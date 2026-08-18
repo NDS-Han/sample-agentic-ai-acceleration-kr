@@ -299,10 +299,10 @@ adminApi:
       eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/llm-gateway-dev-admin-api"
   resources:
     requests:
-      cpu: "250m"
+      cpu: "500m"
       memory: "512Mi"
     limits:
-      cpu: "1000m"
+      cpu: "1500m"
       memory: "1Gi"
   autoscaling:
     enabled: false
@@ -319,7 +319,6 @@ adminApi:
     AGENTCORE_RUNTIME_ARN: "arn:aws:bedrock-agentcore:ap-northeast-2:123456789012:runtime/llm_gateway_dev_admin_chat_agent-a8AdBh8WM8"
     # 리포트 다운로드 presign 라우트도 같은 버킷의 reports/ prefix 를 쓴다.
     # IRSA role(llm-gateway-dev-admin-api)에 report-download-presign 정책 부여됨(§49).
-    CHAT_STAGING_BUCKET: "llm-gateway-dev-chat-agent-staging-123456789012"
 
     # ── Bedrock invocation log 감사 대조 (/admin/audit/invocation-log/*) ──
     # 요청/응답 **본문**까지 남는 유일한 경로다(GPT-5.6 표준 runtime plane). 채우면 감사
@@ -375,11 +374,11 @@ adminUi:
     tag: "1.0.99-modelform"
   resources:
     requests:
-      cpu: "250m"
+      cpu: "500m"
       memory: "512Mi"
     limits:
-      cpu: "500m"
-      memory: "768Mi"
+      cpu: "1000m"
+      memory: "1Gi"
   autoscaling:
     enabled: false
   env:
