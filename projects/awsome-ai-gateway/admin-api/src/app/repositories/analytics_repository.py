@@ -8,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage_filters import cost_period_filter, kst_month_expr
+from app.core.usage_filters import client_filter, cost_period_filter, kst_month_expr
 from app.models.usage import ROIAggregation, ROIScope, UsageLog
 
 
@@ -62,7 +62,7 @@ class AnalyticsRepository:
     # ── UsageLog queries (for scheduler aggregation) ──
 
     async def sum_usage_by_model(
-        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None
     ) -> dict[str, Decimal]:
         """Returns {model_alias: total_cost_usd} for the given period/scope."""
         stmt = select(
@@ -72,18 +72,19 @@ class AnalyticsRepository:
             cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id)
+        stmt = self._apply_client_filter(stmt, client)
         stmt = stmt.group_by(UsageLog.model_alias)
         result = await self._session.execute(stmt)
         return {row.model_alias: row.total_cost or Decimal("0") for row in result}
 
     async def count_requests_by_model(
-        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None
     ) -> dict[str, int]:
         """Returns {model_alias: request_count} for the given period/scope.
 
-        sum_usage_by_model 과 **같은** WHERE(_apply_scope_filter)를 쓴다 — 비용과
-        요청수가 다른 모집단에서 나오면 Analytics export 의 두 열이 서로 안 맞는다.
-        (sum_usage_by_model 시그니처는 건드리지 않는다 —
+        sum_usage_by_model 과 **같은** WHERE(_apply_scope_filter + _apply_client_filter)를
+        쓴다 — 비용과 요청수가 다른 모집단에서 나오면 Analytics export 의 두 열이 서로
+        안 맞는다. (sum_usage_by_model 시그니처는 건드리지 않는다 —
          scheduler/roi_aggregator.py:32,82 가 의존.)
         """
         stmt = select(
@@ -93,27 +94,36 @@ class AnalyticsRepository:
             cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id)
+        stmt = self._apply_client_filter(stmt, client)
         stmt = stmt.group_by(UsageLog.model_alias)
         result = await self._session.execute(stmt)
         return {row.model_alias: int(row.requests or 0) for row in result}
 
-    async def count_active_users(self, period: str, scope: ROIScope, scope_id: uuid.UUID | None) -> int:
+    async def count_active_users(
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None
+    ) -> int:
         stmt = select(func.count(distinct(UsageLog.user_id))).where(
             cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id)
+        stmt = self._apply_client_filter(stmt, client)
         result = await self._session.execute(stmt)
         return result.scalar_one() or 0
 
-    async def total_requests(self, period: str, scope: ROIScope, scope_id: uuid.UUID | None) -> int:
+    async def total_requests(
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None
+    ) -> int:
         stmt = select(func.count(UsageLog.id)).where(
             cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id)
+        stmt = self._apply_client_filter(stmt, client)
         result = await self._session.execute(stmt)
         return result.scalar_one() or 0
 
-    async def total_tokens(self, period: str, scope: ROIScope, scope_id: uuid.UUID | None) -> int:
+    async def total_tokens(
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None
+    ) -> int:
         """모든 과금 버킷의 합. 캐시(생성/읽기)를 빼면 총 토큰이 과소보고된다
         (dev 실측 -29.2%). 이 값은 대시보드 KPI 와 BI 챗 어시스턴트가 같이 읽는다.
         reasoning_tokens 는 output_tokens 에 이미 포함(models/usage.py:61)이라 제외."""
@@ -126,8 +136,15 @@ class AnalyticsRepository:
             cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id)
+        stmt = self._apply_client_filter(stmt, client)
         result = await self._session.execute(stmt)
         return result.scalar_one() or 0
+
+    @staticmethod
+    def _apply_client_filter(stmt, client: str | None):
+        if (cf := client_filter(client)) is not None:
+            stmt = stmt.where(cf)
+        return stmt
 
     @staticmethod
     def _apply_scope_filter(stmt, scope: ROIScope, scope_id: uuid.UUID | None):

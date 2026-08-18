@@ -178,7 +178,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
 async function TrendAndDistribution({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
   const [analyticsResult, shareResult, teamsResult] = await Promise.allSettled([
-    fetchAnalytics(period, 'team'),
+    fetchAnalytics(period, 'team', client),
     fetchModelShare(period, 'all', client),
     fetchTeamOptions(),
   ]);

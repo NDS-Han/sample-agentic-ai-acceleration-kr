@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.exceptions import ForbiddenError, ValidationError
+from app.core.usage_filters import client_filter, reporting_timezone
 from app.models.auth import UserRole
 from app.models.usage import ROIScope
 from app.repositories.analytics_repository import AnalyticsRepository
@@ -60,6 +61,7 @@ class AnalyticsService:
         period: str,
         group_by: str = "model",
         scope: str = "all",
+        client: str | None = None,
         actor: CurrentUser,
     ) -> AnalyticsResponse:
         repo = AnalyticsRepository(session)
@@ -108,14 +110,14 @@ class AnalyticsService:
         # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
         query_scope = roi_scope or ROIScope.GLOBAL
 
-        cost_by_model = await repo.sum_usage_by_model(period, query_scope, scope_id)
-        # ⚠️ 같은 scope 필터(_apply_scope_filter)를 재사용하는 repo 메서드로 뽑는다 —
-        #    WHERE 를 손으로 다시 쓰면 TEAM_LEADER 격리가 갈라진다.
-        requests_by_model = await repo.count_requests_by_model(period, query_scope, scope_id)
+        cost_by_model = await repo.sum_usage_by_model(period, query_scope, scope_id, client)
+        # ⚠️ 같은 scope/client 필터(_apply_scope_filter·_apply_client_filter)를 재사용하는
+        #    repo 메서드로 뽑는다 — WHERE 를 손으로 다시 쓰면 TEAM_LEADER 격리가 갈라진다.
+        requests_by_model = await repo.count_requests_by_model(period, query_scope, scope_id, client)
         total_cost = sum(cost_by_model.values(), Decimal("0"))
-        active_users_count = await repo.count_active_users(period, query_scope, scope_id)
-        total_requests_count = await repo.total_requests(period, query_scope, scope_id)
-        total_tokens_count = await repo.total_tokens(period, query_scope, scope_id)
+        active_users_count = await repo.count_active_users(period, query_scope, scope_id, client)
+        total_requests_count = await repo.total_requests(period, query_scope, scope_id, client)
+        total_tokens_count = await repo.total_tokens(period, query_scope, scope_id, client)
 
         avg_cost = total_cost / active_users_count if active_users_count > 0 else Decimal("0")
 
@@ -150,6 +152,9 @@ class AnalyticsService:
             # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
             #    INNER JOIN 이 안전한 근거: usage_logs.team_id 는 NOT NULL + auth.teams.id
             #    FK (app/models/usage.py) 이므로 조인으로 사라지는 행이 없다(합계 불변).
+            team_where = [cost_period_filter(period)]  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
+            if (cf := client_filter(client)) is not None:
+                team_where.append(cf)
             stmt = select(
                 UsageLog.team_id,
                 Team.name.label("team_name"),
@@ -158,7 +163,7 @@ class AnalyticsService:
             ).join(
                 Team, Team.id == UsageLog.team_id
             ).where(
-                cost_period_filter(period),  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
+                *team_where,
             ).group_by(UsageLog.team_id, Team.name)
             result = await session.execute(stmt)
             for row in result:
@@ -184,6 +189,8 @@ class AnalyticsService:
             user_where = [cost_period_filter(period)]
             if scope_id is not None:  # TEAM_LEADER/team scope 격리
                 user_where.append(UsageLog.team_id == scope_id)
+            if (cf := client_filter(client)) is not None:
+                user_where.append(cf)
             ustmt = (
                 select(
                     User.id.label("user_id"),
@@ -282,7 +289,7 @@ class AnalyticsService:
             by_user.sort(key=lambda b: b.cost_usd, reverse=True)
             del by_user[50:]
 
-        # 비용 추이 — KST 일 버킷(§59). 예전엔 trends 를 아예 대입하지 않아서 기본값 []
+        # 비용 추이 — 리포팅 타임존 일 버킷(§59). 예전엔 trends 를 아예 대입하지 않아서 기본값 []
         # 이 나갔고, 대시보드/Analytics 의 두 추이 차트가 옆 KPI 는 실제 금액을 보여주는
         # 동안 영구히 "데이터 없음" 을 렌더했다.
         # ⚠️ scope_id 격리는 by_user 와 **동일 규칙**으로. 이걸 빼면 TEAM_LEADER 가
@@ -292,10 +299,12 @@ class AnalyticsService:
         from app.core.usage_filters import cost_period_filter
         from app.models.usage import UsageLog
 
-        _kst_day = func.date(func.timezone("Asia/Seoul", UsageLog.requested_at))
+        _kst_day = func.date(func.timezone(reporting_timezone(), UsageLog.requested_at))
         trend_where = [cost_period_filter(period)]
         if scope_id is not None:
             trend_where.append(UsageLog.team_id == scope_id)
+        if (cf := client_filter(client)) is not None:  # 대시보드 ?client= 필터와 정합 (KPI/Top 과 동일 기준)
+            trend_where.append(cf)
         trend_stmt = (
             select(
                 _kst_day.label("day"),

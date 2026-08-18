@@ -119,6 +119,13 @@ data:
   STREAM_DISCONNECT_DRAIN_TIMEOUT: {{ .Values.gatewayProxy.streaming.disconnectDrainTimeout | quote }}
 
   # ----------------------------------------------------------------------------
+  # 비용/사용량 집계 캘린더 경계 타임존(§59) — admin-api·cost-recorder-worker·
+  # notification-worker 공통. 단일 값(global.reportingTimezone)으로 관리해
+  # 서비스 간 타임존 불일치(날짜 경계 어긋남)를 방지.
+  # ----------------------------------------------------------------------------
+  REPORTING_TIMEZONE: {{ .Values.global.reportingTimezone | quote }}
+
+  # ----------------------------------------------------------------------------
   # 서비스 기본 설정
   # ----------------------------------------------------------------------------
   DEFAULT_TEAM_ID: "00000000-0000-4000-a000-000000000003"
