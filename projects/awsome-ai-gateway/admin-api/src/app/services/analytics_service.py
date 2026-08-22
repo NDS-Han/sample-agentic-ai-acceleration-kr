@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.exceptions import ForbiddenError, ValidationError
-from app.core.usage_filters import client_filter, reporting_timezone
+from app.core.usage_filters import client_filter, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import ROIScope
 from app.repositories.analytics_repository import AnalyticsRepository
@@ -299,7 +299,7 @@ class AnalyticsService:
         from app.core.usage_filters import cost_period_filter
         from app.models.usage import UsageLog
 
-        _kst_day = func.date(func.timezone(reporting_timezone(), UsageLog.requested_at))
+        _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
         trend_where = [cost_period_filter(period)]
         if scope_id is not None:
             trend_where.append(UsageLog.team_id == scope_id)
