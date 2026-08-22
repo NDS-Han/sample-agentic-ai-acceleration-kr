@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.db import get_db_session
-from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr
+from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import UsageLog
 
@@ -71,6 +71,7 @@ async def get_analytics(
     #    이 Literal 집합은 admin-ui/src/types/enums.ts 의 GroupByType 과 일치한다.
     group_by: Literal["model", "team", "user"] = Query("model"),
     scope: str = Query("all", description="all | team:{uuid}"),
+    client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -103,6 +104,7 @@ async def get_analytics(
         period=period,
         group_by=group_by,
         scope=scope,
+        client=client,
         actor=user,
     )
     if cache_key is not None:
@@ -165,7 +167,7 @@ async def get_model_cost_analytics(
         })
 
     # 일별 binning 도 KST(§59) — func.date(timestamptz)는 세션 TZ(UTC)라 KST 변환 후 date.
-    _kst_day = func.date(func.timezone("Asia/Seoul", UsageLog.requested_at))
+    _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
     daily_stmt = (
         select(
             _kst_day.label("day"),
