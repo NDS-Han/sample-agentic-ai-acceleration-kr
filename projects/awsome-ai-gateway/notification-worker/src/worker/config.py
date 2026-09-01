@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 흔히 쓰는 비-IANA 약어/레거시 alias → 정규 IANA 이름 힌트 (검증은 그대로 엄격하게
@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     # SMTP (optional)
     smtp_host: str | None = None
     smtp_port: int | None = None
+    smtp_starttls: bool = False
+    smtp_username: str | None = None
+    smtp_password: SecretStr | None = None
 
     # Internal API (optional)
     email_api_url: str | None = None
