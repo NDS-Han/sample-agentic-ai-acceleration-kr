@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import type { OrgTreeNode, RateLimitTreeNode } from '@/types/entities';
 import { RateLimitScope } from '@/types/enums';
@@ -16,9 +16,19 @@ interface RateLimitTreeViewProps {
   rateTree: RateLimitTreeNode[];
 }
 
-function collectAllIds(node: OrgTreeNode, set: Set<string>) {
-  set.add(node.id);
-  node.children.forEach((child) => collectAllIds(child, set));
+const EXPANDED_NODES_STORAGE_KEY = 'rateLimits:orgtree:expandedNodes';
+
+/** 초기 펼침: 조직(ORGANIZATION)과 그 직계 부서(DEPARTMENT)만 펼친다.
+ *  팀(TEAM)과 사용자(USER)는 사용자가 클릭해서 펼치도록 한다. */
+function getDefaultExpandedNodes(root: OrgTreeNode): Set<string> {
+  const expanded = new Set<string>();
+  expanded.add(root.id);
+  for (const child of root.children ?? []) {
+    if (child.type === 'DEPARTMENT') {
+      expanded.add(child.id);
+    }
+  }
+  return expanded;
 }
 
 function flattenRateTree(nodes: RateLimitTreeNode[]): Record<string, RateLimitTreeNode> {
@@ -35,11 +45,45 @@ export function RateLimitTreeView({ root, rateTree }: RateLimitTreeViewProps) {
   const t = useTranslations('rateLimits');
   const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
   const [selectedRateLimit, setSelectedRateLimit] = useState<RateLimitTreeNode | null>(null);
-  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(() => {
-    const set = new Set<string>();
-    if (root) collectAllIds(root, set);
-    return set;
-  });
+  const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
+  const hasMountedRef = useRef(false);
+
+  // sessionStorage에서 펼침 상태 복원. 저장된 값이 없으면 기본값(조직+직계부서) 사용.
+  useEffect(() => {
+    try {
+      const raw = sessionStorage.getItem(EXPANDED_NODES_STORAGE_KEY);
+      if (raw) {
+        const ids = JSON.parse(raw) as unknown;
+        if (Array.isArray(ids) && ids.every((x) => typeof x === 'string')) {
+          setExpandedNodes(new Set(ids as string[]));
+          return;
+        }
+      }
+      if (root) {
+        setExpandedNodes(getDefaultExpandedNodes(root));
+      }
+    } catch {
+      if (root) {
+        setExpandedNodes(getDefaultExpandedNodes(root));
+      }
+    }
+  }, [root]);
+
+  // 펼침 상태 변경 시 persist (초기 빈 Set으로 덮어쓰지 않도록 첫 호출 skip)
+  useEffect(() => {
+    if (!hasMountedRef.current) {
+      hasMountedRef.current = true;
+      return;
+    }
+    try {
+      sessionStorage.setItem(
+        EXPANDED_NODES_STORAGE_KEY,
+        JSON.stringify([...expandedNodes])
+      );
+    } catch {
+      // quota/비활성 storage 무시
+    }
+  }, [expandedNodes]);
 
   const rateLimitMap = useMemo(() => flattenRateTree(rateTree), [rateTree]);
   const globals = rateTree.filter((n) => n.scope === RateLimitScope.GLOBAL);

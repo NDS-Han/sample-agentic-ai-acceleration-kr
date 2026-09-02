@@ -17,6 +17,9 @@ import type { ModelListItem } from '@/types/entities';
 interface TeamOption {
   id: string;
   name: string;
+  // 팀명이 부서 간 중복될 수 있어(예: 여러 부서에 "Developers" 팀), 드롭다운
+  // 표시에 부서명을 병기해 구분한다.
+  department_name: string | null;
 }
 
 interface TeamModelPermissionPanelProps {
@@ -107,7 +110,9 @@ export function TeamModelPermissionPanel({ teams, allTeams, models }: TeamModelP
         >
           <option value="">{t('selectTeamPlaceholder')}</option>
           {visibleTeams.map(t => (
-            <option key={t.id} value={t.id}>{t.name}</option>
+            <option key={t.id} value={t.id}>
+              {t.department_name ? `${t.name} (${t.department_name})` : t.name}
+            </option>
           ))}
         </select>
         {allTeams && allTeams.length > teams.length && (
