@@ -240,11 +240,15 @@ export interface PriceSyncPreview {
   changed_count: number;
 }
 
-/** AWS Price List 단가 vs 현재가 diff 미리보기(읽기 전용). */
-export async function previewPriceSyncAction(): Promise<ActionResult<PriceSyncPreview>> {
+type PriceSyncSource = 'aws' | 'litellm';
+
+/** 외부 단가 소스(AWS Price List / LiteLLM Catalog) vs 현재가 diff 미리보기(읽기 전용). */
+export async function previewPriceSyncAction(
+  source: PriceSyncSource = 'aws'
+): Promise<ActionResult<PriceSyncPreview>> {
   try {
     const data = await withRetry(() =>
-      adminAPI.get<PriceSyncPreview>('/admin/models/pricing/sync-preview')
+      adminAPI.get<PriceSyncPreview>('/admin/models/pricing/sync-preview', { source })
     );
     return { success: true, data };
   } catch (err) {
@@ -252,9 +256,10 @@ export async function previewPriceSyncAction(): Promise<ActionResult<PriceSyncPr
   }
 }
 
-/** 승인된 alias 만 AWS 단가로 적용(자동 전체적용 아님). */
+/** 승인된 alias 만 외부 단가로 적용(자동 전체적용 아님). */
 export async function applyPriceSyncAction(
-  aliases: string[]
+  aliases: string[],
+  source: PriceSyncSource = 'aws'
 ): Promise<ActionResult<{ applied: string[]; skipped: string[]; errors: string[] }>> {
   if (!aliases.length) {
     return { success: false, error: '적용할 모델을 선택하세요' };
@@ -263,7 +268,7 @@ export async function applyPriceSyncAction(
     const data = await withRetry(() =>
       adminAPI.post<{ applied: string[]; skipped: string[]; errors: string[] }>(
         '/admin/models/pricing/sync-apply',
-        { aliases }
+        { aliases, source }
       )
     );
     revalidatePath('/models');

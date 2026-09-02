@@ -196,6 +196,10 @@ class Settings(BaseSettings):
     # 가격 동기화(모델관리 화면 버튼)용. IAM: admin-api 역할에 pricing:GetProducts.
     PRICING_API_REGION: str = "us-east-1"
 
+    # LiteLLM Model Catalog API — AWS Price List 미게시 모델/가격 보조 소스.
+    LITELLM_API_URL: str = "https://api.litellm.ai"
+    LITELLM_PROVIDER_FILTER: str = "bedrock_converse"
+
     # ── Server ──
     HOST: str = "0.0.0.0"
     PORT: int = 8080

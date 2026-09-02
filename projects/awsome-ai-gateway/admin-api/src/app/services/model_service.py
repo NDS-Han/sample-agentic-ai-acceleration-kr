@@ -221,7 +221,7 @@ class ModelService:
                 continue  # OpenModel/vLLM 은 AWS 단가 없음
             cur = await repo.get_current_pricing(m.alias)
             cur_resp = self._to_response(m, cur).current_pricing
-            np = fetched.prices.get(m.provider_model_id.lower())
+            np = fetched.lookup(m.provider_model_id)
             if np is None:
                 diffs.append(PriceSyncDiff(
                     alias=m.alias,
@@ -301,7 +301,7 @@ class ModelService:
             if model.provider != Provider.BEDROCK:
                 skipped.append(alias)
                 continue
-            np = fetched.prices.get(model.provider_model_id.lower())
+            np = fetched.lookup(model.provider_model_id)
             if np is None:
                 skipped.append(alias)  # AWS 단가 미발견 → 적용 안 함
                 continue

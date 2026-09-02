@@ -14,17 +14,17 @@ import { useToast } from '@/components/common/ToastProvider';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 /**
- * AWS Price List 단가 동기화 버튼 + diff 미리보기/승인 다이얼로그.
+ * 외부 단가 소스(AWS Price List / LiteLLM Catalog) 동기화 버튼 + diff 미리보기/승인 다이얼로그.
  *
  * 흐름(자동적용 금지): 버튼 → preview(읽기) → diff 표 → 변경분 선택 → 적용(승인).
- * 소스는 AWS Price List API(서버), AgentCore Gateway 아님. 적용은 기존 set_pricing
- * 경로라 시계열·감사·캐시무효화가 보존된다.
+ * 적용은 기존 set_pricing 경로라 시계열·감사·캐시무효화가 보존된다.
  */
 export function PriceSyncButton() {
   const t = useTranslations('models.priceSync');
   const tCommon = useTranslations('common');
   const { toast } = useToast();
   const [open, setOpen] = useState(false);
+  const [source, setSource] = useState<'aws' | 'litellm'>('aws');
   const [preview, setPreview] = useState<PriceSyncPreview | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
@@ -34,7 +34,7 @@ export function PriceSyncButton() {
     setOpen(true);
     setPreview(null);
     setLoading(true);
-    const res = await previewPriceSyncAction();
+    const res = await previewPriceSyncAction(source);
     setLoading(false);
     if (!res.success) {
       toast({ type: 'error', message: res.error || t('toast.previewFailed'), auto_dismiss_ms: 5000 });
@@ -62,7 +62,7 @@ export function PriceSyncButton() {
       return;
     }
     startApply(async () => {
-      const res = await applyPriceSyncAction(aliases);
+      const res = await applyPriceSyncAction(aliases, source);
       if (!res.success) {
         toast({ type: 'error', message: res.error || t('toast.applyFailed'), auto_dismiss_ms: 5000 });
         return;
@@ -100,6 +100,21 @@ export function PriceSyncButton() {
             </div>
 
             <div className="overflow-auto px-5 py-4">
+              <div className="mb-3">
+                <label className="mb-1 block text-xs text-muted-foreground">
+                  {t('sourceLabel')}
+                </label>
+                <select
+                  value={source}
+                  onChange={(e) => setSource(e.target.value as 'aws' | 'litellm')}
+                  disabled={loading || applying}
+                  className="block w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
+                >
+                  <option value="aws">{t('sourceAws')}</option>
+                  <option value="litellm">{t('sourceLitellm')}</option>
+                </select>
+              </div>
+
               {loading && (
                 <div className="flex items-center gap-2 py-8 text-sm text-muted-foreground">
                   <Loader2 size={16} className="animate-spin" /> {t('loading')}
@@ -110,6 +125,7 @@ export function PriceSyncButton() {
                 <>
                   <p className="mb-3 text-xs text-muted-foreground">
                     {t('sourceInfo', {
+                      source: source === 'aws' ? 'AWS Price List API' : 'LiteLLM Catalog',
                       region: preview.region,
                       matched: preview.matched_count,
                       changed: preview.changed_count,

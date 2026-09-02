@@ -127,6 +127,7 @@ class PriceSyncApplyRequest(BaseModel):
     """승인 후 적용할 alias 목록(명시 선택 — 자동 전체적용 금지)."""
 
     aliases: list[str] = Field(min_length=1)
+    source: str = "aws"  # "aws" | "litellm"
 
 
 class PriceSyncApplyResponse(BaseModel):

@@ -19,21 +19,36 @@ from app.schemas.models import (
     PricingRequest,
     StatusPatchRequest,
 )
+from app.services.model_service import ModelService
 
 router = APIRouter(prefix="/admin/models", tags=["Model Management"])
 
 
-def _build_pricing_sync_service():
-    """AWS Price List API(boto3 pricing client, us-east-1) 기반 동기화 서비스 생성.
+def _build_pricing_sync_service(*, source: str = "aws"):
+    """단가 동기화 서비스 생성.
 
-    가격 동기화 소스는 AWS Price List API 이며 AgentCore Gateway/Inference Targets 아님
-    (IT 는 단가를 노출하지 않음). region 은 Price List 전용 엔드포인트(us-east-1 등).
+    source:
+      - "aws": AWS Price List API(boto3 pricing client)
+      - "litellm": LiteLLM Model Catalog API(httpx)
     """
+    settings = get_settings()
+    if source == "litellm":
+        import httpx
+
+        from app.services.pricing_sync_service import LiteLLMPricingSyncService
+
+        svc = LiteLLMPricingSyncService(
+            http_client=httpx.AsyncClient(timeout=30.0),
+            base_url=settings.LITELLM_API_URL,
+            provider_filter=settings.LITELLM_PROVIDER_FILTER,
+        )
+        svc.region = settings.LITELLM_API_URL  # preview 응답에 소스 표시용
+        return svc
+
     import boto3
 
     from app.services.pricing_sync_service import PricingSyncService
 
-    settings = get_settings()
     region = settings.PRICING_API_REGION
     client = boto3.client("pricing", region_name=region)
     svc = PricingSyncService(client)
@@ -49,8 +64,6 @@ async def list_models(
 ):
     # 읽기 전용 모델 카탈로그 — 조직 전체에 동일하므로 팀별 스코핑 불필요
     # (대시보드 '활성 모델 수' KPI 등 TEAM_LEADER 화면에서도 사용).
-    from app.services.model_service import ModelService
-
     svc: ModelService = request.app.state.model_service
     items = await svc.list_models(session)
     return ModelListResponse(items=items)
@@ -114,17 +127,17 @@ async def set_pricing(
 @router.get("/pricing/sync-preview", response_model=PriceSyncPreviewResponse)
 async def price_sync_preview(
     request: Request,
+    source: str = "aws",
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """AWS Price List 단가 vs DB 현재가 diff 미리보기(읽기 전용, 쓰기 없음).
+    """외부 단가 소스(AWS Price List / LiteLLM Catalog) vs DB 현재가 diff 미리보기.
 
+    source: "aws" | "litellm". 기본값 "aws".
     운영자가 이 diff 를 확인한 뒤 sync-apply 로 명시 적용. 자동 적용 없음.
     """
-    from app.services.model_service import ModelService
-
     svc: ModelService = request.app.state.model_service
-    pricing_sync = _build_pricing_sync_service()
+    pricing_sync = _build_pricing_sync_service(source=source)
     return await svc.preview_price_sync(session, pricing_sync_service=pricing_sync)
 
 
@@ -135,11 +148,9 @@ async def price_sync_apply(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """승인된 alias 목록만 AWS 단가로 적용(기존 set_pricing 재사용 — 시계열·감사·캐시)."""
-    from app.services.model_service import ModelService
-
+    """승인된 alias 목록만 외부 단가 소스(AWS / LiteLLM)로 적용(기존 set_pricing 재사용)."""
     svc: ModelService = request.app.state.model_service
-    pricing_sync = _build_pricing_sync_service()
+    pricing_sync = _build_pricing_sync_service(source=body.source)
     return await svc.apply_price_sync(
         session,
         pricing_sync_service=pricing_sync,
