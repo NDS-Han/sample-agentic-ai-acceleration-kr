@@ -31,6 +31,7 @@ interface APITeamItem {
   id: string;
   name: string;
   member_count?: number;
+  department_name?: string | null;
 }
 
 function mapToModelListItem(item: APIModelItem): ModelListItem {
@@ -73,7 +74,7 @@ export default async function ModelsPage() {
   const routingProfiles = routingRes.status === 'fulfilled' && routingRes.value?.items ? routingRes.value.items : [];
   const teams = allTeams
     .filter(t => (t.member_count ?? 0) > 0)
-    .map(t => ({ id: t.id, name: t.name }));
+    .map(t => ({ id: t.id, name: t.name, department_name: t.department_name ?? null }));
 
   return (
     <div className="space-y-8">
@@ -92,7 +93,7 @@ export default async function ModelsPage() {
         <h2 className="text-lg font-semibold mb-4">{t('teamModelAccess')}</h2>
         <TeamModelPermissionPanel
           teams={teams}
-          allTeams={allTeams.map(t => ({ id: t.id, name: t.name }))}
+          allTeams={allTeams.map(t => ({ id: t.id, name: t.name, department_name: t.department_name ?? null }))}
           models={models}
         />
       </div>
