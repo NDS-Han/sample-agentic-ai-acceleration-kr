@@ -14,7 +14,7 @@ function toErrorMessage(err: unknown): string {
 }
 
 export interface RoutingProfileItem {
-  client: string; // 'claude-code' | 'cowork'
+  client: string; // 'claude-code' | 'cowork' | 'codex'
   web_search_enabled: boolean;
   backend: string;
   enabled: boolean;
