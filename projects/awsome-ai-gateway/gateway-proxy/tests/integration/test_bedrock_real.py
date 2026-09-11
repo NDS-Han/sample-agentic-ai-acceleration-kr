@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
@@ -45,6 +46,9 @@ from app.security.event_detector import SecurityEventDetector
 from app.services.cost_recorder import CostRecorder
 from app.services.lua_loader import LuaScriptLoader
 
+#: 실 AWS 호출 opt-in 스위치. 미설정이면 STS probe 조차 하지 않는다.
+_OPT_IN_ENV = "RUN_REAL_BEDROCK"
+
 
 def _aws_credentials_available() -> bool:
     """Return True only when boto3 can actually resolve AND validate AWS credentials.
@@ -53,7 +57,16 @@ def _aws_credentials_available() -> bool:
     call time), so the old guard always returned True → these live tests never skipped
     and hard-failed in CI (DEVLOG §68.3). Make the gate real by calling STS
     GetCallerIdentity with a short timeout: no creds / offline → skip.
+
+    ⚠️ 이 함수는 **모듈 임포트(=수집) 시점에** 불린다. 그래서 opt-in 없이 호출하면 그냥
+    ``pytest`` 가 테스트 하나도 돌기 전에 실제 AWS(STS)로 나간다 — 스위트가 비-hermetic
+    해지고, 오프라인/자격증명 없는 환경에서 매 수집마다 타임아웃 3초를 문다.
+    그래서 ``RUN_REAL_BEDROCK=1`` 없으면 **probe 자체를 건너뛴다**. 게이트의 정확성은
+    유지된다 — opt-in 한 경우엔 예전과 똑같이 STS 로 실제 검증한다(느긋한 자격증명 해석
+    때문에 client 생성만으론 판별이 안 되므로 이 probe 는 대체할 수 없다).
     """
+    if os.environ.get(_OPT_IN_ENV) != "1":
+        return False
     try:
         from botocore.config import Config
 
@@ -71,8 +84,8 @@ def _aws_credentials_available() -> bool:
 _SKIP_REAL = pytest.mark.skipif(
     not _aws_credentials_available(),
     reason=(
-        "Real AWS credentials not available (botocore[crt] missing or"
-        " credentials unresolvable) — skipping live Bedrock tests"
+        f"{_OPT_IN_ENV} != 1 이거나 실 AWS 자격증명 사용 불가 — 실 Bedrock 호출 테스트 skip."
+        f" 돌리려면 {_OPT_IN_ENV}=1 (그때만 STS GetCallerIdentity 로 자격증명을 검증한다)"
     ),
 )
 

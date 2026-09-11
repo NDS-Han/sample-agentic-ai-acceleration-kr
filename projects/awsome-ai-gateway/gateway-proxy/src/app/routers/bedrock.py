@@ -42,7 +42,7 @@ def _rewrite_model_id_for_region(model_id: str, region: str | None = None) -> st
        → apac.anthropic.claude-sonnet-4-20250514-v1:0 (if region=ap-northeast-2)
 
     `global.` prefix models are passed through unchanged — they resolve from any region.
-    `region` explicit override(예: cross-account claude-code→333 의 profile.region) 우선;
+    `region` explicit override(예: cross-account claude-code→374 의 profile.region) 우선;
     없으면 pod 의 AWS_REGION env(in-account 기본).
     """
     import os
@@ -247,6 +247,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 ttft_ms=duration_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
+                # Join key to the Bedrock model-invocation log record (adapter.invoke
+                # returns it in the headers dict; not forwarded to the client).
+                bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
             )
         return JSONResponse(
             status_code=status,

@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
 
+from app.periods import current_kst_period
 from app.schemas.cost_stream import CostStreamEntry
 from app.schemas.domain import AuthContext, ModelConfigSchema, TokenUsage
 
@@ -112,7 +112,9 @@ class CostRecorder:
             return Decimal("0")
 
         cost_usd = calculate_cost(usage, model_config)
-        period = datetime.now(tz=UTC).strftime("%Y-%m")
+        # KST 월 — 아래 budget:*:{period} 키를 **쓰는** 쪽이다. 읽는 쪽
+        # (middleware/budget.py, routers/usage.py)과 반드시 같은 경계여야 한다.
+        period = current_kst_period()
 
         # OTEL metrics
         if self._metrics:

@@ -15,8 +15,15 @@ import os
 import pytest
 import httpx
 
+from tests.integration.conftest import live_stack_gate
+
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
+
+# ⚠️ 라이브 스택(gateway-proxy:8000 + admin-api:8080 + seed 된 DB)이 없으면 skip.
+#    게이트가 없던 동안 그냥 `pytest` 는 httpx.ConnectError 로 RED 였다 — CI 를 붙이면
+#    첫날부터 빨강이라 "빨강은 원래 그런 것"이 되어 진짜 회귀를 가린다.
+pytestmark = live_stack_gate()
 
 
 @pytest.fixture

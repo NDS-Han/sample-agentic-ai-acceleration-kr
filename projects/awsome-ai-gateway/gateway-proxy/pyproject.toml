@@ -55,6 +55,10 @@ testpaths = ["tests"]
 markers = [
     "unit: fast unit tests with mocks (no DB/Redis required)",
     "integration: integration tests requiring Postgres + Redis",
+    # Hits real AWS and WRITES account configuration (Bedrock invocation logging is
+    # account-wide per Region). Gated by an env var as well as this marker so a plain
+    # `pytest` run skips it: RUN_INVOCATION_LOG_LIVE=1 pytest -m live
+    "live: touches real AWS and mutates account state — explicit opt-in only",
 ]
 addopts = "-ra --strict-markers"
 

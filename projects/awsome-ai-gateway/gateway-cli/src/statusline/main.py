@@ -14,6 +14,21 @@ from datetime import datetime, timezone
 import click
 import structlog
 
+from statusline.formatter import (
+    Severity,
+    StatuslineState,
+    determine_severity,
+    format_status,
+)
+
+# `fetch_usage` 는 반드시 모듈 최상단에서 import 해야 한다. 함수 안에서
+# `from statusline.usage_client import fetch_usage` 로 늦게 들여오면
+# `statusline.main.fetch_usage` 라는 모듈 속성이 아예 생기지 않아
+# `patch("statusline.main.fetch_usage", ...)` 가 AttributeError 로 죽는다
+# (폴링 루프 테스트가 그래서 깨져 있었다). 순환 import 는 없다 —
+# usage_client 는 statusline.config 만 참조한다.
+from statusline.usage_client import fetch_usage
+
 # ---------------------------------------------------------------------------
 # Logging (PP-02 — independent structlog per binary)
 # ---------------------------------------------------------------------------
@@ -102,14 +117,6 @@ def _acquire_virtual_key() -> str | None:
 
 def _run_polling(config, virtual_key: str, log) -> int:
     """Main polling loop: fetch usage → format → stdout (RP-01)."""
-    from statusline.formatter import (
-        Severity,
-        StatuslineState,
-        determine_severity,
-        format_status,
-    )
-    from statusline.usage_client import fetch_usage
-
     install_signal_handlers()
 
     state = StatuslineState()
@@ -180,9 +187,6 @@ def main(interval: int | None, gateway_url: str | None, verbose: bool) -> None:
         sys.exit(1)
 
     # One-shot mode: fetch once, print, exit (Claude Code calls this periodically)
-    from statusline.formatter import StatuslineState, determine_severity, format_status, Severity
-    from statusline.usage_client import fetch_usage
-
     state = StatuslineState()
     try:
         usage = fetch_usage(config, virtual_key)

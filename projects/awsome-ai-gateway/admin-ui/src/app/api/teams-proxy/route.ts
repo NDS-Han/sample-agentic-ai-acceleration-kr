@@ -2,6 +2,7 @@
 
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
+import { unauthorizedBody } from '@/lib/utils/unauthorized';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
@@ -17,6 +18,11 @@ export async function GET() {
     },
   });
 
+  // ⚠️ 401 은 error_code 로 구분해 준다 — 소비자가 '조회 실패' 문구를 렌더하는 대신
+  //    로그인으로 갈 수 있어야 한다. 403(권한 부족)은 여기 들어오지 않는다.
+  if (res.status === 401) {
+    return NextResponse.json(unauthorizedBody(), { status: 401 });
+  }
   if (!res.ok) {
     return NextResponse.json({ error: '팀 목록 조회 실패' }, { status: res.status });
   }

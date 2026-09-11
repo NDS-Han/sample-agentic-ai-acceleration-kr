@@ -29,7 +29,7 @@ database:
   external:
     # CHANGE_ME (terraform output): RDS Proxy endpoint. terraform output -raw rds_proxy_endpoint
     # (Proxy 사용 안 하면 -raw aurora_writer_endpoint). 계정마다 hash 부분 다름.
-    host: "<RDS_PROXY_ENDPOINT>"
+    host: "llm-gateway-dev.proxy-xxx.ap-northeast-2.rds.amazonaws.com"
     port: 5432
     name: "gateway"
     user: "gateway"
@@ -45,7 +45,7 @@ database:
     # 이름은 aws rds describe-db-clusters --query 'DBClusters[].MasterUserSecret.SecretArn'.
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언됨 — 라이브 정책 v2 로 반영).
-    masterPasswordRemoteKey: "rds!cluster-<uuid>"
+    masterPasswordRemoteKey: "rds!cluster-91c56396-2163-4d82-af13-b569d4ea5c0e"
     masterPasswordRemoteProperty: "password"
     poolSize: 5
     maxOverflow: 10
@@ -60,7 +60,7 @@ redis:
   poolSize: 40
   external:
     # CHANGE_ME (terraform output): ElastiCache primary endpoint. terraform output -raw elasticache_primary_endpoint.
-    host: "<ELASTICACHE_ENDPOINT>"
+    host: "master.llm-gateway-dev.xxx.apn2.cache.amazonaws.com"
     port: 6379
     tls: true  # ElastiCache encryption-in-transit
     clusterMode: false  # dev는 단일 노드
@@ -191,10 +191,10 @@ gatewayProxy:
   replicaCount: 1
   # 이미지 태그 명시 — 비우면 Chart.appVersion(1.0.43-rebrand)로 리셋되어 다운그레이드됨.
   # helm --set 없이 helm upgrade 만 해도 이 태그가 유지되도록 각 서비스에 명시(정합 고정).
-  # 1.0.49-xacct: claude-code→333 cross-account Bedrock native 코드(BedrockAccountClientProvider
-  #   + adapter resolver/123 투명폴백).
+  # 1.0.49-xacct: claude-code→374 cross-account Bedrock native 코드(BedrockAccountClientProvider
+  #   + adapter resolver/859 투명폴백).
   # 1.0.50-xacct-review: 어드버서리 리뷰 픽스 — 캐시키에 external_id 포함(#1, stale 재사용 방지),
-  #   count_tokens 도 cross-account(#4, invoke=333/count=123 스플릿 제거), _region_for_rewrite
+  #   count_tokens 도 cross-account(#4, invoke=374/count=859 스플릿 제거), _region_for_rewrite
   #   명시 초기화(#6, locals() 리플렉션 제거). 무회귀(269 유닛 통과).
   # 1.0.51-resilience: 6축 견고성 갭 4건 — readiness 전용 /health/ready(DB_DEGRADED/풀 hard_cap
   #   소진 시 503), pool_timeout=10·pool_recycle=3600, bedrock retries 배선(기본1), event_detector
@@ -208,9 +208,16 @@ gatewayProxy:
     # 1.0.54-phase2gw: 1.0.53 이후 레포 HEAD 에 쌓여 있던 gateway-proxy 미배포분 6파일을
     #   반영 — thinking_normalizer / tool_filter 신규 2, mantle_adapter ·
     #   mantle_openai_adapter · web_search_loop 수정 3, agentcore_mcp_client 의 MCP
-    #   clientInfo de-brand 1. 이미지 내부 소스가 HEAD 와 md5 완전일치함을 검증,
-    #   unit 359 통과(tests/unit).
-    tag: "1.0.54-phase2gw"
+    #   clientInfo de-brand 1. 이미지 내부 소스 77/77 이 HEAD 와 md5 완전일치 검증,
+    #   unit 369 통과(integration 실패 10 은 로컬 Postgres 부재로 변경 전과 동일).
+    # 1.0.55-runtimeplane: GPT-5.6 을 표준 bedrock-runtime plane 으로도 서비스
+    #   (bedrock_openai_adapter + sigv4_signer 신규, provider enum 미러 확장) +
+    #   OpenAI 방언 캐시 이중과금 정정(split_openai_input 3버킷: 순입력/cache read/cache write).
+    #   ⚠️ 이 이미지는 provider enum 에 BEDROCK_RUNTIME_OPENAI 가 있어야 모델 조회가 되므로
+    #   migration(0031) **보다 먼저** 올려야 한다 — 미러에 없는 enum 라벨을 DB 에서 읽으면
+    #   READ 에서 죽어 카탈로그 전체가 깨진다. 순서: 앱 먼저 → migration 나중.
+    #   578 유닛/회귀 통과 + 실 PG16 0001→0033 완주 후 DB 통합 4/4.
+    tag: "1.0.55-runtimeplane"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
@@ -225,7 +232,7 @@ gatewayProxy:
     # set here, agentcore_mcp_client is None → the router branch is skipped (zero-regression).
     # AGENTCORE_REGION differs from aws.region (ap-northeast-2) on purpose — WebSearch is
     # us-east-1-only; SigV4 signs to us-east-1 while the pod stays in Seoul.
-    AGENTCORE_GATEWAY_URL: ""   # CHANGE_ME: https://<gateway-name>-<id>.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp (see deployment/scripts/provision_agentcore_websearch.py). Empty = web search disabled.
+    AGENTCORE_GATEWAY_URL: "https://ds-llm-gw-websearch-ymzmnfcsbg.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
     AGENTCORE_REGION: "us-east-1"
     AGENTCORE_TARGET_ID: "web-search-tool"
     WEB_SEARCH_ENABLED: "true"   # global kill-switch; per-client gating via routing_profiles.web_search_enabled
@@ -274,7 +281,13 @@ adminApi:
     #       UTC 월(`datetime.now(timezone.utc).strftime`)이라, 읽는 쪽만 KST 로 고친 상태에서는
     #       매월 1일 KST 00~09시에 새 달 행이 생성되지 않아 지표가 0 으로 보였다.
     #   전 항목 음성대조군으로 검증(수정 되돌리면 정확히 그 테스트만 실패). 회귀 대조: 신규 0.
-    tag: "1.0.67-roifix"
+    # 1.0.68-invlogaudit: Bedrock invocation log 본문 감사 API
+    #   (/admin/audit/invocation-log/{config,reconcile,{bedrock_request_id}}) + provider enum
+    #   미러 확장 + usage_logs 컬럼 미러 드리프트 수정. 아래 BEDROCK_INVOCATION_LOG_* 가
+    #   비어 있으면 감사 엔드포인트는 404 가 아니라 **503**(미설정)을 준다 — 지금 dev 의 상태다
+    #   (terraform 의 enable_bedrock_invocation_logging 이 false 라 log group 이 없다).
+    #   285 통과. ⚠️ scheduler.image.tag 를 같은 값으로 유지(아래 주석 참조).
+    tag: "1.0.68-invlogaudit"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
@@ -291,7 +304,7 @@ adminApi:
   env:
     DEV_LOGIN_ENABLED: "true"  # dev 환경에서만 허용
     # CHANGE_ME (terraform output): Cognito User Pool ID. terraform output -raw cognito_user_pool_id
-    COGNITO_USER_POOL_ID: ""   # e.g. ap-northeast-2_XXXXXXXXX
+    COGNITO_USER_POOL_ID: "ap-northeast-2_nKW7FJWst"
     COGNITO_REGION: "ap-northeast-2"
     COGNITO_SYNC_DEACTIVATE_MISSING: "true"
     # BI Insight / 퀵챗 = AgentCore Runtime(admin-chat-agent) 연결. 이 ARN 없으면
@@ -299,10 +312,32 @@ adminApi:
     # values 에 명시(--set 유실 방지). ARN = aws bedrock-agentcore-control list-agent-runtimes.
     AGENTCORE_REGION: "ap-northeast-2"
     AGENTCORE_RUNTIME_ARN: "arn:aws:bedrock-agentcore:ap-northeast-2:123456789012:runtime/llm_gateway_dev_admin_chat_agent-a8AdBh8WM8"
-    CHAT_STAGING_BUCKET: "llm-gateway-dev-chat-agent-staging-123456789012"
-    # 리포트 다운로드 presign 라우트 — staging 버킷 reports/ prefix 화이트리스트.
+    # 리포트 다운로드 presign 라우트도 같은 버킷의 reports/ prefix 를 쓴다.
     # IRSA role(llm-gateway-dev-admin-api)에 report-download-presign 정책 부여됨(§49).
     CHAT_STAGING_BUCKET: "llm-gateway-dev-chat-agent-staging-123456789012"
+
+    # ── Bedrock invocation log 감사 대조 (/admin/audit/invocation-log/*) ──
+    # 요청/응답 **본문**까지 남는 유일한 경로다(GPT-5.6 표준 runtime plane). 채우면 감사
+    # 엔드포인트가 살아나고, 비우면 503(미설정)을 반환한다 — 404 가 아니므로 UI 가
+    # "기능 없음" 과 "안 켬" 을 구분할 수 있다. 라우터는 항상 등록된다.
+    #
+    # 값의 출처: cd deployment/terraform/environments/llm-gateway-dev &&
+    #   tofu output -raw bedrock_invocation_log_group
+    #   tofu output -raw bedrock_invocation_log_region
+    # (또는 deployment/scripts/provision_bedrock_invocation_logging.py deploy 의 출력)
+    #
+    # ⚠️ REGION 은 배포 리전(ap-northeast-2)이 아니라 **모델이 실행된 리전**이다. GPT-5.6
+    #    runtime plane 은 us-east-2 에서 실행되므로 로그도 거기 쌓인다. 서울로 조회하면
+    #    로그가 0건이어서 대조 리포트가 과금 행 전부를 `missing` 으로 표시한다.
+    # ⚠️ 이 스위치는 **리전 단위로 계정 전체**의 본문을 수집한다(모델·principal 단위 스코프
+    #    없음). 그래서 install-eks.sh 가 자동 주입하지 않고, 여기 비워 둔 채로 시작한다.
+    #    dev 에서 라이브 캡처 검증을 끝낸 뒤 로깅 구성을 지웠으므로 현재는 미설정 상태다.
+    #    다시 켤 때: terraform 은 enable_bedrock_invocation_logging=true 로 apply.
+    BEDROCK_INVOCATION_LOG_GROUP: ""
+    BEDROCK_INVOCATION_LOG_REGION: "us-east-2"
+    # 본문(프롬프트 원문) 열람 게이트. true 로 켜면 조회마다 audit_logs 에
+    # VIEW_INVOCATION_LOG_BODY 가 남는다. 승인 없이 켜지 말 것.
+    BEDROCK_INVOCATION_LOG_BODIES_ENABLED: "false"
 
   # ── OIDC (Cognito) ──
   # issuerUrl / providerName 은 install-eks.sh 가 terraform output 에서 자동 주입.
@@ -310,7 +345,7 @@ adminApi:
   oidc:
     enabled: true
     # CHANGE_ME (terraform output): cognito_issuer_url. 형식 https://cognito-idp.{region}.amazonaws.com/{pool_id}
-    issuerUrl: ""   # e.g. https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_XXXXXXXXX
+    issuerUrl: "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_nKW7FJWst"
     audience: ""               # Cognito access_token 은 aud 없음 → 비워둠
     providerName: "oidc:cognito"
     groupsClaim: "cognito:groups"
@@ -353,7 +388,7 @@ scheduler:
     # roi_aggregator 가 KST 비닝 수정(A-2/E-1)의 대상이라 어긋나면 스케줄러만 옛 로직으로 집계.
     # ⚠️ 이 값이 특히 중요하다: 1.0.67-roifix 가 고친 NameError 는 **스케줄러에서만** 터진다
     # (API 경로는 그 함수를 안 탄다). adminApi 만 올리고 여기를 두면 ROI 집계는 계속 실패한다.
-    tag: "1.0.67-roifix"
+    tag: "1.0.68-invlogaudit"
   resources:
     requests:
       cpu: "250m"  # Fargate 하한
@@ -384,8 +419,8 @@ notificationWorker:
 # DB migration hook — 태그 명시(비우면 Chart.appVersion=1.0.43-rebrand 로 리셋되는데,
 # 그 이미지는 revision 0021 을 모름 → `alembic upgrade head` 가 DB 현재 리비전(0021)을
 # 못 찾아 pre-upgrade 훅 실패).
-# 1.0.49-xacct: head=0022(claude-code→333 cross-account). upgrade head 가 0021→0022 적용
-#   = routing_profiles.claude-code account_role_arn 을 333 role 로 SET → 333 컷오버.
+# 1.0.49-xacct: head=0022(claude-code→374 cross-account). upgrade head 가 0021→0022 적용
+#   = routing_profiles.claude-code account_role_arn 을 374 role 로 SET → 374 컷오버.
 #   즉시 롤백: 0022 downgrade(account_role_arn NULL) 또는 SQL UPDATE + Redis 플러시.
 # 1.0.50-models: head=0028. 0022→0028 을 적용한다 —
 #   0023(예산 partial unique index) / 0024(활성 config 중복 제거 + 부분 유니크 인덱스) /
@@ -397,9 +432,21 @@ notificationWorker:
 #   ⚠️ 0027 의 alias 만으로는 호출이 안 된다 — IAM 의 foundation-model 패턴도 함께 필요
 #   (Claude 5 는 prod/dev 정책 v2 에 anthropic.claude-{opus,sonnet}-5* 추가 완료).
 #   또한 run_migration.sh 의 SCHEMAS 에 chat_agent 가 이 이미지부터 포함(A-3).
+# 1.0.52-head0033: head=0033. 0029→0033 을 적용한다 —
+#   0029(OPENMODEL 샘플 alias llama-3-70b · endpoint_url NULL 이라 보이지만 호출 불가) /
+#   0030(Claude Sonnet 5 단가 1.5배 과대 정정) / 0031(provider enum BEDROCK_RUNTIME_OPENAI) /
+#   0032(표준 plane alias gpt-5.6-{sol,terra,luna} + backend CHECK 확장) /
+#   0033(codex-gpt-5.6-sol 단가 공시 컷 정정).
+#   ⚠️ **배포 순서가 강제된다**: 이 차트에서 migration 은 pre-upgrade **훅**(weight -5)이라
+#   앱 파드보다 **먼저** 돈다. 그래서 앱을 먼저 올리는 별도 upgrade 를 한 번 돌린 뒤
+#   (rev 86: gateway-proxy 1.0.55 / admin-api·scheduler 1.0.68) 이 태그를 올려야 한다.
+#   한 번에 올리면 0032 가 심은 BEDROCK_RUNTIME_OPENAI 행을 그 enum 라벨이 없는 구버전
+#   파드가 읽어 **모델 카탈로그 조회 전체가 READ 에서 죽는다**.
+#   ⚠️ 적용 후 Redis 플러시 필수: `model:*` / `model:list` (TTL 300s 대기도 가능).
+#   ⚠️ 0030/0033 은 운영자 개입 가드가 있어 admin UI 로 단가를 이미 바꾼 환경에서는 no-op.
 migration:
   image:
-    tag: "1.0.50-models"
+    tag: "1.0.52-head0033"
 
 costRecorderWorker:
   replicaCount: 1

@@ -35,11 +35,11 @@
    claude-code               codex                          cowork
    Bedrock NATIVE            Bedrock Mantle                 Bedrock Mantle
    (boto3 invoke_model)      (OpenAI Responses API)         (Anthropic Messages)
-   계정 333344445555          계정 123 in-account             계정 222233334444
+   계정 333344445555          계정 859 in-account             계정 222233334444
    (ap-northeast-2)          (us-east-2, 오하이오)           (ap-northeast-1, 도쿄)
-   STS AssumeRole(333 role)  assume 없음 — pod IRSA 직접      STS AssumeRole(222 role)
+   STS AssumeRole(374 role)  assume 없음 — pod IRSA 직접      STS AssumeRole(905 role)
    ExternalId=claude-code-…  Mantle GPT-5.5                 ExternalId=cowork-…
-   실패 시 123 in-account     bearer(BedrockTokenGenerator)   Opus 4.8 (cowork-opus)
+   실패 시 859 in-account     bearer(BedrockTokenGenerator)   Opus 4.8 (cowork-opus)
    투명 폴백(절대 안 죽음)     httpx AsyncClient               httpx AsyncClient
           │
           ▼
@@ -68,15 +68,15 @@ WebSearch(MCP over httpx, SigV4/IRSA, us-east-1 전용) 호출 → 결과 재투
 | 항목 | 계정 | region | 백엔드 | API 규격 | cross-account |
 |------|------|--------|--------|------|---------------|
 | 메인 배포 (게이트웨이 전 서비스 + Aurora + AgentCore Runtime/웹서치 GW + ECR) | `123456789012` | ap-northeast-2 | — | — | gateway-proxy IRSA 가 이 계정 |
-| claude-code | `333344445555` | ap-northeast-2 | Bedrock NATIVE (invoke_model) | Anthropic Messages | STS AssumeRole(ExternalId=`claude-code-bedrock`), 실패 시 123 in-account 투명 폴백 |
+| claude-code | `333344445555` | ap-northeast-2 | Bedrock NATIVE (invoke_model) | Anthropic Messages | STS AssumeRole(ExternalId=`claude-code-bedrock`), 실패 시 859 in-account 투명 폴백 |
 | codex | `123456789012` (in-account) | us-east-2 | Bedrock Mantle GPT-5.5 | OpenAI Responses (`/v1/responses`) | 없음 — pod IRSA creds 직접 사용 |
 | cowork | `222233334444` | ap-northeast-1 | Bedrock Mantle Opus 4.8 | Anthropic Messages | STS AssumeRole(ExternalId=`cowork-bedrock`) |
 
-- cross-account는 `STS AssumeRole(DurationSeconds=3600)` + 선택적 `ExternalId`. claude-code(333 native)의 클라이언트는 `BedrockAccountClientProvider`가 `(role_arn, region, external_id)` 키로 vend/캐시합니다. assume 실패 시 게이트웨이는 123 in-account 클라이언트로 투명 폴백하므로 claude-code 요청은 죽지 않습니다.
+- cross-account는 `STS AssumeRole(DurationSeconds=3600)` + 선택적 `ExternalId`. claude-code(374 native)의 클라이언트는 `BedrockAccountClientProvider`가 `(role_arn, region, external_id)` 키로 vend/캐시합니다. assume 실패 시 게이트웨이는 859 in-account 클라이언트로 투명 폴백하므로 claude-code 요청은 죽지 않습니다.
 - codex/cowork Mantle bearer는 `MantleCredentialBroker`가 assumed creds에서 `BedrockTokenGenerator`로 발급해 `(role, region)`으로 캐시합니다.
 - provider registry는 4개 어댑터: `BEDROCK`(boto3), `OPENMODEL`(httpx vLLM), `BEDROCK_MANTLE`(cowork), `BEDROCK_MANTLE_OPENAI`(codex).
 
-> 컴포넌트·계정·데이터플레인 전체 상세는 레포 루트 [`ARCHITECTURE.md`](ARCHITECTURE.md) 및 [`devlog_websearch.md`](devlog_websearch.md) 참조.
+> 컴포넌트·계정·데이터플레인 전체 상세는 레포 루트 [`ARCHITECTURE.md`](ARCHITECTURE.md) 참조.
 
 **지원 모델과 등록 방식**
 
@@ -176,7 +176,7 @@ AWSome AI Gateway는 **re-origination(요청 재구성 발신)** 방식입니다
 - **멀티앱 거버넌스 (Phase 2)** — 사용자별 모델 allow-list(팀 정책 override, migration 0014, admin-api `GET/PUT/DELETE /admin/users/{id}/allowed-models`), 사용자별 클라이언트 ACL(allowed-clients — 특정 사용자에게 claude-code/codex/cowork 중 일부만 허용), 앱(client)별 예산·Rate Limit 분리. 3-client가 각기 다른 계정·백엔드로 라우팅되는 데이터드리븐 프로파일(`routing_profiles`)이 이 거버넌스의 기반입니다.
 - **service-token** — 외부 시스템(비 OIDC)용 장수명 bearer 토큰 발급/회전. admin-api `POST/GET/DELETE /admin/service-tokens` + `/rotate`. 목록은 prefix만 노출하고 원문 토큰은 발급/회전 시 1회만 반환(migration 0015).
 - **Resilience** — readiness 게이트 `/health/ready`(열화/DB 풀 고갈 시 503, `/health`는 관대), 무효 VK 즉시 차단(무효키 폭주가 DB 커넥션 풀을 고갈시키지 못하도록 DB 세션을 안 엶), DB 풀 튜닝(`pool_timeout` 기본 10s fast-fail·`pool_recycle` 3600s·`pre_ping`), Redis 소켓 타임아웃/재시도 + rate-limit 회로 차단기, Redis 다운 시 in-memory rate-limit 근사 폴백, 응답 헤더 유출 방어(state에 값이 있을 때만 `X-*` 헤더 주입), 보안 이벤트 detector의 OrderedDict LRU(스푸핑된 IP churn OOM 방어), 비용 스트림 스풀링(Redis blip 시 XADD 실패 재발행).
-- **서버사이드 웹서치 (아키텍처 C)** — 게이트웨이가 `web_search` 툴을 주입하고 모델의 tool_use를 가로채 AgentCore Gateway 관리형 WebSearch(MCP over httpx, SigV4/IRSA)로 검색·재투입하는 서버사이드 방식. **클라이언트(Claude Code/Codex/Cowork) 무설정** — 그냥 질문하면 검색된 답이 옵니다. anthropic/responses 두 API 규격 지원, AgentCore 관리형 커넥터는 us-east-1 전용, 글로벌 kill-switch(`web_search_enabled`) 기본 off. 검색 횟수·토큰·비용을 per-client 추적. 상세: [`devlog_websearch.md`](devlog_websearch.md), E2E: [`e2e_report_websearch.md`](e2e_report_websearch.md).
+- **서버사이드 웹서치 (아키텍처 C)** — 게이트웨이가 `web_search` 툴을 주입하고 모델의 tool_use를 가로채 AgentCore Gateway 관리형 WebSearch(MCP over httpx, SigV4/IRSA)로 검색·재투입하는 서버사이드 방식. **클라이언트(Claude Code/Codex/Cowork) 무설정** — 그냥 질문하면 검색된 답이 옵니다. anthropic/responses 두 API 규격 지원, AgentCore 관리형 커넥터는 us-east-1 전용, 글로벌 kill-switch(`web_search_enabled`) 기본 off. 검색 횟수·토큰·비용을 per-client 추적. 검색 횟수·토큰·비용은 admin-ui 분석 화면과 `usage.usage_logs` 에서 per-client 로 확인한다.
 - **Admin UI (Next.js 14)** — 대시보드(KPI·비용 추이·모델 점유율 도넛·client 점유율 도넛·client 필터·팀/사용자 랭킹), 사용자/팀, 모델, 예산, Rate Limit, API Key, 실시간 모니터링, 분석(ROI), `/chat` BI 어시스턴트. 라이트/다크 Glass 디자인 + 기간 선택기. 대시보드 차트는 Chart.js, BI 차트는 recharts.
 - **AI BI 어시스턴트 (`/chat`)** — 자연어 질문 → 검증된 SQL 자동 생성(text2SQL) → Aurora 조회 → 마크다운 표 + recharts 차트로 답변. agents-as-tools 오케스트레이터(Orchestrator + SQL/Code/Validator/Viz/Report Specialist + L3 self-consistency)를 AWS Strands + Bedrock AgentCore Runtime으로 호스팅. deep 모드 및 L4 cross-family critic(옵션)도 존재. 실시간 토큰 스트리밍 + heartbeat.
 
@@ -191,7 +191,7 @@ AWSome AI Gateway는 **re-origination(요청 재구성 발신)** 방식입니다
 - **완화책(효과 큰 순)** — (1) 스트리밍 전용 ThreadPoolExecutor: `BEDROCK_STREAM_EXECUTOR_WORKERS` env가 `>0`이면 전용 executor, `0`/미설정이면 기본 공유 executor(무회귀·안전 롤백). **PoC로 코드에는 shipped됐으나 현재 어떤 chart values에도 배선돼 있지 않아 배포상 기본 비활성입니다.** (2) async httpx + 자체 SigV4로의 전환(정석) — 로컬 실측은 있으나 루프백·파싱0·소켓무제한 환경이라 실환경 미검증이며 착수 전 승인 게이트(골든 바이트캡처 테스트 + 실 Bedrock A/B 카나리) 통과가 조건. (3) uvicorn `--limit-concurrency` 백프레셔. (4) 커스텀 메트릭(활성 SSE/동시성 기준) HPA.
 - **관련 튜닝** — boto3 Bedrock 클라이언트 소켓 풀 하드캡 `max_pool_connections=50`(in-account/cross-account 동일, 대규모에는 상향 검토 대상), `bedrock_max_attempts=1`을 BotoConfig `retries`에 실제 배선(fallback 루프와의 재시도 폭풍 억제), uvicorn `--workers ${WORKERS:-4}`는 shell-form CMD로 env override 가능(미설정 시 기본 4). Fargate 0.5 vCPU 환경에선 `WORKERS=2` 권장.
 
-> EKS Fargate에서 CPU 기반 HPA가 동작하려면 prometheus-adapter가 `metrics.k8s.io`를 서빙해야 합니다(표준 metrics-server는 kubelet authz 제약으로 미동작). 자세한 분석·완화 로드맵·승인 게이트는 [`devlog_websearch.md`](devlog_websearch.md) §부하 분석 참조.
+> EKS Fargate에서 CPU 기반 HPA가 동작하려면 prometheus-adapter가 `metrics.k8s.io`를 서빙해야 합니다(표준 metrics-server는 kubelet authz 제약으로 미동작). prometheus-adapter 설치는 [`guides/deployer-guide.md`](guides/deployer-guide.md) 의 모니터링 절을 따른다.
 
 ---
 
@@ -210,7 +210,7 @@ AWSome AI Gateway는 **re-origination(요청 재구성 발신)** 방식입니다
 > 에 dev / prod 두 EKS Fargate 환경(둘 다 EKS 1.30) 운영. 구체 endpoint/Cognito
 > pool/ALB DNS 는 각 가이드의 **부록** 참조 — user-guide §B, admin-guide §D,
 > deployer-guide §E. claude-code(333)·cowork(222)는 cross-account, codex(123)는
-> in-account 로, 게이트웨이는 123 에서 각 백엔드로 라우팅합니다.
+> in-account 로, 게이트웨이는 859 에서 각 백엔드로 라우팅합니다.
 >
 > **다른 계정에 적용 시**: `terraform.tfvars` (gitignored), `backend.tf` 의
 > `-backend-config`, `values-eks-fargate-{dev,prod}.yaml` 안의 `# CHANGE_ME`

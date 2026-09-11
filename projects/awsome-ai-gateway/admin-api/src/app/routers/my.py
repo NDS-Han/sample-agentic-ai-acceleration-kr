@@ -81,7 +81,12 @@ async def get_my_usage(
             _kst_day.label("day"),
             func.sum(UsageLog.cost_usd).label("cost_usd"),
             func.count().label("requests"),
-            func.sum(UsageLog.input_tokens + UsageLog.output_tokens).label("tokens"),
+            func.sum(
+                UsageLog.input_tokens
+                + UsageLog.output_tokens
+                + UsageLog.cache_creation_tokens
+                + UsageLog.cache_read_tokens
+            ).label("tokens"),
         )
         .where(
             UsageLog.user_id == user.user_id,
@@ -106,7 +111,12 @@ async def get_my_usage(
             UsageLog.model_alias,
             func.sum(UsageLog.cost_usd).label("cost_usd"),
             func.count().label("requests"),
-            func.sum(UsageLog.input_tokens + UsageLog.output_tokens).label("tokens"),
+            func.sum(
+                UsageLog.input_tokens
+                + UsageLog.output_tokens
+                + UsageLog.cache_creation_tokens
+                + UsageLog.cache_read_tokens
+            ).label("tokens"),
         )
         .where(
             UsageLog.user_id == user.user_id,

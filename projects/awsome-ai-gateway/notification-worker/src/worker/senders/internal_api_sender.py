@@ -5,8 +5,8 @@ from __future__ import annotations
 import structlog
 
 from worker.config import Settings
-from worker.senders.base import EmailSendError
 from worker.schemas.recipients import RenderedEmail
+from worker.senders.base import EmailSendError
 
 logger = structlog.get_logger(__name__)
 

@@ -23,7 +23,7 @@ from typing import Any
 import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.schemas.cost_stream import CostStreamEntry
 
@@ -309,18 +309,26 @@ class BatchFlusher:
             if e.threshold_triggered is None:
                 continue
             try:
+                # ⚠️ 도메인 필드는 반드시 `payload` 봉투 안에 넣는다. notification-worker 의
+                #    NotificationEvent(notification-worker/src/worker/schemas/events.py:39-44)
+                #    는 payload 를 필수로 요구하고 핸들러/recipient_resolver 가 그 안을
+                #    읽는다. 예전엔 전부 평평해서 worker 가 "payload Field required" 로
+                #    전량 폐기했고, 예산 80% 경고가 한 번도 발송되지 않았다.
+                #    envelope 4필드(event_id/type/timestamp/source)만 최상위에 둔다.
                 event = {
                     "event_id": e.request_id,  # idempotency hint
                     "type": "budget_threshold",
                     "timestamp": e.completed_at,
                     "source": "cost-recorder-worker",
-                    "user_id": e.user_id,
-                    "team_id": e.team_id,
-                    "threshold_pct": e.threshold_triggered,
-                    "current_used_usd": str(e.cost_usd),
-                    "period": e.period,
-                    "policy": e.threshold_policy or "hard_block",
-                    "target_type": "user",
+                    "payload": {
+                        "user_id": e.user_id,
+                        "team_id": e.team_id,
+                        "threshold_pct": e.threshold_triggered,
+                        "current_used_usd": str(e.cost_usd),
+                        "period": e.period,
+                        "policy": e.threshold_policy or "hard_block",
+                        "target_type": "user",
+                    },
                 }
                 await self._redis.publish("notifications:budget", json.dumps(event))
             except Exception:

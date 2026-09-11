@@ -57,7 +57,7 @@ class TestSetupBedrock:
         )
         config = GatewayConfig(gateway_url="https://gw.example.com")
 
-        with patch("cli.tools.bedrock_config._resolve_helper_path", return_value="/path/helper"):
+        with patch("cli.tools.bedrock_config.resolve_helper_path", return_value="/path/helper"):
             result = setup_bedrock(tool, config)
 
         assert result.status == ComponentStatus.SUCCESS

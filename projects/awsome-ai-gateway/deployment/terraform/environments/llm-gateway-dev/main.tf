@@ -39,9 +39,12 @@ module "vpc" {
 module "eks" {
   source = "../../modules/eks-fargate"
 
-  project             = var.project
-  environment         = var.environment
+  project     = var.project
+  environment = var.environment
+  # 두 값은 minor 홉마다 **함께** 움직인다. 순서/기한은 variables.tf 의
+  # eks_cluster_version · eks_addon_versions 주석 참고(현재 1.31, 목표 1.36).
   cluster_version     = var.eks_cluster_version
+  addon_versions      = var.eks_addon_versions
   vpc_id              = module.vpc.vpc_id
   private_subnet_ids  = module.vpc.private_subnet_ids
   public_access_cidrs = ["0.0.0.0/0"] # dev는 공개 접근 허용
@@ -62,7 +65,38 @@ module "irsa" {
   bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
   cognito_user_pool_arn      = module.cognito.user_pool_arn
   cowork_role_arn            = var.cowork_role_arn
-  claude_code_333_role_arn   = var.claude_code_333_role_arn
+  claude_code_374_role_arn   = var.claude_code_374_role_arn
+  mantle_regions             = var.mantle_regions
+
+  # 감사 대조(/admin/audit/invocation-log/*)용 Logs Insights 읽기 권한. 로깅이 꺼져 있으면
+  # 빈 문자열이 와서 권한 statement 자체가 렌더되지 않는다(불필요한 권한을 남기지 않는다).
+  bedrock_invocation_log_group_arn = module.bedrock_invocation_logging.log_group_arn
+
+  tags = var.tags
+}
+
+# ─── Bedrock model-invocation logging (GPT-5.6 runtime plane 본문 감사) ───
+# ⚠️ 이 모듈이 켜지면 us-east-2 **계정 전체** 의 Bedrock 요청/응답 본문이 수집된다.
+#    provider 를 별칭으로 명시 전달하는 것이 필수다(모듈 versions.tf 의
+#    configuration_aliases) — 기본 provider(서울) 상속을 문법 수준에서 막는다.
+# ⚠️ default 는 false 다. dev us-east-2 는 현재 provision_bedrock_invocation_logging.py
+#    가 소유하고 있으므로, 켜기 전에 variables.tf 의 import 절차를 따라야 한다.
+module "bedrock_invocation_logging" {
+  source = "../../modules/bedrock-invocation-logging"
+  providers = {
+    aws.logs = aws.bedrock_openai
+  }
+
+  enabled     = var.enable_bedrock_invocation_logging
+  project     = var.project
+  environment = var.environment
+
+  log_region                = var.bedrock_invocation_log_region
+  log_retention_days        = var.bedrock_invocation_log_retention_days
+  large_body_retention_days = var.bedrock_invocation_log_retention_days
+  # text 만 — 우리가 감사하는 것은 프롬프트/응답 텍스트이고, GPT-5.6 경로에는 image/video
+  # modality 가 없어 켜면 sidecar 용량만 늘고 얻는 게 없다.
+  modalities = ["text"]
 
   tags = var.tags
 }
@@ -78,6 +112,17 @@ module "alb_controller" {
   aws_region        = var.aws_region
 
   tags = var.tags
+
+  # Fargate 프로파일이 ACTIVE 된 뒤에 helm_release 를 시작해야 한다.
+  # 위 인자(cluster_name/oidc_provider_arn/vpc_id)는 클러스터 생성 직후 확정되므로
+  # 이것만으로는 fargate_profiles·cluster_addons 에 대한 의존이 그래프에 안 잡히고,
+  # terraform 이 프로파일 생성과 helm_release 를 병렬로 돌린다.
+  # Fargate 는 Pod 를 만들 때 매칭되는 프로파일이 있어야 fargate-scheduler 에
+  # 배정한다. 프로파일보다 먼저 생긴 Pod 는 기본 스케줄러에 배정되어, 노드가 없는
+  # Fargate 전용 클러스터에서 영원히 Pending 으로 남는다(나중에 프로파일이 ACTIVE
+  # 돼도 구제되지 않음) → helm timeout(900s) → atomic 으로 uninstall → apply 실패.
+  # 재실행하면 프로파일이 이미 ACTIVE 라 통과하는 것이 이 문제의 증상이다.
+  depends_on = [module.eks]
 }
 
 module "external_secrets" {

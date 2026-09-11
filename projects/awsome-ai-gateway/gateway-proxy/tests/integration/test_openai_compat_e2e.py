@@ -24,10 +24,16 @@ import os
 import httpx
 import pytest
 
+from tests.integration.conftest import live_stack_gate
+
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
 
 OPENMODEL_ALIAS = "llama-3-70b"
+
+# ⚠️ 라이브 스택(+ mock-vllm + seed 된 OPENMODEL alias) 없으면 skip — 게이트 부재로
+#    그냥 `pytest` 가 RED 였다(conftest 참조).
+pytestmark = live_stack_gate()
 
 
 @pytest.fixture

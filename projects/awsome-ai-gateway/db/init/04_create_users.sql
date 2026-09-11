@@ -5,33 +5,51 @@
 -- Based on shared-infrastructure.md Section 2.2 principle: least privilege
 
 -- ============================================================
--- Database users (passwords supplied via environment variables)
+-- Database users — 권한 컨테이너 전용, LOGIN 불가
 -- ============================================================
 --
--- [SECURITY / 보안 경고]
--- EN: The literal passwords below (e.g. 'proxy_password_change_me') are
---     placeholders intended for local development / docker-compose only.
---     For ANY non-local environment you MUST override these via the
---     POSTGRES_* / *_PASSWORD environment variables wired into your
---     container orchestrator (K8s Secret, ExternalSecret, Vault, ...).
---     Deploying these defaults to a shared environment is a security
---     incident. See SECURITY_REVIEW.md (category A).
--- KO: 아래 리터럴 비밀번호('proxy_password_change_me' 등)는 로컬 개발 /
---     docker-compose 전용 플레이스홀더입니다. 로컬이 아닌 모든 환경에서는
---     반드시 컨테이너 오케스트레이터(K8s Secret, ExternalSecret, Vault 등)에
---     연결된 POSTGRES_* / *_PASSWORD 환경변수로 override 해야 합니다.
---     이 기본값을 공유 환경에 배포하면 보안 사고에 해당합니다.
---     자세한 내용은 SECURITY_REVIEW.md (카테고리 A) 참조.
+-- ⚠️ **이 파일에 리터럴 비밀번호를 박지 말 것.** 이 스크립트는 로컬 docker-compose 뿐
+--    아니라 **prod 를 포함한 모든 환경의 migration Job 에서 매 helm install/upgrade 마다
+--    실행된다**(db/run_migration.sh:54-58 의 `for f in /app/init/*.sql`,
+--    deployment/docs/eks-fargate/03-secrets.md:166). 따라서 리터럴은 곧 "git 에 공개된
+--    비밀번호로 LOGIN 가능한 롤을 prod Aurora 에 만든다"는 뜻이다.
+--    예전엔 정확히 그랬다 — 'proxy_password_change_me' / 'admin_api_password_change_me' /
+--    'notification_worker_password_change_me'. 주석은 "환경변수로 override 하라"고 했지만
+--    .sql 파일에는 환경변수 치환 메커니즘이 없어서 override 는 애초에 불가능했고,
+--    admin_api_user 는 auth(=virtual_keys)·budget·model 에 full CRUD 를 갖는다.
+--    VPC 안에 발판만 있으면(pod/bastion) 공개된 비번으로 권한상승이 가능한 상태였다.
+--
+-- 그래서 세 롤은 **NOLOGIN + 비밀번호 없음**으로 만든다. 랜덤 비밀번호
+-- (08_create_chat_reader.sql 방식)보다 강하다 — 비번 유무와 무관하게 인증 자체가 막힌다.
+-- GRANT 는 그대로 남긴다: 의도된 최소권한 설계를 문서화하고, 나중에 서비스별 유저로
+-- 되돌릴 때 권한을 다시 짤 필요가 없다.
+--
+-- 실제 배포는 이 롤들을 **쓰지 않는다** — dev·prod 모두 migration Job 이 만드는 단일
+-- 'gateway' 유저로 접속한다(run_migration.sh:60-79, values-eks-fargate-prod.yaml:37
+-- `user: "gateway"` + :40 `notificationWorkerUser: "gateway"`). 즉 이 변경으로 끊기는
+-- 접속 경로는 없다.
+--
+-- 서비스별 유저를 실제로 쓰고 싶으면: 운영자가 out-of-band 로
+--   ALTER ROLE proxy_user WITH LOGIN PASSWORD '<secrets manager 값>';
+-- 를 실행하고 그 비밀번호를 ESO/Secrets Manager 로 주입한다
+-- (08_create_chat_reader.sql 의 gateway_chat_reader 와 같은 운영 방식).
 -- ============================================================
 
 
 -- proxy_user: Used by U1 Gateway Proxy
 -- Reads: auth, model (config lookup), budget (usage check)
 -- Writes: usage (usage_logs), budget (budget_usages atomic update)
+--
+-- ⚠️ ALTER 분기가 반드시 필요하다. IF NOT EXISTS 만 두면 **이미 배포된 dev·prod 의 롤은
+--    공개된 옛 비밀번호를 그대로 유지한다** — 롤이 이미 존재하므로 CREATE 가 스킵되기
+--    때문이다. PASSWORD NULL 로 저장된 해시를 지우고 NOLOGIN 으로 인증을 막는다.
+--    (ALTER 는 멱등이라 재실행 안전.)
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'proxy_user') THEN
-        CREATE ROLE proxy_user WITH LOGIN PASSWORD 'proxy_password_change_me';
+        CREATE ROLE proxy_user WITH NOLOGIN;
+    ELSE
+        ALTER ROLE proxy_user WITH NOLOGIN PASSWORD NULL;
     END IF;
 END
 $$;
@@ -42,7 +60,9 @@ $$;
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'admin_api_user') THEN
-        CREATE ROLE admin_api_user WITH LOGIN PASSWORD 'admin_api_password_change_me';
+        CREATE ROLE admin_api_user WITH NOLOGIN;
+    ELSE
+        ALTER ROLE admin_api_user WITH NOLOGIN PASSWORD NULL;
     END IF;
 END
 $$;
@@ -103,7 +123,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA audit TO admin_api_
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'notification_worker_user') THEN
-        CREATE ROLE notification_worker_user WITH LOGIN PASSWORD 'notification_worker_password_change_me';
+        CREATE ROLE notification_worker_user WITH NOLOGIN;
+    ELSE
+        ALTER ROLE notification_worker_user WITH NOLOGIN PASSWORD NULL;
     END IF;
 END
 $$;

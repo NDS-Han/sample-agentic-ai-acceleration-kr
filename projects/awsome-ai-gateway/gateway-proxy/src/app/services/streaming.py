@@ -11,6 +11,7 @@ import structlog
 from starlette.requests import Request
 
 from app.config import get_settings
+from app.providers.openai_usage import extract_chat_usage, extract_responses_usage
 from app.schemas.domain import TokenUsage
 
 logger = structlog.get_logger(__name__)
@@ -327,11 +328,12 @@ async def openai_sse_stream(
                         first_token_time = time.monotonic()
                     accumulated_text.append(c)
             if u := data.get("usage"):
-                found = TokenUsage(
-                    input_tokens=u.get("prompt_tokens", 0),
-                    output_tokens=u.get("completion_tokens", 0),
-                    total_tokens=u.get("total_tokens", 0),
-                )
+                # Shared Chat-wire parser: splits the cache-inclusive prompt count into
+                # exclusive TokenUsage buckets and picks up reasoning_tokens. vLLM sends
+                # none of the details sub-objects, so its behaviour is byte-identical to
+                # the previous three-field construction; GPT-5.6 on either Bedrock plane
+                # sends them and would otherwise be billed as if nothing were cached.
+                found = extract_chat_usage(u)
         return found
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
@@ -471,20 +473,14 @@ async def responses_sse_stream(
         return f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
 
     def _usage_from_response(resp: dict) -> TokenUsage | None:
-        u = resp.get("usage")
-        if not isinstance(u, dict):
+        # Same parser as the non-streaming adapters (providers/openai_usage) — that is
+        # what guarantees a prompt bills identically streamed vs non-streamed, on both the
+        # Mantle and the bedrock-runtime plane. None (not a zero TokenUsage) when the
+        # event carries no usage object, so a usage-less `response.incomplete` cannot
+        # erase a good reading from an earlier terminal event.
+        if not isinstance(resp.get("usage"), dict):
             return None
-        in_details = u.get("input_tokens_details") or {}
-        out_details = u.get("output_tokens_details") or {}
-        it = int(u.get("input_tokens", 0) or 0)
-        ot = int(u.get("output_tokens", 0) or 0)
-        return TokenUsage(
-            input_tokens=it,
-            output_tokens=ot,
-            total_tokens=int(u.get("total_tokens", 0) or 0) or (it + ot),
-            cache_read_input_tokens=int(in_details.get("cached_tokens", 0) or 0),
-            reasoning_tokens=int(out_details.get("reasoning_tokens", 0) or 0),
-        )
+        return extract_responses_usage(resp)
 
     def _process(chunk: bytes) -> bytes:
         """Parse a RAW JSON event chunk → update usage/text, return re-framed SSE bytes.

@@ -11,6 +11,11 @@
 #   ./gw.sh codex  [args...]      # codex-box 컨테이너에서 codex 실행
 #   ./gw.sh shell claude|codex    # 컨테이너 셸 진입(디버그)
 #
+# codex 모델/plane 선택(설정된 것만 컨테이너로 전달):
+#   GW_PLANE=mantle|runtime (기본 mantle)  GW_TIER=sol|terra|luna (기본 terra)
+#   GW_MODEL=<alias> 전체 override, GW_CONTEXT_WINDOW=<int>
+#   예: GW_PLANE=runtime ./gw.sh codex "버그 고쳐줘"   # 표준 runtime plane(gpt-5.6-terra)
+#
 # VK 는 ~/.gateway-vk 파일(plain VK 문자열, 600)에서 읽는다. 1시간 만료 → 만료 시 `gw.sh vk` 재실행.
 set -euo pipefail
 
@@ -27,6 +32,29 @@ ENGINE="${GW_ENGINE:-docker}"; command -v "$ENGINE" >/dev/null 2>&1 || ENGINE=fi
 read_vk() {
   [ -f "$VK_FILE" ] || { echo "VK 없음. 먼저 './gw.sh vk' 실행." >&2; exit 1; }
   cat "$VK_FILE"
+}
+
+# codex-box 의 모델 선택 knob 을 호스트 → 컨테이너로 전달한다.
+#
+# `docker run` 은 env 를 자동 상속하지 않으므로(-e 로 명시한 것만 들어간다), 이 목록이
+# 없으면 호스트에서 `GW_PLANE=runtime ./gw.sh codex` 를 해도 컨테이너 안에선 조용히
+# 기본값(mantle)이 쓰인다 — plane 을 바꿨다고 믿는데 과금은 다른 plane 에 찍히는 상황.
+# 설정된 것만 넘겨서, 미설정 시 entrypoint.sh 의 기본값이 그대로 유효하게 둔다.
+# 의미는 codex-box/entrypoint.sh 상단 주석 참조.
+CODEX_MODEL_KNOBS=(GW_PLANE GW_TIER GW_MODEL GW_CONTEXT_WINDOW)
+
+# CODEX_ENV_ARGS 배열을 채운다. 값에 공백이 있어도 깨지지 않게 배열로 전달하고,
+# `$(...)` 로 문자열을 되받지 않는다(그러면 다시 word splitting 에 의존하게 된다).
+# 호출부는 `${CODEX_ENV_ARGS[@]+"${CODEX_ENV_ARGS[@]}"}` 형태로 펼친다 — knob 이 하나도
+# 설정되지 않으면 빈 배열이고, `set -u` 아래에서 빈 배열을 `"${arr[@]}"` 로 펼치면
+# bash < 4.4 가 unbound variable 로 죽는다.
+CODEX_ENV_ARGS=()
+set_codex_env_args() {
+  CODEX_ENV_ARGS=()
+  local k
+  for k in "${CODEX_MODEL_KNOBS[@]}"; do
+    if [ -n "${!k:-}" ]; then CODEX_ENV_ARGS+=(-e "$k=${!k}"); fi
+  done
 }
 
 # 게이트웨이 /v1/usage/me 폴링 → 예산/사용량 한 줄 출력(stderr). claude/codex 실행 전 표시.
@@ -125,9 +153,11 @@ PY
     shift
     VK="$(read_vk)"
     print_budget   # Codex 는 statusline 훅이 없어 실행 전 예산을 여기서 표시
+    set_codex_env_args
     exec "$ENGINE" run -it --rm \
       -e GW_URL="$GW_URL" \
       -e GATEWAY_VK="$VK" \
+      ${CODEX_ENV_ARGS[@]+"${CODEX_ENV_ARGS[@]}"} \
       -v "$PWD":/work \
       codex-box "$@"
     ;;
@@ -136,13 +166,19 @@ PY
     box="${2:-claude}"
     VK="$(read_vk)"
     if [ "$box" = "codex" ]; then
-      exec "$ENGINE" run -it --rm --entrypoint /bin/sh -e GW_URL="$GW_URL" -e GATEWAY_VK="$VK" -v "$PWD":/work codex-box
+      # 디버그 셸에서도 같은 knob 을 넘긴다 — 셸 안에서 entrypoint.sh 를 직접 실행해
+      # 생성되는 config.toml 을 확인하는 것이 이 서브커맨드의 용도라서.
+      set_codex_env_args
+      exec "$ENGINE" run -it --rm --entrypoint /bin/sh -e GW_URL="$GW_URL" -e GATEWAY_VK="$VK" \
+        ${CODEX_ENV_ARGS[@]+"${CODEX_ENV_ARGS[@]}"} -v "$PWD":/work codex-box
     else
       exec "$ENGINE" run -it --rm --entrypoint /bin/bash -e ANTHROPIC_BASE_URL="$GW_URL" -e ANTHROPIC_AUTH_TOKEN="$VK" -v "$PWD":/work claude-box
     fi
     ;;
 
   *)
-    sed -n '4,18p' "$HERE/gw.sh"
+    # 헤더 주석 블록 전체를 usage 로 출력. 고정 행 범위(예전의 `sed -n '4,18p'`)를 쓰면
+    # 헤더에 한 줄 추가할 때마다 usage 가 조용히 잘린다 — 실제로 그렇게 잘려 있었다.
+    awk 'NR > 3 { if ($0 ~ /^#/) print; else exit }' "$HERE/gw.sh"
     ;;
 esac

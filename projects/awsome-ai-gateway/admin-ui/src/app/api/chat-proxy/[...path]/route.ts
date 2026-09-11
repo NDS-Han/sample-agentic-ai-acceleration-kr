@@ -15,6 +15,7 @@
 
 import { cookies } from 'next/headers';
 import { NextRequest } from 'next/server';
+import { unauthorizedBody } from '@/lib/utils/unauthorized';
 
 // SSE pass-through 라우트 — Next.js 가 응답을 버퍼링/정적최적화하지 않도록 강제.
 // 이 설정이 없으면 standalone 런타임이 ReadableStream(특히 admin-api 의 10초
@@ -54,6 +55,16 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
   }
 
   const upstream = await fetch(target, init);
+
+  // ⚠️ pass-through 의 유일한 예외: 401. 인증 실패 응답은 SSE 스트림이 아니라 JSON 한
+  //    덩이라서 흘려보낼 이유가 없고, 그대로 흘리면 useChatStream 이 `HTTP 401` 문자열만
+  //    onError 로 던져(components/chat/useChatStream.ts) 사용자는 이유 없이 멈춘 채팅을
+  //    본다. 기계 판독용 본문으로 바꿔 로그인 유도를 가능하게 한다.
+  //    상류 body 는 읽지 않고 버리므로 명시적으로 취소한다(미소비 스트림 경고 방지).
+  if (upstream.status === 401) {
+    upstream.body?.cancel().catch(() => {});
+    return Response.json(unauthorizedBody(), { status: 401 });
+  }
 
   // SSE 등 스트리밍 응답은 body 를 그대로 pass-through (버퍼링 금지)
   return new Response(upstream.body, {

@@ -94,10 +94,15 @@ User HTTP → ALB → gateway-proxy Pod
 |------|-----------|
 | AWS CLI | v2.x |
 | Terraform | v1.9+ |
-| kubectl | v1.29+ |
+| kubectl | v1.30 ~ v1.32 (권장 v1.31.x) |
 | Helm | v3.14+ |
 | Docker 또는 Finch | 최신 |
 | jq | 최신 |
+
+> kubectl 은 "최신"이 정답이 아니다. 클러스터(EKS 1.31)와의 지원 skew 는 **±1 minor** 이므로
+> v1.30~v1.32 만 지원 범위이며, `dl.k8s.io/release/stable.txt` 로 받으면 지금은 v1.37 이 내려와
+> skew 를 벗어난다. 설치 명령은 `stable-1.31.txt` 채널을 쓴다
+> (deployment/docs/eks-fargate/01-prerequisites.md §2.3 참고).
 
 ### 2.2 AWS 계정 준비
 
@@ -230,7 +235,7 @@ database:
     masterPasswordRemoteProperty: "password"
 ```
 
-- 빈 값이면 하위호환으로 `<prefix><env>/db` 시크릿의 `master_password` 프로퍼티를 사용합니다.
+- 빈 값이면 하위호환으로 `<prefix><env>/db` 시크릿의 `master_password` 프로퍼티를 사용합니다. **단 `enable_rds_proxy=true` 로 Terraform 이 `/db` 를 관리하는 환경에서는 그 키가 없으므로(로테이션 드리프트 때문에 제거됨) 위 두 값 설정이 필수입니다.**
 - `rds!cluster-<uuid>`를 참조하려면 **ESO IRSA 정책에 `rds!cluster-*` read 권한**이 필요합니다 (irsa 모듈에 추가됨).
 
 ---
@@ -522,7 +527,7 @@ On-Prem 배포는 지원되지 않습니다 — 필요하다면 해당 커밋에
 | 항목 | 값 |
 |---|---|
 | VPC CIDR | `10.40.0.0/16` (multi-AZ: ap-northeast-2a/c) |
-| EKS cluster | `llm-gateway-prod` (1.30) |
+| EKS cluster | `llm-gateway-prod` (1.31) |
 | Aurora | `llm-gateway-prod`, db.r7g.large, multi-AZ, RDS Proxy on |
 | ElastiCache | `llm-gateway-prod`, cache.r7g.large, **cluster mode on** |
 | Cognito User Pool | `<COGNITO_USER_POOL_ID_PROD>` |
@@ -540,7 +545,7 @@ On-Prem 배포는 지원되지 않습니다 — 필요하다면 해당 커밋에
 | 항목 | 값 |
 |---|---|
 | VPC CIDR | `10.30.0.0/16` (single AZ) |
-| EKS cluster | `llm-gateway-dev` (1.30) |
+| EKS cluster | `llm-gateway-dev` (1.31) |
 | Aurora | `llm-gateway-dev`, t-class, single-AZ, RDS Proxy on |
 | ElastiCache | `llm-gateway-dev`, single node (cluster mode off) |
 | Cognito User Pool | `<COGNITO_USER_POOL_ID_DEV>` (2026-05-18 us-east-1 → ap-northeast-2 마이그레이션 완료) |

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
@@ -21,7 +22,11 @@ router = APIRouter(prefix="/admin/analytics", tags=["Analytics"])
 async def get_analytics(
     request: Request,
     period: str = Query(description="YYYY-MM format"),
-    group_by: str = Query("model", description="model | team | department | user"),
+    # ⚠️ Literal 로 좁혀 잘못된 값이 422 로 실패하게 한다. 예전 description 은
+    #    'department' 를 광고했지만 analytics_service 에는 그 분기가 없어서, 요청하면
+    #    조용히 by_model 응답이 돌아왔다(쓰레기 값과 바이트 단위로 동일 = 무증상 오답).
+    #    이 Literal 집합은 admin-ui/src/types/enums.ts 의 GroupByType 과 일치한다.
+    group_by: Literal["model", "team", "user"] = Query("model"),
     scope: str = Query("all", description="all | team:{uuid}"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -67,7 +72,18 @@ async def get_model_cost_analytics(
 
     models = []
     for row in model_result.all():
-        total_tokens = (row.input_tokens or 0) + (row.output_tokens or 0)
+        # ⚠️ 분자(total_cost_usd)와 분모(total_tokens)의 버킷이 같아야 한다. 예전엔
+        #    분모가 input+output 뿐이라 캐시를 많이 쓰는 모델의 단가가 실제보다 크게
+        #    부풀어, "1k 토큰당 비용" 열이 두 Opus 모델의 가격 순위를 뒤집어 보였다.
+        #    cache_creation/cache_read 는 별도 과금 버킷이므로 더한다.
+        #    reasoning_tokens 는 이미 output_tokens 안에 포함(models/usage.py:61)이라
+        #    더하면 이중계상 — 넣지 않는다.
+        total_tokens = (
+            (row.input_tokens or 0)
+            + (row.output_tokens or 0)
+            + (row.cache_creation_tokens or 0)
+            + (row.cache_read_tokens or 0)
+        )
         cost_per_1k = (float(row.total_cost_usd) / total_tokens * 1000) if total_tokens > 0 else 0
         models.append({
             "model_alias": row.model_alias,
@@ -115,9 +131,9 @@ async def get_model_cost_analytics(
 @router.get("/export")
 async def export_analytics(
     request: Request,
-    format: str = Query("csv", description="csv | json"),
+    format: Literal["csv", "json"] = Query("csv"),
     period: str = Query(description="YYYY-MM format"),
-    group_by: str = Query("model"),
+    group_by: Literal["model", "team", "user"] = Query("model"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):

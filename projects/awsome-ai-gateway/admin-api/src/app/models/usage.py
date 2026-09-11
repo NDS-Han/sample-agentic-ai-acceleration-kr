@@ -80,6 +80,21 @@ class UsageLog(Base):
     # gateway-proxy; read-only here. DB column is `text` (migration 0007) — use
     # unbounded String() to match it and avoid an autogenerate-truncation footgun.
     client: Mapped[str | None] = mapped_column(String(), nullable=True)
+    # SSO subject (OIDC `sub`). Written by gateway-proxy; read-only here.
+    sso_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # AWS `x-amzn-requestid` of the underlying Bedrock invocation — the join key to the
+    # Bedrock model-invocation log record (index idx_usage_logs_bedrock_req).
+    #
+    # NULL is a meaningful value here, not missing data, and the reconciler must not
+    # report it as a gap: the Mantle plane emits no log record at all (and its
+    # OpenAI-style ``req_…`` id joins to nothing), and the web-search path sums N
+    # invocations into one row so a single id would misreport 1:N as a clean 1:1.
+    #
+    # These two columns existed in db/init/02_create_tables.sql:377-378 but were never
+    # mirrored here. Unlike the provider enum, a MISSING column is silent — SQLAlchemy
+    # simply never selects it — so admin-api could not read the join key at all while
+    # every test passed. No migration needed; this is pure mirror drift.
+    bedrock_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 # ── ROIAggregation ──

@@ -44,7 +44,7 @@ output "gateway_user_secret_arn" {
 }
 
 output "db_secret_arn" {
-  description = "Helm ExternalSecret 이 참조하는 /db secret ARN (format: {password, master_password})"
+  description = "Helm ExternalSecret 이 참조하는 /db secret ARN (format: {password}). master 비번은 RDS 관리형 rds!cluster-<uuid> 를 Helm 이 직접 참조 — 여기에 복사하지 않는다."
   value       = var.enable_rds_proxy ? aws_secretsmanager_secret.db[0].arn : null
 }
 

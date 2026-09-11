@@ -336,6 +336,7 @@
     "editModel": "모델 수정",
     "createModel": "모델 추가",
     "aliasReadonly": "생성 후 alias(식별자)는 변경할 수 없습니다. 이름을 바꾸려면 새 모델을 생성하세요.",
+    "providerReadonly": "생성 후 Provider(및 이로부터 결정되는 api_format)는 변경할 수 없습니다. 공급자를 바꾸려면 새 모델을 생성하세요.",
     "selectProvider": "선택하세요",
     "mantleEndpointNote": "/v1/messages 는 자동으로 추가됩니다.",
     "allowedAppsLabel": "사용 가능 앱",

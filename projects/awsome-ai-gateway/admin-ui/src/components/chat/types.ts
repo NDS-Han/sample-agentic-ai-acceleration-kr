@@ -137,11 +137,16 @@ export type StreamEvent =
   | { type: 'tool_call'; tool: string; args?: Record<string, unknown> }
   | { type: 'tool_result'; tool: string; result: Record<string, unknown> }
   | { type: 'chart'; spec: ChartSpec; strip?: string }
+  // deep 모드 분석 계획(§57 PlanCard). ChatLayout 은 이미 처리하고 있었는데 유니온에만
+  // 빠져 있었다 — applyEvent 가 event: any 를 받아 타입 검사에 걸리지 않았다.
+  | { type: 'plan'; plan: AnalysisPlan; strip?: string }
   | { type: 'report'; s3_uri: string; file_name: string; format: string; summary: string; page_count?: number | null }
   | { type: 'text'; chunk: string }
   | { type: 'validator'; result: ValidatorResult }
   | { type: 'verification'; result: VerificationResult }
   | { type: 'audit'; result: AuditResult }
-  | { type: 'error'; error: string }
+  // ⚠️ 예외 클래스명은 `error_type` 이다 — `type` 으로 실어보내면 SSE 이벤트 이름을
+  // 덮어써서 이 variant 가 절대 매칭되지 않는다(useChatStream.parseSseBlock 주석).
+  | { type: 'error'; error: string; error_type?: string }
   | { type: 'session_warning'; expiresInSeconds: number }
   | { type: 'done'; totalTokens?: number; costUsd?: number; durationMs?: number };

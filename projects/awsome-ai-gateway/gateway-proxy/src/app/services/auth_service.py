@@ -8,7 +8,8 @@ from typing import Protocol
 
 import jwt
 import structlog
-from sqlalchemy import select, text as _sql_text
+from sqlalchemy import select
+from sqlalchemy import text as _sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import JwtPublicKey, User
@@ -186,12 +187,22 @@ class JWTAuthStrategy:
             if db is None:
                 raise PermissionError("DB unavailable, JWT key cache miss")
 
-            result = await db.execute(
-                select(JwtPublicKey)
-                .where(JwtPublicKey.kid == kid)
-                .where(JwtPublicKey.status == "active")
-            )
-            jwt_key = result.scalar_one_or_none()
+            # ⚠️ auth.admin_jwt_configs 에는 `kid` / `status` 컬럼이 없다. 실제 플래그는
+            #    `is_active` 다 (db/init/02_create_tables.sql, app/models/auth.py:50-59,
+            #    admin-api 의 같은 테이블 미러도 동일). 예전 코드는 존재하지 않는 두 컬럼을
+            #    참조해 AttributeError 를 냈고, middleware/auth.py 가 (PermissionError,
+            #    ValueError) 만 잡으므로 3-part 토큰(만료 JWT·Cognito id_token·`a.b.c`)이면
+            #    무인증 엔드포인트에서 HTTP 500 이 났다. kid 는 캐시 키로만 쓴다.
+            #    per-kid 선택이 필요해지면 kid 컬럼을 마이그레이션으로 추가한 뒤 필터를
+            #    되살릴 것 — 없는 컬럼을 참조하는 쿼리로 되돌리지 말 것.
+            try:
+                result = await db.execute(
+                    select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
+                )
+                jwt_key = result.scalars().first()
+            except Exception as e:  # 내부 장애도 401 로 — 500 유발 경로를 남기지 않는다
+                logger.warning("jwt_key_lookup_failed", error=str(e))
+                raise PermissionError(f"JWT key lookup failed: {e}")
             if jwt_key is None:
                 raise PermissionError(f"Unknown JWT kid: {kid}")
 
@@ -216,11 +227,20 @@ class JWTAuthStrategy:
         except jwt.InvalidTokenError as e:
             raise PermissionError(f"JWT invalid: {e}")
 
+        # 알 수 없는 role 라벨은 통째로 401 을 만드는 대신 건너뛰고 경고를 남긴다.
+        # (Role(r) 가 ValueError → middleware 가 이유 없는 401 로 바꿔버렸다.)
+        roles: list[Role] = []
+        for r in claims.get("roles", []):
+            try:
+                roles.append(Role(r))
+            except ValueError:
+                logger.warning("unknown_role_in_jwt", role=str(r))
+
         return AuthContext(
             user_id=claims["user_id"],
             team_id=claims["team_id"],
             dept_id=claims["dept_id"],
-            roles=[Role(r) for r in claims.get("roles", [])],
+            roles=roles,
             auth_type=AuthType.JWT,
             key_id=None,
             allowed_models=None,  # JWT는 Key Scope 없음

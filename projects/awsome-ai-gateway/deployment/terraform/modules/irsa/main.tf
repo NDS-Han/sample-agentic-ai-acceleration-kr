@@ -18,7 +18,11 @@ locals {
   #   - us-east-2 (Ohio): Codex in-account Mantle GPT-5.5 (openai.gpt-5.5, Responses API).
   #     Codex 호출 계정 == gateway-proxy IRSA 계정(123)이라 cross-account assume 불필요 —
   #     이 in-account 권한만으로 충분(라이브 probe 로 us-east-2 GPT-5.5 200 OK 확인).
-  mantle_regions = ["ap-northeast-1", "us-east-2"]
+  #   - 배포별로 다르므로 var.mantle_regions 로 주입한다. 이 모듈 변수는 **필수**다
+  #     (default 없음, variables.tf 참조) — 기본값 ["ap-northeast-1", "us-east-2"] 은
+  #     environments/*/variables.tf 에만 있고 그것이 단일 진실원천이다. 다른 리전
+  #     배포는 tfvars 에서 mantle_regions = ["us-east-1"] 처럼 덮어쓴다.
+  mantle_regions = var.mantle_regions
 }
 
 # ------------------------------------------------------------------------------
@@ -94,10 +98,10 @@ data "aws_iam_policy_document" "bedrock" {
 
   # --------------------------------------------------------------------------
   # Cowork cross-account Mantle — cowork routes to Bedrock Mantle Opus 4.8 in a
-  # SEPARATE account (222, Tokyo), so gateway-proxy must AssumeRole into that
-  # account's cowork role. Unlike codex/claude-code (in-account 123, no assume),
-  # cowork is the ONLY cross-account client. The 222 role's trust policy allows
-  # this 123 IRSA principal + sts:ExternalId=cowork-bedrock (see cowork_role_arn).
+  # SEPARATE account (905, Tokyo), so gateway-proxy must AssumeRole into that
+  # account's cowork role. Unlike codex/claude-code (in-account 859, no assume),
+  # cowork is the ONLY cross-account client. The 905 role's trust policy allows
+  # this 859 IRSA principal + sts:ExternalId=cowork-bedrock (see cowork_role_arn).
   # routing_profiles.account_role_arn(=cowork) must match cowork_role_arn.
   # --------------------------------------------------------------------------
   dynamic "statement" {
@@ -113,18 +117,18 @@ data "aws_iam_policy_document" "bedrock" {
   # --------------------------------------------------------------------------
   # Claude Code cross-account Bedrock NATIVE — claude-code routes to Bedrock
   # native (bedrock-runtime, boto3 invoke_model) in a SEPARATE account (333).
-  # Unlike cowork(Mantle), this is native; gateway-proxy assumes the 333 role and
+  # Unlike cowork(Mantle), this is native; gateway-proxy assumes the 374 role and
   # builds a bedrock-runtime client from temp creds (BedrockAccountClientProvider).
-  # The 333 role trust allows this 123 IRSA principal + sts:ExternalId=claude-code-bedrock.
-  # routing_profiles.account_role_arn(=claude-code) must match claude_code_333_role_arn.
+  # The 374 role trust allows this 859 IRSA principal + sts:ExternalId=claude-code-bedrock.
+  # routing_profiles.account_role_arn(=claude-code) must match claude_code_374_role_arn.
   # --------------------------------------------------------------------------
   dynamic "statement" {
-    for_each = var.claude_code_333_role_arn != "" ? [1] : []
+    for_each = var.claude_code_374_role_arn != "" ? [1] : []
     content {
       sid       = "AssumeClaudeCode374Bedrock"
       effect    = "Allow"
       actions   = ["sts:AssumeRole"]
-      resources = [var.claude_code_333_role_arn]
+      resources = [var.claude_code_374_role_arn]
     }
   }
 }
@@ -201,11 +205,52 @@ data "aws_iam_policy_document" "admin_api" {
     ]
     resources = ["*"]
   }
+
+  # Bedrock invocation log 감사 대조 — CloudWatch Logs Insights **읽기 전용**.
+  # 두 statement 로 쪼갠 이유: Insights 액션들의 리소스레벨 권한 지원이 다르다.
+  #   StartQuery / FilterLogEvents / GetLogEvents / DescribeLogStreams → log-group ARN 지정 가능
+  #   GetQueryResults / StopQuery / DescribeLogGroups                 → 리소스레벨 미지원(*)
+  # 좁힐 수 있는 쪽만 좁힌다. 쓰기 액션(PutLogEvents, DeleteLogGroup 등)은 일절 없음.
+  dynamic "statement" {
+    for_each = var.bedrock_invocation_log_group_arn != "" ? [1] : []
+    content {
+      sid    = "BedrockInvocationLogRead"
+      effect = "Allow"
+      actions = [
+        "logs:StartQuery",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams",
+      ]
+      resources = [
+        var.bedrock_invocation_log_group_arn,
+        # log stream 대상 액션은 :* 접미사가 붙은 ARN 을 요구한다.
+        "${var.bedrock_invocation_log_group_arn}:*",
+      ]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.bedrock_invocation_log_group_arn != "" ? [1] : []
+    content {
+      sid    = "BedrockInvocationLogQueryResults"
+      effect = "Allow"
+      actions = [
+        # 이 세 액션은 IAM 리소스레벨 조건을 지원하지 않는다(queryId 는 ARN 이 아님).
+        # StopQuery 는 우리가 띄운 쿼리를 타임아웃에 취소하는 용도로, 로그 데이터를
+        # 변경하지 않는다.
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:DescribeLogGroups",
+      ]
+      resources = ["*"]
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {
   name        = "${var.project}-${var.environment}-admin-api"
-  description = "STS + Cognito + Price List permissions for admin-api"
+  description = "STS + Cognito + Price List + Bedrock invocation-log read permissions for admin-api"
   policy      = data.aws_iam_policy_document.admin_api.json
   tags        = var.tags
 }

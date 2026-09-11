@@ -37,11 +37,26 @@ REGISTRY=$(echo "$ECR_URL" | cut -d/ -f1)
 aws ecr get-login-password --region ap-northeast-2 | \
     finch login --username AWS --password-stdin "$REGISTRY"
 
+# 태그는 pyproject.toml 의 version 에서 뽑는다. 예전엔 여기에 0.1.1-arm64 가 박혀 있었고
+# pyproject 가 0.2.29 로 올라간 뒤에도 문서만 뒤처져서, 이 문서를 그대로 따르면 4개월 전
+# 이미지를 밀어 올리게 됐다. 버전을 문서에 하드코딩하지 않는다.
+VER=$(grep -m1 '^version' pyproject.toml | cut -d'"' -f2)   # 예: 0.2.29
+TAG="$VER-arm64"                                            # 핫픽스 시엔 "$VER-l3fix" 처럼 접미사
+
 # arm64 필수 (Apple Silicon 은 네이티브, 그 외는 에뮬레이션)
-finch build --platform linux/arm64 -t admin-chat-agent:0.1.1-arm64 .
-finch tag  admin-chat-agent:0.1.1-arm64 "$ECR_URL:0.1.1-arm64"
-finch push "$ECR_URL:0.1.1-arm64"
+finch build --platform linux/arm64 -t "admin-chat-agent:$TAG" .
+finch tag  "admin-chat-agent:$TAG" "$ECR_URL:$TAG"
+finch push "$ECR_URL:$TAG"
 ```
+
+> 현재 배포된 런타임이 실제로 어떤 태그를 쓰는지는 아래로 확인한다(dev 라이브는
+> `0.2.29-l3fix` 처럼 접미사가 붙어 있어 `$VER-arm64` 와 다를 수 있다):
+>
+> ```bash
+> aws bedrock-agentcore-control get-agent-runtime --agent-runtime-id <ID> \
+>     --region ap-northeast-2 \
+>     --query 'agentRuntimeArtifact.containerConfiguration.containerUri'
+> ```
 
 ## AgentCore Runtime 생성
 
@@ -57,7 +72,7 @@ STAGING=$(terraform -chdir=... output -raw chat_agent_staging_bucket)
 cat > /tmp/create.json <<JSON
 {
   "agentRuntimeName": "$NAME",
-  "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "$ECR_URL:0.1.1-arm64"}},
+  "agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "$ECR_URL:$TAG"}},
   "roleArn": "$ROLE_ARN",
   "networkConfiguration": {"networkMode": "PUBLIC"},
   "protocolConfiguration": {"serverProtocol": "HTTP"},

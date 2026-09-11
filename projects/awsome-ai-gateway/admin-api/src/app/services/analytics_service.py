@@ -78,14 +78,40 @@ class AnalyticsService:
         elif scope == "all":
             # TEAM_LEADER restricted to own team
             if actor.role == UserRole.TEAM_LEADER:
+                # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. 예전엔 scope_id 가
+                #    None 이 되고, 아래 모든 WHERE 가 `if scope_id`/`is not None` 가드
+                #    뒤에 있어서 **전부 사라졌다** → 전사 분석(비용·사용자·모델·추이)과
+                #    /admin/analytics/export CSV 가 그대로 나갔다. 도달 경로: JWT 에
+                #    team_id 클레임이 없으면(core/auth.py:157) 또는 auth.users.team_id
+                #    가 NULL 이면(nullable) team_id 는 None 이다. dev 토큰은 role 을
+                #    본문에서 읽고 team_id 를 항상 None 으로 만들기 때문에
+                #    `dev.{"role":"TEAM_LEADER"}` 하나로 재현된다.
+                if actor.team_id is None:
+                    raise ForbiddenError(
+                        "Team leader has no team assigned — cannot scope analytics. "
+                        "Ask an administrator to assign a team."
+                    )
                 roi_scope = ROIScope.TEAM
                 scope_id = actor.team_id
         # ADMIN: no restriction
+
+        # 불변식: 비-GLOBAL scope 라면 scope_id 가 반드시 있다. 아래의 by_user/trends 는
+        # `scope_id is not None` 로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만
+        # 조용히 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
+        # assert 를 쓰지 않는다 — python -O 로 사라지는 검사에 데이터 격리를 맡길 수 없다.
+        if roi_scope not in (None, ROIScope.GLOBAL) and scope_id is None:
+            raise ForbiddenError(
+                f"Analytics scope isolation could not be applied (scope={roi_scope}) — "
+                "refusing to return organization-wide data."
+            )
 
         # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
         query_scope = roi_scope or ROIScope.GLOBAL
 
         cost_by_model = await repo.sum_usage_by_model(period, query_scope, scope_id)
+        # ⚠️ 같은 scope 필터(_apply_scope_filter)를 재사용하는 repo 메서드로 뽑는다 —
+        #    WHERE 를 손으로 다시 쓰면 TEAM_LEADER 격리가 갈라진다.
+        requests_by_model = await repo.count_requests_by_model(period, query_scope, scope_id)
         total_cost = sum(cost_by_model.values(), Decimal("0"))
         active_users_count = await repo.count_active_users(period, query_scope, scope_id)
         total_requests_count = await repo.total_requests(period, query_scope, scope_id)
@@ -101,31 +127,44 @@ class AnalyticsService:
             avg_cost_per_user_usd=avg_cost,
         )
 
+        # requests 를 채운다 — 예전엔 기본값 0 이 그대로 나가서, Analytics 화면에서
+        # 내려받는 JSON export 가 모든 모델에 대해 "요청 0건" 을 보고했다.
         by_model = [
-            ModelBreakdown(model=model, cost_usd=cost)
+            ModelBreakdown(
+                model=model,
+                cost_usd=cost,
+                requests=requests_by_model.get(model, 0),
+            )
             for model, cost in cost_by_model.items()
         ]
 
         # Team breakdown — aggregate per team from usage_logs
         by_team: list[TeamBreakdown] = []
         if not roi_scope or roi_scope == ROIScope.GLOBAL:
-            team_costs = await repo.sum_usage_by_model(period, ROIScope.GLOBAL, None)
-            # Get per-team costs
+            # (예전엔 여기서 sum_usage_by_model 을 team_costs 로 받아놓고 한 번도 읽지
+            #  않았다 — group_by=team 요청마다 전체 테이블 집계를 낭비했으므로 제거.)
             from sqlalchemy import distinct, func, select
+            from app.models.auth import Team
             from app.models.usage import UsageLog
             from app.core.usage_filters import cost_period_filter
+            # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
+            #    INNER JOIN 이 안전한 근거: usage_logs.team_id 는 NOT NULL + auth.teams.id
+            #    FK (app/models/usage.py) 이므로 조인으로 사라지는 행이 없다(합계 불변).
             stmt = select(
                 UsageLog.team_id,
+                Team.name.label("team_name"),
                 func.sum(UsageLog.cost_usd).label("cost"),
                 func.count(distinct(UsageLog.user_id)).label("users"),
+            ).join(
+                Team, Team.id == UsageLog.team_id
             ).where(
                 cost_period_filter(period),  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
-            ).group_by(UsageLog.team_id)
+            ).group_by(UsageLog.team_id, Team.name)
             result = await session.execute(stmt)
             for row in result:
                 if row.team_id:
                     by_team.append(TeamBreakdown(
-                        team=str(row.team_id),
+                        team=row.team_name or str(row.team_id),
                         team_id=str(row.team_id),
                         cost_usd=row.cost or Decimal("0"),
                         active_users=row.users or 0,
@@ -166,12 +205,46 @@ class AnalyticsService:
                     requests=row.requests or 0,
                 ))
 
+        # 비용 추이 — KST 일 버킷(§59). 예전엔 trends 를 아예 대입하지 않아서 기본값 []
+        # 이 나갔고, 대시보드/Analytics 의 두 추이 차트가 옆 KPI 는 실제 금액을 보여주는
+        # 동안 영구히 "데이터 없음" 을 렌더했다.
+        # ⚠️ scope_id 격리는 by_user 와 **동일 규칙**으로. 이걸 빼면 TEAM_LEADER 가
+        #    전사 일별 비용을 받아 가는 권한 누출이 된다.
+        from sqlalchemy import func, select
+
+        from app.core.usage_filters import cost_period_filter
+        from app.models.usage import UsageLog
+
+        _kst_day = func.date(func.timezone("Asia/Seoul", UsageLog.requested_at))
+        trend_where = [cost_period_filter(period)]
+        if scope_id is not None:
+            trend_where.append(UsageLog.team_id == scope_id)
+        trend_stmt = (
+            select(
+                _kst_day.label("day"),
+                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
+                func.count().label("requests"),
+            )
+            .where(*trend_where)
+            .group_by(_kst_day)
+            .order_by(_kst_day)
+        )
+        trends = [
+            TrendItem(
+                date=str(r.day),  # 'YYYY-MM-DD' — CostTrendCard 가 slice(5) 로 잘라 쓴다
+                cost_usd=r.cost_usd or Decimal("0"),
+                requests=r.requests or 0,
+            )
+            for r in (await session.execute(trend_stmt)).all()
+        ]
+
         return AnalyticsResponse(
             period=period,
             cost_summary=cost_summary,
             by_model=by_model,
             by_team=by_team,
             by_user=by_user,
+            trends=trends,
         )
 
     async def export_analytics(

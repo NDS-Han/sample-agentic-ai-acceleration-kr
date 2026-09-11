@@ -17,7 +17,15 @@ services:
   # Database
   # ============================================================
   postgres:
-    image: postgres:16-alpine
+    # ⚠️ pgvector 가 포함된 이미지여야 한다. stock `postgres:16-alpine` 로는
+    #    `alembic upgrade head` 가 **반드시 실패**한다 — migration
+    #    db/versions/0005_add_chat_agent_schema.py:29 이
+    #    `CREATE EXTENSION IF NOT EXISTS vector` 를 실행하고(chat_agent.schema_embeddings
+    #    의 vector(1024) 컬럼용), alpine 이미지엔 그 확장이 없다.
+    #    즉 예전 compose 는 스키마를 head 까지 올릴 수 없었고, 그래서 real-Postgres 를
+    #    요구하는 증명 테스트들을 하나도 풀어줄 수 없었다(compose 를 띄워도 무의미).
+    #    Aurora PostgreSQL 16 은 pgvector 를 지원하므로 배포 환경과도 일치한다.
+    image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-gateway}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gateway_dev_password}
@@ -236,7 +244,11 @@ services:
       dockerfile: Dockerfile
     env_file: .env
     environment:
-      DB_URL: postgresql+asyncpg://notification_worker_user:${NW_DB_PASSWORD:-notification_worker_password_change_me}@postgres:5432/${POSTGRES_DB:-gateway}
+      # ⚠️ 다른 서비스와 같은 'gateway' 유저를 쓴다 — 배포와 동일한 구성이다
+      #    (values-eks-fargate-prod.yaml:40 `notificationWorkerUser: "gateway"`).
+      #    예전엔 notification_worker_user + 레포에 공개된 비밀번호였는데, 그 롤은
+      #    db/init/04_create_users.sql 에서 NOLOGIN 으로 잠겼다(공개 비번 = prod 권한상승).
+      DB_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway_dev_password}@postgres:5432/${POSTGRES_DB:-gateway}
       REDIS_URL: redis://redis:6379/0
       OTEL_EXPORTER_OTLP_ENDPOINT: otel-collector:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc

@@ -39,6 +39,11 @@ from botocore.awsrequest import AWSRequest
 from botocore.exceptions import ClientError, ParamValidationError
 
 REGION = os.environ.get("REGION", "us-east-1")  # WebSearch connector is us-east-1 only
+# ⚠️ 기존 dev 게이트웨이는 예전 기본값 `ds-llm-gw-websearch` 로 이미 프로비저닝돼 있고
+#    values-eks-fargate-dev.yaml 의 AGENTCORE_GATEWAY_URL 이 그 호스트를 가리킨다.
+#    find_gateway() 는 이름 완전일치로 찾으므로, **기존 게이트웨이를 재사용**하려면
+#    `GW_NAME=ds-llm-gw-websearch` 로 실행해야 한다. 새 기본값으로 그냥 재실행하면
+#    중복 게이트웨이가 하나 더 생기고 values 의 URL 은 여전히 옛 것을 가리킨다.
 GW_NAME = os.environ.get("GW_NAME", "awsome-ai-gw-websearch")
 ROLE_NAME = os.environ.get("ROLE_NAME", "llm-gateway-dev-agentcore-websearch-gw")
 TARGET_NAME = os.environ.get("TARGET_NAME", "web-search-tool")

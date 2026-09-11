@@ -91,8 +91,12 @@ cd ~/my-project
 # 인터랙티브:
 <repo>/gateway-clients/gw.sh codex
 ```
-- 게이트웨이 `/v1/responses`(GPT-5.5, Responses API) 로 호출 → `client=codex` 로 집계.
+- 게이트웨이 `/v1/responses`(GPT-5.6, Responses API) 로 호출 → `client=codex` 로 집계.
 - entrypoint 가 컨테이너 안에 `~/.codex/config.toml`(base_url=게이트웨이, wire_api=responses)을 자동 생성.
+- **plane 선택**: GPT-5.6 은 Bedrock 의 두 plane 으로 서비스되고 plane 별 alias 가 다르다.
+  `GW_PLANE=mantle`(기본, alias `codex-gpt-5.6-terra`) / `GW_PLANE=runtime`(alias
+  `gpt-5.6-terra`, invocation log 기록됨). tier 는 `GW_TIER=sol|terra|luna`.
+  예: `GW_PLANE=runtime ./gw.sh codex "..."` — 자세한 내용은 `gateway-clients/README.md`.
 
 ### 3-3. 디버그용 셸 (컨테이너 안 직접 진입)
 ```bash
@@ -108,7 +112,8 @@ cd ~/my-project
 |---|---|---|
 | `VK 없음. 먼저 './gw.sh vk' 실행` | VK 미발급 | 2단계 수행 |
 | 401 / `auth_failed` / "API key rejected" | VK 1시간 만료 | 2단계 재실행 |
-| 403 `Model not allowed` | 해당 user/team 의 allowed_models 에 모델 없음 | Admin UI(사용자/팀 또는 모델 권한)에서 `codex-gpt`(codex) / 사용할 claude alias 추가 |
+| 403 `Model not allowed` | 해당 user/team 의 allowed_models 에 모델 없음 | Admin UI(사용자/팀 또는 모델 권한)에서 **요청되는 alias** 추가 — codex 는 `GW_PLANE` 에 따라 `codex-gpt-5.6-terra`(mantle) / `gpt-5.6-terra`(runtime), 구 환경은 `codex-gpt`. claude 는 사용할 claude alias |
+| 의도한 plane 이 아닌 곳에 과금됨 | `GW_PLANE` 을 호스트에만 설정하고 컨테이너로 전달 안 됨(구 `gw.sh`), 또는 alias 미등록으로 `default_model` 폴백 | `gw.sh` 최신본 사용(knob 을 `-e` 로 전달함) + 게이트웨이 로그의 `responses_requested_model_unresolved_using_default` 확인 |
 | `docker: ... not found` | 런타임 미기동 | `colima start` 또는 `finch vm start` |
 | codex 가 응답 짧게 잘림 | max_output_tokens 가 reasoning 토큰에 먹힘 | 프롬프트에서 출력 길이 늘리기(기본은 충분) |
 
@@ -131,7 +136,10 @@ cd ~/my-project
 > `alias gwcodex='<repo>/gateway-clients/gw.sh codex'` 를 **호스트가 아닌** 임시 셸에만 두고 싶으면
 > 그 터미널에서만 export. (호스트 영구 설정 변경 원치 않으면 ~/.zshrc 에 넣지 말 것)
 
-## 검증 기록 (123 dev)
+## 검증 기록 (859 dev)
+> 아래는 **GPT-5.6 alias 도입(0025/0028/0032) 이전** 시점의 기록이다. 당시 codex 의
+> `default_model` 은 `codex-gpt`(GPT-5.5) 였다. 경로·인증 방식은 그대로 유효하다.
+
 - claude-box → `/v1/messages` → Claude **HTTP 200** ("BOX-OK received")
 - codex-box → `/v1/responses` → GPT-5.5 **HTTP 200** (reasoning_tokens 포함)
 - VK 는 호스트 `~/.gateway-vk` 주입 → 호스트 환경 무변경 확인.

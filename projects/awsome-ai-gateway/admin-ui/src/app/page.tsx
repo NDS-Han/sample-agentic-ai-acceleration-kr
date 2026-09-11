@@ -4,7 +4,6 @@ import { adminAPI } from '@/lib/api-client';
 import { KPICard } from '@/components/common/KPICard';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { AlertLevel } from '@/types/enums';
-import type { ModelListItem } from '@/types/entities';
 import {
   DollarSign,
   Key,
@@ -36,6 +35,7 @@ import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
+import { kstNowParts } from '@/lib/utils/period';
 
 interface BudgetSummaryResponse {
   summary: BudgetSummaryItem[];
@@ -74,9 +74,13 @@ function computeDailyAvg(period: string, totalCost: number): {
 } {
   const [y, m] = period.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
-  const now = new Date();
-  const isCurrentMonth = y === now.getFullYear() && m === now.getMonth() + 1;
-  const elapsedDays = isCurrentMonth ? now.getDate() : daysInMonth;
+  // ⚠️ "지금" 은 KST 로 구한다. 분자(summary.total_cost_usd)는 백엔드에서 KST 버킷으로
+  //    집계되는데 분모를 pod 의 UTC 시계로 나누면 매일 00:00~09:00 KST 사이에 경과일이
+  //    하루 적어 일평균이 과대계상되고, 매월 1일 그 9시간 동안은 isCurrentMonth 가
+  //    false 가 되어 월말 예상이 아무 설명 없이 사라진다.
+  const kstNow = kstNowParts();
+  const isCurrentMonth = y === kstNow.y && m === kstNow.m;
+  const elapsedDays = isCurrentMonth ? kstNow.d : daysInMonth;
   const dailyAvg = elapsedDays > 0 ? totalCost / elapsedDays : 0;
   const projection = isCurrentMonth ? dailyAvg * daysInMonth : null;
   return { dailyAvg, projection };
@@ -87,7 +91,12 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
   const [budgetResult, keysResult, modelsResult, summaryResult] = await Promise.allSettled([
     adminAPI.get<BudgetSummaryResponse>('/admin/budgets/summary', { period }),
     adminAPI.get<KeyCountResponse>('/admin/keys/count', { status: 'ACTIVE' }),
-    adminAPI.get<{ items: ModelListItem[] }>('/admin/models'),
+    // ⚠️ ModelListItem(표시용 타입, is_active 보유) 로 캐스팅하면 안 된다. /admin/models 의
+    //    실제 응답은 `status: 'ACTIVE' | 'INACTIVE'` 이고 is_active 를 내보낸 적이 없다.
+    //    다른 3개 소비처(models/page.tsx, budgets/page.tsx, lib/actions/models.ts)는
+    //    status → is_active 매퍼를 거치는데 이 화면만 생짜 캐스팅이라, 필터가 전부
+    //    undefined 를 만나 "활성 모델 수" 가 영구히 0 이었다(TS 에러도 콘솔 경고도 없음).
+    adminAPI.get<{ items: Array<{ status: string }> }>('/admin/models'),
     fetchDashboardSummary(period, client),
   ]);
 
@@ -107,10 +116,13 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
     0,
   );
   const budgetUtilization = totalLimitUsd > 0 ? (totalUsageUsd / totalLimitUsd) * 100 : 0;
-  const activeKeys = keysData?.count ?? 0;
+  // ⚠️ 실패(403/네트워크)를 0 으로 접지 말 것. TEAM_LEADER 는 /admin/keys/count 에서
+  //    403 을 받는데 예전 `?? 0` 은 그걸 "활성 키 0개" 라는 **사실 진술**로 렌더했다.
+  //    다른 카드들과 같은 '—' + fetchFailed 관례를 따른다.
+  const activeKeys = keysData ? keysData.count : null;
   const activeModels = modelsData
-    ? (modelsData.items ?? []).filter((m) => m.is_active).length
-    : 0;
+    ? (modelsData.items ?? []).filter((m) => m.status === 'ACTIVE').length
+    : null;
   const alertLevel = calcAlertLevel(budgetUtilization);
 
   // 일 평균 / 월말 예상 — summary 의 total_cost_usd 기반 (가짜 없음, 파생값)
@@ -178,15 +190,15 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
           <KPICard
             title={t('activeKeys')}
-            value={activeKeys}
+            value={activeKeys != null ? activeKeys.toLocaleString() : '—'}
             icon={<Key size={18} aria-hidden="true" />}
-            description={t('activeKeysDesc')}
+            description={activeKeys != null ? t('activeKeysDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('activeModels')}
-            value={activeModels}
+            value={activeModels != null ? activeModels.toLocaleString() : '—'}
             icon={<Cpu size={18} aria-hidden="true" />}
-            description={t('activeModelsDesc')}
+            description={activeModels != null ? t('activeModelsDesc') : t('fetchFailed')}
           />
         </div>
       </section>

@@ -205,7 +205,18 @@ Error: updating EKS Cluster (llm-gateway-dev) version:
 InvalidParameterException: Unsupported Kubernetes minor version update from 1.30 to 1.29
 ```
 
-**원인**: 이미 생성된 EKS 클러스터가 `1.30` 인데 `variables.tf` 의 `eks_cluster_version` 기본값이 `"1.29"` 로 남아있음. AWS EKS 는 minor version **downgrade 를 허용하지 않음** (upgrade only).
+**원인**: 이미 생성된 EKS 클러스터가 `1.30` 인데 `variables.tf` 의 `eks_cluster_version` 기본값이 `"1.29"` 로 남아있음. **선언값이 라이브보다 낮으면** apply 가 이 에러로 죽는다.
+
+⚠️ 예전 이 문서의 "downgrade 를 허용하지 않음 (upgrade only)" 는 **정확하지 않았다.** EKS User Guide
+"Downgrade the Kubernetes version for an Amazon EKS cluster" 기준, in-place 업그레이드 **7일 이내**에는
+직전 minor 로 롤백할 수 있다(조건: 클러스터 ACTIVE + ERROR insight 0). 7일이 지나면 정말로 불가하며
+새 클러스터 + 워크로드 이관밖에 없다. 단 **Fargate 에서는 사실상 유료다** — 홉 후 파드를 재생성하면
+kubelet skew 가 ERROR insight 로 떠서 롤백이 막히므로, 롤백하려면 파드를 지워야 한다 = **계획된 다운타임**.
+"7일 롤백 가능" 을 "안전하고 공짜" 로 읽지 말 것. (같은 설명: `environments/llm-gateway-{dev,prod}/variables.tf`
+의 `eks_cluster_version` 주석)
+
+**진짜 위험은 클러스터가 아니라 스택이다**: apply 가 이 에러로 죽으면 클러스터 자체는 무사하지만
+**그 스택의 terraform 이 아무것도 못 돌게 되어** 다른 드리프트가 계속 쌓인다.
 
 **왜 1.30이 먼저 생성됐나**: 과거 apply 때 변수를 비웠거나, EKS 모듈이 자동으로 더 최신 버전을 선택했거나, 이후 AWS auto-upgrade 가 발생했을 수 있음.
 
@@ -213,19 +224,25 @@ InvalidParameterException: Unsupported Kubernetes minor version update from 1.30
 ```hcl
 # deployment/terraform/environments/{dev,prod}/variables.tf
 variable "eks_cluster_version" {
-  type    = string
-  default = "1.30"   # 1.29 → 1.30 으로 업
+  type     = string
+  default  = "1.31"   # 라이브와 동일하게. 라이브보다 낮추지 말 것
+  nullable = false
 }
 ```
 
-**확인**:
+**확인** (선언값을 정하기 전에 **먼저 라이브를 읽어라**):
 ```bash
 aws eks describe-cluster --name llm-gateway-dev \
   --query 'cluster.version' --output text --region "$AWS_REGION"
-# → 1.30
+# → 1.31
 ```
 
-우리 리포는 2026-04-23 이후 버전에서 `1.30` 으로 기본값 상향 완료.
+우리 리포의 현재 기본값은 dev·prod 모두 **`1.31`** = 라이브(2026-09-04 실측)와 일치.
+
+⚠️ **이 사고는 재발했다.** 2026-09-04 감사에서 커밋된 브랜치의 dev·prod `eks_cluster_version`
+기본값이 `"1.30"` 인데 라이브가 `1.31` 인 상태가 발견됐다(그대로 apply 하면 prod 까지 위 에러로
+스택이 웨지되는 부비트랩). 그래서 이제 두 환경 variables.tf 에 `>= 31` **validation** 을 걸어
+다운그레이드 커밋 자체를 막는다. 버전을 만질 때 이 validation 을 풀지 말 것.
 
 ---
 
@@ -733,6 +750,11 @@ helm upgrade --install "$RELEASE_NAME" "$CHART_DIR" \
     --wait
 ```
 
+⚠️ 위 `--atomic` 은 **Helm 3 기준**이다. Helm 4 에서는 `--rollback-on-failure` 가 권장 이름이고
+(`--atomic` 은 deprecation warning 만 내고 여전히 동작), 반대로 Helm 3 에는
+`--rollback-on-failure` 가 없어 위와 똑같은 `unknown flag` 로 죽는다. `install-eks.sh` 는
+`helm version` 을 읽어 자동으로 골라 쓴다(`HELM_MAJOR` / `ROLLBACK_FLAG`).
+
 우리 리포는 2026-04-23 이후 버전에서 `install-eks.sh` 를 `helm upgrade --install` 로 통합.
 
 ---
@@ -796,7 +818,11 @@ Error: release llm-gateway failed ... failed pre-install:
    ```yaml
    initContainers:
      - name: wait-for-secret
-       image: bitnami/kubectl:1.30
+       # ⚠️ 예전 문서의 `bitnami/kubectl:1.30` 은 이제 존재하지 않는다(레지스트리 404 —
+       #    bitnami/kubectl 은 버전 태그를 모두 내렸고 `latest` 만 남았다). 실제 chart 는
+       #    digest 로 고정한다 — 단일 출처는 values.yaml 의 migration.waitForSecret.image.
+       #    registry.k8s.io/kubectl 은 distroless(쉘 없음)라 이 `sh -c` 루프를 못 돌린다.
+       image: bitnami/kubectl@sha256:b29d8c1665b70817259ceecaea16ab27aab6368b48daf485d19436c809067492
        command: ["sh","-c","until kubectl get secret $SECRET -n $NS >/dev/null 2>&1; do sleep 3; done"]
    ```
 

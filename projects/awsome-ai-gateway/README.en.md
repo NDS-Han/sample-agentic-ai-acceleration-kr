@@ -53,7 +53,7 @@ Zero client-side configuration.
                                                       ▼ Real-time streaming (SSE) + heartbeat
 ```
 
-> Full component / account / data-plane details: [`ARCHITECTURE.md`](ARCHITECTURE.md) and [`devlog_websearch.md`](devlog_websearch.md).
+> Full component / account / data-plane details: [`ARCHITECTURE.md`](ARCHITECTURE.md).
 
 **Supported models and how they are registered**
 

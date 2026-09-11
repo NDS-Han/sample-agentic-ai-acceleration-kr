@@ -7,7 +7,10 @@
  * `secure` flag matches the actual connection scheme (HTTP vs HTTPS) and
  * the redirect URL preserves the original Host header (avoids 0.0.0.0 in
  * containerized envs). The redirect lands on '/' which middleware then
- * sends to '/api/auth/dev-login' since the cookie is gone.
+ * sends to '/api/auth/login' since the cookie is gone — that route picks the
+ * OIDC authorize URL, the dev form, or a readable 503 depending on env
+ * (src/app/api/auth/login/route.ts). It used to point straight at
+ * '/api/auth/dev-login', which answers a bodyless 404 in prod.
  */
 
 import { NextRequest, NextResponse } from 'next/server';

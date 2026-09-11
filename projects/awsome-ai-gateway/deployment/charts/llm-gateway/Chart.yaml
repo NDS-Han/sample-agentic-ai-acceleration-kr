@@ -9,18 +9,52 @@ description: |
 type: application
 
 # Chart 자체 버전. 내부 변경 시 SemVer bump.
-version: 0.1.0
+# 0.1.0 이 dev 87 revision / prod 14 revision 내내 한 번도 안 움직여서 `helm history` 로
+# chart 변경을 구분할 수 없었다. 이번 chart 변경(이미지 태그 명시 + waitForSecret digest 핀
+# + statementCacheSize 0 반영)에 맞춰 bump.
+# ⚠️ **이 bump 만으로도 6개 Deployment 가 전부 롤링 재시작된다.** 파드 *라벨* 자체는
+#    llm-gateway.selectorLabels(version/chart 제외)라 안 바뀌지만, common/configmap.yaml 과
+#    common/secret.yaml 이 llm-gateway.labels(= helm.sh/chart + app.kubernetes.io/version)를
+#    포함하고, 6개 Deployment 가 그 **파일 렌더 텍스트의 sha256** 을 파드 템플릿 annotation
+#    `checksum/config` / `checksum/secret` 에 넣기 때문이다.
+#    실측(2026-09-07, Chart.yaml 만 바꿔 렌더 대조): checksum/config
+#    b3b76a7… → b351b08…, checksum/secret b9337f3… → 6fa0a93… (6개 전부 동일하게 변경).
+#    특히 scheduler 는 replicas:1 + strategy:Recreate 라 롤 동안 **cron 싱글턴이 0개**가 된다
+#    (Fargate 는 매번 새 microVM + 이미지 pull). 버전만 올리는 커밋도 변경창에서 할 것.
+version: 0.2.0
 
-# 애플리케이션(이미지 태그) 기본 버전. values.image.tag로 오버라이드 가능.
-appVersion: "1.0.43-rebrand"
+# 애플리케이션(이미지 태그) 기본 버전.
+#
+# ⚠️ 이 값은 이제 **이미지 태그 폴백으로 쓰이지 않는다.** values.yaml 의 7개 워크로드가
+#    모두 라이브 태그로 명시돼 있어 _helpers.tpl:76 의 `| default .root.Chart.AppVersion`
+#    가 발동할 경로가 없다(예전엔 이 값이 발동해 5개 서비스가 조용히 롤백됐다).
+#    남은 용도는 `app.kubernetes.io/version` 라벨 하나뿐이다 — 단 그 라벨이
+#    common/configmap.yaml·secret.yaml 에 렌더되므로 위 `version` 과 똑같이
+#    checksum/config·checksum/secret 을 바꿔 **6개 Deployment 를 롤린다**(라벨 전용이 아니다).
+#
+# ⚠️ 스칼라 하나로 7개가 각자 버전인 이미지를 표현할 수 없으므로 이 라벨은 근본적으로
+#    정확할 수 없다. **컴포넌트의 실제 버전은 values 의 image.tag 를 봐야 한다.**
+#    그래도 1.0.43-rebrand(2026-05) 로 두면 라이브 6개 워크로드 전부보다 뒤처져서
+#    (실측: prod 6개 Deployment 라벨이 전부 1.0.43-rebrand 인데 실제론 1.0.99/1.0.68/
+#    1.0.55/1.0.47 가 돌고 있었다) 대시보드·장애 트리아지가 오답을 읽는다.
+#    → 라이브 최신 태그로 올려 최소한 "뒤처지지는 않게" 한다. 라벨 전용이고
+#      파드 템플릿에 없으므로 이 변경으로 재시작되는 파드는 없다.
+# 후속(선택): componentLabels 에 컴포넌트별 image.tag 를 주입해 라벨을 컴포넌트별로
+#            정확히 만드는 방법이 있다. 호출부 40곳을 건드려야 해서 이 커밋에서는 제외.
+appVersion: "1.0.99-modelform"
 
+# 라이브 클러스터는 dev·prod 모두 1.31 (2026-09-04 실측). 이 제약은 하한만 보므로
+# 1.31 을 만족한다. 하한을 올리지 않는 이유는 이 chart 가 신규 계정/구버전 EKS 에도
+# 설치될 수 있어야 하기 때문이다.
 kubeVersion: ">=1.28.0-0"
 
 home:
 sources:
 maintainers:
+  # email 은 의도적으로 비워 둔다 — de-brand 과정에서 조직 주소를 제거했고, `helm lint` 는
+  # 값이 있으면 RFC 형식을 검사해 `admin` 같은 잔여 문자열에 chart 전체를 ERROR 로 떨군다.
+  # 필드 자체를 생략하는 것은 유효하다(있으면 형식 검사, 없으면 통과).
   - name: LLM Gateway Team
-    email: admin
 
 keywords:
   - llm

@@ -13,11 +13,12 @@ from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
 from app.core.auth import CurrentUser, JWTVerifier
 from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.db import SESSION_STATE_ATTR
 from app.core.encryption import AESEncryptionService
 from app.models.auth import UserRole
 from app.services.analytics_service import AnalyticsService
@@ -40,44 +41,32 @@ DEV_USER_ID = uuid.UUID("00000000-0000-0000-0000-000000000003")
 
 def _build_test_app() -> FastAPI:
     """Build a FastAPI app with mocked dependencies for integration tests."""
-    from app.routers import analytics, budgets, cli, internal, keys, models, rate_limits, users
-    from app.core.exceptions import (
-        AppError, NotFoundError, ConflictError, ForbiddenError,
-        ValidationError, BudgetExceededError, STSVerificationError,
+    # dashboard/monitoring/my 는 app.state 서비스를 쓰지 않는 순수 세션 쿼리 라우터다.
+    # 예전엔 테스트 앱에 등록되지 않아 limit 경계·KST 집계 같은 계약을 통합테스트가
+    # 전혀 밟지 못했다(요청하면 404 라서 '통과'처럼 보였다).
+    from app.routers import (
+        analytics,
+        audit_reconcile,
+        budgets,
+        cli,
+        dashboard,
+        internal,
+        keys,
+        models,
+        monitoring,
+        my,
+        rate_limits,
+        users,
     )
-    from fastapi import Request
-    from fastapi.responses import JSONResponse
 
     app = FastAPI(title="Test Admin API")
 
-    # Exception handlers (same as main.py)
-    @app.exception_handler(NotFoundError)
-    async def not_found_handler(request: Request, exc: NotFoundError):
-        return JSONResponse(status_code=404, content={"error": {"message": exc.message, "code": exc.code}})
+    # ⚠️ 핸들러를 여기서 손으로 복제하지 말 것. 예전엔 복제본이라 main.py 에만 추가된
+    #    핸들러(422 정규화 / 미처리 예외 최후의 그물)를 통합테스트가 전혀 검증하지
+    #    못했고, 프로덕션과 테스트의 에러 봉투가 조용히 갈라졌다.
+    from app.main import register_exception_handlers
 
-    @app.exception_handler(ConflictError)
-    async def conflict_handler(request: Request, exc: ConflictError):
-        return JSONResponse(status_code=409, content={"error": {"message": exc.message, "code": exc.code}})
-
-    @app.exception_handler(ForbiddenError)
-    async def forbidden_handler(request: Request, exc: ForbiddenError):
-        return JSONResponse(status_code=403, content={"error": {"message": exc.message, "code": exc.code}})
-
-    @app.exception_handler(ValidationError)
-    async def validation_handler(request: Request, exc: ValidationError):
-        return JSONResponse(status_code=400, content={"error": {"message": exc.message, "code": exc.code}})
-
-    @app.exception_handler(BudgetExceededError)
-    async def budget_handler(request: Request, exc: BudgetExceededError):
-        return JSONResponse(status_code=429, content={"error": {"message": exc.message, "code": exc.code}})
-
-    @app.exception_handler(STSVerificationError)
-    async def sts_handler(request: Request, exc: STSVerificationError):
-        return JSONResponse(status_code=401, content={"error": {"message": exc.message, "code": exc.code}})
-
-    @app.exception_handler(AppError)
-    async def app_error_handler(request: Request, exc: AppError):
-        return JSONResponse(status_code=500, content={"error": {"message": exc.message, "code": exc.code}})
+    register_exception_handlers(app)
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
@@ -87,6 +76,18 @@ def _build_test_app() -> FastAPI:
     app.include_router(analytics.router)
     app.include_router(cli.router)
     app.include_router(internal.router)
+    app.include_router(audit_reconcile.router)
+    app.include_router(dashboard.router)
+    app.include_router(monitoring.router)
+    app.include_router(my.router)
+
+    # ⚠️ 프로덕션 create_app() 과 같은 배선. 이 호출이 없으면 통합테스트는 커밋이
+    #    응답 **뒤에** 일어나는 예전 앱 형상을 검증하게 되고, 커밋 실패가 200 으로
+    #    나가는 회귀를 통합테스트가 전혀 잡지 못한다(핸들러 손복제와 같은 부류의 틈).
+    #    반드시 모든 include_router 뒤여야 한다 — 뒤에 추가된 라우터는 승격되지 않는다.
+    from app.core.db import install_commit_before_response
+
+    install_commit_before_response(app)
 
     return app
 
@@ -129,21 +130,36 @@ def _mock_db_result() -> MagicMock:
     return result
 
 
-async def _mock_get_db_session():
+async def _mock_get_db_session(request: Request):
     """Override for app.core.db.get_db_session — a mock AsyncSession.
 
     The integration conftest promises "mocked DB" but the routers depend on the
     real get_db_session (which builds a live asyncpg engine). Override it so no
     router test ever opens a real connection; repository-level patches still take
     precedence where a test sets them.
+
+    ⚠️ 진짜 get_db_session 처럼 request.state 에 세션을 매달아야 한다. 안 매달면
+       CommittingRoute 가 세션을 못 찾아 그대로 통과하고, 통합테스트는 커밋 경로를
+       **한 번도** 밟지 않는다(라우트만 승격되고 실제 동작은 미검증). in_transaction()
+       도 실제 세션처럼 커밋/롤백 뒤 False 로 떨어지게 해서, 승격된 라우트가 커밋한
+       세션을 종료 블록이 또 커밋하지 않는지까지 같은 배선으로 확인한다.
     """
     session = AsyncMock()
     session.execute = AsyncMock(return_value=_mock_db_result())
     session.get = AsyncMock(return_value=None)
     session.add = MagicMock()
     session.flush = AsyncMock()
-    session.commit = AsyncMock()
-    session.rollback = AsyncMock()
+
+    open_tx = {"value": True}
+    session.in_transaction = MagicMock(side_effect=lambda: open_tx["value"])
+
+    async def _close(*_args, **_kwargs):
+        open_tx["value"] = False
+
+    session.commit = AsyncMock(side_effect=_close)
+    session.rollback = AsyncMock(side_effect=_close)
+
+    setattr(request.state, SESSION_STATE_ATTR, session)
     yield session
 
 

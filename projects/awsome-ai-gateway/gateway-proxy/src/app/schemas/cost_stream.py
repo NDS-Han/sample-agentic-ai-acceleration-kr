@@ -7,6 +7,8 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
+from app.periods import current_kst_date, current_kst_period
+
 
 class CostStreamEntry(BaseModel):
     """Redis Stream `cost:stream`에 XADD 되는 단일 비용 레코드.
@@ -111,8 +113,16 @@ class CostStreamEntry(BaseModel):
             availability_fallback_from=availability_fallback_from,
             requested_at=now.isoformat(),
             completed_at=now.isoformat(),
-            period=now.strftime("%Y-%m"),
-            date=now.strftime("%Y-%m-%d"),
+            # ⚠️ period/date 는 UTC 가 아니라 **KST** 경계다(app.periods 참조).
+            # 이 두 값이 cost-recorder-worker 에서 그대로 키가 된다:
+            #   period → budget.budget_usages.period 행 + budget:*:{period} Redis 키
+            #   date   → usage:daily:user:{uid}:{date} Redis 카운터
+            # 집계 데이터는 전부 KST 로 버킷되고(daily_aggregator 는 AT TIME ZONE
+            # 'Asia/Seoul') admin-api 는 KST 월로 읽으므로(§59), 여기서 UTC 로 쓰면
+            # 매월/매일 경계에서 9시간 어긋난다. requested_at/completed_at 은 절대시각
+            # (timestamptz)이므로 UTC 그대로가 맞다 — 버킷 라벨만 KST 다.
+            period=current_kst_period(),
+            date=current_kst_date(),
             threshold_triggered=threshold_triggered,
             threshold_policy=threshold_policy,
             sso_subject=sso_subject,

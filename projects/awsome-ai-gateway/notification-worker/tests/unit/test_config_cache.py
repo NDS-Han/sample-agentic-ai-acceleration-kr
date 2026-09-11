@@ -78,8 +78,37 @@ async def test_reload_updates_existing_cache() -> None:
 def test_needs_poll_returns_true_initially() -> None:
     factory = MagicMock()
     cache = ConfigCache(factory)
-    # _last_loaded = 0 → 5분 초과 → True
+    # 로드 이력이 없으면 무조건 True — 시계와 무관해야 한다.
     assert cache.needs_poll() is True
+
+
+def test_needs_poll_is_true_right_after_boot() -> None:
+    """⚠️ 회귀 가드: 호스트 uptime 이 5분 미만이어도 True 여야 한다.
+
+    예전 구현은 sentinel 을 0.0 으로 두고 `time.monotonic() - 0.0 > 300` 을 봤다.
+    monotonic 의 기준점은 임의(리눅스에서는 부팅 시각)이므로, 방금 뜬 노드에서는
+    `monotonic()` 자체가 300 미만이라 **한 번도 로드하지 않은 캐시가 "폴링 불필요"**
+    를 반환했다. 그러면 Pub/Sub 갱신이 오기 전까지 빈 설정으로 돈다.
+
+    이 결함은 uptime 이 긴 개발 머신에서는 재현되지 않는다(실측: 로컬 94,643s 통과,
+    CI 러너에서 실패). 그래서 monotonic 을 부팅 직후 값으로 고정해 재현한다.
+    """
+    factory = MagicMock()
+    cache = ConfigCache(factory)
+    with patch.object(time, "monotonic", return_value=12.0):  # 부팅 12초 후
+        assert cache.needs_poll() is True, (
+            "부팅 직후 uptime 이 짧으면 폴링이 꺼진다 — sentinel 을 monotonic 과 "
+            "같은 축에서 비교하면 안 된다(None 을 쓸 것)"
+        )
+
+
+def test_needs_poll_is_false_right_after_boot_when_just_loaded() -> None:
+    """대조군 — 위 가드가 '항상 True' 로 통과하지 않는지."""
+    factory = MagicMock()
+    cache = ConfigCache(factory)
+    with patch.object(time, "monotonic", return_value=12.0):
+        cache._last_loaded = 12.0
+        assert cache.needs_poll() is False
 
 
 def test_needs_poll_returns_false_after_recent_load() -> None:

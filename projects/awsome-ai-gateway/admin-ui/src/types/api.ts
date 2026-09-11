@@ -82,7 +82,42 @@ export const ModelCreateSchema = z.object({
   // (두 필드는 ModelListItem 표시용 타입에만 존재하며 항상 0 으로 채워진다.)
   description: z.string().max(512).optional(),
   display_name: z.string().max(128).optional(),
-});
+})
+  // BEDROCK_RUNTIME_OPENAI 은 endpoint_url 이 **필수**다. 게이트웨이 어댑터가 SigV4 서명
+  // 리전을 endpoint 호스트(bedrock-runtime.{region}.amazonaws.com)에서 뽑아내므로, 비어
+  // 있으면 서명 자체가 불가능하고 모든 호출이 502 로 죽는다. 등록 시점에 막지 않으면
+  // 화면상 정상으로 보이는 모델이 런타임에만 실패한다 — 원인 추적이 가장 어려운 형태다.
+  // (Mantle/BEDROCK 계열은 기존대로 optional 이므로 이 refine 은 그들에게 영향이 없다.)
+  .refine(
+    (d) => d.provider.toUpperCase() !== 'BEDROCK_RUNTIME_OPENAI' || !!d.endpoint_url?.trim(),
+    {
+      path: ['endpoint_url'],
+      message: 'Endpoint URL is required for BEDROCK_RUNTIME_OPENAI (e.g. https://bedrock-runtime.us-east-2.amazonaws.com/openai)',
+    },
+  )
+  // 같은 이유로 host 형태도 검사한다. 오타(bedrock-runtime.us-east-2.amazonaws.com 대신
+  // bedrock.us-east-2… 등)는 리전 추출을 실패시켜 ValueError 로 502 가 된다.
+  .refine(
+    (d) =>
+      d.provider.toUpperCase() !== 'BEDROCK_RUNTIME_OPENAI' ||
+      /^https:\/\/bedrock-runtime\.[a-z0-9-]+\.amazonaws\.com/i.test(d.endpoint_url?.trim() ?? ''),
+    {
+      path: ['endpoint_url'],
+      message: 'Must be https://bedrock-runtime.{region}.amazonaws.com/openai',
+    },
+  )
+  // provider_model_id 는 cross-region inference profile ID 여야 한다. 접두사 없는
+  // openai.gpt-5.6-* 는 inferenceTypesSupported=[INFERENCE_PROFILE] 이라 호출 불가이며,
+  // Bedrock 이 400 "The provided model identifier is invalid" 를 돌려준다(실측).
+  .refine(
+    (d) =>
+      d.provider.toUpperCase() !== 'BEDROCK_RUNTIME_OPENAI' ||
+      /^(us|global|eu|apac|us-gov)\./.test(d.model_id.trim()),
+    {
+      path: ['model_id'],
+      message: 'Must be a cross-region inference profile ID (e.g. us.openai.gpt-5.6-terra)',
+    },
+  );
 
 export interface ModelDeactivateForm {
   alias: string;

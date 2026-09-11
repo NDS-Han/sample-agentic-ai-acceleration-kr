@@ -35,12 +35,21 @@ module "vpc" {
 module "eks" {
   source = "../../modules/eks-fargate"
 
-  project             = var.project
-  environment         = var.environment
-  cluster_version     = var.eks_cluster_version
-  vpc_id              = module.vpc.vpc_id
-  private_subnet_ids  = module.vpc.private_subnet_ids
-  public_access_cidrs = ["0.0.0.0/0"] # dev는 공개 접근 허용
+  project     = var.project
+  environment = var.environment
+  # 두 값은 minor 홉마다 **함께** 움직이고, prod 는 dev 가 같은 홉을 통과한 뒤에 올린다.
+  # 순서/기한은 variables.tf 의 eks_cluster_version · eks_addon_versions 주석 참고
+  # (현재 1.31, 목표 1.36).
+  cluster_version    = var.eks_cluster_version
+  addon_versions     = var.eks_addon_versions
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  # ⚠️ 이 주석은 dev 에서 복사돼 온 것이고 값은 prod 에도 그대로 적용돼 있다 —
+  #    즉 **prod EKS public API endpoint 가 전 인터넷에 열려 있다**(라이브 실측 확인).
+  #    좁히는 것은 kubectl 접근 경로(운영자 IP/CI/VPN)를 확정해야 하는 별개 결정이므로
+  #    이 커밋에서는 값을 바꾸지 않고 사실만 명시한다. 좁힐 때는 EKS access entry 로
+  #    잠금 상태를 먼저 확인할 것(잘못 좁히면 클러스터 관리 접근이 끊긴다).
+  public_access_cidrs = ["0.0.0.0/0"]
 
   application_namespace = var.application_namespace
   access_entries        = var.eks_access_entries
@@ -57,6 +66,7 @@ module "irsa" {
   k8s_namespace              = var.application_namespace
   bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
   cognito_user_pool_arn      = module.cognito.user_pool_arn
+  mantle_regions             = var.mantle_regions
 
   tags = var.tags
 }
@@ -72,6 +82,17 @@ module "alb_controller" {
   aws_region        = var.aws_region
 
   tags = var.tags
+
+  # Fargate 프로파일이 ACTIVE 된 뒤에 helm_release 를 시작해야 한다.
+  # 위 인자(cluster_name/oidc_provider_arn/vpc_id)는 클러스터 생성 직후 확정되므로
+  # 이것만으로는 fargate_profiles·cluster_addons 에 대한 의존이 그래프에 안 잡히고,
+  # terraform 이 프로파일 생성과 helm_release 를 병렬로 돌린다.
+  # Fargate 는 Pod 를 만들 때 매칭되는 프로파일이 있어야 fargate-scheduler 에
+  # 배정한다. 프로파일보다 먼저 생긴 Pod 는 기본 스케줄러에 배정되어, 노드가 없는
+  # Fargate 전용 클러스터에서 영원히 Pending 으로 남는다(나중에 프로파일이 ACTIVE
+  # 돼도 구제되지 않음) → helm timeout(900s) → atomic 으로 uninstall → apply 실패.
+  # 재실행하면 프로파일이 이미 ACTIVE 라 통과하는 것이 이 문제의 증상이다.
+  depends_on = [module.eks]
 }
 
 module "external_secrets" {

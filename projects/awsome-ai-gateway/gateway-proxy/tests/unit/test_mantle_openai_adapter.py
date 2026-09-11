@@ -37,11 +37,16 @@ def test_extract_responses_usage_reasoning_and_cache():
         }
     }
     u = _extract_responses_usage(body)
-    assert u.input_tokens == 11
+    # Responses input_tokens (11) is the GRAND TOTAL and INCLUDES cached_tokens (3), so the
+    # billable non-cached input is 8. Billing 11 here double-charged the 3 cached tokens
+    # (once at the input rate, again at the cache-read rate).
+    assert u.input_tokens == 8
     assert u.output_tokens == 17  # reasoning is INSIDE output, not added on top
-    assert u.total_tokens == 28
+    assert u.total_tokens == 28  # provider total preserved: 8 + 3 + 17
     assert u.cache_read_input_tokens == 3
     assert u.reasoning_tokens == 10
+    # Invariant: the split never loses or invents tokens.
+    assert u.input_tokens + u.cache_read_input_tokens == 11
 
 
 def test_extract_responses_usage_missing_total_is_derived():

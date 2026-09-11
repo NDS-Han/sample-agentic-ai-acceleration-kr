@@ -33,17 +33,26 @@ def _stub_user(user_id: uuid.UUID, team_id: uuid.UUID | None = None) -> MagicMoc
     return u
 
 
-def _patch_user_and_tam(user_id: uuid.UUID, team_id: uuid.UUID | None = None, aliases: list[str] | None = None):
-    """UserRepository + TeamAllowedModelRepository 패치 컨텍스트 쌍 생성.
-
-    issue_key가 이제 이 두 repo를 조회하므로 기존 tests도 mock 필요.
-    """
-    user_mock = patch("app.services.key_service.UserRepository")
-    tam_mock = patch("app.services.key_service.TeamAllowedModelRepository")
-    return user_mock, tam_mock, user_id, team_id, aliases or []
-
-
 class TestIssueKey:
+    @pytest.fixture(autouse=True)
+    def _no_user_level_acl(self):
+        """issue_key 가 조회하는 **사용자 단위** ACL repo 두 개를 '엔트리 없음' 으로 고정.
+
+        이 클래스의 관심사는 VK 발급·TTL·팀 스냅샷이다. 두 repo 를 패치하지 않으면
+        mock_session(AsyncMock) 위에서 진짜 repo 가 돌아 MagicMock 이 돌아오고,
+        json.dumps 가 터져 스냅샷 자체가 건너뛰어진다 — 아래 캐시 관련 단정들이
+        StopIteration 으로 죽거나(운이 좋은 경우) 조용히 무의미해진다.
+
+        ⚠️ 여기서 [] 로 고정했으므로 **이 파일은 user > team 우선순위를 검증하지 않는다.**
+           그 계약과 allowed_clients 스냅샷은
+           tests/regression/test_critical_vk_authcontext_acl_snapshot.py 가 못 박는다.
+        """
+        with patch("app.services.key_service.UserAllowedModelRepository") as MockUam, \
+             patch("app.services.key_service.UserAllowedClientRepository") as MockUac:
+            MockUam.return_value.list_by_user = AsyncMock(return_value=[])
+            MockUac.return_value.list_by_user = AsyncMock(return_value=[])
+            yield
+
     def _mock_repo(self, MockRepo, *, expire_count=0):
         repo = MockRepo.return_value
         # issue_key now expires existing keys and inserts the new one atomically in a
