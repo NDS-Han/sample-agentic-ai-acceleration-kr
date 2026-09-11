@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 from collections import OrderedDict
 from datetime import datetime, timezone
@@ -74,7 +75,9 @@ class SecurityEventDetector:
                 try:
                     await self._redis.publish(
                         "notifications:security",
-                        event.model_dump_json(),
+                        # ⚠️ model_dump_json() 을 그대로 보내면 안 된다 — worker 는
+                        # payload 봉투를 필수로 요구한다 (SecurityEvent.to_envelope 주석).
+                        json.dumps(event.to_envelope()),
                     )
                     logger.warning(
                         "security_event_published",

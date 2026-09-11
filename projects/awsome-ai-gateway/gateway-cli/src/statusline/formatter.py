@@ -11,15 +11,29 @@ from typing import Optional
 
 from statusline.usage_client import UsageInfo
 
+_CLAUDE_TIERS = ("opus", "sonnet", "haiku")
+# GPT-5.6 tier names, which are the last segment of the alias on both Bedrock planes.
+_GPT_TIERS = ("sol", "terra", "luna")
+
+
 def _short_name(alias: str) -> str:
-    """Model alias → short display name (substring match for any format)."""
+    """Model alias → short display name (substring match for any format).
+
+    GPT-5.6 is served by TWO aliases that name the same model on different Bedrock
+    planes — ``gpt-5.6-terra`` (standard runtime, SigV4 + CRIS) and
+    ``codex-gpt-5.6-terra`` (Mantle, bearer). They are separate rows in ``usage_logs``
+    and are not interchangeable: only the runtime one is captured by Bedrock invocation
+    logging. Rendering both as "Terra" would hide which plane the spend is on, so the
+    Mantle one is suffixed. The ``codex-`` prefix is the plane discriminator because
+    that is the naming convention the catalogue uses (migrations 0025 vs 0032).
+    """
     a = alias.lower()
-    if "opus" in a:
-        return "Opus"
-    if "sonnet" in a:
-        return "Sonnet"
-    if "haiku" in a:
-        return "Haiku"
+    for tier in _CLAUDE_TIERS:
+        if tier in a:
+            return tier.capitalize()
+    for tier in _GPT_TIERS:
+        if tier in a:
+            return f"{tier.capitalize()}(M)" if a.startswith("codex-") else tier.capitalize()
     parts = alias.rsplit("-", 1)
     return parts[-1].capitalize() if len(parts) > 1 else alias
 
@@ -82,6 +96,15 @@ _MODEL_COLOR = {
     "Opus": _MAGENTA,
     "Sonnet": _CYAN,
     "Haiku": _BLUE,
+    # GPT-5.6 tiers, best→cheapest. Colours are reused from the Claude set on purpose:
+    # a user never sees a Claude and a GPT row that share a colour AND a name, and adding
+    # new ANSI codes for a 3-row statusline costs more legibility than it buys.
+    "Sol": _MAGENTA,
+    "Terra": _CYAN,
+    "Luna": _BLUE,
+    "Sol(M)": _MAGENTA,
+    "Terra(M)": _CYAN,
+    "Luna(M)": _BLUE,
 }
 
 

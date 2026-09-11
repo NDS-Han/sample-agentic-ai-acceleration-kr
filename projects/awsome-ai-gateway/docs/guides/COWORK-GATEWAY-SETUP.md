@@ -15,7 +15,8 @@
 >   `<COWORK_GATEWAY_HTTPS_URL — to be provisioned via CloudFront, see Phase 4>`
 >   **임의의 URL을 지어내지 않는다.** 이 가이드는 그 엔드포인트가 생기는 즉시 그대로 사용 가능하다.
 > - 게이트웨이 인증 키(Virtual Key)가 필요한 자리에는 `<VIRTUAL_KEY>` placeholder를 쓴다. 실제 키는 **admin-api 가 발급**한다.
-> - `cowork-llm-gateway-main/` 레포는 **다른 AWS 계정(`444455556666`)** 의 참고용(reference) 자산이다. 거기에 박혀 있는 URL/좌표(`<REFERENCE_CLOUDFRONT_DOMAIN>` 등)는 **패턴 참고용일 뿐 우리 계정 값이 아니다 — 복사 금지.**
+> - `cowork-llm-gateway-main/` 레포는 **다른 AWS 계정(`<OTHER_TEAM_ACCOUNT_ID>`)** 의 참고용(reference) 자산이다.
+>   (계정 번호는 우리 소유가 아니라 다른 팀 것이므로 문서에 남기지 않는다 — 참고 대상이 어디인지는 레포 이름으로 충분하다.) 거기에 박혀 있는 URL/좌표(`<REFERENCE_CLOUDFRONT_DOMAIN>` 등)는 **패턴 참고용일 뿐 우리 계정 값이 아니다 — 복사 금지.**
 
 ---
 
@@ -210,9 +211,9 @@ Cowork는 **시작 시에만 config를 읽는다.** 따라서:
 
 여러 대를 한 번에 배포하려면 **MDM 관리형 프로파일**(macOS `.mobileconfig`, Windows `.reg`)을 쓴다. §3.1 UI의 **`Export`** 로 생성하거나, 프로그램으로 만든다.
 
-- **패턴 참고**(다른 계정 `444455556666` 레포): `cowork-llm-gateway-main/client/macos/install-cowork-llm-gateway.py` 가 `com.anthropic.claudefordesktop` payload를 가진 `.mobileconfig` 를 생성한다. 핵심은 payload 안에 `inferenceProvider: "gateway"`, `inferenceGatewayBaseUrl`, `inferenceGatewayAuthScheme: "bearer"`, `inferenceModels` 를 넣는 것 — §2 와 **동일한 키**다.
+- **패턴 참고**(다른 계정 `<OTHER_TEAM_ACCOUNT_ID>` 레포): `cowork-llm-gateway-main/client/macos/install-cowork-llm-gateway.py` 가 `com.anthropic.claudefordesktop` payload를 가진 `.mobileconfig` 를 생성한다. 핵심은 payload 안에 `inferenceProvider: "gateway"`, `inferenceGatewayBaseUrl`, `inferenceGatewayAuthScheme: "bearer"`, `inferenceModels` 를 넣는 것 — §2 와 **동일한 키**다.
 - 정적 키 대신 **자동 갱신 헬퍼**(`inferenceCredentialHelper` = 절대경로 스크립트, TTL ~1800s)를 쓰면 VK 만료 시 자동 재발급된다. 헬퍼는 **stdout에 bare 토큰 한 줄**만 출력해야 하고(`Bearer` 접두어는 Cowork가 붙임), 진단 로그는 stderr로 보낸다. (참고: `cowork-gw-credential-helper.sh`.)
-- **우리 계정용으로 쓸 땐** `LLM_GATEWAY_URL`/모델/OIDC/admin-api 좌표를 **우리 `333344445555` 값으로 바꿔야 한다.** 레포에 박힌 `<REFERENCE_CLOUDFRONT_DOMAIN>`·`444455556666` 좌표를 **그대로 복사 금지.**
+- **우리 계정용으로 쓸 땐** `LLM_GATEWAY_URL`/모델/OIDC/admin-api 좌표를 **우리 `333344445555` 값으로 바꿔야 한다.** 레포에 박힌 `<REFERENCE_CLOUDFRONT_DOMAIN>`·`<OTHER_TEAM_ACCOUNT_ID>` 좌표를 **그대로 복사 금지.**
 - 설치(macOS): `open <생성된 .mobileconfig>` → System Settings에서 프로파일 승인 → Cowork Cmd+Q 후 재시작.
 - ⚠️ **MDM로 배포된 프로파일은 앱 UI가 read-only** 가 된다("Organization-managed"). 원복은 **MDM 프로파일 제거**로만 가능(§6).
 
@@ -304,5 +305,5 @@ cp "~/Library/Application Support/Claude-3p/configLibrary/<uuid>.json" \
 - 실측 근거: `COWORK-vs-CLAUDE-CODE.md` §C (이 가이드의 PRIMARY 소스)
 - 프로브: `cowork-probe/probe_http.py`(HTTP, 포트 8480), 캡처 로그 `cowork-probe/captures_http.log`
 - config 백업(원본 bedrock 형태): `cowork-config-backup/d5ef301d-...json.ORIGINAL`, `_meta.json.ORIGINAL`
-- 패턴 참고(다른 계정 444455556666, 복사 금지): `cowork-llm-gateway-main/`
+- 패턴 참고(다른 계정 <OTHER_TEAM_ACCOUNT_ID>, 복사 금지): `cowork-llm-gateway-main/`
   (`client/macos/install-cowork-llm-gateway.py`, `client/macos/cowork-gw-credential-helper.sh`, `cloudfront/dist-config.json`)

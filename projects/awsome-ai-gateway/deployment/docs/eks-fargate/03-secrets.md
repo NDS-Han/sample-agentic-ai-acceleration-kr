@@ -99,8 +99,9 @@ aws secretsmanager put-secret-value \
 
 ```
 /llm-gateway/$ENV/db                 ← Helm ExternalSecret 이 참조
-                                          {"password": <gateway pw>,
-                                           "master_password": <Aurora managed>}
+                                          {"password": <gateway pw>}
+                                      (master 비번은 여기 없음 — RDS 관리형
+                                       rds!cluster-<uuid> 를 Helm 이 직접 참조)
 
 /llm-gateway/$ENV/db/gateway-user    ← RDS Proxy auth 전용
                                           {"username": "gateway",
@@ -158,14 +159,16 @@ aws secretsmanager create-secret \
 
 | Secret key | 용도 | 누가 사용 |
 |---|---|---|
-| `master_password` | Aurora master (`postgres_admin`) 비번 | migration Job (init SQL 실행, application user 생성) |
+| `master_password` | Aurora master (`postgres_admin`) 비번. **출처는 RDS 관리형 `rds!cluster-<uuid>`** (`values.database.external.masterPasswordRemoteKey`) — `/db` 에는 저장하지 않는다 | migration Job (init SQL 실행, application user 생성) |
 | `password` | Application user (`gateway`) 비번 | 모든 서비스 + RDS Proxy auth |
 
 migration Job 이 **매 helm install/upgrade 마다** 실행되어:
 1. init SQL (`db/init/*.sql`) 실행 — schemas, tables, seed data (idempotent)
 2. `gateway` 유저 생성 (없으면) 또는 비번 업데이트 (있으면) — **Terraform 이 생성한 password 사용**
 3. 모든 schema 에 필요한 권한 부여 (USAGE, CREATE, SELECT/INSERT/UPDATE/DELETE, DEFAULT PRIVILEGES)
-4. `alembic stamp head`
+4. `alembic upgrade head` — 실제 마이그레이션 적용. 이 단계에서 `budget_configs` /
+   `rate_limit_configs` 의 partial UNIQUE 인덱스가 중복 정리 후 생성된다(migration 0024).
+   `stamp` 가 아니므로 신규 설치와 업그레이드 모두 이 단계를 반드시 통과해야 한다.
 
 수동 SQL 실행 불필요. 신규 계정에서도 이 구조 그대로 재현.
 
@@ -245,7 +248,7 @@ ESO가 AUTH 토큰을 읽을 때 KMS 복호화 권한이 필요합니다. Terraf
 ## 5. 체크리스트 (03 단계 완료 시점)
 
 - [ ] `/llm-gateway/$ENV/app` 생성 (operator, 3 key: `virtual_key_encryption_key`, `nextauth_secret`, `jwt_jwks_cache_key`)
-- [ ] `/llm-gateway/$ENV/db` 생성 (**Terraform 이 자동 생성** when `enable_rds_proxy=true`, 2 key: `password`, `master_password`)
+- [ ] `/llm-gateway/$ENV/db` 생성 (**Terraform 이 자동 생성** when `enable_rds_proxy=true`, 1 key: `password`)
 - [ ] `/llm-gateway/$ENV/db/gateway-user` 생성 (**Terraform 이 자동 생성** when `enable_rds_proxy=true`, RDS Proxy auth 전용)
 - [ ] `/llm-gateway/$ENV/redis` 생성 (operator, 1 key: `password`)
 - [ ] `aws secretsmanager list-secrets` 로 위 4개 경로 확인 (terraform 이 만든 `/redis/auth_token` 도 보이면 정상, 총 5개):

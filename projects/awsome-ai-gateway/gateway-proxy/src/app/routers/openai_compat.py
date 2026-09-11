@@ -20,6 +20,17 @@ logger = structlog.get_logger(__name__)
 router = APIRouter()
 _router_service = RouterService()
 
+# Routing-profile `backend` values whose client may use /v1/responses.
+#   mantle         — the original Codex → Bedrock Mantle path (bearer, openai.gpt-5.x).
+#   bedrock_openai — runtime plane only (SigV4 + CRIS ids), for a client with no Mantle
+#                    entitlement at all.
+# Which PLANE a given request goes out on is decided by the resolved model row's provider,
+# not by this value: a `mantle` client that asks for a BEDROCK_RUNTIME_OPENAI alias is
+# served on the runtime plane. This gate only answers "is /v1/responses serviceable for
+# this client at all", which is why both values are accepted and `invoke` (Bedrock native,
+# e.g. claude-code) still is not.
+_RESPONSES_BACKENDS = frozenset({"mantle", "bedrock_openai"})
+
 
 @router.get("/v1/models")
 async def list_models(request: Request) -> JSONResponse:
@@ -122,13 +133,15 @@ async def completions(request: Request) -> StreamingResponse | JSONResponse:
 
 @router.post("/v1/responses", response_model=None)
 async def responses(request: Request) -> StreamingResponse | JSONResponse:
-    """OpenAI **Responses API** endpoint — Codex -> Bedrock Mantle GPT-5.5.
+    """OpenAI **Responses API** endpoint — Codex -> Bedrock (Mantle or runtime plane).
 
-    Distinct from _handle_openai (Chat Completions -> OPENMODEL/vLLM): this path is
-    routing-profile-driven. A request whose identified client has a `mantle` routing
-    profile (e.g. codex) is dispatched to the BEDROCK_MANTLE_OPENAI adapter using the
-    profile's region/account + the profile's default_model alias. We deliberately do
-    NOT touch _handle_openai so the existing chat/completions behaviour is unchanged.
+    Routing-profile-driven: a request whose identified client has a Responses-capable
+    routing profile (`mantle` or `bedrock_openai`, e.g. codex) is dispatched to the
+    adapter that matches the RESOLVED MODEL's provider — BEDROCK_MANTLE_OPENAI (bearer,
+    openai.gpt-5.x) or BEDROCK_RUNTIME_OPENAI (SigV4, us./global. CRIS) — using the
+    profile's account + the client's model, falling back to the profile's default_model.
+    Both planes speak the same Responses dialect, so everything downstream of the adapter
+    (SSE re-framing, usage parsing, costing) is shared.
     """
     return await _handle_responses(request)
 
@@ -211,14 +224,69 @@ async def _handle_openai(request: Request, path: str):
         if rejected is not None:
             return rejected
 
-    adapter = registry.get(ProviderType.OPENMODEL)
+    # Which plane serves this Chat request is decided by the RESOLVED MODEL, not by the
+    # path: OPENMODEL → in-house vLLM (default, unchanged), BEDROCK_RUNTIME_OPENAI →
+    # bedrock-runtime's OpenAI Chat endpoint (SigV4 + CRIS model id, GPT-5.6). The two
+    # adapters take different kwargs — vLLM is addressed by `path` against a fixed base
+    # URL, the Bedrock one by the alias's own endpoint + a wire selector — so the call
+    # kwargs are built here once and reused by both the streaming and non-streaming call.
+    is_bedrock_runtime = model_config.provider == ProviderType.BEDROCK_RUNTIME_OPENAI
+    if is_bedrock_runtime:
+        if path != "/v1/chat/completions":
+            # The runtime plane serves /openai/v1/chat/completions and
+            # /openai/v1/responses only — there is no legacy /v1/completions. Refusing is
+            # correct: silently rerouting a completions request to the chat wire would
+            # return a response shape the client cannot parse.
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"type": "not_found",
+                                   "message": f"Model '{model_config.alias}' does not support {path}"}},
+            )
+        adapter = registry.get(ProviderType.BEDROCK_RUNTIME_OPENAI)
+        # The routing profile only supplies the cross-account role here (the signing
+        # region comes from the alias endpoint). Absent profile/loader → None → the
+        # signer uses the pod's own IRSA identity, which is the in-account case.
+        routing_loader = getattr(request.app.state, "routing_profile_loader", None)
+        profile = None
+        if routing_loader is not None:
+            try:
+                if not is_db_degraded and session_factory is not None:
+                    async with session_factory() as db:
+                        profile = await routing_loader.load(redis, db, client)
+                else:
+                    profile = await routing_loader.load(redis, None, client)
+            except Exception:
+                # A profile is optional on this path; failing to load one must not turn a
+                # servable in-account request into a 500.
+                logger.warning("chat_routing_profile_load_failed", client=client)
+        invoke_kwargs = {"profile": profile, "endpoint": model_config.endpoint, "wire": "chat"}
+        # Rewrite the outgoing model id to the CRIS inference-profile id. Unlike the vLLM
+        # adapter (which rewrites `model` itself), this adapter must send the body bytes
+        # verbatim — the SigV4 signature covers them — so the substitution happens here,
+        # before signing. Bedrock rejects our aliases; it only knows us./global. ids.
+        if isinstance(req_data, dict):
+            req_data["model"] = model_config.provider_model_id
+            body = json.dumps(req_data).encode()
+    else:
+        adapter = registry.get(ProviderType.OPENMODEL)
+        invoke_kwargs = {"path": path}
     rate_limit_state = state.get("rate_limit_state")
     tokenizer = getattr(request.app.state, "tokenizer", None)
 
     if is_stream:
-        status, chunk_iter, headers = await adapter.invoke_stream(
-            body, model_config.provider_model_id, path=path
-        )
+        if is_bedrock_runtime:
+            # 4-tuple (…, aws_request_id) — the join key to the Bedrock model-invocation
+            # log for this call, persisted as usage_logs.bedrock_request_id below.
+            status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+        else:
+            # vLLM is a 3-tuple and has no AWS request id — there is no Bedrock
+            # invocation-log record to join to, so None is the truthful value.
+            status, chunk_iter, headers = await adapter.invoke_stream(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+            aws_request_id = None
 
         # KI-08: OpenAI path는 tiktoken(cl100k_base) 근사로 출력 토큰 역산.
         async def _estimate(text: str) -> int | None:
@@ -226,7 +294,7 @@ async def _handle_openai(request: Request, path: str):
                 return None
             return await tokenizer.estimate_output_tokens(
                 text,
-                provider=ProviderType.OPENMODEL,
+                provider=model_config.provider,
                 model_id=model_config.provider_model_id,
             )
 
@@ -249,6 +317,7 @@ async def _handle_openai(request: Request, path: str):
                 ttft_ms=ttft_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=aws_request_id,
                 client=client,
             )
 
@@ -260,8 +329,8 @@ async def _handle_openai(request: Request, path: str):
             media_type="text/event-stream",
         )
     else:
-        status, response_body, _, usage = await adapter.invoke(
-            body, model_config.provider_model_id, path=path
+        status, response_body, resp_headers, usage = await adapter.invoke(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -276,6 +345,11 @@ async def _handle_openai(request: Request, path: str):
                 ttft_ms=duration_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
+                # Both streaming and non-streaming are captured by Bedrock invocation
+                # logging (measured 2026-09-03 — one record per invocation either way), so
+                # this row is joinable exactly like the streaming branch above.
+                # vLLM returns {} here → None → column stays NULL (nothing to join to).
+                bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
             )
         try:
@@ -286,11 +360,12 @@ async def _handle_openai(request: Request, path: str):
 
 
 async def _handle_responses(request: Request):
-    """Routing-profile-driven OpenAI Responses handler (Codex -> Mantle GPT-5.5).
+    """Routing-profile-driven OpenAI Responses handler (Codex -> Mantle **or** runtime).
 
-    Resolves the backend from the identified client's routing profile (mantle), then
-    dispatches to BEDROCK_MANTLE_OPENAI. Auth/key-scope/rate-limit/cost mirror the
-    chat path; budget enforcement already ran in middleware (path now registered).
+    Two-step resolution: the routing profile decides whether this client may use
+    /v1/responses at all (_RESPONSES_BACKENDS), and the resolved model row's provider
+    decides which Bedrock plane serves it. Auth/key-scope/rate-limit/cost mirror the chat
+    path; budget enforcement already ran in middleware (path now registered).
     """
     import json
 
@@ -337,8 +412,9 @@ async def _handle_responses(request: Request):
     # Before this, the profile's default_model was the ONLY reachable model on this
     # route, so registering three GPT-5.6 aliases would have left all three
     # unreachable: a client sending {"model": "codex-gpt-5.6-sol"} still got the
-    # default. Now the client's own model wins WHEN it resolves to an ACTIVE
-    # BEDROCK_MANTLE_OPENAI alias.
+    # default. Now the client's own model wins WHEN it resolves to an ACTIVE alias on
+    # either OpenAI-Responses plane (BEDROCK_MANTLE_OPENAI or BEDROCK_RUNTIME_OPENAI) —
+    # which is also how one client reaches both planes by model name alone.
     #
     # Falling back (rather than 404ing) on an unresolvable value is what makes this
     # change regression-free for existing clients: Codex always sends SOME model id,
@@ -437,7 +513,11 @@ async def _handle_responses(request: Request):
         if not is_db_degraded and session_factory is not None:
             async with session_factory() as db:
                 profile = await _load_profile(db)
-                if profile is None or profile.backend != "mantle" or not profile.default_model:
+                if (
+                    profile is None
+                    or profile.backend not in _RESPONSES_BACKENDS
+                    or not profile.default_model
+                ):
                     return JSONResponse(
                         status_code=404,
                         content={"error": {"type": "not_found",
@@ -446,7 +526,11 @@ async def _handle_responses(request: Request):
                 model_config = await _resolve_model(db, profile)
         else:
             profile = await _load_profile(None)
-            if profile is None or profile.backend != "mantle" or not profile.default_model:
+            if (
+                profile is None
+                or profile.backend not in _RESPONSES_BACKENDS
+                or not profile.default_model
+            ):
                 return JSONResponse(
                     status_code=404,
                     content={"error": {"type": "not_found",
@@ -487,13 +571,28 @@ async def _handle_responses(request: Request):
         if rejected is not None:
             return rejected
 
-    adapter = registry.get(ProviderType.BEDROCK_MANTLE_OPENAI)
+    # PLANE SELECTION — by the resolved model row, not by the routing profile.
+    # BEDROCK_MANTLE_OPENAI → Mantle bearer plane; BEDROCK_RUNTIME_OPENAI → bedrock-runtime
+    # SigV4 plane with a CRIS model id. resolve_codex_model() accepts exactly these two
+    # (OPENAI_RESPONSES_PROVIDERS), so registry.get() cannot land on an unrelated adapter,
+    # and both take the same (profile, endpoint) kwargs plus a wire selector — the runtime
+    # adapter serves two wires and needs to be told which; the Mantle adapter only serves
+    # /v1/responses and absorbs the kwarg. One dict therefore drives every call below,
+    # including the web-search loop's per-turn invokes.
+    adapter = registry.get(model_config.provider)
+    invoke_kwargs = {
+        "profile": profile,
+        "endpoint": model_config.endpoint,
+        "wire": "responses",
+    }
     rate_limit_state = state.get("rate_limit_state")
 
     # Rewrite the outgoing model id to the resolved provider_model_id (e.g. openai.gpt-5.5,
-    # openai.gpt-5.6-terra), so the alias the client sent (codex-gpt-5.6-terra) — or the
-    # profile default, when the client sent something we do not recognise — maps to the
-    # Mantle model. Mantle only accepts provider model ids, never our aliases.
+    # openai.gpt-5.6-terra on Mantle, us.openai.gpt-5.6-terra on the runtime plane), so the
+    # alias the client sent (codex-gpt-5.6-terra) — or the profile default, when the client
+    # sent something we do not recognise — maps to the real model. Neither plane accepts
+    # our aliases; the runtime plane additionally requires the CRIS prefix, which is why it
+    # is stored in provider_model_id rather than added here.
     if isinstance(req_data, dict):
         req_data["model"] = model_config.provider_model_id
         body = json.dumps(req_data).encode()
@@ -517,21 +616,26 @@ async def _handle_responses(request: Request):
         async def _ws_invoke(turn_body: dict) -> tuple[int, bytes, dict, TokenUsage]:
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke(
-                json.dumps(tb).encode(), _pmid, profile=profile, endpoint=model_config.endpoint
-            )
+            return await adapter.invoke(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
 
         async def _ws_invoke_stream(turn_body: dict):
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke_stream(
-                json.dumps(tb).encode(), _pmid, profile=profile, endpoint=model_config.endpoint
-            )
+            return await adapter.invoke_stream(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
                 return
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            # bedrock_request_id is deliberately NOT set on the web-search path, and left
+            # NULL. The loop makes N Bedrock invocations (one per tool-use turn) whose
+            # usage is summed into ONE usage_logs row, so no single x-amzn-requestid is
+            # the join key: recording one of them would make an invocation-log
+            # reconciliation report a 1:1 match while the true relationship is 1:N, i.e.
+            # it would claim "0 discrepancies" while silently comparing our N-turn total
+            # against a single turn's record. NULL is the honest value — the reconciler
+            # skips these rows instead of mis-matching them. Web search is opt-in per
+            # routing profile, so this affects only profiles that enabled it.
             await cost_recorder.finalize(
                 redis, auth_context, model_config, usage, request_id, is_stream, duration_ms,
                 rate_limit_state=rate_limit_state,
@@ -554,9 +658,12 @@ async def _handle_responses(request: Request):
         )
 
     if is_stream:
-        status, chunk_iter, headers, _ = await adapter.invoke_stream(
-            body, model_config.provider_model_id,
-            profile=profile, endpoint=model_config.endpoint,
+        # 4th element = x-amzn-requestid. Populated on the runtime plane (the join key to
+        # the Bedrock model-invocation log record); always None on Mantle, which AWS does
+        # not capture in invocation logging at all — so a NULL column here is a true
+        # statement about the plane, not a lost value.
+        status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
 
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
@@ -571,7 +678,9 @@ async def _handle_responses(request: Request):
                 redis, auth_context, model_config, usage, request_id, True, duration_ms,
                 ttft_ms=ttft_ms,
                 rate_limit_state=rate_limit_state,
-                downgraded_from=state.get("downgraded_from"), client=client,
+                downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=aws_request_id,
+                client=client,
             )
 
         from app.services.streaming import responses_sse_stream
@@ -582,9 +691,8 @@ async def _handle_responses(request: Request):
             media_type="text/event-stream",
         )
     else:
-        status, response_body, _, usage = await adapter.invoke(
-            body, model_config.provider_model_id,
-            profile=profile, endpoint=model_config.endpoint,
+        status, response_body, resp_headers, usage = await adapter.invoke(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -592,7 +700,9 @@ async def _handle_responses(request: Request):
                 redis, auth_context, model_config, usage, request_id, False, duration_ms,
                 ttft_ms=duration_ms,
                 rate_limit_state=rate_limit_state,
-                downgraded_from=state.get("downgraded_from"), client=client,
+                downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
+                client=client,
             )
         try:
             content = json.loads(response_body)

@@ -9,6 +9,7 @@ import httpx
 import structlog
 
 from app.providers.base import ProviderAdapter
+from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 
 logger = structlog.get_logger(__name__)
@@ -18,33 +19,13 @@ class _BearerProvider(Protocol):
     async def bearer_token(self, profile) -> str: ...
 
 
-def _extract_responses_usage(response_body: dict) -> TokenUsage:
-    """Parse a Bedrock-Mantle OpenAI **Responses API** usage object into TokenUsage.
-
-    Responses usage shape (verified live against GPT-5.5):
-        usage.input_tokens
-        usage.output_tokens                         # ALREADY includes reasoning tokens
-        usage.total_tokens
-        usage.input_tokens_details.cached_tokens    # prompt-cache hits
-        usage.output_tokens_details.reasoning_tokens
-
-    reasoning_tokens is recorded as a VISIBILITY SUBMETRIC only — it is NOT added to
-    output/total/cost again (it is already inside output_tokens per OpenAI accounting).
-    cached_tokens maps to cache_read_input_tokens (read-side cache, like Anthropic).
-    """
-    usage = response_body.get("usage") or {}
-    in_details = usage.get("input_tokens_details") or {}
-    out_details = usage.get("output_tokens_details") or {}
-    input_tokens = int(usage.get("input_tokens", 0) or 0)
-    output_tokens = int(usage.get("output_tokens", 0) or 0)
-    total_tokens = int(usage.get("total_tokens", 0) or 0) or (input_tokens + output_tokens)
-    return TokenUsage(
-        input_tokens=input_tokens,
-        output_tokens=output_tokens,
-        total_tokens=total_tokens,
-        cache_read_input_tokens=int(in_details.get("cached_tokens", 0) or 0),
-        reasoning_tokens=int(out_details.get("reasoning_tokens", 0) or 0),
-    )
+# The Responses usage parser now lives in providers/openai_usage.py — one implementation
+# shared by this adapter, the bedrock-runtime adapter and both streaming finalizers, so a
+# streamed request and a non-streamed request of the same prompt can never bill
+# differently. Re-exported under the original private name because it is the documented
+# reference point for the cache-billing regression suite
+# (tests/regression/test_high_cached_token_double_billing.py) and db/versions/0025.
+_extract_responses_usage = extract_responses_usage
 
 
 class MantleOpenAIAdapter(ProviderAdapter):

@@ -129,7 +129,7 @@ class Settings(BaseSettings):
     aws_profile: str | None = None
 
     # Mantle (Cowork cross-account) — region for the STS client used to assume the
-    # 222 Mantle role; and the httpx timeout for Mantle streaming calls.
+    # 905 Mantle role; and the httpx timeout for Mantle streaming calls.
     mantle_assume_region: str = "ap-northeast-2"
     mantle_http_timeout: float = 120.0
 

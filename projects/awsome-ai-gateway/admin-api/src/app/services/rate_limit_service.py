@@ -193,7 +193,13 @@ class RateLimitService:
         sc = (scope or "").upper()
         if sc not in ("USER", "TEAM", "GLOBAL"):
             return {"available": False, "reason": "invalid scope"}
-        sid = scope_id if sc != "GLOBAL" else "__global__"
+        # ⚠️ GLOBAL 의 scope_id 는 proxy 가 `*` 로 적는다
+        #    (gateway-proxy/rate_limit_scope.py:75 GLOBAL_WILDCARD, :101 scope_id is None → `*`).
+        #    예전엔 여기서 `__global__` 을 조립해 SCAN 이 0건 → GLOBAL RPM 이 에러 없이
+        #    항상 0/available=true 로 보였다(실제로는 429 를 내는 중일 수 있음).
+        #    `[*]` 는 Redis 글롭에서 **리터럴 별표** 문자 클래스라, 임의 scope_id 까지
+        #    싸잡지 않으면서 `*` 키만 정확히 잡는다.
+        sid = scope_id if sc != "GLOBAL" else "[*]"
         now_ms = int(time.time() * 1000)
         window_start = now_ms - window_ms
         pattern = f"{{{sc}:{sid}:*}}:rpm"  # 해당 scope 의 모든 모델 rpm ZSET

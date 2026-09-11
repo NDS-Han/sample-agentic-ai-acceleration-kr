@@ -49,6 +49,7 @@ from app.schemas.domain import (
 from app.security.event_detector import SecurityEventDetector
 from app.services.cost_recorder import CostRecorder
 from app.services.lua_loader import LuaScriptLoader
+from tests.integration.conftest import db_skip_reason, db_unavailable
 
 # ---------------------------------------------------------------------------
 # 상수
@@ -523,6 +524,10 @@ class TestBedrockProviderError:
 # ===========================================================================
 
 
+# ⚠️ 이 클래스만 실 Postgres 를 쓴다(나머지 클래스는 mock 기반). 그래서 모듈이 아니라
+#    **클래스 단위**로 게이트한다 — 모듈에 걸면 mock 테스트까지 불필요하게 skip 된다.
+#    게이트 부재로 CI 에서 이 클래스가 asyncpg connect 실패로 RED 였다(conftest 참조).
+@pytest.mark.skipif(db_unavailable(TEST_DB_URL), reason=db_skip_reason(TEST_DB_URL))
 class TestAliasRoutingRegression:
     """FR-1.2 design: alias / full ID / unregistered → 404 regression."""
 
@@ -531,6 +536,7 @@ class TestAliasRoutingRegression:
     async def test_alias_call_resolves_to_seeded_provider_id(self):
         """`claude-sonnet-4-6` alias로 호출 → DB에서 provider_model_id로 변환되어 Bedrock에 전달."""
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
         from app.services.router_service import RouterService
 
         engine = create_async_engine(TEST_DB_URL)
@@ -548,6 +554,7 @@ class TestAliasRoutingRegression:
     async def test_full_id_call_resolves(self):
         """full Bedrock ID로 호출해도 같은 row 반환."""
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
         from app.services.router_service import RouterService
 
         engine = create_async_engine(TEST_DB_URL)
@@ -567,6 +574,7 @@ class TestAliasRoutingRegression:
     async def test_unregistered_full_id_now_raises_lookup_error(self):
         """회귀: 기존 코드는 `.`이 있으면 200으로 통과시켰음. 이제는 LookupError."""
         from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
         from app.services.router_service import RouterService
 
         engine = create_async_engine(TEST_DB_URL)

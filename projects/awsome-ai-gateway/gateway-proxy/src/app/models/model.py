@@ -15,7 +15,13 @@ _provider_enum = Enum(
     "BEDROCK",
     "OPENMODEL",
     "BEDROCK_MANTLE",
-    "BEDROCK_MANTLE_OPENAI",  # Codex → 123 Mantle GPT-5.5 (migration 0016)
+    "BEDROCK_MANTLE_OPENAI",  # Codex → 859 Mantle GPT-5.5 (migration 0016)
+    # GPT-5.6 on the STANDARD bedrock-runtime plane, SigV4 + CRIS (migration 0031).
+    # ⚠️ This list must contain EVERY label in the Postgres enum, not just the ones this
+    # service dispatches on. SQLAlchemy validates on READ: a row whose provider is not
+    # listed here raises LookupError while fetching, so a single unlisted label breaks
+    # every model lookup and the whole /admin/models listing — not just that one row.
+    "BEDROCK_RUNTIME_OPENAI",
     name="provider",
     schema="model",
     create_type=False,

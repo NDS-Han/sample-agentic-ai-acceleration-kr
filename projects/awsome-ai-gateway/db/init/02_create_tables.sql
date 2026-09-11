@@ -179,8 +179,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usag
 -- model schema — Enums
 -- ============================================================
 
-DO $$ BEGIN CREATE TYPE model.provider          AS ENUM ('BEDROCK', 'OPENMODEL'); EXCEPTION WHEN duplicate_object THEN null; END $$;
-DO $$ BEGIN CREATE TYPE model.api_format        AS ENUM ('BEDROCK_NATIVE', 'OPENAI_COMPATIBLE'); EXCEPTION WHEN duplicate_object THEN null; END $$;
+-- ⚠️ fresh-init DB 와 migrated DB 는 **같은 라벨 집합**으로 수렴해야 한다
+-- (03_seed_data.sql:91 의 수렴 규약). 아래 두 enum 은 마이그레이션에서도 라벨이 늘어난다:
+--   provider    +BEDROCK_MANTLE(0008) +BEDROCK_MANTLE_OPENAI(0016) +BEDROCK_RUNTIME_OPENAI(0031)
+--   api_format  +ANTHROPIC_MESSAGES(0008) +OPENAI_RESPONSES(0016)
+-- 세 마이그레이션 모두 `ADD VALUE IF NOT EXISTS` 라서, 여기서 미리 만들어 두어도 재실행이 안전하다
+-- (fresh-init → 5라벨 생성 후 ADD VALUE 는 no-op / 기존 DB → CREATE TYPE 자체가 no-op).
+--
+-- 여기 빠뜨리면 조용히 갈린다: fresh-init 뒤 alembic 을 아직 안 돌린 DB 에 새 plane 행을 넣는
+-- 순간 `invalid input value for enum` 이고, 반대로 SQLAlchemy 미러는 **읽을 때** 검증하므로
+-- 라벨이 실제로 쓰이기 전까지는 아무 증상이 없다(tests/regression/test_high_db_enum_mirror_drift.py).
+DO $$ BEGIN CREATE TYPE model.provider          AS ENUM ('BEDROCK', 'OPENMODEL', 'BEDROCK_MANTLE', 'BEDROCK_MANTLE_OPENAI', 'BEDROCK_RUNTIME_OPENAI'); EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN CREATE TYPE model.api_format        AS ENUM ('BEDROCK_NATIVE', 'OPENAI_COMPATIBLE', 'ANTHROPIC_MESSAGES', 'OPENAI_RESPONSES'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN CREATE TYPE model.model_status      AS ENUM ('ACTIVE', 'INACTIVE'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN CREATE TYPE model.rate_limit_scope  AS ENUM ('USER', 'TEAM', 'GLOBAL'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 

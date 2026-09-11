@@ -15,7 +15,12 @@ class Settings(BaseSettings):
     )
 
     # Database
-    db_url: str = "postgresql+asyncpg://notification_worker_user:notification_worker_password_change_me@postgres:5432/gateway"
+    # ⚠️ 기본값에 서비스별 유저를 쓰지 않는다. notification_worker_user 는 레포에 공개된
+    #    비밀번호를 갖고 있었고, 그래서 db/init/04_create_users.sql 에서 NOLOGIN 으로
+    #    잠겼다 — 그 DSN 을 기본값으로 남겨두면 로컬에서 인증 실패로만 나타난다.
+    #    배포도 동일하게 단일 'gateway' 유저를 쓴다
+    #    (values-eks-fargate-prod.yaml:40 `notificationWorkerUser: "gateway"`).
+    db_url: str = "postgresql+asyncpg://gateway:gateway_dev_password@postgres:5432/gateway"
     db_pool_size: int = 5
     db_pool_overflow: int = 3
     db_ssl_mode: str = "disable"

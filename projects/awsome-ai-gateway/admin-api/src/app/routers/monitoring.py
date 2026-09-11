@@ -14,6 +14,7 @@ from app.core.db import get_db_session
 from app.models.auth import User
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus
+from app.schemas.common import PAGE_LIMIT_MAX, PAGE_LIMIT_MIN
 
 router = APIRouter(prefix="/admin/monitoring", tags=["Monitoring"])
 
@@ -101,7 +102,9 @@ async def monitoring_models(
 @router.get("/events")
 async def monitoring_events(
     request: Request,
-    limit: int = Query(default=50, le=200),
+    # ge=1 이 없으면 ?limit=-1 이 그대로 SQL LIMIT 으로 가서
+    # PostgreSQL 이 "LIMIT must not be negative" 로 거부한다(정체불명 500).
+    limit: int = Query(default=50, ge=PAGE_LIMIT_MIN, le=PAGE_LIMIT_MAX),
     event_type: str = Query(
         default="all",
         regex="^(all|success|error|timeout|slow|abnormal)$",
@@ -201,7 +204,15 @@ async def monitoring_users(
             User.email,
             User.display_name,
             func.count().label("requests"),
-            func.coalesce(func.sum(UsageLog.input_tokens + UsageLog.output_tokens), 0).label("tokens"),
+            func.coalesce(
+                func.sum(
+                    UsageLog.input_tokens
+                    + UsageLog.output_tokens
+                    + UsageLog.cache_creation_tokens
+                    + UsageLog.cache_read_tokens
+                ),
+                0,
+            ).label("tokens"),
             func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
             func.count().filter(UsageLog.status == UsageStatus.ERROR).label("error_count"),
             func.max(UsageLog.requested_at).label("last_request_at"),

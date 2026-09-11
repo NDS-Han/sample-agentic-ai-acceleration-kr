@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
 import responses
 
 from cli.config import (
@@ -96,7 +97,11 @@ class TestSetupOtel:
         responses.add(
             responses.GET,
             "https://otel.example.com",
-            body=ConnectionError("refused"),
+            # 빌트인 ConnectionError 는 requests 예외 계층 밖이라 프로덕션에서
+            # 절대 일어나지 않는다. _validate_otel_connection 이 잡는 것은
+            # requests.RequestException 이므로 그 하위 타입으로 시뮬레이션해야
+            # 실제 "endpoint unreachable" 경로를 검증한다.
+            body=requests.exceptions.ConnectionError("refused"),
         )
 
         tool = DetectedTool(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date as date_cls
 from decimal import Decimal
 
 import structlog
@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import select
 
 from app.models.usage import DailyAggregate
+from app.periods import current_kst_date, current_kst_period
 from app.schemas.domain import Role
 from app.schemas.responses import DailyBreakdown, UsageBudgetInfo, UsageByModel, UsageMeResponse
 
@@ -32,10 +33,15 @@ async def usage_me(
     redis = state.get("_redis")
     session_factory = state.get("_session_factory")
 
+    # ⚠️ 둘 다 **KST** 경계다(app.periods 참조). 아래에서 이 값들이
+    #   * period → budget:user:{uid}:{period} 조회 + daily_aggregates 월 하한
+    #   * today  → usage:daily:user:{uid}:{today} 조회 + daily_aggregates 상한
+    # 으로 쓰이는데, 그 두 소스가 모두 KST 로 버킷돼 있다. UTC 로 잡으면 KST 09:00
+    # 이전에 하루치가 통째로 사라진다(current_kst_date docstring 에 상세).
     if period is None:
-        period = datetime.now(tz=timezone.utc).strftime("%Y-%m")
+        period = current_kst_period()
 
-    today = datetime.now(tz=timezone.utc).strftime("%Y-%m-%d")
+    today = current_kst_date()
     user_id = auth_context.user_id
 
     # 당일 Redis 집계
@@ -60,7 +66,6 @@ async def usage_me(
     # daily_breakdown은 1 row/date.
     # period는 YYYY-MM, today 는 YYYY-MM-DD.
     from collections import defaultdict
-    from datetime import date as date_cls
 
     total_tokens_db = 0
     total_cost_db = Decimal("0")
@@ -204,7 +209,9 @@ async def usage_team(team_id: str, request: Request) -> JSONResponse:
 
     session_factory = state.get("_session_factory")
     redis = state.get("_redis")
-    period = datetime.now(tz=timezone.utc).strftime("%Y-%m")
+    # KST 월 — daily_aggregates.date 가 KST 로 버킷돼 있으므로 월 경계도 KST 여야
+    # 한다. UTC 면 매월 1일 KST 00:00~09:00 동안 지난달 합계를 보여준다.
+    period = current_kst_period()
 
     # 팀 사용량 집계 (간략 버전)
     total_tokens = 0
@@ -212,17 +219,32 @@ async def usage_team(team_id: str, request: Request) -> JSONResponse:
 
     if session_factory is not None:
         try:
+            # ⚠️ `date` 는 DATE 컬럼이므로 문자열 LIKE 로 월을 걸러선 안 된다.
+            # `DailyAggregate.date.like(f"{period}%")` 는 `date LIKE '2026-09%'` 를
+            # 내보내고 PostgreSQL 이 거부한다:
+            #   operator does not exist: date ~~ unknown   (실 PG16 확인)
+            # 아래 except 가 이 예외를 삼켜 이 엔드포인트는 항상 0/0 을 돌려줬다.
+            # 반열구간(>= 월초, < 다음달초)으로 비교해야 인덱스
+            # (idx_daily_aggregates_team_date) 도 그대로 탄다.
+            period_start = date_cls(*(int(x) for x in period.split("-", 1)), 1)
+            next_month = (
+                date_cls(period_start.year + 1, 1, 1)
+                if period_start.month == 12
+                else date_cls(period_start.year, period_start.month + 1, 1)
+            )
             async with session_factory() as db_session:
                 result = await db_session.execute(
                     select(DailyAggregate)
                     .where(DailyAggregate.team_id == team_id)
-                    .where(DailyAggregate.date.like(f"{period}%"))
+                    .where(DailyAggregate.date >= period_start)
+                    .where(DailyAggregate.date < next_month)
                 )
                 for agg in result.scalars().all():
                     total_tokens += agg.total_tokens
                     total_cost += agg.total_cost_usd
         except Exception:
-            logger.warning("team_usage_fetch_failed", team_id=team_id)
+            # warning + traceback 없음이면 위 같은 타입 드리프트가 조용히 0 으로 보인다.
+            logger.exception("team_usage_fetch_failed", team_id=team_id)
 
     return JSONResponse(
         content={

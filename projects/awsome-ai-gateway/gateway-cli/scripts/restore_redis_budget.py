@@ -18,10 +18,14 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timezone, date
+from datetime import datetime, timedelta, timezone, date
 
 import asyncpg
 import redis.asyncio as aioredis
+
+# KST = UTC+9 고정 오프셋. 이 스크립트는 standalone 실행이라 gateway-proxy 의
+# app.periods 를 import 할 수 없으므로 같은 상수를 둔다(두 곳을 함께 바꿀 것).
+KST = timezone(timedelta(hours=9))
 
 
 # ── 환경 변수 ──────────────────────────────────────────────────────────────
@@ -37,8 +41,11 @@ async def restore(
     target_date: str | None = None,
     dry_run: bool = False,
 ) -> None:
-    period = target_date[:7] if target_date else datetime.now(timezone.utc).strftime("%Y-%m")
-    today = target_date or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    # ⚠️ **KST** 경계 — 이 스크립트가 되살리는 키를 gateway-proxy 가 KST 로 읽고 쓴다
+    # (gateway-proxy/src/app/periods.py). UTC 로 잡으면 KST 09:00 이전에 실행할 때
+    # 하루 전 키를 복구해, 정작 조회되는 오늘 키는 비어 있는 채로 남는다.
+    period = target_date[:7] if target_date else datetime.now(KST).strftime("%Y-%m")
+    today = target_date or datetime.now(KST).strftime("%Y-%m-%d")
 
     # DB + Redis 연결
     db_url = DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
@@ -117,7 +124,11 @@ async def restore(
               COALESCE(SUM(cache_read_tokens), 0)      AS cache_read,
               COUNT(*)                                  AS requests
             FROM usage.usage_logs
-            WHERE user_id = $1::uuid AND DATE(requested_at) = $2::date
+            -- ⚠️ DATE(requested_at) 는 **DB 세션 TZ**(pod 은 UTC)로 자른다. 일별
+            -- 카운터는 KST 일자 키이므로(daily_aggregator.py:43 과 같은 규칙)
+            -- 명시적으로 KST 로 변환해야 복구값이 키와 같은 구간을 담는다.
+            WHERE user_id = $1::uuid
+              AND DATE(requested_at AT TIME ZONE 'Asia/Seoul') = $2::date
             GROUP BY model_alias
             """,
             uid, date.fromisoformat(today),

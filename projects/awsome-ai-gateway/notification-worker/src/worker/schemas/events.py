@@ -60,5 +60,14 @@ def parse_pubsub_message(raw_data: str | bytes) -> NotificationEvent | None:
         data = json.loads(raw_data)
         return NotificationEvent.model_validate(data)
     except Exception as exc:
-        logger.error("pubsub_parse_failed", extra={"error": str(exc), "raw": str(raw_data)[:200]})
+        # ⚠️ 이유를 메시지 본문에 넣는다. 예전엔 `extra={...}` 로만 넘겼는데, stdlib
+        #    기본 포매터는 extra 키를 출력하지 않으므로 로그에는 "pubsub_parse_failed"
+        #    한 줄만 남았다. 실제로 봉투 불일치(payload 누락 / 대문자 type)로 전량이
+        #    폐기되는 동안 원인이 로그에 전혀 드러나지 않았다.
+        logger.error(
+            "pubsub_parse_failed error=%s raw=%s",
+            exc,
+            str(raw_data)[:200],
+            extra={"error": str(exc), "raw": str(raw_data)[:200]},
+        )
         return None

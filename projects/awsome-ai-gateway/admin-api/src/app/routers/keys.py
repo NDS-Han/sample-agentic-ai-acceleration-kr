@@ -4,13 +4,18 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
 from app.models.auth import KeyStatus
-from app.schemas.common import PaginationMeta
+from app.schemas.common import (
+    PAGE_LIMIT_DEFAULT,
+    PAGE_LIMIT_MAX,
+    PAGE_LIMIT_MIN,
+    PaginationMeta,
+)
 from app.schemas.keys import KeyCountResponse, KeyListResponse
 
 router = APIRouter(prefix="/admin/keys", tags=["Key Management"])
@@ -24,7 +29,12 @@ async def list_keys(
     status: KeyStatus | None = None,
     email: str | None = None,
     cursor: str | None = None,
-    limit: int = 50,
+    limit: int = Query(
+        PAGE_LIMIT_DEFAULT,
+        ge=PAGE_LIMIT_MIN,
+        le=PAGE_LIMIT_MAX,
+        description="페이지 크기. 경계를 벗어나면 422 — 예전엔 무제한이라 ?limit=1000000 이 테이블 전체를 끌어왔고 ?limit=0/-1 은 PostgreSQL 이 거부해 500 이 됐다.",
+    ),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):

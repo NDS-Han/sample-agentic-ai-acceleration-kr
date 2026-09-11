@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { parseJWT } from '@/lib/auth';
-import { checkPagePermission } from '@/lib/auth';
+import { checkPagePermission, isSessionExpired } from '@/lib/auth';
 
 export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
@@ -29,6 +29,33 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
     response.headers.set(key, value);
   }
   return response;
+}
+
+/**
+ * 로그인 화면으로 되돌린다. `clearCookie` 면 남아 있는 admin_jwt 도 지운다.
+ *
+ * nextUrl 을 쓰는 이유: request.url 은 Docker 안에서 0.0.0.0 으로 풀려 원래 호스트를 잃는다.
+ *
+ * ⚠️ 목적지가 `/api/auth/dev-login` 이 아니라 `/api/auth/login` 인 이유(A3):
+ *    dev-login 라우트는 DEV_LOGIN_ENABLED !== 'true' 이면 본문 없는 404 를 준다. prod 는
+ *    그 값이 "false"(values-eks-fargate-prod.yaml adminUi.env) 이므로 예전 목적지로는
+ *    **prod 브라우저가 307 → 빈 404 에서 끝났다** — ALB 인증도 없어 로그인 경로가 0개였다.
+ *    `/api/auth/login` 은 환경을 보고 OIDC authorize / dev 폼 / 읽히는 503 으로 갈라주는
+ *    단일 진입점이다(app/api/auth/login/route.ts). 이 경로는 아래 `/api/` 예외에 걸려
+ *    미인증으로도 도달 가능하다 — 그래야 무한 리다이렉트가 안 난다.
+ */
+function redirectToLogin(request: NextRequest, clearCookie: boolean): NextResponse {
+  const loginUrl = request.nextUrl.clone();
+  loginUrl.pathname = '/api/auth/login';
+  loginUrl.search = '';
+  const redirectResponse = NextResponse.redirect(loginUrl);
+  if (clearCookie) {
+    // 만료/손상된 자격증명은 응답에서 즉시 제거한다 — 안 지우면 다음 요청도 같은 쿠키로
+    // 다시 이 분기를 타고, 사용자는 못 쓰는 쿠키를 계속 들고 다닌다.
+    redirectResponse.cookies.delete('admin_jwt');
+  }
+  applySecurityHeaders(redirectResponse);
+  return redirectResponse;
 }
 
 export async function middleware(request: NextRequest): Promise<NextResponse> {
@@ -52,19 +79,24 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   const jwtCookie = request.cookies.get('admin_jwt');
 
-  // No JWT present — redirect to dev-login (MVP) or 401
+  // No JWT present — 환경에 맞는 로그인 진입점(/api/auth/login)으로 보낸다.
   if (!jwtCookie?.value) {
-    // Use nextUrl (preserves original host header) instead of request.url (may resolve to 0.0.0.0 in Docker)
-    const devLoginUrl = request.nextUrl.clone();
-    devLoginUrl.pathname = '/api/auth/dev-login';
-    const redirectResponse = NextResponse.redirect(devLoginUrl);
-    applySecurityHeaders(redirectResponse);
-    return redirectResponse;
+    return redirectToLogin(request, false);
   }
 
-  // JWT present — parse and check permissions
+  // JWT present — parse, check expiry, then check permissions
   try {
     const session = parseJWT(jwtCookie.value);
+
+    // ⚠️ 만료 검사. 예전엔 이 분기가 아예 없어서 만료된 admin_jwt 로도 페이지가 열렸고,
+    //    서버 컴포넌트의 모든 admin-api 호출만 401 이 됐다 — 화면 전체가 '—' 와
+    //    fetchFailed 로 덮이고 로그인으로 돌아갈 방법이 없었다. 만료는 미인증과 같게
+    //    취급한다(쿠키 제거 + 로그인 리다이렉트).
+    //    isSessionExpired 는 exp 클레임이 없거나 해석 불가면 false 를 준다 — dev 토큰에는
+    //    숫자 exp 가 없어서, 여기서 만료로 몰면 dev 로그인이 무한 리다이렉트가 된다.
+    if (isSessionExpired(session)) {
+      return redirectToLogin(request, true);
+    }
 
     const hasPermission = checkPagePermission(pathname, session.role);
 
@@ -76,12 +108,8 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return redirectResponse;
     }
   } catch {
-    // Malformed JWT — treat as unauthenticated
-    const devLoginUrl = request.nextUrl.clone();
-    devLoginUrl.pathname = '/api/auth/dev-login';
-    const redirectResponse = NextResponse.redirect(devLoginUrl);
-    applySecurityHeaders(redirectResponse);
-    return redirectResponse;
+    // Malformed JWT — treat as unauthenticated (그리고 못 쓰는 쿠키는 지운다)
+    return redirectToLogin(request, true);
   }
 
   return response;

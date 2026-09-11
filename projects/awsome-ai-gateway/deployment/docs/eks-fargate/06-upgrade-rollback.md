@@ -25,6 +25,13 @@ docker push "$ECR_BASE/gateway-proxy:$NEW_VERSION"
 
 ### 1.3 Helm upgrade
 
+> 🔀 **롤백 플래그는 Helm 메이저에 따라 다르다.** 아래 예시는 `--atomic`(v3 기준, v4 에서도
+> deprecation warning 만 내고 동작) 으로 적어 뒀다. **Helm 4** 를 쓰면
+> `--rollback-on-failure` 가 권장 이름이다. 반대로 v3 에는 `--rollback-on-failure` 가
+> 없어 unknown flag 로 죽는다. `install-eks.sh` 는 `helm version` 을 읽어 자동으로
+> 고르므로 스크립트 경로에서는 신경 쓰지 않아도 된다 — 손으로 `helm upgrade` 를 칠
+> 때만 자기 버전에 맞춰 바꿀 것(`helm version --template '{{.Version}}'`).
+
 방법 A — `install-eks.sh` 재사용 (모든 서비스가 같은 버전 쓸 때):
 ```bash
 # 편집: values-eks-fargate-dev.yaml 에서 image.tag 설정, 또는 --set 직접

@@ -8,7 +8,7 @@
 # 경로에 동일 값으로 박아둠:
 #
 #   /llm-gateway/<env>/db/gateway-user   (RDS Proxy auth 용 — {username, password})
-#   /llm-gateway/<env>/db                (Helm ExternalSecret 용 — {password, master_password})
+#   /llm-gateway/<env>/db                (Helm ExternalSecret 용 — {password})
 #
 # 두 secret 의 `password` 값은 single source(random_password.gateway_user)에서
 # 파생되므로 항상 동기화됨.
@@ -28,14 +28,21 @@ resource "random_password" "gateway_user" {
   }
 }
 
-# Aurora managed master secret 에서 password 를 꺼내 /db 의 master_password 키로 복사.
-# 주의: Aurora 가 master password 를 rotate 하면 이 값은 apply 전까지 stale.
-#       현재 manage_master_user_password=true 지만 자동 rotation 은 AWS default 가 아니므로
-#       실질적 rotation 없음. 쓰는 경우엔 apply 또는 별도 sync 경로 필요.
-data "aws_secretsmanager_secret_version" "aurora_master_current" {
-  count     = local.proxy_enabled ? 1 : 0
-  secret_id = module.aurora.cluster_master_user_secret[0].secret_arn
-}
+# master password 는 여기에 복사하지 않는다 (의도적).
+# manage_master_user_password=true 면 RDS 가 rds!cluster-<uuid> 시크릿을 소유하고 자동
+# 로테이션한다 — 실측(2026-09-09) dev/prod 모두 RotationEnabled=true,
+# AutomaticallyAfterDays=7. Terraform 이 값을 복사해두면 apply 사이에 반드시 stale 해진다:
+# /llm-gateway/prod/db 는 2026-07-09 → 2026-09-07 사이 새 버전이 없는데 그 구간에 master 는
+# ~8회 로테이션되었다. 게다가 data source 가 매 plan 마다 AWSCURRENT 를 다시 읽으므로
+# 로테이션마다 가짜 plan diff(secret_version 은 ForceNew)가 생긴다.
+# 그래서 Helm 은 master 비번을 RDS 관리형 시크릿에서 직접 읽는다:
+#   database.external.masterPasswordRemoteKey      = "rds!cluster-<uuid>"
+#   database.external.masterPasswordRemoteProperty = "password"
+# (values-eks-fargate-{dev,prod}.yaml 에 설정됨. ESO IRSA 에 secret:rds!cluster-* read 권한이
+#  이미 선언돼 있음 — modules/irsa/main.tf.)
+# 시크릿 이름 조회:
+#   aws rds describe-db-clusters --db-cluster-identifier <cluster-id> \
+#     --query 'DBClusters[0].MasterUserSecret.SecretArn'
 
 # ---- /db/gateway-user ---- (RDS Proxy auth format)
 resource "aws_secretsmanager_secret" "gateway_user" {
@@ -84,7 +91,6 @@ resource "aws_secretsmanager_secret_version" "db" {
   count     = local.proxy_enabled ? 1 : 0
   secret_id = aws_secretsmanager_secret.db[0].id
   secret_string = jsonencode({
-    password        = random_password.gateway_user[0].result
-    master_password = jsondecode(data.aws_secretsmanager_secret_version.aurora_master_current[0].secret_string).password
+    password = random_password.gateway_user[0].result
   })
 }

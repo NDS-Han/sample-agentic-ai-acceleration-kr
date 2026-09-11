@@ -305,7 +305,7 @@ li { font-size: 18px; margin-bottom: 6px; line-height: 1.5; }
 
 근거: `gateway-proxy/src/app/main.py:373-386`
 
-<!-- 청중이 게이트웨이를 얇은 중계기로 오해하는 것을 첫 문장에서 깨십시오. 우리 게이트웨이는 사내 모든 LLM 트래픽이 반드시 지나는 단일 관문이고, 여기서 인증·앱별 접근권(ACL)·모델 허용 목록·앱별 예산·호출 속도 제한·웹서치 켜고끄기·사용량 추적이 전부 강제됩니다. 가장 강조할 문장은 '우리는 요청을 그대로 전달(relay)하지 않고, 허용된 것만 골라 새로 만들어 보낸다(re-origination)'로, 이후 LiteLLM 대비 전체 서사의 축입니다. 3개 클라이언트가 실제로 서로 다른 AWS 계정으로 나갑니다(claude-code는 333 계정에서 Bedrock 직접 호출, codex는 게이트웨이와 같은 123 계정에서 Mantle 경유, cowork는 222 계정에서 Mantle 경유). 이 경로는 routing_profiles DB 한 줄로 결정되고, 그 한 줄만 바꾸면 재배포 없이 즉시 롤백됩니다. VK(Virtual Key)는 게이트웨이가 사용자에게 발급하는 임시 출입증인데, 실제 AWS 자격증명과 분리돼 있어 이게 새도 원본 클라우드 접근권은 안전합니다. 대기업 보안 심사에서 '한 사용자의 키가 다른 곳으로 새지 않는가'와 '누가 무엇을 얼마나 썼는지 통제·추적되는가'가 통과 기준이기 때문입니다. -->
+<!-- 청중이 게이트웨이를 얇은 중계기로 오해하는 것을 첫 문장에서 깨십시오. 우리 게이트웨이는 사내 모든 LLM 트래픽이 반드시 지나는 단일 관문이고, 여기서 인증·앱별 접근권(ACL)·모델 허용 목록·앱별 예산·호출 속도 제한·웹서치 켜고끄기·사용량 추적이 전부 강제됩니다. 가장 강조할 문장은 '우리는 요청을 그대로 전달(relay)하지 않고, 허용된 것만 골라 새로 만들어 보낸다(re-origination)'로, 이후 LiteLLM 대비 전체 서사의 축입니다. 3개 클라이언트가 실제로 서로 다른 AWS 계정으로 나갑니다(claude-code는 374 계정에서 Bedrock 직접 호출, codex는 게이트웨이와 같은 859 계정에서 Mantle 경유, cowork는 905 계정에서 Mantle 경유). 이 경로는 routing_profiles DB 한 줄로 결정되고, 그 한 줄만 바꾸면 재배포 없이 즉시 롤백됩니다. VK(Virtual Key)는 게이트웨이가 사용자에게 발급하는 임시 출입증인데, 실제 AWS 자격증명과 분리돼 있어 이게 새도 원본 클라우드 접근권은 안전합니다. 대기업 보안 심사에서 '한 사용자의 키가 다른 곳으로 새지 않는가'와 '누가 무엇을 얼마나 썼는지 통제·추적되는가'가 통과 기준이기 때문입니다. -->
 
 ---
 
@@ -376,7 +376,7 @@ li { font-size: 15px; line-height: 1.4; margin-bottom: 3px; } h2 { font-size: 30
 
 근거: `messages.py:79,164` · `auth_service.py:49,71`
 
-<!-- 이 슬라이드가 챕터의 클라이맥스이자 '왜 직접 만들었나'의 정면 답입니다. LiteLLM 같은 오픈소스는 빠르게 시작하기엔 좋지만, 근본이 받은 요청을 검사 없이 그대로 통과시키는 중계기(passthrough 프록시)라, 우리 요구(대기업 보안·다계정·정밀 과금·통제)에는 구조적으로 안 맞습니다. 축1이 가장 강력합니다: 우리는 요청 본문을 허용 목록(_BEDROCK_ALLOWED_FIELDS)으로 다시 조립하고(messages.py:164), 모델로 나가는 인증 헤더는 broker bearer나 SigV4 서명으로 그 자리에서 새로 발급하며, 응답 헤더는 우리 것(x-llm-gateway-*)만 내보냅니다. 그래서 '남의 키가 새는 사고(header leak)'는 우리가 방어를 빠뜨린 게 아니라, 애초에 새어나갈 표면 자체가 없는 설계입니다. 축2는 타사(카카오) LiteLLM 장애와의 대조입니다 — 그쪽은 무효키 폭주가 요청마다 사용기록 DB 쓰기로 이어져 연결이 터졌지만, 우리는 형식 오류면 Redis도 안 보고, 미등록 출입증이면 Redis 2회 조회 실패로 401 종료하며, DB 연결(세션)은 필요할 때만 잠깐 여는 방식이라 아예 잡지 않습니다. 축3은 운영 민첩성 — 경로 규칙의 account_role_arn을 NULL로 바꾸고 Redis만 비우면 재배포 없이 123 계정으로 폴백됩니다. 축5의 '자가복구'는 조건부(특정 상황 한정)로 정직하게 하향 정정했고 순수 연결 고갈은 미검증이라, 상태 점검 전용 신호(readiness probe)를 새로 넣었다고 솔직히 말하면 신뢰도가 올라갑니다. 예상 질문 '오픈소스를 커스터마이징하면 안 됐나?'에는, 헤더 재구성·다계정 권한 위임·서버사이드 웹서치 통합은 중계기 위에 패치로 얹는 게 아니라 아키텍처 자체가 달라야 한다고 답하십시오. -->
+<!-- 이 슬라이드가 챕터의 클라이맥스이자 '왜 직접 만들었나'의 정면 답입니다. LiteLLM 같은 오픈소스는 빠르게 시작하기엔 좋지만, 근본이 받은 요청을 검사 없이 그대로 통과시키는 중계기(passthrough 프록시)라, 우리 요구(대기업 보안·다계정·정밀 과금·통제)에는 구조적으로 안 맞습니다. 축1이 가장 강력합니다: 우리는 요청 본문을 허용 목록(_BEDROCK_ALLOWED_FIELDS)으로 다시 조립하고(messages.py:164), 모델로 나가는 인증 헤더는 broker bearer나 SigV4 서명으로 그 자리에서 새로 발급하며, 응답 헤더는 우리 것(x-llm-gateway-*)만 내보냅니다. 그래서 '남의 키가 새는 사고(header leak)'는 우리가 방어를 빠뜨린 게 아니라, 애초에 새어나갈 표면 자체가 없는 설계입니다. 축2는 타사(카카오) LiteLLM 장애와의 대조입니다 — 그쪽은 무효키 폭주가 요청마다 사용기록 DB 쓰기로 이어져 연결이 터졌지만, 우리는 형식 오류면 Redis도 안 보고, 미등록 출입증이면 Redis 2회 조회 실패로 401 종료하며, DB 연결(세션)은 필요할 때만 잠깐 여는 방식이라 아예 잡지 않습니다. 축3은 운영 민첩성 — 경로 규칙의 account_role_arn을 NULL로 바꾸고 Redis만 비우면 재배포 없이 859 계정으로 폴백됩니다. 축5의 '자가복구'는 조건부(특정 상황 한정)로 정직하게 하향 정정했고 순수 연결 고갈은 미검증이라, 상태 점검 전용 신호(readiness probe)를 새로 넣었다고 솔직히 말하면 신뢰도가 올라갑니다. 예상 질문 '오픈소스를 커스터마이징하면 안 됐나?'에는, 헤더 재구성·다계정 권한 위임·서버사이드 웹서치 통합은 중계기 위에 패치로 얹는 게 아니라 아키텍처 자체가 달라야 한다고 답하십시오. -->
 
 ---
 
@@ -501,21 +501,21 @@ h2 { font-size: 40px; }
 
 re-origination으로 재발신 · claude-code는 절대 안 죽는다
 
-- Bedrock 호출: 333 계정 권한을 잠깐 빌려(cross-account) 부르고, 실패하면 자기 계정 123로 조용히 되돌아감 → claude-code는 절대 안 죽음 (라이브 실증: AccessDenied→123 200)
+- Bedrock 호출: 374 계정 권한을 잠깐 빌려(cross-account) 부르고, 실패하면 자기 계정 859로 조용히 되돌아감 → claude-code는 절대 안 죽음 (라이브 실증: AccessDenied→859 200)
 - re-origination(요청을 새로 만들어 발신): AWS 정식 서명(SigV4)이나 Mantle 브로커 토큰으로 새로 인증 — 사용자 VK는 뒤로 절대 안 넘어감
 - 데이터: Aurora PostgreSQL(인증·모델·예산·사용량 원본 DB) · Redis(라우팅·모델·예산 빠른 경로 캐시)
 - AgentCore Runtime(BI·퀵챗 에이전트 실행) + AgentCore Gateway(웹검색 도구 제공, MCP 규격)
 
 ```
 [BedrockAdapter._get_client]
-   ├─ 정상:  123 → AssumeRole(333) → Bedrock 호출
-   └─ 실패:  AccessDenied → 예외 catch → 123 자기 계정으로 조용히 폴백 → 200
+   ├─ 정상:  859 → AssumeRole(333) → Bedrock 호출
+   └─ 실패:  AccessDenied → 예외 catch → 859 자기 계정으로 조용히 폴백 → 200
 ──────────────────────────────────────────────
 데이터플레인:  [Aurora=원본 DB] · [Redis=캐시] · [AgentCore Runtime=실행 / Gateway=웹검색]
 ```
 
 <!--
-어댑터의 킬러 대목, 계정 간 투명 폴백과 데이터플레인입니다. 가장 인상적인 대목은 계정 간 투명 폴백입니다 — claude-code는 다른 계정(333)의 권한을 잠깐 위임받아(cross-account, 권한을 잠깐 빌리는 것) Bedrock을 부르는데, 그 위임이 실패하면 BedrockAdapter._get_client가 예외를 잡아 자기 계정(123)으로 조용히 되돌아가 계속 응답합니다. 데브로그의 "라이브 실증: AccessDenied→123 200"이 바로 이것이고, 그래서 claude-code는 절대 죽지 않습니다. re-origination(허용 항목만 골라 요청을 새로 만들어 발신)은 뒤로 나갈 때 SigV4(AWS 정식 서명) 또는 Mantle 브로커 토큰으로 새 자격을 만들어 보내므로, 사용자 VK(임시 출입증)는 뒤로 절대 안 넘어갑니다 — 남의 키가 새어나갈 표면 자체가 없다는 5장 안전성 챕터와 연결하십시오. 데이터는 세 축입니다: Aurora PostgreSQL(모든 값의 원본), Redis(빠른 경로 캐시), AgentCore(Runtime=BI 퀵챗 에이전트 실행, Gateway=웹검색 도구를 MCP 규격으로 제공). 근거: gateway-proxy/src/app/providers/base.py:12-32; gateway-proxy/src/app/main.py:151-192.
+어댑터의 킬러 대목, 계정 간 투명 폴백과 데이터플레인입니다. 가장 인상적인 대목은 계정 간 투명 폴백입니다 — claude-code는 다른 계정(333)의 권한을 잠깐 위임받아(cross-account, 권한을 잠깐 빌리는 것) Bedrock을 부르는데, 그 위임이 실패하면 BedrockAdapter._get_client가 예외를 잡아 자기 계정(123)으로 조용히 되돌아가 계속 응답합니다. 데브로그의 "라이브 실증: AccessDenied→859 200"이 바로 이것이고, 그래서 claude-code는 절대 죽지 않습니다. re-origination(허용 항목만 골라 요청을 새로 만들어 발신)은 뒤로 나갈 때 SigV4(AWS 정식 서명) 또는 Mantle 브로커 토큰으로 새 자격을 만들어 보내므로, 사용자 VK(임시 출입증)는 뒤로 절대 안 넘어갑니다 — 남의 키가 새어나갈 표면 자체가 없다는 5장 안전성 챕터와 연결하십시오. 데이터는 세 축입니다: Aurora PostgreSQL(모든 값의 원본), Redis(빠른 경로 캐시), AgentCore(Runtime=BI 퀵챗 에이전트 실행, Gateway=웹검색 도구를 MCP 규격으로 제공). 근거: gateway-proxy/src/app/providers/base.py:12-32; gateway-proxy/src/app/main.py:151-192.
 -->
 
 ---
@@ -685,7 +685,7 @@ h2 { font-size: 34px; }
 </style>
 
 ```
-[클라 요청] → [ALB] → [gateway-proxy · 123 EKS Fargate · 서울]
+[클라 요청] → [ALB] → [gateway-proxy · 859 EKS Fargate · 서울]
                                 │
                                 ▼
               [routing_profiles(client) 조회]
@@ -694,19 +694,19 @@ h2 { font-size: 34px; }
         ┌───────────────────────┼────────────────────────┐
         ▼                       ▼                        ▼
   claude-code               codex                     cowork
-  333 빌려쓰기              123 자기계정               222 빌려쓰기
+  374 빌려쓰기              859 자기계정               905 빌려쓰기
   (cross-account            (IRSA, role_arn NULL)     (AssumeRole)
    AssumeRole,              → Mantle GPT-5.5          → Mantle Opus 4.8
    ExternalId)               us-east-2 Responses       도쿄 Messages
   → Bedrock 직접호출
         │
         ▼
-  333 실패 시 → 123 자기계정으로 조용히 되돌아감
+  374 실패 시 → 859 자기계정으로 조용히 되돌아감
   (투명 폴백: 사용자 못 느끼고 서비스 안 죽음)
 ```
 
 <!--
-핵심 메시지는 겉으로는 하나의 접속 주소지만 속으로는 세 개의 완전히 다른 AWS 계정으로 트래픽이 갈라진다는 것입니다. claude-code는 자기 계정이 아닌 333 계정의 모델을 빌려 씁니다 — cross-account AssumeRole(잠깐 권한을 위임받는 방식, ExternalId=claude-code-bedrock으로 상대가 우릴 확인)로 들어가 Bedrock을 직접 호출합니다. codex는 셋 중 유일하게 게이트웨이와 같은 123 계정에 그대로 머물며(그래서 남의 계정을 빌릴 필요가 없고 account_role_arn이 비어 있으며, IRSA=코드에 키를 안 심고 파드에 AWS 권한 부여로 인증) Mantle(외부 모델 중개 백엔드)의 GPT-5.5로 오하이오 us-east-2 OpenAI Responses 규격으로 나갑니다. cowork는 222 계정을 빌려 Mantle의 Opus 4.8(도쿄)로 갑니다. 어느 경로로 갈지는 messages.py의 _select_backend와 _xacct 분기가 routing_profiles 한 줄만 보고 결정합니다(messages.py:243-267). 반드시 강조할 점은 claude-code의 투명 폴백입니다 — 333 빌려쓰기가 실패해도 BedrockAdapter._get_client가 예외를 잡아 123로 조용히 되돌리므로 claude-code는 절대 죽지 않으며, 라이브에서 AccessDenied가 나도 123로 200 응답이 나온 것으로 실증됐습니다. 예상 질문 "왜 codex만 자기 계정이냐"에는 codex 백엔드가 게이트웨이 배포 계정 123와 같아 account_role_arn이 NULL이기 때문이라 답하십시오. 리전이 셋 다 다른 이유는 각 모델이 서비스되는 지역(Bedrock 서울·Mantle GPT-5.5 오하이오·Mantle Opus 도쿄)을 따라간 것입니다.
+핵심 메시지는 겉으로는 하나의 접속 주소지만 속으로는 세 개의 완전히 다른 AWS 계정으로 트래픽이 갈라진다는 것입니다. claude-code는 자기 계정이 아닌 374 계정의 모델을 빌려 씁니다 — cross-account AssumeRole(잠깐 권한을 위임받는 방식, ExternalId=claude-code-bedrock으로 상대가 우릴 확인)로 들어가 Bedrock을 직접 호출합니다. codex는 셋 중 유일하게 게이트웨이와 같은 859 계정에 그대로 머물며(그래서 남의 계정을 빌릴 필요가 없고 account_role_arn이 비어 있으며, IRSA=코드에 키를 안 심고 파드에 AWS 권한 부여로 인증) Mantle(외부 모델 중개 백엔드)의 GPT-5.5로 오하이오 us-east-2 OpenAI Responses 규격으로 나갑니다. cowork는 905 계정을 빌려 Mantle의 Opus 4.8(도쿄)로 갑니다. 어느 경로로 갈지는 messages.py의 _select_backend와 _xacct 분기가 routing_profiles 한 줄만 보고 결정합니다(messages.py:243-267). 반드시 강조할 점은 claude-code의 투명 폴백입니다 — 374 빌려쓰기가 실패해도 BedrockAdapter._get_client가 예외를 잡아 859로 조용히 되돌리므로 claude-code는 절대 죽지 않으며, 라이브에서 AccessDenied가 나도 859로 200 응답이 나온 것으로 실증됐습니다. 예상 질문 "왜 codex만 자기 계정이냐"에는 codex 백엔드가 게이트웨이 배포 계정 859와 같아 account_role_arn이 NULL이기 때문이라 답하십시오. 리전이 셋 다 다른 이유는 각 모델이 서비스되는 지역(Bedrock 서울·Mantle GPT-5.5 오하이오·Mantle Opus 도쿄)을 따라간 것입니다.
 -->
 
 ---
@@ -744,10 +744,10 @@ h2 { font-size: 34px; }
 - codex → OpenAI Responses 규격(/v1/responses), 안 엉키게 별도 _handle_responses 경로
 - 받은 본문을 relay(그대로 넘김) 안 함 — 허용 12필드(_BEDROCK_ALLOWED_FIELDS)만 골라 재조립, 몰래 낀 필드는 뒤로 못 넘어감(re-origination)
 - Mantle(외부 모델 중개) 방언 변환: anthropic_version 제거 · model 주입 · metadata에 user_id
-- 즉시 롤백: account_role_arn 비우면(NULL) 다음 요청부터 123 복귀 + Redis 캐시(5분 유효) 비우기로 끝
+- 즉시 롤백: account_role_arn 비우면(NULL) 다음 요청부터 859 복귀 + Redis 캐시(5분 유효) 비우기로 끝
 
 <!--
-전하고 싶은 것은 세 클라이언트가 서로 다른 API 규격(방언)으로 말하는데도 게이트웨이가 이를 하나로 흡수한다는 점입니다. claude-code와 cowork는 Anthropic Messages 규격(/v1/messages), codex는 완전히 다른 OpenAI Responses 규격(/v1/responses)을 씁니다. 후자는 openai_compat.py의 _handle_responses라는 별도 경로로 처리되어 기존 동작과 엉키지 않습니다. 중요한 건 게이트웨이가 받은 본문을 그대로 뒤로 흘려보내지(relay하지) 않고 허용 목록 12개 필드(_BEDROCK_ALLOWED_FIELDS: messages·max_tokens·system·tools 등)만 골라 요청을 새로 조립한다는 점입니다 — 이것이 re-origination(허용 항목만 골라 요청을 새로 만들어 발신)이며, 몰래 낀 필드나 헤더는 뒤로 넘어갈 표면 자체가 없다는 것이 안전성 챕터와 이어집니다. Mantle 경로는 anthropic_version을 제거하고 실제 모델 ID를 model 필드에 넣고 sso_subject를 metadata에 넣는 방언 변환을 합니다. 운영 관점의 킬러 기능: 라우팅이 코드가 아니라 routing_profiles DB 한 줄이라 재배포 없이 즉시 롤백이 됩니다 — account_role_arn을 비우고(NULL) Redis의 라우팅 캐시 키를 비우면 다음 요청부터 123로 되돌아갑니다. 예상 질문 "규격이 늘면 코드가 폭발하지 않나"에는 백엔드가 ProviderAdapter라는 공통 틀(ABC+Registry)로 추상화돼 있고 규격 변환은 각 어댑터·핸들러에만 국소화돼 있어 한곳만 손대면 된다고 답하십시오. 근거: messages.py:79-92,325-351.
+전하고 싶은 것은 세 클라이언트가 서로 다른 API 규격(방언)으로 말하는데도 게이트웨이가 이를 하나로 흡수한다는 점입니다. claude-code와 cowork는 Anthropic Messages 규격(/v1/messages), codex는 완전히 다른 OpenAI Responses 규격(/v1/responses)을 씁니다. 후자는 openai_compat.py의 _handle_responses라는 별도 경로로 처리되어 기존 동작과 엉키지 않습니다. 중요한 건 게이트웨이가 받은 본문을 그대로 뒤로 흘려보내지(relay하지) 않고 허용 목록 12개 필드(_BEDROCK_ALLOWED_FIELDS: messages·max_tokens·system·tools 등)만 골라 요청을 새로 조립한다는 점입니다 — 이것이 re-origination(허용 항목만 골라 요청을 새로 만들어 발신)이며, 몰래 낀 필드나 헤더는 뒤로 넘어갈 표면 자체가 없다는 것이 안전성 챕터와 이어집니다. Mantle 경로는 anthropic_version을 제거하고 실제 모델 ID를 model 필드에 넣고 sso_subject를 metadata에 넣는 방언 변환을 합니다. 운영 관점의 킬러 기능: 라우팅이 코드가 아니라 routing_profiles DB 한 줄이라 재배포 없이 즉시 롤백이 됩니다 — account_role_arn을 비우고(NULL) Redis의 라우팅 캐시 키를 비우면 다음 요청부터 859로 되돌아갑니다. 예상 질문 "규격이 늘면 코드가 폭발하지 않나"에는 백엔드가 ProviderAdapter라는 공통 틀(ABC+Registry)로 추상화돼 있고 규격 변환은 각 어댑터·핸들러에만 국소화돼 있어 한곳만 손대면 된다고 답하십시오. 근거: messages.py:79-92,325-351.
 -->
 
 ---
@@ -1398,12 +1398,12 @@ table { font-size: 15px; } td, th { padding: 8px 10px; } li { font-size: 15px; }
 | **cowork** (Claude 데스크톱 앱) | `configLibrary/<uuid>.json`: `inferenceProvider=gateway`(호출 대상을 게이트웨이로) + baseUrl + VK + `authScheme=bearer` |
 
 - 앱 자동 식별: claude-code=UA `claude-cli/`(external,cli) · codex=originator `codex_cli_rs`
-- 라우팅(현 dev): claude-code → **333** native · codex → **123** Mantle GPT-5.5
+- 라우팅(현 dev): claude-code → **374** native · codex → **859** Mantle GPT-5.5
 
 `근거: docs/guides/connect.md · gateway-clients/codex-box/entrypoint.sh · COWORK-GATEWAY-SETUP.md §2`
 
 <!--
-이 표가 챕터의 핵심 참조 자료입니다. 세 클라이언트가 연결하는 방식이 근본적으로 다르다는 걸 명확히 하십시오. claude-code 는 gateway-cli setup 한 줄이 apiKeyHelper(키 자동 주입 헬퍼)와 접속 주소(base URL)를 설정에 기록하면 끝입니다. codex 는 OpenAI 응답 규격(Responses API)을 쓰므로 ~/.codex/config.toml 에 model_provider=gateway, base_url=<게이트웨이>/v1, wire_api=responses(응답 규격 지정)를 넣고 VK 를 GATEWAY_VK 환경변수로 참조합니다. cowork 는 Claude 데스크톱 앱이라 CLI 가 아니라 앱 설정파일(configLibrary/<uuid>.json)의 inferenceProvider(호출 대상)를 gateway 로 바꾸고 baseUrl·VK·authScheme=bearer(인증방식)를 채웁니다. 결정적 포인트: 개발자는 어느 클라이언트인지 게이트웨이에 따로 알릴 필요가 없습니다 — 게이트웨이가 앱마다 다른 서명(User-Agent claude-cli/, originator codex_cli_rs)으로 자동 식별해 사용 기록(usage_logs.client)에 남기고 routing_profiles(어느 앱을 어느 계정으로 보낼지 정하는 DB 규칙 한 줄)로 각각 다른 AWS 계정에 라우팅합니다 — 현 dev 기준 claude-code 는 333 계정 native, codex 는 123 계정 Mantle GPT-5.5. 예상 질문 "앱마다 키 따로?"엔 아니오, 같은 로그인 신원에서 발급된 VK 하나를 세 곳에 넣을 수 있다고 답하십시오. 근거: 소스 slide 43.
+이 표가 챕터의 핵심 참조 자료입니다. 세 클라이언트가 연결하는 방식이 근본적으로 다르다는 걸 명확히 하십시오. claude-code 는 gateway-cli setup 한 줄이 apiKeyHelper(키 자동 주입 헬퍼)와 접속 주소(base URL)를 설정에 기록하면 끝입니다. codex 는 OpenAI 응답 규격(Responses API)을 쓰므로 ~/.codex/config.toml 에 model_provider=gateway, base_url=<게이트웨이>/v1, wire_api=responses(응답 규격 지정)를 넣고 VK 를 GATEWAY_VK 환경변수로 참조합니다. cowork 는 Claude 데스크톱 앱이라 CLI 가 아니라 앱 설정파일(configLibrary/<uuid>.json)의 inferenceProvider(호출 대상)를 gateway 로 바꾸고 baseUrl·VK·authScheme=bearer(인증방식)를 채웁니다. 결정적 포인트: 개발자는 어느 클라이언트인지 게이트웨이에 따로 알릴 필요가 없습니다 — 게이트웨이가 앱마다 다른 서명(User-Agent claude-cli/, originator codex_cli_rs)으로 자동 식별해 사용 기록(usage_logs.client)에 남기고 routing_profiles(어느 앱을 어느 계정으로 보낼지 정하는 DB 규칙 한 줄)로 각각 다른 AWS 계정에 라우팅합니다 — 현 dev 기준 claude-code 는 374 계정 native, codex 는 859 계정 Mantle GPT-5.5. 예상 질문 "앱마다 키 따로?"엔 아니오, 같은 로그인 신원에서 발급된 VK 하나를 세 곳에 넣을 수 있다고 답하십시오. 근거: 소스 slide 43.
 -->
 
 ---
@@ -1519,7 +1519,7 @@ h2 { font-size: 44px; }
 `근거: messages.py:79,164 · auth_service.py:45-76 · health.py:49-110`
 
 <!--
-요약 슬라이드는 각 주장에 반드시 근거가 붙는다는 우리 발표의 규율을 재확인하는 자리입니다. 다섯 차별점에 거버넌스를 더해 압축하되, 각 줄이 앞 챕터의 코드·라이브 근거로 이미 증명됐음을 상기시키십시오. 첫 줄은 re-origination(받은 요청을 그대로 넘기지 않고 허용목록만 골라 새로 만들어 발신) — 본문·업스트림 헤더·응답 헤더 세 곳을 다 새로 만드니 키가 샐 표면 자체가 없습니다(messages.py:79,164). 무효키 방어는 Redis 를 먼저 보고 DB 세션은 필요할 때만 짧게 여는(lazy) 설계라 가짜 키 폭주가 DB 폭발로 이어지는 경로를 끊습니다(auth_service.py:45-76). 멀티계정 민첩성은 routing_profiles(경로 규칙) DB 한 행만 바꾸면 재배포 없이 즉시 경로 변경·롤백입니다 — 333/123/222 3계정 라이브. 서버사이드 웹서치는 모델이 스스로 내는 tool_use(검색 필요 신호)를 게이트웨이가 가로채 대신 검색·재투입하므로 사용자는 무설정이고, 횟수 집계와 5회/90초 가드레일이 강제됩니다. 견고성은 6개 관점 적대검증으로 HIGH 2·MED 2 수정, 283개 유닛테스트, rev75 라이브 실증(health.py:49-110), 거버넌스는 5레버가 실제 효과(403 권한거부/404 모델비활성/429 한도초과/미검색)를 내는지 라이브로 확인했습니다. 이 슬라이드는 청중이 기억할 "한 장"이니, 질문이 나오면 각 줄의 근거 파일로 바로 이동해 코드를 열 수 있게 준비하십시오. 근거: 소스 slide 48.
+요약 슬라이드는 각 주장에 반드시 근거가 붙는다는 우리 발표의 규율을 재확인하는 자리입니다. 다섯 차별점에 거버넌스를 더해 압축하되, 각 줄이 앞 챕터의 코드·라이브 근거로 이미 증명됐음을 상기시키십시오. 첫 줄은 re-origination(받은 요청을 그대로 넘기지 않고 허용목록만 골라 새로 만들어 발신) — 본문·업스트림 헤더·응답 헤더 세 곳을 다 새로 만드니 키가 샐 표면 자체가 없습니다(messages.py:79,164). 무효키 방어는 Redis 를 먼저 보고 DB 세션은 필요할 때만 짧게 여는(lazy) 설계라 가짜 키 폭주가 DB 폭발로 이어지는 경로를 끊습니다(auth_service.py:45-76). 멀티계정 민첩성은 routing_profiles(경로 규칙) DB 한 행만 바꾸면 재배포 없이 즉시 경로 변경·롤백입니다 — 374/859/905 3계정 라이브. 서버사이드 웹서치는 모델이 스스로 내는 tool_use(검색 필요 신호)를 게이트웨이가 가로채 대신 검색·재투입하므로 사용자는 무설정이고, 횟수 집계와 5회/90초 가드레일이 강제됩니다. 견고성은 6개 관점 적대검증으로 HIGH 2·MED 2 수정, 283개 유닛테스트, rev75 라이브 실증(health.py:49-110), 거버넌스는 5레버가 실제 효과(403 권한거부/404 모델비활성/429 한도초과/미검색)를 내는지 라이브로 확인했습니다. 이 슬라이드는 청중이 기억할 "한 장"이니, 질문이 나오면 각 줄의 근거 파일로 바로 이동해 코드를 열 수 있게 준비하십시오. 근거: 소스 slide 48.
 -->
 
 ---

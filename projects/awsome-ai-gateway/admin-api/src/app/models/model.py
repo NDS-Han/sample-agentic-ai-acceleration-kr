@@ -27,15 +27,26 @@ from app.models.base import Base
 class Provider(str, enum.Enum):
     BEDROCK = "BEDROCK"
     OPENMODEL = "OPENMODEL"
-    BEDROCK_MANTLE = "BEDROCK_MANTLE"  # Cowork → 222 Bedrock Mantle (Tokyo Opus 4.8)
-    BEDROCK_MANTLE_OPENAI = "BEDROCK_MANTLE_OPENAI"  # Codex → 123 Bedrock Mantle GPT-5.5 (Ohio, Responses)
+    BEDROCK_MANTLE = "BEDROCK_MANTLE"  # Cowork → 905 Bedrock Mantle (Tokyo Opus 4.8)
+    BEDROCK_MANTLE_OPENAI = "BEDROCK_MANTLE_OPENAI"  # Codex → 859 Bedrock Mantle GPT-5.5 (Ohio, Responses)
+    # GPT-5.6 on the STANDARD bedrock-runtime plane: SigV4 instead of a bearer token, and
+    # a cross-region inference-profile model id (us./global.openai.gpt-5.6-*). Same OpenAI
+    # dialect as BEDROCK_MANTLE_OPENAI, so api_format stays OPENAI_RESPONSES — the plane is
+    # what `provider` names. Added by migration 0031.
+    #
+    # ⚠️ Must list EVERY label in the Postgres enum: SQLAlchemy validates on READ, so an
+    # unlisted label raises LookupError while fetching and breaks the entire model listing,
+    # not merely the row that uses it.
+    BEDROCK_RUNTIME_OPENAI = "BEDROCK_RUNTIME_OPENAI"
 
 
 class ApiFormat(str, enum.Enum):
     BEDROCK_NATIVE = "BEDROCK_NATIVE"
     OPENAI_COMPATIBLE = "OPENAI_COMPATIBLE"
     ANTHROPIC_MESSAGES = "ANTHROPIC_MESSAGES"  # Mantle /anthropic/v1/messages
-    OPENAI_RESPONSES = "OPENAI_RESPONSES"  # Mantle /openai/v1/responses (GPT-5.x)
+    # Both OpenAI planes (Mantle and bedrock-runtime). Names the DIALECT, not the endpoint;
+    # runtime-plane rows also serve /v1/chat/completions on the same dialect.
+    OPENAI_RESPONSES = "OPENAI_RESPONSES"
 
 
 class ModelStatus(str, enum.Enum):

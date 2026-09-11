@@ -112,14 +112,19 @@ database:
     masterUser: "postgres_admin"
     masterPasswordSecretKey: "master_password"
     # Master 비번을 어느 Secrets Manager 시크릿/프로퍼티에서 가져올지.
-    # 기본(빈 값)은 app 비번과 같은 "<prefix><env>/db" 시크릿의 master_password 프로퍼티
-    # (하위호환). Aurora ManageMasterUserPassword=on 환경에서는 RDS 가 master 비번을
-    # 자동 로테이션하는 별도 시크릿(rds!cluster-<uuid>)을 직접 가리켜 드리프트를 원천 차단:
+    # ⚠️ enable_rds_proxy=true (Terraform 이 <prefix><env>/db 를 관리) 환경에서는 이 두 값을
+    #    반드시 설정해야 한다. Terraform 이 만드는 /db 에는 password 키만 있고
+    #    master_password 는 없다 (RDS 가 7일마다 로테이션해서 복사본이 stale 해지므로 삭제됨).
+    #    미설정 시 ESO 가 <prefix><env>/db 의 master_password 를 찾다 실패 → ExternalSecret
+    #    이 Ready 가 안 되고 migration Job initContainer 가 5분 타임아웃으로 죽는다.
     #   masterPasswordRemoteKey: "rds!cluster-<uuid>"   (이름만, suffix 불필요)
     #   masterPasswordRemoteProperty: "password"
-    # (ESO IRSA 정책에 rds!cluster-* read 권한 필요 — irsa 모듈에 추가됨.)
-    masterPasswordRemoteKey: ""        # 빈 값 → "<prefix><env>/db" 사용
-    masterPasswordRemoteProperty: ""   # 빈 값 → "master_password" 사용
+    #   조회: aws rds describe-db-clusters --db-cluster-identifier <id> \
+    #           --query 'DBClusters[0].MasterUserSecret.SecretArn'
+    # (ESO IRSA 정책에 rds!cluster-* read 권한 필요 — irsa 모듈에 선언됨.)
+    # 빈 값은 operator 가 손으로 만든 레거시 /db (enable_rds_proxy=false 경로) 하위호환 전용.
+    masterPasswordRemoteKey: ""        # 빈 값 → 레거시 "<prefix><env>/db" 사용
+    masterPasswordRemoteProperty: ""   # 빈 값 → 레거시 "master_password" 사용
     # SSL 모드 (Aurora는 require 권장)
     sslMode: "require"
     # 연결 풀
@@ -133,6 +138,14 @@ database:
     # asyncpg prepared statement 캐시 크기.
     # RDS Proxy 경유 환경에선 0 으로 override (PostgreSQL pinning 회피).
     # Aurora/Postgres 직접 연결 환경에선 기본값 100 유지 (성능 이득).
+    #
+    # ⚠️ 이 값이 **여기 있는 것이 중요하다.** 예전에는 템플릿이
+    #      DB_STATEMENT_CACHE_SIZE: {{ ... | default 100 | quote }}
+    #    였는데 Go 템플릿의 `default` 는 0 을 "빈 값" 으로 보고 삼킨다. 그래서 dev/prod
+    #    overlay 가 둘 다 `statementCacheSize: 0` 을 명시했는데도 라이브 ConfigMap 은
+    #    양쪽 다 "100" 이었다(2026-09-04 실측) — RDS Proxy pinning 회피 설정이 조용히
+    #    죽어 있었다. 기본값을 values 로 옮기고 템플릿의 `| default` 를 제거해서 0 이
+    #    그대로 통과하게 했다. 이 키를 여기서 지우면 렌더가 빈 문자열이 된다.
     statementCacheSize: 100
 
 # Rate-limit 정책(deepdive Q50). failMode: open=eval 실패 시 통과(가용성·기본),
@@ -149,9 +162,27 @@ redis:
   # 30 pod × 150 = 4,500 커넥션 (ElastiCache 3-shard 기준 shard 당 1,500 여유).
   poolSize: 150
 
+  # Redis 클라이언트 타이밍. 예전엔 이 4개가 values 에 없고 configmap 템플릿의
+  # `| default` 만이 유일한 출처였다. statementCacheSize 와 같은 0-삼킴 함정이 있어
+  # (retries: 0 = 재시도 없음, healthCheckInterval: 0 = health check 비활성 — 둘 다
+  # 의미 있는 0 인데 조용히 1 / 30 으로 바뀐다) 기본값을 values 로 끌어올리고
+  # 템플릿의 `| default` 를 제거했다. 값은 기존 템플릿 기본값과 **동일**하다(렌더 무변화).
+  socketTimeout: 2.0
+  connectTimeout: 1.0
+  retries: 1
+  healthCheckInterval: 30.0
+
+  # 읽기 replica 라우팅(cluster+replica 일 때만). 기본 false = primary-only(강한 일관성).
+  # 예전엔 이 키가 values 에 아예 없고 configmap 의 `| default false` 만이 출처였다.
+  readFromReplicas: false
+
   # rate-limit 회로 차단기(deepdive Q50 Phase3/4). Redis 연속 실패 시 회로 OPEN →
   # 후속 eval 을 socket_timeout 대기 없이 즉시 fast-fail(→ fallback). 기본 활성.
   breaker:
+    # ⚠️ 예전 템플릿은 `| default true` 였다 — Go 의 default 는 false 를 빈 값으로 보므로
+    #    overlay 에 `enabled: false` 를 써도 "true" 로 렌더됐다. 즉 **values 로 차단기를
+    #    끌 수 없는** 상태였다(현재 overlay 중 끄는 곳은 없어 라이브 영향은 0).
+    #    템플릿에서 default 를 제거했으니 이제 여기 값이 유일한 출처다.
     enabled: true
     failThreshold: 5      # 연속 실패 N 회 → OPEN
     recoveryTimeout: 5.0  # OPEN 후 N 초 뒤 HALF_OPEN 시험
@@ -211,7 +242,8 @@ ingress:
   # "alb" (EKS Fargate)
   className: "nginx"
 
-  # ALB(EKS) 어노테이션
+  # ALB(EKS) 어노테이션 — 세 Ingress 에 공통 적용.
+  # Ingress 하나에만 필요한 규칙은 여기 넣지 말고 아래 전용 맵을 쓸 것.
   annotations: {}
 
   # gateway-proxy (사용자 API, data-plane)
@@ -222,6 +254,15 @@ ingress:
     tls:
       enabled: false
       secretName: ""
+    # 이 Ingress 에만 붙는 어노테이션. 공통값을 덮어쓴다.
+    # data-plane 전용 규칙 자리 — 특히 CloudFront 를 오리진 앞에 둔 구성에서:
+    #   alb.ingress.kubernetes.io/security-group-prefix-lists: "pl-xxxxxxxx"
+    # (리전마다 ID 가 다르므로 이름으로 조회할 것:
+    #  aws ec2 describe-managed-prefix-lists --filters
+    #    Name=prefix-list-name,Values=com.amazonaws.global.cloudfront.origin-facing)
+    # ⚠️ 이 값을 위 공통 annotations 에 넣으면 admin-api·admin-ui 까지 임의의
+    #    CloudFront 배포에 열려 IP 제한이 무력화된다.
+    annotations: {}
 
   # admin-ui (관리자 웹)
   adminUi:
@@ -231,6 +272,9 @@ ingress:
     tls:
       enabled: false
       secretName: ""
+    # 이 Ingress 에만 붙는 어노테이션. 공통값과 템플릿 기본값
+    # (healthcheck-path=/api/health, success-codes=200) 을 모두 덮어쓴다.
+    annotations: {}
 
   # admin-api (관리자 REST API)
   adminApi:
@@ -240,6 +284,8 @@ ingress:
     tls:
       enabled: false
       secretName: ""
+    # 이 Ingress 에만 붙는 어노테이션. 공통값을 덮어쓴다.
+    annotations: {}
 
 # ----------------------------------------------------------------------------
 # External Secrets Operator 연동 (ESO 사용 시 K8s Secret 대신 동적 주입)
@@ -268,15 +314,34 @@ observability:
     protocol: "grpc"  # grpc | http/protobuf
 
     # Sidecar 이미지 (mode=sidecar 일 때만)
+    # ⚠️ 현재 dev·prod 모두 mode="in-cluster" 이므로 이 블록은 **렌더되지 않는다**
+    #    (templates/gateway-proxy/deployment.yaml 의 sidecar 블록이 mode 로 가드됨.
+    #     실측: 두 클러스터 어느 파드에도 otel 컨테이너 없음). 즉 값이 틀려도 라이브
+    #    영향은 0 이지만, mode 를 sidecar 로 돌리는 순간 조용히 구버전이 뜬다.
+    # 그래서 in-cluster 로 실제 돌고 있는 Collector 와 **같은 버전**으로 맞춰 둔다:
+    #   deployment/observability/otel-collector/deployment.yaml:44 = 0.113.0
+    #   라이브 ns observability (dev·prod 양쪽) = otel/opentelemetry-collector-contrib:0.113.0
     sidecarImage:
       repository: "otel/opentelemetry-collector-contrib"
-      tag: "0.104.0"
+      tag: "0.113.0"
       pullPolicy: "IfNotPresent"
 
 # ============================================================================
 # 서비스별 설정
 # ============================================================================
 
+# ⚠️ 아래 7개 워크로드의 image.tag 는 모두 **라이브에서 돌고 있는 태그**로 채워져 있다
+#    (2026-09-04 실측: dev rev87 / prod rev14 파드의 실제 이미지. 두 환경 동일).
+#    예전에는 전부 `tag: ""` 였고 그러면 _helpers.tpl:76 의
+#      $tag := .image.tag | default .root.Chart.AppVersion
+#    이 Chart.appVersion(당시 1.0.43-rebrand) 으로 폴백했다. 그 태그들은 ECR 에 실재하므로
+#    **ImagePullBackOff 로 실패하지도 않고 조용히 5개 서비스가 ~3.5개월 롤백**된다.
+#    env overlay 를 안 넘기는 경로(신규 overlay 복사, --reuse-values 실수, values 만 넘긴
+#    helm upgrade, prod-loadtest overlay 단독 사용)가 전부 그 폴백을 탄다.
+#    특히 migration 은 appVersion 이미지가 alembic 0004 까지만 담고 있어(라이브는 0033)
+#    실행되면 스키마 기준이 29 리비전 뒤로 간다.
+#    → overlay 와 값이 같으므로 렌더 결과는 지금과 완전히 동일(라이브 무변화)하고,
+#      폴백 자체가 사라져서 후퇴 경로만 없어진다. 배포 시엔 계속 overlay 가 우선한다.
 # ----------------------------------------------------------------------------
 # DB Migration (Helm pre-install / pre-upgrade hook으로 1회 실행)
 # ----------------------------------------------------------------------------
@@ -284,7 +349,7 @@ migration:
   enabled: true
   image:
     repository: "llm-gateway/migration"
-    tag: ""  # 비우면 Chart.appVersion 사용
+    tag: "1.0.52-head0033"  # = 라이브(dev·prod). alembic head 0033
     pullPolicy: "IfNotPresent"
   resources:
     requests:
@@ -301,10 +366,32 @@ migration:
   hookDeletePolicy: "before-hook-creation,hook-succeeded"
   activeDeadlineSeconds: 600  # 10분 안에 끝나지 않으면 실패로 판정
   # initContainer 가 ExternalSecret 의 K8s Secret sync 완료를 대기할 때 사용.
-  # bitnami/kubectl 은 major.minor 태그를 제공하지 않음 — latest 또는 full version (1.30.13 등).
-  # 고객이 외부 이미지를 못 쓰는 환경이면 자체 ECR 로 복사 후 override.
+  #
+  # ⚠️ 옛 주석("major.minor 태그가 없어 latest 또는 1.30.13 같은 full version 을 쓴다")은
+  #    이제 **틀렸다**. docker.io/bitnami/kubectl 에서 **버전 태그가 전부 사라졌다**
+  #    (2026-09-04 실측: 1.30 / 1.31 / 1.31.14 / 1.37.0 모두 registry 404. `latest` 만 200).
+  #    그래서 태그 핀은 불가능하고 **digest 핀이 유일한 재현 가능 방법**이다.
+  #    아래 digest = 지금 라이브(dev rev87 / prod rev14 hook manifest)가 `latest` 로
+  #    당겨오고 있는 그 이미지와 동일(kubectl 1.37.0, 2026-09-04 재측정에서도 불변).
+  #    → 렌더 결과의 실체는 그대로이고 mutable 태그만 고정된다(라이브 무변화).
+  #
+  #    이게 왜 중요한가: 이 Job 은 pre-install/pre-upgrade hook(weight -5) 이라 dev·prod
+  #    **모든 helm upgrade 에서 매번 실행**되고, Fargate 는 파드마다 새 microVM 이라
+  #    imagePullPolicy: IfNotPresent 여도 사실상 매번 Docker Hub 익명 pull 이다.
+  #    태그가 움직이면 같은 chart SHA 가 매 배포마다 다른 코드를 돌리고,
+  #    `latest` 에서 /bin/sh 가 빠지는 날 아래 `sh -c` wait 루프가 깨져
+  #    migration hook 이 죽고 helm upgrade 전체가 실패한다.
+  #
+  # 대안 검토 (실측 결과 둘 다 지금은 못 쓴다):
+  #   - registry.k8s.io/kubectl:v1.31.14 (서버 버전과 정확히 일치, 200 OK) → **distroless**.
+  #     이미지에 bin/kubectl 하나뿐이고 sh/bash/busybox 가 0개라 `sh -c` 루프가 못 돈다
+  #     (레이어 전수 확인). 쓰려면 wait 루프를 셸 없이 재작성해야 한다.
+  #   - alpine/kubectl 도 버전 태그 404 (`latest` 만 존재).
+  # 권장 후속: 이 digest 를 자체 ECR 로 미러링하고 여기서 ECR 주소를 참조
+  #           (익명 Docker Hub pull rate limit / egress 정책 의존 제거).
+  #           고객이 외부 이미지를 못 쓰는 환경도 같은 방법으로 override.
   waitForSecret:
-    image: "bitnami/kubectl:latest"
+    image: "bitnami/kubectl@sha256:b29d8c1665b70817259ceecaea16ab27aab6368b48daf485d19436c809067492"
 
 # ----------------------------------------------------------------------------
 # Gateway Proxy (U1, data-plane) — 요청 라우팅 + 인증 + Rate Limit + 비용 기록
@@ -315,7 +402,7 @@ gatewayProxy:
 
   image:
     repository: "llm-gateway/gateway-proxy"
-    tag: ""  # 비우면 Chart.appVersion
+    tag: "1.0.55-runtimeplane"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -429,7 +516,7 @@ adminApi:
 
   image:
     repository: "llm-gateway/admin-api"
-    tag: ""
+    tag: "1.0.68-invlogaudit"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -499,11 +586,23 @@ adminApi:
   tolerations: []
   affinity: {}
 
+  # admin-api 앱 설정은 (oidc 를 제외하면) 전용 블록 없이 전부 이 자유 map 을 통과한다 —
+  # templates/admin-api/deployment.yaml 의 `range $key, $value := .Values.adminApi.env`.
+  # 새 설정을 넣을 때 차트에 구조를 추가할 필요가 없다.
   env:
     LOG_LEVEL: "INFO"
     WORKERS: "2"
     DEV_LOGIN_ENABLED: "false"  # production에선 반드시 false
     DEFAULT_USER_BUDGET_USD: "1000"
+    # ── Bedrock invocation log 감사 대조 (기본 OFF) ──
+    # 비어 있으면 /admin/audit/invocation-log/* 가 503(미설정)을 반환한다. 켜는 절차와
+    # 주의사항은 values-eks-fargate-dev.yaml 의 같은 키 주석 참조. 요약:
+    #   - 값은 terraform output bedrock_invocation_log_{group,region} 에서 가져온다
+    #   - REGION 은 배포 리전이 아니라 **모델 실행 리전**(GPT-5.6 runtime plane = us-east-2)
+    #   - 리전 단위로 계정 전체 본문을 수집하므로 운영자가 명시적으로 켜야 한다
+    # BEDROCK_INVOCATION_LOG_GROUP: ""
+    # BEDROCK_INVOCATION_LOG_REGION: "us-east-2"
+    # BEDROCK_INVOCATION_LOG_BODIES_ENABLED: "false"
 
   # --------------------------------------------------------------------------
   # OIDC 인증 (Cognito / Keycloak / Okta / Azure AD / IC)
@@ -561,7 +660,7 @@ adminUi:
 
   image:
     repository: "llm-gateway/admin-ui"
-    tag: ""
+    tag: "1.0.99-modelform"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -630,10 +729,51 @@ adminUi:
   tolerations: []
   affinity: {}
 
+  # admin-ui 앱 설정은 전용 블록 없이 전부 이 자유 map 을 통과한다 —
+  # templates/admin-ui/deployment.yaml:87 의 `range $key, $value := .Values.adminUi.env`.
   env:
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
     OTEL_SERVICE_NAME: "admin-ui"
+    # ── 브라우저 SSO (OIDC Authorization Code + PKCE) — 기본 OFF ──
+    #
+    # ⚠️ 이 세 개가 **admin-ui 의 유일한 prod 로그인 경로**를 켠다. 셋 다 비어 있고
+    #    DEV_LOGIN_ENABLED 도 "false" 면 로그인 방법이 존재하지 않는다 —
+    #    prod 가 정확히 그 상태였다(A3). 그 상태에서 / 로 들어오면 이제
+    #    /api/auth/login 이 아래 변수 이름을 찍은 503 을 돌려준다(예전엔 본문 없는 404).
+    #
+    # ⚠️ 일부러 **주석 처리**해서 둔다. 위 range 는 값이 빈 문자열이어도 env 항목을
+    #    그대로 렌더하므로(`- name: X` + `value: ""`), 빈 기본값을 살려 두면 오늘과
+    #    다른 pod spec 이 나와 admin-ui 3개가 전부 롤링 재시작한다. 기능이 꺼져 있는데
+    #    파드를 굴릴 이유가 없다. 같은 이유로 adminApi.env 의
+    #    BEDROCK_INVOCATION_LOG_* 도 주석으로 둔다(values.yaml:603 참조).
+    #    ⇒ 켤 때는 아래 3줄의 주석을 풀고 값을 채운다(그 순간부터 렌더된다).
+    #
+    # 값 채우는 법 (Cognito):
+    #   OIDC_AUTHORIZE_URL / OIDC_TOKEN_URL 은 issuer 가 **아니다**. issuer 는
+    #   https://cognito-idp.<region>.amazonaws.com/<poolId> 이지만 authorize/token 은
+    #   hosted UI 도메인 https://<domain>.auth.<region>.amazoncognito.com/oauth2/{authorize,token} 이다.
+    #   Keycloak 이면 <issuer>/protocol/openid-connect/{auth,token}.
+    #   app client 의 Allowed callback URL 에 https://<admin-ui host>/api/auth/callback 을 등록해야 한다.
+    # OIDC_CLIENT_ID: ""       # 비면 SSO OFF. 채우면 /api/auth/login 이 authorize 로 302.
+    # OIDC_AUTHORIZE_URL: ""   # 예: https://<domain>.auth.ap-northeast-2.amazoncognito.com/oauth2/authorize
+    # OIDC_TOKEN_URL: ""       # 예: https://<domain>.auth.ap-northeast-2.amazoncognito.com/oauth2/token
+    #
+    # 선택 (없으면 기본값):
+    # OIDC_REDIRECT_URI: ""    # 비면 요청의 Host + x-forwarded-proto 로 조립. IdP 등록값과
+    #                          # 정확히 일치해야 할 때만 명시한다.
+    # OIDC_SCOPES: ""          # 기본 "openid email profile"
+    # OIDC_COOKIE_TOKEN: ""    # "access_token" 이면 access_token 을 쿠키에 넣는다. 기본은 id_token.
+    #
+    # ⚠️ OIDC_CLIENT_SECRET 은 **여기에 절대 쓰지 않는다**. 이 차트의 시크릿 경로는
+    #    templates/common/secret.yaml 의 `{{ fullname }}-app` Secret 이다
+    #    (externalSecrets.enabled=true 면 ESO 가 "<secretPathPrefix><env>/app" 에서 주입,
+    #     false 면 .Values.secrets.app 에서 생성 — git 커밋 금지).
+    #    다만 위 range 는 `value:` 만 렌더하고 secretKeyRef 를 못 만들기 때문에,
+    #    confidential client 를 쓰려면 templates/admin-ui/deployment.yaml 에 NEXTAUTH_SECRET
+    #    (같은 파일 77-81줄)처럼 secretKeyRef env 블록을 추가해야 한다.
+    #    ⇒ 권장은 **secret 없는 public client + PKCE**. 코드는 양쪽 다 지원한다
+    #      (app/api/auth/callback/route.ts — secret 이 있으면 HTTP Basic 을 붙인다).
 
 # ----------------------------------------------------------------------------
 # Scheduler (admin-api 이미지를 다른 CMD로 실행 — ROI 집계 cron)
@@ -644,9 +784,9 @@ scheduler:
   replicaCount: 1  # 절대 2 이상 금지 (중복 cron 실행 방지)
 
   image:
-    # admin-api 이미지 재사용 (command만 다름)
+    # admin-api 이미지 재사용 (command만 다름) — 태그도 admin-api 와 항상 같이 움직인다
     repository: "llm-gateway/admin-api"
-    tag: ""
+    tag: "1.0.68-invlogaudit"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   command: ["python", "-m", "app.scheduler.main"]
@@ -710,7 +850,7 @@ notificationWorker:
 
   image:
     repository: "llm-gateway/notification-worker"
-    tag: ""
+    tag: "1.0.43-rebrand"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -796,7 +936,7 @@ costRecorderWorker:
 
   image:
     repository: "llm-gateway/cost-recorder-worker"
-    tag: ""
+    tag: "1.0.47-websearch"  # = 라이브(dev·prod)
     pullPolicy: "IfNotPresent"
 
   serviceAccount:

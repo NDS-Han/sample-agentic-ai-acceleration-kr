@@ -26,7 +26,7 @@ class MantleAdapter(ProviderAdapter):
 
     NOT boto3 invoke_model. Targets POST {endpoint}/v1/messages on
     bedrock-mantle.{region}.api.aws/anthropic using a short-lived bearer minted
-    by MantleCredentialBroker (which assumes the cross-account 222 role).
+    by MantleCredentialBroker (which assumes the cross-account 905 role).
     Used for Cowork -> Tokyo Opus 4.8.
     """
 

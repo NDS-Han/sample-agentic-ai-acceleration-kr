@@ -25,6 +25,25 @@ logger = structlog.get_logger(__name__)
 MODEL_CACHE_TTL = 300  # 5분
 MODEL_LIST_CACHE_TTL = 300
 
+# The OpenAI **Responses** wire is served by two different Bedrock planes, and a client on
+# /v1/responses may legitimately use either — Mantle (bearer, openai.gpt-5.x) or the
+# standard runtime plane (SigV4, us./global. CRIS ids). Both are acceptable for the same
+# routing profile, so the model row's own provider — not the profile — decides which
+# adapter runs. Anything OUTSIDE this tuple (a Bedrock-native or vLLM alias) must still be
+# unreachable from /v1/responses, which is why this is an allow-list and not a wildcard.
+OPENAI_RESPONSES_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.BEDROCK_MANTLE_OPENAI,
+    ProviderType.BEDROCK_RUNTIME_OPENAI,
+)
+
+# Same idea for the /v1/chat/completions wire: in-house vLLM plus the Bedrock runtime
+# plane, which serves the identical Chat dialect. Mantle is deliberately absent — the
+# shipped Mantle adapter only ever posts to /v1/responses.
+OPENAI_CHAT_PROVIDERS: tuple[ProviderType, ...] = (
+    ProviderType.OPENMODEL,
+    ProviderType.BEDROCK_RUNTIME_OPENAI,
+)
+
 
 class ModelInactiveError(LookupError):
     """An alias exists and matches the expected provider, but its status is INACTIVE.
@@ -74,6 +93,29 @@ def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -
     )
 
 
+def _parse_cached_model_list(cached: str) -> Optional[list[ModelConfigSchema]]:
+    """Parse a cached ``model:list`` payload, returning None on any failure.
+
+    Same defense as :func:`_parse_cached_model`, which the single-model path has had
+    since P0-④ — this path did not, and the asymmetry was the bug. ``model:list`` is a
+    single provider-agnostic key holding EVERY active model, so one unparseable entry
+    poisons the whole endpoint, and it stays poisoned for the full 300 s TTL because the
+    exception fires before any rebuild can run.
+
+    The realistic trigger is a rolling deploy, not corruption: a NEW pod writes the key
+    with a provider label (``BEDROCK_RUNTIME_OPENAI``) that an OLD pod's ``ProviderType``
+    does not know, and every old pod then 500s on ``GET /v1/models`` — an outage caused
+    by deploying, in the direction nobody tests. All-or-nothing is deliberate: silently
+    serving a filtered catalogue would make a model look deregistered, so we rebuild
+    from the DB instead (returning None = treat as a miss).
+    """
+    try:
+        return [ModelConfigSchema(**m) for m in json.loads(cached)]
+    except Exception:
+        logger.warning("model_list_cache_parse_failed_treating_as_miss", cache_key="model:list")
+        return None
+
+
 def _parse_cached_model(cached: str, model_ref: str) -> Optional[ModelConfigSchema]:
     """Parse a cached model:{alias} payload, returning None on any failure.
 
@@ -112,27 +154,39 @@ async def _fetch_latest_pricing(db: AsyncSession, alias: str) -> Optional[ModelP
 class RouterService:
     """모델 alias 조회 및 Key Scope 검사."""
 
-    async def resolve_bedrock_model(
+    async def _resolve_by_providers(
         self,
         redis,
         db: Optional[AsyncSession],
         model_ref: str,
+        providers: tuple[ProviderType, ...],
     ) -> ModelConfigSchema:
-        """Bedrock 경로: alias OR provider_model_id 둘 다 수용. 미등록은 LookupError.
+        """alias OR provider_model_id 로 모델 1건 해석 (provider 화이트리스트 적용).
+
+        ``resolve_bedrock_model`` / ``resolve_mantle_model`` / ``resolve_codex_model`` 의
+        공통 본문. 원래는 provider 1개만 비교하는 코드가 두 벌 복사돼 있었는데, OpenAI
+        Responses 와 Chat 이 각각 **두 개의 provider** (Mantle/runtime, vLLM/runtime) 로
+        서비스되면서 단일 비교로는 표현이 불가능해졌다. providers 가 1-튜플이면 동작은
+        기존과 완전히 동일하다(= 회귀 없음).
+
+        Redis 캐시는 provider 무관 단일 네임스페이스(``model:{ref}``)를 공유하므로,
+        캐시 히트 후에도 provider 화이트리스트를 **다시** 검사해야 한다. 그러지 않으면
+        예컨대 Bedrock-native alias 가 캐시에 있을 때 /v1/responses 로 도달한다.
 
         Raises:
-            LookupError: 미등록, INACTIVE, 또는 provider mismatch.
+            ModelInactiveError: alias 는 있으나 status=INACTIVE (운영자 kill switch).
+            LookupError: 미등록 또는 provider 화이트리스트 불일치.
         """
-        cache_key = f"model:{model_ref}"
+        provider_values = [p.value for p in providers]
 
         if redis is not None:
-            cached = await redis.get(cache_key)
+            cached = await redis.get(f"model:{model_ref}")
             if cached:
                 schema = _parse_cached_model(cached, model_ref)
                 if schema is not None:
                     if schema.status == ModelStatus.INACTIVE:
                         raise ModelInactiveError(f"Model '{schema.alias or model_ref}' is inactive")
-                    if schema.provider != ProviderType.BEDROCK:
+                    if schema.provider not in providers:
                         raise LookupError(f"Model alias '{model_ref}' not found")
                     return schema
                 # parse failed → fall through to DB rebuild (self-heal poison entry)
@@ -141,14 +195,14 @@ class RouterService:
             raise LookupError(f"Model alias '{model_ref}' not found (DB unavailable)")
 
         # alias 정확 매칭 우선, 없으면 provider_model_id fallback (동일 provider_model_id가
-        # 여러 alias에 매핑될 수 있으므로 first() 사용).
+        # 여러 alias에 매핑될 수 있으므로 limit(1) 사용).
         result = await db.execute(
             select(ModelAlias).where(
                 and_(
-                    ModelAlias.provider == "BEDROCK",
+                    ModelAlias.provider.in_(provider_values),
                     ModelAlias.alias == model_ref,
                 )
-            )
+            ).limit(1)
         )
         alias_row = result.scalar_one_or_none()
 
@@ -156,7 +210,7 @@ class RouterService:
             result = await db.execute(
                 select(ModelAlias).where(
                     and_(
-                        ModelAlias.provider == "BEDROCK",
+                        ModelAlias.provider.in_(provider_values),
                         ModelAlias.provider_model_id == model_ref,
                     )
                 ).limit(1)
@@ -177,6 +231,21 @@ class RouterService:
             await redis.setex(f"model:{schema.provider_model_id}", MODEL_CACHE_TTL, payload)
 
         return schema
+
+    async def resolve_bedrock_model(
+        self,
+        redis,
+        db: Optional[AsyncSession],
+        model_ref: str,
+    ) -> ModelConfigSchema:
+        """Bedrock 경로: alias OR provider_model_id 둘 다 수용. 미등록은 LookupError.
+
+        Raises:
+            LookupError: 미등록, INACTIVE, 또는 provider mismatch.
+        """
+        return await self._resolve_by_providers(
+            redis, db, model_ref, (ProviderType.BEDROCK,)
+        )
 
     async def resolve_mantle_model(
         self,
@@ -195,59 +264,7 @@ class RouterService:
         Raises:
             LookupError: 미등록, INACTIVE, 또는 provider mismatch.
         """
-        provider_value = expected_provider.value
-        if redis is not None:
-            cached = await redis.get(f"model:{model_ref}")
-            if cached:
-                schema = _parse_cached_model(cached, model_ref)
-                if schema is not None:
-                    if schema.status == ModelStatus.INACTIVE:
-                        raise ModelInactiveError(f"Model '{schema.alias or model_ref}' is inactive")
-                    if schema.provider != expected_provider:
-                        raise LookupError(f"Model alias '{model_ref}' not found")
-                    return schema
-                # parse failed → fall through to DB rebuild (self-heal poison entry)
-
-        if db is None:
-            raise LookupError(f"Model alias '{model_ref}' not found (DB unavailable)")
-
-        # alias 정확 매칭 우선, 없으면 provider_model_id fallback (동일 provider_model_id가
-        # 여러 alias에 매핑될 수 있으므로 first() 사용).
-        result = await db.execute(
-            select(ModelAlias).where(
-                and_(
-                    ModelAlias.provider == provider_value,
-                    ModelAlias.alias == model_ref,
-                )
-            )
-        )
-        alias_row = result.scalar_one_or_none()
-
-        if alias_row is None:
-            result = await db.execute(
-                select(ModelAlias).where(
-                    and_(
-                        ModelAlias.provider == provider_value,
-                        ModelAlias.provider_model_id == model_ref,
-                    )
-                ).limit(1)
-            )
-            alias_row = result.scalar_one_or_none()
-        if alias_row is None:
-            raise LookupError(f"Model alias '{model_ref}' not found")
-
-        if alias_row.status != "ACTIVE":
-            raise ModelInactiveError(f"Model '{alias_row.alias}' is inactive")
-
-        pricing_row = await _fetch_latest_pricing(db, alias_row.alias)
-        schema = _orm_to_schema(alias_row, pricing_row)
-
-        if redis is not None:
-            payload = schema.model_dump_json()
-            await redis.setex(f"model:{schema.alias}", MODEL_CACHE_TTL, payload)
-            await redis.setex(f"model:{schema.provider_model_id}", MODEL_CACHE_TTL, payload)
-
-        return schema
+        return await self._resolve_by_providers(redis, db, model_ref, (expected_provider,))
 
     async def resolve_codex_model(
         self,
@@ -255,10 +272,16 @@ class RouterService:
         db: Optional[AsyncSession],
         model_ref: str,
     ) -> ModelConfigSchema:
-        """Codex (Bedrock Mantle OpenAI Responses) 모델 해석. resolve_mantle_model 의
-        BEDROCK_MANTLE_OPENAI 특화 래퍼 — provider mismatch 시 LookupError."""
-        return await self.resolve_mantle_model(
-            redis, db, model_ref, expected_provider=ProviderType.BEDROCK_MANTLE_OPENAI
+        """/v1/responses 용 모델 해석 — **두 Bedrock plane 을 모두 수용**한다.
+
+        BEDROCK_MANTLE_OPENAI (bearer, openai.gpt-5.x) 와 BEDROCK_RUNTIME_OPENAI
+        (SigV4, us./global. CRIS) 는 동일한 Responses 방언을 쓰므로, 같은 클라이언트가
+        모델 이름만 바꿔 두 plane 을 오갈 수 있다. 어느 plane 으로 나갈지는 **해석된
+        모델 row 의 provider** 가 결정한다(routing profile 이 아니라). 그 외 provider
+        (Bedrock native / vLLM) 는 이 경로에서 여전히 도달 불가.
+        """
+        return await self._resolve_by_providers(
+            redis, db, model_ref, OPENAI_RESPONSES_PROVIDERS
         )
 
     async def alias_provider(self, redis, db, alias: str):
@@ -293,48 +316,18 @@ class RouterService:
         db: Optional[AsyncSession],
         alias: str,
     ) -> ModelConfigSchema:
-        """OPENMODEL alias 조회. 이번 단위에선 minimal 동작만 (다음 단위 vLLM에서 완성).
+        """/v1/chat/completions (+/v1/completions) 용 모델 해석.
+
+        in-house vLLM(OPENMODEL) 과 Bedrock runtime plane(BEDROCK_RUNTIME_OPENAI) 을 모두
+        수용한다 — 후자는 동일한 Chat Completions 방언을 SigV4 + CRIS 모델 id 로 서비스한다.
+        어느 어댑터로 나갈지는 해석된 row 의 provider 가 결정한다(routers/openai_compat).
+        Mantle 계열은 여기서 여전히 도달 불가(그 어댑터는 /v1/responses 전용).
 
         Raises:
-            LookupError: 미등록 또는 INACTIVE.
+            ModelInactiveError: alias 는 있으나 status=INACTIVE.
+            LookupError: 미등록 또는 provider 불일치.
         """
-        cache_key = f"model:{alias}"
-
-        if redis is not None:
-            cached = await redis.get(cache_key)
-            if cached:
-                schema = _parse_cached_model(cached, alias)
-                if schema is not None:
-                    if schema.status == ModelStatus.INACTIVE:
-                        raise ModelInactiveError(f"Model '{alias}' is inactive")
-                    if schema.provider != ProviderType.OPENMODEL:
-                        raise LookupError(f"Model '{alias}' not found")
-                    return schema
-                # parse failed → fall through to DB rebuild (self-heal poison entry)
-
-        if db is None:
-            raise LookupError(f"Model '{alias}' not found (DB unavailable)")
-
-        result = await db.execute(
-            select(ModelAlias).where(
-                and_(
-                    ModelAlias.provider == "OPENMODEL",
-                    ModelAlias.alias == alias,
-                )
-            )
-        )
-        alias_row = result.scalar_one_or_none()
-        if alias_row is None:
-            raise LookupError(f"Model '{alias}' not found")
-        if alias_row.status != "ACTIVE":
-            raise ModelInactiveError(f"Model '{alias}' is inactive")
-
-        pricing_row = await _fetch_latest_pricing(db, alias_row.alias)
-        schema = _orm_to_schema(alias_row, pricing_row)
-
-        if redis is not None:
-            await redis.setex(cache_key, MODEL_CACHE_TTL, schema.model_dump_json())
-        return schema
+        return await self._resolve_by_providers(redis, db, alias, OPENAI_CHAT_PROVIDERS)
 
     def check_key_scope(
         self,
@@ -374,7 +367,17 @@ class RouterService:
         if redis is not None:
             cached = await redis.get(cache_key)
             if cached:
-                return [ModelConfigSchema(**m) for m in json.loads(cached)]
+                schemas = _parse_cached_model_list(cached)
+                if schemas is not None:
+                    return schemas
+                # parse failed → drop the poisoned key so the rebuild below is not
+                # racing a still-poisoned entry, then fall through to the DB.
+                # delete (not just overwrite) because if the DB is also unavailable we
+                # must serve an empty list rather than keep 500ing for 300 s.
+                try:
+                    await redis.delete(cache_key)
+                except Exception:  # noqa: BLE001 — cache eviction must never fail a read
+                    logger.warning("model_list_cache_delete_failed", cache_key=cache_key)
 
         if db is None:
             return []

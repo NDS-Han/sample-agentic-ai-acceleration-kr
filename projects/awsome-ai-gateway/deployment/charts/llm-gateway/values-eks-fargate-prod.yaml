@@ -11,7 +11,7 @@
 #    동일하게 내려둠:
 #    - Ingress: HTTPS/ACM/WAF/도메인 대신 HTTP + host="" (방식 A)
 #    - OTel: sidecar → in-cluster (Chart sidecar ConfigMap 템플릿 미완성)
-#    - DEV_LOGIN_ENABLED: true (고객 SSO 교체 전이므로 dev-login 우회)
+#    - DEV_LOGIN_ENABLED: false (서명검증 없는 우회 경로 — prod 상시 차단, Cognito OIDC 사용)
 #    - notificationWorkerUser: "gateway" (별도 DB role 생성 회피)
 #    ACM ARN / 도메인 / SSO / DB role 정책에 맞춰 재설정할 것.
 # ============================================================================
@@ -31,7 +31,7 @@ database:
   enabled: false
   external:
     # CHANGE_ME (terraform output): RDS Proxy endpoint. terraform output -raw rds_proxy_endpoint
-    host: "<RDS_PROXY_ENDPOINT>"
+    host: "llm-gateway-prod.proxy-xxx.ap-northeast-2.rds.amazonaws.com"
     port: 5432
     name: "gateway"
     user: "gateway"
@@ -43,13 +43,13 @@ database:
     # migration Job 의 master 비번을 RDS 관리형 시크릿에서 **직접** 가져온다.
     # 왜: 수동 /llm-gateway/prod/db:master_password 에 값을 복사해 두는 방식은 관리형
     # 시크릿이 7일마다 자동 로테이션되므로(RotationEnabled=true) 반드시 어긋난다 —
-    # 실제로 두 값이 어긋난 드리프트를 겪었고, 그 상태로 helm upgrade 하면
-    # 마이그레이션 Job 이 인증에 실패한다.
+    # 실제로 prod 는 이 드리프트로 두 값이 달라져 있었고(해시 e7e439f6a264 vs
+    # 46079b8a29f3) 그 상태로 helm upgrade 하면 마이그레이션 Job 이 인증 실패한다.
     # dev 에서 수동 값을 고의로 오염시킨 음성 대조군으로 이 경로의 드리프트 내성을
     # 증명했다(rev83 통과). 이름은 describe-db-clusters 의 MasterUserSecret.SecretArn.
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언 — 라이브 정책 v2 로 반영).
-    masterPasswordRemoteKey: "rds!cluster-<uuid>"
+    masterPasswordRemoteKey: "rds!cluster-6516eb93-cacb-4a6d-8cbe-f7823369881c"
     masterPasswordRemoteProperty: "password"
     # pod 당 pool 50 (base 20 + burst 30). Aurora r7g.large max_connections ≈ 1800.
     # HPA max 30 × 50 = 1,500 → 한도의 83% 안전. RDS Proxy multiplex 로 실제는 더 여유.
@@ -70,7 +70,7 @@ redis:
   external:
     # CHANGE_ME (terraform output): ElastiCache configuration endpoint (cluster mode).
     # terraform output -raw elasticache_configuration_endpoint
-    host: "<ELASTICACHE_ENDPOINT>"
+    host: "clustercfg.llm-gateway-prod.xxx.apn2.cache.amazonaws.com"
     port: 6379
     tls: true
     clusterMode: true
@@ -161,10 +161,16 @@ gatewayProxy:
     # 1.0.54-phase2gw: 레포 HEAD 의 gateway-proxy 미배포분 6파일 반영(dev 와 동일 이미지).
     #   ⚠️ prod 행동 델타는 **로깅 추가뿐**임을 실측 확인: ① mantle_adapter /
     #   mantle_openai_adapter 는 비200 warning 에 error_body(500B) 추가 = 응답경로 무변경,
-    #   ② web_search_loop · agentcore_mcp_client 변경은 agentcore_gateway_url 이 빈 값이면
-    #      도달 불가(mcp_client None), ③ thinking_normalizer / tool_filter 신규 2개는
-    #      레포 전체에 호출처 0(미배선).
-    tag: "1.0.54-phase2gw"
+    #   ② web_search_loop · agentcore_mcp_client 변경은 prod 에서 도달 불가
+    #   (prod pod 실측 agentcore_gateway_url='' → mcp_client None,
+    #    기동로그 agentcore_mcp_client_configured 0건),
+    #   ③ thinking_normalizer / tool_filter 신규 2개는 레포 전체에 호출처 0(미배선).
+    # 1.0.55-runtimeplane: GPT-5.6 을 표준 bedrock-runtime plane 으로도 서비스
+    #   (sigv4_signer / bedrock_openai_adapter / openai_usage 신규 3파일 + provider enum
+    #   BEDROCK_RUNTIME_OPENAI 미러). Mantle 경로는 건드리지 않는다 — 같은 방언, 다른 plane.
+    #   ⚠️ 이 이미지는 provider enum 5라벨을 알아야 하므로 **migration(0031/0032)보다 먼저**
+    #   떠 있어야 한다. 그래서 2단계 배포: 이 태그 먼저 → 그다음 migration 태그.
+    tag: "1.0.55-runtimeplane"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
@@ -234,7 +240,12 @@ adminApi:
     #   그리고 E-1 잔존 2곳: scheduler/main.py(ROI 행을 실제로 **쓰는** cron)·internal.py 가
     #   UTC 월이라, 읽는 쪽만 KST 인 상태면 매월 1일 KST 00~09시에 새 달 행이 아예 생성되지
     #   않아 지표 전체가 0 으로 보인다(한쪽만 고치면 더 나빠지는 경우).
-    tag: "1.0.67-roifix"
+    # 1.0.68-invlogaudit: Bedrock invocation log 본문 감사(/admin/audit/invocation-log/
+    #   {config,reconcile,{bedrock_request_id}}) + provider enum BEDROCK_RUNTIME_OPENAI 미러.
+    #   prod 는 BEDROCK_INVOCATION_LOG_GROUP 을 주지 않으므로 /config 는 200+configured:false,
+    #   데이터 엔드포인트는 503 이다(라우터는 항상 등록되므로 404 아님).
+    #   ⚠️ scheduler.image.tag 와 반드시 동일하게 — enum 미러 누락은 READ 에서 죽는다.
+    tag: "1.0.68-invlogaudit"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
@@ -255,19 +266,43 @@ adminApi:
     enabled: true
     minAvailable: 2
   env:
-    # 고객 SSO 교체 전이므로 dev-login 허용.
-    # 고객 로그인 설정 필요 반드시 "false" 로 복구.
-    DEV_LOGIN_ENABLED: "true"
+    # 🔴 prod 에서는 반드시 "false".
+    # core/auth.py 의 _parse_dev_token 은 `dev.<base64url payload>.sig` 토큰을
+    # **서명 검증 없이** 파싱해 payload 의 role 을 그대로 신뢰한다. 이 값이 "true" 면
+    # 누구든 role=ADMIN 을 담은 임의 토큰(또는 admin_jwt 쿠키)으로 control-plane 전체를
+    # 관리자 권한으로 호출할 수 있다. prod 인그레스 3개가 모두 internet-facing 이므로
+    # 켜두면 인터넷에서 도달 가능한 무인증 관리자 우회가 된다.
+    # 관리자 로그인은 아래 oidc(Cognito) 경로를 쓴다 — 이미 enabled=true 이고
+    # adminBootstrap.emails 가 첫 운영자를 ClaudeAdmin 으로 승격한다.
+    DEV_LOGIN_ENABLED: "false"
     # CHANGE_ME (terraform output): Cognito User Pool ID. terraform output -raw cognito_user_pool_id
-    COGNITO_USER_POOL_ID: ""   # e.g. ap-northeast-2_XXXXXXXXX
+    COGNITO_USER_POOL_ID: "ap-northeast-2_oofmkaz81"
     COGNITO_REGION: "ap-northeast-2"
     COGNITO_SYNC_DEACTIVATE_MISSING: "true"
+
+    # ── Bedrock invocation log 감사 대조 — prod 는 **끈 상태로 둔다** ──
+    # 이 스위치는 리전 단위로 **계정 전체**의 요청/응답 본문을 CloudWatch 에 남긴다
+    # (모델·principal 단위 스코프가 없다). prod 에서 켜면 게이트웨이를 지나는 모든
+    # 사용자 프롬프트가 로그에 적재되므로, 개인정보/보존기간 승인 없이는 켜지 않는다.
+    # 지금은 키 자체를 두지 않는다 — 코드 기본값이 빈 문자열이고, 감사 엔드포인트는
+    # 503(미설정)을 반환한다(라우터는 등록돼 있으므로 404 가 아니다).
+    #
+    # 참고: prod terraform 루트에는 bedrock-invocation-logging 모듈을 **의도적으로 넣지
+    # 않았다**(dev 루트에만 있다). 승인 후 켤 때 dev/main.tf 의 module 블록 +
+    # providers.tf 의 aws.bedrock_openai 별칭 + outputs.tf 3개를 prod 루트로 복사하고
+    # enable_bedrock_invocation_logging=true 로 apply 한 뒤, 그 output 값을 여기 적는다.
+    # REGION 은 배포 리전이 아니라 모델 실행 리전이다(GPT-5.6 runtime plane = us-east-2).
+    # BODIES_ENABLED 는 별개 승인 사항이다 — 켜면 열람마다 audit_logs 에
+    # VIEW_INVOCATION_LOG_BODY 가 남는다.
+    # BEDROCK_INVOCATION_LOG_GROUP: ""
+    # BEDROCK_INVOCATION_LOG_REGION: "us-east-2"
+    # BEDROCK_INVOCATION_LOG_BODIES_ENABLED: "false"
 
   # ── OIDC (Cognito) ──
   oidc:
     enabled: true
     # CHANGE_ME (terraform output): cognito_issuer_url. 형식 https://cognito-idp.{region}.amazonaws.com/{pool_id}
-    issuerUrl: ""   # e.g. https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_XXXXXXXXX
+    issuerUrl: "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_oofmkaz81"
     audience: ""               # Cognito access_token 은 aud 없음 → 비워둠
     providerName: "oidc:cognito"
     groupsClaim: "cognito:groups"
@@ -305,9 +340,10 @@ adminUi:
     minReplicas: 2
     maxReplicas: 6
   env:
-    # admin-ui (Next.js) 도 dev-login route 를 렌더하려면 필요 (admin-api 와 별개 env).
-    # 고객 로그인 설정 필요 SSO 교체후 "false" 로 복구.
-    DEV_LOGIN_ENABLED: "true"
+    # admin-ui (Next.js) 의 dev-login route 렌더 스위치 (admin-api 와 별개 env).
+    # prod 는 "false" — adminApi 쪽과 반드시 짝을 맞춘다. 한쪽만 내리면 UI 에 버튼은
+    # 보이는데 API 가 401 을 주거나(또는 그 반대) 혼란만 남는다.
+    DEV_LOGIN_ENABLED: "false"
 
 scheduler:
   image:
@@ -317,7 +353,10 @@ scheduler:
     # 어긋나면 API 는 새 로직, 스케줄러는 옛 로직으로 집계해 지표가 갈린다.
     # ⚠️ 1.0.67-roifix 는 특히 이 값이 핵심이다: 고쳐진 NameError 는 **스케줄러 프로세스에서만**
     # 터지는 경로라(API 는 그 함수를 타지 않는다) adminApi 만 올리면 ROI 집계는 계속 실패한다.
-    tag: "1.0.67-roifix"
+    # 1.0.68-invlogaudit: adminApi 와 동일 이미지. 이 값만 뒤처지면 스케줄러의 SQLAlchemy
+    # provider enum 미러가 4라벨로 남아 0032 가 심은 BEDROCK_RUNTIME_OPENAI 행을 읽는 순간
+    # LookupError 로 모델 카탈로그 조회 전체가 깨진다(조용히 실패하지 않고 크게 죽는다).
+    tag: "1.0.68-invlogaudit"
   resources:
     requests:
       cpu: "250m"
@@ -395,7 +434,7 @@ costRecorderWorker:
 # 이 24 단계에 포함되는 파괴적/비가역 항목:
 #   - 0024: 활성 config 중복 제거(비활성화)는 **비가역** — downgrade 는 인덱스만 drop.
 #           적용 전 prod 활성 중복을 세어 0 건임을 확인해야 한다(dev 는 0 건 실측).
-#   - 0009/0017/0022/0028: routing_profiles 데이터 SET (Mantle/codex/333 x-account/GPT-5.6).
+#   - 0009/0017/0022/0028: routing_profiles 데이터 SET (Mantle/codex/374 x-account/GPT-5.6).
 #   - 0026: CREATE INDEX (CONCURRENTLY 아님 — env.py 가 transaction_per_migration=True)
 #           → 빌드 동안 usage_logs 쓰기 잠금. prod usage_logs 는 2 행이라 즉시 완료.
 # ⚠️ 1.0.50-models 로는 배포하지 말 것 — prod(0004) 에서 실제로 실패한 이미지다.
@@ -408,6 +447,16 @@ costRecorderWorker:
 # 1.0.51-initorder 는 두 backfill 을 각자의 인덱스 앞으로 옮긴 수정본이고,
 # prod 의 실제 0004 스키마를 복제한 일회용 pgvector/pg16 에서 0004→0028 24 단계를 완주 증명했다
 # (음성대조군: 같은 DB 에 1.0.50 을 돌려 동일 지점 실패 재현).
+# 1.0.52-head0033: 0029(llama-3-70b) · 0030(Sonnet 5 공시단가 정정 −33%) ·
+#   0031(provider enum BEDROCK_RUNTIME_OPENAI) · 0032(gpt-5.6-{sol,terra,luna} 별칭) ·
+#   0033(gpt-5.6-sol 프로모션 단가 정정) 을 포함한다. 이미지 내용은 실행 없이
+#   `docker create` + `docker export | tar -tf` 로 0028..0033 정확히 6개임을 확인했다.
+# ⚠️ 이 태그는 **앱 이미지(gateway-proxy 1.0.55 / adminApi·scheduler 1.0.68)가 먼저 떠서
+#   provider enum 5라벨을 아는 상태가 된 뒤에만** 올린다. migration 은 pre-upgrade hook
+#   (hook-weight -5)이라 항상 앱 롤보다 먼저 도므로, 한 번에 올리면 0032 가 심은
+#   BEDROCK_RUNTIME_OPENAI 행을 4라벨 구버전 파드가 읽어 모델 카탈로그가 LookupError 로 전멸한다.
+# ⚠️ 0031 은 `ALTER TYPE ... ADD VALUE` 이고 downgrade() 는 `pass` 다. Postgres 는 enum
+#   라벨을 지울 수 없으므로 **이 태그를 한 번 돌리면 provider enum 은 영구히 5라벨**이다.
 migration:
   image:
-    tag: "1.0.51-initorder"
+    tag: "1.0.52-head0033"

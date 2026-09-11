@@ -13,11 +13,11 @@
 | 연결 방식 | 환경변수 `ANTHROPIC_BASE_URL` + `gateway-cli`/`api-key-helper` 가 발급한 **Virtual Key(VK)** | 앱 config 파일(`Claude-3p/configLibrary/<uuid>.json`)의 `inferenceProvider: "gateway"` |
 | 인증 | `Authorization: Bearer <VK>` (api-key-helper 자동 주입) | `inferenceGatewayApiKey: <VK>` + `inferenceGatewayAuthScheme: bearer` |
 | 게이트웨이가 식별 | UA `claude-cli/... (external, cli)` → `client=claude-code` | UA `claude-cli/... (external, claude-desktop-3p)` → `client=cowork` |
-| 백엔드(현재 dev) | 333 Bedrock `InvokeModel` (Seoul) | **222 Bedrock Mantle Opus 4.8** (Tokyo) — routing_profiles 로 자동 라우팅 |
+| 백엔드(현재 dev) | 374 Bedrock `InvokeModel` (Seoul) | **905 Bedrock Mantle Opus 4.8** (Tokyo) — routing_profiles 로 자동 라우팅 |
 
-> 게이트웨이는 두 클라이언트를 **User-Agent** 로 자동 구분한다. 별도 설정 없이도 `usage_logs.client` 에 `claude-code` / `cowork` 로 기록되고, Cowork 트래픽은 routing_profiles 규칙에 따라 222 Mantle 로 라우팅된다.
+> 게이트웨이는 두 클라이언트를 **User-Agent** 로 자동 구분한다. 별도 설정 없이도 `usage_logs.client` 에 `claude-code` / `cowork` 로 기록되고, Cowork 트래픽은 routing_profiles 규칙에 따라 905 Mantle 로 라우팅된다.
 
-### 우리 환경의 실제 엔드포인트 (dev, 계정 333, HTTP ALB)
+### 우리 환경의 실제 엔드포인트 (dev, 계정 374, HTTP ALB)
 
 | 용도 | URL |
 |------|-----|
@@ -215,7 +215,7 @@ echo "백업 완료: ${APPLIED}.json.ORIGINAL"
 | `inferenceCredentialKind` | `"static"` (VK 직접 입력 시). **빠지면 "needs a fix" / degraded** — 실측으로 확인된 필수 키 | ✅ |
 | `inferenceGatewayApiKey` | VK. **빈 값 불가** | ✅ |
 | `inferenceGatewayAuthScheme` | `"bearer"` → `Authorization: Bearer <VK>` | ✅ |
-| `inferenceModels` | 모델명 리스트. 게이트웨이가 Cowork UA 를 보고 어떤 모델명이든 222 Mantle(`cowork-opus`)로 라우팅하므로 값 자체는 무관하나, **키가 있어야** 앱이 정상 인식 | ✅ |
+| `inferenceModels` | 모델명 리스트. 게이트웨이가 Cowork UA 를 보고 어떤 모델명이든 905 Mantle(`cowork-opus`)로 라우팅하므로 값 자체는 무관하나, **키가 있어야** 앱이 정상 인식 | ✅ |
 | `deploymentOrganizationUuid`, `disableDeploymentModeChooser` | 원본에 있던 배포 메타. **보존**(빠지면 "setup 필요" 경고) | 원본 유지 |
 
 > 터미널로 한 번에 쓰기 (원본 메타 보존 + gateway 전환). `$VK` 는 §A-2 에서 발급받은 값, `$CF` 는 CloudFront URL:
@@ -261,11 +261,11 @@ echo "백업 완료: ${APPLIED}.json.ORIGINAL"
 >   -H "anthropic-client-platform: desktop_app" -H "anthropic-version: 2023-06-01" \
 >   -d '{"model":"claude-opus-4-7","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}' \
 >   | python3 -c "import sys,json;d=json.load(sys.stdin);print('응답 model:',d.get('model'),'| id:',d.get('id','')[:18])"
-> # → "응답 model: claude-opus-4-8 | id: msg_bdrk_…" 이면 222 Mantle 정상.
+> # → "응답 model: claude-opus-4-8 | id: msg_bdrk_…" 이면 905 Mantle 정상.
 > ```
 > ⚠️ **모델에게 "너 누구냐" 물어보면 'Opus 4.5/4.x' 라 답할 수 있다 — 무시하라.** LLM 은 자기 백엔드를 모르고 학습 데이터의 이름을 답할 뿐이다. 라우팅 증거는 **응답 JSON 의 `.model` 필드**(=`claude-opus-4-8`)와 `.id`(=`msg_bdrk_…` Mantle 형식), 그리고 게이트웨이 `usage_logs`(아래)다.
 
-4. **게이트웨이 기록 확인** (관리자/테스터): Admin UI 대시보드 **앱별 비용 점유율** 위젯에 `Cowork` 항목이 생기거나 늘어난다. Cowork 트래픽은 **222 Mantle Opus 4.8**(Tokyo)로 라우팅되고 `usage_logs.client='cowork'`, `provider='BEDROCK_MANTLE'`, `model_alias='cowork-opus'` 로 기록된다. DB 직접 확인(admin-api pod 내부):
+4. **게이트웨이 기록 확인** (관리자/테스터): Admin UI 대시보드 **앱별 비용 점유율** 위젯에 `Cowork` 항목이 생기거나 늘어난다. Cowork 트래픽은 **905 Mantle Opus 4.8**(Tokyo)로 라우팅되고 `usage_logs.client='cowork'`, `provider='BEDROCK_MANTLE'`, `model_alias='cowork-opus'` 로 기록된다. DB 직접 확인(admin-api pod 내부):
    ```bash
    # kubectl exec … -c admin-api -- python  (app.core.db engine 사용; RDS Proxy 라 raw asyncpg 는 ssl 옵션 미지원)
    SELECT client, provider, model_alias, count(*), round(sum(cost_usd),6)
@@ -348,13 +348,13 @@ gateway-cli login --issuer-url "https://cognito-idp.ap-northeast-2.amazonaws.com
 
 Cowork 는 HTTPS origin(`originPinned`)을 요구하므로 게이트웨이 ALB(HTTP) 앞에 CloudFront 를 세운다. **dev(333) 는 이미 생성됨**: `https://<CLOUDFRONT_DOMAIN>` (분포 ID `<CLOUDFRONT_DISTRIBUTION_ID>`).
 
-새 환경에서 만들 때 (계정 가드 필수 — 333 확인):
+새 환경에서 만들 때 (계정 가드 필수 — 374 확인):
 ```bash
 export AWS_PROFILE=llm-gateway AWS_REGION=ap-northeast-2
 aws sts get-caller-identity --query Account --output text   # == 333344445555 확인
 ALB="<GATEWAY_HOST>"  # gateway-proxy ALB
 # dist-config 템플릿(POST/SSE, http-only origin, redirect-to-https, *.cloudfront.net 인증서)에 ALB 주입
-jq --arg ref "llm-gw-cowork-333-$(date +%s)" --arg alb "$ALB" \
+jq --arg ref "llm-gw-cowork-374-$(date +%s)" --arg alb "$ALB" \
    --arg c "LLM gateway-proxy HTTPS front for Claude CoWork" \
    '.CallerReference=$ref | .Comment=$c | .Origins.Items[0].DomainName=$alb' \
    dist-config.json > /tmp/cf.json
@@ -377,4 +377,4 @@ aws cloudfront wait distribution-deployed --id <위 Id>   # ~15-20분(실측 2�
 - 전체 아키텍처 + 데이터플로우: [`../../ARCHITECTURE.md`](../../ARCHITECTURE.md)
 - 사용자 가이드(gateway-cli 상세): [`user-guide.md`](user-guide.md)
 
-> **엔드포인트 주의**: 이 문서의 URL 은 **dev(계정 333, HTTP ALB)** 기준이다. 운영/HTTPS(CloudFront) 전환 시 `inferenceGatewayBaseUrl` / `ANTHROPIC_BASE_URL` 만 그 값으로 교체하면 절차는 동일하다.
+> **엔드포인트 주의**: 이 문서의 URL 은 **dev(계정 374, HTTP ALB)** 기준이다. 운영/HTTPS(CloudFront) 전환 시 `inferenceGatewayBaseUrl` / `ANTHROPIC_BASE_URL` 만 그 값으로 교체하면 절차는 동일하다.

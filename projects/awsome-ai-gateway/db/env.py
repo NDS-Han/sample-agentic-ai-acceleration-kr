@@ -2,6 +2,7 @@
 
 import asyncio
 import os
+import re
 from logging.config import fileConfig
 
 from alembic import context
@@ -31,20 +32,39 @@ if db_url and db_url.startswith("postgresql://") and "+asyncpg" not in db_url:
 # If DB_MASTER_PASSWORD env is set, rebuild the URL with properly quoted password.
 # Cannot use urlparse here because chars like [ ] in the password break parsing.
 if db_url and os.getenv("DB_MASTER_PASSWORD"):
-    import re
     from urllib.parse import quote
     safe_password = quote(os.getenv("DB_MASTER_PASSWORD"), safe="")
     # Replace password between :// user : password @ host
     db_url = re.sub(r'(://[^:]+:)[^@]+(@)', rf'\g<1>{safe_password}\2', db_url, count=1)
 
-# DEBUG: Print which URL is being used (mask password)
+# DEBUG: 어떤 URL 이 쓰이는지만 남긴다 — 자격증명은 절대 찍지 않는다.
+# ⚠️ 예전 코드는 `db_url[:40]` 을 찍고 주석에 "mask password" 라고 적어두었지만,
+#    실제로는 마스킹이 아니었다. `postgresql+asyncpg://<user>:` 접두사가
+#    30~35자(`postgres`=30, prod 의 `postgres_admin`=35)라서 40자 컷은 비밀번호
+#    앞 5~10자를 그대로 노출한다. 실측(로컬 PG16, 2026-09-09):
+#    `[ENV.PY DEBUG] Using URL starting with: postgresql+asyncpg://postgres:NOT-A-REAL-PW...`
+#    (예시의 비번은 대체값이다 — 이 파일에 실제 조각을 남기면 이 수정이 막으려는 유출을
+#     주석으로 다시 저지르게 된다. 실측 당시엔 비번 앞 10자가 그대로 찍혔다.)
+#    migration Job 은 매 helm install/upgrade 마다 dev·prod 양쪽에서 돌고 stdout 은
+#    CloudWatch Logs 에 보존되므로, 그대로 두면 master 비번 앞부분이 로그에 축적된다.
+#    userinfo 구간(`://user:pass@`) 을 통째로 지운다.
+def _redact_credentials(url: str) -> str:
+    """`scheme://user:pass@host/db` → `scheme://<redacted>@host/db`.
+
+    `[^/]*` 는 authority 구간을 벗어나지 못하므로(path 는 `/` 로 시작) 탐욕적으로
+    잡아도 안전하고, 비밀번호에 `@` 가 인코딩 없이 들어와도 마지막 `@` 까지 지운다.
+    자격증명이 없는 URL 은 매치되지 않아 그대로 남는다.
+    """
+    return re.sub(r"://[^/]*@", "://<redacted>@", url)
+
+
 print(f"[ENV.PY DEBUG] DB_MASTER_URL exists: {bool(db_master)}")
 print(f"[ENV.PY DEBUG] DB_URL exists: {bool(db_app)}")
 if db_url:
-    # Show first 40 chars to see which connection string is used
-    print(f"[ENV.PY DEBUG] Using URL starting with: {db_url[:40]}...")
+    # host/db 는 진단에 필요하므로 남기고 자격증명만 제거.
+    print(f"[ENV.PY DEBUG] Using URL: {_redact_credentials(db_url)}")
 else:
-    print(f"[ENV.PY DEBUG] ERROR: No database URL found!")
+    print("[ENV.PY DEBUG] ERROR: No database URL found!")
 
 
 # transaction_per_migration=True commits each migration script independently

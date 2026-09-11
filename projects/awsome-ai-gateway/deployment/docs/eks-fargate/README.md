@@ -46,6 +46,7 @@ pwd  # /Users/.../LLM-Gateway-Vanilla 여야 함
 ```bash
 export ENV=dev          # 또는 prod
 export AWS_REGION=ap-northeast-2
+export AWS_DEFAULT_REGION=$AWS_REGION # 둘 다 export (01-prerequisites.md §3.2 참고)
 export AWS_PROFILE=claude-proxy-dev   # 본인 AWS profile
 ```
 

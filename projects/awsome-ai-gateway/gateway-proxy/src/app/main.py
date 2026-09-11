@@ -25,6 +25,7 @@ from app.middleware.otel import HeaderInjectorMiddleware, OTelMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.observability import GatewayMetrics, init_otel, shutdown_otel
 from app.providers.bedrock_adapter import BedrockAdapter
+from app.providers.bedrock_openai_adapter import BedrockOpenAIAdapter
 from app.providers.mantle_adapter import MantleAdapter
 from app.providers.mantle_openai_adapter import MantleOpenAIAdapter
 from app.providers.openmodel_adapter import OpenModelAdapter
@@ -46,6 +47,7 @@ from app.services.lua_loader import LuaScriptLoader
 from app.services.mantle_credentials import MantleCredentialBroker
 from app.services.rate_limit_service import set_fail_open_metric
 from app.services.routing_profile_loader import RoutingProfileLoader
+from app.services.sigv4_signer import SigV4Signer
 from app.services.tokenizer import TokenizerService
 
 logger = structlog.get_logger(__name__)
@@ -155,8 +157,8 @@ async def lifespan(app: FastAPI):
     provider_registry.register(ProviderType.BEDROCK, bedrock_adapter)
     provider_registry.register(ProviderType.OPENMODEL, openmodel_adapter)
 
-    # 12b. Mantle (Cowork cross-account) — broker assumes the 222 role at request time
-    # (no long-lived 222 keys held). Mantle is HTTP+bearer, NOT boto3 invoke_model.
+    # 12b. Mantle (Cowork cross-account) — broker assumes the 905 role at request time
+    # (no long-lived 905 keys held). Mantle is HTTP+bearer, NOT boto3 invoke_model.
     sts_client = boto3.client("sts", region_name=settings.mantle_assume_region)
     mantle_broker = MantleCredentialBroker(sts_client=sts_client)
     mantle_http = httpx.AsyncClient(
@@ -174,8 +176,22 @@ async def lifespan(app: FastAPI):
     mantle_openai_adapter = MantleOpenAIAdapter(http_client=mantle_http, broker=mantle_broker)
     provider_registry.register(ProviderType.BEDROCK_MANTLE_OPENAI, mantle_openai_adapter)
 
-    # 12c'. Cross-account Bedrock NATIVE (claude-code → 333). Assumes the 333 role at
-    # request time (no long-lived 333 keys), builds/caches a bedrock-runtime client from
+    # 12c''. Bedrock RUNTIME OpenAI (GPT-5.6 via CRIS, 2026-09-03). Same OpenAI wires as
+    # 12c but the STANDARD plane: bedrock-runtime.{region}.amazonaws.com/openai, SigV4
+    # instead of a bearer, and a cross-region inference-profile model id (us./global.).
+    # Reuses mantle_http — identical traffic shape (long-lived SSE POSTs to an AWS
+    # endpoint), so one connection pool with one timeout policy serves both planes.
+    # Same STS client as the other cross-account paths; when a routing profile has no
+    # account_role_arn the signer uses the pod's own IRSA identity (in-account).
+    # Registering unconditionally is safe: nothing routes here until a model row carries
+    # provider=BEDROCK_RUNTIME_OPENAI, so this is inert until the catalogue opts in.
+    bedrock_openai_adapter = BedrockOpenAIAdapter(
+        http_client=mantle_http, signer=SigV4Signer(sts_client=sts_client)
+    )
+    provider_registry.register(ProviderType.BEDROCK_RUNTIME_OPENAI, bedrock_openai_adapter)
+
+    # 12c'. Cross-account Bedrock NATIVE (claude-code → 374). Assumes the 374 role at
+    # request time (no long-lived 374 keys), builds/caches a bedrock-runtime client from
     # the temp creds. boto3 invoke_model, NOT Mantle bearer. Reuses the same STS assume
     # region + BotoConfig as the in-account client (streaming timeout parity). The router
     # only uses this when a routing profile has backend=invoke AND account_role_arn set;

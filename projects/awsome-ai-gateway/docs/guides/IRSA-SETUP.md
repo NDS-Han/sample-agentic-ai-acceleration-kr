@@ -73,13 +73,13 @@ InAccountMantleBearer       bedrock-mantle:CallWithBearerToken                  
 AgentCoreInvokeGateway      bedrock-agentcore:InvokeGateway
                             -> arn:aws:bedrock-agentcore:us-east-1:<ACCOUNT>:gateway/*
 AssumeCoworkMantle          sts:AssumeRole -> var.cowork_role_arn            # 변수 비면 렌더 안 됨
-AssumeClaudeCode374Bedrock  sts:AssumeRole -> var.claude_code_333_role_arn   # 변수 비면 렌더 안 됨
+AssumeClaudeCode374Bedrock  sts:AssumeRole -> var.claude_code_374_role_arn   # 변수 비면 렌더 안 됨
 ```
 ([modules/irsa/main.tf:27-130](../../deployment/terraform/modules/irsa/main.tf#L27-L130))
 
 핵심 3가지:
 - **Mantle 은 `bedrock:` 가 아니라 `bedrock-mantle:` 네임스페이스입니다.** 라이브 배포에서 어렵게 확인된 사항이며, 손으로 최소권한 정책을 다시 쓸 때 가장 많이 놓칩니다.
-- **Mantle 리전은 변수가 아니라 `local.mantle_regions = ["ap-northeast-1","us-east-2"]` 하드코딩**입니다([:21](../../deployment/terraform/modules/irsa/main.tf#L21)). 세 번째 리전을 쓰려면 **모듈을 수정**해야 하며 tfvars 로 덮을 수 없습니다.
+- **Mantle 리전은 `var.mantle_regions` 로 주입**합니다([:24](../../deployment/terraform/modules/irsa/main.tf#L24), 사용처 [:69](../../deployment/terraform/modules/irsa/main.tf#L69)). 기본값 `["ap-northeast-1","us-east-2"]`(라이브와 동일)은 **각 env 의 `environments/llm-gateway-{dev,prod}/variables.tf` 에만** 있습니다 — 모듈 변수는 default 가 없는 **필수 인자**라, env root 가 인자를 빠뜨리면 `tofu validate` 단계에서 "Missing required argument" 로 떨어집니다(default 가 있으면 대신 Tokyo+Ohio 로 조용히 폴백합니다). 세 번째 리전이 필요하면 **모듈 수정 없이** tfvars 에서 `mantle_regions = [...]` 로 덮어씁니다. `nullable = false` 라 명시적 `null` 은 **에러가 아니라 default 로 대체**됩니다(실측 2026-09-07: `mantle_regions = null` → `["ap-northeast-1","us-east-2"]`). 이것으로 모듈 안의 `for` 표현식이 "Iteration over null value" 로 죽는 경로가 막힙니다. 반면 **`[]` 는 validation 이 plan 단계에서 거부**합니다 — 통과시키면 IAM statement 가 Resource 없이 렌더돼 apply 중간에 MalformedPolicyDocument 로 죽습니다.
 - **AgentCore 는 `us-east-1` 고정**입니다(관리형 WebSearch 커넥터가 us-east-1 전용). 다른 리전에 게이트웨이를 만들면 AccessDenied 이고 모듈 수정이 필요합니다.
 
 ---
@@ -340,14 +340,14 @@ kubectl exec -n "$NS" deploy/"$DEPLOY" -- \
 
 ---
 
-## 6. cross-account 확장 (cowork → 222, claude-code → 333)
+## 6. cross-account 확장 (cowork → 905, claude-code → 374)
 
 이 게이트웨이는 클라이언트별로 **다른 AWS 계정**의 Bedrock 을 호출할 수 있습니다. terraform 은 **호출자(caller) 측 권한만** 만듭니다. 타깃 계정의 역할은 별도로 만들어야 합니다.
 
 | 클라이언트 | 타깃 | 방식 | ExternalId |
 |---|---|---|---|
-| `cowork` | 222 (Tokyo) | Bedrock **Mantle** (bearer) | `cowork-bedrock` |
-| `claude-code` | 333 | Bedrock **native** (boto3) | `claude-code-bedrock` |
+| `cowork` | 905 (Tokyo) | Bedrock **Mantle** (bearer) | `cowork-bedrock` |
+| `claude-code` | 374 | Bedrock **native** (boto3) | `claude-code-bedrock` |
 | `codex` | 동일 계정 | Mantle in-account (assume 불필요) | — |
 
 ### 6-1. 호출자 측 (terraform)
@@ -355,7 +355,7 @@ kubectl exec -n "$NS" deploy/"$DEPLOY" -- \
 ```hcl
 # deployment/terraform/environments/<env>/terraform.tfvars
 cowork_role_arn          = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
-claude_code_333_role_arn = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+claude_code_374_role_arn = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
 ```
 
 **빈 문자열이면 `sts:AssumeRole` statement 가 아예 렌더되지 않습니다** — terraform 오류 없이 cross-account 기능이 조용히 사라집니다([modules/irsa/main.tf:103-129](../../deployment/terraform/modules/irsa/main.tf#L103-L129)).
@@ -368,7 +368,7 @@ FROM model.routing_profiles ORDER BY client;
 
 ### 6-2. 타깃 계정 측
 
-**cowork (222)** — 커밋된 멱등 스크립트가 있습니다. **222 자격증명으로** 실행하십시오.
+**cowork (222)** — 커밋된 멱등 스크립트가 있습니다. **905 자격증명으로** 실행하십시오.
 
 ```bash
 # dev 만 신뢰 (스크립트 기본값)
@@ -389,7 +389,7 @@ GATEWAY_PROXY_ROLE_ARNS="arn:aws:iam::<ACCT>:role/llm-gateway-dev-gateway-proxy-
     "Condition": { "StringEquals": { "sts:ExternalId": "cowork-bedrock" } } }] }
 ```
 
-**순서가 중요합니다**: 222 신뢰정책이 123 IRSA 역할 ARN 을 지목하므로 **terraform apply 가 먼저**입니다.
+**순서가 중요합니다**: 905 신뢰정책이 859 IRSA 역할 ARN 을 지목하므로 **terraform apply 가 먼저**입니다.
 
 **claude-code (333)** — **프로비저닝 스크립트가 없습니다. 수동 생성해야 합니다.** 권한은 **Bedrock native** 여야 하며 `bedrock-mantle:*` 를 넣으면 안 됩니다(claude-code 는 boto3 native). foundation-model 과 inference-profile ARN 을 **모두** 넣어야 합니다([§2-3](#2-3-bedrock_allowed_model_arns--필수-입력이자-가장-흔한-403-원인) 과 동일한 이유).
 
@@ -486,7 +486,7 @@ UPDATE model.routing_profiles SET account_role_arn=NULL WHERE client='claude-cod
 |---|---|---|
 | `module "irsa"` 인자 수 | **9** | **7** |
 | `cowork_role_arn` | 전달 | ❌ 없음 |
-| `claude_code_333_role_arn` | 전달 | ❌ 없음 |
+| `claude_code_374_role_arn` | 전달 | ❌ 없음 |
 | 렌더되는 statement 수 | **7** | **5** |
 
 ([llm-gateway-dev/main.tf:55-68](../../deployment/terraform/environments/llm-gateway-dev/main.tf#L55-L68) vs [llm-gateway-prod/main.tf:51-62](../../deployment/terraform/environments/llm-gateway-prod/main.tf#L51-L62) — prod 의 `main.tf`/`variables.tf` 에서 두 변수 grep 결과 **0건**)
@@ -502,14 +502,14 @@ UPDATE model.routing_profiles SET account_role_arn=NULL WHERE client='claude-cod
 ```hcl
 # 1) llm-gateway-prod/variables.tf — 변수 선언 추가
 variable "cowork_role_arn"          { type = string; default = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock" }
-variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock" }
+variable "claude_code_374_role_arn" { type = string; default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock" }
 
 # 2) llm-gateway-prod/main.tf — module "irsa" 에 추가
   cowork_role_arn          = var.cowork_role_arn
-  claude_code_333_role_arn = var.claude_code_333_role_arn
+  claude_code_374_role_arn = var.claude_code_374_role_arn
 ```
 ```
-# 3) 222 / 333 자격증명으로 타깃 역할 신뢰정책에 prod IRSA 역할 ARN 추가
+# 3) 905 / 374 자격증명으로 타깃 역할 신뢰정책에 prod IRSA 역할 ARN 추가
 #    arn:aws:iam::<ACCT>:role/llm-gateway-prod-gateway-proxy-bedrock
 ```
 
@@ -525,15 +525,15 @@ variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333
 | **403** `bedrock-mantle:CreateInference` 거부 | Mantle Sid 누락/리전 | [§1](#gateway-proxy-정책의-sid-인벤토리) + (B) 배포 정책 확인 |
 | **401** `Mantle (OpenAI) stream HTTP 401` | 서명 리전 불일치 또는 파드 신원 | bearer 는 발급됐고(아니면 502) 업스트림이 거부한 상태 → ① 서명 리전이 호출 리전과 같은지 ② 파드가 기대한 역할로 붙었는지([§5](#5-step-3--검증-전부-읽기-전용)) ③ 애노테이션 변경 후 재기동했는지([§4-3](#4-3-애노테이션-변경은-파드를-재기동하지-않으면-반영되지-않는다)) |
 | **502** `Mantle (OpenAI) auth failed` | 자격증명 획득 실패 (assume/신뢰/OIDC) | (A)(B)(D) |
-| **502** cowork 전 요청 | `AssumeCoworkMantle` 누락 또는 타깃 신뢰/ExternalId | [§6](#6-cross-account-확장-cowork--222-claude-code--333), [§7](#7-prod-드리프트--가장-큰-지뢰) |
+| **502** cowork 전 요청 | `AssumeCoworkMantle` 누락 또는 타깃 신뢰/ExternalId | [§6](#6-cross-account-확장-cowork--905-claude-code--374), [§7](#7-prod-드리프트--가장-큰-지뢰) |
 | **200 인데 계정이 틀림** | claude-code 조용한 폴백 | [§6-4](#6-4-claude-code-는-실패해도-200-을-반환한다), [§6-5 ②](#6-5-검증) |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 신뢰 subject 불일치 (네임스페이스/SA 이름) | [§4-4](#4-4-네임스페이스), (A) |
 | ExternalSecret 이 계속 실패 | ESO 역할/시크릿 경로 | [§9](#9-함정-모음) 선행 슬래시 항목 |
 | 애노테이션은 맞는데 계속 실패 | **파드 미재기동** | [§4-3](#4-3-애노테이션-변경은-파드를-재기동하지-않으면-반영되지-않는다) |
 
 > **로그 공백 주의** — Mantle 자격증명 브로커는 logger 를 바인딩만 하고 **한 번도 호출하지 않습니다**([mantle_credentials.py:14](../../gateway-proxy/src/app/services/mantle_credentials.py#L14)). STS AssumeRole·IRSA 취득·bearer 발급·캐시 히트/미스 전부 **로그 0줄**입니다. 이 계층은 CloudTrail 로 봐야 합니다:
-> - `AssumeRole` `RoleSessionName=gw-mantle` → cowork → 222 Mantle
-> - `AssumeRole` `RoleSessionName=gw-bedrock-xacct` → claude-code → 333 native
+> - `AssumeRole` `RoleSessionName=gw-mantle` → cowork → 905 Mantle
+> - `AssumeRole` `RoleSessionName=gw-bedrock-xacct` → claude-code → 374 native
 
 ---
 
@@ -549,9 +549,9 @@ variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333
 | 6 | `terraform.tfvars.example` 을 그대로 복사 | Bedrock 허용목록이 조용히 축소 → 403 |
 | 7 | tfvars 없이 apply | `enable_chat_agent=false` → plan 이 ~24개 삭제 제안 |
 | 8 | `bootstrap-tfstate.sh` 기본값 사용 | 버킷 이름 불일치 → init 실패 |
-| 9 | 수동 helm 경로 + 123 리터럴 | 타 계정 역할 ARN 주입 ([§4-2](#4-2-수동-helm-경로를-쓸-때)) |
+| 9 | 수동 helm 경로 + 859 리터럴 | 타 계정 역할 ARN 주입 ([§4-2](#4-2-수동-helm-경로를-쓸-때)) |
 | 10 | Mantle 에 `bedrock:` 권한 부여 | `bedrock-mantle:` 네임스페이스여야 함 |
-| 11 | 333 에 `bedrock-mantle:*` 부여 | claude-code 는 native → 실패, 게다가 폴백에 가려짐 |
+| 11 | 374 에 `bedrock-mantle:*` 부여 | claude-code 는 native → 실패, 게다가 폴백에 가려짐 |
 | 12 | 타깃 역할 `MaxSessionDuration` 900초 | AssumeRole `ValidationError` |
 | 13 | `routing:{client}` 캐시 삭제 | no-op, 5분간 옛 값 |
 | 14 | OIDC provider 수동 생성 | provider 2개 → 신뢰 불일치 |
@@ -561,8 +561,8 @@ variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333
 
 ### 사용하지 말아야 할 레거시 산출물
 
-- **`scripts/create_cowork_mantle_iam.sh`** — 333 를 **게이트웨이 계정**으로 가정하던 시절의 스크립트입니다(333 는 2026-07-05 cutover 이후 claude-code **타깃** 계정). 지금 실행하면 **잘못된 주체로 신뢰정책을 쓰고** `bedrock-mantle:*` 대신 `bedrock:*` 를 부여합니다. 또한 인라인 정책을 IRSA 역할에 직접 붙이므로 terraform 이 관리하는 attached policy 에서 **보이지 않고 apply 로도 제거되지 않습니다.**
-- **`mantle_credentials.py` 의 docstring**, **`db/init/03_seed_data.sql`**, **`docs/guides/connect.md`** 의 333 관련 서술은 **stale** 합니다(claude-code 를 in-account 로 기술). [§6](#6-cross-account-확장-cowork--222-claude-code--333) 과 마이그레이션 0022 를 신뢰하십시오.
+- **`scripts/create_cowork_mantle_iam.sh`** — 374 를 **게이트웨이 계정**으로 가정하던 시절의 스크립트입니다(374 는 2026-07-05 cutover 이후 claude-code **타깃** 계정). 지금 실행하면 **잘못된 주체로 신뢰정책을 쓰고** `bedrock-mantle:*` 대신 `bedrock:*` 를 부여합니다. 또한 인라인 정책을 IRSA 역할에 직접 붙이므로 terraform 이 관리하는 attached policy 에서 **보이지 않고 apply 로도 제거되지 않습니다.**
+- **`mantle_credentials.py` 의 docstring**, **`db/init/03_seed_data.sql`**, **`docs/guides/connect.md`** 의 374 관련 서술은 **stale** 합니다(claude-code 를 in-account 로 기술). [§6](#6-cross-account-확장-cowork--905-claude-code--374) 과 마이그레이션 0022 를 신뢰하십시오.
 
 ### 보안 리뷰에서 지적될 항목
 
@@ -580,10 +580,10 @@ variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333
 2. **EKS pod-identity mutating webhook 의 실제 주입 동작**. `AWS_ROLE_ARN` / `AWS_WEB_IDENTITY_TOKEN_FILE` 을 참조하는 레포 파일이 없습니다. "애노테이션 변경은 파드 재생성이 필요하다"는 결론은 **차트 측 근거**(파드 템플릿에 SA 파생 해시 없음)로만 증명했습니다.
 3. **라이브 클러스터의 실제 네임스페이스**. 레포 근거는 `llm-gateway` 를 가리키지만 문서 헤더들이 서로 다릅니다.
 4. **`llm-gateway-prod` 가 실제로 apply 된 적이 있는지**, prod IRSA 역할이 라이브에 존재하는지.
-5. **333 타깃 역할의 실제 신뢰/권한 정책**. 레포에 스크립트·terraform·JSON 이 **전혀 없습니다**. [§6-2](#6-2-타깃-계정-측)의 claude-code 정책 형태는 cowork 스크립트 구조 + IRSA 모듈의 Bedrock action/ARN 에서 **유도한 것**입니다.
-6. **333 역할의 `MaxSessionDuration` 실제 값**. cowork 스크립트만 `--max-session-duration 3600` 을 설정합니다.
+5. **374 타깃 역할의 실제 신뢰/권한 정책**. 레포에 스크립트·terraform·JSON 이 **전혀 없습니다**. [§6-2](#6-2-타깃-계정-측)의 claude-code 정책 형태는 cowork 스크립트 구조 + IRSA 모듈의 Bedrock action/ARN 에서 **유도한 것**입니다.
+6. **374 역할의 `MaxSessionDuration` 실제 값**. cowork 스크립트만 `--max-session-duration 3600` 을 설정합니다.
 7. **재사용된 Mantle bearer 가 IAM 상 `bedrock:CallWithBearerToken` 으로 평가되는지 `bedrock-mantle:CallWithBearerToken` 으로 평가되는지**. 토큰 생성기의 SigV4 service name 은 `"bedrock"` 인데 terraform 이 부여하는 것은 `bedrock-mantle:CallWithBearerToken` 입니다. 모듈 주석은 라이브 probe 로 확인했다고 적고 있으나 이 문서에서 IAM 호출로 재확인하지는 못했습니다.
-8. **`AmazonBedrockMantleInferenceAccess`** (일부 고객 안내 문서가 권장하는 AWS 관리형 정책)가 222 역할에 실제로 쓰이는지. 레포 스크립트는 `mantle-invoke` 라는 **인라인** 정책에 `bedrock-mantle:*` 를 넣습니다.
+8. **`AmazonBedrockMantleInferenceAccess`** (일부 고객 안내 문서가 권장하는 AWS 관리형 정책)가 905 역할에 실제로 쓰이는지. 레포 스크립트는 `mantle-invoke` 라는 **인라인** 정책에 `bedrock-mantle:*` 를 넣습니다.
 9. **cluster-mode ElastiCache 에서의 `DEL`**. [§6-3](#6-3-db-변경-후-redis-캐시-무효화-필수) 스니펫은 레포의 in-pod redis 패턴에서 유도했으며 CROSSSLOT 회피를 위해 키를 하나씩 지웁니다.
 10. **`alembic current` / `SELECT version_num FROM alembic_version`** 은 레포에 존재하지 않는 명령입니다. 레포에 있는 리비전 확인 수단은 `alembic upgrade head` 와 Helm values 의 migration 이미지 태그 고정뿐입니다.
 11. **CloudTrail 조회 CLI** 는 레포에 없습니다. [§8](#8-증상--원인-매핑)의 `RoleSessionName` 값은 소스 코드에서 확인한 것이지만, `aws cloudtrail lookup-events` 명령 자체는 이 문서에서 새로 작성한 것입니다.
@@ -599,7 +599,7 @@ variable "claude_code_333_role_arn" { type = string; default = "arn:aws:iam::333
 [ ] bedrock_allowed_model_arns 에 foundation-model + inference-profile
     (AWS소유형 + 계정스코프형) 모두 있다                                 (§2-3)
 [ ] terraform apply 성공, output 3개 확인                              (§3)
-[ ] install-eks.sh 로 배포했다 (또는 values 의 123 리터럴을 교체했다)     (§4)
+[ ] install-eks.sh 로 배포했다 (또는 values 의 859 리터럴을 교체했다)     (§4)
 [ ] SA 애노테이션 확인 후 rollout restart 했다                          (§4-3)
 [ ] 배포된 정책의 DefaultVersionId 를 조회해 Sid 목록을 확인했다          (§5 B)
 [ ] 파드 안에서 get_caller_identity 가 의도한 역할/계정을 반환한다        (§5 D)

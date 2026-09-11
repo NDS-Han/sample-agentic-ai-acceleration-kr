@@ -186,7 +186,14 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
             {fieldErrors.alias && <FormError error={fieldErrors.alias} />}
           </div>
 
-          {/* Provider */}
+          {/* Provider — ⚠️ 편집 모드에서는 alias 와 마찬가지로 읽기 전용이다.
+              PUT /admin/models/{alias} 의 ModelUpdateRequest 에는 provider/api_format 이
+              없고(admin-api/src/app/schemas/models.py) update 서비스·리포지토리에도 변경
+              경로가 없어 admin API 로는 바꿀 수 없는 불변 필드다. 예전엔 여기서 드롭다운을
+              바꿀 수 있었고 updateModelAction 은 provider 를 아예 보내지도 않으므로
+              (lib/actions/models.ts:95~) 성공 토스트만 뜨고 값은 반영되지 않았다 —
+              화면과 DB 가 갈라지는 조용한 실패. 지금은 스키마가 422 로 거부하기도 하지만,
+              애초에 저장 못 하는 컨트롤을 열어 두지 않는다. */}
           <div className="space-y-1">
             <label htmlFor="provider" className="text-sm font-medium">
               Provider <span className="text-destructive">*</span>
@@ -197,7 +204,8 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               value={form.provider}
               onChange={handleChange}
               required
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              disabled={isEditMode}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <option value="">{t('selectProvider')}</option>
               <option value="BEDROCK">BEDROCK</option>
@@ -207,7 +215,17 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                   매칭되도록 옵션을 노출한다. */}
               <option value="BEDROCK_MANTLE">BEDROCK_MANTLE (Cowork · Opus)</option>
               <option value="BEDROCK_MANTLE_OPENAI">BEDROCK_MANTLE_OPENAI (Codex · GPT)</option>
+              {/* 표준 bedrock-runtime plane (SigV4 + CRIS). Mantle 과 달리 endpoint_url 이
+                  **필수**다 — 어댑터가 endpoint 호스트에서 서명 리전을 뽑아내므로
+                  (bedrock-runtime.{region}.amazonaws.com) 비워 두면 서명할 수 없다.
+                  provider_model_id 는 us./global. 접두사가 붙은 추론 프로파일 ID 여야 한다. */}
+              <option value="BEDROCK_RUNTIME_OPENAI">BEDROCK_RUNTIME_OPENAI (GPT-5.6 · CRIS)</option>
             </select>
+            {isEditMode && (
+              <p className="text-xs text-muted-foreground">
+                {t('providerReadonly')}
+              </p>
+            )}
             {fieldErrors.provider && <FormError error={fieldErrors.provider} />}
           </div>
 

@@ -19,6 +19,8 @@ from app.core.exceptions import NotFoundError
 from app.models.auth import KeyStatus, User, VirtualKey
 from app.repositories.key_repository import KeyRepository
 from app.repositories.model_repository import TeamAllowedModelRepository
+from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
+from app.repositories.user_allowed_model_repository import UserAllowedModelRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.keys import KeyCreateResponse, KeyResponse
 
@@ -115,12 +117,53 @@ class KeyService:
             if user is None:
                 raise NotFoundError("User", str(user_id))
 
+        # ── AuthContext 스냅샷 (gateway-proxy 가 캐시 히트 시 그대로 되살린다) ──
+        # ⚠️ 이 payload 는 gateway-proxy 가 `AuthContext(**data)` 로 **검증 없이 복원**한다
+        #    (gateway-proxy/src/app/services/auth_service.py:66). 즉 여기서 빠뜨린 인가
+        #    필드는 캐시가 사는 동안 "제한 없음" 으로 동작하고, 그 사이 gateway 는 DB 를
+        #    보지 않으므로 아무도 눈치채지 못한다. 예전엔 두 군데가 새고 있었다:
+        #
+        #    1) allowed_models 를 team_allowed_models **만으로** 채웠다. gateway 의 정책은
+        #       user > team > none 인데(auth_service.py:87-121), user_allowed_models 로 더
+        #       좁혀 놓은 사용자가 VK 를 새로 받으면 캐시 TTL 동안 **팀 화이트리스트로
+        #       넓어졌다** — 사용자 단위 제한(국가핵심기술)이 통째로 무력화된다.
+        #       user_allowed_model_repository 의 주석도 "0행 = 팀 폴백, 그 분기는
+        #       key_service / auth_service 가 책임진다" 라고 적어 두었는데 여기가 빠져 있었다.
+        #    2) allowed_clients 를 아예 넣지 않았다 → AuthContext 기본값 None = 전 클라이언트
+        #       허용이라 ClientAuthorizationMiddleware(403)가 통과시킨다. VK + allowed_clients
+        #       는 ARCHITECTURE.md 가 명시한 유일한 클라이언트 인가 축이다(UA 는 스푸핑 가능).
+        #
+        #    그래서 gateway 와 같은 우선순위·같은 필드로 계산한다. 정합성은
+        #    tests/regression 의 AuthContext 필드 대조 테스트가 못 박는다.
+        acl_snapshot_ok = True
         allowed_models: list[str] | None = None
-        if user.team_id is not None:
-            tam_repo = TeamAllowedModelRepository(session)
-            team_aliases = await tam_repo.list_by_team(user.team_id)
-            # 엔트리 0개 → None (전체 허용). 엔트리 존재 → 화이트리스트.
-            allowed_models = team_aliases if team_aliases else None
+        allowed_clients: list[str] | None = None
+        try:
+            uam_repo = UserAllowedModelRepository(session)
+            user_aliases = await uam_repo.list_by_user(user_id)
+            if user_aliases:
+                # user override 존재 → 팀 정책은 보지 않는다(gateway 와 동일).
+                allowed_models = user_aliases
+            elif user.team_id is not None:
+                tam_repo = TeamAllowedModelRepository(session)
+                team_aliases = await tam_repo.list_by_team(user.team_id)
+                # 엔트리 0개 → None (전체 허용). 엔트리 존재 → 화이트리스트.
+                allowed_models = team_aliases if team_aliases else None
+
+            uac_repo = UserAllowedClientRepository(session)
+            client_rows = await uac_repo.list_by_user(user_id)
+            allowed_clients = client_rows if client_rows else None
+        except Exception:
+            # 스냅샷은 콜드캐시 DB 왕복을 아끼기 위한 **최적화**일 뿐이다. 정책을 못 읽었으면
+            # 넓은 스냅샷을 심는 대신 아예 심지 않는다 — gateway 가 첫 요청에서 직접 조회하고
+            # 자기 fail-closed 규칙(auth_service.py:99-107)을 적용한다. VK 발급은 살린다.
+            acl_snapshot_ok = False
+            logger.warning(
+                "key.acl_snapshot_skipped",
+                user_id=str(user_id),
+                reason="allowed_models/allowed_clients 조회 실패 — gateway 가 직접 조회한다",
+                exc_info=True,
+            )
 
         auth_context_payload = {
             "user_id": str(user.id),
@@ -130,6 +173,7 @@ class KeyService:
             "auth_type": "VIRTUAL_KEY",
             "key_id": None,
             "allowed_models": allowed_models,
+            "allowed_clients": allowed_clients,
             "sso_subject": user.sso_subject,
         }
         auth_cache_ttl = min(VK_AUTH_CACHE_TTL, seconds_until_expiry)
@@ -139,11 +183,12 @@ class KeyService:
         redis = self._cache_mgr._redis
         pipe = redis.pipeline(transaction=False)
         pipe.setex(f"key:vk:{key_hash}", seconds_until_expiry, f"{user_id}")
-        pipe.setex(
-            f"key:cache:vk:{key_hash}",
-            auth_cache_ttl,
-            json.dumps(auth_context_payload),
-        )
+        if acl_snapshot_ok:
+            pipe.setex(
+                f"key:cache:vk:{key_hash}",
+                auth_cache_ttl,
+                json.dumps(auth_context_payload),
+            )
         if user.team_id is not None:
             pipe.sadd(f"team:vk_hashes:{user.team_id}", key_hash)
         await pipe.execute()

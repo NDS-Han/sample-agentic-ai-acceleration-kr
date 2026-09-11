@@ -105,7 +105,7 @@ export AWS_PROFILE=your-profile
 ```bash
 aws --version        # aws-cli/2.x
 terraform version    # Terraform v1.9.0+
-kubectl version --client  # Client Version: v1.29+
+kubectl version --client  # Client Version: v1.30 ~ v1.32 (클러스터 1.31 ±1 minor, 권장 v1.31.x)
 helm version         # v3.14+
 docker --version     # Docker version 24+ (또는 finch)
 jq --version         # jq-1.6+
@@ -121,8 +121,15 @@ brew install awscli
 brew tap hashicorp/tap
 brew install hashicorp/tap/terraform
 
-# kubectl
-brew install kubectl
+# kubectl — `brew install kubectl` 은 최신(현재 1.37)을 깔지만 클러스터는 1.31 이라
+# 지원 skew(±1 minor)를 벗어난다. 버전을 맞춰 설치한다.
+ARCH=$(uname -m | sed 's/x86_64/amd64/')          # Apple Silicon 은 arm64 그대로
+KVER=$(curl -L -s https://dl.k8s.io/release/stable-1.31.txt)   # 예: v1.31.14
+curl -LO "https://dl.k8s.io/release/${KVER}/bin/darwin/${ARCH}/kubectl"
+chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+# ⚠️ brew 로는 안 된다. 1.31 클러스터의 skew 안에 드는 formula 두 개가 모두 disabled 다
+#    (kubernetes-cli@1.31 → 2025-10-28, kubernetes-cli@1.32 → 2026-02-28, 확인: brew info <formula>).
+#    brew install kubernetes-cli 는 최신(1.37)을 깔아 skew 를 벗어난다. 위 curl 경로를 쓸 것.
 
 # Helm
 brew install helm
@@ -147,8 +154,9 @@ unzip awscliv2.zip && sudo ./aws/install
 wget https://releases.hashicorp.com/terraform/1.9.8/terraform_1.9.8_linux_amd64.zip
 unzip terraform_1.9.8_linux_amd64.zip && sudo mv terraform /usr/local/bin/
 
-# kubectl
-curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+# kubectl — ⚠️ stable.txt 는 전체 최신(현재 v1.37)을 가리켜 클러스터 1.31 과의
+# 지원 skew(±1 minor)를 벗어난다. minor 고정 채널 stable-1.31.txt 를 쓴다.
+curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable-1.31.txt)/bin/linux/amd64/kubectl"
 sudo install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
 # Helm
@@ -175,8 +183,21 @@ cd LLM-Gateway-Vanilla
 ```bash
 export ENV=dev                         # dev | prod
 export AWS_REGION=ap-northeast-2
+export AWS_DEFAULT_REGION=$AWS_REGION  # 둘 다 필요 — 아래 참고
 export AWS_PROFILE=claude-proxy-dev    # 본인 profile 이름
 ```
+
+⚠️ **`AWS_REGION` 과 `AWS_DEFAULT_REGION` 을 둘 다 export** 할 것. AWS CLI v2 는 둘 다 읽으므로
+(우선순위: `AWS_REGION` > `AWS_DEFAULT_REGION` > profile 의 `region`) **CLI 만 쓸 거면 한쪽으로 충분하다.**
+둘 다 필요한 이유는 CLI 가 아니라 **같이 도는 다른 것들**이다 — 일부 SDK·terraform provider·헬퍼
+스크립트는 `AWS_DEFAULT_REGION` 만 보거나 그 반대다. 한쪽만 세팅하면 CLI 명령은 맞는 리전을 치는데
+그 옆의 도구는 **profile/`~/.aws/config` 의 리전으로 조용히 빠져** 두 리전에 리소스가 갈린다.
+
+💡 `--region` 없는 명령이 "없음" 을 돌려주면, 원인은 대개 이 변수가 아니라 **profile 의 region 이
+의도한 배포 리전과 다른 것**이다. 먼저 `aws configure get region --profile "$AWS_PROFILE"` 를 확인할 것.
+
+`install-eks.sh` 는 스크립트 첫머리에서 `AWS_REGION` → `AWS_DEFAULT_REGION` →
+`aws configure get region` 순으로 해석하고, 셋 다 비면 추측하지 않고 종료한다.
 
 ✅ 아래 명령이 성공해야 함:
 ```bash
@@ -239,7 +260,7 @@ Hosted Zone이 없으면:
 - [ ] `aws sts get-caller-identity` 성공
 - [ ] `terraform version` v1.9+
 - [ ] `helm version` v3.14+
-- [ ] `kubectl version --client` v1.29+
+- [ ] `kubectl version --client` v1.30 ~ v1.32 (클러스터 1.31 ±1 minor)
 - [ ] `jq --version` v1.6+
 - [ ] Bedrock `list-foundation-models` 에서 Claude 모델 ACTIVE 확인
 - [ ] (선택) Route53 Hosted Zone 확인

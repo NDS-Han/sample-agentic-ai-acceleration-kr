@@ -65,9 +65,12 @@ async def test_responses_stream_reframes_and_captures_usage():
     assert text.endswith("\n\n")
     # Usage captured from the terminal event, with reasoning as a submetric.
     u = captured["usage"]
-    assert u.input_tokens == 14 and u.output_tokens == 63 and u.total_tokens == 77
+    # input_tokens 14 INCLUDES cached_tokens 2 on the Responses wire → billable input is 12.
+    # Must match mantle_openai_adapter exactly (same prompt, streamed vs non-streamed).
+    assert u.input_tokens == 12 and u.output_tokens == 63 and u.total_tokens == 77
     assert u.reasoning_tokens == 52  # submetric, NOT added to output/total
     assert u.cache_read_input_tokens == 2
+    assert u.input_tokens + u.cache_read_input_tokens == 14
 
 
 @pytest.mark.asyncio

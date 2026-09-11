@@ -8,6 +8,7 @@ import { Download, ChevronDown } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { resolveMonth } from '@/lib/utils/period';
+import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
 interface ExportButtonProps {
   filter: AnalyticsFilterForm;
@@ -55,6 +56,12 @@ export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
       const params = new URLSearchParams(exportParams).toString();
 
       const response = await fetch(`/api/analytics-export?${params}`);
+      // ⚠️ 401 을 아래 throw 로 흘리면 console.error 만 남고 화면엔 아무 변화가 없다 —
+      //    사용자는 버튼이 그냥 안 먹는다고 생각한다. 세션이 죽었으면 로그인으로 보낸다.
+      //    403(권한 부족)은 여기 걸리지 않는다.
+      if (redirectToLoginIfUnauthorized(response)) {
+        return;
+      }
       if (!response.ok) {
         throw new Error(`내보내기 실패: ${response.status}`);
       }

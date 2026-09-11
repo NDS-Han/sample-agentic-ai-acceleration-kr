@@ -38,6 +38,7 @@ import structlog
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
 
@@ -176,6 +177,22 @@ def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     acc.cache_ttl_1h = acc.cache_ttl_1h or turn.cache_ttl_1h
     acc.estimated = acc.estimated or turn.estimated
     return acc
+
+
+def _wire_input(usage: TokenUsage) -> int:
+    """Billing buckets → the cache-INCLUSIVE prompt count the OpenAI wires report.
+
+    The inverse of ``split_openai_input``: TokenUsage keeps the three prompt buckets
+    mutually exclusive for costing, while the client (Codex CLI reads this to track its
+    context window) expects the grand total with both cache buckets folded in. Kept as one
+    function because the streaming and non-streaming loops both rewrite usage on the way
+    out and must agree.
+    """
+    return (
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens
+    )
 
 
 def _sse(event: str, data: dict) -> bytes:
@@ -703,13 +720,13 @@ async def _responses_stream(
                     resp_obj = ev.get("response") or {}
                     final_response_obj = resp_obj
                     final_terminal_type = etype  # preserve incomplete/failed, don't fake completed (F-1)
-                    u = resp_obj.get("usage") or {}
-                    in_d = u.get("input_tokens_details") or {}
-                    out_d = u.get("output_tokens_details") or {}
-                    merged.input_tokens += int(u.get("input_tokens", 0) or 0)
-                    merged.output_tokens += int(u.get("output_tokens", 0) or 0)
-                    merged.cache_read_input_tokens += int(in_d.get("cached_tokens", 0) or 0)
-                    merged.reasoning_tokens += int(out_d.get("reasoning_tokens", 0) or 0)
+                    # Responses `input_tokens` INCLUDES both cached_tokens and
+                    # cache_write_tokens — parse per turn into exclusive buckets before
+                    # accumulating, so merged.input_tokens stays the non-cached billable
+                    # input (TokenUsage contract). Per TURN, not on the final sum: each
+                    # turn caches a different amount, and typically exactly one turn of a
+                    # search loop writes the cache while the rest read it.
+                    _merge_usage(merged, extract_responses_usage(resp_obj))
                     # captured; emit our own terminal event at envelope close
                 elif etype == "error":
                     error_seen = True  # NEW round2 High-1: do not also emit a fake completed
@@ -800,11 +817,21 @@ def _finalize_responses_obj(
             if not (isinstance(it, dict) and it.get("type") == "function_call"
                     and it.get("call_id") in our_call_ids)
         ]
+    # WIRE representation, not the billing one: Responses `input_tokens` must be the GRAND
+    # TOTAL prompt count (cache reads AND cache writes included), because that is what the
+    # OpenAI spec says and what Codex CLI reads to track context. merged.input_tokens is
+    # the non-cached billing bucket, so add both cache buckets back on the way out.
+    # Emitting the billing value here would produce cached_tokens > input_tokens — an
+    # impossible payload. Both sub-counters are echoed for the same reason.
+    wire_input = _wire_input(merged)
     obj["usage"] = {
-        "input_tokens": merged.input_tokens,
+        "input_tokens": wire_input,
         "output_tokens": merged.output_tokens,
-        "total_tokens": merged.input_tokens + merged.output_tokens,
-        "input_tokens_details": {"cached_tokens": merged.cache_read_input_tokens},
+        "total_tokens": wire_input + merged.output_tokens,
+        "input_tokens_details": {
+            "cached_tokens": merged.cache_read_input_tokens,
+            "cache_write_tokens": merged.cache_creation_input_tokens,
+        },
         "output_tokens_details": {"reasoning_tokens": merged.reasoning_tokens},
     }
     return obj
@@ -895,9 +922,12 @@ async def _responses_nonstream(
                 logger.warning("web_search.on_usage_failed")
 
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
-        final_body["usage"]["input_tokens"] = merged.input_tokens
+        # Same wire-vs-billing split as _finalize_responses_obj: the client must see the
+        # cache-INCLUSIVE prompt count that the Responses spec defines.
+        wire_input = _wire_input(merged)
+        final_body["usage"]["input_tokens"] = wire_input
         final_body["usage"]["output_tokens"] = merged.output_tokens
-        final_body["usage"]["total_tokens"] = merged.input_tokens + merged.output_tokens
+        final_body["usage"]["total_tokens"] = wire_input + merged.output_tokens
     return JSONResponse(status_code=final_status, content=final_body)
 
 

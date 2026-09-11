@@ -1,0 +1,211 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# LLM Gateway — CI  (repo-root workflow for projects/awsome-ai-gateway)
+#
+# ⚠️ 이 파일은 **레포 루트** .github/workflows/ 에 있어야 한다. GitHub Actions 는 루트의
+#    .github/workflows/ 만 읽는다 — projects/awsome-ai-gateway/.github/workflows/ 에 두면
+#    파일은 존재하지만 **한 번도 실행되지 않는다**(있어 보이는데 없는 CI 가 가장 나쁘다).
+#    그래서 working-directory 를 PROJECT_DIR 로 접두어 붙인다.
+#
+# 왜 이 파일이 뒤늦게 추가됐나: 레포에 CI 설정이 **하나도 없었다.** 그래서 ~1600개
+# 테스트가 아무것도 강제하지 않았고, 실제로 그 사이에 스위트가 조용히 RED 로 갔다
+# (gateway-proxy 는 라이브 스택 skip 게이트가 없어 3 failed + 10 errors,
+# admin-api 는 에러 봉투 정규화가 두 테스트를 깨뜨린 채였다).
+#
+# ⚠️ 이 워크플로는 **AWS 를 절대 만지지 않는다.** 자격증명을 주입하지 않고,
+#    실 AWS 를 쓰는 테스트는 전부 opt-in env(RUN_REAL_BEDROCK / RUN_INVOCATION_LOG_LIVE /
+#    REDIS_CLUSTER_URL) 로 잠겨 있어 여기서는 skip 된다. gateway-proxy 의
+#    tests/regression/test_high_suite_is_green_and_hermetic_by_default.py 가 그 성질을
+#    테스트로 고정한다(그 파일이 없으면 CI 가 조용히 실 Bedrock 을 호출·과금했다).
+#
+# ⚠️ 라이브 스택(docker compose)이 필요한 integration 테스트는 여기서 **skip** 된다.
+#    이유는 tests/integration/conftest.py 참고 — 그 테스트들은
+#    /internal/test/issue-key 로 실사용 가능한 VK 를 발급하므로 아무 대상에나 돌리면 안 된다.
+#    compose 를 띄우는 별도 job 은 의도적으로 넣지 않았다(현재 compose 는 alembic head 에
+#    도달하지 못한다 — postgres:16-alpine 에 pgvector 확장이 없어 migration 0005 가 실패).
+
+name: awsome-ai-gateway CI
+
+# ⚠️ 이 레포는 멀티 프로젝트 모노레포다. paths 필터로 이 프로젝트가 바뀔 때만 돌려서
+#    다른 projects/* 의 PR 에 무관한 체크가 붙지 않게 한다.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "projects/awsome-ai-gateway/**"
+      - ".github/workflows/awsome-ai-gateway-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "projects/awsome-ai-gateway/**"
+      - ".github/workflows/awsome-ai-gateway-ci.yml"
+
+# 최소 권한 — 이 워크플로는 읽기만 필요하다.
+permissions:
+  contents: read
+
+concurrency:
+  group: awsome-ai-gateway-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 로컬 .venv 와 같은 버전. pyproject 는 >=3.11 이지만 개발·배포 실측은 3.12 다.
+  PYTHON_VERSION: "3.12"
+  # admin-ui Dockerfile 의 node:20-alpine 과 맞춘다(빌드와 CI 가 갈리면 의미가 없다).
+  NODE_VERSION: "20"
+  # 이 워크플로가 담당하는 프로젝트 경로(모노레포).
+  PROJECT_DIR: "projects/awsome-ai-gateway"
+
+jobs:
+  python-tests:
+    name: pytest · ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # 한 서비스가 실패해도 나머지 결과를 보고 싶다 — 어디까지 번졌는지가 정보다.
+      fail-fast: false
+      matrix:
+        service:
+          - admin-api
+          - gateway-proxy
+          - cost-recorder-worker
+          - notification-worker
+          - admin-chat-agent
+          - gateway-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/${{ matrix.service }}/uv.lock
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # --frozen: uv.lock 을 그대로 쓴다. 이게 없으면 lock 이 조용히 갱신돼 CI 가
+      # 로컬·배포와 다른 의존성으로 통과할 수 있다.
+      - name: Sync dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        # ⚠️ AWS 관련 env 를 주입하지 않는다. 특히 AWS_BEARER_TOKEN_BEDROCK 이 있으면
+        #    SigV4 경로를 덮어써 검증 자체가 무의미해진다.
+        run: uv run pytest -q -p no:cacheprovider
+
+  db-guards:
+    name: pytest · db/tests (init SQL 정적 가드)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # db/ 는 자체 pyproject 가 없다 — 이 가드들은 표준 라이브러리(ast/pathlib/re)만 쓴다.
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: pytest
+        run: python -m pytest ${{ env.PROJECT_DIR }}/db/tests -q -p no:cacheprovider
+
+  admin-ui:
+    name: admin-ui · vitest + typecheck + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.PROJECT_DIR }}/admin-ui/package-lock.json
+
+      # npm ci: package-lock.json 을 그대로 설치한다(npm install 은 lock 을 갱신할 수 있다).
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm ci
+
+      - name: vitest
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm test
+
+      # tsc / eslint 는 현재 **완전히 깨끗하다** → 하드 게이트로 둔다.
+      # (파이썬 ruff 는 기존 부채가 있어 아래 lint-ratchet 에서 다르게 다룬다.)
+      - name: typecheck (tsc --noEmit)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm run typecheck
+
+      - name: lint (next lint)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm run lint
+
+  lint-ratchet:
+    name: ruff ratchet · ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # baseline = 이 커밋 시점의 실측 위반 수. 늘어나면 실패한다.
+        #
+        # ⚠️ 왜 "0 이어야 한다" 가 아니라 ratchet 인가: 기존 위반이 753건이라
+        #    0 을 요구하면 CI 를 도입할 수 없고, 도입을 미루면 아무것도 강제되지 않는
+        #    지금 상태가 계속된다. 신규 유입만 막고 숫자는 내려가게 둔다.
+        #    ⚠️ 한계: 개수 비교이므로 "1개 추가 + 무관한 1개 수정" 은 통과한다.
+        #    파일/규칙 단위 정밀 게이트는 부채를 실제로 줄인 뒤에 도입하는 게 맞다.
+        include:
+          - service: admin-api
+            baseline: 76
+          - service: gateway-proxy
+            baseline: 467
+          - service: cost-recorder-worker
+            baseline: 22
+          - service: notification-worker
+            baseline: 101
+          - service: admin-chat-agent
+            baseline: 1
+          - service: gateway-cli
+            baseline: 82
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/${{ matrix.service }}/uv.lock
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        run: uv sync --frozen --all-extras --dev
+
+      - name: ruff — 위반 수가 baseline 을 넘지 않는지
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        env:
+          BASELINE: ${{ matrix.baseline }}
+        run: |
+          set -uo pipefail
+          # ruff 는 위반이 있으면 exit 1 이다 — 개수만 세려는 것이므로 실패를 삼킨다.
+          # 각 위반은 `path:line:col: CODE msg` 한 줄이다(concise).
+          uv run ruff check --output-format=concise . > /tmp/ruff.txt 2>&1 || true
+          COUNT=$(grep -cE '^[^:]+:[0-9]+:[0-9]+: ' /tmp/ruff.txt || true)
+          COUNT=${COUNT:-0}
+          echo "ruff 위반: ${COUNT} (baseline ${BASELINE})"
+          # 대조군 — 파싱이 빗나가 항상 0 이면 이 게이트는 공허하다.
+          if [ "$BASELINE" -gt 0 ] && [ "$COUNT" -eq 0 ]; then
+            echo "::error::baseline 이 ${BASELINE} 인데 0건으로 셌다 — ruff 출력 파싱이 깨졌다."
+            head -20 /tmp/ruff.txt
+            exit 1
+          fi
+          if [ "$COUNT" -gt "$BASELINE" ]; then
+            echo "::error::lint 위반이 늘었다: ${COUNT} > ${BASELINE}. 새로 생긴 항목을 고치거나, 정당하게 줄인 경우 .github/workflows/ci.yml 의 baseline 을 낮춰 갱신하세요."
+            # 무엇이 늘었는지 보이게 남긴다.
+            sort /tmp/ruff.txt | uniq -c | sort -rn | head -30
+            exit 1
+          fi
+          if [ "$COUNT" -lt "$BASELINE" ]; then
+            echo "::notice::lint 위반이 ${BASELINE} → ${COUNT} 로 줄었습니다. ci.yml 의 baseline 을 ${COUNT} 로 낮춰 주세요(ratchet)."
+          fi

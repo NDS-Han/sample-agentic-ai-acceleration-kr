@@ -121,3 +121,24 @@ output "chat_agent_reader_secret_arn" {
   value       = try(module.agentcore_runtime[0].chat_reader_secret_arn, null)
   description = "gateway_chat_reader 비밀번호 secret ARN (apply 후 password 설정 필요)"
 }
+
+# ─── Bedrock invocation logging (admin-api 감사 대조 설정값) ───
+# helm values 의 `adminApi.env.BEDROCK_INVOCATION_LOG_GROUP` /
+# `adminApi.env.BEDROCK_INVOCATION_LOG_REGION` 에 그대로 옮긴다(차트에 전용 블록은 없다 —
+# admin-api 앱 설정은 전부 adminApi.env 자유 map 을 통과한다. values-eks-fargate-dev.yaml
+# 의 adminApi.env 주석 참조). install-eks.sh 는 이 두 값을 자동 주입하지 않는다:
+# 리전 단위로 계정 전체 본문을 수집하는 스위치라 운영자가 명시적으로 적어야 한다.
+# 꺼져 있으면 logGroup 이 빈 문자열이고, admin-api 는 감사 엔드포인트를 404 가 아니라
+# 503(미설정)으로 응답한다 — UI 가 "기능 없음" 과 "안 켬" 을 구분할 수 있어야 한다.
+output "bedrock_invocation_log_group" {
+  value       = module.bedrock_invocation_logging.log_group_name
+  description = "admin-api BEDROCK_INVOCATION_LOG_GROUP 값 (미사용 시 빈 문자열)"
+}
+output "bedrock_invocation_log_region" {
+  value       = module.bedrock_invocation_logging.log_region
+  description = "admin-api BEDROCK_INVOCATION_LOG_REGION — 배포 리전이 아니라 모델 실행 리전(us-east-2)"
+}
+output "bedrock_invocation_log_bucket" {
+  value       = module.bedrock_invocation_logging.large_body_bucket
+  description = ">100KB 본문 sidecar S3 버킷. admin-api 는 읽지 않는다(권한 없음, 포인터만 노출)"
+}

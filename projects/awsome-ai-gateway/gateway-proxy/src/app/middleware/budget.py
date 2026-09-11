@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 
 import structlog
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.periods import current_kst_period
 from app.services.budget_service import BudgetService
 
 logger = structlog.get_logger(__name__)
@@ -53,7 +53,10 @@ class BudgetMiddleware:
 
         redis = state.get("_redis")
         session_factory = state.get("_session_factory")
-        period = datetime.now(tz=timezone.utc).strftime("%Y-%m")
+        # KST 월 — 예산 카운터를 쓰는 쪽(cost_recorder.py)과 같은 경계여야 한다.
+        # UTC 였을 때는 매월 1일 KST 00:00~09:00 동안 지난달 카운터를 계속 조회해,
+        # 지난달 예산을 소진한 사용자/팀이 새 달 첫 9시간 동안 차단된 채로 남았다.
+        period = current_kst_period()
 
         from app.schemas.domain import DegradationLevel
 

@@ -5,6 +5,7 @@
 
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
+import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
 
 export interface DashboardSummary {
   period: string;
@@ -59,10 +60,10 @@ export interface AvailablePeriods {
  * 빈 DB / 엔드포인트 미배포(404) 시 현재 달력월로 graceful fallback.
  */
 export async function fetchAvailablePeriods(): Promise<AvailablePeriods> {
-  const now = new Date();
-  const ym = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  const thisMonth = ym(now);
-  const lastMonth = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  // KST 기준 — 백엔드 집계 버킷과 일치시킨다. pod 로컬(UTC)로 계산하면 매월 1일
+  // 00:00~09:00 KST 사이에 "이번 달" 버튼이 지난 달을 가리켰다.
+  const thisMonth = currentCalendarMonth();
+  const lastMonth = monthsAgo(1);
   try {
     const res = await withRetry(() =>
       adminAPI.get<{ periods: string[] }>('/admin/dashboard/periods'),

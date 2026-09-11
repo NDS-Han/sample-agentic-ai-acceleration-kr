@@ -1,9 +1,9 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-"""Unit tests for cross-account Bedrock native (claude-code → 333).
+"""Unit tests for cross-account Bedrock native (claude-code → 374).
 
 Covers: BedrockAccountClientProvider assume+cache+expiry-rebuild, and
-BedrockAdapter's client_resolver + transparent 123 fallback on resolver failure.
+BedrockAdapter's client_resolver + transparent 859 fallback on resolver failure.
 """
 from __future__ import annotations
 
@@ -86,20 +86,20 @@ async def test_adapter_backward_compat_inaccount():
 @pytest.mark.asyncio
 async def test_adapter_resolver_used_when_present():
     async def resolver():
-        return "xacct-333-client"
-    a = BedrockAdapter(bedrock_client=None, client_resolver=resolver, fallback_client="in-account-123")
+        return "xacct-374-client"
+    a = BedrockAdapter(bedrock_client=None, client_resolver=resolver, fallback_client="in-account-859")
     got = await a._get_client()
-    assert got == "xacct-333-client"
+    assert got == "xacct-374-client"
 
 
 @pytest.mark.asyncio
 async def test_adapter_transparent_fallback_on_resolver_failure():
-    # 핵심 안전장치: assume 실패 시 123 로 투명 폴백 (claude-code 안 죽음)
+    # 핵심 안전장치: assume 실패 시 859 로 투명 폴백 (claude-code 안 죽음)
     async def failing_resolver():
         raise RuntimeError("assume failed / bad trust")
-    a = BedrockAdapter(bedrock_client=None, client_resolver=failing_resolver, fallback_client="in-account-123")
+    a = BedrockAdapter(bedrock_client=None, client_resolver=failing_resolver, fallback_client="in-account-859")
     got = await a._get_client()
-    assert got == "in-account-123"
+    assert got == "in-account-859"
 
 
 @pytest.mark.asyncio
