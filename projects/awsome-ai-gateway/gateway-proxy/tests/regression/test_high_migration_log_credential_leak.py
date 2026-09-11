@@ -64,6 +64,10 @@ def _load_redactor():
         ("postgresql://postgres:pw@with@host:5432/gateway", "pw@with"),
         # sslmode 쿼리스트링이 붙은 형태 (Helm 이 넘기는 모양)
         ("postgresql://postgres:abcdef123@host:5432/gateway?sslmode=require", "abcdef123"),
+        # ⚠️ 비밀번호에 `/` — 예전 정규식 `://[^/]*@` 는 이 입력에서 **치환을 아예 못 해**
+        #    전체 URL 을 그대로 출력했다(리댁션 함수가 조용히 no-op).
+        ("postgresql://postgres:pa/ss@host:5432/gateway", "pa/ss"),
+        ("postgresql://postgres:trailing/@host:5432/gateway", "trailing/"),
     ],
 )
 def test_redaction_removes_the_password(url: str, secret: str):

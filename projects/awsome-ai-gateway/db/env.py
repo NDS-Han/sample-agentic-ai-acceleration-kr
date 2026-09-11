@@ -51,11 +51,27 @@ if db_url and os.getenv("DB_MASTER_PASSWORD"):
 def _redact_credentials(url: str) -> str:
     """`scheme://user:pass@host/db` → `scheme://<redacted>@host/db`.
 
-    `[^/]*` 는 authority 구간을 벗어나지 못하므로(path 는 `/` 로 시작) 탐욕적으로
-    잡아도 안전하고, 비밀번호에 `@` 가 인코딩 없이 들어와도 마지막 `@` 까지 지운다.
-    자격증명이 없는 URL 은 매치되지 않아 그대로 남는다.
+    ⚠️ 정규식 `://[^/]*@` 를 쓰면 **비밀번호에 `/` 가 있을 때 아무것도 치환되지 않고
+    전체 URL 이 그대로 출력된다** — `[^/]*` 가 `/` 를 넘지 못해 매치 자체가 실패하기
+    때문이다. 리댁션 함수가 조용히 no-op 하는 것이 최악이라 문자열 위치로 바꿨다.
+    (실측: `postgresql://postgres:pa/ss@host/db` → 치환 0회.)
+    현재 배포에서는 도달하지 않는다(앱 유저 비번은 `random_password ... special=false`
+    로 영숫자만, master 는 RDS 관리형이라 `/`·`"`·`@` 를 제외한다) — 그래도 이 함수는
+    입력을 신뢰하지 않아야 한다.
+
+    `@` 를 **마지막**부터 찾는다: 비밀번호에 인코딩되지 않은 `@` 가 섞여도 authority
+    끝까지 지운다. path/query 에만 `@` 가 있는(자격증명 없는) URL 은 호스트까지 함께
+    가려질 수 있는데, 그건 진단 정보를 조금 잃는 쪽이라 안전한 방향의 실패다.
     """
-    return re.sub(r"://[^/]*@", "://<redacted>@", url)
+    marker = "://"
+    i = url.find(marker)
+    if i == -1:
+        return url
+    start = i + len(marker)
+    at = url.rfind("@")
+    if at < start:
+        return url  # 자격증명 없음 — 그대로 둔다
+    return url[:start] + "<redacted>@" + url[at + 1 :]
 
 
 print(f"[ENV.PY DEBUG] DB_MASTER_URL exists: {bool(db_master)}")

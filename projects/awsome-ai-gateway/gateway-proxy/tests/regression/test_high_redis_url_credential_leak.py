@@ -120,6 +120,24 @@ def test_redaction_keeps_host_and_db_for_diagnostics(service: str):
 
 
 @pytest.mark.parametrize("service", sorted(REDIS_CLIENTS))
+def test_redaction_handles_a_slash_in_the_auth_token(service: str):
+    """⚠️ ElastiCache AUTH 토큰에 `/` 가 있을 수 있다.
+
+    예전 정규식 `://[^/]*@` 는 그 입력에서 매치 자체가 실패해 **전체 URL 을 그대로**
+    로그에 남겼다 — 리댁션이 조용히 no-op 하는, 가장 나쁜 실패 방식이다.
+    """
+    redact = _load_redactor(REDIS_CLIENTS[service])
+    for token in ("pa/ss", "trailing/", "sl/a/sh"):
+        url = f"rediss://:{token}@lgw.example.internal:6379/0"
+        out = redact(url)
+        assert token not in out, f"{service}: `/` 포함 토큰이 그대로 남았다: {out}"
+        assert "<redacted>" in out, f"{service}: 리댁션이 동작하지 않았다: {out}"
+        assert "lgw.example.internal:6379/0" in out, (
+            f"{service}: 진단 정보가 사라졌다: {out}"
+        )
+
+
+@pytest.mark.parametrize("service", sorted(REDIS_CLIENTS))
 def test_redaction_is_noop_without_credentials(service: str):
     """로컬/도커컴포즈의 비밀번호 없는 URL 은 그대로 남아야 한다(기본값 형태)."""
     redact = _load_redactor(REDIS_CLIENTS[service])

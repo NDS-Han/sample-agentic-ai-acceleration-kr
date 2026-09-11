@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import re
-
 import structlog
 from redis.asyncio import Redis
 
@@ -27,7 +25,20 @@ def _redact_credentials(url: str) -> str:
     비밀번호에 `@` 가 인코딩 없이 들어와도 마지막 `@` 까지 지운다. 자격증명이 없는
     URL 은 매치되지 않아 그대로 남는다. (db/env.py:49, gateway-proxy 와 같은 규칙.)
     """
-    return re.sub(r"://[^/]*@", "://<redacted>@", url)
+    # ⚠️ 정규식 `://[^/]*@` 를 쓰면 **AUTH 토큰에 `/` 가 있을 때 아무것도 치환되지
+    #    않고 전체 URL 이 그대로 로그에 남는다** — `[^/]*` 가 `/` 를 넘지 못해 매치가
+    #    실패한다. ElastiCache AUTH 토큰은 `/` 를 포함할 수 있어 실제로 도달한다.
+    #    리댁션이 조용히 no-op 하는 것이 최악이라 문자열 위치로 바꿨다.
+    #    `@` 는 마지막부터 찾는다(토큰에 `@` 가 섞여도 authority 끝까지 지운다).
+    marker = "://"
+    i = url.find(marker)
+    if i == -1:
+        return url
+    start = i + len(marker)
+    at = url.rfind("@")
+    if at < start:
+        return url  # 자격증명 없음
+    return url[:start] + "<redacted>@" + url[at + 1 :]
 
 # Pub/Sub worker: 5채널 × 전용연결 + health_check + config_reload + 여유분
 _REDIS_MAX_CONNECTIONS = 20

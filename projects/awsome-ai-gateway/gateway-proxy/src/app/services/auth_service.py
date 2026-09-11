@@ -8,7 +8,8 @@ from typing import Protocol
 
 import jwt
 import structlog
-from sqlalchemy import select, text as _sql_text
+from sqlalchemy import select
+from sqlalchemy import text as _sql_text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import JwtPublicKey, User

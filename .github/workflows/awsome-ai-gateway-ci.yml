@@ -160,11 +160,11 @@ jobs:
           - service: admin-api
             baseline: 76
           - service: gateway-proxy
-            baseline: 467
+            baseline: 466
           - service: cost-recorder-worker
-            baseline: 22
+            baseline: 21
           - service: notification-worker
-            baseline: 101
+            baseline: 93
           - service: admin-chat-agent
             baseline: 1
           - service: gateway-cli

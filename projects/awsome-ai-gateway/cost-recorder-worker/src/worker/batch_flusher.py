@@ -23,7 +23,7 @@ from typing import Any
 import structlog
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.schemas.cost_stream import CostStreamEntry
 
