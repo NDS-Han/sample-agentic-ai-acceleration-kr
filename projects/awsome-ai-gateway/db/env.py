@@ -78,6 +78,21 @@ print(f"[ENV.PY DEBUG] DB_MASTER_URL exists: {bool(db_master)}")
 print(f"[ENV.PY DEBUG] DB_URL exists: {bool(db_app)}")
 if db_url:
     # host/db 는 진단에 필요하므로 남기고 자격증명만 제거.
+    #
+    # ⚠️ 파서(`urllib.parse.urlsplit`) 로 구성요소만 뽑는 방식을 시도했지만 **더 나빴다**:
+    #    비밀번호에 인코딩되지 않은 `/` 가 있으면 authority 가 조기 분할되어
+    #    (1) `.port` 접근이 ValueError 로 터져 migration Job 이 임포트 시점에 죽고,
+    #    (2) 비밀번호 조각이 `netloc` 과 `path` 양쪽에 흩어져 되레 새어나간다.
+    #    실측: `postgresql://postgres:pa/ss@h:5432/gateway`
+    #          → netloc='postgres:pa', path='/ss@h:5432/gateway'.
+    #    `_redact_credentials` 는 마지막 `@` **이전을 전부 버리므로** 입력이 어떻든
+    #    자격증명이 살아남을 수 없다 — 이 경로에서 증명 가능하게 안전한 유일한 방식이다.
+    #
+    # ⚠️ CodeQL py/clear-text-logging-sensitive-data 가 이 줄을 high 로 표시한다
+    #    (`os.getenv("DB_MASTER_PASSWORD")` → :35-38 에서 db_url 주입 → 여기 print).
+    #    커스텀 sanitizer 는 정적 분석이 증명할 수 없어서 나는 경고이며, 위 근거와
+    #    tests/regression/test_high_migration_log_credential_leak.py 의 케이스
+    #    (`/`·`@` 포함 비밀번호까지)로 실제 안전성을 검증한다.
     print(f"[ENV.PY DEBUG] Using URL: {_redact_credentials(db_url)}")
 else:
     print("[ENV.PY DEBUG] ERROR: No database URL found!")
