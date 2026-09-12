@@ -23,6 +23,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 import { parseJWT, isSessionExpired } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
@@ -345,7 +346,8 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const maxAge = cookieMaxAge(cookieToken, tokens.expires_in);
 
   // 303 — POST/GET 구분 없이 GET 으로 이동시킨다(logout/route.ts:19 와 같은 이유).
-  const res = NextResponse.redirect(`${proto}://${host}/`, { status: 303 });
+  // 상대 Location — CloudFront/ALB 뒤에서 Host 헤더가 내부 오리진일 수 있다(lib/redirect.ts).
+  const res = redirectRelative('/');
   res.cookies.set('admin_jwt', cookieToken, {
     httpOnly: true,
     sameSite: 'lax',

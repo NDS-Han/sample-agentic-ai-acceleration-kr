@@ -111,6 +111,29 @@ jobs:
       - name: pytest
         run: python -m pytest ${{ env.PROJECT_DIR }}/db/tests -q -p no:cacheprovider
 
+  helm-render:
+    name: pytest · helm 렌더 정합성 (admin-api ↔ admin-ui)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # helm 이 없으면 테스트가 조용히 skip 된다 — 그러면 이 잡은 아무것도 강제하지 않는다.
+      # 테스트 쪽에서도 CI 면 skip 대신 실패시키지만, 여기서 확실히 설치한다.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Install pytest + pyyaml
+        run: python -m pip install --disable-pip-version-check pytest pyyaml
+      # ⚠️ CI=true 가 필수다. 테스트가 이 값을 보고 "helm 없음" 을 skip 이 아니라
+      #    실패로 처리한다(조용한 미검증 방지).
+      - name: pytest
+        env:
+          CI: "true"
+        run: python -m pytest ${{ env.PROJECT_DIR }}/deployment/charts/llm-gateway/tests -q -p no:cacheprovider
+
   admin-ui:
     name: admin-ui · vitest + typecheck + lint
     runs-on: ubuntu-latest
