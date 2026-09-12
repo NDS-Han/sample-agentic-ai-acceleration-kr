@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser
 from app.core.config import get_settings
 from app.core.exceptions import ForbiddenError
+from app.core.oidc_identity import derive_role
 from app.core.oidc_verifier import OIDCConfigError, OIDCVerifier, OIDCVerifyError
 from app.models.auth import Department, Team, User, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, PeriodType
@@ -382,17 +383,14 @@ class OIDCService:
 
     @staticmethod
     def _derive_role(email: str, groups: list[str]) -> UserRole:
-        """ADMIN_EMAILS / ADMIN_GROUPS 둘 중 하나라도 매칭되면 ADMIN."""
-        settings = get_settings()
-        admin_emails = {e.lower() for e in settings.ADMIN_EMAILS}
-        if email and email.lower() in admin_emails:
-            return UserRole.ADMIN
+        """ADMIN_EMAILS / ADMIN_GROUPS 둘 중 하나라도 매칭되면 ADMIN.
 
-        admin_groups = set(settings.ADMIN_GROUPS)
-        if any(g in admin_groups for g in groups):
-            return UserRole.ADMIN
-
-        return UserRole.DEVELOPER
+        ⚠️ 정책 본체는 ``core.oidc_identity.derive_role`` 하나뿐이다. 여기서 복제하면
+           admin_jwt(리소스 서버) 경로와 조용히 어긋난다 — 그 부류의 사고가 이미
+           한 번 있었다(oidc_identity 모듈 docstring 참조). 이 래퍼는 기존 호출부와
+           테스트를 유지하기 위해서만 남긴다.
+        """
+        return derive_role(email, groups)
 
     async def _upsert_user(
         self,

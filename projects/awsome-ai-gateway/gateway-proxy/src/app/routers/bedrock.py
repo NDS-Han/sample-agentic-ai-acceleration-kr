@@ -9,6 +9,12 @@ import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.observability.provider_metrics import (
+    STATUS_STREAM_ERROR,
+    build_provider_labels,
+    record_provider_error,
+    record_provider_request,
+)
 from app.schemas.domain import ProviderType
 from app.services.router_service import RouterService
 
@@ -170,6 +176,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
+            metrics=getattr(request.app.state, "metrics", None),
         )
         if rejected is not None:
             return rejected
@@ -177,15 +184,39 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
     adapter = registry.get(ProviderType.BEDROCK)
     rate_limit_state = state.get("rate_limit_state")
 
+    # ── 프로바이더 호출 결과 지표 ──
+    #
+    # 여기서 request(분모)와 error(분자)를 **같은 라벨로** 올린다. 라벨 구성은
+    # observability/provider_metrics.py 한 곳에서만 만든다 — 호출부마다 다르게 붙이면
+    # 모델별 에러율 시계열이 섞여 어느 모델이 죽는지 알 수 없게 된다.
+    #
+    # ⚠️ 이 경로는 `/model/*` 패스스루다. 미들웨어의 `gateway_error_total` 은 HTTP
+    #    상태만 보므로 "Bedrock 이 ThrottlingException 을 냈다" 와 "우리 쿼터가 찼다" 를
+    #    구분하지 못한다. 그래서 error_code 를 별도 라벨로 남긴다.
+    _pm = getattr(request.app.state, "metrics", None)
+    _pm_labels = build_provider_labels(
+        model_config=model_config,
+        client=state.get("client"),
+        is_stream=bool(stream),
+    )
+    record_provider_request(_pm, _pm_labels)
+
     if stream:
         # invoke_stream 은 4-튜플 (status, chunk_iter, headers, request_id) 반환.
         # ⚠️ 버그수정(2026-07-09): 기존 `await invoke_stream(...)[:3]` 은 연산자 우선순위상
         # `await (coroutine[:3])` 로 파싱돼 coroutine 슬라이싱 TypeError → 이 raw
         # /model/*/invoke-with-response-stream 경로가 깨져 있었음(테스트 미커버, 주경로는
         # /v1/messages 라 안 드러남). await 를 먼저 풀고 앞 3개만 취한다.
-        status, chunk_iter, headers, _req_id = await adapter.invoke_stream(
-            body, bedrock_model_id, path_suffix=path_suffix
-        )
+        try:
+            status, chunk_iter, headers, _req_id = await adapter.invoke_stream(
+                body, bedrock_model_id, path_suffix=path_suffix
+            )
+        except Exception as e:
+            # 기록만 하고 **그대로 재던진다** — 지표를 위해 에러를 삼키면 안 된다.
+            record_provider_error(
+                _pm, _pm_labels, status=STATUS_STREAM_ERROR, error_code=type(e).__name__
+            )
+            raise
 
         async def stream_with_cost():
             """Bedrock `/model/*` pass-through: 원본 바이트 유지. usage는 OpenAI 형식
@@ -231,9 +262,16 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             media_type=headers.get("Content-Type", "application/octet-stream"),
         )
     else:
-        status, response_body, headers, usage = await adapter.invoke(
-            body, bedrock_model_id, path_suffix=path_suffix
-        )
+        try:
+            status, response_body, headers, usage = await adapter.invoke(
+                body, bedrock_model_id, path_suffix=path_suffix
+            )
+        except Exception as e:
+            record_provider_error(_pm, _pm_labels, status="exception", error_code=type(e).__name__)
+            raise
+        if status >= 400:
+            # 예외가 아니라 상태코드로 실패가 오는 경우(어댑터가 응답을 그대로 넘긴다).
+            record_provider_error(_pm, _pm_labels, status=status)
         if auth_context and (usage.input_tokens + usage.output_tokens) > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await cost_recorder.finalize(

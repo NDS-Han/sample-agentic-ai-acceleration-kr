@@ -35,6 +35,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 
 // 로그인 진입점 — 캐시/정적최적화 금지. 여기서 만든 state/PKCE 가 캐시되면 모든 사용자가
 // 같은 state·verifier 를 쓰게 되어 CSRF 보호가 무력화된다(cli-download/route.ts:21 과 같은 이유).
@@ -157,10 +158,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (missing.length === OIDC_REQUIRED_VARS.length && devLoginEnabled) {
     const touchedOptional = OIDC_OPTIONAL_VARS.some((v) => env(v));
     if (!touchedOptional) {
-      const devUrl = request.nextUrl.clone();
-      devUrl.pathname = '/api/auth/dev-login';
-      devUrl.search = '';
-      const res = NextResponse.redirect(devUrl);
+      // 같은 오리진 → 상대 Location. nextUrl 은 컨테이너에서 0.0.0.0 으로 푼다(lib/redirect.ts).
+      // 307 — GET→GET 이라 메서드 보존이 자연스럽다(기존 동작과 동일).
+      const res = redirectRelative('/api/auth/dev-login', { status: 307 });
       res.headers.set('Cache-Control', 'no-store');
       return res;
     }

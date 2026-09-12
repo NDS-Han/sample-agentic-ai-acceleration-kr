@@ -1,6 +1,5 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { adminAPI } from '@/lib/api-client';
 import { KPICard } from '@/components/common/KPICard';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { AlertLevel } from '@/types/enums';
@@ -17,7 +16,7 @@ import {
 import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
 import {
-  fetchDashboardSummary,
+  fetchDashboardKPI,
   fetchModelShare,
   fetchTeamOptions,
   fetchAnalytics,
@@ -26,7 +25,6 @@ import {
   fetchTopTeams,
   fetchAvailablePeriods,
   fetchClientShare,
-  type BudgetSummaryItem,
   type ClientShareResponse,
 } from '@/lib/actions/dashboard';
 import { ModelShareDonutClient } from '@/components/dashboard/ModelShareDonutClient';
@@ -37,13 +35,7 @@ import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { kstNowParts } from '@/lib/utils/period';
 
-interface BudgetSummaryResponse {
-  summary: BudgetSummaryItem[];
-}
 
-interface KeyCountResponse {
-  count: number;
-}
 
 function calcAlertLevel(utilization: number): (typeof AlertLevel)[keyof typeof AlertLevel] {
   if (utilization >= 95) return AlertLevel.CRITICAL;
@@ -88,46 +80,23 @@ function computeDailyAvg(period: string, totalCost: number): {
 
 async function DashboardKPIs({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
-  const [budgetResult, keysResult, modelsResult, summaryResult] = await Promise.allSettled([
-    adminAPI.get<BudgetSummaryResponse>('/admin/budgets/summary', { period }),
-    adminAPI.get<KeyCountResponse>('/admin/keys/count', { status: 'ACTIVE' }),
-    // ⚠️ ModelListItem(표시용 타입, is_active 보유) 로 캐스팅하면 안 된다. /admin/models 의
-    //    실제 응답은 `status: 'ACTIVE' | 'INACTIVE'` 이고 is_active 를 내보낸 적이 없다.
-    //    다른 3개 소비처(models/page.tsx, budgets/page.tsx, lib/actions/models.ts)는
-    //    status → is_active 매퍼를 거치는데 이 화면만 생짜 캐스팅이라, 필터가 전부
-    //    undefined 를 만나 "활성 모델 수" 가 영구히 0 이었다(TS 에러도 콘솔 경고도 없음).
-    adminAPI.get<{ items: Array<{ status: string }> }>('/admin/models'),
-    fetchDashboardSummary(period, client),
-  ]);
 
-  const budgetData = budgetResult.status === 'fulfilled' ? budgetResult.value : null;
-  const keysData = keysResult.status === 'fulfilled' ? keysResult.value : null;
-  const modelsData = modelsResult.status === 'fulfilled' ? modelsResult.value : null;
-  const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+  // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
+  // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
+  // 순차로 돌아 사용자 수에 비례해 느려지는 병목이었다(수백~수천 명 규모에서 수십 초).
+  //
+  // ⚠️ 단일 호출은 "한 번 실패하면 카드가 전부 빈다" 는 대가가 있다. 예전 구조는 카드별
+  //    degradation 이 가능했다. 그래서 실패를 0 으로 접지 않고 **전부 '—' + fetchFailed**
+  //    로 렌더한다 — 부분적으로 그럴듯한 화면보다 "지금 값을 모른다" 가 정확하다.
+  const kpi = await fetchDashboardKPI(period, client).catch(() => null);
 
-  // 이번 달 사용량/예산: TEAM 행 + 팀 미소속 USER 행을 합산.
-  const summaryItems = budgetData?.summary ?? [];
-  const teamItems = summaryItems.filter((i) => i.target_type === 'team');
-  const teamlessUsers = summaryItems.filter((i) => i.target_type === 'user' && !i.team_id);
-  const aggregateItems = [...teamItems, ...teamlessUsers];
-  const totalUsageUsd = aggregateItems.reduce((sum, i) => sum + parseFloat(i.used_usd || '0'), 0);
-  const totalLimitUsd = aggregateItems.reduce(
-    (sum, i) => sum + (i.limit_usd != null ? parseFloat(i.limit_usd) : 0),
-    0,
-  );
-  const budgetUtilization = totalLimitUsd > 0 ? (totalUsageUsd / totalLimitUsd) * 100 : 0;
-  // ⚠️ 실패(403/네트워크)를 0 으로 접지 말 것. TEAM_LEADER 는 /admin/keys/count 에서
-  //    403 을 받는데 예전 `?? 0` 은 그걸 "활성 키 0개" 라는 **사실 진술**로 렌더했다.
-  //    다른 카드들과 같은 '—' + fetchFailed 관례를 따른다.
-  const activeKeys = keysData ? keysData.count : null;
-  const activeModels = modelsData
-    ? (modelsData.items ?? []).filter((m) => m.status === 'ACTIVE').length
-    : null;
-  const alertLevel = calcAlertLevel(budgetUtilization);
+  const budgetUtilization = kpi?.budget_utilization_pct ?? null;
+  // 한도 합계가 0 이면 비율이 정의되지 않는다(백엔드가 null 을 준다). 0% 로 접으면
+  // "예산을 하나도 안 썼다" 는 거짓 사실이 되므로 경고 등급도 매기지 않는다.
+  const alertLevel = budgetUtilization != null ? calcAlertLevel(budgetUtilization) : undefined;
 
-  // 일 평균 / 월말 예상 — summary 의 total_cost_usd 기반 (가짜 없음, 파생값)
-  const { dailyAvg, projection } = summary
-    ? computeDailyAvg(period, summary.total_cost_usd)
+  const { dailyAvg, projection } = kpi
+    ? computeDailyAvg(period, kpi.total_cost_usd)
     : { dailyAvg: 0, projection: null };
 
   return (
@@ -140,26 +109,26 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('usageThisMonth')}
-            value={fmtUsd2(summary?.total_cost_usd ?? totalUsageUsd)}
+            value={kpi ? fmtUsd2(kpi.total_cost_usd) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
-            description={t('usageThisMonthDesc')}
+            description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('budgetUtilization')}
-            value={`${budgetUtilization.toFixed(1)}%`}
+            value={budgetUtilization != null ? `${budgetUtilization.toFixed(1)}%` : '—'}
             icon={<BarChart3 size={18} aria-hidden="true" />}
             alertLevel={alertLevel}
-            description={t('budgetUtilizationDesc')}
+            description={budgetUtilization != null ? t('budgetUtilizationDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('avgCostPerUser')}
-            value={summary ? fmtUsd2(summary.cost_per_user_usd) : '—'}
+            value={kpi ? fmtUsd2(kpi.cost_per_user_usd) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
-            description={summary ? t('avgCostPerUserDesc', { count: summary.active_users }) : t('fetchFailed')}
+            description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
           />
           <KPICard
             title={t('dailyAvg')}
-            value={summary ? fmtUsd2(dailyAvg) : '—'}
+            value={kpi ? fmtUsd2(dailyAvg) : '—'}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null
@@ -178,27 +147,27 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('totalRequests')}
-            value={summary ? summary.total_requests.toLocaleString() : '—'}
+            value={kpi ? kpi.total_requests.toLocaleString() : '—'}
             icon={<Activity size={18} aria-hidden="true" />}
             description={t('totalRequestsDesc')}
           />
           <KPICard
             title={t('totalTokens')}
-            value={summary ? formatTokens(summary.total_tokens) : '—'}
+            value={kpi ? formatTokens(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
           />
           <KPICard
             title={t('activeKeys')}
-            value={activeKeys != null ? activeKeys.toLocaleString() : '—'}
+            value={kpi ? kpi.active_keys.toLocaleString() : '—'}
             icon={<Key size={18} aria-hidden="true" />}
-            description={activeKeys != null ? t('activeKeysDesc') : t('fetchFailed')}
+            description={kpi ? t('activeKeysDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('activeModels')}
-            value={activeModels != null ? activeModels.toLocaleString() : '—'}
+            value={kpi ? kpi.active_models.toLocaleString() : '—'}
             icon={<Cpu size={18} aria-hidden="true" />}
-            description={activeModels != null ? t('activeModelsDesc') : t('fetchFailed')}
+            description={kpi ? t('activeModelsDesc') : t('fetchFailed')}
           />
         </div>
       </section>

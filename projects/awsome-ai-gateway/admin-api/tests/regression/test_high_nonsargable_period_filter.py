@@ -677,3 +677,223 @@ async def test_productivity_kst_window_matches_cost_window():
             assert same, "DB 의 KST 경계 해석이 파이썬 산식과 다르다"
     finally:
         await engine.dispose()
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 일(day) 구간 필터 — 월 필터와 같은 결함이 by-user / by-user-model 에 남아 있었다
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 월 필터는 cost_period_filter 로 고쳤지만, 일자 구간을 쓰는 두 집계
+# (get_usage_by_user, get_usage_by_user_model) 는 여전히
+#   date(timezone('Asia/Seoul', requested_at)) >= date(:start)
+# 형태였다. 좌변이 컬럼에 함수를 씌운 표현식이라 requested_at 인덱스를 못 탄다.
+#
+# 실측(실 PostgreSQL 16, usage_logs 18만행, idx_usage_logs_requested_at 존재):
+#   옛 방식 → Parallel Seq Scan, cost 6521, rows 추정 476 vs 실제 20289 (**43배 오차**)
+#   새 방식 → Bitmap Index Scan,  cost 4584, rows 추정 40843 vs 실제 40578 (0.7%)
+#   두 방식의 count/sum 은 완전히 동일(40578 / 201.772267).
+# 행 추정 43배 오차는 그 자체로 상위 조인의 계획까지 망가뜨린다.
+
+
+def test_kst_day_range_filter_compiles_to_a_range_not_a_function_on_the_column():
+    """정적 증명 — 컴파일된 SQL 에 컬럼을 감싼 함수가 없어야 한다."""
+    from app.core.usage_filters import kst_day_range_filter
+
+    sql = str(
+        kst_day_range_filter("2026-09-01", "2026-09-15").compile(
+            compile_kwargs={"literal_binds": True}
+        )
+    )
+    assert "timezone" not in sql.lower(), f"컬럼에 timezone() 이 씌워졌다: {sql}"
+    assert "date(" not in sql.lower(), f"컬럼에 date() 가 씌워졌다: {sql}"
+    assert ">=" in sql and "<" in sql, f"반개구간이 아니다: {sql}"
+    # 경계는 KST 00:00 을 UTC 로 환산한 값이어야 한다(9시간 앞).
+    assert "2026-08-31 15:00:00" in sql, f"start 경계가 KST 환산이 아니다: {sql}"
+    assert "2026-09-15 15:00:00" in sql, f"end 경계가 KST(+1일) 환산이 아니다: {sql}"
+
+
+def test_no_nonsargable_day_comparison_remains_in_analytics_service():
+    """AST 가드 — 같은 결함이 다시 들어오지 못하게.
+
+    ⚠️ 문자열 grep 이 아니라 **비교 표현식의 좌변**을 본다. `kst_day` 는 SELECT/GROUP BY
+    에서 계속 쓰여야 정상이므로(일자별 버킷 라벨), 단순히 이름 등장 여부로는 판정할 수 없다.
+    금지되는 것은 그 표현식을 **WHERE 의 비교 좌변**에 두는 것뿐이다.
+    """
+    import ast
+    from pathlib import Path
+
+    src_path = (
+        Path(__file__).resolve().parents[2]
+        / "src" / "app" / "services" / "analytics_service.py"
+    )
+    tree = ast.parse(src_path.read_text(encoding="utf-8"))
+
+    offenders: list[str] = []
+    scanned = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Compare):
+            continue
+        scanned += 1
+        left = ast.unparse(node.left)
+        # 컬럼에 함수를 씌운 좌변: date(...) / func.date(...) / timezone(...)
+        if left.startswith(("func.date(", "func.timezone(")) or left == "kst_day":
+            offenders.append(f"line {node.lineno}: {left} {ast.unparse(node)[:70]}")
+
+    # 대조군 — 비교 표현식을 하나도 못 찾았으면 위 루프가 공허하다.
+    assert scanned >= 5, f"비교 표현식을 {scanned}개만 찾았다 — AST 파싱이 빗나갔다"
+    assert offenders == [], (
+        "일자 필터가 컬럼에 함수를 씌운 채 비교되고 있다 — requested_at 인덱스를 타지 "
+        "못해 usage_logs 전체를 훑는다. kst_day_range_filter 를 쓸 것:\n  "
+        + "\n  ".join(offenders)
+    )
+
+
+@pytest.mark.parametrize(
+    ("start_day", "end_day", "start_iso", "end_iso"),
+    [
+        ("2026-09-01", "2026-09-30", "2026-08-31T15:00:00+00:00", "2026-09-30T15:00:00+00:00"),
+        ("2026-09-05", "2026-09-05", "2026-09-04T15:00:00+00:00", "2026-09-05T15:00:00+00:00"),
+        ("2026-12-31", "2026-12-31", "2026-12-30T15:00:00+00:00", "2026-12-31T15:00:00+00:00"),
+        ("2026-01-01", "2026-01-31", "2025-12-31T15:00:00+00:00", "2026-01-31T15:00:00+00:00"),
+    ],
+)
+def test_day_range_to_utc_boundaries(start_day, end_day, start_iso, end_iso):
+    """경계표 — end_day 는 포함이므로 end 경계는 다음날 KST 00:00 이다."""
+    from app.core.usage_filters import day_range_to_utc
+
+    start, end = day_range_to_utc(start_day, end_day)
+    assert start.isoformat() == start_iso
+    assert end.isoformat() == end_iso
+
+
+def test_day_range_membership_matches_the_old_kst_day_predicate():
+    """집합 동등성 — 숫자가 움직이지 않는다는 주장의 근거.
+
+    경계 전후 1초 지점에서 새 반개구간 판정과 옛 `KST 일자 ∈ [start, end]` 판정이
+    일치하는지 본다. 여기서 어긋나면 성능 수정이 조용히 값을 바꾼다.
+    """
+    from datetime import date as _date, timedelta as _td
+
+    from app.core.usage_filters import KST, day_range_to_utc
+
+    for start_day, end_day in [
+        ("2026-09-01", "2026-09-30"),
+        ("2026-09-05", "2026-09-05"),
+        ("2026-02-01", "2026-02-28"),
+        ("2026-01-01", "2026-01-31"),
+    ]:
+        start_utc, end_utc = day_range_to_utc(start_day, end_day)
+        lo, hi = _date.fromisoformat(start_day), _date.fromisoformat(end_day)
+        for probe in (
+            start_utc - _td(seconds=1),
+            start_utc,
+            end_utc - _td(seconds=1),
+            end_utc,
+        ):
+            new_in = start_utc <= probe < end_utc
+            old_in = lo <= probe.astimezone(KST).date() <= hi
+            assert new_in == old_in, (
+                f"{start_day}~{end_day} 경계 {probe.isoformat()} 에서 판정이 갈린다: "
+                f"new={new_in} old={old_in} (KST {probe.astimezone(KST).date()})"
+            )
+
+
+@pytest.mark.parametrize(
+    "bad",
+    ["2026-9-1", "20260901", "2026-06-31", "", None, "1999-01-01", "2100-01-02"],
+)
+def test_malformed_day_raises_validation_error_not_500(bad):
+    """형식/달력/연범위 위반은 400(ValidationError) 이어야 한다 — 500 이나 조용한 0건이 아니라.
+
+    옛 구현은 문자열을 슬라이싱해 `int(day[:4])` 로 파싱했다. '2026-9-1' 같은 입력이
+    형식 검사를 통과해 엉뚱한 경계를 만들거나 int() 가 맨 ValueError 로 터져 500 이 됐다.
+    """
+    from app.core.exceptions import ValidationError
+    from app.core.usage_filters import day_range_to_utc
+
+    with pytest.raises(ValidationError):
+        day_range_to_utc(bad, "2026-09-30")
+
+
+def test_reversed_day_range_is_rejected():
+    """end < start 는 조용히 0건이 아니라 400 이다."""
+    from app.core.exceptions import ValidationError
+    from app.core.usage_filters import day_range_to_utc
+
+    with pytest.raises(ValidationError):
+        day_range_to_utc("2026-09-30", "2026-09-01")
+
+
+def test_no_composite_requested_at_status_index_without_evidence():
+    """`(requested_at, status)` 복합 인덱스는 실측으로 기각됐다 — 근거 없이 되살리지 말 것.
+
+    실측(실 PostgreSQL 16, usage_logs 18만행, SUCCESS 90%): 복합 인덱스가 있어도
+    플래너가 그것을 **선택하지 않는다**. 계획·비용·버퍼가 단일 인덱스일 때와 완전히
+    동일했다(cost 4674.24, buffers 2376). 이 집계는 `sum(cost_usd)` 를 요구해
+    index-only scan 이 불가능하므로 heap 방문이 어차피 필요하고, status 를 인덱스에
+    넣어 걸러지는 건 소수의 비-SUCCESS 행뿐이라 읽는 블록 수가 줄지 않는다.
+
+    ⇒ 이득 0, 비용은 쓰기 증폭 + 저장공간. 이 테스트는 "성능 개선" 이라는 이름으로
+    이득 없는 인덱스가 다시 들어오는 것을 막는다. 집계 형태가 바뀌어(예: count(*) 전용)
+    index-only scan 이 가능해지면, 그 근거를 여기 적고 이 테스트를 갱신하면 된다.
+
+    ⚠️ 판정은 **실행되는 문자열 리터럴** 기준이다. 예전엔 파일 전체를 grep 해서,
+       기각 사실을 docstring 에 기록한 마이그레이션(0034)이 그 기록 때문에 위반으로
+       잡혔다 — 가드가 문서를 증거로 읽은 것이다. 반대 방향의 위험(주석에서만
+       인덱스를 만드는 척)은 존재하지 않으므로, 리터럴만 보는 게 정확하다.
+    """
+    import ast
+    from pathlib import Path
+
+    versions = Path(__file__).resolve().parents[3] / "db" / "versions"
+    # 대조군 — 마이그레이션 디렉터리를 실제로 찾았는가.
+    assert versions.is_dir(), f"db/versions 를 찾지 못했다: {versions}"
+    files = sorted(versions.glob("*.py"))
+    assert len(files) >= 20, f"마이그레이션을 {len(files)}개만 찾았다 — 경로 확인"
+
+    BANNED = "idx_usage_logs_requested_at_status"
+
+    def _executable_literals(path: Path) -> list[str]:
+        """docstring 을 제외한 모든 문자열 리터럴.
+
+        `#` 주석은 AST 에 아예 남지 않으므로 자동으로 빠진다. docstring 은 리터럴이라
+        남으므로 명시적으로 걷어낸다.
+        """
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    if isinstance(body[0].value.value, str):
+                        docstrings.add(id(body[0].value))
+        return [
+            n.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
+        ]
+
+    offenders = [p.name for p in files if any(BANNED in s for s in _executable_literals(p))]
+    assert offenders == [], (
+        "(requested_at, status) 복합 인덱스를 만드는 마이그레이션이 있다 — 실측으로 "
+        "이득 0 으로 기각된 인덱스다(0026 의 주석 참조). 되살리려면 플래너가 실제로 "
+        "그 인덱스를 고르는 EXPLAIN 을 근거로 남길 것:\n  " + "\n  ".join(offenders)
+    )
+
+    # ── 대조군 — 이 가드가 공허하지 않은가 ──
+    # 리터럴 추출기가 실행 SQL 을 놓치면 어떤 위반도 잡히지 않는다. 0026(단일 인덱스를
+    # 실제로 만드는 마이그레이션)에서 그 인덱스 이름이 리터럴로 보여야 한다.
+    single = "idx_usage_logs_requested_at"
+    seen_creating_migration = any(
+        any(single in s for s in _executable_literals(p)) for p in files
+    )
+    assert seen_creating_migration, (
+        "어떤 마이그레이션에서도 usage_logs 인덱스 생성 리터럴을 찾지 못했다 — "
+        "리터럴 추출이 깨졌고 이 가드는 공허하다"
+    )
+    # 그리고 금지 문자열이 docstring 에는 실제로 존재해야 한다(그게 이 가드가 통과하는
+    # 이유이므로, 없어지면 위 판정이 자동 통과인지 구분할 수 없다).
+    assert any(BANNED in p.read_text(encoding="utf-8") for p in files), (
+        f"어떤 마이그레이션에도 {BANNED} 언급이 없다 — 기각 근거 기록이 사라졌다. "
+        "이 가드의 통과가 '문서 제외가 동작함' 인지 '아무 데도 없음' 인지 구분되지 않는다"
+    )

@@ -436,6 +436,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         resolve_model_config=_resolve_candidate,
         build_candidate_body=_build_candidate_body,
         rewrite_model_id=_rewrite,
+        metrics=getattr(request.app.state, "metrics", None),
     )
 
     # --- Handle the result ---

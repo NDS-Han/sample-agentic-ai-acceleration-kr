@@ -8,6 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 import { UserRole } from '@/types/enums';
 
 const DEV_COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours in seconds
@@ -156,10 +157,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const token = buildDevToken(role);
 
-  // Build redirect URL from Host header to avoid 0.0.0.0 in Docker
-  const host = request.headers.get('host') || 'localhost:3000';
+  // 리다이렉트는 상대 경로라 host 가 필요 없다(lib/redirect.ts). proto 는 아래 쿠키의
+  // Secure 판정에 쓴다.
   const proto = request.headers.get('x-forwarded-proto') || 'http';
-  const redirectResponse = NextResponse.redirect(`${proto}://${host}/`);
+  const redirectResponse = redirectRelative('/');
   redirectResponse.cookies.set('admin_jwt', token, {
     httpOnly: true,
     sameSite: 'lax',

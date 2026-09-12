@@ -5,6 +5,82 @@ import type { UserRole } from '@/types/enums';
 import { PAGE_PERMISSIONS } from './permissions';
 
 /**
+ * admin-api 와 **같은 이름**의 env 를 읽는다 — 한 Helm 값이 둘을 동시에 먹여야 한다.
+ *
+ * ⚠️ 이름이 갈리면 관리자 잠김이 난다. 실제 사고 사례: admin-ui 가 관리자 그룹을
+ *    하드코딩하고 admin-api 는 설정 가능하게 두어서, 그룹을 개명하는 순간 admin-api 는
+ *    인가하는데 admin-ui 가 DEVELOPER 로 판정해 모든 페이지가 /403 으로 튕겼다.
+ *
+ * ⚠️ `NEXT_PUBLIC_` 접두사를 쓰지 않는다. parseJWT 는 middleware(Edge) 와 RSC 에서만
+ *    호출되므로(호출부 4곳 전부 서버) 서버 env 로 충분하고, 관리자 그룹 이름을
+ *    클라이언트 번들에 굽지 않는 편이 낫다.
+ */
+function env(name: string): string {
+  return (process.env[name] ?? '').trim();
+}
+
+/** admin-api core/config.py `_split_csv` 와 같은 규약: JSON 배열 또는 콤마 구분. */
+function envList(name: string): string[] {
+  const raw = env(name);
+  if (!raw) return [];
+  if (raw.startsWith('[')) {
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return Array.isArray(parsed) ? parsed.map(String).filter(Boolean) : [];
+    } catch {
+      // admin-api 는 여기서 예외를 던져 부팅을 막지만, UI 가 로그인 자체를 못 하게
+      // 만들 이유는 없다 — 잘못된 값은 "관리자 그룹 없음" 으로 취급한다.
+      return [];
+    }
+  }
+  return raw.split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+/**
+ * 토큰에서 역할을 정한다. **admin-api 와 같은 정책**이어야 한다
+ * (admin-api/src/app/core/oidc_identity.py `derive_role`).
+ *
+ * 우선순위:
+ *   1. `role` 클레임 — 내부 admin JWT / dev-login 토큰이 갖는다. 그대로 신뢰한다
+ *      (서명 검증은 admin-api 몫이고, 여기서 뒤집으면 두 판정이 갈린다).
+ *   2. 그룹 매핑 — IdP id_token 에는 `role` 이 **없고** groups 만 있다. groups claim
+ *      이름은 IdP 마다 다르므로(Cognito 는 `cognito:groups`) 설정으로 읽는다.
+ *   3. 둘 다 없으면 undefined — checkPagePermission 이 거부한다(fail-closed).
+ *
+ * ⚠️ 2번이 없던 동안 IdP 로그인은 **항상** 관리자 잠김이었다. id_token 에 `role` 이
+ *    없으니 role 이 undefined 가 되고, checkPagePermission 은 등재되지 않은 역할을
+ *    거부하므로 로그인 직후 모든 페이지가 /403 이었다. admin-api 쪽은 같은 토큰으로
+ *    ADMIN 을 인가하고 있었다 — API 는 통과, UI 는 차단이라는 최악의 조합.
+ *
+ * ⚠️ groups 가 문자열 하나로 오는 IdP 가 있다(단일 값 매퍼). 배열로 정규화하지 않고
+ *    `includes` 를 쓰면 **부분 문자열 매칭**이 되어 `GatewayAdminReadOnly` 가
+ *    `GatewayAdmin` 을 포함해 읽기 전용 그룹이 ADMIN 으로 승격된다.
+ */
+function resolveRole(payload: Record<string, unknown>): UserRole {
+  const claimed = payload['role'];
+  if (typeof claimed === 'string' && claimed) {
+    return claimed as UserRole;
+  }
+
+  const adminGroups = envList('ADMIN_GROUPS');
+  if (adminGroups.length === 0) {
+    return undefined as unknown as UserRole;
+  }
+
+  const claimName = env('OIDC_GROUPS_CLAIM') || 'groups';
+  const raw = payload[claimName];
+  const groups: string[] = Array.isArray(raw)
+    ? raw.map(String)
+    : typeof raw === 'string' && raw
+      ? [raw]
+      : [];
+
+  // 원소 동등 비교 — 부분 문자열 매칭을 만들지 않는다(위 주석 참조).
+  const isAdmin = groups.some((g) => adminGroups.includes(g));
+  return (isAdmin ? 'ADMIN' : undefined) as unknown as UserRole;
+}
+
+/**
  * Decodes a JWT without verifying the signature.
  *
  * Middleware only checks cookie presence; signature verification is handled
@@ -44,7 +120,7 @@ export function parseJWT(token: string): AdminSession {
     user_id: String(payload['sub'] ?? payload['user_id'] ?? ''),
     email: String(payload['email'] ?? ''),
     display_name: String(payload['display_name'] ?? payload['name'] ?? ''),
-    role: payload['role'] as UserRole,
+    role: resolveRole(payload),
     team_id: (payload['team_id'] as string | null) ?? null,
     department_id: (payload['department_id'] as string | null) ?? null,
     issued_at: String(payload['iat'] ?? payload['issued_at'] ?? ''),

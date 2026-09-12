@@ -210,7 +210,10 @@ class TestGetBudgetSummary:
         with patch("app.services.budget_service.BudgetRepository") as BRepo, \
              patch("app.repositories.user_repository.UserRepository") as URepo:
             BRepo.return_value.list_configs = AsyncMock(return_value=[team_cfg])
-            URepo.return_value.list_users = AsyncMock(return_value=[user_obj])
+            # ⚠️ iter_all_users 다 — 예전엔 list_users(limit=500) 이었고, 그건
+            #    created_at desc 로 정렬한 뒤 앞에서 잘라서 500번째 이후 사용자의 예산
+            #    행이 조용히 빠졌다(오류 없이 틀린 사용률). 전수 조회로 바뀌었다.
+            URepo.return_value.iter_all_users = AsyncMock(return_value=[user_obj])
             URepo.return_value.list_all_teams = AsyncMock(return_value=[team_obj])
 
             result = await budget_service.get_budget_summary(

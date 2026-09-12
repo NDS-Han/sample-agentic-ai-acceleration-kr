@@ -187,11 +187,37 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
     assert res.period == "2026-09"
     assert seen, "질의가 하나도 나가지 않았다 — 아래 단정이 공허하다"
 
-    unscoped = [s for s in seen if "usage_logs.team_id = " not in s]
+    # 격리 경로는 테이블에 따라 둘이다. **어느 쪽도 없으면** 전사 데이터가 섞인다.
+    #
+    #   usage_logs.team_id  — usage_logs 를 직접 읽는 질의
+    #   users.team_id       — budget_usages 를 읽는 질의. 이 테이블에는 team_id 컬럼이
+    #                         **없어서**(scope/scope_id/period/client 뿐) auth.users 로
+    #                         조인해 거르는 것이 유일한 방법이다.
+    #
+    # ⚠️ 이 목록에 새 문자열을 추가할 때는 그것이 진짜 격리인지 확인할 것. "team" 이
+    #    들어간 아무 문자열이나 넣으면(예: GROUP BY teams.name) 가드가 통째로 공허해진다.
+    SCOPE_PREDICATES = ("usage_logs.team_id = ", "users.team_id = ")
+    unscoped = [s for s in seen if not any(p in s for p in SCOPE_PREDICATES)]
     assert not unscoped, (
         f"team_id 격리가 없는 질의 {len(unscoped)}건 — 전사 데이터가 섞여 나온다. "
         f"예: {unscoped[0][:400]}"
     )
+
+    # 대조군 — 두 경로가 **둘 다 실제로 등장**하는가. 한쪽이 사라지면 위 단정은
+    # 남은 한쪽만으로 통과하고, 없어진 질의의 격리 누락을 못 잡는다.
+    assert any("usage_logs.team_id = " in s for s in seen), (
+        "usage_logs 격리 질의가 하나도 없다 — 가드의 전제가 깨졌다"
+    )
+    assert any("budget.budget_usages" in s for s in seen), (
+        "budget_usages 질의가 나가지 않았다 — seed 반영 경로가 사라졌다면 "
+        "이 가드는 그 경로의 격리를 더 이상 검사하지 못한다"
+    )
+    for q in seen:
+        if "budget.budget_usages" in q:
+            assert "users.team_id = " in q, (
+                "budget_usages 질의에 users.team_id 격리가 없다 — TEAM_LEADER 가 다른 팀 "
+                f"사용자의 이관 금액을 받아 간다: {q[:400]}"
+            )
 
 
 @pytest.mark.asyncio

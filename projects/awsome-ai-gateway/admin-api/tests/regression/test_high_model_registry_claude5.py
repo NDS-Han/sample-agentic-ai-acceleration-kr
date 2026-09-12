@@ -317,6 +317,10 @@ async def test_live_registry_state_after_migrations():
             if head is None or head < "0028":
                 pytest.skip(f"DB head={head} — 0028 미적용")
 
+            # ⚠️ `effective_until IS NULL` 이 필수다. 단가는 시계열이므로 0030 이후
+            #    Sonnet 5 에는 **닫힌 잠정 행과 열린 정정 행이 둘 다** 존재한다. 필터가
+            #    없으면 dict 컴프리헨션이 마지막으로 읽힌 행을 남겨서, 단정하는 값이
+            #    행 순서(플래너 마음)에 달린다 — 통과/실패가 무작위가 된다.
             rows = dict(
                 (r[0], (str(r[1]), str(r[2])))
                 for r in (
@@ -328,6 +332,7 @@ async def test_live_registry_state_after_migrations():
                             "  JOIN model.model_pricings p ON p.model_alias = a.alias "
                             " WHERE a.alias IN ('claude-opus-5','claude-sonnet-5',"
                             "                   'claude-opus-4-8','claude-sonnet-4-6')"
+                            "   AND p.effective_until IS NULL"
                         )
                     )
                 ).fetchall()
@@ -337,10 +342,31 @@ async def test_live_registry_state_after_migrations():
                 assert rows["claude-opus-5"] == rows["claude-opus-4-8"], (
                     f"Opus 5 단가가 4.8 과 다르다: {rows}"
                 )
-            if "claude-sonnet-4-6" in rows and "claude-sonnet-5" in rows:
-                assert rows["claude-sonnet-5"] == rows["claude-sonnet-4-6"], (
-                    f"Sonnet 5 단가가 4.6 과 다르다: {rows}"
+
+            # ⚠️ Sonnet 5 는 4.6 과 **다르다.** 예전 단정("4.6 과 같아야 한다")은 0027 의
+            #    잠정값을 굳혀 둔 것이고, 마이그레이션 0030 이 그 값을 1.5 배 과대청구로
+            #    판정해 $2.00/$10.00 로 정정했다(AWS Price List 의 OnDemand term 이 근거,
+            #    Sonnet 5 토큰 SKU 265개 전부 nterms=1). 그래서 "같아야 한다" 는 정정을
+            #    되돌리라는 요구가 된다.
+            #
+            #    이 단정이 왜 여태 살아 있었나: PROOF_DSN 이 없으면 이 파일 전체가 skip
+            #    되고, CI 에는 PROOF_DSN 잡이 없었다. 즉 0030 이 머지된 뒤로 한 번도
+            #    실행되지 않았다.
+            #
+            #    ⚠️ 0030 의 감시 항목: Bedrock 이 2026-08-31 이후 1P 를 따라 $3.00/$15.00
+            #       으로 올리면 새 effective_from 행이 추가된다. 그때는 0030 과 같은
+            #       패턴으로 마이그레이션을 넣고 **이 줄도 함께** 갱신할 것.
+            SONNET_5_PUBLISHED = ("0.002000", "0.010000")
+            if "claude-sonnet-5" in rows:
+                assert rows["claude-sonnet-5"] == SONNET_5_PUBLISHED, (
+                    f"Sonnet 5 열린 단가가 공시가 {SONNET_5_PUBLISHED} 와 다르다: "
+                    f"{rows['claude-sonnet-5']}. 0027 의 잠정값(4.6 과 동일)으로 돌아갔다면 "
+                    "0030 의 정정이 유실된 것이다(과대청구 방향)."
                 )
+                if "claude-sonnet-4-6" in rows:
+                    assert rows["claude-sonnet-5"] != rows["claude-sonnet-4-6"], (
+                        "Sonnet 5 단가가 4.6 과 같다 — 0030 이 적용되지 않았다"
+                    )
 
             fable = (
                 await conn.execute(

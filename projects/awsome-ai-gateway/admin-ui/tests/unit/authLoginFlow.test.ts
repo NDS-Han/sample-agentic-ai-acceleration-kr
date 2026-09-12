@@ -132,6 +132,25 @@ function stubTokenEndpoint(body: unknown, status = 200) {
 
 // ───────────────────────── 0. vacuity control ─────────────────────────
 
+/**
+ * 같은 오리진 리다이렉트의 새 계약: Location 은 **상대 경로**다.
+ *
+ * 왜 절대 URL 이 아니어야 하나: 컨테이너 안에서 request.url 은 0.0.0.0 으로 풀리고,
+ * Host 헤더도 CloudFront→ALB 구성에서는 ALB 의 DNS 이름이 들어온다. 절대 URL 을 만들면
+ * 로그인 직후 브라우저가 내부 호스트로 이동해 CloudFront 오리진을 잃는다(내부 호스트에는
+ * dev-login 이 열려 있을 수 있어 UX 문제로 끝나지 않는다). 상대 Location 은 브라우저가
+ * **자신이 요청한 URL** 기준으로 해석하므로 서버가 자기 외부 주소를 알 필요가 없다.
+ *
+ * 그래서 scheme/host 가 **없다는 것 자체**를 단정한다 — 절대 URL 로 되돌아가면 실패한다.
+ */
+function expectRelativeRedirect(res: Response, path: string): void {
+  const loc = res.headers.get('location');
+  expect(loc).toBe(path);
+  expect(loc).not.toMatch(/^https?:\/\//);
+  // `//host` 는 스킴 상대 URL 이라 외부로 나간다 — "/" 로 시작한다는 검사만으론 부족하다.
+  expect(loc!.startsWith('//')).toBe(false);
+}
+
 describe('vacuity control — 하네스가 정말로 핸들러를 실행하는가', () => {
   it('loginGET 은 실제 Response 를 돌려주고, env 를 읽어 출력이 달라진다', async () => {
     // 이 테스트가 없으면 아래 모든 단정이 "핸들러가 아무것도 안 해도 통과"할 수 있다.
@@ -175,16 +194,19 @@ describe('GET /api/auth/login — dev 는 오늘과 동일해야 한다', () => 
     const res = await loginGET(req('http://admin.test/api/auth/login'));
 
     expect(res.status).toBe(307);
-    const loc = new URL(res.headers.get('location')!);
-    expect(loc.pathname).toBe('/api/auth/dev-login');
+    expectRelativeRedirect(res, '/api/auth/dev-login');
     // ⚠️ dev 분기에서는 state/verifier 쿠키를 만들지 않는다(dev 흐름 오염 금지).
     expect(Object.keys(setCookies(res))).not.toContain('oidc_state');
   });
 
-  it('dev 분기는 원래 호스트를 유지한다 — request.url 의 0.0.0.0 함정', async () => {
+  it('dev 분기는 호스트를 아예 싣지 않는다 — 그래서 어떤 프록시 뒤에서도 오리진이 유지된다', async () => {
+    // 예전 계약은 "Host 헤더의 호스트를 유지" 였다. 그건 CloudFront→ALB 에서 깨진다
+    // (Host 가 ALB 이름이면 절대 URL 이 내부 호스트를 가리킨다). 상대 Location 은
+    // 호스트를 싣지 않으므로 브라우저가 보고 있던 오리진이 그대로 남는다.
     process.env.DEV_LOGIN_ENABLED = 'true';
     const res = await loginGET(req('http://admin.internal:3000/api/auth/login'));
-    expect(new URL(res.headers.get('location')!).host).toBe('admin.internal:3000');
+    expectRelativeRedirect(res, '/api/auth/dev-login');
+    expect(res.headers.get('location')).not.toContain('admin.internal');
   });
 });
 
@@ -432,7 +454,7 @@ describe('GET /api/auth/callback — happy path', () => {
     const res = await callbackGET(callbackReq());
 
     expect(res.status).toBe(303);
-    expect(new URL(res.headers.get('location')!).pathname).toBe('/');
+    expectRelativeRedirect(res, '/');
     const jar = setCookies(res);
     expect(jar['admin_jwt']).toBeTruthy();
     expect(cookieValue(jar['admin_jwt'])).toBe(idToken);
@@ -581,7 +603,9 @@ describe('GET /api/auth/callback — happy path', () => {
     stubTokenEndpoint({ id_token: jwtWithExp(null) });
     const res = await callbackGET(callbackReq(undefined, { 'x-forwarded-proto': 'https' }));
     expect(setCookies(res)['admin_jwt']).toMatch(/Secure/i);
-    expect(new URL(res.headers.get('location')!).protocol).toBe('https:');
+    // 리다이렉트는 상대 경로라 scheme 이 없다 — 브라우저가 https 오리진을 그대로 쓴다.
+    // (Secure 플래그는 x-forwarded-proto 로 판정하므로 위 단정이 그 계약을 지킨다.)
+    expectRelativeRedirect(res, '/');
   });
 });
 
@@ -674,15 +698,14 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
   it('쿠키 없음 → /api/auth/login (dev-login 직행 금지)', async () => {
     const res = await middleware(req('http://admin.test/'));
     expect(res.status).toBe(307);
-    const loc = new URL(res.headers.get('location')!);
-    expect(loc.pathname).toBe('/api/auth/login');
-    expect(loc.pathname).not.toBe('/api/auth/dev-login');
+    expectRelativeRedirect(res, '/api/auth/login');
+    expect(res.headers.get('location')).not.toBe('/api/auth/dev-login');
   });
 
   it('만료된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
     const expired = `header.${b64({ sub: 'u', role: 'ADMIN', exp: Math.floor(Date.now() / 1000) - 60 })}.sig`;
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: expired } }));
-    expect(new URL(res.headers.get('location')!).pathname).toBe('/api/auth/login');
+    expectRelativeRedirect(res, '/api/auth/login');
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('admin_jwt=');
     expect(setCookie).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
@@ -690,7 +713,7 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
 
   it('손상된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: 'not-a-jwt' } }));
-    expect(new URL(res.headers.get('location')!).pathname).toBe('/api/auth/login');
+    expectRelativeRedirect(res, '/api/auth/login');
     expect(res.headers.get('set-cookie') ?? '').toContain('admin_jwt=');
   });
 
@@ -708,11 +731,13 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
-  it('원래 호스트를 유지한다 (nextUrl.clone — request.url 은 0.0.0.0)', async () => {
-    const res = await middleware(req('http://admin.internal:3000/budgets'));
-    const loc = new URL(res.headers.get('location')!);
-    expect(loc.host).toBe('admin.internal:3000');
-    expect(loc.search).toBe('');
+  it('호스트를 싣지 않고 쿼리도 버린다 (상대 Location)', async () => {
+    // 옛 계약("Host 유지")은 프록시 뒤에서 내부 호스트를 가리킬 수 있었다. 상대 경로면
+    // 그 실패 모드가 구조적으로 사라진다. 쿼리를 버리는 성질은 그대로 지킨다 —
+    // 로그인 진입점에 원래 요청의 쿼리가 새어 들어갈 이유가 없다.
+    const res = await middleware(req('http://admin.internal:3000/budgets?q=secret'));
+    expectRelativeRedirect(res, '/api/auth/login');
+    expect(res.headers.get('location')).not.toContain('secret');
   });
 });
 
@@ -772,8 +797,11 @@ describe('/api/auth/dev-login — 켜져 있을 때는 오늘과 동일 (dev 무
       }),
     );
 
-    expect(res.status).toBe(307);
-    expect(new URL(res.headers.get('location')!).pathname).toBe('/');
+    // ⚠️ 303 이어야 한다(예전엔 307). 이 요청은 **POST** 이고, 307 은 메서드를 보존하므로
+    //    브라우저가 `/` 로 다시 POST 한다 — `/` 는 페이지(GET) 라서 그 요청은 의미가 없다.
+    //    303 은 "결과를 GET 으로 보라" 는 뜻이고, logout 라우트가 이미 그렇게 하고 있었다.
+    expect(res.status).toBe(303);
+    expectRelativeRedirect(res, '/');
     const jar = setCookies(res);
     const token = cookieValue(jar['admin_jwt']);
     expect(token.startsWith('dev.')).toBe(true);

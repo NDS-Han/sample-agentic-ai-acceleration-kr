@@ -111,6 +111,146 @@ jobs:
       - name: pytest
         run: python -m pytest ${{ env.PROJECT_DIR }}/db/tests -q -p no:cacheprovider
 
+  helm-render:
+    name: pytest · helm 렌더 정합성 (admin-api ↔ admin-ui)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # helm 이 없으면 테스트가 조용히 skip 된다 — 그러면 이 잡은 아무것도 강제하지 않는다.
+      # 테스트 쪽에서도 CI 면 skip 대신 실패시키지만, 여기서 확실히 설치한다.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Install pytest + pyyaml
+        run: python -m pip install --disable-pip-version-check pytest pyyaml
+      # ⚠️ CI=true 가 필수다. 테스트가 이 값을 보고 "helm 없음" 을 skip 이 아니라
+      #    실패로 처리한다(조용한 미검증 방지).
+      - name: pytest
+        env:
+          CI: "true"
+        run: python -m pytest ${{ env.PROJECT_DIR }}/deployment/charts/llm-gateway/tests -q -p no:cacheprovider
+
+  pg-proof:
+    name: pytest · 실 PostgreSQL 증명 (PROOF_DSN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # ⚠️ 이 잡이 없으면 admin-api 의 PROOF_DSN 테스트 4파일이 CI 에서 **전부 skip** 된다.
+    #    그 파일들이 검증하는 것은 하필 mock 으로 증명이 불가능한 것들이다:
+    #    MVCC 스냅샷 하에서의 동시 upsert, 부분 유니크 인덱스, sargability(EXPLAIN),
+    #    그리고 CTE + GREATEST 로 만든 seed 역산.
+    #
+    #    실제로 skip 된 채로 방치된 대가가 이미 있었다: test_high_model_registry_claude5
+    #    의 "Sonnet 5 단가는 4.6 과 같다" 단정이 마이그레이션 0030(1.5배 과대청구 정정)
+    #    이후로 계속 틀린 채였고, 아무도 몰랐다 — 이 잡을 붙이자마자 드러났다.
+    services:
+      postgres:
+        # pgvector 이미지를 쓴다 — db/init 이 `CREATE EXTENSION vector` 를 요구한다
+        # (stock postgres:16 에서는 그 파일이 실패해 스키마가 반쪽이 된다).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: proof
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # ⚠️ DB 이름에 'proof' 가 들어가야 한다. 두 테스트 파일이 스크래치 DB 가드를 갖고
+      #    있어서(이름에 proof/test/scratch/tmp 중 하나 필수) 다른 이름이면 통째로
+      #    실패한다 — 그 가드는 실 데이터를 DROP 하지 않으려고 일부러 있는 것이다.
+      PGPASSWORD: proof
+      PROOF_DB: gwproof_ci
+      PROOF_DSN: postgresql+asyncpg://postgres:proof@127.0.0.1:5432/gwproof_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # ⚠️ 두 파일은 PROOF_DSN 이 **alembic head 를 마친** DB 를 가리킬 것을 요구한다
+      #    (에러 메시지에도 그렇게 적혀 있다). 빈 DB 를 주면 4건이 실패한다.
+      - name: Create the proof database
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -c "DROP DATABASE IF EXISTS ${PROOF_DB} WITH (FORCE)"
+          psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ${PROOF_DB}"
+
+      - name: Apply db/init SQL
+        working-directory: ${{ env.PROJECT_DIR }}/db/init
+        run: |
+          set -uo pipefail
+          for f in *.sql; do
+            if ! psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -v ON_ERROR_STOP=1 -q -f "$f"; then
+              echo "::warning::init SQL 실패(계속): $f"
+            fi
+          done
+          # 대조군 — 핵심 테이블이 실제로 생겼는가. 반쪽 스키마로 진행하면 아래 테스트가
+          # 알 수 없는 이유로 죽는다.
+          for t in "auth users" "usage usage_logs" "budget budget_usages" "model model_pricings"; do
+            set -- $t
+            n=$(psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -tA -c \
+              "SELECT count(*) FROM information_schema.tables WHERE table_schema='$1' AND table_name='$2'")
+            if [ "$n" != "1" ]; then echo "::error::$1.$2 이 없다 — init SQL 적용 실패"; exit 1; fi
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/admin-api/uv.lock
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # db/ 는 자체 pyproject 가 없다(Dockerfile 로만 돈다) → 필요한 것만 직접 설치한다.
+      - name: alembic upgrade head
+        working-directory: ${{ env.PROJECT_DIR }}/db
+        env:
+          DB_URL: postgresql+asyncpg://postgres:proof@127.0.0.1:5432/gwproof_ci
+        run: |
+          set -euo pipefail
+          uv run --with alembic --with asyncpg --with sqlalchemy --with pgvector \
+            alembic upgrade head
+          head=$(psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -tA \
+            -c "SELECT version_num FROM public.alembic_version")
+          echo "alembic head = ${head}"
+          # 대조군 — 마이그레이션이 실제로 끝까지 갔는가.
+          if [ -z "${head}" ]; then echo "::error::alembic_version 이 비었다"; exit 1; fi
+
+      - name: Sync admin-api dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-api
+        run: uv sync --frozen --all-extras --dev
+
+      # ⚠️ 파일을 **명시**한다. `-k "nonsargable or ..."` 는 이름 매칭이라 무관한 파일
+      #    12개까지 끌고 들어왔다(실측). 여기 나열된 것이 PROOF_DSN 을 쓰는 전부다.
+      - name: pytest (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-api
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_high_nonsargable_period_filter.py \
+            tests/regression/test_high_duplicate_active_config.py \
+            tests/regression/test_high_model_registry_claude5.py \
+            tests/regression/test_high_analytics_seed_reconciliation.py \
+            > /tmp/proof.txt 2>&1
+          status=$?
+          tail -40 /tmp/proof.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          # 통과했더라도 실질 실행이 0건이면 실패다 — 그게 이 잡을 만든 이유다.
+          # (로컬 실측 기준선: 107 passed, 2 skipped)
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          echo "passed=${passed}"
+          if [ "${passed:-0}" -lt 90 ]; then
+            echo "::error::통과 수가 ${passed} 건뿐이다(기대 100+). PROOF_DSN 게이트가 걸려 대부분 skip 된 것으로 보인다."
+            exit 1
+          fi
+
   admin-ui:
     name: admin-ui · vitest + typecheck + lint
     runs-on: ubuntu-latest
@@ -158,9 +298,14 @@ jobs:
         #    파일/규칙 단위 정밀 게이트는 부채를 실제로 줄인 뒤에 도입하는 게 맞다.
         include:
           - service: admin-api
-            baseline: 76
+            baseline: 75
           - service: gateway-proxy
-            baseline: 466
+            # 466(기존) + 2. 신규 파일 2개(observability/provider_metrics.py,
+            # tests/regression/test_high_declared_metrics_are_emitted.py)의 **저작권 헤더**
+            # E501 이다. 그 헤더는 레포의 161개 파일 전부가 동일하게 갖는 100자 초과 한
+            # 줄이라 파일을 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이
+            # 아니다. 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
+            baseline: 468
           - service: cost-recorder-worker
             baseline: 21
           - service: notification-worker

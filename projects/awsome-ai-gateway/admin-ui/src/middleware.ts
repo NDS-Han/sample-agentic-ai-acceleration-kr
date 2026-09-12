@@ -8,6 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 import { parseJWT } from '@/lib/auth';
 import { checkPagePermission, isSessionExpired } from '@/lib/auth';
 
@@ -45,10 +46,9 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
  *    미인증으로도 도달 가능하다 — 그래야 무한 리다이렉트가 안 난다.
  */
 function redirectToLogin(request: NextRequest, clearCookie: boolean): NextResponse {
-  const loginUrl = request.nextUrl.clone();
-  loginUrl.pathname = '/api/auth/login';
-  loginUrl.search = '';
-  const redirectResponse = NextResponse.redirect(loginUrl);
+  // 상대 Location. nextUrl 은 컨테이너에서 0.0.0.0 으로 풀리고, Host 헤더도 CloudFront
+  // 뒤에서는 ALB 이름일 수 있다 — 둘 다 신뢰하지 않는다(lib/redirect.ts).
+  const redirectResponse = redirectRelative('/api/auth/login', { status: 307 });
   if (clearCookie) {
     // 만료/손상된 자격증명은 응답에서 즉시 제거한다 — 안 지우면 다음 요청도 같은 쿠키로
     // 다시 이 분기를 타고, 사용자는 못 쓰는 쿠키를 계속 들고 다닌다.
@@ -101,9 +101,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     const hasPermission = checkPagePermission(pathname, session.role);
 
     if (!hasPermission) {
-      const forbiddenUrl = request.nextUrl.clone();
-      forbiddenUrl.pathname = '/403';
-      const redirectResponse = NextResponse.redirect(forbiddenUrl);
+      const redirectResponse = redirectRelative('/403', { status: 307 });
       applySecurityHeaders(redirectResponse);
       return redirectResponse;
     }

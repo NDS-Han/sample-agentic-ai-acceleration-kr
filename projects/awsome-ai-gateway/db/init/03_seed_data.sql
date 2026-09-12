@@ -41,6 +41,20 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================
 -- Service-Token Synthetic User (FK target for service_tokens.created_by)
 -- ============================================================
+--
+-- ⚠️ 이 id 는 코드에 **하드코딩**돼 있다: admin-api/src/app/core/auth.py 가
+--    `Bearer svc-...` 요청마다 이 UUID 로 CurrentUser 를 합성한다(is_service_token=True).
+--    그래서 이 행이 없으면 서비스 토큰 발급이 `service_tokens.created_by` FK 위반으로
+--    실패한다. id 를 바꾸려면 코드와 함께 바꿔야 한다 —
+--    admin-api/tests/unit/test_service_token_seed_contract.py 가 둘의 일치를 검사한다.
+--
+-- ⚠️ 이 시드를 백필하는 **alembic 마이그레이션은 필요 없다.** db/run_migration.sh 가
+--    `for f in /app/init/*.sql` 로 매 배포마다 이 파일을 재적용하고(그 루프의 주석 참조),
+--    `ON CONFLICT (id) DO NOTHING` 이라 기존 DB 에서도 안전한 no-op 이다.
+--    즉 신규 설치와 기존 업그레이드 양쪽에서 FK 대상이 보장된다.
+--    (참조 트리에는 이 백필을 하는 마이그레이션이 있는데, 여기서는 중복이다.
+--     게다가 ON CONFLICT DO NOTHING 이라 이미 시드된 행의 컬럼 드리프트를 고치지도
+--     못한다 — "고친 것처럼 보이기만" 한다.)
 
 INSERT INTO auth.users (id, team_id, email, display_name, role, sso_subject) VALUES
     ('00000000-0000-4000-a000-000000000011',

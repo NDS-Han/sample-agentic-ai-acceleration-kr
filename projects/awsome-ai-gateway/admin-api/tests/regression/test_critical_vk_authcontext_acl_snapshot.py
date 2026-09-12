@@ -42,6 +42,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from tests.session_double import wire_savepoint
+
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.encryption import AESEncryptionService
@@ -197,6 +199,7 @@ async def _issue(
     clients: list[str] | Exception,
 ):
     session = AsyncMock()
+    wire_savepoint(session)  # begin_nested 는 sync 호출 → async CM (실물과 동일)
     session.add = MagicMock()
     session.flush = AsyncMock()
     session.execute = AsyncMock()

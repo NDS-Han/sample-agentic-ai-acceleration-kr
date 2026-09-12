@@ -14,12 +14,15 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const host = request.headers.get('host') || 'localhost:3000';
+  // host 는 더 필요 없다 — 리다이렉트가 상대 경로다(lib/redirect.ts). proto 는 쿠키의
+  // Secure 플래그 판정에 여전히 쓴다(HTTP 종단에서 Secure 를 붙이면 쿠키가 저장 안 된다).
   const proto = request.headers.get('x-forwarded-proto') || 'http';
 
-  const response = NextResponse.redirect(`${proto}://${host}/`, { status: 303 });
+  // 상대 Location — Host 헤더가 CloudFront 뒤에서 ALB 이름일 수 있다(lib/redirect.ts).
+  const response = redirectRelative('/');
   response.cookies.set('admin_jwt', '', {
     httpOnly: true,
     sameSite: 'lax',

@@ -698,7 +698,11 @@ class BudgetService:
 
         from app.repositories.user_repository import UserRepository
         user_repo = UserRepository(session)
-        users = await user_repo.list_users(limit=500)
+        # ⚠️ limit=500 이었다. `list_users` 는 created_at desc 로 정렬한 뒤 앞에서
+        #    자르므로, 가입이 오래된 사용자의 예산 행이 **조용히 빠진 채** 사용률이
+        #    계산됐다(오류 없이 틀린 비율). 커서 페이징으로 우회할 수도 없다 —
+        #    정렬 키(created_at)와 커서 키(id)가 달라 행을 건너뛴다. 전수 조회를 쓴다.
+        users = await user_repo.iter_all_users()
         teams = await user_repo.list_all_teams()
 
         # team_id(str) → (dept_id, dept_name). teams are loaded with

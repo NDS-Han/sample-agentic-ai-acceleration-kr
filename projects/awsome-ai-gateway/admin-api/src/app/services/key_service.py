@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -102,7 +103,38 @@ class KeyService:
         )
 
         # BR-KEY-01 + INSERT 를 단일 CTE 로 (B: round-trip 절감)
-        expired_count, _ = await repo.expire_and_create(user_id, vk)
+        #
+        # ⚠️ savepoint + 1회 재시도가 필요한 이유(경쟁조건):
+        #    `auth.virtual_keys (user_id) WHERE status='ACTIVE'` 부분 유니크 인덱스가
+        #    "사용자당 ACTIVE 키 1개" 를 DB 차원에서 강제한다. 그게 없으면 동시 발급
+        #    두 건이 **둘 다 성공해 ACTIVE 키가 2개** 남는다(실 PostgreSQL 16 실측).
+        #    CTE 안의 UPDATE/INSERT 는 같은 스냅샷을 보므로 상대 트랜잭션이 넣는 행을
+        #    보지 못하고, 그래서 애플리케이션 단독으로는 막을 수 없다.
+        #
+        #    인덱스를 넣으면 그 경쟁이 유니크 위반으로 드러나는데, 재시도가 없으면
+        #    **두 요청이 모두 실패**한다(실측: 최종 ACTIVE 는 기존 키 그대로).
+        #    CLI 로그인·OIDC 교환이 그 경로라 사용자에겐 원인 불명의 500 이 된다.
+        #    상대가 커밋을 끝낸 뒤 재시도하면 우리 UPDATE 가 그 키를 EXPIRED 로 만들고
+        #    INSERT 가 성공한다 — 그래서 1회 재시도로 충분하다.
+        #
+        #    savepoint(`begin_nested`)로 감싸는 이유: IntegrityError 는 트랜잭션을
+        #    abort 상태로 만들어 이후 모든 문장이 거부된다. 이 함수는 commit 책임이
+        #    호출자에게 있으므로(docstring), 바깥 트랜잭션을 살려두려면 실패를
+        #    savepoint 안에 격리해야 한다.
+        expired_count = 0
+        for attempt in (1, 2):
+            try:
+                async with session.begin_nested():
+                    expired_count, _ = await repo.expire_and_create(user_id, vk)
+                break
+            except IntegrityError:
+                if attempt == 2:
+                    # 두 번째도 실패하면 경쟁이 아니라 다른 제약 위반이다 — 삼키지 않는다.
+                    logger.warning(
+                        "key.issue_conflict_persisted", user_id=str(user_id)
+                    )
+                    raise
+                logger.info("key.issue_conflict_retry", user_id=str(user_id))
         if expired_count > 0:
             logger.info("key.expired_existing", user_id=str(user_id), count=expired_count)
 
