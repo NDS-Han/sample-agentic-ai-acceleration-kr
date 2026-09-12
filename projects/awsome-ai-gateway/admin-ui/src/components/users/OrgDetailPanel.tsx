@@ -47,6 +47,8 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
   // ── ORGANIZATION ────────────────────────────────────────────────────────────
   if (node.type === 'ORGANIZATION') {
     const deptCount = node.children?.length ?? 0;
+    const orgTeamCount = node.meta.team_count ?? null;
+    const orgMemberCount = node.meta.member_count ?? null;
     return (
       <div>
         <h2 className="text-lg font-semibold mb-4">{node.name}</h2>
@@ -54,13 +56,33 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
           <span className="text-muted-foreground">{t('departmentCount')}</span>
           <span className="font-medium">{t('countSuffix', { count: deptCount })}</span>
         </div>
+        {orgTeamCount !== null && (
+          <div className="flex items-center gap-2 text-sm mb-2">
+            <span className="text-muted-foreground">{t('teamCount')}</span>
+            <span className="font-medium">{t('countSuffix', { count: orgTeamCount })}</span>
+          </div>
+        )}
+        {orgMemberCount !== null && (
+          <div className="flex items-center gap-2 text-sm mb-2">
+            <span className="text-muted-foreground">{t('memberCount')}</span>
+            <span className="font-medium">{t('memberCountValue', { count: orgMemberCount })}</span>
+          </div>
+        )}
       </div>
     );
   }
 
   // ── DEPARTMENT ──────────────────────────────────────────────────────────────
   if (node.type === 'DEPARTMENT') {
-    const teamCount = node.meta.member_count ?? node.children?.length ?? 0;
+    // ⚠️ 예전엔 `node.meta.member_count ?? children.length` 를 **팀 수**로 표시했다.
+    //    서버는 그 필드에 하위 팀들의 사용자 수 합을 넣으므로, 20팀×50명 부서가
+    //    화면에 "팀 1000개" 로 떴다. 지금은 서버가 team_count 를 따로 준다
+    //    (admin-api schemas/users.py OrgNodeMeta).
+    //
+    //    폴백은 children.length 로만 둔다 — 팀 수를 모르면 "모른다" 가 맞고,
+    //    사람 수로 대신 채우면 정확히 그 버그가 재발한다.
+    const teamCount = node.meta.team_count ?? node.children?.length ?? 0;
+    const deptMemberCount = node.meta.member_count ?? null;
     return (
       <div>
         <h2 className="text-lg font-semibold mb-4">{node.name}</h2>
@@ -68,6 +90,12 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
           <span className="text-muted-foreground">{t('teamCount')}</span>
           <span className="font-medium">{t('countSuffix', { count: teamCount })}</span>
         </div>
+        {deptMemberCount !== null && (
+          <div className="flex items-center gap-2 text-sm mb-2">
+            <span className="text-muted-foreground">{t('memberCount')}</span>
+            <span className="font-medium">{t('memberCountValue', { count: deptMemberCount })}</span>
+          </div>
+        )}
       </div>
     );
   }
