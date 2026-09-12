@@ -158,7 +158,7 @@ jobs:
         #    파일/규칙 단위 정밀 게이트는 부채를 실제로 줄인 뒤에 도입하는 게 맞다.
         include:
           - service: admin-api
-            baseline: 76
+            baseline: 75
           - service: gateway-proxy
             baseline: 466
           - service: cost-recorder-worker

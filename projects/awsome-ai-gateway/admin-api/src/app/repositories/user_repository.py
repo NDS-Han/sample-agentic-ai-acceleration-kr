@@ -242,6 +242,29 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return result.rowcount or 0
 
+    async def iter_all_users(self) -> list[User]:
+        """예산 요약처럼 **전수**가 필요한 집계용 — limit 없이 모든 사용자를 돌려준다.
+
+        ⚠️ `list_users(limit=N)` 을 크게 잡아 쓰지 말 것. 그건 `created_at desc` 로 정렬한
+        뒤 앞에서 N 개만 자르므로, **N 번째 이후 사용자가 조용히 사라진다.** 실제로 예산
+        요약이 `list_users(limit=500)` 이라 가입이 오래된 사용자의 예산 행이 통째로 빠진
+        채 사용률이 계산됐다 — 화면에 오류 없이 틀린 비율이 떴다.
+
+        ⚠️ `cursor` 페이징으로 우회하는 것도 안 된다. `list_users` 는
+        `order_by(created_at desc)` 인데 커서 조건이 `User.id < cursor` 여서 **정렬 키와
+        커서 키가 다르다.** 그 조합은 행을 건너뛰거나 같은 페이지를 반복한다(id 순서와
+        created_at 순서가 무관하므로). 커서 페이징을 쓰려면 정렬 키로 커서를 잡아야 한다.
+
+        전수 로드가 안전한 근거: 이 메서드는 관리자 화면의 요약 집계에서만 쓰이고,
+        auth.users 는 조직 구성원 수(수천 규모) 상한이라 목록 자체가 크지 않다. 사용자가
+        수십만 규모가 되면 이 집계를 SQL 쪽 GROUP BY 로 옮겨야 한다 —
+        `/admin/dashboard/kpi` 가 이미 그 방식이다(합계만 필요할 때는 그쪽을 쓸 것).
+        """
+        result = await self._session.execute(
+            select(User).order_by(User.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def list_users(
         self,
         *,

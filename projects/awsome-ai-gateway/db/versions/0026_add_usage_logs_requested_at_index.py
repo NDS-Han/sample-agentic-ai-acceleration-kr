@@ -40,6 +40,18 @@ CONCURRENTLY 로 수동 생성한 뒤 IF NOT EXISTS 로 no-op 되게 하는 편�
 
 DESC 로 만드는 이유: 범위 스캔에는 방향이 무관하지만, 이 컬럼의 다른 쓰임새(최근 N건
 조회)가 전부 최신순이고 기존 복합 인덱스들도 DESC 라 관례를 맞춘다.
+
+⚠️ `(requested_at, status)` **복합 인덱스는 일부러 만들지 않는다.** 검토는 했고 실측으로
+   기각했다(실 PostgreSQL 16, usage_logs 18만행, SUCCESS 90%):
+     복합 인덱스 있음 → cost 4674.24, buffers 2376, Bitmap Index Scan on
+                        **idx_usage_logs_requested_at** (복합 인덱스 미선택)
+     복합 인덱스 없음 → cost 4674.24, buffers 2376, 계획 완전 동일
+   플래너가 복합 인덱스를 아예 고르지 않는 이유는 이 집계가 `sum(cost_usd)` 를 요구해서
+   index-only scan 이 불가능하고 heap 방문이 어차피 필요하기 때문이다. status 를 인덱스에
+   넣어도 걸러낼 수 있는 건 소수의 비-SUCCESS 행(위 실측 45,027 중 4,449)뿐이라
+   Bitmap Heap Scan 의 블록 수가 줄지 않는다.
+   ⇒ 이득 0, 비용은 쓰기 증폭 + 저장공간. 넣지 않는다.
+   (집계가 `count(*)` 만 하는 형태로 바뀌면 그때 재검토할 값이 생긴다.)
 """
 from alembic import op
 

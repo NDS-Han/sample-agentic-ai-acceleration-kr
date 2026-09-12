@@ -276,13 +276,13 @@ class AnalyticsService:
         """User × Model 누적 (period 1일 ~ date, KST, SUCCESS only)."""
         from sqlalchemy import func, select
 
+        from app.core.usage_filters import kst_day_range_filter
         from app.models.auth import Department, Team, User
         from app.models.usage import UsageLog, UsageStatus
 
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone("Asia/Seoul", UsageLog.requested_at))
 
         stmt = (
             select(
@@ -309,10 +309,13 @@ class AnalyticsService:
             .outerjoin(Department, Department.id == Team.dept_id)
             .where(
                 UsageLog.status == UsageStatus.SUCCESS,
-                # cast string bounds to date — kst_day is a DATE, comparing against a
-                # bare str raises asyncpg "operator does not exist: date >= varchar".
-                kst_day >= func.date(period_start),
-                kst_day <= func.date(date),
+                # ⚠️ `date(timezone('Asia/Seoul', requested_at)) >= date(:start)` 형태는
+                #    좌변이 컬럼에 함수를 씌운 표현식이라 requested_at 인덱스를 못 타고
+                #    usage_logs 를 전부 훑는다(월 필터를 cost_period_filter 로 고친 것과
+                #    같은 이유). 경계를 파라미터 쪽에서 UTC 반개구간으로 환산하면 컬럼이
+                #    그대로 남아 인덱스를 탄다. 집합은 동일하므로 숫자는 움직이지 않는다:
+                #    KST 일자 ∈ [start, date] ⟺ requested_at ∈ [KST start, KST date+1).
+                kst_day_range_filter(period_start, date),
             )
             .group_by(
                 UsageLog.user_id,
@@ -360,13 +363,13 @@ class AnalyticsService:
         """User 단위 누적 (period 1일 ~ date, KST, SUCCESS only). Dashboard 요약 테이블용."""
         from sqlalchemy import func, select
 
+        from app.core.usage_filters import kst_day_range_filter
         from app.models.auth import Department, Team, User
         from app.models.usage import UsageLog, UsageStatus
 
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone("Asia/Seoul", UsageLog.requested_at))
 
         stmt = (
             select(
@@ -385,10 +388,13 @@ class AnalyticsService:
             .outerjoin(Department, Department.id == Team.dept_id)
             .where(
                 UsageLog.status == UsageStatus.SUCCESS,
-                # cast string bounds to date — kst_day is a DATE, comparing against a
-                # bare str raises asyncpg "operator does not exist: date >= varchar".
-                kst_day >= func.date(period_start),
-                kst_day <= func.date(date),
+                # ⚠️ `date(timezone('Asia/Seoul', requested_at)) >= date(:start)` 형태는
+                #    좌변이 컬럼에 함수를 씌운 표현식이라 requested_at 인덱스를 못 타고
+                #    usage_logs 를 전부 훑는다(월 필터를 cost_period_filter 로 고친 것과
+                #    같은 이유). 경계를 파라미터 쪽에서 UTC 반개구간으로 환산하면 컬럼이
+                #    그대로 남아 인덱스를 탄다. 집합은 동일하므로 숫자는 움직이지 않는다:
+                #    KST 일자 ∈ [start, date] ⟺ requested_at ∈ [KST start, KST date+1).
+                kst_day_range_filter(period_start, date),
             )
             .group_by(
                 UsageLog.user_id,
