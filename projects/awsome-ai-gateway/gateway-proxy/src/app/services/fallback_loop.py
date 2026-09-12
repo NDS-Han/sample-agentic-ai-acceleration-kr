@@ -31,6 +31,11 @@ from typing import Any
 
 import structlog
 
+from app.observability.provider_metrics import (
+    build_provider_labels,
+    record_provider_error,
+    record_provider_request,
+)
 from app.schemas.domain import ModelConfigSchema, TokenUsage
 from app.services.circuit_breaker import CircuitBreakerService
 from app.services.rate_limit_enforcement import enforce_rate_limits
@@ -126,6 +131,8 @@ async def run_fallback_loop(
     build_candidate_body,  # callable(req_data, model_config, is_stream) -> (bytes, dict, dict)
     # For Bedrock: _rewrite_model_id_for_region; for Mantle: identity
     rewrite_model_id,  # callable(provider_model_id) -> str
+    # 프로바이더 호출 결과 지표(선택). None 이면 아무것도 기록하지 않는다.
+    metrics=None,
 ) -> FallbackResult:
     """Run the fallback loop over `try_order`.
 
@@ -254,6 +261,18 @@ async def run_fallback_loop(
 
         any_invoked = True
 
+        # ── 이 후보 1건 = 프로바이더 호출 1건 ──
+        #
+        # 폴백 루프에서는 후보마다 따로 세는 것이 맞다. 요청 단위로 한 번만 세면
+        # "원본 모델이 죽어서 폴백이 성공했다" 가 **성공 1건**으로만 보이고, 원본의
+        # 실패는 지표에서 사라진다 — 정확히 알아야 할 사실이 그것이다.
+        _pm_labels = build_provider_labels(
+            model_config=candidate_config,
+            client=state.get("client"),
+            is_stream=is_stream,
+        )
+        record_provider_request(metrics, _pm_labels)
+
         # --- 6. Invoke ---
         caught_connection_error = False
         try:
@@ -272,6 +291,9 @@ async def run_fallback_loop(
                 error=type(exc).__name__,
             )
             caught_connection_error = True
+            record_provider_error(
+                metrics, _pm_labels, status=503, error_code=type(exc).__name__
+            )
             status = 503  # treat as 503 for unwind/CB purposes
             response_body = json.dumps(
                 {"error": {"type": "connection_error", "message": str(exc)}}
@@ -281,6 +303,9 @@ async def run_fallback_loop(
 
         # --- 7. Handle result ---
         if status in _FALLBACK_STATUSES or caught_connection_error:
+            # ⚠️ 연결 오류는 위 except 에서 이미 셌다 — 여기서 또 세면 2배가 된다.
+            if not caught_connection_error:
+                record_provider_error(metrics, _pm_labels, status=status)
             # CB: record failure only for {502,503} and connection errors, NOT 504
             if status in _CB_FAILURE_STATUSES or caught_connection_error:
                 await cb.record_failure(redis, pmid)

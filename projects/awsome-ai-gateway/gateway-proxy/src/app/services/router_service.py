@@ -11,6 +11,7 @@ from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.model import ModelAlias, ModelPricing
+from app.observability.provider_metrics import record_cache_hit
 from app.schemas.domain import (
     ApiFormat,
     AuthContext,
@@ -152,6 +153,15 @@ async def _fetch_latest_pricing(db: AsyncSession, alias: str) -> Optional[ModelP
 
 
 class RouterService:
+    # ⚠️ **클래스** 속성이다. 라우터 모듈 3곳이 각자 `RouterService()` 를 만들기 때문에
+    #    인스턴스 주입으로는 한 곳만 계측된다. main.py 의 lifespan 에서
+    #    `RouterService.metrics = gateway_metrics` 로 한 번 주입하면 세 인스턴스가 모두
+    #    본다. 미설정(테스트 등)이면 None → record_cache_hit 이 no-op 이다.
+    #
+    #    파라미터로 넘기지 않는 이유: 진입점 호출부가 23곳이고, 그 전부에 지표 인자를
+    #    끼우는 것은 계측이 얻는 값보다 회귀 위험이 크다.
+    metrics = None
+
     """모델 alias 조회 및 Key Scope 검사."""
 
     async def _resolve_by_providers(
@@ -184,6 +194,7 @@ class RouterService:
             if cached:
                 schema = _parse_cached_model(cached, model_ref)
                 if schema is not None:
+                    record_cache_hit(RouterService.metrics, kind="model")
                     if schema.status == ModelStatus.INACTIVE:
                         raise ModelInactiveError(f"Model '{schema.alias or model_ref}' is inactive")
                     if schema.provider not in providers:
@@ -369,6 +380,7 @@ class RouterService:
             if cached:
                 schemas = _parse_cached_model_list(cached)
                 if schemas is not None:
+                    record_cache_hit(RouterService.metrics, kind="model_list")
                     return schemas
                 # parse failed → drop the poisoned key so the rebuild below is not
                 # racing a still-poisoned entry, then fall through to the DB.

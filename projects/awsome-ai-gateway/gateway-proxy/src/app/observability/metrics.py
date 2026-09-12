@@ -61,9 +61,17 @@ class GatewayMetrics:
             "gateway_cache_hits_total",
             description="Total Redis cache hits",
         )
+        # ⚠️ request(분모)와 error(분자)는 **함께** 있어야 의미가 있다. 예전엔 error 만
+        #    선언돼 있고 그것마저 어디서도 증가하지 않아, 모델별 에러율을 낼 수 없었다.
+        #    라벨 구성은 observability/provider_metrics.py 한 곳에서만 만든다 —
+        #    호출부마다 다른 라벨을 붙이면 시계열이 섞여 어느 모델이 죽는지 알 수 없다.
+        self.provider_request_total: Counter = meter.create_counter(
+            "gateway_provider_request_total",
+            description="Total provider calls (denominator for provider error rate)",
+        )
         self.provider_error_total: Counter = meter.create_counter(
             "gateway_provider_error_total",
-            description="Total provider errors",
+            description="Total provider errors (numerator; labels match provider_request_total)",
         )
         self.background_task_errors_total: Counter = meter.create_counter(
             "gateway_background_task_errors_total",
@@ -102,11 +110,16 @@ class GatewayMetrics:
             description="Model request duration in seconds",
             unit="s",
         )
-        self.streaming_chunk_duration: Histogram = meter.create_histogram(
-            "gateway_streaming_chunk_duration_seconds",
-            description="Time between streaming chunks",
-            unit="s",
-        )
+        # ── `gateway_streaming_chunk_duration_seconds` 는 제거했다 ──
+        #
+        # 선언만 되어 있고 어디서도 기록되지 않았다. 그리고 이 형태 자체가 맞지 않는다:
+        # 청크 간 지연을 **전부** 히스토그램에 넣으면 정상 스트림의 수천 개 짧은 간격이
+        # 분포를 지배해, 정작 보고 싶은 "업스트림이 멈췄다" 가 꼬리에 묻힌다.
+        #
+        # 올바른 형태는 keepalive 핑 간격을 넘긴 구간만 재는 별도 지표
+        # (`stream_idle_gap_seconds` + `stream_ping_total`)이고, 그건 스트리밍
+        # 제너레이터 3개에 지표 접근을 넣는 별도 작업이다. 그때까지 이름만 남겨 두면
+        # "스트림 지연 지표가 있다" 는 잘못된 인상을 준다.
 
         # Gauges (4개)
         self.active_connections: UpDownCounter = meter.create_up_down_counter(
@@ -118,24 +131,34 @@ class GatewayMetrics:
             description="Current degradation level (0=healthy, 1=db, 2=redis, 3=both)",
         )
 
-        # Observable gauges (buffer_size, budget_remaining은 콜백 기반)
+        # Observable gauge — 콜백 기반.
+        #
+        # ⚠️ 콜백을 **등록하지 않으면 값이 하나도 나가지 않는다.** 예전엔
+        #    `register_buffer_size_callback` 이 코드베이스 어디에서도 호출되지 않아
+        #    이 게이지가 이름만 존재했다. Prometheus 에 시계열이 없으면 대시보드는
+        #    "No data" 를, 알람은 영구히 거짓을 낸다 — 사람은 둘 다 "정상" 으로 읽는다.
+        #    지표를 선언만 해 두는 것은 없는 것보다 나쁘다.
+        #    등록은 main.py 의 lifespan 에서 한다(UsageBufferQueue.size 를 읽는다).
         self._buffer_size_callback: list = []
-        self._budget_remaining_callback: list = []
 
         self.usage_buffer_size: ObservableGauge = meter.create_observable_gauge(
             "gateway_usage_buffer_size",
             callbacks=self._buffer_size_callback,
             description="Current usage buffer queue size",
         )
-        self.budget_remaining: ObservableGauge = meter.create_observable_gauge(
-            "gateway_budget_remaining_usd",
-            callbacks=self._budget_remaining_callback,
-            description="Remaining budget in USD",
-            unit="USD",
-        )
+
+        # ── `gateway_budget_remaining_usd` 는 제거했다 ──
+        #
+        # 남은 예산은 **사용자·팀 단위** 값이다. 라벨 없는 단일 게이지로는 무엇의 잔액인지
+        # 말할 수 없고, 라벨을 붙이면 사용자 수만큼 시계열이 생긴다 — 이 Prometheus 는
+        # prometheus-adapter 로 HPA 도 먹이므로 카디널리티 폭발은 관측성과 함께
+        # 오토스케일링을 죽인다(provider_metrics.py 의 카디널리티 계약 참조).
+        # 예산 잔액의 진실의 원천은 admin-api 의 예산 API/DB 이고, 게이트웨이는 요청
+        # 시점 판정만 한다. 여기서 또 내보내면 두 개의 진실이 생긴다.
 
     def register_buffer_size_callback(self, callback) -> None:
-        self._buffer_size_callback.append(callback)
+        """OTel observable gauge 콜백 등록. main.py lifespan 에서 호출한다.
 
-    def register_budget_callback(self, callback) -> None:
-        self._budget_remaining_callback.append(callback)
+        콜백 시그니처는 `(CallbackOptions) -> Iterable[Observation]` 이다.
+        """
+        self._buffer_size_callback.append(callback)

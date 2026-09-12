@@ -220,6 +220,7 @@ async def _handle_openai(request: Request, path: str):
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
+            metrics=getattr(request.app.state, "metrics", None),
         )
         if rejected is not None:
             return rejected
@@ -567,6 +568,7 @@ async def _handle_responses(request: Request):
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
+            metrics=getattr(request.app.state, "metrics", None),
         )
         if rejected is not None:
             return rejected

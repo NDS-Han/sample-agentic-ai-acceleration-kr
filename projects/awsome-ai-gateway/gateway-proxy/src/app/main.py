@@ -12,6 +12,7 @@ import structlog
 from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from opentelemetry.metrics import Observation
 
 from app.config import get_settings
 from app.db import create_db_engine, create_session_factory
@@ -145,6 +146,13 @@ async def lifespan(app: FastAPI):
     gateway_metrics = GatewayMetrics()
     degradation_manager.set_metrics(gateway_metrics.degradation_level)
     usage_buffer.set_metrics(gateway_metrics.usage_records_dropped_total)
+    # ⚠️ observable gauge 는 콜백을 등록해야 값이 나간다. set_metrics 처럼 카운터를
+    #    넘기는 것과는 다른 메커니즘이고, 예전엔 이 한 줄이 없어서
+    #    `gateway_usage_buffer_size` 가 이름만 존재했다(시계열 0개 = 대시보드 "No data").
+    #    버퍼가 차오르는 것은 cost-recorder 경로가 막혔다는 가장 이른 신호다.
+    gateway_metrics.register_buffer_size_callback(
+        lambda _options: [Observation(usage_buffer.size)]
+    )
     retry_worker.set_metrics(gateway_metrics.background_task_errors_total)
     cost_stream_spool.set_metrics(gateway_metrics.usage_records_dropped_total)
     # rate-limit fail-open 관측성(deepdive Q50 Phase 3) — eval 예외로 집행 못한 횟수.
@@ -338,6 +346,12 @@ async def lifespan(app: FastAPI):
     app.state.retry_worker = retry_worker
     app.state.health_checker = health_checker
     app.state.metrics = gateway_metrics
+    # RouterService 는 라우터 모듈 3곳에서 각각 인스턴스화되므로 **클래스** 속성에 넣는다
+    # (router_service.py 의 주석 참조). 캐시 히트율은 Redis 부하와 DB 폴백 빈도를 함께
+    # 설명하는 유일한 신호다 — 히트가 떨어지면 그 다음에 오는 것은 DB 커넥션 고갈이다.
+    from app.services.router_service import RouterService as _RouterService
+
+    _RouterService.metrics = gateway_metrics
     app.state.provider_registry = provider_registry
     app.state.routing_profile_loader = RoutingProfileLoader()
     app.state.mantle_http_client = mantle_http
