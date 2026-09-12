@@ -13,6 +13,8 @@ from typing import AsyncGenerator
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+
+from tests.session_double import wire_savepoint
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
@@ -145,6 +147,8 @@ async def _mock_get_db_session(request: Request):
        세션을 종료 블록이 또 커밋하지 않는지까지 같은 배선으로 확인한다.
     """
     session = AsyncMock()
+    # begin_nested 는 실물에서 sync 호출 → async CM (session_double 주석 참조)
+    wire_savepoint(session)
     session.execute = AsyncMock(return_value=_mock_db_result())
     session.get = AsyncMock(return_value=None)
     session.add = MagicMock()

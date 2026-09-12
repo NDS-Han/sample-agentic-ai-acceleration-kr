@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.session_double import wire_savepoint
+
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.encryption import AESEncryptionService
@@ -59,6 +61,9 @@ def mock_session() -> AsyncMock:
     session.commit = AsyncMock()
     session.execute = AsyncMock()
     session.rollback = AsyncMock()
+    # ⚠️ `begin_nested` 는 실물에서 **동기 호출**이고 async context manager 를 돌려준다.
+    #    AsyncMock 기본값은 코루틴을 돌려주므로 `async with` 가 TypeError 로 터진다.
+    wire_savepoint(session)
     return session
 
 

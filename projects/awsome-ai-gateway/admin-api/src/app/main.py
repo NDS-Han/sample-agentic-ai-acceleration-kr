@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 #    판정 함수를 그대로 재사용한다. 204/304 에 본문을 실으면 h11 이 프로토콜 위반으로
 #    끊어버리기 때문에, 우리가 봉투를 씌울 때도 같은 예외를 지켜야 한다.
 from fastapi.utils import is_body_allowed_for_status_code
+from sqlalchemy.exc import IntegrityError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.cache_invalidation import CacheInvalidationManager
@@ -399,6 +400,59 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=500,
             content={"error": {"type": "internal_error", "message": exc.message, "code": exc.code}},
+        )
+
+    # DB 유니크 제약 위반 → 409. 마이그레이션 0034 가 넣은 부분 유니크 인덱스
+    # (활성 단가 1개/사용자당 ACTIVE VK 1개/lower(alias) 유일)는 **동시 요청**에서
+    # 정상적으로 발동할 수 있다 — 예컨대 두 관리자가 같은 모델 단가를 동시에 바꾸면
+    # 한쪽이 진다. 그건 서버 결함이 아니라 경합이므로 409 로 알려주고 재시도하게 해야
+    # 한다. 핸들러가 없으면 최후의 그물이 잡아 **500** 이 되고, admin-ui 는 "서버 오류"
+    # 라고만 띄운다(실측: admin-api 전체에 IntegrityError 처리가 하나도 없었다).
+    #
+    # ⚠️ 무조건 409 로 바꾸면 안 된다. IntegrityError 는 FK 위반·NOT NULL 위반 등
+    #    **코드 버그**로도 발생하고, 그걸 409 로 감추면 500 으로 드러나야 할 결함이
+    #    "정상적인 경합" 처럼 보인다(로그·알람에서도 사라진다). 그래서 제약 이름을
+    #    확인해 **알려진 유니크 제약만** 409 로 매핑하고, 나머지는 다시 던져
+    #    최후의 그물이 500 + logger.exception 으로 처리하게 둔다.
+    _CONFLICT_CONSTRAINTS = frozenset(
+        {
+            "idx_model_pricings_active_unique",
+            "idx_virtual_keys_user_active_unique",
+            "idx_model_aliases_lower_unique",
+            "idx_productivity_events_idempotency",
+        }
+    )
+
+    @app.exception_handler(IntegrityError)
+    async def integrity_error_handler(request: Request, exc: IntegrityError):
+        # asyncpg 의 UniqueViolationError 는 constraint_name 을 들고 있다. SQLAlchemy 가
+        # 감싸므로 orig 를 본다. 드라이버가 이름을 안 주면 문자열에서 찾는다(psycopg 폴백).
+        orig = getattr(exc, "orig", None)
+        constraint = getattr(orig, "constraint_name", None)
+        if not constraint:
+            text = str(orig or exc)
+            constraint = next((c for c in _CONFLICT_CONSTRAINTS if c in text), None)
+
+        if constraint not in _CONFLICT_CONSTRAINTS:
+            # 알 수 없는 무결성 위반 = 버그일 가능성. 감추지 않는다.
+            raise exc
+
+        logger.info(
+            "integrity_conflict",
+            path=request.url.path,
+            method=request.method,
+            constraint=constraint,
+        )
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "type": "conflict",
+                    "code": "CONCURRENT_MODIFICATION",
+                    # 제약 이름은 내부 구조라 본문에 넣지 않는다.
+                    "message": "The resource was modified concurrently. Please retry.",
+                }
+            },
         )
 
     # 요청 검증 실패(422). FastAPI 기본 응답은 {"detail": [{loc, msg, type}, ...]} 인

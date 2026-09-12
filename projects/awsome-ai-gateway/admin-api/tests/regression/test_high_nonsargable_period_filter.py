@@ -836,7 +836,13 @@ def test_no_composite_requested_at_status_index_without_evidence():
     ⇒ 이득 0, 비용은 쓰기 증폭 + 저장공간. 이 테스트는 "성능 개선" 이라는 이름으로
     이득 없는 인덱스가 다시 들어오는 것을 막는다. 집계 형태가 바뀌어(예: count(*) 전용)
     index-only scan 이 가능해지면, 그 근거를 여기 적고 이 테스트를 갱신하면 된다.
+
+    ⚠️ 판정은 **실행되는 문자열 리터럴** 기준이다. 예전엔 파일 전체를 grep 해서,
+       기각 사실을 docstring 에 기록한 마이그레이션(0034)이 그 기록 때문에 위반으로
+       잡혔다 — 가드가 문서를 증거로 읽은 것이다. 반대 방향의 위험(주석에서만
+       인덱스를 만드는 척)은 존재하지 않으므로, 리터럴만 보는 게 정확하다.
     """
+    import ast
     from pathlib import Path
 
     versions = Path(__file__).resolve().parents[3] / "db" / "versions"
@@ -845,12 +851,49 @@ def test_no_composite_requested_at_status_index_without_evidence():
     files = sorted(versions.glob("*.py"))
     assert len(files) >= 20, f"마이그레이션을 {len(files)}개만 찾았다 — 경로 확인"
 
-    offenders = [
-        f"{p.name}" for p in files
-        if "idx_usage_logs_requested_at_status" in p.read_text(encoding="utf-8")
-    ]
+    BANNED = "idx_usage_logs_requested_at_status"
+
+    def _executable_literals(path: Path) -> list[str]:
+        """docstring 을 제외한 모든 문자열 리터럴.
+
+        `#` 주석은 AST 에 아예 남지 않으므로 자동으로 빠진다. docstring 은 리터럴이라
+        남으므로 명시적으로 걷어낸다.
+        """
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        docstrings = set()
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                body = getattr(node, "body", None)
+                if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
+                    if isinstance(body[0].value.value, str):
+                        docstrings.add(id(body[0].value))
+        return [
+            n.value
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Constant) and isinstance(n.value, str) and id(n) not in docstrings
+        ]
+
+    offenders = [p.name for p in files if any(BANNED in s for s in _executable_literals(p))]
     assert offenders == [], (
         "(requested_at, status) 복합 인덱스를 만드는 마이그레이션이 있다 — 실측으로 "
         "이득 0 으로 기각된 인덱스다(0026 의 주석 참조). 되살리려면 플래너가 실제로 "
         "그 인덱스를 고르는 EXPLAIN 을 근거로 남길 것:\n  " + "\n  ".join(offenders)
+    )
+
+    # ── 대조군 — 이 가드가 공허하지 않은가 ──
+    # 리터럴 추출기가 실행 SQL 을 놓치면 어떤 위반도 잡히지 않는다. 0026(단일 인덱스를
+    # 실제로 만드는 마이그레이션)에서 그 인덱스 이름이 리터럴로 보여야 한다.
+    single = "idx_usage_logs_requested_at"
+    seen_creating_migration = any(
+        any(single in s for s in _executable_literals(p)) for p in files
+    )
+    assert seen_creating_migration, (
+        "어떤 마이그레이션에서도 usage_logs 인덱스 생성 리터럴을 찾지 못했다 — "
+        "리터럴 추출이 깨졌고 이 가드는 공허하다"
+    )
+    # 그리고 금지 문자열이 docstring 에는 실제로 존재해야 한다(그게 이 가드가 통과하는
+    # 이유이므로, 없어지면 위 판정이 자동 통과인지 구분할 수 없다).
+    assert any(BANNED in p.read_text(encoding="utf-8") for p in files), (
+        f"어떤 마이그레이션에도 {BANNED} 언급이 없다 — 기각 근거 기록이 사라졌다. "
+        "이 가드의 통과가 '문서 제외가 동작함' 인지 '아무 데도 없음' 인지 구분되지 않는다"
     )
