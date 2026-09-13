@@ -29,6 +29,8 @@ class ProductivityEventRequest(BaseModel):
     lines_generated: int = Field(default=0, ge=0)
     lines_accepted: int = Field(default=0, ge=0)
     language: str | None = None
+    #: 재전송 중복 제거용. 생략하면 중복 제거를 하지 않는다(기존 호출자 무변경).
+    idempotency_key: str | None = Field(default=None, max_length=256)
 
 
 class GitWebhookPayload(BaseModel):
@@ -45,6 +47,33 @@ async def record_productivity_event(
     body: ProductivityEventRequest,
     session: AsyncSession = Depends(get_db_session),
 ):
+    # ── 재전송 중복 제거 ──
+    #
+    # 웹훅은 재전송된다(수신측 타임아웃·5xx·네트워크 단절). 중복 제거가 없으면 같은
+    # 이벤트가 두 번 적재되어 ROI 지표(생성/수용 줄 수)가 그만큼 부풀려진다 — 조용히
+    # 틀린 숫자가 되고, 나중에 원인을 역추적할 방법이 없다.
+    #
+    # ⚠️ SELECT 로 확인하고 INSERT 하는 것만으로는 **닫히지 않는다.** 동시 재전송 두
+    #    건이 둘 다 "없다" 를 보고 둘 다 INSERT 하면, 부분 유니크 인덱스
+    #    (idx_productivity_events_idempotency, migration 0034) 가 한쪽을 거부하고
+    #    그 요청은 500 이 된다. 그래서 두 층으로 처리한다:
+    #      1) 선-조회 — 흔한 경우(이미 적재된 재전송)에서 쓸데없는 INSERT 를 피한다.
+    #      2) 세이브포인트 + IntegrityError — 경합으로 진 쪽도 "이미 처리됨" 으로
+    #         **200** 을 돌려준다. 409 가 아니라 200 인 이유: 호출자의 의도(이 이벤트를
+    #         기록해 달라)는 이미 충족됐다. 409 를 주면 웹훅 발신자는 실패로 보고 또
+    #         재전송한다.
+    if body.idempotency_key:
+        from sqlalchemy import select as sa_select
+
+        existing = await session.execute(
+            sa_select(ProductivityEvent.id)
+            .where(ProductivityEvent.idempotency_key == body.idempotency_key)
+            .limit(1)
+        )
+        prior = existing.scalar_one_or_none()
+        if prior is not None:
+            return {"status": "ok", "event_id": str(prior), "deduplicated": True}
+
     event = ProductivityEvent(
         id=uuid.uuid4(),
         user_id=uuid.UUID(body.user_id),
@@ -55,10 +84,38 @@ async def record_productivity_event(
         lines_generated=body.lines_generated,
         lines_accepted=body.lines_accepted,
         language=body.language,
+        idempotency_key=body.idempotency_key,
         created_at=datetime.now(timezone.utc),
     )
-    session.add(event)
-    await session.commit()
+
+    if body.idempotency_key:
+        from sqlalchemy.exc import IntegrityError
+
+        try:
+            async with session.begin_nested():
+                session.add(event)
+            await session.commit()
+        except IntegrityError:
+            # 경합에서 졌다 = 상대가 같은 키로 먼저 적재했다. 세이브포인트가 되감겨
+            # 세션은 살아 있으므로, 승자의 id 를 찾아 같은 응답을 돌려준다.
+            await session.rollback()
+            from sqlalchemy import select as sa_select
+
+            winner = await session.execute(
+                sa_select(ProductivityEvent.id)
+                .where(ProductivityEvent.idempotency_key == body.idempotency_key)
+                .limit(1)
+            )
+            wid = winner.scalar_one_or_none()
+            return {
+                "status": "ok",
+                "event_id": str(wid) if wid else "duplicate",
+                "deduplicated": True,
+            }
+    else:
+        session.add(event)
+        await session.commit()
+
     return {"status": "ok", "event_id": str(event.id)}
 
 

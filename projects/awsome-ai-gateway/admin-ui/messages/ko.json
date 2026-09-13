@@ -486,6 +486,23 @@
       "usersUpdated": "업데이트 {count}명",
       "usersDeactivated": "비활성화 {count}명",
       "noChanges": "동기화 완료 (변경 없음)"
+    },
+    "search": {
+      "placeholder": "이메일 · 이름 · 팀명 검색",
+      "ariaLabel": "조직 검색",
+      "clear": "검색어 지우기",
+      "minLength": "2자 이상 입력하세요",
+      "searching": "검색 중…",
+      "noResults": "검색 결과가 없습니다",
+      "failed": "검색에 실패했습니다. 다시 시도하세요.",
+      "groupOrg": "부서 · 팀",
+      "groupUser": "사용자",
+      "truncated": "결과가 더 있습니다 — 검색어를 더 입력해 좁혀보세요",
+      "resultsCount": "{count}건",
+      "teamCountShort": "{count}팀",
+      "userCountShort": "{count}명",
+      "unassigned": "미배정",
+      "hint": "↑↓ 이동 · Enter 선택 · Esc 닫기"
     }
   },
   "analytics": {

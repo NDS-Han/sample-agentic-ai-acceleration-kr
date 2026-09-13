@@ -147,6 +147,18 @@ jobs:
     #    의 "Sonnet 5 단가는 4.6 과 같다" 단정이 마이그레이션 0030(1.5배 과대청구 정정)
     #    이후로 계속 틀린 채였고, 아무도 몰랐다 — 이 잡을 붙이자마자 드러났다.
     services:
+      # Lua 원자성과 SET 의 TTL 폐기 동작은 실 Redis 에서만 증명된다 — 가짜 Redis 로는
+      # app_clients 클로버를 잡을 수 없다(그 가드가 문자열 grep 이던 동안 실제로
+      # 클로버가 프로덕션에 살아 있었다).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
       postgres:
         # pgvector 이미지를 쓴다 — db/init 이 `CREATE EXTENSION vector` 를 요구한다
         # (stock postgres:16 에서는 그 파일이 실패해 스키마가 반쪽이 된다).
@@ -168,6 +180,7 @@ jobs:
       PGPASSWORD: proof
       PROOF_DB: gwproof_ci
       PROOF_DSN: postgresql+asyncpg://postgres:proof@127.0.0.1:5432/gwproof_ci
+      REDIS_PROOF_URL: redis://127.0.0.1:6379/0
     steps:
       - uses: actions/checkout@v4
 
@@ -238,6 +251,8 @@ jobs:
             tests/regression/test_high_duplicate_active_config.py \
             tests/regression/test_high_model_registry_claude5.py \
             tests/regression/test_high_analytics_seed_reconciliation.py \
+            tests/regression/test_high_productivity_idempotency.py \
+            tests/regression/test_high_budget_redis_clobber.py \
             > /tmp/proof.txt 2>&1
           status=$?
           tail -40 /tmp/proof.txt
@@ -248,6 +263,28 @@ jobs:
           echo "passed=${passed}"
           if [ "${passed:-0}" -lt 90 ]; then
             echo "::error::통과 수가 ${passed} 건뿐이다(기대 100+). PROOF_DSN 게이트가 걸려 대부분 skip 된 것으로 보인다."
+            exit 1
+          fi
+
+      # cost-recorder-worker 의 per-app 예산 행 테스트도 실 PG 를 요구한다. 같은 DB 를
+      # 재사용해도 안전하다 — 그 파일은 자기 소유 DB(`<name>_appbudget`)를 만들어 쓴다.
+      - name: Sync cost-recorder-worker dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/cost-recorder-worker
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest · cost-recorder-worker (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/cost-recorder-worker
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_high_per_app_budget_rows.py > /tmp/proof2.txt 2>&1
+          status=$?
+          tail -30 /tmp/proof2.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof2.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          # 로컬 실측 기준선: 9 passed. 실 PG 게이트가 걸리면 4건만 통과한다(정적 검사만).
+          if [ "${passed:-0}" -lt 8 ]; then
+            echo "::error::통과 ${passed} 건 — PROOF_DSN 이 안 걸려 DB 테스트가 skip 됐다."
             exit 1
           fi
 
@@ -305,9 +342,11 @@ jobs:
             # E501 이다. 그 헤더는 레포의 161개 파일 전부가 동일하게 갖는 100자 초과 한
             # 줄이라 파일을 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이
             # 아니다. 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
-            baseline: 468
+                        # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
+            baseline: 469
           - service: cost-recorder-worker
-            baseline: 21
+                        # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
+            baseline: 22
           - service: notification-worker
             baseline: 93
           - service: admin-chat-agent

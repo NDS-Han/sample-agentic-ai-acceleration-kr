@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.budget_cache import refresh_user_app_clients, write_user_budget_config
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
@@ -859,20 +860,21 @@ class BudgetService:
                 "policy": data.policy.value.lower(),
                 "thresholds": sorted(data.alert_thresholds),
             }
-            # Preserve app_clients from existing user-config key (no clobber).
-            # Use "in" membership check rather than truthiness so that an empty
-            # list [] is preserved — [] means "no active per-app budgets" and is
-            # distinct from the key being absent entirely.
+            # ⚠️ app_clients 보존을 **애플리케이션에서** GET-modify-SET 으로 하면 안 된다.
+            #    `await redis.get` 이 이벤트 루프를 양보하므로 uvicorn 워커 하나 안에서도
+            #    두 요청(set_user_budget / set_user_client_budget /
+            #    clear_user_client_budget)이 교차하고, 나중에 SET 하는 쪽이 상대의 필드를
+            #    지운다. 그리고 그 손실은 조용하다 — budget_check.lua 는 없는 필드를
+            #    빈 테이블로 읽고, 게이트웨이는 앱별 예산 평가를 통째로 건너뛴다.
+            #    Lua 로 Redis 안에서 병합한다(core/budget_cache.py).
             if scope_type == "user":
-                try:
-                    existing_raw = await redis.get(config_key)
-                    if existing_raw:
-                        prev = json.loads(existing_raw)
-                        if "app_clients" in prev:
-                            config_data["app_clients"] = prev["app_clients"]
-                except Exception:
-                    pass
-            await redis.set(config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
+                await write_user_budget_config(
+                    redis, scope_id, config_data, BUDGET_CONFIG_CACHE_TTL
+                )
+            else:
+                await redis.set(
+                    config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL
+                )
         except Exception:
             logger.warning("redis_threshold_sync_failed", scope_type=scope_type, scope_id=str(scope_id))
 
@@ -919,20 +921,18 @@ class BudgetService:
         Redis key's app_clients field WITHOUT clobbering other fields.
         If the user-config key is absent, does nothing (gateway re-derives on miss).
         """
-        import json
         try:
             repo = BudgetRepository(session)
             active_clients = await repo.list_active_app_clients(user_id)
 
-            redis = self._cache_mgr._redis
-            user_config_key = f"budget:config:user:{{{user_id}}}"
-            existing_raw = await redis.get(user_config_key)
-            if existing_raw is None:
-                # Key absent — gateway will re-derive app_clients from DB on next miss.
-                return
-            config_data = json.loads(existing_raw)
-            config_data["app_clients"] = active_clients
-            await redis.set(user_config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
+            # ⚠️ 여기가 가장 아픈 GET-modify-SET 이었다. 이 쓰기는 **새로 추가된
+            #    client 를 싣는** 쓰기이므로, 경합에서 지면 단순 staleness 가 아니라
+            #    그 앱의 예산 한도가 적용되지 않는 상태가 된다(우회).
+            #    키가 없으면 아무것도 하지 않는다 — 총액 필드를 모르는 채로 키를 만들면
+            #    게이트웨이가 한도 없는 설정으로 읽는다. 게이트웨이가 DB 에서 재도출한다.
+            await refresh_user_app_clients(
+                self._cache_mgr._redis, user_id, active_clients, BUDGET_CONFIG_CACHE_TTL
+            )
         except Exception:
             logger.warning("redis_refresh_user_app_clients_failed", user_id=str(user_id))
 

@@ -486,6 +486,23 @@
       "usersUpdated": "{count} updated",
       "usersDeactivated": "{count} deactivated",
       "noChanges": "Sync complete (no changes)"
+    },
+    "search": {
+      "placeholder": "Search email · name · team",
+      "ariaLabel": "Search organization",
+      "clear": "Clear search",
+      "minLength": "Enter at least 2 characters",
+      "searching": "Searching…",
+      "noResults": "No results found",
+      "failed": "Search failed. Please try again.",
+      "groupOrg": "Departments · Teams",
+      "groupUser": "Users",
+      "truncated": "More results available — refine your search",
+      "resultsCount": "{count}",
+      "teamCountShort": "{count} teams",
+      "userCountShort": "{count} users",
+      "unassigned": "Unassigned",
+      "hint": "↑↓ navigate · Enter select · Esc close"
     }
   },
   "analytics": {

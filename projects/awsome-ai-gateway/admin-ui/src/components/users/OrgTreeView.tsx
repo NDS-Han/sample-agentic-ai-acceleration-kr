@@ -5,9 +5,11 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import type { OrgTreeNode } from '@/types/entities';
+import type { OrgTreeNode, UserSearchItem } from '@/types/entities';
 import { OrgTree } from './OrgTree';
 import { OrgDetailPanel } from './OrgDetailPanel';
+import { OrgSearchBox } from './OrgSearchBox';
+import { findTeamExpandPath, type OrgMatch } from '@/lib/utils/orgSearch';
 
 interface OrgTreeViewProps {
   root: OrgTreeNode | null;
@@ -52,6 +54,48 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     }
   }, [expandedNodes]);
 
+  // ── 검색 결과 선택 ──────────────────────────────────────────────────────────
+
+  /** 부서/팀: 조상 경로를 펼쳐 트리에 드러낸 뒤 선택한다. */
+  const handleSelectOrgNode = (match: OrgMatch) => {
+    const { node, ancestorIds } = match;
+    // 팀이면 자신도 펼친다 — 멤버를 바로 보여주는 것이 클릭했을 때와 같은 결과다.
+    const toExpand = node.type === 'TEAM' ? [...ancestorIds, node.id] : ancestorIds;
+    setExpandedNodes((prev) => new Set([...prev, ...toExpand]));
+    setSelectedNode(node);
+  };
+
+  /**
+   * 사용자: 소속 팀 경로를 펼쳐 트리에서 위치를 드러내고, 상세 패널은 검색 결과로
+   * 즉시 채운다.
+   *
+   * ⚠️ 검색 결과 항목으로 USER 노드를 **합성**한다. 트리에서 같은 사용자를 찾아 쓰지
+   *    않는 이유는 두 가지다: (1) 팀이 트리에 없을 수 있고(멤버 0명 팀은 서버가
+   *    숨긴다), (2) 팀 미배정 사용자는 트리에 자리가 없다. 두 경우에도 상세는 보여야
+   *    한다. 합성 노드의 id 는 실제 노드와 같으므로 트리 하이라이트도 맞는다.
+   */
+  const handleSelectUser = (user: UserSearchItem) => {
+    setSelectedNode({
+      id: user.id,
+      name: user.display_name,
+      type: 'USER',
+      children: [],
+      meta: {
+        member_count: null,
+        team_count: null,
+        leader_name: null,
+        email: user.email,
+        role: user.role,
+        team_name: user.team_name,
+      },
+    });
+
+    if (!user.team_id) return; // 팀 미배정 — 트리에 드러낼 자리가 없다
+    const path = findTeamExpandPath(root, user.team_id);
+    if (!path) return; // 팀이 트리에 없다(멤버 0명 등) — 상세 패널만
+    setExpandedNodes((prev) => new Set([...prev, ...path]));
+  };
+
   const handleToggle = (id: string) => {
     setExpandedNodes((prev) => {
       if (prev.has(id)) {
@@ -62,7 +106,13 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   };
 
   return (
-    <div className="flex gap-0 border rounded-lg overflow-hidden min-h-[600px]">
+    <div className="flex flex-col gap-3">
+      <OrgSearchBox
+        root={root}
+        onSelectOrgNode={handleSelectOrgNode}
+        onSelectUser={handleSelectUser}
+      />
+      <div className="flex gap-0 border rounded-lg overflow-hidden min-h-[600px]">
       <div className="w-72 border-r overflow-y-auto">
         {root ? (
           <OrgTree
@@ -78,6 +128,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
       </div>
       <div className="flex-1 p-6">
         <OrgDetailPanel node={selectedNode} />
+      </div>
       </div>
     </div>
   );

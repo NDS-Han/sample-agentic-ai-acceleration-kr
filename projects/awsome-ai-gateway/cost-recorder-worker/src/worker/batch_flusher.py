@@ -72,6 +72,11 @@ _INSERT_USAGE_LOGS = text(
 )
 
 
+#: per-app 예산 하위 한도를 갖는 client 들. gateway-proxy 의 PER_APP_BUDGET_CLIENTS 와
+#: 같아야 한다 — 이쪽이 좁으면 그 앱의 누적 행이 없어 복원이 0 이 되고, 이쪽이 넓으면
+#: 아무도 읽지 않는 행이 쌓인다.
+_PER_APP_CLIENTS = ("claude-code", "cowork", "codex")
+
 _UPSERT_BUDGET_USAGE = text(
     """
     INSERT INTO budget.budget_usages
@@ -81,7 +86,7 @@ _UPSERT_BUDGET_USAGE = text(
         CAST(:scope AS budget.budget_scope),
         CAST(:scope_id AS uuid),
         :period,
-        NULL,
+        CAST(:client AS varchar),
         :cost,
         COALESCE((
             SELECT max_budget_usd
@@ -89,6 +94,14 @@ _UPSERT_BUDGET_USAGE = text(
             WHERE scope = CAST(:scope AS budget.budget_scope)
               AND scope_id = CAST(:scope_id AS uuid)
               AND is_active = true
+              -- ⚠️ 이 술어가 없으면 per-app config 의 한도가 **총합 행**의 limit_usd 로
+              --    박힌다. per-app 과 총액 config 가 같은 테이블에 살고, 정렬이
+              --    effective_from DESC 뿐이라 어느 쪽이 잡히는지가 비결정적이다.
+              --    admin-api 는 자기 쪽 같은 SQL 에 이미 이 술어를 걸고 있었다
+              --    (services/budget_service.py) — 이 워커만 빠져 있었다.
+              --    IS NOT DISTINCT FROM 을 쓰는 이유: client 가 NULL 일 때 `= NULL` 은
+              --    UNKNOWN 이라 한 행도 매칭되지 않아 한도가 0 이 된다.
+              AND client IS NOT DISTINCT FROM CAST(:client AS varchar)
             ORDER BY effective_from DESC
             LIMIT 1
         ), 0),
@@ -97,7 +110,15 @@ _UPSERT_BUDGET_USAGE = text(
     -- Conflict target MUST match the unique index from migration 0011:
     -- (scope, scope_id, period, COALESCE(client,'')). The pre-0011 3-col target
     -- no longer matches any index → ON CONFLICT would raise on migrated DBs.
-    -- This worker writes only the client=NULL total rows (COALESCE -> '').
+    --
+    -- ⚠️ 이 워커는 client=NULL 총합 행 **과 앱별 행 둘 다** 쓴다. 예전엔 총합만 썼고,
+    --    그 결과 per-app 상한이 Redis 카운터로만 존재했다:
+    --      * Redis 유실/failover 후 소진된 앱 예산이 조용히 0 으로 되돌아갔다
+    --        (게이트웨이 복원 경로가 읽을 행이 아예 없었다),
+    --      * REDIS_DEGRADED 시 DB 폴백 분기가 `client_used=0` 을 읽어 앱 한도가
+    --        아예 적용되지 않았다.
+    --    migration 0011 의 주석은 이미 "worker writes total + per-app rows" 라고
+    --    적혀 있었다 — 스키마와 문서가 맞고 워커만 어긋난 상태였다.
     ON CONFLICT (scope, scope_id, period, COALESCE(client, ''))
     DO UPDATE SET used_usd = budget.budget_usages.used_usd + EXCLUDED.used_usd,
                   last_updated = now()
@@ -236,26 +257,47 @@ class BatchFlusher:
     async def _upsert_budget_usages(
         self, session: AsyncSession, entries: list[CostStreamEntry]
     ) -> None:
-        """USER + TEAM 두 스코프 각각에 대해 (scope_id, period) 그룹별 합산 UPSERT."""
+        """USER + TEAM 총합, 그리고 per-app 하위 행을 그룹별 합산 UPSERT.
+
+        ⚠️ 앱별 행이 없으면 per-app 예산은 Redis 카운터로만 존재한다 — 유실되면
+           소진된 한도가 0 으로 되돌아가고, Redis 열화 시 DB 폴백이 0 을 읽어 한도가
+           적용되지 않는다. 이 행들이 그 두 경로의 진실의 원천이다.
+        """
         # GROUP BY user_id + period → sum cost, 같은 로직 team에도 적용.
         user_sums: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
         team_sums: dict[tuple[str, str], Decimal] = defaultdict(lambda: Decimal("0"))
+        # (user_id, period, client) → 앱별 누적. per-app 예산을 갖는 client 만.
+        app_sums: dict[tuple[str, str, str], Decimal] = defaultdict(lambda: Decimal("0"))
         for e in entries:
             user_sums[(e.user_id, e.period)] += e.cost_usd
             team_sums[(e.team_id, e.period)] += e.cost_usd
+            if e.client in _PER_APP_CLIENTS:
+                app_sums[(e.user_id, e.period, e.client)] += e.cost_usd
 
         user_params = [
-            {"scope": "USER", "scope_id": uid, "period": period, "cost": str(cost)}
+            {"scope": "USER", "scope_id": uid, "period": period, "cost": str(cost),
+             "client": None}
             for (uid, period), cost in user_sums.items()
         ]
         team_params = [
-            {"scope": "TEAM", "scope_id": tid, "period": period, "cost": str(cost)}
+            {"scope": "TEAM", "scope_id": tid, "period": period, "cost": str(cost),
+             "client": None}
             for (tid, period), cost in team_sums.items()
+        ]
+        app_params = [
+            {"scope": "USER", "scope_id": uid, "period": period, "cost": str(cost),
+             "client": client}
+            for (uid, period, client), cost in app_sums.items()
         ]
         if user_params:
             await session.execute(_UPSERT_BUDGET_USAGE, user_params)
         if team_params:
             await session.execute(_UPSERT_BUDGET_USAGE, team_params)
+        # ⚠️ 앱별 행은 총합 행을 **대체하지 않고 더한다.** 총합은 client 무관 전체이고
+        #    앱별은 그 하위 집합이다 — 둘을 합산해 읽는 코드가 있으면 이중계상이 된다.
+        #    (분석 경로가 client 축으로 파티션해 읽는 이유가 그것이다.)
+        if app_params:
+            await session.execute(_UPSERT_BUDGET_USAGE, app_params)
 
     async def _bump_daily_counters(self, entries: list[CostStreamEntry]) -> None:
         """usage:daily:* Redis 카운터 배치 INCRBY + TTL 48h."""

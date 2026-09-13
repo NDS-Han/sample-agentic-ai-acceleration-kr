@@ -230,8 +230,16 @@ class TestGetBudgetSummary:
 
 @pytest.mark.asyncio
 async def test_sync_redis_thresholds_sets_5min_ttl(budget_service):
+    """USER 예산 설정 캐시는 5분 TTL 이어야 한다(Z 정책).
+
+    ⚠️ USER 경로는 이제 `redis.set` 이 아니라 **Lua(`redis.eval`)** 로 쓴다 —
+       app_clients 를 애플리케이션에서 GET-modify-SET 하면 로그인/동시 요청이 서로의
+       필드를 지웠기 때문이다(core/budget_cache.py 참조). TTL 은 스크립트의 ARGV[2] 로
+       넘어가므로 그 인자를 검사한다. 계약은 그대로다: 5분.
+    """
     fake_redis = MagicMock()
     fake_redis.set = AsyncMock()
+    fake_redis.eval = AsyncMock(return_value=1)
     budget_service._cache_mgr._redis = fake_redis
 
     data = SetBudgetRequest(
@@ -242,11 +250,15 @@ async def test_sync_redis_thresholds_sets_5min_ttl(budget_service):
         "user", uuid.UUID("00000000-0000-4000-a000-000000000001"), data
     )
 
-    fake_redis.set.assert_called_once()
-    call = fake_redis.set.call_args
-    assert call.kwargs.get("ex") == BUDGET_CONFIG_CACHE_TTL, (
-        "USER budget config cache 는 5분 TTL 이어야 함 (Z 정책)"
+    fake_redis.eval.assert_awaited_once()
+    args = fake_redis.eval.await_args.args
+    # eval(script, numkeys, key, payload_json, ttl_str)
+    assert args[1] == 1, "단일 키 스크립트여야 한다(클러스터 슬롯 안전)"
+    assert str(BUDGET_CONFIG_CACHE_TTL) in args[4], (
+        f"USER budget config cache 는 5분 TTL 이어야 함 (Z 정책). 받은 인자: {args[4]!r}"
     )
+    # ⚠️ 이 경로에서 redis.set 을 쓰면 안 된다 — 그게 클로버의 형태다.
+    fake_redis.set.assert_not_called()
 
 
 @pytest.mark.asyncio

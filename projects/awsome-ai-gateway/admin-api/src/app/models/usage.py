@@ -152,6 +152,13 @@ class ProductivityEvent(Base):
     lines_generated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lines_accepted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 웹훅 재전송 중복 제거 키. 호출자가 이벤트마다 안정된 값을 넣는다.
+    #:
+    #: ⚠️ ``unique=True`` 를 여기 붙이지 않는다. DB 의 실제 제약은 **부분** 유니크
+    #:    인덱스(``WHERE idempotency_key IS NOT NULL``, migration 0034)이고,
+    #:    ORM 에 전체 유니크로 선언하면 메타데이터가 실물과 어긋난다 — NULL 을 넣는
+    #:    호출자(키 없는 이벤트)가 두 번째부터 막히는 형태로 드리프트한다.
+    idempotency_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

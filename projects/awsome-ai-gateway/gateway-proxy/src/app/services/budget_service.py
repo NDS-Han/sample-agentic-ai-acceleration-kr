@@ -43,6 +43,25 @@ def _db_policy_to_domain(db_policy) -> BudgetPolicy:
     return BudgetPolicy(raw.lower())
 
 
+
+def _as_client_list(value) -> list[str]:
+    """``app_clients`` 필드를 리스트로 정규화한다.
+
+    admin-api 가 이 필드를 Lua 로 병합하는데(core/budget_cache.py — 로그인과 예산
+    변경이 서로의 필드를 지우던 클로버를 막기 위해), Redis 의 cjson 은 빈 배열을
+    표현할 수 없어 ``[]`` 를 ``{}`` 로 인코딩한다(실측: redis 7.4). 둘 다 "활성
+    per-app 예산이 없다" 는 뜻이다.
+
+    ⚠️ 비어 있지 않은 dict 는 **리스트로 바꾸지 않는다** — 그건 예상 밖의 형상이고,
+       키를 client 이름으로 착각해 통과시키면 없는 예산을 있다고 판정할 수 있다.
+       그런 경우는 빈 리스트로 떨어뜨려(= per-app 평가 없음) 부모 USER 예산만 걸린다.
+    """
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, dict) and not value:
+        return []
+    return []
+
 class BudgetService:
     """예산 정책 확인 서비스."""
 
@@ -81,24 +100,38 @@ class BudgetService:
             if db is not None and not await redis.exists(user_config_key):
                 await self.ensure_config_cached(redis, db, user_id)
 
-            # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 대비)
+            # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
+            #
+            # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
+            #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
+            #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
+            #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
+            #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
+            #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
+            #    전체가 0 으로 리셋되고 전부 통과한다.**
+            #
+            #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
+            #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
+            #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
             if not await redis.exists(user_key) and db is not None:
                 try:
-                    # budget_usages에서 복구 (raw SQL — 모델 컬럼명 불일치 방지)
-                    # fallback: usage_logs SUM
                     from sqlalchemy import func, select, text
 
+                    # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
+                    # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
                     result = await db.execute(
                         text(
-                            "SELECT used_usd FROM budget.budget_usages "
+                            "SELECT client, used_usd FROM budget.budget_usages "
                             "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
                         ),
                         {"uid": user_id, "period": period},
                     )
-                    row = result.scalar_one_or_none()
+                    rows = result.all()
+                    by_client = {r[0]: r[1] for r in rows}
+                    total_row = by_client.get(None)
 
-                    if row is None:
-                        # budget_usages 없으면 usage_logs에서 SUM
+                    if total_row is None:
+                        # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
                         from app.models.usage import UsageRecord
 
                         stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
@@ -108,7 +141,7 @@ class BudgetService:
                         result2 = await db.execute(stmt2)
                         used_from_db = result2.scalar_one()
                     else:
-                        used_from_db = row
+                        used_from_db = total_row
 
                     if used_from_db and used_from_db > 0:
                         await redis.set(user_key, str(used_from_db))
@@ -117,6 +150,28 @@ class BudgetService:
                             user_id=user_id,
                             period=period,
                             used=str(used_from_db),
+                        )
+
+                    # ── 앱별 카운터도 복원한다 ──
+                    #
+                    # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
+                    #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
+                    #    한도가 그 달 내내 사실상 없어진다.
+                    #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
+                    #    그 사이의 사용량을 잃는다).
+                    for client_name, used in by_client.items():
+                        if client_name is None or not used or used <= 0:
+                            continue
+                        app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
+                        if await redis.exists(app_key):
+                            continue
+                        await redis.set(app_key, str(used))
+                        logger.info(
+                            "budget_app_counter_restored",
+                            user_id=user_id,
+                            client=client_name,
+                            period=period,
+                            used=str(used),
                         )
                 except Exception:
                     logger.exception("budget_counter_restore_failed", user_id=user_id)
@@ -151,12 +206,20 @@ class BudgetService:
                 # 불변식(P0-③ review): per-app 예산은 USER 총예산의 하위 서브-리밋이므로
                 # 항상 부모 USER 예산이 존재한다(admin-api 가 부모 없는 per-app 생성 거부).
                 # → app_clients 게이트는 부모 config 가 있다는 전제에서 신뢰 가능.
-                user_app_clients = user_result.get("app_clients")
-                if (
-                    client in PER_APP_BUDGET_CLIENTS
-                    and isinstance(user_app_clients, list)
-                    and client in user_app_clients
-                ):
+                #
+                # ⚠️ `app_clients` 는 리스트 또는 **빈 dict** 로 올 수 있다. admin-api 는 이
+                #    필드를 Lua 로 병합해 쓰는데(app_clients 클로버를 막기 위해),
+                #    Redis 의 cjson 에는 빈 배열 개념이 없어 `[]` 가 `{}` 로 인코딩된다
+                #    (실측: redis 7.4, `cjson.empty_array` 미지원). 둘 다 "활성 per-app
+                #    예산이 없다" 는 같은 뜻이므로 같게 다뤄야 한다.
+                #
+                #    `isinstance(list)` 만 보면 빈 dict 가 "타입이 틀렸다" 로 떨어져,
+                #    아래 per-app 분기 전체(콜드 캐시 재수화 안전망 포함)를 건너뛴다.
+                #    지금은 결과가 같지만(둘 다 per-app 예산 0건), 그 동등성이 우연이라
+                #    미래의 독자가 `{}` 를 "알 수 없음" 으로 오독할 수 있다. 여기서 한 번
+                #    정규화해 그 여지를 없앤다.
+                user_app_clients = _as_client_list(user_result.get("app_clients"))
+                if client in PER_APP_BUDGET_CLIENTS and client in user_app_clients:
                     client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
                     client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
                     # P0-③: per-app config cold-cache fallback. If admin's
