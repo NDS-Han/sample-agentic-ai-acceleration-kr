@@ -7,17 +7,18 @@ import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import {
-  LayoutDashboard,
-  KeyRound,
-  Wallet,
-  BrainCircuit,
-  Gauge,
-  Users,
-  UserCircle,
   Activity,
-  Sparkles,
+  AppWindow,
   BarChart3,
+  BrainCircuit,
   Download,
+  Gauge,
+  KeyRound,
+  LayoutDashboard,
+  Sparkles,
+  UserCircle,
+  Users,
+  Wallet,
 } from 'lucide-react';
 import type { UserRole } from '@/types/enums';
 import { UserRole as UserRoleConst } from '@/types/enums';
@@ -55,6 +56,14 @@ const NAV_ITEMS: NavItemDef[] = [
     key: 'models',
     href: '/models',
     icon: <BrainCircuit size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN],
+  },
+  {
+    // 앱(클라이언트) 정책 — allowedRoles 는 PAGE_PERMISSIONS['/apps'] 와 **정확히**
+    // 같아야 한다. 좁으면 메뉴에서 안 보이고, 넓으면 보이지만 클릭하면 /403 이다.
+    key: 'apps',
+    href: '/apps',
+    icon: <AppWindow size={18} />,
     allowedRoles: [UserRoleConst.ADMIN],
   },
   {

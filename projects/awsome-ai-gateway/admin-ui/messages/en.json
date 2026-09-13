@@ -803,6 +803,10 @@
     "noEmail": "No email",
     "confirmAllTitle": "Change all-apps model",
     "confirmAllMessage": "This model is currently allowed for all apps. Clearing it switches to an explicit list, which can change other apps' access. Continue?",
-    "confirmAllLabel": "Continue"
+    "confirmAllLabel": "Continue",
+    "confirmLastMessage": "This is the last app allowed for {alias}. Removing it leaves no allowed app, so every app is refused (the model stays in the list). Continue?",
+    "confirmLastTitle": "Remove the last allowed app",
+    "noneBadge": "Deny all",
+    "noneHint": "No app allowed (deny all) — no app can use this model."
   }
 }
