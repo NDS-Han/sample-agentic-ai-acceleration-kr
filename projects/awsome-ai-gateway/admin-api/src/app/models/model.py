@@ -18,6 +18,7 @@ from sqlalchemy import (
     Text,
     Uuid,
 )
+from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.sql import func
 
@@ -77,6 +78,20 @@ class ModelAlias(Base):
     )
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    #: 이 모델을 쓸 수 있는 앱(client) 허용목록 — **모델 × 앱** 인가 축(migration 0035).
+    #:
+    #: 3-상태 의미론(이 필드의 유일한 정의, 전 계층 동일):
+    #:   ``None``  미설정 = 제한 없음. 지금 앱과 나중에 추가될 앱 전부 허용.
+    #:   ``[]``    명시적으로 빈 허용목록 = **어떤 앱도 이 모델을 쓸 수 없다.**
+    #:   non-empty 허용목록. 목록 밖 client 는 거부되며 ``other``/``None`` 도 거부.
+    #:
+    #: ⚠️ ``[]`` 를 "전부 허용" 으로 읽으면 안 된다. ``[]`` 는 운영자가 콘솔에서 마지막
+    #:    앱의 체크를 해제했을 때 만들어지는 값이라, 화면은 "허용된 앱 없음" 으로
+    #:    보여주는데 게이트가 전부 통과시키는 상태가 된다(원본 구현의 실제 결함).
+    #:    판정은 반드시 ``is None`` 으로 — falsiness 는 두 상태를 섞는다.
+    #:
+    #: ``auth.user_allowed_clients``(사용자 × 앱)와는 **다른 축**이고 AND 로 걸린다.
+    allowed_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

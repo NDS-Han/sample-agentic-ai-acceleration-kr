@@ -116,6 +116,10 @@ async def lifespan(app: FastAPI):
     budget_service = BudgetService(cache_mgr=cache_mgr)
     app.state.budget_service = budget_service
     app.state.model_service = ModelService(cache_mgr=cache_mgr)
+    # 전역 런타임 설정(body logging 토글 등). DB 가 진실의 원천, Redis 는 읽기 캐시.
+    from app.services.system_settings_service import SystemSettingsService
+
+    app.state.system_settings_service = SystemSettingsService(cache_mgr=cache_mgr)
     app.state.rate_limit_service = RateLimitService(cache_mgr=cache_mgr)
     app.state.user_team_service = UserTeamService(cache_mgr=cache_mgr, key_service=key_service)
     app.state.team_allowed_model_service = TeamAllowedModelService(cache_mgr=cache_mgr)
@@ -592,13 +596,15 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # ── Register routers ──
-    from app.routers import analytics, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_tokens, users
+    from app.routers import analytics, apps, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_tokens, settings as settings_router, users
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
     app.include_router(models.router)
     app.include_router(rate_limits.router)
     app.include_router(routing.router)
+    app.include_router(apps.router)
+    app.include_router(settings_router.router)
     app.include_router(users.router)
     app.include_router(analytics.router)
     app.include_router(dashboard.router)

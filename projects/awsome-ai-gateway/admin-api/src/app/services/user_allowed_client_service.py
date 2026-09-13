@@ -5,12 +5,14 @@ import uuid
 
 import structlog
 
+from app.core.clients import VALID_CLIENTS
 from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
 from app.repositories.user_repository import UserRepository
 
 logger = structlog.get_logger(__name__)
 
-_VALID_CLIENTS = {"claude-code", "cowork", "codex"}
+#: 단일 출처는 core/clients.py (중복 3벌을 모았다).
+_VALID_CLIENTS = VALID_CLIENTS
 
 
 class UserAllowedClientService:

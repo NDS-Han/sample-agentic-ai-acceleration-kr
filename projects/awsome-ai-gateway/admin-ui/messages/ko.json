@@ -803,6 +803,10 @@
     "noEmail": "이메일 없음",
     "confirmAllTitle": "전체 허용 모델 변경",
     "confirmAllMessage": "이 모델은 현재 모든 앱에 허용되어 있습니다. 해제하면 명시 목록으로 전환되어 다른 앱의 접근 범위가 바뀔 수 있습니다. 계속할까요?",
-    "confirmAllLabel": "계속"
+    "confirmAllLabel": "계속",
+    "confirmLastMessage": "이 앱은 {alias} 의 마지막 허용 앱입니다. 해제하면 허용 앱이 하나도 남지 않아 모든 앱에서 거부됩니다(모델은 목록에 남습니다). 계속할까요?",
+    "confirmLastTitle": "마지막 허용 앱 해제",
+    "noneBadge": "전면 거부",
+    "noneHint": "허용 앱 없음(전면 거부) — 어떤 앱도 이 모델을 쓸 수 없습니다."
   }
 }

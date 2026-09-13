@@ -25,6 +25,15 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
   // Model catalogue — admin only
   '/models': [UserRole.ADMIN],
 
+  // App(client) policy — admin only. 백엔드의 세 엔드포인트가 전부
+  // Depends(require_admin) 이다(admin-api routers/apps.py). 여기서 넓히면 페이지는
+  // 열리는데 모든 조회·저장이 403 인 화면이 된다.
+  //
+  // ⚠️ 이 항목이 **없으면** checkPagePermission 이 미등재 경로를 default-deny 하므로
+  //    ADMIN 을 포함한 모든 역할이 /403 으로 튕긴다 — 라우트만 추가하고 여기를 빼먹는
+  //    것이 이 화면을 통째로 죽이는 가장 쉬운 방법이다.
+  '/apps': [UserRole.ADMIN],
+
   // Rate-limit configuration — admin only
   '/rate-limits': [UserRole.ADMIN],
 

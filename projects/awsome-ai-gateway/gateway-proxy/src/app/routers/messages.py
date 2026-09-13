@@ -26,6 +26,12 @@ from app.schemas.domain import (
     TokenUsage,
 )
 from app.schemas.routing import RoutingProfileSchema
+from app.services.body_log_records import (
+    build_body_record_for_nonstream,
+    build_body_record_for_stream,
+    provider_name,
+    resolve_body_logger,
+)
 from app.services.fallback_loop import FallbackResult, run_fallback_loop
 from app.services.fallback_resolver import make_same_provider
 from app.services.router_service import RouterService
@@ -517,9 +523,46 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         if availability_fallback_from:
             response_headers["x-llm-gateway-fallback-from"] = availability_fallback_from
 
+        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+            """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                )
+            )
+
+        # ⚠️ **사전** 게이팅이다. on_complete 를 넘기면 제너레이터가 SSE 프레임 전문을
+        #    메모리에 누적하므로(services/streaming.py OnComplete 주석), 로깅이 꺼져
+        #    있을 때 그 비용을 내지 않으려면 스트림이 시작되기 **전에** 판정해야 한다.
+        #    끝나고 물어보면 모든 요청에 대해 응답 본문을 버릴 목적으로 버퍼링하게 된다.
+        _on_complete = (
+            _log_body_stream
+            if await resolve_body_logger(request.app.state, redis, session_factory)
+            else None
+        )
+
         return StreamingResponse(
             bedrock_anthropic_sse_stream(
-                request, chunk_iter, on_usage=_record, tokenizer_hook=_estimate
+                request,
+                chunk_iter,
+                on_usage=_record,
+                tokenizer_hook=_estimate,
+                on_complete=_on_complete,
             ),
             status_code=status,
             media_type="text/event-stream",
@@ -551,6 +594,30 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 # FallbackResult.payload and is never sent to the client.
                 bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
                 client=client,
+            )
+
+        # 본문 로깅(성공 **및** 오류). enqueue 만 하므로 응답을 지연시키지 않는다.
+        # effective_model_config 를 쓴다 — 폴백이 일어났으면 실제로 응답한 모델이 남아야 한다.
+        body_logger = await resolve_body_logger(request.app.state, redis, session_factory)
+        if body_logger is not None:
+            await body_logger.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status_code=status,
+                    request_body=body,
+                    response_body=response_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
+                )
             )
 
         response_headers_out: dict = {}
@@ -636,6 +703,9 @@ async def count_tokens(request: Request) -> JSONResponse:
     if auth_context:
         try:
             _router_service.check_key_scope(auth_context, model_config)
+            # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
+            # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
+            _router_service.check_client_model_scope(model_config, state.get("client"))
         except PermissionError:
             return JSONResponse(
                 status_code=400,
