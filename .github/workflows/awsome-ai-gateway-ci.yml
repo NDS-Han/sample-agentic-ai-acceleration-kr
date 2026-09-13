@@ -288,6 +288,37 @@ jobs:
             exit 1
           fi
 
+      # gateway-proxy 의 모델 × 앱 allow-list 는 **실 DB 로만** 증명된다.
+      #
+      # ⚠️ 이 스텝이 존재하는 이유: 그 게이트가 한 번 완전히 무력화된 채로 배포됐다.
+      #    마이그레이션·게이트 함수·다섯 개 호출 지점·admin-api 쓰기 경로·UI 가 모두
+      #    있었는데 gateway-proxy 의 ORM 클래스만 컬럼을 선언하지 않아
+      #    `getattr(row, "allowed_clients", None)` 이 언제나 None 이었다. 관리자 화면은
+      #    "차단" 으로 표시하고 데이터 경로는 모든 앱을 통과시켰다 — 오류도 로그도 없이.
+      #    당시 회귀 테스트 24건은 전부 통과했다(가짜 model_config 단위 테스트 + kwarg
+      #    이름만 보는 AST 검사였다). 값이 DB 에서 게이트까지 실제로 흐르는지는 실 PG
+      #    없이는 원리적으로 확인할 수 없다.
+      - name: Sync gateway-proxy dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/gateway-proxy
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest · gateway-proxy (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/gateway-proxy
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_critical_model_client_scope_real_db.py > /tmp/proof3.txt 2>&1
+          status=$?
+          tail -30 /tmp/proof3.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof3.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          # 로컬 실측 기준선: 3 passed. PROOF_DSN 이 안 걸리면 3건 전부 skip 된다 —
+          # 통과 0건은 "문제 없음" 이 아니라 "검증 안 됨" 이므로 실패로 처리한다.
+          if [ "${passed:-0}" -lt 3 ]; then
+            echo "::error::통과 ${passed} 건(기대 3) — PROOF_DSN 이 안 걸려 skip 됐다."
+            exit 1
+          fi
+
   admin-ui:
     name: admin-ui · vitest + typecheck + lint
     runs-on: ubuntu-latest
@@ -337,15 +368,18 @@ jobs:
           - service: admin-api
             baseline: 75
           - service: gateway-proxy
-            # 466(기존) + 2. 신규 파일 2개(observability/provider_metrics.py,
-            # tests/regression/test_high_declared_metrics_are_emitted.py)의 **저작권 헤더**
-            # E501 이다. 그 헤더는 레포의 161개 파일 전부가 동일하게 갖는 100자 초과 한
-            # 줄이라 파일을 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이
-            # 아니다. 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
-                        # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
-            # +5: body-logging 신규 파일 5개(body_logger / body_log_flag /
-            #     body_log_records / schemas/body_log / 회귀 테스트)의 저작권 헤더 E501.
-            baseline: 475
+            # 466(기존) 위에 쌓인 증분은 **전부 신규 파일의 저작권 헤더 E501** 이다.
+            # 그 헤더는 레포의 모든 파일이 동일하게 갖는 100자 초과 한 줄이라, 파일을
+            # 하나 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이 아니다.
+            # 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
+            #   +2  observability/provider_metrics.py, 그 회귀 테스트
+            #   +1  회귀 테스트 1개
+            #   +5  body-logging(body_logger / body_log_flag / body_log_records /
+            #       schemas/body_log / 회귀 테스트)
+            #   +1  OpenAI 방언·웹서치 본문 로깅 회귀 테스트
+            #   +1  모델 × 앱 allow-list 실 DB 회귀 테스트
+            # 헤더 외 신규 위반은 0 이다(UP045 2건은 `X | None` 로 맞춰 유입시키지 않았다).
+            baseline: 477
           - service: cost-recorder-worker
                         # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
             baseline: 22

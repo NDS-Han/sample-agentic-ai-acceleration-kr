@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import ARRAY, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
 
@@ -70,6 +70,27 @@ class ModelAlias(Base):
     display_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     status: Mapped[str] = mapped_column(_model_status_enum, nullable=False, default="ACTIVE")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: 모델 × 앱 축의 allow-list (migration 0035). 3-state 의미는
+    #: ``services/router_service.check_client_model_scope`` 의 docstring 이 정본이다:
+    #:   NULL      제한 없음(나중에 추가되는 앱까지 포함)
+    #:   {}        명시적 빈 allow-list = **어떤 앱도 이 모델을 쓸 수 없다**
+    #:   {codex}   그 앱만 허용
+    #:
+    #: ⚠️ 이 줄이 없으면 게이트가 **조용히 무력화된다.** `_orm_to_schema` 는
+    #:    `getattr(alias_row, "allowed_clients", None)` 로 읽는데, ORM 이 컬럼을
+    #:    선언하지 않으면 그 getattr 이 언제나 None 을 돌려주고
+    #:    `check_client_model_scope` 는 즉시 return 한다 — 관리자 화면은 "이 앱 차단"
+    #:    이라고 표시하고 admin-api 도 저장에 성공하는데, 데이터 경로에서는 모든 앱이
+    #:    그 모델을 계속 호출한다. 실제로 그 상태로 배포된 적이 있다(회귀 테스트가
+    #:    `_orm_to_schema` 의 kwarg 이름만 AST 로 확인해서 통과했다).
+    #:
+    #: ⚠️ 그래서 `db/init/02_create_tables.sql` 에도 idempotent ALTER 가 있어야 한다.
+    #:    이 컬럼은 model_aliases 의 모든 SELECT 에 들어가므로, 0035 를 적용하지 않은
+    #:    DB(init SQL 로만 만든 compose/로컬)에서는 **모든 모델 조회가** UndefinedColumn
+    #:    으로 죽어 추론 경로 전체가 500 이 된다.
+    allowed_clients: Mapped[list[str] | None] = mapped_column(
+        ARRAY(String), nullable=True, default=None
+    )
     created_by: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

@@ -216,6 +216,19 @@ CREATE TABLE IF NOT EXISTS model.model_aliases (
 -- on pre-existing tables (CREATE TABLE IF NOT EXISTS above is a no-op there).
 ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS display_name VARCHAR(128);
 
+-- allowed_clients added by migration 0035 (model × app allow-list).
+--
+-- ⚠️ This ALTER is load-bearing, not tidiness. Both gateway-proxy and admin-api declare
+--    the column on their ModelAlias ORM class, so it appears in EVERY SELECT of
+--    model_aliases. A database built from this init SQL alone — compose, a local dev
+--    stack, any environment where alembic has not reached 0035 — would raise
+--    UndefinedColumn on every model resolution, i.e. 500 on the entire inference path,
+--    not just on the allow-list feature.
+--
+-- No DEFAULT. NULL means "unrestricted"; DEFAULT '{}' would mean "no app may use this
+-- model" and would deny every app on every existing alias the moment it applied.
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS allowed_clients TEXT[];
+
 CREATE TABLE IF NOT EXISTS model.model_pricings (
     id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),
