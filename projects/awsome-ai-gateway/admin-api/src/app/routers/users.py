@@ -426,6 +426,9 @@ async def set_allowed_clients(
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     await session.commit()
+    # 커밋 **후** 무효화 — DEL→commit 창에 들어온 게이트웨이 요청이 옛(느슨한) 정책을
+    # 다시 캐시하면 안 된다. allowed-models 경로와 같은 순서다(:494).
+    await svc.invalidate_user_vk_cache(user_id)
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
 
@@ -443,6 +446,8 @@ async def clear_allowed_clients(
     )
     await svc.clear(user_id, admin.user_id)
     await session.commit()
+    # 커밋 후 무효화 — set 경로와 같은 이유.
+    await svc.invalidate_user_vk_cache(user_id)
 
 
 # ── per-USER model allow-list (overrides team_allowed_models) ────────────────

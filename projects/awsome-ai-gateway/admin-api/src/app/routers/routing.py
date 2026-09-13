@@ -62,4 +62,8 @@ async def set_web_search(
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     await session.commit()
+    # 커밋 **후** 무효화 — flush 는 커밋이 아니다. 커밋 전에 지우면 그 창에 들어온
+    # 게이트웨이 요청이 토글 전 값을 다시 캐시해, 관리자는 성공을 봤는데 그 앱은
+    # 300s 동안 옛 설정으로 돈다.
+    await svc.invalidate_cache(client)
     return result

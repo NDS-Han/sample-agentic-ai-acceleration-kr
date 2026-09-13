@@ -27,12 +27,20 @@ async def get_my_budget(
     # KST 월(§59) — date.today() 는 pod TZ(UTC)라 매월 1일 첫 9시간에 지난달이 된다.
     period = current_kst_period()
 
+    # ⚠️ `client IS NULL` 이 load-bearing 이다. per-app(앱별) 예산 config 가 **같은
+    #    테이블**에 살기 때문에, 이 필터가 없으면 `created_at DESC LIMIT 1` 이 나중에
+    #    만들어진 앱별 행을 집는다. 그러면 사용자 화면의 "내 개인 월예산" 칸에 그 앱의
+    #    한도(예: $200)가 뜨는데 used_usd 는 **총 사용액**이라, remaining 과 usage_pct
+    #    가 둘 다 틀린다 — 사용자는 아직 여유가 있는데 소진됐다고 보거나 그 반대가 된다.
+    #    이 레포의 리포지토리 계층은 이미 같은 필터를 걸고 있었다
+    #    (repositories/budget_repository.py) — 이 라우터만 빠져 있었다.
     stmt = (
         select(BudgetConfig)
         .where(
             BudgetConfig.scope == BudgetScope.USER,
             BudgetConfig.scope_id == user.user_id,
             BudgetConfig.is_active.is_(True),
+            BudgetConfig.client.is_(None),
         )
         .order_by(BudgetConfig.created_at.desc())
         .limit(1)

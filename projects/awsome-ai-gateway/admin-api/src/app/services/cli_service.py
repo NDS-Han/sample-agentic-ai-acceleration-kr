@@ -195,19 +195,32 @@ class CLIService:
     @staticmethod
     async def _cache_for_gateway(redis, user, user_budget) -> None:
         """Cache budget config and model configs in Redis for Gateway Proxy."""
-        import json
 
-        # Budget config — format must match what budget_check.lua expects
+        # Budget config — format must match what budget_check.lua expects.
+        #
+        # ⚠️ `redis.set` 을 직접 쓰면 안 된다. 이 페이로드에는 `app_clients`(앱별 하위
+        #    한도 게이트)가 없고, `ex=` 도 없어서 **기존 TTL 까지 버린다**(Redis SET 은
+        #    KEEPTTL 없이 TTL 을 폐기한다). 이 함수는 CLI 로그인과 OIDC 교환 **매번**
+        #    실행되므로, 예전 코드는 로그인 한 번으로 그 사용자의 앱별 예산 하위 한도를
+        #    영구히 꺼 버렸다 — 게이트웨이는 키가 **없을 때만** 재수화하기 때문에
+        #    present-and-persistent 가 된 키는 자가치유되지 않는다.
+        #    core/budget_cache.write_user_budget_config 는 Lua 로 병합하며 app_clients
+        #    를 보존하고 TTL 을 다시 건다.
         if user_budget:
-            await redis.set(
-                f"budget:config:user:{{{user.id}}}",
-                json.dumps({
+            from app.core.budget_cache import write_user_budget_config
+            from app.services.budget_service import BUDGET_CONFIG_CACHE_TTL
+
+            await write_user_budget_config(
+                redis,
+                user.id,
+                {
                     "limit_usd": str(user_budget.max_budget_usd),
                     "policy": user_budget.policy.value.lower(),
                     "soft_limit_pct": 110,
                     "throttle_rpm_pct": 50,
                     "thresholds": [80, 90, 100],
-                }),
+                },
+                BUDGET_CONFIG_CACHE_TTL,
             )
 
         # NOTE: Model config Redis cache 는 gateway-proxy 의 router_service 가 DB 에서
