@@ -157,6 +157,30 @@ class Settings(BaseSettings):
     trace_enabled: bool = False
     trace_mask_pii: bool = True
 
+    # ── Body logging (요청/응답 **본문** → Firehose → S3) ──
+    #
+    # ⚠️ 이 기능을 켜면 사용자가 프롬프트에 넣은 것이 그대로 durable 저장소로 나간다.
+    #    현재 구현은 **마스킹하지 않는다** — 같은 코드베이스의 trace 경로는
+    #    `trace_mask_pii` 기본 True 로 마스킹하는데, 본문 로거에는 그것이 적용되지
+    #    않는다. 그건 알고 있는 격차이고 향후 개선 대상이다. 그래서 두 겹으로 잠근다:
+    #      (1) `firehose_stream_name` 이 없으면 로거 자체가 no-op(로컬/compose 안전),
+    #      (2) 런타임 토글(`bodylog:enabled`)이 **기본 OFF** — 배포만으로는 켜지지 않고
+    #          관리자가 명시적으로 켜야 한다(admin-api PUT /admin/settings/body-logging,
+    #          그 액션은 audit.audit_logs 에 불변 행을 남긴다).
+    body_logging_enabled: bool = True
+    firehose_stream_name: str | None = None
+    body_log_s3_bucket: str | None = None
+    body_log_max_queue: int = 10_000
+    body_log_batch_size: int = 100
+    body_log_flush_interval: float = 5.0
+    #: Firehose 레코드 상한(1 MB) 아래로. 초과분은 S3 에 직접 넣는다.
+    body_log_max_record_bytes: int = 900_000
+    #: 워커가 캐시된 플래그를 믿는 시간(초). 토글은 이 시간 안에 반영된다.
+    body_log_flag_cache_ttl: float = 5.0
+    #: 플래그를 읽지 못했을 때의 값. **False 여야 한다** — 설정을 못 읽었다는 이유로
+    #: 본문 수집이 켜지면 안 된다(fail-safe 방향).
+    body_log_flag_default: bool = False
+
     # --- AgentCore Gateway web search (server-side tool-use loop, 2026-07-01) ---
     # We inject a web_search tool, intercept the model's tool_use, call AgentCore
     # Gateway's managed WebSearch connector over MCP (SigV4/IRSA), feed results

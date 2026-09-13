@@ -343,7 +343,9 @@ jobs:
             # 줄이라 파일을 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이
             # 아니다. 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
                         # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
-            baseline: 470
+            # +5: body-logging 신규 파일 5개(body_logger / body_log_flag /
+            #     body_log_records / schemas/body_log / 회귀 테스트)의 저작권 헤더 E501.
+            baseline: 475
           - service: cost-recorder-worker
                         # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
             baseline: 22
