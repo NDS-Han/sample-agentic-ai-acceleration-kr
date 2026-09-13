@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 import pytest
@@ -211,10 +212,89 @@ def test_schema_default_is_none_not_empty_list():
     )
 
 
-def test_orm_conversion_carries_the_field():
-    """DB → 스키마 변환이 필드를 빠뜨리면 게이트는 항상 None(제한 없음)을 본다.
+def test_the_orm_actually_declares_the_column():
+    """⚠️ 이 단정이 없어서 게이트 전체가 무력화된 채로 배포됐다.
 
-    즉 컬럼에 값을 넣어도 아무 효과가 없다 — 조용한 미집행.
+    ``_orm_to_schema`` 는 ``getattr(alias_row, "allowed_clients", None)`` 로 읽는다.
+    ORM 클래스가 컬럼을 선언하지 않으면 그 getattr 은 **언제나** None 을 돌려주고
+    ``check_client_model_scope`` 는 즉시 return 한다. 그러면:
+
+      - 관리자 화면은 "이 앱 차단" 으로 표시하고
+      - admin-api 는 값을 실제로 DB 에 저장하고(그쪽 ORM 에는 컬럼이 있다)
+      - 게이트웨이는 모든 앱을 계속 통과시킨다.
+
+    오류도 경고도 없다. 아래 ``test_orm_conversion_reads_the_orm_attribute`` 는 이전에
+    ``_orm_to_schema`` 의 **kwarg 이름만** AST 로 확인했기 때문에, 값이 영구히 None 인
+    상태에서 통과했다 — 통과하는 테스트가 미집행을 보증서로 덮은 것이다.
+
+    그래서 여기서는 파싱이 아니라 **매핑된 컬럼을 실행으로** 확인한다.
+    """
+    from sqlalchemy import ARRAY
+
+    from app.models.model import ModelAlias
+
+    columns = {c.name: c for c in ModelAlias.__table__.columns}
+    assert "allowed_clients" in columns, (
+        f"ModelAlias 에 allowed_clients 컬럼이 없다(현재: {sorted(columns)}) — "
+        "모델 × 앱 게이트가 데이터 경로에서 조용히 무력화된다"
+    )
+    col = columns["allowed_clients"]
+    assert isinstance(col.type, ARRAY), f"타입이 ARRAY 가 아니다: {col.type!r}"
+    assert col.nullable, (
+        "nullable=False 면 NULL(제한 없음)을 표현할 수 없어 3-state 가 2-state 로 붕괴한다"
+    )
+
+
+def test_admin_api_and_gateway_agree_on_the_column():
+    """두 서비스의 ORM 이 같은 컬럼을 선언해야 한다.
+
+    admin-api 만 선언하면 "쓰기는 되는데 집행은 안 되는" 정확히 그 상태가 된다.
+    게이트웨이 쪽 소스를 문자열로 대조한다(두 서비스는 별개 venv 라 한 프로세스에서
+    양쪽 모델을 import 하면 모듈명이 충돌한다 — ``app.models.model`` 이 양쪽에 있다).
+    """
+    admin_model = (
+        _SRC.parents[2] / "admin-api" / "src" / "app" / "models" / "model.py"
+    )
+    if not admin_model.exists():  # 단독 체크아웃
+        pytest.skip("admin-api 소스가 이 체크아웃에 없다")
+    text = admin_model.read_text(encoding="utf-8")
+    assert "allowed_clients" in text, (
+        "admin-api ORM 에 allowed_clients 가 없다 — 관리자 화면의 저장이 컬럼에 닿지 않는다"
+    )
+
+
+def test_init_sql_adds_the_column_idempotently():
+    """⚠️ ORM 컬럼만 추가하면 pre-0035 DB 의 **모든 모델 조회가** 500 이 된다.
+
+    컬럼은 model_aliases 의 모든 SELECT 에 들어간다. init SQL 로만 만든 DB(compose,
+    로컬, alembic 이 0035 에 닿지 않은 환경)에는 컬럼이 없으므로 UndefinedColumn 이
+    나고, 그것은 allow-list 기능만이 아니라 **추론 경로 전체**를 죽인다.
+    """
+    init_sql = _SRC.parents[2] / "db" / "init" / "02_create_tables.sql"
+    if not init_sql.exists():
+        pytest.skip("db/init 이 이 체크아웃에 없다")
+    text = init_sql.read_text(encoding="utf-8")
+    stmt = re.search(
+        r"ALTER TABLE model\.model_aliases\s+ADD COLUMN IF NOT EXISTS\s+allowed_clients\s+TEXT\[\]",
+        text,
+        re.I,
+    )
+    assert stmt is not None, (
+        "db/init 에 allowed_clients 의 idempotent ALTER 가 없다 — "
+        "0035 미적용 DB 에서 모든 모델 조회가 UndefinedColumn 으로 죽는다"
+    )
+    # DEFAULT '{}' 이면 모든 기존 alias 가 "어떤 앱도 불가" 로 바뀐다.
+    assert "allowed_clients TEXT[] DEFAULT" not in text.replace("  ", " "), (
+        "DEFAULT 가 붙어 있다 — '{}' 기본값은 모든 모델을 전면 거부로 만든다"
+    )
+
+
+def test_orm_conversion_reads_the_orm_attribute():
+    """변환 함수가 필드를 빠뜨리면 게이트는 항상 None(제한 없음)을 본다.
+
+    ⚠️ 이 검사만으로는 부족하다 — 위 ``test_the_orm_actually_declares_the_column`` 이
+       함께 있어야 "kwarg 은 있는데 값이 영구 None" 인 상태를 잡는다. 둘 다 남겨 둔다:
+       이건 배선을, 위 것은 데이터를 본다.
     """
     src = (_SRC / "services" / "router_service.py").read_text(encoding="utf-8")
     tree = ast.parse(src)
