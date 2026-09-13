@@ -69,6 +69,37 @@ def check_client_scope(allowed_clients: list[str] | None, client: str | None) ->
         raise PermissionError(f"Client '{client}' not allowed for this key")
 
 
+def check_client_model_scope(model_config, client: str | None) -> None:
+    """앱(client)이 이 **모델**을 쓸 수 없으면 PermissionError.
+
+    ``model_aliases.allowed_clients`` 의 canonical 의미(전 계층 동일, migration 0035):
+
+      * ``None`` (SQL NULL) = **제한 없음** — 지금 앱과 나중에 추가될 앱 전부.
+      * ``[]`` (SQL ``{}``) = **명시적으로 빈 허용목록** — 어떤 앱도 쓸 수 없다.
+      * non-empty = 허용목록. 목록 밖 client 는 거부되며 ``other``/``None`` 도 거부.
+
+    ⚠️ 바로 위 :func:`check_client_scope` 와 **의미가 다르다.** 그쪽은 사용자 × 앱 축이고
+       ``None``/``[]`` 를 둘 다 전체 허용으로 본다(그 필드는 "이 키가 쓸 수 있는 앱" 이라
+       빈 값이 "제한 없음" 을 뜻하도록 설계됐다). 이쪽은 모델 × 앱 축이고 ``[]`` 가
+       **전면 거부**다 — 그래서 두 함수를 합치면 안 된다.
+
+       ``[]`` 를 fail-closed 로 두는 이유: ``[]`` 는 운영자가 콘솔에서 마지막 앱의 체크를
+       해제했을 때 만들어지는 값이다. 화면은 "허용된 앱 없음" 으로 보여주는데 게이트가
+       전부 통과시키면, 운영자가 방금 내린 제한이 아무 효과가 없다. 접근제어 필드는 빈
+       경우에 닫혀야 하고, ``NULL`` vs ``{}`` 가 "미설정" 과 "명시적으로 비움" 을
+       구별하는 유일한 축이다 — 그래서 falsiness 가 아니라 ``is None`` 으로 판정한다.
+
+    :func:`check_key_scope`(allowed_models 게이트)와 AND 로 걸린다.
+    """
+    allowed = getattr(model_config, "allowed_clients", None)
+    if allowed is None:
+        return
+    if client not in allowed:
+        raise PermissionError(
+            f"Model '{getattr(model_config, 'alias', '?')}' not allowed for client '{client}'"
+        )
+
+
 def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -> ModelConfigSchema:
     if pricing_row:
         p = ModelPricingSchema(
@@ -91,6 +122,9 @@ def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -
         status=ModelStatus(alias_row.status),
         created_at=alias_row.created_at,
         description=alias_row.description,
+        # getattr 로 읽는다 — 0035 를 적용하지 않은 DB(구 배포와의 롤링 창)에서도
+        # 부팅이 죽지 않아야 하고, 그때는 None(제한 없음) = 오늘 동작이다.
+        allowed_clients=getattr(alias_row, "allowed_clients", None),
     )
 
 
@@ -339,6 +373,13 @@ class RouterService:
             LookupError: 미등록 또는 provider 불일치.
         """
         return await self._resolve_by_providers(redis, db, alias, OPENAI_CHAT_PROVIDERS)
+
+    def check_client_model_scope(self, model_config, client: str | None) -> None:
+        """모듈 레벨 :func:`check_client_model_scope` 로 위임.
+
+        ``allowed_clients`` 가 ``None`` 이면 제한 없음, ``[]`` 면 어떤 앱도 허용되지 않음.
+        """
+        check_client_model_scope(model_config, client)
 
     def check_key_scope(
         self,

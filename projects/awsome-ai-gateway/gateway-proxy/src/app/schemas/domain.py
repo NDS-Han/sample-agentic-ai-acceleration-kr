@@ -112,6 +112,17 @@ class ModelConfigSchema(BaseModel):
     status: ModelStatus
     created_at: datetime | None = None
     description: str | None = None
+    #: 이 모델을 쓸 수 있는 앱 허용목록 — **모델 × 앱** 인가 축(migration 0035).
+    #:
+    #:   ``None``   미설정 = 제한 없음(하위호환 기본값)
+    #:   ``[]``     명시적으로 빈 허용목록 = **어떤 앱도 이 모델을 쓸 수 없다**
+    #:   non-empty  허용목록
+    #:
+    #: ⚠️ 기본값이 ``None`` 이어야 한다. 이 스키마는 Redis 캐시에서
+    #:    ``ModelConfigSchema(**json)`` 으로 **검증 없이 복원**되므로, 필드가 없는
+    #:    옛 캐시 엔트리는 기본값을 받는다. 기본값을 ``[]`` 로 두면 배포 직후 캐시가
+    #:    갈리기 전까지 **모든 모델이 전면 거부**된다.
+    allowed_clients: list[str] | None = None
 
 
 class BudgetStatus(BaseModel):

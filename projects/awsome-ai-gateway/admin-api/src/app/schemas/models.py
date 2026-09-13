@@ -5,8 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core.clients import validate_clients
 from app.schemas.common import ApiFormatEnum, ProviderEnum
 
 # 단가 상한 — DB 컬럼에서 유도한 값이지 임의로 고른 숫자가 아니다.
@@ -54,6 +55,19 @@ class ModelCreateRequest(BaseModel):
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
     )
 
+    #: 이 모델을 쓸 수 있는 앱 허용목록. **3-상태**(models/model.py 주석 참조):
+    #:   생략/``null``  제한 없음
+    #:   ``[]``         명시적으로 빈 허용목록 = 어떤 앱도 허용되지 않음
+    #:   목록           그 앱들만 허용
+    allowed_clients: list[str] | None = None
+
+    @field_validator("allowed_clients")
+    @classmethod
+    def _validate_clients(cls, v: list[str] | None) -> list[str] | None:
+        # ⚠️ None 을 그대로 통과시켜야 한다 — [] 로 정규화하면 "제한 없음" 이
+        #    "전면 거부" 로 바뀐다(정확히 반대 방향의 사고).
+        return validate_clients(v)
+
 
 class ModelUpdateRequest(BaseModel):
     # ⚠️ extra="forbid" 필수. pydantic 기본값(extra="ignore")이면 여기 선언되지 않은 키가
@@ -81,6 +95,18 @@ class ModelUpdateRequest(BaseModel):
     # NOTE: update uses an is-not-None filter, so display_name can be SET/changed but not
     # cleared back to NULL via the API (repo-wide behavior for all nullable update fields).
     display_name: str | None = Field(default=None, max_length=128)
+    #: 3-상태. ⚠️ 여기서 "생략 = 유지" 와 "명시적 null = 제한 해제" 를 구별해야 한다.
+    #:    null 을 생략과 같이 다루면 한 번 목록이 박힌 모델을 "제한 없음" 으로 되돌릴 API
+    #:    가 사라지고, 콘솔은 그 목적으로 ``[]`` 를 보내게 된다 — 그런데 ``[]`` 는 전면
+    #:    거부이므로 "제한 해제" 버튼이 그 모델을 통째로 막는다.
+    #:    구별은 서비스 계층에서 ``model_fields_set`` 으로 한다.
+    allowed_clients: list[str] | None = None
+
+    @field_validator("allowed_clients")
+    @classmethod
+    def _validate_update_clients(cls, v: list[str] | None) -> list[str] | None:
+        return validate_clients(v)
+
 
 
 class PricingRequest(BaseModel):
@@ -138,6 +164,10 @@ class ModelResponse(BaseModel):
     status: str
     description: str | None = None
     display_name: str | None = None
+    #: ``None`` = 제한 없음, ``[]`` = 허용 앱 없음, 목록 = 그 앱만. 화면이 이 세 상태를
+    #: 구별해 보여줘야 한다 — ``[]`` 를 "제한 없음" 으로 렌더하면 운영자가 자기가 만든
+    #: 전면 거부를 보지 못한다.
+    allowed_clients: list[str] | None = None
     current_pricing: ModelPricingResponse | None = None
     created_at: datetime
     updated_at: datetime

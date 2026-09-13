@@ -77,6 +77,10 @@ class _FakeModel:
         self.status = ModelStatus.ACTIVE
         self.description = "before"
         self.display_name = "Before"
+        # ⚠️ 실물 ModelAlias 에 있는 필드는 여기도 있어야 한다. 없으면 _to_response 가
+        #    AttributeError 로 터져 500 이 되고, 그 500 은 "이 테스트가 검증하려는 결함"
+        #    처럼 보인다(실제로 그렇게 오독될 뻔했다). None = per-app 제한 없음.
+        self.allowed_clients = None
         self.created_at = datetime.now(timezone.utc)
         self.updated_at = datetime.now(timezone.utc)
 

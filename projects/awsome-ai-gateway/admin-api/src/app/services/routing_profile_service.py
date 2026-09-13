@@ -10,12 +10,14 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
+from app.core.clients import VALID_CLIENTS
 from app.models.routing import RoutingProfile
 
 logger = structlog.get_logger(__name__)
 
 # Must match gateway-proxy client_identifier tokens + user_allowed_client_service.
-_VALID_CLIENTS = {"claude-code", "cowork", "codex"}
+#: 단일 출처는 core/clients.py.
+_VALID_CLIENTS = VALID_CLIENTS
 # Cache key written by gateway-proxy RoutingProfileLoader (routing_profile_loader.py).
 _CACHE_KEY = "routing_profile:{client}"
 

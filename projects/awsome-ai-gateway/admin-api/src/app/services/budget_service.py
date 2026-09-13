@@ -11,6 +11,7 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clients import CLIENT_ORDER
 from app.core.budget_cache import refresh_user_app_clients, write_user_budget_config
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
@@ -40,7 +41,9 @@ logger = structlog.get_logger()
 BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
 
 _PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
-_ALLOWED_CLIENTS = ("claude-code", "cowork", "codex")
+#: 단일 출처는 core/clients.py 다 — 앱 추가 시 한 곳만 고치면 되도록.
+#: 튜플로 유지하는 이유: 기존 호출부가 순서를 가정한 곳이 있다.
+_ALLOWED_CLIENTS = CLIENT_ORDER
 
 
 def _redis_usage_key(scope: str, scope_id: str, period: str, client: str | None) -> str:

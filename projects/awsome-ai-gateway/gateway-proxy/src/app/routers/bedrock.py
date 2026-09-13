@@ -142,6 +142,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
     if auth_context:
         try:
             _router_service.check_key_scope(auth_context, model_config)
+            # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
+            # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
+            _router_service.check_client_model_scope(model_config, state.get("client"))
         except PermissionError:
             return JSONResponse(
                 status_code=400,
