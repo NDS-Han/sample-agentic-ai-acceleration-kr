@@ -334,17 +334,11 @@ async def run_fallback_loop(
             req_data, candidate_config, is_stream
         )
 
-        # Haiku thinking-strip (mirrors downgrade.py:191)
-        candidate_alias = candidate_config.alias or ""
-        if candidate_alias.startswith("claude-haiku-4-5"):
-            try:
-                body_dict = json.loads(invoke_body)
-                if "thinking" in body_dict:
-                    body_dict.pop("thinking")
-                    invoke_body = json.dumps(body_dict).encode()
-                    logger.info("fallback_thinking_stripped", alias=candidate_alias)
-            except Exception as _exc:
-                logger.warning("fallback_haiku_strip_skipped", reason=str(_exc))
+        # ⚠️ 예전에는 여기서 haiku 후보의 `thinking` 을 **무조건 지웠다.** 지금은
+        #    build_candidate_body 가 `normalize_thinking` 으로 계열에 맞게 변환하므로 그
+        #    strip 은 유해하다: haiku 가 실제로 받는 `{"type":"enabled"}` 까지 지워서,
+        #    사용자는 HTTP 200 을 받으면서 extended thinking 만 조용히 사라진다.
+        #    변환은 본문을 만드는 단일 지점에서만 한다.
 
         call_model_id = rewrite_model_id(pmid)
 
