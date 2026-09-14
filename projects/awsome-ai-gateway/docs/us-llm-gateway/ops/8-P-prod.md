@@ -410,7 +410,9 @@ for svc in gateway-proxy admin-api admin-ui notification-worker cost-recorder-wo
     --query 'imageIds[].imageTag' --output text)"; done
 ```
 
-기대 태그: `1.0.52-workers` · `1.0.48-websearch` · `1.0.97-brand` · `1.0.43-rebrand` · `1.0.47-websearch` · `1.0.49-xacct`.
+기대 태그 = (2) 에서 만든 `/tmp/images.txt` 의 6줄과 같으면 된다(values 에 적힌 태그를 helm 이
+서비스별 `repo:tag` 로 뽑아 준 목록). upstream 을 새로 가져올 때마다 값이 바뀌므로 숫자를 외우지
+말고 그 파일과 대조한다.
 렌더된 이미지 이름 앞의 `123456789012.dkr.ecr.ap-northeast-2…` 는 values 의 placeholder 라 무시 — (3)이 repo·tag 만 뽑아
 실제 계정의 `$ECR_BASE` 로 push 한다(설치 때는 `install-eks.sh` 가 `global.imageRegistry` 를 주입).
 
