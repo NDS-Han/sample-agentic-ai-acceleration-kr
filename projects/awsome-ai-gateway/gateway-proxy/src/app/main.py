@@ -255,6 +255,8 @@ async def lifespan(app: FastAPI):
             region=settings.agentcore_region,
             target_id=settings.agentcore_target_id,
             timeout=settings.agentcore_http_timeout,
+            handshake_timeout=settings.agentcore_handshake_timeout,
+            handshake_negative_ttl=settings.agentcore_handshake_negative_ttl,
         )
         logger.info(
             "agentcore_mcp_client_configured",

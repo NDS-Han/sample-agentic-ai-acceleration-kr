@@ -96,6 +96,8 @@ class AgentCoreMcpClient:
         region: str = "us-east-1",
         target_id: str = "",
         timeout: float = 30.0,
+        handshake_timeout: float = 10.0,
+        handshake_negative_ttl: float = 30.0,
         session_provider: Callable[[], Credentials] | None = None,
         now: Callable[[], float] = time.time,
     ) -> None:
@@ -104,11 +106,27 @@ class AgentCoreMcpClient:
         self._region = region
         self._target_id = target_id
         self._timeout = timeout
+        #: 핸드셰이크 **전체**(HTTP 3회 합계)의 상한. ``timeout`` 은 호출 1회당 값이라
+        #: 그것만으로는 3배까지 늘어난다.
+        self._handshake_timeout = handshake_timeout
+        #: 핸드셰이크 실패 후 재시도를 억제하는 기간.
+        #: ⚠️ 대가: 게이트웨이가 살아난 뒤 최대 이만큼 복구가 늦다. 그 대신 죽어 있는 동안
+        #:    N 개 요청이 각각 상한만큼 직렬로 기다리는 것을 막는다 — 후자가 훨씬 비싸다.
+        self._handshake_negative_ttl = handshake_negative_ttl
         self._session_provider = session_provider or self._default_creds
         self._now = now
 
         self._lock = asyncio.Lock()
         self._initialized = False
+        #: 마지막 핸드셰이크 실패 시각(단조 시계). 이 뒤 ``_handshake_negative_ttl`` 초
+        #: 동안은 재시도 없이 즉시 실패시킨다.
+        #: ⚠️ 왜 필요한가: 핸드셰이크는 process-global 한 ``self._lock`` 을 잡고 HTTP 3회
+        #:    (initialize / notifications/initialized / tools/list)를 순차로 부른다.
+        #:    게이트웨이가 죽어 있으면(리전 간 egress 차단, InvokeGateway 권한 상실) 요청
+        #:    하나가 최대 3 × timeout 을 소모하고, 동시 요청은 그 락에서 **직렬화**된다.
+        #:    각 요청은 그동안 자기 RPM/TPM/CPH 예약을 물고 있다. 음성 캐시가 없으면
+        #:    죽은 게이트웨이의 비용을 모든 요청이 상한만큼 되풀이해서 낸다.
+        self._handshake_failed_at: float | None = None
         self._tool_name: Optional[str] = None
         self._tool_input_schema: Optional[dict] = None
         self._mcp_session_id: Optional[str] = None
@@ -251,40 +269,74 @@ class AgentCoreMcpClient:
         """
         if self._initialized and self._tool_name:
             return self._tool_name
+
+        # 음성 캐시 — 최근에 실패했으면 락을 잡지도 않고 즉시 실패시킨다.
+        if self._handshake_failed_at is not None:
+            since = time.monotonic() - self._handshake_failed_at
+            if since < self._handshake_negative_ttl:
+                raise AgentCoreMcpError(
+                    f"AgentCore MCP handshake failed {since:.1f}s ago; "
+                    f"suppressed for {self._handshake_negative_ttl:.0f}s"
+                )
+
         async with self._lock:
             if self._initialized and self._tool_name:
                 return self._tool_name
-
-            await self._post_jsonrpc(
-                "initialize",
-                {
-                    "protocolVersion": _MCP_PROTOCOL_VERSION,
-                    "capabilities": {},
-                    "clientInfo": {"name": "awsome-ai-gateway", "version": "1.0"},
-                },
-            )
-            # Per MCP: notify the server the handshake is complete before listing.
+            # 락을 기다리는 동안 다른 코루틴이 실패했을 수 있다 — 다시 확인한다.
+            if self._handshake_failed_at is not None:
+                since = time.monotonic() - self._handshake_failed_at
+                if since < self._handshake_negative_ttl:
+                    raise AgentCoreMcpError(
+                        f"AgentCore MCP handshake failed {since:.1f}s ago; "
+                        f"suppressed for {self._handshake_negative_ttl:.0f}s"
+                    )
             try:
-                await self._post_jsonrpc("notifications/initialized", {}, is_notification=True)
-            except AgentCoreMcpError:
-                # Stateless gateways may reject/ignore this; not fatal.
-                logger.debug("agentcore_mcp.initialized_notify_skipped")
-
-            result = await self._post_jsonrpc("tools/list", {})
-            tools = (result or {}).get("tools", []) if isinstance(result, dict) else []
-            name = self._resolve_web_search_tool(tools)
-            if not name:
-                raise AgentCoreMcpProtocolError(
-                    f"AgentCore MCP: no WebSearch tool found in tools/list "
-                    f"(saw: {[t.get('name') for t in tools if isinstance(t, dict)]})"
+                return await asyncio.wait_for(
+                    self._handshake(), timeout=self._handshake_timeout
                 )
-            self._tool_name = name
-            self._tool_input_schema = next(
-                (t.get("inputSchema") for t in tools if t.get("name") == name), None
+            except Exception:
+                # ⚠️ TimeoutError 도 여기 걸린다(Exception 하위). 실패 시각을 남겨야
+                #    다음 요청이 같은 상한을 다시 물지 않는다.
+                self._handshake_failed_at = time.monotonic()
+                raise
+
+    async def _handshake(self) -> str:
+        """실제 핸드셰이크 3단계. ``ensure_initialized`` 가 락과 상한 안에서 부른다.
+
+        ⚠️ 중간에 취소돼도 안전하다: ``_initialized`` 는 마지막에야 True 가 되고,
+           락은 호출자의 ``async with`` 가 풀어 준다.
+        """
+        await self._post_jsonrpc(
+            "initialize",
+            {
+                "protocolVersion": _MCP_PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {"name": "awsome-ai-gateway", "version": "1.0"},
+            },
+        )
+        # Per MCP: notify the server the handshake is complete before listing.
+        try:
+            await self._post_jsonrpc("notifications/initialized", {}, is_notification=True)
+        except AgentCoreMcpError:
+            # Stateless gateways may reject/ignore this; not fatal.
+            logger.debug("agentcore_mcp.initialized_notify_skipped")
+
+        result = await self._post_jsonrpc("tools/list", {})
+        tools = (result or {}).get("tools", []) if isinstance(result, dict) else []
+        name = self._resolve_web_search_tool(tools)
+        if not name:
+            raise AgentCoreMcpProtocolError(
+                f"AgentCore MCP: no WebSearch tool found in tools/list "
+                f"(saw: {[t.get('name') for t in tools if isinstance(t, dict)]})"
             )
-            self._initialized = True
-            logger.info("agentcore_mcp.initialized", tool=name)
-            return name
+        self._tool_name = name
+        self._tool_input_schema = next(
+            (t.get("inputSchema") for t in tools if t.get("name") == name), None
+        )
+        self._initialized = True
+        self._handshake_failed_at = None
+        logger.info("agentcore_mcp.initialized", tool=name)
+        return name
 
     def _resolve_web_search_tool(self, tools: list) -> Optional[str]:
         """Prefer exact ``<target_id>___WebSearch``; else any name ending in ___WebSearch;
