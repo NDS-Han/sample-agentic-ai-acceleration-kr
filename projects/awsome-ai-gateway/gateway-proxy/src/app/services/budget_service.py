@@ -62,6 +62,57 @@ def _as_client_list(value) -> list[str]:
         return []
     return []
 
+def _evaluate_layer(
+    used: Decimal, limit: Decimal, policy: BudgetPolicy
+) -> tuple[str | None, bool, bool]:
+    """한 예산 계층의 판정. ``(block_reason_suffix, soft_warning, throttle_active)``.
+
+    ⚠️ 이 함수가 따로 있는 이유. DB 폴백은 오랫동안 **정책을 보기 전에** 무조건
+       ``used >= limit`` 에서 차단했다. Redis 경로(``redis_scripts/budget_check.lua``)는
+       같은 상태에서 정책을 먼저 본다:
+
+         hard_block    100% 에서 차단
+         soft_warning  soft_limit_pct(기본 110%) 까지 허용, 100% 를 넘으면 경고 플래그만
+         throttle      **차단하지 않는다** — RPM 만 줄인다
+
+       그래서 SOFT_WARNING 팀이 $1000.50/$1000 인 상태에서 Redis 가 한 번 타임아웃되면,
+       Redis 경로였다면 통과했을 요청이 DB 폴백에서는 429 가 됐다 — Redis 가 degrade 된
+       동안 팀 전원이 막힌다. THROTTLE 도 같다: 설계상 절대 차단하지 않는 정책인데 폴백에서만
+       100% 에서 막혔다.
+
+       부수적으로 ``team_soft_limit_exceeded`` 와 ``soft_warning=True`` 는 폴백 경로에서
+       **도달 불가능한 죽은 코드**였다(무조건 raise 가 먼저였다). 즉 ``X-Budget-Warning``
+       헤더가 Redis 다운 중에는 나오지 않았다.
+
+    ⚠️ 판정 **순서**가 Lua 와 같아야 한다(hard_block → soft_warning → throttle). 순서가
+       달라지면 같은 상태가 경로에 따라 다르게 판정된다 — 그것이 원래의 결함이다.
+
+    ⚠️ 이 변경으로 폴백은 이전보다 **느슨해진다**: Redis 다운 중 SOFT_WARNING 사용자는
+       110% 까지 쓸 수 있고 THROTTLE 사용자는 100% 에서 막히지 않는다. 그것이 저장된 정책이
+       말하는 바이고 Redis 경로가 이미 그렇게 동작하지만, 돈이 나가는 동작의 변경이다.
+    """
+    if policy == BudgetPolicy.HARD_BLOCK and used >= limit:
+        return "budget_exceeded", False, False
+
+    soft_warning = False
+    if policy == BudgetPolicy.SOFT_WARNING and limit > 0:
+        effective_limit = limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
+        if used >= effective_limit:
+            return "soft_limit_exceeded", False, False
+        if used >= limit:
+            soft_warning = True
+
+    throttle_active = False
+    if policy == BudgetPolicy.THROTTLE:
+        usage_pct = int(used / limit * 100) if limit > 0 else 0
+        for threshold in sorted(DEFAULT_THRESHOLDS, reverse=True):
+            if usage_pct >= threshold:
+                throttle_active = True
+                break
+
+    return None, soft_warning, throttle_active
+
+
 class BudgetService:
     """예산 정책 확인 서비스."""
 
@@ -309,8 +360,14 @@ class BudgetService:
             )
             user_usage = user_usage_result.scalar_one_or_none()
             user_used = user_usage.used_usd if user_usage else Decimal("0")
-            if user_used >= user_config.max_budget_usd:
-                raise PermissionError("user_budget_exceeded")
+            # 정책을 적용한다 — 무조건 차단은 Redis 경로와 어긋난다(_evaluate_layer 주석).
+            user_block, _uw, _ut = _evaluate_layer(
+                user_used,
+                user_config.max_budget_usd,
+                _db_policy_to_domain(user_config.policy),
+            )
+            if user_block:
+                raise PermissionError(f"user_{user_block}")
 
         # C-1 정책: TEAM 예산 미설정 → 차단
         team_cfg_result = await db.execute(
@@ -333,34 +390,18 @@ class BudgetService:
         team_used = team_usage.used_usd if team_usage else Decimal("0")
 
         max_budget = team_config.max_budget_usd
-        if team_used >= max_budget:
-            raise PermissionError("team_budget_exceeded")
-
         remaining = max_budget - team_used
         threshold_pct = int(team_used / max_budget * 100) if max_budget > 0 else 0
 
+        # ⚠️ 이전에는 이 위에 `if team_used >= max_budget: raise` 가 있었고, 그것이 정책
+        #    판정보다 **먼저** 돌아 아래 SOFT_WARNING/THROTTLE 분기를 도달 불가능한 죽은
+        #    코드로 만들었다. Redis 경로(budget_check.lua)와 같은 판정을 쓴다.
         policy = _db_policy_to_domain(team_config.policy)
-        if policy == BudgetPolicy.HARD_BLOCK and team_used >= max_budget:
-            raise PermissionError("hard_block")
-
-        # SOFT_WARNING: used ≥ limit × soft_limit_pct/100 이면 차단 (soft_limit_exceeded),
-        # limit ≤ used < effective_limit 이면 통과 + soft_warning=true 플래그.
-        # Redis `budget_check.lua`의 SOFT_WARNING 분기와 동일 의미. Redis 다운 시 DB
-        # fallback 경로가 enforcement를 빠뜨리지 않도록 이 분기를 추가해야 함.
-        soft_warning = False
-        if policy == BudgetPolicy.SOFT_WARNING and max_budget > 0:
-            effective_limit = max_budget * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
-            if team_used >= effective_limit:
-                raise PermissionError("team_soft_limit_exceeded")
-            if team_used >= max_budget:
-                soft_warning = True
-
-        throttle_active = False
-        if policy == BudgetPolicy.THROTTLE:
-            for threshold in sorted(DEFAULT_THRESHOLDS, reverse=True):
-                if threshold_pct >= threshold:
-                    throttle_active = True
-                    break
+        team_block, soft_warning, throttle_active = _evaluate_layer(
+            team_used, max_budget, policy
+        )
+        if team_block:
+            raise PermissionError(f"team_{team_block}")
 
         # 앱(client) 예산 확인 (REDIS_DEGRADED 경로) — 미설정 시 pass-through.
         if client in PER_APP_BUDGET_CLIENTS:
@@ -382,8 +423,13 @@ class BudgetService:
                 )
                 client_usage = client_usage_result.scalar_one_or_none()
                 client_used = client_usage.used_usd if client_usage else Decimal("0")
-                if client_used >= client_config.max_budget_usd:
-                    raise PermissionError("client_budget_exceeded")
+                client_block, _cw, _ct = _evaluate_layer(
+                    client_used,
+                    client_config.max_budget_usd,
+                    _db_policy_to_domain(client_config.policy),
+                )
+                if client_block:
+                    raise PermissionError(f"client_{client_block}")
 
         return BudgetStatus(
             remaining_usd=remaining,
