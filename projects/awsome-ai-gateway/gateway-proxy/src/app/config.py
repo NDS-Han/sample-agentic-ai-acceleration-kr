@@ -196,10 +196,27 @@ class Settings(BaseSettings):
     agentcore_region: str = "us-east-1"
     agentcore_target_id: str = "web-search-tool"
     agentcore_http_timeout: float = 30.0
+    #: MCP 핸드셰이크(HTTP 3회 합계)의 상한. agentcore_http_timeout 은 **호출 1회당** 값이라
+    #: 그것만으로는 핸드셰이크 하나가 그 3배까지 늘어나고, 락이 process-global 이라 동시
+    #: 요청이 직렬화된다(services/agentcore_mcp_client.py 의 필드 주석 참조).
+    agentcore_handshake_timeout: float = 10.0
+    #: 핸드셰이크 실패 후 재시도를 억제하는 기간. 죽은 게이트웨이의 비용을 모든 요청이
+    #: 상한만큼 되풀어 내지 않게 한다. 대가는 복구가 최대 이만큼 늦어지는 것.
+    agentcore_handshake_negative_ttl: float = 30.0
     web_search_enabled: bool = False
     web_search_max_iterations: int = 5
     web_search_total_deadline_sec: float = 90.0
     web_search_max_results_default: int = 10
+    #: 검색 **1회** 결과 텍스트의 상한(문자). 0 = 무제한(캡 이전 동작).
+    #: ⚠️ max_iterations 는 턴 수를, total_deadline_sec 는 시간을 묶는다. 청구서를 정하는
+    #:    축인 "다음 턴 입력에 주입되는 바이트" 는 이것뿐이다. dev 실측: 검색 한 번이 다음
+    #:    턴 입력에 약 17.4K 토큰을 넣었다. 60000자 ≈ 15K 토큰 수준으로 잡는다.
+    web_search_max_result_chars: int = 60000
+    #: 한 **턴**에서 실행할 검색 개수 상한. 0 = 무제한.
+    #: ⚠️ 모델은 한 턴에 병렬 web_search 를 여러 개 낼 수 있고 이 루프는 그것을 지원한다.
+    #:    20개가 통과하면 20 × 결과가 다음 턴 입력에 연결되어, 상한 없는 단일 요청 비용이
+    #:    되거나 컨텍스트 창을 넘겨 continuation 턴이 400 이 된다(그때까지 과금분 전부 유실).
+    web_search_max_searches_per_turn: int = 4
 
 
 @lru_cache

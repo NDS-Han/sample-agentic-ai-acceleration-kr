@@ -496,6 +496,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             max_iterations=_settings_ws.web_search_max_iterations,
             total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
             default_max_results=_settings_ws.web_search_max_results_default,
+            max_result_chars=_settings_ws.web_search_max_result_chars,
+            max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
+            handshake_timeout=_settings_ws.agentcore_handshake_timeout,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )
