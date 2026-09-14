@@ -182,10 +182,10 @@ _DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 
 
 def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
-    """KST 기준 'YYYY-MM-DD' 두 개 → UTC 반개구간 [start, end).
+    """리포팅 타임존 기준 'YYYY-MM-DD' 두 개 → UTC 반개구간 [start, end).
 
     `end_day` 는 **포함**이다(그 날 하루 전체). 그래서 end 경계는 end_day + 1일의
-    KST 00:00 을 UTC 로 옮긴 값이다.
+    리포팅 타임존 00:00 을 UTC 로 옮긴 값이다(period_to_utc_range 와 같은 tz).
 
     ⚠️ 문자열을 슬라이싱해서 `int(day[:4])` 로 파싱하지 않는다. 그러면 '20xx-1-1' 같은
     입력이 형식 검사를 통과해 엉뚱한 경계를 만들거나 `int()` 가 맨 ValueError 로 터져
@@ -210,12 +210,13 @@ def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
         raise ValidationError(
             f"end year must be {_PERIOD_MIN_YEAR}-{_PERIOD_MAX_YEAR} (got {end_day!r})"
         )
+    tz = _reporting_tz()
     start_utc = datetime(
-        start_date.year, start_date.month, start_date.day, tzinfo=KST
+        start_date.year, start_date.month, start_date.day, tzinfo=tz
     ).astimezone(timezone.utc)
     end_exclusive = end_date + timedelta(days=1)
     end_utc = datetime(
-        end_exclusive.year, end_exclusive.month, end_exclusive.day, tzinfo=KST
+        end_exclusive.year, end_exclusive.month, end_exclusive.day, tzinfo=tz
     ).astimezone(timezone.utc)
     return start_utc, end_utc
 

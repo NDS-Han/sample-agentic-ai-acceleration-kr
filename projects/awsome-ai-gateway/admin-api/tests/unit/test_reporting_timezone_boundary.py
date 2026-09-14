@@ -93,3 +93,25 @@ def test_month_expr_renders_timezone_and_format_as_literals(reporting_tz):
     select_part, group_part = sql.split("GROUP BY")
     assert "to_char(timezone('America/Los_Angeles', usage.usage_logs.requested_at), 'YYYY-MM')" in select_part
     assert "to_char(timezone('America/Los_Angeles', usage.usage_logs.requested_at), 'YYYY-MM')" in group_part
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("tz", "start_day", "end_day", "start", "end"),
+    [
+        # 기본값 = Asia/Seoul: 종전 KST 동작 그대로
+        (None, "2026-08-01", "2026-08-15", "2026-07-31T15:00Z", "2026-08-15T15:00Z"),
+        # LA: 3/8 02:00 DST 시작 — start 는 PST(-8), end(3/9 00:00) 는 PDT(-7)
+        ("America/Los_Angeles", "2026-03-08", "2026-03-08",
+         "2026-03-08T08:00Z", "2026-03-09T07:00Z"),
+        # India: 반시간 오프셋
+        ("Asia/Kolkata", "2026-08-01", "2026-08-01",
+         "2026-07-31T18:30Z", "2026-08-01T18:30Z"),
+    ],
+)
+def test_day_range_to_utc_follows_reporting_timezone(
+    reporting_tz, tz, start_day, end_day, start, end
+):
+    """by-user 원장(kst_day_range_filter)의 일자 경계도 월 KPI 와 같은 타임존을 따라야 한다."""
+    reporting_tz(tz)
+    assert uf.day_range_to_utc(start_day, end_day) == (_utc(start), _utc(end))
