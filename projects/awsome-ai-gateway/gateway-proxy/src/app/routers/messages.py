@@ -481,6 +481,23 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 )
             )
 
+        # KI-08 역산 훅 — 웹서치 경로 **전용**.
+        #
+        # ⚠️ 아래쪽 `_estimate` 를 재사용할 수 없다. 그것은 `call_model_id_final` /
+        #    `is_mantle` 에 의존하고 둘 다 폴백 루프 **뒤에** 계산되므로, 여기서 참조하면
+        #    UnboundLocalError 다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는
+        #    잡히지 않는다). 이 경로는 폴백을 타지 않으므로 model_config 가 곧 실제 모델이다.
+        _ws_tokenizer = getattr(request.app.state, "tokenizer", None)
+
+        async def _ws_estimate(text: str) -> int | None:
+            if not _ws_tokenizer:
+                return None
+            return await _ws_tokenizer.estimate_output_tokens(
+                text,
+                provider=model_config.provider,
+                model_id=model_config.provider_model_id,
+            )
+
         # 사전 게이팅 — 훅을 넘기면 루프가 SSE 전문을 누적한다.
         _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
 
@@ -499,6 +516,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             max_result_chars=_settings_ws.web_search_max_result_chars,
             max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
             handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+            tokenizer_hook=_ws_estimate,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )

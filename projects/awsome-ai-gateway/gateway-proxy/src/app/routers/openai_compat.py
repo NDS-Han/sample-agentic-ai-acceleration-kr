@@ -681,6 +681,24 @@ async def _handle_responses(request: Request):
         req_data["model"] = model_config.provider_model_id
         body = json.dumps(req_data).encode()
 
+    # KI-08 역산용 토크나이저 훅. 이 방언은 usage 가 종결 이벤트(response.completed)
+    # 안에만 있어서, 상류가 그 전에 끊기면 역산 없이는 usage 가 전부 0 이 되고
+    # cost_recorder 가 usage_logs 행을 아예 만들지 않는다.
+    #
+    # ⚠️ 정의가 **웹서치 분기보다 앞**에 있어야 한다. 그 분기는 아래 `if is_stream:` 보다
+    #    먼저 리턴하므로, 정의를 그 블록 안에 두면 웹서치 경로에서 UnboundLocalError 가
+    #    된다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는 안 잡힌다).
+    _tokenizer = getattr(request.app.state, "tokenizer", None)
+
+    async def _estimate(text: str) -> int | None:
+        if not _tokenizer:
+            return None
+        return await _tokenizer.estimate_output_tokens(
+            text,
+            provider=model_config.provider,
+            model_id=model_config.provider_model_id,
+        )
+
     # --- Server-side web search (Architecture C) — opt-in per routing profile ---
     # When the codex profile enables web search AND the AgentCore MCP client is present,
     # run the Responses-dialect tool-use loop instead of the plain single dispatch below.
@@ -795,6 +813,7 @@ async def _handle_responses(request: Request):
             max_result_chars=_settings_ws.web_search_max_result_chars,
             max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
             handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+            tokenizer_hook=_estimate,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )
@@ -865,7 +884,13 @@ async def _handle_responses(request: Request):
 
         return StreamingResponse(
             responses_sse_stream(
-                request, chunk_iter, on_usage=_record, on_complete=_on_complete
+                request,
+                chunk_iter,
+                on_usage=_record,
+                on_complete=_on_complete,
+                # KI-08 역산 — 이 방언은 usage 가 종결 이벤트 안에만 있어서, 그 전에
+                # 끊기면 역산이 없으면 usage_logs 행이 아예 만들어지지 않는다.
+                tokenizer_hook=_estimate,
             ),
             status_code=status,
             media_type="text/event-stream",

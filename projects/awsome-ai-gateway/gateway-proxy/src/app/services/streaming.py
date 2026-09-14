@@ -508,6 +508,7 @@ async def responses_sse_stream(
     idle_timeout: float | None = None,
     drain_timeout: float | None = None,
     on_complete: OnComplete = None,
+    tokenizer_hook: TokenizerHook = None,
 ) -> AsyncIterator[bytes]:
     """OpenAI **Responses API** → re-framed SSE (`event: {type}\\ndata: {json}\\n\\n`).
 
@@ -592,6 +593,46 @@ async def responses_sse_stream(
         except Exception:
             logger.exception("on_complete_callback_failed")
 
+    async def _estimate_output_tokens() -> TokenUsage | None:
+        """KI-08 역산 — 이 방언에만 없던 것.
+
+        ⚠️ 왜 필요한가. Responses 방언은 usage 를 **종결 이벤트(response.completed)
+           안에서만** 준다. 그래서 상류가 idle timeout 이나 오류로 그 이벤트 전에 끊기면
+           ``latest_usage`` 가 None 이고, ``TokenUsage()``(전부 0)로 발화한다.
+           ``cost_recorder.finalize`` 는 total/input/output 이 모두 0 이면 TPM 예약만
+           돌려주고 **usage_logs 행을 아예 만들지 않은 채** 리턴한다 — provider 가 이미
+           AWS 에 청구한 토큰이 우리 쪽에는 존재하지 않게 된다.
+
+           같은 요청 형태가 ``/v1/messages`` 와 ``/v1/chat/completions`` 에서는 역산되어
+           기록된다. 즉 이 누락은 **방언별**이라 집계 대시보드에서는 보이지 않는다.
+
+        ⚠️ input 과 cache 버킷을 **앞으로 이어 나른다.** response.incomplete/failed 는
+           input+cache 를 담고 output 만 0 인 경우가 있어서, output 만으로 TokenUsage 를
+           새로 만들면 캐시 버킷이 지워져 지금보다 더 과소청구가 된다.
+        """
+        if not tokenizer_hook or not accumulated_text:
+            return None
+        base = latest_usage or TokenUsage()
+        if base.output_tokens > 0:
+            return None  # 실제 usage 를 받았다 — 역산 불필요
+        try:
+            estimated = await tokenizer_hook("".join(accumulated_text))
+        except Exception:
+            logger.warning("tokenizer_hook_failed")
+            return None
+        if not estimated or estimated <= 0:
+            return None
+        # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다.** TokenUsage 에는 output 과 무관한 필드가
+        #    더 있다(web_search_count — 웹서치 귀속/과금, cache_ttl_1h — 캐시 단가 분기).
+        #    필드를 열거해 새로 만들면 나중에 필드가 추가될 때 조용히 유실된다.
+        return base.model_copy(
+            update={
+                "output_tokens": estimated,
+                "total_tokens": base.input_tokens + estimated,
+                "estimated": True,
+            }
+        )
+
     async def _fire_on_usage() -> None:
         """**정확히 1회만** 실행된다(usage_fired 가드)."""
         nonlocal usage_fired
@@ -599,6 +640,9 @@ async def responses_sse_stream(
             return
         usage_fired = True
         usage = latest_usage or TokenUsage()
+        estimated_usage = await _estimate_output_tokens()
+        if estimated_usage is not None:
+            usage = estimated_usage
         try:
             await on_usage(usage, first_token_time)
         except Exception:

@@ -391,8 +391,9 @@ jobs:
             #   +1  모델 × 앱 allow-list 실 DB 회귀 테스트
             #   +1  예약 해제 회귀 테스트
             #   +1  예산 폴백 정책 회귀 테스트
+            #   +1  readiness / Responses usage 회귀 테스트
             # 헤더 외 신규 위반은 0 이다(UP045 2건은 `X | None` 로 맞춰 유입시키지 않았다).
-            baseline: 479
+            baseline: 480
           - service: cost-recorder-worker
                         # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
             baseline: 22

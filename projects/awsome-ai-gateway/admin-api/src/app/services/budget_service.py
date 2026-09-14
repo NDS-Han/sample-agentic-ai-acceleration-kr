@@ -1047,13 +1047,45 @@ class BudgetService:
 
         model_repo = ModelRepository(session)
         all_aliases = {alias for rule in data.rules for alias in (rule.from_model_alias, rule.to_model_alias)}
+        # ⚠️ 행을 버리지 말고 들고 있는다 — 아래 provider 대조에 필요하다(존재 확인만 하고
+        #    버리면 alias 당 조회를 두 번 하게 된다).
+        alias_rows: dict[str, object] = {}
         for alias in all_aliases:
-            if await model_repo.get_by_alias(alias) is None:
+            row = await model_repo.get_by_alias(alias)
+            if row is None:
                 raise NotFoundError("ModelAlias", alias)
+            alias_rows[alias] = row
 
         for rule in data.rules:
             if rule.from_model_alias == rule.to_model_alias:
                 raise ValidationError(f"Source and target model cannot be the same: {rule.from_model_alias}")
+
+            # ⚠️ provider 가 다른 규칙은 **저장 자체를 거부한다.**
+            #
+            #    강등은 요청 본문의 model 을 그대로 바꿔치기한다. 그런데 각 라우트는 자기
+            #    provider 로 필터해서 alias 를 해석한다 — /v1/messages 는
+            #    resolve_bedrock_model(provider == BEDROCK)이다. 그래서 BEDROCK alias 를
+            #    BEDROCK_MANTLE/RUNTIME_OPENAI alias 로 바꾸는 규칙은 임계값을 넘는 순간
+            #    LookupError → **404** 가 되고, 그 스코프의 모든 사용자가 한꺼번에 끊긴다.
+            #    비용 절감 설정이 팀을 오프라인으로 만드는 것이고, 404 본문에는 강등 규칙이
+            #    원인이라는 단서가 없다.
+            #
+            #    반대 방향(mantle → runtime plane)은 더 조용하고 더 나쁘다: 두 provider 가
+            #    같은 리졸버를 통과하므로 HTTP 200 인 채로 인증 방식(bearer vs SigV4), 단가,
+            #    AWS 쪽 invocation 로깅이 함께 바뀐다.
+            #
+            #    저장 시점이 막을 수 있는 유일한 지점이다 — 요청 시점에는 이미 늦었고
+            #    (그 요청은 실패한다) 화면은 200 을 받은 뒤다.
+            from_provider = getattr(alias_rows[rule.from_model_alias], "provider", None)
+            to_provider = getattr(alias_rows[rule.to_model_alias], "provider", None)
+            if from_provider != to_provider:
+                raise ValidationError(
+                    f"Downgrade target must use the same provider as the source: "
+                    f"'{rule.from_model_alias}' is {getattr(from_provider, 'value', from_provider)} "
+                    f"but '{rule.to_model_alias}' is {getattr(to_provider, 'value', to_provider)}. "
+                    f"A cross-provider rewrite does not resolve on the serving route, so every "
+                    f"request in this scope would fail once the threshold is crossed."
+                )
 
         budget_repo = BudgetRepository(session)
         config = await budget_repo.get_first_active_config(scope, scope_id)
