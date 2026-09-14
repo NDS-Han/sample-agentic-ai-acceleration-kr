@@ -253,16 +253,20 @@ jobs:
             tests/regression/test_high_analytics_seed_reconciliation.py \
             tests/regression/test_high_productivity_idempotency.py \
             tests/regression/test_high_budget_redis_clobber.py \
+            tests/regression/test_high_init_sql_matches_orm.py \
             > /tmp/proof.txt 2>&1
           status=$?
           tail -40 /tmp/proof.txt
           if [ "$status" -ne 0 ]; then exit "$status"; fi
           # 통과했더라도 실질 실행이 0건이면 실패다 — 그게 이 잡을 만든 이유다.
-          # (로컬 실측 기준선: 107 passed, 2 skipped)
+          # ⚠️ 하한만 본다. 정확한 통과 수는 DB 에 쌓인 데이터에 따라 달라진다 — 일부
+          #    테스트는 대상 테이블이 비어 있으면 스스로 skip 한다(플랜 어서션 등). 로컬
+          #    실측은 134 passed / 2 skipped 였다. 하한의 목적은 "PROOF_DSN 이 안 걸려
+          #    대부분 skip 된" 상태를 잡는 것이다(그 경우 20건 미만으로 떨어진다).
           passed=$(grep -oE "[0-9]+ passed" /tmp/proof.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
           echo "passed=${passed}"
-          if [ "${passed:-0}" -lt 90 ]; then
-            echo "::error::통과 수가 ${passed} 건뿐이다(기대 100+). PROOF_DSN 게이트가 걸려 대부분 skip 된 것으로 보인다."
+          if [ "${passed:-0}" -lt 93 ]; then
+            echo "::error::통과 수가 ${passed} 건뿐이다(하한 93). PROOF_DSN/REDIS_PROOF_URL 이 안 걸려 대부분 skip 된 것으로 보인다."
             exit 1
           fi
 
@@ -277,13 +281,16 @@ jobs:
         run: |
           set -uo pipefail
           uv run pytest -q -p no:cacheprovider \
-            tests/regression/test_high_per_app_budget_rows.py > /tmp/proof2.txt 2>&1
+            tests/regression/test_high_per_app_budget_rows.py \
+            tests/regression/test_high_replay_and_orphan_pel.py > /tmp/proof2.txt 2>&1
           status=$?
           tail -30 /tmp/proof2.txt
           if [ "$status" -ne 0 ]; then exit "$status"; fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/proof2.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
-          # 로컬 실측 기준선: 9 passed. 실 PG 게이트가 걸리면 4건만 통과한다(정적 검사만).
-          if [ "${passed:-0}" -lt 8 ]; then
+          # 로컬 실측 기준선: 18 passed (per-app 9 + replay/PEL 9).
+          # ⚠️ replay/PEL 파일은 PROOF_DSN **과** REDIS_PROOF_URL 을 모두 요구한다 —
+          #    한쪽만 걸리면 통과 수가 떨어져 여기서 실패한다.
+          if [ "${passed:-0}" -lt 17 ]; then
             echo "::error::통과 ${passed} 건 — PROOF_DSN 이 안 걸려 DB 테스트가 skip 됐다."
             exit 1
           fi
@@ -308,17 +315,18 @@ jobs:
           set -uo pipefail
           uv run pytest -q -p no:cacheprovider \
             tests/regression/test_critical_model_client_scope_real_db.py \
-            tests/regression/test_high_reservation_release_on_error.py > /tmp/proof3.txt 2>&1
+            tests/regression/test_high_reservation_release_on_error.py \
+            tests/regression/test_high_budget_fallback_policy.py > /tmp/proof3.txt 2>&1
           status=$?
           tail -30 /tmp/proof3.txt
           if [ "$status" -ne 0 ]; then exit "$status"; fi
           passed=$(grep -oE "[0-9]+ passed" /tmp/proof3.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
-          # 로컬 실측 기준선: 13 passed (실 DB 3 + 예약 해제 10).
+          # 로컬 실측 기준선: 29 passed (실 DB 3 + 예약 해제 10 + 예산 정책 16).
           # ⚠️ 예약 해제 파일은 REDIS_PROOF_URL 을 요구한다 — 환불은 incrbyfloat 로
           #    카운터를 움직이는 것이라, 가짜 Redis 로는 부호가 반대인 환불도 통과한다.
           #    두 env 중 하나라도 안 걸리면 통과 수가 떨어져 여기서 실패한다.
-          if [ "${passed:-0}" -lt 13 ]; then
-            echo "::error::통과 ${passed} 건(기대 13) — PROOF_DSN/REDIS_PROOF_URL 이 안 걸려 skip 됐다."
+          if [ "${passed:-0}" -lt 29 ]; then
+            echo "::error::통과 ${passed} 건(기대 29) — PROOF_DSN/REDIS_PROOF_URL 이 안 걸려 skip 됐다."
             exit 1
           fi
 
@@ -382,8 +390,9 @@ jobs:
             #   +1  OpenAI 방언·웹서치 본문 로깅 회귀 테스트
             #   +1  모델 × 앱 allow-list 실 DB 회귀 테스트
             #   +1  예약 해제 회귀 테스트
+            #   +1  예산 폴백 정책 회귀 테스트
             # 헤더 외 신규 위반은 0 이다(UP045 2건은 `X | None` 로 맞춰 유입시키지 않았다).
-            baseline: 478
+            baseline: 479
           - service: cost-recorder-worker
                         # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
             baseline: 22

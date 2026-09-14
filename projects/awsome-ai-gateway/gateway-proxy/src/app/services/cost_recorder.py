@@ -167,6 +167,7 @@ class CostRecorder:
         # 1. Redis 예산 차감 + 임계값 체크
         threshold_triggered = None
         if redis is not None:
+            from app.services.budget_service import PER_APP_BUDGET_CLIENTS
             from app.services.lua_loader import LuaScriptLoader
 
             # Redis Cluster hash tag: {<scope_id>} ensures usage/config keys
@@ -203,19 +204,44 @@ class CostRecorder:
             except Exception:
                 logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
 
-            # 앱(client) 예산 차감 — user 설정에 app_clients 로 등록된 client 만(free gate).
-            if client in ("claude-code", "cowork", "codex"):
-                app_clients = result.get("app_clients") if isinstance(result, dict) else None
-                if isinstance(app_clients, list) and client in app_clients:
-                    client_usage_key = f"budget:user:{{{auth_context.user_id}}}:{client}:{period}"
-                    client_config_key = f"budget:config:user:{{{auth_context.user_id}}}:{client}"
-                    try:
-                        await redis.eval(
-                            LuaScriptLoader.get("budget_deduct"),
-                            2, client_usage_key, client_config_key, str(cost_usd),
-                        )
-                    except Exception:
-                        logger.warning("client_budget_deduct_failed", client=client)
+            # 앱(client) 예산 차감.
+            #
+            # ⚠️ 예전에는 이 차감이 ``result["app_clients"]`` 게이트 뒤에 있었다 — 즉 위
+            #    user-layer EVAL 이 **에코해 준** 목록에 이 client 가 있어야만 차감했다.
+            #    그 게이트는 검사 경로와 어긋나서 조용히 과소청구를 만들었다:
+            #
+            #      * ``budget:config:user:{uid}`` 는 ex=300 으로 쓰이고, 없을 때만 다시
+            #        만들어진다. 60초짜리 스트리밍 응답이 그 키의 잔여 20초에 시작해
+            #        만료 뒤에 finalize 하면, budget_deduct.lua 는 ``app_clients = {}`` 로
+            #        시작하고 cjson 이 빈 Lua 테이블을 JSON **객체** ``{}`` 로 인코딩하므로
+            #        ``isinstance(..., list)`` 가 False 가 되어 그 요청의 앱별 카운터가
+            #        올라가지 않는다.
+            #      * user-layer EVAL 이 예외를 내면 ``result`` 가 None 이라 게이트가 닫힌다 —
+            #        Redis 딸꾹질 한 번이 앱 계층 차감까지 함께 떨어뜨린다.
+            #
+            #    반면 **검사** 경로는 다음 요청에서 DB 로부터 per-app 설정을 재수화해 $50
+            #    앱 한도를 계속 집행한다. 앱별 카운터에는 TTL 이 없고 복원 경로는 키가
+            #    없을 때만 도는데, 이 경우 키는 존재하므로 그 달 내내 어긋난 채 남는다 —
+            #    한편 ``budget.budget_usages`` 에는 참값이 들어간다(워커는 게이트가 없다).
+            #
+            #    그래서 게이트를 없앤다. 대상 client 이면 항상 차감한다 — DB 기록자
+            #    (cost-recorder-worker) 와 같은 규칙이다.
+            #
+            # ⚠️ 대가: per-app 예산이 없는 사용자에게도 ``budget:user:{uid}:{client}:{period}``
+            #    키가 생긴다. TTL 이 없으므로 volatile-lru 에서는 축출되지 않는다
+            #    (사용자·월당 최대 3개). 그리고 관리자가 달 중간에 per-app 예산을 만들면
+            #    이미 누적된 카운터가 즉시 그 한도에 계산된다 — 의도된 동작이지만
+            #    운영자에게 알려야 하는 변경이다.
+            if client in PER_APP_BUDGET_CLIENTS:
+                client_usage_key = f"budget:user:{{{auth_context.user_id}}}:{client}:{period}"
+                client_config_key = f"budget:config:user:{{{auth_context.user_id}}}:{client}"
+                try:
+                    await redis.eval(
+                        LuaScriptLoader.get("budget_deduct"),
+                        2, client_usage_key, client_config_key, str(cost_usd),
+                    )
+                except Exception:
+                    logger.warning("client_budget_deduct_failed", client=client)
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)
         # reserved_cost는 rate_limit_state['cost_reserved'] (enforcement 주입) 우선,
