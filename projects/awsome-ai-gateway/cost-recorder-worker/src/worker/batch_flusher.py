@@ -126,6 +126,67 @@ _UPSERT_BUDGET_USAGE = text(
 )
 
 
+_ALREADY_RECORDED_SQL = text(
+    "SELECT request_id FROM usage.usage_logs WHERE request_id = ANY(:ids)"
+)
+
+
+def _dedup_in_batch(entries: list[CostStreamEntry]) -> list[CostStreamEntry]:
+    """배치 안의 같은 ``request_id`` 를 하나로 접는다(첫 것을 남긴다).
+
+    ⚠️ 크래시 없이도 재현된다: 게이트웨이의 spool 이 Redis 복구 후 페이로드를 다시
+       발행하므로 같은 request_id 가 한 flush 배치 안에 두 번 들어올 수 있다.
+       ``usage_logs`` 는 ``ON CONFLICT (request_id) DO NOTHING`` 으로 보호되지만
+       ``budget_usages`` 는 **가산** UPSERT 라 두 번 더해진다.
+    """
+    seen: set[str] = set()
+    out: list[CostStreamEntry] = []
+    dropped = 0
+    for e in entries:
+        if e.request_id in seen:
+            dropped += 1
+            continue
+        seen.add(e.request_id)
+        out.append(e)
+    if dropped:
+        logger.warning("batch_intra_dedup", dropped=dropped, kept=len(out))
+    return out
+
+
+async def _filter_replays(
+    session: AsyncSession, entries: list[CostStreamEntry]
+) -> list[CostStreamEntry]:
+    """이미 ``usage_logs`` 에 있는 ``request_id`` 를 걸러낸다(재처리 방어).
+
+    ⚠️ 왜 필요한가. 소비자는 DB 커밋을 **먼저** 하고 그 다음 XACK 한다. 그 사이에 파드가
+       죽으면(롤아웃 SIGKILL, OOM, 노드 축출) 같은 배치를 다시 읽는다. ``usage_logs`` 는
+       ``ON CONFLICT DO NOTHING`` 으로 넘어가지만 ``budget_usages.used_usd`` 는 두 번
+       더해진다. $12 짜리 배치면 사용자의 월 사용액이 $24 로 **영구히** 기록된다.
+
+       그 값이 하필 진실의 원천이다: 게이트웨이는 Redis 가 degrade 되면 그것을 읽고,
+       Redis 복구 후 카운터를 그것으로 되돌린다. 그래서 $30 한도 사용자가 실제 지출
+       $15 에서 남은 달 내내 hard_block 되고, 손으로 SQL 을 고치는 것 외에 되돌릴 방법이
+       없다.
+
+    ⚠️ 이 SELECT 는 호출자의 트랜잭션 **안에서** 돈다 — 그래야 "확인 후 삽입" 사이에
+       다른 커밋이 끼어들 창이 좁아진다. 완전한 배제는 아니지만(그건 usage_logs 의
+       UNIQUE 가 담당한다), 재처리라는 실제 시나리오는 여기서 막힌다.
+    """
+    if not entries:
+        return entries
+    ids = [e.request_id for e in entries]
+    rows = await session.execute(_ALREADY_RECORDED_SQL, {"ids": ids})
+    existing = {r[0] for r in rows}
+    if not existing:
+        return entries
+    logger.warning(
+        "batch_replay_filtered",
+        already_recorded=len(existing),
+        batch_size=len(entries),
+    )
+    return [e for e in entries if e.request_id not in existing]
+
+
 class BatchFlusher:
     """Redis Stream에서 가져온 entries를 DB/Redis에 반영."""
 
@@ -149,11 +210,21 @@ class BatchFlusher:
         if not entries:
             return
 
+        # 배치 안 중복을 먼저 접는다 — 크래시 없이도 spool 재발행으로 생긴다.
+        entries = _dedup_in_batch(entries)
+
         # 1. DB 쓰기 — 단일 트랜잭션. FK 위반 시 per-row fallback.
         try:
             async with self._session_factory() as session:
-                await self._insert_usage_logs(session, entries)
-                await self._upsert_budget_usages(session, entries)
+                # ⚠️ budget_usages 는 **가산** UPSERT 다. 재처리된 entry 를 걸러내지 않으면
+                #    사용자의 기록 사용액이 영구히 두 배가 된다(_filter_replays 주석 참조).
+                fresh = await _filter_replays(session, entries)
+                if not fresh:
+                    logger.info("batch_all_replays_skipped", batch_size=len(entries))
+                    await session.commit()
+                    return
+                await self._insert_usage_logs(session, fresh)
+                await self._upsert_budget_usages(session, fresh)
                 await session.commit()
         except IntegrityError as ie:
             logger.warning(
@@ -193,6 +264,11 @@ class BatchFlusher:
         for e in entries:
             try:
                 async with self._session_factory() as session:
+                    # ⚠️ 배치 경로와 **같은** 방어가 필요하다. 여기만 빼면 IntegrityError
+                    #    한 번으로 폴백 경로로 넘어간 배치가 계속 이중청구한다.
+                    if not await _filter_replays(session, [e]):
+                        await session.commit()
+                        continue
                     await self._insert_usage_logs(session, [e])
                     await self._upsert_budget_usages(session, [e])
                     await session.commit()

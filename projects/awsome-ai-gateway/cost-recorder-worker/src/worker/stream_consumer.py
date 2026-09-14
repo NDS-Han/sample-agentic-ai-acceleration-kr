@@ -27,6 +27,24 @@ from worker.schemas.cost_stream import CostStreamEntry
 logger = structlog.get_logger(__name__)
 
 
+def _parse_xautoclaim(res: Any) -> tuple[str, list]:
+    """``XAUTOCLAIM`` 응답을 ``(next_cursor, messages)`` 로 정규화한다.
+
+    ⚠️ redis-py 는 버전에 따라 2-tuple ``(cursor, msgs)`` 또는 3-tuple
+       ``(cursor, msgs, deleted_ids)`` 를 돌려준다. 한쪽만 가정하면 다른 쪽에서
+       ValueError 로 회수가 통째로 죽고, 그 실패는 "고아가 없다" 와 구별되지 않는다.
+    """
+    if not res:
+        return "0-0", []
+    if isinstance(res, (list, tuple)):
+        cursor = res[0] if len(res) >= 1 else "0-0"
+        msgs = res[1] if len(res) >= 2 else []
+        if isinstance(cursor, bytes):
+            cursor = cursor.decode()
+        return str(cursor), list(msgs or [])
+    return "0-0", []
+
+
 class StreamConsumer:
     """cost:stream → BatchFlusher pipeline."""
 
@@ -45,6 +63,9 @@ class StreamConsumer:
         self._batch_max = settings.batch_max_size
         self._batch_interval = settings.batch_max_interval_sec
         self._block_ms = settings.xread_block_ms
+        self._claim_interval = settings.xautoclaim_interval_sec
+        self._claim_min_idle_ms = settings.xautoclaim_min_idle_ms
+        self._claim_task: asyncio.Task | None = None
         self._metrics = metrics
 
     async def ensure_group(self) -> None:
@@ -74,11 +95,22 @@ class StreamConsumer:
             consumer=self._consumer,
         )
 
-        # 기동 시 unacked backlog 먼저 처리 (이전 인스턴스 크래시 복구)
+        # 기동 시 unacked backlog 먼저 처리 (**이 consumer 이름의** 크래시 복구)
         await self._drain_backlog()
 
-        # 정상 소비 루프
-        await self._consume_live()
+        # ⚠️ 죽은 **다른** consumer 이름의 PEL 은 위 backlog 로 절대 보이지 않는다
+        #    (XREADGROUP id='0' 은 자기 PEL 만 돌려준다). 파드 이름이 consumer 이름이고
+        #    롤아웃마다 바뀌므로, 회수하지 않으면 그 메시지들은 영구히 유실된다.
+        #    기동 시 한 번 + 주기적으로 돈다.
+        await self._reclaim_orphans()
+        self._claim_task = asyncio.create_task(self._reclaim_loop())
+
+        try:
+            # 정상 소비 루프
+            await self._consume_live()
+        finally:
+            if self._claim_task is not None:
+                self._claim_task.cancel()
 
     async def _drain_backlog(self) -> None:
         """이 consumer 이름으로 남아있는 unacked 메시지 재처리 (at-least-once)."""
@@ -103,6 +135,71 @@ class StreamConsumer:
             await self._flusher.flush(entries)
             await self._redis.xack(self._stream, self._group, *ids)
             logger.info("backlog_batch_processed", count=len(ids))
+
+    async def _reclaim_loop(self) -> None:
+        """주기적으로 고아 PEL 을 회수한다. 예외로 소비 루프를 죽이지 않는다."""
+        while True:
+            try:
+                await asyncio.sleep(self._claim_interval)
+                await self._reclaim_orphans()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("xautoclaim_loop_failed")
+
+    async def _reclaim_orphans(self) -> None:
+        """``XAUTOCLAIM`` 으로 다른 consumer 이름의 idle 메시지를 이 이름으로 가져와 처리.
+
+        ⚠️ 이것이 없으면 무슨 일이 나나. 워커는 RollingUpdate Deployment 라 파드 이름에
+           랜덤 접미사가 붙고, 그 이름이 consumer 이름이다. 배치를 읽은 뒤 flush 가
+           실패해(DB 페일오버 등) XACK 을 못 한 상태에서 파드가 롤되면, 새 파드는 **다른**
+           이름이라 그 PEL 을 볼 수 없다. 그 배치는 영구히 unacked 로 남고, cost:stream 은
+           MAXLEN~100_000 으로 트림되므로 결국 원본 entry 까지 사라진다 — 그 요청들의
+           usage_logs 행, budget_usages 차감, 일별 카운터가 모두 없다(즉 **과소청구**이며
+           복구 불가).
+
+        ⚠️ 살아 있는 형제 replica 의 진행 중 배치를 빼앗을 수 있다. 그래서 min_idle 을
+           크게 둔다(기본 5분). 그럼에도 겹치면, 배치 flusher 의 재처리 필터가 이중청구를
+           막는다 — 두 방어가 짝이다.
+        """
+        cursor = "0-0"
+        reclaimed = 0
+        while True:
+            try:
+                res = await self._redis.xautoclaim(
+                    name=self._stream,
+                    groupname=self._group,
+                    consumername=self._consumer,
+                    min_idle_time=self._claim_min_idle_ms,
+                    start_id=cursor,
+                    count=self._batch_max,
+                )
+            except ResponseError as e:
+                # XAUTOCLAIM 은 Redis/Valkey 6.2+ 다. 구버전이면 조용히 포기한다 —
+                # 여기서 죽으면 소비 자체가 멈춘다.
+                logger.warning("xautoclaim_unsupported", error=str(e)[:160])
+                return
+
+            cursor, msgs = _parse_xautoclaim(res)
+            if not msgs:
+                break
+
+            entries, ids = self._decode([(self._stream, msgs)])
+            if entries:
+                await self._flusher.flush(entries)
+            if ids:
+                await self._redis.xack(self._stream, self._group, *ids)
+                reclaimed += len(ids)
+            if cursor in ("0-0", "0", None):
+                break
+
+        if reclaimed:
+            logger.warning(
+                "orphan_pel_reclaimed",
+                count=reclaimed,
+                consumer=self._consumer,
+                min_idle_ms=self._claim_min_idle_ms,
+            )
 
     async def _consume_live(self) -> None:
         """신규 메시지 XREADGROUP(>) + batch 누적 + time/count 기준 flush."""
