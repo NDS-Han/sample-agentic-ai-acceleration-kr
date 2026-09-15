@@ -100,6 +100,8 @@ bash 13-bump-image-tags.sh dev --apply
 ```
 기대: 표 6행 모두 `<- change`(또는 `<- pin explicitly`) → `--apply` 후 `OK values updated` 와 바뀐 줄 목록. 백업 = `snapshots/<ts>-values-dev.yaml.bak`.
 
+📋 참고(동기화 담당자용): upstream 이 코드를 바꾸고도 태그를 안 올린 서비스는 13 이 "변경 없음" 으로 본다. 리베이스 뒤 서비스마다 `git log <이전 배포 base>..HEAD -- <서비스 디렉터리>` 로 코드 변경을 보고, 변경됐는데 템플릿 태그가 그대로면 **fork 템플릿(dev·prod)에서 새 태그를 매긴 뒤** ⑤ 를 돈다. 같은 태그로 rebuild 하면 helm 이 변화를 못 봐 롤아웃이 없고(옛 코드 계속 실행) 옛 이미지만 덮인다(2026-09-15: notification-worker·cost-recorder-worker 가 그 경우). upstream 이 태그 이후 한 번도 빌드하지 않은 커밋은 우리가 첫 실행이 되므로 ⑨ 의 기능 확인을 생략하지 않는다(같은 날 admin-ui 미들웨어 500 이 그렇게 잡혔다).
+
 ## ⑥ 이미지 6개 빌드·push — 15분
 
 ▶ 실행
@@ -142,9 +144,25 @@ admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthrop
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
-bash 04-verify.sh --base-url https://<gateway-domain> --vk <VK>
+GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
+bash 04-verify.sh --base-url $GW --vk <VK>
 ```
-기대: 14 `OK no failures` · 04 종단 200 + 비용 행. `<VK>` 는 [「VK 얻기」](../update-scripts/README.md#vk-얻기).
+기대: 14 `OK no failures` · 04 는 `HTTP 200` + 「C」 표에 새 행(비용 = 입력·출력 토큰 × Standard 단가 — 예: 491/10 토큰이면 0.002976). `<VK>` 만 손으로 넣는다 — 꺾쇠를 그대로 두면 bash 리다이렉션 오류가 난다.
+
+**VK 얻기** — EC2 에서 값 4줄을 뽑아 Mac 에 붙여 넣고 로그인한다. Cowork 도 이 로그인을 재사용한다.
+
+▶ 실행 · EC2
+```bash
+bash 07-client-values.sh
+```
+출력 끝의 `export OIDC_ISSUER_URL=…` `export OIDC_CLIENT_ID=…` `export ADMIN_API_URL=…` `export ANTHROPIC_BASE_URL=…` 4줄을 복사한다.
+
+▶ 실행 · Mac (`gateway-cli` 가 설치된 터미널, 위 4줄을 먼저 붙여 넣은 뒤)
+```bash
+gateway-cli login --redirect-port 8090
+api-key-helper 2>/dev/null | grep -m1 '^vk-'
+```
+브라우저에 Cognito 로그인 창 → `Login successful` → `vk-…` 한 줄이 `<VK>` 다. 8090 이 점유돼 있으면 `--redirect-port 8091`(US 풀 등록 포트 8090·8091). `gateway-cli login` 이 `Missing required OIDC config` 로 실패하면 4줄을 같은 터미널에 안 넣은 것. Cowork 가 `Credential helper exited with code 1` 이면 같은 로그인을 한 뒤 Cowork 를 Cmd+Q 로 껐다 켠다(`setup` 재실행 금지).
 
 | 확인 | 어떻게 | 기대 |
 |---|---|---|
@@ -251,6 +269,7 @@ bash 08-set-model-pricing.sh --apply
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
-bash 04-verify.sh --base-url https://gateway-prod.<도메인> --vk <VK>
+GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
+bash 04-verify.sh --base-url $GW --vk <VK>
 ```
-기대와 기능별 확인 표는 ⑨ 와 같다. 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
+기대·기능별 확인 표·VK 얻기는 ⑨ 와 같다(`07-client-values.sh` 는 prod EC2 에서). 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
