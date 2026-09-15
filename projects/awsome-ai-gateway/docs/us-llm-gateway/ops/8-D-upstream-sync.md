@@ -72,8 +72,9 @@ cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
 terraform init
 terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
 ```
-기대(2026-09 dev 실측 5건 — 이 안이면 통과): `external-secrets` helm_release in-place(upstream 이 웹훅·cert-controller 비활성 설정을 걷어냄) · IAM 정책 `bedrock` in-place(감사 로그 ARN) · IAM 정책 `admin-api` **replace**(description 이 바뀌어 재생성 — apply 하면 수 초 권한 공백) · 그 정책 연결 replace · Secrets Manager `db` 시크릿 버전 **replace**(`master_password` 키 제거, 비밀번호 값은 그대로 — 앱은 ② `15` 의 RDS 시크릿을 쓰므로 무관). `Plan:` 줄의 destroy 수는 이 replace 만큼 나온다.
-**멈추는 조건**: 이 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). **apply 는 하지 않는다** — 5건 모두 이번 배포에 필요 없고, 드리프트 해소는 배포 뒤 별도 창에서 결정한다(ESO 웹훅 재활성 여부 포함).
+기대(2026-09 dev 실측 4건 — 이 안이면 통과): IAM 정책 `bedrock` in-place(감사 로그 ARN) · IAM 정책 `admin-api` **replace**(description 이 바뀌어 재생성 — apply 하면 수 초 권한 공백) · 그 정책 연결 replace · Secrets Manager `db` 시크릿 버전 **replace**(`master_password` 키 제거, 비밀번호 값은 그대로 — 앱은 ② `15` 의 RDS 시크릿을 쓰므로 무관). `Plan:` 줄의 destroy 수는 이 replace 만큼 나온다.
+📋 참고: `external-secrets` helm_release 변경이 보이면 fork 의 ESO 설정(웹훅·cert-controller OFF, `modules/external-secrets/main.tf`)이 upstream 에 덮여 빠진 것이다 — 켜면 `install-eks.sh` 의 VWC 삭제와 맞물려 cert-controller 가 영구 0/1 이 된다(2026-08-14 실측). apply 하지 말고 그 3줄을 복원한다.
+**멈추는 조건**: 이 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). **apply 여부**: 4건 모두 이번 배포에 필요 없다. 지금 없애려면 `terraform apply`(2026-09-15 dev 는 이 시점에 apply 해 드리프트 0) — `admin-api` 정책 재생성 순간 VK 발급이 수 초 실패할 수 있으니 트래픽 없는 지금이 적기다. 미루면 다음 apply 때 같이 적용된다.
 
 ## ⑤ 이미지 태그 올림 — 새 코드는 새 태그로
 
