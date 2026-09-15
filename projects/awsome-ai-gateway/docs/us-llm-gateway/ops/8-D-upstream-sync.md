@@ -28,7 +28,7 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 ```
 기대: `values restored OK` · 마지막 줄에 `13-bump-image-tags.sh` `14-postdeploy-check.sh`. `RESTORE FAILED` 면 멈춘다(values 는 이 EC2 유일본).
 
-📋 참고: EC2 values 에 새로 넣을 키는 없다 — 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하고, 태그만 ⑤ 에서 바뀐다.
+📋 참고: 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하다. 단 **DB 마스터 비밀번호 참조 2줄**은 values 에 있어야 한다 — ② 의 `15` 가 확인·삽입한다. 태그는 ⑤ 에서.
 
 ## ② 사전 점검 — 읽기 전용, 15분
 
@@ -38,11 +38,13 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
+bash 15-set-master-secret-ref.sh
 ```
 기대:
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
 - `14` 는 지금 `XX` 3~4개(DB 가 아직 옛 마이그레이션 0025 에 있음 · 단가 · system_settings 표 없음)가 **정상**. 목적은 배포 전 숫자를 `snapshots/pre.numbers` 에 남기는 것.
 - `06` 은 `already matches`. 아니면 `--apply`([8-U 0단계](8-U-update.md)).
+- `15` 는 표 3행(masterPasswordRemoteKey · masterPasswordRemoteProperty · masterUser)에 `<- change` 없이 `OK … nothing to do`. 새 차트의 migration Job 은 init SQL·권한 부여를 **DB 마스터 사용자**로 실행하므로, values 가 그 비밀번호를 RDS 가 직접 로테이션하는 시크릿(`rds!cluster-<uuid>`)에서 가져오게 돼 있어야 한다(`database.external.masterPasswordRemoteKey`·`…RemoteProperty`). `<- change` 가 있으면 `bash 15-set-master-secret-ref.sh --apply`(백업 후 삽입, helm 렌더로 검증) — 없이 ⑦ 을 돌리면 migration Job 이 5분 타임아웃으로 죽는다.
 - 단가의 정본은 **파일 하나** — `docs/us-llm-gateway/update-scripts/pricing.tsv`(alias 별 입력·출력·캐시 단가, /1K, US `us.` Standard 티어). `14` 와 `08` 은 이 파일과 DB 를 비교한다. 다른 리전·티어로 청구받는 배포라면 **⑧ 전에** 이 파일을 자기 청구 단가로 고친다(`asof`·`source` 열 포함) — 그러면 `08` 은 "차이 없음", `14` 는 OK.
 
 ## ③ DB 스냅샷 — 되돌리기의 기준점
@@ -68,10 +70,10 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
 terraform init
-terraform plan | tail -25
+terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
 ```
-기대: `0 to destroy`. 나올 수 있는 변경 = `external-secrets` helm_release 갱신(upstream 이 웹훅·cert-controller 비활성 설정을 걷어냄) · IAM 정책 in-place.
-**멈추는 조건**: destroy/replace 가 1개라도 · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). apply 는 배포와 별개로 결정한다.
+기대(2026-09 dev 실측 5건 — 이 안이면 통과): `external-secrets` helm_release in-place(upstream 이 웹훅·cert-controller 비활성 설정을 걷어냄) · IAM 정책 `bedrock` in-place(감사 로그 ARN) · IAM 정책 `admin-api` **replace**(description 이 바뀌어 재생성 — apply 하면 수 초 권한 공백) · 그 정책 연결 replace · Secrets Manager `db` 시크릿 버전 **replace**(`master_password` 키 제거, 비밀번호 값은 그대로 — 앱은 ② `15` 의 RDS 시크릿을 쓰므로 무관). `Plan:` 줄의 destroy 수는 이 replace 만큼 나온다.
+**멈추는 조건**: 이 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). **apply 는 하지 않는다** — 5건 모두 이번 배포에 필요 없고, 드리프트 해소는 배포 뒤 별도 창에서 결정한다(ESO 웹훅 재활성 여부 포함).
 
 ## ⑤ 이미지 태그 올림 — 새 코드는 새 태그로
 
@@ -166,8 +168,9 @@ grep -n '^DEPLOY_ENV' config.env
 bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
+bash 15-set-master-secret-ref.sh
 ```
-기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches`.
+기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15` 는 `nothing to do`(아니면 `--apply`).
 
 **⑩-③ DB 스냅샷**
 ▶ 실행
@@ -186,7 +189,7 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
 terraform init
-terraform plan | tail -25
+terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
 ```
 기대·멈추는 조건은 ④ 와 같다.
 
