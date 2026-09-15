@@ -98,12 +98,14 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | --------------------------- | ------------------------------------------------------ | -------------------------- |
 | `00-preflight-check.sh`     | **없음** — 상태 조회·판정·스냅샷                                  | 없음                         |
 | `01-fix-cowork-routing.sh`  | `model.routing_profiles` 의 **행 1개**                    | 낮음. Claude Code 경로 무관      |
-| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경) | 낮음                         |
+| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경 · `--remap` 이면 기존 alias 의 provider_model_id 를 config 값으로 재매핑) | 낮음                         |
 | `03-create-cloudfront.sh`   | **CloudFront 배포 생성** + gateway Ingress 어노테이션           | ⚠️ 데이터플레인 접근 통제가 바뀝니다 (아래) |
 | `04-verify.sh`              | **없음** — 검증                                            | 없음                         |
 | `05-allow-client-ip.sh`     | Ingress `inbound-cidrs` 어노테이션                          | 낮음                         |
 | `06-persist-annotations.sh` | **helm values 파일** (`05-allow-client-ip.sh` 의 IP 허용목록을 영구화)               | 낮음. helm 을 돌리지 않음          |
 | `07-client-values.sh`       | **없음** — 직원에게 줄 env 4줄 출력                              | 없음                         |
+| `08-set-model-pricing.sh`   | `model_pricings` — 열린 단가 행 닫고 **새 행 추가** (`pricing.tsv` 기준, 과거 로그 불변) | 낮음. 새 호출부터 과금 단가 변경 |
+| `pricing.tsv`               | 단가 정본 (Standard 티어, /1K) — 값 바꿀 때 `asof`·`source` 도 갱신          | —                          |
 | `09-update-admin-ui.sh`     | admin-ui **이미지 빌드→ECR→롤아웃** + values 태그                | 낮음. 대시보드만. helm 을 돌리지 않음   |
 | `https-env.sh` (source)     | **없음** — US-06 용 값 12개 export (도메인만 입력)                | 없음                         |
 | `10-switch-https.sh`        | **helm values 파일** Ingress 블록 → 방식 B(https·인증서·host)     | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
@@ -114,6 +116,12 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 
 
 
+
+## 단가 갱신 (08)
+
+`08-set-model-pricing.sh` 는 `pricing.tsv` 의 값과 DB 의 **열린 단가 행**(`effective_until IS NULL`)을 비교해, 다른 alias 만 닫고 새 행을 넣는다(한 트랜잭션). 등록 안 된 alias 는 건너뛴다(`02` 로 등록). `--alias` 로 한 모델만, `--print-sql` 로 SQL 만 확인(AWS 불필요). 적용 후 검증 SELECT 로 열린 행 1개·값 일치를 확인하고, `snapshots/<ts>-08-pricing-rollback.sql` 에 이전 값을 다시 넣는 SQL 을 남긴다(행 삭제 없음).
+
+왜 Standard 티어인가 — `us.anthropic.*` 는 지리 CRIS 라 AWS 가 Global 보다 10% 높은 Standard 단가로 청구한다(Price List us-west-2 `*_standard` SKU + 891 Cost Explorer 실측). Global(`global.*`) 모델을 등록했다면 표에 그 값을 따로 넣는다.
 
 ### 공통 규약
 
@@ -138,6 +146,10 @@ bash 01-fix-cowork-routing.sh --apply
 
 bash 02-add-opus5-model.sh                 # 확인 (단가는 config.env 에 기입돼 있음)
 bash 02-add-opus5-model.sh --apply
+#   기본 시드로 alias 가 이미 있으면(global.* 로) --remap 을 붙인다 — dry-run 이 알려줌
+
+bash 08-set-model-pricing.sh               # 현재 vs pricing.tsv 차이 확인
+bash 08-set-model-pricing.sh --apply       # 5분 뒤 반영 (Redis model 캐시)
 
 bash 03-create-cloudfront.sh               # 설정 확인
 bash 03-create-cloudfront.sh --create

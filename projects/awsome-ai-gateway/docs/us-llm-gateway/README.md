@@ -49,11 +49,11 @@
 
 | ID (문서) | 무엇 | 등급 · 신규 설치 | 기존 배포가 할 일 |
 |---|---|---|---|
+| [**US-10**](update-scripts/README.md#단가-갱신-08) 2026/09 | 모델 단가 정정 — `us.` 지리 CRIS 는 Standard 티어(Global ×1.1) · Sonnet 5 9/1 인상 취소 반영 | 필수(청구 정합) · 신규 설치는 불필요(§4-2 (C) 가 Standard 단가를 심음) | `bash 08-set-model-pricing.sh` 로 차이 확인 → `--apply` (5분 캐시) · alias 가 global.* 이면 `02 --remap` |
 | [**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08 | Cowork Windows 설치기 — 관리자가 .exe 1개 빌드 → 직원 PC 설치(HKLM 정책) | 선택 · Cowork Windows 쓰면 권장(수동 설치 대체) · 게이트웨이 변경 없음 | 빌드 PC 에서 `feat/cowork-installer-import` clone → `07-client-values.sh` 값으로 `site-config.json` → `build.ps1` → 직원 PC 설치 + `setup` |
 | [**US-08**](ops/8-P-prod.md) 2026/08 | prod 스택 신설 — 별도 계정 · https + admin internal + VPN · Cowork Windows | 선택 · POC 이후 운영 전환 시 · `environment=prod` | dev 는 그대로 두고 prod 계정에 §1~§6 재실행(8-P 순서) |
 | [**US-07**](ops/8-I-admin-internal.md) 2026/08 | 고객사 최종 아키텍처 — admin ALB 2개를 internal 로 | 선택 · 전제 S2S VPN · POC 신규는 §3-6 시점에 values 주석 해제 · 운영(`US-08`)은 포함 | values 주석 2곳 해제 → helm(ALB 재생성) → admin SG·CNAME 교체 |
 | [**US-06**](ops/8-H-alb-https.md) 2026/08 | ALB HTTPS — 커스텀 도메인 + ACM | 선택 · POC 는 도메인 있을 때 · 운영(`US-08`)은 포함 | 도메인 확보 → 전환 → 클라이언트 URL 2개 교체 (30분) |
-| [**US-05**](ops/8-E-eks-upgrade.md) 2026/08 | EKS 1.31 → 1.34 | 필수(지원 만료·비용) · 신규 포함 | 1단계씩 3회 apply + 전 ns 재시작 |
 그 이전(`US-01` 최초 설치)과 항목별 이유·함정 → [updates.md](updates.md)
 
 ---

@@ -755,7 +755,7 @@ UPDATE model.model_aliases
  WHERE alias IN ('claude-opus-4-8','claude-haiku-4-5-20251001');
 --  ⚠️ Haiku 는 runtime ID 라 날짜접미사+버전(-20251001-v1:0) 이 붙는다. Opus/Sonnet 은 안 붙음.
 
--- (B) Sonnet 5 alias 신규 등록 (기본 시드에 없음) — native + US Geo
+-- (B) Sonnet 5 alias — 기본 시드가 global.* 로 넣어 두므로 US Geo 로 덮어쓴다(없으면 신규 등록) — native + US Geo
 INSERT INTO model.model_aliases
     (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
 VALUES
@@ -766,37 +766,55 @@ ON CONFLICT (alias) DO UPDATE
    SET provider='BEDROCK', provider_model_id='us.anthropic.claude-sonnet-5',
        endpoint_url=NULL, api_format='BEDROCK_NATIVE';
 
--- (C) Sonnet 5 요금(비용 기록용) — **Amazon Bedrock 단가**(US Geo=base, 프리미엄 없음).
---   ⚠️ 컬럼명은 실제 스키마 기준: cache_creation_5m/1h_price_per_1k_tokens · effective_from/effective_until
---      (옛 예시의 cache_write_.../effective_date 는 존재하지 않는 컬럼 → INSERT 실패했음).
---   ⚠️ 프로모: ~2026-08-31 $2/$10, 2026-09-01~ 표준 $3/$15 (per 1M input/output).
---      cost-recorder(router_service)가 effective_from<=now +(effective_until IS NULL OR >now) 로
---      시점별 단가를 고르므로, 두 행을 넣으면 9/1에 자동 전환된다.
---   캐시 단가 = Anthropic 공식 published Sonnet 5 값(Bedrock base 동일). 기간별 base×(1.25 / 2 / 0.1):
---      프로모 $2.50 / $4.00 / $0.20 · 표준 $3.75 / $6.00 / $0.30 per 1M (5m write / 1h write / read).
+-- (C) 3모델 단가 — Standard 티어 (2026-09-15 확인). us. 지리 프로파일은 AWS 가 Global 보다 10% 높게
+--     청구한다(Price List us-west-2 `*_standard` SKU · Cost Explorer 실측). 기본 시드가 Global 티어
+--     단가 행을 먼저 넣어 두므로 "열린 행을 닫고 → Standard 행 삽입" 순서다(과거 사용 기록은 재계산되지 않음).
+--   ⚠️ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10(Global), Standard $2.20/$11.
+--   값의 정본은 update-scripts/pricing.tsv. 바뀌면 `bash update-scripts/08-set-model-pricing.sh --print-sql`
+--   로 이 블록을 다시 뽑는다(이미 설치된 시스템은 US-10 = `08 --apply`).
+--   단가 /1M: Opus 5 $5.50/$27.50 · Sonnet 5 $2.20/$11 · Haiku 4.5 $1.10/$5.50 (아래는 /1K).
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-opus-5' AND effective_until IS NULL;
 INSERT INTO model.model_pricings
-    (id, model_alias, input_price_per_1k_tokens, output_price_per_1k_tokens,
-     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens, cache_read_price_per_1k_tokens,
-     effective_from, effective_until, created_by)
-SELECT * FROM (VALUES
-    -- 프로모 ($2/$10 in/out) + 캐시는 Sonnet 4.5 값, ~2026-08-31
-    (gen_random_uuid(), 'claude-sonnet-5',
-     0.002000, 0.010000, 0.003750, 0.006000, 0.000300,
-     '2026-06-30T00:00:00Z'::timestamptz, '2026-09-01T00:00:00Z'::timestamptz,
-     '00000000-0000-4000-a000-000000000010'::uuid),
-    -- 표준 ($3/$15), 2026-09-01~
-    (gen_random_uuid(), 'claude-sonnet-5',
-     0.003000, 0.015000, 0.003750, 0.006000, 0.000300,
-     '2026-09-01T00:00:00Z'::timestamptz, NULL::timestamptz,
-     '00000000-0000-4000-a000-000000000010'::uuid)
-) AS v
-WHERE NOT EXISTS (SELECT 1 FROM model.model_pricings WHERE model_alias='claude-sonnet-5');
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-opus-5',
+        0.005500, 0.027500, 0.006875, 0.011000, 0.000550,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-sonnet-5' AND effective_until IS NULL;
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-sonnet-5',
+        0.002200, 0.011000, 0.002750, 0.004400, 0.000220,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-haiku-4-5-20251001' AND effective_until IS NULL;
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-haiku-4-5-20251001',
+        0.001100, 0.005500, 0.001375, 0.002200, 0.000110,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
 
 -- (D) 이 배포의 3모델(§0) 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음(sonnet-5 가 있어야).
 --   시드는 alias 를 여럿 ACTIVE 로 깐다:
 --     · global.* 잔재: claude-sonnet-4-6 · claude-sonnet-4-6[1m] · claude-opus-4-7 ·
 --       global.anthropic.claude-opus-4-6-v1 · global.anthropic.claude-opus-4-8(= opus-4-8 중복)
 --     · out-of-scope Mantle/Codex: cowork-opus(anthropic.*, Mantle Tokyo) · codex-gpt(openai.gpt-5.5)
+--     · 기본 시드가 ACTIVE 로 더 깔아 두는 것(2026-09 기준): claude-opus-5 와 Claude 5 의 global.* 별칭(Global 라우팅),
+--       llama-3-70b, gpt-5.6-{sol,terra,luna} — 여기서 전부 INACTIVE 된다. Opus 5 는 뒤 절차
+--       (US-02 `02 --remap`)에서 US Geo 프로파일로 바꿔 다시 ACTIVE 로 만든다.
 --   전부 이 배포엔 없는 백엔드(전세계 라우팅 / Mantle 905·Tokyo / Codex us-east-2)라, ACTIVE 로
 --   두면 /v1/models 에 떠서 고르는 순간 실패한다(AccessDenied·라우팅 에러). 그래서 provider_model_id
 --   LIKE 'global.%' 만으로는 부족 — codex/cowork 는 다른 접두어라 안 걸린다. 3모델만 남긴다.
