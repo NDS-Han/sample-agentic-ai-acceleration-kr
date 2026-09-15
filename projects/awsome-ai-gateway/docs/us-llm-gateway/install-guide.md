@@ -771,7 +771,7 @@ ON CONFLICT (alias) DO UPDATE
 --     단가 행을 먼저 넣어 두므로 "열린 행을 닫고 → Standard 행 삽입" 순서다(과거 사용 기록은 재계산되지 않음).
 --   ⚠️ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10(Global), Standard $2.20/$11.
 --   값의 정본은 update-scripts/pricing.tsv. 바뀌면 `bash update-scripts/08-set-model-pricing.sh --print-sql`
---   로 이 블록을 다시 뽑는다(이미 설치된 시스템은 US-10 = `08 --apply`).
+--   로 이 블록을 다시 뽑는다(이미 설치된 시스템은 US-11 = `08 --apply`).
 --   단가 /1M: Opus 5 $5.50/$27.50 · Sonnet 5 $2.20/$11 · Haiku 4.5 $1.10/$5.50 (아래는 /1K).
 UPDATE model.model_pricings SET effective_until = now()
  WHERE model_alias = 'claude-opus-5' AND effective_until IS NULL;
