@@ -456,7 +456,11 @@ def test_both_flush_paths_filter_replays():
 def test_the_replay_filter_runs_before_the_additive_upsert():
     """순서가 뒤집히면 필터가 무의미하다 — 이미 더한 뒤에 걸러도 소용이 없다."""
     tree = _tree("batch_flusher.py")
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "flush")
+    fn = next(
+        n
+        for n in ast.walk(tree)
+        if isinstance(n, ast.AsyncFunctionDef) and n.name == "flush"
+    )
 
     def lines(name, attr=False):
         out = []

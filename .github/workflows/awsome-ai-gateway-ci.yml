@@ -396,8 +396,12 @@ jobs:
             # 헤더 외 신규 위반은 0 이다(UP045 2건은 `X | None` 로 맞춰 유입시키지 않았다).
             baseline: 481
           - service: cost-recorder-worker
-                        # +1: 신규 회귀 테스트 파일 1개의 저작권 헤더 E501(레포 전 파일 공통).
-            baseline: 22
+            # 21(기존) 위의 증분은 전부 신규 파일의 저작권 헤더 E501 이다 — 레포의 모든
+            # 파일이 갖는 100자 초과 한 줄이라 파일을 추가하면 필연적으로 +1 이고, 코드
+            # 품질 부채가 늘어난 것이 아니다.
+            #   +1  per-app 예산 행 회귀 테스트
+            #   +1  재처리/고아 PEL 회귀 테스트
+            baseline: 23
           - service: notification-worker
             baseline: 93
           - service: admin-chat-agent
