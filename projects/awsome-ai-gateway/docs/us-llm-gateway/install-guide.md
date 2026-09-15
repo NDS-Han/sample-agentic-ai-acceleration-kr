@@ -734,7 +734,7 @@ kubectl -n llm-gateway run psql --rm -it --restart=Never --pod-running-timeout=5
 
 
 
-### 4-2. 3모델 alias 를 US Geo 프로파일로 (Sonnet 5는 신규)
+### 4-2. 4모델 alias 를 US Geo 프로파일로 (Sonnet 5·Opus 5 는 시드 교정)
 
 > **한 줄**: 게이트웨이에 리전 접두어 **자동 교정기가 있는데도** 이 SQL 이 필요하다 — 교정기가 `apac.`→`us.` 는 고쳐주지만 `global.` **만은 일부러 통과시킨다**(`bedrock.py:60`, 주석: *"region-agnostic family … passed through unchanged"*). 
 
@@ -755,7 +755,7 @@ UPDATE model.model_aliases
  WHERE alias IN ('claude-opus-4-8','claude-haiku-4-5-20251001');
 --  ⚠️ Haiku 는 runtime ID 라 날짜접미사+버전(-20251001-v1:0) 이 붙는다. Opus/Sonnet 은 안 붙음.
 
--- (B) Sonnet 5 alias — 기본 시드가 global.* 로 넣어 두므로 US Geo 로 덮어쓴다(없으면 신규 등록) — native + US Geo
+-- (B) Sonnet 5 · Opus 5 alias — 기본 시드가 global.* 로 넣어 두므로 US Geo 로 덮어쓴다(없으면 신규 등록) — native + US Geo
 INSERT INTO model.model_aliases
     (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
 VALUES
@@ -765,8 +765,18 @@ VALUES
 ON CONFLICT (alias) DO UPDATE
    SET provider='BEDROCK', provider_model_id='us.anthropic.claude-sonnet-5',
        endpoint_url=NULL, api_format='BEDROCK_NATIVE';
+INSERT INTO model.model_aliases
+    (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
+VALUES
+    ('claude-opus-5', 'BEDROCK', 'us.anthropic.claude-opus-5', NULL, 'BEDROCK_NATIVE', 'ACTIVE',
+     'Claude Code -> bedrock-runtime US Geo Opus 5 (source us-west-2)',
+     '00000000-0000-4000-a000-000000000010')
+ON CONFLICT (alias) DO UPDATE
+   SET provider='BEDROCK', provider_model_id='us.anthropic.claude-opus-5',
+       endpoint_url=NULL, api_format='BEDROCK_NATIVE', status='ACTIVE';
 
--- (C) 3모델 단가 — Standard 티어 (2026-09-15 확인). us. 지리 프로파일은 AWS 가 Global 보다 10% 높게
+-- (C) 단가 — Opus 5 · Sonnet 5 · Haiku 4.5, Standard 티어 (2026-09-15 확인). Opus 4.8 은 시드 단가 유지(pricing.tsv 에 없음).
+--     us. 지리 프로파일은 AWS 가 Global 보다 10% 높게
 --     청구한다(Price List us-west-2 `*_standard` SKU · Cost Explorer 실측). 기본 시드가 Global 티어
 --     단가 행을 먼저 넣어 두므로 "열린 행을 닫고 → Standard 행 삽입" 순서다(과거 사용 기록은 재계산되지 않음).
 --   ⚠️ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10(Global), Standard $2.20/$11.
@@ -807,21 +817,21 @@ VALUES (gen_random_uuid(), 'claude-haiku-4-5-20251001',
         0.001100, 0.005500, 0.001375, 0.002200, 0.000110,
         now(), '00000000-0000-4000-a000-000000000010'::uuid);
 
--- (D) 이 배포의 3모델(§0) 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음(sonnet-5 가 있어야).
+-- (D) 이 배포의 4모델 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음(sonnet-5·opus-5 가 US Geo 여야).
 --   시드는 alias 를 여럿 ACTIVE 로 깐다:
 --     · global.* 잔재: claude-sonnet-4-6 · claude-sonnet-4-6[1m] · claude-opus-4-7 ·
 --       global.anthropic.claude-opus-4-6-v1 · global.anthropic.claude-opus-4-8(= opus-4-8 중복)
 --     · out-of-scope Mantle/Codex: cowork-opus(anthropic.*, Mantle Tokyo) · codex-gpt(openai.gpt-5.5)
---     · 기본 시드가 ACTIVE 로 더 깔아 두는 것(2026-09 기준): claude-opus-5 와 Claude 5 의 global.* 별칭(Global 라우팅),
---       llama-3-70b, gpt-5.6-{sol,terra,luna} — 여기서 전부 INACTIVE 된다. Opus 5 는 뒤 절차
---       (US-02 `02 --remap`)에서 US Geo 프로파일로 바꿔 다시 ACTIVE 로 만든다.
+--     · 기본 시드가 ACTIVE 로 더 깔아 두는 것(2026-09 기준): Claude 5 의 global.* full-ID 별칭
+--       (global.anthropic.claude-opus-5 / -sonnet-5, Global 라우팅) · llama-3-70b · gpt-5.6-{sol,terra,luna}
+--       — 여기서 전부 INACTIVE 된다(Opus 5 본 alias 는 (B) 가 US Geo 로 바꿔 남긴다).
 --   전부 이 배포엔 없는 백엔드(전세계 라우팅 / Mantle 905·Tokyo / Codex us-east-2)라, ACTIVE 로
 --   두면 /v1/models 에 떠서 고르는 순간 실패한다(AccessDenied·라우팅 에러). 그래서 provider_model_id
---   LIKE 'global.%' 만으로는 부족 — codex/cowork 는 다른 접두어라 안 걸린다. 3모델만 남긴다.
+--   LIKE 'global.%' 만으로는 부족 — codex/cowork 는 다른 접두어라 안 걸린다. 4모델만 남긴다.
 --   되돌리기: PATCH /admin/models/{alias}/status. INACTIVE 는 FK 안전(DELETE 아님).
 UPDATE model.model_aliases
    SET status = 'INACTIVE'
- WHERE alias NOT IN ('claude-opus-4-8','claude-sonnet-5','claude-haiku-4-5-20251001');
+ WHERE alias NOT IN ('claude-opus-4-8','claude-opus-5','claude-sonnet-5','claude-haiku-4-5-20251001');
 SQL
 ```
 
@@ -829,9 +839,9 @@ SQL
 
 
 
-### 4-3. claude-code 라우팅 region 을 us-west-2 로 (backend=invoke 유지)
+### 4-3. claude-code · cowork 라우팅을 이 계정(us-west-2)으로 (backend=invoke)
 
-> **한 줄**: 기본 시드는 claude-code 를 **다른 AWS 계정의 Bedrock 으로 보내도록**(cross-account) 설정해뒀다. 이 배포는 **단일 계정**이라 그 "다른 계정" 이 없으니, 그대로 두면 claude-code 요청이 전부 실패한다(없는 계정을 AssumeRole 시도 → 에러). `account_role_arn` 을 **비워(**`NULL`**)** 이 계정 안에서 직접 호출하게(**in-account** = 파드 자신의 IRSA 자격증명) 되돌린다.
+> **한 줄**: 기본 시드는 claude-code 를 **다른 AWS 계정의 Bedrock 으로 보내도록**(cross-account) 설정해뒀다. 이 배포는 **단일 계정**이라 그 "다른 계정" 이 없으니, 그대로 두면 claude-code 요청이 전부 실패한다(없는 계정을 AssumeRole 시도 → 에러). `account_role_arn` 을 **비워(**`NULL`**)** 이 계정 안에서 직접 호출하게(**in-account** = 파드 자신의 IRSA 자격증명) 되돌린다. **cowork 행도 같다** — 시드가 Mantle(없는 계정)로 보내고 `default_model` 로 사용자의 모델 선택을 덮어써, 그대로 두면 Cowork 전부 502·모델 고정이다(기존 배포는 US-02 `01` 이 같은 일을 한다).
 >
 > - `account_role_arn`·`external_id` = `NULL` → "다른 계정 assume" 을 끄고 이 계정에서 직접.
 > - `region = us-west-2` → 이 경로에선 안 쓰이지만(실제 리전은 파드의 `AWS_REGION`) 스키마가 `NOT NULL` 이라 채운다.
@@ -859,10 +869,22 @@ INSERT INTO model.routing_profiles (client, backend, account_role_arn, region, d
 SELECT 'claude-code','invoke',NULL,'us-west-2',NULL,NULL,true,true
 WHERE NOT EXISTS (SELECT 1 FROM model.routing_profiles WHERE client='claude-code');
 
+-- §4-3: cowork 라우팅 — 시드(Mantle · 없는 계정 · default_model 고정) → 이 계정에서 직접 호출 (기존 배포는 US-02 `01`)
+UPDATE model.routing_profiles
+   SET backend          = 'invoke',
+       account_role_arn = NULL,
+       external_id      = NULL,
+       region           = 'us-west-2',
+       default_model    = NULL           -- 값이 있으면 Cowork 가 고른 모델을 버리고 이 값으로 고정한다
+ WHERE client = 'cowork';
+INSERT INTO model.routing_profiles (client, backend, account_role_arn, region, default_model, external_id, enabled, web_search_enabled)
+SELECT 'cowork','invoke',NULL,'us-west-2',NULL,NULL,true,false
+WHERE NOT EXISTS (SELECT 1 FROM model.routing_profiles WHERE client='cowork');
+
 -- 검증 (결과가 안 보이면 SQL 미전달 = 무동작 성공 주의)
 SELECT alias, provider_model_id, status FROM model.model_aliases ORDER BY status, alias;
 SELECT client, backend, region, account_role_arn, external_id, web_search_enabled
-  FROM model.routing_profiles WHERE client = 'claude-code';
+  FROM model.routing_profiles WHERE client IN ('claude-code','cowork') ORDER BY client;
 SQL
 ```
 
@@ -878,7 +900,7 @@ kubectl -n llm-gateway run psql --rm -i --restart=Never --pod-running-timeout=5m
   --command -- psql -v ON_ERROR_STOP=1 --echo-all < ~/us-setup.sql
 ```
 
-> 실행 전 `wc -l ~/us-setup.sql` 로 수십 줄인지 확인(몇 줄이면 붙여넣다 잘린 것). 맨 끝 두 SELECT 결과 — ACTIVE 3개가 `us.anthropic.*`·나머지 INACTIVE, claude-code 의 `account_role_arn`·`external_id` 가 비어있으면(null) 성공.
+> 실행 전 `wc -l ~/us-setup.sql` 로 수십 줄인지 확인(몇 줄이면 붙여넣다 잘린 것). 맨 끝 두 SELECT 결과 — ACTIVE 4개가 `us.anthropic.*`·나머지 INACTIVE, claude-code·cowork 두 행의 `account_role_arn`·`external_id`·`default_model` 이 비어있으면(null) 성공.
 
 
 

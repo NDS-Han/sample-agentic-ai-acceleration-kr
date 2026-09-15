@@ -686,7 +686,7 @@ aws cognito-idp admin-list-groups-for-user --user-pool-id "$POOL_ID" --username 
 기대: 마지막 줄에 `ClaudeAdmin` + 팀 그룹. 이 이메일·비번이 3 절의 admin-ui 로그인과 6 절 클라이언트 `gateway-cli login` 계정이다.
 
 **② 모델 alias · claude-code 라우팅 SQL** (§4-2 · §4-3) — 세 단계: 접속 정보(prod) → SQL 파일 생성(§4 와 동일 내용, 여기 그대로) → 실행.
-무엇을 왜 바꾸는지(`global.`→`us.` Geo 프로파일 · Sonnet 5 신규 · 3모델 외 INACTIVE · claude-code 를 in-account 로)는 §4-2·§4-3 참고.
+무엇을 왜 바꾸는지(`global.`→`us.` Geo 프로파일 · Sonnet 5·Opus 5 시드 교정 · 4모델 외 INACTIVE · cowork 라우팅 · claude-code 를 in-account 로)는 §4-2·§4-3 참고.
 
 **②-a 접속 정보** (RDS Proxy 는 private subnet 전용이라 배포 EC2 에서 직접 못 붙고, 클러스터 안 임시 psql 파드로 간다):
 
@@ -725,7 +725,7 @@ UPDATE model.model_aliases
  WHERE alias IN ('claude-opus-4-8','claude-haiku-4-5-20251001');
 --  ⚠️ Haiku 는 runtime ID 라 날짜접미사+버전(-20251001-v1:0) 이 붙는다. Opus/Sonnet 은 안 붙음.
 
--- (B) Sonnet 5 alias 신규 등록 (기본 시드에 없음) — native + US Geo
+-- (B) Sonnet 5 · Opus 5 alias — 기본 시드가 global.* 로 넣어 두므로 US Geo 로 덮어쓴다(없으면 신규 등록) — native + US Geo
 INSERT INTO model.model_aliases
     (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
 VALUES
@@ -735,45 +735,73 @@ VALUES
 ON CONFLICT (alias) DO UPDATE
    SET provider='BEDROCK', provider_model_id='us.anthropic.claude-sonnet-5',
        endpoint_url=NULL, api_format='BEDROCK_NATIVE';
+INSERT INTO model.model_aliases
+    (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
+VALUES
+    ('claude-opus-5', 'BEDROCK', 'us.anthropic.claude-opus-5', NULL, 'BEDROCK_NATIVE', 'ACTIVE',
+     'Claude Code -> bedrock-runtime US Geo Opus 5 (source us-west-2)',
+     '00000000-0000-4000-a000-000000000010')
+ON CONFLICT (alias) DO UPDATE
+   SET provider='BEDROCK', provider_model_id='us.anthropic.claude-opus-5',
+       endpoint_url=NULL, api_format='BEDROCK_NATIVE', status='ACTIVE';
 
--- (C) Sonnet 5 요금(비용 기록용) — **Amazon Bedrock 단가**(US Geo=base, 프리미엄 없음).
---   ⚠️ 컬럼명은 실제 스키마 기준: cache_creation_5m/1h_price_per_1k_tokens · effective_from/effective_until
---      (옛 예시의 cache_write_.../effective_date 는 존재하지 않는 컬럼 → INSERT 실패했음).
---   ⚠️ 프로모: ~2026-08-31 $2/$10, 2026-09-01~ 표준 $3/$15 (per 1M input/output).
---      cost-recorder(router_service)가 effective_from<=now +(effective_until IS NULL OR >now) 로
---      시점별 단가를 고르므로, 두 행을 넣으면 9/1에 자동 전환된다.
---   캐시 단가 = Anthropic 공식 published Sonnet 5 값(Bedrock base 동일). 기간별 base×(1.25 / 2 / 0.1):
---      프로모 $2.50 / $4.00 / $0.20 · 표준 $3.75 / $6.00 / $0.30 per 1M (5m write / 1h write / read).
+-- (C) 단가 — Opus 5 · Sonnet 5 · Haiku 4.5, Standard 티어 (2026-09-15 확인). Opus 4.8 은 시드 단가 유지(pricing.tsv 에 없음).
+--     us. 지리 프로파일은 AWS 가 Global 보다 10% 높게
+--     청구한다(Price List us-west-2 `*_standard` SKU · Cost Explorer 실측). 기본 시드가 Global 티어
+--     단가 행을 먼저 넣어 두므로 "열린 행을 닫고 → Standard 행 삽입" 순서다(과거 사용 기록은 재계산되지 않음).
+--   ⚠️ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10(Global), Standard $2.20/$11.
+--   값의 정본은 update-scripts/pricing.tsv. 바뀌면 `bash update-scripts/08-set-model-pricing.sh --print-sql`
+--   로 이 블록을 다시 뽑는다(이미 설치된 시스템은 US-11 = `08 --apply`).
+--   단가 /1M: Opus 5 $5.50/$27.50 · Sonnet 5 $2.20/$11 · Haiku 4.5 $1.10/$5.50 (아래는 /1K).
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-opus-5' AND effective_until IS NULL;
 INSERT INTO model.model_pricings
-    (id, model_alias, input_price_per_1k_tokens, output_price_per_1k_tokens,
-     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens, cache_read_price_per_1k_tokens,
-     effective_from, effective_until, created_by)
-SELECT * FROM (VALUES
-    -- 프로모 ($2/$10 in/out) + 캐시는 Sonnet 4.5 값, ~2026-08-31
-    (gen_random_uuid(), 'claude-sonnet-5',
-     0.002000, 0.010000, 0.003750, 0.006000, 0.000300,
-     '2026-06-30T00:00:00Z'::timestamptz, '2026-09-01T00:00:00Z'::timestamptz,
-     '00000000-0000-4000-a000-000000000010'::uuid),
-    -- 표준 ($3/$15), 2026-09-01~
-    (gen_random_uuid(), 'claude-sonnet-5',
-     0.003000, 0.015000, 0.003750, 0.006000, 0.000300,
-     '2026-09-01T00:00:00Z'::timestamptz, NULL::timestamptz,
-     '00000000-0000-4000-a000-000000000010'::uuid)
-) AS v
-WHERE NOT EXISTS (SELECT 1 FROM model.model_pricings WHERE model_alias='claude-sonnet-5');
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-opus-5',
+        0.005500, 0.027500, 0.006875, 0.011000, 0.000550,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-sonnet-5' AND effective_until IS NULL;
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-sonnet-5',
+        0.002200, 0.011000, 0.002750, 0.004400, 0.000220,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
+UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-haiku-4-5-20251001' AND effective_until IS NULL;
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-haiku-4-5-20251001',
+        0.001100, 0.005500, 0.001375, 0.002200, 0.000110,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
 
--- (D) 이 배포의 3모델(§0) 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음(sonnet-5 가 있어야).
+-- (D) 이 배포의 4모델 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음(sonnet-5·opus-5 가 US Geo 여야).
 --   시드는 alias 를 여럿 ACTIVE 로 깐다:
 --     · global.* 잔재: claude-sonnet-4-6 · claude-sonnet-4-6[1m] · claude-opus-4-7 ·
 --       global.anthropic.claude-opus-4-6-v1 · global.anthropic.claude-opus-4-8(= opus-4-8 중복)
 --     · out-of-scope Mantle/Codex: cowork-opus(anthropic.*, Mantle Tokyo) · codex-gpt(openai.gpt-5.5)
+--     · 기본 시드가 ACTIVE 로 더 깔아 두는 것(2026-09 기준): Claude 5 의 global.* full-ID 별칭
+--       (global.anthropic.claude-opus-5 / -sonnet-5, Global 라우팅) · llama-3-70b · gpt-5.6-{sol,terra,luna}
+--       — 여기서 전부 INACTIVE 된다(Opus 5 본 alias 는 (B) 가 US Geo 로 바꿔 남긴다).
 --   전부 이 배포엔 없는 백엔드(전세계 라우팅 / Mantle 905·Tokyo / Codex us-east-2)라, ACTIVE 로
 --   두면 /v1/models 에 떠서 고르는 순간 실패한다(AccessDenied·라우팅 에러). 그래서 provider_model_id
---   LIKE 'global.%' 만으로는 부족 — codex/cowork 는 다른 접두어라 안 걸린다. 3모델만 남긴다.
+--   LIKE 'global.%' 만으로는 부족 — codex/cowork 는 다른 접두어라 안 걸린다. 4모델만 남긴다.
 --   되돌리기: PATCH /admin/models/{alias}/status. INACTIVE 는 FK 안전(DELETE 아님).
 UPDATE model.model_aliases
    SET status = 'INACTIVE'
- WHERE alias NOT IN ('claude-opus-4-8','claude-sonnet-5','claude-haiku-4-5-20251001');
+ WHERE alias NOT IN ('claude-opus-4-8','claude-opus-5','claude-sonnet-5','claude-haiku-4-5-20251001');
 SQL
 ```
 
@@ -795,10 +823,22 @@ INSERT INTO model.routing_profiles (client, backend, account_role_arn, region, d
 SELECT 'claude-code','invoke',NULL,'us-west-2',NULL,NULL,true,true
 WHERE NOT EXISTS (SELECT 1 FROM model.routing_profiles WHERE client='claude-code');
 
+-- §4-3: cowork 라우팅 — 시드(Mantle · 없는 계정 · default_model 고정) → 이 계정에서 직접 호출 (기존 배포는 US-02 `01`)
+UPDATE model.routing_profiles
+   SET backend          = 'invoke',
+       account_role_arn = NULL,
+       external_id      = NULL,
+       region           = 'us-west-2',
+       default_model    = NULL           -- 값이 있으면 Cowork 가 고른 모델을 버리고 이 값으로 고정한다
+ WHERE client = 'cowork';
+INSERT INTO model.routing_profiles (client, backend, account_role_arn, region, default_model, external_id, enabled, web_search_enabled)
+SELECT 'cowork','invoke',NULL,'us-west-2',NULL,NULL,true,false
+WHERE NOT EXISTS (SELECT 1 FROM model.routing_profiles WHERE client='cowork');
+
 -- 검증 (결과가 안 보이면 SQL 미전달 = 무동작 성공 주의)
 SELECT alias, provider_model_id, status FROM model.model_aliases ORDER BY status, alias;
 SELECT client, backend, region, account_role_arn, external_id, web_search_enabled
-  FROM model.routing_profiles WHERE client = 'claude-code';
+  FROM model.routing_profiles WHERE client IN ('claude-code','cowork') ORDER BY client;
 SQL
 ```
 
@@ -817,7 +857,7 @@ kubectl -n llm-gateway run psql --rm -i --restart=Never --pod-running-timeout=5m
   --command -- psql -v ON_ERROR_STOP=1 --echo-all < ~/us-setup.sql
 ```
 
-기대(맨 끝 SELECT 2개): ACTIVE alias 3개가 전부 `us.anthropic.*` · `claude-code` 행이 `invoke / us-west-2 / NULL / NULL / true`.
+기대(맨 끝 SELECT 2개): ACTIVE alias 4개가 전부 `us.anthropic.*` · `claude-code`·`cowork` 행이 `invoke / us-west-2 / NULL / NULL`(claude-code 는 web_search true).
 kubectl 컨텍스트가 prod 클러스터(2-6 ②)인지 먼저 확인: `kubectl config current-context`.
 
 **③ 서버측 web search** (§5-1 → §5-2) — prod 전용 AgentCore Gateway(us-east-1) 를 만들고 URL 을 values 에 넣어 재배포:
@@ -836,33 +876,7 @@ bash deployment/scripts/set-websearch-url.sh prod      # GW_NAME 기본값 = llm
 `deploy` 끝의 Gateway URL 이 `set-websearch-url.sh` 로 values 에 들어간다(손으로 옮기지 않음). dev 의 gateway 를 공유하지 않는 이유:
 teardown 단위를 계정·환경과 맞추기 위함(IRSA 는 계정 안 `gateway/*` 를 허용하므로 기술적으론 공유도 됨).
 
-**④ Cowork 라우팅** (US-02 `01`) — 시드가 Cowork 를 존재하지 않는 계정(Mantle)으로 보내므로 in-account 로 교정. `config.env` 의
-`COWORK_BACKEND="invoke"`, `COWORK_REGION=""`(빈 값 = 이 리전) 기본값 그대로:
-
-▶ **실행** · 배포 EC2
-
-```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
-bash 00-preflight-check.sh            # 읽기 전용 — 계정·ns·DB 시크릿·Ingress 가 prod 로 잡히는지
-bash 01-fix-cowork-routing.sh         # dry-run
-bash 01-fix-cowork-routing.sh --apply
-```
-
-**④-2 Opus 5 등록** (US-02 `02`, 상세 [8-M](8-M-models.md)) — 시드엔 Opus 4.8 까지라 Opus 5 는 등록해야 Claude Code·Cowork 에서 보인다.
-`config.env` 의 `MODEL_ALIAS="claude-opus-5"` · `MODEL_PROVIDER_ID="us.anthropic.claude-opus-5"`(US Geo, `us.` 접두 필수) · 단가 5종
-(`MODEL_PRICE_*`, `MODEL_PRICE_ASOF`) 기본값 그대로. **단가는 리전 기준**(②-b 의 💲·⚠️ 메모) — us-west-2 가 아니면 `config.env` 값부터 고친다.
-
-▶ **실행** · 배포 EC2
-
-```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
-grep -n '^MODEL_ALIAS\|^MODEL_PROVIDER_ID\|^MODEL_PRICE_' config.env     # alias · us. 접두 · 단가 5종 + ASOF 확인
-bash 02-add-opus5-model.sh            # dry-run: 등록될 내용 + 현재 ACTIVE 목록
-bash 02-add-opus5-model.sh --apply
-```
-
-기대: 마지막 Verification 에 `claude-opus-5 | us.anthropic.claude-opus-5 | ACTIVE | 0.005000 | 0.025000`. 반영은 ⑤ 캐시 5분 뒤.
-`00-preflight-check.sh` 가 `team_allowed_models has N rows` 로 경고하면(화이트리스트 모드) `--team-id <uuid>` 를 붙인다(8-M ⓐ).
+**④ Cowork 라우팅 · Opus 5** — ②-b 의 §4-2(Opus 5)·§4-3(cowork 행) 블록에 포함됐다. 별도 실행 없음(기존 배포의 US-02 `01`·`02` 와 같은 내용).
 
 **⑤ 캐시 5분** (§4-4) — DB 를 직접 고쳤으므로 gateway-proxy 의 Redis 캐시(TTL 300s)가 빠질 때까지 기다린다. 파드 재시작으로는
 안 지워진다(외부 ElastiCache). 급하면 §4-4 의 `redis-cli DEL` 블록을 prod 디렉터리로 바꿔 실행.
@@ -870,7 +884,7 @@ bash 02-add-opus5-model.sh --apply
 **⑥ 남은 것(2-9 VPN 후, 3 절)**: 첫 admin-ui 로그인 → 팀 예산(`/budgets`, 없으면 첫 요청이 `429`) → 앱별 웹서치 토글 확인(§5-3).
 
 **완료 기준**: ①의 그룹 2개 · ②의 SELECT 기대값 · ③ `AGENTCORE_GATEWAY_URL` 이 values 에 있고 `install-eks.sh prod` `deployed` ·
-④ `01 … --apply` 성공 · ④-2 `claude-opus-5` ACTIVE + 단가 행.
+④ 는 ②의 SELECT 에 포함(cowork 행 · `claude-opus-5` ACTIVE).
 
 ### 2-9. Client VPN 스탠드인 (`client-vpn.sh`) — 고객사 S2S VPN 의 대체
 
