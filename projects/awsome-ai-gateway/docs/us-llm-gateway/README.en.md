@@ -29,14 +29,14 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 |---|---|---|
 | Account · sizing | one account · `environment=dev` (Aurora ×1 · Valkey ×1 · NAT ×1) | **separate account** · `environment=prod` (Aurora ×2 · Valkey 3 shards × 3 · NAT ×2) |
 | Entry point | http ALB + IP allow-list (mode A) | https domain (`US-06`) + both admin ALBs internal (`US-07`, requires a site-to-site VPN) |
-| Procedure | `US-01` — [install-guide.md](install-guide.md) §1–§6 | **`US-08`** — [ops/8-P-prod.md](ops/8-P-prod.md): the order and insertion points for running `US-01` §1–§6 in the prod account (dev stays as is) |
+| Procedure | `US-01` — [install-guide.md](install-guide.md) §1–§6 | **`US-08`** — the same install as `US-01`, done in the prod account by following [ops/8-P-prod.md](ops/8-P-prod.md), which tells you at which steps to add the prod settings (https · admin internal · VPN) (dev stays as is) |
 
 | Your setup | POC (dev) | Production (prod) |
 |---|---|---|
-| Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-01` + `US-08` (in the prod account, in 8-P order: https · admin internal · VPN inserted) |
-| Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-01` + `US-08` (https included, so no entry choice) |
+| Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` (the same install as `US-01`, in the prod account per 8-P — https · admin internal · VPN included) |
+| Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` (same; https included, so no entry choice) |
 
-- **Production (`US-08`)** — the same procedure as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing inserted from the start. `US-03·04·05` are included in every new install (POC and production).
+- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05` are included in every new install (POC and production).
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
