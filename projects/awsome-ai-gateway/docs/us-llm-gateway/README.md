@@ -14,7 +14,7 @@
 - 🔴 **코드** — fork 의 **`us/deploy-fixes`** 브랜치: https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr/tree/us/deploy-fixes/projects/awsome-ai-gateway (원본 [aws-samples](https://github.com/aws-samples/sample-agentic-ai-acceleration-kr) 에 아직 없는 배포·벤더 픽스 포함, `forked from aws-samples/…` 배너가 정상). upstream 위로 **리베이스**되어 해시가 바뀌므로 버전은 **`US-NN`** 으로 센다
 - **리전** — `us-west-2`(인프라) · 추론은 **US Geo**(`us.anthropic.*`, us-east-1/2·us-west-2 분산) · 리전 변경/US 밖 설치는 [install-overview §0](install-overview.md#0-이번-배포의-범위-확정)
 - **추론 백엔드** — `bedrock-runtime` + US Geo 추론 프로파일 (Mantle 아님)
-- **클라이언트 · 모델** — Claude Code(Mac·Windows·Linux) · Cowork · Opus 4.8 · Sonnet 5 · Haiku 4.5 · Opus 5 — POC 는 Cowork·Opus 5 를 `US-02` 로 추가, 운영(`US-08`)은 포함
+- **클라이언트 · 모델** — Claude Code(Mac·Windows·Linux) · Cowork · Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5 — 전부 `US-01` 에 포함, 운영(`US-08`)도 포함
 - **접속(입구)** — POC: http ALB + IP 허용목록(방식 A), 도메인이 있으면 https(`US-06`) · 운영(`US-08`): https 도메인 + admin ALB 2개 internal(S2S VPN)
 
 ---
@@ -31,15 +31,14 @@
 
 | 사용 구성 | POC (dev) | 운영 (prod) |
 |---|---|---|
-| Claude Code 만 (Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` |
-| Claude Code 만 + **Opus 5** | `US-01` + `US-02` 의 `02`(모델 등록) | `US-08` |
-| Claude Code + **Cowork** | `US-01` + `US-02` 전체 (`01` 라우팅 · `02` 모델 · `03` CloudFront) | `US-08` |
+| Claude Code 만 (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` |
+| Claude Code + **Cowork** | `US-01` + https 입구 하나(도메인 있으면 `US-06`, 없으면 `US-02` 의 `03` CloudFront) | `US-08` |
 
 - **운영(`US-08`)** — https(US-06) · admin internal(US-07) · Cowork 라우팅 · Opus 5 를 처음부터 포함. `US-03·04·05` 는 신규 설치에 포함(필수).
 - **POC(`US-01`)** 에만 해당:
   - **`US-06`(ALB HTTPS)** — Cowork 는 https 필수. 도메인 없으면 CloudFront(`03`), 있으면 US-06 — 둘 다는 불필요. 나중에 도메인이 생기면 [전환 절차](ops/8-H-alb-https.md).
   - **`US-07`(admin ALB internal)** — S2S VPN 이 있는 운영의 최종형이라 POC 엔 보통 불필요. 적용하려면 [전환 절차](ops/8-I-admin-internal.md) — VPN 없이 internal 로 두면 VK 발급이 막힌다. 운영은 VPN 이 전제([8-P §0](ops/8-P-prod.md#0-결론--전제)).
-  - ⚠️ **`US-02` 는 POC 신규 설치에도 필요** — 마이그레이션이 Cowork 라우팅 행을 없는 계정으로 심어 그대로 두면 Cowork 전부 502. Claude Code 만 + 시드 모델이면 생략 가능.
+  - **`US-02` 는 기존 배포 전용** — 신규 설치는 §4-2(Opus 5)·§4-3(Cowork 라우팅)이 같은 내용을 포함한다. 신규에서 남는 것은 도메인 없이 Cowork 를 쓸 때의 `03` CloudFront 뿐.
 
 ---
 

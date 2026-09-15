@@ -27,7 +27,7 @@
 | Region | **us-west-2** (인프라·추론) — 추론은 US Geo라 us-east-1/us-east-2/us-west-2 분산                                       |
 | 클라이언트  | **Claude Code** (Mac, Windows, Linux)                                                                       |
 | 추론 백엔드 | `bedrock-runtime` **+ US Geo 추론 프로파일** (`us.anthropic.`*) — us-west-2 In-Region 미지원이라 Geo 사용. **Mantle 아님** |
-| 모델     | **Opus 4.8 · Sonnet 5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                               |
+| 모델     | **Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                               |
 | 핵심 기능  | **서버측 Web Search** (AgentCore 관리형 커넥터, **us-east-1 전용 → cross-region 호출**)                                  |
 | 보안(입구) | **IP 제한**(`inbound-cidrs`) · 도메인이 있으면 **HTTPS**(ACM, `US-06` [ops/8-H](ops/8-H-alb-https.md)) — 운영이면 강력 권장                    |
 

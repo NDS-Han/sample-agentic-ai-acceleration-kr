@@ -16,7 +16,7 @@ README 의 「최신 업데이트」는 최근 5개만 보여준다 — 여기�
 | [**US-05**](ops/8-E-eks-upgrade.md) 2026/08 | EKS 1.31 → 1.34 | 필수(지원 만료·비용) · 신규 포함 | 1단계씩 3회 apply + 전 ns 파드 재시작 |
 | [**US-04**](ops/8-N-vpc-endpoint.md) 2026/08 | Bedrock·STS 를 NAT 대신 VPC Endpoint 로 | 필수(컴플라이언스) · 신규 포함 | 엔드포인트 apply → gateway-proxy 재시작 |
 | [**US-03**](ops/8-U-update.md) 2026/08 | Admin UI 한/영 토글 | 필수(영문 지원) · 신규 포함 | admin-ui 이미지 재빌드 → install-eks |
-| [**US-02**](update-scripts/README.md#실행-순서) 2026/08 | Cowork 연결 + Opus 5 등록 | 항목별 — Cowork 쓰면 `01`·`03`, Opus 5 쓰면 `02` 필수 · 🔴 **신규도 해당** | 01 라우팅 · 02 모델(단가 필수) · 03 CloudFront(도메인 없을 때만) |
+| [**US-02**](update-scripts/README.md#실행-순서) 2026/08 | Cowork 연결 + Opus 5 등록 | 기존 배포 전용 — Cowork 쓰면 `01`·`03`, Opus 5 켜면 `02` · 신규 설치는 US-01 §4-2·§4-3 에 포함(`03` 은 도메인 없을 때만) | 01 라우팅 · 02 모델(`--remap`) · 03 CloudFront(도메인 없을 때만) |
 | [**US-01**](install-overview.md) 2026/07 | 최초 설치 (기준선) | — | — |
 
 ## 왜 · 함정 (항목별)
@@ -30,5 +30,5 @@ README 의 「최신 업데이트」는 최근 5개만 보여준다 — 여기�
 - **US-05** — 1.31 은 표준 지원 종료로 연장 요금(클러스터당 월 ~$365) · 최종 종료(2026-11-26) 후 강제 자동 업그레이드. 마이너 1단계씩만(3회 apply), 단계마다 전 ns 파드 재시작(Fargate 는 파드=노드).
 - **US-04** — Bedrock·STS 호출이 NAT·퍼블릭 인터넷 대신 VPC 내부 PrivateLink 로. 엔드포인트 선언이 들어가기 전에 만든 VPC 만 대상(신규는 이미 포함) — Bedrock 은 계속 성공하니 아무도 안 알려준다. 적용 직후 gateway-proxy 재시작 필수(풀에 남은 죽은 소켓 → 연속 502 를 엔드포인트 탓으로 오진).
 - **US-03** — 관리 화면 i18n, 헤더 KO/EN 토글이 실제로 번역. admin-ui 이미지 재빌드가 필요.
-- **US-02** — 설치 마이그레이션이 Cowork 라우팅 행을 존재하지 않는 계정으로 심어 그대로 두면 Cowork 전부 502(`01`). `02` 모델 등록은 Claude Code 에서 Opus 5 를 쓸 때도 필요(설치 시드엔 Opus 5 없음) — 단가를 빼먹으면 비용 `$0` 기록·예산 우회. `03` CloudFront 는 도메인 없이 Cowork https 를 만들 때만(US-06 이면 불필요). Claude Code 만 + 시드 모델이면 전체 생략 가능.
+- **US-02** — 설치 마이그레이션이 Cowork 라우팅 행을 존재하지 않는 계정으로 심어 그대로 두면 Cowork 전부 502(`01`). `02` 는 Opus 5 를 켤 때 — 시드가 alias 를 global.* 로 넣어 두므로 `--remap` 으로 US Geo 로. 단가는 §4-2 (C)·`08` 이 심는다(빠지면 비용 `$0` 기록·예산 우회). `03` CloudFront 는 도메인 없이 Cowork https 를 만들 때만(US-06 이면 불필요). **신규 설치(US-01)는 §4-2·§4-3 이 01·02 를 포함**하므로 03 만 해당.
 - **US-01** — 단일 계정 · us-west-2 · Claude Code · US Geo 추론 기준선.

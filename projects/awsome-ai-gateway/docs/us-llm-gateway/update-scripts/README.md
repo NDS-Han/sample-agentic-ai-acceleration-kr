@@ -16,7 +16,7 @@
 
 ## 무엇을 해결하나
 
-Claude Code는 잘 되는데 Cowork만 안 되는 상태를 고칩니다. 원인은 셋입니다.
+Claude Code는 잘 되는데 Cowork만 안 되는 상태를 고칩니다(기존 배포 대상 — 신규 설치는 install-guide §4-2·§4-3 이 같은 내용을 포함). 원인은 셋입니다.
 
 ### ① Cowork 요청이 전부 실패합니다
 
@@ -146,7 +146,7 @@ bash 00-preflight-check.sh                 # 항상 먼저. 읽기 전용 (2~3�
 bash 01-fix-cowork-routing.sh              # 확인
 bash 01-fix-cowork-routing.sh --apply
 
-bash 02-add-opus5-model.sh                 # 확인 (단가는 config.env 에 기입돼 있음)
+bash 02-add-opus5-model.sh                 # 확인 — 기존 배포 전용(신규는 §4-2 에 포함)
 bash 02-add-opus5-model.sh --apply
 #   기본 시드로 alias 가 이미 있으면(global.* 로) --remap 을 붙인다 — dry-run 이 알려줌
 
