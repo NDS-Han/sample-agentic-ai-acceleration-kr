@@ -62,9 +62,7 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```
 기대: `"creating"` → wait 가 조용히 끝남(수 분) → 마지막 줄 `llm-gateway-dev-pre-sync-<날짜>  available`. 이 이름을 §롤백에서 쓴다.
 
-## ④ terraform — plan 까지만
-
-이번 배포는 `terraform apply` 가 **필요 없다**(`install-eks.sh` 가 새 output 을 읽지 않는다). plan 은 드리프트를 알기 위해서만.
+## ④ terraform — 드리프트 확인 후 apply
 
 ▶ 실행
 ```bash
@@ -72,9 +70,23 @@ cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
 terraform init
 terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
 ```
-기대(2026-09 dev 실측 4건 — 이 안이면 통과): IAM 정책 `bedrock` in-place(감사 로그 ARN) · IAM 정책 `admin-api` **replace**(description 이 바뀌어 재생성 — apply 하면 수 초 권한 공백) · 그 정책 연결 replace · Secrets Manager `db` 시크릿 버전 **replace**(`master_password` 키 제거, 비밀번호 값은 그대로 — 앱은 ② `15` 의 RDS 시크릿을 쓰므로 무관). `Plan:` 줄의 destroy 수는 이 replace 만큼 나온다.
-📋 참고: `external-secrets` helm_release 변경이 보이면 fork 의 ESO 설정(웹훅·cert-controller OFF, `modules/external-secrets/main.tf`)이 upstream 에 덮여 빠진 것이다 — 켜면 `install-eks.sh` 의 VWC 삭제와 맞물려 cert-controller 가 영구 0/1 이 된다(2026-08-14 실측). apply 하지 말고 그 3줄을 복원한다.
-**멈추는 조건**: 이 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). **apply 여부**: 4건 모두 이번 배포에 필요 없다. 지금 없애려면 `terraform apply`(2026-09-15 dev 는 이 시점에 apply 해 드리프트 0) — `admin-api` 정책 재생성 순간 VK 발급이 수 초 실패할 수 있으니 트래픽 없는 지금이 적기다. 미루면 다음 apply 때 같이 적용된다.
+기대(2026-09 dev 실측): 아래 4줄 + `Plan: 3 to add, 1 to change, 3 to destroy.`
+```
+# module.aurora.aws_secretsmanager_secret_version.db[0] must be replaced
+# module.irsa.aws_iam_policy.admin_api must be replaced
+# module.irsa.aws_iam_policy.bedrock will be updated in-place
+# module.irsa.module.admin_api_irsa.aws_iam_role_policy_attachment.this["admin_api"] must be replaced
+```
+replace 3건은 파괴가 아니다 — 정책 description 변경·시크릿 JSON 에서 `master_password` 키 제거로 새로 만드는 것. 비밀번호 값은 그대로(앱은 ② `15` 의 RDS 시크릿을 쓴다).
+
+**멈추는 조건**: 위 4줄 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)) · `external-secrets` 줄 — fork 의 ESO OFF 설정이 upstream 에 덮인 것이다. 켜면 cert-controller 가 영구 0/1(2026-08-14 실측). apply 하지 말고 `modules/external-secrets/main.tf` 의 3줄을 복원한 뒤 다시 plan.
+
+▶ 실행 — 요약이 위와 같으면 `yes`
+```bash
+terraform apply
+terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
+```
+기대: `Apply complete! Resources: 3 added, 1 changed, 3 destroyed.` → `No changes.` apply 순간 admin-api 정책이 재생성돼 VK 발급이 수 초 실패할 수 있다(트래픽 없는 지금이 적기). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)).
 
 ## ⑤ 이미지 태그 올림 — 새 코드는 새 태그로
 
@@ -185,14 +197,16 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```
 기대: 마지막 줄 `llm-gateway-prod-pre-sync-<날짜>  available`.
 
-**⑩-④ terraform plan 까지만**
+**⑩-④ terraform — 확인 후 apply**
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
 terraform init
 terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
+terraform apply
+terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 ```
-기대·멈추는 조건은 ④ 와 같다.
+기대·멈추는 조건은 ④ 와 같다(4줄 → `yes` → `No changes.`).
 
 **⑩-⑤ 태그 올림**
 ▶ 실행
