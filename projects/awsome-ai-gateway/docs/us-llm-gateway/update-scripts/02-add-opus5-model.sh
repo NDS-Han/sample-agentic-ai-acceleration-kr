@@ -3,13 +3,20 @@
 # 02-add-opus5-model.sh
 #
 # WHAT: register the model alias from config.env plus its price row
-#       (existing models are left untouched)
+#       (existing models are left untouched — unless --remap, see below)
 # WHY:  the Bedrock model is already callable in the region, but the gateway
 #       has no alias for it, so no client can request it
 #       Values come from config.env: MODEL_ALIAS / MODEL_PROVIDER_ID /
 #       MODEL_DISPLAY_NAME / MODEL_DESCRIPTION
+#       --remap: upstream migration 0027 pre-registers claude-opus-5 /
+#       claude-sonnet-5 as global.anthropic.* (Global routing, Global prices).
+#       A plain INSERT ... ON CONFLICT DO NOTHING then changes nothing and the
+#       gateway keeps routing globally. --remap rewrites provider_model_id of
+#       an existing alias to MODEL_PROVIDER_ID (e.g. us.anthropic.*) and sets it
+#       ACTIVE. Prices are NOT touched here — run 08-set-model-pricing.sh.
 # UNDO: 99-rollback.sh — flips status to INACTIVE (never DELETE: several FKs
-#       reference model_aliases and none declare ON DELETE)
+#       reference model_aliases and none declare ON DELETE). For --remap the
+#       previous provider_model_id is written to snapshots/<ts>-02-remap-rollback.sql
 #
 # Usage:
 #   Fill MODEL_PRICE_* in config.env, then:
@@ -27,7 +34,7 @@ set -uo pipefail
 source "$(dirname "$(readlink -f "$0")")/_lib.sh"
 
 P_IN=""; P_OUT=""; P_C5M=""; P_C1H=""; P_CREAD=""
-TEAM_ID=""; APPLY=0
+TEAM_ID=""; APPLY=0; REMAP=0
 
 usage() {
   cat <<EOF
@@ -45,6 +52,11 @@ Prices (USD per 1K tokens) — required, from config.env or these flags
 
 Optional
   --team-id <uuid>   only when team_allowed_models is in whitelist mode
+  --remap            if the alias already exists with a different
+                     provider_model_id (upstream seeds claude-opus-5 as
+                     global.anthropic.*), rewrite it to MODEL_PROVIDER_ID and
+                     set ACTIVE. Without this flag an existing alias is left
+                     as is and the dry-run tells you so.
   --apply            actually apply (otherwise dry-run)
 
 Why prices are mandatory
@@ -67,6 +79,7 @@ while [ $# -gt 0 ]; do
     --cache-1h)   P_C1H="$2";   shift 2 ;;
     --cache-read) P_CREAD="$2"; shift 2 ;;
     --team-id)    TEAM_ID="$2"; shift 2 ;;
+    --remap)      REMAP=1;      shift ;;
     --apply)      APPLY=1;      shift ;;
     -h|--help)    usage; exit 0 ;;
     *) echo "Unknown argument: $1"; usage; exit 1 ;;
@@ -112,6 +125,34 @@ for pair in "input:$P_IN" "output:$P_OUT"; do
 done
 
 # ── SQL ─────────────────────────────────────────────────────────────────────
+# ── Current state of the alias ─────────────────────────────────────────
+# upstream migration 0027 seeds claude-opus-5 / claude-sonnet-5 as
+# global.anthropic.* — a plain INSERT ... ON CONFLICT would silently do nothing.
+CUR_MODEL_ID=""; CUR_STATUS=""; CUR_PRICE_ROWS=0
+cur=$(run_sql "\\pset format unaligned
+\\pset fieldsep '|'
+\\pset tuples_only on
+SELECT 'A', provider_model_id, status FROM model.model_aliases WHERE alias = '$ALIAS';
+SELECT 'P', count(*) FROM model.model_pricings WHERE model_alias = '$ALIAS';") \
+  || die "could not read the current state of $ALIAS (see output above)"
+while IFS='|' read -r tag f1 f2; do
+  case "$tag" in
+    A) CUR_MODEL_ID="$f1"; CUR_STATUS="$f2" ;;
+    P) CUR_PRICE_ROWS="$f1" ;;
+  esac
+done <<<"$cur"
+
+ALIAS_ACTION="INSERT"                       # INSERT | SAME | REMAP | EXISTS
+if [ -n "$CUR_MODEL_ID" ]; then
+  if [ "$CUR_MODEL_ID" = "$MODEL_ID" ] && [ "$CUR_STATUS" = "ACTIVE" ]; then
+    ALIAS_ACTION="SAME"
+  elif [ "$REMAP" -eq 1 ]; then
+    ALIAS_ACTION="REMAP"
+  else
+    ALIAS_ACTION="EXISTS"
+  fi
+fi
+
 # Shape follows the existing seed (db/init/03_seed_data.sql:97-111) and
 # migration 0004_add_opus_4_6.py:34-46.
 SQL_ALIAS="INSERT INTO model.model_aliases
@@ -120,6 +161,12 @@ SQL_ALIAS="INSERT INTO model.model_aliases
 VALUES ('$ALIAS', 'BEDROCK', '$MODEL_ID', NULL, 'BEDROCK_NATIVE', 'ACTIVE',
         '$DESCRIPTION', '$DISPLAY', '$SEED_ADMIN_UUID')
 ON CONFLICT (alias) DO NOTHING;"
+if [ "$ALIAS_ACTION" = "REMAP" ]; then
+  SQL_ALIAS="UPDATE model.model_aliases
+   SET provider_model_id = '$MODEL_ID', status = 'ACTIVE',
+       display_name = '$DISPLAY', description = '$DESCRIPTION'
+ WHERE alias = '$ALIAS';"
+fi
 
 # effective_from must be <= now(): a future-dated row behaves like no row.
 SQL_PRICE="INSERT INTO model.model_pricings
@@ -160,6 +207,19 @@ cat <<EOF
 EOF
 [ -n "$TEAM_ID" ] && echo "  team_allowed_models  allow row for team $TEAM_ID"
 
+hdr "Alias state in the DB"
+case "$ALIAS_ACTION" in
+  INSERT) note "$ALIAS is not registered — will INSERT" ;;
+  SAME)   ok "$ALIAS already maps to $MODEL_ID (ACTIVE) — alias row unchanged" ;;
+  REMAP)  warn "$ALIAS exists as $CUR_MODEL_ID ($CUR_STATUS) — will REMAP to $MODEL_ID and set ACTIVE" ;;
+  EXISTS) warn "$ALIAS exists as $CUR_MODEL_ID ($CUR_STATUS), not $MODEL_ID."
+          note "Nothing will be changed. Re-run with --remap to rewrite provider_model_id." ;;
+esac
+if [ "$CUR_PRICE_ROWS" -gt 0 ]; then
+  note "$ALIAS already has $CUR_PRICE_ROWS price row(s) — the price INSERT above is skipped."
+  note "Set prices with: bash 08-set-model-pricing.sh --alias $ALIAS"
+fi
+
 hdr "Currently ACTIVE models"
 run_sql "SELECT alias, provider_model_id FROM model.model_aliases
           WHERE status='ACTIVE' ORDER BY alias;"
@@ -168,18 +228,26 @@ if [ "$APPLY" -eq 0 ]; then
   cat <<EOF
 
   Nothing applied yet.
-  Apply:  bash $(basename "$0") ${TEAM_ID:+--team-id $TEAM_ID }--apply
+  Apply:  bash $(basename "$0") ${TEAM_ID:+--team-id $TEAM_ID }$( { [ "$ALIAS_ACTION" = EXISTS ] || [ "$ALIAS_ACTION" = REMAP ]; } && printf -- '--remap ' )--apply
 EOF
   exit 0
 fi
 
-confirm "Registering $ALIAS as ACTIVE. Existing models are not modified."
+[ "$ALIAS_ACTION" = "EXISTS" ] && die "$ALIAS already exists as $CUR_MODEL_ID — pass --remap to change it, or leave it."
+case "$ALIAS_ACTION" in
+  REMAP) confirm "Remapping $ALIAS: $CUR_MODEL_ID -> $MODEL_ID (status ACTIVE). Other models are not modified." ;;
+  *)     confirm "Registering $ALIAS as ACTIVE. Existing models are not modified." ;;
+esac
 
 hdr "Applying"
-run_sql "$SQL_ALIAS" || die "alias INSERT failed"
-ok "alias registered"
-run_sql "$SQL_PRICE" || die "pricing INSERT failed"
-ok "pricing registered"
+run_sql "$SQL_ALIAS" || die "alias $ALIAS_ACTION failed"
+ok "alias $ALIAS_ACTION done"
+if [ "$CUR_PRICE_ROWS" -gt 0 ]; then
+  note "price rows already exist for $ALIAS — pricing INSERT skipped (use 08-set-model-pricing.sh)"
+else
+  run_sql "$SQL_PRICE" || die "pricing INSERT failed"
+  ok "pricing registered"
+fi
 if [ -n "$SQL_TEAM" ]; then
   run_sql "$SQL_TEAM" || die "team_allowed_models INSERT failed"
   ok "team allow row registered"
@@ -187,6 +255,12 @@ fi
 
 printf 'UPDATE model.model_aliases SET status='"'"'INACTIVE'"'"' WHERE alias='"'"'%s'"'"';\n' \
   "$ALIAS" > "$SNAP_DIR/${TS}-02-opus5-rollback.sql"
+if [ "$ALIAS_ACTION" = "REMAP" ]; then
+  printf "UPDATE model.model_aliases SET provider_model_id='%s', status='%s' WHERE alias='%s';\n" \
+    "$CUR_MODEL_ID" "$CUR_STATUS" "$ALIAS" > "$SNAP_DIR/${TS}-02-remap-rollback.sql"
+  note "remap rollback SQL written: $SNAP_DIR/${TS}-02-remap-rollback.sql"
+  note "model:$ALIAS is cached in Redis for 300s — the new mapping is live within 5 min"
+fi
 
 hdr "Verification"
 run_sql "SELECT a.alias, a.provider_model_id, a.status,
