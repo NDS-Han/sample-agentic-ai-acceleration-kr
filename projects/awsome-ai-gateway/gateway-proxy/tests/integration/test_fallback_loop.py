@@ -523,7 +523,18 @@ class TestFiveOhFourDoesNotTripCircuitBreaker:
 # ===========================================================================
 
 class TestHaikuThinkingStrip:
-    """When fallback candidate is claude-haiku-4-5, 'thinking' is stripped from body."""
+    """haiku 후보로 폴백할 때 `thinking` 이 **haiku 가 받는 형태로 정규화**되는지.
+
+    ⚠️ 이 클래스는 원래 "thinking 이 **제거**된다" 를 단정했다. 그것이 결함이었다:
+       haiku-4-5 는 `{"type":"enabled"}` 를 실제로 받아들인다(거부하는 것은 `adaptive`
+       쪽이다). 그래서 무조건 제거는 사용자에게 HTTP 200 을 주면서 extended thinking 만
+       조용히 없애는 동작이었다 — 실패가 아니라 **조용한 기능 상실**이라 아무도 눈치채지
+       못한다.
+
+       지금은 본문을 만드는 단일 지점(messages._build_candidate_body)이 계열에 맞게
+       변환한다: adaptive-only 계열은 enabled→adaptive, legacy 계열(haiku)은
+       adaptive→enabled. 이미 맞는 형태면 그대로 둔다.
+    """
 
     @pytest.mark.asyncio
     async def test_haiku_thinking_stripped(self):
@@ -572,9 +583,15 @@ class TestHaikuThinkingStrip:
             result = await run_fallback_loop(**kwargs)
 
         assert result.status == 200
-        # Second call (to haiku) must NOT have 'thinking' in the body
         assert len(received_bodies) == 2
-        assert "thinking" not in received_bodies[1]
+        # haiku 는 `enabled` 를 받아들인다 → 그대로 유지되어야 한다.
+        assert received_bodies[1].get("thinking") == {
+            "type": "enabled",
+            "budget_tokens": 1000,
+        }, (
+            f"haiku 후보의 thinking 이 바뀌었다: {received_bodies[1].get('thinking')!r} — "
+            "무조건 제거로 되돌아가면 사용자는 200 을 받으면서 thinking 만 잃는다"
+        )
 
 
 # ===========================================================================

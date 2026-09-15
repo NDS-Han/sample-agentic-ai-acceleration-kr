@@ -98,12 +98,40 @@ async def readiness_check(request: Request) -> JSONResponse:
             # pool introspection 실패는 readiness 를 떨어뜨릴 사유가 아님(관대).
             pool_info = {"error": "pool_introspection_failed"}
 
-    ready = level == DegradationLevel.HEALTHY and not pool_saturated
+    # ⚠️ Redis 단독 장애는 readiness 를 떨어뜨리지 **않는다.**
+    #
+    #    이전에는 `level == HEALTHY` 였다. 그런데 REDIS_DEGRADED 는 파드별 상태가 아니라
+    #    **플릿 전체가 동시에** 들어가는 상태다(같은 ElastiCache 를 본다). 그래서 primary
+    #    failover 나 AZ blip 으로 Redis 가 ~90초 끊기면 모든 replica 가 거의 동시에
+    #    503 을 내고, readinessProbe(failureThreshold 3 / period 10s)가 ~30초 안에 전
+    #    파드를 NotReady 로 만든다. target-type: ip 이므로 ALB 타깃 그룹이 **비게 되고**,
+    #    사용자는 장애 구간 + 복구 구간(SUCCESS_THRESHOLD 3 × 15s) 전체를 503 으로 받는다.
+    #    liveness 는 관대한 /health 라 파드는 재시작되지도 않는다 — 멀쩡한 파드가 아무도
+    #    닿을 수 없는 상태로 앉아 있는다.
+    #
+    #    그런데 이 코드베이스는 Redis 다운 연속성에 이미 많이 투자돼 있다:
+    #      - 인메모리 USER/TEAM/GLOBAL 폴백 리미터 (middleware/rate_limit.py)
+    #      - 예산 DB 폴백 (budget_service._check_budget_db)
+    #      - 레이트리밋 서킷브레이커 + rl_fail_mode=open
+    #      - cost:stream 스풀
+    #    그 폴백들을 다 만들어 두고 정작 파드를 로드밸런서에서 빼면 전부 무의미하다.
+    #
+    #    대가(의도한 교환): Redis degrade 중에는 레이트리밋이 프로세스별 인메모리 카운터로
+    #    **근사** 집행되고 예산 검사가 DB 로 내려간다 — 즉 Redis 가 없을 때 DB 부하가 늘어난다.
+    #    한도가 근사해지는 것과 전면 503 중에서 전자를 고른다.
+    #
+    #    DB 계층은 여전히 readiness 를 떨어뜨린다: DB 가 없으면 폴백 자체가 성립하지 않는다.
+    _NOT_READY_LEVELS = (DegradationLevel.DB_DEGRADED, DegradationLevel.BOTH_DEGRADED)
+    ready = level not in _NOT_READY_LEVELS and not pool_saturated
     return JSONResponse(
         status_code=200 if ready else 503,
         content={
             "status": "ready" if ready else "not_ready",
             "degradation_level": level.value,
+            # ⚠️ 판정에서는 빠졌지만 본문에는 남긴다 — 운영자가 "왜 200 인데 한도가
+            #    근사인가" 를 이 필드로 알 수 있어야 한다.
+            "redis_degraded": level
+            in (DegradationLevel.REDIS_DEGRADED, DegradationLevel.BOTH_DEGRADED),
             "pool_saturated": pool_saturated,
             "pool": pool_info,
         },

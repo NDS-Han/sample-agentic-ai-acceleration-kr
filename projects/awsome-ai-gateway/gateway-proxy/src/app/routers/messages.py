@@ -40,6 +40,8 @@ from app.services.fallback_loop import (
 from app.services.fallback_resolver import make_same_provider
 from app.services.router_service import RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
+from app.services.thinking_normalizer import normalize_thinking
+from app.services.tool_filter import strip_unsupported_tools
 
 logger = structlog.get_logger(__name__)
 
@@ -99,6 +101,14 @@ _BEDROCK_ALLOWED_FIELDS = {
     "tools",
     "tool_choice",
     "thinking",
+    # ⚠️ adaptive 계열이 thinking 깊이를 제어하는 유일한 수단이다
+    #    (`output_config.effort`). 여기 없으면 클라이언트가 보내도 우리가 버려서, 정규화를
+    #    배선해도 깊이 제어가 동작하지 않는다.
+    #
+    # ⚠️ legacy 계열(haiku)은 이 필드를 받지 않는다. 그래서 이 필드를 허용하는 것은
+    #    `normalize_thinking` 이 legacy 계열에서 이것을 **무조건 떨구는** 것과 한 쌍이다
+    #    (thinking 형태와 무관하게). 그 두 변경 중 하나만 하면 haiku 가 400 을 내기 시작한다.
+    "output_config",
 }
 
 
@@ -335,7 +345,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     def _build_candidate_body(
         req_d: dict, cand_config: ModelConfigSchema, streaming: bool
     ) -> tuple[bytes, dict, dict]:
-        """Build invoke body + kwargs for a given candidate model_config."""
+        """Build invoke body + kwargs for a given candidate model_config.
+
+        ⚠️ 여기가 상류로 나가는 본문이 만들어지는 **단일 지점**이다 — 폴백 후보와 웹서치
+           턴이 모두 이 함수를 지난다. 그래서 모델별 본문 정규화도 여기서 한다.
+        """
         if is_mantle:
             mantle_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
             mantle_b.pop("anthropic_version", None)
@@ -344,6 +358,18 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 mantle_b["metadata"] = {"user_id": auth_context.sso_subject}
             if streaming:
                 mantle_b["stream"] = True
+            # ⚠️ Mantle 경로에서 Anthropic **네이티브** 도구 선언을 걷어낸다.
+            #    Cowork 가 `web_search_20250305` / `code_execution_*` / `text_editor_*` /
+            #    `computer_*` 를 선언하면 Mantle 은 "tool type is not supported for this
+            #    model" 로 400 을 준다. 클라이언트가 고칠 수 없는 거부라 게이트웨이가
+            #    걸러야 한다.
+            #
+            #    ⚠️ 우리가 주입하는 서버사이드 web_search 는 영향받지 않는다: 필터는
+            #       `type` 필드로 판정하는데 주입된 도구에는 그 필드가 없다.
+            mantle_b = strip_unsupported_tools(mantle_b, request_id=request_id)
+            mantle_b = normalize_thinking(
+                mantle_b, cand_config.provider_model_id, request_id=request_id
+            )
             return (
                 json.dumps(mantle_b).encode(),
                 {"profile": decision.profile, "endpoint": decision.endpoint},
@@ -354,6 +380,21 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             bedrock_b["anthropic_version"] = "bedrock-2023-05-31"
             if auth_context and auth_context.sso_subject:
                 bedrock_b["metadata"] = {"user_id": auth_context.sso_subject}
+            # ⚠️ `thinking` 의 형태를 **후보 모델이 받는 형태로** 맞춘다.
+            #
+            #    두 계열이 서로를 거부한다: opus-4-7/4-8/opus-5/sonnet-5/fable-5/mythos-5 는
+            #    `{"type":"adaptive"}` 만 받고, haiku-4-5 는 `{"type":"enabled"}` 만 받는다.
+            #    정규화가 없으면 MAX_THINKING_TOKENS>0 로 설정된 Claude Code 의 **모든**
+            #    요청이 opus-4-8 에서 400 이고, 400 은 폴백 대상이 아니라 그대로 사용자에게
+            #    간다. 반대 방향도 마찬가지다.
+            #
+            #    후보 **단위**로 하는 것이 핵심이다: 가용성 폴백과 예산 강등이 계열을 넘어
+            #    모델을 바꾸므로, 79% 예산에서 되던 요청이 80% 에서 400 이 되는 경로가
+            #    실재한다. 모르는 모델은 그대로 통과시킨다(fail-open).
+            bedrock_b = strip_unsupported_tools(bedrock_b, request_id=request_id)
+            bedrock_b = normalize_thinking(
+                bedrock_b, cand_config.provider_model_id, request_id=request_id
+            )
             return (
                 json.dumps(bedrock_b).encode(),
                 {"path_suffix": "invoke-with-response-stream"},
@@ -481,6 +522,23 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 )
             )
 
+        # KI-08 역산 훅 — 웹서치 경로 **전용**.
+        #
+        # ⚠️ 아래쪽 `_estimate` 를 재사용할 수 없다. 그것은 `call_model_id_final` /
+        #    `is_mantle` 에 의존하고 둘 다 폴백 루프 **뒤에** 계산되므로, 여기서 참조하면
+        #    UnboundLocalError 다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는
+        #    잡히지 않는다). 이 경로는 폴백을 타지 않으므로 model_config 가 곧 실제 모델이다.
+        _ws_tokenizer = getattr(request.app.state, "tokenizer", None)
+
+        async def _ws_estimate(text: str) -> int | None:
+            if not _ws_tokenizer:
+                return None
+            return await _ws_tokenizer.estimate_output_tokens(
+                text,
+                provider=model_config.provider,
+                model_id=model_config.provider_model_id,
+            )
+
         # 사전 게이팅 — 훅을 넘기면 루프가 SSE 전문을 누적한다.
         _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
 
@@ -499,6 +557,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             max_result_chars=_settings_ws.web_search_max_result_chars,
             max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
             handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+            tokenizer_hook=_ws_estimate,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )

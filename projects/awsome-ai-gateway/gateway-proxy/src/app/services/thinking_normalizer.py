@@ -63,10 +63,34 @@ def _family(provider_model_id: str | None) -> str | None:
     return None
 
 
+def _family_from_alias(alias: str | None) -> str | None:
+    """alias 문자열로 계열을 추정한다. ``provider_model_id`` 를 모르는 계층용.
+
+    ⚠️ 왜 필요한가: 예산 강등 미들웨어는 모델 **해석 전**에 동작하므로 alias 만 안다.
+       그 계층이 ``startswith("claude-haiku-4-5")`` 로 판정하고 있었는데, 운영자가 만든
+       alias(예: ``team-haiku-cheap``)는 그 접두사로 시작하지 않아 판정을 빠져나갔다 —
+       강등 대상이 haiku 인데 thinking 이 그대로 실려 400 이 됐다.
+
+    ⚠️ 접두사가 아니라 **부분 문자열**로 본다. alias 는 운영자가 자유롭게 짓는 이름이라
+       접두사 규약을 강제할 수 없다. 대가는 오탐 가능성이지만, 두 변환 모두 상류가
+       거부하는 형태를 받아들이는 형태로 바꾸는 것이라 오탐의 비용이 낮다.
+    """
+    if not alias:
+        return None
+    a = alias.lower()
+    if "haiku" in a:
+        return "legacy"
+    for token in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "fable-5", "mythos-5"):
+        if token in a:
+            return "adaptive"
+    return None
+
+
 def normalize_thinking(
     body: dict[str, Any],
     provider_model_id: str | None,
     *,
+    alias: str | None = None,
     request_id: str = "",
 ) -> dict[str, Any]:
     """Return `body` with `thinking` adjusted to what `provider_model_id` accepts.
@@ -83,9 +107,21 @@ def normalize_thinking(
         if t_type not in ("enabled", "adaptive"):
             return body
 
-        family = _family(provider_model_id)
+        family = _family(provider_model_id) or _family_from_alias(alias)
         if family is None:
             return body
+
+        # ⚠️ legacy 계열은 `output_config` 자체를 받지 않는다. `thinking` 이 이미
+        #    `enabled` 라 아래 변환이 필요 없는 경우에도 이건 떨궈야 한다 — 그러지 않으면
+        #    `output_config` 를 허용 필드에 넣은 순간 haiku 가 400 을 내기 시작한다.
+        if family == "legacy" and "output_config" in body:
+            body.pop("output_config", None)
+            logger.info(
+                "thinking_normalized",
+                request_id=request_id,
+                provider_model_id=provider_model_id,
+                direction="output_config_dropped_legacy_family",
+            )
 
         if family == "adaptive" and t_type == "enabled":
             new_thinking: dict[str, Any] = {"type": "adaptive"}
