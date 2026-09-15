@@ -136,7 +136,7 @@ for a in "${ALIASES[@]}"; do
      && [ "$(norm "$cr")" = "$(norm "${T_CREAD[$a]}")" ]; then
     ok "$a price = pricing.tsv ($ci / $co / $c5 / $c1 / $cr)"
   else
-    fail "$a price $ci / $co / $c5 / $c1 / $cr ≠ pricing.tsv — run 08-set-model-pricing.sh --apply"
+    fail "$a price $ci / $co / $c5 / $c1 / $cr ≠ price table $TSV — run 08-set-model-pricing.sh --apply; if the DB values are what AWS bills you, edit that file instead (asof/source too) and this turns OK"
   fi
 done
 
