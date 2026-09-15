@@ -55,8 +55,10 @@ SNAP=llm-gateway-dev-pre-sync-$(date +%Y%m%d)
 aws rds create-db-cluster-snapshot --db-cluster-identifier llm-gateway-dev \
   --db-cluster-snapshot-identifier $SNAP --query DBClusterSnapshot.Status
 aws rds wait db-cluster-snapshot-available --db-cluster-snapshot-identifier $SNAP
+aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
+  --query 'DBClusterSnapshots[0].[DBClusterSnapshotIdentifier,Status]' --output text
 ```
-기대: `"creating"` → wait 가 조용히 끝남(수 분).
+기대: `"creating"` → wait 가 조용히 끝남(수 분) → 마지막 줄 `llm-gateway-dev-pre-sync-<날짜>  available`. 이 이름을 §롤백에서 쓴다.
 
 ## ④ terraform — plan 까지만
 
@@ -174,7 +176,10 @@ SNAP=llm-gateway-prod-pre-sync-$(date +%Y%m%d)
 aws rds create-db-cluster-snapshot --db-cluster-identifier llm-gateway-prod \
   --db-cluster-snapshot-identifier $SNAP --query DBClusterSnapshot.Status
 aws rds wait db-cluster-snapshot-available --db-cluster-snapshot-identifier $SNAP
+aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
+  --query 'DBClusterSnapshots[0].[DBClusterSnapshotIdentifier,Status]' --output text
 ```
+기대: 마지막 줄 `llm-gateway-prod-pre-sync-<날짜>  available`.
 
 **⑩-④ terraform plan 까지만**
 ▶ 실행
