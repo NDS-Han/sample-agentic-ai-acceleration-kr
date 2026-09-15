@@ -16,6 +16,7 @@
 | ID | 절 | 언제 | 문서 |
 |---|---|---|---|
 | §8-U | 업데이트 (코드 변경 반영) | 코드·차트·terraform 이 바뀔 때마다 | [ops/8-U-update.md](ops/8-U-update.md) |
+| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
 | §8-M | 모델 추가와 교체 | 모델 추가·교체 | [ops/8-M-models.md](ops/8-M-models.md) |
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |
 | §8-S | 배포 후 보안 하드닝 (직원 오픈 전 필수) | 직원 오픈 전 1회 | [ops/8-S-hardening.md](ops/8-S-hardening.md) |
@@ -34,6 +35,13 @@
 
 `git pull` 후 바뀐 것에 따라 **A 서비스 코드 / B 차트·values / C terraform** 중 하나 → 공통 마지막 `install-eks.sh dev`. 0단계(저장소 갱신·values 백업) 를 건너뛰면 추론이 멈춘다.
 → **[ops/8-U-update.md](ops/8-U-update.md)**
+
+---
+
+### 8-D. upstream 동기화 배포 (코드·스키마·단가 일괄)
+
+upstream 을 통째로 들여온 뒤 배포 EC2 에서 명령만 위에서 아래로: 저장소 → 사전 점검 → DB 스냅샷 → plan → 태그 → 빌드 → install-eks → 단가 → 사후 점검.
+→ **[ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md)**
 
 ---
 

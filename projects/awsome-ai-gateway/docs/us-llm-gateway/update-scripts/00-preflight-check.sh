@@ -157,6 +157,30 @@ if [ -n "$GW_SG" ]; then
     --output text 2>/dev/null | sed 's/^/    /'
 fi
 
+# ── 4. Migration pre-check (before an upstream sync deploy — ops/8-D) ──────
+# Read-only. Of the four, only (a) makes the migration Job FAIL (0034's
+# lower(alias) unique index); the rest are informational or auto-cleaned.
+hdr "4. Migration pre-check"
+MIG_OUT=$(run_sql "\\pset format unaligned
+\\pset fieldsep '|'
+\\pset tuples_only on
+SELECT 'A', lower(alias), count(*) FROM model.model_aliases GROUP BY lower(alias) HAVING count(*) > 1;
+SELECT 'P', model_alias, count(*) FROM model.model_pricings WHERE effective_until IS NULL GROUP BY model_alias HAVING count(*) > 1;
+SELECT 'K', user_id, count(*) FROM auth.virtual_keys WHERE status = 'ACTIVE' GROUP BY user_id HAVING count(*) > 1;
+SELECT 'B', client, backend FROM model.routing_profiles WHERE backend NOT IN ('invoke','mantle','bedrock_openai');
+SELECT 'V', version_num FROM public.alembic_version;" 2>&1) || { echo "$MIG_OUT"; die "migration pre-check query failed"; }
+mig_a=$(printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="A"' | wc -l)
+mig_p=$(printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="P"' | wc -l)
+mig_k=$(printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="K"' | wc -l)
+mig_b=$(printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="B"' | wc -l)
+mig_v=$(printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="V"{print $2}' | head -1)
+note "alembic_version = ${mig_v:-?}"
+if [ "$mig_a" -eq 0 ]; then ok "no aliases differing only by case (0034 unique index will apply)"
+else bad "$mig_a alias group(s) differ only by case — migration 0034 will FAIL; rename/deactivate first:"; printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="A"{print "     "$2" x"$3}'; fi
+[ "$mig_p" -eq 0 ] && ok "one open price row per alias" || { warn "$mig_p alias(es) with 2+ open price rows — 0034 closes the older ones (values kept):"; printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="P"{print "     "$2" open="$3}'; }
+[ "$mig_k" -eq 0 ] && ok "one ACTIVE virtual key per user" || warn "$mig_k user(s) with 2+ ACTIVE keys — 0034 keeps the newest, older ones become EXPIRED (client re-issues on next call)"
+[ "$mig_b" -eq 0 ] && ok "routing_profiles.backend values are all allowed by 0032" || { bad "routing_profiles.backend outside invoke/mantle/bedrock_openai — 0032 CHECK will FAIL:"; printf '%s\n' "$MIG_OUT" | awk -F'|' '$1=="B"{print "     "$2": "$3}'; }
+
 # ── Snapshot ────────────────────────────────────────────────────────────────
 # 01/02 write their own rollback SQL at apply time; this is the "what did the
 # whole thing look like before we touched it" record.

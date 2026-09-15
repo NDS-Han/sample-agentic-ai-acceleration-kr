@@ -110,6 +110,8 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `https-env.sh` (source)     | **없음** — US-06 용 값 12개 export (도메인만 입력)                | 없음                         |
 | `10-switch-https.sh`        | **helm values 파일** Ingress 블록 → 방식 B(https·인증서·host)     | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
 | `11-route53-cname.sh`       | Route 53 hosted zone 에 **CNAME 3개**                       | 낮음. DNS 만                   |
+| `13-bump-image-tags.sh`     | **helm values 파일** image.tag 7개 → repo 템플릿 값 (백업 후, helm 렌더로 검증) | 낮음. helm 을 돌리지 않음 |
+| `14-postdeploy-check.sh`    | **없음** — 배포 후 검증 (스키마·단가·라우팅·시드 alias·파드·readiness) · 숫자 저장/비교 | 없음 |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |
@@ -136,7 +138,7 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 
 ## 실행 순서
 
-⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다.
+⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다. upstream 동기화 배포(13·14 포함)는 [ops/8-D](../ops/8-D-upstream-sync.md).
 
 ```bash
 bash 00-preflight-check.sh                 # 항상 먼저. 읽기 전용 (2~3분)
@@ -175,7 +177,7 @@ bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 
 | 스크립트                       | DB 조회 | 대략             |
 | -------------------------- | ----- | -------------- |
-| `00-preflight-check.sh`    | 3회    | 3~5분           |
+| `00-preflight-check.sh`    | 4회    | 4~7분           |
 | `01-fix-cowork-routing.sh` | 최대 3회 | 2~5분           |
 | `02-add-opus5-model.sh`    | 최대 5회 | 3~8분           |
 | `04-verify.sh`             | 2회    | 2~4분 + 종단 curl |

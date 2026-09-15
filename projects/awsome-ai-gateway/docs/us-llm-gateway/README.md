@@ -83,7 +83,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash status.sh
  다음 작업: bash 03-create-cloudfront.sh … / (수동) ops/8-N-vpc-endpoint.md …
 ```
 
-**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md).
+**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md). **upstream 대량 동기화**(코드·스키마·단가 일괄)는 [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md).
 
 ---
 
