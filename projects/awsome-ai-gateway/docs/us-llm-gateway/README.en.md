@@ -8,7 +8,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 > Synced with the Korean version through `US-09` (2026-08-29). **The linked procedure documents are Korean-only** (install guide, runbooks, update scripts) — this page tells you *what changed* and *whether this deployment has it*; the runbooks are for the operator who performs the change.
 
 **What you want to do**
-- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
+- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) drives [install-guide.md](install-guide.md) §1–§6 in the prod account — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
 - **Already installed — see the update state** — `bash status.sh` on the deployment EC2 → apply only the missing rows of [2. Latest updates](#2-latest-updates) below
 - **Set up employee PCs only** — [client-install.md](client-install.md) (Claude Code) · [cowork/…windows.md](cowork/manual/cowork-client-install-windows.md) · [cowork/…windows-auto.md](cowork/manual/cowork-client-install-windows-auto.md) (installer) · [cowork/…macos.md](cowork/cowork-client-install-macos.md) · [cowork/installer/…e2e-windows.md](cowork/installer/cowork-installer-admin-e2e-windows.md) (Windows installer, US-09)
 
@@ -29,14 +29,14 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 |---|---|---|
 | Account · sizing | one account · `environment=dev` (Aurora ×1 · Valkey ×1 · NAT ×1) | **separate account** · `environment=prod` (Aurora ×2 · Valkey 3 shards × 3 · NAT ×2) |
 | Entry point | http ALB + IP allow-list (mode A) | https domain (`US-06`) + both admin ALBs internal (`US-07`, requires a site-to-site VPN) |
-| Procedure | `US-01` — [install-guide.md](install-guide.md) §1–§6 | **`US-08`** — [ops/8-P-prod.md](ops/8-P-prod.md) (dev stays as is) |
+| Procedure | `US-01` — [install-guide.md](install-guide.md) §1–§6 | **`US-08`** — [ops/8-P-prod.md](ops/8-P-prod.md): the order and insertion points for running `US-01` §1–§6 in the prod account (dev stays as is) |
 
 | Your setup | POC (dev) | Production (prod) |
 |---|---|---|
-| Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` |
-| Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` |
+| Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-01` + `US-08` (in the prod account, in 8-P order: https · admin internal · VPN inserted) |
+| Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-01` + `US-08` (https included, so no entry choice) |
 
-- **Production (`US-08`)** — includes https (US-06) · admin internal (US-07) · Cowork routing · Opus 5 from the start. `US-03·04·05` are included in new installs (required).
+- **Production (`US-08`)** — the same procedure as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing inserted from the start. `US-03·04·05` are included in every new install (POC and production).
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
@@ -51,7 +51,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 | ID (doc) | What | Grade · new installs | Existing deployments do |
 |---|---|---|---|
 | [**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08 | Cowork Windows installer — admin builds one .exe → installs on employee PCs (HKLM policy) | Optional · recommended for Cowork on Windows (replaces manual setup) · no gateway change | on a build PC clone `feat/cowork-installer-import` → `site-config.json` from `07-client-values.sh` → `build.ps1` → install + `setup` on employee PCs |
-| [**US-08**](ops/8-P-prod.md) 2026/08 | New prod stack — separate account · https + admin internal + VPN · Cowork Windows | Optional · when moving from POC to production · `environment=prod` | leave dev as is; rerun §1–§6 in the prod account (8-P order) |
+| [**US-08**](ops/8-P-prod.md) 2026/08 | New prod stack — separate account · https + admin internal + VPN · Cowork Windows | Optional · when moving from POC to production · `environment=prod` | leave dev as is; rerun `US-01` §1–§6 in the prod account (8-P order) |
 | [**US-07**](ops/8-I-admin-internal.md) 2026/08 | Customer final architecture — both admin ALBs internal (private subnets) | Optional · requires site-to-site VPN · new POC installs: at §3-6 via values · production (`US-08`) includes it | uncomment 2 values blocks → helm (ALB recreation) → swap admin SG · CNAMEs |
 | [**US-06**](ops/8-H-alb-https.md) 2026/08 | ALB HTTPS — custom domain + ACM | Optional · POC with a domain · production (`US-08`) includes it | get a domain → switch → update 2 client URLs (30 min) |
 | [**US-05**](ops/8-E-eks-upgrade.md) 2026/08 | EKS 1.31 → 1.34 | Required (support expiry · cost) · included in new installs | apply one minor at a time ×3 + restart all ns |
