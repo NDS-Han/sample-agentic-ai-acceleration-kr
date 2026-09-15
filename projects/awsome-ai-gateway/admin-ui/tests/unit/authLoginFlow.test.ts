@@ -151,6 +151,23 @@ function expectRelativeRedirect(res: Response, path: string): void {
   expect(loc!.startsWith('//')).toBe(false);
 }
 
+/**
+ * middleware 만의 계약: Location 은 **요청의 Host + x-forwarded-proto 로 만든 절대 URL**
+ * 이다. Next.js 14.2 미들웨어 어댑터가 Location 을 `new NextURL()` 로 다시 해석하므로
+ * 상대 경로는 `Invalid URL` → 모든 페이지 500 (2026-09-15 실측). 라우트 핸들러는 그 어댑터를
+ * 안 타서 위 상대 계약을 유지한다. request.url(0.0.0.0) 이 아니라 헤더로 만든다는 점은
+ * login/callback 라우트의 redirect_uri 와 같다.
+ */
+function expectSameOriginRedirect(res: Response, origin: string, path: string): void {
+  const loc = res.headers.get('location');
+  expect(loc).not.toBeNull();
+  const url = new URL(loc!);
+  expect(url.origin).toBe(origin);
+  expect(url.pathname).toBe(path);
+  expect(url.search).toBe('');
+  expect(loc!.startsWith('//')).toBe(false);
+}
+
 describe('vacuity control — 하네스가 정말로 핸들러를 실행하는가', () => {
   it('loginGET 은 실제 Response 를 돌려주고, env 를 읽어 출력이 달라진다', async () => {
     // 이 테스트가 없으면 아래 모든 단정이 "핸들러가 아무것도 안 해도 통과"할 수 있다.
@@ -698,14 +715,14 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
   it('쿠키 없음 → /api/auth/login (dev-login 직행 금지)', async () => {
     const res = await middleware(req('http://admin.test/'));
     expect(res.status).toBe(307);
-    expectRelativeRedirect(res, '/api/auth/login');
-    expect(res.headers.get('location')).not.toBe('/api/auth/dev-login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
+    expect(res.headers.get('location')).not.toContain('/api/auth/dev-login');
   });
 
   it('만료된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
     const expired = `header.${b64({ sub: 'u', role: 'ADMIN', exp: Math.floor(Date.now() / 1000) - 60 })}.sig`;
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: expired } }));
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('admin_jwt=');
     expect(setCookie).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
@@ -713,7 +730,7 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
 
   it('손상된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: 'not-a-jwt' } }));
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
     expect(res.headers.get('set-cookie') ?? '').toContain('admin_jwt=');
   });
 
@@ -731,12 +748,15 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
     expect(res.headers.get('location')).toBeNull();
   });
 
-  it('호스트를 싣지 않고 쿼리도 버린다 (상대 Location)', async () => {
-    // 옛 계약("Host 유지")은 프록시 뒤에서 내부 호스트를 가리킬 수 있었다. 상대 경로면
-    // 그 실패 모드가 구조적으로 사라진다. 쿼리를 버리는 성질은 그대로 지킨다 —
+  it('요청의 Host·proto 로 절대 URL 을 만들고 쿼리는 버린다', async () => {
+    // 상대 Location 은 Next.js 14.2 미들웨어 어댑터에서 500 이 나므로 절대 URL 이어야
+    // 한다. 오리진은 request.url(컨테이너 안에서 0.0.0.0)이 아니라 Host + x-forwarded-proto
+    // (login/callback 라우트의 redirect_uri 와 같은 규칙). 쿼리를 버리는 성질은 그대로 —
     // 로그인 진입점에 원래 요청의 쿼리가 새어 들어갈 이유가 없다.
-    const res = await middleware(req('http://admin.internal:3000/budgets?q=secret'));
-    expectRelativeRedirect(res, '/api/auth/login');
+    const res = await middleware(
+      req('http://admin.internal:3000/budgets?q=secret', { headers: { 'x-forwarded-proto': 'https' } }),
+    );
+    expectSameOriginRedirect(res, 'https://admin.internal:3000', '/api/auth/login');
     expect(res.headers.get('location')).not.toContain('secret');
   });
 });
