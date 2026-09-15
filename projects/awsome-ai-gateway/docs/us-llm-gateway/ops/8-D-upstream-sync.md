@@ -43,6 +43,7 @@ bash 06-persist-annotations.sh
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
 - `14` 는 지금 `XX` 3~4개(DB 가 아직 옛 마이그레이션 0025 에 있음 · 단가 · system_settings 표 없음)가 **정상**. 목적은 배포 전 숫자를 `snapshots/pre.numbers` 에 남기는 것.
 - `06` 은 `already matches`. 아니면 `--apply`([8-U 0단계](8-U-update.md)).
+- 단가의 정본은 **파일 하나** — `docs/us-llm-gateway/update-scripts/pricing.tsv`(alias 별 입력·출력·캐시 단가, /1K, US `us.` Standard 티어). `14` 와 `08` 은 이 파일과 DB 를 비교한다. 다른 리전·티어로 청구받는 배포라면 **⑧ 전에** 이 파일을 자기 청구 단가로 고친다(`asof`·`source` 열 포함) — 그러면 `08` 은 "차이 없음", `14` 는 OK.
 
 ## ③ DB 스냅샷 — 되돌리기의 기준점
 
@@ -110,7 +111,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 08-set-model-pricing.sh
 bash 08-set-model-pricing.sh --apply
 ```
-기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)).
+기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)). 단가 표 = `update-scripts/pricing.tsv` 가 정본이다 — 청구 단가가 다르면 `--apply` 전에 이 파일부터 고친다(②).
 
 admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthropic.claude-opus-5`·`…-sonnet-5`·`gpt-5.6-*`·`llama-3-70b`)는 **INACTIVE** 로 — US 가 서비스하지 않는다. ⑨ 의 14 가 남은 것을 알려준다.
 
