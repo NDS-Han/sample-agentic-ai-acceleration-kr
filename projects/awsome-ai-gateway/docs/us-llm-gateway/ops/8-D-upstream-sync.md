@@ -114,9 +114,13 @@ for s in migration gateway-proxy admin-api admin-ui notification-worker \
 
 ▶ 실행
 ```bash
+cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
+terraform init | tail -3
+terraform output -json >/dev/null && echo "output OK"
 cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 ```
-기대: migration Job Completed → Deployment 6개 롤아웃 → `deployed`.
+기대: `output OK` → migration Job Completed → Deployment 6개 롤아웃 → `deployed`.
+- `terraform init` 을 다시 하는 이유: ① 의 `git reset --hard` 가 `.terraform.lock.hcl` 을 커밋본으로 되돌려, 그대로 두면 `install-eks.sh` 가 `terraform output 실패` 로 멈춘다(인프라·state 무관 — [8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)). init 은 lock 만 고쳐 쓴다.
 - 순서는 **migration 먼저, 롤아웃 나중**(pre-upgrade hook). 그 사이 수 분간 옛 파드가 모델 목록 조회에 실패할 수 있다(마이그레이션 0032 가 옛 코드가 모르는 provider 값을 심음) — **그 창에서 rollback 하지 않는다**. 새 파드 Ready 로 끝난다.
 - Job 실패: `kubectl -n llm-gateway logs job/llm-gateway-migration-<rev>`(`helm history` 최신 rev). 마이그레이션 0034 에서 죽었으면 ② 의 alias 대소문자 중복.
 
@@ -227,6 +231,9 @@ for s in migration gateway-proxy admin-api admin-ui notification-worker \
 **⑩-⑦ 배포**
 ▶ 실행
 ```bash
+cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
+terraform init | tail -3
+terraform output -json >/dev/null && echo "output OK"
 cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh prod
 ```
 
