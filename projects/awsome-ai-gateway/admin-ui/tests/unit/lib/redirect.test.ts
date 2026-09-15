@@ -118,6 +118,12 @@ describe('같은 오리진 리다이렉트는 모두 redirectRelative 를 쓴다
       // IdP authorize 로 나가는 리다이렉트는 **절대 URL 이어야** 한다(외부 오리진).
       expect(absolute).toHaveLength(1);
       expect(absolute[0]).toContain('authorizeUrl');
+    } else if (rel === 'src/middleware.ts') {
+      // middleware 는 예외: Next.js 14.2 어댑터가 Location 을 다시 파싱하므로 상대 경로면
+      // 500 이다. 대신 오리진을 request.url 이 아닌 헤더(externalOrigin)로 만든 절대 URL
+      // 하나만 허용한다.
+      expect(absolute).toHaveLength(1);
+      expect(absolute[0]).toContain('externalOrigin(');
     } else {
       expect(absolute).toEqual([]);
     }

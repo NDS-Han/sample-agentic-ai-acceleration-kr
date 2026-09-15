@@ -50,21 +50,22 @@ function requestWith(cookie?: string, pathname = '/'): NextRequest {
 //    OIDC authorize / dev 폼 / 읽히는 503 으로 갈라주는 단일 진입점 `/api/auth/login`
 //    으로 보낸다(src/app/api/auth/login/route.ts).
 /**
- * 같은 오리진 리다이렉트의 새 계약: Location 은 **상대 경로**다.
+ * 같은 오리진 리다이렉트의 계약: Location 은 **요청의 Host + x-forwarded-proto 로 만든
+ * 절대 URL** 이고 경로만 다르다.
  *
- * 왜 절대 URL 이 아니어야 하나: 컨테이너 안에서 request.url 은 0.0.0.0 으로 풀리고,
- * Host 헤더도 CloudFront→ALB 구성에서는 ALB 의 DNS 이름이 들어온다. 절대 URL 을 만들면
- * 로그인 직후 브라우저가 내부 호스트로 이동해 CloudFront 오리진을 잃는다(내부 호스트에는
- * dev-login 이 열려 있을 수 있어 UX 문제로 끝나지 않는다). 상대 Location 은 브라우저가
- * **자신이 요청한 URL** 기준으로 해석하므로 서버가 자기 외부 주소를 알 필요가 없다.
- *
- * 그래서 scheme/host 가 **없다는 것 자체**를 단정한다 — 절대 URL 로 되돌아가면 실패한다.
+ * 왜 상대 경로가 아닌가: Next.js 14.2 미들웨어 어댑터가 Location 을 `new NextURL()` 로
+ * 다시 해석해 상대 경로면 `Invalid URL` 로 500 이 난다(라우트 핸들러는 무관). 왜
+ * request.url 이 아닌가: 컨테이너 안에서 0.0.0.0 으로 풀린다. 그래서 login/callback
+ * 라우트와 같은 헤더 규칙을 쓴다 — 테스트 요청의 Host 는 admin.test, proto 는 http.
  */
-function expectRelativeRedirect(res: Response, path: string): void {
+function expectSameOriginRedirect(res: Response, path: string): void {
   const loc = res.headers.get('location');
-  expect(loc).toBe(path);
-  expect(loc).not.toMatch(/^https?:\/\//);
-  // `//host` 는 스킴 상대 URL 이라 외부로 나간다 — "/" 로 시작한다는 검사만으론 부족하다.
+  expect(loc).not.toBeNull();
+  const url = new URL(loc!);
+  expect(url.host).toBe('admin.test');
+  expect(url.protocol).toBe('http:');
+  expect(url.pathname).toBe(path);
+  // 절대 URL 이라도 `//host` 스킴 상대 형태로 새지 않는다.
   expect(loc!.startsWith('//')).toBe(false);
 }
 
@@ -73,7 +74,7 @@ describe('middleware — session expiry', () => {
     const res = await middleware(requestWith(tokenWithExp(-3600)));
 
     expect(res.status).toBe(307);
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, '/api/auth/login');
     // 못 쓰는 자격증명은 응답에서 제거돼야 한다.
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('admin_jwt=');
@@ -117,19 +118,19 @@ describe('middleware — session expiry', () => {
     // 전부 401' 이라는 원래 증상이 재현된다. 10초 남은 토큰은 이미 로그인으로 보내야 한다.
     const res = await middleware(requestWith(tokenWithExp(10)));
     expect(res.status).toBe(307);
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, '/api/auth/login');
   });
 
   it('still redirects when no cookie is present (and does not clear anything)', async () => {
     const res = await middleware(requestWith(undefined));
     expect(res.status).toBe(307);
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, '/api/auth/login');
   });
 
   it('redirects a malformed token to login and clears the cookie', async () => {
     const res = await middleware(requestWith('not-a-jwt'));
     expect(res.status).toBe(307);
-    expectRelativeRedirect(res, '/api/auth/login');
+    expectSameOriginRedirect(res, '/api/auth/login');
     expect(res.headers.get('set-cookie') ?? '').toContain('admin_jwt=');
   });
 

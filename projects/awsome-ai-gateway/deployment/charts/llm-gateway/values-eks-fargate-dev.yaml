@@ -383,7 +383,10 @@ adminUi:
     # 1.0.99-modelform: ModelCreateSchema 에서 max_tokens/context_window 를 제거 — 폼에
     #   입력란이 없고 백엔드·DB 에도 대응 필드가 없어 required 로 남으면 safeParse 가 항상
     #   실패, 모델 등록/편집이 100% 막히던 것 수정(브랜드 1.0.97·modelfix 1.0.98 포함).
-    tag: "1.0.99-modelform"
+    # 1.0.100-mwredirect: 미들웨어 로그인 리다이렉트가 상대 Location 이라 Next 14.2 어댑터에서
+    #   Invalid URL → 미인증·만료 요청이 오는 모든 페이지 500 (upstream b51fab0 를 처음 빌드한 결과).
+    #   요청 Host + x-forwarded-proto 로 절대 URL 을 만들도록 수정.
+    tag: "1.0.100-mwredirect"
   resources:
     requests:
       cpu: "500m"
