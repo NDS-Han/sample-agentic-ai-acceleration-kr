@@ -244,7 +244,8 @@ gatewayProxy:
     # 1.0.61→1.0.63-wstrace: 검색마다 흔적 한 줄(+상위 제목 2개·"결과 전문 제공됨" 안내, 모델이 모방한 흔적 줄은 필터)(🔎 [gateway web_search] …)을 응답 텍스트로 남김 → 클라이언트 도구 사이 다음 요청에서 모델이 "검색한 적 없다" 며 되풀이하던 루프 방지.
     # 1.0.64-toolchoice: 클라이언트가 web_search 를 tool_choice 로 강제하면(Cowork 내장 WebSearch 헬퍼) 첫 턴만 존중, 이후 auto, 최종 턴은 제거 → 400 루프 해소.
     # 1.0.65-wsopt: (A) 검색 결과 tool_result 에 cache_control 1개(뒤 턴 캐시 읽기, 4개 한도, WEB_SEARCH_CACHE_RESULTS=false 로 끔) (H) 결과 항목별 본문 1500자 트림(WEB_SEARCH_RESULT_TEXT_CHARS) (O) 턴당 검색 동시 실행 + 흔적 줄 간소화(WEB_SEARCH_TRACE_LANG=ko 옵션).
-    tag: "1.0.65-wsopt"
+    # 1.0.66-ffnote: 최종(도구 제거) 턴에서 thinking 만 남는 assistant 턴에 안내 문구, 마지막 user 메시지에 "이제 답하라" 지시 → Opus 5 가 `<br>` 만 내던 빈 답 방지.
+    tag: "1.0.66-ffnote"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
