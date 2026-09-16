@@ -53,7 +53,17 @@ GW_WEB_SEARCH_NAME = "web_search"
 _WEB_SEARCH_DESCRIPTION = (
     "Search the public web for current, factual, or recent information. Use this when "
     "the answer may depend on events, data, docs, or facts that are recent or external. "
-    "Returns titles, URLs, and snippets to cite."
+    "Returns titles, URLs, and snippets to cite. "
+    # 절제 지시 — 검색 결과는 다음 턴 입력으로 되돌아와 반복마다 다시 과금된다(2026-09-16 실측:
+    # 한 사실을 4번 병렬 검색한 호출 1건이 입력 132k 토큰). 게이트웨이는 결과 크기·턴당 검색 수도
+    # 상한으로 묶지만, 모델이 처음부터 적게 부르는 것이 가장 싸다.
+    "Prefer ONE focused query per fact; results are capped in size and count, so pick "
+    "the query carefully instead of issuing several. Do not search again for a fact you "
+    "already have unless the first result was empty or contradictory. "
+    # 흔적 줄 모방 금지 — 모델이 이력에서 본 흔적 형식을 따라 써서 검색 없이 "검색함" 을
+    # 주장했다(2026-09-16 실측, 요청 3건 중 1건). 출력 필터(_TraceLineFilter)가 2차 방어.
+    "The gateway itself appends a transcript line starting with '🔎 [gateway web_search]' "
+    "after each real search; never write such lines yourself — to search, call this tool."
 )
 
 # The loop passes the LOGICAL turn body (a dict: messages/input + tools + stream flag).
@@ -392,6 +402,72 @@ _TRACE_PREFIX = "🔎 [gateway web_search]"
 #: 있을 때 자기 검증 질문에 "폐기하라" 고 답함).
 _TRACE_NOTE = ("(full search results were shown to the assistant in this turn and used for "
                "the answer; only this trace is kept in the transcript)")
+#: 모델이 흔적을 **모방**한 줄을 걷어내기 위한 마커들(흔적 줄·안내 줄의 앞부분).
+_TRACE_MARKERS = (_TRACE_PREFIX, _TRACE_NOTE[:40])
+
+
+def _is_fake_trace_line(line: str) -> bool:
+    t = line.strip()
+    return bool(t) and any(t.startswith(m) for m in _TRACE_MARKERS)
+
+
+def _could_become_trace_line(partial: str) -> bool:
+    """True while a line-in-progress is still a prefix of (or starts with) a marker."""
+    t = partial.lstrip()
+    return any(m.startswith(t) or t.startswith(m) for m in _TRACE_MARKERS)
+
+
+class _TraceLineFilter:
+    """Drop MODEL-written lines that imitate our trace / note.
+
+    ⚠️ 2026-09-16 실측: 이력에 우리 흔적 줄이 보이자 모델이 검색 없이 같은 형식의 줄을 써서
+    "검색함" 을 주장했다(요청 3건 중 1건, usage_logs ws=0). 흔적은 게이트웨이만 쓴다 — 이
+    필터가 클라이언트로 나가는 텍스트에서 모방 줄을 걷어낸다. 스트리밍에서도 지연이 거의 없다:
+    줄 시작에서 아직 마커의 앞부분일 수 있는 조각만 붙들고, 마커와 갈라지는 순간 흘려보낸다.
+    """
+
+    def __init__(self) -> None:
+        self.pending = ""        # held line-start fragment (could still become a marker)
+        self.mid_line = False    # part of the current line was already emitted
+        self.dropped = ""        # everything removed (for the never-empty fallback)
+
+    def feed(self, text: str) -> str:
+        out: list[str] = []
+        buf = self.pending + text
+        self.pending = ""
+        while buf:
+            nl = buf.find("\n")
+            seg, buf = (buf, "") if nl < 0 else (buf[: nl + 1], buf[nl + 1:])
+            complete = seg.endswith("\n")
+            if self.mid_line:
+                out.append(seg)
+            elif complete:
+                if _is_fake_trace_line(seg):
+                    self.dropped += seg
+                else:
+                    out.append(seg)
+            elif _could_become_trace_line(seg):
+                self.pending = seg
+            else:
+                out.append(seg)
+                self.mid_line = True
+            if complete:
+                self.mid_line = False
+        return "".join(out)
+
+    def flush(self) -> str:
+        p, self.pending = self.pending, ""
+        self.mid_line = False
+        if p and _is_fake_trace_line(p):
+            self.dropped += p
+            return ""
+        return p
+
+
+def _strip_fake_trace_lines(text: str) -> str:
+    """Non-streaming twin of _TraceLineFilter."""
+    f = _TraceLineFilter()
+    return f.feed(text) + f.flush()
 
 
 def _trace_line(query: str, outcome: str) -> str:
@@ -551,6 +627,10 @@ async def _anthropic_stream(
             local_to_global: dict[int, int] = {}   # local block idx → emitted global idx
             suppressed: dict[int, dict] = {}        # local idx → {kind, buffer, block}
             text_buf: dict[int, str] = {}
+            #: 텍스트 블록은 걸러낸 첫 글자가 나올 때 start 를 내보낸다(모방 흔적만 있는 블록은
+            #: 아예 열지 않는다 — 빈 text 블록을 클라이언트가 되돌려 보내면 Bedrock 400).
+            text_filters: dict[int, _TraceLineFilter] = {}
+            text_start_ev: dict[int, dict] = {}
             thinking_buf: dict[int, dict] = {}
             pending_searches: list[dict] = []   # [{id, name, input}] — support MANY per turn (F-3)
             client_tool_present = False
@@ -606,12 +686,14 @@ async def _anthropic_stream(
                         # suppressing it from client output is safe. (F-thinking)
                         thinking_buf[idx] = {"kind": btype, "thinking": "", "signature": "",
                                              "data": block.get("data")}
+                    elif btype == "text":
+                        text_buf[idx] = ""
+                        text_filters[idx] = _TraceLineFilter()
+                        text_start_ev[idx] = ev          # emitted lazily (see text_filters)
                     else:
                         gi = global_index
                         global_index += 1
                         local_to_global[idx] = gi
-                        if btype == "text":
-                            text_buf[idx] = ""
                         ev2 = dict(ev); ev2["index"] = gi
                         open_global_blocks.add(gi)
                         yield _sse("content_block_start", ev2)
@@ -639,7 +721,24 @@ async def _anthropic_stream(
                             thinking_buf[idx]["signature"] += delta.get("signature", "") or ""
                         continue
                     if dtype == "text_delta" and idx in text_buf:
-                        text_buf[idx] += delta.get("text", "") or ""
+                        raw = delta.get("text", "") or ""
+                        text_buf[idx] += raw            # internal conversation keeps the original
+                        emit = text_filters[idx].feed(raw)
+                        if not emit:
+                            continue
+                        if idx not in local_to_global:   # first visible text → open the block now
+                            gi = global_index
+                            global_index += 1
+                            local_to_global[idx] = gi
+                            ev_start = dict(text_start_ev[idx])
+                            ev_start["index"] = gi
+                            open_global_blocks.add(gi)
+                            yield _sse("content_block_start", ev_start)
+                        gi = local_to_global[idx]
+                        yield _sse("content_block_delta",
+                                   {"type": "content_block_delta", "index": gi,
+                                    "delta": {"type": "text_delta", "text": emit}})
+                        continue
                     gi = local_to_global.get(idx, idx)
                     ev2 = dict(ev); ev2["index"] = gi
                     yield _sse("content_block_delta", ev2)
@@ -688,6 +787,22 @@ async def _anthropic_stream(
                         continue  # suppress from client
                     if idx in text_buf:
                         assistant_content.append({"type": "text", "text": text_buf[idx]})
+                        tail = text_filters[idx].flush()
+                        if tail and idx not in local_to_global:
+                            gi = global_index
+                            global_index += 1
+                            local_to_global[idx] = gi
+                            ev_start = dict(text_start_ev[idx])
+                            ev_start["index"] = gi
+                            open_global_blocks.add(gi)
+                            yield _sse("content_block_start", ev_start)
+                        if idx not in local_to_global:
+                            continue   # nothing visible survived — block never opened
+                        if tail:
+                            yield _sse("content_block_delta",
+                                       {"type": "content_block_delta",
+                                        "index": local_to_global[idx],
+                                        "delta": {"type": "text_delta", "text": tail}})
                     gi = local_to_global.get(idx, idx)
                     ev2 = dict(ev); ev2["index"] = gi
                     open_global_blocks.discard(gi)
@@ -774,6 +889,19 @@ async def _anthropic_stream(
                 #    압축이 도는 "Autocompact is thrashing" 의 원인(2026-09-16 US 실측).
                 #    청구는 on_usage(merged) 가 합계를 받으므로 그대로다. 캐시 버킷도 같은
                 #    턴 것으로 실어야 input_tokens 와 서로 모순되지 않는다.
+                if envelope_open and global_index == 0:
+                    # 필터 때문에 빈 응답이 되면 안 된다(클라이언트가 빈 content 를 되돌리면 400).
+                    dropped = "".join(f.dropped for f in text_filters.values())
+                    if dropped.strip():
+                        yield _sse("content_block_start",
+                                   {"type": "content_block_start", "index": 0,
+                                    "content_block": {"type": "text", "text": ""}})
+                        yield _sse("content_block_delta",
+                                   {"type": "content_block_delta", "index": 0,
+                                    "delta": {"type": "text_delta", "text": dropped}})
+                        yield _sse("content_block_stop",
+                                   {"type": "content_block_stop", "index": 0})
+                        global_index = 1
                 if envelope_open:
                     gauge = _client_prompt_usage(first_turn, merged)
                     yield _sse(
@@ -1006,6 +1134,18 @@ async def _anthropic_nonstream(
             b for b in final_body["content"]
             if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
         ]
+        # 모델이 모방한 흔적 줄 제거(_TraceLineFilter 참조). 전부 사라지면 원문을 둔다 — 빈
+        # content 는 다음 턴에 400 이다.
+        cleaned = []
+        for b in final_body["content"]:
+            if b.get("type") == "text":
+                t = _strip_fake_trace_lines(b.get("text") or "")
+                if not t.strip():
+                    continue
+                b = {**b, "text": t}
+            cleaned.append(b)
+        if cleaned or not final_body["content"]:
+            final_body["content"] = cleaned
         # 검색 흔적을 본문 맨 앞에 텍스트 블록으로(스트리밍 경로와 같은 계약, _TRACE_PREFIX).
         if traces:
             if any(" → failed" not in t and " → skipped" not in t for t in traces):

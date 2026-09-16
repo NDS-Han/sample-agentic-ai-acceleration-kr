@@ -241,8 +241,8 @@ gatewayProxy:
     #   비스트리밍 루프 2개도 force_final 에서 걷어낸다(2026-09-16 실측: 상한을 낮추자 Cowork 재시도 3회가 전부 400).
     # 1.0.59-outcfg: Cowork 의 output_config.format(구조화 출력)을 Bedrock 이 거부(400) → effort 만 남기고 걷어냄.
     # 1.0.60-ctxusage: 클라이언트 usage 의 입력·캐시 버킷을 검색 N턴 합계가 아니라 첫 턴 값으로 → Cowork 자동 압축 thrashing 해소(청구는 불변).
-    # 1.0.61→1.0.62-wstrace: 검색마다 흔적 한 줄(+상위 제목 2개·"결과 전문 제공됨" 안내)(🔎 [gateway web_search] …)을 응답 텍스트로 남김 → 클라이언트 도구 사이 다음 요청에서 모델이 "검색한 적 없다" 며 되풀이하던 루프 방지.
-    tag: "1.0.62-wstrace"
+    # 1.0.61→1.0.63-wstrace: 검색마다 흔적 한 줄(+상위 제목 2개·"결과 전문 제공됨" 안내, 모델이 모방한 흔적 줄은 필터)(🔎 [gateway web_search] …)을 응답 텍스트로 남김 → 클라이언트 도구 사이 다음 요청에서 모델이 "검색한 적 없다" 며 되풀이하던 루프 방지.
+    tag: "1.0.63-wstrace"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn

@@ -245,3 +245,106 @@ def test_trace_line_truncates_long_queries_and_hosts_are_deduped():
     n2, hosts2, titles2 = wsl._result_hosts(
         type("R", (), {"raw_text": '{"results":[{"t":1},{"t":2}]}'})())
     assert (n2, hosts2, titles2) == (2, [], [])
+
+
+# ─── 모델이 흔적을 모방한 줄은 걷어낸다 ────────────────────────────────────
+# 2026-09-16 실측: 이력에 우리 흔적이 보이자 모델이 검색 없이 같은 형식의 줄을 써서(usage_logs
+# ws=0) "검색함" 을 주장했다. 흔적은 게이트웨이만 쓴다.
+
+FAKE = f'{PREFIX} "fake query" → 5 results: x.com | 「x」'
+
+
+def _text_turn(chunks: list[str], stop: str = "end_turn") -> list[bytes]:
+    ev = [_raw({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+          _raw({"type": "content_block_start", "index": 0,
+                "content_block": {"type": "text", "text": ""}})]
+    ev += [_raw({"type": "content_block_delta", "index": 0,
+                 "delta": {"type": "text_delta", "text": c}}) for c in chunks]
+    ev += [_raw({"type": "content_block_stop", "index": 0}),
+           _raw({"type": "message_delta", "delta": {"stop_reason": stop},
+                 "usage": {"output_tokens": 3}}),
+           _raw({"type": "message_stop"})]
+    return ev
+
+
+def test_filter_drops_fake_lines_even_when_split_across_deltas():
+    f = wsl._TraceLineFilter()
+    got = "".join(f.feed(c) for c in ["검색하겠", "습니다.\n🔎 [gate", "way web_search] \"fa",
+                                       "ke\" → 5 results\n(full search results were shown to",
+                                       " the assistant …)\n실제 ", "답변"]) + f.flush()
+    assert got == "검색하겠습니다.\n실제 답변", repr(got)
+    assert "fake" in f.dropped
+
+
+def test_filter_lets_ordinary_lines_through_including_emoji_starts():
+    f = wsl._TraceLineFilter()
+    chunks = ["🔎 오늘", "의 검색 팁\n", "다음 줄 🔎 [gateway web_search] 인용\n"]
+    got = "".join(f.feed(c) for c in chunks) + f.flush()
+    assert got == "🔎 오늘의 검색 팁\n다음 줄 🔎 [gateway web_search] 인용\n", repr(got)
+    # 줄 시작이 마커와 갈라지는 순간 흘려보낸다 — 붙들려 있던 조각까지 순서대로
+    f2 = wsl._TraceLineFilter()
+    assert f2.feed("🔎 [gateway") == ""            # still could become the marker
+    assert f2.feed(" 아님") == "🔎 [gateway 아님"    # diverged → released in order
+    assert f2.flush() == ""
+
+
+async def test_stream_drops_a_fake_trace_the_model_wrote():
+    out = await _run_stream([_text_turn(["검색하겠습니다.\n", FAKE + "\n", "실제 답변"])], _Mcp())
+    events = _parse(out)
+    assert _texts(events) == ["검색하겠습니다.\n실제 답변"], _texts(events)
+    starts = [d["index"] for e, d in events if e == "content_block_start"]
+    stops = [d["index"] for e, d in events if e == "content_block_stop"]
+    assert starts == stops == [0], (starts, stops)
+
+
+async def test_stream_never_opens_a_block_that_was_only_a_fake_trace():
+    """모방 줄만 있는 텍스트 블록은 열리지 않고,
+    뒤따르는 클라이언트 도구 블록이 index 0 을 받는다."""
+    turn = [_raw({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+            _raw({"type": "content_block_start", "index": 0,
+                  "content_block": {"type": "text", "text": ""}}),
+            _raw({"type": "content_block_delta", "index": 0,
+                  "delta": {"type": "text_delta", "text": FAKE + "\n"}}),
+            _raw({"type": "content_block_stop", "index": 0}),
+            _raw({"type": "content_block_start", "index": 1,
+                  "content_block": {"type": "tool_use", "id": "c1", "name": "save_note",
+                                    "input": {}}}),
+            _raw({"type": "content_block_delta", "index": 1,
+                  "delta": {"type": "input_json_delta", "partial_json": "{}"}}),
+            _raw({"type": "content_block_stop", "index": 1}),
+            _raw({"type": "message_delta", "delta": {"stop_reason": "tool_use"},
+                  "usage": {"output_tokens": 3}}),
+            _raw({"type": "message_stop"})]
+    out = await _run_stream([turn], _Mcp())
+    events = _parse(out)
+    kinds = [(d["index"], d["content_block"]["type"])
+             for e, d in events if e == "content_block_start"]
+    assert kinds == [(0, "tool_use")], kinds
+    assert _texts(events) == []
+
+
+async def test_stream_keeps_the_text_if_filtering_would_empty_the_whole_response():
+    out = await _run_stream([_text_turn([FAKE])], _Mcp())
+    texts = _texts(_parse(out))
+    assert texts == [FAKE], "빈 응답 대신 원문을 돌려준다(클라이언트가 빈 content 를 되돌리면 400)"
+
+
+async def test_nonstream_strips_fake_lines_and_keeps_the_real_trace():
+    mcp = _Mcp(results=[{"url": "https://ir.amd.com/q2", "title": "t"}])
+    turn1 = {"stop_reason": "tool_use",
+             "content": [{"type": "tool_use", "id": "tu_1", "name": GW,
+                          "input": {"query": "AMD Q2 2026"}}],
+             "usage": {"input_tokens": 10, "output_tokens": 5}}
+    turn2 = {"stop_reason": "end_turn",
+             "content": [{"type": "text", "text": FAKE + "\n"},
+                         {"type": "text", "text": "머리말\n" + FAKE + "\n답변"}],
+             "usage": {"input_tokens": 40, "output_tokens": 3}}
+    body = await _run_nonstream([turn1, turn2], mcp)
+    texts = [b["text"] for b in body["content"]]
+    assert texts[0].startswith(f'{PREFIX} "AMD Q2 2026" → 1 results: ir.amd.com'), texts[0]
+    assert texts[1:] == ["머리말\n답변"], texts
+    # 모방 줄만 있는 응답은 원문 유지(빈 content 방지)
+    only_fake = {"stop_reason": "end_turn", "content": [{"type": "text", "text": FAKE}],
+                 "usage": {"input_tokens": 10, "output_tokens": 5}}
+    body2 = await _run_nonstream([only_fake], _Mcp())
+    assert [b["text"] for b in body2["content"]] == [FAKE]
