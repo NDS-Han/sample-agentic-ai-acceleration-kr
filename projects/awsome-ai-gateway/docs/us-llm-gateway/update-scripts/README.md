@@ -113,6 +113,7 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `13-bump-image-tags.sh`     | **helm values 파일** image.tag 7개 → repo 템플릿 값 (백업 후, helm 렌더로 검증) | 낮음. helm 을 돌리지 않음 |
 | `14-postdeploy-check.sh`    | **없음** — 배포 후 검증 (스키마·단가·라우팅·시드 alias·파드·readiness) · 숫자 저장/비교 | 없음 |
 | `15-set-master-secret-ref.sh` | **helm values 파일** `database.external` 의 마스터 비밀번호 참조 2줄(RDS 관리 시크릿 `rds!cluster-…`) — 없거나 다를 때만 교체·삽입, helm 렌더로 검증 | 낮음. helm 을 돌리지 않음 |
+| `16-usage-recent.sh`        | **없음** — 최근 N시간 요청별 토큰(in/out/cache/thinking)·web search 수·비용 + 합계 (`--hours` `--client` `--limit`) | 없음 |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |
