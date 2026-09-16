@@ -534,7 +534,7 @@ async def test_result_cap_is_applied_on_the_wire():
 async def test_a_truncated_search_still_counts_as_a_successful_search():
     """잘린 검색도 과금됐고 답변을 근거지었다 — ok 플래그를 뒤집으면 귀속이 어긋난다."""
     mcp = _Mcp(text="Z" * 5000)
-    text, ok = await wsl._do_search(mcp, {"query": "q"}, 5, 100)
+    text, ok, _trace = await wsl._do_search(mcp, {"query": "q"}, 5, 100)
     assert ok is True, "캡이 성공 플래그를 뒤집었다 — web_search_count 가 어긋난다"
     assert "truncated" in text.lower()
 
