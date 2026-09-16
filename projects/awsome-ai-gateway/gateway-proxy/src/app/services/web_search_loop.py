@@ -161,7 +161,26 @@ def _strip_anthropic_web_search_plumbing(
     우리 id 가 하나도 없으면 **입력 객체를 그대로 돌려준다**(사본도 만들지 않는다) — 검색이
     없었던 요청은 바이트 단위로 동일한 경로를 타야 한다.
     """
-    if not our_tool_use_ids:
+    # 이 요청이 실행한 검색의 id 에 더해, 이름이 web_search 인 tool_use 는 **전부** 우리 것으로
+    # 본다. 루프 안에서는 클라이언트가 그 이름의 도구를 선언하지 않은 것이 전제다(F-7: 선언했으면
+    # 루프 자체가 건너뛰어진다). 그러니 이력에 남은 그런 블록은 예전 턴에서 우리 배관이 클라이언트
+    # 쪽으로 새어 나갔다가 되돌아온 것뿐이다. 2026-09-16 US 실측: 그 누출 블록 하나 때문에
+    # force_final 턴이 Bedrock 400("Tool 'web_search' not found in provided tools") — 검색 N 회를
+    # 과금한 뒤 답이 없고, 클라이언트의 비스트리밍 재시도 3회가 전부 같은 400 이었다.
+    ids: set[str] = set(our_tool_use_ids)
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == GW_WEB_SEARCH_NAME
+                and block.get("id")
+            ):
+                ids.add(block["id"])
+    if not ids:
         return messages
 
     out: list = []
@@ -181,10 +200,10 @@ def _strip_anthropic_web_search_plumbing(
                 new_content.append(block)
                 continue
             btype = block.get("type")
-            if btype == "tool_use" and block.get("id") in our_tool_use_ids:
+            if btype == "tool_use" and block.get("id") in ids:
                 changed = True
                 continue  # 아래에서 비면 안내 텍스트로 채운다
-            if btype == "tool_result" and block.get("tool_use_id") in our_tool_use_ids:
+            if btype == "tool_result" and block.get("tool_use_id") in ids:
                 changed = True
                 raw = block.get("content")
                 if isinstance(raw, list):
@@ -219,7 +238,18 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
        API 는 뒤따르는 쌍이 없는 reasoning 항목을 거부하므로, 배관만 지우면 그 reasoning 이
        고아가 되어 다시 400 이 된다.
     """
-    if not our_call_ids:
+    # 이름이 web_search 인 function_call 은 전부 우리 것(누출분 포함)으로 본다 — 근거는
+    # _strip_anthropic_web_search_plumbing 의 같은 주석.
+    ids: set[str] = set(our_call_ids)
+    for item in input_items:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("name") == GW_WEB_SEARCH_NAME
+            and item.get("call_id")
+        ):
+            ids.add(item["call_id"])
+    if not ids:
         return input_items
 
     out: list = []
@@ -228,12 +258,12 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
             out.append(item)
             continue
         itype = item.get("type")
-        if itype == "function_call" and item.get("call_id") in our_call_ids:
+        if itype == "function_call" and item.get("call_id") in ids:
             # 직전 reasoning 항목이 이 호출에 딸린 것이면 함께 제거한다.
             if out and isinstance(out[-1], dict) and out[-1].get("type") == "reasoning":
                 out.pop()
             continue
-        if itype == "function_call_output" and item.get("call_id") in our_call_ids:
+        if itype == "function_call_output" and item.get("call_id") in ids:
             raw = item.get("output")
             text = raw if isinstance(raw, str) else json.dumps(raw)
             out.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
@@ -837,6 +867,7 @@ async def _anthropic_nonstream(
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
+    our_tool_use_ids: set[str] = set()
     final_status = 200
     final_body: dict = {}
 
@@ -845,7 +876,14 @@ async def _anthropic_nonstream(
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final)
             turn_body = dict(turn_body)
-            turn_body["messages"] = conversation
+            # ⚠️ force_final 턴은 tools 를 빼므로 대화의 우리 tool_use/tool_result(이력의 누출분
+            #    포함)를 텍스트로 바꿔야 한다 — 스트리밍 경로와 같은 이유. 이 줄이 없던 동안
+            #    비스트리밍 force_final 은 항상 400 이었다(2026-09-16 US 실측, Cowork 재시도 3회).
+            turn_body["messages"] = (
+                _strip_anthropic_web_search_plumbing(conversation, our_tool_use_ids)
+                if force_final
+                else conversation
+            )
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -865,6 +903,7 @@ async def _anthropic_nonstream(
                 and b.get("name") == GW_WEB_SEARCH_NAME
             ]
             client_calls = [b for b in content if _is_client_tool_use_block(b)]
+            our_tool_use_ids.update(c.get("id") for c in our_calls if c.get("id"))
 
             if force_final or not our_calls or client_calls:
                 break  # terminal — return this body
@@ -1345,6 +1384,7 @@ async def _responses_nonstream(
     conv_input: list = _normalize_responses_input(base_body)
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
+    our_call_ids: set[str] = set()
     final_status = 200
     final_body: dict = {}
 
@@ -1353,7 +1393,13 @@ async def _responses_nonstream(
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final)
             turn_body = dict(turn_body)
-            turn_body["input"] = conv_input
+            # force_final 턴은 tools 를 빼므로 우리 function_call/output(누출분 포함)을 걷어낸다
+            # — _anthropic_nonstream 의 같은 주석 참조.
+            turn_body["input"] = (
+                _strip_responses_web_search_items(conv_input, our_call_ids)
+                if force_final
+                else conv_input
+            )
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -1373,6 +1419,7 @@ async def _responses_nonstream(
                 and o.get("name") == GW_WEB_SEARCH_NAME
             ]
             client_calls = [o for o in output if _is_client_tool_call_item(o)]
+            our_call_ids.update(c.get("call_id") for c in our_calls if c.get("call_id"))
 
             if force_final or not our_calls or client_calls:
                 break
