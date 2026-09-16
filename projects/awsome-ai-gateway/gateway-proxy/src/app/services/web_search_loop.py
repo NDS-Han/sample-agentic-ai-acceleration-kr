@@ -34,6 +34,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 import structlog
 from fastapi import Request
@@ -379,12 +380,54 @@ def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
     return min(requested, max_per_turn)
 
 
+#: 클라이언트에게 남기는 검색 흔적 한 줄의 접두어. 우리 web_search tool_use/tool_result 는
+#: 클라이언트가 선언하지 않은 도구라 응답에서 걷어내는데, 그러면 클라이언트 도구(bash 등)를
+#: 사이에 둔 **다음 요청**에서 모델이 자기 이력에 검색 증거를 못 보고 "검색한 적 없다" 고
+#: 판단해 검색을 되풀이했다(2026-09-16 US Cowork 실측: 질문 하나에 요청 8건·검색 21회·$3.3,
+#: 최종 답변은 자백문). 텍스트 한 줄은 Bedrock 도 클라이언트도 그대로 받아들이고, 결과
+#: 본문(≤12k자)은 싣지 않는다. Anthropic 방식(server_tool_use 블록)은 upstream PR 후보.
+_TRACE_PREFIX = "🔎 [gateway web_search]"
+
+
+def _trace_line(query: str, outcome: str) -> str:
+    q = (query or "").strip().replace("\n", " ")
+    if len(q) > 80:
+        q = q[:77] + "…"
+    return f'{_TRACE_PREFIX} "{q}" → {outcome}'
+
+
+def _result_hosts(resp) -> tuple[int, list[str]]:
+    """(count, up to 3 distinct hosts) of a WebSearchResponse-like object; tolerant of fakes."""
+    items = getattr(resp, "results", None)
+    if items is None:
+        try:
+            data = json.loads(getattr(resp, "raw_text", "") or "")
+            items = data.get("results", data) if isinstance(data, dict) else data
+        except (ValueError, TypeError):
+            items = []
+    if not isinstance(items, list):
+        items = []
+    hosts: list[str] = []
+    for it in items:
+        url = it.get("url") if isinstance(it, dict) else getattr(it, "url", None)
+        host = urlparse(str(url or "")).netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        if host and host not in hosts:
+            hosts.append(host)
+        if len(hosts) >= 3:
+            break
+    return len(items), hosts
+
+
 async def _do_search(
     mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int,
     max_result_chars: int = 0,
-) -> tuple[str, bool]:
-    """Run one web search. Returns (result_text_for_model, ok). Never raises — on
-    failure returns an error string so the model can continue from its own knowledge.
+) -> tuple[str, bool, str]:
+    """Run one web search. Returns (result_text_for_model, ok, trace_line). Never raises —
+    on failure returns an error string so the model can continue from its own knowledge.
+    ``trace_line`` is the one-line evidence the loops leave in the CLIENT-facing output
+    (see _TRACE_PREFIX).
 
     캡을 **여기서** 적용한다 — 네 개 경로(anthropic/responses × 스트리밍/비스트리밍)가
     결과 텍스트를 얻는 유일한 지점이라, 여기 두면 넷이 갈라질 수 없다.
@@ -409,13 +452,17 @@ async def _do_search(
                 original_chars=len(resp.raw_text),
                 cap=max_result_chars,
             )
-        return text, True
+        n, hosts = _result_hosts(resp)
+        outcome = f"{n} results" + (": " + ", ".join(hosts) if hosts else "")
+        return text, True, _trace_line(query, outcome)
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
-        return json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False
+        return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
+                _trace_line(query, f"failed ({str(e)[:60]})"))
     except Exception as e:  # defensive — never kill the stream
         logger.exception("web_search.unexpected")
-        return json.dumps({"error": f"web search error: {str(e)[:160]}"}), False
+        return (json.dumps({"error": f"web search error: {str(e)[:160]}"}), False,
+                _trace_line(query, "failed"))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -745,8 +792,12 @@ async def _anthropic_stream(
                     "web_search.turn_fanout_capped",
                     requested=len(pending_searches), allowed=allowance,
                 )
+            traces: list[str] = []   # one line per search → client-visible evidence
             for i, ps in enumerate(pending_searches):
+                pin = ps.get("input") or {}
+                q = pin.get("query", "") if isinstance(pin, dict) else ""
                 if i >= allowance:
+                    traces.append(_trace_line(q, "skipped (per-turn limit)"))
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": ps["id"],
                          "content": json.dumps({
@@ -755,19 +806,34 @@ async def _anthropic_stream(
                          "is_error": True})
                     continue
                 if time.monotonic() > deadline:
+                    traces.append(_trace_line(q, "skipped (deadline)"))
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": ps["id"],
                          "content": "web search deadline exceeded", "is_error": True})
                     continue
-                result_text, ok = await _do_search(
+                result_text, ok, trace = await _do_search(
                     mcp_client, ps["input"], default_max_results, max_result_chars
                 )
+                traces.append(trace)
                 if ok:
                     searches_done += 1
                 tool_results.append(
                     {"type": "tool_result", "tool_use_id": ps["id"],
                      "content": result_text, **({"is_error": True} if not ok else {})}
                 )
+            # 검색 흔적을 클라이언트 봉투에 텍스트 블록 하나로 남긴다(근거: _TRACE_PREFIX 주석).
+            # 내부 대화에는 넣지 않는다 — 거기엔 진짜 tool_use/tool_result 가 있다.
+            if traces and envelope_open:
+                gi = global_index
+                global_index += 1
+                yield _sse("content_block_start",
+                           {"type": "content_block_start", "index": gi,
+                            "content_block": {"type": "text", "text": ""}})
+                yield _sse("content_block_delta",
+                           {"type": "content_block_delta", "index": gi,
+                            "delta": {"type": "text_delta",
+                                      "text": "\n" + "\n".join(traces) + "\n"}})
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
             conversation = conversation + [
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
@@ -823,6 +889,8 @@ async def _anthropic_nonstream(
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
+    our_tool_use_ids: set[str] = set()
+    traces: list[str] = []   # one line per search → client-visible evidence (_TRACE_PREFIX)
     final_status = 200
     final_body: dict = {}
 
@@ -864,7 +932,10 @@ async def _anthropic_nonstream(
                 logger.info("web_search.turn_fanout_capped",
                             requested=len(our_calls), allowed=allowance)
             for i, call in enumerate(our_calls):
+                cin = call.get("input") or {}
+                q = cin.get("query", "") if isinstance(cin, dict) else ""
                 if i >= allowance:
+                    traces.append(_trace_line(q, "skipped (per-turn limit)"))
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": call.get("id"),
                          "content": json.dumps({
@@ -873,13 +944,15 @@ async def _anthropic_nonstream(
                          "is_error": True})
                     continue
                 if time.monotonic() > deadline:
+                    traces.append(_trace_line(q, "skipped (deadline)"))
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": call.get("id"),
                          "content": "web search deadline exceeded", "is_error": True})
                     continue
-                result_text, ok = await _do_search(
-                    mcp_client, call.get("input") or {}, default_max_results, max_result_chars
+                result_text, ok, trace = await _do_search(
+                    mcp_client, cin, default_max_results, max_result_chars
                 )
+                traces.append(trace)
                 if ok:
                     searches_done += 1
                 tool_results.append(
@@ -919,6 +992,16 @@ async def _anthropic_nonstream(
             b for b in final_body["content"]
             if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
         ]
+        # 검색 흔적을 본문 맨 앞에 텍스트 블록으로(스트리밍 경로와 같은 계약, _TRACE_PREFIX).
+        if traces:
+            final_body["content"].insert(
+                0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
+        # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
+        # 도구 호출을 기다린다 — 스트리밍 스티처의 같은 판단.
+        if final_body.get("stop_reason") == "tool_use" and not any(
+            _is_client_tool_use_block(b) for b in final_body["content"]
+        ):
+            final_body["stop_reason"] = "end_turn"
     return JSONResponse(status_code=final_status, content=final_body)
 
 
@@ -1203,7 +1286,7 @@ async def _responses_stream(
                     outputs.append({"type": "function_call_output", "call_id": ps["call_id"],
                                     "output": json.dumps({"error": "web search deadline exceeded"})})
                     continue
-                result_text, ok = await _do_search(
+                result_text, ok, _trace = await _do_search(
                     mcp_client, ps["input"], default_max_results, max_result_chars
                 )
                 if ok:
@@ -1375,7 +1458,7 @@ async def _responses_nonstream(
                     args = json.loads(call.get("arguments") or "{}")
                 except (ValueError, TypeError):
                     args = {}
-                result_text, ok = await _do_search(
+                result_text, ok, _trace = await _do_search(
                     mcp_client, args, default_max_results, max_result_chars
                 )
                 if ok:
