@@ -387,6 +387,11 @@ def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
 #: 최종 답변은 자백문). 텍스트 한 줄은 Bedrock 도 클라이언트도 그대로 받아들이고, 결과
 #: 본문(≤12k자)은 싣지 않는다. Anthropic 방식(server_tool_use 블록)은 upstream PR 후보.
 _TRACE_PREFIX = "🔎 [gateway web_search]"
+#: 검색이 하나라도 성공한 라운드의 마지막 줄. 다음 요청에서 모델이 "이력엔 제목뿐이니 수치는
+#: 지어낸 것" 이라고 물러서지 않도록, 결과 전문이 그 턴에 제공됐다는 사실을 남긴다(실측: 흔적만
+#: 있을 때 자기 검증 질문에 "폐기하라" 고 답함).
+_TRACE_NOTE = ("(full search results were shown to the assistant in this turn and used for "
+               "the answer; only this trace is kept in the transcript)")
 
 
 def _trace_line(query: str, outcome: str) -> str:
@@ -396,8 +401,10 @@ def _trace_line(query: str, outcome: str) -> str:
     return f'{_TRACE_PREFIX} "{q}" → {outcome}'
 
 
-def _result_hosts(resp) -> tuple[int, list[str]]:
-    """(count, up to 3 distinct hosts) of a WebSearchResponse-like object; tolerant of fakes."""
+def _result_hosts(resp) -> tuple[int, list[str], list[str]]:
+    """(count, up to 3 distinct hosts, up to 2 titles) of a WebSearchResponse-like object;
+    tolerant of fakes. Titles carry the headline facts (e.g. the rate figure) so the model
+    can tie its answer to evidence on a later request."""
     items = getattr(resp, "results", None)
     if items is None:
         try:
@@ -408,16 +415,19 @@ def _result_hosts(resp) -> tuple[int, list[str]]:
     if not isinstance(items, list):
         items = []
     hosts: list[str] = []
+    titles: list[str] = []
     for it in items:
         url = it.get("url") if isinstance(it, dict) else getattr(it, "url", None)
+        title = it.get("title") if isinstance(it, dict) else getattr(it, "title", None)
         host = urlparse(str(url or "")).netloc.lower()
         if host.startswith("www."):
             host = host[4:]
-        if host and host not in hosts:
+        if host and host not in hosts and len(hosts) < 3:
             hosts.append(host)
-        if len(hosts) >= 3:
-            break
-    return len(items), hosts
+        t = " ".join(str(title or "").split())
+        if t and len(titles) < 2:
+            titles.append(t if len(t) <= 60 else t[:57] + "…")
+    return len(items), hosts, titles
 
 
 async def _do_search(
@@ -452,8 +462,10 @@ async def _do_search(
                 original_chars=len(resp.raw_text),
                 cap=max_result_chars,
             )
-        n, hosts = _result_hosts(resp)
+        n, hosts, titles = _result_hosts(resp)
         outcome = f"{n} results" + (": " + ", ".join(hosts) if hosts else "")
+        if titles:
+            outcome += " | " + " · ".join(f"「{t}」" for t in titles)
         return text, True, _trace_line(query, outcome)
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
@@ -824,6 +836,8 @@ async def _anthropic_stream(
             # 검색 흔적을 클라이언트 봉투에 텍스트 블록 하나로 남긴다(근거: _TRACE_PREFIX 주석).
             # 내부 대화에는 넣지 않는다 — 거기엔 진짜 tool_use/tool_result 가 있다.
             if traces and envelope_open:
+                if any(" → failed" not in t and " → skipped" not in t for t in traces):
+                    traces.append(_TRACE_NOTE)
                 gi = global_index
                 global_index += 1
                 yield _sse("content_block_start",
@@ -994,6 +1008,8 @@ async def _anthropic_nonstream(
         ]
         # 검색 흔적을 본문 맨 앞에 텍스트 블록으로(스트리밍 경로와 같은 계약, _TRACE_PREFIX).
         if traces:
+            if any(" → failed" not in t and " → skipped" not in t for t in traces):
+                traces.append(_TRACE_NOTE)
             final_body["content"].insert(
                 0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
         # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
