@@ -52,7 +52,13 @@ GW_WEB_SEARCH_NAME = "web_search"
 _WEB_SEARCH_DESCRIPTION = (
     "Search the public web for current, factual, or recent information. Use this when "
     "the answer may depend on events, data, docs, or facts that are recent or external. "
-    "Returns titles, URLs, and snippets to cite."
+    "Returns titles, URLs, and snippets to cite. "
+    # 절제 지시 — 검색 결과는 다음 턴 입력으로 되돌아와 반복마다 다시 과금된다(2026-09-16 실측:
+    # 한 사실을 4번 병렬 검색한 호출 1건이 입력 132k 토큰). 게이트웨이는 결과 크기·턴당 검색 수도
+    # 상한으로 묶지만, 모델이 처음부터 적게 부르는 것이 가장 싸다.
+    "Prefer ONE focused query per fact; results are capped in size and count, so pick "
+    "the query carefully instead of issuing several. Do not search again for a fact you "
+    "already have unless the first result was empty or contradictory."
 )
 
 # The loop passes the LOGICAL turn body (a dict: messages/input + tools + stream flag).
