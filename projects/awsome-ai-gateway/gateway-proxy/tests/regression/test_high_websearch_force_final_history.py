@@ -215,3 +215,49 @@ async def test_anthropic_nonstream_force_final_on_deadline_with_no_search_this_r
     assert not any(
         b["type"] == "tool_use" and b.get("name") == GW for b in _blocks(bodies[0]["messages"])
     )
+
+
+# ─── 3. thinking 만 남는 assistant 턴 + 마지막 user 메시지의 "이제 답하라" ─────────
+# 2026-09-16 US 실측(Bedrock invocation log): 후속 검색 턴이 thinking+tool_use 만이라 strip 뒤
+# assistant 메시지가 thinking 하나가 됐고, 마지막 user 메시지는 결과 JSON 뿐 → Opus 5 가 `<br>`.
+
+
+def test_strip_adds_the_note_when_only_thinking_remains_and_answer_now_at_the_end():
+    msgs = [
+        {"role": "user", "content": "q"},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig1"},
+            {"type": "text", "text": "searching"},
+            {"type": "tool_use", "id": "t1", "name": GW, "input": {"query": "a"}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "R1"}]},
+        {"role": "assistant", "content": [
+            {"type": "thinking", "thinking": "", "signature": "sig2"},
+            {"type": "tool_use", "id": "t2", "name": GW, "input": {"query": "b"}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t2", "content": "R2",
+                                      "cache_control": {"type": "ephemeral"}}]},
+    ]
+    out = wsl._strip_anthropic_web_search_plumbing(msgs, {"t1", "t2"})
+    a1, a2 = out[1]["content"], out[3]["content"]
+    assert [b["type"] for b in a1] == ["thinking", "text"], a1
+    assert a1[1]["text"] == "searching", "텍스트가 있던 턴은 그대로"
+    assert [b["type"] for b in a2] == ["thinking", "text"], a2
+    assert a2[0]["signature"] == "sig2" and a2[1]["text"] == wsl._FINAL_TURN_TOOL_NOTE
+    last = out[4]["content"]
+    assert [b["type"] for b in last] == ["text", "text"] and last[0]["text"] == "R2"
+    assert last[1]["text"] == wsl._FINAL_TURN_ANSWER_NOW
+    assert all(m["content"] for m in out) and [m["role"] for m in out] == [
+        "user", "assistant", "user", "assistant", "user"]
+
+
+def test_answer_now_is_not_duplicated_on_repeated_strips():
+    msgs = [
+        {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "t1", "name": GW, "input": {}}]},
+        {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "t1", "content": "R"}]},
+    ]
+    once = wsl._strip_anthropic_web_search_plumbing(msgs, {"t1"})
+    twice = wsl._strip_anthropic_web_search_plumbing(once, {"t1"})
+    assert twice is once or twice == once
+    assert sum(b.get("text") == wsl._FINAL_TURN_ANSWER_NOW for b in twice[-1]["content"]) == 1
