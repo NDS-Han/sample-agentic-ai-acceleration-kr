@@ -112,11 +112,51 @@ def _responses_tool_def() -> dict:
     }
 
 
-def _with_web_search_tool(body: dict, dialect: str, include: bool) -> dict:
+def _tool_choice_names_ours(tc: Any, dialect: str) -> bool:
+    if not isinstance(tc, dict) or tc.get("name") != GW_WEB_SEARCH_NAME:
+        return False
+    return tc.get("type") == ("function" if dialect == "responses" else "tool")
+
+
+def _tool_choice_is_forced_any(tc: Any) -> bool:
+    return tc == "required" or (isinstance(tc, dict) and tc.get("type") == "any")
+
+
+def _relax_tool_choice(out: dict, dialect: str, include: bool, first_turn: bool) -> None:
+    """Keep ``tool_choice`` consistent with the tools each turn actually carries.
+
+    ⚠️ 2026-09-16 US 실측: Cowork 의 내장 WebSearch 도구는 모델을 **네이티브 web_search 도구 +
+    ``tool_choice: {"type":"tool","name":"web_search"}``** 로 호출한다. 네이티브 도구는 걷어내고
+    우리 도구를 넣으니 이름이 같아 강제가 그대로 살았고, 모델은 **매 턴** 검색만 하다가
+    max_iterations 에 닿았다. 그 force_final 턴은 도구를 빼는데 tool_choice 는 남아
+    Bedrock 400("Tool 'web_search' not found in provided tools") — 검색 3회 과금 뒤 답 없음,
+    Cowork 하위 에이전트가 40초 간격으로 8회 재시도(≈$1.5). 규칙:
+    - 우리 도구를 지목한 강제는 **첫 턴에만** 존중(클라이언트 의도 = 검색 한 번은 하라),
+      그 뒤 턴은 auto 로 풀어 모델이 답할 수 있게 한다.
+    - force_final(도구 제거) 턴에서는 any/required 도 auto 로 — 이 턴의 목적은 답변이다.
+    - tools 가 아예 없으면 tool_choice 자체를 뺀다(tools 없는 tool_choice 는 거부된다).
+    """
+    tc = out.get("tool_choice")
+    if tc is None:
+        return
+    if "tools" not in out:
+        out.pop("tool_choice", None)
+        return
+    if (_tool_choice_names_ours(tc, dialect) and not (include and first_turn)) or (
+        _tool_choice_is_forced_any(tc) and not include
+    ):
+        out["tool_choice"] = "auto" if dialect == "responses" else {"type": "auto"}
+
+
+def _with_web_search_tool(
+    body: dict, dialect: str, include: bool, *, first_turn: bool = True
+) -> dict:
     """Return a shallow copy of body with the web_search tool appended (or removed).
 
     Preserves any client-provided tools. ``include=False`` strips our tool (used for the
     forced-final turn after a guardrail) so the model cannot search again and must answer.
+    ``first_turn`` lets a client-forced ``tool_choice`` on our tool apply once (see
+    _relax_tool_choice).
     """
     out = dict(body)
     existing = list(out.get("tools") or [])
@@ -128,6 +168,7 @@ def _with_web_search_tool(body: dict, dialect: str, include: bool) -> dict:
         out["tools"] = existing
     elif "tools" in out:
         out.pop("tools")
+    _relax_tool_choice(out, dialect, include, first_turn)
     return out
 
 
@@ -668,7 +709,8 @@ async def _anthropic_stream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final)
+            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
+                                              first_turn=search_attempts == 0)
             turn_body = dict(turn_body)
             # ⚠️ force_final 턴은 `tools` 키를 아예 뺀다. 그런데 대화에는 앞선 턴이 쌓아 둔
             #    우리 tool_use/tool_result 가 남아 있고, Anthropic-on-Bedrock 은 tools 를
@@ -1113,7 +1155,8 @@ async def _anthropic_nonstream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final)
+            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
+                                              first_turn=search_attempts == 0)
             turn_body = dict(turn_body)
             # ⚠️ force_final 턴은 tools 를 빼므로 대화의 우리 tool_use/tool_result(이력의 누출분
             #    포함)를 텍스트로 바꿔야 한다 — 스트리밍 경로와 같은 이유. 이 줄이 없던 동안
@@ -1329,7 +1372,8 @@ async def _responses_stream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "responses", include=not force_final)
+            turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
+                                              first_turn=search_attempts == 0)
             turn_body = dict(turn_body)
             # force_final 턴의 배관 제거 — 근거는 anthropic 스티처의 같은 주석 참조.
             turn_body["input"] = (
@@ -1679,7 +1723,8 @@ async def _responses_nonstream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "responses", include=not force_final)
+            turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
+                                              first_turn=search_attempts == 0)
             turn_body = dict(turn_body)
             # force_final 턴은 tools 를 빼므로 우리 function_call/output(누출분 포함)을 걷어낸다
             # — _anthropic_nonstream 의 같은 주석 참조.
