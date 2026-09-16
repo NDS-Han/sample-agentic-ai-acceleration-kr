@@ -312,7 +312,7 @@ async function ClientDistribution({ period }: { period: string }) {
   );
 }
 
-const ALLOWED_CLIENTS = ['all', 'claude-code', 'cowork', /* 'codex', */ 'other'];
+const ALLOWED_CLIENTS = ['all', 'claude-code', 'cowork', 'codex', 'other'];
 
 export default async function DashboardPage({
   searchParams,

@@ -105,14 +105,9 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
 
   const jwtCookie = request.cookies.get('admin_jwt');
 
-  // No JWT present — redirect to the login page (Cognito). Use nextUrl (preserves
-  // original host header) instead of request.url (may resolve to 0.0.0.0 in Docker).
+  // No JWT present — redirect through the single login entry point.
   if (!jwtCookie?.value) {
-    const loginUrl = request.nextUrl.clone();
-    loginUrl.pathname = '/login';
-    const redirectResponse = NextResponse.redirect(loginUrl);
-    applySecurityHeaders(redirectResponse);
-    return redirectResponse;
+    return redirectToLogin(request, false);
   }
 
   // JWT present — parse, check expiry, then check permissions
@@ -138,11 +133,7 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     }
   } catch {
     // Malformed JWT — treat as unauthenticated
-    const loginUrl = request.nextUrl.clone();
-    loginUrl.pathname = '/login';
-    const redirectResponse = NextResponse.redirect(loginUrl);
-    applySecurityHeaders(redirectResponse);
-    return redirectResponse;
+    return redirectToLogin(request, true);
   }
 
   return response;

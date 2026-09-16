@@ -22,7 +22,7 @@ from app.core.usage_filters import (
     kst_month_expr,
     reporting_timezone,
 )
-from app.models.auth import KeyStatus, Team, User, VirtualKey, Department
+from app.models.auth import Department, KeyStatus, Team, User, UserRole, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus

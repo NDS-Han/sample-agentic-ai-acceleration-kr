@@ -20,7 +20,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { NextRequest } from 'next/server';
-import { GET as loginGET } from '@/app/api/auth/login/route';
+import { GET as loginGET, POST as loginPOST } from '@/app/api/auth/login/route';
 import { GET as callbackGET } from '@/app/api/auth/callback/route';
 import { GET as devLoginGET, POST as devLoginPOST } from '@/app/api/auth/dev-login/route';
 import { middleware } from '@/middleware';
@@ -204,6 +204,12 @@ describe('vacuity control — 하네스가 정말로 핸들러를 실행하는�
 });
 
 // ───────────────────────── 1. /api/auth/login ─────────────────────────
+
+describe('POST /api/auth/login — custom Cognito login form', () => {
+  it('exports the POST handler used by LoginForm', () => {
+    expect(loginPOST).toBeTypeOf('function');
+  });
+});
 
 describe('GET /api/auth/login — dev 는 오늘과 동일해야 한다', () => {
   it('DEV_LOGIN_ENABLED=true + OIDC 미설정 → dev 폼으로 넘긴다', async () => {

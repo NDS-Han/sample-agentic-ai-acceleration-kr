@@ -27,14 +27,15 @@ router = APIRouter(prefix="/admin/analytics", tags=["Analytics"])
 _ANALYTICS_CACHE_TTL = 30
 
 
-def _analytics_cache_key(*, period: str, group_by: str) -> str:
+def _analytics_cache_key(*, period: str, group_by: str, client: str | None) -> str:
     """전사(ADMIN, scope='all') 응답 전용 캐시 키.
 
     ⚠️ scope 를 키에 넣지 않는다 — 이 키는 `scope='all'` 인 경우에만 쓰이므로 상수다.
     대신 **호출부가 role 을 검사**해 ADMIN 이 아니면 캐시를 아예 쓰지 않는다.
     키에 scope 만 넣고 role 을 빼면 TEAM_LEADER 가 ADMIN 의 전사 응답을 받는다.
     """
-    return f"analytics:global:{period}:{group_by}"
+    normalized_client = "all" if client in (None, "", "all") else client
+    return f"analytics:global:{period}:{group_by}:{normalized_client}"
 
 
 async def _cache_get(request: Request, key: str):
@@ -95,7 +96,7 @@ async def get_analytics(
     #      team_id 까지 넣어야 하고 그러면 적중률이 거의 0 이다 — 복잡도만 늘고 이득이 없다.
     cache_key = None
     if user.role == UserRole.ADMIN and scope == "all":
-        cache_key = _analytics_cache_key(period=period, group_by=group_by)
+        cache_key = _analytics_cache_key(period=period, group_by=group_by, client=client)
         if (cached := await _cache_get(request, cache_key)) is not None:
             return cached
 
