@@ -217,6 +217,18 @@ class Settings(BaseSettings):
     #:    20개가 통과하면 20 × 결과가 다음 턴 입력에 연결되어, 상한 없는 단일 요청 비용이
     #:    되거나 컨텍스트 창을 넘겨 continuation 턴이 400 이 된다(그때까지 과금분 전부 유실).
     web_search_max_searches_per_turn: int = 4
+    #: 루프가 넣는 검색 결과(tool_result)에 cache_control 을 붙여, 같은 요청의 뒤 턴이 앞 턴의
+    #: 결과를 캐시 읽기(정가의 10%)로 받게 한다. 2026-09-16 실측: 검색 N회 요청의 입력 비용은
+    #: 결과가 턴마다 다시 실리는 몫이 대부분(검색 3회면 결과 토큰 6R 이 캐시로 약 3.8R).
+    #: 요청당 표시 4개 한도는 _place_cache_breakpoint 가 지킨다. 문제 시 False 로 끈다.
+    web_search_cache_results: bool = True
+    #: 검색 결과 **항목별** 본문 상한(문자). JSON 을 통째로 자르는 max_result_chars 와 달리 결과
+    #: 5개를 전부 남기고 각 본문만 문장 경계에서 자르며 URL 중복을 뺀다(2026-09-16: 원본 13~24k자
+    #: → 항목당 1500자면 검색당 토큰 −40~50%, 뒤쪽 결과가 통째로 잘리던 문제도 사라짐). 0 = 끔.
+    web_search_result_text_chars: int = 1500
+    #: 클라이언트에 남기는 검색 흔적 줄의 언어("en" | "ko"). 접두어 `🔎 [gateway web_search]` 는
+    #: 공통(모방 필터·도구 설명이 이 접두어를 본다).
+    web_search_trace_lang: str = "en"
 
 
 @lru_cache
