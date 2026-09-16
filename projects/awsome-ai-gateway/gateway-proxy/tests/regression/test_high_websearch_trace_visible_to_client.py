@@ -152,9 +152,10 @@ async def test_stream_leaves_one_trace_line_per_search_before_the_answer():
     texts = _texts(events)
     assert len(texts) == 2, f"텍스트 블록이 [흔적, 답변] 둘이어야 한다: {texts}"
     trace, answer = texts
+    lines = [ln for ln in trace.splitlines() if ln.strip()]
     expected = (f'{PREFIX} "NVIDIA Q2 FY2027 results" → 3 results: '
-                "reuters.com, nvidianews.nvidia.com")
-    assert trace.strip() == expected, trace
+                "reuters.com, nvidianews.nvidia.com | 「x」 · 「y」")
+    assert lines == [expected, wsl._TRACE_NOTE], lines
     assert answer == "answer"
     # 블록은 열리고 닫힌다 — SDK 파서가 열린 채 끝나면 오류로 본다
     starts = [d["index"] for e, d in events if e == "content_block_start"]
@@ -172,7 +173,7 @@ async def test_stream_trace_marks_capped_and_failed_searches():
     out = await _run_stream([_search_turn(["q1", "q2"]), _final()], mcp, max_searches_per_turn=1)
     trace = _texts(_parse(out))[0]
     lines = [ln for ln in trace.splitlines() if ln.strip()]
-    assert len(lines) == 2, lines
+    assert len(lines) == 2, f"성공한 검색이 없으면 안내 줄도 없어야 한다: {lines}"
     assert lines[0].startswith(f'{PREFIX} "q1" → failed'), lines[0]
     assert lines[1] == f'{PREFIX} "q2" → skipped (per-turn limit)', lines[1]
     assert mcp.calls == ["q1"], "상한을 넘긴 검색은 실행되지 않아야 한다"
@@ -215,7 +216,8 @@ async def test_nonstream_body_starts_with_the_trace_block():
     body = await _run_nonstream([turn1, turn2], mcp)
     kinds = [b["type"] for b in body["content"]]
     assert kinds == ["text", "text"], kinds
-    assert body["content"][0]["text"].strip() == f'{PREFIX} "AMD Q2 2026" → 1 results: ir.amd.com'
+    assert body["content"][0]["text"].strip().splitlines() == [
+        f'{PREFIX} "AMD Q2 2026" → 1 results: ir.amd.com | 「t」', wsl._TRACE_NOTE]
     assert body["content"][1]["text"] == "answer"
     assert body["stop_reason"] == "end_turn"
 
@@ -233,10 +235,13 @@ async def test_nonstream_without_search_is_untouched():
 def test_trace_line_truncates_long_queries_and_hosts_are_deduped():
     line = wsl._trace_line("x" * 120, "1 results")
     assert line.startswith(f'{PREFIX} "') and "…" in line and len(line) < 130
-    n, hosts = wsl._result_hosts(type("R", (), {"results": [
-        {"url": "https://www.a.com/1"}, {"url": "https://a.com/2"}, {"url": "https://b.com"},
-        {"url": "https://c.com"}, {"url": "https://d.com"}]})())
+    n, hosts, titles = wsl._result_hosts(type("R", (), {"results": [
+        {"url": "https://www.a.com/1", "title": "  first\n title "}, {"url": "https://a.com/2"},
+        {"url": "https://b.com", "title": "T" * 80},
+        {"url": "https://c.com", "title": "third"}, {"url": "https://d.com"}]})())
     assert (n, hosts) == (5, ["a.com", "b.com", "c.com"])
+    assert titles == ["first title", "T" * 57 + "…"], titles
     # results 속성이 없는 가짜(raw_text 만) 도 세어진다
-    n2, hosts2 = wsl._result_hosts(type("R", (), {"raw_text": '{"results":[{"t":1},{"t":2}]}'})())
-    assert (n2, hosts2) == (2, [])
+    n2, hosts2, titles2 = wsl._result_hosts(
+        type("R", (), {"raw_text": '{"results":[{"t":1},{"t":2}]}'})())
+    assert (n2, hosts2, titles2) == (2, [], [])
