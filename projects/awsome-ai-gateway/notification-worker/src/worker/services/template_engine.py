@@ -18,8 +18,6 @@ from jinja2 import (
 
 from worker.config import get_settings
 
-from worker.config import get_settings
-
 logger = structlog.get_logger(__name__)
 
 _TEMPLATES_DIR = Path(__file__).parent.parent / "templates"

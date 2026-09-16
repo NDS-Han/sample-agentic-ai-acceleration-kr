@@ -24,7 +24,7 @@
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
-| §8-L | Admin UI Cognito 로그인 활성화 (dev-login 대체) | dev-login 끄고 싶을 때 (US-10, 선택 · 운영이면 강력 권장) | [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md) |
+| §8-L | Admin UI Cognito 로그인 활성화 (dev-login 대체) | dev-login 끄고 싶을 때 (IN-01, 선택 · 운영이면 강력 권장) | [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md) |
 | §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
 | §8-Z | 토큰 TTL 조절 | 토큰 수명 바꿀 때 | [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md) |
@@ -99,7 +99,7 @@ upstream 을 통째로 들여온 뒤 배포 EC2 에서 명령만 위에서 아�
 
 ### 8-L. Admin UI Cognito 로그인 활성화 (dev-login 대체)
 
-`US-10` 선택(운영이면 강력 권장) — admin-ui 에 이메일/비밀번호로 로그인하는 실제 Cognito 로그인 폼 추가. 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
+`IN-01` 선택(운영이면 강력 권장) — admin-ui 에 이메일/비밀번호로 로그인하는 실제 Cognito 로그인 폼 추가. 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
 → **[ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md)**
 
 ---

@@ -73,21 +73,8 @@ class SecurityEventDetector:
 
             if self._redis is not None:
                 try:
-                    # notification-worker NotificationEvent 스키마(payload 기반)에 맞춤
-                    notification_event = {
-                        "event_id": event.event_id,
-                        "type": event.type.value.lower(),
-                        "timestamp": event.timestamp,
-                        "source": event.source,
-                        "payload": {
-                            "source_ip": event.source_ip,
-                            "failure_count": event.failure_count,
-                            "time_window": f"{event.window_minutes}분",
-                            "period": f"{event.window_minutes}분",
-                            "auth_type": event.auth_type.value,
-                            "details": event.details,
-                        },
-                    }
+                    # notification-worker NotificationEvent 스키마(payload 기반)에 맞춤.
+                    # SecurityEvent.to_envelope() 이 envelope 4필드 + payload 봉투를 만든다.
                     await self._redis.publish(
                         "notifications:security",
                         # ⚠️ model_dump_json() 을 그대로 보내면 안 된다 — worker 는

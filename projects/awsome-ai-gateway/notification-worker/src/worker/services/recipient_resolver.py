@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import structlog
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.models.auth import Team, User
@@ -125,7 +125,7 @@ class RecipientResolver:
         result = await session.execute(
             select(User).where(
                 User.is_active.is_(True),
-                func.lower(User.role) == "admin",
+                User.role == "ADMIN",
             )
         )
         admins = result.scalars().all()
