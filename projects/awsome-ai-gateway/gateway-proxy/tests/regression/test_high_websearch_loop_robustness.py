@@ -131,21 +131,24 @@ def _data_of(out: list[str], name: str) -> dict | None:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-async def test_force_final_turn_has_no_dangling_tool_blocks():
-    """⚠️ 이 파일에서 가장 비싼 결함.
+async def test_force_final_turn_keeps_tools_and_blocks_calls_with_tool_choice_none():
+    """⚠️ 이 파일에서 가장 비싼 결함이었던 자리.
 
-    force_final 턴은 ``tools`` 를 빼고 보낸다. 그런데 대화에는 앞선 턴의
-    ``tool_use``/``tool_result`` 가 남아 있어 Anthropic-on-Bedrock 이 **거부한다**.
-    실패하는 것은 마지막 턴 하나인데, 그 시점에는 N 번의 모델 턴과 N 번의 검색이 이미
-    과금됐고 사용자는 답을 하나도 받지 못한다. deadline 경로에서는 검색 한 번으로도 난다.
+    예전(1.0.58~1.0.67): force_final 턴은 ``tools`` 를 빼고 이력의 tool_use/tool_result 를
+    텍스트로 바꿔 보냈다(안 바꾸면 400). 그 변환이 프롬프트 캐시 접두를 깨고(캐시 0) thinking
+    만 남는 assistant 턴을 만들어 `<br>` 빈 답을 냈다(2026-09-16). 지금(Anthropic): 도구는
+    그대로 두고 ``tool_choice: none`` 으로 호출만 막는다 — 이력은 바이트 그대로, 마지막 user
+    메시지 끝에 "이제 답하라" 만 붙는다. Bedrock 이 이 조합을 받는 것은 실측(200).
     """
     out, bodies = await _run_anthropic(
         [_anthropic_search_turn(1), _anthropic_search_turn(2), _ANTHROPIC_FINAL],
         max_iterations=2,
     )
     final_body = bodies[-1]
-    assert "tools" not in final_body, "force_final 턴인데 tools 가 남았다 — 전제가 깨졌다"
-
+    assert any(t.get("name") == wsl.GW_WEB_SEARCH_NAME for t in final_body.get("tools") or []), (
+        "force_final 턴에도 우리 도구가 선언돼 있어야 이력의 tool 블록이 유효하다"
+    )
+    assert final_body.get("tool_choice") == {"type": "none"}, final_body.get("tool_choice")
     kinds = [
         b.get("type")
         for m in final_body["messages"]
@@ -153,9 +156,11 @@ async def test_force_final_turn_has_no_dangling_tool_blocks():
         for b in m["content"]
         if isinstance(b, dict)
     ]
-    assert "tool_use" not in kinds and "tool_result" not in kinds, (
-        f"tools 없는 요청에 배관이 남았다: {kinds} — 상류가 400 을 준다"
+    assert "tool_use" in kinds and "tool_result" in kinds, (
+        f"이력이 변환됐다(캐시 접두가 깨진다): {kinds}"
     )
+    last = final_body["messages"][-1]
+    assert last["role"] == "user" and last["content"][-1]["text"] == wsl._FINAL_TURN_ANSWER_NOW
 
 
 async def test_force_final_preserves_the_search_text_we_paid_for():
@@ -166,12 +171,13 @@ async def test_force_final_preserves_the_search_text_we_paid_for():
     _out, bodies = await _run_anthropic(
         [_anthropic_search_turn(1), _ANTHROPIC_FINAL], max_iterations=1
     )
+    # 1.0.68: 결과는 tool_result 블록 그대로 남는다(텍스트로 변환하지 않는다 — 캐시 접두 보존).
     texts = [
-        b.get("text", "")
+        str(b.get("text") or b.get("content") or "")
         for m in bodies[-1]["messages"]
         if isinstance(m.get("content"), list)
         for b in m["content"]
-        if isinstance(b, dict) and b.get("type") == "text"
+        if isinstance(b, dict) and b.get("type") in ("text", "tool_result")
     ]
     assert any("WEBTEXT" in t for t in texts), (
         f"검색 결과 텍스트가 사라졌다: {texts} — 모델이 검색 없이 답하게 된다"
