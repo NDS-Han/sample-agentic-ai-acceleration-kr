@@ -183,7 +183,8 @@ gatewayProxy:
     # 1.0.57-wsdesc: web_search 도구 설명에 절제 지시 추가(dev 주석 참조).
     # 1.0.58-wsfinal: force_final 턴 400 수정 — 이력에 새어 있던 web_search 블록을 이름으로 걷어내고,
     #   비스트리밍 루프 2개도 force_final 에서 걷어낸다(2026-09-16 실측: 상한을 낮추자 Cowork 재시도 3회가 전부 400).
-    tag: "1.0.58-wsfinal"
+    # 1.0.59-outcfg: Cowork 의 output_config.format(구조화 출력)을 Bedrock 이 거부(400) → effort 만 남기고 걷어냄.
+    tag: "1.0.59-outcfg"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
