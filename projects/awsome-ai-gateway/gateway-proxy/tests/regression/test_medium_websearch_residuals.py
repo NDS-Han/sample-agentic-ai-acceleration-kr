@@ -606,7 +606,7 @@ async def test_an_anthropic_non_tool_use_call_shape_also_ends_the_turn():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# #3 — 종료 프레임이 전 턴의 입력 합계를 말한다
+# #3 — 종료 프레임: 입력·캐시는 첫 턴 값, 출력은 전 턴 합계
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -639,11 +639,13 @@ def _anthropic_final(inp: int) -> list[bytes]:
     ]
 
 
-async def test_the_terminal_frame_reports_the_input_summed_over_all_turns():
-    """⚠️ ``message_start`` 는 첫 턴에 한 번만 나간다 — 그 값은 1턴치다.
+async def test_the_terminal_frame_reports_the_first_turn_input_and_the_summed_output():
+    """⚠️ 종료 프레임의 입력은 **첫 턴 값**(=클라이언트가 보낸 대화), 출력은 전 턴 합계.
 
-    Claude Code 는 usage 로 컨텍스트를 추적하므로, N 턴을 돈 요청에서 그 값만 보면 우리가
-    청구하는 양과 어긋난다.
+    예전에는 입력도 합계(10+50=60)를 실었다. 클라이언트(Claude Code·Cowork)는 마지막 응답의
+    input+cache 합을 컨텍스트 점유로 읽어 자동 압축을 결정하므로, 검색 N 턴 요청이 컨텍스트를
+    N 배로 보이게 했다(2026-09-16 US 실측 — 검색 턴마다 압축). 청구 합계는 on_usage 가 받는다.
+    상세: tests/regression/test_high_websearch_usage_context_gauge.py
     """
     out = await _run_anthropic([_anthropic_search_turn(1, 10), _anthropic_final(50)])
     starts = _payloads(out, "message_start")
@@ -653,8 +655,9 @@ async def test_the_terminal_frame_reports_the_input_summed_over_all_turns():
 
     assert deltas, "종료 프레임이 없다"
     final_usage = deltas[-1]["usage"]
-    assert final_usage.get("input_tokens") == 60, (
-        f"종료 프레임의 입력이 {final_usage.get('input_tokens')} — 10+50=60 이어야 한다"
+    assert final_usage.get("input_tokens") == 10, (
+        f"종료 프레임의 입력이 {final_usage.get('input_tokens')} — 첫 턴 값 10 이어야 한다"
+        "(합계 60 이면 클라이언트 컨텍스트 게이지가 턴 수만큼 부풀려진다)"
     )
     assert final_usage.get("output_tokens") == 8, f"출력이 {final_usage.get('output_tokens')}"
 
