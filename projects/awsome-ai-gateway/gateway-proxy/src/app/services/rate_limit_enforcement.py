@@ -22,6 +22,7 @@ from decimal import Decimal
 import structlog
 from fastapi.responses import JSONResponse
 
+from app.observability.provider_metrics import record_rate_limit_hit
 from app.schemas.domain import AuthContext, BudgetStatus, DegradationLevel, ModelConfigSchema
 from app.services.rate_limit_config_loader import (
     AllScopeLimits,
@@ -100,6 +101,7 @@ async def enforce_rate_limits(
     state: dict,
     request_id: str,
     budget_status: BudgetStatus | None = None,
+    metrics=None,
 ) -> JSONResponse | None:
     """라우터용 Pre-reserve RPM + TPM 체크 진입점.
 
@@ -162,7 +164,7 @@ async def enforce_rate_limits(
         redis, descriptors, request_id=request_id
     )
     if not rpm_result.allowed:
-        return _build_429(rpm_result)
+        return _build_429(rpm_result, metrics)
 
     # TPM 체크 (Pre-reserve)
     max_output = _extract_max_output(body)
@@ -176,7 +178,7 @@ async def enforce_rate_limits(
         redis, descriptors, reserved_tokens=reserved
     )
     if not tpm_result.allowed:
-        return _build_429(tpm_result)
+        return _build_429(tpm_result, metrics)
 
     # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
     estimated_cost = _estimate_cost(model_config, estimated_input, max_output)
@@ -191,7 +193,7 @@ async def enforce_rate_limits(
         team_cph_limit=limits.team.cph,
     )
     if not cost_result.allowed:
-        return _build_cost_429(cost_result)
+        return _build_cost_429(cost_result, metrics)
 
     # 통과 — settle용 정보 주입
     state["rate_limit_state"] = {
@@ -217,9 +219,13 @@ def _estimate_cost(
     return (input_cost + output_cost).quantize(Decimal("0.000001"))
 
 
-def _build_cost_429(result) -> JSONResponse:
+def _build_cost_429(result, metrics=None) -> JSONResponse:
     scope = result.scope or "USER"
     limit_type = result.limit_type or "cpm"
+    # ⚠️ 429 를 내는 **모든** 경로에서 올려야 한다. 한 경로만 빠지면 그 한도 위반은
+    #    지표에서 사라지고, "스로틀 없음" 으로 읽힌다(observability/provider_metrics.py
+    #    record_rate_limit_hit 주석 참조).
+    record_rate_limit_hit(metrics, scope=scope, limit_type=limit_type)
     code = f"{scope.lower()}_{limit_type}_exceeded"
     retry_after = str(result.retry_after or 60)
     limit_value = str(result.limit) if result.limit is not None else ""
@@ -255,9 +261,10 @@ def _only_tpm(descriptors: list[ScopeDescriptor]) -> list[ScopeDescriptor]:
     return [d for d in descriptors if d.tpm_limit and d.tpm_limit > 0]
 
 
-def _build_429(result) -> JSONResponse:
+def _build_429(result, metrics=None) -> JSONResponse:
     scope = result.scope or "USER"
     limit_type = result.limit_type or "rpm"
+    record_rate_limit_hit(metrics, scope=scope, limit_type=limit_type)
     code = f"{scope.lower()}_{limit_type}_exceeded"
     retry_after = str(result.retry_after or 60)
 

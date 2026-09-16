@@ -23,10 +23,9 @@ locals {
 module "vpc" {
   source = "../../modules/vpc"
 
-  aws_region = var.aws_region
-
   project                  = var.project
   environment              = var.environment
+  aws_region               = var.aws_region
   cidr                     = var.vpc_cidr
   azs                      = var.azs
   private_subnet_cidrs     = var.private_subnet_cidrs
@@ -40,10 +39,12 @@ module "vpc" {
 module "eks" {
   source = "../../modules/eks-fargate"
 
-  project             = var.project
-  environment         = var.environment
+  project     = var.project
+  environment = var.environment
+  # 두 값은 minor 홉마다 **함께** 움직인다. 순서/기한은 variables.tf 의
+  # eks_cluster_version · eks_addon_versions 주석 참고(현재 1.31, 목표 1.36).
   cluster_version     = var.eks_cluster_version
-  addon_versions      = var.eks_addon_versions # null => 모듈 기본값(1.34 호환)
+  addon_versions      = var.eks_addon_versions
   vpc_id              = module.vpc.vpc_id
   private_subnet_ids  = module.vpc.private_subnet_ids
   public_access_cidrs = ["0.0.0.0/0"] # dev는 공개 접근 허용
@@ -62,10 +63,68 @@ module "irsa" {
   oidc_provider_arn          = module.eks.oidc_provider_arn
   k8s_namespace              = var.application_namespace
   bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
-  mantle_regions             = var.mantle_regions
   cognito_user_pool_arn      = module.cognito.user_pool_arn
   cowork_role_arn            = var.cowork_role_arn
   claude_code_374_role_arn   = var.claude_code_374_role_arn
+  mantle_regions             = var.mantle_regions
+
+  # 감사 대조(/admin/audit/invocation-log/*)용 Logs Insights 읽기 권한. 로깅이 꺼져 있으면
+  # 빈 문자열이 와서 권한 statement 자체가 렌더되지 않는다(불필요한 권한을 남기지 않는다).
+  bedrock_invocation_log_group_arn = module.bedrock_invocation_logging.log_group_arn
+
+  # 본문 로깅 sink 쓰기 권한(쓰기 전용). body_logging 이 꺼져 있으면 빈 문자열이 와서
+  # statement 가 렌더되지 않는다.
+  body_log_firehose_arn = module.body_logging.firehose_stream_arn
+  body_log_bucket_arn   = module.body_logging.bucket_arn
+
+  tags = var.tags
+}
+
+# ─── 요청/응답 본문 로깅 sink (Firehose → S3) ───
+# ⚠️ 여기 담기는 것은 **마스킹되지 않은** 프롬프트/응답 본문이다. 그래서 기본이 false 고,
+#    켜도 그것만으로는 수집이 시작되지 않는다 — gateway-proxy 의 두 번째 잠금(관리자
+#    런타임 토글, /monitoring 화면)이 기본 OFF 다. 즉 인프라 opt-in + 운영자 opt-in 둘 다
+#    필요하고, 켜는 조작은 audit.audit_logs 에 남는다.
+# ⚠️ AWS 네이티브 invocation logging(위 bedrock_invocation_logging)과 다른 것이다.
+#    그쪽은 계정×리전 단위 AWS 설정이고 Mantle 트래픽을 전혀 잡지 못한다. 이 sink 는
+#    게이트웨이가 직접 쓰므로 두 평면을 모두 덮는다.
+module "body_logging" {
+  source = "../../modules/body-logging"
+
+  enabled     = var.enable_body_logging
+  project     = var.project
+  environment = var.environment
+
+  log_retention_days = var.body_log_retention_days
+  # dev 라도 false 다 — 버킷 내용물이 프롬프트 본문이므로 destroy 로 조용히 비워지게
+  # 두지 않는다. 정말 필요하면 tfvars 에서 명시적으로 켠다.
+  force_destroy = false
+
+  tags = var.tags
+}
+
+# ─── Bedrock model-invocation logging (GPT-5.6 runtime plane 본문 감사) ───
+# ⚠️ 이 모듈이 켜지면 us-east-2 **계정 전체** 의 Bedrock 요청/응답 본문이 수집된다.
+#    provider 를 별칭으로 명시 전달하는 것이 필수다(모듈 versions.tf 의
+#    configuration_aliases) — 기본 provider(서울) 상속을 문법 수준에서 막는다.
+# ⚠️ default 는 false 다. dev us-east-2 는 현재 provision_bedrock_invocation_logging.py
+#    가 소유하고 있으므로, 켜기 전에 variables.tf 의 import 절차를 따라야 한다.
+module "bedrock_invocation_logging" {
+  source = "../../modules/bedrock-invocation-logging"
+  providers = {
+    aws.logs = aws.bedrock_openai
+  }
+
+  enabled     = var.enable_bedrock_invocation_logging
+  project     = var.project
+  environment = var.environment
+
+  log_region                = var.bedrock_invocation_log_region
+  log_retention_days        = var.bedrock_invocation_log_retention_days
+  large_body_retention_days = var.bedrock_invocation_log_retention_days
+  # text 만 — 우리가 감사하는 것은 프롬프트/응답 텍스트이고, GPT-5.6 경로에는 image/video
+  # modality 가 없어 켜면 sidecar 용량만 늘고 얻는 게 없다.
+  modalities = ["text"]
 
   tags = var.tags
 }

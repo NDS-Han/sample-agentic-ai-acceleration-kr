@@ -16,7 +16,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 - 🔴 **Code** — the fork's **`us/deploy-fixes`** branch: https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr/tree/us/deploy-fixes/projects/awsome-ai-gateway (deployment · vendor fixes not yet in upstream [aws-samples](https://github.com/aws-samples/sample-agentic-ai-acceleration-kr); the `forked from aws-samples/…` banner is expected). It is **rebased** onto upstream, so hashes change — versions are counted by **`US-NN`**
 - **Region** — `us-west-2` (infrastructure) · inference on **US Geo** (`us.anthropic.*`, spread across us-east-1/2 · us-west-2) · changing region / deploying outside the US: [install-overview §0](install-overview.md#0-이번-배포의-범위-확정) (Korean)
 - **Inference backend** — `bedrock-runtime` + US Geo inference profiles (not Mantle)
-- **Clients · models** — Claude Code (Mac · Windows · Linux) · Cowork · Opus 4.8 · Sonnet 5 · Haiku 4.5 · Opus 5 — a POC adds Cowork · Opus 5 via `US-02`; production (`US-08`) includes them
+- **Clients · models** — Claude Code (Mac · Windows · Linux) · Cowork · Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5 — all included in `US-01`; production (`US-08`) includes them too
 - **Entry point** — POC: http ALB + IP allow-list (mode A), https (`US-06`) with a domain · production (`US-08`): https domain + both admin ALBs internal (site-to-site VPN)
 
 ---
@@ -25,32 +25,31 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 
 **POC and production are different stacks, not options on one stack** — production is not a change to dev but a **new stack in a separate account with `environment=prod`** (`US-08`).
 
-||POC (dev)|Production (prod)|
+| | POC (dev) | Production (prod) |
 |---|---|---|
-|Account · sizing|one account · `environment=dev` (Aurora ×1 · Valkey ×1 · NAT ×1)|**separate account** · `environment=prod` (Aurora ×2 · Valkey 3 shards × 3 · NAT ×2)|
-|Entry point|http ALB + IP allow-list (mode A)|https domain (`US-06`) + both admin ALBs internal (`US-07`, requires a site-to-site VPN)|
-|Procedure|`US-01` — [install-guide.md](install-guide.md) §1–§6|**`US-08`** — [ops/8-P-prod.md](ops/8-P-prod.md) (dev stays as is)|
+| Account · sizing | one account · `environment=dev` (Aurora ×1 · Valkey ×1 · NAT ×1) | **separate account** · `environment=prod` (Aurora ×2 · Valkey 3 shards × 3 · NAT ×2) |
+| Entry point | http ALB + IP allow-list (mode A) | https domain (`US-06`) + both admin ALBs internal (`US-07`, requires a site-to-site VPN) |
+| Procedure | `US-01` — [install-guide.md](install-guide.md) §1–§6 | **`US-08`** — the same install as `US-01`, done in the prod account by following [ops/8-P-prod.md](ops/8-P-prod.md), which tells you at which steps to add the prod settings (https · admin internal · VPN) (dev stays as is) |
 
-|Your setup|POC (dev)|Production (prod)|
+| Your setup | POC (dev) | Production (prod) |
 |---|---|---|
-|Claude Code only (Opus 4.8 · Sonnet 5 · Haiku 4.5)|`US-01`|`US-08`|
-|Claude Code only + **Opus 5**|`US-01` + step `02` of `US-02` (model registration)|`US-08`|
-|Claude Code + **Cowork**|`US-01` + all of `US-02` (`01` routing · `02` model · `03` CloudFront)|`US-08`|
+| Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` (the same install as `US-01`, in the prod account per 8-P — https · admin internal · VPN included) |
+| Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` (same; https included, so no entry choice) |
 
-- **Production (`US-08`)** — includes https (US-06) · admin internal (US-07) · Cowork routing · Opus 5 from the start. `US-03·04·05` are included in new installs (required).
+- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05` are included in every new install (POC and production).
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
+  - **`US-02` is for existing deployments only** — a new install already gets the same content from §4-2 (Opus 5) and §4-3 (Cowork routing). The only piece left for a new install is `03` CloudFront, when Cowork is used without a domain.
   - **`US-10` (Admin UI Cognito login)** — replaces dev-login (a role-select MVP bypass) with a real Cognito login (email/password). Optional but **strongly recommended for production** (lets you open the admin console safely without the §8-S network isolation). New installs still ship with dev-login only from `US-01` alone — apply separately: [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md).
-  - ⚠️ **`US-02` is required even for a new POC install** — the migration seeds the Cowork routing row with a non-existent account, so left as is every Cowork request is a 502. Claude Code only + seed models → can be skipped.
-
+  
 ---
 
 ## 2. Latest updates
 
 **Newest 5 only** — full history (US-01~) and the why · pitfalls per item: [updates.en.md](updates.en.md). `US-NN` is a fixed ID unaffected by rebases. **Check the current state first with [3. Applying updates](#3-applying-updates-on-the-deployment-ec2).**
 
-||ID (doc)|What|Grade · new installs|Existing deployments do|
+| ID (doc) | What | Grade · new installs | Existing deployments do |
 |---|---|---|---|---|
 |[**US-10**](ops/8-L-admin-ui-login.md) 2026/08|Admin UI Cognito login — replaces dev-login|Optional · **strongly recommended for production** · included in new installs (apply separately)|rebuild images → `setup-admin-ui-login.sh` → install-eks → `devLoginEnabled=false`|
 |[**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08|Cowork Windows installer — admin builds one .exe → installs on employee PCs (HKLM policy)|Optional · recommended for Cowork on Windows (replaces manual setup) · no gateway change|on a build PC clone `feat/cowork-installer-import` → `site-config.json` from `07-client-values.sh` → `build.ps1` → install + `setup` on employee PCs|

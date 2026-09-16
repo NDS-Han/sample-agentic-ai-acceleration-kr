@@ -44,6 +44,7 @@ export function PriceSyncButton() {
     setLoading(false);
     if (!res.success) {
       toast({ type: 'error', message: res.error || t('toast.previewFailed'), auto_dismiss_ms: 5000 });
+      setOpen(false);
       return;
     }
     setPreview(res.data);

@@ -90,7 +90,9 @@ class SecurityEventDetector:
                     }
                     await self._redis.publish(
                         "notifications:security",
-                        json.dumps(notification_event),
+                        # ⚠️ model_dump_json() 을 그대로 보내면 안 된다 — worker 는
+                        # payload 봉투를 필수로 요구한다 (SecurityEvent.to_envelope 주석).
+                        json.dumps(event.to_envelope()),
                     )
                     logger.warning(
                         "security_event_published",

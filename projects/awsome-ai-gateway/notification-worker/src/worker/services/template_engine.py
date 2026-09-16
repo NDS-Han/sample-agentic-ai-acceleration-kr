@@ -8,7 +8,15 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import structlog
-from jinja2 import Environment, FileSystemLoader, StrictUndefined, TemplateNotFound, select_autoescape
+from jinja2 import (
+    Environment,
+    FileSystemLoader,
+    StrictUndefined,
+    TemplateNotFound,
+    select_autoescape,
+)
+
+from worker.config import get_settings
 
 from worker.config import get_settings
 

@@ -12,26 +12,32 @@ from worker.schemas.recipients import RecipientRole
 from worker.services.recipient_resolver import RecipientResolver
 
 
+# spec_set (not spec) is deliberate: it makes an assignment to an attribute that does not
+# exist on the real model raise AttributeError. These fixtures previously set `name` and
+# `roles`, neither of which exists on auth.users (the columns are `display_name` and `role`),
+# and plain `spec` allows that — so the resolver received an auto-created child MagicMock,
+# Recipient() rejected it, RecipientResolver swallowed the exception, and the tests asserted
+# on an empty list. spec_set turns that silent drift into an immediate failure.
 def _make_user(
     user_id: str = "u1",
     email: str = "user@example.com",
-    name: str = "Alice",
+    display_name: str = "Alice",
     team_id: str = "t1",
-    roles: list[str] | None = None,
+    role: str = "DEVELOPER",
     is_active: bool = True,
 ) -> User:
-    u = MagicMock(spec=User)
+    u = MagicMock(spec_set=User)
     u.id = user_id
     u.email = email
-    u.name = name
+    u.display_name = display_name
     u.team_id = team_id
-    u.roles = roles or ["USER"]
+    u.role = role
     u.is_active = is_active
     return u
 
 
 def _make_team(team_id: str = "t1", leader_user_id: str | None = "u2") -> Team:
-    t = MagicMock(spec=Team)
+    t = MagicMock(spec_set=Team)
     t.id = team_id
     t.leader_user_id = leader_user_id
     return t
@@ -87,8 +93,8 @@ async def test_resolve_affected_user_no_user_id_returns_empty() -> None:
 
 
 async def test_resolve_admin_returns_all_admins() -> None:
-    admin1 = _make_user("u1", "admin1@example.com", "Admin1", roles=["ADMIN"])
-    admin2 = _make_user("u2", "admin2@example.com", "Admin2", roles=["ADMIN"])
+    admin1 = _make_user("u1", "admin1@example.com", "Admin1", role="ADMIN")
+    admin2 = _make_user("u2", "admin2@example.com", "Admin2", role="ADMIN")
 
     session = AsyncMock()
     result = MagicMock()

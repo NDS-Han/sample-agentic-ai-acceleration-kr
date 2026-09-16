@@ -15,6 +15,7 @@ import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
+import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
 
@@ -49,11 +50,19 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
     if (client && client !== 'all') params.set('client', client);
     fetch(`/api/dashboard/model-share?${params}`)
       .then(async (r) => {
+        // ⚠️ 401 은 화면에 찍을 문자열이 아니다. 이 fetch 는 문서 내비게이션이 아니라
+        //    필터 변경으로 도는 것이어서 middleware 의 만료 분기가 아예 실행되지 않는다
+        //    (middleware 는 `/api/` 를 공개 경로로 통과시킨다). 예전엔 여기서
+        //    "조회 실패: HTTP 401" 을 렌더하고 **낡은 숫자를 그대로 남겼다** —
+        //    사용자는 로그인으로 돌아갈 길조차 없었다. 세션이 죽었으면 로그인으로 보낸다.
+        //    403(권한 부족)은 이 분기에 걸리지 않고 아래 에러 문구로 간다 — 정상이다.
+        if (redirectToLoginIfUnauthorized(r)) return null;
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return (await r.json()) as ModelShareResponse;
       })
       .then((next) => {
-        if (!cancelled) setData(next);
+        // next === null 은 401 리다이렉트 경로 — 낡은 데이터를 덮어쓰지 않고 빠진다.
+        if (!cancelled && next) setData(next);
       })
       .catch((e) => {
         if (!cancelled) setError(e instanceof Error ? e.message : t('fetchFailedShort'));

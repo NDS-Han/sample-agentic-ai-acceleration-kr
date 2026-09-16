@@ -1,6 +1,5 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { adminAPI } from '@/lib/api-client';
 import { KPICard } from '@/components/common/KPICard';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { AlertLevel } from '@/types/enums';
@@ -17,7 +16,7 @@ import {
 import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
 import {
-  fetchDashboardSummary,
+  fetchDashboardKPI,
   fetchModelShare,
   fetchTeamOptions,
   fetchAnalytics,
@@ -26,7 +25,6 @@ import {
   fetchTopTeams,
   fetchAvailablePeriods,
   fetchClientShare,
-  type BudgetSummaryItem,
   type ClientShareResponse,
 } from '@/lib/actions/dashboard';
 import { ModelShareDonutClient } from '@/components/dashboard/ModelShareDonutClient';
@@ -35,14 +33,9 @@ import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
+import { kstNowParts } from '@/lib/utils/period';
 
-interface BudgetSummaryResponse {
-  summary: BudgetSummaryItem[];
-}
 
-interface KeyCountResponse {
-  count: number;
-}
 
 function calcAlertLevel(utilization: number): (typeof AlertLevel)[keyof typeof AlertLevel] {
   if (utilization >= 95) return AlertLevel.CRITICAL;
@@ -73,9 +66,13 @@ function computeDailyAvg(period: string, totalCost: number): {
 } {
   const [y, m] = period.split('-').map(Number);
   const daysInMonth = new Date(y, m, 0).getDate();
-  const now = new Date();
-  const isCurrentMonth = y === now.getFullYear() && m === now.getMonth() + 1;
-  const elapsedDays = isCurrentMonth ? now.getDate() : daysInMonth;
+  // ⚠️ "지금" 은 KST 로 구한다. 분자(summary.total_cost_usd)는 백엔드에서 KST 버킷으로
+  //    집계되는데 분모를 pod 의 UTC 시계로 나누면 매일 00:00~09:00 KST 사이에 경과일이
+  //    하루 적어 일평균이 과대계상되고, 매월 1일 그 9시간 동안은 isCurrentMonth 가
+  //    false 가 되어 월말 예상이 아무 설명 없이 사라진다.
+  const kstNow = kstNowParts();
+  const isCurrentMonth = y === kstNow.y && m === kstNow.m;
+  const elapsedDays = isCurrentMonth ? kstNow.d : daysInMonth;
   const dailyAvg = elapsedDays > 0 ? totalCost / elapsedDays : 0;
   const projection = isCurrentMonth ? dailyAvg * daysInMonth : null;
   return { dailyAvg, projection };
@@ -93,10 +90,14 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
     fetchDashboardSummary(period, client),
   ]);
 
-  const budgetData = budgetResult.status === 'fulfilled' ? budgetResult.value : null;
-  const keysData = keysResult.status === 'fulfilled' ? keysResult.value : null;
-  const modelsData = modelsResult.status === 'fulfilled' ? modelsResult.value : null;
-  const summary = summaryResult.status === 'fulfilled' ? summaryResult.value : null;
+  // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
+  // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
+  // 순차로 돌아 사용자 수에 비례해 느려지는 병목이었다(수백~수천 명 규모에서 수십 초).
+  //
+  // ⚠️ 단일 호출은 "한 번 실패하면 카드가 전부 빈다" 는 대가가 있다. 예전 구조는 카드별
+  //    degradation 이 가능했다. 그래서 실패를 0 으로 접지 않고 **전부 '—' + fetchFailed**
+  //    로 렌더한다 — 부분적으로 그럴듯한 화면보다 "지금 값을 모른다" 가 정확하다.
+  const kpi = await fetchDashboardKPI(period, client).catch(() => null);
 
   // 이번 달 사용량/예산: TEAM 행 + 팀 미소속 USER 행을 합산.
   const summaryItems = budgetData?.summary ?? [];
@@ -115,9 +116,8 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
     : 0;
   const alertLevel = calcAlertLevel(budgetUtilization);
 
-  // 일 평균 / 월말 예상 — summary 의 total_cost_usd 기반 (가짜 없음, 파생값)
-  const { dailyAvg, projection } = summary
-    ? computeDailyAvg(period, summary.total_cost_usd)
+  const { dailyAvg, projection } = kpi
+    ? computeDailyAvg(period, kpi.total_cost_usd)
     : { dailyAvg: 0, projection: null };
 
   return (
@@ -130,26 +130,26 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('usageThisMonth')}
-            value={fmtUsd2(summary?.total_cost_usd ?? totalUsageUsd)}
+            value={kpi ? fmtUsd2(kpi.total_cost_usd) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
-            description={t('usageThisMonthDesc')}
+            description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('budgetUtilization')}
-            value={`${budgetUtilization.toFixed(1)}%`}
+            value={budgetUtilization != null ? `${budgetUtilization.toFixed(1)}%` : '—'}
             icon={<BarChart3 size={18} aria-hidden="true" />}
             alertLevel={alertLevel}
-            description={t('budgetUtilizationDesc')}
+            description={budgetUtilization != null ? t('budgetUtilizationDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('avgCostPerUser')}
-            value={summary ? fmtUsd2(summary.cost_per_user_usd) : '—'}
+            value={kpi ? fmtUsd2(kpi.cost_per_user_usd) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
-            description={summary ? t('avgCostPerUserDesc', { count: summary.active_users }) : t('fetchFailed')}
+            description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
           />
           <KPICard
             title={t('dailyAvg')}
-            value={summary ? fmtUsd2(dailyAvg) : '—'}
+            value={kpi ? fmtUsd2(dailyAvg) : '—'}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null
@@ -168,27 +168,27 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('totalRequests')}
-            value={summary ? summary.total_requests.toLocaleString() : '—'}
+            value={kpi ? kpi.total_requests.toLocaleString() : '—'}
             icon={<Activity size={18} aria-hidden="true" />}
             description={t('totalRequestsDesc')}
           />
           <KPICard
             title={t('totalTokens')}
-            value={summary ? formatTokens(summary.total_tokens) : '—'}
+            value={kpi ? formatTokens(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
           />
           <KPICard
             title={t('activeKeys')}
-            value={activeKeys}
+            value={kpi ? kpi.active_keys.toLocaleString() : '—'}
             icon={<Key size={18} aria-hidden="true" />}
-            description={t('activeKeysDesc')}
+            description={kpi ? t('activeKeysDesc') : t('fetchFailed')}
           />
           <KPICard
             title={t('activeModels')}
-            value={activeModels}
+            value={kpi ? kpi.active_models.toLocaleString() : '—'}
             icon={<Cpu size={18} aria-hidden="true" />}
-            description={t('activeModelsDesc')}
+            description={kpi ? t('activeModelsDesc') : t('fetchFailed')}
           />
         </div>
       </section>

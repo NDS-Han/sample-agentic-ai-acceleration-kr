@@ -74,7 +74,7 @@ def upgrade() -> None:
             (client, backend, account_role_arn, region, default_model, external_id, enabled)
         VALUES
             ('cowork', 'mantle',
-             'arn:aws:iam::234567890123:role/llm-gateway-cowork-bedrock',
+             'arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock',
              'ap-northeast-1', 'cowork-opus', 'cowork-bedrock', true)
         ON CONFLICT (client) DO NOTHING
         """

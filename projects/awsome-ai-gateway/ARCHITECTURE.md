@@ -1,10 +1,10 @@
 # LLM Gateway — Architecture & Data Flows
 
 > **메인 배포 계정: `123456789012` (ap-northeast-2, dev/prod EKS Fargate).** 게이트웨이 전 서비스 + Aurora + AgentCore Runtime + AgentCore 웹서치 Gateway + ECR 가 이 계정에 있고 `gateway-proxy` IRSA 도 이 계정에 속한다.
-> **3-client × 멀티계정 백엔드:** `claude-code` → **345678901234** cross-account Bedrock **NATIVE** (실패 시 859 in-account 투명 폴백), `codex` → **859 in-account** Mantle GPT-5.5 (us-east-2), `cowork` → **234567890123** cross-account Mantle Opus 4.8 (도쿄 ap-northeast-1).
+> **3-client × 멀티계정 백엔드:** `claude-code` → **333344445555** cross-account Bedrock **NATIVE** (실패 시 859 in-account 투명 폴백), `codex` → **859 in-account** Mantle GPT-5.5 (us-east-2), `cowork` → **222233334444** cross-account Mantle Opus 4.8 (도쿄 ap-northeast-1).
 > Last updated: 2026-07-09 (3-client 라우팅 + claude-code→374 cross-account native 컷오버(0022) + 서버사이드 웹서치(0021) + resilience 반영).
 
-이 문서는 **as-built** 시스템을 기술한다: 배포된 컴포넌트, 데이터 스토어, 인증 모델, 3-client × 멀티계정 데이터플로우(요청/비용·사용량/client 태그/cross-account/웹서치), 그리고 resilience/scale 특성. 기능별 근거는 `deepdive.md`, 부하 분석은 `devlog_websearch.md §부하 분석`, 사용자 온보딩은 `guides/QUICKSTART.md` 참조.
+이 문서는 **as-built** 시스템을 기술한다: 배포된 컴포넌트, 데이터 스토어, 인증 모델, 3-client × 멀티계정 데이터플로우(요청/비용·사용량/client 태그/cross-account/웹서치), 그리고 resilience/scale 특성. 사용자 온보딩은 `guides/QUICKSTART.md`, 배포 절차는 `guides/deployer-guide.md` 참조.
 
 ---
 
@@ -21,9 +21,9 @@ LLM Gateway 는 사내 코딩 에이전트 **3-client** — **Claude Code**, **C
 
 | client | 진입 경로 | 백엔드 종류 | 대상 계정/리전 | 방언 |
 |---|---|---|---|---|
-| **claude-code** | `/v1/messages` | Bedrock **native** (boto3 `invoke_model`) | 345678901234 / ap-northeast-2 (cross-account, 실패 시 859 폴백) | Anthropic Messages |
+| **claude-code** | `/v1/messages` | Bedrock **native** (boto3 `invoke_model`) | 333344445555 / ap-northeast-2 (cross-account, 실패 시 859 폴백) | Anthropic Messages |
 | **codex** | `/v1/responses` | Bedrock **Mantle** (async httpx bearer, GPT-5.5) | 859 in-account / us-east-2 (오하이오) | OpenAI Responses |
-| **cowork** | `/v1/messages` | Bedrock **Mantle** (async httpx bearer, Opus 4.8) | 234567890123 / ap-northeast-1 (도쿄, cross-account) | Anthropic Messages |
+| **cowork** | `/v1/messages` | Bedrock **Mantle** (async httpx bearer, Opus 4.8) | 222233334444 / ap-northeast-1 (도쿄, cross-account) | Anthropic Messages |
 
 ```
                           ┌──────────────────── CONTROL PLANE ────────────────────┐
@@ -167,7 +167,7 @@ POST /v1/messages  (Bearer VK)
 
 ## 6. claude-code → 374 cross-account Bedrock NATIVE
 
-claude-code inference 는 **345678901234 계정의 bedrock-runtime(boto3 `invoke_model`) native** 로 나간다. Mantle 이 아니다. Bedrock native 는 원래 cross-account 미지원(startup 에 in-account 859 클라이언트 고정)이라, 이 경로는 대상 계정 role 을 STS AssumeRole 하여 그 계정의 bedrock-runtime 클라이언트를 빌드·캐시한다.
+claude-code inference 는 **333344445555 계정의 bedrock-runtime(boto3 `invoke_model`) native** 로 나간다. Mantle 이 아니다. Bedrock native 는 원래 cross-account 미지원(startup 에 in-account 859 클라이언트 고정)이라, 이 경로는 대상 계정 role 을 STS AssumeRole 하여 그 계정의 bedrock-runtime 클라이언트를 빌드·캐시한다.
 
 ```
 client=claude-code → routing_profiles row (backend=invoke, account_role_arn=374…claude-code-bedrock,
@@ -273,7 +273,7 @@ Bedrock/Mantle 은 Anthropic native server-side `web_search` 를 노출하지 �
 3. uvicorn `--limit-concurrency` 백프레셔.
 4. 커스텀 메트릭(활성 SSE/동시성 기준) HPA.
 
-**관련 함정:** boto3 소켓 풀 하드캡 `max_pool_connections=50`(in-account/cross-account 동일, 5000 SSE 규모엔 상향 검토 — 200~500). uvicorn `--workers 4` 는 Dockerfile CMD 하드코딩이라 env override 불가. DB 커넥션 풀은 이 병목의 직접 원인이 **아니다**(인증 short-lived, `pool_timeout=10s` fast-fail). 상세·로드맵·승인 게이트: `devlog_websearch.md §부하 분석`.
+**관련 함정:** boto3 소켓 풀 하드캡 `max_pool_connections=50`(in-account/cross-account 동일, 5000 SSE 규모엔 상향 검토 — 200~500). uvicorn `--workers 4` 는 Dockerfile CMD 하드코딩이라 env override 불가. DB 커넥션 풀은 이 병목의 직접 원인이 **아니다**(인증 short-lived, `pool_timeout=10s` fast-fail). 상향은 부하 시험 결과에 따른 승인 게이트 대상이다.
 
 ---
 
@@ -405,4 +405,4 @@ admin-ui(Next.js)는 server-only `adminAPI` 클라이언트(`src/lib/api-client.
 | 4 | User-pool separation | ⏳ 진행 |
 | 5 | **Dashboard distinguishes client(client-share donut + filter)** | ✅ (admin-ui 구현 완료) |
 
-계정 매핑 요약: **123456789012** = 메인 배포(게이트웨이/Aurora/AgentCore/ECR), **345678901234** = claude-code 전용 cross-account Bedrock native(같은 계정에 도는 `ds-*` 는 별도 프로젝트), **234567890123** = cowork 전용 cross-account Mantle(도쿄). 세 계정은 중복 없이 분리된다.
+계정 매핑 요약: **123456789012** = 메인 배포(게이트웨이/Aurora/AgentCore/ECR), **333344445555** = claude-code 전용 cross-account Bedrock native(같은 계정에 도는 `ds-*` 는 별도 프로젝트), **222233334444** = cowork 전용 cross-account Mantle(도쿄). 세 계정은 중복 없이 분리된다.

@@ -15,8 +15,15 @@ import os
 import pytest
 import httpx
 
+from tests.integration.conftest import live_stack_gate
+
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
+
+# ⚠️ 라이브 스택(gateway-proxy:8000 + admin-api:8080 + seed 된 DB)이 없으면 skip.
+#    게이트가 없던 동안 그냥 `pytest` 는 httpx.ConnectError 로 RED 였다 — CI 를 붙이면
+#    첫날부터 빨강이라 "빨강은 원래 그런 것"이 되어 진짜 회귀를 가린다.
+pytestmark = live_stack_gate()
 
 
 @pytest.fixture
@@ -36,7 +43,7 @@ def test_count_tokens_auth_required():
     resp = httpx.post(
         f"{GATEWAY_URL}/v1/messages/count_tokens",
         json={
-            "model": "claude-haiku-4-5",
+            "model": "claude-haiku-4-5-20251001",
             "messages": [{"role": "user", "content": "hi"}],
         },
         timeout=10,
@@ -54,7 +61,7 @@ def test_count_tokens_accepts_vk_and_returns_input_tokens(virtual_key):
             "anthropic-version": "2023-06-01",
         },
         json={
-            "model": "claude-haiku-4-5",
+            "model": "claude-haiku-4-5-20251001",
             "messages": [{"role": "user", "content": "hello world"}],
         },
         timeout=15,

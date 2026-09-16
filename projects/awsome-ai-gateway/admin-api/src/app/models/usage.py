@@ -80,6 +80,21 @@ class UsageLog(Base):
     # gateway-proxy; read-only here. DB column is `text` (migration 0007) — use
     # unbounded String() to match it and avoid an autogenerate-truncation footgun.
     client: Mapped[str | None] = mapped_column(String(), nullable=True)
+    # SSO subject (OIDC `sub`). Written by gateway-proxy; read-only here.
+    sso_subject: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    # AWS `x-amzn-requestid` of the underlying Bedrock invocation — the join key to the
+    # Bedrock model-invocation log record (index idx_usage_logs_bedrock_req).
+    #
+    # NULL is a meaningful value here, not missing data, and the reconciler must not
+    # report it as a gap: the Mantle plane emits no log record at all (and its
+    # OpenAI-style ``req_…`` id joins to nothing), and the web-search path sums N
+    # invocations into one row so a single id would misreport 1:N as a clean 1:1.
+    #
+    # These two columns existed in db/init/02_create_tables.sql:377-378 but were never
+    # mirrored here. Unlike the provider enum, a MISSING column is silent — SQLAlchemy
+    # simply never selects it — so admin-api could not read the join key at all while
+    # every test passed. No migration needed; this is pure mirror drift.
+    bedrock_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 # ── ROIAggregation ──
@@ -137,6 +152,13 @@ class ProductivityEvent(Base):
     lines_generated: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     lines_accepted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     language: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    #: 웹훅 재전송 중복 제거 키. 호출자가 이벤트마다 안정된 값을 넣는다.
+    #:
+    #: ⚠️ ``unique=True`` 를 여기 붙이지 않는다. DB 의 실제 제약은 **부분** 유니크
+    #:    인덱스(``WHERE idempotency_key IS NOT NULL``, migration 0034)이고,
+    #:    ORM 에 전체 유니크로 선언하면 메타데이터가 실물과 어긋난다 — NULL 을 넣는
+    #:    호출자(키 없는 이벤트)가 두 번째부터 막히는 형태로 드리프트한다.
+    idempotency_key: Mapped[str | None] = mapped_column(String(256), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 

@@ -19,10 +19,9 @@ locals {
 module "vpc" {
   source = "../../modules/vpc"
 
-  aws_region = var.aws_region
-
   project                  = var.project
   environment              = var.environment
+  aws_region               = var.aws_region
   cidr                     = var.vpc_cidr
   azs                      = var.azs
   private_subnet_cidrs     = var.private_subnet_cidrs
@@ -36,13 +35,21 @@ module "vpc" {
 module "eks" {
   source = "../../modules/eks-fargate"
 
-  project             = var.project
-  environment         = var.environment
-  cluster_version     = var.eks_cluster_version
-  addon_versions      = var.eks_addon_versions # null => 모듈 기본값(1.34 호환)
-  vpc_id              = module.vpc.vpc_id
-  private_subnet_ids  = module.vpc.private_subnet_ids
-  public_access_cidrs = ["0.0.0.0/0"] # dev는 공개 접근 허용
+  project     = var.project
+  environment = var.environment
+  # 두 값은 minor 홉마다 **함께** 움직이고, prod 는 dev 가 같은 홉을 통과한 뒤에 올린다.
+  # 순서/기한은 variables.tf 의 eks_cluster_version · eks_addon_versions 주석 참고
+  # (현재 1.31, 목표 1.36).
+  cluster_version    = var.eks_cluster_version
+  addon_versions     = var.eks_addon_versions
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+  # ⚠️ 이 주석은 dev 에서 복사돼 온 것이고 값은 prod 에도 그대로 적용돼 있다 —
+  #    즉 **prod EKS public API endpoint 가 전 인터넷에 열려 있다**(라이브 실측 확인).
+  #    좁히는 것은 kubectl 접근 경로(운영자 IP/CI/VPN)를 확정해야 하는 별개 결정이므로
+  #    이 커밋에서는 값을 바꾸지 않고 사실만 명시한다. 좁힐 때는 EKS access entry 로
+  #    잠금 상태를 먼저 확인할 것(잘못 좁히면 클러스터 관리 접근이 끊긴다).
+  public_access_cidrs = ["0.0.0.0/0"]
 
   application_namespace = var.application_namespace
   access_entries        = var.eks_access_entries
@@ -58,8 +65,37 @@ module "irsa" {
   oidc_provider_arn          = module.eks.oidc_provider_arn
   k8s_namespace              = var.application_namespace
   bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
-  mantle_regions             = var.mantle_regions
   cognito_user_pool_arn      = module.cognito.user_pool_arn
+  mantle_regions             = var.mantle_regions
+
+  # 본문 로깅 sink 쓰기 권한(쓰기 전용). body_logging 이 꺼져 있으면 빈 문자열이 와서
+  # statement 가 렌더되지 않는다.
+  body_log_firehose_arn = module.body_logging.firehose_stream_arn
+  body_log_bucket_arn   = module.body_logging.bucket_arn
+
+  tags = var.tags
+}
+
+# ─── 요청/응답 본문 로깅 sink (Firehose → S3) ───
+# ⚠️ 여기 담기는 것은 **마스킹되지 않은** 프롬프트/응답 본문이다. 그래서 기본이 false 고,
+#    켜도 그것만으로는 수집이 시작되지 않는다 — gateway-proxy 의 두 번째 잠금(관리자
+#    런타임 토글, /monitoring 화면)이 기본 OFF 다. 인프라 opt-in + 운영자 opt-in 둘 다
+#    필요하고, 켜는 조작은 audit.audit_logs 에 불변 행으로 남는다.
+# ⚠️ prod 에는 AWS 네이티브 invocation logging 모듈이 없다(그쪽은 dev 에서만 terraform 이
+#    소유한다). 이 sink 는 그것과 전혀 다른 것이다 — 계정×리전 단위 싱글턴 설정이 아니라
+#    이 스택이 만드는 일반 리소스라, 소유자 충돌이나 남의 설정을 덮어쓸 위험이 없다.
+module "body_logging" {
+  source = "../../modules/body-logging"
+
+  enabled     = var.enable_body_logging
+  project     = var.project
+  environment = var.environment
+
+  log_retention_days = var.body_log_retention_days
+  kms_key_arn        = var.body_log_kms_key_arn
+  # prod 은 반드시 false — 마스킹되지 않은 본문이 든 버킷이 destroy 한 번에 비워지지
+  # 않게 한다.
+  force_destroy = false
 
   tags = var.tags
 }

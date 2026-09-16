@@ -32,12 +32,19 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
     // provider → api_format 매핑(백엔드 model.api_format enum 과 정합).
     //   BEDROCK              → BEDROCK_NATIVE
     //   BEDROCK_MANTLE       → ANTHROPIC_MESSAGES (Cowork Mantle Opus, /anthropic/v1/messages)
-    //   BEDROCK_MANTLE_OPENAI→ OPENAI_RESPONSES   (Mantle GPT-5.5, /openai/v1/responses)
+    //   BEDROCK_MANTLE_OPENAI→ OPENAI_RESPONSES   (Codex Mantle GPT-5.5, /openai/v1/responses)
+    //   BEDROCK_RUNTIME_OPENAI→OPENAI_RESPONSES   (GPT-5.6, bedrock-runtime + CRIS)
     //   OPENMODEL/그 외       → OPENAI_COMPATIBLE  (/v1/chat/completions)
+    //
+    // 두 OpenAI plane 이 같은 api_format 인 것은 의도된 것이다. api_format 은 **방언**을
+    // 가리키고 plane 은 provider 가 가리킨다. runtime plane 행은 /v1/responses 와
+    // /v1/chat/completions 를 **둘 다** 서비스하지만, 둘이 같은 OpenAI 방언이므로
+    // 새 api_format 값을 만들 이유가 없다(마이그레이션 0031 참조).
     const apiFormatByProvider: Record<string, string> = {
       BEDROCK: 'BEDROCK_NATIVE',
       BEDROCK_MANTLE: 'ANTHROPIC_MESSAGES',
       BEDROCK_MANTLE_OPENAI: 'OPENAI_RESPONSES',
+      BEDROCK_RUNTIME_OPENAI: 'OPENAI_RESPONSES',
       OPENMODEL: 'OPENAI_COMPATIBLE',
     };
     await withRetry(() => adminAPI.post('/admin/models', {

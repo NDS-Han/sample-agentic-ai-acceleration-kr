@@ -12,6 +12,14 @@ from sqlalchemy.exc import DBAPIError
 
 from app.schemas.domain import ProviderType, TokenUsage
 from app.schemas.responses import ModelObject, ModelPricingObject, ModelsListResponse
+from app.services.body_log_records import (
+    build_body_record_for_nonstream,
+    build_body_record_for_stream,
+    model_alias_of,
+    provider_name,
+    resolve_body_logger,
+)
+from app.services.fallback_loop import release_reservations
 from app.services.router_service import ModelInactiveError, RouterService
 from app.services.streaming import openai_sse_stream
 
@@ -19,6 +27,17 @@ logger = structlog.get_logger(__name__)
 
 router = APIRouter()
 _router_service = RouterService()
+
+# Routing-profile `backend` values whose client may use /v1/responses.
+#   mantle         — the original Codex → Bedrock Mantle path (bearer, openai.gpt-5.x).
+#   bedrock_openai — runtime plane only (SigV4 + CRIS ids), for a client with no Mantle
+#                    entitlement at all.
+# Which PLANE a given request goes out on is decided by the resolved model row's provider,
+# not by this value: a `mantle` client that asks for a BEDROCK_RUNTIME_OPENAI alias is
+# served on the runtime plane. This gate only answers "is /v1/responses serviceable for
+# this client at all", which is why both values are accepted and `invoke` (Bedrock native,
+# e.g. claude-code) still is not.
+_RESPONSES_BACKENDS = frozenset({"mantle", "bedrock_openai"})
 
 
 @router.get("/v1/models")
@@ -122,13 +141,15 @@ async def completions(request: Request) -> StreamingResponse | JSONResponse:
 
 @router.post("/v1/responses", response_model=None)
 async def responses(request: Request) -> StreamingResponse | JSONResponse:
-    """OpenAI **Responses API** endpoint — Codex -> Bedrock Mantle GPT-5.5.
+    """OpenAI **Responses API** endpoint — Codex -> Bedrock (Mantle or runtime plane).
 
-    Distinct from _handle_openai (Chat Completions -> OPENMODEL/vLLM): this path is
-    routing-profile-driven. A request whose identified client has a `mantle` routing
-    profile (e.g. codex) is dispatched to the BEDROCK_MANTLE_OPENAI adapter using the
-    profile's region/account + the profile's default_model alias. We deliberately do
-    NOT touch _handle_openai so the existing chat/completions behaviour is unchanged.
+    Routing-profile-driven: a request whose identified client has a Responses-capable
+    routing profile (`mantle` or `bedrock_openai`, e.g. codex) is dispatched to the
+    adapter that matches the RESOLVED MODEL's provider — BEDROCK_MANTLE_OPENAI (bearer,
+    openai.gpt-5.x) or BEDROCK_RUNTIME_OPENAI (SigV4, us./global. CRIS) — using the
+    profile's account + the client's model, falling back to the profile's default_model.
+    Both planes speak the same Responses dialect, so everything downstream of the adapter
+    (SSE re-framing, usage parsing, costing) is shared.
     """
     return await _handle_responses(request)
 
@@ -184,6 +205,9 @@ async def _handle_openai(request: Request, path: str):
     if auth_context:
         try:
             _router_service.check_key_scope(auth_context, model_config)
+            # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
+            # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
+            _router_service.check_client_model_scope(model_config, state.get("client"))
         except PermissionError:
             return JSONResponse(
                 status_code=400,
@@ -207,18 +231,74 @@ async def _handle_openai(request: Request, path: str):
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
+            metrics=getattr(request.app.state, "metrics", None),
         )
         if rejected is not None:
             return rejected
 
-    adapter = registry.get(ProviderType.OPENMODEL)
+    # Which plane serves this Chat request is decided by the RESOLVED MODEL, not by the
+    # path: OPENMODEL → in-house vLLM (default, unchanged), BEDROCK_RUNTIME_OPENAI →
+    # bedrock-runtime's OpenAI Chat endpoint (SigV4 + CRIS model id, GPT-5.6). The two
+    # adapters take different kwargs — vLLM is addressed by `path` against a fixed base
+    # URL, the Bedrock one by the alias's own endpoint + a wire selector — so the call
+    # kwargs are built here once and reused by both the streaming and non-streaming call.
+    is_bedrock_runtime = model_config.provider == ProviderType.BEDROCK_RUNTIME_OPENAI
+    if is_bedrock_runtime:
+        if path != "/v1/chat/completions":
+            # The runtime plane serves /openai/v1/chat/completions and
+            # /openai/v1/responses only — there is no legacy /v1/completions. Refusing is
+            # correct: silently rerouting a completions request to the chat wire would
+            # return a response shape the client cannot parse.
+            return JSONResponse(
+                status_code=404,
+                content={"error": {"type": "not_found",
+                                   "message": f"Model '{model_config.alias}' does not support {path}"}},
+            )
+        adapter = registry.get(ProviderType.BEDROCK_RUNTIME_OPENAI)
+        # The routing profile only supplies the cross-account role here (the signing
+        # region comes from the alias endpoint). Absent profile/loader → None → the
+        # signer uses the pod's own IRSA identity, which is the in-account case.
+        routing_loader = getattr(request.app.state, "routing_profile_loader", None)
+        profile = None
+        if routing_loader is not None:
+            try:
+                if not is_db_degraded and session_factory is not None:
+                    async with session_factory() as db:
+                        profile = await routing_loader.load(redis, db, client)
+                else:
+                    profile = await routing_loader.load(redis, None, client)
+            except Exception:
+                # A profile is optional on this path; failing to load one must not turn a
+                # servable in-account request into a 500.
+                logger.warning("chat_routing_profile_load_failed", client=client)
+        invoke_kwargs = {"profile": profile, "endpoint": model_config.endpoint, "wire": "chat"}
+        # Rewrite the outgoing model id to the CRIS inference-profile id. Unlike the vLLM
+        # adapter (which rewrites `model` itself), this adapter must send the body bytes
+        # verbatim — the SigV4 signature covers them — so the substitution happens here,
+        # before signing. Bedrock rejects our aliases; it only knows us./global. ids.
+        if isinstance(req_data, dict):
+            req_data["model"] = model_config.provider_model_id
+            body = json.dumps(req_data).encode()
+    else:
+        adapter = registry.get(ProviderType.OPENMODEL)
+        invoke_kwargs = {"path": path}
     rate_limit_state = state.get("rate_limit_state")
     tokenizer = getattr(request.app.state, "tokenizer", None)
 
     if is_stream:
-        status, chunk_iter, headers = await adapter.invoke_stream(
-            body, model_config.provider_model_id, path=path
-        )
+        if is_bedrock_runtime:
+            # 4-tuple (…, aws_request_id) — the join key to the Bedrock model-invocation
+            # log for this call, persisted as usage_logs.bedrock_request_id below.
+            status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+        else:
+            # vLLM is a 3-tuple and has no AWS request id — there is no Bedrock
+            # invocation-log record to join to, so None is the truthful value.
+            status, chunk_iter, headers = await adapter.invoke_stream(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+            aws_request_id = None
 
         # KI-08: OpenAI path는 tiktoken(cl100k_base) 근사로 출력 토큰 역산.
         async def _estimate(text: str) -> int | None:
@@ -226,7 +306,7 @@ async def _handle_openai(request: Request, path: str):
                 return None
             return await tokenizer.estimate_output_tokens(
                 text,
-                provider=ProviderType.OPENMODEL,
+                provider=model_config.provider,
                 model_id=model_config.provider_model_id,
             )
 
@@ -249,19 +329,59 @@ async def _handle_openai(request: Request, path: str):
                 ttft_ms=ttft_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=aws_request_id,
                 client=client,
             )
 
+        # ⚠️ 상류가 비-2xx 면 SSE 제너레이터는 오류 프레임만 내보내고 on_usage 는 발화하지
+        #    않는다 → finalize 가 돌지 않아 예약이 창(window) 끝까지 남는다. 스트림을
+        #    클라이언트에게 넘기기 **전에** 되돌린다(release_reservations 는 멱등).
+        if not (200 <= status < 300):
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+
+        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+            """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=aws_request_id,
+                )
+            )
+
+        # ⚠️ **사전** 게이팅. on_complete 를 넘기면 제너레이터가 SSE 프레임 전문을 메모리에
+        #    누적하므로(services/streaming.py), 스트림이 시작되기 **전에** 판정해야 한다.
+        _on_complete = (
+            _log_body_stream
+            if await resolve_body_logger(request.app.state, redis, session_factory)
+            else None
+        )
+
         return StreamingResponse(
             openai_sse_stream(
-                request, chunk_iter, on_usage=_record, tokenizer_hook=_estimate
+                request,
+                chunk_iter,
+                on_usage=_record,
+                tokenizer_hook=_estimate,
+                on_complete=_on_complete,
             ),
             status_code=status,
             media_type="text/event-stream",
         )
     else:
-        status, response_body, _, usage = await adapter.invoke(
-            body, model_config.provider_model_id, path=path
+        status, response_body, resp_headers, usage = await adapter.invoke(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -276,8 +396,42 @@ async def _handle_openai(request: Request, path: str):
                 ttft_ms=duration_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
+                # Both streaming and non-streaming are captured by Bedrock invocation
+                # logging (measured 2026-09-03 — one record per invocation either way), so
+                # this row is joinable exactly like the streaming branch above.
+                # vLLM returns {} here → None → column stays NULL (nothing to join to).
+                bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
             )
+        else:
+            # ⚠️ finalize 를 타지 않는 경로다(상류 4xx/5xx, 또는 usage 가 비어 온 응답).
+            #    그러면 enforce_rate_limits 가 잡아 둔 TPM/CPM/CPH 예약을 되돌리는 곳이
+            #    아무 데도 없다 — 이 라우트에는 폴백 루프가 없어 그쪽 unwind 도 안 돈다.
+            #    400 을 연속으로 받은 사용자가 실제 지출 0 으로 자기 한도를 소진했다.
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+
+        # 본문 로깅(성공 **및** 오류). 위 cost_recorder 블록과 달리 토큰 수를 조건으로
+        # 걸지 않는다 — 조사에 필요한 것은 오히려 실패한 요청의 본문이고, 실패한 호출은
+        # usage 가 0 이라 그 조건을 달면 정확히 필요한 레코드만 사라진다.
+        body_logger = await resolve_body_logger(request.app.state, redis, session_factory)
+        if body_logger is not None:
+            await body_logger.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status_code=status,
+                    request_body=body,
+                    response_body=response_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
+                )
+            )
+
         try:
             content = json.loads(response_body)
         except Exception:
@@ -286,11 +440,12 @@ async def _handle_openai(request: Request, path: str):
 
 
 async def _handle_responses(request: Request):
-    """Routing-profile-driven OpenAI Responses handler (Codex -> Mantle GPT-5.5).
+    """Routing-profile-driven OpenAI Responses handler (Codex -> Mantle **or** runtime).
 
-    Resolves the backend from the identified client's routing profile (mantle), then
-    dispatches to BEDROCK_MANTLE_OPENAI. Auth/key-scope/rate-limit/cost mirror the
-    chat path; budget enforcement already ran in middleware (path now registered).
+    Two-step resolution: the routing profile decides whether this client may use
+    /v1/responses at all (_RESPONSES_BACKENDS), and the resolved model row's provider
+    decides which Bedrock plane serves it. Auth/key-scope/rate-limit/cost mirror the chat
+    path; budget enforcement already ran in middleware (path now registered).
     """
     import json
 
@@ -337,8 +492,9 @@ async def _handle_responses(request: Request):
     # Before this, the profile's default_model was the ONLY reachable model on this
     # route, so registering three GPT-5.6 aliases would have left all three
     # unreachable: a client sending {"model": "codex-gpt-5.6-sol"} still got the
-    # default. Now the client's own model wins WHEN it resolves to an ACTIVE
-    # BEDROCK_MANTLE_OPENAI alias.
+    # default. Now the client's own model wins WHEN it resolves to an ACTIVE alias on
+    # either OpenAI-Responses plane (BEDROCK_MANTLE_OPENAI or BEDROCK_RUNTIME_OPENAI) —
+    # which is also how one client reaches both planes by model name alone.
     #
     # Falling back (rather than 404ing) on an unresolvable value is what makes this
     # change regression-free for existing clients: Codex always sends SOME model id,
@@ -437,7 +593,11 @@ async def _handle_responses(request: Request):
         if not is_db_degraded and session_factory is not None:
             async with session_factory() as db:
                 profile = await _load_profile(db)
-                if profile is None or profile.backend != "mantle" or not profile.default_model:
+                if (
+                    profile is None
+                    or profile.backend not in _RESPONSES_BACKENDS
+                    or not profile.default_model
+                ):
                     return JSONResponse(
                         status_code=404,
                         content={"error": {"type": "not_found",
@@ -446,7 +606,11 @@ async def _handle_responses(request: Request):
                 model_config = await _resolve_model(db, profile)
         else:
             profile = await _load_profile(None)
-            if profile is None or profile.backend != "mantle" or not profile.default_model:
+            if (
+                profile is None
+                or profile.backend not in _RESPONSES_BACKENDS
+                or not profile.default_model
+            ):
                 return JSONResponse(
                     status_code=404,
                     content={"error": {"type": "not_found",
@@ -464,6 +628,9 @@ async def _handle_responses(request: Request):
     if auth_context:
         try:
             _router_service.check_key_scope(auth_context, model_config)
+            # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
+            # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
+            _router_service.check_client_model_scope(model_config, state.get("client"))
         except PermissionError:
             return JSONResponse(
                 status_code=400,
@@ -483,20 +650,54 @@ async def _handle_responses(request: Request):
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
+            metrics=getattr(request.app.state, "metrics", None),
         )
         if rejected is not None:
             return rejected
 
-    adapter = registry.get(ProviderType.BEDROCK_MANTLE_OPENAI)
+    # PLANE SELECTION — by the resolved model row, not by the routing profile.
+    # BEDROCK_MANTLE_OPENAI → Mantle bearer plane; BEDROCK_RUNTIME_OPENAI → bedrock-runtime
+    # SigV4 plane with a CRIS model id. resolve_codex_model() accepts exactly these two
+    # (OPENAI_RESPONSES_PROVIDERS), so registry.get() cannot land on an unrelated adapter,
+    # and both take the same (profile, endpoint) kwargs plus a wire selector — the runtime
+    # adapter serves two wires and needs to be told which; the Mantle adapter only serves
+    # /v1/responses and absorbs the kwarg. One dict therefore drives every call below,
+    # including the web-search loop's per-turn invokes.
+    adapter = registry.get(model_config.provider)
+    invoke_kwargs = {
+        "profile": profile,
+        "endpoint": model_config.endpoint,
+        "wire": "responses",
+    }
     rate_limit_state = state.get("rate_limit_state")
 
     # Rewrite the outgoing model id to the resolved provider_model_id (e.g. openai.gpt-5.5,
-    # openai.gpt-5.6-terra), so the alias the client sent (codex-gpt-5.6-terra) — or the
-    # profile default, when the client sent something we do not recognise — maps to the
-    # Mantle model. Mantle only accepts provider model ids, never our aliases.
+    # openai.gpt-5.6-terra on Mantle, us.openai.gpt-5.6-terra on the runtime plane), so the
+    # alias the client sent (codex-gpt-5.6-terra) — or the profile default, when the client
+    # sent something we do not recognise — maps to the real model. Neither plane accepts
+    # our aliases; the runtime plane additionally requires the CRIS prefix, which is why it
+    # is stored in provider_model_id rather than added here.
     if isinstance(req_data, dict):
         req_data["model"] = model_config.provider_model_id
         body = json.dumps(req_data).encode()
+
+    # KI-08 역산용 토크나이저 훅. 이 방언은 usage 가 종결 이벤트(response.completed)
+    # 안에만 있어서, 상류가 그 전에 끊기면 역산 없이는 usage 가 전부 0 이 되고
+    # cost_recorder 가 usage_logs 행을 아예 만들지 않는다.
+    #
+    # ⚠️ 정의가 **웹서치 분기보다 앞**에 있어야 한다. 그 분기는 아래 `if is_stream:` 보다
+    #    먼저 리턴하므로, 정의를 그 블록 안에 두면 웹서치 경로에서 UnboundLocalError 가
+    #    된다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는 안 잡힌다).
+    _tokenizer = getattr(request.app.state, "tokenizer", None)
+
+    async def _estimate(text: str) -> int | None:
+        if not _tokenizer:
+            return None
+        return await _tokenizer.estimate_output_tokens(
+            text,
+            provider=model_config.provider,
+            model_id=model_config.provider_model_id,
+        )
 
     # --- Server-side web search (Architecture C) — opt-in per routing profile ---
     # When the codex profile enables web search AND the AgentCore MCP client is present,
@@ -517,26 +718,84 @@ async def _handle_responses(request: Request):
         async def _ws_invoke(turn_body: dict) -> tuple[int, bytes, dict, TokenUsage]:
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke(
-                json.dumps(tb).encode(), _pmid, profile=profile, endpoint=model_config.endpoint
-            )
+            return await adapter.invoke(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
 
         async def _ws_invoke_stream(turn_body: dict):
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke_stream(
-                json.dumps(tb).encode(), _pmid, profile=profile, endpoint=model_config.endpoint
-            )
+            return await adapter.invoke_stream(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
                 return
             duration_ms = int((time.monotonic() - start_time) * 1000)
+            # bedrock_request_id is deliberately NOT set on the web-search path, and left
+            # NULL. The loop makes N Bedrock invocations (one per tool-use turn) whose
+            # usage is summed into ONE usage_logs row, so no single x-amzn-requestid is
+            # the join key: recording one of them would make an invocation-log
+            # reconciliation report a 1:1 match while the true relationship is 1:N, i.e.
+            # it would claim "0 discrepancies" while silently comparing our N-turn total
+            # against a single turn's record. NULL is the honest value — the reconciler
+            # skips these rows instead of mis-matching them. Web search is opt-in per
+            # routing profile, so this affects only profiles that enabled it.
             await cost_recorder.finalize(
                 redis, auth_context, model_config, usage, request_id, is_stream, duration_ms,
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"), client=client,
             )
+
+        # 본문 로깅 — 웹서치 경로 전용 훅. 이 경로는 아래 `if is_stream:` 블록보다 먼저
+        # 리턴하므로, 여기 배선하지 않으면 웹서치를 켠 프로파일의 본문이 조용히 미기록된다.
+        # Mantle 은 AWS invocation log 에도 남지 않으므로 그 조합에서는 본문의 정본이
+        # 어디에도 없게 된다.
+        #
+        # ⚠️ bedrock_request_id 는 여기서 의도적으로 None 이다 — 위 `_ws_record` 주석과
+        #    같은 이유다. 루프는 턴마다 별개의 Bedrock 호출을 하므로 단일 요청 id 가
+        #    이 레코드의 조인 키가 되지 못한다. 하나를 골라 넣으면 대조 리포트가 1:N 을
+        #    1:1 로 오판한다.
+        async def _ws_log_stream(sse_text: str, log_status: str) -> None:
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=None,
+                )
+            )
+
+        async def _ws_log_nonstream(resp_status: int, resp_body: bytes) -> None:
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status_code=resp_status,
+                    request_body=body,
+                    response_body=resp_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=None,
+                )
+            )
+
+        # 사전 게이팅 — 훅을 넘기면 루프가 SSE 전문을 누적한다.
+        _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
 
         _settings_ws = get_settings()
         return await run_web_search_loop(
@@ -551,13 +810,27 @@ async def _handle_responses(request: Request):
             max_iterations=_settings_ws.web_search_max_iterations,
             total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
             default_max_results=_settings_ws.web_search_max_results_default,
+            max_result_chars=_settings_ws.web_search_max_result_chars,
+            max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
+            handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+            tokenizer_hook=_estimate,
+            on_stream_complete=_ws_log_stream if _ws_logging else None,
+            on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )
 
     if is_stream:
-        status, chunk_iter, headers, _ = await adapter.invoke_stream(
-            body, model_config.provider_model_id,
-            profile=profile, endpoint=model_config.endpoint,
+        # 4th element = x-amzn-requestid. Populated on the runtime plane (the join key to
+        # the Bedrock model-invocation log record); always None on Mantle, which AWS does
+        # not capture in invocation logging at all — so a NULL column here is a true
+        # statement about the plane, not a lost value.
+        status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
+
+        # 비-2xx 면 on_usage 가 발화하지 않아 예약을 되돌리는 곳이 없다 — 근거는
+        # _handle_openai 의 같은 주석 참조.
+        if not (200 <= status < 300):
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
@@ -571,20 +844,60 @@ async def _handle_responses(request: Request):
                 redis, auth_context, model_config, usage, request_id, True, duration_ms,
                 ttft_ms=ttft_ms,
                 rate_limit_state=rate_limit_state,
-                downgraded_from=state.get("downgraded_from"), client=client,
+                downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=aws_request_id,
+                client=client,
             )
+
+        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+            """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    # Mantle 에서는 항상 None 이다(위 주석) — 그리고 바로 그것이 이 경로에
+                    # 본문 로깅이 **필요한** 이유다. AWS 쪽에 대조할 레코드가 없으므로 이
+                    # 레코드가 유일한 본문 정본이 된다.
+                    bedrock_request_id=aws_request_id,
+                )
+            )
+
+        # ⚠️ **사전** 게이팅. 근거는 _handle_openai 의 같은 주석 참조.
+        _on_complete = (
+            _log_body_stream
+            if await resolve_body_logger(request.app.state, redis, session_factory)
+            else None
+        )
 
         from app.services.streaming import responses_sse_stream
 
         return StreamingResponse(
-            responses_sse_stream(request, chunk_iter, on_usage=_record),
+            responses_sse_stream(
+                request,
+                chunk_iter,
+                on_usage=_record,
+                on_complete=_on_complete,
+                # KI-08 역산 — 이 방언은 usage 가 종결 이벤트 안에만 있어서, 그 전에
+                # 끊기면 역산이 없으면 usage_logs 행이 아예 만들어지지 않는다.
+                tokenizer_hook=_estimate,
+            ),
             status_code=status,
             media_type="text/event-stream",
         )
     else:
-        status, response_body, _, usage = await adapter.invoke(
-            body, model_config.provider_model_id,
-            profile=profile, endpoint=model_config.endpoint,
+        status, response_body, resp_headers, usage = await adapter.invoke(
+            body, model_config.provider_model_id, **invoke_kwargs
         )
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -592,8 +905,35 @@ async def _handle_responses(request: Request):
                 redis, auth_context, model_config, usage, request_id, False, duration_ms,
                 ttft_ms=duration_ms,
                 rate_limit_state=rate_limit_state,
-                downgraded_from=state.get("downgraded_from"), client=client,
+                downgraded_from=state.get("downgraded_from"),
+                bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
+                client=client,
             )
+        else:
+            # 예약 되돌리기 — 근거는 _handle_openai 의 같은 블록 주석 참조.
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+
+        # 본문 로깅(성공 **및** 오류). usage 조건을 걸지 않는 이유는 _handle_openai 의
+        # 같은 블록 주석 참조.
+        body_logger = await resolve_body_logger(request.app.state, redis, session_factory)
+        if body_logger is not None:
+            await body_logger.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_alias_of(model_config),
+                    status_code=status,
+                    request_body=body,
+                    response_body=response_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
+                )
+            )
+
         try:
             content = json.loads(response_body)
         except Exception:

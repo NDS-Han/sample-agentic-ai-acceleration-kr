@@ -214,6 +214,41 @@ imagePullSecrets:
   value: {{ join "," .Values.aws.allowedIamRoles | quote }}
 {{- end -}}
 
+{{/* ---------------------------------------------------------------------------
+  llm-gateway.adminUiIdpEnv
+
+  admin-ui 가 IdP id_token 을 해석하는 데 필요한 **두 값만** 주입한다.
+
+  왜 별도 헬퍼인가: `llm-gateway.oidcEnv` 는 admin-api 전용 설정(issuer/audience/
+  jwks TTL/팀 매핑 prefix 등)까지 담고 있어 admin-ui 컨테이너에 넣을 이유가 없다.
+  하지만 이 둘은 **양쪽이 같은 값이어야** 한다:
+
+    OIDC_GROUPS_CLAIM  — groups 클레임 이름(Cognito 면 `cognito:groups`)
+    ADMIN_GROUPS       — ADMIN 을 부여할 그룹 목록
+
+  ⚠️ 어긋나면 관리자 잠김이 난다. admin-api 는 그룹을 보고 ADMIN 을 인가하는데
+     admin-ui 는 역할을 못 정해 checkPagePermission 이 모든 페이지를 /403 으로
+     보낸다 — "API 는 되는데 화면은 안 되는" 상태다. 예전엔 admin-ui 가 그룹 이름을
+     소스에 하드코딩해서, admin-api 쪽 값만 바꾸면 그대로 재현됐다.
+
+     그래서 두 컨테이너가 **같은 values 키**(adminApi.oidc.groupsClaim /
+     adminApi.adminBootstrap.groups)에서 값을 받는다. 운영자가 맞춰야 할 곳은 없다.
+
+  `adminApi.oidc.enabled` 로 게이트하는 이유: OIDC 를 안 쓰면 IdP id_token 자체가
+  없고, admin-ui 는 `role` 클레임(내부 JWT / dev 토큰)만 보게 된다 — 오늘 동작 그대로.
+
+  이 블록은 adminUi.env 의 자유형 map **앞에** 놓는다. 쿠버네티스는 같은 이름의 env
+  가 여러 번 오면 마지막 것을 쓰므로, 운영자의 명시적 override 가 이긴다.
+--------------------------------------------------------------------------- */}}
+{{- define "llm-gateway.adminUiIdpEnv" -}}
+{{- if .Values.adminApi.oidc.enabled -}}
+- name: OIDC_GROUPS_CLAIM
+  value: {{ .Values.adminApi.oidc.groupsClaim | quote }}
+- name: ADMIN_GROUPS
+  value: {{ join "," .Values.adminApi.adminBootstrap.groups | quote }}
+{{- end -}}
+{{- end -}}
+
 {{/* ------------------------------------------------------------------------
   OIDC env (admin-api 전용) — Cognito / Keycloak / Okta / Azure AD 호환.
   adminApi.oidc.enabled=true 일 때만 주입.

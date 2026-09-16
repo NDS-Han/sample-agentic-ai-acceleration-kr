@@ -106,7 +106,11 @@ cd /path/to/LLM-Gateway-Vanilla   # 리포 루트
 4. **Observability 스택 설치/업그레이드** (`kube-prometheus-stack` + `prometheus-adapter` + `otel-collector`) — HPA 의 `metrics.k8s.io` API 와 관측성 제공. EKS Fargate 에선 metrics-server 가 kubelet authz 제약으로 동작하지 않으므로 `prometheus-adapter` 가 이를 대체 (AWS 공식 권장). 자세한 배경: [`deployment/observability/README.md`](../../observability/README.md).
 5. Secrets Manager 3개 경로 존재 확인 (03에서 만든 것)
 6. `helm install` 에 `--set` 플래그로 Terraform output 주입
-7. `--rollback-on-failure --cleanup-on-fail --wait --timeout 15m` 으로 실패 시 자동 롤백
+7. `--cleanup-on-fail --wait --timeout 15m` + **롤백 플래그** 로 실패 시 자동 롤백.
+   플래그는 런타임에 `helm version` 으로 골라진다 — **v3 = `--atomic`, v4 = `--rollback-on-failure`**.
+   v3 에는 `--rollback-on-failure` 가 아예 없어 unknown flag 로 죽고, v4 의 `--atomic` 은
+   deprecation warning 일 뿐 동작하므로, 사전 요구사항(Helm ≥ 3.14)을 만족하는 두 메이저를
+   모두 지원하려면 고정할 수 없다([install-eks.sh](../../scripts/install-eks.sh) `HELM_MAJOR`).
 
 ---
 

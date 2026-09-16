@@ -17,7 +17,15 @@ from app.models.model import RateLimitScope
 from app.repositories.budget_repository import BudgetRepository
 from app.repositories.model_repository import RateLimitConfigRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.users import DepartmentResponse, OrgNodeMeta, OrgTreeNode, TeamListItem, TeamResponse, UserResponse
+from app.schemas.users import (
+    DepartmentResponse,
+    OrgNodeMeta,
+    OrgTreeNode,
+    TeamListItem,
+    TeamResponse,
+    UserResponse,
+    UserSearchItem,
+)
 from app.services.key_service import KeyService
 
 logger = structlog.get_logger()
@@ -376,6 +384,50 @@ class UserTeamService:
             for t in teams
         ]
 
+    # 검색 결과 상한. 드롭다운에 보여줄 수 있는 양이고, 타이핑마다 호출되는 경로라
+    # 의도적으로 작게 유지한다. 초과분은 truncated=True 로 UI 에 알린다.
+    SEARCH_LIMIT = 20
+    # 최소 검색어 길이. 1자 검색은 사실상 전량 매칭이라 무의미하고 비싸다.
+    SEARCH_MIN_LEN = 2
+
+    async def search_users(
+        self,
+        session: AsyncSession,
+        *,
+        term: str,
+        limit: int | None = None,
+    ) -> tuple[list[UserSearchItem], bool]:
+        """이메일/이름 부분 일치 사용자 검색. ``(items, truncated)`` 반환.
+
+        검색어가 ``SEARCH_MIN_LEN`` 미만이면 **DB 를 치지 않고** 빈 결과를 준다.
+
+        비활성 사용자는 제외한다 — 조직 트리도 비활성을 빼고 만들기 때문에
+        (get_org_tree 의 ``active_members``), 검색에서 나온 사람을 선택했더니 트리에
+        없다는 상태가 생기면 UI 가 조상 경로를 펼칠 대상을 찾지 못한다.
+        """
+        stripped = term.strip()
+        if len(stripped) < self.SEARCH_MIN_LEN:
+            return [], False
+
+        effective = limit if limit is not None else self.SEARCH_LIMIT
+        repo = UserRepository(session)
+        # limit+1 로 조회해 잘림 여부를 판정한다 — 별도 COUNT 쿼리를 피한다.
+        rows = await repo.search_users(term=stripped, is_active=True, limit=effective + 1)
+        truncated = len(rows) > effective
+        if truncated:
+            rows = rows[:effective]
+        return [
+            UserSearchItem(
+                id=str(user_id),
+                email=email,
+                display_name=display_name,
+                role=role,
+                team_id=str(team_id) if team_id else None,
+                team_name=team_name,
+            )
+            for user_id, email, display_name, role, team_id, team_name in rows
+        ], truncated
+
     async def get_org_tree(self, session: AsyncSession) -> OrgTreeNode | None:
         repo = UserRepository(session)
         orgs = await repo.list_all_orgs()
@@ -404,6 +456,7 @@ class UserTeamService:
                             children=[],
                             meta=OrgNodeMeta(
                                 member_count=None,
+                                team_count=None,
                                 leader_name=None,
                                 email=member.email,
                                 role=member.role.value,
@@ -419,6 +472,8 @@ class UserTeamService:
                         children=member_nodes,
                         meta=OrgNodeMeta(
                             member_count=len(active_members),
+                            # TEAM 은 팀이 아니라 사람을 담는다 — 팀 수는 의미가 없다.
+                            team_count=None,
                             leader_name=leader.display_name if leader else None,
                             leader_user_id=str(team.leader_user_id) if team.leader_user_id else None,
                             email=leader.email if leader else None,
@@ -436,7 +491,9 @@ class UserTeamService:
                     type="DEPARTMENT",
                     children=team_nodes,
                     meta=OrgNodeMeta(
+                        # 하위 팀들의 **활성 사용자** 합. 팀 수가 아니다(team_count 참조).
                         member_count=sum(len(n.children) for n in team_nodes),
+                        team_count=len(team_nodes),
                         leader_name=None,
                         email=None,
                         role=None,
@@ -451,7 +508,14 @@ class UserTeamService:
             type="ORGANIZATION",
             children=dept_nodes,
             meta=OrgNodeMeta(
-                member_count=sum(len(t.members) for d in org.departments for t in d.teams),
+                # ⚠️ 예전엔 `sum(len(t.members) ...)` 였다 — ORM 의 **전체** 멤버라
+                #    비활성 사용자까지 셌다. 반면 팀/부서는 active_members 만 센다.
+                #    그래서 조직 합계가 부서 합계의 총합과 달라, 어느 쪽이 맞는지 화면에서
+                #    판단할 수 없었다. 이미 만들어 둔 노드에서 세면 계층이 일관된다.
+                member_count=sum(
+                    len(team.children) for dept in dept_nodes for team in dept.children
+                ),
+                team_count=sum(len(dept.children) for dept in dept_nodes),
                 leader_name=None,
                 email=None,
                 role=None,

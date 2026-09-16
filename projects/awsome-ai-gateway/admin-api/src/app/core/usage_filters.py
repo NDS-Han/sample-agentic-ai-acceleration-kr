@@ -20,7 +20,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import ColumnElement, and_, func, literal
@@ -176,6 +176,66 @@ def kst_period_range_filter(column: ColumnElement, period: str) -> ColumnElement
     """
     start_utc, end_utc = period_to_utc_range(period)
     return and_(column >= start_utc, column < end_utc)
+
+
+_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+
+
+def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
+    """리포팅 타임존 기준 'YYYY-MM-DD' 두 개 → UTC 반개구간 [start, end).
+
+    `end_day` 는 **포함**이다(그 날 하루 전체). 그래서 end 경계는 end_day + 1일의
+    리포팅 타임존 00:00 을 UTC 로 옮긴 값이다(period_to_utc_range 와 같은 tz).
+
+    ⚠️ 문자열을 슬라이싱해서 `int(day[:4])` 로 파싱하지 않는다. 그러면 '20xx-1-1' 같은
+    입력이 형식 검사를 통과해 엉뚱한 경계를 만들거나 `int()` 가 맨 ValueError 로 터져
+    **500** 이 된다(period_to_utc_range 주석의 같은 교훈). 형식은 정규식으로, 달력
+    유효성은 `date.fromisoformat` 으로 확인하고 어긋나면 ValidationError → **400**.
+    """
+    for label, value in (("start", start_day), ("end", end_day)):
+        if not (isinstance(value, str) and _DAY_RE.match(value)):
+            raise ValidationError(f"{label} day must be 'YYYY-MM-DD' (got {value!r})")
+    try:
+        start_date = date.fromisoformat(start_day)
+        end_date = date.fromisoformat(end_day)
+    except ValueError as exc:  # 2026-06-31 처럼 형식은 맞고 달력엔 없는 날짜
+        raise ValidationError(f"invalid calendar date: {exc}") from exc
+    if end_date < start_date:
+        raise ValidationError(f"end day {end_day} precedes start day {start_day}")
+    if not _PERIOD_MIN_YEAR <= start_date.year <= _PERIOD_MAX_YEAR:
+        raise ValidationError(
+            f"start year must be {_PERIOD_MIN_YEAR}-{_PERIOD_MAX_YEAR} (got {start_day!r})"
+        )
+    if not _PERIOD_MIN_YEAR <= end_date.year <= _PERIOD_MAX_YEAR:
+        raise ValidationError(
+            f"end year must be {_PERIOD_MIN_YEAR}-{_PERIOD_MAX_YEAR} (got {end_day!r})"
+        )
+    tz = _reporting_tz()
+    start_utc = datetime(
+        start_date.year, start_date.month, start_date.day, tzinfo=tz
+    ).astimezone(timezone.utc)
+    end_exclusive = end_date + timedelta(days=1)
+    end_utc = datetime(
+        end_exclusive.year, end_exclusive.month, end_exclusive.day, tzinfo=tz
+    ).astimezone(timezone.utc)
+    return start_utc, end_utc
+
+
+def kst_day_range_filter(start_day: str, end_day: str) -> ColumnElement:
+    """usage_logs 의 KST 일자 구간 sargable 필터 (SUCCESS 조건은 호출부가 붙인다).
+
+    ⚠️ 이 헬퍼가 생긴 이유(성능 결함): 일자 필터가
+    `date(timezone('Asia/Seoul', requested_at)) >= date(:start)` 형태였다. 좌변이
+    **컬럼에 함수를 씌운 표현식**이라 `requested_at` 인덱스를 전혀 쓰지 못하고
+    usage_logs 전체를 훑는다(같은 이유로 월 필터를 고친 것이 cost_period_filter).
+    경계 계산을 파라미터 쪽으로 옮기면 컬럼이 그대로 남아 인덱스를 탄다.
+
+    집합은 완전히 동일하다: KST 일자가 [start_day, end_day] 안에 있다는 것은
+    requested_at 이 [KST start_day 00:00, KST (end_day+1) 00:00) 안에 있다는 것과
+    같다(반개구간이라 경계 중복·누락 없음). 즉 **숫자가 움직이지 않는다.**
+    """
+    start_utc, end_utc = day_range_to_utc(start_day, end_day)
+    return and_(UsageLog.requested_at >= start_utc, UsageLog.requested_at < end_utc)
 
 
 def cost_period_filter(period: str, *, success_only: bool = True) -> ColumnElement:

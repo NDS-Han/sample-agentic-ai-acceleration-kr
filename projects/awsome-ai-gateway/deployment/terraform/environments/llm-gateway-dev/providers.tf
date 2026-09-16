@@ -34,6 +34,27 @@ provider "aws" {
   }
 }
 
+# GPT-5.6 표준 runtime plane 이 실행되는 리전(us-east-2) 전용 provider.
+# 왜 별칭이 필요한가: Bedrock model-invocation logging 은 **리전 단위** 설정이고, 로그는
+# 게이트웨이 배포 리전(ap-northeast-2)이 아니라 **모델이 실제로 실행된 리전** 에 쌓인다.
+# `us.openai.gpt-5.6-*` 와 `global.openai.gpt-5.6-*` 가 둘 다 착지하는 유일한 리전이
+# us-east-2 다(2026-09-03 get-inference-profile 실측).
+# bedrock-invocation-logging 모듈은 이 별칭을 configuration_aliases 로 요구하므로,
+# 실수로 기본 provider(서울)를 상속해 서울 계정 전체의 Claude 본문을 수집하는 사고가
+# 문법 수준에서 막힌다.
+provider "aws" {
+  alias  = "bedrock_openai"
+  region = var.bedrock_invocation_log_region
+  default_tags {
+    tags = {
+      Project     = var.project
+      Environment = var.environment
+      ManagedBy   = "terraform"
+      Repository  = "llm-gateway-vanilla"
+    }
+  }
+}
+
 # EKS 인증 토큰 — exec 방식 사용.
 # data.aws_eks_cluster_auth 는 plan 시점에 토큰을 1회 fetch 해서 고정하는데
 # EKS 토큰은 15분만 유효 → apply 가 길어지거나 중간에 다른 작업 후 재apply 시

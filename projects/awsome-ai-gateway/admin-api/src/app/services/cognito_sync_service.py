@@ -357,8 +357,19 @@ class CognitoSyncService:
 
     async def _resolve_team_id_from_groups(
         self, repo: UserRepository, session, user_groups: list[str], result: SyncResult,
+        cache: _TeamCache | None = None,
     ) -> uuid.UUID:
-        """그룹 목록 → 첫 매핑 가능한 팀 id (없으면 DEFAULT_TEAM_ID)."""
+        """그룹 목록 → 첫 매핑 가능한 팀 id (없으면 DEFAULT_TEAM_ID).
+
+        ``cache`` 를 주면 팀/부서 조회를 캐시로 해결한다. 전체 동기화(:98)는 이미
+        캐시를 만들어 쓰는데 per-entity 경로(sync_user/sync_group)만 캐시 없이
+        ``_ensure_team`` 을 타고 있었다 — 그건 그룹 하나당 팀·부서를 DB 에서 다시 찾는
+        경로라, 그룹이 많은 사용자에서 라운드트립이 그룹 수만큼 쌓인다.
+        캐시 인프라는 이미 있었고 이 호출부만 연결이 빠져 있었다.
+
+        ⚠️ ``cache=None`` 이면 예전 그대로 ``_ensure_team`` 을 쓴다. 기본값이라
+        기존 호출부의 동작은 바뀌지 않는다(호출 호환).
+        """
         settings = get_settings()
         for g in user_groups:
             parsed = self._parse_group(g)
@@ -366,6 +377,11 @@ class CognitoSyncService:
                 continue
             dept_name, team_name = parsed
             try:
+                if cache is not None:
+                    # ORM 객체가 아니라 uuid 를 돌려주므로 session expunge 후에도 안전.
+                    return await self._ensure_team_id(
+                        repo, session, cache, dept_name, team_name
+                    )
                 team = await self._ensure_team(repo, session, dept_name, team_name)
                 return team.id
             except Exception as e:
@@ -414,8 +430,11 @@ class CognitoSyncService:
             result.errors.append(f"Failed to list groups for {username}: {e}")
             user_groups = []
 
+        # 팀/부서 캐시를 한 번 만들어 그룹 해석에 넘긴다. 없으면 그룹 하나당 팀·부서를
+        # DB 에서 다시 찾는다(그룹이 많은 사용자에서 라운드트립이 그룹 수만큼 쌓인다).
+        cache = await self._build_team_cache(repo)
         team_id = await self._resolve_team_id_from_groups(
-            repo, session, user_groups, result
+            repo, session, user_groups, result, cache=cache
         )
         role = self._derive_role(email, user_groups)
 
@@ -490,7 +509,13 @@ class CognitoSyncService:
 
         dept_name, team_name = parsed
         try:
-            team = await self._ensure_team(repo, session, dept_name, team_name)
+            # ⚠️ ORM 객체(`team`)가 아니라 uuid 를 받는다. 아래 멤버 upsert 루프는 중간에
+            #    flush/commit 을 하는데, ORM 객체를 들고 있으면 expunge 이후 속성 접근이
+            #    DetachedInstanceError 로 터질 수 있다(_ensure_team_id 의 docstring 참조).
+            cache = await self._build_team_cache(repo)
+            team_id = await self._ensure_team_id(
+                repo, session, cache, dept_name, team_name
+            )
             result.groups_synced += 1
         except Exception as e:
             result.errors.append(f"Failed to ensure team {team_name}: {e}")
@@ -517,7 +542,7 @@ class CognitoSyncService:
             try:
                 await self._upsert_one_user(
                     repo, sub=sub, email=email, name=name, enabled=enabled,
-                    team_id=team.id, role=self._derive_role(email, [group_name]),
+                    team_id=team_id, role=self._derive_role(email, [group_name]),
                     result=result,
                 )
             except Exception as e:

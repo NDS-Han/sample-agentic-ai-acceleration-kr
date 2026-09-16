@@ -34,7 +34,7 @@ MODEL="${MODEL:-$MODEL_ALIAS}"   # --model overrides config.env
 hdr "A. Database state"
 
 DB_OUT=$(run_sql "$(cat <<'Q'
-\echo '--- routing_profiles: Cowork + Claude Code should both be in-account invoke ---'
+\echo '--- routing_profiles: does the Cowork row mirror claude-code? ---'
 SELECT client, backend, region,
        COALESCE(default_model,'(null)')    AS default_model,
        COALESCE(account_role_arn,'(null)') AS account_role_arn,

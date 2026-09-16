@@ -105,12 +105,30 @@ resource "aws_elasticache_parameter_group" "this" {
   tags = var.tags
 }
 
-# prod 커스텀 cluster-enabled 파라미터그룹(deepdive Q50 Phase4) — 기본 비활성.
+# prod 커스텀 cluster-enabled 파라미터그룹(deepdive Q50 Phase4) — 모듈 기본 비활성,
+# prod env 는 true(라이브 적용됨: llm-gateway-prod-* 9노드 모두 이 그룹 in-sync).
 # family `valkey7` 의 custom 그룹은 standalone 으로 해석되는 게 AWS 기본이나,
-# `cluster-enabled=yes` 파라미터를 명시하면 cluster-mode 와 호환된다. 활성 시
-# prod 가 default.valkey7.cluster.on(커스터마이징 불가) 대신 이 그룹을 써
-# maxmemory-policy + reserved-memory-percent 를 박는다(메모리압박 시 noeviction
-# OOM-거부 회피 + failover/replication/BGSAVE 헤드룸).
+# `cluster-enabled=yes` 파라미터를 명시하면 cluster-mode 와 호환된다.
+#
+# ⚠️ **오늘 기준 이 그룹은 런타임 동작을 바꾸지 않는다.** 아래 두 값이 AWS 기본
+# `default.valkey7.cluster.on` 과 완전히 동일하기 때문이다 — 2026-09-09
+# ap-northeast-2 실측(`aws elasticache describe-cache-parameters
+# --cache-parameter-group-name default.valkey7.cluster.on`):
+# `maxmemory-policy=volatile-lru`, `reserved-memory-percent=25`.
+# 따라서 옛 주석의 "메모리압박 시 noeviction OOM-거부 회피" 는 사실과 다르다
+# (AWS default 는 noeviction 이 아니라 이미 volatile-lru 다).
+#
+# 이 리소스의 실제 값어치는 **나중에 파라미터그룹을 갈아끼우지 않고 값만 튜닝할
+# 손잡이(knob)를 미리 확보** 하는 것이다. AWS default 그룹은 수정 불가라, 값을
+# 바꾸려면 그룹 자체를 교체해야 한다.
+#
+# 값을 실제로 바꾸는 것(예: allkeys-lru)은 **라이브 캐시 동작 변경**이며 별도
+# 승인이 필요하다. 앱에는 TTL 없는 키가 존재한다(dev 실측 38키 중 29키 TTL=-1:
+# `budget:user:{uid}:<period>`, `budget:team:{tid}:<period>`,
+# `budget:config:user:{uid}`, `team:vk_hashes:<team>`, `cost:stream`).
+# volatile-lru 는 그 키들을 절대 evict 하지 않으므로 — 압박 시 쓰기 거부(진짜
+# OOM)가 될 수 있는 대신, 미소비 `cost:stream`(정산 원본)이 조용히 사라지지는
+# 않는다. 이 트레이드오프를 이해한 뒤에만 정책을 바꿀 것.
 resource "aws_elasticache_parameter_group" "prod_cluster" {
   count       = local.is_prod && var.prod_enable_custom_param_group ? 1 : 0
   name        = "${var.project}-${var.environment}-valkey-cluster"

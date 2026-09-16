@@ -341,6 +341,7 @@
     "editModel": "Edit Model",
     "createModel": "Add Model",
     "aliasReadonly": "Alias (identifier) cannot be changed after creation. Create a new model to change the name.",
+    "providerReadonly": "Provider (and the api_format derived from it) cannot be changed after creation. Create a new model to switch providers.",
     "selectProvider": "Select",
     "mantleEndpointNote": "/v1/messages is appended automatically.",
     "allowedAppsLabel": "Allowed Apps",
@@ -414,10 +415,10 @@
     },
     "webSearch": {
       "title": "App-specific Web Search",
-      "description": "Allow server-side web search per app. When ON, the gateway automatically performs web searches for users of that app (Claude Code / Cowork) so they get up-to-date answers without client configuration.",
+      "description": "Allow server-side web search per app. When ON, the gateway automatically performs web searches for users of that app (Claude Code / Cowork / Codex) so they get up-to-date answers without client configuration.",
       "on": "Web Search ON",
       "off": "Web Search OFF",
-      "empty": "No routing profiles found. (Migration 0021 is required to seed claude-code/cowork.)",
+      "empty": "No routing profiles found. (Migration 0021 is required to seed claude-code/cowork/codex.)",
       "saveFailed": "Save failed: {error}"
     }
   },
@@ -545,6 +546,23 @@
       "usersUpdated": "{count} updated",
       "usersDeactivated": "{count} deactivated",
       "noChanges": "Sync complete (no changes)"
+    },
+    "search": {
+      "placeholder": "Search email · name · team",
+      "ariaLabel": "Search organization",
+      "clear": "Clear search",
+      "minLength": "Enter at least 2 characters",
+      "searching": "Searching…",
+      "noResults": "No results found",
+      "failed": "Search failed. Please try again.",
+      "groupOrg": "Departments · Teams",
+      "groupUser": "Users",
+      "truncated": "More results available — refine your search",
+      "resultsCount": "{count}",
+      "teamCountShort": "{count} teams",
+      "userCountShort": "{count} users",
+      "unassigned": "Unassigned",
+      "hint": "↑↓ navigate · Enter select · Esc close"
     }
   },
   "analytics": {
@@ -801,13 +819,17 @@
     },
     "bodyLogging": {
       "label": "Body logging (Invocation Body Logging)",
-      "description": "Stores request and response bodies in S3. Changes reach the gateway within a few seconds.",
+      "description": "Stores complete request and response bodies in S3. They are not masked, so whatever a user put in a prompt is stored verbatim. Changes reach the gateway within a few seconds.",
       "toggleLabel": "Toggle body logging",
+      "activeWarning": "Capturing — prompt and response bodies are being stored in S3 without masking.",
       "turnedOn": "Body logging is on. It takes effect within a few seconds.",
       "turnedOff": "Body logging is off. It takes effect within a few seconds.",
-      "confirmTitle": "Turn off body logging?",
-      "confirmMessage": "Request and response bodies will no longer be stored in S3. You can turn it back on at any time.",
-      "confirmLabel": "Turn off"
+      "confirmOnTitle": "Turn on body logging?",
+      "confirmOnMessage": "From now on every request and response body is stored in S3 without masking, including anything users paste into a prompt. Turning it on is recorded in the audit log.",
+      "confirmOnLabel": "Turn on",
+      "confirmOffTitle": "Turn off body logging?",
+      "confirmOffMessage": "Request and response bodies will no longer be stored in S3. Bodies from the period it was off cannot be recovered later. You can turn it back on at any time.",
+      "confirmOffLabel": "Turn off"
     }
   },
   "errors": {
@@ -850,6 +872,10 @@
     "noEmail": "No email",
     "confirmAllTitle": "Change all-apps model",
     "confirmAllMessage": "This model is currently allowed for all apps. Clearing it switches to an explicit list, which can change other apps' access. Continue?",
-    "confirmAllLabel": "Continue"
+    "confirmAllLabel": "Continue",
+    "confirmLastMessage": "This is the last app allowed for {alias}. Removing it leaves no allowed app, so every app is refused (the model stays in the list). Continue?",
+    "confirmLastTitle": "Remove the last allowed app",
+    "noneBadge": "Deny all",
+    "noneHint": "No app allowed (deny all) — no app can use this model."
   }
 }

@@ -43,18 +43,18 @@ async def test_provider_assumes_and_caches(monkeypatch):
     import app.services.bedrock_account_client as mod
     monkeypatch.setattr(mod.boto3, "client", lambda svc, **kw: {"svc": svc, "region": kw.get("region_name"), "creds": kw.get("aws_access_key_id")})
 
-    c1 = await prov.get_client("arn:aws:iam::345678901234:role/x", "ap-northeast-2", "ext-id")
+    c1 = await prov.get_client("arn:aws:iam::123456789012:role/x", "ap-northeast-2", "ext-id")
     assert c1["svc"] == "bedrock-runtime" and c1["region"] == "ap-northeast-2"
     assert sts.calls == 1
     assert sts.last_kwargs["ExternalId"] == "ext-id"
     assert sts.last_kwargs["RoleArn"].endswith(":role/x")
 
     # 캐시 적중 (같은 role+region) → assume 재호출 안 함
-    c2 = await prov.get_client("arn:aws:iam::345678901234:role/x", "ap-northeast-2", "ext-id")
+    c2 = await prov.get_client("arn:aws:iam::123456789012:role/x", "ap-northeast-2", "ext-id")
     assert sts.calls == 1 and c2 is c1
 
     # 다른 region → 별도 클라이언트
-    c3 = await prov.get_client("arn:aws:iam::345678901234:role/x", "us-east-1", "ext-id")
+    c3 = await prov.get_client("arn:aws:iam::123456789012:role/x", "us-east-1", "ext-id")
     assert sts.calls == 2 and c3 is not c1 and c3["region"] == "us-east-1"
 
 

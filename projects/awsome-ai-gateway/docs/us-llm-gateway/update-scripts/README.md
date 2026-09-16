@@ -16,7 +16,7 @@
 
 ## 무엇을 해결하나
 
-Claude Code는 잘 되는데 Cowork만 안 되는 상태를 고칩니다. 원인은 셋입니다.
+Claude Code는 잘 되는데 Cowork만 안 되는 상태를 고칩니다(기존 배포 대상 — 신규 설치는 install-guide §4-2·§4-3 이 같은 내용을 포함). 원인은 셋입니다.
 
 ### ① Cowork 요청이 전부 실패합니다
 
@@ -106,16 +106,27 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `06-persist-annotations.sh` | **helm values 파일** (`05-allow-client-ip.sh` 의 IP 허용목록을 영구화)               | 낮음. helm 을 돌리지 않음          |
 | `07-client-values.sh`       | **없음** — 직원에게 줄 env 4줄 출력                              | 없음                         |
 | `08-setup-notification-ses-irsa.sh` | **IAM 역할 + values 어노테이션** (`notification-worker` SES 용 IRSA) | 낮음. install-eks.sh 는 별도 실행     |
+| `08-set-model-pricing.sh`   | `model_pricings` — 열린 단가 행 닫고 **새 행 추가** (`pricing.tsv` 기준, 과거 로그 불변) | 낮음. 새 호출부터 과금 단가 변경 |
+| `pricing.tsv`               | 단가 정본 (Standard 티어, /1K) — 값 바꿀 때 `asof`·`source` 도 갱신          | —                          |
 | `09-update-admin-ui.sh`     | admin-ui **이미지 빌드→ECR→롤아웃** + values 태그                | 낮음. 대시보드만. helm 을 돌리지 않음   |
 | `https-env.sh` (source)     | **없음** — US-06 용 값 12개 export (도메인만 입력)                | 없음                         |
 | `10-switch-https.sh`        | **helm values 파일** Ingress 블록 → 방식 B(https·인증서·host)     | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
 | `11-route53-cname.sh`       | Route 53 hosted zone 에 **CNAME 3개**                       | 낮음. DNS 만                   |
+| `13-bump-image-tags.sh`     | **helm values 파일** image.tag 7개 → repo 템플릿 값 (백업 후, helm 렌더로 검증) | 낮음. helm 을 돌리지 않음 |
+| `14-postdeploy-check.sh`    | **없음** — 배포 후 검증 (스키마·단가·라우팅·시드 alias·파드·readiness) · 숫자 저장/비교 | 없음 |
+| `15-set-master-secret-ref.sh` | **helm values 파일** `database.external` 의 마스터 비밀번호 참조 2줄(RDS 관리 시크릿 `rds!cluster-…`) — 없거나 다를 때만 교체·삽입, helm 렌더로 검증 | 낮음. helm 을 돌리지 않음 |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |
 
 
 
+
+## 단가 갱신 (08)
+
+`08-set-model-pricing.sh` 는 `pricing.tsv` 의 값과 DB 의 **열린 단가 행**(`effective_until IS NULL`)을 비교해, 다른 alias 만 닫고 새 행을 넣는다(한 트랜잭션). 등록 안 된 alias 는 건너뛴다(`02` 로 등록). `--alias` 로 한 모델만, `--print-sql` 로 SQL 만 확인(AWS 불필요). 적용 후 검증 SELECT 로 열린 행 1개·값 일치를 확인하고, `snapshots/<ts>-08-pricing-rollback.sql` 에 이전 값을 다시 넣는 SQL 을 남긴다(행 삭제 없음).
+
+왜 Standard 티어인가 — `us.anthropic.*` 는 지리 CRIS 라 AWS 가 Global 보다 10% 높은 Standard 단가로 청구한다(Price List us-west-2 `*_standard` SKU + 891 Cost Explorer 실측). Global(`global.*`) 모델을 등록했다면 표에 그 값을 따로 넣는다.
 
 ### 공통 규약
 
@@ -130,20 +141,23 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 
 ## 실행 순서
 
-⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다.
+⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다. upstream 동기화 배포(13·14 포함)는 [ops/8-D](../ops/8-D-upstream-sync.md).
 
 ```bash
 bash 00-preflight-check.sh                 # 항상 먼저. 읽기 전용 (2~3분)
 
 bash 01-fix-cowork-routing.sh              # 확인
 bash 01-fix-cowork-routing.sh --apply
-
 # 단일 계정 배포라면 claude-code 도 374 cross-account 대신 in-account 으로
 bash 01a-fix-claude-code-routing.sh        # 확인
 bash 01a-fix-claude-code-routing.sh --apply
 
-bash 02-add-opus5-model.sh                 # 확인 (단가는 config.env 에 기입돼 있음)
+bash 02-add-opus5-model.sh                 # 확인 — 기존 배포 전용(신규는 §4-2 에 포함)
 bash 02-add-opus5-model.sh --apply
+#   기본 시드로 alias 가 이미 있으면(global.* 로) --remap 을 붙인다 — dry-run 이 알려줌
+
+bash 08-set-model-pricing.sh               # 현재 vs pricing.tsv 차이 확인
+bash 08-set-model-pricing.sh --apply       # 5분 뒤 반영 (Redis model 캐시)
 
 bash 03-create-cloudfront.sh               # 설정 확인
 bash 03-create-cloudfront.sh --create
@@ -169,10 +183,9 @@ bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 
 | 스크립트                       | DB 조회 | 대략             |
 | -------------------------- | ----- | -------------- |
-| `00-preflight-check.sh`           | 3회    | 3~5분           |
-| `01-fix-cowork-routing.sh`        | 최대 3회 | 2~5분           |
-| `01a-fix-claude-code-routing.sh`  | 최대 2회 | 2~5분           |
-| `02-add-opus5-model.sh`         | 최대 5회 | 3~8분           |
+| `00-preflight-check.sh`    | 4회    | 4~7분           |
+| `01-fix-cowork-routing.sh` | 최대 3회 | 2~5분           |
+| `01a-fix-claude-code-routing.sh`  | 최대 2회 | 2~5분    |
 | `04-verify.sh`             | 2회    | 2~4분 + 종단 curl |
 | `03` · `05` · `06` · `07`  | 없음    | 수 초            |
 

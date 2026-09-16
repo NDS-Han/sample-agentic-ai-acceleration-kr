@@ -128,10 +128,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
         });
         onClose();
       } else {
-        // Field-error keys with no matching input in this form cannot be rendered by the JSX
-        // below, so they just disappear. That is exactly why the max_tokens/context_window
-        // schema drift showed up only as a "Validation failed" with no cause. Merge the
-        // unrenderable keys into the top-level error message so they are always visible.
+        // 필드 에러 중 이 폼에 대응 입력란이 없는 키는 아래 JSX 로 렌더될 수 없어 그냥 사라진다.
+        // 실제로 그래서 max_tokens/context_window 스키마 드리프트가 원인 없는 "Validation failed"
+        // 로만 보였다. 렌더 불가한 키는 상단 에러 메시지에 합쳐 항상 화면에 노출한다.
         const fe = (!result.success && result.fieldErrors) || {};
         const orphanKeys = Object.keys(fe).filter((k) => !(k in form));
         setError(
@@ -187,7 +186,14 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
             {fieldErrors.alias && <FormError error={fieldErrors.alias} />}
           </div>
 
-          {/* Provider */}
+          {/* Provider — ⚠️ 편집 모드에서는 alias 와 마찬가지로 읽기 전용이다.
+              PUT /admin/models/{alias} 의 ModelUpdateRequest 에는 provider/api_format 이
+              없고(admin-api/src/app/schemas/models.py) update 서비스·리포지토리에도 변경
+              경로가 없어 admin API 로는 바꿀 수 없는 불변 필드다. 예전엔 여기서 드롭다운을
+              바꿀 수 있었고 updateModelAction 은 provider 를 아예 보내지도 않으므로
+              (lib/actions/models.ts:95~) 성공 토스트만 뜨고 값은 반영되지 않았다 —
+              화면과 DB 가 갈라지는 조용한 실패. 지금은 스키마가 422 로 거부하기도 하지만,
+              애초에 저장 못 하는 컨트롤을 열어 두지 않는다. */}
           <div className="space-y-1">
             <label htmlFor="provider" className="text-sm font-medium">
               Provider <span className="text-destructive">*</span>
@@ -198,18 +204,28 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               value={form.provider}
               onChange={handleChange}
               required
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              disabled={isEditMode}
+              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
             >
               <option value="">{t('selectProvider')}</option>
               <option value="BEDROCK">BEDROCK</option>
               <option value="OPENMODEL">OPENMODEL</option>
-              {/* Mantle providers need endpoint_url and api_format, so they are normally seeded
-                  by a migration. The options are still exposed here so the provider dropdown
-                  matches the stored value when editing existing cowork-opus models
-                  (unit price, etc.). */}
+              {/* Mantle 계열은 endpoint_url·api_format 이 필요해 보통 마이그레이션으로 시드되지만,
+                  기존 cowork-opus / codex-gpt 모델 편집(단가 등) 시 provider 드롭다운이 값과
+                  매칭되도록 옵션을 노출한다. */}
               <option value="BEDROCK_MANTLE">BEDROCK_MANTLE (Cowork · Opus)</option>
-              {/* <option value="BEDROCK_MANTLE_OPENAI">BEDROCK_MANTLE_OPENAI (Codex · GPT)</option> */}
+              <option value="BEDROCK_MANTLE_OPENAI">BEDROCK_MANTLE_OPENAI (Codex · GPT)</option>
+              {/* 표준 bedrock-runtime plane (SigV4 + CRIS). Mantle 과 달리 endpoint_url 이
+                  **필수**다 — 어댑터가 endpoint 호스트에서 서명 리전을 뽑아내므로
+                  (bedrock-runtime.{region}.amazonaws.com) 비워 두면 서명할 수 없다.
+                  provider_model_id 는 us./global. 접두사가 붙은 추론 프로파일 ID 여야 한다. */}
+              <option value="BEDROCK_RUNTIME_OPENAI">BEDROCK_RUNTIME_OPENAI (GPT-5.6 · CRIS)</option>
             </select>
+            {isEditMode && (
+              <p className="text-xs text-muted-foreground">
+                {t('providerReadonly')}
+              </p>
+            )}
             {fieldErrors.provider && <FormError error={fieldErrors.provider} />}
           </div>
 

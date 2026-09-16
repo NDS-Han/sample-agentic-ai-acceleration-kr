@@ -12,6 +12,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from app.observability.metrics import GatewayMetrics
 from app.services.downgrade_loader import DowngradePolicyLoader, apply_chain
 from app.services.router_service import RouterService
+from app.services.thinking_normalizer import normalize_thinking
 
 logger = structlog.get_logger(__name__)
 
@@ -187,10 +188,22 @@ class DowngradeMiddleware:
 
         payload["model"] = effective
 
-        # Haiku 4.5 는 extended thinking 미지원 — thinking 필드가 있으면
-        # Bedrock 이 ValidationException 으로 reject. 다운그레이드 target 이 haiku 면 제거.
-        if effective.startswith("claude-haiku-4-5") and payload.pop("thinking", None) is not None:
-            logger.info("downgrade_thinking_stripped", target=effective, original=original)
+        # 강등 대상 모델이 받는 형태로 `thinking` 을 맞춘다.
+        #
+        # ⚠️ 예전에는 `effective.startswith("claude-haiku-4-5")` 일 때 **지웠다.** 두 가지가
+        #    틀렸다: (1) 운영자가 만든 alias(예: team-haiku-cheap)는 그 접두사로 시작하지
+        #    않아 판정을 빠져나가고 강등 뒤 400 이 됐다. (2) 지우는 것은 haiku 가 실제로
+        #    받는 `{"type":"enabled"}` 까지 없애서, 사용자는 200 을 받으면서 extended
+        #    thinking 만 조용히 잃는다.
+        #
+        # ⚠️ 이 계층은 모델 **해석 전**이라 provider_model_id 를 모른다 — alias 로 계열을
+        #    추정한다(_family_from_alias). 모르는 alias 는 그대로 통과시킨다(fail-open).
+        _before = json.dumps(payload.get("thinking"), sort_keys=True)
+        payload = normalize_thinking(
+            payload, None, alias=effective, request_id=state.get("request_id", "")
+        )
+        if json.dumps(payload.get("thinking"), sort_keys=True) != _before:
+            logger.info("downgrade_thinking_normalized", target=effective, original=original)
 
         # ensure_ascii=False: 한국어/일본어 content 보존; separators: 컴팩트 JSON
         new_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

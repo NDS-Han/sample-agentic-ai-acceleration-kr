@@ -102,8 +102,13 @@ end
 
 local soft_warning = false
 if policy == 'soft_warning' then
-    local effective_limit = limit * (soft_limit_pct / 100)
-    if used >= effective_limit then
+    -- ⚠️ 나눗셈을 쓰지 않는다. `limit * (soft_limit_pct / 100)` 은 IEEE754 에서
+    --    100 * (110/100) = 110.00000000000001 이 되어, used=110 / limit=100 /
+    --    soft_limit_pct=110 이라는 **정확히 경계인** 상태를 통과시킨다. DB 폴백은 Decimal
+    --    로 정확히 110 을 계산해 차단하므로, Redis 가 살아 있는지에 따라 판정이 갈렸다
+    --    (실측으로 잡은 불일치). 양변에 100 을 곱해 비교하면 표현 오차가 사라진다.
+    local effective_limit = limit * soft_limit_pct / 100
+    if used * 100 >= limit * soft_limit_pct then
         return cjson.encode({
             allowed = false,
             reason = scope_label .. '_soft_limit_exceeded',

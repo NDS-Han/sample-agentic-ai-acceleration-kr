@@ -19,6 +19,7 @@ import {
 } from '@/types/api';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
+import type { UserSearchItem } from '@/types/entities';
 import type { ActionResult } from './types';
 
 // ─── createDepartmentAction ───────────────────────────────────────────────────
@@ -342,6 +343,38 @@ export async function clearUserClientBudgetAction(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+// ─── searchUsersAction (조직 트리 검색창) ─────────────────────────────────────
+//
+// 이메일/이름 부분 일치. 2자 미만은 서버를 치지 않고 즉시 빈 결과 — 1자 검색은
+// 사실상 전량 매칭이라 비싸고 무의미하다(백엔드도 같은 하한을 갖는다:
+// admin-api UserTeamService.SEARCH_MIN_LEN).
+//
+// ⚠️ 타이핑마다 호출되는 경로이므로 `withRetry` 를 **쓰지 않는다.** 실패한 요청은
+//    다음 키 입력이 어차피 대체하므로, 재시도는 결과를 늦게 만들 뿐이다. 다른
+//    액션들이 withRetry 를 쓰는 것과 의도적으로 다르다.
+
+const SEARCH_MIN_LEN = 2;
+
+export async function searchUsersAction(
+  term: string,
+): Promise<ActionResult<{ items: UserSearchItem[]; truncated: boolean }>> {
+  const trimmed = term.trim();
+  if (trimmed.length < SEARCH_MIN_LEN) {
+    return { success: true, data: { items: [], truncated: false } };
+  }
+  try {
+    const res = await adminAPI.get<{ items: UserSearchItem[]; truncated: boolean }>(
+      `/admin/users/search?q=${encodeURIComponent(trimmed)}`,
+    );
+    return {
+      success: true,
+      data: { items: res.items ?? [], truncated: res.truncated ?? false },
+    };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof APIError) {

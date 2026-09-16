@@ -9,9 +9,17 @@ export default async function CLIPage() {
     .get<CLIDownloadItem[]>('/cli/downloads')
     .catch(() => []);
 
+  // admin-api 가 주는 download_url 은 `/cli/download/{os}/{arch}` — **admin-api** 기준 경로다.
+  // 브라우저에서 쓰려면 같은 오리진의 프록시를 거쳐야 하므로
+  // app/api/cli-download/[os]/[arch] 로 바꿔 준다.
+  //   * 이 앱의 라우트 핸들러 규약이 `app/api/**` 이고 미들웨어 허용목록도 `/api/` 기준이다.
+  //   * 그 프록시는 스트리밍이고 상류 불통(502)과 상류 상태코드를 구분한다.
+  // (정정: 예전 경로도 Next 404 는 아니었다 — app/cli/download/[os]/[arch]/route.ts 가
+  //  같은 경로를 받고 있었다. 버튼이 404 였던 진짜 원인은 admin-api 의 CLI_DIST_DIR 이
+  //  비어 있어서 **상류가** 404 였던 것. 그 중복 라우트는 스트리밍/502 구분이 없어 제거했다.)
   const downloads = (Array.isArray(rawDownloads) ? rawDownloads : []).map((item) => ({
     ...item,
-    download_url: `/cli/download/${item.os}/${item.arch}`,
+    download_url: `/api/cli-download/${item.os}/${item.arch}`,
   }));
 
   return (
@@ -180,7 +188,14 @@ gateway-cli disable`}
       <section className="space-y-3">
         <h2 className="text-base font-semibold">바이너리 다운로드</h2>
         {downloads.length === 0 ? (
-          <p className="text-muted-foreground text-sm">다운로드 가능한 버전이 없습니다.</p>
+          // admin-api 는 CLI_DIST_DIR 에 실제로 있는 패키지만 광고한다(예전엔 없는 파일도
+          // 0.0 MB 카드로 광고해 누르면 404 였다). 비어 있으면 원인을 알려 준다.
+          <p className="text-muted-foreground text-sm">
+            다운로드 가능한 패키지가 없습니다. 관리자가{' '}
+            <code className="bg-muted px-1 rounded">gateway-cli/package.sh</code> 로 빌드한 뒤
+            admin-api 의 <code className="bg-muted px-1 rounded">CLI_DIST_DIR</code> 에 마운트해야
+            합니다. 그동안은 위의 소스 설치 절차를 사용하세요.
+          </p>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {downloads.map((item) => (

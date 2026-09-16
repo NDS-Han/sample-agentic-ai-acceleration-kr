@@ -49,11 +49,15 @@ variable "prod_replicas_per_node_group" {
 }
 
 # prod cluster 용 커스텀 파라미터(deepdive Q50 Phase4). 기본 비활성(AWS default
-# `default.valkey7.cluster.on` 사용 — 기존 동작). 활성 시 모듈이 cluster-enabled
-# 커스텀 파라미터그룹을 만들어 maxmemory-policy + reserved-memory-percent 를 박는다
-# (prod 가 default 라 dev 의 volatile-lru 와 갈리고 메모리압박 시 noeviction → OOM
-# 거부 위험을 닫음). family valkey7 의 cluster-enabled 커스텀 그룹은 동일 family 의
-# cluster.on 파생이라 cluster-mode 와 호환된다.
+# `default.valkey7.cluster.on` 사용). 활성 시 모듈이 cluster-enabled 커스텀
+# 파라미터그룹을 만들어 maxmemory-policy + reserved-memory-percent 를 박는다.
+# ⚠️ 다만 아래 두 기본값(volatile-lru / 25)은 `default.valkey7.cluster.on` 의 값과
+# **동일**하므로(2026-09-09 ap-northeast-2 실측) 켜는 것 자체로는 동작이 바뀌지
+# 않는다. 옛 주석의 "prod 가 default 라 dev 의 volatile-lru 와 갈린다 / noeviction
+# OOM 거부" 는 사실과 다르다 — prod default 도 volatile-lru 이고 noeviction 이 아니다.
+# 이 그룹의 목적은 나중에 그룹 교체 없이 값만 바꿀 수 있게 하는 것이다.
+# family valkey7 의 cluster-enabled 커스텀 그룹은 동일 family 의 cluster.on
+# 파생이라 cluster-mode 와 호환된다.
 variable "prod_enable_custom_param_group" {
   description = "prod 에 커스텀 cluster 파라미터그룹(maxmemory-policy/reserved-memory) 사용 여부"
   type        = bool

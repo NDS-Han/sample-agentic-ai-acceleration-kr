@@ -17,6 +17,35 @@ locals {
 
   # prod는 최소 2 인스턴스 (writer + reader), dev는 1 인스턴스
   instance_count = local.is_prod ? 2 : 1
+
+  # final snapshot 이름에 박을 타임스탬프.
+  # time_static 이 count=0 (dev) 이면 [] -> "" 가 되므로 인덱스 에러가 나지 않는다.
+  # (`time_static.final_snapshot[0]` 을 조건식 안에 쓰면 HCL 이 양쪽 분기를 함께
+  #  타입 통일하면서 count=0 인 dev 에서 인덱스 에러가 난다.)
+  final_snapshot_suffix = join("", [
+    for t in time_static.final_snapshot : formatdate("YYYYMMDDhhmmss", t.rfc3339)
+  ])
+}
+
+# ------------------------------------------------------------------------------
+# final_snapshot_identifier 용 타임스탬프 — timestamp() 를 쓰면 안 된다.
+#
+# timestamp() 는 plan 마다 재평가되므로 prod 는 영구 diff 가 남는다:
+#   module.aurora.module.aurora.aws_rds_cluster.this[0] will be updated in-place
+#     ~ final_snapshot_identifier = "...-20260907081803" -> (known after apply)
+# 즉 "변경 없음" 을 배포 게이트로 쓸 수 없게 된다. time_static 은 첫 apply 때 캡처한
+# UTC 시각을 state 에 고정해 이 재평가를 없앤다(provider 문서의 명시 용도).
+#
+# 이 값은 오직 DeleteDBCluster 의 FinalDBSnapshotIdentifier 로만 쓰인다(AWS 에서
+# 되읽지 않는 terraform 전용 속성) — 그래서 값 교정 apply 는 AWS 쓰기 호출이 없다
+# (aws provider 5.100.0 cluster.go:1576 HasChangesExcept 가 이 속성만 바뀌면
+#  ModifyDBCluster 블록 전체를 건너뛴다). prod 첫 plan 만 "1 to add, 1 to change" 이고
+# 그 다음부터 영구히 "No changes." 다.
+#
+# dev 는 skip_final_snapshot=true 이고 식별자도 null 이라 count=0 (dev plan 무영향).
+# ------------------------------------------------------------------------------
+resource "time_static" "final_snapshot" {
+  count = local.is_prod ? 1 : 0
 }
 
 module "aurora" {
@@ -69,7 +98,7 @@ module "aurora" {
   preferred_backup_window   = "17:00-19:00" # KST 02:00-04:00 (UTC 17-19)
   deletion_protection       = local.is_prod
   skip_final_snapshot       = !local.is_prod
-  final_snapshot_identifier = local.is_prod ? "${var.project}-${var.environment}-final-${formatdate("YYYYMMDDHHmmss", timestamp())}" : null
+  final_snapshot_identifier = local.is_prod ? "${var.project}-${var.environment}-final-${local.final_snapshot_suffix}" : null
 
   # 성능 관측성
   performance_insights_enabled          = true

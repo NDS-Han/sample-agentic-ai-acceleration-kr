@@ -38,9 +38,11 @@ def pytest_collection_modifyitems(config, items):
 
 @pytest.fixture(scope="session")
 def db_url() -> str:
+    # notification_worker_user 는 NOLOGIN 으로 잠겼다(db/init/04_create_users.sql) —
+    # 로컬 compose 와 같은 'gateway' 유저로 붙는다.
     return os.environ.get(
         "DB_URL",
-        "postgresql+asyncpg://notification_worker_user:notification_worker_password_change_me@localhost:5432/gateway",
+        "postgresql+asyncpg://gateway:gateway_dev_password@localhost:5432/gateway",
     )
 
 

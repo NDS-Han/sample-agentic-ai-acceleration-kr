@@ -438,6 +438,33 @@ def _extract_reply(raw: str) -> str:
     return raw
 
 
+def _sse(event: str, payload: dict) -> bytes:
+    r"""SSE 블록 한 개를 **단일 프레임**으로 직렬화.
+
+    ⚠️ ``event:`` 줄과 ``data:`` 줄을 따로 publish 하면 안 된다. 두 publish 사이에는
+    await 경계가 있어 릴레이 소비자(``_StreamRelay.tail``)가 그 틈에 따라잡힐 수 있고,
+    그러면 keepalive 코멘트(``: keepalive\n\n``)가 두 줄 **사이에** 끼어 블록이 쪼개진다.
+    클라이언트는 그때 ``event: X`` + ``: keepalive``(data 없음 → 폐기)와 ``data: {...}``
+    (event 이름 없음 → 'message' 로 오분류) 두 조각을 받아 **이벤트가 통째로 사라진다.**
+    한 프레임으로 보내면 구조적으로 쪼개질 수 없다.
+    """
+    return f"event: {event}\ndata: {json.dumps(payload)}\n\n".encode()
+
+
+async def _publish_error(relay: _StreamRelay, message: object, error_type: str) -> None:
+    """SSE 에러 프레임 발행.
+
+    ⚠️ 본문 키는 ``error_type`` 이다 — **``type`` 이면 안 된다.** admin-ui 의
+    ``parseSseBlock`` 은 프레임을 ``{type: <event 이름>, ...payload}`` 로 합치므로,
+    본문에 ``type`` 이 들어있으면 그게 이벤트 이름 ``'error'`` 를 덮어쓴다
+    (예: ``type: 'ClientError'``). 그러면 ChatLayout 의 ``case 'error'`` 가 잡지
+    못하고 ``default: return msg`` 로 **조용히 버려진다** — 사용자에게는 실패가
+    전혀 보이지 않고 pending 스피너만 영구히 돌았다
+    (admin-ui/src/components/chat/ChatLayout.tsx:415, types.ts StreamEvent).
+    """
+    await relay.publish(_sse("error", {"error": message, "error_type": error_type}))
+
+
 async def _agentcore_producer(
     relay: _StreamRelay,
     session_id: str,
@@ -464,6 +491,81 @@ async def _agentcore_producer(
     if screen_context:
         payload["screen_context"] = screen_context
 
+    accumulated: list[str] = []
+    # 영속화 누적: 스트림 종료 후 chat_agent.messages 에 저장해 새로고침/재조회
+    # 시에도 SQL/차트/검증이 보이도록. UI applyEvent 와 **같은 형태**로 재구성:
+    #   tool_calls = [{tool, args, result, status:'done'}] (tool_call+result 병합)
+    #   charts = [spec, ...], validator = 마지막 단일 객체.
+    # (이전엔 content 만 저장 → tool_calls/charts/validator 컬럼이 NULL 로 남아
+    #  read 경로는 조회하는데 표시할 게 없었음.)
+    # ⚠️ 이 선언들은 try **밖**이어야 한다 — 아래 except 핸들러가 부분 결과를
+    #    영속화하므로, try 안에서 선언하면 invoke 전에 터진 예외(자격증명/네트워크)
+    #    에서 핸들러가 NameError 로 다시 죽어 아무것도 남지 않는다.
+    acc_tool_calls: list[dict] = []
+    acc_charts: list[dict] = []
+    acc_validator: dict | None = None
+    # report 이벤트 카드. chat_agent.messages 에는 reports 컬럼이 없어 **영속화되지
+    # 않는다** — 세션 중에만 표시된다(복원까지 원하면 컬럼 추가가 필요).
+    acc_reports: list[dict] = []
+    # 종료 판정 플래그.
+    #   saw_done      — agent 가 마지막 {"type":"done"} 프레임을 보냈는가
+    #   stream_error  — in-band 에러 프레임을 이미 발행했는가(중복 보고 방지)
+    #   streamed      — 스트리밍 분기를 탔는가(비스트리밍 fallback 엔 done 프레임 없음)
+    saw_done = False
+    stream_error = False
+    streamed = False
+    persisted = False
+
+    async def _persist(error_note: str | None = None) -> None:
+        """스트림 누적분을 chat_agent.messages 에 저장. 성공·실패 **양쪽**에서 호출.
+
+        ⚠️ 예전엔 이 저장이 try 안, 스트림 루프 **뒤**에만 있었다 — AgentCore 예외가
+        나면 이미 흘려보낸 텍스트·도구호출·차트까지 전부 버려져 assistant 턴이 통째로
+        사라졌다(새로고침하면 질문만 남고 답이 없다). 부분 답변이라도 남긴다.
+
+        ``error_note`` 가 주어지면 실패 종료로 취급 — 본문에 라이브 화면과 **같은**
+        ``[오류] …`` 문구를 덧붙이고(복원 화면이 라이브와 일치하도록) 미완 도구를
+        failed 로 정리한다.
+        """
+        nonlocal persisted
+        if persisted:
+            return
+        persisted = True
+        # tool_result 없는 도구(render_chart 등)가 running 으로 영속화되면 복원
+        # 시 "실행 중..." 고착(§57) — 정상 종료면 done, 실패 종료면 failed.
+        for tc in acc_tool_calls:
+            if tc.get("status") == "running":
+                tc["status"] = "failed" if error_note else "done"
+        full_reply = "".join(accumulated)
+        # [SUGGESTIONS]...[/SUGGESTIONS] 마커는 UI 전용(후속질문 칩) — DB 본문에서
+        # 제거(§55). UI 도 동일 정규식으로 추출·제거하므로 양쪽 일관.
+        full_reply = re.sub(
+            r"\s*\[SUGGESTIONS\][\s\S]*?\[/SUGGESTIONS\]\s*", "", full_reply
+        ).rstrip()
+        if error_note:
+            note = f"\n\n[오류] {error_note}"
+            # content 저장 상한이 8000 자다. 그냥 이어붙이면 긴 답변에서 **오류 문구가
+            # 먼저 잘려** 실패 사실이 사라지므로, 본문 쪽에서 자리를 비운다.
+            full_reply = (full_reply[: 8000 - len(note)].rstrip() + note).lstrip()
+        # jsonb 컬럼은 None 이면 SQL NULL, 있으면 JSON 문자열을 ::jsonb 캐스팅.
+        # 빈 리스트는 저장 안 함(NULL) → read 경로가 undefined 로 매핑(UI 와 일관).
+        async with AsyncSessionLocal() as own_db:
+            await own_db.execute(
+                text(
+                    "INSERT INTO chat_agent.messages "
+                    "(session_id, role, content, tool_calls, charts, validator) "
+                    "VALUES (CAST(:sid AS uuid), 'assistant', :c, "
+                    "CAST(:tc AS jsonb), CAST(:ch AS jsonb), CAST(:vd AS jsonb))"
+                ).bindparams(
+                    sid=session_id,
+                    c=full_reply[:8000],
+                    tc=json.dumps(acc_tool_calls) if acc_tool_calls else None,
+                    ch=json.dumps(acc_charts) if acc_charts else None,
+                    vd=json.dumps(acc_validator) if acc_validator else None,
+                )
+            )
+            await own_db.commit()
+
     try:
         # read_timeout 900s — boto3 기본(60s)이면 deep 분석의 AgentCore flush 간격
         # (§51: sub-agent blocking 중 최대 ~60s+)에 ReadTimeout 으로 producer 가
@@ -486,24 +588,14 @@ async def _agentcore_producer(
 
         # SigV4 응답 본문은 'response' (StreamingBody). 구버전 'payload' fallback.
         body = response.get("response") or response.get("payload")
-        accumulated: list[str] = []
-        # 영속화 누적: 스트림 종료 후 chat_agent.messages 에 저장해 새로고침/재조회
-        # 시에도 SQL/차트/검증이 보이도록. UI applyEvent 와 **같은 형태**로 재구성:
-        #   tool_calls = [{tool, args, result, status:'done'}] (tool_call+result 병합)
-        #   charts = [spec, ...], validator = 마지막 단일 객체.
-        # (이전엔 content 만 저장 → tool_calls/charts/validator 컬럼이 NULL 로 남아
-        #  read 경로는 조회하는데 표시할 게 없었음.)
-        acc_tool_calls: list[dict] = []
-        acc_charts: list[dict] = []
-        acc_validator: dict | None = None
-        acc_reports: list[dict] = []  # 다운로드 리포트 카드(report 이벤트)
 
         # Phase 4: agent 가 async-generator 면 AgentCore 가 `data: <json>\n\n` 프레임을
         # 점진적으로 흘린다. StreamingBody.iter_lines() 로 한 줄씩 읽어 admin-ui SSE 로
         # 재발행. 각 next() 는 blocking 이라 to_thread 로 감싸 이벤트 루프 양보(전체
         # 루프를 감싸면 재버퍼링되므로 next() 단위로만).
         if hasattr(body, "iter_lines"):
-            # chunk_size=1 — botocore 기본(1024)은 1KB 가 모일 때까지 read 가 블록돼
+            streamed = True
+            # chunk_size=1— botocore 기본(1024)은 1KB 가 모일 때까지 read 가 블록돼
             # 첫 thinking/heartbeat 프레임이 ~5초 묶여 도착(§52 실측: 기본 5.03s →
             # 1바이트 0.51s). SSE 는 초당 수백 바이트 수준이라 1바이트 read 의
             # syscall 비용은 무시 가능 — 체감 첫 프레임이 즉시 도달하는 게 압도적 이득.
@@ -545,14 +637,12 @@ async def _agentcore_producer(
 
                 # AgentCore in-band 에러 프레임 (HTTP 는 200 유지)
                 if isinstance(evt, dict) and "error_type" in evt:
-                    err = json.dumps(
-                        {
-                            "error": evt.get("error", "stream error"),
-                            "type": evt.get("error_type", "StreamError"),
-                        }
+                    await _publish_error(
+                        relay,
+                        evt.get("error", "stream error"),
+                        str(evt.get("error_type") or "StreamError"),
                     )
-                    await relay.publish(b"event: error\n")
-                    await relay.publish(f"data: {err}\n\n".encode())
+                    stream_error = True
                     break
 
                 etype = evt.get("type") if isinstance(evt, dict) else None
@@ -562,18 +652,15 @@ async def _agentcore_producer(
                     if evt.get("strip"):
                         payload_out["strip"] = evt["strip"]
                     acc_charts.append(evt["spec"])  # 영속화: charts[]
-                    await relay.publish(b"event: chart\n")
-                    await relay.publish(f"data: {json.dumps(payload_out)}\n\n".encode())
+                    await relay.publish(_sse("chart", payload_out))
                 elif etype == "thinking":
                     # "작업 중" 신호 — 본문에 누적하지 않고 그대로 전달
-                    await relay.publish(b"event: thinking\n")
-                    await relay.publish(f"data: {json.dumps({'text': evt.get('text', '')})}\n\n".encode())
+                    await relay.publish(_sse("thinking", {"text": evt.get("text", "")}))
                 elif etype == "reasoning":
                     # 추론 요약 델타(orchestrator display:summarized) — 침묵 구간을
                     # 메우는 "사고 과정" 스트림. 본문(accumulated)에 누적하지 않고
                     # 그대로 전달(답변과 분리, DB 영속화 대상 아님).
-                    await relay.publish(b"event: reasoning\n")
-                    await relay.publish(f"data: {json.dumps({'chunk': evt.get('chunk', '')})}\n\n".encode())
+                    await relay.publish(_sse("reasoning", {"chunk": evt.get("chunk", "")}))
                 elif etype == "tool_call":
                     # 도구 호출 투명성 (어떤 specialist 를 부르는지)
                     tool_name = evt.get("tool", "")
@@ -581,8 +668,9 @@ async def _agentcore_producer(
                     acc_tool_calls.append(
                         {"tool": tool_name, "args": evt.get("args", {}), "status": "running"}
                     )
-                    await relay.publish(b"event: tool_call\n")
-                    await relay.publish(f"data: {json.dumps({'tool': tool_name, 'args': evt.get('args', {})})}\n\n".encode())
+                    await relay.publish(
+                        _sse("tool_call", {"tool": tool_name, "args": evt.get("args", {})})
+                    )
                 elif etype == "tool_result":
                     # 실행된 코드/구조화 결과 (Code Specialist 의 code 포함)
                     tool_name = evt.get("tool", "")
@@ -602,47 +690,41 @@ async def _agentcore_producer(
                         acc_tool_calls.append(
                             {"tool": tool_name, "result": tool_result, "status": "done"}
                         )
-                    await relay.publish(b"event: tool_result\n")
-                    await relay.publish(f"data: {json.dumps({'tool': tool_name, 'result': tool_result})}\n\n".encode())
+                    await relay.publish(
+                        _sse("tool_result", {"tool": tool_name, "result": tool_result})
+                    )
                 elif etype == "validator":
                     # reconciliation gate WARN 등. 영속화: 마지막 verdict 단일 객체.
                     acc_validator = evt.get("result", {})
-                    await relay.publish(b"event: validator\n")
-                    await relay.publish(f"data: {json.dumps({'result': evt.get('result', {})})}\n\n".encode())
+                    await relay.publish(_sse("validator", {"result": evt.get("result", {})}))
                 elif etype == "verification":
                     # L3 실행기반 후보선택 검증 메타(§58, deep 모드만). agreement/k/
                     # verdict 를 그대로 전달 — UI 가 "검증됨" 카드로 렌더(설명가능성).
                     # 휘발성 진행표시라 DB 영속화 안 함(validator 와 동일 취급).
-                    await relay.publish(b"event: verification\n")
                     await relay.publish(
-                        f"data: {json.dumps({'result': evt.get('result', {})})}\n\n".encode()
+                        _sse("verification", {"result": evt.get("result", {})})
                     )
                 elif etype == "audit":
                     # L5 독립 답변 감사(§60, deep+고위험만). 최종 산문 수치 cite 무결성
                     # verdict/defects 를 그대로 전달 — UI advisory 카드(비파괴). validator
                     # 와 동일하게 휘발성 진행표시로 취급(DB 영속화 안 함).
-                    await relay.publish(b"event: audit\n")
-                    await relay.publish(
-                        f"data: {json.dumps({'result': evt.get('result', {})})}\n\n".encode()
-                    )
+                    await relay.publish(_sse("audit", {"result": evt.get("result", {})}))
                 elif etype == "heartbeat":
                     # 공백 없는 스트리밍 생존신호(진행 단계/경과시간). 본문(accumulated)에
                     # 절대 누적하지 않고 그대로 전달 — DB 영속화 대상 아님(휘발성 진행표시).
                     # ⚠️ 명시 elif 필수: 없으면 아래 else 가 'phase'/'label' 없는 dict 라
                     # chunk 추출 실패로 무시되거나, 키가 겹치면 본문 오염. (transport-level
                     # `: keepalive` SSE 코멘트와는 다른, 데이터 이벤트.)
-                    await relay.publish(b"event: heartbeat\n")
-                    await relay.publish((
-                        "data: "
-                        + json.dumps(
+                    await relay.publish(
+                        _sse(
+                            "heartbeat",
                             {
                                 "phase": evt.get("phase", ""),
                                 "label": evt.get("label", ""),
                                 "elapsed_ms": evt.get("elapsed_ms", 0),
-                            }
+                            },
                         )
-                        + "\n\n"
-                    ).encode())
+                    )
                 elif etype == "plan":
                     # deep 모드 분석 계획(§57 PlanCard). strip 으로 본문에서 raw
                     # JSON 펜스 제거(차트와 동일 패턴). 영속화는 본문 텍스트에
@@ -650,15 +732,13 @@ async def _agentcore_producer(
                     payload_out = {"plan": evt.get("plan", {})}
                     if evt.get("strip"):
                         payload_out["strip"] = evt["strip"]
-                    await relay.publish(b"event: plan\n")
-                    await relay.publish(
-                        f"data: {json.dumps(payload_out)}\n\n".encode()
-                    )
+                    await relay.publish(_sse("plan", payload_out))
                 elif etype == "report":
                     # 다운로드 리포트 카드. s3_uri 는 그대로 전달(UI 가 다운로드 클릭 시
                     # /reports/download 로 presign 요청 — URL 을 미리 굽지 않음, 만료·검증
-                    # 우회 방지). 영속화: tool_calls 와 함께 acc 에 저장해 새로고침 후도
-                    # 카드 유지(사용자 결정: 세션 중만이지만 DB 에 흔적은 남겨 둠).
+                    # 우회 방지). ⚠️ chat_agent.messages 에 reports 컬럼이 없어
+                    # acc_reports 는 **DB 에 저장되지 않는다** — 새로고침하면 카드가
+                    # 사라진다(세션 중에만 유효). 복원까지 원하면 컬럼 추가가 필요.
                     rep = {
                         "s3_uri": evt.get("s3_uri", ""),
                         "file_name": evt.get("file_name", "report"),
@@ -667,10 +747,13 @@ async def _agentcore_producer(
                         "page_count": evt.get("page_count"),
                     }
                     acc_reports.append(rep)
-                    await relay.publish(b"event: report\n")
-                    await relay.publish(f"data: {json.dumps(rep)}\n\n".encode())
+                    await relay.publish(_sse("report", rep))
                 elif etype == "done":
-                    continue  # 루프 종료 후 자체 done 발행
+                    # agent 가 보내는 **정상 완료 표식**. 이 프레임을 못 보고 스트림이
+                    # 끝나면 절단이다(아래 truncated 판정) — 여기서만 기록하고 발행은
+                    # 루프 종료 후 한 번에 한다.
+                    saw_done = True
+                    continue
                 else:
                     chunk = (
                         (evt.get("chunk") or evt.get("delta") or evt.get("reply") or "")
@@ -679,54 +762,46 @@ async def _agentcore_producer(
                     )
                     if chunk:
                         accumulated.append(chunk)
-                        await relay.publish(b"event: text\n")
-                        await relay.publish(f"data: {json.dumps({'chunk': chunk})}\n\n".encode())
+                        await relay.publish(_sse("text", {"chunk": chunk}))
         else:
             # Fallback: 비스트리밍 단일 JSON 응답
             raw = body.read().decode() if hasattr(body, "read") else json.dumps(response, default=str)
             reply = _extract_reply(raw)
             accumulated.append(reply)
-            await relay.publish(b"event: text\n")
-            await relay.publish(f"data: {json.dumps({'chunk': reply})}\n\n".encode())
+            await relay.publish(_sse("text", {"chunk": reply}))
 
-        await relay.publish(b"event: done\n")
-        await relay.publish(b"data: {}\n\n")
-
-        # assistant 메시지 저장 (스트림 누적분 + tool_calls/charts/validator).
-        # jsonb 컬럼은 None 이면 SQL NULL, 있으면 JSON 문자열을 ::jsonb 캐스팅.
-        # 빈 리스트는 저장 안 함(NULL) → read 경로가 undefined 로 매핑(UI 와 일관).
-        # tool_result 없는 도구(render_chart 등)가 running 으로 영속화되면 복원
-        # 시 "실행 중..." 고착(§57) — 스트림 종료 시점엔 전부 완료이므로 done 처리.
-        for tc in acc_tool_calls:
-            if tc.get("status") == "running":
-                tc["status"] = "done"
-        full_reply = "".join(accumulated)
-        # [SUGGESTIONS]...[/SUGGESTIONS] 마커는 UI 전용(후속질문 칩) — DB 본문에서
-        # 제거(§55). UI 도 동일 정규식으로 추출·제거하므로 양쪽 일관.
-        full_reply = re.sub(
-            r"\s*\[SUGGESTIONS\][\s\S]*?\[/SUGGESTIONS\]\s*", "", full_reply
-        ).rstrip()
-        async with AsyncSessionLocal() as own_db:
-            await own_db.execute(
-                text(
-                    "INSERT INTO chat_agent.messages "
-                    "(session_id, role, content, tool_calls, charts, validator) "
-                    "VALUES (CAST(:sid AS uuid), 'assistant', :c, "
-                    "CAST(:tc AS jsonb), CAST(:ch AS jsonb), CAST(:vd AS jsonb))"
-                ).bindparams(
-                    sid=session_id,
-                    c=full_reply[:8000],
-                    tc=json.dumps(acc_tool_calls) if acc_tool_calls else None,
-                    ch=json.dumps(acc_charts) if acc_charts else None,
-                    vd=json.dumps(acc_validator) if acc_validator else None,
-                )
+        # 스트림이 agent 의 done 프레임 없이 끝났으면 **성공이 아니다.** iter_lines 가
+        # None 을 돌려주는 경로(=루프의 `if line is None: break`)는 런타임 종료·네트워크
+        # 절단·read timeout 으로 프레임이 중간에 끊긴 경우도 포함한다 — agent 는 정상
+        # 완료 시 반드시 마지막에 {"type":"done"} 을 yield 하므로
+        # (admin-chat-agent/src/agent/main.py:1503) 그 부재가 절단의 신호다.
+        # 예전엔 이 경로에서도 `event: done` 만 발행해 **잘린 답변이 완결된 답변으로**
+        # 표시됐다(사용자는 조용히 truncate 된 분석을 신뢰하게 된다).
+        truncation_note: str | None = None
+        if streamed and not saw_done and not stream_error:
+            truncation_note = (
+                "스트림이 완료 신호 없이 끊겼습니다 — 답변이 중간에 잘렸을 수 있습니다."
             )
-            await own_db.commit()
+            await _publish_error(relay, truncation_note, "StreamTruncated")
+
+        # done 은 "성공"이 아니라 "스트림 종료" 신호다(실패 사실은 위 error 프레임이
+        # 전달). 클라이언트가 pending 스피너를 정리하고 [SUGGESTIONS] 를 추출하려면
+        # 절단·에러 종료에서도 필요하다.
+        await relay.publish(_sse("done", {}))
+
+        await _persist(error_note=truncation_note)
 
     except Exception as exc:
-        err = json.dumps({"error": str(exc), "type": type(exc).__name__})
-        await relay.publish(b"event: error\n")
-        await relay.publish(f"data: {err}\n\n".encode())
+        await _publish_error(relay, str(exc), type(exc).__name__)
+        # ⚠️ 예외 경로에서도 영속화한다 — 안 하면 이미 사용자 화면에 흘러간 부분
+        # 답변·도구호출이 DB 에 하나도 남지 않아, 새로고침하면 assistant 턴이 통째로
+        # 사라진다(질문만 남는다). 저장 자체가 또 실패해도 원래 예외 보고를 덮지
+        # 않도록 따로 감싼다.
+        try:
+            await _persist(error_note=f"{type(exc).__name__}: {exc}")
+        except Exception:  # noqa: BLE001 — 영속화 실패가 에러 보고를 가리지 않게
+            # stdlib logging — structlog 식 kwargs 를 넘기면 TypeError 다(%s 포맷).
+            logger.exception("chat partial persist failed session_id=%s", session_id)
     finally:
         # tail 구독자 종료 신호 + 릴레이 정리(완료 후 재구독은 history 폴백).
         await relay.finish()

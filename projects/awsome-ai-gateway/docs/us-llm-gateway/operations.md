@@ -16,6 +16,7 @@
 | ID | 절 | 언제 | 문서 |
 |---|---|---|---|
 | §8-U | 업데이트 (코드 변경 반영) | 코드·차트·terraform 이 바뀔 때마다 | [ops/8-U-update.md](ops/8-U-update.md) |
+| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
 | §8-M | 모델 추가와 교체 | 모델 추가·교체 | [ops/8-M-models.md](ops/8-M-models.md) |
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |
 | §8-S | 배포 후 보안 하드닝 (직원 오픈 전 필수) | 직원 오픈 전 1회 | [ops/8-S-hardening.md](ops/8-S-hardening.md) |
@@ -23,11 +24,11 @@
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
-| §8-P | dev → prod 승격 — 별도 계정에 prod 스택 신설 | prod 승격 (US-08) | [ops/8-P-prod.md](ops/8-P-prod.md) |
 | §8-L | Admin UI Cognito 로그인 활성화 (dev-login 대체) | dev-login 끄고 싶을 때 (US-10, 선택 · 운영이면 강력 권장) | [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md) |
 | §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
 | §8-Z | 토큰 TTL 조절 | 토큰 수명 바꿀 때 | [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md) |
+| §8-P | dev → prod 승격 — 별도 계정에 prod 스택 신설 | prod 승격 (US-08) | [ops/8-P-prod.md](ops/8-P-prod.md) |
 | §8-X | 멀티계정 확장 — claude-code 를 별도 계정 Bedrock 으로 | 멀티계정 확장 | [아래](#8-x-멀티계정-확장--claude-code-를-별도-계정-bedrock-으로) |
 
 ---
@@ -36,6 +37,13 @@
 
 `git pull` 후 바뀐 것에 따라 **A 서비스 코드 / B 차트·values / C terraform** 중 하나 → 공통 마지막 `install-eks.sh dev`. 0단계(저장소 갱신·values 백업) 를 건너뛰면 추론이 멈춘다.
 → **[ops/8-U-update.md](ops/8-U-update.md)**
+
+---
+
+### 8-D. upstream 동기화 배포 (코드·스키마·단가 일괄)
+
+upstream 을 통째로 들여온 뒤 배포 EC2 에서 명령만 위에서 아래로: 저장소 → 사전 점검 → DB 스냅샷 → plan → 태그 → 빌드 → install-eks → 단가 → 사후 점검.
+→ **[ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md)**
 
 ---
 
@@ -86,16 +94,6 @@
 `US-07` 선택 — 전제 S2S VPN. values 주석 2곳 해제 → `install-eks.sh`(ALB 재생성) → admin SG·CNAME 교체. VPN 없이 적용하면 VK 발급이 끊겨 게이트웨이 사용 불가. terraform 무변경. 신규 설치는 `US-01` 때 values 로 포함.
 → **[ops/8-I-admin-internal.md](ops/8-I-admin-internal.md)**
 
----
-
-### 8-P. dev → prod 승격 — 별도 계정에 prod 스택 신설
-
-`US-08` prod 는 dev 의 스위치가 아니라 **별도 계정에 나란히 서는 별개 스택**(tfstate·EKS·Aurora·Valkey·Cognito·ECR 전부 새로).
-`environment = "prod"` 한 줄로 HA 사이징(Aurora r7g ×2 · Valkey 3 shard × 3 · NAT ×2)이 켜지고,
-처음부터 **https(US-06) + admin ALB internal(US-07) + VPN** 형태로 세운다. dev 에서 가져오는 것은 tfvars 원본과 도메인 위임뿐.
-
-→ **[ops/8-P-prod.md](ops/8-P-prod.md)** — 준비(계정·도메인·tfvars) → terraform → 이미지 → values → https/internal
-→ Cognito·SQL → Client VPN → Cowork Windows 설치기 → 검증 → teardown. 검증 계정 실측(2026-08-28~29).
 
 ---
 
@@ -139,6 +137,17 @@ python3 ~/awsome-ai-gateway/deployment/scripts/provision_agentcore_websearch.py 
 
 토큰 수명 — refresh 7일·access/id 1시간(Cognito, terraform) · VK 1시간(admin-api env). 바꾸는 이유는 client-setup-explained 「만료 조건」.
 → **[ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md)**
+
+---
+
+### 8-P. dev → prod 승격 — 별도 계정에 prod 스택 신설
+
+> prod 는 dev 의 스위치가 아니라 **별도 계정에 나란히 서는 별개 스택**(tfstate·EKS·Aurora·Valkey·Cognito·ECR 전부 새로).
+> `environment = "prod"` 한 줄로 HA 사이징(Aurora r7g ×2 · Valkey 3 shard × 3 · NAT ×2)이 켜지고,
+> 처음부터 **https(US-06) + admin ALB internal(US-07) + VPN** 형태로 세운다. dev 에서 가져오는 것은 tfvars 원본과 도메인 위임뿐.
+
+→ **[ops/8-P-prod.md](ops/8-P-prod.md)** — 준비(계정·도메인·tfvars) → terraform → 이미지 → values → https/internal
+→ Cognito·SQL → Client VPN → Cowork Windows 설치기 → 검증 → teardown. 검증 계정 실측(2026-08-28~29).
 
 ---
 

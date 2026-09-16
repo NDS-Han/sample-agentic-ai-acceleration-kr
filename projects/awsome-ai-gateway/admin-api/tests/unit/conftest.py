@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from tests.session_double import wire_savepoint
+
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.encryption import AESEncryptionService
@@ -59,6 +61,9 @@ def mock_session() -> AsyncMock:
     session.commit = AsyncMock()
     session.execute = AsyncMock()
     session.rollback = AsyncMock()
+    # ⚠️ `begin_nested` 는 실물에서 **동기 호출**이고 async context manager 를 돌려준다.
+    #    AsyncMock 기본값은 코루틴을 돌려주므로 `async with` 가 TypeError 로 터진다.
+    wire_savepoint(session)
     return session
 
 
@@ -76,6 +81,18 @@ def mock_redis() -> AsyncMock:
         yield  # pragma: no cover — make this an async generator
 
     redis.scan_iter = MagicMock(side_effect=lambda *a, **kw: _empty_scan())
+
+    # Pipeline support: services buffer writes via
+    #   pipe = redis.pipeline(transaction=False); pipe.setex(...); await pipe.execute()
+    # redis-py's async pipeline buffers commands *synchronously* (they return the
+    # pipeline for chaining); only execute() is awaited. Mirror that: setex/sadd are
+    # sync MagicMocks (no unawaited-coroutine warnings, and no code path awaits them
+    # directly — every caller goes through the pipe), execute() is awaitable, and
+    # pipeline() returns the same mock so buffered calls record on mock_redis.setex/.sadd.
+    redis.setex = MagicMock()
+    redis.sadd = MagicMock()
+    redis.execute = AsyncMock()
+    redis.pipeline = MagicMock(return_value=redis)
     return redis
 
 
@@ -96,7 +113,7 @@ def db_session_factory():
     The factory returns a context manager yielding a session whose `add_all` calls
     are recorded so tests can assert batch INSERT behavior. We do NOT use a real DB
     here because AuditLog uses Postgres-specific schema=audit and JSONB types.
-    Real-database integration for the batch insert has no coverage yet.
+    Real DB integration is covered separately (Finch e2e in Task A5).
     """
     from contextlib import asynccontextmanager
 

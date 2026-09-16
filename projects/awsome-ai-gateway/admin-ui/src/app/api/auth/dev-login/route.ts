@@ -8,6 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 import { UserRole } from '@/types/enums';
 
 const DEV_COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours in seconds
@@ -31,6 +32,50 @@ function buildDevToken(role: string): string {
   // dev JWT format: dev.<base64url-payload>.sig  (MVP only — not signed)
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   return `dev.${payloadB64}.sig`;
+}
+
+/**
+ * 꺼져 있을 때의 응답. 예전엔 `new NextResponse(null, { status: 404 })` 였다 —
+ * middleware 가 여기로 리다이렉트했으므로 **prod 사용자는 본문 없는 404 에서 끝났고**
+ * 브라우저에도 서버 로그에도 단서가 0이었다(A3). 상태코드도 404 는 오답이다:
+ * 라우트는 존재하고 정책상 비활성일 뿐이라 503 이 맞다.
+ */
+const DISABLED_MESSAGE =
+  'Dev login is disabled in this environment (DEV_LOGIN_ENABLED != "true"). ' +
+  'Use the SSO entry point at /api/auth/login. ' +
+  'If SSO is not configured either, /api/auth/login will name the missing OIDC_* variables.';
+
+const DISABLED_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dev login disabled — Admin UI</title>
+  <style>
+    body { font-family: system-ui, sans-serif; display: flex; justify-content: center; align-items: center; min-height: 100vh; margin: 0; background: #f5f5f5; }
+    .card { background: white; padding: 2rem; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); max-width: 560px; }
+    h1 { font-size: 1.25rem; margin: 0 0 1rem; color: #111; }
+    p { font-size: 0.875rem; color: #444; line-height: 1.6; }
+    code { background: #f0f0f0; padding: 0.1rem 0.3rem; border-radius: 3px; font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h1>Dev login is disabled</h1>
+    <p>이 환경은 <code>DEV_LOGIN_ENABLED != "true"</code> 이므로 개발용 로그인이 비활성입니다.</p>
+    <p>SSO 진입점: <a href="/api/auth/login">/api/auth/login</a> — OIDC 가 설정돼 있지 않으면 그 페이지가 <strong>비어 있는 환경변수 이름</strong>을 그대로 알려줍니다.</p>
+  </div>
+</body>
+</html>`;
+
+function disabledHtmlResponse(): NextResponse {
+  return new NextResponse(DISABLED_HTML, {
+    status: 503,
+    headers: {
+      'Content-Type': 'text/html; charset=utf-8',
+      'Cache-Control': 'no-store',
+    },
+  });
 }
 
 const LOGIN_HTML = `<!DOCTYPE html>
@@ -68,7 +113,7 @@ const LOGIN_HTML = `<!DOCTYPE html>
 
 export async function GET(): Promise<NextResponse> {
   if (isDisabled()) {
-    return new NextResponse(null, { status: 404 });
+    return disabledHtmlResponse();
   }
 
   return new NextResponse(LOGIN_HTML, {
@@ -79,7 +124,11 @@ export async function GET(): Promise<NextResponse> {
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
   if (isDisabled()) {
-    return new NextResponse(null, { status: 404 });
+    // POST 는 이 파일의 다른 에러들과 같은 JSON 형태를 유지한다(아래 400 들과 동일 idiom).
+    return NextResponse.json(
+      { error: DISABLED_MESSAGE, sso_entry_point: '/api/auth/login' },
+      { status: 503, headers: { 'Cache-Control': 'no-store' } },
+    );
   }
 
   let role: string | null = null;
@@ -108,10 +157,10 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   const token = buildDevToken(role);
 
-  // Build redirect URL from Host header to avoid 0.0.0.0 in Docker
-  const host = request.headers.get('host') || 'localhost:3000';
+  // 리다이렉트는 상대 경로라 host 가 필요 없다(lib/redirect.ts). proto 는 아래 쿠키의
+  // Secure 판정에 쓴다.
   const proto = request.headers.get('x-forwarded-proto') || 'http';
-  const redirectResponse = NextResponse.redirect(`${proto}://${host}/`);
+  const redirectResponse = redirectRelative('/');
   redirectResponse.cookies.set('admin_jwt', token, {
     httpOnly: true,
     sameSite: 'lax',

@@ -7,16 +7,22 @@
  * `secure` flag matches the actual connection scheme (HTTP vs HTTPS) and
  * the redirect URL preserves the original Host header (avoids 0.0.0.0 in
  * containerized envs). The redirect lands on '/' which middleware then
- * sends to '/login' since the cookie is gone.
+ * sends to '/api/auth/login' since the cookie is gone — that route picks the
+ * OIDC authorize URL, the dev form, or a readable 503 depending on env
+ * (src/app/api/auth/login/route.ts). It used to point straight at
+ * '/api/auth/dev-login', which answers a bodyless 404 in prod.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { redirectRelative } from '@/lib/redirect';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
-  const host = request.headers.get('host') || 'localhost:3000';
+  // host 는 더 필요 없다 — 리다이렉트가 상대 경로다(lib/redirect.ts). proto 는 쿠키의
+  // Secure 플래그 판정에 여전히 쓴다(HTTP 종단에서 Secure 를 붙이면 쿠키가 저장 안 된다).
   const proto = request.headers.get('x-forwarded-proto') || 'http';
 
-  const response = NextResponse.redirect(`${proto}://${host}/`, { status: 303 });
+  // 상대 Location — Host 헤더가 CloudFront 뒤에서 ALB 이름일 수 있다(lib/redirect.ts).
+  const response = redirectRelative('/');
   response.cookies.set('admin_jwt', '', {
     httpOnly: true,
     sameSite: 'lax',

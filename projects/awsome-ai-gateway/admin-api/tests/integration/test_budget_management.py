@@ -93,7 +93,7 @@ class TestBudgetSummary:
             with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
                  patch("app.repositories.user_repository.UserRepository") as MockUserRepo:
                 MockBudgetRepo.return_value.list_configs = AsyncMock(return_value=[config])
-                MockUserRepo.return_value.list_users = AsyncMock(return_value=[])
+                MockUserRepo.return_value.iter_all_users = AsyncMock(return_value=[])
                 MockUserRepo.return_value.list_all_teams = AsyncMock(return_value=[team_obj])
 
                 resp = await client.get(

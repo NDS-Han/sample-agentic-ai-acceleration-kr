@@ -124,8 +124,27 @@ export interface RateLimitTreeNode {
 
 // ─── Organisation Tree ────────────────────────────────────────────────────────
 
+/**
+ * 조직 트리 검색창의 사용자 결과 1건.
+ *
+ * `UserResponse` 와 별개인 이유: 검색은 트리에서 노드를 찾아 선택하는 용도라
+ * created_at/is_active 가 불필요하고, 반대로 `team_id` 가 **반드시** 필요하다 —
+ * 팀 멤버는 트리에서 lazy-load 되므로 조상 경로를 펼치려면 팀 id 를 알아야 한다.
+ */
+export interface UserSearchItem {
+  id: string;
+  email: string;
+  display_name: string;
+  role: UserRole;
+  team_id: string | null;
+  team_name: string | null;
+}
+
 export interface OrgNodeMeta {
+  /** 항상 **사람 수**. 노드 타입과 무관하다(admin-api OrgNodeMeta 주석 참조). */
   member_count: number | null;
+  /** 하위 팀 수. DEPARTMENT / ORGANIZATION 만 채워지고 TEAM·USER 는 null. */
+  team_count: number | null;
   leader_name: string | null;
   leader_user_id: string | null;
   email: string | null;

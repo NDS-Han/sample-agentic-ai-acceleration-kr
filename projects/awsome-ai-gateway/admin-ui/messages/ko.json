@@ -341,6 +341,7 @@
     "editModel": "모델 수정",
     "createModel": "모델 추가",
     "aliasReadonly": "생성 후 alias(식별자)는 변경할 수 없습니다. 이름을 바꾸려면 새 모델을 생성하세요.",
+    "providerReadonly": "생성 후 Provider(및 이로부터 결정되는 api_format)는 변경할 수 없습니다. 공급자를 바꾸려면 새 모델을 생성하세요.",
     "selectProvider": "선택하세요",
     "mantleEndpointNote": "/v1/messages 는 자동으로 추가됩니다.",
     "allowedAppsLabel": "사용 가능 앱",
@@ -414,10 +415,10 @@
     },
     "webSearch": {
       "title": "앱별 웹서치 허용",
-      "description": "앱별 서버사이드 웹서치 허용. ON 이면 해당 앱(Claude Code / Cowork) 사용자가 질문할 때 게이트웨이가 자동으로 웹 검색을 수행해 최신 정보로 답합니다(클라 설정 불필요).",
+      "description": "앱별 서버사이드 웹서치 허용. ON 이면 해당 앱(Claude Code / Cowork / Codex) 사용자가 질문할 때 게이트웨이가 자동으로 웹 검색을 수행해 최신 정보로 답합니다(클라 설정 불필요).",
       "on": "웹서치 ON",
       "off": "웹서치 OFF",
-      "empty": "라우팅 프로필이 없습니다. (마이그레이션 0021 로 claude-code/cowork 시드 필요)",
+      "empty": "라우팅 프로필이 없습니다. (마이그레이션 0021 로 claude-code/cowork/codex 시드 필요)",
       "saveFailed": "저장 실패: {error}"
     }
   },
@@ -545,6 +546,23 @@
       "usersUpdated": "업데이트 {count}명",
       "usersDeactivated": "비활성화 {count}명",
       "noChanges": "동기화 완료 (변경 없음)"
+    },
+    "search": {
+      "placeholder": "이메일 · 이름 · 팀명 검색",
+      "ariaLabel": "조직 검색",
+      "clear": "검색어 지우기",
+      "minLength": "2자 이상 입력하세요",
+      "searching": "검색 중…",
+      "noResults": "검색 결과가 없습니다",
+      "failed": "검색에 실패했습니다. 다시 시도하세요.",
+      "groupOrg": "부서 · 팀",
+      "groupUser": "사용자",
+      "truncated": "결과가 더 있습니다 — 검색어를 더 입력해 좁혀보세요",
+      "resultsCount": "{count}건",
+      "teamCountShort": "{count}팀",
+      "userCountShort": "{count}명",
+      "unassigned": "미배정",
+      "hint": "↑↓ 이동 · Enter 선택 · Esc 닫기"
     }
   },
   "analytics": {
@@ -801,13 +819,17 @@
     },
     "bodyLogging": {
       "label": "본문 로깅 (Invocation Body Logging)",
-      "description": "요청·응답 본문을 S3에 적재합니다. 변경은 게이트웨이에 수 초 내 반영됩니다.",
+      "description": "요청·응답 본문 전문을 S3에 적재합니다. 마스킹하지 않으므로 사용자가 프롬프트에 넣은 내용이 그대로 저장됩니다. 변경은 게이트웨이에 수 초 내 반영됩니다.",
       "toggleLabel": "본문 로깅 토글",
+      "activeWarning": "수집 중 — 프롬프트·응답 본문이 마스킹 없이 S3에 저장됩니다.",
       "turnedOn": "본문 로깅을 켰습니다. 수 초 내 적용됩니다.",
       "turnedOff": "본문 로깅을 껐습니다. 수 초 내 적용됩니다.",
-      "confirmTitle": "본문 로깅을 끄시겠습니까?",
-      "confirmMessage": "끄면 이후 요청·응답 본문이 S3에 더 이상 적재되지 않습니다. 언제든 다시 켤 수 있습니다.",
-      "confirmLabel": "끄기"
+      "confirmOnTitle": "본문 로깅을 켜시겠습니까?",
+      "confirmOnMessage": "지금부터 모든 요청·응답 본문이 마스킹 없이 S3에 저장됩니다. 사용자가 프롬프트에 붙여 넣은 자료도 포함됩니다. 켜는 조작은 감사 로그에 기록됩니다.",
+      "confirmOnLabel": "켜기",
+      "confirmOffTitle": "본문 로깅을 끄시겠습니까?",
+      "confirmOffMessage": "끄면 이후 요청·응답 본문이 S3에 더 이상 적재되지 않습니다. 꺼져 있던 구간의 본문은 나중에 복구할 수 없습니다. 언제든 다시 켤 수 있습니다.",
+      "confirmOffLabel": "끄기"
     }
   },
   "errors": {
@@ -850,6 +872,10 @@
     "noEmail": "이메일 없음",
     "confirmAllTitle": "전체 허용 모델 변경",
     "confirmAllMessage": "이 모델은 현재 모든 앱에 허용되어 있습니다. 해제하면 명시 목록으로 전환되어 다른 앱의 접근 범위가 바뀔 수 있습니다. 계속할까요?",
-    "confirmAllLabel": "계속"
+    "confirmAllLabel": "계속",
+    "confirmLastMessage": "이 앱은 {alias} 의 마지막 허용 앱입니다. 해제하면 허용 앱이 하나도 남지 않아 모든 앱에서 거부됩니다(모델은 목록에 남습니다). 계속할까요?",
+    "confirmLastTitle": "마지막 허용 앱 해제",
+    "noneBadge": "전면 거부",
+    "noneHint": "허용 앱 없음(전면 거부) — 어떤 앱도 이 모델을 쓸 수 없습니다."
   }
 }

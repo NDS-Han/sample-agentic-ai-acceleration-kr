@@ -5,7 +5,7 @@
 #
 # cowork 클라이언트는 Bedrock Mantle Opus 4.8 을 **별도 계정(905, 도쿄)** 에서 쓴다.
 # gateway-proxy(859 IRSA)가 이 역할을 AssumeRole 하여 Mantle bearer 를 발급받는다.
-# codex/claude-code 는 in-account(859)라 assume 불필요 — cowork 만 유일한 cross-account.
+# codex/claude-code 는 in-account(123)라 assume 불필요 — cowork 만 유일한 cross-account.
 #
 # 이 스크립트는 905 계정 자격증명으로 실행한다(gateway-proxy 계정 아님).
 #   AWS_ACCESS_KEY_ID/SECRET = 905 admin, 그 다음:

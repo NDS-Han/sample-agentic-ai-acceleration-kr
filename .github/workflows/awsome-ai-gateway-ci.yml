@@ -1,0 +1,450 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# LLM Gateway — CI  (repo-root workflow for projects/awsome-ai-gateway)
+#
+# ⚠️ 이 파일은 **레포 루트** .github/workflows/ 에 있어야 한다. GitHub Actions 는 루트의
+#    .github/workflows/ 만 읽는다 — projects/awsome-ai-gateway/.github/workflows/ 에 두면
+#    파일은 존재하지만 **한 번도 실행되지 않는다**(있어 보이는데 없는 CI 가 가장 나쁘다).
+#    그래서 working-directory 를 PROJECT_DIR 로 접두어 붙인다.
+#
+# 왜 이 파일이 뒤늦게 추가됐나: 레포에 CI 설정이 **하나도 없었다.** 그래서 ~1600개
+# 테스트가 아무것도 강제하지 않았고, 실제로 그 사이에 스위트가 조용히 RED 로 갔다
+# (gateway-proxy 는 라이브 스택 skip 게이트가 없어 3 failed + 10 errors,
+# admin-api 는 에러 봉투 정규화가 두 테스트를 깨뜨린 채였다).
+#
+# ⚠️ 이 워크플로는 **AWS 를 절대 만지지 않는다.** 자격증명을 주입하지 않고,
+#    실 AWS 를 쓰는 테스트는 전부 opt-in env(RUN_REAL_BEDROCK / RUN_INVOCATION_LOG_LIVE /
+#    REDIS_CLUSTER_URL) 로 잠겨 있어 여기서는 skip 된다. gateway-proxy 의
+#    tests/regression/test_high_suite_is_green_and_hermetic_by_default.py 가 그 성질을
+#    테스트로 고정한다(그 파일이 없으면 CI 가 조용히 실 Bedrock 을 호출·과금했다).
+#
+# ⚠️ 라이브 스택(docker compose)이 필요한 integration 테스트는 여기서 **skip** 된다.
+#    이유는 tests/integration/conftest.py 참고 — 그 테스트들은
+#    /internal/test/issue-key 로 실사용 가능한 VK 를 발급하므로 아무 대상에나 돌리면 안 된다.
+#    compose 를 띄우는 별도 job 은 의도적으로 넣지 않았다(현재 compose 는 alembic head 에
+#    도달하지 못한다 — postgres:16-alpine 에 pgvector 확장이 없어 migration 0005 가 실패).
+
+name: awsome-ai-gateway CI
+
+# ⚠️ 이 레포는 멀티 프로젝트 모노레포다. paths 필터로 이 프로젝트가 바뀔 때만 돌려서
+#    다른 projects/* 의 PR 에 무관한 체크가 붙지 않게 한다.
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "projects/awsome-ai-gateway/**"
+      - ".github/workflows/awsome-ai-gateway-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "projects/awsome-ai-gateway/**"
+      - ".github/workflows/awsome-ai-gateway-ci.yml"
+
+# 최소 권한 — 이 워크플로는 읽기만 필요하다.
+permissions:
+  contents: read
+
+concurrency:
+  group: awsome-ai-gateway-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 로컬 .venv 와 같은 버전. pyproject 는 >=3.11 이지만 개발·배포 실측은 3.12 다.
+  PYTHON_VERSION: "3.12"
+  # admin-ui Dockerfile 의 node:20-alpine 과 맞춘다(빌드와 CI 가 갈리면 의미가 없다).
+  NODE_VERSION: "20"
+  # 이 워크플로가 담당하는 프로젝트 경로(모노레포).
+  PROJECT_DIR: "projects/awsome-ai-gateway"
+
+jobs:
+  python-tests:
+    name: pytest · ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      # 한 서비스가 실패해도 나머지 결과를 보고 싶다 — 어디까지 번졌는지가 정보다.
+      fail-fast: false
+      matrix:
+        service:
+          - admin-api
+          - gateway-proxy
+          - cost-recorder-worker
+          - notification-worker
+          - admin-chat-agent
+          - gateway-cli
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/${{ matrix.service }}/uv.lock
+
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # --frozen: uv.lock 을 그대로 쓴다. 이게 없으면 lock 이 조용히 갱신돼 CI 가
+      # 로컬·배포와 다른 의존성으로 통과할 수 있다.
+      - name: Sync dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        # ⚠️ AWS 관련 env 를 주입하지 않는다. 특히 AWS_BEARER_TOKEN_BEDROCK 이 있으면
+        #    SigV4 경로를 덮어써 검증 자체가 무의미해진다.
+        run: uv run pytest -q -p no:cacheprovider
+
+  db-guards:
+    name: pytest · db/tests (init SQL 정적 가드)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # db/ 는 자체 pyproject 가 없다 — 이 가드들은 표준 라이브러리(ast/pathlib/re)만 쓴다.
+      - name: Install pytest
+        run: python -m pip install --disable-pip-version-check pytest
+      - name: pytest
+        run: python -m pytest ${{ env.PROJECT_DIR }}/db/tests -q -p no:cacheprovider
+
+  helm-render:
+    name: pytest · helm 렌더 정합성 (admin-api ↔ admin-ui)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # helm 이 없으면 테스트가 조용히 skip 된다 — 그러면 이 잡은 아무것도 강제하지 않는다.
+      # 테스트 쪽에서도 CI 면 skip 대신 실패시키지만, 여기서 확실히 설치한다.
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.16.2
+      - name: Install pytest + pyyaml
+        run: python -m pip install --disable-pip-version-check pytest pyyaml
+      # ⚠️ CI=true 가 필수다. 테스트가 이 값을 보고 "helm 없음" 을 skip 이 아니라
+      #    실패로 처리한다(조용한 미검증 방지).
+      - name: pytest
+        env:
+          CI: "true"
+        run: python -m pytest ${{ env.PROJECT_DIR }}/deployment/charts/llm-gateway/tests -q -p no:cacheprovider
+
+  pg-proof:
+    name: pytest · 실 PostgreSQL 증명 (PROOF_DSN)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # ⚠️ 이 잡이 없으면 admin-api 의 PROOF_DSN 테스트 4파일이 CI 에서 **전부 skip** 된다.
+    #    그 파일들이 검증하는 것은 하필 mock 으로 증명이 불가능한 것들이다:
+    #    MVCC 스냅샷 하에서의 동시 upsert, 부분 유니크 인덱스, sargability(EXPLAIN),
+    #    그리고 CTE + GREATEST 로 만든 seed 역산.
+    #
+    #    실제로 skip 된 채로 방치된 대가가 이미 있었다: test_high_model_registry_claude5
+    #    의 "Sonnet 5 단가는 4.6 과 같다" 단정이 마이그레이션 0030(1.5배 과대청구 정정)
+    #    이후로 계속 틀린 채였고, 아무도 몰랐다 — 이 잡을 붙이자마자 드러났다.
+    services:
+      # Lua 원자성과 SET 의 TTL 폐기 동작은 실 Redis 에서만 증명된다 — 가짜 Redis 로는
+      # app_clients 클로버를 잡을 수 없다(그 가드가 문자열 grep 이던 동안 실제로
+      # 클로버가 프로덕션에 살아 있었다).
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      postgres:
+        # pgvector 이미지를 쓴다 — db/init 이 `CREATE EXTENSION vector` 를 요구한다
+        # (stock postgres:16 에서는 그 파일이 실패해 스키마가 반쪽이 된다).
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: proof
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      # ⚠️ DB 이름에 'proof' 가 들어가야 한다. 두 테스트 파일이 스크래치 DB 가드를 갖고
+      #    있어서(이름에 proof/test/scratch/tmp 중 하나 필수) 다른 이름이면 통째로
+      #    실패한다 — 그 가드는 실 데이터를 DROP 하지 않으려고 일부러 있는 것이다.
+      PGPASSWORD: proof
+      PROOF_DB: gwproof_ci
+      PROOF_DSN: postgresql+asyncpg://postgres:proof@127.0.0.1:5432/gwproof_ci
+      REDIS_PROOF_URL: redis://127.0.0.1:6379/0
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install PostgreSQL client
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client
+
+      # ⚠️ 두 파일은 PROOF_DSN 이 **alembic head 를 마친** DB 를 가리킬 것을 요구한다
+      #    (에러 메시지에도 그렇게 적혀 있다). 빈 DB 를 주면 4건이 실패한다.
+      - name: Create the proof database
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -c "DROP DATABASE IF EXISTS ${PROOF_DB} WITH (FORCE)"
+          psql -h 127.0.0.1 -U postgres -c "CREATE DATABASE ${PROOF_DB}"
+
+      - name: Apply db/init SQL
+        working-directory: ${{ env.PROJECT_DIR }}/db/init
+        run: |
+          set -uo pipefail
+          for f in *.sql; do
+            if ! psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -v ON_ERROR_STOP=1 -q -f "$f"; then
+              echo "::warning::init SQL 실패(계속): $f"
+            fi
+          done
+          # 대조군 — 핵심 테이블이 실제로 생겼는가. 반쪽 스키마로 진행하면 아래 테스트가
+          # 알 수 없는 이유로 죽는다.
+          for t in "auth users" "usage usage_logs" "budget budget_usages" "model model_pricings"; do
+            set -- $t
+            n=$(psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -tA -c \
+              "SELECT count(*) FROM information_schema.tables WHERE table_schema='$1' AND table_name='$2'")
+            if [ "$n" != "1" ]; then echo "::error::$1.$2 이 없다 — init SQL 적용 실패"; exit 1; fi
+          done
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/admin-api/uv.lock
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+
+      # db/ 는 자체 pyproject 가 없다(Dockerfile 로만 돈다) → 필요한 것만 직접 설치한다.
+      - name: alembic upgrade head
+        working-directory: ${{ env.PROJECT_DIR }}/db
+        env:
+          DB_URL: postgresql+asyncpg://postgres:proof@127.0.0.1:5432/gwproof_ci
+        run: |
+          set -euo pipefail
+          uv run --with alembic --with asyncpg --with sqlalchemy --with pgvector \
+            alembic upgrade head
+          head=$(psql -h 127.0.0.1 -U postgres -d "${PROOF_DB}" -tA \
+            -c "SELECT version_num FROM public.alembic_version")
+          echo "alembic head = ${head}"
+          # 대조군 — 마이그레이션이 실제로 끝까지 갔는가.
+          if [ -z "${head}" ]; then echo "::error::alembic_version 이 비었다"; exit 1; fi
+
+      - name: Sync admin-api dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-api
+        run: uv sync --frozen --all-extras --dev
+
+      # ⚠️ 파일을 **명시**한다. `-k "nonsargable or ..."` 는 이름 매칭이라 무관한 파일
+      #    12개까지 끌고 들어왔다(실측). 여기 나열된 것이 PROOF_DSN 을 쓰는 전부다.
+      - name: pytest (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-api
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_high_nonsargable_period_filter.py \
+            tests/regression/test_high_duplicate_active_config.py \
+            tests/regression/test_high_model_registry_claude5.py \
+            tests/regression/test_high_analytics_seed_reconciliation.py \
+            tests/regression/test_high_productivity_idempotency.py \
+            tests/regression/test_high_budget_redis_clobber.py \
+            tests/regression/test_high_init_sql_matches_orm.py \
+            > /tmp/proof.txt 2>&1
+          status=$?
+          tail -40 /tmp/proof.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          # 통과했더라도 실질 실행이 0건이면 실패다 — 그게 이 잡을 만든 이유다.
+          # ⚠️ 하한만 본다. 정확한 통과 수는 DB 에 쌓인 데이터에 따라 달라진다 — 일부
+          #    테스트는 대상 테이블이 비어 있으면 스스로 skip 한다(플랜 어서션 등). 로컬
+          #    실측은 134 passed / 2 skipped 였다. 하한의 목적은 "PROOF_DSN 이 안 걸려
+          #    대부분 skip 된" 상태를 잡는 것이다(그 경우 20건 미만으로 떨어진다).
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          echo "passed=${passed}"
+          if [ "${passed:-0}" -lt 93 ]; then
+            echo "::error::통과 수가 ${passed} 건뿐이다(하한 93). PROOF_DSN/REDIS_PROOF_URL 이 안 걸려 대부분 skip 된 것으로 보인다."
+            exit 1
+          fi
+
+      # cost-recorder-worker 의 per-app 예산 행 테스트도 실 PG 를 요구한다. 같은 DB 를
+      # 재사용해도 안전하다 — 그 파일은 자기 소유 DB(`<name>_appbudget`)를 만들어 쓴다.
+      - name: Sync cost-recorder-worker dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/cost-recorder-worker
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest · cost-recorder-worker (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/cost-recorder-worker
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_high_per_app_budget_rows.py \
+            tests/regression/test_high_replay_and_orphan_pel.py > /tmp/proof2.txt 2>&1
+          status=$?
+          tail -30 /tmp/proof2.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof2.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          # 로컬 실측 기준선: 18 passed (per-app 9 + replay/PEL 9).
+          # ⚠️ replay/PEL 파일은 PROOF_DSN **과** REDIS_PROOF_URL 을 모두 요구한다 —
+          #    한쪽만 걸리면 통과 수가 떨어져 여기서 실패한다.
+          if [ "${passed:-0}" -lt 17 ]; then
+            echo "::error::통과 ${passed} 건 — PROOF_DSN 이 안 걸려 DB 테스트가 skip 됐다."
+            exit 1
+          fi
+
+      # gateway-proxy 의 모델 × 앱 allow-list 는 **실 DB 로만** 증명된다.
+      #
+      # ⚠️ 이 스텝이 존재하는 이유: 그 게이트가 한 번 완전히 무력화된 채로 배포됐다.
+      #    마이그레이션·게이트 함수·다섯 개 호출 지점·admin-api 쓰기 경로·UI 가 모두
+      #    있었는데 gateway-proxy 의 ORM 클래스만 컬럼을 선언하지 않아
+      #    `getattr(row, "allowed_clients", None)` 이 언제나 None 이었다. 관리자 화면은
+      #    "차단" 으로 표시하고 데이터 경로는 모든 앱을 통과시켰다 — 오류도 로그도 없이.
+      #    당시 회귀 테스트 24건은 전부 통과했다(가짜 model_config 단위 테스트 + kwarg
+      #    이름만 보는 AST 검사였다). 값이 DB 에서 게이트까지 실제로 흐르는지는 실 PG
+      #    없이는 원리적으로 확인할 수 없다.
+      - name: Sync gateway-proxy dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/gateway-proxy
+        run: uv sync --frozen --all-extras --dev
+
+      - name: pytest · gateway-proxy (PROOF_DSN)
+        working-directory: ${{ env.PROJECT_DIR }}/gateway-proxy
+        run: |
+          set -uo pipefail
+          uv run pytest -q -p no:cacheprovider \
+            tests/regression/test_critical_model_client_scope_real_db.py \
+            tests/regression/test_high_reservation_release_on_error.py \
+            tests/regression/test_high_budget_fallback_policy.py > /tmp/proof3.txt 2>&1
+          status=$?
+          tail -30 /tmp/proof3.txt
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          passed=$(grep -oE "[0-9]+ passed" /tmp/proof3.txt | tail -1 | grep -oE "[0-9]+" || echo 0)
+          # 로컬 실측 기준선: 29 passed (실 DB 3 + 예약 해제 10 + 예산 정책 16).
+          # ⚠️ 예약 해제 파일은 REDIS_PROOF_URL 을 요구한다 — 환불은 incrbyfloat 로
+          #    카운터를 움직이는 것이라, 가짜 Redis 로는 부호가 반대인 환불도 통과한다.
+          #    두 env 중 하나라도 안 걸리면 통과 수가 떨어져 여기서 실패한다.
+          if [ "${passed:-0}" -lt 29 ]; then
+            echo "::error::통과 ${passed} 건(기대 29) — PROOF_DSN/REDIS_PROOF_URL 이 안 걸려 skip 됐다."
+            exit 1
+          fi
+
+  admin-ui:
+    name: admin-ui · vitest + typecheck + lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ${{ env.PROJECT_DIR }}/admin-ui/package-lock.json
+
+      # npm ci: package-lock.json 을 그대로 설치한다(npm install 은 lock 을 갱신할 수 있다).
+      - name: Install dependencies
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm ci
+
+      - name: vitest
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm test
+
+      # tsc / eslint 는 현재 **완전히 깨끗하다** → 하드 게이트로 둔다.
+      # (파이썬 ruff 는 기존 부채가 있어 아래 lint-ratchet 에서 다르게 다룬다.)
+      - name: typecheck (tsc --noEmit)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm run typecheck
+
+      - name: lint (next lint)
+        working-directory: ${{ env.PROJECT_DIR }}/admin-ui
+        run: npm run lint
+
+  lint-ratchet:
+    name: ruff ratchet · ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # baseline = 이 커밋 시점의 실측 위반 수. 늘어나면 실패한다.
+        #
+        # ⚠️ 왜 "0 이어야 한다" 가 아니라 ratchet 인가: 기존 위반이 753건이라
+        #    0 을 요구하면 CI 를 도입할 수 없고, 도입을 미루면 아무것도 강제되지 않는
+        #    지금 상태가 계속된다. 신규 유입만 막고 숫자는 내려가게 둔다.
+        #    ⚠️ 한계: 개수 비교이므로 "1개 추가 + 무관한 1개 수정" 은 통과한다.
+        #    파일/규칙 단위 정밀 게이트는 부채를 실제로 줄인 뒤에 도입하는 게 맞다.
+        include:
+          - service: admin-api
+            baseline: 75
+          - service: gateway-proxy
+            # 466(기존) 위에 쌓인 증분은 **전부 신규 파일의 저작권 헤더 E501** 이다.
+            # 그 헤더는 레포의 모든 파일이 동일하게 갖는 100자 초과 한 줄이라, 파일을
+            # 하나 추가하면 필연적으로 +1 이다 — 코드 품질 부채가 늘어난 것이 아니다.
+            # 줄이려면 헤더 규약 자체를 바꿔야 하고 그건 별건이다.
+            #   +2  observability/provider_metrics.py, 그 회귀 테스트
+            #   +1  회귀 테스트 1개
+            #   +5  body-logging(body_logger / body_log_flag / body_log_records /
+            #       schemas/body_log / 회귀 테스트)
+            #   +1  OpenAI 방언·웹서치 본문 로깅 회귀 테스트
+            #   +1  모델 × 앱 allow-list 실 DB 회귀 테스트
+            #   +1  예약 해제 회귀 테스트
+            #   +1  예산 폴백 정책 회귀 테스트
+            #   +1  readiness / Responses usage 회귀 테스트
+            #   +1  thinking 정규화 배선 회귀 테스트
+            # 헤더 외 신규 위반은 0 이다(UP045 2건은 `X | None` 로 맞춰 유입시키지 않았다).
+            baseline: 481
+          - service: cost-recorder-worker
+            # 21(기존) 위의 증분은 전부 신규 파일의 저작권 헤더 E501 이다 — 레포의 모든
+            # 파일이 갖는 100자 초과 한 줄이라 파일을 추가하면 필연적으로 +1 이고, 코드
+            # 품질 부채가 늘어난 것이 아니다.
+            #   +1  per-app 예산 행 회귀 테스트
+            #   +1  재처리/고아 PEL 회귀 테스트
+            baseline: 23
+          - service: notification-worker
+            baseline: 93
+          - service: admin-chat-agent
+            baseline: 1
+          - service: gateway-cli
+            baseline: 82
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: ${{ env.PROJECT_DIR }}/${{ matrix.service }}/uv.lock
+      - name: Set up Python
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync dependencies (frozen lock)
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        run: uv sync --frozen --all-extras --dev
+
+      - name: ruff — 위반 수가 baseline 을 넘지 않는지
+        working-directory: ${{ env.PROJECT_DIR }}/${{ matrix.service }}
+        env:
+          BASELINE: ${{ matrix.baseline }}
+        run: |
+          set -uo pipefail
+          # ruff 는 위반이 있으면 exit 1 이다 — 개수만 세려는 것이므로 실패를 삼킨다.
+          # 각 위반은 `path:line:col: CODE msg` 한 줄이다(concise).
+          uv run ruff check --output-format=concise . > /tmp/ruff.txt 2>&1 || true
+          COUNT=$(grep -cE '^[^:]+:[0-9]+:[0-9]+: ' /tmp/ruff.txt || true)
+          COUNT=${COUNT:-0}
+          echo "ruff 위반: ${COUNT} (baseline ${BASELINE})"
+          # 대조군 — 파싱이 빗나가 항상 0 이면 이 게이트는 공허하다.
+          if [ "$BASELINE" -gt 0 ] && [ "$COUNT" -eq 0 ]; then
+            echo "::error::baseline 이 ${BASELINE} 인데 0건으로 셌다 — ruff 출력 파싱이 깨졌다."
+            head -20 /tmp/ruff.txt
+            exit 1
+          fi
+          if [ "$COUNT" -gt "$BASELINE" ]; then
+            echo "::error::lint 위반이 늘었다: ${COUNT} > ${BASELINE}. 새로 생긴 항목을 고치거나, 정당하게 줄인 경우 .github/workflows/ci.yml 의 baseline 을 낮춰 갱신하세요."
+            # 무엇이 늘었는지 보이게 남긴다.
+            sort /tmp/ruff.txt | uniq -c | sort -rn | head -30
+            exit 1
+          fi
+          if [ "$COUNT" -lt "$BASELINE" ]; then
+            echo "::notice::lint 위반이 ${BASELINE} → ${COUNT} 로 줄었습니다. ci.yml 의 baseline 을 ${COUNT} 로 낮춰 주세요(ratchet)."
+          fi

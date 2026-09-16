@@ -80,7 +80,21 @@ class Settings(BaseSettings):
     # Timeouts
     lua_timeout_ms: int = 1000
     stream_timeout: int = 300
-    stream_idle_timeout: int = 60
+    # SSE 청크 간 무응답 상한. 초과 시 `event: error`(timeout_error) 프레임을 보내고 종료.
+    #
+    # ⚠️ 두 개의 상한 사이에 끼워야 한다:
+    #   ① upstream(Bedrock/Mantle) 첫 토큰 지연 — extended thinking 은 60s 를 넘길 수 있다.
+    #      기본값 60 은 Opus extended thinking 요청을 정상 응답 중에 끊어버렸다.
+    #   ② ALB idle_timeout — dev 300s / prod 600s
+    #      (values-eks-fargate-{dev,prod}.yaml: load-balancer-attributes).
+    #      이 값이 ALB 보다 **크거나 같으면** ALB 가 먼저 커넥션을 끊어 클라이언트는
+    #      깔끔한 SSE 에러 대신 truncated stream 을 본다. 반드시 ALB 보다 작아야 한다.
+    #
+    # 기본 240 = dev ALB(300) 보다 60s 아래. 차트가 환경별로 override 한다
+    # (STREAM_IDLE_TIMEOUT). ALB 값을 바꿀 때 이 값도 함께 조정할 것.
+    stream_idle_timeout: int = 240
+    # 클라이언트 끊김 후 백그라운드로 upstream 을 계속 소비하는 상한.
+    # 이 시간 안에 받은 토큰까지 usage 로 기록된다(과금 정확성).
     stream_disconnect_drain_timeout: int = 30
 
     # Reliability
@@ -143,6 +157,30 @@ class Settings(BaseSettings):
     trace_enabled: bool = False
     trace_mask_pii: bool = True
 
+    # ── Body logging (요청/응답 **본문** → Firehose → S3) ──
+    #
+    # ⚠️ 이 기능을 켜면 사용자가 프롬프트에 넣은 것이 그대로 durable 저장소로 나간다.
+    #    현재 구현은 **마스킹하지 않는다** — 같은 코드베이스의 trace 경로는
+    #    `trace_mask_pii` 기본 True 로 마스킹하는데, 본문 로거에는 그것이 적용되지
+    #    않는다. 그건 알고 있는 격차이고 향후 개선 대상이다. 그래서 두 겹으로 잠근다:
+    #      (1) `firehose_stream_name` 이 없으면 로거 자체가 no-op(로컬/compose 안전),
+    #      (2) 런타임 토글(`bodylog:enabled`)이 **기본 OFF** — 배포만으로는 켜지지 않고
+    #          관리자가 명시적으로 켜야 한다(admin-api PUT /admin/settings/body-logging,
+    #          그 액션은 audit.audit_logs 에 불변 행을 남긴다).
+    body_logging_enabled: bool = True
+    firehose_stream_name: str | None = None
+    body_log_s3_bucket: str | None = None
+    body_log_max_queue: int = 10_000
+    body_log_batch_size: int = 100
+    body_log_flush_interval: float = 5.0
+    #: Firehose 레코드 상한(1 MB) 아래로. 초과분은 S3 에 직접 넣는다.
+    body_log_max_record_bytes: int = 900_000
+    #: 워커가 캐시된 플래그를 믿는 시간(초). 토글은 이 시간 안에 반영된다.
+    body_log_flag_cache_ttl: float = 5.0
+    #: 플래그를 읽지 못했을 때의 값. **False 여야 한다** — 설정을 못 읽었다는 이유로
+    #: 본문 수집이 켜지면 안 된다(fail-safe 방향).
+    body_log_flag_default: bool = False
+
     # --- AgentCore Gateway web search (server-side tool-use loop, 2026-07-01) ---
     # We inject a web_search tool, intercept the model's tool_use, call AgentCore
     # Gateway's managed WebSearch connector over MCP (SigV4/IRSA), feed results
@@ -158,10 +196,27 @@ class Settings(BaseSettings):
     agentcore_region: str = "us-east-1"
     agentcore_target_id: str = "web-search-tool"
     agentcore_http_timeout: float = 30.0
+    #: MCP 핸드셰이크(HTTP 3회 합계)의 상한. agentcore_http_timeout 은 **호출 1회당** 값이라
+    #: 그것만으로는 핸드셰이크 하나가 그 3배까지 늘어나고, 락이 process-global 이라 동시
+    #: 요청이 직렬화된다(services/agentcore_mcp_client.py 의 필드 주석 참조).
+    agentcore_handshake_timeout: float = 10.0
+    #: 핸드셰이크 실패 후 재시도를 억제하는 기간. 죽은 게이트웨이의 비용을 모든 요청이
+    #: 상한만큼 되풀어 내지 않게 한다. 대가는 복구가 최대 이만큼 늦어지는 것.
+    agentcore_handshake_negative_ttl: float = 30.0
     web_search_enabled: bool = False
     web_search_max_iterations: int = 5
     web_search_total_deadline_sec: float = 90.0
     web_search_max_results_default: int = 10
+    #: 검색 **1회** 결과 텍스트의 상한(문자). 0 = 무제한(캡 이전 동작).
+    #: ⚠️ max_iterations 는 턴 수를, total_deadline_sec 는 시간을 묶는다. 청구서를 정하는
+    #:    축인 "다음 턴 입력에 주입되는 바이트" 는 이것뿐이다. dev 실측: 검색 한 번이 다음
+    #:    턴 입력에 약 17.4K 토큰을 넣었다. 60000자 ≈ 15K 토큰 수준으로 잡는다.
+    web_search_max_result_chars: int = 60000
+    #: 한 **턴**에서 실행할 검색 개수 상한. 0 = 무제한.
+    #: ⚠️ 모델은 한 턴에 병렬 web_search 를 여러 개 낼 수 있고 이 루프는 그것을 지원한다.
+    #:    20개가 통과하면 20 × 결과가 다음 턴 입력에 연결되어, 상한 없는 단일 요청 비용이
+    #:    되거나 컨텍스트 창을 넘겨 continuation 턴이 400 이 된다(그때까지 과금분 전부 유실).
+    web_search_max_searches_per_turn: int = 4
 
 
 @lru_cache

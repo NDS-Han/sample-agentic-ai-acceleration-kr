@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass
 
 import structlog
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import get_settings
@@ -26,10 +26,22 @@ from app.schemas.domain import (
     TokenUsage,
 )
 from app.schemas.routing import RoutingProfileSchema
-from app.services.fallback_loop import FallbackResult, run_fallback_loop
+from app.services.body_log_records import (
+    build_body_record_for_nonstream,
+    build_body_record_for_stream,
+    provider_name,
+    resolve_body_logger,
+)
+from app.services.fallback_loop import (
+    FallbackResult,
+    enforce_candidate_admission,
+    run_fallback_loop,
+)
 from app.services.fallback_resolver import make_same_provider
 from app.services.router_service import RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
+from app.services.thinking_normalizer import normalize_thinking
+from app.services.tool_filter import strip_unsupported_tools
 
 logger = structlog.get_logger(__name__)
 
@@ -89,6 +101,14 @@ _BEDROCK_ALLOWED_FIELDS = {
     "tools",
     "tool_choice",
     "thinking",
+    # ⚠️ adaptive 계열이 thinking 깊이를 제어하는 유일한 수단이다
+    #    (`output_config.effort`). 여기 없으면 클라이언트가 보내도 우리가 버려서, 정규화를
+    #    배선해도 깊이 제어가 동작하지 않는다.
+    #
+    # ⚠️ legacy 계열(haiku)은 이 필드를 받지 않는다. 그래서 이 필드를 허용하는 것은
+    #    `normalize_thinking` 이 legacy 계열에서 이것을 **무조건 떨구는** 것과 한 쌍이다
+    #    (thinking 형태와 무관하게). 그 두 변경 중 하나만 하면 haiku 가 400 을 내기 시작한다.
+    "output_config",
 }
 
 
@@ -325,7 +345,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     def _build_candidate_body(
         req_d: dict, cand_config: ModelConfigSchema, streaming: bool
     ) -> tuple[bytes, dict, dict]:
-        """Build invoke body + kwargs for a given candidate model_config."""
+        """Build invoke body + kwargs for a given candidate model_config.
+
+        ⚠️ 여기가 상류로 나가는 본문이 만들어지는 **단일 지점**이다 — 폴백 후보와 웹서치
+           턴이 모두 이 함수를 지난다. 그래서 모델별 본문 정규화도 여기서 한다.
+        """
         if is_mantle:
             mantle_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
             mantle_b.pop("anthropic_version", None)
@@ -334,6 +358,18 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 mantle_b["metadata"] = {"user_id": auth_context.sso_subject}
             if streaming:
                 mantle_b["stream"] = True
+            # ⚠️ Mantle 경로에서 Anthropic **네이티브** 도구 선언을 걷어낸다.
+            #    Cowork 가 `web_search_20250305` / `code_execution_*` / `text_editor_*` /
+            #    `computer_*` 를 선언하면 Mantle 은 "tool type is not supported for this
+            #    model" 로 400 을 준다. 클라이언트가 고칠 수 없는 거부라 게이트웨이가
+            #    걸러야 한다.
+            #
+            #    ⚠️ 우리가 주입하는 서버사이드 web_search 는 영향받지 않는다: 필터는
+            #       `type` 필드로 판정하는데 주입된 도구에는 그 필드가 없다.
+            mantle_b = strip_unsupported_tools(mantle_b, request_id=request_id)
+            mantle_b = normalize_thinking(
+                mantle_b, cand_config.provider_model_id, request_id=request_id
+            )
             return (
                 json.dumps(mantle_b).encode(),
                 {"profile": decision.profile, "endpoint": decision.endpoint},
@@ -344,13 +380,28 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             bedrock_b["anthropic_version"] = "bedrock-2023-05-31"
             if auth_context and auth_context.sso_subject:
                 bedrock_b["metadata"] = {"user_id": auth_context.sso_subject}
+            # ⚠️ `thinking` 의 형태를 **후보 모델이 받는 형태로** 맞춘다.
+            #
+            #    두 계열이 서로를 거부한다: opus-4-7/4-8/opus-5/sonnet-5/fable-5/mythos-5 는
+            #    `{"type":"adaptive"}` 만 받고, haiku-4-5 는 `{"type":"enabled"}` 만 받는다.
+            #    정규화가 없으면 MAX_THINKING_TOKENS>0 로 설정된 Claude Code 의 **모든**
+            #    요청이 opus-4-8 에서 400 이고, 400 은 폴백 대상이 아니라 그대로 사용자에게
+            #    간다. 반대 방향도 마찬가지다.
+            #
+            #    후보 **단위**로 하는 것이 핵심이다: 가용성 폴백과 예산 강등이 계열을 넘어
+            #    모델을 바꾸므로, 79% 예산에서 되던 요청이 80% 에서 400 이 되는 경로가
+            #    실재한다. 모르는 모델은 그대로 통과시킨다(fail-open).
+            bedrock_b = strip_unsupported_tools(bedrock_b, request_id=request_id)
+            bedrock_b = normalize_thinking(
+                bedrock_b, cand_config.provider_model_id, request_id=request_id
+            )
             return (
                 json.dumps(bedrock_b).encode(),
                 {"path_suffix": "invoke-with-response-stream"},
                 {"path_suffix": "invoke"},
             )
 
-    # cross-account(374) 면 profile.region, 아니면 None (분기 전 초기화됨).
+    # cross-account(333) 면 profile.region, 아니면 None (분기 전 초기화됨).
     def _rewrite(pmid: str) -> str:
         if is_mantle:
             return pmid
@@ -369,6 +420,35 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         and getattr(_profile, "web_search_enabled", False)
     ):
         from app.services.web_search_loop import run_web_search_loop
+
+        # ⚠️ **입장 심사를 여기서 해야 한다.** 이 분기는 아래 `run_fallback_loop` 보다
+        #    먼저 리턴하고, 그 폴백 루프가 `/v1/messages` 에서 스코프 2축과 레이트리밋을
+        #    거는 **유일한** 지점이다. 그래서 이 분기는 오랫동안 다음을 전부 건너뛰었다:
+        #      - check_key_scope            (사용자 × 모델 허용목록)
+        #      - check_client_model_scope   (앱 × 모델 허용목록, migration 0035)
+        #      - enforce_rate_limits        (RPM / TPM / 비용 한도)
+        #    웹서치를 켠 프로파일에서만 그랬으므로 증상이 없었다 — 접근권 없는 모델도
+        #    호출되고, 한도를 넘겨도 429 가 나지 않았다.
+        #
+        #    같은 함수를 폴백 루프도 쓴다(단일 구현). 여기서 거절되면 상류를 호출하지
+        #    않으므로 예약도 남지 않는다.
+        _admission = await enforce_candidate_admission(
+            router_service=_router_service,
+            auth_context=auth_context,
+            candidate_config=model_config,
+            redis=redis,
+            req_data=req_data,
+            state=state,
+            request_id=request_id,
+            budget_status=state.get("budget_status"),
+        )
+        if _admission is not None:
+            return Response(
+                content=_admission.body,
+                status_code=_admission.status,
+                headers=_admission.headers or None,
+                media_type="application/json",
+            )
 
         _settings_ws = get_settings()
 
@@ -395,6 +475,73 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 client=client,
             )
 
+        # 본문 로깅 — 웹서치 경로 전용 훅. 이 return 은 아래 본문 로깅 배선보다 **먼저**
+        # 일어나므로, 여기 걸지 않으면 웹서치를 켠 프로파일의 요청은 로깅 코드를 아예
+        # 지나지 않고 조용히 미기록된다.
+        #
+        # ⚠️ bedrock_request_id 는 None 이다. 루프가 턴마다 별개의 Bedrock 호출을 하므로
+        #    단일 요청 id 가 조인 키가 되지 못한다(`_ws_record` 의 같은 판단).
+        async def _ws_log_stream(sse_text: str, log_status: str) -> None:
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_config.alias or model_config.provider_model_id,
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=None,
+                )
+            )
+
+        async def _ws_log_nonstream(resp_status: int, resp_body: bytes) -> None:
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(model_config),
+                    client=client,
+                    model_alias=model_config.alias or model_config.provider_model_id,
+                    status_code=resp_status,
+                    request_body=body,
+                    response_body=resp_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=None,
+                )
+            )
+
+        # KI-08 역산 훅 — 웹서치 경로 **전용**.
+        #
+        # ⚠️ 아래쪽 `_estimate` 를 재사용할 수 없다. 그것은 `call_model_id_final` /
+        #    `is_mantle` 에 의존하고 둘 다 폴백 루프 **뒤에** 계산되므로, 여기서 참조하면
+        #    UnboundLocalError 다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는
+        #    잡히지 않는다). 이 경로는 폴백을 타지 않으므로 model_config 가 곧 실제 모델이다.
+        _ws_tokenizer = getattr(request.app.state, "tokenizer", None)
+
+        async def _ws_estimate(text: str) -> int | None:
+            if not _ws_tokenizer:
+                return None
+            return await _ws_tokenizer.estimate_output_tokens(
+                text,
+                provider=model_config.provider,
+                model_id=model_config.provider_model_id,
+            )
+
+        # 사전 게이팅 — 훅을 넘기면 루프가 SSE 전문을 누적한다.
+        _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
+
         return await run_web_search_loop(
             dialect="anthropic",
             invoke=_ws_invoke,
@@ -407,6 +554,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             max_iterations=_settings_ws.web_search_max_iterations,
             total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
             default_max_results=_settings_ws.web_search_max_results_default,
+            max_result_chars=_settings_ws.web_search_max_result_chars,
+            max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
+            handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+            tokenizer_hook=_ws_estimate,
+            on_stream_complete=_ws_log_stream if _ws_logging else None,
+            on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
         )
 
     # Use a no-op CB when the service is not wired (e.g. tests that don't configure it)
@@ -436,6 +589,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         resolve_model_config=_resolve_candidate,
         build_candidate_body=_build_candidate_body,
         rewrite_model_id=_rewrite,
+        metrics=getattr(request.app.state, "metrics", None),
     )
 
     # --- Handle the result ---
@@ -516,9 +670,46 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         if availability_fallback_from:
             response_headers["x-llm-gateway-fallback-from"] = availability_fallback_from
 
+        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+            """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
+            bl = getattr(request.app.state, "body_logger", None)
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status=log_status,
+                    request_body=body,
+                    sse_text=sse_text,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                )
+            )
+
+        # ⚠️ **사전** 게이팅이다. on_complete 를 넘기면 제너레이터가 SSE 프레임 전문을
+        #    메모리에 누적하므로(services/streaming.py OnComplete 주석), 로깅이 꺼져
+        #    있을 때 그 비용을 내지 않으려면 스트림이 시작되기 **전에** 판정해야 한다.
+        #    끝나고 물어보면 모든 요청에 대해 응답 본문을 버릴 목적으로 버퍼링하게 된다.
+        _on_complete = (
+            _log_body_stream
+            if await resolve_body_logger(request.app.state, redis, session_factory)
+            else None
+        )
+
         return StreamingResponse(
             bedrock_anthropic_sse_stream(
-                request, chunk_iter, on_usage=_record, tokenizer_hook=_estimate
+                request,
+                chunk_iter,
+                on_usage=_record,
+                tokenizer_hook=_estimate,
+                on_complete=_on_complete,
             ),
             status_code=status,
             media_type="text/event-stream",
@@ -543,7 +734,37 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 rate_limit_state=rate_limit_state,
                 downgraded_from=state.get("downgraded_from"),
                 availability_fallback_from=availability_fallback_from,
+                # Join key to the Bedrock model-invocation log record. The streaming
+                # branch above has always recorded it; this one did not, so every
+                # non-streaming Claude call landed with a NULL id and was unauditable
+                # even though AWS had logged it. `headers` comes from adapter.invoke via
+                # FallbackResult.payload and is never sent to the client.
+                bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
                 client=client,
+            )
+
+        # 본문 로깅(성공 **및** 오류). enqueue 만 하므로 응답을 지연시키지 않는다.
+        # effective_model_config 를 쓴다 — 폴백이 일어났으면 실제로 응답한 모델이 남아야 한다.
+        body_logger = await resolve_body_logger(request.app.state, redis, session_factory)
+        if body_logger is not None:
+            await body_logger.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status_code=status,
+                    request_body=body,
+                    response_body=response_body,
+                    is_streaming=False,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
+                )
             )
 
         response_headers_out: dict = {}
@@ -567,7 +788,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 async def count_tokens(request: Request) -> JSONResponse:
     """Anthropic count_tokens — proxies to Bedrock CountTokens (no inference, no cost)."""
     # count_tokens 는 Bedrock native 경로 유지(Mantle/Cowork 는 Phase 3에서 VK scope 후 라우팅).
-    # claude-code→374 cross-account: CountTokens 도 invoke 와 동일 계정(374)에서 실행되도록
+    # claude-code→374 cross-account: CountTokens 도 invoke 와 동일 계정(333)에서 실행되도록
     # 라우팅 프로파일을 읽어 _xacct 면 cross-account adapter 사용(assume 실패 시 859 투명 폴백).
     # → invoke=374 / count_tokens=859 로 갈리는 무음 계정 스플릿 방지(어드버서리 리뷰 #4).
     state = request.scope.get("state", {})
@@ -629,6 +850,9 @@ async def count_tokens(request: Request) -> JSONResponse:
     if auth_context:
         try:
             _router_service.check_key_scope(auth_context, model_config)
+            # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
+            # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
+            _router_service.check_client_model_scope(model_config, state.get("client"))
         except PermissionError:
             return JSONResponse(
                 status_code=400,

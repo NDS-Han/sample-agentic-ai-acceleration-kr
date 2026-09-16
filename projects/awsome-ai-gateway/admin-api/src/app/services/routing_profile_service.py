@@ -10,12 +10,14 @@ from __future__ import annotations
 import structlog
 from sqlalchemy import select
 
+from app.core.clients import VALID_CLIENTS
 from app.models.routing import RoutingProfile
 
 logger = structlog.get_logger(__name__)
 
 # Must match gateway-proxy client_identifier tokens + user_allowed_client_service.
-_VALID_CLIENTS = {"claude-code", "cowork", "codex"}
+#: 단일 출처는 core/clients.py.
+_VALID_CLIENTS = VALID_CLIENTS
 # Cache key written by gateway-proxy RoutingProfileLoader (routing_profile_loader.py).
 _CACHE_KEY = "routing_profile:{client}"
 
@@ -50,12 +52,22 @@ class RoutingProfileService:
             raise LookupError(f"routing profile not found for client: {client}")
         row.web_search_enabled = bool(enabled)
         await self._session.flush()
-        await self._invalidate(client)
+        # ⚠️ 캐시를 여기서 지우지 **않는다** — flush 는 커밋이 아니다. DEL→commit 창에
+        #    들어온 게이트웨이 요청이 `routing_profile:{client}` 를 **토글 전** 값으로
+        #    다시 캐시하면, 관리자는 성공을 봤는데 그 앱은 300s 동안 옛 설정으로 돈다.
+        #    무효화는 라우터가 커밋 뒤에 `invalidate_cache` 로 한다.
         logger.info(
             "admin.set_web_search_enabled",
             client=client, web_search_enabled=bool(enabled), admin_id=str(admin_id),
         )
         return {"client": client, "web_search_enabled": bool(enabled)}
+
+    async def invalidate_cache(self, client: str) -> None:
+        """``routing_profile:{client}`` 무효화. **``session.commit()`` 뒤에** 호출한다.
+
+        ``set_web_search`` 안에서 부르면 안 된다 — 그 시점은 커밋 전이다.
+        """
+        await self._invalidate(client)
 
     async def _invalidate(self, client: str) -> None:
         """DEL routing_profile:{client} so gateway-proxy repopulates from DB (self-heal)."""

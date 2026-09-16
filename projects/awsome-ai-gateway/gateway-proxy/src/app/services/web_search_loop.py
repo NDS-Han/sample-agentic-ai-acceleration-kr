@@ -29,6 +29,7 @@ Interception rule (both dialects):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -38,6 +39,7 @@ import structlog
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
 
@@ -118,6 +120,122 @@ def _with_web_search_tool(body: dict, dialect: str, include: bool) -> dict:
     return out
 
 
+#: force_final 턴에서 우리 tool_use 를 치환할 때 쓰는 안내. 모델이 "도구를 더 쓸 수 없고
+#: 이미 받은 결과로 답해야 한다" 는 것을 알아야 한다 — 그냥 지우면 검색을 했다는 사실 자체가
+#: 사라져서 모델이 "검색할 수 없었다" 고 답할 수 있다.
+_FINAL_TURN_TOOL_NOTE = "[web search results provided below; no further searches available]"
+
+
+def _strip_anthropic_web_search_plumbing(
+    messages: list, our_tool_use_ids: set[str]
+) -> list:
+    """force_final 턴을 위해 **우리** web_search 배관을 대화에서 걷어낸다.
+
+    왜 필요한가
+    -----------
+    force_final 턴(``max_iterations`` 소진 또는 deadline 초과)은 ``tools`` 키를 아예
+    빼고 보낸다 — 더 검색하지 않겠다는 뜻이다. 그런데 대화에는 앞선 턴이 쌓아 둔
+    ``tool_use`` / ``tool_result`` 블록이 그대로 남아 있다. Anthropic-on-Bedrock 은
+    **tool_use/tool_result 를 담은 요청이 tools 를 정의하지 않으면 거부**한다.
+
+    그 결과가 최악의 형태다: 마지막 턴만 400 이 되어, 이미 과금된 N 번의 모델 턴과 N 번의
+    검색이 전부 버려지고 사용자는 답을 하나도 받지 못한다. deadline 경로에서는 검색 한 번만
+    있어도 재현된다.
+
+    무엇으로 바꾸나
+    ---------------
+    ``tool_result`` 는 **텍스트 블록으로 변환**한다 — 그 안의 웹 결과는 이미 비용을 지불한
+    것이고, 지우면 모델이 근거 없이 답하게 된다. 우리 ``tool_use`` 는 안내 텍스트로
+    치환한다(그냥 지우면 assistant 메시지가 비는데, 빈 content 도 거부된다).
+
+    클라이언트 소유 도구의 ``tool_use``/``tool_result`` 는 **건드리지 않는다** —
+    ``our_tool_use_ids`` 에 없는 것은 그대로 둔다. 그쪽은 클라이언트가 자기 루프에서 쓰는
+    것이고, 애초에 client_tool_present 면 이 루프가 그 턴에서 끝난다.
+
+    우리 id 가 하나도 없으면 **입력 객체를 그대로 돌려준다**(사본도 만들지 않는다) — 검색이
+    없었던 요청은 바이트 단위로 동일한 경로를 타야 한다.
+    """
+    if not our_tool_use_ids:
+        return messages
+
+    out: list = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            out.append(msg)
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            out.append(msg)
+            continue
+
+        new_content: list = []
+        changed = False
+        for block in content:
+            if not isinstance(block, dict):
+                new_content.append(block)
+                continue
+            btype = block.get("type")
+            if btype == "tool_use" and block.get("id") in our_tool_use_ids:
+                changed = True
+                continue  # 아래에서 비면 안내 텍스트로 채운다
+            if btype == "tool_result" and block.get("tool_use_id") in our_tool_use_ids:
+                changed = True
+                raw = block.get("content")
+                if isinstance(raw, list):
+                    # content 가 블록 배열인 형태 — 텍스트만 이어붙인다.
+                    text = "".join(
+                        b.get("text", "") for b in raw if isinstance(b, dict)
+                    )
+                else:
+                    text = raw if isinstance(raw, str) else json.dumps(raw)
+                new_content.append({"type": "text", "text": text})
+                continue
+            new_content.append(block)
+
+        if not changed:
+            out.append(msg)
+            continue
+        if not new_content:
+            # ⚠️ 빈 content 는 거부된다. 우리 tool_use 하나만 있던 assistant 메시지가
+            #    정확히 이 경우다.
+            new_content = [{"type": "text", "text": _FINAL_TURN_TOOL_NOTE}]
+        out.append({**msg, "content": new_content})
+    return out
+
+
+def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str]) -> list:
+    """Responses 방언의 같은 작업.
+
+    ``function_call`` / ``function_call_output`` 쌍을 걷어내고, 출력은 텍스트 메시지로
+    바꾼다(같은 이유 — 이미 지불한 검색 결과다).
+
+    ⚠️ 제거되는 ``function_call`` **직전의 ``reasoning`` 항목도 함께 지운다.** Responses
+       API 는 뒤따르는 쌍이 없는 reasoning 항목을 거부하므로, 배관만 지우면 그 reasoning 이
+       고아가 되어 다시 400 이 된다.
+    """
+    if not our_call_ids:
+        return input_items
+
+    out: list = []
+    for item in input_items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        itype = item.get("type")
+        if itype == "function_call" and item.get("call_id") in our_call_ids:
+            # 직전 reasoning 항목이 이 호출에 딸린 것이면 함께 제거한다.
+            if out and isinstance(out[-1], dict) and out[-1].get("type") == "reasoning":
+                out.pop()
+            continue
+        if itype == "function_call_output" and item.get("call_id") in our_call_ids:
+            raw = item.get("output")
+            text = raw if isinstance(raw, str) else json.dumps(raw)
+            out.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
+            continue
+        out.append(item)
+    return out
+
+
 def _is_our_tool(tool: dict) -> bool:
     return isinstance(tool, dict) and tool.get("name") == GW_WEB_SEARCH_NAME
 
@@ -178,16 +296,76 @@ def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     return acc
 
 
+def _wire_input(usage: TokenUsage) -> int:
+    """Billing buckets → the cache-INCLUSIVE prompt count the OpenAI wires report.
+
+    The inverse of ``split_openai_input``: TokenUsage keeps the three prompt buckets
+    mutually exclusive for costing, while the client (Codex CLI reads this to track its
+    context window) expects the grand total with both cache buckets folded in. Kept as one
+    function because the streaming and non-streaming loops both rewrite usage on the way
+    out and must agree.
+    """
+    return (
+        usage.input_tokens
+        + usage.cache_read_input_tokens
+        + usage.cache_creation_input_tokens
+    )
+
+
 def _sse(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
 # ── search execution (shared) ─────────────────────────────────────────────────
+def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
+    """검색 결과 텍스트를 상한까지 자른다. ``(text, truncated)``.
+
+    ⚠️ 왜 필요한가: ``max_iterations`` 는 **턴 수**를, ``total_deadline_sec`` 는 **시간**을
+       묶는다. 청구서를 결정하는 두 축 — 다음 턴 입력에 주입되는 **바이트 수**와 한 턴의
+       **검색 횟수** — 는 어느 것도 묶이지 않았다. dev 실측: 검색 **한 번**이 다음 턴
+       입력에 약 17.4K 토큰의 원본 결과 텍스트를 넣었다. 모델이 한 턴에 20개의 병렬
+       web_search 를 내보내면(이 루프는 그것을 의도적으로 지원한다) 20 × 17.4K 가 다음
+       턴 입력에 연결된다. 결과는 둘 중 하나다: 공유 예산에 상한 없는 단일 요청 비용, 또는
+       컨텍스트 창을 넘겨 continuation 턴이 400 이 되면서 **그때까지 과금된 모든 턴이
+       버려지는** 것.
+
+    ⚠️ 잘랐다는 표지를 반드시 붙인다. 조용한 절단이 최악이다 — JSON 이 레코드 중간에서
+       끊긴 것을 모델은 "결과 전체" 로 읽고 단정적으로 답한다.
+
+    ``max_chars <= 0`` 이면 캡을 끄고 입력을 그대로 돌려준다(캡 이전 동작이 바이트 단위로
+    재현 가능해야 한다).
+    """
+    if max_chars <= 0 or len(text) <= max_chars:
+        return text, False
+    marker = "\n\n[truncated by gateway: result set exceeded the per-search size cap]"
+    return text[:max_chars] + marker, True
+
+
+def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
+    """한 턴에서 실제로 실행할 검색 개수. ``max_per_turn <= 0`` 이면 무제한.
+
+    ⚠️ 초과분도 **응답은 만들어 줘야 한다.** Anthropic/Responses 는 tool_use 하나당
+       정확히 하나의 tool_result / function_call_output 을 요구한다 — 개수가 어긋나면
+       다음 턴이 400 이다. 그래서 "실행하지 않는다" 와 "결과를 만들지 않는다" 는 다르다.
+    """
+    if max_per_turn <= 0:
+        return requested
+    return min(requested, max_per_turn)
+
+
 async def _do_search(
-    mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int
+    mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int,
+    max_result_chars: int = 0,
 ) -> tuple[str, bool]:
     """Run one web search. Returns (result_text_for_model, ok). Never raises — on
-    failure returns an error string so the model can continue from its own knowledge."""
+    failure returns an error string so the model can continue from its own knowledge.
+
+    캡을 **여기서** 적용한다 — 네 개 경로(anthropic/responses × 스트리밍/비스트리밍)가
+    결과 텍스트를 얻는 유일한 지점이라, 여기 두면 넷이 갈라질 수 없다.
+
+    ⚠️ 잘린 검색도 ``ok=True`` 를 유지한다. 그 쿼리는 청구됐고 답변을 실제로 근거지었다 —
+       캡이 성공 플래그를 뒤집으면 web_search_count(과금/귀속)가 어긋난다.
+    """
     query = ""
     max_results = default_max
     if isinstance(tool_input, dict):
@@ -198,7 +376,14 @@ async def _do_search(
             max_results = default_max
     try:
         resp = await mcp_client.search(query, max_results)
-        return resp.raw_text, True
+        text, truncated = _truncate_result(resp.raw_text, max_result_chars)
+        if truncated:
+            logger.info(
+                "web_search.result_truncated",
+                original_chars=len(resp.raw_text),
+                cap=max_result_chars,
+            )
+        return text, True
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False
@@ -220,6 +405,8 @@ async def _anthropic_stream(
     max_iterations: int,
     deadline: float,
     default_max_results: int,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -232,14 +419,36 @@ async def _anthropic_stream(
     search_attempts = 0      # ALL search rounds incl. failures → loop guard (F-5)
     envelope_open = False
     global_index = 0  # next content_block index in the stitched envelope
+    #: 200 스트림 도중 provider 오류가 왔는지. 왔으면 정상 종료를 **주장하지 않는다**.
+    error_seen = False
+    #: 클라이언트에 열어 준 뒤 아직 닫지 않은 content_block 인덱스. 상류가 중간에 죽으면
+    #: 이걸 닫아 줘야 SDK 의 파서 상태가 정리된다(열린 채 끝나면 파싱 오류로 보인다).
+    open_global_blocks: set[int] = set()
+    #: ⚠️ stop_reason 과 "종료 프레임을 봤는지" 는 **턴 단위** 상태다. 루프 스코프에 두면
+    #:    검색 턴의 stop_reason("tool_use")이, 다음 턴이 잘렸을 때 그대로 최종 프레임으로
+    #:    새어 나간다. 클라이언트에는 tool_use 블록이 하나도 보이지 않았는데(우리 것은 전부
+    #:    억제된다) stop_reason 이 tool_use 이면 Anthropic SDK/Claude Code 는 도구 결과를
+    #:    기다리며 없는 tool_use 를 찾다가 멈추거나 재요청한다.
     stop_reason_final = "end_turn"
+    saw_message_delta = False
+    #: 우리가 주입한 web_search 의 tool_use id 전체. force_final 턴에서 이 배관을
+    #: 걷어내야 tools 없는 요청이 400 이 되지 않는다(_strip_… docstring 참조).
+    our_tool_use_ids: set[str] = set()
 
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final)
             turn_body = dict(turn_body)
-            turn_body["messages"] = conversation
+            # ⚠️ force_final 턴은 `tools` 키를 아예 뺀다. 그런데 대화에는 앞선 턴이 쌓아 둔
+            #    우리 tool_use/tool_result 가 남아 있고, Anthropic-on-Bedrock 은 tools 를
+            #    정의하지 않은 요청에 그 블록들이 있으면 **거부한다**. 그러면 마지막 턴만
+            #    400 이 되어 이미 과금된 N 턴과 N 번의 검색이 전부 버려진다.
+            turn_body["messages"] = (
+                _strip_anthropic_web_search_plumbing(conversation, our_tool_use_ids)
+                if force_final
+                else conversation
+            )
             turn_body["stream"] = True
 
             status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
@@ -249,6 +458,9 @@ async def _anthropic_stream(
                 return
 
             # Per-turn parse state.
+            # ⚠️ stop_reason / saw_message_delta 를 턴마다 재설정한다(선언부 주석의 이유).
+            stop_reason_final = "end_turn"
+            saw_message_delta = False
             assistant_content: list[dict] = []
             local_to_global: dict[int, int] = {}   # local block idx → emitted global idx
             suppressed: dict[int, dict] = {}        # local idx → {kind, buffer, block}
@@ -290,6 +502,7 @@ async def _anthropic_stream(
                         suppressed[idx] = {"kind": "client_tool", "buf": "",
                                            "id": block.get("id"), "name": block.get("name")}
                         ev2 = dict(ev); ev2["index"] = gi
+                        open_global_blocks.add(gi)
                         yield _sse("content_block_start", ev2)
                     elif btype in ("thinking", "redacted_thinking"):
                         # Buffer thinking for the INTERNAL conversation (the next model turn's
@@ -308,6 +521,7 @@ async def _anthropic_stream(
                         if btype == "text":
                             text_buf[idx] = ""
                         ev2 = dict(ev); ev2["index"] = gi
+                        open_global_blocks.add(gi)
                         yield _sse("content_block_start", ev2)
 
                 elif etype == "content_block_delta":
@@ -347,6 +561,8 @@ async def _anthropic_stream(
                         except (ValueError, TypeError):
                             tool_input = {}
                         pending_searches.append({"id": s["id"], "name": s["name"], "input": tool_input})
+                        if s["id"]:
+                            our_tool_use_ids.add(s["id"])
                         assistant_content.append(
                             {"type": "tool_use", "id": s["id"], "name": s["name"], "input": tool_input}
                         )
@@ -362,6 +578,7 @@ async def _anthropic_stream(
                         )
                         gi = local_to_global.get(idx, idx)
                         ev2 = dict(ev); ev2["index"] = gi
+                        open_global_blocks.discard(gi)
                         yield _sse("content_block_stop", ev2)
                         continue
                     if idx in thinking_buf:
@@ -381,9 +598,11 @@ async def _anthropic_stream(
                         assistant_content.append({"type": "text", "text": text_buf[idx]})
                     gi = local_to_global.get(idx, idx)
                     ev2 = dict(ev); ev2["index"] = gi
+                    open_global_blocks.discard(gi)
                     yield _sse("content_block_stop", ev2)
 
                 elif etype == "message_delta":
+                    saw_message_delta = True
                     d = ev.get("delta") or {}
                     if d.get("stop_reason"):
                         stop_reason_final = d["stop_reason"]
@@ -397,16 +616,67 @@ async def _anthropic_stream(
                 elif etype == "ping":
                     yield _sse("ping", ev)
                 elif etype == "error":
+                    error_seen = True
                     yield _sse("error", ev)
+                elif isinstance(ev.get("error"), dict):
+                    # ⚠️ 이 레포의 **모든** 어댑터가 내보내는 오류 청크는 type 이
+                    #    중첩되어 있다: {"error": {"type": "provider_error", ...}}.
+                    #    최상위 "type" 이 없으므로 위 `etype == "error"` 분기에 걸리지
+                    #    않고, 그대로 아무 분기도 타지 않아 **조용히 사라졌다.** 결과는
+                    #    잘린 답변에 붙은 정상 종료 프레임 — 클라이언트도 감사 로그도
+                    #    "성공" 으로 기록한다(mantle_adapter 는 200 이후 스트림이 끊길 때
+                    #    이 청크를 중간에 흘린다).
+                    #
+                    #    최상위 "type" 을 붙여서 다시 프레이밍한다 — SSE 이벤트 이름으로
+                    #    분기하는 SDK 들이 실제로 예외를 던지게 하는 유일한 형태다.
+                    error_seen = True
+                    inner = ev["error"]
+                    yield _sse("error", {"type": "error", "error": inner})
 
             # ---- turn ended: decide terminal vs search ----
-            is_search_turn = bool(pending_searches) and not client_tool_present
+            # ⚠️ 오류가 온 턴은 검색 턴으로 취급하지 않는다. 그러지 않으면 실패한 턴을
+            #    "검색을 요청했다" 로 읽고 루프를 계속 돌린다.
+            is_search_turn = (
+                bool(pending_searches) and not client_tool_present and not error_seen
+            )
             if not is_search_turn or force_final:
+                # 상류가 중간에 죽어 열린 채 남은 블록을 닫는다 — 열린 채 끝나면 SDK 쪽에서
+                # 파싱 오류로 보이고, 원인이 게이트웨이인지 상류인지 구분되지 않는다.
+                for gi in sorted(open_global_blocks):
+                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+                open_global_blocks.clear()
+
+                if error_seen or not saw_message_delta:
+                    # ⚠️ 정상 종료를 **주장하지 않는다.** message_delta 는 stop_reason 을
+                    #    실어 "이렇게 끝났다" 고 말하는 프레임이다. 응답이 잘렸는데 그것을
+                    #    보내면 클라이언트와 감사 로그가 모두 성공으로 기록한다. 오류
+                    #    프레임(위에서 이미 emit)이 종료 신호이고, message_stop 은 스트림을
+                    #    닫기 위해서만 보낸다.
+                    #
+                    #    saw_message_delta 가 False 인 경우도 같다 — 종료 프레임을 못 받았고
+                    #    (소켓 절단/타임아웃) 우리가 그것을 지어낼 근거가 없다.
+                    if not error_seen:
+                        yield _sse(
+                            "error",
+                            {"type": "error",
+                             "error": {"type": "incomplete_stream",
+                                       "message": "upstream ended without a terminal event"}},
+                        )
+                    yield _sse("message_stop", {"type": "message_stop"})
+                    break
+
+                # ⚠️ 클라이언트가 볼 수 없는 tool_use 로 끝났다고 말하지 않는다. 우리 검색의
+                #    tool_use 블록은 전부 억제되므로, client_tool_present 가 아닌데
+                #    stop_reason 이 tool_use 면 클라이언트는 없는 도구 호출을 기다린다.
+                emitted_stop_reason = stop_reason_final
+                if emitted_stop_reason == "tool_use" and not client_tool_present:
+                    emitted_stop_reason = "end_turn"
+
                 # Terminal: close the single envelope.
                 yield _sse(
                     "message_delta",
                     {"type": "message_delta",
-                     "delta": {"stop_reason": stop_reason_final, "stop_sequence": None},
+                     "delta": {"stop_reason": emitted_stop_reason, "stop_sequence": None},
                      "usage": {"output_tokens": merged.output_tokens}},
                 )
                 yield _sse("message_stop", {"type": "message_stop"})
@@ -417,13 +687,32 @@ async def _anthropic_stream(
             # Per-search deadline recheck so a large fan-out can't run uncapped (round2 High-2).
             search_attempts += 1
             tool_results = []
-            for ps in pending_searches:
+            # ⚠️ 턴당 검색 개수 상한. 초과분도 **응답은 만들어 준다** — tool_use 하나당
+            #    tool_result 하나가 없으면 다음 턴이 400 이므로, "실행하지 않는다" 와
+            #    "결과를 만들지 않는다" 는 구별해야 한다.
+            allowance = _turn_search_allowance(len(pending_searches), max_searches_per_turn)
+            if allowance < len(pending_searches):
+                logger.info(
+                    "web_search.turn_fanout_capped",
+                    requested=len(pending_searches), allowed=allowance,
+                )
+            for i, ps in enumerate(pending_searches):
+                if i >= allowance:
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": ps["id"],
+                         "content": json.dumps({
+                             "error": "per-turn web search limit reached; "
+                                      "answer from the results already provided"}),
+                         "is_error": True})
+                    continue
                 if time.monotonic() > deadline:
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": ps["id"],
                          "content": "web search deadline exceeded", "is_error": True})
                     continue
-                result_text, ok = await _do_search(mcp_client, ps["input"], default_max_results)
+                result_text, ok = await _do_search(
+                    mcp_client, ps["input"], default_max_results, max_result_chars
+                )
                 if ok:
                     searches_done += 1
                 tool_results.append(
@@ -475,6 +764,8 @@ async def _anthropic_nonstream(
     max_iterations: int,
     deadline: float,
     default_max_results: int,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
 ) -> JSONResponse:
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
@@ -512,13 +803,28 @@ async def _anthropic_nonstream(
             search_attempts += 1
             tool_results = []
             assistant_content = content
-            for call in our_calls:
+            # 턴당 검색 개수 상한 — 근거는 스트리밍 스티처의 같은 주석 참조.
+            allowance = _turn_search_allowance(len(our_calls), max_searches_per_turn)
+            if allowance < len(our_calls):
+                logger.info("web_search.turn_fanout_capped",
+                            requested=len(our_calls), allowed=allowance)
+            for i, call in enumerate(our_calls):
+                if i >= allowance:
+                    tool_results.append(
+                        {"type": "tool_result", "tool_use_id": call.get("id"),
+                         "content": json.dumps({
+                             "error": "per-turn web search limit reached; "
+                                      "answer from the results already provided"}),
+                         "is_error": True})
+                    continue
                 if time.monotonic() > deadline:
                     tool_results.append(
                         {"type": "tool_result", "tool_use_id": call.get("id"),
                          "content": "web search deadline exceeded", "is_error": True})
                     continue
-                result_text, ok = await _do_search(mcp_client, call.get("input") or {}, default_max_results)
+                result_text, ok = await _do_search(
+                    mcp_client, call.get("input") or {}, default_max_results, max_result_chars
+                )
                 if ok:
                     searches_done += 1
                 tool_results.append(
@@ -583,6 +889,8 @@ async def _responses_stream(
     max_iterations: int,
     deadline: float,
     default_max_results: int,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
 ) -> AsyncIterator[bytes]:
     """Stitch N Responses turns into ONE response.created … response.completed stream.
 
@@ -595,8 +903,21 @@ async def _responses_stream(
     search_attempts = 0      # all rounds incl. failures → loop guard (F-5)
     envelope_open = False
     global_out_index = 0
+    #: ⚠️ 이 둘은 **턴 단위** 상태다. 루프 스코프에 두면 답변 턴이 종료 이벤트 없이 죽었을
+    #:    때 직전 검색 턴의 객체와 "response.completed" 가 그대로 최종 프레임으로 나간다 —
+    #:    잘린 답변에 붙은 조작된 성공이다. 게다가 그 객체의 output 은 우리 web_search 호출을
+    #:    올바르게 제거했기 때문에 **비어 있어서**, 델타가 아니라 최종 객체로 답을 재구성하는
+    #:    클라이언트(Codex 계열)는 빈 답변을 받고 완료로 기록한다. 첫 턴에서 죽으면
+    #:    final_response_obj 가 None 이라 `id` 조차 없는 completed 가 나간다.
     final_response_obj: Optional[dict] = None
     final_terminal_type = "response.completed"  # actual upstream terminal type (F-1)
+    #: 이 턴에서 실제로 종료 이벤트를 받았는지. 못 받았으면 종료를 지어내지 않는다.
+    saw_terminal_event = False
+    #: 클라이언트가 본 봉투의 id — **첫 턴의** response.created 에서 온 값이다.
+    #: ⚠️ 종료 프레임의 id 는 이것과 같아야 한다. 마지막 턴의 id 를 쓰면 클라이언트는
+    #:    자기가 열지 않은 응답의 종료를 받는다: created(resp_1) … completed(resp_2).
+    #:    id 로 요청을 상관짓는 클라이언트/로그는 그 응답을 찾지 못한다.
+    envelope_response_id: str | None = None
     our_call_ids: set[str] = set()  # our web_search call_ids to strip from final output (F-3 Responses)
     error_seen = False       # a 200-stream `error` event occurred (NEW round2 High-1)
 
@@ -605,13 +926,21 @@ async def _responses_stream(
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final)
             turn_body = dict(turn_body)
-            turn_body["input"] = conv_input
+            # force_final 턴의 배관 제거 — 근거는 anthropic 스티처의 같은 주석 참조.
+            turn_body["input"] = (
+                _strip_responses_web_search_items(conv_input, our_call_ids)
+                if force_final
+                else conv_input
+            )
             turn_body["stream"] = True
             status, chunk_iter, _h, _rid = await invoke_stream(turn_body)
             if status != 200:
                 async for b in _drain_responses_error(chunk_iter, envelope_open):
                     yield b
                 return
+
+            # 턴 단위 상태 재설정(위 선언부 주석의 이유).
+            saw_terminal_event = False
 
             local_to_global: dict[int, int] = {}
             suppressed_out: dict[int, dict] = {}     # our web_search fn call by output_index
@@ -630,6 +959,7 @@ async def _responses_stream(
                 if etype == "response.created":
                     if not envelope_open:
                         envelope_open = True
+                        envelope_response_id = ((ev.get("response") or {}).get("id"))
                         yield _sse("response.created", ev)
                 elif etype == "response.in_progress":
                     if not envelope_open:
@@ -703,24 +1033,62 @@ async def _responses_stream(
 
                 elif etype in ("response.completed", "response.incomplete", "response.failed"):
                     resp_obj = ev.get("response") or {}
+                    saw_terminal_event = True
                     final_response_obj = resp_obj
                     final_terminal_type = etype  # preserve incomplete/failed, don't fake completed (F-1)
-                    u = resp_obj.get("usage") or {}
-                    in_d = u.get("input_tokens_details") or {}
-                    out_d = u.get("output_tokens_details") or {}
-                    merged.input_tokens += int(u.get("input_tokens", 0) or 0)
-                    merged.output_tokens += int(u.get("output_tokens", 0) or 0)
-                    merged.cache_read_input_tokens += int(in_d.get("cached_tokens", 0) or 0)
-                    merged.reasoning_tokens += int(out_d.get("reasoning_tokens", 0) or 0)
+                    # Responses `input_tokens` INCLUDES both cached_tokens and
+                    # cache_write_tokens — parse per turn into exclusive buckets before
+                    # accumulating, so merged.input_tokens stays the non-cached billable
+                    # input (TokenUsage contract). Per TURN, not on the final sum: each
+                    # turn caches a different amount, and typically exactly one turn of a
+                    # search loop writes the cache while the rest read it.
+                    _merge_usage(merged, extract_responses_usage(resp_obj))
                     # captured; emit our own terminal event at envelope close
                 elif etype == "error":
                     error_seen = True  # NEW round2 High-1: do not also emit a fake completed
                     yield _sse("error", ev)
+                elif isinstance(ev.get("error"), dict):
+                    # ⚠️ 어댑터들이 실제로 내보내는 형태는 type 이 중첩되어 있다:
+                    #    {"error": {"type": "provider_error", ...}}. 최상위 "type" 이 없어
+                    #    위 분기에 걸리지 않고 조용히 사라졌다 — 근거는 anthropic 스티처의
+                    #    같은 분기 주석 참조.
+                    error_seen = True
+                    yield _sse("error", {"type": "error", "error": ev["error"]})
 
             is_search_turn = bool(pending_searches) and not client_tool_present and not error_seen
             # An incomplete/failed upstream turn is terminal even if a search was requested —
             # never loop on a truncated/failed response (F-1).
-            if not is_search_turn or force_final or final_terminal_type != "response.completed" or error_seen:
+            if (
+                not is_search_turn
+                or force_final
+                or final_terminal_type != "response.completed"
+                or error_seen
+                # ⚠️ 종료 이벤트를 못 받은 턴(소켓 절단/타임아웃)도 terminal 이다. 이걸
+                #    빼면 pending_searches 가 비어 있으니 위 조건으로 우연히 빠져나가는데,
+                #    그때 final_* 는 **직전 턴의 값**이라 조작된 성공이 나간다.
+                or not saw_terminal_event
+            ):
+                # 이 턴에서 종료 이벤트를 못 받았다면 직전 턴의 객체를 물려주지 않는다.
+                if not saw_terminal_event:
+                    # 직전 턴(검색 턴)의 객체는 이 답변과 무관하다 — 그 output 은 우리
+                    # web_search 를 제거해 비어 있어서, 최종 객체로 답을 재구성하는
+                    # 클라이언트에게 "빈 답변, 완료" 를 준다. 봉투 id 는
+                    # _finalize_responses_obj 가 다시 채운다.
+                    final_response_obj = {}
+                    if error_seen:
+                        # ⚠️ 오류로 끝난 것과 그냥 잘린 것은 **다른 신호**여야 한다.
+                        #    failed = 상류가 오류를 반환했다, incomplete = 종료 프레임 없이
+                        #    끊겼다. 둘을 합치면 운영자가 provider 장애와 네트워크 절단을
+                        #    구분할 수 없다.
+                        final_terminal_type = "response.failed"
+                    else:
+                        final_terminal_type = "response.incomplete"
+                        yield _sse(
+                            "error",
+                            {"type": "error",
+                             "error": {"type": "incomplete_stream",
+                                       "message": "upstream ended without a terminal event"}},
+                        )
                 # If a mid-stream `error` occurred, the error frame is the terminal signal —
                 # do NOT also emit a synthetic response.completed (NEW round2 High-1). Emit
                 # response.failed only if we never got a real terminal event.
@@ -729,14 +1097,16 @@ async def _responses_stream(
                                {"type": "response.failed",
                                 "response": _finalize_responses_obj(
                                     final_response_obj, merged, global_out_index,
-                                    "response.failed", our_call_ids)})
+                                    "response.failed", our_call_ids,
+                                    envelope_id=envelope_response_id)})
                 else:
                     yield _sse(
                         final_terminal_type,
                         {"type": final_terminal_type,
                          "response": _finalize_responses_obj(
                              final_response_obj, merged, global_out_index,
-                             final_terminal_type, our_call_ids)},
+                             final_terminal_type, our_call_ids,
+                             envelope_id=envelope_response_id)},
                     )
                 break
 
@@ -746,12 +1116,27 @@ async def _responses_stream(
             # past the total deadline (NEW round2 High-2).
             search_attempts += 1
             outputs = []
-            for ps in pending_searches:
+            # 턴당 검색 개수 상한 — 근거는 anthropic 스티처의 같은 주석 참조.
+            allowance = _turn_search_allowance(len(pending_searches), max_searches_per_turn)
+            if allowance < len(pending_searches):
+                logger.info(
+                    "web_search.turn_fanout_capped",
+                    requested=len(pending_searches), allowed=allowance,
+                )
+            for i, ps in enumerate(pending_searches):
+                if i >= allowance:
+                    outputs.append({"type": "function_call_output", "call_id": ps["call_id"],
+                                    "output": json.dumps({
+                                        "error": "per-turn web search limit reached; "
+                                                 "answer from the results already provided"})})
+                    continue
                 if time.monotonic() > deadline:
                     outputs.append({"type": "function_call_output", "call_id": ps["call_id"],
                                     "output": json.dumps({"error": "web search deadline exceeded"})})
                     continue
-                result_text, ok = await _do_search(mcp_client, ps["input"], default_max_results)
+                result_text, ok = await _do_search(
+                    mcp_client, ps["input"], default_max_results, max_result_chars
+                )
                 if ok:
                     searches_done += 1
                 outputs.append(
@@ -783,6 +1168,7 @@ def _finalize_responses_obj(
     resp_obj: Optional[dict], merged: TokenUsage, _n: int,
     terminal_type: str = "response.completed",
     our_call_ids: Optional[set] = None,
+    envelope_id: str | None = None,
 ) -> dict:
     """Build the terminal response object with merged usage (multi-turn totals).
 
@@ -796,17 +1182,32 @@ def _finalize_responses_obj(
                   "response.failed": "failed"}
     obj = dict(resp_obj or {})
     obj["status"] = status_map.get(terminal_type, "completed")
+    # ⚠️ 봉투(첫 response.created)의 id 로 고정한다. 마지막 턴의 id 를 그대로 두면
+    #    created(resp_1) … completed(resp_2) 가 되어, id 로 상관짓는 클라이언트와 로그가
+    #    그 응답을 찾지 못한다. 여러 턴을 하나의 응답으로 합치는 것이 이 스티처의 계약이다.
+    if envelope_id:
+        obj["id"] = envelope_id
     if our_call_ids and isinstance(obj.get("output"), list):
         obj["output"] = [
             it for it in obj["output"]
             if not (isinstance(it, dict) and it.get("type") == "function_call"
                     and it.get("call_id") in our_call_ids)
         ]
+    # WIRE representation, not the billing one: Responses `input_tokens` must be the GRAND
+    # TOTAL prompt count (cache reads AND cache writes included), because that is what the
+    # OpenAI spec says and what Codex CLI reads to track context. merged.input_tokens is
+    # the non-cached billing bucket, so add both cache buckets back on the way out.
+    # Emitting the billing value here would produce cached_tokens > input_tokens — an
+    # impossible payload. Both sub-counters are echoed for the same reason.
+    wire_input = _wire_input(merged)
     obj["usage"] = {
-        "input_tokens": merged.input_tokens,
+        "input_tokens": wire_input,
         "output_tokens": merged.output_tokens,
-        "total_tokens": merged.input_tokens + merged.output_tokens,
-        "input_tokens_details": {"cached_tokens": merged.cache_read_input_tokens},
+        "total_tokens": wire_input + merged.output_tokens,
+        "input_tokens_details": {
+            "cached_tokens": merged.cache_read_input_tokens,
+            "cache_write_tokens": merged.cache_creation_input_tokens,
+        },
         "output_tokens_details": {"reasoning_tokens": merged.reasoning_tokens},
     }
     return obj
@@ -838,6 +1239,8 @@ async def _responses_nonstream(
     max_iterations: int,
     deadline: float,
     default_max_results: int,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
 ) -> JSONResponse:
     merged = TokenUsage()
     conv_input: list = _normalize_responses_input(base_body)
@@ -872,7 +1275,17 @@ async def _responses_nonstream(
 
             search_attempts += 1
             new_items = list(output)
-            for call in our_calls:
+            allowance = _turn_search_allowance(len(our_calls), max_searches_per_turn)
+            if allowance < len(our_calls):
+                logger.info("web_search.turn_fanout_capped",
+                            requested=len(our_calls), allowed=allowance)
+            for i, call in enumerate(our_calls):
+                if i >= allowance:
+                    new_items.append({"type": "function_call_output", "call_id": call.get("call_id"),
+                                      "output": json.dumps({
+                                          "error": "per-turn web search limit reached; "
+                                                   "answer from the results already provided"})})
+                    continue
                 if time.monotonic() > deadline:
                     new_items.append({"type": "function_call_output", "call_id": call.get("call_id"),
                                       "output": json.dumps({"error": "web search deadline exceeded"})})
@@ -881,7 +1294,9 @@ async def _responses_nonstream(
                     args = json.loads(call.get("arguments") or "{}")
                 except (ValueError, TypeError):
                     args = {}
-                result_text, ok = await _do_search(mcp_client, args, default_max_results)
+                result_text, ok = await _do_search(
+                    mcp_client, args, default_max_results, max_result_chars
+                )
                 if ok:
                     searches_done += 1
                 new_items.append(
@@ -897,9 +1312,12 @@ async def _responses_nonstream(
                 logger.warning("web_search.on_usage_failed")
 
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
-        final_body["usage"]["input_tokens"] = merged.input_tokens
+        # Same wire-vs-billing split as _finalize_responses_obj: the client must see the
+        # cache-INCLUSIVE prompt count that the Responses spec defines.
+        wire_input = _wire_input(merged)
+        final_body["usage"]["input_tokens"] = wire_input
         final_body["usage"]["output_tokens"] = merged.output_tokens
-        final_body["usage"]["total_tokens"] = merged.input_tokens + merged.output_tokens
+        final_body["usage"]["total_tokens"] = wire_input + merged.output_tokens
     return JSONResponse(status_code=final_status, content=final_body)
 
 
@@ -919,15 +1337,55 @@ async def run_web_search_loop(
     max_iterations: int = 5,
     total_deadline_sec: float = 90.0,
     default_max_results: int = 10,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
+    handshake_timeout: float = 10.0,
+    #: KI-08 역산 훅. Responses 방언은 usage 가 종결 이벤트 안에만 있어서, 패스스루
+    #: 경로의 스트림이 그 전에 끊기면 역산 없이는 usage 가 전부 0 이 되고 usage_logs
+    #: 행이 아예 만들어지지 않는다(services/streaming.py 의 같은 주석 참조).
+    tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
     response_headers: Optional[dict] = None,
+    on_stream_complete: Callable[[str, str], Awaitable[None]] | None = None,
+    on_nonstream_complete: Callable[[int, bytes], Awaitable[None]] | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Run the server-side web-search loop and return the client response.
 
     ``dialect`` is "anthropic" (/v1/messages) or "responses" (/v1/responses). The loop
     ensures the MCP client is initialized (discovers the WebSearch tool) before starting;
     if that fails, it degrades to a plain pass-through of the original request (no tool).
+
+    ``on_stream_complete`` / ``on_nonstream_complete`` are the request/response **body**
+    log hooks. Both are ``None`` when body logging is off, and the routers decide that
+    before calling — passing a hook makes the streaming paths accumulate the full SSE
+    text in memory, so the decision has to be made up front.
+
+    ⚠️ 이 두 훅이 이 함수의 인자로 있는 이유: 라우터들은 ``if is_stream:`` 블록에서
+       본문 로깅을 배선하는데, 이 함수는 **그 블록보다 먼저** 리턴한다. 훅 없이 두면
+       웹서치를 켠 프로파일의 요청은 라우터의 로깅 코드를 아예 지나지 않아 조용히
+       미기록된다. 그리고 그 조합이 하필 최악이다 — 웹서치를 쓰는 것은 Codex(Mantle)이고
+       Mantle 은 AWS 쪽 invocation log 에도 남지 않으므로, 본문의 정본이 **어디에도**
+       없게 된다. 여섯 개 리턴 경로 전부에 배선돼 있고, 테스트가 그 개수를 센다.
     """
     deadline = time.monotonic() + total_deadline_sec
+
+    def _log_stream(gen):
+        """스트리밍 응답을 본문 로깅 래퍼로 감싼다(훅이 없으면 그대로 통과)."""
+        if on_stream_complete is None:
+            return gen
+        from app.services.body_log_records import wrap_stream_for_body_log
+
+        return wrap_stream_for_body_log(
+            gen, dialect=dialect, on_complete=on_stream_complete
+        )
+
+    async def _log_nonstream(status: int, raw: bytes) -> None:
+        """비스트리밍 응답 본문을 기록한다. 실패해도 요청을 깨뜨리지 않는다."""
+        if on_nonstream_complete is None:
+            return
+        try:
+            await on_nonstream_complete(status, raw)
+        except Exception:
+            logger.warning("web_search.body_log_failed")
 
     # Strip Anthropic/OpenAI NATIVE web_search tool(s) up front: Bedrock/Mantle reject
     # them, and we fulfill the intent via our own loop. Doing it here (before F-7) means
@@ -956,13 +1414,15 @@ async def run_web_search_loop(
                 responses_sse_stream,
             )
             gen = (bedrock_anthropic_sse_stream if dialect == "anthropic" else responses_sse_stream)(
-                request, chunk_iter, on_usage=_stream_on_usage)
-            return StreamingResponse(gen, status_code=status,
+                request, chunk_iter, on_usage=_stream_on_usage,
+                tokenizer_hook=tokenizer_hook)
+            return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
         base.pop("stream", None)
         status, body, _h, usage = await invoke(base)
         if usage and (usage.input_tokens + usage.output_tokens) > 0:
             await on_usage(usage)
+        await _log_nonstream(status, body)
         try:
             content = json.loads(body)
         except (ValueError, TypeError):
@@ -973,7 +1433,15 @@ async def run_web_search_loop(
     # model. If discovery fails, fall back to a normal (no-search) call so the request
     # still succeeds — the model simply lacks web search this time.
     try:
-        await mcp_client.ensure_initialized()
+        # ⚠️ 여기에도 상한이 필요하다. 클라이언트 안쪽에 상한이 있어도, 이 지점은 요청
+        #    진입 경로이므로 상한을 두 번 거는 것이 아니라 **최악의 경우를 명시**하는 것이다:
+        #    핸드셰이크가 늦어지는 동안 이 요청은 이미 만든 RPM/TPM/CPH 예약을 물고 있다.
+        #    asyncio.TimeoutError 는 Exception 하위라 아래 except 가 그대로 잡아
+        #    검색 없는 단일 턴으로 폴백한다.
+        await asyncio.wait_for(
+            mcp_client.ensure_initialized(),
+            timeout=handshake_timeout,
+        )
     except Exception:
         logger.warning("web_search.mcp_init_failed_fallback_no_search")
         # Degrade to a normal (no-search) single turn. Route the stream through the real
@@ -989,14 +1457,19 @@ async def run_web_search_loop(
                 responses_sse_stream,
             )
             if dialect == "anthropic":
-                gen = bedrock_anthropic_sse_stream(request, chunk_iter, on_usage=_stream_on_usage)
+                gen = bedrock_anthropic_sse_stream(
+                    request, chunk_iter, on_usage=_stream_on_usage,
+                    tokenizer_hook=tokenizer_hook)
             else:
-                gen = responses_sse_stream(request, chunk_iter, on_usage=_stream_on_usage)
-            return StreamingResponse(gen, status_code=status,
+                gen = responses_sse_stream(
+                    request, chunk_iter, on_usage=_stream_on_usage,
+                    tokenizer_hook=tokenizer_hook)
+            return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
         status, body, _h, usage = await invoke(base)
         if usage and (usage.input_tokens + usage.output_tokens) > 0:
             await on_usage(usage)
+        await _log_nonstream(status, body)
         try:
             content = json.loads(body)
         except (ValueError, TypeError):
@@ -1014,13 +1487,16 @@ async def run_web_search_loop(
             max_iterations=max_iterations,
             deadline=deadline,
             default_max_results=default_max_results,
+            max_result_chars=max_result_chars,
+            max_searches_per_turn=max_searches_per_turn,
         )
         return StreamingResponse(
-            gen, status_code=200, media_type="text/event-stream", headers=response_headers
+            _log_stream(gen), status_code=200,
+            media_type="text/event-stream", headers=response_headers,
         )
 
     loop = _anthropic_nonstream if dialect == "anthropic" else _responses_nonstream
-    return await loop(
+    resp = await loop(
         invoke=invoke,
         base_body=initial_req_data,
         mcp_client=mcp_client,
@@ -1028,4 +1504,11 @@ async def run_web_search_loop(
         max_iterations=max_iterations,
         deadline=deadline,
         default_max_results=default_max_results,
+        max_result_chars=max_result_chars,
+        max_searches_per_turn=max_searches_per_turn,
     )
+    # 루프가 조립해 반환한 최종 본문을 기록한다. 여기서는 `resp.body` 를 읽는다 —
+    # 루프 내부가 여러 턴의 결과를 합쳐 만든 것이므로 어떤 단일 턴의 provider 응답도
+    # 클라이언트가 실제로 받는 것과 같지 않다. 클라이언트가 받은 바이트가 정본이다.
+    await _log_nonstream(resp.status_code, bytes(resp.body or b""))
+    return resp

@@ -73,6 +73,11 @@ class UsageByUserModelItem(BaseModel):
     date: str
     user_id: str
     user_name: str | None = None
+    # ⚠️ display_name 은 IdP 에서 비어 오거나 동명이인이 생긴다(auto-provisioning 은
+    #    name claim 이 없으면 email 을 넣고, 그것도 없으면 <sub>@unknown 을 쓴다).
+    #    운영자가 화면에서 사람을 특정할 축이 하나뿐이면 잘못된 사용자에게 예산 조치를
+    #    하게 된다. ADMIN/TEAM_LEADER 전용 엔드포인트라 email 노출 범위는 넓어지지 않는다.
+    user_email: str | None = None
     model_alias: str
     cost_usd: Decimal
     calls: int
@@ -97,8 +102,23 @@ class UsageByUserItem(BaseModel):
     date: str
     user_id: str
     user_name: str | None = None
+    user_email: str | None = None
+    #: 실사용 + 마이그레이션 주입분(`seeded_usd`)의 합. 화면에 뜨는 사용자 총액.
     cost_usd: Decimal
     calls: int
+    #: 입력/출력 외 캐시 토큰. by-user-model 에는 이미 있었는데 사용자 합계에는 없어서,
+    #: 모델 표를 접었을 때 캐시 사용량이 화면에서 사라졌다(합이 맞지 않아 보인다).
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    #: `budget_usages` 에 주입된 마이그레이션 이전 사용액(`POST /admin/budgets/seed-spent`).
+    #:
+    #: ⚠️ 이 값을 **따로 드러내는 것**이 중요하다. cost_usd 에만 접어 넣으면 운영자가
+    #:    "이 사용자는 게이트웨이로 $13 밖에 안 썼는데 왜 $963 인가" 를 화면에서 해석할
+    #:    수 없다(예산 페이지와 분석 페이지가 서로 다른 숫자를 보여주던 문제의 반대편).
+    #:    seed 는 일자·모델 granularity 가 없어 모델 표(by-user-model)에는 넣지 않는다.
+    seeded_usd: Decimal = Decimal("0")
     department_id: str | None = None
     department_name: str | None = None
     team_id: str | None = None

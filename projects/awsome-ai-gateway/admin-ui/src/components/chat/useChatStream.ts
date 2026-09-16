@@ -4,6 +4,7 @@
 
 import { useCallback, useRef, useState } from 'react';
 import type { StreamEvent } from './types';
+import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
 // admin-ui server-side proxy 경유 (api.ts 와 동일). SSE 스트림도 pass-through.
 const API_BASE = '/api/chat-proxy';
@@ -51,6 +52,14 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
             signal: controller.signal,
           }
         );
+
+        // ⚠️ 401 은 세션이 죽은 것이라 스트림을 기다릴 이유가 없다. 아래 generic 분기로
+        //    내려보내면 onError 가 `HTTP 401: {...}` 를 채팅창에 흘리는데, 사용자가 할 수
+        //    있는 행동(재로그인)이 전혀 안내되지 않는다. 로그인으로 보내고 조용히 끝낸다.
+        //    (finally 가 남아 있으므로 isStreaming 은 정상적으로 풀린다.)
+        if (redirectToLoginIfUnauthorized(response)) {
+          return;
+        }
 
         if (!response.ok || !response.body) {
           throw new Error(`HTTP ${response.status}: ${await response.text()}`);
@@ -139,18 +148,41 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
   return { send, cancel, reattach, isStreaming };
 }
 
-function parseSseBlock(block: string, onEvent: (e: StreamEvent) => void) {
-  let event = 'message';
+/**
+ * SSE 블록 하나(`event:` + `data:`) → StreamEvent.
+ *
+ * ⚠️ **이벤트 이름(`event:`) 이 payload 의 `type` 보다 우선한다.** 예전엔
+ * `{ type: event, ...parsed }` 로 합쳐서 payload 의 `type` 이 이벤트 이름을 덮어썼다.
+ * admin-api 의 에러 프레임 본문이 `{"error": …, "type": "ClientError"}` 였기 때문에
+ * 최종 이벤트가 `type: 'ClientError'` 가 되어, ChatLayout 의 `case 'error'` 가 영원히
+ * 잡히지 않고 `default` 로 **조용히 버려졌다** — AgentCore 호출이 실패해도 사용자에게는
+ * 아무 메시지 없이 pending 스피너만 계속 돌았다. (백엔드는 본문 키를 `error_type` 으로
+ * 바꿨고, 여기서도 구조적으로 덮이지 않게 못박는다 — 이중 방어.)
+ *
+ * `event:` 줄이 없는 프레임(AgentCore 직결 형태)은 payload 의 `type` 을 그대로 쓴다.
+ */
+export function parseSseBlock(block: string, onEvent: (e: StreamEvent) => void) {
+  let event = ''; // '' = event: 줄 없음
   let data = '';
   for (const line of block.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
     else if (line.startsWith('data:')) data += line.slice(5).trim();
   }
   if (!data) return;
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(data);
-    onEvent({ type: event, ...parsed } as StreamEvent);
+    parsed = JSON.parse(data);
   } catch {
     onEvent({ type: 'text', chunk: data } as StreamEvent);
+    return;
   }
+  // 문자열/숫자 등 비객체 JSON 은 스프레드하면 문자 인덱스로 흩어진다
+  // (`{...'hi'}` → `{0:'h',1:'i'}`) — 텍스트로 취급한다.
+  if (typeof parsed !== 'object' || parsed === null) {
+    onEvent({ type: 'text', chunk: String(parsed) } as StreamEvent);
+    return;
+  }
+  const body = parsed as Record<string, unknown>;
+  const type = event || (typeof body.type === 'string' ? body.type : 'message');
+  onEvent({ ...body, type } as StreamEvent);
 }

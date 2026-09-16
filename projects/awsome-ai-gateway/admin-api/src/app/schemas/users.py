@@ -79,8 +79,39 @@ class TeamListResponse(BaseModel):
 # ── Org Tree ──
 
 
+class UserSearchItem(BaseModel):
+    """조직 트리 검색 결과의 사용자 항목.
+
+    ``UserResponse`` 를 쓰지 않는 이유: 검색은 트리에서 노드를 찾아 선택하는 용도라
+    ``created_at``/``is_active`` 가 불필요하고, 반대로 ``team_id`` 는 **반드시** 필요하다 —
+    팀 멤버는 트리에서 lazy-load 되므로 조상 경로를 펼치려면 팀 id 를 알아야 한다.
+    """
+
+    id: str
+    email: str
+    display_name: str
+    role: UserRole
+    team_id: str | None = None
+    team_name: str | None = None
+
+
+class UserSearchResponse(BaseModel):
+    items: list[UserSearchItem] = []
+    #: limit 에서 잘렸는지. UI 가 "결과가 더 있습니다" 힌트를 띄운다 — 잘림을 숨기면
+    #: 사용자는 찾는 사람이 없다고 결론 내린다.
+    truncated: bool = False
+
+
 class OrgNodeMeta(BaseModel):
+    #: **항상 사람 수.** 노드 타입과 무관하다.
+    #:
+    #: ⚠️ 예전엔 이 한 필드가 노드 타입에 따라 다른 것을 뜻했다 — TEAM 에서는 사람 수,
+    #:    DEPARTMENT 에서는 (서버가 넣은) 사람 수인데 UI 는 그걸 **팀 수**로 읽었다.
+    #:    그래서 20팀×50명 부서가 화면에 "팀 1000개" 로 떴다. 필드 하나가 두 의미를
+    #:    가지면 그 오독은 언젠가 반드시 일어난다 — 그래서 team_count 를 분리했다.
     member_count: int | None = None
+    #: 하위 팀 수. DEPARTMENT / ORGANIZATION 에서만 채운다. TEAM·USER 는 None.
+    team_count: int | None = None
     leader_name: str | None = None
     leader_user_id: str | None = None
     email: str | None = None

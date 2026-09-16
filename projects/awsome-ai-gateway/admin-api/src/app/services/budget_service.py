@@ -11,6 +11,8 @@ import structlog
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.clients import CLIENT_ORDER
+from app.core.budget_cache import refresh_user_app_clients, write_user_budget_config
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
@@ -40,7 +42,9 @@ logger = structlog.get_logger()
 BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
 
 _PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
-_ALLOWED_CLIENTS = ("claude-code", "cowork", "codex")
+#: 단일 출처는 core/clients.py 다 — 앱 추가 시 한 곳만 고치면 되도록.
+#: 튜플로 유지하는 이유: 기존 호출부가 순서를 가정한 곳이 있다.
+_ALLOWED_CLIENTS = CLIENT_ORDER
 
 
 def _team_display_name(team: Team) -> str:
@@ -712,7 +716,11 @@ class BudgetService:
 
         from app.repositories.user_repository import UserRepository
         user_repo = UserRepository(session)
-        users = await user_repo.list_users(limit=500)
+        # ⚠️ limit=500 이었다. `list_users` 는 created_at desc 로 정렬한 뒤 앞에서
+        #    자르므로, 가입이 오래된 사용자의 예산 행이 **조용히 빠진 채** 사용률이
+        #    계산됐다(오류 없이 틀린 비율). 커서 페이징으로 우회할 수도 없다 —
+        #    정렬 키(created_at)와 커서 키(id)가 달라 행을 건너뛴다. 전수 조회를 쓴다.
+        users = await user_repo.iter_all_users()
         teams = await user_repo.list_all_teams()
 
         # TEAM_LEADER 는 본인 팀만 — scope/target_id 쿼리 파라미터로 다른 팀을 넘겨도
@@ -893,20 +901,21 @@ class BudgetService:
                 "policy": data.policy.value.lower(),
                 "thresholds": sorted(data.alert_thresholds),
             }
-            # Preserve app_clients from existing user-config key (no clobber).
-            # Use "in" membership check rather than truthiness so that an empty
-            # list [] is preserved — [] means "no active per-app budgets" and is
-            # distinct from the key being absent entirely.
+            # ⚠️ app_clients 보존을 **애플리케이션에서** GET-modify-SET 으로 하면 안 된다.
+            #    `await redis.get` 이 이벤트 루프를 양보하므로 uvicorn 워커 하나 안에서도
+            #    두 요청(set_user_budget / set_user_client_budget /
+            #    clear_user_client_budget)이 교차하고, 나중에 SET 하는 쪽이 상대의 필드를
+            #    지운다. 그리고 그 손실은 조용하다 — budget_check.lua 는 없는 필드를
+            #    빈 테이블로 읽고, 게이트웨이는 앱별 예산 평가를 통째로 건너뛴다.
+            #    Lua 로 Redis 안에서 병합한다(core/budget_cache.py).
             if scope_type == "user":
-                try:
-                    existing_raw = await redis.get(config_key)
-                    if existing_raw:
-                        prev = json.loads(existing_raw)
-                        if "app_clients" in prev:
-                            config_data["app_clients"] = prev["app_clients"]
-                except Exception:
-                    pass
-            await redis.set(config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
+                await write_user_budget_config(
+                    redis, scope_id, config_data, BUDGET_CONFIG_CACHE_TTL
+                )
+            else:
+                await redis.set(
+                    config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL
+                )
         except Exception:
             logger.warning("redis_threshold_sync_failed", scope_type=scope_type, scope_id=str(scope_id))
 
@@ -953,20 +962,18 @@ class BudgetService:
         Redis key's app_clients field WITHOUT clobbering other fields.
         If the user-config key is absent, does nothing (gateway re-derives on miss).
         """
-        import json
         try:
             repo = BudgetRepository(session)
             active_clients = await repo.list_active_app_clients(user_id)
 
-            redis = self._cache_mgr._redis
-            user_config_key = f"budget:config:user:{{{user_id}}}"
-            existing_raw = await redis.get(user_config_key)
-            if existing_raw is None:
-                # Key absent — gateway will re-derive app_clients from DB on next miss.
-                return
-            config_data = json.loads(existing_raw)
-            config_data["app_clients"] = active_clients
-            await redis.set(user_config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
+            # ⚠️ 여기가 가장 아픈 GET-modify-SET 이었다. 이 쓰기는 **새로 추가된
+            #    client 를 싣는** 쓰기이므로, 경합에서 지면 단순 staleness 가 아니라
+            #    그 앱의 예산 한도가 적용되지 않는 상태가 된다(우회).
+            #    키가 없으면 아무것도 하지 않는다 — 총액 필드를 모르는 채로 키를 만들면
+            #    게이트웨이가 한도 없는 설정으로 읽는다. 게이트웨이가 DB 에서 재도출한다.
+            await refresh_user_app_clients(
+                self._cache_mgr._redis, user_id, active_clients, BUDGET_CONFIG_CACHE_TTL
+            )
         except Exception:
             logger.warning("redis_refresh_user_app_clients_failed", user_id=str(user_id))
 
@@ -1078,13 +1085,45 @@ class BudgetService:
 
         model_repo = ModelRepository(session)
         all_aliases = {alias for rule in data.rules for alias in (rule.from_model_alias, rule.to_model_alias)}
+        # ⚠️ 행을 버리지 말고 들고 있는다 — 아래 provider 대조에 필요하다(존재 확인만 하고
+        #    버리면 alias 당 조회를 두 번 하게 된다).
+        alias_rows: dict[str, object] = {}
         for alias in all_aliases:
-            if await model_repo.get_by_alias(alias) is None:
+            row = await model_repo.get_by_alias(alias)
+            if row is None:
                 raise NotFoundError("ModelAlias", alias)
+            alias_rows[alias] = row
 
         for rule in data.rules:
             if rule.from_model_alias == rule.to_model_alias:
                 raise ValidationError(f"Source and target model cannot be the same: {rule.from_model_alias}")
+
+            # ⚠️ provider 가 다른 규칙은 **저장 자체를 거부한다.**
+            #
+            #    강등은 요청 본문의 model 을 그대로 바꿔치기한다. 그런데 각 라우트는 자기
+            #    provider 로 필터해서 alias 를 해석한다 — /v1/messages 는
+            #    resolve_bedrock_model(provider == BEDROCK)이다. 그래서 BEDROCK alias 를
+            #    BEDROCK_MANTLE/RUNTIME_OPENAI alias 로 바꾸는 규칙은 임계값을 넘는 순간
+            #    LookupError → **404** 가 되고, 그 스코프의 모든 사용자가 한꺼번에 끊긴다.
+            #    비용 절감 설정이 팀을 오프라인으로 만드는 것이고, 404 본문에는 강등 규칙이
+            #    원인이라는 단서가 없다.
+            #
+            #    반대 방향(mantle → runtime plane)은 더 조용하고 더 나쁘다: 두 provider 가
+            #    같은 리졸버를 통과하므로 HTTP 200 인 채로 인증 방식(bearer vs SigV4), 단가,
+            #    AWS 쪽 invocation 로깅이 함께 바뀐다.
+            #
+            #    저장 시점이 막을 수 있는 유일한 지점이다 — 요청 시점에는 이미 늦었고
+            #    (그 요청은 실패한다) 화면은 200 을 받은 뒤다.
+            from_provider = getattr(alias_rows[rule.from_model_alias], "provider", None)
+            to_provider = getattr(alias_rows[rule.to_model_alias], "provider", None)
+            if from_provider != to_provider:
+                raise ValidationError(
+                    f"Downgrade target must use the same provider as the source: "
+                    f"'{rule.from_model_alias}' is {getattr(from_provider, 'value', from_provider)} "
+                    f"but '{rule.to_model_alias}' is {getattr(to_provider, 'value', to_provider)}. "
+                    f"A cross-provider rewrite does not resolve on the serving route, so every "
+                    f"request in this scope would fail once the threshold is crossed."
+                )
 
         budget_repo = BudgetRepository(session)
         config = await budget_repo.get_first_active_config(scope, scope_id)

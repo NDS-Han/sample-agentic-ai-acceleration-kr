@@ -43,6 +43,76 @@ def _db_policy_to_domain(db_policy) -> BudgetPolicy:
     return BudgetPolicy(raw.lower())
 
 
+
+def _as_client_list(value) -> list[str]:
+    """``app_clients`` 필드를 리스트로 정규화한다.
+
+    admin-api 가 이 필드를 Lua 로 병합하는데(core/budget_cache.py — 로그인과 예산
+    변경이 서로의 필드를 지우던 클로버를 막기 위해), Redis 의 cjson 은 빈 배열을
+    표현할 수 없어 ``[]`` 를 ``{}`` 로 인코딩한다(실측: redis 7.4). 둘 다 "활성
+    per-app 예산이 없다" 는 뜻이다.
+
+    ⚠️ 비어 있지 않은 dict 는 **리스트로 바꾸지 않는다** — 그건 예상 밖의 형상이고,
+       키를 client 이름으로 착각해 통과시키면 없는 예산을 있다고 판정할 수 있다.
+       그런 경우는 빈 리스트로 떨어뜨려(= per-app 평가 없음) 부모 USER 예산만 걸린다.
+    """
+    if isinstance(value, list):
+        return [str(v) for v in value]
+    if isinstance(value, dict) and not value:
+        return []
+    return []
+
+def _evaluate_layer(
+    used: Decimal, limit: Decimal, policy: BudgetPolicy
+) -> tuple[str | None, bool, bool]:
+    """한 예산 계층의 판정. ``(block_reason_suffix, soft_warning, throttle_active)``.
+
+    ⚠️ 이 함수가 따로 있는 이유. DB 폴백은 오랫동안 **정책을 보기 전에** 무조건
+       ``used >= limit`` 에서 차단했다. Redis 경로(``redis_scripts/budget_check.lua``)는
+       같은 상태에서 정책을 먼저 본다:
+
+         hard_block    100% 에서 차단
+         soft_warning  soft_limit_pct(기본 110%) 까지 허용, 100% 를 넘으면 경고 플래그만
+         throttle      **차단하지 않는다** — RPM 만 줄인다
+
+       그래서 SOFT_WARNING 팀이 $1000.50/$1000 인 상태에서 Redis 가 한 번 타임아웃되면,
+       Redis 경로였다면 통과했을 요청이 DB 폴백에서는 429 가 됐다 — Redis 가 degrade 된
+       동안 팀 전원이 막힌다. THROTTLE 도 같다: 설계상 절대 차단하지 않는 정책인데 폴백에서만
+       100% 에서 막혔다.
+
+       부수적으로 ``team_soft_limit_exceeded`` 와 ``soft_warning=True`` 는 폴백 경로에서
+       **도달 불가능한 죽은 코드**였다(무조건 raise 가 먼저였다). 즉 ``X-Budget-Warning``
+       헤더가 Redis 다운 중에는 나오지 않았다.
+
+    ⚠️ 판정 **순서**가 Lua 와 같아야 한다(hard_block → soft_warning → throttle). 순서가
+       달라지면 같은 상태가 경로에 따라 다르게 판정된다 — 그것이 원래의 결함이다.
+
+    ⚠️ 이 변경으로 폴백은 이전보다 **느슨해진다**: Redis 다운 중 SOFT_WARNING 사용자는
+       110% 까지 쓸 수 있고 THROTTLE 사용자는 100% 에서 막히지 않는다. 그것이 저장된 정책이
+       말하는 바이고 Redis 경로가 이미 그렇게 동작하지만, 돈이 나가는 동작의 변경이다.
+    """
+    if policy == BudgetPolicy.HARD_BLOCK and used >= limit:
+        return "budget_exceeded", False, False
+
+    soft_warning = False
+    if policy == BudgetPolicy.SOFT_WARNING and limit > 0:
+        effective_limit = limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
+        if used >= effective_limit:
+            return "soft_limit_exceeded", False, False
+        if used >= limit:
+            soft_warning = True
+
+    throttle_active = False
+    if policy == BudgetPolicy.THROTTLE:
+        usage_pct = int(used / limit * 100) if limit > 0 else 0
+        for threshold in sorted(DEFAULT_THRESHOLDS, reverse=True):
+            if usage_pct >= threshold:
+                throttle_active = True
+                break
+
+    return None, soft_warning, throttle_active
+
+
 class BudgetService:
     """예산 정책 확인 서비스."""
 
@@ -81,24 +151,38 @@ class BudgetService:
             if db is not None and not await redis.exists(user_config_key):
                 await self.ensure_config_cached(redis, db, user_id)
 
-            # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 대비)
+            # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
+            #
+            # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
+            #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
+            #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
+            #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
+            #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
+            #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
+            #    전체가 0 으로 리셋되고 전부 통과한다.**
+            #
+            #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
+            #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
+            #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
             if not await redis.exists(user_key) and db is not None:
                 try:
-                    # budget_usages에서 복구 (raw SQL — 모델 컬럼명 불일치 방지)
-                    # fallback: usage_logs SUM
                     from sqlalchemy import func, select, text
 
+                    # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
+                    # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
                     result = await db.execute(
                         text(
-                            "SELECT used_usd FROM budget.budget_usages "
+                            "SELECT client, used_usd FROM budget.budget_usages "
                             "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
                         ),
                         {"uid": user_id, "period": period},
                     )
-                    row = result.scalar_one_or_none()
+                    rows = result.all()
+                    by_client = {r[0]: r[1] for r in rows}
+                    total_row = by_client.get(None)
 
-                    if row is None:
-                        # budget_usages 없으면 usage_logs에서 SUM
+                    if total_row is None:
+                        # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
                         from app.models.usage import UsageRecord
 
                         stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
@@ -108,7 +192,7 @@ class BudgetService:
                         result2 = await db.execute(stmt2)
                         used_from_db = result2.scalar_one()
                     else:
-                        used_from_db = row
+                        used_from_db = total_row
 
                     if used_from_db and used_from_db > 0:
                         await redis.set(user_key, str(used_from_db))
@@ -117,6 +201,28 @@ class BudgetService:
                             user_id=user_id,
                             period=period,
                             used=str(used_from_db),
+                        )
+
+                    # ── 앱별 카운터도 복원한다 ──
+                    #
+                    # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
+                    #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
+                    #    한도가 그 달 내내 사실상 없어진다.
+                    #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
+                    #    그 사이의 사용량을 잃는다).
+                    for client_name, used in by_client.items():
+                        if client_name is None or not used or used <= 0:
+                            continue
+                        app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
+                        if await redis.exists(app_key):
+                            continue
+                        await redis.set(app_key, str(used))
+                        logger.info(
+                            "budget_app_counter_restored",
+                            user_id=user_id,
+                            client=client_name,
+                            period=period,
+                            used=str(used),
                         )
                 except Exception:
                     logger.exception("budget_counter_restore_failed", user_id=user_id)
@@ -151,12 +257,20 @@ class BudgetService:
                 # 불변식(P0-③ review): per-app 예산은 USER 총예산의 하위 서브-리밋이므로
                 # 항상 부모 USER 예산이 존재한다(admin-api 가 부모 없는 per-app 생성 거부).
                 # → app_clients 게이트는 부모 config 가 있다는 전제에서 신뢰 가능.
-                user_app_clients = user_result.get("app_clients")
-                if (
-                    client in PER_APP_BUDGET_CLIENTS
-                    and isinstance(user_app_clients, list)
-                    and client in user_app_clients
-                ):
+                #
+                # ⚠️ `app_clients` 는 리스트 또는 **빈 dict** 로 올 수 있다. admin-api 는 이
+                #    필드를 Lua 로 병합해 쓰는데(app_clients 클로버를 막기 위해),
+                #    Redis 의 cjson 에는 빈 배열 개념이 없어 `[]` 가 `{}` 로 인코딩된다
+                #    (실측: redis 7.4, `cjson.empty_array` 미지원). 둘 다 "활성 per-app
+                #    예산이 없다" 는 같은 뜻이므로 같게 다뤄야 한다.
+                #
+                #    `isinstance(list)` 만 보면 빈 dict 가 "타입이 틀렸다" 로 떨어져,
+                #    아래 per-app 분기 전체(콜드 캐시 재수화 안전망 포함)를 건너뛴다.
+                #    지금은 결과가 같지만(둘 다 per-app 예산 0건), 그 동등성이 우연이라
+                #    미래의 독자가 `{}` 를 "알 수 없음" 으로 오독할 수 있다. 여기서 한 번
+                #    정규화해 그 여지를 없앤다.
+                user_app_clients = _as_client_list(user_result.get("app_clients"))
+                if client in PER_APP_BUDGET_CLIENTS and client in user_app_clients:
                     client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
                     client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
                     # P0-③: per-app config cold-cache fallback. If admin's
@@ -246,8 +360,14 @@ class BudgetService:
             )
             user_usage = user_usage_result.scalar_one_or_none()
             user_used = user_usage.used_usd if user_usage else Decimal("0")
-            if user_used >= user_config.max_budget_usd:
-                raise PermissionError("user_budget_exceeded")
+            # 정책을 적용한다 — 무조건 차단은 Redis 경로와 어긋난다(_evaluate_layer 주석).
+            user_block, _uw, _ut = _evaluate_layer(
+                user_used,
+                user_config.max_budget_usd,
+                _db_policy_to_domain(user_config.policy),
+            )
+            if user_block:
+                raise PermissionError(f"user_{user_block}")
 
         # C-1 정책: TEAM 예산 미설정 → 차단
         team_cfg_result = await db.execute(
@@ -270,34 +390,18 @@ class BudgetService:
         team_used = team_usage.used_usd if team_usage else Decimal("0")
 
         max_budget = team_config.max_budget_usd
-        if team_used >= max_budget:
-            raise PermissionError("team_budget_exceeded")
-
         remaining = max_budget - team_used
         threshold_pct = int(team_used / max_budget * 100) if max_budget > 0 else 0
 
+        # ⚠️ 이전에는 이 위에 `if team_used >= max_budget: raise` 가 있었고, 그것이 정책
+        #    판정보다 **먼저** 돌아 아래 SOFT_WARNING/THROTTLE 분기를 도달 불가능한 죽은
+        #    코드로 만들었다. Redis 경로(budget_check.lua)와 같은 판정을 쓴다.
         policy = _db_policy_to_domain(team_config.policy)
-        if policy == BudgetPolicy.HARD_BLOCK and team_used >= max_budget:
-            raise PermissionError("hard_block")
-
-        # SOFT_WARNING: used ≥ limit × soft_limit_pct/100 이면 차단 (soft_limit_exceeded),
-        # limit ≤ used < effective_limit 이면 통과 + soft_warning=true 플래그.
-        # Redis `budget_check.lua`의 SOFT_WARNING 분기와 동일 의미. Redis 다운 시 DB
-        # fallback 경로가 enforcement를 빠뜨리지 않도록 이 분기를 추가해야 함.
-        soft_warning = False
-        if policy == BudgetPolicy.SOFT_WARNING and max_budget > 0:
-            effective_limit = max_budget * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
-            if team_used >= effective_limit:
-                raise PermissionError("team_soft_limit_exceeded")
-            if team_used >= max_budget:
-                soft_warning = True
-
-        throttle_active = False
-        if policy == BudgetPolicy.THROTTLE:
-            for threshold in sorted(DEFAULT_THRESHOLDS, reverse=True):
-                if threshold_pct >= threshold:
-                    throttle_active = True
-                    break
+        team_block, soft_warning, throttle_active = _evaluate_layer(
+            team_used, max_budget, policy
+        )
+        if team_block:
+            raise PermissionError(f"team_{team_block}")
 
         # 앱(client) 예산 확인 (REDIS_DEGRADED 경로) — 미설정 시 pass-through.
         if client in PER_APP_BUDGET_CLIENTS:
@@ -319,8 +423,13 @@ class BudgetService:
                 )
                 client_usage = client_usage_result.scalar_one_or_none()
                 client_used = client_usage.used_usd if client_usage else Decimal("0")
-                if client_used >= client_config.max_budget_usd:
-                    raise PermissionError("client_budget_exceeded")
+                client_block, _cw, _ct = _evaluate_layer(
+                    client_used,
+                    client_config.max_budget_usd,
+                    _db_policy_to_domain(client_config.policy),
+                )
+                if client_block:
+                    raise PermissionError(f"client_{client_block}")
 
         return BudgetStatus(
             remaining_usd=remaining,

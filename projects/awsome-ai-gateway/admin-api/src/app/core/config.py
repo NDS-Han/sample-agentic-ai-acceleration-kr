@@ -199,6 +199,21 @@ class Settings(BaseSettings):
     # LiteLLM Model Catalog API — AWS Price List 미게시 모델/가격 보조 소스.
     LITELLM_API_URL: str = "https://api.litellm.ai"
     LITELLM_PROVIDER_FILTER: str = "bedrock_converse"
+    # ── Bedrock model-invocation logging (audit reconcile) ──
+    # Bedrock 이 남기는 invocation log 는 **호출이 일어난 Region 의 계정 단위**로 켜진다
+    # (모델별/주체별 스위치 없음). 그래서 log group 과 Region 을 따로 설정한다 — 로그는
+    # 게이트웨이 홈리전이 아니라 그 모델이 실행된 Region 에 쌓인다(GPT-5.6 runtime plane
+    # = us-east-2). 비워 두면 감사 엔드포인트가 503 으로 "미설정" 을 명확히 알린다.
+    BEDROCK_INVOCATION_LOG_GROUP: str = ""
+    BEDROCK_INVOCATION_LOG_REGION: str = "us-east-2"
+    # 요청/응답 **본문** 조회 엔드포인트. 프롬프트 원문이 노출되므로 기본 비활성이고,
+    # 켠 뒤 호출하면 호출 자체가 audit_logs 에 기록된다.
+    BEDROCK_INVOCATION_LOG_BODIES_ENABLED: bool = False
+    # Logs Insights StartQuery 폴링 상한(초). 초과 시 부분결과가 아니라 실패로 알린다.
+    BEDROCK_INVOCATION_LOG_QUERY_TIMEOUT_S: int = 30
+    # Logs Insights 가 한 쿼리에서 돌려줄 수 있는 상한은 10 000 이다. 잘렸는지를
+    # 응답에 명시하려고 우리도 같은 값을 들고 있는다(조용한 truncation 금지).
+    BEDROCK_INVOCATION_LOG_MAX_RECORDS: int = 10_000
 
     # ── Server ──
     HOST: str = "0.0.0.0"

@@ -135,12 +135,24 @@ CREATE TABLE IF NOT EXISTS budget.budget_configs (
     CONSTRAINT ck_budget_configs_client CHECK (client IS NULL OR client IN ('claude-code','cowork','codex'))
 );
 
+-- ⚠️ 이 backfill 은 아래 COALESCE(client, ...) 인덱스보다 **반드시 먼저** 와야 한다.
+-- CREATE TABLE IF NOT EXISTS 는 테이블이 이미 있으면 통째로 no-op 이라 위의 인라인
+-- `client` 컬럼이 안 생긴다(라이브 DB 업그레이드). 그 상태에서 COALESCE 인덱스를 만들면
+-- "column client does not exist" 로 init SQL 이 죽고 → 마이그레이션 Job 실패 →
+-- helm pre-upgrade hook 실패로 배포 전체가 중단된다.
+-- 실제로 prod(revision 0004, client 컬럼 도입 전) 배포에서 이 순서 때문에 실패했다.
+-- fresh DB 에서는 컬럼이 이미 인라인으로 있어 no-op 이므로 양쪽 모두 안전(멱등).
+-- 기존 테이블의 인덱스 교체 + CHECK 제약 추가는 alembic 0011 이 담당한다(init SQL 이후 실행).
+ALTER TABLE budget.budget_configs ADD COLUMN IF NOT EXISTS client VARCHAR(32);
+
 CREATE INDEX IF NOT EXISTS idx_budget_configs_scope ON budget.budget_configs (scope, scope_id) WHERE is_active = true;
 
--- uq_budget_configs_active is created by migration 0024, NOT here. run_migration.sh applies
--- init/*.sql BEFORE `alembic upgrade head`, so creating the index here fails on any existing
--- deployment that already carries duplicate active rows — the exact corruption 0024 exists to
--- repair — and `set -e` then aborts the job before 0024's dedupe can run.
+-- 같은 키에 is_active=true 행이 2개 생기면 이후 모든 조회가 scalar_one_or_none() 에서
+-- MultipleResultsFound → 500 이 된다 (migration 0024 참조). COALESCE 는 필수 —
+-- client IS NULL 인 조직 전체 예산 행은 그냥 (scope, scope_id, client) 로는 보호되지 않는다.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_configs_active
+    ON budget.budget_configs (scope, scope_id, COALESCE(client, ''))
+    WHERE is_active = true;
 
 CREATE TABLE IF NOT EXISTS budget.budget_usages (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -155,15 +167,8 @@ CREATE TABLE IF NOT EXISTS budget.budget_usages (
     CONSTRAINT ck_budget_usages_client CHECK (client IS NULL OR client IN ('claude-code','cowork','codex'))
 );
 
--- Backfill `client` on pre-existing tables: CREATE TABLE IF NOT EXISTS is a no-op
--- when the table already exists (live DB upgrade), so the inline `client` column
--- above never lands and the COALESCE index below would fail with
--- "column client does not exist". ADD COLUMN IF NOT EXISTS makes this idempotent —
--- no-op on fresh DBs (column already inline), adds the column on existing DBs.
--- The index swap to the COALESCE form + check constraints on existing tables are
--- owned by alembic migration 0011 (runs after init SQL).
-ALTER TABLE budget.budget_configs ADD COLUMN IF NOT EXISTS client VARCHAR(32);
-ALTER TABLE budget.budget_usages  ADD COLUMN IF NOT EXISTS client VARCHAR(32);
+-- budget_usages 쪽 backfill 도 아래 COALESCE 인덱스보다 먼저 와야 한다(위 budget_configs 와 동일 이유).
+ALTER TABLE budget.budget_usages ADD COLUMN IF NOT EXISTS client VARCHAR(32);
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usages (scope, scope_id, period, COALESCE(client,''));
 
@@ -174,8 +179,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usag
 -- model schema — Enums
 -- ============================================================
 
-DO $$ BEGIN CREATE TYPE model.provider          AS ENUM ('BEDROCK', 'OPENMODEL'); EXCEPTION WHEN duplicate_object THEN null; END $$;
-DO $$ BEGIN CREATE TYPE model.api_format        AS ENUM ('BEDROCK_NATIVE', 'OPENAI_COMPATIBLE'); EXCEPTION WHEN duplicate_object THEN null; END $$;
+-- ⚠️ fresh-init DB 와 migrated DB 는 **같은 라벨 집합**으로 수렴해야 한다
+-- (03_seed_data.sql:91 의 수렴 규약). 아래 두 enum 은 마이그레이션에서도 라벨이 늘어난다:
+--   provider    +BEDROCK_MANTLE(0008) +BEDROCK_MANTLE_OPENAI(0016) +BEDROCK_RUNTIME_OPENAI(0031)
+--   api_format  +ANTHROPIC_MESSAGES(0008) +OPENAI_RESPONSES(0016)
+-- 세 마이그레이션 모두 `ADD VALUE IF NOT EXISTS` 라서, 여기서 미리 만들어 두어도 재실행이 안전하다
+-- (fresh-init → 5라벨 생성 후 ADD VALUE 는 no-op / 기존 DB → CREATE TYPE 자체가 no-op).
+--
+-- 여기 빠뜨리면 조용히 갈린다: fresh-init 뒤 alembic 을 아직 안 돌린 DB 에 새 plane 행을 넣는
+-- 순간 `invalid input value for enum` 이고, 반대로 SQLAlchemy 미러는 **읽을 때** 검증하므로
+-- 라벨이 실제로 쓰이기 전까지는 아무 증상이 없다(tests/regression/test_high_db_enum_mirror_drift.py).
+DO $$ BEGIN CREATE TYPE model.provider          AS ENUM ('BEDROCK', 'OPENMODEL', 'BEDROCK_MANTLE', 'BEDROCK_MANTLE_OPENAI', 'BEDROCK_RUNTIME_OPENAI'); EXCEPTION WHEN duplicate_object THEN null; END $$;
+DO $$ BEGIN CREATE TYPE model.api_format        AS ENUM ('BEDROCK_NATIVE', 'OPENAI_COMPATIBLE', 'ANTHROPIC_MESSAGES', 'OPENAI_RESPONSES'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN CREATE TYPE model.model_status      AS ENUM ('ACTIVE', 'INACTIVE'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 DO $$ BEGIN CREATE TYPE model.rate_limit_scope  AS ENUM ('USER', 'TEAM', 'GLOBAL'); EXCEPTION WHEN duplicate_object THEN null; END $$;
 
@@ -201,6 +216,18 @@ CREATE TABLE IF NOT EXISTS model.model_aliases (
 -- on pre-existing tables (CREATE TABLE IF NOT EXISTS above is a no-op there).
 ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS display_name VARCHAR(128);
 
+-- allowed_clients added by migration 0035 (model × app allow-list).
+--
+-- ⚠️ This ALTER is load-bearing, not tidiness. Both gateway-proxy and admin-api declare
+--    the column on their ModelAlias ORM class, so it appears in EVERY SELECT of
+--    model_aliases. A database built from this init SQL alone — compose, a local dev
+--    stack, any environment where alembic has not reached 0035 — would raise
+--    UndefinedColumn on every model resolution, i.e. 500 on the entire inference path,
+--    not just on the allow-list feature.
+--
+-- No DEFAULT. NULL means "unrestricted"; DEFAULT '{}' would mean "no app may use this
+-- model" and would deny every app on every existing alias the moment it applied.
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS allowed_clients TEXT[];
 CREATE TABLE IF NOT EXISTS model.model_pricings (
     id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),
@@ -233,8 +260,13 @@ CREATE TABLE IF NOT EXISTS model.rate_limit_configs (
 
 CREATE INDEX IF NOT EXISTS idx_rate_limit_configs_scope ON model.rate_limit_configs (scope, scope_id) WHERE is_active = true;
 
--- uq_rate_limit_configs_active is likewise created by migration 0024, not here. See the note
--- above budget.budget_usages for why the init SQL must not create it.
+-- migration 0024 와 동일. model_alias 는 키에 넣지 않는다 — upsert 가 alias 무관하게
+-- 해당 scope 의 활성 행 전부를 비활성화하므로, alias 를 넣으면 실제 중복 창이 열린다.
+-- COALESCE(scope_id, ...) 는 필수 — GLOBAL scope 는 scope_id IS NULL 이고,
+-- unique index 에서 NULL 은 서로 구별되므로 그냥 (scope, scope_id) 로는 보호되지 않는다.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_limit_configs_active
+    ON model.rate_limit_configs (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid))
+    WHERE is_active = true;
 
 -- ------------------------------------------------------------
 -- 팀별 모델 접근 제어
@@ -540,3 +572,64 @@ CREATE TABLE IF NOT EXISTS auth.service_tokens (
 );
 
 CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON auth.service_tokens (token_hash);
+
+
+-- ⚠️ 아래 블록은 **선택적 문서화가 아니라 필수**다.
+--
+-- ⚠️ 위치가 중요하다 — 이 블록은 파일 **맨 끝**에 있어야 한다. 참조하는 테이블
+--    (usage.usage_logs, usage.productivity_events)이 위에서 만들어진 뒤여야 ALTER 가
+--    성립하고, init SQL 은 `ON_ERROR_STOP=1` 로 실행되므로 한 문장이 실패하면 **파일의
+--    나머지가 통째로 적용되지 않는다**(실제로 이 블록을 중간에 넣었다가 생성 컬럼이
+--    237개→84개로 줄었다).
+--
+-- 서비스들의 ORM 이 선언한 컬럼은 그 테이블의 **모든 SELECT/INSERT** 에 들어간다. 그래서
+-- init SQL 로만 만든 DB(compose, 로컬 개발, alembic 이 아직 닿지 않은 환경)에 컬럼이 없으면
+-- 그 기능만 죽는 것이 아니라 그 테이블을 쓰는 경로 전체가 UndefinedColumn 으로 죽는다.
+-- 실제로 그런 상태였다: `usage.usage_logs.client` 가 없어 cost-recorder-worker 의 배치
+-- INSERT 가 전부 실패했고(사용량 행 0개), `model.routing_profiles` 와
+-- `public.system_settings` 는 테이블 자체가 없었다.
+--
+-- 이 파일과 ORM 의 차집합은 admin-api 의
+-- tests/regression/test_high_init_sql_matches_orm.py 가 실 PG 로 자동 대조한다 —
+-- 새 마이그레이션을 넣고 여기를 빠뜨리면 그 테스트가 잡는다.
+
+-- migration 0007: 요청을 발생시킨 앱 태그(claude-code | cowork | codex | other | NULL).
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS client TEXT;
+CREATE INDEX IF NOT EXISTS ix_usage_logs_client ON usage.usage_logs (client);
+
+-- migration 0034: 생산성 이벤트 멱등키. 부분 유니크 인덱스라 NULL 은 중복을 허용한다
+-- (멱등키를 보내지 않는 옛 클라이언트를 막지 않기 위해서다).
+ALTER TABLE usage.productivity_events ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(256);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_events_idempotency
+    ON usage.productivity_events (idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
+
+-- migration 0009(+0021 web_search_enabled, +0032 backend CHECK 확장): 앱별 라우팅 프로파일.
+-- ⚠️ CHECK 값은 **0032 적용 후의 최종 상태**로 만든다. 0009 시점의 ('invoke','mantle') 로
+--    만들면 codex 의 bedrock_openai 백엔드 행 삽입이 CHECK 위반으로 거부된다.
+CREATE TABLE IF NOT EXISTS model.routing_profiles (
+    client              TEXT        PRIMARY KEY,
+    backend             TEXT        NOT NULL,
+    account_role_arn    TEXT,
+    region              TEXT        NOT NULL,
+    default_model       TEXT,
+    external_id         TEXT,
+    enabled             BOOLEAN     NOT NULL DEFAULT true,
+    web_search_enabled  BOOLEAN     NOT NULL DEFAULT false,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at          TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT routing_profiles_backend_check
+        CHECK (backend IN ('invoke','mantle','bedrock_openai'))
+);
+-- 이미 존재하는 테이블(0009~0021 사이에서 만들어진 DB)에도 컬럼이 있도록.
+ALTER TABLE model.routing_profiles
+    ADD COLUMN IF NOT EXISTS web_search_enabled BOOLEAN NOT NULL DEFAULT false;
+
+-- migration 0036: 런타임에 바꿀 수 있는 전역 설정. 행이 없으면 "미설정" 이고 소비자가
+-- 자기 기본값을 쓴다(body logging 은 OFF).
+CREATE TABLE IF NOT EXISTS public.system_settings (
+    key         TEXT        PRIMARY KEY,
+    value       JSONB       NOT NULL,
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_by  UUID        REFERENCES auth.users(id)
+);

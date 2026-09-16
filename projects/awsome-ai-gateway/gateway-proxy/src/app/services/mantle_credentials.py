@@ -67,7 +67,7 @@ class MantleCredentialBroker:
         self._lock = asyncio.Lock()
 
     def _in_account_creds(self) -> Credentials:
-        """Pod's own IRSA credentials (no AssumeRole) for in-account Mantle (374)."""
+        """Pod's own IRSA credentials (no AssumeRole) for in-account Mantle (333)."""
         import boto3
         raw = boto3.Session().get_credentials()
         if raw is None:

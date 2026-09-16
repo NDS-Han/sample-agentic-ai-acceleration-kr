@@ -13,11 +13,15 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  # gateway-proxy IRSA 가 in-account Bedrock Mantle(bedrock-mantle:*) 를 호출할 수 있는 리전.
-  # 배포별로 다르므로 var.mantle_regions 로 주입 (기본값 = Tokyo + Ohio, variables.tf 참조):
-  #   - ap-northeast-1 (Tokyo): Claude Code / Cowork in-account Mantle.
-  #   - us-east-2 (Ohio): Codex in-account Mantle GPT-5.5 (Responses API).
-  #   - 다른 리전 배포는 tfvars 에서 mantle_regions = ["us-east-1"] 처럼 지정.
+  # Bedrock Mantle 서비스 엔드포인트 리전들 (일반 Bedrock 서울과 구별되는 별도 네임스페이스).
+  #   - ap-northeast-1 (Tokyo): Claude Code in-account Mantle(claude-opus-4-8-mantle).
+  #   - us-east-2 (Ohio): Codex in-account Mantle GPT-5.5 (openai.gpt-5.5, Responses API).
+  #     Codex 호출 계정 == gateway-proxy IRSA 계정(123)이라 cross-account assume 불필요 —
+  #     이 in-account 권한만으로 충분(라이브 probe 로 us-east-2 GPT-5.5 200 OK 확인).
+  #   - 배포별로 다르므로 var.mantle_regions 로 주입한다. 이 모듈 변수는 **필수**다
+  #     (default 없음, variables.tf 참조) — 기본값 ["ap-northeast-1", "us-east-2"] 은
+  #     environments/*/variables.tf 에만 있고 그것이 단일 진실원천이다. 다른 리전
+  #     배포는 tfvars 에서 mantle_regions = ["us-east-1"] 처럼 덮어쓴다.
   mantle_regions = var.mantle_regions
 }
 
@@ -52,7 +56,7 @@ data "aws_iam_policy_document" "bedrock" {
   # In-Account Mantle — Claude Code(Tokyo Opus 4.8) + Codex(Ohio GPT-5.5).
   # Mantle 은 일반 bedrock:InvokeModel 이 아닌 bedrock-mantle 네임스페이스를 사용한다.
   # 엔드포인트: bedrock-mantle.{region}.api.aws (local.mantle_regions — Tokyo + Ohio).
-  # 라이브 검증(probe)으로 확인된 실제 필요 action 집합. Codex 는 같은 계정(859)이라
+  # 라이브 검증(probe)으로 확인된 실제 필요 action 집합. Codex 는 같은 계정(123)이라
   # cross-account assume 없이 in-account 권한만으로 호출된다.
   # --------------------------------------------------------------------------
   statement {
@@ -112,7 +116,7 @@ data "aws_iam_policy_document" "bedrock" {
 
   # --------------------------------------------------------------------------
   # Claude Code cross-account Bedrock NATIVE — claude-code routes to Bedrock
-  # native (bedrock-runtime, boto3 invoke_model) in a SEPARATE account (374).
+  # native (bedrock-runtime, boto3 invoke_model) in a SEPARATE account (333).
   # Unlike cowork(Mantle), this is native; gateway-proxy assumes the 374 role and
   # builds a bedrock-runtime client from temp creds (BedrockAccountClientProvider).
   # The 374 role trust allows this 859 IRSA principal + sts:ExternalId=claude-code-bedrock.
@@ -125,6 +129,43 @@ data "aws_iam_policy_document" "bedrock" {
       effect    = "Allow"
       actions   = ["sts:AssumeRole"]
       resources = [var.claude_code_374_role_arn]
+    }
+  }
+
+  # --------------------------------------------------------------------------
+  # 요청/응답 **본문** 로깅 sink 쓰기 (modules/body-logging).
+  #
+  # ⚠️ 쓰기 전용이다. Get/List/Delete 를 넣지 않는다 — 게이트웨이는 자기가 넣은 본문을
+  #    다시 읽을 이유가 없고, 그 권한이 있으면 게이트웨이 파드 침해가 곧 **누적된 전체
+  #    프롬프트 이력의 유출**이 된다. 읽기는 사람이 별도 자격증명으로 한다.
+  #
+  # ⚠️ body-logging 모듈이 꺼져 있으면 ARN 이 빈 문자열로 와서 statement 자체가
+  #    렌더되지 않는다. `resources = [""]` 로 남으면 MalformedPolicyDocument 로 apply 가
+  #    깨지므로, 조건을 빼서는 안 된다.
+  # --------------------------------------------------------------------------
+  dynamic "statement" {
+    for_each = var.body_log_firehose_arn != "" ? [1] : []
+    content {
+      sid    = "BodyLogFirehoseWrite"
+      effect = "Allow"
+      actions = [
+        "firehose:PutRecord",
+        "firehose:PutRecordBatch",
+      ]
+      resources = [var.body_log_firehose_arn]
+    }
+  }
+
+  # Firehose 레코드 상한(1MB)을 넘는 본문의 S3 직행 fallback. 객체 하나를 넣는 것만
+  # 허용하고 버킷 열람(s3:ListBucket)은 주지 않는다 — 목록 권한이 있으면 침해 시
+  # 무엇이 쌓여 있는지 열거할 수 있다.
+  dynamic "statement" {
+    for_each = var.body_log_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogS3Fallback"
+      effect    = "Allow"
+      actions   = ["s3:PutObject"]
+      resources = ["${var.body_log_bucket_arn}/*"]
     }
   }
 }
@@ -201,11 +242,52 @@ data "aws_iam_policy_document" "admin_api" {
     ]
     resources = ["*"]
   }
+
+  # Bedrock invocation log 감사 대조 — CloudWatch Logs Insights **읽기 전용**.
+  # 두 statement 로 쪼갠 이유: Insights 액션들의 리소스레벨 권한 지원이 다르다.
+  #   StartQuery / FilterLogEvents / GetLogEvents / DescribeLogStreams → log-group ARN 지정 가능
+  #   GetQueryResults / StopQuery / DescribeLogGroups                 → 리소스레벨 미지원(*)
+  # 좁힐 수 있는 쪽만 좁힌다. 쓰기 액션(PutLogEvents, DeleteLogGroup 등)은 일절 없음.
+  dynamic "statement" {
+    for_each = var.bedrock_invocation_log_group_arn != "" ? [1] : []
+    content {
+      sid    = "BedrockInvocationLogRead"
+      effect = "Allow"
+      actions = [
+        "logs:StartQuery",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents",
+        "logs:DescribeLogStreams",
+      ]
+      resources = [
+        var.bedrock_invocation_log_group_arn,
+        # log stream 대상 액션은 :* 접미사가 붙은 ARN 을 요구한다.
+        "${var.bedrock_invocation_log_group_arn}:*",
+      ]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.bedrock_invocation_log_group_arn != "" ? [1] : []
+    content {
+      sid    = "BedrockInvocationLogQueryResults"
+      effect = "Allow"
+      actions = [
+        # 이 세 액션은 IAM 리소스레벨 조건을 지원하지 않는다(queryId 는 ARN 이 아님).
+        # StopQuery 는 우리가 띄운 쿼리를 타임아웃에 취소하는 용도로, 로그 데이터를
+        # 변경하지 않는다.
+        "logs:GetQueryResults",
+        "logs:StopQuery",
+        "logs:DescribeLogGroups",
+      ]
+      resources = ["*"]
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {
   name        = "${var.project}-${var.environment}-admin-api"
-  description = "STS + Cognito + Price List permissions for admin-api"
+  description = "STS + Cognito + Price List + Bedrock invocation-log read permissions for admin-api"
   policy      = data.aws_iam_policy_document.admin_api.json
   tags        = var.tags
 }

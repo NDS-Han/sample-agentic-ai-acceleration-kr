@@ -7,13 +7,24 @@
 -- whitelist 에 따른 컬럼만 노출. password_hash / virtual_keys.value 같은
 -- 민감 컬럼은 명시적으로 제외.
 --
--- 비밀번호: ESO 가 Secrets Manager 에서 동기화. 실제 password 는 init 시
--- placeholder 로 두고 Terraform 또는 운영자가 ALTER ROLE 로 갱신.
+-- 비밀번호: ESO 가 Secrets Manager 에서 동기화. 실제 password 는 Terraform 또는
+-- 운영자가 ALTER ROLE 로 설정한다 (terraform output chat_reader_secret_arn).
+--
+-- ⚠️ 여기에 리터럴 placeholder 를 박지 말 것. 이 파일은 git 트리에 있고 이 스크립트는
+--    모든 환경(prod 포함)의 migration Job 에서 실행되므로, 리터럴은 곧 "공개된 비밀번호로
+--    LOGIN 가능한 롤을 prod 에 만든다"는 뜻이다. 대신 매 실행 랜덤값을 넣어 아무도 모르는
+--    상태로 만든다 — 운영자가 ALTER ROLE 로 설정하기 전까지 로그인 불가.
+--    gen_random_uuid() 는 PG13+ core 내장이라 pgcrypto 확장이 필요 없다.
+--    IF NOT EXISTS 가드 덕에 이미 롤이 있는 환경(운영자가 손으로 만든 dev 등)의
+--    비밀번호는 건드리지 않는다 — 재실행 멱등.
 
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'gateway_chat_reader') THEN
-        CREATE ROLE gateway_chat_reader LOGIN PASSWORD 'placeholder_change_me' NOINHERIT;
+        EXECUTE format(
+            'CREATE ROLE gateway_chat_reader LOGIN PASSWORD %L NOINHERIT',
+            gen_random_uuid()::text || gen_random_uuid()::text
+        );
     END IF;
 END
 $$;

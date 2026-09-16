@@ -47,6 +47,18 @@ def _extract_bedrock_usage(response_body: dict) -> TokenUsage:
     )
 
 
+def _request_id_headers(response: dict) -> dict:
+    """``{"x-amzn-requestid": <id>}`` from a boto3 response, or ``{}`` if absent.
+
+    Empty dict rather than ``{"x-amzn-requestid": None}`` on purpose: the caller does
+    ``headers.get("x-amzn-requestid")`` and stores the result, and a NULL column means
+    "no record to join to". A key present with a None value would be indistinguishable
+    downstream but would make any future ``in headers`` check lie.
+    """
+    rid = (response or {}).get("ResponseMetadata", {}).get("RequestId")
+    return {"x-amzn-requestid": rid} if rid else {}
+
+
 class BedrockAdapter(ProviderAdapter):
     """AWS Bedrock Runtime adapter (boto3 기반).
 
@@ -77,6 +89,22 @@ class BedrockAdapter(ProviderAdapter):
     async def invoke(
         self, request_body: bytes, model_id: str, path_suffix: str = "invoke", **kwargs
     ) -> tuple[int, bytes, dict, TokenUsage]:
+        """Non-streaming Bedrock call.
+
+        The returned headers dict carries ``x-amzn-requestid`` — the join key to this
+        call's Bedrock model-invocation log record, persisted as
+        ``usage_logs.bedrock_request_id``. ``invoke_stream`` has surfaced it since the
+        streaming rewrite (see :meth:`invoke_stream`), but this branch dropped it, so
+        every NON-streaming Claude call was unauditable: the record exists in AWS and
+        nothing in our data pointed at it. Returned in the headers dict (rather than as
+        a 5th tuple element) to keep the 4-tuple contract in ``ProviderAdapter`` and to
+        match ``BedrockOpenAIAdapter``, which uses the same convention.
+
+        Safe to put here because no route forwards this dict to the client — every caller
+        (``routers/messages.py``, ``routers/bedrock.py``, ``routers/openai_compat.py``)
+        constructs its own ``JSONResponse``/``StreamingResponse`` headers rather than
+        passing this dict through, so the AWS id is not leaked outward.
+        """
         import asyncio
 
         loop = asyncio.get_event_loop()
@@ -98,7 +126,7 @@ class BedrockAdapter(ProviderAdapter):
                     usage = _extract_bedrock_usage(parsed)
                 except Exception:
                     usage = TokenUsage()
-                return 200, body, {}, usage
+                return 200, body, _request_id_headers(response), usage
 
             elif path_suffix == "converse":
                 parsed_req = json.loads(request_body)
@@ -115,7 +143,7 @@ class BedrockAdapter(ProviderAdapter):
                 )
                 usage.total_tokens = usage.input_tokens + usage.output_tokens
                 body = json.dumps(response).encode()
-                return 200, body, {}, usage
+                return 200, body, _request_id_headers(response), usage
 
         except ClientError as e:
             code = e.response["Error"]["Code"]

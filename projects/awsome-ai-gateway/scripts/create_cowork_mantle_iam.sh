@@ -19,8 +19,8 @@ set -euo pipefail
 
 # ---- fixed identifiers (verified 2026-06-20) ----
 ROLE_NAME="llm-gateway-cowork-bedrock"
-ACCOUNT_905="234567890123"
-ACCOUNT_374="345678901234"
+ACCOUNT_905="222233334444"
+ACCOUNT_374="333344445555"
 EXTERNAL_ID="cowork-bedrock"
 MANTLE_REGION="ap-northeast-1"
 GW_ROLE_NAME="llm-gateway-dev-gateway-proxy-bedrock"

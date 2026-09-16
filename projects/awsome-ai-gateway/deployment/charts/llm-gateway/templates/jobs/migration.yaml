@@ -38,10 +38,13 @@ spec:
       # 시점을 hook 이 보장 못 하므로 명시적 wait 가 필요.
       initContainers:
         - name: wait-for-secret
-          # bitnami/kubectl 은 major.minor 태그를 제공하지 않음. full version (예: 1.30.13)
-          # 또는 latest 만 존재. latest 는 mutable 하지만 initContainer 가 Secret 존재만
-          # 확인하는 단순 작업이라 특정 kubectl API 변경에 민감하지 않음.
-          image: {{ .Values.migration.waitForSecret.image | default "bitnami/kubectl:latest" | quote }}
+          # 이미지 핀의 근거(버전 태그 소멸 / distroless 대안 불가 / ECR 미러 권장)는
+          # values.yaml 의 migration.waitForSecret 주석에 있다.
+          # ⚠️ 여기의 `| default` 는 values.yaml 의 값이 비었을 때만 쓰이는 2차 폴백인데,
+          #    예전엔 mutable `bitnami/kubectl:latest` 였다. values 쪽만 digest 로 고정하면
+          #    이 줄이 그대로 남아 폴백 경로에서만 다시 mutable 태그가 되므로 **같은 digest**
+          #    로 함께 고정한다(두 곳이 어긋나면 재현성 구멍이 조용히 남는다).
+          image: {{ .Values.migration.waitForSecret.image | default "bitnami/kubectl@sha256:b29d8c1665b70817259ceecaea16ab27aab6368b48daf485d19436c809067492" | quote }}
           imagePullPolicy: IfNotPresent
           command:
             - sh

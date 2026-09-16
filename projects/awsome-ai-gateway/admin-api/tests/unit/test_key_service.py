@@ -26,30 +26,41 @@ def _stub_user(user_id: uuid.UUID, team_id: uuid.UUID | None = None) -> MagicMoc
     u = MagicMock(spec=User)
     u.id = user_id
     u.team_id = team_id
+    # issue_key snapshots user.sso_subject into the JSON AuthContext cache payload
+    # (key_service.py:133/145). A bare MagicMock attr is not JSON-serializable, so
+    # pin it to the real-world value (None for non-SSO users).
+    u.sso_subject = None
     return u
 
 
-def _patch_user_and_tam(user_id: uuid.UUID, team_id: uuid.UUID | None = None, aliases: list[str] | None = None):
-    """UserRepository + TeamAllowedModelRepository 패치 컨텍스트 쌍 생성.
-
-    issue_key가 이제 이 두 repo를 조회하므로 기존 tests도 mock 필요.
-    """
-    user_mock = patch("app.services.key_service.UserRepository")
-    tam_mock = patch("app.services.key_service.TeamAllowedModelRepository")
-    return user_mock, tam_mock, user_id, team_id, aliases or []
-
-
 class TestIssueKey:
+    @pytest.fixture(autouse=True)
+    def _no_user_level_acl(self):
+        """issue_key 가 조회하는 **사용자 단위** ACL repo 두 개를 '엔트리 없음' 으로 고정.
+
+        이 클래스의 관심사는 VK 발급·TTL·팀 스냅샷이다. 두 repo 를 패치하지 않으면
+        mock_session(AsyncMock) 위에서 진짜 repo 가 돌아 MagicMock 이 돌아오고,
+        json.dumps 가 터져 스냅샷 자체가 건너뛰어진다 — 아래 캐시 관련 단정들이
+        StopIteration 으로 죽거나(운이 좋은 경우) 조용히 무의미해진다.
+
+        ⚠️ 여기서 [] 로 고정했으므로 **이 파일은 user > team 우선순위를 검증하지 않는다.**
+           그 계약과 allowed_clients 스냅샷은
+           tests/regression/test_critical_vk_authcontext_acl_snapshot.py 가 못 박는다.
+        """
+        with patch("app.services.key_service.UserAllowedModelRepository") as MockUam, \
+             patch("app.services.key_service.UserAllowedClientRepository") as MockUac:
+            MockUam.return_value.list_by_user = AsyncMock(return_value=[])
+            MockUac.return_value.list_by_user = AsyncMock(return_value=[])
+            yield
+
     def _mock_repo(self, MockRepo, *, expire_count=0):
         repo = MockRepo.return_value
-        repo.expire_active_keys = AsyncMock(return_value=expire_count)
-        repo.create = AsyncMock(side_effect=self._populate_dates)
+        # issue_key now expires existing keys and inserts the new one atomically in a
+        # single CTE: `expired_count, _ = await repo.expire_and_create(user_id, vk)`.
+        # Mock the real method with its real return shape: (expired_count, new_id).
+        # issue_key sets vk.issued_at itself, so the old _populate_dates hook is obsolete.
+        repo.expire_and_create = AsyncMock(return_value=(expire_count, uuid.uuid4()))
         return repo
-
-    @staticmethod
-    def _populate_dates(vk):
-        vk.issued_at = datetime.now(timezone.utc)
-        return vk
 
     async def test_issue_key_generates_vk_prefix(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
@@ -88,7 +99,9 @@ class TestIssueKey:
                 mock_audit.log = AsyncMock()
                 await key_service.issue_key(mock_session, user_id=user_id, actor=admin_user)
 
-        repo.expire_active_keys.assert_called_once_with(user_id)
+        # expire + insert are now one atomic CTE: expire_and_create(user_id, vk)
+        repo.expire_and_create.assert_called_once()
+        assert repo.expire_and_create.call_args[0][0] == user_id
 
     async def test_issue_key_defaults_to_24h_without_expires_at(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
@@ -131,8 +144,9 @@ class TestIssueKey:
         assert len(vk_setex_calls) == 1
         assert vk_setex_calls[0][0][1] > 0  # TTL must be positive
 
-        # Encryption roundtrip: the VK stored in the model is encrypted
-        created_vk = MockRepo.return_value.create.call_args[0][0]
+        # Encryption roundtrip: the VK stored in the model is encrypted.
+        # expire_and_create(user_id, vk) — the VirtualKey is the 2nd positional arg.
+        created_vk = MockRepo.return_value.expire_and_create.call_args[0][1]
         decrypted = key_service._encryption.decrypt(created_vk.key_value_encrypted)
         assert decrypted == result.virtual_key
 
@@ -211,19 +225,22 @@ class TestIssueKey:
         # 90-day policy > 8h SSO session, so VK expiry must equal SSO expiry
         assert abs((result.expires_at - sso_expiry).total_seconds()) < 2
 
-    async def test_issue_key_sso_expiry_ignored_when_longer_than_policy(
+    async def test_issue_key_sso_expiry_ignored_when_longer_than_default(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
-        """sso_session_expires_at longer than rotation policy leaves policy expiry unchanged."""
+        """sso_session_expires_at longer than the default 24h TTL leaves expiry unchanged.
+
+        issue_key caps VK expiry to the SSO session only when the SSO session is
+        *shorter* than the computed expiry (key_service.py:73). A 30-day SSO session
+        is longer than the 24h default, so the default expiry must survive untouched.
+        """
         user_id = uuid.uuid4()
-        policy = MagicMock(spec=RotationPolicy)
-        policy.expiry_days = 1
         sso_expiry = datetime.now(timezone.utc) + timedelta(days=30)
 
         with patch("app.services.key_service.KeyRepository") as MockRepo, \
              patch("app.services.key_service.UserRepository") as MockUserRepo, \
              patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
-            self._mock_repo(MockRepo, policy=policy)
+            self._mock_repo(MockRepo)  # no expires_at → default 24h
             MockUserRepo.return_value.get_user = AsyncMock(return_value=_stub_user(user_id))
             MockTam.return_value.list_by_team = AsyncMock(return_value=[])
 
@@ -254,19 +271,11 @@ class TestIssueKey:
         user_id = uuid.uuid4()
         team_id = uuid.uuid4()
 
-        mock_redis.setex = AsyncMock()
-        mock_redis.sadd = AsyncMock()
-
-        def _populate_dates(vk):
-            vk.issued_at = datetime.now(timezone.utc)
-            return vk
-
         with patch("app.services.key_service.KeyRepository") as MockRepo, \
              patch("app.services.key_service.UserRepository") as MockUserRepo, \
              patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
             repo = MockRepo.return_value
-            repo.expire_active_keys = AsyncMock(return_value=0)
-            repo.create = AsyncMock(side_effect=_populate_dates)
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4()))
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id)
             )
@@ -300,19 +309,12 @@ class TestIssueKey:
         import json
 
         user_id = uuid.uuid4()
-        mock_redis.setex = AsyncMock()
-        mock_redis.sadd = AsyncMock()
-
-        def _populate_dates(vk):
-            vk.issued_at = datetime.now(timezone.utc)
-            return vk
 
         with patch("app.services.key_service.KeyRepository") as MockRepo, \
              patch("app.services.key_service.UserRepository") as MockUserRepo, \
              patch("app.services.key_service.TeamAllowedModelRepository"):
             repo = MockRepo.return_value
-            repo.expire_active_keys = AsyncMock(return_value=0)
-            repo.create = AsyncMock(side_effect=_populate_dates)
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4()))
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id=None)
             )

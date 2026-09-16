@@ -39,7 +39,12 @@ from botocore.awsrequest import AWSRequest
 from botocore.exceptions import ClientError, ParamValidationError
 
 REGION = os.environ.get("REGION", "us-east-1")  # WebSearch connector is us-east-1 only
-GW_NAME = os.environ.get("GW_NAME", "llm-gateway-websearch")
+# ⚠️ 이미 게이트웨이를 만들어 둔 환경에서 다시 실행할 때는 `GW_NAME` 을 **그때 쓴 이름과
+#    똑같이** 넘겨야 한다. find_gateway() 가 이름 완전일치로 찾기 때문에, 이름이 다르면
+#    기존 것을 재사용하지 않고 중복 게이트웨이를 하나 더 만들고, values 의
+#    AGENTCORE_GATEWAY_URL 은 여전히 옛 호스트를 가리킨 채로 남는다(그래서 새로 만든
+#    쪽은 아무도 쓰지 않는다). 이름을 바꾸려면 values 의 URL 도 함께 갱신할 것.
+GW_NAME = os.environ.get("GW_NAME", "awsome-ai-gw-websearch")
 ROLE_NAME = os.environ.get("ROLE_NAME", "llm-gateway-dev-agentcore-websearch-gw")
 TARGET_NAME = os.environ.get("TARGET_NAME", "web-search-tool")
 CONNECTOR_ID = "web-search"
@@ -113,7 +118,7 @@ def ensure_gateway(role_arn: str, dry: bool):
         return "<dry-gateway-id>", "<dry-gateway-url>"
     r = _control().create_gateway(
         name=GW_NAME, roleArn=role_arn, protocolType="MCP", authorizerType="AWS_IAM",
-        description="Managed WebSearch for llm-gateway (Architecture C, SigV4 inbound)",
+        description="Managed WebSearch for awsome-ai-gateway (Architecture C, SigV4 inbound)",
     )
     log(f"Gateway created: {r['gatewayId']}")
     return r["gatewayId"], r["gatewayUrl"]

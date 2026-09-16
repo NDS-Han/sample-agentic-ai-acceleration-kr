@@ -38,6 +38,13 @@ packages = ["src/worker"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ⚠️ pythonpath 는 load-bearing 이다. 이게 없으면 pytest 는 venv 에 editable 설치된
+# 패키지를 import 한다 — 그 경로는 venv 를 만든 **그때의** 소스 트리이고, 체크아웃한
+# 다른 트리(릴리스 태그, git worktree, 배포용 사본)에서 `pytest` 를 돌리면 **테스트만
+# 그 트리 것이고 코드는 다른 트리 것**이 된다. 실측으로 그 상태에 빠졌다: 한 트리에서
+# 소스를 고치고 다른 트리에서 스위트를 돌려 "672 통과" 를 받았는데, 고친 코드는 한 줄도
+# 실행되지 않았다. admin-api 는 처음부터 이 줄이 있어서 무사했다.
+pythonpath = ["src"]
 markers = [
     "unit: fast unit tests with mocks (no DB/Redis required)",
     "integration: integration tests requiring Postgres + Redis",

@@ -12,6 +12,7 @@ import structlog
 from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from opentelemetry.metrics import Observation
 
 from app.config import get_settings
 from app.db import create_db_engine, create_session_factory
@@ -25,6 +26,7 @@ from app.middleware.otel import HeaderInjectorMiddleware, OTelMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.observability import GatewayMetrics, init_otel, shutdown_otel
 from app.providers.bedrock_adapter import BedrockAdapter
+from app.providers.bedrock_openai_adapter import BedrockOpenAIAdapter
 from app.providers.mantle_adapter import MantleAdapter
 from app.providers.mantle_openai_adapter import MantleOpenAIAdapter
 from app.providers.openmodel_adapter import OpenModelAdapter
@@ -46,6 +48,7 @@ from app.services.lua_loader import LuaScriptLoader
 from app.services.mantle_credentials import MantleCredentialBroker
 from app.services.rate_limit_service import set_fail_open_metric
 from app.services.routing_profile_loader import RoutingProfileLoader
+from app.services.sigv4_signer import SigV4Signer
 from app.services.tokenizer import TokenizerService
 
 logger = structlog.get_logger(__name__)
@@ -68,6 +71,34 @@ def configure_structlog(settings) -> None:
             __import__("logging").getLevelName(settings.log_level.upper())
         ),
         logger_factory=structlog.PrintLoggerFactory(),
+    )
+
+
+
+def build_body_logger(settings):
+    """설정에서 BodyLogger 를 만든다.
+
+    ⚠️ `firehose_stream_name` 이 없으면 boto3 클라이언트를 **만들지 않는다** — 그러면
+       로거는 큐에 넣고 버리는 no-op 이 되어 로컬/compose 에서 자격증명 없이도 안전하다.
+       이게 본문 수집을 막는 두 겹 잠금 중 첫 번째다(두 번째는 런타임 토글, 기본 OFF).
+    """
+    from app.services.body_logger import BodyLogger
+
+    firehose_client = None
+    s3_client = None
+    if settings.firehose_stream_name:
+        firehose_client = boto3.client("firehose", region_name=settings.aws_region)
+        s3_client = boto3.client("s3", region_name=settings.aws_region)
+    return BodyLogger(
+        firehose_client=firehose_client,
+        s3_client=s3_client,
+        stream_name=settings.firehose_stream_name,
+        bucket=settings.body_log_s3_bucket,
+        enabled=settings.body_logging_enabled,
+        max_queue=settings.body_log_max_queue,
+        batch_size=settings.body_log_batch_size,
+        flush_interval=settings.body_log_flush_interval,
+        max_record_bytes=settings.body_log_max_record_bytes,
     )
 
 
@@ -143,6 +174,13 @@ async def lifespan(app: FastAPI):
     gateway_metrics = GatewayMetrics()
     degradation_manager.set_metrics(gateway_metrics.degradation_level)
     usage_buffer.set_metrics(gateway_metrics.usage_records_dropped_total)
+    # ⚠️ observable gauge 는 콜백을 등록해야 값이 나간다. set_metrics 처럼 카운터를
+    #    넘기는 것과는 다른 메커니즘이고, 예전엔 이 한 줄이 없어서
+    #    `gateway_usage_buffer_size` 가 이름만 존재했다(시계열 0개 = 대시보드 "No data").
+    #    버퍼가 차오르는 것은 cost-recorder 경로가 막혔다는 가장 이른 신호다.
+    gateway_metrics.register_buffer_size_callback(
+        lambda _options: [Observation(usage_buffer.size)]
+    )
     retry_worker.set_metrics(gateway_metrics.background_task_errors_total)
     cost_stream_spool.set_metrics(gateway_metrics.usage_records_dropped_total)
     # rate-limit fail-open 관측성(deepdive Q50 Phase 3) — eval 예외로 집행 못한 횟수.
@@ -168,11 +206,25 @@ async def lifespan(app: FastAPI):
     provider_registry.register(ProviderType.BEDROCK_MANTLE, mantle_adapter)
 
     # 12c. Mantle OpenAI (Codex in-account) — same broker/http client, OpenAI Responses
-    # wire instead of Anthropic Messages. Codex's account == gateway IRSA account (859),
+    # wire instead of Anthropic Messages. Codex's account == gateway IRSA account (123),
     # so the broker uses the in-account credential path (routing_profiles.account_role_arn
     # IS NULL); no cross-account assume. Region (us-east-2) comes from the routing profile.
     mantle_openai_adapter = MantleOpenAIAdapter(http_client=mantle_http, broker=mantle_broker)
     provider_registry.register(ProviderType.BEDROCK_MANTLE_OPENAI, mantle_openai_adapter)
+
+    # 12c''. Bedrock RUNTIME OpenAI (GPT-5.6 via CRIS, 2026-09-03). Same OpenAI wires as
+    # 12c but the STANDARD plane: bedrock-runtime.{region}.amazonaws.com/openai, SigV4
+    # instead of a bearer, and a cross-region inference-profile model id (us./global.).
+    # Reuses mantle_http — identical traffic shape (long-lived SSE POSTs to an AWS
+    # endpoint), so one connection pool with one timeout policy serves both planes.
+    # Same STS client as the other cross-account paths; when a routing profile has no
+    # account_role_arn the signer uses the pod's own IRSA identity (in-account).
+    # Registering unconditionally is safe: nothing routes here until a model row carries
+    # provider=BEDROCK_RUNTIME_OPENAI, so this is inert until the catalogue opts in.
+    bedrock_openai_adapter = BedrockOpenAIAdapter(
+        http_client=mantle_http, signer=SigV4Signer(sts_client=sts_client)
+    )
+    provider_registry.register(ProviderType.BEDROCK_RUNTIME_OPENAI, bedrock_openai_adapter)
 
     # 12c'. Cross-account Bedrock NATIVE (claude-code → 374). Assumes the 374 role at
     # request time (no long-lived 374 keys), builds/caches a bedrock-runtime client from
@@ -203,6 +255,8 @@ async def lifespan(app: FastAPI):
             region=settings.agentcore_region,
             target_id=settings.agentcore_target_id,
             timeout=settings.agentcore_http_timeout,
+            handshake_timeout=settings.agentcore_handshake_timeout,
+            handshake_negative_ttl=settings.agentcore_handshake_negative_ttl,
         )
         logger.info(
             "agentcore_mcp_client_configured",
@@ -309,6 +363,19 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(retry_worker.run())
     await health_checker.start()
 
+    # Body logger (요청/응답 본문 → Firehose → S3). 스트림 미설정이면 no-op.
+    body_logger = build_body_logger(settings)
+    await body_logger.start()
+
+    # 본문 로깅 런타임 토글(관리자 제어, DB+Redis). 요청마다 짧은 in-process TTL 캐시로
+    # 읽는다. **기본 OFF** — 배포만으로는 수집이 시작되지 않는다.
+    from app.services.body_log_flag import BodyLogFlag
+
+    body_log_flag = BodyLogFlag(
+        ttl=settings.body_log_flag_cache_ttl,
+        default=settings.body_log_flag_default,
+    )
+
     # app.state에 저장
     app.state.settings = settings
     app.state.redis = redis
@@ -322,6 +389,14 @@ async def lifespan(app: FastAPI):
     app.state.retry_worker = retry_worker
     app.state.health_checker = health_checker
     app.state.metrics = gateway_metrics
+    app.state.body_logger = body_logger
+    app.state.body_log_flag = body_log_flag
+    # RouterService 는 라우터 모듈 3곳에서 각각 인스턴스화되므로 **클래스** 속성에 넣는다
+    # (router_service.py 의 주석 참조). 캐시 히트율은 Redis 부하와 DB 폴백 빈도를 함께
+    # 설명하는 유일한 신호다 — 히트가 떨어지면 그 다음에 오는 것은 DB 커넥션 고갈이다.
+    from app.services.router_service import RouterService as _RouterService
+
+    _RouterService.metrics = gateway_metrics
     app.state.provider_registry = provider_registry
     app.state.routing_profile_loader = RoutingProfileLoader()
     app.state.mantle_http_client = mantle_http
@@ -340,6 +415,8 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("gateway_proxy_shutting_down")
     await health_checker.stop()
+    # 큐에 남은 레코드를 flush 한다 — 종료 시 버리면 감사 기록에 구멍이 생긴다.
+    await body_logger.stop()
     await retry_worker.stop()
     # P0-②: last-chance drain of the cost-stream spool before closing Redis, so
     # records buffered during a recent blip get one final re-publish attempt.

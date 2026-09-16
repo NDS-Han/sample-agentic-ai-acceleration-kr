@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.models.notification import NotificationConfig
 
@@ -32,7 +32,16 @@ class ConfigCache:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
         self._configs: dict[str, NotificationConfig] = {}
-        self._last_loaded: float = 0.0
+        # ⚠️ "아직 로드 안 함" 을 0.0 으로 쓰면 안 된다. needs_poll() 이
+        #    `time.monotonic() - self._last_loaded` 를 보는데, monotonic 의 기준점은
+        #    임의(리눅스에서는 **부팅 시각**)다. 그래서 호스트 uptime 이 5분 미만이면
+        #    `monotonic() - 0.0 < 300` 이 되어, **한 번도 로드하지 않은 캐시가
+        #    "폴링 불필요" 라고 답한다.** 노드가 방금 뜬 직후 재시작한 파드에서는
+        #    Pub/Sub 갱신이 오기 전까지 빈 설정으로 도는 창이 생긴다.
+        #    (실측: 로컬 uptime 94,643s 라 통과 → CI 러너에서 실패. 부팅 후
+        #     5분이라는 조건 때문에 개발 환경에서는 거의 재현되지 않는다.)
+        #    None = 로드 이력 없음. 시계와 무관하게 폴링이 필요하다.
+        self._last_loaded: float | None = None
 
     async def load(self) -> None:
         """DB에서 전체 NotificationConfig를 로드하여 캐시를 갱신한다."""
@@ -54,7 +63,14 @@ class ConfigCache:
         return self._configs.get(event_type)
 
     def needs_poll(self) -> bool:
-        """마지막 로드로부터 POLL_INTERVAL(5분)이 경과했는지 확인한다."""
+        """마지막 로드로부터 POLL_INTERVAL(5분)이 경과했는지 확인한다.
+
+        로드 이력이 없으면(``_last_loaded is None``) 무조건 True — 빈 캐시로 도는 창을
+        만들지 않는다. 예전엔 sentinel 이 ``0.0`` 이라 호스트 uptime 이 5분 미만일 때
+        False 를 돌려줬다(``__init__`` 주석 참조).
+        """
+        if self._last_loaded is None:
+            return True
         return (time.monotonic() - self._last_loaded) > _POLL_INTERVAL
 
 

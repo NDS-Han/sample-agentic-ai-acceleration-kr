@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -12,7 +12,12 @@ from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
 from app.services.user_allowed_client_service import UserAllowedClientService
 from app.services.user_allowed_model_service import UserAllowedModelService
-from app.schemas.common import PaginationMeta
+from app.schemas.common import (
+    PAGE_LIMIT_DEFAULT,
+    PAGE_LIMIT_MAX,
+    PAGE_LIMIT_MIN,
+    PaginationMeta,
+)
 from app.schemas.models import AllowedModelsResponse, AllowedModelsSetRequest
 from app.schemas.users import (
     DepartmentCreateRequest,
@@ -25,6 +30,7 @@ from app.schemas.users import (
     TransferUserRequest,
     UserListResponse,
     UserResponse,
+    UserSearchResponse,
 )
 
 router = APIRouter(prefix="/admin", tags=["User & Team Management"])
@@ -178,6 +184,31 @@ async def get_users_tree(
     return await svc.get_org_tree(session)
 
 
+@router.get("/users/search", response_model=UserSearchResponse)
+async def search_users(
+    request: Request,
+    q: str,
+    limit: int = Query(default=20, ge=1, le=50),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """이메일/이름 부분 일치 사용자 검색 — admin UI 조직 트리 검색창 전용.
+
+    기존 ``GET /admin/users?email=`` 는 Cognito username **exact** 매칭(단건 조회)
+    이라 검색창에는 쓸 수 없다. 여기서는 email/display_name 을 ILIKE 부분 매칭하고,
+    활성 사용자만 반환한다.
+
+    ⚠️ 이 라우트는 ``/users/{user_id}/...`` 보다 **먼저** 선언되어야 한다. FastAPI 는
+       선언 순서대로 매칭하므로 뒤에 두면 ``"search"`` 가 ``user_id`` 로 잡혀
+       422(uuid 파싱 실패)가 난다. 아래 tests/regression 이 이 순서를 못 박는다.
+    """
+    from app.services.user_team_service import UserTeamService
+
+    svc: UserTeamService = request.app.state.user_team_service
+    items, truncated = await svc.search_users(session, term=q, limit=limit)
+    return UserSearchResponse(items=items, truncated=truncated)
+
+
 @router.get("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
 async def list_team_allowed_models(
     request: Request,
@@ -247,11 +278,14 @@ async def sync_cognito(
 
     settings = get_settings()
     if not settings.COGNITO_USER_POOL_ID:
-        from fastapi.responses import JSONResponse
-        return JSONResponse(
-            status_code=400,
-            content={"error": "COGNITO_USER_POOL_ID not configured"},
-        )
+        # ⚠️ `return JSONResponse(content={"error": "<문자열>"})` 로 쓰면 안 된다.
+        #    직접 만든 응답은 어떤 exception handler 도 볼 수 없어서 프로젝트 표준 봉투
+        #    (`{"error": {"type","code","message"}}`) 를 우회한다 — `error` 가 dict 가
+        #    아니라 문자열인 **제3의 shape** 가 되고, admin-ui 파서는 code/message 를
+        #    못 찾아 화면에 `UNKNOWN_ERROR` + "Request failed with status 400" 만 띄운다
+        #    (실측). 즉 운영자는 "Cognito 를 안 켰다"는 사실을 알 수 없다.
+        #    raise 하면 main.py 의 HTTPException 정규화 핸들러가 봉투를 씌워 준다.
+        raise HTTPException(status_code=400, detail="COGNITO_USER_POOL_ID not configured")
 
     import boto3
     cognito_client = boto3.client(
@@ -273,17 +307,23 @@ async def sync_cognito(
 def _build_cognito_sync_service():
     """COGNITO_USER_POOL_ID 확인 + boto3 cognito client 로 CognitoSyncService 생성.
 
-    미설정 시 (None, error_dict) 반환. 정상 시 (svc, None).
+    미설정 시 ``HTTPException(400)`` 을 raise 한다.
+
+    ⚠️ 예전엔 ``(None, error_dict)`` 2-튜플을 돌려주고 호출부가
+    ``return JSONResponse(status_code=400, content=err)`` 를 했다. 직접 만든 응답은 어떤
+    exception handler 도 볼 수 없어서 프로젝트 표준 봉투를 우회했고, ``error`` 가 dict 가
+    아니라 문자열인 **제3의 shape** 가 되어 admin-ui 는 `UNKNOWN_ERROR` 만 띄웠다(실측).
+    2-튜플을 없애 호출부마다 봉투를 다시 틀릴 여지 자체를 제거한다.
     """
     from app.core.config import get_settings
     from app.services.cognito_sync_service import CognitoSyncService
 
     settings = get_settings()
     if not settings.COGNITO_USER_POOL_ID:
-        return None, {"error": "COGNITO_USER_POOL_ID not configured"}
+        raise HTTPException(status_code=400, detail="COGNITO_USER_POOL_ID not configured")
     import boto3
     client = boto3.client("cognito-idp", region_name=settings.COGNITO_REGION)
-    return CognitoSyncService(client), None
+    return CognitoSyncService(client)
 
 
 @router.post("/users/sync-cognito/user/{username}")
@@ -301,11 +341,7 @@ async def sync_cognito_user(
     동기 처리(단일 사용자 ~sub-second). 전역 reconciliation 미수행.
     svc- 서비스 토큰 또는 admin JWT 로 호출 가능(require_admin).
     """
-    from fastapi.responses import JSONResponse
-
-    svc, err = _build_cognito_sync_service()
-    if err is not None:
-        return JSONResponse(status_code=400, content=err)
+    svc = _build_cognito_sync_service()
     result = await svc.sync_user(session, username)
     return {
         "username": username,
@@ -324,11 +360,7 @@ async def sync_cognito_group(
     session: AsyncSession = Depends(get_db_session),
 ):
     """단일 그룹만 동기화: 팀 확보 + 그 그룹 멤버 upsert. 전역 정리 미수행."""
-    from fastapi.responses import JSONResponse
-
-    svc, err = _build_cognito_sync_service()
-    if err is not None:
-        return JSONResponse(status_code=400, content=err)
+    svc = _build_cognito_sync_service()
     result = await svc.sync_group(session, groupname)
     return {
         "groupname": groupname,
@@ -347,7 +379,12 @@ async def list_users(
     is_active: bool | None = None,
     email: str | None = None,
     cursor: str | None = None,
-    limit: int = 50,
+    limit: int = Query(
+        PAGE_LIMIT_DEFAULT,
+        ge=PAGE_LIMIT_MIN,
+        le=PAGE_LIMIT_MAX,
+        description="페이지 크기. 경계를 벗어나면 422 — 예전엔 무제한이라 ?limit=1000000 이 테이블 전체를 끌어왔고 ?limit=0/-1 은 PostgreSQL 이 거부해 500 이 됐다.",
+    ),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -411,6 +448,9 @@ async def set_allowed_clients(
     except LookupError as e:
         raise HTTPException(status_code=404, detail=str(e))
     await session.commit()
+    # 커밋 **후** 무효화 — DEL→commit 창에 들어온 게이트웨이 요청이 옛(느슨한) 정책을
+    # 다시 캐시하면 안 된다. allowed-models 경로와 같은 순서다(:494).
+    await svc.invalidate_user_vk_cache(user_id)
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
 
@@ -428,6 +468,8 @@ async def clear_allowed_clients(
     )
     await svc.clear(user_id, admin.user_id)
     await session.commit()
+    # 커밋 후 무효화 — set 경로와 같은 이유.
+    await svc.invalidate_user_vk_cache(user_id)
 
 
 # ── per-USER model allow-list (overrides team_allowed_models) ────────────────

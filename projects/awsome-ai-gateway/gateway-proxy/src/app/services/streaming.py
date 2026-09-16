@@ -10,6 +10,8 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 import structlog
 from starlette.requests import Request
 
+from app.config import get_settings
+from app.providers.openai_usage import extract_chat_usage, extract_responses_usage
 from app.schemas.domain import TokenUsage
 
 logger = structlog.get_logger(__name__)
@@ -20,14 +22,50 @@ OnUsage = Callable[[TokenUsage, float | None], Awaitable[None]] | None
 # None 반환 시 추정 불가 (cost_recorder는 0 토큰 + estimated=True로 기록).
 TokenizerHook = Callable[[str], Awaitable[int | None]] | None
 
+#: 스트림 종료 훅 — ``(누적된 원본 SSE 프레임 전문, status)``.
+#: status 는 ``"success"`` 또는 ``"partial"``(disconnect / timeout / 중간 예외).
+#:
+#: ⚠️ 이 훅이 설정되면 제너레이터가 **모든 프레임을 메모리에 누적한다.** 동시 스트림 수 ×
+#:    응답 크기만큼 메모리를 쓴다. 그래서 훅이 None 이면 한 바이트도 쌓지 않는다 —
+#:    본문 로깅이 꺼진 상태의 비용이 0 이어야 한다.
+OnComplete = Callable[[str, str], Awaitable[None]] | None
+
+
+def _resolve_timeouts(
+    idle_timeout: float | None, drain_timeout: float | None
+) -> tuple[float, float]:
+    """SSE 타임아웃의 **단일 진실원**: 인자 미지정(None) 시 Settings 에서 해석.
+
+    과거엔 각 헬퍼의 기본값이 하드코딩 60.0/30.0 이었고 **모든 호출부가 인자를 넘기지
+    않아** `settings.stream_idle_timeout` / `stream_disconnect_drain_timeout` 이 완전한
+    **죽은 설정**이었다 — 차트/env 로 어떤 값을 주입해도 런타임은 60s 로 동작했고,
+    그래서 Opus extended thinking 요청이 정상 생성 중에 끊겼다.
+
+    호출부는 5곳(routers/messages.py, routers/openai_compat.py×2,
+    services/web_search_loop.py×3 — pass-through 경로 포함)이라 "호출부마다 인자 추가"
+    방식은 새 호출부가 하나 생기는 순간 같은 회귀가 재발한다. 그래서 기본값 자체를
+    설정에서 끌어오게 만들어 구조적으로 막는다.
+
+    인자를 명시하면 그대로 우선한다(단위테스트가 idle_timeout=0.2 로 타임아웃 경로를
+    강제하는 것처럼). 둘 다 명시된 경우엔 get_settings() 를 아예 호출하지 않는다.
+    """
+    if idle_timeout is not None and drain_timeout is not None:
+        return idle_timeout, drain_timeout
+    s = get_settings()
+    return (
+        float(s.stream_idle_timeout) if idle_timeout is None else idle_timeout,
+        float(s.stream_disconnect_drain_timeout) if drain_timeout is None else drain_timeout,
+    )
+
 
 async def bedrock_anthropic_sse_stream(
     request: Request,
     chunk_iter: AsyncIterator[bytes],
     on_usage: OnUsage = None,
-    idle_timeout: float = 60.0,
-    drain_timeout: float = 30.0,
+    idle_timeout: float | None = None,
+    drain_timeout: float | None = None,
     tokenizer_hook: TokenizerHook = None,
+    on_complete: OnComplete = None,
 ) -> AsyncIterator[bytes]:
     """Bedrock EventStream chunks → Anthropic SSE-formatted bytes.
 
@@ -39,12 +77,14 @@ async def bedrock_anthropic_sse_stream(
     Edge case handling:
     - Client disconnect: stop yielding; drain remaining chunks in a
       background task so usage is still recorded (best-effort).
-    - Idle timeout per chunk (default 60s): emit `event: error` SSE and
-      return. Prevents hung upstream streams from pinning the connection.
+    - Idle timeout per chunk (기본 = settings.stream_idle_timeout): emit
+      `event: error` SSE and return. Prevents hung upstream streams from
+      pinning the connection.
     - Upstream exception mid-stream: emit `event: error` SSE with the
       error message and return gracefully (do not propagate).
     - Malformed JSON chunk: passthrough as `data: <raw>\\n\\n` (no crash).
     """
+    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
     counters = {
         "input_tokens": 0,
         "output_tokens": 0,
@@ -55,6 +95,14 @@ async def bedrock_anthropic_sse_stream(
     first_token_time: float | None = None
     iterator = chunk_iter.__aiter__()
     client_disconnected = False
+    # 과금 멱등 가드. 종료 경로가 4개(정상/idle timeout/upstream 예외/클라이언트 끊김
+    # → 백그라운드 drain)라, 가드 없이 각 경로에서 finalize 를 호출하면 **이중 과금**이
+    # 된다. 반대로 timeout/예외 경로에서 호출을 빼면 그때까지 생성된 토큰이 **유실**된다
+    # (과거 동작: 두 경로가 함수 말미의 _fire_on_usage 를 건너뛰는 return 이었다).
+    usage_fired = False
+    # 본문 로깅용 원본 SSE 프레임 누적. on_complete 가 없으면 아무것도 쌓지 않는다.
+    accumulated_frames: list[str] = []
+    complete_fired = False
 
     def _format(chunk: bytes) -> bytes:
         """Parse chunk, update counters, return SSE-formatted bytes."""
@@ -139,15 +187,35 @@ async def bedrock_anthropic_sse_stream(
             estimated=True,
         )
 
+    async def _fire_on_complete(status: str) -> None:
+        """스트림 종료를 **정확히 1회** 알린다(complete_fired 가드).
+
+        ⚠️ 예외를 밖으로 내지 않는다. 이 훅의 소비자는 본문 로깅(감사)이고, 감사 실패로
+           사용자의 스트림을 깨뜨리는 것은 거래가 성립하지 않는다.
+        """
+        nonlocal complete_fired
+        if on_complete is None or complete_fired:
+            return
+        complete_fired = True
+        try:
+            await on_complete("".join(accumulated_frames), status)
+        except Exception:
+            logger.exception("on_complete_callback_failed")
+
     async def _fire_on_usage() -> None:
         """KI-08: usage 미추출 시에도 빈 TokenUsage로 콜백 실행.
 
         라우터가 TPM 예약을 설정한 경우, 빈 usage로도 콜백이 돌아가야
         cost_recorder가 ``settle_tpm(actual=0)``을 호출해 예약 해제함.
         누적 텍스트가 있으면 tokenizer로 output_tokens 역산 시도.
+
+        **정확히 1회만** 실행된다(usage_fired 가드) — 위 4개 종료 경로 중
+        어디로 빠져도 과금이 유실되지도, 중복되지도 않게.
         """
-        if not on_usage:
+        nonlocal usage_fired
+        if not on_usage or usage_fired:
             return
+        usage_fired = True
         base = _current_usage()
         estimated = await _estimate_if_needed(base)
         usage = estimated or base or TokenUsage(
@@ -174,6 +242,7 @@ async def bedrock_anthropic_sse_stream(
             logger.exception("stream_drain_error")
         finally:
             await _fire_on_usage()
+            await _fire_on_complete("partial")
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -187,6 +256,11 @@ async def bedrock_anthropic_sse_stream(
                 break
             except TimeoutError:
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
+                # ⚠️ yield 보다 **먼저** 확정한다. 클라이언트가 이미 끊긴 상태면 아래
+                # yield 가 GeneratorExit 을 던져 except 절로 빠지므로, 뒤에 두면
+                # 이 경로의 과금이 다시 유실된다.
+                await _fire_on_usage()
+                await _fire_on_complete("partial")
                 err = {
                     "type": "error",
                     "error": {
@@ -197,7 +271,10 @@ async def bedrock_anthropic_sse_stream(
                 yield f"event: error\ndata: {json.dumps(err)}\n\n".encode()
                 return
 
-            yield _format(chunk)
+            _frame = _format(chunk)
+            if on_complete is not None:
+                accumulated_frames.append(_frame.decode("utf-8", errors="replace"))
+            yield _frame
 
     except (asyncio.CancelledError, GeneratorExit):
         # Starlette client-disconnect / upstream cancellation. Spawn background
@@ -209,6 +286,9 @@ async def bedrock_anthropic_sse_stream(
 
     except Exception as exc:
         logger.exception("bedrock_stream_proxy_error")
+        # timeout 경로와 동일 이유로 yield 앞에서 확정.
+        await _fire_on_usage()
+        await _fire_on_complete("partial")
         err = {
             "type": "error",
             "error": {"type": "stream_error", "message": str(exc) or "stream_error"},
@@ -218,15 +298,18 @@ async def bedrock_anthropic_sse_stream(
 
     if not client_disconnected:
         await _fire_on_usage()
+        # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
+        await _fire_on_complete("success")
 
 
 async def openai_sse_stream(
     request: Request,
     chunk_iter: AsyncIterator[bytes],
     on_usage: OnUsage = None,
-    idle_timeout: float = 60.0,
-    drain_timeout: float = 30.0,
+    idle_timeout: float | None = None,
+    drain_timeout: float | None = None,
     tokenizer_hook: TokenizerHook = None,
+    on_complete: OnComplete = None,
 ) -> AsyncIterator[bytes]:
     """OpenAI-compatible SSE chunks → passthrough bytes (no re-formatting).
 
@@ -237,15 +320,20 @@ async def openai_sse_stream(
 
     Edge case handling mirrors `bedrock_anthropic_sse_stream`:
     - Client disconnect: stop, background-drain so usage is still recorded.
-    - Idle timeout per chunk (default 60s): emit an OpenAI-shaped error
-      chunk (`data: {"error":{"type":"timeout_error",...}}\\n\\n`) and return.
+    - Idle timeout per chunk (기본 = settings.stream_idle_timeout): emit an
+      OpenAI-shaped error chunk (`data: {"error":{"type":"timeout_error",...}}\\n\\n`)
+      and return.
     - Upstream exception mid-stream: same OpenAI-shaped error chunk path.
     """
+    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
     latest_usage: TokenUsage | None = None
     accumulated_text: list[str] = []  # KI-08: delta.content 누적
     first_token_time: float | None = None
     iterator = chunk_iter.__aiter__()
     client_disconnected = False
+    usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
+    accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
+    complete_fired = False
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
@@ -278,11 +366,12 @@ async def openai_sse_stream(
                         first_token_time = time.monotonic()
                     accumulated_text.append(c)
             if u := data.get("usage"):
-                found = TokenUsage(
-                    input_tokens=u.get("prompt_tokens", 0),
-                    output_tokens=u.get("completion_tokens", 0),
-                    total_tokens=u.get("total_tokens", 0),
-                )
+                # Shared Chat-wire parser: splits the cache-inclusive prompt count into
+                # exclusive TokenUsage buckets and picks up reasoning_tokens. vLLM sends
+                # none of the details sub-objects, so its behaviour is byte-identical to
+                # the previous three-field construction; GPT-5.6 on either Bedrock plane
+                # sends them and would otherwise be billed as if nothing were cached.
+                found = extract_chat_usage(u)
         return found
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
@@ -307,13 +396,31 @@ async def openai_sse_stream(
             estimated=True,
         )
 
+    async def _fire_on_complete(status: str) -> None:
+        """스트림 종료를 **정확히 1회** 알린다(complete_fired 가드).
+
+        ⚠️ 예외를 밖으로 내지 않는다. 이 훅의 소비자는 본문 로깅(감사)이고, 감사 실패로
+           사용자의 스트림을 깨뜨리는 것은 거래가 성립하지 않는다.
+        """
+        nonlocal complete_fired
+        if on_complete is None or complete_fired:
+            return
+        complete_fired = True
+        try:
+            await on_complete("".join(accumulated_frames), status)
+        except Exception:
+            logger.exception("on_complete_callback_failed")
+
     async def _fire_on_usage() -> None:
         """KI-08: latest_usage 없어도 빈 TokenUsage로 콜백 실행 (TPM 예약 해제용).
 
         누적 텍스트가 있으면 tokenizer로 output_tokens 역산 시도.
+        **정확히 1회만** 실행된다(usage_fired 가드).
         """
-        if not on_usage:
+        nonlocal usage_fired
+        if not on_usage or usage_fired:
             return
+        usage_fired = True
         estimated = await _estimate_if_needed(latest_usage)
         usage = estimated or latest_usage or TokenUsage(
             input_tokens=0,
@@ -341,6 +448,7 @@ async def openai_sse_stream(
             logger.exception("stream_drain_error")
         finally:
             await _fire_on_usage()
+            await _fire_on_complete("partial")
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -354,6 +462,9 @@ async def openai_sse_stream(
                 break
             except TimeoutError:
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
+                # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                await _fire_on_usage()
+                await _fire_on_complete("partial")
                 yield _emit_error_chunk(
                     "timeout_error", f"upstream idle timeout after {idle_timeout}s"
                 )
@@ -361,6 +472,12 @@ async def openai_sse_stream(
 
             if u := _scan_usage(chunk):
                 latest_usage = u
+            if on_complete is not None:
+                accumulated_frames.append(
+                    chunk.decode("utf-8", errors="replace")
+                    if isinstance(chunk, bytes)
+                    else str(chunk)
+                )
             yield chunk
 
     except (asyncio.CancelledError, GeneratorExit):
@@ -373,19 +490,25 @@ async def openai_sse_stream(
 
     except Exception as exc:
         logger.exception("openai_stream_proxy_error")
+        await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
+        await _fire_on_complete("partial")
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 
     if not client_disconnected:
         await _fire_on_usage()
+        # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
+        await _fire_on_complete("success")
 
 
 async def responses_sse_stream(
     request: Request,
     chunk_iter: AsyncIterator[bytes],
     on_usage: OnUsage = None,
-    idle_timeout: float = 60.0,
-    drain_timeout: float = 30.0,
+    idle_timeout: float | None = None,
+    drain_timeout: float | None = None,
+    on_complete: OnComplete = None,
+    tokenizer_hook: TokenizerHook = None,
 ) -> AsyncIterator[bytes]:
     """OpenAI **Responses API** → re-framed SSE (`event: {type}\\ndata: {json}\\n\\n`).
 
@@ -400,32 +523,32 @@ async def responses_sse_stream(
     `response.incomplete`/`response.failed` may carry usage or null. Text deltas arrive
     as `response.output_text.delta`. reasoning_tokens is a submetric (already inside
     output_tokens) — never re-added to total/cost.
+
+    idle/drain 타임아웃 기본값은 Settings 에서 해석된다(_resolve_timeouts).
     """
+    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
     latest_usage: TokenUsage | None = None
     accumulated_text: list[str] = []
     first_token_time: float | None = None
     iterator = chunk_iter.__aiter__()
     client_disconnected = False
+    usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
+    accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
+    complete_fired = False
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
         return f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
 
     def _usage_from_response(resp: dict) -> TokenUsage | None:
-        u = resp.get("usage")
-        if not isinstance(u, dict):
+        # Same parser as the non-streaming adapters (providers/openai_usage) — that is
+        # what guarantees a prompt bills identically streamed vs non-streamed, on both the
+        # Mantle and the bedrock-runtime plane. None (not a zero TokenUsage) when the
+        # event carries no usage object, so a usage-less `response.incomplete` cannot
+        # erase a good reading from an earlier terminal event.
+        if not isinstance(resp.get("usage"), dict):
             return None
-        in_details = u.get("input_tokens_details") or {}
-        out_details = u.get("output_tokens_details") or {}
-        it = int(u.get("input_tokens", 0) or 0)
-        ot = int(u.get("output_tokens", 0) or 0)
-        return TokenUsage(
-            input_tokens=it,
-            output_tokens=ot,
-            total_tokens=int(u.get("total_tokens", 0) or 0) or (it + ot),
-            cache_read_input_tokens=int(in_details.get("cached_tokens", 0) or 0),
-            reasoning_tokens=int(out_details.get("reasoning_tokens", 0) or 0),
-        )
+        return extract_responses_usage(resp)
 
     def _process(chunk: bytes) -> bytes:
         """Parse a RAW JSON event chunk → update usage/text, return re-framed SSE bytes.
@@ -455,10 +578,71 @@ async def responses_sse_stream(
         # Non-dict JSON (unexpected) — re-frame defensively.
         return f"data: {json.dumps(data)}\n\n".encode()
 
-    async def _fire_on_usage() -> None:
-        if not on_usage:
+    async def _fire_on_complete(status: str) -> None:
+        """스트림 종료를 **정확히 1회** 알린다(complete_fired 가드).
+
+        ⚠️ 예외를 밖으로 내지 않는다. 이 훅의 소비자는 본문 로깅(감사)이고, 감사 실패로
+           사용자의 스트림을 깨뜨리는 것은 거래가 성립하지 않는다.
+        """
+        nonlocal complete_fired
+        if on_complete is None or complete_fired:
             return
+        complete_fired = True
+        try:
+            await on_complete("".join(accumulated_frames), status)
+        except Exception:
+            logger.exception("on_complete_callback_failed")
+
+    async def _estimate_output_tokens() -> TokenUsage | None:
+        """KI-08 역산 — 이 방언에만 없던 것.
+
+        ⚠️ 왜 필요한가. Responses 방언은 usage 를 **종결 이벤트(response.completed)
+           안에서만** 준다. 그래서 상류가 idle timeout 이나 오류로 그 이벤트 전에 끊기면
+           ``latest_usage`` 가 None 이고, ``TokenUsage()``(전부 0)로 발화한다.
+           ``cost_recorder.finalize`` 는 total/input/output 이 모두 0 이면 TPM 예약만
+           돌려주고 **usage_logs 행을 아예 만들지 않은 채** 리턴한다 — provider 가 이미
+           AWS 에 청구한 토큰이 우리 쪽에는 존재하지 않게 된다.
+
+           같은 요청 형태가 ``/v1/messages`` 와 ``/v1/chat/completions`` 에서는 역산되어
+           기록된다. 즉 이 누락은 **방언별**이라 집계 대시보드에서는 보이지 않는다.
+
+        ⚠️ input 과 cache 버킷을 **앞으로 이어 나른다.** response.incomplete/failed 는
+           input+cache 를 담고 output 만 0 인 경우가 있어서, output 만으로 TokenUsage 를
+           새로 만들면 캐시 버킷이 지워져 지금보다 더 과소청구가 된다.
+        """
+        if not tokenizer_hook or not accumulated_text:
+            return None
+        base = latest_usage or TokenUsage()
+        if base.output_tokens > 0:
+            return None  # 실제 usage 를 받았다 — 역산 불필요
+        try:
+            estimated = await tokenizer_hook("".join(accumulated_text))
+        except Exception:
+            logger.warning("tokenizer_hook_failed")
+            return None
+        if not estimated or estimated <= 0:
+            return None
+        # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다.** TokenUsage 에는 output 과 무관한 필드가
+        #    더 있다(web_search_count — 웹서치 귀속/과금, cache_ttl_1h — 캐시 단가 분기).
+        #    필드를 열거해 새로 만들면 나중에 필드가 추가될 때 조용히 유실된다.
+        return base.model_copy(
+            update={
+                "output_tokens": estimated,
+                "total_tokens": base.input_tokens + estimated,
+                "estimated": True,
+            }
+        )
+
+    async def _fire_on_usage() -> None:
+        """**정확히 1회만** 실행된다(usage_fired 가드)."""
+        nonlocal usage_fired
+        if not on_usage or usage_fired:
+            return
+        usage_fired = True
         usage = latest_usage or TokenUsage()
+        estimated_usage = await _estimate_output_tokens()
+        if estimated_usage is not None:
+            usage = estimated_usage
         try:
             await on_usage(usage, first_token_time)
         except Exception:
@@ -476,6 +660,7 @@ async def responses_sse_stream(
             logger.exception("responses_stream_drain_error")
         finally:
             await _fire_on_usage()
+            await _fire_on_complete("partial")
 
     try:
         while True:
@@ -485,12 +670,22 @@ async def responses_sse_stream(
                 break
             except TimeoutError:
                 logger.warning("responses_stream_idle_timeout", idle_timeout=idle_timeout)
+                # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                await _fire_on_usage()
+                await _fire_on_complete("partial")
                 yield _emit_error_chunk(
                     "timeout_error", f"upstream idle timeout after {idle_timeout}s"
                 )
                 return
 
-            yield _process(chunk)
+            _frame = _process(chunk)
+            if on_complete is not None:
+                accumulated_frames.append(
+                    _frame.decode("utf-8", errors="replace")
+                    if isinstance(_frame, bytes)
+                    else str(_frame)
+                )
+            yield _frame
 
     except (asyncio.CancelledError, GeneratorExit):
         logger.info("responses_stream_cancelled")
@@ -500,25 +695,34 @@ async def responses_sse_stream(
 
     except Exception as exc:
         logger.exception("responses_stream_proxy_error")
+        await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
+        await _fire_on_complete("partial")
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 
     if not client_disconnected:
         await _fire_on_usage()
+        # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
+        await _fire_on_complete("success")
 
 
 async def stream_response(
     request: Request,
     chunk_iterator: AsyncIterator[bytes],
     on_usage: callable,
-    idle_timeout: float = 60.0,
-    drain_timeout: float = 30.0,
+    idle_timeout: float | None = None,
+    drain_timeout: float | None = None,
 ) -> AsyncIterator[bytes]:
     """스트리밍 응답 프록시.
 
     클라이언트에 chunk를 yield하며, 연결이 끊어지면 백그라운드에서
     스트림을 계속 소비하여 usage를 기록한다.
+
+    ⚠️ 현재 **호출부 없음**(dialect 별 전용 헬퍼가 대체). 그래도 타임아웃 기본값을
+    Settings 에서 해석하도록 맞춰 둔다 — 나중에 누가 이 함수를 쓰기 시작할 때
+    하드코딩 60s 로 되돌아가는 회귀를 원천 차단하기 위함.
     """
+    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
     usage: TokenUsage | None = None
     client_disconnected = False
 

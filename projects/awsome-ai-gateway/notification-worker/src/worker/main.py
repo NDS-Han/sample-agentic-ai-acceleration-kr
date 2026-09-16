@@ -32,8 +32,8 @@ from worker.listeners.config_reload_task import ConfigReloadTask
 from worker.listeners.health_check_task import HealthCheckTask
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.redis_client import create_redis_client, set_redis_client
-from worker.senders.factory import create_email_sender
 from worker.schemas.events import EventType, NotificationEvent
+from worker.senders.factory import create_email_sender
 from worker.services.config_cache import get_config_cache, init_config_cache
 from worker.services.notification_buffer import (
     get_notification_buffer,

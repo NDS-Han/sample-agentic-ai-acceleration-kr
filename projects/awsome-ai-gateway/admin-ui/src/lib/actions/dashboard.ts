@@ -5,6 +5,7 @@
 
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
+import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
 
 export interface DashboardSummary {
   period: string;
@@ -62,10 +63,10 @@ export interface AvailablePeriods {
  * 빈 DB / 엔드포인트 미배포(404) 시 현재 달력월로 graceful fallback.
  */
 export async function fetchAvailablePeriods(): Promise<AvailablePeriods> {
-  const now = new Date();
-  const ym = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
-  const thisMonth = ym(now);
-  const lastMonth = ym(new Date(now.getFullYear(), now.getMonth() - 1, 1));
+  // KST 기준 — 백엔드 집계 버킷과 일치시킨다. pod 로컬(UTC)로 계산하면 매월 1일
+  // 00:00~09:00 KST 사이에 "이번 달" 버튼이 지난 달을 가리켰다.
+  const thisMonth = currentCalendarMonth();
+  const lastMonth = monthsAgo(1);
   try {
     const res = await withRetry(() =>
       adminAPI.get<{ periods: string[] }>('/admin/dashboard/periods'),
@@ -86,6 +87,48 @@ export async function fetchAvailablePeriods(): Promise<AvailablePeriods> {
     console.error('[fetchAvailablePeriods] /admin/dashboard/periods 실패 — 현재월로 fallback:', err);
     return { periods: [thisMonth, lastMonth], latest: thisMonth };
   }
+}
+
+/**
+ * 대시보드 상단 KPI 카드 일괄 응답.
+ *
+ * ⚠️ `null` 은 "값이 0" 이 아니라 **"알 수 없음"** 이다. 반드시 '—' 로 렌더할 것 —
+ * 0 으로 접으면 "활성 키 0개"·"예산 미사용" 같은 거짓 사실을 화면에 쓰게 된다.
+ * (`budget_utilization_pct` 는 한도 합계가 0 일 때 null 이다.)
+ */
+export interface DashboardKPI {
+  period: string;
+  total_requests: number;
+  total_tokens: number;
+  total_cost_usd: number;
+  active_users: number;
+  cost_per_user_usd: number;
+  budget_used_usd: number;
+  budget_limit_usd: number;
+  budget_utilization_pct: number | null;
+  active_keys: number;
+  active_models: number;
+}
+
+/**
+ * KPI 카드용 단일 호출.
+ *
+ * 예전에는 이 화면 하나를 그리려고 `/admin/budgets/summary`, `/admin/keys/count`,
+ * `/admin/models`, `/admin/dashboard/summary` 4개를 동시에 불렀다. 그중
+ * `/admin/budgets/summary` 가 예산 config 하나당 Redis GET + SQL SUM 을 순차로 돌려
+ * 사용자 수에 비례해 느려지는 병목이었다. 카드에 필요한 건 합계 몇 개뿐이므로
+ * 백엔드에서 SQL 집계 한 번으로 낸다.
+ */
+export async function fetchDashboardKPI(period?: string, client?: string): Promise<DashboardKPI> {
+  const params: Record<string, string> = {};
+  if (period) params.period = period;
+  if (client && client !== 'all') params.client = client;
+  return withRetry(() =>
+    adminAPI.get<DashboardKPI>(
+      '/admin/dashboard/kpi',
+      Object.keys(params).length ? params : undefined,
+    ),
+  );
 }
 
 export async function fetchDashboardSummary(period?: string, client?: string): Promise<DashboardSummary> {

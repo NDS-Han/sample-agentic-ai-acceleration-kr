@@ -64,6 +64,8 @@ class ModelService:
             status=ModelStatus.ACTIVE,
             description=data.description,
             display_name=data.display_name,
+            # None = 제한 없음(하위호환 기본값), [] = 허용 앱 없음, 목록 = 그 앱만.
+            allowed_clients=data.allowed_clients,
             created_by=actor.user_id,
         )
         await repo.create_model(model)
@@ -120,6 +122,26 @@ class ModelService:
         model = await repo.update_model(alias, **update_kwargs)
         if model is None:
             raise NotFoundError("ModelAlias", alias)
+
+        # ── allowed_clients 의 "명시적 null = 제한 해제" ──
+        #
+        # 위 필터(`if v is not None`)는 이 저장소의 관례다: null 은 "생략" 과 같이
+        # 취급해 값을 유지한다. 그런데 allowed_clients 는 그 관례에서 **한 칸 더**
+        # 필요하다. canonical 의미가 `None`=제한 없음 / `[]`=허용 앱 없음 이므로,
+        # null 을 필터로 버리면 **한 번 목록이 박힌 모델을 "제한 없음" 으로 되돌릴
+        # API 가 사라진다.** 그러면 콘솔은 그 목적으로 `[]` 를 보낼 수밖에 없고,
+        # `[]` 는 전면 거부이므로 "제한 해제" 버튼이 그 모델을 통째로 막는다.
+        #
+        # pydantic 의 `model_fields_set` 이 "키를 안 보냄" 과 "null 을 보냄" 을
+        # 구별해 주므로, **명시적 null 만** 해제로 취급한다.
+        #
+        # ⚠️ 다른 nullable 필드(description / display_name / endpoint_url)는 오늘의
+        #    "null = 무시" 동작을 그대로 둔다. 그 셋까지 바꾸면 null 을 "변경 안 함"
+        #    으로 보내던 기존 호출자의 동작이 조용히 바뀐다 — 별건으로 다뤄야 한다.
+        if "allowed_clients" in data.model_fields_set and data.allowed_clients is None:
+            model.allowed_clients = None
+            await session.flush()
+            update_kwargs["allowed_clients"] = None
 
         pricing = await repo.get_current_pricing(alias)
 
@@ -377,6 +399,9 @@ class ModelService:
             endpoint_url=model.endpoint_url,
             api_format=model.api_format,
             status=model.status.value,
+            # 3-상태를 그대로 노출한다 — [] 를 None 으로 뭉개면 운영자가 자기가 만든
+            # 전면 거부를 화면에서 볼 수 없다.
+            allowed_clients=model.allowed_clients,
             description=model.description,
             display_name=model.display_name,
             current_pricing=pricing_resp,

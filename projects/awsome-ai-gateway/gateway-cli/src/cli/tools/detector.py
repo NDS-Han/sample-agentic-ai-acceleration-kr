@@ -72,10 +72,18 @@ DETECTION_RULES: list[ToolDetectionRule] = [
     ),
 ]
 
+# ⚠️ 값이 함수 객체가 아니라 람다인 것은 의도적이다. 함수 객체를 그대로 담으면
+# 이 dict 가 import 시점의 객체를 붙잡아버려서, 테스트가
+# `patch("cli.tools.detector._claude_code_paths", ...)` 로 모듈 속성을 바꿔도
+# detect_tools 는 여전히 원본을 호출한다 — 패치가 조용한 no-op 이 되고 테스트는
+# 개발자 머신의 실제 `~/.claude/settings.json` 을 읽는다(실제로 4개 테스트가
+# 그렇게 깨져 있었고, 1개는 그 파일이 마침 존재해서 '우연히' 통과했다).
+# 람다로 감싸면 호출 시점에 모듈 전역을 다시 찾으므로 패치가 정상 동작한다.
+# 런타임 동작은 완전히 동일하다.
 _PATH_RESOLVERS: dict[ToolType, callable] = {
-    ToolType.CLAUDE_CODE: _claude_code_paths,
-    ToolType.OPENCODE: _opencode_paths,
-    ToolType.CLINE: _cline_paths,
+    ToolType.CLAUDE_CODE: lambda: _claude_code_paths(),
+    ToolType.OPENCODE: lambda: _opencode_paths(),
+    ToolType.CLINE: lambda: _cline_paths(),
 }
 
 _DISPLAY_NAMES: dict[ToolType, str] = {

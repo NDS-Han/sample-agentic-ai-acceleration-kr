@@ -85,19 +85,29 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     flusher = BatchFlusher(session_factory=session_factory, redis=redis)
     await flusher.flush(entries)
 
-    # 3 session.execute 호출: INSERT usage_logs + UPSERT user budget + UPSERT team budget
-    assert session.execute.await_count == 3
+    # 4 session.execute 호출: 재처리 필터 SELECT + INSERT usage_logs
+    # + UPSERT user budget + UPSERT team budget
+    #
+    # ⚠️ 첫 호출이 재처리 필터여야 한다. budget_usages 는 **가산** UPSERT 라, 재처리된
+    #    entry 를 걸러내지 않으면 사용자의 기록 사용액이 영구히 두 배가 된다
+    #    (batch_flusher._filter_replays 주석 참조). 개수만 세면 그 SELECT 가 뒤로 밀려
+    #    무의미해진 것을 잡지 못하므로 순서를 함께 못 박는다.
+    assert session.execute.await_count == 4
     assert session.commit.await_count == 1
+    replay_sql = str(session.execute.await_args_list[0].args[0]).lower()
+    assert "from usage.usage_logs" in replay_sql and "request_id" in replay_sql, (
+        f"첫 호출이 재처리 필터 SELECT 가 아니다: {replay_sql[:120]}"
+    )
 
-    # 2번째 호출 = user UPSERT — 합산된 cost (0.30)
-    user_call = session.execute.await_args_list[1]
+    # 3번째 호출 = user UPSERT — 합산된 cost (0.30)
+    user_call = session.execute.await_args_list[2]
     user_params = user_call.args[1]
     assert len(user_params) == 1  # 단일 (user, period) 그룹
     assert user_params[0]["scope"] == "USER"
     assert user_params[0]["cost"] == "0.30"
 
-    # 3번째 호출 = team UPSERT
-    team_call = session.execute.await_args_list[2]
+    # 4번째 호출 = team UPSERT
+    team_call = session.execute.await_args_list[3]
     team_params = team_call.args[1]
     assert team_params[0]["scope"] == "TEAM"
     assert team_params[0]["cost"] == "0.30"

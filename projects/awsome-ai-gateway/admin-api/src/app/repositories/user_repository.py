@@ -12,6 +12,20 @@ from sqlalchemy.orm import lazyload, selectinload
 from app.models.auth import Department, Organization, Team, User, UserRole
 
 
+def _escape_like(term: str) -> str:
+    """LIKE/ILIKE 와일드카드를 리터럴로 이스케이프.
+
+    ⚠️ 이스케이프가 없으면 사용자가 ``%`` 한 글자를 치는 순간 **전체 사용자**가
+       매칭된다 — 의도치 않은 전량 스캔이고 결과도 무의미하다. ``_`` 는 임의의 한
+       글자라 조용히 오탐을 만든다.
+
+    ``\\`` 자체가 이스케이프 문자이므로 **먼저** 치환해야 한다. 순서를 바꾸면
+    ``\\%`` 를 ``\\\\%`` 로 만들지 못해 이스케이프가 풀린다.
+    호출부는 ``ilike(..., escape="\\")`` 를 반드시 함께 지정한다.
+    """
+    return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
 class UserRepository:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
@@ -183,6 +197,58 @@ class UserRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def search_users(
+        self,
+        *,
+        term: str,
+        is_active: bool | None = True,
+        limit: int = 20,
+    ) -> list[tuple[uuid.UUID, str, str, UserRole, uuid.UUID | None, str | None]]:
+        """이메일/이름 부분 일치 검색. admin UI 조직 트리의 검색창 전용.
+
+        ``list_users`` 를 재사용하지 않는 이유: ``select(User)`` 는 ORM 엔티티를
+        만들면서 ``User.team`` 과 ``User.virtual_keys`` 를 eager-load 한다(둘 다
+        모델 레벨 ``lazy="selectin"``, app/models/auth.py:127,129). 검색은 타이핑
+        **한 글자마다** 호출되는 경로라, 결과 20건에 대해 팀과 VK 를 끌어오는 추가
+        쿼리가 매번 붙는다. 그래서 필요한 컬럼만 SELECT 하고 팀명은 LEFT JOIN 으로
+        한 번에 가져온다.
+
+        반환: ``(id, email, display_name, role, team_id, team_name)`` 튜플.
+
+        정렬은 prefix 일치를 먼저 노출한다 — "kim" 을 치면 ``kim@…`` 이
+        ``akim@…`` 보다 위에 온다. 그 다음 email 사전순으로 안정 정렬한다(같은
+        검색어에 대해 결과 순서가 요청마다 흔들리면 키보드 순회가 어긋난다).
+        """
+        escaped = _escape_like(term)
+        pattern = f"%{escaped}%"
+        prefix = f"{escaped}%"
+        stmt = (
+            select(
+                User.id,
+                User.email,
+                User.display_name,
+                User.role,
+                User.team_id,
+                Team.name,
+            )
+            .outerjoin(Team, User.team_id == Team.id)
+            .where(
+                User.email.ilike(pattern, escape="\\")
+                | User.display_name.ilike(pattern, escape="\\")
+            )
+        )
+        if is_active is not None:
+            stmt = stmt.where(User.is_active == is_active)
+        stmt = stmt.order_by(
+            (
+                User.email.ilike(prefix, escape="\\")
+                | User.display_name.ilike(prefix, escape="\\")
+            ).desc(),
+            User.email,
+        ).limit(limit)
+        result = await self._session.execute(stmt)
+        return [tuple(row) for row in result.all()]  # type: ignore[misc]
+
     async def prefetch_users_by_subjects(self, subs: set[str]) -> dict[str, dict]:
         """sso_subject 집합에 해당하는 기존 유저의 스칼라 스냅샷을 일괄 조회.
 
@@ -241,6 +307,29 @@ class UserRepository:
         )
         result = await self._session.execute(stmt)
         return result.rowcount or 0
+
+    async def iter_all_users(self) -> list[User]:
+        """예산 요약처럼 **전수**가 필요한 집계용 — limit 없이 모든 사용자를 돌려준다.
+
+        ⚠️ `list_users(limit=N)` 을 크게 잡아 쓰지 말 것. 그건 `created_at desc` 로 정렬한
+        뒤 앞에서 N 개만 자르므로, **N 번째 이후 사용자가 조용히 사라진다.** 실제로 예산
+        요약이 `list_users(limit=500)` 이라 가입이 오래된 사용자의 예산 행이 통째로 빠진
+        채 사용률이 계산됐다 — 화면에 오류 없이 틀린 비율이 떴다.
+
+        ⚠️ `cursor` 페이징으로 우회하는 것도 안 된다. `list_users` 는
+        `order_by(created_at desc)` 인데 커서 조건이 `User.id < cursor` 여서 **정렬 키와
+        커서 키가 다르다.** 그 조합은 행을 건너뛰거나 같은 페이지를 반복한다(id 순서와
+        created_at 순서가 무관하므로). 커서 페이징을 쓰려면 정렬 키로 커서를 잡아야 한다.
+
+        전수 로드가 안전한 근거: 이 메서드는 관리자 화면의 요약 집계에서만 쓰이고,
+        auth.users 는 조직 구성원 수(수천 규모) 상한이라 목록 자체가 크지 않다. 사용자가
+        수십만 규모가 되면 이 집계를 SQL 쪽 GROUP BY 로 옮겨야 한다 —
+        `/admin/dashboard/kpi` 가 이미 그 방식이다(합계만 필요할 때는 그쪽을 쓸 것).
+        """
+        result = await self._session.execute(
+            select(User).order_by(User.created_at.desc())
+        )
+        return list(result.scalars().all())
 
     async def list_users(
         self,

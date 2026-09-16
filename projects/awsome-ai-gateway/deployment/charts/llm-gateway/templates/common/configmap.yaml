@@ -23,15 +23,20 @@ data:
   DB_POOL_RECYCLE: {{ .Values.database.external.poolRecycle | quote }}
   DB_ECHO: "false"
   # asyncpg prepared statement 캐시 크기. RDS Proxy 경유 시 0 (PostgreSQL pinning 회피),
-  # Aurora 직접 연결 시 100 (성능 이득) — 기본 100.
-  DB_STATEMENT_CACHE_SIZE: {{ .Values.database.external.statementCacheSize | default 100 | quote }}
+  # Aurora 직접 연결 시 100 (성능 이득). 기본값은 values.yaml 에 있다(database.external).
+  #
+  # ⚠️ `| default 100` 을 붙이면 **안 된다.** Go 템플릿 `default` 는 0 을 빈 값으로 보고
+  #    삼키므로, dev/prod overlay 가 명시한 `statementCacheSize: 0` 이 100 으로 되살아난다
+  #    (그 상태로 라이브 ConfigMap 이 양쪽 다 "100" 이었다 — 2026-09-04 실측).
+  #    0 이 의미를 갖는 값에는 `default` 금지. 기본값은 values.yaml 에서만 준다.
+  DB_STATEMENT_CACHE_SIZE: {{ .Values.database.external.statementCacheSize | quote }}
 
   # ----------------------------------------------------------------------------
   # Redis 연결 풀 (gateway-proxy 전용, pod 당 max_connections)
   # 공식: pod 당 pool × HPA max_replica ≤ ElastiCache shard max_clients 합.
   # T2 v3 에서 기본 50 은 4k VU hold 구간에서 MaxConnectionsError → 429 유발.
   # ----------------------------------------------------------------------------
-  REDIS_POOL_SIZE: {{ .Values.redis.poolSize | default 150 | quote }}
+  REDIS_POOL_SIZE: {{ .Values.redis.poolSize | quote }}
 
   # Redis 장애 시 in-memory rate-limit fallback divisor 의 replica 항.
   # divisor = RL_FALLBACK_REPLICAS × UVICORN_WORKERS (프로세스당 독립 카운터 수).
@@ -42,23 +47,28 @@ data:
   # Redis 연결 복원력 (deepdive Q50 Phase 2). socket_timeout 미설정(과거)이면 느린
   # 노드 1개가 풀을 전 pod 에서 고갈 → 명령/연결 타임아웃 + blip 재시도 + idle
   # health-check 로 "느린 Redis → 빠른 실패 → DB fallback". 0 으로 끄면 과거 동작.
-  REDIS_SOCKET_TIMEOUT: {{ .Values.redis.socketTimeout | default 2.0 | quote }}
-  REDIS_CONNECT_TIMEOUT: {{ .Values.redis.connectTimeout | default 1.0 | quote }}
-  REDIS_RETRIES: {{ .Values.redis.retries | default 1 | quote }}
-  REDIS_HEALTH_CHECK_INTERVAL: {{ .Values.redis.healthCheckInterval | default 30.0 | quote }}
+  # ⚠️ 이 4개도 0 이 의미를 갖는다(retries: 0 = 재시도 없음, healthCheckInterval: 0 =
+  #    health check 비활성). DB_STATEMENT_CACHE_SIZE 와 같은 이유로 `| default` 를
+  #    쓰지 않고 기본값은 values.yaml(redis.*) 에서만 준다.
+  REDIS_SOCKET_TIMEOUT: {{ .Values.redis.socketTimeout | quote }}
+  REDIS_CONNECT_TIMEOUT: {{ .Values.redis.connectTimeout | quote }}
+  REDIS_RETRIES: {{ .Values.redis.retries | quote }}
+  REDIS_HEALTH_CHECK_INTERVAL: {{ .Values.redis.healthCheckInterval | quote }}
   # 읽기 replica 라우팅(cluster+replica 일 때만, deepdive Q50 Phase4-f). 기본 false=
   # primary-only(강한 일관성). TTL 캐시·RL ZSET 처럼 lag 허용 시 true 로 read 스케일.
-  REDIS_READ_FROM_REPLICAS: {{ .Values.redis.readFromReplicas | default false | quote }}
+  REDIS_READ_FROM_REPLICAS: {{ .Values.redis.readFromReplicas | quote }}
 
   # rate-limit 회로 차단기(deepdive Q50). Redis 연속 실패 시 회로 OPEN → 후속 호출
-  # socket_timeout 대기 없이 즉시 fallback. 기본 활성.
-  RL_BREAKER_ENABLED: {{ .Values.redis.breaker.enabled | default true | quote }}
-  RL_BREAKER_FAIL_THRESHOLD: {{ .Values.redis.breaker.failThreshold | default 5 | quote }}
-  RL_BREAKER_RECOVERY_TIMEOUT: {{ .Values.redis.breaker.recoveryTimeout | default 5.0 | quote }}
+  # socket_timeout 대기 없이 즉시 fallback. 기본 활성(values.yaml redis.breaker).
+  # ⚠️ enabled 에 `| default true` 를 붙이면 **안 된다** — Go 의 default 는 false 를 빈 값
+  #    으로 보므로 overlay 의 `enabled: false` 가 조용히 true 가 되어 차단기를 끌 수 없다.
+  RL_BREAKER_ENABLED: {{ .Values.redis.breaker.enabled | quote }}
+  RL_BREAKER_FAIL_THRESHOLD: {{ .Values.redis.breaker.failThreshold | quote }}
+  RL_BREAKER_RECOVERY_TIMEOUT: {{ .Values.redis.breaker.recoveryTimeout | quote }}
   # rate-limit eval 실패 정책(deepdive Q50). open=통과(가용성, 기본·기존 동작),
   # closed=차단(쿼타 정확성). budget/auth 는 이미 fail-closed — 의도적 비대칭.
   # **무단 전환 금지** — 운영 정책 결정 후에만 closed 로.
-  RL_FAIL_MODE: {{ .Values.rateLimit.failMode | default "open" | quote }}
+  RL_FAIL_MODE: {{ .Values.rateLimit.failMode | quote }}
 
   # ----------------------------------------------------------------------------
   # OpenTelemetry
@@ -72,7 +82,41 @@ data:
   # ----------------------------------------------------------------------------
   AWS_REGION: {{ .Values.aws.region | quote }}
   AWS_DEFAULT_REGION: {{ .Values.aws.region | quote }}
+  # ⚠️ **읽는 코드가 없다(dead config).** gateway-proxy / admin-api 전 소스트리를
+  # 전수 검색해도 BEDROCK_ALLOWED_MODELS / bedrock_allowed_models 소비자가 0건이다
+  # (2026-08-19 확인). 모델 허용은 **DB 주도**다 — services/router_service.py 가
+  # `model.model_aliases` 에서 alias 를 해석하고(Redis 300s 캐시), status='INACTIVE'
+  # 로만 차단한다. 팀/사용자 단위 제한은 model.team_allowed_models /
+  # user_allowed_models 다.
+  #
+  # 그래서 **여기에 모델을 추가해도 아무 일도 일어나지 않는다** — 에러도 없다.
+  # 신모델 개방은 마이그레이션(예: 0027 Claude 5)으로 alias 행을 넣는 것이지 이 목록이
+  # 아니다. 지우지 않고 남겨 두는 이유는 values 3곳이 이 키를 채우고 있어 제거하면
+  # 차트 렌더가 깨지기 때문이고, 오해를 막기 위해 이 주석을 남긴다.
   BEDROCK_ALLOWED_MODELS: {{ join "," .Values.aws.bedrockAllowedModels | quote }}
+
+  # ----------------------------------------------------------------------------
+  # SSE 스트리밍 타임아웃 (gateway-proxy)
+  # ----------------------------------------------------------------------------
+  # STREAM_IDLE_TIMEOUT: 청크 간 무응답 상한. 초과 시 `event: error`(timeout_error)
+  # 프레임을 보내고 정상 종료한다 — 그때까지의 토큰은 usage 로 기록된다(과금 보존).
+  #
+  # ⚠️ **반드시 ALB idle_timeout 보다 작아야 한다.** 크거나 같으면 ALB 가 먼저
+  # 커넥션을 끊어, 클라이언트는 깔끔한 SSE 에러 프레임 대신 truncated stream 을 본다
+  # (원인 파악이 훨씬 어렵다). ALB 값은 values-eks-fargate-{dev,prod}.yaml 의
+  # `load-balancer-attributes: idle_timeout.timeout_seconds` 다.
+  # 반대쪽 하한은 upstream 첫 토큰 지연 — Opus extended thinking 은 60s 를 넘긴다
+  # (기본값 60 이 정상 응답을 끊어버린 적이 있다).
+  #
+  # STREAM_DISCONNECT_DRAIN_TIMEOUT: 클라이언트가 끊은 뒤에도 upstream 을 계속
+  # 소비하는 상한. 이 시간 안에 도착한 토큰까지 usage 에 기록되므로, 0 으로 두면
+  # 조기 취소된 요청의 과금이 유실된다.
+  #
+  # 기본값은 values.yaml(gatewayProxy.streaming) 에 있다. `| default` 를 쓰지 않는 이유는
+  # disconnectDrainTimeout: 0 (드레인 없음) 이 의미 있는 설정이기 때문이다 —
+  # default 가 0 을 삼켜 30 으로 되살리면 "끄기"가 불가능해진다.
+  STREAM_IDLE_TIMEOUT: {{ .Values.gatewayProxy.streaming.idleTimeout | quote }}
+  STREAM_DISCONNECT_DRAIN_TIMEOUT: {{ .Values.gatewayProxy.streaming.disconnectDrainTimeout | quote }}
 
   # ----------------------------------------------------------------------------
   # 비용/사용량 집계 캘린더 경계 타임존(§59) — admin-api·cost-recorder-worker·
