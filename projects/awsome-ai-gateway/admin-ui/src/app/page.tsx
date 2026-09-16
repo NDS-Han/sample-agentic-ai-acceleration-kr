@@ -80,15 +80,6 @@ function computeDailyAvg(period: string, totalCost: number): {
 
 async function DashboardKPIs({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
-  const [budgetResult, keysResult, modelsResult, summaryResult] = await Promise.allSettled([
-    adminAPI.get<BudgetSummaryResponse>('/admin/budgets/summary', { period }),
-    adminAPI.get<KeyCountResponse>('/admin/keys/count', { status: 'ACTIVE' }),
-    // /admin/models 는 is_active 가 아니라 status("ACTIVE"|"INACTIVE") 문자열을 반환한다
-    // (admin-api ModelResponse 스키마). ModelListItem(is_active: boolean)으로 잘못
-    // 캐스팅하면 항상 undefined → 활성 모델 수가 0으로 잡히는 버그가 있어 raw shape 사용.
-    adminAPI.get<{ items: Array<{ status: string }> }>('/admin/models'),
-    fetchDashboardSummary(period, client),
-  ]);
 
   // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
   // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
@@ -99,22 +90,8 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
   //    로 렌더한다 — 부분적으로 그럴듯한 화면보다 "지금 값을 모른다" 가 정확하다.
   const kpi = await fetchDashboardKPI(period, client).catch(() => null);
 
-  // 이번 달 사용량/예산: TEAM 행 + 팀 미소속 USER 행을 합산.
-  const summaryItems = budgetData?.summary ?? [];
-  const teamItems = summaryItems.filter((i) => i.target_type === 'team');
-  const teamlessUsers = summaryItems.filter((i) => i.target_type === 'user' && !i.team_id);
-  const aggregateItems = [...teamItems, ...teamlessUsers];
-  const totalUsageUsd = aggregateItems.reduce((sum, i) => sum + parseFloat(i.used_usd || '0'), 0);
-  const totalLimitUsd = aggregateItems.reduce(
-    (sum, i) => sum + (i.limit_usd != null ? parseFloat(i.limit_usd) : 0),
-    0,
-  );
-  const budgetUtilization = totalLimitUsd > 0 ? (totalUsageUsd / totalLimitUsd) * 100 : 0;
-  const activeKeys = keysData?.count ?? 0;
-  const activeModels = modelsData
-    ? (modelsData.items ?? []).filter((m) => m.status === 'ACTIVE').length
-    : 0;
-  const alertLevel = calcAlertLevel(budgetUtilization);
+  const budgetUtilization = kpi?.budget_utilization_pct ?? null;
+  const alertLevel = budgetUtilization == null ? undefined : calcAlertLevel(budgetUtilization);
 
   const { dailyAvg, projection } = kpi
     ? computeDailyAvg(period, kpi.total_cost_usd)

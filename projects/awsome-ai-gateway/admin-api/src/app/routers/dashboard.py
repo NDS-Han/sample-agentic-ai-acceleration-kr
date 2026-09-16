@@ -433,7 +433,7 @@ async def dashboard_kpi(
     request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
-    _admin: CurrentUser = Depends(require_admin),
+    _admin: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
     """대시보드 상단 KPI 카드 일괄 — 화면 1개당 API 1개.
