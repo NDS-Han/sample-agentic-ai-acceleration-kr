@@ -69,6 +69,9 @@ done < "$TSV"
 alist=""; for a in "${ALIASES[@]}"; do alist="${alist:+$alist,}'$a'"; done
 
 # ── One psql run, rows tagged by a leading column ────────────────────────
+# B sums only the client=NULL (total) rows: since the phase-2 cost-recorder the
+# worker also writes one budget_usages row per app (client='cowork', ...), so
+# summing every USER row counts each request twice (measured 1.39x on 2026-09-16).
 SQL="\\pset format unaligned
 \\pset fieldsep '|'
 \\pset tuples_only on
@@ -83,7 +86,7 @@ SELECT 'R', alias, provider_model_id, status FROM model.model_aliases WHERE alia
 SELECT 'U', coalesce(sum(cost_usd),0), count(*)
   FROM usage.usage_logs WHERE requested_at >= date_trunc('month', now());
 SELECT 'B', coalesce(sum(used_usd),0)
-  FROM budget.budget_usages WHERE scope = 'USER' AND period = to_char(now(), 'YYYY-MM');
+  FROM budget.budget_usages WHERE scope = 'USER' AND period = to_char(now(), 'YYYY-MM') AND client IS NULL;
 SELECT 'W', coalesce(sum(web_search_count),0), count(*) FILTER (WHERE web_search_count > 0)
   FROM usage.usage_logs WHERE requested_at > now() - interval '24 hours';
 SELECT 'E', count(*) FILTER (WHERE status = 'SUCCESS'), count(*) FILTER (WHERE status <> 'SUCCESS')
