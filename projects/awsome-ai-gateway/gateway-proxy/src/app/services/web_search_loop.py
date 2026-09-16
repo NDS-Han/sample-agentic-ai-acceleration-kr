@@ -63,7 +63,9 @@ _WEB_SEARCH_DESCRIPTION = (
     # 흔적 줄 모방 금지 — 모델이 이력에서 본 흔적 형식을 따라 써서 검색 없이 "검색함" 을
     # 주장했다(2026-09-16 실측, 요청 3건 중 1건). 출력 필터(_TraceLineFilter)가 2차 방어.
     "The gateway itself appends a transcript line starting with '🔎 [gateway web_search]' "
-    "after each real search; never write such lines yourself — to search, call this tool."
+    "after each real search; it records a search whose FULL results were shown to you in "
+    "that turn, so on later requests treat those lines as your own evidence. Never write "
+    "such lines yourself — to search, call this tool."
 )
 
 # The loop passes the LOGICAL turn body (a dict: messages/input + tools + stream flag).
@@ -400,6 +402,81 @@ def _strip_native_web_search(body: dict) -> dict:
     return out
 
 
+# ── prompt-cache breakpoint on our search results ─────────────────────────────
+#: Anthropic 프롬프트 캐시의 요청당 cache_control 상한.
+_MAX_CACHE_BREAKPOINTS = 4
+
+
+def _has_cc(b: Any) -> bool:
+    return isinstance(b, dict) and bool(b.get("cache_control"))
+
+
+def _count_cache_breakpoints(
+    base_body: dict, conversation: list
+) -> tuple[int, list[tuple[int, int]]]:
+    """(total breakpoints, [(msg_idx, block_idx)] of the MESSAGE-level ones, in order)."""
+    n = 0
+    sysb = base_body.get("system")
+    if isinstance(sysb, list):
+        n += sum(1 for b in sysb if _has_cc(b))
+    n += sum(1 for t in (base_body.get("tools") or []) if _has_cc(t))
+    positions: list[tuple[int, int]] = []
+    for i, m in enumerate(conversation):
+        c = m.get("content") if isinstance(m, dict) else None
+        if isinstance(c, list):
+            for j, b in enumerate(c):
+                if _has_cc(b):
+                    n += 1
+                    positions.append((i, j))
+    return n, positions
+
+
+def _without_cc(block: dict) -> dict:
+    return {k: v for k, v in block.items() if k != "cache_control"}
+
+
+def _place_cache_breakpoint(
+    base_body: dict, conversation: list, tool_results: list, our_tool_use_ids: set
+) -> list:
+    """Put ONE cache_control on the newest tool_result we inject; keep ≤ 4 per request.
+
+    왜: 검색 N 회 요청은 Bedrock 턴이 N+1 번이고, 뒤 턴마다 앞 턴의 프롬프트와 검색 결과를
+    그대로 다시 보낸다. 클라이언트 접두(시스템·이력)는 클라이언트의 표시로 캐시되지만, 우리가
+    끼워 넣는 결과(검색당 4~6k 토큰)는 표시가 없어 매 턴 정가였다(2026-09-16 실측: 검색 3회
+    요청에서 결과 토큰이 6R 만큼 과금, 표시를 두면 약 3.8R). 표시는 항상 **가장 새 결과 하나**에만
+    둔다 — Anthropic 은 표시 앞 ~20 블록 경계에서 자동으로 캐시 적중을 찾으므로 하나면 충분하고,
+    요청당 4개 한도도 아껴야 한다. 한도에 닿으면 가장 오래된 **메시지** 표시를 뗀다(system/tools
+    표시는 건드리지 않는다). 클라이언트 원본 dict 는 바꾸지 않는다(copy-on-write) — 내부 대화는
+    이 요청 안에서만 쓰인다.
+    """
+    if not tool_results:
+        return conversation
+    conv = list(conversation)
+    # 1) 앞 라운드에 우리가 붙인 표시는 뗀다 — 우리 것은 항상 하나.
+    for i, m in enumerate(conv):
+        c = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(c, list):
+            continue
+        ours = [j for j, b in enumerate(c)
+                if _has_cc(b) and b.get("type") == "tool_result"
+                and b.get("tool_use_id") in our_tool_use_ids]
+        if ours:
+            new_c = list(c)
+            for j in ours:
+                new_c[j] = _without_cc(new_c[j])
+            conv[i] = {**m, "content": new_c}
+    n, positions = _count_cache_breakpoints(base_body, conv)
+    if n >= _MAX_CACHE_BREAKPOINTS:
+        if not positions:
+            return conv   # 네 개가 전부 system/tools 에 있다 — 손대지 않는다
+        i, j = positions[0]
+        c = list(conv[i]["content"])
+        c[j] = _without_cc(c[j])
+        conv[i] = {**conv[i], "content": c}
+    tool_results[-1]["cache_control"] = {"type": "ephemeral"}
+    return conv
+
+
 # ── usage merge ───────────────────────────────────────────────────────────────
 def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     """Sum usage across turns. reasoning_tokens stays a submetric (already inside
@@ -487,6 +564,65 @@ def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars] + marker, True
 
 
+_CAP_ERROR = json.dumps({"error": "per-turn web search limit reached; "
+                                  "answer from the results already provided"})
+
+
+async def _run_turn_searches(
+    mcp_client: AgentCoreMcpClient, inputs: list, allowance: int, deadline: float,
+    default_max_results: int, max_result_chars: int, result_text_chars: int,
+) -> list[tuple[str, bool, str, Optional[str]]]:
+    """Run one turn's searches CONCURRENTLY; return (result_text, ok, trace, reason) per
+    input, in input order. ``reason`` is None (ran), "capped" (over the per-turn limit) or
+    "deadline" (total deadline already passed) — the loops turn those into the
+    dialect's error payload so every tool_use still gets exactly one result.
+
+    왜 동시에: 한 턴의 검색 2개를 차례로 기다리면 fan-out 턴마다 5초 안팎이 그냥 쌓였다
+    (2026-09-16 실측 검색 1회 4~9초). 비용은 같고 벽시계만 준다. _do_search 는 예외를
+    던지지 않으므로 gather 가 중간에 깨질 일이 없다.
+    """
+    results: list = [None] * len(inputs)
+    todo: list[tuple[int, Any]] = []
+    past_deadline = time.monotonic() > deadline
+    for i, inp in enumerate(inputs):
+        q = inp.get("query", "") if isinstance(inp, dict) else ""
+        if i >= allowance:
+            results[i] = ("", False, _trace_line(q, _trace_words("capped")), "capped")
+        elif past_deadline:
+            results[i] = ("", False, _trace_line(q, _trace_words("deadline")), "deadline")
+        else:
+            todo.append((i, _do_search(mcp_client, inp if isinstance(inp, dict) else {},
+                                       default_max_results, max_result_chars, result_text_chars)))
+    if todo:
+        done = await asyncio.gather(*(c for _, c in todo))
+        for (i, _), (text, ok, trace) in zip(todo, done):
+            results[i] = (text, ok, trace, None)
+    return results
+
+
+def _anthropic_tool_result(tool_use_id: Any, result_text: str, ok: bool,
+                           reason: Optional[str]) -> dict:
+    if reason == "capped":
+        content = _CAP_ERROR
+    elif reason == "deadline":
+        content = "web search deadline exceeded"
+    else:
+        content = result_text
+    return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content,
+            **({"is_error": True} if not ok else {})}
+
+
+def _responses_call_output(call_id: Any, result_text: str, ok: bool,
+                           reason: Optional[str]) -> dict:
+    if reason == "capped":
+        out = _CAP_ERROR
+    elif reason == "deadline":
+        out = json.dumps({"error": "web search deadline exceeded"})
+    else:
+        out = result_text
+    return {"type": "function_call_output", "call_id": call_id, "output": out}
+
+
 def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
     """한 턴에서 실제로 실행할 검색 개수. ``max_per_turn <= 0`` 이면 무제한.
 
@@ -506,9 +642,9 @@ def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
 #: 최종 답변은 자백문). 텍스트 한 줄은 Bedrock 도 클라이언트도 그대로 받아들이고, 결과
 #: 본문(≤12k자)은 싣지 않는다. Anthropic 방식(server_tool_use 블록)은 upstream PR 후보.
 _TRACE_PREFIX = "🔎 [gateway web_search]"
-#: 검색이 하나라도 성공한 라운드의 마지막 줄. 다음 요청에서 모델이 "이력엔 제목뿐이니 수치는
-#: 지어낸 것" 이라고 물러서지 않도록, 결과 전문이 그 턴에 제공됐다는 사실을 남긴다(실측: 흔적만
-#: 있을 때 자기 검증 질문에 "폐기하라" 고 답함).
+#: (1.0.62~1.0.64 에서 라운드 끝에 붙이던 안내 줄. 1.0.65 부터는 화면에 내보내지 않고 같은 말을
+#: 도구 설명에 둔다 — 사용자가 볼 이유가 없어서. 옛 대화에 남은 줄을 모델이 흉내 낼 수 있어
+#: 모방 필터 마커에는 계속 남긴다.)
 _TRACE_NOTE = ("(full search results were shown to the assistant in this turn and used for "
                "the answer; only this trace is kept in the transcript)")
 #: 모델이 흔적을 **모방**한 줄을 걷어내기 위한 마커들(흔적 줄·안내 줄의 앞부분).
@@ -579,17 +715,44 @@ def _strip_fake_trace_lines(text: str) -> str:
     return f.feed(text) + f.flush()
 
 
+def _trace_lang() -> str:
+    """"en" | "ko" — settings.web_search_trace_lang; the prefix is language-neutral."""
+    try:
+        from app.config import get_settings
+        return (get_settings().web_search_trace_lang or "en").lower()
+    except Exception:  # settings unavailable (tests) → English
+        return "en"
+
+
+def _trace_words(kind: str, **kw: Any) -> str:
+    """Human wording after the em dash. kind: results | failed | capped | deadline."""
+    ko = _trace_lang() == "ko"
+    if kind == "results":
+        n, hosts = kw["n"], kw.get("hosts") or []
+        tail = f" ({', '.join(hosts)})" if hosts else ""
+        if ko:
+            return f"결과 {n}건{tail}"
+        return f"{n} result{'' if n == 1 else 's'}{tail}"
+    if kind == "failed":
+        why = kw.get("why") or ""
+        return (f"실패 ({why})" if why else "실패") if ko else (f"failed ({why})" if why else "failed")
+    if kind == "capped":
+        return "건너뜀 (턴당 상한)" if ko else "skipped (per-turn limit)"
+    return "건너뜀 (마감)" if ko else "skipped (deadline)"
+
+
 def _trace_line(query: str, outcome: str) -> str:
+    """One user-facing line per search: ``🔎 [gateway web_search] "<query>" — <outcome>``.
+    The tag stays so users can tell the gateway's server-side search from the client's own
+    search tool; titles/notes were dropped for readability (2026-09-16 사용자 요청)."""
     q = (query or "").strip().replace("\n", " ")
     if len(q) > 80:
         q = q[:77] + "…"
-    return f'{_TRACE_PREFIX} "{q}" → {outcome}'
+    return f'{_TRACE_PREFIX} "{q}" — {outcome}'
 
 
-def _result_hosts(resp) -> tuple[int, list[str], list[str]]:
-    """(count, up to 3 distinct hosts, up to 2 titles) of a WebSearchResponse-like object;
-    tolerant of fakes. Titles carry the headline facts (e.g. the rate figure) so the model
-    can tie its answer to evidence on a later request."""
+def _result_hosts(resp) -> tuple[int, list[str]]:
+    """(count, up to 3 distinct hosts) of a WebSearchResponse-like object; tolerant of fakes."""
     items = getattr(resp, "results", None)
     if items is None:
         try:
@@ -600,24 +763,72 @@ def _result_hosts(resp) -> tuple[int, list[str], list[str]]:
     if not isinstance(items, list):
         items = []
     hosts: list[str] = []
-    titles: list[str] = []
     for it in items:
         url = it.get("url") if isinstance(it, dict) else getattr(it, "url", None)
-        title = it.get("title") if isinstance(it, dict) else getattr(it, "title", None)
         host = urlparse(str(url or "")).netloc.lower()
         if host.startswith("www."):
             host = host[4:]
         if host and host not in hosts and len(hosts) < 3:
             hosts.append(host)
-        t = " ".join(str(title or "").split())
-        if t and len(titles) < 2:
-            titles.append(t if len(t) <= 60 else t[:57] + "…")
-    return len(items), hosts, titles
+    return len(items), hosts
+
+
+def _trim_results(text: str, per_result_chars: int) -> tuple[str, bool]:
+    """Structured trim of the provider JSON: keep EVERY result, cut each body to
+    ``per_result_chars`` at a sentence boundary, collapse whitespace, drop URL duplicates,
+    re-serialize compactly. ``(text, changed)``. Disabled (<=0), non-JSON or empty → input
+    untouched, so the byte-identical pre-trim path stays reachable.
+
+    왜: max_result_chars 는 JSON 을 통째로 자르므로 뒤쪽 결과가 레코드 중간에서 사라졌고, 앞쪽
+    결과는 본문 수천 자가 그대로 실렸다. 항목별로 자르면 결과 5개의 제목·URL·머리 본문이 모두
+    남고 토큰은 검색당 40~50% 준다(2026-09-16 실측: 원본 13~24k자).
+    """
+    if per_result_chars <= 0:
+        return text, False
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return text, False
+    items = data.get("results") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return text, False
+    seen: set[str] = set()
+    out: list[dict] = []
+    changed = False
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        url = str(it.get("url") or "")
+        key = url.split("#")[0].rstrip("/") if url else ""
+        if key and key in seen:
+            changed = True
+            continue
+        if key:
+            seen.add(key)
+        raw_body = it.get("text") if it.get("text") is not None else it.get("content")
+        body = " ".join(str(raw_body or "").split())
+        if len(body) > per_result_chars:
+            cut = body[:per_result_chars]
+            m = max(cut.rfind(". "), cut.rfind("다. "), cut.rfind("。"), cut.rfind("! "),
+                    cut.rfind("? "))
+            if m > per_result_chars * 0.6:
+                cut = cut[: m + 1]
+            body = cut.rstrip() + " …"
+        if body != raw_body:
+            changed = True
+        new = {k: v for k, v in it.items() if k not in ("text", "content", "raw_content")}
+        new["text"] = body
+        out.append(new)
+    if not out:
+        return text, False
+    new_text = json.dumps({"results": out} if isinstance(data, dict) else out,
+                          ensure_ascii=False, separators=(",", ":"))
+    return new_text, changed
 
 
 async def _do_search(
     mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int,
-    max_result_chars: int = 0,
+    max_result_chars: int = 0, result_text_chars: int = 0,
 ) -> tuple[str, bool, str]:
     """Run one web search. Returns (result_text_for_model, ok, trace_line). Never raises —
     on failure returns an error string so the model can continue from its own knowledge.
@@ -640,26 +851,27 @@ async def _do_search(
             max_results = default_max
     try:
         resp = await mcp_client.search(query, max_results)
-        text, truncated = _truncate_result(resp.raw_text, max_result_chars)
+        text, trimmed = _trim_results(resp.raw_text, result_text_chars)
+        if trimmed:
+            logger.info("web_search.result_trimmed", original_chars=len(resp.raw_text),
+                        chars=len(text), per_result=result_text_chars)
+        text, truncated = _truncate_result(text, max_result_chars)
         if truncated:
             logger.info(
                 "web_search.result_truncated",
                 original_chars=len(resp.raw_text),
                 cap=max_result_chars,
             )
-        n, hosts, titles = _result_hosts(resp)
-        outcome = f"{n} results" + (": " + ", ".join(hosts) if hosts else "")
-        if titles:
-            outcome += " | " + " · ".join(f"「{t}」" for t in titles)
-        return text, True, _trace_line(query, outcome)
+        n, hosts = _result_hosts(resp)
+        return text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts))
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
-                _trace_line(query, f"failed ({str(e)[:60]})"))
+                _trace_line(query, _trace_words("failed", why=str(e)[:60])))
     except Exception as e:  # defensive — never kill the stream
         logger.exception("web_search.unexpected")
         return (json.dumps({"error": f"web search error: {str(e)[:160]}"}), False,
-                _trace_line(query, "failed"))
+                _trace_line(query, _trace_words("failed")))
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -677,6 +889,8 @@ async def _anthropic_stream(
     default_max_results: int,
     max_result_chars: int = 0,
     max_searches_per_turn: int = 0,
+    cache_results: bool = True,
+    result_text_chars: int = 0,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -1049,39 +1263,17 @@ async def _anthropic_stream(
                     requested=len(pending_searches), allowed=allowance,
                 )
             traces: list[str] = []   # one line per search → client-visible evidence
-            for i, ps in enumerate(pending_searches):
-                pin = ps.get("input") or {}
-                q = pin.get("query", "") if isinstance(pin, dict) else ""
-                if i >= allowance:
-                    traces.append(_trace_line(q, "skipped (per-turn limit)"))
-                    tool_results.append(
-                        {"type": "tool_result", "tool_use_id": ps["id"],
-                         "content": json.dumps({
-                             "error": "per-turn web search limit reached; "
-                                      "answer from the results already provided"}),
-                         "is_error": True})
-                    continue
-                if time.monotonic() > deadline:
-                    traces.append(_trace_line(q, "skipped (deadline)"))
-                    tool_results.append(
-                        {"type": "tool_result", "tool_use_id": ps["id"],
-                         "content": "web search deadline exceeded", "is_error": True})
-                    continue
-                result_text, ok, trace = await _do_search(
-                    mcp_client, ps["input"], default_max_results, max_result_chars
-                )
+            outcomes = await _run_turn_searches(
+                mcp_client, [ps.get("input") or {} for ps in pending_searches], allowance,
+                deadline, default_max_results, max_result_chars, result_text_chars)
+            for ps, (result_text, ok, trace, reason) in zip(pending_searches, outcomes):
                 traces.append(trace)
                 if ok:
                     searches_done += 1
-                tool_results.append(
-                    {"type": "tool_result", "tool_use_id": ps["id"],
-                     "content": result_text, **({"is_error": True} if not ok else {})}
-                )
+                tool_results.append(_anthropic_tool_result(ps["id"], result_text, ok, reason))
             # 검색 흔적을 클라이언트 봉투에 텍스트 블록 하나로 남긴다(근거: _TRACE_PREFIX 주석).
             # 내부 대화에는 넣지 않는다 — 거기엔 진짜 tool_use/tool_result 가 있다.
             if traces and envelope_open:
-                if any(" → failed" not in t and " → skipped" not in t for t in traces):
-                    traces.append(_TRACE_NOTE)
                 gi = global_index
                 global_index += 1
                 yield _sse("content_block_start",
@@ -1092,6 +1284,9 @@ async def _anthropic_stream(
                             "delta": {"type": "text_delta",
                                       "text": "\n" + "\n".join(traces) + "\n"}})
                 yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+            if cache_results:
+                conversation = _place_cache_breakpoint(
+                    base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
@@ -1139,6 +1334,8 @@ async def _anthropic_nonstream(
     default_max_results: int,
     max_result_chars: int = 0,
     max_searches_per_turn: int = 0,
+    cache_results: bool = True,
+    result_text_chars: int = 0,
 ) -> JSONResponse:
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
@@ -1203,34 +1400,18 @@ async def _anthropic_nonstream(
             if allowance < len(our_calls):
                 logger.info("web_search.turn_fanout_capped",
                             requested=len(our_calls), allowed=allowance)
-            for i, call in enumerate(our_calls):
-                cin = call.get("input") or {}
-                q = cin.get("query", "") if isinstance(cin, dict) else ""
-                if i >= allowance:
-                    traces.append(_trace_line(q, "skipped (per-turn limit)"))
-                    tool_results.append(
-                        {"type": "tool_result", "tool_use_id": call.get("id"),
-                         "content": json.dumps({
-                             "error": "per-turn web search limit reached; "
-                                      "answer from the results already provided"}),
-                         "is_error": True})
-                    continue
-                if time.monotonic() > deadline:
-                    traces.append(_trace_line(q, "skipped (deadline)"))
-                    tool_results.append(
-                        {"type": "tool_result", "tool_use_id": call.get("id"),
-                         "content": "web search deadline exceeded", "is_error": True})
-                    continue
-                result_text, ok, trace = await _do_search(
-                    mcp_client, cin, default_max_results, max_result_chars
-                )
+            outcomes = await _run_turn_searches(
+                mcp_client, [c.get("input") or {} for c in our_calls], allowance,
+                deadline, default_max_results, max_result_chars, result_text_chars)
+            for call, (result_text, ok, trace, reason) in zip(our_calls, outcomes):
                 traces.append(trace)
                 if ok:
                     searches_done += 1
                 tool_results.append(
-                    {"type": "tool_result", "tool_use_id": call.get("id"),
-                     "content": result_text, **({"is_error": True} if not ok else {})}
-                )
+                    _anthropic_tool_result(call.get("id"), result_text, ok, reason))
+            if cache_results:
+                conversation = _place_cache_breakpoint(
+                    base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
@@ -1296,8 +1477,6 @@ async def _anthropic_nonstream(
             final_body["content"] = cleaned
         # 검색 흔적을 본문 맨 앞에 텍스트 블록으로(스트리밍 경로와 같은 계약, _TRACE_PREFIX).
         if traces:
-            if any(" → failed" not in t and " → skipped" not in t for t in traces):
-                traces.append(_TRACE_NOTE)
             final_body["content"].insert(
                 0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
         # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
@@ -1338,6 +1517,8 @@ async def _responses_stream(
     default_max_results: int,
     max_result_chars: int = 0,
     max_searches_per_turn: int = 0,
+    cache_results: bool = True,
+    result_text_chars: int = 0,
 ) -> AsyncIterator[bytes]:
     """Stitch N Responses turns into ONE response.created … response.completed stream.
 
@@ -1586,25 +1767,13 @@ async def _responses_stream(
                     "web_search.turn_fanout_capped",
                     requested=len(pending_searches), allowed=allowance,
                 )
-            for i, ps in enumerate(pending_searches):
-                if i >= allowance:
-                    outputs.append({"type": "function_call_output", "call_id": ps["call_id"],
-                                    "output": json.dumps({
-                                        "error": "per-turn web search limit reached; "
-                                                 "answer from the results already provided"})})
-                    continue
-                if time.monotonic() > deadline:
-                    outputs.append({"type": "function_call_output", "call_id": ps["call_id"],
-                                    "output": json.dumps({"error": "web search deadline exceeded"})})
-                    continue
-                result_text, ok, _trace = await _do_search(
-                    mcp_client, ps["input"], default_max_results, max_result_chars
-                )
+            outcomes = await _run_turn_searches(
+                mcp_client, [ps.get("input") or {} for ps in pending_searches], allowance,
+                deadline, default_max_results, max_result_chars, result_text_chars)
+            for ps, (result_text, ok, _trace, reason) in zip(pending_searches, outcomes):
                 if ok:
                     searches_done += 1
-                outputs.append(
-                    {"type": "function_call_output", "call_id": ps["call_id"], "output": result_text}
-                )
+                outputs.append(_responses_call_output(ps["call_id"], result_text, ok, reason))
             conv_input = conv_input + turn_output_items + outputs
     except Exception:
         logger.exception("web_search.responses_stream_failed")
@@ -1710,6 +1879,8 @@ async def _responses_nonstream(
     default_max_results: int,
     max_result_chars: int = 0,
     max_searches_per_turn: int = 0,
+    cache_results: bool = True,
+    result_text_chars: int = 0,
 ) -> JSONResponse:
     merged = TokenUsage()
     first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
@@ -1768,29 +1939,20 @@ async def _responses_nonstream(
             if allowance < len(our_calls):
                 logger.info("web_search.turn_fanout_capped",
                             requested=len(our_calls), allowed=allowance)
-            for i, call in enumerate(our_calls):
-                if i >= allowance:
-                    new_items.append({"type": "function_call_output", "call_id": call.get("call_id"),
-                                      "output": json.dumps({
-                                          "error": "per-turn web search limit reached; "
-                                                   "answer from the results already provided"})})
-                    continue
-                if time.monotonic() > deadline:
-                    new_items.append({"type": "function_call_output", "call_id": call.get("call_id"),
-                                      "output": json.dumps({"error": "web search deadline exceeded"})})
-                    continue
+            inputs = []
+            for call in our_calls:
                 try:
-                    args = json.loads(call.get("arguments") or "{}")
+                    inputs.append(json.loads(call.get("arguments") or "{}"))
                 except (ValueError, TypeError):
-                    args = {}
-                result_text, ok, _trace = await _do_search(
-                    mcp_client, args, default_max_results, max_result_chars
-                )
+                    inputs.append({})
+            outcomes = await _run_turn_searches(
+                mcp_client, inputs, allowance, deadline,
+                default_max_results, max_result_chars, result_text_chars)
+            for call, (result_text, ok, _trace, reason) in zip(our_calls, outcomes):
                 if ok:
                     searches_done += 1
                 new_items.append(
-                    {"type": "function_call_output", "call_id": call.get("call_id"), "output": result_text}
-                )
+                    _responses_call_output(call.get("call_id"), result_text, ok, reason))
             conv_input = conv_input + new_items
     finally:
         merged.web_search_count = searches_done  # fire on any accrued usage even on late failure (F-9)
@@ -1847,6 +2009,8 @@ async def run_web_search_loop(
     default_max_results: int = 10,
     max_result_chars: int = 0,
     max_searches_per_turn: int = 0,
+    cache_results: bool = True,
+    result_text_chars: int = 0,
     handshake_timeout: float = 10.0,
     #: KI-08 역산 훅. Responses 방언은 usage 가 종결 이벤트 안에만 있어서, 패스스루
     #: 경로의 스트림이 그 전에 끊기면 역산 없이는 usage 가 전부 0 이 되고 usage_logs
@@ -1997,6 +2161,8 @@ async def run_web_search_loop(
             default_max_results=default_max_results,
             max_result_chars=max_result_chars,
             max_searches_per_turn=max_searches_per_turn,
+            cache_results=cache_results,
+            result_text_chars=result_text_chars,
         )
         return StreamingResponse(
             _log_stream(gen), status_code=200,
@@ -2014,6 +2180,8 @@ async def run_web_search_loop(
         default_max_results=default_max_results,
         max_result_chars=max_result_chars,
         max_searches_per_turn=max_searches_per_turn,
+        cache_results=cache_results,
+        result_text_chars=result_text_chars,
     )
     # 루프가 조립해 반환한 최종 본문을 기록한다. 여기서는 `resp.body` 를 읽는다 —
     # 루프 내부가 여러 턴의 결과를 합쳐 만든 것이므로 어떤 단일 턴의 provider 응답도
