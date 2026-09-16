@@ -178,6 +178,11 @@ def _with_web_search_tool(
 #: 이미 받은 결과로 답해야 한다" 는 것을 알아야 한다 — 그냥 지우면 검색을 했다는 사실 자체가
 #: 사라져서 모델이 "검색할 수 없었다" 고 답할 수 있다.
 _FINAL_TURN_TOOL_NOTE = "[web search results provided below; no further searches available]"
+#: force_final 턴의 마지막 user 메시지 끝에 붙이는 지시. 2026-09-16 US 실측: 후속 검색 턴에
+#: 텍스트 없이 thinking+tool_use 만 있던 assistant 메시지가 strip 뒤 thinking 만 남고, 마지막
+#: user 메시지는 결과 JSON 뿐이라 모델(Opus 5)이 `<br>` 한 글자로 답했다(검색 4회 과금 뒤 답 없음).
+_FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request; "
+                          "no further searches can be made. Write the final answer now.]")
 
 
 def _strip_anthropic_web_search_plumbing(
@@ -268,11 +273,24 @@ def _strip_anthropic_web_search_plumbing(
         if not changed:
             out.append(msg)
             continue
-        if not new_content:
-            # ⚠️ 빈 content 는 거부된다. 우리 tool_use 하나만 있던 assistant 메시지가
-            #    정확히 이 경우다.
-            new_content = [{"type": "text", "text": _FINAL_TURN_TOOL_NOTE}]
+        if msg.get("role") == "assistant" and not any(
+            isinstance(b, dict) and b.get("type") == "text" for b in new_content
+        ):
+            # ⚠️ 빈 content 는 거부되고, thinking 만 남은 assistant 턴은 "아무 말도 안 한 턴" 으로
+            #    읽혀 모델이 `<br>` 같은 빈 답을 낸다(2026-09-16 실측). 텍스트가 하나도 없으면
+            #    안내를 넣는다 — thinking 블록은 앞에 그대로 둔다(같은 모델 재생에 필요).
+            new_content = new_content + [{"type": "text", "text": _FINAL_TURN_TOOL_NOTE}]
         out.append({**msg, "content": new_content})
+    # 마지막 user 메시지(= 방금 변환한 결과들) 끝에 "이제 답하라" 를 붙인다. 결과 JSON 만 있으면
+    # 모델이 다음 지시를 기다리듯 빈 답을 내는 것을 실측했다.
+    for i in range(len(out) - 1, -1, -1):
+        m = out[i]
+        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), list):
+            if not any(isinstance(b, dict) and b.get("text") == _FINAL_TURN_ANSWER_NOW
+                       for b in m["content"]):
+                out[i] = {**m, "content": list(m["content"]) + [
+                    {"type": "text", "text": _FINAL_TURN_ANSWER_NOW}]}
+            break
     return out
 
 
