@@ -149,5 +149,6 @@ async def test_stream_loop_forced_choice_first_turn_only_and_clean_force_final()
     assert len(bodies) == 4, [b.get("tool_choice") for b in bodies]
     assert bodies[0]["tool_choice"] == FORCED_A
     assert bodies[1]["tool_choice"] == bodies[2]["tool_choice"] == {"type": "auto"}
-    assert "tool_choice" not in bodies[3] and "tools" not in bodies[3], bodies[3]
+    assert bodies[3]["tool_choice"] == {"type": "none"}, "force_final 은 none 으로 호출만 막는다"
+    assert any(t.get("name") == GW for t in bodies[3]["tools"]), "도구는 유지(이력 보존)"
     assert b"answer" in out and b'"stop_reason": "end_turn"' in out

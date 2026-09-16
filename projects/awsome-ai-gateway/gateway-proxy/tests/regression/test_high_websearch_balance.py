@@ -93,9 +93,9 @@ def _cc_tool_results(body):
             if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("cache_control")]
 
 
-async def test_no_cache_mark_on_the_last_allowed_round():
-    """max_iterations=2: 라운드 1 결과에는 표시(턴 3 이 읽음),
-    라운드 2 결과에는 없음(턴 3 = force_final)."""
+async def test_cache_mark_moves_to_the_last_round_and_final_turn_keeps_the_prefix():
+    """max_iterations=2: 표시는 항상 가장 새 결과 하나. 턴 3(force_final) 은 도구를 유지하고
+    tool_choice none 으로 보내므로 접두가 그대로라 그 표시가 읽힌다(1.0.68)."""
     turns = [_search_turn(1), _search_turn(2), _final()]
     bodies = []
 
@@ -121,8 +121,9 @@ async def test_no_cache_mark_on_the_last_allowed_round():
         pass
     assert len(bodies) == 3
     assert _cc_tool_results(bodies[1]) == [(2, "toolu_1")], bodies[1]
-    assert _cc_tool_results(bodies[2]) == [], "마지막 라운드 결과에 표시가 붙었다(쓰기 비용만 발생)"
-    assert "tools" not in bodies[2], "턴 3 은 force_final"
+    assert _cc_tool_results(bodies[2]) == [(4, "toolu_2")], bodies[2]
+    assert bodies[2]["tool_choice"] == {"type": "none"}, "턴 3 은 force_final"
+    assert "tools" in bodies[2]
     assert "Budget for this request: up to 3 searches per turn and 2 search turns" in \
         bodies[0]["tools"][-1]["description"]
 

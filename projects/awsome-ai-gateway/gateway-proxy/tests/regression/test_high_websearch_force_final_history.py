@@ -163,16 +163,17 @@ async def test_anthropic_nonstream_force_final_sends_no_web_search_blocks_and_no
     assert mcp.calls == 1, "검색은 한 번 실행돼야 한다"
     assert len(bodies) == 2, f"상류 호출 2회(검색 턴 + force_final)여야 한다: {len(bodies)}"
     final = bodies[1]
-    assert "tools" not in final, "force_final 은 tools 를 빼고 보낸다"
-    for b in _blocks(final["messages"]):
-        assert not (b["type"] == "tool_use" and b.get("name") == GW), (
-            f"web_search tool_use 가 남았다: {b}"
-        )
-        assert b["type"] != "tool_result", f"tool_result 가 남았다: {b}"
+    # 1.0.68: force_final 은 도구를 유지하고 tool_choice none 으로 호출만 막는다(이력 보존).
+    assert any(t.get("name") == GW for t in final.get("tools") or []), (
+        "도구가 빠지면 이력의 블록이 400")
+    assert final.get("tool_choice") == {"type": "none"}
+    kinds = [b["type"] for b in _blocks(final["messages"])]
+    assert "tool_use" in kinds and "tool_result" in kinds, f"이력이 변환됐다: {kinds}"
     joined = json.dumps(final["messages"])
     assert "OLD PAID RESULT" in joined and "WEBTEXT" in joined, (
         "지불한 검색 결과가 본문에서 사라졌다"
     )
+    assert final["messages"][-1]["content"][-1]["text"] == wsl._FINAL_TURN_ANSWER_NOW
     # 첫 턴(검색 턴)은 예전처럼 tools 를 갖고 이력을 그대로 보낸다
     assert any(t.get("name") == GW for t in bodies[0].get("tools") or [])
 
@@ -211,10 +212,13 @@ async def test_anthropic_nonstream_force_final_on_deadline_with_no_search_this_r
     )
     assert resp.status_code == 200
     assert len(bodies) == 1
-    assert "tools" not in bodies[0]
-    assert not any(
+    assert bodies[0].get("tool_choice") == {"type": "none"}
+    assert any(t.get("name") == GW for t in bodies[0].get("tools") or [])
+    # 누출 블록은 그대로 남아도 된다 — 도구가 선언돼 있으니 유효하다
+    assert any(
         b["type"] == "tool_use" and b.get("name") == GW for b in _blocks(bodies[0]["messages"])
     )
+    assert bodies[0]["messages"][-1]["content"][-1]["text"] == wsl._FINAL_TURN_ANSWER_NOW
 
 
 # ─── 3. thinking 만 남는 assistant 턴 + 마지막 user 메시지의 "이제 답하라" ─────────
