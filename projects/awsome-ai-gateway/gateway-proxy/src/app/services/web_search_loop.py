@@ -312,6 +312,32 @@ def _wire_input(usage: TokenUsage) -> int:
     )
 
 
+def _prompt_snapshot(input_tokens: int, cache_creation: int, cache_read: int) -> TokenUsage:
+    """The three prompt buckets of ONE turn, frozen for the client-facing usage."""
+    return TokenUsage(
+        input_tokens=int(input_tokens or 0),
+        cache_creation_input_tokens=int(cache_creation or 0),
+        cache_read_input_tokens=int(cache_read or 0),
+    )
+
+
+def _client_prompt_usage(first_turn: TokenUsage | None, merged: TokenUsage) -> TokenUsage:
+    """Prompt buckets the CLIENT sees = the FIRST turn's, never the multi-turn sum.
+
+    ⚠️ Claude Code / Cowork / Codex read ``input + cache_creation + cache_read`` of the
+    last response as "how full is my context window" and auto-compact near the limit.
+    The first turn's prompt IS the client's conversation; every later turn re-sends it
+    plus our search results, which the client never keeps (stripped on the way out).
+    Summing N turns therefore reported N× the real context — 2026-09-16 US dev
+    measurement: 26.7k real → 106.6k reported after 3 searches, and a 55k Cowork
+    session reported 270k, crossing the 200k window so Cowork compacted on every
+    search turn ("Autocompact is thrashing"). Billing is untouched: on_usage() still
+    receives the merged multi-turn totals. Falls back to ``merged`` when no turn
+    completed (nothing to snapshot) so the payload stays self-consistent.
+    """
+    return first_turn if first_turn is not None else merged
+
+
 def _sse(event: str, data: dict) -> bytes:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
@@ -414,6 +440,7 @@ async def _anthropic_stream(
     tool_use/tool_result plumbing; runs the search between turns.
     """
     merged = TokenUsage()
+    first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0        # successful searches → web_search_count (billing/attribution)
     search_attempts = 0      # ALL search rounds incl. failures → loop guard (F-5)
@@ -481,6 +508,12 @@ async def _anthropic_stream(
                     merged.input_tokens += int(u.get("input_tokens", 0) or 0)
                     merged.cache_creation_input_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
                     merged.cache_read_input_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
+                    if first_turn is None:
+                        first_turn = _prompt_snapshot(
+                            u.get("input_tokens", 0),
+                            u.get("cache_creation_input_tokens", 0),
+                            u.get("cache_read_input_tokens", 0),
+                        )
                     if not envelope_open:
                         envelope_open = True
                         yield _sse("message_start", ev)
@@ -673,13 +706,29 @@ async def _anthropic_stream(
                     emitted_stop_reason = "end_turn"
 
                 # Terminal: close the single envelope.
-                yield _sse(
-                    "message_delta",
-                    {"type": "message_delta",
-                     "delta": {"stop_reason": emitted_stop_reason, "stop_sequence": None},
-                     "usage": {"output_tokens": merged.output_tokens}},
-                )
-                yield _sse("message_stop", {"type": "message_stop"})
+                #
+                # ⚠️ 종료 프레임의 usage: 입력·캐시 버킷은 **첫 턴 값**, 출력은 전 턴 합계.
+                #    클라이언트(Claude Code·Cowork)는 마지막 응답의 input+cache 합을 컨텍스트
+                #    점유로 읽고 한계 근처에서 자동 압축한다. 첫 턴 프롬프트가 곧 클라이언트의
+                #    대화이고, 뒤 턴들은 거기에 우리 검색 결과(클라이언트는 받지 않는다)를 더해
+                #    다시 보낸 것이라, N 턴 합계를 실으면 컨텍스트가 N 배로 보인다 — 검색 턴마다
+                #    압축이 도는 "Autocompact is thrashing" 의 원인(2026-09-16 US 실측).
+                #    청구는 on_usage(merged) 가 합계를 받으므로 그대로다. 캐시 버킷도 같은
+                #    턴 것으로 실어야 input_tokens 와 서로 모순되지 않는다.
+                if envelope_open:
+                    gauge = _client_prompt_usage(first_turn, merged)
+                    yield _sse(
+                        "message_delta",
+                        {"type": "message_delta",
+                         "delta": {"stop_reason": emitted_stop_reason, "stop_sequence": None},
+                         "usage": {
+                             "input_tokens": gauge.input_tokens,
+                             "output_tokens": merged.output_tokens,
+                             "cache_creation_input_tokens": gauge.cache_creation_input_tokens,
+                             "cache_read_input_tokens": gauge.cache_read_input_tokens,
+                         }},
+                    )
+                    yield _sse("message_stop", {"type": "message_stop"})
                 break
 
             # Search turn: run ALL requested searches (F-3) → one tool_result per tool_use_id,
@@ -770,6 +819,7 @@ async def _anthropic_nonstream(
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
     merged = TokenUsage()
+    first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
@@ -792,6 +842,11 @@ async def _anthropic_nonstream(
             if status != 200:
                 break
             _merge_usage(merged, usage)
+            if first_turn is None:
+                first_turn = _prompt_snapshot(
+                    usage.input_tokens, usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                )
 
             content = final_body.get("content") or []
             our_calls = [b for b in content if b.get("type") == "tool_use" and b.get("name") == GW_WEB_SEARCH_NAME]
@@ -846,9 +901,14 @@ async def _anthropic_nonstream(
                 logger.warning("web_search.on_usage_failed")
 
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
-        # Overwrite the returned body's usage with the merged (multi-turn) totals so the
-        # client sees the full accounting; reasoning stays a submetric.
-        final_body["usage"]["input_tokens"] = merged.input_tokens
+        # Client-facing usage: prompt buckets from the FIRST turn (the client's real
+        # context — see _client_prompt_usage), output summed over all turns. The body's
+        # own usage is the LAST turn's, which carries our search results the client
+        # never keeps. Billing already went out via on_usage(merged).
+        gauge = _client_prompt_usage(first_turn, merged)
+        final_body["usage"]["input_tokens"] = gauge.input_tokens
+        final_body["usage"]["cache_creation_input_tokens"] = gauge.cache_creation_input_tokens
+        final_body["usage"]["cache_read_input_tokens"] = gauge.cache_read_input_tokens
         final_body["usage"]["output_tokens"] = merged.output_tokens
     # Strip thinking/redacted_thinking from the CLIENT-returned body: the client replays
     # this (possibly stitched) assistant message on its next turn, and Bedrock rejects a
@@ -898,6 +958,7 @@ async def _responses_stream(
     for our web_search; runs the search between turns.
     """
     merged = TokenUsage()
+    first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
     conv_input: list = _normalize_responses_input(base_body)
     searches_done = 0        # successful → web_search_count
     search_attempts = 0      # all rounds incl. failures → loop guard (F-5)
@@ -1042,7 +1103,13 @@ async def _responses_stream(
                     # input (TokenUsage contract). Per TURN, not on the final sum: each
                     # turn caches a different amount, and typically exactly one turn of a
                     # search loop writes the cache while the rest read it.
-                    _merge_usage(merged, extract_responses_usage(resp_obj))
+                    turn_usage = extract_responses_usage(resp_obj)
+                    _merge_usage(merged, turn_usage)
+                    if first_turn is None:
+                        first_turn = _prompt_snapshot(
+                            turn_usage.input_tokens, turn_usage.cache_creation_input_tokens,
+                            turn_usage.cache_read_input_tokens,
+                        )
                     # captured; emit our own terminal event at envelope close
                 elif etype == "error":
                     error_seen = True  # NEW round2 High-1: do not also emit a fake completed
@@ -1098,7 +1165,8 @@ async def _responses_stream(
                                 "response": _finalize_responses_obj(
                                     final_response_obj, merged, global_out_index,
                                     "response.failed", our_call_ids,
-                                    envelope_id=envelope_response_id)})
+                                    envelope_id=envelope_response_id,
+                                    first_turn=first_turn)})
                 else:
                     yield _sse(
                         final_terminal_type,
@@ -1106,7 +1174,8 @@ async def _responses_stream(
                          "response": _finalize_responses_obj(
                              final_response_obj, merged, global_out_index,
                              final_terminal_type, our_call_ids,
-                             envelope_id=envelope_response_id)},
+                             envelope_id=envelope_response_id,
+                             first_turn=first_turn)},
                     )
                 break
 
@@ -1153,7 +1222,8 @@ async def _responses_stream(
             yield _sse("response.failed",
                        {"type": "response.failed",
                         "response": _finalize_responses_obj(
-                            final_response_obj, merged, global_out_index, "response.failed", our_call_ids)})
+                            final_response_obj, merged, global_out_index, "response.failed", our_call_ids,
+                            first_turn=first_turn)})
         return
     finally:
         merged.web_search_count = searches_done
@@ -1169,8 +1239,10 @@ def _finalize_responses_obj(
     terminal_type: str = "response.completed",
     our_call_ids: Optional[set] = None,
     envelope_id: str | None = None,
+    first_turn: TokenUsage | None = None,
 ) -> dict:
-    """Build the terminal response object with merged usage (multi-turn totals).
+    """Build the terminal response object: output summed over turns, prompt buckets
+    from the FIRST turn (the client's real context — see _client_prompt_usage).
 
     Preserves the real upstream terminal status: response.completed → 'completed',
     response.incomplete → 'incomplete', response.failed → 'failed' (F-1).
@@ -1199,14 +1271,17 @@ def _finalize_responses_obj(
     # the non-cached billing bucket, so add both cache buckets back on the way out.
     # Emitting the billing value here would produce cached_tokens > input_tokens — an
     # impossible payload. Both sub-counters are echoed for the same reason.
-    wire_input = _wire_input(merged)
+    # Prompt buckets = the FIRST turn's (what the client sent); later turns carry our
+    # search results the client never keeps, and Codex reads this as its context gauge.
+    gauge = _client_prompt_usage(first_turn, merged)
+    wire_input = _wire_input(gauge)
     obj["usage"] = {
         "input_tokens": wire_input,
         "output_tokens": merged.output_tokens,
         "total_tokens": wire_input + merged.output_tokens,
         "input_tokens_details": {
-            "cached_tokens": merged.cache_read_input_tokens,
-            "cache_write_tokens": merged.cache_creation_input_tokens,
+            "cached_tokens": gauge.cache_read_input_tokens,
+            "cache_write_tokens": gauge.cache_creation_input_tokens,
         },
         "output_tokens_details": {"reasoning_tokens": merged.reasoning_tokens},
     }
@@ -1243,6 +1318,7 @@ async def _responses_nonstream(
     max_searches_per_turn: int = 0,
 ) -> JSONResponse:
     merged = TokenUsage()
+    first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
     conv_input: list = _normalize_responses_input(base_body)
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
@@ -1265,6 +1341,11 @@ async def _responses_nonstream(
             if status != 200:
                 break
             _merge_usage(merged, usage)
+            if first_turn is None:
+                first_turn = _prompt_snapshot(
+                    usage.input_tokens, usage.cache_creation_input_tokens,
+                    usage.cache_read_input_tokens,
+                )
 
             output = final_body.get("output") or []
             our_calls = [o for o in output if o.get("type") == "function_call" and o.get("name") == GW_WEB_SEARCH_NAME]
@@ -1314,10 +1395,27 @@ async def _responses_nonstream(
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
         # Same wire-vs-billing split as _finalize_responses_obj: the client must see the
         # cache-INCLUSIVE prompt count that the Responses spec defines.
-        wire_input = _wire_input(merged)
+        gauge = _client_prompt_usage(first_turn, merged)   # first turn = the client's context
+        wire_input = _wire_input(gauge)
         final_body["usage"]["input_tokens"] = wire_input
         final_body["usage"]["output_tokens"] = merged.output_tokens
         final_body["usage"]["total_tokens"] = wire_input + merged.output_tokens
+        details = final_body["usage"].get("input_tokens_details")
+        if isinstance(details, dict):
+            details["cached_tokens"] = gauge.cache_read_input_tokens
+            details["cache_write_tokens"] = gauge.cache_creation_input_tokens
+    # ⚠️ 우리 web_search function_call 항목을 응답 output 에서 걷어낸다 — 근거는
+    #    _anthropic_nonstream 의 같은 블록 주석, 그리고 스트리밍 쪽
+    #    _finalize_responses_obj 가 이미 하고 있는 일과 동일하다. 비스트리밍만 빠져 있었다.
+    if final_status == 200 and isinstance(final_body.get("output"), list):
+        final_body["output"] = [
+            it for it in final_body["output"]
+            if not (
+                isinstance(it, dict)
+                and it.get("type") == "function_call"
+                and it.get("name") == GW_WEB_SEARCH_NAME
+            )
+        ]
     return JSONResponse(status_code=final_status, content=final_body)
 
 
