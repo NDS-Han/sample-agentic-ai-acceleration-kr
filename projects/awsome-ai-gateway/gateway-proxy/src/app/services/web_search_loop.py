@@ -173,7 +173,7 @@ def _relax_tool_choice(out: dict, dialect: str, include: bool, first_turn: bool)
 
 def _with_web_search_tool(
     body: dict, dialect: str, include: bool, *, first_turn: bool = True,
-    budget: Optional[tuple[int, int]] = None,
+    budget: Optional[tuple[int, int]] = None, final: bool = False,
 ) -> dict:
     """Return a shallow copy of body with the web_search tool appended (or removed).
 
@@ -194,6 +194,13 @@ def _with_web_search_tool(
     elif "tools" in out:
         out.pop("tools")
     _relax_tool_choice(out, dialect, include, first_turn)
+    if final and dialect == "anthropic":
+        # force_final(Anthropic): 도구는 그대로 두고 `tool_choice: none` 으로 호출만 막는다.
+        # 도구를 빼면 이력의 tool_use/tool_result 를 텍스트로 바꿔야 해서(400 회피) 접두가
+        # 달라져 프롬프트 캐시가 전부 빗나가고, 그 변환이 thinking 만 남는 assistant 턴 →
+        # `<br>` 빈 답의 원인이었다(2026-09-16). Bedrock 이 none + 이력 tool 블록을 받는 것은
+        # F-7 패스스루로 실측(200). Responses 방언은 종전대로 도구 제거 + strip.
+        out["tool_choice"] = {"type": "none"}
     return out
 
 
@@ -304,16 +311,29 @@ def _strip_anthropic_web_search_plumbing(
             #    안내를 넣는다 — thinking 블록은 앞에 그대로 둔다(같은 모델 재생에 필요).
             new_content = new_content + [{"type": "text", "text": _FINAL_TURN_TOOL_NOTE}]
         out.append({**msg, "content": new_content})
-    # 마지막 user 메시지(= 방금 변환한 결과들) 끝에 "이제 답하라" 를 붙인다. 결과 JSON 만 있으면
-    # 모델이 다음 지시를 기다리듯 빈 답을 내는 것을 실측했다.
+    return _with_answer_now(out)
+
+
+def _with_answer_now(messages: list) -> list:
+    """Append the answer-now instruction to the LAST user message (copy-on-write, idempotent).
+
+    결과 JSON 만 있으면 모델이 다음 지시를 기다리듯 빈 답을 내는 것을 실측했다(2026-09-16).
+    str content 는 텍스트 블록 둘로 바꾼다. 이미 붙어 있으면 그대로 돌려준다.
+    """
+    out = list(messages)
     for i in range(len(out) - 1, -1, -1):
         m = out[i]
-        if isinstance(m, dict) and m.get("role") == "user" and isinstance(m.get("content"), list):
-            if not any(isinstance(b, dict) and b.get("text") == _FINAL_TURN_ANSWER_NOW
-                       for b in m["content"]):
-                out[i] = {**m, "content": list(m["content"]) + [
-                    {"type": "text", "text": _FINAL_TURN_ANSWER_NOW}]}
-            break
+        if not (isinstance(m, dict) and m.get("role") == "user"):
+            continue
+        c = m.get("content")
+        note = {"type": "text", "text": _FINAL_TURN_ANSWER_NOW}
+        if isinstance(c, str):
+            out[i] = {**m, "content": [{"type": "text", "text": c}, note]}
+        elif isinstance(c, list):
+            if any(isinstance(b, dict) and b.get("text") == _FINAL_TURN_ANSWER_NOW for b in c):
+                return messages
+            out[i] = {**m, "content": list(c) + [note]}
+        break
     return out
 
 
@@ -969,19 +989,16 @@ async def _anthropic_stream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
+            turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations))
+                                              budget=(max_searches_per_turn, max_iterations),
+                                              final=force_final)
             turn_body = dict(turn_body)
             # ⚠️ force_final 턴은 `tools` 키를 아예 뺀다. 그런데 대화에는 앞선 턴이 쌓아 둔
             #    우리 tool_use/tool_result 가 남아 있고, Anthropic-on-Bedrock 은 tools 를
             #    정의하지 않은 요청에 그 블록들이 있으면 **거부한다**. 그러면 마지막 턴만
             #    400 이 되어 이미 과금된 N 턴과 N 번의 검색이 전부 버려진다.
-            turn_body["messages"] = (
-                _strip_anthropic_web_search_plumbing(conversation, our_tool_use_ids)
-                if force_final
-                else conversation
-            )
+            turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
             turn_body["stream"] = True
 
             status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
@@ -1331,9 +1348,8 @@ async def _anthropic_stream(
                             "delta": {"type": "text_delta",
                                       "text": "\n" + "\n".join(traces) + "\n"}})
                 yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
-            # 마지막 허용 라운드(다음 턴이 force_final)의 결과는 한 번만 보내지므로 캐시 표시를
-            # 두면 쓰기 비용(1.25×)만 낸다 — 2026-09-16 실측, 그 라운드는 건너뛴다.
-            if cache_results and search_attempts < max_iterations:
+            # 최종 턴(tool_choice none)도 같은 접두를 보내므로 마지막 표시까지 읽힌다.
+            if cache_results:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
@@ -1401,18 +1417,15 @@ async def _anthropic_nonstream(
     try:
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
-            turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
+            turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
-                                              budget=(max_searches_per_turn, max_iterations))
+                                              budget=(max_searches_per_turn, max_iterations),
+                                              final=force_final)
             turn_body = dict(turn_body)
             # ⚠️ force_final 턴은 tools 를 빼므로 대화의 우리 tool_use/tool_result(이력의 누출분
             #    포함)를 텍스트로 바꿔야 한다 — 스트리밍 경로와 같은 이유. 이 줄이 없던 동안
             #    비스트리밍 force_final 은 항상 400 이었다(2026-09-16 US 실측, Cowork 재시도 3회).
-            turn_body["messages"] = (
-                _strip_anthropic_web_search_plumbing(conversation, our_tool_use_ids)
-                if force_final
-                else conversation
-            )
+            turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -1459,9 +1472,8 @@ async def _anthropic_nonstream(
                     searches_done += 1
                 tool_results.append(
                     _anthropic_tool_result(call.get("id"), result_text, ok, reason))
-            # 마지막 허용 라운드(다음 턴이 force_final)의 결과는 한 번만 보내지므로 캐시 표시를
-            # 두면 쓰기 비용(1.25×)만 낸다 — 2026-09-16 실측, 그 라운드는 건너뛴다.
-            if cache_results and search_attempts < max_iterations:
+            # 최종 턴(tool_choice none)도 같은 접두를 보내므로 마지막 표시까지 읽힌다.
+            if cache_results:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
