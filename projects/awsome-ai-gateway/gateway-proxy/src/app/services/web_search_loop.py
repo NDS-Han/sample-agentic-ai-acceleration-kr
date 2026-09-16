@@ -77,10 +77,31 @@ InvokeStreamFn = Callable[[dict], Awaitable[tuple[int, AsyncIterator[bytes], dic
 
 
 # ── tool injection (pure) ─────────────────────────────────────────────────────
-def _anthropic_tool_def() -> dict:
+def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
+    """Tell the model its search budget so it plans queries instead of re-verifying.
+
+    2026-09-16 반도체 14건 실측: 예산을 모르는 모델은 단일 사실 질문에도 상한(2×3=6)까지
+    재확인 검색을 했다. 예산을 알려 주면 빠진 항목에 배분한다(품질 우선 — 상한 자체는 안 줄임).
+    """
+    if not budget:
+        return ""
+    per_turn, iterations = budget
+    parts = []
+    if per_turn > 0:
+        parts.append(f"up to {per_turn} searches per turn")
+    if iterations > 0:
+        parts.append(f"{iterations} search turn{'s' if iterations != 1 else ''} per request")
+    if not parts:
+        return ""
+    return (" Budget for this request: " + " and ".join(parts)
+            + "; plan queries so the budget covers every entity or fact asked about, and do "
+            "not spend it re-verifying facts you already have.")
+
+
+def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
     return {
         "name": GW_WEB_SEARCH_NAME,
-        "description": _WEB_SEARCH_DESCRIPTION,
+        "description": _WEB_SEARCH_DESCRIPTION + _budget_sentence(budget),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -97,11 +118,11 @@ def _anthropic_tool_def() -> dict:
     }
 
 
-def _responses_tool_def() -> dict:
+def _responses_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
     return {
         "type": "function",
         "name": GW_WEB_SEARCH_NAME,
-        "description": _WEB_SEARCH_DESCRIPTION,
+        "description": _WEB_SEARCH_DESCRIPTION + _budget_sentence(budget),
         "parameters": {
             "type": "object",
             "properties": {
@@ -151,7 +172,8 @@ def _relax_tool_choice(out: dict, dialect: str, include: bool, first_turn: bool)
 
 
 def _with_web_search_tool(
-    body: dict, dialect: str, include: bool, *, first_turn: bool = True
+    body: dict, dialect: str, include: bool, *, first_turn: bool = True,
+    budget: Optional[tuple[int, int]] = None,
 ) -> dict:
     """Return a shallow copy of body with the web_search tool appended (or removed).
 
@@ -165,7 +187,8 @@ def _with_web_search_tool(
     # Drop any prior copy of our tool (idempotent across turns).
     existing = [t for t in existing if not _is_our_tool(t)]
     if include:
-        existing.append(_anthropic_tool_def() if dialect == "anthropic" else _responses_tool_def())
+        existing.append(_anthropic_tool_def(budget) if dialect == "anthropic"
+                        else _responses_tool_def(budget))
     if existing:
         out["tools"] = existing
     elif "tools" in out:
@@ -514,8 +537,16 @@ def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
     return text[:max_chars] + marker, True
 
 
-_CAP_ERROR = json.dumps({"error": "per-turn web search limit reached; "
-                                  "answer from the results already provided"})
+def _cap_error(limit: int) -> str:
+    """tool_result for a search that exceeded the per-turn cap.
+
+    2026-09-16 실측: 예전 문구("answer from the results already provided")는 모델이 fan-out 의
+    나머지 항목을 **포기**하게 만들었다(5개사 중 2개만 채움). 실행되지 않았다는 사실과 다음 턴에
+    다시 요청할 수 있다는 것을 말해 주면 라운드 상한 안에서 마저 채운다(품질 우선).
+    """
+    return json.dumps({"error": (f"per-turn web search limit reached ({limit} per turn); "
+                                 "this query was NOT run — request it again in your next "
+                                 "turn if it is still needed")})
 
 
 async def _run_turn_searches(
@@ -537,7 +568,8 @@ async def _run_turn_searches(
     for i, inp in enumerate(inputs):
         q = inp.get("query", "") if isinstance(inp, dict) else ""
         if i >= allowance:
-            results[i] = ("", False, _trace_line(q, _trace_words("capped")), "capped")
+            results[i] = (_cap_error(allowance), False, _trace_line(q, _trace_words("capped")),
+                          "capped")
         elif past_deadline:
             results[i] = ("", False, _trace_line(q, _trace_words("deadline")), "deadline")
         else:
@@ -552,24 +584,20 @@ async def _run_turn_searches(
 
 def _anthropic_tool_result(tool_use_id: Any, result_text: str, ok: bool,
                            reason: Optional[str]) -> dict:
-    if reason == "capped":
-        content = _CAP_ERROR
-    elif reason == "deadline":
+    if reason == "deadline":
         content = "web search deadline exceeded"
     else:
-        content = result_text
+        content = result_text          # ran, or the capped JSON from _cap_error
     return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content,
             **({"is_error": True} if not ok else {})}
 
 
 def _responses_call_output(call_id: Any, result_text: str, ok: bool,
                            reason: Optional[str]) -> dict:
-    if reason == "capped":
-        out = _CAP_ERROR
-    elif reason == "deadline":
+    if reason == "deadline":
         out = json.dumps({"error": "web search deadline exceeded"})
     else:
-        out = result_text
+        out = result_text              # ran, or the capped JSON from _cap_error
     return {"type": "function_call_output", "call_id": call_id, "output": out}
 
 
@@ -874,7 +902,8 @@ async def _anthropic_stream(
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
-                                              first_turn=search_attempts == 0)
+                                              first_turn=search_attempts == 0,
+                                              budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
             # ⚠️ force_final 턴은 `tools` 키를 아예 뺀다. 그런데 대화에는 앞선 턴이 쌓아 둔
             #    우리 tool_use/tool_result 가 남아 있고, Anthropic-on-Bedrock 은 tools 를
@@ -1228,7 +1257,9 @@ async def _anthropic_stream(
                             "delta": {"type": "text_delta",
                                       "text": "\n" + "\n".join(traces) + "\n"}})
                 yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
-            if cache_results:
+            # 마지막 허용 라운드(다음 턴이 force_final)의 결과는 한 번만 보내지므로 캐시 표시를
+            # 두면 쓰기 비용(1.25×)만 낸다 — 2026-09-16 실측, 그 라운드는 건너뛴다.
+            if cache_results and search_attempts < max_iterations:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
@@ -1297,7 +1328,8 @@ async def _anthropic_nonstream(
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "anthropic", include=not force_final,
-                                              first_turn=search_attempts == 0)
+                                              first_turn=search_attempts == 0,
+                                              budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
             turn_body["messages"] = conversation
             turn_body.pop("stream", None)
@@ -1340,7 +1372,9 @@ async def _anthropic_nonstream(
                     searches_done += 1
                 tool_results.append(
                     _anthropic_tool_result(call.get("id"), result_text, ok, reason))
-            if cache_results:
+            # 마지막 허용 라운드(다음 턴이 force_final)의 결과는 한 번만 보내지므로 캐시 표시를
+            # 두면 쓰기 비용(1.25×)만 낸다 — 2026-09-16 실측, 그 라운드는 건너뛴다.
+            if cache_results and search_attempts < max_iterations:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
             conversation = conversation + [
@@ -1467,7 +1501,8 @@ async def _responses_stream(
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
-                                              first_turn=search_attempts == 0)
+                                              first_turn=search_attempts == 0,
+                                              budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
             # force_final 턴의 배관 제거 — 근거는 anthropic 스티처의 같은 주석 참조.
             turn_body["input"] = (
@@ -1801,7 +1836,8 @@ async def _responses_nonstream(
         while True:
             force_final = search_attempts >= max_iterations or time.monotonic() > deadline
             turn_body = _with_web_search_tool(base_body, "responses", include=not force_final,
-                                              first_turn=search_attempts == 0)
+                                              first_turn=search_attempts == 0,
+                                              budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
             turn_body["input"] = conv_input
             turn_body.pop("stream", None)

@@ -103,5 +103,6 @@ async def test_deadline_already_passed_skips_all_without_calling():
     blk = wsl._anthropic_tool_result("t", *out[0][:2], out[0][3])
     assert blk == {"type": "tool_result", "tool_use_id": "t",
                    "content": "web search deadline exceeded", "is_error": True}
-    item = wsl._responses_call_output("c", "", False, "capped")
-    assert json.loads(item["output"])["error"].startswith("per-turn web search limit")
+    item = wsl._responses_call_output("c", wsl._cap_error(2), False, "capped")
+    assert json.loads(item["output"])["error"].startswith(
+        "per-turn web search limit reached (2 per turn)")
