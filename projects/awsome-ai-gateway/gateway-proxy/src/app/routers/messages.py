@@ -183,7 +183,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
         bedrock_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
         bedrock_body["anthropic_version"] = "bedrock-2023-05-31"
-        sanitize_output_config(bedrock_body, request_id=request_id)
+        sanitize_output_config(bedrock_body, alias=model_alias, request_id=request_id)
         if auth_context and auth_context.sso_subject:
             bedrock_body["metadata"] = {"user_id": auth_context.sso_subject}
         cache_ttl_1h = _has_1h_cache_control(req_data)
@@ -253,7 +253,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # anthropic-version is a HEADER for Mantle (adapter sets it); model goes in body.
         mantle_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
         mantle_body.pop("anthropic_version", None)
-        sanitize_output_config(mantle_body, request_id=request_id)
+        sanitize_output_config(mantle_body, call_model_id, alias=model_alias, request_id=request_id)
         mantle_body["model"] = call_model_id
         # Carry user attribution metadata, same as the Bedrock path (line ~138).
         if auth_context and auth_context.sso_subject:
@@ -355,7 +355,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         if is_mantle:
             mantle_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
             mantle_b.pop("anthropic_version", None)
-            sanitize_output_config(mantle_b, request_id=request_id)
+            sanitize_output_config(mantle_b, cand_config.provider_model_id, request_id=request_id)
             mantle_b["model"] = cand_config.provider_model_id
             if auth_context and auth_context.sso_subject:
                 mantle_b["metadata"] = {"user_id": auth_context.sso_subject}
@@ -382,8 +382,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             bedrock_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
             bedrock_b["anthropic_version"] = "bedrock-2023-05-31"
             # ⚠️ Cowork 의 `output_config.format`(구조화 출력)은 Bedrock 이 거부한다
-            #    — effort 만 남긴다.
-            sanitize_output_config(bedrock_b, request_id=request_id)
+            #    — effort 만 남긴다(haiku 는 지원하므로 그대로).
+            sanitize_output_config(bedrock_b, cand_config.provider_model_id, request_id=request_id)
             if auth_context and auth_context.sso_subject:
                 bedrock_b["metadata"] = {"user_id": auth_context.sso_subject}
             # ⚠️ `thinking` 의 형태를 **후보 모델이 받는 형태로** 맞춘다.
@@ -812,7 +812,7 @@ async def count_tokens(request: Request) -> JSONResponse:
         model_alias = req_data.get("model", "")
         bedrock_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
         bedrock_body["anthropic_version"] = "bedrock-2023-05-31"
-        sanitize_output_config(bedrock_body)
+        sanitize_output_config(bedrock_body, alias=model_alias)
         # Bedrock CountTokens requires max_tokens in the wrapped Anthropic body
         # even though it doesn't generate output; inject a placeholder when absent.
         bedrock_body.setdefault("max_tokens", 1)

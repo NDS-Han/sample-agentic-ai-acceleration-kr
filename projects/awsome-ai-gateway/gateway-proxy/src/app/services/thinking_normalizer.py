@@ -178,24 +178,32 @@ def normalize_thinking(
         return body
 
 
-#: Bedrock 의 Anthropic Messages 가 `output_config` 안에서 받는 키. `effort` 뿐이다 —
-#: `format`(구조화 출력, JSON 스키마)은 2026-09 현재 Bedrock 이 거부한다:
-#:   ValidationException: output_config.format: Extra inputs are not permitted
+#: Bedrock 의 Anthropic Messages 가 `output_config` 안에서 받는 키 — **adaptive 계열**
+#: (opus-4-7/4-8·opus-5·sonnet-5 …) 기준. 2026-09-16 US 실측:
+#:   opus-5 · sonnet-5 + output_config.format
+#:       → 400 "output_config.format: Extra inputs are not permitted"
+#:   haiku-4-5           + output_config.format → 200, 스키마대로 응답(구조화 출력 동작)
+#: 그래서 legacy 계열(haiku)에서는 손대지 않고, adaptive/미상 계열에서만 `format` 을 걷어낸다.
 _BEDROCK_OUTPUT_CONFIG_KEYS = frozenset({"effort"})
 
 
 def sanitize_output_config(
-    body: dict[str, Any], *, request_id: str | None = None
+    body: dict[str, Any],
+    provider_model_id: str | None = None,
+    *,
+    alias: str | None = None,
+    request_id: str | None = None,
 ) -> dict[str, Any]:
     """Bedrock 이 받지 않는 `output_config` 하위 키를 걷어낸다. 같은 dict 를 고쳐서 돌려준다.
 
     왜 필요한가: Cowork 는 `/v1/messages?beta=true` 로 `output_config: {"format": {...}}`
     (구조화 출력)를 보낸다. `output_config` 자체는 `effort` 때문에 허용 필드에 있어서
-    그대로 Bedrock 까지 가는데, Bedrock 은 `format` 을 모른다 → 400 이 그대로 클라이언트에
-    돌아가고 Cowork 는 재시도만 반복한다(2026-09-16 US 실측: 3종목 주가 비교 요청이 400 ×4
-    뒤 실패). `format` 을 빼면 모델은 프롬프트로 형식을 맞추고 요청은 성공한다 — 일부 형식
-    강제를 잃는 것이 400 보다 낫다. 비어 버린 `output_config` 는 통째로 뺀다.
-    Never raises.
+    그대로 Bedrock 까지 가는데, adaptive 계열 모델은 `format` 을 모른다 → 400 이 그대로
+    클라이언트에 돌아가고 Cowork 는 재시도만 반복한다(2026-09-16 US 실측: 3종목 주가 비교
+    요청이 400 ×4 뒤 실패). `format` 을 빼면 모델은 프롬프트로 형식을 맞추고 요청은
+    성공한다 — 일부 형식 강제를 잃는 것이 400 보다 낫다. 비어 버린 `output_config` 는
+    통째로 뺀다. legacy 계열(haiku)은 `format` 을 실제로 지원하므로 그대로 둔다. 계열을
+    모르면 보수적으로 걷어낸다(400 이 기능 손실보다 나쁘다). Never raises.
     """
     try:
         oc = body.get("output_config")
@@ -205,6 +213,9 @@ def sanitize_output_config(
             body.pop("output_config", None)
             logger.info("output_config_sanitized", request_id=request_id, dropped=["<non-object>"])
             return body
+        family = _family(provider_model_id) or _family_from_alias(alias)
+        if family == "legacy":
+            return body
         dropped = [k for k in oc if k not in _BEDROCK_OUTPUT_CONFIG_KEYS]
         if not dropped:
             return body
@@ -213,7 +224,13 @@ def sanitize_output_config(
             body["output_config"] = kept
         else:
             body.pop("output_config", None)
-        logger.info("output_config_sanitized", request_id=request_id, dropped=sorted(dropped))
+        logger.info(
+            "output_config_sanitized",
+            request_id=request_id,
+            provider_model_id=provider_model_id,
+            family=family,
+            dropped=sorted(dropped),
+        )
         return body
     except Exception:
         logger.warning("output_config_sanitize_failed", request_id=request_id)
