@@ -39,12 +39,14 @@ bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
 bash 15-set-master-secret-ref.sh
+bash 17-set-websearch-caps.sh
 ```
 기대:
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
 - `14` 는 지금 `XX` 3~4개(DB 가 아직 옛 마이그레이션 0025 에 있음 · 단가 · system_settings 표 없음)가 **정상**. 목적은 배포 전 숫자를 `snapshots/pre.numbers` 에 남기는 것.
 - `06` 은 `already matches`. 아니면 `--apply`([8-U 0단계](8-U-update.md)).
 - `15` 는 표 3행(masterPasswordRemoteKey · masterPasswordRemoteProperty · masterUser)에 `<- change` 없이 `OK … nothing to do`. 새 차트의 migration Job 은 init SQL·권한 부여를 **DB 마스터 사용자**로 실행하므로, values 가 그 비밀번호를 RDS 가 직접 로테이션하는 시크릿(`rds!cluster-<uuid>`)에서 가져오게 돼 있어야 한다(`database.external.masterPasswordRemoteKey`·`…RemoteProperty`). `<- change` 가 있으면 `bash 15-set-master-secret-ref.sh --apply`(백업 후 삽입, helm 렌더로 검증) — 없이 ⑦ 을 돌리면 migration Job 이 5분 타임아웃으로 죽는다.
+- `17` 은 표 4행(web search 결과 크기·결과 수·턴당 검색 수·반복 수)이 `<- change` 면 `bash 17-set-websearch-caps.sh --apply`(백업 후 values 에 삽입, helm 렌더로 검증). ⑦ 의 롤아웃에서 적용된다. 검색 결과가 다음 턴 입력으로 되돌아와 반복마다 과금되는 구조라, 기본값(60,000자·10개·4회·5회)으로는 검색 질문 1건이 $3 를 넘긴다(2026-09-16 실측 $3.62) — 12,000자·5개·2회·3회면 약 $1.5 이하. 값은 `config.env` 의 `WEB_SEARCH_MAX_*`.
 - 단가의 정본은 **파일 하나** — `docs/us-llm-gateway/update-scripts/pricing.tsv`(alias 별 입력·출력·캐시 단가, /1K, US `us.` Standard 티어). `14` 와 `08` 은 이 파일과 DB 를 비교한다. 다른 리전·티어로 청구받는 배포라면 **⑧ 전에** 이 파일을 자기 청구 단가로 고친다(`asof`·`source` 열 포함) — 그러면 `08` 은 "차이 없음", `14` 는 OK.
 
 ## ③ DB 스냅샷 — 되돌리기의 기준점
@@ -204,8 +206,9 @@ bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
 bash 15-set-master-secret-ref.sh
+bash 17-set-websearch-caps.sh
 ```
-기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15` 는 `nothing to do`(아니면 `--apply`).
+기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15`·`17` 은 `nothing to do`(아니면 `--apply`).
 
 **⑩-③ DB 스냅샷**
 ▶ 실행
