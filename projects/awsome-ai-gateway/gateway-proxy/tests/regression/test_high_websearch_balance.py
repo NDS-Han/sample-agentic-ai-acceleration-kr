@@ -153,3 +153,105 @@ async def test_stream_invoke_gives_up_after_the_second_connection_error():
     assert status == 502 and client.invoke_model_with_response_stream.call_count == 2
     body = b"".join([c async for c in gen])
     assert b"provider_error" in body
+
+
+# ─── 본문 없는 최종 턴은 한 번만 재촉 (2026-09-17 Cowork 실측: thinking 6k, 텍스트 0) ─────
+
+
+def _thinking_only_turn():
+    return [
+        _raw({"type": "message_start", "message": {"usage": {"input_tokens": 10}}}),
+        _raw({"type": "content_block_start", "index": 0,
+              "content_block": {"type": "thinking", "thinking": ""}}),
+        _raw({"type": "content_block_delta", "index": 0,
+              "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+        _raw({"type": "content_block_delta", "index": 0,
+              "delta": {"type": "signature_delta", "signature": "sig"}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+              "usage": {"output_tokens": 500}}),
+        _raw({"type": "message_stop"}),
+    ]
+
+
+async def _run_turns(turns, max_iterations=1):
+    bodies = []
+
+    async def invoke_stream(body):
+        bodies.append(json.loads(json.dumps(body)))
+        frames = turns.pop(0)
+
+        async def gen():
+            for f in frames:
+                yield f
+
+        return 200, gen(), {}, None
+
+    async def on_usage(_u):
+        pass
+
+    out = b""
+    async for chunk in wsl._anthropic_stream(
+        invoke_stream=invoke_stream, base_body={"messages": [{"role": "user", "content": "q"}]},
+        mcp_client=_Mcp(), request=None, on_usage=on_usage, max_iterations=max_iterations,
+        deadline=asyncio.get_event_loop().time() + 999, default_max_results=5,
+    ):
+        out += chunk
+    return bodies, out
+
+
+async def test_stream_empty_final_turn_is_nudged_once_then_answer_flows():
+    bodies, out = await _run_turns([_search_turn(1), _thinking_only_turn(), _final()])
+    assert len(bodies) == 3, [b.get("tool_choice") for b in bodies]
+    nudge_msg = bodies[2]["messages"][-1]
+    texts = [b["text"] for b in nudge_msg["content"] if b.get("type") == "text"]
+    assert texts[0] == wsl._FINAL_TURN_TEXT_NUDGE and texts[-1] == wsl._FINAL_TURN_ANSWER_NOW
+    assert bodies[2]["messages"][-2]["content"][0]["type"] == "thinking", (
+        "thinking 턴은 이력에 남긴다")
+    assert bodies[2]["tool_choice"] == {"type": "none"}
+    assert b"answer" in out and b'"stop_reason": "end_turn"' in out
+
+
+async def test_stream_empty_final_turn_is_nudged_only_once():
+    bodies, out = await _run_turns([_search_turn(1), _thinking_only_turn(), _thinking_only_turn()])
+    assert len(bodies) == 3, "재촉은 한 번 — 두 번째도 비면 그대로 끝낸다"
+    assert b'"stop_reason": "end_turn"' in out
+
+
+async def test_nonstream_empty_final_turn_is_nudged_once():
+    bodies = []
+    turns = [
+        {"stop_reason": "tool_use",
+         "content": [{"type": "tool_use", "id": "t1", "name": GW, "input": {"query": "q"}}],
+         "usage": {"input_tokens": 10, "output_tokens": 5}},
+        {"stop_reason": "end_turn",
+         "content": [{"type": "thinking", "thinking": "", "signature": "s"}],
+         "usage": {"input_tokens": 10, "output_tokens": 500}},
+        {"stop_reason": "end_turn", "content": [{"type": "text", "text": "answer"}],
+         "usage": {"input_tokens": 10, "output_tokens": 3}},
+    ]
+    from app.schemas.domain import TokenUsage
+
+    async def invoke(body):
+        bodies.append(json.loads(json.dumps(body)))
+        return (200, json.dumps(turns.pop(0)).encode(), {},
+                TokenUsage(input_tokens=10, output_tokens=5))
+
+    async def on_usage(_u):
+        pass
+
+    resp = await wsl._anthropic_nonstream(
+        invoke=invoke, base_body={"messages": [{"role": "user", "content": "q"}]},
+        mcp_client=_Mcp(), on_usage=on_usage, max_iterations=1,
+        deadline=asyncio.get_event_loop().time() + 999, default_max_results=5,
+    )
+    body = json.loads(bytes(resp.body))
+    assert len(bodies) == 3 and [b["type"] for b in body["content"]][-1] == "text"
+    assert body["content"][-1]["text"] == "answer"
+    assert bodies[2]["messages"][-1]["content"][0]["text"] == wsl._FINAL_TURN_TEXT_NUDGE
+
+
+def test_tool_description_tells_the_model_history_traces_are_genuine():
+    d = wsl._anthropic_tool_def()["description"]
+    assert "inserted by the gateway" in d and "genuine evidence" in d and "never 'discard'" in d
+    assert "Do not compose such lines yourself" in d

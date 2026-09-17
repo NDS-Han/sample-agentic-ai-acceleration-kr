@@ -62,10 +62,13 @@ _WEB_SEARCH_DESCRIPTION = (
     "already have unless the first result was empty or contradictory. "
     # 흔적 줄 모방 금지 — 모델이 이력에서 본 흔적 형식을 따라 써서 검색 없이 "검색함" 을
     # 주장했다(2026-09-16 실측, 요청 3건 중 1건). 출력 필터(_TraceLineFilter)가 2차 방어.
-    "The gateway itself appends a transcript line starting with '🔎 [gateway web_search]' "
-    "after each real search; it records a search whose FULL results were shown to you in "
-    "that turn, so on later requests treat those lines as your own evidence. Never write "
-    "such lines yourself — to search, call this tool."
+    # 2026-09-17 실측: "never write such lines yourself" 만 있으니 모델이 이력 속 게이트웨이 흔적을
+    # 자기 위반으로 읽고 "가짜였다, 폐기한다" 며 재검색했다(9회 전부 실제 검색). 이력의 줄은
+    # 게이트웨이가 넣은 진짜 기록임을 먼저 말해 준다.
+    "Lines starting with '🔎 [gateway web_search]' that appear in your EARLIER messages were "
+    "inserted by the gateway: each records a real search you made, whose full results were "
+    "shown to you in that turn. They are genuine evidence — never 'discard' them or apologize "
+    "for them. Do not compose such lines yourself; to search, call this tool."
 )
 
 # The loop passes the LOGICAL turn body (a dict: messages/input + tools + stream flag).
@@ -211,6 +214,10 @@ _FINAL_TURN_TOOL_NOTE = "[web search results provided below; no further searches
 #: force_final 턴의 마지막 user 메시지 끝에 붙이는 지시. 2026-09-16 US 실측: 후속 검색 턴에
 #: 텍스트 없이 thinking+tool_use 만 있던 assistant 메시지가 strip 뒤 thinking 만 남고, 마지막
 #: user 메시지는 결과 JSON 뿐이라 모델(Opus 5)이 `<br>` 한 글자로 답했다(검색 4회 과금 뒤 답 없음).
+#: 최종 턴이 thinking 만 내고 본문이 없을 때(2026-09-17 Cowork 실측: thinking 6k 토큰, 텍스트 0 →
+#: 화면이 빈 채 멈춤) 한 번만 더 재촉하는 문구. 두 번째도 비면 그대로 돌려준다(무한 루프 금지).
+_FINAL_TURN_TEXT_NUDGE = ("[Your previous turn contained no visible text. Write the final answer "
+                          "now as plain text.]")
 _FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request; "
                           "no further searches can be made. Write the final answer now.]")
 
@@ -965,6 +972,7 @@ async def _anthropic_stream(
     """
     merged = TokenUsage()
     first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
+    nudged = False           # empty force_final turn re-prompted once (_FINAL_TURN_TEXT_NUDGE)
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0        # successful searches → web_search_count (billing/attribution)
     search_attempts = 0      # ALL search rounds incl. failures → loop guard (F-5)
@@ -1019,6 +1027,7 @@ async def _anthropic_stream(
             #: 아예 열지 않는다 — 빈 text 블록을 클라이언트가 되돌려 보내면 Bedrock 400).
             text_filters: dict[int, _TraceLineFilter] = {}
             text_start_ev: dict[int, dict] = {}
+            turn_visible = False   # any client-visible text or client tool this turn
             thinking_buf: dict[int, dict] = {}
             pending_searches: list[dict] = []   # [{id, name, input}] — support MANY per turn (F-3)
             client_tool_present = False
@@ -1056,6 +1065,7 @@ async def _anthropic_stream(
                     elif _is_client_tool_use_block(block):
                         # CLIENT tool — terminal; forward re-indexed, buffer args to rebuild.
                         client_tool_present = True
+                        turn_visible = True
                         gi = global_index
                         global_index += 1
                         local_to_global[idx] = gi
@@ -1114,6 +1124,7 @@ async def _anthropic_stream(
                         emit = text_filters[idx].feed(raw)
                         if not emit:
                             continue
+                        turn_visible = True
                         if idx not in local_to_global:   # first visible text → open the block now
                             gi = global_index
                             global_index += 1
@@ -1234,6 +1245,16 @@ async def _anthropic_stream(
             is_search_turn = (
                 bool(pending_searches) and not client_tool_present and not error_seen
             )
+            # 최종 턴이 thinking 만 내고 본문이 없으면 한 번만 재촉한다(_FINAL_TURN_TEXT_NUDGE).
+            if (force_final and not turn_visible and not pending_searches and not nudged
+                    and not error_seen and saw_message_delta and assistant_content):
+                nudged = True
+                logger.info("web_search.final_turn_empty_nudge")
+                conversation = conversation + [
+                    {"role": "assistant", "content": assistant_content},
+                    {"role": "user", "content": [{"type": "text", "text": _FINAL_TURN_TEXT_NUDGE}]},
+                ]
+                continue
             if not is_search_turn or force_final:
                 # 상류가 중간에 죽어 열린 채 남은 블록을 닫는다 — 열린 채 끝나면 SDK 쪽에서
                 # 파싱 오류로 보이고, 원인이 게이트웨이인지 상류인지 구분되지 않는다.
@@ -1406,6 +1427,7 @@ async def _anthropic_nonstream(
 
     merged = TokenUsage()
     first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
+    nudged = False           # empty force_final turn re-prompted once (_FINAL_TURN_TEXT_NUDGE)
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
@@ -1452,6 +1474,17 @@ async def _anthropic_nonstream(
             client_calls = [b for b in content if _is_client_tool_use_block(b)]
             our_tool_use_ids.update(c.get("id") for c in our_calls if c.get("id"))
 
+            if force_final and not nudged and not client_calls and not our_calls and content and not any(
+                isinstance(b, dict) and b.get("type") == "text" and (b.get("text") or "").strip()
+                for b in content
+            ):
+                nudged = True
+                logger.info("web_search.final_turn_empty_nudge")
+                conversation = conversation + [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": [{"type": "text", "text": _FINAL_TURN_TEXT_NUDGE}]},
+                ]
+                continue
             if force_final or not our_calls or client_calls:
                 break  # terminal — return this body
 
