@@ -47,7 +47,8 @@ class _Mcp:
             raise AgentCoreMcpError("connector down")
 
         class _R:
-            raw_text = self.raw
+            # 증거 집합은 provider 의 raw JSON 에서 만든다(1.0.76) — 가짜도 같은 데이터를 두 곳에 둔다.
+            raw_text = self.raw if self.results is None else json.dumps({"results": self.results})
 
         if self.results is not None:
             _R.results = self.results
