@@ -57,7 +57,7 @@ async def test_do_search_trims_then_caps_and_keeps_the_trace():
                 results = [{"url": "https://a.com", "title": "t"}]
             return _R()
 
-    text, ok, trace = await wsl._do_search(_Mcp(), {"query": "q"}, 5, 0, 300)
+    text, ok, trace, _digest = await wsl._do_search(_Mcp(), {"query": "q"}, 5, 0, 300)
     assert ok and len(json.loads(text)["results"][0]["text"]) <= 302
     assert trace.startswith(wsl._TRACE_PREFIX) and "a.com" in trace
 

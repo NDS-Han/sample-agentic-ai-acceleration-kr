@@ -42,6 +42,7 @@ from app.services.router_service import RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
 from app.services.thinking_normalizer import normalize_thinking, sanitize_output_config
 from app.services.tool_filter import strip_unsupported_tools
+from app.services.web_search_loop import normalize_inbound_native_blocks
 
 logger = structlog.get_logger(__name__)
 
@@ -178,6 +179,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     try:
         req_data = json.loads(body)
+        # 탐침(native 검색 흔적): 클라이언트가 우리 server_tool_use/web_search_tool_result 블록을
+        # 이력에 실어 되돌리면 Bedrock 이 모르는 형태라 400 이다. 웹서치 루프를 타지 않는 요청
+        # (프로파일 토글 off·MCP 미설정·폴백 루프·보조 모델 요청)도 지나가는 이 지점에서 환원한다.
+        # 블록이 없으면 같은 객체를 돌려주므로 다른 요청은 바이트 단위로 같다.
+        if isinstance(req_data, dict):
+            req_data = normalize_inbound_native_blocks(req_data)
         model_alias = req_data.get("model", "")
         is_stream = req_data.get("stream", False)
 
@@ -811,6 +818,9 @@ async def count_tokens(request: Request) -> JSONResponse:
 
     try:
         req_data = json.loads(body)
+        # 되돌아온 native 검색 블록은 CountTokens 도 거부한다 — /v1/messages 와 같은 환원.
+        if isinstance(req_data, dict):
+            req_data = normalize_inbound_native_blocks(req_data)
         model_alias = req_data.get("model", "")
         bedrock_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
         bedrock_body["anthropic_version"] = "bedrock-2023-05-31"
