@@ -16,6 +16,8 @@
 #
 # Targets come from config.env (WEB_SEARCH_MAX_RESULT_CHARS etc.); unset means
 # the defaults below. Takes effect at the next install-eks.sh <env> (rollout).
+# Also carries WEB_SEARCH_TRACE_MODE (text | native — the 2026-09-17 native-block
+# probe for Cowork); same mechanism, string-valued.
 #
 # Usage:
 #   bash 17-set-websearch-caps.sh                 # dry-run
@@ -40,10 +42,15 @@ load_config
 : "${WEB_SEARCH_MAX_RESULTS_DEFAULT:=5}"
 : "${WEB_SEARCH_MAX_SEARCHES_PER_TURN:=3}"
 : "${WEB_SEARCH_MAX_ITERATIONS:=2}"
+: "${WEB_SEARCH_TRACE_MODE:=text}"
 KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS)
+STR_KEYS=(WEB_SEARCH_TRACE_MODE)
+ALL_KEYS=("${KEYS[@]}" "${STR_KEYS[@]}")
 declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=60000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=10
-                          [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5 )
+                          [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5
+                          [WEB_SEARCH_TRACE_MODE]=text )
 for k in "${KEYS[@]}"; do [[ "${!k}" =~ ^[0-9]+$ ]] || die "$k must be an integer (config.env): ${!k}"; done
+for k in "${STR_KEYS[@]}"; do [[ "${!k}" =~ ^(text|native)$ ]] || die "$k must be text|native (config.env): ${!k}"; done
 
 ROOT="$(cd "$LIB_DIR/../../.." && pwd)"
 CHART="$ROOT/deployment/charts/llm-gateway"
@@ -55,7 +62,7 @@ render_env() {   # <values> → "KEY value" for the gateway-proxy Deployment env
   helm template t "$CHART" -f "$1" 2>/dev/null | awk '
     /^kind: Deployment/ { dep=1 } /^kind: / && !/Deployment/ { dep=0 }
     /^  name: .*gateway-proxy$/ && dep { gp=1 } /^  name: / && !/gateway-proxy$/ { gp=0 }
-    gp && /- name: WEB_SEARCH_MAX_/ { k=$3 } gp && k!="" && /value:/ { v=$2; gsub(/"/,"",v); print k, v; k="" }'
+    gp && /- name: WEB_SEARCH_/ { k=$3 } gp && k!="" && /value:/ { v=$2; gsub(/"/,"",v); print k, v; k="" }'
 }
 declare -A CUR
 while read -r k v; do CUR[$k]=$v; done < <(render_env "$V")
@@ -63,7 +70,7 @@ while read -r k v; do CUR[$k]=$v; done < <(render_env "$V")
 hdr "web search caps — $(basename "$V") (rendered) vs target"
 printf '  %-34s %-24s %s\n' "key" "rendered now" "target"
 CHANGES=0
-for k in "${KEYS[@]}"; do
+for k in "${ALL_KEYS[@]}"; do
   cur="${CUR[$k]:-}"; want="${!k}"; shown="${cur:-(unset -> code default ${CODE_DEFAULT[$k]})}"
   if [ "$cur" = "$want" ]; then printf '  %-34s %-24s %s\n' "$k" "$shown" "$want"
   else printf '  %-34s %-24s %s  <- change\n' "$k" "$shown" "$want"; CHANGES=$((CHANGES+1)); fi
@@ -89,7 +96,7 @@ note "backup: $BAK"
 # Pass 2: rewrite existing keys in place; insert missing ones after
 # WEB_SEARCH_ENABLED (or right after `  env:` if that anchor is absent).
 TMP=$(mktemp); trap 'rm -f "$TMP"' EXIT
-awk -v map="$(for k in "${KEYS[@]}"; do printf '%s=%s;' "$k" "${!k}"; done)" '
+awk -v map="$(for k in "${ALL_KEYS[@]}"; do printf '%s=%s;' "$k" "${!k}"; done)" '
 BEGIN { n = split(map, kv, ";"); for (i = 1; i <= n; i++) { if (kv[i] == "") continue; split(kv[i], p, "="); want[p[1]] = p[2] } }
 function line(k) { return "    " k ": \"" want[k] "\"" }
 function emit_missing(   k) { for (k in want) if (!has[k] && !done[k]) { print line(k); done[k] = 1 } }
@@ -123,11 +130,11 @@ END { if (top == "gatewayProxy" && sub2 == "env") emit_missing() }
 declare -A NEW
 while read -r k v; do NEW[$k]=$v; done < <(render_env "$TMP")
 bad_n=0
-for k in "${KEYS[@]}"; do [ "${NEW[$k]:-}" = "${!k}" ] || { bad "$k renders ${NEW[$k]:-(unset)}, expected ${!k}"; bad_n=$((bad_n+1)); }; done
+for k in "${ALL_KEYS[@]}"; do [ "${NEW[$k]:-}" = "${!k}" ] || { bad "$k renders ${NEW[$k]:-(unset)}, expected ${!k}"; bad_n=$((bad_n+1)); }; done
 [ "$bad_n" -eq 0 ] || die "edited values do not render the target caps — live file untouched (backup: $BAK)"
 echo "  changed lines (backup -> new):"; diff "$BAK" "$TMP" | grep -E '^[<>]' | sed 's/^/    /'
 cp "$TMP" "$V" || die "could not write $V"
-ok "values updated: $V (helm renders all four caps)"
+ok "values updated: $V (helm renders all ${#ALL_KEYS[@]} keys)"
 
 hdr "Next steps"
 cat <<EOT

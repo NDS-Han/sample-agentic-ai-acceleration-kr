@@ -30,8 +30,10 @@ Interception rule (both dialects):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -60,6 +62,11 @@ _WEB_SEARCH_DESCRIPTION = (
     "Prefer ONE focused query per fact; results are capped in size and count, so pick "
     "the query carefully instead of issuing several. Do not search again for a fact you "
     "already have unless the first result was empty or contradictory. "
+    # 회사별 분리 — 2026-09-17 Cowork 실측: "SMIC UMC GlobalFoundries Q2 2026" 처럼 묶어 검색해
+    # 한 회사 결과만 얻고 나머지는 추정치로 채웠다(6사 표에서 2사만 실측). 예산 문장과 함께 읽힌다.
+    "When a question covers several companies, products, or other entities, use one query "
+    "per entity rather than one combined query — a combined query returns results for only "
+    "some of them. "
     # 흔적 줄 모방 금지 — 모델이 이력에서 본 흔적 형식을 따라 써서 검색 없이 "검색함" 을
     # 주장했다(2026-09-16 실측, 요청 3건 중 1건). 출력 필터(_TraceLineFilter)가 2차 방어.
     # 2026-09-17 실측: "never write such lines yourself" 만 있으니 모델이 이력 속 게이트웨이 흔적을
@@ -647,8 +654,9 @@ def _cap_error(limit: int) -> str:
 async def _run_turn_searches(
     mcp_client: AgentCoreMcpClient, inputs: list, allowance: int, deadline: float,
     default_max_results: int, max_result_chars: int, result_text_chars: int,
-) -> list[tuple[str, bool, str, Optional[str]]]:
-    """Run one turn's searches CONCURRENTLY; return (result_text, ok, trace, reason) per
+) -> list[tuple[str, bool, str, str | None, list[dict] | None]]:
+    """Run one turn's searches CONCURRENTLY; return (result_text, ok, trace, reason, digest)
+    per
     input, in input order. ``reason`` is None (ran), "capped" (over the per-turn limit) or
     "deadline" (total deadline already passed) — the loops turn those into the
     dialect's error payload so every tool_use still gets exactly one result.
@@ -664,16 +672,16 @@ async def _run_turn_searches(
         q = inp.get("query", "") if isinstance(inp, dict) else ""
         if i >= allowance:
             results[i] = (_cap_error(allowance), False, _trace_line(q, _trace_words("capped")),
-                          "capped")
+                          "capped", None)
         elif past_deadline:
-            results[i] = ("", False, _trace_line(q, _trace_words("deadline")), "deadline")
+            results[i] = ("", False, _trace_line(q, _trace_words("deadline")), "deadline", None)
         else:
             todo.append((i, _do_search(mcp_client, inp if isinstance(inp, dict) else {},
                                        default_max_results, max_result_chars, result_text_chars)))
     if todo:
         done = await asyncio.gather(*(c for _, c in todo))
-        for (i, _), (text, ok, trace) in zip(todo, done):
-            results[i] = (text, ok, trace, None)
+        for (i, _), (text, ok, trace, digest) in zip(todo, done):
+            results[i] = (text, ok, trace, None, digest)
     return results
 
 
@@ -811,6 +819,11 @@ def _trace_words(kind: str, **kw: Any) -> str:
         return (f"실패 ({why})" if why else "실패") if ko else (f"failed ({why})" if why else "failed")
     if kind == "capped":
         return "건너뜀 (턴당 상한)" if ko else "skipped (per-turn limit)"
+    if kind == "mixed":
+        if ko:
+            return "실행 안 됨 (클라이언트 도구와 같은 턴 — 다음 턴에 web_search 단독 호출)"
+        return ("not run (called in the same turn as a client tool — call web_search on its "
+                "own next turn)")
     return "건너뜀 (마감)" if ko else "skipped (deadline)"
 
 
@@ -822,6 +835,178 @@ def _trace_line(query: str, outcome: str) -> str:
     if len(q) > 80:
         q = q[:77] + "…"
     return f'{_TRACE_PREFIX} "{q}" — {outcome}'
+
+
+#: ── native 흔적(탐침, 2026-09-17) ──────────────────────────────────────────────
+#: 텍스트 흔적은 모델에게 "내가 쓴 글" 이라 캐물으면 부정하고(실제 흔적 12줄이 있어도 "검색 0건"),
+#: 클라이언트 도구와 같은 메시지에 실리면 모양을 복사해 검색 없이 흔적만 쓴다(한 세션 4회).
+#: Anthropic 네이티브 검색 블록(server_tool_use + web_search_tool_result)은 모델이 만들 수 없는
+#: "도구 기록" 이다. WEB_SEARCH_TRACE_MODE=native 이고 클라이언트 플랫폼이 허용 목록에 있을 때만
+#: 이 형태로 남긴다. 결과 발췌는 API 가 불투명 재전송용으로 정의한 encrypted_content 에 싣는다.
+#: 되돌아온 블록은 _normalize_inbound_native_blocks 가 텍스트 흔적으로 환원한다(탐침 단계).
+_NATIVE_TOOL_USE = "server_tool_use"
+_NATIVE_TOOL_RESULT = "web_search_tool_result"
+_DIGEST_RESULTS = 5
+_DIGEST_SNIPPET_CHARS = 200
+
+
+def _trace_mode() -> tuple[str, frozenset[str]]:
+    """("text" | "native", allowed anthropic-client-platform values; empty = all)."""
+    try:
+        from app.config import get_settings
+        s = get_settings()
+        mode = (getattr(s, "web_search_trace_mode", "text") or "text").strip().lower()
+        raw = getattr(s, "web_search_trace_native_platforms", "") or ""
+        plats = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+        return mode, plats
+    except Exception:  # settings unavailable (tests) → text
+        return "text", frozenset()
+
+
+def _native_trace_enabled(request: Any) -> bool:
+    mode, platforms = _trace_mode()
+    if mode != "native":
+        return False
+    if not platforms:
+        return True
+    headers = getattr(request, "headers", None)
+    try:
+        platform = (headers.get("anthropic-client-platform") or "") if headers else ""
+    except Exception:
+        platform = ""
+    return str(platform).strip().lower() in platforms
+
+
+def _result_digest(resp: Any, limit: int = _DIGEST_RESULTS,
+                   snippet_chars: int = _DIGEST_SNIPPET_CHARS) -> list[dict]:
+    """[{title, url, snippet, page_age}] × ≤limit from a WebSearchResponse-like object."""
+    items = getattr(resp, "results", None)
+    if items is None:
+        try:
+            data = json.loads(getattr(resp, "raw_text", "") or "")
+            items = data.get("results", data) if isinstance(data, dict) else data
+        except (ValueError, TypeError):
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for it in items:
+        if isinstance(it, dict):
+            def get(k, _it=it):
+                return _it.get(k)
+        else:
+            def get(k, _it=it):
+                return getattr(_it, k, None)
+        body = get("text") if get("text") is not None else get("content")
+        snippet = " ".join(str(body or "").split())[:snippet_chars]
+        age = get("published_date") or get("page_age")
+        out.append({"title": str(get("title") or ""), "url": str(get("url") or ""),
+                    "snippet": snippet, "page_age": str(age) if age else None})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _native_search_blocks(query: str, ok: bool, reason: str | None,
+                          digest: list[dict] | None) -> list[dict]:
+    """[server_tool_use, web_search_tool_result] for one search, in the API's shape."""
+    srv_id = "srvtoolu_" + uuid.uuid4().hex[:24]
+    use = {"type": _NATIVE_TOOL_USE, "id": srv_id, "name": GW_WEB_SEARCH_NAME,
+           "input": {"query": query}}
+    if ok and digest is not None:
+        content: Any = [
+            {"type": "web_search_result", "title": d.get("title") or "",
+             "url": d.get("url") or "",
+             "encrypted_content": base64.b64encode(json.dumps(
+                 {"gw": 1, "snippet": d.get("snippet") or ""}, ensure_ascii=False,
+             ).encode("utf-8")).decode("ascii"),
+             "page_age": d.get("page_age")}
+            for d in digest
+        ]
+    else:
+        content = {"type": "web_search_tool_result_error",
+                   "error_code": "max_uses_exceeded" if reason == "capped" else "unavailable"}
+    return [use, {"type": _NATIVE_TOOL_RESULT, "tool_use_id": srv_id, "content": content}]
+
+
+def _native_block_frames(gi: int, blk: dict) -> list[bytes]:
+    """SSE frames for one native block at envelope index ``gi`` — server_tool_use streams its
+    input as input_json_delta (like tool_use); the result block arrives whole in start."""
+    if blk.get("type") == _NATIVE_TOOL_USE:
+        partial = json.dumps(blk.get("input") or {}, ensure_ascii=False)
+        return [
+            _sse("content_block_start", {"type": "content_block_start", "index": gi,
+                                         "content_block": {**blk, "input": {}}}),
+            _sse("content_block_delta", {"type": "content_block_delta", "index": gi,
+                                         "delta": {"type": "input_json_delta",
+                                                   "partial_json": partial}}),
+            _sse("content_block_stop", {"type": "content_block_stop", "index": gi}),
+        ]
+    return [
+        _sse("content_block_start", {"type": "content_block_start", "index": gi,
+                                     "content_block": blk}),
+        _sse("content_block_stop", {"type": "content_block_stop", "index": gi}),
+    ]
+
+
+def _inbound_outcome(result: dict | None) -> str:
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list):
+        class _R:  # _result_hosts reads .results
+            results = content
+        n, hosts = _result_hosts(_R())
+        return _trace_words("results", n=n, hosts=hosts)
+    if isinstance(content, dict):
+        return _trace_words("failed", why=str(content.get("error_code") or "")[:60])
+    return _trace_words("failed")
+
+
+def _normalize_inbound_native_blocks(body: dict) -> dict:
+    """Probe stage: our native search blocks echoed back by the client → text trace lines.
+
+    Bedrock knows neither block type, so leaving them in is a 400. Returns the SAME object
+    when nothing was found (byte-identical path for everyone else). Logs how many came back —
+    that count is the probe's answer ("does Cowork replay server blocks?").
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return body
+    n_use = n_res = 0
+    new_msgs: list = []
+    for m in msgs:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list) or not any(
+            isinstance(b, dict) and b.get("type") in (_NATIVE_TOOL_USE, _NATIVE_TOOL_RESULT)
+            for b in content
+        ):
+            new_msgs.append(m)
+            continue
+        results = {b.get("tool_use_id"): b for b in content
+                   if isinstance(b, dict) and b.get("type") == _NATIVE_TOOL_RESULT}
+        out: list = []
+        for b in content:
+            t = b.get("type") if isinstance(b, dict) else None
+            if t == _NATIVE_TOOL_USE:
+                n_use += 1
+                q = str((b.get("input") or {}).get("query") or "")
+                out.append({"type": "text",
+                            "text": _trace_line(q, _inbound_outcome(results.get(b.get("id"))))})
+            elif t == _NATIVE_TOOL_RESULT:
+                n_res += 1
+            else:
+                out.append(b)
+        if not out:   # result blocks without their tool_use — never leave an empty message
+            out = [{"type": "text", "text": _trace_line("", _trace_words("failed"))}]
+        new_msgs.append({**m, "content": out})
+    if not (n_use or n_res):
+        return body
+    logger.info("web_search.inbound_native_blocks", server_tool_use=n_use, tool_result=n_res)
+    return {**body, "messages": new_msgs}
+
+
+#: 라우터용 공개 이름 — 루프를 타지 않는 요청(프로파일 토글 off·MCP 미설정·count_tokens·하이쿠
+#: 보조 요청)도 되돌아온 블록을 Bedrock 에 그대로 보내면 400 이라, 본문 파싱 직후 한 번 더 부른다.
+normalize_inbound_native_blocks = _normalize_inbound_native_blocks
 
 
 def _result_hosts(resp) -> tuple[int, list[str]]:
@@ -902,8 +1087,9 @@ def _trim_results(text: str, per_result_chars: int) -> tuple[str, bool]:
 async def _do_search(
     mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int,
     max_result_chars: int = 0, result_text_chars: int = 0,
-) -> tuple[str, bool, str]:
-    """Run one web search. Returns (result_text_for_model, ok, trace_line). Never raises —
+) -> tuple[str, bool, str, list[dict] | None]:
+    """Run one web search. Returns (result_text_for_model, ok, trace_line, digest). Never
+    raises —
     on failure returns an error string so the model can continue from its own knowledge.
     ``trace_line`` is the one-line evidence the loops leave in the CLIENT-facing output
     (see _TRACE_PREFIX).
@@ -936,15 +1122,16 @@ async def _do_search(
                 cap=max_result_chars,
             )
         n, hosts = _result_hosts(resp)
-        return text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts))
+        return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)),
+                _result_digest(resp))
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
-                _trace_line(query, _trace_words("failed", why=str(e)[:60])))
+                _trace_line(query, _trace_words("failed", why=str(e)[:60])), None)
     except Exception as e:  # defensive — never kill the stream
         logger.exception("web_search.unexpected")
         return (json.dumps({"error": f"web search error: {str(e)[:160]}"}), False,
-                _trace_line(query, _trace_words("failed")))
+                _trace_line(query, _trace_words("failed")), None)
 
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -964,6 +1151,7 @@ async def _anthropic_stream(
     max_searches_per_turn: int = 0,
     cache_results: bool = True,
     result_text_chars: int = 0,
+    native_trace: bool = False,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -1059,7 +1247,9 @@ async def _anthropic_stream(
                     block = ev.get("content_block") or {}
                     btype = block.get("type")
                     if btype == "tool_use" and block.get("name") == GW_WEB_SEARCH_NAME:
-                        # OUR search — suppress, buffer input JSON.
+                        # OUR search — suppress, buffer input JSON. (정확히 "tool_use" 만 본다:
+                        # Bedrock 은 server_tool_use 를 내지 않고, 우리 native 블록은 이 스티처가
+                        # 검색 뒤에 따로 만든다 — _native_block_frames.)
                         suppressed[idx] = {"kind": "web_search", "buf": "",
                                            "id": block.get("id"), "name": block.get("name")}
                     elif _is_client_tool_use_block(block):
@@ -1256,6 +1446,24 @@ async def _anthropic_stream(
                 ]
                 continue
             if not is_search_turn or force_final:
+                # 섞인 턴(클라이언트 도구 + 우리 검색)은 검색을 실행하지 않고 넘긴다(계약).
+                # 그 검색이 조용히 사라지면 모델은 다음 요청에서 검색됐다고 믿거나 재요청에
+                # 요청 2건을 쓴다(2026-09-17 Cowork 실측) — "실행 안 됨" 흔적을 남긴다.
+                # native 모드는 블록만 쓴다.
+                if (pending_searches and client_tool_present and not error_seen
+                        and saw_message_delta and envelope_open and not native_trace):
+                    lines = [_trace_line((ps.get("input") or {}).get("query", ""),
+                                         _trace_words("mixed")) for ps in pending_searches]
+                    gi = global_index
+                    global_index += 1
+                    yield _sse("content_block_start",
+                               {"type": "content_block_start", "index": gi,
+                                "content_block": {"type": "text", "text": ""}})
+                    yield _sse("content_block_delta",
+                               {"type": "content_block_delta", "index": gi,
+                                "delta": {"type": "text_delta",
+                                          "text": "\n" + "\n".join(lines) + "\n"}})
+                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
                 # 상류가 중간에 죽어 열린 채 남은 블록을 닫는다 — 열린 채 끝나면 SDK 쪽에서
                 # 파싱 오류로 보이고, 원인이 게이트웨이인지 상류인지 구분되지 않는다.
                 for gi in sorted(open_global_blocks):
@@ -1348,17 +1556,30 @@ async def _anthropic_stream(
                     requested=len(pending_searches), allowed=allowance,
                 )
             traces: list[str] = []   # one line per search → client-visible evidence
+            native_blocks: list[dict] = []   # native mode: server_tool_use + result per search
             outcomes = await _run_turn_searches(
                 mcp_client, [ps.get("input") or {} for ps in pending_searches], allowance,
                 deadline, default_max_results, max_result_chars, result_text_chars)
-            for ps, (result_text, ok, trace, reason) in zip(pending_searches, outcomes):
+            for ps, (result_text, ok, trace, reason, digest) in zip(pending_searches, outcomes):
                 traces.append(trace)
                 if ok:
                     searches_done += 1
                 tool_results.append(_anthropic_tool_result(ps["id"], result_text, ok, reason))
-            # 검색 흔적을 클라이언트 봉투에 텍스트 블록 하나로 남긴다(근거: _TRACE_PREFIX 주석).
-            # 내부 대화에는 넣지 않는다 — 거기엔 진짜 tool_use/tool_result 가 있다.
-            if traces and envelope_open:
+                if native_trace:
+                    native_blocks.extend(_native_search_blocks(
+                        (ps.get("input") or {}).get("query", ""), ok, reason, digest))
+            # 검색 흔적을 클라이언트 봉투에 남긴다 — native 모드는 블록 쌍, 아니면 텍스트 블록 하나
+            # (근거: _TRACE_PREFIX·_NATIVE_TOOL_USE 주석). 내부 대화에는 넣지 않는다 — 거기엔
+            # 진짜 tool_use/tool_result 가 있다.
+            if native_trace and native_blocks and envelope_open:
+                # 탐침 판독용 짝: 여기서 낸 개수 vs 다음 요청의 inbound_native_blocks 개수.
+                logger.info("web_search.native_blocks_emitted", searches=len(native_blocks) // 2)
+                for blk in native_blocks:
+                    gi = global_index
+                    global_index += 1
+                    for frame in _native_block_frames(gi, blk):
+                        yield frame
+            elif traces and envelope_open and not native_trace:
                 gi = global_index
                 global_index += 1
                 yield _sse("content_block_start",
@@ -1422,6 +1643,7 @@ async def _anthropic_nonstream(
     max_searches_per_turn: int = 0,
     cache_results: bool = True,
     result_text_chars: int = 0,
+    native_trace: bool = False,
 ) -> JSONResponse:
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
@@ -1433,6 +1655,7 @@ async def _anthropic_nonstream(
     search_attempts = 0      # loop guard incl. failures (F-5)
     our_tool_use_ids: set[str] = set()
     traces: list[str] = []   # one line per search → client-visible evidence (_TRACE_PREFIX)
+    native_blocks: list[dict] = []   # native mode: server_tool_use + result per search
     final_status = 200
     final_body: dict = {}
 
@@ -1474,10 +1697,12 @@ async def _anthropic_nonstream(
             client_calls = [b for b in content if _is_client_tool_use_block(b)]
             our_tool_use_ids.update(c.get("id") for c in our_calls if c.get("id"))
 
-            if force_final and not nudged and not client_calls and not our_calls and content and not any(
+            has_text = any(
                 isinstance(b, dict) and b.get("type") == "text" and (b.get("text") or "").strip()
                 for b in content
-            ):
+            )
+            if (force_final and not nudged and not client_calls and not our_calls
+                    and content and not has_text):
                 nudged = True
                 logger.info("web_search.final_turn_empty_nudge")
                 conversation = conversation + [
@@ -1485,6 +1710,10 @@ async def _anthropic_nonstream(
                     {"role": "user", "content": [{"type": "text", "text": _FINAL_TURN_TEXT_NUDGE}]},
                 ]
                 continue
+            if our_calls and client_calls and not native_trace:
+                # 섞인 턴의 검색은 실행하지 않는다(계약) — 스트리밍 경로와 같은 "실행 안 됨" 흔적.
+                traces.extend(_trace_line((c.get("input") or {}).get("query", ""),
+                                          _trace_words("mixed")) for c in our_calls)
             if force_final or not our_calls or client_calls:
                 break  # terminal — return this body
 
@@ -1499,12 +1728,15 @@ async def _anthropic_nonstream(
             outcomes = await _run_turn_searches(
                 mcp_client, [c.get("input") or {} for c in our_calls], allowance,
                 deadline, default_max_results, max_result_chars, result_text_chars)
-            for call, (result_text, ok, trace, reason) in zip(our_calls, outcomes):
+            for call, (result_text, ok, trace, reason, digest) in zip(our_calls, outcomes):
                 traces.append(trace)
                 if ok:
                     searches_done += 1
                 tool_results.append(
                     _anthropic_tool_result(call.get("id"), result_text, ok, reason))
+                if native_trace:
+                    native_blocks.extend(_native_search_blocks(
+                        (call.get("input") or {}).get("query", ""), ok, reason, digest))
             # 최종 턴(tool_choice none)도 같은 접두를 보내므로 마지막 표시까지 읽힌다.
             if cache_results:
                 conversation = _place_cache_breakpoint(
@@ -1572,8 +1804,14 @@ async def _anthropic_nonstream(
             cleaned.append(b)
         if cleaned or not final_body["content"]:
             final_body["content"] = cleaned
-        # 검색 흔적을 본문 맨 앞에 텍스트 블록으로(스트리밍 경로와 같은 계약, _TRACE_PREFIX).
-        if traces:
+        # 검색 흔적을 본문 맨 앞에(스트리밍 경로와 같은 계약) — native 모드는 블록 쌍, 아니면
+        # 텍스트 블록 하나(_TRACE_PREFIX).
+        if native_trace:
+            if native_blocks:
+                logger.info("web_search.native_blocks_emitted",
+                            searches=len(native_blocks) // 2)
+            final_body["content"][0:0] = native_blocks
+        elif traces:
             final_body["content"].insert(
                 0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
         # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
@@ -1868,7 +2106,7 @@ async def _responses_stream(
             outcomes = await _run_turn_searches(
                 mcp_client, [ps.get("input") or {} for ps in pending_searches], allowance,
                 deadline, default_max_results, max_result_chars, result_text_chars)
-            for ps, (result_text, ok, _trace, reason) in zip(pending_searches, outcomes):
+            for ps, (result_text, ok, _trace, reason, _digest) in zip(pending_searches, outcomes):
                 if ok:
                     searches_done += 1
                 outputs.append(_responses_call_output(ps["call_id"], result_text, ok, reason))
@@ -2047,7 +2285,7 @@ async def _responses_nonstream(
             outcomes = await _run_turn_searches(
                 mcp_client, inputs, allowance, deadline,
                 default_max_results, max_result_chars, result_text_chars)
-            for call, (result_text, ok, _trace, reason) in zip(our_calls, outcomes):
+            for call, (result_text, ok, _trace, reason, _digest) in zip(our_calls, outcomes):
                 if ok:
                     searches_done += 1
                 new_items.append(
@@ -2164,6 +2402,13 @@ async def run_web_search_loop(
     # a genuine CUSTOM web_search tool (no native type) survives and is still respected
     # (F-7). This also covers the MCP-init-failure fallback below (both read initial_req_data).
     initial_req_data = _strip_native_web_search(initial_req_data)
+    # 탐침(native 흔적): 클라이언트가 우리 server_tool_use/web_search_tool_result 블록을 이력에
+    # 실어 되돌리면 Bedrock 이 모르는 형태다 — 텍스트 흔적으로 환원한다(_normalize_… 주석). F-7
+    # 패스스루와 MCP 초기화 실패 폴백도 initial_req_data 를 읽으므로 그 앞에서 한다.
+    if dialect == "anthropic":
+        initial_req_data = _normalize_inbound_native_blocks(initial_req_data)
+    native_trace = dialect == "anthropic" and _native_trace_enabled(request)
+    dialect_kw: dict = {"native_trace": native_trace} if dialect == "anthropic" else {}
 
     # streaming.py sse helpers now call on_usage(usage, first_token_time) (2-arg TTFT
     # contract). The web-search loop's on_usage is 1-arg (multi-turn aggregate — per-turn
@@ -2262,6 +2507,7 @@ async def run_web_search_loop(
             max_searches_per_turn=max_searches_per_turn,
             cache_results=cache_results,
             result_text_chars=result_text_chars,
+            **dialect_kw,
         )
         return StreamingResponse(
             _log_stream(gen), status_code=200,
@@ -2281,6 +2527,7 @@ async def run_web_search_loop(
         max_searches_per_turn=max_searches_per_turn,
         cache_results=cache_results,
         result_text_chars=result_text_chars,
+        **dialect_kw,
     )
     # 루프가 조립해 반환한 최종 본문을 기록한다. 여기서는 `resp.body` 를 읽는다 —
     # 루프 내부가 여러 턴의 결과를 합쳐 만든 것이므로 어떤 단일 턴의 provider 응답도
