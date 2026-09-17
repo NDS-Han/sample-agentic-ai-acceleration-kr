@@ -36,13 +36,17 @@ function applySecurityHeaders(response: NextResponse): NextResponse {
  *
  * nextUrl 을 쓰는 이유: request.url 은 Docker 안에서 0.0.0.0 으로 풀려 원래 호스트를 잃는다.
  *
- * ⚠️ 목적지가 `/api/auth/dev-login` 이 아니라 `/api/auth/login` 인 이유(A3):
+ * ⚠️ 목적지가 `/api/auth/dev-login` 이 아니라 `/login` 인 이유(A3):
  *    dev-login 라우트는 DEV_LOGIN_ENABLED !== 'true' 이면 본문 없는 404 를 준다. prod 는
- *    그 값이 "false"(values-eks-fargate-prod.yaml adminUi.env) 이므로 예전 목적지로는
- *    **prod 브라우저가 307 → 빈 404 에서 끝났다** — ALB 인증도 없어 로그인 경로가 0개였다.
- *    `/api/auth/login` 은 환경을 보고 OIDC authorize / dev 폼 / 읽히는 503 으로 갈라주는
- *    단일 진입점이다(app/api/auth/login/route.ts). 이 경로는 아래 `/api/` 예외에 걸려
- *    미인증으로도 도달 가능하다 — 그래야 무한 리다이렉트가 안 난다.
+ *    그 값이 "false" 이므로 예전 목적지로는 **prod 브라우저가 307 → 빈 404 에서 끝났다** —
+ *    ALB 인증도 없어 로그인 경로가 0개였다.
+ *    `/login` 은 8-L 의 로그인 페이지다 — Cognito 이메일/비밀번호 폼이 상시 렌더되고,
+ *    DEV_LOGIN_ENABLED=true 일 때만 "Sign in with dev mode (dev-login)" 링크가 붙는다
+ *    (app/login/page.tsx → components/auth/LoginForm.tsx). `/api/auth/login` GET 은
+ *    OIDC env 가 비어 있고 dev-login 이 켜진 배포에서 dev 폼으로 307 하는데, 그러면
+ *    로그인 화면이 /login 이 아니라 dev 폼으로 새어 사용자에게 두 화면이 보인다.
+ *    `/login` 은 아래 public 예외에 걸려 미인증으로도 도달 가능하다 — 그래야 무한
+ *    리다이렉트가 안 난다.
  */
 /**
  * 미들웨어의 리다이렉트는 **절대 URL** 이어야 한다. Next.js 14.2 의 미들웨어 어댑터가
@@ -73,7 +77,7 @@ function redirectSameOrigin(request: NextRequest, path: string, status: number):
 }
 
 function redirectToLogin(request: NextRequest, clearCookie: boolean): NextResponse {
-  const redirectResponse = redirectSameOrigin(request, '/api/auth/login', 307);
+  const redirectResponse = redirectSameOrigin(request, '/login', 307);
   if (clearCookie) {
     // 만료/손상된 자격증명은 응답에서 즉시 제거한다 — 안 지우면 다음 요청도 같은 쿠키로
     // 다시 이 분기를 타고, 사용자는 못 쓰는 쿠키를 계속 들고 다닌다.
