@@ -216,14 +216,14 @@ async def _run_nonstream(turns, mcp, capture: list | None = None, **kw):
 
 
 # ── 스트리밍: 블록 형태 ──────────────────────────────────────────────────────────
-async def test_native_stream_emits_server_tool_use_and_result_instead_of_text():
+async def test_native_stream_emits_server_blocks_plus_display_line():
     mcp = _Mcp()
     ev = await _run_stream([_search_turn(["q1", "q2"]), _final("done")], mcp,
                            native_trace=True)
     blocks = _blocks(ev)
     kinds = [b["type"] for b in blocks]
     assert kinds == ["server_tool_use", "web_search_tool_result",
-                     "server_tool_use", "web_search_tool_result", "text"], kinds
+                     "server_tool_use", "web_search_tool_result", "text", "text"], kinds
     use, res = blocks[0], blocks[1]
     assert use["name"] == GW and use["id"].startswith("srvtoolu_")
     assert use["input"] == {"query": "q1"}
@@ -236,8 +236,9 @@ async def test_native_stream_emits_server_tool_use_and_result_instead_of_text():
     assert digest["snippet"].startswith("A body") and len(digest["snippet"]) <= 200
     assert blocks[2]["input"] == {"query": "q2"}
     assert blocks[1]["tool_use_id"] != blocks[3]["tool_use_id"]
-    assert not any(PREFIX in (b.get("text") or "") for b in blocks), (
-        "native 모드에 🔎 텍스트 줄이 남았다")
+    shown = blocks[4]["text"].strip().splitlines()
+    assert len(shown) == 2 and all(ln.startswith(PREFIX) for ln in shown), (
+        "표시용 🔎 줄은 블록 뒤에 한 블록으로(Cowork 화면은 블록을 그리지 않는다)")
     assert blocks[-1]["text"] == "done"
     assert mcp.calls == ["q1", "q2"]
 
@@ -246,7 +247,7 @@ async def test_native_stream_frames_are_well_formed_for_sdk_parsers():
     ev = await _run_stream([_search_turn(["q1"]), _final()], _Mcp(), native_trace=True)
     starts = [d["index"] for e, d in ev if e == "content_block_start"]
     stops = [d["index"] for e, d in ev if e == "content_block_stop"]
-    assert starts == [0, 1, 2] and stops == [0, 1, 2], (
+    assert starts == [0, 1, 2, 3] and stops == [0, 1, 2, 3], (
         "블록 인덱스가 봉투 안에서 연속·1:1 이어야 한다")
     # server_tool_use starts with an EMPTY input and streams it as input_json_delta (like tool_use)
     stu = next(d for e, d in ev if e == "content_block_start"
@@ -327,11 +328,11 @@ async def test_native_nonstream_puts_blocks_first_in_content():
     ]
     body = await _run_nonstream(turns, _Mcp(), native_trace=True)
     kinds = [b["type"] for b in body["content"]]
-    assert kinds == ["server_tool_use", "web_search_tool_result", "text"], kinds
+    assert kinds == ["server_tool_use", "web_search_tool_result", "text", "text"], kinds
     assert body["content"][0]["input"] == {"query": "q1"}
     assert body["content"][1]["tool_use_id"] == body["content"][0]["id"]
-    assert body["content"][2]["text"] == "done" and body["stop_reason"] == "end_turn"
-    assert not any(PREFIX in (b.get("text") or "") for b in body["content"])
+    assert body["content"][2]["text"].startswith(f'{PREFIX} "q1"'), "표시용 🔎 줄"
+    assert body["content"][3]["text"] == "done" and body["stop_reason"] == "end_turn"
 
 
 # ── 인바운드 환원(탐침) ──────────────────────────────────────────────────────────
