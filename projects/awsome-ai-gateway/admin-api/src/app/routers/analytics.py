@@ -8,6 +8,7 @@ from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -45,7 +46,13 @@ async def _cache_get(request: Request, key: str):
         return None
     try:
         raw = await redis.get(key)
-        return json.loads(raw) if raw else None
+        if not raw:
+            return None
+        cached = json.loads(raw)
+        # ⚠️ dict 가 아니면 깨진 엔트리다(예: pydantic 모델을 json.dumps(..., default=str)
+        # 로 저장하면 str() repr 문자열이 들어간다). 문자열을 그대로 반환하면 UI 는
+        # data.cost_summary == undefined 를 받아 페이지가 깨진다 — miss 로 처리해 재계산.
+        return cached if isinstance(cached, dict) else None
     except Exception as exc:  # noqa: BLE001
         logger.debug("analytics cache get failed key=%s err=%s", key, exc)
         return None
@@ -56,7 +63,10 @@ async def _cache_set(request: Request, key: str, value: object) -> None:
     if redis is None:
         return
     try:
-        await redis.setex(key, _ANALYTICS_CACHE_TTL, json.dumps(value, default=str))
+        # jsonable_encoder 로 pydantic 모델→dict 를 먼저 펼쳐야 한다.
+        # json.dumps(model, default=str) 는 모델 통째를 str() repr 로 저장해서
+        # 캐시 적중 시 응답이 JSON 객체가 아니라 문자열이 된다.
+        await redis.setex(key, _ANALYTICS_CACHE_TTL, json.dumps(jsonable_encoder(value)))
     except Exception as exc:  # noqa: BLE001
         logger.debug("analytics cache set failed key=%s err=%s", key, exc)
 
