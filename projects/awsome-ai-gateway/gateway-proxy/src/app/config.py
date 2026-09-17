@@ -236,6 +236,8 @@ class Settings(BaseSettings):
     #: native 를 적용할 클라이언트 분류(cowork | claude-code | codex, 쉼표 구분, 빈 값 = 전부).
     #: 분류는 ClientIdentificationMiddleware 가 한다(헤더 값이 아니라 그 결과를 본다).
     web_search_trace_native_clients: str = "cowork"
+    #: native 블록에 싣는 결과당 발췌 길이(문자). 되돌아온 턴의 tool_result 가 이만큼 본다. 0 = 코드 기본 600.
+    web_search_digest_chars: int = 600
 
 
 @lru_cache

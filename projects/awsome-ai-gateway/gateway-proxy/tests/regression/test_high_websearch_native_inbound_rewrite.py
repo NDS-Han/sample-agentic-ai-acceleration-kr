@@ -107,7 +107,11 @@ def test_rewrite_restores_search_result_continue_turn_structure():
     assert (
         tr["type"] == "tool_result" and tr["tool_use_id"] == "toolu_gw_1" and "is_error" not in tr
     )
-    results = json.loads(tr["content"])["results"]
+    payload = json.loads(tr["content"])
+    assert payload["note"].startswith("digest of an earlier search"), (
+        "전문은 이전 턴에 봤음을 알린다"
+    )
+    results = payload["results"]
     assert results[0] == {
         "title": "A",
         "url": "https://a.com/x",

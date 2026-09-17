@@ -233,7 +233,7 @@ async def test_native_stream_emits_server_blocks_plus_display_line():
     assert items[0]["title"] == "A title" and items[0]["url"] == "https://a.com/x"
     assert items[0]["page_age"] == "2026-09-01" and items[1]["page_age"] is None
     digest = json.loads(base64.b64decode(items[0]["encrypted_content"]).decode())
-    assert digest["snippet"].startswith("A body") and len(digest["snippet"]) <= 200
+    assert digest["snippet"].startswith("A body") and len(digest["snippet"]) <= 600
     assert blocks[2]["input"] == {"query": "q2"}
     assert blocks[1]["tool_use_id"] != blocks[3]["tool_use_id"]
     shown = blocks[4]["text"].strip().splitlines()
@@ -461,8 +461,8 @@ def test_result_digest_is_bounded_and_tolerant():
                    for i in range(8)]
 
     d = wsl._result_digest(_R())
-    assert len(d) == 5 and all(len(x["snippet"]) <= 200 for x in d)
-    assert d[0] == {"title": "t0", "url": "https://h0.com", "snippet": "x" * 200, "page_age": None}
+    assert len(d) == 5 and all(len(x["snippet"]) <= 600 for x in d)
+    assert d[0] == {"title": "t0", "url": "https://h0.com", "snippet": "x" * 500, "page_age": None}
 
     class _Raw:
         results = None
@@ -471,3 +471,32 @@ def test_result_digest_is_bounded_and_tolerant():
     assert wsl._result_digest(_Raw()) == [{"title": "", "url": "https://z.com", "snippet": "a b",
                                            "page_age": None}]
     assert wsl._result_digest(object()) == []
+
+
+def test_pick_snippet_skips_page_noise_and_cuts_at_sentence():
+    noisy = ("705.310.55% 76537.602.1162% 520.570.75% 394.010.3% 80.660.33% September 15, 2026 "
+             "2:23 PM 3 min read SK Hynix Is Shipping 16-Layer HBM4 for Nvidia Rubin. Micron and "
+             "Samsung trail. " + "More detail follows here. " * 40)
+    snip = wsl._pick_snippet(noisy, 600)
+    assert not snip.startswith("705") and "SK Hynix Is Shipping" in snip[:60], snip[:80]
+    assert len(snip) <= 602 and snip.endswith(" …") and snip.rstrip(" …").endswith(".")
+    ko = ("삼성전자, 세계 최초 업계 최고 성능의 HBM4 양산 출하 2026년 02월 12일 "
+          "삼성전자가 세계 최초로 HBM4를 양산 출하했다.")
+    assert wsl._pick_snippet(ko, 600) == ko, "본문으로 시작하는 글은 그대로"
+    assert wsl._pick_snippet("  a   b ", 600) == "a b" and wsl._pick_snippet(None, 600) == ""
+    table = "| a | 1 | | b | 2 |"
+    assert wsl._pick_snippet(table, 600) == table, "단어 구간이 없으면 통째로"
+
+
+def test_digest_comes_from_the_trimmed_json_the_model_saw(monkeypatch):
+    monkeypatch.setattr(wsl, "_digest_chars", lambda: 50)
+    trimmed = json.dumps({"results": [
+        {"url": "https://a.com", "title": "A",
+         "text": "Real body sentence one. Sentence two is long.", "publishedDate": "2026-09-15"},
+        {"url": "https://b.com", "title": "B", "text": "B body"}]})
+    d = wsl._result_digest_from_text(trimmed, None, 5, 50)
+    assert d[0]["page_age"] == "2026-09-15"
+    assert d[0]["snippet"].startswith("Real body sentence one.")
+    assert len(d) == 2 and d[1]["page_age"] is None
+    raw = type("R", (), {"results": [{"url": "https://z.com", "title": "Z", "text": "Z body"}]})()
+    assert wsl._result_digest_from_text("not json", raw, 5, 50)[0]["title"] == "Z"
