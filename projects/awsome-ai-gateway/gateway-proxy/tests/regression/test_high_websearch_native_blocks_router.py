@@ -76,6 +76,18 @@ def _assign_line(fn: ast.FunctionDef, target: str) -> int:
     raise AssertionError(f"{fn.name}: {target} = … 가 없다")
 
 
+def test_fallback_loop_receives_the_text_normalized_body():
+    """폴백 루프(우리 도구 없이 나감)는 원본 req_data 가 아니라 환원본 req_for_bedrock 을 받아야
+    한다 — 원본이 가면 되돌아온 server_tool_use 가 다운그레이드 경로에서 Bedrock 400."""
+    tree = ast.parse(_ROUTER.read_text())
+    fn = next(n for n in tree.body if isinstance(n, ast.AsyncFunctionDef) and n.name == "messages")
+    call = next(node for node in ast.walk(fn) if isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name) and node.func.id == "run_fallback_loop")
+    kw = next(k for k in call.keywords if k.arg == "req_data")
+    names = {n.id for n in ast.walk(kw.value) if isinstance(n, ast.Name)}
+    assert "req_for_bedrock" in names and "req_data" not in names, ast.dump(kw.value)
+
+
 def test_both_routes_normalize_before_building_the_bedrock_body():
     tree = ast.parse(_ROUTER.read_text())
     fns = {n.name: n for n in tree.body if isinstance(n, ast.AsyncFunctionDef)}

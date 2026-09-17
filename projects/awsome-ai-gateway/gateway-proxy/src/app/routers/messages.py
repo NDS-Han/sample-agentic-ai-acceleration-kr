@@ -179,16 +179,16 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     try:
         req_data = json.loads(body)
-        # 탐침(native 검색 흔적): 클라이언트가 우리 server_tool_use/web_search_tool_result 블록을
-        # 이력에 실어 되돌리면 Bedrock 이 모르는 형태라 400 이다. 웹서치 루프를 타지 않는 요청
-        # (프로파일 토글 off·MCP 미설정·폴백 루프·보조 모델 요청)도 지나가는 이 지점에서 환원한다.
-        # 블록이 없으면 같은 객체를 돌려주므로 다른 요청은 바이트 단위로 같다.
-        if isinstance(req_data, dict):
-            req_data = normalize_inbound_native_blocks(req_data)
+        # 되돌아온 native 검색 블록(server_tool_use/web_search_tool_result)은 Bedrock 이 모르는
+        # 형태라 400 이다. 웹서치 루프는 원본(req_data)을 받아 tool_use/tool_result 로 재작성하고,
+        # 루프를 타지 않는 경로(폴백 루프·Mantle·프로파일 토글 off·보조 모델 요청)가 쓰는 본문은
+        # 여기서 텍스트 흔적으로 환원한다. 블록이 없으면 같은 객체 — 다른 요청은 바이트 단위로 같다.
+        req_for_bedrock = (normalize_inbound_native_blocks(req_data)
+                           if isinstance(req_data, dict) else req_data)
         model_alias = req_data.get("model", "")
         is_stream = req_data.get("stream", False)
 
-        bedrock_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
+        bedrock_body = {k: v for k, v in req_for_bedrock.items() if k in _BEDROCK_ALLOWED_FIELDS}
         bedrock_body["anthropic_version"] = "bedrock-2023-05-31"
         sanitize_output_config(bedrock_body, alias=model_alias, request_id=request_id)
         if auth_context and auth_context.sso_subject:
@@ -258,7 +258,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         nonstream_kwargs: dict = {"profile": decision.profile, "endpoint": decision.endpoint}
         # Rebuild body as standard Anthropic Messages (NOT the bedrock-wrapped body):
         # anthropic-version is a HEADER for Mantle (adapter sets it); model goes in body.
-        mantle_body = {k: v for k, v in req_data.items() if k in _BEDROCK_ALLOWED_FIELDS}
+        mantle_body = {k: v for k, v in req_for_bedrock.items() if k in _BEDROCK_ALLOWED_FIELDS}
         mantle_body.pop("anthropic_version", None)
         sanitize_output_config(mantle_body, call_model_id, alias=model_alias, request_id=request_id)
         mantle_body["model"] = call_model_id
@@ -587,7 +587,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         try_order=try_order,
         original_alias=model_alias,
         is_stream=is_stream,
-        req_data=req_data if isinstance(req_data, dict) else {},
+        # 폴백 루프는 우리 web_search 도구 없이 나간다 — 되돌아온 native 검색 블록은 텍스트로
+        # 환원된 본문(req_for_bedrock)을 준다(원본 req_data 는 웹서치 루프 전용).
+        req_data=req_for_bedrock if isinstance(req_for_bedrock, dict) else {},
         redis=redis,
         auth_context=auth_context,
         state=state,
