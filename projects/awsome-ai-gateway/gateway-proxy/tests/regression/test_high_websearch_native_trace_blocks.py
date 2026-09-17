@@ -373,7 +373,7 @@ def test_inbound_native_blocks_become_trace_text():
         "블록이 없으면 같은 객체(바이트 동일 경로)")
 
 
-async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch):
+async def test_loop_entry_rewrites_inbound_blocks_and_gates_native(monkeypatch):
     _native_on(monkeypatch, "cowork")
     mcp = _Mcp()
     captured: list[dict] = []
@@ -403,8 +403,10 @@ async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch
     for b in captured:
         dumped = json.dumps(b)
         assert "server_tool_use" not in dumped and "web_search_tool_result" not in dumped
-    hist = captured[0]["messages"][1]["content"]
-    assert hist[1]["text"].startswith(f'{PREFIX} "q1"')
+    hist = captured[0]["messages"]
+    # 루프 안은 도구 기록으로 재작성(본 구현, test_high_websearch_native_inbound_rewrite 참조)
+    assert [b["type"] for b in hist[1]["content"]] == ["text", "tool_use", "tool_use"]
+    assert [b["type"] for b in hist[2]["content"]] == ["tool_result", "tool_result"]
     body = json.loads(bytes(resp.body))
     assert [b["type"] for b in body["content"]][:2] == ["server_tool_use", "web_search_tool_result"]
     assert mcp.calls == ["q3"]
