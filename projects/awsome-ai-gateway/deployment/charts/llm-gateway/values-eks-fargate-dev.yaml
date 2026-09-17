@@ -252,7 +252,8 @@ gatewayProxy:
     # 1.0.71-nativegate: 1.0.70 게이트 수정 — 실제 Cowork 는 anthropic-client-platform 헤더가 아니라 User-Agent 로 식별되므로(탐침 실측: 검색 4회에 native 0회) 미들웨어가 분류한 클라이언트(WEB_SEARCH_TRACE_NATIVE_CLIENTS, 기본 cowork)로 판정.
     # 1.0.72-nativehist: 본 구현 — Cowork 가 되돌려 준 native 검색 블록(탐침 07:57 inbound 2/2·4/4 확인)을 루프 턴에서 tool_use/tool_result 로 재작성해 결과 발췌(digest)까지 모델에 다시 보인다(탐침은 결과 없는 텍스트 한 줄이라 답이 흐려짐). 우리 도구 없이 나가는 경로(폴백 루프·Mantle·count_tokens·MCP 실패 폴백)는 텍스트 환원 유지.
     # 1.0.73-nativeshow: native 모드에서도 🔎 표시 줄을 블록 뒤에 함께 낸다(Cowork 화면은 블록을 그리지 않아 검색 흔적이 안 보였음). 되돌아오면 재작성 때 🔎 줄은 걷어내 모델 이력에는 도구 기록만 남는다(모방 원천 없음).
-    tag: "1.0.73-nativeshow"
+    # 1.0.74-digest: 되돌아온 검색 결과의 발췌를 200자·페이지 첫머리 → 본문다운 지점부터 600자(WEB_SEARCH_DIGEST_CHARS)로. 모델이 본 트림 결과에서 만들고, 되살린 tool_result 에 "전문은 그 턴에 봤다" 메모 — Cowork 2번 프롬프트에서 발췌가 얇아 실제 근거를 되물리던 문제.
+    tag: "1.0.74-digest"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
