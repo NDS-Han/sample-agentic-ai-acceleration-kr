@@ -240,7 +240,14 @@ gatewayProxy:
     # 1.0.58-wsfinal: force_final 턴 400 수정 — 이력에 새어 있던 web_search 블록을 이름으로 걷어내고,
     #   비스트리밍 루프 2개도 force_final 에서 걷어낸다(2026-09-16 실측: 상한을 낮추자 Cowork 재시도 3회가 전부 400).
     # 1.0.59-outcfg: Cowork 의 output_config.format(구조화 출력)을 Bedrock 이 거부(400) → effort 만 남기고 걷어냄.
-    tag: "1.0.59-outcfg"
+    # 1.0.60-ctxusage: 클라이언트 usage 의 입력·캐시 버킷을 검색 N턴 합계가 아니라 첫 턴 값으로 → Cowork 자동 압축 thrashing 해소(청구는 불변).
+    # 1.0.61→1.0.63-wstrace: 검색마다 흔적 한 줄(+상위 제목 2개·"결과 전문 제공됨" 안내, 모델이 모방한 흔적 줄은 필터)(🔎 [gateway web_search] …)을 응답 텍스트로 남김 → 클라이언트 도구 사이 다음 요청에서 모델이 "검색한 적 없다" 며 되풀이하던 루프 방지.
+    # 1.0.64-toolchoice: 클라이언트가 web_search 를 tool_choice 로 강제하면(Cowork 내장 WebSearch 헬퍼) 첫 턴만 존중, 이후 auto, 최종 턴은 제거 → 400 루프 해소.
+    # 1.0.65-wsopt: (A) 검색 결과 tool_result 에 cache_control 1개(뒤 턴 캐시 읽기, 4개 한도, WEB_SEARCH_CACHE_RESULTS=false 로 끔) (H) 결과 항목별 본문 1500자 트림(WEB_SEARCH_RESULT_TEXT_CHARS) (O) 턴당 검색 동시 실행 + 흔적 줄 간소화(WEB_SEARCH_TRACE_LANG=ko 옵션).
+    # 1.0.66-ffnote: 최종(도구 제거) 턴에서 thinking 만 남는 assistant 턴에 안내 문구, 마지막 user 메시지에 "이제 답하라" 지시 → Opus 5 가 `<br>` 만 내던 빈 답 방지.
+    # 1.0.67-balance: 품질 우선 균형 — 상한 초과 문구 "실행 안 됨, 다음 턴 재요청", 도구 설명에 검색 예산 명시, 첫 턴 연결 오류 1회 재시도, 마지막 라운드 캐시 표시 생략. 상한은 턴당 3 x 2턴(최대 6, 동일).
+    # 1.0.68-ffnone: Anthropic 최종(force_final) 턴을 "도구 유지 + tool_choice none + 답하라 지시" 로 — 이력 변환 없이 캐시 접두 보존, 빈 답 원인 제거. 마지막 라운드 캐시 표시 복원.
+    tag: "1.0.68-ffnone"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
@@ -263,6 +270,13 @@ gatewayProxy:
     AGENTCORE_REGION: "us-east-1"
     AGENTCORE_TARGET_ID: "web-search-tool"
     WEB_SEARCH_ENABLED: "true"   # global kill-switch; per-client gating via routing_profiles.web_search_enabled
+    # web search 비용 상한(2026-09-16 실측: 검색 4회 든 호출 1건 = 입력 132k 토큰·$1.56 — 검색 결과 본문이
+    #   반복마다 다시 입력으로 들어간다). 결과 1회 60,000자(≈15k 토큰)→12,000자, 결과 수 10→5, 턴당 검색 4→2,
+    #   반복 5→3. 게이트웨이 config.py 의 기본값을 여기서 덮어쓴다.
+    WEB_SEARCH_MAX_RESULT_CHARS: "12000"
+    WEB_SEARCH_MAX_RESULTS_DEFAULT: "5"
+    WEB_SEARCH_MAX_SEARCHES_PER_TURN: "3"
+    WEB_SEARCH_MAX_ITERATIONS: "2"
   # SSE 스트리밍 타임아웃. dev ALB idle_timeout=300s(:118) 보다 60s 아래로 둔다 —
   # 같거나 크면 ALB 가 먼저 끊어 클라이언트가 truncated stream 을 본다.
   # ALB 값을 바꾸면 이 값도 함께 조정할 것.

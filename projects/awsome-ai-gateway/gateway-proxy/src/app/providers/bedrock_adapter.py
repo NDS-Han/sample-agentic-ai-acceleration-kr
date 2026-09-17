@@ -9,7 +9,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
-from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError, ConnectionClosedError, EndpointConnectionError
 
 from app.providers.base import ProviderAdapter
 from app.schemas.domain import TokenUsage
@@ -199,15 +199,27 @@ class BedrockAdapter(ProviderAdapter):
         try:
             client = await self._get_client()
             if path_suffix == "invoke-with-response-stream":
-                response = await loop.run_in_executor(
-                    _bedrock_executor,
-                    lambda: client.invoke_model_with_response_stream(
-                        modelId=model_id,
-                        body=request_body,
-                        contentType="application/json",
-                        accept="application/json",
-                    ),
-                )
+                # ⚠️ 연결 수준 오류(응답 0바이트) 만 1회 재시도한다. botocore 풀의 죽은 연결로
+                #    "Connection was closed before we received a valid response" 가 2026-09-16
+                #    하루 3번(첫 턴) 났고, bedrock_max_attempts=1 이라 그대로 502 로 나갔다.
+                #    응답이 시작되기 전이라 중복 과금이 없다 — 스트림 도중 끊김은 재시도하지 않는다.
+                for attempt in (1, 2):
+                    try:
+                        response = await loop.run_in_executor(
+                            _bedrock_executor,
+                            lambda: client.invoke_model_with_response_stream(
+                                modelId=model_id,
+                                body=request_body,
+                                contentType="application/json",
+                                accept="application/json",
+                            ),
+                        )
+                        break
+                    except (ConnectionClosedError, EndpointConnectionError) as exc:
+                        if attempt == 2:
+                            raise
+                        logger.warning("bedrock_stream_connect_retry", model_id=model_id,
+                                       error=str(exc)[:160])
                 aws_request_id: str | None = response.get("ResponseMetadata", {}).get("RequestId")
                 stream = response.get("body")
                 return (
