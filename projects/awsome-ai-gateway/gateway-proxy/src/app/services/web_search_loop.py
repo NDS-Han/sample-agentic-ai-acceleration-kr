@@ -851,30 +851,48 @@ _DIGEST_SNIPPET_CHARS = 200
 
 
 def _trace_mode() -> tuple[str, frozenset[str]]:
-    """("text" | "native", allowed anthropic-client-platform values; empty = all)."""
+    """("text" | "native", allowed client classes — cowork/claude-code/codex; empty = all)."""
     try:
         from app.config import get_settings
         s = get_settings()
         mode = (getattr(s, "web_search_trace_mode", "text") or "text").strip().lower()
-        raw = getattr(s, "web_search_trace_native_platforms", "") or ""
-        plats = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
-        return mode, plats
+        raw = getattr(s, "web_search_trace_native_clients", "") or ""
+        clients = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+        return mode, clients
     except Exception:  # settings unavailable (tests) → text
         return "text", frozenset()
 
 
+def _request_client(request: Any) -> str:
+    """The client class the ClientIdentificationMiddleware stored (scope.state.client), or
+    the same classification from the headers when no middleware ran (tests, direct calls).
+
+    ⚠️ 헤더 값(anthropic-client-platform)을 직접 보면 안 된다 — 실제 Cowork 는 그 헤더가 아니라
+       User-Agent(claude-desktop-3p / local-agent)로 잡힌다(2026-09-17 1.0.70 탐침 실측: 검색
+       4회에 native 0회). 분류 규칙은 client_identifier 한 곳에만 둔다.
+    """
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        client = (scope.get("state") or {}).get("client")
+        if client:
+            return str(client).lower()
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return ""
+    try:
+        from app.services.client_identifier import identify_client
+        return str(identify_client(dict(headers)) or "").lower()
+    except Exception:
+        return ""
+
+
 def _native_trace_enabled(request: Any) -> bool:
-    mode, platforms = _trace_mode()
+    mode, clients = _trace_mode()
     if mode != "native":
         return False
-    if not platforms:
+    if not clients:
         return True
-    headers = getattr(request, "headers", None)
-    try:
-        platform = (headers.get("anthropic-client-platform") or "") if headers else ""
-    except Exception:
-        platform = ""
-    return str(platform).strip().lower() in platforms
+    return _request_client(request) in clients
 
 
 def _result_digest(resp: Any, limit: int = _DIGEST_RESULTS,

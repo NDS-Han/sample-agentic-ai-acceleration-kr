@@ -233,8 +233,9 @@ class Settings(BaseSettings):
     #: web_search_tool_result)으로 남긴다 — 텍스트 줄은 캐물으면 부정되고(자백) 클라이언트 도구와
     #: 섞이면 모방된다. "text"(기본, 종전 경로) | "native". 되돌아온 블록은 텍스트로 환원한다.
     web_search_trace_mode: str = "text"
-    #: native 를 적용할 anthropic-client-platform 값(쉼표 구분, 빈 값 = 전부). 기본 Cowork 만.
-    web_search_trace_native_platforms: str = "desktop_app"
+    #: native 를 적용할 클라이언트 분류(cowork | claude-code | codex, 쉼표 구분, 빈 값 = 전부).
+    #: 분류는 ClientIdentificationMiddleware 가 한다(헤더 값이 아니라 그 결과를 본다).
+    web_search_trace_native_clients: str = "cowork"
 
 
 @lru_cache

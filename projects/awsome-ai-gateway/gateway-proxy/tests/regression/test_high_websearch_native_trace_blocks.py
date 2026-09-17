@@ -44,8 +44,12 @@ RESULTS = [
 
 
 class _Req:
-    def __init__(self, platform: str | None = "desktop_app"):
+    """Fake request: ``client`` = what the middleware would have stored; ``platform`` = raw
+    header only (no middleware ran), so the header fallback classification is exercised."""
+
+    def __init__(self, platform: str | None = "desktop_app", client: str | None = None):
         self.headers = {"anthropic-client-platform": platform} if platform else {}
+        self.scope = {"state": {"client": client}} if client else {}
 
     async def is_disconnected(self) -> bool:
         return False
@@ -76,9 +80,9 @@ class _Mcp:
         return _R()
 
 
-def _native_on(monkeypatch, platforms: str = "desktop_app"):
-    plats = frozenset(p for p in platforms.split(",") if p)
-    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("native", plats))
+def _native_on(monkeypatch, clients: str = "cowork"):
+    allowed = frozenset(p for p in clients.split(",") if p)
+    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("native", allowed))
 
 
 def _raw(ev: dict) -> bytes:
@@ -274,24 +278,37 @@ async def test_native_failed_and_capped_searches_use_error_results():
 
 
 # ── 게이팅 ───────────────────────────────────────────────────────────────────────
-def test_native_mode_gated_by_setting_and_client_platform(monkeypatch):
-    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("text", frozenset({"desktop_app"})))
-    assert wsl._native_trace_enabled(_Req("desktop_app")) is False, "기본 text = 종전 경로"
-    _native_on(monkeypatch, "desktop_app")
+def test_native_mode_gated_by_setting_and_classified_client(monkeypatch):
+    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("text", frozenset({"cowork"})))
+    assert wsl._native_trace_enabled(_Req(client="cowork")) is False, "기본 text = 종전 경로"
+    _native_on(monkeypatch, "cowork")
+    # 미들웨어가 분류해 둔 값이 기준 — 실제 Cowork 는 UA 로 잡히고 platform 헤더가 없다.
+    assert wsl._native_trace_enabled(_Req(None, client="cowork")) is True
+    assert wsl._native_trace_enabled(_Req(None, client="claude-code")) is False
+    assert wsl._native_trace_enabled(_Req(None, client="other")) is False
+    # 미들웨어 없이 직접 부른 경우(테스트·에뮬레이션): 헤더에서 같은 규칙으로 분류
     assert wsl._native_trace_enabled(_Req("desktop_app")) is True
     assert wsl._native_trace_enabled(_Req("cli")) is False, "Claude Code 는 탐침 대상이 아니다"
     assert wsl._native_trace_enabled(_Req(None)) is False
     assert wsl._native_trace_enabled(None) is False
     _native_on(monkeypatch, "")
-    assert wsl._native_trace_enabled(_Req("cli")) is True, "빈 목록 = 전부"
+    assert wsl._native_trace_enabled(_Req(None, client="claude-code")) is True, "빈 목록 = 전부"
+
+
+def test_request_client_prefers_middleware_state_over_headers():
+    assert wsl._request_client(_Req("desktop_app", client="claude-code")) == "claude-code"
+    assert wsl._request_client(_Req("desktop_app")) == "cowork"
+    ua = type("R", (), {"headers": {
+        "user-agent": "claude-cli/2.0.1 (external, claude-desktop-3p)"}})()
+    assert wsl._request_client(ua) == "cowork"
 
 
 def test_trace_mode_reads_settings(monkeypatch):
     from app import config as cfg
     monkeypatch.setattr(cfg, "get_settings", lambda: type("S", (), {
         "web_search_trace_mode": "NATIVE",
-        "web_search_trace_native_platforms": "desktop_app, Cli"})())
-    assert wsl._trace_mode() == ("native", frozenset({"desktop_app", "cli"}))
+        "web_search_trace_native_clients": "cowork, Claude-Code"})())
+    assert wsl._trace_mode() == ("native", frozenset({"cowork", "claude-code"}))
 
 
 async def test_text_mode_stream_is_unchanged():
@@ -357,7 +374,7 @@ def test_inbound_native_blocks_become_trace_text():
 
 
 async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch):
-    _native_on(monkeypatch, "desktop_app")
+    _native_on(monkeypatch, "cowork")
     mcp = _Mcp()
     captured: list[dict] = []
     queue = [
@@ -381,7 +398,7 @@ async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch
     resp = await wsl.run_web_search_loop(
         dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
         initial_req_data={"messages": _echoed_history()}, is_stream=False,
-        mcp_client=mcp, request=_Req("desktop_app"), on_usage=on_usage,
+        mcp_client=mcp, request=_Req(None, client="cowork"), on_usage=on_usage,
     )
     for b in captured:
         dumped = json.dumps(b)
