@@ -200,7 +200,8 @@ gatewayProxy:
     # 1.0.72-nativehist: 본 구현 — Cowork 가 되돌려 준 native 검색 블록(탐침 07:57 inbound 2/2·4/4 확인)을 루프 턴에서 tool_use/tool_result 로 재작성해 결과 발췌(digest)까지 모델에 다시 보인다(탐침은 결과 없는 텍스트 한 줄이라 답이 흐려짐). 우리 도구 없이 나가는 경로(폴백 루프·Mantle·count_tokens·MCP 실패 폴백)는 텍스트 환원 유지.
     # 1.0.73-nativeshow: native 모드에서도 🔎 표시 줄을 블록 뒤에 함께 낸다(Cowork 화면은 블록을 그리지 않아 검색 흔적이 안 보였음). 되돌아오면 재작성 때 🔎 줄은 걷어내 모델 이력에는 도구 기록만 남는다(모방 원천 없음).
     # 1.0.74-digest: 되돌아온 검색 결과의 발췌를 200자·페이지 첫머리 → 본문다운 지점부터 600자(WEB_SEARCH_DIGEST_CHARS)로. 모델이 본 트림 결과에서 만들고, 되살린 tool_result 에 "전문은 그 턴에 봤다" 메모 — Cowork 2번 프롬프트에서 발췌가 얇아 실제 근거를 되물리던 문제.
-    tag: "1.0.74-digest"
+    # 1.0.75-digestfull: 되돌아온 결과 발췌 기본을 "모델이 본 트림 결과와 같은 길이"(1500)로. 600자에서도 실제 근거 문장(마이크론 3월 HVM·TrendForce 20%)이 잘려 모델이 되물렸음(S3 전문 확인). WEB_SEARCH_DIGEST_CHARS(17 스크립트 키, 0=동일)로 줄일 수 있음. 품질 우선(사용자 결정).
+    tag: "1.0.75-digestfull"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
