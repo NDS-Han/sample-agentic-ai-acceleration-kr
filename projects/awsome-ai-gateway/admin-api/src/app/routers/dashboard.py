@@ -441,7 +441,7 @@ async def dashboard_kpi(
     request: Request,
     period: str = Query(default=None, description="YYYY-MM (KST). 미지정 시 현재 월"),
     client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
-    _admin: CurrentUser = Depends(require_admin_or_team_leader),
+    actor: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
     """대시보드 상단 KPI 카드 일괄 — 화면 1개당 API 1개.
@@ -477,12 +477,14 @@ async def dashboard_kpi(
     if not period:
         period = _default_period()
 
-    cache_key = _cache_key("kpi", period=period, client=client)
+    # /summary 와 같이 **유효 scope** 를 키에 넣는다 — TEAM_LEADER 는 본인 팀만 본다.
+    eff_scope = str(actor.team_id or "none") if actor.role == UserRole.TEAM_LEADER else "all"
+    cache_key = _cache_key("kpi", period=period, client=client, scope=eff_scope)
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
     # ── 1) 비용/요청/사용자: /summary 와 동일한 집계(같은 필터를 공유해 값이 갈리지 않게)
-    where_clauses = [cost_period_filter(period)]
+    where_clauses = [cost_period_filter(period), *_team_scope_clauses(actor)]
     if (cf := client_filter(client)) is not None:
         where_clauses.append(cf)
 
@@ -515,30 +517,63 @@ async def dashboard_kpi(
     #    scope_id 가 auth.users 에 없는 고아 행이면 조인이 NULL 이 되어 포함되는데,
     #    그건 팀 소속을 확인할 수 없는 예산이므로 합산 대상으로 두는 편이 안전하다
     #    (누락시 사용률이 과대평가된다).
-    limit_row = (
-        await session.execute(
-            select(func.coalesce(func.sum(BudgetConfig.max_budget_usd), 0).label("total_limit"))
-            .select_from(BudgetConfig)
-            .outerjoin(
-                User,
-                and_(
-                    BudgetConfig.scope == BudgetScope.USER,
-                    User.id == BudgetConfig.scope_id,
-                ),
-            )
-            .where(
-                BudgetConfig.is_active.is_(True),
-                or_(
+    if actor.role == UserRole.TEAM_LEADER:
+        # 리더의 분모는 본인 팀의 TEAM 예산 — 멤버 USER 예산을 같이 더하면 같은 한도를
+        # 팀 축과 개인 축에서 이중계상한다(위 org 규칙과 같은 이유). 팀 예산이 없으면
+        # 멤버 USER 예산 합계로 폴백한다.
+        tid = actor.team_id or uuid.uuid4()
+        team_limit = (
+            await session.execute(
+                select(func.coalesce(func.sum(BudgetConfig.max_budget_usd), 0))
+                .where(
+                    BudgetConfig.is_active.is_(True),
                     BudgetConfig.scope == BudgetScope.TEAM,
+                    BudgetConfig.scope_id == tid,
+                )
+            )
+        ).scalar()
+        total_limit = Decimal(str(team_limit or 0))
+        if total_limit == 0:
+            member_limit = (
+                await session.execute(
+                    select(func.coalesce(func.sum(BudgetConfig.max_budget_usd), 0))
+                    .select_from(BudgetConfig)
+                    .join(
+                        User,
+                        and_(
+                            BudgetConfig.scope == BudgetScope.USER,
+                            User.id == BudgetConfig.scope_id,
+                        ),
+                    )
+                    .where(BudgetConfig.is_active.is_(True), User.team_id == tid)
+                )
+            ).scalar()
+            total_limit = Decimal(str(member_limit or 0))
+    else:
+        limit_row = (
+            await session.execute(
+                select(func.coalesce(func.sum(BudgetConfig.max_budget_usd), 0).label("total_limit"))
+                .select_from(BudgetConfig)
+                .outerjoin(
+                    User,
                     and_(
                         BudgetConfig.scope == BudgetScope.USER,
-                        User.team_id.is_(None),
+                        User.id == BudgetConfig.scope_id,
                     ),
-                ),
+                )
+                .where(
+                    BudgetConfig.is_active.is_(True),
+                    or_(
+                        BudgetConfig.scope == BudgetScope.TEAM,
+                        and_(
+                            BudgetConfig.scope == BudgetScope.USER,
+                            User.team_id.is_(None),
+                        ),
+                    ),
+                )
             )
-        )
-    ).one()
-    total_limit = Decimal(str(limit_row.total_limit or 0))
+        ).one()
+        total_limit = Decimal(str(limit_row.total_limit or 0))
 
     # ── 3) 예산 사용액(분자): usage_logs SUCCESS 합계.
     #    한도가 TEAM+팀없는USER 를 덮으므로 사용액도 전사 합계와 같다(모든 사용자는
@@ -548,7 +583,7 @@ async def dashboard_kpi(
     budget_used_row = (
         await session.execute(
             select(func.coalesce(func.sum(UsageLog.cost_usd), 0).label("used"))
-            .where(cost_period_filter(period))
+            .where(cost_period_filter(period), *_team_scope_clauses(actor))
         )
     ).one()
     budget_used = Decimal(str(budget_used_row.used or 0))
@@ -557,11 +592,19 @@ async def dashboard_kpi(
     )
 
     # ── 4) 활성 키 / 활성 모델
+    #    리더의 활성 키는 본인 팀 멤버 소유분만. 모델 카탈로그는 조직 공용이라 스코핑 없다.
+    key_clauses = [VirtualKey.status == KeyStatus.ACTIVE]
+    if actor.role == UserRole.TEAM_LEADER:
+        key_clauses.append(
+            VirtualKey.user_id.in_(
+                select(User.id)
+                .where(User.team_id == (actor.team_id or uuid.uuid4()))
+                .scalar_subquery()
+            )
+        )
     active_keys = (
         await session.execute(
-            select(func.count()).select_from(VirtualKey).where(
-                VirtualKey.status == KeyStatus.ACTIVE
-            )
+            select(func.count()).select_from(VirtualKey).where(*key_clauses)
         )
     ).scalar()
     active_models = (
