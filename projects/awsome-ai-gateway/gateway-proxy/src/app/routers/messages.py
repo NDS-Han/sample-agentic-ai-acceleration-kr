@@ -179,10 +179,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     try:
         req_data = json.loads(body)
-        # 되돌아온 native 검색 블록(server_tool_use/web_search_tool_result)은 Bedrock 이 모르는
-        # 형태라 400 이다. 웹서치 루프는 원본(req_data)을 받아 tool_use/tool_result 로 재작성하고,
-        # 루프를 타지 않는 경로(폴백 루프·Mantle·프로파일 토글 off·보조 모델 요청)가 쓰는 본문은
-        # 여기서 텍스트 흔적으로 환원한다. 블록이 없으면 같은 객체 — 다른 요청은 바이트 단위로 같다.
+        # Replayed native search blocks (server_tool_use / web_search_tool_result) are unknown
+        # to Bedrock and would 400. The web-search loop receives the ORIGINAL req_data and
+        # rewrites them as tool_use/tool_result; every path that bypasses the loop (fallback
+        # loop, Mantle, profile toggle off, helper-model requests) uses the body normalised
+        # here, where they become text trace lines. Without such blocks the same object is
+        # returned, so other requests are byte-identical.
         req_for_bedrock = (normalize_inbound_native_blocks(req_data)
                            if isinstance(req_data, dict) else req_data)
         model_alias = req_data.get("model", "")
@@ -488,12 +490,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 client=client,
             )
 
-        # 본문 로깅 — 웹서치 경로 전용 훅. 이 return 은 아래 본문 로깅 배선보다 **먼저**
-        # 일어나므로, 여기 걸지 않으면 웹서치를 켠 프로파일의 요청은 로깅 코드를 아예
-        # 지나지 않고 조용히 미기록된다.
+        # Body logging — hooks for the web-search path only. This branch returns BEFORE the
+        # body-logging wiring below, so without these hooks requests of a web-search-enabled
+        # profile would never reach the logging code and go silently unrecorded.
         #
-        # ⚠️ bedrock_request_id 는 None 이다. 루프가 턴마다 별개의 Bedrock 호출을 하므로
-        #    단일 요청 id 가 조인 키가 되지 못한다(`_ws_record` 의 같은 판단).
+        # bedrock_request_id is None: the loop makes a separate Bedrock call per turn, so no
+        # single request id can serve as the join key (same decision as `_ws_record`).
         async def _ws_log_stream(sse_text: str, log_status: str) -> None:
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
@@ -535,12 +537,13 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 )
             )
 
-        # KI-08 역산 훅 — 웹서치 경로 **전용**.
+        # KI-08 token back-estimation hook — web-search path ONLY.
         #
-        # ⚠️ 아래쪽 `_estimate` 를 재사용할 수 없다. 그것은 `call_model_id_final` /
-        #    `is_mantle` 에 의존하고 둘 다 폴백 루프 **뒤에** 계산되므로, 여기서 참조하면
-        #    UnboundLocalError 다(실측으로 잡았다 — "함수 안에 정의돼 있다" 는 AST 검사로는
-        #    잡히지 않는다). 이 경로는 폴백을 타지 않으므로 model_config 가 곧 실제 모델이다.
+        # The `_estimate` defined further down cannot be reused: it depends on
+        # `call_model_id_final` / `is_mantle`, both computed AFTER the fallback loop, so
+        # referencing it here is an UnboundLocalError (caught at runtime — an AST check for
+        # "defined inside the function" does not catch it). This path never runs the fallback
+        # loop, so model_config is the actual model.
         _ws_tokenizer = getattr(request.app.state, "tokenizer", None)
 
         async def _ws_estimate(text: str) -> int | None:
@@ -587,8 +590,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         try_order=try_order,
         original_alias=model_alias,
         is_stream=is_stream,
-        # 폴백 루프는 우리 web_search 도구 없이 나간다 — 되돌아온 native 검색 블록은 텍스트로
-        # 환원된 본문(req_for_bedrock)을 준다(원본 req_data 는 웹서치 루프 전용).
+        # The fallback loop goes out without our web_search tool, so it gets the body whose
+        # replayed native search blocks were turned into text (req_for_bedrock); the original
+        # req_data is for the web-search loop only.
         req_data=req_for_bedrock if isinstance(req_for_bedrock, dict) else {},
         redis=redis,
         auth_context=auth_context,
