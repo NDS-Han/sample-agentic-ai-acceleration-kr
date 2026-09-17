@@ -72,6 +72,11 @@
 {{- if and .Values.global.devLoginEnabled (eq .Values.global.environment "prod") }}
    🚨 global.devLoginEnabled=true 이지만 environment=prod 입니다. 즉시 false로 바꾸세요.
 {{- end }}
+{{- if and (not .Values.global.devLoginEnabled) (not .Values.adminApi.adminUiLogin.cognitoAppClientId) (not .Values.adminUi.env.OIDC_CLIENT_ID) }}
+   🚨 로그인 경로가 없습니다: devLoginEnabled=false + adminUiLogin 미설정 + admin-ui OIDC 미설정.
+      admin-ui /login 폼이 열리지만 Cognito 로그인이 동작하지 않습니다. adminApi.adminUiLogin.cognitoAppClientId
+      또는 adminUi.env 의 OIDC_CLIENT_ID/OIDC_AUTHORIZE_URL/OIDC_TOKEN_URL 을 설정하세요.
+{{- end }}
 
 📚 다음 단계:
    1. 스모크 테스트 실행:    deployment/scripts/smoke-test.sh --namespace {{ .Release.Namespace }}

@@ -77,7 +77,16 @@ function redirectSameOrigin(request: NextRequest, path: string, status: number):
 }
 
 function redirectToLogin(request: NextRequest, clearCookie: boolean): NextResponse {
-  const redirectResponse = redirectSameOrigin(request, '/login', 307);
+  // 로그인 방식은 배포별로 둘 중 하나다. adminUi.env 의 OIDC_* 가 채워져 있으면
+  // hosted-UI SSO(Authorization Code+PKCE) 배포 — /api/auth/login GET 이 IdP 로 302.
+  // 그게 아니면 /login 페이지(8-L Cognito 폼; DEV_LOGIN_ENABLED 면 dev-login 링크도 표시).
+  // OIDC 배포에서 /login 으로내면 ROPC 가 꺼져 있어 폼이 동작하지 않는다.
+  const hostedUiOidc = (process.env.OIDC_CLIENT_ID ?? '').trim() !== '';
+  const redirectResponse = redirectSameOrigin(
+    request,
+    hostedUiOidc ? '/api/auth/login' : '/login',
+    307,
+  );
   if (clearCookie) {
     // 만료/손상된 자격증명은 응답에서 즉시 제거한다 — 안 지우면 다음 요청도 같은 쿠키로
     // 다시 이 분기를 타고, 사용자는 못 쓰는 쿠키를 계속 들고 다닌다.
