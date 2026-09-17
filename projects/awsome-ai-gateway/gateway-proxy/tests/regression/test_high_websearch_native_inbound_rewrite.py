@@ -227,6 +227,53 @@ def test_rewrite_tolerates_bad_digest_and_no_blocks():
     assert wsl._rewrite_inbound_native_blocks({"messages": "nope"}) is not None
 
 
+def test_rewrite_drops_display_trace_lines_only_next_to_native_blocks():
+    """native 모드가 사용자에게 보여 준 🔎 줄은 모델 이력에서 빠진다(도구 기록이 대신 있다).
+    native 블록이 없는 메시지(text 모드 클라이언트)의 🔎 줄은 그대로 — 거기선 유일한 흔적."""
+    shown = _text(f'{PREFIX} "q1" — 1 result (a.com)\n')
+    body = {
+        "messages": [
+            {"role": "user", "content": "q"},
+            {
+                "role": "assistant",
+                "content": [
+                    _text("t0"),
+                    _stu(1, "q1"),
+                    _res(1, [_item("A", "https://a.com")]),
+                    shown,
+                    _text(f'{PREFIX} "q1" — 1 result (a.com)\n\nanswer'),
+                ],
+            },
+            {"role": "user", "content": "more"},
+            {
+                "role": "assistant",
+                "content": [_text(f'{PREFIX} "q9" — 2 results (z.com)\n'), _text("x")],
+            },
+        ]
+    }
+    msgs = wsl._rewrite_inbound_native_blocks(body)["messages"]
+    assert _roles(msgs) == ["user", "assistant", "user", "assistant", "user", "assistant"]
+    assert _kinds(msgs[3]) == ["text"] and msgs[3]["content"][0]["text"].strip() == "answer"
+    assert PREFIX not in json.dumps(msgs[:5])
+    assert msgs[5] is body["messages"][3], "native 블록 없는 메시지는 손대지 않는다"
+    # a trailing display-only block after the search leaves no dangling assistant message
+    body2 = {
+        "messages": [
+            {
+                "role": "assistant",
+                "content": [
+                    _text("t0"),
+                    _stu(1, "q1"),
+                    _res(1, [_item("A", "https://a.com")]),
+                    shown,
+                ],
+            }
+        ]
+    }
+    msgs2 = wsl._rewrite_inbound_native_blocks(body2)["messages"]
+    assert _roles(msgs2) == ["assistant", "user"] and _kinds(msgs2[0]) == ["text", "tool_use"]
+
+
 def test_rewrite_result_only_message_never_becomes_empty():
     body = {
         "messages": [{"role": "assistant", "content": [_res(9, [_item("A", "https://a.com")])]}]
@@ -279,6 +326,7 @@ def _echoed() -> list[dict]:
                 _text("looking"),
                 _stu(1, "q1"),
                 _res(1, [_item("A", "https://a.com/x", "A snippet")]),
+                _text(f'{PREFIX} "q1" — 1 result (a.com)\n'),
                 _text("answer"),
             ],
         },

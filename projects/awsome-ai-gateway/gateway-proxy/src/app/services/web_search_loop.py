@@ -1106,10 +1106,13 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
         segment: list = []       # blocks of the assistant turn being rebuilt
         uses: list = []          # our tool_use blocks pending their results
         outs: list = []          # matching tool_result blocks
+        closed = 0               # assistant/user pairs already emitted for this message
 
         def close() -> None:
+            nonlocal closed
             new_msgs.append({"role": "assistant", "content": segment + uses})
             new_msgs.append({"role": "user", "content": outs})
+            closed += 1
 
         for b in content:
             t = b.get("type") if isinstance(b, dict) else None
@@ -1128,11 +1131,20 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
                 if uses:
                     close()
                     segment, uses, outs = [], [], []
+                if t == "text":
+                    # 표시용 🔎 줄(native 모드가 사용자에게 보여 준 것)은 모델 이력에서 뺀다 —
+                    # 도구 기록이 대신 있고, 남겨 두면 모방의 원천이 된다.
+                    cleaned = _strip_fake_trace_lines(b.get("text") or "")
+                    if not cleaned.strip():
+                        continue
+                    b = {**b, "text": cleaned}
                 segment.append(b)
         if uses:
             close()
         elif segment:
             new_msgs.append({**m, "content": segment})
+        elif closed:
+            pass    # the message was fully emitted as assistant/user pairs above
         else:   # only orphan result blocks — never leave an empty assistant message
             new_msgs.append({**m, "content": [{"type": "text", "text": _trace_line(
                 "", _trace_words("failed"))}]})
@@ -1713,7 +1725,10 @@ async def _anthropic_stream(
                     global_index += 1
                     for frame in _native_block_frames(gi, blk):
                         yield frame
-            elif traces and envelope_open and not native_trace:
+            # 🔎 줄은 두 모드 모두 낸다 — text 모드에선 유일한 흔적, native 모드에선 사용자 표시용
+            # (Cowork 화면은 블록을 그리지 않는다, 2026-09-17 실측). native 모드의 🔎 줄은 되돌아올
+            # 때 _rewrite_inbound_native_blocks 가 걷어내 모델 이력에는 도구 기록만 남는다.
+            if traces and envelope_open:
                 gi = global_index
                 global_index += 1
                 yield _sse("content_block_start",
@@ -1940,14 +1955,15 @@ async def _anthropic_nonstream(
             final_body["content"] = cleaned
         # 검색 흔적을 본문 맨 앞에(스트리밍 경로와 같은 계약) — native 모드는 블록 쌍, 아니면
         # 텍스트 블록 하나(_TRACE_PREFIX).
-        if native_trace:
-            if native_blocks:
-                logger.info("web_search.native_blocks_emitted",
-                            searches=len(native_blocks) // 2)
-            final_body["content"][0:0] = native_blocks
-        elif traces:
-            final_body["content"].insert(
-                0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
+        lead: list[dict] = []
+        if native_trace and native_blocks:
+            logger.info("web_search.native_blocks_emitted",
+                        searches=len(native_blocks) // 2)
+            lead.extend(native_blocks)
+        if traces:   # 표시용 🔎 줄 — native 모드에서도 낸다(스트리밍 경로의 같은 주석)
+            lead.append({"type": "text", "text": "\n".join(traces) + "\n\n"})
+        if lead:
+            final_body["content"][0:0] = lead
         # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
         # 도구 호출을 기다린다 — 스트리밍 스티처의 같은 판단.
         if final_body.get("stop_reason") == "tool_use" and not any(
