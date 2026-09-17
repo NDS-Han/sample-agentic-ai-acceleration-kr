@@ -847,7 +847,50 @@ def _trace_line(query: str, outcome: str) -> str:
 _NATIVE_TOOL_USE = "server_tool_use"
 _NATIVE_TOOL_RESULT = "web_search_tool_result"
 _DIGEST_RESULTS = 5
-_DIGEST_SNIPPET_CHARS = 200
+#: 결과당 발췌 길이 기본값 — settings.web_search_digest_chars 가 덮어쓴다. 2026-09-17 Cowork
+#: 실측: 200자·페이지 첫머리는 시세표 숫자·"3 min read" 같은 잡음이라, 모델이 전문을 보고 근거지은
+#: 세부를 되돌아온 턴에서 "근거 없음" 으로 되물렸다. 본문다운 지점부터 600자.
+_DIGEST_SNIPPET_CHARS = 600
+#: 되돌아온 결과를 tool_result 로 되살릴 때의 메모 — 발췌만 남았지 전문은 그 턴에 봤음을 알린다.
+_DIGEST_NOTE = ("digest of an earlier search: the full results were shown to you in the turn "
+                "that ran it; only the leading excerpt of each result is kept here")
+
+
+def _digest_chars() -> int:
+    try:
+        from app.config import get_settings
+        v = int(getattr(get_settings(), "web_search_digest_chars", _DIGEST_SNIPPET_CHARS))
+        return v if v > 0 else _DIGEST_SNIPPET_CHARS
+    except Exception:  # settings unavailable (tests) → default
+        return _DIGEST_SNIPPET_CHARS
+
+
+def _wordy(tok: str) -> bool:
+    letters = sum(1 for ch in tok if ch.isalpha())
+    return letters >= 2 and letters / max(len(tok), 1) >= 0.5
+
+
+def _pick_snippet(body: Any, limit: int) -> str:
+    """Leading excerpt that starts at the first run of real words — skips ticker tables,
+    timestamps and read-time badges that open many pages — and ends at a sentence boundary."""
+    text = " ".join(str(body or "").split())
+    if not text:
+        return ""
+    toks = text.split(" ")
+    start = 0
+    for i in range(len(toks)):
+        window = toks[i:i + 6]
+        if len(window) >= 3 and sum(1 for t in window if _wordy(t)) >= min(5, len(window)):
+            start = i
+            break
+    text = " ".join(toks[start:])
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    m = max(cut.rfind(". "), cut.rfind("다. "), cut.rfind("。"), cut.rfind("! "), cut.rfind("? "))
+    if m > limit * 0.6:
+        cut = cut[: m + 1]
+    return cut.rstrip() + " …"
 
 
 def _trace_mode() -> tuple[str, frozenset[str]]:
@@ -916,13 +959,29 @@ def _result_digest(resp: Any, limit: int = _DIGEST_RESULTS,
             def get(k, _it=it):
                 return getattr(_it, k, None)
         body = get("text") if get("text") is not None else get("content")
-        snippet = " ".join(str(body or "").split())[:snippet_chars]
-        age = get("published_date") or get("page_age")
+        age = get("publishedDate") or get("published_date") or get("page_age")
         out.append({"title": str(get("title") or ""), "url": str(get("url") or ""),
-                    "snippet": snippet, "page_age": str(age) if age else None})
+                    "snippet": _pick_snippet(body, snippet_chars),
+                    "page_age": str(age) if age else None})
         if len(out) >= limit:
             break
     return out
+
+
+def _result_digest_from_text(text: str, resp: Any, limit: int = _DIGEST_RESULTS,
+                             snippet_chars: int = _DIGEST_SNIPPET_CHARS) -> list[dict]:
+    """Digest built from the TRIMMED result JSON the model actually saw (title/url/text/
+    publishedDate, URL-deduped); falls back to the raw response when it is not JSON."""
+    try:
+        data = json.loads(text or "")
+        items = data.get("results", data) if isinstance(data, dict) else data
+    except (ValueError, TypeError):
+        items = None
+    if isinstance(items, list) and items:
+        class _R:
+            results = [it for it in items if isinstance(it, dict)]
+        return _result_digest(_R(), limit, snippet_chars)
+    return _result_digest(resp, limit, snippet_chars)
 
 
 def _native_search_blocks(query: str, ok: bool, reason: str | None,
@@ -1060,7 +1119,8 @@ def _inbound_tool_result_block(tid: str, result: dict | None) -> tuple[dict, int
             if it.get("page_age"):
                 row["publishedDate"] = str(it["page_age"])
             items.append(row)
-        text = json.dumps({"results": items}, ensure_ascii=False, separators=(",", ":"))
+        text = json.dumps({"note": _DIGEST_NOTE, "results": items}, ensure_ascii=False,
+                          separators=(",", ":"))
         return {"type": "tool_result", "tool_use_id": tid, "content": text}, decoded
     if isinstance(content, dict):
         why = str(content.get("error_code") or "error")[:60]
@@ -1269,7 +1329,7 @@ async def _do_search(
             )
         n, hosts = _result_hosts(resp)
         return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)),
-                _result_digest(resp))
+                _result_digest_from_text(text, resp, _DIGEST_RESULTS, _digest_chars()))
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
