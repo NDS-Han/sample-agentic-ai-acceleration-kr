@@ -17,7 +17,8 @@
 # Targets come from config.env (WEB_SEARCH_MAX_RESULT_CHARS etc.); unset means
 # the defaults below. Takes effect at the next install-eks.sh <env> (rollout).
 # Also carries WEB_SEARCH_TRACE_MODE (text | native — the 2026-09-17 native-block
-# probe for Cowork); same mechanism, string-valued.
+# probe for Cowork; string-valued) and WEB_SEARCH_DIGEST_CHARS (per-result excerpt
+# replayed in native mode; 0 = same as the trimmed result the model saw).
 #
 # Usage:
 #   bash 17-set-websearch-caps.sh                 # dry-run
@@ -42,13 +43,14 @@ load_config
 : "${WEB_SEARCH_MAX_RESULTS_DEFAULT:=5}"
 : "${WEB_SEARCH_MAX_SEARCHES_PER_TURN:=3}"
 : "${WEB_SEARCH_MAX_ITERATIONS:=2}"
+: "${WEB_SEARCH_DIGEST_CHARS:=0}"
 : "${WEB_SEARCH_TRACE_MODE:=text}"
-KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS)
+KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS WEB_SEARCH_DIGEST_CHARS)
 STR_KEYS=(WEB_SEARCH_TRACE_MODE)
 ALL_KEYS=("${KEYS[@]}" "${STR_KEYS[@]}")
 declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=60000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=10
                           [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5
-                          [WEB_SEARCH_TRACE_MODE]=text )
+                          [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=text )
 for k in "${KEYS[@]}"; do [[ "${!k}" =~ ^[0-9]+$ ]] || die "$k must be an integer (config.env): ${!k}"; done
 for k in "${STR_KEYS[@]}"; do [[ "${!k}" =~ ^(text|native)$ ]] || die "$k must be text|native (config.env): ${!k}"; done
 

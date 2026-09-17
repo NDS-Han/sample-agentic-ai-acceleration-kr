@@ -847,22 +847,28 @@ def _trace_line(query: str, outcome: str) -> str:
 _NATIVE_TOOL_USE = "server_tool_use"
 _NATIVE_TOOL_RESULT = "web_search_tool_result"
 _DIGEST_RESULTS = 5
-#: 결과당 발췌 길이 기본값 — settings.web_search_digest_chars 가 덮어쓴다. 2026-09-17 Cowork
-#: 실측: 200자·페이지 첫머리는 시세표 숫자·"3 min read" 같은 잡음이라, 모델이 전문을 보고 근거지은
-#: 세부를 되돌아온 턴에서 "근거 없음" 으로 되물렸다. 본문다운 지점부터 600자.
-_DIGEST_SNIPPET_CHARS = 600
+#: 결과당 발췌 길이 — 기본은 **모델이 본 트림 결과와 같은 길이**(result_text_chars, 1500).
+#: 2026-09-17 Cowork 실측: 200자(페이지 첫머리 잡음)도 600자도 모델이 전문으로 근거지은 문장이
+#: 잘려서, 되돌아온 턴에서 실제 근거를 "없다" 며 되물렸다(마이크론 3월 HVM·TrendForce 20% 등 —
+#: S3 전문에 전부 있었음). 이력이 곧 모델이 본 것이어야 되물릴 이유가 없다(품질 우선, 사용자 결정).
+#: settings.web_search_digest_chars > 0 이면 그 값으로 줄인다.
+_DIGEST_SNIPPET_CHARS = 1500
 #: 되돌아온 결과를 tool_result 로 되살릴 때의 메모 — 발췌만 남았지 전문은 그 턴에 봤음을 알린다.
 _DIGEST_NOTE = ("digest of an earlier search: the full results were shown to you in the turn "
                 "that ran it; only the leading excerpt of each result is kept here")
 
 
-def _digest_chars() -> int:
+def _digest_chars(result_text_chars: int = 0) -> int:
+    """Per-result digest length: WEB_SEARCH_DIGEST_CHARS if > 0, else the trimmed-result
+    length the model actually saw (result_text_chars), else the code default."""
     try:
         from app.config import get_settings
-        v = int(getattr(get_settings(), "web_search_digest_chars", _DIGEST_SNIPPET_CHARS))
-        return v if v > 0 else _DIGEST_SNIPPET_CHARS
-    except Exception:  # settings unavailable (tests) → default
-        return _DIGEST_SNIPPET_CHARS
+        v = int(getattr(get_settings(), "web_search_digest_chars", 0) or 0)
+    except Exception:  # settings unavailable (tests) → follow the trim length
+        v = 0
+    if v > 0:
+        return v
+    return result_text_chars if result_text_chars > 0 else _DIGEST_SNIPPET_CHARS
 
 
 def _wordy(tok: str) -> bool:
@@ -1329,7 +1335,8 @@ async def _do_search(
             )
         n, hosts = _result_hosts(resp)
         return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)),
-                _result_digest_from_text(text, resp, _DIGEST_RESULTS, _digest_chars()))
+                _result_digest_from_text(text, resp, _DIGEST_RESULTS,
+                                         _digest_chars(result_text_chars)))
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
