@@ -1027,6 +1027,122 @@ def _normalize_inbound_native_blocks(body: dict) -> dict:
 normalize_inbound_native_blocks = _normalize_inbound_native_blocks
 
 
+def _inbound_tool_id(srv_id: Any) -> str:
+    """srvtoolu_X → toolu_gw_X (tool_use 와 tool_result 가 같은 id 를 쓴다)."""
+    sid = str(srv_id or "")
+    if sid.startswith("srvtoolu_"):
+        sid = sid[len("srvtoolu_"):]
+    return "toolu_gw_" + (sid or uuid.uuid4().hex[:24])
+
+
+def _decode_digest(enc: Any) -> str:
+    """encrypted_content(base64 JSON {"gw":1,"snippet":…}) → 발췌. 못 읽으면 빈 문자열."""
+    try:
+        data = json.loads(base64.b64decode(str(enc or ""), validate=True).decode("utf-8"))
+        return str(data.get("snippet") or "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def _inbound_tool_result_block(tid: str, result: dict | None) -> tuple[dict, int]:
+    """되돌아온 web_search_tool_result → 우리 tool_result. (block, 발췌를 복원한 결과 수)."""
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list):
+        items: list[dict] = []
+        decoded = 0
+        for it in content:
+            if not isinstance(it, dict):
+                continue
+            snippet = _decode_digest(it.get("encrypted_content"))
+            decoded += 1 if snippet else 0
+            row = {"title": str(it.get("title") or ""), "url": str(it.get("url") or ""),
+                   "text": snippet}
+            if it.get("page_age"):
+                row["publishedDate"] = str(it["page_age"])
+            items.append(row)
+        text = json.dumps({"results": items}, ensure_ascii=False, separators=(",", ":"))
+        return {"type": "tool_result", "tool_use_id": tid, "content": text}, decoded
+    if isinstance(content, dict):
+        why = str(content.get("error_code") or "error")[:60]
+        return ({"type": "tool_result", "tool_use_id": tid, "is_error": True,
+                 "content": json.dumps({"error": f"web search unavailable ({why})"})}, 0)
+    return ({"type": "tool_result", "tool_use_id": tid, "is_error": True,
+             "content": json.dumps({"error": "web search result missing"})}, 0)
+
+
+def _rewrite_inbound_native_blocks(body: dict) -> dict:
+    """본 구현: 되돌아온 native 검색 블록을 **진짜 도구 기록**으로 재작성한다.
+
+    assistant [text0, server_tool_use, web_search_tool_result, text1]
+      → assistant [text0, tool_use] / user [tool_result] / assistant [text1]
+    원래 턴 구조(검색 → 결과 → 계속)가 복원되고, 결과 발췌(digest)가 tool_result 로 모델에 다시
+    보인다 — 텍스트 흔적과 달리 모델이 "도구 기록" 으로 믿는 형태. 연속 검색은 한 assistant 턴에
+    병렬 tool_use. 텍스트·클라이언트 도구 등 다른 블록이 나오면 그 앞에서 턴을 닫는다.
+
+    ⚠️ 우리 web_search 도구가 함께 나가는 루프 턴에만 쓴다. 도구 정의 없이 나가는 경로(F-7
+       패스스루·MCP 실패 폴백·라우터 폴백 루프·count_tokens)는 _normalize_inbound_native_blocks
+       (텍스트 환원) — tool_use 가 정의 없는 도구를 가리키면 Bedrock 400 이다.
+    ⚠️ 이 함수는 클라이언트가 보내지 않은 user[tool_result] 메시지를 **합성**한다. 그 뒤로 루프의
+       메시지 목록은 클라이언트의 것과 개수·인덱스가 다르다 — "마지막 user 메시지"·메시지 인덱스·
+       user 턴 수에 기대는 기능을 붙일 때 주의(캐시 표시 _place_cache_breakpoint 는 합성 메시지에
+       cache_control 이 없어 4개 셈이 그대로 맞는다).
+    블록이 없으면 같은 객체를 돌려준다.
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return body
+    n_use = n_res = n_decoded = 0
+    new_msgs: list = []
+    for m in msgs:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list) or not any(
+            isinstance(b, dict) and b.get("type") in (_NATIVE_TOOL_USE, _NATIVE_TOOL_RESULT)
+            for b in content
+        ):
+            new_msgs.append(m)
+            continue
+        results = {b.get("tool_use_id"): b for b in content
+                   if isinstance(b, dict) and b.get("type") == _NATIVE_TOOL_RESULT}
+        segment: list = []       # blocks of the assistant turn being rebuilt
+        uses: list = []          # our tool_use blocks pending their results
+        outs: list = []          # matching tool_result blocks
+
+        def close() -> None:
+            new_msgs.append({"role": "assistant", "content": segment + uses})
+            new_msgs.append({"role": "user", "content": outs})
+
+        for b in content:
+            t = b.get("type") if isinstance(b, dict) else None
+            if t == _NATIVE_TOOL_USE:
+                n_use += 1
+                tid = _inbound_tool_id(b.get("id"))
+                q = str((b.get("input") or {}).get("query") or "")
+                uses.append({"type": "tool_use", "id": tid, "name": GW_WEB_SEARCH_NAME,
+                             "input": {"query": q}})
+                blk, decoded = _inbound_tool_result_block(tid, results.get(b.get("id")))
+                outs.append(blk)
+                n_decoded += decoded
+            elif t == _NATIVE_TOOL_RESULT:
+                n_res += 1          # consumed through `results` above
+            else:
+                if uses:
+                    close()
+                    segment, uses, outs = [], [], []
+                segment.append(b)
+        if uses:
+            close()
+        elif segment:
+            new_msgs.append({**m, "content": segment})
+        else:   # only orphan result blocks — never leave an empty assistant message
+            new_msgs.append({**m, "content": [{"type": "text", "text": _trace_line(
+                "", _trace_words("failed"))}]})
+    if not (n_use or n_res):
+        return body
+    logger.info("web_search.inbound_native_rewritten", server_tool_use=n_use,
+                tool_result=n_res, digests=n_decoded)
+    return {**body, "messages": new_msgs}
+
+
 def _result_hosts(resp) -> tuple[int, list[str]]:
     """(count, up to 3 distinct hosts) of a WebSearchResponse-like object; tolerant of fakes."""
     items = getattr(resp, "results", None)
@@ -2420,10 +2536,13 @@ async def run_web_search_loop(
     # a genuine CUSTOM web_search tool (no native type) survives and is still respected
     # (F-7). This also covers the MCP-init-failure fallback below (both read initial_req_data).
     initial_req_data = _strip_native_web_search(initial_req_data)
-    # 탐침(native 흔적): 클라이언트가 우리 server_tool_use/web_search_tool_result 블록을 이력에
-    # 실어 되돌리면 Bedrock 이 모르는 형태다 — 텍스트 흔적으로 환원한다(_normalize_… 주석). F-7
-    # 패스스루와 MCP 초기화 실패 폴백도 initial_req_data 를 읽으므로 그 앞에서 한다.
+    # 되돌아온 native 검색 블록(server_tool_use/web_search_tool_result — Bedrock 이 모르는 형태):
+    # 루프 턴(우리 도구가 주입됨)에는 tool_use/tool_result 로 **재작성**해 결과 발췌까지 되살리고,
+    # 우리 도구 없이 나가는 F-7 패스스루·MCP 초기화 실패 폴백에는 텍스트 흔적으로 환원한다
+    # (_rewrite_… / _normalize_… 주석). 둘 다 블록이 없으면 같은 객체.
+    loop_req_data = initial_req_data
     if dialect == "anthropic":
+        loop_req_data = _rewrite_inbound_native_blocks(initial_req_data)
         initial_req_data = _normalize_inbound_native_blocks(initial_req_data)
     native_trace = dialect == "anthropic" and _native_trace_enabled(request)
     dialect_kw: dict = {"native_trace": native_trace} if dialect == "anthropic" else {}
@@ -2514,7 +2633,7 @@ async def run_web_search_loop(
         stitcher = _anthropic_stream if dialect == "anthropic" else _responses_stream
         gen = stitcher(
             invoke_stream=invoke_stream,
-            base_body=initial_req_data,
+            base_body=loop_req_data,
             mcp_client=mcp_client,
             request=request,
             on_usage=on_usage,
@@ -2535,7 +2654,7 @@ async def run_web_search_loop(
     loop = _anthropic_nonstream if dialect == "anthropic" else _responses_nonstream
     resp = await loop(
         invoke=invoke,
-        base_body=initial_req_data,
+        base_body=loop_req_data,
         mcp_client=mcp_client,
         on_usage=on_usage,
         max_iterations=max_iterations,
