@@ -206,6 +206,9 @@ class Settings(BaseSettings):
     web_search_enabled: bool = False
     web_search_max_iterations: int = 5
     web_search_total_deadline_sec: float = 90.0
+    #: 검색 **1회**의 결과 수 상한(중복·미러 제거 뒤 남기는 수). 모델의 max_results 는 이 값까지만
+    #: 존중된다 — 이름은 "default" 지만 최대다(2026-09-17: 모델이 15 를 요구해 12k 캡에서 JSON 이
+    #: 절단되던 문제). 0 = 무제한. 커넥터에는 중복 제거 여유로 2배까지 요청한다.
     web_search_max_results_default: int = 10
     #: 검색 **1회** 결과 텍스트의 상한(문자). 0 = 무제한(캡 이전 동작).
     #: ⚠️ max_iterations 는 턴 수를, total_deadline_sec 는 시간을 묶는다. 청구서를 정하는

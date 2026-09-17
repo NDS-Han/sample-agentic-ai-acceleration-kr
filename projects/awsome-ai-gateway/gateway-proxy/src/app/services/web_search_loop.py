@@ -32,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -118,7 +119,8 @@ def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
                 "query": {"type": "string", "description": "Search query (<=200 chars)"},
                 "max_results": {
                     "type": "integer",
-                    "description": "Max results (1-25)",
+                    "description": ("Max distinct results to return (1-25); the gateway caps "
+                                    "this per search and removes duplicate/mirror pages"),
                     "minimum": 1,
                     "maximum": 25,
                 },
@@ -877,26 +879,11 @@ def _wordy(tok: str) -> bool:
 
 
 def _pick_snippet(body: Any, limit: int) -> str:
-    """Leading excerpt that starts at the first run of real words — skips ticker tables,
-    timestamps and read-time badges that open many pages — and ends at a sentence boundary."""
-    text = " ".join(str(body or "").split())
+    """Leading excerpt: real words first (_skip_noise), then a sentence-boundary cut."""
+    text = _collapse(body)
     if not text:
         return ""
-    toks = text.split(" ")
-    start = 0
-    for i in range(len(toks)):
-        window = toks[i:i + 6]
-        if len(window) >= 3 and sum(1 for t in window if _wordy(t)) >= min(5, len(window)):
-            start = i
-            break
-    text = " ".join(toks[start:])
-    if len(text) <= limit:
-        return text
-    cut = text[:limit]
-    m = max(cut.rfind(". "), cut.rfind("다. "), cut.rfind("。"), cut.rfind("! "), cut.rfind("? "))
-    if m > limit * 0.6:
-        cut = cut[: m + 1]
-    return cut.rstrip() + " …"
+    return _cut_sentence(_skip_noise(text), limit)
 
 
 def _trace_mode() -> tuple[str, frozenset[str]]:
@@ -1243,6 +1230,181 @@ def _result_hosts(resp) -> tuple[int, list[str]]:
     return len(items), hosts
 
 
+#: ── 증거 집합(evidence set) ─────────────────────────────────────────────────────
+#: 검색 1회의 결과를 **한 번만** 정규화해 세 곳 — 모델 tool_result · 되돌림 digest · 🔎 줄 —
+#: 이 같은 집합을 쓴다. 2026-09-17 S3 실측: 모델이 max_results 15 를 요구하면 설정 상한 5 가
+#: "기본값"이라 무시돼 15×1500자 > 12k 캡 → 검색마다 JSON 이 레코드 중간에서 절단(모델은 깨진
+#: 8건을 봄), 되돌림은 절단 JSON 을 못 읽어 원본에서 5건을 다시 만들고, 🔎 줄은 15 를 셌다 —
+#: 셋이 서로 달라 모델이 "내가 본 결과에 없다" 며 실제 근거를 되물렸다. 그래서: 상한은 **최대**로
+#: 강제, 미러·중복은 본문 지문으로 제거, 결과당 길이는 캡에 맞춰 배분(절단 불가, JSON 항상 유효).
+_FETCH_HEADROOM = 2          # 중복 제거 여유: 상한의 2배까지 커넥터에 요청(과금은 호출당)
+_CONNECTOR_MAX_RESULTS = 25  # agentcore_mcp_client.search 의 상한과 같다
+_EVIDENCE_FLOOR = 120        # 결과당 본문 최소 길이 — 이보다 작아지면 결과 수를 줄인다
+_MIRROR_JACCARD = 0.6        # 지문(8-단어) 자카드 — 거의 같은 글(보일러플레이트만 다름)
+_MIRROR_CONTAIN = 0.9        # 한쪽이 다른 쪽에 거의 통째로 포함(잘린 미러), 지문 60개 이상
+_MIRROR_MIN_SHINGLES = 60
+
+
+def _collapse(body: Any) -> str:
+    return " ".join(str(body or "").split())
+
+
+_PAGE_BADGES = re.compile(r"\b\d+\s*min(?:ute)?s?\s+read\b|\b\d{1,2}:\d{2}\s*[AaPp][Mm]\b")
+
+
+def _skip_noise(text: str) -> str:
+    """Start at the first run of real words — skips ticker tables, timestamps and read-time
+    badges ("3 min read", "2:23 PM") that open many pages. Input returned when no run exists."""
+    text = " ".join(_PAGE_BADGES.sub(" ", text).split())
+    toks = text.split(" ")
+    for i in range(len(toks)):
+        window = toks[i:i + 6]
+        if (len(window) >= 3 and _wordy(window[0])
+                and sum(1 for t in window if _wordy(t)) >= min(5, len(window))):
+            return " ".join(toks[i:])
+    return text
+
+
+def _cut_sentence(text: str, limit: int) -> str:
+    """Cut to ``limit`` at a sentence boundary (when one lies past 60% of it) and mark it."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    m = max(cut.rfind(". "), cut.rfind("다. "), cut.rfind("。"), cut.rfind("! "), cut.rfind("? "))
+    if m > limit * 0.6:
+        cut = cut[: m + 1]
+    return cut.rstrip() + " …"
+
+
+def _fingerprint(text: str, n: int = 8) -> set[str]:
+    words = re.findall(r"\w+", text.lower())[:400]
+    return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+
+def _is_mirror(fp: set[str], kept: list[set[str]]) -> bool:
+    """Same article on another host? Jaccard catches copies that differ only in boilerplate;
+    containment catches a truncated copy. A long quote shared by two DIFFERENT articles stays
+    below both (Jaccard ≈ shared/(2−shared); containment needs ≥90% of a substantial page)."""
+    if len(fp) < 4:
+        return False
+    for other in kept:
+        if len(other) < 4:
+            continue
+        inter = len(fp & other)
+        if inter / len(fp | other) >= _MIRROR_JACCARD:
+            return True
+        if (min(len(fp), len(other)) >= _MIRROR_MIN_SHINGLES
+                and inter / min(len(fp), len(other)) >= _MIRROR_CONTAIN):
+            return True
+    return False
+
+
+def _dumps(obj: Any) -> str:
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _fit_to_cap(kept: list[dict], bodies: list[str], per_cap: int, max_chars: int,
+                stats: dict) -> int:
+    """Cut each body so the serialized result list fits ``max_chars`` (exactly, measured on
+    the real JSON), dropping trailing results when the per-result share would fall below
+    _EVIDENCE_FLOOR. Returns the per-result length used. Deterministic — no overhead estimate."""
+    per = per_cap
+    for _ in range(40):
+        if not kept:
+            return 0
+        overhead = len(_dumps({"results": [{**it, "text": ""} for it in kept]}))
+        share = (max_chars - overhead) // len(kept)
+        if share < _EVIDENCE_FLOOR:
+            kept.pop()
+            bodies.pop()
+            stats["dropped_budget"] += 1
+            continue
+        per = min(per_cap, share)
+        for it, body in zip(kept, bodies):
+            it["text"] = _cut_sentence(body, per)
+        size = len(_dumps({"results": kept}))
+        if size <= max_chars:
+            return per
+        per_cap = per - ((size - max_chars) // len(kept) + 1)   # shave the overshoot
+        if per_cap < _EVIDENCE_FLOOR:
+            kept.pop()
+            bodies.pop()
+            stats["dropped_budget"] += 1
+            per_cap = per
+    return per
+
+
+def _build_evidence(raw_text: str, *, keep: int, per_result_chars: int,
+                    max_chars: int) -> tuple[list[dict], dict] | None:
+    """Canonical result list for one search, or None when the provider text is not JSON.
+
+    URL duplicates and mirrors (same article body on another host) are dropped, the first
+    ``keep`` distinct results are kept (``keep <= 0`` = all), each body starts at real words
+    and is cut so that ``keep`` results fit ``max_chars`` (per-result cut disabled when
+    ``per_result_chars <= 0`` — the old whole-JSON cap then applies downstream).
+    """
+    try:
+        data = json.loads(raw_text or "")
+    except (ValueError, TypeError):
+        return None
+    items = data.get("results") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return None
+    stats = {"fetched": len(items), "dup_url": 0, "dup_mirror": 0, "dropped_budget": 0}
+    seen_urls: set[str] = set()
+    kept_fps: list[set[str]] = []
+    kept: list[dict] = []
+    bodies: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        url = str(it.get("url") or "")
+        key = url.split("#")[0].rstrip("/") if url else ""
+        if key and key in seen_urls:
+            stats["dup_url"] += 1
+            continue
+        raw_body = it.get("text") if it.get("text") is not None else it.get("content")
+        collapsed = _collapse(raw_body)
+        body = _skip_noise(collapsed)
+        fp = _fingerprint(body)
+        if _is_mirror(fp, kept_fps):
+            stats["dup_mirror"] += 1
+            continue
+        if key:
+            seen_urls.add(key)
+        kept_fps.append(fp)
+        if not kept:   # 잡음 제거 판독용(첫 결과만) — 다음 배포에서 미발동이면 뺀다
+            stats["lead_raw"] = collapsed[:60]
+            stats["lead_clean"] = body[:60]
+        new = {k: v for k, v in it.items() if k not in ("text", "content", "raw_content")}
+        new["text"] = body
+        kept.append(new)
+        bodies.append(body)
+        if keep > 0 and len(kept) >= keep:
+            break
+    per = per_result_chars if per_result_chars > 0 else 0
+    if per > 0 and max_chars > 0:
+        per = _fit_to_cap(kept, bodies, per, max_chars, stats)
+    elif per > 0:
+        for it, body in zip(kept, bodies):
+            it["text"] = _cut_sentence(body, per)
+    stats["kept"] = len(kept)
+    stats["per_result"] = per
+    return kept, stats
+
+
+def _digest_from_evidence(evidence: list[dict], snippet_chars: int) -> list[dict]:
+    """Replay digest = the evidence itself (title/url/date + the same text, optionally
+    shortened by WEB_SEARCH_DIGEST_CHARS)."""
+    out: list[dict] = []
+    for it in evidence:
+        age = it.get("publishedDate") or it.get("published_date") or it.get("page_age")
+        out.append({"title": str(it.get("title") or ""), "url": str(it.get("url") or ""),
+                    "snippet": _cut_sentence(str(it.get("text") or ""), snippet_chars),
+                    "page_age": str(age) if age else None})
+    return out
+
+
 def _trim_results(text: str, per_result_chars: int) -> tuple[str, bool]:
     """Structured trim of the provider JSON: keep EVERY result, cut each body to
     ``per_result_chars`` at a sentence boundary, collapse whitespace, drop URL duplicates,
@@ -1313,30 +1475,51 @@ async def _do_search(
        캡이 성공 플래그를 뒤집으면 web_search_count(과금/귀속)가 어긋난다.
     """
     query = ""
-    max_results = default_max
+    requested = default_max
     if isinstance(tool_input, dict):
         query = str(tool_input.get("query") or "")
         try:
-            max_results = int(tool_input.get("max_results") or default_max)
+            requested = int(tool_input.get("max_results") or default_max)
         except (TypeError, ValueError):
-            max_results = default_max
+            requested = default_max
+    if requested <= 0:
+        requested = default_max
+    # 설정 상한은 **최대**다(모델이 더 요구해도 넘지 않는다). 중복 제거 여유로 상한의 2배까지
+    # 커넥터에 요청한다 — 과금은 호출당이라 결과 수는 비용에 영향이 없다(_build_evidence 주석).
+    keep = min(requested, default_max) if default_max > 0 else requested
+    fetch_n = requested
+    if default_max > 0:
+        fetch_n = min(keep * _FETCH_HEADROOM, _CONNECTOR_MAX_RESULTS)
     try:
-        resp = await mcp_client.search(query, max_results)
-        text, trimmed = _trim_results(resp.raw_text, result_text_chars)
-        if trimmed:
-            logger.info("web_search.result_trimmed", original_chars=len(resp.raw_text),
-                        chars=len(text), per_result=result_text_chars)
-        text, truncated = _truncate_result(text, max_result_chars)
-        if truncated:
-            logger.info(
-                "web_search.result_truncated",
-                original_chars=len(resp.raw_text),
-                cap=max_result_chars,
-            )
-        n, hosts = _result_hosts(resp)
-        return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)),
-                _result_digest_from_text(text, resp, _DIGEST_RESULTS,
-                                         _digest_chars(result_text_chars)))
+        resp = await mcp_client.search(query, fetch_n)
+        built = _build_evidence(resp.raw_text, keep=keep, per_result_chars=result_text_chars,
+                                max_chars=max_result_chars)
+        if built is not None:
+            evidence, stats = built
+            text = json.dumps({"results": evidence}, ensure_ascii=False, separators=(",", ":"))
+            logger.info("web_search.evidence_built", requested=requested, fetched=stats["fetched"],
+                        kept=stats["kept"], dup_url=stats["dup_url"],
+                        dup_mirror=stats["dup_mirror"], dropped_budget=stats["dropped_budget"],
+                        per_result=stats["per_result"], chars=len(text),
+                        lead_raw=stats.get("lead_raw"), lead_clean=stats.get("lead_clean"))
+            text, truncated = _truncate_result(text, max_result_chars)   # safety net only
+            if truncated:
+                logger.warning("web_search.result_truncated", chars=len(text),
+                               cap=max_result_chars)
+
+            class _E:
+                results = evidence
+            n, hosts = _result_hosts(_E())
+            digest = _digest_from_evidence(evidence, _digest_chars(result_text_chars))
+        else:
+            # provider text is not JSON — old path: whole-text cap, raw-response digest
+            text, truncated = _truncate_result(resp.raw_text, max_result_chars)
+            if truncated:
+                logger.info("web_search.result_truncated", original_chars=len(resp.raw_text),
+                            cap=max_result_chars)
+            n, hosts = _result_hosts(resp)
+            digest = _result_digest(resp, _DIGEST_RESULTS, _digest_chars(result_text_chars))
+        return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)), digest)
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
