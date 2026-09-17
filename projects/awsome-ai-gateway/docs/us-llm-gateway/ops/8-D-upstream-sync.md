@@ -39,6 +39,8 @@ bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
 bash 15-set-master-secret-ref.sh
+bash 17-set-websearch-caps.sh
+bash 17-set-websearch-caps.sh --apply
 ```
 기대:
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
@@ -205,8 +207,10 @@ bash 00-preflight-check.sh
 bash 14-postdeploy-check.sh --save pre
 bash 06-persist-annotations.sh
 bash 15-set-master-secret-ref.sh
+bash 17-set-websearch-caps.sh
+bash 17-set-websearch-caps.sh --apply
 ```
-기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15` 는 `nothing to do`(아니면 `--apply`).
+기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15`·`17` 은 `nothing to do`(아니면 `--apply`).
 
 **⑩-③ DB 스냅샷**
 ▶ 실행

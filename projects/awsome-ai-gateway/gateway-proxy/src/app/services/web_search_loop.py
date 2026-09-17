@@ -258,7 +258,26 @@ def _strip_anthropic_web_search_plumbing(
     우리 id 가 하나도 없으면 **입력 객체를 그대로 돌려준다**(사본도 만들지 않는다) — 검색이
     없었던 요청은 바이트 단위로 동일한 경로를 타야 한다.
     """
-    if not our_tool_use_ids:
+    # 이 요청이 실행한 검색의 id 에 더해, 이름이 web_search 인 tool_use 는 **전부** 우리 것으로
+    # 본다. 루프 안에서는 클라이언트가 그 이름의 도구를 선언하지 않은 것이 전제다(F-7: 선언했으면
+    # 루프 자체가 건너뛰어진다). 그러니 이력에 남은 그런 블록은 예전 턴에서 우리 배관이 클라이언트
+    # 쪽으로 새어 나갔다가 되돌아온 것뿐이다. 2026-09-16 US 실측: 그 누출 블록 하나 때문에
+    # force_final 턴이 Bedrock 400("Tool 'web_search' not found in provided tools") — 검색 N 회를
+    # 과금한 뒤 답이 없고, 클라이언트의 비스트리밍 재시도 3회가 전부 같은 400 이었다.
+    ids: set[str] = set(our_tool_use_ids)
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if (
+                isinstance(block, dict)
+                and block.get("type") == "tool_use"
+                and block.get("name") == GW_WEB_SEARCH_NAME
+                and block.get("id")
+            ):
+                ids.add(block["id"])
+    if not ids:
         return messages
 
     out: list = []
@@ -278,10 +297,10 @@ def _strip_anthropic_web_search_plumbing(
                 new_content.append(block)
                 continue
             btype = block.get("type")
-            if btype == "tool_use" and block.get("id") in our_tool_use_ids:
+            if btype == "tool_use" and block.get("id") in ids:
                 changed = True
                 continue  # 아래에서 비면 안내 텍스트로 채운다
-            if btype == "tool_result" and block.get("tool_use_id") in our_tool_use_ids:
+            if btype == "tool_result" and block.get("tool_use_id") in ids:
                 changed = True
                 raw = block.get("content")
                 if isinstance(raw, list):
@@ -342,7 +361,18 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
        API 는 뒤따르는 쌍이 없는 reasoning 항목을 거부하므로, 배관만 지우면 그 reasoning 이
        고아가 되어 다시 400 이 된다.
     """
-    if not our_call_ids:
+    # 이름이 web_search 인 function_call 은 전부 우리 것(누출분 포함)으로 본다 — 근거는
+    # _strip_anthropic_web_search_plumbing 의 같은 주석.
+    ids: set[str] = set(our_call_ids)
+    for item in input_items:
+        if (
+            isinstance(item, dict)
+            and item.get("type") == "function_call"
+            and item.get("name") == GW_WEB_SEARCH_NAME
+            and item.get("call_id")
+        ):
+            ids.add(item["call_id"])
+    if not ids:
         return input_items
 
     out: list = []
@@ -351,12 +381,12 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
             out.append(item)
             continue
         itype = item.get("type")
-        if itype == "function_call" and item.get("call_id") in our_call_ids:
+        if itype == "function_call" and item.get("call_id") in ids:
             # 직전 reasoning 항목이 이 호출에 딸린 것이면 함께 제거한다.
             if out and isinstance(out[-1], dict) and out[-1].get("type") == "reasoning":
                 out.pop()
             continue
-        if itype == "function_call_output" and item.get("call_id") in our_call_ids:
+        if itype == "function_call_output" and item.get("call_id") in ids:
             raw = item.get("output")
             text = raw if isinstance(raw, str) else json.dumps(raw)
             out.append({"role": "user", "content": [{"type": "input_text", "text": text}]})
@@ -1222,7 +1252,7 @@ async def _anthropic_stream(
                         # 검색 뒤에 따로 만든다 — _native_block_frames.)
                         suppressed[idx] = {"kind": "web_search", "buf": "",
                                            "id": block.get("id"), "name": block.get("name")}
-                    elif btype == "tool_use":
+                    elif _is_client_tool_use_block(block):
                         # CLIENT tool — terminal; forward re-indexed, buffer args to rebuild.
                         client_tool_present = True
                         turn_visible = True
@@ -1456,7 +1486,13 @@ async def _anthropic_stream(
                              "error": {"type": "incomplete_stream",
                                        "message": "upstream ended without a terminal event"}},
                         )
-                    yield _sse("message_stop", {"type": "message_stop"})
+                    # ⚠️ 봉투를 한 번도 열지 않았으면(message_start 미전송) message_stop 을
+                    #    보내지 않는다. Anthropic SSE 계약은 message_start → … →
+                    #    message_stop 이고, start 없는 stop 은 SDK 파싱 오류가 된다 — 상류
+                    #    오류가 게이트웨이 버그처럼 보인다. 그때 종료 신호는 위 error
+                    #    프레임이다. _drain_error 와 아래 except 절은 이미 이 구분을 한다.
+                    if envelope_open:
+                        yield _sse("message_stop", {"type": "message_stop"})
                     break
 
                 # ⚠️ 클라이언트가 볼 수 없는 tool_use 로 끝났다고 말하지 않는다. 우리 검색의
@@ -1652,8 +1688,14 @@ async def _anthropic_nonstream(
                 )
 
             content = final_body.get("content") or []
-            our_calls = [b for b in content if b.get("type") == "tool_use" and b.get("name") == GW_WEB_SEARCH_NAME]
-            client_calls = [b for b in content if b.get("type") == "tool_use" and b.get("name") != GW_WEB_SEARCH_NAME]
+            our_calls = [
+                b for b in content
+                if isinstance(b, dict)
+                and b.get("type") == "tool_use"
+                and b.get("name") == GW_WEB_SEARCH_NAME
+            ]
+            client_calls = [b for b in content if _is_client_tool_use_block(b)]
+            our_tool_use_ids.update(c.get("id") for c in our_calls if c.get("id"))
 
             has_text = any(
                 isinstance(b, dict) and b.get("type") == "text" and (b.get("text") or "").strip()
@@ -1707,11 +1749,20 @@ async def _anthropic_nonstream(
         # Fire on_usage whenever any tokens accrued — even if a LATER turn failed after
         # earlier turns succeeded (tokens were consumed and must be accounted) (F-9).
         merged.web_search_count = searches_done
-        if (merged.input_tokens + merged.output_tokens) > 0:
-            try:
-                await on_usage(merged)
-            except Exception:
-                logger.warning("web_search.on_usage_failed")
+        merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # ⚠️ 토큰이 0 이어도 **부른다.** 예전에는 `> 0` 조건이 걸려 있어서, 첫 턴이 상류
+        #    4xx/5xx 로 죽으면(토큰 0) on_usage 가 아예 불리지 않았다. 그 콜백이
+        #    ``cost_recorder.finalize`` 이고, finalize 의 zero-usage 경로가 RPM/TPM/비용
+        #    예약을 되돌리는 **유일한** 지점이다. 이 경로는 폴백 루프를 타지 않으므로
+        #    ``release_reservations`` 도 돌지 않는다 — 즉 400 을 받은 요청이 한 푼도 쓰지
+        #    않고 사용자의 분/시간 한도를 창이 끝날 때까지 물고 있었다.
+        #
+        #    토큰이 0 이면 finalize 는 usage_logs 행을 쓰지 않고 예약만 해제한다(그 경로의
+        #    조기 반환). 그래서 무조건 호출이 안전하다.
+        try:
+            await on_usage(merged)
+        except Exception:
+            logger.warning("web_search.on_usage_failed")
 
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
         # Client-facing usage: prompt buckets from the FIRST turn (the client's real
@@ -1728,9 +1779,18 @@ async def _anthropic_nonstream(
     # modified thinking block. Prior-turn thinking may be omitted on a new user turn, so
     # this is safe. (Mirrors the streaming path's client-side suppression.) (F-thinking)
     if final_status == 200 and isinstance(final_body.get("content"), list):
+        # ⚠️ 우리 web_search tool_use 블록도 함께 걷어낸다. 클라이언트 도구 호출과 우리
+        #    검색이 **같은 턴**에 함께 오면(두 방언 모두 병렬 도구 호출을 지원한다) 그 턴은
+        #    terminal 이라 이 본문이 그대로 나가고, 클라이언트는 자기가 선언하지 않은
+        #    ``web_search`` 도구 호출을 받는다. Anthropic 계약상 모든 tool_use 는 tool_result
+        #    로 답해야 하므로, 클라이언트는 없는 도구를 실행하려 하거나(Claude Code 는 알 수
+        #    없는 도구로 보고한다) 다음 턴에서 400 을 받는다. 스트리밍 경로는 이 블록들을
+        #    이미 억제한다 — 비스트리밍만 빠져 있었다.
         final_body["content"] = [
             b for b in final_body["content"]
-            if not (isinstance(b, dict) and b.get("type") in ("thinking", "redacted_thinking"))
+            if isinstance(b, dict)
+            and b.get("type") not in ("thinking", "redacted_thinking")
+            and not (b.get("type") == "tool_use" and b.get("name") == GW_WEB_SEARCH_NAME)
         ]
         # 모델이 모방한 흔적 줄 제거(_TraceLineFilter 참조). 전부 사라지면 원문을 둔다 — 빈
         # content 는 다음 턴에 400 이다.
@@ -1882,7 +1942,7 @@ async def _responses_stream(
                         fn_arg_buf[oidx] = ""
                         if item.get("call_id"):
                             our_call_ids.add(item["call_id"])  # strip from final output (F-3 Responses)
-                    elif itype == "function_call":
+                    elif _is_client_tool_call_item(item, our_call_ids):
                         client_tool_present = True
                         gi = global_out_index; global_out_index += 1
                         local_to_global[oidx] = gi
@@ -2004,6 +2064,12 @@ async def _responses_stream(
                 # If a mid-stream `error` occurred, the error frame is the terminal signal —
                 # do NOT also emit a synthetic response.completed (NEW round2 High-1). Emit
                 # response.failed only if we never got a real terminal event.
+                # ⚠️ 봉투(response.created)를 한 번도 못 보냈으면 종료 객체도 만들지
+                #    않는다. created 없는 response.completed/failed 는 Responses SDK 가
+                #    상관지을 대상이 없어 파싱에서 실패한다 — 상류 오류가 게이트웨이 버그로
+                #    보인다. 그때 종료 신호는 이미 나간 error 프레임이다.
+                if not envelope_open:
+                    break
                 if error_seen and final_terminal_type == "response.completed":
                     yield _sse("response.failed",
                                {"type": "response.failed",
@@ -2157,6 +2223,7 @@ async def _responses_nonstream(
     conv_input: list = _normalize_responses_input(base_body)
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
+    our_call_ids: set[str] = set()
     final_status = 200
     final_body: dict = {}
 
@@ -2167,7 +2234,13 @@ async def _responses_nonstream(
                                               first_turn=search_attempts == 0,
                                               budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
-            turn_body["input"] = conv_input
+            # force_final 턴은 tools 를 빼므로 우리 function_call/output(누출분 포함)을 걷어낸다
+            # — _anthropic_nonstream 의 같은 주석 참조.
+            turn_body["input"] = (
+                _strip_responses_web_search_items(conv_input, our_call_ids)
+                if force_final
+                else conv_input
+            )
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -2185,8 +2258,14 @@ async def _responses_nonstream(
                 )
 
             output = final_body.get("output") or []
-            our_calls = [o for o in output if o.get("type") == "function_call" and o.get("name") == GW_WEB_SEARCH_NAME]
-            client_calls = [o for o in output if o.get("type") == "function_call" and o.get("name") != GW_WEB_SEARCH_NAME]
+            our_calls = [
+                o for o in output
+                if isinstance(o, dict)
+                and o.get("type") == "function_call"
+                and o.get("name") == GW_WEB_SEARCH_NAME
+            ]
+            client_calls = [o for o in output if _is_client_tool_call_item(o)]
+            our_call_ids.update(c.get("call_id") for c in our_calls if c.get("call_id"))
 
             if force_final or not our_calls or client_calls:
                 break
@@ -2214,11 +2293,13 @@ async def _responses_nonstream(
             conv_input = conv_input + new_items
     finally:
         merged.web_search_count = searches_done  # fire on any accrued usage even on late failure (F-9)
-        if (merged.input_tokens + merged.output_tokens) > 0:
-            try:
-                await on_usage(merged)
-            except Exception:
-                logger.warning("web_search.on_usage_failed")
+        merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # 토큰 0 에서도 호출하는 이유는 _anthropic_nonstream 의 같은 블록 주석 참조
+        # (예약 해제가 이 콜백에만 달려 있다).
+        try:
+            await on_usage(merged)
+        except Exception:
+            logger.warning("web_search.on_usage_failed")
 
     if final_status == 200 and isinstance(final_body.get("usage"), dict):
         # Same wire-vs-billing split as _finalize_responses_obj: the client must see the
