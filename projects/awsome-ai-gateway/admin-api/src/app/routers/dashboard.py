@@ -124,12 +124,12 @@ async def dashboard_summary(
     if not period:
         period = _default_period()
 
-    # ⚠️ 캐시가 안전한 근거: 이 라우터의 모든 핸들러가 `require_admin` 이므로 응답이
-    #    **행위자에 따라 달라지지 않는다**. 그래서 키에 actor 를 넣지 않아도 된다.
-    #    (대조: /admin/analytics 는 require_admin_or_team_leader 라 같은 파라미터가
-    #     ADMIN 에겐 전사·TEAM_LEADER 에겐 팀 범위를 뜻한다 — 거기서 actor 없는 키를
-    #     쓰면 TEAM_LEADER 가 전사 데이터를 받는다. 그 캐시는 role 을 키에 넣는다.)
-    cache_key = _cache_key("summary", period=period, client=client)
+    # ⚠️ require_admin_or_team_leader 라 응답이 행위자에 따라 달라진다 — ADMIN 은
+    #    전사, TEAM_LEADER 는 본인 팀(_team_scope_clauses). 키에 **유효 scope** 를 넣어야
+    #    리더의 팀 결과가 'all' 키에 저장되어 ADMIN 에게 새어 나가는 일을 막을 수 있다
+    #    (analytics 라우터의 캐시와 같은 규칙).
+    eff_scope = str(actor.team_id or "none") if actor.role == UserRole.TEAM_LEADER else "all"
+    cache_key = _cache_key("summary", period=period, client=client, scope=eff_scope)
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
@@ -186,7 +186,15 @@ async def model_share(
 
     # 응답을 바꾸는 파라미터 **전부**를 키에 넣는다 — 하나라도 빠지면 다른 질의의
     # 결과가 반환된다(team_id 를 빼면 A팀 화면에 B팀 점유율이 뜨는 식).
-    cache_key = _cache_key("model-share", period=period, team_id=team_id, client=client)
+    # team_id 는 **유효** 값을 써야 한다 — TEAM_LEADER 는 파라미터가 무시되고 본인 팀으로
+    # 강제되므로, raw 파라미터를 키에 쓰면 리더의 팀 결과가 'all'(전사) 키에 저장된다.
+    if actor.role == UserRole.TEAM_LEADER:
+        eff_team = str(actor.team_id or "none")
+    elif team_id and team_id != "all":
+        eff_team = team_id
+    else:
+        eff_team = "all"
+    cache_key = _cache_key("model-share", period=period, team_id=eff_team, client=client)
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
@@ -467,7 +475,7 @@ async def dashboard_kpi(
     "활성 키 0개" 처럼 **거짓 사실**을 표시하게 된다(page.tsx 의 기존 관례).
     """
     if not period:
-        period = current_kst_period()
+        period = _default_period()
 
     cache_key = _cache_key("kpi", period=period, client=client)
     if (cached := await _cache_get(request, cache_key)) is not None:

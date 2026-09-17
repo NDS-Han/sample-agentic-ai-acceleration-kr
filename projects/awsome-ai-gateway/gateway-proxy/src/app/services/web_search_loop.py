@@ -362,6 +362,44 @@ def _is_our_tool(tool: dict) -> bool:
     return isinstance(tool, dict) and tool.get("name") == GW_WEB_SEARCH_NAME
 
 
+# Anthropic 블록 / Responses 항목 중 **클라이언트가 실행해야 하는** 도구 호출 판정.
+#
+# ⚠️ 예전에는 각각 정확히 ``tool_use`` / ``function_call`` 만 셌다. 두 방언 모두 그것이
+#    도구 호출 항목의 전부가 아니다 — Responses 는 커스텀(freeform) 도구를
+#    ``custom_tool_call`` 로, 로컬 실행 도구를 ``local_shell_call`` / ``computer_call`` 로
+#    보내고, Anthropic 은 ``server_tool_use`` / ``mcp_tool_use`` 를 쓴다.
+#
+#    이 판정이 False 가 되면 ``is_search_turn`` 이 True 가 되어 게이트웨이가 검색을 돌리고
+#    루프를 한 바퀴 더 돈다 — 그 과정에서 **클라이언트의 도구 호출이 삼켜진다.** 클라이언트는
+#    자기가 실행해야 할 호출을 보지 못한 채 기다린다. 모델이 우리 web_search 와 자기 도구를
+#    같은 턴에 함께 호출하면(두 방언 모두 병렬 도구 호출을 지원한다) 바로 재현된다.
+#
+#    그래서 화이트리스트가 아니라 **접미사**로 판정한다: 새 호출 유형이 생겼을 때 삼키는
+#    쪽이 아니라 넘겨주는 쪽으로 틀리는 것이 안전하다(최악의 경우 한 턴 일찍 끝난다).
+def _is_client_tool_use_block(block: dict) -> bool:
+    """Anthropic: 우리 것이 아닌 도구 사용 블록인가."""
+    if not isinstance(block, dict):
+        return False
+    btype = block.get("type")
+    if not isinstance(btype, str) or "tool_use" not in btype:
+        return False
+    return block.get("name") != GW_WEB_SEARCH_NAME
+
+
+def _is_client_tool_call_item(item: dict, our_call_ids: set[str] | None = None) -> bool:
+    """Responses: 우리 것이 아닌 도구 호출 항목인가."""
+    if not isinstance(item, dict):
+        return False
+    itype = item.get("type")
+    if not isinstance(itype, str) or not itype.endswith("_call"):
+        return False
+    if item.get("name") == GW_WEB_SEARCH_NAME:
+        return False
+    if our_call_ids and item.get("call_id") in our_call_ids:
+        return False
+    return True
+
+
 def _client_declares_web_search(body: dict) -> bool:
     """True if the client's ORIGINAL request already declares a tool named web_search.
 
