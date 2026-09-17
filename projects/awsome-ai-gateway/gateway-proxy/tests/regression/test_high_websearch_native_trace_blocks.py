@@ -488,8 +488,21 @@ def test_pick_snippet_skips_page_noise_and_cuts_at_sentence():
     assert wsl._pick_snippet(table, 600) == table, "단어 구간이 없으면 통째로"
 
 
+def test_digest_length_follows_the_trim_length_unless_overridden(monkeypatch):
+    from app import config as cfg
+
+    def settings(v):
+        return lambda: type("S", (), {"web_search_digest_chars": v})()
+
+    monkeypatch.setattr(cfg, "get_settings", settings(0))
+    assert wsl._digest_chars(1500) == 1500, "기본 = 모델이 본 트림 결과 길이"
+    assert wsl._digest_chars(0) == wsl._DIGEST_SNIPPET_CHARS == 1500
+    monkeypatch.setattr(cfg, "get_settings", settings(600))
+    assert wsl._digest_chars(1500) == 600, "WEB_SEARCH_DIGEST_CHARS > 0 이면 그 값"
+
+
 def test_digest_comes_from_the_trimmed_json_the_model_saw(monkeypatch):
-    monkeypatch.setattr(wsl, "_digest_chars", lambda: 50)
+    monkeypatch.setattr(wsl, "_digest_chars", lambda *_: 50)
     trimmed = json.dumps({"results": [
         {"url": "https://a.com", "title": "A",
          "text": "Real body sentence one. Sentence two is long.", "publishedDate": "2026-09-15"},
