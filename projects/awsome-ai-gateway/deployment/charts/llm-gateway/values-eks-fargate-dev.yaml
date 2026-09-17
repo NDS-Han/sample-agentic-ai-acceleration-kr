@@ -244,7 +244,8 @@ gatewayProxy:
     # 1.0.66-ffnote: 최종(도구 제거) 턴에서 thinking 만 남는 assistant 턴에 안내 문구, 마지막 user 메시지에 "이제 답하라" 지시 → Opus 5 가 `<br>` 만 내던 빈 답 방지.
     # 1.0.67-balance: 품질 우선 균형 — 상한 초과 문구 "실행 안 됨, 다음 턴 재요청", 도구 설명에 검색 예산 명시, 첫 턴 연결 오류 1회 재시도, 마지막 라운드 캐시 표시 생략. 상한은 턴당 3 x 2턴(최대 6, 동일).
     # 1.0.68-ffnone: Anthropic 최종(force_final) 턴을 "도구 유지 + tool_choice none + 답하라 지시" 로 — 이력 변환 없이 캐시 접두 보존, 빈 답 원인 제거. 마지막 라운드 캐시 표시 복원.
-    tag: "1.0.68-ffnone"
+    # 1.0.69-nudge: 도구 설명 — 이력의 🔎 줄은 게이트웨이가 넣은 진짜 검색 기록(폐기 금지). 최종 턴이 thinking 만 내고 본문이 없으면 한 번만 재촉.
+    tag: "1.0.69-nudge"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
