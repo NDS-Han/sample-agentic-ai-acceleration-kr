@@ -54,6 +54,27 @@ def _validate_period_date(period: str, date: str) -> None:
 
 
 class AnalyticsService:
+    @staticmethod
+    async def _leader_team_ids(session: AsyncSession, actor: CurrentUser) -> set[uuid.UUID]:
+        """TEAM_LEADER 가 열람할 수 있는 팀 집합 = 리더로 지정된 팀들 ∪ 소속 팀.
+
+        auth.teams.leader_user_id 는 복수 팀이 같은 사용자를 가리킬 수 있으므로
+        (한 사람이 여러 팀의 리더) CurrentUser.team_id — 소속 팀 1개 — 만으로 좁히면
+        리더가 맡은 다른 팀이 빠진다. 반대로 소속 팀은 포함한다 — 본인의 사용량이
+        그 팀에 귀속되기 때문.
+        """
+        from sqlalchemy import select
+
+        from app.models.auth import Team
+
+        rows = await session.execute(
+            select(Team.id).where(Team.leader_user_id == actor.user_id)
+        )
+        ids = set(rows.scalars().all())
+        if actor.team_id is not None:
+            ids.add(actor.team_id)
+        return ids
+
     async def get_analytics(
         self,
         session: AsyncSession,
@@ -68,40 +89,43 @@ class AnalyticsService:
 
         # Determine scope filter
         roi_scope: ROIScope | None = None
-        scope_id: uuid.UUID | None = None
+        # TEAM scope 의 실제 필터 집합 — auth.teams.leader_user_id 는 여러 팀이 같은
+        # 사용자를 가리킬 수 있어(한 사람이 복수 팀 리더) 단일 UUID 가 아니라 목록이다.
+        scope_ids: list[uuid.UUID] | None = None
 
         if scope.startswith("team:"):
             team_id = uuid.UUID(scope.split(":")[1])
-            # TEAM_LEADER can only see own team
-            if actor.role == UserRole.TEAM_LEADER and actor.team_id != team_id:
+            # TEAM_LEADER 는 본인이 소속/리더인 팀만 볼 수 있다
+            if actor.role == UserRole.TEAM_LEADER and team_id not in await self._leader_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only view analytics for their own team")
             roi_scope = ROIScope.TEAM
-            scope_id = team_id
+            scope_ids = [team_id]
         elif scope == "all":
-            # TEAM_LEADER restricted to own team
+            # TEAM_LEADER restricted to own team(s)
             if actor.role == UserRole.TEAM_LEADER:
-                # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. 예전엔 scope_id 가
-                #    None 이 되고, 아래 모든 WHERE 가 `if scope_id`/`is not None` 가드
-                #    뒤에 있어서 **전부 사라졌다** → 전사 분석(비용·사용자·모델·추이)과
-                #    /admin/analytics/export CSV 가 그대로 나갔다. 도달 경로: JWT 에
-                #    team_id 클레임이 없으면(core/auth.py:157) 또는 auth.users.team_id
-                #    가 NULL 이면(nullable) team_id 는 None 이다. dev 토큰은 role 을
-                #    본문에서 읽고 team_id 를 항상 None 으로 만들기 때문에
-                #    `dev.{"role":"TEAM_LEADER"}` 하나로 재현된다.
-                if actor.team_id is None:
+                # ⚠️ 열람 가능 팀이 하나도 없는 TEAM_LEADER 를 통과시키면 안 된다.
+                #    예전엔 scope_id 가 None 이 되고, 아래 모든 WHERE 가 `if scope_id`/
+                #    `is not None` 가드 뒤에 있어서 **전부 사라졌다** → 전사 분석
+                #    (비용·사용자·모델·추이)과 /admin/analytics/export CSV 가 그대로
+                #    나갔다. 도달 경로: JWT 에 team_id 클레임이 없으면
+                #    (core/auth.py:157) 또는 auth.users.team_id 가 NULL 이면(nullable)
+                #    team_id 는 None 이다. dev 토큰은 role 을 본문에서 읽고 team_id 를
+                #    항상 None 으로 만들기 때문에 `dev.{"role":"TEAM_LEADER"}` 하나로
+                #    재현된다.
+                scope_ids = sorted(await self._leader_team_ids(session, actor), key=str)
+                if not scope_ids:
                     raise ForbiddenError(
                         "Team leader has no team assigned — cannot scope analytics. "
                         "Ask an administrator to assign a team."
                     )
                 roi_scope = ROIScope.TEAM
-                scope_id = actor.team_id
         # ADMIN: no restriction
 
-        # 불변식: 비-GLOBAL scope 라면 scope_id 가 반드시 있다. 아래의 by_user/trends 는
-        # `scope_id is not None` 로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만
-        # 조용히 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
+        # 불변식: 비-GLOBAL scope 라면 scope_ids 가 반드시 있다. 아래의 by_user/trends 는
+        # `scope_ids` 진위로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만 조용히
+        # 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
         # assert 를 쓰지 않는다 — python -O 로 사라지는 검사에 데이터 격리를 맡길 수 없다.
-        if roi_scope not in (None, ROIScope.GLOBAL) and scope_id is None:
+        if roi_scope not in (None, ROIScope.GLOBAL) and not scope_ids:
             raise ForbiddenError(
                 f"Analytics scope isolation could not be applied (scope={roi_scope}) — "
                 "refusing to return organization-wide data."
@@ -110,14 +134,14 @@ class AnalyticsService:
         # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
         query_scope = roi_scope or ROIScope.GLOBAL
 
-        cost_by_model = await repo.sum_usage_by_model(period, query_scope, scope_id, client)
+        cost_by_model = await repo.sum_usage_by_model(period, query_scope, None, client, scope_ids=scope_ids)
         # ⚠️ 같은 scope/client 필터(_apply_scope_filter·_apply_client_filter)를 재사용하는
         #    repo 메서드로 뽑는다 — WHERE 를 손으로 다시 쓰면 TEAM_LEADER 격리가 갈라진다.
-        requests_by_model = await repo.count_requests_by_model(period, query_scope, scope_id, client)
+        requests_by_model = await repo.count_requests_by_model(period, query_scope, None, client, scope_ids=scope_ids)
         total_cost = sum(cost_by_model.values(), Decimal("0"))
-        active_users_count = await repo.count_active_users(period, query_scope, scope_id, client)
-        total_requests_count = await repo.total_requests(period, query_scope, scope_id, client)
-        total_tokens_count = await repo.total_tokens(period, query_scope, scope_id, client)
+        active_users_count = await repo.count_active_users(period, query_scope, None, client, scope_ids=scope_ids)
+        total_requests_count = await repo.total_requests(period, query_scope, None, client, scope_ids=scope_ids)
+        total_tokens_count = await repo.total_tokens(period, query_scope, None, client, scope_ids=scope_ids)
 
         avg_cost = total_cost / active_users_count if active_users_count > 0 else Decimal("0")
 
@@ -141,41 +165,41 @@ class AnalyticsService:
         ]
 
         # Team breakdown — aggregate per team from usage_logs
+        # TEAM_LEADER 도 본인 팀(들)의 행은 본다 — 한 사람이 복수 팀 리더일 수 있어
+        # 행이 여러 개일 수 있다. 예전엔 비-GLOBAL 이면 by_team 을 비워 '팀별' 차트가
+        # 항상 빈 상태로 나왔다.
         by_team: list[TeamBreakdown] = []
-        if not roi_scope or roi_scope == ROIScope.GLOBAL:
-            team_costs = await repo.sum_usage_by_model(period, ROIScope.GLOBAL, None, client)
-            # Get per-team costs
-            # (예전엔 여기서 sum_usage_by_model 을 team_costs 로 받아놓고 한 번도 읽지
-            #  않았다 — group_by=team 요청마다 전체 테이블 집계를 낭비했으므로 제거.)
-            from sqlalchemy import distinct, func, select
-            from app.models.auth import Team
-            from app.models.usage import UsageLog
-            from app.core.usage_filters import cost_period_filter
-            # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
-            #    INNER JOIN 이 안전한 근거: usage_logs.team_id 는 NOT NULL + auth.teams.id
-            #    FK (app/models/usage.py) 이므로 조인으로 사라지는 행이 없다(합계 불변).
-            team_where = [cost_period_filter(period)]  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
-            if (cf := client_filter(client)) is not None:
-                team_where.append(cf)
-            stmt = select(
-                UsageLog.team_id,
-                Team.name.label("team_name"),
-                func.sum(UsageLog.cost_usd).label("cost"),
-                func.count(distinct(UsageLog.user_id)).label("users"),
-            ).join(
-                Team, Team.id == UsageLog.team_id
-            ).where(
-                *team_where,
-            ).group_by(UsageLog.team_id, Team.name)
-            result = await session.execute(stmt)
-            for row in result:
-                if row.team_id:
-                    by_team.append(TeamBreakdown(
-                        team=row.team_name or str(row.team_id),
-                        team_id=str(row.team_id),
-                        cost_usd=row.cost or Decimal("0"),
-                        active_users=row.users or 0,
-                    ))
+        from sqlalchemy import distinct, func, select
+        from app.models.auth import Team
+        from app.models.usage import UsageLog
+        from app.core.usage_filters import cost_period_filter
+        # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
+        #    INNER JOIN 이 안전한 근거: usage_logs.team_id 는 NOT NULL + auth.teams.id
+        #    FK (app/models/usage.py) 이므로 조인으로 사라지는 행이 없다(합계 불변).
+        team_where = [cost_period_filter(period)]  # §59 SUCCESS + KST (team 귀속은 usage_logs.team_id 직접)
+        if scope_ids:  # TEAM_LEADER/team scope 격리 — 본인 팀(들)만
+            team_where.append(UsageLog.team_id.in_(scope_ids))
+        if (cf := client_filter(client)) is not None:
+            team_where.append(cf)
+        stmt = select(
+            UsageLog.team_id,
+            Team.name.label("team_name"),
+            func.sum(UsageLog.cost_usd).label("cost"),
+            func.count(distinct(UsageLog.user_id)).label("users"),
+        ).join(
+            Team, Team.id == UsageLog.team_id
+        ).where(
+            *team_where,
+        ).group_by(UsageLog.team_id, Team.name)
+        result = await session.execute(stmt)
+        for row in result:
+            if row.team_id:
+                by_team.append(TeamBreakdown(
+                    team=row.team_name or str(row.team_id),
+                    team_id=str(row.team_id),
+                    cost_usd=row.cost or Decimal("0"),
+                    active_users=row.users or 0,
+                ))
 
         # User breakdown — group_by='user' 요청 시만 집계(불필요 조인 회피). §60.9:
         # 그간 UI 에 '사용자별' 옵션은 있었으나 백엔드가 group_by 무시 → by_model 표시되던
@@ -189,8 +213,8 @@ class AnalyticsService:
             from app.core.usage_filters import cost_period_filter
 
             user_where = [cost_period_filter(period)]
-            if scope_id is not None:  # TEAM_LEADER/team scope 격리
-                user_where.append(UsageLog.team_id == scope_id)
+            if scope_ids:  # TEAM_LEADER/team scope 격리
+                user_where.append(UsageLog.team_id.in_(scope_ids))
             if (cf := client_filter(client)) is not None:
                 user_where.append(cf)
             ustmt = (
@@ -231,8 +255,8 @@ class AnalyticsService:
                 UsageLog.requested_at >= m_start,
                 UsageLog.requested_at < m_end,
             ]
-            if scope_id is not None:
-                actual_where.append(UsageLog.team_id == scope_id)
+            if scope_ids:
+                actual_where.append(UsageLog.team_id.in_(scope_ids))
             actual_stmt = (
                 select(
                     UsageLog.user_id.label("user_id"),
@@ -261,8 +285,8 @@ class AnalyticsService:
                 )
                 .group_by(User.id, User.display_name, User.email)
             )
-            if scope_id is not None:
-                recorded_stmt = recorded_stmt.where(User.team_id == scope_id)
+            if scope_ids:
+                recorded_stmt = recorded_stmt.where(User.team_id.in_(scope_ids))
 
             seeded: dict[uuid.UUID, tuple[str | None, str | None, Decimal]] = {}
             for r in (await session.execute(recorded_stmt)).all():
@@ -303,8 +327,8 @@ class AnalyticsService:
 
         _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
         trend_where = [cost_period_filter(period)]
-        if scope_id is not None:
-            trend_where.append(UsageLog.team_id == scope_id)
+        if scope_ids:
+            trend_where.append(UsageLog.team_id.in_(scope_ids))
         if (cf := client_filter(client)) is not None:  # 대시보드 ?client= 필터와 정합 (KPI/Top 과 동일 기준)
             trend_where.append(cf)
         trend_stmt = (

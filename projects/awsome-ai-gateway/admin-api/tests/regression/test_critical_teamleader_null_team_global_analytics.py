@@ -144,7 +144,13 @@ def _recording_session() -> tuple[AsyncMock, list[str]]:
 
 @pytest.mark.asyncio
 async def test_team_leader_without_a_team_is_refused_not_given_everything():
-    """팀 없는 TEAM_LEADER 의 scope=all → 403. DB 질의는 한 건도 나가지 않는다."""
+    """열람 가능 팀이 하나도 없는 TEAM_LEADER 의 scope=all → 403.
+
+    리더 팀 조회(auth.teams.leader_user_id = actor.user_id)는 허용한다 — 복수 팀
+    리더 지원으로 격리 집합을 만들려면 그 인가 조회가 선행돼야 한다. 그 질의는
+    본인이 리더인 팀 id 만 읽는다(사용량 데이터 아님). 금지되는 것은 usage_logs·
+    budget_usages 같은 **데이터** 질의다.
+    """
     session, seen = _recording_session()
     svc = AnalyticsService()
 
@@ -155,7 +161,8 @@ async def test_team_leader_without_a_team_is_refused_not_given_everything():
 
     # 운영자가 무엇을 해야 하는지 알 수 있는 메시지여야 한다(팀 배정).
     assert "team" in str(exc.value).lower()
-    assert not seen, f"막기 전에 질의가 나갔다 — 전사 데이터를 이미 읽었다: {seen[:2]}"
+    leaked = [s for s in seen if "usage_logs" in s or "budget_usages" in s]
+    assert not leaked, f"막기 전에 데이터 질의가 나갔다 — 전사 데이터를 이미 읽었다: {leaked[:2]}"
 
 
 @pytest.mark.asyncio
@@ -168,7 +175,8 @@ async def test_csv_export_is_refused_too():
         await svc.export_analytics(
             session, format="csv", period="2026-09", group_by="user", actor=_leader(None)
         )
-    assert not seen
+    leaked = [s for s in seen if "usage_logs" in s or "budget_usages" in s]
+    assert not leaked
 
 
 @pytest.mark.asyncio
@@ -194,9 +202,13 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
     #                         **없어서**(scope/scope_id/period/client 뿐) auth.users 로
     #                         조인해 거르는 것이 유일한 방법이다.
     #
+    # 세 번째는 인가 조회이지 데이터 질의가 아니다:
+    #   teams.leader_user_id — 복수 팀 리더 지원으로 "리더가 맡은 팀 집합"을 만드는
+    #                         조회. 본인이 리더인 팀 id 만 읽으므로 격리 없이 둔다.
+    #
     # ⚠️ 이 목록에 새 문자열을 추가할 때는 그것이 진짜 격리인지 확인할 것. "team" 이
     #    들어간 아무 문자열이나 넣으면(예: GROUP BY teams.name) 가드가 통째로 공허해진다.
-    SCOPE_PREDICATES = ("usage_logs.team_id = ", "users.team_id = ")
+    SCOPE_PREDICATES = ("usage_logs.team_id IN", "users.team_id IN", "teams.leader_user_id")
     unscoped = [s for s in seen if not any(p in s for p in SCOPE_PREDICATES)]
     assert not unscoped, (
         f"team_id 격리가 없는 질의 {len(unscoped)}건 — 전사 데이터가 섞여 나온다. "
@@ -205,7 +217,7 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
 
     # 대조군 — 두 경로가 **둘 다 실제로 등장**하는가. 한쪽이 사라지면 위 단정은
     # 남은 한쪽만으로 통과하고, 없어진 질의의 격리 누락을 못 잡는다.
-    assert any("usage_logs.team_id = " in s for s in seen), (
+    assert any("usage_logs.team_id IN" in s for s in seen), (
         "usage_logs 격리 질의가 하나도 없다 — 가드의 전제가 깨졌다"
     )
     assert any("budget.budget_usages" in s for s in seen), (
@@ -214,7 +226,7 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
     )
     for q in seen:
         if "budget.budget_usages" in q:
-            assert "users.team_id = " in q, (
+            assert "users.team_id IN" in q, (
                 "budget_usages 질의에 users.team_id 격리가 없다 — TEAM_LEADER 가 다른 팀 "
                 f"사용자의 이관 금액을 받아 간다: {q[:400]}"
             )
@@ -255,3 +267,38 @@ async def test_team_leader_asking_for_another_team_is_still_forbidden():
             scope=f"team:{other}",
             actor=_leader(TEAM_A),
         )
+
+
+@pytest.mark.asyncio
+async def test_team_leader_can_request_own_team_scope():
+    """scope=team:{본인팀} 은 허용된다 — 막히면 UI 의 팀 필터가 403 이 된다."""
+    session, seen = _recording_session()
+    svc = AnalyticsService()
+
+    res = await svc.get_analytics(
+        session, period="2026-09", group_by="model", scope=f"team:{TEAM_A}",
+        actor=_leader(TEAM_A),
+    )
+    assert res.period == "2026-09"
+    assert any("usage_logs.team_id IN" in s for s in seen), (
+        "team: scope 질의에 팀 격리가 없다"
+    )
+
+
+@pytest.mark.asyncio
+async def test_leader_scope_set_comes_from_led_teams_not_just_membership():
+    """복수 팀 리더 지원 — 격리 집합은 leader_user_id 조회로 만들어져야 한다.
+
+    소속 팀(actor.team_id) 하나만 보면, 한 사람이 여러 팀의 리더일 때 나머지
+    팀 데이터가 빠진다. mock 세션은 빈 결과를 돌려주므로 응답 내용이 아니라
+    조회가 실제로 나가는지만 본다.
+    """
+    session, seen = _recording_session()
+    svc = AnalyticsService()
+
+    await svc.get_analytics(
+        session, period="2026-09", group_by="model", scope="all", actor=_leader(TEAM_A)
+    )
+    assert any("leader_user_id" in s for s in seen), (
+        "리더 소유 팀 조회가 없다 — 복수 팀 리더면 나머지 팀이 격리 집합에서 빠진다"
+    )
