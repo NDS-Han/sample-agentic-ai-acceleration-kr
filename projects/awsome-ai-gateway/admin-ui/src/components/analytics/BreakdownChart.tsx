@@ -43,7 +43,7 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
       // §60.9: 백엔드 by_user 집계 사용(이전엔 by_model 로 잘못 표시됐음).
       labels = (data.by_user ?? []).map((b) => b.user || b.email);
       values = (data.by_user ?? []).map((b) => Number(b.cost_usd));
-      title = '사용자별 비용 분석';
+      title = t('costByUser');
     } else {
       labels = (data.by_model ?? []).map((b) => b.model);
       values = (data.by_model ?? []).map((b) => Number(b.cost_usd));

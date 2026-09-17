@@ -14,6 +14,7 @@ import {
   Legend,
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
+import { useTranslations } from 'next-intl';
 import type { TrendDataPoint } from '@/types/entities';
 import { PRIMARY_SERIES, useChartTheme } from '@/lib/utils/chartTheme';
 
@@ -32,7 +33,8 @@ interface CostTrendChartClientProps {
 }
 
 export function CostTrendChartClient({ trends }: CostTrendChartClientProps) {
-  const t = useChartTheme();
+  const t = useTranslations('analytics');
+  const theme = useChartTheme();
   const labels = trends.map((d) => d.date);
   const values = trends.map((d) => d.cost_usd);
 
@@ -40,7 +42,7 @@ export function CostTrendChartClient({ trends }: CostTrendChartClientProps) {
     labels,
     datasets: [
       {
-        label: '비용 (USD)',
+        label: t('costUsd'),
         data: values,
         borderColor: PRIMARY_SERIES,
         backgroundColor: 'rgba(45, 212, 191, 0.16)',
@@ -55,8 +57,8 @@ export function CostTrendChartClient({ trends }: CostTrendChartClientProps) {
   const options = {
     responsive: true,
     plugins: {
-      legend: { position: 'top' as const, labels: { color: t.text } },
-      title: { display: true, text: '비용 추이', color: t.text },
+      legend: { position: 'top' as const, labels: { color: theme.text } },
+      title: { display: true, text: t('usageTrend'), color: theme.text },
       tooltip: {
         callbacks: {
           label: (ctx: import('chart.js').TooltipItem<'line'>) =>
@@ -66,17 +68,17 @@ export function CostTrendChartClient({ trends }: CostTrendChartClientProps) {
     },
     scales: {
       x: {
-        title: { display: true, text: '날짜', color: t.textMuted },
-        ticks: { color: t.textMuted },
-        grid: { color: t.grid },
+        title: { display: true, text: t('date'), color: theme.textMuted },
+        ticks: { color: theme.textMuted },
+        grid: { color: theme.grid },
       },
       y: {
-        title: { display: true, text: 'USD', color: t.textMuted },
+        title: { display: true, text: 'USD', color: theme.textMuted },
         ticks: {
-          color: t.textMuted,
+          color: theme.textMuted,
           callback: (value: string | number) => `$${Number(value).toFixed(2)}`,
         },
-        grid: { color: t.grid },
+        grid: { color: theme.grid },
       },
     },
   };
@@ -84,7 +86,7 @@ export function CostTrendChartClient({ trends }: CostTrendChartClientProps) {
   if (trends.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
-        데이터가 없습니다.
+        {t('noData')}
       </div>
     );
   }
