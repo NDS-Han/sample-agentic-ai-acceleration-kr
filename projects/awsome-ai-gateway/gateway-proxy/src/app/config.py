@@ -229,6 +229,12 @@ class Settings(BaseSettings):
     #: 클라이언트에 남기는 검색 흔적 줄의 언어("en" | "ko"). 접두어 `🔎 [gateway web_search]` 는
     #: 공통(모방 필터·도구 설명이 이 접두어를 본다).
     web_search_trace_lang: str = "en"
+    #: 탐침(2026-09-17): 검색 흔적을 텍스트 줄 대신 Anthropic 네이티브 블록(server_tool_use +
+    #: web_search_tool_result)으로 남긴다 — 텍스트 줄은 캐물으면 부정되고(자백) 클라이언트 도구와
+    #: 섞이면 모방된다. "text"(기본, 종전 경로) | "native". 되돌아온 블록은 텍스트로 환원한다.
+    web_search_trace_mode: str = "text"
+    #: native 를 적용할 anthropic-client-platform 값(쉼표 구분, 빈 값 = 전부). 기본 Cowork 만.
+    web_search_trace_native_platforms: str = "desktop_app"
 
 
 @lru_cache
