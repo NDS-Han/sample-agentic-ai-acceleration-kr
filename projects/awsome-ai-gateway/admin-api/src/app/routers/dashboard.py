@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -19,14 +18,13 @@ from app.core.usage_filters import (
     client_coalesce_expr,
     client_filter,
     cost_period_filter,
+    current_kst_period,
     kst_month_expr,
-    reporting_timezone,
 )
 from app.models.auth import Department, KeyStatus, Team, User, UserRole, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog, UsageStatus
-from zoneinfo import ZoneInfo
 
 
 logger = logging.getLogger(__name__)
@@ -84,7 +82,9 @@ async def _cache_set(request: Request, key: str, value: object) -> None:
 def _default_period() -> str:
     # 집계 타임존 기준(§59) — 데이터 월 버킷이 REPORTING_TIMEZONE(기본 KST) 이므로
     # 기본 기간도 동일 타임존으로 통일. 배포 리전이 다르면 REPORTING_TIMEZONE env 로 변경.
-    return datetime.now(ZoneInfo(reporting_timezone())).strftime("%Y-%m")
+    # 다른 라우터와 같은 단일 진실원(usage_filters.current_kst_period — 내부는
+    # reporting_timezone)을 쓴다 — 여기서 따로 파생하면 표현만 달라도 드리프트한다.
+    return current_kst_period()
 
 
 def _team_display_name(team_name: str, dept_id: uuid.UUID | None, dept_name: str | None) -> str:
