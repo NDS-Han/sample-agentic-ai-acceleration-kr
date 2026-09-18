@@ -23,6 +23,9 @@
 # next to the client's own tools — run the searches of a turn that also calls a client
 # tool (native mode), and keep client tools callable once the search budget is used up.
 # 0 = previous behaviour; flip back to 0 + install-eks.sh if a client/model update breaks it.
+# WEB_SEARCH_TRACE_NATIVE_CLIENTS (comma list of cowork|claude-code|codex|other): which
+# client classes get native blocks when TRACE_MODE=native. Only clients that REPLAY the
+# blocks belong here — verified: cowork (2026-09-17), claude-code CLI 2.1.276 (2026-09-18).
 #
 # Usage:
 #   bash 17-set-websearch-caps.sh                 # dry-run
@@ -37,7 +40,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --apply)   APPLY=1;     shift ;;
     --values)  VALUES="$2"; shift 2 ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,33p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -51,16 +54,20 @@ load_config
 : "${WEB_SEARCH_MIXED_TURN_RUN:=0}"
 : "${WEB_SEARCH_FINAL_TURN_SOFT:=0}"
 : "${WEB_SEARCH_TRACE_MODE:=text}"
+: "${WEB_SEARCH_TRACE_NATIVE_CLIENTS:=cowork}"
 KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS WEB_SEARCH_DIGEST_CHARS
       WEB_SEARCH_MIXED_TURN_RUN WEB_SEARCH_FINAL_TURN_SOFT)
-STR_KEYS=(WEB_SEARCH_TRACE_MODE)
+STR_KEYS=(WEB_SEARCH_TRACE_MODE WEB_SEARCH_TRACE_NATIVE_CLIENTS)
 ALL_KEYS=("${KEYS[@]}" "${STR_KEYS[@]}")
 declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=60000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=10
                           [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5
                           [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=text
+                          [WEB_SEARCH_TRACE_NATIVE_CLIENTS]=cowork
                           [WEB_SEARCH_MIXED_TURN_RUN]=0 [WEB_SEARCH_FINAL_TURN_SOFT]=0 )
 for k in "${KEYS[@]}"; do [[ "${!k}" =~ ^[0-9]+$ ]] || die "$k must be an integer (config.env): ${!k}"; done
-for k in "${STR_KEYS[@]}"; do [[ "${!k}" =~ ^(text|native)$ ]] || die "$k must be text|native (config.env): ${!k}"; done
+[[ "$WEB_SEARCH_TRACE_MODE" =~ ^(text|native)$ ]] || die "WEB_SEARCH_TRACE_MODE must be text|native (config.env): $WEB_SEARCH_TRACE_MODE"
+_cls='(cowork|claude-code|codex|other)'
+[[ "$WEB_SEARCH_TRACE_NATIVE_CLIENTS" =~ ^$_cls(,$_cls)*$ ]] || die "WEB_SEARCH_TRACE_NATIVE_CLIENTS must be a comma list of cowork|claude-code|codex|other, no spaces (config.env): $WEB_SEARCH_TRACE_NATIVE_CLIENTS"
 for k in WEB_SEARCH_MIXED_TURN_RUN WEB_SEARCH_FINAL_TURN_SOFT; do [[ "${!k}" =~ ^[01]$ ]] || die "$k must be 0 or 1 (config.env): ${!k}"; done
 
 ROOT="$(cd "$LIB_DIR/../../.." && pwd)"
