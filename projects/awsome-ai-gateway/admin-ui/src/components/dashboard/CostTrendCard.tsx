@@ -264,11 +264,11 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
             />
             {hasTeamSeries && (
               <Legend
-                verticalAlign="top"
-                height={30}
+                verticalAlign="bottom"
+                height={28}
                 iconSize={11}
                 iconType="plainline"
-                wrapperStyle={{ fontSize: '11px' }}
+                wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }}
               />
             )}
             <Area

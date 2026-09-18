@@ -449,7 +449,9 @@ adminUi:
     #   + 컴포넌트 지역 client 배열을 gateway.ts CLIENTS 로 통일.
     # 1.0.103-teamtrend: 비용 추이를 합계+팀별 멀티 시리즈로 — 기본 상위5팀+기타 합산,
     #   팀 칩 토글로 개별 표시 선택(꺼진 팀은 기타에 합산). trends_by_team 소비.
-    tag: "1.0.103-teamtrend"
+    # 1.0.104-trendlegend: 추이 범례를 차트 아래(x축 밑)로 이동 — 상단 플로팅이
+    #   그래프를 가렸음.
+    tag: "1.0.104-trendlegend"
   resources:
     requests:
       cpu: "500m"
