@@ -21,13 +21,13 @@ global:
   # 달력 경계. **정규 IANA 이름만**(예: America/Los_Angeles · Asia/Seoul · UTC — "KST"/"PST"/
   # "US/Pacific" 은 배포 이미지에서 거부). fill-org-values.sh 가 프롬프트로 채운다.
   # 예산 강제(gateway-proxy)의 월 경계는 이 값과 무관하게 UTC 고정.
-  reportingTimezone: "Asia/Kolkata"
+  reportingTimezone: "Asia/Seoul"
   commonLabels:
     environment: dev
     managed-by: terraform
   # CHANGE_ME (account): 본인 AWS 계정의 ECR registry. terraform output ecr_registry 또는
   # `aws ecr describe-repositories --query 'repositories[0].repositoryUri' | cut -d/ -f1` 로 확인.
-  imageRegistry: "610156625835.dkr.ecr.ap-south-1.amazonaws.com"
+  imageRegistry: "123456789012.dkr.ecr.ap-northeast-2.amazonaws.com"
 
 # ----------------------------------------------------------------------------
 # 외부 관리형 의존성 (Aurora / ElastiCache)
@@ -37,7 +37,7 @@ database:
   external:
     # CHANGE_ME (terraform output): RDS Proxy endpoint. terraform output -raw rds_proxy_endpoint
     # (Proxy 사용 안 하면 -raw aurora_writer_endpoint). 계정마다 hash 부분 다름.
-    host: "llm-gateway-dev.proxy-xxx.ap-south-1.rds.amazonaws.com"
+    host: "llm-gateway-dev.proxy-xxx.ap-northeast-2.rds.amazonaws.com"
     port: 5432
     name: "gateway"
     user: "gateway"
@@ -53,7 +53,7 @@ database:
     # 이름은 aws rds describe-db-clusters --query 'DBClusters[].MasterUserSecret.SecretArn'.
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언됨 — 라이브 정책 v2 로 반영).
-    masterPasswordRemoteKey: "rds!cluster-f7f04eaa-42b7-4688-9ed5-4fa0084c85b7"
+    masterPasswordRemoteKey: "rds!cluster-91c56396-2163-4d82-af13-b569d4ea5c0e"
     masterPasswordRemoteProperty: "password"
     poolSize: 5
     maxOverflow: 10
@@ -81,13 +81,13 @@ redis:
 # AWS / IAM — dev 계정/역할 예시 (Terraform outputs로 교체 필요)
 # ----------------------------------------------------------------------------
 aws:
-  region: "ap-south-1"
+  region: "ap-northeast-2"
   # 코드가 읽지 않는 값(configmap 이 BEDROCK_ALLOWED_MODELS 로 내보내지만 소비처 없음).
   # 실제 모델 제어는 DB model_aliases(§4) + IAM bedrock_allowed_model_arns(tfvars).
   # 옛 서울 모델 목록이 혼란을 줘서 비움. 훅 자체는 base values 에 남겨둠.
   bedrockAllowedModels: []
   allowedStsRegions:
-    - "ap-south-1"
+    - "ap-northeast-2"
   allowedIamRoles:
     - Customer-Developer  # dev Permission Set 예시
     - admin                # 개발/테스트 계정 admin role
@@ -126,12 +126,9 @@ ingress:
   enabled: true
   className: "alb"
   annotations:
-    alb.ingress.kubernetes.io/inbound-cidrs: "65.2.11.169/32,0.0.0.0/0"
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip  # Fargate 필수
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS":443}]'
-    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-south-1:610156625835:certificate/e54f7341-f49e-4540-b337-d75ed8dfb9a4"
-    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/backend-protocol: HTTP
@@ -139,21 +136,21 @@ ingress:
     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
   # host 를 비워두면 ALB 가 모든 Host 헤더를 수락 (ALB DNS 로 직접 접근 가능)
   gateway:
-    host: "gateway-dev.ssir-dev.nds.remu.one"
+    host: ""
     tls:
-      enabled: true
+      enabled: false
   adminUi:
-    host: "admin-dev.ssir-dev.nds.remu.one"
+    host: ""
     tls:
-      enabled: true
+      enabled: false
     # 최종형(고객 권장): admin 을 private 서브넷 internal ALB 로 — 아래 2줄 해제.
     # 전제 S2S VPN. 상세: docs/us-llm-gateway/architecture.md 「고객사 최종 아키텍처」
     # annotations:
     #   alb.ingress.kubernetes.io/scheme: internal
   adminApi:
-    host: "admin-api-dev.ssir-dev.nds.remu.one"
+    host: ""
     tls:
-      enabled: true
+      enabled: false
     # 최종형(고객 권장): 위 adminUi 와 동일 — 아래 2줄 해제 (gateway 는 public 유지)
     # annotations:
     #   alb.ingress.kubernetes.io/scheme: internal
@@ -175,8 +172,8 @@ ingress:
 #     alb.ingress.kubernetes.io/backend-protocol: HTTP
 #     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=300
 #     # 아래 ACM 인증서 ARN 을 실제 값으로 교체하세요.
-#     # aws acm list-certificates --region ap-south-1 로 확인.
-#     alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-south-1:ACCOUNT_ID:certificate/CERT_ID"
+#     # aws acm list-certificates --region ap-northeast-2 로 확인.
+#     alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-northeast-2:ACCOUNT_ID:certificate/CERT_ID"
 #   gateway:
 #     host: "gateway-dev.llm-gateway.example.com"
 #     tls:
@@ -258,15 +255,11 @@ gatewayProxy:
     # 1.0.74-digest: 되돌아온 검색 결과의 발췌를 200자·페이지 첫머리 → 본문다운 지점부터 600자(WEB_SEARCH_DIGEST_CHARS)로. 모델이 본 트림 결과에서 만들고, 되살린 tool_result 에 "전문은 그 턴에 봤다" 메모 — Cowork 2번 프롬프트에서 발췌가 얇아 실제 근거를 되물리던 문제.
     # 1.0.75-digestfull: 되돌아온 결과 발췌 기본을 "모델이 본 트림 결과와 같은 길이"(1500)로. 600자에서도 실제 근거 문장(마이크론 3월 HVM·TrendForce 20%)이 잘려 모델이 되물렸음(S3 전문 확인). WEB_SEARCH_DIGEST_CHARS(17 스크립트 키, 0=동일)로 줄일 수 있음. 품질 우선(사용자 결정).
     # 1.0.76-evidence: 검색 1회 = 증거 집합 하나(모델 tool_result·되돌림·🔎 줄이 같은 집합). 상한(WEB_SEARCH_MAX_RESULTS_DEFAULT)을 "최대"로 강제(모델이 15 를 요구해 12k 캡에서 JSON 이 매 검색 절단되던 문제 — S3 실측), 미러·중복 제거(본문 지문), 결과당 길이를 캡에 맞춰 배분(절단 불가), 잡음 배지("3 min read") 제거. 커넥터엔 상한의 2배까지 요청(과금 호출당).
-    # 1.0.70-toolfix(로컬 c756804): squash merge 유실 복원 — _is_client_tool_use_block 정의(upstream 67e51ae verbatim). 비스트림 tool_use 턴 NameError 500 수정.
-    # 1.0.71-wsttft: 웹서치 경로 ttft_ms NULL 수정 — 루프의 on_usage 는 1-arg(멀티턴 합산)라
-    #   per-turn TTFT 를 안 넘겨 모니터링에 ttft=- 로 나옴. 라우터가 반환된 StreamingResponse
-    #   body_iterator 를 래핑해 첫 yield 시각을 기록(web_search_loop.py 미변경). 비스트림은 duration 폴백.
     tag: "1.0.71-wsttft"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
-      eks.amazonaws.com/role-arn: "arn:aws:iam::610156625835:role/llm-gateway-dev-gateway-proxy-bedrock"
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/llm-gateway-dev-gateway-proxy-bedrock"
   env:
     # uvicorn 워커 수. Dockerfile CMD 가 ${WORKERS:-4} 로 읽음(1.0.98+). Fargate cpu
     # request 250m(≈0.25 vCPU)에서 워커당 CPU 기아를 피하려 2 로 명시(과거엔 Dockerfile
@@ -275,17 +268,16 @@ gatewayProxy:
     # Server-side web search (Architecture C, AgentCore Gateway). AGENTCORE_GATEWAY_URL is
     # the managed WebSearch gateway's /mcp endpoint (us-east-1); until it's provisioned and
     # set here, agentcore_mcp_client is None → the router branch is skipped (zero-regression).
-    # AGENTCORE_REGION differs from aws.region (ap-south-1) on purpose — WebSearch is
+    # AGENTCORE_REGION differs from aws.region (ap-northeast-2) on purpose — WebSearch is
     # us-east-1-only; SigV4 signs to us-east-1 while the pod stays in Seoul.
     # ⚠️ 이 값은 배포마다 다르다 — AgentCore 가 게이트웨이 이름 뒤에 무작위 접미사를
     #    붙여 발급하므로, 아래 xxx 자리를 자기 계정의 실제 게이트웨이 id 로 바꿔야 한다
     #    (deployment/scripts/provision_agentcore_websearch.py 가 출력한다).
     #    비워 두면 agentcore_mcp_client 가 None 이 되어 라우터 분기를 건너뛴다(무회귀).
-    AGENTCORE_GATEWAY_URL: "https://llm-gateway-websearch-dev-jzczmakryg.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
+    AGENTCORE_GATEWAY_URL: "https://gw-websearch-xxx.gateway.bedrock-agentcore.us-east-1.amazonaws.com/mcp"
     AGENTCORE_REGION: "us-east-1"
     AGENTCORE_TARGET_ID: "web-search-tool"
     WEB_SEARCH_ENABLED: "true"   # global kill-switch; per-client gating via routing_profiles.web_search_enabled
-    WEB_SEARCH_TRACE_MODE: "text"
     # web search 비용 상한(2026-09-16 실측: 검색 4회 든 호출 1건 = 입력 132k 토큰·$1.56 — 검색 결과 본문이
     #   반복마다 다시 입력으로 들어간다). 결과 1회 60,000자(≈15k 토큰)→12,000자, 결과 수 10→5, 턴당 검색 4→2,
     #   반복 5→3. 게이트웨이 config.py 의 기본값을 여기서 덮어쓴다.
@@ -344,24 +336,11 @@ adminApi:
     #   비어 있으면 감사 엔드포인트는 404 가 아니라 **503**(미설정)을 준다 — 지금 dev 의 상태다
     #   (terraform 의 enable_bedrock_invocation_logging 이 false 라 log group 이 없다).
     #   285 통과. ⚠️ scheduler.image.tag 를 같은 값으로 유지(아래 주석 참조).
-    # 1.0.69-dbscope: dashboard /summary·/model-share 캐시 키에 유효 scope 추가(팀 리더↔어드민 유출 차단), /kpi _default_period 통일.
-    # 1.0.70-authscope: auth.py iss==OIDC_ISSUER_URL 로 IdP 토큰 판정(role 클레임 verbatim 신뢰 제거)
-    #   + UserRole/UUID 파싱 ValueError→401, /kpi TEAM_LEADER 팀 스코프+캐시 키 scope.
-    # 1.0.71-usagefix: budget get_usage client IS NULL — per-app 행까지 매칭돼 TEAM_LEADER
-    #   /budgets 의 team allocation 이 MultipleResultsFound 500 으로 죽던 것 수정.
-    # 1.0.72-leadscope: analytics TEAM_LEADER scope 를 리더 소유 팀 집합(led ∪ member)으로
-    #   확장 + by_team 에 본인 팀 행 표시(복수 팀 리더 지원).
-    # 1.0.73-teamtrend: TEAM_LEADER 스코프를 "리더인 팀만"(엄격, 소속 제외)으로 통일 —
-    #   dashboard 6개 엔드포인트를 led 집합 IN + 캐시 키 집합 해시로. analytics
-    #   trends_by_team 추가(팀×일 집계, 합계와 동일 필터) — 대시보드 팀별 추이용.
-    # 1.0.74-budgetscope: budget 도 led 팀 정책으로 통일 — allocate/get_team_allocation/
-    #   user_budget/summary 의 actor.team_id 검사를 led_team_ids 로 교체,
-    #   get_team_allocation 의 actor 무검사(IDOR) 수정, /my-allocations 신설.
     tag: "1.0.74-budgetscope"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
-      eks.amazonaws.com/role-arn: "arn:aws:iam::610156625835:role/llm-gateway-dev-admin-api"
+      eks.amazonaws.com/role-arn: "arn:aws:iam::123456789012:role/llm-gateway-dev-admin-api"
   resources:
     requests:
       cpu: "500m"
@@ -374,14 +353,14 @@ adminApi:
   env:
     # DEV_LOGIN_ENABLED 는 global.devLoginEnabled (이 파일 상단) 로 주입됨.
     # CHANGE_ME (terraform output): Cognito User Pool ID. terraform output -raw cognito_user_pool_id
-    COGNITO_USER_POOL_ID: "ap-south-1_f68d06P7T"
-    COGNITO_REGION: "ap-south-1"
+    COGNITO_USER_POOL_ID: "ap-northeast-2_nKW7FJWst"
+    COGNITO_REGION: "ap-northeast-2"
     COGNITO_SYNC_DEACTIVATE_MISSING: "true"
     # BI Insight / 퀵챗 = AgentCore Runtime(admin-chat-agent) 연결. 이 ARN 없으면
     # chat_agent.py:333 이 503 "AgentCore runtime not configured" 반환.
     # values 에 명시(--set 유실 방지). ARN = aws bedrock-agentcore-control list-agent-runtimes.
-    AGENTCORE_REGION: "ap-south-1"
-    AGENTCORE_RUNTIME_ARN: ""
+    AGENTCORE_REGION: "ap-northeast-2"
+    AGENTCORE_RUNTIME_ARN: "arn:aws:bedrock-agentcore:ap-northeast-2:123456789012:runtime/llm_gateway_dev_admin_chat_agent-a8AdBh8WM8"
     # 리포트 다운로드 presign 라우트도 같은 버킷의 reports/ prefix 를 쓴다.
     # IRSA role(llm-gateway-dev-admin-api)에 report-download-presign 정책 부여됨(§49).
 
@@ -395,7 +374,7 @@ adminApi:
     #   tofu output -raw bedrock_invocation_log_region
     # (또는 deployment/scripts/provision_bedrock_invocation_logging.py deploy 의 출력)
     #
-    # ⚠️ REGION 은 배포 리전(ap-south-1)이 아니라 **모델이 실행된 리전**이다. GPT-5.6
+    # ⚠️ REGION 은 배포 리전(ap-northeast-2)이 아니라 **모델이 실행된 리전**이다. GPT-5.6
     #    runtime plane 은 us-east-2 에서 실행되므로 로그도 거기 쌓인다. 서울로 조회하면
     #    로그가 0건이어서 대조 리포트가 과금 행 전부를 `missing` 으로 표시한다.
     # ⚠️ 이 스위치는 **리전 단위로 계정 전체**의 본문을 수집한다(모델·principal 단위 스코프
@@ -414,7 +393,7 @@ adminApi:
   oidc:
     enabled: true
     # CHANGE_ME (terraform output): cognito_issuer_url. 형식 https://cognito-idp.{region}.amazonaws.com/{pool_id}
-    issuerUrl: "https://cognito-idp.ap-south-1.amazonaws.com/ap-south-1_nKW7FJWst"
+    issuerUrl: "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_nKW7FJWst"
     audience: ""               # Cognito access_token 은 aud 없음 → 비워둠
     providerName: "oidc:cognito"
     groupsClaim: "cognito:groups"
@@ -426,7 +405,7 @@ adminApi:
   adminBootstrap:
     # CHANGE_ME (org-specific): 첫 운영자 이메일. 이 사용자가 ClaudeAdmin 으로 승격됨
     emails:
-      - "seunghwan1228@nongshim.co.kr"
+      - "admin@example.com"
     groups:
       - "ClaudeAdmin"
 
@@ -446,21 +425,6 @@ adminUi:
     # 1.0.100-mwredirect: 미들웨어 로그인 리다이렉트가 상대 Location 이라 Next 14.2 어댑터에서
     #   Invalid URL → 미인증·만료 요청이 오는 모든 페이지 500 (upstream b51fab0 를 처음 빌드한 결과).
     #   요청 Host + x-forwarded-proto 로 절대 URL 을 만들도록 수정.
-    # 1.0.101-loginflow: 미인증/로그아웃/401 리다이렉트를 /login 페이지로 통일(hosted-UI OIDC 배포는
-    #   /api/auth/login 유지), resolveRole 에 ADMIN_EMAILS+DEVELOPER 폴백, locale 쿠키 검증 공용화.
-    # 1.0.102-codexui: users 앱 접근·예산 다이얼로그·모델 웹서치 토글의 codex 주석 해제
-    #   + 컴포넌트 지역 client 배열을 gateway.ts CLIENTS 로 통일.
-    # 1.0.103-teamtrend: 비용 추이를 합계+팀별 멀티 시리즈로 — 기본 상위5팀+기타 합산,
-    #   팀 칩 토글로 개별 표시 선택(꺼진 팀은 기타에 합산). trends_by_team 소비.
-    # 1.0.104-trendlegend: 추이 범례를 차트 아래(x축 밑)로 이동 — 상단 플로팅이
-    #   그래프를 가렸음.
-    # 1.0.105-anatrend: 분석 페이지 사용량 추세도 합계+팀별 멀티 시리즈로 —
-    #   팀 칩 토글·하단 범례·범례 클릭 무력화(클릭 시 빈 차트 혼란 제거).
-    #   조립 로직을 lib/utils/trendSeries 로 공용화해 대시보드와 동일 규칙.
-    # 1.0.106-linelegend: 분석 차트 범례 마커를 채색 박스 → 선(pointStyle 'line').
-    # 1.0.107-allocui: 팀 리더 예산 페이지를 admin 표 구조로 — 팀 행(admin 설정,
-    #   읽기전용)+멤버 행(배정 입력). 입력을 문자열 draft 로 바꿔 "0 못 지우는"
-    #   UX 수정. /my-allocations 로 led 팀별 카드 렌더.
     tag: "1.0.107-allocui"
   resources:
     requests:
@@ -471,11 +435,6 @@ adminUi:
       memory: "1Gi"
   autoscaling:
     enabled: false
-  # 채팅(BI Insight) 미설치 환경이면 사이드바/퀵챗 메뉴를 숨긴다.
-  # terraform.tfvars 의 enable_chat_agent/enable_chat_db_tools 가 모두 true 일 때만
-  # "true" — fill-org-values.sh 가 같은 규칙으로 이 값을 갱신한다.
-  env:
-    CHAT_ENABLED: "false"
 
 scheduler:
   image:
@@ -504,9 +463,9 @@ notificationWorker:
   autoscaling:
     enabled: false
   email:
-    provider: "ses"
-    ses:
-      region: "ap-south-1"
+    provider: "mock"          # 고객 내부 메일 API 연동 시 "internal_api"로 전환
+    internalApi:
+      url: ""                 # 고객 내부 메일 API URL
       fromAddress: "no-reply-dev@llm-gateway.local"
       fromName: "LLM Gateway"
 
@@ -554,8 +513,3 @@ costRecorderWorker:
       memory: "512Mi"
   autoscaling:
     enabled: false
-
-auth:
-  adminUiJwt:
-    privateKeySecretName: "llm-gateway-app"
-    privateKeySecretKey: "admin_ui_jwt_private_key_pem"
