@@ -257,6 +257,8 @@ export interface AllocationEntry {
   target_id: string;
   target_name: string;
   target_type: BudgetScope;
+  /** USER 행의 계정 역할(ADMIN|TEAM_LEADER|USER). TEAM 행은 null/부재. */
+  target_role?: string | null;
   allocated_usd: number;
   used_usd: number;
   remaining_usd: number;

@@ -58,6 +58,7 @@ export default async function BudgetsPage() {
     target_id: string;
     target_name: string;
     target_type: string;
+    target_role?: string | null;
     allocated_usd: string;
     used_usd: string;
     remaining_usd: string;
@@ -88,6 +89,7 @@ export default async function BudgetsPage() {
         target_id: e.target_id,
         target_name: e.target_name,
         target_type: e.target_type.toUpperCase() as AllocationEntry['target_type'],
+        target_role: e.target_role ?? null,
         allocated_usd: parseFloat(e.allocated_usd) || 0,
         used_usd: parseFloat(e.used_usd) || 0,
         remaining_usd: parseFloat(e.remaining_usd) || 0,

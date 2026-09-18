@@ -21,7 +21,7 @@ import { allocateTeamBudgetAction } from '@/lib/actions/budgets';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Table, THead, TBody, TFoot, Tr, Th, Td, TEmpty } from '@/components/common/Table';
-import { AlertBadge, TypeBadge, UsageBar, alertLevelOf } from './budgetVisuals';
+import { AlertBadge, RoleBadge, TypeBadge, UsageBar, alertLevelOf } from './budgetVisuals';
 
 interface TeamAllocationViewProps {
   teamId: string;
@@ -68,6 +68,11 @@ export function TeamAllocationView({ teamId, initialAllocation }: TeamAllocation
     [BudgetScope.TEAM]: t('scope.TEAM'),
     [BudgetScope.USER]: t('scope.USER'),
   };
+  const roleLabels: Record<string, string> = {
+    ADMIN: tCommon('role.ADMIN'),
+    TEAM_LEADER: tCommon('role.TEAM_LEADER'),
+    DEVELOPER: tCommon('role.DEVELOPER'),
+  };
 
   const handleSave = () => {
     const allocations = memberEntries.map((e) => ({
@@ -108,7 +113,7 @@ export function TeamAllocationView({ teamId, initialAllocation }: TeamAllocation
       <Tr key={entry.target_id}>
         <Td emphasis>{entry.target_name}</Td>
         <Td>
-          <TypeBadge type={entry.target_type} labels={typeLabels} />
+          <RoleBadge role={entry.target_role} labels={roleLabels} />
         </Td>
         <Td numeric>
           <div className="inline-flex items-center gap-1">

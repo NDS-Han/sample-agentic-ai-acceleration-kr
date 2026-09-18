@@ -686,6 +686,7 @@ class BudgetService:
                     target_id=str(member.id),
                     target_name=member.display_name,
                     target_type="USER",
+                    target_role=member.role.value if member.role else None,
                     allocated_usd=member_alloc,
                     used_usd=member_used,
                     remaining_usd=member_remaining,

@@ -26,6 +26,17 @@ export function TypeBadge({ type, labels }: { type: BudgetScopeValue | string; l
   return <Badge tone={type === BudgetScope.TEAM ? 'sky' : 'neutral'}>{labels[type] ?? type}</Badge>;
 }
 
+/** 멤버 행의 계정 역할 뱃지 — ADMIN/TEAM_LEADER/DEVELOPER 를 색으로 구분한다. */
+export function RoleBadge({ role, labels }: { role: string | null | undefined; labels: Record<string, string> }) {
+  const tones: Record<string, BadgeTone> = {
+    ADMIN: 'pink',
+    TEAM_LEADER: 'sky',
+    DEVELOPER: 'neutral',
+  };
+  const key = role ?? 'DEVELOPER';
+  return <Badge tone={tones[key] ?? 'neutral'}>{labels[key] ?? key}</Badge>;
+}
+
 export function UsageBar({ pct, level }: { pct: number; level: AlertLevelValue | string }) {
   // 임계 기반 시맨틱색(테마 토큰 — 다크/라이트 자동): 정상 teal / 경고 amber / 위험 destructive.
   const colorMap: Record<string, string> = {
