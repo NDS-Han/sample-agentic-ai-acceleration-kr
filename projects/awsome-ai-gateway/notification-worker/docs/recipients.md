@@ -30,18 +30,18 @@
 
 ## 2. 이벤트별 수신자
 
-| event_type | 본인 | 팀 리더 | Admin | 비고 |
-|---|:-:|:-:|:-:|---|
-| `budget_threshold` | ✅ | ✅* | | 유일하게 팀 리더에게 가는 이벤트. *리더 미지정 팀은 리더 메일 없음 |
-| `key_expiring` | ✅ | | | |
-| `key_expired` | ✅ | | | |
-| `key_revoked` | ✅ | | ✅ | |
-| `degradation_mode` | ✅* | | ✅ | *seed는 admin만 — dev DB에 affected_user 추가됨(§4 참고) |
-| `auth_failure_spike` | | | ✅ | |
-| `permission_violation` | | | ✅ | |
-| `suspicious_usage` | | | ✅ | |
-| `provider_error` | | | ✅ | |
-| `service_health_change` | | | ✅ | |
+| event_type | 본인 | 팀 리더 | Admin | 상태 | 비고 |
+|---|:-:|:-:|:-:|:-:|---|
+| `budget_threshold` | ✅ | ✅* | | live | 유일하게 팀 리더에게 가는 이벤트. *리더 미지정 팀은 리더 메일 없음 |
+| `key_revoked` | ✅ | | ✅ | live | |
+| `auth_failure_spike` | | | ✅ | live | |
+| `degradation_mode` | ✅* | | ✅ | live | *seed는 admin만 — dev DB에 affected_user 추가됨(§4 참고) |
+| `key_expiring` | ✅ | | | dead | producer 없음 — api-key-helper가 자동 갱신 |
+| `key_expired` | ✅ | | | dead | producer 없음 — key_expirer는 DB status만 갱신 |
+| `permission_violation` | | | ✅ | dead | producer 없음 — enum 값만 존재 |
+| `suspicious_usage` | | | ✅ | dead | producer 없음 — enum 값만 존재 |
+| `provider_error` | | | ✅ | dead | producer 없음 — 게이트웨이의 "provider_error"는 클라이언트용 error payload |
+| `service_health_change` | | | ✅ | dead | producer 없음 |
 
 패턴으로 보면:
 
@@ -49,11 +49,11 @@
 - **시스템/보안 이벤트**(인증 급증·권한 위반·프로바이더 오류·의심 사용): admin 전용.
 - `budget_threshold`만 `team_leader` 역할을 사용한다.
 
-⚠️ 이 표는 수신자 **설정**이다. 실제 발송은 producer가 이벤트를 publish 해야
-일어난다 — `key_expiring`/`key_expired`/`permission_violation`/`suspicious_usage`/
-`provider_error`/`service_health_change` 는 현재 발행자가 없다(dead 타입,
-[event-producers.md §2](./event-producers.md) 참조). producer가 추가되는 순간
-위 설정대로 발송이 시작된다.
+**상태** 컬럼은 producer(발행자) 존재 여부다 — `live`는 실제 publish 중,
+`dead`는 설정만 있고 발행자가 없다
+([event-producers.md §2](./event-producers.md)의 producer 위치 참조).
+⚠️ dead 타입도 `enabled=true`라서, 누군가 producer를 추가하는 순간
+**위 수신자 설정대로 발송이 바로 시작된다**.
 
 ## 3. 설정 위치
 
