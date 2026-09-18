@@ -266,6 +266,13 @@ class Settings(BaseSettings):
     web_search_mixed_turn_run: bool = False
     web_search_final_turn_soft: bool = False
 
+    #: Tool ``type`` prefixes (comma-separated) removed from /v1/messages requests before they
+    #: go upstream: Anthropic-only SERVER tools that Bedrock rejects with a 400 for the whole
+    #: request. 2026-09-18: Claude Code's advisor (``advisor_20260301``) made every request of
+    #: an affected user fail, "hi" included. A new Anthropic-only tool type is a config change
+    #: here, not a release. Blank = pass everything through. See services/upstream_compat.py.
+    bedrock_unsupported_tool_type_prefixes: str = "advisor_"
+
 
 @lru_cache
 def get_settings() -> Settings:
