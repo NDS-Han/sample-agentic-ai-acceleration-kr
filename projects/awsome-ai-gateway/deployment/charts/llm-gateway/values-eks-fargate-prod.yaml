@@ -202,7 +202,8 @@ gatewayProxy:
     # 1.0.74-digest: 되돌아온 검색 결과의 발췌를 200자·페이지 첫머리 → 본문다운 지점부터 600자(WEB_SEARCH_DIGEST_CHARS)로. 모델이 본 트림 결과에서 만들고, 되살린 tool_result 에 "전문은 그 턴에 봤다" 메모 — Cowork 2번 프롬프트에서 발췌가 얇아 실제 근거를 되물리던 문제.
     # 1.0.75-digestfull: 되돌아온 결과 발췌 기본을 "모델이 본 트림 결과와 같은 길이"(1500)로. 600자에서도 실제 근거 문장(마이크론 3월 HVM·TrendForce 20%)이 잘려 모델이 되물렸음(S3 전문 확인). WEB_SEARCH_DIGEST_CHARS(17 스크립트 키, 0=동일)로 줄일 수 있음. 품질 우선(사용자 결정).
     # 1.0.76-evidence: 검색 1회 = 증거 집합 하나(모델 tool_result·되돌림·🔎 줄이 같은 집합). 상한(WEB_SEARCH_MAX_RESULTS_DEFAULT)을 "최대"로 강제(모델이 15 를 요구해 12k 캡에서 JSON 이 매 검색 절단되던 문제 — S3 실측), 미러·중복 제거(본문 지문), 결과당 길이를 캡에 맞춰 배분(절단 불가), 잡음 배지("3 min read") 제거. 커넥터엔 상한의 2배까지 요청(과금 호출당).
-    tag: "1.0.76-evidence"
+    # 1.0.77-finalnotool: 강제 최종 턴 지시문이 "어떤 도구도 호출할 수 없다, 다음 단계를 예고하지 말고 지금 완전한 답을 써라" 를 말하도록 — tool_choice none 은 클라이언트 도구까지 막는데 종전 문구는 "검색 불가"만 알려, 모델이 "메모 저장 후 작성" 을 예고만 하고 턴을 끝냄(2026-09-18 Cowork: 텍스트 191자, 답 없음).
+    tag: "1.0.77-finalnotool"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
