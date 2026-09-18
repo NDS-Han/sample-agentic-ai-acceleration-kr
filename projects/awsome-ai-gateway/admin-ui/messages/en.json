@@ -141,6 +141,8 @@
     "costTrendSubtitle": "Daily cost and requests for the period",
     "costTrendEmpty": "No usage aggregated for this period.",
     "costSeries": "Cost",
+    "costSeriesTotal": "Total",
+    "costSeriesOther": "Other",
     "webSearchCount": "{count, number} web searches",
     "noUsageForPeriod": "No usage records for this period.",
     "monthNames": {

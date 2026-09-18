@@ -141,6 +141,8 @@
     "costTrendSubtitle": "기간 내 일별 비용 · 요청 수",
     "costTrendEmpty": "기간 내 집계된 사용량이 없습니다.",
     "costSeries": "비용",
+    "costSeriesTotal": "합계",
+    "costSeriesOther": "기타",
     "webSearchCount": "웹서치 {count, number}회",
     "noUsageForPeriod": "이 기간에 사용 기록이 없습니다.",
     "monthNames": {

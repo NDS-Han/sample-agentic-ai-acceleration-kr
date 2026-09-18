@@ -182,7 +182,7 @@ async function TrendAndDistribution({ period, client }: { period: string; client
   ]);
 
   const analytics =
-    analyticsResult.status === 'fulfilled' ? analyticsResult.value : { trends: [] };
+    analyticsResult.status === 'fulfilled' ? analyticsResult.value : { trends: [], trends_by_team: [] };
   const initialShare =
     shareResult.status === 'fulfilled'
       ? shareResult.value
@@ -195,7 +195,7 @@ async function TrendAndDistribution({ period, client }: { period: string; client
         {t('trendAndDistribution')}
       </h2>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.6fr_1fr]">
-        <CostTrendCard trends={analytics.trends ?? []} />
+        <CostTrendCard trends={analytics.trends ?? []} trendsByTeam={analytics.trends_by_team ?? []} />
         <ModelShareDonutClient initialData={initialShare} teams={teams} period={period} client={client} />
       </div>
     </section>

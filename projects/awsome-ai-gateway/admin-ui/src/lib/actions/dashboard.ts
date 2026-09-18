@@ -194,11 +194,18 @@ export interface TeamBreakdown {
   active_users: number;
 }
 
+export interface TeamTrend {
+  team: string;
+  team_id: string;
+  points: TrendItem[];
+}
+
 export interface AnalyticsResponse {
   period: string;
   currency: string;
   by_team: TeamBreakdown[];
   trends: TrendItem[];
+  trends_by_team?: TeamTrend[];
 }
 
 /** 비용 추이(trends) + 팀별 분해(by_team) 를 한 번에. group_by=team. */
