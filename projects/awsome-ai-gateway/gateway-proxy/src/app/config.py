@@ -245,7 +245,10 @@ class Settings(BaseSettings):
     web_search_trace_mode: str = "text"
     #: Client classes that get native traces (cowork | claude-code | codex, comma-separated;
     #: empty = all). Classification comes from ClientIdentificationMiddleware, not from a raw
-    #: header value.
+    #: header value. Only clients that REPLAY the blocks verbatim belong here — otherwise the
+    #: results never reach the model on the next request. Verified: cowork (2026-09-17),
+    #: claude-code CLI 2.1.276 (2026-09-18: byte-identical replay, also with --continue, and
+    #: its built-in WebSearch helper builds proper link results only from native blocks).
     web_search_trace_native_clients: str = "cowork"
     #: Per-result excerpt length (chars) carried in the native blocks — what the replayed
     #: tool_result shows the model on later turns. 0 (default) = the same length as the trimmed

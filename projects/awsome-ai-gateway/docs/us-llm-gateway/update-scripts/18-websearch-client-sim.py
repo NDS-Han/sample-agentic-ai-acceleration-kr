@@ -25,9 +25,9 @@ Usage:
   python3 18-websearch-client-sim.py                 # built-in scenarios
   python3 18-websearch-client-sim.py --only file     # scenarios whose name contains "file"
   python3 18-websearch-client-sim.py --client claude-code
-      # identify as Claude Code instead of Cowork: the gateway then answers in TEXT trace mode
-      # (no native blocks; a search leaves only its 🔎 line). Run both — they are different
-      # code paths in the gateway.
+      # identify as Claude Code instead of Cowork. Which trace mode that class gets is the
+      # gateway's setting (WEB_SEARCH_TRACE_NATIVE_CLIENTS): native blocks + 🔎 line, or the
+      # 🔎 line alone. The judgement follows what actually came back. Run both classes.
   python3 18-websearch-client-sim.py --scenarios my.json --out transcript.json
   python3 18-websearch-client-sim.py --connect-to 127.0.0.1:8443
       # TCP goes to a local tunnel; TLS name and Host header stay GATEWAY_URL's host
@@ -173,6 +173,7 @@ def run_prompt(gw: Gateway, messages: list, prompt: dict, log: list) -> list[str
     messages.append({"role": "user", "content": text})
     print(f"\n  USER: {text}")
     answer, searches, refused, tools, fails = "", 0, 0, [], []
+    modes: set[str] = set()
     for n in range(1, 11):
         t0 = time.time()
         status, content, stop, usage, error = gw.request(messages)
@@ -186,16 +187,15 @@ def run_prompt(gw: Gateway, messages: list, prompt: dict, log: list) -> list[str
         calls = [b for b in content if b["type"] == "tool_use"]
         body = "\n".join(b["text"] for b in content if b["type"] == "text")
         lines = [ln for ln in body.splitlines() if TRACE in ln]
-        if gw.client == "cowork":       # native mode: one block pair AND one line per search
+        if srv:                         # native mode: one block pair AND one line per search
             if len(lines) != len(srv):
                 fails.append(f"request {n}: {len(srv)} search block(s) but {len(lines)} "
                              "trace line(s)")
             ran_n, refused_n = len(srv) - len(errs), len(errs)
-        else:                           # text mode: the 🔎 line is the only trace
-            if srv:
-                fails.append(f"request {n}: native blocks sent to a text-mode client")
+        else:                           # text mode (or no search): the 🔎 line is the only trace
             ran_n = sum(1 for ln in lines if RAN.search(ln))
             refused_n = len(lines) - ran_n
+        modes.add("native" if srv else "text" if lines else "")
         searches += ran_n
         refused += refused_n
         tools += [b["name"] for b in calls]
@@ -224,7 +224,8 @@ def run_prompt(gw: Gateway, messages: list, prompt: dict, log: list) -> list[str
     if expect.get("tool") and expect["tool"] not in tools:
         fails.append(f"client tool {expect['tool']} was never called")
     print(f"    => {'PASS' if not fails else 'FAIL'}: searches={searches} refused={refused} "
-          f"client_tools={tools} answer_chars={len(answer)}")
+          f"trace={'+'.join(sorted(modes - {''})) or '-'} client_tools={tools} "
+          f"answer_chars={len(answer)}")
     for f in fails:
         print(f"       - {f}")
     print("       " + answer[:300].replace("\n", " / "))
