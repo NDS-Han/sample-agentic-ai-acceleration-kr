@@ -71,29 +71,29 @@ export default async function BudgetsPage() {
     entries: RawAllocationEntry[];
   }
 
-  let teamAllocation: TeamBudgetAllocation | null = null;
-  if (!isAdmin && session?.team_id) {
-    const rawAllocation = await adminAPI
-      .get<RawTeamAllocation>(`/admin/budgets/team/${session.team_id}/allocation`)
-      .catch(() => null);
+  // TEAM_LEADER 는 "리더로 지정된 팀" 전부를 관리한다 — 소속 팀 1개가 아니라
+  // /admin/budgets/my-allocations 가 led 팀별 allocation 을 돌려준다(없으면 []).
+  let teamAllocations: TeamBudgetAllocation[] = [];
+  if (!isAdmin) {
+    const rawAllocations = await adminAPI
+      .get<RawTeamAllocation[]>(`/admin/budgets/my-allocations`)
+      .catch(() => [] as RawTeamAllocation[]);
     // Decimal 필드는 pydantic 이 JSON 문자열로 직렬화 — 여기서 숫자로 변환해야
     // TeamAllocationView 의 .toFixed() 호출이 안전하다 (BudgetSummaryTable 경로와 동일 처리).
-    teamAllocation = rawAllocation
-      ? {
-          team_id: rawAllocation.team_id,
-          team_name: rawAllocation.team_name,
-          total_budget_usd: parseFloat(rawAllocation.total_budget_usd) || 0,
-          entries: (rawAllocation.entries ?? []).map((e) => ({
-            target_id: e.target_id,
-            target_name: e.target_name,
-            target_type: e.target_type.toUpperCase() as AllocationEntry['target_type'],
-            allocated_usd: parseFloat(e.allocated_usd) || 0,
-            used_usd: parseFloat(e.used_usd) || 0,
-            remaining_usd: parseFloat(e.remaining_usd) || 0,
-            alert_level: e.alert_level.toUpperCase() as AllocationEntry['alert_level'],
-          })),
-        }
-      : null;
+    teamAllocations = (Array.isArray(rawAllocations) ? rawAllocations : []).map((ra) => ({
+      team_id: ra.team_id,
+      team_name: ra.team_name,
+      total_budget_usd: parseFloat(ra.total_budget_usd) || 0,
+      entries: (ra.entries ?? []).map((e) => ({
+        target_id: e.target_id,
+        target_name: e.target_name,
+        target_type: e.target_type.toUpperCase() as AllocationEntry['target_type'],
+        allocated_usd: parseFloat(e.allocated_usd) || 0,
+        used_usd: parseFloat(e.used_usd) || 0,
+        remaining_usd: parseFloat(e.remaining_usd) || 0,
+        alert_level: e.alert_level.toUpperCase() as AllocationEntry['alert_level'],
+      })),
+    }));
   }
 
   interface APIModelItem {
@@ -180,13 +180,18 @@ export default async function BudgetsPage() {
 
       {isAdmin ? (
         <BudgetSummaryTable items={items} isAdmin={isAdmin} />
-      ) : session?.team_id ? (
-        <TeamAllocationView
-          teamId={session.team_id}
-          initialAllocation={teamAllocation}
-        />
+      ) : teamAllocations.length > 0 ? (
+        <div className="space-y-8">
+          {teamAllocations.map((alloc) => (
+            <TeamAllocationView
+              key={alloc.team_id}
+              teamId={alloc.team_id}
+              initialAllocation={alloc}
+            />
+          ))}
+        </div>
       ) : (
-        <p className="text-sm text-muted-foreground">{t('noTeamAssigned')}</p>
+        <p className="text-sm text-muted-foreground">{t('noLedTeams')}</p>
       )}
 
       {isAdmin && teamItems.length > 0 && (

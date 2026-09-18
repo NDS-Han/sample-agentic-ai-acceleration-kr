@@ -297,6 +297,8 @@
     "colUsage": "Usage",
     "noMembers": "No members.",
     "unallocated": "Unallocated",
+    "setByAdmin": "Set by admin",
+    "noLedTeams": "No teams you lead. Ask an administrator to assign you as a team leader.",
     "allocationExceeds": "Allocated total (${allocated}) exceeds the team budget (${budget})."
   },
   "models": {

@@ -297,6 +297,8 @@
     "colUsage": "사용량",
     "noMembers": "팀원이 없습니다.",
     "unallocated": "미배분 잔액",
+    "setByAdmin": "관리자 설정",
+    "noLedTeams": "리더로 지정된 팀이 없습니다. 관리자에게 팀 리더 지정을 요청하세요.",
     "allocationExceeds": "배분 금액의 합계(${allocated})가 팀 예산(${budget})을 초과합니다."
   },
   "models": {

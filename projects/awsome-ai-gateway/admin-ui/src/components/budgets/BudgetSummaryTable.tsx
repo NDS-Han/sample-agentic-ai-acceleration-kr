@@ -8,9 +8,9 @@ import { useTranslations } from 'next-intl';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import type { BudgetSummaryItem } from '@/types/entities';
 import { AlertLevel, BudgetScope } from '@/types/enums';
-import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { SetBudgetDialog } from './SetBudgetDialog';
+import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
 
 interface BudgetSummaryTableProps {
   items: BudgetSummaryItem[];
@@ -26,43 +26,6 @@ type DialogTarget = {
 };
 
 const UNASSIGNED_KEY = '__unassigned__';
-
-function AlertBadge({ level, labels }: { level: (typeof AlertLevel)[keyof typeof AlertLevel]; labels: Record<string, string> }) {
-  const tones: Record<string, BadgeTone> = {
-    [AlertLevel.NORMAL]: 'teal',
-    [AlertLevel.WARNING]: 'amber',
-    [AlertLevel.CRITICAL]: 'pink',
-  };
-  return <Badge tone={tones[level] ?? 'neutral'}>{labels[level] ?? level}</Badge>;
-}
-
-function TypeBadge({ type, labels }: { type: (typeof BudgetScope)[keyof typeof BudgetScope]; labels: Record<string, string> }) {
-  return <Badge tone={type === BudgetScope.TEAM ? 'sky' : 'neutral'}>{labels[type] ?? type}</Badge>;
-}
-
-function UsageBar({
-  pct,
-  level,
-}: {
-  pct: number;
-  level: (typeof AlertLevel)[keyof typeof AlertLevel];
-}) {
-  // 임계 기반 시맨틱색(테마 토큰 — 다크/라이트 자동): 정상 teal / 경고 amber / 위험 destructive.
-  const colorMap: Record<string, string> = {
-    [AlertLevel.NORMAL]: 'hsl(var(--chart-1))',
-    [AlertLevel.WARNING]: 'hsl(38 92% 50%)',
-    [AlertLevel.CRITICAL]: 'hsl(var(--destructive))',
-  };
-  const color = colorMap[level] ?? 'hsl(var(--muted-foreground))';
-  return (
-    <div className="w-full h-1.5 rounded-full overflow-hidden bg-[--table-progress-track]">
-      <div
-        className="h-full rounded-full"
-        style={{ width: `${Math.min(pct, 100)}%`, background: color }}
-      />
-    </div>
-  );
-}
 
 export function BudgetSummaryTable({ items, isAdmin }: BudgetSummaryTableProps) {
   const t = useTranslations('budgets');
