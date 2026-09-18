@@ -44,8 +44,12 @@ RESULTS = [
 
 
 class _Req:
-    def __init__(self, platform: str | None = "desktop_app"):
+    """Fake request: ``client`` = what the middleware would have stored; ``platform`` = raw
+    header only (no middleware ran), so the header fallback classification is exercised."""
+
+    def __init__(self, platform: str | None = "desktop_app", client: str | None = None):
         self.headers = {"anthropic-client-platform": platform} if platform else {}
+        self.scope = {"state": {"client": client}} if client else {}
 
     async def is_disconnected(self) -> bool:
         return False
@@ -76,9 +80,9 @@ class _Mcp:
         return _R()
 
 
-def _native_on(monkeypatch, platforms: str = "desktop_app"):
-    plats = frozenset(p for p in platforms.split(",") if p)
-    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("native", plats))
+def _native_on(monkeypatch, clients: str = "cowork"):
+    allowed = frozenset(p for p in clients.split(",") if p)
+    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("native", allowed))
 
 
 def _raw(ev: dict) -> bytes:
@@ -212,14 +216,14 @@ async def _run_nonstream(turns, mcp, capture: list | None = None, **kw):
 
 
 # ── 스트리밍: 블록 형태 ──────────────────────────────────────────────────────────
-async def test_native_stream_emits_server_tool_use_and_result_instead_of_text():
+async def test_native_stream_emits_server_blocks_plus_display_line():
     mcp = _Mcp()
     ev = await _run_stream([_search_turn(["q1", "q2"]), _final("done")], mcp,
                            native_trace=True)
     blocks = _blocks(ev)
     kinds = [b["type"] for b in blocks]
     assert kinds == ["server_tool_use", "web_search_tool_result",
-                     "server_tool_use", "web_search_tool_result", "text"], kinds
+                     "server_tool_use", "web_search_tool_result", "text", "text"], kinds
     use, res = blocks[0], blocks[1]
     assert use["name"] == GW and use["id"].startswith("srvtoolu_")
     assert use["input"] == {"query": "q1"}
@@ -229,11 +233,12 @@ async def test_native_stream_emits_server_tool_use_and_result_instead_of_text():
     assert items[0]["title"] == "A title" and items[0]["url"] == "https://a.com/x"
     assert items[0]["page_age"] == "2026-09-01" and items[1]["page_age"] is None
     digest = json.loads(base64.b64decode(items[0]["encrypted_content"]).decode())
-    assert digest["snippet"].startswith("A body") and len(digest["snippet"]) <= 200
+    assert digest["snippet"].startswith("A body") and len(digest["snippet"]) <= 600
     assert blocks[2]["input"] == {"query": "q2"}
     assert blocks[1]["tool_use_id"] != blocks[3]["tool_use_id"]
-    assert not any(PREFIX in (b.get("text") or "") for b in blocks), (
-        "native 모드에 🔎 텍스트 줄이 남았다")
+    shown = blocks[4]["text"].strip().splitlines()
+    assert len(shown) == 2 and all(ln.startswith(PREFIX) for ln in shown), (
+        "표시용 🔎 줄은 블록 뒤에 한 블록으로(Cowork 화면은 블록을 그리지 않는다)")
     assert blocks[-1]["text"] == "done"
     assert mcp.calls == ["q1", "q2"]
 
@@ -242,7 +247,7 @@ async def test_native_stream_frames_are_well_formed_for_sdk_parsers():
     ev = await _run_stream([_search_turn(["q1"]), _final()], _Mcp(), native_trace=True)
     starts = [d["index"] for e, d in ev if e == "content_block_start"]
     stops = [d["index"] for e, d in ev if e == "content_block_stop"]
-    assert starts == [0, 1, 2] and stops == [0, 1, 2], (
+    assert starts == [0, 1, 2, 3] and stops == [0, 1, 2, 3], (
         "블록 인덱스가 봉투 안에서 연속·1:1 이어야 한다")
     # server_tool_use starts with an EMPTY input and streams it as input_json_delta (like tool_use)
     stu = next(d for e, d in ev if e == "content_block_start"
@@ -274,24 +279,37 @@ async def test_native_failed_and_capped_searches_use_error_results():
 
 
 # ── 게이팅 ───────────────────────────────────────────────────────────────────────
-def test_native_mode_gated_by_setting_and_client_platform(monkeypatch):
-    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("text", frozenset({"desktop_app"})))
-    assert wsl._native_trace_enabled(_Req("desktop_app")) is False, "기본 text = 종전 경로"
-    _native_on(monkeypatch, "desktop_app")
+def test_native_mode_gated_by_setting_and_classified_client(monkeypatch):
+    monkeypatch.setattr(wsl, "_trace_mode", lambda: ("text", frozenset({"cowork"})))
+    assert wsl._native_trace_enabled(_Req(client="cowork")) is False, "기본 text = 종전 경로"
+    _native_on(monkeypatch, "cowork")
+    # 미들웨어가 분류해 둔 값이 기준 — 실제 Cowork 는 UA 로 잡히고 platform 헤더가 없다.
+    assert wsl._native_trace_enabled(_Req(None, client="cowork")) is True
+    assert wsl._native_trace_enabled(_Req(None, client="claude-code")) is False
+    assert wsl._native_trace_enabled(_Req(None, client="other")) is False
+    # 미들웨어 없이 직접 부른 경우(테스트·에뮬레이션): 헤더에서 같은 규칙으로 분류
     assert wsl._native_trace_enabled(_Req("desktop_app")) is True
     assert wsl._native_trace_enabled(_Req("cli")) is False, "Claude Code 는 탐침 대상이 아니다"
     assert wsl._native_trace_enabled(_Req(None)) is False
     assert wsl._native_trace_enabled(None) is False
     _native_on(monkeypatch, "")
-    assert wsl._native_trace_enabled(_Req("cli")) is True, "빈 목록 = 전부"
+    assert wsl._native_trace_enabled(_Req(None, client="claude-code")) is True, "빈 목록 = 전부"
+
+
+def test_request_client_prefers_middleware_state_over_headers():
+    assert wsl._request_client(_Req("desktop_app", client="claude-code")) == "claude-code"
+    assert wsl._request_client(_Req("desktop_app")) == "cowork"
+    ua = type("R", (), {"headers": {
+        "user-agent": "claude-cli/2.0.1 (external, claude-desktop-3p)"}})()
+    assert wsl._request_client(ua) == "cowork"
 
 
 def test_trace_mode_reads_settings(monkeypatch):
     from app import config as cfg
     monkeypatch.setattr(cfg, "get_settings", lambda: type("S", (), {
         "web_search_trace_mode": "NATIVE",
-        "web_search_trace_native_platforms": "desktop_app, Cli"})())
-    assert wsl._trace_mode() == ("native", frozenset({"desktop_app", "cli"}))
+        "web_search_trace_native_clients": "cowork, Claude-Code"})())
+    assert wsl._trace_mode() == ("native", frozenset({"cowork", "claude-code"}))
 
 
 async def test_text_mode_stream_is_unchanged():
@@ -310,11 +328,11 @@ async def test_native_nonstream_puts_blocks_first_in_content():
     ]
     body = await _run_nonstream(turns, _Mcp(), native_trace=True)
     kinds = [b["type"] for b in body["content"]]
-    assert kinds == ["server_tool_use", "web_search_tool_result", "text"], kinds
+    assert kinds == ["server_tool_use", "web_search_tool_result", "text", "text"], kinds
     assert body["content"][0]["input"] == {"query": "q1"}
     assert body["content"][1]["tool_use_id"] == body["content"][0]["id"]
-    assert body["content"][2]["text"] == "done" and body["stop_reason"] == "end_turn"
-    assert not any(PREFIX in (b.get("text") or "") for b in body["content"])
+    assert body["content"][2]["text"].startswith(f'{PREFIX} "q1"'), "표시용 🔎 줄"
+    assert body["content"][3]["text"] == "done" and body["stop_reason"] == "end_turn"
 
 
 # ── 인바운드 환원(탐침) ──────────────────────────────────────────────────────────
@@ -356,8 +374,8 @@ def test_inbound_native_blocks_become_trace_text():
         "블록이 없으면 같은 객체(바이트 동일 경로)")
 
 
-async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch):
-    _native_on(monkeypatch, "desktop_app")
+async def test_loop_entry_rewrites_inbound_blocks_and_gates_native(monkeypatch):
+    _native_on(monkeypatch, "cowork")
     mcp = _Mcp()
     captured: list[dict] = []
     queue = [
@@ -381,13 +399,15 @@ async def test_loop_entry_normalizes_inbound_blocks_and_gates_native(monkeypatch
     resp = await wsl.run_web_search_loop(
         dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
         initial_req_data={"messages": _echoed_history()}, is_stream=False,
-        mcp_client=mcp, request=_Req("desktop_app"), on_usage=on_usage,
+        mcp_client=mcp, request=_Req(None, client="cowork"), on_usage=on_usage,
     )
     for b in captured:
         dumped = json.dumps(b)
         assert "server_tool_use" not in dumped and "web_search_tool_result" not in dumped
-    hist = captured[0]["messages"][1]["content"]
-    assert hist[1]["text"].startswith(f'{PREFIX} "q1"')
+    hist = captured[0]["messages"]
+    # 루프 안은 도구 기록으로 재작성(본 구현, test_high_websearch_native_inbound_rewrite 참조)
+    assert [b["type"] for b in hist[1]["content"]] == ["text", "tool_use", "tool_use"]
+    assert [b["type"] for b in hist[2]["content"]] == ["tool_result", "tool_result"]
     body = json.loads(bytes(resp.body))
     assert [b["type"] for b in body["content"]][:2] == ["server_tool_use", "web_search_tool_result"]
     assert mcp.calls == ["q3"]
@@ -441,8 +461,8 @@ def test_result_digest_is_bounded_and_tolerant():
                    for i in range(8)]
 
     d = wsl._result_digest(_R())
-    assert len(d) == 5 and all(len(x["snippet"]) <= 200 for x in d)
-    assert d[0] == {"title": "t0", "url": "https://h0.com", "snippet": "x" * 200, "page_age": None}
+    assert len(d) == 5 and all(len(x["snippet"]) <= 600 for x in d)
+    assert d[0] == {"title": "t0", "url": "https://h0.com", "snippet": "x" * 500, "page_age": None}
 
     class _Raw:
         results = None
@@ -451,3 +471,45 @@ def test_result_digest_is_bounded_and_tolerant():
     assert wsl._result_digest(_Raw()) == [{"title": "", "url": "https://z.com", "snippet": "a b",
                                            "page_age": None}]
     assert wsl._result_digest(object()) == []
+
+
+def test_pick_snippet_skips_page_noise_and_cuts_at_sentence():
+    noisy = ("705.310.55% 76537.602.1162% 520.570.75% 394.010.3% 80.660.33% September 15, 2026 "
+             "2:23 PM 3 min read SK Hynix Is Shipping 16-Layer HBM4 for Nvidia Rubin. Micron and "
+             "Samsung trail. " + "More detail follows here. " * 40)
+    snip = wsl._pick_snippet(noisy, 600)
+    assert not snip.startswith("705") and "SK Hynix Is Shipping" in snip[:60], snip[:80]
+    assert len(snip) <= 602 and snip.endswith(" …") and snip.rstrip(" …").endswith(".")
+    ko = ("삼성전자, 세계 최초 업계 최고 성능의 HBM4 양산 출하 2026년 02월 12일 "
+          "삼성전자가 세계 최초로 HBM4를 양산 출하했다.")
+    assert wsl._pick_snippet(ko, 600) == ko, "본문으로 시작하는 글은 그대로"
+    assert wsl._pick_snippet("  a   b ", 600) == "a b" and wsl._pick_snippet(None, 600) == ""
+    table = "| a | 1 | | b | 2 |"
+    assert wsl._pick_snippet(table, 600) == table, "단어 구간이 없으면 통째로"
+
+
+def test_digest_length_follows_the_trim_length_unless_overridden(monkeypatch):
+    from app import config as cfg
+
+    def settings(v):
+        return lambda: type("S", (), {"web_search_digest_chars": v})()
+
+    monkeypatch.setattr(cfg, "get_settings", settings(0))
+    assert wsl._digest_chars(1500) == 1500, "기본 = 모델이 본 트림 결과 길이"
+    assert wsl._digest_chars(0) == wsl._DIGEST_SNIPPET_CHARS == 1500
+    monkeypatch.setattr(cfg, "get_settings", settings(600))
+    assert wsl._digest_chars(1500) == 600, "WEB_SEARCH_DIGEST_CHARS > 0 이면 그 값"
+
+
+def test_digest_comes_from_the_trimmed_json_the_model_saw(monkeypatch):
+    monkeypatch.setattr(wsl, "_digest_chars", lambda *_: 50)
+    trimmed = json.dumps({"results": [
+        {"url": "https://a.com", "title": "A",
+         "text": "Real body sentence one. Sentence two is long.", "publishedDate": "2026-09-15"},
+        {"url": "https://b.com", "title": "B", "text": "B body"}]})
+    d = wsl._result_digest_from_text(trimmed, None, 5, 50)
+    assert d[0]["page_age"] == "2026-09-15"
+    assert d[0]["snippet"].startswith("Real body sentence one.")
+    assert len(d) == 2 and d[1]["page_age"] is None
+    raw = type("R", (), {"results": [{"url": "https://z.com", "title": "Z", "text": "Z body"}]})()
+    assert wsl._result_digest_from_text("not json", raw, 5, 50)[0]["title"] == "Z"

@@ -197,45 +197,61 @@ class Settings(BaseSettings):
     agentcore_region: str = "us-east-1"
     agentcore_target_id: str = "web-search-tool"
     agentcore_http_timeout: float = 30.0
-    #: MCP 핸드셰이크(HTTP 3회 합계)의 상한. agentcore_http_timeout 은 **호출 1회당** 값이라
-    #: 그것만으로는 핸드셰이크 하나가 그 3배까지 늘어나고, 락이 process-global 이라 동시
-    #: 요청이 직렬화된다(services/agentcore_mcp_client.py 의 필드 주석 참조).
+    #: Cap on the whole MCP handshake (three HTTP calls). agentcore_http_timeout is PER CALL,
+    #: so on its own one handshake could take 3× that, and the handshake lock is
+    #: process-global, so concurrent requests would queue behind it (see the field comments
+    #: in services/agentcore_mcp_client.py).
     agentcore_handshake_timeout: float = 10.0
-    #: 핸드셰이크 실패 후 재시도를 억제하는 기간. 죽은 게이트웨이의 비용을 모든 요청이
-    #: 상한만큼 되풀어 내지 않게 한다. 대가는 복구가 최대 이만큼 늦어지는 것.
+    #: How long to suppress handshake retries after a failure, so every request does not pay
+    #: the full timeout against a dead gateway. The price is a recovery delayed by up to this.
     agentcore_handshake_negative_ttl: float = 30.0
     web_search_enabled: bool = False
     web_search_max_iterations: int = 5
     web_search_total_deadline_sec: float = 90.0
+    #: Results kept per search (after URL/mirror de-duplication). The model's ``max_results``
+    #: is honoured only up to this value — despite the name it is a MAXIMUM (2026-09-17: the
+    #: model asked for 15 and the 12k-char cap cut the result JSON mid-record). 0 = unlimited.
+    #: The connector is asked for up to 2× this number so de-duplication has candidates.
     web_search_max_results_default: int = 10
-    #: 검색 **1회** 결과 텍스트의 상한(문자). 0 = 무제한(캡 이전 동작).
-    #: ⚠️ max_iterations 는 턴 수를, total_deadline_sec 는 시간을 묶는다. 청구서를 정하는
-    #:    축인 "다음 턴 입력에 주입되는 바이트" 는 이것뿐이다. dev 실측: 검색 한 번이 다음
-    #:    턴 입력에 약 17.4K 토큰을 넣었다. 60000자 ≈ 15K 토큰 수준으로 잡는다.
+    #: Cap on ONE search's result text (chars). 0 = unlimited (pre-cap behaviour).
+    #: max_iterations bounds turns and total_deadline_sec bounds time; the only bound on the
+    #: bill-deciding axis — bytes injected into the next turn's input — is this one. One
+    #: search once injected ~17.4K tokens on dev; 60000 chars ≈ 15K tokens.
     web_search_max_result_chars: int = 60000
-    #: 한 **턴**에서 실행할 검색 개수 상한. 0 = 무제한.
-    #: ⚠️ 모델은 한 턴에 병렬 web_search 를 여러 개 낼 수 있고 이 루프는 그것을 지원한다.
-    #:    20개가 통과하면 20 × 결과가 다음 턴 입력에 연결되어, 상한 없는 단일 요청 비용이
-    #:    되거나 컨텍스트 창을 넘겨 continuation 턴이 400 이 된다(그때까지 과금분 전부 유실).
+    #: Searches run per TURN. 0 = unlimited. The model may issue many parallel web_search
+    #: calls in one turn and the loop supports that; 20 of them would put 20× results into
+    #: the next turn's input — an uncapped single-request cost, or a context overflow that
+    #: 400s the continuation turn and loses everything billed so far.
     web_search_max_searches_per_turn: int = 4
-    #: 루프가 넣는 검색 결과(tool_result)에 cache_control 을 붙여, 같은 요청의 뒤 턴이 앞 턴의
-    #: 결과를 캐시 읽기(정가의 10%)로 받게 한다. 2026-09-16 실측: 검색 N회 요청의 입력 비용은
-    #: 결과가 턴마다 다시 실리는 몫이 대부분(검색 3회면 결과 토큰 6R 이 캐시로 약 3.8R).
-    #: 요청당 표시 4개 한도는 _place_cache_breakpoint 가 지킨다. 문제 시 False 로 끈다.
+    #: Put a cache_control marker on the search results (tool_result) the loop injects so later
+    #: turns of the same request read them at the cached price (10% of list). 2026-09-16: most
+    #: of a multi-search request's input cost was results re-sent every turn (3 searches: 6R
+    #: result tokens, about 3.8R with the marker). _place_cache_breakpoint keeps the 4-marker
+    #: limit. Set False to disable if it misbehaves.
     web_search_cache_results: bool = True
-    #: 검색 결과 **항목별** 본문 상한(문자). JSON 을 통째로 자르는 max_result_chars 와 달리 결과
-    #: 5개를 전부 남기고 각 본문만 문장 경계에서 자르며 URL 중복을 뺀다(2026-09-16: 원본 13~24k자
-    #: → 항목당 1500자면 검색당 토큰 −40~50%, 뒤쪽 결과가 통째로 잘리던 문제도 사라짐). 0 = 끔.
+    #: Per-RESULT body cap (chars). Unlike max_result_chars (which cuts the whole JSON) this
+    #: keeps every result's title/URL/lead and cuts only the body at a sentence boundary,
+    #: dropping URL duplicates (2026-09-16: raw results were 13–24k chars; 1500 per item saves
+    #: 40–50% of the tokens per search and no trailing result is lost). 0 = off.
     web_search_result_text_chars: int = 1500
-    #: 클라이언트에 남기는 검색 흔적 줄의 언어("en" | "ko"). 접두어 `🔎 [gateway web_search]` 는
-    #: 공통(모방 필터·도구 설명이 이 접두어를 본다).
+    #: Language of the trace line left for the client ("en" | "ko"). The prefix
+    #: `🔎 [gateway web_search]` is shared (the imitation filter and the tool description
+    #: match on it).
     web_search_trace_lang: str = "en"
-    #: 탐침(2026-09-17): 검색 흔적을 텍스트 줄 대신 Anthropic 네이티브 블록(server_tool_use +
-    #: web_search_tool_result)으로 남긴다 — 텍스트 줄은 캐물으면 부정되고(자백) 클라이언트 도구와
-    #: 섞이면 모방된다. "text"(기본, 종전 경로) | "native". 되돌아온 블록은 텍스트로 환원한다.
+    #: "text" (default, unchanged path) | "native". Native leaves the trace as Anthropic
+    #: native search blocks (server_tool_use + web_search_tool_result) instead of a text
+    #: line — a text line is denied under questioning ("I never searched") and imitated when
+    #: it shares a message with a client tool call. Replayed blocks are converted back on
+    #: the way in (2026-09-17).
     web_search_trace_mode: str = "text"
-    #: native 를 적용할 anthropic-client-platform 값(쉼표 구분, 빈 값 = 전부). 기본 Cowork 만.
-    web_search_trace_native_platforms: str = "desktop_app"
+    #: Client classes that get native traces (cowork | claude-code | codex, comma-separated;
+    #: empty = all). Classification comes from ClientIdentificationMiddleware, not from a raw
+    #: header value.
+    web_search_trace_native_clients: str = "cowork"
+    #: Per-result excerpt length (chars) carried in the native blocks — what the replayed
+    #: tool_result shows the model on later turns. 0 (default) = the same length as the trimmed
+    #: result the model saw (web_search_result_text_chars). Shorter cuts evidence.
+    web_search_digest_chars: int = 0
 
     # ── Reporting timezone (§59) ──
     # 비용/사용량 집계의 "월/일 경계" 기준 타임존. admin-api·cost-recorder-worker·

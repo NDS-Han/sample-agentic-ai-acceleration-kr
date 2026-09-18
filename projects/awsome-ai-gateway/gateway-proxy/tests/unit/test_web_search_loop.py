@@ -314,7 +314,7 @@ async def test_anthropic_one_search_single_envelope_suppresses_plumbing():
     assert types.count("message_start") == 1, types
     assert types.count("message_stop") == 1, types
     # search actually ran once
-    assert mcp.calls == [("aws news", 10)]
+    assert mcp.calls == [("aws news", 20)]   # cap 10 → fetch 2× for dedupe headroom
     assert usage.web_search_count == 1
     # web_search tool_use block NOT surfaced as a tool_use content block to the client
     assert not any(
@@ -430,7 +430,7 @@ async def test_responses_one_search_single_envelope():
     types = [e for e, _ in events]
     assert types.count("response.created") == 1, types
     assert types.count("response.completed") == 1, types
-    assert mcp.calls == [("aws", 10)]
+    assert mcp.calls == [("aws", 20)]
     assert usage.web_search_count == 1
     # our function_call plumbing suppressed (no function_call_arguments deltas surfaced)
     assert not any(e == "response.function_call_arguments.delta" for e, _ in events)
@@ -504,7 +504,7 @@ async def test_anthropic_multiple_searches_one_turn(monkeypatch):
     ):
         out += f
     # both searches executed
-    assert mcp.calls == [("q1", 10), ("q2", 10)]
+    assert mcp.calls == [("q1", 20), ("q2", 20)]
     # 2nd turn body's conversation has a user turn with TWO tool_results, matching ids
     second = bodies[1]
     user_turns = [m for m in second["messages"] if m["role"] == "user"]

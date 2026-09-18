@@ -249,7 +249,13 @@ gatewayProxy:
     # 1.0.68-ffnone: Anthropic 최종(force_final) 턴을 "도구 유지 + tool_choice none + 답하라 지시" 로 — 이력 변환 없이 캐시 접두 보존, 빈 답 원인 제거. 마지막 라운드 캐시 표시 복원.
     # 1.0.69-nudge: 도구 설명 — 이력의 🔎 줄은 게이트웨이가 넣은 진짜 검색 기록(폐기 금지). 최종 턴이 thinking 만 내고 본문이 없으면 한 번만 재촉.
     # 1.0.70-native: 탐침 — 검색 흔적을 🔎 텍스트 줄 대신 Anthropic 네이티브 블록(server_tool_use + web_search_tool_result, 발췌는 encrypted_content)으로. WEB_SEARCH_TRACE_MODE=native + anthropic-client-platform 허용 목록(기본 desktop_app=Cowork)일 때만, 기본 text 는 종전과 동일. 되돌아온 블록은 텍스트로 환원·카운트 로그. 덤: 섞인 턴에서 버려지는 검색에 "not run" 흔적, 도구 설명에 "회사별로 나눠 검색".
-    tag: "1.0.70-native"
+    # 1.0.71-nativegate: 1.0.70 게이트 수정 — 실제 Cowork 는 anthropic-client-platform 헤더가 아니라 User-Agent 로 식별되므로(탐침 실측: 검색 4회에 native 0회) 미들웨어가 분류한 클라이언트(WEB_SEARCH_TRACE_NATIVE_CLIENTS, 기본 cowork)로 판정.
+    # 1.0.72-nativehist: 본 구현 — Cowork 가 되돌려 준 native 검색 블록(탐침 07:57 inbound 2/2·4/4 확인)을 루프 턴에서 tool_use/tool_result 로 재작성해 결과 발췌(digest)까지 모델에 다시 보인다(탐침은 결과 없는 텍스트 한 줄이라 답이 흐려짐). 우리 도구 없이 나가는 경로(폴백 루프·Mantle·count_tokens·MCP 실패 폴백)는 텍스트 환원 유지.
+    # 1.0.73-nativeshow: native 모드에서도 🔎 표시 줄을 블록 뒤에 함께 낸다(Cowork 화면은 블록을 그리지 않아 검색 흔적이 안 보였음). 되돌아오면 재작성 때 🔎 줄은 걷어내 모델 이력에는 도구 기록만 남는다(모방 원천 없음).
+    # 1.0.74-digest: 되돌아온 검색 결과의 발췌를 200자·페이지 첫머리 → 본문다운 지점부터 600자(WEB_SEARCH_DIGEST_CHARS)로. 모델이 본 트림 결과에서 만들고, 되살린 tool_result 에 "전문은 그 턴에 봤다" 메모 — Cowork 2번 프롬프트에서 발췌가 얇아 실제 근거를 되물리던 문제.
+    # 1.0.75-digestfull: 되돌아온 결과 발췌 기본을 "모델이 본 트림 결과와 같은 길이"(1500)로. 600자에서도 실제 근거 문장(마이크론 3월 HVM·TrendForce 20%)이 잘려 모델이 되물렸음(S3 전문 확인). WEB_SEARCH_DIGEST_CHARS(17 스크립트 키, 0=동일)로 줄일 수 있음. 품질 우선(사용자 결정).
+    # 1.0.76-evidence: 검색 1회 = 증거 집합 하나(모델 tool_result·되돌림·🔎 줄이 같은 집합). 상한(WEB_SEARCH_MAX_RESULTS_DEFAULT)을 "최대"로 강제(모델이 15 를 요구해 12k 캡에서 JSON 이 매 검색 절단되던 문제 — S3 실측), 미러·중복 제거(본문 지문), 결과당 길이를 캡에 맞춰 배분(절단 불가), 잡음 배지("3 min read") 제거. 커넥터엔 상한의 2배까지 요청(과금 호출당).
+    tag: "1.0.76-evidence"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn

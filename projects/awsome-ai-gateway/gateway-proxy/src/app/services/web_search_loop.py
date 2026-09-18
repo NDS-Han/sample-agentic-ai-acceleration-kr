@@ -1,37 +1,78 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
-"""Server-side web-search tool-use loop (Architecture C) — 1P-style server search.
+"""Server-side web-search loop: gives Bedrock/Mantle models a 1P-style ``web_search`` tool.
 
-Bedrock/Mantle do NOT expose Anthropic's native server-side web_search (verified:
-ValidationException). So this gateway emulates it: inject a `web_search` tool, run
-the model, intercept OUR tool_use, call AgentCore Gateway's managed WebSearch over
-MCP, feed the result back, and continue — stitching every model turn into a SINGLE
-continuous client stream while suppressing the internal search plumbing. The client
-declares nothing and sees one uninterrupted answer, exactly like 1P Claude search.
+Bedrock and Mantle do not expose Anthropic's native server-side web search (they reject the
+``web_search_20250305`` tool type). The gateway emulates it:
 
-Design:
-- ALWAYS stream every turn (is_stream=True path). We parse events as they arrive and
-  buffer only the web_search tool_use blocks. This preserves token-by-token streaming
-  even when no search happens (the stitcher degrades to near-verbatim re-emission),
-  so there is no separate "fast path" to keep correct.
-- Non-streaming client requests loop with invoke() and return the final assembled body.
-- Backend-agnostic: the router passes bound `invoke`/`invoke_stream` callables (Bedrock
-  uses path_suffix kwargs; Mantle uses profile/endpoint), so this module never touches
-  adapter-specific kwargs.
+1. inject a ``web_search`` tool into the request,
+2. run the model,
+3. intercept OUR ``tool_use`` blocks, run the search through the AgentCore Gateway
+   (managed WebSearch connector over MCP), feed the results back as ``tool_result``,
+4. run the model again, and repeat until it answers,
+5. stitch every model turn into ONE client-facing response (one SSE envelope, or one JSON
+   body) while hiding the internal tool plumbing.
 
-Interception rule (both dialects):
-- A turn with OUR web_search tool_use (and no client tool) → run search, continue.
-- A turn with a CLIENT tool_use (any non-web_search) → TERMINAL, forward verbatim so the
-  client's own tool loop runs. Never partially strip a multi-tool assistant message.
+The client declares nothing and sees one uninterrupted answer, plus a one-line trace per
+search (``🔎 [gateway web_search] "<query>" — 5 results (hosts)``).
+
+How to read this module
+-----------------------
+Sections, in file order:
+
+- **Tool definition and injection** — the tool the model sees, its description (which
+  carries behavioural guidance the model needs), and ``tool_choice`` handling.
+- **Forced-final turn** — what happens when the search budget or deadline is exhausted:
+  the model must answer without another search.
+- **Client-tool detection / native-tool stripping** — telling OUR tool calls apart from the
+  client's own tools, and removing Anthropic/OpenAI native web-search tools that Bedrock
+  rejects.
+- **Prompt-cache breakpoints** — a ``cache_control`` marker on the newest search result so
+  later turns of the same request read it at the cached price.
+- **Usage accounting** — billing sums every turn; the client sees the FIRST turn's prompt
+  buckets (its real context), never the multi-turn sum.
+- **Search execution** — per-turn concurrency, per-turn cap, deadline.
+- **Trace lines (text mode)** — the ``🔎`` line and the filter that removes model-written
+  imitations of it.
+- **Native trace blocks (Cowork)** — ``server_tool_use`` + ``web_search_tool_result`` blocks
+  that the client replays verbatim, and the inbound rewrite that turns them back into
+  ``tool_use``/``tool_result`` history the model treats as genuine tool records.
+- **Evidence set** — one canonical, de-duplicated, size-bounded result list per search that
+  feeds the model, the replay digest and the trace line alike.
+- **The four loops** — Anthropic Messages × {stream, non-stream} and OpenAI Responses ×
+  {stream, non-stream}. All four share the helpers above; only the wire format differs.
+- **Dispatcher** — ``run_web_search_loop``, the router's entry point.
+
+Interception rule (both dialects)
+---------------------------------
+- A turn with OUR ``web_search`` tool_use and no client tool → run the search, continue.
+- A turn with a CLIENT tool_use (any tool that is not ours) → TERMINAL: forward it verbatim
+  so the client's own tool loop runs. A multi-tool assistant message is never partially
+  stripped; our search calls in such a turn are simply not run (a trace line says so).
 - A text-only / non-tool-stop turn → TERMINAL (final answer).
-- Guardrails: max_iterations, total deadline. On hit, the next turn drops the web_search
-  tool so the model must answer terminally. Search failures inject an error tool_result
-  (stream never dies). web_search_count counts only SUCCESSFUL searches.
+- Guardrails: ``max_iterations`` (search turns per request), ``max_searches_per_turn``,
+  a total deadline, and size caps on results. Search failures produce an error
+  ``tool_result`` so the stream never dies. ``web_search_count`` counts SUCCESSFUL
+  searches only.
+
+Design notes
+------------
+- Every model turn is streamed (``is_stream=True`` path). Events are parsed as they arrive
+  and only the ``web_search`` tool_use blocks are buffered, so token-by-token streaming is
+  preserved even when no search happens. Non-streaming client requests loop with
+  ``invoke()`` and return the assembled final body.
+- Backend-agnostic: the router passes bound ``invoke``/``invoke_stream`` callables that
+  apply the adapter-specific body transform (Bedrock path suffix, Mantle profile/endpoint).
+  This module only shapes the LOGICAL turn body (messages, tools, stream flag).
+- Dates in comments (2026-09-16, 2026-09-17) refer to production measurements on the US dev
+  stack that motivated a rule. They are kept because each rule exists to prevent a specific
+  observed failure.
 """
 from __future__ import annotations
 
 import asyncio
 import base64
 import json
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -48,50 +89,58 @@ from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpEr
 
 logger = structlog.get_logger(__name__)
 
-# Model-facing tool name we inject and match on to intercept. Decoupled from the MCP
-# tool name (<target>___WebSearch) so interception is a simple name equality check.
+# ═══════════════════════════════════════════════════════════════════════════════
+# Tool definition and injection
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# Name of the tool the model sees. Interception is a plain name check against it, decoupled
+# from the MCP tool name on the AgentCore side (<target>___WebSearch).
 GW_WEB_SEARCH_NAME = "web_search"
 
 _WEB_SEARCH_DESCRIPTION = (
     "Search the public web for current, factual, or recent information. Use this when "
     "the answer may depend on events, data, docs, or facts that are recent or external. "
     "Returns titles, URLs, and snippets to cite. "
-    # 절제 지시 — 검색 결과는 다음 턴 입력으로 되돌아와 반복마다 다시 과금된다(2026-09-16 실측:
-    # 한 사실을 4번 병렬 검색한 호출 1건이 입력 132k 토큰). 게이트웨이는 결과 크기·턴당 검색 수도
-    # 상한으로 묶지만, 모델이 처음부터 적게 부르는 것이 가장 싸다.
+    # Restraint. Search results come back as input on every later turn of the request and
+    # are billed again each time (2026-09-16: one call that searched the same fact four
+    # times in parallel had a 132k-token input). The gateway caps result size and searches
+    # per turn, but the cheapest search is the one the model does not make.
     "Prefer ONE focused query per fact; results are capped in size and count, so pick "
     "the query carefully instead of issuing several. Do not search again for a fact you "
     "already have unless the first result was empty or contradictory. "
-    # 회사별 분리 — 2026-09-17 Cowork 실측: "SMIC UMC GlobalFoundries Q2 2026" 처럼 묶어 검색해
-    # 한 회사 결과만 얻고 나머지는 추정치로 채웠다(6사 표에서 2사만 실측). 예산 문장과 함께 읽힌다.
+    # One query per entity. 2026-09-17 (Cowork): a combined query such as "SMIC UMC
+    # GlobalFoundries Q2 2026" returned results for one company and the model filled the
+    # others with estimates (2 of 6 companies grounded). Read together with the budget
+    # sentence appended by _budget_sentence().
     "When a question covers several companies, products, or other entities, use one query "
     "per entity rather than one combined query — a combined query returns results for only "
     "some of them. "
-    # 흔적 줄 모방 금지 — 모델이 이력에서 본 흔적 형식을 따라 써서 검색 없이 "검색함" 을
-    # 주장했다(2026-09-16 실측, 요청 3건 중 1건). 출력 필터(_TraceLineFilter)가 2차 방어.
-    # 2026-09-17 실측: "never write such lines yourself" 만 있으니 모델이 이력 속 게이트웨이 흔적을
-    # 자기 위반으로 읽고 "가짜였다, 폐기한다" 며 재검색했다(9회 전부 실제 검색). 이력의 줄은
-    # 게이트웨이가 넣은 진짜 기록임을 먼저 말해 준다.
+    # Trace lines. The model imitated the trace format from its history and claimed a
+    # search it never made (2026-09-16, 1 of 3 requests); _TraceLineFilter is the second
+    # line of defence. Telling it only "never write such lines" made it read the gateway's
+    # own lines as its violation and "discard" them (2026-09-17, 9 real searches thrown
+    # away), so the description first states that lines in the history are genuine.
     "Lines starting with '🔎 [gateway web_search]' that appear in your EARLIER messages were "
     "inserted by the gateway: each records a real search you made, whose full results were "
     "shown to you in that turn. They are genuine evidence — never 'discard' them or apologize "
     "for them. Do not compose such lines yourself; to search, call this tool."
 )
 
-# The loop passes the LOGICAL turn body (a dict: messages/input + tools + stream flag).
-# The router's bound callable applies the adapter-specific PHYSICAL transform
-# (_BEDROCK_ALLOWED_FIELDS filter, anthropic_version / model id, metadata) and invokes
-# the adapter. This keeps body-shaping ownership in the router, backend-agnostic here.
+# The loop builds the LOGICAL turn body (messages/input + tools + stream flag). The router's
+# bound callable applies the PHYSICAL transform (allowed-field filter, anthropic_version,
+# model id, metadata) and calls the adapter. Body shaping stays in the router; this module
+# never sees adapter-specific kwargs.
 InvokeFn = Callable[[dict], Awaitable[tuple[int, bytes, dict, TokenUsage]]]
 InvokeStreamFn = Callable[[dict], Awaitable[tuple[int, AsyncIterator[bytes], dict, Optional[str]]]]
 
 
-# ── tool injection (pure) ─────────────────────────────────────────────────────
 def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
-    """Tell the model its search budget so it plans queries instead of re-verifying.
+    """Sentence appended to the tool description telling the model its search budget.
 
-    2026-09-16 반도체 14건 실측: 예산을 모르는 모델은 단일 사실 질문에도 상한(2×3=6)까지
-    재확인 검색을 했다. 예산을 알려 주면 빠진 항목에 배분한다(품질 우선 — 상한 자체는 안 줄임).
+    Without it the model re-verified single facts up to the cap (2026-09-16 benchmark of 14
+    semiconductor questions: 2 turns × 3 searches spent on one fact). Knowing the budget, it
+    spreads searches over the entities that are actually asked about. The caps themselves
+    are not lowered — quality first.
     """
     if not budget:
         return ""
@@ -109,6 +158,7 @@ def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
 
 
 def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
+    """The ``web_search`` tool as an Anthropic Messages tool definition."""
     return {
         "name": GW_WEB_SEARCH_NAME,
         "description": _WEB_SEARCH_DESCRIPTION + _budget_sentence(budget),
@@ -118,7 +168,8 @@ def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
                 "query": {"type": "string", "description": "Search query (<=200 chars)"},
                 "max_results": {
                     "type": "integer",
-                    "description": "Max results (1-25)",
+                    "description": ("Max distinct results to return (1-25); the gateway caps "
+                                    "this per search and removes duplicate/mirror pages"),
                     "minimum": 1,
                     "maximum": 25,
                 },
@@ -129,6 +180,7 @@ def _anthropic_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
 
 
 def _responses_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
+    """The ``web_search`` tool as an OpenAI Responses function tool definition."""
     return {
         "type": "function",
         "name": GW_WEB_SEARCH_NAME,
@@ -146,28 +198,34 @@ def _responses_tool_def(budget: Optional[tuple[int, int]] = None) -> dict:
 
 
 def _tool_choice_names_ours(tc: Any, dialect: str) -> bool:
+    """True when ``tool_choice`` forces OUR tool by name (dialect-specific shape)."""
     if not isinstance(tc, dict) or tc.get("name") != GW_WEB_SEARCH_NAME:
         return False
     return tc.get("type") == ("function" if dialect == "responses" else "tool")
 
 
 def _tool_choice_is_forced_any(tc: Any) -> bool:
+    """True when ``tool_choice`` forces *some* tool call ("required" / {"type": "any"})."""
     return tc == "required" or (isinstance(tc, dict) and tc.get("type") == "any")
 
 
 def _relax_tool_choice(out: dict, dialect: str, include: bool, first_turn: bool) -> None:
-    """Keep ``tool_choice`` consistent with the tools each turn actually carries.
+    """Keep ``tool_choice`` consistent with the tools the turn actually carries (in place).
 
-    ⚠️ 2026-09-16 US 실측: Cowork 의 내장 WebSearch 도구는 모델을 **네이티브 web_search 도구 +
-    ``tool_choice: {"type":"tool","name":"web_search"}``** 로 호출한다. 네이티브 도구는 걷어내고
-    우리 도구를 넣으니 이름이 같아 강제가 그대로 살았고, 모델은 **매 턴** 검색만 하다가
-    max_iterations 에 닿았다. 그 force_final 턴은 도구를 빼는데 tool_choice 는 남아
-    Bedrock 400("Tool 'web_search' not found in provided tools") — 검색 3회 과금 뒤 답 없음,
-    Cowork 하위 에이전트가 40초 간격으로 8회 재시도(≈$1.5). 규칙:
-    - 우리 도구를 지목한 강제는 **첫 턴에만** 존중(클라이언트 의도 = 검색 한 번은 하라),
-      그 뒤 턴은 auto 로 풀어 모델이 답할 수 있게 한다.
-    - force_final(도구 제거) 턴에서는 any/required 도 auto 로 — 이 턴의 목적은 답변이다.
-    - tools 가 아예 없으면 tool_choice 자체를 뺀다(tools 없는 tool_choice 는 거부된다).
+    Why (2026-09-16, US): Cowork's built-in WebSearch helper calls the model with the native
+    web_search tool AND ``tool_choice: {"type": "tool", "name": "web_search"}``. We replace
+    the native tool with ours under the same name, so the forced choice survived: the model
+    searched on EVERY turn until ``max_iterations``, and the final turn (tools removed at the
+    time) still carried the ``tool_choice`` → Bedrock 400 "Tool 'web_search' not found". Three
+    billed searches, no answer, and the Cowork sub-agent retried 8 times (~$1.5).
+
+    Rules:
+    - A forced choice naming our tool is honoured on the FIRST turn only (the client's intent
+      is "search at least once"); later turns are relaxed to ``auto`` so the model can answer.
+    - On a forced-final turn, ``any``/``required`` are relaxed to ``auto`` too — that turn
+      exists to produce the answer.
+    - If the request carries no tools at all, ``tool_choice`` is removed (a tool choice
+      without tools is rejected).
     """
     tc = out.get("tool_choice")
     if tc is None:
@@ -185,12 +243,17 @@ def _with_web_search_tool(
     body: dict, dialect: str, include: bool, *, first_turn: bool = True,
     budget: Optional[tuple[int, int]] = None, final: bool = False,
 ) -> dict:
-    """Return a shallow copy of body with the web_search tool appended (or removed).
+    """Return a shallow copy of ``body`` with our tool appended (``include``) or removed.
 
-    Preserves any client-provided tools. ``include=False`` strips our tool (used for the
-    forced-final turn after a guardrail) so the model cannot search again and must answer.
-    ``first_turn`` lets a client-forced ``tool_choice`` on our tool apply once (see
-    _relax_tool_choice).
+    Client-provided tools are preserved. ``first_turn`` lets a client-forced ``tool_choice``
+    on our tool apply once (see ``_relax_tool_choice``). ``final`` marks the forced-final
+    turn: for the Anthropic dialect the tool stays in place and ``tool_choice: none`` blocks
+    further calls — removing the tool would force us to rewrite the history's
+    tool_use/tool_result blocks as text (Bedrock rejects tool blocks without a tool
+    definition), which changes the prompt prefix and defeats the prompt cache, and that
+    rewrite was the cause of empty ``<br>`` answers (2026-09-16). Bedrock accepts
+    ``tool_choice: none`` together with tool blocks in the history (verified). The Responses
+    dialect still removes the tool and strips the plumbing (``include=False``).
     """
     out = dict(body)
     existing = list(out.get("tools") or [])
@@ -205,26 +268,28 @@ def _with_web_search_tool(
         out.pop("tools")
     _relax_tool_choice(out, dialect, include, first_turn)
     if final and dialect == "anthropic":
-        # force_final(Anthropic): 도구는 그대로 두고 `tool_choice: none` 으로 호출만 막는다.
-        # 도구를 빼면 이력의 tool_use/tool_result 를 텍스트로 바꿔야 해서(400 회피) 접두가
-        # 달라져 프롬프트 캐시가 전부 빗나가고, 그 변환이 thinking 만 남는 assistant 턴 →
-        # `<br>` 빈 답의 원인이었다(2026-09-16). Bedrock 이 none + 이력 tool 블록을 받는 것은
-        # F-7 패스스루로 실측(200). Responses 방언은 종전대로 도구 제거 + strip.
         out["tool_choice"] = {"type": "none"}
     return out
 
 
-#: force_final 턴에서 우리 tool_use 를 치환할 때 쓰는 안내. 모델이 "도구를 더 쓸 수 없고
-#: 이미 받은 결과로 답해야 한다" 는 것을 알아야 한다 — 그냥 지우면 검색을 했다는 사실 자체가
-#: 사라져서 모델이 "검색할 수 없었다" 고 답할 수 있다.
+# ═══════════════════════════════════════════════════════════════════════════════
+# Forced-final turn
+# ═══════════════════════════════════════════════════════════════════════════════
+# When the search budget (max_iterations) or the deadline is exhausted, one more turn runs
+# in which the model must answer from what it already has.
+
+#: Replaces our tool_use block when the history has to be rewritten as text (Responses
+#: dialect). The model must know that no further searches are possible AND that searches
+#: did happen — deleting the block silently made it answer "I could not search".
 _FINAL_TURN_TOOL_NOTE = "[web search results provided below; no further searches available]"
-#: force_final 턴의 마지막 user 메시지 끝에 붙이는 지시. 2026-09-16 US 실측: 후속 검색 턴에
-#: 텍스트 없이 thinking+tool_use 만 있던 assistant 메시지가 strip 뒤 thinking 만 남고, 마지막
-#: user 메시지는 결과 JSON 뿐이라 모델(Opus 5)이 `<br>` 한 글자로 답했다(검색 4회 과금 뒤 답 없음).
-#: 최종 턴이 thinking 만 내고 본문이 없을 때(2026-09-17 Cowork 실측: thinking 6k 토큰, 텍스트 0 →
-#: 화면이 빈 채 멈춤) 한 번만 더 재촉하는 문구. 두 번째도 비면 그대로 돌려준다(무한 루프 금지).
+#: Re-prompt used ONCE when the forced-final turn produced thinking but no visible text
+#: (2026-09-17, Cowork: 6k thinking tokens, zero text → a blank screen). A second empty
+#: turn is returned as-is (no infinite loop).
 _FINAL_TURN_TEXT_NUDGE = ("[Your previous turn contained no visible text. Write the final answer "
                           "now as plain text.]")
+#: Appended to the last user message of the forced-final turn. With only result JSON as the
+#: last user content, Opus 5 answered with a single ``<br>`` (2026-09-16: four billed
+#: searches and no answer).
 _FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request; "
                           "no further searches can be made. Write the final answer now.]")
 
@@ -232,38 +297,33 @@ _FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this 
 def _strip_anthropic_web_search_plumbing(
     messages: list, our_tool_use_ids: set[str]
 ) -> list:
-    """force_final 턴을 위해 **우리** web_search 배관을 대화에서 걷어낸다.
+    """Rewrite OUR web_search tool_use/tool_result blocks as text for a turn without tools.
 
-    왜 필요한가
-    -----------
-    force_final 턴(``max_iterations`` 소진 또는 deadline 초과)은 ``tools`` 키를 아예
-    빼고 보낸다 — 더 검색하지 않겠다는 뜻이다. 그런데 대화에는 앞선 턴이 쌓아 둔
-    ``tool_use`` / ``tool_result`` 블록이 그대로 남아 있다. Anthropic-on-Bedrock 은
-    **tool_use/tool_result 를 담은 요청이 tools 를 정의하지 않으면 거부**한다.
+    Why it exists: a turn sent without a ``tools`` definition is rejected by
+    Anthropic-on-Bedrock if the conversation still contains tool_use/tool_result blocks. That
+    failure is the worst possible shape — only the LAST turn 400s, so N billed model turns
+    and N billed searches are thrown away and the user gets nothing. (The Anthropic loops no
+    longer take this path — they keep the tool and use ``tool_choice: none`` — but the helper
+    stays for any caller that removes the tool.)
 
-    그 결과가 최악의 형태다: 마지막 턴만 400 이 되어, 이미 과금된 N 번의 모델 턴과 N 번의
-    검색이 전부 버려지고 사용자는 답을 하나도 받지 못한다. deadline 경로에서는 검색 한 번만
-    있어도 재현된다.
+    What it does:
+    - ``tool_result`` → a text block with the same content (the results were paid for and the
+      answer must stay grounded in them).
+    - our ``tool_use`` → dropped; if an assistant message would end up with no text block,
+      ``_FINAL_TURN_TOOL_NOTE`` is appended (empty content is rejected, and a thinking-only
+      assistant turn reads as "said nothing", which produced ``<br>`` answers).
+    - client-owned tool blocks are left untouched.
+    - the answer-now instruction is appended to the last user message (``_with_answer_now``).
 
-    무엇으로 바꾸나
-    ---------------
-    ``tool_result`` 는 **텍스트 블록으로 변환**한다 — 그 안의 웹 결과는 이미 비용을 지불한
-    것이고, 지우면 모델이 근거 없이 답하게 된다. 우리 ``tool_use`` 는 안내 텍스트로
-    치환한다(그냥 지우면 assistant 메시지가 비는데, 빈 content 도 거부된다).
-
-    클라이언트 소유 도구의 ``tool_use``/``tool_result`` 는 **건드리지 않는다** —
-    ``our_tool_use_ids`` 에 없는 것은 그대로 둔다. 그쪽은 클라이언트가 자기 루프에서 쓰는
-    것이고, 애초에 client_tool_present 면 이 루프가 그 턴에서 끝난다.
-
-    우리 id 가 하나도 없으면 **입력 객체를 그대로 돌려준다**(사본도 만들지 않는다) — 검색이
-    없었던 요청은 바이트 단위로 동일한 경로를 타야 한다.
+    Returns the input object itself (no copy) when nothing had to change, so requests without
+    searches take a byte-identical path.
     """
-    # 이 요청이 실행한 검색의 id 에 더해, 이름이 web_search 인 tool_use 는 **전부** 우리 것으로
-    # 본다. 루프 안에서는 클라이언트가 그 이름의 도구를 선언하지 않은 것이 전제다(F-7: 선언했으면
-    # 루프 자체가 건너뛰어진다). 그러니 이력에 남은 그런 블록은 예전 턴에서 우리 배관이 클라이언트
-    # 쪽으로 새어 나갔다가 되돌아온 것뿐이다. 2026-09-16 US 실측: 그 누출 블록 하나 때문에
-    # force_final 턴이 Bedrock 400("Tool 'web_search' not found in provided tools") — 검색 N 회를
-    # 과금한 뒤 답이 없고, 클라이언트의 비스트리밍 재시도 3회가 전부 같은 400 이었다.
+    # Every tool_use named web_search in the history counts as ours, not only the ids of this
+    # request. Inside the loop the client has not declared a tool of that name (otherwise the
+    # loop is skipped — F-7), so such blocks can only be our plumbing that leaked to the
+    # client on an earlier turn and came back. 2026-09-16: one leaked block made the final
+    # turn fail with Bedrock 400 after N billed searches; the client's three retries failed
+    # the same way.
     ids: set[str] = set(our_tool_use_ids)
     for msg in messages:
         content = msg.get("content") if isinstance(msg, dict) else None
@@ -299,12 +359,12 @@ def _strip_anthropic_web_search_plumbing(
             btype = block.get("type")
             if btype == "tool_use" and block.get("id") in ids:
                 changed = True
-                continue  # 아래에서 비면 안내 텍스트로 채운다
+                continue  # a note is added below if the message ends up without text
             if btype == "tool_result" and block.get("tool_use_id") in ids:
                 changed = True
                 raw = block.get("content")
                 if isinstance(raw, list):
-                    # content 가 블록 배열인 형태 — 텍스트만 이어붙인다.
+                    # content given as a block list — keep the text parts only
                     text = "".join(
                         b.get("text", "") for b in raw if isinstance(b, dict)
                     )
@@ -320,19 +380,20 @@ def _strip_anthropic_web_search_plumbing(
         if msg.get("role") == "assistant" and not any(
             isinstance(b, dict) and b.get("type") == "text" for b in new_content
         ):
-            # ⚠️ 빈 content 는 거부되고, thinking 만 남은 assistant 턴은 "아무 말도 안 한 턴" 으로
-            #    읽혀 모델이 `<br>` 같은 빈 답을 낸다(2026-09-16 실측). 텍스트가 하나도 없으면
-            #    안내를 넣는다 — thinking 블록은 앞에 그대로 둔다(같은 모델 재생에 필요).
+            # Empty content is rejected, and a thinking-only assistant turn made the model
+            # answer with a blank ``<br>`` (2026-09-16). Keep the thinking blocks (the same
+            # model replays them) and add the note after them.
             new_content = new_content + [{"type": "text", "text": _FINAL_TURN_TOOL_NOTE}]
         out.append({**msg, "content": new_content})
     return _with_answer_now(out)
 
 
 def _with_answer_now(messages: list) -> list:
-    """Append the answer-now instruction to the LAST user message (copy-on-write, idempotent).
+    """Append ``_FINAL_TURN_ANSWER_NOW`` to the LAST user message (copy-on-write, idempotent).
 
-    결과 JSON 만 있으면 모델이 다음 지시를 기다리듯 빈 답을 내는 것을 실측했다(2026-09-16).
-    str content 는 텍스트 블록 둘로 바꾼다. 이미 붙어 있으면 그대로 돌려준다.
+    With nothing but result JSON in the last user message the model tends to wait for further
+    instructions and answers blank (2026-09-16). A string ``content`` becomes two text blocks.
+    If the note is already present the input is returned unchanged.
     """
     out = list(messages)
     for i in range(len(out) - 1, -1, -1):
@@ -352,17 +413,15 @@ def _with_answer_now(messages: list) -> list:
 
 
 def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str]) -> list:
-    """Responses 방언의 같은 작업.
+    """Responses-dialect twin of ``_strip_anthropic_web_search_plumbing``.
 
-    ``function_call`` / ``function_call_output`` 쌍을 걷어내고, 출력은 텍스트 메시지로
-    바꾼다(같은 이유 — 이미 지불한 검색 결과다).
-
-    ⚠️ 제거되는 ``function_call`` **직전의 ``reasoning`` 항목도 함께 지운다.** Responses
-       API 는 뒤따르는 쌍이 없는 reasoning 항목을 거부하므로, 배관만 지우면 그 reasoning 이
-       고아가 되어 다시 400 이 된다.
+    Our ``function_call`` / ``function_call_output`` pairs are removed and each output becomes
+    a user text message (the results were paid for). The ``reasoning`` item that directly
+    precedes a removed ``function_call`` is removed with it: the Responses API rejects a
+    reasoning item whose call is gone, so stripping only the pair would 400 again.
     """
-    # 이름이 web_search 인 function_call 은 전부 우리 것(누출분 포함)으로 본다 — 근거는
-    # _strip_anthropic_web_search_plumbing 의 같은 주석.
+    # Every function_call named web_search counts as ours, leaked blocks included — see the
+    # same comment in _strip_anthropic_web_search_plumbing.
     ids: set[str] = set(our_call_ids)
     for item in input_items:
         if (
@@ -382,7 +441,7 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
             continue
         itype = item.get("type")
         if itype == "function_call" and item.get("call_id") in ids:
-            # 직전 reasoning 항목이 이 호출에 딸린 것이면 함께 제거한다.
+            # A reasoning item immediately before this call belongs to it — drop it too.
             if out and isinstance(out[-1], dict) and out[-1].get("type") == "reasoning":
                 out.pop()
             continue
@@ -395,26 +454,28 @@ def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str])
     return out
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Client-tool detection and native web-search stripping
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _is_our_tool(tool: dict) -> bool:
     return isinstance(tool, dict) and tool.get("name") == GW_WEB_SEARCH_NAME
 
 
-# Anthropic 블록 / Responses 항목 중 **클라이언트가 실행해야 하는** 도구 호출 판정.
+# Which Anthropic blocks / Responses items are tool calls the CLIENT must execute?
 #
-# ⚠️ 예전에는 각각 정확히 ``tool_use`` / ``function_call`` 만 셌다. 두 방언 모두 그것이
-#    도구 호출 항목의 전부가 아니다 — Responses 는 커스텀(freeform) 도구를
-#    ``custom_tool_call`` 로, 로컬 실행 도구를 ``local_shell_call`` / ``computer_call`` 로
-#    보내고, Anthropic 은 ``server_tool_use`` / ``mcp_tool_use`` 를 쓴다.
+# Earlier versions matched exactly "tool_use" / "function_call". That is not the full set of
+# call items in either dialect: Responses also has custom_tool_call, local_shell_call and
+# computer_call; Anthropic also has server_tool_use and mcp_tool_use. When such an item is
+# NOT recognised as a client call, the turn is treated as a search turn, the gateway runs
+# the search and loops again — and the client's own tool call is swallowed while the client
+# waits for it. That reproduces whenever the model calls our web_search and a client tool in
+# the same turn (both dialects support parallel tool calls).
 #
-#    이 판정이 False 가 되면 ``is_search_turn`` 이 True 가 되어 게이트웨이가 검색을 돌리고
-#    루프를 한 바퀴 더 돈다 — 그 과정에서 **클라이언트의 도구 호출이 삼켜진다.** 클라이언트는
-#    자기가 실행해야 할 호출을 보지 못한 채 기다린다. 모델이 우리 web_search 와 자기 도구를
-#    같은 턴에 함께 호출하면(두 방언 모두 병렬 도구 호출을 지원한다) 바로 재현된다.
-#
-#    그래서 화이트리스트가 아니라 **접미사**로 판정한다: 새 호출 유형이 생겼을 때 삼키는
-#    쪽이 아니라 넘겨주는 쪽으로 틀리는 것이 안전하다(최악의 경우 한 턴 일찍 끝난다).
+# Hence a SUFFIX test rather than an allow-list: an unknown future call type errs on the
+# side of forwarding (the turn ends one round early) instead of swallowing.
 def _is_client_tool_use_block(block: dict) -> bool:
-    """Anthropic: 우리 것이 아닌 도구 사용 블록인가."""
+    """Anthropic: a tool-use block that is not ours."""
     if not isinstance(block, dict):
         return False
     btype = block.get("type")
@@ -424,7 +485,7 @@ def _is_client_tool_use_block(block: dict) -> bool:
 
 
 def _is_client_tool_call_item(item: dict, our_call_ids: set[str] | None = None) -> bool:
-    """Responses: 우리 것이 아닌 도구 호출 항목인가."""
+    """Responses: a tool-call item that is not ours."""
     if not isinstance(item, dict):
         return False
     itype = item.get("type")
@@ -463,6 +524,7 @@ def _is_native_web_search(tool: dict) -> bool:
 
 
 def _strip_native_web_search(body: dict) -> dict:
+    """Remove native web-search tool definitions; return the same object when none exist."""
     tools = body.get("tools")
     if not isinstance(tools, list):
         return body
@@ -477,8 +539,11 @@ def _strip_native_web_search(body: dict) -> dict:
     return out
 
 
-# ── prompt-cache breakpoint on our search results ─────────────────────────────
-#: Anthropic 프롬프트 캐시의 요청당 cache_control 상한.
+# ═══════════════════════════════════════════════════════════════════════════════
+# Prompt-cache breakpoints on our search results
+# ═══════════════════════════════════════════════════════════════════════════════
+
+#: Anthropic's limit on ``cache_control`` markers per request.
 _MAX_CACHE_BREAKPOINTS = 4
 
 
@@ -513,21 +578,22 @@ def _without_cc(block: dict) -> dict:
 def _place_cache_breakpoint(
     base_body: dict, conversation: list, tool_results: list, our_tool_use_ids: set
 ) -> list:
-    """Put ONE cache_control on the newest tool_result we inject; keep ≤ 4 per request.
+    """Put ONE ``cache_control`` on the newest tool_result we inject; keep ≤ 4 per request.
 
-    왜: 검색 N 회 요청은 Bedrock 턴이 N+1 번이고, 뒤 턴마다 앞 턴의 프롬프트와 검색 결과를
-    그대로 다시 보낸다. 클라이언트 접두(시스템·이력)는 클라이언트의 표시로 캐시되지만, 우리가
-    끼워 넣는 결과(검색당 4~6k 토큰)는 표시가 없어 매 턴 정가였다(2026-09-16 실측: 검색 3회
-    요청에서 결과 토큰이 6R 만큼 과금, 표시를 두면 약 3.8R). 표시는 항상 **가장 새 결과 하나**에만
-    둔다 — Anthropic 은 표시 앞 ~20 블록 경계에서 자동으로 캐시 적중을 찾으므로 하나면 충분하고,
-    요청당 4개 한도도 아껴야 한다. 한도에 닿으면 가장 오래된 **메시지** 표시를 뗀다(system/tools
-    표시는 건드리지 않는다). 클라이언트 원본 dict 는 바꾸지 않는다(copy-on-write) — 내부 대화는
-    이 요청 안에서만 쓰인다.
+    Why: a request with N searches is N+1 Bedrock turns, and every later turn re-sends the
+    earlier prompt plus the search results. The client's own prefix (system, history) is
+    cached by the client's markers, but the results we splice in (4–6k tokens per search) had
+    no marker and were billed at full price on every turn (2026-09-16: a 3-search request
+    paid 6R result tokens; with a marker about 3.8R). One marker on the NEWEST result is
+    enough — Anthropic looks back ~20 block boundaries for a cache hit — and it saves the
+    per-request limit of four. When the limit is reached, the oldest MESSAGE-level marker is
+    removed (system/tools markers are never touched). The client's original dicts are not
+    mutated (copy-on-write); the internal conversation lives only inside this request.
     """
     if not tool_results:
         return conversation
     conv = list(conversation)
-    # 1) 앞 라운드에 우리가 붙인 표시는 뗀다 — 우리 것은 항상 하나.
+    # 1) Remove the marker we put on an earlier round — ours is always exactly one.
     for i, m in enumerate(conv):
         c = m.get("content") if isinstance(m, dict) else None
         if not isinstance(c, list):
@@ -543,7 +609,7 @@ def _place_cache_breakpoint(
     n, positions = _count_cache_breakpoints(base_body, conv)
     if n >= _MAX_CACHE_BREAKPOINTS:
         if not positions:
-            return conv   # 네 개가 전부 system/tools 에 있다 — 손대지 않는다
+            return conv   # all four sit on system/tools — leave them alone
         i, j = positions[0]
         c = list(conv[i]["content"])
         c[j] = _without_cc(c[j])
@@ -552,7 +618,12 @@ def _place_cache_breakpoint(
     return conv
 
 
-# ── usage merge ───────────────────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Usage accounting
+# ═══════════════════════════════════════════════════════════════════════════════
+# Billing sums every turn (on_usage receives the merged total). The CLIENT sees the first
+# turn's prompt buckets — see _client_prompt_usage for why.
+
 def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     """Sum usage across turns. reasoning_tokens stays a submetric (already inside
     output_tokens) — summed for visibility but total is recomputed from input+output,
@@ -596,42 +667,42 @@ def _prompt_snapshot(input_tokens: int, cache_creation: int, cache_read: int) ->
 def _client_prompt_usage(first_turn: TokenUsage | None, merged: TokenUsage) -> TokenUsage:
     """Prompt buckets the CLIENT sees = the FIRST turn's, never the multi-turn sum.
 
-    ⚠️ Claude Code / Cowork / Codex read ``input + cache_creation + cache_read`` of the
-    last response as "how full is my context window" and auto-compact near the limit.
-    The first turn's prompt IS the client's conversation; every later turn re-sends it
-    plus our search results, which the client never keeps (stripped on the way out).
-    Summing N turns therefore reported N× the real context — 2026-09-16 US dev
-    measurement: 26.7k real → 106.6k reported after 3 searches, and a 55k Cowork
-    session reported 270k, crossing the 200k window so Cowork compacted on every
-    search turn ("Autocompact is thrashing"). Billing is untouched: on_usage() still
-    receives the merged multi-turn totals. Falls back to ``merged`` when no turn
-    completed (nothing to snapshot) so the payload stays self-consistent.
+    Claude Code / Cowork / Codex read ``input + cache_creation + cache_read`` of the last
+    response as "how full is my context window" and auto-compact near the limit. The first
+    turn's prompt IS the client's conversation; every later turn re-sends it plus our search
+    results, which the client never keeps. Summing N turns therefore reported N× the real
+    context — 2026-09-16 US dev measurement: 26.7k real → 106.6k reported after 3 searches,
+    and a 55k Cowork session reported 270k, crossing the 200k window so Cowork compacted on
+    every search turn ("Autocompact is thrashing"). Billing is untouched: on_usage() still
+    receives the merged multi-turn totals. Falls back to ``merged`` when no turn completed
+    (nothing to snapshot) so the payload stays self-consistent.
     """
     return first_turn if first_turn is not None else merged
 
 
 def _sse(event: str, data: dict) -> bytes:
+    """Encode one server-sent event frame."""
     return f"event: {event}\ndata: {json.dumps(data)}\n\n".encode()
 
 
-# ── search execution (shared) ─────────────────────────────────────────────────
+# ═══════════════════════════════════════════════════════════════════════════════
+# Search execution (shared by the four loops)
+# ═══════════════════════════════════════════════════════════════════════════════
+
 def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
-    """검색 결과 텍스트를 상한까지 자른다. ``(text, truncated)``.
+    """Hard cap on one search result's text. Returns ``(text, truncated)``.
 
-    ⚠️ 왜 필요한가: ``max_iterations`` 는 **턴 수**를, ``total_deadline_sec`` 는 **시간**을
-       묶는다. 청구서를 결정하는 두 축 — 다음 턴 입력에 주입되는 **바이트 수**와 한 턴의
-       **검색 횟수** — 는 어느 것도 묶이지 않았다. dev 실측: 검색 **한 번**이 다음 턴
-       입력에 약 17.4K 토큰의 원본 결과 텍스트를 넣었다. 모델이 한 턴에 20개의 병렬
-       web_search 를 내보내면(이 루프는 그것을 의도적으로 지원한다) 20 × 17.4K 가 다음
-       턴 입력에 연결된다. 결과는 둘 중 하나다: 공유 예산에 상한 없는 단일 요청 비용, 또는
-       컨텍스트 창을 넘겨 continuation 턴이 400 이 되면서 **그때까지 과금된 모든 턴이
-       버려지는** 것.
+    Why: ``max_iterations`` bounds turns and ``total_deadline_sec`` bounds time, but neither
+    bounds the two axes that decide the bill — bytes injected into the next turn's input and
+    searches per turn. One search once injected ~17.4K tokens of raw result text; twenty
+    parallel searches in a turn (which this loop deliberately supports) would inject 20× that,
+    either as an uncapped cost or as a context overflow that 400s the continuation turn and
+    throws away every billed turn before it.
 
-    ⚠️ 잘랐다는 표지를 반드시 붙인다. 조용한 절단이 최악이다 — JSON 이 레코드 중간에서
-       끊긴 것을 모델은 "결과 전체" 로 읽고 단정적으로 답한다.
-
-    ``max_chars <= 0`` 이면 캡을 끄고 입력을 그대로 돌려준다(캡 이전 동작이 바이트 단위로
-    재현 가능해야 한다).
+    A visible marker is appended when the text is cut. Silent truncation is the worst case:
+    the model reads JSON cut mid-record as "the full result set". Since the evidence set
+    (``_build_evidence``) fits results to the cap exactly, this is a safety net only.
+    ``max_chars <= 0`` disables the cap and returns the input unchanged.
     """
     if max_chars <= 0 or len(text) <= max_chars:
         return text, False
@@ -640,11 +711,11 @@ def _truncate_result(text: str, max_chars: int) -> tuple[str, bool]:
 
 
 def _cap_error(limit: int) -> str:
-    """tool_result for a search that exceeded the per-turn cap.
+    """tool_result content for a search that exceeded the per-turn cap.
 
-    2026-09-16 실측: 예전 문구("answer from the results already provided")는 모델이 fan-out 의
-    나머지 항목을 **포기**하게 만들었다(5개사 중 2개만 채움). 실행되지 않았다는 사실과 다음 턴에
-    다시 요청할 수 있다는 것을 말해 주면 라운드 상한 안에서 마저 채운다(품질 우선).
+    The earlier wording ("answer from the results already provided") made the model give up
+    on the rest of a fan-out (2026-09-16: 2 of 5 companies filled). Saying that the query was
+    NOT run and can be requested again lets it finish within the round limit.
     """
     return json.dumps({"error": (f"per-turn web search limit reached ({limit} per turn); "
                                  "this query was NOT run — request it again in your next "
@@ -655,15 +726,16 @@ async def _run_turn_searches(
     mcp_client: AgentCoreMcpClient, inputs: list, allowance: int, deadline: float,
     default_max_results: int, max_result_chars: int, result_text_chars: int,
 ) -> list[tuple[str, bool, str, str | None, list[dict] | None]]:
-    """Run one turn's searches CONCURRENTLY; return (result_text, ok, trace, reason, digest)
-    per
-    input, in input order. ``reason`` is None (ran), "capped" (over the per-turn limit) or
-    "deadline" (total deadline already passed) — the loops turn those into the
-    dialect's error payload so every tool_use still gets exactly one result.
+    """Run one turn's searches CONCURRENTLY.
 
-    왜 동시에: 한 턴의 검색 2개를 차례로 기다리면 fan-out 턴마다 5초 안팎이 그냥 쌓였다
-    (2026-09-16 실측 검색 1회 4~9초). 비용은 같고 벽시계만 준다. _do_search 는 예외를
-    던지지 않으므로 gather 가 중간에 깨질 일이 없다.
+    Returns ``(result_text, ok, trace, reason, digest)`` per input, in input order.
+    ``reason`` is None (ran), "capped" (over the per-turn limit) or "deadline" (total
+    deadline already passed) — the loops turn those into the dialect's error payload so
+    every tool_use still gets exactly one result.
+
+    Concurrency: waiting for two searches one after the other added ~5 s to every fan-out
+    turn (2026-09-16: 4–9 s per search). Cost is identical; only wall-clock shrinks.
+    ``_do_search`` never raises, so ``gather`` cannot be broken mid-way.
     """
     results: list = [None] * len(inputs)
     todo: list[tuple[int, Any]] = []
@@ -687,6 +759,7 @@ async def _run_turn_searches(
 
 def _anthropic_tool_result(tool_use_id: Any, result_text: str, ok: bool,
                            reason: Optional[str]) -> dict:
+    """Anthropic ``tool_result`` block for one search outcome."""
     if reason == "deadline":
         content = "web search deadline exceeded"
     else:
@@ -697,6 +770,7 @@ def _anthropic_tool_result(tool_use_id: Any, result_text: str, ok: bool,
 
 def _responses_call_output(call_id: Any, result_text: str, ok: bool,
                            reason: Optional[str]) -> dict:
+    """Responses ``function_call_output`` item for one search outcome."""
     if reason == "deadline":
         out = json.dumps({"error": "web search deadline exceeded"})
     else:
@@ -705,30 +779,38 @@ def _responses_call_output(call_id: Any, result_text: str, ok: bool,
 
 
 def _turn_search_allowance(requested: int, max_per_turn: int) -> int:
-    """한 턴에서 실제로 실행할 검색 개수. ``max_per_turn <= 0`` 이면 무제한.
+    """How many of a turn's requested searches actually run. ``max_per_turn <= 0`` = all.
 
-    ⚠️ 초과분도 **응답은 만들어 줘야 한다.** Anthropic/Responses 는 tool_use 하나당
-       정확히 하나의 tool_result / function_call_output 을 요구한다 — 개수가 어긋나면
-       다음 턴이 400 이다. 그래서 "실행하지 않는다" 와 "결과를 만들지 않는다" 는 다르다.
+    The excess still gets a RESPONSE: Anthropic/Responses require exactly one
+    tool_result / function_call_output per tool_use, or the next turn is a 400. "Not run"
+    and "no result produced" are therefore different things (see ``_cap_error``).
     """
     if max_per_turn <= 0:
         return requested
     return min(requested, max_per_turn)
 
 
-#: 클라이언트에게 남기는 검색 흔적 한 줄의 접두어. 우리 web_search tool_use/tool_result 는
-#: 클라이언트가 선언하지 않은 도구라 응답에서 걷어내는데, 그러면 클라이언트 도구(bash 등)를
-#: 사이에 둔 **다음 요청**에서 모델이 자기 이력에 검색 증거를 못 보고 "검색한 적 없다" 고
-#: 판단해 검색을 되풀이했다(2026-09-16 US Cowork 실측: 질문 하나에 요청 8건·검색 21회·$3.3,
-#: 최종 답변은 자백문). 텍스트 한 줄은 Bedrock 도 클라이언트도 그대로 받아들이고, 결과
-#: 본문(≤12k자)은 싣지 않는다. Anthropic 방식(server_tool_use 블록)은 upstream PR 후보.
+# ═══════════════════════════════════════════════════════════════════════════════
+# Trace lines (text mode)
+# ═══════════════════════════════════════════════════════════════════════════════
+# Our web_search tool_use/tool_result blocks are removed from the client-facing response
+# (the client never declared that tool). Without any trace, the model could not see in its
+# own history that a search had happened when the client's tool loop (bash etc.) came back
+# with the NEXT request, and it kept re-searching or "confessed" that it had never searched
+# (2026-09-16, Cowork: 8 requests, 21 searches, $3.3 for one question). A one-line text trace
+# is accepted by Bedrock and by every client and carries no result body.
+# Native mode (next section) replaces the trace with real tool blocks for clients that
+# replay them; the text line is still shown to the user there.
+
+#: Prefix of the one-line trace. The tag lets users tell the gateway's server-side search
+#: from the client's own search tool.
 _TRACE_PREFIX = "🔎 [gateway web_search]"
-#: (1.0.62~1.0.64 에서 라운드 끝에 붙이던 안내 줄. 1.0.65 부터는 화면에 내보내지 않고 같은 말을
-#: 도구 설명에 둔다 — 사용자가 볼 이유가 없어서. 옛 대화에 남은 줄을 모델이 흉내 낼 수 있어
-#: 모방 필터 마커에는 계속 남긴다.)
+#: Note appended after a search round in 1.0.62–1.0.64. No longer emitted (the same
+#: information sits in the tool description) but kept as a filter marker: old transcripts
+#: still contain it and the model may imitate it.
 _TRACE_NOTE = ("(full search results were shown to the assistant in this turn and used for "
                "the answer; only this trace is kept in the transcript)")
-#: 모델이 흔적을 **모방**한 줄을 걷어내기 위한 마커들(흔적 줄·안내 줄의 앞부분).
+#: Line prefixes that identify model-written imitations of our trace / note.
 _TRACE_MARKERS = (_TRACE_PREFIX, _TRACE_NOTE[:40])
 
 
@@ -744,12 +826,13 @@ def _could_become_trace_line(partial: str) -> bool:
 
 
 class _TraceLineFilter:
-    """Drop MODEL-written lines that imitate our trace / note.
+    """Drop MODEL-written lines that imitate our trace / note from client-facing text.
 
-    ⚠️ 2026-09-16 실측: 이력에 우리 흔적 줄이 보이자 모델이 검색 없이 같은 형식의 줄을 써서
-    "검색함" 을 주장했다(요청 3건 중 1건, usage_logs ws=0). 흔적은 게이트웨이만 쓴다 — 이
-    필터가 클라이언트로 나가는 텍스트에서 모방 줄을 걷어낸다. 스트리밍에서도 지연이 거의 없다:
-    줄 시작에서 아직 마커의 앞부분일 수 있는 조각만 붙들고, 마커와 갈라지는 순간 흘려보낸다.
+    2026-09-16: once the model saw our trace lines in its history it wrote lines in the same
+    format without searching and claimed a search (1 of 3 requests, usage_logs ws=0). Only
+    the gateway writes traces. Streaming adds almost no latency: at the start of a line only
+    the fragment that could still become a marker is held back; the moment it diverges from
+    every marker it is released.
     """
 
     def __init__(self) -> None:
@@ -806,7 +889,7 @@ def _trace_lang() -> str:
 
 
 def _trace_words(kind: str, **kw: Any) -> str:
-    """Human wording after the em dash. kind: results | failed | capped | deadline."""
+    """Human wording after the em dash. kind: results | failed | capped | mixed | deadline."""
     ko = _trace_lang() == "ko"
     if kind == "results":
         n, hosts = kw["n"], kw.get("hosts") or []
@@ -829,82 +912,113 @@ def _trace_words(kind: str, **kw: Any) -> str:
 
 def _trace_line(query: str, outcome: str) -> str:
     """One user-facing line per search: ``🔎 [gateway web_search] "<query>" — <outcome>``.
-    The tag stays so users can tell the gateway's server-side search from the client's own
-    search tool; titles/notes were dropped for readability (2026-09-16 사용자 요청)."""
+
+    Titles and notes were dropped from the line for readability (user request, 2026-09-16).
+    """
     q = (query or "").strip().replace("\n", " ")
     if len(q) > 80:
         q = q[:77] + "…"
     return f'{_TRACE_PREFIX} "{q}" — {outcome}'
 
 
-#: ── native 흔적(탐침, 2026-09-17) ──────────────────────────────────────────────
-#: 텍스트 흔적은 모델에게 "내가 쓴 글" 이라 캐물으면 부정하고(실제 흔적 12줄이 있어도 "검색 0건"),
-#: 클라이언트 도구와 같은 메시지에 실리면 모양을 복사해 검색 없이 흔적만 쓴다(한 세션 4회).
-#: Anthropic 네이티브 검색 블록(server_tool_use + web_search_tool_result)은 모델이 만들 수 없는
-#: "도구 기록" 이다. WEB_SEARCH_TRACE_MODE=native 이고 클라이언트 플랫폼이 허용 목록에 있을 때만
-#: 이 형태로 남긴다. 결과 발췌는 API 가 불투명 재전송용으로 정의한 encrypted_content 에 싣는다.
-#: 되돌아온 블록은 _normalize_inbound_native_blocks 가 텍스트 흔적으로 환원한다(탐침 단계).
+# ═══════════════════════════════════════════════════════════════════════════════
+# Native trace blocks (Cowork) and their inbound rewrite
+# ═══════════════════════════════════════════════════════════════════════════════
+# A text trace is, to the model, "something I wrote": when asked "did you really search?" it
+# denied having searched even with 12 real trace lines in its history (2026-09-17, Cowork),
+# and when a trace line shared an assistant message with a client tool call it copied the
+# shape and wrote trace lines without searching (4× in one session). Anthropic's native
+# search blocks — ``server_tool_use`` + ``web_search_tool_result`` — are tool records the
+# model cannot fabricate. Cowork replays them verbatim in the next request's history
+# (verified 2026-09-17), so:
+#
+#   outbound  : per search, a server_tool_use block + a web_search_tool_result block whose
+#               items carry title/url/page_age and the result text base64-encoded in
+#               ``encrypted_content`` (the field the API defines as opaque replay data).
+#               The 🔎 text line is still emitted for the user; it is removed again on the
+#               way back in.
+#   inbound   : ``_rewrite_inbound_native_blocks`` turns the replayed blocks into
+#               assistant[tool_use] / user[tool_result] history for loop turns (our tool is
+#               defined there); ``_normalize_inbound_native_blocks`` turns them into text
+#               trace lines for requests that go out WITHOUT our tool definition.
+#
+# Enabled by WEB_SEARCH_TRACE_MODE=native for the client classes listed in
+# WEB_SEARCH_TRACE_NATIVE_CLIENTS (default: cowork). Other clients keep the text trace.
+
 _NATIVE_TOOL_USE = "server_tool_use"
 _NATIVE_TOOL_RESULT = "web_search_tool_result"
 _DIGEST_RESULTS = 5
-_DIGEST_SNIPPET_CHARS = 200
+#: Per-result excerpt length in the replayed digest. The default follows the trimmed result
+#: length the model actually saw (``result_text_chars``, 1500). Shorter excerpts (200, then
+#: 600) cut sentences the model had grounded its answer on, and on the next turn it
+#: retracted real facts as "not in my sources" (2026-09-17: Micron "since March",
+#: TrendForce 20% — all present in the full results). The history must be what the model
+#: saw. ``settings.web_search_digest_chars > 0`` overrides.
+_DIGEST_SNIPPET_CHARS = 1500
+#: Note placed in the replayed tool_result so the model knows the full results were shown in
+#: the turn that ran the search.
+_DIGEST_NOTE = ("digest of an earlier search: the full results were shown to you in the turn "
+                "that ran it; only the leading excerpt of each result is kept here")
+
+
+def _digest_chars(result_text_chars: int = 0) -> int:
+    """Per-result digest length: WEB_SEARCH_DIGEST_CHARS if > 0, else the trimmed-result
+    length the model actually saw (result_text_chars), else the code default."""
+    try:
+        from app.config import get_settings
+        v = int(getattr(get_settings(), "web_search_digest_chars", 0) or 0)
+    except Exception:  # settings unavailable (tests) → follow the trim length
+        v = 0
+    if v > 0:
+        return v
+    return result_text_chars if result_text_chars > 0 else _DIGEST_SNIPPET_CHARS
 
 
 def _trace_mode() -> tuple[str, frozenset[str]]:
-    """("text" | "native", allowed anthropic-client-platform values; empty = all)."""
+    """("text" | "native", allowed client classes — cowork/claude-code/codex; empty = all)."""
     try:
         from app.config import get_settings
         s = get_settings()
         mode = (getattr(s, "web_search_trace_mode", "text") or "text").strip().lower()
-        raw = getattr(s, "web_search_trace_native_platforms", "") or ""
-        plats = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
-        return mode, plats
+        raw = getattr(s, "web_search_trace_native_clients", "") or ""
+        clients = frozenset(p.strip().lower() for p in raw.split(",") if p.strip())
+        return mode, clients
     except Exception:  # settings unavailable (tests) → text
         return "text", frozenset()
 
 
+def _request_client(request: Any) -> str:
+    """The client class the ClientIdentificationMiddleware stored (scope.state.client), or
+    the same classification from the headers when no middleware ran (tests, direct calls).
+
+    Do not read the ``anthropic-client-platform`` header directly: the real Cowork client is
+    identified by its User-Agent (claude-desktop-3p / local-agent), not by that header
+    (2026-09-17: the first native build matched zero Cowork requests because of this). The
+    classification rule lives in ``client_identifier`` only.
+    """
+    scope = getattr(request, "scope", None)
+    if isinstance(scope, dict):
+        client = (scope.get("state") or {}).get("client")
+        if client:
+            return str(client).lower()
+    headers = getattr(request, "headers", None)
+    if not headers:
+        return ""
+    try:
+        from app.services.client_identifier import identify_client
+        return str(identify_client(dict(headers)) or "").lower()
+    except Exception:
+        return ""
+
+
 def _native_trace_enabled(request: Any) -> bool:
-    mode, platforms = _trace_mode()
+    """True when this request's client should receive native trace blocks."""
+    mode, clients = _trace_mode()
     if mode != "native":
         return False
-    if not platforms:
+    if not clients:
         return True
-    headers = getattr(request, "headers", None)
-    try:
-        platform = (headers.get("anthropic-client-platform") or "") if headers else ""
-    except Exception:
-        platform = ""
-    return str(platform).strip().lower() in platforms
-
-
-def _result_digest(resp: Any, limit: int = _DIGEST_RESULTS,
-                   snippet_chars: int = _DIGEST_SNIPPET_CHARS) -> list[dict]:
-    """[{title, url, snippet, page_age}] × ≤limit from a WebSearchResponse-like object."""
-    items = getattr(resp, "results", None)
-    if items is None:
-        try:
-            data = json.loads(getattr(resp, "raw_text", "") or "")
-            items = data.get("results", data) if isinstance(data, dict) else data
-        except (ValueError, TypeError):
-            items = []
-    if not isinstance(items, list):
-        return []
-    out: list[dict] = []
-    for it in items:
-        if isinstance(it, dict):
-            def get(k, _it=it):
-                return _it.get(k)
-        else:
-            def get(k, _it=it):
-                return getattr(_it, k, None)
-        body = get("text") if get("text") is not None else get("content")
-        snippet = " ".join(str(body or "").split())[:snippet_chars]
-        age = get("published_date") or get("page_age")
-        out.append({"title": str(get("title") or ""), "url": str(get("url") or ""),
-                    "snippet": snippet, "page_age": str(age) if age else None})
-        if len(out) >= limit:
-            break
-    return out
+    return _request_client(request) in clients
 
 
 def _native_search_blocks(query: str, ok: bool, reason: str | None,
@@ -950,6 +1064,7 @@ def _native_block_frames(gi: int, blk: dict) -> list[bytes]:
 
 
 def _inbound_outcome(result: dict | None) -> str:
+    """Trace wording for a replayed result block (used by the text fallback)."""
     content = result.get("content") if isinstance(result, dict) else None
     if isinstance(content, list):
         class _R:  # _result_hosts reads .results
@@ -962,11 +1077,13 @@ def _inbound_outcome(result: dict | None) -> str:
 
 
 def _normalize_inbound_native_blocks(body: dict) -> dict:
-    """Probe stage: our native search blocks echoed back by the client → text trace lines.
+    """Replayed native search blocks → text trace lines (for requests WITHOUT our tool).
 
-    Bedrock knows neither block type, so leaving them in is a 400. Returns the SAME object
-    when nothing was found (byte-identical path for everyone else). Logs how many came back —
-    that count is the probe's answer ("does Cowork replay server blocks?").
+    Bedrock knows neither block type, so leaving them in is a 400. Used where the request
+    goes out without our tool definition: the router's fallback loop, Mantle, count_tokens,
+    the F-7 pass-through and the MCP-init-failure fallback. Returns the SAME object when
+    nothing was found (byte-identical path for everyone else) and logs how many blocks
+    came back.
     """
     msgs = body.get("messages")
     if not isinstance(msgs, list):
@@ -1004,9 +1121,353 @@ def _normalize_inbound_native_blocks(body: dict) -> dict:
     return {**body, "messages": new_msgs}
 
 
-#: 라우터용 공개 이름 — 루프를 타지 않는 요청(프로파일 토글 off·MCP 미설정·count_tokens·하이쿠
-#: 보조 요청)도 되돌아온 블록을 Bedrock 에 그대로 보내면 400 이라, 본문 파싱 직후 한 번 더 부른다.
+#: Public name for the router. Requests that do not enter the loop (client profile without
+#: web search, MCP client not configured, count_tokens, helper-model requests) would also
+#: 400 on replayed blocks, so the router calls this right after parsing the body.
 normalize_inbound_native_blocks = _normalize_inbound_native_blocks
+
+
+def _inbound_tool_id(srv_id: Any) -> str:
+    """``srvtoolu_X`` → ``toolu_gw_X`` (the rebuilt tool_use and tool_result share it)."""
+    sid = str(srv_id or "")
+    if sid.startswith("srvtoolu_"):
+        sid = sid[len("srvtoolu_"):]
+    return "toolu_gw_" + (sid or uuid.uuid4().hex[:24])
+
+
+def _decode_digest(enc: Any) -> str:
+    """``encrypted_content`` (base64 JSON ``{"gw": 1, "snippet": …}``) → excerpt, or ""."""
+    try:
+        data = json.loads(base64.b64decode(str(enc or ""), validate=True).decode("utf-8"))
+        return str(data.get("snippet") or "") if isinstance(data, dict) else ""
+    except Exception:
+        return ""
+
+
+def _inbound_tool_result_block(tid: str, result: dict | None) -> tuple[dict, int]:
+    """Replayed web_search_tool_result → our tool_result. Returns ``(block, decoded)`` where
+    ``decoded`` is the number of results whose excerpt could be restored."""
+    content = result.get("content") if isinstance(result, dict) else None
+    if isinstance(content, list):
+        items: list[dict] = []
+        decoded = 0
+        for it in content:
+            if not isinstance(it, dict):
+                continue
+            snippet = _decode_digest(it.get("encrypted_content"))
+            decoded += 1 if snippet else 0
+            row = {"title": str(it.get("title") or ""), "url": str(it.get("url") or ""),
+                   "text": snippet}
+            if it.get("page_age"):
+                row["publishedDate"] = str(it["page_age"])
+            items.append(row)
+        text = json.dumps({"note": _DIGEST_NOTE, "results": items}, ensure_ascii=False,
+                          separators=(",", ":"))
+        return {"type": "tool_result", "tool_use_id": tid, "content": text}, decoded
+    if isinstance(content, dict):
+        why = str(content.get("error_code") or "error")[:60]
+        return ({"type": "tool_result", "tool_use_id": tid, "is_error": True,
+                 "content": json.dumps({"error": f"web search unavailable ({why})"})}, 0)
+    return ({"type": "tool_result", "tool_use_id": tid, "is_error": True,
+             "content": json.dumps({"error": "web search result missing"})}, 0)
+
+
+def _rewrite_inbound_native_blocks(body: dict) -> dict:
+    """Replayed native search blocks → real tool history (for loop turns).
+
+    ::
+
+        assistant [text0, server_tool_use, web_search_tool_result, text1]
+          → assistant [text0, tool_use] / user [tool_result] / assistant [text1]
+
+    The original turn structure (search → result → continue) is restored and the result
+    excerpts come back as ``tool_result`` content — the form the model treats as a tool
+    record rather than as its own prose. Consecutive searches become parallel tool_use blocks
+    in one assistant turn; any other block (text, client tool call) closes the turn first.
+    Display-only 🔎 lines are removed from text blocks in the same message: the tool record
+    replaces them, and leaving them would re-create the imitation source.
+
+    Only for turns that carry our ``web_search`` tool definition. A tool_use that names an
+    undefined tool is a Bedrock 400, so requests that go out without our tool use
+    ``_normalize_inbound_native_blocks`` instead.
+
+    Caveat: this SYNTHESISES user[tool_result] messages the client never sent. From here on
+    the loop's message list differs from the client's in count and indices — anything that
+    relies on "the last user message", message indices or the number of user turns must be
+    aware of it (``_place_cache_breakpoint`` is unaffected: synthesised messages carry no
+    ``cache_control``, so the count of four still holds).
+
+    Returns the same object when no native block is present.
+    """
+    msgs = body.get("messages")
+    if not isinstance(msgs, list):
+        return body
+    n_use = n_res = n_decoded = 0
+    new_msgs: list = []
+    for m in msgs:
+        content = m.get("content") if isinstance(m, dict) else None
+        if not isinstance(content, list) or not any(
+            isinstance(b, dict) and b.get("type") in (_NATIVE_TOOL_USE, _NATIVE_TOOL_RESULT)
+            for b in content
+        ):
+            new_msgs.append(m)
+            continue
+        results = {b.get("tool_use_id"): b for b in content
+                   if isinstance(b, dict) and b.get("type") == _NATIVE_TOOL_RESULT}
+        segment: list = []       # blocks of the assistant turn being rebuilt
+        uses: list = []          # our tool_use blocks pending their results
+        outs: list = []          # matching tool_result blocks
+        closed = 0               # assistant/user pairs already emitted for this message
+
+        def close() -> None:
+            nonlocal closed
+            new_msgs.append({"role": "assistant", "content": segment + uses})
+            new_msgs.append({"role": "user", "content": outs})
+            closed += 1
+
+        for b in content:
+            t = b.get("type") if isinstance(b, dict) else None
+            if t == _NATIVE_TOOL_USE:
+                n_use += 1
+                tid = _inbound_tool_id(b.get("id"))
+                q = str((b.get("input") or {}).get("query") or "")
+                uses.append({"type": "tool_use", "id": tid, "name": GW_WEB_SEARCH_NAME,
+                             "input": {"query": q}})
+                blk, decoded = _inbound_tool_result_block(tid, results.get(b.get("id")))
+                outs.append(blk)
+                n_decoded += decoded
+            elif t == _NATIVE_TOOL_RESULT:
+                n_res += 1          # consumed through `results` above
+            else:
+                if uses:
+                    close()
+                    segment, uses, outs = [], [], []
+                if t == "text":
+                    # Display-only 🔎 lines (shown to the user in native mode) are removed
+                    # from the model's history: the tool record replaces them.
+                    cleaned = _strip_fake_trace_lines(b.get("text") or "")
+                    if not cleaned.strip():
+                        continue
+                    b = {**b, "text": cleaned}
+                segment.append(b)
+        if uses:
+            close()
+        elif segment:
+            new_msgs.append({**m, "content": segment})
+        elif closed:
+            pass    # the message was fully emitted as assistant/user pairs above
+        else:   # only orphan result blocks — never leave an empty assistant message
+            new_msgs.append({**m, "content": [{"type": "text", "text": _trace_line(
+                "", _trace_words("failed"))}]})
+    if not (n_use or n_res):
+        return body
+    logger.info("web_search.inbound_native_rewritten", server_tool_use=n_use,
+                tool_result=n_res, digests=n_decoded)
+    return {**body, "messages": new_msgs}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Evidence set: one canonical result list per search
+# ═══════════════════════════════════════════════════════════════════════════════
+# The results of one search are normalised ONCE and the same list feeds three consumers:
+# the model's tool_result, the replay digest (native mode), and the 🔎 line's count/hosts.
+#
+# Why (2026-09-17, from the Bedrock invocation bodies): the model asked for 15 results, the
+# configured cap of 5 was treated as a mere default, and 15 × 1500 chars exceeded the 12k cap,
+# so EVERY search reached the model as JSON cut mid-record (8 of 15 records visible, three of
+# them mirrors of one article). The replay digest could not parse that JSON and rebuilt five
+# results from the raw response (different lead text), and the 🔎 line counted 15. Three
+# different views of one search — and the model, asked for its sources, retracted facts that
+# were in the evidence with "not in the results I can see". Hence: the cap is a MAXIMUM,
+# mirrors are removed by content fingerprint, and per-result length is fitted so the set
+# always serialises within the cap (valid JSON, no truncation).
+
+_FETCH_HEADROOM = 2          # ask the connector for 2× the cap so dedupe has candidates
+_CONNECTOR_MAX_RESULTS = 25  # matches the limit in agentcore_mcp_client.search
+_EVIDENCE_FLOOR = 120        # minimum body chars per result; below it, drop results instead
+_MIRROR_JACCARD = 0.6        # 8-word shingle Jaccard: same article, different boilerplate
+_MIRROR_CONTAIN = 0.9        # one page almost entirely inside the other (a truncated copy)
+_MIRROR_MIN_SHINGLES = 60    # containment only counts for pages of substantial length
+
+
+def _collapse(body: Any) -> str:
+    """Whitespace-collapsed string form of a result body."""
+    return " ".join(str(body or "").split())
+
+
+#: Page badges that open many articles: "3 min read", "2:23 PM".
+_PAGE_BADGES = re.compile(r"\b\d+\s*min(?:ute)?s?\s+read\b|\b\d{1,2}:\d{2}\s*[AaPp][Mm]\b")
+
+
+def _wordy(tok: str) -> bool:
+    """A token that looks like a word (mostly letters), as opposed to a number or symbol."""
+    letters = sum(1 for ch in tok if ch.isalpha())
+    return letters >= 2 and letters / max(len(tok), 1) >= 0.5
+
+
+def _skip_noise(text: str) -> str:
+    """Start at the first run of real words — skips ticker tables, timestamps and read-time
+    badges that open many pages. Input returned when no such run exists."""
+    text = " ".join(_PAGE_BADGES.sub(" ", text).split())
+    toks = text.split(" ")
+    for i in range(len(toks)):
+        window = toks[i:i + 6]
+        if (len(window) >= 3 and _wordy(window[0])
+                and sum(1 for t in window if _wordy(t)) >= min(5, len(window))):
+            return " ".join(toks[i:])
+    return text
+
+
+def _cut_sentence(text: str, limit: int) -> str:
+    """Cut to ``limit`` at a sentence boundary (when one lies past 60% of it) and mark it."""
+    if limit <= 0 or len(text) <= limit:
+        return text
+    cut = text[:limit]
+    m = max(cut.rfind(". "), cut.rfind("다. "), cut.rfind("。"), cut.rfind("! "), cut.rfind("? "))
+    if m > limit * 0.6:
+        cut = cut[: m + 1]
+    return cut.rstrip() + " …"
+
+
+def _pick_snippet(body: Any, limit: int) -> str:
+    """Leading excerpt: real words first (_skip_noise), then a sentence-boundary cut."""
+    text = _collapse(body)
+    if not text:
+        return ""
+    return _cut_sentence(_skip_noise(text), limit)
+
+
+def _fingerprint(text: str, n: int = 8) -> set[str]:
+    """Set of ``n``-word shingles over the first 400 words — the basis for mirror detection."""
+    words = re.findall(r"\w+", text.lower())[:400]
+    return {" ".join(words[i:i + n]) for i in range(max(0, len(words) - n + 1))}
+
+
+def _is_mirror(fp: set[str], kept: list[set[str]]) -> bool:
+    """Same article on another host? Jaccard catches copies that differ only in boilerplate;
+    containment catches a truncated copy. A long quote shared by two DIFFERENT articles stays
+    below both (Jaccard ≈ shared/(2−shared); containment needs ≥90% of a substantial page)."""
+    if len(fp) < 4:
+        return False
+    for other in kept:
+        if len(other) < 4:
+            continue
+        inter = len(fp & other)
+        if inter / len(fp | other) >= _MIRROR_JACCARD:
+            return True
+        if (min(len(fp), len(other)) >= _MIRROR_MIN_SHINGLES
+                and inter / min(len(fp), len(other)) >= _MIRROR_CONTAIN):
+            return True
+    return False
+
+
+def _dumps(obj: Any) -> str:
+    """Compact JSON, non-ASCII kept as-is (the form sent to the model)."""
+    return json.dumps(obj, ensure_ascii=False, separators=(",", ":"))
+
+
+def _fit_to_cap(kept: list[dict], bodies: list[str], per_cap: int, max_chars: int,
+                stats: dict) -> int:
+    """Cut each body so the serialized result list fits ``max_chars`` (exactly, measured on
+    the real JSON), dropping trailing results when the per-result share would fall below
+    _EVIDENCE_FLOOR. Returns the per-result length used. Deterministic — no overhead estimate."""
+    per = per_cap
+    for _ in range(40):
+        if not kept:
+            return 0
+        overhead = len(_dumps({"results": [{**it, "text": ""} for it in kept]}))
+        share = (max_chars - overhead) // len(kept)
+        if share < _EVIDENCE_FLOOR:
+            kept.pop()
+            bodies.pop()
+            stats["dropped_budget"] += 1
+            continue
+        per = min(per_cap, share)
+        for it, body in zip(kept, bodies):
+            it["text"] = _cut_sentence(body, per)
+        size = len(_dumps({"results": kept}))
+        if size <= max_chars:
+            return per
+        per_cap = per - ((size - max_chars) // len(kept) + 1)   # shave the overshoot
+        if per_cap < _EVIDENCE_FLOOR:
+            kept.pop()
+            bodies.pop()
+            stats["dropped_budget"] += 1
+            per_cap = per
+    return per
+
+
+def _build_evidence(raw_text: str, *, keep: int, per_result_chars: int,
+                    max_chars: int) -> tuple[list[dict], dict] | None:
+    """Canonical result list for one search, or None when the provider text is not JSON.
+
+    URL duplicates and mirrors (same article body on another host) are dropped, the first
+    ``keep`` distinct results are kept (``keep <= 0`` = all), each body starts at real words
+    and is cut so that ``keep`` results fit ``max_chars`` (per-result cut disabled when
+    ``per_result_chars <= 0`` — the old whole-JSON cap then applies downstream).
+
+    Returns ``(items, stats)``; ``stats`` feeds the ``web_search.evidence_built`` log line.
+    """
+    try:
+        data = json.loads(raw_text or "")
+    except (ValueError, TypeError):
+        return None
+    items = data.get("results") if isinstance(data, dict) else data
+    if not isinstance(items, list):
+        return None
+    stats = {"fetched": len(items), "dup_url": 0, "dup_mirror": 0, "dropped_budget": 0}
+    seen_urls: set[str] = set()
+    kept_fps: list[set[str]] = []
+    kept: list[dict] = []
+    bodies: list[str] = []
+    for it in items:
+        if not isinstance(it, dict):
+            continue
+        url = str(it.get("url") or "")
+        key = url.split("#")[0].rstrip("/") if url else ""
+        if key and key in seen_urls:
+            stats["dup_url"] += 1
+            continue
+        raw_body = it.get("text") if it.get("text") is not None else it.get("content")
+        collapsed = _collapse(raw_body)
+        body = _skip_noise(collapsed)
+        fp = _fingerprint(body)
+        if _is_mirror(fp, kept_fps):
+            stats["dup_mirror"] += 1
+            continue
+        if key:
+            seen_urls.add(key)
+        kept_fps.append(fp)
+        if not kept:   # first result only: raw vs cleaned lead, to audit _skip_noise in logs
+            stats["lead_raw"] = collapsed[:60]
+            stats["lead_clean"] = body[:60]
+        new = {k: v for k, v in it.items() if k not in ("text", "content", "raw_content")}
+        new["text"] = body
+        kept.append(new)
+        bodies.append(body)
+        if keep > 0 and len(kept) >= keep:
+            break
+    per = per_result_chars if per_result_chars > 0 else 0
+    if per > 0 and max_chars > 0:
+        per = _fit_to_cap(kept, bodies, per, max_chars, stats)
+    elif per > 0:
+        for it, body in zip(kept, bodies):
+            it["text"] = _cut_sentence(body, per)
+    stats["kept"] = len(kept)
+    stats["per_result"] = per
+    return kept, stats
+
+
+def _digest_from_evidence(evidence: list[dict], snippet_chars: int) -> list[dict]:
+    """Replay digest = the evidence itself (title/url/date + the same text, optionally
+    shortened by WEB_SEARCH_DIGEST_CHARS)."""
+    out: list[dict] = []
+    for it in evidence:
+        age = it.get("publishedDate") or it.get("published_date") or it.get("page_age")
+        out.append({"title": str(it.get("title") or ""), "url": str(it.get("url") or ""),
+                    "snippet": _cut_sentence(str(it.get("text") or ""), snippet_chars),
+                    "page_age": str(age) if age else None})
+    return out
 
 
 def _result_hosts(resp) -> tuple[int, list[str]]:
@@ -1031,15 +1492,69 @@ def _result_hosts(resp) -> tuple[int, list[str]]:
     return len(items), hosts
 
 
+def _result_digest(resp: Any, limit: int = _DIGEST_RESULTS,
+                   snippet_chars: int = _DIGEST_SNIPPET_CHARS) -> list[dict]:
+    """[{title, url, snippet, page_age}] × ≤limit from a WebSearchResponse-like object.
+
+    Fallback digest for the non-JSON provider path (``_do_search``); the JSON path derives the
+    digest from the evidence set instead.
+    """
+    items = getattr(resp, "results", None)
+    if items is None:
+        try:
+            data = json.loads(getattr(resp, "raw_text", "") or "")
+            items = data.get("results", data) if isinstance(data, dict) else data
+        except (ValueError, TypeError):
+            items = []
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for it in items:
+        if isinstance(it, dict):
+            def get(k, _it=it):
+                return _it.get(k)
+        else:
+            def get(k, _it=it):
+                return getattr(_it, k, None)
+        body = get("text") if get("text") is not None else get("content")
+        age = get("publishedDate") or get("published_date") or get("page_age")
+        out.append({"title": str(get("title") or ""), "url": str(get("url") or ""),
+                    "snippet": _pick_snippet(body, snippet_chars),
+                    "page_age": str(age) if age else None})
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _result_digest_from_text(text: str, resp: Any, limit: int = _DIGEST_RESULTS,
+                             snippet_chars: int = _DIGEST_SNIPPET_CHARS) -> list[dict]:
+    """Digest built from the TRIMMED result JSON the model actually saw (title/url/text/
+    publishedDate, URL-deduped); falls back to the raw response when it is not JSON."""
+    try:
+        data = json.loads(text or "")
+        items = data.get("results", data) if isinstance(data, dict) else data
+    except (ValueError, TypeError):
+        items = None
+    if isinstance(items, list) and items:
+        class _R:
+            results = [it for it in items if isinstance(it, dict)]
+        return _result_digest(_R(), limit, snippet_chars)
+    return _result_digest(resp, limit, snippet_chars)
+
+
 def _trim_results(text: str, per_result_chars: int) -> tuple[str, bool]:
     """Structured trim of the provider JSON: keep EVERY result, cut each body to
     ``per_result_chars`` at a sentence boundary, collapse whitespace, drop URL duplicates,
     re-serialize compactly. ``(text, changed)``. Disabled (<=0), non-JSON or empty → input
     untouched, so the byte-identical pre-trim path stays reachable.
 
-    왜: max_result_chars 는 JSON 을 통째로 자르므로 뒤쪽 결과가 레코드 중간에서 사라졌고, 앞쪽
-    결과는 본문 수천 자가 그대로 실렸다. 항목별로 자르면 결과 5개의 제목·URL·머리 본문이 모두
-    남고 토큰은 검색당 40~50% 준다(2026-09-16 실측: 원본 13~24k자).
+    Predecessor of ``_build_evidence`` (which adds the count cap, mirror removal and the
+    exact fit to the size cap); kept as a standalone helper.
+
+    Why per-result trimming: a whole-JSON cap cut the trailing results mid-record while the
+    leading results carried thousands of characters of body. Cutting each item keeps the
+    title, URL and lead of every result and saves 40–50% of the tokens per search
+    (2026-09-16: raw results were 13–24k chars).
     """
     if per_result_chars <= 0:
         return text, False
@@ -1088,42 +1603,63 @@ async def _do_search(
     mcp_client: AgentCoreMcpClient, tool_input: dict, default_max: int,
     max_result_chars: int = 0, result_text_chars: int = 0,
 ) -> tuple[str, bool, str, list[dict] | None]:
-    """Run one web search. Returns (result_text_for_model, ok, trace_line, digest). Never
-    raises —
-    on failure returns an error string so the model can continue from its own knowledge.
-    ``trace_line`` is the one-line evidence the loops leave in the CLIENT-facing output
-    (see _TRACE_PREFIX).
+    """Run one web search. Returns ``(result_text_for_model, ok, trace_line, digest)``.
 
-    캡을 **여기서** 적용한다 — 네 개 경로(anthropic/responses × 스트리밍/비스트리밍)가
-    결과 텍스트를 얻는 유일한 지점이라, 여기 두면 넷이 갈라질 수 없다.
+    Never raises — on failure the result text is an error JSON so the model can continue
+    from its own knowledge. ``trace_line`` is the one-line evidence the loops leave in the
+    client-facing output; ``digest`` is the replay digest for native mode.
 
-    ⚠️ 잘린 검색도 ``ok=True`` 를 유지한다. 그 쿼리는 청구됐고 답변을 실제로 근거지었다 —
-       캡이 성공 플래그를 뒤집으면 web_search_count(과금/귀속)가 어긋난다.
+    All caps are applied HERE: this is the only place where the four loops obtain result
+    text, so they cannot diverge. A truncated search keeps ``ok=True`` — the query was billed
+    and did ground the answer; flipping the flag would skew ``web_search_count``.
     """
     query = ""
-    max_results = default_max
+    requested = default_max
     if isinstance(tool_input, dict):
         query = str(tool_input.get("query") or "")
         try:
-            max_results = int(tool_input.get("max_results") or default_max)
+            requested = int(tool_input.get("max_results") or default_max)
         except (TypeError, ValueError):
-            max_results = default_max
+            requested = default_max
+    if requested <= 0:
+        requested = default_max
+    # The configured cap is a MAXIMUM (the model cannot exceed it). The connector is asked for
+    # up to 2× the cap so dedupe has candidates — the connector bills per call, so the number
+    # of results does not affect cost (see the evidence-set header).
+    keep = min(requested, default_max) if default_max > 0 else requested
+    fetch_n = requested
+    if default_max > 0:
+        fetch_n = min(keep * _FETCH_HEADROOM, _CONNECTOR_MAX_RESULTS)
     try:
-        resp = await mcp_client.search(query, max_results)
-        text, trimmed = _trim_results(resp.raw_text, result_text_chars)
-        if trimmed:
-            logger.info("web_search.result_trimmed", original_chars=len(resp.raw_text),
-                        chars=len(text), per_result=result_text_chars)
-        text, truncated = _truncate_result(text, max_result_chars)
-        if truncated:
-            logger.info(
-                "web_search.result_truncated",
-                original_chars=len(resp.raw_text),
-                cap=max_result_chars,
-            )
-        n, hosts = _result_hosts(resp)
-        return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)),
-                _result_digest(resp))
+        resp = await mcp_client.search(query, fetch_n)
+        built = _build_evidence(resp.raw_text, keep=keep, per_result_chars=result_text_chars,
+                                max_chars=max_result_chars)
+        if built is not None:
+            evidence, stats = built
+            text = json.dumps({"results": evidence}, ensure_ascii=False, separators=(",", ":"))
+            logger.info("web_search.evidence_built", requested=requested, fetched=stats["fetched"],
+                        kept=stats["kept"], dup_url=stats["dup_url"],
+                        dup_mirror=stats["dup_mirror"], dropped_budget=stats["dropped_budget"],
+                        per_result=stats["per_result"], chars=len(text),
+                        lead_raw=stats.get("lead_raw"), lead_clean=stats.get("lead_clean"))
+            text, truncated = _truncate_result(text, max_result_chars)   # safety net only
+            if truncated:
+                logger.warning("web_search.result_truncated", chars=len(text),
+                               cap=max_result_chars)
+
+            class _E:
+                results = evidence
+            n, hosts = _result_hosts(_E())
+            digest = _digest_from_evidence(evidence, _digest_chars(result_text_chars))
+        else:
+            # provider text is not JSON — old path: whole-text cap, raw-response digest
+            text, truncated = _truncate_result(resp.raw_text, max_result_chars)
+            if truncated:
+                logger.info("web_search.result_truncated", original_chars=len(resp.raw_text),
+                            cap=max_result_chars)
+            n, hosts = _result_hosts(resp)
+            digest = _result_digest(resp, _DIGEST_RESULTS, _digest_chars(result_text_chars))
+        return (text, True, _trace_line(query, _trace_words("results", n=n, hosts=hosts)), digest)
     except AgentCoreMcpError as e:
         logger.warning("web_search.failed", error=str(e)[:200])
         return (json.dumps({"error": f"web search unavailable: {str(e)[:160]}"}), False,
@@ -1134,9 +1670,9 @@ async def _do_search(
                 _trace_line(query, _trace_words("failed")), None)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # ANTHROPIC (Messages) — streaming stitcher
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 async def _anthropic_stream(
     *,
     invoke_stream: InvokeStreamFn,
@@ -1157,6 +1693,11 @@ async def _anthropic_stream(
 
     Forwards text/thinking blocks (re-indexed into one envelope); suppresses web_search
     tool_use/tool_result plumbing; runs the search between turns.
+
+    State that is reset PER TURN (``stop_reason_final``, ``saw_message_delta``, the block
+    maps) must not leak across turns: a search turn ends with ``stop_reason: tool_use``, and
+    if the next turn dies mid-stream that value would be emitted as the final frame — the
+    client would then wait for a tool call it never saw (ours are all suppressed).
     """
     merged = TokenUsage()
     first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
@@ -1166,20 +1707,15 @@ async def _anthropic_stream(
     search_attempts = 0      # ALL search rounds incl. failures → loop guard (F-5)
     envelope_open = False
     global_index = 0  # next content_block index in the stitched envelope
-    #: 200 스트림 도중 provider 오류가 왔는지. 왔으면 정상 종료를 **주장하지 않는다**.
+    #: A provider error arrived inside a 200 stream. If so, never claim a normal end.
     error_seen = False
-    #: 클라이언트에 열어 준 뒤 아직 닫지 않은 content_block 인덱스. 상류가 중간에 죽으면
-    #: 이걸 닫아 줘야 SDK 의 파서 상태가 정리된다(열린 채 끝나면 파싱 오류로 보인다).
+    #: content_block indices opened towards the client and not closed yet. If the upstream
+    #: dies mid-block these are closed explicitly so the SDK's parser state is clean.
     open_global_blocks: set[int] = set()
-    #: ⚠️ stop_reason 과 "종료 프레임을 봤는지" 는 **턴 단위** 상태다. 루프 스코프에 두면
-    #:    검색 턴의 stop_reason("tool_use")이, 다음 턴이 잘렸을 때 그대로 최종 프레임으로
-    #:    새어 나간다. 클라이언트에는 tool_use 블록이 하나도 보이지 않았는데(우리 것은 전부
-    #:    억제된다) stop_reason 이 tool_use 이면 Anthropic SDK/Claude Code 는 도구 결과를
-    #:    기다리며 없는 tool_use 를 찾다가 멈추거나 재요청한다.
     stop_reason_final = "end_turn"
     saw_message_delta = False
-    #: 우리가 주입한 web_search 의 tool_use id 전체. force_final 턴에서 이 배관을
-    #: 걷어내야 tools 없는 요청이 400 이 되지 않는다(_strip_… docstring 참조).
+    #: All tool_use ids of our injected searches (used by the cache-breakpoint placement and
+    #: by the plumbing strip if a caller removes the tool).
     our_tool_use_ids: set[str] = set()
 
     try:
@@ -1190,10 +1726,8 @@ async def _anthropic_stream(
                                               budget=(max_searches_per_turn, max_iterations),
                                               final=force_final)
             turn_body = dict(turn_body)
-            # ⚠️ force_final 턴은 `tools` 키를 아예 뺀다. 그런데 대화에는 앞선 턴이 쌓아 둔
-            #    우리 tool_use/tool_result 가 남아 있고, Anthropic-on-Bedrock 은 tools 를
-            #    정의하지 않은 요청에 그 블록들이 있으면 **거부한다**. 그러면 마지막 턴만
-            #    400 이 되어 이미 과금된 N 턴과 N 번의 검색이 전부 버려진다.
+            # The forced-final turn keeps the tool (tool_choice: none) so the history's
+            # tool blocks stay valid; it only appends the answer-now instruction.
             turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
             turn_body["stream"] = True
 
@@ -1203,16 +1737,16 @@ async def _anthropic_stream(
                     yield b
                 return
 
-            # Per-turn parse state.
-            # ⚠️ stop_reason / saw_message_delta 를 턴마다 재설정한다(선언부 주석의 이유).
+            # Per-turn parse state (see the docstring on why these reset every turn).
             stop_reason_final = "end_turn"
             saw_message_delta = False
             assistant_content: list[dict] = []
             local_to_global: dict[int, int] = {}   # local block idx → emitted global idx
             suppressed: dict[int, dict] = {}        # local idx → {kind, buffer, block}
             text_buf: dict[int, str] = {}
-            #: 텍스트 블록은 걸러낸 첫 글자가 나올 때 start 를 내보낸다(모방 흔적만 있는 블록은
-            #: 아예 열지 않는다 — 빈 text 블록을 클라이언트가 되돌려 보내면 Bedrock 400).
+            #: A text block is opened towards the client only when its first filtered
+            #: character arrives — a block that contained nothing but imitated trace lines is
+            #: never opened (an empty text block replayed by the client is a Bedrock 400).
             text_filters: dict[int, _TraceLineFilter] = {}
             text_start_ev: dict[int, dict] = {}
             turn_visible = False   # any client-visible text or client tool this turn
@@ -1247,9 +1781,9 @@ async def _anthropic_stream(
                     block = ev.get("content_block") or {}
                     btype = block.get("type")
                     if btype == "tool_use" and block.get("name") == GW_WEB_SEARCH_NAME:
-                        # OUR search — suppress, buffer input JSON. (정확히 "tool_use" 만 본다:
-                        # Bedrock 은 server_tool_use 를 내지 않고, 우리 native 블록은 이 스티처가
-                        # 검색 뒤에 따로 만든다 — _native_block_frames.)
+                        # OUR search — suppress, buffer input JSON. Exactly "tool_use" is
+                        # matched: Bedrock never emits server_tool_use, and our native blocks
+                        # are produced separately after the search (_native_block_frames).
                         suppressed[idx] = {"kind": "web_search", "buf": "",
                                            "id": block.get("id"), "name": block.get("name")}
                     elif _is_client_tool_use_block(block):
@@ -1415,27 +1949,27 @@ async def _anthropic_stream(
                     error_seen = True
                     yield _sse("error", ev)
                 elif isinstance(ev.get("error"), dict):
-                    # ⚠️ 이 레포의 **모든** 어댑터가 내보내는 오류 청크는 type 이
-                    #    중첩되어 있다: {"error": {"type": "provider_error", ...}}.
-                    #    최상위 "type" 이 없으므로 위 `etype == "error"` 분기에 걸리지
-                    #    않고, 그대로 아무 분기도 타지 않아 **조용히 사라졌다.** 결과는
-                    #    잘린 답변에 붙은 정상 종료 프레임 — 클라이언트도 감사 로그도
-                    #    "성공" 으로 기록한다(mantle_adapter 는 200 이후 스트림이 끊길 때
-                    #    이 청크를 중간에 흘린다).
-                    #
-                    #    최상위 "type" 을 붙여서 다시 프레이밍한다 — SSE 이벤트 이름으로
-                    #    분기하는 SDK 들이 실제로 예외를 던지게 하는 유일한 형태다.
+                    # Every adapter in this repo emits error chunks with a NESTED type:
+                    # {"error": {"type": "provider_error", ...}} and no top-level "type".
+                    # Such a chunk misses the `etype == "error"` branch above and used to
+                    # vanish silently — a truncated answer followed by a normal terminal
+                    # frame, recorded as success by client and audit log alike (the Mantle
+                    # adapter emits it when the stream breaks after a 200). Re-frame it with
+                    # a top-level "type" — the only shape SDKs that dispatch on the SSE event
+                    # name turn into an exception.
                     error_seen = True
                     inner = ev["error"]
                     yield _sse("error", {"type": "error", "error": inner})
 
             # ---- turn ended: decide terminal vs search ----
-            # ⚠️ 오류가 온 턴은 검색 턴으로 취급하지 않는다. 그러지 않으면 실패한 턴을
-            #    "검색을 요청했다" 로 읽고 루프를 계속 돌린다.
+            # A turn that carried an error is never treated as a search turn; otherwise a
+            # failed turn would be read as "the model asked for a search" and the loop
+            # would continue.
             is_search_turn = (
                 bool(pending_searches) and not client_tool_present and not error_seen
             )
-            # 최종 턴이 thinking 만 내고 본문이 없으면 한 번만 재촉한다(_FINAL_TURN_TEXT_NUDGE).
+            # A forced-final turn with thinking but no visible text is re-prompted once
+            # (_FINAL_TURN_TEXT_NUDGE).
             if (force_final and not turn_visible and not pending_searches and not nudged
                     and not error_seen and saw_message_delta and assistant_content):
                 nudged = True
@@ -1446,10 +1980,11 @@ async def _anthropic_stream(
                 ]
                 continue
             if not is_search_turn or force_final:
-                # 섞인 턴(클라이언트 도구 + 우리 검색)은 검색을 실행하지 않고 넘긴다(계약).
-                # 그 검색이 조용히 사라지면 모델은 다음 요청에서 검색됐다고 믿거나 재요청에
-                # 요청 2건을 쓴다(2026-09-17 Cowork 실측) — "실행 안 됨" 흔적을 남긴다.
-                # native 모드는 블록만 쓴다.
+                # Mixed turn (client tool + our search): the search is not run and the turn is
+                # handed to the client (contract). If the search vanished silently the model
+                # believed on the next request that it had run, or spent two requests
+                # re-issuing it (2026-09-17, Cowork) — leave a "not run" trace. Native mode
+                # emits blocks only.
                 if (pending_searches and client_tool_present and not error_seen
                         and saw_message_delta and envelope_open and not native_trace):
                     lines = [_trace_line((ps.get("input") or {}).get("query", ""),
@@ -1464,21 +1999,21 @@ async def _anthropic_stream(
                                 "delta": {"type": "text_delta",
                                           "text": "\n" + "\n".join(lines) + "\n"}})
                     yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
-                # 상류가 중간에 죽어 열린 채 남은 블록을 닫는다 — 열린 채 끝나면 SDK 쪽에서
-                # 파싱 오류로 보이고, 원인이 게이트웨이인지 상류인지 구분되지 않는다.
+                # Close blocks left open by an upstream that died mid-way — an envelope that
+                # ends with an open block looks like a parse error on the SDK side, and the
+                # cause (gateway vs upstream) becomes indistinguishable.
                 for gi in sorted(open_global_blocks):
                     yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
                 open_global_blocks.clear()
 
                 if error_seen or not saw_message_delta:
-                    # ⚠️ 정상 종료를 **주장하지 않는다.** message_delta 는 stop_reason 을
-                    #    실어 "이렇게 끝났다" 고 말하는 프레임이다. 응답이 잘렸는데 그것을
-                    #    보내면 클라이언트와 감사 로그가 모두 성공으로 기록한다. 오류
-                    #    프레임(위에서 이미 emit)이 종료 신호이고, message_stop 은 스트림을
-                    #    닫기 위해서만 보낸다.
-                    #
-                    #    saw_message_delta 가 False 인 경우도 같다 — 종료 프레임을 못 받았고
-                    #    (소켓 절단/타임아웃) 우리가 그것을 지어낼 근거가 없다.
+                    # Never claim a normal end. message_delta carries stop_reason — the
+                    # frame that says "this is how it ended". Sending it after a truncated
+                    # response makes client and audit log record a success. The error frame
+                    # (already emitted above) is the terminal signal; message_stop only
+                    # closes the stream. `saw_message_delta` False means the same: no
+                    # terminal frame arrived (socket cut / timeout) and we have no basis to
+                    # invent one.
                     if not error_seen:
                         yield _sse(
                             "error",
@@ -1486,34 +2021,38 @@ async def _anthropic_stream(
                              "error": {"type": "incomplete_stream",
                                        "message": "upstream ended without a terminal event"}},
                         )
-                    # ⚠️ 봉투를 한 번도 열지 않았으면(message_start 미전송) message_stop 을
-                    #    보내지 않는다. Anthropic SSE 계약은 message_start → … →
-                    #    message_stop 이고, start 없는 stop 은 SDK 파싱 오류가 된다 — 상류
-                    #    오류가 게이트웨이 버그처럼 보인다. 그때 종료 신호는 위 error
-                    #    프레임이다. _drain_error 와 아래 except 절은 이미 이 구분을 한다.
+                    # If the envelope was never opened (no message_start sent) do not send
+                    # message_stop: the Anthropic SSE contract is message_start → … →
+                    # message_stop, and a stop without a start is an SDK parse error that
+                    # makes an upstream failure look like a gateway bug. The error frame
+                    # above is the terminal signal in that case (_drain_error and the
+                    # except clause below make the same distinction).
                     if envelope_open:
                         yield _sse("message_stop", {"type": "message_stop"})
                     break
 
-                # ⚠️ 클라이언트가 볼 수 없는 tool_use 로 끝났다고 말하지 않는다. 우리 검색의
-                #    tool_use 블록은 전부 억제되므로, client_tool_present 가 아닌데
-                #    stop_reason 이 tool_use 면 클라이언트는 없는 도구 호출을 기다린다.
+                # Never say the message ended on a tool_use the client cannot see. Our search
+                # tool_use blocks are all suppressed, so a `tool_use` stop_reason without a
+                # client tool would leave the client waiting for a tool call that does not
+                # exist.
                 emitted_stop_reason = stop_reason_final
                 if emitted_stop_reason == "tool_use" and not client_tool_present:
                     emitted_stop_reason = "end_turn"
 
                 # Terminal: close the single envelope.
                 #
-                # ⚠️ 종료 프레임의 usage: 입력·캐시 버킷은 **첫 턴 값**, 출력은 전 턴 합계.
-                #    클라이언트(Claude Code·Cowork)는 마지막 응답의 input+cache 합을 컨텍스트
-                #    점유로 읽고 한계 근처에서 자동 압축한다. 첫 턴 프롬프트가 곧 클라이언트의
-                #    대화이고, 뒤 턴들은 거기에 우리 검색 결과(클라이언트는 받지 않는다)를 더해
-                #    다시 보낸 것이라, N 턴 합계를 실으면 컨텍스트가 N 배로 보인다 — 검색 턴마다
-                #    압축이 도는 "Autocompact is thrashing" 의 원인(2026-09-16 US 실측).
-                #    청구는 on_usage(merged) 가 합계를 받으므로 그대로다. 캐시 버킷도 같은
-                #    턴 것으로 실어야 input_tokens 와 서로 모순되지 않는다.
+                # Usage on the terminal frame: prompt buckets from the FIRST turn, output
+                # summed over all turns. Clients read the last response's input+cache sum as
+                # their context occupancy and auto-compact near the limit; the first turn's
+                # prompt IS the client's conversation, later turns re-send it plus our search
+                # results (which the client never receives). Reporting the N-turn sum made
+                # the context look N× larger — the cause of "Autocompact is thrashing"
+                # (2026-09-16, US). Billing is unchanged: on_usage(merged) gets the sum. The
+                # cache buckets come from the same turn so they cannot contradict
+                # input_tokens.
                 if envelope_open and global_index == 0:
-                    # 필터 때문에 빈 응답이 되면 안 된다(클라이언트가 빈 content 를 되돌리면 400).
+                    # The filter must not leave the response empty (an empty content list
+                    # replayed by the client is a 400).
                     dropped = "".join(f.dropped for f in text_filters.values())
                     if dropped.strip():
                         yield _sse("content_block_start",
@@ -1546,9 +2085,8 @@ async def _anthropic_stream(
             # Per-search deadline recheck so a large fan-out can't run uncapped (round2 High-2).
             search_attempts += 1
             tool_results = []
-            # ⚠️ 턴당 검색 개수 상한. 초과분도 **응답은 만들어 준다** — tool_use 하나당
-            #    tool_result 하나가 없으면 다음 턴이 400 이므로, "실행하지 않는다" 와
-            #    "결과를 만들지 않는다" 는 구별해야 한다.
+            # Per-turn cap. The excess still gets a RESPONSE: one tool_result per tool_use or
+            # the next turn is a 400 — "not run" and "no result" are different things.
             allowance = _turn_search_allowance(len(pending_searches), max_searches_per_turn)
             if allowance < len(pending_searches):
                 logger.info(
@@ -1568,18 +2106,22 @@ async def _anthropic_stream(
                 if native_trace:
                     native_blocks.extend(_native_search_blocks(
                         (ps.get("input") or {}).get("query", ""), ok, reason, digest))
-            # 검색 흔적을 클라이언트 봉투에 남긴다 — native 모드는 블록 쌍, 아니면 텍스트 블록 하나
-            # (근거: _TRACE_PREFIX·_NATIVE_TOOL_USE 주석). 내부 대화에는 넣지 않는다 — 거기엔
-            # 진짜 tool_use/tool_result 가 있다.
+            # Leave the search trace in the client envelope — block pairs in native mode,
+            # then the text line in both modes. Nothing is added to the INTERNAL
+            # conversation: it holds the real tool_use/tool_result.
             if native_trace and native_blocks and envelope_open:
-                # 탐침 판독용 짝: 여기서 낸 개수 vs 다음 요청의 inbound_native_blocks 개수.
+                # Paired with inbound_native_rewritten on the next request for readouts.
                 logger.info("web_search.native_blocks_emitted", searches=len(native_blocks) // 2)
                 for blk in native_blocks:
                     gi = global_index
                     global_index += 1
                     for frame in _native_block_frames(gi, blk):
                         yield frame
-            elif traces and envelope_open and not native_trace:
+            # The 🔎 line is emitted in both modes: in text mode it is the only trace, in
+            # native mode it is for the user (Cowork's UI does not render the blocks,
+            # 2026-09-17) and is removed from the history on the way back in
+            # (_rewrite_inbound_native_blocks).
+            if traces and envelope_open:
                 gi = global_index
                 global_index += 1
                 yield _sse("content_block_start",
@@ -1590,7 +2132,7 @@ async def _anthropic_stream(
                             "delta": {"type": "text_delta",
                                       "text": "\n" + "\n".join(traces) + "\n"}})
                 yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
-            # 최종 턴(tool_choice none)도 같은 접두를 보내므로 마지막 표시까지 읽힌다.
+            # The forced-final turn sends the same prefix, so the marker is read there too.
             if cache_results:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
@@ -1627,9 +2169,9 @@ async def _drain_error(chunk_iter: AsyncIterator[bytes], envelope_open: bool) ->
         yield _sse("message_stop", {"type": "message_stop"})
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # ANTHROPIC (Messages) — non-streaming loop
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 async def _anthropic_nonstream(
     *,
     invoke: InvokeFn,
@@ -1645,6 +2187,9 @@ async def _anthropic_nonstream(
     result_text_chars: int = 0,
     native_trace: bool = False,
 ) -> JSONResponse:
+    """Non-streaming twin of ``_anthropic_stream``: loop with ``invoke()`` and return the
+    assembled final body (our plumbing removed, traces/native blocks prepended, usage rewritten
+    to the client-facing gauge)."""
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
     merged = TokenUsage()
@@ -1667,9 +2212,8 @@ async def _anthropic_nonstream(
                                               budget=(max_searches_per_turn, max_iterations),
                                               final=force_final)
             turn_body = dict(turn_body)
-            # ⚠️ force_final 턴은 tools 를 빼므로 대화의 우리 tool_use/tool_result(이력의 누출분
-            #    포함)를 텍스트로 바꿔야 한다 — 스트리밍 경로와 같은 이유. 이 줄이 없던 동안
-            #    비스트리밍 force_final 은 항상 400 이었다(2026-09-16 US 실측, Cowork 재시도 3회).
+            # Forced-final turn: tool kept (tool_choice: none), answer-now instruction
+            # appended — same contract as the streaming path.
             turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
@@ -1711,7 +2255,8 @@ async def _anthropic_nonstream(
                 ]
                 continue
             if our_calls and client_calls and not native_trace:
-                # 섞인 턴의 검색은 실행하지 않는다(계약) — 스트리밍 경로와 같은 "실행 안 됨" 흔적.
+                # Mixed turn: the search is not run (contract) — same "not run" trace as the
+                # streaming path.
                 traces.extend(_trace_line((c.get("input") or {}).get("query", ""),
                                           _trace_words("mixed")) for c in our_calls)
             if force_final or not our_calls or client_calls:
@@ -1720,7 +2265,7 @@ async def _anthropic_nonstream(
             search_attempts += 1
             tool_results = []
             assistant_content = content
-            # 턴당 검색 개수 상한 — 근거는 스트리밍 스티처의 같은 주석 참조.
+            # Per-turn cap — see the same comment in the streaming stitcher.
             allowance = _turn_search_allowance(len(our_calls), max_searches_per_turn)
             if allowance < len(our_calls):
                 logger.info("web_search.turn_fanout_capped",
@@ -1737,7 +2282,7 @@ async def _anthropic_nonstream(
                 if native_trace:
                     native_blocks.extend(_native_search_blocks(
                         (call.get("input") or {}).get("query", ""), ok, reason, digest))
-            # 최종 턴(tool_choice none)도 같은 접두를 보내므로 마지막 표시까지 읽힌다.
+            # The forced-final turn sends the same prefix, so the marker is read there too.
             if cache_results:
                 conversation = _place_cache_breakpoint(
                     base_body, conversation, tool_results, our_tool_use_ids)
@@ -1750,15 +2295,13 @@ async def _anthropic_nonstream(
         # earlier turns succeeded (tokens were consumed and must be accounted) (F-9).
         merged.web_search_count = searches_done
         merged.total_tokens = merged.input_tokens + merged.output_tokens
-        # ⚠️ 토큰이 0 이어도 **부른다.** 예전에는 `> 0` 조건이 걸려 있어서, 첫 턴이 상류
-        #    4xx/5xx 로 죽으면(토큰 0) on_usage 가 아예 불리지 않았다. 그 콜백이
-        #    ``cost_recorder.finalize`` 이고, finalize 의 zero-usage 경로가 RPM/TPM/비용
-        #    예약을 되돌리는 **유일한** 지점이다. 이 경로는 폴백 루프를 타지 않으므로
-        #    ``release_reservations`` 도 돌지 않는다 — 즉 400 을 받은 요청이 한 푼도 쓰지
-        #    않고 사용자의 분/시간 한도를 창이 끝날 때까지 물고 있었다.
-        #
-        #    토큰이 0 이면 finalize 는 usage_logs 행을 쓰지 않고 예약만 해제한다(그 경로의
-        #    조기 반환). 그래서 무조건 호출이 안전하다.
+        # Called even with zero tokens. A `> 0` guard used to skip on_usage when the first
+        # turn died with an upstream 4xx/5xx — but that callback is cost_recorder.finalize,
+        # whose zero-usage path is the ONLY place that releases the RPM/TPM/cost
+        # reservations (this path never runs the fallback loop's release_reservations). A
+        # request that got a 400 therefore held the user's per-minute/hour quota until the
+        # window ended. With zero tokens finalize writes no usage_logs row and only releases
+        # the reservation, so the unconditional call is safe.
         try:
             await on_usage(merged)
         except Exception:
@@ -1779,21 +2322,21 @@ async def _anthropic_nonstream(
     # modified thinking block. Prior-turn thinking may be omitted on a new user turn, so
     # this is safe. (Mirrors the streaming path's client-side suppression.) (F-thinking)
     if final_status == 200 and isinstance(final_body.get("content"), list):
-        # ⚠️ 우리 web_search tool_use 블록도 함께 걷어낸다. 클라이언트 도구 호출과 우리
-        #    검색이 **같은 턴**에 함께 오면(두 방언 모두 병렬 도구 호출을 지원한다) 그 턴은
-        #    terminal 이라 이 본문이 그대로 나가고, 클라이언트는 자기가 선언하지 않은
-        #    ``web_search`` 도구 호출을 받는다. Anthropic 계약상 모든 tool_use 는 tool_result
-        #    로 답해야 하므로, 클라이언트는 없는 도구를 실행하려 하거나(Claude Code 는 알 수
-        #    없는 도구로 보고한다) 다음 턴에서 400 을 받는다. 스트리밍 경로는 이 블록들을
-        #    이미 억제한다 — 비스트리밍만 빠져 있었다.
+        # Our web_search tool_use blocks are removed too. When a client tool call and our
+        # search arrive in the SAME turn (both dialects support parallel tool calls) the
+        # turn is terminal and this body goes out as-is, so the client would receive a
+        # tool_use for a tool it never declared. The Anthropic contract requires a
+        # tool_result for every tool_use, so the client would try to run an unknown tool
+        # (Claude Code reports it as unknown) or get a 400 on its next turn. The streaming
+        # path already suppresses these blocks; only the non-streaming path lacked it.
         final_body["content"] = [
             b for b in final_body["content"]
             if isinstance(b, dict)
             and b.get("type") not in ("thinking", "redacted_thinking")
             and not (b.get("type") == "tool_use" and b.get("name") == GW_WEB_SEARCH_NAME)
         ]
-        # 모델이 모방한 흔적 줄 제거(_TraceLineFilter 참조). 전부 사라지면 원문을 둔다 — 빈
-        # content 는 다음 턴에 400 이다.
+        # Remove model-imitated trace lines (see _TraceLineFilter). If everything would be
+        # removed, keep the original — empty content is a 400 on the next turn.
         cleaned = []
         for b in final_body["content"]:
             if b.get("type") == "text":
@@ -1804,18 +2347,19 @@ async def _anthropic_nonstream(
             cleaned.append(b)
         if cleaned or not final_body["content"]:
             final_body["content"] = cleaned
-        # 검색 흔적을 본문 맨 앞에(스트리밍 경로와 같은 계약) — native 모드는 블록 쌍, 아니면
-        # 텍스트 블록 하나(_TRACE_PREFIX).
-        if native_trace:
-            if native_blocks:
-                logger.info("web_search.native_blocks_emitted",
-                            searches=len(native_blocks) // 2)
-            final_body["content"][0:0] = native_blocks
-        elif traces:
-            final_body["content"].insert(
-                0, {"type": "text", "text": "\n".join(traces) + "\n\n"})
-        # 우리 것만 지웠는데 stop_reason 이 tool_use 로 남으면 클라이언트는 보이지 않는
-        # 도구 호출을 기다린다 — 스트리밍 스티처의 같은 판단.
+        # Search trace at the front of the body (same contract as the streaming path):
+        # block pairs in native mode, then one text block with the 🔎 lines.
+        lead: list[dict] = []
+        if native_trace and native_blocks:
+            logger.info("web_search.native_blocks_emitted",
+                        searches=len(native_blocks) // 2)
+            lead.extend(native_blocks)
+        if traces:   # the 🔎 line is emitted in native mode too (see the streaming path)
+            lead.append({"type": "text", "text": "\n".join(traces) + "\n\n"})
+        if lead:
+            final_body["content"][0:0] = lead
+        # Only our blocks were removed, so a leftover `tool_use` stop_reason would make the
+        # client wait for an invisible tool call — same decision as the streaming stitcher.
         if final_body.get("stop_reason") == "tool_use" and not any(
             _is_client_tool_use_block(b) for b in final_body["content"]
         ):
@@ -1823,9 +2367,9 @@ async def _anthropic_nonstream(
     return JSONResponse(status_code=final_status, content=final_body)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # RESPONSES (OpenAI) — helpers
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 def _normalize_responses_input(body: dict) -> list:
     """Responses `input` may be a string or an array of items — normalize to a list
     so we can append function_call / function_call_output items for continuation."""
@@ -1837,9 +2381,9 @@ def _normalize_responses_input(body: dict) -> list:
     return []
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # RESPONSES (OpenAI) — streaming stitcher
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 async def _responses_stream(
     *,
     invoke_stream: InvokeStreamFn,
@@ -1867,20 +2411,21 @@ async def _responses_stream(
     search_attempts = 0      # all rounds incl. failures → loop guard (F-5)
     envelope_open = False
     global_out_index = 0
-    #: ⚠️ 이 둘은 **턴 단위** 상태다. 루프 스코프에 두면 답변 턴이 종료 이벤트 없이 죽었을
-    #:    때 직전 검색 턴의 객체와 "response.completed" 가 그대로 최종 프레임으로 나간다 —
-    #:    잘린 답변에 붙은 조작된 성공이다. 게다가 그 객체의 output 은 우리 web_search 호출을
-    #:    올바르게 제거했기 때문에 **비어 있어서**, 델타가 아니라 최종 객체로 답을 재구성하는
-    #:    클라이언트(Codex 계열)는 빈 답변을 받고 완료로 기록한다. 첫 턴에서 죽으면
-    #:    final_response_obj 가 None 이라 `id` 조차 없는 completed 가 나간다.
+    #: The next two are PER-TURN state. Kept at loop scope, an answer turn that died without
+    #: a terminal event would send the previous search turn's object and a
+    #: "response.completed" as the final frame — a fabricated success on a truncated answer.
+    #: Worse, that object's output is EMPTY (our web_search call was correctly removed), so
+    #: clients that rebuild the answer from the final object (Codex family) get an empty
+    #: answer marked completed. Dying on the first turn would send a completed without even
+    #: an `id`.
     final_response_obj: Optional[dict] = None
     final_terminal_type = "response.completed"  # actual upstream terminal type (F-1)
-    #: 이 턴에서 실제로 종료 이벤트를 받았는지. 못 받았으면 종료를 지어내지 않는다.
+    #: Whether THIS turn delivered a terminal event. Without one, no end is invented.
     saw_terminal_event = False
-    #: 클라이언트가 본 봉투의 id — **첫 턴의** response.created 에서 온 값이다.
-    #: ⚠️ 종료 프레임의 id 는 이것과 같아야 한다. 마지막 턴의 id 를 쓰면 클라이언트는
-    #:    자기가 열지 않은 응답의 종료를 받는다: created(resp_1) … completed(resp_2).
-    #:    id 로 요청을 상관짓는 클라이언트/로그는 그 응답을 찾지 못한다.
+    #: The envelope id the client saw — from the FIRST turn's response.created. The terminal
+    #: frame must carry the same id: with the last turn's id the client receives the end of
+    #: a response it never opened (created(resp_1) … completed(resp_2)) and anything that
+    #: correlates by id cannot find it.
     envelope_response_id: str | None = None
     our_call_ids: set[str] = set()  # our web_search call_ids to strip from final output (F-3 Responses)
     error_seen = False       # a 200-stream `error` event occurred (NEW round2 High-1)
@@ -1892,7 +2437,8 @@ async def _responses_stream(
                                               first_turn=search_attempts == 0,
                                               budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
-            # force_final 턴의 배관 제거 — 근거는 anthropic 스티처의 같은 주석 참조.
+            # Forced-final turn: the tool is removed, so our plumbing must be rewritten as
+            # text — see _strip_anthropic_web_search_plumbing for the reasoning.
             turn_body["input"] = (
                 _strip_responses_web_search_items(conv_input, our_call_ids)
                 if force_final
@@ -1905,7 +2451,7 @@ async def _responses_stream(
                     yield b
                 return
 
-            # 턴 단위 상태 재설정(위 선언부 주석의 이유).
+            # Per-turn state reset (see the declarations above).
             saw_terminal_event = False
 
             local_to_global: dict[int, int] = {}
@@ -2020,10 +2566,10 @@ async def _responses_stream(
                     error_seen = True  # NEW round2 High-1: do not also emit a fake completed
                     yield _sse("error", ev)
                 elif isinstance(ev.get("error"), dict):
-                    # ⚠️ 어댑터들이 실제로 내보내는 형태는 type 이 중첩되어 있다:
-                    #    {"error": {"type": "provider_error", ...}}. 최상위 "type" 이 없어
-                    #    위 분기에 걸리지 않고 조용히 사라졌다 — 근거는 anthropic 스티처의
-                    #    같은 분기 주석 참조.
+                    # Adapters emit error chunks with a NESTED type:
+                    # {"error": {"type": "provider_error", ...}} — no top-level "type", so
+                    # the branch above misses it and it vanished silently. See the same
+                    # branch in the Anthropic stitcher.
                     error_seen = True
                     yield _sse("error", {"type": "error", "error": ev["error"]})
 
@@ -2035,23 +2581,25 @@ async def _responses_stream(
                 or force_final
                 or final_terminal_type != "response.completed"
                 or error_seen
-                # ⚠️ 종료 이벤트를 못 받은 턴(소켓 절단/타임아웃)도 terminal 이다. 이걸
-                #    빼면 pending_searches 가 비어 있으니 위 조건으로 우연히 빠져나가는데,
-                #    그때 final_* 는 **직전 턴의 값**이라 조작된 성공이 나간다.
+                # A turn without a terminal event (socket cut / timeout) is terminal too.
+                # Without this clause pending_searches would be empty and the condition
+                # above would fall through by accident — with final_* still holding the
+                # PREVIOUS turn's values, i.e. a fabricated success.
                 or not saw_terminal_event
             ):
-                # 이 턴에서 종료 이벤트를 못 받았다면 직전 턴의 객체를 물려주지 않는다.
+                # Do not inherit the previous turn's object when this turn had no terminal
+                # event.
                 if not saw_terminal_event:
-                    # 직전 턴(검색 턴)의 객체는 이 답변과 무관하다 — 그 output 은 우리
-                    # web_search 를 제거해 비어 있어서, 최종 객체로 답을 재구성하는
-                    # 클라이언트에게 "빈 답변, 완료" 를 준다. 봉투 id 는
-                    # _finalize_responses_obj 가 다시 채운다.
+                    # The previous (search) turn's object has nothing to do with this
+                    # answer — its output had our web_search removed and is empty, which
+                    # gives final-object clients "empty answer, completed". The envelope id
+                    # is restored by _finalize_responses_obj.
                     final_response_obj = {}
                     if error_seen:
-                        # ⚠️ 오류로 끝난 것과 그냥 잘린 것은 **다른 신호**여야 한다.
-                        #    failed = 상류가 오류를 반환했다, incomplete = 종료 프레임 없이
-                        #    끊겼다. 둘을 합치면 운영자가 provider 장애와 네트워크 절단을
-                        #    구분할 수 없다.
+                        # Ending on an error and simply being cut off must be DIFFERENT
+                        # signals: failed = the upstream returned an error, incomplete =
+                        # the stream broke without a terminal frame. Merged, an operator
+                        # cannot tell a provider failure from a network cut.
                         final_terminal_type = "response.failed"
                     else:
                         final_terminal_type = "response.incomplete"
@@ -2064,10 +2612,11 @@ async def _responses_stream(
                 # If a mid-stream `error` occurred, the error frame is the terminal signal —
                 # do NOT also emit a synthetic response.completed (NEW round2 High-1). Emit
                 # response.failed only if we never got a real terminal event.
-                # ⚠️ 봉투(response.created)를 한 번도 못 보냈으면 종료 객체도 만들지
-                #    않는다. created 없는 response.completed/failed 는 Responses SDK 가
-                #    상관지을 대상이 없어 파싱에서 실패한다 — 상류 오류가 게이트웨이 버그로
-                #    보인다. 그때 종료 신호는 이미 나간 error 프레임이다.
+                # If the envelope (response.created) was never sent, build no terminal
+                # object either: a completed/failed without a created has nothing for the
+                # Responses SDK to correlate with and fails to parse — an upstream error
+                # would look like a gateway bug. The error frame already sent is the
+                # terminal signal in that case.
                 if not envelope_open:
                     break
                 if error_seen and final_terminal_type == "response.completed":
@@ -2096,7 +2645,7 @@ async def _responses_stream(
             # past the total deadline (NEW round2 High-2).
             search_attempts += 1
             outputs = []
-            # 턴당 검색 개수 상한 — 근거는 anthropic 스티처의 같은 주석 참조.
+            # Per-turn cap — see the same comment in the Anthropic stitcher.
             allowance = _turn_search_allowance(len(pending_searches), max_searches_per_turn)
             if allowance < len(pending_searches):
                 logger.info(
@@ -2153,9 +2702,9 @@ def _finalize_responses_obj(
                   "response.failed": "failed"}
     obj = dict(resp_obj or {})
     obj["status"] = status_map.get(terminal_type, "completed")
-    # ⚠️ 봉투(첫 response.created)의 id 로 고정한다. 마지막 턴의 id 를 그대로 두면
-    #    created(resp_1) … completed(resp_2) 가 되어, id 로 상관짓는 클라이언트와 로그가
-    #    그 응답을 찾지 못한다. 여러 턴을 하나의 응답으로 합치는 것이 이 스티처의 계약이다.
+    # Pin the envelope id (the first response.created). Leaving the last turn's id gives
+    # created(resp_1) … completed(resp_2) and clients/logs that correlate by id cannot find
+    # the response. Merging several turns into one response is this stitcher's contract.
     if envelope_id:
         obj["id"] = envelope_id
     if our_call_ids and isinstance(obj.get("output"), list):
@@ -2188,6 +2737,7 @@ def _finalize_responses_obj(
 
 
 async def _drain_responses_error(chunk_iter: AsyncIterator[bytes], envelope_open: bool) -> AsyncIterator[bytes]:
+    """Relay a non-200 provider turn; close an already-open envelope with response.failed."""
     async for raw in chunk_iter:
         try:
             ev = json.loads(raw)
@@ -2201,9 +2751,9 @@ async def _drain_responses_error(chunk_iter: AsyncIterator[bytes], envelope_open
                    {"type": "response.failed", "response": {"status": "failed"}})
 
 
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 # RESPONSES (OpenAI) — non-streaming loop
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
 async def _responses_nonstream(
     *,
     invoke: InvokeFn,
@@ -2218,6 +2768,7 @@ async def _responses_nonstream(
     cache_results: bool = True,
     result_text_chars: int = 0,
 ) -> JSONResponse:
+    """Non-streaming twin of ``_responses_stream``."""
     merged = TokenUsage()
     first_turn: TokenUsage | None = None   # turn-1 prompt buckets → client usage (context gauge)
     conv_input: list = _normalize_responses_input(base_body)
@@ -2234,8 +2785,8 @@ async def _responses_nonstream(
                                               first_turn=search_attempts == 0,
                                               budget=(max_searches_per_turn, max_iterations))
             turn_body = dict(turn_body)
-            # force_final 턴은 tools 를 빼므로 우리 function_call/output(누출분 포함)을 걷어낸다
-            # — _anthropic_nonstream 의 같은 주석 참조.
+            # Forced-final turn removes the tool, so our function_call/output items (leaked
+            # ones included) are rewritten as text — see _anthropic_nonstream.
             turn_body["input"] = (
                 _strip_responses_web_search_items(conv_input, our_call_ids)
                 if force_final
@@ -2294,8 +2845,8 @@ async def _responses_nonstream(
     finally:
         merged.web_search_count = searches_done  # fire on any accrued usage even on late failure (F-9)
         merged.total_tokens = merged.input_tokens + merged.output_tokens
-        # 토큰 0 에서도 호출하는 이유는 _anthropic_nonstream 의 같은 블록 주석 참조
-        # (예약 해제가 이 콜백에만 달려 있다).
+        # Called even with zero tokens — the reservation release depends on this callback;
+        # see the same block in _anthropic_nonstream.
         try:
             await on_usage(merged)
         except Exception:
@@ -2313,9 +2864,9 @@ async def _responses_nonstream(
         if isinstance(details, dict):
             details["cached_tokens"] = gauge.cache_read_input_tokens
             details["cache_write_tokens"] = gauge.cache_creation_input_tokens
-    # ⚠️ 우리 web_search function_call 항목을 응답 output 에서 걷어낸다 — 근거는
-    #    _anthropic_nonstream 의 같은 블록 주석, 그리고 스트리밍 쪽
-    #    _finalize_responses_obj 가 이미 하고 있는 일과 동일하다. 비스트리밍만 빠져 있었다.
+    # Remove our web_search function_call items from the response output — same reasoning
+    # as the block in _anthropic_nonstream, and the same thing _finalize_responses_obj
+    # already does on the streaming side.
     if final_status == 200 and isinstance(final_body.get("output"), list):
         final_body["output"] = [
             it for it in final_body["output"]
@@ -2328,9 +2879,9 @@ async def _responses_nonstream(
     return JSONResponse(status_code=final_status, content=final_body)
 
 
-# ════════════════════════════════════════════════════════════════════════════════
-# public dispatcher
-# ════════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════
+# Dispatcher (the router's entry point)
+# ═══════════════════════════════════════════════════════════════════════════════
 async def run_web_search_loop(
     *,
     dialect: str,
@@ -2349,9 +2900,9 @@ async def run_web_search_loop(
     cache_results: bool = True,
     result_text_chars: int = 0,
     handshake_timeout: float = 10.0,
-    #: KI-08 역산 훅. Responses 방언은 usage 가 종결 이벤트 안에만 있어서, 패스스루
-    #: 경로의 스트림이 그 전에 끊기면 역산 없이는 usage 가 전부 0 이 되고 usage_logs
-    #: 행이 아예 만들어지지 않는다(services/streaming.py 의 같은 주석 참조).
+    #: Token back-estimation hook (KI-08). The Responses dialect carries usage only in the
+    #: terminal event; if a pass-through stream breaks before it, usage would be all zeros
+    #: and no usage_logs row would be written (see the same comment in services/streaming.py).
     tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
     response_headers: Optional[dict] = None,
     on_stream_complete: Callable[[str, str], Awaitable[None]] | None = None,
@@ -2363,22 +2914,24 @@ async def run_web_search_loop(
     ensures the MCP client is initialized (discovers the WebSearch tool) before starting;
     if that fails, it degrades to a plain pass-through of the original request (no tool).
 
+    Request flow: strip native web-search tools → convert replayed native trace blocks →
+    F-7 pass-through if the client owns a ``web_search`` tool → MCP handshake (fallback to
+    a no-search call on failure) → the dialect's stream/non-stream loop.
+
     ``on_stream_complete`` / ``on_nonstream_complete`` are the request/response **body**
     log hooks. Both are ``None`` when body logging is off, and the routers decide that
     before calling — passing a hook makes the streaming paths accumulate the full SSE
-    text in memory, so the decision has to be made up front.
-
-    ⚠️ 이 두 훅이 이 함수의 인자로 있는 이유: 라우터들은 ``if is_stream:`` 블록에서
-       본문 로깅을 배선하는데, 이 함수는 **그 블록보다 먼저** 리턴한다. 훅 없이 두면
-       웹서치를 켠 프로파일의 요청은 라우터의 로깅 코드를 아예 지나지 않아 조용히
-       미기록된다. 그리고 그 조합이 하필 최악이다 — 웹서치를 쓰는 것은 Codex(Mantle)이고
-       Mantle 은 AWS 쪽 invocation log 에도 남지 않으므로, 본문의 정본이 **어디에도**
-       없게 된다. 여섯 개 리턴 경로 전부에 배선돼 있고, 테스트가 그 개수를 센다.
+    text in memory, so the decision has to be made up front. They are parameters here
+    because the routers wire body logging inside their ``if is_stream:`` block and this
+    function returns BEFORE that block: without the hooks, requests of a web-search-enabled
+    profile would never pass the router's logging code and go unrecorded — and Codex on
+    Mantle, the main web-search user, leaves no AWS invocation log either, so the body would
+    exist nowhere. All six return paths are wired and a test counts them.
     """
     deadline = time.monotonic() + total_deadline_sec
 
     def _log_stream(gen):
-        """스트리밍 응답을 본문 로깅 래퍼로 감싼다(훅이 없으면 그대로 통과)."""
+        """Wrap a streaming response with the body-log recorder (pass-through without a hook)."""
         if on_stream_complete is None:
             return gen
         from app.services.body_log_records import wrap_stream_for_body_log
@@ -2388,7 +2941,7 @@ async def run_web_search_loop(
         )
 
     async def _log_nonstream(status: int, raw: bytes) -> None:
-        """비스트리밍 응답 본문을 기록한다. 실패해도 요청을 깨뜨리지 않는다."""
+        """Record a non-streaming response body; never fails the request."""
         if on_nonstream_complete is None:
             return
         try:
@@ -2402,10 +2955,14 @@ async def run_web_search_loop(
     # a genuine CUSTOM web_search tool (no native type) survives and is still respected
     # (F-7). This also covers the MCP-init-failure fallback below (both read initial_req_data).
     initial_req_data = _strip_native_web_search(initial_req_data)
-    # 탐침(native 흔적): 클라이언트가 우리 server_tool_use/web_search_tool_result 블록을 이력에
-    # 실어 되돌리면 Bedrock 이 모르는 형태다 — 텍스트 흔적으로 환원한다(_normalize_… 주석). F-7
-    # 패스스루와 MCP 초기화 실패 폴백도 initial_req_data 를 읽으므로 그 앞에서 한다.
+    # Replayed native trace blocks (server_tool_use / web_search_tool_result — unknown to
+    # Bedrock): loop turns carry our tool definition, so there they are REWRITTEN as
+    # tool_use/tool_result history with the result excerpts; the F-7 pass-through and the
+    # MCP-init-failure fallback go out without our tool, so there they become text trace
+    # lines. Both helpers return the same object when no block is present.
+    loop_req_data = initial_req_data
     if dialect == "anthropic":
+        loop_req_data = _rewrite_inbound_native_blocks(initial_req_data)
         initial_req_data = _normalize_inbound_native_blocks(initial_req_data)
     native_trace = dialect == "anthropic" and _native_trace_enabled(request)
     dialect_kw: dict = {"native_trace": native_trace} if dialect == "anthropic" else {}
@@ -2449,11 +3006,10 @@ async def run_web_search_loop(
     # model. If discovery fails, fall back to a normal (no-search) call so the request
     # still succeeds — the model simply lacks web search this time.
     try:
-        # ⚠️ 여기에도 상한이 필요하다. 클라이언트 안쪽에 상한이 있어도, 이 지점은 요청
-        #    진입 경로이므로 상한을 두 번 거는 것이 아니라 **최악의 경우를 명시**하는 것이다:
-        #    핸드셰이크가 늦어지는 동안 이 요청은 이미 만든 RPM/TPM/CPH 예약을 물고 있다.
-        #    asyncio.TimeoutError 는 Exception 하위라 아래 except 가 그대로 잡아
-        #    검색 없는 단일 턴으로 폴백한다.
+        # A timeout here states the worst case explicitly: while the handshake stalls this
+        # request already holds its RPM/TPM/CPH reservations. asyncio.TimeoutError is an
+        # Exception, so the except below catches it and falls back to a single no-search
+        # turn.
         await asyncio.wait_for(
             mcp_client.ensure_initialized(),
             timeout=handshake_timeout,
@@ -2496,7 +3052,7 @@ async def run_web_search_loop(
         stitcher = _anthropic_stream if dialect == "anthropic" else _responses_stream
         gen = stitcher(
             invoke_stream=invoke_stream,
-            base_body=initial_req_data,
+            base_body=loop_req_data,
             mcp_client=mcp_client,
             request=request,
             on_usage=on_usage,
@@ -2517,7 +3073,7 @@ async def run_web_search_loop(
     loop = _anthropic_nonstream if dialect == "anthropic" else _responses_nonstream
     resp = await loop(
         invoke=invoke,
-        base_body=initial_req_data,
+        base_body=loop_req_data,
         mcp_client=mcp_client,
         on_usage=on_usage,
         max_iterations=max_iterations,
@@ -2529,8 +3085,8 @@ async def run_web_search_loop(
         result_text_chars=result_text_chars,
         **dialect_kw,
     )
-    # 루프가 조립해 반환한 최종 본문을 기록한다. 여기서는 `resp.body` 를 읽는다 —
-    # 루프 내부가 여러 턴의 결과를 합쳐 만든 것이므로 어떤 단일 턴의 provider 응답도
-    # 클라이언트가 실제로 받는 것과 같지 않다. 클라이언트가 받은 바이트가 정본이다.
+    # Record the final body the loop assembled. `resp.body` is read here because the loop
+    # merged several turns into it — no single provider response equals what the client
+    # actually receives, and the bytes the client got are the record of truth.
     await _log_nonstream(resp.status_code, bytes(resp.body or b""))
     return resp
