@@ -326,6 +326,49 @@ async def test_mixed_turn_respects_the_per_turn_cap():
             {"messages": _replay(content), "tools": CLIENT_TOOLS})["messages"])
 
 
+# The gateway knows ONE tool name — its own. Everything else is "a client tool", whatever it
+# is called, however many there are and wherever they sit in the turn. Clients rename and add
+# tools with every release; nothing here may depend on a name such as TaskCreate.
+ANY_CLIENT_TOOLS = {
+    "file write": [_tu(1, "Write", {"file_path": "a.md", "content": "x" * 500}), _search(2, "q")],
+    "mcp tool": [_tu(1, "mcp__workspace__bash", {"command": "ls"}), _search(2, "q")],
+    "sub-agent": [_tu(1, "Agent", {"prompt": "research"}), _search(2, "q")],
+    "client's own search tool": [_tu(1, "WebSearch", {"query": "x"}), _search(2, "q")],
+    "a tool that does not exist yet": [_tu(1, "FutureTool_2027", {"anything": [1, 2]}),
+                                       _search(2, "q")],
+    "search first, tool after": [_search(1, "q"), _tu(2, "Write", {"file_path": "a.md"})],
+    "interleaved": [_search(1, "q1"), _tu(2, "Edit", {"p": 1}), _search(3, "q2"),
+                    _tu(4, "mcp__cowork__present_files", {"files": []})],
+    "three different tools": [{"type": "text", "text": "plan"}, _tu(1, "TaskUpdate", {}),
+                              _tu(2, "Read", {"file_path": "b"}), _tu(3, "Glob", {"p": "*"}),
+                              _search(4, "q1"), _search(5, "q2")],
+}
+
+
+@pytest.mark.parametrize("name", list(ANY_CLIENT_TOOLS))
+async def test_mixed_turn_works_for_any_client_tool(name):
+    blocks = ANY_CLIENT_TOOLS[name]
+    asked = [b["input"]["query"] for b in blocks if b.get("name") == GW]
+    client = [b for b in blocks if b["type"] == "tool_use" and b.get("name") != GW]
+    for run in (_run_stream, _run_nonstream):
+        content, stop, bodies, mcp, usage = await run([(blocks, "tool_use")], native_trace=True,
+                                                      mixed_turn_run=True)
+        assert mcp.queries == asked and usage.web_search_count == len(asked)
+        assert len(bodies) == 1 and stop == "tool_use"
+        # every client tool call reaches the client untouched — name, id and input
+        got = [b for b in content if b["type"] == "tool_use"]
+        assert [(b["name"], b["id"], b["input"]) for b in got] == \
+               [(b["name"], b["id"], b["input"]) for b in client]
+        rewritten = wsl._rewrite_inbound_native_blocks(
+            {"messages": _replay(content), "tools": CLIENT_TOOLS})["messages"]
+        _assert_bedrock_valid(rewritten)
+        names = sorted(b["name"] for m in rewritten if m["role"] == "assistant"
+                       for b in m["content"] if b.get("type") == "tool_use")
+        assert names == sorted([b["name"] for b in client] + [GW] * len(asked))
+        _assert_bedrock_valid(wsl._normalize_inbound_native_blocks(
+            {"messages": _replay(content)})["messages"])
+
+
 # ── ② exhausted budget ────────────────────────────────────────────────────────────────────
 def _last_user_text(body: dict) -> str:
     last = [m for m in body["messages"] if m["role"] == "user"][-1]["content"]
