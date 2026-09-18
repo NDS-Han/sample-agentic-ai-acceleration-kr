@@ -24,6 +24,10 @@ Usage:
   export VK_FILE=~/.vk                               # file holding one virtual key (chmod 600)
   python3 18-websearch-client-sim.py                 # built-in scenarios
   python3 18-websearch-client-sim.py --only file     # scenarios whose name contains "file"
+  python3 18-websearch-client-sim.py --client claude-code
+      # identify as Claude Code instead of Cowork: the gateway then answers in TEXT trace mode
+      # (no native blocks; a search leaves only its 🔎 line). Run both — they are different
+      # code paths in the gateway.
   python3 18-websearch-client-sim.py --scenarios my.json --out transcript.json
   python3 18-websearch-client-sim.py --connect-to 127.0.0.1:8443
       # TCP goes to a local tunnel; TLS name and Host header stay GATEWAY_URL's host
@@ -37,6 +41,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import socket
 import sys
 import time
@@ -57,6 +62,13 @@ TOOLS = [
                       "content": {"type": "string"}}, "required": ["file_path", "content"]}},
 ]
 TRACE = "[gateway web_search]"
+RAN = re.compile(r"— (\d+ results?|결과 \d+건)")   # a 🔎 line of a search that returned results
+#: request headers per client class (what gateway-proxy's client_identifier looks at)
+CLIENTS = {
+    "cowork": {"anthropic-client-platform": "desktop_app",
+               "user-agent": "claude-cli/2.1.0 (external, local-agent)"},
+    "claude-code": {"user-agent": "claude-cli/2.1.0 (external, cli)"},
+}
 
 # expect keys: min_searches, max_searches, min_answer_chars, tool (client tool that must run)
 SCENARIOS = [
@@ -86,7 +98,9 @@ SCENARIOS = [
 
 
 class Gateway:
-    def __init__(self, base_url: str, key: str, model: str, connect_to: str | None):
+    def __init__(self, base_url: str, key: str, model: str, connect_to: str | None,
+                 client: str = "cowork"):
+        self.client = client
         u = urlparse(base_url)
         if u.scheme != "https" or not u.hostname:
             sys.exit(f"GATEWAY_URL must be https://host[:port] — got {base_url!r}")
@@ -110,8 +124,7 @@ class Gateway:
         conn = self._conn()
         conn.request("POST", "/v1/messages?beta=true", body=body.encode(), headers={
             "Authorization": "Bearer " + self.key, "content-type": "application/json",
-            "anthropic-version": "2023-06-01", "anthropic-client-platform": "desktop_app",
-            "user-agent": "claude-cli/2.1.0 (external, local-agent)"})
+            "anthropic-version": "2023-06-01", **CLIENTS[self.client]})
         resp = conn.getresponse()
         if resp.status != 200:
             return resp.status, [], None, {}, resp.read().decode("utf-8", "replace")[:400]
@@ -173,14 +186,22 @@ def run_prompt(gw: Gateway, messages: list, prompt: dict, log: list) -> list[str
         calls = [b for b in content if b["type"] == "tool_use"]
         body = "\n".join(b["text"] for b in content if b["type"] == "text")
         lines = [ln for ln in body.splitlines() if TRACE in ln]
-        if len(lines) != len(srv):
-            fails.append(f"request {n}: {len(srv)} search block(s) but {len(lines)} trace line(s)")
-        searches += len(srv) - len(errs)
-        refused += len(errs)
+        if gw.client == "cowork":       # native mode: one block pair AND one line per search
+            if len(lines) != len(srv):
+                fails.append(f"request {n}: {len(srv)} search block(s) but {len(lines)} "
+                             "trace line(s)")
+            ran_n, refused_n = len(srv) - len(errs), len(errs)
+        else:                           # text mode: the 🔎 line is the only trace
+            if srv:
+                fails.append(f"request {n}: native blocks sent to a text-mode client")
+            ran_n = sum(1 for ln in lines if RAN.search(ln))
+            refused_n = len(lines) - ran_n
+        searches += ran_n
+        refused += refused_n
         tools += [b["name"] for b in calls]
         answer += "\n" + "\n".join(ln for ln in body.splitlines() if TRACE not in ln)
-        print(f"    req{n}: {time.time() - t0:3.0f}s stop={stop} searches={len(srv) - len(errs)}"
-              f" refused={len(errs)} client_tools={[b['name'] for b in calls]}"
+        print(f"    req{n}: {time.time() - t0:3.0f}s stop={stop} searches={ran_n}"
+              f" refused={refused_n} client_tools={[b['name'] for b in calls]}"
               f" cache_read={usage.get('cache_read_input_tokens')} out={usage.get('output_tokens')}")
         log.append({"prompt": text, "request": n, "stop": stop, "content": content, "usage": usage})
         if stop != "tool_use" or not calls:
@@ -216,6 +237,8 @@ def main() -> int:
     ap.add_argument("--only", help="run scenarios whose name contains this text")
     ap.add_argument("--model", default=os.environ.get("SIM_MODEL", "claude-opus-5"))
     ap.add_argument("--connect-to", help="HOST:PORT of a local tunnel to the gateway")
+    ap.add_argument("--client", choices=sorted(CLIENTS), default="cowork",
+                    help="client class to identify as (default: cowork)")
     ap.add_argument("--out", help="write the full transcript (every content block) here")
     a = ap.parse_args()
     base = os.environ.get("GATEWAY_URL") or os.environ.get("ANTHROPIC_BASE_URL")
@@ -224,7 +247,7 @@ def main() -> int:
         sys.exit("set GATEWAY_URL (or ANTHROPIC_BASE_URL) and VK_FILE — see the header")
     with open(os.path.expanduser(key_file)) as fh:
         key = fh.read().strip()
-    gw = Gateway(base, key, a.model, a.connect_to)
+    gw = Gateway(base, key, a.model, a.connect_to, a.client)
     scenarios = SCENARIOS
     if a.scenarios:
         with open(a.scenarios) as fh:
@@ -232,7 +255,7 @@ def main() -> int:
     if a.only:
         scenarios = [s for s in scenarios if a.only in s["name"]]
     failed, transcript = [], {}
-    print(f"gateway={gw.host} model={a.model} scenarios={len(scenarios)} "
+    print(f"gateway={gw.host} client={a.client} model={a.model} scenarios={len(scenarios)} "
           f"start={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     for sc in scenarios:
         print(f"\n=== {sc['name']}")
