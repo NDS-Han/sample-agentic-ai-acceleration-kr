@@ -48,23 +48,23 @@ from worker.worker import TaskSupervisor
 _CHANNEL_EVENT_TYPES: dict[str, list[EventType]] = {
     "notifications:budget": [EventType.BUDGET_THRESHOLD],
     "notifications:key": [
-        # api-key-helper가 자동 갱신하므로 expiring/expired 는 비활성화
-        # EventType.KEY_EXPIRING,
-        # EventType.KEY_EXPIRED,
+        # api-key-helper가 자동 갱신하므로 현재 expiring/expired 발행자는 없다 —
+        # 발행자가 생기면 notification_configs.enabled 로 제어한다(이 맵은
+        # 버퍼 드레인 시 EventType→handler 라우팅이라 발행 없는 항목은 무해하다).
+        EventType.KEY_EXPIRING,
+        EventType.KEY_EXPIRED,
         # 관리자/정책에 의한 폐기 시 발행
         EventType.KEY_REVOKED,
     ],
     "notifications:security": [
         EventType.AUTH_FAILURE_SPIKE,
-        # 발행 주체 없음
-        # EventType.PERMISSION_VIOLATION,
-        # EventType.SUSPICIOUS_USAGE,
+        EventType.PERMISSION_VIOLATION,
+        EventType.SUSPICIOUS_USAGE,
     ],
     "notifications:system": [
         EventType.DEGRADATION_MODE,
-        # 발행 주체 없음
-        # EventType.PROVIDER_ERROR,
-        # EventType.SERVICE_HEALTH_CHANGE,
+        EventType.PROVIDER_ERROR,
+        EventType.SERVICE_HEALTH_CHANGE,
     ],
 }
 
