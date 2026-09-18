@@ -22,6 +22,7 @@ from app.models.auth import Team, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, DowngradePolicy, PeriodType
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
+from app.services.team_scope import led_team_ids
 from app.schemas.budgets import (
     AllocationEntry,
     AllocateBudgetRequest,
@@ -287,7 +288,8 @@ class BudgetService:
 
         # BR-BUD-03: Team leader can only set budgets for own team
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            # 소속(actor.team_id)이 아니라 "리더로 지정된 팀" 기준 — team_scope 정책.
+            if user.team_id not in await led_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
 
         # BR-BUD-01: Validate member budget sum <= team budget
@@ -402,7 +404,8 @@ class BudgetService:
 
         # BR-BUD-03: Team leaders can only set budgets for their own team members.
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            # 소속(actor.team_id)이 아니라 "리더로 지정된 팀" 기준 — team_scope 정책.
+            if user.team_id not in await led_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
 
         from app.services.user_allowed_client_service import UserAllowedClientService
@@ -498,7 +501,8 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            # 소속(actor.team_id)이 아니라 "리더로 지정된 팀" 기준 — team_scope 정책.
+            if user.team_id not in await led_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
 
         repo = BudgetRepository(session)
@@ -549,7 +553,7 @@ class BudgetService:
         user = await user_repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
-        if actor.role == UserRole.TEAM_LEADER and user.team_id != actor.team_id:
+        if actor.role == UserRole.TEAM_LEADER and user.team_id not in await led_team_ids(session, actor):
             raise ForbiddenError("Team leaders can only read budgets for their own team members")
 
         repo = BudgetRepository(session)
@@ -574,8 +578,8 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
-        # BR-BUD-03: Team leader can only allocate within own team
-        if actor.role == UserRole.TEAM_LEADER and actor.team_id != team_id:
+        # BR-BUD-03: Team leader can only allocate within teams they lead
+        if actor.role == UserRole.TEAM_LEADER and team_id not in await led_team_ids(session, actor):
             raise ForbiddenError("Team leaders can only allocate budgets within their own team")
 
         repo = BudgetRepository(session)
@@ -628,7 +632,13 @@ class BudgetService:
         *,
         team_id: uuid.UUID,
         period: str,
+        actor: CurrentUser,
     ) -> TeamBudgetAllocation | None:
+        # 리더로 지정된 팀만 열람 가능 — 이전엔 actor 검사가 없어 임의 team_id로
+        # 타 팀 배정 현황을 읽을 수 있었다(IDOR). analytics/dashboard 와 동일 정책.
+        if actor.role == UserRole.TEAM_LEADER and team_id not in await led_team_ids(session, actor):
+            raise ForbiddenError("Team leaders can only read allocations for teams they lead")
+
         user_repo = UserRepository(session)
         team = await user_repo.get_team(team_id)
         if team is None:
@@ -690,6 +700,30 @@ class BudgetService:
             entries=entries,
         )
 
+    async def get_my_allocations(
+        self,
+        session: AsyncSession,
+        *,
+        actor: CurrentUser,
+        period: str,
+    ) -> list[TeamBudgetAllocation]:
+        """행위자가 관리할 수 있는 팀들의 배정 현황 — ADMIN 은 전체, TEAM_LEADER 는
+        리더로 지정된 팀만. 팀 예산 페이지가 팀당 카드 하나씩 렌더한다.
+        리더인 팀이 없으면 빈 리스트(실패 폐쇄 — 전사 데이터가 새지 않는다)."""
+        if actor.role == UserRole.ADMIN:
+            teams = await UserRepository(session).list_all_teams()
+            team_ids = [t.id for t in teams]
+        else:
+            team_ids = sorted(await led_team_ids(session, actor), key=str)
+        out: list[TeamBudgetAllocation] = []
+        for tid in team_ids:
+            alloc = await self.get_team_allocation(
+                session, team_id=tid, period=period, actor=actor
+            )
+            if alloc is not None:
+                out.append(alloc)
+        return out
+
     async def get_budget_summary(
         self,
         session: AsyncSession,
@@ -723,11 +757,12 @@ class BudgetService:
         users = await user_repo.iter_all_users()
         teams = await user_repo.list_all_teams()
 
-        # TEAM_LEADER 는 본인 팀만 — scope/target_id 쿼리 파라미터로 다른 팀을 넘겨도
-        # 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
+        # TEAM_LEADER 는 리더로 지정된 팀만 — scope/target_id 쿼리 파라미터로 다른
+        # 팀을 넘겨도 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
         if actor is not None and actor.role == UserRole.TEAM_LEADER:
-            teams = [t for t in teams if t.id == actor.team_id]
-            users = [u for u in users if u.team_id == actor.team_id]
+            led = await led_team_ids(session, actor)
+            teams = [t for t in teams if t.id in led]
+            users = [u for u in users if u.team_id in led]
 
         # team_id(str) → (dept_id, dept_name). teams are loaded with
         # selectinload(Team.department), so this needs no extra query.
