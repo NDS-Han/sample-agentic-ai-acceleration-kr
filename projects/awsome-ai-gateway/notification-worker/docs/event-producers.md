@@ -5,6 +5,7 @@
 **새 발행자를 추가할 때 어느 지점을 연결해야 하는지**를 정리한다.
 
 > 발송 채널(mock/smtp/ses/internal_api) 설정은 [8-W-notifications](../../docs/us-llm-gateway/ops/8-W-notifications.md) 참조.
+> 이벤트별 메일 수신자(recipient_roles)는 [recipients.md](./recipients.md) 참조.
 
 ---
 
