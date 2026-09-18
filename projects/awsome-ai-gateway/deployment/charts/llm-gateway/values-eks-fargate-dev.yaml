@@ -336,7 +336,7 @@ adminApi:
     #   비어 있으면 감사 엔드포인트는 404 가 아니라 **503**(미설정)을 준다 — 지금 dev 의 상태다
     #   (terraform 의 enable_bedrock_invocation_logging 이 false 라 log group 이 없다).
     #   285 통과. ⚠️ scheduler.image.tag 를 같은 값으로 유지(아래 주석 참조).
-    tag: "1.0.74-budgetscope"
+    tag: "1.0.75-deptname"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
@@ -425,7 +425,7 @@ adminUi:
     # 1.0.100-mwredirect: 미들웨어 로그인 리다이렉트가 상대 Location 이라 Next 14.2 어댑터에서
     #   Invalid URL → 미인증·만료 요청이 오는 모든 페이지 500 (upstream b51fab0 를 처음 빌드한 결과).
     #   요청 Host + x-forwarded-proto 로 절대 URL 을 만들도록 수정.
-    tag: "1.0.107-allocui"
+    tag: "1.0.108-deptname"
   resources:
     requests:
       cpu: "500m"
@@ -442,7 +442,7 @@ scheduler:
     # roi_aggregator 가 KST 비닝 수정(A-2/E-1)의 대상이라 어긋나면 스케줄러만 옛 로직으로 집계.
     # ⚠️ 이 값이 특히 중요하다: 1.0.67-roifix 가 고친 NameError 는 **스케줄러에서만** 터진다
     # (API 경로는 그 함수를 안 탄다). adminApi 만 올리고 여기를 두면 ROI 집계는 계속 실패한다.
-    tag: "1.0.74-budgetscope"
+    tag: "1.0.75-deptname"
   resources:
     requests:
       cpu: "250m"  # Fargate 하한
