@@ -605,6 +605,8 @@
     "activeUsersDescription": "활성 사용자 {count}명 기준",
     "costByUser": "사용자별 비용 분석",
     "costUsd": "비용 (USD)",
+    "costSeriesTotal": "합계",
+    "costSeriesOther": "기타",
     "item": "항목",
     "date": "날짜",
     "periods": {

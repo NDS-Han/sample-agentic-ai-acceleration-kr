@@ -12,6 +12,11 @@ interface CostTrendChartProps {
 
 interface AnalyticsAPIResponse {
   trends: { date: string; cost_usd: number; requests: number }[];
+  trends_by_team?: {
+    team: string;
+    team_id: string;
+    points: { date: string; cost_usd: number; requests: number }[];
+  }[];
 }
 
 export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProps) {
@@ -22,11 +27,21 @@ export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProp
   const trends = (data?.trends ?? []).map((t) => ({
     date: t.date,
     cost_usd: Number(t.cost_usd),
+    requests: Number(t.requests ?? 0),
+  }));
+  const trendsByTeam = (data?.trends_by_team ?? []).map((tt) => ({
+    team: tt.team,
+    team_id: tt.team_id,
+    points: (tt.points ?? []).map((p) => ({
+      date: p.date,
+      cost_usd: Number(p.cost_usd),
+      requests: Number(p.requests ?? 0),
+    })),
   }));
 
   return (
     <div className="glass glass-hover rounded-apple p-4">
-      <LazyCostTrendChart trends={trends} />
+      <LazyCostTrendChart trends={trends} trendsByTeam={trendsByTeam} />
     </div>
   );
 }

@@ -451,7 +451,10 @@ adminUi:
     #   팀 칩 토글로 개별 표시 선택(꺼진 팀은 기타에 합산). trends_by_team 소비.
     # 1.0.104-trendlegend: 추이 범례를 차트 아래(x축 밑)로 이동 — 상단 플로팅이
     #   그래프를 가렸음.
-    tag: "1.0.104-trendlegend"
+    # 1.0.105-anatrend: 분석 페이지 사용량 추세도 합계+팀별 멀티 시리즈로 —
+    #   팀 칩 토글·하단 범례·범례 클릭 무력화(클릭 시 빈 차트 혼란 제거).
+    #   조립 로직을 lib/utils/trendSeries 로 공용화해 대시보드와 동일 규칙.
+    tag: "1.0.105-anatrend"
   resources:
     requests:
       cpu: "500m"

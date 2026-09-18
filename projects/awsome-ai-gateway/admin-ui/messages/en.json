@@ -605,6 +605,8 @@
     "activeUsersDescription": "Based on {count} active users",
     "costByUser": "Cost by User",
     "costUsd": "Cost (USD)",
+    "costSeriesTotal": "Total",
+    "costSeriesOther": "Other",
     "item": "Item",
     "date": "Date",
     "periods": {

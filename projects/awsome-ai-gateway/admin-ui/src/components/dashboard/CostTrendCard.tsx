@@ -26,43 +26,20 @@ import {
   Tooltip,
   Legend,
 } from 'recharts';
+import {
+  buildTrendSeries,
+  defaultSelectedTeamIds,
+  type TeamSeriesMeta,
+  type TeamTrendSeries,
+  type TrendPoint,
+} from '@/lib/utils/trendSeries';
 
-interface TrendPoint {
-  date: string;
-  cost_usd: number;
-  requests: number;
-}
-
-interface TeamTrendSeries {
-  team: string;
-  team_id: string;
-  points: TrendPoint[];
-}
+export { defaultSelectedTeamIds };
 
 interface CostTrendCardProps {
   trends: TrendPoint[];
   trendsByTeam?: TeamTrendSeries[];
 }
-
-// 기본으로 개별 표시할 팀 수 — 이만큼이면 범례 한 줄 + 선 구분이 유지된다.
-const TOP_TEAM_COUNT = 5;
-
-// 팀 시리즈 색상 — chart 토큰 우선, 이후는 팔레트 확장 보조색.
-const TEAM_COLORS = [
-  'hsl(var(--chart-2))',   // sky
-  'hsl(var(--chart-3))',   // pink
-  'hsl(var(--chart-4))',   // violet
-  'hsl(var(--chart-5))',   // amber
-  'hsl(350 85% 66%)',      // rose
-  'hsl(150 65% 42%)',      // green
-  'hsl(230 75% 66%)',      // indigo
-  'hsl(185 75% 42%)',      // cyan
-  'hsl(25 90% 55%)',       // orange
-  'hsl(280 60% 60%)',      // purple
-];
-
-// 팀별 선형 — 색뿐 아니라 대시 패턴도 달리해 단색 출력/색약에도 구분되게.
-const TEAM_DASHES = ['0', '8 4', '4 4', '10 4 2 4', '3 3', '12 4', '6 2 2 2', '2 5', '9 3 3 3', '5 5'];
 
 export interface TeamSeriesDef {
   dataKey: string;
@@ -83,85 +60,44 @@ export interface TrendChartData {
   hasTeamSeries: boolean;
 }
 
-interface RankedTeam {
-  teamId: string;
-  name: string;
-  total: number;
-  byDate: Map<string, number>;
-}
-
-function rankTeams(trendsByTeam: TeamTrendSeries[]): RankedTeam[] {
-  return trendsByTeam
-    .map((tt) => ({
-      teamId: tt.team_id,
-      name: tt.team,
-      total: tt.points.reduce((s, p) => s + Number(p.cost_usd || 0), 0),
-      byDate: new Map(tt.points.map((p) => [p.date, Number(p.cost_usd)])),
-    }))
-    .sort((a, b) => b.total - a.total);
-}
-
-/** 기본 선택 = 비용 상위 TOP_TEAM_COUNT 개 팀 id. */
-export function defaultSelectedTeamIds(trendsByTeam: TeamTrendSeries[]): Set<string> {
-  return new Set(rankTeams(trendsByTeam).slice(0, TOP_TEAM_COUNT).map((t) => t.teamId));
-}
-
 /**
- * 추이 차트 데이터 조립 — 합계 + 팀별 시리즈를 날짜 축으로 정렬한다.
- * 렌더와 무관한 순수 함수라 상위 N/기타 합산·날짜 정합성을 직접 검증할 수 있다.
- *
- * 규칙:
- *  - x축 날짜 = 합계 + 모든 팀 포인트의 날짜 합집합(오름차순). 어느 시리즈든
- *    그 날짜에 포인트가 없으면 null — 0 으로 접으면 "그날 비용 0" 이라는 거짓
- *    사실이 되므로 connectNulls 로 끊어 그린다.
- *  - selectedIds 에 든 팀만 개별 시리즈. 나머지 팀은 날짜별 합산 'other'
- *    시리즈 하나로 접는다 — 꺼둔 팀의 비용이 화면에서 사라지지 않는다.
- *  - selectedIds 미지정이면 비용 상위 TOP_TEAM_COUNT 개가 기본 선택이다.
+ * 추이 차트 데이터 조립 — lib/utils/trendSeries 의 열 형태 결과를 recharts 가
+ * 먹는 행(row) 형태로 바꾸는 얇은 어댑터. 조립 규칙(날짜 합집합·null·기타
+ * 합산·상위 N 기본 선택)은 공용 유틸 문서를 본다.
  */
 export function buildTrendChartData(
   trends: TrendPoint[],
   trendsByTeam: TeamTrendSeries[],
   selectedIds?: ReadonlySet<string>,
 ): TrendChartData {
-  const ranked = rankTeams(trendsByTeam);
-  const selected = selectedIds ?? new Set(ranked.slice(0, TOP_TEAM_COUNT).map((t) => t.teamId));
+  const { dates, total, series, allTeams, other, hasTeamSeries } =
+    buildTrendSeries(trends, trendsByTeam, selectedIds);
 
-  const totalByDate = new Map(trends.map((p) => [p.date, Number(p.cost_usd)]));
-  const dateSet = new Set<string>(totalByDate.keys());
-  for (const s of ranked) for (const d of s.byDate.keys()) dateSet.add(d);
-  const dates = [...dateSet].sort();
-
-  const on = ranked.filter((t) => selected.has(t.teamId));
-  const off = ranked.filter((t) => !selected.has(t.teamId));
-
-  const data = dates.map((d) => {
+  const data = dates.map((d, i) => {
     const row: Record<string, number | string | null> = {
       label: d.length >= 10 ? d.slice(5) : d,
-      total: totalByDate.get(d) ?? null,
+      total: total[i],
     };
-    for (const s of on) row[`team_${s.teamId}`] = s.byDate.get(d) ?? null;
-    if (off.length > 0) {
-      row.other = off.reduce((s, tt) => s + (tt.byDate.get(d) ?? 0), 0);
-    }
+    for (const s of series) row[s.key] = s.values[i];
+    if (other) row.other = other[i];
     return row;
   });
 
-  const allTeams = ranked.map((t, i) => ({
-    dataKey: `team_${t.teamId}`,
-    teamId: t.teamId,
-    name: t.name,
-    color: TEAM_COLORS[i % TEAM_COLORS.length],
-    dash: TEAM_DASHES[i % TEAM_DASHES.length],
-    total: t.total,
-  }));
-  const series = allTeams.filter((t) => selected.has(t.teamId));
+  const toDef = (m: TeamSeriesMeta): TeamSeriesDef => ({
+    dataKey: m.key,
+    teamId: m.teamId,
+    name: m.name,
+    color: m.color,
+    dash: m.dash,
+    total: m.total,
+  });
 
   return {
     data,
-    series,
-    allTeams,
-    showOther: off.length > 0,
-    hasTeamSeries: ranked.length > 0,
+    series: series.map(toDef),
+    allTeams: allTeams.map(toDef),
+    showOther: other !== null,
+    hasTeamSeries,
   };
 }
 

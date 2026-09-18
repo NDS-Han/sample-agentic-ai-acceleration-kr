@@ -4,6 +4,7 @@
 
 import dynamic from 'next/dynamic';
 import type { TrendDataPoint } from '@/types/entities';
+import type { TeamTrendSeries } from '@/lib/utils/trendSeries';
 
 // ⚠️ ssr:false 는 Server Component 안의 next/dynamic 에서 쓰면
 // BAILOUT_TO_CLIENT_SIDE_RENDERING 경계가 생겨 hydration 타이밍에 따라
@@ -21,8 +22,14 @@ const BreakdownChartClient = dynamic(
   { ssr: false }
 );
 
-export function LazyCostTrendChart({ trends }: { trends: TrendDataPoint[] }) {
-  return <CostTrendChartClient trends={trends} />;
+export function LazyCostTrendChart({
+  trends,
+  trendsByTeam,
+}: {
+  trends: TrendDataPoint[];
+  trendsByTeam?: TeamTrendSeries[];
+}) {
+  return <CostTrendChartClient trends={trends} trendsByTeam={trendsByTeam} />;
 }
 
 export function LazyBreakdownChart({
