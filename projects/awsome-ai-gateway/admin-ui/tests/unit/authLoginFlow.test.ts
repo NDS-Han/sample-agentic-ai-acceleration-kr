@@ -713,30 +713,33 @@ describe('GET /api/auth/callback — 실패를 읽히게', () => {
 
 // ───────────────────────── 3. middleware 목적지 ─────────────────────────
 
-describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
+// ⚠️ 이 describe 는 OIDC_* 미설정(beforeEach 가 ENV_KEYS 를 지운다)에서 돌므로
+//    목적지는 `/login` 이다 — OIDC_* 가 채워진 hosted-UI 배포의 `/api/auth/login`
+//    분기는 tests/unit/middleware.test.ts 의 별도 describe 가 덮는다.
+describe('middleware — 로그인 목적지는 /login 이다', () => {
   function b64(obj: unknown): string {
     return Buffer.from(JSON.stringify(obj)).toString('base64url');
   }
 
-  it('쿠키 없음 → /api/auth/login (dev-login 직행 금지)', async () => {
+  it('쿠키 없음 → /login (dev-login 직행 금지)', async () => {
     const res = await middleware(req('http://admin.test/'));
     expect(res.status).toBe(307);
-    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/login');
     expect(res.headers.get('location')).not.toContain('/api/auth/dev-login');
   });
 
-  it('만료된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
+  it('만료된 토큰 → /login + admin_jwt 제거', async () => {
     const expired = `header.${b64({ sub: 'u', role: 'ADMIN', exp: Math.floor(Date.now() / 1000) - 60 })}.sig`;
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: expired } }));
-    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/login');
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain('admin_jwt=');
     expect(setCookie).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
   });
 
-  it('손상된 토큰 → /api/auth/login + admin_jwt 제거', async () => {
+  it('손상된 토큰 → /login + admin_jwt 제거', async () => {
     const res = await middleware(req('http://admin.test/', { cookies: { admin_jwt: 'not-a-jwt' } }));
-    expectSameOriginRedirect(res, 'http://admin.test', '/api/auth/login');
+    expectSameOriginRedirect(res, 'http://admin.test', '/login');
     expect(res.headers.get('set-cookie') ?? '').toContain('admin_jwt=');
   });
 
@@ -762,7 +765,7 @@ describe('middleware — 로그인 목적지는 /api/auth/login 이다', () => {
     const res = await middleware(
       req('http://admin.internal:3000/budgets?q=secret', { headers: { 'x-forwarded-proto': 'https' } }),
     );
-    expectSameOriginRedirect(res, 'https://admin.internal:3000', '/api/auth/login');
+    expectSameOriginRedirect(res, 'https://admin.internal:3000', '/login');
     expect(res.headers.get('location')).not.toContain('secret');
   });
 });
