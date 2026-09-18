@@ -290,8 +290,19 @@ _FINAL_TURN_TEXT_NUDGE = ("[Your previous turn contained no visible text. Write 
 #: Appended to the last user message of the forced-final turn. With only result JSON as the
 #: last user content, Opus 5 answered with a single ``<br>`` (2026-09-16: four billed
 #: searches and no answer).
-_FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request; "
-                          "no further searches can be made. Write the final answer now.]")
+#: 2026-09-18 (Cowork): the forced-final turn is sent with ``tool_choice: none``, which blocks
+#: EVERY tool — the client's own tools too, not only web_search. The instruction used to say
+#: only that no further searches can be made; the model kept its plan ("save a note with the
+#: memory tool, then write the news"), could not call the tool, and ended the turn after the
+#: announcement alone (191 chars of text out of 2,895 output tokens). The empty-text nudge
+#: does not fire in that case because there IS visible text, so the instruction itself must
+#: say that no tool is available and that the whole answer is due now.
+_FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request. "
+                          "No tool of any kind can be called in this turn — not web_search "
+                          "and not any other tool — so do not announce or plan further "
+                          "steps such as saving notes or more lookups; anything that needs "
+                          "a tool can happen in a later turn. Write the complete final "
+                          "answer now.]")
 
 
 def _strip_anthropic_web_search_plumbing(
