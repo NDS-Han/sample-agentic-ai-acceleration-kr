@@ -19,6 +19,10 @@
 # Also carries WEB_SEARCH_TRACE_MODE (text | native — the 2026-09-17 native-block
 # probe for Cowork; string-valued) and WEB_SEARCH_DIGEST_CHARS (per-result excerpt
 # replayed in native mode; 0 = same as the trimmed result the model saw).
+# WEB_SEARCH_MIXED_TURN_RUN / WEB_SEARCH_FINAL_TURN_SOFT (0|1, 2026-09-18): web search
+# next to the client's own tools — run the searches of a turn that also calls a client
+# tool (native mode), and keep client tools callable once the search budget is used up.
+# 0 = previous behaviour; flip back to 0 + install-eks.sh if a client/model update breaks it.
 #
 # Usage:
 #   bash 17-set-websearch-caps.sh                 # dry-run
@@ -33,7 +37,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --apply)   APPLY=1;     shift ;;
     --values)  VALUES="$2"; shift 2 ;;
-    -h|--help) sed -n '2,24p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "Unknown argument: $1"; exit 1 ;;
   esac
 done
@@ -44,15 +48,20 @@ load_config
 : "${WEB_SEARCH_MAX_SEARCHES_PER_TURN:=3}"
 : "${WEB_SEARCH_MAX_ITERATIONS:=2}"
 : "${WEB_SEARCH_DIGEST_CHARS:=0}"
+: "${WEB_SEARCH_MIXED_TURN_RUN:=0}"
+: "${WEB_SEARCH_FINAL_TURN_SOFT:=0}"
 : "${WEB_SEARCH_TRACE_MODE:=text}"
-KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS WEB_SEARCH_DIGEST_CHARS)
+KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS WEB_SEARCH_DIGEST_CHARS
+      WEB_SEARCH_MIXED_TURN_RUN WEB_SEARCH_FINAL_TURN_SOFT)
 STR_KEYS=(WEB_SEARCH_TRACE_MODE)
 ALL_KEYS=("${KEYS[@]}" "${STR_KEYS[@]}")
 declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=60000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=10
                           [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5
-                          [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=text )
+                          [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=text
+                          [WEB_SEARCH_MIXED_TURN_RUN]=0 [WEB_SEARCH_FINAL_TURN_SOFT]=0 )
 for k in "${KEYS[@]}"; do [[ "${!k}" =~ ^[0-9]+$ ]] || die "$k must be an integer (config.env): ${!k}"; done
 for k in "${STR_KEYS[@]}"; do [[ "${!k}" =~ ^(text|native)$ ]] || die "$k must be text|native (config.env): ${!k}"; done
+for k in WEB_SEARCH_MIXED_TURN_RUN WEB_SEARCH_FINAL_TURN_SOFT; do [[ "${!k}" =~ ^[01]$ ]] || die "$k must be 0 or 1 (config.env): ${!k}"; done
 
 ROOT="$(cd "$LIB_DIR/../../.." && pwd)"
 CHART="$ROOT/deployment/charts/llm-gateway"
