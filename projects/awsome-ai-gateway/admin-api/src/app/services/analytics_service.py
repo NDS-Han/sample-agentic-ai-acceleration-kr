@@ -164,7 +164,7 @@ class AnalyticsService:
         # 항상 빈 상태로 나왔다.
         by_team: list[TeamBreakdown] = []
         from sqlalchemy import distinct, func, select
-        from app.models.auth import Team
+        from app.models.auth import Department, Team
         from app.models.usage import UsageLog
         from app.core.usage_filters import cost_period_filter
         # ⚠️ team 라벨에 UUID 를 넣지 말 것 — 차트 x축에 그대로 노출된다.
@@ -350,13 +350,16 @@ class AnalyticsService:
             select(
                 UsageLog.team_id,
                 Team.name.label("team_name"),
+                Department.name.label("dept_name"),
                 _kst_day.label("day"),
                 func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
                 func.count().label("requests"),
             )
             .join(Team, Team.id == UsageLog.team_id)
+            # dept 는 팀에 안 달려 있을 수 있어 OUTER — 부서 없는 팀도 시리즈가 나와야 한다.
+            .outerjoin(Department, Department.id == Team.dept_id)
             .where(*trend_where)
-            .group_by(UsageLog.team_id, Team.name, _kst_day)
+            .group_by(UsageLog.team_id, Team.name, Department.name, _kst_day)
             .order_by(Team.name, _kst_day)
         )
         _trend_rows: dict[uuid.UUID, TeamTrend] = {}
@@ -366,6 +369,7 @@ class AnalyticsService:
                 tt = _trend_rows[r.team_id] = TeamTrend(
                     team=r.team_name or str(r.team_id),
                     team_id=str(r.team_id),
+                    dept_name=r.dept_name,
                 )
             tt.points.append(TrendItem(
                 date=str(r.day),

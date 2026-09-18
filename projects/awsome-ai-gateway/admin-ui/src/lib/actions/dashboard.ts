@@ -197,6 +197,7 @@ export interface TeamBreakdown {
 export interface TeamTrend {
   team: string;
   team_id: string;
+  dept_name?: string | null;
   points: TrendItem[];
 }
 

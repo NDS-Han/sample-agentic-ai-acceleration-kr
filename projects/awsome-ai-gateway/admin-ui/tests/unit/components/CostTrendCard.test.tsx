@@ -26,9 +26,10 @@ vi.mock('next-intl', () => ({
 }));
 
 const pt = (date: string, cost: number) => ({ date, cost_usd: cost, requests: 1 });
-const team = (id: string, name: string, points: [string, number][]) => ({
+const team = (id: string, name: string, points: [string, number][], dept?: string) => ({
   team: name,
   team_id: id,
+  dept_name: dept ?? null,
   points: points.map(([d, c]) => pt(d, c)),
 });
 
@@ -41,6 +42,17 @@ describe('buildTrendChartData', () => {
     expect(r.allTeams).toHaveLength(0);
     expect(r.data.map((d) => d.total)).toEqual([10, 20]);
     expect(r.data[0].other).toBeUndefined();
+  });
+
+  it('부서가 있는 팀은 라벨이 "부서-팀"이다 — 부서 없으면 팀명 그대로', () => {
+    const r = buildTrendChartData(
+      [pt('2026-09-01', 10)],
+      [
+        team('a', 'Developers', [['2026-09-01', 6]], 'NDS'),
+        team('b', 'Infra', [['2026-09-01', 4]]),
+      ],
+    );
+    expect(r.series.map((s) => s.name)).toEqual(['NDS-Developers', 'Infra']);
   });
 
   it('팀이 하나면 합계 + 그 팀 시리즈다', () => {

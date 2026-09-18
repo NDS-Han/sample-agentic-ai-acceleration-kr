@@ -25,6 +25,8 @@ export interface TrendPoint {
 export interface TeamTrendSeries {
   team: string;
   team_id: string;
+  /** 팀의 소속 부서명 — 있으면 라벨을 "부서-팀"으로 표시한다. */
+  dept_name?: string | null;
   points: TrendPoint[];
 }
 
@@ -78,11 +80,16 @@ interface RankedTeam {
   byDate: Map<string, number>;
 }
 
+/** 표시용 팀 라벨 — 부서가 있으면 "부서-팀", 없으면 팀명 그대로. */
+export function teamDisplayName(tt: Pick<TeamTrendSeries, 'team' | 'dept_name'>): string {
+  return tt.dept_name ? `${tt.dept_name}-${tt.team}` : tt.team;
+}
+
 function rankTeams(trendsByTeam: TeamTrendSeries[]): RankedTeam[] {
   return trendsByTeam
     .map((tt) => ({
       teamId: tt.team_id,
-      name: tt.team,
+      name: teamDisplayName(tt),
       total: tt.points.reduce((s, p) => s + Number(p.cost_usd || 0), 0),
       byDate: new Map(tt.points.map((p) => [p.date, Number(p.cost_usd)])),
     }))

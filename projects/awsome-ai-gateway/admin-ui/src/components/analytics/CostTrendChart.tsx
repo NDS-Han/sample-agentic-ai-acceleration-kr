@@ -15,6 +15,7 @@ interface AnalyticsAPIResponse {
   trends_by_team?: {
     team: string;
     team_id: string;
+    dept_name?: string | null;
     points: { date: string; cost_usd: number; requests: number }[];
   }[];
 }
@@ -32,6 +33,7 @@ export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProp
   const trendsByTeam = (data?.trends_by_team ?? []).map((tt) => ({
     team: tt.team,
     team_id: tt.team_id,
+    dept_name: tt.dept_name ?? null,
     points: (tt.points ?? []).map((p) => ({
       date: p.date,
       cost_usd: Number(p.cost_usd),

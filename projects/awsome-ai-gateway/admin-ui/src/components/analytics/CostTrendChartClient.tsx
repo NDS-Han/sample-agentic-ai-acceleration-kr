@@ -171,18 +171,19 @@ export function CostTrendChartClient({ trends, trendsByTeam = [] }: CostTrendCha
                 key={tm.teamId}
                 type="button"
                 aria-pressed={on}
+                title={tm.name}
                 onClick={() => toggleTeam(tm.teamId)}
-                className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
+                className={`inline-flex max-w-full items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${
                   on
                     ? 'border-transparent bg-secondary text-foreground'
                     : 'border-border text-muted-foreground hover:bg-secondary/60'
                 }`}
               >
                 <span
-                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  className="inline-block h-2.5 w-2.5 shrink-0 rounded-full"
                   style={{ backgroundColor: on ? tm.color : theme.textMuted }}
                 />
-                {tm.name}
+                <span className="max-w-[12rem] truncate">{tm.name}</span>
               </button>
             );
           })}

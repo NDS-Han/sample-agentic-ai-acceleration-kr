@@ -64,6 +64,8 @@ class TeamTrend(BaseModel):
 
     team: str
     team_id: str
+    # 팀의 소속 부서명 — UI 에서 "부서-팀" 형태 라벨을 만들 때 쓴다. 부서 미지정 팀은 None.
+    dept_name: str | None = None
     points: list[TrendItem] = []
 
 
