@@ -20,6 +20,7 @@ import {
   unsetTeamLeaderAction,
 } from '@/lib/actions/users';
 import { listActiveModelsAction } from '@/lib/actions/models';
+import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
@@ -118,15 +119,15 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
 
 // ── USER 상세 (앱 접근 권한 토글 포함) ────────────────────────────────────────
 
-// 앱(client) 집합 — client_identifier 토큰과 동일. 새 앱 추가 시 여기만 늘리면
+// 앱(client) 집합 — gateway.ts CLIENTS 단일 소스 사용. 새 앱 추가 시 거기만 늘리면
 // 토글·예산 입력·dirty 비교가 모두 자동으로 확장된다(이전 both/single 이분법 폐기).
-const ALL_CLIENTS = ['claude-code', 'cowork' /* , 'codex' */] as const;
-type ClientId = (typeof ALL_CLIENTS)[number];
+const ALL_CLIENTS = CLIENTS;
+type ClientId = GatewayClient;
 
 const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'claude-code', label: 'Claude Code' },
   { value: 'cowork', label: 'Cowork' },
-  // { value: 'codex', label: 'Codex' },
+  { value: 'codex', label: 'Codex' },
 ];
 
 // API allowed_clients([] = 전체 허용) → UI 체크 상태. [] 면 전부 체크로 표시.

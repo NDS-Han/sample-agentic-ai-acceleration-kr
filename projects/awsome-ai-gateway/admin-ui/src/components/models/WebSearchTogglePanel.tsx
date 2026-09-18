@@ -5,10 +5,11 @@
 import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import { setClientWebSearchAction, type RoutingProfileItem } from '@/lib/actions/routing';
+import { CLIENTS } from '@/lib/constants/gateway';
 import { labelFor } from '@/lib/utils/modelLabel';
 
 // 앱(client) 순서 고정 — client_identifier 토큰과 동일.
-const CLIENT_ORDER = ['claude-code', 'cowork' /* , 'codex' */] as const;
+const CLIENT_ORDER = CLIENTS;
 
 interface Props {
   initial: RoutingProfileItem[];

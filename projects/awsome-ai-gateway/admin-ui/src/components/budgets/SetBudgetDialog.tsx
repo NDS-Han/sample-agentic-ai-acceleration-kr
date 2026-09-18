@@ -14,6 +14,7 @@ import {
   setUserClientBudgetAction,
   clearUserClientBudgetAction,
 } from '@/lib/actions/users';
+import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
@@ -39,13 +40,13 @@ const POLICY_OPTIONS = [
 const DEFAULT_THRESHOLDS = [80, 90, 100];
 
 // per-app(client) 예산 게이팅 — /users 화면(OrgDetailPanel UserPanel)과 동일 로직.
-// 빈 allowed_clients = 전체 허용. 새 앱은 ALL_CLIENTS 에만 추가하면 자동 확장.
-const ALL_CLIENTS = ['claude-code', 'cowork' /* , 'codex' */] as const;
-type ClientId = (typeof ALL_CLIENTS)[number];
+// 빈 allowed_clients = 전체 허용. 새 앱은 gateway.ts CLIENTS 에만 추가하면 자동 확장.
+const ALL_CLIENTS = CLIENTS;
+type ClientId = GatewayClient;
 const CLIENT_LABELS: Record<ClientId, string> = {
   'claude-code': 'Claude Code',
   cowork: 'Cowork',
-  // codex: 'Codex',
+  codex: 'Codex',
 };
 
 // API allowed_clients([] = 전체 허용) → 허용 client 목록. [] 면 전부 허용으로 펼친다.
