@@ -22,6 +22,7 @@ from app.schemas.analytics import (
     CostSummary,
     ModelBreakdown,
     TeamBreakdown,
+    TeamTrend,
     TrendItem,
     UsageByUserItem,
     UsageByUserModelItem,
@@ -56,24 +57,17 @@ def _validate_period_date(period: str, date: str) -> None:
 class AnalyticsService:
     @staticmethod
     async def _leader_team_ids(session: AsyncSession, actor: CurrentUser) -> set[uuid.UUID]:
-        """TEAM_LEADER 가 열람할 수 있는 팀 집합 = 리더로 지정된 팀들 ∪ 소속 팀.
+        """TEAM_LEADER 가 열람할 수 있는 팀 집합 = 리더로 지정된 팀들(엄격).
 
         auth.teams.leader_user_id 는 복수 팀이 같은 사용자를 가리킬 수 있으므로
         (한 사람이 여러 팀의 리더) CurrentUser.team_id — 소속 팀 1개 — 만으로 좁히면
-        리더가 맡은 다른 팀이 빠진다. 반대로 소속 팀은 포함한다 — 본인의 사용량이
-        그 팀에 귀속되기 때문.
+        리더가 맡은 다른 팀이 빠진다. 소속 팀은 포함하지 **않는다** — 정책은
+        "리더인 팀만" 이므로, 소속이지만 리더가 아닌 팀의 데이터는 열리지 않는다.
+        구현은 services/team_scope.py 의 공용 헬퍼로 위임(dashboard 와 단일 진실원).
         """
-        from sqlalchemy import select
+        from app.services.team_scope import led_team_ids
 
-        from app.models.auth import Team
-
-        rows = await session.execute(
-            select(Team.id).where(Team.leader_user_id == actor.user_id)
-        )
-        ids = set(rows.scalars().all())
-        if actor.team_id is not None:
-            ids.add(actor.team_id)
-        return ids
+        return await led_team_ids(session, actor)
 
     async def get_analytics(
         self,
@@ -95,7 +89,7 @@ class AnalyticsService:
 
         if scope.startswith("team:"):
             team_id = uuid.UUID(scope.split(":")[1])
-            # TEAM_LEADER 는 본인이 소속/리더인 팀만 볼 수 있다
+            # TEAM_LEADER 는 본인이 리더로 지정된 팀만 볼 수 있다(엄격 — 소속만으론 부족)
             if actor.role == UserRole.TEAM_LEADER and team_id not in await self._leader_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only view analytics for their own team")
             roi_scope = ROIScope.TEAM
@@ -350,6 +344,36 @@ class AnalyticsService:
             for r in (await session.execute(trend_stmt)).all()
         ]
 
+        # 팀별 추이 — trends 와 같은 WHERE(scope_ids·client)에 team 차원만 추가.
+        # ADMIN 은 전 팀, TEAM_LEADER 는 리더인 팀들만 나온다(by_team 과 같은 격리).
+        team_trend_stmt = (
+            select(
+                UsageLog.team_id,
+                Team.name.label("team_name"),
+                _kst_day.label("day"),
+                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
+                func.count().label("requests"),
+            )
+            .join(Team, Team.id == UsageLog.team_id)
+            .where(*trend_where)
+            .group_by(UsageLog.team_id, Team.name, _kst_day)
+            .order_by(Team.name, _kst_day)
+        )
+        _trend_rows: dict[uuid.UUID, TeamTrend] = {}
+        for r in (await session.execute(team_trend_stmt)).all():
+            tt = _trend_rows.get(r.team_id)
+            if tt is None:
+                tt = _trend_rows[r.team_id] = TeamTrend(
+                    team=r.team_name or str(r.team_id),
+                    team_id=str(r.team_id),
+                )
+            tt.points.append(TrendItem(
+                date=str(r.day),
+                cost_usd=r.cost_usd or Decimal("0"),
+                requests=r.requests or 0,
+            ))
+        trends_by_team = list(_trend_rows.values())
+
         return AnalyticsResponse(
             period=period,
             cost_summary=cost_summary,
@@ -357,6 +381,7 @@ class AnalyticsService:
             by_team=by_team,
             by_user=by_user,
             trends=trends,
+            trends_by_team=trends_by_team,
         )
 
     async def export_analytics(
@@ -395,7 +420,6 @@ class AnalyticsService:
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
 
         stmt = (
             select(
@@ -486,7 +510,6 @@ class AnalyticsService:
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
 
         stmt = (
             select(

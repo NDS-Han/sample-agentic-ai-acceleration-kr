@@ -59,6 +59,14 @@ class TrendItem(BaseModel):
     requests: int = 0
 
 
+class TeamTrend(BaseModel):
+    """팀별 일별 추이 시리즈 — 대시보드 CostTrendCard 의 멀티라인 렌더용."""
+
+    team: str
+    team_id: str
+    points: list[TrendItem] = []
+
+
 class AnalyticsResponse(BaseModel):
     period: str
     currency: str = "USD"
@@ -67,6 +75,8 @@ class AnalyticsResponse(BaseModel):
     by_team: list[TeamBreakdown] = []
     by_user: list[UserBreakdown] = []
     trends: list[TrendItem] = []
+    # ADMIN 이면 전 팀, TEAM_LEADER 이면 리더인 팀들만 — scope_ids 와 같은 격리.
+    trends_by_team: list[TeamTrend] = []
 
 
 class UsageByUserModelItem(BaseModel):

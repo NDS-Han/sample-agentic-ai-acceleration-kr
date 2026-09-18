@@ -24,7 +24,7 @@ from app.core.usage_filters import (
 from app.models.auth import Department, KeyStatus, Team, User, UserRole, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope
 from app.models.model import ModelAlias, ModelStatus
-from app.models.usage import UsageLog, UsageStatus
+from app.models.usage import UsageLog
 
 
 logger = logging.getLogger(__name__)
@@ -99,18 +99,38 @@ def _team_display_name(team_name: str, dept_id: uuid.UUID | None, dept_name: str
     return team_name
 
 
-def _team_scope_clauses(actor: CurrentUser):
-    """TEAM_LEADER 는 본인 팀으로만 스코핑, ADMIN 은 무제한.
+async def _team_scope_ids(session: AsyncSession, actor: CurrentUser) -> list[uuid.UUID] | None:
+    """TEAM_LEADER 의 유효 팀 집합을 반환 — ADMIN 은 None(무제한).
 
-    analytics_service.py 의 동일 정책(§ TEAM_LEADER can only see own team)을
-    대시보드 위젯에도 적용 — 이게 빠져 있으면 TEAM_LEADER 가 조직 전체 숫자를
-    보게 되거나(스코핑 누락) admin-only 의존성 탓에 아예 403 으로 막힌다.
+    정책 = analytics 와 동일한 "리더인 팀만"(services/team_scope.py 단일 진실원):
+    auth.teams.leader_user_id 가 자신인 팀들. 한 사람이 복수 팀의 리더일 수 있고,
+    소속 팀(User.team_id)은 범위에 포함하지 않는다 — 소속이지만 리더가 아닌 팀의
+    데이터는 열리지 않는다. 리더인 팀이 없으면 빈 list(호출자가 "매칭 없음" 조건으로
+    빈 결과를 내거나 거부한다).
     """
-    if actor.role == UserRole.TEAM_LEADER:
-        # team_id 가 없는 TEAM_LEADER 는 정상 상태가 아니므로(설계상 항상 팀 소속),
-        # 절대 매칭 안 되는 조건으로 안전하게 빈 결과를 반환한다.
-        return [UsageLog.team_id == (actor.team_id or uuid.uuid4())]
-    return []
+    if actor.role != UserRole.TEAM_LEADER:
+        return None
+    from app.services.team_scope import led_team_ids
+
+    return sorted(await led_team_ids(session, actor), key=str)
+
+
+def _ids_clause(ids: list[uuid.UUID] | None):
+    """유효 팀 집합 → UsageLog.team_id WHERE 절. None=무제한, []=절대 매칭 없음."""
+    if ids is None:
+        return None
+    if not ids:
+        return UsageLog.team_id == uuid.uuid4()  # 안전한 빈 결과
+    return UsageLog.team_id.in_(ids)
+
+
+def _scope_token(ids: list[uuid.UUID] | None) -> str:
+    """캐시 키용 유효 scope 토큰 — 같은 팀 집합은 항상 같은 문자열."""
+    if ids is None:
+        return "all"
+    from app.services.team_scope import scope_cache_token
+
+    return scope_cache_token(ids)
 
 
 @router.get("/summary")
@@ -125,16 +145,19 @@ async def dashboard_summary(
         period = _default_period()
 
     # ⚠️ require_admin_or_team_leader 라 응답이 행위자에 따라 달라진다 — ADMIN 은
-    #    전사, TEAM_LEADER 는 본인 팀(_team_scope_clauses). 키에 **유효 scope** 를 넣어야
+    #    전사, TEAM_LEADER 는 리더인 팀(들)(_team_scope_ids). 키에 **유효 scope** 를 넣어야
     #    리더의 팀 결과가 'all' 키에 저장되어 ADMIN 에게 새어 나가는 일을 막을 수 있다
-    #    (analytics 라우터의 캐시와 같은 규칙).
-    eff_scope = str(actor.team_id or "none") if actor.role == UserRole.TEAM_LEADER else "all"
+    #    (analytics 라우터의 캐시와 같은 규칙). 같은 팀 집합은 항상 같은 토큰이 된다.
+    ids = await _team_scope_ids(session, actor)
+    eff_scope = _scope_token(ids)
     cache_key = _cache_key("summary", period=period, client=client, scope=eff_scope)
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
     # 선택적 앱(client) 필터 — 'all'/None 이면 전체.
-    where_clauses = [cost_period_filter(period), *_team_scope_clauses(actor)]
+    where_clauses = [cost_period_filter(period)]
+    if (team_clause := _ids_clause(ids)) is not None:
+        where_clauses.append(team_clause)
     if (cf := client_filter(client)) is not None:
         where_clauses.append(cf)
 
@@ -186,13 +209,26 @@ async def model_share(
 
     # 응답을 바꾸는 파라미터 **전부**를 키에 넣는다 — 하나라도 빠지면 다른 질의의
     # 결과가 반환된다(team_id 를 빼면 A팀 화면에 B팀 점유율이 뜨는 식).
-    # team_id 는 **유효** 값을 써야 한다 — TEAM_LEADER 는 파라미터가 무시되고 본인 팀으로
-    # 강제되므로, raw 파라미터를 키에 쓰면 리더의 팀 결과가 'all'(전사) 키에 저장된다.
-    if actor.role == UserRole.TEAM_LEADER:
-        eff_team = str(actor.team_id or "none")
+    # team_id 는 **유효** 값을 써야 한다 — TEAM_LEADER 는 파라미터가 리더인 팀 집합
+    # 안에서만 유효하므로(집합 밖 team_id 는 무시하고 전체 집합으로), raw 파라미터를
+    # 키에 쓰면 리더의 결과가 'all'(전사) 키에 저장된다.
+    ids = await _team_scope_ids(session, actor)
+    if ids is not None:
+        # 리더가 집합 안의 특정 팀을 고르면 그 팀으로, 아니면 전체 집합으로.
+        picked = None
+        if team_id and team_id != "all":
+            try:
+                t = uuid.UUID(team_id)
+                picked = t if t in ids else None
+            except ValueError:
+                picked = None
+        eff_ids = [picked] if picked else ids
+        eff_team = str(picked) if picked else _scope_token(ids)
     elif team_id and team_id != "all":
+        eff_ids = None
         eff_team = team_id
     else:
+        eff_ids = None
         eff_team = "all"
     cache_key = _cache_key("model-share", period=period, team_id=eff_team, client=client)
     if (cached := await _cache_get(request, cache_key)) is not None:
@@ -206,11 +242,11 @@ async def model_share(
         where_clauses.append(cf)
 
     team_filter: str = "all"
-    if actor.role == UserRole.TEAM_LEADER:
-        # TEAM_LEADER 는 team_id 쿼리 파라미터를 무시하고 항상 본인 팀으로 고정
-        # (다른 팀 team_id 를 넘겨 조회하는 것을 막는다).
-        where_clauses.extend(_team_scope_clauses(actor))
-        team_filter = str(actor.team_id) if actor.team_id else "all"
+    if ids is not None:
+        # TEAM_LEADER — 리더인 팀 집합(또는 그 안에서 고른 1팀)으로 고정.
+        if (tc := _ids_clause(eff_ids)) is not None:
+            where_clauses.append(tc)
+        team_filter = eff_team
     elif team_id and team_id != "all":
         try:
             team_uuid = uuid.UUID(team_id)
@@ -272,7 +308,7 @@ async def client_share(
 
     client_coalesce_expr() 로 NULL(레거시 미식별) 행을 'other' 로 접어 GROUP BY.
     §59 비용 집계 표준(SUCCESS + KST 월 경계) 동일 적용. admin-ui ClientShareResponse 형태.
-    TEAM_LEADER 는 본인 팀으로 스코핑.
+    TEAM_LEADER 는 리더인 팀(들)으로 스코핑(소속만으론 부족 — analytics 와 동일 정책).
     """
     if not period:
         period = _default_period()
@@ -287,7 +323,10 @@ async def client_share(
             # dashboard show which apps use AgentCore WebSearch and how much.
             func.coalesce(func.sum(UsageLog.web_search_count), 0).label("web_search_count"),
         )
-        .where(cost_period_filter(period), *_team_scope_clauses(actor))
+        .where(
+            cost_period_filter(period),
+            *([tc] if (tc := _ids_clause(await _team_scope_ids(session, actor))) is not None else []),
+        )
         .group_by(client_col)
         .order_by(func.sum(UsageLog.cost_usd).desc())
     )
@@ -326,7 +365,7 @@ async def top_users(
     ⚠️ 기존 대시보드 'Top 사용자 by 비용' 위젯은 budgets/summary(예산설정된 사용자만)를
     써서 예산 없는 헤비유저를 누락했다(라벨='비용'인데 실제론 예산설정자 중 사용액).
     이 엔드포인트는 챗(text2SQL)과 동일하게 usage_logs 전체에서 진짜 top spender 를 낸다.
-    PII 금지: sso_subject 미노출(display_name·email 만). TEAM_LEADER 는 본인 팀으로 스코핑.
+    PII 금지: sso_subject 미노출(display_name·email 만). TEAM_LEADER 는 리더인 팀(들)으로 스코핑.
     """
     if not period:
         period = _default_period()
@@ -348,7 +387,7 @@ async def top_users(
         .outerjoin(Department, Department.id == Team.dept_id)
         .where(
             cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
-            *_team_scope_clauses(actor),
+            *([tc] if (tc := _ids_clause(await _team_scope_ids(session, actor))) is not None else []),
             *([cf] if (cf := client_filter(client)) is not None else []),
         )
         .group_by(
@@ -394,7 +433,7 @@ async def top_teams(
     팀을 누락했다(§60.8 의 top-users 와 동형 버그 — 팀은 미수정이었음). top-users 와
     동일하게 usage_logs 전체에서 집계한다. **팀 귀속은 usage_logs.team_id 직접**
     (users.team_id 경유 금지 — 팀 이동 사용자의 과거 비용 오귀속 방지).
-    TEAM_LEADER 는 본인 팀 하나만(다른 팀 순위는 노출하지 않음).
+    TEAM_LEADER 는 리더인 팀(들)만(다른 팀 순위는 노출하지 않음).
     """
     if not period:
         period = _default_period()
@@ -412,7 +451,7 @@ async def top_teams(
         .outerjoin(Department, Department.id == Team.dept_id)
         .where(
             cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
-            *_team_scope_clauses(actor),
+            *([tc] if (tc := _ids_clause(await _team_scope_ids(session, actor))) is not None else []),
             *([cf] if (cf := client_filter(client)) is not None else []),
         )
         .group_by(Team.id, Team.name, Team.dept_id, Department.name)
@@ -477,14 +516,17 @@ async def dashboard_kpi(
     if not period:
         period = _default_period()
 
-    # /summary 와 같이 **유효 scope** 를 키에 넣는다 — TEAM_LEADER 는 본인 팀만 본다.
-    eff_scope = str(actor.team_id or "none") if actor.role == UserRole.TEAM_LEADER else "all"
+    # /summary 와 같이 **유효 scope** 를 키에 넣는다 — TEAM_LEADER 는 리더인 팀(들)만 본다.
+    ids = await _team_scope_ids(session, actor)
+    eff_scope = _scope_token(ids)
     cache_key = _cache_key("kpi", period=period, client=client, scope=eff_scope)
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
     # ── 1) 비용/요청/사용자: /summary 와 동일한 집계(같은 필터를 공유해 값이 갈리지 않게)
-    where_clauses = [cost_period_filter(period), *_team_scope_clauses(actor)]
+    where_clauses = [cost_period_filter(period)]
+    if (tc := _ids_clause(ids)) is not None:
+        where_clauses.append(tc)
     if (cf := client_filter(client)) is not None:
         where_clauses.append(cf)
 
@@ -517,18 +559,19 @@ async def dashboard_kpi(
     #    scope_id 가 auth.users 에 없는 고아 행이면 조인이 NULL 이 되어 포함되는데,
     #    그건 팀 소속을 확인할 수 없는 예산이므로 합산 대상으로 두는 편이 안전하다
     #    (누락시 사용률이 과대평가된다).
-    if actor.role == UserRole.TEAM_LEADER:
-        # 리더의 분모는 본인 팀의 TEAM 예산 — 멤버 USER 예산을 같이 더하면 같은 한도를
-        # 팀 축과 개인 축에서 이중계상한다(위 org 규칙과 같은 이유). 팀 예산이 없으면
-        # 멤버 USER 예산 합계로 폴백한다.
-        tid = actor.team_id or uuid.uuid4()
+    if ids is not None:
+        # 리더의 분모는 리더인 팀(들)의 TEAM 예산 합계 — 멤버 USER 예산을 같이 더하면
+        # 같은 한도를 팀 축과 개인 축에서 이중계상한다(위 org 규칙과 같은 이유).
+        # 복수 팀 리더는 각 팀의 TEAM 예산을 합산한다. 팀 예산이 없으면 멤버 USER
+        # 예산 합계로 폴백한다. 리더인 팀이 없으면 매칭 불가 조건으로 0.
+        tids = ids if ids else [uuid.uuid4()]
         team_limit = (
             await session.execute(
                 select(func.coalesce(func.sum(BudgetConfig.max_budget_usd), 0))
                 .where(
                     BudgetConfig.is_active.is_(True),
                     BudgetConfig.scope == BudgetScope.TEAM,
-                    BudgetConfig.scope_id == tid,
+                    BudgetConfig.scope_id.in_(tids),
                 )
             )
         ).scalar()
@@ -545,7 +588,7 @@ async def dashboard_kpi(
                             User.id == BudgetConfig.scope_id,
                         ),
                     )
-                    .where(BudgetConfig.is_active.is_(True), User.team_id == tid)
+                    .where(BudgetConfig.is_active.is_(True), User.team_id.in_(tids))
                 )
             ).scalar()
             total_limit = Decimal(str(member_limit or 0))
@@ -583,7 +626,10 @@ async def dashboard_kpi(
     budget_used_row = (
         await session.execute(
             select(func.coalesce(func.sum(UsageLog.cost_usd), 0).label("used"))
-            .where(cost_period_filter(period), *_team_scope_clauses(actor))
+            .where(
+                cost_period_filter(period),
+                *([tc] if (tc := _ids_clause(ids)) is not None else []),
+            )
         )
     ).one()
     budget_used = Decimal(str(budget_used_row.used or 0))
@@ -592,13 +638,13 @@ async def dashboard_kpi(
     )
 
     # ── 4) 활성 키 / 활성 모델
-    #    리더의 활성 키는 본인 팀 멤버 소유분만. 모델 카탈로그는 조직 공용이라 스코핑 없다.
+    #    리더의 활성 키는 리더인 팀(들) 멤버 소유분만. 모델 카탈로그는 조직 공용이라 스코핑 없다.
     key_clauses = [VirtualKey.status == KeyStatus.ACTIVE]
-    if actor.role == UserRole.TEAM_LEADER:
+    if ids is not None:
         key_clauses.append(
             VirtualKey.user_id.in_(
                 select(User.id)
-                .where(User.team_id == (actor.team_id or uuid.uuid4()))
+                .where(User.team_id.in_(ids if ids else [uuid.uuid4()]))
                 .scalar_subquery()
             )
         )
