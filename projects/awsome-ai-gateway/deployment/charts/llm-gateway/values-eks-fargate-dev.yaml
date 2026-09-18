@@ -354,7 +354,10 @@ adminApi:
     # 1.0.73-teamtrend: TEAM_LEADER 스코프를 "리더인 팀만"(엄격, 소속 제외)으로 통일 —
     #   dashboard 6개 엔드포인트를 led 집합 IN + 캐시 키 집합 해시로. analytics
     #   trends_by_team 추가(팀×일 집계, 합계와 동일 필터) — 대시보드 팀별 추이용.
-    tag: "1.0.73-teamtrend"
+    # 1.0.74-budgetscope: budget 도 led 팀 정책으로 통일 — allocate/get_team_allocation/
+    #   user_budget/summary 의 actor.team_id 검사를 led_team_ids 로 교체,
+    #   get_team_allocation 의 actor 무검사(IDOR) 수정, /my-allocations 신설.
+    tag: "1.0.74-budgetscope"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
@@ -455,7 +458,10 @@ adminUi:
     #   팀 칩 토글·하단 범례·범례 클릭 무력화(클릭 시 빈 차트 혼란 제거).
     #   조립 로직을 lib/utils/trendSeries 로 공용화해 대시보드와 동일 규칙.
     # 1.0.106-linelegend: 분석 차트 범례 마커를 채색 박스 → 선(pointStyle 'line').
-    tag: "1.0.106-linelegend"
+    # 1.0.107-allocui: 팀 리더 예산 페이지를 admin 표 구조로 — 팀 행(admin 설정,
+    #   읽기전용)+멤버 행(배정 입력). 입력을 문자열 draft 로 바꿔 "0 못 지우는"
+    #   UX 수정. /my-allocations 로 led 팀별 카드 렌더.
+    tag: "1.0.107-allocui"
   resources:
     requests:
       cpu: "500m"
@@ -477,7 +483,7 @@ scheduler:
     # roi_aggregator 가 KST 비닝 수정(A-2/E-1)의 대상이라 어긋나면 스케줄러만 옛 로직으로 집계.
     # ⚠️ 이 값이 특히 중요하다: 1.0.67-roifix 가 고친 NameError 는 **스케줄러에서만** 터진다
     # (API 경로는 그 함수를 안 탄다). adminApi 만 올리고 여기를 두면 ROI 집계는 계속 실패한다.
-    tag: "1.0.73-teamtrend"
+    tag: "1.0.74-budgetscope"
   resources:
     requests:
       cpu: "250m"  # Fargate 하한
