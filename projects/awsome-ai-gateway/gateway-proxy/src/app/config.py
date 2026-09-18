@@ -251,6 +251,17 @@ class Settings(BaseSettings):
     #: tool_result shows the model on later turns. 0 (default) = the same length as the trimmed
     #: result the model saw (web_search_result_text_chars). Shorter cuts evidence.
     web_search_digest_chars: int = 0
+    #: Web search next to the CLIENT's own tools (2026-09-18). Both default to the previous
+    #: behaviour so a client or model update that breaks them can be rolled back by config.
+    #: - mixed_turn_run: a turn that calls a client tool AND web_search — run the searches and
+    #:   send their native block pairs in the same message as the client's tool_use (native
+    #:   trace mode only). Off: the searches are not run and the model re-issues them later.
+    #: - final_turn_soft: when the search budget is used up, keep every tool callable; a
+    #:   further web_search gets an error instead of running (like a server tool's max_uses),
+    #:   and only then the hard final turn (tool_choice: none) follows. Off: hard final turn
+    #:   at once, which also blocks the client's tools ("search and save a file" saved nothing).
+    web_search_mixed_turn_run: bool = False
+    web_search_final_turn_soft: bool = False
 
 
 @lru_cache
