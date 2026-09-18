@@ -120,7 +120,12 @@ export function CostTrendChartClient({ trends, trendsByTeam = [] }: CostTrendCha
         // 기본 onClick 은 데이터셋 토글 — 유일 시리즈를 끄면 빈 차트가 되는
         // 혼란을 없애기 위해 무력화(표시 제어는 위 칩이 담당).
         onClick: () => undefined,
-        labels: { color: theme.text },
+        // 기본은 채색 박스 — 선 차트라 범례도 선(pointStyle 'line')으로.
+        labels: {
+          color: theme.text,
+          usePointStyle: true,
+          pointStyle: 'line',
+        },
       },
       title: { display: true, text: t('usageTrend'), color: theme.text },
       tooltip: {
