@@ -462,6 +462,33 @@ async def test_without_the_flag_the_budget_end_is_the_hard_final_turn_as_before(
         assert _last_user_text(bodies[1]) == wsl._FINAL_TURN_ANSWER_NOW
 
 
+# ── text trace mode (Claude Code and every client that is not in the native list) ─────────
+# The soft final turn does not depend on native blocks, so it must work there too; the mixed
+# turn stays "not run" (covered above) because a text line cannot carry results.
+async def test_text_mode_soft_final_turn_lets_the_client_tool_through_and_refuses_searches():
+    write = [([_search(1, "news")], "tool_use"),
+             ([_tu(2, "Write", {"file_path": "n.md", "content": "x"})], "tool_use")]
+    again = [([_search(1, "a")], "tool_use"), ([_search(2, "b")], "tool_use"),
+             ([{"type": "text", "text": "answer"}], "end_turn")]
+    for run in (_run_stream, _run_nonstream):
+        content, stop, bodies, mcp, _ = await run(write, max_iterations=1, native_trace=False,
+                                                  final_turn_soft=True, mixed_turn_run=True)
+        assert stop == "tool_use" and mcp.queries == ["news"]
+        assert bodies[1].get("tool_choice") != {"type": "none"}
+        assert [b["name"] for b in content if b["type"] == "tool_use"] == ["Write"]
+        assert not any(b["type"] in NATIVE for b in content), "text mode sends no native block"
+
+        content, stop, bodies, mcp, usage = await run(again, max_iterations=1,
+                                                      native_trace=False, final_turn_soft=True)
+        assert mcp.queries == ["a"] and usage.web_search_count == 1 and stop == "end_turn"
+        assert len(bodies) == 3 and bodies[2]["tool_choice"] == {"type": "none"}
+        _assert_bedrock_valid(bodies[2]["messages"])
+        text = "\n".join(b["text"] for b in content if b["type"] == "text")
+        lines = [ln for ln in text.splitlines() if ln.startswith(PREFIX)]
+        assert len(lines) == 2 and "not run" in lines[1], lines
+        assert not any(b["type"] in NATIVE for b in content)
+
+
 # ── the whole scenario sweep again, with both flags on ────────────────────────────────────
 # The sweep pins the default (flags off) contract. With the flags on, the flag-independent
 # invariants must still hold for every scenario, every asked search must leave exactly one
