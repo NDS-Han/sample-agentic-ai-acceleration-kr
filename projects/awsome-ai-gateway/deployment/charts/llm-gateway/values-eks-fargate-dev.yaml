@@ -506,7 +506,7 @@ costRecorderWorker:
   # 1.0.48-replayfix: cost-recorder 이중 차감(커밋~XACK 사이 파드 사망 시 budget_usages 재가산) ·
   #   파드명 변경 시 PEL 배치 영구 유실(XAUTOCLAIM 60s) 수정 + upstream 9203164 동기화분.
   image:
-    tag: "1.0.48-replayfix"
+    tag: "1.0.49-cumulusage"
   resources:
     requests:
       cpu: "250m"
