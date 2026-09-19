@@ -9,9 +9,11 @@
 # WHY:  every search result is fed back into the next model turn and billed
 #       again on every iteration. One Cowork stock-price question measured
 #       6 calls · 12 searches · 275k input tokens · $3.62 (2026-09-16); a single
-#       call with 4 parallel searches was 132k input tokens. The gateway's code
-#       defaults (60000 chars / 10 results / 4 per turn / 5 iterations) are
-#       generous; these caps cut the bill ~60% with no image rebuild.
+#       call with 4 parallel searches was 132k input tokens. Images before
+#       1.0.80 default to 60000 chars / 10 results / 4 per turn / 5 iterations;
+#       these caps cut that bill ~60% with no image rebuild. From 1.0.80 the
+#       code defaults equal the defaults below, so this script is for CHANGING
+#       a value (or rolling a behaviour back), not for making an install sane.
 # UNDO: restore the backup this script writes, then install-eks.sh again.
 #
 # Targets come from config.env (WEB_SEARCH_MAX_RESULT_CHARS etc.); unset means
@@ -22,7 +24,7 @@
 # WEB_SEARCH_MIXED_TURN_RUN / WEB_SEARCH_FINAL_TURN_SOFT (0|1, 2026-09-18): web search
 # next to the client's own tools — run the searches of a turn that also calls a client
 # tool (native mode), and keep client tools callable once the search budget is used up.
-# 0 = previous behaviour; flip back to 0 + install-eks.sh if a client/model update breaks it.
+# 1 = default; set to 0 + install-eks.sh if a client/model update breaks it.
 # WEB_SEARCH_TRACE_NATIVE_CLIENTS (comma list of cowork|claude-code|codex|other): which
 # client classes get native blocks when TRACE_MODE=native. Only clients that REPLAY the
 # blocks belong here — verified: cowork (2026-09-17), claude-code CLI 2.1.276 (2026-09-18).
@@ -51,19 +53,20 @@ load_config
 : "${WEB_SEARCH_MAX_SEARCHES_PER_TURN:=3}"
 : "${WEB_SEARCH_MAX_ITERATIONS:=2}"
 : "${WEB_SEARCH_DIGEST_CHARS:=0}"
-: "${WEB_SEARCH_MIXED_TURN_RUN:=0}"
-: "${WEB_SEARCH_FINAL_TURN_SOFT:=0}"
-: "${WEB_SEARCH_TRACE_MODE:=text}"
-: "${WEB_SEARCH_TRACE_NATIVE_CLIENTS:=cowork}"
+: "${WEB_SEARCH_MIXED_TURN_RUN:=1}"
+: "${WEB_SEARCH_FINAL_TURN_SOFT:=1}"
+: "${WEB_SEARCH_TRACE_MODE:=native}"
+: "${WEB_SEARCH_TRACE_NATIVE_CLIENTS:=cowork,claude-code}"
 KEYS=(WEB_SEARCH_MAX_RESULT_CHARS WEB_SEARCH_MAX_RESULTS_DEFAULT WEB_SEARCH_MAX_SEARCHES_PER_TURN WEB_SEARCH_MAX_ITERATIONS WEB_SEARCH_DIGEST_CHARS
       WEB_SEARCH_MIXED_TURN_RUN WEB_SEARCH_FINAL_TURN_SOFT)
 STR_KEYS=(WEB_SEARCH_TRACE_MODE WEB_SEARCH_TRACE_NATIVE_CLIENTS)
 ALL_KEYS=("${KEYS[@]}" "${STR_KEYS[@]}")
-declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=60000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=10
-                          [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=4 [WEB_SEARCH_MAX_ITERATIONS]=5
-                          [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=text
-                          [WEB_SEARCH_TRACE_NATIVE_CLIENTS]=cowork
-                          [WEB_SEARCH_MIXED_TURN_RUN]=0 [WEB_SEARCH_FINAL_TURN_SOFT]=0 )
+# code defaults of gateway-proxy >= 1.0.80 (shown when values does not set a key)
+declare -A CODE_DEFAULT=( [WEB_SEARCH_MAX_RESULT_CHARS]=12000 [WEB_SEARCH_MAX_RESULTS_DEFAULT]=5
+                          [WEB_SEARCH_MAX_SEARCHES_PER_TURN]=3 [WEB_SEARCH_MAX_ITERATIONS]=2
+                          [WEB_SEARCH_DIGEST_CHARS]=0 [WEB_SEARCH_TRACE_MODE]=native
+                          [WEB_SEARCH_TRACE_NATIVE_CLIENTS]=cowork,claude-code
+                          [WEB_SEARCH_MIXED_TURN_RUN]=1 [WEB_SEARCH_FINAL_TURN_SOFT]=1 )
 for k in "${KEYS[@]}"; do [[ "${!k}" =~ ^[0-9]+$ ]] || die "$k must be an integer (config.env): ${!k}"; done
 [[ "$WEB_SEARCH_TRACE_MODE" =~ ^(text|native)$ ]] || die "WEB_SEARCH_TRACE_MODE must be text|native (config.env): $WEB_SEARCH_TRACE_MODE"
 _cls='(cowork|claude-code|codex|other)'
