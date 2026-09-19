@@ -1042,7 +1042,7 @@ aws cloudwatch get-metric-statistics --region us-east-1 --output text \
 
 `tools/call` 카운트가 오르면 동작(`initialize`·`tools/list` 는 핸드셰이크라 검색이 아니다). DB 로 보려면 `usage.usage_logs.web_search_count` — 성공한 검색만 센다.
 
-> 🔴 **로그로 확인하려 하지 말 것.** 성공한 검색은 **로그를 한 줄도 안 남긴다**(info 이벤트는 `client_owns_tool_skip` 뿐, 나머지는 실패 warning). `agentcore_mcp.initialized` 조차 **파드 기동 후 첫 검색 1회만** 찍힌다(`ensure_initialized` 가 lazy). 즉 `kubectl logs | grep web_search` 는 **정상 동작해도 빈 출력**이라 "안 된다"고 오진하게 된다.
+> 📋 **로그로도 확인할 수 있다.** gateway-proxy 는 검색 1건마다 `web_search.evidence_built` 를 남긴다(`kubectl logs deploy/llm-gateway-gateway-proxy | grep web_search`). 이 줄이 하나도 없으면 ① 모델이 검색 없이 답했거나 ② 이미지가 옛 버전(성공한 검색이 로그를 남기지 않던 시기)이다. 이벤트 목록은 [web-search-explained.md](web-search-explained.md#검증--정말-검색했나).
 
 
 
