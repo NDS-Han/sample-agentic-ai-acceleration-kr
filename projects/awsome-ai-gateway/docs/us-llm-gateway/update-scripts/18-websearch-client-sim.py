@@ -29,6 +29,7 @@ Usage:
       # gateway's setting (WEB_SEARCH_TRACE_NATIVE_CLIENTS): native blocks + 🔎 line, or the
       # 🔎 line alone. The judgement follows what actually came back. Run both classes.
   python3 18-websearch-client-sim.py --scenarios my.json --out transcript.json
+  python3 18-websearch-client-sim.py --no-stream     # the gateway's non-streaming loop
   python3 18-websearch-client-sim.py --connect-to 127.0.0.1:8443
       # TCP goes to a local tunnel; TLS name and Host header stay GATEWAY_URL's host
       # (same idea as curl --connect-to). For gateways reachable only from inside.
@@ -99,8 +100,8 @@ SCENARIOS = [
 
 class Gateway:
     def __init__(self, base_url: str, key: str, model: str, connect_to: str | None,
-                 client: str = "cowork"):
-        self.client = client
+                 client: str = "cowork", stream: bool = True):
+        self.client, self.stream = client, stream
         u = urlparse(base_url)
         if u.scheme != "https" or not u.hostname:
             sys.exit(f"GATEWAY_URL must be https://host[:port] — got {base_url!r}")
@@ -118,8 +119,9 @@ class Gateway:
         return conn
 
     def request(self, messages: list) -> tuple[int, list[dict], str | None, dict, str]:
-        """One streamed /v1/messages call → (status, content blocks, stop_reason, usage, error)."""
-        body = json.dumps({"model": self.model, "max_tokens": 16000, "stream": True,
+        """One /v1/messages call (streamed, or one JSON body with --no-stream) →
+        (status, content blocks, stop_reason, usage, error)."""
+        body = json.dumps({"model": self.model, "max_tokens": 16000, "stream": self.stream,
                            "system": SYSTEM, "tools": TOOLS, "messages": messages})
         conn = self._conn()
         conn.request("POST", "/v1/messages?beta=true", body=body.encode(), headers={
@@ -128,6 +130,13 @@ class Gateway:
         resp = conn.getresponse()
         if resp.status != 200:
             return resp.status, [], None, {}, resp.read().decode("utf-8", "replace")[:400]
+        if not self.stream:                       # one JSON body, blocks already assembled
+            d = json.loads(resp.read())
+            conn.close()
+            content = [b for b in d.get("content") or []
+                       if not (b.get("type") == "text" and not b.get("text"))]
+            err = json.dumps(d["error"], ensure_ascii=False)[:300] if d.get("error") else ""
+            return 200, content, d.get("stop_reason"), d.get("usage") or {}, err
         blocks: dict[int, dict] = {}
         stop, usage, error = None, {}, ""
         for raw in resp:
@@ -240,6 +249,8 @@ def main() -> int:
     ap.add_argument("--connect-to", help="HOST:PORT of a local tunnel to the gateway")
     ap.add_argument("--client", choices=sorted(CLIENTS), default="cowork",
                     help="client class to identify as (default: cowork)")
+    ap.add_argument("--no-stream", action="store_true",
+                    help="send non-streaming requests (the gateway's other loop)")
     ap.add_argument("--out", help="write the full transcript (every content block) here")
     a = ap.parse_args()
     base = os.environ.get("GATEWAY_URL") or os.environ.get("ANTHROPIC_BASE_URL")
@@ -248,7 +259,7 @@ def main() -> int:
         sys.exit("set GATEWAY_URL (or ANTHROPIC_BASE_URL) and VK_FILE — see the header")
     with open(os.path.expanduser(key_file)) as fh:
         key = fh.read().strip()
-    gw = Gateway(base, key, a.model, a.connect_to, a.client)
+    gw = Gateway(base, key, a.model, a.connect_to, a.client, stream=not a.no_stream)
     scenarios = SCENARIOS
     if a.scenarios:
         with open(a.scenarios) as fh:
@@ -256,7 +267,8 @@ def main() -> int:
     if a.only:
         scenarios = [s for s in scenarios if a.only in s["name"]]
     failed, transcript = [], {}
-    print(f"gateway={gw.host} client={a.client} model={a.model} scenarios={len(scenarios)} "
+    print(f"gateway={gw.host} client={a.client} model={a.model} "
+          f"stream={gw.stream} scenarios={len(scenarios)} "
           f"start={time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}")
     for sc in scenarios:
         print(f"\n=== {sc['name']}")
