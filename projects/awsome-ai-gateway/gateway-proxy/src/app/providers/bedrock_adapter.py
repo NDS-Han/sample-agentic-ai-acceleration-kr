@@ -86,6 +86,44 @@ class BedrockAdapter(ProviderAdapter):
                 return self._fallback_client
             raise
 
+    async def _call_with_connect_retry(self, client, executor, fn, *, model_id: str,
+                                       event: str = "bedrock_connect_retry"):
+        """Run one blocking boto call; on a CONNECTION-level error retry it once.
+
+        Why: the gateway keeps its connections to Bedrock alive, and the network path drops
+        idle ones silently (no FIN). The next request that picks such a connection fails with
+        "Connection was closed before we received a valid response". ``bedrock_max_attempts``
+        is 1, so botocore does not retry — the caller got a 502 (2026-09-16: three times in a
+        day on the streaming path; 2026-09-19: a non-streaming request after 2.5 idle hours).
+        The pool hands out the most recently used connections first, so the rest go stale
+        while the gateway is busy and surface together when requests pile up: more users make
+        this MORE frequent, not less.
+
+        Rule:
+        - only ``ConnectionClosedError`` / ``EndpointConnectionError`` — nothing reached
+          Bedrock, so nothing is billed twice. An error Bedrock answered with (``ClientError``)
+          is never retried here.
+        - before the retry the client's idle pooled connections are dropped: they went idle
+          together, so the next one from the pool would most likely be dead as well.
+          In-flight requests keep their own connections. Best effort — botocore has no public
+          API for it, and a failure to reset must not cost us the retry.
+        - one retry only; the second error propagates (no retry storm).
+        """
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        for attempt in (1, 2):
+            try:
+                return await loop.run_in_executor(executor, fn)
+            except (ConnectionClosedError, EndpointConnectionError) as exc:
+                if attempt == 2:
+                    raise
+                logger.warning(event, model_id=model_id, error=str(exc)[:160])
+                try:
+                    client._endpoint.http_session.close()   # drop idle pooled connections
+                except Exception:
+                    logger.debug("bedrock_pool_reset_skipped", model_id=model_id)
+
     async def invoke(
         self, request_body: bytes, model_id: str, path_suffix: str = "invoke", **kwargs
     ) -> tuple[int, bytes, dict, TokenUsage]:
@@ -105,20 +143,18 @@ class BedrockAdapter(ProviderAdapter):
         constructs its own ``JSONResponse``/``StreamingResponse`` headers rather than
         passing this dict through, so the AWS id is not leaked outward.
         """
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         try:
             client = await self._get_client()
             if path_suffix in ("invoke", ""):
-                response = await loop.run_in_executor(
-                    _bedrock_executor,
+                response = await self._call_with_connect_retry(
+                    client, _bedrock_executor,
                     lambda: client.invoke_model(
                         modelId=model_id,
                         body=request_body,
                         contentType="application/json",
                         accept="application/json",
                     ),
+                    model_id=model_id,
                 )
                 body = response["body"].read()
                 try:
@@ -130,12 +166,13 @@ class BedrockAdapter(ProviderAdapter):
 
             elif path_suffix == "converse":
                 parsed_req = json.loads(request_body)
-                response = await loop.run_in_executor(
-                    _bedrock_executor,
+                response = await self._call_with_connect_retry(
+                    client, _bedrock_executor,
                     lambda: client.converse(
                         modelId=model_id,
                         **{k: v for k, v in parsed_req.items() if k != "modelId"},
                     ),
+                    model_id=model_id,
                 )
                 usage = TokenUsage(
                     input_tokens=response.get("usage", {}).get("inputTokens", 0),
@@ -164,17 +201,15 @@ class BedrockAdapter(ProviderAdapter):
 
     async def count_tokens(self, request_body: bytes, model_id: str) -> tuple[int, int]:
         """Bedrock CountTokens API — returns (status, input_tokens). No cost, no inference."""
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         try:
             client = await self._get_client()
-            response = await loop.run_in_executor(
-                None,
+            response = await self._call_with_connect_retry(
+                client, None,
                 lambda: client.count_tokens(
                     modelId=model_id,
                     input={"invokeModel": {"body": request_body}},
                 ),
+                model_id=model_id,
             )
             return 200, int(response.get("inputTokens", 0))
         except ClientError as e:
@@ -203,23 +238,16 @@ class BedrockAdapter(ProviderAdapter):
                 #    "Connection was closed before we received a valid response" 가 2026-09-16
                 #    하루 3번(첫 턴) 났고, bedrock_max_attempts=1 이라 그대로 502 로 나갔다.
                 #    응답이 시작되기 전이라 중복 과금이 없다 — 스트림 도중 끊김은 재시도하지 않는다.
-                for attempt in (1, 2):
-                    try:
-                        response = await loop.run_in_executor(
-                            _bedrock_executor,
-                            lambda: client.invoke_model_with_response_stream(
-                                modelId=model_id,
-                                body=request_body,
-                                contentType="application/json",
-                                accept="application/json",
-                            ),
-                        )
-                        break
-                    except (ConnectionClosedError, EndpointConnectionError) as exc:
-                        if attempt == 2:
-                            raise
-                        logger.warning("bedrock_stream_connect_retry", model_id=model_id,
-                                       error=str(exc)[:160])
+                response = await self._call_with_connect_retry(
+                    client, _bedrock_executor,
+                    lambda: client.invoke_model_with_response_stream(
+                        modelId=model_id,
+                        body=request_body,
+                        contentType="application/json",
+                        accept="application/json",
+                    ),
+                    model_id=model_id, event="bedrock_stream_connect_retry",
+                )
                 aws_request_id: str | None = response.get("ResponseMetadata", {}).get("RequestId")
                 stream = response.get("body")
                 return (
