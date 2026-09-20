@@ -125,6 +125,12 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 
 ## 단가 갱신 (08)
 
+**언제 돌리나** — ① upstream 동기화(US-10 · [8-D](../ops/8-D-upstream-sync.md) ⑧) 직후: 마이그레이션이 단가를 글로벌 값으로 다시 넣는다(2026-09-20 prod 실측 — Sonnet 5 가 $2/$10 로 돌아감) ② AWS 단가가 바뀌었을 때: `pricing.tsv` 를 먼저 고친다.
+
+**순서** — `bash 08-set-model-pricing.sh`(차이만 출력) → `--apply`(`yes`) → 5분 대기(모델 캐시, `--wait` 를 붙이면 스크립트가 기다린다) → `bash 14-postdeploy-check.sh` 의 단가 행이 OK.
+
+Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10, Standard $2.20/$11(`pricing.tsv` 머리말).
+
 `08-set-model-pricing.sh` 는 `pricing.tsv` 의 값과 DB 의 **열린 단가 행**(`effective_until IS NULL`)을 비교해, 다른 alias 만 닫고 새 행을 넣는다(한 트랜잭션). 등록 안 된 alias 는 건너뛴다(`02` 로 등록). `--alias` 로 한 모델만, `--print-sql` 로 SQL 만 확인(AWS 불필요). 적용 후 검증 SELECT 로 열린 행 1개·값 일치를 확인하고, `snapshots/<ts>-08-pricing-rollback.sql` 에 이전 값을 다시 넣는 SQL 을 남긴다(행 삭제 없음).
 
 왜 Standard 티어인가 — `us.anthropic.*` 는 지리 CRIS 라 AWS 가 Global 보다 10% 높은 Standard 단가로 청구한다(Price List us-west-2 `*_standard` SKU + 891 Cost Explorer 실측). Global(`global.*`) 모델을 등록했다면 표에 그 값을 따로 넣는다.
