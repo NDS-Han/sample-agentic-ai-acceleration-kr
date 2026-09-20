@@ -138,7 +138,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 08-set-model-pricing.sh
 bash 08-set-model-pricing.sh --apply
 ```
-기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)). 단가 표 = `update-scripts/pricing.tsv` 가 정본이다 — 청구 단가가 다르면 `--apply` 전에 이 파일부터 고친다(②).
+기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)). 단가 표 = `update-scripts/pricing.tsv` 가 정본이다 — 청구 단가가 다르면 `--apply` 전에 이 파일부터 고친다(②). 단가만 따로 다룬 문서 = [8-R](8-R-pricing.md).
 
 admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthropic.claude-opus-5`·`…-sonnet-5`·`gpt-5.6-*`·`llama-3-70b`)는 **INACTIVE** 로 — US 가 서비스하지 않는다. ⑨ 의 14 가 남은 것을 알려준다.
 
