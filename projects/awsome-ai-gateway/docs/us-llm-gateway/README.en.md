@@ -8,8 +8,8 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 > Synced with the Korean version through `US-10` (2026-08-29). **The linked procedure documents are Korean-only** (install guide, runbooks, update scripts) — this page tells you *what changed* and *whether this deployment has it*; the runbooks are for the operator who performs the change.
 
 **What you want to do**
-- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
-- **Already installed — see the update state** — `bash status.sh` on the deployment EC2 → apply only the missing rows of [2. Latest updates](#2-latest-updates) below
+- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) drives [install-guide.md](install-guide.md) §1–§6 in the prod account — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
+- **Already installed — see the update state** — `bash status.sh` on the deployment EC2 → apply only the missing rows of [2. Latest updates](#2-latest-updates) below · `US-10`·`US-11` are not judged by `status.sh` — check them with `bash 14-postdeploy-check.sh` (DB schema number · prices match)
 - **Set up employee PCs only** — [client-install.md](client-install.md) (Claude Code) · [cowork/…windows.md](cowork/manual/cowork-client-install-windows.md) · [cowork/…windows-auto.md](cowork/manual/cowork-client-install-windows-auto.md) (installer) · [cowork/…macos.md](cowork/cowork-client-install-macos.md) · [cowork/installer/…e2e-windows.md](cowork/installer/cowork-installer-admin-e2e-windows.md) (Windows installer, US-09)
 
 **This deployment**
@@ -36,7 +36,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 | Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` (the same install as `US-01`, in the prod account per 8-P — https · admin internal · VPN included) |
 | Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` (same; https included, so no entry choice) |
 
-- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05` are included in every new install (POC and production).
+- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05·10·11` are included in every new install (POC and production) — installing the current code already has them.
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
@@ -62,7 +62,7 @@ Earlier (`US-01` initial install) and the why · pitfalls per item → [updates.
 
 ## 3. Applying updates (on the deployment EC2)
 
-**① Bring the repository up to date** — a rebased branch, so not `git pull` but the block below. `values-*.yaml` exists only on this EC2, so the backup · restore is the point (confirm `values restored OK`). `origin` in `git remote -v` must be `gonsoomoon-ml/…` (if it is aws-samples, `set-url`). The prod stack (`US-08`) follows the same steps on the **prod account's deployment EC2** with `V=…/values-eks-fargate-prod.yaml` — `status.sh` does not judge US-08~10 (US-08 is a separate stack, US-09/US-10 are PC/admin-UI side).
+**① Bring the repository up to date** — a rebased branch, so not `git pull` but the block below. `values-*.yaml` exists only on this EC2, so the backup · restore is the point (confirm `values restored OK`). `origin` in `git remote -v` must be `gonsoomoon-ml/…` (if it is aws-samples, `set-url`). The prod stack (`US-08`) follows the same steps on the **prod account's deployment EC2** with `V=…/values-eks-fargate-prod.yaml` — `status.sh` does not judge US-08~11 (US-08 is a separate stack, US-09 is PC-side, US-10·11 are judged by `14-postdeploy-check.sh`).
 
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -85,7 +85,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash status.sh
  다음 작업: bash 03-create-cloudfront.sh … / (수동) ops/8-N-vpc-endpoint.md …
 ```
 
-**③ Only the missing rows**, via the doc column of the table in §2. Detailed procedure · pitfalls · rollback: [ops/8-U-update.md](ops/8-U-update.md).
+**③ Only the missing rows**, via the doc column of the table in §2. Detailed procedure · pitfalls · rollback: [ops/8-U-update.md](ops/8-U-update.md). **`US-10`·`US-11`** (bulk upstream sync — code · schema · prices together) are applied in one procedure, [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) — prod: section ⑩ of the same doc.
 
 ---
 

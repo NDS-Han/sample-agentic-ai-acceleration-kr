@@ -7,7 +7,7 @@
 
 **지금 하려는 것**
 - **처음 설치한다** — POC: [install-overview.md](install-overview.md)(범위·흐름 10분) → [install-guide.md](install-guide.md)(§1~§6-0 실행) · 운영(별도 계정 prod): [ops/8-P-prod.md](ops/8-P-prod.md) 순서로 [install-guide.md](install-guide.md) §1~§6 을 prod 계정에서 — 어느 쪽인지는 [1. 신규 설치 범위](#1-신규-설치-범위--무엇을-쓰느냐--poc-인가-운영인가)에서 먼저
-- **이미 설치했다 — 업데이트 상태를 보겠다** — 배포 EC2 에서 `bash status.sh` → 아래 [2. 최신 업데이트](#2-최신-업데이트) 표에서 미적용 항목만
+- **이미 설치했다 — 업데이트 상태를 보겠다** — 배포 EC2 에서 `bash status.sh` → 아래 [2. 최신 업데이트](#2-최신-업데이트) 표에서 미적용 항목만 · `US-10`·`US-11` 은 `status.sh` 가 판정하지 않는다 — `bash 14-postdeploy-check.sh`(DB 스키마 번호 · 단가 일치)로 확인
 - **직원 PC 만 설정한다** — [client-install.md](client-install.md)(Claude Code) · [cowork/…windows.md](cowork/manual/cowork-client-install-windows.md) · [cowork/…macos.md](cowork/cowork-client-install-macos.md) · [cowork/installer/…e2e-windows.md](cowork/installer/cowork-installer-admin-e2e-windows.md)(Windows 설치기, US-09)
 
 **이 배포**
@@ -33,7 +33,7 @@
 | Claude Code 만 (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08`(`US-01` 과 같은 설치를 prod 계정에서 8-P 대로 — https·admin internal·VPN 포함) |
 | Claude Code + **Cowork** | `US-01` + https 입구 하나(도메인 있으면 `US-06`, 없으면 `US-02` 의 `03` CloudFront) | `US-08`(같음 · https 포함이라 입구 선택 없음) |
 
-- **운영(`US-08`)** — https(US-06) · admin internal(US-07) · Cowork 라우팅 · Opus 5 를 처음부터 포함. `US-03·04·05` 는 신규 설치에 포함(필수).
+- **운영(`US-08`)** — `US-01` 과 같은 설치에 https(US-06) · admin internal(US-07) · VPN · prod 사이징을 처음부터 추가한다. `US-03·04·05·10·11` 은 신규 설치(POC·운영 모두)에 포함(필수) — 지금 코드로 설치하면 이미 들어 있다.
 - **POC(`US-01`)** 에만 해당:
   - **`US-06`(ALB HTTPS)** — Cowork 는 https 필수. 도메인 없으면 CloudFront(`03`), 있으면 US-06 — 둘 다는 불필요. 나중에 도메인이 생기면 [전환 절차](ops/8-H-alb-https.md).
   - **`US-07`(admin ALB internal)** — S2S VPN 이 있는 운영의 최종형이라 POC 엔 보통 불필요. 적용하려면 [전환 절차](ops/8-I-admin-internal.md) — VPN 없이 internal 로 두면 VK 발급이 막힌다. 운영은 VPN 이 전제([8-P §0](ops/8-P-prod.md#0-결론--전제)).
@@ -59,7 +59,7 @@
 
 ## 3. 적용하기 (배포 EC2 에서)
 
-**① 저장소 최신화** — 리베이스 브랜치라 `git pull` 이 아니라 아래. `values-*.yaml` 은 이 EC2 유일본이라 백업·복원이 핵심(`values restored OK` 확인). `git remote -v` 의 origin 이 `gonsoomoon-ml/…` 이어야 한다(aws-samples 면 `set-url`). prod 스택(`US-08`)은 **prod 계정의 배포 EC2** 에서 `V=…/values-eks-fargate-prod.yaml` 로 같은 절차 — `status.sh` 는 US-08~09 를 판정하지 않는다(US-08 은 별도 스택, US-09 는 PC 쪽).
+**① 저장소 최신화** — 리베이스 브랜치라 `git pull` 이 아니라 아래. `values-*.yaml` 은 이 EC2 유일본이라 백업·복원이 핵심(`values restored OK` 확인). `git remote -v` 의 origin 이 `gonsoomoon-ml/…` 이어야 한다(aws-samples 면 `set-url`). prod 스택(`US-08`)은 **prod 계정의 배포 EC2** 에서 `V=…/values-eks-fargate-prod.yaml` 로 같은 절차 — `status.sh` 는 US-08~11 을 판정하지 않는다(US-08 은 별도 스택, US-09 는 PC 쪽, US-10·11 은 `14-postdeploy-check.sh` 가 판정).
 
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -82,7 +82,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash status.sh
  다음 작업: bash 03-create-cloudfront.sh … / (수동) ops/8-N-vpc-endpoint.md …
 ```
 
-**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md). **upstream 대량 동기화**(코드·스키마·단가 일괄)는 [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md).
+**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md). **`US-10`·`US-11`**(upstream 대량 동기화 — 코드·스키마·단가 일괄)은 [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) 한 절차로 함께 적용한다 — prod 는 같은 문서 ⑩.
 
 ---
 
