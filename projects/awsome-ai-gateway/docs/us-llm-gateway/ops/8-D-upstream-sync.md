@@ -6,7 +6,7 @@
 > **위에서 아래로 명령만 치는** 순서. 이유·함정·상세는 링크. 서비스 하나 고친 일상 업데이트는 [8-U](8-U-update.md).
 
 ```
-①저장소 최신화 → ②사전 점검 → ③DB 스냅샷 → ④terraform plan(확인만)
+①저장소 최신화 → ②사전 점검·values 준비 → ③DB 스냅샷 → ④terraform plan(확인만)
 → ⑤태그 올림(13) → ⑥이미지 6개 빌드 → ⑦install-eks.sh(migration+롤아웃)
 → ⑧단가(08)·시드 alias 정리 → ⑨사후 점검(14)·24h 관찰
 ```
@@ -30,7 +30,7 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 
 📋 참고: 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하다. 단 **DB 마스터 비밀번호 참조 2줄**은 values 에 있어야 한다 — ② 의 `15` 가 확인·삽입한다. 태그는 ⑤ 에서.
 
-## ② 사전 점검 — 읽기 전용, 15분
+## ② 사전 점검 · values 준비 — 클러스터는 그대로, 15분
 
 ▶ 실행
 ```bash
@@ -43,6 +43,7 @@ bash 17-set-websearch-caps.sh
 bash 17-set-websearch-caps.sh --apply
 ```
 기대:
+- `00`·`14` 는 읽기 전용, `06`·`15`·`17` 은 **values 파일만** 고친다(클러스터 반영은 ⑦).
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
 - `14` 는 지금 `XX` 3~4개(DB 가 아직 옛 마이그레이션 0025 에 있음 · 단가 · system_settings 표 없음)가 **정상**. 목적은 배포 전 숫자를 `snapshots/pre.numbers` 에 남기는 것.
 - `06` 은 `already matches`. 아니면 `--apply`([8-U 0단계](8-U-update.md)).
@@ -198,7 +199,7 @@ git reset --hard origin/us/deploy-fixes && cp ~/values.bak $V
 cmp -s $V ~/values.bak && echo "values restored OK" || echo "RESTORE FAILED"
 ```
 
-**⑩-② 사전 점검**
+**⑩-② 사전 점검 · values 준비**
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
