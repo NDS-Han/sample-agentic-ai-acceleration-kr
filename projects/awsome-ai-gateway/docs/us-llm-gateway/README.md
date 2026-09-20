@@ -33,7 +33,11 @@
 | Claude Code 만 (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08`(`US-01` 과 같은 설치를 prod 계정에서 8-P 대로 — https·admin internal·VPN 포함) |
 | Claude Code + **Cowork** | `US-01` + https 입구 하나(도메인 있으면 `US-06`, 없으면 `US-02` 의 `03` CloudFront) | `US-08`(같음 · https 포함이라 입구 선택 없음) |
 
-- **운영(`US-08`)** — `US-01` 과 같은 설치에 https(US-06) · admin internal(US-07) · VPN · prod 사이징을 처음부터 추가한다. `US-03·04·05·10·11` 은 신규 설치(POC·운영 모두)에 포함(필수) — 지금 코드로 설치하면 이미 들어 있다.
+- **운영(`US-08`)** — `US-01` 과 같은 설치에 https(US-06) · admin internal(US-07) · VPN · prod 사이징을 처음부터 추가한다.
+- **신규 설치(POC·운영 모두)에 이미 들어 있는 것 — 따로 적용하지 않는다**:
+  - **`US-03·04·05`** — 관리 화면 한/영 · Bedrock VPC Endpoint · EKS 1.34 가 설치 절차에 포함.
+  - **`US-10`** — 지금 코드가 곧 US-10 이다. 최신 DB 스키마 · 안정성 수정 · web search 비용 상한과 개선이 기본값으로 동작한다.
+  - **`US-11`** — install-guide §4-2 (C) 가 `update-scripts/pricing.tsv` 의 단가를 심는다(기본 = `us.` Standard 티어). **다른 리전·티어로 청구받는 배포**는 §4-2 전에 이 파일을 자기 청구 단가로 고치고 `08-set-model-pricing.sh --print-sql` 로 (C) 블록을 다시 뽑는다.
 - **POC(`US-01`)** 에만 해당:
   - **`US-06`(ALB HTTPS)** — Cowork 는 https 필수. 도메인 없으면 CloudFront(`03`), 있으면 US-06 — 둘 다는 불필요. 나중에 도메인이 생기면 [전환 절차](ops/8-H-alb-https.md).
   - **`US-07`(admin ALB internal)** — S2S VPN 이 있는 운영의 최종형이라 POC 엔 보통 불필요. 적용하려면 [전환 절차](ops/8-I-admin-internal.md) — VPN 없이 internal 로 두면 VK 발급이 막힌다. 운영은 VPN 이 전제([8-P §0](ops/8-P-prod.md#0-결론--전제)).
