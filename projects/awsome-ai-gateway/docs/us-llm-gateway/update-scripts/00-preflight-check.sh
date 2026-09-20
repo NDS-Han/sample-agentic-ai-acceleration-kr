@@ -145,6 +145,9 @@ CF=$(aws cloudfront list-distributions \
 if [ -n "$CF" ]; then
   ok "a CloudFront distribution already fronts this ALB"
   sed 's/^/    /' <<<"$CF"
+elif grep -q HTTPS <<<"${LISTENERS:-}"; then
+  # US-06: the ALB serves https itself, so CloudFront is not part of this deployment
+  note "no CloudFront distribution — not needed: the ALB serves https itself (US-06)"
 else
   warn "no CloudFront distribution -> run 03-create-cloudfront.sh"
 fi
