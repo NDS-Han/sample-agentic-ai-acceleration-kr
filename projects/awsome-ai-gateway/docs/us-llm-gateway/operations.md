@@ -18,6 +18,7 @@
 | §8-U | 업데이트 (코드 변경 반영) | 코드·차트·terraform 이 바뀔 때마다 | [ops/8-U-update.md](ops/8-U-update.md) |
 | §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
 | §8-M | 모델 추가와 교체 | 모델 추가·교체 | [ops/8-M-models.md](ops/8-M-models.md) |
+| §8-R | 모델 단가 맞추기 (AWS 실제 청구와 같게) | 단가가 바뀔 때마다 · upstream 동기화 직후 (US-11) | [ops/8-R-pricing.md](ops/8-R-pricing.md) |
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |
 | §8-S | 배포 후 보안 하드닝 (직원 오픈 전 필수) | 직원 오픈 전 1회 | [ops/8-S-hardening.md](ops/8-S-hardening.md) |
 | §8-N | Bedrock 을 NAT 대신 VPC Endpoint(PrivateLink)로 | 기존 VPC 1회 (US-04) | [ops/8-N-vpc-endpoint.md](ops/8-N-vpc-endpoint.md) |
@@ -49,6 +50,13 @@ upstream 을 통째로 들여온 뒤 배포 EC2 에서 명령만 위에서 아�
 
 `02-add-opus5-model.sh` 는 범용 — `config.env` 의 `MODEL_ALIAS`·`MODEL_PROVIDER_ID` 로 어떤 모델이든 등록. ⚠️ 단가 누락 = 비용 `$0` 기록·예산 우회.
 → **[ops/8-M-models.md](ops/8-M-models.md)**
+
+---
+
+### 8-R. 모델 단가 맞추기 (AWS 실제 청구와 같게)
+
+비용·예산은 DB 의 단가 × 토큰이다 — 단가가 청구와 다르면 조용히 틀린다. 단가 표는 `update-scripts/pricing.tsv` 하나, 적용은 `08-set-model-pricing.sh`. ⚠️ upstream 마이그레이션이 글로벌 단가를 다시 넣으므로 동기화 뒤에는 꼭 한 번 더.
+→ **[ops/8-R-pricing.md](ops/8-R-pricing.md)**
 
 ---
 
