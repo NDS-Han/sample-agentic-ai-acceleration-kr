@@ -1,6 +1,6 @@
 # 서버측 Web Search 는 어떻게 동작하나 (초보자용)
 
-> 이 문서는 [install-guide.md §5](install-guide.md#5-서버측-web-search-us-east-1) 를 **개념부터** 이해하려는 사람을 위한 것이다. 설치 명령은 §5 에 있고, 여기서는 *"직원이 질문하면 무슨 일이 일어나나"* 를 그림으로 설명한다.
+> 이 문서는 [install-guide.md §5](../install-guide.md#5-서버측-web-search-us-east-1) 를 **개념부터** 이해하려는 사람을 위한 것이다. 설치 명령은 §5 에 있고, 여기서는 *"직원이 질문하면 무슨 일이 일어나나"* 를 그림으로 설명한다.
 
 ---
 
@@ -213,7 +213,7 @@ Cowork·Claude Code 는 파일 쓰기, 할 일 목록 같은 **자체 도구**�
 ## 검증 — "정말 검색했나?"
 
 - **화면** — 답변의 🔎 줄.
-- **CloudWatch** — AgentCore 게이트웨이의 `tools/call` 호출 수 (DB·비번 불필요). 명령은 [§5-4](install-guide.md#5-4-검증-6-클라이언트-설치-후).
+- **CloudWatch** — AgentCore 게이트웨이의 `tools/call` 호출 수 (DB·비번 불필요). 명령은 [§5-4](../install-guide.md#5-4-검증-6-클라이언트-설치-후).
 - **DB** — `usage.usage_logs.web_search_count` (성공한 검색만 카운트).
 - **gateway-proxy 로그** — `kubectl logs` 에 검색마다 이벤트가 남는다.
   - `web_search.evidence_built` — 검색 1건 실행(요청 건수·남긴 건수·크기)
