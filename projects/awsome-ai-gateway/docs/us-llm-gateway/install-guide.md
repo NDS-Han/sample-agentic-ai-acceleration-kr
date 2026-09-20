@@ -954,7 +954,7 @@ kubectl -n llm-gateway logs deploy/llm-gateway-gateway-proxy | grep -iE "us\.ant
 
 ## 5. 서버측 Web Search (us-east-1)
 
-> 📖 **처음이면 [web-search-explained.md](web-search-explained.md) 를 먼저 읽으세요.** — "직원이 질문하면 무슨 일이 일어나나" 를 그림으로 설명한다(어떤 단어가 검색을 켜나·검색은 어디서 도나·직원은 왜 설정 안 하나). 아래는 그 위에 필요한 **설치 명령**입니다.
+> 📖 **처음이면 [web-search-explained.md](web-search/web-search-explained.md) 를 먼저 읽으세요.** — "직원이 질문하면 무슨 일이 일어나나" 를 그림으로 설명한다(어떤 단어가 검색을 켜나·검색은 어디서 도나·직원은 왜 설정 안 하나). 아래는 그 위에 필요한 **설치 명령**입니다.
 
 AWS **관리형 WebSearch 커넥터**(`bedrock-agentcore:us-east-1:aws:tool/web-search.v1`)를 AgentCore Gateway(MCP·**AWS_IAM/SigV4 inbound**)로 노출하고, gateway-proxy가 **IRSA** `InvokeGateway` 로 호출한다.
 
@@ -1045,7 +1045,7 @@ aws cloudwatch get-metric-statistics --region us-east-1 --output text \
 
 `tools/call` 카운트가 오르면 동작(`initialize`·`tools/list` 는 핸드셰이크라 검색이 아니다). DB 로 보려면 `usage.usage_logs.web_search_count` — 성공한 검색만 센다.
 
-> 📋 **로그로도 확인할 수 있다.** gateway-proxy 는 검색 1건마다 `web_search.evidence_built` 를 남긴다(`kubectl logs deploy/llm-gateway-gateway-proxy | grep web_search`). 이 줄이 하나도 없으면 ① 모델이 검색 없이 답했거나 ② 이미지가 옛 버전(성공한 검색이 로그를 남기지 않던 시기)이다. 이벤트 목록은 [web-search-explained.md](web-search-explained.md#검증--정말-검색했나).
+> 📋 **로그로도 확인할 수 있다.** gateway-proxy 는 검색 1건마다 `web_search.evidence_built` 를 남긴다(`kubectl logs deploy/llm-gateway-gateway-proxy | grep web_search`). 이 줄이 하나도 없으면 ① 모델이 검색 없이 답했거나 ② 이미지가 옛 버전(성공한 검색이 로그를 남기지 않던 시기)이다. 이벤트 목록은 [web-search-explained.md](web-search/web-search-explained.md#검증--정말-검색했나).
 
 
 
