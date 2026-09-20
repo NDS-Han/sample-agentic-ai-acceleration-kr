@@ -36,7 +36,11 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 | Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` (the same install as `US-01`, in the prod account per 8-P — https · admin internal · VPN included) |
 | Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` (same; https included, so no entry choice) |
 
-- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05·10·11` are included in every new install (POC and production) — installing the current code already has them.
+- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start.
+- **Already included in every new install (POC and production) — nothing to apply separately**:
+  - **`US-03·04·05`** — admin UI KO/EN toggle · Bedrock VPC endpoints · EKS 1.34 are part of the install steps.
+  - **`US-10`** — the code you install is US-10: latest DB schema · stability fixes · web-search cost caps and improvements work by default.
+  - **`US-11`** — install-guide §4-2 (C) seeds the prices from `update-scripts/pricing.tsv` (default = `us.` Standard tier). **If you are billed at another region or tier**, edit that file to your billed prices before §4-2 and regenerate block (C) with `08-set-model-pricing.sh --print-sql`.
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
