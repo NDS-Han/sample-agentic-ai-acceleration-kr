@@ -12,9 +12,23 @@
 
 `deployment/scripts/install-eks.sh` 로 설치한 게이트웨이라면 `config.env` **에서 계정 ID 한 줄만** 고치면 됩니다. 나머지 값은 설치 기본값이거나 클러스터에서 자동으로 찾아냅니다.
 
+**이 문서의 구성** — 큰 절은 번호(`## N.`)로 시작하고, 절과 절 사이에는 구분선이 있습니다.
+
+1. [무엇을 해결하나](#1-무엇을-해결하나)
+2. [실행 위치와 준비물](#2-실행-위치와-준비물)
+3. [어느 스크립트가 무엇을 바꾸나](#3-어느-스크립트가-무엇을-바꾸나)
+4. [단가 갱신 (08)](#4-단가-갱신-08)
+5. [실행 순서](#5-실행-순서)
+6. [검증](#6-검증)
+7. [롤백](#7-롤백)
+8. [`helm upgrade` 전에 어노테이션을 영구화하십시오](#8-helm-upgrade-전에-어노테이션을-영구화하십시오)
+9. [각 단계 보충](#9-각-단계-보충)
+10. [문제가 생기면](#10-문제가-생기면)
+11. [참고](#11-참고)
+
 ---
 
-## 무엇을 해결하나
+## 1. 무엇을 해결하나
 
 Claude Code는 잘 되는데 Cowork만 안 되는 상태를 고칩니다(기존 배포 대상 — 신규 설치는 install-guide §4-2·§4-3 이 같은 내용을 포함). 원인은 셋입니다.
 
@@ -46,11 +60,12 @@ Cowork 앱에서 "Claude Opus 5" 선택
 
 Cowork는 게이트웨이 주소(`inferenceGatewayBaseUrl`)가 `https://` 로 시작해야 연결합니다. 게이트웨이 ALB가 HTTP만 열려 있고 ACM 인증서·퍼블릭 호스팅영역이 없다면, 도메인을 새로 사지 않고 https를 얻는 방법은 CloudFront를 앞에 세우는 것입니다.
 
----
 
 `01-fix-cowork-routing.sh` 가 ①②를 (`routing_profiles` 의 `cowork` 행을 `claude-code` 행과 같은 모양으로 고칩니다), `03-create-cloudfront.sh` 가 ③을 해결합니다.
 
-## 실행 위치와 준비물
+---
+
+## 2. 실행 위치와 준비물
 
 **설치할 때 쓴 배포 작업용 EC2(Deployment EC2, 설치 가이드 §1-2)에서 실행합니다.** 랩톱이나 다른 머신에서는 동작하지 않습니다 — DB가 프라이빗 VPC 안에 있어 그 EC2를 거쳐야 하고, 클러스터 접근에 필요한 kubeconfig도 거기에 있습니다.
 
@@ -91,7 +106,9 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 
 **여기까지가 준비입니다.** 실행은 다음 절의 순서를 그대로 따르십시오 — 맨 처음 `00-preflight-check.sh` 가 읽기 전용으로 설정이 어떻게 해석됐는지, 자동 탐지가 무엇을 찾았는지 보여줍니다. 값이 틀렸으면 거기서 멈추면 됩니다.
 
-## 어느 스크립트가 무엇을 바꾸나
+---
+
+## 3. 어느 스크립트가 무엇을 바꾸나
 
 
 | 스크립트                        | 바꾸는 것                                                  | 위험도                        |
@@ -120,21 +137,6 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |
 
-
-
-
-## 단가 갱신 (08)
-
-**언제 돌리나** — ① upstream 동기화(US-10 · [8-D](../ops/8-D-upstream-sync.md) ⑧) 직후: 마이그레이션이 단가를 글로벌 값으로 다시 넣는다(2026-09-20 prod 실측 — Sonnet 5 가 $2/$10 로 돌아감) ② AWS 단가가 바뀌었을 때: `pricing.tsv` 를 먼저 고친다.
-
-**순서** — `bash 08-set-model-pricing.sh`(차이만 출력) → `--apply`(`yes`) → 5분 대기(모델 캐시, `--wait` 를 붙이면 스크립트가 기다린다) → `bash 14-postdeploy-check.sh` 의 단가 행이 OK.
-
-Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10, Standard $2.20/$11(`pricing.tsv` 머리말).
-
-`08-set-model-pricing.sh` 는 `pricing.tsv` 의 값과 DB 의 **열린 단가 행**(`effective_until IS NULL`)을 비교해, 다른 alias 만 닫고 새 행을 넣는다(한 트랜잭션). 등록 안 된 alias 는 건너뛴다(`02` 로 등록). `--alias` 로 한 모델만, `--print-sql` 로 SQL 만 확인(AWS 불필요). 적용 후 검증 SELECT 로 열린 행 1개·값 일치를 확인하고, `snapshots/<ts>-08-pricing-rollback.sql` 에 이전 값을 다시 넣는 SQL 을 남긴다(행 삭제 없음).
-
-왜 Standard 티어인가 — `us.anthropic.*` 는 지리 CRIS 라 AWS 가 Global 보다 10% 높은 Standard 단가로 청구한다(Price List us-west-2 `*_standard` SKU + 891 Cost Explorer 실측). Global(`global.*`) 모델을 등록했다면 표에 그 값을 따로 넣는다.
-
 ### 공통 규약
 
 - **인자 없이 실행 = dry-run.** 현재값과 바꿀 내용만 출력하고 아무것도 건드리지 않습니다.
@@ -144,19 +146,25 @@ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10, St
 
 ---
 
+## 4. 단가 갱신 (08)
 
+`08-set-model-pricing.sh` 는 단가 표 `pricing.tsv` 와 DB 를 비교해, 다른 모델만 새 단가 행으로 바꾼다 — 인자 없이 돌리면 차이만 출력, `--apply` 로 적용, 5분 뒤 반영.
 
-## 실행 순서
+**언제 · 어떤 순서로 · 왜 이 값인지 · 함정 · 되돌리기는 전용 문서 → [ops/8-R-pricing.md](../ops/8-R-pricing.md)** (US-11).
+
+---
+
+## 5. 실행 순서
 
 ⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다. upstream 동기화 배포(13·14 포함)는 [ops/8-D](../ops/8-D-upstream-sync.md).
 
-### 1. 항상 — 상태 점검
+### 5-1. 항상 — 상태 점검
 
 ```bash
 bash 00-preflight-check.sh                 # 항상 먼저. 읽기 전용 (2~3분)
 ```
 
-### 2. 이미 설치한 곳만 — Cowork 경로 · Opus 5 등록 (처음 설치는 설치 절차에 포함)
+### 5-2. 이미 설치한 곳만 — Cowork 경로 · Opus 5 등록 (처음 설치는 설치 절차에 포함)
 
 ```bash
 bash 01-fix-cowork-routing.sh              # 확인
@@ -167,7 +175,7 @@ bash 02-add-opus5-model.sh --apply
 #   기본 시드로 alias 가 이미 있으면(global.* 로) --remap 을 붙인다 — dry-run 이 알려줌
 ```
 
-### 3. 단가 · web search 설정 — upstream 동기화(8-D)에서는 그 문서의 순서를 따른다
+### 5-3. 단가 · web search 설정 — upstream 동기화(8-D)에서는 그 문서의 순서를 따른다
 
 ```bash
 bash 08-set-model-pricing.sh               # 현재 vs pricing.tsv 차이 확인
@@ -177,7 +185,7 @@ bash 17-set-websearch-caps.sh              # web search 설정(상한·동작 �
 bash 17-set-websearch-caps.sh --apply
 ```
 
-### 4. 도메인이 없을 때만 — CloudFront 로 https 주소 얻기
+### 5-4. 도메인이 없을 때만 — CloudFront 로 https 주소 얻기
 
 도메인이 있으면 **건너뛴다** — [US-06](../ops/8-H-alb-https.md)으로 ALB 가 https 를 직접 받는다(둘 다 할 필요 없음).
 
@@ -189,7 +197,7 @@ bash 03-create-cloudfront.sh --allow-cloudfront
 #   IP+VK -> VK 단독으로 바뀝니다 (「참고」 절)
 ```
 
-### 5. Cowork 를 돌릴 PC 의 IP 허용
+### 5-5. Cowork 를 돌릴 PC 의 IP 허용
 
 ```bash
 bash 05-allow-client-ip.sh --add <Cowork 를 돌릴 PC 의 공인IP>/32 --apply
@@ -198,7 +206,7 @@ bash 06-persist-annotations.sh             # 확인
 bash 06-persist-annotations.sh --apply     # 05 의 IP 허용목록을 values 에 반영
 ```
 
-### 6. 항상 마지막 — 검증 · 직원에게 줄 값
+### 5-6. 항상 마지막 — 검증 · 직원에게 줄 값
 
 5분 기다린 뒤(캐시). 4번을 했다면 CloudFront 전파 5~15분을 더 기다린다.
 
@@ -227,9 +235,7 @@ bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 
 ---
 
-
-
-## 검증
+## 6. 검증
 
 `04-verify.sh` 가 세 층을 확인합니다.
 
@@ -263,9 +269,7 @@ B는 `anthropic-client-platform: desktop_app` **헤더로 Cowork를 흉내** 냅
 
 ---
 
-
-
-## 롤백
+## 7. 롤백
 
 ```bash
 bash 99-rollback.sh --list          # 되돌릴 수 있는 항목
@@ -278,9 +282,7 @@ bash 09-update-admin-ui.sh --rollback                  # 09 → 이전 이미지
 
 ---
 
-
-
-## `helm upgrade` 전에 어노테이션을 영구화하십시오
+## 8. `helm upgrade` 전에 어노테이션을 영구화하십시오
 
 `helm upgrade` 는 values 로부터 Ingress 를 다시 만들고, AWS Load Balancer Controller 가 그 Ingress 로부터 SG 를 다시 만듭니다. **values 에 없는 규칙은 그때 사라집니다.** 클러스터에서만 `kubectl annotate` 로 넣은 값이 대표적입니다.
 
@@ -320,9 +322,7 @@ bash 04-verify.sh                           # 종단 확인
 
 ---
 
-
-
-## 각 단계 보충
+## 9. 각 단계 보충
 
 실행 순서의 특정 줄이 왜 필요한지에 대한 설명입니다.
 
@@ -373,9 +373,6 @@ CloudFront를 세우면 추론은 어디서든 되지만, **VK를 받아오는 �
 ssh -i <key> ubuntu@<대상 리전 EC2> 'echo $SSH_CLIENT'   # 작은따옴표 필수
 ```
 
----
-
-
 
 ### VK 얻기
 
@@ -406,10 +403,7 @@ ssh -L 8090:localhost:8090 -i <key> ubuntu@<EC2 공인IP>
 
 ---
 
-
-
-## 문제가 생기면
-
+## 10. 문제가 생기면
 
 
 ### 간헐적인 502 / 504 — CloudFront 를 의심하지 마십시오
@@ -476,7 +470,6 @@ kubectl rollout status deploy/llm-gateway-gateway-proxy -n llm-gateway --timeout
 **근본 해결**(미적용): `gateway-proxy/src/app/providers/bedrock_adapter.py` 의 boto `Config` 에서 `read_timeout` 을 300 → 30 으로 낮추고 재시도를 붙이면, 300초 매달림이 빠른 재시도로 바뀌어 새 연결을 잡습니다. 이미지 재빌드 + `install-eks.sh` 가 필요합니다.
 
 > `tcp_keepalive=True` 만으로는 부족합니다 — Linux 기본 `tcp_keepalive_time` 이 7200초라 350초 안에 keepalive 가 나가지 않습니다. **Bedrock VPC 엔드포인트도 해결책이 아닙니다** — 인터페이스 엔드포인트는 NLB 기반이고 NLB idle timeout 도 350초로 같습니다(보안·비용 이유로는 여전히 넣을 값어치가 있습니다).
-
 
 
 ### ⚠️ 보안그룹을 직접 고치지 마십시오
@@ -562,10 +555,7 @@ comm -23 /tmp/a /tmp/b      # 빈 출력 = 전부 원격에 있음 = 버려도 �
 
 ---
 
-
-
-## 참고
-
+## 11. 참고
 
 
 ### `03 --allow-cloudfront` 의 보안 성격 변경
@@ -578,8 +568,6 @@ CloudFront는 오리진에 공인 IP로 접근하므로 ALB가 그 대역을 받
 | gateway ALB 도달       | 허용된 IP만 | CloudFront 경유 시 누구나  |
 | 실질 접근 통제             | IP + VK | **VK 단독**            |
 | admin-api / admin-ui | IP 제한   | **IP 제한 유지 (변경 없음)** |
-
-
 
 
 ### 직접 확인·디버깅할 때 쓸 이름
@@ -619,6 +607,3 @@ account_role_arn=arn:aws:iam::<존재하지 않는 계정>:role/...
 ```
 
 `claude-code` 행은 `backend='invoke'`, `default_model=NULL` 이라 이 규칙이 발동하지 않습니다. `01-fix-cowork-routing.sh` 는 Cowork 행을 이 모양으로 맞춥니다.
-
----
-
