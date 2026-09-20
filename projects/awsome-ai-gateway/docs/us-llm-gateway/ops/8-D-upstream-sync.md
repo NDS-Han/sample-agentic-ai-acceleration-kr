@@ -239,6 +239,7 @@ terraform apply
 terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 ```
 기대·멈추는 조건은 ④ 와 같다(4줄 → `yes` → `No changes.`).
+prod 실측(2026-09-20): `bedrock` 줄이 없고 대신 `module.aurora.time_static.final_snapshot[0] will be created` · `aws_rds_cluster … updated in-place`(`final_snapshot_identifier` 만) 2줄 — `Plan: 4 to add, 1 to change, 3 to destroy.` 이 2줄은 prod 첫 apply 에만 나오고 DB 에 쓰기 호출이 없다.
 
 **⑩-⑤ 태그 올림**
 
