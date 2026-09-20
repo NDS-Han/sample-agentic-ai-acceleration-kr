@@ -6,7 +6,7 @@
 > **위에서 아래로 명령만 치는** 순서. 이유·함정·상세는 링크. 서비스 하나 고친 일상 업데이트는 [8-U](8-U-update.md).
 
 ```
-①저장소 최신화 → ②사전 점검·values 준비 → ③DB 스냅샷 → ④terraform plan(확인만)
+①저장소 최신화 → ②사전 점검·설정 적용 → ③DB 스냅샷 → ④terraform plan(확인만)
 → ⑤태그 올림(13) → ⑥이미지 6개 빌드 → ⑦install-eks.sh(migration+롤아웃)
 → ⑧단가(08)·시드 alias 정리 → ⑨사후 점검(14)·24h 관찰
 ```
@@ -30,7 +30,7 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 
 📋 참고: 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하다. 단 **DB 마스터 비밀번호 참조 2줄**은 values 에 있어야 한다 — ② 의 `15` 가 확인·삽입한다. 태그는 ⑤ 에서.
 
-## ② 사전 점검 · values 준비 — 클러스터는 그대로, 15분
+## ② 사전 점검 · 설정 적용 — values 파일까지만, 15분
 
 ▶ 실행
 ```bash
@@ -190,6 +190,7 @@ api-key-helper 2>/dev/null | grep -m1 '^vk-'
 dev 와 같은 순서다. 다른 것은 셋뿐 — values 파일 이름, 스냅샷·terraform 디렉터리의 `prod`, 스크립트 인자 `prod`. `config.env` 는 prod EC2 의 것(`DEPLOY_ENV="prod"`)을 쓴다.
 
 **⑩-① 저장소 최신화**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -199,7 +200,8 @@ git reset --hard origin/us/deploy-fixes && cp ~/values.bak $V
 cmp -s $V ~/values.bak && echo "values restored OK" || echo "RESTORE FAILED"
 ```
 
-**⑩-② 사전 점검 · values 준비**
+**⑩-② 사전 점검 · 설정 적용**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -214,6 +216,7 @@ bash 17-set-websearch-caps.sh --apply
 기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15`·`17` 은 `nothing to do`(아니면 `--apply`).
 
 **⑩-③ DB 스냅샷**
+
 ▶ 실행
 ```bash
 SNAP=llm-gateway-prod-pre-sync-$(date +%Y%m%d)
@@ -226,6 +229,7 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 기대: 마지막 줄 `llm-gateway-prod-pre-sync-<날짜>  available`.
 
 **⑩-④ terraform — 확인 후 apply**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
@@ -237,6 +241,7 @@ terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 기대·멈추는 조건은 ④ 와 같다(4줄 → `yes` → `No changes.`).
 
 **⑩-⑤ 태그 올림**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -245,6 +250,7 @@ bash 13-bump-image-tags.sh prod --apply
 ```
 
 **⑩-⑥ 이미지 6개 빌드·push**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway
@@ -253,6 +259,7 @@ for s in migration gateway-proxy admin-api admin-ui notification-worker \
 ```
 
 **⑩-⑦ 배포**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
@@ -262,6 +269,7 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh prod
 ```
 
 **⑩-⑧ 단가 · 시드 alias**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -271,6 +279,7 @@ bash 08-set-model-pricing.sh --apply
 그다음 admin UI › Models 에서 시드 alias INACTIVE(⑧ 과 같음).
 
 **⑩-⑨ 사후 점검**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
