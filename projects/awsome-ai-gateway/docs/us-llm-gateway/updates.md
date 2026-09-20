@@ -8,15 +8,15 @@ README 의 「최신 업데이트」는 최근 5개만 보여준다 — 여기�
 | ID (문서) | 무엇 | 등급 · 처음 설치한다면 | 이미 설치했다면 — 적용 방법 |
 |---|---|---|---|
 | [**US-11**](update-scripts/README.md#단가-갱신-08) 2026/09 | 모델 단가를 **AWS 실제 청구**에 맞춤 — 미국 리전 묶음(`us.`) 호출은 글로벌 단가보다 10% 높게 청구된다 · Sonnet 5 의 9/1 인상은 취소돼 반영 · 단가가 바뀔 때마다 반복 | 필수(게이트웨이의 비용·예산이 실제 청구와 맞아야 한다) · 신규 포함(설치 중 §4-2 가 이 단가를 넣는다) | **US-10 을 [8-D](ops/8-D-upstream-sync.md) 로 했으면 끝**(⑧ 이 이 작업) · 그 뒤 단가가 바뀌면 단가 파일 `update-scripts/pricing.tsv` 를 고치고 `08` 스크립트로 적용(5분 뒤 반영) |
-| [**US-10**](ops/8-D-upstream-sync.md) 2026/09 | upstream 최신 코드 전체 반영 — DB 스키마 변경 11건 · 이미지 6종 전부 교체 · 안정성 수정 6건(상태 점검이 전부 503 · thinking 요청 400 · web search 반복 오류 · 예산 이중 차감 · Claude Code advisor 켜면 전부 400 · 오래 쉰 뒤 첫 요청 502) · web search 비용 상한 · web search 개선(9/19 추가 — 검색 기록 유지 · 앱 도구와 함께 동작 · 기본값 내장) | 필수(가용성 결함 수정) · 신규 설치는 포함(US-01 이 이 코드로 설치) | [8-D](ops/8-D-upstream-sync.md) ①~⑨: 사전 점검 → DB 스냅샷 → `13` 태그 → 이미지 6개 → `install-eks.sh` → `08` 단가 → `14` 점검 · 이미 끝낸 배포는 아래 9/19 추가분만 |
-| [**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08 | Cowork Windows 설치기 — 관리자가 .exe 1개 빌드 → 직원 PC 설치(HKLM 정책) | 선택 · Cowork Windows 쓰면 권장(수동 설치 대체) · 게이트웨이 변경 없음 | 빌드 PC 에서 `feat/cowork-installer-import` clone → `07-client-values.sh` 값으로 `site-config.json` → `build.ps1` → 직원 PC 설치 + `setup` |
-| [**US-08**](ops/8-P-prod.md) 2026/08 | prod 스택 신설 — 별도 계정 · https + admin internal + VPN · Cowork Windows | 선택 · POC 이후 운영 전환 시 · `environment=prod` | dev 는 그대로 두고 prod 계정에 §1~§6 재실행(8-P 순서) |
-| [**US-07**](ops/8-I-admin-internal.md) 2026/08 | 고객사 최종 아키텍처 — admin ALB 2개를 internal 로 | 선택 · 전제 S2S VPN · POC 신규는 §3-6 시점에 values 주석 해제 · 운영(`US-08`)은 포함 | values 주석 2곳 해제 → helm(ALB 재생성) → admin SG·CNAME 교체 |
-| [**US-06**](ops/8-H-alb-https.md) 2026/08 | ALB HTTPS — 커스텀 도메인 + ACM 인증서 | 선택 · POC 는 도메인 있을 때 · 운영(`US-08`)은 포함 | 도메인 확보 → 전환 → 클라이언트 URL 2개 교체 (약 30분) |
-| [**US-05**](ops/8-E-eks-upgrade.md) 2026/08 | EKS 1.31 → 1.34 | 필수(지원 만료·비용) · 신규 포함 | 1단계씩 3회 apply + 전 ns 파드 재시작 |
-| [**US-04**](ops/8-N-vpc-endpoint.md) 2026/08 | Bedrock·STS 를 NAT 대신 VPC Endpoint 로 | 필수(컴플라이언스) · 신규 포함 | 엔드포인트 apply → gateway-proxy 재시작 |
-| [**US-03**](ops/8-U-update.md) 2026/08 | Admin UI 한/영 토글 | 필수(영문 지원) · 신규 포함 | admin-ui 이미지 재빌드 → install-eks |
-| [**US-02**](update-scripts/README.md#실행-순서) 2026/08 | Cowork 연결 + Opus 5 등록 | 기존 배포 전용 — Cowork 쓰면 `01`·`03`, Opus 5 켜면 `02` · 신규 설치는 US-01 §4-2·§4-3 에 포함(`03` 은 도메인 없을 때만) | 01 라우팅 · 02 모델(`--remap`) · 03 CloudFront(도메인 없을 때만) |
+| [**US-10**](ops/8-D-upstream-sync.md) 2026/09 | 게이트웨이를 최신 코드로 올림(DB 구조 변경과 서비스 6개 전부 교체가 따르는 큰 업데이트) — 끊김·오류 6가지 수정(상태 점검 오판으로 전체가 한꺼번에 끊김 · thinking 요청 오류 · web search 반복 오류 · 예산 이중 차감 · Claude Code 의 advisor 를 켜면 전부 오류 · 오래 쉰 뒤 첫 요청 오류) · web search 비용 상한 · web search 개선(9/19 추가 — 검색 기록 유지 · 앱 도구와 함께 동작 · 설정 없이 기본 동작) | 필수(서비스가 끊기는 결함 수정) · 신규 포함(지금 설치하면 이 코드다) | [8-D](ops/8-D-upstream-sync.md) 를 위에서 아래로 따라 한다(약 1.5시간 · 사용자가 적은 시간에) — 점검 → DB 백업 → 새 버전 빌드 → 배포 → 단가 → 확인 · 9/19 전에 끝낸 곳은 아래 9/19 추가분만 |
+| [**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08 | Cowork Windows 설치 파일 — 관리자가 설치 파일 1개를 만들어 직원 PC 에서 실행하면 설정까지 끝난다(손으로 하던 설정 입력을 대체) | 선택 · Cowork 를 Windows 에서 쓰면 권장 · 게이트웨이는 바뀌지 않는다 | 문서 순서대로 — 빌드용 PC 에서 설치 파일 만들기 → 직원 PC 에 설치 → 로그인 1회 |
+| [**US-08**](ops/8-P-prod.md) 2026/08 | 운영(prod) 환경 새로 만들기 — 별도 AWS 계정 · https 주소 · 관리 화면은 사내망(VPN)에서만 · Cowork Windows 포함 | 선택 · POC 를 마치고 운영으로 갈 때 | POC(dev)는 그대로 두고, 운영 계정에서 [8-P](ops/8-P-prod.md) 순서대로 처음부터 설치한다 |
+| [**US-07**](ops/8-I-admin-internal.md) 2026/08 | 관리 화면과 관리 API 를 인터넷에서 닫고 사내망(VPN)에서만 열리게 — 고객사 최종 구성 | 선택 · 사내망 연결(S2S VPN)이 먼저 있어야 한다 · POC 엔 보통 불필요 · 운영(`US-08`)은 포함 | [8-I](ops/8-I-admin-internal.md) 순서대로 — 설정 2곳 변경 → 재배포 → 관리 화면 주소(DNS) 교체 |
+| [**US-06**](ops/8-H-alb-https.md) 2026/08 | https 주소로 접속 — 자체 도메인 + 인증서 | 선택 · POC 는 도메인이 있을 때 · 운영(`US-08`)은 포함 | 도메인 준비 → [8-H](ops/8-H-alb-https.md) 순서대로 전환 → 직원 PC 의 주소 2개 교체(약 30분) |
+| [**US-05**](ops/8-E-eks-upgrade.md) 2026/08 | 쿠버네티스(EKS) 버전 올림 — 1.31 → 1.34 | 필수(옛 버전은 지원 종료로 추가 요금이 붙는다) · 신규 포함 | [8-E](ops/8-E-eks-upgrade.md) 순서대로 — 한 단계씩 3번 올리고, 매번 전체 서비스를 재시작한다 |
+| [**US-04**](ops/8-N-vpc-endpoint.md) 2026/08 | Bedrock 호출을 인터넷(NAT) 대신 AWS 내부망(VPC Endpoint)으로 | 필수(보안 규정) · 신규 포함 | [8-N](ops/8-N-vpc-endpoint.md) 순서대로 — 내부망 연결점 생성 → 게이트웨이 재시작 |
+| [**US-03**](ops/8-U-update.md) 2026/08 | 관리 화면 한/영 전환 | 필수(영문 사용자 지원) · 신규 포함 | [8-U](ops/8-U-update.md) 순서대로 — 관리 화면만 새로 빌드해 재배포 |
+| [**US-02**](update-scripts/README.md#실행-순서) 2026/08 | Cowork 연결 + Opus 5 등록 | 이미 설치한 곳 전용 · 처음 설치는 설치 절차에 포함(도메인 없이 Cowork 를 쓸 때의 CloudFront 만 예외) | [update-scripts](update-scripts/README.md#실행-순서) 순서대로 — Cowork 경로 교정 · Opus 5 모델 등록 · (도메인이 없으면) https 용 CloudFront |
 | [**US-01**](install-overview.md) 2026/07 | 최초 설치 (기준선) | — | — |
 
 ## 왜 · 함정 (항목별)
