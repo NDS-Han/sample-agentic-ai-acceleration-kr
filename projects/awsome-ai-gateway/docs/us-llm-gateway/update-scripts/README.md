@@ -150,37 +150,61 @@ Sonnet 5 의 "9/1 부터 $3/$15" 인상은 취소됐다 — 표준가 $2/$10, St
 
 ⚠️ **파일 번호는 실행 순서가 아니라 변경 ID 입니다.** `04-verify.sh` 는 번호와 달리 **맨 마지막**에 돌립니다 — `05-allow-client-ip.sh`·`06-persist-annotations.sh` 가 나중에 추가됐고 둘 다 검증보다 앞에 와야 하기 때문입니다. 기준은 아래 목록입니다. upstream 동기화 배포(13·14 포함)는 [ops/8-D](../ops/8-D-upstream-sync.md).
 
+### 1. 항상 — 상태 점검
+
 ```bash
 bash 00-preflight-check.sh                 # 항상 먼저. 읽기 전용 (2~3분)
+```
 
+### 2. 이미 설치한 곳만 — Cowork 경로 · Opus 5 등록 (처음 설치는 설치 절차에 포함)
+
+```bash
 bash 01-fix-cowork-routing.sh              # 확인
 bash 01-fix-cowork-routing.sh --apply
 
-bash 02-add-opus5-model.sh                 # 확인 — 기존 배포 전용(신규는 §4-2 에 포함)
+bash 02-add-opus5-model.sh                 # 확인
 bash 02-add-opus5-model.sh --apply
 #   기본 시드로 alias 가 이미 있으면(global.* 로) --remap 을 붙인다 — dry-run 이 알려줌
+```
 
+### 3. 단가 · web search 설정 — upstream 동기화(8-D)에서는 그 문서의 순서를 따른다
+
+```bash
 bash 08-set-model-pricing.sh               # 현재 vs pricing.tsv 차이 확인
 bash 08-set-model-pricing.sh --apply       # 5분 뒤 반영 (Redis model 캐시)
 
-bash 17-set-websearch-caps.sh              # 8-D ② — web search 설정(상한·동작 스위치) (install-eks.sh 롤아웃으로 적용)
+bash 17-set-websearch-caps.sh              # web search 설정(상한·동작 스위치) — install-eks.sh 롤아웃으로 적용
 bash 17-set-websearch-caps.sh --apply
+```
 
+### 4. 도메인이 없을 때만 — CloudFront 로 https 주소 얻기
+
+도메인이 있으면 **건너뛴다** — [US-06](../ops/8-H-alb-https.md)으로 ALB 가 https 를 직접 받는다(둘 다 할 필요 없음).
+
+```bash
 bash 03-create-cloudfront.sh               # 설정 확인
 bash 03-create-cloudfront.sh --create
 bash 03-create-cloudfront.sh --allow-cloudfront
 #   안 하면 502. 단 데이터플레인 접근 통제가
 #   IP+VK -> VK 단독으로 바뀝니다 (「참고」 절)
+```
 
+### 5. Cowork 를 돌릴 PC 의 IP 허용
+
+```bash
 bash 05-allow-client-ip.sh --add <Cowork 를 돌릴 PC 의 공인IP>/32 --apply
 
 bash 06-persist-annotations.sh             # 확인
 bash 06-persist-annotations.sh --apply     # 05 의 IP 허용목록을 values 에 반영
+```
 
-#   ↑ 여기서 5분 대기 (캐시), CloudFront 전파는 5~15분
+### 6. 항상 마지막 — 검증 · 직원에게 줄 값
 
-bash 04-verify.sh --base-url https://<cf-domain> --vk <VK>
-#                                                    ↑ 「VK 얻기」 참고
+5분 기다린 뒤(캐시). 4번을 했다면 CloudFront 전파 5~15분을 더 기다린다.
+
+```bash
+bash 04-verify.sh --base-url https://<게이트웨이 주소> --vk <VK>
+#   <게이트웨이 주소> = 4번을 했으면 CloudFront 도메인, US-06 이면 gateway 도메인 · <VK> 는 「VK 얻기」 참고
 
 bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 ```
