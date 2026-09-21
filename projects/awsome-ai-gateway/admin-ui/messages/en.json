@@ -570,6 +570,34 @@
       "userCountShort": "{count} users",
       "unassigned": "Unassigned",
       "hint": "↑↓ navigate · Enter select · Esc close"
+    },
+    "effectivePolicy": {
+      "title": "Effective policy (read-only)",
+      "hint": "The synthesized result of all policy axes. Hover a ✗ to see which axis blocks it.",
+      "loading": "Loading policy…",
+      "loadFailed": "Failed to load policy",
+      "app": "App",
+      "webSearch": "Web Search",
+      "allowed": "Allowed",
+      "denied": "Denied",
+      "axis": {
+        "user_app": "No app access",
+        "user_model": "Not in model allowlist",
+        "model_app": "Model not available for this app"
+      },
+      "modelsSource": {
+        "label": "Model policy source",
+        "user": "User override",
+        "team": "Team policy",
+        "none": "No restriction (all allowed)"
+      },
+      "budgets": "Budgets",
+      "teamBudget": "Team total",
+      "userTotal": "User total",
+      "used": "used",
+      "rateLimits": "Rate limits",
+      "downgrade": "Auto downgrade",
+      "downgradeRule": "at {pct}% spend, {from} → {to}"
     }
   },
   "analytics": {

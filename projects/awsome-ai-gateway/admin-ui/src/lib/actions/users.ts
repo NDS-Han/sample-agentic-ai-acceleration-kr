@@ -388,3 +388,21 @@ function toErrorMessage(err: unknown): string {
   }
   return 'An unexpected error occurred';
 }
+// ─── getEffectivePolicyAction ────────────────────────────────────────────────
+// 사용자에게 적용되는 정책의 합성 읽기 전용 뷰 (effective-policy).
+
+import type { EffectivePolicy } from '@/types/entities';
+
+export async function getEffectivePolicyAction(
+  userId: string,
+): Promise<ActionResult<EffectivePolicy>> {
+  if (!userId) return { success: false, error: 'User ID is required' };
+  try {
+    const res = await withRetry(() =>
+      adminAPI.get<EffectivePolicy>(`/admin/users/${userId}/effective-policy`),
+    );
+    return { success: true, data: res };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}

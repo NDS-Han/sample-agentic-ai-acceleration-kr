@@ -542,5 +542,21 @@ async def clear_user_allowed_models(
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
+
+
+@router.get("/users/{user_id}/effective-policy")
+async def get_user_effective_policy(
+    user_id: uuid.UUID,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """사용자에게 실제로 적용되는 정책의 합성 뷰 — 읽기 전용.
+
+    4개 축(user→app, user/team→model, model→app)의 판정 매트릭스 + 예산·
+    rate limit·downgrade·web search 설정을 한 번에 반환한다.
+    """
+    from app.services.effective_policy_service import EffectivePolicyService
+
+    return await EffectivePolicyService(session).get_for_user(user_id)
     await session.commit()
     await svc.invalidate_user_vk_cache(user_id)

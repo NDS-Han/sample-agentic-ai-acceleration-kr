@@ -24,6 +24,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { TeamModelPermissionPanel } from '@/components/users/TeamModelPermissionPanel';
+import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 
 interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
@@ -422,6 +423,16 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 ))}
               </div>
             )}
+          </div>
+        )}
+
+        {!isLoadPending && (
+          <div className="border rounded-apple-md p-3 mb-3">
+            <p className="text-sm font-medium mb-1">{t('effectivePolicy.title')}</p>
+            <p className="text-xs text-muted-foreground mb-3">
+              {t('effectivePolicy.hint')}
+            </p>
+            <EffectivePolicyCard userId={node.id} />
           </div>
         )}
 

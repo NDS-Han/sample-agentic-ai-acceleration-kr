@@ -570,6 +570,34 @@
       "userCountShort": "{count}명",
       "unassigned": "미배정",
       "hint": "↑↓ 이동 · Enter 선택 · Esc 닫기"
+    },
+    "effectivePolicy": {
+      "title": "유효 정책 (읽기 전용)",
+      "hint": "모든 정책 축을 합성한 실제 판정 결과입니다. ✗에 마우스를 올리면 어느 축에서 막혔는지 보입니다.",
+      "loading": "정책 불러오는 중…",
+      "loadFailed": "정책을 불러오지 못했습니다",
+      "app": "앱",
+      "webSearch": "웹서치",
+      "allowed": "허용",
+      "denied": "거부",
+      "axis": {
+        "user_app": "앱 접근 권한 없음",
+        "user_model": "허용 모델 목록 밖",
+        "model_app": "이 모델은 이 앱에서 사용 불가"
+      },
+      "modelsSource": {
+        "label": "모델 정책 출처",
+        "user": "사용자 개별 설정",
+        "team": "팀 정책",
+        "none": "제한 없음 (전체 허용)"
+      },
+      "budgets": "예산",
+      "teamBudget": "팀 총예산",
+      "userTotal": "사용자 총예산",
+      "used": "사용",
+      "rateLimits": "Rate Limit",
+      "downgrade": "자동 다운그레이드",
+      "downgradeRule": "{pct}% 소진 시 {from} → {to} 전환"
     }
   },
   "analytics": {

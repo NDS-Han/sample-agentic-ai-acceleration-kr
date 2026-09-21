@@ -285,3 +285,51 @@ export interface FormFieldError {
   message: string;
 }
 
+
+// ─── Effective Policy (GET /admin/users/{id}/effective-policy) ────────────────
+
+export interface EffectivePolicyCell {
+  client: string;
+  model_alias: string;
+  allowed: boolean;
+  blocked_by: string[]; // "user_app" | "user_model" | "model_app"
+}
+
+export interface EffectiveBudgetEntry {
+  scope: string;
+  client: string | null;
+  max_budget_usd: string;
+  used_usd: string | null;
+  policy: string;
+}
+
+export interface EffectiveRateLimitEntry {
+  scope: string;
+  model_alias: string | null;
+  rpm_limit: number | null;
+  tpm_limit: number | null;
+  cpm_limit_usd: string | null;
+  cph_limit_usd: string | null;
+}
+
+export interface EffectiveDowngradeRule {
+  scope: string;
+  threshold_pct: number;
+  from_model_alias: string;
+  to_model_alias: string;
+}
+
+export interface EffectivePolicy {
+  user_id: string;
+  email: string | null;
+  team_id: string | null;
+  team_name: string | null;
+  allowed_clients: string[] | null;
+  allowed_models: string[] | null;
+  allowed_models_source: 'user' | 'team' | 'none';
+  web_search: Record<string, boolean>;
+  cells: EffectivePolicyCell[];
+  budgets: EffectiveBudgetEntry[];
+  rate_limits: EffectiveRateLimitEntry[];
+  downgrade_rules: EffectiveDowngradeRule[];
+}
