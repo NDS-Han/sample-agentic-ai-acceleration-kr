@@ -6,6 +6,8 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction } from '@/lib/actions/users';
+import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
+import { Badge } from '@/components/common/Badge';
 import type { EffectivePolicy, EffectivePolicyCell } from '@/types/entities';
 
 interface Props {
@@ -122,19 +124,21 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
         </span>
       </p>
 
-      {/* 예산 요약 */}
+      {/* 예산 요약 — Budget Management 와 같은 게이지 표현 */}
       {policy.budgets.length > 0 && (
         <div>
-          <p className="text-xs font-medium mb-1">{t('budgets')}</p>
-          <ul className="text-xs text-muted-foreground space-y-0.5">
+          <p className="text-xs font-medium mb-1.5">{t('budgets')}</p>
+          <div className="space-y-2">
             {policy.budgets.map((b, i) => (
-              <li key={i}>
-                {b.scope === 'TEAM' ? t('teamBudget') : b.client ? `${b.client}` : t('userTotal')}{' '}
-                — ${b.max_budget_usd}
-                {b.used_usd != null && ` (${t('used')} $${b.used_usd})`}
-              </li>
+              <BudgetGaugeRow
+                key={i}
+                label={b.scope === 'TEAM' ? t('teamBudget') : b.client ? b.client : t('userTotal')}
+                max={b.max_budget_usd}
+                used={b.used_usd}
+                unsetLabel="-"
+              />
             ))}
-          </ul>
+          </div>
         </div>
       )}
 
@@ -161,21 +165,25 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
         </div>
       )}
 
-      {/* 다운그레이드 규칙 */}
+      {/* 다운그레이드 규칙 — [scope] [임계] [from → to] 배지 행 */}
       {policy.downgrade_rules.length > 0 && (
         <div>
-          <p className="text-xs font-medium mb-1">{t('downgrade')}</p>
-          <ul className="text-xs text-muted-foreground space-y-0.5">
+          <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
+          <div className="rounded-md border border-border divide-y divide-border overflow-hidden">
             {policy.downgrade_rules.map((d, i) => (
-              <li key={i}>
-                {d.scope} — {t('downgradeRule', {
-                  pct: d.threshold_pct,
-                  from: d.from_model_alias,
-                  to: d.to_model_alias,
-                })}
-              </li>
+              <div key={i} className="flex items-center gap-2 px-3 py-2 text-xs">
+                <Badge tone="sky">
+                  {d.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser')}
+                </Badge>
+                <span className="text-muted-foreground">
+                  {t('downgradeAt', { pct: d.threshold_pct })}
+                </span>
+                <Badge tone="neutral">{d.from_model_alias}</Badge>
+                <span className="text-muted-foreground" aria-hidden="true">→</span>
+                <Badge tone="teal">{d.to_model_alias}</Badge>
+              </div>
             ))}
-          </ul>
+          </div>
         </div>
       )}
     </div>

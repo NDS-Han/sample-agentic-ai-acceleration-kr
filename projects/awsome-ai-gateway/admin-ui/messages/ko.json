@@ -576,7 +576,7 @@
       "hint": "↑↓ 이동 · Enter 선택 · Esc 닫기"
     },
     "effectivePolicy": {
-      "title": "유효 정책 (읽기 전용)",
+      "title": "유효 정책",
       "hint": "모든 정책 축을 합성한 실제 판정 결과입니다. ✗에 마우스를 올리면 어느 축에서 막혔는지 보입니다.",
       "loading": "정책 불러오는 중…",
       "loadFailed": "정책을 불러오지 못했습니다",
@@ -601,10 +601,14 @@
       "used": "사용",
       "rateLimits": "Rate Limit",
       "downgrade": "자동 다운그레이드",
-      "downgradeRule": "{pct}% 소진 시 {from} → {to} 전환"
+      "downgradeRule": "{pct}% 소진 시 {from} → {to} 전환",
+      "readonly": "읽기 전용",
+      "downgradeAt": "사용률 {pct}% 도달 시",
+      "scopeTeam": "팀",
+      "scopeUser": "사용자"
     },
-    "userModelsInheritTeam": "개인 설정 없음 — 아래는 팀 정책에서 상속된 모델입니다. 체크하면 이 사용자만의 정책으로 전환됩니다.",
-    "userModelsInheritNone": "개인 설정 없음 — 모든 모델이 허용됩니다(팀 정책도 없음)."
+    "userModelsInheritTeam": "개인 설정 없음 — 체크 상태는 팀 정책 상속분입니다. 변경하면 이 사용자만의 정책으로 저장됩니다.",
+    "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음)."
   },
   "analytics": {
     "title": "분석",

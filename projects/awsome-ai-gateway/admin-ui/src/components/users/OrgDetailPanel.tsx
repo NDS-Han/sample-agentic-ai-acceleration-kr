@@ -25,6 +25,7 @@ import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { TeamModelPermissionPanel } from '@/components/users/TeamModelPermissionPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
+import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
 
 interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
@@ -183,11 +184,17 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   //   저장하면 기존 override 가 의도치 않게 DELETE(팀 폴백)되어 제한이 풀린다 —
   //   국가핵심기술 제한이므로 로드 실패 시에는 모델 정책 저장 자체를 건너뛴다.
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  // 개인 override 가 없으면 체크박스에 유효 목록(팀 상속 또는 전체)을 미리 채워
+  // 보여준다 — 빈 체크박스는 "전부 차단"으로 읽히기 때문. 미리 채운 값은 표시용
+  // 이라 저장 자격이 없어야 하므로, 실제로 쓰는 것은 사용자가 토글한 뒤뿐이다
+  // (그대로 저장하면 팀 정책이 개인 override 로 굳어 이후 팀 변경이 안 따라온다).
+  const [modelsTouched, setModelsTouched] = useState(false);
 
   useEffect(() => {
     // 사용자 전환 시 이전 사용자 상태 잔존 방지(잘못된 저장 차단).
     setModelsLoaded(false);
     setClientsLoaded(false);
+    setModelsTouched(false);
     setLoadedModelAliases([]);
     setSelectedModelAliases([]);
     startLoadTransition(async () => {
@@ -225,7 +232,14 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       }
       if (m.success) {
         setLoadedModelAliases(m.data.modelAliases);
-        setSelectedModelAliases(m.data.modelAliases);
+        if (m.data.modelAliases.length > 0) {
+          setSelectedModelAliases(m.data.modelAliases);
+        } else if (p.success && p.data.allowed_models_source !== 'user') {
+          // override 없음 → 유효 목록(팀 정책 또는 전체 모델)을 체크 상태로 표시.
+          const inherited =
+            p.data.allowed_models ?? (cat.success ? cat.data.map((mm) => mm.alias) : []);
+          setSelectedModelAliases(inherited);
+        }
         setModelsLoaded(true);
       } else {
         toast({
@@ -238,6 +252,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   }, [node.id]);
 
   const toggleModel = (alias: string) => {
+    setModelsTouched(true);
     setSelectedModelAliases((prev) =>
       prev.includes(alias) ? prev.filter((a) => a !== alias) : [...prev, alias]
     );
@@ -266,7 +281,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
       // ★ 모델 정책이 정상 로드되지 않았으면(modelsLoaded=false) stale 빈 목록을
       //   저장해 기존 override 를 의도치 않게 해제하는 사고를 막기 위해 저장을 건너뛴다.
-      if (modelsLoaded) {
+      if (modelsLoaded && modelsTouched) {
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
         if (!mr.success) {
           // 접근 권한은 이미 저장됨 — 모델만 실패. loaded 상태를 동기화 후 알림.
@@ -277,6 +292,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         }
         setLoadedModelAliases(mr.data.modelAliases);
         setSelectedModelAliases(mr.data.modelAliases);
+        setModelsTouched(false);
       }
 
       // 모두 성공 — loaded 상태를 낙관적 값으로 갱신.
@@ -298,10 +314,8 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   const accessDirty = clientsLoaded && clientsKey(selected) !== clientsKey(loadedSelected);
   // 모델 선택은 순서 무관 비교 (toggle 시 순서가 바뀌므로).
   // modelsLoaded=false 면 비교 자체를 막아 stale 상태가 dirty 로 보이지 않게 한다.
-  const modelsDirty =
-    modelsLoaded &&
-    (selectedModelAliases.length !== loadedModelAliases.length ||
-      selectedModelAliases.some((a) => !loadedModelAliases.includes(a)));
+  // 토글로 실제 변경이 있을 때만 dirty — 상속 프리필은 변경이 아니다.
+  const modelsDirty = modelsLoaded && modelsTouched;
   const dirty = accessDirty || modelsDirty;
 
   const btn = (active: boolean) =>
@@ -382,31 +396,33 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 {t('budgetInput.editInBudgets')}
               </Link>
             </div>
-            {/* 총예산(사용자/팀) + 앱별 예산을 함께 표시. 앱별은 접근 허용과 무관하게
+            {/* 총예산(사용자/팀) + 앱별 예산을 게이지로 표시. 앱별은 접근 허용과 무관하게
                 전체 앱을 보여준다 — 허용되지 않은 앱에 설정된 예산(고아 예산)도
                 여기서 보여야 발견할 수 있다. */}
-            <div className="space-y-1.5">
+            <div className="space-y-2">
               {policy?.budgets
                 .filter((b) => (b.scope === 'USER' && b.client === null) || b.scope === 'TEAM')
                 .map((b, i) => (
-                  <div key={`total-${i}`} className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">
-                      {b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
-                    </span>
-                    <span className="font-medium">${Number(b.max_budget_usd).toFixed(2)}</span>
-                  </div>
+                  <BudgetGaugeRow
+                    key={`total-${i}`}
+                    label={b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
+                    max={b.max_budget_usd}
+                    used={b.used_usd}
+                    unsetLabel={t('budgetInput.placeholder')}
+                  />
                 ))}
               {CLIENT_OPTIONS.map((o) => {
                 const cfg = policy?.budgets.find(
                   (b) => b.scope === 'USER' && b.client === o.value,
                 );
                 return (
-                  <div key={o.value} className="flex items-center justify-between text-sm">
-                    <span className="text-muted-foreground">{o.label}</span>
-                    <span className="font-medium">
-                      {cfg ? `$${Number(cfg.max_budget_usd).toFixed(2)}` : t('budgetInput.placeholder')}
-                    </span>
-                  </div>
+                  <BudgetGaugeRow
+                    key={o.value}
+                    label={o.label}
+                    max={cfg?.max_budget_usd ?? null}
+                    used={cfg?.used_usd ?? null}
+                    unsetLabel={t('budgetInput.placeholder')}
+                  />
                 );
               })}
             </div>
@@ -419,25 +435,15 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
             <p className="text-xs text-muted-foreground mb-3">
               {t('userModels.hint')}
             </p>
-            {/* 정책 출처 표시 — 개인 체크박스가 전부 비어 있으면 실제 적용값은
-                팀 정책이다. 출처를 명시하지 않으면 "모두 해제 = 모두 차단" 처럼
-                읽혀서(체크박스의 일반 직관) 실제 동작(팀 정책 상속)과 반대로
-                해석된다. */}
+            {/* 정책 출처 캡션 — 개인 override 가 없으면 체크박스의 체크 상태는
+                팀 정책(또는 전체 허용)의 프리필이다. 변경하면 개인 정책으로 저장됨을
+                명시한다. */}
             {policy && policy.allowed_models_source !== 'user' && (
-              <div className="mb-3 rounded-md bg-muted/40 px-2.5 py-1.5">
-                <p className="text-xs text-muted-foreground mb-1">
-                  {policy.allowed_models_source === 'team'
-                    ? t('userModelsInheritTeam')
-                    : t('userModelsInheritNone')}
-                </p>
-                {(policy.allowed_models?.length ?? 0) > 0 && (
-                  <div className="flex flex-wrap gap-1">
-                    {policy.allowed_models!.map((a) => (
-                      <Badge key={a} tone="sky">{a}</Badge>
-                    ))}
-                  </div>
-                )}
-              </div>
+              <p className="text-xs text-muted-foreground mb-3">
+                {policy.allowed_models_source === 'team'
+                  ? t('userModelsInheritTeam')
+                  : t('userModelsInheritNone')}
+              </p>
             )}
             {!modelsLoaded ? (
               <div className="text-xs text-destructive py-1">
@@ -469,7 +475,10 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
 
         {!isLoadPending && (
           <div className="border rounded-apple-md p-3 mb-3">
-            <p className="text-sm font-medium mb-1">{t('effectivePolicy.title')}</p>
+            <div className="flex items-center gap-2 mb-1">
+              <p className="text-sm font-medium">{t('effectivePolicy.title')}</p>
+              <Badge tone="neutral">{t('effectivePolicy.readonly')}</Badge>
+            </div>
             <p className="text-xs text-muted-foreground mb-3">
               {t('effectivePolicy.hint')}
             </p>

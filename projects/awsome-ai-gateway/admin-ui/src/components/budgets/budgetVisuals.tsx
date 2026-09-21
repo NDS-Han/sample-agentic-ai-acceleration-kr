@@ -62,3 +62,36 @@ export function alertLevelOf(pct: number | null): AlertLevelValue {
   if (pct >= 70) return AlertLevel.WARNING;
   return AlertLevel.NORMAL;
 }
+
+/** 라벨 + "사용 / 한도" + 게이지 한 줄 — 요약 카드(사용자 상세·유효 정책)에서
+    예산 상태를 표 형태가 아니라 게이지로 보여줄 때 쓴다. */
+export function BudgetGaugeRow({
+  label,
+  max,
+  used,
+  unsetLabel,
+}: {
+  label: string;
+  max: string | number | null;
+  used: string | number | null;
+  unsetLabel: string;
+}) {
+  const maxN = max != null ? Number(max) : null;
+  const usedN = used != null ? Number(used) : 0;
+  const pct = maxN != null && maxN > 0 ? (usedN / maxN) * 100 : null;
+  return (
+    <div>
+      <div className="flex items-center justify-between text-xs mb-1">
+        <span className="text-muted-foreground">{label}</span>
+        <span className="font-medium tabular-nums">
+          {maxN != null ? (
+            `$${usedN.toFixed(2)} / $${maxN.toFixed(2)}`
+          ) : (
+            <span className="text-muted-foreground italic font-normal">{unsetLabel}</span>
+          )}
+        </span>
+      </div>
+      {pct != null && <UsageBar pct={pct} level={alertLevelOf(pct)} />}
+    </div>
+  );
+}

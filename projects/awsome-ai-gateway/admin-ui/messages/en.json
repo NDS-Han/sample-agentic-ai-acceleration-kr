@@ -576,7 +576,7 @@
       "hint": "↑↓ navigate · Enter select · Esc close"
     },
     "effectivePolicy": {
-      "title": "Effective policy (read-only)",
+      "title": "Effective Policy",
       "hint": "The synthesized result of all policy axes. Hover a ✗ to see which axis blocks it.",
       "loading": "Loading policy…",
       "loadFailed": "Failed to load policy",
@@ -601,9 +601,13 @@
       "used": "used",
       "rateLimits": "Rate limits",
       "downgrade": "Auto downgrade",
-      "downgradeRule": "at {pct}% spend, {from} → {to}"
+      "downgradeRule": "at {pct}% spend, {from} → {to}",
+      "readonly": "Read-only",
+      "downgradeAt": "At {pct}% spend",
+      "scopeTeam": "Team",
+      "scopeUser": "User"
     },
-    "userModelsInheritTeam": "No personal override — badges below are inherited from the team policy. Checking a box switches to a per-user policy.",
+    "userModelsInheritTeam": "No personal override — checkmarks show the inherited team policy. Changes save as a per-user policy.",
     "userModelsInheritNone": "No personal override — all models allowed (no team policy either)."
   },
   "analytics": {
