@@ -11,6 +11,7 @@ import {
   type PriceSyncPreview,
 } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
+import { fmtPricePerM } from '@/lib/utils/pricing';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 /**
@@ -48,8 +49,9 @@ export function PriceSyncButton() {
       return;
     }
     setPreview(res.data);
-    // 기본 선택 = 변경분 전체(matched && changed)
-    setSelected(new Set(res.data.diffs.filter((d) => d.matched && d.changed).map((d) => d.alias)));
+    // 기본 선택 = 변경분 전체(단가 변경 OR 스펙 갱신 — 스펙만 바뀌는 경우도 적용해야
+    // context_window 가 채워진다).
+    setSelected(new Set(res.data.diffs.filter((d) => d.matched && (d.changed || d.spec_changed)).map((d) => d.alias)));
   }
 
   function toggle(alias: string) {
@@ -80,8 +82,8 @@ export function PriceSyncButton() {
     });
   }
 
-  const changedDiffs = preview?.diffs.filter((d) => d.matched && d.changed) ?? [];
-  const unchanged = preview?.diffs.filter((d) => d.matched && !d.changed).length ?? 0;
+  const changedDiffs = preview?.diffs.filter((d) => d.matched && (d.changed || d.spec_changed)) ?? [];
+  const unchanged = preview?.diffs.filter((d) => d.matched && !d.changed && !d.spec_changed).length ?? 0;
   const unmatched = preview?.diffs.filter((d) => !d.matched) ?? [];
 
   return (
@@ -227,12 +229,12 @@ export function PriceSyncButton() {
 }
 
 function fmtPrice(value: string | undefined | null): string {
-  if (value == null) return '$0.000000';
-  return `$${Number(value).toFixed(6)}`;
+  if (value == null) return '—';
+  return fmtPricePerM(value);  // per-1K 저장값 → per-1M 표시
 }
 
 function fmtChange(current: string | undefined | null, proposed: string | null): string {
   const c = fmtPrice(current);
-  const p = proposed != null ? `$${Number(proposed).toFixed(6)}` : '—';
+  const p = proposed != null ? fmtPricePerM(proposed) : '—';
   return `${c} → ${p}`;
 }

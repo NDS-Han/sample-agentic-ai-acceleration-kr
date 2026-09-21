@@ -359,7 +359,15 @@ class ModelService:
             ])
             if is_changed:
                 changed += 1
+            # 스펙(context_window/max_output_tokens) 차이도 별도 플래그 —
+            # 단가 동일해도 스펙만 새로 채워지는 경우가 있다.
+            spec_changed = bool(
+                (np.context_window and m.context_window != np.context_window)
+                or (np.max_output_tokens and m.max_output_tokens != np.max_output_tokens)
+            )
             note = "캐시 단가 일부 파생(AWS 미게시 → input 기반 추정)" if np.cache_derived else None
+            if spec_changed:
+                note = (note + " · " if note else "") + "스펙 갱신(context/max output)"
             diffs.append(PriceSyncDiff(
                 alias=m.alias,
                 provider_model_id=m.provider_model_id,
@@ -372,6 +380,7 @@ class ModelService:
                 proposed_cache_1h_per_1k=p_1h,
                 proposed_cache_read_per_1k=p_rd,
                 changed=is_changed,
+                spec_changed=spec_changed,
             ))
 
         return PriceSyncPreviewResponse(

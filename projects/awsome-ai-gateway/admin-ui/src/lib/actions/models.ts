@@ -259,6 +259,8 @@ export interface PriceSyncDiff {
   proposed_cache_1h_per_1k: string | null;
   proposed_cache_read_per_1k: string | null;
   changed: boolean;
+  /** 단가 동일해도 카탈로그 스펙(context_window/max_output_tokens)이 갱신되면 true. */
+  spec_changed?: boolean;
 }
 
 export interface PriceSyncPreview {

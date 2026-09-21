@@ -10,6 +10,7 @@ import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
+import { fmtPricePerM } from '@/lib/utils/pricing';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
@@ -146,8 +147,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                   <Td>
                     <ProviderBadge provider={model.provider} />
                   </Td>
-                  <Td numeric>${model.input_price_per_1k.toFixed(4)}/1K</Td>
-                  <Td numeric>${model.output_price_per_1k.toFixed(4)}/1K</Td>
+                  <Td numeric>{fmtPricePerM(model.input_price_per_1k)}</Td>
+                  <Td numeric>{fmtPricePerM(model.output_price_per_1k)}</Td>
                   <Td>
                     <StatusBadge isActive={model.is_active} activeLabel={t('active')} inactiveLabel={t('inactive')} />
                   </Td>
@@ -189,68 +190,70 @@ export function ModelsTable({ models }: ModelsTableProps) {
                 {expanded.has(model.alias) && (
                   <Tr>
                     <Td colSpan={8} className="bg-muted/30 !py-4">
-                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs">
-                        <dl className="space-y-2">
-                          <div>
-                            <dt className="text-muted-foreground">{t('modelIdLabel')}</dt>
-                            <dd className="font-mono mono-id mt-0.5">{model.model_id}</dd>
-                          </div>
-                          {model.endpoint_url && (
-                            <div>
-                              <dt className="text-muted-foreground">{t('endpointUrlLabel')}</dt>
-                              <dd className="font-mono mono-id mt-0.5 break-all">{model.endpoint_url}</dd>
-                            </div>
-                          )}
-                          <div>
-                            <dt className="text-muted-foreground">{t('contextWindowLabel')}</dt>
-                            <dd className="mt-0.5 tabular-nums">
-                              {model.context_window > 0
-                                ? `${formatNumber(model.context_window)} tokens · ${t('maxOutputTokens')} ${formatNumber(model.max_tokens)}`
-                                : t('specUnknown')}
-                            </dd>
-                          </div>
-                          {model.description && (
-                            <div>
-                              <dt className="text-muted-foreground">{t('descriptionLabel')}</dt>
-                              <dd className="mt-0.5">{model.description}</dd>
-                            </div>
-                          )}
-                        </dl>
+                      {/* LiteLLM 카탈로그 카드 레이아웃 — TOKEN PRICING 카드 그리드 +
+                          MODEL INFO 목록. mode/features 는 게이트웨이가 추적하지
+                          않는 데이터라 표시하지 않는다. */}
+                      <div className="grid grid-cols-1 lg:grid-cols-[3fr_2fr] gap-6 text-xs">
                         <div>
-                          <p className="text-muted-foreground mb-1.5">{t('pricingDetailTitle')}</p>
-                          <dl className="rounded-md border border-border divide-y divide-border overflow-hidden">
-                            <div className="flex justify-between px-3 py-1.5">
-                              <dt className="text-muted-foreground">{t('inputPriceShort')}</dt>
-                              <dd className="tabular-nums">${model.input_price_per_1k.toFixed(4)}/1K</dd>
+                          <p className="text-[11px] font-medium tracking-wider text-muted-foreground mb-2">
+                            {t('pricingDetailTitle')}
+                          </p>
+                          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                            {[
+                              { label: t('cardInput'), v: fmtPricePerM(model.input_price_per_1k) },
+                              { label: t('cardOutput'), v: fmtPricePerM(model.output_price_per_1k) },
+                              { label: t('cardCacheRead'), v: model.cache_read_price_per_1k > 0 ? fmtPricePerM(model.cache_read_price_per_1k) : '—' },
+                              { label: t('cardCacheWrite5m'), v: model.cache_creation_5m_price_per_1k > 0 ? fmtPricePerM(model.cache_creation_5m_price_per_1k) : '—' },
+                              { label: t('cardCacheWrite1h'), v: model.cache_creation_1h_price_per_1k > 0 ? fmtPricePerM(model.cache_creation_1h_price_per_1k) : '—' },
+                            ].map((c) => (
+                              <div key={c.label} className="rounded-md border border-border px-3 py-2">
+                                <p className="text-[10px] font-medium tracking-wide text-muted-foreground uppercase">{c.label}</p>
+                                <p className="mt-1 text-sm font-semibold tabular-nums">{c.v}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-medium tracking-wider text-muted-foreground mb-2">
+                            {t('modelInfoTitle')}
+                          </p>
+                          <dl className="space-y-2">
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-muted-foreground">Provider</dt>
+                              <dd><ProviderBadge provider={model.provider} /></dd>
                             </div>
-                            <div className="flex justify-between px-3 py-1.5">
-                              <dt className="text-muted-foreground">{t('outputPriceShort')}</dt>
-                              <dd className="tabular-nums">${model.output_price_per_1k.toFixed(4)}/1K</dd>
-                            </div>
-                            <div className="flex justify-between px-3 py-1.5">
-                              <dt className="text-muted-foreground">{t('cache5min')}</dt>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-muted-foreground">{t('maxInputLabel')}</dt>
                               <dd className="tabular-nums">
-                                {model.cache_creation_5m_price_per_1k > 0
-                                  ? `$${model.cache_creation_5m_price_per_1k.toFixed(5)}/1K`
-                                  : '—'}
+                                {model.context_window > 0
+                                  ? `${formatNumber(model.context_window)} tokens`
+                                  : <span className="text-muted-foreground">{t('specUnknown')}</span>}
                               </dd>
                             </div>
-                            <div className="flex justify-between px-3 py-1.5">
-                              <dt className="text-muted-foreground">{t('cache1h')}</dt>
+                            <div className="flex items-center justify-between gap-3">
+                              <dt className="text-muted-foreground">{t('maxOutputLabel')}</dt>
                               <dd className="tabular-nums">
-                                {model.cache_creation_1h_price_per_1k > 0
-                                  ? `$${model.cache_creation_1h_price_per_1k.toFixed(5)}/1K`
-                                  : '—'}
+                                {model.max_tokens > 0
+                                  ? `${formatNumber(model.max_tokens)} tokens`
+                                  : <span className="text-muted-foreground">{t('specUnknown')}</span>}
                               </dd>
                             </div>
-                            <div className="flex justify-between px-3 py-1.5">
-                              <dt className="text-muted-foreground">{t('cacheRead')}</dt>
-                              <dd className="tabular-nums">
-                                {model.cache_read_price_per_1k > 0
-                                  ? `$${model.cache_read_price_per_1k.toFixed(5)}/1K`
-                                  : '—'}
-                              </dd>
+                            <div className="flex items-start justify-between gap-3">
+                              <dt className="text-muted-foreground shrink-0">{t('modelIdLabel')}</dt>
+                              <dd className="font-mono mono-id break-all text-right">{model.model_id}</dd>
                             </div>
+                            {model.endpoint_url && (
+                              <div className="flex items-start justify-between gap-3">
+                                <dt className="text-muted-foreground shrink-0">{t('endpointUrlLabel')}</dt>
+                                <dd className="font-mono mono-id break-all text-right">{model.endpoint_url}</dd>
+                              </div>
+                            )}
+                            {model.description && (
+                              <div className="flex items-start justify-between gap-3">
+                                <dt className="text-muted-foreground shrink-0">{t('descriptionLabel')}</dt>
+                                <dd className="text-right">{model.description}</dd>
+                              </div>
+                            )}
                           </dl>
                         </div>
                       </div>

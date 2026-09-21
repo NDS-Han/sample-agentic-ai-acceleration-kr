@@ -8,6 +8,7 @@ import { useTranslations } from 'next-intl';
 import { X } from 'lucide-react';
 import type { ModelListItem } from '@/types/entities';
 import { createModelAction, updateModelAction } from '@/lib/actions/models';
+import { perMtoPer1k, per1kToPerM } from '@/lib/utils/pricing';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
@@ -39,11 +40,11 @@ function getInitialState(editModel?: ModelListItem): FormState {
       provider: editModel.provider,
       model_id: editModel.model_id,
       endpoint_url: editModel.endpoint_url ?? '',
-      input_price_per_1k: editModel.input_price_per_1k.toString(),
-      output_price_per_1k: editModel.output_price_per_1k.toString(),
-      cache_creation_5m_price_per_1k: editModel.cache_creation_5m_price_per_1k.toString(),
-      cache_creation_1h_price_per_1k: editModel.cache_creation_1h_price_per_1k.toString(),
-      cache_read_price_per_1k: editModel.cache_read_price_per_1k.toString(),
+      input_price_per_1k: per1kToPerM(editModel.input_price_per_1k),
+      output_price_per_1k: per1kToPerM(editModel.output_price_per_1k),
+      cache_creation_5m_price_per_1k: per1kToPerM(editModel.cache_creation_5m_price_per_1k),
+      cache_creation_1h_price_per_1k: per1kToPerM(editModel.cache_creation_1h_price_per_1k),
+      cache_read_price_per_1k: per1kToPerM(editModel.cache_read_price_per_1k),
       description: editModel.description ?? '',
       display_name: editModel.display_name ?? '',
     };
@@ -104,11 +105,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       provider: form.provider,
       model_id: form.model_id,
       endpoint_url: form.endpoint_url,
-      input_price_per_1k: parseFloat(form.input_price_per_1k),
-      output_price_per_1k: parseFloat(form.output_price_per_1k),
-      cache_creation_5m_price_per_1k: parseFloat(form.cache_creation_5m_price_per_1k || '0'),
-      cache_creation_1h_price_per_1k: parseFloat(form.cache_creation_1h_price_per_1k || '0'),
-      cache_read_price_per_1k: parseFloat(form.cache_read_price_per_1k || '0'),
+      input_price_per_1k: perMtoPer1k(parseFloat(form.input_price_per_1k)),
+      output_price_per_1k: perMtoPer1k(parseFloat(form.output_price_per_1k)),
+      cache_creation_5m_price_per_1k: perMtoPer1k(parseFloat(form.cache_creation_5m_price_per_1k || '0')),
+      cache_creation_1h_price_per_1k: perMtoPer1k(parseFloat(form.cache_creation_1h_price_per_1k || '0')),
+      cache_read_price_per_1k: perMtoPer1k(parseFloat(form.cache_read_price_per_1k || '0')),
       description: form.description || undefined,
       display_name: form.display_name || undefined,
     };
@@ -279,12 +280,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="input_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step={0.001}
                 value={form.input_price_per_1k}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00"
               />
               {fieldErrors.input_price_per_1k && <FormError error={fieldErrors.input_price_per_1k} />}
             </div>
@@ -296,12 +297,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="output_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step={0.001}
                 value={form.output_price_per_1k}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00"
               />
               {fieldErrors.output_price_per_1k && <FormError error={fieldErrors.output_price_per_1k} />}
             </div>
@@ -313,11 +314,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_creation_5m_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step={0.001}
                 value={form.cache_creation_5m_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00"
               />
               {fieldErrors.cache_creation_5m_price_per_1k && <FormError error={fieldErrors.cache_creation_5m_price_per_1k} />}
             </div>
@@ -329,11 +330,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_creation_1h_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step={0.001}
                 value={form.cache_creation_1h_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00"
               />
               {fieldErrors.cache_creation_1h_price_per_1k && <FormError error={fieldErrors.cache_creation_1h_price_per_1k} />}
             </div>
@@ -345,11 +346,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_read_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step={0.001}
                 value={form.cache_read_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00"
               />
               {fieldErrors.cache_read_price_per_1k && <FormError error={fieldErrors.cache_read_price_per_1k} />}
             </div>
