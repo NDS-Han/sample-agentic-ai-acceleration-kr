@@ -14,6 +14,7 @@ from dataclasses import dataclass
 
 import structlog
 from fastapi import APIRouter, Request, Response
+from sqlalchemy.exc import DBAPIError
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.config import get_settings
@@ -38,7 +39,7 @@ from app.services.fallback_loop import (
     run_fallback_loop,
 )
 from app.services.fallback_resolver import make_same_provider
-from app.services.router_service import RouterService
+from app.services.router_service import ModelInactiveError, RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
 from app.services.thinking_normalizer import normalize_thinking, sanitize_output_config
 from app.services.tool_filter import strip_unsupported_tools
@@ -167,6 +168,37 @@ async def _select_backend(*, loader, router_service, redis, db, client, requeste
     return BackendDecision(provider=ProviderType.BEDROCK, profile=profile)
 
 
+async def _resolve_bedrock_with_default(redis, db, requested_alias, profile, client):
+    """Bedrock 경로 resolve — 요청 alias 우선, 실패 시 profile.default_model 폴백.
+
+    invoke-backend 프로필에서는 default_model 이 완전히 죽은 필드였다 — 요청
+    model 이 항상 이기고 미등록 이름은 404. codex(/v1/responses) 경로와 같은
+    의미로 미등록 이름을 default 로 대체한다. 조용한 대체이므로 INFO 로그 필수
+    (과금은 default alias 로 기록되어 추적 가능).
+
+    ModelInactiveError(운영자 kill switch)는 폴백 없이 전파하고, default 자체의
+    resolve 실패도 숨기지 않고 전파한다 — 깨진 default 는 진짜 서버 결함이다.
+    """
+    try:
+        return await _router_service.resolve_bedrock_model(
+            redis, db, requested_alias
+        )
+    except ModelInactiveError:
+        raise
+    except (LookupError, DBAPIError):
+        if profile is None or not profile.default_model:
+            raise
+        logger.info(
+            "messages_requested_model_unresolved_using_default",
+            requested=str(requested_alias)[:128],
+            default_model=profile.default_model,
+            client=client,
+        )
+        return await _router_service.resolve_bedrock_model(
+            redis, db, profile.default_model
+        )
+
+
 @router.post("/v1/messages", response_model=None)
 async def messages(request: Request) -> StreamingResponse | JSONResponse:
     state = request.scope.get("state", {})
@@ -240,8 +272,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                         redis=redis, db=db, client=client, requested_alias=model_alias,
                     )
                 if decision.provider != ProviderType.BEDROCK_MANTLE:
-                    model_config = await _router_service.resolve_bedrock_model(
-                        redis, db, model_alias
+                    model_config = await _resolve_bedrock_with_default(
+                        redis, db, model_alias, decision.profile, client
                     )
         else:
             if routing_loader is not None:
@@ -250,8 +282,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     redis=redis, db=None, client=client, requested_alias=model_alias,
                 )
             if decision.provider != ProviderType.BEDROCK_MANTLE:
-                model_config = await _router_service.resolve_bedrock_model(
-                    redis, None, model_alias
+                model_config = await _resolve_bedrock_with_default(
+                    redis, None, model_alias, decision.profile, client
                 )
     except LookupError as e:
         return JSONResponse(
