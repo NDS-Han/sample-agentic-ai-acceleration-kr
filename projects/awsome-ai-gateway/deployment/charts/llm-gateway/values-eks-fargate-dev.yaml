@@ -262,7 +262,7 @@ gatewayProxy:
     # 1.0.81-connretry: 비스트리밍 Bedrock 호출(invoke·converse·count_tokens)에도 연결 수준 오류 1회 재시도 — 풀의 죽은 연결(장시간 idle 뒤 조용히 끊긴 것)을 집으면 "Connection was closed…" 로 실패하는데 bedrock_max_attempts=1 이라 그대로 502 로 나갔다(2026-09-19 13:07Z, 2.5시간 idle 뒤). 스트리밍은 9/16 부터 재시도가 있었다. 재시도 전에 유휴 풀 연결을 비워 같은 실패를 피한다. Bedrock 이 실제로 응답한 오류(400/429/5xx)는 재시도하지 않는다(이중 과금 없음).
     # 1.0.82-upmerge: upstream us/deploy-fixes(6345ef5, ~1.0.81) 전체 + 우리 추가분
     #   (REPORTING_TIMEZONE 설정화 periods·ttft·openai_compat·downgrade 등) 머지 빌드.
-    tag: "1.0.83-unmatched"
+    tag: "1.0.84-deffallback"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
