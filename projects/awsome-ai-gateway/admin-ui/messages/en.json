@@ -511,7 +511,9 @@
       "description": "Select all (or deselect all) = allow every app. Select a subset to restrict to a whitelist.",
       "groupLabel": "Select app access",
       "all": "All",
-      "loading": "Loading…"
+      "loading": "Loading…",
+      "unrestricted": "No restriction",
+      "restricted": "Allowlist: {count} apps"
     },
     "budgetInput": {
       "claudeCode": "Claude Code budget (USD/month)",

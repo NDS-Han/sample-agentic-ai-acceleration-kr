@@ -336,7 +336,18 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       </div>
 
       <div className="border-t pt-4">
-        <p className="text-sm font-medium mb-2">{t('appAccess.title')}</p>
+        <div className="flex items-center gap-2 mb-2">
+          <p className="text-sm font-medium">{t('appAccess.title')}</p>
+          {clientsLoaded && (
+            selected.length === ALL_CLIENTS.length ? (
+              <span className="badge badge-teal">{t('appAccess.unrestricted')}</span>
+            ) : (
+              <span className="badge badge-amber">
+                {t('appAccess.restricted', { count: selected.length })}
+              </span>
+            )
+          )}
+        </div>
         <p className="text-xs text-muted-foreground mb-2">
           {t('appAccess.description')}
         </p>
