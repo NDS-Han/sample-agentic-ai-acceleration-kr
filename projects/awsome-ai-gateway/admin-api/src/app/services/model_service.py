@@ -604,7 +604,9 @@ class ModelService:
             # 전면 거부를 화면에서 볼 수 없다.
             allowed_clients=model.allowed_clients,
             description=model.description,
-            display_name=model.display_name,
+            # display_name 은 표시 전용 — 비어 있으면 alias 로 대체해 모든 API
+            # 소비자(목록·피커·정책 표시)가 같은 이름을 보게 한다. DB 는 NULL 유지.
+            display_name=model.display_name or model.alias,
             context_window=model.context_window,
             max_output_tokens=model.max_output_tokens,
             current_pricing=pricing_resp,

@@ -334,3 +334,16 @@ class TestDeleteModel:
         assert by_name["gpt-5.6-terra"].last_seen_at is not None
         # 정렬: 총 관측량(성공+404) 내림차순 — sonnet-5(44) > terra(7)
         assert res.items[0].name == "claude-sonnet-5"
+
+    async def test_display_name_falls_back_to_alias(
+        self, model_service: ModelService, mock_session: AsyncMock
+    ):
+        """display_name NULL → 응답엔 alias — '비우면 alias 사용' 안내와 일치."""
+        model = _make_model()
+        model.display_name = None
+        resp = model_service._to_response(model, None)
+        assert resp.display_name == model.alias
+
+        model.display_name = "Sonnet 5 (표시명)"
+        resp = model_service._to_response(model, None)
+        assert resp.display_name == "Sonnet 5 (표시명)"
