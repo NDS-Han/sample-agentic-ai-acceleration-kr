@@ -49,6 +49,8 @@ class AppPolicyResponse(BaseModel):
     all_models: list[AppModelRef]
     default_model: str | None
     allowed_users: list[AppUserRef]
+    # 같은 routing_profiles 행의 앱 정책 — 한 화면에서 같이 보고 바꾼다.
+    web_search_enabled: bool = False
 
 
 class DefaultModelPatchRequest(BaseModel):
@@ -202,13 +204,17 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
         AppModelRef(alias=row[0], allowed_clients=row[1]) for row in all_result.fetchall()
     ]
 
-    # default_model: model.routing_profiles WHERE client = :client
+    # default_model + web_search_enabled: model.routing_profiles WHERE client = :client
     rp_result = await session.execute(
-        text("SELECT default_model FROM model.routing_profiles WHERE client = :client"),
+        text(
+            "SELECT default_model, web_search_enabled"
+            " FROM model.routing_profiles WHERE client = :client"
+        ),
         {"client": client},
     )
     rp_row = rp_result.fetchone()
     default_model: str | None = rp_row[0] if rp_row else None
+    web_search_enabled = bool(rp_row[1]) if rp_row else False
 
     # allowed_users: user_allowed_clients JOIN users → {user_id, email}
     uac_stmt = (
@@ -228,6 +234,7 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
         all_models=all_models,
         default_model=default_model,
         allowed_users=allowed_users,
+        web_search_enabled=web_search_enabled,
     )
 
 

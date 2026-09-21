@@ -93,8 +93,8 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
             # all_models text query: fetchall returns (alias, allowed_clients) tuples
             result.fetchall.return_value = [("m1", ["cowork"]), ("m2", None)]
         elif call_count == 3:
-            # routing_profiles text query
-            result.fetchone.return_value = ("claude-sonnet",)
+            # routing_profiles text query (default_model, web_search_enabled)
+            result.fetchone.return_value = ("claude-sonnet", True)
         else:
             # ORM JOIN select for user_allowed_clients: all() returns (uuid, email) rows
             result.all.return_value = [(user_uuid, "user@example.com")]
@@ -111,6 +111,7 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
     assert len(resp.allowed_users) == 1
     assert resp.allowed_users[0].user_id == str(user_uuid)
     assert resp.allowed_users[0].email == "user@example.com"
+    assert resp.web_search_enabled is True
     # all_models assertions
     assert len(resp.all_models) == 2
     assert resp.all_models[0].allowed_clients == ["cowork"]
@@ -146,6 +147,7 @@ async def test_get_app_policy_no_routing_profile(mock_session: AsyncMock):
 
     assert resp.client == "cowork"
     assert resp.default_model is None
+    assert resp.web_search_enabled is False
 
 
 @pytest.mark.asyncio
