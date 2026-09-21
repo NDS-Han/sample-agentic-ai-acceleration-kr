@@ -86,6 +86,27 @@ async def create_model(
     )
 
 
+@router.delete("/{alias}", status_code=204)
+async def delete_model(
+    request: Request,
+    alias: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """모델 alias 삭제 — 라우팅 설정행은 cascade, 사용 이력은 보존.
+
+    앱의 default_model 로 참조 중이면 409 (그 앱 요청이 전부 깨지므로).
+    """
+    svc: ModelService = request.app.state.model_service
+    await svc.delete_model(
+        session,
+        alias=alias,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
+
 @router.put("/{alias}", response_model=ModelResponse)
 async def update_model(
     request: Request,

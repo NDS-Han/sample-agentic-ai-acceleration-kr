@@ -7,13 +7,25 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import structlog
+from sqlalchemy import delete as sa_delete, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.exceptions import ConflictError, NotFoundError
-from app.models.model import ApiFormat, ModelAlias, ModelPricing, ModelStatus, Provider
+from app.models.budget import DowngradePolicy
+from app.models.model import (
+    ApiFormat,
+    ModelAlias,
+    ModelPricing,
+    ModelStatus,
+    Provider,
+    RateLimitConfig,
+    TeamAllowedModel,
+    UserAllowedModel,
+)
+from app.models.routing import RoutingProfile
 from app.repositories.model_repository import ModelRepository
 from app.schemas.models import (
     ModelCreateRequest,
@@ -161,6 +173,85 @@ class ModelService:
         )
 
         return self._to_response(model, pricing)
+
+    async def delete_model(
+        self,
+        session: AsyncSession,
+        *,
+        alias: str,
+        actor: CurrentUser,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> None:
+        """모델 alias 삭제.
+
+        alias 는 요청 라우팅 키이므로, 없는 모델을 가리키는 설정행은 무의미하다 —
+        FK(RESTRICT) 참조를 같은 트랜잭션에서 같이 지운다: pricing 이력,
+        team/user_allowed_models, 모델별 rate_limit, downgrade 규칙(from/to).
+        usage_logs 는 FK 없는 과금 이력이라 보존한다.
+
+        차단(409): routing_profiles.default_model 로 참조 중이면 거부한다.
+        default_model 은 FK 가 없어 DB 가 못 막고, 지우면 그 앱의 모든 요청이
+        런타임에 404/resolve 실패로 깨진다 — 먼저 다른 기본 모델로 바꿔야 한다.
+        """
+        repo = ModelRepository(session)
+        model = await repo.get_by_alias(alias)
+        if model is None:
+            raise NotFoundError("ModelAlias", alias)
+
+        rp_clients = (
+            await session.execute(
+                select(RoutingProfile.client).where(
+                    RoutingProfile.default_model == alias
+                )
+            )
+        ).all()
+        if rp_clients:
+            raise ConflictError(
+                f"Model '{alias}' is the default model of app(s): "
+                f"{', '.join(sorted(r[0] for r in rp_clients))}. "
+                f"Change the default model first."
+            )
+
+        await session.execute(
+            sa_delete(ModelPricing).where(ModelPricing.model_alias == alias)
+        )
+        await session.execute(
+            sa_delete(TeamAllowedModel).where(TeamAllowedModel.model_alias == alias)
+        )
+        await session.execute(
+            sa_delete(UserAllowedModel).where(UserAllowedModel.model_alias == alias)
+        )
+        await session.execute(
+            sa_delete(RateLimitConfig).where(RateLimitConfig.model_alias == alias)
+        )
+        await session.execute(
+            sa_delete(DowngradePolicy).where(
+                or_(
+                    DowngradePolicy.from_model_alias == alias,
+                    DowngradePolicy.to_model_alias == alias,
+                )
+            )
+        )
+        await session.delete(model)
+
+        # 게이트웨이는 model:{alias} 와 model:{provider_model_id} 두 키로 캐시한다.
+        await self._cache_mgr.invalidate(
+            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            session=session,
+        )
+
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            action="DELETE_MODEL",
+            resource_type="ModelAlias",
+            resource_id=alias,
+            changes={"before": {"alias": alias, "provider_model_id": model.provider_model_id}},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
 
     async def set_pricing(
         self,

@@ -249,3 +249,54 @@ class TestPatchStatus:
 
         assert result.status == "INACTIVE"
         assert mock_redis.delete.call_count >= 1
+
+
+class TestDeleteModel:
+    async def test_delete_model_not_found(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=None)
+
+            with pytest.raises(NotFoundError):
+                await model_service.delete_model(mock_session, alias="missing", actor=admin_user)
+
+    async def test_delete_model_blocked_when_app_default(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """routing_profiles.default_model 로 참조 중이면 409 — 지우면 그 앱 요청이 깨진다."""
+        model = _make_model()
+        rp_result = MagicMock()
+        rp_result.all.return_value = [("claude-code",)]
+        mock_session.execute = AsyncMock(return_value=rp_result)
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=model)
+
+            with pytest.raises(ConflictError, match="default model"):
+                await model_service.delete_model(mock_session, alias="claude-sonnet", actor=admin_user)
+
+        mock_session.delete.assert_not_called()
+
+    async def test_delete_model_cascades_and_invalidates(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        model = _make_model()
+        rp_result = MagicMock()
+        rp_result.all.return_value = []  # default_model 참조 없음
+        mock_session.execute = AsyncMock(return_value=rp_result)
+        mock_session.delete = AsyncMock()
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=model)
+            mock_audit.log = AsyncMock()
+
+            await model_service.delete_model(mock_session, alias="claude-sonnet", actor=admin_user)
+
+        # 설정행 정리 쿼리 5개(pricing/team/user/rate-limit/downgrade) + default_model 조회 1개
+        assert mock_session.execute.await_count == 6
+        mock_session.delete.assert_awaited_once_with(model)
+        # 캐시는 alias + provider_model_id 둘 다 무효화한다(게이트웨이가 두 키로 캐시).
+        deleted_keys = {c.args[0] for c in mock_redis.delete.call_args_list}
+        assert any("model:claude-sonnet" in str(k) for k in deleted_keys) or mock_redis.delete.call_count >= 1

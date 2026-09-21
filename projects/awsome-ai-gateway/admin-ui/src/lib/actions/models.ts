@@ -159,6 +159,26 @@ export async function activateModelAction(alias: string): Promise<ActionResult<v
   }
 }
 
+// ─── deleteModelAction ────────────────────────────────────────────────────────
+// 라우팅 설정행(pricing·allowed_models·rate limit·downgrade)은 백엔드가 같이 지운다.
+// 앱의 default_model 로 참조 중이면 409 — 서버 에러 메시지가 그대로 토스트에 나온다.
+
+export async function deleteModelAction(alias: string): Promise<ActionResult<void>> {
+  if (!alias) {
+    return { success: false, error: 'Model alias is required' };
+  }
+
+  try {
+    await withRetry(() =>
+      adminAPI.delete(`/admin/models/${encodeURIComponent(alias)}`)
+    );
+    revalidatePath('/models');
+    return { success: true, data: undefined };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 // ─── listActiveModelsAction ───────────────────────────────────────────────────
 // 활성 모델 카탈로그 조회 (client 컴포넌트에서 모델 선택 UI 용). status==='ACTIVE' 만 반환.
 

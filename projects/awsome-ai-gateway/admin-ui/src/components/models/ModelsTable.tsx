@@ -6,9 +6,10 @@
 import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import type { ModelListItem } from '@/types/entities';
-import { activateModelAction } from '@/lib/actions/models';
+import { activateModelAction, deleteModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
@@ -42,6 +43,7 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const [selectedModel, setSelectedModel] = useState<ModelListItem | null>(null);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deactivateDialogOpen, setDeactivateDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   const handleEdit = (model: ModelListItem) => {
     setSelectedModel(model);
@@ -51,6 +53,29 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const handleDeactivate = (model: ModelListItem) => {
     setSelectedModel(model);
     setDeactivateDialogOpen(true);
+  };
+
+  const handleDelete = (model: ModelListItem) => {
+    setSelectedModel(model);
+    setDeleteDialogOpen(true);
+  };
+
+  const confirmDelete = () => {
+    if (!selectedModel) return;
+    const alias = selectedModel.alias;
+    startTransition(async () => {
+      const result = await deleteModelAction(alias);
+      if (result.success) {
+        toast({
+          type: 'success',
+          message: t('deleteSuccess', { alias }),
+          auto_dismiss_ms: 3000,
+        });
+      } else {
+        // 409(기본 모델 참조 중) 등 서버 메시지를 그대로 보여준다.
+        toast({ type: 'error', message: result.error, auto_dismiss_ms: 6000 });
+      }
+    });
   };
 
   const handleActivate = (model: ModelListItem) => {
@@ -154,6 +179,14 @@ export function ModelsTable({ models }: ModelsTableProps) {
                           {t('activate')}
                         </button>
                       )}
+                      <button
+                        onClick={() => handleDelete(model)}
+                        disabled={isPending}
+                        aria-label={t('deleteAria', { alias: model.alias })}
+                        className="inline-flex items-center justify-center rounded-md border border-destructive/40 bg-background px-2 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/15 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                      >
+                        {t('delete')}
+                      </button>
                     </div>
                   </Td>
                 </Tr>
@@ -179,6 +212,19 @@ export function ModelsTable({ models }: ModelsTableProps) {
           setSelectedModel(null);
         }}
         model={selectedModel}
+      />
+
+      <ConfirmDialog
+        isOpen={deleteDialogOpen}
+        onClose={() => {
+          setDeleteDialogOpen(false);
+          setSelectedModel(null);
+        }}
+        onConfirm={confirmDelete}
+        title={t('deleteTitle')}
+        message={t('deleteMessage', { alias: selectedModel?.alias ?? '' })}
+        confirmLabel={t('delete')}
+        isDestructive
       />
     </>
   );
