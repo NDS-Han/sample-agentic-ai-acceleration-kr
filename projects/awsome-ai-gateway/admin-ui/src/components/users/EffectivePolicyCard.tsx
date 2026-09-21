@@ -6,7 +6,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction } from '@/lib/actions/users';
-import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
 import { Badge } from '@/components/common/Badge';
 import type { EffectivePolicy, EffectivePolicyCell } from '@/types/entities';
 
@@ -124,23 +123,8 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
         </span>
       </p>
 
-      {/* 예산 요약 — Budget Management 와 같은 게이지 표현 */}
-      {policy.budgets.length > 0 && (
-        <div>
-          <p className="text-xs font-medium mb-1.5">{t('budgets')}</p>
-          <div className="space-y-2">
-            {policy.budgets.map((b, i) => (
-              <BudgetGaugeRow
-                key={i}
-                label={b.scope === 'TEAM' ? t('teamBudget') : b.client ? b.client : t('userTotal')}
-                max={b.max_budget_usd}
-                used={b.used_usd}
-                unsetLabel="-"
-              />
-            ))}
-          </div>
-        </div>
-      )}
+      {/* 예산은 바로 위의 예산 섹션(BudgetGaugeRow)이 이미 같은 데이터를
+          보여주므로 여기서는 생략한다 — 카드는 접근 판정에 집중. */}
 
       {/* rate limit 요약 */}
       {policy.rate_limits.length > 0 && (
