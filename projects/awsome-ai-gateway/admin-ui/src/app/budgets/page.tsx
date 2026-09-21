@@ -7,7 +7,6 @@ import { parseJWT } from '@/lib/auth';
 import type { AllocationEntry, BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
 import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
-import { DowngradeSection } from '@/components/budgets/DowngradeSection';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 
 export default async function BudgetsPage() {
@@ -181,7 +180,7 @@ export default async function BudgetsPage() {
       </div>
 
       {isAdmin ? (
-        <BudgetSummaryTable items={items} isAdmin={isAdmin} />
+        <BudgetSummaryTable items={items} isAdmin={isAdmin} models={models} />
       ) : teamAllocations.length > 0 ? (
         <div className="space-y-8">
           {teamAllocations.map((alloc) => (
@@ -196,9 +195,6 @@ export default async function BudgetsPage() {
         <p className="text-sm text-muted-foreground">{t('noLedTeams')}</p>
       )}
 
-      {isAdmin && teamItems.length > 0 && (
-        <DowngradeSection teamItems={teamItems} models={models} />
-      )}
     </div>
   );
 }
