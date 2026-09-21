@@ -42,6 +42,10 @@ from app.services.router_service import RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
 from app.services.thinking_normalizer import normalize_thinking, sanitize_output_config
 from app.services.tool_filter import strip_unsupported_tools
+from app.services.upstream_compat import (
+    strip_unsupported_server_tools,
+    unsupported_tool_prefixes,
+)
 from app.services.web_search_loop import normalize_inbound_native_blocks
 
 logger = structlog.get_logger(__name__)
@@ -179,6 +183,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     try:
         req_data = json.loads(body)
+        # Anthropic-only server tools (Claude Code's advisor …) are a Bedrock 400 for the whole
+        # request. Removed HERE, before both consumers of req_data — the web-search loop and
+        # the direct/fallback/Mantle bodies. Same object when there is nothing to remove.
+        req_data, _ = strip_unsupported_server_tools(
+            req_data,
+            unsupported_tool_prefixes(get_settings().bedrock_unsupported_tool_type_prefixes))
         # Replayed native search blocks (server_tool_use / web_search_tool_result) are unknown
         # to Bedrock and would 400. The web-search loop receives the ORIGINAL req_data and
         # rewrites them as tool_use/tool_result; every path that bypasses the loop (fallback
@@ -849,6 +859,10 @@ async def count_tokens(request: Request) -> JSONResponse:
 
     try:
         req_data = json.loads(body)
+        # Same bridge as /v1/messages: CountTokens rejects Anthropic-only server tools too.
+        req_data, _ = strip_unsupported_server_tools(
+            req_data,
+            unsupported_tool_prefixes(get_settings().bedrock_unsupported_tool_type_prefixes))
         # 되돌아온 native 검색 블록은 CountTokens 도 거부한다 — /v1/messages 와 같은 환원.
         if isinstance(req_data, dict):
             req_data = normalize_inbound_native_blocks(req_data)

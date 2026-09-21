@@ -954,6 +954,7 @@ curl -sS -o /dev/null -w '%{http_code}\n' https://admin-api.<DOMAIN>/health
 `m5zn.metal`(≈$6/hr — **안 쓸 땐 stop**) · 200 GB gp3
 - 키 페어 `<키 페어>`(기존) · SG 신규 `window-pc-rdp` = 3389 ← 작업자 IP `/32` 만 ·
 IAM 신규 `window-pc-ssm` = `AmazonSSMManagedInstanceCore` 만 · Name `window-pc-metal-prod`
+- **EIP 연결** — stop/start 때 공인 IP 가 바뀌면 RDP 주소와 gateway 허용 목록(`05 --targets gateway` → `06 --apply`)을 매번 고쳐야 한다. EIP 를 붙이면 한 번으로 끝난다(꺼 둔 동안에도 ≈$3.6/월).
 
 **(b) 생성 순서**: IAM role+profile → SG → `run-instances` → `get-password-data`(`.pem`) → RDP →
 1회 준비(Hyper-V 역할+재부팅 · Claude Desktop · AWS VPN Client · 빌드 도구 Inno Setup+Python —

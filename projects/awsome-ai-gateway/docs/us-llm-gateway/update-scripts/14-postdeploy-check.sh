@@ -178,9 +178,11 @@ req_1h_ok=$E_OK
 req_1h_err=$E_BAD
 alembic=$DB_HEAD"
 printf '%s\n' "$NUM" | sed 's/^/  /'
-ratio=$(awk "BEGIN{ if ($U_COST > 0) printf \"%.3f\", $B_SUM / $U_COST; else print \"n/a\" }")
+# values go in via -v: gawk folds a literal "0 / 0" at parse time and dies
+# even behind the if-guard (seen on a deployment with no usage this month)
+ratio=$(awk -v b="$B_SUM" -v u="$U_COST" 'BEGIN{ if (u > 0) printf "%.3f", b / u; else print "n/a" }')
 note "budget_user_sum / usage_cost = $ratio  (≈1.0 expected; seed-spent or a rollout replay moves it)"
-if [ "$ratio" != "n/a" ] && awk "BEGIN{exit !($ratio > 1.05)}"; then
+if [ "$ratio" != "n/a" ] && awk -v r="$ratio" 'BEGIN{exit !(r > 1.05)}'; then
   warnc "budget rows exceed usage cost by >5% — check for a rollout replay (5597f64) or seeded spend"
 fi
 if [ -n "$SAVE" ]; then

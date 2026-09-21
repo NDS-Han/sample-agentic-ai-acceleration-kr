@@ -8,8 +8,8 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 > Synced with the Korean version through `US-10` (2026-08-29). **The linked procedure documents are Korean-only** (install guide, runbooks, update scripts) — this page tells you *what changed* and *whether this deployment has it*; the runbooks are for the operator who performs the change.
 
 **What you want to do**
-- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
-- **Already installed — see the update state** — `bash status.sh` on the deployment EC2 → apply only the missing rows of [2. Latest updates](#2-latest-updates) below
+- **Install for the first time** — POC: [install-overview.md](install-overview.md) (scope · flow, 10 min) → [install-guide.md](install-guide.md) (run §1–§6-0) · production (separate prod account): [ops/8-P-prod.md](ops/8-P-prod.md) drives [install-guide.md](install-guide.md) §1–§6 in the prod account — decide which in [1. New-install scope](#1-new-install-scope--what-you-use--poc-or-production) first
+- **Already installed — see the update state** — `bash status.sh` on the deployment EC2 → apply only the missing rows of [2. Latest updates](#2-latest-updates) below · `US-10`·`US-11` are not judged by `status.sh` — check them with `bash 14-postdeploy-check.sh` (DB schema number · prices match)
 - **Set up employee PCs only** — [client-install.md](client-install.md) (Claude Code) · [cowork/…windows.md](cowork/manual/cowork-client-install-windows.md) · [cowork/…windows-auto.md](cowork/manual/cowork-client-install-windows-auto.md) (installer) · [cowork/…macos.md](cowork/cowork-client-install-macos.md) · [cowork/installer/…e2e-windows.md](cowork/installer/cowork-installer-admin-e2e-windows.md) (Windows installer, US-09)
 
 **This deployment**
@@ -36,7 +36,11 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 | Claude Code only (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08` (the same install as `US-01`, in the prod account per 8-P — https · admin internal · VPN included) |
 | Claude Code + **Cowork** | `US-01` + one https entry (`US-06` with a domain, otherwise `03` CloudFront from `US-02`) | `US-08` (same; https included, so no entry choice) |
 
-- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start. `US-03·04·05` are included in every new install (POC and production).
+- **Production (`US-08`)** — the same install as `US-01` with https (US-06) · admin internal (US-07) · VPN · prod sizing added from the start.
+- **Already included in every new install (POC and production) — nothing to apply separately**:
+  - **`US-03·04·05`** — admin UI KO/EN toggle · Bedrock VPC endpoints · EKS 1.34 are part of the install steps.
+  - **`US-10`** — the code you install is US-10: latest DB schema · stability fixes · web-search cost caps and improvements work by default.
+  - **`US-11`** — install-guide §4-2 (C) seeds the prices from `update-scripts/pricing.tsv` (default = `us.` Standard tier). **If you are billed at another region or tier**, edit that file to your billed prices before §4-2 (how: see the note in install-guide §4-2 (C)).
 - **POC (`US-01`) only:**
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
@@ -49,22 +53,20 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 
 **Newest 5 only** — full history (US-01~) and the why · pitfalls per item: [updates.en.md](updates.en.md). `US-NN` is a fixed ID unaffected by rebases. **Check the current state first with [3. Applying updates](#3-applying-updates-on-the-deployment-ec2).**
 
-| ID (doc) | What | Grade · new installs | Existing deployments do |
-|---|---|---|---|---|
-|[**IN-01**](ops/8-L-admin-ui-login.md) 2026/08|Admin UI Cognito login — replaces dev-login|Optional · **strongly recommended for production** · included in new installs (apply separately)|rebuild images → `setup-admin-ui-login.sh` → install-eks → `devLoginEnabled=false`|
-|[**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08|Cowork Windows installer — admin builds one .exe → installs on employee PCs (HKLM policy)|Optional · recommended for Cowork on Windows (replaces manual setup) · no gateway change|on a build PC clone `feat/cowork-installer-import` → `site-config.json` from `07-client-values.sh` → `build.ps1` → install + `setup` on employee PCs|
-|[**US-08**](ops/8-P-prod.md) 2026/08|New prod stack — separate account · https + admin internal + VPN · Cowork Windows|Optional · when moving from POC to production · `environment=prod`|leave dev as is; rerun §1–§6 in the prod account (8-P order)|
-|[**US-07**](ops/8-I-admin-internal.md) 2026/08|Customer final architecture — both admin ALBs internal (private subnets)|Optional · requires site-to-site VPN · new POC installs: at §3-6 via values · production (`US-08`) includes it|uncomment 2 values blocks → helm (ALB recreation) → swap admin SG · CNAMEs|
-|[**US-06**](ops/8-H-alb-https.md) 2026/08|ALB HTTPS — custom domain + ACM|Optional · POC with a domain · production (`US-08`) includes it|get a domain → switch → update 2 client URLs (30 min)|
-|[**US-05**](ops/8-E-eks-upgrade.md) 2026/08|EKS 1.31 → 1.34|Required (support expiry · cost) · included in new installs|apply one minor at a time ×3 + restart all ns|
-
+| ID (doc) | What | Grade · installing new | Already installed — how to apply |
+|---|---|---|---|
+| [**US-11**](ops/8-R-pricing.md) 2026/09 | Align model prices with **what AWS actually bills** — calls through the US region group (`us.`) are billed 10% above the global price · Sonnet 5's Sept-1 increase was cancelled · repeat whenever prices change | Required (gateway cost and budgets must match the bill) · included in new installs (§4-2 seeds these prices) | **Done if you ran US-10 via [8-D](ops/8-D-upstream-sync.md)** (step ⑧ is this) · later, when prices change: edit the price file `update-scripts/pricing.tsv`, then apply it with the `08` script (takes effect in 5 min) |
+| [**US-10**](ops/8-D-upstream-sync.md) 2026/09 | Bring the gateway to the latest code (a large update: DB structure changes and all 6 services replaced) — 6 outage/error fixes (a health-check misjudgment dropping every pod at once · thinking requests failing · web-search loop errors · double budget charge · every request failing when Claude Code's advisor is on · first request after a long idle failing) · web-search cost caps · web-search improvements (added Sept 19 — search record kept · works alongside app tools · works by default with no settings) | Required (fixes outages) · included in new installs (installing now gives you this code) | Follow [8-D](ops/8-D-upstream-sync.md) top to bottom (about 1.5 h, at a quiet hour) — checks → DB backup → build the new version → deploy → prices → verify · finished before Sept 19? only the Sept 19 additions in [updates.en.md](updates.en.md) US-10 |
+| [**US-09**](cowork/installer/cowork-installer-admin-e2e-windows.md) 2026/08 | Cowork Windows installer file — the admin builds one installer; running it on an employee PC finishes the setup (replaces typing settings by hand) | Optional · recommended if you use Cowork on Windows · the gateway does not change | Follow the doc — build the installer on a build PC → install on employee PCs → sign in once |
+| [**US-08**](ops/8-P-prod.md) 2026/08 | Build a new production (prod) environment — separate AWS account · https address · admin screen reachable only from the corporate network (VPN) · Cowork Windows included | Optional · when moving from POC to production | Leave the POC (dev) as is; in the production account install from scratch following [8-P](ops/8-P-prod.md) |
+| [**US-07**](ops/8-I-admin-internal.md) 2026/08 | Close the admin screen and admin API to the internet; reachable only from the corporate network (VPN) — the customer's final layout | Optional · the corporate network link (site-to-site VPN) must exist first · usually not needed for a POC · production (`US-08`) includes it | Follow [8-I](ops/8-I-admin-internal.md) — change 2 settings → redeploy → swap the admin screen address (DNS) |
 Earlier (`US-01` initial install) and the why · pitfalls per item → [updates.en.md](updates.en.md)
 
 ---
 
 ## 3. Applying updates (on the deployment EC2)
 
-**① Bring the repository up to date** — a rebased branch, so not `git pull` but the block below. `values-*.yaml` exists only on this EC2, so the backup · restore is the point (confirm `values restored OK`). `origin` in `git remote -v` must be `gonsoomoon-ml/…` (if it is aws-samples, `set-url`). The prod stack (`US-08`) follows the same steps on the **prod account's deployment EC2** with `V=…/values-eks-fargate-prod.yaml` — `status.sh` does not judge US-08~10 (US-08 is a separate stack, US-09/US-10 are PC/admin-UI side).
+**① Bring the repository up to date** — a rebased branch, so not `git pull` but the block below. `values-*.yaml` exists only on this EC2, so the backup · restore is the point (confirm `values restored OK`). `origin` in `git remote -v` must be `gonsoomoon-ml/…` (if it is aws-samples, `set-url`). The prod stack (`US-08`) follows the same steps on the **prod account's deployment EC2** with `V=…/values-eks-fargate-prod.yaml` — `status.sh` does not judge US-08~11 (US-08 is a separate stack, US-09 is PC-side, US-10·11 are judged by `14-postdeploy-check.sh`).
 
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -87,7 +89,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash status.sh
  다음 작업: bash 03-create-cloudfront.sh … / (수동) ops/8-N-vpc-endpoint.md …
 ```
 
-**③ Only the missing rows**, via the doc column of the table in §2. Detailed procedure · pitfalls · rollback: [ops/8-U-update.md](ops/8-U-update.md).
+**③ Only the missing rows**, via the doc column of the table in §2. Detailed procedure · pitfalls · rollback: [ops/8-U-update.md](ops/8-U-update.md). **`US-10`·`US-11`** (bulk upstream sync — code · schema · prices together) are applied in one procedure, [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) — prod: section ⑩ of the same doc.
 
 ---
 

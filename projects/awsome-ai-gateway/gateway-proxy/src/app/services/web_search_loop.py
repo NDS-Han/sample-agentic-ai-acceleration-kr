@@ -290,8 +290,31 @@ _FINAL_TURN_TEXT_NUDGE = ("[Your previous turn contained no visible text. Write 
 #: Appended to the last user message of the forced-final turn. With only result JSON as the
 #: last user content, Opus 5 answered with a single ``<br>`` (2026-09-16: four billed
 #: searches and no answer).
-_FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request; "
-                          "no further searches can be made. Write the final answer now.]")
+#: 2026-09-18 (Cowork): the forced-final turn is sent with ``tool_choice: none``, which blocks
+#: EVERY tool — the client's own tools too, not only web_search. The instruction used to say
+#: only that no further searches can be made; the model kept its plan ("save a note with the
+#: memory tool, then write the news"), could not call the tool, and ended the turn after the
+#: announcement alone (191 chars of text out of 2,895 output tokens). The empty-text nudge
+#: does not fire in that case because there IS visible text, so the instruction itself must
+#: say that no tool is available and that the whole answer is due now.
+_FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this request. "
+                          "No tool of any kind can be called in this turn — not web_search "
+                          "and not any other tool — so do not announce or plan further "
+                          "steps such as saving notes or more lookups; anything that needs "
+                          "a tool can happen in a later turn. Write the complete final "
+                          "answer now.]")
+#: Appended to the last user message of the SOFT final turn (``final_turn_soft``): the first
+#: turn after the search budget is used up. Every tool stays callable there — a client tool
+#: call goes to the client as usual, a further web_search is answered with an error instead
+#: of being run (what ``max_uses`` does for a server tool in the Messages API). The hard final
+#: turn above follows only if the model still asks for a search.
+#: Why (2026-09-18, Cowork): "search the news and save it as samsung-news.md" reached the
+#: hard final turn, ``tool_choice: none`` blocked the client's Write tool too, and the model
+#: delivered the summary as text with "the file tool is not available in this turn".
+_FINAL_TURN_SEARCH_EXHAUSTED = ("[The web search budget for this request is used up: further "
+                                "web_search calls will not be run. Every other tool is still "
+                                "available. Answer from the search results above, or call "
+                                "the other tool you need.]")
 
 
 def _strip_anthropic_web_search_plumbing(
@@ -388,12 +411,11 @@ def _strip_anthropic_web_search_plumbing(
     return _with_answer_now(out)
 
 
-def _with_answer_now(messages: list) -> list:
-    """Append ``_FINAL_TURN_ANSWER_NOW`` to the LAST user message (copy-on-write, idempotent).
+def _with_user_note(messages: list, text: str) -> list:
+    """Append a gateway instruction to the LAST user message (copy-on-write, idempotent).
 
-    With nothing but result JSON in the last user message the model tends to wait for further
-    instructions and answers blank (2026-09-16). A string ``content`` becomes two text blocks.
-    If the note is already present the input is returned unchanged.
+    A string ``content`` becomes two text blocks. If the note is already present the input is
+    returned unchanged.
     """
     out = list(messages)
     for i in range(len(out) - 1, -1, -1):
@@ -401,15 +423,47 @@ def _with_answer_now(messages: list) -> list:
         if not (isinstance(m, dict) and m.get("role") == "user"):
             continue
         c = m.get("content")
-        note = {"type": "text", "text": _FINAL_TURN_ANSWER_NOW}
+        note = {"type": "text", "text": text}
         if isinstance(c, str):
             out[i] = {**m, "content": [{"type": "text", "text": c}, note]}
         elif isinstance(c, list):
-            if any(isinstance(b, dict) and b.get("text") == _FINAL_TURN_ANSWER_NOW for b in c):
+            if any(isinstance(b, dict) and b.get("text") == text for b in c):
                 return messages
             out[i] = {**m, "content": list(c) + [note]}
         break
     return out
+
+
+def _with_answer_now(messages: list) -> list:
+    """Hard final turn: append ``_FINAL_TURN_ANSWER_NOW``.
+
+    With nothing but result JSON in the last user message the model tends to wait for further
+    instructions and answers blank (2026-09-16).
+    """
+    return _with_user_note(messages, _FINAL_TURN_ANSWER_NOW)
+
+
+def _with_search_exhausted(messages: list) -> list:
+    """Soft final turn: append ``_FINAL_TURN_SEARCH_EXHAUSTED``."""
+    return _with_user_note(messages, _FINAL_TURN_SEARCH_EXHAUSTED)
+
+
+def _final_turn_mode(search_attempts: int, max_iterations: int, past_deadline: bool,
+                     final_turn_soft: bool, refused_rounds: int) -> str:
+    """"" (budget left) | "soft" | "hard" — what kind of turn comes next.
+
+    - budget left → a normal turn.
+    - budget used up, ``final_turn_soft`` on, nothing refused yet → SOFT: tools stay callable,
+      a web_search call is refused with an error (``_exhausted_error``).
+    - otherwise → HARD: ``tool_choice: none`` + answer-now. A passed deadline is always hard
+      (a soft round could cost one more model turn), and so is every turn after one refused
+      round — the loop is bounded by ``max_iterations + 2`` model calls.
+    """
+    if search_attempts < max_iterations and not past_deadline:
+        return ""
+    if final_turn_soft and not past_deadline and refused_rounds == 0:
+        return "soft"
+    return "hard"
 
 
 def _strip_responses_web_search_items(input_items: list, our_call_ids: set[str]) -> list:
@@ -722,14 +776,28 @@ def _cap_error(limit: int) -> str:
                                  "turn if it is still needed")})
 
 
+def _exhausted_error() -> str:
+    """tool_result content for a search requested after the request's budget was used up.
+
+    Unlike ``_cap_error`` it must NOT invite a retry: the per-turn wording ("request it again
+    in your next turn") would make the model spend the hard final turn asking again.
+    """
+    return json.dumps({"error": ("the web search budget for this request is used up; this "
+                                 "query was NOT run and no further search will be run in "
+                                 "this request — answer from the results already provided, "
+                                 "or continue with your other tools")})
+
+
 async def _run_turn_searches(
     mcp_client: AgentCoreMcpClient, inputs: list, allowance: int, deadline: float,
     default_max_results: int, max_result_chars: int, result_text_chars: int,
+    exhausted: bool = False,
 ) -> list[tuple[str, bool, str, str | None, list[dict] | None]]:
     """Run one turn's searches CONCURRENTLY.
 
     Returns ``(result_text, ok, trace, reason, digest)`` per input, in input order.
-    ``reason`` is None (ran), "capped" (over the per-turn limit) or "deadline" (total
+    ``reason`` is None (ran), "capped" (over the per-turn limit), "exhausted" (the request's
+    search budget is used up — nothing is run, see ``_exhausted_error``) or "deadline" (total
     deadline already passed) — the loops turn those into the dialect's error payload so
     every tool_use still gets exactly one result.
 
@@ -742,7 +810,10 @@ async def _run_turn_searches(
     past_deadline = time.monotonic() > deadline
     for i, inp in enumerate(inputs):
         q = inp.get("query", "") if isinstance(inp, dict) else ""
-        if i >= allowance:
+        if exhausted:
+            results[i] = (_exhausted_error(), False,
+                          _trace_line(q, _trace_words("exhausted")), "exhausted", None)
+        elif i >= allowance:
             results[i] = (_cap_error(allowance), False, _trace_line(q, _trace_words("capped")),
                           "capped", None)
         elif past_deadline:
@@ -763,7 +834,7 @@ def _anthropic_tool_result(tool_use_id: Any, result_text: str, ok: bool,
     if reason == "deadline":
         content = "web search deadline exceeded"
     else:
-        content = result_text          # ran, or the capped JSON from _cap_error
+        content = result_text          # ran, or the JSON from _cap_error/_exhausted_error
     return {"type": "tool_result", "tool_use_id": tool_use_id, "content": content,
             **({"is_error": True} if not ok else {})}
 
@@ -889,7 +960,8 @@ def _trace_lang() -> str:
 
 
 def _trace_words(kind: str, **kw: Any) -> str:
-    """Human wording after the em dash. kind: results | failed | capped | mixed | deadline."""
+    """Human wording after the em dash.
+    kind: results | failed | capped | exhausted | mixed | deadline."""
     ko = _trace_lang() == "ko"
     if kind == "results":
         n, hosts = kw["n"], kw.get("hosts") or []
@@ -902,6 +974,9 @@ def _trace_words(kind: str, **kw: Any) -> str:
         return (f"실패 ({why})" if why else "실패") if ko else (f"failed ({why})" if why else "failed")
     if kind == "capped":
         return "건너뜀 (턴당 상한)" if ko else "skipped (per-turn limit)"
+    if kind == "exhausted":
+        return ("실행 안 됨 (이 요청의 검색 한도 소진)" if ko
+                else "not run (search budget of this request used up)")
     if kind == "mixed":
         if ko:
             return "실행 안 됨 (클라이언트 도구와 같은 턴 — 다음 턴에 web_search 단독 호출)"
@@ -1021,6 +1096,18 @@ def _native_trace_enabled(request: Any) -> bool:
     return _request_client(request) in clients
 
 
+def _client_tool_flags() -> dict:
+    """``{"mixed_turn_run": bool, "final_turn_soft": bool}`` from settings (both False when
+    settings are unavailable, e.g. in unit tests that call the loops directly)."""
+    try:
+        from app.config import get_settings
+        st = get_settings()
+        return {"mixed_turn_run": bool(getattr(st, "web_search_mixed_turn_run", False)),
+                "final_turn_soft": bool(getattr(st, "web_search_final_turn_soft", False))}
+    except Exception:
+        return {"mixed_turn_run": False, "final_turn_soft": False}
+
+
 def _native_search_blocks(query: str, ok: bool, reason: str | None,
                           digest: list[dict] | None) -> list[dict]:
     """[server_tool_use, web_search_tool_result] for one search, in the API's shape."""
@@ -1039,7 +1126,8 @@ def _native_search_blocks(query: str, ok: bool, reason: str | None,
         ]
     else:
         content = {"type": "web_search_tool_result_error",
-                   "error_code": "max_uses_exceeded" if reason == "capped" else "unavailable"}
+                   "error_code": ("max_uses_exceeded" if reason in ("capped", "exhausted")
+                                  else "unavailable")}
     return [use, {"type": _NATIVE_TOOL_RESULT, "tool_use_id": srv_id, "content": content}]
 
 
@@ -1114,6 +1202,16 @@ def _normalize_inbound_native_blocks(body: dict) -> dict:
                 out.append(b)
         if not out:   # result blocks without their tool_use — never leave an empty message
             out = [{"type": "text", "text": _trace_line("", _trace_words("failed"))}]
+        # Mixed turn (mixed_turn_run): the stream sent our pairs and the 🔎 block AFTER the
+        # client's tool_use, so text would now follow a tool_use. Keep the client tool calls
+        # last, as a model turn has them (stable: the order inside each group is unchanged).
+        first_tool = next((i for i, b in enumerate(out)
+                           if isinstance(b, dict) and b.get("type") == "tool_use"), None)
+        if first_tool is not None and any(
+                not (isinstance(b, dict) and b.get("type") == "tool_use")
+                for b in out[first_tool:]):
+            out = ([b for b in out if not (isinstance(b, dict) and b.get("type") == "tool_use")]
+                   + [b for b in out if isinstance(b, dict) and b.get("type") == "tool_use"])
         new_msgs.append({**m, "content": out})
     if not (n_use or n_res):
         return body
@@ -1187,6 +1285,21 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
     Display-only 🔎 lines are removed from text blocks in the same message: the tool record
     replaces them, and leaving them would re-create the imitation source.
 
+    Mixed turn (``mixed_turn_run``): the message also holds a CLIENT tool_use, whose
+    tool_result arrives in the client's next user message. An assistant turn cannot be split
+    after that block (its result would no longer be in the immediately following user
+    message), so from the client tool_use on everything stays in ONE assistant turn and our
+    tool_results are merged into the FRONT of the client's user message::
+
+        assistant [text, tool_use(client), server_tool_use, web_search_tool_result, 🔎]
+        user      [tool_result(client)]
+          → assistant [text, tool_use(client), tool_use(ours)]
+            user      [tool_result(ours), tool_result(client)]
+
+    That is the parallel-tool-call shape the model produced in the first place. Both block
+    orders are accepted (the stream sends our pairs after the client tool_use, the
+    non-streaming body before it).
+
     Only for turns that carry our ``web_search`` tool definition. A tool_use that names an
     undefined tool is a Bedrock 400, so requests that go out without our tool use
     ``_normalize_inbound_native_blocks`` instead.
@@ -1202,9 +1315,19 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
     msgs = body.get("messages")
     if not isinstance(msgs, list):
         return body
-    n_use = n_res = n_decoded = 0
+    n_use = n_res = n_decoded = n_merged = 0
     new_msgs: list = []
+    #: our tool_results of a mixed turn, waiting for the client's user message (see docstring)
+    carry: list = []
     for m in msgs:
+        if carry:
+            if isinstance(m, dict) and m.get("role") == "user":
+                c = m.get("content")
+                rest = c if isinstance(c, list) else [{"type": "text", "text": str(c or "")}]
+                m = {**m, "content": carry + list(rest)}
+            else:   # no client result message followed — keep the history pairable
+                new_msgs.append({"role": "user", "content": carry})
+            carry = []
         content = m.get("content") if isinstance(m, dict) else None
         if not isinstance(content, list) or not any(
             isinstance(b, dict) and b.get("type") in (_NATIVE_TOOL_USE, _NATIVE_TOOL_RESULT)
@@ -1218,6 +1341,7 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
         uses: list = []          # our tool_use blocks pending their results
         outs: list = []          # matching tool_result blocks
         closed = 0               # assistant/user pairs already emitted for this message
+        client_pending = False   # a client tool_use is in `segment` → the turn cannot be split
 
         def close() -> None:
             nonlocal closed
@@ -1239,9 +1363,11 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
             elif t == _NATIVE_TOOL_RESULT:
                 n_res += 1          # consumed through `results` above
             else:
-                if uses:
+                if uses and not client_pending:
                     close()
                     segment, uses, outs = [], [], []
+                if t == "tool_use":
+                    client_pending = True
                 if t == "text":
                     # Display-only 🔎 lines (shown to the user in native mode) are removed
                     # from the model's history: the tool record replaces them.
@@ -1250,7 +1376,11 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
                         continue
                     b = {**b, "text": cleaned}
                 segment.append(b)
-        if uses:
+        if uses and client_pending:
+            new_msgs.append({"role": "assistant", "content": segment + uses})
+            carry = outs
+            n_merged += len(outs)
+        elif uses:
             close()
         elif segment:
             new_msgs.append({**m, "content": segment})
@@ -1259,10 +1389,12 @@ def _rewrite_inbound_native_blocks(body: dict) -> dict:
         else:   # only orphan result blocks — never leave an empty assistant message
             new_msgs.append({**m, "content": [{"type": "text", "text": _trace_line(
                 "", _trace_words("failed"))}]})
+    if carry:   # the mixed assistant turn was the last message
+        new_msgs.append({"role": "user", "content": carry})
     if not (n_use or n_res):
         return body
     logger.info("web_search.inbound_native_rewritten", server_tool_use=n_use,
-                tool_result=n_res, digests=n_decoded)
+                tool_result=n_res, digests=n_decoded, merged_into_client_results=n_merged)
     return {**body, "messages": new_msgs}
 
 
@@ -1670,6 +1802,33 @@ async def _do_search(
                 _trace_line(query, _trace_words("failed")), None)
 
 
+def _search_trace_frames(gi: int, native_blocks: list[dict],
+                         traces: list[str]) -> tuple[list[bytes], int]:
+    """SSE frames that leave one round of searches in the client envelope, starting at
+    envelope index ``gi``: the native block pairs (native mode), then ONE text block with the
+    🔎 lines. Returns ``(frames, next_index)``.
+
+    The 🔎 line is emitted in both modes: in text mode it is the only trace, in native mode it
+    is for the user (Cowork's UI does not render the blocks, 2026-09-17) and is removed from
+    the history on the way back in (``_rewrite_inbound_native_blocks``).
+    """
+    frames: list[bytes] = []
+    for blk in native_blocks:
+        frames.extend(_native_block_frames(gi, blk))
+        gi += 1
+    if traces:
+        frames += [
+            _sse("content_block_start", {"type": "content_block_start", "index": gi,
+                                         "content_block": {"type": "text", "text": ""}}),
+            _sse("content_block_delta", {"type": "content_block_delta", "index": gi,
+                                         "delta": {"type": "text_delta",
+                                                   "text": "\n" + "\n".join(traces) + "\n"}}),
+            _sse("content_block_stop", {"type": "content_block_stop", "index": gi}),
+        ]
+        gi += 1
+    return frames, gi
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ANTHROPIC (Messages) — streaming stitcher
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1688,11 +1847,22 @@ async def _anthropic_stream(
     cache_results: bool = True,
     result_text_chars: int = 0,
     native_trace: bool = False,
+    mixed_turn_run: bool = False,
+    final_turn_soft: bool = False,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
     Forwards text/thinking blocks (re-indexed into one envelope); suppresses web_search
     tool_use/tool_result plumbing; runs the search between turns.
+
+    Two flags cover web search next to the client's own tools (both default to the previous
+    behaviour):
+
+    - ``mixed_turn_run`` — a turn that calls a client tool AND web_search has to go to the
+      client. With the flag (native mode only) its searches are run and their block pairs
+      leave in the same message as the client's tool_use; without it they are not run. Text
+      mode never runs them: the results could not come back with the client's next request.
+    - ``final_turn_soft`` — see ``_final_turn_mode``.
 
     State that is reset PER TURN (``stop_reason_final``, ``saw_message_delta``, the block
     maps) must not leak across turns: a search turn ends with ``stop_reason: tool_use``, and
@@ -1705,6 +1875,7 @@ async def _anthropic_stream(
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0        # successful searches → web_search_count (billing/attribution)
     search_attempts = 0      # ALL search rounds incl. failures → loop guard (F-5)
+    refused_rounds = 0       # soft final turns whose searches were refused (bounds the loop)
     envelope_open = False
     global_index = 0  # next content_block index in the stitched envelope
     #: A provider error arrived inside a 200 stream. If so, never claim a normal end.
@@ -1720,15 +1891,24 @@ async def _anthropic_stream(
 
     try:
         while True:
-            force_final = search_attempts >= max_iterations or time.monotonic() > deadline
+            final_mode = _final_turn_mode(search_attempts, max_iterations,
+                                          time.monotonic() > deadline, final_turn_soft,
+                                          refused_rounds)
+            force_final = final_mode == "hard"
+            soft_final = final_mode == "soft"
+            if final_mode:
+                logger.info("web_search.final_turn", mode=final_mode, attempts=search_attempts)
             turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
                                               budget=(max_searches_per_turn, max_iterations),
                                               final=force_final)
             turn_body = dict(turn_body)
-            # The forced-final turn keeps the tool (tool_choice: none) so the history's
-            # tool blocks stay valid; it only appends the answer-now instruction.
-            turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
+            # The hard final turn keeps the tool (tool_choice: none) so the history's tool
+            # blocks stay valid; it only appends the answer-now instruction. The soft final
+            # turn changes nothing but the instruction.
+            turn_body["messages"] = (_with_answer_now(conversation) if force_final
+                                     else _with_search_exhausted(conversation) if soft_final
+                                     else conversation)
             turn_body["stream"] = True
 
             status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
@@ -1970,7 +2150,7 @@ async def _anthropic_stream(
             )
             # A forced-final turn with thinking but no visible text is re-prompted once
             # (_FINAL_TURN_TEXT_NUDGE).
-            if (force_final and not turn_visible and not pending_searches and not nudged
+            if (final_mode and not turn_visible and not pending_searches and not nudged
                     and not error_seen and saw_message_delta and assistant_content):
                 nudged = True
                 logger.info("web_search.final_turn_empty_nudge")
@@ -1980,25 +2160,50 @@ async def _anthropic_stream(
                 ]
                 continue
             if not is_search_turn or force_final:
-                # Mixed turn (client tool + our search): the search is not run and the turn is
-                # handed to the client (contract). If the search vanished silently the model
-                # believed on the next request that it had run, or spent two requests
-                # re-issuing it (2026-09-17, Cowork) — leave a "not run" trace. Native mode
-                # emits blocks only.
-                if (pending_searches and client_tool_present and not error_seen
-                        and saw_message_delta and envelope_open and not native_trace):
+                # Mixed turn (client tool + our search): the turn has to go to the client.
+                mixed = (bool(pending_searches) and client_tool_present and not error_seen
+                         and saw_message_delta and envelope_open)
+                if mixed and native_trace and mixed_turn_run:
+                    # Run the searches and send their block pairs in the same message as the
+                    # client's tool_use — the shape a server tool has in the Messages API. The
+                    # client replays the pairs with its next request, where
+                    # _rewrite_inbound_native_blocks turns them into tool_use/tool_result next
+                    # to the client's own results. 2026-09-18 (Cowork): without this, 5 of 10
+                    # requested searches were dropped silently and re-issued one or two
+                    # requests later. Past the budget they are refused, not run.
+                    allowance = _turn_search_allowance(len(pending_searches),
+                                                       max_searches_per_turn)
+                    outcomes = await _run_turn_searches(
+                        mcp_client, [ps.get("input") or {} for ps in pending_searches],
+                        allowance, deadline, default_max_results, max_result_chars,
+                        result_text_chars, exhausted=bool(final_mode))
+                    mixed_traces: list[str] = []
+                    mixed_blocks: list[dict] = []
+                    ran = 0
+                    for ps, (_text, ok, trace, reason, digest) in zip(pending_searches, outcomes):
+                        mixed_traces.append(trace)
+                        ran += 1 if ok else 0
+                        mixed_blocks.extend(_native_search_blocks(
+                            (ps.get("input") or {}).get("query", ""), ok, reason, digest))
+                    searches_done += ran
+                    logger.info("web_search.mixed_turn_ran", requested=len(pending_searches),
+                                ran=ran, refused=bool(final_mode))
+                    logger.info("web_search.native_blocks_emitted",
+                                searches=len(mixed_blocks) // 2)
+                    frames, global_index = _search_trace_frames(
+                        global_index, mixed_blocks, mixed_traces)
+                    for frame in frames:
+                        yield frame
+                elif mixed and not native_trace:
+                    # Text mode: the results could not travel back with the client's next
+                    # request, so the search is not run. If it vanished silently the model
+                    # believed on the next request that it had run, or spent two requests
+                    # re-issuing it (2026-09-17, Cowork) — leave a "not run" trace.
                     lines = [_trace_line((ps.get("input") or {}).get("query", ""),
                                          _trace_words("mixed")) for ps in pending_searches]
-                    gi = global_index
-                    global_index += 1
-                    yield _sse("content_block_start",
-                               {"type": "content_block_start", "index": gi,
-                                "content_block": {"type": "text", "text": ""}})
-                    yield _sse("content_block_delta",
-                               {"type": "content_block_delta", "index": gi,
-                                "delta": {"type": "text_delta",
-                                          "text": "\n" + "\n".join(lines) + "\n"}})
-                    yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+                    frames, global_index = _search_trace_frames(global_index, [], lines)
+                    for frame in frames:
+                        yield frame
                 # Close blocks left open by an upstream that died mid-way — an envelope that
                 # ends with an open block looks like a parse error on the SDK side, and the
                 # cause (gateway vs upstream) becomes indistinguishable.
@@ -2095,9 +2300,15 @@ async def _anthropic_stream(
                 )
             traces: list[str] = []   # one line per search → client-visible evidence
             native_blocks: list[dict] = []   # native mode: server_tool_use + result per search
+            if soft_final:
+                # Budget used up: every search of this turn is refused without running, and
+                # the next turn is the hard final one (_final_turn_mode).
+                refused_rounds += 1
+                logger.info("web_search.search_refused_budget", requested=len(pending_searches))
             outcomes = await _run_turn_searches(
                 mcp_client, [ps.get("input") or {} for ps in pending_searches], allowance,
-                deadline, default_max_results, max_result_chars, result_text_chars)
+                deadline, default_max_results, max_result_chars, result_text_chars,
+                exhausted=soft_final)
             for ps, (result_text, ok, trace, reason, digest) in zip(pending_searches, outcomes):
                 traces.append(trace)
                 if ok:
@@ -2109,29 +2320,15 @@ async def _anthropic_stream(
             # Leave the search trace in the client envelope — block pairs in native mode,
             # then the text line in both modes. Nothing is added to the INTERNAL
             # conversation: it holds the real tool_use/tool_result.
-            if native_trace and native_blocks and envelope_open:
-                # Paired with inbound_native_rewritten on the next request for readouts.
-                logger.info("web_search.native_blocks_emitted", searches=len(native_blocks) // 2)
-                for blk in native_blocks:
-                    gi = global_index
-                    global_index += 1
-                    for frame in _native_block_frames(gi, blk):
-                        yield frame
-            # The 🔎 line is emitted in both modes: in text mode it is the only trace, in
-            # native mode it is for the user (Cowork's UI does not render the blocks,
-            # 2026-09-17) and is removed from the history on the way back in
-            # (_rewrite_inbound_native_blocks).
-            if traces and envelope_open:
-                gi = global_index
-                global_index += 1
-                yield _sse("content_block_start",
-                           {"type": "content_block_start", "index": gi,
-                            "content_block": {"type": "text", "text": ""}})
-                yield _sse("content_block_delta",
-                           {"type": "content_block_delta", "index": gi,
-                            "delta": {"type": "text_delta",
-                                      "text": "\n" + "\n".join(traces) + "\n"}})
-                yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+            if envelope_open:
+                if native_trace and native_blocks:
+                    # Paired with inbound_native_rewritten on the next request for readouts.
+                    logger.info("web_search.native_blocks_emitted",
+                                searches=len(native_blocks) // 2)
+                frames, global_index = _search_trace_frames(
+                    global_index, native_blocks if native_trace else [], traces)
+                for frame in frames:
+                    yield frame
             # The forced-final turn sends the same prefix, so the marker is read there too.
             if cache_results:
                 conversation = _place_cache_breakpoint(
@@ -2186,10 +2383,15 @@ async def _anthropic_nonstream(
     cache_results: bool = True,
     result_text_chars: int = 0,
     native_trace: bool = False,
+    mixed_turn_run: bool = False,
+    final_turn_soft: bool = False,
 ) -> JSONResponse:
     """Non-streaming twin of ``_anthropic_stream``: loop with ``invoke()`` and return the
     assembled final body (our plumbing removed, traces/native blocks prepended, usage rewritten
-    to the client-facing gauge)."""
+    to the client-facing gauge). ``mixed_turn_run`` / ``final_turn_soft``: same contract as
+    the streaming path; here the block pairs of a mixed turn are prepended like every other
+    trace, so they sit BEFORE the client's tool_use (the stream has them after it — the
+    inbound rewrite accepts both orders)."""
     from app.providers.bedrock_adapter import _extract_bedrock_usage
 
     merged = TokenUsage()
@@ -2198,6 +2400,7 @@ async def _anthropic_nonstream(
     conversation: list[dict] = list(base_body.get("messages") or [])
     searches_done = 0
     search_attempts = 0      # loop guard incl. failures (F-5)
+    refused_rounds = 0       # soft final turns whose searches were refused (bounds the loop)
     our_tool_use_ids: set[str] = set()
     traces: list[str] = []   # one line per search → client-visible evidence (_TRACE_PREFIX)
     native_blocks: list[dict] = []   # native mode: server_tool_use + result per search
@@ -2206,15 +2409,23 @@ async def _anthropic_nonstream(
 
     try:
         while True:
-            force_final = search_attempts >= max_iterations or time.monotonic() > deadline
+            final_mode = _final_turn_mode(search_attempts, max_iterations,
+                                          time.monotonic() > deadline, final_turn_soft,
+                                          refused_rounds)
+            force_final = final_mode == "hard"
+            soft_final = final_mode == "soft"
+            if final_mode:
+                logger.info("web_search.final_turn", mode=final_mode, attempts=search_attempts)
             turn_body = _with_web_search_tool(base_body, "anthropic", include=True,
                                               first_turn=search_attempts == 0,
                                               budget=(max_searches_per_turn, max_iterations),
                                               final=force_final)
             turn_body = dict(turn_body)
-            # Forced-final turn: tool kept (tool_choice: none), answer-now instruction
-            # appended — same contract as the streaming path.
-            turn_body["messages"] = _with_answer_now(conversation) if force_final else conversation
+            # Hard final turn: tool kept (tool_choice: none), answer-now instruction appended;
+            # soft final turn: only the instruction — same contract as the streaming path.
+            turn_body["messages"] = (_with_answer_now(conversation) if force_final
+                                     else _with_search_exhausted(conversation) if soft_final
+                                     else conversation)
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -2245,7 +2456,7 @@ async def _anthropic_nonstream(
                 isinstance(b, dict) and b.get("type") == "text" and (b.get("text") or "").strip()
                 for b in content
             )
-            if (force_final and not nudged and not client_calls and not our_calls
+            if (final_mode and not nudged and not client_calls and not our_calls
                     and content and not has_text):
                 nudged = True
                 logger.info("web_search.final_turn_empty_nudge")
@@ -2254,8 +2465,25 @@ async def _anthropic_nonstream(
                     {"role": "user", "content": [{"type": "text", "text": _FINAL_TURN_TEXT_NUDGE}]},
                 ]
                 continue
-            if our_calls and client_calls and not native_trace:
-                # Mixed turn: the search is not run (contract) — same "not run" trace as the
+            if our_calls and client_calls and native_trace and mixed_turn_run:
+                # Mixed turn, native mode: run the searches and hand their block pairs to the
+                # client together with its tool_use (see the streaming path).
+                allowance = _turn_search_allowance(len(our_calls), max_searches_per_turn)
+                outcomes = await _run_turn_searches(
+                    mcp_client, [c.get("input") or {} for c in our_calls], allowance,
+                    deadline, default_max_results, max_result_chars, result_text_chars,
+                    exhausted=bool(final_mode))
+                ran = 0
+                for call, (_text, ok, trace, reason, digest) in zip(our_calls, outcomes):
+                    traces.append(trace)
+                    ran += 1 if ok else 0
+                    native_blocks.extend(_native_search_blocks(
+                        (call.get("input") or {}).get("query", ""), ok, reason, digest))
+                searches_done += ran
+                logger.info("web_search.mixed_turn_ran", requested=len(our_calls), ran=ran,
+                            refused=bool(final_mode))
+            elif our_calls and client_calls and not native_trace:
+                # Mixed turn, text mode: the search is not run — same "not run" trace as the
                 # streaming path.
                 traces.extend(_trace_line((c.get("input") or {}).get("query", ""),
                                           _trace_words("mixed")) for c in our_calls)
@@ -2270,9 +2498,14 @@ async def _anthropic_nonstream(
             if allowance < len(our_calls):
                 logger.info("web_search.turn_fanout_capped",
                             requested=len(our_calls), allowed=allowance)
+            if soft_final:
+                # Budget used up: refuse without running; the next turn is the hard final one.
+                refused_rounds += 1
+                logger.info("web_search.search_refused_budget", requested=len(our_calls))
             outcomes = await _run_turn_searches(
                 mcp_client, [c.get("input") or {} for c in our_calls], allowance,
-                deadline, default_max_results, max_result_chars, result_text_chars)
+                deadline, default_max_results, max_result_chars, result_text_chars,
+                exhausted=soft_final)
             for call, (result_text, ok, trace, reason, digest) in zip(our_calls, outcomes):
                 traces.append(trace)
                 if ok:
@@ -2965,7 +3198,9 @@ async def run_web_search_loop(
         loop_req_data = _rewrite_inbound_native_blocks(initial_req_data)
         initial_req_data = _normalize_inbound_native_blocks(initial_req_data)
     native_trace = dialect == "anthropic" and _native_trace_enabled(request)
-    dialect_kw: dict = {"native_trace": native_trace} if dialect == "anthropic" else {}
+    # The Responses loops (Codex) take neither native blocks nor the client-tool flags.
+    dialect_kw: dict = ({"native_trace": native_trace, **_client_tool_flags()}
+                        if dialect == "anthropic" else {})
 
     # streaming.py sse helpers now call on_usage(usage, first_token_time) (2-arg TTFT
     # contract). The web-search loop's on_usage is 1-arg (multi-turn aggregate — per-turn

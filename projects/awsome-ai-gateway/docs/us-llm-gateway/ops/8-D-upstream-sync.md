@@ -6,7 +6,7 @@
 > **위에서 아래로 명령만 치는** 순서. 이유·함정·상세는 링크. 서비스 하나 고친 일상 업데이트는 [8-U](8-U-update.md).
 
 ```
-①저장소 최신화 → ②사전 점검 → ③DB 스냅샷 → ④terraform plan(확인만)
+①저장소 최신화 → ②사전 점검·설정 적용 → ③DB 스냅샷 → ④terraform plan(확인만)
 → ⑤태그 올림(13) → ⑥이미지 6개 빌드 → ⑦install-eks.sh(migration+롤아웃)
 → ⑧단가(08)·시드 alias 정리 → ⑨사후 점검(14)·24h 관찰
 ```
@@ -30,7 +30,7 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 
 📋 참고: 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하다. 단 **DB 마스터 비밀번호 참조 2줄**은 values 에 있어야 한다 — ② 의 `15` 가 확인·삽입한다. 태그는 ⑤ 에서.
 
-## ② 사전 점검 — 읽기 전용, 15분
+## ② 사전 점검 · 설정 적용 — values 파일까지만, 15분
 
 ▶ 실행
 ```bash
@@ -43,11 +43,12 @@ bash 17-set-websearch-caps.sh
 bash 17-set-websearch-caps.sh --apply
 ```
 기대:
+- `00`·`14` 는 읽기 전용, `06`·`15`·`17` 은 **values 파일만** 고친다(클러스터 반영은 ⑦).
 - `00` 의 **「4. Migration pre-check」가 전부 OK**. `XX` 가 하나라도 있으면 진행 금지 — alias 대소문자 중복은 마이그레이션 0034(alias 를 대소문자 구분 없이 유일하게 만드는 인덱스)를, backend 값은 0032(라우팅 backend 허용 목록 갱신)를 실패시킨다.
 - `14` 는 지금 `XX` 3~4개(DB 가 아직 옛 마이그레이션 0025 에 있음 · 단가 · system_settings 표 없음)가 **정상**. 목적은 배포 전 숫자를 `snapshots/pre.numbers` 에 남기는 것.
 - `06` 은 `already matches`. 아니면 `--apply`([8-U 0단계](8-U-update.md)).
 - `15` 는 표 3행(masterPasswordRemoteKey · masterPasswordRemoteProperty · masterUser)에 `<- change` 없이 `OK … nothing to do`. 새 차트의 migration Job 은 init SQL·권한 부여를 **DB 마스터 사용자**로 실행하므로, values 가 그 비밀번호를 RDS 가 직접 로테이션하는 시크릿(`rds!cluster-<uuid>`)에서 가져오게 돼 있어야 한다(`database.external.masterPasswordRemoteKey`·`…RemoteProperty`). `<- change` 가 있으면 `bash 15-set-master-secret-ref.sh --apply`(백업 후 삽입, helm 렌더로 검증) — 없이 ⑦ 을 돌리면 migration Job 이 5분 타임아웃으로 죽는다.
-- `17` 은 기존 배포에선 표 4행(web search 결과 크기·결과 수·턴당 검색 수·반복 수)이 전부 `<- change` 다 — 그래서 `--apply` 까지 두 줄(`yes` 입력, 백업 후 values 에 삽입, helm 렌더로 검증). 이미 들어 있으면 `nothing to do` 로 지나간다. ⑦ 의 롤아웃에서 적용되고, **⑦ 을 이미 끝낸 뒤라면 `install-eks.sh` 를 한 번 더** 돌린다. 검색 결과가 다음 턴 입력으로 되돌아와 반복마다 과금되는 구조라, 기본값(60,000자·10개·4회·5회)으로는 검색 질문 1건이 $3 를 넘긴다(2026-09-16 실측 $3.62) — 12,000자·5개·3회·2회(요청당 최대 6회)면 약 $1.5 이하. 값은 `config.env` 의 `WEB_SEARCH_MAX_*`.
+- `17` 은 기존 배포에선 표의 행(web search 상한 4개 — 결과 크기·결과 수·턴당 검색 수·반복 수 — 와 동작 스위치)이 `<- change` 로 나온다 — 그래서 `--apply` 까지 두 줄(`yes` 입력, 백업 후 values 에 삽입, helm 렌더로 검증). 이미 들어 있으면 `nothing to do` 로 지나간다. ⑦ 의 롤아웃에서 적용되고, **⑦ 을 이미 끝낸 뒤라면 `install-eks.sh` 를 한 번 더** 돌린다. **9/19 부터(gateway-proxy 1.0.80 이상) 이 목표값이 코드 기본값과 같다** — `rendered now` 열에 `(unset -> code default …)` 로 보이는 행은 넣지 않아도 동작이 같고, `--apply` 는 같은 값을 values 에 명시해 둘 뿐이다(값을 바꾸거나 스위치를 끌 때가 `17` 의 용도). 검색 결과가 다음 턴 입력으로 되돌아와 반복마다 과금되는 구조라, **1.0.80 이전 이미지의** 기본값(60,000자·10개·4회·5회)으로는 검색 질문 1건이 $3 를 넘긴다(2026-09-16 실측 $3.62) — 12,000자·5개·3회·2회(요청당 최대 6회)면 약 $1.5 이하. 값은 `config.env` 의 `WEB_SEARCH_*`.
 - 단가의 정본은 **파일 하나** — `docs/us-llm-gateway/update-scripts/pricing.tsv`(alias 별 입력·출력·캐시 단가, /1K, US `us.` Standard 티어). `14` 와 `08` 은 이 파일과 DB 를 비교한다. 다른 리전·티어로 청구받는 배포라면 **⑧ 전에** 이 파일을 자기 청구 단가로 고친다(`asof`·`source` 열 포함) — 그러면 `08` 은 "차이 없음", `14` 는 OK.
 
 ## ③ DB 스냅샷 — 되돌리기의 기준점
@@ -137,7 +138,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 08-set-model-pricing.sh
 bash 08-set-model-pricing.sh --apply
 ```
-기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)). 단가 표 = `update-scripts/pricing.tsv` 가 정본이다 — 청구 단가가 다르면 `--apply` 전에 이 파일부터 고친다(②).
+기대: 차이 표 → `--apply` 후 검증 행 3개 일치. 왜 배포 **뒤**인가: 마이그레이션(0027 · 0030 — 모델·단가 시드)이 단가 행을 건드릴 수 있어서([US-11](../updates.md)). 단가 표 = `update-scripts/pricing.tsv` 가 정본이다 — 청구 단가가 다르면 `--apply` 전에 이 파일부터 고친다(②). 단가만 따로 다룬 문서 = [8-R](8-R-pricing.md).
 
 admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthropic.claude-opus-5`·`…-sonnet-5`·`gpt-5.6-*`·`llama-3-70b`)는 **INACTIVE** 로 — US 가 서비스하지 않는다. ⑨ 의 14 가 남은 것을 알려준다.
 
@@ -189,6 +190,7 @@ api-key-helper 2>/dev/null | grep -m1 '^vk-'
 dev 와 같은 순서다. 다른 것은 셋뿐 — values 파일 이름, 스냅샷·terraform 디렉터리의 `prod`, 스크립트 인자 `prod`. `config.env` 는 prod EC2 의 것(`DEPLOY_ENV="prod"`)을 쓴다.
 
 **⑩-① 저장소 최신화**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -198,7 +200,8 @@ git reset --hard origin/us/deploy-fixes && cp ~/values.bak $V
 cmp -s $V ~/values.bak && echo "values restored OK" || echo "RESTORE FAILED"
 ```
 
-**⑩-② 사전 점검**
+**⑩-② 사전 점검 · 설정 적용**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -213,6 +216,7 @@ bash 17-set-websearch-caps.sh --apply
 기대: `DEPLOY_ENV="prod"` · 「4. Migration pre-check」 전부 OK · `06` 은 `already matches` · `15`·`17` 은 `nothing to do`(아니면 `--apply`).
 
 **⑩-③ DB 스냅샷**
+
 ▶ 실행
 ```bash
 SNAP=llm-gateway-prod-pre-sync-$(date +%Y%m%d)
@@ -225,6 +229,7 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 기대: 마지막 줄 `llm-gateway-prod-pre-sync-<날짜>  available`.
 
 **⑩-④ terraform — 확인 후 apply**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
@@ -234,8 +239,10 @@ terraform apply
 terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 ```
 기대·멈추는 조건은 ④ 와 같다(4줄 → `yes` → `No changes.`).
+prod 실측(2026-09-20): `bedrock` 줄이 없고 대신 `module.aurora.time_static.final_snapshot[0] will be created` · `aws_rds_cluster … updated in-place`(`final_snapshot_identifier` 만) 2줄 — `Plan: 4 to add, 1 to change, 3 to destroy.` 이 2줄은 prod 첫 apply 에만 나오고 DB 에 쓰기 호출이 없다.
 
 **⑩-⑤ 태그 올림**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -244,6 +251,7 @@ bash 13-bump-image-tags.sh prod --apply
 ```
 
 **⑩-⑥ 이미지 6개 빌드·push**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway
@@ -252,6 +260,7 @@ for s in migration gateway-proxy admin-api admin-ui notification-worker \
 ```
 
 **⑩-⑦ 배포**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
@@ -261,6 +270,7 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh prod
 ```
 
 **⑩-⑧ 단가 · 시드 alias**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -270,6 +280,7 @@ bash 08-set-model-pricing.sh --apply
 그다음 admin UI › Models 에서 시드 alias INACTIVE(⑧ 과 같음).
 
 **⑩-⑨ 사후 점검**
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts

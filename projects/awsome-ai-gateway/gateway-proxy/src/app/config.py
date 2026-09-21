@@ -206,23 +206,33 @@ class Settings(BaseSettings):
     #: the full timeout against a dead gateway. The price is a recovery delayed by up to this.
     agentcore_handshake_negative_ttl: float = 30.0
     web_search_enabled: bool = False
-    web_search_max_iterations: int = 5
+    #: Defaults of the web-search settings below (2026-09-19): the values that were measured
+    #: and verified on US dev are the DEFAULTS, so an install that sets nothing gets the cheap
+    #: caps and the fixed behaviour instead of having to discover a script. Every one of them
+    #: is still an env var — a client or model update that breaks something is rolled back
+    #: by config, without a rebuild. Previous defaults: 5 rounds / 10 results / 60000 chars /
+    #: 4 per turn / text trace / cowork only / mixed-turn and soft-final off.
+    #:
+    #: Search ROUNDS per request. 2→3 measured +50% searches and +47% cost with the same
+    #: answer on narrow questions; only comparisons of 7+ items gained (2026-09-19).
+    web_search_max_iterations: int = 2
     web_search_total_deadline_sec: float = 90.0
     #: Results kept per search (after URL/mirror de-duplication). The model's ``max_results``
     #: is honoured only up to this value — despite the name it is a MAXIMUM (2026-09-17: the
     #: model asked for 15 and the 12k-char cap cut the result JSON mid-record). 0 = unlimited.
     #: The connector is asked for up to 2× this number so de-duplication has candidates.
-    web_search_max_results_default: int = 10
+    web_search_max_results_default: int = 5
     #: Cap on ONE search's result text (chars). 0 = unlimited (pre-cap behaviour).
     #: max_iterations bounds turns and total_deadline_sec bounds time; the only bound on the
     #: bill-deciding axis — bytes injected into the next turn's input — is this one. One
-    #: search once injected ~17.4K tokens on dev; 60000 chars ≈ 15K tokens.
-    web_search_max_result_chars: int = 60000
+    #: search once injected ~17.4K tokens on dev; 60000 chars ≈ 15K tokens, 12000 ≈ 3–4K.
+    web_search_max_result_chars: int = 12000
     #: Searches run per TURN. 0 = unlimited. The model may issue many parallel web_search
     #: calls in one turn and the loop supports that; 20 of them would put 20× results into
     #: the next turn's input — an uncapped single-request cost, or a context overflow that
-    #: 400s the continuation turn and loses everything billed so far.
-    web_search_max_searches_per_turn: int = 4
+    #: 400s the continuation turn and loses everything billed so far. Observed: the model
+    #: never asked for more than 3 in one turn.
+    web_search_max_searches_per_turn: int = 3
     #: Put a cache_control marker on the search results (tool_result) the loop injects so later
     #: turns of the same request read them at the cached price (10% of list). 2026-09-16: most
     #: of a multi-search request's input cost was results re-sent every turn (3 searches: 6R
@@ -238,20 +248,43 @@ class Settings(BaseSettings):
     #: `🔎 [gateway web_search]` is shared (the imitation filter and the tool description
     #: match on it).
     web_search_trace_lang: str = "en"
-    #: "text" (default, unchanged path) | "native". Native leaves the trace as Anthropic
-    #: native search blocks (server_tool_use + web_search_tool_result) instead of a text
-    #: line — a text line is denied under questioning ("I never searched") and imitated when
-    #: it shares a message with a client tool call. Replayed blocks are converted back on
-    #: the way in (2026-09-17).
-    web_search_trace_mode: str = "text"
+    #: "native" (default) | "text". Native leaves the trace as Anthropic native search blocks
+    #: (server_tool_use + web_search_tool_result) in addition to the text line — a text line
+    #: alone is denied under questioning ("I never searched") and imitated when it shares a
+    #: message with a client tool call. Replayed blocks are converted back on the way in
+    #: (2026-09-17). Only the client classes listed below get the blocks; every other client
+    #: keeps the text line, so "native" is safe as a default. "text" turns the blocks off.
+    web_search_trace_mode: str = "native"
     #: Client classes that get native traces (cowork | claude-code | codex, comma-separated;
     #: empty = all). Classification comes from ClientIdentificationMiddleware, not from a raw
-    #: header value.
-    web_search_trace_native_clients: str = "cowork"
+    #: header value. Only clients that REPLAY the blocks verbatim belong here — otherwise the
+    #: results never reach the model on the next request. Verified: cowork (2026-09-17),
+    #: claude-code CLI 2.1.276 (2026-09-18: byte-identical replay, also with --continue, and
+    #: its built-in WebSearch helper builds proper link results only from native blocks).
+    web_search_trace_native_clients: str = "cowork,claude-code"
     #: Per-result excerpt length (chars) carried in the native blocks — what the replayed
     #: tool_result shows the model on later turns. 0 (default) = the same length as the trimmed
     #: result the model saw (web_search_result_text_chars). Shorter cuts evidence.
     web_search_digest_chars: int = 0
+    #: Web search next to the CLIENT's own tools (2026-09-18). On by default since both were
+    #: confirmed with real Cowork and real Claude Code (2026-09-19); set to false to get the
+    #: previous behaviour back if a client or model update breaks them.
+    #: - mixed_turn_run: a turn that calls a client tool AND web_search — run the searches and
+    #:   send their native block pairs in the same message as the client's tool_use (native
+    #:   trace mode only). Off: the searches are not run and the model re-issues them later.
+    #: - final_turn_soft: when the search budget is used up, keep every tool callable; a
+    #:   further web_search gets an error instead of running (like a server tool's max_uses),
+    #:   and only then the hard final turn (tool_choice: none) follows. Off: hard final turn
+    #:   at once, which also blocks the client's tools ("search and save a file" saved nothing).
+    web_search_mixed_turn_run: bool = True
+    web_search_final_turn_soft: bool = True
+
+    #: Tool ``type`` prefixes (comma-separated) removed from /v1/messages requests before they
+    #: go upstream: Anthropic-only SERVER tools that Bedrock rejects with a 400 for the whole
+    #: request. 2026-09-18: Claude Code's advisor (``advisor_20260301``) made every request of
+    #: an affected user fail, "hi" included. A new Anthropic-only tool type is a config change
+    #: here, not a release. Blank = pass everything through. See services/upstream_compat.py.
+    bedrock_unsupported_tool_type_prefixes: str = "advisor_"
 
     # ── Reporting timezone (§59) ──
     # 비용/사용량 집계의 "월/일 경계" 기준 타임존. admin-api·cost-recorder-worker·
