@@ -10,6 +10,8 @@ import type { EffectivePolicy, EffectivePolicyCell } from '@/types/entities';
 
 interface Props {
   userId: string;
+  /** 부모(UserPanel)가 이미 fetch한 정책을 넘기면 재조회를 건너뛴다. */
+  policy?: EffectivePolicy | null;
 }
 
 /** 거부 축 id → i18n 키 매핑. */
@@ -19,19 +21,22 @@ const AXIS_KEYS = ['user_app', 'user_model', 'model_app'] as const;
  * 사용자에게 실제로 적용되는 정책의 합성 읽기 전용 뷰.
  * app×model 매트릭스(어느 축에서 막혔는지) + 예산·rate limit·downgrade·web search 요약.
  */
-export function EffectivePolicyCard({ userId }: Props) {
+export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
   const t = useTranslations('users.effectivePolicy');
-  const [policy, setPolicy] = useState<EffectivePolicy | null>(null);
+  const [fetched, setFetched] = useState<EffectivePolicy | null>(null);
   const [failed, setFailed] = useState(false);
 
+  const policy = policyProp ?? fetched;
+
   useEffect(() => {
-    setPolicy(null);
+    if (policyProp !== undefined) return; // 부모가 데이터를 소유
+    setFetched(null);
     setFailed(false);
     getEffectivePolicyAction(userId).then((r) => {
-      if (r.success) setPolicy(r.data);
+      if (r.success) setFetched(r.data);
       else setFailed(true);
     });
-  }, [userId]);
+  }, [userId, policyProp]);
 
   if (failed) {
     return <p className="text-xs text-destructive py-1">{t('loadFailed')}</p>;

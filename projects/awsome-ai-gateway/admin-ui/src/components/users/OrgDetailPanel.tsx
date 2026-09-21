@@ -7,12 +7,12 @@ import { useState, useEffect, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
-import type { OrgTreeNode, ModelListItem } from '@/types/entities';
+import type { OrgTreeNode, ModelListItem, EffectivePolicy } from '@/types/entities';
 import {
   forceReauthTeamAction,
   getUserAllowedClientsAction,
   setUserAllowedClientsAction,
-  getUserClientBudgetsAction,
+  getEffectivePolicyAction,
   getUserAllowedModelsAction,
   setUserAllowedModelsAction,
   setTeamLeaderAction,
@@ -167,11 +167,9 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   // 전체허용([])으로 저장돼 의도치 않게 허용되는 사고를 막기 위해 저장을 건너뛴다.
   const [clientsLoaded, setClientsLoaded] = useState(false);
 
-  // per-app 예산 — 읽기 전용 표시. 편집은 /budgets(Budget Management)가 유일한
-  // 정본이므로 여기서는 현재값만 보여주고 링크로 안내한다.
-  const emptyBudgets = (): Record<string, string> =>
-    Object.fromEntries(ALL_CLIENTS.map((c) => [c, '']));
-  const [budgets, setBudgets] = useState<Record<string, string>>(emptyBudgets);
+  // 유효 정책 합성 결과 — 앱별 예산/모델 정책 출처 표시와 EffectivePolicyCard 가
+  // 같은 데이터를 쓰므로 한 번만 가져와 공유한다.
+  const [policy, setPolicy] = useState<EffectivePolicy | null>(null);
 
   const toggleClient = (c: ClientId) => {
     setSelected((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
@@ -193,9 +191,9 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
     setLoadedModelAliases([]);
     setSelectedModelAliases([]);
     startLoadTransition(async () => {
-      const [r, b, m, cat] = await Promise.all([
+      const [r, p, m, cat] = await Promise.all([
         getUserAllowedClientsAction(node.id),
-        getUserClientBudgetsAction(node.id),
+        getEffectivePolicyAction(node.id),
         getUserAllowedModelsAction(node.id),
         listActiveModelsAction(),
       ]);
@@ -211,11 +209,10 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
           auto_dismiss_ms: 5000,
         });
       }
-      if (b.success) {
-        const byClient = new Map(b.data.apps.map((a) => [a.client, a.max_budget_usd]));
-        const next = emptyBudgets();
-        for (const c of ALL_CLIENTS) next[c] = byClient.get(c) ?? '';
-        setBudgets(next);
+      if (p.success) {
+        setPolicy(p.data);
+      } else {
+        setPolicy(null);
       }
       if (cat.success) {
         setModels(cat.data);
@@ -385,20 +382,33 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 {t('budgetInput.editInBudgets')}
               </Link>
             </div>
+            {/* 총예산(사용자/팀) + 앱별 예산을 함께 표시. 앱별은 접근 허용과 무관하게
+                전체 앱을 보여준다 — 허용되지 않은 앱에 설정된 예산(고아 예산)도
+                여기서 보여야 발견할 수 있다. */}
             <div className="space-y-1.5">
-              {CLIENT_OPTIONS.filter((o) => selected.includes(o.value)).map((o) => (
-                <div key={o.value} className="flex items-center justify-between text-sm">
-                  <span className="text-muted-foreground">{o.label}</span>
-                  <span className="font-medium">
-                    {(budgets[o.value] ?? '').trim() !== ''
-                      ? `$${Number(budgets[o.value]).toFixed(2)}`
-                      : t('budgetInput.placeholder')}
-                  </span>
-                </div>
-              ))}
-              {selected.length === 0 && (
-                <p className="text-xs text-muted-foreground">{t('budgetInput.noApps')}</p>
-              )}
+              {policy?.budgets
+                .filter((b) => (b.scope === 'USER' && b.client === null) || b.scope === 'TEAM')
+                .map((b, i) => (
+                  <div key={`total-${i}`} className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">
+                      {b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
+                    </span>
+                    <span className="font-medium">${Number(b.max_budget_usd).toFixed(2)}</span>
+                  </div>
+                ))}
+              {CLIENT_OPTIONS.map((o) => {
+                const cfg = policy?.budgets.find(
+                  (b) => b.scope === 'USER' && b.client === o.value,
+                );
+                return (
+                  <div key={o.value} className="flex items-center justify-between text-sm">
+                    <span className="text-muted-foreground">{o.label}</span>
+                    <span className="font-medium">
+                      {cfg ? `$${Number(cfg.max_budget_usd).toFixed(2)}` : t('budgetInput.placeholder')}
+                    </span>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -409,6 +419,26 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
             <p className="text-xs text-muted-foreground mb-3">
               {t('userModels.hint')}
             </p>
+            {/* 정책 출처 표시 — 개인 체크박스가 전부 비어 있으면 실제 적용값은
+                팀 정책이다. 출처를 명시하지 않으면 "모두 해제 = 모두 차단" 처럼
+                읽혀서(체크박스의 일반 직관) 실제 동작(팀 정책 상속)과 반대로
+                해석된다. */}
+            {policy && policy.allowed_models_source !== 'user' && (
+              <div className="mb-3 rounded-md bg-muted/40 px-2.5 py-1.5">
+                <p className="text-xs text-muted-foreground mb-1">
+                  {policy.allowed_models_source === 'team'
+                    ? t('userModelsInheritTeam')
+                    : t('userModelsInheritNone')}
+                </p>
+                {(policy.allowed_models?.length ?? 0) > 0 && (
+                  <div className="flex flex-wrap gap-1">
+                    {policy.allowed_models!.map((a) => (
+                      <Badge key={a} tone="sky">{a}</Badge>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
             {!modelsLoaded ? (
               <div className="text-xs text-destructive py-1">
                 {t('userModels.loadFailed')}
@@ -443,7 +473,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
             <p className="text-xs text-muted-foreground mb-3">
               {t('effectivePolicy.hint')}
             </p>
-            <EffectivePolicyCard userId={node.id} />
+            <EffectivePolicyCard userId={node.id} policy={policy} />
           </div>
         )}
 

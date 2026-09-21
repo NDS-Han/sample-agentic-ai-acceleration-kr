@@ -523,7 +523,9 @@
       "invalid": "Invalid budget value ({client}). Enter a number of 0 or greater.",
       "title": "Per-app budgets (USD/month)",
       "editInBudgets": "Edit in Budget Management →",
-      "noApps": "No allowed apps"
+      "noApps": "No allowed apps",
+      "teamTotal": "Team total",
+      "userTotal": "User total"
     },
     "userModels": {
       "title": "Per-user allowed models (overrides team policy)",
@@ -600,7 +602,9 @@
       "rateLimits": "Rate limits",
       "downgrade": "Auto downgrade",
       "downgradeRule": "at {pct}% spend, {from} → {to}"
-    }
+    },
+    "userModelsInheritTeam": "No personal override — badges below are inherited from the team policy. Checking a box switches to a per-user policy.",
+    "userModelsInheritNone": "No personal override — all models allowed (no team policy either)."
   },
   "analytics": {
     "title": "Analytics",
@@ -934,6 +938,11 @@
     "confirmLastMessage": "This is the last app allowed for {alias}. Removing it leaves no allowed app, so every app is refused (the model stays in the list). Continue?",
     "confirmLastTitle": "Remove the last allowed app",
     "noneBadge": "Deny all",
-    "noneHint": "No app allowed (deny all) — no app can use this model."
+    "noneHint": "No app allowed (deny all) — no app can use this model.",
+    "webSearchTitle": "Web search",
+    "webSearchHint": "Injects the server-side web_search tool into requests from this app.",
+    "webSearchOn": "On",
+    "webSearchOff": "Off",
+    "webSearchSaved": "Web search setting saved."
   }
 }

@@ -523,7 +523,9 @@
       "invalid": "유효하지 않은 예산 값입니다 ({client}). 0 이상 숫자를 입력하세요.",
       "title": "앱별 예산 (USD/월)",
       "editInBudgets": "예산 관리에서 설정 →",
-      "noApps": "허용된 앱이 없습니다"
+      "noApps": "허용된 앱이 없습니다",
+      "teamTotal": "팀 총예산",
+      "userTotal": "사용자 총예산"
     },
     "userModels": {
       "title": "사용자별 허용 모델 (팀 정책 override)",
@@ -600,7 +602,9 @@
       "rateLimits": "Rate Limit",
       "downgrade": "자동 다운그레이드",
       "downgradeRule": "{pct}% 소진 시 {from} → {to} 전환"
-    }
+    },
+    "userModelsInheritTeam": "개인 설정 없음 — 아래는 팀 정책에서 상속된 모델입니다. 체크하면 이 사용자만의 정책으로 전환됩니다.",
+    "userModelsInheritNone": "개인 설정 없음 — 모든 모델이 허용됩니다(팀 정책도 없음)."
   },
   "analytics": {
     "title": "분석",
@@ -934,6 +938,11 @@
     "confirmLastMessage": "이 앱은 {alias} 의 마지막 허용 앱입니다. 해제하면 허용 앱이 하나도 남지 않아 모든 앱에서 거부됩니다(모델은 목록에 남습니다). 계속할까요?",
     "confirmLastTitle": "마지막 허용 앱 해제",
     "noneBadge": "전면 거부",
-    "noneHint": "허용 앱 없음(전면 거부) — 어떤 앱도 이 모델을 쓸 수 없습니다."
+    "noneHint": "허용 앱 없음(전면 거부) — 어떤 앱도 이 모델을 쓸 수 없습니다.",
+    "webSearchTitle": "웹서치",
+    "webSearchHint": "이 앱의 요청에 서버사이드 web_search 도구를 주입합니다.",
+    "webSearchOn": "켜짐",
+    "webSearchOff": "꺼짐",
+    "webSearchSaved": "웹서치 설정이 저장되었습니다."
   }
 }
