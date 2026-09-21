@@ -285,9 +285,13 @@ gatewayProxy:
     AGENTCORE_REGION: "us-east-1"
     AGENTCORE_TARGET_ID: "web-search-tool"
     WEB_SEARCH_ENABLED: "true"   # global kill-switch; per-client gating via routing_profiles.web_search_enabled
-    # web search 비용 상한(2026-09-16 실측: 검색 4회 든 호출 1건 = 입력 132k 토큰·$1.56 — 검색 결과 본문이
-    #   반복마다 다시 입력으로 들어간다). 결과 1회 60,000자(≈15k 토큰)→12,000자, 결과 수 10→5, 턴당 검색 4→2,
-    #   반복 5→3. 게이트웨이 config.py 의 기본값을 여기서 덮어쓴다.
+    # 1.0.80-wsdefaults 이후 upstream 기본값에 맞춘다 — native 모드는 검색 흔적을 Anthropic
+    #   네이티브 블록(server_tool_use + web_search_tool_result)으로 보여준다. 대상 클라이언트는
+    #   WEB_SEARCH_TRACE_NATIVE_CLIENTS 기본값 "cowork,claude-code" (미설정 = 기본값 적용).
+    WEB_SEARCH_TRACE_MODE: "native"
+    # web search 비용 상한 — upstream 기본값과 동일한 값을 명시해 고정한다(기본값이
+    #   다시 바뀌어도 동작 유지). 미설정인 WEB_SEARCH_MIXED_TURN_RUN / WEB_SEARCH_FINAL_TURN_SOFT
+    #   도 새 기본값 true 가 적용된다(검색+클라이언트 도구 공존, soft 최종 턴).
     WEB_SEARCH_MAX_RESULT_CHARS: "12000"
     WEB_SEARCH_MAX_RESULTS_DEFAULT: "5"
     WEB_SEARCH_MAX_SEARCHES_PER_TURN: "3"
@@ -343,7 +347,9 @@ adminApi:
     #   비어 있으면 감사 엔드포인트는 404 가 아니라 **503**(미설정)을 준다 — 지금 dev 의 상태다
     #   (terraform 의 enable_bedrock_invocation_logging 이 false 라 log group 이 없다).
     #   285 통과. ⚠️ scheduler.image.tag 를 같은 값으로 유지(아래 주석 참조).
-    tag: "1.0.76-allocrole"
+    # 1.0.77-effpol: GET /users/{id}/effective-policy 신설 — user→app · user/team→model
+    #   · model→app 3축 합성 매트릭스 + 예산/rate-limit/downgrade/web-search 요약.
+    tag: "1.0.77-effpol"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw admin_api_role_arn
@@ -432,7 +438,11 @@ adminUi:
     # 1.0.100-mwredirect: 미들웨어 로그인 리다이렉트가 상대 Location 이라 Next 14.2 어댑터에서
     #   Invalid URL → 미인증·만료 요청이 오는 모든 페이지 500 (upstream b51fab0 를 처음 빌드한 결과).
     #   요청 Host + x-forwarded-proto 로 절대 URL 을 만들도록 수정.
-    tag: "1.0.109-allocrole"
+    # 1.0.108-deptname: 비용 추이 팀 라벨에 부서 병기("NDS-Developers"), 칩 truncate+title.
+    # 1.0.109-allocrole: 배정 행 Type 을 실제 역할 뱃지로(Admin/Team Leader/Developer).
+    # 1.0.110-effpol: 정책 화면 재편 — 팀 모델 권한→/users 팀 상세, 웹서치 토글→/apps,
+    #   사용자 상세 앱별 예산 읽기전용+링크, Effective Policy 카드, 다운그레이드 팀행 인라인.
+    tag: "1.0.110-effpol"
   resources:
     requests:
       cpu: "500m"
@@ -449,7 +459,7 @@ scheduler:
     # roi_aggregator 가 KST 비닝 수정(A-2/E-1)의 대상이라 어긋나면 스케줄러만 옛 로직으로 집계.
     # ⚠️ 이 값이 특히 중요하다: 1.0.67-roifix 가 고친 NameError 는 **스케줄러에서만** 터진다
     # (API 경로는 그 함수를 안 탄다). adminApi 만 올리고 여기를 두면 ROI 집계는 계속 실패한다.
-    tag: "1.0.76-allocrole"
+    tag: "1.0.77-effpol"
   resources:
     requests:
       cpu: "250m"  # Fargate 하한
