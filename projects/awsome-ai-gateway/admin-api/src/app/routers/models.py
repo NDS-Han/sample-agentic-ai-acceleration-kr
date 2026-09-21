@@ -18,6 +18,7 @@ from app.schemas.models import (
     PriceSyncPreviewResponse,
     PricingRequest,
     StatusPatchRequest,
+    WireNameListResponse,
 )
 from app.services.model_service import ModelService
 
@@ -67,6 +68,18 @@ async def list_models(
     svc: ModelService = request.app.state.model_service
     items = await svc.list_models(session)
     return ModelListResponse(items=items)
+
+
+@router.get("/wire-names", response_model=WireNameListResponse)
+async def list_wire_names(
+    request: Request,
+    days: int = 30,
+    _actor: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """최근 N일 usage_logs 에 관측된 모델 이름 — alias 생성 시 확인용."""
+    svc: ModelService = request.app.state.model_service
+    return await svc.list_wire_names(session, days=days)
 
 
 @router.post("", response_model=ModelResponse, status_code=201)

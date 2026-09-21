@@ -7,7 +7,7 @@ import { useState, useTransition, useEffect } from 'react';
 import { useTranslations } from 'next-intl';
 import { X } from 'lucide-react';
 import type { ModelListItem } from '@/types/entities';
-import { createModelAction, updateModelAction } from '@/lib/actions/models';
+import { createModelAction, updateModelAction, listWireNamesAction, type WireNameItem } from '@/lib/actions/models';
 import { perMtoPer1k, per1kToPerM } from '@/lib/utils/pricing';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
@@ -74,12 +74,22 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
   const [form, setForm] = useState<FormState>(() => getInitialState(editModel));
 
   const isEditMode = !!editModel;
+  const [wireNames, setWireNames] = useState<WireNameItem[] | null>(null);
+  const [showWireNames, setShowWireNames] = useState(false);
 
   useEffect(() => {
     if (editModel) {
       setForm(getInitialState(editModel));
     }
   }, [editModel]);
+
+  // alias 생성 시 "클라이언트가 실제로 보내는 이름" 힌트 — usage_logs 에 관측된
+  // 와이어 이름 목록. 클릭하면 alias 입력칸을 채운다.
+  useEffect(() => {
+    if (isOpen && !isEditMode && wireNames === null) {
+      listWireNamesAction(30).then((r) => setWireNames(r.success ? r.data : []));
+    }
+  }, [isOpen, isEditMode, wireNames]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -189,6 +199,54 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               </p>
             )}
             {fieldErrors.alias && <FormError error={fieldErrors.alias} />}
+
+            {/* 실제 관측된 와이어 이름 — "어떤 이름으로 등록해야 하나"에 답하는 목록 */}
+            {!isEditMode && (
+              <div className="pt-1">
+                <button
+                  type="button"
+                  onClick={() => setShowWireNames((v) => !v)}
+                  aria-expanded={showWireNames}
+                  className="text-xs text-primary hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                >
+                  {t('wireNamesToggle')}
+                </button>
+                {showWireNames && (
+                  <div className="mt-1.5 rounded-md border border-border max-h-40 overflow-y-auto divide-y divide-border">
+                    {wireNames === null ? (
+                      <p className="px-3 py-2 text-xs text-muted-foreground">{tCommon('loading')}</p>
+                    ) : wireNames.length === 0 ? (
+                      <p className="px-3 py-2 text-xs text-muted-foreground">{t('wireNamesEmpty')}</p>
+                    ) : (
+                      wireNames.map((w) => (
+                        <button
+                          key={w.name}
+                          type="button"
+                          onClick={() => setForm((prev) => ({ ...prev, alias: w.name }))}
+                          className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left hover:bg-accent/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-ring"
+                        >
+                          <span className="font-mono mono-id text-xs truncate">{w.name}</span>
+                          <span className="flex items-center gap-2 shrink-0">
+                            <span className="text-[10px] text-muted-foreground tabular-nums">
+                              {t('wireNameCount', { count: w.request_count })}
+                            </span>
+                            <span
+                              className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                w.registered
+                                  ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'
+                                  : 'bg-amber-500/15 text-amber-700 dark:text-amber-300'
+                              }`}
+                            >
+                              {w.registered ? t('wireNameRegistered') : t('wireNameUnregistered')}
+                            </span>
+                          </span>
+                        </button>
+                      ))
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Provider — ⚠️ 편집 모드에서는 alias 와 마찬가지로 읽기 전용이다.

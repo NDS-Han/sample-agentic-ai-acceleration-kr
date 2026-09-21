@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import structlog
-from sqlalchemy import delete as sa_delete, or_, select
+from sqlalchemy import delete as sa_delete, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -33,6 +33,8 @@ from app.schemas.models import (
     ModelResponse,
     ModelUpdateRequest,
     PricingRequest,
+    WireNameItem,
+    WireNameListResponse,
     StatusPatchRequest,
 )
 
@@ -51,6 +53,48 @@ class ModelService:
             pricing = await repo.get_current_pricing(m.alias)
             result.append(self._to_response(m, pricing))
         return result
+
+    async def list_wire_names(
+        self, session: AsyncSession, *, days: int = 30
+    ) -> WireNameListResponse:
+        """최근 N일간 클라이언트가 실제로 보낸 모델 이름(와이어 키) 목록.
+
+        alias 생성 시 "어떤 이름으로 등록해야 하나"에 답하는 조회용.
+        주의: usage_logs 는 resolve 성공한 요청만 기록하므로, 미등록 이름으로
+        실패한 요청(404)은 여기에 나오지 않는다 — 그쪽은 게이트웨이 로그 확인.
+        """
+        from app.models.usage import UsageLog
+
+        days = max(1, min(days, 365))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+        rows = (
+            await session.execute(
+                select(
+                    UsageLog.model_alias,
+                    func.count(),
+                    func.max(UsageLog.requested_at),
+                )
+                .where(UsageLog.requested_at >= cutoff)
+                .group_by(UsageLog.model_alias)
+                .order_by(func.count().desc())
+                .limit(100)
+            )
+        ).all()
+        registered = set(
+            (await session.execute(select(ModelAlias.alias))).scalars().all()
+        )
+        return WireNameListResponse(
+            days=days,
+            items=[
+                WireNameItem(
+                    name=name,
+                    request_count=cnt,
+                    last_seen_at=last,
+                    registered=name in registered,
+                )
+                for name, cnt, last in rows
+            ],
+        )
 
     async def create_model(
         self,

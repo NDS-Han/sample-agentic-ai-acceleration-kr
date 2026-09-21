@@ -450,7 +450,12 @@
     "cardCacheWrite1h": "Cache write (1h)",
     "modelInfoTitle": "MODEL INFO",
     "maxInputLabel": "Max Input",
-    "maxOutputLabel": "Max Output"
+    "maxOutputLabel": "Max Output",
+    "wireNamesToggle": "Show model names actually requested (last 30 days)",
+    "wireNamesEmpty": "No requests observed",
+    "wireNameCount": "{count} reqs",
+    "wireNameRegistered": "registered",
+    "wireNameUnregistered": "unregistered"
   },
   "rateLimits": {
     "title": "Rate Limits",

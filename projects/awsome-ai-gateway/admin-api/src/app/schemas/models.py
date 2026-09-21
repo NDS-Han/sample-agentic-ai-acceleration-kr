@@ -213,6 +213,24 @@ class PriceSyncPreviewResponse(BaseModel):
     changed_count: int
 
 
+class WireNameItem(BaseModel):
+    """usage_logs 에 실제로 관측된 모델 이름 — alias 후보 확인용.
+
+    ``registered`` = model_aliases 에 같은 이름이 있나. 미등록 이름은 곧
+    필요한 alias 후보(클라이언트가 보내는데 아직 매칭 안 되는 이름).
+    """
+
+    name: str
+    request_count: int
+    last_seen_at: datetime | None = None
+    registered: bool
+
+
+class WireNameListResponse(BaseModel):
+    days: int
+    items: list[WireNameItem]
+
+
 class PriceSyncApplyRequest(BaseModel):
     """승인 후 적용할 alias 목록(명시 선택 — 자동 전체적용 금지)."""
 

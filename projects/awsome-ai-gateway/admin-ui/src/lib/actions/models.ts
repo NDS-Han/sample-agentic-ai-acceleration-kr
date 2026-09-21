@@ -201,6 +201,25 @@ interface AdminModelItem {
   max_output_tokens: number | null;
 }
 
+/** usage_logs 에 관측된 와이어 이름 — alias 생성 시 "클라이언트가 뭘내나" 확인용. */
+export interface WireNameItem {
+  name: string;
+  request_count: number;
+  last_seen_at: string | null;
+  registered: boolean;
+}
+
+export async function listWireNamesAction(days = 30): Promise<ActionResult<WireNameItem[]>> {
+  try {
+    const res = await withRetry(() =>
+      adminAPI.get<{ items: WireNameItem[] }>('/admin/models/wire-names', { days })
+    );
+    return { success: true, data: res.items ?? [] };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 export async function listActiveModelsAction(): Promise<ActionResult<ModelListItem[]>> {
   try {
     const res = await withRetry(() =>

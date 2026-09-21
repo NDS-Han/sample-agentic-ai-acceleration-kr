@@ -450,7 +450,12 @@
     "cardCacheWrite1h": "캐시 쓰기 (1시간)",
     "modelInfoTitle": "MODEL INFO",
     "maxInputLabel": "Max Input",
-    "maxOutputLabel": "Max Output"
+    "maxOutputLabel": "Max Output",
+    "wireNamesToggle": "최근 30일간 실제로 요청된 모델 이름 보기",
+    "wireNamesEmpty": "관측된 요청이 없습니다",
+    "wireNameCount": "{count}건",
+    "wireNameRegistered": "등록됨",
+    "wireNameUnregistered": "미등록"
   },
   "rateLimits": {
     "title": "Rate Limits",
