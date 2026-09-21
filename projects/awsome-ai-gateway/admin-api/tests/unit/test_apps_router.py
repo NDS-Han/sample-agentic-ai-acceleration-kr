@@ -77,9 +77,10 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
       1. text SQL: allowed_models  → fetchall() returns list of (alias,) tuples
       2. text SQL: all_models      → fetchall() returns list of (alias, allowed_clients) tuples
       3. text SQL: routing_profile → fetchone() returns a row tuple
-      4. ORM select: user_allowed_clients JOIN users → all() returns (uuid, email) tuples
+      4. ORM select: allowed users → all() returns (uuid, email, explicit) tuples
     """
     user_uuid = uuid.UUID("00000000-0000-0000-0000-000000000099")
+    open_uuid = uuid.UUID("00000000-0000-0000-0000-000000000088")
     call_count = 0
 
     async def _execute(stmt, *args, **kwargs):
@@ -96,8 +97,12 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
             # routing_profiles text query (default_model, web_search_enabled)
             result.fetchone.return_value = ("claude-sonnet", True)
         else:
-            # ORM JOIN select for user_allowed_clients: all() returns (uuid, email) rows
-            result.all.return_value = [(user_uuid, "user@example.com")]
+            # ORM select for allowed users: all() returns (uuid, email, explicit) rows.
+            # explicit=False = 명시 행이 없는 사용자 — fail-open(전체 앱 허용)으로 포함.
+            result.all.return_value = [
+                (user_uuid, "user@example.com", True),
+                (open_uuid, "open@example.com", False),
+            ]
         return result
 
     mock_session.execute = AsyncMock(side_effect=_execute)
@@ -108,9 +113,12 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
     assert "claude-sonnet" in resp.allowed_models
     assert "claude-haiku" in resp.allowed_models
     assert resp.default_model == "claude-sonnet"
-    assert len(resp.allowed_users) == 1
+    assert len(resp.allowed_users) == 2
     assert resp.allowed_users[0].user_id == str(user_uuid)
     assert resp.allowed_users[0].email == "user@example.com"
+    assert resp.allowed_users[0].explicit is True
+    assert resp.allowed_users[1].user_id == str(open_uuid)
+    assert resp.allowed_users[1].explicit is False
     assert resp.web_search_enabled is True
     # all_models assertions
     assert len(resp.all_models) == 2

@@ -14,6 +14,8 @@ import type { ActionResult } from './types';
 
 export interface AppUserRef {
   user_id: string;
+  /** false = 명시 행이 없는 사용자 — 앱 제한 없음(fail-open)으로 허용에 포함. */
+  explicit: boolean;
   email?: string | null;
 }
 

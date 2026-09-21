@@ -981,6 +981,9 @@
     "webSearchHint": "이 앱의 요청에 서버사이드 web_search 도구를 주입합니다.",
     "webSearchOn": "켜짐",
     "webSearchOff": "꺼짐",
-    "webSearchSaved": "웹서치 설정이 저장되었습니다."
+    "webSearchSaved": "웹서치 설정이 저장되었습니다.",
+    "colAccess": "구분",
+    "accessExplicit": "명시 허용",
+    "accessUnrestricted": "제한 없음"
   }
 }

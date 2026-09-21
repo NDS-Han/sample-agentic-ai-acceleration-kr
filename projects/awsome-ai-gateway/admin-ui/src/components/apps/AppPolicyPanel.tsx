@@ -316,16 +316,27 @@ export function AppPolicyPanel() {
             <div className="glass rounded-apple overflow-hidden">
               <Table>
                 <THead>
-                  <Tr><Th>{t('colUser')}</Th><Th>ID</Th></Tr>
+                  <Tr><Th>{t('colUser')}</Th><Th>{t('colAccess')}</Th><Th>ID</Th></Tr>
                 </THead>
                 <TBody>
                   {policy.allowed_users.length === 0 ? (
-                    <TEmpty colSpan={2}>{t('noAllowedUsers')}</TEmpty>
+                    <TEmpty colSpan={3}>{t('noAllowedUsers')}</TEmpty>
                   ) : (
                     policy.allowed_users.map((u) => (
                       <Tr key={u.user_id}>
                         <Td emphasis>
                           {u.email ?? <span className="text-muted-foreground">{t('noEmail')}</span>}
+                        </Td>
+                        <Td>
+                          <span
+                            className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${
+                              u.explicit
+                                ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'
+                                : 'bg-muted text-muted-foreground'
+                            }`}
+                          >
+                            {u.explicit ? t('accessExplicit') : t('accessUnrestricted')}
+                          </span>
                         </Td>
                         <Td className="font-mono mono-id text-xs text-muted-foreground">{u.user_id}</Td>
                       </Tr>

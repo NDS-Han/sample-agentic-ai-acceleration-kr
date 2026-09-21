@@ -981,6 +981,9 @@
     "webSearchHint": "Injects the server-side web_search tool into requests from this app.",
     "webSearchOn": "On",
     "webSearchOff": "Off",
-    "webSearchSaved": "Web search setting saved."
+    "webSearchSaved": "Web search setting saved.",
+    "colAccess": "Access",
+    "accessExplicit": "explicit",
+    "accessUnrestricted": "unrestricted"
   }
 }
