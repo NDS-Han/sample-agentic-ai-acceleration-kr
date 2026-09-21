@@ -32,6 +32,7 @@ export interface AppPolicy {
   default_model: string | null;
   allowed_users: AppUserRef[];
   all_models: AppModelRef[];
+  web_search_enabled: boolean;
 }
 
 // ─── getAppPolicyAction ───────────────────────────────────────────────────────

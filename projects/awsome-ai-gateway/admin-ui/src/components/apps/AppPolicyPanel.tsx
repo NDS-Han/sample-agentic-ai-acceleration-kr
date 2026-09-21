@@ -4,6 +4,7 @@
 import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } from '@/lib/actions/apps';
+import { setClientWebSearchAction } from '@/lib/actions/routing';
 import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
@@ -44,6 +45,7 @@ export function AppPolicyPanel() {
   const [pendingToggle, setPendingToggle] = useState<
     { alias: string; allowed: boolean; kind: 'all' | 'last' } | null
   >(null);
+  const [isWsPending, startWsTransition] = useTransition();
 
   const handleClientChange = (client: string) => {
     setSelectedClient(client);
@@ -59,6 +61,19 @@ export function AppPolicyPanel() {
         setDefaultModelInput(result.data.default_model ?? '');
       } else {
         setLoadError(result.error);
+      }
+    });
+  };
+
+  const handleToggleWebSearch = (enabled: boolean) => {
+    if (!policy) return;
+    startWsTransition(async () => {
+      const result = await setClientWebSearchAction(selectedClient, enabled);
+      if (result.success) {
+        setPolicy((prev) => (prev ? { ...prev, web_search_enabled: enabled } : prev));
+        toast({ type: 'success', message: t('webSearchSaved'), auto_dismiss_ms: 3000 });
+      } else {
+        toast({ type: 'error', message: result.error, auto_dismiss_ms: 4000 });
       }
     });
   };
@@ -128,22 +143,29 @@ export function AppPolicyPanel() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-end gap-4 glass rounded-apple p-4">
-        <div className="flex flex-col gap-1.5">
-          <label htmlFor="client-select" className="text-xs font-medium text-muted-foreground">
-            {t('selectApp')}
-          </label>
-          <select
-            id="client-select"
-            value={selectedClient}
-            onChange={(e) => handleClientChange(e.target.value)}
-            className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-          >
-            <option value="">{t('selectPlaceholder')}</option>
-            {CLIENTS.map(({ value, label }) => (
-              <option key={value} value={value}>{label}</option>
-            ))}
-          </select>
+      <div className="glass rounded-apple p-4">
+        <p className="text-xs font-medium text-muted-foreground mb-2">{t('selectApp')}</p>
+        <div
+          role="group"
+          aria-label={t('selectApp')}
+          className="glass inline-flex items-center gap-0.5 rounded-apple-md p-1"
+        >
+          {CLIENTS.map(({ value, label }) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => handleClientChange(value)}
+              aria-pressed={selectedClient === value}
+              className={[
+                'pressable rounded-apple-sm px-3 py-1.5 text-sm font-medium transition-[background,color,box-shadow] duration-150',
+                selectedClient === value
+                  ? 'bg-primary/10 text-primary font-semibold shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)]'
+                  : 'text-muted-foreground interactive',
+              ].join(' ')}
+            >
+              {label}
+            </button>
+          ))}
         </div>
       </div>
 
@@ -200,6 +222,29 @@ export function AppPolicyPanel() {
               </SpinnerButton>
             </div>
             {saveError && <FormError error={saveError} />}
+          </div>
+
+          <div className="glass rounded-apple p-4 flex items-center justify-between">
+            <div>
+              <h2 className="text-sm font-semibold">{t('webSearchTitle')}</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('webSearchHint')}</p>
+            </div>
+            <label className="flex items-center gap-2 cursor-pointer">
+              <div className="relative inline-flex items-center">
+                <input
+                  type="checkbox"
+                  checked={policy.web_search_enabled}
+                  onChange={(e) => handleToggleWebSearch(e.target.checked)}
+                  disabled={isWsPending}
+                  className="sr-only peer"
+                  aria-label={t('webSearchTitle')}
+                />
+                <div className="w-9 h-5 bg-muted-foreground/30 peer-checked:bg-primary rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-background after:rounded-full after:transition-transform peer-checked:after:translate-x-4" />
+              </div>
+              <span className="text-sm">
+                {policy.web_search_enabled ? t('webSearchOn') : t('webSearchOff')}
+              </span>
+            </label>
           </div>
 
           <div className="space-y-3">

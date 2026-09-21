@@ -47,7 +47,7 @@ export async function setClientWebSearchAction(
         { enabled },
       ),
     );
-    revalidatePath('/models');
+    revalidatePath('/apps');
     return { success: true, data: res };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
