@@ -4,7 +4,7 @@
 
 > **한 줄**: Anthropic 신형 모델은 Bedrock **Model access 신청이 아니라 AWS Marketplace 구독**이다.
 > 모델을 게이트웨이에 등록(§8-M)해도 **계정에 구독이 없으면** 호출이 AccessDenied로 떨어진다.
-> 2026-09-21 dev(610156625835)에서 Claude Opus 5로 실측·재현한 절차다.
+> 2026-09-21 dev 배포 계정에서 Claude Opus 5로 실측·재현한 절차다.
 
 ---
 
@@ -49,7 +49,7 @@ aws bedrock-runtime invoke-model --region ap-south-1 \
 
 **Bedrock을 실제로 호출하는 계정** — `model.routing_profiles.account_role_arn`이 가리키는 곳:
 
-- 이 배포(단일 계정): `account_role_arn = NULL` → **게이트웨이 계정 자체**(610156625835)
+- 이 배포(단일 계정): `account_role_arn = NULL` → **배포를 진행한 계정 자체**
 - 멀티계정(§8-X): **cross-account 대상 계정**에서 구독한다
 
 ```sql
