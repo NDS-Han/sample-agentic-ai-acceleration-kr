@@ -518,7 +518,10 @@
       "cowork": "Cowork budget (USD/month)",
       "generic": "{app} budget (USD/month)",
       "placeholder": "Not set",
-      "invalid": "Invalid budget value ({client}). Enter a number of 0 or greater."
+      "invalid": "Invalid budget value ({client}). Enter a number of 0 or greater.",
+      "title": "Per-app budgets (USD/month)",
+      "editInBudgets": "Edit in Budget Management →",
+      "noApps": "No allowed apps"
     },
     "userModels": {
       "title": "Per-user allowed models (overrides team policy)",

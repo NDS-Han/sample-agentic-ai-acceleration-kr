@@ -518,7 +518,10 @@
       "cowork": "Cowork 예산 (USD/월)",
       "generic": "{app} 예산 (USD/월)",
       "placeholder": "미설정",
-      "invalid": "유효하지 않은 예산 값입니다 ({client}). 0 이상 숫자를 입력하세요."
+      "invalid": "유효하지 않은 예산 값입니다 ({client}). 0 이상 숫자를 입력하세요.",
+      "title": "앱별 예산 (USD/월)",
+      "editInBudgets": "예산 관리에서 설정 →",
+      "noApps": "허용된 앱이 없습니다"
     },
     "userModels": {
       "title": "사용자별 허용 모델 (팀 정책 override)",

@@ -4,6 +4,7 @@
 
 
 import { useState, useEffect, useTransition } from 'react';
+import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import type { OrgTreeNode, ModelListItem } from '@/types/entities';
@@ -12,8 +13,6 @@ import {
   getUserAllowedClientsAction,
   setUserAllowedClientsAction,
   getUserClientBudgetsAction,
-  setUserClientBudgetAction,
-  clearUserClientBudgetAction,
   getUserAllowedModelsAction,
   setUserAllowedModelsAction,
   setTeamLeaderAction,
@@ -167,12 +166,11 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   // 전체허용([])으로 저장돼 의도치 않게 허용되는 사고를 막기 위해 저장을 건너뛴다.
   const [clientsLoaded, setClientsLoaded] = useState(false);
 
-  // per-app 예산 입력값 — client→문자열 map (빈 문자열 = 미설정). loaded* 는 prefill
-  // 시점 값 기억 — 입력을 비우고 적용하면 clear 호출로 이어진다. 새 앱은 키만 추가됨.
+  // per-app 예산 — 읽기 전용 표시. 편집은 /budgets(Budget Management)가 유일한
+  // 정본이므로 여기서는 현재값만 보여주고 링크로 안내한다.
   const emptyBudgets = (): Record<string, string> =>
     Object.fromEntries(ALL_CLIENTS.map((c) => [c, '']));
   const [budgets, setBudgets] = useState<Record<string, string>>(emptyBudgets);
-  const [loadedBudgets, setLoadedBudgets] = useState<Record<string, string>>(emptyBudgets);
 
   const toggleClient = (c: ClientId) => {
     setSelected((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
@@ -217,7 +215,6 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         const next = emptyBudgets();
         for (const c of ALL_CLIENTS) next[c] = byClient.get(c) ?? '';
         setBudgets(next);
-        setLoadedBudgets(next);
       }
       if (cat.success) {
         setModels(cat.data);
@@ -260,7 +257,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         });
         return;
       }
-      // 1) 접근 권한 먼저 저장 — 실패 시 (거부됐을 수도 있는) 접근 상태에 예산을 쓰지 않도록 중단.
+      // 1) 접근 권한 먼저 저장.
       const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
       if (!r.success) {
         toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
@@ -268,81 +265,15 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       }
       const savedSelected = clientsToSelected(r.data.clients);
 
-      // 2) 새 접근 권한에 포함된 앱만 예산 반영. selected 에 없는 앱 예산은 손대지 않는다 —
-      //    사용자가 쓸 수 없는 client 는 게이트웨이가 강제하지 않으므로 고아 예산은 무해(inert).
-      const targets = ALL_CLIENTS.filter((c) => savedSelected.includes(c)).map((c) => ({
-        client: c,
-        value: budgets[c] ?? '',
-        loaded: loadedBudgets[c] ?? '',
-      }));
-
-      // 3) >= 0 검증.
-      for (const tgt of targets) {
-        const trimmed = tgt.value.trim();
-        if (trimmed === '') continue;
-        const n = Number(trimmed);
-        if (!Number.isFinite(n) || n < 0) {
-          toast({ type: 'error', message: t('budgetInput.invalid', { client: tgt.client }), auto_dismiss_ms: 4000 });
-          return;
-        }
-      }
-
-      // 4) 각 앱: 값이 있으면 set, 비었고 기존 예산이 있었으면 clear.
-      let firstError: string | null = null;
-      for (const tgt of targets) {
-        const trimmed = tgt.value.trim();
-        if (trimmed !== '') {
-          const res = await setUserClientBudgetAction(node.id, tgt.client, { max_budget_usd: trimmed });
-          if (!res.success && firstError === null) firstError = res.error;
-        } else if (tgt.loaded.trim() !== '') {
-          const res = await clearUserClientBudgetAction(node.id, tgt.client);
-          if (!res.success && firstError === null) firstError = res.error;
-        }
-      }
-
-      // 예산을 서버에서 재동기화해 loaded/입력 상태를 갱신하는 헬퍼.
-      const resyncBudgets = async () => {
-        const b = await getUserClientBudgetsAction(node.id);
-        if (b.success) {
-          const byClient = new Map(b.data.apps.map((a) => [a.client, a.max_budget_usd]));
-          const next = emptyBudgets();
-          for (const c of ALL_CLIENTS) next[c] = byClient.get(c) ?? '';
-          setBudgets(next);
-          setLoadedBudgets(next);
-        }
-      };
-
-      // 낙관적 예산 상태 — 활성 client 는 입력값(trim), 비활성은 loaded 유지.
-      const optimisticBudgets = (): Record<string, string> => {
-        const next = emptyBudgets();
-        for (const c of ALL_CLIENTS) {
-          next[c] = savedSelected.includes(c) ? (budgets[c] ?? '').trim() : (loadedBudgets[c] ?? '');
-        }
-        return next;
-      };
-
-      // 5) 결과 처리.
-      if (firstError) {
-        // 일부 예산 쓰기 실패 — 낙관적 상태를 적용하지 않고 서버에서 재동기화한다.
-        setLoadedSelected(savedSelected);
-        setSelected(savedSelected);
-        await resyncBudgets();
-        toast({ type: 'error', message: firstError, auto_dismiss_ms: 4000 });
-        return;
-      }
-
-      // 6) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
+      // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
       // ★ 모델 정책이 정상 로드되지 않았으면(modelsLoaded=false) stale 빈 목록을
       //   저장해 기존 override 를 의도치 않게 해제하는 사고를 막기 위해 저장을 건너뛴다.
       if (modelsLoaded) {
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
         if (!mr.success) {
-          // 접근 권한·예산은 이미 저장됨 — 모델만 실패. loaded 상태를 동기화 후 알림.
+          // 접근 권한은 이미 저장됨 — 모델만 실패. loaded 상태를 동기화 후 알림.
           setLoadedSelected(savedSelected);
           setSelected(savedSelected);
-          const opt = optimisticBudgets();
-          setBudgets(opt);
-          setLoadedBudgets(opt);
           toast({ type: 'error', message: mr.error, auto_dismiss_ms: 4000 });
           return;
         }
@@ -353,9 +284,6 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       // 모두 성공 — loaded 상태를 낙관적 값으로 갱신.
       setLoadedSelected(savedSelected);
       setSelected(savedSelected);
-      const opt = optimisticBudgets();
-      setBudgets(opt);
-      setLoadedBudgets(opt);
       toast({
         type: 'success',
         message: t('saveSuccess'),
@@ -366,10 +294,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
 
   const busy = isLoadPending || isSavePending;
 
-  // 접근 권한·예산·허용 모델 중 하나라도 loaded 상태에서 변경되면 적용 활성화.
-  const budgetDirty = ALL_CLIENTS.some(
-    (c) => (budgets[c] ?? '').trim() !== (loadedBudgets[c] ?? '').trim()
-  );
+  // 접근 권한·허용 모델 중 하나라도 loaded 상태에서 변경되면 적용 활성화.
   // 접근 권한은 canonical key 로 비교 ([]·전체선택 동일 취급, 순서 무관).
   // clientsLoaded=false 면 stale 상태가 dirty 로 보이지 않게 막는다.
   const accessDirty = clientsLoaded && clientsKey(selected) !== clientsKey(loadedSelected);
@@ -379,7 +304,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
     modelsLoaded &&
     (selectedModelAliases.length !== loadedModelAliases.length ||
       selectedModelAliases.some((a) => !loadedModelAliases.includes(a)));
-  const dirty = accessDirty || budgetDirty || modelsDirty;
+  const dirty = accessDirty || modelsDirty;
 
   const btn = (active: boolean) =>
     [
@@ -438,30 +363,31 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         )}
 
         {!isLoadPending && (
-          <div className="space-y-3 mb-3">
-            {CLIENT_OPTIONS.filter((o) => selected.includes(o.value)).map((o) => (
-              <div key={o.value}>
-                <label className="block text-xs text-muted-foreground mb-1">
-                  {o.value === 'claude-code'
-                    ? t('budgetInput.claudeCode')
-                    : o.value === 'cowork'
-                      ? t('budgetInput.cowork')
-                      : t('budgetInput.generic', { app: o.label })}
-                </label>
-                <input
-                  type="number"
-                  min={0}
-                  step="0.01"
-                  value={budgets[o.value] ?? ''}
-                  onChange={(e) =>
-                    setBudgets((prev) => ({ ...prev, [o.value]: e.target.value }))
-                  }
-                  disabled={busy}
-                  placeholder={t('budgetInput.placeholder')}
-                  className="glass w-full rounded-apple-sm border px-3 py-1.5 text-sm disabled:opacity-50"
-                />
-              </div>
-            ))}
+          <div className="border rounded-apple-md p-3 mb-3">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-sm font-medium">{t('budgetInput.title')}</p>
+              <Link
+                href="/budgets"
+                className="text-xs text-primary hover:underline"
+              >
+                {t('budgetInput.editInBudgets')}
+              </Link>
+            </div>
+            <div className="space-y-1.5">
+              {CLIENT_OPTIONS.filter((o) => selected.includes(o.value)).map((o) => (
+                <div key={o.value} className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{o.label}</span>
+                  <span className="font-medium">
+                    {(budgets[o.value] ?? '').trim() !== ''
+                      ? `$${Number(budgets[o.value]).toFixed(2)}`
+                      : t('budgetInput.placeholder')}
+                  </span>
+                </div>
+              ))}
+              {selected.length === 0 && (
+                <p className="text-xs text-muted-foreground">{t('budgetInput.noApps')}</p>
+              )}
+            </div>
           </div>
         )}
 
