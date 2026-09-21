@@ -292,8 +292,12 @@ class BudgetService:
             if user.team_id not in await led_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
 
-        # BR-BUD-01: Validate member budget sum <= team budget
-        if user.team_id:
+        # BR-BUD-01: 멤버 예산 합계 <= 팀 예산 — TEAM_LEADER 에만 적용한다.
+        # 이 규칙은 "리더가 팀 풀을 초과해 배분하지 못하게" 하는 배분 규율인데,
+        # ADMIN 은 팀 예산 자체를 소유하므로(팀 예산을 먼저 올리면 어차피 통과됨)
+        # admin 에게까지 걸면 "이미 초과된 멤버의 한도를 올리는" 정상 작업이
+        # ValidationError 로 막혀 예산 조정이 불가능해진다 — 2026-09 실측 버그.
+        if user.team_id and actor.role == UserRole.TEAM_LEADER:
             repo = BudgetRepository(session)
             team_config = await repo.get_active_config(BudgetScope.TEAM, user.team_id)
             if team_config:

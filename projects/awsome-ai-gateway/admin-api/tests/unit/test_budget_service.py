@@ -78,8 +78,9 @@ class TestSetUserBudget:
                 await budget_service.set_user_budget(mock_session, user_id=user_id, data=data, actor=team_leader_user)
 
     async def test_user_budget_sum_exceeds_team_budget(
-        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
     ):
+        """BR-BUD-01은 TEAM_LEADER 에만 적용 — 리더는 팀 풀을 초과해 배분 불가."""
         user_id = uuid.uuid4()
         team_id = uuid.uuid4()
         data = SetBudgetRequest(max_budget_usd=Decimal("600.00"))
@@ -91,14 +92,41 @@ class TestSetUserBudget:
         team_config.max_budget_usd = Decimal("1000.00")
 
         with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
-             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
+             patch("app.services.budget_service.led_team_ids",
+                   new=AsyncMock(return_value={team_id})):
             MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
             repo = MockBudgetRepo.return_value
             repo.get_active_config = AsyncMock(side_effect=[team_config, None])
             repo.sum_member_budgets = AsyncMock(return_value=Decimal("500.00"))
 
             with pytest.raises(ValidationError, match="exceeds team budget"):
-                await budget_service.set_user_budget(mock_session, user_id=user_id, data=data, actor=admin_user)
+                await budget_service.set_user_budget(mock_session, user_id=user_id, data=data, actor=team_leader_user)
+
+    async def test_admin_can_exceed_member_sum(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """ADMIN 은 BR-BUD-01을 우회한다 — 초과된 멤버의 한도 상향이 막히지 않아야 한다."""
+        user_id = uuid.uuid4()
+        team_id = uuid.uuid4()
+        data = SetBudgetRequest(max_budget_usd=Decimal("600.00"))
+
+        user = MagicMock(spec=User)
+        user.team_id = team_id
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
+             patch("app.services.budget_service.audit_logger") as mock_audit:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
+            repo = MockBudgetRepo.return_value
+            repo.upsert_config = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            await budget_service.set_user_budget(mock_session, user_id=user_id, data=data, actor=admin_user)
+
+        repo.upsert_config.assert_called_once()
+        # admin 우회 시 멤버 합계 조회 자체를 하지 않는다.
+        repo.sum_member_budgets.assert_not_called()
 
     async def test_user_budget_replaces_existing(
         self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
