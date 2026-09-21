@@ -49,6 +49,9 @@ class NormalizedPrice:
     cache_1h_per_1k: Decimal
     cache_read_per_1k: Decimal
     cache_derived: bool = False  # 캐시 단가가 파생(추정)인지
+    #: 스펙 정보 — LiteLLM 카탈로그만 제공(AWS Price List 에는 없어 None 유지).
+    context_window: int | None = None
+    max_output_tokens: int | None = None
 
 
 @dataclass
@@ -312,6 +315,9 @@ class LiteLLMPricingSyncService:
                 cache_1h_per_1k=(cache_1h if cache_1h is not None else input_cost * _CACHE_1H_MULT) * Decimal(1000),
                 cache_read_per_1k=(cache_read if cache_read is not None else input_cost * _CACHE_READ_MULT) * Decimal(1000),
                 cache_derived=derived,
+                context_window=self._to_int(m.get("max_input_tokens"))
+                or self._to_int(m.get("max_tokens")),
+                max_output_tokens=self._to_int(m.get("max_output_tokens")),
             )
         return result
 
@@ -322,6 +328,15 @@ class LiteLLMPricingSyncService:
         try:
             return Decimal(str(value))
         except Exception:  # noqa: BLE001
+            return None
+
+    @staticmethod
+    def _to_int(value) -> int | None:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
             return None
 
 

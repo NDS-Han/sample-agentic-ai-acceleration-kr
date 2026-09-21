@@ -431,6 +431,21 @@ class ModelService:
                 session, alias=alias, data=req, actor=actor,
                 ip_address=ip_address, request_id=request_id,
             )
+            # 카탈로그가 스펙을 주면 같이 채운다 — LiteLLM만 제공, AWS 소스는 None.
+            # 모델 행은 캐시 키(model:{alias})를 공유하므로 변경 시 무효화 필요.
+            spec_changed = False
+            if np.context_window and model.context_window != np.context_window:
+                model.context_window = np.context_window
+                spec_changed = True
+            if np.max_output_tokens and model.max_output_tokens != np.max_output_tokens:
+                model.max_output_tokens = np.max_output_tokens
+                spec_changed = True
+            if spec_changed:
+                await session.flush()
+                await self._cache_mgr.invalidate(
+                    [f"model:{alias}", f"model:{model.provider_model_id}"],
+                    session=session,
+                )
             applied.append(alias)
 
         return PriceSyncApplyResponse(applied=applied, skipped=skipped, errors=errors)
@@ -495,6 +510,8 @@ class ModelService:
             allowed_clients=model.allowed_clients,
             description=model.description,
             display_name=model.display_name,
+            context_window=model.context_window,
+            max_output_tokens=model.max_output_tokens,
             current_pricing=pricing_resp,
             created_at=model.created_at,
             updated_at=model.updated_at,

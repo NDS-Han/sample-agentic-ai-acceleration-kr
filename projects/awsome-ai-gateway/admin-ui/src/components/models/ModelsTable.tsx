@@ -204,8 +204,9 @@ export function ModelsTable({ models }: ModelsTableProps) {
                           <div>
                             <dt className="text-muted-foreground">{t('contextWindowLabel')}</dt>
                             <dd className="mt-0.5 tabular-nums">
-                              {formatNumber(model.context_window)} tokens · {t('maxOutputTokens')}{' '}
-                              {formatNumber(model.max_tokens)}
+                              {model.context_window > 0
+                                ? `${formatNumber(model.context_window)} tokens · ${t('maxOutputTokens')} ${formatNumber(model.max_tokens)}`
+                                : t('specUnknown')}
                             </dd>
                           </div>
                           {model.description && (

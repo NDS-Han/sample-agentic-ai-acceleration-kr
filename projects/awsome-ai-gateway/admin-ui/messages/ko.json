@@ -441,7 +441,8 @@
     "endpointUrlLabel": "엔드포인트 URL",
     "contextWindowLabel": "컨텍스트 윈도우",
     "maxOutputTokens": "최대 출력",
-    "pricingDetailTitle": "가격 상세"
+    "pricingDetailTitle": "가격 상세",
+    "specUnknown": "미상 — 가격 싱크(LiteLLM) 실행 시 자동으로 채워집니다"
   },
   "rateLimits": {
     "title": "Rate Limits",

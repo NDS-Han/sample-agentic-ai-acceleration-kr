@@ -197,6 +197,8 @@ interface AdminModelItem {
     cache_creation_1h_price_per_1k_tokens?: string;
     cache_read_price_per_1k_tokens?: string;
   } | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
 }
 
 export async function listActiveModelsAction(): Promise<ActionResult<ModelListItem[]>> {
@@ -225,8 +227,8 @@ export async function listActiveModelsAction(): Promise<ActionResult<ModelListIt
           cache_read_price_per_1k: p?.cache_read_price_per_1k_tokens
             ? parseFloat(p.cache_read_price_per_1k_tokens)
             : 0,
-          max_tokens: 0,
-          context_window: 0,
+          max_tokens: item.max_output_tokens ?? 0,
+          context_window: item.context_window ?? 0,
           description: item.description,
           display_name: item.display_name,
         };

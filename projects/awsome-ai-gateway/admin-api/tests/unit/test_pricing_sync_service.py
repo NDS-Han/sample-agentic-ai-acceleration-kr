@@ -156,6 +156,8 @@ def _llm_model(
     cache_read: float | None = None,
     cache_5m: float | None = None,
     cache_1h: float | None = None,
+    max_input: int | None = None,
+    max_output: int | None = None,
 ) -> dict:
     return {
         "id": model_id,
@@ -166,6 +168,8 @@ def _llm_model(
         "cache_read_input_token_cost": cache_read,
         "cache_creation_input_token_cost": cache_5m,
         "cache_creation_input_token_cost_above_1hr": cache_1h,
+        "max_input_tokens": max_input,
+        "max_output_tokens": max_output,
     }
 
 
@@ -283,3 +287,36 @@ def test_fetch_result_lookup_with_region_prefix_variants():
     assert result.lookup("us.anthropic.claude-sonnet-4-6") is not None
     assert result.lookup("anthropic.claude-sonnet-4-6") is not None
     assert result.lookup("anthropic.claude-opus-4-6") is None
+
+
+@pytest.mark.asyncio
+async def test_litellm_extracts_context_spec():
+    """max_input_tokens/max_output_tokens 가 NormalizedPrice 에 실린다."""
+    client = _FakeAsyncClient([
+        {
+            "data": [
+                _llm_model("anthropic.claude-opus-5", 5e-06, 2.5e-05,
+                           max_input=1000000, max_output=64000),
+            ],
+            "has_more": False,
+        }
+    ])
+    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    p = res.prices["anthropic.claude-opus-5"]
+    assert p.context_window == 1000000
+    assert p.max_output_tokens == 64000
+
+
+@pytest.mark.asyncio
+async def test_litellm_context_spec_absent():
+    """스펙 필드가 없으면 None — 기존 모델 값을 덮어쓰지 않도록 구별한다."""
+    client = _FakeAsyncClient([
+        {
+            "data": [_llm_model("anthropic.claude-sonnet-5", 3e-06, 1.5e-05)],
+            "has_more": False,
+        }
+    ])
+    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    p = res.prices["anthropic.claude-sonnet-5"]
+    assert p.context_window is None
+    assert p.max_output_tokens is None
