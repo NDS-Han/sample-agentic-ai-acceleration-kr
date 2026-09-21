@@ -430,7 +430,18 @@
     "deleteMessage": "'{alias}' 모델을 삭제합니다. 이 모델을 가리키는 정책(허용 모델·rate limit·다운그레이드·가격 이력)도 함께 제거되며, 과금 이력은 보존됩니다.",
     "deleteAria": "{alias} 삭제",
     "deleteSuccess": "'{alias}' 모델이 삭제되었습니다.",
-    "deleteTypeToConfirm": "확인하려면 모델 alias '{alias}'를 입력하세요:"
+    "deleteTypeToConfirm": "확인하려면 모델 alias '{alias}'를 입력하세요:",
+    "aliasHelpTitle": "Alias란?",
+    "aliasHelp": "클라이언트가 요청의 model 필드에 넣는 이름(라우팅 키)입니다. Claude Code에서 'Sonnet 5'를 골라도 실제로는 'claude-sonnet-5'를 보냅니다 — 화면 표시명이 아니라 실제 전송 이름으로 등록해야 합니다.",
+    "displayNameHelpTitle": "Display name이란?",
+    "displayNameHelp": "관리 콘솔에만 표시되는 읽기용 이름입니다. 라우팅에는 사용되지 않습니다.",
+    "aliasFieldHint": "클라이언트가 요청에 보내는 모델 이름입니다. 표시명이 아니라 'claude-sonnet-5' 같은 실제 전송 이름을 입력하세요.",
+    "detailExpandAria": "{alias} 상세 보기",
+    "modelIdLabel": "모델 ID (provider_model_id)",
+    "endpointUrlLabel": "엔드포인트 URL",
+    "contextWindowLabel": "컨텍스트 윈도우",
+    "maxOutputTokens": "최대 출력",
+    "pricingDetailTitle": "가격 상세"
   },
   "rateLimits": {
     "title": "Rate Limits",

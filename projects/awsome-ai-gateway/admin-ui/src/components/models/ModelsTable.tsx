@@ -3,12 +3,14 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useState, useTransition } from 'react';
+import { Fragment, useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import type { ModelListItem } from '@/types/entities';
 import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
@@ -44,6 +46,16 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deactivateDialogOpen, setDeactivateDialogOpen] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+
+  const toggleExpand = (alias: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (next.has(alias)) next.delete(alias);
+      else next.add(alias);
+      return next;
+    });
+  };
 
   const handleEdit = (model: ModelListItem) => {
     setSelectedModel(model);
@@ -85,25 +97,43 @@ export function ModelsTable({ models }: ModelsTableProps) {
         <Table>
           <THead>
             <Tr>
-              <Th>Alias</Th>
-              <Th>{t('displayName')}</Th>
+              <Th className="w-8" />
+              <Th>
+                Alias <InfoTooltip label={t('aliasHelpTitle')}>{t('aliasHelp')}</InfoTooltip>
+              </Th>
+              <Th>
+                {t('displayName')}{' '}
+                <InfoTooltip label={t('displayNameHelpTitle')}>{t('displayNameHelp')}</InfoTooltip>
+              </Th>
               <Th>Provider</Th>
-              <Th>Model ID</Th>
               <Th numeric>{t('inputPriceShort')}</Th>
               <Th numeric>{t('outputPriceShort')}</Th>
-              <Th numeric>{t('cache5min')}</Th>
-              <Th numeric>{t('cache1h')}</Th>
-              <Th numeric>{t('cacheRead')}</Th>
               <Th>{t('status')}</Th>
               <Th>{t('actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {models.length === 0 ? (
-              <TEmpty colSpan={11}>{t('noModels')}</TEmpty>
+              <TEmpty colSpan={8}>{t('noModels')}</TEmpty>
             ) : (
               models.map((model) => (
-                <Tr key={model.alias}>
+                <Fragment key={model.alias}>
+                <Tr>
+                  <Td>
+                    <button
+                      type="button"
+                      onClick={() => toggleExpand(model.alias)}
+                      aria-expanded={expanded.has(model.alias)}
+                      aria-label={t('detailExpandAria', { alias: model.alias })}
+                      className="inline-flex items-center justify-center rounded-sm p-0.5 text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      {expanded.has(model.alias) ? (
+                        <ChevronDown size={14} aria-hidden="true" />
+                      ) : (
+                        <ChevronRight size={14} aria-hidden="true" />
+                      )}
+                    </button>
+                  </Td>
                   <Td
                     emphasis
                     className={`font-mono mono-id text-xs${!model.is_active ? ' text-muted-foreground' : ''}`}
@@ -116,24 +146,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                   <Td>
                     <ProviderBadge provider={model.provider} />
                   </Td>
-                  <Td className="text-muted-foreground font-mono mono-id text-xs">{model.model_id}</Td>
                   <Td numeric>${model.input_price_per_1k.toFixed(4)}/1K</Td>
                   <Td numeric>${model.output_price_per_1k.toFixed(4)}/1K</Td>
-                  <Td numeric className="text-muted-foreground">
-                    {model.cache_creation_5m_price_per_1k > 0
-                      ? `$${model.cache_creation_5m_price_per_1k.toFixed(5)}/1K`
-                      : '—'}
-                  </Td>
-                  <Td numeric className="text-muted-foreground">
-                    {model.cache_creation_1h_price_per_1k > 0
-                      ? `$${model.cache_creation_1h_price_per_1k.toFixed(5)}/1K`
-                      : '—'}
-                  </Td>
-                  <Td numeric className="text-muted-foreground">
-                    {model.cache_read_price_per_1k > 0
-                      ? `$${model.cache_read_price_per_1k.toFixed(5)}/1K`
-                      : '—'}
-                  </Td>
                   <Td>
                     <StatusBadge isActive={model.is_active} activeLabel={t('active')} inactiveLabel={t('inactive')} />
                   </Td>
@@ -172,6 +186,77 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     </div>
                   </Td>
                 </Tr>
+                {expanded.has(model.alias) && (
+                  <Tr>
+                    <Td colSpan={8} className="bg-muted/30 !py-4">
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-8 gap-y-3 text-xs">
+                        <dl className="space-y-2">
+                          <div>
+                            <dt className="text-muted-foreground">{t('modelIdLabel')}</dt>
+                            <dd className="font-mono mono-id mt-0.5">{model.model_id}</dd>
+                          </div>
+                          {model.endpoint_url && (
+                            <div>
+                              <dt className="text-muted-foreground">{t('endpointUrlLabel')}</dt>
+                              <dd className="font-mono mono-id mt-0.5 break-all">{model.endpoint_url}</dd>
+                            </div>
+                          )}
+                          <div>
+                            <dt className="text-muted-foreground">{t('contextWindowLabel')}</dt>
+                            <dd className="mt-0.5 tabular-nums">
+                              {formatNumber(model.context_window)} tokens · {t('maxOutputTokens')}{' '}
+                              {formatNumber(model.max_tokens)}
+                            </dd>
+                          </div>
+                          {model.description && (
+                            <div>
+                              <dt className="text-muted-foreground">{t('descriptionLabel')}</dt>
+                              <dd className="mt-0.5">{model.description}</dd>
+                            </div>
+                          )}
+                        </dl>
+                        <div>
+                          <p className="text-muted-foreground mb-1.5">{t('pricingDetailTitle')}</p>
+                          <dl className="rounded-md border border-border divide-y divide-border overflow-hidden">
+                            <div className="flex justify-between px-3 py-1.5">
+                              <dt className="text-muted-foreground">{t('inputPriceShort')}</dt>
+                              <dd className="tabular-nums">${model.input_price_per_1k.toFixed(4)}/1K</dd>
+                            </div>
+                            <div className="flex justify-between px-3 py-1.5">
+                              <dt className="text-muted-foreground">{t('outputPriceShort')}</dt>
+                              <dd className="tabular-nums">${model.output_price_per_1k.toFixed(4)}/1K</dd>
+                            </div>
+                            <div className="flex justify-between px-3 py-1.5">
+                              <dt className="text-muted-foreground">{t('cache5min')}</dt>
+                              <dd className="tabular-nums">
+                                {model.cache_creation_5m_price_per_1k > 0
+                                  ? `$${model.cache_creation_5m_price_per_1k.toFixed(5)}/1K`
+                                  : '—'}
+                              </dd>
+                            </div>
+                            <div className="flex justify-between px-3 py-1.5">
+                              <dt className="text-muted-foreground">{t('cache1h')}</dt>
+                              <dd className="tabular-nums">
+                                {model.cache_creation_1h_price_per_1k > 0
+                                  ? `$${model.cache_creation_1h_price_per_1k.toFixed(5)}/1K`
+                                  : '—'}
+                              </dd>
+                            </div>
+                            <div className="flex justify-between px-3 py-1.5">
+                              <dt className="text-muted-foreground">{t('cacheRead')}</dt>
+                              <dd className="tabular-nums">
+                                {model.cache_read_price_per_1k > 0
+                                  ? `$${model.cache_read_price_per_1k.toFixed(5)}/1K`
+                                  : '—'}
+                              </dd>
+                            </div>
+                          </dl>
+                        </div>
+                      </div>
+                    </Td>
+                  </Tr>
+                )}
+                </Fragment>
               ))
             )}
           </TBody>

@@ -430,7 +430,18 @@
     "deleteMessage": "Delete model '{alias}'. Policies referencing it (allowed models, rate limits, downgrade rules, pricing history) are removed too; usage records are preserved.",
     "deleteAria": "Delete {alias}",
     "deleteSuccess": "Model '{alias}' deleted.",
-    "deleteTypeToConfirm": "To confirm, type the model alias '{alias}':"
+    "deleteTypeToConfirm": "To confirm, type the model alias '{alias}':",
+    "aliasHelpTitle": "What is alias?",
+    "aliasHelp": "The name clients put in the request's model field (the routing key). Picking 'Sonnet 5' in Claude Code still sends 'claude-sonnet-5' — register the actual wire name, not a display label.",
+    "displayNameHelpTitle": "What is display name?",
+    "displayNameHelp": "A read-only label shown only in this admin console. It is never used for routing.",
+    "aliasFieldHint": "The model name clients send in requests. Enter the actual wire name like 'claude-sonnet-5', not a display label.",
+    "detailExpandAria": "Show details for {alias}",
+    "modelIdLabel": "Model ID (provider_model_id)",
+    "endpointUrlLabel": "Endpoint URL",
+    "contextWindowLabel": "Context window",
+    "maxOutputTokens": "max output",
+    "pricingDetailTitle": "Pricing detail"
   },
   "rateLimits": {
     "title": "Rate Limits",

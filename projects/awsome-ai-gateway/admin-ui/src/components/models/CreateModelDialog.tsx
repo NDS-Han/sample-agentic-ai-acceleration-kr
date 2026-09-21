@@ -178,9 +178,13 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
               placeholder="e.g. claude-3-5-sonnet"
             />
-            {isEditMode && (
+            {isEditMode ? (
               <p className="text-xs text-muted-foreground">
                 {t('aliasReadonly')}
+              </p>
+            ) : (
+              <p className="text-xs text-muted-foreground">
+                {t('aliasFieldHint')}
               </p>
             )}
             {fieldErrors.alias && <FormError error={fieldErrors.alias} />}
