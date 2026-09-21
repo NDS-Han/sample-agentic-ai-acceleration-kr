@@ -300,3 +300,37 @@ class TestDeleteModel:
         # 캐시는 alias + provider_model_id 둘 다 무효화한다(게이트웨이가 두 키로 캐시).
         deleted_keys = {c.args[0] for c in mock_redis.delete.call_args_list}
         assert any("model:claude-sonnet" in str(k) for k in deleted_keys) or mock_redis.delete.call_count >= 1
+
+    async def test_wire_names_merges_unmatched_from_redis(
+        self, model_service: ModelService, mock_session: AsyncMock, mock_redis: AsyncMock
+    ):
+        """usage(성공) + Redis 404 집계 병합 — 미등록 이름만 404 카운트를 갖는다."""
+        now = datetime.now(timezone.utc)
+        usage_result = MagicMock()
+        usage_result.all.return_value = [("claude-sonnet-5", 42, now)]
+        reg_result = MagicMock()
+        reg_scalars = MagicMock()
+        reg_scalars.all.return_value = ["claude-sonnet-5"]
+        reg_result.scalars.return_value = reg_scalars
+        mock_session.execute = AsyncMock(side_effect=[usage_result, reg_result])
+
+        mock_redis.zrevrange = AsyncMock(
+            return_value=[(b"gpt-5.6-terra", 7.0), (b"claude-sonnet-5", 2.0)]
+        )
+        mock_redis.hgetall = AsyncMock(
+            return_value={b"gpt-5.6-terra": b"2026-09-21T01:00:00+00:00"}
+        )
+
+        res = await model_service.list_wire_names(mock_session, days=30, redis=mock_redis)
+        by_name = {i.name: i for i in res.items}
+
+        assert by_name["claude-sonnet-5"].request_count == 42
+        assert by_name["claude-sonnet-5"].rejected_count == 2
+        assert by_name["claude-sonnet-5"].registered is True
+        # 성공 기록 없이 404 만 관측된 이름도 목록에 들어온다 — 이게 alias 후보.
+        assert by_name["gpt-5.6-terra"].request_count == 0
+        assert by_name["gpt-5.6-terra"].rejected_count == 7
+        assert by_name["gpt-5.6-terra"].registered is False
+        assert by_name["gpt-5.6-terra"].last_seen_at is not None
+        # 정렬: 총 관측량(성공+404) 내림차순 — sonnet-5(44) > terra(7)
+        assert res.items[0].name == "claude-sonnet-5"

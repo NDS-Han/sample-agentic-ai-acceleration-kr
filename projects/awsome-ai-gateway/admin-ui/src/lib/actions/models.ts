@@ -207,6 +207,8 @@ export interface WireNameItem {
   request_count: number;
   last_seen_at: string | null;
   registered: boolean;
+  /** resolve 실패(404)로 관측된 횟수 — 미등록 이름 요청의 실제 신호. */
+  rejected_count: number;
 }
 
 export async function listWireNamesAction(days = 30): Promise<ActionResult<WireNameItem[]>> {

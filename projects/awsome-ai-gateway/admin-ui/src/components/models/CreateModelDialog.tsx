@@ -227,9 +227,16 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                         >
                           <span className="font-mono mono-id text-xs truncate">{w.name}</span>
                           <span className="flex items-center gap-2 shrink-0">
-                            <span className="text-[10px] text-muted-foreground tabular-nums">
-                              {t('wireNameCount', { count: w.request_count })}
-                            </span>
+                            {w.rejected_count > 0 && (
+                              <span className="text-[10px] font-medium text-destructive tabular-nums">
+                                {t('wireNameRejected', { count: w.rejected_count })}
+                              </span>
+                            )}
+                            {w.request_count > 0 && (
+                              <span className="text-[10px] text-muted-foreground tabular-nums">
+                                {t('wireNameCount', { count: w.request_count })}
+                              </span>
+                            )}
                             <span
                               className={`text-[10px] px-1.5 py-0.5 rounded ${
                                 w.registered

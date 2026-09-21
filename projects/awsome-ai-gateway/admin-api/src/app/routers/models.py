@@ -79,7 +79,9 @@ async def list_wire_names(
 ):
     """최근 N일 usage_logs 에 관측된 모델 이름 — alias 생성 시 확인용."""
     svc: ModelService = request.app.state.model_service
-    return await svc.list_wire_names(session, days=days)
+    return await svc.list_wire_names(
+        session, days=days, redis=getattr(request.app.state, "redis", None)
+    )
 
 
 @router.post("", response_model=ModelResponse, status_code=201)

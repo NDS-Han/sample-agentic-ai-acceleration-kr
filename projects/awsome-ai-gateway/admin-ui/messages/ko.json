@@ -455,7 +455,8 @@
     "wireNamesEmpty": "관측된 요청이 없습니다",
     "wireNameCount": "{count}건",
     "wireNameRegistered": "등록됨",
-    "wireNameUnregistered": "미등록"
+    "wireNameUnregistered": "미등록",
+    "wireNameRejected": "404 ×{count}"
   },
   "rateLimits": {
     "title": "Rate Limits",

@@ -224,6 +224,9 @@ class WireNameItem(BaseModel):
     request_count: int
     last_seen_at: datetime | None = None
     registered: bool
+    #: resolve 실패(404)로 관측된 횟수 — 게이트웨이가 Redis 에 집계.
+    #: 0 이면 usage_logs 에만, >0 이면 미등록 이름으로 요청이 떨어진 것.
+    rejected_count: int = 0
 
 
 class WireNameListResponse(BaseModel):

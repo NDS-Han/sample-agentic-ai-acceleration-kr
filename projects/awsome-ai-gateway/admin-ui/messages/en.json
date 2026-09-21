@@ -455,7 +455,8 @@
     "wireNamesEmpty": "No requests observed",
     "wireNameCount": "{count} reqs",
     "wireNameRegistered": "registered",
-    "wireNameUnregistered": "unregistered"
+    "wireNameUnregistered": "unregistered",
+    "wireNameRejected": "404 ×{count}"
   },
   "rateLimits": {
     "title": "Rate Limits",

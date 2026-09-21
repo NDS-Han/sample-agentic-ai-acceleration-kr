@@ -41,6 +41,16 @@ from app.schemas.models import (
 logger = structlog.get_logger()
 
 
+def _parse_iso(value) -> datetime | None:
+    """Redis 에 저장한 ISO 문자열 → datetime. 파싱 실패 시 None."""
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
 class ModelService:
     def __init__(self, cache_mgr: CacheInvalidationManager) -> None:
         self._cache_mgr = cache_mgr
@@ -55,13 +65,15 @@ class ModelService:
         return result
 
     async def list_wire_names(
-        self, session: AsyncSession, *, days: int = 30
+        self, session: AsyncSession, *, days: int = 30, redis=None
     ) -> WireNameListResponse:
         """최근 N일간 클라이언트가 실제로 보낸 모델 이름(와이어 키) 목록.
 
-        alias 생성 시 "어떤 이름으로 등록해야 하나"에 답하는 조회용.
-        주의: usage_logs 는 resolve 성공한 요청만 기록하므로, 미등록 이름으로
-        실패한 요청(404)은 여기에 나오지 않는다 — 그쪽은 게이트웨이 로그 확인.
+        두 소스를 합친다:
+          - usage_logs: resolve 성공 요청(보통 등록된 이름)
+          - Redis gw:unmatched_models: resolve 실패(404) 이름 — 게이트웨이가
+            집계. **미등록 이름으로 들어오는 신호는 여기에만 있다** — 새 모델이
+            나와 클라이언트가 새 이름을내면 이 목록에 뜬다.
         """
         from app.models.usage import UsageLog
 
@@ -83,18 +95,48 @@ class ModelService:
         registered = set(
             (await session.execute(select(ModelAlias.alias))).scalars().all()
         )
-        return WireNameListResponse(
-            days=days,
-            items=[
-                WireNameItem(
-                    name=name,
-                    request_count=cnt,
-                    last_seen_at=last,
-                    registered=name in registered,
+
+        items: dict[str, WireNameItem] = {
+            name: WireNameItem(
+                name=name,
+                request_count=cnt,
+                last_seen_at=last,
+                registered=name in registered,
+            )
+            for name, cnt, last in rows
+        }
+
+        # 404 집계 병합 — 성공 기록이 없는 미등록 이름도 rows 에 추가한다.
+        if redis is not None:
+            try:
+                rejected = await redis.zrevrange(
+                    "gw:unmatched_models", 0, 99, withscores=True
                 )
-                for name, cnt, last in rows
-            ],
+                last_seen = await redis.hgetall("gw:unmatched_models:last_seen")
+                for raw_name, score in rejected:
+                    name = raw_name.decode() if isinstance(raw_name, bytes) else raw_name
+                    item = items.get(name)
+                    if item is None:
+                        raw_last = last_seen.get(raw_name) or last_seen.get(name)
+                        if isinstance(raw_last, bytes):
+                            raw_last = raw_last.decode()
+                        item = WireNameItem(
+                            name=name,
+                            request_count=0,
+                            last_seen_at=_parse_iso(raw_last),
+                            registered=name in registered,
+                        )
+                        items[name] = item
+                    item.rejected_count = int(score)
+            except Exception:  # noqa: BLE001 — Redis 장애가 목록을 깨면 안 된다
+                logger.warning("wire_names_unmatched_fetch_failed")
+
+        merged = sorted(
+            items.values(),
+            key=lambda i: (i.rejected_count + i.request_count, i.name),
+            reverse=True,
         )
+        return WireNameListResponse(days=days, items=merged)
 
     async def create_model(
         self,
