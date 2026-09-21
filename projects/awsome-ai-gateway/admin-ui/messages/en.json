@@ -603,9 +603,10 @@
       "downgrade": "Auto downgrade",
       "downgradeRule": "at {pct}% spend, {from} → {to}",
       "readonly": "Read-only",
-      "downgradeAt": "At {pct}% spend",
       "scopeTeam": "Team",
-      "scopeUser": "User"
+      "scopeUser": "User",
+      "downgradeAtPre": "at",
+      "downgradeAtPost": "spend"
     },
     "userModelsInheritTeam": "No personal override — checkmarks show the inherited team policy. Changes save as a per-user policy.",
     "userModelsInheritNone": "No personal override — all models allowed (no team policy either)."

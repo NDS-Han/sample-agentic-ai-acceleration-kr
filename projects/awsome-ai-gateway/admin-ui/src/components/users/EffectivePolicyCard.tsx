@@ -155,16 +155,20 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
           <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
           <div className="rounded-md border border-border divide-y divide-border overflow-hidden">
             {policy.downgrade_rules.map((d, i) => (
-              <div key={i} className="flex items-center gap-2 px-3 py-2 text-xs">
-                <Badge tone="sky">
-                  {d.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser')}
-                </Badge>
-                <span className="text-muted-foreground">
-                  {t('downgradeAt', { pct: d.threshold_pct })}
-                </span>
-                <Badge tone="neutral">{d.from_model_alias}</Badge>
-                <span className="text-muted-foreground" aria-hidden="true">→</span>
-                <Badge tone="teal">{d.to_model_alias}</Badge>
+              <div key={i} className="px-3 py-2 text-xs space-y-1.5">
+                <div>
+                  <Badge tone="sky">
+                    {d.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser')}
+                  </Badge>
+                </div>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-muted-foreground">{t('downgradeAtPre')}</span>
+                  <Badge tone="amber">{d.threshold_pct}%</Badge>
+                  <span className="text-muted-foreground">{t('downgradeAtPost')}</span>
+                  <Badge tone="neutral">{d.from_model_alias}</Badge>
+                  <span className="text-muted-foreground" aria-hidden="true">→</span>
+                  <Badge tone="teal">{d.to_model_alias}</Badge>
+                </div>
               </div>
             ))}
           </div>
