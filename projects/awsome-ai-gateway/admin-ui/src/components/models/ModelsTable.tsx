@@ -11,7 +11,8 @@ import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { fmtPricePerM } from '@/lib/utils/pricing';
-import { ChevronDown, ChevronRight } from 'lucide-react';
+import { cn } from '@/lib/utils/cn';
+import { ChevronDown, ChevronRight, Pencil, Power, PowerOff, Trash2 } from 'lucide-react';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
@@ -153,37 +154,23 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     <StatusBadge isActive={model.is_active} activeLabel={t('active')} inactiveLabel={t('inactive')} />
                   </Td>
                   <Td>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => handleEdit(model)}
-                        className="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                      >
-                        {t('edit')}
-                      </button>
+                    {/* 아이콘 버튼 — 라벨 길이(활성화/비활성화)가 달라도 행마다 위치가 정렬된다 */}
+                    <div className="flex items-center gap-1.5">
+                      <IconAction label={t('edit')} onClick={() => handleEdit(model)}>
+                        <Pencil size={14} aria-hidden="true" />
+                      </IconAction>
                       {model.is_active ? (
-                        <button
-                          onClick={() => handleDeactivate(model)}
-                          className="inline-flex items-center justify-center rounded-md border border-destructive/30 bg-background px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        >
-                          {t('deactivate')}
-                        </button>
+                        <IconAction label={t('deactivate')} onClick={() => handleDeactivate(model)} danger>
+                          <PowerOff size={14} aria-hidden="true" />
+                        </IconAction>
                       ) : (
-                        <button
-                          onClick={() => handleActivate(model)}
-                          disabled={isPending}
-                          className="inline-flex items-center justify-center rounded-md border border-primary/40 bg-background px-3 py-1.5 text-xs font-medium text-primary hover:bg-primary/10 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-                        >
-                          {t('activate')}
-                        </button>
+                        <IconAction label={t('activate')} onClick={() => handleActivate(model)} disabled={isPending} accent>
+                          <Power size={14} aria-hidden="true" />
+                        </IconAction>
                       )}
-                      <button
-                        onClick={() => handleDelete(model)}
-                        disabled={isPending}
-                        aria-label={t('deleteAria', { alias: model.alias })}
-                        className="inline-flex items-center justify-center rounded-md border border-destructive/40 bg-background px-2 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/15 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
-                      >
-                        {t('delete')}
-                      </button>
+                      <IconAction label={t('delete')} onClick={() => handleDelete(model)} disabled={isPending} danger>
+                        <Trash2 size={14} aria-hidden="true" />
+                      </IconAction>
                     </div>
                   </Td>
                 </Tr>
@@ -294,5 +281,48 @@ export function ModelsTable({ models }: ModelsTableProps) {
         model={selectedModel}
       />
     </>
+  );
+}
+/** 고정 크기 아이콘 액션 + CSS 툴팁 — 우측 끝 컬럼이라 툴팁은 오른쪽 앵커. */
+function IconAction({
+  label,
+  onClick,
+  disabled,
+  danger,
+  accent,
+  children,
+}: {
+  label: string;
+  onClick: () => void;
+  disabled?: boolean;
+  danger?: boolean;
+  accent?: boolean;
+  children: React.ReactNode;
+}) {
+  return (
+    <span className="relative inline-flex group">
+      <button
+        type="button"
+        onClick={onClick}
+        disabled={disabled}
+        aria-label={label}
+        className={cn(
+          'inline-flex size-7 items-center justify-center rounded-md border transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
+          danger
+            ? 'border-destructive/40 text-destructive hover:bg-destructive/10'
+            : accent
+              ? 'border-primary/40 text-primary hover:bg-primary/10'
+              : 'border-border text-muted-foreground hover:bg-accent hover:text-foreground',
+        )}
+      >
+        {children}
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute right-0 top-full z-50 mt-1 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      >
+        {label}
+      </span>
+    </span>
   );
 }

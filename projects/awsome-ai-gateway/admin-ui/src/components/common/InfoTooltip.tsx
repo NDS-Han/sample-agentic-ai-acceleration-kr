@@ -9,7 +9,16 @@ import { Info } from 'lucide-react';
  * title 어트리뷰트는 표시가 지연되고 키보드 포커스에서 열리지 않으므로
  * group-hover/group-focus-within 팝오버를 쓴다.
  */
-export function InfoTooltip({ label, children }: { label: string; children: React.ReactNode }) {
+export function InfoTooltip({
+  label,
+  children,
+  align = 'left',
+}: {
+  label: string;
+  children: React.ReactNode;
+  /** 좌측 끝 컬럼 등에서 중앙 정렬이면 사이드바/뷰포트 밖으로 넘친다 — 기본은 좌측 앵커. */
+  align?: 'left' | 'center';
+}) {
   return (
     <span className="relative inline-flex group align-middle">
       <button
@@ -21,7 +30,9 @@ export function InfoTooltip({ label, children }: { label: string; children: Reac
       </button>
       <span
         role="tooltip"
-        className="pointer-events-none invisible absolute left-1/2 top-full z-50 mt-1.5 w-64 -translate-x-1/2 whitespace-normal rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs font-normal leading-relaxed normal-case tracking-normal text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+        className={`pointer-events-none invisible absolute top-full z-50 mt-1.5 w-64 whitespace-normal rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs font-normal leading-relaxed normal-case tracking-normal text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${
+          align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
+        }`}
       >
         {children}
       </span>
