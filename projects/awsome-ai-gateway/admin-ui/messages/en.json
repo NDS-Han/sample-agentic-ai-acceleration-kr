@@ -606,7 +606,8 @@
       "scopeTeam": "Team",
       "scopeUser": "User",
       "downgradeAtPre": "at",
-      "downgradeAtPost": "spend"
+      "downgradeAtPost": "spend",
+      "deniedTitle": "Blocked because"
     },
     "userModelsInheritTeam": "No personal override — checkmarks show the inherited team policy. Changes save as a per-user policy.",
     "userModelsInheritNone": "No personal override — all models allowed (no team policy either)."

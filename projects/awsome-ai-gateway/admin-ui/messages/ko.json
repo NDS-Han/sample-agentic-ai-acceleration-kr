@@ -606,7 +606,8 @@
       "scopeTeam": "팀",
       "scopeUser": "사용자",
       "downgradeAtPre": "사용률",
-      "downgradeAtPost": "도달 시"
+      "downgradeAtPost": "도달 시",
+      "deniedTitle": "거부 사유"
     },
     "userModelsInheritTeam": "개인 설정 없음 — 체크 상태는 팀 정책 상속분입니다. 변경하면 이 사용자만의 정책으로 저장됩니다.",
     "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음)."

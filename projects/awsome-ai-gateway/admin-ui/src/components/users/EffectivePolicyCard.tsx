@@ -86,16 +86,30 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
                     .filter((a): a is (typeof AXIS_KEYS)[number] =>
                       (AXIS_KEYS as readonly string[]).includes(a),
                     )
-                    .map((a) => t(`axis.${a}`))
-                    .join(', ');
+                    .map((a) => t(`axis.${a}`));
                   return (
                     <td key={m} className="text-center">
-                      <span
-                        className="text-destructive cursor-help"
-                        title={reasons}
-                        aria-label={`${t('denied')}: ${reasons}`}
-                      >
-                        ✗
+                      {/* title 어트리뷰트 툴팁은 표시 지연·무시되는 환경이 있어
+                          CSS 팝오버로 대체 — hover 와 키보드 focus 둘 다 동작한다. */}
+                      <span className="relative inline-flex group">
+                        <button
+                          type="button"
+                          className="text-destructive rounded-sm px-0.5 leading-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          aria-label={`${t('denied')}: ${reasons.join(', ')}`}
+                        >
+                          ✗
+                        </button>
+                        <span
+                          role="tooltip"
+                          className="pointer-events-none invisible absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-56 -translate-x-1/2 rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                        >
+                          <span className="block font-medium mb-1">{t('deniedTitle')}</span>
+                          <ul className="list-disc pl-3.5 space-y-0.5">
+                            {reasons.map((r) => (
+                              <li key={r}>{r}</li>
+                            ))}
+                          </ul>
+                        </span>
                       </span>
                     </td>
                   );
