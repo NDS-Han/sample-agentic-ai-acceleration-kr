@@ -6,13 +6,13 @@
 import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import type { ModelListItem } from '@/types/entities';
-import { activateModelAction, deleteModelAction } from '@/lib/actions/models';
+import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
-import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
+import { DeleteModelDialog } from './DeleteModelDialog';
 
 interface ModelsTableProps {
   models: ModelListItem[];
@@ -58,24 +58,6 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const handleDelete = (model: ModelListItem) => {
     setSelectedModel(model);
     setDeleteDialogOpen(true);
-  };
-
-  const confirmDelete = () => {
-    if (!selectedModel) return;
-    const alias = selectedModel.alias;
-    startTransition(async () => {
-      const result = await deleteModelAction(alias);
-      if (result.success) {
-        toast({
-          type: 'success',
-          message: t('deleteSuccess', { alias }),
-          auto_dismiss_ms: 3000,
-        });
-      } else {
-        // 409(기본 모델 참조 중) 등 서버 메시지를 그대로 보여준다.
-        toast({ type: 'error', message: result.error, auto_dismiss_ms: 6000 });
-      }
-    });
   };
 
   const handleActivate = (model: ModelListItem) => {
@@ -214,17 +196,13 @@ export function ModelsTable({ models }: ModelsTableProps) {
         model={selectedModel}
       />
 
-      <ConfirmDialog
+      <DeleteModelDialog
         isOpen={deleteDialogOpen}
         onClose={() => {
           setDeleteDialogOpen(false);
           setSelectedModel(null);
         }}
-        onConfirm={confirmDelete}
-        title={t('deleteTitle')}
-        message={t('deleteMessage', { alias: selectedModel?.alias ?? '' })}
-        confirmLabel={t('delete')}
-        isDestructive
+        model={selectedModel}
       />
     </>
   );

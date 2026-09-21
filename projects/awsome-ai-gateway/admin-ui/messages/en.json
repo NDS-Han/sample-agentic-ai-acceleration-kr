@@ -427,9 +427,10 @@
     },
     "delete": "Delete",
     "deleteTitle": "Delete model",
-    "deleteMessage": "Delete model '{alias}'. Policies referencing it (allowed models, rate limits, downgrade rules, pricing history) are removed too; usage records are preserved. Continue?",
+    "deleteMessage": "Delete model '{alias}'. Policies referencing it (allowed models, rate limits, downgrade rules, pricing history) are removed too; usage records are preserved.",
     "deleteAria": "Delete {alias}",
-    "deleteSuccess": "Model '{alias}' deleted."
+    "deleteSuccess": "Model '{alias}' deleted.",
+    "deleteTypeToConfirm": "To confirm, type the model alias '{alias}':"
   },
   "rateLimits": {
     "title": "Rate Limits",
