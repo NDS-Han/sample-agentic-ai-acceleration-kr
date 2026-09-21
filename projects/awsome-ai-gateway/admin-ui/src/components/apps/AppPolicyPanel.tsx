@@ -9,13 +9,13 @@ import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { FormError } from '@/components/common/FormError';
-import { Badge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { useToast } from '@/components/common/ToastProvider';
 import {
   CLIENTS as GATEWAY_CLIENTS,
   CLIENT_LABELS,
+  CLIENT_SHORT_LABELS,
   modelAllowsClient,
   modelAppScope,
 } from '@/lib/constants/gateway';
@@ -266,32 +266,41 @@ export function AppPolicyPanel() {
                       <Tr key={m.alias}>
                         <Td emphasis className="font-mono mono-id text-xs">{m.alias}</Td>
                         <Td>
-                          {/* 세 상태를 세 가지로 표시한다. 예전엔 `[]`(전면 거부) 가
-                              ['cowork'] 같은 평범한 부분 허용과 똑같은 em-dash 로 보였다 —
-                              전면 거부를 만드는 화면이 그 상태를 숨기고 있었던 셈이다.
-                              판정은 `modelAppScope` 로만 한다(3갈래 판정의 사본을 만들지 않는다). */}
+                          {/* 앱 상태 = 앱별 고정 칩 3개 — 켜짐(teal)/꺼짐(dim)으로 커버리지를
+                              한눈에 읽게 한다. 예전 표시(전체 배지/전면 거부 배지/— 대시)는
+                              부분 허용의 "어떤 앱인지" 를 숨기고 세 상태의 형식이 달라
+                              행 비교가 안 됐다.
+                              NULL(전체 허용) 은 세 칩이 모두 켜진 것과 같지만 "향후 추가 앱도
+                              포함" 이라는 별도 의미가 있으므로 title/sr-only 로 구분한다. */}
                           {(() => {
                             const scope = modelAppScope(m.allowed_clients);
-                            if (scope.kind === 'unrestricted') {
-                              return <Badge tone="neutral">{t('allBadge')}</Badge>;
-                            }
-                            if (scope.kind === 'none') {
-                              // 배지 문구 자체가 "전체 허용" 열 안에서 홀로 읽혀도 뜻이 통해야 한다.
-                              // 예전 문구는 '없음'/None 이었는데, 이 열에서 부분 허용이 쓰는 em-dash
-                              // 와 같은 뜻("전체 허용은 아님")으로 읽혀 전면 거부가 평범한 제한처럼
-                              // 보였다. 색(pink)은 보조 단서일 뿐이라 문구가 정본이어야 한다.
-                              //
-                              // 그리고 hover 전용 title 하나로 끝내지 않는다: <span> 은 포커스 대상이
-                              // 아니라 키보드 사용자에게는 tooltip 이 아예 열리지 않고, 스크린리더도
-                              // title 을 읽지 않는 조합이 흔하다. 같은 문장을 sr-only 로 한 번 더 둔다.
-                              return (
-                                <span title={t('noneHint')} className="cursor-help">
-                                  <Badge tone="pink">{t('noneBadge')}</Badge>
-                                  <span className="sr-only">{t('noneHint')}</span>
-                                </span>
-                              );
-                            }
-                            return <span className="text-muted-foreground">—</span>;
+                            const hint =
+                              scope.kind === 'unrestricted'
+                                ? t('appStatusUnrestrictedHint')
+                                : undefined;
+                            return (
+                              <span
+                                className="inline-flex items-center gap-1"
+                                title={hint}
+                              >
+                                {GATEWAY_CLIENTS.map((c) => {
+                                  const on = modelAllowsClient(m.allowed_clients, c);
+                                  return (
+                                    <span
+                                      key={c}
+                                      className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                                        on
+                                          ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'
+                                          : 'bg-muted/50 text-muted-foreground/50 line-through'
+                                      }`}
+                                    >
+                                      {CLIENT_SHORT_LABELS[c]}
+                                    </span>
+                                  );
+                                })}
+                                {hint && <span className="sr-only">{hint}</span>}
+                              </span>
+                            );
                           })()}
                         </Td>
                         <Td>

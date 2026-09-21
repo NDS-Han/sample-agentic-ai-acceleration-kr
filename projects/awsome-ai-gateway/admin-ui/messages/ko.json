@@ -963,7 +963,7 @@
     "toggleSaved": "허용 설정이 변경되었습니다.",
     "modelManagement": "모델 허용 관리",
     "colAlias": "모델 Alias",
-    "colAllowAll": "전체 허용",
+    "colAllowAll": "앱 상태",
     "colAllowThisApp": "이 앱 허용",
     "noModels": "모델이 없습니다.",
     "allBadge": "전체",
@@ -984,6 +984,7 @@
     "webSearchSaved": "웹서치 설정이 저장되었습니다.",
     "colAccess": "구분",
     "accessExplicit": "명시 허용",
-    "accessUnrestricted": "제한 없음"
+    "accessUnrestricted": "제한 없음",
+    "appStatusUnrestrictedHint": "제한 없음 — 향후 추가되는 앱도 자동 포함"
   }
 }

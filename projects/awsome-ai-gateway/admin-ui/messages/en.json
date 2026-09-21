@@ -963,7 +963,7 @@
     "toggleSaved": "Access setting updated.",
     "modelManagement": "Model access",
     "colAlias": "Model alias",
-    "colAllowAll": "All apps",
+    "colAllowAll": "App status",
     "colAllowThisApp": "This app",
     "noModels": "No models.",
     "allBadge": "All",
@@ -984,6 +984,7 @@
     "webSearchSaved": "Web search setting saved.",
     "colAccess": "Access",
     "accessExplicit": "explicit",
-    "accessUnrestricted": "unrestricted"
+    "accessUnrestricted": "unrestricted",
+    "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically"
   }
 }
