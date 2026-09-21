@@ -152,7 +152,10 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
         onSelectUser={handleSelectUser}
       />
       <div className="flex gap-0 border rounded-lg overflow-hidden min-h-[600px]">
-      <div className="w-72 border-r overflow-y-auto">
+      {/* shrink-0: 우측 패널의 넓은 내용(유효 정책 매트릭스 등)이 트리 열을
+          0폭까지 수축시키는 것을 막는다. 우측은 min-w-0 으로 수축을 허용해
+          내부 overflow-x-auto 가 대신 동작한다. */}
+      <div className="w-72 shrink-0 border-r overflow-y-auto">
         {root ? (
           <OrgTree
             node={root}
@@ -165,7 +168,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
           <p className="p-4 text-muted-foreground text-sm">{t('noOrgData')}</p>
         )}
       </div>
-      <div className="flex-1 p-6">
+      <div className="flex-1 min-w-0 p-6">
         <OrgDetailPanel node={selectedNode} />
       </div>
       </div>
