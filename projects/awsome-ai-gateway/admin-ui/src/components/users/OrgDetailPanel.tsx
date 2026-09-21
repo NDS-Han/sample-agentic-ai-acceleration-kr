@@ -24,6 +24,7 @@ import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { TeamModelPermissionPanel } from '@/components/users/TeamModelPermissionPanel';
 
 interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
@@ -517,6 +518,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
 
 function TeamPanel({ node }: { node: OrgTreeNode }) {
   const t = useTranslations('users');
+  const tm = useTranslations('models');
   const tc = useTranslations('common');
   const { toast } = useToast();
   const router = useRouter();
@@ -524,9 +526,17 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [isLeaderPending, startLeaderTransition] = useTransition();
   const [selectedMemberId, setSelectedMemberId] = useState('');
+  const [teamModels, setTeamModels] = useState<ModelListItem[]>([]);
   // 해제할 리더를 확인 모달에서 명확히 지정 — 팀에 리더가 여러 명일 수 있으므로
   // "리더 해제" 버튼 하나로는 어느 사람을 내릴지 알 수 없다.
   const [leaderToRemove, setLeaderToRemove] = useState<{ id: string; name: string } | null>(null);
+
+  // 팀별 허용 모델 패널용 모델 목록 — 팀 상세가 열릴 때만 로드한다.
+  useEffect(() => {
+    listActiveModelsAction().then((r) => {
+      if (r.success) setTeamModels(r.data);
+    });
+  }, []);
 
   const memberCount = node.meta.member_count ?? 0;
   const members = node.children ?? [];
@@ -671,6 +681,11 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
           </div>
         </div>
       )}
+
+      <div className="mb-4">
+        <p className="text-sm font-medium mb-2">{tm('teamModelAccess')}</p>
+        <TeamModelPermissionPanel teamId={node.id} models={teamModels} />
+      </div>
 
       <SpinnerButton
         type="button"

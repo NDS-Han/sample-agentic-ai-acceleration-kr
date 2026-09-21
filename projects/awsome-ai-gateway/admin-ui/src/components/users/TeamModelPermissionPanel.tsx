@@ -23,16 +23,20 @@ interface TeamOption {
 }
 
 interface TeamModelPermissionPanelProps {
-  teams: TeamOption[];
+  // 팀 상세(OrgDetailPanel)에 임베드될 때는 teamId 를 직접 받고 드롭다운을 숨긴다.
+  // 미제공 시 기존 동작 — 드롭다운으로 팀을 고른다.
+  teamId?: string;
+  teams?: TeamOption[];
   allTeams?: TeamOption[];
   models: ModelListItem[];
 }
 
-export function TeamModelPermissionPanel({ teams, allTeams, models }: TeamModelPermissionPanelProps) {
+export function TeamModelPermissionPanel({ teamId, teams = [], allTeams, models }: TeamModelPermissionPanelProps) {
   const t = useTranslations('models');
   const { toast } = useToast();
   const [isPending, startTransition] = useTransition();
-  const [selectedTeamId, setSelectedTeamId] = useState('');
+  const [pickedTeamId, setPickedTeamId] = useState('');
+  const selectedTeamId = teamId ?? pickedTeamId;
   const [allowedAliases, setAllowedAliases] = useState<string[]>([]);
   const [hasRestrictions, setHasRestrictions] = useState(false);
   const [loaded, setLoaded] = useState(false);
@@ -102,20 +106,24 @@ export function TeamModelPermissionPanel({ teams, allTeams, models }: TeamModelP
   return (
     <div className="space-y-4 glass rounded-apple p-4">
       <div className="flex items-center gap-4">
-        <label className="text-sm font-medium">{t('selectTeam')}</label>
-        <select
-          value={selectedTeamId}
-          onChange={e => setSelectedTeamId(e.target.value)}
-          className="rounded-md border border-input bg-background px-3 py-1.5 text-sm"
-        >
-          <option value="">{t('selectTeamPlaceholder')}</option>
-          {visibleTeams.map(t => (
-            <option key={t.id} value={t.id}>
-              {t.department_name ? `${t.name} (${t.department_name})` : t.name}
-            </option>
-          ))}
-        </select>
-        {allTeams && allTeams.length > teams.length && (
+        {!teamId && (
+          <>
+            <label className="text-sm font-medium">{t('selectTeam')}</label>
+            <select
+              value={pickedTeamId}
+              onChange={e => setPickedTeamId(e.target.value)}
+              className="rounded-md border border-input bg-background px-3 py-1.5 text-sm"
+            >
+              <option value="">{t('selectTeamPlaceholder')}</option>
+              {visibleTeams.map(t => (
+                <option key={t.id} value={t.id}>
+                  {t.department_name ? `${t.name} (${t.department_name})` : t.name}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+        {!teamId && allTeams && allTeams.length > teams.length && (
           <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground">
             <input
               type="checkbox"
