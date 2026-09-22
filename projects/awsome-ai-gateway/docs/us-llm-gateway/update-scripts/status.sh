@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # status.sh — which updates this gateway has applied
 #
-# WHAT: probe the live system and report US-02 … US-07 as
+# WHAT: probe the live system and report US-02 … US-07 and US-12 as
 #       applied, partially applied, or not applied. Prints the next command
 #       for each.
 # WHY:  what an update produces lives OUTSIDE git — a routing_profiles row, a
@@ -331,6 +331,61 @@ probe_us07() {
   raw "${ev%$'\n'}"
 }
 
+# ── US-12 — admin console Cognito login (optional) ──────────────────────────
+# The evidence is the running Deployments' env, not the values file (values can
+# be edited and not yet rolled out). Cognito login is live when admin-ui carries
+# OIDC_CLIENT_ID; it only works if OIDC_REDIRECT_URI is registered on that app
+# client, which is read from Cognito itself (pool id = last segment of the
+# admin-api issuer URL). dev-login still on = "partial": it is the intended
+# state between the two rollouts (ops/8-L-admin-login.md). No login at all,
+# with dev-login off, is the one state where nobody can sign in — a failure.
+probe_us12() {
+  local ui api cid redir ui_dev api_dev issuer pool cbs cb_ok=0
+  ui=$(kubectl get deploy "${HELM_RELEASE}-admin-ui" -n "$NS" -o json 2>/dev/null)
+  api=$(kubectl get deploy "${HELM_RELEASE}-admin-api" -n "$NS" -o json 2>/dev/null)
+  if [ -z "$ui" ] || [ -z "$api" ]; then
+    row warn "US-12" "admin 콘솔 Cognito 로그인 — 판정 불가"
+    detail "admin-ui·admin-api Deployment 를 읽지 못했습니다 (kubectl get deploy -n $NS)"
+    return
+  fi
+  envval() { jq -r --arg k "$2" '[.spec.template.spec.containers[0].env[]? | select(.name == $k) | .value] | last // ""' <<<"$1"; }
+  cid=$(envval "$ui" OIDC_CLIENT_ID); redir=$(envval "$ui" OIDC_REDIRECT_URI)
+  ui_dev=$(envval "$ui" DEV_LOGIN_ENABLED); api_dev=$(envval "$api" DEV_LOGIN_ENABLED)
+  issuer=$(envval "$api" OIDC_ISSUER_URL); pool=${issuer##*/}
+  if [ -n "$cid" ]; then
+    # A failed read is "cannot tell", never "not registered".
+    if [ -z "$redir" ] || [ -z "$pool" ] \
+       || ! cbs=$(aws cognito-idp describe-user-pool-client --user-pool-id "$pool" --client-id "$cid" \
+                  --query 'UserPoolClient.CallbackURLs' --output json 2>/dev/null) \
+       || ! cbs=$(jq -r '.[]?' <<<"$cbs" 2>/dev/null); then
+      row warn "US-12" "admin 콘솔 Cognito 로그인 — 판정 불가"
+      detail "Cognito 앱 클라이언트 $cid 의 콜백을 읽지 못했습니다 (pool=${pool:-?}, redirect=${redir:-?})"
+      return
+    fi
+    [[ $'\n'"$cbs"$'\n' == *$'\n'"$redir"$'\n'* ]] && cb_ok=1
+  fi
+  if [ -n "$cid" ] && [ "$cb_ok" = 0 ]; then
+    row bad "US-12" "admin 콘솔 Cognito 로그인 — 콜백 미등록 (로그인 실패)"
+    detail "admin-ui 가 $redir 로 돌아오게 하는데 Cognito 앱 클라이언트 $cid 에 그 주소가 없습니다"
+    TODO+=("bash 19-admin-login.sh callback   # tfvars → terraform plan/apply")
+  elif [ -n "$cid" ] && [ "$ui_dev" != true ] && [ "$api_dev" != true ]; then
+    row ok "US-12" "admin 콘솔 Cognito 로그인 (dev-login 꺼짐)"
+    detail "admin-ui → Cognito 로그인 → ADMIN_GROUPS 그룹만 관리자"
+  elif [ -n "$cid" ]; then
+    row warn "US-12" "admin 콘솔 Cognito 로그인 — 일부 적용 (dev-login 아직 켜짐)"
+    detail "브라우저로 Cognito 로그인을 확인했으면 dev-login 을 끕니다 (admin-api=$api_dev, admin-ui=$ui_dev)"
+    TODO+=("bash 19-admin-login.sh dev-login-off   # 그다음 install-eks.sh")
+  elif [ "$ui_dev" != true ]; then
+    row bad "US-12" "admin 콘솔 로그인 경로 없음 — Cognito 로그인도 dev-login 도 꺼짐"
+    detail "아무도 admin 콘솔에 들어갈 수 없습니다 — ops/8-L-admin-login.md 로 Cognito 로그인을 켭니다"
+    TODO+=("bash 19-admin-login.sh   # 상태 점검부터")
+  else
+    row skip "US-12" "admin 콘솔 Cognito 로그인 — 미적용 (선택 · 지금은 dev-login)"
+    detail "admin 주소에 닿는 사람은 누구나 관리자 — ops/8-L-admin-login.md · 네트워크로만 막는 대안은 ops/8-S-hardening.md"
+  fi
+  raw "admin-ui OIDC_CLIENT_ID=${cid:-<none>} OIDC_REDIRECT_URI=${redir:-<none>} DEV_LOGIN_ENABLED=${ui_dev:-<unset>}"$'\n'"admin-api DEV_LOGIN_ENABLED=${api_dev:-<unset>} pool=${pool:-<none>} callback registered=$cb_ok"
+}
+
 # ── Report ──────────────────────────────────────────────────────────────────
 echo
 printf '%s AWSome AI Gateway 해외 배포판 — 업데이트 적용 상태%s\n' "$c_bold" "$c_reset"
@@ -346,6 +401,7 @@ probe_us04
 probe_us05
 probe_us06
 probe_us07
+probe_us12
 
 echo
 if [ "${#TODO[@]}" -eq 0 ]; then
