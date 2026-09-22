@@ -299,7 +299,8 @@
     "unallocated": "Unallocated",
     "setByAdmin": "Set by admin",
     "noLedTeams": "No teams you lead. Ask an administrator to assign you as a team leader.",
-    "allocationExceeds": "Allocated total (${allocated}) exceeds the team budget (${budget})."
+    "allocationExceeds": "Allocated total (${allocated}) exceeds the team budget (${budget}).",
+    "noRules": "No rules yet — add one below."
   },
   "models": {
     "title": "Model Management",

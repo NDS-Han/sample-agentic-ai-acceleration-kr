@@ -5,6 +5,7 @@
 
 import { useState, useTransition, useEffect } from 'react';
 import { useTranslations } from 'next-intl';
+import { TrendingDown, ArrowRight, Plus, X } from 'lucide-react';
 import { useToast } from '@/components/common/ToastProvider';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import {
@@ -29,6 +30,7 @@ interface AutoDowngradeConfigProps {
 
 export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: AutoDowngradeConfigProps) {
   const t = useTranslations('budgets');
+  const tc = useTranslations('common');
   const { toast } = useToast();
   const [isPending, startTransition] = useTransition();
   const [enabled, setEnabled] = useState(false);
@@ -127,13 +129,31 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   }
 
   return (
-    <div className="space-y-4 glass rounded-apple p-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h3 className="text-base font-semibold">{scopeName}</h3>
-          <p className="text-xs text-muted-foreground">{t('autoDowngrade')}</p>
+    <div className="space-y-4 rounded-apple border border-border/60 bg-muted/20 p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="flex items-center gap-3 min-w-0">
+          <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <TrendingDown size={17} />
+          </div>
+          <div className="min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="text-sm font-semibold truncate">{t('autoDowngrade')}</h3>
+              <span
+                className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                  enabled
+                    ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : 'bg-muted text-muted-foreground'
+                }`}
+              >
+                {enabled ? tc('enabled') : tc('disabled')}
+              </span>
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground truncate">
+              {t('autoDowngradeDesc', { scope: scopeName })}
+            </p>
+          </div>
         </div>
-        <label className="flex items-center gap-2 cursor-pointer">
+        <label className="flex shrink-0 items-center gap-2 cursor-pointer pt-1">
           <div className="relative inline-flex items-center">
             <input
               type="checkbox"
@@ -141,94 +161,107 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
               onChange={e => setEnabled(e.target.checked)}
               className="sr-only peer"
             />
-            <div className="w-9 h-5 bg-muted-foreground/30 peer-checked:bg-primary rounded-full transition-colors after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:w-4 after:h-4 after:bg-background after:rounded-full after:transition-transform peer-checked:after:translate-x-4" />
+            <div className="w-10 h-[22px] bg-muted-foreground/30 peer-checked:bg-primary rounded-full transition-colors after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:w-4 after:h-4 after:bg-background after:rounded-full after:shadow-sm after:transition-transform peer-checked:after:translate-x-[18px]" />
           </div>
-          <span className="text-sm">{t('configure')}</span>
         </label>
       </div>
 
       {enabled && (
-        <>
-          {rules.length > 0 && (
-            <div className="flex flex-wrap items-center gap-2 rounded-md bg-muted/30 p-3">
-              <span className="text-xs font-medium text-muted-foreground">{t('downgradeChain')}</span>
-              {rules
-                .sort((a, b) => (parseInt(a.threshold_pct) || 0) - (parseInt(b.threshold_pct) || 0))
-                .map((rule, i) => (
-                  <span key={i} className="flex items-center gap-1 text-xs">
-                    <span className="badge badge-pink font-mono">
-                      {rule.from_model_alias}
-                    </span>
-                    <span className="text-muted-foreground">&rarr;</span>
-                    <span className="badge badge-teal font-mono">
-                      {rule.to_model_alias}
-                    </span>
-                    <span className="text-muted-foreground">({rule.threshold_pct}%)</span>
-                    {i < rules.length - 1 && <span className="text-muted-foreground mx-1">|</span>}
+        <div className="space-y-3">
+          {rules.length === 0 ? (
+            <div className="rounded-xl border border-dashed border-border px-4 py-5 text-center text-xs text-muted-foreground">
+              {t('noRules')}
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {rules.map((rule, index) => (
+                <div
+                  key={index}
+                  className="group flex items-center gap-2 rounded-xl border border-border/60 bg-background/60 px-3 py-2"
+                >
+                  <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold tabular-nums text-muted-foreground">
+                    {index + 1}
                   </span>
-                ))}
+                  <select
+                    value={rule.from_model_alias}
+                    onChange={e => updateRule(index, 'from_model_alias', e.target.value)}
+                    className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    {activeModels.map(m => (
+                      <option key={m.alias} value={m.alias}>{m.alias}</option>
+                    ))}
+                  </select>
+                  <ArrowRight size={14} className="shrink-0 text-muted-foreground" />
+                  <select
+                    value={rule.to_model_alias}
+                    onChange={e => updateRule(index, 'to_model_alias', e.target.value)}
+                    className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                  >
+                    {activeModels.map(m => (
+                      <option key={m.alias} value={m.alias}>{m.alias}</option>
+                    ))}
+                  </select>
+                  <div className="flex shrink-0 items-center gap-1 rounded-lg border border-input bg-background px-2 py-1 focus-within:ring-1 focus-within:ring-ring">
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={rule.threshold_pct}
+                      onChange={e => updateRule(index, 'threshold_pct', e.target.value)}
+                      className="w-10 bg-transparent text-center text-xs tabular-nums focus:outline-none"
+                    />
+                    <span className="text-[10px] text-muted-foreground">%</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => removeRule(index)}
+                    className="shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-destructive/10 hover:text-destructive focus-visible:opacity-100 group-hover:opacity-100"
+                    title={tc('delete')}
+                    aria-label={tc('delete')}
+                  >
+                    <X size={14} />
+                  </button>
+                </div>
+              ))}
             </div>
           )}
-
-          <div className="space-y-2">
-            {rules.map((rule, index) => (
-              <div key={index} className="flex items-center gap-2 rounded-md border p-2">
-                <select
-                  value={rule.from_model_alias}
-                  onChange={e => updateRule(index, 'from_model_alias', e.target.value)}
-                  className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-                >
-                  {activeModels.map(m => (
-                    <option key={m.alias} value={m.alias}>{m.alias}</option>
-                  ))}
-                </select>
-                <span className="text-sm text-muted-foreground">&rarr;</span>
-                <select
-                  value={rule.to_model_alias}
-                  onChange={e => updateRule(index, 'to_model_alias', e.target.value)}
-                  className="flex-1 rounded-md border border-input bg-background px-2 py-1.5 text-sm"
-                >
-                  {activeModels.map(m => (
-                    <option key={m.alias} value={m.alias}>{m.alias}</option>
-                  ))}
-                </select>
-                <input
-                  type="number"
-                  min={1}
-                  max={100}
-                  value={rule.threshold_pct}
-                  onChange={e => updateRule(index, 'threshold_pct', e.target.value)}
-                  className="w-16 rounded-md border border-input bg-background px-2 py-1.5 text-sm text-center"
-                />
-                <span className="text-xs text-muted-foreground">%</span>
-                <button
-                  type="button"
-                  onClick={() => removeRule(index)}
-                  className="text-destructive hover:text-destructive/80 text-sm px-1"
-                  title="삭제"
-                >
-                  &times;
-                </button>
-              </div>
-            ))}
-          </div>
 
           <button
             type="button"
             onClick={addRule}
-            className="text-sm text-primary hover:underline"
+            className="flex w-full items-center justify-center gap-1.5 rounded-xl border border-dashed border-border px-3 py-2 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:bg-primary/5 hover:text-primary"
           >
+            <Plus size={13} />
             {t('addRule')}
           </button>
-        </>
+
+          {rules.length > 1 && (
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 rounded-xl bg-muted/30 px-3 py-2.5">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {t('downgradeChain')}
+              </span>
+              {[...rules]
+                .sort((a, b) => (parseInt(a.threshold_pct) || 0) - (parseInt(b.threshold_pct) || 0))
+                .map((rule, i) => (
+                  <span key={i} className="flex items-center gap-1 text-xs">
+                    <span className="badge badge-pink font-mono">{rule.from_model_alias}</span>
+                    <ArrowRight size={11} className="text-muted-foreground" />
+                    <span className="badge badge-teal font-mono">{rule.to_model_alias}</span>
+                    <span className="tabular-nums text-muted-foreground">@{rule.threshold_pct}%</span>
+                    {i < rules.length - 1 && <span className="mx-0.5 text-border">·</span>}
+                  </span>
+                ))}
+            </div>
+          )}
+        </div>
       )}
 
-      <div className="flex items-center gap-3 pt-2 border-t">
+      <div className="flex items-center gap-3 border-t border-border/60 pt-3">
         <SpinnerButton
           onClick={handleSave}
           isLoading={isPending}
           disabled={!enabled && rules.length === 0}
-          className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-md text-sm font-medium disabled:opacity-50"
+          className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
         >
           {t('saveConfig')}
         </SpinnerButton>

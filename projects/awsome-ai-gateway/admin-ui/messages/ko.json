@@ -299,7 +299,8 @@
     "unallocated": "미배분 잔액",
     "setByAdmin": "관리자 설정",
     "noLedTeams": "리더로 지정된 팀이 없습니다. 관리자에게 팀 리더 지정을 요청하세요.",
-    "allocationExceeds": "배분 금액의 합계(${allocated})가 팀 예산(${budget})을 초과합니다."
+    "allocationExceeds": "배분 금액의 합계(${allocated})가 팀 예산(${budget})을 초과합니다.",
+    "noRules": "규칙이 없습니다 — 아래 버튼으로 추가하세요."
   },
   "models": {
     "title": "모델 관리",
