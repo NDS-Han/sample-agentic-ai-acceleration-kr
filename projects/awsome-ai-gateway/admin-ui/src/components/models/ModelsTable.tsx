@@ -12,7 +12,7 @@ import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 import { cn } from '@/lib/utils/cn';
-import { ChevronDown, ChevronRight, Pencil, Power, PowerOff, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Pencil, Trash2 } from 'lucide-react';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
@@ -32,8 +32,54 @@ function ProviderBadge({ provider }: { provider: string }) {
   return <Badge tone={toneMap[provider.toLowerCase()] ?? 'neutral'}>{provider}</Badge>;
 }
 
-function StatusBadge({ isActive, activeLabel, inactiveLabel }: { isActive: boolean; activeLabel: string; inactiveLabel: string }) {
-  return <Badge tone={isActive ? 'teal' : 'neutral'}>{isActive ? activeLabel : inactiveLabel}</Badge>;
+/** Status 컬럼의 토글 스위치 — 상태 표시와 on/off 조작을 한 컨트롤로 합친다.
+ *  ON: 초록 트랙 + 우측 노브(점등), OFF: 무채색 트랙 + 좌측 노브(소등).
+ *  켜기는 즉시 실행, 끄기는 확인 다이얼로그를 거친다(기존 동작 유지). */
+function StatusToggle({
+  isActive,
+  onClick,
+  disabled,
+  label,
+}: {
+  isActive: boolean;
+  onClick: () => void;
+  disabled?: boolean;
+  label: string;
+}) {
+  return (
+    <span className="relative inline-flex group">
+      <button
+        type="button"
+        role="switch"
+        aria-checked={isActive}
+        aria-label={label}
+        title={label}
+        onClick={onClick}
+        disabled={disabled}
+        className={cn(
+          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
+          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
+          isActive
+            ? 'bg-teal-500 shadow-[0_0_8px_rgba(20,184,166,0.45)]'
+            : 'bg-muted-foreground/30',
+        )}
+      >
+        <span
+          aria-hidden="true"
+          className={cn(
+            'inline-block size-3.5 rounded-full bg-white shadow transition-transform',
+            isActive ? 'translate-x-[19px]' : 'translate-x-[3px]',
+          )}
+        />
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none invisible absolute left-1/2 top-full z-50 mt-1 -translate-x-1/2 whitespace-nowrap rounded-md border border-border bg-popover px-2 py-1 text-xs text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+      >
+        {label}
+      </span>
+    </span>
+  );
 }
 
 function formatNumber(n: number): string {
@@ -151,7 +197,17 @@ export function ModelsTable({ models }: ModelsTableProps) {
                   <Td numeric>{fmtPricePerM(model.input_price_per_1k)}</Td>
                   <Td numeric>{fmtPricePerM(model.output_price_per_1k)}</Td>
                   <Td>
-                    <StatusBadge isActive={model.is_active} activeLabel={t('active')} inactiveLabel={t('inactive')} />
+                    <div className="flex items-center gap-2">
+                      <StatusToggle
+                        isActive={model.is_active}
+                        disabled={isPending}
+                        label={model.is_active ? `${t('active')} — ${t('deactivate')}` : `${t('inactive')} — ${t('activate')}`}
+                        onClick={() => (model.is_active ? handleDeactivate(model) : handleActivate(model))}
+                      />
+                      <span className={cn('text-xs', model.is_active ? 'text-teal-600 dark:text-teal-400' : 'text-muted-foreground')}>
+                        {model.is_active ? t('active') : t('inactive')}
+                      </span>
+                    </div>
                   </Td>
                   <Td>
                     {/* 아이콘 버튼 — 라벨 길이(활성화/비활성화)가 달라도 행마다 위치가 정렬된다 */}
@@ -159,15 +215,6 @@ export function ModelsTable({ models }: ModelsTableProps) {
                       <IconAction label={t('edit')} onClick={() => handleEdit(model)}>
                         <Pencil size={14} aria-hidden="true" />
                       </IconAction>
-                      {model.is_active ? (
-                        <IconAction label={t('deactivate')} onClick={() => handleDeactivate(model)} danger>
-                          <PowerOff size={14} aria-hidden="true" />
-                        </IconAction>
-                      ) : (
-                        <IconAction label={t('activate')} onClick={() => handleActivate(model)} disabled={isPending} accent>
-                          <Power size={14} aria-hidden="true" />
-                        </IconAction>
-                      )}
                       <IconAction label={t('delete')} onClick={() => handleDelete(model)} disabled={isPending} danger>
                         <Trash2 size={14} aria-hidden="true" />
                       </IconAction>
