@@ -36,6 +36,9 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   const [isPending, startTransition] = useTransition();
   const [enabled, setEnabled] = useState(false);
   const [rules, setRules] = useState<DowngradeRuleForm[]>([]);
+  // 마지막으로 저장된 스냅샷 — 이 값과 같은 규칙 행은 "저장됨" 초록 테두리로 표시.
+  // 편집하면 스냅샷과 어긋나 테두리가 풀리고, 새 규칙은 처음부터 테두리가 없다.
+  const [savedRules, setSavedRules] = useState<DowngradeRuleForm[]>([]);
   const [loaded, setLoaded] = useState(false);
 
   const activeModels = models.filter(m => m.is_active);
@@ -62,30 +65,23 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
       const result = await getDowngradeConfigAction(scopeType, scopeId);
       if (result.success) {
         setEnabled(result.data.enabled);
-        setRules(
-          result.data.rules.map(r => ({
-            from_model_alias: r.from_model_alias,
-            to_model_alias: r.to_model_alias,
-            threshold_pct: String(r.threshold_pct),
-          })),
-        );
+        const loaded = result.data.rules.map(r => ({
+          from_model_alias: r.from_model_alias,
+          to_model_alias: r.to_model_alias,
+          threshold_pct: String(r.threshold_pct),
+        }));
+        setRules(loaded);
+        setSavedRules(loaded);
       }
       setLoaded(true);
     });
   }, [scopeType, scopeId]);
 
   const addRule = () => {
-    // 기본 from 은 output 단가가 가장 높은 모델 — 저렴한 to 후보가 존재하도록.
-    const from = [...activeModels].sort(
-      (a, b) => b.output_price_per_1k - a.output_price_per_1k,
-    )[0]?.alias ?? '';
+    // 빈 규칙 — from/to 는 placeholder 를 보여주고 사용자가 고른다.
     setRules(prev => [
       ...prev,
-      {
-        from_model_alias: from,
-        to_model_alias: cheaperModels(from)[0]?.alias ?? '',
-        threshold_pct: '80',
-      },
+      { from_model_alias: '', to_model_alias: '', threshold_pct: '80' },
     ]);
   };
 
@@ -113,12 +109,16 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
       return;
     }
     for (const rule of rules) {
-      if (rule.from_model_alias === rule.to_model_alias) {
-        toast({ type: 'error', message: t('sameSourceTarget', { alias: rule.from_model_alias }), auto_dismiss_ms: 3000 });
+      if (!rule.from_model_alias) {
+        toast({ type: 'error', message: t('selectFromModel'), auto_dismiss_ms: 3000 });
         return;
       }
       if (!rule.to_model_alias) {
-        toast({ type: 'error', message: t('noCheaperModel', { alias: rule.from_model_alias }), auto_dismiss_ms: 4000 });
+        toast({ type: 'error', message: t('selectToModel'), auto_dismiss_ms: 3000 });
+        return;
+      }
+      if (rule.from_model_alias === rule.to_model_alias) {
+        toast({ type: 'error', message: t('sameSourceTarget', { alias: rule.from_model_alias }), auto_dismiss_ms: 3000 });
         return;
       }
       if (!cheaperModels(rule.from_model_alias).some(m => m.alias === rule.to_model_alias)) {
@@ -132,6 +132,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
         rules: rules.map(r => ({ ...r, threshold_pct: parseInt(r.threshold_pct) || 0 })),
       });
       if (result.success) {
+        setSavedRules(rules.map(r => ({ ...r })));
         toast({ type: 'success', message: t('downgradeSaved'), auto_dismiss_ms: 3000 });
       } else {
         let msg = result.error;
@@ -149,6 +150,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
       if (result.success) {
         setEnabled(false);
         setRules([]);
+        setSavedRules([]);
         toast({ type: 'success', message: t('downgradeCleared'), auto_dismiss_ms: 3000 });
       } else {
         toast({ type: 'error', message: result.error, auto_dismiss_ms: 5000 });
@@ -214,7 +216,16 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
               {rules.map((rule, index) => (
                 <div
                   key={index}
-                  className="group flex items-center gap-2 rounded-xl border border-border/60 bg-background/60 px-3 py-2"
+                  className={`group flex items-center gap-2 rounded-xl border px-3 py-2 ${
+                    savedRules.some(
+                      s =>
+                        s.from_model_alias === rule.from_model_alias &&
+                        s.to_model_alias === rule.to_model_alias &&
+                        s.threshold_pct === rule.threshold_pct,
+                    )
+                      ? 'border-emerald-500/60 bg-emerald-500/5'
+                      : 'border-border/60 bg-background/60'
+                  }`}
                 >
                   <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold tabular-nums text-muted-foreground">
                     {index + 1}
@@ -224,6 +235,11 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                     onChange={e => updateRule(index, 'from_model_alias', e.target.value)}
                     className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                   >
+                    {!rule.from_model_alias && (
+                      <option value="" disabled>
+                        {t('selectFromModel')}
+                      </option>
+                    )}
                     {activeModels.map(m => (
                       <option key={m.alias} value={m.alias}>
                         {m.alias} ({formatOutPrice(m)})
@@ -236,9 +252,11 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                     onChange={e => updateRule(index, 'to_model_alias', e.target.value)}
                     className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                   >
-                    {cheaperModels(rule.from_model_alias).length === 0 && (
+                    {!rule.to_model_alias && (
                       <option value="" disabled>
-                        {t('noCheaperModel', { alias: rule.from_model_alias })}
+                        {rule.from_model_alias && cheaperModels(rule.from_model_alias).length === 0
+                          ? t('noCheaperModel', { alias: rule.from_model_alias })
+                          : t('selectToModel')}
                       </option>
                     )}
                     {/* 기존 저장분이 필터에 걸리는 경우 현재 값을 유지해 보여준다

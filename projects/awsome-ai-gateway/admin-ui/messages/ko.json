@@ -280,6 +280,8 @@
     "downgradeChain": "다운그레이드 체인:",
     "configure": "설정하기",
     "addRule": "+ 규칙 추가",
+    "selectFromModel": "From 모델 선택",
+    "selectToModel": "To 모델 선택",
     "saveConfig": "설정 저장",
     "clearConfig": "설정 해제",
     "configLoading": "설정 로딩 중...",

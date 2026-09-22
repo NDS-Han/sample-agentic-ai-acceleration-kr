@@ -280,6 +280,8 @@
     "downgradeChain": "Downgrade chain:",
     "configure": "Configure",
     "addRule": "+ Add rule",
+    "selectFromModel": "Select From model",
+    "selectToModel": "Select To model",
     "saveConfig": "Save settings",
     "clearConfig": "Clear settings",
     "configLoading": "Loading settings...",
