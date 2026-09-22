@@ -66,7 +66,10 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
           통째로 비어 보여서 두 컬럼으로 배치한다. 규칙이 없으면 매트릭스만. */}
       <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
       {policy.downgrade_rules.length > 0 && (
-        <div className="min-w-64">
+        // max-w-xs + 배지 break-all: from/to 모델 alias 가 길면(global.anthropic.…)
+        // 컬럼이 무한정 넓어져 우측 매트릭스를 밀어낸다 — 폭을 제한하고 긴 이름은
+        // 배지 안에서 줄바꿈시킨다.
+        <div className="min-w-64 max-w-sm">
           <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
           <div className="rounded-md border border-border divide-y divide-border overflow-hidden">
             {policy.downgrade_rules.map((d, i) => (
@@ -80,9 +83,9 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
                   <span className="text-muted-foreground">{t('downgradeAtPre')}</span>
                   <Badge tone="amber">{d.threshold_pct}%</Badge>
                   <span className="text-muted-foreground">{t('downgradeAtPost')}</span>
-                  <Badge tone="neutral">{d.from_model_alias}</Badge>
+                  <Badge tone="neutral" className="break-all">{d.from_model_alias}</Badge>
                   <span className="text-muted-foreground" aria-hidden="true">→</span>
-                  <Badge tone="teal">{d.to_model_alias}</Badge>
+                  <Badge tone="teal" className="break-all">{d.to_model_alias}</Badge>
                 </div>
               </div>
             ))}
@@ -93,8 +96,10 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
       {/* 모델 × 앱 매트릭스 — 행=모델, 열=앱. 웹서치는 모델과 무관한 앱별 값이라
           표 맨 아래 행으로 둔다.
           w-auto 로 콤팩트하므로 횡 스크롤 래퍼는 뺀다 — overflow-x-auto 는
-          CSS 규칙상 overflow-y 도 auto 로 바꿔 ✗ 툴팁(위로 뜸)을 자른다. */}
-      <div>
+          CSS 규칙상 overflow-y 도 auto 로 바꿔 ✗ 툴팁(위로 뜸)을 자른다.
+          ml-auto(규칙 있을 때만): 다운그레이드와의 사이 공백을 가운데로 몰아
+          우측 정렬. 규칙이 없으면 왼쪽 끝에 둔다. */}
+      <div className={policy.downgrade_rules.length > 0 ? 'ml-auto' : ''}>
         <table className="w-auto text-xs">
           <thead>
             <tr className="border-b">
