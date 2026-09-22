@@ -634,6 +634,7 @@
       "used": "used",
       "rateLimits": "Rate limits",
       "downgrade": "Auto downgrade",
+      "downgradeNone": "No rules configured",
       "downgradeRule": "at {pct}% spend, {from} → {to}",
       "readonly": "Read-only",
       "scopeTeam": "Team",

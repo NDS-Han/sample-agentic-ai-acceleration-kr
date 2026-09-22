@@ -634,6 +634,7 @@
       "used": "사용",
       "rateLimits": "Rate Limit",
       "downgrade": "자동 다운그레이드",
+      "downgradeNone": "설정된 규칙 없음",
       "downgradeRule": "{pct}% 소진 시 {from} → {to} 전환",
       "readonly": "읽기 전용",
       "scopeTeam": "팀",
