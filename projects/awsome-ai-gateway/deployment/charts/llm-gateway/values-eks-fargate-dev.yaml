@@ -264,7 +264,7 @@ gatewayProxy:
     #   (REPORTING_TIMEZONE 설정화 periods·ttft·openai_compat·downgrade 등) 머지 빌드.
     # 1.0.85-scopeclients: VK allowed_clients 를 user→team→org 3단계 폴백으로 해결
     #   (auth.team_allowed_clients / auth.org_allowed_clients, alembic 0038).
-    tag: "1.0.85-scopeclients"
+    tag: "1.0.86-liverpm"
   serviceAccount:
     annotations:
       # CHANGE_ME (terraform output): IRSA role ARN. terraform output -raw gateway_proxy_role_arn
