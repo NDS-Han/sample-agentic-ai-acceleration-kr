@@ -481,7 +481,7 @@ adminUi:
     #   표시를 effective-policy 로 통합, /apps 앱 선택 버튼화 + 웹서치 선택앱 연동.
     # 1.0.112-gaugefix: 상속 모델 체크박스 프리필(modelsTouched 게이트), 예산 게이지,
     #   유효 정책 읽기전용 배지 + 다운그레이드 배지 표.
-    tag: "1.0.134-policyright"
+    tag: "1.0.135-dgnone"
   resources:
     requests:
       cpu: "500m"
