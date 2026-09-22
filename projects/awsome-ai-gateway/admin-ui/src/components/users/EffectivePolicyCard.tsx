@@ -91,10 +91,10 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
       )}
 
       {/* 모델 × 앱 매트릭스 — 행=모델, 열=앱. 웹서치는 모델과 무관한 앱별 값이라
-          표 맨 아래 행으로 둔다. */}
-      <div className="overflow-x-auto">
-        {/* w-full 이 아니라 w-auto — 표가 카드 너비만큼 늘어나면 모델명과 앱 체크
-            표시 사이에 빈 공백이 크게 벌어져 같은 행인지 읽기 어렵다. */}
+          표 맨 아래 행으로 둔다.
+          w-auto 로 콤팩트하므로 횡 스크롤 래퍼는 뺀다 — overflow-x-auto 는
+          CSS 규칙상 overflow-y 도 auto 로 바꿔 ✗ 툴팁(위로 뜸)을 자른다. */}
+      <div>
         <table className="w-auto text-xs">
           <thead>
             <tr className="border-b">
