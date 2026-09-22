@@ -91,12 +91,14 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
       {/* 모델 × 앱 매트릭스 — 행=모델, 열=앱. 웹서치는 모델과 무관한 앱별 값이라
           표 맨 아래 행으로 둔다. */}
       <div className="overflow-x-auto">
-        <table className="w-full text-xs">
+        {/* w-full 이 아니라 w-auto — 표가 카드 너비만큼 늘어나면 모델명과 앱 체크
+            표시 사이에 빈 공백이 크게 벌어져 같은 행인지 읽기 어렵다. */}
+        <table className="w-auto text-xs">
           <thead>
             <tr className="border-b">
-              <th className="text-left py-1 pr-2 font-medium text-muted-foreground">{t('model')}</th>
+              <th className="text-left py-1 pr-4 font-medium text-muted-foreground">{t('model')}</th>
               {clients.map((client) => (
-                <th key={client} className="text-center py-1 px-1 font-medium text-muted-foreground whitespace-nowrap">
+                <th key={client} className="text-center py-1 px-3 font-medium text-muted-foreground whitespace-nowrap">
                   {client}
                 </th>
               ))}
