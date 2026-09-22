@@ -61,10 +61,12 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
 
   return (
     <div className="space-y-3">
-      {/* 다운그레이드 규칙 — 모델 수만큼 아래로 길어지는 매트릭스보다 위에 둬야
-          스크롤 없이 보인다. [scope] [임계] [from → to] 배지 행 */}
+      {/* 좌: 다운그레이드 규칙(여러 개면 아래로 늘어남) / 우: 모델×앱 매트릭스.
+          매트릭스는 행=모델이라 모델 수만큼 길어지는데, 단일 컬럼이면 우측이
+          통째로 비어 보여서 두 컬럼으로 배치한다. 규칙이 없으면 매트릭스만. */}
+      <div className="flex flex-wrap items-start gap-x-6 gap-y-3">
       {policy.downgrade_rules.length > 0 && (
-        <div>
+        <div className="min-w-64">
           <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
           <div className="rounded-md border border-border divide-y divide-border overflow-hidden">
             {policy.downgrade_rules.map((d, i) => (
@@ -167,6 +169,7 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
             </tr>
           </tbody>
         </table>
+      </div>
       </div>
 
       {/* 모델 정책 출처 */}
