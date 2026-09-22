@@ -17,6 +17,7 @@ interface RateLimitTreeViewProps {
 }
 
 const EXPANDED_NODES_STORAGE_KEY = 'rateLimits:orgtree:expandedNodes';
+const SELECTED_NODE_STORAGE_KEY = 'rateLimits:selectedNode';
 
 /** 초기 펼침: 조직(ORGANIZATION)과 그 직계 부서(DEPARTMENT)만 펼친다.
  *  팀(TEAM)과 사용자(USER)는 사용자가 클릭해서 펼치도록 한다. */
@@ -43,10 +44,43 @@ function flattenRateTree(nodes: RateLimitTreeNode[]): Record<string, RateLimitTr
 
 export function RateLimitTreeView({ root, rateTree }: RateLimitTreeViewProps) {
   const t = useTranslations('rateLimits');
-  const [selectedOrgId, setSelectedOrgId] = useState<string | null>(null);
-  const [selectedRateLimit, setSelectedRateLimit] = useState<RateLimitTreeNode | null>(null);
+  // 선택은 노드 객체가 아니라 ID로 보관한다 — 저장 시 revalidatePath로 rateTree가
+  // 갱신돼도 파생 조회가 새 객체를 가리켜 패널에 최신 config가 보이고, 리마운트돼도
+  // sessionStorage에서 복원된다.
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const hasMountedRef = useRef(false);
+
+  const rateLimitMap = useMemo(() => flattenRateTree(rateTree), [rateTree]);
+  const globals = rateTree.filter((n) => n.scope === RateLimitScope.GLOBAL);
+
+  const selectedRateLimit = selectedId ? rateLimitMap[selectedId] ?? null : null;
+  const selectedOrgId =
+    selectedRateLimit?.scope === RateLimitScope.GLOBAL ? null : selectedId;
+
+  // 리마운트 시 선택 복원 (revalidatePath가 서버 컴포넌트를 리페치해 발생)
+  useEffect(() => {
+    try {
+      const id = sessionStorage.getItem(SELECTED_NODE_STORAGE_KEY);
+      if (id && rateLimitMap[id]) {
+        setSelectedId(id);
+      }
+    } catch {
+      // storage 비활성 환경 무시
+    }
+  }, [rateLimitMap]);
+
+  useEffect(() => {
+    try {
+      if (selectedId) {
+        sessionStorage.setItem(SELECTED_NODE_STORAGE_KEY, selectedId);
+      } else {
+        sessionStorage.removeItem(SELECTED_NODE_STORAGE_KEY);
+      }
+    } catch {
+      // quota/비활성 storage 무시
+    }
+  }, [selectedId]);
 
   // sessionStorage에서 펼침 상태 복원. 저장된 값이 없으면 기본값(조직+직계부서) 사용.
   useEffect(() => {
@@ -85,9 +119,6 @@ export function RateLimitTreeView({ root, rateTree }: RateLimitTreeViewProps) {
     }
   }, [expandedNodes]);
 
-  const rateLimitMap = useMemo(() => flattenRateTree(rateTree), [rateTree]);
-  const globals = rateTree.filter((n) => n.scope === RateLimitScope.GLOBAL);
-
   const handleToggle = (id: string) => {
     setExpandedNodes((prev: Set<string>) => {
       const next = new Set(prev);
@@ -98,13 +129,11 @@ export function RateLimitTreeView({ root, rateTree }: RateLimitTreeViewProps) {
   };
 
   const handleOrgSelect = (node: OrgTreeNode) => {
-    setSelectedOrgId(node.id);
-    setSelectedRateLimit(rateLimitMap[node.id] ?? null);
+    setSelectedId(node.id);
   };
 
   const handleGlobalSelect = (node: RateLimitTreeNode) => {
-    setSelectedOrgId(null);
-    setSelectedRateLimit(node);
+    setSelectedId(node.id);
   };
 
   return (
