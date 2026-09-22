@@ -12,7 +12,12 @@ import { parseJWT } from '@/lib/auth';
 import { checkPagePermission, isSessionExpired } from '@/lib/auth';
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
+  // icon.svg 는 app/icon.svg 에서 나오는 파비콘 — 제외하지 않으면 매 페이지 로드마다
+  // checkPagePermission('/icon.svg') 가 default-deny 에 걸려 307 → /403 이 되고,
+  // 브라우저는 이미지 요청으로 /403 HTML 을 받는다(네트워크 탭의 유령 403 의 정체).
+  matcher: [
+    '/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg|apple-icon\\.(?:png|svg)|robots\\.txt|sitemap\\.xml|manifest\\.(?:json|webmanifest)).*)',
+  ],
 };
 
 const SECURITY_HEADERS: Record<string, string> = {
