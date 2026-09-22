@@ -113,6 +113,15 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     pathname === '/login' ||
     pathname === '/403'
   ) {
+    // '/login' 은 로그아웃 상태의 페이지다. 클라이언트 측 401 핸들러가 쿠키를 지우지
+    // 않고 assign('/login') 하므로(만료 외에 admin-api 가 거절하는 유효 형태의 JWT —
+    // 서명키 교체·admin_jwt_configs 토글 등), 쿠키가 남은 채 /login 에 오면 layout 이
+    // 그걸 세션으로 해석해 사이드바+헤더 위에 로그인 폼이 겹쳐 그려진다. 쿠키를 들고
+    // 온 /login 요청은 지우고 한 번 더 /login 으로 보낸다 — 다음 요청은 쿠키 없이
+    // 도착해 깨끗한 전체화면 로그인이 렌더된다.
+    if (pathname === '/login' && request.cookies.get('admin_jwt')?.value) {
+      return redirectToLogin(request, true);
+    }
     return response;
   }
 

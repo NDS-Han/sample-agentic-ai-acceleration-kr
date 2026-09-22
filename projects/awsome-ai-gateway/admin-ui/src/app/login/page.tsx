@@ -3,7 +3,7 @@
 import { redirect } from 'next/navigation';
 import { cookies } from 'next/headers';
 import { LoginForm } from '@/components/auth/LoginForm';
-import { parseJWT } from '@/lib/auth';
+import { parseJWT, isSessionExpired } from '@/lib/auth';
 
 export default function LoginPage() {
   // 이미 유효한 세션이 있으면 로그인 폼 대신 대시보드로.
@@ -13,8 +13,9 @@ export default function LoginPage() {
   let hasValidSession = false;
   if (token) {
     try {
-      parseJWT(token);
-      hasValidSession = true;
+      // 만료된 토큰도 파싱은 성공한다 — '/' 로내면 middleware 가 다시
+      // /login 으로 튕기므로, 여기서 만료를 세션 무효로 보고 폼을 그린다.
+      hasValidSession = !isSessionExpired(parseJWT(token));
     } catch {
       // Malformed/expired token — fall through to show the login form.
     }

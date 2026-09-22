@@ -152,6 +152,28 @@ describe('middleware — session expiry', () => {
     expect(res.status).toBe(200);
     expect(res.headers.get('location')).toBeNull();
   });
+
+  it('/login WITH a stale cookie clears it and re-requests /login', async () => {
+    // 클라이언트 측 401 핸들러는 쿠키를 지우지 않고 assign('/login') 한다 —
+    // 쿠키가 남아 오면 layout 이 그걸 세션으로 해석해 셸 위에 로그인 폼이 겹친다.
+    // 삭제 후 /login 으로 한 번 더내면 다음 요청은 쿠키 없이 도착한다.
+    const res = await middleware(requestWith(tokenWithExp(-3600), '/login'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/login');
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain('admin_jwt=');
+    expect(setCookie).toMatch(/Max-Age=0|Expires=Thu, 01 Jan 1970/);
+  });
+
+  it('/login clears even a LIVE-looking cookie — admin-api 401 경유 도착 포함', async () => {
+    // 서명키 교체·admin_jwt_configs 토글처럼 "파싱·만료는 정상인데 admin-api 가
+    // 거절하는" 쿠키로 /login 에 도달할 수 있다. 이 경우도 지워야 한다 —
+    // 안 지우면 '/' ↔ /login 이 무한 루프다.
+    const res = await middleware(requestWith(tokenWithExp(3600), '/login'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/login');
+    expect(res.headers.get('set-cookie') ?? '').toContain('admin_jwt=');
+  });
 });
 
 describe('middleware — hosted-UI OIDC 배포에서는 /api/auth/login 이다', () => {
