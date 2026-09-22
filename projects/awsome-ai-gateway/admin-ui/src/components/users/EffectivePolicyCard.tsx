@@ -6,14 +6,16 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction } from '@/lib/actions/users';
-import { Badge } from '@/components/common/Badge';
+import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
-import type { EffectivePolicy, EffectivePolicyCell } from '@/types/entities';
+import type { EffectivePolicy, EffectivePolicyCell, ModelListItem } from '@/types/entities';
 
 interface Props {
   userId: string;
   /** 부모(UserPanel)가 이미 fetch한 정책을 넘기면 재조회를 건너뛴다. */
   policy?: EffectivePolicy | null;
+  /** 다운그레이드 다이어그램의 output 단가 표기용 — 없으면 단가 칸은 '—'. */
+  models?: ModelListItem[];
 }
 
 /** 거부 축 id → i18n 키 매핑. */
@@ -24,7 +26,7 @@ const AXIS_KEYS = ['user_app', 'user_model', 'model_app'] as const;
  * model×app 매트릭스(어느 축에서 막혔는지) + 예산·rate limit·downgrade·web search 요약.
  * 다운그레이드 규칙은 매트릭스보다 위에 둔다 — 모델 수만큼 표가 길어져도 스크롤 없이 보이게.
  */
-export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
+export function EffectivePolicyCard({ userId, policy: policyProp, models }: Props) {
   const t = useTranslations('users.effectivePolicy');
   const [fetched, setFetched] = useState<EffectivePolicy | null>(null);
   const [failed, setFailed] = useState(false);
@@ -69,28 +71,18 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
           컬럼이 무한정 넓어져 우측 매트릭스를 밀어낸다 — 폭을 제한하고 긴 이름은
           배지 안에서 줄바꿈시킨다. 규칙이 없어도 빈 상태를 명시한다 — 컬럼을
           통째로 없애면 왼쪽 공백이 "미설정" 인지 "로딩 실패" 인지 읽히지 않는다. */}
-      <div className="min-w-64 max-w-sm">
+      <div className="min-w-64 max-w-md">
         <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
         {policy.downgrade_rules.length > 0 ? (
-          <div className="rounded-md border border-border divide-y divide-border overflow-hidden">
-            {policy.downgrade_rules.map((d, i) => (
-              <div key={i} className="px-3 py-2 text-xs space-y-1.5">
-                <div>
-                  <Badge tone="sky">
-                    {d.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser')}
-                  </Badge>
-                </div>
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <span className="text-muted-foreground">{t('downgradeAtPre')}</span>
-                  <Badge tone="amber">{d.threshold_pct}%</Badge>
-                  <span className="text-muted-foreground">{t('downgradeAtPost')}</span>
-                  <Badge tone="neutral" className="break-all">{d.from_model_alias}</Badge>
-                  <span className="text-muted-foreground" aria-hidden="true">→</span>
-                  <Badge tone="teal" className="break-all">{d.to_model_alias}</Badge>
-                </div>
-              </div>
-            ))}
-          </div>
+          <DowngradeDiagram
+            rules={policy.downgrade_rules}
+            models={models ?? []}
+            formatOutPrice={(m) => {
+              const per1m = m.output_price_per_1k * 1000;
+              return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
+            }}
+            edgeTag={(r) => (r.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser'))}
+          />
         ) : (
           <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border px-3 py-2">
             {t('downgradeNone')}
