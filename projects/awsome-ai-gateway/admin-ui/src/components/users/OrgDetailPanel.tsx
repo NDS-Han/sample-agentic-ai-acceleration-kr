@@ -24,6 +24,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { TeamModelPermissionPanel } from '@/components/users/TeamModelPermissionPanel';
+import { ScopeAppAccessPanel } from '@/components/users/ScopeAppAccessPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
 
@@ -74,6 +75,9 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
             <span className="font-medium">{t('memberCountValue', { count: orgMemberCount })}</span>
           </div>
         )}
+        <div className="mt-4">
+          <ScopeAppAccessPanel scope="organization" scopeId={node.id} />
+        </div>
       </div>
     );
   }
@@ -206,8 +210,19 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
       ]);
       if (r.success) {
         const sel = clientsToSelected(r.data.clients);
-        setLoadedSelected(sel);
-        setSelected(sel);
+        // 개인 정책 행이 없으면 상속된 유효 목록(팀/조직 정책)을 프리필해 보여준다 —
+        // userModels 와 같은 규칙: 빈 전체체크는 "제한 없음"으로 오독되므로 실제
+        // 적용값을 표시한다. loadedSelected 도 같은 값으로 둬야 프리필이 dirty 로
+        // 보이지 않고, 그대로 저장되는 일(= 상속값이 개인 override 로 굳음)도 없다.
+        const sel2 =
+          r.data.clients.length === 0 &&
+          p.success &&
+          p.data.allowed_clients_source !== 'user' &&
+          p.data.allowed_clients
+            ? clientsToSelected(p.data.allowed_clients)
+            : sel;
+        setLoadedSelected(sel2);
+        setSelected(sel2);
         setClientsLoaded(true);
       } else {
         toast({
@@ -270,13 +285,17 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         });
         return;
       }
-      // 1) 접근 권한 먼저 저장.
-      const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
-      if (!r.success) {
-        toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
-        return;
+      // 1) 접근 권한 — 실제로 바뀐 경우만 저장. 상속 프리필을 그대로 저장하면
+      //    팀/조직 정책이 개인 override 로 굳어 이후 상위 변경이 안 따라온다.
+      let savedSelected = selected;
+      if (accessDirty) {
+        const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
+        if (!r.success) {
+          toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
+          return;
+        }
+        savedSelected = clientsToSelected(r.data.clients);
       }
-      const savedSelected = clientsToSelected(r.data.clients);
 
       // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
       // ★ 모델 정책이 정상 로드되지 않았으면(modelsLoaded=false) stale 빈 목록을
@@ -295,9 +314,12 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         setModelsTouched(false);
       }
 
-      // 모두 성공 — loaded 상태를 낙관적 값으로 갱신.
+      // 모두 성공 — loaded 상태를 낙관적 값으로 갱신. 유효 정책도 다시 읽어
+      // 앱 정책 출처(상속 → 개인 override) 캡션이 즉시 갱신되게 한다.
       setLoadedSelected(savedSelected);
       setSelected(savedSelected);
+      const p2 = await getEffectivePolicyAction(node.id);
+      if (p2.success) setPolicy(p2.data);
       toast({
         type: 'success',
         message: t('saveSuccess'),
@@ -362,6 +384,17 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         <p className="text-xs text-muted-foreground mb-2">
           {t('appAccess.description')}
         </p>
+        {/* 상속 출처 캡션 — 개인 정책이 없을 때 토글 상태는 팀/조직 정책의 프리필이다.
+            변경하면 개인 정책으로 저장됨을 명시(userModels 의 상속 캡션과 같은 규칙). */}
+        {clientsLoaded &&
+          (policy?.allowed_clients_source === 'team' ||
+            policy?.allowed_clients_source === 'organization') && (
+            <p className="text-xs text-muted-foreground mb-2">
+              {policy.allowed_clients_source === 'team'
+                ? t('appAccess.inheritTeam')
+                : t('appAccess.inheritOrg')}
+            </p>
+          )}
         {isLoadPending ? (
           <div className="text-xs text-muted-foreground py-1 mb-3">{t('appAccess.loading')}</div>
         ) : (
@@ -685,6 +718,10 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
           </div>
         </div>
       )}
+
+      <div className="mb-4">
+        <ScopeAppAccessPanel scope="team" scopeId={node.id} />
+      </div>
 
       <div className="mb-4">
         <p className="text-sm font-medium mb-2">{tm('teamModelAccess')}</p>

@@ -545,7 +545,9 @@
       "all": "전체",
       "loading": "로딩 중…",
       "unrestricted": "제한 없음",
-      "restricted": "목록: {count}개 앱"
+      "restricted": "목록: {count}개 앱",
+      "inheritTeam": "현재 팀 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다.",
+      "inheritOrg": "현재 조직 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다."
     },
     "budgetInput": {
       "claudeCode": "Claude Code 예산 (USD/월)",
@@ -642,10 +644,29 @@
       "scopeUser": "사용자",
       "downgradeAtPre": "사용률",
       "downgradeAtPost": "도달 시",
-      "deniedTitle": "거부 사유"
+      "deniedTitle": "거부 사유",
+      "clientsSource": {
+        "label": "앱 정책 출처",
+        "user": "사용자 개별 설정",
+        "team": "팀 정책",
+        "organization": "조직 정책",
+        "none": "제한 없음 (전체 허용)"
+      }
     },
     "userModelsInheritTeam": "개인 설정 없음 — 체크 상태는 팀 정책 상속분입니다. 변경하면 이 사용자만의 정책으로 저장됩니다.",
-    "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음)."
+    "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음).",
+    "scopeAppAccess": {
+      "title": "앱 접근 정책",
+      "descriptionTeam": "개별 설정이 없는 팀 멤버에게 적용됩니다. 전부 선택 = 팀 정책 없음(조직 정책을 따름).",
+      "descriptionOrg": "팀/개별 설정이 없는 전체 사용자에게 적용되는 기본값입니다. 전부 선택 = 조직 정책 없음(제한 없음).",
+      "groupLabel": "허용 앱 선택",
+      "unrestricted": "제한 없음",
+      "restricted": "목록: {count}개 앱",
+      "loading": "로딩 중…",
+      "apply": "적용",
+      "saveSuccess": "앱 접근 정책이 저장되었습니다",
+      "loadError": "앱 접근 정책을 불러오지 못했습니다"
+    }
   },
   "analytics": {
     "title": "분석",

@@ -325,6 +325,7 @@ export interface EffectivePolicy {
   team_id: string | null;
   team_name: string | null;
   allowed_clients: string[] | null;
+  allowed_clients_source: 'user' | 'team' | 'organization' | 'none';
   allowed_models: string[] | null;
   allowed_models_source: 'user' | 'team' | 'none';
   web_search: Record<string, boolean>;

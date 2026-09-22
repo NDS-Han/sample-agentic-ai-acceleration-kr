@@ -51,8 +51,10 @@ class EffectivePolicyResponse(BaseModel):
     team_id: str | None
     team_name: str | None
 
-    # None = 제한 없음(전체 허용). list = 그 목록만.
+    # effective — user 행이 있으면 user, 없으면 team, 없으면 org, 셋 다 없으면 None.
+    # ⚠️ 각 스코프에서 "행 0개 = 정책 없음(하위 폴백)" — 전면 거부를 표현할 수 없다.
     allowed_clients: list[str] | None
+    allowed_clients_source: str  # "user" | "team" | "organization" | "none"
     # effective — user 행이 있으면 user, 없으면 team, 둘 다 없으면 None.
     allowed_models: list[str] | None
     allowed_models_source: str  # "user" | "team" | "none"

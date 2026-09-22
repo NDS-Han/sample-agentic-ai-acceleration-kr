@@ -545,7 +545,9 @@
       "all": "All",
       "loading": "Loading…",
       "unrestricted": "No restriction",
-      "restricted": "Allowlist: {count} apps"
+      "restricted": "Allowlist: {count} apps",
+      "inheritTeam": "Currently inheriting the team policy — any change is saved as this user's individual setting.",
+      "inheritOrg": "Currently inheriting the organization policy — any change is saved as this user's individual setting."
     },
     "budgetInput": {
       "claudeCode": "Claude Code budget (USD/month)",
@@ -642,10 +644,29 @@
       "scopeUser": "User",
       "downgradeAtPre": "at",
       "downgradeAtPost": "spend",
-      "deniedTitle": "Blocked because"
+      "deniedTitle": "Blocked because",
+      "clientsSource": {
+        "label": "App policy source",
+        "user": "User override",
+        "team": "Team policy",
+        "organization": "Organization policy",
+        "none": "Unrestricted (all apps)"
+      }
     },
     "userModelsInheritTeam": "No personal override — checkmarks show the inherited team policy. Changes save as a per-user policy.",
-    "userModelsInheritNone": "No personal override — all models allowed (no team policy either)."
+    "userModelsInheritNone": "No personal override — all models allowed (no team policy either).",
+    "scopeAppAccess": {
+      "title": "App access policy",
+      "descriptionTeam": "Applies to team members without an individual setting. All selected = no team policy (inherits the organization policy).",
+      "descriptionOrg": "Default for every user without a team or individual setting. All selected = no organization policy (unrestricted).",
+      "groupLabel": "Allowed apps",
+      "unrestricted": "Unrestricted",
+      "restricted": "Allowlist: {count} apps",
+      "loading": "Loading…",
+      "apply": "Apply",
+      "saveSuccess": "App access policy saved",
+      "loadError": "Failed to load the app access policy"
+    }
   },
   "analytics": {
     "title": "Analytics",

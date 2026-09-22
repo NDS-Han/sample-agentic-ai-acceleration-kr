@@ -243,6 +243,60 @@ export async function setUserAllowedClientsAction(
   }
 }
 
+// ─── getScopeAllowedClientsAction / setScopeAllowedClientsAction ──────────────
+// 팀/조직 단위 앱 접근 정책 (alembic 0038). 우선순위 user > team > org > 제한없음.
+// [] = 정책 없음(하위 폴백) — 전면 거부가 아님. 개인 override 와 같은 의미 체계.
+
+type ClientPolicyScope = 'team' | 'organization';
+
+function scopeClientsPath(scope: ClientPolicyScope, scopeId: string): string {
+  return scope === 'team'
+    ? `/admin/teams/${scopeId}/allowed-clients`
+    : `/admin/organizations/${scopeId}/allowed-clients`;
+}
+
+export async function getScopeAllowedClientsAction(
+  scope: ClientPolicyScope,
+  scopeId: string,
+): Promise<ActionResult<{ clients: string[] }>> {
+  if (!scopeId) return { success: false, error: 'Scope ID is required' };
+  try {
+    const res = await withRetry(() =>
+      adminAPI.get<{ scope_id: string; clients: string[] }>(
+        scopeClientsPath(scope, scopeId),
+      ),
+    );
+    return { success: true, data: { clients: res.clients ?? [] } };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+export async function setScopeAllowedClientsAction(
+  scope: ClientPolicyScope,
+  scopeId: string,
+  clients: string[],
+): Promise<ActionResult<{ clients: string[] }>> {
+  if (!scopeId) return { success: false, error: 'Scope ID is required' };
+  try {
+    if (clients.length === 0) {
+      await withRetry(() => adminAPI.delete(scopeClientsPath(scope, scopeId)));
+      revalidatePath('/users');
+      return { success: true, data: { clients: [] } };
+    }
+    const res = await withRetry(() =>
+      adminAPI.put<{ scope_id: string; clients: string[] }>(
+        scopeClientsPath(scope, scopeId),
+        { clients },
+      ),
+    );
+    revalidatePath('/users');
+    return { success: true, data: { clients: res.clients ?? clients } };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 // ─── getUserAllowedModelsAction ───────────────────────────────────────────────
 // per-user model whitelist (overrides team). [] = no override → falls back to team.
 

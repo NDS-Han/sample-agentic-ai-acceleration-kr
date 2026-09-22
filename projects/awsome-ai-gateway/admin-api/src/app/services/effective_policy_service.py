@@ -24,7 +24,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clients import VALID_CLIENTS
 from app.core.exceptions import NotFoundError
 from app.core.usage_filters import current_kst_period
-from app.models.auth import Team, User, UserAllowedClient
+from app.models.auth import (
+    Department,
+    OrgAllowedClient,
+    Team,
+    TeamAllowedClient,
+    User,
+    UserAllowedClient,
+)
 from app.models.budget import BudgetConfig, BudgetUsage, DowngradePolicy
 from app.models.model import (
     ModelAlias,
@@ -97,7 +104,7 @@ class EffectivePolicyService:
                 )
             ).scalar_one_or_none()
 
-        # ── 축 1: user→app ──
+        # ── 축 1: user→app (user > team > org > 제한없음 — 게이트웨이와 동일 순서) ──
         uac = list(
             (
                 await self.session.execute(
@@ -107,7 +114,50 @@ class EffectivePolicyService:
                 )
             ).scalars()
         )
-        allowed_clients = uac if uac else None
+        if uac:
+            allowed_clients: list[str] | None = uac
+            clients_source = "user"
+        elif user.team_id:
+            tac = list(
+                (
+                    await self.session.execute(
+                        select(TeamAllowedClient.client).where(
+                            TeamAllowedClient.team_id == user.team_id
+                        )
+                    )
+                ).scalars()
+            )
+            if tac:
+                allowed_clients = tac
+                clients_source = "team"
+            elif team and team.dept_id:
+                # team → department → organization 경로로 org 정책을 찾는다
+                dept = (
+                    await self.session.execute(
+                        select(Department.org_id).where(Department.id == team.dept_id)
+                    )
+                ).scalar_one_or_none()
+                oac = (
+                    list(
+                        (
+                            await self.session.execute(
+                                select(OrgAllowedClient.client).where(
+                                    OrgAllowedClient.org_id == dept
+                                )
+                            )
+                        ).scalars()
+                    )
+                    if dept
+                    else []
+                )
+                allowed_clients = oac if oac else None
+                clients_source = "organization" if oac else "none"
+            else:
+                allowed_clients = None
+                clients_source = "none"
+        else:
+            allowed_clients = None
+            clients_source = "none"
 
         # ── 축 2: user/team→model (user > team > none) ──
         uam = list(
@@ -249,6 +299,7 @@ class EffectivePolicyService:
             team_id=str(user.team_id) if user.team_id else None,
             team_name=team.name if team else None,
             allowed_clients=allowed_clients,
+            allowed_clients_source=clients_source,
             allowed_models=effective_models,
             allowed_models_source=models_source,
             web_search=web_search,

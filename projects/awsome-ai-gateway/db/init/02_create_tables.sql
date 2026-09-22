@@ -310,6 +310,27 @@ CREATE TABLE IF NOT EXISTS auth.user_allowed_clients (
 );
 CREATE INDEX IF NOT EXISTS idx_user_allowed_clients_user ON auth.user_allowed_clients (user_id);
 
+-- 팀/조직별 허용 클라이언트(앱) 정책 — user_allowed_clients 의 상위 정책.
+-- 우선순위 user > team > org > 제한없음 (alembic 0038). 행 0개 = 상위로 폴백,
+-- 최종적으로도 없으면 전체 허용. model_aliases.allowed_clients 의 {}=전면거부와
+-- 반대 의미이므로 혼동 금지.
+CREATE TABLE IF NOT EXISTS auth.team_allowed_clients (
+    team_id    UUID        NOT NULL REFERENCES auth.teams(id) ON DELETE CASCADE,
+    client     VARCHAR(32) NOT NULL CHECK (client IN ('claude-code','cowork','codex')),
+    created_by UUID        NOT NULL REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (team_id, client)
+);
+CREATE INDEX IF NOT EXISTS idx_team_allowed_clients_team ON auth.team_allowed_clients (team_id);
+
+CREATE TABLE IF NOT EXISTS auth.org_allowed_clients (
+    org_id     UUID        NOT NULL REFERENCES auth.organizations(id) ON DELETE CASCADE,
+    client     VARCHAR(32) NOT NULL CHECK (client IN ('claude-code','cowork','codex')),
+    created_by UUID        NOT NULL REFERENCES auth.users(id),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (org_id, client)
+);
+
 -- ------------------------------------------------------------
 -- Budget-aware 모델 다운그레이드 (model.model_aliases FK 때문에 model 블록 이후 정의)
 -- 사용자/팀의 월 예산 소진율이 임계치(threshold_pct) 초과 시 상위→하위 모델 자동 전환.

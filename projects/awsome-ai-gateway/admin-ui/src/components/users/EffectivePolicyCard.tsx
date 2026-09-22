@@ -191,6 +191,16 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
         </span>
       </p>
 
+      {/* 앱 정책 출처 — user > team > organization 폴백 중 실제로 적용된 스코프 */}
+      <p className="text-xs text-muted-foreground">
+        {t('clientsSource.label')}:{' '}
+        <span className="font-medium text-foreground">
+          {policy.allowed_clients_source === 'none'
+            ? t('clientsSource.none')
+            : t(`clientsSource.${policy.allowed_clients_source}`)}
+        </span>
+      </p>
+
       {/* 예산은 바로 위의 예산 섹션(BudgetGaugeRow)이 이미 같은 데이터를
           보여주므로 여기서는 생략한다 — 카드는 접근 판정에 집중. */}
 

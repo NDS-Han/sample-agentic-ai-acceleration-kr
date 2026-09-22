@@ -120,3 +120,137 @@ class TestGetForUser:
         assert res.allowed_models_source == "none"
         assert _cell(res.cells, "cowork", "opus-5").allowed
         assert _cell(res.cells, "codex", "opus-5").blocked_by == ["user_app"]
+
+
+def _user_with_team(*, dept_id=None):
+    """team/dept 체인이 있는 사용자·팀 모사."""
+    from app.models.auth import Team
+
+    user = MagicMock(spec=User)
+    user.id = uuid.uuid4()
+    user.email = "dev@example.com"
+    user.team_id = uuid.uuid4()
+
+    team = MagicMock(spec=Team)
+    team.id = user.team_id
+    team.name = "T"
+    team.dept_id = dept_id if dept_id is not None else uuid.uuid4()
+    return user, team
+
+
+class TestAllowedClientsFallback:
+    """축 1 폴백: user > team > organization > none (alembic 0038).
+
+    execute 호출 순서(팀 소속 사용자, 개인/팀/조직 정책 모두 조회하는 최대 경로):
+      User → Team → user_allowed_clients → team_allowed_clients →
+      Department.org_id → org_allowed_clients → user_allowed_models →
+      team_allowed_models → ModelAlias → BudgetConfig → BudgetUsage →
+      RateLimitConfig → DowngradePolicy → RoutingProfile
+    """
+
+    def _tail(self):
+        return [
+            _exec_result(scalars=[]),          # user_allowed_models
+            _exec_result(scalars=[]),          # team_allowed_models
+            _exec_result(rows=[]),             # ModelAlias
+            _exec_result(scalars=[]),          # BudgetConfig
+            _exec_result(scalars=[]),          # BudgetUsage
+            _exec_result(scalars=[]),          # RateLimitConfig
+            _exec_result(scalars=[]),          # DowngradePolicy
+            _exec_result(scalars=[]),          # RoutingProfile
+        ]
+
+    async def test_user_policy_wins(self):
+        user, team = _user_with_team()
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalar=team),
+                _exec_result(scalars=["cowork"]),  # user rows → 바로 확정
+                *self._tail(),
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.allowed_clients == ["cowork"]
+        assert res.allowed_clients_source == "user"
+        # team/org 조회 자체를 생략했다 — execute 3 + tail 8 = 11회
+        assert session.execute.await_count == 11
+
+    async def test_team_policy_applies_when_no_user_rows(self):
+        user, team = _user_with_team()
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalar=team),
+                _exec_result(scalars=[]),                     # user rows 없음
+                _exec_result(scalars=["claude-code"]),        # team rows
+                *self._tail(),
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.allowed_clients == ["claude-code"]
+        assert res.allowed_clients_source == "team"
+
+    async def test_org_policy_applies_when_no_user_or_team_rows(self):
+        user, team = _user_with_team()
+        org_id = uuid.uuid4()
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalar=team),
+                _exec_result(scalars=[]),               # user
+                _exec_result(scalars=[]),               # team
+                _exec_result(scalar=org_id),            # dept → org_id
+                _exec_result(scalars=["codex"]),        # org rows
+                *self._tail(),
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.allowed_clients == ["codex"]
+        assert res.allowed_clients_source == "organization"
+
+    async def test_no_policy_anywhere_is_unrestricted(self):
+        user, team = _user_with_team()
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalar=team),
+                _exec_result(scalars=[]),          # user
+                _exec_result(scalars=[]),          # team
+                _exec_result(scalar=uuid.uuid4()), # dept → org_id
+                _exec_result(scalars=[]),          # org
+                *self._tail(),
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.allowed_clients is None
+        assert res.allowed_clients_source == "none"
+
+    async def test_teamless_user_skips_team_and_org(self):
+        # team_id 가 없으면 org 정책도 타지 않는다 (user→team→dept→org 체인 단절).
+        user = MagicMock(spec=User)
+        user.id = uuid.uuid4()
+        user.email = "dev@example.com"
+        user.team_id = None
+
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalars=[]),   # user rows 없음 — team/org 조회 생략
+                _exec_result(scalars=[]),   # user_allowed_models
+                _exec_result(rows=[]),      # ModelAlias (team 없어 team_models 생략)
+                _exec_result(scalars=[]),   # BudgetConfig
+                _exec_result(scalars=[]),   # BudgetUsage
+                _exec_result(scalars=[]),   # RateLimitConfig
+                _exec_result(scalars=[]),   # DowngradePolicy
+                _exec_result(scalars=[]),   # RoutingProfile
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.allowed_clients is None
+        assert res.allowed_clients_source == "none"

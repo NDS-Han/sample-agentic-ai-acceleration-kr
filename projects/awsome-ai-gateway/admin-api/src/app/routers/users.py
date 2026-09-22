@@ -23,6 +23,7 @@ from app.schemas.users import (
     DepartmentCreateRequest,
     DepartmentResponse,
     OrgTreeNode,
+    ScopedAllowedClientsResponse,
     SetLeaderRequest,
     TeamCreateRequest,
     TeamListResponse,
@@ -260,6 +261,128 @@ async def clear_team_allowed_models(
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
+
+
+# ── per-TEAM / per-ORG app allow-list (alembic 0038) ──────────────────────────
+# 우선순위 user > team > org > 제한없음 — user_allowed_clients 의 상위 정책.
+# PUT body 는 user 경로와 같은 {clients: []}. [] = 정책 없음(상위 폴백), 전면 거부 아님.
+# 캐시 무효화는 커밋 **후** — DEL→commit 창의 재캐시 방지(user 경로 주석 참조).
+
+
+def _client_scope_svc(request: Request):
+    return request.app.state.allowed_client_scope_service
+
+
+@router.get("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def list_team_allowed_clients(
+    request: Request,
+    team_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return await _client_scope_svc(request).list_for_team(
+        session, team_id=uuid.UUID(team_id)
+    )
+
+
+@router.put("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def set_team_allowed_clients(
+    request: Request,
+    team_id: str,
+    body: AllowedClientsBody,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc = _client_scope_svc(request)
+    tid = uuid.UUID(team_id)
+    res = await svc.set_for_team(
+        session,
+        team_id=tid,
+        clients=body.clients,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+    await session.commit()
+    await svc.invalidate_for_team(session, tid)
+    return res
+
+
+@router.delete("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def clear_team_allowed_clients(
+    request: Request,
+    team_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc = _client_scope_svc(request)
+    tid = uuid.UUID(team_id)
+    res = await svc.clear_for_team(
+        session,
+        team_id=tid,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+    await session.commit()
+    await svc.invalidate_for_team(session, tid)
+    return res
+
+
+@router.get("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def list_org_allowed_clients(
+    request: Request,
+    org_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    return await _client_scope_svc(request).list_for_org(
+        session, org_id=uuid.UUID(org_id)
+    )
+
+
+@router.put("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def set_org_allowed_clients(
+    request: Request,
+    org_id: str,
+    body: AllowedClientsBody,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc = _client_scope_svc(request)
+    oid = uuid.UUID(org_id)
+    res = await svc.set_for_org(
+        session,
+        org_id=oid,
+        clients=body.clients,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+    await session.commit()
+    await svc.invalidate_for_org(session, oid)
+    return res
+
+
+@router.delete("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+async def clear_org_allowed_clients(
+    request: Request,
+    org_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    svc = _client_scope_svc(request)
+    oid = uuid.UUID(org_id)
+    res = await svc.clear_for_org(
+        session,
+        org_id=oid,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+    await session.commit()
+    await svc.invalidate_for_org(session, oid)
+    return res
 
 
 @router.post("/users/sync-cognito")
