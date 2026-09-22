@@ -42,8 +42,11 @@ export function AppPolicyPanel() {
   // 가 일으키는 RSC 리페치/리마운트 때 선택이 날아간다(실제로 그 버그가 있었다).
   // URL 에 두면 리마운트·새로고침·딥링크 모두에서 선택이 유지된다.
   // (APP_PARAM 상수: 쿼리명을 리터럴로 쓰면 i18n 키 스캔 테스트가 t() 호출로 오인한다.)
+  // 쿼리가 없거나 이상하면 첫 앱(claude-code)을 기본 선택 — 빈 상태 문구를 띄우지 않는다.
   const rawClient = searchParams.get(APP_PARAM) ?? '';
-  const selectedClient = CLIENTS.some((c) => c.value === rawClient) ? rawClient : '';
+  const selectedClient = CLIENTS.some((c) => c.value === rawClient)
+    ? rawClient
+    : (CLIENTS[0]?.value ?? '');
   const [policy, setPolicy] = useState<AppPolicy | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoadPending, startLoadTransition] = useTransition();
@@ -276,8 +279,10 @@ export function AppPolicyPanel() {
           <div className="space-y-3">
             <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
             <div className="glass rounded-apple overflow-hidden">
-              <Table>
-                <THead>
+              {/* 모델 수만큼 길어지는 표 — max-h + overflow-y 로 스크롤시키고
+                  헤더는 sticky 로 고정(bg-card 로 아래 행을 가림). */}
+              <Table wrapperClassName="max-h-96 overflow-y-auto">
+                <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
                   <Tr>
                     <Th>{t('colAlias')}</Th>
                     <Th>{t('colAllowAll')}</Th>
@@ -349,8 +354,9 @@ export function AppPolicyPanel() {
           <div className="space-y-3">
             <h2 className="text-sm font-semibold">{t('allowedUsers')}</h2>
             <div className="glass rounded-apple overflow-hidden">
-              <Table>
-                <THead>
+              {/* 유저 수만큼 길어진다 — 모델 표와 같은 스크롤+sticky 헤더. */}
+              <Table wrapperClassName="max-h-96 overflow-y-auto">
+                <THead className="[&_th]:sticky [&_th]:top-0 [&_th]:z-10 [&_th]:bg-card">
                   <Tr><Th>{t('colUser')}</Th><Th>{t('colAccess')}</Th><Th>ID</Th></Tr>
                 </THead>
                 <TBody>
