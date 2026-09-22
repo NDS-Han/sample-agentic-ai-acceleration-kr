@@ -10,6 +10,12 @@
 > 경로는 PII 마스커가 기본 ON 인데 본문 로거에는 적용되지 않는다(알고 있는 격차,
 > 향후 개선 대상). 개인정보·보안 검토 없이 켜지 말 것.
 
+> **신규 설치는 기본 꺼짐이다.** `terraform.tfvars.example` 은 `enable_body_logging`
+> 을 주석으로 두고 변수 기본값도 `false` 라, 예시를 복사해 설치하면 sink 자체가
+> 만들어지지 않는다. 처음부터 켜려면 주석을 해제하고 첫 apply 때 함께 만들어도
+> 되고, 나중에 켜도 이 절의 절차는 신규·기존 동일하다(스크립트가 하는 일이
+> tfvars 설정 + apply + helm env 주입이라 구분이 없다).
+
 **왜 존재하는가** — Mantle 엔드포인트(`bedrock-mantle.{region}.api.aws`) 트래픽은
 AWS model invocation logging 에 **전혀** 잡히지 않는다(실측: runtime 은 기록,
 Mantle 은 0건). Codex·Cowork 가 그 평면을 쓰므로 그 트래픽의 본문 감사는 이 sink 가
