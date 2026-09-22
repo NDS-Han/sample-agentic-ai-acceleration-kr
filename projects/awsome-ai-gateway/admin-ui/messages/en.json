@@ -613,6 +613,7 @@
       "loading": "Loading policy…",
       "loadFailed": "Failed to load policy",
       "app": "App",
+      "model": "Model",
       "webSearch": "Web Search",
       "allowed": "Allowed",
       "denied": "Denied",

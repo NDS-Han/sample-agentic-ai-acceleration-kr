@@ -613,6 +613,7 @@
       "loading": "정책 불러오는 중…",
       "loadFailed": "정책을 불러오지 못했습니다",
       "app": "앱",
+      "model": "모델",
       "webSearch": "웹서치",
       "allowed": "허용",
       "denied": "거부",
