@@ -284,6 +284,8 @@
     "selectToModel": "Select To model",
     "saveConfig": "Save settings",
     "clearConfig": "Clear settings",
+    "clearConfigTitle": "Clear auto downgrade",
+    "clearConfigConfirm": "All auto downgrade rules for {scope} will be deleted. Continue?",
     "configLoading": "Loading settings...",
     "minOneRule": "Add at least one downgrade rule.",
     "sameSourceTarget": "Source and target models are identical: {alias}",

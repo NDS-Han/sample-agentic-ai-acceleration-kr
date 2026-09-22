@@ -284,6 +284,8 @@
     "selectToModel": "To 모델 선택",
     "saveConfig": "설정 저장",
     "clearConfig": "설정 해제",
+    "clearConfigTitle": "자동 다운그레이드 해제",
+    "clearConfigConfirm": "{scope}의 자동 다운그레이드 규칙이 모두 삭제됩니다. 계속하시겠습니까?",
     "configLoading": "설정 로딩 중...",
     "minOneRule": "최소 1개 이상의 다운그레이드 규칙을 추가해야 합니다.",
     "sameSourceTarget": "소스와 타겟 모델이 동일합니다: {alias}",

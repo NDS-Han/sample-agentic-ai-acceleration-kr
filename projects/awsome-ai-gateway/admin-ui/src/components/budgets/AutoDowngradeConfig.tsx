@@ -8,6 +8,7 @@ import { useTranslations } from 'next-intl';
 import { TrendingDown, ArrowRight, Plus, X } from 'lucide-react';
 import { useToast } from '@/components/common/ToastProvider';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import {
   getDowngradeConfigAction,
@@ -40,6 +41,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   // 편집하면 스냅샷과 어긋나 테두리가 풀리고, 새 규칙은 처음부터 테두리가 없다.
   const [savedRules, setSavedRules] = useState<DowngradeRuleForm[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [clearOpen, setClearOpen] = useState(false);
 
   const activeModels = models.filter(m => m.is_active);
 
@@ -329,7 +331,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
         {enabled && (
           <button
             type="button"
-            onClick={handleDisable}
+            onClick={() => setClearOpen(true)}
             disabled={isPending}
             className="text-sm text-destructive hover:underline disabled:opacity-50"
           >
@@ -337,6 +339,16 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
           </button>
         )}
       </div>
+
+      <ConfirmDialog
+        isOpen={clearOpen}
+        onClose={() => setClearOpen(false)}
+        onConfirm={handleDisable}
+        title={t('clearConfigTitle')}
+        message={t('clearConfigConfirm', { scope: scopeName })}
+        confirmLabel={t('clearConfig')}
+        isDestructive
+      />
     </div>
   );
 }
