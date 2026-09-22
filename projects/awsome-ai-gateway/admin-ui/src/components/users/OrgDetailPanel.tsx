@@ -486,16 +486,33 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
           </div>
         )}
 
-        <div>
-          <SpinnerButton
-            type="button"
-            isLoading={isSavePending}
-            disabled={busy || !dirty}
-            onClick={handleApply}
-          >
-            {t('apply')}
-          </SpinnerButton>
-        </div>
+        {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 이 패널은 앱 접근/예산/모델/
+            유효 정책을 세로로 길게 쌓는데 버튼이 맨 아래 고정이면 앱 토글 하나
+            바꾸고도 끝까지 스크롤해야 했다. 조상에 overflow-hidden 이 있어
+            sticky 는 무효라 fixed 로 띄우고, 변경이 생기는 순간 나타나므로
+            발견 가능성도 자연히 해결된다. */}
+        {dirty && (
+          <>
+            {/* 플로팅 바 높이만큼 스페이서 — 스크롤 끝에서 마지막 콘텐츠가
+                바에 가려지지 않게 한다. */}
+            <div className="h-16" aria-hidden="true" />
+            <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2">
+              <div className="flex items-center gap-3 rounded-full border border-border bg-card/95 px-5 py-2.5 shadow-lg backdrop-blur">
+                <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">
+                  {t('unsavedChanges')}
+                </span>
+                <SpinnerButton
+                  type="button"
+                  isLoading={isSavePending}
+                  disabled={busy}
+                  onClick={handleApply}
+                >
+                  {t('apply')}
+                </SpinnerButton>
+              </div>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );

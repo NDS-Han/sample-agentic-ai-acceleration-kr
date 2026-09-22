@@ -566,6 +566,7 @@
       "empty": "No active models."
     },
     "apply": "Apply",
+    "unsavedChanges": "Unsaved changes",
     "loadErrors": {
       "appAccess": "Failed to load app access — refresh and try again.",
       "models": "Failed to load the model list — refresh and try again.",
