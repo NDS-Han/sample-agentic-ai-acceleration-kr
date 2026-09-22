@@ -16,6 +16,10 @@ interface OrgTreeViewProps {
 }
 
 const EXPANDED_NODES_STORAGE_KEY = 'users:orgtree:expandedNodes';
+// 선택 노드도 sessionStorage 에 지속한다 — 정책 저장 후의 router.refresh /
+// revalidatePath 리페치가 loading.tsx Suspense 를 거쳐 이 컴포넌트를 리마운트하면
+// useState 인 selectedNode 가 통째로 날아간다(/apps 의 ?app= 사건과 같은 결함).
+const SELECTED_NODE_STORAGE_KEY = 'users:orgtree:selectedNode';
 
 /** 초기 펼침: 조직(ORGANIZATION)과 그 직계 부서(DEPARTMENT)만 펼친다.
  *  팀(TEAM)과 사용자(USER)는 사용자가 클릭해서 펼치도록 한다. */
@@ -35,6 +39,21 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   const [selectedNode, setSelectedNode] = useState<OrgTreeNode | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(new Set());
   const hasMountedRef = useRef(false);
+  const selectedRestoredRef = useRef(false);
+
+  // 선택 변경 시 persist — 리마운트 복원의 소스.
+  useEffect(() => {
+    if (!selectedRestoredRef.current) return; // 복원 effect 보다 먼저 쓰지 않는다
+    try {
+      if (selectedNode) {
+        sessionStorage.setItem(SELECTED_NODE_STORAGE_KEY, JSON.stringify(selectedNode));
+      } else {
+        sessionStorage.removeItem(SELECTED_NODE_STORAGE_KEY);
+      }
+    } catch {
+      // 무시
+    }
+  }, [selectedNode]);
 
   // sessionStorage에서 펼침 상태 복원. 저장된 값이 없으면 기본값(조직+직계부서) 사용.
   useEffect(() => {
@@ -53,6 +72,23 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     } catch {
       if (root) {
         setExpandedNodes(getDefaultExpandedNodes(root));
+      }
+    }
+    // 선택 노드 복원(마운트 1회) — 저장된 노드는 id 가 같으므로 아래 resync
+    // effect 가 새 트리의 동일 노드로 교체한다. 트리에 없으면 검색 합성 노드로
+    // 저장된 것 — 저장분 그대로 표시.
+    if (!selectedRestoredRef.current) {
+      selectedRestoredRef.current = true;
+      try {
+        const raw = sessionStorage.getItem(SELECTED_NODE_STORAGE_KEY);
+        if (raw) {
+          const n = JSON.parse(raw) as OrgTreeNode;
+          if (n && typeof n.id === 'string' && typeof n.type === 'string') {
+            setSelectedNode(n);
+          }
+        }
+      } catch {
+        // 파싱 실패는 무시 — 선택 없음으로 시작
       }
     }
   }, [root]);

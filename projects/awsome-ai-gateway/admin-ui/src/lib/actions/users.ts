@@ -162,7 +162,6 @@ export async function forceReauthTeamAction(
         {}
       )
     );
-    revalidatePath('/users');
     return { success: true, data: res };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -227,7 +226,6 @@ export async function setUserAllowedClientsAction(
   try {
     if (clients.length === 0) {
       await withRetry(() => adminAPI.delete(`/admin/users/${userId}/allowed-clients`));
-      revalidatePath('/users');
       return { success: true, data: { clients: [] } };
     }
     const res = await withRetry(() =>
@@ -236,7 +234,6 @@ export async function setUserAllowedClientsAction(
         { clients },
       ),
     );
-    revalidatePath('/users');
     return { success: true, data: { clients: res.clients ?? clients } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -281,7 +278,6 @@ export async function setScopeAllowedClientsAction(
   try {
     if (clients.length === 0) {
       await withRetry(() => adminAPI.delete(scopeClientsPath(scope, scopeId)));
-      revalidatePath('/users');
       return { success: true, data: { clients: [] } };
     }
     const res = await withRetry(() =>
@@ -290,7 +286,6 @@ export async function setScopeAllowedClientsAction(
         { clients },
       ),
     );
-    revalidatePath('/users');
     return { success: true, data: { clients: res.clients ?? clients } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -328,7 +323,6 @@ export async function setUserAllowedModelsAction(
   try {
     if (modelAliases.length === 0) {
       await withRetry(() => adminAPI.delete(`/admin/users/${userId}/allowed-models`));
-      revalidatePath('/users');
       return { success: true, data: { modelAliases: [] } };
     }
     const res = await withRetry(() =>
@@ -337,7 +331,6 @@ export async function setUserAllowedModelsAction(
         { model_aliases: modelAliases },
       ),
     );
-    revalidatePath('/users');
     return { success: true, data: { modelAliases: res.model_aliases ?? modelAliases } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -373,7 +366,6 @@ export async function setUserClientBudgetAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     await withRetry(() => adminAPI.put(`/admin/budgets/user/${userId}/app/${client}`, body));
-    revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -389,7 +381,6 @@ export async function clearUserClientBudgetAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     await withRetry(() => adminAPI.delete(`/admin/budgets/user/${userId}/app/${client}`));
-    revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
