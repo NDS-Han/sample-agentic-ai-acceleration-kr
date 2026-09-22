@@ -24,6 +24,7 @@ type DialogTarget = {
   name: string;
   type: (typeof BudgetScope)[keyof typeof BudgetScope];
   currentLimit: number;
+  currentUsed?: number;
   parentLimit?: number;
 };
 
@@ -70,6 +71,7 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
       name: item.target_name,
       type: item.target_type,
       currentLimit: item.limit ?? 0,
+      currentUsed: item.used,
     });
     setIsDialogOpen(true);
   };
