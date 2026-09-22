@@ -1,7 +1,8 @@
 'use client';
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useState, useTransition } from 'react';
+import { useState, useTransition, useEffect } from 'react';
+import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } from '@/lib/actions/apps';
 import { setClientWebSearchAction } from '@/lib/actions/routing';
@@ -28,11 +29,21 @@ const CLIENTS = GATEWAY_CLIENTS.map((value) => ({
   label: CLIENT_LABELS[value] ?? value,
 }));
 
+const APP_PARAM = 'app';
+
 export function AppPolicyPanel() {
   const t = useTranslations('apps');
   const tc = useTranslations('common');
   const { toast } = useToast();
-  const [selectedClient, setSelectedClient] = useState<string>('');
+  const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
+  // 선택 앱은 ?app= 쿼리가 정본이다 — useState 로 두면 mutation action 의 revalidatePath
+  // 가 일으키는 RSC 리페치/리마운트 때 선택이 날아간다(실제로 그 버그가 있었다).
+  // URL 에 두면 리마운트·새로고침·딥링크 모두에서 선택이 유지된다.
+  // (APP_PARAM 상수: 쿼리명을 리터럴로 쓰면 i18n 키 스캔 테스트가 t() 호출로 오인한다.)
+  const rawClient = searchParams.get(APP_PARAM) ?? '';
+  const selectedClient = CLIENTS.some((c) => c.value === rawClient) ? rawClient : '';
   const [policy, setPolicy] = useState<AppPolicy | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [isLoadPending, startLoadTransition] = useTransition();
@@ -47,15 +58,18 @@ export function AppPolicyPanel() {
   >(null);
   const [isWsPending, startWsTransition] = useTransition();
 
-  const handleClientChange = (client: string) => {
-    setSelectedClient(client);
+  // 선택 변경 → URL 갱신. policy fetch 는 아래 useEffect 가 selectedClient 를 보고 수행한다
+  // (클릭 경로뿐 아니라 리마운트 복구 경로에서도 같은 코드를 타게 하기 위함).
+  useEffect(() => {
     setPolicy(null);
     setLoadError(null);
     setDefaultModelInput('');
     setSaveError(null);
-    if (!client) return;
+    if (!selectedClient) return;
+    let cancelled = false;
     startLoadTransition(async () => {
-      const result = await getAppPolicyAction(client);
+      const result = await getAppPolicyAction(selectedClient);
+      if (cancelled) return;
       if (result.success) {
         setPolicy(result.data);
         setDefaultModelInput(result.data.default_model ?? '');
@@ -63,6 +77,18 @@ export function AppPolicyPanel() {
         setLoadError(result.error);
       }
     });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedClient]);
+
+  const handleClientChange = (client: string) => {
+    if (client === selectedClient) return;
+    const sp = new URLSearchParams(searchParams.toString());
+    if (client) sp.set(APP_PARAM, client);
+    else sp.delete(APP_PARAM);
+    const qs = sp.toString();
+    router.push(qs ? `${pathname}?${qs}` : pathname);
   };
 
   const handleToggleWebSearch = (enabled: boolean) => {
