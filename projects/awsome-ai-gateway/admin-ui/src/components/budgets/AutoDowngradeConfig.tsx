@@ -49,7 +49,11 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
     return activeModels.filter(m => m.output_price_per_1k < p);
   };
 
-  const formatOutPrice = (m: ModelListItem) => `$${m.output_price_per_1k}/1K`;
+  // 저장값은 per-1K — 표기는 1M 기준이 읽기 쉽다 ($0.015/1K → $15.00/1M).
+  const formatOutPrice = (m: ModelListItem) => {
+    const per1m = m.output_price_per_1k * 1000;
+    return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M`;
+  };
 
   useEffect(() => {
     if (!scopeId) return;
@@ -220,7 +224,9 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                     className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                   >
                     {activeModels.map(m => (
-                      <option key={m.alias} value={m.alias}>{m.alias}</option>
+                      <option key={m.alias} value={m.alias}>
+                        {m.alias} ({formatOutPrice(m)})
+                      </option>
                     ))}
                   </select>
                   <ArrowRight size={14} className="shrink-0 text-muted-foreground" />
