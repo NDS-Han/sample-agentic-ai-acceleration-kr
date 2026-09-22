@@ -1052,7 +1052,7 @@ Windows 테스트 머신 terminate(+SG·IAM role) → 배포 EC2 stop.
 - `#` **만 지우면 YAML 들여쓰기가 5칸** — values 주석 해제는 2-6 ④-3 의 스크립트로.
 - **Client VPN 인증서엔 keyUsage 필수** — 없으면 `TLS handshake error`(스크립트가 넣음).
 - **public gateway ALB 는 허용목록** — 테스트 PC/Windows 머신 공인 IP 를 `05-allow-client-ip.sh … --targets gateway` 로, `06-persist-annotations.sh` 로 values 에 영구화. EC2 공인 IP 는 stop/start 마다 바뀐다(EIP 미사용 시).
-- **팀 예산은 첫 VK 발급 뒤에** — Cognito 그룹 팀이 그때 생기고 $0 · admin-ui 는 dev-login(무인증)이라 internal ALB + VPN 이 유일한 보호.
+- **팀 예산은 첫 VK 발급 뒤에** — Cognito 그룹 팀이 그때 생기고 $0 · admin-ui 는 [8-L](8-L-admin-login.md)(US-12) 전까지 dev-login(무인증)이라 internal ALB + VPN 이 유일한 보호.
 - **Windows Server 에선 Hyper-V 만으론 Cowork readiness 실패** — `VirtualMachinePlatform` + `Containers` 후 재부팅. winget 은 `--source winget`.
 - **prod 전용 자원 이름** — AgentCore 실행 역할이 dev 이름(`llm-gateway-dev-agentcore-websearch-gw`)으로 재사용될 수 있음(`ROLE_NAME` 으로 지정 가능). Aurora `deletion_protection`·Valkey `apply_immediately=false`(변경이 유지보수 창 대기).
 
