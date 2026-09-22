@@ -177,6 +177,9 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               {limit != null && limit > 0 && (
                 <ReferenceLine
                   y={limit}
+                  // 기본 ifOverflow='discard' 는 한도가 Y축 범위를 넘으면 선을
+                  // 아예 안 그린다 — 한도 비교가 이 차트의 목적이므로 축을 확장한다.
+                  ifOverflow="extendDomain"
                   stroke="hsl(var(--destructive, 0 84% 60%))"
                   strokeDasharray="4 3"
                   label={{

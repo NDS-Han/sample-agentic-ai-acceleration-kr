@@ -461,7 +461,7 @@ adminUi:
     #   to=저가 모델 필터, 1M output 가격 표기, 체인→DAG 다이어그램(가격 스펙트럼
     #   채색), effective policy 동일 다이어그램 + 상하 배치.
     # 1.0.147-teammode: 팀 예산 share/distribute 모드 + set budget 모달 2컬럼.
-    tag: "1.0.149-usagetrend"
+    tag: "1.0.150-limitline"
   resources:
     requests:
       cpu: "500m"
