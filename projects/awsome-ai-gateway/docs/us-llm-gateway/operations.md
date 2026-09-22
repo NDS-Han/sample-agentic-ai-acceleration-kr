@@ -28,6 +28,7 @@
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
 | §8-L | Admin UI Cognito 로그인 활성화 (dev-login 대체) | dev-login 끄고 싶을 때 (IN-01, 선택 · 운영이면 강력 권장) | [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md) |
 | §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
+| §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (IN-02, 선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
 | §8-Z | 토큰 TTL 조절 | 토큰 수명 바꿀 때 | [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md) |
 | §8-P | dev → prod 승격 — 별도 계정에 prod 스택 신설 | prod 승격 (US-08) | [ops/8-P-prod.md](ops/8-P-prod.md) |
@@ -131,6 +132,20 @@ bash deployment/scripts/install-eks.sh dev
 ```
 
 상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**
+
+---
+
+### 8-V. 본문 로깅 활성화 (요청/응답 전문 → S3)
+
+`IN-02` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `--apply` 후에도 수집은 꺼져 있다.
+
+```bash
+bash deployment/scripts/enable-body-logging.sh dev           # 상태 + plan (읽기 전용)
+bash deployment/scripts/enable-body-logging.sh dev --apply   # tfvars → apply → helm env 주입
+bash deployment/scripts/enable-body-logging.sh dev --verify  # 버킷/스트림/env 검증
+```
+
+→ **[ops/8-V-body-logging.md](ops/8-V-body-logging.md)**
 
 ---
 
