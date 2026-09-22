@@ -202,7 +202,7 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     <StatusToggle
                       isActive={model.is_active}
                       disabled={isPending}
-                      label={model.is_active ? `${t('active')} — ${t('deactivate')}` : `${t('inactive')} — ${t('activate')}`}
+                      label={`${t('status')}: ${model.is_active ? t('active') : t('inactive')}`}
                       onClick={() => (model.is_active ? handleDeactivate(model) : handleActivate(model))}
                     />
                   </Td>
