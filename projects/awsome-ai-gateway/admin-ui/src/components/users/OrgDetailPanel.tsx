@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useState, useEffect, useTransition } from 'react';
+import { useState, useEffect, useRef, useTransition } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useTranslations } from 'next-intl';
@@ -23,8 +23,8 @@ import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
-import { TeamModelPermissionPanel } from '@/components/users/TeamModelPermissionPanel';
-import { ScopeAppAccessPanel } from '@/components/users/ScopeAppAccessPanel';
+import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/users/TeamModelPermissionPanel';
+import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
 
@@ -568,6 +568,24 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
   // "리더 해제" 버튼 하나로는 어느 사람을 내릴지 알 수 없다.
   const [leaderToRemove, setLeaderToRemove] = useState<{ id: string; name: string } | null>(null);
 
+  // 앱 접근 + 모델 권한 통합 Apply — 두 패널은 자체 버튼을 숨기고(hideActions)
+  // dirty/save 를 이 ref·콜백에 맡긴다. UserPanel 의 플로팅 바와 같은 패턴.
+  const appAccessRef = useRef<ScopeAppAccessHandle>(null);
+  const modelPolicyRef = useRef<TeamModelPermissionHandle>(null);
+  const [appDirty, setAppDirty] = useState(false);
+  const [modelDirty, setModelDirty] = useState(false);
+  const [isPolicySavePending, startPolicySaveTransition] = useTransition();
+  const policyDirty = appDirty || modelDirty;
+
+  const handleApplyAll = () => {
+    startPolicySaveTransition(async () => {
+      // 앱 접근 → 모델 순서로 저장(UserPanel 과 동일). 앞이 실패하면 뒤는 저장하지 않는다.
+      if (appDirty && !(await appAccessRef.current?.save())) return;
+      if (modelDirty && !(await modelPolicyRef.current?.save())) return;
+      toast({ type: 'success', message: t('saveSuccess'), auto_dismiss_ms: 5000 });
+    });
+  };
+
   // 팀별 허용 모델 패널용 모델 목록 — 팀 상세가 열릴 때만 로드한다.
   useEffect(() => {
     listActiveModelsAction().then((r) => {
@@ -720,13 +738,48 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
       )}
 
       <div className="mb-4">
-        <ScopeAppAccessPanel scope="team" scopeId={node.id} />
+        <ScopeAppAccessPanel
+          ref={appAccessRef}
+          scope="team"
+          scopeId={node.id}
+          hideActions
+          onDirtyChange={setAppDirty}
+        />
       </div>
 
       <div className="mb-4">
         <p className="text-sm font-medium mb-2">{tm('teamModelAccess')}</p>
-        <TeamModelPermissionPanel teamId={node.id} models={teamModels} />
+        <TeamModelPermissionPanel
+          ref={modelPolicyRef}
+          teamId={node.id}
+          models={teamModels}
+          hideActions
+          onDirtyChange={setModelDirty}
+        />
       </div>
+
+      {/* 통합 Apply — 앱 접근/모델 권한 어느 쪽이든 dirty 면 뜬다.
+          UserPanel 의 플로팅 바와 같은 패턴: 스크롤 무관하게 항상 보인다. */}
+      {policyDirty && (
+        <>
+          <div className="h-16" aria-hidden="true" />
+          <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2">
+            <div className="flex items-center gap-3 rounded-full border border-border bg-card/95 px-5 py-2.5 shadow-lg backdrop-blur">
+              <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">
+                {t('unsavedChanges')}
+              </span>
+              <SpinnerButton
+                type="button"
+                isLoading={isPolicySavePending}
+                disabled={isPolicySavePending}
+                onClick={handleApplyAll}
+              >
+                {t('apply')}
+              </SpinnerButton>
+            </div>
+          </div>
+        </>
+      )}
 
       <SpinnerButton
         type="button"
