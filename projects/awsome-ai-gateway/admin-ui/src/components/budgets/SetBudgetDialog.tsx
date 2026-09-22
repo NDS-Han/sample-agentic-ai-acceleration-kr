@@ -94,7 +94,6 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const maxValue = target?.parentLimit ?? 999999;
   const isUserScope = target?.type === 'USER';
   const isTeamScope = target?.type === 'TEAM';
-  const [useTeamBudget, setUseTeamBudget] = useState(false);
 
   // TEAM scope: share(공유 풀) vs distribute(인당 한도).
   // distribute 는 /team/{id}/allocate 로 멤버별 USER config 를 upsert 한다.
@@ -368,28 +367,27 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
-        <div className="grid gap-6 sm:grid-cols-2">
-        <div className="space-y-4">
-          {/* Use Team Budget option (USER scope only) */}
-          {isUserScope && (
-            <div className="flex items-center justify-between rounded-md border border-border p-3 bg-muted/30">
-              <div>
-                <p className="text-sm font-medium">{t('useTeamBudget')}</p>
-                <p className="text-xs text-muted-foreground">{t('useTeamBudgetDesc')}</p>
-              </div>
-              <SpinnerButton
-                type="button"
-                onClick={handleUseTeamBudget}
-                isLoading={isPending && useTeamBudget}
-                className="bg-secondary text-secondary-foreground hover:bg-secondary/80 px-3 py-1.5 rounded-md text-xs font-medium"
-              >
-                {t('switchToTeamBudget')}
-              </SpinnerButton>
+        {/* 전폭 섹션 — USER: 팀 예산 전환 / TEAM: 공유·분배 모드 */}
+        {/* Use Team Budget option (USER scope only) */}
+        {isUserScope && (
+          <div className="flex items-center justify-between rounded-md border border-border p-3 bg-muted/30">
+            <div>
+              <p className="text-sm font-medium">{t('useTeamBudget')}</p>
+              <p className="text-xs text-muted-foreground">{t('useTeamBudgetDesc')}</p>
             </div>
-          )}
+            <SpinnerButton
+              type="button"
+              onClick={handleUseTeamBudget}
+              isLoading={isPending}
+              className="bg-secondary text-secondary-foreground hover:bg-secondary/80 px-3 py-1.5 rounded-md text-xs font-medium"
+            >
+              {t('switchToTeamBudget')}
+            </SpinnerButton>
+          </div>
+        )}
 
-          {/* TEAM scope: 공유 풀 vs 인당 분배 모드 */}
-          {isTeamScope && (
+        {/* TEAM scope: 공유 풀 vs 인당 분배 모드 */}
+        {isTeamScope && (
             <div className="space-y-2">
               <label className="text-sm font-medium">{t('teamMode')}</label>
               <div className="grid grid-cols-2 gap-2">
@@ -466,6 +464,9 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             </div>
           )}
 
+        {/* 본문 — USER: 좌(max/policy/thresholds)·우(per-app) 2컬럼, TEAM: 1컬럼 */}
+        <div className={isUserScope ? 'grid gap-6 sm:grid-cols-2' : ''}>
+        <div className="space-y-4">
           {/* Budget Amount */}
           <div className="space-y-2">
             <label className="text-sm font-medium">
@@ -501,8 +502,6 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             </div>
           </div>
 
-        </div>
-        <div className="space-y-4">
           {/* Policy Selection */}
           <div className="space-y-2">
             <label className="text-sm font-medium">{t('overagePolicy')}</label>
@@ -563,10 +562,12 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               </button>
             </div>
           </div>
+        </div>
 
-          {/* Per-app budgets (USER scope only, allowed_clients-gated) */}
-          {isUserScope && (
-            <div className="space-y-2 rounded-md border border-border p-3">
+        {/* 오른쪽 컬럼 — Per-app budgets (USER scope only, allowed_clients-gated) */}
+        {isUserScope && (
+        <div className="space-y-4">
+          <div className="space-y-2 rounded-md border border-border p-3">
               <label className="text-sm font-medium">{t('perAppBudget')}</label>
               <p className="text-xs text-muted-foreground">
                 {t('perAppBudgetDesc')}
@@ -602,9 +603,9 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 </div>
               )}
             </div>
-          )}
-
         </div>
+        )}
+
         </div>
 
           <FormError error={error} />
