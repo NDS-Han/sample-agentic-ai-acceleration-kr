@@ -43,11 +43,31 @@ export function DowngradeDiagram({
   const maxDepth = Math.max(0, ...depth.values());
   const layerCount = maxDepth + 1;
   const priceOf = (alias: string) =>
-    models.find(m => m.alias === alias)?.output_price_per_1k ?? 0;
+    models.find(m => m.alias === alias)?.output_price_per_1k;
+
+  // 노드 색은 output 단가의 상대 위치 — 비쌀수록 초록, 쌀수록 빨강 계열.
+  const TONES = [
+    'bg-rose-500/10 border-rose-500/40 text-rose-700 dark:text-rose-300',
+    'bg-orange-500/10 border-orange-500/40 text-orange-700 dark:text-orange-300',
+    'bg-amber-500/10 border-amber-500/40 text-amber-700 dark:text-amber-300',
+    'bg-lime-500/10 border-lime-500/40 text-lime-700 dark:text-lime-300',
+    'bg-emerald-500/10 border-emerald-500/40 text-emerald-700 dark:text-emerald-300',
+  ];
+  const prices = [...depth.keys()]
+    .map(a => priceOf(a))
+    .filter((p): p is number => p != null);
+  const minP = Math.min(...prices);
+  const maxP = Math.max(...prices);
+  const toneOf = (alias: string) => {
+    const p = priceOf(alias);
+    if (p == null || prices.length === 0) return 'bg-muted/40 border-border/60';
+    const t = maxP > minP ? (p - minP) / (maxP - minP) : 0.5;
+    return TONES[Math.round(t * (TONES.length - 1))];
+  };
 
   const layers: string[][] = Array.from({ length: layerCount }, () => []);
   for (const [alias, d] of depth) layers[d].push(alias);
-  for (const l of layers) l.sort((a, b) => priceOf(b) - priceOf(a));
+  for (const l of layers) l.sort((a, b) => (priceOf(b) ?? 0) - (priceOf(a) ?? 0));
 
   const pos = new Map<string, { l: number; i: number; n: number }>();
   layers.forEach((nodes, l) =>
@@ -75,10 +95,10 @@ export function DowngradeDiagram({
               return (
                 <div
                   key={alias}
-                  className="mx-auto w-[86%] rounded-lg border border-border/60 bg-background/90 px-2 py-1 text-center shadow-sm"
+                  className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm ${toneOf(alias)}`}
                 >
-                  <div className="truncate font-mono text-[11px]">{alias}</div>
-                  <div className="text-[9px] tabular-nums text-muted-foreground">
+                  <div className="truncate font-mono text-[11px] font-medium">{alias}</div>
+                  <div className="text-[9px] tabular-nums opacity-80">
                     {m ? formatOutPrice(m) : '—'}
                   </div>
                 </div>
