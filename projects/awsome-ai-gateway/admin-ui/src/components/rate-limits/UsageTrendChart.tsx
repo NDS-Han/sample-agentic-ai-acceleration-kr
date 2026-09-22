@@ -172,7 +172,14 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <Tooltip
                 labelFormatter={(v) => fmtTick(Number(v), trend.bucket_sec)}
                 formatter={(v) => [fmtValue(Number(v), metric), metric.toUpperCase()]}
-                contentStyle={{ fontSize: 11 }}
+                contentStyle={{
+                  backgroundColor: 'hsl(var(--card))',
+                  border: '1px solid hsl(var(--border))',
+                  borderRadius: 'var(--radius)',
+                  fontSize: 11,
+                }}
+                labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
+                itemStyle={{ color: 'hsl(var(--card-foreground))' }}
               />
               {limit != null && limit > 0 && (
                 <ReferenceLine
