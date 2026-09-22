@@ -300,7 +300,9 @@
     "setByAdmin": "Set by admin",
     "noLedTeams": "No teams you lead. Ask an administrator to assign you as a team leader.",
     "allocationExceeds": "Allocated total (${allocated}) exceeds the team budget (${budget}).",
-    "noRules": "No rules yet — add one below."
+    "noRules": "No rules yet — add one below.",
+    "noCheaperModel": "No model with lower output cost than {alias}.",
+    "targetNotCheaper": "{to} does not have a lower output cost than {from} and cannot be a downgrade target."
   },
   "models": {
     "title": "Model Management",

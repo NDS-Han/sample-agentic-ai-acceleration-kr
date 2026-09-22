@@ -300,7 +300,9 @@
     "setByAdmin": "관리자 설정",
     "noLedTeams": "리더로 지정된 팀이 없습니다. 관리자에게 팀 리더 지정을 요청하세요.",
     "allocationExceeds": "배분 금액의 합계(${allocated})가 팀 예산(${budget})을 초과합니다.",
-    "noRules": "규칙이 없습니다 — 아래 버튼으로 추가하세요."
+    "noRules": "규칙이 없습니다 — 아래 버튼으로 추가하세요.",
+    "noCheaperModel": "{alias}보다 output 비용이 낮은 모델이 없습니다.",
+    "targetNotCheaper": "{to}은(는) {from}보다 output 비용이 낮지 않습니다 — 다운그레이드 대상으로 선택할 수 없습니다."
   },
   "models": {
     "title": "모델 관리",

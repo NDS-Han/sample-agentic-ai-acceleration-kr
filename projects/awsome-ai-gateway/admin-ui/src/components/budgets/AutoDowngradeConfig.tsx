@@ -39,6 +39,18 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
 
   const activeModels = models.filter(m => m.is_active);
 
+  const priceOf = (alias: string) =>
+    activeModels.find(m => m.alias === alias)?.output_price_per_1k;
+
+  // 다운그레이드는 output 단가가 낮은 모델로만 — from 보다 비싼 모델은 후보에서 제외.
+  const cheaperModels = (fromAlias: string): ModelListItem[] => {
+    const p = priceOf(fromAlias);
+    if (p == null) return activeModels;
+    return activeModels.filter(m => m.output_price_per_1k < p);
+  };
+
+  const formatOutPrice = (m: ModelListItem) => `$${m.output_price_per_1k}/1K`;
+
   useEffect(() => {
     if (!scopeId) return;
     startTransition(async () => {
@@ -58,11 +70,15 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   }, [scopeType, scopeId]);
 
   const addRule = () => {
+    // 기본 from 은 output 단가가 가장 높은 모델 — 저렴한 to 후보가 존재하도록.
+    const from = [...activeModels].sort(
+      (a, b) => b.output_price_per_1k - a.output_price_per_1k,
+    )[0]?.alias ?? '';
     setRules(prev => [
       ...prev,
       {
-        from_model_alias: activeModels[0]?.alias ?? '',
-        to_model_alias: activeModels.length > 1 ? activeModels[1].alias : activeModels[0]?.alias ?? '',
+        from_model_alias: from,
+        to_model_alias: cheaperModels(from)[0]?.alias ?? '',
         threshold_pct: '80',
       },
     ]);
@@ -74,7 +90,15 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
 
   const updateRule = (index: number, field: keyof DowngradeRuleForm, value: string | number) => {
     setRules(prev =>
-      prev.map((r, i) => (i === index ? { ...r, [field]: value } : r)),
+      prev.map((r, i) => {
+        if (i !== index) return r;
+        const next = { ...r, [field]: value };
+        // from 변경 시 기존 to 가 더 이상 저렴하지 않으면 첫 번째 유효 후보로 교체.
+        if (field === 'from_model_alias' && !cheaperModels(next.from_model_alias).some(m => m.alias === next.to_model_alias)) {
+          next.to_model_alias = cheaperModels(next.from_model_alias)[0]?.alias ?? '';
+        }
+        return next;
+      }),
     );
   };
 
@@ -86,6 +110,14 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
     for (const rule of rules) {
       if (rule.from_model_alias === rule.to_model_alias) {
         toast({ type: 'error', message: t('sameSourceTarget', { alias: rule.from_model_alias }), auto_dismiss_ms: 3000 });
+        return;
+      }
+      if (!rule.to_model_alias) {
+        toast({ type: 'error', message: t('noCheaperModel', { alias: rule.from_model_alias }), auto_dismiss_ms: 4000 });
+        return;
+      }
+      if (!cheaperModels(rule.from_model_alias).some(m => m.alias === rule.to_model_alias)) {
+        toast({ type: 'error', message: t('targetNotCheaper', { from: rule.from_model_alias, to: rule.to_model_alias }), auto_dismiss_ms: 4000 });
         return;
       }
     }
@@ -197,8 +229,23 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                     onChange={e => updateRule(index, 'to_model_alias', e.target.value)}
                     className="min-w-0 flex-1 rounded-lg border border-transparent bg-transparent px-2 py-1.5 font-mono text-xs hover:bg-muted/50 focus:border-input focus:bg-background focus:outline-none focus:ring-1 focus:ring-ring"
                   >
-                    {activeModels.map(m => (
-                      <option key={m.alias} value={m.alias}>{m.alias}</option>
+                    {cheaperModels(rule.from_model_alias).length === 0 && (
+                      <option value="" disabled>
+                        {t('noCheaperModel', { alias: rule.from_model_alias })}
+                      </option>
+                    )}
+                    {/* 기존 저장분이 필터에 걸리는 경우 현재 값을 유지해 보여준다
+                        (저장 시 검증에서 걸러짐) */}
+                    {rule.to_model_alias &&
+                      !cheaperModels(rule.from_model_alias).some(m => m.alias === rule.to_model_alias) && (
+                        <option value={rule.to_model_alias}>
+                          {rule.to_model_alias} — {tc('inactive')}
+                        </option>
+                      )}
+                    {cheaperModels(rule.from_model_alias).map(m => (
+                      <option key={m.alias} value={m.alias}>
+                        {m.alias} ({formatOutPrice(m)})
+                      </option>
                     ))}
                   </select>
                   <div className="flex shrink-0 items-center gap-1 rounded-lg border border-input bg-background px-2 py-1 focus-within:ring-1 focus-within:ring-ring">
