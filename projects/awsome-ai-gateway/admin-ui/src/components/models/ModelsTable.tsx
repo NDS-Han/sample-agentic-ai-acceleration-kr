@@ -60,15 +60,17 @@ function StatusToggle({
           'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors',
           'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50',
           isActive
-            ? 'bg-teal-500 shadow-[0_0_8px_rgba(20,184,166,0.45)]'
-            : 'bg-muted-foreground/30',
+            ? 'bg-teal-500 shadow-[0_0_10px_rgba(20,184,166,0.5)]'
+            : 'border border-border bg-muted',
         )}
       >
         <span
           aria-hidden="true"
           className={cn(
-            'inline-block size-3.5 rounded-full bg-white shadow transition-transform',
-            isActive ? 'translate-x-[19px]' : 'translate-x-[3px]',
+            'inline-block size-3.5 rounded-full shadow transition-transform',
+            isActive
+              ? 'translate-x-[19px] bg-white'
+              : 'translate-x-[3px] bg-muted-foreground/50',
           )}
         />
       </button>
@@ -197,17 +199,12 @@ export function ModelsTable({ models }: ModelsTableProps) {
                   <Td numeric>{fmtPricePerM(model.input_price_per_1k)}</Td>
                   <Td numeric>{fmtPricePerM(model.output_price_per_1k)}</Td>
                   <Td>
-                    <div className="flex items-center gap-2">
-                      <StatusToggle
-                        isActive={model.is_active}
-                        disabled={isPending}
-                        label={model.is_active ? `${t('active')} — ${t('deactivate')}` : `${t('inactive')} — ${t('activate')}`}
-                        onClick={() => (model.is_active ? handleDeactivate(model) : handleActivate(model))}
-                      />
-                      <span className={cn('text-xs', model.is_active ? 'text-teal-600 dark:text-teal-400' : 'text-muted-foreground')}>
-                        {model.is_active ? t('active') : t('inactive')}
-                      </span>
-                    </div>
+                    <StatusToggle
+                      isActive={model.is_active}
+                      disabled={isPending}
+                      label={model.is_active ? `${t('active')} — ${t('deactivate')}` : `${t('inactive')} — ${t('activate')}`}
+                      onClick={() => (model.is_active ? handleDeactivate(model) : handleActivate(model))}
+                    />
                   </Td>
                   <Td>
                     {/* 아이콘 버튼 — 라벨 길이(활성화/비활성화)가 달라도 행마다 위치가 정렬된다 */}
