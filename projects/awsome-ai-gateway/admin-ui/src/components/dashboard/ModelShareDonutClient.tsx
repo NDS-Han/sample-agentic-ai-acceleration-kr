@@ -14,7 +14,7 @@ import {
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
-import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
+import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
@@ -32,7 +32,6 @@ interface Props {
 
 export function ModelShareDonutClient({ initialData, teams, period, client }: Props) {
   const t = useTranslations('dashboard');
-  const theme = useChartTheme();
   const [teamId, setTeamId] = useState<string>('all');
   const [data, setData] = useState<ModelShareResponse>(initialData);
   const [loading, setLoading] = useState(false);
@@ -109,28 +108,12 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       },
       plugins: {
         legend: { display: false },
-        tooltip: {
-          // 기본 rgba(0,0,0,0.8) 은 반투명이라 뒤의 중앙 오버레이가 비쳐
-          // '겹침' 으로 보였다. 카드 표면색(불투명)+테두리의 팝오버로 바꾼다.
-          backgroundColor: theme.surface,
-          titleColor: theme.text,
-          bodyColor: theme.textMuted,
-          borderColor: theme.isDark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.12)',
-          borderWidth: 1,
-          padding: 10,
-          cornerRadius: 8,
-          position: 'nearest' as const,
-          callbacks: {
-            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.models[ctx.dataIndex];
-              if (!item) return '';
-              return `${modelDisplay(item.model_alias, item.display_name)}: $${item.cost_usd.toFixed(4)} (${item.share_pct.toFixed(1)}%)`;
-            },
-          },
-        },
+        // 캔버스 툴팁은 어디에 놓아도 도넛 중앙 오버레이를 물리적으로 가린다.
+        // 호버 상세는 중앙 표시 자체가 담당(조각 호버 시 중앙 내용이 바뀐다).
+        tooltip: { enabled: false },
       },
     }),
-    [data, theme],
+    [data],
   );
 
   const isEmpty = data.models.length === 0 || data.total_cost_usd === 0;
@@ -175,28 +158,37 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
         <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
           <div className="relative h-64">
             <Doughnut data={chartData} options={options} />
-            {/* 가운데: 점유율 1위 모델 강조 (models 는 비용 desc 정렬, [0]=1위) */}
-            <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
-              {data.models[0] && (
-                <span
-                  className="mb-1 h-2.5 w-2.5 rounded-full"
-                  style={{ backgroundColor: COLORS[0] }}
-                  aria-hidden="true"
-                />
-              )}
-              <p className="text-2xl font-bold leading-none tracking-tight">
-                {data.models[0] ? `${data.models[0].share_pct.toFixed(0)}%` : '—'}
-              </p>
-              <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
-                {data.models[0] ? modelDisplay(data.models[0].model_alias, data.models[0].display_name) : ''}
-              </p>
-              <p className="mt-0.5 text-[10px] text-muted-foreground">
-                {t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
-                  minimumFractionDigits: 2,
-                  maximumFractionDigits: 2,
-                }) })}
-              </p>
-            </div>
+            {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
+                조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
+            {(() => {
+              const centerItem = (hoverIndex != null ? data.models[hoverIndex] : null) ?? data.models[0];
+              const centerIdx = hoverIndex ?? 0;
+              return (
+                <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
+                  {centerItem && (
+                    <span
+                      className="mb-1 h-2.5 w-2.5 rounded-full"
+                      style={{ backgroundColor: COLORS[centerIdx % COLORS.length] }}
+                      aria-hidden="true"
+                    />
+                  )}
+                  <p className="text-2xl font-bold leading-none tracking-tight">
+                    {centerItem ? `${centerItem.share_pct.toFixed(0)}%` : '—'}
+                  </p>
+                  <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
+                    {centerItem ? modelDisplay(centerItem.model_alias, centerItem.display_name) : ''}
+                  </p>
+                  <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
+                    {hoverIndex != null && centerItem
+                      ? `$${centerItem.cost_usd.toFixed(4)}`
+                      : t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
+                          minimumFractionDigits: 2,
+                          maximumFractionDigits: 2,
+                        }) })}
+                  </p>
+                </div>
+              );
+            })()}
           </div>
           <ul className="space-y-2">
             {data.models.map((m, i) => (
