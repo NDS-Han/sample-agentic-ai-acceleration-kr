@@ -227,6 +227,13 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 }
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // OIDC(hosted-UI) 배포에서는 ROPC 폼 경로를 닫는다 — 비밀번호가 admin-ui/admin-api 를
+  // 통과하는 이 경로는 HTTPS IdP 로그인이 가능해진 배포에서 제거 대상이다(middleware
+  // 도 /login 을 닫는다). 404 로 경로 자체가 없는 것처럼 보이게 한다.
+  if (env('OIDC_CLIENT_ID')) {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+
   let email: string | undefined;
   let password: string | undefined;
 

@@ -19,6 +19,12 @@ import {
 } from '@/lib/adminSessionCookie';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  // ROPC 챌린지 완결도 같은 경로다 — OIDC 배포에서는 /api/auth/login POST 와 같이 닫는다.
+  // Hosted UI 는 NEW_PASSWORD_REQUIRED 를 Cognito 쪽에서 자체 처리한다.
+  if ((process.env.OIDC_CLIENT_ID ?? '').trim() !== '') {
+    return NextResponse.json({ error: 'Not found' }, { status: 404 });
+  }
+
   let email: string | undefined;
   let newPassword: string | undefined;
   let cognitoSession: string | undefined;

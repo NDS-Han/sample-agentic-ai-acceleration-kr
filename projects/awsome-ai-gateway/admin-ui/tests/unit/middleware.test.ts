@@ -191,4 +191,19 @@ describe('middleware — hosted-UI OIDC 배포에서는 /api/auth/login 이다',
       else process.env.OIDC_CLIENT_ID = saved;
     }
   });
+
+  it('OIDC 배포에서 /login 직접 접근은 / 로 낸다 (ROPC 폼 경로 폐쇄)', async () => {
+    // 비밀번호가 우리 서버를 통과하는 ROPC 폼은 HTTPS IdP 로그인이 가능해진 배포에서
+    // 제거 대상이다. / 로내면 세션이 살아 있으면 대시보드, 아니면 단일 진입점으로 간다.
+    const saved = process.env.OIDC_CLIENT_ID;
+    process.env.OIDC_CLIENT_ID = 'admin-ui-client';
+    try {
+      const res = await middleware(requestWith(undefined, '/login'));
+      expect(res.status).toBe(307);
+      expectSameOriginRedirect(res, '/');
+    } finally {
+      if (saved === undefined) delete process.env.OIDC_CLIENT_ID;
+      else process.env.OIDC_CLIENT_ID = saved;
+    }
+  });
 });

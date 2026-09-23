@@ -28,7 +28,25 @@ from app.services.oidc_service import OIDCNotProvisionableError
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/v1/auth/admin", tags=["Admin UI Auth"])
+
+def _ropc_enabled() -> None:
+    """OIDC hosted-UI 배포에서는 ROPC 로그인 경로를 닫는다.
+
+    이 라우터는 평문 비밀번호가 admin-api 를 통과하는 경로다 — admin-ui 가 OIDC
+    로그인으로 동작하는 배포에서는 ``ADMIN_ROPC_ENABLED=false`` 로 끈다. 비활성
+    시 404 — 경로가 아예 없는 것처럼 보이게 해 노출면을 줄인다.
+    """
+    from app.core.config import get_settings
+
+    if not get_settings().ADMIN_ROPC_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+
+router = APIRouter(
+    prefix="/v1/auth/admin",
+    tags=["Admin UI Auth"],
+    dependencies=[Depends(_ropc_enabled)],
+)
 
 
 def _client_ip(request: Request) -> str:

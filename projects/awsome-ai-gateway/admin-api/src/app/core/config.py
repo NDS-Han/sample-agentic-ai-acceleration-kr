@@ -191,6 +191,12 @@ class Settings(BaseSettings):
     ADMIN_UI_JWT_AUDIENCE: str = "ds-gateway-admin-api"
     ADMIN_UI_JWT_TTL_HOURS: int = 12
 
+    # admin-ui ROPC 로그인 경로(POST /v1/auth/admin/login, /new-password).
+    # 평문 비밀번호가 admin-api 를 통과하는 경로라, HTTPS/도메인이 준비돼 admin-ui 가
+    # OIDC hosted-UI 로그인(OIDC_CLIENT_ID 등)으로 동작하는 배포에서는 false 로 끈다.
+    # admin-api 는 공인 ALB 에 노출되므로 UI 쪽 게이트만으로는 노출면이 닫히지 않는다.
+    ADMIN_ROPC_ENABLED: bool = True
+
     # AWS Price List API 리전(GetProducts). Price List 는 us-east-1/ap-south-1/
     # eu-central-1 엔드포인트만 지원 — 우리 홈리전 ap-northeast-2 가 아니어도 정상.
     # 가격 동기화(모델관리 화면 버튼)용. IAM: admin-api 역할에 pricing:GetProducts.

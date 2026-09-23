@@ -81,15 +81,19 @@ function redirectSameOrigin(request: NextRequest, path: string, status: number):
   return NextResponse.redirect(new URL(path, externalOrigin(request)), status);
 }
 
+/** OIDC(hosted-UI SSO) 배포인가 — adminUi.env 의 OIDC_CLIENT_ID 유무가 스위치. */
+function hostedUiOidc(): boolean {
+  return (process.env.OIDC_CLIENT_ID ?? '').trim() !== '';
+}
+
 function redirectToLogin(request: NextRequest, clearCookie: boolean): NextResponse {
   // 로그인 방식은 배포별로 둘 중 하나다. adminUi.env 의 OIDC_* 가 채워져 있으면
   // hosted-UI SSO(Authorization Code+PKCE) 배포 — /api/auth/login GET 이 IdP 로 302.
   // 그게 아니면 /login 페이지(8-L Cognito 폼; DEV_LOGIN_ENABLED 면 dev-login 링크도 표시).
   // OIDC 배포에서 /login 으로내면 ROPC 가 꺼져 있어 폼이 동작하지 않는다.
-  const hostedUiOidc = (process.env.OIDC_CLIENT_ID ?? '').trim() !== '';
   const redirectResponse = redirectSameOrigin(
     request,
-    hostedUiOidc ? '/api/auth/login' : '/login',
+    hostedUiOidc() ? '/api/auth/login' : '/login',
     307,
   );
   if (clearCookie) {
@@ -118,6 +122,15 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     pathname === '/login' ||
     pathname === '/403'
   ) {
+    // OIDC 배포에서는 ROPC 폼 경로(/login)를 닫는다 — 비밀번호가 우리 서버를 통과하는
+    // 경로는 HTTPS IdP 로그인이 가능해진 시점에 제거하는 게 맞다. 쿠키가 있든 없든
+    // '/' 로내면 세션이 살아 있으면 대시보드, 아니면 단일 진입점(/api/auth/login)으로
+    // 다시 분기된다.
+    if (pathname === '/login' && hostedUiOidc()) {
+      const res = redirectSameOrigin(request, '/', 307);
+      applySecurityHeaders(res);
+      return res;
+    }
     // '/login' 은 로그아웃 상태의 페이지다. 클라이언트 측 401 핸들러가 쿠키를 지우지
     // 않고 assign('/login') 하므로(만료 외에 admin-api 가 거절하는 유효 형태의 JWT —
     // 서명키 교체·admin_jwt_configs 토글 등), 쿠키가 남은 채 /login 에 오면 layout 이
