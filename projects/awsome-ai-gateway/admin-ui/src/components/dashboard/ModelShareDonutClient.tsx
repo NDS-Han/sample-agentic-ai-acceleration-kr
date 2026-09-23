@@ -201,7 +201,10 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                     className="w-3 h-3 rounded-full flex-shrink-0"
                     style={{ backgroundColor: COLORS[i % COLORS.length] }}
                   />
-                  <span className="font-medium truncate">{modelDisplay(m.model_alias, m.display_name)}</span>
+                  {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용. */}
+                  <span className="font-medium break-words leading-snug" title={modelDisplay(m.model_alias, m.display_name)}>
+                    {modelDisplay(m.model_alias, m.display_name)}
+                  </span>
                 </div>
                 <span className="tabular-nums text-xs text-right">
                   ${m.cost_usd.toFixed(2)}

@@ -123,7 +123,7 @@ export function ClientShareDonutClient({ data }: Props) {
                 className="w-3 h-3 rounded-full flex-shrink-0"
                 style={{ backgroundColor: COLORS[i % COLORS.length] }}
               />
-              <span className="font-medium truncate">{labelFor(c.client)}</span>
+              <span className="font-medium break-words leading-snug" title={labelFor(c.client)}>{labelFor(c.client)}</span>
             </div>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {t('callCount', { count: c.call_count })}
