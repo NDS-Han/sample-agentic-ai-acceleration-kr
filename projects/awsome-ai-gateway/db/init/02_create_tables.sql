@@ -654,3 +654,8 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_by  UUID        REFERENCES auth.users(id)
 );
+
+-- migration 0037: 모델 스펙(context_window / max_output_tokens). LiteLLM catalog
+-- 싱크가 채우고, ORM 이 매 SELECT 에 포함하므로 init SQL 로만 세운 DB 에도 있어야 한다.
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS context_window INTEGER;
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER;
