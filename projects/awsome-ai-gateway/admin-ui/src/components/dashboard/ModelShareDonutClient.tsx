@@ -14,7 +14,7 @@ import {
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
-import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
+import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
@@ -32,6 +32,7 @@ interface Props {
 
 export function ModelShareDonutClient({ initialData, teams, period, client }: Props) {
   const t = useTranslations('dashboard');
+  const theme = useChartTheme();
   const [teamId, setTeamId] = useState<string>('all');
   const [data, setData] = useState<ModelShareResponse>(initialData);
   const [loading, setLoading] = useState(false);
@@ -102,17 +103,34 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       cutout: '62%',
       // hover 시 부드럽게 튀어나오는 애니메이션.
       animation: { animateRotate: true, animateScale: false },
-      // 호버한 조각의 우측 목록 행을 강조한다 — 캔버스 툴팁은 점유율이 큰
-      // 조각에서 도넛 중앙(1위 % 오버레이)을 피할 방법이 없어 끈다.
+      // 호버한 조각의 우측 목록 행도 함께 강조한다.
       onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
         setHoverIndex(elements.length ? elements[0].index : null);
       },
       plugins: {
         legend: { display: false },
-        tooltip: { enabled: false },
+        tooltip: {
+          // 기본 rgba(0,0,0,0.8) 은 반투명이라 뒤의 중앙 오버레이가 비쳐
+          // '겹침' 으로 보였다. 카드 표면색(불투명)+테두리의 팝오버로 바꾼다.
+          backgroundColor: theme.surface,
+          titleColor: theme.text,
+          bodyColor: theme.textMuted,
+          borderColor: theme.isDark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.12)',
+          borderWidth: 1,
+          padding: 10,
+          cornerRadius: 8,
+          position: 'nearest' as const,
+          callbacks: {
+            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
+              const item = data.models[ctx.dataIndex];
+              if (!item) return '';
+              return `${modelDisplay(item.model_alias, item.display_name)}: $${item.cost_usd.toFixed(4)} (${item.share_pct.toFixed(1)}%)`;
+            },
+          },
+        },
       },
     }),
-    [data],
+    [data, theme],
   );
 
   const isEmpty = data.models.length === 0 || data.total_cost_usd === 0;
@@ -184,7 +202,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
             {data.models.map((m, i) => (
               <li
                 key={m.model_alias}
-                className={`flex items-center justify-between text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <span
@@ -193,14 +211,12 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                   />
                   <span className="font-medium truncate">{modelDisplay(m.model_alias, m.display_name)}</span>
                 </div>
-                <div className="flex items-center gap-3 text-xs">
-                  <span className="tabular-nums">
-                    ${m.cost_usd.toFixed(2)}
-                  </span>
-                  <span className="text-muted-foreground tabular-nums w-12 text-right">
-                    {m.share_pct.toFixed(1)}%
-                  </span>
-                </div>
+                <span className="tabular-nums text-xs text-right">
+                  ${m.cost_usd.toFixed(2)}
+                </span>
+                <span className="text-muted-foreground tabular-nums text-xs text-right">
+                  {m.share_pct.toFixed(1)}%
+                </span>
               </li>
             ))}
           </ul>

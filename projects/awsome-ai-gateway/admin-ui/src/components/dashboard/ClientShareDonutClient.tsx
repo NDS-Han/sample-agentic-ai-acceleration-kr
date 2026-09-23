@@ -13,7 +13,7 @@ import {
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
-import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
+import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
@@ -27,6 +27,7 @@ interface Props {
 
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
+  const theme = useChartTheme();
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartData = useMemo(
     () => ({
@@ -50,17 +51,44 @@ export function ClientShareDonutClient({ data }: Props) {
       maintainAspectRatio: false,
       cutout: '62%',
       animation: { animateRotate: true, animateScale: false },
-      // 호버한 조각의 우측 목록 행을 강조한다 — 캔버스 툴팁은 점유율이 큰
-      // 조각에서 도넛 중앙(1위 % 오버레이)을 피할 방법이 없어 끈다.
+      // 호버한 조각의 우측 목록 행도 함께 강조한다.
       onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
         setHoverIndex(elements.length ? elements[0].index : null);
       },
       plugins: {
         legend: { display: false },
-        tooltip: { enabled: false },
+        tooltip: {
+          // 기본 rgba(0,0,0,0.8) 은 반투명이라 뒤의 중앙 오버레이가 비쳐
+          // '겹침' 으로 보였다. 카드 표면색(불투명)+테두리의 팝오버로 바꾼다.
+          backgroundColor: theme.surface,
+          titleColor: theme.text,
+          bodyColor: theme.textMuted,
+          borderColor: theme.isDark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.12)',
+          borderWidth: 1,
+          padding: 10,
+          cornerRadius: 8,
+          position: 'nearest' as const,
+          callbacks: {
+            // Use the backend-computed share_pct (authoritative) rather than
+            // recomputing from cost/total, which can drift due to rounding.
+            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
+              const item = data.clients[ctx.dataIndex];
+              if (!item) return '';
+              return `${labelFor(item.client)}: $${item.cost_usd.toFixed(2)} (${item.share_pct.toFixed(1)}%)`;
+            },
+            // 호출 수 + 서버측 웹검색 수(attribution 지표)를 같은 툴팁에 함께 표시.
+            afterLabel: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
+              const item = data.clients[ctx.dataIndex];
+              if (!item) return '';
+              const lines = [t('callCount', { count: item.call_count })];
+              if (item.web_search_count) lines.push(t('webSearchCount', { count: item.web_search_count }));
+              return lines;
+            },
+          },
+        },
       },
     }),
-    [data],
+    [data, theme, t],
   );
 
   if (!data.clients.length) {
@@ -102,7 +130,9 @@ export function ClientShareDonutClient({ data }: Props) {
         {data.clients.map((c, i) => (
           <li
             key={c.client}
-            className={`flex items-center justify-between gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+            // 이름 + 고정폭 우측정렬 수치 컬럼 — justify-between 은 이름과 수치가
+            // 양끝으로 벌어지고 행마다 수치 위치가 들쭉날쭉해 산만해 보였다.
+            className={`grid grid-cols-[minmax(0,1fr)_5rem_6.5rem_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
           >
             <div className="flex items-center gap-2 min-w-0">
               <span
@@ -111,20 +141,16 @@ export function ClientShareDonutClient({ data }: Props) {
               />
               <span className="font-medium truncate">{labelFor(c.client)}</span>
             </div>
-            <div className="flex items-center gap-3 text-xs shrink-0">
-              <span className="text-muted-foreground tabular-nums">
-                {t('callCount', { count: c.call_count })}
-              </span>
-              {c.web_search_count > 0 && (
-                <span className="text-muted-foreground tabular-nums">
-                  {t('webSearchCount', { count: c.web_search_count })}
-                </span>
-              )}
-              <span className="tabular-nums">${c.cost_usd.toFixed(2)}</span>
-              <span className="text-muted-foreground tabular-nums w-12 text-right">
-                {c.share_pct.toFixed(1)}%
-              </span>
-            </div>
+            <span className="text-muted-foreground tabular-nums text-xs text-right">
+              {t('callCount', { count: c.call_count })}
+            </span>
+            <span className="text-muted-foreground tabular-nums text-xs text-right">
+              {c.web_search_count > 0 ? t('webSearchCount', { count: c.web_search_count }) : ''}
+            </span>
+            <span className="tabular-nums text-xs text-right">${c.cost_usd.toFixed(2)}</span>
+            <span className="text-muted-foreground tabular-nums text-xs text-right">
+              {c.share_pct.toFixed(1)}%
+            </span>
           </li>
         ))}
       </ul>
