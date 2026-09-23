@@ -14,8 +14,8 @@ from dataclasses import dataclass
 
 import structlog
 from fastapi import APIRouter, Request, Response
-from sqlalchemy.exc import DBAPIError
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.exc import DBAPIError
 
 from app.config import get_settings
 from app.providers.bedrock_adapter import BedrockAdapter

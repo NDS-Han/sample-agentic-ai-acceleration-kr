@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Optional
 
@@ -42,7 +42,7 @@ async def _record_unmatched_model(redis, name: str) -> None:
         pipe.hset(
             UNMATCHED_MODELS_SEEN,
             name,
-            datetime.now(timezone.utc).isoformat(),
+            datetime.now(UTC).isoformat(),
         )
         await pipe.execute()
     except Exception:  # noqa: BLE001

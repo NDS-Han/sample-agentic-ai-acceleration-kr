@@ -681,5 +681,3 @@ async def get_user_effective_policy(
     from app.services.effective_policy_service import EffectivePolicyService
 
     return await EffectivePolicyService(session).get_for_user(user_id)
-    await session.commit()
-    await svc.invalidate_user_vk_cache(user_id)

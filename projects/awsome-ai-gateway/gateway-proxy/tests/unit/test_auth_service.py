@@ -161,7 +161,9 @@ async def test_vk_auth_db_fallback_loads_team_allowed_models(monkeypatch):
     uac_scalars.all.return_value = []
     uac_result.scalars.return_value = uac_scalars
 
-    db.execute = AsyncMock(side_effect=[user_result, tam_result, uac_result, uac_result, uac_result])
+    db.execute = AsyncMock(
+        side_effect=[user_result, tam_result, uac_result, uac_result, uac_result]
+    )
 
     strategy = auth_mod.VKAuthStrategy()
     auth = await strategy.authenticate("Bearer vk-xyz", redis, db)
@@ -201,7 +203,9 @@ async def test_vk_auth_db_fallback_empty_team_means_allow_all():
     uac_result.scalars.return_value = uac_scalars
 
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=[user_result, tam_result, uac_result, uac_result, uac_result])
+    db.execute = AsyncMock(
+        side_effect=[user_result, tam_result, uac_result, uac_result, uac_result]
+    )
 
     strategy = auth_mod.VKAuthStrategy()
     auth = await strategy.authenticate("Bearer vk-xyz", redis, db)
