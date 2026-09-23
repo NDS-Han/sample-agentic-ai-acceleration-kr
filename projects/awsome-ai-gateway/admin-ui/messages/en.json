@@ -144,6 +144,7 @@
     "costSeriesTotal": "Total",
     "costSeriesOther": "Other",
     "webSearchCount": "{count, number} web searches",
+    "callCount": "{count, number} calls",
     "noUsageForPeriod": "No usage records for this period.",
     "monthNames": {
       "1": "January",

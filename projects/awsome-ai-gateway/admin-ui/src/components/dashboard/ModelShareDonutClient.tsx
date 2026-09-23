@@ -11,6 +11,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
@@ -35,6 +36,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
   const [data, setData] = useState<ModelShareResponse>(initialData);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const isFirstRender = useRef(true);
 
   useEffect(() => {
@@ -100,20 +102,14 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       cutout: '62%',
       // hover 시 부드럽게 튀어나오는 애니메이션.
       animation: { animateRotate: true, animateScale: false },
+      // 호버한 조각의 우측 목록 행을 강조한다 — 캔버스 툴팁은 점유율이 큰
+      // 조각에서 도넛 중앙(1위 % 오버레이)을 피할 방법이 없어 끈다.
+      onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
+        setHoverIndex(elements.length ? elements[0].index : null);
+      },
       plugins: {
         legend: { display: false },
-        tooltip: {
-          // 'average'(기본)는 조각 무게중심 — 도넛 중앙의 1위 % 숫자 위로
-          // 툴팁이 겹친다. 'nearest' 는 커서를 따라간다.
-          position: 'nearest' as const,
-          callbacks: {
-            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.models[ctx.dataIndex];
-              if (!item) return '';
-              return `${modelDisplay(item.model_alias, item.display_name)}: $${item.cost_usd.toFixed(4)} (${item.share_pct.toFixed(1)}%)`;
-            },
-          },
-        },
+        tooltip: { enabled: false },
       },
     }),
     [data],
@@ -186,7 +182,10 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
           </div>
           <ul className="space-y-2">
             {data.models.map((m, i) => (
-              <li key={m.model_alias} className="flex items-center justify-between text-sm">
+              <li
+                key={m.model_alias}
+                className={`flex items-center justify-between text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+              >
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className="w-3 h-3 rounded-full flex-shrink-0"

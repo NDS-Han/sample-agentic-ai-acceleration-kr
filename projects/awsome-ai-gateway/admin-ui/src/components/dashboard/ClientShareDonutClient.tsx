@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import {
   Chart as ChartJS,
@@ -10,6 +10,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
@@ -26,6 +27,7 @@ interface Props {
 
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
+  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartData = useMemo(
     () => ({
       labels: data.clients.map((c) => labelFor(c.client)),
@@ -48,28 +50,14 @@ export function ClientShareDonutClient({ data }: Props) {
       maintainAspectRatio: false,
       cutout: '62%',
       animation: { animateRotate: true, animateScale: false },
+      // 호버한 조각의 우측 목록 행을 강조한다 — 캔버스 툴팁은 점유율이 큰
+      // 조각에서 도넛 중앙(1위 % 오버레이)을 피할 방법이 없어 끈다.
+      onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
+        setHoverIndex(elements.length ? elements[0].index : null);
+      },
       plugins: {
         legend: { display: false },
-        tooltip: {
-          // 'average'(기본)는 조각 무게중심 — 도넛 중앙의 1위 % 숫자 위로
-          // 툴팁이 겹친다. 'nearest' 는 커서를 따라간다.
-          position: 'nearest' as const,
-          callbacks: {
-            // Use the backend-computed share_pct (authoritative) rather than
-            // recomputing from cost/total, which can drift due to rounding.
-            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.clients[ctx.dataIndex];
-              if (!item) return '';
-              return `${labelFor(item.client)}: $${item.cost_usd.toFixed(2)} (${item.share_pct.toFixed(1)}%)`;
-            },
-            // Extra line: server-side web searches for this client (attribution metric).
-            afterLabel: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.clients[ctx.dataIndex];
-              if (!item || !item.web_search_count) return '';
-              return t('webSearchCount', { count: item.web_search_count });
-            },
-          },
-        },
+        tooltip: { enabled: false },
       },
     }),
     [data],
@@ -112,7 +100,10 @@ export function ClientShareDonutClient({ data }: Props) {
       </div>
       <ul className="space-y-2">
         {data.clients.map((c, i) => (
-          <li key={c.client} className="flex items-center justify-between gap-2 text-sm">
+          <li
+            key={c.client}
+            className={`flex items-center justify-between gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+          >
             <div className="flex items-center gap-2 min-w-0">
               <span
                 className="w-3 h-3 rounded-full flex-shrink-0"
@@ -121,6 +112,9 @@ export function ClientShareDonutClient({ data }: Props) {
               <span className="font-medium truncate">{labelFor(c.client)}</span>
             </div>
             <div className="flex items-center gap-3 text-xs shrink-0">
+              <span className="text-muted-foreground tabular-nums">
+                {t('callCount', { count: c.call_count })}
+              </span>
               {c.web_search_count > 0 && (
                 <span className="text-muted-foreground tabular-nums">
                   {t('webSearchCount', { count: c.web_search_count })}

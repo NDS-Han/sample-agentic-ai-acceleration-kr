@@ -144,6 +144,7 @@
     "costSeriesTotal": "합계",
     "costSeriesOther": "기타",
     "webSearchCount": "웹서치 {count, number}회",
+    "callCount": "호출 {count, number}회",
     "noUsageForPeriod": "이 기간에 사용 기록이 없습니다.",
     "monthNames": {
       "1": "1",
