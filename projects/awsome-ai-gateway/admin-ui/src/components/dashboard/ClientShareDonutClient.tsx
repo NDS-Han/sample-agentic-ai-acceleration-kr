@@ -49,8 +49,11 @@ export function ClientShareDonutClient({ data }: Props) {
       cutout: '62%',
       animation: { animateRotate: true, animateScale: false },
       plugins: {
-        legend: { display: true, position: 'bottom' as const },
+        legend: { display: false },
         tooltip: {
+          // 'average'(기본)는 조각 무게중심 — 도넛 중앙의 1위 % 숫자 위로
+          // 툴팁이 겹친다. 'nearest' 는 커서를 따라간다.
+          position: 'nearest' as const,
           callbacks: {
             // Use the backend-computed share_pct (authoritative) rather than
             // recomputing from cost/total, which can drift due to rounding.
@@ -81,8 +84,56 @@ export function ClientShareDonutClient({ data }: Props) {
   }
 
   return (
-    <div className="relative h-64">
-      <Doughnut data={chartData} options={options} />
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+      <div className="relative h-64">
+        <Doughnut data={chartData} options={options} />
+        {/* 가운데: 점유율 1위 앱 강조 (clients 는 비용 desc 정렬, [0]=1위) */}
+        <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
+          {data.clients[0] && (
+            <span
+              className="mb-1 h-2.5 w-2.5 rounded-full"
+              style={{ backgroundColor: COLORS[0] }}
+              aria-hidden="true"
+            />
+          )}
+          <p className="text-2xl font-bold leading-none tracking-tight">
+            {data.clients[0] ? `${data.clients[0].share_pct.toFixed(0)}%` : '—'}
+          </p>
+          <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
+            {data.clients[0] ? labelFor(data.clients[0].client) : ''}
+          </p>
+          <p className="mt-0.5 text-[10px] text-muted-foreground">
+            {t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
+              minimumFractionDigits: 2,
+              maximumFractionDigits: 2,
+            }) })}
+          </p>
+        </div>
+      </div>
+      <ul className="space-y-2">
+        {data.clients.map((c, i) => (
+          <li key={c.client} className="flex items-center justify-between gap-2 text-sm">
+            <div className="flex items-center gap-2 min-w-0">
+              <span
+                className="w-3 h-3 rounded-full flex-shrink-0"
+                style={{ backgroundColor: COLORS[i % COLORS.length] }}
+              />
+              <span className="font-medium truncate">{labelFor(c.client)}</span>
+            </div>
+            <div className="flex items-center gap-3 text-xs shrink-0">
+              {c.web_search_count > 0 && (
+                <span className="text-muted-foreground tabular-nums">
+                  {t('webSearchCount', { count: c.web_search_count })}
+                </span>
+              )}
+              <span className="tabular-nums">${c.cost_usd.toFixed(2)}</span>
+              <span className="text-muted-foreground tabular-nums w-12 text-right">
+                {c.share_pct.toFixed(1)}%
+              </span>
+            </div>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

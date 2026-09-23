@@ -103,6 +103,9 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       plugins: {
         legend: { display: false },
         tooltip: {
+          // 'average'(기본)는 조각 무게중심 — 도넛 중앙의 1위 % 숫자 위로
+          // 툴팁이 겹친다. 'nearest' 는 커서를 따라간다.
+          position: 'nearest' as const,
           callbacks: {
             label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
               const item = data.models[ctx.dataIndex];
