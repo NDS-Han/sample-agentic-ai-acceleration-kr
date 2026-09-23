@@ -218,6 +218,7 @@ class AnalyticsService:
                     active_users=row.users or 0,
                 ))
 
+
         # User breakdown — group_by='user' 요청 시만 집계(불필요 조인 회피). §60.9:
         # 그간 UI 에 '사용자별' 옵션은 있었으나 백엔드가 group_by 무시 → by_model 표시되던
         # 버그 수정. usage_logs SUCCESS+KST(cost_period_filter) + User 조인, PII(sso_subject)

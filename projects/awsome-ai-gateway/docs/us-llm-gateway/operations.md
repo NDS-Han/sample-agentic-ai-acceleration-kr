@@ -22,11 +22,12 @@
 | §8-Q | Bedrock Marketplace 구독 (AccessDenied 해결) | 신형 모델이 AccessDenied aws-marketplace 로 거절될 때 | [ops/8-Q-marketplace.md](ops/8-Q-marketplace.md) |
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |
 | §8-S | 배포 후 보안 하드닝 (직원 오픈 전 필수) | 직원 오픈 전 1회 | [ops/8-S-hardening.md](ops/8-S-hardening.md) |
+| §8-L | admin 콘솔 Cognito 로그인 | admin 콘솔을 계정으로 막을 때 (US-12, 선택 · 권장) | [ops/8-L-admin-login.md](ops/8-L-admin-login.md) |
 | §8-N | Bedrock 을 NAT 대신 VPC Endpoint(PrivateLink)로 | 기존 VPC 1회 (US-04) | [ops/8-N-vpc-endpoint.md](ops/8-N-vpc-endpoint.md) |
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
-| §8-L | Admin UI Cognito 로그인 활성화 (dev-login 대체) | dev-login 끄고 싶을 때 (IN-01, 선택 · 운영이면 강력 권장) | [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md) |
+| §8-F | Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC) | Hosted UI/도메인 없이 이메일·비밀번호 폼으로 로그인할 때 (IN-01, 선택) | [ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md) |
 | §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
 | §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (IN-02, 선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
@@ -80,8 +81,15 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 
 ### 8-S. 배포 후 보안 하드닝 (직원 오픈 전 필수)
 
-직원 오픈 전 필수 — 입구 `inbound-cidrs` 를 직원 대역으로, admin 콘솔은 `DEV_LOGIN_ENABLED` 그대로 두고 관리자 IP/VPN 전용으로 네트워크 보호, ALB 잠금 검증. HTTPS 없는 배포는 IP 허용목록이 유일한 보호막.
+직원 오픈 전 필수 — 입구 `inbound-cidrs` 를 직원 대역으로, admin 콘솔은 관리자 IP/VPN 전용으로 네트워크 보호(계정으로 막는 것은 §8-L Cognito 로그인), ALB 잠금 검증. HTTPS 없는 배포는 IP 허용목록이 유일한 보호막.
 → **[ops/8-S-hardening.md](ops/8-S-hardening.md)**
+
+---
+
+### 8-L. admin 콘솔 Cognito 로그인
+
+`US-12` 선택·권장 — admin-ui 를 Cognito 로그인으로(지금은 dev-login = 주소에 닿으면 관리자). `19-admin-login.sh` 가 콜백(tfvars→terraform)·admin-ui 설정 4줄·dev-login 끄기를 계산해 넣는다. https(US-06) 전제, 배포 두 번, 추론 무중단.
+→ **[ops/8-L-admin-login.md](ops/8-L-admin-login.md)**
 
 ---
 
@@ -114,10 +122,10 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 
 ---
 
-### 8-L. Admin UI Cognito 로그인 활성화 (dev-login 대체)
+### 8-F. Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC)
 
-`IN-01` 선택(운영이면 강력 권장) — admin-ui 에 이메일/비밀번호로 로그인하는 실제 Cognito 로그인 폼 추가. 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
-→ **[ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md)**
+`IN-01` 선택 — admin-ui 에 이메일/비밀번호로 로그인하는 커스텀 Cognito 로그인 폼 추가. Hosted UI 도메인·콜백 없이 internal ALB 환경에서도 동작한다(AD/IdP 연동이 목표라면 §8-L 의 OIDC Hosted UI 방식이 적합). 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
+→ **[ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md)**
 
 ---
 

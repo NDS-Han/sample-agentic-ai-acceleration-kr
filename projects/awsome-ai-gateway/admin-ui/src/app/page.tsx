@@ -91,7 +91,9 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
   const kpi = await fetchDashboardKPI(period, client).catch(() => null);
 
   const budgetUtilization = kpi?.budget_utilization_pct ?? null;
-  const alertLevel = budgetUtilization == null ? undefined : calcAlertLevel(budgetUtilization);
+  // 한도 합계가 0 이면 비율이 정의되지 않는다(백엔드가 null 을 준다). 0% 로 접으면
+  // "예산을 하나도 안 썼다" 는 거짓 사실이 되므로 경고 등급도 매기지 않는다.
+  const alertLevel = budgetUtilization != null ? calcAlertLevel(budgetUtilization) : undefined;
 
   const { dailyAvg, projection } = kpi
     ? computeDailyAvg(period, kpi.total_cost_usd)

@@ -114,9 +114,9 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | 스크립트                        | 바꾸는 것                                                  | 위험도                        |
 | --------------------------- | ------------------------------------------------------ | -------------------------- |
 | `00-preflight-check.sh`     | **없음** — 상태 조회·판정·스냅샷                                  | 없음                         |
-| `01-fix-cowork-routing.sh`  | `model.routing_profiles` 의 **Cowork 행**              | 낮음. Claude Code 경로 무관      |
+| `01-fix-cowork-routing.sh`  | `model.routing_profiles` 의 **행 1개**                    | 낮음. Claude Code 경로 무관      |
 | `01a-fix-claude-code-routing.sh` | `model.routing_profiles` 의 **Claude Code 행** (단일 계정 배포용) | 낮음. Codex/Cowork 경로 무관     |
-| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경) | 낮음                         |
+| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경 · `--remap` 이면 기존 alias 의 provider_model_id 를 config 값으로 재매핑) | 낮음                         |
 | `03-create-cloudfront.sh`   | **CloudFront 배포 생성** + gateway Ingress 어노테이션           | ⚠️ 데이터플레인 접근 통제가 바뀝니다 (아래) |
 | `04-verify.sh`              | **없음** — 검증                                            | 없음                         |
 | `05-allow-client-ip.sh`     | Ingress `inbound-cidrs` 어노테이션                          | 낮음                         |
@@ -134,6 +134,7 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `15-set-master-secret-ref.sh` | **helm values 파일** `database.external` 의 마스터 비밀번호 참조 2줄(RDS 관리 시크릿 `rds!cluster-…`) — 없거나 다를 때만 교체·삽입, helm 렌더로 검증 | 낮음. helm 을 돌리지 않음 |
 | `17-set-websearch-caps.sh`  | **helm values 파일** `gatewayProxy.env` 의 web search 설정 — 상한 4개(결과 크기·개수·턴당 검색·반복)와 동작 스위치(검색 기록 방식·대상 앱·앱 도구와 함께 쓰기) — 다르면 백업 후 삽입·교체, helm 렌더로 검증. 1.0.80 부터 목표값이 코드 기본값과 같아 **값을 바꾸거나 스위치를 끌 때** 쓴다 | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
 | `18-websearch-client-sim.py` | **없음** — Cowork·Claude Code 흉내 회귀 테스트: 실제 게이트웨이에 검색·도구 호출 시나리오를 돌려 프롬프트별 합격/불합격 판정(스트리밍 기본, `--no-stream` 으로 비스트리밍) · 클라이언트·모델 업데이트 후, web search 코드 변경 후 실행 | 낮음. 읽기 전용이지만 실제 모델·검색 비용 발생 |
+| `19-admin-login.sh` | **terraform.tfvars**(`cognito_callback_urls`) · **helm values 파일**(`adminUi.env` OIDC 4줄 · 양쪽 `DEV_LOGIN_ENABLED`) — US-12 admin 콘솔 Cognito 로그인. 단계별(`callback`·`login`·`dev-login-off`) dry-run 기본, `verify` 는 클러스터 안 임시 파드로 로그인 흐름 확인 | 낮음. terraform·helm 을 돌리지 않음 · dev-login 은 로그인이 배포된 뒤에만 끔 |
 | `16-usage-recent.sh`        | **없음** — 최근 N시간 요청별 토큰(in/out/cache/thinking)·web search 수·비용 + 합계 (`--hours` `--client` `--limit`) | 없음 |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
@@ -230,6 +231,7 @@ bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 | `00-preflight-check.sh`    | 4회    | 4~7분           |
 | `01-fix-cowork-routing.sh` | 최대 3회 | 2~5분           |
 | `01a-fix-claude-code-routing.sh`  | 최대 2회 | 2~5분    |
+| `02-add-opus5-model.sh`    | 최대 5회 | 3~8분           |
 | `04-verify.sh`             | 2회    | 2~4분 + 종단 curl |
 | `03` · `05` · `06` · `07`  | 없음    | 수 초            |
 

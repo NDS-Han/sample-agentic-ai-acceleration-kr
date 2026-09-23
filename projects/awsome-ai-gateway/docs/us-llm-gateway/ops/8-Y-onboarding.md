@@ -7,7 +7,7 @@
 **공통 — 어느 그룹에 넣나**
 
 - **팀 그룹**(`Claude_default-department_default-team`) = **필수.** 없으면 로그인은 되지만 VK 발급이 **403**. 이 배포는 팀이 하나뿐이라 전원 이 그룹에 넣는다(§3-2 `cognito_groups`).
-- `ClaudeAdmin` = **관리자에게만.** admin-ui(`/models`·예산 등)를 쓸 사람만. 일반 직원은 **넣지 않는다.**
+- `ClaudeAdmin` = **관리자에게만.** admin-ui(`/models`·예산 등)를 쓸 사람만. 일반 직원은 **넣지 않는다.** Cognito 로그인([8-L](8-L-admin-login.md))을 켠 배포에선 새 관리자가 `gateway-cli login` 을 한 번 해야 admin-ui 에 들어간다(안 하면 403 `user_not_provisioned`).
 
 ## 방법 A — admin-ui 화면 (권장, 소수)
 

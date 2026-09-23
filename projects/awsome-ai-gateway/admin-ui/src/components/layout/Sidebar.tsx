@@ -121,6 +121,12 @@ const NAV_ITEMS: NavItemDef[] = [
     allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
   },
   {
+    key: 'cli',
+    href: '/cli',
+    icon: <Download size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
+  },
+  {
     key: 'my',
     href: '/my',
     icon: <UserCircle size={18} />,

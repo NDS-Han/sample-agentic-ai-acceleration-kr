@@ -12,7 +12,7 @@
 
 | 항목          | 조치                                                                                                                                                               |
 | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| admin 콘솔 보호 | (권장) [§8-L](8-L-admin-ui-login.md) 로 실제 Cognito 로그인을 켜고 `global.devLoginEnabled: false` 로 dev-login 을 끈다. 아직 안 했다면 `devLoginEnabled=false` 시 **GUI 가 잠기므로**(대체 로그인 경로 없음), 그대로 두고 **admin-ui·admin-api 를 관리자 IP/VPN 전용**으로 좁혀 네트워크로 보호한다(아래 "admin 콘솔은 네트워크로 보호"). |
+| admin 콘솔 보호 | 두 가지 — **계정**: Cognito 로그인을 켜고 dev-login 을 끈다([8-L](8-L-admin-login.md), US-12) · **네트워크**: admin-ui·admin-api 를 관리자 IP/VPN 전용으로 좁힌다(아래 "admin 콘솔은 네트워크로 보호"). 둘을 같이 쓰면 이중 보호. |
 | 입구 접근제한     | values `inbound-cidrs` 를 **직원 출구 대역**으로 확대하고 **설치용 관리자** `/32` **는 제거**. HTTPS 대신 이 IP제한이 보호막(§0 결정). 절차 = (1)(2) 아래.                                            |
 | 허용 모델 목록    | §4에서 등록한 4모델 외 불필요 alias 정리.                                                                                                                                     |
 
@@ -66,11 +66,9 @@ done
 
 → 허용 CIDR이 위에서 확보한 대역과 일치하고 `0.0.0.0/0` 이 없으면 잠긴 것.
 
-**admin 콘솔은 네트워크로 보호 (dev-login 유지 — §8-L 미적용 시)**
+**admin 콘솔은 네트워크로 보호**
 
-> ℹ️ [§8-L](8-L-admin-ui-login.md) 을 적용했다면 아래 네트워크 격리 없이도 실제 Cognito 계정으로만 로그인되므로 이 절은 건너뛰어도 된다(그래도 방어 심층화 차원에서 admin 콘솔을 관리자 대역으로 좁혀두는 것 자체는 여전히 유효하다).
-
-§8-L 을 아직 안 했다면 admin-ui 에는 **실제 로그인이 없다** — 유일한 경로가 dev-login 이고 `global.devLoginEnabled: false` 면 **404 로 아무도 못 들어간다**(admin-api 도 dev 토큰 거부, `auth.py:100`). 그래서 이 상태에서는 **dev-login 을 켠 채, admin 콘솔을 네트워크로 가둔다**:
+Cognito 로그인([8-L](8-L-admin-login.md))을 켜기 전까지 admin-ui 의 로그인은 dev-login 뿐이다 — 역할만 고르면 서명 없는 관리자 토큰이 나온다. 그동안은(켠 뒤에도 이중 보호로) admin 콘솔을 네트워크로 가둔다:
 
 - **admin-ui·admin-api 는 관리자 IP/VPN 대역만** 닿게 한다. 데이터 플레인(gateway)은 직원 대역으로 넓혀도 컨트롤 플레인은 관리자만.
 - ⚠️ **차트 기본값은 3 ALB(gateway·admin-ui·admin-api)가 `inbound-cidrs` 를 공유**한다 — 그냥 두면 직원 대역이 admin 콘솔에도 닿아 dev-login 우회를 누구나 쓸 수 있다.
@@ -95,4 +93,4 @@ done
   > 🔴 단 **저장소를 갱신하지 않은 설치**에서는 아니다. 예전 버전은 `sed` 로 `inbound-cidrs:` 가 들어간 **모든 줄**을 같은 값으로 덮어, 좁혀 둔 관리자 대역이 아무 경고 없이 공통값으로 되돌아갔다. 이 하드닝을 하기 전에 [§8-U](8-U-update.md) 로 저장소를 먼저 갱신할 것.
 - POC 로 **allowlist 전체가 신뢰된 관리자/VPN** 이면 공유해도 된다 — dev-login 이 그 신뢰 경계 안에서만 노출된다.
 
-> 🔴 admin-ui·admin-api 를 `**0.0.0.0/0` 이나 광범위 대역에 두지 말 것** — dev-login 이 **서명 없는 admin 토큰**을 즉시 내주므로 닿는 사람 = admin 이다.
+> 🔴 admin-ui·admin-api 를 `**0.0.0.0/0` 이나 광범위 대역에 두지 말 것** — dev-login 이 켜져 있으면 **서명 없는 admin 토큰**을 즉시 내주므로 닿는 사람 = admin 이다.
