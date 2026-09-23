@@ -759,7 +759,7 @@
     "subtitle": "Install the AWSome AI Gateway CLI and connect Claude Code to the corporate gateway via Cognito (OIDC) login. The first login automatically provisions your user and team.",
     "prereqTitle": "Prerequisites",
     "prereqDesc": "Get the three values below from your administrator and export them in your shell. These are the OIDC settings issued by the Cognito User Pool.",
-    "prereqEnv": "export OIDC_ISSUER_URL=\"https://cognito-idp.ap-northeast-2.amazonaws.com/<POOL_ID>\"\nexport OIDC_CLIENT_ID=\"<COGNITO_APP_CLIENT_ID>\"\nexport OIDC_AUDIENCE=\"<COGNITO_APP_CLIENT_ID>\"\nexport GATEWAY_URL=\"http://<gateway-host>:8000\"\nexport GATEWAY_ADMIN_URL=\"http://<admin-api-host>:8080\"",
+    "prereqEnv": "export OIDC_ISSUER_URL=\"https://cognito-idp.ap-south-1.amazonaws.com/'<POOL_ID>'\"\nexport OIDC_CLIENT_ID=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport OIDC_AUDIENCE=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport GATEWAY_URL=\"http://'<gateway-host>':8000\"\nexport GATEWAY_ADMIN_URL=\"http://'<admin-api-host>':8080\"",
     "installTitle": "Install & Activate",
     "installLinuxLabel": "Linux / macOS",
     "installWindowsLabel": "Windows (PowerShell, admin)",

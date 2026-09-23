@@ -29,12 +29,21 @@ export function DowngradeDiagram({
   formatOutPrice: (_m: ModelListItem) => string;
   edgeTag?: (_rule: DowngradeDiagramRule) => string | null;
 }) {
+  // from/to 가 비어 있는 규칙(작성 중인 새 행)은 레이아웃·렌더 모두에서 제외한다 —
+  // 포함하면 빈 alias 가 유령 노드 열을 만들고 엣지가 화면 밖으로 길게 뻗는다.
+  const visibleRules = rules.filter(
+    (r) => r.from_model_alias && r.to_model_alias,
+  );
+  // 완성된 규칙이 하나도 없으면 빈 프레임 대신 아무것도 그리지 않는다 —
+  // 편집 화면에서 "규칙 추가" 직후의 빈 행이 유령 다이어그램을 만들지 않게.
+  if (visibleRules.length === 0) return null;
+
   const depth = new Map<string, number>();
-  for (const r of rules) {
+  for (const r of visibleRules) {
     if (!depth.has(r.from_model_alias)) depth.set(r.from_model_alias, 0);
   }
-  for (let pass = 0; pass < rules.length; pass++) {
-    for (const r of rules) {
+  for (let pass = 0; pass < visibleRules.length; pass++) {
+    for (const r of visibleRules) {
       const d = (depth.get(r.from_model_alias) ?? 0) + 1;
       if ((depth.get(r.to_model_alias) ?? -1) < d) depth.set(r.to_model_alias, d);
     }
@@ -166,7 +175,7 @@ export function DowngradeDiagram({
               </marker>
             ))}
           </defs>
-          {rules.map((r, idx) => {
+          {visibleRules.map((r, idx) => {
             const a = pos.get(r.from_model_alias);
             const b = pos.get(r.to_model_alias);
             if (!a || !b) return null;
@@ -197,7 +206,7 @@ export function DowngradeDiagram({
           // 라벨 위치 = 곡선의 t=0.5 지점(중점 + 0.75·bow). 같은 칼럼 사이
           // 공간(mx 가 가까움)에 몰린 라벨이 세로로 겹치면 아래로 밀어 펼친다 —
           // 색상이 라벨↔엣지를 이어주므로 라벨이 선에서 조금 떨어져도 읽힌다.
-          const labelPts = rules
+          const labelPts = visibleRules
             .map((r, idx) => {
               const a = pos.get(r.from_model_alias);
               const b = pos.get(r.to_model_alias);
@@ -239,7 +248,7 @@ export function DowngradeDiagram({
             i = j + 1;
           }
           return labelPts.map(({ idx, mx, my }) => {
-            const r = rules[idx];
+            const r = visibleRules[idx];
             const tag = edgeTag?.(r);
             return (
               <span
