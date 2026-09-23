@@ -74,6 +74,43 @@ export function DowngradeDiagram({
     nodes.forEach((a, i) => pos.set(a, { l, i, n: nodes.length })),
   );
 
+  // 규칙별 엣지 색 — 겹쳐 그려진 곡선과 % 라벨이 어느 규칙의 것인지 구분할 수
+  // 있게 path·marker·라벨 칩이 같은 색을 공유한다. 규칙 수가 팔레트를 넘으면
+  // 순환한다(이완적으로도 6개를 넘는 규칙 묶음은 드물다).
+  const EDGE_COLORS = [
+    {
+      stroke: 'stroke-sky-500',
+      fill: 'fill-sky-500',
+      chip: 'border-sky-500/50 bg-sky-500/10 text-sky-700 dark:text-sky-300',
+    },
+    {
+      stroke: 'stroke-violet-500',
+      fill: 'fill-violet-500',
+      chip: 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+    },
+    {
+      stroke: 'stroke-rose-500',
+      fill: 'fill-rose-500',
+      chip: 'border-rose-500/50 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+    },
+    {
+      stroke: 'stroke-amber-600',
+      fill: 'fill-amber-600',
+      chip: 'border-amber-600/50 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+    },
+    {
+      stroke: 'stroke-emerald-500',
+      fill: 'fill-emerald-500',
+      chip: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+    },
+    {
+      stroke: 'stroke-fuchsia-500',
+      fill: 'fill-fuchsia-500',
+      chip: 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300',
+    },
+  ];
+  const edgeColor = (idx: number) => EDGE_COLORS[idx % EDGE_COLORS.length];
+
   // 칩은 컬럼 폭의 86% (중앙 정렬) — 엣지는 칩의 좌/우 끝에 닿도록 보정.
   const chipPad = (100 / layerCount) * 0.07;
   const edgeX1 = (l: number) => ((l + 1) / layerCount) * 100 - chipPad;
@@ -114,17 +151,20 @@ export function DowngradeDiagram({
           aria-hidden="true"
         >
           <defs>
-            <marker
-              id="dg-arrow"
-              viewBox="0 0 10 10"
-              refX="9"
-              refY="5"
-              markerWidth="5"
-              markerHeight="5"
-              orient="auto-start-reverse"
-            >
-              <path d="M0,0 L10,5 L0,10 z" className="fill-muted-foreground" />
-            </marker>
+            {EDGE_COLORS.map((c, i) => (
+              <marker
+                key={i}
+                id={`dg-arrow-${i}`}
+                viewBox="0 0 10 10"
+                refX="9"
+                refY="5"
+                markerWidth="5"
+                markerHeight="5"
+                orient="auto-start-reverse"
+              >
+                <path d="M0,0 L10,5 L0,10 z" className={c.fill} />
+              </marker>
+            ))}
           </defs>
           {rules.map((r, idx) => {
             const a = pos.get(r.from_model_alias);
@@ -142,8 +182,8 @@ export function DowngradeDiagram({
                 fill="none"
                 strokeWidth="1.5"
                 vectorEffect="non-scaling-stroke"
-                className="stroke-muted-foreground/60"
-                markerEnd="url(#dg-arrow)"
+                className={edgeColor(idx).stroke}
+                markerEnd={`url(#dg-arrow-${idx % EDGE_COLORS.length})`}
               />
             );
           })}
@@ -159,7 +199,7 @@ export function DowngradeDiagram({
           return (
             <span
               key={`t${idx}`}
-              className="absolute -translate-x-1/2 -translate-y-1/2 rounded-full border border-border/60 bg-background px-1.5 py-px text-[9px] font-semibold tabular-nums text-muted-foreground whitespace-nowrap"
+              className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip}`}
               style={{ left: `${mx}%`, top: `${my}%` }}
             >
               {r.threshold_pct}%{tag ? ` · ${tag}` : ''}

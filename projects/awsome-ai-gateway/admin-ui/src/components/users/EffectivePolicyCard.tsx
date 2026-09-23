@@ -88,10 +88,11 @@ export function EffectivePolicyCard({ userId, policy: policyProp, models }: Prop
 
       {/* 모델 × 앱 매트릭스 — 행=모델, 열=앱. 웹서치는 모델과 무관한 앱별 값이라
           표 맨 아래 행으로 둔다.
-          w-auto 로 콤팩트하므로 횡 스크롤 래퍼는 뺀다 — overflow-x-auto 는
+          w-full 로 카드 폭을 채운다 — w-auto 시 표가 좌측에 붙어 나머지 공간이
+          비어 보였다. 횡 스크롤 래퍼는 여전히 두지 않는다 — overflow-x-auto 는
           CSS 규칙상 overflow-y 도 auto 로 바꿔 ✗ 툴팁(위로 뜸)을 자른다. */}
       <div>
-        <table className="w-auto text-xs">
+        <table className="w-full text-xs">
           <thead>
             <tr className="border-b">
               <th className="text-left py-1 pr-4 font-medium text-muted-foreground">{t('model')}</th>
@@ -168,51 +169,55 @@ export function EffectivePolicyCard({ userId, policy: policyProp, models }: Prop
       </div>
       </div>
 
-      {/* 모델 정책 출처 */}
-      <p className="text-xs text-muted-foreground">
-        {t('modelsSource.label')}:{' '}
-        <span className="font-medium text-foreground">
-          {policy.allowed_models_source === 'none'
-            ? t('modelsSource.none')
-            : t(`modelsSource.${policy.allowed_models_source}`)}
-        </span>
-      </p>
-
-      {/* 앱 정책 출처 — user > team > organization 폴백 중 실제로 적용된 스코프 */}
-      <p className="text-xs text-muted-foreground">
-        {t('clientsSource.label')}:{' '}
-        <span className="font-medium text-foreground">
-          {policy.allowed_clients_source === 'none'
-            ? t('clientsSource.none')
-            : t(`clientsSource.${policy.allowed_clients_source}`)}
-        </span>
-      </p>
-
-      {/* 예산은 바로 위의 예산 섹션(BudgetGaugeRow)이 이미 같은 데이터를
+      {/* 정책 출처 + rate limit — 하나의 컨테이너로 묶어 "이 사용자에게 적용된
+          스코프 요약" 임을 시각적으로 구분한다.
+          예산은 바로 위의 예산 섹션(BudgetGaugeRow)이 이미 같은 데이터를
           보여주므로 여기서는 생략한다 — 카드는 접근 판정에 집중. */}
-
-      {/* rate limit 요약 */}
-      {policy.rate_limits.length > 0 && (
-        <div>
-          <p className="text-xs font-medium mb-1">{t('rateLimits')}</p>
-          <ul className="text-xs text-muted-foreground space-y-0.5">
-            {policy.rate_limits.map((r, i) => (
-              <li key={i}>
-                {r.scope}
-                {r.model_alias ? ` · ${r.model_alias}` : ''} —{' '}
-                {[
-                  r.rpm_limit != null && `RPM ${r.rpm_limit}`,
-                  r.tpm_limit != null && `TPM ${r.tpm_limit}`,
-                  r.cpm_limit_usd != null && `$${r.cpm_limit_usd}/min`,
-                  r.cph_limit_usd != null && `$${r.cph_limit_usd}/hr`,
-                ]
-                  .filter(Boolean)
-                  .join(' · ')}
-              </li>
-            ))}
-          </ul>
+      <div className="rounded-lg border border-border/60 bg-muted/30 px-3 py-2.5 space-y-1.5">
+        <div className="flex items-baseline justify-between gap-3 text-xs">
+          <span className="text-muted-foreground">{t('modelsSource.label')}</span>
+          <span className="font-medium text-foreground text-right">
+            {policy.allowed_models_source === 'none'
+              ? t('modelsSource.none')
+              : t(`modelsSource.${policy.allowed_models_source}`)}
+          </span>
         </div>
-      )}
+
+        {/* 앱 정책 출처 — user > team > organization 폴백 중 실제로 적용된 스코프 */}
+        <div className="flex items-baseline justify-between gap-3 text-xs">
+          <span className="text-muted-foreground">{t('clientsSource.label')}</span>
+          <span className="font-medium text-foreground text-right">
+            {policy.allowed_clients_source === 'none'
+              ? t('clientsSource.none')
+              : t(`clientsSource.${policy.allowed_clients_source}`)}
+          </span>
+        </div>
+
+        {/* rate limit 요약 */}
+        <div className="border-t border-border/50 pt-1.5">
+          <p className="text-xs font-medium mb-1">{t('rateLimits')}</p>
+          {policy.rate_limits.length > 0 ? (
+            <ul className="text-xs text-muted-foreground space-y-0.5">
+              {policy.rate_limits.map((r, i) => (
+                <li key={i}>
+                  {r.scope}
+                  {r.model_alias ? ` · ${r.model_alias}` : ''} —{' '}
+                  {[
+                    r.rpm_limit != null && `RPM ${r.rpm_limit}`,
+                    r.tpm_limit != null && `TPM ${r.tpm_limit}`,
+                    r.cpm_limit_usd != null && `$${r.cpm_limit_usd}/min`,
+                    r.cph_limit_usd != null && `$${r.cph_limit_usd}/hr`,
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="text-xs text-muted-foreground">—</p>
+          )}
+        </div>
+      </div>
 
     </div>
   );

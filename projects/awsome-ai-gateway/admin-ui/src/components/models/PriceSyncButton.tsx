@@ -120,7 +120,7 @@ export function PriceSyncButton() {
                     className="block w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
                   >
                     <option value="aws">{t('sourceAws')}</option>
-                    <option value="litellm">{t('sourceLitellm')}</option>
+                    <option value="litellm">{t('sourceThirdParty')}</option>
                   </select>
                 </div>
                 <button
@@ -144,7 +144,7 @@ export function PriceSyncButton() {
                 <>
                   <p className="mb-3 text-xs text-muted-foreground">
                     {t('sourceInfo', {
-                      source: source === 'aws' ? 'AWS Price List API' : 'LiteLLM Catalog',
+                      source: source === 'aws' ? 'AWS Price List API' : t('sourceThirdParty'),
                       region: preview.region,
                       matched: preview.matched_count,
                       changed: preview.changed_count,

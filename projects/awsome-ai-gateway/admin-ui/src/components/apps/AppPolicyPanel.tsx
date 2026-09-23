@@ -8,6 +8,7 @@ import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } fr
 import { setClientWebSearchAction } from '@/lib/actions/routing';
 import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { FormError } from '@/components/common/FormError';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
@@ -228,7 +229,10 @@ export function AppPolicyPanel() {
           </div>
 
           <div className="glass rounded-apple p-4 space-y-3">
-            <h2 className="text-sm font-semibold">{t('defaultModel')}</h2>
+            <h2 className="text-sm font-semibold flex items-center gap-1">
+              {t('defaultModel')}
+              <InfoTooltip label={t('defaultModel')}>{t('defaultModelHint')}</InfoTooltip>
+            </h2>
             <div className="flex items-center gap-3">
               <select
                 value={defaultModelInput}
