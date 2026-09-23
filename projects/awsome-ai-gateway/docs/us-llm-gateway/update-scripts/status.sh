@@ -71,7 +71,7 @@ TODO=()
 # as three sub-items rather than one boolean: CloudFront only matters to a
 # deployment that actually serves Cowork.
 probe_us02() {
-  local out routing_cowork routing_claude alias_n cf n_bad=0
+  local out routing alias_n cf n_bad=0
 
   # Markers rather than column parsing: the pod log carries other lines, and
   # unaligned output with an explicit separator survives any psql formatting.
@@ -380,6 +380,8 @@ probe_08_ses() {
     TODO+=("bash 08-setup-notification-ses-irsa.sh --apply   # SES 사용 시")
   fi
   raw "role=$role arn=$arn sa=$sa_name sa_arn=$sa_arn"
+}
+
 # ── US-12 — admin console Cognito login (optional) ──────────────────────────
 # The evidence is the running Deployments' env, not the values file (values can
 # be edited and not yet rolled out). Cognito login is live when admin-ui carries

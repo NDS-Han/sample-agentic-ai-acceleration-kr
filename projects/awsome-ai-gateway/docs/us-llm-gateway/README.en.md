@@ -45,7 +45,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
   - **`US-06` (ALB HTTPS)** — Cowork requires https: CloudFront (`03`) without a domain, US-06 with one — never both. If a domain arrives later, follow the [switch runbook](ops/8-H-alb-https.md).
   - **`US-07` (admin ALBs internal)** — the final posture for production with a site-to-site VPN; usually not needed in a POC. To apply it, follow the [switch runbook](ops/8-I-admin-internal.md) — internal without a VPN blocks VK issuance. Production assumes the VPN ([8-P §0](ops/8-P-prod.md)).
   - **`US-02` is for existing deployments only** — a new install already gets the same content from §4-2 (Opus 5) and §4-3 (Cowork routing). The only piece left for a new install is `03` CloudFront, when Cowork is used without a domain.
-  - **`IN-01` (Admin UI Cognito login)** — replaces dev-login (a role-select MVP bypass) with a real Cognito login (email/password). Optional but **strongly recommended for production** (lets you open the admin console safely without the §8-S network isolation). New installs still ship with dev-login only from `US-01` alone — apply separately: [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md).
+  - **`IN-01` (Admin UI Cognito login)** — replaces dev-login (a role-select MVP bypass) with a real Cognito login (email/password). Optional but **strongly recommended for production** (lets you open the admin console safely without the §8-S network isolation). New installs still ship with dev-login only from `US-01` alone — apply separately: [ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md).
   
 ---
 

@@ -114,9 +114,9 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | 스크립트                        | 바꾸는 것                                                  | 위험도                        |
 | --------------------------- | ------------------------------------------------------ | -------------------------- |
 | `00-preflight-check.sh`     | **없음** — 상태 조회·판정·스냅샷                                  | 없음                         |
-| `01-fix-cowork-routing.sh`  | `model.routing_profiles` 의 **Cowork 행**              | 낮음. Claude Code 경로 무관      |
+| `01-fix-cowork-routing.sh`  | `model.routing_profiles` 의 **행 1개**                    | 낮음. Claude Code 경로 무관      |
 | `01a-fix-claude-code-routing.sh` | `model.routing_profiles` 의 **Claude Code 행** (단일 계정 배포용) | 낮음. Codex/Cowork 경로 무관     |
-| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경) | 낮음                         |
+| `02-add-opus5-model.sh`     | `model_aliases` + `model_pricings` 에 **행 추가** (기존 미변경 · `--remap` 이면 기존 alias 의 provider_model_id 를 config 값으로 재매핑) | 낮음                         |
 | `03-create-cloudfront.sh`   | **CloudFront 배포 생성** + gateway Ingress 어노테이션           | ⚠️ 데이터플레인 접근 통제가 바뀝니다 (아래) |
 | `04-verify.sh`              | **없음** — 검증                                            | 없음                         |
 | `05-allow-client-ip.sh`     | Ingress `inbound-cidrs` 어노테이션                          | 낮음                         |
@@ -231,6 +231,7 @@ bash 07-client-values.sh                   # 직원에게 전달할 env 4줄
 | `00-preflight-check.sh`    | 4회    | 4~7분           |
 | `01-fix-cowork-routing.sh` | 최대 3회 | 2~5분           |
 | `01a-fix-claude-code-routing.sh`  | 최대 2회 | 2~5분    |
+| `02-add-opus5-model.sh`    | 최대 5회 | 3~8분           |
 | `04-verify.sh`             | 2회    | 2~4분 + 종단 curl |
 | `03` · `05` · `06` · `07`  | 없음    | 수 초            |
 

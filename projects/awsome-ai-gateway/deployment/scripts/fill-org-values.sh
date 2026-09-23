@@ -213,4 +213,5 @@ fi
 echo
 echo "✅ 완료. 반영된 줄:"
 grep -n 'COGNITO_USER_POOL_ID:\|^    COGNITO_REGION:\|inbound-cidrs:\|masterPasswordRemoteKey:\|^  reportingTimezone:\|CHAT_ENABLED:' "$V"
+grep -n 'COGNITO_USER_POOL_ID:\|^    COGNITO_REGION:\|inbound-cidrs:\|masterPasswordRemoteKey:\|^  reportingTimezone:' "$V"
 grep -n -A1 '^    emails:$' "$V" | tail -1

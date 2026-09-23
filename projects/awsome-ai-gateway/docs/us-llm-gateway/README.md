@@ -25,10 +25,11 @@
 
 | | POC (dev) | 운영 (prod) |
 |---|---|---|
-|계정 · 사이징|한 계정 · `environment=dev` (Aurora 1 · Valkey 1 · NAT 1)|**별도 계정** · `environment=prod` (Aurora ×2 · Valkey 3 shard × 3 · NAT ×2)|
-|입구|http ALB + IP 허용목록(방식 A)|https 도메인(`US-06`) + admin ALB 2개 internal(`US-07`, S2S VPN 전제)|
+| 계정 · 사이징 | 한 계정 · `environment=dev` (Aurora 1 · Valkey 1 · NAT 1) | **별도 계정** · `environment=prod` (Aurora ×2 · Valkey 3 shard × 3 · NAT ×2) |
+| 입구 | http ALB + IP 허용목록(방식 A) | https 도메인(`US-06`) + admin ALB 2개 internal(`US-07`, S2S VPN 전제) |
 | 절차 | `US-01` — [install-guide.md](install-guide.md) §1~§6 | **`US-08`** — `US-01` 과 같은 설치를 prod 계정에서 [ops/8-P-prod.md](ops/8-P-prod.md) 를 따라 한다. 8-P 는 어느 단계에서 prod 설정(https · admin internal · VPN)을 더 넣는지 알려준다 (dev 는 그대로 둔다) |
-|사용 구성|POC (dev)|운영 (prod)|
+
+| 사용 구성 | POC (dev) | 운영 (prod) |
 |---|---|---|
 | Claude Code 만 (Opus 5 · Opus 4.8 · Sonnet 5 · Haiku 4.5) | `US-01` | `US-08`(`US-01` 과 같은 설치를 prod 계정에서 8-P 대로 — https·admin internal·VPN 포함) |
 | Claude Code + **Cowork** | `US-01` + https 입구 하나(도메인 있으면 `US-06`, 없으면 `US-02` 의 `03` CloudFront) | `US-08`(같음 · https 포함이라 입구 선택 없음) |
@@ -41,7 +42,7 @@
 - **POC(`US-01`)** 에만 해당:
   - **`US-06`(ALB HTTPS)** — Cowork 는 https 필수. 도메인 없으면 CloudFront(`03`), 있으면 US-06 — 둘 다는 불필요. 나중에 도메인이 생기면 [전환 절차](ops/8-H-alb-https.md).
   - **`US-07`(admin ALB internal)** — S2S VPN 이 있는 운영의 최종형이라 POC 엔 보통 불필요. 적용하려면 [전환 절차](ops/8-I-admin-internal.md) — VPN 없이 internal 로 두면 VK 발급이 막힌다. 운영은 VPN 이 전제([8-P §0](ops/8-P-prod.md#0-결론--전제)).
-  - **`IN-01`(Admin UI Cognito 로그인)** — dev-login(role 을 화면에서 직접 선택하는 MVP 우회)을 실제 Cognito 로그인(이메일/비밀번호)으로 전환. 선택이지만 **운영이면 강력 권장**([§8-S 하드닝](ops/8-S-hardening.md)의 네트워크 격리 없이도 admin 콘솔을 안전하게 열 수 있음). 신규 설치도 `US-01` 만으로는 dev-login 뿐이라 별도 적용 필요 — [ops/8-L-admin-ui-login.md](ops/8-L-admin-ui-login.md).
+  - **`IN-01`(Admin UI Cognito 로그인)** — dev-login(role 을 화면에서 직접 선택하는 MVP 우회)을 실제 Cognito 로그인(이메일/비밀번호)으로 전환. 선택이지만 **운영이면 강력 권장**([§8-S 하드닝](ops/8-S-hardening.md)의 네트워크 격리 없이도 admin 콘솔을 안전하게 열 수 있음). 신규 설치도 `US-01` 만으로는 dev-login 뿐이라 별도 적용 필요 — [ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md).
   - **`US-02` 는 기존 배포 전용** — 신규 설치는 §4-2(Opus 5)·§4-3(Cowork 라우팅)이 같은 내용을 포함한다. 신규에서 남는 것은 도메인 없이 Cowork 를 쓸 때의 `03` CloudFront 뿐.
 
 ---

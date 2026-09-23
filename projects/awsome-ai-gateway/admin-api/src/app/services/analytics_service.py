@@ -143,8 +143,6 @@ class AnalyticsService:
         # Team breakdown — aggregate per team from usage_logs
         by_team: list[TeamBreakdown] = []
         if not roi_scope or roi_scope == ROIScope.GLOBAL:
-            team_costs = await repo.sum_usage_by_model(period, ROIScope.GLOBAL, None, client)
-            # Get per-team costs
             # (예전엔 여기서 sum_usage_by_model 을 team_costs 로 받아놓고 한 번도 읽지
             #  않았다 — group_by=team 요청마다 전체 테이블 집계를 낭비했으므로 제거.)
             from sqlalchemy import distinct, func, select
@@ -371,7 +369,6 @@ class AnalyticsService:
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
 
         stmt = (
             select(
@@ -462,7 +459,6 @@ class AnalyticsService:
         _validate_period_date(period, date)
 
         period_start = f"{period}-01"
-        kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
 
         stmt = (
             select(

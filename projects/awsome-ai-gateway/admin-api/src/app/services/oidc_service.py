@@ -457,6 +457,11 @@ class OIDCService:
     def _derive_role(email: str, groups: list[str]) -> UserRole:
         """ADMIN_EMAILS / ADMIN_GROUPS 둘 중 하나라도 매칭되면 ADMIN.
 
+        ⚠️ 정책 본체는 ``core.oidc_identity.derive_role`` 하나뿐이다. 여기서 복제하면
+           admin_jwt(리소스 서버) 경로와 조용히 어긋난다 — 그 부류의 사고가 이미
+           한 번 있었다(oidc_identity 모듈 docstring 참조). 이 래퍼는 기존 호출부와
+           테스트를 유지하기 위해서만 남긴다.
+
         TEAM_LEADER 는 Cognito 그룹으로 부트스트랩하지 않는다 — "어느 팀"의
         리더인지까지 그룹명만으로 명확히 표현하려면 팀 매핑용 그룹과 별도로 또
         하나의 그룹(예: ClaudeTeamLeader)에 동시 가입해야 해서 운영 부담이 크고,

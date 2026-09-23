@@ -1,6 +1,6 @@
-# 8-L. Admin UI Cognito 로그인 활성화 (dev-login 대체)
+# 8-F. Admin UI Cognito 로그인 활성화 (dev-login 대체)
 
-> ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-L**
+> ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-F**
 
 > 📒 **`IN-01` · 등급 선택(운영이면 강력 권장)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트).
 

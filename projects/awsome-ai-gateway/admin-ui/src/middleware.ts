@@ -137,10 +137,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return redirectResponse;
     }
   } catch {
-    // Malformed JWT — treat as unauthenticated
+    // Malformed JWT — treat as unauthenticated (못 쓰는 쿠키는 지운다)
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = '/login';
     const redirectResponse = NextResponse.redirect(loginUrl);
+    redirectResponse.cookies.delete('admin_jwt');
     applySecurityHeaders(redirectResponse);
     return redirectResponse;
   }

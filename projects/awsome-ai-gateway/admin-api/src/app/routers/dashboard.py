@@ -113,6 +113,17 @@ def _team_scope_clauses(actor: CurrentUser):
     return []
 
 
+def _actor_scope(actor: CurrentUser, requested_team_id: str | None = None) -> str:
+    """캐시 키용 유효 스코프 — TEAM_LEADER 는 팀 고정, ADMIN 은 요청 팀(없으면 전사).
+
+    require_admin_or_team_leader 핸들러는 응답이 actor 마다 달라지므로 키에서
+    actor 를 빼면 ADMIN 의 전사 캐시가 TEAM_LEADER 에게 반환된다(데이터 리크).
+    """
+    if actor.role == UserRole.TEAM_LEADER:
+        return f"team:{actor.team_id}" if actor.team_id else "team:none"
+    return f"team:{requested_team_id}" if requested_team_id and requested_team_id != "all" else "admin:all"
+
+
 @router.get("/summary")
 async def dashboard_summary(
     request: Request,
@@ -124,12 +135,11 @@ async def dashboard_summary(
     if not period:
         period = _default_period()
 
-    # ⚠️ 캐시가 안전한 근거: 이 라우터의 모든 핸들러가 `require_admin` 이므로 응답이
-    #    **행위자에 따라 달라지지 않는다**. 그래서 키에 actor 를 넣지 않아도 된다.
-    #    (대조: /admin/analytics 는 require_admin_or_team_leader 라 같은 파라미터가
-    #     ADMIN 에겐 전사·TEAM_LEADER 에겐 팀 범위를 뜻한다 — 거기서 actor 없는 키를
-    #     쓰면 TEAM_LEADER 가 전사 데이터를 받는다. 그 캐시는 role 을 키에 넣는다.)
-    cache_key = _cache_key("summary", period=period, client=client)
+    # ⚠️ 이 라우터는 require_admin_or_team_leader — TEAM_LEADER 에겐
+    #    _team_scope_clauses 가 팀 스코프를 강제하므로 응답이 actor 마다 달라진다.
+    #    캐시 키에 유효 스코프(_actor_scope)를 반드시 넣는다 — 빠지면 ADMIN 의 전사
+    #    캐시가 TEAM_LEADER 에게 반환된다(데이터 리크).
+    cache_key = _cache_key("summary", period=period, client=client, scope=_actor_scope(actor))
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
@@ -186,7 +196,11 @@ async def model_share(
 
     # 응답을 바꾸는 파라미터 **전부**를 키에 넣는다 — 하나라도 빠지면 다른 질의의
     # 결과가 반환된다(team_id 를 빼면 A팀 화면에 B팀 점유율이 뜨는 식).
-    cache_key = _cache_key("model-share", period=period, team_id=team_id, client=client)
+    # TEAM_LEADER 는 team_id 파라미터가 무시되고 본인 팀으로 강제되므로, 키에는
+    # raw 파라미터가 아니라 유효 스코프(_actor_scope)를 넣는다.
+    cache_key = _cache_key(
+        "model-share", period=period, scope=_actor_scope(actor, team_id), client=client
+    )
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
