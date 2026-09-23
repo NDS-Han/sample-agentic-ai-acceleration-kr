@@ -66,6 +66,10 @@ class JWTVerifier:
                     algorithms=[key_cfg["algorithm"]],
                     issuer=key_cfg["issuer"],
                     audience=key_cfg["audience"],
+                    # IdP id_token 의 at_hash 는 access_token 과의 binding 검증용이다.
+                    # 쿠키에는 id_token 만 실리므로 비교할 access_token 이 없다 —
+                    # core.oidc_verifier 와 같은 이유로 끈다.
+                    options={"verify_at_hash": False},
                 )
                 return payload
             except JWTError as e:
