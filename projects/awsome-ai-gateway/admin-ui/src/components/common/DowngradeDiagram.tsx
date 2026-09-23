@@ -175,10 +175,14 @@ export function DowngradeDiagram({
             const x2 = edgeX2(b.l);
             const y2 = nodeY(b.i, b.n);
             const dx = Math.max((x2 - x1) * 0.5, 4);
+            // 규칙별 수직 오목(bow) — 같은 구간을 지나는 엣지가 완전히 겹치면
+            // 어느 선이 어느 규칙인지 읽을 수 없다. 제어점을 인덱스만큼 벌려
+            // 곡선을 팬처럼 펼치고, 라벨은 휘어진 곡선 위의 실제 중점에 둔다.
+            const bow = ((idx % 5) - 2) * 3.5; // -7, -3.5, 0, +3.5, +7 (viewBox %)
             return (
               <path
                 key={idx}
-                d={`M ${x1} ${y1} C ${x1 + dx} ${y1}, ${x2 - dx} ${y2}, ${x2} ${y2}`}
+                d={`M ${x1} ${y1} C ${x1 + dx} ${y1 + bow}, ${x2 - dx} ${y2 + bow}, ${x2} ${y2}`}
                 fill="none"
                 strokeWidth="1.5"
                 vectorEffect="non-scaling-stroke"
@@ -189,23 +193,45 @@ export function DowngradeDiagram({
           })}
         </svg>
 
-        {rules.map((r, idx) => {
-          const a = pos.get(r.from_model_alias);
-          const b = pos.get(r.to_model_alias);
-          if (!a || !b) return null;
-          const mx = (edgeX1(a.l) + edgeX2(b.l)) / 2;
-          const my = (nodeY(a.i, a.n) + nodeY(b.i, b.n)) / 2;
-          const tag = edgeTag?.(r);
-          return (
-            <span
-              key={`t${idx}`}
-              className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip}`}
-              style={{ left: `${mx}%`, top: `${my}%` }}
-            >
-              {r.threshold_pct}%{tag ? ` · ${tag}` : ''}
-            </span>
-          );
-        })}
+        {(() => {
+          // 라벨 위치 = 곡선의 t=0.5 지점(중점 + 0.75·bow). 같은 칼럼 사이
+          // 공간(mx 가 가까움)에 몰린 라벨이 세로로 겹치면 아래로 밀어 펼친다 —
+          // 색상이 라벨↔엣지를 이어주므로 라벨이 선에서 조금 떨어져도 읽힌다.
+          const labelPts = rules
+            .map((r, idx) => {
+              const a = pos.get(r.from_model_alias);
+              const b = pos.get(r.to_model_alias);
+              if (!a || !b) return null;
+              const bow = ((idx % 5) - 2) * 3.5;
+              return {
+                idx,
+                mx: (edgeX1(a.l) + edgeX2(b.l)) / 2,
+                my: (nodeY(a.i, a.n) + nodeY(b.i, b.n)) / 2 + bow * 0.75,
+              };
+            })
+            .filter((p): p is { idx: number; mx: number; my: number } => p != null)
+            .sort((x, y) => x.mx - y.mx || x.my - y.my);
+          for (let i = 1; i < labelPts.length; i++) {
+            const prev = labelPts[i - 1];
+            const cur = labelPts[i];
+            if (Math.abs(cur.mx - prev.mx) < 12 && cur.my - prev.my < 10) {
+              cur.my = prev.my + 10;
+            }
+          }
+          return labelPts.map(({ idx, mx, my }) => {
+            const r = rules[idx];
+            const tag = edgeTag?.(r);
+            return (
+              <span
+                key={`t${idx}`}
+                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip}`}
+                style={{ left: `${mx}%`, top: `${my}%` }}
+              >
+                {r.threshold_pct}%{tag ? ` · ${tag}` : ''}
+              </span>
+            );
+          });
+        })()}
       </div>
     </div>
   );

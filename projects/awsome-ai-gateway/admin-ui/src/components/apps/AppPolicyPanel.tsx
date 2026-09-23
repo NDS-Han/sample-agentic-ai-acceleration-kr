@@ -231,7 +231,7 @@ export function AppPolicyPanel() {
           <div className="glass rounded-apple p-4 space-y-3">
             <h2 className="text-sm font-semibold flex items-center gap-1">
               {t('defaultModel')}
-              <InfoTooltip label={t('defaultModel')}>{t('defaultModelHint')}</InfoTooltip>
+              <InfoTooltip label={t('defaultModel')} side="top">{t('defaultModelHint')}</InfoTooltip>
             </h2>
             <div className="flex items-center gap-3">
               <select
