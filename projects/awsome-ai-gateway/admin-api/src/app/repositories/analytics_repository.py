@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import distinct, func, select
+from sqlalchemy import ColumnElement, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage_filters import client_filter, cost_period_filter, kst_month_expr
@@ -64,13 +64,18 @@ class AnalyticsRepository:
     async def sum_usage_by_model(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
     ) -> dict[str, Decimal]:
-        """Returns {model_alias: total_cost_usd} for the given period/scope."""
+        """Returns {model_alias: total_cost_usd} for the given period/scope.
+
+        `cost_where` 를 넘기면 period 대신 그 WHERE 를 쓴다 — Analytics 의
+        custom 날짜 구간(cost_date_range_filter)이 이 경로를 탄다.
+        """
         stmt = select(
             UsageLog.model_alias,
             func.sum(UsageLog.cost_usd).label("total_cost"),
         ).where(
-            cost_period_filter(period),  # §59 SUCCESS + KST
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)
@@ -81,6 +86,7 @@ class AnalyticsRepository:
     async def count_requests_by_model(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
     ) -> dict[str, int]:
         """Returns {model_alias: request_count} for the given period/scope.
 
@@ -93,7 +99,7 @@ class AnalyticsRepository:
             UsageLog.model_alias,
             func.count().label("requests"),
         ).where(
-            cost_period_filter(period),  # §59 SUCCESS + KST
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)
@@ -104,9 +110,10 @@ class AnalyticsRepository:
     async def count_active_users(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
     ) -> int:
         stmt = select(func.count(distinct(UsageLog.user_id))).where(
-            cost_period_filter(period),  # §59 SUCCESS + KST
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)
@@ -116,9 +123,10 @@ class AnalyticsRepository:
     async def total_requests(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
     ) -> int:
         stmt = select(func.count(UsageLog.id)).where(
-            cost_period_filter(period),  # §59 SUCCESS + KST
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)
@@ -128,6 +136,7 @@ class AnalyticsRepository:
     async def total_tokens(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
     ) -> int:
         """모든 과금 버킷의 합. 캐시(생성/읽기)를 빼면 총 토큰이 과소보고된다
         (dev 실측 -29.2%). 이 값은 대시보드 KPI 와 BI 챗 어시스턴트가 같이 읽는다.
@@ -138,7 +147,7 @@ class AnalyticsRepository:
             + func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0)
             + func.coalesce(func.sum(UsageLog.cache_read_tokens), 0)
         ).where(
-            cost_period_filter(period),  # §59 SUCCESS + KST
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)

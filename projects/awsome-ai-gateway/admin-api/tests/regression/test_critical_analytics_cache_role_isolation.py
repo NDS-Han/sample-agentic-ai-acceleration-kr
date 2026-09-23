@@ -139,7 +139,7 @@ class _Svc:
     def __init__(self) -> None:
         self.calls = 0
 
-    async def get_analytics(self, session, *, period, group_by, scope, client, actor):
+    async def get_analytics(self, session, *, period, group_by, scope, client, actor, **_kw):
         self.calls += 1
         return {"who": actor.role.value if hasattr(actor.role, "value") else str(actor.role),
                 "scope": scope, "secret": "ORG_WIDE" if actor.role == UserRole.ADMIN else "TEAM_ONLY"}

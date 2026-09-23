@@ -126,8 +126,11 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
   const effectiveMonth = isMonth(requested) && periods.includes(requested) ? requested : latest;
 
   const filter = parseFilter(searchParams, effectiveMonth);
-  // 차트 key: custom 이면 날짜, 아니면 월 — 변경 시 remount + 재요청.
-  const sectionKey = filter.period === 'custom' ? `custom-${filter.start_date ?? ''}` : effectiveMonth;
+  // 차트 key: custom 이면 날짜 구간, 아니면 월 — 변경 시 remount + 재요청.
+  const sectionKey =
+    filter.period === 'custom'
+      ? `custom-${filter.start_date ?? ''}-${filter.end_date ?? ''}`
+      : effectiveMonth;
   // 컨텍스트용 사람이 읽는 기간 라벨.
   const periodLabel =
     filter.period === 'custom'
