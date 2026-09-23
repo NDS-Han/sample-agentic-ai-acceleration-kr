@@ -13,7 +13,7 @@ import {
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
-import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
+import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
@@ -27,7 +27,6 @@ interface Props {
 
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
-  const theme = useChartTheme();
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
   const chartData = useMemo(
     () => ({
@@ -57,38 +56,12 @@ export function ClientShareDonutClient({ data }: Props) {
       },
       plugins: {
         legend: { display: false },
-        tooltip: {
-          // 기본 rgba(0,0,0,0.8) 은 반투명이라 뒤의 중앙 오버레이가 비쳐
-          // '겹침' 으로 보였다. 카드 표면색(불투명)+테두리의 팝오버로 바꾼다.
-          backgroundColor: theme.surface,
-          titleColor: theme.text,
-          bodyColor: theme.textMuted,
-          borderColor: theme.isDark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.12)',
-          borderWidth: 1,
-          padding: 10,
-          cornerRadius: 8,
-          position: 'nearest' as const,
-          callbacks: {
-            // Use the backend-computed share_pct (authoritative) rather than
-            // recomputing from cost/total, which can drift due to rounding.
-            label: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.clients[ctx.dataIndex];
-              if (!item) return '';
-              return `${labelFor(item.client)}: $${item.cost_usd.toFixed(2)} (${item.share_pct.toFixed(1)}%)`;
-            },
-            // 호출 수 + 서버측 웹검색 수(attribution 지표)를 같은 툴팁에 함께 표시.
-            afterLabel: (ctx: import('chart.js').TooltipItem<'doughnut'>) => {
-              const item = data.clients[ctx.dataIndex];
-              if (!item) return '';
-              const lines = [t('callCount', { count: item.call_count })];
-              if (item.web_search_count) lines.push(t('webSearchCount', { count: item.web_search_count }));
-              return lines;
-            },
-          },
-        },
+        // 캔버스 툴팁은 어디에 놓아도 도넛 중앙 오버레이를 물리적으로 가린다.
+        // 호버 상세는 중앙 표시 자체가 담당(조각 호버 시 중앙 내용이 바뀐다).
+        tooltip: { enabled: false },
       },
     }),
-    [data, theme, t],
+    [data],
   );
 
   if (!data.clients.length) {
@@ -100,33 +73,44 @@ export function ClientShareDonutClient({ data }: Props) {
   }
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
-      <div className="relative h-64">
+    // 카드가 전체 폭이라 grid-cols-2 는 도넛과 목록을 양끝으로 벌린다.
+    // 도넛 고정폭 + 목록 컴팩트 컬럼을 중앙 정렬로 묶는다.
+    <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
+      <div className="relative h-64 w-64 shrink-0">
         <Doughnut data={chartData} options={options} />
-        {/* 가운데: 점유율 1위 앱 강조 (clients 는 비용 desc 정렬, [0]=1위) */}
-        <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
-          {data.clients[0] && (
-            <span
-              className="mb-1 h-2.5 w-2.5 rounded-full"
-              style={{ backgroundColor: COLORS[0] }}
-              aria-hidden="true"
-            />
-          )}
-          <p className="text-2xl font-bold leading-none tracking-tight">
-            {data.clients[0] ? `${data.clients[0].share_pct.toFixed(0)}%` : '—'}
-          </p>
-          <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
-            {data.clients[0] ? labelFor(data.clients[0].client) : ''}
-          </p>
-          <p className="mt-0.5 text-[10px] text-muted-foreground">
-            {t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
-              minimumFractionDigits: 2,
-              maximumFractionDigits: 2,
-            }) })}
-          </p>
-        </div>
+        {/* 가운데: 기본은 점유율 1위(clients 는 비용 desc 정렬, [0]=1위),
+            조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
+        {(() => {
+          const centerItem = (hoverIndex != null ? data.clients[hoverIndex] : null) ?? data.clients[0];
+          const centerIdx = hoverIndex ?? 0;
+          return (
+            <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
+              {centerItem && (
+                <span
+                  className="mb-1 h-2.5 w-2.5 rounded-full"
+                  style={{ backgroundColor: COLORS[centerIdx % COLORS.length] }}
+                  aria-hidden="true"
+                />
+              )}
+              <p className="text-2xl font-bold leading-none tracking-tight">
+                {centerItem ? `${centerItem.share_pct.toFixed(0)}%` : '—'}
+              </p>
+              <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
+                {centerItem ? labelFor(centerItem.client) : ''}
+              </p>
+              <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
+                {hoverIndex != null && centerItem
+                  ? `$${centerItem.cost_usd.toFixed(2)}`
+                  : t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
+                      minimumFractionDigits: 2,
+                      maximumFractionDigits: 2,
+                    }) })}
+              </p>
+            </div>
+          );
+        })()}
       </div>
-      <ul className="space-y-2">
+      <ul className="space-y-2 w-full md:w-[30rem]">
         {data.clients.map((c, i) => (
           <li
             key={c.client}
