@@ -33,6 +33,21 @@ class CostSummary(BaseModel):
     avg_cost_per_user_usd: Decimal = Decimal("0")
 
 
+class TokenBreakdown(BaseModel):
+    """과금 토큰 버킷별 합계 — Analytics 토큰 분석 패널용.
+
+    cache_write 는 usage_logs.cache_creation_tokens 의 UI 용어다
+    (UsageByUserModelItem.cache_write_tokens 와 같은 명명). reasoning_tokens 는
+    output_tokens 에 이미 포함(models/usage.py)이라 별도 버킷이 아니다 — 더하면 이중계산.
+    """
+
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+    total_tokens: int = 0
+
+
 class ModelBreakdown(BaseModel):
     model: str
     requests: int = 0
@@ -79,6 +94,8 @@ class AnalyticsResponse(BaseModel):
     trends: list[TrendItem] = []
     # ADMIN 이면 전 팀, TEAM_LEADER 이면 리더인 팀들만 — scope_ids 와 같은 격리.
     trends_by_team: list[TeamTrend] = []
+    # 토큰 버킷 비율 분석 패널용 — cost_summary 와 동일 WHERE/scope 격리로 집계.
+    token_breakdown: TokenBreakdown = TokenBreakdown()
 
 
 class UsageByUserModelItem(BaseModel):

@@ -23,6 +23,7 @@ from app.schemas.analytics import (
     ModelBreakdown,
     TeamBreakdown,
     TeamTrend,
+    TokenBreakdown,
     TrendItem,
     UsageByUserItem,
     UsageByUserModelItem,
@@ -147,7 +148,17 @@ class AnalyticsService:
         total_cost = sum(cost_by_model.values(), Decimal("0"))
         active_users_count = await repo.count_active_users(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
         total_requests_count = await repo.total_requests(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
-        total_tokens_count = await repo.total_tokens(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
+        # 버킷별 합계 한 번의 질의로 총 토큰 + 토큰 분석 패널 데이터를 같이 채운다 —
+        # total_tokens 를 따로 더하면 두 값의 근원 쿼리가 갈라진다.
+        token_buckets = await repo.token_bucket_totals(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
+        total_tokens_count = sum(token_buckets.values())
+        token_breakdown = TokenBreakdown(
+            input_tokens=token_buckets["input_tokens"],
+            output_tokens=token_buckets["output_tokens"],
+            cache_read_tokens=token_buckets["cache_read_tokens"],
+            cache_write_tokens=token_buckets["cache_write_tokens"],
+            total_tokens=total_tokens_count,
+        )
 
         avg_cost = total_cost / active_users_count if active_users_count > 0 else Decimal("0")
 
@@ -403,6 +414,7 @@ class AnalyticsService:
             by_user=by_user,
             trends=trends,
             trends_by_team=trends_by_team,
+            token_breakdown=token_breakdown,
         )
 
     async def export_analytics(

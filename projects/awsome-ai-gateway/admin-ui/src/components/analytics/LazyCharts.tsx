@@ -5,6 +5,7 @@
 import dynamic from 'next/dynamic';
 import type { TrendDataPoint } from '@/types/entities';
 import type { TeamTrendSeries } from '@/lib/utils/trendSeries';
+import type { TokenBreakdownData } from './TokenMixDonutClient';
 
 // ⚠️ ssr:false 는 Server Component 안의 next/dynamic 에서 쓰면
 // BAILOUT_TO_CLIENT_SIDE_RENDERING 경계가 생겨 hydration 타이밍에 따라
@@ -19,6 +20,12 @@ const CostTrendChartClient = dynamic(
 const BreakdownChartClient = dynamic(
   () =>
     import('./BreakdownChartClient').then((mod) => ({ default: mod.BreakdownChartClient })),
+  { ssr: false }
+);
+
+const TokenMixDonutClient = dynamic(
+  () =>
+    import('./TokenMixDonutClient').then((mod) => ({ default: mod.TokenMixDonutClient })),
   { ssr: false }
 );
 
@@ -42,4 +49,8 @@ export function LazyBreakdownChart({
   title: string;
 }) {
   return <BreakdownChartClient labels={labels} values={values} title={title} />;
+}
+
+export function LazyTokenMixDonut({ data }: { data: TokenBreakdownData }) {
+  return <TokenMixDonutClient data={data} />;
 }

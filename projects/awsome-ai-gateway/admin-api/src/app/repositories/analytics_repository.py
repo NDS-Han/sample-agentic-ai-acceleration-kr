@@ -154,6 +154,34 @@ class AnalyticsRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one() or 0
 
+    async def token_bucket_totals(
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
+        scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
+    ) -> dict[str, int]:
+        """4개 과금 버킷 각각의 합 — Analytics 토큰 분석 패널용.
+
+        total_tokens 와 **같은** WHERE/스코프/클라이언트 필터를 쓴다 — 패널의
+        합이 KPI 카드의 총 토큰과 어긋나면 같은 화면에서 두 숫자가 싸운다.
+        """
+        stmt = select(
+            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
+            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
+            func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label("cache_write_tokens"),
+            func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
+        ).where(
+            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
+        )
+        stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
+        stmt = self._apply_client_filter(stmt, client)
+        row = (await self._session.execute(stmt)).one()
+        return {
+            "input_tokens": int(row.input_tokens or 0),
+            "output_tokens": int(row.output_tokens or 0),
+            "cache_write_tokens": int(row.cache_write_tokens or 0),
+            "cache_read_tokens": int(row.cache_read_tokens or 0),
+        }
+
     @staticmethod
     def _apply_client_filter(stmt, client: str | None):
         if (cf := client_filter(client)) is not None:
