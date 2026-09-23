@@ -114,6 +114,10 @@ export function CostTrendChartClient({ trends, trendsByTeam = [] }: CostTrendCha
 
   const options = {
     responsive: true,
+    // 기본 'nearest' + intersect:true 는 포인트 정위치에만 툴팁이 뜨고,
+    // pointRadius:0 인 팀 시리즈는 사실상 호버 불가. x축 기준 index 모드로
+    // 바꿔 커서 아래 날짜의 전체 시리즈 값이 바로 뜨게 한다.
+    interaction: { mode: 'index' as const, axis: 'x' as const, intersect: false },
     plugins: {
       legend: {
         position: 'bottom' as const,
@@ -129,6 +133,17 @@ export function CostTrendChartClient({ trends, trendsByTeam = [] }: CostTrendCha
       },
       title: { display: true, text: t('usageTrend'), color: theme.text },
       tooltip: {
+        // 도넛 차트와 같은 불투명 팝오버 스타일.
+        backgroundColor: theme.surface,
+        titleColor: theme.text,
+        bodyColor: theme.textMuted,
+        borderColor: theme.isDark ? 'rgba(255,255,255,0.16)' : 'rgba(15,23,42,0.12)',
+        borderWidth: 1,
+        padding: 10,
+        cornerRadius: 8,
+        // 합계가 위로 오도록 값 desc 정렬.
+        itemSort: (a: import('chart.js').TooltipItem<'line'>, b: import('chart.js').TooltipItem<'line'>) =>
+          (b.parsed.y ?? 0) - (a.parsed.y ?? 0),
         callbacks: {
           label: (ctx: import('chart.js').TooltipItem<'line'>) =>
             ` ${ctx.dataset.label}: $${(ctx.parsed.y ?? 0).toFixed(4)}`,
