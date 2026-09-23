@@ -211,12 +211,32 @@ export function DowngradeDiagram({
             })
             .filter((p): p is { idx: number; mx: number; my: number } => p != null)
             .sort((x, y) => x.mx - y.mx || x.my - y.my);
-          for (let i = 1; i < labelPts.length; i++) {
-            const prev = labelPts[i - 1];
-            const cur = labelPts[i];
-            if (Math.abs(cur.mx - prev.mx) < 12 && cur.my - prev.my < 10) {
-              cur.my = prev.my + 10;
+          // 같은 칼럼 간격(mx 가 가까움)에 몰린 라벨 클러스터를 찾아, 겹침이
+          // 있으면 클러스터 중심 기준으로 위아래 대칭 등간격(14%)으로 재배치한다.
+          // 아래로만 미는 방식은 라벨이 많을 때 하단에 다시 쌓인다.
+          for (let i = 0; i < labelPts.length; ) {
+            let j = i;
+            while (
+              j + 1 < labelPts.length &&
+              Math.abs(labelPts[j + 1].mx - labelPts[i].mx) < 12
+            ) {
+              j++;
             }
+            const cluster = labelPts.slice(i, j + 1).sort((a, b) => a.my - b.my);
+            const collides = cluster.some(
+              (p, k) => k > 0 && p.my - cluster[k - 1].my < 14,
+            );
+            if (collides) {
+              const center =
+                cluster.reduce((s, p) => s + p.my, 0) / cluster.length;
+              cluster.forEach((p, k) => {
+                p.my = Math.min(
+                  Math.max(center + (k - (cluster.length - 1) / 2) * 14, 3),
+                  97,
+                );
+              });
+            }
+            i = j + 1;
           }
           return labelPts.map(({ idx, mx, my }) => {
             const r = rules[idx];
