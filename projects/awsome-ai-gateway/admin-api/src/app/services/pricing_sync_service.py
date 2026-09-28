@@ -60,16 +60,26 @@ class FetchResult:
     errors: list[str] = field(default_factory=list)
 
     def lookup(self, provider_model_id: str) -> NormalizedPrice | None:
-        """DB provider_model_id 와 source 정규화 키 간 매칭(best-effort).
+        """DB provider_model_id 와 source model_id 간 매칭(best-effort).
 
-        region prefix(global./us./eu./apac.) 유무에 따라 같은 모델로 취급한다.
+        region prefix(global./us./eu./apac./jp./us-gov.)는 같은 모델이라도
+        **리전별 단가가 다른 별도 상품**이므로 붕괴시키지 않는다.
+        매칭 순서: exact → global.<base> → <base>(plain). 다른 리전
+        (us.X 가 eu.X 단가를 받는 식의) 교차 fallback 은 하지 않는다.
         """
         if not provider_model_id:
             return None
-        variants = _model_id_variants(provider_model_id)
-        for v in variants:
-            if v in self.prices:
-                return self.prices[v]
+        mid = provider_model_id.lower().strip()
+        if not mid:
+            return None
+        if mid in self.prices:
+            return self.prices[mid]
+        base = _strip_region_prefix(mid)
+        global_key = f"global.{base}"
+        if global_key in self.prices:
+            return self.prices[global_key]
+        if base != mid and base in self.prices:
+            return self.prices[base]
         return None
 
 
@@ -79,9 +89,10 @@ class PricingSyncSource(Protocol):
     async def fetch_bedrock_prices(self) -> FetchResult: ...
 
 
-# Bedrock cross-region inference profile prefix. Price sources 의 model_id 가
-# global./us./eu./apac. prefix 를 붙이거나 뗄 수 있어 매칭 시 무시한다.
-_KNOWN_REGION_PREFIXES = {"global", "us", "eu", "apac"}
+# Bedrock cross-region inference profile prefix. 같은 모델이라도 prefix 별로
+# 리전 단가가 다른 별도 상품이므로(예: us. 는 global. 대비 ~1.1×) prices 키는
+# full id 를 유지하고, base 추출 시에만 prefix 를 뗀다.
+_KNOWN_REGION_PREFIXES = {"global", "us", "eu", "apac", "jp", "us-gov"}
 
 
 def _strip_region_prefix(model_id: str) -> str:
@@ -89,15 +100,6 @@ def _strip_region_prefix(model_id: str) -> str:
     if len(parts) == 2 and parts[0] in _KNOWN_REGION_PREFIXES:
         return parts[1]
     return model_id
-
-
-def _model_id_variants(model_id: str) -> list[str]:
-    """exact match 와 region-prefix-free match 모두 시도할 수 있는 변형 목록."""
-    mid = model_id.lower().strip()
-    stripped = _strip_region_prefix(mid)
-    if stripped == mid:
-        return [mid]
-    return [mid, stripped]
 
 
 class AwsPricingSyncService:
@@ -157,7 +159,7 @@ class AwsPricingSyncService:
             kind = self._classify_usage(attrs)
             if kind is None:
                 continue
-            acc.setdefault(_strip_region_prefix(model_id.lower()), {})[kind] = per_1k
+            acc.setdefault(model_id.lower(), {})[kind] = per_1k
 
         for mid, d in acc.items():
             inp = d.get("input")
@@ -169,7 +171,7 @@ class AwsPricingSyncService:
             cache_1h = d.get("cache_write_1h")
             cache_read = d.get("cache_read")
             derived = cache_5m is None or cache_1h is None or cache_read is None
-            result.prices[_strip_region_prefix(mid)] = NormalizedPrice(
+            result.prices[mid] = NormalizedPrice(
                 input_per_1k=inp,
                 output_per_1k=out,
                 cache_5m_per_1k=cache_5m if cache_5m is not None else inp * _CACHE_5M_MULT,
@@ -294,9 +296,9 @@ class LiteLLMPricingSyncService:
             model_id = str(m.get("id") or "").strip()
             if not model_id:
                 continue
-            key = _strip_region_prefix(model_id.lower())
+            key = model_id.lower()
             if key in result.prices:
-                continue  # 첫 번째 항목 우선; region prefix 가 다른 중복 무시
+                continue  # 동일 id 중복만 무시; region variant(us./global./eu. 등)는 별도 상품으로 유지
 
             input_cost = self._to_decimal(m.get("input_cost_per_token"))
             output_cost = self._to_decimal(m.get("output_cost_per_token"))

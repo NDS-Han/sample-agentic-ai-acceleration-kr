@@ -186,7 +186,7 @@ async def test_litellm_normalizes_per_token_to_per_1k():
     ])
     res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
     assert not res.errors
-    p = res.prices["writer.palmyra-x4-v1:0"]  # region prefix stripped
+    p = res.prices["us.writer.palmyra-x4-v1:0"]  # region prefix 유지 — 별도 상품
     assert p.input_per_1k == Decimal("0.0025")
     assert p.output_per_1k == Decimal("0.01")
 
@@ -270,23 +270,44 @@ async def test_litellm_fetch_failure_is_fail_soft():
     assert res.errors and "timeout" in res.errors[0]
 
 
-def test_fetch_result_lookup_with_region_prefix_variants():
-    """region prefix 유무에 따른 매칭: DB=global.xxx 를 source=us.xxx / xxx 로 찾을 수 있다."""
-    result = FetchResult(
-        prices={
-            "anthropic.claude-sonnet-4-6": NormalizedPrice(
-                input_per_1k=Decimal("0.003"),
-                output_per_1k=Decimal("0.015"),
-                cache_5m_per_1k=Decimal("0"),
-                cache_1h_per_1k=Decimal("0"),
-                cache_read_per_1k=Decimal("0"),
-            )
-        }
+def _price(inp: str) -> NormalizedPrice:
+    return NormalizedPrice(
+        input_per_1k=Decimal(inp),
+        output_per_1k=Decimal("0"),
+        cache_5m_per_1k=Decimal("0"),
+        cache_1h_per_1k=Decimal("0"),
+        cache_read_per_1k=Decimal("0"),
     )
-    assert result.lookup("global.anthropic.claude-sonnet-4-6") is not None
-    assert result.lookup("us.anthropic.claude-sonnet-4-6") is not None
-    assert result.lookup("anthropic.claude-sonnet-4-6") is not None
-    assert result.lookup("anthropic.claude-opus-4-6") is None
+
+
+def test_fetch_result_lookup_region_aware():
+    """리전 prefix 는 별도 상품 — 같은 이름이어도 각자의 단가를 받는다."""
+    result = FetchResult(prices={
+        "global.anthropic.claude-haiku-4-5": _price("0.001"),   # global 기준가
+        "us.anthropic.claude-haiku-4-5": _price("0.0011"),      # us = 1.1×
+        "eu.anthropic.claude-haiku-4-5": _price("0.0013"),      # eu = 1.3×
+    })
+    assert result.lookup("us.anthropic.claude-haiku-4-5").input_per_1k == Decimal("0.0011")
+    assert result.lookup("global.anthropic.claude-haiku-4-5").input_per_1k == Decimal("0.001")
+    assert result.lookup("eu.anthropic.claude-haiku-4-5").input_per_1k == Decimal("0.0013")
+
+
+def test_fetch_result_lookup_global_fallback():
+    """exact 가 없으면 global.<base> 기준가 → 없으면 plain <base> — 타 리전 교차 금지."""
+    result = FetchResult(prices={
+        "global.anthropic.claude-sonnet-4-6": _price("0.003"),
+        "anthropic.claude-opus-4-6": _price("0.005"),
+        "us.anthropic.claude-fable-5": _price("0.011"),
+    })
+    # apac.DB id → apac 엔트리 없음 → global 기준가로 폴백
+    assert result.lookup("apac.anthropic.claude-sonnet-4-6").input_per_1k == Decimal("0.003")
+    # prefix 없는 DB id → global 우선
+    assert result.lookup("anthropic.claude-sonnet-4-6").input_per_1k == Decimal("0.003")
+    # us.DB id 에 exact 없고 global 도 없으면 → us 외 타 리전(eu 등)으로는 가지 않음
+    assert result.lookup("us.anthropic.claude-fable-5").input_per_1k == Decimal("0.011")
+    # eu.DB id 가 us 엔트리만 있는 모델 → global/plain 없으면 미매칭(조용한 교차 리전 금지)
+    assert result.lookup("eu.anthropic.claude-fable-5") is None
+    assert result.lookup("anthropic.claude-nonexistent") is None
 
 
 @pytest.mark.asyncio
