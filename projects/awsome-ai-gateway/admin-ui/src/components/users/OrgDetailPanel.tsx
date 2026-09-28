@@ -23,7 +23,7 @@ import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
-import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/models/TeamModelPermissionPanel';
+import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/users/TeamModelPermissionPanel';
 import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
