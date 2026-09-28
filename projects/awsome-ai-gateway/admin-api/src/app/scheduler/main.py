@@ -66,7 +66,6 @@ def main() -> None:
         key_expiry_cron=settings.KEY_EXPIRY_CRON,
         key_purge_cron=settings.KEY_PURGE_CRON,
         key_purge_retention_days=settings.KEY_PURGE_RETENTION_DAYS,
-        key_purge_enabled=settings.KEY_PURGE_ENABLED,
     )
 
     loop = asyncio.new_event_loop()
@@ -85,13 +84,12 @@ def main() -> None:
         id="key_expiry",
         replace_existing=True,
     )
-    if settings.KEY_PURGE_ENABLED:
-        scheduler.add_job(
-            run_key_purge,
-            CronTrigger.from_crontab(settings.KEY_PURGE_CRON),
-            id="key_purge",
-            replace_existing=True,
-        )
+    scheduler.add_job(
+        run_key_purge,
+        CronTrigger.from_crontab(settings.KEY_PURGE_CRON),
+        id="key_purge",
+        replace_existing=True,
+    )
     scheduler.start()
 
     try:

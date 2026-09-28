@@ -20,6 +20,9 @@
 #   - Cognito access_token: 표준 OIDC `aud` claim 없음 (대신 client_id claim).
 #     admin-api 의 OIDC_AUDIENCE 는 비워두고 audience 검증 skip 사용.
 #   - issuer URL: https://cognito-idp.{region}.amazonaws.com/{user_pool_id}
+#
+# admin-ui 로그인(커스텀 이메일/비밀번호 폼)은 이 `cli` App Client 를 그대로
+# ROPC(USER_PASSWORD_AUTH)로 재사용한다 (admin-api COGNITO_APP_CLIENT_ID = 이 client_id).
 # ==============================================================================
 
 locals {
