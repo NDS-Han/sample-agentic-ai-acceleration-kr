@@ -630,7 +630,13 @@ class BudgetService:
         *,
         team_id: uuid.UUID,
         period: str,
+        actor: CurrentUser,
     ) -> TeamBudgetAllocation | None:
+        # 소속 팀만 열람 가능 — 이전엔 actor 검사가 없어 임의 team_id로
+        # 타 팀 배정 현황을 읽을 수 있었다(IDOR).
+        if actor.role == UserRole.TEAM_LEADER and team_id != actor.team_id:
+            raise ForbiddenError("Team leaders can only read allocations for teams they lead")
+
         user_repo = UserRepository(session)
         team = await user_repo.get_team(team_id)
         if team is None:
@@ -700,6 +706,7 @@ class BudgetService:
         scope: str | None = None,
         target_id: uuid.UUID | None = None,
         period: str,
+        actor: CurrentUser | None = None,
     ) -> BudgetSummaryResponse:
         if not re.match(r'^\d{4}-\d{2}$', period):
             raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
@@ -723,6 +730,13 @@ class BudgetService:
         #    정렬 키(created_at)와 커서 키(id)가 달라 행을 건너뛴다. 전수 조회를 쓴다.
         users = await user_repo.iter_all_users()
         teams = await user_repo.list_all_teams()
+
+        # TEAM_LEADER 는 소속 팀만 — scope/target_id 쿼리 파라미터로 다른
+        # 팀을 넘겨도 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
+        if actor is not None and actor.role == UserRole.TEAM_LEADER:
+            led = {actor.team_id} if actor.team_id else set()
+            teams = [t for t in teams if t.id in led]
+            users = [u for u in users if u.team_id in led]
 
         # team_id(str) → (dept_id, dept_name). teams are loaded with
         # selectinload(Team.department), so this needs no extra query.
