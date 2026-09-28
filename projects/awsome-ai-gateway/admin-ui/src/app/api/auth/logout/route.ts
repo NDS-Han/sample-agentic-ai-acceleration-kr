@@ -51,8 +51,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     response = NextResponse.redirect(url.toString(), { status: 303 });
   } else {
     // 상대 Location — Host 헤더가 CloudFront 뒤에서 ALB 이름일 수 있다(lib/redirect.ts).
-    // OIDC 미구성이면 '/' 로 보내 middleware 가 '/api/auth/login' 으로 갈라준다.
-    response = redirectRelative('/');
+    response = redirectRelative('/login');
   }
   response.cookies.set('admin_jwt', '', {
     httpOnly: true,

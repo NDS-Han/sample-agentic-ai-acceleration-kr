@@ -265,7 +265,7 @@ class UserTeamService:
         # 가 이제 그 팀 소속도 아닌 사람을 계속 가리키고(스테일 포인터), 동시에
         # require_team_leader_of(role+team_id 로만 판정)가 새 팀에서 이 사람을
         # 명시적 지정 없이 리더로 인가해버리는 의도치 않은 권한 상승이 발생한다.
-        # (Cognito 그룹 동기화 경로가 그룹 변경 시 이 메서드를 자동 호출하므로,
+        # (authenticate_for_admin_ui 가 Cognito 그룹 변경 시 이 메서드를 자동 호출하므로,
         # 이 버그는 관리자 조작 없이도 Cognito 그룹 재배정만으로 트리거될 수 있었다.)
         # 같은 팀으로의 no-op 호출(new_team_id == old_team_id)까지 강등시키지 않도록
         # 실제로 팀이 바뀌는 경우에만 적용한다.
