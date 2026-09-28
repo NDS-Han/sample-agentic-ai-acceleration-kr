@@ -15,6 +15,14 @@
 
 📋 용어: **마이그레이션** = DB 스키마를 한 단계씩 바꾸는 번호 붙은 스크립트(`db/versions/0034_….py` 식). 이번 배포는 0026~0036 의 11개가 `install-eks.sh` 안에서 순서대로 돈다. 아래의 0032·0034 같은 번호는 그 파일 번호다.
 
+📋 브랜치 모델(2026-10 재편): `after-merge-fix` = `upstream/us/deploy-fixes` tip 위에
+**수용 커밋 23개 + fork 전용 커밋 6개**를 쌓은 선형 이력이다. 마지막 6개(IN-01 로그인,
+리더 범위 확대, 예산/모델 화면 리워크, gateway 운영 기능, 모델 wire-name·LiteLLM,
+운영 스크립트)는 upstream PR 에서 제외된 fork 고유분 — 커밋 제목에 "fork 전용" 표기.
+`pr/nds-delta`(PR #6)는 같은 23개까지만 담는다. 다음 upstream 머지 때는
+"수용 23 + fork 6" 전체를 새 upstream tip 위로 옮기면 되고, PR 델타는 fork 전용
+커밋들을 뺀 앞부분만 다시 squash/재구성하면 된다.
+
 ## ① 저장소 최신화 — [README §3 ①](../README.md#3-적용하기-배포-ec2-에서) 그대로
 
 ▶ 실행
