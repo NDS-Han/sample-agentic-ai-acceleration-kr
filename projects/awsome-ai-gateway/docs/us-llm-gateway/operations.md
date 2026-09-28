@@ -27,6 +27,9 @@
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
+| §8-F | Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC) | Hosted UI/도메인 없이 이메일·비밀번호 폼으로 로그인할 때 (IN-01, 선택) | [ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md) |
+| §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
+| §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (IN-02, 선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
 | §8-Z | 토큰 TTL 조절 | 토큰 수명 바꿀 때 | [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md) |
 | §8-P | dev → prod 승격 — 별도 계정에 prod 스택 신설 | prod 승격 (US-08) | [ops/8-P-prod.md](ops/8-P-prod.md) |
@@ -116,6 +119,41 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 `US-07` 선택 — 전제 S2S VPN. values 주석 2곳 해제 → `install-eks.sh`(ALB 재생성) → admin SG·CNAME 교체. VPN 없이 적용하면 VK 발급이 끊겨 게이트웨이 사용 불가. terraform 무변경. 신규 설치는 `US-01` 때 values 로 포함.
 → **[ops/8-I-admin-internal.md](ops/8-I-admin-internal.md)**
 
+
+---
+
+### 8-F. Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC)
+
+`IN-01` 선택 — admin-ui 에 이메일/비밀번호로 로그인하는 커스텀 Cognito 로그인 폼 추가. Hosted UI 도메인·콜백 없이 internal ALB 환경에서도 동작한다(AD/IdP 연동이 목표라면 §8-L 의 OIDC Hosted UI 방식이 적합). 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
+→ **[ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md)**
+
+---
+
+### 8-W. Notification 발송 채널 변경
+
+메일을 실제로 보내려면 `notificationWorker.email.provider`를 `mock`에서 `internal_api`·`smtp`·`ses`로 전환한다. 값 파일을 직접 고치지 않고 `deployment/scripts/set-notification-provider.sh`를 사용할 수 있다. `ses` 선택 시 IAM/IRSA 는 `update-scripts/08-setup-notification-ses-irsa.sh`로 자동 설정한다.
+
+```bash
+cd ~/awsome-ai-gateway
+bash deployment/scripts/set-notification-provider.sh dev internal_api
+bash deployment/scripts/install-eks.sh dev
+```
+
+상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**
+
+---
+
+### 8-V. 본문 로깅 활성화 (요청/응답 전문 → S3)
+
+`IN-02` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `--apply` 후에도 수집은 꺼져 있다.
+
+```bash
+bash deployment/scripts/enable-body-logging.sh dev           # 상태 + plan (읽기 전용)
+bash deployment/scripts/enable-body-logging.sh dev --apply   # tfvars → apply → helm env 주입
+bash deployment/scripts/enable-body-logging.sh dev --verify  # 버킷/스트림/env 검증
+```
+
+→ **[ops/8-V-body-logging.md](ops/8-V-body-logging.md)**
 
 ---
 
