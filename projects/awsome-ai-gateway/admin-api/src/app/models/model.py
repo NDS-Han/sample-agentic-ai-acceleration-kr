@@ -92,7 +92,8 @@ class ModelAlias(Base):
     #:
     #: ``auth.user_allowed_clients``(사용자 × 앱)와는 **다른 축**이고 AND 로 걸린다.
     allowed_clients: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
-    #: 스펙 정보(옵션) — 모델 등록/수정 시 운영자가 입력한다(NULL = 미상).
+    #: 스펙 정보 — LiteLLM model catalog 싱크로 채워진다(없으면 NULL = 미상).
+    #: context_window 는 catalog 의 max_input_tokens(없으면 max_tokens)를 뜻한다.
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=False)

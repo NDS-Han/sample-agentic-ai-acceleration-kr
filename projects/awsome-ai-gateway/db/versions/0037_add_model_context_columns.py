@@ -6,8 +6,9 @@ Revision ID: 0037
 Revises: 0036
 Create Date: 2026-09-21
 
-모델 레지스트리에 스펙 정보가 없어 콘솔 상세가 0으로 표시됐다.
-NULL 허용 — 외부 카탈로그에 매칭되지 않는 커스텀 모델(OPENMODEL/vLLM)은 비어 있을
+모델 레지스트리에 스펙 정보가 없어 콘솔 상세가 0으로 표시됐다. LiteLLM model
+catalog 가격 싱크와 같은 소스에서 max_input_tokens/max_output_tokens 를 가져와
+채운다. NULL 허용 — 싱크에 매칭되지 않는 커스텀 모델(OPENMODEL/vLLM)은 비어 있을
 수 있다.
 """
 
