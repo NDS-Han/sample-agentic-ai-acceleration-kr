@@ -56,6 +56,20 @@ def _validate_period_date(period: str, date: str) -> None:
 
 
 class AnalyticsService:
+    @staticmethod
+    async def _leader_team_ids(session: AsyncSession, actor: CurrentUser) -> set[uuid.UUID]:
+        """TEAM_LEADER 가 열람할 수 있는 팀 집합 = 리더로 지정된 팀들(엄격).
+
+        auth.teams.leader_user_id 는 복수 팀이 같은 사용자를 가리킬 수 있으므로
+        (한 사람이 여러 팀의 리더) CurrentUser.team_id — 소속 팀 1개 — 만으로 좁히면
+        리더가 맡은 다른 팀이 빠진다. 소속 팀은 포함하지 **않는다** — 정책은
+        "리더인 팀만" 이므로, 소속이지만 리더가 아닌 팀의 데이터는 열리지 않는다.
+        구현은 services/team_scope.py 의 공용 헬퍼로 위임(dashboard 와 단일 진실원).
+        """
+        from app.services.team_scope import led_team_ids
+
+        return await led_team_ids(session, actor)
+
     async def get_analytics(
         self,
         session: AsyncSession,
@@ -88,23 +102,24 @@ class AnalyticsService:
 
         if scope.startswith("team:"):
             team_id = uuid.UUID(scope.split(":")[1])
-            # TEAM_LEADER 는 소속 팀만 볼 수 있다
-            if actor.role == UserRole.TEAM_LEADER and team_id != actor.team_id:
+            # TEAM_LEADER 는 본인이 리더로 지정된 팀만 볼 수 있다(엄격 — 소속만으론 부족)
+            if actor.role == UserRole.TEAM_LEADER and team_id not in await self._leader_team_ids(session, actor):
                 raise ForbiddenError("Team leaders can only view analytics for their own team")
             roi_scope = ROIScope.TEAM
             scope_ids = [team_id]
         elif scope == "all":
-            # TEAM_LEADER restricted to own team
+            # TEAM_LEADER restricted to own team(s)
             if actor.role == UserRole.TEAM_LEADER:
-                # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. scope_ids 가 비면
-                #    아래 모든 WHERE 가 가드 뒤에 있어서 **전부 사라진다** → 전사 분석
+                # ⚠️ 열람 가능 팀이 하나도 없는 TEAM_LEADER 를 통과시키면 안 된다.
+                #    예전엔 scope_id 가 None 이 되고, 아래 모든 WHERE 가 `if scope_id`/
+                #    `is not None` 가드 뒤에 있어서 **전부 사라졌다** → 전사 분석
                 #    (비용·사용자·모델·추이)과 /admin/analytics/export CSV 가 그대로
-                #    나간다. 도달 경로: JWT 에 team_id 클레임이 없으면
+                #    나갔다. 도달 경로: JWT 에 team_id 클레임이 없으면
                 #    (core/auth.py:157) 또는 auth.users.team_id 가 NULL 이면(nullable)
                 #    team_id 는 None 이다. dev 토큰은 role 을 본문에서 읽고 team_id 를
                 #    항상 None 으로 만들기 때문에 `dev.{"role":"TEAM_LEADER"}` 하나로
                 #    재현된다.
-                scope_ids = [actor.team_id] if actor.team_id else []
+                scope_ids = sorted(await self._leader_team_ids(session, actor), key=str)
                 if not scope_ids:
                     raise ForbiddenError(
                         "Team leader has no team assigned — cannot scope analytics. "

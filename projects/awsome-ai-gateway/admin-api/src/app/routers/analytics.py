@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import timedelta
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query, Request
@@ -14,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.db import get_db_session
-from app.core.usage_filters import cost_period_filter, current_kst_period, reporting_tz_sql
+from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
 from app.models.auth import UserRole
 from app.models.usage import UsageLog
 

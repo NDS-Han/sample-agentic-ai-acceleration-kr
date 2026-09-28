@@ -8,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import ColumnElement, distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.usage_filters import client_filter, cost_period_filter
+from app.core.usage_filters import client_filter, cost_period_filter, kst_month_expr
 from app.models.usage import ROIAggregation, ROIScope, UsageLog
 
 
