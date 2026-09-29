@@ -14,7 +14,7 @@
 #     MIGRATION_ENABLED=false   — DB migration Job 스킵 (기본 true)
 #     DEV_LOGIN_ENABLED=false   — dev-login(role 선택 MVP 우회) 강제 off, 안 주면
 #                                 values-eks-fargate-<env>.yaml 의 global.devLoginEnabled 값 그대로.
-#                                 Cognito 로그인(adminApi.adminUiLogin) 전환 후 false 로.
+#                                 OIDC 로그인(adminUi.env OIDC_*) 전환 후 false 로.
 #
 # 전제:
 #   - terraform/environments/llm-gateway-<env> 에 terraform apply 가 성공적으로 완료됨
@@ -439,16 +439,6 @@ helm_install() {
         )
         # 다시 if 로 닫지 않고 dummy true (아래 fi 와 짝 맞춤 위해)
         true
-    fi
-
-    # admin-ui 커스텀 로그인 폼(Cognito ROPC) — 같은 App Client(cli) 재사용.
-    # auth.adminUiJwt.privateKeySecretName 을 별도로 설정하지 않으면 admin-api 가
-    # ADMIN_UI_JWT_PRIVATE_KEY_PEM 미구성으로 로그인을 계속 비활성 상태로 둔다
-    # (dev-login 만 사용 가능) — 키 발급은 scripts/generate_admin_jwt_keypair.py 참고.
-    if [ -n "${COGNITO_CLIENT_ID}" ]; then
-        SET_ARGS+=(
-            --set "adminApi.adminUiLogin.cognitoAppClientId=${COGNITO_CLIENT_ID}"
-        )
     fi
 
     # dev-login on/off — 안 주면 values 파일의 global.devLoginEnabled 그대로 사용.

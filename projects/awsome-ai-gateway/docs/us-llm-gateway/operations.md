@@ -27,7 +27,6 @@
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
-| §8-F | Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC) | Hosted UI/도메인 없이 이메일·비밀번호 폼으로 로그인할 때 (IN-01, 선택) | [ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md) |
 | §8-W | Notification 발송 채널 변경 | 메일을 실제로 보내고 싶을 때 | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
 | §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (US-15, 선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
@@ -121,11 +120,6 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 
 
 ---
-
-### 8-F. Admin UI Cognito 로그인 폼 (dev-login 대체, ROPC)
-
-`IN-01` 선택 — admin-ui 에 이메일/비밀번호로 로그인하는 커스텀 Cognito 로그인 폼 추가. Hosted UI 도메인·콜백 없이 internal ALB 환경에서도 동작한다(AD/IdP 연동이 목표라면 §8-L 의 OIDC Hosted UI 방식이 적합). 이미지 재빌드 → `setup-admin-ui-login.sh`(세션 서명 키 발급 + DB/Secret 반영) → `install-eks.sh` → 확인 후 `global.devLoginEnabled: false` 로 dev-login 우회 차단.
-→ **[ops/8-F-admin-ui-login.md](ops/8-F-admin-ui-login.md)**
 
 ---
 

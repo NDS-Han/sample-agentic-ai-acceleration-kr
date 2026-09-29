@@ -367,13 +367,6 @@ adminApi:
     groups:
       - "ClaudeAdmin"
 
-  # admin-ui 커스텀 로그인 폼(Cognito ROPC). 고객 SSO/Hosted UI(OIDC PKCE) 외에
-  # Cognito 네이티브 사용자용 폼 로그인을 쓸 때 채운다.
-  # auth.adminUiJwt.privateKeySecretName 도 함께 설정 — 03-secrets.md 참고.
-  adminUiLogin:
-    # CHANGE_ME (terraform output): terraform output -raw cognito_client_id
-    cognitoAppClientId: ""
-
 adminUi:
   replicaCount: 2
   image:
@@ -527,7 +520,4 @@ migration:
   image:
     tag: "1.0.52-head0033"
 
-auth:
-  adminUiJwt:
-    privateKeySecretName: "llm-gateway-app"
-    privateKeySecretKey: "admin_ui_jwt_private_key_pem"
+

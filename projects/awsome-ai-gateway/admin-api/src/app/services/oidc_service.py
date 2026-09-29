@@ -29,7 +29,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.config import get_settings
-from app.core.exceptions import ForbiddenError
 from app.core.oidc_identity import derive_role
 from app.core.oidc_verifier import OIDCConfigError, OIDCVerifier, OIDCVerifyError
 from app.models.auth import Department, Team, User, UserRole
@@ -226,78 +225,6 @@ class OIDCService:
             tpm_limit=None,
             rpm_limit=None,
         )
-
-    async def authenticate_for_admin_ui(
-        self,
-        session: AsyncSession,
-        *,
-        token: str,
-    ) -> User:
-        """admin-ui 로그인 전용 진입점 (``routers/auth_admin.py`` 가 호출).
-
-        ``exchange_jwt_for_vk`` 와 claim 검증/팀 매핑/user upsert 로직은 동일하지만:
-        - VK 를 발급하지 않는다 (admin-ui 세션은 자체 서명 JWT — ``admin_jwt_signer``).
-        - role 이 ADMIN/TEAM_LEADER 가 아니면 거부한다 (DEVELOPER 는 admin-ui 페이지가 없음).
-          TEAM_LEADER 는 Cognito 그룹이 아니라 admin-ui 에서 수동 지정되므로(``_derive_role``
-          참고), 이 체크는 **upsert 이후** ``user.role`` (수동 지정 보존 로직 반영)로 해야
-          기존 팀 리더가 정상적으로 로그인할 수 있다 — upsert 이전에 걸러버리면 항상 거부됨.
-        """
-        settings = get_settings()
-
-        try:
-            claims = await self._verifier.verify_async(token, self._http_client)
-        except OIDCVerifyError as e:
-            raise OIDCAuthError(str(e)) from e
-
-        sub = claims.get(settings.OIDC_USER_ID_CLAIM)
-        email = claims.get(settings.OIDC_EMAIL_CLAIM, "")
-        name = claims.get(settings.OIDC_NAME_CLAIM) or email or sub
-        groups = claims.get(settings.OIDC_GROUPS_CLAIM, []) or []
-        if not isinstance(groups, list):
-            groups = [groups]
-
-        if not sub:
-            raise OIDCAuthError(f"missing claim: {settings.OIDC_USER_ID_CLAIM}")
-        if not email:
-            email = claims.get("preferred_username") or ""
-        if not email:
-            email = (await self._email_from_cognito(str(sub))) or f"{sub}@unknown"
-
-        role = self._derive_role(email, groups)
-        team_id = await self._resolve_team(session, groups)
-
-        user, was_created, team_changed = await self._upsert_user(
-            session=session,
-            sso_subject=str(sub),
-            email=str(email),
-            display_name=str(name),
-            team_id=team_id,
-            role=role,
-        )
-
-        if user.role not in (UserRole.ADMIN, UserRole.TEAM_LEADER):
-            raise OIDCNotProvisionableError(
-                "admin_ui_access_denied: ADMIN 또는 TEAM_LEADER 만 admin-ui 에 로그인할 수 있습니다."
-            )
-
-        if not was_created and team_changed:
-            actor = CurrentUser(user_id=user.id, email=user.email, role=user.role, team_id=team_id)
-            try:
-                await self._user_team_service.transfer_user(
-                    session,
-                    user_id=user.id,
-                    new_team_id=team_id,
-                    actor=actor,
-                    ip_address="0.0.0.0",
-                    request_id="",
-                )
-            except Exception:
-                logger.exception("admin_ui_login.transfer_user_failed", user_id=str(user.id))
-
-        if not user.is_active:
-            raise OIDCNotProvisionableError("user_deactivated")
-
-        return user
 
     # ------------------------------------------------------------------
     # Private helpers

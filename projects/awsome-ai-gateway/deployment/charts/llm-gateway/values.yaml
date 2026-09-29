@@ -53,8 +53,8 @@ global:
   # 두 컨테이너에 동시에 주입되는 단일 스위치(각자 따로 --set 할 필요 없음).
   # true 로 두면 누구나 admin_jwt 쿠키만으로 임의 role 로 로그인 가능하므로
   # **prod 에서는 반드시 false**(NOTES.txt 가 environment=prod + true 조합을 경고).
-  # Cognito 로그인(admin-ui 커스텀 로그인 폼, adminApi.oidc/adminApi.adminUiLogin)이
-  # 준비되면 이 값을 false 로 바꿔 우회 경로를 완전히 잠근다.
+  # OIDC 로그인(adminUi.env 의 OIDC_* 변수)이 준비되면 이 값을 false 로 바꿔
+  # 우회 경로를 완전히 잠근다.
   devLoginEnabled: false
 
 # ----------------------------------------------------------------------------
@@ -252,16 +252,7 @@ auth:
     encryptionKeySecretKey: "virtual_key_encryption_key"
     # 로테이션 준비: 이전 버전 키 (복호화 전용)
     extraKeysEnabled: false
-  adminUiJwt:
-    # admin-ui 세션 JWT(RS256) 서명용 개인키 PEM. 생성:
-    # python admin-api/scripts/generate_admin_jwt_keypair.py
-    # (공개키는 db/init/03_seed_data.sql 의 admin_jwt_configs.public_key_pem 에 반영)
-    # 비어있으면 admin-ui 의 Cognito 로그인이 비활성화된다 (dev-login 만 사용 가능).
-    # 활성화하려면 보통 virtualKey.encryptionKeySecretName 과 같은 "llm-gateway-app"
-    # Secret 을 재사용(templates/common/secret.yaml 이 이 이름으로 ExternalSecret/Secret
-    # 을 만듦) — 그 Secret 에 admin_ui_jwt_private_key_pem 키만 추가하면 됨.
-    privateKeySecretName: ""
-    privateKeySecretKey: "admin_ui_jwt_private_key_pem"
+
 
 # ----------------------------------------------------------------------------
 # Ingress (ALB on EKS)
@@ -698,23 +689,6 @@ adminApi:
   adminBootstrap:
     emails: []          # ADMIN_EMAILS — 예: ["admin@example.com"]
     groups: []          # ADMIN_GROUPS — 예: ["ClaudeAdmin"]
-
-  # --------------------------------------------------------------------------
-  # Admin-UI 로그인 (Cognito ROPC) — admin-ui 커스텀 로그인 폼(email/password)이
-  # 이 값들로 admin-api POST /v1/auth/admin/login 을 거쳐 세션을 발급받는다.
-  # cognitoAppClientId 가 비어있으면 (또는 auth.adminUiJwt.privateKeySecretName 이
-  # 비어있으면) 이 로그인 경로는 503 으로 비활성 — dev-login 만 사용 가능.
-  # --------------------------------------------------------------------------
-  adminUiLogin:
-    # terraform cognito 모듈의 `cli` App Client 를 재사용 (ALLOW_USER_PASSWORD_AUTH
-    # 이미 허용됨). terraform output -raw cognito_client_id
-    cognitoAppClientId: ""
-    # db/init/03_seed_data.sql 의 auth.admin_jwt_configs.id 와 반드시 일치해야 함
-    # (core.auth.JWTVerifier 가 kid 로 공개키를 매칭).
-    jwtConfigId: "00000000-0000-4000-a000-000000000030"
-    jwtIssuer: "ds-gateway-admin"
-    jwtAudience: "ds-gateway-admin-api"
-    jwtTtlHours: 12
 
   # 자동 프로비저닝 기본값 (Default Department / Team UUIDs)
   # db/init/03_seed_data.sql 의 시드 UUID 와 정확히 일치해야 함.

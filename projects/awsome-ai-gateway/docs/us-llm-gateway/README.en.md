@@ -43,7 +43,6 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 - **Pick one of two**: set up employee PCs by hand ↔ installer file (`US-14` Claude Code · `US-09` Cowork)
 - **Optional for a POC**: `US-06` (https) · `US-07` (admin internal) · `US-02` is for existing deployments only
 
-- **Fork additions (`IN-NN`)**: `IN-01` (custom Cognito login form for the admin console — off by default)
 ---
 
 ## 2. Latest updates

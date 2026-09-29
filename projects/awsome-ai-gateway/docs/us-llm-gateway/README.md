@@ -40,7 +40,6 @@
 - **설치 뒤 따로**: `US-12`(관리 화면 Cognito 로그인) — 운영(`US-08`)은 사실상 필수
 - **둘 중 하나 고르기**: 직원 PC 를 수동 설치 ↔ 설치 파일(`US-14` Claude Code · `US-09` Cowork)
 - **POC 에서 선택**: `US-06`(https) · `US-07`(admin internal) · `US-02` 는 기존 배포 전용
-- **포크 추가 (`IN-NN`)**: `IN-01`(admin 콘솔 커스텀 Cognito 로그인 폼 — 기본 꺼짐)
 
 ---
 
