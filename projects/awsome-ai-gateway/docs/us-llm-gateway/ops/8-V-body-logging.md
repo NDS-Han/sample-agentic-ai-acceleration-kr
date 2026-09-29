@@ -2,7 +2,7 @@
 
 > ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-V**
 
-> 📒 **`IN-02` · 등급 선택(감사·디버깅 필요 시)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트). 적용 여부는 `docs/us-llm-gateway/update-scripts/20-enable-body-logging.sh verify` 로 확인한다.
+> 📒 **`US-15` · 등급 선택(감사·디버깅 필요 시)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트). 적용 여부는 `docs/us-llm-gateway/update-scripts/20-enable-body-logging.sh verify` 로 확인한다.
 
 > ⚠️ **무엇이 저장되는지 먼저 알아야 한다.** 켜면 게이트웨이가 **요청 JSON 전문과
 > 응답 전문**(스트리밍이면 재구성된 SSE 텍스트)을 S3 에 보낸다 — 사용자가 프롬프트에

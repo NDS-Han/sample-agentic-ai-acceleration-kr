@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # 20-enable-body-logging.sh
 #
-# WHAT: open the infra gate for request/response body logging — IN-02,
+# WHAT: open the infra gate for request/response body logging — US-15,
 #       docs/us-llm-gateway/ops/8-V-body-logging.md.
 #         (no step)  status: tfvars flag + terraform outputs + pod env + values
 #         tfvars     append enable_body_logging = true to terraform.tfvars
