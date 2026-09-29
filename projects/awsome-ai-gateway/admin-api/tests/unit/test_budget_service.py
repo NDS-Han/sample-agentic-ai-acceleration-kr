@@ -427,7 +427,7 @@ class TestSetDowngradeConfigDisabled:
 
         data = AutoDowngradeConfigRequest(enabled=False, rules=[])
         with patch("app.services.budget_service.DowngradePolicyRepository") as Repo:
-            Repo.return_value.delete_rules = AsyncMock(return_value=3)
+            Repo.return_value.deactivate_rules = AsyncMock(return_value=3)
             res = await budget_service.set_downgrade_config(
                 mock_session,
                 scope=BudgetScope.TEAM,
@@ -435,7 +435,7 @@ class TestSetDowngradeConfigDisabled:
                 data=data,
                 actor=admin_user,
             )
-        Repo.return_value.delete_rules.assert_awaited_once()
+        Repo.return_value.deactivate_rules.assert_awaited_once()
         assert res.enabled is False
         assert res.rules == []
 
@@ -449,7 +449,7 @@ class TestSetDowngradeConfigDisabled:
         data = AutoDowngradeConfigRequest(enabled=False)
         with patch("app.services.budget_service.DowngradePolicyRepository") as Repo, \
              patch("app.services.budget_service.BudgetRepository") as BRepo:
-            Repo.return_value.delete_rules = AsyncMock(return_value=0)
+            Repo.return_value.deactivate_rules = AsyncMock(return_value=0)
             res = await budget_service.set_downgrade_config(
                 mock_session,
                 scope=BudgetScope.USER,
@@ -477,3 +477,28 @@ class TestSetDowngradeConfigDisabled:
                 actor=admin_user,
             )
         mock_session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_get_disabled_config_preserves_rules(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """끄기 저장 후에도 최신 배치의 규칙이 GET 에 그대로 보인다 —
+        비활성화는 삭제가 아니므로 리로드해도 규칙이 사라지지 않아야 한다."""
+        from datetime import datetime, timezone
+
+        rule = MagicMock(
+            id=uuid.uuid4(),
+            from_model_alias="anthropic.claude-opus",
+            to_model_alias="anthropic.claude-haiku",
+            threshold_pct=80,
+            is_active=False,
+            created_at=datetime.now(timezone.utc),
+        )
+        with patch("app.services.budget_service.DowngradePolicyRepository") as Repo:
+            Repo.return_value.get_current_rules = AsyncMock(return_value=[rule])
+            res = await budget_service.get_downgrade_config(
+                mock_session, scope=BudgetScope.TEAM, scope_id=uuid.uuid4()
+            )
+        assert res.enabled is False
+        assert len(res.rules) == 1
+        assert res.rules[0].from_model_alias == "anthropic.claude-opus"

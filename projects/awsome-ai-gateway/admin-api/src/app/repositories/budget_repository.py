@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage, DowngradePolicy
@@ -241,6 +241,36 @@ class DowngradePolicyRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def get_current_rules(
+        self, scope: BudgetScope, scope_id: uuid.UUID
+    ) -> list[DowngradePolicy]:
+        """가장 최근 저장 배치 — is_active 무관하게 돌려준다.
+
+        저장할 때마다 이전 배치는 비활성화되고 새 배치가 INSERT 된다. 한 배치의
+        행들은 같은 트랜잭션에서 INSERT 되므로 created_at(server_default=func.now(),
+        트랜잭션 시각)이 모두 같다 — max(created_at) 이 곧 최신 배치다.
+        비활성화된 배치도 반환하므로 '끄기' 상태의 규칙이 화면에서 사라지지 않는다.
+        """
+        latest = (
+            select(func.max(DowngradePolicy.created_at))
+            .where(
+                DowngradePolicy.scope == scope,
+                DowngradePolicy.scope_id == scope_id,
+            )
+            .scalar_subquery()
+        )
+        stmt = (
+            select(DowngradePolicy)
+            .where(
+                DowngradePolicy.scope == scope,
+                DowngradePolicy.scope_id == scope_id,
+                DowngradePolicy.created_at == latest,
+            )
+            .order_by(DowngradePolicy.threshold_pct)
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def set_rules(
         self, scope: BudgetScope, scope_id: uuid.UUID, rules: list[DowngradePolicy]
     ) -> list[DowngradePolicy]:
@@ -259,7 +289,8 @@ class DowngradePolicyRepository:
         await self._session.flush()
         return rules
 
-    async def delete_rules(self, scope: BudgetScope, scope_id: uuid.UUID) -> int:
+    async def deactivate_rules(self, scope: BudgetScope, scope_id: uuid.UUID) -> int:
+        """활성 규칙을 비활성화만 한다(끄기) — 행은 남아 GET 이 최신 배치로 돌려준다."""
         stmt = (
             update(DowngradePolicy)
             .where(
@@ -268,6 +299,17 @@ class DowngradePolicyRepository:
                 DowngradePolicy.is_active.is_(True),
             )
             .values(is_active=False)
+        )
+        result = await self._session.execute(stmt)
+        return result.rowcount  # type: ignore[return-value]
+
+    async def clear_rules(self, scope: BudgetScope, scope_id: uuid.UUID) -> int:
+        """규칙 행 자체를 삭제한다(Clear). soft-delete 로 두면 비활성 배치가
+        get_current_rules 의 최신 배치로 다시 노출되므로, 삭제 의미를 지키기
+        위해 hard delete 한다. 이력은 audit_log 가 보존한다."""
+        stmt = delete(DowngradePolicy).where(
+            DowngradePolicy.scope == scope,
+            DowngradePolicy.scope_id == scope_id,
         )
         result = await self._session.execute(stmt)
         return result.rowcount  # type: ignore[return-value]

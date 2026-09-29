@@ -138,9 +138,9 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
           : [],
       });
       if (result.success) {
-        // 끄기 저장 후에는 규칙 행이 더 이상 "저장됨"이 아니다 — 다시 켜면
-        // 미저장 상태(테두리 없음)로 표시해 실제 활성 상태와 맞춘다.
-        setSavedRules(enabled ? rules.map(r => ({ ...r })) : []);
+        // 끄기 저장은 규칙을 삭제하지 않고 비활성화만 한다 — 규칙은 저장된
+        // 설정으로 남으므로 스냅샷도 현재 규칙으로 갱신한다.
+        setSavedRules(rules.map(r => ({ ...r })));
         toast({ type: 'success', message: t('downgradeSaved'), auto_dismiss_ms: 3000 });
       } else {
         let msg = result.error;

@@ -1063,12 +1063,13 @@ class BudgetService:
         scope_id: uuid.UUID,
     ) -> AutoDowngradeConfigResponse:
         rule_repo = DowngradePolicyRepository(session)
-        rules = await rule_repo.get_rules(scope, scope_id)
+        # 최신 저장 배치 — 비활성화(끄기)된 규칙도 포함해 화면에서 사라지지 않게 한다.
+        rules = await rule_repo.get_current_rules(scope, scope_id)
 
         return AutoDowngradeConfigResponse(
             scope=scope.value,
             scope_id=str(scope_id),
-            enabled=len(rules) > 0,
+            enabled=any(r.is_active for r in rules),
             rules=[
                 DowngradeRuleResponse(
                     id=str(r.id),
@@ -1101,7 +1102,7 @@ class BudgetService:
         # 있어도 끄기는 항상 성공해야 한다(행은 is_active=False 로 남는다).
         if not data.enabled:
             rule_repo = DowngradePolicyRepository(session)
-            removed = await rule_repo.delete_rules(scope, scope_id)
+            removed = await rule_repo.deactivate_rules(scope, scope_id)
 
             cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
             await self._cache_mgr.invalidate([cache_key], session=session)
@@ -1222,7 +1223,8 @@ class BudgetService:
         request_id: str = "",
     ) -> None:
         rule_repo = DowngradePolicyRepository(session)
-        await rule_repo.delete_rules(scope, scope_id)
+        # Clear 는 삭제 — soft-delete 로 두면 최신 배치가 비활성 규칙으로 다시 보인다.
+        await rule_repo.clear_rules(scope, scope_id)
 
         cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
         await self._cache_mgr.invalidate([cache_key], session=session)
