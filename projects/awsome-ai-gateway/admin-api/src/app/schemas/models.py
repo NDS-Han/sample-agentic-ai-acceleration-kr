@@ -198,6 +198,11 @@ class PriceSyncDiff(BaseModel):
     proposed_cache_1h_per_1k: Decimal | None = None
     proposed_cache_read_per_1k: Decimal | None = None
     changed: bool = False  # 현재가와 제안가가 다른가
+    #: 카탈로그 스펙(context_window/max_output_tokens)과 DB 값이 다른가.
+    #: 단가 변경이 0이어도 이 플래그가 있으면 적용 대상에 포함되어야 한다 —
+    #: 스펙 기록이 단가 변경에 묶여 있어 "변경 없음" 일 때 스펙이 영구히 비는
+    #: 버그가 있었다.
+    spec_changed: bool = False
 
 
 class PriceSyncPreviewResponse(BaseModel):
@@ -212,6 +217,7 @@ class PriceSyncApplyRequest(BaseModel):
     """승인 후 적용할 alias 목록(명시 선택 — 자동 전체적용 금지)."""
 
     aliases: list[str] = Field(min_length=1)
+    source: str = "aws"  # "aws" | "litellm"
 
 
 class PriceSyncApplyResponse(BaseModel):

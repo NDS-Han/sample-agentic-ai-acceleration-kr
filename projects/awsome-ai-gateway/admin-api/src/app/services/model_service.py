@@ -243,7 +243,7 @@ class ModelService:
                 continue  # OpenModel/vLLM 은 AWS 단가 없음
             cur = await repo.get_current_pricing(m.alias)
             cur_resp = self._to_response(m, cur).current_pricing
-            np = fetched.prices.get(m.provider_model_id.lower())
+            np = fetched.lookup(m.provider_model_id)
             if np is None:
                 diffs.append(PriceSyncDiff(
                     alias=m.alias,
@@ -268,11 +268,20 @@ class ModelService:
             ])
             if is_changed:
                 changed += 1
+            # 스펙(context_window/max_output_tokens) 차이도 별도 플래그 —
+            # 단가 동일해도 스펙만 새로 채워지는 경우가 있다.
+            spec_changed = bool(
+                (np.context_window and m.context_window != np.context_window)
+                or (np.max_output_tokens and m.max_output_tokens != np.max_output_tokens)
+            )
+            note = "캐시 단가 일부 파생(AWS 미게시 → input 기반 추정)" if np.cache_derived else None
+            if spec_changed:
+                note = (note + " · " if note else "") + "스펙 갱신(context/max output)"
             diffs.append(PriceSyncDiff(
                 alias=m.alias,
                 provider_model_id=m.provider_model_id,
                 matched=True,
-                note="캐시 단가 일부 파생(AWS 미게시 → input 기반 추정)" if np.cache_derived else None,
+                note=note,
                 current=cur_resp,
                 proposed_input_per_1k=p_in,
                 proposed_output_per_1k=p_out,
@@ -280,6 +289,7 @@ class ModelService:
                 proposed_cache_1h_per_1k=p_1h,
                 proposed_cache_read_per_1k=p_rd,
                 changed=is_changed,
+                spec_changed=spec_changed,
             ))
 
         return PriceSyncPreviewResponse(
@@ -322,7 +332,7 @@ class ModelService:
             if model.provider != Provider.BEDROCK:
                 skipped.append(alias)
                 continue
-            np = fetched.prices.get(model.provider_model_id.lower())
+            np = fetched.lookup(model.provider_model_id)
             if np is None:
                 skipped.append(alias)  # AWS 단가 미발견 → 적용 안 함
                 continue
@@ -339,6 +349,21 @@ class ModelService:
                 session, alias=alias, data=req, actor=actor,
                 ip_address=ip_address, request_id=request_id,
             )
+            # 카탈로그가 스펙을 주면 같이 채운다 — LiteLLM만 제공, AWS 소스는 None.
+            # 모델 행은 캐시 키(model:{alias})를 공유하므로 변경 시 무효화 필요.
+            spec_changed = False
+            if np.context_window and model.context_window != np.context_window:
+                model.context_window = np.context_window
+                spec_changed = True
+            if np.max_output_tokens and model.max_output_tokens != np.max_output_tokens:
+                model.max_output_tokens = np.max_output_tokens
+                spec_changed = True
+            if spec_changed:
+                await session.flush()
+                await self._cache_mgr.invalidate(
+                    [f"model:{alias}", f"model:{model.provider_model_id}"],
+                    session=session,
+                )
             applied.append(alias)
 
         return PriceSyncApplyResponse(applied=applied, skipped=skipped, errors=errors)

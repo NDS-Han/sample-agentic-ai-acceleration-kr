@@ -178,6 +178,10 @@ class Settings(BaseSettings):
     # 가격 동기화(모델관리 화면 버튼)용. IAM: admin-api 역할에 pricing:GetProducts.
     PRICING_API_REGION: str = "us-east-1"
 
+    # LiteLLM Model Catalog API — AWS Price List 미게시 모델/가격 보조 소스.
+    LITELLM_API_URL: str = "https://api.litellm.ai"
+    LITELLM_PROVIDER_FILTER: str = "bedrock_converse"
+
     # ── Bedrock model-invocation logging (audit reconcile) ──
     # Bedrock 이 남기는 invocation log 는 **호출이 일어난 Region 의 계정 단위**로 켜진다
     # (모델별/주체별 스위치 없음). 그래서 log group 과 Region 을 따로 설정한다 — 로그는
