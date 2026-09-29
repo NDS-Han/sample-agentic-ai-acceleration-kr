@@ -6,13 +6,16 @@
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { getEffectivePolicyAction } from '@/lib/actions/users';
+import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
-import type { EffectivePolicy, EffectivePolicyCell } from '@/types/entities';
+import type { EffectivePolicy, EffectivePolicyCell, ModelListItem } from '@/types/entities';
 
 interface Props {
   userId: string;
   /** 부모(UserPanel)가 이미 fetch한 정책을 넘기면 재조회를 건너뛴다. */
   policy?: EffectivePolicy | null;
+  /** 다운그레이드 다이어그램의 output 단가 표기용 — 없으면 단가 칸은 '—'. */
+  models?: ModelListItem[];
 }
 
 /** 거부 축 id → i18n 키 매핑. */
@@ -21,8 +24,9 @@ const AXIS_KEYS = ['user_app', 'user_model', 'model_app'] as const;
 /**
  * 사용자에게 실제로 적용되는 정책의 합성 읽기 전용 뷰.
  * model×app 매트릭스(어느 축에서 막혔는지) + 예산·rate limit·downgrade·web search 요약.
+ * 다운그레이드 규칙은 매트릭스보다 위에 둔다 — 모델 수만큼 표가 길어져도 스크롤 없이 보이게.
  */
-export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
+export function EffectivePolicyCard({ userId, policy: policyProp, models }: Props) {
   const t = useTranslations('users.effectivePolicy');
   const [fetched, setFetched] = useState<EffectivePolicy | null>(null);
   const [failed, setFailed] = useState(false);
@@ -59,20 +63,22 @@ export function EffectivePolicyCard({ userId, policy: policyProp }: Props) {
 
   return (
     <div className="space-y-3">
-      {/* 상: 다운그레이드 규칙 목록 / 하: 모델×앱 매트릭스. 규칙이 없어도
-          빈 상태를 명시한다 — 영역을 통째로 없애면 "미설정" 인지 "로딩 실패"
-          인지 읽히지 않는다. */}
+      {/* 상: 다운그레이드 다이어그램(전체 폭 — 노드/엣지가 읽힐 크기가 필요) /
+          하: 모델×앱 매트릭스. 규칙이 없어도 빈 상태를 명시한다 — 영역을 통째로
+          없애면 "미설정" 인지 "로딩 실패" 인지 읽히지 않는다. */}
       <div className="space-y-4">
       <div>
         <p className="text-xs font-medium mb-1.5">{t('downgrade')}</p>
         {policy.downgrade_rules.length > 0 ? (
-          <ul className="text-xs space-y-0.5">
-            {policy.downgrade_rules.map((r) => (
-              <li key={`${r.from_model_alias}->${r.to_model_alias}-${r.scope ?? ''}`}>
-                {r.from_model_alias} → {r.to_model_alias} ({r.threshold_pct}%)
-              </li>
-            ))}
-          </ul>
+          <DowngradeDiagram
+            rules={policy.downgrade_rules}
+            models={models ?? []}
+            formatOutPrice={(m) => {
+              const per1m = m.output_price_per_1k * 1000;
+              return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
+            }}
+            edgeTag={(r) => (r.scope === 'TEAM' ? t('scopeTeam') : t('scopeUser'))}
+          />
         ) : (
           <p className="text-xs text-muted-foreground rounded-md border border-dashed border-border px-3 py-2">
             {t('downgradeNone')}

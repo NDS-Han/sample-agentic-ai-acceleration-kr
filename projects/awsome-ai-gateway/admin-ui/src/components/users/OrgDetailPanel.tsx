@@ -515,7 +515,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
             <p className="text-xs text-muted-foreground mb-3">
               {t('effectivePolicy.hint')}
             </p>
-            <EffectivePolicyCard userId={node.id} policy={policy} />
+            <EffectivePolicyCard userId={node.id} policy={policy} models={models} />
           </div>
         )}
 
