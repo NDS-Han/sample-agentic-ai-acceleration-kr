@@ -120,6 +120,20 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 
 ---
 
+### 8-W. Notification 발송 채널 변경
+
+메일을 실제로내려면 `notificationWorker.email.provider`를 `mock`에서 `internal_api`·`smtp`·`ses`로 전환한다. values 파일은 `update-scripts/21-set-notification-provider.sh`가 yq로 편집한다(수동 grep/sed 금지). `ses` 선택 시 IAM/IRSA는 `update-scripts/22-setup-notification-ses-irsa.sh`로 설정한다.
+
+```bash
+cd docs/us-llm-gateway/update-scripts
+bash 21-set-notification-provider.sh internal-api --apply --url http://mail-api.internal/send
+bash deployment/scripts/install-eks.sh dev   # 실제 반영은 install-eks.sh
+```
+
+상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**
+
+---
+
 ### 8-V. 본문 로깅 활성화 (요청/응답 전문 → S3)
 
 `US-15` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`update-scripts/20-enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `env --apply` + install-eks.sh 후에도 수집은 꺼져 있다.
