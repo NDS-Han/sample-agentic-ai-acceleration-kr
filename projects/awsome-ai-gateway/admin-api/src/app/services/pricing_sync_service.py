@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
@@ -242,11 +243,42 @@ class AwsPricingSyncService:
         return None
 
 
+class LambdaCatalogFetcher:
+    """Lambda invoke 로 LiteLLM 카탈로그 원본 모델 목록을 받아오는 fetcher.
+
+    llm-gateway-<env>-litellm-pricing Lambda(배포: update-scripts/NDS-01)가
+    api.litellm.ai/model_catalog 를 페이지네이션 조회해 {"data": [...]} 를
+    반환한다. admin-api 는 lambda:InvokeFunction 만 필요하고 카탈로그
+    정규화는 LiteLLMPricingSyncService 에 그대로 둔다.
+    """
+
+    def __init__(self, lambda_client, *, function_name: str) -> None:
+        self._lambda = lambda_client
+        self._function_name = function_name
+
+    async def __call__(self) -> list[dict]:
+        resp = await asyncio.to_thread(
+            self._lambda.invoke,
+            FunctionName=self._function_name,
+            InvocationType="RequestResponse",
+            Payload=b"{}",
+        )
+        if resp.get("FunctionError"):
+            detail = resp["Payload"].read().decode("utf-8", "replace")[:300]
+            raise RuntimeError(f"Lambda {self._function_name} error: {detail}")
+        payload = json.loads(resp["Payload"].read())
+        if errors := payload.get("errors"):
+            raise RuntimeError("; ".join(str(e) for e in errors))
+        return payload.get("data", [])
+
+
 class LiteLLMPricingSyncService:
     """LiteLLM Model Catalog API 단가 조회·정규화.
 
     LiteLLM 은 per-token 단가를 반환하므로 per-1k USD 로 변환(×1000)한다.
     httpx.AsyncClient 를 주입받아 테스트 시 mock 할 수 있다.
+    fetcher 를 주입하면 카탈로그 조회 자체를 외부화한다(Lambda 프록시 —
+    LITELLM_PRICING_LAMBDA 설정 시 _build_pricing_sync_service 가 주입).
     """
 
     def __init__(
@@ -255,17 +287,19 @@ class LiteLLMPricingSyncService:
         *,
         base_url: str = "https://api.litellm.ai",
         provider_filter: str = "bedrock_converse",
+        fetcher: Callable[[], Awaitable[list[dict]]] | None = None,
     ) -> None:
         self._http_client = http_client
         self._base_url = base_url.rstrip("/")
         self._provider_filter = provider_filter
+        self._fetcher = fetcher
 
     async def fetch_bedrock_prices(self) -> FetchResult:
         """LiteLLM Model Catalog 페이지네이션 → model_id 별 per-1k 정규화 단가."""
-        client_owned = self._http_client is None
-        client = self._http_client or httpx.AsyncClient(timeout=30.0)
+        client_owned = self._fetcher is None and self._http_client is None
+        client = None if self._fetcher is not None else (self._http_client or httpx.AsyncClient(timeout=30.0))
         try:
-            raw = await self._fetch_all_models(client)
+            raw = await self._fetcher() if self._fetcher is not None else await self._fetch_all_models(client)
             return self._normalize_models(raw)
         except Exception as e:  # noqa: BLE001 — 외부 API 실패는 결과로 보고(fail-soft)
             logger.warning("litellm_fetch_failed", error=str(e))

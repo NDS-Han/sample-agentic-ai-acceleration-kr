@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import io
 import json
 from decimal import Decimal
 
@@ -15,6 +16,7 @@ import pytest
 
 from app.services.pricing_sync_service import (
     FetchResult,
+    LambdaCatalogFetcher,
     LiteLLMPricingSyncService,
     NormalizedPrice,
     PricingSyncService,
@@ -341,3 +343,64 @@ async def test_litellm_context_spec_absent():
     p = res.prices["anthropic.claude-sonnet-5"]
     assert p.context_window is None
     assert p.max_output_tokens is None
+
+
+class _FakeLambdaClient:
+    """boto3 lambda client 흉내 — invoke 가 Payload 스트림을 돌려준다."""
+
+    def __init__(self, payload: dict | None = None, *, function_error: str | None = None):
+        self._payload = json.dumps(payload or {}).encode()
+        self._function_error = function_error
+        self.calls: list[dict] = []
+
+    def invoke(self, **kwargs):
+        self.calls.append(kwargs)
+        resp = {"Payload": io.BytesIO(self._payload)}
+        if self._function_error:
+            resp["FunctionError"] = self._function_error
+        return resp
+
+
+@pytest.mark.asyncio
+async def test_lambda_fetcher_returns_catalog_rows():
+    """Lambda 응답 {"data": [...]} 이 그대로 정규화 파이프라인을 탄다."""
+    lam = _FakeLambdaClient({
+        "data": [_llm_model("anthropic.claude-sonnet-5", 3e-06, 1.5e-05)],
+    })
+    fetcher = LambdaCatalogFetcher(lam, function_name="llm-gateway-dev-litellm-pricing")
+    res = await LiteLLMPricingSyncService(fetcher=fetcher).fetch_bedrock_prices()
+    assert not res.errors
+    assert lam.calls[0]["FunctionName"] == "llm-gateway-dev-litellm-pricing"
+    assert lam.calls[0]["InvocationType"] == "RequestResponse"
+    p = res.prices["anthropic.claude-sonnet-5"]
+    assert p.input_per_1k == Decimal("0.003")
+    assert p.output_per_1k == Decimal("0.015")
+
+
+@pytest.mark.asyncio
+async def test_lambda_fetcher_function_error_is_fail_soft():
+    """Lambda FunctionError → FetchResult.errors(호출부 예외 전파 없음)."""
+    lam = _FakeLambdaClient({"errorMessage": "timeout"}, function_error="Unhandled")
+    fetcher = LambdaCatalogFetcher(lam, function_name="fn")
+    res = await LiteLLMPricingSyncService(fetcher=fetcher).fetch_bedrock_prices()
+    assert res.errors and "timeout" in res.errors[0]
+    assert not res.prices
+
+
+@pytest.mark.asyncio
+async def test_lambda_fetcher_app_level_errors():
+    """Lambda 가 {"errors": [...]} 를 돌려주면(앱 레벨 실패) fail-soft."""
+    lam = _FakeLambdaClient({"errors": ["LiteLLM catalog fetch failed: boom"]})
+    fetcher = LambdaCatalogFetcher(lam, function_name="fn")
+    res = await LiteLLMPricingSyncService(fetcher=fetcher).fetch_bedrock_prices()
+    assert res.errors and "boom" in res.errors[0]
+
+
+@pytest.mark.asyncio
+async def test_fetcher_path_never_opens_http_client():
+    """fetcher 주입 시 httpx client 를 만들지 않는다(완전 외부화)."""
+    async def fetcher():
+        return [_llm_model("anthropic.claude-haiku-4-5", 1e-06, 5e-06)]
+
+    res = await LiteLLMPricingSyncService(fetcher=fetcher).fetch_bedrock_prices()
+    assert res.prices["anthropic.claude-haiku-4-5"].output_per_1k == Decimal("0.005")

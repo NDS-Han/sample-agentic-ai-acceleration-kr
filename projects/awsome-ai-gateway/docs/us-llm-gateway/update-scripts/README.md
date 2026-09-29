@@ -137,6 +137,7 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `20-enable-body-logging.sh` | **terraform.tfvars**(`enable_body_logging`) · **helm values 파일**(`gatewayProxy.env` 본문 로깅 키 2개) — US-15 본문 로깅 인프라 게이트. 단계별(`tfvars`·`env`·`disable`) dry-run 기본, `verify` 는 버킷·스트림·파드 env 확인 | 낮음. terraform·helm 을 돌리지 않음 — terraform plan/apply 와 install-eks.sh 는 사용자가 실행 |
 | `21-set-notification-provider.sh` | **helm values 파일** `notificationWorker.email.*` — 이메일 provider 전환(mock/internal-api/smtp/ses). **yq** 구조화 편집, dry-run은 임시 복사본 렌더, `--apply`는 백업+helm 렌더 검증 | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
 | `22-setup-notification-ses-irsa.sh` | **IAM role**(SES IRSA trust+inline policy) + **helm values 파일**(SA annotation·`NOTIFICATION_LOCALE`) — yq 편집. SES 사용 시에만 필요 | 낮음. install-eks.sh 는 별도 실행 |
+| `NDS-01-deploy-litellm-pricing-lambda.sh` | **Lambda 함수·실행 role** + **admin-api invoke 인라인 정책** + **helm values 파일**(`adminApi.env.LITELLM_PRICING_LAMBDA`) — LiteLLM 단가 조회를 Lambda 프록시로 격리(NDS 전용). `--delete` 지원 | 낮음. 역순 삭제 가능 |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |

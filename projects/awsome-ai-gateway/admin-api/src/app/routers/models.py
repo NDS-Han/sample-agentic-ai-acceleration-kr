@@ -36,16 +36,32 @@ def _build_pricing_sync_service(*, source: str = "aws"):
     """
     settings = get_settings()
     if source == "litellm":
+        import boto3
         import httpx
 
-        from app.services.pricing_sync_service import LiteLLMPricingSyncService
+        from app.services.pricing_sync_service import (
+            LambdaCatalogFetcher,
+            LiteLLMPricingSyncService,
+        )
 
+        fetcher = None
+        if settings.LITELLM_PRICING_LAMBDA:
+            # Lambda 는 파드와 같은 리전에 배포 — boto3 기본 리전 해석(AWS_REGION) 사용.
+            fetcher = LambdaCatalogFetcher(
+                boto3.client("lambda"),
+                function_name=settings.LITELLM_PRICING_LAMBDA,
+            )
         svc = LiteLLMPricingSyncService(
-            http_client=httpx.AsyncClient(timeout=30.0),
+            http_client=None if fetcher else httpx.AsyncClient(timeout=30.0),
             base_url=settings.LITELLM_API_URL,
             provider_filter=settings.LITELLM_PROVIDER_FILTER,
+            fetcher=fetcher,
         )
-        svc.region = settings.LITELLM_API_URL  # preview 응답에 소스 표시용
+        svc.region = (
+            f"lambda:{settings.LITELLM_PRICING_LAMBDA}"
+            if fetcher
+            else settings.LITELLM_API_URL
+        )  # preview 응답에 소스 표시용
         return svc
 
     import boto3

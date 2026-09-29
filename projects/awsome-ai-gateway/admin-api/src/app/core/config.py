@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _TZ_ALIAS_HINTS: dict[str, str] = {
     "KST": "Asia/Seoul",
     "JST": "Asia/Tokyo",
-    "IST": "Asia/Kolkata",
+    "IST": "Asia/Kolkata", 
     "PST": "America/Los_Angeles",
     "PDT": "America/Los_Angeles",
     "EST": "America/New_York",
@@ -181,6 +181,10 @@ class Settings(BaseSettings):
     # LiteLLM Model Catalog API — AWS Price List 미게시 모델/가격 보조 소스.
     LITELLM_API_URL: str = "https://api.litellm.ai"
     LITELLM_PROVIDER_FILTER: str = "bedrock_converse"
+    # 카탈로그 조회를 Lambda 프록시(llm-gateway-<env>-litellm-pricing)로 위임할 때
+    # 함수 이름/ARN. 비어 있으면 admin-api 가 api.litellm.ai 를 직접 호출한다.
+    # 배포/권한: update-scripts/NDS-01-deploy-litellm-pricing-lambda.sh
+    LITELLM_PRICING_LAMBDA: str = ""
 
     # ── Bedrock model-invocation logging (audit reconcile) ──
     # Bedrock 이 남기는 invocation log 는 **호출이 일어난 Region 의 계정 단위**로 켜진다
