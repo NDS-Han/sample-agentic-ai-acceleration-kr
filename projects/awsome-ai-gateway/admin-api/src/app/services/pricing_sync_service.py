@@ -28,7 +28,6 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Protocol
 
-import httpx
 import structlog
 
 logger = structlog.get_logger()
@@ -273,56 +272,25 @@ class LambdaCatalogFetcher:
 
 
 class LiteLLMPricingSyncService:
-    """LiteLLM Model Catalog API 단가 조회·정규화.
+    """LiteLLM Model Catalog 단가 정규화.
 
     LiteLLM 은 per-token 단가를 반환하므로 per-1k USD 로 변환(×1000)한다.
-    httpx.AsyncClient 를 주입받아 테스트 시 mock 할 수 있다.
-    fetcher 를 주입하면 카탈로그 조회 자체를 외부화한다(Lambda 프록시 —
-    LITELLM_PRICING_LAMBDA 설정 시 _build_pricing_sync_service 가 주입).
+    카탈로그 조회는 fetcher 에 전적으로 위임된다 — 운영에서는
+    LambdaCatalogFetcher(LITELLM_PRICING_LAMBDA, NDS-01)를 주입하며,
+    admin-api 가 외부 인터넷을 직접 호출하는 경로는 없다.
     """
 
-    def __init__(
-        self,
-        http_client: httpx.AsyncClient | None = None,
-        *,
-        base_url: str = "https://api.litellm.ai",
-        provider_filter: str = "bedrock_converse",
-        fetcher: Callable[[], Awaitable[list[dict]]] | None = None,
-    ) -> None:
-        self._http_client = http_client
-        self._base_url = base_url.rstrip("/")
-        self._provider_filter = provider_filter
+    def __init__(self, *, fetcher: Callable[[], Awaitable[list[dict]]]) -> None:
         self._fetcher = fetcher
 
     async def fetch_bedrock_prices(self) -> FetchResult:
-        """LiteLLM Model Catalog 페이지네이션 → model_id 별 per-1k 정규화 단가."""
-        client_owned = self._fetcher is None and self._http_client is None
-        client = None if self._fetcher is not None else (self._http_client or httpx.AsyncClient(timeout=30.0))
+        """fetcher 가 돌려준 카탈로그 row → model_id 별 per-1k 정규화 단가."""
         try:
-            raw = await self._fetcher() if self._fetcher is not None else await self._fetch_all_models(client)
+            raw = await self._fetcher()
             return self._normalize_models(raw)
-        except Exception as e:  # noqa: BLE001 — 외부 API 실패는 결과로 보고(fail-soft)
+        except Exception as e:  # noqa: BLE001 — 외부 조회 실패는 결과로 보고(fail-soft)
             logger.warning("litellm_fetch_failed", error=str(e))
             return FetchResult(errors=[f"LiteLLM API 호출 실패: {e}"])
-        finally:
-            if client_owned:
-                await client.aclose()
-
-    async def _fetch_all_models(self, client: httpx.AsyncClient) -> list[dict]:
-        all_models: list[dict] = []
-        page = 1
-        while True:
-            params: dict = {"page_size": 100, "page": page}
-            if self._provider_filter:
-                params["provider"] = self._provider_filter
-            resp = await client.get(f"{self._base_url}/model_catalog", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            all_models.extend(data.get("data", []))
-            if not data.get("has_more"):
-                break
-            page += 1
-        return all_models
 
     def _normalize_models(self, models: list[dict]) -> FetchResult:
         result = FetchResult()

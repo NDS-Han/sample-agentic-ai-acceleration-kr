@@ -402,6 +402,7 @@
       "sourceLabel": "Price source",
       "sourceAws": "AWS Price List",
       "sourceThirdParty": "3rd-party catalog",
+      "sourceUnavailable": "Not deployed — run update-scripts/NDS-01 to enable this source.",
       "previewButton": "Preview",
       "sourceInfo": "Source: {source} ({region}) · matched {matched} · changed {changed} · unchanged {unchanged} · unmatched {unmatched}",
       "noChanges": "No price changes (current DB prices match the selected source).",

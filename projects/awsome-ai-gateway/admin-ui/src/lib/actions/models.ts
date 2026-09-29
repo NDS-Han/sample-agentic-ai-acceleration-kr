@@ -252,6 +252,22 @@ export interface PriceSyncPreview {
 /** AWS Price List 단가 vs 현재가 diff 미리보기(읽기 전용). */
 type PriceSyncSource = 'aws' | 'litellm';
 
+export interface PriceSyncSources {
+  sources: Record<PriceSyncSource, boolean>;
+}
+
+/** 사용 가능한 단가 소스 — litellm 은 Lambda 프록시(NDS-01) 배포 시에만 true. */
+export async function getPriceSyncSourcesAction(): Promise<ActionResult<PriceSyncSources>> {
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<PriceSyncSources>('/admin/models/pricing/sources')
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 export async function previewPriceSyncAction(
   source: PriceSyncSource = 'aws'
 ): Promise<ActionResult<PriceSyncPreview>> {

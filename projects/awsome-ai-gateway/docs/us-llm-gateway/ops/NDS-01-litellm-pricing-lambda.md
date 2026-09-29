@@ -22,8 +22,10 @@ admin-api ◀── FetchResult 정규화는 기존 LiteLLMPricingSyncService
 ```
 
 `adminApi.env.LITELLM_PRICING_LAMBDA`가 함수 이름을 가리킵니다.
-**비어 있으면 admin-api가 api.litellm.ai를 직접 호출**(폴백 — Lambda 삭제 후에도
-기능이 죽지 않습니다).
+**비어 있으면 litellm 소스는 비활성** — sync-preview/apply가 503을 반환하고
+admin-ui의 "3rd-party catalog" 선택지가 자동으로 비활성화됩니다
+(`GET /admin/models/pricing/sources`). admin-api가 api.litellm.ai를 직접 호출하는
+폴백은 없습니다.
 
 ## 배포
 
@@ -62,7 +64,8 @@ bash NDS-01-deploy-litellm-pricing-lambda.sh --delete   # 정책→함수→role
 bash deployment/scripts/install-eks.sh dev
 ```
 
-삭제 후에는 `LITELLM_PRICING_LAMBDA`가 비어 admin-api 직접 호출로 돌아갑니다.
+삭제 후에는 `LITELLM_PRICING_LAMBDA`가 비어 litellm 소스가 비활성화됩니다
+(AWS Price List 소스는 영향 없음).
 
 ## 주의
 

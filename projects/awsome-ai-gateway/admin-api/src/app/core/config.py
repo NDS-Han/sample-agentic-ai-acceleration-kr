@@ -178,11 +178,10 @@ class Settings(BaseSettings):
     # 가격 동기화(모델관리 화면 버튼)용. IAM: admin-api 역할에 pricing:GetProducts.
     PRICING_API_REGION: str = "us-east-1"
 
-    # LiteLLM Model Catalog API — AWS Price List 미게시 모델/가격 보조 소스.
-    LITELLM_API_URL: str = "https://api.litellm.ai"
-    LITELLM_PROVIDER_FILTER: str = "bedrock_converse"
-    # 카탈로그 조회를 Lambda 프록시(llm-gateway-<env>-litellm-pricing)로 위임할 때
-    # 함수 이름/ARN. 비어 있으면 admin-api 가 api.litellm.ai 를 직접 호출한다.
+    # LiteLLM 카탈로그 조회를 맡는 Lambda 프록시 함수 이름/ARN
+    # (llm-gateway-<env>-litellm-pricing). 비어 있으면 litellm 소스는 503 —
+    # admin-api 가 외부 인터넷을 직접 호출하는 폴백은 없다.
+    # 카탈로그 URL/provider 필터는 Lambda 쪽 환경변수(LITELLM_BASE_URL 등)가 담당.
     # 배포/권한: update-scripts/NDS-01-deploy-litellm-pricing-lambda.sh
     LITELLM_PRICING_LAMBDA: str = ""
 

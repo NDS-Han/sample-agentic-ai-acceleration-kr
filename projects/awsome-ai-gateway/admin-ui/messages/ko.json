@@ -402,6 +402,7 @@
       "sourceLabel": "단가 소스",
       "sourceAws": "AWS Price List",
       "sourceThirdParty": "3rd-party 카탈로그",
+      "sourceUnavailable": "미배포 — update-scripts/NDS-01로 Lambda를 배포해야 사용할 수 있습니다.",
       "previewButton": "조회",
       "sourceInfo": "소스: {source} ({region}) · 매칭 {matched} · 변경 {changed} · 동일 {unchanged} · 미매칭 {unmatched}",
       "noChanges": "변경된 단가가 없습니다(현재 DB 단가가 선택한 소스와 일치).",

@@ -8,6 +8,7 @@ import { RefreshCw, Loader2, X } from 'lucide-react';
 import {
   previewPriceSyncAction,
   applyPriceSyncAction,
+  getPriceSyncSourcesAction,
   type PriceSyncPreview,
 } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
@@ -30,11 +31,17 @@ export function PriceSyncButton() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(false);
   const [applying, startApply] = useTransition();
+  // null = 아직 조회 안 함(모달 닫힘). litellm 은 Lambda 프록시(NDS-01) 배포 시에만 true.
+  const [litellmAvailable, setLitellmAvailable] = useState<boolean | null>(null);
 
   function openDialog() {
     setOpen(true);
     setPreview(null);
     setSelected(new Set());
+    setLitellmAvailable(null);
+    void getPriceSyncSourcesAction().then((res) => {
+      if (res.success) setLitellmAvailable(Boolean(res.data.sources.litellm));
+    });
   }
 
   async function runPreview() {
@@ -120,8 +127,15 @@ export function PriceSyncButton() {
                     className="block w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
                   >
                     <option value="aws">{t('sourceAws')}</option>
-                    <option value="litellm">{t('sourceThirdParty')}</option>
+                    <option value="litellm" disabled={litellmAvailable === false}>
+                      {t('sourceThirdParty')}
+                    </option>
                   </select>
+                  {litellmAvailable === false && (
+                    <p className="mt-1 text-xs text-muted-foreground">
+                      {t('sourceUnavailable')}
+                    </p>
+                  )}
                 </div>
                 <button
                   type="button"

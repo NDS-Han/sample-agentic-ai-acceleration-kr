@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
@@ -16,6 +16,7 @@ from app.schemas.models import (
     PriceSyncApplyRequest,
     PriceSyncApplyResponse,
     PriceSyncPreviewResponse,
+    PriceSyncSourcesResponse,
     PricingRequest,
     StatusPatchRequest,
 )
@@ -32,36 +33,32 @@ def _build_pricing_sync_service(*, source: str = "aws"):
 
     source:
       - "aws": AWS Price List API(boto3 pricing client)
-      - "litellm": LiteLLM Model Catalog API(httpx)
+      - "litellm": LiteLLM Model Catalog — Lambda 프록시 경유(NDS-01)
     """
     settings = get_settings()
     if source == "litellm":
+        # LiteLLM 카탈로그 조회는 Lambda 프록시만 허용 — admin-api 가 외부 인터넷을
+        # 직접 호출하지 않는다. 미배포 시 503 으로 명시 (조용한 폴백 금지).
+        if not settings.LITELLM_PRICING_LAMBDA:
+            raise HTTPException(
+                status_code=503,
+                detail="LiteLLM pricing source is not configured. "
+                "Deploy the catalog proxy with update-scripts/NDS-01-deploy-litellm-pricing-lambda.sh",
+            )
         import boto3
-        import httpx
 
         from app.services.pricing_sync_service import (
             LambdaCatalogFetcher,
             LiteLLMPricingSyncService,
         )
 
-        fetcher = None
-        if settings.LITELLM_PRICING_LAMBDA:
-            # Lambda 는 파드와 같은 리전에 배포 — boto3 기본 리전 해석(AWS_REGION) 사용.
-            fetcher = LambdaCatalogFetcher(
-                boto3.client("lambda"),
-                function_name=settings.LITELLM_PRICING_LAMBDA,
-            )
-        svc = LiteLLMPricingSyncService(
-            http_client=None if fetcher else httpx.AsyncClient(timeout=30.0),
-            base_url=settings.LITELLM_API_URL,
-            provider_filter=settings.LITELLM_PROVIDER_FILTER,
-            fetcher=fetcher,
+        # Lambda 는 파드와 같은 리전에 배포 — boto3 기본 리전 해석(AWS_REGION) 사용.
+        fetcher = LambdaCatalogFetcher(
+            boto3.client("lambda"),
+            function_name=settings.LITELLM_PRICING_LAMBDA,
         )
-        svc.region = (
-            f"lambda:{settings.LITELLM_PRICING_LAMBDA}"
-            if fetcher
-            else settings.LITELLM_API_URL
-        )  # preview 응답에 소스 표시용
+        svc = LiteLLMPricingSyncService(fetcher=fetcher)
+        svc.region = f"lambda:{settings.LITELLM_PRICING_LAMBDA}"  # preview 응답에 소스 표시용
         return svc
 
     import boto3
@@ -140,6 +137,20 @@ async def set_pricing(
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
+    )
+
+
+@router.get("/pricing/sources", response_model=PriceSyncSourcesResponse)
+async def price_sync_sources(
+    admin: CurrentUser = Depends(require_admin),
+):
+    """사용 가능한 단가 소스 — UI 가 litellm 옵션을 Lambda 미배포 시 비활성화하는 근거."""
+    settings = get_settings()
+    return PriceSyncSourcesResponse(
+        sources={
+            "aws": True,
+            "litellm": bool(settings.LITELLM_PRICING_LAMBDA),
+        }
     )
 
 

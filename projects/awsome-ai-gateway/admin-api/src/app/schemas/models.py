@@ -226,6 +226,12 @@ class PriceSyncApplyResponse(BaseModel):
     errors: list[str] = Field(default_factory=list)
 
 
+class PriceSyncSourcesResponse(BaseModel):
+    """사용 가능한 단가 소스 — litellm 은 Lambda 프록시 배포 시에만 true."""
+
+    sources: dict[str, bool]
+
+
 # ── Team Allowed Models ──
 
 

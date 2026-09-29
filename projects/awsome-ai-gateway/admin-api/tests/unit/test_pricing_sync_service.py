@@ -11,7 +11,6 @@ import io
 import json
 from decimal import Decimal
 
-import httpx
 import pytest
 
 from app.services.pricing_sync_service import (
@@ -117,38 +116,18 @@ async def test_fetch_failure_is_fail_soft():
 # ── LiteLLM Model Catalog API ──
 
 
-class _MockAsyncResponse:
-    def __init__(self, json_data: dict, status_code: int = 200):
-        self._json = json_data
-        self.status_code = status_code
 
-    def raise_for_status(self):
-        if self.status_code >= 400:
-            raise httpx.HTTPStatusError(
-                "boom",
-                request=None,
-                response=self,  # type: ignore[arg-type]
-            )
-
-    def json(self):
-        return self._json
+def _fetcher_of(*pages: dict):
+    """카탈로그 fetcher 흉내 — 페이지들의 data row 를 합쳐 돌려준다."""
+    async def fetch():
+        return [m for p in pages for m in p["data"]]
+    return fetch
 
 
-class _FakeAsyncClient:
-    """httpx.AsyncClient 흉내 — get() 호출 시 미리 등록한 페이지를 순서대로 반환."""
-
-    def __init__(self, pages: list[dict]):
-        self._pages = pages
-        self._idx = 0
-        self.closed = False
-
-    async def get(self, url: str, params: dict | None = None):
-        data = self._pages[self._idx]
-        self._idx += 1
-        return _MockAsyncResponse(data)
-
-    async def aclose(self):
-        self.closed = True
+def _failing_fetcher(exc: Exception):
+    async def fetch():
+        raise exc
+    return fetch
 
 
 def _llm_model(
@@ -178,15 +157,14 @@ def _llm_model(
 @pytest.mark.asyncio
 async def test_litellm_normalizes_per_token_to_per_1k():
     """per-token 단가를 per-1k 로 변환(×1000)."""
-    client = _FakeAsyncClient([
+    res = await LiteLLMPricingSyncService(fetcher=_fetcher_of(
         {
             "data": [
                 _llm_model("us.writer.palmyra-x4-v1:0", 2.5e-06, 1e-05),
             ],
             "has_more": False,
         }
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    )).fetch_bedrock_prices()
     assert not res.errors
     p = res.prices["us.writer.palmyra-x4-v1:0"]  # region prefix 유지 — 별도 상품
     assert p.input_per_1k == Decimal("0.0025")
@@ -196,15 +174,14 @@ async def test_litellm_normalizes_per_token_to_per_1k():
 @pytest.mark.asyncio
 async def test_litellm_cache_derived_when_not_provided():
     """캐시 필드가 없으면 input 기반 파생 + derived=True."""
-    client = _FakeAsyncClient([
+    res = await LiteLLMPricingSyncService(fetcher=_fetcher_of(
         {
             "data": [
                 _llm_model("writer.palmyra-x5-v1:0", 6e-07, 6e-06),
             ],
             "has_more": False,
         }
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    )).fetch_bedrock_prices()
     p = res.prices["writer.palmyra-x5-v1:0"]
     assert p.cache_derived is True
     assert p.cache_5m_per_1k == Decimal("0.00075")   # 6e-07 * 1.25 * 1000
@@ -215,7 +192,7 @@ async def test_litellm_cache_derived_when_not_provided():
 @pytest.mark.asyncio
 async def test_litellm_cache_explicit_when_provided():
     """캐시 필드가 제공되면 그 값을 사용하고 derived=False."""
-    client = _FakeAsyncClient([
+    res = await LiteLLMPricingSyncService(fetcher=_fetcher_of(
         {
             "data": [
                 _llm_model(
@@ -229,8 +206,7 @@ async def test_litellm_cache_explicit_when_provided():
             ],
             "has_more": False,
         }
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    )).fetch_bedrock_prices()
     p = res.prices["anthropic.claude-sonnet-4-6"]
     assert p.cache_derived is False
     assert p.cache_read_per_1k == Decimal("0.0003")
@@ -239,35 +215,12 @@ async def test_litellm_cache_explicit_when_provided():
 
 
 @pytest.mark.asyncio
-async def test_litellm_pagination():
-    """has_more 가 True 이면 다음 페이지를 추가로 요청."""
-    client = _FakeAsyncClient([
-        {
-            "data": [_llm_model("model-a", 1e-06, 2e-06)],
-            "has_more": True,
-        },
-        {
-            "data": [_llm_model("model-b", 3e-06, 4e-06)],
-            "has_more": False,
-        },
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
-    assert set(res.prices.keys()) == {"model-a", "model-b"}
-    assert client._idx == 2  # 2페이지 호출
-
-
-@pytest.mark.asyncio
 async def test_litellm_fetch_failure_is_fail_soft():
     """LiteLLM API 예외 → errors 에 담고 빈 결과."""
 
-    class _BoomClient:
-        async def get(self, url: str, params: dict | None = None):
-            raise RuntimeError("timeout")
-
-        async def aclose(self):
-            pass
-
-    res = await LiteLLMPricingSyncService(http_client=_BoomClient()).fetch_bedrock_prices()
+    res = await LiteLLMPricingSyncService(
+        fetcher=_failing_fetcher(RuntimeError("timeout"))
+    ).fetch_bedrock_prices()
     assert res.prices == {}
     assert res.errors and "timeout" in res.errors[0]
 
@@ -315,7 +268,7 @@ def test_fetch_result_lookup_global_fallback():
 @pytest.mark.asyncio
 async def test_litellm_extracts_context_spec():
     """max_input_tokens/max_output_tokens 가 NormalizedPrice 에 실린다."""
-    client = _FakeAsyncClient([
+    res = await LiteLLMPricingSyncService(fetcher=_fetcher_of(
         {
             "data": [
                 _llm_model("anthropic.claude-opus-5", 5e-06, 2.5e-05,
@@ -323,8 +276,7 @@ async def test_litellm_extracts_context_spec():
             ],
             "has_more": False,
         }
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    )).fetch_bedrock_prices()
     p = res.prices["anthropic.claude-opus-5"]
     assert p.context_window == 1000000
     assert p.max_output_tokens == 64000
@@ -333,13 +285,12 @@ async def test_litellm_extracts_context_spec():
 @pytest.mark.asyncio
 async def test_litellm_context_spec_absent():
     """스펙 필드가 없으면 None — 기존 모델 값을 덮어쓰지 않도록 구별한다."""
-    client = _FakeAsyncClient([
+    res = await LiteLLMPricingSyncService(fetcher=_fetcher_of(
         {
             "data": [_llm_model("anthropic.claude-sonnet-5", 3e-06, 1.5e-05)],
             "has_more": False,
         }
-    ])
-    res = await LiteLLMPricingSyncService(http_client=client).fetch_bedrock_prices()
+    )).fetch_bedrock_prices()
     p = res.prices["anthropic.claude-sonnet-5"]
     assert p.context_window is None
     assert p.max_output_tokens is None
@@ -397,10 +348,7 @@ async def test_lambda_fetcher_app_level_errors():
 
 
 @pytest.mark.asyncio
-async def test_fetcher_path_never_opens_http_client():
-    """fetcher 주입 시 httpx client 를 만들지 않는다(완전 외부화)."""
-    async def fetcher():
-        return [_llm_model("anthropic.claude-haiku-4-5", 1e-06, 5e-06)]
-
-    res = await LiteLLMPricingSyncService(fetcher=fetcher).fetch_bedrock_prices()
-    assert res.prices["anthropic.claude-haiku-4-5"].output_per_1k == Decimal("0.005")
+async def test_service_requires_fetcher():
+    """fetcher 없이는 인스턴스화 불가 — 직접 HTTP 호출 경로가 아예 없음."""
+    with pytest.raises(TypeError):
+        LiteLLMPricingSyncService()
