@@ -17,13 +17,18 @@
 #
 # 사용법:
 #   ./enable-body-logging.sh <env>             # 상태 + plan. 아무것도 안 바꿈
-#   ./enable-body-logging.sh <env> --apply     # tfvars 반영 → apply → helm env 주입 → rollout
+#   ./enable-body-logging.sh <env> --apply     # tfvars 반영 → apply → values env 주입
+#                                              #   → install-eks.sh (배포는 그 스크립트에 위임)
 #   ./enable-body-logging.sh <env> --verify    # 읽기 전용. 버킷/스트림/env 확인
-#   ./enable-body-logging.sh <env> --disable   # env 비우기 + helm upgrade (수집 중지.
+#   ./enable-body-logging.sh <env> --disable   # env 비우기 + install-eks.sh (수집 중지.
 #                                              # terraform 리소스는 유지 — 버킷 삭제는 수동)
 #     env: dev | prod
-#   옵션: --values <path>   helm values 파일 (기본: values-eks-fargate-<env>.local.yaml
-#                           있으면 그것, 없으면 values-eks-fargate-<env>.yaml)
+#
+# ⚠️ helm upgrade 를 직접 돌리지 않는다 — install-eks.sh 만 terraform outputs 에서
+#    --set 으로 주입하는 값들(imageRegistry, aurora/redis host, IRSA role ARN,
+#    OIDC issuer 등)을 채운다. bare helm upgrade -f 는 그 값들을 placeholder 로
+#    되돌려 release 를 깨뜨린다. 그래서 이 스크립트는 values-eks-fargate-<env>.yaml
+#    에 env 두 줄만 쓰고 배포는 install-eks.sh 에 위임한다.
 #
 # 전제:
 #   - terraform/environments/llm-gateway-<env> 가 init 되어 있고 state 접근 가능
@@ -47,20 +52,18 @@ export AWS_REGION AWS_DEFAULT_REGION="$AWS_REGION"
 # ---- 인자 ----
 ENV="${1:-}"
 if [ -z "$ENV" ] || { [ "$ENV" != "dev" ] && [ "$ENV" != "prod" ]; }; then
-    echo "Usage: $0 <dev|prod> [--apply|--verify|--disable] [--values <path>]"
+    echo "Usage: $0 <dev|prod> [--apply|--verify|--disable]"
     exit 1
 fi
 shift
 
 MODE="plan"
-VALUES_FILE=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --apply)    MODE="apply";    shift ;;
         --verify)   MODE="verify";   shift ;;
         --disable)  MODE="disable";  shift ;;
         --status)   MODE="plan";     shift ;;
-        --values)   VALUES_FILE="${2:-}"; shift 2 ;;
         -h|--help)  sed -n '5,34p' "$0"; exit 0 ;;
         *) echo "Unknown argument: $1"; exit 1 ;;
     esac
@@ -75,13 +78,9 @@ CHART_DIR="$ROOT/deployment/charts/llm-gateway"
 RELEASE="llm-gateway"
 NS="llm-gateway"
 
-if [ -z "$VALUES_FILE" ]; then
-    if [ -f "$CHART_DIR/values-eks-fargate-$ENV.local.yaml" ]; then
-        VALUES_FILE="$CHART_DIR/values-eks-fargate-$ENV.local.yaml"
-    else
-        VALUES_FILE="$CHART_DIR/values-eks-fargate-$ENV.yaml"
-    fi
-fi
+# install-eks.sh 가 읽는 values 파일과 반드시 같아야 한다 — 다른 파일에 쓰면
+# 배포에 반영되지 않아 "켰는데 안 켜지는" 상태가 된다.
+VALUES_FILE="$CHART_DIR/values-eks-fargate-$ENV.yaml"
 
 [ -d "$TF_DIR" ] || { echo "ERROR: terraform env dir not found: $TF_DIR" >&2; exit 1; }
 [ -f "$TFVARS" ] || { echo "ERROR: terraform.tfvars not found: $TFVARS" >&2; exit 1; }
@@ -227,7 +226,7 @@ if [ "$MODE" = "disable" ]; then
     info "env 비우기 — 수집 중지 (인프라는 유지)"
     unset_env_kv FIREHOSE_STREAM_NAME
     unset_env_kv BODY_LOG_S3_BUCKET
-    helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" -f "$VALUES_FILE" | tail -3
+    bash "$SCRIPT_DIR/install-eks.sh" "$ENV"
     kubectl rollout status "deploy/$RELEASE-gateway-proxy" -n "$NS" --timeout=300s
     echo
     echo "env 제거 + 재배포 완료. admin 토글을 켜도 로거는 no-op 이다."
@@ -275,8 +274,8 @@ set_env_kv FIREHOSE_STREAM_NAME "$STREAM"
 set_env_kv BODY_LOG_S3_BUCKET "$BUCKET"
 grep -nE 'FIREHOSE_STREAM_NAME|BODY_LOG_S3_BUCKET' "$VALUES_FILE" | sed 's/^/   /'
 
-info "helm upgrade + rollout"
-helm upgrade "$RELEASE" "$CHART_DIR" -n "$NS" -f "$VALUES_FILE" | tail -3
+info "install-eks.sh 로 배포 (--set 주입 포함 — bare helm upgrade 금지)"
+bash "$SCRIPT_DIR/install-eks.sh" "$ENV"
 kubectl rollout status "deploy/$RELEASE-gateway-proxy" -n "$NS" --timeout=300s
 
 echo
