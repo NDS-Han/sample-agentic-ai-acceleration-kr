@@ -106,11 +106,13 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   };
 
   const handleSave = () => {
-    if (rules.length === 0) {
+    // enabled=false(끄기 저장)는 규칙 검증을 건너뛴다 — 반쯤 편집된 규칙이
+    // 있어도 끄기는 항상 가능해야 한다. 규칙은 비워 보낸다.
+    if (enabled && rules.length === 0) {
       toast({ type: 'error', message: t('minOneRule'), auto_dismiss_ms: 3000 });
       return;
     }
-    for (const rule of rules) {
+    for (const rule of enabled ? rules : []) {
       if (!rule.from_model_alias) {
         toast({ type: 'error', message: t('selectFromModel'), auto_dismiss_ms: 3000 });
         return;
@@ -131,10 +133,14 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
     startTransition(async () => {
       const result = await setDowngradeConfigAction(scopeType, scopeId, {
         enabled,
-        rules: rules.map(r => ({ ...r, threshold_pct: parseInt(r.threshold_pct) || 0 })),
+        rules: enabled
+          ? rules.map(r => ({ ...r, threshold_pct: parseInt(r.threshold_pct) || 0 }))
+          : [],
       });
       if (result.success) {
-        setSavedRules(rules.map(r => ({ ...r })));
+        // 끄기 저장 후에는 규칙 행이 더 이상 "저장됨"이 아니다 — 다시 켜면
+        // 미저장 상태(테두리 없음)로 표시해 실제 활성 상태와 맞춘다.
+        setSavedRules(enabled ? rules.map(r => ({ ...r })) : []);
         toast({ type: 'success', message: t('downgradeSaved'), auto_dismiss_ms: 3000 });
       } else {
         let msg = result.error;

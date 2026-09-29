@@ -11,7 +11,7 @@ import pytest
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
-from app.models.auth import Team, User, UserRole
+from app.models.auth import Team, User
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope
 from app.schemas.budgets import AllocateBudgetItem, AllocateBudgetRequest, SetBudgetRequest
 from app.services.budget_service import BUDGET_CONFIG_CACHE_TTL, BudgetService
@@ -413,3 +413,67 @@ async def test_warm_team_budget_cache_empty_returns_zero(
 
     assert count == 0
     fake_redis.set.assert_not_called()
+
+
+class TestSetDowngradeConfigDisabled:
+    """enabled=False(끄기 저장) 경로 — 규칙 존재 자체가 enabled 이므로
+    끄기는 활성 규칙 전부 비활성화이며, 규칙·예산 검증을 거치지 않는다."""
+
+    @pytest.mark.asyncio
+    async def test_disabled_save_deactivates_rules(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        from app.schemas.budgets import AutoDowngradeConfigRequest
+
+        data = AutoDowngradeConfigRequest(enabled=False, rules=[])
+        with patch("app.services.budget_service.DowngradePolicyRepository") as Repo:
+            Repo.return_value.delete_rules = AsyncMock(return_value=3)
+            res = await budget_service.set_downgrade_config(
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=uuid.uuid4(),
+                data=data,
+                actor=admin_user,
+            )
+        Repo.return_value.delete_rules.assert_awaited_once()
+        assert res.enabled is False
+        assert res.rules == []
+
+    @pytest.mark.asyncio
+    async def test_disabled_save_works_without_budget(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """예산 미설정 스코프에서도 끄기는 성공해야 한다 — 예산 검증을 건너뛴다."""
+        from app.schemas.budgets import AutoDowngradeConfigRequest
+
+        data = AutoDowngradeConfigRequest(enabled=False)
+        with patch("app.services.budget_service.DowngradePolicyRepository") as Repo, \
+             patch("app.services.budget_service.BudgetRepository") as BRepo:
+            Repo.return_value.delete_rules = AsyncMock(return_value=0)
+            res = await budget_service.set_downgrade_config(
+                mock_session,
+                scope=BudgetScope.USER,
+                scope_id=uuid.uuid4(),
+                data=data,
+                actor=admin_user,
+            )
+            BRepo.assert_not_called()  # 끄기는 예산 존재 여부를 조회하지 않는다
+        assert res.enabled is False
+
+    @pytest.mark.asyncio
+    async def test_enabled_save_with_empty_rules_rejected(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """enabled=True 인데 규칙이 없으면 ValidationError — 켜기는 규칙을 요구한다."""
+        from app.schemas.budgets import AutoDowngradeConfigRequest
+
+        data = AutoDowngradeConfigRequest(enabled=True, rules=[])
+        with pytest.raises(ValidationError):
+            await budget_service.set_downgrade_config(
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=uuid.uuid4(),
+                data=data,
+                actor=admin_user,
+            )
+        mock_session.execute.assert_not_called()

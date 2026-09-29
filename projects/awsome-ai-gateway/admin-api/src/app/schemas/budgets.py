@@ -124,7 +124,9 @@ class DowngradeRuleItem(BaseModel):
 
 class AutoDowngradeConfigRequest(BaseModel):
     enabled: bool = True
-    rules: list[DowngradeRuleItem] = Field(min_length=1)
+    # enabled=False(끄기 저장)는 규칙을 요구하지 않는다 — service 계층이
+    # enabled=True 일 때 빈 규칙을 거부한다.
+    rules: list[DowngradeRuleItem] = Field(default_factory=list)
 
 
 class DowngradeRuleResponse(BaseModel):

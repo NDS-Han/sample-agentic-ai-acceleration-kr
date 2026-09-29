@@ -1095,6 +1095,38 @@ class BudgetService:
     ) -> AutoDowngradeConfigResponse:
         from app.repositories.model_repository import ModelRepository
 
+        # enabled=False 는 "끄기" 저장이다. 별도의 enabled 플래그 컬럼은 없고 활성
+        # 규칙의 존재 자체가 enabled 이므로, 끄기 = 활성 규칙 전부 비활성화다.
+        # 규칙·예산 검증을 거치지 않는다 — 예산 미설정이거나 반쯤 편집된 규칙이
+        # 있어도 끄기는 항상 성공해야 한다(행은 is_active=False 로 남는다).
+        if not data.enabled:
+            rule_repo = DowngradePolicyRepository(session)
+            removed = await rule_repo.delete_rules(scope, scope_id)
+
+            cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
+            await self._cache_mgr.invalidate([cache_key], session=session)
+
+            await audit_logger.log(
+                session,
+                actor_user_id=actor.user_id,
+                actor_role=actor.role.value,
+                action="SET_AUTO_DOWNGRADE",
+                resource_type="DowngradePolicy",
+                resource_id=str(scope_id),
+                changes={"after": {"enabled": False}, "deactivated_rules": removed},
+                ip_address=ip_address,
+                request_id=request_id,
+            )
+            return AutoDowngradeConfigResponse(
+                scope=scope.value,
+                scope_id=str(scope_id),
+                enabled=False,
+                rules=[],
+            )
+
+        if not data.rules:
+            raise ValidationError("At least one downgrade rule is required when enabled")
+
         model_repo = ModelRepository(session)
         all_aliases = {alias for rule in data.rules for alias in (rule.from_model_alias, rule.to_model_alias)}
         # ⚠️ 행을 버리지 말고 들고 있는다 — 아래 provider 대조에 필요하다(존재 확인만 하고
