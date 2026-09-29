@@ -192,7 +192,7 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 
 admin-api · admin-ui **둘 다** `DEV_LOGIN_ENABLED: "false"` 로 바꾼다(한쪽만 끄면 화면과 API 가 어긋난다). `19` 는 Cognito 로그인이 배포돼 있고 DB 에 관리자가 있을 때만 진행한다 — 아니면 모두가 잠긴다. 관리자 확인이 0 명으로 나오면 [사내 IdP 절](#사내-idp-연동-배포-adfs-등)의 「그 밖에」를 본다. 이번엔 admin-api·admin-ui 파드가 교체된다(추론 무중단).
 
-> ⚠️ **이 차트에는 `global.devLoginEnabled` 단일 스위치가 있다** — `_helpers.tpl` 이 이 값으로 admin-api·admin-ui 양쪽에 `DEV_LOGIN_ENABLED` 를 주입한다. `19` 의 `dev-login-off` 가 `adminApi.env` / `adminUi.env` 에 같은 env 를 **한 번 더** 쓰면, values 에 두 군데가 생겨 helm upgrade 가 "duplicate env" 로 실패한다(atomic 롤백). 따라서 `dev-login-off` 실행 후에는 스크립트가 넣은 `adminApi.env` / `adminUi.env` 의 `DEV_LOGIN_ENABLED` 항목을 지우고 **`global.devLoginEnabled: false` 만** 남긴다. (`ADMIN_ROPC_ENABLED: "false"` 항목은 유지 — 폼 로그인 엔드포인트를 닫는 별개 스위치다.)
+> ⚠️ **이 차트에는 `global.devLoginEnabled` 단일 스위치가 있다** — `_helpers.tpl` 이 이 값으로 admin-api·admin-ui 양쪽에 `DEV_LOGIN_ENABLED` 를 주입한다. `19` 의 `dev-login-off` 가 `adminApi.env` / `adminUi.env` 에 같은 env 를 **한 번 더** 쓰면, values 에 두 군데가 생겨 helm upgrade 가 "duplicate env" 로 실패한다(atomic 롤백). 따라서 `dev-login-off` 실행 후에는 스크립트가 넣은 `adminApi.env` / `adminUi.env` 의 `DEV_LOGIN_ENABLED` 항목을 지우고 **`global.devLoginEnabled: false` 만** 남긴다.
 
 ▶ **실행** · 배포 EC2 — 끝 확인
 
