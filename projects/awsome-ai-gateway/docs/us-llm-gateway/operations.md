@@ -145,12 +145,13 @@ bash deployment/scripts/install-eks.sh dev
 
 ### 8-V. 본문 로깅 활성화 (요청/응답 전문 → S3)
 
-`IN-02` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `--apply` 후에도 수집은 꺼져 있다.
+`IN-02` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`update-scripts/20-enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `env --apply` + install-eks.sh 후에도 수집은 꺼져 있다.
 
 ```bash
-bash deployment/scripts/enable-body-logging.sh dev           # 상태 + plan (읽기 전용)
-bash deployment/scripts/enable-body-logging.sh dev --apply   # tfvars → apply → helm env 주입
-bash deployment/scripts/enable-body-logging.sh dev --verify  # 버킷/스트림/env 검증
+bash 20-enable-body-logging.sh                  # 상태 (읽기 전용)
+bash 20-enable-body-logging.sh tfvars --apply    # tfvars 편집 → 운영자가 terraform apply
+bash 20-enable-body-logging.sh env --apply       # values env 주입 → 운영자가 install-eks.sh
+bash 20-enable-body-logging.sh verify            # 버킷/스트림/env 검증
 ```
 
 → **[ops/8-V-body-logging.md](ops/8-V-body-logging.md)**

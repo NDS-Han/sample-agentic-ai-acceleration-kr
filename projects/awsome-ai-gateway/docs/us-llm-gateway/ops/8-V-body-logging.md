@@ -2,7 +2,7 @@
 
 > ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-V**
 
-> 📒 **`IN-02` · 등급 선택(감사·디버깅 필요 시)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트). 적용 여부는 `deployment/scripts/enable-body-logging.sh <env> --verify` 로 확인한다.
+> 📒 **`IN-02` · 등급 선택(감사·디버깅 필요 시)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트). 적용 여부는 `docs/us-llm-gateway/update-scripts/20-enable-body-logging.sh verify` 로 확인한다.
 
 > ⚠️ **무엇이 저장되는지 먼저 알아야 한다.** 켜면 게이트웨이가 **요청 JSON 전문과
 > 응답 전문**(스트리밍이면 재구성된 SSE 텍스트)을 S3 에 보낸다 — 사용자가 프롬프트에
@@ -25,7 +25,7 @@ Mantle 은 0건). Codex·Cowork 가 그 평면을 쓰므로 그 트래픽의 본
 
 | 잠금 | 위치 | 누가 여나 |
 | --- | --- | --- |
-| ① 인프라 | S3 버킷 + Firehose + IAM(terraform module `body_logging`) + `gatewayProxy.env` 의 `FIREHOSE_STREAM_NAME`/`BODY_LOG_S3_BUCKET` | **이 절** (`enable-body-logging.sh`) |
+| ① 인프라 | S3 버킷 + Firehose + IAM(terraform module `body_logging`) + `gatewayProxy.env` 의 `FIREHOSE_STREAM_NAME`/`BODY_LOG_S3_BUCKET` | **이 절** (`update-scripts/20-enable-body-logging.sh`) |
 | ② 런타임 | `public.system_settings` 의 `body_logging_enabled` (기본 OFF) | 관리자가 `/monitoring` 토글로 — audit_logs 에 불변 기록 |
 
 런타임 토글의 내부는 이렇다: admin-api 가 DB upsert + Redis `bodylog:enabled`
@@ -51,30 +51,42 @@ write-through → 게이트웨이는 요청당 인프로세스 캐시(TTL 기본
 ▶ **실행** · 배포 EC2
 
 ```bash
-cd ~/awsome-ai-gateway
-bash deployment/scripts/enable-body-logging.sh dev
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+bash 20-enable-body-logging.sh
 ```
 
-tfvars 의 `enable_body_logging` · terraform output · 파드 env 를 찍고 `terraform
-plan -target` 을 보여준다. 여기까지 아무것도 바꾸지 않는다.
+tfvars 의 `enable_body_logging` · terraform output · 파드 env · values 키를
+찍는다. 여기까지 아무것도 바꾸지 않는다.
 
 **(2) 적용**
 
 ▶ **실행** · 배포 EC2
 
 ```bash
-bash deployment/scripts/enable-body-logging.sh dev --apply
+bash 20-enable-body-logging.sh tfvars --apply     # terraform.tfvars 편집
+cd ../../deployment/terraform/environments/llm-gateway-dev
+terraform plan -target=module.body_logging -target=module.irsa
+terraform apply
+cd - && bash 20-enable-body-logging.sh env --apply  # values 의 gatewayProxy.env 주입
+cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 ```
 
-스크립트가 순서대로 한다 — `terraform.tfvars` 에 `enable_body_logging = true`
-반영(없으면 추가) → `terraform plan/apply -target=module.body_logging
--target=module.irsa` → output 에서 스트림/버킷 이름 추출 → values 의
-`gatewayProxy.env` 에 두 키 주입 → `helm upgrade` → gateway-proxy 롤아웃.
+스크립트는 **파일만** 쓰고 terraform·helm 은 직접 돌리지 않는다(update-scripts
+공통 규약): `tfvars --apply` 가 `enable_body_logging = true` 를 반영 → 운영자가
+`terraform plan/apply -target=module.body_logging -target=module.irsa` →
+`env --apply` 가 output 에서 스트림/버킷 이름을 읽어 values 의
+`gatewayProxy.env` 에 두 키 주입 + helm 렌더로 검증 → `install-eks.sh` 가
+배포와 gateway-proxy 롤아웃.
 
 > ℹ️ `-target` 을 쓰는 이유는 오래 운영한 배포의 무관한 드리프트가 같이 적용되는
 > 것을 막기 위해서다(8-N 절의 사례: VPC 엔드포인트 추가 때 DB 시크릿 replace 가
 > 딸려 나옴). IRSA 는 게이트웨이에 `firehose:PutRecordBatch` + 버킷 `s3:PutObject`
 > 권한을 얹는다 — 새 권한이므로 같이 타깃한다.
+>
+> 🔴 **배포는 반드시 `install-eks.sh` 로 — bare `helm upgrade -f` 금지.**
+> install-eks.sh 만 terraform outputs 에서 `--set` 으로 주입하는 값들
+> (imageRegistry·aurora/redis host·IRSA role ARN·OIDC issuer 등)을 채운다.
+> values 파일만 넘기는 helm upgrade 는 그 값들을 placeholder 로 되돌린다.
 >
 > 🔴 **plan 에 add 외 change/destroy 가 보이면 멈춘다.** body-logging 모듈과
 > 무관한 diff 는 이 작업의 범위가 아니다.
@@ -82,7 +94,8 @@ bash deployment/scripts/enable-body-logging.sh dev --apply
 **(3) 검증**
 
 ```bash
-bash deployment/scripts/enable-body-logging.sh dev --verify
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+bash 20-enable-body-logging.sh verify
 ```
 
 버킷 존재 · 스트림 `ACTIVE` · 파드 env 설정을 확인한다. `READY` 가 나오면 인프라
@@ -105,10 +118,11 @@ s3://<bucket>/provider=<p>/client=<c>/dt=<YYYY-MM-DD>/<records>.gz
 인프라 게이트까지 닫으려면(토글을 켜도 수집 불가 상태로):
 
 ```bash
-bash deployment/scripts/enable-body-logging.sh dev --disable
+bash 20-enable-body-logging.sh disable --apply
+cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 ```
 
-env 두 개를 values 에서 제거하고 재배포한다. **S3 버킷과 Firehose 는 지우지
+env 두 개를 values 에서 제거하고 install-eks.sh 로 재배포한다. **S3 버킷과 Firehose 는 지우지
 않는다** — 버킷엔 프롬프트 본문이 있을 수 있어(`force_destroy=false` 라 terraform
 destroy 도 객체가 있으면 실패한다) 객체 비우기 → `enable_body_logging = false` →
 apply 는 운영자가 명시적으로 결정한다.
@@ -116,7 +130,7 @@ apply 는 운영자가 명시적으로 결정한다.
 **함정 모음**
 
 - **토글을 켰는데 아무것도 안 나온다** — 인프라 게이트가 닫혀 있다. env 두 개가
-  파드에 있는지 `--verify` 로 확인. 토글은 ①이 열린 뒤에만 의미가 있다.
+  파드에 있는지 `verify` 로 확인. 토글은 ①이 열린 뒤에만 의미가 있다.
 - **dev 라고 안심 금물** — 켜면 dev 사용자의 프롬프트도 그대로 저장된다.
   lifecycle 기본 90일(`body_log_retention_days`)이라 테스트 후에는 버킷 정리를
   잊지 말 것.
