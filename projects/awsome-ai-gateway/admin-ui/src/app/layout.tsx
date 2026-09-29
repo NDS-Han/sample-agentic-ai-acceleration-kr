@@ -58,6 +58,12 @@ export default async function RootLayout({
   // request.ts 와 같은 규칙 — 쿠키 원시값을 그대로 쓰면 lang="fr" + ko 메시지 조합이 된다.
   const locale = resolveLocale(cookieStore.get('locale')?.value);
 
+  // BI Insight(admin-chat-agent, AgentCore Runtime)는 별도 배포다 — NDS-02로
+  // 배포되지 않은 환경에서는 사이드바 메뉴·퀵챗 패널·/chat 페이지를 전부 숨긴다.
+  // 값은 adminUi.env.CHAT_ENABLED (NDS-02가 values에 주입) — 런타임 env라
+  // 이미지 재빌드 없이 helm upgrade 만으로 켜고 끌 수 있다.
+  const chatDeployed = process.env.CHAT_ENABLED === 'true';
+
   return (
     <html
       lang={locale}
@@ -69,11 +75,12 @@ export default async function RootLayout({
           <NextIntlClientProvider messages={messages} locale={locale}>
             <ToastProvider>
               <div className="flex h-screen bg-background">
-                <Sidebar role={session?.role} />
+                <Sidebar role={session?.role} chatEnabled={chatDeployed} />
                 {/* ChatShell: 본문과 퀵챗 패널을 flex 형제로 배치(분할뷰). 채팅
-                    열리면 본문이 자동으로 좁아짐(overlay 아님). enabled=ADMIN 만
-                    채팅 UI 노출 — Provider 는 항상 감싸 페이지 hook 안전성 유지. */}
-                <ChatShell enabled={session?.role === 'ADMIN'}>
+                    열리면 본문이 자동으로 좁아짐(overlay 아님). enabled=ADMIN +
+                    BI Insight 배포된 환경에서만 채팅 UI 노출 — Provider 는 항상
+                    감싸 페이지 hook 안전성 유지. */}
+                <ChatShell enabled={session?.role === 'ADMIN' && chatDeployed}>
                   <div className="flex flex-col flex-1 overflow-hidden">
                     <Header session={session} />
                     <main className="aurora-bg flex-1 overflow-auto p-6">

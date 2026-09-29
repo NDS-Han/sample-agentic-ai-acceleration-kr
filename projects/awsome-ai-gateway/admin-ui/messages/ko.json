@@ -901,7 +901,9 @@
       "closeChat": "채팅 닫기"
     },
     "emptyDeep": "계획을 먼저 세우고 다단계 분석·교차 검증을 거쳐 신뢰할 수 있는 인사이트를 드립니다. 비용·사용량·이상치·예측 등 깊은 질문에 적합합니다.",
-    "emptyQuick": "자연어로 사용자 / 팀 / 예산 / 사용량 데이터를 빠르게 질의하세요. SQL은 자동 작성 + 검증되며, 분석/예측은 Python sandbox 에서 처리됩니다."
+    "emptyQuick": "자연어로 사용자 / 팀 / 예산 / 사용량 데이터를 빠르게 질의하세요. SQL은 자동 작성 + 검증되며, 분석/예측은 Python sandbox 에서 처리됩니다.",
+    "unavailableTitle": "BI Insight가 배포되어 있지 않습니다",
+    "unavailableDesc": "이 환경에는 BI Insight 에이전트(admin-chat-agent)가 배포되어 있지 않습니다. NDS-02 업데이트 스크립트로 배포하면 이 페이지를 사용할 수 있습니다."
   },
   "monitoring": {
     "lastHourSummary": "최근 1시간 요약",

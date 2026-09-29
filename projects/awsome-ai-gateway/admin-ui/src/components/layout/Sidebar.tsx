@@ -27,6 +27,9 @@ import { BrandLogo } from '@/components/brand/BrandLogo';
 
 interface SidebarProps {
   role?: UserRole;
+  // BI Insight(admin-chat-agent) 배포 여부 — 미배포면 chat 항목을 숨긴다.
+  // layout.tsx 가 CHAT_ENABLED env 를 읽어 넘긴다. 미전달 시 숨김(fail-close).
+  chatEnabled?: boolean;
 }
 
 interface NavItemDef {
@@ -34,6 +37,8 @@ interface NavItemDef {
   href: string;
   icon: React.ReactNode;
   allowedRoles: UserRole[];
+  // true 이면 BI Insight 배포(CHAT_ENABLED)가 된 환경에서만 보인다.
+  requiresChatDeploy?: boolean;
 }
 
 const NAV_ITEMS: NavItemDef[] = [
@@ -110,6 +115,7 @@ const NAV_ITEMS: NavItemDef[] = [
     // 그러면 메뉴는 보이지만 페이지의 모든 호출이 403 이 되는 죽은 화면이 된다.
     // 권한표 쪽을 백엔드에 맞춰 좁히는 것이 맞다.
     allowedRoles: [UserRoleConst.ADMIN],
+    requiresChatDeploy: true,
   },
   {
     key: 'cli',
@@ -125,13 +131,14 @@ const NAV_ITEMS: NavItemDef[] = [
   },
 ];
 
-export function Sidebar({ role }: SidebarProps) {
+export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
   const pathname = usePathname();
   const t = useTranslations('nav');
 
-  const visibleItems = role
+  const visibleItems = (role
     ? NAV_ITEMS.filter((item) => item.allowedRoles.includes(role))
-    : NAV_ITEMS.filter((item) => item.href === '/');
+    : NAV_ITEMS.filter((item) => item.href === '/')
+  ).filter((item) => !item.requiresChatDeploy || chatEnabled);
 
   const isActive = (href: string): boolean => {
     if (href === '/') return pathname === '/';

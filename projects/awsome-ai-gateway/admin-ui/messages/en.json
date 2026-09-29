@@ -901,7 +901,9 @@
       "closeChat": "Close chat"
     },
     "emptyDeep": "Plans first, then runs multi-step analysis and cross-validation to give you insights you can trust. Best for deeper questions on cost, usage, anomalies, and forecasts.",
-    "emptyQuick": "Query user, team, budget, and usage data in natural language. SQL is written and validated automatically; analysis and forecasts run in a Python sandbox."
+    "emptyQuick": "Query user, team, budget, and usage data in natural language. SQL is written and validated automatically; analysis and forecasts run in a Python sandbox.",
+    "unavailableTitle": "BI Insight is not deployed",
+    "unavailableDesc": "The BI Insight agent (admin-chat-agent) is not deployed in this environment. Deploy it with the NDS-02 update script to enable this page."
   },
   "monitoring": {
     "lastHourSummary": "Last 1 Hour Summary",

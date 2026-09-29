@@ -138,6 +138,8 @@ vi config.env            # AWS_ACCOUNT_ID 만 채우면 됩니다
 | `21-set-notification-provider.sh` | **helm values 파일** `notificationWorker.email.*` — 이메일 provider 전환(mock/internal-api/smtp/ses). **yq** 구조화 편집, dry-run은 임시 복사본 렌더, `--apply`는 백업+helm 렌더 검증 | 낮음. helm 을 돌리지 않음(install-eks.sh 가) |
 | `22-setup-notification-ses-irsa.sh` | **IAM role**(SES IRSA trust+inline policy) + **helm values 파일**(SA annotation·`NOTIFICATION_LOCALE`) — yq 편집. SES 사용 시에만 필요 | 낮음. install-eks.sh 는 별도 실행 |
 | `NDS-01-deploy-litellm-pricing-lambda.sh` | **Lambda 함수·실행 role** + **admin-api invoke 인라인 정책** + **helm values 파일**(`adminApi.env.LITELLM_PRICING_LAMBDA`) — LiteLLM 단가 조회를 Lambda 프록시로 격리(NDS 전용). `--delete` 지원 | 낮음. 역순 삭제 가능 |
+| `NDS-02-deploy-bi-insight.sh` | **terraform.tfvars**(`enable_chat_agent`/`enable_chat_db_tools`) + **AgentCore runtime** + **arm64 ECR 이미지** + **admin-api invoke 인라인 정책**(`bedrock-agentcore:InvokeAgentRuntime`) + **values**(`AGENTCORE_RUNTIME_ARN`·`CHAT_STAGING_BUCKET`·`adminUi.env.CHAT_ENABLED`) — BI Insight 배포(NDS 전용). `--delete` 지원 | 중간. terraform apply -target 을 대화형 실행하고 이미지 빌드/push |
+| `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `99-rollback.sh`            | 위 변경 되돌리기                                              | —                          |
 | `_lib.sh`                   | 공통 함수 (직접 실행하지 않음)                                     | —                          |
 | `config.env`                | 설정값 (부작용 없음)                                           | —                          |
