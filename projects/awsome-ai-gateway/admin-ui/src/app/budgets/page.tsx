@@ -3,6 +3,7 @@
 import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
+import { normalizeAllocation } from '@/lib/budget-allocation';
 import { parseJWT } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
@@ -61,7 +62,8 @@ export default async function BudgetsPage() {
   let teamAllocation: TeamBudgetAllocation | null = null;
   if (!isAdmin && session?.team_id) {
     teamAllocation = await adminAPI
-      .get<TeamBudgetAllocation>(`/admin/budgets/team/${session.team_id}/allocation`)
+      .get(`/admin/budgets/team/${session.team_id}/allocation`)
+      .then(normalizeAllocation)
       .catch(() => null);
   }
 

@@ -6,6 +6,7 @@
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { adminAPI } from '@/lib/api-client';
+import { normalizeAllocation } from '@/lib/budget-allocation';
 import { BudgetSetSchema } from '@/types/api';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
@@ -108,7 +109,7 @@ export async function getTeamAllocationAction(
     const data = await withRetry(() =>
       adminAPI.get<TeamBudgetAllocation | null>(`/admin/budgets/team/${teamId}/allocation`)
     );
-    return { success: true, data };
+    return { success: true, data: normalizeAllocation(data) };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
   }
