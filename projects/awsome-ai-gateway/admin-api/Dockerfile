@@ -14,8 +14,18 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 # uv.lock* 가 있으면 사용, 없어도 동작 (glob)
 COPY pyproject.toml uv.lock* ./
 
-# dev 의존성 제외 + cache/bytecode/tests 제거 → 이미지 슬림화
-RUN uv pip install --system --no-cache -r pyproject.toml \
+# ⚠️ `-r pyproject.toml` 로 설치하지 않는다 — 범위 지정자를 매 빌드마다 새로
+#    해석하므로 이미지가 표류한다(재빌드 시 fastapi 0.141→0.142 가 들어와
+#    자동 telemetry 의 OTLP 프로토콜 검사에 걸려 기동 크래시했던 실패).
+#    gateway-proxy 등 다른 이미지와 같은 규약(uv sync --frozen)으로 맞춘다 —
+#    runtime 이 system site-packages 를 복사하는 이 Dockerfile 구조에서는
+#    uv export 로 lock 을 requirements 로 변환해 설치하는 것이 등가다.
+RUN if [ -f uv.lock ]; then \
+      uv export --frozen --no-dev --format requirements-txt -o /tmp/requirements.txt; \
+    else \
+      cp pyproject.toml /tmp/requirements.txt; \
+    fi \
+    && uv pip install --system --no-cache -r /tmp/requirements.txt \
     && find /usr/local/lib/python3.11/site-packages -type d -name '__pycache__' -exec rm -rf {} + \
     && find /usr/local/lib/python3.11/site-packages -type f -name '*.pyc' -delete \
     && find /usr/local/lib/python3.11/site-packages -type d -name 'tests' -exec rm -rf {} + \
