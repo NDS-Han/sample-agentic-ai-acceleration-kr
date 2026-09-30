@@ -6,6 +6,8 @@
 -- KEYS[1] = budget:user:{<user_id>}:<period>   -- hash tag on user_id
 -- KEYS[2] = budget:config:user:{<user_id>}     -- same hash tag → same slot
 -- ARGV[1] = cost (USD, string decimal)
+-- ARGV[2] = fallback config JSON ('' = 없음). user 키가 없을 때 팀 기본 cap D
+--           로 threshold 교차를 평가한다 (D-10: D 적용 유저도 임계값 알림).
 --
 -- Returns: JSON {new_used, remaining, threshold_triggered}
 
@@ -14,6 +16,9 @@ local config_key = KEYS[2]
 local cost = tonumber(ARGV[1])
 
 local config_raw = redis.call('GET', config_key)
+if not config_raw and ARGV[2] and ARGV[2] ~= '' then
+    config_raw = ARGV[2]
+end
 local limit = 0
 local thresholds = {80, 90, 100}
 local app_clients = {}

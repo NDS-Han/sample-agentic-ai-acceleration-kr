@@ -138,6 +138,11 @@ class BudgetStatus(BaseModel):
     # SOFT_WARNING 정책에서 limit ≤ used < limit × soft_limit_pct/100 구간에 True.
     # 미들웨어가 응답에 X-Budget-Warning 헤더 주입할 때 사용.
     soft_warning: bool = False
+    # §6-5: remaining_usd 의 결정 계층 — 'user' | 'team' | 'client'.
+    # X-Budget-Tier 헤더 + Limit/Used 헤더의 team 비노출 게이팅에 사용.
+    tier: str | None = None
+    # §6-3: 경고(soft_warning) 상태인 계층 전부 — X-Budget-Warning-Tiers 헤더.
+    warning_tiers: list[str] = Field(default_factory=list)
 
 
 class RateLimitResult(BaseModel):

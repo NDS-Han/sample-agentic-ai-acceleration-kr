@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
 
-from app.periods import current_kst_period
+from app.periods import request_period
 from app.schemas.cost_stream import CostStreamEntry
 from app.schemas.domain import AuthContext, ModelConfigSchema, TokenUsage
 
@@ -138,7 +138,9 @@ class CostRecorder:
         cost_usd = calculate_cost(usage, model_config)
         # KST 월 — 아래 budget:*:{period} 키를 **쓰는** 쪽이다. 읽는 쪽
         # (middleware/budget.py, routers/usage.py)과 반드시 같은 경계여야 한다.
-        period = current_kst_period()
+        # D-20/§6-4: **요청 시작 시각**의 월 — 완료 시각으로 잡으면 월 경계를
+        # 넘긴 스트리밍 요청이 다음 달 카운터에 든다.
+        period = request_period()
 
         # OTEL metrics
         if self._metrics:
@@ -181,12 +183,33 @@ class CostRecorder:
 
             result = None
             try:
+                # D-10: 개인 config 없음 + 팀 기본 cap D → D 를 합성 config 로
+                # 넘겨 threshold 교차를 평가한다. 개인 config 없는 D 유저는
+                # 예전에 limit=0 으로 읽혀 임계값 알림이 영구 침묵했다.
+                user_fallback = ""
+                if not await redis.exists(user_config_key):
+                    team_cfg_raw = await redis.get(team_config_key)
+                    if team_cfg_raw:
+                        team_cfg = json.loads(
+                            team_cfg_raw.decode()
+                            if isinstance(team_cfg_raw, bytes)
+                            else team_cfg_raw
+                        )
+                        d_cap = team_cfg.get("default_user_cap_usd")
+                        if d_cap is not None:
+                            user_fallback = json.dumps({
+                                "limit_usd": str(d_cap),
+                                "policy": team_cfg.get("policy", "hard_block"),
+                                "thresholds": team_cfg.get("thresholds") or [80, 90, 100],
+                            })
+
                 raw = await redis.eval(
                     LuaScriptLoader.get("budget_deduct"),
                     2,
                     user_usage_key,
                     user_config_key,
                     str(cost_usd),
+                    user_fallback,
                 )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")

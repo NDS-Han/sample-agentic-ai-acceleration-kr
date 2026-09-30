@@ -10,6 +10,8 @@
 -- KEYS[1] = budget:{scope}:{<scope_id>}:<period>   -- usage counter
 -- KEYS[2] = budget:config:{scope}:{<scope_id>}     -- config (same hash tag)
 -- ARGV[1] = 'user' | 'team'                         -- scope label (미설정 처리 분기)
+-- ARGV[2] = fallback config JSON ('' = 없음). user scope 에서 키가 없을 때
+--           팀 기본 cap D 를 합성 config 로 주입하는 데 쓴다 (cap_u = A_u ?? D).
 --
 -- Returns: JSON {allowed, reason, used_usd, remaining_usd, policy,
 --               throttle_active, throttle_rpm_pct, threshold_pct,
@@ -30,6 +32,11 @@ local function decode_or_nil(s)
 end
 
 local cfg_raw = redis.call('GET', config_key)
+if not cfg_raw and ARGV[2] and ARGV[2] ~= '' then
+    -- 개인 config 없음 + 팀 기본 cap D 존재 → 호출자가 합성한 D config 로 평가.
+    -- D 는 팀 키에 저장되고 이 slot 의 키가 아니므로 ARGV 로 넘긴다.
+    cfg_raw = ARGV[2]
+end
 if not cfg_raw then
     return cjson.encode({
         allowed = true,
@@ -80,6 +87,26 @@ local remaining = limit - used
 local usage_pct = 0
 if limit > 0 then
     usage_pct = math.floor((used / limit) * 100)
+end
+
+-- D-8: limit = 0 은 정책과 무관하게 항상 차단 (A_u=0 / D=0 / app_c=0 = 명시적 차단).
+-- 예전엔 hard_block/soft_warning 분기만 걸려 throttle 정책에서 0 이 통과됐다.
+if limit == 0 then
+    return cjson.encode({
+        allowed = false,
+        reason = scope_label .. '_budget_exceeded',
+        used_usd = used,
+        remaining_usd = remaining,
+        limit_usd = limit,
+        policy = policy,
+        throttle_active = false,
+        throttle_rpm_pct = throttle_rpm_pct,
+        threshold_pct = usage_pct,
+        soft_warning = false,
+        scope = scope_label,
+        config_present = true,
+        app_clients = app_clients
+    })
 end
 
 if policy == 'hard_block' and used >= limit then

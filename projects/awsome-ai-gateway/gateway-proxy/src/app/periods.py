@@ -53,6 +53,7 @@ gateway-proxy 만 ``datetime.now(tz=timezone.utc).strftime("%Y-%m")`` 로 UTC �
 
 from __future__ import annotations
 
+from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -100,3 +101,22 @@ def current_kst_date() -> str:
     이어붙는다.
     """
     return datetime.now(_reporting_tz()).strftime("%Y-%m-%d")
+
+
+# ── 요청 시작 시각의 period (D-20/§6-4) ─────────────────────────────────────
+#
+# 비용·사용량 카운터는 **요청 시작 시각**이 속한 월에 귀속된다. 월 경계를 넘겨
+# 끝나는 스트리밍 요청이 완료 시각의 월(다음 달) 카운터에 새는 것을 막기 위해,
+# BudgetMiddleware 가 요청 시작 시점에 이 ContextVar 를 심고 cost_recorder 가
+# 읽는다. 미들웨어를 타지 않는 호출(테스트 등)은 지금 시각으로 폴백한다.
+_request_period: ContextVar[str | None] = ContextVar("budget_request_period", default=None)
+
+
+def set_request_period(period: str) -> None:
+    """요청 시작 시각의 리포팅 월을 ContextVar 에 심는다 (middleware 전용)."""
+    _request_period.set(period)
+
+
+def request_period() -> str:
+    """요청 시작 시각의 월. 설정되지 않았으면 현재 월로 폴백."""
+    return _request_period.get() or current_kst_period()

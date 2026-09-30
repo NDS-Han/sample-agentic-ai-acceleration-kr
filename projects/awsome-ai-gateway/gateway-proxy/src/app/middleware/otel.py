@@ -101,13 +101,24 @@ class HeaderInjectorMiddleware:
                 if request_id := state.get("request_id"):
                     headers.append("X-Request-Id", request_id)
 
-                # Budget
+                # Budget — §6-5 계약:
+                #   Remaining = 모든 계층의 "차단까지 잔여" 최솟값 (항상 노출)
+                #   Limit/Used = 결정 계층이 user/client 일 때만 (team 정보 비노출)
+                #   Warning-Tiers = 경고 계층 전부 / Throttle = 활성 시 rpm_pct
                 if budget := state.get("budget_status"):
                     headers.append("X-Budget-Remaining", str(budget.remaining_usd))
-                    headers.append("X-Budget-Used", str(budget.used_usd))
-                    headers.append("X-Budget-Limit", str(budget.limit_usd))
-                    if budget.policy.value == "soft_warning" and state.get("budget_soft_warning"):
+                    if budget.tier:
+                        headers.append("X-Budget-Tier", budget.tier)
+                        if budget.tier != "team":
+                            headers.append("X-Budget-Used", str(budget.used_usd))
+                            headers.append("X-Budget-Limit", str(budget.limit_usd))
+                    if budget.warning_tiers:
                         headers.append("X-Budget-Warning", "over_budget")
+                        headers.append(
+                            "X-Budget-Warning-Tiers", ",".join(budget.warning_tiers)
+                        )
+                    if budget.throttle_active:
+                        headers.append("X-Budget-Throttle", str(budget.throttle_rpm_pct))
 
                 # RateLimit
                 if rl := state.get("rate_limit_result"):

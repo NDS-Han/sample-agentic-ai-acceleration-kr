@@ -302,7 +302,15 @@ def test_every_period_site_uses_the_shared_helper():
             f"{path.name} 이 app.periods 를 import 하지 않는다 — 자체 파생으로 "
             f"되돌아갔을 수 있다"
         )
-        assert imported <= {"current_kst_period", "current_kst_date", "KST"}, (
+        # request_period/set_request_period — D-20(요청 시작 시각 월 귀속)의
+        # ContextVar 경로. budget.py 가 시작 시점에 심고 cost_recorder 가 읽는다.
+        assert imported <= {
+            "current_kst_period",
+            "current_kst_date",
+            "KST",
+            "request_period",
+            "set_request_period",
+        }, (
             f"{path.name} 이 app.periods 에서 예상 외 이름을 가져온다: {imported}"
         )
 

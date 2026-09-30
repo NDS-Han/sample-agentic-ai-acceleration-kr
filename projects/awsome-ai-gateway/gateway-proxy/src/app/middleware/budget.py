@@ -7,7 +7,7 @@ import json
 import structlog
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.periods import current_kst_period
+from app.periods import current_kst_period, set_request_period
 from app.services.budget_service import BudgetService
 
 logger = structlog.get_logger(__name__)
@@ -27,6 +27,11 @@ class BudgetMiddleware:
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
+
+        # D-20/§6-4: 비용·사용량 카운터는 **요청 시작 시각**이 속한 월에 귀속된다.
+        # 월 경계를 넘겨 끝나는 스트리밍 요청이 다음 달 카운터에 새지 않도록
+        # 시작 시점의 period 를 ContextVar 에 심어 cost_recorder 가 읽는다.
+        set_request_period(current_kst_period())
 
         path: str = scope.get("path", "")
         state = scope.setdefault("state", {})
@@ -97,12 +102,8 @@ class BudgetMiddleware:
                     client=client,
                 )
             state["budget_status"] = budget_status
-            if budget_status.policy.value == "soft_warning":
-                from decimal import Decimal
-
-                # Soft Warning: used >= limit 구간
-                if budget_status.used_usd >= budget_status.limit_usd:
-                    state["budget_soft_warning"] = True
+            if budget_status.warning_tiers:
+                state["budget_soft_warning"] = True
 
             await self.app(scope, receive, send)
 
@@ -111,7 +112,12 @@ class BudgetMiddleware:
             await self._send_429_budget(scope, send, reason)
 
     async def _send_429_budget(self, scope: Scope, send: Send, reason: str) -> None:
-        if reason == "no_budget_assigned":
+        if reason == "no_team_assigned":
+            # §6-5 단계 0 — 팀 미배정 유저. cognito sync 가 전원 팀을 배정하므로
+            # 실질적으로 발생하지 않지만, 발생 시 fail-closed 로 둔다.
+            message = "No team assigned. Contact your admin."
+            code = "no_team_assigned"
+        elif reason == "no_budget_assigned":
             # Q 정책 적용 후 거의 발생하지 않지만 호환 위해 유지
             message = "No budget assigned. Contact your admin."
             code = "no_budget_assigned"

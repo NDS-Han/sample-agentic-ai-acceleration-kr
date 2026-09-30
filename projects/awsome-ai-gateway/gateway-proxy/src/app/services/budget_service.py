@@ -91,6 +91,11 @@ def _evaluate_layer(
        110% 까지 쓸 수 있고 THROTTLE 사용자는 100% 에서 막히지 않는다. 그것이 저장된 정책이
        말하는 바이고 Redis 경로가 이미 그렇게 동작하지만, 돈이 나가는 동작의 변경이다.
     """
+    # D-8/I-1: limit = 0 은 정책과 무관하게 항상 차단 — SOFT_WARNING/THROTTLE 의
+    # `limit > 0` 가드 뒤로 명시적 0 cap 이 빠져나가던 구멍을 막는다.
+    if limit <= 0:
+        return "budget_exceeded", False, False
+
     if policy == BudgetPolicy.HARD_BLOCK and used >= limit:
         return "budget_exceeded", False, False
 
@@ -113,6 +118,63 @@ def _evaluate_layer(
     return None, soft_warning, throttle_active
 
 
+def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetStatus:
+    """평가된 계층 결과들을 §6-3/§6-5 규칙으로 하나의 BudgetStatus 로 조합한다.
+
+    각 tier dict 는 ``limit_usd, used_usd, policy(lowercase), soft_warning,
+    throttle_active, throttle_rpm_pct, threshold_pct`` 를 가진다
+    (Redis 경로 = budget_check.lua 의 JSON, DB 폴백 = 같은 shape 로 정규화).
+
+    - ``remaining_usd`` = 모든 계층의 "차단 시점까지의 잔여" 최솟값.
+      SOFT_WARNING 은 ``limit × soft_limit_pct/100 - used`` (실효 한도 기준),
+      THROTTLE 계층은 금액 차단이 없으므로 후보에서 제외(§6-5).
+    - ``tier`` = 최솟값을 만든 계층명 — 헤더의 Limit/Used 비노출 게이팅에 사용.
+    - ``warning_tiers`` = soft_warning 상태인 계층 전부 (헤더용, §6-3).
+    - ``throttle_rpm_pct`` = 활성 계층 중 **가장 작은** 값 (§6-3).
+    - ``policy``/``threshold_pct``/``thresholds`` = TEAM 결과 그대로 —
+      downgrade middleware·soft_limit_pct 등 기존 소비자의 의미를 유지한다.
+    """
+    best: tuple[Decimal, str, dict] | None = None
+    warning_tiers: list[str] = []
+    active_throttle_pcts: list[int] = []
+
+    for name, r in tiers:
+        if r.get("soft_warning"):
+            warning_tiers.append(name)
+        if r.get("throttle_active"):
+            active_throttle_pcts.append(int(r.get("throttle_rpm_pct") or 50))
+
+        policy = r.get("policy", "hard_block")
+        if policy == BudgetPolicy.THROTTLE.value:
+            continue
+        limit = Decimal(str(r.get("limit_usd", 0)))
+        used = Decimal(str(r.get("used_usd", 0)))
+        effective = (
+            limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
+            if policy == BudgetPolicy.SOFT_WARNING.value
+            else limit
+        )
+        remaining = effective - used
+        if best is None or remaining < best[0]:
+            best = (remaining, name, r)
+
+    # team 계층은 도달 시 항상 config_present — best 는 비어 있을 수 없다.
+    assert best is not None
+    remaining, tier, decisive = best
+    return BudgetStatus(
+        remaining_usd=remaining,
+        limit_usd=Decimal(str(decisive.get("limit_usd", 0))),
+        used_usd=Decimal(str(decisive.get("used_usd", 0))),
+        policy=BudgetPolicy(team_result.get("policy", "hard_block")),
+        throttle_rpm_pct=min(active_throttle_pcts) if active_throttle_pcts else 50,
+        threshold_pct=team_result.get("threshold_pct", 0),
+        throttle_active=bool(active_throttle_pcts),
+        soft_warning=bool(warning_tiers),
+        tier=tier,
+        warning_tiers=warning_tiers,
+    )
+
+
 class BudgetService:
     """예산 정책 확인 서비스."""
 
@@ -129,6 +191,11 @@ class BudgetService:
         예산 미설정 시 PermissionError 발생 (429 no_budget_assigned).
         client 가 'claude-code' 또는 'cowork' 이면 앱별 예산도 추가로 확인한다.
         """
+        # D-14/§6-1 단계 0: 팀 미배정 유저는 fail-closed — team_id='' 로 만들어진
+        # `budget:team:{}` 키 부재가 team_budget_unset 과 구분되도록 별도 코드.
+        if not team_id:
+            raise PermissionError("no_team_assigned")
+
         # Redis Cluster hash tag: {<user_id>} co-locates usage/config on same slot.
         user_key = f"budget:user:{{{user_id}}}:{period}"
         user_config_key = f"budget:config:user:{{{user_id}}}"
@@ -148,8 +215,10 @@ class BudgetService:
             # budget gate below would silently skip → budget bypass. Rehydrate from
             # DB on miss (ensure_config_cached rebuilds app_clients from active
             # per-app BudgetConfig rows) so the gate stays enforced.
-            if db is not None and not await redis.exists(user_config_key):
+            user_config_present = await redis.exists(user_config_key)
+            if db is not None and not user_config_present:
                 await self.ensure_config_cached(redis, db, user_id)
+                user_config_present = await redis.exists(user_config_key)
 
             # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
             #
@@ -233,14 +302,38 @@ class BudgetService:
             try:
                 script = LuaScriptLoader.get("budget_check")
 
-                user_raw = await redis.eval(script, 2, user_key, user_config_key, "user")
+                # D-3: 개인 config 가 없고 팀 기본 cap D 가 있으면, D 를 합성
+                # config 로 user EVAL 에 넘긴다 (cap_u = A_u ?? D). 팀 키는 다른
+                # slot 이라 Lua 안에서 읽지 못하므로 plain GET 으로 미리 읽어
+                # ARGV 로 주입한다 — D 유저의 policy/thresholds 는 팀 것을 따른다.
+                user_fallback = ""
+                if not user_config_present:
+                    team_cfg_raw = await redis.get(team_config_key)
+                    if team_cfg_raw:
+                        team_cfg = json.loads(
+                            team_cfg_raw.decode()
+                            if isinstance(team_cfg_raw, bytes)
+                            else team_cfg_raw
+                        )
+                        d_cap = team_cfg.get("default_user_cap_usd")
+                        if d_cap is not None:
+                            user_fallback = json.dumps({
+                                "limit_usd": str(d_cap),
+                                "policy": team_cfg.get("policy", "hard_block"),
+                                "thresholds": team_cfg.get("thresholds")
+                                or list(DEFAULT_THRESHOLDS),
+                            })
+
+                user_raw = await redis.eval(
+                    script, 2, user_key, user_config_key, "user", user_fallback
+                )
                 user_result = json.loads(user_raw)
 
-                # USER config 미설정 → pass-through (Q 정책)
+                # USER config 미설정(+D 미설정) → pass-through (Q 정책)
                 if user_result.get("config_present") and not user_result["allowed"]:
                     raise PermissionError(user_result.get("reason", "user_budget_exceeded"))
 
-                team_raw = await redis.eval(script, 2, team_key, team_config_key, "team")
+                team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
                 team_result = json.loads(team_raw)
 
                 # TEAM config 미설정 → deny (C-1 정책)
@@ -270,6 +363,7 @@ class BudgetService:
                 #    미래의 독자가 `{}` 를 "알 수 없음" 으로 오독할 수 있다. 여기서 한 번
                 #    정규화해 그 여지를 없앤다.
                 user_app_clients = _as_client_list(user_result.get("app_clients"))
+                client_result = None
                 if client in PER_APP_BUDGET_CLIENTS and client in user_app_clients:
                     client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
                     client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
@@ -282,7 +376,7 @@ class BudgetService:
                             redis, db, user_id, client
                         )
                     client_raw = await redis.eval(
-                        script, 2, client_key, client_config_key, "client"
+                        script, 2, client_key, client_config_key, "client", ""
                     )
                     client_result = json.loads(client_raw)
                     if client_result.get("config_present") and not client_result["allowed"]:
@@ -290,18 +384,15 @@ class BudgetService:
                             client_result.get("reason", "client_budget_exceeded")
                         )
 
-                # 둘 다 통과 — TEAM 결과를 우선 반환 (limit/used 정보가 더 의미있음)
-                final = team_result
-                return BudgetStatus(
-                    remaining_usd=Decimal(str(final["remaining_usd"])),
-                    limit_usd=Decimal(str(final.get("limit_usd", 0))),
-                    used_usd=Decimal(str(final["used_usd"])),
-                    policy=BudgetPolicy(final["policy"]),
-                    throttle_rpm_pct=final.get("throttle_rpm_pct", 50),
-                    threshold_pct=final.get("threshold_pct", 0),
-                    throttle_active=final.get("throttle_active", False),
-                    soft_warning=final.get("soft_warning", False),
-                )
+                # §6-3/§6-5: 평가된 계층 전부를 조합 — remaining 은 "차단까지의
+                # 잔여" 최솟값, 경고·throttle 은 계층별로 모은다.
+                tiers: list[tuple[str, dict]] = []
+                if user_result.get("config_present"):
+                    tiers.append(("user", user_result))
+                tiers.append(("team", team_result))
+                if client_result is not None and client_result.get("config_present"):
+                    tiers.append(("client", client_result))
+                return _build_status(tiers, team_result)
             except PermissionError:
                 raise
             except Exception:
@@ -350,24 +441,49 @@ class BudgetService:
         )
         user_config = user_cfg_result.scalar_one_or_none()
 
-        if user_config is not None:
-            user_usage_result = await db.execute(
+        def _layer(used: Decimal, limit: Decimal, policy: BudgetPolicy) -> tuple[str | None, dict]:
+            """한 계층을 평가해 (block_reason, normalized dict) 를 돌려준다.
+
+            dict 는 budget_check.lua 반환 JSON 과 같은 shape — _build_status 가
+            Redis 경로와 이 경로를 같은 코드로 조합할 수 있게 한다.
+            """
+            block, sw, ta = _evaluate_layer(used, limit, policy)
+            return block, {
+                "limit_usd": limit,
+                "used_usd": used,
+                "policy": policy.value,
+                "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
+                "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
+                "threshold_pct": int(used / limit * 100) if limit > 0 else 0,
+                "thresholds": list(DEFAULT_THRESHOLDS),
+                "soft_warning": sw,
+                "throttle_active": ta,
+                "config_present": True,
+            }
+
+        async def _user_used() -> Decimal:
+            r = await db.execute(
                 select(BudgetUsage)
                 .where(BudgetUsage.scope == BudgetScope.USER)
                 .where(BudgetUsage.scope_id == user_id)
                 .where(BudgetUsage.client.is_(None))
                 .where(BudgetUsage.period == period)
             )
-            user_usage = user_usage_result.scalar_one_or_none()
-            user_used = user_usage.used_usd if user_usage else Decimal("0")
+            u = r.scalar_one_or_none()
+            return u.used_usd if u else Decimal("0")
+
+        tiers: list[tuple[str, dict]] = []
+
+        if user_config is not None:
             # 정책을 적용한다 — 무조건 차단은 Redis 경로와 어긋난다(_evaluate_layer 주석).
-            user_block, _uw, _ut = _evaluate_layer(
-                user_used,
+            user_block, d = _layer(
+                await _user_used(),
                 user_config.max_budget_usd,
                 _db_policy_to_domain(user_config.policy),
             )
             if user_block:
                 raise PermissionError(f"user_{user_block}")
+            tiers.append(("user", d))
 
         # C-1 정책: TEAM 예산 미설정 → 차단
         team_cfg_result = await db.execute(
@@ -381,6 +497,19 @@ class BudgetService:
         if team_config is None or team_config.max_budget_usd is None:
             raise PermissionError("team_budget_unset")
 
+        policy = _db_policy_to_domain(team_config.policy)
+
+        # D-3: 개인 cap 없음 + 팀 기본 cap D → D 로 평가(cap_u = A_u ?? D).
+        # 팀 계층 판정보다 먼저 한다 — §6-1 의 계층 순서(user → team → app)를
+        # 지켜 동시 위반 시 user 코드가 우선 보고된다.
+        if user_config is None:
+            cap_d = team_config.default_user_cap_usd
+            if cap_d is not None:
+                user_block, d = _layer(await _user_used(), cap_d, policy)
+                if user_block:
+                    raise PermissionError(f"user_{user_block}")
+                tiers.append(("user", d))
+
         team_usage_result = await db.execute(
             select(BudgetUsage)
             .where(BudgetUsage.scope == BudgetScope.TEAM)
@@ -391,18 +520,10 @@ class BudgetService:
         team_used = team_usage.used_usd if team_usage else Decimal("0")
 
         max_budget = team_config.max_budget_usd
-        remaining = max_budget - team_used
-        threshold_pct = int(team_used / max_budget * 100) if max_budget > 0 else 0
-
-        # ⚠️ 이전에는 이 위에 `if team_used >= max_budget: raise` 가 있었고, 그것이 정책
-        #    판정보다 **먼저** 돌아 아래 SOFT_WARNING/THROTTLE 분기를 도달 불가능한 죽은
-        #    코드로 만들었다. Redis 경로(budget_check.lua)와 같은 판정을 쓴다.
-        policy = _db_policy_to_domain(team_config.policy)
-        team_block, soft_warning, throttle_active = _evaluate_layer(
-            team_used, max_budget, policy
-        )
+        team_block, team_dict = _layer(team_used, max_budget, policy)
         if team_block:
             raise PermissionError(f"team_{team_block}")
+        tiers.append(("team", team_dict))
 
         # 앱(client) 예산 확인 (REDIS_DEGRADED 경로) — 미설정 시 pass-through.
         if client in PER_APP_BUDGET_CLIENTS:
@@ -424,26 +545,16 @@ class BudgetService:
                 )
                 client_usage = client_usage_result.scalar_one_or_none()
                 client_used = client_usage.used_usd if client_usage else Decimal("0")
-                client_block, _cw, _ct = _evaluate_layer(
+                client_block, client_dict = _layer(
                     client_used,
                     client_config.max_budget_usd,
                     _db_policy_to_domain(client_config.policy),
                 )
                 if client_block:
                     raise PermissionError(f"client_{client_block}")
+                tiers.append(("client", client_dict))
 
-        return BudgetStatus(
-            remaining_usd=remaining,
-            limit_usd=max_budget,
-            used_usd=team_used,
-            policy=policy,
-            soft_limit_pct=DEFAULT_SOFT_LIMIT_PCT,
-            throttle_rpm_pct=DEFAULT_THROTTLE_RPM_PCT,
-            threshold_pct=threshold_pct,
-            thresholds=list(DEFAULT_THRESHOLDS),
-            throttle_active=throttle_active,
-            soft_warning=soft_warning,
-        )
+        return _build_status(tiers, team_dict)
 
     async def ensure_config_cached(
         self,
