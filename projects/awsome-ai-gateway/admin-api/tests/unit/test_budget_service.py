@@ -1044,3 +1044,138 @@ class TestEqualSplit:
 
         assert result["default_user_cap_usd"] == "33.33"
         assert cfg.default_user_cap_usd == Decimal("33.33")
+
+
+class TestReviewFixes:
+    """Opus 리뷰 반영 — 중복 배정 거부, overcommit D 항, no-op 캐시 갱신, 정밀도."""
+
+    async def test_allocate_rejects_duplicate_user_ids(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """한 배치의 중복 user_id — order-dependent 결과이므로 전체 거부."""
+        team_id = uuid.uuid4()
+        uid = uuid.uuid4()
+        member = _member_mock(uid, team_id)
+
+        team_cfg = MagicMock(spec=BudgetConfig)
+        team_cfg.max_budget_usd = Decimal("100")
+        team_cfg.policy = BudgetPolicy.HARD_BLOCK
+
+        req = AllocateBudgetRequest(allocations=[
+            AllocateBudgetItem(user_id=str(uid), allocated_usd=Decimal("10")),
+            AllocateBudgetItem(user_id=str(uid), allocated_usd=Decimal("20")),
+        ])
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockUserRepo.return_value.get_team = AsyncMock(
+                return_value=_team_mock(team_id, members=[member])
+            )
+            MockBudgetRepo.return_value.get_active_config = AsyncMock(return_value=team_cfg)
+
+            with pytest.raises(BudgetRuleError) as excinfo:
+                await budget_service.allocate_team_budget(
+                    mock_session, team_id=team_id, data=req, actor=admin_user,
+                    confirm=True,
+                )
+            assert excinfo.value.code == "duplicate_allocation"
+
+    async def test_overcommit_ratio_includes_default_cap_members(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """§0: overcommit = (ΣA_u + D × N_미설정) / T — D 커버 멤버도 분자에 포함."""
+        team_id = uuid.uuid4()
+        uid_a, uid_b = uuid.uuid4(), uuid.uuid4()
+        member_a = _member_mock(uid_a, team_id, display_name="A")
+        member_b = _member_mock(uid_b, team_id, display_name="B")
+        member_a.role = None
+        member_b.role = None
+
+        team_cfg = MagicMock(spec=BudgetConfig)
+        team_cfg.max_budget_usd = Decimal("100")
+        team_cfg.default_user_cap_usd = Decimal("20")  # D=20
+
+        user_cfg_a = MagicMock(spec=BudgetConfig)
+        user_cfg_a.max_budget_usd = Decimal("10")  # A: explicit 10, B: unset → D=20
+        # committed = 10 + 20×1 = 30 → ratio 0.3
+
+        async def _first_cfg(scope, sid):
+            if scope == BudgetScope.TEAM:
+                return team_cfg
+            return user_cfg_a if sid == uid_a else None
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockUserRepo.return_value.get_team = AsyncMock(
+                return_value=_team_mock(team_id, members=[member_a, member_b])
+            )
+            repo = MockBudgetRepo.return_value
+            repo.get_first_active_config = AsyncMock(side_effect=_first_cfg)
+            repo.get_usage = AsyncMock(return_value=None)
+
+            result = await budget_service.get_team_allocation(
+                mock_session, team_id=team_id, period="2026-04", actor=admin_user
+            )
+
+        assert result.overcommit_ratio == Decimal("0.3")
+
+    async def test_default_cap_noop_still_invalidates_cache(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser,
+        mock_redis: AsyncMock,
+    ):
+        """동일 D 재설정 — DB 변경 없어도 stale 캐시를 즉시 갱신한다."""
+        team_id = uuid.uuid4()
+        cfg = MagicMock(spec=BudgetConfig)
+        cfg.default_user_cap_usd = Decimal("20")
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockUserRepo.return_value.get_team = AsyncMock(
+                return_value=_team_mock(team_id)
+            )
+            MockBudgetRepo.return_value.get_active_config = AsyncMock(return_value=cfg)
+
+            await budget_service.set_team_default_cap(
+                mock_session, team_id=team_id, value=Decimal("20"), actor=admin_user,
+            )
+
+        mock_redis.delete.assert_awaited()
+
+    async def test_over_precision_rejected_by_service_not_schema(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """5자리 소수도 스키마를 통과 → 서비스가 invalid_amount_precision 으로 거부."""
+        team_id = uuid.uuid4()
+        uid = uuid.uuid4()
+        user = _member_mock(uid, team_id)
+        # 스키마가 통과시켜야 한다(decimal_places 제약 제거됨).
+        req = SetBudgetRequest(max_budget_usd=Decimal("1.23456"))
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
+            with pytest.raises(BudgetRuleError) as excinfo:
+                await budget_service.set_user_budget(
+                    mock_session, user_id=uid, data=req, actor=admin_user,
+                )
+            assert excinfo.value.code == "invalid_amount_precision"
+
+    async def test_warm_cache_skips_d_only_rows(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        """T=NULL 'D-only' 행은 limit_usd:null 캐시를 쓰지 않는다(키 부재=unset)."""
+        cfg = MagicMock(spec=BudgetConfig)
+        cfg.scope = BudgetScope.TEAM
+        cfg.scope_id = uuid.uuid4()
+        cfg.max_budget_usd = None
+        cfg.policy = BudgetPolicy.HARD_BLOCK
+
+        fake_redis = MagicMock()
+        fake_redis.set = AsyncMock()
+        budget_service._cache_mgr._redis = fake_redis
+
+        with patch("app.services.budget_service.BudgetRepository") as BRepo:
+            BRepo.return_value.list_configs = AsyncMock(return_value=[cfg])
+            count = await budget_service.warm_team_budget_cache(mock_session)
+
+        assert count == 0
+        fake_redis.set.assert_not_called()

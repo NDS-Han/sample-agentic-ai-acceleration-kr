@@ -377,7 +377,8 @@ class BudgetService:
             .where(BudgetConfig.is_active == True)  # noqa: E712
         )
         team_config = team_cfg_result.scalar_one_or_none()
-        if team_config is None:
+        # T=NULL 'D-only' 행은 행 없음과 동일 — fail-closed(§3-1).
+        if team_config is None or team_config.max_budget_usd is None:
             raise PermissionError("team_budget_unset")
 
         team_usage_result = await db.execute(
@@ -519,13 +520,22 @@ class BudgetService:
                 .limit(1)
             )
             config = result.scalar_one_or_none()
-            if config is None:
+            if config is None or config.max_budget_usd is None:
+                # T=NULL 'D-only' 행 — 키 부재로 두어 Lua 가 team_budget_unset
+                # 으로 fail-closed 판정하게 한다(§3-1: 행 없음과 동일 취급).
                 return
 
             config_data = {
                 "limit_usd": str(config.max_budget_usd),
                 "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
                 "thresholds": list(DEFAULT_THRESHOLDS),
+                # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
+                # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
+                "default_user_cap_usd": (
+                    str(config.default_user_cap_usd)
+                    if config.default_user_cap_usd is not None
+                    else None
+                ),
             }
             config_key = f"budget:config:team:{{{team_id}}}"
             # TTL은 admin-api BUDGET_CONFIG_CACHE_TTL 과 일치 (5분)

@@ -7,7 +7,6 @@ import uuid
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 from httpx import AsyncClient
 
 from app.models.auth import Team
@@ -23,6 +22,8 @@ class TestSetTeamBudget:
              patch("app.services.budget_service.audit_logger") as mock_audit:
             MockUserRepo.return_value.get_team = AsyncMock(return_value=MagicMock(spec=Team))
             MockBudgetRepo.return_value.upsert_config = AsyncMock()
+            MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=None)
+            MockBudgetRepo.return_value.get_usage = AsyncMock(return_value=None)
             mock_audit.log = AsyncMock()
 
             resp = await client.put(
@@ -35,16 +36,28 @@ class TestSetTeamBudget:
         assert resp.json()["status"] == "ok"
 
 
-class TestAllocationExceedsTeamBudget:
-    async def test_allocation_exceeds_returns_400(self, client: AsyncClient, admin_headers: dict):
-        team_id = str(uuid.uuid4())
+class TestAllocationMembership:
+    """D-2/I-4: 배정 대상은 해당 팀의 현재 멤버여야 한다 — 비멤버는 403.
+
+    예전 'ΣA > T → 400' 테스트는 D-1 에서 제거됐다 — CAP 모델은 초과 약정을
+    허용하고 팀 총량 T 만 enforcement 한다.
+    """
+
+    async def test_non_member_allocation_returns_403(self, client: AsyncClient, admin_headers: dict):
+        team_id = uuid.uuid4()
 
         team_config = MagicMock(spec=BudgetConfig)
         team_config.max_budget_usd = Decimal("100.00")
         team_config.policy = BudgetPolicy.HARD_BLOCK
 
-        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+        team_obj = MagicMock(spec=Team)
+        team_obj.id = team_id
+        team_obj.members = []  # 빈 팀 — 배정 대상은 전부 비멤버
+
+        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
+             patch("app.services.budget_service.UserRepository") as MockUserRepo:
             MockBudgetRepo.return_value.get_active_config = AsyncMock(return_value=team_config)
+            MockUserRepo.return_value.get_team = AsyncMock(return_value=team_obj)
 
             resp = await client.put(
                 f"/admin/budgets/team/{team_id}/allocate",
@@ -57,8 +70,8 @@ class TestAllocationExceedsTeamBudget:
                 headers=admin_headers,
             )
 
-        assert resp.status_code == 400
-        assert "exceeds" in resp.json()["error"]["message"]
+        assert resp.status_code == 403
+        assert "user_not_in_team" in resp.json()["error"]["message"]
 
 
 class TestBudgetSummary:
@@ -71,6 +84,7 @@ class TestBudgetSummary:
         config.scope = BudgetScope.TEAM
         config.scope_id = team_id
         config.max_budget_usd = Decimal("500.00")
+        config.default_user_cap_usd = None
 
         team_obj = MagicMock(spec=Team)
         team_obj.id = team_id

@@ -389,6 +389,10 @@ class BudgetService:
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
         old_cap = cfg.default_user_cap_usd if cfg else None
         if old_cap == value:
+            # no-op 이어도 팀 캐시를 갱신 — stale/유실된 D 를 즉시 자가치유한다.
+            await self._cache_mgr.invalidate(
+                [f"budget:config:team:{{{team_id}}}"], session=session
+            )
             return value
 
         period = current_kst_period()
@@ -430,16 +434,11 @@ class BudgetService:
             cfg.default_user_cap_usd = value
             await session.flush()
 
+        # 캐시는 DEL 만 — commit 전 SET 은 미커밋 D 를 광고하고(§6-6 위반),
+        # T=NULL 행의 limit_usd:null 을 미리 쓰면 gateway 가 unset 판정을 하기
+        # 전에 위험하다. miss 시 gateway 가 커밋된 DB 행(D 포함)으로 재수화한다.
         await self._cache_mgr.invalidate(
             [f"budget:config:team:{{{team_id}}}"], session=session
-        )
-        # write-through — team 캐시가 D 를 싣는 유일한 경로다(§6-6).
-        await self._write_team_config_cache(
-            scope_id=team_id,
-            max_budget_usd=cfg.max_budget_usd,
-            policy=cfg.policy,
-            alert_thresholds=[80, 90, 100],
-            default_cap=value,
         )
 
         await audit_logger.log(
@@ -614,21 +613,15 @@ class BudgetService:
                     cleared_app_keys.append(f"budget:config:user:{{{m.id}}}")
                     for r in app_rows:
                         await self._delete_redis_app_config(m.id, r.client)
-                    await self._refresh_user_app_clients(session, m.id)
 
         cfg.default_user_cap_usd = cap_d
         await session.flush()
 
+        # DEL 만 — commit 전 SET 시 미커밋 D/clear 결과가 광고된다(§6-6).
+        # miss → gateway 가 커밋된 DB 행으로 재수화.
         await self._cache_mgr.invalidate(
             [f"budget:config:team:{{{team_id}}}", *cleared_app_keys],
             session=session,
-        )
-        await self._write_team_config_cache(
-            scope_id=team_id,
-            max_budget_usd=cfg.max_budget_usd,
-            policy=cfg.policy,
-            alert_thresholds=[80, 90, 100],
-            default_cap=cap_d,
         )
 
         await audit_logger.log(
@@ -836,7 +829,6 @@ class BudgetService:
         await self._cache_mgr.invalidate(invalidate_keys, session=session)
         for c in cascaded:
             await self._delete_redis_app_config(user_id, c)
-        await self._refresh_user_app_clients(session, user_id)
 
         await audit_logger.log(
             session,
@@ -1129,6 +1121,18 @@ class BudgetService:
         if team_config is None or team_config.max_budget_usd is None:
             raise ValidationError("Team budget must be set before allocation")
 
+        # 한 배치 안의 중복 user_id — 마지막 값이 이기는 order-dependent 결과를
+        # 만들고 audit 에 두 행이 남으므로 전부 거부한다(all-or-nothing).
+        seen_ids: set[str] = set()
+        for alloc in data.allocations:
+            if alloc.user_id in seen_ids:
+                raise BudgetRuleError(
+                    f"Duplicate user_id {alloc.user_id} in allocation batch "
+                    f"(duplicate_allocation).",
+                    "duplicate_allocation",
+                )
+            seen_ids.add(alloc.user_id)
+
         # D-2/I-4: 배정 대상은 전부 해당 팀의 **현재** 멤버여야 한다.
         member_ids = {m.id for m in team.members}
         for alloc in data.allocations:
@@ -1274,6 +1278,7 @@ class BudgetService:
 
         # Member entries — cap_u = A_u ?? D. 개별 cap 없는 멤버는 D(없으면 팀 한도만).
         sum_allocated = Decimal("0")
+        n_unset = 0  # 개별 cap 없이 D 를 쓰는 멤버 수 — overcommit 공식의 D×N 항.
         for member in team.members:
             member_config = await repo.get_first_active_config(BudgetScope.USER, member.id)
             member_usage = await repo.get_usage(BudgetScope.USER, member.id, period)
@@ -1286,6 +1291,7 @@ class BudgetService:
             elif cap_d is not None:
                 cap_source = "team_default"
                 effective_cap = cap_d
+                n_unset += 1
             else:
                 cap_source = None
                 effective_cap = None
@@ -1308,7 +1314,10 @@ class BudgetService:
                 )
             )
 
-        overcommit_ratio = (sum_allocated / total_budget) if total_budget > 0 else None
+        # §0: 초과 약정률 = (ΣA_u + D × N_미설정) / T — D 로 커버되는 멤버의
+        # 잠재 cap 도 약정 분자에 포함해야 대시보드 수치가 과소표시되지 않는다.
+        committed = sum_allocated + (cap_d * n_unset if cap_d is not None else Decimal("0"))
+        overcommit_ratio = (committed / total_budget) if total_budget > 0 else None
         return TeamBudgetAllocation(
             team_id=str(team_id),
             team_name=_team_display_name(team),
@@ -1526,10 +1535,8 @@ class BudgetService:
         try:
             key = _redis_usage_key(scope_type, str(scope_id), period, client)
             raw = await redis.get(key)
-            if raw:
-                val = Decimal(raw.decode() if isinstance(raw, bytes) else raw)
-                if val != 0:
-                    return val
+            if raw is not None:
+                return Decimal(raw.decode() if isinstance(raw, bytes) else raw)
         except Exception:
             pass
         if client is None:
@@ -1710,6 +1717,10 @@ class BudgetService:
         configs = await repo.list_configs(scope=BudgetScope.TEAM)
         count = 0
         for cfg in configs:
+            if cfg.max_budget_usd is None:
+                # T=NULL 'D-only' 행 — limit_usd:null 캐시를 쓰지 않는다.
+                # 키 부재 = gateway 가 unset 으로 fail-closed 판정(§3-1).
+                continue
             await self._write_team_config_cache(
                 scope_id=cfg.scope_id,
                 max_budget_usd=cfg.max_budget_usd,
