@@ -353,7 +353,8 @@
       "userBlocked": "해당 사용자가 즉시 차단됩니다",
       "userBlockedByDefaultCap": "기본 cap으로 즉시 차단됩니다",
       "appBlocked": "해당 앱이 즉시 차단됩니다"
-    }
+    },
+    "allowedClientsNote": "이 사용자는 {list}만 허용됨"
   },
   "models": {
     "title": "모델 관리",

@@ -260,7 +260,9 @@ export function TeamAllocationView({
               }
               title={t('overcommitTooltip')}
             >
-              {t('overcommitBadge', { pct: Math.round(overcommit * 100) })}
+              {/* 소수 1자리 — Math.round 는 1.004 를 "100%" 로 표시해
+                  빨간 경고색과 라벨이 어긋났다. */}
+              {t('overcommitBadge', { pct: (overcommit * 100).toFixed(1) })}
             </span>
           )}
         </div>
@@ -320,10 +322,19 @@ export function TeamAllocationView({
         <ConfirmImpactBox
           confirmation={confirmation}
           isPending={isPending}
-          onConfirm={() => pendingAction?.()}
+          onConfirm={() => {
+            // 단발 실행 — 409 직후 isPending=false 구간의 더블클릭으로
+            // 같은 확인 액션이 두 번 나가는 것을 막는다.
+            const action = pendingAction;
+            setPendingAction(null);
+            action?.();
+          }}
           onCancel={() => {
             setConfirmation(null);
             setPendingAction(null);
+            // 409 이전에 이미 커밋된 변경이 있을 수 있다 — 취소하면 서버
+            // truth 로 맞춰 부분 저장이 조용히 묻히지 않게 한다.
+            void refresh();
           }}
         />
       )}

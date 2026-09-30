@@ -353,7 +353,8 @@
       "userBlocked": "This user will be blocked immediately",
       "userBlockedByDefaultCap": "This user will be blocked by the default cap",
       "appBlocked": "This app will be blocked immediately"
-    }
+    },
+    "allowedClientsNote": "This user is only allowed {list}"
   },
   "models": {
     "title": "Model Management",

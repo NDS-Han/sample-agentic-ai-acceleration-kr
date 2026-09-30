@@ -101,10 +101,20 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   useEffect(() => {
     if (target) {
       setValue(target.currentLimit ? String(target.currentLimit) : '');
+      // 대상 전환 시 폼 상태 전체를 서버 값으로 리셋 — 이전 대상의 D/policy 가
+      // 남아 다른 팀에 덮어씌워지는 교차 오염 방지 (key 리마운트에만 의존 금지).
+      setDefaultCap(
+        target.currentDefaultCap != null ? String(target.currentDefaultCap) : ''
+      );
+      setPolicy('HARD_BLOCK');
+      setThresholds(DEFAULT_THRESHOLDS);
+      setConfirmation(null);
+      pendingConfirmRef.current = null;
     }
   }, [target]);
 
-  const numericValue = parseFloat(value) || 0;
+  const parsedValue = parseFloat(value);
+  const numericValue = Number.isFinite(parsedValue) ? parsedValue : 0;
   const maxValue = target?.parentLimit ?? 999999;
   const isUserScope = target?.type === 'USER';
   const isTeamScope = target?.type === 'TEAM';
@@ -193,15 +203,23 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       return;
     }
 
-    // TEAM: D 입력이 비어 있으면 null(명시 해제), 값이 있으면 그대로 —
-    // 기존 D 와 같으면 백엔드가 no-op 처리한다. 키 미전송(보존)은 쓰지 않는다:
-    // 다이얼로그에 D 가 보이므로 빈칸 저장은 "지운다"는 의도로 읽는 게 자연스럽다.
+    // 메인 예산: 빈칸/비수치를 0 으로 강제 변환하면 전원 차단이 저장되므로
+    // 명시적 검증이 필요하다 (0 은 유효한 '명시적 차단' 값이라 그대로 통과).
+    if (!Number.isFinite(parsedValue) || parsedValue < 0) {
+      setError(t('invalidAmount', { name: target.name }));
+      return;
+    }
+
+    // TEAM: D 입력이 비어 있으면 null(명시 해제), 값이 있으면 그대로.
+    // 기존 D 와 동일하면 키를 보내지 않는다(undefined=보존) — T/policy 만
+    // 바꾸는 저장이 D 를 덮어쓰지 않도록.
     const dTrimmed = defaultCap.trim();
     const dParsed = dTrimmed === '' ? null : Number(dTrimmed);
     if (isTeamScope && dParsed !== null && (!Number.isFinite(dParsed) || dParsed < 0)) {
       setError(t('invalidDefaultCap'));
       return;
     }
+    const dChanged = isTeamScope && dParsed !== (target.currentDefaultCap ?? null);
 
     startTransition(async () => {
       const result = await setBudgetAction({
@@ -210,8 +228,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         max_budget_usd: numericValue,
         policy,
         alert_thresholds: thresholds,
-        // TEAM scope 는 항상 D 키를 보낸다 — 빈 입력 = 명시적 해제(null).
-        ...(isTeamScope ? { default_user_cap_usd: dParsed } : {}),
+        ...(isTeamScope && dChanged ? { default_user_cap_usd: dParsed } : {}),
       }, confirm);
 
       if (!result.success) {
@@ -512,7 +529,9 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 <div className="space-y-3 pt-1">
                   {allowedClients.length < ALL_CLIENTS.length && (
                     <p className="text-xs text-muted-foreground">
-                      이 사용자는 {allowedClients.map((c) => CLIENT_LABELS[c]).join(' · ')}만 허용됨
+                      {t('allowedClientsNote', {
+                        list: allowedClients.map((c) => CLIENT_LABELS[c]).join(' · '),
+                      })}
                     </p>
                   )}
                   {ALL_CLIENTS.filter((c) => allowedClients.includes(c)).map((c) => (
