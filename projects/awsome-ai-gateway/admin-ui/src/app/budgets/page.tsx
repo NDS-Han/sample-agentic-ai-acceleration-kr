@@ -29,6 +29,8 @@ export default async function BudgetsPage() {
     used_usd: string;
     remaining_usd: string | null;
     usage_pct: string | null;
+    default_user_cap_usd?: string | null;
+    cap_source?: 'individual' | 'team_default' | null;
   }
 
   const raw = await adminAPI
@@ -50,6 +52,9 @@ export default async function BudgetsPage() {
       remaining: r.remaining_usd != null ? parseFloat(r.remaining_usd) || 0 : null,
       usage_pct: pct,
       alert_level: pct != null ? (pct >= 100 ? 'CRITICAL' : pct >= 80 ? 'WARNING' : 'NORMAL') : 'NORMAL',
+      default_user_cap_usd:
+        r.default_user_cap_usd != null ? parseFloat(r.default_user_cap_usd) : null,
+      cap_source: r.cap_source ?? null,
     } as BudgetSummaryItem;
   });
 
@@ -145,11 +150,18 @@ export default async function BudgetsPage() {
       </div>
 
       {isAdmin ? (
-        <BudgetSummaryTable items={items} isAdmin={isAdmin} models={models} />
+        <BudgetSummaryTable
+          items={items}
+          isAdmin={isAdmin}
+          models={models}
+          currentUserId={session?.user_id}
+        />
       ) : session?.team_id ? (
         <TeamAllocationView
           teamId={session.team_id}
           initialAllocation={teamAllocation}
+          isAdmin={false}
+          currentUserId={session?.user_id}
         />
       ) : (
         <p className="text-sm text-muted-foreground">{t('noTeamAssigned')}</p>

@@ -361,14 +361,19 @@ export async function getUserClientBudgetsAction(
 export async function setUserClientBudgetAction(
   userId: string,
   client: string,
-  body: { max_budget_usd: string; policy?: string; alert_thresholds?: number[] },
+  body: {
+    max_budget_usd: string;
+    policy?: string;
+    alert_thresholds?: number[];
+    confirm?: boolean;
+  },
 ): Promise<ActionResult<void>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     await withRetry(() => adminAPI.put(`/admin/budgets/user/${userId}/app/${client}`, body));
     return { success: true, data: undefined };
   } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
+    return { success: false, ...toActionError(err) };
   }
 }
 
@@ -377,13 +382,18 @@ export async function setUserClientBudgetAction(
 export async function clearUserClientBudgetAction(
   userId: string,
   client: string,
+  confirm = false,
 ): Promise<ActionResult<void>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
-    await withRetry(() => adminAPI.delete(`/admin/budgets/user/${userId}/app/${client}`));
+    await withRetry(() =>
+      adminAPI.delete(
+        `/admin/budgets/user/${userId}/app/${client}${confirm ? '?confirm=true' : ''}`,
+      ),
+    );
     return { success: true, data: undefined };
   } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
+    return { success: false, ...toActionError(err) };
   }
 }
 
@@ -419,6 +429,17 @@ export async function searchUsersAction(
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
   }
+}
+
+/** 409 confirmation_required 를 구조화된 confirmation 으로, 나머지는 error 문자열로. */
+function toActionError(err: unknown): {
+  error: string;
+  confirmation?: { message: string; details?: unknown };
+} {
+  if (err instanceof APIError && err.status === 409 && err.error_code === 'confirmation_required') {
+    return { error: err.message, confirmation: { message: err.message, details: err.details } };
+  }
+  return { error: toErrorMessage(err) };
 }
 
 function toErrorMessage(err: unknown): string {

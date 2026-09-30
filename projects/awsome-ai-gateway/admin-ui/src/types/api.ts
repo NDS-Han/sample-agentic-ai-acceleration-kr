@@ -43,6 +43,8 @@ export const BudgetSetSchema = z.object({
   max_budget_usd: z.number().nonnegative('Budget must be 0 or greater'),
   policy: z.enum(['HARD_BLOCK', 'SOFT_WARNING', 'THROTTLE']),
   alert_thresholds: z.array(z.number().int().min(1).max(100)).min(1),
+  // TEAM 전용: 기본 유저 cap D — undefined=보존, null=해제(§3-1).
+  default_user_cap_usd: z.number().nonnegative().nullish(),
 });
 
 // ─── Models ───────────────────────────────────────────────────────────────────

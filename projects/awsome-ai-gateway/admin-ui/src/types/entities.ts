@@ -55,6 +55,10 @@ export interface BudgetSummaryItem {
   remaining: number | null;
   usage_pct: number | null;
   alert_level: AlertLevel;
+  /** TEAM 행만: 기본 유저 cap D(§3-2). USER 행은 항상 null/부재. */
+  default_user_cap_usd?: number | null;
+  /** USER 행만: cap 출처 — 'individual'(A_u) | 'team_default'(D) | null(팀 한도만). */
+  cap_source?: 'individual' | 'team_default' | null;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
@@ -263,6 +267,11 @@ export interface AllocationEntry {
   used_usd: number;
   remaining_usd: number;
   alert_level: AlertLevel;
+  /** USER 행만: cap 출처 — 'individual'(A_u 명시 설정) | 'team_default'(D 상속)
+   *  | null(개인 cap 없음, 팀 한도만). TEAM 행은 null/부재. */
+  cap_source?: 'individual' | 'team_default' | null;
+  /** USER 행만: 실효 cap = A_u ?? D. 개인 cap 없으면 null(팀 한도만). */
+  effective_cap_usd?: number | null;
 }
 
 export interface TeamBudgetAllocation {
@@ -270,6 +279,12 @@ export interface TeamBudgetAllocation {
   team_name: string;
   total_budget_usd: number;
   entries: AllocationEntry[];
+  /** 팀 기본 유저 cap D(§3-2). null = 미설정. */
+  default_user_cap_usd?: number | null;
+  /** ΣA_u — 개별 cap 합계(D 제외). */
+  sum_allocated_usd?: number | null;
+  /** (ΣA_u + D × N_미설정) / T — >1 이면 초과 약정. */
+  overcommit_ratio?: number | null;
 }
 
 // ─── UI State ─────────────────────────────────────────────────────────────────

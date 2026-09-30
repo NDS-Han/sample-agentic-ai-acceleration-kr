@@ -5,18 +5,20 @@
 
 import { Fragment, useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import { ChevronRight, ChevronDown } from 'lucide-react';
+import { ChevronRight, ChevronDown, Users } from 'lucide-react';
 import type { BudgetSummaryItem, ModelListItem } from '@/types/entities';
 import { AlertLevel, BudgetScope } from '@/types/enums';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { SetBudgetDialog } from './SetBudgetDialog';
 import { AutoDowngradeConfig } from './AutoDowngradeConfig';
+import { TeamAllocationView } from './TeamAllocationView';
 import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
 
 interface BudgetSummaryTableProps {
   items: BudgetSummaryItem[];
   isAdmin: boolean;
   models: ModelListItem[];
+  currentUserId?: string;
 }
 
 type DialogTarget = {
@@ -26,16 +28,25 @@ type DialogTarget = {
   currentLimit: number;
   currentUsed?: number;
   parentLimit?: number;
+  /** USER 행: 소속 팀의 기본 cap D — 입력 참고값 표시용 (D-7). */
+  teamDefaultCap?: number | null;
+  /** USER 행: 현재 cap 출처 — 다이얼로그의 상속 상태 안내용. */
+  capSource?: 'individual' | 'team_default' | null;
+  /** TEAM 행: 현재 D — 다이얼로그의 D 입력 초기값. */
+  currentDefaultCap?: number | null;
 };
 
 const UNASSIGNED_KEY = '__unassigned__';
 
-export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTableProps) {
+export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: BudgetSummaryTableProps) {
   const t = useTranslations('budgets');
+  const tCommon = useTranslations('common');
   const [selectedItem, setSelectedItem] = useState<DialogTarget | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showInactive, setShowInactive] = useState(true);
+  // D-21: admin 이 펼친 팀 행에서 "팀원 일괄 편집" 모달을 여는 대상.
+  const [memberEditTeam, setMemberEditTeam] = useState<{ id: string; name: string } | null>(null);
 
   const alertLabels: Record<string, string> = {
     [AlertLevel.NORMAL]: t('alertLevels.NORMAL'),
@@ -66,12 +77,22 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
   }, [filteredItems]);
 
   const handleOpenDialog = (item: BudgetSummaryItem) => {
+    // USER 행: 소속 팀의 D 를 찾아 다이얼로그 참고값으로 넘긴다 (D-7).
+    const parentTeam =
+      item.target_type === BudgetScope.USER && item.team_id
+        ? teamRows.find((tm) => tm.target_id === item.team_id)
+        : undefined;
     setSelectedItem({
       id: item.target_id,
       name: item.target_name,
       type: item.target_type,
       currentLimit: item.limit ?? 0,
       currentUsed: item.used,
+      // parentLimit 을 넘기지 않는다 — CAP 모델은 A_u > T(초과 약정)를 허용하므로
+      // 팀 예산이 개별 cap 의 상한이 아니다.
+      teamDefaultCap: parentTeam?.default_user_cap_usd ?? null,
+      capSource: item.cap_source ?? null,
+      currentDefaultCap: item.target_type === BudgetScope.TEAM ? item.default_user_cap_usd ?? null : null,
     });
     setIsDialogOpen(true);
   };
@@ -102,7 +123,13 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
         <TypeBadge type={user.target_type} labels={typeLabels} />
       </Td>
       <Td numeric>
-        {user.limit != null ? `$${user.limit.toFixed(2)}` : <span className="text-muted-foreground italic">{t('teamBudgetApplied')}</span>}
+        {user.limit != null ? (
+          `$${user.limit.toFixed(2)}`
+        ) : user.cap_source === 'team_default' ? (
+          <span className="text-muted-foreground italic">{t('defaultCapApplied')}</span>
+        ) : (
+          <span className="text-muted-foreground italic">{t('teamBudgetApplied')}</span>
+        )}
       </Td>
       <Td numeric>${user.used.toFixed(2)}</Td>
       <Td numeric>
@@ -211,6 +238,11 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
                         </Td>
                         <Td numeric>
                           {team.limit != null ? `$${team.limit.toFixed(2)}` : <span className="text-muted-foreground italic">{t('notSet')}</span>}
+                          {team.default_user_cap_usd != null && (
+                            <span className="block text-[11px] text-muted-foreground tabular-nums">
+                              {t('defaultCapShort', { value: team.default_user_cap_usd.toFixed(2) })}
+                            </span>
+                          )}
                         </Td>
                         <Td numeric>${team.used.toFixed(2)}</Td>
                         <Td numeric>
@@ -245,6 +277,24 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
                         )}
                       </Tr>
                       {isOpen && members.map(renderUserRow)}
+                      {isOpen && isAdmin && (
+                        <Tr className="bg-muted/10">
+                          <Td colSpan={colCount}>
+                            <div className="pl-10 py-1">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setMemberEditTeam({ id: team.target_id, name: team.target_name })
+                                }
+                                className="inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                              >
+                                <Users size={13} aria-hidden="true" />
+                                {t('memberBulkEdit')}
+                              </button>
+                            </div>
+                          </Td>
+                        </Tr>
+                      )}
                       {isOpen && (
                         <Tr className="bg-muted/10">
                           <Td colSpan={colCount}>
@@ -306,6 +356,33 @@ export function BudgetSummaryTable({ items, isAdmin, models }: BudgetSummaryTabl
         onClose={handleCloseDialog}
         target={selectedItem}
       />
+
+      {/* D-21: admin 팀원 일괄 편집 모달 — allocation 은 뷰 내부에서 lazy-load. */}
+      {memberEditTeam && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-background rounded-lg p-6 w-full max-w-4xl shadow-xl border border-border max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between mb-4">
+              <h2 className="text-lg font-semibold">
+                {t('memberBulkEditTitle', { team: memberEditTeam.name })}
+              </h2>
+              <button
+                type="button"
+                onClick={() => setMemberEditTeam(null)}
+                className="rounded-sm opacity-70 hover:opacity-100 text-sm px-2 py-1"
+                aria-label={tCommon('close')}
+              >
+                ✕
+              </button>
+            </div>
+            <TeamAllocationView
+              key={memberEditTeam.id}
+              teamId={memberEditTeam.id}
+              isAdmin
+              currentUserId={currentUserId}
+            />
+          </div>
+        </div>
+      )}
     </>
   );
 }

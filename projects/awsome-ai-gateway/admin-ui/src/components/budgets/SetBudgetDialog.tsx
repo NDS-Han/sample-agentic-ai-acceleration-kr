@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useState, useTransition, useEffect } from 'react';
+import { useState, useTransition, useEffect, useRef } from 'react';
 import { useTranslations } from 'next-intl';
 import { X } from 'lucide-react';
 import type { BudgetScope } from '@/types/enums';
@@ -18,9 +18,11 @@ import {
   clearUserClientBudgetAction,
 } from '@/lib/actions/users';
 import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
+import type { ConfirmationPayload } from '@/lib/actions/types';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
+import { ConfirmImpactBox } from './ConfirmImpactBox';
 
 interface SetBudgetDialogProps {
   isOpen: boolean;
@@ -32,6 +34,12 @@ interface SetBudgetDialogProps {
     currentLimit: number;
     currentUsed?: number;
     parentLimit?: number;
+    /** USER: 소속 팀의 기본 cap D — 입력 참고값 (D-7). */
+    teamDefaultCap?: number | null;
+    /** USER: 현재 cap 출처 — 'individual' | 'team_default' | null(팀 한도만). */
+    capSource?: 'individual' | 'team_default' | null;
+    /** TEAM: 현재 기본 유저 cap D — 입력 초기값. */
+    currentDefaultCap?: number | null;
   } | null;
 }
 
@@ -69,6 +77,14 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const [policy, setPolicy] = useState<'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE'>('HARD_BLOCK');
   const [thresholds, setThresholds] = useState<number[]>(DEFAULT_THRESHOLDS);
   const [newThreshold, setNewThreshold] = useState<string>('50');
+  // TEAM scope — 기본 유저 cap D 입력. 빈 문자열 = D 해제(null 전송).
+  const [defaultCap, setDefaultCap] = useState<string>(
+    target?.currentDefaultCap != null ? String(target.currentDefaultCap) : ''
+  );
+  // confirmation_required(409) — 확인 박스 표시 후 confirm=true 로 같은 제출을 재시도.
+  const [confirmation, setConfirmation] = useState<ConfirmationPayload | null>(null);
+  // 409 를 낸 마지막 시도의 재시도 콜백 (총예산 저장 / 팀예산 전환 중 어느 것인지).
+  const pendingConfirmRef = useRef<(() => void) | null>(null);
 
   // per-app(client) 예산 — USER scope 에서만 사용. 빈 문자열 = 미설정.
   // loaded* 는 prefill 시점 값 기억 → 비우고 저장하면 clear 로 이어진다. client→문자열 map.
@@ -137,17 +153,21 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
 
   if (!target) return null;
 
-  const handleUseTeamBudget = () => {
+  const handleUseTeamBudget = (confirm = false) => {
     setError(null);
     startTransition(async () => {
-      const result = await deleteUserBudgetAction(target.id);
+      const result = await deleteUserBudgetAction(target.id, confirm);
       if (result.success) {
+        setConfirmation(null);
         toast({
           type: 'success',
           message: t('personalBudgetDeleted', { name: target.name }),
           auto_dismiss_ms: 3000,
         });
         onClose();
+      } else if (result.confirmation) {
+        pendingConfirmRef.current = () => handleUseTeamBudget(true);
+        setConfirmation(result.confirmation);
       } else {
         setError(result.error);
       }
@@ -165,12 +185,21 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
     setThresholds(prev => prev.filter(v => v !== val));
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
+  const doSubmit = (confirm: boolean) => {
     setError(null);
 
     if (thresholds.length === 0) {
       setError(t('minThresholdError'));
+      return;
+    }
+
+    // TEAM: D 입력이 비어 있으면 null(명시 해제), 값이 있으면 그대로 —
+    // 기존 D 와 같으면 백엔드가 no-op 처리한다. 키 미전송(보존)은 쓰지 않는다:
+    // 다이얼로그에 D 가 보이므로 빈칸 저장은 "지운다"는 의도로 읽는 게 자연스럽다.
+    const dTrimmed = defaultCap.trim();
+    const dParsed = dTrimmed === '' ? null : Number(dTrimmed);
+    if (isTeamScope && dParsed !== null && (!Number.isFinite(dParsed) || dParsed < 0)) {
+      setError(t('invalidDefaultCap'));
       return;
     }
 
@@ -181,10 +210,17 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         max_budget_usd: numericValue,
         policy,
         alert_thresholds: thresholds,
-      });
+        // TEAM scope 는 항상 D 키를 보낸다 — 빈 입력 = 명시적 해제(null).
+        ...(isTeamScope ? { default_user_cap_usd: dParsed } : {}),
+      }, confirm);
 
       if (!result.success) {
-        setError(result.error);
+        if (result.confirmation) {
+          pendingConfirmRef.current = () => doSubmit(true);
+          setConfirmation(result.confirmation);
+        } else {
+          setError(result.error);
+        }
         return;
       }
 
@@ -222,11 +258,26 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               max_budget_usd: trimmed,
               policy,
               alert_thresholds: thresholds,
+              confirm,
             });
-            if (!res.success && appError === null) appError = res.error;
+            if (!res.success && appError === null) {
+              appError = res.error;
+              if (res.confirmation) {
+                pendingConfirmRef.current = () => doSubmit(true);
+                setConfirmation(res.confirmation);
+                return;
+              }
+            }
           } else if (tgt.loaded.trim() !== '') {
-            const res = await clearUserClientBudgetAction(target.id, tgt.client);
-            if (!res.success && appError === null) appError = res.error;
+            const res = await clearUserClientBudgetAction(target.id, tgt.client, confirm);
+            if (!res.success && appError === null) {
+              appError = res.error;
+              if (res.confirmation) {
+                pendingConfirmRef.current = () => doSubmit(true);
+                setConfirmation(res.confirmation);
+                return;
+              }
+            }
           }
         }
       }
@@ -251,6 +302,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         return;
       }
 
+      setConfirmation(null);
       toast({
         type: 'success',
         message: t('budgetSetSuccess', { name: target.name, amount: numericValue.toFixed(2) }),
@@ -258,6 +310,11 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       });
       onClose();
     });
+  };
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    doSubmit(false);
   };
 
   if (!isOpen) return null;
@@ -299,7 +356,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             </div>
             <SpinnerButton
               type="button"
-              onClick={handleUseTeamBudget}
+              onClick={() => handleUseTeamBudget(false)}
               isLoading={isPending}
               className="bg-secondary text-secondary-foreground hover:bg-secondary/80 px-3 py-1.5 rounded-md text-xs font-medium"
             >
@@ -343,8 +400,41 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                   {t('upperLimit')} ${target.parentLimit.toFixed(2)}
                 </p>
               )}
+              {/* D-7: USER 입력 참고값 — 현재 cap 출처 + 팀 기본 cap D */}
+              {isUserScope && (
+                <p className="text-xs text-muted-foreground">
+                  {target.capSource === 'individual'
+                    ? t('capRefIndividual')
+                    : target.capSource === 'team_default'
+                      ? t('capRefDefault', {
+                          value: (target.teamDefaultCap ?? 0).toFixed(2),
+                        })
+                      : t('capRefNone')}
+                </p>
+              )}
             </div>
           </div>
+
+          {/* TEAM: 기본 유저 cap D (§3-2 — 미설정 유저에게 적용되는 상한) */}
+          {isTeamScope && (
+            <div className="space-y-2">
+              <label className="text-sm font-medium">{t('defaultCapInputLabel')}</label>
+              <p className="text-xs text-muted-foreground">{t('defaultCapDesc')}</p>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-muted-foreground">$</span>
+                <input
+                  type="number"
+                  min={0}
+                  step={0.01}
+                  value={defaultCap}
+                  onChange={(e) => setDefaultCap(e.target.value)}
+                  placeholder={t('notSetPlaceholder')}
+                  className="w-32 rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+                <span className="text-xs text-muted-foreground">{t('defaultCapEmptyHint')}</span>
+              </div>
+            </div>
+          )}
 
           {/* Policy Selection */}
           <div className="space-y-2">
@@ -453,6 +543,23 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         </div>
 
           <FormError error={error} />
+
+          {confirmation && (
+            <ConfirmImpactBox
+              confirmation={confirmation}
+              isPending={isPending}
+              onConfirm={() => {
+                // 가장 최근 시도(총예산 저장 / 팀예산 전환)를 confirm=true 로 재시도.
+                const retry = pendingConfirmRef.current;
+                pendingConfirmRef.current = null;
+                retry?.();
+              }}
+              onCancel={() => {
+                setConfirmation(null);
+                pendingConfirmRef.current = null;
+              }}
+            />
+          )}
 
           <div className="flex items-center justify-end gap-3 pt-2">
             <button

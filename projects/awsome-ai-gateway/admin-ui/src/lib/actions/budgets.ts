@@ -9,12 +9,15 @@ import { adminAPI } from '@/lib/api-client';
 import { BudgetSetSchema } from '@/types/api';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
-import type { AllocationEntry } from '@/types/entities';
+import type { AllocationEntry, TeamBudgetAllocation } from '@/types/entities';
 import type { ActionResult } from './types';
 
 // ─── setBudgetAction ──────────────────────────────────────────────────────────
 
-export async function setBudgetAction(formData: unknown): Promise<ActionResult<void>> {
+export async function setBudgetAction(
+  formData: unknown,
+  confirm = false
+): Promise<ActionResult<void>> {
   const parsed = BudgetSetSchema.safeParse(formData);
 
   if (!parsed.success) {
@@ -26,7 +29,8 @@ export async function setBudgetAction(formData: unknown): Promise<ActionResult<v
     return { success: false, error: 'Validation failed', fieldErrors };
   }
 
-  const { target_id, target_type, max_budget_usd, policy, alert_thresholds } = parsed.data;
+  const { target_id, target_type, max_budget_usd, policy, alert_thresholds, default_user_cap_usd } =
+    parsed.data;
 
   try {
     const endpoint =
@@ -34,23 +38,33 @@ export async function setBudgetAction(formData: unknown): Promise<ActionResult<v
         ? `/admin/budgets/team/${target_id}`
         : `/admin/budgets/user/${target_id}`;
 
-    await withRetry(() => adminAPI.put(endpoint, { max_budget_usd, policy, alert_thresholds }));
+    // TEAM: default_user_cap_usd 는 키를 보낼 때만 D 변경 — undefined 면 보존(§3-1).
+    const body: Record<string, unknown> = { max_budget_usd, policy, alert_thresholds, confirm };
+    if (target_type === 'TEAM' && default_user_cap_usd !== undefined) {
+      body.default_user_cap_usd = default_user_cap_usd;
+    }
+    await withRetry(() => adminAPI.put(endpoint, body));
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
+    return { success: false, ...toActionError(err) };
   }
 }
 
 // ─── deleteUserBudgetAction ───────────────────────────────────────────────────
 
-export async function deleteUserBudgetAction(userId: string): Promise<ActionResult<void>> {
+export async function deleteUserBudgetAction(
+  userId: string,
+  confirm = false
+): Promise<ActionResult<void>> {
   try {
-    await withRetry(() => adminAPI.delete(`/admin/budgets/user/${userId}`));
+    await withRetry(() =>
+      adminAPI.delete(`/admin/budgets/user/${userId}${confirm ? '?confirm=true' : ''}`)
+    );
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
+    return { success: false, ...toActionError(err) };
   }
 }
 
@@ -58,7 +72,8 @@ export async function deleteUserBudgetAction(userId: string): Promise<ActionResu
 
 export async function allocateTeamBudgetAction(
   teamId: string,
-  allocations: Pick<AllocationEntry, 'target_id' | 'target_type' | 'allocated_usd'>[]
+  allocations: Pick<AllocationEntry, 'target_id' | 'target_type' | 'allocated_usd'>[],
+  confirm = false
 ): Promise<ActionResult<void>> {
   if (!teamId) {
     return { success: false, error: 'Team ID is required' };
@@ -72,12 +87,78 @@ export async function allocateTeamBudgetAction(
       .filter((e) => e.target_type === 'USER')
       .map((e) => ({ user_id: e.target_id, allocated_usd: e.allocated_usd }));
     await withRetry(() =>
-      adminAPI.put(`/admin/budgets/team/${teamId}/allocate`, { allocations: items })
+      adminAPI.put(`/admin/budgets/team/${teamId}/allocate`, { allocations: items, confirm })
     );
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
+    return { success: false, ...toActionError(err) };
+  }
+}
+
+// ─── getTeamAllocationAction (D-21: admin 도 임의 팀 조회 가능) ──────────────
+
+export async function getTeamAllocationAction(
+  teamId: string
+): Promise<ActionResult<TeamBudgetAllocation | null>> {
+  if (!teamId) {
+    return { success: false, error: 'Team ID is required' };
+  }
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<TeamBudgetAllocation | null>(`/admin/budgets/team/${teamId}/allocation`)
+    );
+    return { success: true, data };
+  } catch (err) {
     return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// ─── setTeamDefaultCapAction (D-23: 팀 기본 유저 cap D) ──────────────────────
+
+export async function setTeamDefaultCapAction(
+  teamId: string,
+  value: number | null,
+  confirm = false
+): Promise<ActionResult<{ default_user_cap_usd: string | null }>> {
+  if (!teamId) {
+    return { success: false, error: 'Team ID is required' };
+  }
+  try {
+    const res = await withRetry(() =>
+      adminAPI.put<{ default_user_cap_usd: string | null }>(
+        `/admin/budgets/team/${teamId}/default-cap`,
+        { value, confirm }
+      )
+    );
+    revalidatePath('/budgets');
+    return { success: true, data: res };
+  } catch (err) {
+    return { success: false, ...toActionError(err) };
+  }
+}
+
+// ─── equalSplitTeamBudgetAction (D-23: D = floor(T/N) 도우미) ────────────────
+
+export async function equalSplitTeamBudgetAction(
+  teamId: string,
+  clearIndividual: boolean,
+  confirm = false
+): Promise<ActionResult<{ default_user_cap_usd?: string | null }>> {
+  if (!teamId) {
+    return { success: false, error: 'Team ID is required' };
+  }
+  try {
+    const res = await withRetry(() =>
+      adminAPI.post<{ default_user_cap_usd?: string | null }>(
+        `/admin/budgets/team/${teamId}/equal-split`,
+        { clear_individual: clearIndividual, confirm }
+      )
+    );
+    revalidatePath('/budgets');
+    return { success: true, data: res };
+  } catch (err) {
+    return { success: false, ...toActionError(err) };
   }
 }
 
@@ -139,6 +220,17 @@ export async function deleteDowngradeConfigAction(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** 409 confirmation_required 를 구조화된 confirmation 으로, 나머지는 error 문자열로. */
+function toActionError(err: unknown): {
+  error: string;
+  confirmation?: { message: string; details?: unknown };
+} {
+  if (err instanceof APIError && err.status === 409 && err.error_code === 'confirmation_required') {
+    return { error: err.message, confirmation: { message: err.message, details: err.details } };
+  }
+  return { error: toErrorMessage(err) };
+}
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof APIError) {
