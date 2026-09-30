@@ -26,19 +26,12 @@
 
 name: awsome-ai-gateway CI
 
-# ⚠️ 이 레포는 멀티 프로젝트 모노레포다. paths 필터로 이 프로젝트가 바뀔 때만 돌려서
-#    다른 projects/* 의 PR 에 무관한 체크가 붙지 않게 한다.
+# ⚠️ 자동 트리거는 끄고 수동 실행(workflow_dispatch)만 남긴다. push 마다 돌리는
+#    CI 를 이 레포에서는 의도적으로 운용하지 않기로 했으므로, Actions 탭에서 필요할
+#    때만 실행한다. 다시 켜려면 아래에 push/pull_request 트리거를 추가하면 된다
+#    (paths 필터 "projects/awsome-ai-gateway/**" 함께 — 모노레포이므로).
 on:
-  push:
-    branches: ["**"]
-    paths:
-      - "projects/awsome-ai-gateway/**"
-      - ".github/workflows/awsome-ai-gateway-ci.yml"
-  pull_request:
-    branches: [main]
-    paths:
-      - "projects/awsome-ai-gateway/**"
-      - ".github/workflows/awsome-ai-gateway-ci.yml"
+  workflow_dispatch:
 
 # 최소 권한 — 이 워크플로는 읽기만 필요하다.
 permissions:
