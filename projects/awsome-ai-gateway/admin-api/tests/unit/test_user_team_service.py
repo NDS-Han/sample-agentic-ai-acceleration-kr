@@ -105,6 +105,12 @@ class TestTransferUser:
             user_repo.get_user = AsyncMock(return_value=user)
             user_repo.update_user_team = AsyncMock(return_value=transferred_user)
             MockBudgetRepo.return_value.deactivate_configs = AsyncMock()
+            MockBudgetRepo.return_value.list_active_app_clients = AsyncMock(
+                return_value=["claude-code"]
+            )
+            MockBudgetRepo.return_value.deactivate_app_configs_for_user = AsyncMock(
+                return_value=["claude-code"]
+            )
             MockRLRepo.return_value.deactivate_configs = AsyncMock()
             mock_audit.log = AsyncMock()
 
@@ -120,10 +126,13 @@ class TestTransferUser:
                 mock_session, user_id=user_id, new_team_id=new_team_id, actor=admin_user
             )
 
-        # Budget deactivated
+        # Budget deactivated — 총액(A_u)과 앱별(app_c) 모두 (D-15/I-3)
         MockBudgetRepo.return_value.deactivate_configs.assert_awaited_once()
-        # Cache invalidation called
+        MockBudgetRepo.return_value.deactivate_app_configs_for_user.assert_awaited_once()
+        # Cache invalidation called — app config 키도 포함
         cache_mgr.invalidate.assert_awaited_once()
+        invalidated = set(cache_mgr.invalidate.call_args.args[0])
+        assert f"budget:config:user:{{{user_id}}}:claude-code" in invalidated
         assert result.team_id == str(new_team_id)
 
     async def test_transfer_user_not_found(
@@ -163,6 +172,8 @@ class TestTransferUser:
             URepo.return_value.get_user = AsyncMock(return_value=user_mock)
             URepo.return_value.update_user_team = AsyncMock(return_value=user_mock_after)
             BRepo.return_value.deactivate_configs = AsyncMock(return_value=1)
+            BRepo.return_value.list_active_app_clients = AsyncMock(return_value=[])
+            BRepo.return_value.deactivate_app_configs_for_user = AsyncMock(return_value=[])
             RLRepo.return_value.deactivate_configs = AsyncMock(return_value=1)
             mock_audit.log = AsyncMock()
 

@@ -10,14 +10,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.db import get_db_session
 from app.models.budget import BudgetScope
+from app.services.budget_service import BudgetService
 from app.schemas.budgets import (
     AllocateBudgetRequest,
     AutoDowngradeConfigRequest,
     AutoDowngradeConfigResponse,
     BudgetSummaryResponse,
+    EqualSplitRequest,
     SeedSpentRequest,
     SeedSpentResponse,
     SetBudgetRequest,
+    SetDefaultCapRequest,
     TeamBudgetAllocation,
     UserAppBudgetsResponse,
 )
@@ -33,7 +36,6 @@ async def set_team_budget(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    from app.services.budget_service import BudgetService
 
     svc: BudgetService = request.app.state.budget_service
     await svc.set_team_budget(
@@ -41,10 +43,77 @@ async def set_team_budget(
         team_id=uuid.UUID(team_id),
         data=body,
         actor=admin,
+        confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
     return {"status": "ok"}
+
+
+@router.delete("/team/{team_id}", status_code=204)
+async def delete_team_budget(
+    request: Request,
+    team_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    confirm: bool = Query(False),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """팀 예산 해제 — 팀 전원이 team_budget_unset 으로 차단되므로 confirm 필수(§3-1)."""
+    svc: BudgetService = request.app.state.budget_service
+    await svc.delete_team_budget(
+        session,
+        team_id=uuid.UUID(team_id),
+        actor=admin,
+        confirm=confirm,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
+
+@router.put("/team/{team_id}/default-cap")
+async def set_team_default_cap(
+    request: Request,
+    team_id: str,
+    body: SetDefaultCapRequest,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """팀 기본 유저 cap D 설정/해제(§3-2). value=null 이면 D 해제."""
+    svc: BudgetService = request.app.state.budget_service
+    value = await svc.set_team_default_cap(
+        session,
+        team_id=uuid.UUID(team_id),
+        value=body.value,
+        actor=admin,
+        confirm=body.confirm,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+    return {
+        "status": "ok",
+        "default_user_cap_usd": str(value) if value is not None else None,
+    }
+
+
+@router.post("/team/{team_id}/equal-split")
+async def equal_split_team_budget(
+    request: Request,
+    team_id: str,
+    body: EqualSplitRequest,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """균등분배 도우미 — D = floor_cent(T/N). clear_individual=true 면 개별 cap 초기화."""
+    svc: BudgetService = request.app.state.budget_service
+    return await svc.equal_split_team_budget(
+        session,
+        team_id=uuid.UUID(team_id),
+        clear_individual=body.clear_individual,
+        actor=admin,
+        confirm=body.confirm,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
 
 
 @router.put("/user/{user_id}")
@@ -61,6 +130,7 @@ async def set_user_budget(
         user_id=uuid.UUID(user_id),
         data=body,
         actor=user,
+        confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
@@ -78,7 +148,6 @@ async def seed_budget_spent(
 
     Overwrites used_usd in DB + Redis. Idempotent. Per-item partial failure reported.
     """
-    from app.services.budget_service import BudgetService
 
     svc: BudgetService = request.app.state.budget_service
     return await svc.seed_spent(
@@ -94,15 +163,19 @@ async def seed_budget_spent(
 async def delete_user_budget(
     request: Request,
     user_id: str,
-    admin: CurrentUser = Depends(require_admin),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    confirm: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """개인 예산 삭제 → 팀 예산 적용으로 전환."""
+    """개인 예산 삭제 → 팀 기본 cap D 적용으로 전환. 하위 app_c 연쇄 삭제(§4-2/I-3).
+
+    TEAM_LEADER 도 자기 팀 멤버의 개별 cap 을 해제할 수 있다(본인 제외)."""
     svc: BudgetService = request.app.state.budget_service
     await svc.delete_user_budget(
         session,
         user_id=uuid.UUID(user_id),
-        actor=admin,
+        actor=user,
+        confirm=confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
@@ -118,7 +191,6 @@ async def set_user_client_budget(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Set a per-app (client) budget for a user."""
-    from app.services.budget_service import BudgetService
     from fastapi import HTTPException
 
     svc: BudgetService = request.app.state.budget_service
@@ -129,6 +201,7 @@ async def set_user_client_budget(
             client=client,
             data=body,
             actor=user,
+            confirm=body.confirm,
             ip_address=request.client.host if request.client else "0.0.0.0",
             request_id=request.headers.get("x-request-id", ""),
         )
@@ -146,7 +219,6 @@ async def clear_user_client_budget(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Clear (deactivate) the per-app budget for a user."""
-    from app.services.budget_service import BudgetService
     from fastapi import HTTPException
 
     svc: BudgetService = request.app.state.budget_service
@@ -171,7 +243,6 @@ async def get_user_app_budgets(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Read active per-app (client) budgets for a user, for UI prefill."""
-    from app.services.budget_service import BudgetService
 
     svc: BudgetService = request.app.state.budget_service
     apps = await svc.get_user_app_budgets(session, user_id=uuid.UUID(user_id), actor=user)
@@ -187,7 +258,6 @@ async def get_team_allocation(
     session: AsyncSession = Depends(get_db_session),
 ):
     from app.core.usage_filters import current_kst_period
-    from app.services.budget_service import BudgetService
 
     svc: BudgetService = request.app.state.budget_service
     # KST 월(§59) — date.today() 는 pod TZ(UTC)라 월 경계 첫 9시간에 지난달이 된다.
@@ -214,6 +284,7 @@ async def allocate_team_budget(
         team_id=uuid.UUID(team_id),
         data=body,
         actor=user,
+        confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )

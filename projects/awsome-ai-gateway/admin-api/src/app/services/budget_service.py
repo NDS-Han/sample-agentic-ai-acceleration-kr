@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 import structlog
 from sqlalchemy import text
@@ -17,9 +17,17 @@ from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.config import get_settings
-from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
+from app.core.exceptions import (
+    BudgetRuleError,
+    ConfirmationRequiredError,
+    ForbiddenError,
+    NotFoundError,
+    ValidationError,
+)
+from app.core.usage_filters import current_kst_period
 from app.models.auth import Team, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, DowngradePolicy, PeriodType
+from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.budgets import (
@@ -40,6 +48,40 @@ from app.schemas.budgets import (
 logger = structlog.get_logger()
 
 BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
+
+_CENT = Decimal("0.01")
+
+
+def _check_cent_precision(amount: Decimal) -> None:
+    """D-17/§0-3: 예산 입력은 센트(2자리)까지. 초과 정밀도는 거부한다.
+
+    저장은 NUMERIC(12,4) 가 허용하지만 입력 계약은 2자리다 — 소수 3~4자리를
+    조용히 받아주면 UI 표시(센트 반올림)와 enforcement(정밀 비교)가 어긋난다.
+    """
+    try:
+        ok = amount == amount.quantize(_CENT)
+    except InvalidOperation:
+        ok = False
+    if not ok:
+        raise BudgetRuleError(
+            f"Budget amounts are limited to cents (2 decimal places): {amount}",
+            "invalid_amount_precision",
+        )
+
+
+async def _lock_user_budget_key(session: AsyncSession, user_id: uuid.UUID) -> None:
+    """같은 유저의 총액(A_u)·앱별(app_c)·삭제·일괄 쓰기를 직렬화한다 (§3-0/D-4).
+
+    upsert_config 의 advisory lock 은 (scope, scope_id, client) 키라 총액과
+    앱별이 서로 다른 키를 잡는다 — I-2 검증(app_c ≤ A_u)은 둘을 함께 읽으므로
+    유저 단위의 별도 직렬화가 필요하다. 행 존재 여부와 무관하게 동작한다.
+    """
+    await advisory_xact_lock(session, "budget_user_rules", user_id)
+
+
+def _confirmed_action(base: str, confirm: bool) -> str:
+    """§3-0/G-8: confirm=true 재요청은 별도 audit action 으로 구분한다."""
+    return f"{base}_CONFIRMED" if confirm else base
 
 _PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
 #: 단일 출처는 core/clients.py 다 — 앱 추가 시 한 곳만 고치면 되도록.
@@ -229,15 +271,63 @@ class BudgetService:
         team_id: uuid.UUID,
         data: SetBudgetRequest,
         actor: CurrentUser,
+        confirm: bool = False,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
+        _check_cent_precision(data.max_budget_usd)
+        if data.default_user_cap_usd is not None:
+            _check_cent_precision(data.default_user_cap_usd)
+
         user_repo = UserRepository(session)
         team = await user_repo.get_team(team_id)
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
         repo = BudgetRepository(session)
+
+        # §3-1: T 편집은 D 를 건드리지 않는다 — 키가 안 오면 직전 행(비활성 포함,
+        # 예산 해제 후 재설정 경로)의 D 를 그대로 이어 쓴다.
+        latest = await repo.get_latest_config(BudgetScope.TEAM, team_id)
+        if "default_user_cap_usd" in data.model_fields_set:
+            new_cap = data.default_user_cap_usd
+        else:
+            new_cap = latest.default_user_cap_usd if latest else None
+        old_cap = latest.default_user_cap_usd if latest else None
+
+        # 확인 필요 사유를 모두 수집해 한 번에 409 로 돌린다 — 첫 409 에서 못 본
+        # 경고가 confirm 재시도에서 조용히 통과되는 일이 없도록.
+        period = current_kst_period()
+        warnings: list[dict] = []
+
+        # §3-1 감액 확인: team_used ≥ T_new 면 저장 즉시 팀 전원이 차단된다.
+        team_used = await self._current_used(repo, BudgetScope.TEAM, team_id, period)
+        if team_used >= data.max_budget_usd:
+            warnings.append({
+                "impact": "team_blocked",
+                "team_used_usd": str(team_used),
+                "new_budget_usd": str(data.max_budget_usd),
+            })
+
+        # §3-2: 이 요청으로 D 가 줄어들거나 새로 생기면, 개별 cap 없는 멤버 중
+        # 사용량이 새 D 이상인 사람이 즉시 차단된다 → 확인 필요.
+        if new_cap is not None and (old_cap is None or new_cap < old_cap):
+            affected = await self._unset_members_over_cap(
+                session, repo, team, cap=new_cap, period=period
+            )
+            if affected:
+                warnings.append({
+                    "impact": "default_cap_blocks_members",
+                    "affected": affected,
+                })
+
+        if warnings and not confirm:
+            raise ConfirmationRequiredError(
+                "This change will block requests immediately after saving — "
+                "review the impacts and re-submit with confirm=true.",
+                details={"warnings": warnings},
+            )
+
         config = BudgetConfig(
             id=uuid.uuid4(),
             scope=BudgetScope.TEAM,
@@ -247,6 +337,7 @@ class BudgetService:
             policy=BudgetPolicy(data.policy.value),
             allocated_by=actor.user_id,
             effective_from=date.today(),
+            default_user_cap_usd=new_cap,
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -256,19 +347,314 @@ class BudgetService:
             session=session,
         )
 
-        await self._sync_redis_thresholds("team", team_id, data)
+        await self._sync_redis_thresholds("team", team_id, data, default_cap=new_cap)
 
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
-            action="SET_TEAM_BUDGET",
+            action=_confirmed_action("SET_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
-            changes={"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": data.policy.value, "alert_thresholds": data.alert_thresholds}},
+            changes={"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": data.policy.value, "alert_thresholds": data.alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}},
             ip_address=ip_address,
             request_id=request_id,
         )
+
+    async def set_team_default_cap(
+        self,
+        session: AsyncSession,
+        *,
+        team_id: uuid.UUID,
+        value: Decimal | None,
+        actor: CurrentUser,
+        confirm: bool = False,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> Decimal | None:
+        """팀 기본 유저 cap D 만 변경한다(§3-2) — T·정책·thresholds 는 유지.
+
+        T 가 아직 없으면(팀 config 행 없음) T=NULL '사전 준비' 행을 만든다(G-6).
+        반환값은 확정된 D 다.
+        """
+        if value is not None:
+            _check_cent_precision(value)
+
+        user_repo = UserRepository(session)
+        team = await user_repo.get_team(team_id)
+        if team is None:
+            raise NotFoundError("Team", str(team_id))
+
+        repo = BudgetRepository(session)
+        cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
+        old_cap = cfg.default_user_cap_usd if cfg else None
+        if old_cap == value:
+            return value
+
+        period = current_kst_period()
+        warnings: list[dict] = []
+        if value is not None and (old_cap is None or value < old_cap):
+            affected = await self._unset_members_over_cap(
+                session, repo, team, cap=value, period=period
+            )
+            if affected:
+                warnings.append({
+                    "impact": "default_cap_blocks_members",
+                    "affected": affected,
+                })
+        if warnings and not confirm:
+            raise ConfirmationRequiredError(
+                f"The new default user cap (${value}) will immediately block "
+                f"members without an individual budget whose usage already meets "
+                f"it — re-submit with confirm=true.",
+                details={"warnings": warnings},
+            )
+
+        if cfg is None:
+            # G-6: T=NULL 행 — 'D만 저장된 팀 config'. T=NULL 과 행 없음은
+            # enforcement 에서 동일하게 team_budget_unset 으로 판정된다.
+            cfg = BudgetConfig(
+                id=uuid.uuid4(),
+                scope=BudgetScope.TEAM,
+                scope_id=team_id,
+                max_budget_usd=None,
+                period_type=PeriodType.MONTHLY,
+                policy=BudgetPolicy.HARD_BLOCK,
+                allocated_by=actor.user_id,
+                effective_from=date.today(),
+                default_user_cap_usd=value,
+                is_active=True,
+            )
+            await repo.upsert_config(cfg)
+        else:
+            cfg.default_user_cap_usd = value
+            await session.flush()
+
+        await self._cache_mgr.invalidate(
+            [f"budget:config:team:{{{team_id}}}"], session=session
+        )
+        # write-through — team 캐시가 D 를 싣는 유일한 경로다(§6-6).
+        await self._write_team_config_cache(
+            scope_id=team_id,
+            max_budget_usd=cfg.max_budget_usd,
+            policy=cfg.policy,
+            alert_thresholds=[80, 90, 100],
+            default_cap=value,
+        )
+
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            action=_confirmed_action("SET_TEAM_DEFAULT_CAP", confirm),
+            resource_type="BudgetConfig",
+            resource_id=str(cfg.id),
+            changes={
+                "before": {"default_user_cap_usd": str(old_cap) if old_cap is not None else None},
+                "after": {"default_user_cap_usd": str(value) if value is not None else None},
+            },
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+        return value
+
+    async def delete_team_budget(
+        self,
+        session: AsyncSession,
+        *,
+        team_id: uuid.UUID,
+        actor: CurrentUser,
+        confirm: bool = False,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> None:
+        """팀 예산 해제 — 팀 전원이 team_budget_unset 으로 차단된다(§3-1).
+
+        A_u·app_c·D 는 보존된다 — 비활성 행에 남은 D 는 T 재설정 시
+        get_latest_config 가 이어 받는다.
+        """
+        repo = BudgetRepository(session)
+        cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
+        if cfg is None:
+            return
+
+        if not confirm:
+            raise ConfirmationRequiredError(
+                "Removing the team budget will block ALL requests from this team "
+                "(team_budget_unset) — re-submit with confirm=true.",
+                details={
+                    "warnings": [{
+                        "impact": "team_blocked",
+                        "team_id": str(team_id),
+                    }]
+                },
+            )
+
+        cfg.is_active = False
+        await session.flush()
+
+        await self._cache_mgr.invalidate(
+            [f"budget:config:team:{{{team_id}}}"], session=session
+        )
+
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            action="DELETE_TEAM_BUDGET_CONFIRMED",
+            resource_type="BudgetConfig",
+            resource_id=str(cfg.id),
+            changes={
+                "before": {
+                    "team_id": str(team_id),
+                    "max_budget_usd": str(cfg.max_budget_usd)
+                    if cfg.max_budget_usd is not None else None,
+                }
+            },
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+
+    async def equal_split_team_budget(
+        self,
+        session: AsyncSession,
+        *,
+        team_id: uuid.UUID,
+        clear_individual: bool,
+        actor: CurrentUser,
+        confirm: bool = False,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> dict:
+        """균등분배 도우미 — D = floor_cent(T/N) 을 팀 행에 쓴다(§4-3/D-11).
+
+        clear_individual=True 면 모든 개별 A_u·app_c 를 같은 트랜잭션에서
+        제거하고 전원 D 로 통일한다. 반환: 계산된 D 와 초기화된 멤버 수.
+        """
+        user_repo = UserRepository(session)
+        team = await user_repo.get_team(team_id)
+        if team is None:
+            raise NotFoundError("Team", str(team_id))
+
+        members = [m for m in team.members if m.is_active]
+        n_members = len(members)
+
+        repo = BudgetRepository(session)
+        cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
+        team_budget = cfg.max_budget_usd if cfg else None
+
+        cap_d: Decimal | None = None
+        if n_members > 0 and team_budget is not None and team_budget > 0:
+            cap_d = (team_budget / n_members).quantize(_CENT, rounding=ROUND_DOWN)
+        if cap_d is None or cap_d <= 0:
+            raise BudgetRuleError(
+                "Equal split is not possible — the team has no active members or "
+                "no team budget is set (equal_split_nothing_to_allocate).",
+                "equal_split_nothing_to_allocate",
+            )
+
+        period = current_kst_period()
+        warnings: list[dict] = []
+        if not confirm:
+            if clear_individual:
+                # 전원 D 로 통일 — D 이상 사용 중인 멤버 전원이 즉시 차단된다.
+                member_ids = [m.id for m in members]
+                usages = await repo.get_usages_for_scope_ids(
+                    BudgetScope.USER, member_ids, period
+                )
+                affected = [
+                    {
+                        "user_id": str(m.id),
+                        "name": m.display_name or m.email,
+                        "used_usd": str(usages.get(m.id, Decimal("0"))),
+                    }
+                    for m in members
+                    if usages.get(m.id, Decimal("0")) >= cap_d
+                ]
+            else:
+                affected = await self._unset_members_over_cap(
+                    session, repo, team, cap=cap_d, period=period
+                )
+            if affected:
+                warnings.append({
+                    "impact": "default_cap_blocks_members",
+                    "affected": affected,
+                })
+            if clear_individual:
+                configured = await repo.list_configured_member_ids(team_id)
+                if configured & {m.id for m in members}:
+                    warnings.append({
+                        "impact": "individual_budgets_cleared",
+                        "count": len(configured & {m.id for m in members}),
+                    })
+            if warnings:
+                raise ConfirmationRequiredError(
+                    f"Equal split sets the default cap to ${cap_d} "
+                    f"(floor({team_budget} / {n_members})) — some members would "
+                    f"be blocked or lose their individual budgets. Re-submit "
+                    f"with confirm=true.",
+                    details={"warnings": warnings, "computed_default_cap_usd": str(cap_d)},
+                )
+
+        # 여기까지 오면 cfg·team_budget 은 확정돼 있다(위 가드에서 T 없으면 종료).
+        cleared_users = 0
+        cleared_app_keys: list[str] = []
+        if clear_individual:
+            for m in members:
+                await _lock_user_budget_key(session, m.id)
+                # app 캐시 키는 deactivate 전에 수집 — rows 가 비면 무효화 대상이 없다.
+                app_rows = await repo.list_active_app_configs(m.id)
+                cleared_app_keys += [
+                    f"budget:config:user:{{{m.id}}}:{r.client}" for r in app_rows
+                ]
+                removed = await repo.deactivate_configs(BudgetScope.USER, m.id)
+                await repo.deactivate_app_configs_for_user(m.id)
+                if removed or app_rows:
+                    cleared_users += 1
+                    cleared_app_keys.append(f"budget:config:user:{{{m.id}}}")
+                    for r in app_rows:
+                        await self._delete_redis_app_config(m.id, r.client)
+                    await self._refresh_user_app_clients(session, m.id)
+
+        cfg.default_user_cap_usd = cap_d
+        await session.flush()
+
+        await self._cache_mgr.invalidate(
+            [f"budget:config:team:{{{team_id}}}", *cleared_app_keys],
+            session=session,
+        )
+        await self._write_team_config_cache(
+            scope_id=team_id,
+            max_budget_usd=cfg.max_budget_usd,
+            policy=cfg.policy,
+            alert_thresholds=[80, 90, 100],
+            default_cap=cap_d,
+        )
+
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            action=_confirmed_action("EQUAL_SPLIT_TEAM_BUDGET", confirm),
+            resource_type="BudgetConfig",
+            resource_id=str(cfg.id),
+            changes={
+                "after": {
+                    "team_id": str(team_id),
+                    "default_user_cap_usd": str(cap_d),
+                    "member_count": n_members,
+                    "clear_individual": clear_individual,
+                    "cleared_users": cleared_users,
+                }
+            },
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+        return {
+            "default_user_cap_usd": str(cap_d),
+            "member_count": n_members,
+            "cleared_users": cleared_users,
+        }
 
     async def set_user_budget(
         self,
@@ -277,40 +663,74 @@ class BudgetService:
         user_id: uuid.UUID,
         data: SetBudgetRequest,
         actor: CurrentUser,
+        confirm: bool = False,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
+        _check_cent_precision(data.max_budget_usd)
+
         user_repo = UserRepository(session)
         user = await user_repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
 
+        # I-4/§4-6: 팀 소속이 없는 유저에게는 개인 예산을 설정할 수 없다.
+        if user.team_id is None:
+            raise BudgetRuleError(
+                f"User {user_id} has no team — budgets can only be assigned to "
+                f"team members (no_team_assigned at enforcement).",
+                "user_not_in_team",
+                403,
+            )
+
         # BR-BUD-03: Team leader can only set budgets for own team
         if actor.role == UserRole.TEAM_LEADER:
             if user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
+            # D-13/§4-1: 리더는 본인의 예산을 스스로 설정할 수 없다.
+            if actor.user_id == user_id:
+                raise BudgetRuleError(
+                    "Team leaders cannot set their own budget "
+                    "(self_allocation_forbidden) — an admin must do it.",
+                    "self_allocation_forbidden",
+                    403,
+                )
 
-        # BR-BUD-01: 멤버 예산 합계 <= 팀 예산 — TEAM_LEADER 에만 적용한다.
-        # 이 규칙은 "리더가 팀 풀을 초과해 배분하지 못하게" 하는 배분 규율인데,
-        # ADMIN 은 팀 예산 자체를 소유하므로(팀 예산을 먼저 올리면 어차피 통과됨)
-        # admin 에게까지 걸면 "이미 초과된 멤버의 한도를 올리는" 정상 작업이
-        # ValidationError 로 막혀 예산 조정이 불가능해진다 — 2026-09 실측 버그.
-        if user.team_id and actor.role == UserRole.TEAM_LEADER:
-            repo = BudgetRepository(session)
-            team_config = await repo.get_active_config(BudgetScope.TEAM, user.team_id)
-            if team_config:
-                current_sum = await repo.sum_member_budgets(user.team_id)
-                # Subtract existing user budget if any
-                existing = await repo.get_active_config(BudgetScope.USER, user_id)
-                if existing:
-                    current_sum -= existing.max_budget_usd
-                new_sum = current_sum + data.max_budget_usd
-                if new_sum > team_config.max_budget_usd:
-                    raise ValidationError(
-                        f"Member budget sum ({new_sum}) exceeds team budget ({team_config.max_budget_usd})"
-                    )
+        # 유저 단위 직렬화 — 총액·앱별 쓰기가 엇갈려 I-2(app_c ≤ A_u)가 깨지는 것을 막는다.
+        await _lock_user_budget_key(session, user_id)
 
         repo = BudgetRepository(session)
+
+        # D-4/I-2 거부: A_u_new < max(app_c) → 하위 앱 cap 이 부모를 넘는 모순.
+        max_app = await repo.max_app_budget(user_id)
+        if max_app is not None and data.max_budget_usd < max_app:
+            raise BudgetRuleError(
+                f"User budget (${data.max_budget_usd}) is below an existing app cap "
+                f"(${max_app}) — lower the app budgets first (user_budget_below_app_cap).",
+                "user_budget_below_app_cap",
+            )
+
+        # §4-2 확인: A_u_new ≤ used_u → 저장 즉시 해당 유저가 차단된다.
+        if not confirm:
+            used = await self._current_used(repo, BudgetScope.USER, user_id, current_kst_period())
+            if used >= data.max_budget_usd:
+                raise ConfirmationRequiredError(
+                    f"User's current usage (${used}) already meets or exceeds the new "
+                    f"budget (${data.max_budget_usd}) — this user will be blocked "
+                    f"immediately.",
+                    details={
+                        "warnings": [{
+                            "impact": "user_blocked",
+                            "user_id": str(user_id),
+                            "used_usd": str(used),
+                            "new_budget_usd": str(data.max_budget_usd),
+                        }]
+                    },
+                )
+
+        # D-1: ΣA_u ≤ T 합계 검증은 없다 — CAP 모델은 초과 약정(overcommit)을
+        # 허용하고 팀 총량 T 만 실질 상한으로 enforcement 한다.
+
         config = BudgetConfig(
             id=uuid.uuid4(),
             scope=BudgetScope.USER,
@@ -335,7 +755,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
-            action="SET_USER_BUDGET",
+            action=_confirmed_action("SET_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
             changes={"after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": data.policy.value, "alert_thresholds": data.alert_thresholds}},
@@ -349,30 +769,89 @@ class BudgetService:
         *,
         user_id: uuid.UUID,
         actor: CurrentUser,
+        confirm: bool = False,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
+        """개별 cap A_u 해제 — 유저는 팀 기본 cap D 로 이행한다(§4-2).
+
+        D=null 이면 팀 한도만 적용(제한 완화), D 있으면 used_u ≥ D 시 즉시 차단.
+        하위 app_c 는 I-3 에 따라 연쇄 삭제된다.
+        """
+        user_repo = UserRepository(session)
+        user = await user_repo.get_user(user_id)
+        if user is None:
+            raise NotFoundError("User", str(user_id))
+        if actor.role == UserRole.TEAM_LEADER:
+            if user.team_id != actor.team_id:
+                raise ForbiddenError("Team leaders can only delete budgets for their own team members")
+            if actor.user_id == user_id:
+                raise BudgetRuleError(
+                    "Team leaders cannot delete their own budget (self_allocation_forbidden).",
+                    "self_allocation_forbidden",
+                    403,
+                )
+
+        await _lock_user_budget_key(session, user_id)
+
         repo = BudgetRepository(session)
         existing = await repo.get_active_config(BudgetScope.USER, user_id)
         if existing is None:
             return
 
+        # I-3 cascade 대상 — 확인 다이얼로그에 목록으로 보여준다.
+        app_rows = await repo.list_active_app_configs(user_id)
+
+        team_cfg = await repo.get_active_config(BudgetScope.TEAM, user.team_id) if user.team_id else None
+        cap_d = team_cfg.default_user_cap_usd if team_cfg else None
+
+        warnings: list[dict] = []
+        if app_rows:
+            warnings.append({
+                "impact": "app_budgets_cascaded",
+                "clients": [r.client for r in app_rows],
+            })
+        if cap_d is not None:
+            used = await self._current_used(repo, BudgetScope.USER, user_id, current_kst_period())
+            if used >= cap_d:
+                warnings.append({
+                    "impact": "user_blocked_by_default_cap",
+                    "used_usd": str(used),
+                    "default_cap_usd": str(cap_d),
+                })
+        if warnings and not confirm:
+            raise ConfirmationRequiredError(
+                "Deleting the individual budget will cascade-delete the app budgets "
+                "and/or block this user under the team default cap — "
+                "re-submit with confirm=true.",
+                details={"warnings": warnings},
+            )
+
         existing.is_active = False
+        cascaded = await repo.deactivate_app_configs_for_user(user_id)
         await session.flush()
 
-        await self._cache_mgr.invalidate(
-            [f"budget:config:user:{{{user_id}}}"],
-            session=session,
-        )
+        invalidate_keys = [f"budget:config:user:{{{user_id}}}"]
+        invalidate_keys += [f"budget:config:user:{{{user_id}}}:{c}" for c in cascaded]
+        await self._cache_mgr.invalidate(invalidate_keys, session=session)
+        for c in cascaded:
+            await self._delete_redis_app_config(user_id, c)
+        await self._refresh_user_app_clients(session, user_id)
 
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
-            action="DELETE_USER_BUDGET",
+            action=_confirmed_action("DELETE_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(existing.id),
-            changes={"before": {"user_id": str(user_id), "max_budget_usd": str(existing.max_budget_usd)}},
+            changes={
+                "before": {
+                    "user_id": str(user_id),
+                    "max_budget_usd": str(existing.max_budget_usd),
+                    "cascaded_app_clients": cascaded,
+                }
+            },
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -385,6 +864,7 @@ class BudgetService:
         client: str,
         data: SetBudgetRequest,
         actor: CurrentUser,
+        confirm: bool = False,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
@@ -393,7 +873,11 @@ class BudgetService:
         Guards:
           - client must be one of _ALLOWED_CLIENTS (claude-code / cowork / codex)
           - if the user has a non-empty allowed_clients list, client must be in it
+          - I-3: parent USER total budget must exist
+          - I-2: app_c <= A_u (부모 유저 총예산을 넘는 앱 cap 은 모순)
         """
+        _check_cent_precision(data.max_budget_usd)
+
         if client not in _ALLOWED_CLIENTS:
             raise ValueError("invalid client")
 
@@ -404,10 +888,25 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
 
-        # BR-BUD-03: Team leaders can only set budgets for their own team members.
+        # I-4/§4-6: 팀 없는 유저에는 app cap 도 설정 불가.
+        if user.team_id is None:
+            raise BudgetRuleError(
+                f"User {user_id} has no team — budgets can only be assigned to "
+                f"team members.",
+                "user_not_in_team",
+                403,
+            )
+
+        # BR-BUD-03 + D-13: 리더는 자기 팀 멤버만, 본인은 제외.
         if actor.role == UserRole.TEAM_LEADER:
             if user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
+            if actor.user_id == user_id:
+                raise BudgetRuleError(
+                    "Team leaders cannot set their own budget (self_allocation_forbidden).",
+                    "self_allocation_forbidden",
+                    403,
+                )
 
         from app.services.user_allowed_client_service import UserAllowedClientService
 
@@ -415,19 +914,49 @@ class BudgetService:
         if allowed and client not in allowed:
             raise ValueError(f"client '{client}' not allowed for this user")
 
+        await _lock_user_budget_key(session, user_id)
+
         repo = BudgetRepository(session)
 
-        # P0-③ invariant: a per-app budget is an additive SUB-limit UNDER the
-        # user's total budget (see README). It is only enforced on the gateway
-        # hot path via the parent USER-config's app_clients gate, so a per-app
-        # budget without a parent USER total budget would be silently bypassed.
-        # Reject it here to keep the documented invariant (parent must exist).
+        # I-3 (P0-③ invariant): per-app 예산은 USER 총액 예산의 하위 cap 이다.
+        # 부모가 없으면 gateway hot path 의 app_clients 게이트가 부모 config 를
+        # 읽어 조용히 우회된다 → 거부.
         parent = await repo.get_active_config(BudgetScope.USER, user_id)
-        if parent is None:
-            raise ValueError(
-                "cannot set a per-app budget before the user's total budget is set "
-                "(per-app budget is a sub-limit of the user total)"
+        if parent is None or parent.max_budget_usd is None:
+            raise BudgetRuleError(
+                "Cannot set a per-app budget before the user's total budget is set "
+                "(per-app budget is a sub-limit of the user total).",
+                "app_budget_requires_user_budget",
             )
+
+        # I-2: app_c > A_u → 거부. 같은 유저 키를 잠근 뒤 검증하므로 동시에
+        # A_u 가 줄어드는 경합은 없다(§3-0).
+        if data.max_budget_usd > parent.max_budget_usd:
+            raise BudgetRuleError(
+                f"App cap (${data.max_budget_usd}) exceeds the user's total budget "
+                f"(${parent.max_budget_usd}) (app_cap_exceeds_user_budget).",
+                "app_cap_exceeds_user_budget",
+            )
+
+        # §5 확인: app_c_new ≤ app_used → 저장 즉시 그 앱이 차단된다.
+        if not confirm:
+            app_used = await self._current_used(
+                repo, BudgetScope.USER, user_id, current_kst_period(), client=client
+            )
+            if app_used >= data.max_budget_usd:
+                raise ConfirmationRequiredError(
+                    f"This app's usage (${app_used}) already meets or exceeds the new "
+                    f"cap (${data.max_budget_usd}) — '{client}' will be blocked "
+                    f"immediately for this user.",
+                    details={
+                        "warnings": [{
+                            "impact": "app_blocked",
+                            "client": client,
+                            "used_usd": str(app_used),
+                            "new_budget_usd": str(data.max_budget_usd),
+                        }]
+                    },
+                )
 
         config = BudgetConfig(
             id=uuid.uuid4(),
@@ -466,7 +995,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
-            action="SET_USER_CLIENT_BUDGET",
+            action=_confirmed_action("SET_USER_CLIENT_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
             changes={
@@ -496,14 +1025,21 @@ class BudgetService:
         if client not in _ALLOWED_CLIENTS:
             raise ValueError("invalid client")
 
-        # BR-BUD-03: Team leaders can only clear budgets for their own team members.
+        # BR-BUD-03 + D-13: Team leaders can only clear budgets for their own
+        # team members, never their own.
         user_repo = UserRepository(session)
         user = await user_repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
             if user.team_id != actor.team_id:
-                raise ForbiddenError("Team leaders can only set budgets for their own team members")
+                raise ForbiddenError("Team leaders can only clear budgets for their own team members")
+            if actor.user_id == user_id:
+                raise BudgetRuleError(
+                    "Team leaders cannot delete their own budget (self_allocation_forbidden).",
+                    "self_allocation_forbidden",
+                    403,
+                )
 
         repo = BudgetRepository(session)
         existing = await repo.get_active_app_config(BudgetScope.USER, user_id, client)
@@ -575,6 +1111,7 @@ class BudgetService:
         team_id: uuid.UUID,
         data: AllocateBudgetRequest,
         actor: CurrentUser,
+        confirm: bool = False,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
@@ -582,21 +1119,78 @@ class BudgetService:
         if actor.role == UserRole.TEAM_LEADER and actor.team_id != team_id:
             raise ForbiddenError("Team leaders can only allocate budgets within their own team")
 
+        user_repo = UserRepository(session)
+        team = await user_repo.get_team(team_id)
+        if team is None:
+            raise NotFoundError("Team", str(team_id))
+
         repo = BudgetRepository(session)
         team_config = await repo.get_active_config(BudgetScope.TEAM, team_id)
-        if team_config is None:
+        if team_config is None or team_config.max_budget_usd is None:
             raise ValidationError("Team budget must be set before allocation")
 
-        # BR-BUD-01: Validate total allocation <= team budget
-        total_allocation = sum(a.allocated_usd for a in data.allocations)
-        if total_allocation > team_config.max_budget_usd:
-            raise ValidationError(
-                f"Total allocation ({total_allocation}) exceeds team budget ({team_config.max_budget_usd})"
+        # D-2/I-4: 배정 대상은 전부 해당 팀의 **현재** 멤버여야 한다.
+        member_ids = {m.id for m in team.members}
+        for alloc in data.allocations:
+            _check_cent_precision(alloc.allocated_usd)
+            uid = uuid.UUID(alloc.user_id)
+            if uid not in member_ids:
+                raise BudgetRuleError(
+                    f"User {uid} is not a member of team {team_id} "
+                    f"(user_not_in_team).",
+                    "user_not_in_team",
+                    403,
+                )
+            # D-13: 리더는 자기 예산을 배정 목록에 넣을 수 없다.
+            if actor.role == UserRole.TEAM_LEADER and uid == actor.user_id:
+                raise BudgetRuleError(
+                    "Team leaders cannot allocate a budget to themselves "
+                    "(self_allocation_forbidden).",
+                    "self_allocation_forbidden",
+                    403,
+                )
+
+        # D-1: ΣA_u ≤ T 합계 검증은 없다 — CAP 모델은 초과 약정을 허용한다.
+
+        # 데드락 방지: 유저 키를 정렬된 순서로 잠근다.
+        sorted_allocs = sorted(data.allocations, key=lambda a: a.user_id)
+        for alloc in sorted_allocs:
+            await _lock_user_budget_key(session, uuid.UUID(alloc.user_id))
+
+        # 배치를 쓰기 전에 전수 검증한다 — 부분 성공(일부 유저만 새 cap)은
+        # 관리자가 보는 상태와 DB 가 어긋나므로 허용하지 않는다.
+        period = current_kst_period()
+        warnings: list[dict] = []
+        for alloc in sorted_allocs:
+            uid = uuid.UUID(alloc.user_id)
+            # I-2: 새 A_u 가 기존 app_c 보다 낮아지면 모순 → 배치 전체 거부.
+            max_app = await repo.max_app_budget(uid)
+            if max_app is not None and alloc.allocated_usd < max_app:
+                raise BudgetRuleError(
+                    f"Allocation for user {uid} (${alloc.allocated_usd}) is below "
+                    f"an existing app cap (${max_app}) "
+                    f"(user_budget_below_app_cap).",
+                    "user_budget_below_app_cap",
+                )
+            used = await self._current_used(repo, BudgetScope.USER, uid, period)
+            if used >= alloc.allocated_usd:
+                warnings.append({
+                    "impact": "user_blocked",
+                    "user_id": str(uid),
+                    "used_usd": str(used),
+                    "new_budget_usd": str(alloc.allocated_usd),
+                })
+
+        if warnings and not confirm:
+            raise ConfirmationRequiredError(
+                f"{len(warnings)} member(s) would be blocked immediately by the "
+                f"new allocations — re-submit with confirm=true.",
+                details={"warnings": warnings},
             )
 
         # Batch upsert user budgets
         cache_keys: list[str] = []
-        for alloc in data.allocations:
+        for alloc in sorted_allocs:
             uid = uuid.UUID(alloc.user_id)
             config = BudgetConfig(
                 id=uuid.uuid4(),
@@ -618,7 +1212,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
-            action="ALLOCATE_TEAM_BUDGET",
+            action=_confirmed_action("ALLOCATE_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(team_id),
             changes={"after": {"allocations": [a.model_dump() for a in data.allocations]}},
@@ -646,7 +1240,12 @@ class BudgetService:
 
         repo = BudgetRepository(session)
         team_config = await repo.get_first_active_config(BudgetScope.TEAM, team_id)
-        total_budget = team_config.max_budget_usd if team_config else Decimal("0")
+        total_budget = (
+            team_config.max_budget_usd
+            if team_config and team_config.max_budget_usd is not None
+            else Decimal("0")
+        )
+        cap_d = team_config.default_user_cap_usd if team_config else None
 
         # Team-level entry
         team_usage = await repo.get_usage(BudgetScope.TEAM, team_id, period)
@@ -673,12 +1272,25 @@ class BudgetService:
             )
         ]
 
-        # Member entries
+        # Member entries — cap_u = A_u ?? D. 개별 cap 없는 멤버는 D(없으면 팀 한도만).
+        sum_allocated = Decimal("0")
         for member in team.members:
             member_config = await repo.get_first_active_config(BudgetScope.USER, member.id)
-            member_alloc = member_config.max_budget_usd if member_config else Decimal("0")
             member_usage = await repo.get_usage(BudgetScope.USER, member.id, period)
             member_used = member_usage.used_usd if member_usage else Decimal("0")
+
+            if member_config is not None:
+                cap_source = "individual"
+                effective_cap = member_config.max_budget_usd
+                sum_allocated += member_config.max_budget_usd
+            elif cap_d is not None:
+                cap_source = "team_default"
+                effective_cap = cap_d
+            else:
+                cap_source = None
+                effective_cap = None
+
+            member_alloc = effective_cap if effective_cap is not None else Decimal("0")
             member_remaining = member_alloc - member_used
             member_pct = (member_used / member_alloc * 100) if member_alloc > 0 else Decimal("0")
             entries.append(
@@ -691,14 +1303,20 @@ class BudgetService:
                     used_usd=member_used,
                     remaining_usd=member_remaining,
                     alert_level=_alert_level(member_pct),
+                    cap_source=cap_source,
+                    effective_cap_usd=effective_cap,
                 )
             )
 
+        overcommit_ratio = (sum_allocated / total_budget) if total_budget > 0 else None
         return TeamBudgetAllocation(
             team_id=str(team_id),
             team_name=_team_display_name(team),
             total_budget_usd=total_budget,
             entries=entries,
+            default_user_cap_usd=cap_d,
+            sum_allocated_usd=sum_allocated,
+            overcommit_ratio=overcommit_ratio,
         )
 
     async def get_budget_summary(
@@ -810,10 +1428,29 @@ class BudgetService:
         ) -> None:
             cfg = cfg_by_target.get((scope_enum, sid))
             used = await _resolve_used(scope_enum, sid)
-            if cfg is not None:
+            cap_source: str | None = None
+            default_cap: Decimal | None = None
+            if scope_enum == BudgetScope.TEAM:
+                default_cap = cfg.default_user_cap_usd if cfg else None
+            if cfg is not None and cfg.max_budget_usd is not None:
                 limit = cfg.max_budget_usd
                 remaining = limit - used
                 pct = (used / limit * 100) if limit > 0 else Decimal("0")
+                if scope_enum == BudgetScope.USER:
+                    cap_source = "individual"
+            elif scope_enum == BudgetScope.USER and team_id:
+                # 개별 cap 없음 — 팀 기본 cap D 가 있으면 그게 실효 cap 이다.
+                team_cfg = cfg_by_target.get((BudgetScope.TEAM, team_id))
+                team_d = team_cfg.default_user_cap_usd if team_cfg else None
+                if team_d is not None:
+                    limit = team_d
+                    remaining = limit - used
+                    pct = (used / limit * 100) if limit > 0 else Decimal("0")
+                    cap_source = "team_default"
+                else:
+                    limit = None
+                    remaining = None
+                    pct = None
             else:
                 limit = None
                 remaining = None
@@ -831,6 +1468,8 @@ class BudgetService:
                     usage_pct=pct,
                     department_id=department_id,
                     department_name=department_name,
+                    default_user_cap_usd=default_cap,
+                    cap_source=cap_source,
                 )
             )
 
@@ -869,17 +1508,77 @@ class BudgetService:
 
         return BudgetSummaryResponse(period=period, summary=items)
 
+    async def _current_used(
+        self,
+        repo: BudgetRepository,
+        scope: BudgetScope,
+        scope_id: uuid.UUID,
+        period: str,
+        client: str | None = None,
+    ) -> Decimal:
+        """월 사용량 — Redis(enforcement 카운터, 최신) 우선, DB fallback.
+
+        확인 판정(used ≥ new cap)은 hot path 와 같은 카운터를 봐야 한다 —
+        budget_usages 는 워커 배치 반영이라 수 초 뒤처질 수 있다.
+        """
+        scope_type = scope.value.lower()
+        redis = self._cache_mgr._redis
+        try:
+            key = _redis_usage_key(scope_type, str(scope_id), period, client)
+            raw = await redis.get(key)
+            if raw:
+                val = Decimal(raw.decode() if isinstance(raw, bytes) else raw)
+                if val != 0:
+                    return val
+        except Exception:
+            pass
+        if client is None:
+            usage = await repo.get_usage(scope, scope_id, period)
+            return usage.used_usd if usage else Decimal("0")
+        return await repo.get_app_usage(scope, scope_id, period, client)
+
+    async def _unset_members_over_cap(
+        self,
+        session: AsyncSession,
+        repo: BudgetRepository,
+        team: Team,
+        *,
+        cap: Decimal,
+        period: str,
+    ) -> list[dict]:
+        """개별 cap(A_u)이 없는 활성 멤버 중 월 사용량 ≥ cap 인 목록 — 확인 다이얼로그용."""
+        configured = await repo.list_configured_member_ids(team.id)
+        unset_members = [
+            m for m in team.members if m.is_active and m.id not in configured
+        ]
+        if not unset_members:
+            return []
+        usages = await repo.get_usages_for_scope_ids(
+            BudgetScope.USER, [m.id for m in unset_members], period
+        )
+        return [
+            {
+                "user_id": str(m.id),
+                "name": m.display_name or m.email,
+                "used_usd": str(usages.get(m.id, Decimal("0"))),
+            }
+            for m in unset_members
+            if usages.get(m.id, Decimal("0")) >= cap
+        ]
+
     async def _write_team_config_cache(
         self,
         scope_id: uuid.UUID,
-        max_budget_usd: Decimal,
+        max_budget_usd: Decimal | None,
         policy: BudgetPolicy,
         alert_thresholds: list[int],
+        default_cap: Decimal | None = None,
     ) -> None:
         """budget:config:team:{<scope_id>} 를 Redis에 SET.
 
         budget_check.lua 가 기대하는 JSON shape:
-          limit_usd, policy (lowercase), thresholds
+          limit_usd, policy (lowercase), thresholds,
+          default_user_cap_usd (팀 기본 유저 cap D — 미설정 멤버 cap, §3-2)
         Lua / gateway-proxy 기본값(soft_limit_pct, throttle_rpm_pct)은
         DB 스키마에 없으므로 Python 기본값은 포함하지 않음 — Lua 내 기본값 사용.
         """
@@ -888,16 +1587,18 @@ class BudgetService:
             redis = self._cache_mgr._redis
             config_key = f"budget:config:team:{{{scope_id}}}"
             config_data = {
-                "limit_usd": str(max_budget_usd),
+                "limit_usd": str(max_budget_usd) if max_budget_usd is not None else None,
                 "policy": policy.value.lower(),
                 "thresholds": sorted(alert_thresholds),
+                "default_user_cap_usd": str(default_cap) if default_cap is not None else None,
             }
             await redis.set(config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
         except Exception:
             logger.warning("redis_team_config_cache_write_failed", scope_id=str(scope_id))
 
     async def _sync_redis_thresholds(
-        self, scope_type: str, scope_id: uuid.UUID, data: SetBudgetRequest
+        self, scope_type: str, scope_id: uuid.UUID, data: SetBudgetRequest,
+        default_cap: Decimal | None = None,
     ) -> None:
         import json
         try:
@@ -913,6 +1614,12 @@ class BudgetService:
                 "policy": data.policy.value.lower(),
                 "thresholds": sorted(data.alert_thresholds),
             }
+            if scope_type == "team":
+                # team 캐시에만 D 를 싣는다 — gateway 가 미설정 멤버 cap_u 를
+                # 읽는 유일한 경로(§6-6).
+                config_data["default_user_cap_usd"] = (
+                    str(default_cap) if default_cap is not None else None
+                )
             # ⚠️ app_clients 보존을 **애플리케이션에서** GET-modify-SET 으로 하면 안 된다.
             #    `await redis.get` 이 이벤트 루프를 양보하므로 uvicorn 워커 하나 안에서도
             #    두 요청(set_user_budget / set_user_client_budget /
@@ -1008,6 +1715,7 @@ class BudgetService:
                 max_budget_usd=cfg.max_budget_usd,
                 policy=cfg.policy,
                 alert_thresholds=[80, 90, 100],  # DB에 컬럼 없음 — 표준 기본값
+                default_cap=cfg.default_user_cap_usd,
             )
             count += 1
         logger.info("team_budget_cache.warmed", count=count)

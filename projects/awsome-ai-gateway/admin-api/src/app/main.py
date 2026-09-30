@@ -26,6 +26,8 @@ from app.core.encryption import AESEncryptionService
 from app.core.exceptions import (
     AppError,
     BudgetExceededError,
+    BudgetRuleError,
+    ConfirmationRequiredError,
     ConflictError,
     ForbiddenError,
     NotFoundError,
@@ -392,6 +394,30 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse(
             status_code=429,
             content={"error": {"type": "budget_exceeded", "message": exc.message, "code": exc.code}},
+        )
+
+    @app.exception_handler(BudgetRuleError)
+    async def budget_rule_handler(request: Request, exc: BudgetRuleError):
+        # spec 코드 그대로: error.code 가 곧 계약(user_not_in_team 등).
+        err_type = _HTTP_STATUS_ERROR_TYPES.get(exc.status_code, "validation_error")
+        return JSONResponse(
+            status_code=exc.status_code,
+            content={"error": {"type": err_type, "message": exc.message, "code": exc.code}},
+        )
+
+    @app.exception_handler(ConfirmationRequiredError)
+    async def confirmation_required_handler(request: Request, exc: ConfirmationRequiredError):
+        # 409 + details — admin-ui 가 "확인 후 재시도" 다이얼로그를 띄우는 계약.
+        return JSONResponse(
+            status_code=409,
+            content={
+                "error": {
+                    "type": "conflict",
+                    "message": exc.message,
+                    "code": exc.code,
+                    "details": exc.details,
+                }
+            },
         )
 
     @app.exception_handler(STSVerificationError)

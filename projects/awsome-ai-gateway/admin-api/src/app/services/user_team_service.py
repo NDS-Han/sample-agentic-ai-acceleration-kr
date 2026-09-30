@@ -284,9 +284,13 @@ class UserTeamService:
                     )
                     old_team.leader_user_id = remaining_leader.id if remaining_leader else None
 
-        # BR-BUD-04: Deactivate existing user budget configs
+        # BR-BUD-04 + D-15/I-3: 팀 이동 시 개별 cap A_u 와 하위 app_c 를 함께
+        # 제거한다 — 예산은 팀 속성이라 유저를 따라가지 않는다. 사용량 카운터는
+        # 유저 귀속으로 유지(팀 이동으로 한도를 초기화하는 우회 차단).
         budget_repo = BudgetRepository(session)
+        removed_app_clients = await budget_repo.list_active_app_clients(user_id)
         await budget_repo.deactivate_configs(BudgetScope.USER, user_id)
+        await budget_repo.deactivate_app_configs_for_user(user_id)
 
         # BR-RL: Deactivate existing USER scope rate-limit configs
         rl_repo = RateLimitConfigRepository(session)
@@ -305,6 +309,10 @@ class UserTeamService:
         cache_keys: list[str] = [
             f"user_context:{user_id}",
             f"budget:config:user:{{{user_id}}}",
+            *[
+                f"budget:config:user:{{{user_id}}}:{c}"
+                for c in removed_app_clients
+            ],
             *[f"key:cache:vk:{h}" for h in vk_hashes],
         ]
         await self._cache_mgr.invalidate(cache_keys, session=session)

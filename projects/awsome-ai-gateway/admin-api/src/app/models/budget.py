@@ -51,7 +51,10 @@ class BudgetConfig(Base):
     scope: Mapped[BudgetScope] = mapped_column(Enum(BudgetScope, name="budget_scope", schema="budget", create_type=False), nullable=False)
     scope_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     client: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    max_budget_usd: Mapped[Decimal] = mapped_column(Numeric(12, 4), nullable=False)
+    # TEAM scope + client IS NULL 행만 NULL 허용 — T=미설정 상태에서 D 만
+    # 저장된 "사전 준비" 행(ck_budget_configs_max_required, migration 0039).
+    # T=NULL 과 행 없음은 enforcement 에서 team_budget_unset 으로 동일 판정.
+    max_budget_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     period_type: Mapped[PeriodType] = mapped_column(
         Enum(PeriodType, name="period_type", schema="budget", create_type=False), nullable=False, default=PeriodType.MONTHLY
     )

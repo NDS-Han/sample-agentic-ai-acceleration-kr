@@ -111,6 +111,109 @@ class BudgetRepository:
         result = await self._session.execute(stmt)
         return [row[0] for row in result.fetchall()]
 
+    async def get_latest_config(self, scope: BudgetScope, scope_id: uuid.UUID) -> BudgetConfig | None:
+        """최신 총액 config 행 — is_active 무관. T 재설정 시 이전 행의
+        default_user_cap_usd 를 이어 받기 위한 용도(§3-1: A_u·app_c·D 보존)."""
+        stmt = (
+            select(BudgetConfig)
+            .where(
+                BudgetConfig.scope == scope,
+                BudgetConfig.scope_id == scope_id,
+                BudgetConfig.client.is_(None),
+            )
+            .order_by(BudgetConfig.created_at.desc())
+            .limit(1)
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_active_app_configs(self, user_id: uuid.UUID) -> list[BudgetConfig]:
+        """유저의 활성 per-app config 행 전부 — cascade 삭제·확인 다이얼로그용."""
+        stmt = (
+            select(BudgetConfig)
+            .where(
+                BudgetConfig.scope == BudgetScope.USER,
+                BudgetConfig.scope_id == user_id,
+                BudgetConfig.client.is_not(None),
+                BudgetConfig.is_active.is_(True),
+            )
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def deactivate_app_configs_for_user(self, user_id: uuid.UUID) -> list[str]:
+        """유저의 활성 per-app config 전부 비활성화 — 비활성화된 client 목록 반환.
+
+        I-3 cascade: 부모 USER 총액 예산이 사라지는 경로(delete_user_budget,
+        transfer_user, 균등분배 초기화)는 하위 app 예산을 함께 끈다.
+        """
+        rows = await self.list_active_app_configs(user_id)
+        clients = [r.client for r in rows if r.client is not None]
+        for r in rows:
+            r.is_active = False
+        if rows:
+            await self._session.flush()
+        return clients
+
+    async def max_app_budget(self, user_id: uuid.UUID) -> Decimal | None:
+        """유저의 활성 per-app 예산 중 최대값 — I-2 검증(app_c ≤ A_u)용.
+
+        '최소 하나라도 app_c > A_u_new 면 거부' 이므로 MAX 하나면 충분하다."""
+        stmt = select(func.max(BudgetConfig.max_budget_usd)).where(
+            BudgetConfig.scope == BudgetScope.USER,
+            BudgetConfig.scope_id == user_id,
+            BudgetConfig.client.is_not(None),
+            BudgetConfig.is_active.is_(True),
+        )
+        result = await self._session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def list_configured_member_ids(self, team_id: uuid.UUID) -> set[uuid.UUID]:
+        """팀 멤버 중 활성 USER 총액 예산(A_u)이 있는 user_id 집합 — '미설정 멤버' 판별용."""
+        from app.models.auth import User
+
+        stmt = (
+            select(BudgetConfig.scope_id)
+            .join(User, BudgetConfig.scope_id == User.id)
+            .where(
+                BudgetConfig.scope == BudgetScope.USER,
+                BudgetConfig.client.is_(None),
+                BudgetConfig.is_active.is_(True),
+                User.team_id == team_id,
+            )
+        )
+        result = await self._session.execute(stmt)
+        return {row[0] for row in result.fetchall()}
+
+    async def get_app_usage(
+        self, scope: BudgetScope, scope_id: uuid.UUID, period: str, client: str
+    ) -> Decimal:
+        """per-app(client) 월 사용량 — 없으면 0. get_usage 는 client IS NULL 전용."""
+        stmt = select(BudgetUsage).where(
+            BudgetUsage.scope == scope,
+            BudgetUsage.scope_id == scope_id,
+            BudgetUsage.period == period,
+            BudgetUsage.client == client,
+        )
+        result = await self._session.execute(stmt)
+        row = result.scalar_one_or_none()
+        return row.used_usd if row else Decimal("0")
+
+    async def get_usages_for_scope_ids(
+        self, scope: BudgetScope, scope_ids: list[uuid.UUID], period: str
+    ) -> dict[uuid.UUID, Decimal]:
+        """여러 scope_id 의 월 사용량을 한 번에 — 확인 다이얼로그의 영향 멤버 목록용."""
+        if not scope_ids:
+            return {}
+        stmt = select(BudgetUsage).where(
+            BudgetUsage.scope == scope,
+            BudgetUsage.scope_id.in_(scope_ids),
+            BudgetUsage.period == period,
+            BudgetUsage.client.is_(None),
+        )
+        result = await self._session.execute(stmt)
+        return {row.scope_id: row.used_usd for row in result.scalars().all()}
+
     async def get_first_active_config(self, scope: BudgetScope, scope_id: uuid.UUID) -> BudgetConfig | None:
         """Like get_active_config but tolerates duplicate rows. Excludes per-app rows."""
         stmt = (
