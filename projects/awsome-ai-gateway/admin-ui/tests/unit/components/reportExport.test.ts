@@ -67,7 +67,7 @@ describe('buildReportHtml', () => {
 
   it('embeds the rendered narrative HTML and the title', () => {
     const root = makeRoot('<p>총비용은 <strong>$28</strong> 입니다.</p>');
-    const html = buildReportHtml(root, baseMsg, '6월 비용 리포트');
+    const html = buildReportHtml(root, baseMsg, '6월 비용 리포트', 'Asia/Seoul');
     expect(html).toContain('<title>6월 비용 리포트</title>');
     expect(html).toContain('총비용은 <strong>$28</strong> 입니다.');
     expect(html).toContain('분석 요약'); // narrative 섹션 헤더
@@ -93,7 +93,7 @@ describe('buildReportHtml', () => {
         { tool: 'ask_sql_specialist', result: { sql: 'SELECT 2 FROM teams' } },
       ],
     };
-    const html = buildReportHtml(root, msg, 'T');
+    const html = buildReportHtml(root, msg, 'T', 'Asia/Seoul');
     expect(html).toContain('부록 — 실행된 SQL');
     expect(html).toContain('SELECT 1 FROM usage_logs');
     expect(html).toContain('SELECT 2 FROM teams');
@@ -101,13 +101,20 @@ describe('buildReportHtml', () => {
 
   it('omits the SQL appendix when no SQL is present', () => {
     const root = makeRoot('<p>x</p>');
-    const html = buildReportHtml(root, baseMsg, 'T');
+    const html = buildReportHtml(root, baseMsg, 'T', 'Asia/Seoul');
     expect(html).not.toContain('부록 — 실행된 SQL');
+  });
+
+  it('labels the generated-at timestamp with the passed reporting timezone', () => {
+    const root = makeRoot('<p>x</p>');
+    const html = buildReportHtml(root, baseMsg, 'T', 'America/Los_Angeles');
+    expect(html).toContain('(America/Los_Angeles)');
+    expect(html).not.toContain('(KST)');
   });
 
   it('is a self-contained document with inline styles (no external deps)', () => {
     const root = makeRoot('<p>x</p>');
-    const html = buildReportHtml(root, baseMsg, 'T');
+    const html = buildReportHtml(root, baseMsg, 'T', 'Asia/Seoul');
     expect(html.startsWith('<!doctype html>')).toBe(true);
     expect(html).toContain('<style>');
     expect(html).not.toContain('<link rel="stylesheet"'); // 외부 CSS 의존 없음

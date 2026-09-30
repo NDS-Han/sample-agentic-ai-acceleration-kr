@@ -9,6 +9,8 @@ import { useTranslations } from 'next-intl';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { resolveMonth } from '@/lib/utils/period';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { useToast } from '@/components/common/ToastProvider';
 
 interface ExportButtonProps {
   filter: AnalyticsFilterForm;
@@ -20,6 +22,8 @@ type ExportFormat = 'csv' | 'json';
 
 export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
   const t = useTranslations('common');
+  const { toast } = useToast();
+  const reportingTz = useReportingTz();
   const [isOpen, setIsOpen] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -42,7 +46,7 @@ export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
     try {
       // 화면 차트와 동일한 월(resolveMonth)을 보냄 — 상대기간/잘못된 period 가
       // 빈 CSV 를 만들지 않도록. custom 이면 start/end 도 함께 전달.
-      const month = resolveMonth(filter, latestMonth);
+      const month = resolveMonth(filter, latestMonth, reportingTz);
       const exportParams: Record<string, string> = {
         period: month,
         group_by: filter.group_by,
@@ -77,6 +81,8 @@ export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
       URL.revokeObjectURL(url);
     } catch (err) {
       console.error('Export error:', err);
+      // 5xx·네트워크 실패가 console 에만 남으면 유저는 버튼이 무시됐다고 본다.
+      toast({ type: 'error', message: t('exportFailed'), auto_dismiss_ms: 5000 });
     } finally {
       setIsLoading(false);
     }

@@ -206,7 +206,12 @@ tbody tr:nth-child(even){background:#fafbfc;}
 `;
 
 // 최종 리포트 HTML 문서 문자열 조립.
-export function buildReportHtml(root: HTMLElement, message: ChatMessage, title: string): string {
+export function buildReportHtml(
+  root: HTMLElement,
+  message: ChatMessage,
+  title: string,
+  reportingTz: string,
+): string {
   const docEl = document.documentElement;
   const wasDark = docEl.classList.contains('dark');
   // 인쇄에 적합한 라이트 톤으로 고정한 채 차트 색을 인라인 캡처(CSS 변수 기반이라 즉시 반영).
@@ -230,7 +235,7 @@ export function buildReportHtml(root: HTMLElement, message: ChatMessage, title: 
     : '';
 
   const when = new Date().toLocaleString('ko-KR', {
-    timeZone: 'Asia/Seoul',
+    timeZone: reportingTz,
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -247,7 +252,7 @@ export function buildReportHtml(root: HTMLElement, message: ChatMessage, title: 
   <header class="report-header">
     <div class="brand"><span class="dot"></span>AWSome AI Gateway · BI Insight</div>
     <h1>${escapeHtml(title)}</h1>
-    <div class="meta">생성 ${escapeHtml(when)} (KST)</div>
+    <div class="meta">생성 ${escapeHtml(when)} (${escapeHtml(reportingTz)})</div>
   </header>
   <main>
     ${narrative ? `<section class="narrative"><h2>분석 요약</h2>${narrative}</section>` : ''}
@@ -261,9 +266,14 @@ export function buildReportHtml(root: HTMLElement, message: ChatMessage, title: 
 // 리포트를 새 탭에서 연다. document.write() 대신 **Blob URL** 을 새 탭 src 로 주어
 // XSS/파싱 경로를 회피한다(Blob URL 은 same-origin 이라 onload 에서 print() 호출 가능).
 // 팝업 차단 시 같은 Blob 을 HTML 파일로 다운로드(열어서 인쇄→PDF 가능).
-export function exportMessageReport(root: HTMLElement, message: ChatMessage, title?: string): void {
+export function exportMessageReport(
+  root: HTMLElement,
+  message: ChatMessage,
+  title: string | undefined,
+  reportingTz: string,
+): void {
   const reportTitle = title?.trim() || 'BI Insight 분석 리포트';
-  const html = buildReportHtml(root, message, reportTitle);
+  const html = buildReportHtml(root, message, reportTitle, reportingTz);
 
   const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);

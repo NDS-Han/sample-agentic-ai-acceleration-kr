@@ -83,6 +83,14 @@ spec:
               value: {{ .Values.observability.otel.endpoint | quote }}
             - name: OTEL_EXPORTER_OTLP_PROTOCOL
               value: "http/protobuf"
+            # 집계 캘린더 경계 타임존 — 공통 ConfigMap(global.reportingTimezone)의
+            # 같은 키를 읽어 admin-api 와 불일치가 생길 수 없게 한다.
+            # admin-ui 는 월 경계 계산(대시보드/예산 기간, daily-avg 분모)에 쓴다.
+            - name: REPORTING_TIMEZONE
+              valueFrom:
+                configMapKeyRef:
+                  name: {{ include "llm-gateway.fullname" . }}-config
+                  key: REPORTING_TIMEZONE
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
             {{/* admin-api 와 **같은 values 키**에서 그룹 매핑 두 값을 받는다.
                  어긋나면 관리자 잠김(_helpers.tpl adminUiIdpEnv 주석 참조). */}}

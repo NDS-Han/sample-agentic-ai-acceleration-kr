@@ -14,6 +14,7 @@ import { HeartbeatTimeline } from './HeartbeatTimeline';
 import { ReportCard } from './ReportCard';
 import { PlanCard } from './PlanCard';
 import { exportMessageReport } from './reportExport';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 // 답변 본문의 마크다운 표를 모델관리 등과 동일한 공통 Table 컴포넌트로 렌더(§60) —
@@ -111,6 +112,7 @@ function ReasoningBlock({ text, live }: { text: string; live: boolean }) {
 
 export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
   const t = useTranslations('chat');
+  const reportingTz = useReportingTz();
   const isUser = message.role === 'user';
   const bodyRef = useRef<HTMLDivElement>(null);
 
@@ -126,7 +128,7 @@ export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
   function handleExport() {
     if (!bodyRef.current) return;
     const title = deriveReportTitle(message);
-    exportMessageReport(bodyRef.current, message, title);
+    exportMessageReport(bodyRef.current, message, title, reportingTz);
   }
 
   return (

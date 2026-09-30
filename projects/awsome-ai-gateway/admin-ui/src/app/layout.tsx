@@ -23,6 +23,8 @@ import { Header } from '@/components/layout/Header';
 import { ToastProvider } from '@/components/common/ToastProvider';
 import { ThemeProvider } from '@/components/common/ThemeProvider';
 import { ChatShell } from '@/components/chat/ChatShell';
+import { ReportingTimezoneProvider } from '@/components/common/ReportingTimezoneProvider';
+import { reportingTimezone } from '@/lib/utils/period';
 import type { AdminSession } from '@/types/entities';
 
 export const metadata: Metadata = {
@@ -73,6 +75,9 @@ export default async function RootLayout({
       <body>
         <ThemeProvider>
           <NextIntlClientProvider messages={messages} locale={locale}>
+            {/* 리포팅 TZ — 서버 env(REPORTING_TIMEZONE, 백엔드 집계와 동일 값)를
+                클라이언트 트리로. 월 경계 계산이 모든 클라이언트에서 같은 TZ 를 쓰게 한다. */}
+            <ReportingTimezoneProvider tz={reportingTimezone()}>
             <ToastProvider>
               <div className="flex h-screen bg-background">
                 <Sidebar role={session?.role} chatEnabled={chatDeployed} />
@@ -90,6 +95,7 @@ export default async function RootLayout({
                 </ChatShell>
               </div>
             </ToastProvider>
+            </ReportingTimezoneProvider>
           </NextIntlClientProvider>
         </ThemeProvider>
       </body>

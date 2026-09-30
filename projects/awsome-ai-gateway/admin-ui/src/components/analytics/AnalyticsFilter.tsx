@@ -7,6 +7,7 @@ import { useLocale, useTranslations } from 'next-intl';
 import type { AnalyticsFilterForm } from '@/types/api';
 import type { GroupByType } from '@/types/enums';
 import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 
 interface AnalyticsFilterProps {
   defaultValue: AnalyticsFilterForm;
@@ -28,8 +29,9 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
     { value: 'user', label: t('groupByOptions.user') },
   ];
   const isCustom = defaultValue.period === 'custom';
-  const thisMonth = currentCalendarMonth();
-  const lastMonth = monthsAgo(1);
+  const reportingTz = useReportingTz();
+  const thisMonth = currentCalendarMonth(reportingTz);
+  const lastMonth = monthsAgo(1, reportingTz);
 
   function buildSearchParams(update: Partial<AnalyticsFilterForm>): string {
     const merged: AnalyticsFilterForm = { ...defaultValue, ...update };

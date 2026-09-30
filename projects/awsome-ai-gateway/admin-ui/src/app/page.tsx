@@ -33,7 +33,7 @@ import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
 import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpendTable';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
-import { kstNowParts } from '@/lib/utils/period';
+import { reportingNowParts } from '@/lib/utils/period';
 
 
 
@@ -65,14 +65,17 @@ function computeDailyAvg(period: string, totalCost: number): {
   projection: number | null;
 } {
   const [y, m] = period.split('-').map(Number);
-  const daysInMonth = new Date(y, m, 0).getDate();
-  // ⚠️ "지금" 은 KST 로 구한다. 분자(summary.total_cost_usd)는 백엔드에서 KST 버킷으로
-  //    집계되는데 분모를 pod 의 UTC 시계로 나누면 매일 00:00~09:00 KST 사이에 경과일이
-  //    하루 적어 일평균이 과대계상되고, 매월 1일 그 9시간 동안은 isCurrentMonth 가
-  //    false 가 되어 월말 예상이 아무 설명 없이 사라진다.
-  const kstNow = kstNowParts();
-  const isCurrentMonth = y === kstNow.y && m === kstNow.m;
-  const elapsedDays = isCurrentMonth ? kstNow.d : daysInMonth;
+  // 달력 일수는 TZ 와 무관한 순수 계산이지만, 로컬 Date 생성자(실행환경 TZ)를
+  // 피해 UTC 산술로 둔다 — 파일 전체의 TZ-free 규칙과 일치시키기 위함.
+  const daysInMonth = new Date(Date.UTC(y, m, 0)).getUTCDate();
+  // ⚠️ "지금" 은 리포팅 TZ 로 구한다. 분자(summary.total_cost_usd)는 백엔드에서
+  //    REPORTING_TIMEZONE 버킷으로 집계되는데 분모를 pod 의 UTC 시계로 나누면
+  //    리포팅 TZ 의 새벽(UTC 자정~TZ 자정) 사이에 경과일이 하루 적어 일평균이
+  //    과대계상되고, 매월 1일 그 구간엔 isCurrentMonth 가 false 가 되어 월말 예상이
+  //    아무 설명 없이 사라진다.
+  const now = reportingNowParts();
+  const isCurrentMonth = y === now.y && m === now.m;
+  const elapsedDays = isCurrentMonth ? now.d : daysInMonth;
   const dailyAvg = elapsedDays > 0 ? totalCost / elapsedDays : 0;
   const projection = isCurrentMonth ? dailyAvg * daysInMonth : null;
   return { dailyAvg, projection };

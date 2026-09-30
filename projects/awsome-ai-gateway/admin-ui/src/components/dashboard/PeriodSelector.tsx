@@ -9,6 +9,7 @@ import {
   monthsAgo,
   toKoreanMonthLabel,
 } from '@/lib/utils/period';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 
 interface PeriodSelectorProps {
   periods: string[]; // 선택 가능한 월 (YYYY-MM), 최신순
@@ -26,9 +27,10 @@ export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
+  const reportingTz = useReportingTz();
 
-  const thisMonth = currentCalendarMonth();
-  const lastMonth = monthsAgo(1);
+  const thisMonth = currentCalendarMonth(reportingTz);
+  const lastMonth = monthsAgo(1, reportingTz);
 
   function go(period: string) {
     if (period === current) return;

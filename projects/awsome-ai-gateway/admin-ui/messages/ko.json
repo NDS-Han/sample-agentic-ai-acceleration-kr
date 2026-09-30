@@ -29,6 +29,7 @@
     "search": "검색",
     "filter": "필터",
     "export": "내보내기",
+    "exportFailed": "내보내기에 실패했습니다. 다시 시도해 주세요.",
     "refresh": "새로고침",
     "close": "닫기",
     "back": "뒤로가기",

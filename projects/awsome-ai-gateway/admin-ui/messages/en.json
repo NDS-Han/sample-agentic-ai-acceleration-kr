@@ -29,6 +29,7 @@
     "search": "Search",
     "filter": "Filter",
     "export": "Export",
+    "exportFailed": "Export failed. Please try again.",
     "refresh": "Refresh",
     "close": "Close",
     "back": "Back",

@@ -4,6 +4,7 @@ import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
 import { normalizeAllocation } from '@/lib/budget-allocation';
+import { currentCalendarMonth } from '@/lib/utils/period';
 import { parseJWT } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
@@ -17,8 +18,9 @@ export default async function BudgetsPage() {
   const session = jwt ? parseJWT(jwt) : null;
   const isAdmin = session?.role === 'ADMIN';
 
-  const now = new Date();
-  const period = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+  // 리포팅 TZ 기준 현재월 — 로컬 new Date()(pod UTC)로 계산하면 매월 1일 리포팅 TZ
+  // 새벽(UTC 자정~TZ 자정)에 지난달 요약을 보여준다. 백엔드 집계 버킷과 같은 env 값.
+  const period = currentCalendarMonth();
 
   interface RawBudgetItem {
     target_type: string;
