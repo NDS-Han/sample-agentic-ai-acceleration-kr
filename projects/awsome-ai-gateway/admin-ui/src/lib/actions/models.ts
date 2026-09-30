@@ -338,21 +338,10 @@ export async function setTeamAllowedModelsAction(
   }
 }
 
-export async function clearTeamAllowedModelsAction(
-  teamId: string
-): Promise<ActionResult<{ team_id: string; model_aliases: string[] }>> {
-  try {
-    const data = await withRetry(() =>
-      adminAPI.delete<{ team_id: string; model_aliases: string[] }>(
-        `/admin/teams/${teamId}/allowed-models`
-      )
-    );
-    revalidatePath('/models');
-    return { success: true, data };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
+// clearTeamAllowedModelsAction 은 의도적으로 없다 — "제한 해제"는 이제
+// setTeamAllowedModelsAction(teamId, []) 로 staged 저장된다(백엔드
+// replace-all 은 빈 목록을 무제한 복귀로 처리). 즉시 DELETE 버튼은
+// Apply 워크플로를 우회해 제거됐다.
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 

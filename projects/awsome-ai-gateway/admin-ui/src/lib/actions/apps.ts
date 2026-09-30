@@ -2,7 +2,6 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { revalidatePath } from 'next/cache';
 import { getTranslations } from 'next-intl/server';
 import { z } from 'zod';
 import { adminAPI } from '@/lib/api-client';

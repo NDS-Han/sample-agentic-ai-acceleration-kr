@@ -18,6 +18,7 @@ import {
 import { CLIENTS, CLIENT_LABELS, type GatewayClient } from '@/lib/constants/gateway';
 import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { useToast } from '@/components/common/ToastProvider';
+import type { PolicySummary } from '@/components/common/policySummary';
 
 const ALL_CLIENTS = CLIENTS;
 type ClientId = GatewayClient;
@@ -40,6 +41,8 @@ function selectedToClients(selected: string[]): string[] {
 export interface ScopeAppAccessHandle {
   /** 통합 저장 경로 — 성공 시 true. 실패 시 토스트를 띄우고 false. */
   save: () => Promise<boolean>;
+  /** 편집을 마지막 저장 상태로 되돌린다 (통합 Apply 바의 섹션별 되돌리기). */
+  revert: () => void;
 }
 
 interface ScopeAppAccessPanelProps {
@@ -47,11 +50,17 @@ interface ScopeAppAccessPanelProps {
   scopeId: string;
   /** 자체 Apply 버튼 숨김 — 부모의 통합 저장이 ref.save() 를 호출한다. */
   hideActions?: boolean;
+  /** 헤더(제목/설명/배지) 숨김 — PolicySection 헤더가 대신 보여준다. */
+  bare?: boolean;
+  /** 부모 저장 진행 중 — 편집을 잠근다(저장 중 토글이 다음 저장에 섞이는 것 방지). */
+  disabled?: boolean;
   onDirtyChange?: (_dirty: boolean) => void;
+  /** 저장된 정책 요약을 부모(섹션 헤더 배지)에 보고한다. */
+  onSummaryChange?: (_summary: PolicySummary) => void;
 }
 
 export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAccessPanelProps>(
-  function ScopeAppAccessPanel({ scope, scopeId, hideActions, onDirtyChange }, ref) {
+  function ScopeAppAccessPanel({ scope, scopeId, hideActions, bare, disabled, onDirtyChange, onSummaryChange }, ref) {
     const t = useTranslations('users.scopeAppAccess');
     const { toast } = useToast();
     const [isLoadPending, startLoadTransition] = useTransition();
@@ -82,7 +91,7 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       return () => {
         cancelled = true;
       };
-    }, [scope, scopeId]);
+    }, [scope, scopeId, t, toast]);
 
     const toggle = (c: ClientId) => {
       setSelected((prev) =>
@@ -90,7 +99,7 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       );
     };
 
-    const busy = isLoadPending || isSavePending;
+    const busy = isLoadPending || isSavePending || disabled === true;
     const dirty =
       loaded &&
       selectedToClients(selected).join(',') !==
@@ -100,8 +109,24 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       onDirtyChange?.(dirty);
     }, [dirty, onDirtyChange]);
 
+    // 헤더 배지는 **저장된** 상태만 보여준다 — 편집 중 값이 배지에 올라가면
+    // 저장 전 상태가 저장된 것처럼 오독된다(수정됨 마커는 dirty 가 담당).
+    useEffect(() => {
+      const restricted = selectedToClients(loadedSelected);
+      onSummaryChange?.({
+        loaded,
+        restricted: restricted.length > 0,
+        count: restricted.length,
+      });
+    }, [loaded, loadedSelected, onSummaryChange]);
+
     const save = async (): Promise<boolean> => {
-      if (!loaded) return false;
+      // 로드 실패 상태의 저장은 무음 false 가 아니라 명시적 차단이어야 한다 —
+      // stale 전체허용이 기존 제한을 덮는 사고 방지.
+      if (!loaded) {
+        toast({ type: 'error', message: t('loadError'), auto_dismiss_ms: 4000 });
+        return false;
+      }
       const r = await setScopeAllowedClientsAction(
         scope,
         scopeId,
@@ -120,7 +145,11 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       return true;
     };
 
-    useImperativeHandle(ref, () => ({ save }));
+    const revert = () => {
+      setSelected(loadedSelected);
+    };
+
+    useImperativeHandle(ref, () => ({ save, revert }));
 
     const handleApply = () => {
       startSaveTransition(async () => {
@@ -137,21 +166,25 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       ].join(' ');
 
     return (
-      <div className="border rounded-apple-md p-3">
-        <div className="flex items-center gap-2 mb-1">
-          <p className="text-sm font-medium">{t('title')}</p>
-          {loaded &&
-            (selected.length === ALL_CLIENTS.length ? (
-              <span className="badge badge-teal">{t('unrestricted')}</span>
-            ) : (
-              <span className="badge badge-amber">
-                {t('restricted', { count: selected.length })}
-              </span>
-            ))}
-        </div>
-        <p className="text-xs text-muted-foreground mb-3">
-          {scope === 'team' ? t('descriptionTeam') : t('descriptionOrg')}
-        </p>
+      <div className={bare ? '' : 'border rounded-apple-md p-3'}>
+        {!bare && (
+          <>
+            <div className="flex items-center gap-2 mb-1">
+              <p className="text-sm font-medium">{t('title')}</p>
+              {loaded &&
+                (selected.length === ALL_CLIENTS.length ? (
+                  <span className="badge badge-teal">{t('unrestricted')}</span>
+                ) : (
+                  <span className="badge badge-amber">
+                    {t('restricted', { count: selected.length })}
+                  </span>
+                ))}
+            </div>
+            <p className="text-xs text-muted-foreground mb-3">
+              {scope === 'team' ? t('descriptionTeam') : t('descriptionOrg')}
+            </p>
+          </>
+        )}
         {isLoadPending ? (
           <div className="text-xs text-muted-foreground py-1">{t('loading')}</div>
         ) : (

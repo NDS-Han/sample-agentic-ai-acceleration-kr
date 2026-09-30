@@ -66,7 +66,9 @@
     "loadFailed": "Failed to load data",
     "loadFailedDesc": "A temporary error occurred while fetching data. Please try again.",
     "unsavedChanges": "Unsaved changes",
-    "apply": "Apply"
+    "apply": "Apply",
+    "revert": "Revert",
+    "applyPartialNote": "Sections save in order — if one fails the rest are skipped and earlier saves are kept."
   },
   "auth": {
     "login": "Login",
@@ -447,14 +449,10 @@
     "selectAll": "Select all",
     "clearAll": "Clear all",
     "savePermission": "Save permissions",
-    "clearRestriction": "Clear restriction (allow all)",
-    "clearRestrictionTitle": "Clear this team's model restriction?",
-    "clearRestrictionMessage": "This deletes the team's allowed-model list. Every member will be able to use every model.",
     "saveNotReady": "The policy is still loading — try again in a moment.",
     "loadingText": "Loading...",
     "minOneModel": "Select at least one model.",
     "teamPermissionSaved": "Team model access saved.",
-    "restrictionCleared": "Model access restriction cleared.",
     "deactivateSuccess": "Model {alias} has been deactivated.",
     "deactivateTarget": "Model",
     "deactivateTargetSuffix": "will be deactivated.",
@@ -503,7 +501,8 @@
       "empty": "No routing profiles found. (Migration 0021 is required to seed claude-code/cowork/codex.)",
       "saveFailed": "Save failed: {error}"
     },
-    "selectedCount": "{count}/{total} selected"
+    "selectedCount": "{count}/{total} selected",
+    "emptySaveHint": "Selecting none cannot be saved — to allow all models, select all and save."
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -707,7 +706,8 @@
       "apply": "Apply",
       "saveSuccess": "App access policy saved",
       "loadError": "Failed to load the app access policy"
-    }
+    },
+    "budgetSectionTitle": "Budget"
   },
   "analytics": {
     "title": "Analytics",
@@ -1125,5 +1125,18 @@
     "title": "Access denied",
     "description": "You do not have permission to view this page. Contact an administrator if you need access.",
     "backHome": "Back to home"
+  },
+  "policyState": {
+    "unrestricted": "Unrestricted",
+    "restricted": "{count} allowed",
+    "sourceOwn": "Custom",
+    "sourceTeam": "Team policy",
+    "sourceOrganization": "Org policy",
+    "sourceDefault": "Default",
+    "modified": "Modified",
+    "failed": "Save failed",
+    "readonly": "Read-only",
+    "nodeTypeTeam": "Team",
+    "nodeTypeUser": "User"
   }
 }

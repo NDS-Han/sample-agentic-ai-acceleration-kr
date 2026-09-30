@@ -21,6 +21,8 @@ import {
 import { listActiveModelsAction } from '@/lib/actions/models';
 import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
 import { AppDialog } from '@/components/common/AppDialog';
+import { PolicySection } from '@/components/common/PolicySection';
+import { EMPTY_POLICY_SUMMARY, type PolicySummary } from '@/components/common/policySummary';
 import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
@@ -161,6 +163,14 @@ function clientsKey(clients: string[]): string {
   return selectedToClients(clients).slice().sort().join(',');
 }
 
+// EffectivePolicy 의 *_source 값 → policyState 출처 배지 키.
+const SOURCE_KEY = {
+  user: 'sourceOwn',
+  team: 'sourceTeam',
+  organization: 'sourceOrganization',
+  none: 'sourceDefault',
+} as const;
+
 function UserPanel({
   node,
   onDirtyChange,
@@ -169,6 +179,7 @@ function UserPanel({
   onDirtyChange?: (_dirty: boolean) => void;
 }) {
   const t = useTranslations('users');
+  const tp = useTranslations('policyState');
   const { toast } = useToast();
   // 로드용/저장용 transition 분리 — 초기 조회 중에 Apply 버튼이 스피너로 보이는 혼동 방지.
   const [isLoadPending, startLoadTransition] = useTransition();
@@ -200,18 +211,20 @@ function UserPanel({
   //   저장하면 기존 override 가 의도치 않게 DELETE(팀 폴백)되어 제한이 풀린다 —
   //   국가핵심기술 제한이므로 로드 실패 시에는 모델 정책 저장 자체를 건너뛴다.
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  // 개인 override 가 없으면 체크박스에 유효 목록(팀 상속 또는 전체)을 미리 채워
-  // 보여준다 — 빈 체크박스는 "전부 차단"으로 읽히기 때문. 미리 채운 값은 표시용
-  // 이라 저장 자격이 없어야 하므로, 실제로 쓰는 것은 사용자가 토글한 뒤뿐이다
-  // (그대로 저장하면 팀 정책이 개인 override 로 굳어 이후 팀 변경이 안 따라온다).
-  const [modelsTouched, setModelsTouched] = useState(false);
+  // 저장된 정책의 표시용 기준선 — override 가 없으면 상속 목록(팀/전체)으로
+  // 채워진 체크 상태가 기준이다. 되돌리기·저장 후 표시에 쓴다.
+  // dirty 판정은 touched 플래그가 아니라 baseline 과의 비교로 한다 —
+  // 토글했다 원상태로 되돌리면 dirty 가 아니고, 그런 상태를 저장하면
+  // 상속값이 개인 override 로 굳어 이후 팀 변경이 안 따라온다.
+  const [modelBaseline, setModelBaseline] = useState<string[]>([]);
+  // 통합 Apply 의 실패 섹션 — 헤더에 "저장 실패" 배지 + 자동 펼침에 쓴다.
+  const [failedSection, setFailedSection] = useState<'apps' | 'models' | null>(null);
 
   useEffect(() => {
     // 사용자 전환 시 이전 사용자 상태 잔존 방지(잘못된 저장 차단).
     let cancelled = false;
     setModelsLoaded(false);
     setClientsLoaded(false);
-    setModelsTouched(false);
     setLoadedModelAliases([]);
     setSelectedModelAliases([]);
     startLoadTransition(async () => {
@@ -262,14 +275,18 @@ function UserPanel({
       }
       if (m.success) {
         setLoadedModelAliases(m.data.modelAliases);
-        if (m.data.modelAliases.length > 0) {
-          setSelectedModelAliases(m.data.modelAliases);
-        } else if (p.success && p.data.allowed_models_source !== 'user') {
-          // override 없음 → 유효 목록(팀 정책 또는 전체 모델)을 체크 상태로 표시.
-          const inherited =
-            p.data.allowed_models ?? (cat.success ? cat.data.map((mm) => mm.alias) : []);
-          setSelectedModelAliases(inherited);
-        }
+        // override 없음 → 유효 목록(팀 정책 또는 전체 모델)을 체크 상태로 표시.
+        const display =
+          m.data.modelAliases.length > 0
+            ? m.data.modelAliases
+            : p.success && p.data.allowed_models_source !== 'user'
+              ? (p.data.allowed_models ??
+                (cat.success ? cat.data.map((mm) => mm.alias) : []))
+              : cat.success
+                ? cat.data.map((mm) => mm.alias)
+                : [];
+        setSelectedModelAliases(display);
+        setModelBaseline(display);
         setModelsLoaded(true);
       } else {
         toast({
@@ -282,10 +299,9 @@ function UserPanel({
     return () => {
       cancelled = true;
     };
-  }, [node.id]);
+  }, [node.id, t, toast]);
 
   const toggleModel = (alias: string) => {
-    setModelsTouched(true);
     setSelectedModelAliases((prev) =>
       prev.includes(alias) ? prev.filter((a) => a !== alias) : [...prev, alias]
     );
@@ -293,6 +309,7 @@ function UserPanel({
 
   const handleApply = () => {
     startSaveTransition(async () => {
+      setFailedSection(null);
       // ★ 허용 클라이언트 정책이 정상 로드되지 않았으면 stale 전체허용([])을
       //   저장해 의도치 않게 허용되는 사고를 막기 위해 저장 자체를 중단한다.
       if (!clientsLoaded) {
@@ -309,6 +326,7 @@ function UserPanel({
       if (accessDirty) {
         const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
         if (!r.success) {
+          setFailedSection('apps');
           toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
           return;
         }
@@ -318,18 +336,18 @@ function UserPanel({
       // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
       // ★ 모델 정책이 정상 로드되지 않았으면(modelsLoaded=false) stale 빈 목록을
       //   저장해 기존 override 를 의도치 않게 해제하는 사고를 막기 위해 저장을 건너뛴다.
-      if (modelsLoaded && modelsTouched) {
+      let savedAliases: string[] | null = null;
+      if (modelsDirty) {
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
         if (!mr.success) {
           // 접근 권한은 이미 저장됨 — 모델만 실패. loaded 상태를 동기화 후 알림.
           setLoadedSelected(savedSelected);
           setSelected(savedSelected);
+          setFailedSection('models');
           toast({ type: 'error', message: mr.error, auto_dismiss_ms: 4000 });
           return;
         }
-        setLoadedModelAliases(mr.data.modelAliases);
-        setSelectedModelAliases(mr.data.modelAliases);
-        setModelsTouched(false);
+        savedAliases = mr.data.modelAliases;
       }
 
       // 모두 성공 — loaded 상태를 낙관적 값으로 갱신. 유효 정책도 다시 읽어
@@ -338,6 +356,22 @@ function UserPanel({
       setSelected(savedSelected);
       const p2 = await getEffectivePolicyAction(node.id);
       if (p2.success) setPolicy(p2.data);
+      if (savedAliases !== null) {
+        setLoadedModelAliases(savedAliases);
+        // override 해제([]) 후엔 상속 목록을 다시 표시해야 한다 — 전부 미체크는
+        // "차단" 처럼 읽히므로 유효 목록으로 채운다. 저장 전 policy 는 stale 이므로
+        // 방금 다시 읽은 p2 를 우선 쓴다.
+        const effective =
+          (p2.success ? p2.data.allowed_models : policy?.allowed_models) ?? null;
+        const display =
+          savedAliases.length > 0
+            ? savedAliases
+            : effective && effective.length > 0
+              ? effective
+              : models.map((mm) => mm.alias);
+        setSelectedModelAliases(display);
+        setModelBaseline(display);
+      }
       toast({
         type: 'success',
         message: t('saveSuccess'),
@@ -352,11 +386,35 @@ function UserPanel({
   // 접근 권한은 canonical key 로 비교 ([]·전체선택 동일 취급, 순서 무관).
   // clientsLoaded=false 면 stale 상태가 dirty 로 보이지 않게 막는다.
   const accessDirty = clientsLoaded && clientsKey(selected) !== clientsKey(loadedSelected);
-  // 모델 선택은 순서 무관 비교 (toggle 시 순서가 바뀌므로).
-  // modelsLoaded=false 면 비교 자체를 막아 stale 상태가 dirty 로 보이지 않게 한다.
-  // 토글로 실제 변경이 있을 때만 dirty — 상속 프리필은 변경이 아니다.
-  const modelsDirty = modelsLoaded && modelsTouched;
+  // 모델 선택은 기준선(상속 프리필 포함)과 순서 무관 비교 — 상속값과 같은 선택은
+  // dirty 가 아니며, 저장하면 상속이 개인 override 로 굳는다.
+  const modelsDirty =
+    modelsLoaded &&
+    selectedModelAliases.slice().sort().join(',') !== modelBaseline.slice().sort().join(',');
+
+  // 헤더 배지는 저장된 "유효" 상태를 보여야 한다 — 개인 override 가 없어
+  // 상속이면 loaded* 은 비어 있지만 실제 제한은 팀/조직 정책이 정한다.
+  // policy 로드 실패 시에는 표시 기준선(loadedSelected/modelBaseline)으로 추정한다.
+  const appBadgeRestricted = policy
+    ? (policy.allowed_clients?.length ?? 0) > 0
+    : selectedToClients(loadedSelected).length > 0;
+  const appBadgeCount = policy
+    ? (policy.allowed_clients?.length ?? 0)
+    : selectedToClients(loadedSelected).length;
+  const modelBadgeRestricted = policy
+    ? (policy.allowed_models?.length ?? 0) > 0
+    : loadedModelAliases.length > 0
+      ? true // 개인 override 존재 = 명시적 제한
+      : models.length > 0 &&
+        modelBaseline.length > 0 &&
+        modelBaseline.length < models.length;
+  const modelBadgeCount = policy
+    ? (policy.allowed_models?.length ?? 0)
+    : loadedModelAliases.length > 0
+      ? loadedModelAliases.length
+      : modelBaseline.length;
   const dirty = accessDirty || modelsDirty;
+  const dirtyCount = (accessDirty ? 1 : 0) + (modelsDirty ? 1 : 0);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -390,19 +448,49 @@ function UserPanel({
         <span className="font-medium">{teamName}</span>
       </div>
 
-      <div className="border-t pt-4">
-        <div className="flex items-center gap-2 mb-2">
-          <p className="text-sm font-medium">{t('appAccess.title')}</p>
-          {clientsLoaded && (
-            selected.length === ALL_CLIENTS.length ? (
-              <span className="badge badge-teal">{t('appAccess.unrestricted')}</span>
-            ) : (
-              <span className="badge badge-amber">
-                {t('appAccess.restricted', { count: selected.length })}
-              </span>
-            )
+      {/* sticky 요약 스트립 — 노드 타입 · 수정된 섹션 수 · 마지막 실패 섹션.
+          긴 패널을 스크롤해도 "무엇이 바뀌었는지"가 헤더에서 읽힌다. */}
+      {(dirty || failedSection) && (
+        <div className="sticky top-2 z-20 mb-3 flex w-fit flex-wrap items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
+          <span className="badge badge-neutral whitespace-nowrap">{tp('nodeTypeUser')}</span>
+          {dirty && (
+            <span className="text-muted-foreground whitespace-nowrap">
+              {tp('modified')} {dirtyCount}
+            </span>
+          )}
+          {failedSection && (
+            <span className="text-destructive whitespace-nowrap">
+              {tp('failed')}: {failedSection === 'apps' ? t('appAccess.title') : t('userModels.title')}
+            </span>
           )}
         </div>
+      )}
+
+      <PolicySection
+        title={t('appAccess.title')}
+        autoOpen={accessDirty || failedSection === 'apps'}
+        badges={
+          <>
+            {(clientsLoaded || policy) &&
+              (appBadgeRestricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('restricted', { count: appBadgeCount })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {policy && (
+              <span className="badge badge-neutral whitespace-nowrap">
+                {tp(SOURCE_KEY[policy.allowed_clients_source])}
+              </span>
+            )}
+            {accessDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'apps' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
         <p className="text-xs text-muted-foreground mb-2">
           {t('appAccess.description')}
         </p>
@@ -439,124 +527,159 @@ function UserPanel({
             ))}
           </div>
         )}
+      </PolicySection>
 
-        {!isLoadPending && (
-          // 접이식 섹션 — 패널이 앱접근/예산/모델/유효정책 4개 서브시스템을 한 열로
-          // 쌓아 길다. details/summary 는 네이티브로 키보드·스크린리더를 지원한다.
-          <details open className="border rounded-apple-md p-3 mb-3 group">
-            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-2 [&::-webkit-details-marker]:hidden">
-              <span>{t('budgetInput.title')}</span>
-              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
-            </summary>
-            <div className="flex items-center justify-end mb-2">
-              <Link
-                href="/budgets"
-                className="text-xs text-primary hover:underline"
-              >
-                {t('budgetInput.editInBudgets')}
-              </Link>
-            </div>
-            {/* 총예산(사용자/팀) + 앱별 예산을 게이지로 표시. 앱별은 접근 허용과 무관하게
-                전체 앱을 보여준다 — 허용되지 않은 앱에 설정된 예산(고아 예산)도
-                여기서 보여야 발견할 수 있다. */}
-            <div className="space-y-2">
-              {policy?.budgets
-                .filter((b) => (b.scope === 'USER' && b.client === null) || b.scope === 'TEAM')
-                .map((b, i) => (
-                  <BudgetGaugeRow
-                    key={`total-${i}`}
-                    label={b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
-                    max={b.max_budget_usd}
-                    used={b.used_usd}
-                    unsetLabel={t('budgetInput.placeholder')}
-                  />
-                ))}
-              {CLIENT_OPTIONS.map((o) => {
-                const cfg = policy?.budgets.find(
-                  (b) => b.scope === 'USER' && b.client === o.value,
-                );
-                return (
-                  <BudgetGaugeRow
-                    key={o.value}
-                    label={o.label}
-                    max={cfg?.max_budget_usd ?? null}
-                    used={cfg?.used_usd ?? null}
-                    unsetLabel={t('budgetInput.placeholder')}
-                  />
-                );
-              })}
-            </div>
-          </details>
-        )}
-
-        {!isLoadPending && (
-          <details open className="border rounded-apple-md p-3 mb-3 group">
-            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-1 [&::-webkit-details-marker]:hidden">
-              <span>{t('userModels.title')}</span>
-              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
-            </summary>
-            <p className="text-xs text-muted-foreground mb-3">
-              {t('userModels.hint')}
-            </p>
-            {/* 정책 출처 캡션 — 개인 override 가 없으면 체크박스의 체크 상태는
-                팀 정책(또는 전체 허용)의 프리필이다. 변경하면 개인 정책으로 저장됨을
-                명시한다. */}
-            {policy && policy.allowed_models_source !== 'user' && (
-              <p className="text-xs text-muted-foreground mb-3">
-                {policy.allowed_models_source === 'team'
-                  ? t('userModelsInheritTeam')
-                  : t('userModelsInheritNone')}
-              </p>
-            )}
-            {!modelsLoaded ? (
-              <div className="text-xs text-destructive py-1">
-                {t('userModels.loadFailed')}
-              </div>
-            ) : models.length === 0 ? (
-              <div className="text-xs text-muted-foreground py-1">{t('userModels.empty')}</div>
-            ) : (
-              <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
-                {models.map((m) => (
-                  <label
-                    key={m.alias}
-                    className="flex items-center gap-2 rounded-apple-sm border p-2 cursor-pointer hover:bg-muted/50"
-                  >
-                    <input
-                      type="checkbox"
-                      checked={selectedModelAliases.includes(m.alias)}
-                      onChange={() => toggleModel(m.alias)}
-                      disabled={busy || !modelsLoaded}
-                      className="h-4 w-4 rounded border-gray-300"
-                    />
-                    <span className="text-sm">{m.display_name || m.alias}</span>
-                  </label>
-                ))}
-              </div>
-            )}
-          </details>
-        )}
-
-        {!isLoadPending && (
-          <details open className="border rounded-apple-md p-3 mb-3 group">
-            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-1 [&::-webkit-details-marker]:hidden">
-              <span className="flex items-center gap-2">
-                {t('effectivePolicy.title')}
-                <Badge tone="neutral">{t('effectivePolicy.readonly')}</Badge>
+      <PolicySection
+        title={t('userModels.title')}
+        autoOpen={modelsDirty || failedSection === 'models'}
+        badges={
+          <>
+            {(modelsLoaded || policy) &&
+              (modelBadgeRestricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('restricted', { count: modelBadgeCount })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {policy && (
+              <span className="badge badge-neutral whitespace-nowrap">
+                {tp(SOURCE_KEY[policy.allowed_models_source])}
               </span>
-              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
-            </summary>
-            <p className="text-xs text-muted-foreground mb-3">
-              {t('effectivePolicy.hint')}
-            </p>
-            <EffectivePolicyCard userId={node.id} policy={policy} models={models} />
-          </details>
+            )}
+            {modelsDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'models' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
+        <p className="text-xs text-muted-foreground mb-3">
+          {t('userModels.hint')}
+        </p>
+        {/* 정책 출처 캡션 — 개인 override 가 없으면 체크박스의 체크 상태는
+            팀 정책(또는 전체 허용)의 프리필이다. 변경하면 개인 정책으로 저장됨을
+            명시한다. */}
+        {policy && policy.allowed_models_source !== 'user' && (
+          <p className="text-xs text-muted-foreground mb-3">
+            {policy.allowed_models_source === 'team'
+              ? t('userModelsInheritTeam')
+              : t('userModelsInheritNone')}
+          </p>
         )}
+        {!modelsLoaded ? (
+          <div className="text-xs text-destructive py-1">
+            {t('userModels.loadFailed')}
+          </div>
+        ) : models.length === 0 ? (
+          <div className="text-xs text-muted-foreground py-1">{t('userModels.empty')}</div>
+        ) : (
+          <div className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+            {models.map((m) => (
+              <label
+                key={m.alias}
+                className="flex items-center gap-2 rounded-apple-sm border p-2 cursor-pointer hover:bg-muted/50"
+              >
+                <input
+                  type="checkbox"
+                  checked={selectedModelAliases.includes(m.alias)}
+                  onChange={() => toggleModel(m.alias)}
+                  disabled={busy || !modelsLoaded}
+                  className="h-4 w-4 rounded border-gray-300"
+                />
+                <span className="text-sm">{m.display_name || m.alias}</span>
+              </label>
+            ))}
+          </div>
+        )}
+      </PolicySection>
 
-        {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 공용 UnsavedApplyBar 와 통일. */}
-        {dirty && (
-          <UnsavedApplyBar isPending={isSavePending} disabled={busy} onApply={handleApply} />
-        )}
-      </div>
+      <PolicySection
+        title={t('budgetInput.title')}
+        badges={
+          <span className="badge badge-neutral whitespace-nowrap">{tp('readonly')}</span>
+        }
+      >
+        <div className="flex items-center justify-end mb-2">
+          <Link
+            href="/budgets"
+            className="text-xs text-primary hover:underline"
+          >
+            {t('budgetInput.editInBudgets')}
+          </Link>
+        </div>
+        {/* 총예산(사용자/팀) + 앱별 예산을 게이지로 표시. 앱별은 접근 허용과 무관하게
+            전체 앱을 보여준다 — 허용되지 않은 앱에 설정된 예산(고아 예산)도
+            여기서 보여야 발견할 수 있다. */}
+        <div className="space-y-2">
+          {policy?.budgets
+            .filter((b) => (b.scope === 'USER' && b.client === null) || b.scope === 'TEAM')
+            .map((b, i) => (
+              <BudgetGaugeRow
+                key={`total-${i}`}
+                label={b.scope === 'TEAM' ? t('budgetInput.teamTotal') : t('budgetInput.userTotal')}
+                max={b.max_budget_usd}
+                used={b.used_usd}
+                unsetLabel={t('budgetInput.placeholder')}
+              />
+            ))}
+          {CLIENT_OPTIONS.map((o) => {
+            const cfg = policy?.budgets.find(
+              (b) => b.scope === 'USER' && b.client === o.value,
+            );
+            return (
+              <BudgetGaugeRow
+                key={o.value}
+                label={o.label}
+                max={cfg?.max_budget_usd ?? null}
+                used={cfg?.used_usd ?? null}
+                unsetLabel={t('budgetInput.placeholder')}
+              />
+            );
+          })}
+        </div>
+      </PolicySection>
+
+      <PolicySection
+        title={t('effectivePolicy.title')}
+        badges={
+          <span className="badge badge-neutral whitespace-nowrap">{tp('readonly')}</span>
+        }
+      >
+        <p className="text-xs text-muted-foreground mb-3">
+          {t('effectivePolicy.hint')}
+        </p>
+        <EffectivePolicyCard userId={node.id} policy={policy} models={models} />
+      </PolicySection>
+
+      {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 공용 UnsavedApplyBar 와 통일. */}
+      {dirty && (
+        <UnsavedApplyBar
+          isPending={isSavePending}
+          disabled={busy}
+          onApply={handleApply}
+          items={[
+            ...(accessDirty
+              ? [
+                  {
+                    key: 'apps',
+                    label: t('appAccess.title'),
+                    onRevert: () => setSelected(loadedSelected),
+                  },
+                ]
+              : []),
+            ...(modelsDirty
+              ? [
+                  {
+                    key: 'models',
+                    label: t('userModels.title'),
+                    onRevert: () => setSelectedModelAliases(modelBaseline),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      )}
     </div>
   );
 }
@@ -573,6 +696,7 @@ function TeamPanel({
   const t = useTranslations('users');
   const tm = useTranslations('models');
   const tc = useTranslations('common');
+  const tp = useTranslations('policyState');
   const { toast } = useToast();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -592,6 +716,12 @@ function TeamPanel({
   const [modelDirty, setModelDirty] = useState(false);
   const [isPolicySavePending, startPolicySaveTransition] = useTransition();
   const policyDirty = appDirty || modelDirty;
+  const dirtyCount = (appDirty ? 1 : 0) + (modelDirty ? 1 : 0);
+  // 섹션 헤더 배지용 저장 상태 요약 — 자식 패널이 로드할 때마다 보고한다.
+  const [appSummary, setAppSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
+  const [modelSummary, setModelSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
+  // 통합 Apply 의 실패 섹션 — 헤더 "저장 실패" 배지 + 자동 펼침에 쓴다.
+  const [failedSection, setFailedSection] = useState<'apps' | 'models' | null>(null);
 
   useEffect(() => {
     onDirtyChange?.(policyDirty);
@@ -599,9 +729,16 @@ function TeamPanel({
 
   const handleApplyAll = () => {
     startPolicySaveTransition(async () => {
+      setFailedSection(null);
       // 앱 접근 → 모델 순서로 저장(UserPanel 과 동일). 앞이 실패하면 뒤는 저장하지 않는다.
-      if (appDirty && !(await appAccessRef.current?.save())) return;
-      if (modelDirty && !(await modelPolicyRef.current?.save())) return;
+      if (appDirty && !(await appAccessRef.current?.save())) {
+        setFailedSection('apps');
+        return;
+      }
+      if (modelDirty && !(await modelPolicyRef.current?.save())) {
+        setFailedSection('models');
+        return;
+      }
       toast({ type: 'success', message: t('saveSuccess'), auto_dismiss_ms: 5000 });
     });
   };
@@ -671,6 +808,23 @@ function TeamPanel({
         <span className="text-muted-foreground">{t('memberCount')}</span>
         <span className="font-medium">{t('memberCountValue', { count: memberCount })}</span>
       </div>
+
+      {/* sticky 요약 스트립 — 노드 타입 · 수정된 섹션 수 · 마지막 실패 섹션 */}
+      {(policyDirty || failedSection) && (
+        <div className="sticky top-2 z-20 mb-3 flex w-fit flex-wrap items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
+          <span className="badge badge-neutral whitespace-nowrap">{tp('nodeTypeTeam')}</span>
+          {policyDirty && (
+            <span className="text-muted-foreground whitespace-nowrap">
+              {tp('modified')} {dirtyCount}
+            </span>
+          )}
+          {failedSection && (
+            <span className="text-destructive whitespace-nowrap">
+              {tp('failed')}: {failedSection === 'apps' ? t('scopeAppAccess.title') : tm('teamModelAccess')}
+            </span>
+          )}
+        </div>
+      )}
 
       <div className="border rounded-apple-md p-3 mb-4">
         <p className="text-sm font-medium mb-2">{t('leaderAction.currentLeaders')}</p>
@@ -760,25 +914,79 @@ function TeamPanel({
         )}
       </AppDialog>
 
-      <div className="mb-4">
+      <PolicySection
+        title={t('scopeAppAccess.title')}
+        autoOpen={appDirty || failedSection === 'apps'}
+        badges={
+          <>
+            {appSummary.loaded &&
+              (appSummary.restricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('restricted', { count: appSummary.count })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {appDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'apps' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
+        <p className="text-xs text-muted-foreground mb-3">
+          {t('scopeAppAccess.descriptionTeam')}
+        </p>
         <ScopeAppAccessPanel
           ref={appAccessRef}
           scope="team"
           scopeId={node.id}
           hideActions
+          bare
+          disabled={isPolicySavePending}
           onDirtyChange={setAppDirty}
+          onSummaryChange={setAppSummary}
         />
-      </div>
+      </PolicySection>
 
-      <div className="mb-4">
-        <p className="text-sm font-medium mb-2">{tm('teamModelAccess')}</p>
+      <PolicySection
+        title={tm('teamModelAccess')}
+        autoOpen={modelDirty || failedSection === 'models'}
+        badges={
+          <>
+            {modelSummary.loaded &&
+              (modelSummary.restricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('restricted', { count: modelSummary.count })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {modelDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'models' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
         <TeamModelPermissionPanel
           ref={modelPolicyRef}
           teamId={node.id}
           models={teamModels}
           hideActions
+          bare
+          disabled={isPolicySavePending}
           onDirtyChange={setModelDirty}
+          onSummaryChange={setModelSummary}
         />
+      </PolicySection>
+
+      {/* 예산·다운그레이드는 예산 페이지 소유 — 여기선 진입 링크만 둔다. */}
+      <div className="mb-4 flex items-center justify-between rounded-apple-md border px-3 py-2.5">
+        <span className="text-sm font-medium">{t('budgetSectionTitle')}</span>
+        <Link href="/budgets" className="text-xs text-primary hover:underline">
+          {t('budgetInput.editInBudgets')}
+        </Link>
       </div>
 
       {/* 통합 Apply — 앱 접근/모델 권한 어느 쪽이든 dirty 면 뜬다.
@@ -787,6 +995,26 @@ function TeamPanel({
         <UnsavedApplyBar
           isPending={isPolicySavePending}
           onApply={handleApplyAll}
+          items={[
+            ...(appDirty
+              ? [
+                  {
+                    key: 'apps',
+                    label: t('scopeAppAccess.title'),
+                    onRevert: () => appAccessRef.current?.revert(),
+                  },
+                ]
+              : []),
+            ...(modelDirty
+              ? [
+                  {
+                    key: 'models',
+                    label: tm('teamModelAccess'),
+                    onRevert: () => modelPolicyRef.current?.revert(),
+                  },
+                ]
+              : []),
+          ]}
         />
       )}
 

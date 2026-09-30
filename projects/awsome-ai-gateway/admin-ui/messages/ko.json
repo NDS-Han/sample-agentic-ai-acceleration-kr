@@ -66,7 +66,9 @@
     "loadFailed": "데이터를 불러오지 못했습니다",
     "loadFailedDesc": "데이터 조회 중 일시적인 오류가 발생했습니다. 다시 시도해 주세요.",
     "unsavedChanges": "저장되지 않은 변경사항",
-    "apply": "적용"
+    "apply": "적용",
+    "revert": "되돌리기",
+    "applyPartialNote": "섹션별로 순서대로 저장됩니다 — 하나가 실패하면 나머지는 건너뛰고, 이미 저장된 섹션은 유지됩니다."
   },
   "auth": {
     "login": "로그인",
@@ -447,14 +449,10 @@
     "selectAll": "전체 선택",
     "clearAll": "전체 해제",
     "savePermission": "권한 저장",
-    "clearRestriction": "제한 해제 (전체 허용)",
-    "clearRestrictionTitle": "이 팀의 모델 제한을 해제할까요?",
-    "clearRestrictionMessage": "팀의 허용 모델 목록을 삭제합니다. 모든 멤버가 모든 모델을 사용할 수 있게 됩니다.",
     "saveNotReady": "정책을 불러오는 중입니다. 잠시 후 다시 시도하세요.",
     "loadingText": "로딩 중...",
     "minOneModel": "최소 1개 이상의 모델을 선택해야 합니다.",
     "teamPermissionSaved": "팀 모델 접근 권한이 저장되었습니다.",
-    "restrictionCleared": "모델 접근 제한이 해제되었습니다.",
     "deactivateSuccess": "{alias} 모델이 비활성화되었습니다.",
     "deactivateTarget": "모델",
     "deactivateTargetSuffix": "을 비활성화합니다.",
@@ -503,7 +501,8 @@
       "empty": "라우팅 프로필이 없습니다. (마이그레이션 0021 로 claude-code/cowork/codex 시드 필요)",
       "saveFailed": "저장 실패: {error}"
     },
-    "selectedCount": "{count}/{total}개 선택됨"
+    "selectedCount": "{count}/{total}개 선택됨",
+    "emptySaveHint": "0개 선택은 저장할 수 없습니다. 전체 허용하려면 모두 선택 후 저장하세요."
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -707,7 +706,8 @@
       "apply": "적용",
       "saveSuccess": "앱 접근 정책이 저장되었습니다",
       "loadError": "앱 접근 정책을 불러오지 못했습니다"
-    }
+    },
+    "budgetSectionTitle": "예산"
   },
   "analytics": {
     "title": "분석",
@@ -1125,5 +1125,18 @@
     "title": "접근 권한 없음",
     "description": "이 페이지에 접근할 권한이 없습니다. 권한이 필요한 경우 관리자에게 문의하세요.",
     "backHome": "홈으로 돌아가기"
+  },
+  "policyState": {
+    "unrestricted": "제한 없음",
+    "restricted": "{count}개 허용",
+    "sourceOwn": "개별 설정",
+    "sourceTeam": "팀 정책",
+    "sourceOrganization": "조직 정책",
+    "sourceDefault": "기본",
+    "modified": "수정됨",
+    "failed": "저장 실패",
+    "readonly": "읽기 전용",
+    "nodeTypeTeam": "팀",
+    "nodeTypeUser": "사용자"
   }
 }
