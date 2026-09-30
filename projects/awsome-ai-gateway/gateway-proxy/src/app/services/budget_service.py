@@ -149,8 +149,11 @@ def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetSta
             continue
         limit = Decimal(str(r.get("limit_usd", 0)))
         used = Decimal(str(r.get("used_usd", 0)))
+        # 계층별 soft_limit_pct 를 반영 — Lua 는 config 의 값을 쓰므로
+        # 조합도 같은 값을 써야 잔여 계산이 판정과 일치한다.
+        soft_pct = r.get("soft_limit_pct") or DEFAULT_SOFT_LIMIT_PCT
         effective = (
-            limit * Decimal(DEFAULT_SOFT_LIMIT_PCT) / Decimal(100)
+            limit * Decimal(str(soft_pct)) / Decimal(100)
             if policy == BudgetPolicy.SOFT_WARNING.value
             else limit
         )
@@ -302,6 +305,18 @@ class BudgetService:
             try:
                 script = LuaScriptLoader.get("budget_check")
 
+                # §6-1 단계 1: TEAM 설정 존재 확인이 USER 평가보다 먼저다.
+                # user EVAL 을 먼저 돌리면 D-유저 차단 + T-미설정 조합에서
+                # user_budget_exceeded 가 team_budget_unset 을 이겨 DB 폴백과
+                # 에러 코드가 갈린다. eval 순서만 바꾸고 block 판정은
+                # §6-1 순서(1 unset → 2 user → 3 team)대로 적용한다.
+                team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
+                team_result = json.loads(team_raw)
+
+                # TEAM config 미설정 → deny (C-1 정책)
+                if not team_result.get("config_present"):
+                    raise PermissionError("team_budget_unset")
+
                 # D-3: 개인 config 가 없고 팀 기본 cap D 가 있으면, D 를 합성
                 # config 로 user EVAL 에 넘긴다 (cap_u = A_u ?? D). 팀 키는 다른
                 # slot 이라 Lua 안에서 읽지 못하므로 plain GET 으로 미리 읽어
@@ -320,10 +335,15 @@ class BudgetService:
                             user_fallback = json.dumps({
                                 "limit_usd": str(d_cap),
                                 "policy": team_cfg.get("policy", "hard_block"),
+                                "soft_limit_pct": team_cfg.get("soft_limit_pct")
+                                or DEFAULT_SOFT_LIMIT_PCT,
+                                "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
+                                or DEFAULT_THROTTLE_RPM_PCT,
                                 "thresholds": team_cfg.get("thresholds")
                                 or list(DEFAULT_THRESHOLDS),
                             })
 
+                # §6-1 단계 2: USER (A_u 또는 D)
                 user_raw = await redis.eval(
                     script, 2, user_key, user_config_key, "user", user_fallback
                 )
@@ -333,13 +353,7 @@ class BudgetService:
                 if user_result.get("config_present") and not user_result["allowed"]:
                     raise PermissionError(user_result.get("reason", "user_budget_exceeded"))
 
-                team_raw = await redis.eval(script, 2, team_key, team_config_key, "team", "")
-                team_result = json.loads(team_raw)
-
-                # TEAM config 미설정 → deny (C-1 정책)
-                if not team_result.get("config_present"):
-                    raise PermissionError("team_budget_unset")
-
+                # §6-1 단계 3: TEAM 한도 — unset 은 위에서 이미 걸렀다.
                 if not team_result["allowed"]:
                     raise PermissionError(team_result.get("reason", "team_budget_exceeded"))
 
@@ -474,18 +488,9 @@ class BudgetService:
 
         tiers: list[tuple[str, dict]] = []
 
-        if user_config is not None:
-            # 정책을 적용한다 — 무조건 차단은 Redis 경로와 어긋난다(_evaluate_layer 주석).
-            user_block, d = _layer(
-                await _user_used(),
-                user_config.max_budget_usd,
-                _db_policy_to_domain(user_config.policy),
-            )
-            if user_block:
-                raise PermissionError(f"user_{user_block}")
-            tiers.append(("user", d))
-
-        # C-1 정책: TEAM 예산 미설정 → 차단
+        # C-1 정책 + §6-1 단계 1: TEAM 설정 존재 확인이 USER 평가보다 먼저다.
+        # 개인 cap 평가를 먼저 하면 T-미설정 팀의 차단된 유저가 user_* 코드를
+        # 받아 Redis 경로와 에러 코드가 갈린다.
         team_cfg_result = await db.execute(
             select(BudgetConfig)
             .where(BudgetConfig.scope == BudgetScope.TEAM)
@@ -499,10 +504,18 @@ class BudgetService:
 
         policy = _db_policy_to_domain(team_config.policy)
 
-        # D-3: 개인 cap 없음 + 팀 기본 cap D → D 로 평가(cap_u = A_u ?? D).
-        # 팀 계층 판정보다 먼저 한다 — §6-1 의 계층 순서(user → team → app)를
-        # 지켜 동시 위반 시 user 코드가 우선 보고된다.
-        if user_config is None:
+        # §6-1 단계 2: USER — 명시적 A_u, 없으면 팀 기본 cap D (cap_u = A_u ?? D)
+        if user_config is not None:
+            # 정책을 적용한다 — 무조건 차단은 Redis 경로와 어긋난다(_evaluate_layer 주석).
+            user_block, d = _layer(
+                await _user_used(),
+                user_config.max_budget_usd,
+                _db_policy_to_domain(user_config.policy),
+            )
+            if user_block:
+                raise PermissionError(f"user_{user_block}")
+            tiers.append(("user", d))
+        else:
             cap_d = team_config.default_user_cap_usd
             if cap_d is not None:
                 user_block, d = _layer(await _user_used(), cap_d, policy)

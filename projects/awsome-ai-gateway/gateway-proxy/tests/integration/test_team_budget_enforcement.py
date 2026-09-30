@@ -139,13 +139,13 @@ def _budget_team_exceeded(used: float = 100.0, limit: float = 100.0) -> tuple[by
 
 
 def _budget_user_exceeded(used: float = 50.0, limit: float = 50.0) -> tuple[bytes, bytes]:
-    """USER 한도 초과 → USER 단계에서 차단. TEAM EVAL 은 호출되지 않음."""
+    """USER 한도 초과 → USER 단계에서 차단. TEAM 은 설정 있음+여유로 통과."""
     return (
         _resp(
             allowed=False, reason="user_budget_exceeded", scope="user",
             used_usd=used, remaining_usd=0.0, limit_usd=limit, threshold_pct=100,
         ),
-        _resp(allowed=True, scope="team"),   # unused
+        _resp(allowed=True, scope="team", config_present=True),
     )
 
 
@@ -217,10 +217,14 @@ def _build_redis(budget_eval_resps) -> AsyncMock:
 
     redis.get = AsyncMock(side_effect=_redis_get_side_effect)
 
-    # Redis eval: USER EVAL 먼저, TEAM EVAL 그 다음. 두 응답을 순차 반환.
+    # Redis eval: §6-1 단계 순서상 TEAM EVAL 이 먼저 — scope label(ARGV[1])로
+    # 응답을 골라 호출 순서 변경에 무관하게 한다.
     user_resp, team_resp = budget_eval_resps
-    _eval_mock = AsyncMock(side_effect=[user_resp, team_resp])
-    setattr(redis, "eval", _eval_mock)
+
+    async def _eval_side(*args, **_kwargs):
+        return user_resp if args[4] == "user" else team_resp
+
+    setattr(redis, "eval", AsyncMock(side_effect=_eval_side))
 
     pipe = MagicMock()
     pipe.incrbyfloat = MagicMock()

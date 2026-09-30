@@ -31,13 +31,7 @@ local function decode_or_nil(s)
     return v
 end
 
-local cfg_raw = redis.call('GET', config_key)
-if not cfg_raw and ARGV[2] and ARGV[2] ~= '' then
-    -- 개인 config 없음 + 팀 기본 cap D 존재 → 호출자가 합성한 D config 로 평가.
-    -- D 는 팀 키에 저장되고 이 slot 의 키가 아니므로 ARGV 로 넘긴다.
-    cfg_raw = ARGV[2]
-end
-if not cfg_raw then
+local function absent_config()
     return cjson.encode({
         allowed = true,
         reason = cjson.null,
@@ -55,24 +49,28 @@ if not cfg_raw then
     })
 end
 
+local cfg_raw = redis.call('GET', config_key)
+if not cfg_raw and ARGV[2] and ARGV[2] ~= '' then
+    -- 개인 config 없음 + 팀 기본 cap D 존재 → 호출자가 합성한 D config 로 평가.
+    -- D 는 팀 키에 저장되고 이 slot 의 키가 아니므로 ARGV 로 넘긴다.
+    cfg_raw = ARGV[2]
+end
+if not cfg_raw then
+    return absent_config()
+end
+
 local config = decode_or_nil(cfg_raw)
 if not config then
     -- 잘못된 cache 는 "미설정" 과 동일 취급
-    return cjson.encode({
-        allowed = true,
-        reason = cjson.null,
-        used_usd = 0,
-        remaining_usd = 0,
-        limit_usd = 0,
-        policy = 'hard_block',
-        throttle_active = false,
-        throttle_rpm_pct = 50,
-        threshold_pct = 0,
-        soft_warning = false,
-        scope = scope_label,
-        config_present = false,
-        app_clients = {}
-    })
+    return absent_config()
+end
+
+-- F3: team scope 에서 limit_usd 가 null 이면 'T=NULL (D-only) 행' 이 캐시된 것 —
+-- 설정 없음과 동일하게 config_present=false 를 돌려 호출자가 team_budget_unset
+-- 으로 fail-close 하게 한다 (§3-1). 숫자 0 은 명시적 차단이므로 그대로 둔다.
+if scope_label == 'team'
+    and (config.limit_usd == nil or config.limit_usd == cjson.null) then
+    return absent_config()
 end
 
 local limit = tonumber(config.limit_usd) or 0

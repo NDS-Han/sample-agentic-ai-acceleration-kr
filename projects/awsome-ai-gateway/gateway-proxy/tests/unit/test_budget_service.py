@@ -33,14 +33,14 @@ def _resp(*, allowed: bool, reason=None, scope: str,
 
 
 def _eval_side_effect_user_team(user_resp: bytes, team_resp: bytes):
-    """Return eval side_effect that alternates user -> team responses."""
-    responses = [user_resp, team_resp]
-    idx = {"i": 0}
+    """Return eval side_effect that dispatches by scope label (ARGV[1]).
 
-    async def _side(*_args, **_kwargs):
-        r = responses[idx["i"]]
-        idx["i"] += 1
-        return r
+    §6-1 단계 순서로 TEAM EVAL 이 USER 보다 먼저 호출되므로 호출 순서가
+    아니라 scope label 로 응답을 고른다 — 순서 변경에 테스트가 끄떡없게.
+    """
+
+    async def _side(*args, **_kwargs):
+        return user_resp if args[4] == "user" else team_resp
 
     return _side
 
@@ -118,19 +118,20 @@ async def test_check_budget_uses_single_scope_per_eval(mock_redis):
 
     assert lua_call.call_count == 2, "EVAL 은 scope 당 1회씩 총 2회 호출되어야 함"
 
-    # Call 1: USER scope  — Signature (script, num_keys, key1, key2, argv1)
-    user_args = lua_call.call_args_list[0].args
-    assert user_args[1] == 2, f"USER EVAL num_keys=2 기대, got {user_args[1]}"
-    assert user_args[2] == "budget:user:{u1}:2026-04"
-    assert user_args[3] == "budget:config:user:{u1}"
-    assert user_args[4] == "user"
-
-    # Call 2: TEAM scope
-    team_args = lua_call.call_args_list[1].args
+    # §6-1: Call 1 = TEAM scope (설정 존재 확인이 user 평가보다 먼저)
+    # Signature (script, num_keys, key1, key2, argv1)
+    team_args = lua_call.call_args_list[0].args
     assert team_args[1] == 2, f"TEAM EVAL num_keys=2 기대, got {team_args[1]}"
     assert team_args[2] == "budget:team:{t1}:2026-04"
     assert team_args[3] == "budget:config:team:{t1}"
     assert team_args[4] == "team"
+
+    # Call 2: USER scope
+    user_args = lua_call.call_args_list[1].args
+    assert user_args[1] == 2, f"USER EVAL num_keys=2 기대, got {user_args[1]}"
+    assert user_args[2] == "budget:user:{u1}:2026-04"
+    assert user_args[3] == "budget:config:user:{u1}"
+    assert user_args[4] == "user"
 
 
 @pytest.mark.asyncio
@@ -324,10 +325,11 @@ async def test_d_fallback_synthesizes_user_eval_config(mock_redis):
     svc = BudgetService()
     status = await svc.check_budget(mock_redis, None, "u1", "t1", "2026-04")
 
-    user_args = calls[0]
+    user_args = next(c for c in calls if c[4] == "user")
     fallback = json.loads(user_args[5])
     assert fallback["limit_usd"] == "2.50"
     assert fallback["policy"] == "soft_warning"     # D 유저는 팀 정책을 따른다
+    assert fallback["soft_limit_pct"] == 110        # 팀 값 없으면 기본 110
     assert fallback["thresholds"] == [70, 90]
     assert status.tier == "user"                    # 잔여 1.5 < 팀 90 → user 결정
     assert status.remaining_usd > Decimal("0")
@@ -377,7 +379,8 @@ async def test_no_fallback_when_individual_budget_exists(mock_redis):
 
     svc = BudgetService()
     await svc.check_budget(mock_redis, None, "u1", "t1", "2026-04")
-    assert calls[0][5] == "", "개인 cap 이 있으면 fallback 을 넘기면 안 된다"
+    user_args = next(c for c in calls if c[4] == "user")
+    assert user_args[5] == "", "개인 cap 이 있으면 fallback 을 넘기면 안 된다"
 
 
 def test_build_status_min_remaining_across_tiers():
@@ -507,3 +510,57 @@ async def test_db_fallback_d_user_status_tier():
     # user D 잔여 = 2 vs team 잔여 = 92 → user 결정
     assert status.tier == "user"
     assert status.remaining_usd == Decimal("2")
+
+
+@pytest.mark.asyncio
+async def test_team_unset_precedes_d_user_block(mock_redis):
+    """§6-1 단계 순서 회귀(F1): T-미설정 + D-유저 차단 조합은 team_budget_unset.
+
+    Redis 경로가 user EVAL 을 먼저 돌리던 시절에는 이 조합에서
+    user_budget_exceeded 가 반환돼 DB 폴백(team_budget_unset)과 코드가 갈렸다.
+    """
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_check"] = "-- mock"
+    mock_redis.exists = AsyncMock(return_value=False)  # 개인 config 없음 → D 경로
+    mock_redis.eval = AsyncMock(side_effect=_eval_side_effect_user_team(
+        _resp(allowed=False, reason="user_budget_exceeded", scope="user",
+              used_usd=3.0, remaining_usd=-1.0, limit_usd=2.0),  # 도달하면 안 됨
+        _resp(allowed=True, scope="team", config_present=False),  # T 미설정
+    ))
+
+    svc = BudgetService()
+    with pytest.raises(PermissionError) as exc:
+        await svc.check_budget(mock_redis, None, "u1", "t1", "2026-04")
+    assert str(exc.value) == "team_budget_unset"
+    assert mock_redis.eval.await_count == 1, "team EVAL 후 바로 unset 으로 차단돼야 함"
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_team_unset_precedes_user_block():
+    """§6-1 단계 순서 회귀(F1): DB 폴백도 T-미설정이 개인 차단보다 먼저 보고된다.
+
+    개인 A_u 로 차단될 유저라도 팀 미설정이면 team_budget_unset — Redis 경로와
+    동일해야 §6-4 '동일 규칙·동일 경계값' 을 만족한다.
+    """
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from app.models.budget import BudgetConfig
+    from app.models.budget import BudgetPolicy as OrmBudgetPolicy
+
+    user_cfg = MagicMock(spec=BudgetConfig)
+    user_cfg.max_budget_usd = Decimal("0")      # limit=0 → 차단될 유저
+    user_cfg.policy = OrmBudgetPolicy.HARD_BLOCK
+
+    fake_db = MagicMock(spec=AsyncSession)
+    fake_db.execute = AsyncMock(side_effect=[
+        _db_result(user_cfg),   # user config — 있음(차단 대상)
+        _db_result(None),       # team config — 없음
+    ])
+
+    svc = BudgetService()
+    with pytest.raises(PermissionError) as exc:
+        await svc.check_budget(None, fake_db, "u1", "t1", "2026-04")
+    assert str(exc.value) == "team_budget_unset"
+    # user 사용량 SELECT 가 실행되지 않아야 함 — config 2건만 조회하고 종료
+    assert fake_db.execute.await_count == 2
