@@ -564,3 +564,46 @@ async def test_db_fallback_team_unset_precedes_user_block():
     assert str(exc.value) == "team_budget_unset"
     # user 사용량 SELECT 가 실행되지 않아야 함 — config 2건만 조회하고 종료
     assert fake_db.execute.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_app_budget_enforced_for_d_user_without_individual_config(mock_redis):
+    """L-1 회귀: 개인 config 없는 유저의 고아 per-app 예산도 Redis 경로가 건다.
+
+    불변식(P0-③: per-app 은 부모 USER 총예산의 하위) 이전의 고아 per-app 행은
+    app_clients 게이트를 우회한다 — DB 폴백은 client 키를 직접 조회해 걸지만
+    Redis 경로는 게이트가 비어 건너뛰던 불일치. 개인 config 부재 유저는 키를
+    직접 eval 해 두 경로를 일치시킨다.
+    """
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_check"] = "-- mock"
+
+    team_cfg_json = json.dumps({
+        "limit_usd": "100", "policy": "hard_block",
+        "thresholds": [80, 90, 100], "default_user_cap_usd": "5",
+    })
+    mock_redis.exists = AsyncMock(return_value=False)  # 개인 config 없음 → D 경로
+    mock_redis.get = AsyncMock(return_value=team_cfg_json)
+
+    calls: list[str] = []
+
+    async def _eval(*args):
+        scope = args[4]
+        calls.append(scope)
+        if scope == "client":
+            return _resp(allowed=False, reason="client_budget_exceeded",
+                         scope="client", used_usd=9.0,
+                         remaining_usd=-1.0, limit_usd=8.0)
+        return _resp(allowed=True, scope=scope, used_usd=1.0,
+                     remaining_usd=9.0, limit_usd=10.0)
+
+    mock_redis.eval = AsyncMock(side_effect=_eval)
+
+    svc = BudgetService()
+    with pytest.raises(PermissionError) as exc:
+        await svc.check_budget(
+            mock_redis, None, "u1", "t1", "2026-04", client="claude-code"
+        )
+    assert str(exc.value) == "client_budget_exceeded"
+    assert calls == ["team", "user", "client"]

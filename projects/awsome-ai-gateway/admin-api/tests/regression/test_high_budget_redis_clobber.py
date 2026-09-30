@@ -97,7 +97,7 @@ def test_threshold_sync_uses_lua_for_the_user_scope():
 
 
 def test_app_clients_refresh_uses_lua():
-    code = _executable_code(_SVC / "budget_service.py", "_refresh_user_app_clients")
+    code = _executable_code(_SVC / "budget_service.py", "_write_user_app_clients")
     assert "refresh_user_app_clients" in code, "Lua 갱신을 쓰지 않는다"
     assert "attr='get'" not in code
 

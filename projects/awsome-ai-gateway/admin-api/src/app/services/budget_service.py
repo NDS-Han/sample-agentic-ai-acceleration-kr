@@ -12,7 +12,11 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients import CLIENT_ORDER
-from app.core.budget_cache import refresh_user_app_clients, write_user_budget_config
+from app.core.budget_cache import (
+    defer_redis_write_until_commit,
+    refresh_user_app_clients,
+    write_user_budget_config,
+)
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
@@ -347,7 +351,13 @@ class BudgetService:
             session=session,
         )
 
-        await self._sync_redis_thresholds("team", team_id, data, default_cap=new_cap)
+        # ⚠️ SET 은 커밋 후로 미룬다 — 커밋 전 SET 은 롤백 시 미커밋 T/D 를 TTL
+        #    동안 광고한다(§6-6). alert_thresholds 는 Redis 가 유일한 운반체라
+        #    DEL-only 는 불가라, 지연 SET 이 둘 다 지킨다.
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._sync_redis_thresholds("team", team_id, data, default_cap=new_cap),
+        )
 
         await audit_logger.log(
             session,
@@ -742,7 +752,10 @@ class BudgetService:
             session=session,
         )
 
-        await self._sync_redis_thresholds("user", user_id, data)
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._sync_redis_thresholds("user", user_id, data),
+        )
 
         await audit_logger.log(
             session,
@@ -967,11 +980,12 @@ class BudgetService:
         # P0-③ durability: DURABLY invalidate (DEL via retry infra → recorded to
         # cache_invalidation_failures on failure) BOTH the per-app config key AND
         # the parent user-config key (whose app_clients list just changed). The
-        # subsequent _sync_redis_app_config/_refresh_user_app_clients SETs are
-        # best-effort cache-warmers ONLY; if they fail, the durable DEL guarantees
-        # the gateway sees a miss and rehydrates from DB (ensure_config_cached),
-        # rather than enforcing a stale app_clients that silently bypasses the
-        # per-app limit forever.
+        # subsequent _sync_redis_app_config/_write_user_app_clients SETs are
+        # best-effort cache-warmers ONLY, deferred until commit — a rollback
+        # never advertises uncommitted budgets, and if they fail the durable DEL
+        # guarantees the gateway sees a miss and rehydrates from DB
+        # (ensure_config_cached), rather than enforcing a stale app_clients that
+        # silently bypasses the per-app limit forever.
         await self._cache_mgr.invalidate(
             [
                 f"budget:config:user:{{{user_id}}}:{client}",
@@ -980,8 +994,16 @@ class BudgetService:
             session=session,
         )
 
-        await self._sync_redis_app_config(user_id, client, data)
-        await self._refresh_user_app_clients(session, user_id)
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._sync_redis_app_config(user_id, client, data),
+        )
+        # DB 읽기는 트랜잭션 안에서 — 지연 쓰기는 Redis 만 건드린다.
+        active_clients = await repo.list_active_app_clients(user_id)
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._write_user_app_clients(user_id, active_clients),
+        )
 
         await audit_logger.log(
             session,
@@ -1052,7 +1074,11 @@ class BudgetService:
         )
 
         await self._delete_redis_app_config(user_id, client)
-        await self._refresh_user_app_clients(session, user_id)
+        active_clients = await repo.list_active_app_clients(user_id)
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._write_user_app_clients(user_id, active_clients),
+        )
 
         await audit_logger.log(
             session,
@@ -1677,18 +1703,16 @@ class BudgetService:
                 "redis_app_config_delete_failed", user_id=str(user_id), client=client
             )
 
-    async def _refresh_user_app_clients(
-        self, session, user_id: uuid.UUID
+    async def _write_user_app_clients(
+        self, user_id: uuid.UUID, active_clients: list[str]
     ) -> None:
-        """Keep the user-config JSON's app_clients list in sync with DB.
+        """Update the user-config Redis key's app_clients field WITHOUT clobbering
+        other fields. If the key is absent, does nothing (gateway re-derives on miss).
 
-        Reads active per-app BudgetConfig rows, then updates the user-config
-        Redis key's app_clients field WITHOUT clobbering other fields.
-        If the user-config key is absent, does nothing (gateway re-derives on miss).
+        Redis 만 건드린다 — 호출자가 ``defer_redis_write_until_commit`` 로 커밋 후
+        실행을 예약할 수 있게 DB 접근은 호출자가 먼저 끝낸다.
         """
         try:
-            repo = BudgetRepository(session)
-            active_clients = await repo.list_active_app_clients(user_id)
 
             # ⚠️ 여기가 가장 아픈 GET-modify-SET 이었다. 이 쓰기는 **새로 추가된
             #    client 를 싣는** 쓰기이므로, 경합에서 지면 단순 staleness 가 아니라

@@ -378,7 +378,13 @@ class BudgetService:
                 #    정규화해 그 여지를 없앤다.
                 user_app_clients = _as_client_list(user_result.get("app_clients"))
                 client_result = None
-                if client in PER_APP_BUDGET_CLIENTS and client in user_app_clients:
+                # 개인 config 가 없는 유저(D 합성 포함)는 app_clients 게이트를
+                # 신뢰할 수 없다 — 불변식(P0-③) 이전의 고아 per-app 행이 남아
+                # 있으면 DB 폴백은 걸고 Redis 경로는 건너뛰어 판정이 갈린다.
+                # 이 경우엔 per-app 키를 직접 eval 해 두 경로를 일치시킨다.
+                if client in PER_APP_BUDGET_CLIENTS and (
+                    client in user_app_clients or not user_config_present
+                ):
                     client_key = f"budget:user:{{{user_id}}}:{client}:{period}"
                     client_config_key = f"budget:config:user:{{{user_id}}}:{client}"
                     # P0-③: per-app config cold-cache fallback. If admin's

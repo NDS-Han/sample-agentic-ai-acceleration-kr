@@ -42,11 +42,20 @@ Redis 안에서 단일 스레드로 돌므로 두 호출이 겹치지 않는다.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 
 import structlog
+from sqlalchemy import event
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import Session
 
 logger = structlog.get_logger()
+
+#: 지연 Redis 쓰기 태스크의 강참조 — ``asyncio.create_task`` 는 루프가 약참조만
+#: 유지해, 보관하지 않으면 실행 전 GC 될 수 있다(문서화된 asyncio 함정).
+_DEFERRED_TASKS: set[asyncio.Task] = set()
 
 #: 총액 예산 필드를 병합하면서 ``app_clients`` 는 기존 값을 보존한다.
 #:
@@ -126,3 +135,58 @@ async def refresh_user_app_clients(redis, user_id, clients: list[str], ttl: int)
     except Exception:
         logger.warning("budget_app_clients_refresh_failed", user_id=str(user_id))
         return False
+
+
+async def defer_redis_write_until_commit(
+    session: AsyncSession,
+    write: Callable[[], Awaitable[None]],
+) -> None:
+    """``session`` 이 커밋될 때까지 Redis **쓰기(SET)** 를 지연한다.
+
+    왜 필요한가 — 예산 서비스의 캐시 갱신에는 두 부류가 있다:
+
+    * **DEL** — 커밋 전에 실행해도 안전하다. 트랜잭션이 롤백돼도 캐시 미스로
+      남아 게이트웨이가 커밋된 DB 행으로 재수화하므로 자가치유된다.
+    * **SET** — 커밋 전에 실행하면, 그 뒤 롤백 시 DB 에 존재하지 않는 예산
+      설정을 TTL 동안 광고한다(§6-6 위반 — 미커밋 T/D 로 실제 요청이 차단될 수
+      있다). 그렇다고 DEL-only 로 바꿀 수도 없다: ``alert_thresholds`` 는 DB
+      컬럼이 없어 Redis 가 유일한 운반체라, 쓰기를 없애면 그 값이 유실된다.
+
+    그래서 SET 만 ``after_commit`` 까지 민다 — 커밋 성공 시에만 실행되고,
+    롤백되면 폐기된다. 세션이 이벤트를 지원하지 않으면(단위/통합 테스트의
+    AsyncMock) 기존 동작과 같이 즉시 실행한다.
+
+    ⚠️ ``write`` 안에서 ``session`` 을 다시 쓰지 말 것 — 지연 시점에는 이미
+    커밋된 뒤라 같은 세션의 새 쿼리가 응답 경로와 동시에 실행될 수 있다(세션은
+    태스크 간 공유가 안전하지 않다). DB 값이 필요하면 커밋 전에 읽어 클로저로
+    넘긴다.
+    """
+    fired = {"live": True}
+
+    async def _guarded() -> None:
+        try:
+            await write()
+        except Exception:
+            logger.warning("redis_deferred_write_failed", exc_info=True)
+
+    def _on_commit(_s) -> None:
+        if not fired["live"]:
+            return
+        fired["live"] = False
+        try:
+            task = asyncio.get_running_loop().create_task(_guarded())
+            _DEFERRED_TASKS.add(task)
+            task.add_done_callback(_DEFERRED_TASKS.discard)
+        except RuntimeError:
+            logger.warning("redis_deferred_write_no_loop")
+
+    def _on_rollback(_s) -> None:
+        fired["live"] = False
+
+    sync_session = getattr(session, "sync_session", None)
+    if not isinstance(sync_session, Session):
+        # mock 세션(단위/통합 테스트) — 즉시 실행해 기존 동작을 유지한다.
+        await write()
+        return
+    event.listen(sync_session, "after_commit", _on_commit)
+    event.listen(sync_session, "after_rollback", _on_rollback)

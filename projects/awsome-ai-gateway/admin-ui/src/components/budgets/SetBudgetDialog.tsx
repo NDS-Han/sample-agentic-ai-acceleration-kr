@@ -286,7 +286,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               }
             }
           } else if (tgt.loaded.trim() !== '') {
-            const res = await clearUserClientBudgetAction(target.id, tgt.client, confirm);
+            const res = await clearUserClientBudgetAction(target.id, tgt.client);
             if (!res.success && appError === null) {
               appError = res.error;
               if (res.confirmation) {

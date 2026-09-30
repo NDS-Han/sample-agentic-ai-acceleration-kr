@@ -382,14 +382,13 @@ export async function setUserClientBudgetAction(
 export async function clearUserClientBudgetAction(
   userId: string,
   client: string,
-  confirm = false,
 ): Promise<ActionResult<void>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
+    // 앱 예산 해제는 한도 완화라 409/confirm 흐름이 없다 — confirm 파라미터를
+    // 보내지 않는다(엔드포인트가 받지 않는다).
     await withRetry(() =>
-      adminAPI.delete(
-        `/admin/budgets/user/${userId}/app/${client}${confirm ? '?confirm=true' : ''}`,
-      ),
+      adminAPI.delete(`/admin/budgets/user/${userId}/app/${client}`),
     );
     return { success: true, data: undefined };
   } catch (err) {
