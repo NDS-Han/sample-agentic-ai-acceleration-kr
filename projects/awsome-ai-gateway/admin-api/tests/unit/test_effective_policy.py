@@ -230,6 +230,51 @@ class TestAllowedClientsFallback:
         assert res.allowed_clients is None
         assert res.allowed_clients_source == "none"
 
+    async def test_teamless_user_skips_downgrade_query(self):
+        # team_id 가 없으면 DowngradePolicy 조회 자체가 생략된다 —
+        # 적용 가능한 규칙은 TEAM scope + 소속 팀뿐이라 무소속 유저는 조회가
+        # 무의미하다 (RoutingProfile 까지 8회 — DowngradePolicy 제외).
+        user = MagicMock(spec=User)
+        user.id = uuid.uuid4()
+        user.email = "dev@example.com"
+        user.team_id = None
+
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalars=[]),
+                _exec_result(scalars=[]),
+                _exec_result(rows=[]),
+                _exec_result(scalars=[]),
+                _exec_result(scalars=[]),
+                _exec_result(scalars=[]),
+                _exec_result(scalars=[]),   # DowngradePolicy 자리에 RoutingProfile 결과
+            ]
+        )
+        res = await EffectivePolicyService(session).get_for_user(user.id)
+        assert res.downgrade_rules == []
+        assert session.execute.await_count == 8
+
+    async def test_downgrade_query_is_team_scoped(self):
+        """downgrade 조회는 TEAM scope + 소속 팀으로 제한된다 — USER 규칙은
+        게이트웨이가 평가하지 않는 죽은 설정이므로 유효 정책에 섞이면 안 된다."""
+        user, team = _user_with_team()
+        session = MagicMock()
+        session.execute = AsyncMock(
+            side_effect=[
+                _exec_result(scalar=user),
+                _exec_result(scalar=team),
+                _exec_result(scalars=["cowork"]),
+                *self._tail(),
+            ]
+        )
+        await EffectivePolicyService(session).get_for_user(user.id)
+        # 마지막(RoutingProfile) 직전 호출이 DowngradePolicy 조회다.
+        dg_stmt = str(session.execute.await_args_list[-2].args[0])
+        assert "downgrade_policies" in dg_stmt
+        assert ".scope = " in dg_stmt
+
     async def test_teamless_user_skips_team_and_org(self):
         # team_id 가 없으면 org 정책도 타지 않는다 (user→team→dept→org 체인 단절).
         user = MagicMock(spec=User)

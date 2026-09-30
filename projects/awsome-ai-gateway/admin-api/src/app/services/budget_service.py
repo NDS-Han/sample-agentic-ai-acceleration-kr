@@ -1866,6 +1866,16 @@ class BudgetService:
                 rules=[],
             )
 
+        # ⚠️ USER scope 규칙 저장은 거부한다 — gateway-proxy 다운그레이드 미들웨어는
+        #    team_id 의 TEAM scope 규칙만 평가하므로, USER 규칙은 저장돼도 런타임에
+        #    적용되지 않는 죽은 설정이 된다(임계치 기준도 팀 예산 사용률이라 유저별
+        #    규칙에는 정의되지 않는다). 끄기/삭제는 과거 행의 정리 경로이므로 허용한다.
+        if scope != BudgetScope.TEAM:
+            raise ValidationError(
+                "Downgrade rules are only supported for TEAM scope "
+                "(the gateway evaluates team policies only)"
+            )
+
         if not data.rules:
             raise ValidationError("At least one downgrade rule is required when enabled")
 

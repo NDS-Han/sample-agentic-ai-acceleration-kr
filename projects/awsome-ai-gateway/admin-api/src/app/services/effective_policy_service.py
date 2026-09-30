@@ -32,7 +32,7 @@ from app.models.auth import (
     User,
     UserAllowedClient,
 )
-from app.models.budget import BudgetConfig, BudgetUsage, DowngradePolicy
+from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage, DowngradePolicy
 from app.models.model import (
     ModelAlias,
     ModelStatus,
@@ -267,16 +267,20 @@ class EffectivePolicyService:
             for r in rl_rows
         ]
 
-        # ── downgrade rules (user + team) ──
+        # ── downgrade rules (team 만) ──
+        # gateway-proxy 미들웨어는 team_id 의 TEAM scope 규칙만 평가한다 —
+        # USER scope 규칙은 저장돼도 런타임에 적용되지 않으므로 "유효 정책"
+        # 으로 표시하면 거짓 정보다. 사용자에게 적용되는 규칙 = 소속 팀 규칙.
         dg_rows = list(
             (
                 await self.session.execute(
                     select(DowngradePolicy)
                     .where(DowngradePolicy.is_active.is_(True))
-                    .where(DowngradePolicy.scope_id.in_(scope_ids))
+                    .where(DowngradePolicy.scope == BudgetScope.TEAM)
+                    .where(DowngradePolicy.scope_id == user.team_id)
                 )
             ).scalars()
-        )
+        ) if user.team_id else []
         downgrade_rules = [
             EffectiveDowngradeRule(
                 scope=d.scope.value if hasattr(d.scope, "value") else str(d.scope),

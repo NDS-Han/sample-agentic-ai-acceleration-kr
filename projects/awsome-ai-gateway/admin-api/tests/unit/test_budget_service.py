@@ -741,6 +741,35 @@ class TestSetDowngradeConfigDisabled:
         mock_session.execute.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_enabled_save_rejects_user_scope(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """USER scope 규칙 저장은 ValidationError — 게이트웨이가 TEAM 규칙만
+        평가하므로 유저 규칙은 적용되지 않는 죽은 설정이다.
+        끄기/삭제는 과거 행의 정리 경로로 허용한다(위 테스트 커버)."""
+        from app.schemas.budgets import AutoDowngradeConfigRequest, DowngradeRuleItem
+
+        data = AutoDowngradeConfigRequest(
+            enabled=True,
+            rules=[
+                DowngradeRuleItem(
+                    from_model_alias="anthropic.claude-opus",
+                    to_model_alias="anthropic.claude-haiku",
+                    threshold_pct=80,
+                )
+            ],
+        )
+        with pytest.raises(ValidationError):
+            await budget_service.set_downgrade_config(
+                mock_session,
+                scope=BudgetScope.USER,
+                scope_id=uuid.uuid4(),
+                data=data,
+                actor=admin_user,
+            )
+        mock_session.execute.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_get_disabled_config_preserves_rules(
         self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
