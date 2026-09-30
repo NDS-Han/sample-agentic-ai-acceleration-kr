@@ -3,6 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
+import { fmtUsd } from '@/lib/utils/format';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -37,7 +38,7 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
         />
         <StatCard label={t('avgLatency')} value={`${h.avg_latency_ms}ms`} />
         <StatCard label={t('p95Latency')} value={`${h.p95_latency_ms}ms`} />
-        <StatCard label={t('totalCost')} value={`$${h.total_cost_usd.toFixed(4)}`} />
+        <StatCard label={t('totalCost')} value={fmtUsd(h.total_cost_usd)} />
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>
     </div>

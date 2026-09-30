@@ -5,7 +5,7 @@
 
 import { useState, useTransition, useEffect, useRef } from 'react';
 import { useTranslations } from 'next-intl';
-import { X } from 'lucide-react';
+import { AppDialog } from '@/components/common/AppDialog';
 import type { BudgetScope } from '@/types/enums';
 import {
   setBudgetAction,
@@ -23,6 +23,7 @@ import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { ConfirmImpactBox } from './ConfirmImpactBox';
+import { fmtUsd } from '@/lib/utils/format';
 
 interface SetBudgetDialogProps {
   isOpen: boolean;
@@ -115,7 +116,12 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
 
   const parsedValue = parseFloat(value);
   const numericValue = Number.isFinite(parsedValue) ? parsedValue : 0;
-  const maxValue = target?.parentLimit ?? 999999;
+  // 슬라이더 상한 — 부모 한도가 없으면 실무적 상한($10k). 예전 999999 는
+  // $0~$1M 을 1센트 스텝으로 드래그해야 해 사실상 장식이었다. 초과 입력은
+  // 옆 숫자 입력칸이 담당(슬라이더는 대략값 조정용).
+  const sliderMax = target?.parentLimit ?? 10000;
+  // 숫자 입력은 슬라이더 상한과 무관 — 부모 한도가 있을 때만 제한.
+  const numberMax = target?.parentLimit;
   const isUserScope = target?.type === 'USER';
   const isTeamScope = target?.type === 'TEAM';
 
@@ -312,7 +318,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         }
         toast({
           type: 'success',
-          message: t('budgetSetPartialSuccess', { name: target.name, amount: numericValue.toFixed(2) }),
+          message: t('budgetSetPartialSuccess', { name: target.name, amount: fmtUsd(numericValue) }),
           auto_dismiss_ms: 3000,
         });
         setError(t('appBudgetSaveFailed', { error: appError }));
@@ -322,7 +328,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       setConfirmation(null);
       toast({
         type: 'success',
-        message: t('budgetSetSuccess', { name: target.name, amount: numericValue.toFixed(2) }),
+        message: t('budgetSetSuccess', { name: target.name, amount: fmtUsd(numericValue) }),
         auto_dismiss_ms: 3000,
       });
       onClose();
@@ -334,33 +340,19 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
     doSubmit(false);
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      {/* USER scope 는 per-app 예산 열이 추가돼 세로로 길어진다 — 2컬럼으로
-          넓혀 한 화면에 보이게 한다 (모바일은 1열로 자연스럽게 스택). */}
-      <div className="bg-background rounded-lg p-6 w-full max-w-md sm:max-w-3xl shadow-xl border border-border max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">{t('dialogTitle')}</h2>
-          <button
-            onClick={onClose}
-            className="rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-opacity"
-            aria-label={tCommon('close')}
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-        </div>
-
-        <p className="text-sm text-muted-foreground mb-4">
-          {t('dialogTarget')} <span className="font-medium text-foreground">{target.name}</span>
-          {target.currentUsed != null && (
-            <span className="ml-3 text-xs tabular-nums">
-              {t('currentUsage')} ${target.currentUsed.toFixed(2)}
-              {target.currentLimit > 0 && ` · ${t('existingLimit')} $${target.currentLimit.toFixed(2)}`}
-            </span>
-          )}
-        </p>
+    // USER scope 는 per-app 예산 열이 추가돼 세로로 길어진다 — wide 로 2컬럼 유지
+    // (모바일은 1열 스택). Radix 래퍼로 focus trap/Escape/aria-modal 확보.
+    <AppDialog isOpen={isOpen} onClose={onClose} title={t('dialogTitle')} wide>
+      <p className="text-sm text-muted-foreground mb-4">
+        {t('dialogTarget')} <span className="font-medium text-foreground">{target.name}</span>
+        {target.currentUsed != null && (
+          <span className="ml-3 text-xs tabular-nums">
+            {t('currentUsage')} {fmtUsd(target.currentUsed)}
+            {target.currentLimit > 0 && ` · ${t('existingLimit')} ${fmtUsd(target.currentLimit)}`}
+          </span>
+        )}
+      </p>
 
         <form onSubmit={handleSubmit} className="space-y-4">
         {/* 전폭 섹션 — USER: 팀 예산 전환 / TEAM: 공유·분배 모드 */}
@@ -394,8 +386,8 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               <input
                 type="range"
                 min={0}
-                max={maxValue}
-                step={0.01}
+                max={sliderMax}
+                step={1}
                 value={numericValue}
                 onChange={(e) => setValue(e.target.value)}
                 className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-primary"
@@ -405,7 +397,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 <input
                   type="number"
                   min={0}
-                  max={maxValue}
+                  max={numberMax}
                   step={0.01}
                   value={value}
                   onChange={(e) => setValue(e.target.value)}
@@ -414,7 +406,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               </div>
               {target.parentLimit !== undefined && (
                 <p className="text-xs text-muted-foreground">
-                  {t('upperLimit')} ${target.parentLimit.toFixed(2)}
+                  {t('upperLimit')} {fmtUsd(target.parentLimit)}
                 </p>
               )}
               {/* D-7: USER 입력 참고값 — 현재 cap 출처 + 팀 기본 cap D */}
@@ -424,7 +416,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                     ? t('capRefIndividual')
                     : target.capSource === 'team_default'
                       ? t('capRefDefault', {
-                          value: (target.teamDefaultCap ?? 0).toFixed(2),
+                          value: fmtUsd(target.teamDefaultCap ?? 0),
                         })
                       : t('capRefNone')}
                 </p>
@@ -594,7 +586,6 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             </SpinnerButton>
           </div>
         </form>
-      </div>
-    </div>
+    </AppDialog>
   );
 }

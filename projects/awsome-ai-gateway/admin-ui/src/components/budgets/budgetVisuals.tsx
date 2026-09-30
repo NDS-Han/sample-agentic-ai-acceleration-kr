@@ -9,6 +9,7 @@
 
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { AlertLevel, BudgetScope } from '@/types/enums';
+import { fmtUsd } from '@/lib/utils/format';
 
 type AlertLevelValue = (typeof AlertLevel)[keyof typeof AlertLevel];
 type BudgetScopeValue = (typeof BudgetScope)[keyof typeof BudgetScope];
@@ -85,7 +86,7 @@ export function BudgetGaugeRow({
         <span className="text-muted-foreground">{label}</span>
         <span className="font-medium tabular-nums">
           {maxN != null ? (
-            `$${usedN.toFixed(2)} / $${maxN.toFixed(2)}`
+            `${fmtUsd(usedN)} / ${fmtUsd(maxN)}`
           ) : (
             <span className="text-muted-foreground italic font-normal">{unsetLabel}</span>
           )}

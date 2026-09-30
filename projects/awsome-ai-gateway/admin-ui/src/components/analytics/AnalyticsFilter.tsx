@@ -153,6 +153,7 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
               id="start_date"
               type="date"
               defaultValue={defaultValue.start_date ?? ''}
+              max={defaultValue.end_date ?? undefined}
               onChange={(e) => handleStartDateChange(e.target.value)}
               className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
             />
@@ -166,6 +167,7 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
               id="end_date"
               type="date"
               defaultValue={defaultValue.end_date ?? ''}
+              min={defaultValue.start_date ?? undefined}
               onChange={(e) => handleEndDateChange(e.target.value)}
               className="rounded-apple-md border border-input bg-background px-3 py-1.5 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
             />

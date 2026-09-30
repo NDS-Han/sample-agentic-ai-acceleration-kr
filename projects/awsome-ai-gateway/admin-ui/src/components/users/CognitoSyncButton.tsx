@@ -7,6 +7,7 @@ import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import { RefreshCw } from 'lucide-react';
 import { syncCognitoAction } from '@/lib/actions/users';
+import { AppDialog } from '@/components/common/AppDialog';
 import { useToast } from '@/components/common/ToastProvider';
 
 export function CognitoSyncButton() {
@@ -55,35 +56,32 @@ export function CognitoSyncButton() {
         {t('cognitoSync.button')}
       </button>
 
-      {confirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-background border rounded-lg shadow-lg max-w-md w-full mx-4 p-6">
-            <h3 className="text-base font-semibold mb-3">{t('cognitoSync.button')}</h3>
-            <p className="text-sm text-muted-foreground mb-4">
-              {t('cognitoSync.description')}
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmOpen(false)}
-                disabled={isPending}
-                className="px-3 py-1.5 text-sm rounded-md border hover:bg-muted"
-              >
-                {tCommon('cancel')}
-              </button>
-              <button
-                type="button"
-                onClick={handleSync}
-                disabled={isPending}
-                className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
-              >
-                {isPending && <RefreshCw size={14} className="animate-spin" />}
-                {isPending ? t('cognitoSync.running') : t('cognitoSync.run')}
-              </button>
-            </div>
-          </div>
+      <AppDialog
+        isOpen={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        title={t('cognitoSync.button')}
+        description={t('cognitoSync.description')}
+      >
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(false)}
+            disabled={isPending}
+            className="px-3 py-1.5 text-sm rounded-md border hover:bg-muted"
+          >
+            {tCommon('cancel')}
+          </button>
+          <button
+            type="button"
+            onClick={handleSync}
+            disabled={isPending}
+            className="inline-flex items-center gap-2 px-3 py-1.5 text-sm font-medium rounded-md bg-primary text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
+          >
+            {isPending && <RefreshCw size={14} className="animate-spin" />}
+            {isPending ? t('cognitoSync.running') : t('cognitoSync.run')}
+          </button>
         </div>
-      )}
+      </AppDialog>
     </>
   );
 }

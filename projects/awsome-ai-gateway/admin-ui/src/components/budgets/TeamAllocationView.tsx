@@ -17,6 +17,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Table, THead, TBody, TFoot, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { ConfirmImpactBox } from './ConfirmImpactBox';
+import { fmtUsd } from '@/lib/utils/format';
 
 interface TeamAllocationViewProps {
   teamId: string;
@@ -241,14 +242,14 @@ export function TeamAllocationView({
             {t('teamTotalBudget', { team: allocation.team_name })}
           </span>
           <span className="text-lg font-bold">
-            {totalBudget > 0 ? `$${totalBudget.toFixed(2)}` : t('notSet')}
+            {totalBudget > 0 ? fmtUsd(totalBudget) : t('notSet')}
           </span>
         </div>
         <div className="flex items-center gap-3 flex-wrap text-xs">
           <span className="text-muted-foreground">
             {t('defaultCapLabel')}:{' '}
             <span className="font-medium text-foreground">
-              {capD != null ? `$${capD.toFixed(2)}` : t('notSet')}
+              {capD != null ? fmtUsd(capD) : t('notSet')}
             </span>
           </span>
           {overcommit != null && (
@@ -392,7 +393,7 @@ export function TeamAllocationView({
                     </Td>
                     <Td>{capSourceBadge(m.cap_source)}</Td>
                     <Td numeric className="text-muted-foreground">
-                      {m.effective_cap_usd != null ? `$${m.effective_cap_usd.toFixed(2)}` : '-'}
+                      {m.effective_cap_usd != null ? fmtUsd(m.effective_cap_usd) : '-'}
                     </Td>
                     <Td>
                       <div className="flex items-center gap-1">
@@ -412,7 +413,7 @@ export function TeamAllocationView({
                       </div>
                     </Td>
                     <Td numeric className="text-muted-foreground">
-                      ${m.used_usd.toFixed(2)}
+                      {fmtUsd(m.used_usd)}
                     </Td>
                   </Tr>
                 );
@@ -423,7 +424,7 @@ export function TeamAllocationView({
             <Tr>
               <Td emphasis colSpan={4}>{t('sumAllocated')}</Td>
               <Td numeric className="text-muted-foreground">
-                ${(allocation.sum_allocated_usd ?? 0).toFixed(2)}
+                {fmtUsd(allocation.sum_allocated_usd ?? 0)}
               </Td>
             </Tr>
           </TFoot>

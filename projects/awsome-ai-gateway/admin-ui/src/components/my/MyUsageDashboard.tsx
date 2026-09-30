@@ -5,6 +5,7 @@
 
 import { useTranslations } from 'next-intl';
 import type { MyUsageResponse } from '@/lib/actions/my';
+import { fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
@@ -19,7 +20,7 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="glass glass-hover rounded-apple p-4">
           <p className="text-sm text-muted-foreground">{t('totalCost')}</p>
-          <p className="text-2xl font-bold mt-1">${totalCost.toFixed(4)}</p>
+          <p className="text-2xl font-bold mt-1">{fmtUsd(totalCost)}</p>
         </div>
         <div className="glass glass-hover rounded-apple p-4">
           <p className="text-sm text-muted-foreground">{t('totalRequests')}</p>
@@ -52,7 +53,7 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
               {data.daily_usage.map((row) => (
                 <Tr key={row.date}>
                   <Td className="num">{row.date}</Td>
-                  <Td numeric>${row.cost_usd.toFixed(4)}</Td>
+                  <Td numeric>{fmtUsd(row.cost_usd)}</Td>
                   <Td numeric>{row.requests.toLocaleString()}</Td>
                   <Td numeric>{row.tokens.toLocaleString()}</Td>
                 </Tr>
@@ -83,7 +84,7 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
               {data.by_model.map((row) => (
                 <Tr key={row.model_alias}>
                   <Td emphasis className="font-mono mono-id text-xs">{row.model_alias}</Td>
-                  <Td numeric>${row.cost_usd.toFixed(4)}</Td>
+                  <Td numeric>{fmtUsd(row.cost_usd)}</Td>
                   <Td numeric>{row.requests.toLocaleString()}</Td>
                   <Td numeric>{row.tokens.toLocaleString()}</Td>
                 </Tr>

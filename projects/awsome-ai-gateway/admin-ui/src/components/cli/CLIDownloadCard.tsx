@@ -45,15 +45,23 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
   const [copied, setCopied] = useState(false);
   const [cmdCopied, setCmdCopied] = useState(false);
 
+  const [copyFailed, setCopyFailed] = useState(false);
   const curlCmd = getCurlCommand(item);
+
+  // clipboard 실패(권한 거부·비보안 컨텍스트)를 조용히 삼키지 않는다 — 사용자는
+  // 복사됐다고 믿고 붙여넣는다. 실패 시 "직접 선택해서 복사" 안내로 전환.
+  const markCopied = (setter: (v: boolean) => void) => {
+    setter(true);
+    setCopyFailed(false);
+    setTimeout(() => setter(false), 2000);
+  };
 
   async function handleCopyChecksum() {
     try {
       await navigator.clipboard.writeText(item.checksum_sha256);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      markCopied(setCopied);
     } catch {
-      // clipboard API 미지원 환경 무시
+      setCopyFailed(true);
     }
   }
 
@@ -61,9 +69,10 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
     if (!curlCmd) return;
     try {
       await navigator.clipboard.writeText(curlCmd);
-      setCmdCopied(true);
-      setTimeout(() => setCmdCopied(false), 2000);
-    } catch {}
+      markCopied(setCmdCopied);
+    } catch {
+      setCopyFailed(true);
+    }
   }
 
   return (
@@ -125,8 +134,20 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
         {t('download')}
       </a>
 
-      {/* CLI 설치 명령어 (Linux/macOS only) */}
-      {curlCmd && (
+      {/* 복사 실패 피드백 — clipboard 권한 거부 등. */}
+      {copyFailed && (
+        <p className="text-xs text-amber-600 dark:text-amber-400">
+          {t('copyFailed')}
+        </p>
+      )}
+
+      {/* CLI 설치 명령어 (Linux/macOS only) — Windows 는 curl/쉘 스크립트 경로가
+          없으므로 수동 설치 안내로 대체한다(예전엔 안내 자체가 없었다). */}
+      {item.os === 'windows' ? (
+        <p className="text-xs text-muted-foreground">
+          {t('windowsInstallHint')}
+        </p>
+      ) : curlCmd && (
         <div className="space-y-1">
           <div className="flex items-center justify-between">
             <span className="text-xs text-muted-foreground">{t('installCli')}</span>

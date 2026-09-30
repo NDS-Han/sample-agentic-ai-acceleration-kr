@@ -5,6 +5,7 @@ import type { AnalyticsFilterForm } from '@/types/api';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
 import { LazyBreakdownChart } from './LazyCharts';
+import { ErrorState } from '@/components/common/ErrorState';
 
 interface BreakdownChartProps {
   filter: AnalyticsFilterForm;
@@ -46,7 +47,11 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
 
   return (
     <div className="glass glass-hover rounded-apple p-4">
-      <LazyBreakdownChart labels={labels} values={values} title={title} />
+      {data ? (
+        <LazyBreakdownChart labels={labels} values={values} title={title} />
+      ) : (
+        <ErrorState compact />
+      )}
     </div>
   );
 }

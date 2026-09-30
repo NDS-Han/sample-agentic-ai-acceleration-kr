@@ -10,6 +10,7 @@ import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
+import { fmtPricePerM } from '@/lib/utils/pricing';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
 
@@ -29,10 +30,6 @@ function ProviderBadge({ provider }: { provider: string }) {
 
 function StatusBadge({ isActive, activeLabel, inactiveLabel }: { isActive: boolean; activeLabel: string; inactiveLabel: string }) {
   return <Badge tone={isActive ? 'teal' : 'neutral'}>{isActive ? activeLabel : inactiveLabel}</Badge>;
-}
-
-function formatNumber(n: number): string {
-  return new Intl.NumberFormat('ko-KR').format(n);
 }
 
 export function ModelsTable({ models }: ModelsTableProps) {
@@ -110,21 +107,23 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     <ProviderBadge provider={model.provider} />
                   </Td>
                   <Td className="text-muted-foreground font-mono mono-id text-xs">{model.model_id}</Td>
-                  <Td numeric>${model.input_price_per_1k.toFixed(4)}/1K</Td>
-                  <Td numeric>${model.output_price_per_1k.toFixed(4)}/1K</Td>
+                  {/* 단가는 앱 표준 per-1M 표기 — 가격동기화 다이얼로그·
+                      다운그레이드·analytics 와 같은 단위(fmtPricePerM). */}
+                  <Td numeric>{fmtPricePerM(model.input_price_per_1k)}</Td>
+                  <Td numeric>{fmtPricePerM(model.output_price_per_1k)}</Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_creation_5m_price_per_1k > 0
-                      ? `$${model.cache_creation_5m_price_per_1k.toFixed(5)}/1K`
+                      ? fmtPricePerM(model.cache_creation_5m_price_per_1k)
                       : '—'}
                   </Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_creation_1h_price_per_1k > 0
-                      ? `$${model.cache_creation_1h_price_per_1k.toFixed(5)}/1K`
+                      ? fmtPricePerM(model.cache_creation_1h_price_per_1k)
                       : '—'}
                   </Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_read_price_per_1k > 0
-                      ? `$${model.cache_read_price_per_1k.toFixed(5)}/1K`
+                      ? fmtPricePerM(model.cache_read_price_per_1k)
                       : '—'}
                   </Td>
                   <Td>

@@ -183,7 +183,12 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
         <>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-muted-foreground">{t('selectAllowedModels')}</span>
+              <span className="text-sm text-muted-foreground">
+                {t('selectAllowedModels')}
+                <span className="ml-2 text-xs font-medium text-foreground tabular-nums">
+                  {t('selectedCount', { count: allowedAliases.length, total: activeModels.length })}
+                </span>
+              </span>
               <div className="flex gap-2">
                 <button
                   type="button"

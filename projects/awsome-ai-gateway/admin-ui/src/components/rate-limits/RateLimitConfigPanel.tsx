@@ -16,6 +16,8 @@ import { useToast } from '@/components/common/ToastProvider';
 
 interface RateLimitConfigPanelProps {
   node: RateLimitTreeNode | null;
+  /** 미저장 변경 여부 통지 — 부모가 노드 전환 시 확인 다이얼로그를 띄우는 데 쓴다. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 // SCOPE_LABEL is now resolved inside the component via translations
@@ -30,7 +32,7 @@ function parsePosFloat(val: string): number | null {
   return isNaN(n) || n <= 0 ? null : n;
 }
 
-export function RateLimitConfigPanel({ node }: RateLimitConfigPanelProps) {
+export function RateLimitConfigPanel({ node, onDirtyChange }: RateLimitConfigPanelProps) {
   const t = useTranslations('rateLimits');
   const tCommon = useTranslations('common');
   const { toast } = useToast();
@@ -47,23 +49,35 @@ export function RateLimitConfigPanel({ node }: RateLimitConfigPanelProps) {
   const [tpm, setTpm] = useState('');
   const [cpm, setCpm] = useState('');
   const [cph, setCph] = useState('');
+  // dirty 판정 기준 — 로드/저장 성공 시점의 값. 필드와 다른 문자열이면 미저장 변경.
+  const [baseline, setBaseline] = useState({ rpm: '', tpm: '', cpm: '', cph: '' });
   const [usage, setUsage] = useState<RateLimitUsage | null>(null);
 
   // node가 변경될 때 폼 값 초기화
   useEffect(() => {
-    if (node?.config) {
-      setRpm(node.config.rpm != null ? String(node.config.rpm) : '');
-      setTpm(node.config.tpm != null ? String(node.config.tpm) : '');
-      setCpm(node.config.cpm != null ? String(node.config.cpm) : '');
-      setCph(node.config.cph != null ? String(node.config.cph) : '');
-    } else {
-      setRpm('');
-      setTpm('');
-      setCpm('');
-      setCph('');
-    }
+    const loaded = node?.config
+      ? {
+          rpm: node.config.rpm != null ? String(node.config.rpm) : '',
+          tpm: node.config.tpm != null ? String(node.config.tpm) : '',
+          cpm: node.config.cpm != null ? String(node.config.cpm) : '',
+          cph: node.config.cph != null ? String(node.config.cph) : '',
+        }
+      : { rpm: '', tpm: '', cpm: '', cph: '' };
+    setRpm(loaded.rpm);
+    setTpm(loaded.tpm);
+    setCpm(loaded.cpm);
+    setCph(loaded.cph);
+    setBaseline(loaded);
     setError(null);
   }, [node]);
+
+  const isDirty =
+    rpm !== baseline.rpm || tpm !== baseline.tpm || cpm !== baseline.cpm || cph !== baseline.cph;
+
+  // 부모(트리 뷰)에 dirty 상태 전달 — 노드 전환 전 확인에 사용.
+  useEffect(() => {
+    onDirtyChange?.(isDirty);
+  }, [isDirty, onDirtyChange]);
 
   // 실시간 RPM 사용량(§60.9) — node 선택 시 + 10초마다 폴링(gateway-proxy Redis 카운터).
   useEffect(() => {
@@ -114,6 +128,8 @@ export function RateLimitConfigPanel({ node }: RateLimitConfigPanelProps) {
       });
 
       if (result.success) {
+        // 저장 성공 시점의 입력값을 새 기준으로 — dirty 해제.
+        setBaseline({ rpm, tpm, cpm, cph });
         toast({
           type: 'success',
           message: t('saved', { label: node.label }),
@@ -276,7 +292,12 @@ export function RateLimitConfigPanel({ node }: RateLimitConfigPanelProps) {
 
         <FormError error={error} />
 
-        <div className="flex items-center justify-end pt-2">
+        <div className="flex items-center justify-end gap-3 pt-2">
+          {isDirty && (
+            <span className="text-xs text-amber-600 dark:text-amber-400">
+              {t('unsavedChanges')}
+            </span>
+          )}
           <SpinnerButton type="submit" isLoading={isPending}>
             {tCommon('save')}
           </SpinnerButton>

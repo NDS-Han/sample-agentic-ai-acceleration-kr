@@ -14,6 +14,7 @@ import {
 } from 'chart.js';
 import { Bar } from 'react-chartjs-2';
 import { useTranslations } from 'next-intl';
+import { fmtUsd } from '@/lib/utils/format';
 import type { ModelBreakdown, TeamBreakdown } from '@/types/entities';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 
@@ -50,7 +51,7 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
       tooltip: {
         callbacks: {
           label: (ctx: import('chart.js').TooltipItem<'bar'>) =>
-            `$${(ctx.parsed.y ?? 0).toFixed(4)}`,
+            `${fmtUsd(ctx.parsed.y ?? 0)}`,
         },
       },
     },

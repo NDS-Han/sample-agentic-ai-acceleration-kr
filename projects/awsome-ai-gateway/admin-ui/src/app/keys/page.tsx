@@ -5,20 +5,11 @@ import { getTranslations } from 'next-intl/server';
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
-import { KeysTable } from '@/components/keys/KeysTable';
+import { KeysListView } from '@/components/keys/KeysListView';
+import { ErrorState } from '@/components/common/ErrorState';
+import type { KeyListResponse } from '@/lib/actions/keys';
 import { KeyStatus } from '@/types/enums';
-import type { VirtualKeyListItem } from '@/types/entities';
 
-interface CursorPaginationMeta {
-  cursor: string | null;
-  limit: number;
-  has_more: boolean;
-}
-
-interface KeyListResponse {
-  items: VirtualKeyListItem[];
-  pagination: CursorPaginationMeta;
-}
 
 const PAGE_LIMIT = 50;
 
@@ -39,12 +30,10 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
   if (email) listQuery.email = email;
   listQuery.status = currentStatus;
 
-  const keysData = await adminAPI
+  const keysDataResult = await adminAPI
     .get<KeyListResponse>('/admin/keys', listQuery)
-    .catch(() => ({
-      items: [] as VirtualKeyListItem[],
-      pagination: { cursor: null, limit: PAGE_LIMIT, has_more: false },
-    }));
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
 
   return (
     <div>
@@ -103,11 +92,17 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
 
       <Suspense fallback={<SkeletonTable rows={10} columns={6} />}>
         <div className="mt-4">
-          <KeysTable keys={keysData.items} />
-          {keysData.pagination.has_more && (
-            <p className="mt-4 text-sm text-muted-foreground text-center">
-              {t('moreKeysHint')}
-            </p>
+          {keysDataResult.ok ? (
+            <KeysListView
+              initialItems={keysDataResult.value.items}
+              initialCursor={keysDataResult.value.pagination.cursor}
+              hasMore={keysDataResult.value.pagination.has_more}
+              email={email}
+              status={currentStatus}
+              limit={PAGE_LIMIT}
+            />
+          ) : (
+            <ErrorState />
           )}
         </div>
       </Suspense>

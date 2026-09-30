@@ -10,6 +10,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import { fmtUsd } from '@/lib/utils/format';
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
@@ -100,7 +101,7 @@ export function ClientShareDonutClient({ data }: Props) {
               </p>
               <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                 {hoverIndex != null && centerItem
-                  ? `$${centerItem.cost_usd.toFixed(2)}`
+                  ? fmtUsd(centerItem.cost_usd)
                   : t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
                       minimumFractionDigits: 2,
                       maximumFractionDigits: 2,
@@ -131,7 +132,7 @@ export function ClientShareDonutClient({ data }: Props) {
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {c.web_search_count > 0 ? t('webSearchCount', { count: c.web_search_count }) : ''}
             </span>
-            <span className="tabular-nums text-xs text-right">${c.cost_usd.toFixed(2)}</span>
+            <span className="tabular-nums text-xs text-right">{fmtUsd(c.cost_usd)}</span>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {c.share_pct.toFixed(1)}%
             </span>

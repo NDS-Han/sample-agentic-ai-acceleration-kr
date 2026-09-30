@@ -4,6 +4,7 @@ import type { AnalyticsFilterForm } from '@/types/api';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
 import { LazyCostTrendChart } from './LazyCharts';
+import { ErrorState } from '@/components/common/ErrorState';
 
 interface CostTrendChartProps {
   filter: AnalyticsFilterForm;
@@ -43,7 +44,11 @@ export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProp
 
   return (
     <div className="glass glass-hover rounded-apple p-4">
-      <LazyCostTrendChart trends={trends} trendsByTeam={trendsByTeam} />
+      {data ? (
+        <LazyCostTrendChart trends={trends} trendsByTeam={trendsByTeam} />
+      ) : (
+        <ErrorState compact />
+      )}
     </div>
   );
 }

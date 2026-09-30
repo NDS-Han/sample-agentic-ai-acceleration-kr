@@ -16,7 +16,7 @@ import {
   setScopeAllowedClientsAction,
 } from '@/lib/actions/users';
 import { CLIENTS, CLIENT_LABELS, type GatewayClient } from '@/lib/constants/gateway';
-import { SpinnerButton } from '@/components/common/SpinnerButton';
+import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { useToast } from '@/components/common/ToastProvider';
 
 const ALL_CLIENTS = CLIENTS;
@@ -168,17 +168,12 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
                 </button>
               ))}
             </div>
-            {!hideActions && dirty && (
-              <SpinnerButton
-                type="button"
-                isLoading={isSavePending}
-                disabled={busy}
-                onClick={handleApply}
-              >
-                {t('apply')}
-              </SpinnerButton>
-            )}
           </div>
+        )}
+        {/* 단독 사용(hideActions=false)일 때도 UserPanel 과 같은 플로팅 Apply —
+            인라인 버튼은 스크롤 위치에 따라 안 보인다. */}
+        {!hideActions && dirty && (
+          <UnsavedApplyBar isPending={isSavePending} disabled={busy} onApply={handleApply} />
         )}
       </div>
     );

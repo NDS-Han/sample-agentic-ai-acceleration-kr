@@ -1,8 +1,29 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import Link from 'next/link';
+import { cookies } from 'next/headers';
+import { getTranslations } from 'next-intl/server';
+import { parseJWT, isSessionExpired } from '@/lib/auth';
+import { UserRole } from '@/types/enums';
 
-export default function ForbiddenPage() {
+export default async function ForbiddenPage() {
+  const t = await getTranslations('forbidden');
+
+  // 역할별 홈 — DEVELOPER 는 '/' 자체가 403 이라 대시보드 링크로 보내면 다시 이
+  // 페이지로 돌아오는 무한루프가 된다. 개발자 홈은 /my.
+  const token = cookies().get('admin_jwt')?.value;
+  let home = '/';
+  if (token) {
+    try {
+      const session = parseJWT(token);
+      if (!isSessionExpired(session) && session.role === UserRole.DEVELOPER) {
+        home = '/my';
+      }
+    } catch {
+      // 토큰 손상 → 기본 홈으로
+    }
+  }
+
   return (
     <div className="flex flex-col items-center justify-center min-h-[500px] gap-6 p-8">
       <div className="flex flex-col items-center gap-4 text-center">
@@ -27,16 +48,14 @@ export default function ForbiddenPage() {
         </div>
         <div className="flex flex-col gap-2">
           <h1 className="text-3xl font-bold text-foreground">403</h1>
-          <h2 className="text-xl font-semibold text-foreground">접근 권한 없음</h2>
+          <h2 className="text-xl font-semibold text-foreground">{t('title')}</h2>
           <p className="text-sm text-muted-foreground max-w-sm">
-            이 페이지에 접근할 권한이 없습니다.
-            <br />
-            권한이 필요한 경우 관리자에게 문의하세요.
+            {t('description')}
           </p>
         </div>
       </div>
       <Link
-        href="/"
+        href={home}
         className="inline-flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground shadow hover:bg-primary/90 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <svg
@@ -54,7 +73,7 @@ export default function ForbiddenPage() {
           <path d="m3 9 9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
           <polyline points="9 22 9 12 15 12 15 22" />
         </svg>
-        대시보드로 돌아가기
+        {t('backHome')}
       </Link>
     </div>
   );

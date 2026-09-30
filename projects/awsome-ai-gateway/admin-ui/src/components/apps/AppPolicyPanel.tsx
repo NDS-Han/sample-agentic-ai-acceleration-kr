@@ -254,6 +254,10 @@ export function AppPolicyPanel() {
                 {tc('save')}
               </SpinnerButton>
             </div>
+            {policy.allowed_models.length === 0 && (
+              // select 가 disabled 인 이유가 없으면 고장으로 보인다 — 원인 안내.
+              <p className="text-xs text-muted-foreground">{t('noAllowedModelsHint')}</p>
+            )}
             {saveError && <FormError error={saveError} />}
           </div>
 
@@ -342,6 +346,7 @@ export function AppPolicyPanel() {
                           <input
                             type="checkbox"
                             className="h-4 w-4"
+                            aria-label={m.alias}
                             checked={isAllowed(m)}
                             disabled={isSavePending}
                             onChange={(e) => handleToggleClick(m, e.target.checked)}

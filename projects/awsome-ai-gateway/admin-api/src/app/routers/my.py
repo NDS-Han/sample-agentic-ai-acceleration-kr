@@ -2,17 +2,14 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, select
+from sqlalchemy import distinct, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db_session
-from app.core.usage_filters import cost_period_filter, current_kst_period, reporting_tz_sql
-from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
+from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
+from app.models.budget import BudgetConfig, BudgetScope
 from app.models.usage import UsageLog
 
 router = APIRouter(prefix="/admin/my", tags=["My Usage"])
@@ -48,8 +45,11 @@ async def get_my_budget(
     result = await session.execute(stmt)
     config = result.scalar_one_or_none()
 
-    limit_usd = float(config.max_budget_usd) if config else 0
-    policy = config.policy.value if config else "HARD_BLOCK"
+    # 개인 예산 config 없음(팀 예산/D-cap 적용)은 null 로 구분한다 — 예전엔 0/기본
+    # 정책으로 내려가 UI 가 "한도 $0.00·잔액 -$x·HARD_BLOCK" 처럼 차단된 것처럼
+    # 보여줬다. null 이면 프론트가 "팀 예산 적용" 표시로 전환한다.
+    limit_usd = float(config.max_budget_usd) if config else None
+    policy = config.policy.value if config else None
 
     usage_stmt = select(func.coalesce(func.sum(UsageLog.cost_usd), 0)).where(
         UsageLog.user_id == user.user_id,
@@ -57,20 +57,42 @@ async def get_my_budget(
     )
     used_result = await session.execute(usage_stmt)
     used_usd = float(used_result.scalar_one())
-    remaining = limit_usd - used_usd
-    usage_pct = (used_usd / limit_usd * 100) if limit_usd > 0 else 0
+    remaining = (limit_usd - used_usd) if limit_usd is not None else None
+    usage_pct = (used_usd / limit_usd * 100) if limit_usd else None
 
     return {
         "user_id": str(user.user_id),
         "period": period,
         "budget": {
-            "limit_usd": round(limit_usd, 2),
+            "limit_usd": round(limit_usd, 2) if limit_usd is not None else None,
             "used_usd": round(used_usd, 4),
-            "remaining_usd": round(remaining, 4),
-            "usage_pct": round(usage_pct, 1),
+            "remaining_usd": round(remaining, 4) if remaining is not None else None,
+            "usage_pct": round(usage_pct, 1) if usage_pct is not None else None,
             "policy": policy,
         },
     }
+
+
+@router.get("/periods")
+async def get_my_periods(
+    request: Request,
+    user: CurrentUser = Depends(get_current_user),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """본인 사용량이 존재하는 월(YYYY-MM) 목록 — 최신순.
+
+    /my 페이지의 기간 선택기용. /admin/dashboard/periods 는 require_admin 이라
+    DEVELOPER·TEAM_LEADER 가 쓸 수 없어(§PAGE_PERMISSIONS /my 는 비-ADMIN 도
+    허용) 같은 쿼리를 본인 스코프로 내린다.
+    """
+    period_expr = kst_month_expr()
+    stmt = (
+        select(distinct(period_expr).label("period"))
+        .where(UsageLog.user_id == user.user_id)
+        .order_by(period_expr.desc())
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+    return {"periods": [p for p in rows if p]}
 
 
 @router.get("/usage")

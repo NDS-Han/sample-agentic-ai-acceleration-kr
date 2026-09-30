@@ -1,9 +1,11 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { getTranslations } from 'next-intl/server';
+import { fmtUsd } from '@/lib/utils/format';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { ErrorState } from '@/components/common/ErrorState';
 
 interface ROIMetricsCardsProps {
   filter: AnalyticsFilterForm;
@@ -48,11 +50,8 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     .catch(() => null);
 
   if (!data?.cost_summary) {
-    return (
-      <div className="glass rounded-apple p-4 text-sm text-muted-foreground">
-        {t('loadFailed')}
-      </div>
-    );
+    // 조회 실패(네트워크/5xx) — 재시도 가능한 에러 상태로 구분한다.
+    return <ErrorState compact />;
   }
 
   const summary = data.cost_summary;
@@ -72,12 +71,12 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     },
     {
       label: t('totalCost'),
-      value: `$${totalCost.toFixed(4)}`,
+      value: fmtUsd(totalCost),
       description: t('totalCostDescription'),
     },
     {
       label: t('averageCostPerUser'),
-      value: `$${avgCostPerUser.toFixed(4)}`,
+      value: fmtUsd(avgCostPerUser),
       description: t('activeUsersDescription', { count: summary.active_users }),
     },
   ];

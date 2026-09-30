@@ -4,13 +4,14 @@
 
 import { useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
-import { RefreshCw, Loader2, X } from 'lucide-react';
+import { RefreshCw, Loader2 } from 'lucide-react';
 import {
   previewPriceSyncAction,
   applyPriceSyncAction,
   getPriceSyncSourcesAction,
   type PriceSyncPreview,
 } from '@/lib/actions/models';
+import { AppDialog } from '@/components/common/AppDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
@@ -104,17 +105,8 @@ export function PriceSyncButton() {
         {t('button')}
       </button>
 
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="glass max-h-[85vh] w-full max-w-3xl overflow-hidden rounded-apple flex flex-col">
-            <div className="flex items-center justify-between border-b border-border px-5 py-3">
-              <h2 className="text-base font-semibold">{t('dialogTitle')}</h2>
-              <button onClick={() => setOpen(false)} className="text-muted-foreground hover:text-foreground">
-                <X size={18} />
-              </button>
-            </div>
-
-            <div className="overflow-auto px-5 py-4">
+      <AppDialog isOpen={open} onClose={() => setOpen(false)} title={t('dialogTitle')} wide>
+        <div className="mt-4">
               <div className="mb-3 flex items-end gap-2">
                 <div className="flex-1">
                   <label className="mb-1 block text-xs text-muted-foreground">
@@ -192,6 +184,7 @@ export function PriceSyncButton() {
                             <Td>
                               <input
                                 type="checkbox"
+                                aria-label={d.alias}
                                 checked={selected.has(d.alias)}
                                 onChange={() => toggle(d.alias)}
                               />
@@ -219,7 +212,7 @@ export function PriceSyncButton() {
               )}
             </div>
 
-            <div className="flex items-center justify-end gap-2 border-t border-border px-5 py-3">
+            <div className="mt-4 flex items-center justify-end gap-2 border-t border-border pt-3">
               <button
                 onClick={() => setOpen(false)}
                 className="rounded-md border border-border px-3 py-1.5 text-sm hover:bg-accent/50"
@@ -235,9 +228,7 @@ export function PriceSyncButton() {
                 {t('applySelected', { count: selected.size })}
               </button>
             </div>
-          </div>
-        </div>
-      )}
+      </AppDialog>
     </>
   );
 }

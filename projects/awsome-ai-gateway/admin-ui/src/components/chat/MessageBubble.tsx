@@ -15,6 +15,7 @@ import { ReportCard } from './ReportCard';
 import { PlanCard } from './PlanCard';
 import { exportMessageReport } from './reportExport';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 // 답변 본문의 마크다운 표를 모델관리 등과 동일한 공통 Table 컴포넌트로 렌더(§60) —
@@ -314,7 +315,7 @@ export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
           <div className="mt-3 flex items-center gap-3">
             {(message.costUsd || message.durationMs) && (
               <div className="text-[11px] text-muted-foreground/80">
-                {message.costUsd && <span>{t('costLabel', { amount: message.costUsd.toFixed(4) })}</span>}
+                {message.costUsd && <span>{t('costLabel', { amount: fmtUsd(message.costUsd, 4).slice(1) })}</span>}
                 {message.costUsd && message.durationMs && <span className="mx-2">·</span>}
                 {message.durationMs && <span>{message.durationMs}ms</span>}
               </div>

@@ -5,6 +5,7 @@ import { getTranslations } from 'next-intl/server';
 import type { OrgTreeNode } from '@/types/entities';
 import { OrgTreeView } from '@/components/users/OrgTreeView';
 import { CognitoSyncButton } from '@/components/users/CognitoSyncButton';
+import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 
 /** 트리를 순회해 노드 타입별 개수만 집계. email/이름 등 PII 는 일절 미수집. */
@@ -20,9 +21,12 @@ function countOrgNodes(node: OrgTreeNode | null): Record<string, number> {
 
 export default async function UsersPage() {
   const t = await getTranslations('users');
-  const orgTree = await adminAPI
+  // null = 조직 데이터 없음 / failed = 조회 실패 — 빈 트리와 실패를 구분한다.
+  const orgTreeResult = await adminAPI
     .get<OrgTreeNode>('/admin/users/tree')
-    .catch(() => null);
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
+  const orgTree = orgTreeResult.ok ? orgTreeResult.value : null;
 
   // 퀵챗 화면 컨텍스트용 — 조직 구조의 "규모(개수)"만. 사용자 이메일/이름/리더명은
   // 절대 동봉하지 않는다(PII). 상세는 agent 가 query_db 로 직접 조회.
@@ -49,7 +53,7 @@ export default async function UsersPage() {
           </p>
         </div>
       </div>
-      <OrgTreeView root={orgTree} />
+      {orgTreeResult.ok ? <OrgTreeView root={orgTree} /> : <ErrorState />}
     </div>
   );
 }

@@ -1,6 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { Suspense } from 'react';
+import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import type { AnalyticsFilterForm } from '@/types/api';
 import type { PeriodType, GroupByType } from '@/types/enums';
@@ -127,6 +128,13 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
   const effectiveMonth = isMonth(requested) && periods.includes(requested) ? requested : latest;
 
   const filter = parseFilter(searchParams, effectiveMonth);
+  // 시작일 > 종료일 조합은 의미 없는 결과(빈 차트)를 낸다 — min/max 제약은
+  // 힌트일 뿐이라 역전 입력 가능. 역전 시 데이터 섹션 대신 안내를 보여준다.
+  const customRangeInvalid =
+    filter.period === 'custom' &&
+    !!filter.start_date &&
+    !!filter.end_date &&
+    filter.start_date > filter.end_date;
   // 차트 key: custom 이면 날짜 구간, 아니면 월 — 변경 시 remount + 재요청.
   const sectionKey =
     filter.period === 'custom'
@@ -148,6 +156,12 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
         <div className="flex gap-2">
+          <Link
+            href={`/analytics/models?period=${effectiveMonth}`}
+            className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors border border-border bg-background hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+          >
+            {t('viewModelDetail')}
+          </Link>
           <RefreshButton />
           <ExportButton filter={filter} latestMonth={effectiveMonth} />
         </div>
@@ -157,25 +171,33 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
       <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
 
       {/* 각 섹션은 개별 Suspense. key 에 적용 월/날짜 포함 — 변경 시 재요청 */}
-      <Suspense key={`roi-${sectionKey}`} fallback={<SkeletonCard count={4} />}>
-        <ROIMetricsCards filter={filter} latestMonth={effectiveMonth} />
-      </Suspense>
+      {customRangeInvalid ? (
+        <div className="rounded-apple border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-foreground">
+          {t('invalidDateRange')}
+        </div>
+      ) : (
+        <>
+          <Suspense key={`roi-${sectionKey}`} fallback={<SkeletonCard count={4} />}>
+            <ROIMetricsCards filter={filter} latestMonth={effectiveMonth} />
+          </Suspense>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Suspense key={`trend-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
-          <CostTrendChart filter={filter} latestMonth={effectiveMonth} />
-        </Suspense>
-        <Suspense key={`breakdown-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
-          <BreakdownChart filter={filter} latestMonth={effectiveMonth} />
-        </Suspense>
-        {/* 토큰 버킷 비율(input/output/cache read/write) — 전체 폭 카드,
-            내부는 도넛+목록 중앙 정렬(dashboard app share 와 같은 레이아웃). */}
-        <Suspense key={`token-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
-          <div className="lg:col-span-2">
-            <TokenAnalysisCard filter={filter} latestMonth={effectiveMonth} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Suspense key={`trend-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
+              <CostTrendChart filter={filter} latestMonth={effectiveMonth} />
+            </Suspense>
+            <Suspense key={`breakdown-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
+              <BreakdownChart filter={filter} latestMonth={effectiveMonth} />
+            </Suspense>
+            {/* 토큰 버킷 비율(input/output/cache read/write) — 전체 폭 카드,
+                내부는 도넛+목록 중앙 정렬(dashboard app share 와 같은 레이아웃). */}
+            <Suspense key={`token-${sectionKey}`} fallback={<SkeletonCard count={1} />}>
+              <div className="lg:col-span-2">
+                <TokenAnalysisCard filter={filter} latestMonth={effectiveMonth} />
+              </div>
+            </Suspense>
           </div>
-        </Suspense>
-      </div>
+        </>
+      )}
     </div>
   );
 }

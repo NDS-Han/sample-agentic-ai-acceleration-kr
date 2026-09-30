@@ -3,6 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
+import { fmtUsd } from '@/lib/utils/format';
 import type { MonitoringUsersResponse } from '@/lib/actions/monitoring';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
@@ -50,7 +51,7 @@ export function UserTopTable({ data }: { data: MonitoringUsersResponse }) {
               </Td>
               <Td numeric>{u.requests.toLocaleString()}</Td>
               <Td numeric>{u.tokens.toLocaleString()}</Td>
-              <Td numeric emphasis>${u.cost_usd.toFixed(4)}</Td>
+              <Td numeric emphasis>{fmtUsd(u.cost_usd)}</Td>
               <Td numeric className={errorColor(u.error_rate_pct)}>
                 {u.error_rate_pct}%
               </Td>

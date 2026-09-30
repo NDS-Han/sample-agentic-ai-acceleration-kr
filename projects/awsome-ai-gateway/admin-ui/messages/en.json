@@ -61,7 +61,12 @@
       "dark": "Dark",
       "system": "System"
     },
-    "appDescription": "LLM Gateway admin dashboard — API keys, budgets, models, and usage analytics in one place"
+    "appDescription": "LLM Gateway admin dashboard — API keys, budgets, models, and usage analytics in one place",
+    "retry": "Retry",
+    "loadFailed": "Failed to load data",
+    "loadFailedDesc": "A temporary error occurred while fetching data. Please try again.",
+    "unsavedChanges": "Unsaved changes",
+    "apply": "Apply"
   },
   "auth": {
     "login": "Login",
@@ -203,7 +208,10 @@
     "revokeDialogConfirm": "Revoke",
     "revokeSuccess": "Key {prefix} has been successfully revoked.",
     "revokeFailed": "Failed to revoke key.",
-    "noExpiry": "None"
+    "noExpiry": "None",
+    "loadMore": "Load more",
+    "loadMoreFailed": "Failed to load more keys.",
+    "loading": "Loading…"
   },
   "budgets": {
     "title": "Budget Management",
@@ -491,7 +499,8 @@
       "off": "Web Search OFF",
       "empty": "No routing profiles found. (Migration 0021 is required to seed claude-code/cowork/codex.)",
       "saveFailed": "Save failed: {error}"
-    }
+    },
+    "selectedCount": "{count}/{total} selected"
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -527,7 +536,11 @@
     "usageTrend": "Usage trend",
     "usageTrendDesc": "Bucket averages normalized to per-minute / per-hour rates — same unit as the configured limits",
     "trendEmpty": "No usage recorded in this window",
-    "trendLimit": "Configured limit"
+    "trendLimit": "Configured limit",
+    "unsavedChanges": "Unsaved changes",
+    "discardChangesTitle": "Discard unsaved changes?",
+    "discardChangesMessage": "You have unsaved edits in this rate limit. Switching to another item will discard them.",
+    "discardChangesConfirm": "Discard and switch"
   },
   "users": {
     "title": "User/Team Management",
@@ -759,7 +772,26 @@
     "costSeriesTotal": "Total",
     "costSeriesOther": "Other",
     "item": "Item",
-    "date": "Date"
+    "date": "Date",
+    "viewModelDetail": "Model cost detail",
+    "invalidDateRange": "The start date must be before the end date. Please adjust the date range."
+  },
+  "analyticsModels": {
+    "pageTitle": "Cost by Model",
+    "totalCost": "Total cost",
+    "activeModels": "Active models",
+    "period": "Period",
+    "costShare": "Cost share",
+    "costShareAria": "Cost share by model (stacked bar; see legend for values)",
+    "detailTitle": "Model cost detail",
+    "empty": "No usage records for this period.",
+    "colModel": "Model",
+    "colRequests": "Requests",
+    "colCost": "Cost (USD)",
+    "colInputTokens": "Input tokens",
+    "colOutputTokens": "Output tokens",
+    "colPer1M": "$/1M tokens",
+    "colAvgLatency": "Avg latency"
   },
   "cli": {
     "title": "CLI Download",
@@ -801,7 +833,9 @@
     "installCli": "Install via CLI",
     "copy": "Copy",
     "copied": "Copied",
-    "copyCommand": "Copy command"
+    "copyCommand": "Copy command",
+    "copyFailed": "Copy failed — select the text and copy it manually.",
+    "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder."
   },
   "docker": {
     "title": "Docker Status",
@@ -838,7 +872,9 @@
       "HARD_BLOCK": "Hard block",
       "SOFT_WARNING": "Warn only",
       "THROTTLE": "Throttle"
-    }
+    },
+    "pageTitle": "My Usage",
+    "teamBudgetApplied": "Team budget applied — no personal monthly limit. Contact your team leader for your effective cap."
   },
   "chat": {
     "biInsight": "BI Insight",
@@ -980,7 +1016,9 @@
       "lastRequest": "Last request",
       "user": "User",
       "tokens": "Tokens",
-      "costUsd": "Cost (USD)"
+      "costUsd": "Cost (USD)",
+      "severityCritical": "critical error rate",
+      "severityWarning": "elevated error rate"
     },
     "models": {
       "title": "Model status (last 1 hour)",
@@ -1012,7 +1050,8 @@
         "timeout": "Timeout",
         "slow": "Slow (first token over 3s)",
         "abnormal": "Abnormal (error/timeout/slow)"
-      }
+      },
+      "copyUserId": "copy user ID"
     },
     "bodyLogging": {
       "label": "Body logging (Invocation Body Logging)",
@@ -1083,6 +1122,12 @@
     "colAccess": "Access",
     "accessExplicit": "explicit",
     "accessUnrestricted": "unrestricted",
-    "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically"
+    "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically",
+    "noAllowedModelsHint": "Add allowed models below to select a default model."
+  },
+  "forbidden": {
+    "title": "Access denied",
+    "description": "You do not have permission to view this page. Contact an administrator if you need access.",
+    "backHome": "Back to home"
   }
 }

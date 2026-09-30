@@ -20,6 +20,8 @@ import {
 } from '@/lib/actions/users';
 import { listActiveModelsAction } from '@/lib/actions/models';
 import { CLIENTS, type GatewayClient } from '@/lib/constants/gateway';
+import { AppDialog } from '@/components/common/AppDialog';
+import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
@@ -419,9 +421,14 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         )}
 
         {!isLoadPending && (
-          <div className="border rounded-apple-md p-3 mb-3">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-sm font-medium">{t('budgetInput.title')}</p>
+          // 접이식 섹션 — 패널이 앱접근/예산/모델/유효정책 4개 서브시스템을 한 열로
+          // 쌓아 길다. details/summary 는 네이티브로 키보드·스크린리더를 지원한다.
+          <details open className="border rounded-apple-md p-3 mb-3 group">
+            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-2 [&::-webkit-details-marker]:hidden">
+              <span>{t('budgetInput.title')}</span>
+              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+            </summary>
+            <div className="flex items-center justify-end mb-2">
               <Link
                 href="/budgets"
                 className="text-xs text-primary hover:underline"
@@ -459,12 +466,15 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 );
               })}
             </div>
-          </div>
+          </details>
         )}
 
         {!isLoadPending && (
-          <div className="border rounded-apple-md p-3 mb-3">
-            <p className="text-sm font-medium mb-1">{t('userModels.title')}</p>
+          <details open className="border rounded-apple-md p-3 mb-3 group">
+            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-1 [&::-webkit-details-marker]:hidden">
+              <span>{t('userModels.title')}</span>
+              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+            </summary>
             <p className="text-xs text-muted-foreground mb-3">
               {t('userModels.hint')}
             </p>
@@ -503,48 +513,28 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 ))}
               </div>
             )}
-          </div>
+          </details>
         )}
 
         {!isLoadPending && (
-          <div className="border rounded-apple-md p-3 mb-3">
-            <div className="flex items-center gap-2 mb-1">
-              <p className="text-sm font-medium">{t('effectivePolicy.title')}</p>
-              <Badge tone="neutral">{t('effectivePolicy.readonly')}</Badge>
-            </div>
+          <details open className="border rounded-apple-md p-3 mb-3 group">
+            <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-1 [&::-webkit-details-marker]:hidden">
+              <span className="flex items-center gap-2">
+                {t('effectivePolicy.title')}
+                <Badge tone="neutral">{t('effectivePolicy.readonly')}</Badge>
+              </span>
+              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+            </summary>
             <p className="text-xs text-muted-foreground mb-3">
               {t('effectivePolicy.hint')}
             </p>
             <EffectivePolicyCard userId={node.id} policy={policy} models={models} />
-          </div>
+          </details>
         )}
 
-        {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 이 패널은 앱 접근/예산/모델/
-            유효 정책을 세로로 길게 쌓는데 버튼이 맨 아래 고정이면 앱 토글 하나
-            바꾸고도 끝까지 스크롤해야 했다. 조상에 overflow-hidden 이 있어
-            sticky 는 무효라 fixed 로 띄우고, 변경이 생기는 순간 나타나므로
-            발견 가능성도 자연히 해결된다. */}
+        {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 공용 UnsavedApplyBar 와 통일. */}
         {dirty && (
-          <>
-            {/* 플로팅 바 높이만큼 스페이서 — 스크롤 끝에서 마지막 콘텐츠가
-                바에 가려지지 않게 한다. */}
-            <div className="h-16" aria-hidden="true" />
-            <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2">
-              <div className="flex items-center gap-3 rounded-full border border-border bg-card/95 px-5 py-2.5 shadow-lg backdrop-blur">
-                <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">
-                  {t('unsavedChanges')}
-                </span>
-                <SpinnerButton
-                  type="button"
-                  isLoading={isSavePending}
-                  disabled={busy}
-                  onClick={handleApply}
-                >
-                  {t('apply')}
-                </SpinnerButton>
-              </div>
-            </div>
-          </>
+          <UnsavedApplyBar isPending={isSavePending} disabled={busy} onApply={handleApply} />
         )}
       </div>
     </div>
@@ -707,10 +697,13 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
         )}
       </div>
 
-      {leaderToRemove && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-background border rounded-lg shadow-lg max-w-md w-full mx-4 p-6">
-            <h3 className="text-base font-semibold mb-3">{t('leaderAction.removeModalTitle')}</h3>
+      <AppDialog
+        isOpen={leaderToRemove !== null}
+        onClose={() => setLeaderToRemove(null)}
+        title={t('leaderAction.removeModalTitle')}
+      >
+        {leaderToRemove && (
+          <>
             <p className="text-sm text-muted-foreground mb-2">
               {t('leaderAction.removeModalBody', { name: leaderToRemove.name })}
             </p>
@@ -733,9 +726,9 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
                 {t('leaderAction.unassignButton')}
               </SpinnerButton>
             </div>
-          </div>
-        </div>
-      )}
+          </>
+        )}
+      </AppDialog>
 
       <div className="mb-4">
         <ScopeAppAccessPanel
@@ -759,26 +752,12 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
       </div>
 
       {/* 통합 Apply — 앱 접근/모델 권한 어느 쪽이든 dirty 면 뜬다.
-          UserPanel 의 플로팅 바와 같은 패턴: 스크롤 무관하게 항상 보인다. */}
+          공용 UnsavedApplyBar 와 통일. */}
       {policyDirty && (
-        <>
-          <div className="h-16" aria-hidden="true" />
-          <div className="fixed bottom-6 left-1/2 z-40 -translate-x-1/2">
-            <div className="flex items-center gap-3 rounded-full border border-border bg-card/95 px-5 py-2.5 shadow-lg backdrop-blur">
-              <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">
-                {t('unsavedChanges')}
-              </span>
-              <SpinnerButton
-                type="button"
-                isLoading={isPolicySavePending}
-                disabled={isPolicySavePending}
-                onClick={handleApplyAll}
-              >
-                {t('apply')}
-              </SpinnerButton>
-            </div>
-          </div>
-        </>
+        <UnsavedApplyBar
+          isPending={isPolicySavePending}
+          onApply={handleApplyAll}
+        />
       )}
 
       <SpinnerButton
@@ -790,38 +769,37 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
         {t('forceReauth.button')}
       </SpinnerButton>
 
-      {confirmOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40">
-          <div className="bg-background border rounded-lg shadow-lg max-w-md w-full mx-4 p-6">
-            <h3 className="text-base font-semibold mb-3">{t('forceReauth.button')}</h3>
-            <p className="text-sm text-muted-foreground mb-2">
-              <span className="font-medium text-foreground">{node.name}</span>{' '}
-              {t('forceReauth.warning', { count: memberCount })}
-            </p>
-            <p className="text-sm text-muted-foreground mb-4">
-              {t('forceReauth.note')}
-            </p>
-            <div className="flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => setConfirmOpen(false)}
-                disabled={isPending}
-                className="px-3 py-1.5 text-sm rounded-md border hover:bg-muted"
-              >
-                {tc('cancel')}
-              </button>
-              <SpinnerButton
-                type="button"
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
-                isLoading={isPending}
-                onClick={handleForceReauth}
-              >
-                {t('forceReauth.proceed')}
-              </SpinnerButton>
-            </div>
-          </div>
+      <AppDialog
+        isOpen={confirmOpen}
+        onClose={() => setConfirmOpen(false)}
+        title={t('forceReauth.button')}
+      >
+        <p className="text-sm text-muted-foreground mb-2">
+          <span className="font-medium text-foreground">{node.name}</span>{' '}
+          {t('forceReauth.warning', { count: memberCount })}
+        </p>
+        <p className="text-sm text-muted-foreground mb-4">
+          {t('forceReauth.note')}
+        </p>
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={() => setConfirmOpen(false)}
+            disabled={isPending}
+            className="px-3 py-1.5 text-sm rounded-md border hover:bg-muted"
+          >
+            {tc('cancel')}
+          </button>
+          <SpinnerButton
+            type="button"
+            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            isLoading={isPending}
+            onClick={handleForceReauth}
+          >
+            {t('forceReauth.proceed')}
+          </SpinnerButton>
         </div>
-      )}
+      </AppDialog>
     </div>
   );
 }

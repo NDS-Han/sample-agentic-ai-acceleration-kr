@@ -1,5 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
+import { useTranslations } from 'next-intl';
+
 interface SkeletonCardProps {
   count?: number;
 }
@@ -27,9 +29,11 @@ function SingleSkeletonCard({ index }: { index: number }) {
 }
 
 export function SkeletonCard({ count = 1 }: SkeletonCardProps) {
+  const t = useTranslations('common');
+
   if (count === 1) {
     return (
-      <div aria-busy="true" aria-label="로딩 중">
+      <div aria-busy="true" aria-label={t('loadingLabel')}>
         <SingleSkeletonCard index={0} />
       </div>
     );
@@ -38,7 +42,7 @@ export function SkeletonCard({ count = 1 }: SkeletonCardProps) {
   return (
     <div
       aria-busy="true"
-      aria-label="로딩 중"
+      aria-label={t('loadingLabel')}
       className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4"
     >
       {Array.from({ length: count }).map((_, i) => (

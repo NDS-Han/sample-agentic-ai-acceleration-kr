@@ -15,6 +15,7 @@ import {
 } from 'chart.js';
 import { Line } from 'react-chartjs-2';
 import { useTranslations } from 'next-intl';
+import { fmtUsd } from '@/lib/utils/format';
 import type { TrendDataPoint } from '@/types/entities';
 import { CATEGORICAL_PALETTE, PRIMARY_SERIES, useChartTheme } from '@/lib/utils/chartTheme';
 import {
@@ -146,7 +147,7 @@ export function CostTrendChartClient({ trends, trendsByTeam = [] }: CostTrendCha
           (b.parsed.y ?? 0) - (a.parsed.y ?? 0),
         callbacks: {
           label: (ctx: import('chart.js').TooltipItem<'line'>) =>
-            ` ${ctx.dataset.label}: $${(ctx.parsed.y ?? 0).toFixed(4)}`,
+            ` ${ctx.dataset.label}: ${fmtUsd(ctx.parsed.y ?? 0)}`,
         },
       },
     },

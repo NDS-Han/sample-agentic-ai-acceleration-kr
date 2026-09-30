@@ -8,6 +8,7 @@ import { useTranslations } from 'next-intl';
 import type { RateLimitTreeNode } from '@/types/entities';
 import { RateLimitTree } from './RateLimitTree';
 import { RateLimitConfigPanel } from './RateLimitConfigPanel';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 
 interface RateLimitTreeViewProps {
   nodes: RateLimitTreeNode[];
@@ -27,6 +28,9 @@ function collectDefaultExpanded(nodes: RateLimitTreeNode[]): Set<string> {
 export function RateLimitTreeView({ nodes }: RateLimitTreeViewProps) {
   const t = useTranslations('rateLimits');
   const [selectedNode, setSelectedNode] = useState<RateLimitTreeNode | null>(null);
+  // 미저장 편집 중 노드 전환 시도 — 확인 후 전환한다(예전엔 입력이 무통고 소실됐다).
+  const [panelDirty, setPanelDirty] = useState(false);
+  const [pendingNode, setPendingNode] = useState<RateLimitTreeNode | null>(null);
   const [expandedNodes, setExpandedNodes] = useState<Set<string>>(() =>
     collectDefaultExpanded(nodes)
   );
@@ -79,6 +83,20 @@ export function RateLimitTreeView({ nodes }: RateLimitTreeViewProps) {
     });
   };
 
+  /** 같은 노드 재클릭이 아닌 전환 시, dirty 폼이 있으면 확인을 거친다. */
+  const handleSelect = (node: RateLimitTreeNode) => {
+    if (panelDirty && node.id !== selectedNode?.id) {
+      setPendingNode(node);
+      return;
+    }
+    setSelectedNode(node);
+  };
+
+  const confirmSwitch = () => {
+    if (pendingNode) setSelectedNode(pendingNode);
+    setPendingNode(null);
+  };
+
   return (
     <div className="space-y-3">
       {hasInactive && (
@@ -98,14 +116,23 @@ export function RateLimitTreeView({ nodes }: RateLimitTreeViewProps) {
           nodes={filteredNodes}
           selectedNodeId={selectedNode?.id ?? null}
           expandedNodes={expandedNodes}
-          onSelect={setSelectedNode}
+          onSelect={handleSelect}
           onToggle={handleToggle}
         />
       </div>
       <div className="flex-1 p-6">
-        <RateLimitConfigPanel node={selectedNode} />
+        <RateLimitConfigPanel node={selectedNode} onDirtyChange={setPanelDirty} />
       </div>
       </div>
+      <ConfirmDialog
+        isOpen={pendingNode !== null}
+        onClose={() => setPendingNode(null)}
+        onConfirm={confirmSwitch}
+        title={t('discardChangesTitle')}
+        message={t('discardChangesMessage')}
+        confirmLabel={t('discardChangesConfirm')}
+        isDestructive
+      />
     </div>
   );
 }

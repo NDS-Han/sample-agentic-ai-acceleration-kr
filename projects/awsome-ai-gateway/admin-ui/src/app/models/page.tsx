@@ -8,6 +8,7 @@ import { CreateModelButton } from '@/components/models/CreateModelButton';
 import { PriceSyncButton } from '@/components/models/PriceSyncButton';
 import { TeamModelPermissionPanel } from '@/components/models/TeamModelPermissionPanel';
 import { WebSearchTogglePanel } from '@/components/models/WebSearchTogglePanel';
+import { ErrorState } from '@/components/common/ErrorState';
 import type { RoutingProfileItem } from '@/lib/actions/routing';
 
 interface APIModelItem {
@@ -88,21 +89,34 @@ export default async function ModelsPage() {
             <CreateModelButton />
           </div>
         </div>
-        <ModelsTable models={models} />
+        {modelsRes.status === 'fulfilled' ? (
+          <ModelsTable models={models} />
+        ) : (
+          // 조회 실패를 "모델 0개"와 구분 — 재시도 가능한 실패 상태로 표시.
+          <ErrorState />
+        )}
       </div>
 
       <div>
         <h2 className="text-lg font-semibold mb-4">{t('teamModelAccess')}</h2>
-        <TeamModelPermissionPanel
-          teams={teams}
-          allTeams={allTeams.map(t => ({ id: t.id, name: t.name, department_name: t.department_name }))}
-          models={models}
-        />
+        {teamsRes.status === 'fulfilled' ? (
+          <TeamModelPermissionPanel
+            teams={teams}
+            allTeams={allTeams.map(t => ({ id: t.id, name: t.name, department_name: t.department_name }))}
+            models={models}
+          />
+        ) : (
+          <ErrorState compact />
+        )}
       </div>
 
       <div>
         <h2 className="text-lg font-semibold mb-4">{t('webSearch.title')}</h2>
-        <WebSearchTogglePanel initial={routingProfiles} />
+        {routingRes.status === 'fulfilled' ? (
+          <WebSearchTogglePanel initial={routingProfiles} />
+        ) : (
+          <ErrorState compact />
+        )}
       </div>
     </div>
   );

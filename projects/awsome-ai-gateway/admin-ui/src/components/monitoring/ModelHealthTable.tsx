@@ -3,6 +3,9 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
+import { AlertTriangle, AlertCircle } from 'lucide-react';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { fmtTime } from '@/lib/utils/format';
 import type { MonitoringModelsResponse } from '@/lib/actions/monitoring';
 import { Badge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
@@ -14,9 +17,17 @@ function errorColor(pct: number) {
   return '';
 }
 
+// 색상만으로 심각도를 구분하면 색각 이상 사용자에게 전달되지 않는다 — 아이콘 병기.
+function SeverityIcon({ pct }: { pct: number }) {
+  if (pct >= 10) return <AlertTriangle size={13} aria-hidden="true" />;
+  if (pct >= 5) return <AlertCircle size={13} aria-hidden="true" />;
+  return null;
+}
+
 export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
+  const tz = useReportingTz();
 
   if (data.models.length === 0) {
     return (
@@ -52,11 +63,21 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
               <Td numeric>{m.last_1h_requests.toLocaleString()}</Td>
               <Td numeric>{m.avg_latency_ms}ms</Td>
               <Td numeric className={errorColor(m.error_rate_pct)}>
-                {m.error_rate_pct}%
+                <span className="inline-flex items-center justify-end gap-1">
+                  <SeverityIcon pct={m.error_rate_pct} />
+                  {m.error_rate_pct}%
+                  {m.error_rate_pct >= 5 && (
+                    <span className="sr-only">
+                      {m.error_rate_pct >= 10
+                        ? t('table.severityCritical')
+                        : t('table.severityWarning')}
+                    </span>
+                  )}
+                </span>
               </Td>
               <Td numeric className="text-muted-foreground">
                 {m.last_request_at
-                  ? new Date(m.last_request_at).toLocaleTimeString(locale)
+                  ? fmtTime(m.last_request_at, locale, tz)
                   : '-'}
               </Td>
             </Tr>

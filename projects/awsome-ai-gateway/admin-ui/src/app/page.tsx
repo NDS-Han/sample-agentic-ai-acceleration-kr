@@ -1,6 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { KPICard } from '@/components/common/KPICard';
+import { ErrorState } from '@/components/common/ErrorState';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { AlertLevel } from '@/types/enums';
 import {
@@ -34,6 +35,7 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
+import { fmtUsd } from '@/lib/utils/format';
 
 
 
@@ -48,10 +50,6 @@ function formatTokens(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toLocaleString();
-}
-
-function fmtUsd2(n: number): string {
-  return `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
 
 /**
@@ -104,6 +102,8 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
 
   return (
     <div className="space-y-6">
+      {/* KPI 단일 엔드포인트 실패 시 '—' 카드와 함께 재시도 수단을 제공한다. */}
+      {!kpi && <ErrorState compact />}
       {/* ── 비용 & 예산 ── */}
       <section className="space-y-3">
         <h2 className="px-1 text-xs font-bold uppercase tracking-[0.12em] text-muted-foreground">
@@ -112,7 +112,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           <KPICard
             title={t('usageThisMonth')}
-            value={kpi ? fmtUsd2(kpi.total_cost_usd) : '—'}
+            value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
           />
@@ -125,17 +125,17 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
           <KPICard
             title={t('avgCostPerUser')}
-            value={kpi ? fmtUsd2(kpi.cost_per_user_usd) : '—'}
+            value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
           />
           <KPICard
             title={t('dailyAvg')}
-            value={kpi ? fmtUsd2(dailyAvg) : '—'}
+            value={kpi ? fmtUsd(dailyAvg) : '—'}
             icon={<CalendarClock size={18} aria-hidden="true" />}
             description={
               projection != null
-                ? t('dailyAvgProjection', { amount: fmtUsd2(projection) })
+                ? t('dailyAvgProjection', { amount: fmtUsd(projection) })
                 : t('dailyAvgDesc')
             }
           />
@@ -200,8 +200,17 @@ async function TrendAndDistribution({ period, client }: { period: string; client
         {t('trendAndDistribution')}
       </h2>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1.6fr_1fr]">
-        <CostTrendCard trends={analytics.trends ?? []} trendsByTeam={analytics.trends_by_team ?? []} />
-        <ModelShareDonutClient initialData={initialShare} teams={teams} period={period} client={client} />
+        {/* 섹션별 실패를 조용한 빈 차트 대신 재시도 가능한 에러 상태로 표시 */}
+        {analyticsResult.status === 'fulfilled' ? (
+          <CostTrendCard trends={analytics.trends ?? []} trendsByTeam={analytics.trends_by_team ?? []} />
+        ) : (
+          <ErrorState />
+        )}
+        {shareResult.status === 'fulfilled' ? (
+          <ModelShareDonutClient initialData={initialShare} teams={teams} period={period} client={client} />
+        ) : (
+          <ErrorState />
+        )}
       </div>
     </section>
   );
@@ -282,20 +291,28 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
         {t('teamUserRanking')}
       </h2>
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        <TopSpendTable
-          title={t('topTeamByCost')}
-          subtitle={t('topTeamByCostSubtitle')}
-          rows={teamRows}
-          accentVar="var(--chart-1)"
-          teamBudgetAppliedLabel={t('teamBudgetApplied')}
-        />
-        <TopSpendTable
-          title={t('topUserByCost')}
-          subtitle={t('topUserByCostSubtitle')}
-          rows={userRows}
-          accentVar="var(--chart-2)"
-          teamBudgetAppliedLabel={t('teamBudgetApplied')}
-        />
+        {topTeamsResult.status === 'fulfilled' ? (
+          <TopSpendTable
+            title={t('topTeamByCost')}
+            subtitle={t('topTeamByCostSubtitle')}
+            rows={teamRows}
+            accentVar="var(--chart-1)"
+            teamBudgetAppliedLabel={t('teamBudgetApplied')}
+          />
+        ) : (
+          <ErrorState />
+        )}
+        {topUsersResult.status === 'fulfilled' ? (
+          <TopSpendTable
+            title={t('topUserByCost')}
+            subtitle={t('topUserByCostSubtitle')}
+            rows={userRows}
+            accentVar="var(--chart-2)"
+            teamBudgetAppliedLabel={t('teamBudgetApplied')}
+          />
+        ) : (
+          <ErrorState />
+        )}
       </div>
     </section>
   );
@@ -311,7 +328,7 @@ async function ClientDistribution({ period }: { period: string }) {
         {t('clientCostShare')}
       </h2>
       <div className="glass glass-hover rounded-apple p-5">
-        <ClientShareDonutClient data={data} />
+        {share ? <ClientShareDonutClient data={data} /> : <ErrorState compact />}
       </div>
     </section>
   );

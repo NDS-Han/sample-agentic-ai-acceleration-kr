@@ -9,6 +9,7 @@ import { parseJWT } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
 import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
+import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 
 export default async function BudgetsPage() {
@@ -36,11 +37,17 @@ export default async function BudgetsPage() {
     cap_source?: 'individual' | 'team_default' | null;
   }
 
-  const raw = await adminAPI
+  // 조회 실패를 "예산 없음"과 구분 — 실패 시 재시도 가능한 에러 상태를 렌더한다.
+  const summaryResult = await adminAPI
     .get<{ summary: RawBudgetItem[] }>('/admin/budgets/summary', { period })
-    .catch(() => ({ summary: [] as RawBudgetItem[] }));
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
 
-  const rawItems = Array.isArray(raw) ? raw : (raw as { summary: RawBudgetItem[] }).summary ?? [];
+  const rawItems = summaryResult.ok
+    ? Array.isArray(summaryResult.value)
+      ? summaryResult.value
+      : summaryResult.value.summary ?? []
+    : [];
 
   const items: BudgetSummaryItem[] = rawItems.map((r) => {
     const pct = r.usage_pct != null ? parseFloat(r.usage_pct) || 0 : null;
@@ -154,12 +161,16 @@ export default async function BudgetsPage() {
       </div>
 
       {isAdmin ? (
-        <BudgetSummaryTable
-          items={items}
-          isAdmin={isAdmin}
-          models={models}
-          currentUserId={session?.user_id}
-        />
+        summaryResult.ok ? (
+          <BudgetSummaryTable
+            items={items}
+            isAdmin={isAdmin}
+            models={models}
+            currentUserId={session?.user_id}
+          />
+        ) : (
+          <ErrorState />
+        )
       ) : session?.team_id ? (
         <TeamAllocationView
           teamId={session.team_id}

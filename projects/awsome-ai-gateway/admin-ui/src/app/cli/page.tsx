@@ -3,13 +3,19 @@
 import type { CLIDownloadItem } from '@/types/entities';
 import { adminAPI } from '@/lib/api-client';
 import { CLIDownloadCard } from '@/components/cli/CLIDownloadCard';
+import { ErrorState } from '@/components/common/ErrorState';
+import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
 
 export default async function CLIPage() {
   const t = await getTranslations('cli');
-  const rawDownloads = await adminAPI
+  // 목록 조회 실패를 "바이너리 없음"과 구분 — 둘을 합치면 네트워크 장애가
+  // 빌드 누락처럼 보인다.
+  const downloadsResult = await adminAPI
     .get<CLIDownloadItem[]>('/cli/downloads')
-    .catch(() => []);
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
+  const rawDownloads = downloadsResult.ok ? downloadsResult.value : [];
 
   // admin-api 가 주는 download_url 은 `/cli/download/{os}/{arch}` — **admin-api** 기준 경로다.
   // 브라우저에서 쓰려면 같은 오리진의 프록시를 거쳐야 하므로
@@ -67,52 +73,50 @@ export default async function CLIPage() {
       <section className="space-y-3">
         <h2 className="text-base font-semibold">{t('cmdRefTitle')}</h2>
         <div className="glass rounded-apple overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="border-b border-border bg-muted/50">
-                  <th className="px-4 py-2 text-left font-medium w-48">{t('cmdColumn')}</th>
-                  <th className="px-4 py-2 text-left font-medium">{t('descColumn')}</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli login</td>
-                  <td className="px-4 py-2">
-                    {t.rich('cmdLogin', { code })}
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {t('cmdLoginOpts')}
-                    </div>
-                  </td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli logout</td>
-                  <td className="px-4 py-2">{t('cmdLogout')}</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli setup</td>
-                  <td className="px-4 py-2">
-                    {t.rich('cmdSetup', { code })}
-                    <div className="text-xs text-muted-foreground mt-1">
-                      {t('cmdSetupOpts')}
-                    </div>
-                  </td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli status</td>
-                  <td className="px-4 py-2">{t('cmdStatus')}</td>
-                </tr>
-                <tr className="border-b border-border">
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli disable</td>
-                  <td className="px-4 py-2">{t('cmdDisable')}</td>
-                </tr>
-                <tr>
-                  <td className="px-4 py-2 font-mono text-xs">gateway-cli version</td>
-                  <td className="px-4 py-2">{t('cmdVersion')}</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
+          <Table>
+            <THead>
+              <Tr>
+                <Th className="w-48">{t('cmdColumn')}</Th>
+                <Th>{t('descColumn')}</Th>
+              </Tr>
+            </THead>
+            <TBody>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli login</Td>
+                <Td>
+                  {t.rich('cmdLogin', { code })}
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {t('cmdLoginOpts')}
+                  </div>
+                </Td>
+              </Tr>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli logout</Td>
+                <Td>{t('cmdLogout')}</Td>
+              </Tr>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli setup</Td>
+                <Td>
+                  {t.rich('cmdSetup', { code })}
+                  <div className="text-xs text-muted-foreground mt-1">
+                    {t('cmdSetupOpts')}
+                  </div>
+                </Td>
+              </Tr>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli status</Td>
+                <Td>{t('cmdStatus')}</Td>
+              </Tr>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli disable</Td>
+                <Td>{t('cmdDisable')}</Td>
+              </Tr>
+              <Tr>
+                <Td className="font-mono text-xs">gateway-cli version</Td>
+                <Td>{t('cmdVersion')}</Td>
+              </Tr>
+            </TBody>
+          </Table>
         </div>
       </section>
 
@@ -144,7 +148,9 @@ export default async function CLIPage() {
       {/* 다운로드 카드 */}
       <section className="space-y-3">
         <h2 className="text-base font-semibold">{t('binaryTitle')}</h2>
-        {downloads.length === 0 ? (
+        {!downloadsResult.ok ? (
+          <ErrorState compact />
+        ) : downloads.length === 0 ? (
           // admin-api 는 CLI_DIST_DIR 에 실제로 있는 패키지만 광고한다(예전엔 없는 파일도
           // 0.0 MB 카드로 광고해 누르면 404 였다). 비어 있으면 원인을 알려 준다.
           <p className="text-muted-foreground text-sm">

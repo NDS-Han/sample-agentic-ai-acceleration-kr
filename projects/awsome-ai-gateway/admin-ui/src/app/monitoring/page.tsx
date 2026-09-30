@@ -15,10 +15,14 @@ import { MonitoringOverview } from '@/components/monitoring/MonitoringOverview';
 import { ModelHealthTable } from '@/components/monitoring/ModelHealthTable';
 import { UserTopTable } from '@/components/monitoring/UserTopTable';
 import { EventLog } from '@/components/monitoring/EventLog';
+import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 
+// 각 섹션 fetch 가 throw 하면 Suspense 경계가 페이지 전체 error.tsx 로 새는 대신
+// 그 섹션만 실패 카드로 저하시킨다 — 나머지 섹션은 정상 렌더.
 async function OverviewSection() {
-  const data = await fetchMonitoringOverview();
+  const data = await fetchMonitoringOverview().catch(() => null);
+  if (!data) return <ErrorState />;
   return (
     <>
       {/* 퀵챗 화면 컨텍스트 등록 — "지금 보는 모니터링 화면(최근 1시간 집계)".
@@ -35,18 +39,18 @@ async function OverviewSection() {
 }
 
 async function ModelsSection() {
-  const data = await fetchMonitoringModels();
-  return <ModelHealthTable data={data} />;
+  const data = await fetchMonitoringModels().catch(() => null);
+  return data ? <ModelHealthTable data={data} /> : <ErrorState />;
 }
 
 async function UsersSection() {
-  const data = await fetchMonitoringUsers(10);
-  return <UserTopTable data={data} />;
+  const data = await fetchMonitoringUsers(10).catch(() => null);
+  return data ? <UserTopTable data={data} /> : <ErrorState />;
 }
 
 async function EventsSection() {
-  const data = await fetchMonitoringEvents();
-  return <EventLog data={data} />;
+  const data = await fetchMonitoringEvents().catch(() => null);
+  return data ? <EventLog data={data} /> : <ErrorState />;
 }
 
 async function BodyLoggingSection() {

@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useState, useTransition } from 'react';
+import { useEffect, useRef, useState, useTransition } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import {
   fetchMonitoringEvents,
@@ -11,6 +11,8 @@ import {
   type MonitoringEventTypeFilter,
 } from '@/lib/actions/monitoring';
 import type { BadgeTone } from '@/components/common/Badge';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 function eventTone(type: string): BadgeTone {
@@ -30,6 +32,7 @@ function eventTone(type: string): BadgeTone {
 export function EventLog({ data: initialData }: { data: MonitoringEventsResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
+  const tz = useReportingTz();
   const [filter, setFilter] = useState<MonitoringEventTypeFilter>('all');
   const [data, setData] = useState<MonitoringEventsResponse>(initialData);
   const [isPending, startTransition] = useTransition();
@@ -58,6 +61,24 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
     });
   };
 
+  // 모니터링 페이지 — 30초 자동 새로고침(탭 비활성 시 폴링 중지). 수동 리로드에
+  // 의존하면 "실시간" 로그가 아니다. 필터 상태는 ref 로 추적해 클로저 고착 방지.
+  const filterRef = useRef(filter);
+  filterRef.current = filter;
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      void fetchMonitoringEvents(50, filterRef.current)
+        .then(setData)
+        .catch(() => undefined);
+    }, 30_000);
+    return () => clearInterval(id);
+  }, []);
+
+  const copyUserId = (id: string) => {
+    navigator.clipboard?.writeText(id).catch(() => undefined);
+  };
+
   return (
     <div className="glass rounded-apple overflow-hidden">
       <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3 flex-wrap">
@@ -82,6 +103,8 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
         </div>
       </div>
 
+      {/* 필터 재조회 중엔 stale 행이 그대로 보인다 — 흐리게 표시해 "예전 결과"임을 전달 */}
+      <div aria-busy={isPending} className={isPending ? 'opacity-50 transition-opacity' : 'transition-opacity'}>
       {data.events.length === 0 ? (
         <div className="p-6">
           <p className="text-sm text-muted-foreground">{t('events.empty')}</p>
@@ -101,13 +124,7 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
             {data.events.map((ev, i) => (
               <Tr key={`${ev.timestamp}-${i}`}>
                 <Td className="text-muted-foreground whitespace-nowrap num">
-                  {new Date(ev.timestamp).toLocaleString(locale, {
-                    month: '2-digit',
-                    day: '2-digit',
-                    hour: '2-digit',
-                    minute: '2-digit',
-                    second: '2-digit',
-                  })}
+                  {fmtDateTime(ev.timestamp, locale, tz)}
                 </Td>
                 <Td>
                   <span className={`badge badge-${eventTone(ev.event_type)}`}>
@@ -128,7 +145,15 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
                   )}
                 </Td>
                 <Td className="text-muted-foreground font-mono mono-id text-xs">
-                  {ev.user_id.slice(0, 8)}...
+                  <button
+                    type="button"
+                    title={ev.user_id}
+                    onClick={() => copyUserId(ev.user_id)}
+                    className="hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                    aria-label={`${ev.user_id} — ${t('events.copyUserId')}`}
+                  >
+                    {ev.user_id.slice(0, 8)}…
+                  </button>
                 </Td>
                 <Td className="text-muted-foreground">{ev.detail}</Td>
               </Tr>
@@ -136,6 +161,7 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
           </TBody>
         </Table>
       )}
+      </div>
     </div>
   );
 }

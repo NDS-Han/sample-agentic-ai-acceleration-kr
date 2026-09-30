@@ -5,9 +5,9 @@
 
 import { useState, useTransition, useEffect } from 'react';
 import { useTranslations } from 'next-intl';
-import { X } from 'lucide-react';
 import type { ModelListItem } from '@/types/entities';
 import { createModelAction, updateModelAction } from '@/lib/actions/models';
+import { AppDialog } from '@/components/common/AppDialog';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
@@ -143,25 +143,13 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
     });
   };
 
-  if (!isOpen) return null;
-
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-      <div className="bg-background rounded-lg p-6 w-full max-w-lg shadow-xl border border-border max-h-[90vh] overflow-y-auto">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">
-            {isEditMode ? t('editModel') : t('createModel')}
-          </h2>
-          <button
-            onClick={onClose}
-            className="rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-opacity"
-            aria-label={tCommon('close')}
-          >
-            <X size={16} aria-hidden="true" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
+    <AppDialog
+      isOpen={isOpen}
+      onClose={onClose}
+      title={isEditMode ? t('editModel') : t('createModel')}
+    >
+      <form onSubmit={handleSubmit} className="space-y-4 mt-4">
           {/* Alias */}
           <div className="space-y-1">
             <label htmlFor="alias" className="text-sm font-medium">
@@ -403,7 +391,6 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
             </SpinnerButton>
           </div>
         </form>
-      </div>
-    </div>
+    </AppDialog>
   );
 }

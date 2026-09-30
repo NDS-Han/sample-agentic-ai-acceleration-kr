@@ -5,6 +5,7 @@ import type { AnalyticsFilterForm } from '@/types/api';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
 import { LazyTokenMixDonut } from './LazyCharts';
+import { ErrorState } from '@/components/common/ErrorState';
 import type { TokenBreakdownData } from './TokenMixDonutClient';
 
 interface TokenAnalysisCardProps {
@@ -27,7 +28,10 @@ export async function TokenAnalysisCard({ filter, latestMonth }: TokenAnalysisCa
   return (
     <div className="glass glass-hover rounded-apple p-4">
       <h3 className="text-sm font-semibold mb-3">{t('tokenAnalysis')}</h3>
-      {tb && tb.total_tokens > 0 ? (
+      {data === null ? (
+        // 조회 실패와 "토큰 데이터 0"을 구분 — 실패는 재시도 가능 상태.
+        <ErrorState compact />
+      ) : tb && tb.total_tokens > 0 ? (
         <LazyTokenMixDonut data={tb} />
       ) : (
         <div className="flex items-center justify-center h-64 text-sm text-muted-foreground">

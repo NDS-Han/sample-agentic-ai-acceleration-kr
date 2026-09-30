@@ -1,13 +1,16 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
+import { useTranslations } from 'next-intl';
+
 interface SkeletonTableProps {
   rows?: number;
   columns?: number;
 }
 
 export function SkeletonTable({ rows = 5, columns = 4 }: SkeletonTableProps) {
+  const t = useTranslations('common');
   return (
-    <div className="w-full overflow-hidden glass rounded-apple" aria-busy="true" aria-label="로딩 중">
+    <div className="w-full overflow-hidden glass rounded-apple" aria-busy="true" aria-label={t('loadingLabel')}>
       {/* Header */}
       <div className="flex items-center gap-4 border-b border-border bg-muted/40 px-4 py-3">
         {Array.from({ length: columns }).map((_, colIdx) => (

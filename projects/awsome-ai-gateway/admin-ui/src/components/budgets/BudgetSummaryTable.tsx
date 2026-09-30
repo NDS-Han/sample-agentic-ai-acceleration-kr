@@ -9,10 +9,12 @@ import { ChevronRight, ChevronDown, Users } from 'lucide-react';
 import type { BudgetSummaryItem, ModelListItem } from '@/types/entities';
 import { AlertLevel, BudgetScope } from '@/types/enums';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
+import { AppDialog } from '@/components/common/AppDialog';
 import { SetBudgetDialog } from './SetBudgetDialog';
 import { AutoDowngradeConfig } from './AutoDowngradeConfig';
 import { TeamAllocationView } from './TeamAllocationView';
 import { AlertBadge, TypeBadge, UsageBar } from './budgetVisuals';
+import { fmtUsd } from '@/lib/utils/format';
 
 interface BudgetSummaryTableProps {
   items: BudgetSummaryItem[];
@@ -40,7 +42,6 @@ const UNASSIGNED_KEY = '__unassigned__';
 
 export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: BudgetSummaryTableProps) {
   const t = useTranslations('budgets');
-  const tCommon = useTranslations('common');
   const [selectedItem, setSelectedItem] = useState<DialogTarget | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
@@ -124,16 +125,16 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
       </Td>
       <Td numeric>
         {user.limit != null ? (
-          `$${user.limit.toFixed(2)}`
+          fmtUsd(user.limit)
         ) : user.cap_source === 'team_default' ? (
           <span className="text-muted-foreground italic">{t('defaultCapApplied')}</span>
         ) : (
           <span className="text-muted-foreground italic">{t('teamBudgetApplied')}</span>
         )}
       </Td>
-      <Td numeric>${user.used.toFixed(2)}</Td>
+      <Td numeric>{fmtUsd(user.used)}</Td>
       <Td numeric>
-        {user.remaining != null ? `$${user.remaining.toFixed(2)}` : <span className="text-muted-foreground italic">-</span>}
+        {user.remaining != null ? fmtUsd(user.remaining) : <span className="text-muted-foreground italic">-</span>}
       </Td>
       <Td>
         <div className="flex items-center gap-2">
@@ -237,16 +238,16 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
                           <TypeBadge type={team.target_type} labels={typeLabels} />
                         </Td>
                         <Td numeric>
-                          {team.limit != null ? `$${team.limit.toFixed(2)}` : <span className="text-muted-foreground italic">{t('notSet')}</span>}
+                          {team.limit != null ? fmtUsd(team.limit) : <span className="text-muted-foreground italic">{t('notSet')}</span>}
                           {team.default_user_cap_usd != null && (
                             <span className="block text-[11px] text-muted-foreground tabular-nums">
-                              {t('defaultCapShort', { value: team.default_user_cap_usd.toFixed(2) })}
+                              {t('defaultCapShort', { value: fmtUsd(team.default_user_cap_usd) })}
                             </span>
                           )}
                         </Td>
-                        <Td numeric>${team.used.toFixed(2)}</Td>
+                        <Td numeric>{fmtUsd(team.used)}</Td>
                         <Td numeric>
-                          {team.remaining != null ? `$${team.remaining.toFixed(2)}` : <span className="text-muted-foreground italic">-</span>}
+                          {team.remaining != null ? fmtUsd(team.remaining) : <span className="text-muted-foreground italic">-</span>}
                         </Td>
                         <Td>
                           <div className="flex items-center gap-2">
@@ -359,31 +360,21 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
       />
 
       {/* D-21: admin 팀원 일괄 편집 모달 — allocation 은 뷰 내부에서 lazy-load. */}
-      {memberEditTeam && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-background rounded-lg p-6 w-full max-w-4xl shadow-xl border border-border max-h-[90vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold">
-                {t('memberBulkEditTitle', { team: memberEditTeam.name })}
-              </h2>
-              <button
-                type="button"
-                onClick={() => setMemberEditTeam(null)}
-                className="rounded-sm opacity-70 hover:opacity-100 text-sm px-2 py-1"
-                aria-label={tCommon('close')}
-              >
-                ✕
-              </button>
-            </div>
-            <TeamAllocationView
-              key={memberEditTeam.id}
-              teamId={memberEditTeam.id}
-              isAdmin
-              currentUserId={currentUserId}
-            />
-          </div>
-        </div>
-      )}
+      <AppDialog
+        isOpen={memberEditTeam !== null}
+        onClose={() => setMemberEditTeam(null)}
+        title={memberEditTeam ? t('memberBulkEditTitle', { team: memberEditTeam.name }) : ''}
+        contentClassName="max-w-4xl"
+      >
+        {memberEditTeam && (
+          <TeamAllocationView
+            key={memberEditTeam.id}
+            teamId={memberEditTeam.id}
+            isAdmin
+            currentUserId={currentUserId}
+          />
+        )}
+      </AppDialog>
     </>
   );
 }

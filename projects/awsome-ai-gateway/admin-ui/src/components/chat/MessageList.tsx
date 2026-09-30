@@ -3,20 +3,10 @@
 'use client';
 
 import { useEffect, useRef } from 'react';
+import { useTranslations } from 'next-intl';
 import { Sparkles } from 'lucide-react';
 import { MessageBubble } from './MessageBubble';
 import type { ChatMessage } from './types';
-
-const SUGGESTIONS = [
-  '이번 달 비용 top 10 사용자',
-  '어제 평소보다 비싸진 사용자 누구',
-  'Claude Code vs Cowork 앱별 비용·모델 비교',
-  '지난 30일 일별 총 비용 추이',
-  '이번 달 80% 도달한 팀',
-  '지난 24h 429 가장 많이 받은 사용자',
-  '지난 30일 사용 패턴 outlier 사용자',
-  '다음 달 총 비용 예측',
-];
 
 interface Props {
   messages: ChatMessage[];
@@ -26,7 +16,9 @@ interface Props {
 }
 
 export function MessageList({ messages, onSuggestionClick, sessionId, mode = 'quick' }: Props) {
+  const t = useTranslations('chat');
   const endRef = useRef<HTMLDivElement>(null);
+  const suggestions = t.raw('suggestions') as string[];
 
   useEffect(() => {
     endRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
@@ -38,15 +30,15 @@ export function MessageList({ messages, onSuggestionClick, sessionId, mode = 'qu
         <div className="mb-3 flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
           <Sparkles size={20} className="text-secondary-foreground" />
         </div>
-        <h2 className="text-base font-semibold">{mode === 'deep' ? 'BI Insight' : 'Quick Chat'}</h2>
+        <h2 className="text-base font-semibold">
+          {mode === 'deep' ? t('biInsight') : t('quickChat')}
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground max-w-md">
-          {mode === 'deep'
-            ? '계획을 먼저 세우고 다단계 분석·교차 검증을 거쳐 신뢰할 수 있는 인사이트를 드립니다. 비용·사용량·이상치·예측 등 깊은 질문에 적합합니다.'
-            : '자연어로 사용자 / 팀 / 예산 / 사용량 데이터를 빠르게 질의하세요. SQL은 자동 작성 + 검증되며, 분석/예측은 Python sandbox 에서 처리됩니다.'}
+          {mode === 'deep' ? t('emptyDeep') : t('emptyQuick')}
         </p>
 
         <div className="mt-8 grid grid-cols-1 gap-2 sm:grid-cols-2 max-w-2xl w-full">
-          {SUGGESTIONS.map((s) => (
+          {suggestions.map((s) => (
             <button
               key={s}
               type="button"
@@ -80,14 +72,16 @@ export function MessageList({ messages, onSuggestionClick, sessionId, mode = 'qu
             // PlanCard [진행] — 마지막 assistant 메시지의 plan 에만 활성(§57).
             onPlanProceed={
               i === messages.length - 1 && m.plan && !m.pending
-                ? () => onSuggestionClick('진행해줘')
+                ? () => onSuggestionClick(t('proceedMessage'))
                 : undefined
             }
           />
         ))}
         {followUps && (
           <div className="flex flex-wrap items-center gap-2 px-4 pb-5 pt-1 pl-12">
-            <span className="text-[11px] font-medium text-muted-foreground/70 mr-0.5">연관 질문</span>
+            <span className="text-[11px] font-medium text-muted-foreground/70 mr-0.5">
+              {t('relatedQuestions')}
+            </span>
             {followUps.map((s) => (
               <button
                 key={s}

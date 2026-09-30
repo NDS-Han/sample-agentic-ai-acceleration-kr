@@ -10,6 +10,8 @@ import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { fmtDate } from '@/lib/utils/format';
 import type { VirtualKeyListItem } from '@/types/entities';
 import { KeyStatus } from '@/types/enums';
 
@@ -23,17 +25,15 @@ const STATUS_TONE: Record<string, BadgeTone> = {
   [KeyStatus.REVOKED]: 'pink',
 };
 
-function formatDate(iso: string | null, noExpiry: string): string {
+function formatDate(iso: string | null, noExpiry: string, timeZone: string): string {
   if (!iso) return noExpiry;
-  const date = new Date(iso);
-  const y = date.getFullYear();
-  const m = String(date.getMonth() + 1).padStart(2, '0');
-  const d = String(date.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  // 리포팅 TZ 기준 — 만료일이 브라우저 로컬 기준 하루 어긋나 보이는 것 방지.
+  return fmtDate(iso, timeZone);
 }
 
 export function KeysTable({ keys }: KeysTableProps) {
   const t = useTranslations('keys');
+  const tz = useReportingTz();
   const { toast } = useToast();
 
   const [revokeState, setRevokeState] = useState<{
@@ -97,8 +97,8 @@ export function KeysTable({ keys }: KeysTableProps) {
                     {t(`keyStatus.${key.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
                   </Badge>
                 </Td>
-                <Td className="text-muted-foreground">{formatDate(key.created_at, t('noExpiry'))}</Td>
-                <Td className="text-muted-foreground">{formatDate(key.expires_at, t('noExpiry'))}</Td>
+                <Td className="text-muted-foreground">{formatDate(key.created_at, t('noExpiry'), tz)}</Td>
+                <Td className="text-muted-foreground">{formatDate(key.expires_at, t('noExpiry'), tz)}</Td>
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">
                     <button
