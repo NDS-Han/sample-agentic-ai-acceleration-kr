@@ -7,6 +7,7 @@ import { forwardRef, useImperativeHandle, useState, useTransition, useEffect } f
 import { useTranslations } from 'next-intl';
 import { useToast } from '@/components/common/ToastProvider';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
+import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import {
   getTeamAllowedModelsAction,
   setTeamAllowedModelsAction,
@@ -54,32 +55,35 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
   const [hasRestrictions, setHasRestrictions] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [showInactive, setShowInactive] = useState(false);
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
 
   const visibleTeams = showInactive && allTeams ? allTeams : teams;
 
   const activeModels = models.filter(m => m.is_active);
 
   useEffect(() => {
-    if (!selectedTeamId) {
-      setAllowedAliases([]);
-      setLoadedAliases([]);
-      setHasRestrictions(false);
-      setLoaded(false);
-      return;
-    }
+    let cancelled = false;
+    // 팀 전환 즉시 이전 팀의 목록을 지운다 — loaded 가 true 인 채로 팀 A의
+    // aliases 가 남으면 그 사이 토글·저장이 팀 B에 쓰인다.
+    setAllowedAliases([]);
+    setLoadedAliases([]);
+    setHasRestrictions(false);
+    setLoaded(false);
+    if (!selectedTeamId) return;
     startTransition(async () => {
       const result = await getTeamAllowedModelsAction(selectedTeamId);
+      // 빠른 A→B→A 전환에서 늦게 돌아온 응답이 새 팀 상태를 덮지 않게 한다.
+      if (cancelled) return;
       if (result.success) {
         setAllowedAliases(result.data.model_aliases);
         setLoadedAliases(result.data.model_aliases);
         setHasRestrictions(result.data.model_aliases.length > 0);
-      } else {
-        setAllowedAliases([]);
-        setLoadedAliases([]);
-        setHasRestrictions(false);
       }
       setLoaded(true);
     });
+    return () => {
+      cancelled = true;
+    };
   }, [selectedTeamId]);
 
   const toggleModel = (alias: string) => {
@@ -98,7 +102,13 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
   }, [dirty, onDirtyChange]);
 
   const save = async (): Promise<boolean> => {
-    if (!selectedTeamId || !loaded) return false;
+    if (!selectedTeamId) return false;
+    if (!loaded) {
+      // 부모의 통합 저장이 이 경로를 친다 — 조용히 false 만 반환하면 앞 섹션은
+      // 저장됐는데 왜 멈췄는지 사용자가 알 수 없다.
+      toast({ type: 'error', message: t('saveNotReady'), auto_dismiss_ms: 4000 });
+      return false;
+    }
     if (allowedAliases.length === 0) {
       toast({ type: 'error', message: t('minOneModel'), auto_dismiss_ms: 3000 });
       return false;
@@ -125,6 +135,7 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
   };
 
   const handleClear = () => {
+    setClearConfirmOpen(false);
     if (!selectedTeamId) return;
     startTransition(async () => {
       const result = await clearTeamAllowedModelsAction(selectedTeamId);
@@ -237,9 +248,10 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
               {hasRestrictions && (
                 <button
                   type="button"
-                  onClick={handleClear}
-                  disabled={isPending}
-                  className="text-sm text-destructive hover:underline disabled:opacity-50"
+                  onClick={() => setClearConfirmOpen(true)}
+                  // 미저장 편집이 있으면 제한 해제가 편집 내용을 조용히 버리므로 막는다.
+                  disabled={isPending || dirty}
+                  className="text-sm text-destructive hover:underline disabled:opacity-50 disabled:no-underline"
                 >
                   {t('clearRestriction')}
                 </button>
@@ -255,6 +267,16 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
           {t('loadingText')}
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={clearConfirmOpen}
+        onClose={() => setClearConfirmOpen(false)}
+        onConfirm={handleClear}
+        title={t('clearRestrictionTitle')}
+        message={t('clearRestrictionMessage')}
+        confirmLabel={t('clearRestriction')}
+        isDestructive
+      />
     </div>
   );
 });

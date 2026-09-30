@@ -64,9 +64,12 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
     const [loaded, setLoaded] = useState(false);
 
     useEffect(() => {
+      let cancelled = false;
       setLoaded(false);
       startLoadTransition(async () => {
         const r = await getScopeAllowedClientsAction(scope, scopeId);
+        // 빠른 scope 전환에서 늦게 돌아온 응답이 새 상태를 덮지 않게 한다.
+        if (cancelled) return;
         if (r.success) {
           const sel = clientsToSelected(r.data.clients);
           setLoadedSelected(sel);
@@ -76,6 +79,9 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
           toast({ type: 'error', message: t('loadError'), auto_dismiss_ms: 5000 });
         }
       });
+      return () => {
+        cancelled = true;
+      };
     }, [scope, scopeId]);
 
     const toggle = (c: ClientId) => {

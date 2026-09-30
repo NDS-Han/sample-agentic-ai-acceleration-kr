@@ -76,6 +76,43 @@ export function searchOrgNodes(
  * 한다(멤버가 lazy-load 되므로). 따라서 반환값에 teamId 가 포함된다.
  * 팀을 찾지 못하면 null — 비활성 팀이거나 멤버 0명이어서 트리에서 숨겨진 경우.
  */
+/** id 로 트리 노드를 찾는다(타입 무관). 없으면 null. */
+export function findNodeById(
+  root: OrgTreeNode | null,
+  id: string,
+): OrgTreeNode | null {
+  if (!root) return null;
+  const walk = (node: OrgTreeNode): OrgTreeNode | null => {
+    if (node.id === id) return node;
+    for (const child of node.children ?? []) {
+      const hit = walk(child);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return walk(root);
+}
+
+/**
+ * 임의 노드 id 로 "펼쳐야 하는 조상 id 목록" 을 반환(자기 자신 미포함).
+ * 노드를 못 찾으면 null — 딥링크 복원·검색 결과 노출에 사용.
+ */
+export function findNodeExpandPath(
+  root: OrgTreeNode | null,
+  id: string,
+): string[] | null {
+  if (!root) return null;
+  const walk = (node: OrgTreeNode, ancestorIds: string[]): string[] | null => {
+    if (node.id === id) return ancestorIds;
+    for (const child of node.children ?? []) {
+      const hit = walk(child, [...ancestorIds, node.id]);
+      if (hit) return hit;
+    }
+    return null;
+  };
+  return walk(root, []);
+}
+
 export function findTeamExpandPath(
   root: OrgTreeNode | null,
   teamId: string,

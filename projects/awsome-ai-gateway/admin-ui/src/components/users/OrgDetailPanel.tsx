@@ -32,6 +32,8 @@ import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
 
 interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
+  /** 패널 내 미저장 편집 여부를 부모(OrgTreeView 의 노드 전환 가드)에 보고한다. */
+  onDirtyChange?: (_dirty: boolean) => void;
 }
 
 // Role labels are now i18n-driven — see t('roleLabel.ADMIN') etc.
@@ -42,7 +44,7 @@ const ROLE_TONE: Record<string, BadgeTone> = {
   DEVELOPER: 'teal',
 };
 
-export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
+export function OrgDetailPanel({ node, onDirtyChange }: OrgDetailPanelProps) {
   const t = useTranslations('users');
 
   if (!node) {
@@ -78,7 +80,7 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
           </div>
         )}
         <div className="mt-4">
-          <ScopeAppAccessPanel scope="organization" scopeId={node.id} />
+          <ScopeAppAccessPanel scope="organization" scopeId={node.id} onDirtyChange={onDirtyChange} />
         </div>
       </div>
     );
@@ -114,12 +116,14 @@ export function OrgDetailPanel({ node }: OrgDetailPanelProps) {
 
   // ── TEAM ────────────────────────────────────────────────────────────────────
   if (node.type === 'TEAM') {
-    return <TeamPanel node={node} />;
+    // key=node.id — 팀 A→B 전환 시 같은 컴포넌트 재사용으로 리더 선택·다이얼로그·
+    // dirty·로드 상태가 새 팀으로 새는 것을 막는다.
+    return <TeamPanel key={node.id} node={node} onDirtyChange={onDirtyChange} />;
   }
 
   // ── USER ────────────────────────────────────────────────────────────────────
   if (node.type === 'USER') {
-    return <UserPanel node={node} />;
+    return <UserPanel key={node.id} node={node} onDirtyChange={onDirtyChange} />;
   }
 
   return null;
@@ -157,7 +161,13 @@ function clientsKey(clients: string[]): string {
   return selectedToClients(clients).slice().sort().join(',');
 }
 
-function UserPanel({ node }: { node: OrgTreeNode }) {
+function UserPanel({
+  node,
+  onDirtyChange,
+}: {
+  node: OrgTreeNode;
+  onDirtyChange?: (_dirty: boolean) => void;
+}) {
   const t = useTranslations('users');
   const { toast } = useToast();
   // 로드용/저장용 transition 분리 — 초기 조회 중에 Apply 버튼이 스피너로 보이는 혼동 방지.
@@ -198,6 +208,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
 
   useEffect(() => {
     // 사용자 전환 시 이전 사용자 상태 잔존 방지(잘못된 저장 차단).
+    let cancelled = false;
     setModelsLoaded(false);
     setClientsLoaded(false);
     setModelsTouched(false);
@@ -210,6 +221,8 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         getUserAllowedModelsAction(node.id),
         listActiveModelsAction(),
       ]);
+      // 빠른 A→B→A 전환에서 늦게 돌아온 응답이 새 노드 상태를 덮지 않게 한다.
+      if (cancelled) return;
       if (r.success) {
         const sel = clientsToSelected(r.data.clients);
         // 개인 정책 행이 없으면 상속된 유효 목록(팀/조직 정책)을 프리필해 보여준다 —
@@ -266,6 +279,9 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
         });
       }
     });
+    return () => {
+      cancelled = true;
+    };
   }, [node.id]);
 
   const toggleModel = (alias: string) => {
@@ -341,6 +357,10 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
   // 토글로 실제 변경이 있을 때만 dirty — 상속 프리필은 변경이 아니다.
   const modelsDirty = modelsLoaded && modelsTouched;
   const dirty = accessDirty || modelsDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const btn = (active: boolean) =>
     [
@@ -426,7 +446,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
           <details open className="border rounded-apple-md p-3 mb-3 group">
             <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-2 [&::-webkit-details-marker]:hidden">
               <span>{t('budgetInput.title')}</span>
-              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
             </summary>
             <div className="flex items-center justify-end mb-2">
               <Link
@@ -473,7 +493,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
           <details open className="border rounded-apple-md p-3 mb-3 group">
             <summary className="flex items-center justify-between cursor-pointer list-none text-sm font-medium mb-1 [&::-webkit-details-marker]:hidden">
               <span>{t('userModels.title')}</span>
-              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
             </summary>
             <p className="text-xs text-muted-foreground mb-3">
               {t('userModels.hint')}
@@ -523,7 +543,7 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
                 {t('effectivePolicy.title')}
                 <Badge tone="neutral">{t('effectivePolicy.readonly')}</Badge>
               </span>
-              <span className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
+              <span aria-hidden="true" className="text-muted-foreground transition-transform group-open:rotate-180">▾</span>
             </summary>
             <p className="text-xs text-muted-foreground mb-3">
               {t('effectivePolicy.hint')}
@@ -543,7 +563,13 @@ function UserPanel({ node }: { node: OrgTreeNode }) {
 
 // ── TEAM 상세 (강제 재인증 버튼 포함) ─────────────────────────────────────────
 
-function TeamPanel({ node }: { node: OrgTreeNode }) {
+function TeamPanel({
+  node,
+  onDirtyChange,
+}: {
+  node: OrgTreeNode;
+  onDirtyChange?: (_dirty: boolean) => void;
+}) {
   const t = useTranslations('users');
   const tm = useTranslations('models');
   const tc = useTranslations('common');
@@ -566,6 +592,10 @@ function TeamPanel({ node }: { node: OrgTreeNode }) {
   const [modelDirty, setModelDirty] = useState(false);
   const [isPolicySavePending, startPolicySaveTransition] = useTransition();
   const policyDirty = appDirty || modelDirty;
+
+  useEffect(() => {
+    onDirtyChange?.(policyDirty);
+  }, [policyDirty, onDirtyChange]);
 
   const handleApplyAll = () => {
     startPolicySaveTransition(async () => {

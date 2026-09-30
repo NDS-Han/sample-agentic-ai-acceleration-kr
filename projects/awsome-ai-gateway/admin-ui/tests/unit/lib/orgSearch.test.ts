@@ -2,7 +2,12 @@
 
 import { describe, it, expect } from 'vitest';
 import type { OrgTreeNode } from '@/types/entities';
-import { searchOrgNodes, findTeamExpandPath } from '@/lib/utils/orgSearch';
+import {
+  searchOrgNodes,
+  findTeamExpandPath,
+  findNodeById,
+  findNodeExpandPath,
+} from '@/lib/utils/orgSearch';
 
 const meta = (memberCount: number | null = null) => ({
   member_count: memberCount,
@@ -125,5 +130,35 @@ describe('findTeamExpandPath', () => {
 
   it('does not match a department id', () => {
     expect(findTeamExpandPath(root, 'dept-ds')).toBeNull();
+  });
+});
+
+describe('findNodeById', () => {
+  it('finds any node type by id', () => {
+    expect(findNodeById(root, 'org')?.type).toBe('ORGANIZATION');
+    expect(findNodeById(root, 'dept-sw')?.name).toBe('SW부문');
+    expect(findNodeById(root, 'team-platform')?.type).toBe('TEAM');
+  });
+
+  it('returns null for a missing id or null tree', () => {
+    expect(findNodeById(root, 'nope')).toBeNull();
+    expect(findNodeById(null, 'org')).toBeNull();
+  });
+});
+
+describe('findNodeExpandPath', () => {
+  it('returns ancestors only — the node itself is not included', () => {
+    // 딥링크 복원용 — 노드를 트리에 드러내려면 조상만 펼치면 된다.
+    // (팀 멤버 노출처럼 자기 자신까지 펼쳐야 할 때는 호출부가 id 를 추가한다.)
+    expect(findNodeExpandPath(root, 'team-platform')).toEqual(['org', 'dept-sw']);
+  });
+
+  it('returns an empty list for the root node', () => {
+    expect(findNodeExpandPath(root, 'org')).toEqual([]);
+  });
+
+  it('returns null for a missing id or null tree', () => {
+    expect(findNodeExpandPath(root, 'nope')).toBeNull();
+    expect(findNodeExpandPath(null, 'team-sw')).toBeNull();
   });
 });
