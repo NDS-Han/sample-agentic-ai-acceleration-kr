@@ -1,6 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { Suspense } from 'react';
+import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
@@ -30,7 +31,15 @@ export default async function ModelCostPage({ searchParams }: ModelCostPageProps
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
+        <div>
+          <Link
+            href="/analytics"
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors"
+          >
+            ← {t('backToAnalytics')}
+          </Link>
+          <h1 className="text-2xl font-bold mt-1">{t('pageTitle')}</h1>
+        </div>
         <PeriodSelector periods={periods} current={effectiveMonth} />
       </div>
 

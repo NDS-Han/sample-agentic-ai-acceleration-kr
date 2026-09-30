@@ -778,6 +778,7 @@
   },
   "analyticsModels": {
     "pageTitle": "Cost by Model",
+    "backToAnalytics": "Analytics",
     "totalCost": "Total cost",
     "activeModels": "Active models",
     "period": "Period",

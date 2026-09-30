@@ -778,6 +778,7 @@
   },
   "analyticsModels": {
     "pageTitle": "모델별 비용 추적",
+    "backToAnalytics": "Analytics",
     "totalCost": "총 비용",
     "activeModels": "활성 모델 수",
     "period": "기간",
