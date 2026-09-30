@@ -12,16 +12,20 @@ from app.schemas.common import BudgetPolicy
 # ── Requests ──
 
 
+# DB 컬럼은 Numeric(12,4) — 상한 없이 두면 asyncpg 가 500 을 던진다.
+_BUDGET_MAX = Decimal("99999999.99")
+
+
 class SetBudgetRequest(BaseModel):
     # ⚠️ decimal_places 제약을 두지 않는다 — 초과 정밀도는 서비스 계층의
     #    _check_cent_precision 이 invalid_amount_precision(spec 코드)으로
     #    거부한다. 스키마가 먼저 422 를 내면 같은 위반이 두 가지 코드로 갈라진다.
-    max_budget_usd: Decimal = Field(ge=0)
+    max_budget_usd: Decimal = Field(ge=0, le=_BUDGET_MAX)
     policy: BudgetPolicy = BudgetPolicy.HARD_BLOCK
     alert_thresholds: list[int] = Field(default=[80, 90, 100], description="Budget usage % thresholds for alert notifications")
     # TEAM scope 에서만 의미. 키 자체를 보내면 D 를 설정/해제(null)하고,
     # 보내지 않으면 기존 D 를 보존한다(model_fields_set 으로 구분, §3-1).
-    default_user_cap_usd: Decimal | None = Field(default=None, ge=0)
+    default_user_cap_usd: Decimal | None = Field(default=None, ge=0, le=_BUDGET_MAX)
     # confirmation_required(409) 응답 뒤의 확인 재요청 표시 (§3-0).
     confirm: bool = False
 
@@ -31,7 +35,7 @@ class SetDefaultCapRequest(BaseModel):
 
     value=null → D 해제(미설정 유저는 팀 한도만 적용), 0 → 미설정 유저 차단.
     """
-    value: Decimal | None = Field(default=None, ge=0)
+    value: Decimal | None = Field(default=None, ge=0, le=_BUDGET_MAX)
     confirm: bool = False
 
 
@@ -47,7 +51,7 @@ class EqualSplitRequest(BaseModel):
 
 class AllocateBudgetItem(BaseModel):
     user_id: str
-    allocated_usd: Decimal = Field(ge=0)
+    allocated_usd: Decimal = Field(ge=0, le=_BUDGET_MAX)
 
 
 class AllocateBudgetRequest(BaseModel):

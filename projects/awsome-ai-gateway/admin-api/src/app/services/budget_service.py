@@ -1415,10 +1415,8 @@ class BudgetService:
                 redis_key = f"budget:{scope_type}:{{{sid}}}:{period}"
                 try:
                     raw = await redis.get(redis_key)
-                    if raw:
-                        used = Decimal(raw.decode() if isinstance(raw, bytes) else raw)
-                        if used != 0:
-                            return used
+                    if raw is not None:
+                        return Decimal(raw.decode() if isinstance(raw, bytes) else raw)
                 except Exception:
                     pass
             fallback = user_used_by_id if scope_enum == BudgetScope.USER else team_used_by_id
