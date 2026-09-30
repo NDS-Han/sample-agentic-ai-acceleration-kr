@@ -56,6 +56,9 @@ class BudgetConfig(Base):
         UUID(as_uuid=True), ForeignKey("auth.users.id"), nullable=False
     )
     effective_from: Mapped[date] = mapped_column(Date, nullable=False)
+    # TEAM scope 행에서만 의미: 개인 예산 미설정 멤버의 기본 cap D.
+    # NULL=팀 한도만 적용(pass-through), 0=차단, >0=개인 상한 (budget-rules.md §3-2).
+    default_user_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
