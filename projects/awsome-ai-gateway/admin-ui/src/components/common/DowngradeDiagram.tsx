@@ -139,36 +139,38 @@ export function DowngradeDiagram({
   // 규칙별 엣지 색 — 겹쳐 그려진 곡선과 % 라벨이 어느 규칙의 것인지 구분할 수
   // 있게 path·marker·라벨 칩이 같은 색을 공유한다. 규칙 수가 팔레트를 넘으면
   // 순환한다(이완적으로도 6개를 넘는 규칙 묶음은 드물다).
+  // chip 배경은 **불투명** — 반투명(bg-*-500/10)이면 뒤를 지나는 엣지가 라벨을
+  // 관통해 비쳐 보인다. 불투명 tinted 배경으로 가리고 z-10 으로 엣지 위에 둔다.
   const EDGE_COLORS = [
     {
       stroke: 'stroke-sky-500',
       fill: 'fill-sky-500',
-      chip: 'border-sky-500/50 bg-sky-500/10 text-sky-700 dark:text-sky-300',
+      chip: 'border-sky-500/50 bg-sky-50 text-sky-700 dark:bg-sky-950 dark:text-sky-300',
     },
     {
       stroke: 'stroke-violet-500',
       fill: 'fill-violet-500',
-      chip: 'border-violet-500/50 bg-violet-500/10 text-violet-700 dark:text-violet-300',
+      chip: 'border-violet-500/50 bg-violet-50 text-violet-700 dark:bg-violet-950 dark:text-violet-300',
     },
     {
       stroke: 'stroke-rose-500',
       fill: 'fill-rose-500',
-      chip: 'border-rose-500/50 bg-rose-500/10 text-rose-700 dark:text-rose-300',
+      chip: 'border-rose-500/50 bg-rose-50 text-rose-700 dark:bg-rose-950 dark:text-rose-300',
     },
     {
       stroke: 'stroke-amber-600',
       fill: 'fill-amber-600',
-      chip: 'border-amber-600/50 bg-amber-500/10 text-amber-700 dark:text-amber-300',
+      chip: 'border-amber-600/50 bg-amber-50 text-amber-700 dark:bg-amber-950 dark:text-amber-300',
     },
     {
       stroke: 'stroke-emerald-500',
       fill: 'fill-emerald-500',
-      chip: 'border-emerald-500/50 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300',
+      chip: 'border-emerald-500/50 bg-emerald-50 text-emerald-700 dark:bg-emerald-950 dark:text-emerald-300',
     },
     {
       stroke: 'stroke-fuchsia-500',
       fill: 'fill-fuchsia-500',
-      chip: 'border-fuchsia-500/50 bg-fuchsia-500/10 text-fuchsia-700 dark:text-fuchsia-300',
+      chip: 'border-fuchsia-500/50 bg-fuchsia-50 text-fuchsia-700 dark:bg-fuchsia-950 dark:text-fuchsia-300',
     },
   ];
   const edgeColor = (idx: number) => EDGE_COLORS[idx % EDGE_COLORS.length];
@@ -314,7 +316,7 @@ export function DowngradeDiagram({
             return (
               <span
                 key={`t${idx}`}
-                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip} ${dim ? 'opacity-30' : ''}`}
+                className={`absolute z-10 -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip} ${dim ? 'opacity-30' : ''}`}
                 style={{ left: `${mx}%`, top: `${my}%` }}
               >
                 {r.threshold_pct}%{tag ? ` · ${tag}` : ''}
