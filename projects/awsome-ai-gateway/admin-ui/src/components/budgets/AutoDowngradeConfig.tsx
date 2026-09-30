@@ -28,9 +28,11 @@ interface AutoDowngradeConfigProps {
   scopeId: string;
   scopeName: string;
   models: ModelListItem[];
+  /** 팀 월간 예산 현재 사용률(%) — 시뮬레이터 초기값 + "저장 즉시 적용" 경고용. */
+  currentUsagePct?: number | null;
 }
 
-export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: AutoDowngradeConfigProps) {
+export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, currentUsagePct }: AutoDowngradeConfigProps) {
   const t = useTranslations('budgets');
   const tc = useTranslations('common');
   const { toast } = useToast();
@@ -42,6 +44,8 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
   const [savedRules, setSavedRules] = useState<DowngradeRuleForm[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [clearOpen, setClearOpen] = useState(false);
+  // 사용률 시뮬레이터 — null 이면 꺼짐(기본: 현재 사용률 또는 0).
+  const [simPct, setSimPct] = useState<number | null>(null);
 
   const activeModels = models.filter(m => m.is_active);
 
@@ -60,6 +64,45 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
     const per1m = m.output_price_per_1k * 1000;
     return `$${per1m.toFixed(2).replace(/\.?0+$/, '')}/1M output`;
   };
+
+  // 표시 순서는 소스 output 단가 내림차순 — 규칙 테이블이 사다리처럼 위→아래로
+  // 읽힌다. 규칙 의미는 순서와 무관하다(소스당 규칙 하나, DB 유니크 제약).
+  // from 미선택 행은 맨 아래로.
+  const rowOrder = rules
+    .map((_, i) => i)
+    .sort(
+      (a, b) =>
+        (priceOf(rules[b].from_model_alias) ?? -1) -
+        (priceOf(rules[a].from_model_alias) ?? -1),
+    );
+
+  // 같은 임계치로 이어진 체인 — 사용률 도달 순간 한 요청에서 최하위 모델까지
+  // 다단 강등된다(apply_chain). 단계적 사다리를 의도했다면 임계치를 다르게.
+  const hasFlattenedChain = rules.some(
+    r1 =>
+      r1.from_model_alias &&
+      r1.to_model_alias &&
+      rules.some(
+        r2 =>
+          r2 !== r1 &&
+          r2.from_model_alias === r1.to_model_alias &&
+          (parseInt(r2.threshold_pct) || 0) === (parseInt(r1.threshold_pct) || 0),
+      ),
+  );
+
+  // 현재 사용률이 어떤 규칙의 임계치를 이미 넘었으면 저장 즉시 강등이 발동한다.
+  const liveApplies =
+    enabled &&
+    currentUsagePct != null &&
+    rules.some(
+      r =>
+        r.from_model_alias &&
+        r.to_model_alias &&
+        currentUsagePct >= (parseInt(r.threshold_pct) || 0),
+    );
+
+  // 시뮬레이터 표시값 — 슬라이더 미조작 시 현재 사용률(없으면 0).
+  const effectiveSimPct = simPct ?? Math.round(currentUsagePct ?? 0);
 
   useEffect(() => {
     if (!scopeId) return;
@@ -215,13 +258,18 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
 
       {enabled && (
         <div className="space-y-3">
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t('thresholdHint')}
+          </p>
           {rules.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border px-4 py-5 text-center text-xs text-muted-foreground">
               {t('noRules')}
             </div>
           ) : (
             <div className="space-y-2">
-              {rules.map((rule, index) => (
+              {rowOrder.map((index, position) => {
+                const rule = rules[index];
+                return (
                 <div
                   key={index}
                   className={`group flex items-center gap-2 rounded-xl border px-3 py-2 ${
@@ -236,7 +284,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                   }`}
                 >
                   <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-muted text-[10px] font-semibold tabular-nums text-muted-foreground">
-                    {index + 1}
+                    {position + 1}
                   </span>
                   <select
                     value={rule.from_model_alias}
@@ -281,14 +329,17 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                       </option>
                     ))}
                   </select>
-                  <div className="flex shrink-0 items-center gap-1 rounded-lg border border-input bg-background px-2 py-1 focus-within:ring-1 focus-within:ring-ring">
+                  <div
+                    className="flex shrink-0 items-center gap-1 rounded-lg border border-input bg-background px-2 py-1 focus-within:ring-1 focus-within:ring-ring"
+                    title={t('thresholdInputTitle')}
+                  >
                     <input
                       type="number"
                       min={1}
                       max={100}
                       value={rule.threshold_pct}
                       onChange={e => updateRule(index, 'threshold_pct', e.target.value)}
-                      className="w-10 bg-transparent text-center text-xs tabular-nums focus:outline-none"
+                      className="w-12 bg-transparent text-center text-xs tabular-nums focus:outline-none"
                     />
                     <span className="text-[10px] text-muted-foreground">%</span>
                   </div>
@@ -302,7 +353,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
                     <X size={14} />
                   </button>
                 </div>
-              ))}
+              );})}
             </div>
           )}
 
@@ -315,12 +366,60 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models }: A
             {t('addRule')}
           </button>
 
+          {hasFlattenedChain && (
+            <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+              {t('sameThresholdWarning')}
+            </p>
+          )}
+
+          {liveApplies && (
+            <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-300">
+              {t('liveApplyWarning', { pct: Math.round(currentUsagePct ?? 0) })}
+            </p>
+          )}
+
           {rules.length > 0 && (
-            <DowngradeDiagram
-              rules={rules}
-              models={activeModels}
-              formatOutPrice={formatOutPrice}
-            />
+            <div className="space-y-2">
+              <div className="flex items-center gap-3">
+                <span className="shrink-0 text-[11px] font-medium text-muted-foreground">
+                  {t('simulateTitle')}
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={effectiveSimPct}
+                  onChange={e => setSimPct(Number(e.target.value))}
+                  className="h-1.5 flex-1 cursor-pointer accent-primary"
+                  aria-label={t('simulateTitle')}
+                />
+                <span className="w-10 shrink-0 text-right text-[11px] font-semibold tabular-nums">
+                  {effectiveSimPct}%
+                </span>
+                {currentUsagePct != null && (
+                  <button
+                    type="button"
+                    onClick={() => setSimPct(Math.round(currentUsagePct))}
+                    className="shrink-0 rounded-md border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted"
+                    title={t('simulateCurrentHint')}
+                  >
+                    {t('simulateCurrent')}
+                  </button>
+                )}
+              </div>
+              <DowngradeDiagram
+                rules={rules}
+                models={activeModels}
+                formatOutPrice={formatOutPrice}
+                simPct={effectiveSimPct}
+                simLabels={{
+                  noChange: src => t('simNoChange', { src }),
+                  resolved: (src, dst, hops) =>
+                    t('simResolved', { src, dst, hops }),
+                }}
+                terminalLabel={t('terminalTag')}
+              />
+            </div>
           )}
         </div>
       )}

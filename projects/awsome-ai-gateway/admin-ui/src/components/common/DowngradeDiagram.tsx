@@ -3,6 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import type { ModelListItem } from '@/types/entities';
+import { applyChain, type DowngradeRuleLike } from '@/lib/downgrade';
 
 export interface DowngradeDiagramRule {
   from_model_alias: string;
@@ -17,17 +18,32 @@ export interface DowngradeDiagramRule {
  * 엣지=규칙(% 라벨). 노드 깊이는 relaxation으로 계산: 어떤 규칙의 to 인 노드는
  * max(from 깊이)+1 레이어에 놓여 a→b→c 체인도 세 열로 정렬된다.
  * edgeTag 를 넘기면 % 라벨 뒤에 스코프 등의 꼬리표를 붙인다 (읽기 전용 카드용).
+ *
+ * simPct 를 넘기면 "사용률 시뮬레이션" 모드: 게이트웨이와 같은 apply_chain
+ * 판정으로 실제 발화 경로를 계산해, 발화 엣지만 선명하게(나머지는 흐리게),
+ * 최종 도달 노드에 링을 표시하고 하단에 소스별 결과 칩을 보여준다.
+ * 같은 임계치로 이어진 체인이 한 번에 최하위까지 떨어지는 동작이 여기서 드러난다.
  */
 export function DowngradeDiagram({
   rules,
   models,
   formatOutPrice,
   edgeTag,
+  simPct,
+  simLabels,
+  terminalLabel,
 }: {
   rules: DowngradeDiagramRule[];
   models: ModelListItem[];
   formatOutPrice: (_m: ModelListItem) => string;
   edgeTag?: (_rule: DowngradeDiagramRule) => string | null;
+  /** null/undefined 이면 시뮬레이션 끔. 값이면 팀 예산 사용률 %로 해석. */
+  simPct?: number | null;
+  simLabels?: {
+    noChange: (_src: string) => string;
+    resolved: (_src: string, _dst: string, _hops: number) => string;
+  };
+  terminalLabel?: string;
 }) {
   // from/to 가 비어 있는 규칙(작성 중인 새 행)은 레이아웃·렌더 모두에서 제외한다 —
   // 포함하면 빈 alias 가 유령 노드 열을 만들고 엣지가 화면 밖으로 길게 뻗는다.
@@ -37,6 +53,43 @@ export function DowngradeDiagram({
   // 완성된 규칙이 하나도 없으면 빈 프레임 대신 아무것도 그리지 않는다 —
   // 편집 화면에서 "규칙 추가" 직후의 빈 행이 유령 다이어그램을 만들지 않게.
   if (visibleRules.length === 0) return null;
+
+  // 시뮬레이션 — 게이트웨이와 동일한 applyChain 판정으로, simPct 에서 각 소스가
+  // 실제로 어느 모델로 강등되는지/몇 hop 인지를 계산한다. 규칙 순서는 입력 순서를
+  // 유지(파이썬 next() 의 첫 매칭과 동일).
+  const sim = simPct == null ? null : (() => {
+    const parsed: DowngradeRuleLike[] = visibleRules.map(r => ({
+      from_model_alias: r.from_model_alias,
+      to_model_alias: r.to_model_alias,
+      threshold_pct:
+        typeof r.threshold_pct === 'number'
+          ? r.threshold_pct
+          : parseInt(r.threshold_pct) || 0,
+    }));
+    const sources = [...new Set(parsed.map(r => r.from_model_alias))];
+    const lit = new Set<number>();
+    const inPath = new Set<string>();
+    const landing = new Map<string, { from: string; hops: number }[]>();
+    const results = sources.map(src => {
+      const res = applyChain(src, parsed, simPct);
+      res.ruleIdx.forEach(i => lit.add(i));
+      res.path.forEach(a => inPath.add(a));
+      if (res.hops > 0) {
+        const list = landing.get(res.effective) ?? [];
+        list.push({ from: src, hops: res.hops });
+        landing.set(res.effective, list);
+      }
+      return { src, ...res };
+    });
+    return { results, lit, inPath, landing };
+  })();
+
+  // 종단(floor) 노드 = 어떤 규칙의 from 도 아닌 노드 — 여기서 체인이 멈춘다.
+  const terminal = new Set(
+    [...visibleRules.map(r => r.to_model_alias)].filter(
+      a => !visibleRules.some(r => r.from_model_alias === a),
+    ),
+  );
 
   const depth = new Map<string, number>();
   for (const r of visibleRules) {
@@ -138,14 +191,19 @@ export function DowngradeDiagram({
           >
             {nodes.map(alias => {
               const m = models.find(mm => mm.alias === alias);
+              const isLanding = sim?.landing.has(alias) ?? false;
+              const dimmed = sim != null && !sim.inPath.has(alias);
               return (
                 <div
                   key={alias}
-                  className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm ${toneOf(alias)}`}
+                  className={`mx-auto w-[86%] rounded-lg border px-2 py-1 text-center shadow-sm transition-opacity ${toneOf(alias)} ${
+                    isLanding ? 'ring-2 ring-primary' : ''
+                  } ${dimmed ? 'opacity-40' : ''}`}
                 >
                   <div className="truncate font-mono text-[11px] font-medium">{alias}</div>
                   <div className="text-[9px] tabular-nums opacity-80">
                     {m ? formatOutPrice(m) : '—'}
+                    {terminal.has(alias) && terminalLabel ? ` · ${terminalLabel}` : ''}
                   </div>
                 </div>
               );
@@ -193,10 +251,12 @@ export function DowngradeDiagram({
                 key={idx}
                 d={`M ${x1} ${y1} C ${x1 + dx} ${y1 + bow}, ${x2 - dx} ${y2 + bow}, ${x2} ${y2}`}
                 fill="none"
-                strokeWidth="1.5"
+                strokeWidth={sim ? (sim.lit.has(idx) ? '2.2' : '1.2') : '1.5'}
                 vectorEffect="non-scaling-stroke"
-                className={edgeColor(idx).stroke}
-                markerEnd={`url(#dg-arrow-${idx % EDGE_COLORS.length})`}
+                className={`${edgeColor(idx).stroke} ${
+                  sim && !sim.lit.has(idx) ? 'opacity-15' : ''
+                }`}
+                markerEnd={sim && !sim.lit.has(idx) ? undefined : `url(#dg-arrow-${idx % EDGE_COLORS.length})`}
               />
             );
           })}
@@ -250,10 +310,11 @@ export function DowngradeDiagram({
           return labelPts.map(({ idx, mx, my }) => {
             const r = visibleRules[idx];
             const tag = edgeTag?.(r);
+            const dim = sim != null && !sim.lit.has(idx);
             return (
               <span
                 key={`t${idx}`}
-                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip}`}
+                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full border px-1.5 py-px text-[9px] font-semibold tabular-nums whitespace-nowrap ${edgeColor(idx).chip} ${dim ? 'opacity-30' : ''}`}
                 style={{ left: `${mx}%`, top: `${my}%` }}
               >
                 {r.threshold_pct}%{tag ? ` · ${tag}` : ''}
@@ -262,6 +323,25 @@ export function DowngradeDiagram({
           });
         })()}
       </div>
+
+      {sim && simLabels && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {sim.results.map(res => (
+            <span
+              key={res.src}
+              className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium tabular-nums ${
+                res.hops > 0
+                  ? 'border-primary/40 bg-primary/10 text-primary'
+                  : 'border-border/60 bg-muted/40 text-muted-foreground'
+              }`}
+            >
+              {res.hops > 0
+                ? simLabels.resolved(res.src, res.effective, res.hops)
+                : simLabels.noChange(res.src)}
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

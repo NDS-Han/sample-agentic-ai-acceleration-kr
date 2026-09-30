@@ -304,6 +304,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
                                 scopeId={team.target_id}
                                 scopeName={team.target_name}
                                 models={models}
+                                currentUsagePct={team.usage_pct}
                               />
                             </div>
                           </Td>
