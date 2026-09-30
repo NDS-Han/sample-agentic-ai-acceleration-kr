@@ -138,12 +138,11 @@ export function collapseAllowedClients(selected: readonly string[]): string[] {
  * MODEL 축(B) 의 3-state 판별자 — `model_aliases.allowed_clients` 를 읽는 **모든** 곳이
  * 이 함수 또는 이 함수로 구현된 `modelAllowsClient` 를 지나간다.
  *
- * 소비자 전체(감사할 때 이 목록이 곧 grep 대상이다):
- *   modelAppScope       — 3갈래 표시/편집: ModelsTable.tsx 의 허용 앱 배지,
- *                         CreateModelDialog.tsx 의 prefill, AppPolicyPanel.tsx 의 '전체 허용' 열
- *   modelAllowsClient   — "이 앱이 이 alias 를 쓸 수 있는가" 한 가지 질문:
- *                         AppPolicyPanel.tsx 의 '이 앱 허용' 체크박스,
- *                         WebSearchTogglePanel.tsx 의 미지원 alias 경고
+ * 소비자: 현재 유일한 렌더 지점은 AppPolicyPanel.tsx 다 — '전체 허용' 열에
+ *   `modelAppScope` 를, '이 앱 허용' 체크박스에 `modelAllowsClient` 를 쓴다.
+ *   (예전에는 ModelsTable 의 배지·CreateModelDialog 의 prefill·WebSearchTogglePanel 의
+ *   경고도 이 함수들을 썼지만 그 표시/경고는 제거되었고, 위성 구현이 다시 생기지 않도록
+ *   allowed_clients 판정은 반드시 이 두 함수를 거친다.)
  * 두 화면은 예전에 `=== null` / `.length === 0` / `includes` 를 각자 손으로 썼다. 결과는
  * 맞았지만 판정이 세 군데로 흩어져 있었고, 이 문단이 "전부 여기를 지난다" 고 단정하고 있어서
  * 다음 사람이 modelAppScope 만 grep 하면 그 사본들을 놓치게 되어 있었다.

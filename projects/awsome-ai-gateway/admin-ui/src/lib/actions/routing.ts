@@ -19,20 +19,6 @@ export interface RoutingProfileItem {
   enabled: boolean;
 }
 
-// ─── list routing profiles (per-client web_search flag) ──────────────────────
-export async function getRoutingProfilesAction(): Promise<
-  ActionResult<{ items: RoutingProfileItem[] }>
-> {
-  try {
-    const res = await withRetry(() =>
-      adminAPI.get<{ items: RoutingProfileItem[] }>('/admin/routing-profiles'),
-    );
-    return { success: true, data: { items: res.items ?? [] } };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
-
 // ─── toggle per-client web search ────────────────────────────────────────────
 export async function setClientWebSearchAction(
   client: string,

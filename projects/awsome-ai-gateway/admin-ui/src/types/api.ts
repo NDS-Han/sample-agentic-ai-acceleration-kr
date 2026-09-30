@@ -171,34 +171,6 @@ export const ExportConfigSchema = z.object({
 
 // ─── Organisation ─────────────────────────────────────────────────────────────
 
-export interface DepartmentCreateForm {
-  name: string;
-}
-
-export const DepartmentCreateSchema = z.object({
-  name: z.string().min(1, 'Department name is required').max(128),
-});
-
-export interface TeamCreateForm {
-  name: string;
-  department_id: string;
-}
-
-export const TeamCreateSchema = z.object({
-  name: z.string().min(1, 'Team name is required').max(128),
-  department_id: z.string().min(1, 'Department ID is required'),
-});
-
-export interface UserTeamAssignForm {
-  user_id: string;
-  team_id: string;
-}
-
-export const UserTeamAssignSchema = z.object({
-  user_id: z.string().min(1, 'User ID is required'),
-  team_id: z.string().min(1, 'Team ID is required'),
-});
-
 // ─── Rate Limits ──────────────────────────────────────────────────────────────
 
 export interface RateLimitSetForm {
@@ -234,7 +206,4 @@ export type ModelCreateInput = z.infer<typeof ModelCreateSchema>;
 export type ModelDeactivateInput = z.infer<typeof ModelDeactivateSchema>;
 export type AnalyticsFilterInput = z.infer<typeof AnalyticsFilterSchema>;
 export type ExportConfigInput = z.infer<typeof ExportConfigSchema>;
-export type DepartmentCreateInput = z.infer<typeof DepartmentCreateSchema>;
-export type TeamCreateInput = z.infer<typeof TeamCreateSchema>;
-export type UserTeamAssignInput = z.infer<typeof UserTeamAssignSchema>;
 export type RateLimitSetInput = z.infer<typeof RateLimitSetSchema>;

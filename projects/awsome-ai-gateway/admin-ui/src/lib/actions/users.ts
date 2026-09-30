@@ -3,101 +3,19 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-// NOTE: 아래 action 들은 admin UI 에서 호출 지점이 제거되었습니다.
-// 부서/팀/사용자 이전/팀 리더는 Cognito 그룹을 원천으로 동기화됩니다
-// (Claude_<team>, Claude_<dept>_<team> 패턴 → OIDC exchange 시 자동 생성).
-// admin-api 엔드포인트는 safety margin 으로 살아있지만 UI 호출은 없습니다.
-// 필요시 kubectl/curl 로 직접 호출 가능 (긴급 운영 용도).
+// NOTE: 조직 구조(부서/팀 생성, 사용자 팀 배정)는 Cognito 그룹을 원천으로
+// 동기화되며, 관련 서버 액션과 UI 는 제거되었습니다.
+// 단 TEAM_LEADER 는 Cognito 그룹이 아니라 이 admin UI("팀 리더 지정")에서만
+// 부여됩니다 — sync/재로그인이 DEVELOPER 로 되돌리지 않도록 백엔드가 보존합니다
+// (admin-api cognito_sync_service._effective_role / oidc_service.py).
 
 import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { adminAPI } from '@/lib/api-client';
-import {
-  DepartmentCreateSchema,
-  TeamCreateSchema,
-  UserTeamAssignSchema,
-} from '@/types/api';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
 import type { UserSearchItem } from '@/types/entities';
 import type { ActionResult } from './types';
-
-// ─── createDepartmentAction ───────────────────────────────────────────────────
-
-export async function createDepartmentAction(
-  formData: unknown
-): Promise<ActionResult<void>> {
-  const parsed = DepartmentCreateSchema.safeParse(formData);
-
-  if (!parsed.success) {
-    const fieldErrors: Record<string, string> = {};
-    for (const issue of parsed.error.issues) {
-      const key = issue.path.join('.');
-      fieldErrors[key] = issue.message;
-    }
-    return { success: false, error: 'Validation failed', fieldErrors };
-  }
-
-  try {
-    await withRetry(() => adminAPI.post('/admin/departments', parsed.data));
-    revalidatePath('/users');
-    return { success: true, data: undefined };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
-
-// ─── createTeamAction ─────────────────────────────────────────────────────────
-
-export async function createTeamAction(formData: unknown): Promise<ActionResult<void>> {
-  const parsed = TeamCreateSchema.safeParse(formData);
-
-  if (!parsed.success) {
-    const fieldErrors: Record<string, string> = {};
-    for (const issue of parsed.error.issues) {
-      const key = issue.path.join('.');
-      fieldErrors[key] = issue.message;
-    }
-    return { success: false, error: 'Validation failed', fieldErrors };
-  }
-
-  try {
-    await withRetry(() => adminAPI.post('/admin/teams', parsed.data));
-    revalidatePath('/users');
-    return { success: true, data: undefined };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
-
-// ─── assignUserTeamAction ─────────────────────────────────────────────────────
-
-export async function assignUserTeamAction(
-  formData: unknown
-): Promise<ActionResult<void>> {
-  const parsed = UserTeamAssignSchema.safeParse(formData);
-
-  if (!parsed.success) {
-    const fieldErrors: Record<string, string> = {};
-    for (const issue of parsed.error.issues) {
-      const key = issue.path.join('.');
-      fieldErrors[key] = issue.message;
-    }
-    return { success: false, error: 'Validation failed', fieldErrors };
-  }
-
-  try {
-    await withRetry(() =>
-      adminAPI.put(`/admin/users/${parsed.data.user_id}/team`, {
-        team_id: parsed.data.team_id,
-      })
-    );
-    revalidatePath('/users');
-    return { success: true, data: undefined };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
 
 // ─── setTeamLeaderAction ──────────────────────────────────────────────────────
 

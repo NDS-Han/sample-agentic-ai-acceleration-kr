@@ -91,12 +91,10 @@ export async function toggleAppModelAction(
     );
     // '/apps' 는 무효화하지 않는다(위 setAppDefaultModelAction 주석 참조 — 서버 데이터 없음,
     // 리페치→리마운트로 선택 앱이 날아가는 버그의 원인이었다).
-    // 이 PATCH 는 `model_aliases.allowed_clients`(MODEL 축) 를 바꾼다 — 즉 /models 의 "허용 앱"
-    // 열과 편집 다이얼로그의 prefill 도 함께 낡는다. '/apps' 만 무효화하면 다른 탭의 /models
-    // 스냅샷이 옛 정책을 계속 보여주고, 운영자는 그 화면을 보고 쓰기 판단을 한다.
-    // (다이얼로그가 안 건드린 정책 값을 아예 보내지 않게 된 뒤에도 이 무효화는 필요하다:
-    //  덮어쓰기는 막히지만 "화면에 보이는 값이 사실과 다르다" 는 그대로 남는다.)
-    revalidatePath('/models');
+    // 이 PATCH 는 `model_aliases.allowed_clients`(MODEL 축) 를 바꾸지만, 그 필드를 화면에
+    // 표시하는 곳은 /apps 의 AppPolicyPanel 뿐이다 — /models 는 더 이상 허용 앱 열을
+    // 렌더하지 않으므로 revalidatePath('/models') 는 무의미하다(응답의 AppPolicy 로
+    // 패널 state 를 직접 갱신한다).
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
