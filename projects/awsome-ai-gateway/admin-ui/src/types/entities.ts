@@ -154,6 +154,10 @@ export interface OrgNodeMeta {
   email: string | null;
   role: UserRole | null;
   team_name: string | null;
+  /** USER 만 — 앱/모델 정책 개별 override 존재 여부(트리 점 표시). */
+  has_custom_policies?: boolean | null;
+  /** TEAM 만 — 개별 설정을 가진 활성 멤버 수. */
+  custom_policy_count?: number | null;
   // budgets / rate-limits 트리에서 동일한 OrgTree 컴포넌트를 재사용하면서
   // 우측 패널에 보여줄 데이터를 메타로 붙인다.
   budget?: {

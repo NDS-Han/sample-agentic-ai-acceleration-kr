@@ -13,6 +13,10 @@ interface OrgTreeProps {
   depth?: number;
   /** 멤버 0인 팀 노드 옆에 붙는 배지 텍스트(빈 팀 표시 토글 ON 때 보임). */
   emptyTeamLabel?: string;
+  /** 개별 정책(앱/모델 override)을 가진 USER 노드의 점 tooltip 텍스트. */
+  customPolicyLabel?: string;
+  /** TEAM 노드의 개별설정 멤버 수 표시 — count 를 받아 문자열을 만든다. */
+  formatCustomCount?: (_count: number) => string;
 }
 
 function NodeIcon({ type, isExpanded }: { type: OrgNodeType; isExpanded: boolean }) {
@@ -49,6 +53,8 @@ export function OrgTree({
   onToggle,
   depth = 0,
   emptyTeamLabel,
+  customPolicyLabel,
+  formatCustomCount,
 }: OrgTreeProps) {
   const isSelected = selectedNodeId === node.id;
   const hasChildren = node.children && node.children.length > 0;
@@ -134,6 +140,23 @@ export function OrgTree({
 
         <NodeIcon type={node.type} isExpanded={isExpanded} />
         <span className="flex-1 truncate">{node.name}</span>
+        {node.type === 'USER' && node.meta.has_custom_policies === true && (
+          // 앱/모델 개별 override 표시 — 점만으로는 의미를 알 수 없으므로
+          // hover tooltip 과 스크린리더 텍스트를 함께 둔다.
+          <span
+            className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500"
+            title={customPolicyLabel}
+            role="img"
+            aria-label={customPolicyLabel}
+          />
+        )}
+        {formatCustomCount &&
+          node.type === 'TEAM' &&
+          (node.meta.custom_policy_count ?? 0) > 0 && (
+            <span className="text-[10px] text-amber-600 flex-shrink-0">
+              {formatCustomCount(node.meta.custom_policy_count ?? 0)}
+            </span>
+          )}
         {emptyTeamLabel && node.type === 'TEAM' && node.meta.member_count === 0 && (
           <span className="text-[10px] text-muted-foreground flex-shrink-0">
             {emptyTeamLabel}
@@ -155,6 +178,8 @@ export function OrgTree({
           onToggle={onToggle}
           depth={depth + 1}
           emptyTeamLabel={emptyTeamLabel}
+          customPolicyLabel={customPolicyLabel}
+          formatCustomCount={formatCustomCount}
         />
       ))}
     </div>

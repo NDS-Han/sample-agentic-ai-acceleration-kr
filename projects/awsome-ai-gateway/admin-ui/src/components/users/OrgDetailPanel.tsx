@@ -38,6 +38,8 @@ interface OrgDetailPanelProps {
   onDirtyChange?: (_dirty: boolean) => void;
   /** 트리 root(ORGANIZATION) 의 id — 팀 패널이 조직 정책 상속 표시에 쓴다. */
   orgId?: string;
+  /** 저장 성공 후 트리 재조회 콜백 — 개별설정 점이 stale 해지지 않게 한다. */
+  onSaved?: () => void;
 }
 
 // Role labels are now i18n-driven — see t('roleLabel.ADMIN') etc.
@@ -48,7 +50,7 @@ const ROLE_TONE: Record<string, BadgeTone> = {
   DEVELOPER: 'teal',
 };
 
-export function OrgDetailPanel({ node, onDirtyChange, orgId }: OrgDetailPanelProps) {
+export function OrgDetailPanel({ node, onDirtyChange, orgId, onSaved }: OrgDetailPanelProps) {
   const t = useTranslations('users');
 
   if (!node) {
@@ -127,7 +129,7 @@ export function OrgDetailPanel({ node, onDirtyChange, orgId }: OrgDetailPanelPro
 
   // ── USER ────────────────────────────────────────────────────────────────────
   if (node.type === 'USER') {
-    return <UserPanel key={node.id} node={node} onDirtyChange={onDirtyChange} />;
+    return <UserPanel key={node.id} node={node} onDirtyChange={onDirtyChange} onSaved={onSaved} />;
   }
 
   return null;
@@ -178,9 +180,11 @@ const SOURCE_KEY = {
 function UserPanel({
   node,
   onDirtyChange,
+  onSaved,
 }: {
   node: OrgTreeNode;
   onDirtyChange?: (_dirty: boolean) => void;
+  onSaved?: () => void;
 }) {
   const t = useTranslations('users');
   const tp = useTranslations('policyState');
@@ -414,6 +418,8 @@ function UserPanel({
         message: t('saveSuccess'),
         auto_dismiss_ms: 5000,
       });
+      // 개별설정 점/팀 카운트는 트리 메타에서 오므로 저장 후 재조회해 stale 를 막는다.
+      onSaved?.();
     });
   };
 
@@ -555,6 +561,24 @@ function UserPanel({
                 : t('appAccess.inheritOrg')}
             </p>
           )}
+        {/* 개별 설정 되돌리기 — 선택을 비우는 staged 변경이다. Apply 로 [] 가
+            저장되면 override 행이 지워져 팀/조직 정책으로 복귀한다. policy 가
+            null(로드 실패)이면 출처를 모르므로 버튼을 숨긴다(fail-closed). */}
+        {clientsLoaded && policy?.allowed_clients_source === 'user' && (
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <p className="text-xs text-muted-foreground">
+              {t('appAccess.customCaption')}
+            </p>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setSelected([])}
+              className="pressable flex-shrink-0 rounded-apple-sm border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-50"
+            >
+              {t('appAccess.followTeam')}
+            </button>
+          </div>
+        )}
         {isLoadPending ? (
           <div className="text-xs text-muted-foreground py-1 mb-3">{t('appAccess.loading')}</div>
         ) : (
@@ -622,6 +646,23 @@ function UserPanel({
               ? t('userModelsInheritTeam')
               : t('userModelsInheritNone')}
           </p>
+        )}
+        {/* 개별 override 되돌리기 — staged 변경. Apply 시 [] 저장 = 행 삭제 =
+            팀 정책 복귀. policy 로드 실패 시 출처를 모르므로 숨긴다. */}
+        {modelsLoaded && policy?.allowed_models_source === 'user' && (
+          <div className="flex items-center justify-between gap-2 mb-3">
+            <p className="text-xs text-muted-foreground">
+              {t('userModelsCustomCaption')}
+            </p>
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => setSelectedModelAliases([])}
+              className="pressable flex-shrink-0 rounded-apple-sm border border-border px-2.5 py-1 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/50 hover:text-primary disabled:opacity-50"
+            >
+              {t('userModels.followTeam')}
+            </button>
+          </div>
         )}
         {!modelsLoaded ? (
           <div className="text-xs text-destructive py-1">

@@ -574,7 +574,9 @@
       "restricted": "Allowlist: {count} apps",
       "emptyHint": "Nothing selected: saving clears this user's policy and applies the team/org policy. This is not a full block.",
       "inheritTeam": "Currently inheriting the team policy — any change is saved as this user's individual setting.",
-      "inheritOrg": "Currently inheriting the organization policy — any change is saved as this user's individual setting."
+      "inheritOrg": "Currently inheriting the organization policy — any change is saved as this user's individual setting.",
+      "followTeam": "Follow team policy",
+      "customCaption": "A custom policy is applied — to revert to the team policy, uncheck all and apply, or use the button below."
     },
     "budgetInput": {
       "claudeCode": "Claude Code budget (USD/month)",
@@ -591,7 +593,8 @@
       "title": "Per-user allowed models (overrides team policy)",
       "hint": "No selection = follow team policy (override cleared)",
       "loadFailed": "Could not load the policy. Refresh and try again. (Saving disabled)",
-      "empty": "No active models."
+      "empty": "No active models.",
+      "followTeam": "Follow team policy"
     },
     "apply": "Apply",
     "loadErrors": {
@@ -706,7 +709,10 @@
     },
     "budgetSectionTitle": "Budget",
     "showEmptyTeams": "Show empty teams",
-    "emptyTeamBadge": "0 members"
+    "emptyTeamBadge": "0 members",
+    "userModelsCustomCaption": "A custom policy is applied — to revert to the team policy, uncheck all and apply, or use the button below.",
+    "customBadge": "Custom app/model policy",
+    "customCount": "{count} custom"
   },
   "analytics": {
     "title": "Analytics",

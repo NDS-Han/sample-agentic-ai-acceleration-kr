@@ -5,15 +5,16 @@ from __future__ import annotations
 import uuid
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.exceptions import NotFoundError, ValidationError
-from app.models.auth import Department, Team, User, UserRole
+from app.models.auth import Department, Team, User, UserAllowedClient, UserRole
 from app.models.budget import BudgetScope
-from app.models.model import RateLimitScope
+from app.models.model import RateLimitScope, UserAllowedModel
 from app.repositories.budget_repository import BudgetRepository
 from app.repositories.model_repository import RateLimitConfigRepository
 from app.repositories.user_repository import UserRepository
@@ -448,6 +449,18 @@ class UserTeamService:
             return None
         org = orgs[0]
 
+        # 개별 정책(앱/모델 override)을 가진 사용자 id — 트리 노드별 점 표시용.
+        # 멤버당 N+1 조회 대신 DISTINCT union 1방으로 모은다(테이블이 작다).
+        custom_user_ids: set[uuid.UUID] = set(
+            (
+                await session.execute(
+                    select(UserAllowedClient.user_id).union(
+                        select(UserAllowedModel.user_id)
+                    )
+                )
+            ).scalars()
+        )
+
         dept_nodes: list[OrgTreeNode] = []
         for dept in org.departments:
             team_nodes: list[OrgTreeNode] = []
@@ -474,6 +487,7 @@ class UserTeamService:
                                 email=member.email,
                                 role=member.role.value,
                                 team_name=team.name,
+                                has_custom_policies=member.id in custom_user_ids,
                             ),
                         )
                     )
@@ -492,6 +506,9 @@ class UserTeamService:
                             email=leader.email if leader else None,
                             role=None,
                             team_name=None,
+                            custom_policy_count=sum(
+                                1 for m in active_members if m.id in custom_user_ids
+                            ),
                         ),
                     )
                 )

@@ -117,6 +117,13 @@ class OrgNodeMeta(BaseModel):
     email: str | None = None
     role: UserRole | None = None
     team_name: str | None = None
+    #: USER 만 — 앱/모델 정책 개별 override 존재(user_allowed_clients ∪
+    #: user_allowed_models 에 행 존재). 트리에서 "개별 설정" 점 표시용.
+    #: 예산/rate-limit override 는 다른 축이라 포함하지 않는다.
+    has_custom_policies: bool | None = None
+    #: TEAM 만 — 개별 설정을 가진 **활성** 멤버 수. 비활성 사용자는 트리 노드가
+    #: 없으므로 카운트에서도 빼야 점 개수와 일치한다.
+    custom_policy_count: int | None = None
 
 
 class OrgTreeNode(BaseModel):

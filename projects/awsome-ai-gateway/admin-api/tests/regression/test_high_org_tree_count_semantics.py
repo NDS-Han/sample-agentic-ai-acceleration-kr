@@ -69,12 +69,15 @@ def _org(*, name: str, departments: list):
     return o
 
 
-async def _build(org, *, include_empty: bool = False):
+async def _build(org, *, include_empty: bool = False, custom_user_ids=()):
     """``get_org_tree`` 를 태워 트리 노드를 얻는다. 리포지토리만 대체한다.
 
     실제 시그니처는 ``UserTeamService(cache_mgr=..., key_service=...)`` 이고 트리는
     ``UserRepository.list_all_orgs()`` 에서 온다 — 그 둘만 대체하고 노드 조립 로직은
     실물을 그대로 태운다(카운트 계산이 검증 대상이므로).
+
+    ``custom_user_ids`` — 개별정책 DISTINCT union 쿼리(session.execute)가
+    돌려줄 user_id 목록. user_allowed_* 테이블이 비어 있는 기본값은 빈 목록.
     """
     from app.core.cache_invalidation import CacheInvalidationManager
     from app.services.key_service import KeyService
@@ -83,6 +86,9 @@ async def _build(org, *, include_empty: bool = False):
     cache_mgr._redis = MagicMock()
     svc = UserTeamService(cache_mgr=cache_mgr, key_service=MagicMock(spec=KeyService))
     session = AsyncMock()
+    union_result = MagicMock()
+    union_result.scalars.return_value = list(custom_user_ids)
+    session.execute = AsyncMock(return_value=union_result)
     with patch("app.services.user_team_service.UserRepository") as MockRepo:
         MockRepo.return_value.list_all_orgs = AsyncMock(return_value=[org])
         return await svc.get_org_tree(session, include_empty=include_empty)
@@ -315,3 +321,54 @@ async def test_include_empty_still_drops_dept_with_no_teams(org_with_empty_teams
     built = await _build(org_with_empty_teams, include_empty=True)
     depts = {d.name for d in _by_type(built, "DEPARTMENT")}
     assert "E" not in depts
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6. has_custom_policies / custom_policy_count — 트리의 "개별 설정" 표시
+# ─────────────────────────────────────────────────────────────────────────────
+# /users 트리는 user_allowed_clients ∪ user_allowed_models 에 행이 있는
+# 사용자에게 점을 표시하고, 팀에는 "개별 N" 카운트를 단다. 카운트는 **활성**
+# 멤버만 세야 한다 — 비활성 사용자는 트리 노드가 없으므로 카운트에 포함하면
+# 점 개수와 숫자가 어긋난다(섹션 1의 active-only 정합성과 같은 원칙).
+
+
+@pytest.fixture
+def org_with_custom_users():
+    """팀 E: 활성 3명(u1=custom, u2=일반, u3=custom) + 비활성 1명(custom)."""
+    u1 = _member(name="u1")
+    u2 = _member(name="u2")
+    u3 = _member(name="u3")
+    inactive_custom = _member(name="ghost", active=False)
+    team = _team(name="E", members=[u1, u2, u3, inactive_custom])
+    org = _org(name="Org", departments=[_dept(name="D", teams=[team])])
+    # 비활성 사용자의 id 도 DISTINCT 결과에 포함 — 카운트에서 빠져야 함을 검증.
+    return org, {u1.id, u3.id, inactive_custom.id}, {u1.id, u3.id}
+
+
+async def test_user_node_marks_custom_policies(org_with_custom_users):
+    """user_allowed_* 에 행이 있는 활성 사용자만 has_custom_policies=true."""
+    org, all_ids, active_custom = org_with_custom_users
+    built = await _build(org, custom_user_ids=all_ids)
+    users = {u.name: u for u in _by_type(built, "USER")}
+    assert users["u1"].meta.has_custom_policies is True
+    assert users["u3"].meta.has_custom_policies is True
+    assert users["u2"].meta.has_custom_policies is False
+    assert "ghost" not in users, "비활성 사용자는 트리 노드 자체가 없다"
+
+
+async def test_team_custom_policy_count_is_active_only(org_with_custom_users):
+    """TEAM 의 custom_policy_count 는 활성 멤버 교집합 — 비활성 제외."""
+    org, all_ids, _ = org_with_custom_users
+    built = await _build(org, custom_user_ids=all_ids)
+    team = _by_type(built, "TEAM")[0]
+    assert team.meta.custom_policy_count == 2  # u1 + u3 (ghost 제외)
+
+
+async def test_no_custom_policies_means_zero_count(org_with_custom_users):
+    """아무 개별정책도 없으면 count=0 — UI 는 배지를 숨긴다."""
+    org, _, _ = org_with_custom_users
+    built = await _build(org, custom_user_ids=[])
+    team = _by_type(built, "TEAM")[0]
+    assert team.meta.custom_policy_count == 0
+    for u in _by_type(built, "USER"):
+        assert u.meta.has_custom_policies is False

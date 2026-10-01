@@ -574,7 +574,9 @@
       "restricted": "목록: {count}개 앱",
       "emptyHint": "선택 없음: 저장하면 이 사용자의 정책이 지워지고 팀/조직 정책이 적용됩니다. 전면 차단이 아닙니다.",
       "inheritTeam": "현재 팀 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다.",
-      "inheritOrg": "현재 조직 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다."
+      "inheritOrg": "현재 조직 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다.",
+      "followTeam": "팀 정책 따라가기",
+      "customCaption": "개별 설정이 적용 중입니다 — 팀 정책으로 되돌리려면 전체 해제 후 적용하거나 아래 버튼을 사용하세요."
     },
     "budgetInput": {
       "claudeCode": "Claude Code 예산 (USD/월)",
@@ -591,7 +593,8 @@
       "title": "사용자별 허용 모델 (팀 정책 override)",
       "hint": "선택 없음 = 팀 정책을 따름 (override 해제)",
       "loadFailed": "정책을 불러오지 못했습니다. 새로고침 후 다시 시도하세요. (저장 비활성화)",
-      "empty": "활성 모델이 없습니다."
+      "empty": "활성 모델이 없습니다.",
+      "followTeam": "팀 정책 따라가기"
     },
     "apply": "적용",
     "loadErrors": {
@@ -706,7 +709,10 @@
     },
     "budgetSectionTitle": "예산",
     "showEmptyTeams": "빈 팀 표시",
-    "emptyTeamBadge": "멤버 0"
+    "emptyTeamBadge": "멤버 0",
+    "userModelsCustomCaption": "개별 설정이 적용 중입니다 — 팀 정책으로 되돌리려면 전체 해제 후 적용하거나 아래 버튼을 사용하세요.",
+    "customBadge": "앱/모델 개별 정책 적용 중",
+    "customCount": "개별 {count}명"
   },
   "analytics": {
     "title": "분석",

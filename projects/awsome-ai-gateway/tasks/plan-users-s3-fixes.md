@@ -38,9 +38,13 @@
 
 ### 미해결 (다음 사이클)
 
-- `/models` 페이지의 `TeamModelPermissionPanel` 잔존 — Phase 2(todo #3)에서 제거 예정.
+- `/models` 페이지의 `TeamModelPermissionPanel` 잔존 — Phase 2(todo #3)에서 제거 완료 (`e44827e`).
 - F7 후속 UX: 앱 로드 실패 시 비활성 토글 자리에 섹션 내 에러 텍스트(현재는 토스트만).
 - **dev 전용 이슈**: dev 서버에서 유저 노드 클릭 시 간헐적으로 `/users` 라우트가 loading.tsx 상태로 멈춤 (동일 `?node=`에 대한 RSC POST 반복). prod 빌드(`next start`)에서는 동일 시나리오가 재현되지 않아 dev 환경 한정으로 판정 — 배포 후 스모크에서 재확인 필요.
+
+### 후속 수정 완료
+
+- **✗ 툴팁 동시 오픈 버그** (사용자 스크린샷 제보): `PolicySection`의 plain `group` 클래스가 자손의 `group-hover` 툴팁을 전부 발동시킴 → 네임드 그룹 격리 (`group/cell`, `group/tooltip`, `group/section`). prod 빌드 검증: 섹션 hover 0개 / 개별 ✗ hover 1개. admin-ui:1.0.168 재배포(digest `9d1baa6`).
 
 ## ★ 핵심 의미 교정 (리뷰에서 발견 — 배경 설명이 틀렸음)
 

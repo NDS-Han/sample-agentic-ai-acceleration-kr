@@ -32,6 +32,9 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   // 네비게이션 없이 서버 액션으로 재조회해 선택·dirty 상태를 보존한다.
   // prop root 는 서버가 준 기본 트리(빈 팀 제외)라 OFF 복귀 시 재조회 불필요.
   const [treeOverride, setTreeOverride] = useState<OrgTreeNode | null>(null);
+  // treeOverride 가 include_empty 결과인지 — 저장 후 재조회(onSaved)가 기본 트리를
+  // override 에 넣었을 때 "빈 팀 표시" ON 이 그걸 재사용해 빈 팀이 안 뜨는 걸 막는다.
+  const [overrideHasEmpty, setOverrideHasEmpty] = useState(false);
   const [showEmptyTeams, setShowEmptyTeams] = useState(false);
   const [treeLoading, setTreeLoading] = useState(false);
   const effectiveRoot = treeOverride ?? root;
@@ -94,6 +97,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
       if (!r.success || !r.data) return;
       if (applyDeepLink(r.data)) {
         setTreeOverride(r.data);
+        setOverrideHasEmpty(true);
         setShowEmptyTeams(true);
       }
     })();
@@ -222,16 +226,19 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   const applyShowEmpty = async (checked: boolean) => {
     setShowEmptyTeams(checked);
     if (!checked) {
-      // 기본 트리는 prop root 가 이미 들고 있다 — 재조회 불필요.
-      setTreeOverride(null);
+      // 기본 트리로 복귀 — override 가 기본 트리면(onSaved 재조회) 그대로 쓰고,
+      // include_empty 결과면 빈 팀이 남지 않게 버린다.
+      if (overrideHasEmpty) setTreeOverride(null);
+      setOverrideHasEmpty(false);
       return;
     }
-    if (treeOverride) return; // 이미 가져온 트리 재사용
+    if (treeOverride && overrideHasEmpty) return; // 이미 가져온 트리 재사용
     setTreeLoading(true);
     const r = await getOrgTreeAction(true);
     setTreeLoading(false);
     if (r.success) {
       setTreeOverride(r.data);
+      setOverrideHasEmpty(true);
     } else {
       setShowEmptyTeams(false);
       toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
@@ -286,6 +293,8 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
             }}
             onToggle={handleToggle}
             emptyTeamLabel={t('emptyTeamBadge')}
+            customPolicyLabel={t('customBadge')}
+            formatCustomCount={(n) => t('customCount', { count: n })}
           />
         ) : (
           <p className="p-4 text-muted-foreground text-sm">{t('noOrgData')}</p>
@@ -296,6 +305,16 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
           node={selectedNode}
           onDirtyChange={setPanelDirty}
           orgId={effectiveRoot?.type === 'ORGANIZATION' ? effectiveRoot.id : undefined}
+          onSaved={() => {
+            // 저장으로 개별설정 점이 바뀔 수 있다 — 트리 메타를 재조회해 갱신.
+            void (async () => {
+              const r = await getOrgTreeAction(showEmptyTeams);
+              if (r.success && r.data) {
+                setTreeOverride(r.data);
+                setOverrideHasEmpty(showEmptyTeams);
+              }
+            })();
+          }}
         />
       </div>
       </div>
