@@ -47,6 +47,8 @@ export function PolicySection({
   }, [autoOpen]);
 
   return (
+    // group/section 네임드 그룹 — 자식의 다른 group-hover 요소(툴팁 등)와
+    // 충돌하지 않게 이름을 붙인다.
     <details
       open={open}
       onToggle={(e) => {
@@ -54,7 +56,7 @@ export function PolicySection({
         setOpen(next);
         if (next) setMounted(true);
       }}
-      className="border rounded-apple-md p-3 mb-3 group"
+      className="border rounded-apple-md p-3 mb-3 group/section"
     >
       <summary className="flex items-center justify-between gap-2 cursor-pointer list-none text-sm font-medium [&::-webkit-details-marker]:hidden">
         <span className="flex items-center gap-2 min-w-0 flex-wrap">
@@ -63,7 +65,7 @@ export function PolicySection({
         </span>
         <span
           aria-hidden="true"
-          className="text-muted-foreground transition-transform group-open:rotate-180 flex-shrink-0"
+          className="text-muted-foreground transition-transform group-open/section:rotate-180 flex-shrink-0"
         >
           ▾
         </span>

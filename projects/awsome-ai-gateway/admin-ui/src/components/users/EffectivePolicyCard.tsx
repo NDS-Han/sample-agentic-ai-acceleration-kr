@@ -124,7 +124,10 @@ export function EffectivePolicyCard({ userId, policy: policyProp, models }: Prop
                     <td key={client} className="text-center">
                       {/* title 어트리뷰트 툴팁은 표시 지연·무시되는 환경이 있어
                           CSS 팝오버로 대체 — hover 와 키보드 focus 둘 다 동작한다. */}
-                      <span className="relative inline-flex group">
+                      {/* 네임드 그룹 필수 — 이 카드는 PolicySection 의 plain
+                          `group` 안에 있어, 무명 group-hover 는 섹션 hover 시
+                          모든 ✗ 팝오버를 동시에 연다. */}
+                      <span className="relative inline-flex group/cell">
                         <button
                           type="button"
                           className="text-destructive rounded-sm px-0.5 leading-none focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -134,7 +137,7 @@ export function EffectivePolicyCard({ userId, policy: policyProp, models }: Prop
                         </button>
                         <span
                           role="tooltip"
-                          className="pointer-events-none invisible absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-56 -translate-x-1/2 rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100"
+                          className="pointer-events-none invisible absolute bottom-full left-1/2 z-50 mb-1.5 w-max max-w-56 -translate-x-1/2 rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover/cell:visible group-hover/cell:opacity-100 group-focus-within/cell:visible group-focus-within/cell:opacity-100"
                         >
                           <span className="block font-medium mb-1">{t('deniedTitle')}</span>
                           <ul className="list-disc pl-3.5 space-y-0.5">

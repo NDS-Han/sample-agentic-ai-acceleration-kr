@@ -25,8 +25,10 @@ export function InfoTooltip({
 }) {
   const vertical =
     side === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5';
+  // 네임드 그룹(group/tooltip) 필수 — 조상(PolicySection 등)의 plain `group`
+  // 에 hover 가 걸리면 무명 group-hover 는 모든 툴팁을 동시에 연다.
   return (
-    <span className="relative inline-flex group align-middle">
+    <span className="relative inline-flex group/tooltip align-middle">
       <button
         type="button"
         aria-label={label}
@@ -36,7 +38,7 @@ export function InfoTooltip({
       </button>
       <span
         role="tooltip"
-        className={`pointer-events-none invisible absolute z-50 w-64 whitespace-normal rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs font-normal leading-relaxed normal-case tracking-normal text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover:visible group-hover:opacity-100 group-focus-within:visible group-focus-within:opacity-100 ${vertical} ${
+        className={`pointer-events-none invisible absolute z-50 w-64 whitespace-normal rounded-md border border-border bg-popover px-2.5 py-2 text-left text-xs font-normal leading-relaxed normal-case tracking-normal text-popover-foreground shadow-md opacity-0 transition-opacity duration-100 group-hover/tooltip:visible group-hover/tooltip:opacity-100 group-focus-within/tooltip:visible group-focus-within/tooltip:opacity-100 ${vertical} ${
           align === 'center' ? 'left-1/2 -translate-x-1/2' : 'left-0'
         }`}
       >
