@@ -110,6 +110,11 @@ class BudgetSummaryItem(BaseModel):
     # USER 행만: 적용 중인 cap 의 출처 — "individual"(A_u) | "team_default"(D) |
     # None(팀 한도만). UI 의 '미설정(D)' 표시용.
     cap_source: str | None = None
+    # TEAM 행만: 다운그레이드 최신 배치 규칙 수 + 활성 여부.
+    # "최신 배치" 기준은 get_current_rules(펼친 패널이 보는 것)와 동일 — 꺼진
+    # (is_active=false) 배치도 규칙이 화면에 보이므로 is_active 집계가 아니다.
+    downgrade_rule_count: int | None = None
+    downgrade_enabled: bool | None = None
 
 
 class BudgetSummaryResponse(BaseModel):

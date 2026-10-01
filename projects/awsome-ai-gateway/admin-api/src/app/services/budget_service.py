@@ -1435,6 +1435,40 @@ class BudgetService:
             str(tid): Decimal(str(cost)) for tid, cost in team_usage_rows if tid is not None
         }
 
+        # TEAM 행의 다운그레이드 배지 — "최신 저장 배치" 규칙 수 + 활성 여부.
+        # get_current_rules 와 같은 기준(max created_at 배치, is_active 무관)이라
+        # 꺼진 규칙도 펼친 패널과 배지가 일치한다. 팀당 1행 그룹집계(N+1 없음).
+        from app.models.budget import DowngradePolicy
+
+        latest_batch = (
+            sa_select(
+                DowngradePolicy.scope_id,
+                func.max(DowngradePolicy.created_at).label("latest"),
+            )
+            .where(DowngradePolicy.scope == BudgetScope.TEAM)
+            .group_by(DowngradePolicy.scope_id)
+            .subquery()
+        )
+        downgrade_rows = (
+            await session.execute(
+                sa_select(
+                    DowngradePolicy.scope_id,
+                    func.count().label("cnt"),
+                    func.bool_or(DowngradePolicy.is_active).label("enabled"),
+                )
+                .join(
+                    latest_batch,
+                    (DowngradePolicy.scope_id == latest_batch.c.scope_id)
+                    & (DowngradePolicy.created_at == latest_batch.c.latest),
+                )
+                .where(DowngradePolicy.scope == BudgetScope.TEAM)
+                .group_by(DowngradePolicy.scope_id)
+            )
+        ).all()
+        downgrade_by_team: dict[str, tuple[int, bool]] = {
+            str(sid): (cnt, bool(enabled)) for sid, cnt, enabled in downgrade_rows
+        }
+
         async def _resolve_used(scope_enum: BudgetScope, sid: str) -> Decimal:
             scope_type = scope_enum.value.lower()
             if redis is not None:
@@ -1503,6 +1537,14 @@ class BudgetService:
                     department_name=department_name,
                     default_user_cap_usd=default_cap,
                     cap_source=cap_source,
+                    **(
+                        {
+                            "downgrade_rule_count": downgrade_by_team[sid][0],
+                            "downgrade_enabled": downgrade_by_team[sid][1],
+                        }
+                        if scope_enum == BudgetScope.TEAM and sid in downgrade_by_team
+                        else {}
+                    ),
                 )
             )
 

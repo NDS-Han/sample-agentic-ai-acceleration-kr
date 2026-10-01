@@ -360,6 +360,8 @@
     "invalidDefaultCap": "Default cap must be a number ≥ 0",
     "memberBulkEdit": "Bulk edit member budgets",
     "memberBulkEditTitle": "{team} — member budget bulk edit",
+    "downgradeBadge": "downgrade {count}",
+    "downgradeBadgeOff": "Downgrade rules are configured but currently disabled",
     "capRefIndividual": "An individual cap is currently applied",
     "capRefDefault": "The team default cap ${value} is currently applied",
     "capRefNone": "No individual cap — governed by the team limit only",

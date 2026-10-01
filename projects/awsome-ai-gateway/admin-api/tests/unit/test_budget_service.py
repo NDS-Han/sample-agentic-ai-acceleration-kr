@@ -583,6 +583,85 @@ class TestGetBudgetSummary:
         assert team_row.limit_usd == Decimal("1000")
         assert user_row.limit_usd is None  # 미설정 user → limit 없음
 
+    @pytest.mark.asyncio
+    async def test_budget_summary_includes_team_downgrade_badge_fields(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        """TEAM 행의 다운그레이드 배지 — 최신 배치 규칙 수 + 활성 여부.
+
+        펼친 패널(AutoDowngradeConfig)은 최신 배치를 is_active 무관하게 보여
+        주므로 배지도 같은 기준이어야 한다 — is_active 집계면 꺼진 규칙이
+        펼침에서는 보이는데 배지는 안 떠 어긋난다.
+        """
+        team_id = uuid.uuid4()
+        team_obj = MagicMock()
+        team_obj.id = team_id
+        team_obj.name = "Eng"
+        team_obj.department = None
+        team_obj.members = []
+
+        def _rows(values):
+            r = MagicMock()
+            r.all = MagicMock(return_value=values)
+            return r
+
+        # session.execute 호출 순서: user 사용량 → team 사용량 → 다운그레이드 집계.
+        mock_session.execute = AsyncMock(
+            side_effect=[
+                _rows([]),                       # user_usage_rows
+                _rows([]),                       # team_usage_rows
+                _rows([(team_id, 3, True)]),     # downgrade_rows (scope_id, cnt, enabled)
+            ]
+        )
+
+        with patch("app.services.budget_service.BudgetRepository") as BRepo, \
+             patch("app.repositories.user_repository.UserRepository") as URepo:
+            BRepo.return_value.list_configs = AsyncMock(return_value=[])
+            URepo.return_value.iter_all_users = AsyncMock(return_value=[])
+            URepo.return_value.list_all_teams = AsyncMock(return_value=[team_obj])
+
+            result = await budget_service.get_budget_summary(
+                mock_session, scope=None, target_id=None, period="2026-04"
+            )
+
+        team_row = next(i for i in result.summary if i.target_type == "team")
+        assert team_row.downgrade_rule_count == 3
+        assert team_row.downgrade_enabled is True
+
+    @pytest.mark.asyncio
+    async def test_budget_summary_no_downgrade_leaves_fields_null(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        team_id = uuid.uuid4()
+        team_obj = MagicMock()
+        team_obj.id = team_id
+        team_obj.name = "Eng"
+        team_obj.department = None
+        team_obj.members = []
+
+        def _rows(values):
+            r = MagicMock()
+            r.all = MagicMock(return_value=values)
+            return r
+
+        mock_session.execute = AsyncMock(
+            side_effect=[_rows([]), _rows([]), _rows([])]
+        )
+
+        with patch("app.services.budget_service.BudgetRepository") as BRepo, \
+             patch("app.repositories.user_repository.UserRepository") as URepo:
+            BRepo.return_value.list_configs = AsyncMock(return_value=[])
+            URepo.return_value.iter_all_users = AsyncMock(return_value=[])
+            URepo.return_value.list_all_teams = AsyncMock(return_value=[team_obj])
+
+            result = await budget_service.get_budget_summary(
+                mock_session, scope=None, target_id=None, period="2026-04"
+            )
+
+        team_row = next(i for i in result.summary if i.target_type == "team")
+        assert team_row.downgrade_rule_count is None
+        assert team_row.downgrade_enabled is None
+
 
 @pytest.mark.asyncio
 async def test_sync_redis_thresholds_sets_5min_ttl(budget_service):

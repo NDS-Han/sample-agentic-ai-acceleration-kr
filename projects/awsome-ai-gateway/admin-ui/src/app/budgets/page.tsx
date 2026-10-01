@@ -12,8 +12,19 @@ import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
 import { ErrorState } from '@/components/common/ErrorState';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 
-export default async function BudgetsPage() {
+interface BudgetsPageProps {
+  // /users 패널의 "예산에서 편집" 딥링크 — ?team= 은 팀 행 펼침·스크롤,
+  // ?user= 는 해당 유저의 예산 다이얼로그 자동 오픈(BudgetSummaryTable이 처리).
+  // searchParams 는 sync 객체다(await 금지 — 다른 페이지와 같은 패턴).
+  searchParams: { team?: string; user?: string };
+}
+
+const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
+
+export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
   const t = await getTranslations('budgets');
+  const focusTeam = searchParams.team && UUID_RE.test(searchParams.team) ? searchParams.team : undefined;
+  const focusUser = searchParams.user && UUID_RE.test(searchParams.user) ? searchParams.user : undefined;
   const cookieStore = cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
   const session = jwt ? parseJWT(jwt) : null;
@@ -35,6 +46,8 @@ export default async function BudgetsPage() {
     usage_pct: string | null;
     default_user_cap_usd?: string | null;
     cap_source?: 'individual' | 'team_default' | null;
+    downgrade_rule_count?: number | null;
+    downgrade_enabled?: boolean | null;
   }
 
   // 조회 실패를 "예산 없음"과 구분 — 실패 시 재시도 가능한 에러 상태를 렌더한다.
@@ -65,6 +78,8 @@ export default async function BudgetsPage() {
       default_user_cap_usd:
         r.default_user_cap_usd != null ? parseFloat(r.default_user_cap_usd) : null,
       cap_source: r.cap_source ?? null,
+      downgrade_rule_count: r.downgrade_rule_count ?? null,
+      downgrade_enabled: r.downgrade_enabled ?? null,
     } as BudgetSummaryItem;
   });
 
@@ -167,6 +182,8 @@ export default async function BudgetsPage() {
             isAdmin={isAdmin}
             models={models}
             currentUserId={session?.user_id}
+            focusTeam={focusTeam}
+            focusUser={focusUser}
           />
         ) : (
           <ErrorState />

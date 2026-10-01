@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { ChevronRight, ChevronDown, Users } from 'lucide-react';
 import type { BudgetSummaryItem, ModelListItem } from '@/types/entities';
@@ -21,6 +21,9 @@ interface BudgetSummaryTableProps {
   isAdmin: boolean;
   models: ModelListItem[];
   currentUserId?: string;
+  /** /users 패널 딥링크 — ?team= 행 펼침·스크롤, ?user= 예산 다이얼로그 오픈. */
+  focusTeam?: string;
+  focusUser?: string;
 }
 
 type DialogTarget = {
@@ -40,7 +43,7 @@ type DialogTarget = {
 
 const UNASSIGNED_KEY = '__unassigned__';
 
-export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: BudgetSummaryTableProps) {
+export function BudgetSummaryTable({ items, isAdmin, models, currentUserId, focusTeam, focusUser }: BudgetSummaryTableProps) {
   const t = useTranslations('budgets');
   const [selectedItem, setSelectedItem] = useState<DialogTarget | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -76,6 +79,52 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
     }
     return { teamRows: teams, usersByTeam: grouped, unassignedUsers: orphans };
   }, [filteredItems]);
+
+  // 딥링크 포커스 — 1회만 적용한다(Strict Mode 이중 실행 가드는 effect
+  // 최상단에서 세워야 두 번째 호출이 통과하지 못한다). ref 가드가 재실행을
+  // 막으므로 deps 는 정직하게 채운다 — 이후 수동 토글/필터 변경은 덮지 않는다.
+  const focusAppliedRef = useRef(false);
+  useEffect(() => {
+    if (focusAppliedRef.current) return;
+    focusAppliedRef.current = true;
+    const team = focusTeam
+      ? items.find((i) => i.target_type === BudgetScope.TEAM && i.target_id === focusTeam)
+      : undefined;
+    const user = focusUser
+      ? items.find((i) => i.target_type === BudgetScope.USER && i.target_id === focusUser)
+      : undefined;
+    // 대상이 비활성이면 includeInactive 필터에 걸릴 수 있으니 강제로 켠다.
+    if ((team ?? user)?.is_active === false) setShowInactive(true);
+    if (team) {
+      setExpanded((prev) => ({ ...prev, [team.target_id]: true }));
+      document
+        .getElementById(`budget-row-${team.target_id}`)
+        ?.scrollIntoView({ block: 'center' });
+    }
+    if (user) {
+      const groupKey = user.team_id ?? UNASSIGNED_KEY;
+      setExpanded((prev) => ({ ...prev, [groupKey]: true }));
+      // 유저 행은 펼침 후에 렌더되므로 항상 렌더된 팀/그룹 행으로 스크롤한다.
+      document
+        .getElementById(`budget-row-${groupKey}`)
+        ?.scrollIntoView({ block: 'center' });
+      // handleOpenDialog 와 같은 구성 — effect 안에서 함수 참조를 피하기 위해 인라인.
+      const parentTeam = user.team_id
+        ? items.find((i) => i.target_type === BudgetScope.TEAM && i.target_id === user.team_id)
+        : undefined;
+      setSelectedItem({
+        id: user.target_id,
+        name: user.target_name,
+        type: user.target_type,
+        currentLimit: user.limit ?? 0,
+        currentUsed: user.used,
+        teamDefaultCap: parentTeam?.default_user_cap_usd ?? null,
+        capSource: user.cap_source ?? null,
+        currentDefaultCap: null,
+      });
+      setIsDialogOpen(true);
+    }
+  }, [items, focusTeam, focusUser]);
 
   const handleOpenDialog = (item: BudgetSummaryItem) => {
     // USER 행: 소속 팀의 D 를 찾아 다이얼로그 참고값으로 넘긴다 (D-7).
@@ -206,7 +255,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
                   const hasMembers = members.length > 0;
                   return (
                     <Fragment key={team.target_id}>
-                      <Tr>
+                      <Tr id={`budget-row-${team.target_id}`}>
                         <Td emphasis>
                           <div className="flex items-center gap-2">
                             <button
@@ -230,6 +279,22 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
                             {hasMembers && (
                               <span className="text-xs text-muted-foreground">
                                 ({members.length})
+                              </span>
+                            )}
+                            {/* 다운그레이드 최신 배치 규칙 수 — 접힌 상태에서도
+                                설정 유무가 보인다. 꺼진 배치는 neutral 로 구분. */}
+                            {(team.downgrade_rule_count ?? 0) > 0 && (
+                              <span
+                                className={`badge whitespace-nowrap ${
+                                  team.downgrade_enabled ? 'badge-sky' : 'badge-neutral'
+                                }`}
+                                title={
+                                  team.downgrade_enabled
+                                    ? undefined
+                                    : t('downgradeBadgeOff')
+                                }
+                              >
+                                {t('downgradeBadge', { count: team.downgrade_rule_count! })}
                               </span>
                             )}
                           </div>
@@ -319,7 +384,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId }: Bu
                   const isOpen = expanded[UNASSIGNED_KEY] ?? false;
                   return (
                     <Fragment key={UNASSIGNED_KEY}>
-                      <Tr>
+                      <Tr id={`budget-row-${UNASSIGNED_KEY}`}>
                         <Td emphasis colSpan={colCount}>
                           <div className="flex items-center gap-2">
                             <button

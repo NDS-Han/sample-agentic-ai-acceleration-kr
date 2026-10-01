@@ -59,6 +59,9 @@ export interface BudgetSummaryItem {
   default_user_cap_usd?: number | null;
   /** USER 행만: cap 출처 — 'individual'(A_u) | 'team_default'(D) | null(팀 한도만). */
   cap_source?: 'individual' | 'team_default' | null;
+  /** TEAM 행만: 다운그레이드 최신 배치 규칙 수 + 활성 여부(펼친 패널과 같은 기준). */
+  downgrade_rule_count?: number | null;
+  downgrade_enabled?: boolean | null;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────

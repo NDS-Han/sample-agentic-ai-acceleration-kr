@@ -750,7 +750,7 @@ function UserPanel({
       >
         <div className="flex items-center justify-end mb-2">
           <Link
-            href="/budgets"
+            href={`/budgets?user=${node.id}`}
             className="text-xs text-primary hover:underline"
           >
             {t('budgetInput.editInBudgets')}
@@ -1210,7 +1210,7 @@ function TeamPanel({
       {/* 예산·다운그레이드는 예산 페이지 소유 — 여기선 진입 링크만 둔다. */}
       <div className="mb-4 flex items-center justify-between rounded-apple-md border px-3 py-2.5">
         <span className="text-sm font-medium">{t('budgetSectionTitle')}</span>
-        <Link href="/budgets" className="text-xs text-primary hover:underline">
+        <Link href={`/budgets?team=${node.id}`} className="text-xs text-primary hover:underline">
           {t('budgetInput.editInBudgets')}
         </Link>
       </div>
