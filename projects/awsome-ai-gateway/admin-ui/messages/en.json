@@ -377,7 +377,8 @@
       "userBlockedByDefaultCap": "This user will be blocked by the default cap",
       "appBlocked": "This app will be blocked immediately"
     },
-    "allowedClientsNote": "This user is only allowed {list}"
+    "allowedClientsNote": "This user is only allowed {list}",
+    "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again."
   },
   "models": {
     "title": "Model Management",

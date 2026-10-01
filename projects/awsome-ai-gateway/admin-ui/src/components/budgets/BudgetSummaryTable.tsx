@@ -20,6 +20,8 @@ interface BudgetSummaryTableProps {
   items: BudgetSummaryItem[];
   isAdmin: boolean;
   models: ModelListItem[];
+  /** /admin/models 조회 실패 — AutoDowngradeConfig 에 로드 실패 경고를 띄운다. */
+  modelsLoadFailed?: boolean;
   currentUserId?: string;
   /** /users 패널 딥링크 — ?team= 행 펼침·스크롤, ?user= 예산 다이얼로그 오픈. */
   focusTeam?: string;
@@ -43,7 +45,7 @@ type DialogTarget = {
 
 const UNASSIGNED_KEY = '__unassigned__';
 
-export function BudgetSummaryTable({ items, isAdmin, models, currentUserId, focusTeam, focusUser }: BudgetSummaryTableProps) {
+export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, currentUserId, focusTeam, focusUser }: BudgetSummaryTableProps) {
   const t = useTranslations('budgets');
   const [selectedItem, setSelectedItem] = useState<DialogTarget | null>(null);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
@@ -370,6 +372,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, currentUserId, focu
                                 scopeId={team.target_id}
                                 scopeName={team.target_name}
                                 models={models}
+                                modelsLoadFailed={modelsLoadFailed}
                                 currentUsagePct={team.usage_pct}
                               />
                             </div>

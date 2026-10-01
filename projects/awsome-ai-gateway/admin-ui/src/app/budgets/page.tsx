@@ -5,6 +5,8 @@ import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
 import { normalizeAllocation } from '@/lib/budget-allocation';
 import { currentCalendarMonth } from '@/lib/utils/period';
+import { alertLevelOf } from '@/lib/utils/alertLevel';
+import { mapToModelListItem, type APIModelItem } from '@/lib/utils/modelMapping';
 import { parseJWT } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
@@ -74,7 +76,9 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
       used: parseFloat(r.used_usd) || 0,
       remaining: r.remaining_usd != null ? parseFloat(r.remaining_usd) || 0 : null,
       usage_pct: pct,
-      alert_level: pct != null ? (pct >= 100 ? 'CRITICAL' : pct >= 80 ? 'WARNING' : 'NORMAL') : 'NORMAL',
+      // 임계값은 alertLevelOf(lib/utils/alertLevel) 단일 출처 — 백엔드
+      // _alert_level(>=90/>=70)과 불일치하면 같은 행에서 배지/게이지가 엇갈린다.
+      alert_level: alertLevelOf(pct),
       default_user_cap_usd:
         r.default_user_cap_usd != null ? parseFloat(r.default_user_cap_usd) : null,
       cap_source: r.cap_source ?? null,
@@ -91,53 +95,17 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
       .catch(() => null);
   }
 
-  interface APIModelItem {
-    alias: string;
-    provider: string;
-    provider_model_id: string;
-    endpoint_url: string | null;
-    status: string;
-    description: string | null;
-    display_name: string | null;
-    current_pricing: {
-      input_price_per_1k_tokens: string;
-      output_price_per_1k_tokens: string;
-      cache_creation_5m_price_per_1k_tokens?: string;
-      cache_creation_1h_price_per_1k_tokens?: string;
-      cache_read_price_per_1k_tokens?: string;
-    } | null;
-    context_window: number | null;
-    max_output_tokens: number | null;
-  }
-
-  const modelsRes = await adminAPI
+  // 다이얼로그용 모델 목록 — 매핑은 lib/utils/modelMapping 의 단일 출처를 쓴다.
+  // 실패는 빈 배열이 아니라 별도 플래그로 구분해 다이얼로그가 "모델 없음"과
+  // "로드 실패"를 다르게 보여줄 수 있게 한다.
+  const modelsResult = await adminAPI
     .get<{ items: APIModelItem[] }>('/admin/models')
-    .catch(() => ({ items: [] as APIModelItem[] }));
-  const models: ModelListItem[] = (modelsRes.items ?? []).map(m => {
-    const p = m.current_pricing;
-    return {
-      alias: m.alias,
-      provider: m.provider,
-      model_id: m.provider_model_id,
-      endpoint_url: m.endpoint_url ?? null,
-      is_active: m.status === 'ACTIVE',
-      input_price_per_1k: p ? parseFloat(p.input_price_per_1k_tokens) : 0,
-      output_price_per_1k: p ? parseFloat(p.output_price_per_1k_tokens) : 0,
-      cache_creation_5m_price_per_1k: p?.cache_creation_5m_price_per_1k_tokens
-        ? parseFloat(p.cache_creation_5m_price_per_1k_tokens)
-        : 0,
-      cache_creation_1h_price_per_1k: p?.cache_creation_1h_price_per_1k_tokens
-        ? parseFloat(p.cache_creation_1h_price_per_1k_tokens)
-        : 0,
-      cache_read_price_per_1k: p?.cache_read_price_per_1k_tokens
-        ? parseFloat(p.cache_read_price_per_1k_tokens)
-        : 0,
-      max_tokens: m.max_output_tokens ?? 0,
-      context_window: m.context_window ?? 0,
-      description: m.description,
-      display_name: m.display_name,
-    };
-  });
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
+  const models: ModelListItem[] = modelsResult.ok
+    ? (modelsResult.value.items ?? []).map(mapToModelListItem)
+    : [];
+  const modelsLoadFailed = !modelsResult.ok;
 
   const teamItems = items.filter(i => i.target_type === 'TEAM');
 
@@ -181,6 +149,7 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
             items={items}
             isAdmin={isAdmin}
             models={models}
+            modelsLoadFailed={modelsLoadFailed}
             currentUserId={session?.user_id}
             focusTeam={focusTeam}
             focusUser={focusUser}

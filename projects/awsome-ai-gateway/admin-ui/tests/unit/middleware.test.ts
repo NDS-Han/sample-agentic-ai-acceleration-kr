@@ -145,3 +145,42 @@ describe('middleware — session expiry', () => {
     expect(res.status).toBe(200);
   });
 });
+
+describe('middleware — /cli is not public', () => {
+  // 회귀: pathname.startsWith('/cli') 가 공개 분기에 있어 PAGE_PERMISSIONS
+  // (ADMIN/TEAM_LEADER) 검사를 우회했고, 미인증 요청에도 페이지가 열렸다.
+  // 바이너리 다운로드는 /api/cli-download 프록시('/api/' 항목)가 담당한다.
+  it('redirects an unauthenticated /cli request to login', async () => {
+    const res = await middleware(requestWith(undefined, '/cli'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/api/auth/login');
+  });
+
+  it('redirects an unauthenticated /cli subpath too', async () => {
+    const res = await middleware(requestWith(undefined, '/cli/download/linux/x64'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/api/auth/login');
+  });
+
+  it('lets an ADMIN token through to /cli', async () => {
+    const res = await middleware(requestWith(DEV_TOKEN, '/cli'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+  });
+
+  it('keeps /api/cli-download public — curl 설치 명령이 쿠키 없이 도달해야 한다', async () => {
+    const res = await middleware(requestWith(undefined, '/api/cli-download/linux/x64'));
+    expect(res.status).toBe(200);
+  });
+
+  it('redirects a DEVELOPER token to /403 — PAGE_PERMISSIONS 는 ADMIN+TEAM_LEADER', async () => {
+    const devJwt = `header.${b64url({
+      sub: '22222222-2222-2222-2222-222222222222',
+      role: 'DEVELOPER',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}.sig`;
+    const res = await middleware(requestWith(devJwt, '/cli'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/403');
+  });
+});

@@ -10,9 +10,12 @@
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { AlertLevel, BudgetScope } from '@/types/enums';
 import { fmtUsd } from '@/lib/utils/format';
+import { useTranslations } from 'next-intl';
+import { alertLevelOf, type AlertLevelValue } from '@/lib/utils/alertLevel';
 
-type AlertLevelValue = (typeof AlertLevel)[keyof typeof AlertLevel];
 type BudgetScopeValue = (typeof BudgetScope)[keyof typeof BudgetScope];
+
+export { alertLevelOf };
 
 export function AlertBadge({ level, labels }: { level: AlertLevelValue | string; labels: Record<string, string> }) {
   const tones: Record<string, BadgeTone> = {
@@ -38,7 +41,7 @@ export function RoleBadge({ role, labels }: { role: string | null | undefined; l
   return <Badge tone={tones[key] ?? 'neutral'}>{labels[key] ?? key}</Badge>;
 }
 
-export function UsageBar({ pct, level }: { pct: number; level: AlertLevelValue | string }) {
+export function UsageBar({ pct, level, label }: { pct: number; level: AlertLevelValue | string; label?: string }) {
   // 임계 기반 시맨틱색(테마 토큰 — 다크/라이트 자동): 정상 teal / 경고 amber / 위험 destructive.
   const colorMap: Record<string, string> = {
     [AlertLevel.NORMAL]: 'hsl(var(--chart-1))',
@@ -47,21 +50,20 @@ export function UsageBar({ pct, level }: { pct: number; level: AlertLevelValue |
   };
   const color = colorMap[level] ?? 'hsl(var(--muted-foreground))';
   return (
-    <div className="w-full h-1.5 rounded-full overflow-hidden bg-[--table-progress-track]">
+    <div
+      role="progressbar"
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-valuenow={Math.min(Math.round(pct), 100)}
+      aria-label={label}
+      className="w-full h-1.5 rounded-full overflow-hidden bg-[--table-progress-track]"
+    >
       <div
         className="h-full rounded-full"
         style={{ width: `${Math.min(pct, 100)}%`, background: color }}
       />
     </div>
   );
-}
-
-/** 서비스(_alert_level)와 동일 임계 — 편집 중 로컬 재계산용. */
-export function alertLevelOf(pct: number | null): AlertLevelValue {
-  if (pct == null) return AlertLevel.NORMAL;
-  if (pct >= 90) return AlertLevel.CRITICAL;
-  if (pct >= 70) return AlertLevel.WARNING;
-  return AlertLevel.NORMAL;
 }
 
 /** 라벨 + "사용 / 한도" + 게이지 한 줄 — 요약 카드(사용자 상세·유효 정책)에서
@@ -77,9 +79,12 @@ export function BudgetGaugeRow({
   used: string | number | null;
   unsetLabel: string;
 }) {
+  const t = useTranslations('budgets');
   const maxN = max != null ? Number(max) : null;
   const usedN = used != null ? Number(used) : 0;
   const pct = maxN != null && maxN > 0 ? (usedN / maxN) * 100 : null;
+  const level = pct != null ? alertLevelOf(pct) : null;
+  const levelLabel = level != null ? t(`alertLevels.${level}`) : null;
   return (
     <div>
       <div className="flex items-center justify-between text-xs mb-1">
@@ -92,7 +97,13 @@ export function BudgetGaugeRow({
           )}
         </span>
       </div>
-      {pct != null && <UsageBar pct={pct} level={alertLevelOf(pct)} />}
+      {pct != null && level != null && (
+        <UsageBar
+          pct={pct}
+          level={level}
+          label={`${label} ${Math.round(pct)}% · ${levelLabel}`}
+        />
+      )}
     </div>
   );
 }

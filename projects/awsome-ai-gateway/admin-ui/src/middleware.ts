@@ -94,9 +94,11 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
   // '/403' must be public, otherwise an authenticated user without permission
   // for the current path gets redirected to /403, which itself fails the
   // permission check, and bounces back to /403 → ERR_TOO_MANY_REDIRECTS.
+  // '/cli' 페이지는 예외가 아니다 — CLI 바이너리 다운로드는 /api/cli-download
+  // 프록시('/api/' 항목)가 담당하므로 페이지 자체는 PAGE_PERMISSIONS(ADMIN/
+  // TEAM_LEADER) 검사를 받아야 한다.
   if (
     pathname.startsWith('/api/') ||
-    pathname.startsWith('/cli') ||
     pathname === '/403'
   ) {
     return response;

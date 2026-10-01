@@ -9,6 +9,9 @@ interface KPICardProps {
   value: string | number;
   icon: React.ReactNode;
   alertLevel?: AlertLevel;
+  /** 경보 심각도의 텍스트 표기 — 색만으로 전달되지 않도록(접근성).
+   *  alertLevel 이 NORMAL 이 아닐 때 description 앞에 배지처럼 표시된다. */
+  alertLabel?: string;
   description?: string;
   /** 주어지면 카드 전체가 관련 페이지로 가는 링크가 된다. */
   href?: string;
@@ -26,11 +29,18 @@ const ALERT_ICON_WRAPPER_CLASSES: Record<AlertLevel, string> = {
   [AlertLevelConst.NORMAL]: 'bg-muted text-muted-foreground',
 };
 
+const ALERT_TEXT_CLASSES: Record<AlertLevel, string> = {
+  [AlertLevelConst.CRITICAL]: 'text-destructive',
+  [AlertLevelConst.WARNING]: 'text-warning',
+  [AlertLevelConst.NORMAL]: 'text-muted-foreground',
+};
+
 export function KPICard({
   title,
   value,
   icon,
   alertLevel = AlertLevelConst.NORMAL,
+  alertLabel,
   description,
   href,
 }: KPICardProps) {
@@ -67,9 +77,16 @@ export function KPICard({
         {typeof value === 'number' ? value.toLocaleString() : value}
       </p>
 
-      {/* Description */}
-      {description && (
-        <p className="text-xs text-muted-foreground">{description}</p>
+      {/* Description — 경보 심각도는 색뿐 아니라 텍스트로도 전달. */}
+      {(alertLabel || description) && (
+        <p className="text-xs text-muted-foreground">
+          {alertLabel && alertLevel !== AlertLevelConst.NORMAL && (
+            <span className={`font-semibold ${ALERT_TEXT_CLASSES[alertLevel]}`}>
+              {alertLabel} ·{' '}
+            </span>
+          )}
+          {description}
+        </p>
       )}
     </>
   );

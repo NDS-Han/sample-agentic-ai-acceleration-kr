@@ -10,11 +10,14 @@
  */
 
 import { useTranslations } from 'next-intl';
+import Link from 'next/link';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 interface TopSpendRow {
   id: string;
   name: string;
+  /** 행 이름의 딥링크 — 팀 → /budgets?team=, 유저 → /users?node=. */
+  href?: string;
   /** 이름 아래 작게 표시하는 보조 정보 (사용자 행의 소속 팀명 등). */
   subtitle?: string | null;
   usedUsd: number;
@@ -89,7 +92,16 @@ export function TopSpendTable({
                       {i + 1}
                     </span>
                     <span className="min-w-0">
-                      <span className="block truncate">{r.name}</span>
+                      {r.href ? (
+                        <Link
+                          href={r.href}
+                          className="block truncate hover:underline underline-offset-4 decoration-muted-foreground/50 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                        >
+                          {r.name}
+                        </Link>
+                      ) : (
+                        <span className="block truncate">{r.name}</span>
+                      )}
                       {r.subtitle && (
                         <span className="block truncate text-[11px] font-normal text-muted-foreground">
                           {r.subtitle}

@@ -3,7 +3,7 @@
 import { KPICard } from '@/components/common/KPICard';
 import { ErrorState } from '@/components/common/ErrorState';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
-import { AlertLevel } from '@/types/enums';
+import { alertLevelOf } from '@/lib/utils/alertLevel';
 import {
   DollarSign,
   Key,
@@ -39,11 +39,9 @@ import { fmtUsd } from '@/lib/utils/format';
 
 
 
-function calcAlertLevel(utilization: number): (typeof AlertLevel)[keyof typeof AlertLevel] {
-  if (utilization >= 95) return AlertLevel.CRITICAL;
-  if (utilization >= 80) return AlertLevel.WARNING;
-  return AlertLevel.NORMAL;
-}
+// 예산 경보 임계값의 단일 출처는 lib/utils/alertLevel — 백엔드 _alert_level
+// (>=90 CRITICAL / >=70 WARNING)과 동일. 별도 임계를 두면 대시보드 카드와
+// /budgets 표가 같은 수치에 다른 심각도를 표시한다.
 
 function formatTokens(n: number): string {
   if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
@@ -81,6 +79,7 @@ function computeDailyAvg(period: string, totalCost: number): {
 
 async function DashboardKPIs({ period, client }: { period: string; client: string }) {
   const t = await getTranslations('dashboard');
+  const tb = await getTranslations('budgets');
 
   // 카드 전체가 단일 엔드포인트에서 온다. 예전에는 4개를 Promise.allSettled 로 동시에
   // 불렀고 그중 /admin/budgets/summary 가 예산 config 하나당 Redis GET + SQL SUM 을
@@ -94,7 +93,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
   const budgetUtilization = kpi?.budget_utilization_pct ?? null;
   // 한도 합계가 0 이면 비율이 정의되지 않는다(백엔드가 null 을 준다). 0% 로 접으면
   // "예산을 하나도 안 썼다" 는 거짓 사실이 되므로 경고 등급도 매기지 않는다.
-  const alertLevel = budgetUtilization != null ? calcAlertLevel(budgetUtilization) : undefined;
+  const alertLevel = budgetUtilization != null ? alertLevelOf(budgetUtilization) : undefined;
 
   const { dailyAvg, projection } = kpi
     ? computeDailyAvg(period, kpi.total_cost_usd)
@@ -115,12 +114,14 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
+            href={`/analytics?period=${period}`}
           />
           <KPICard
             title={t('budgetUtilization')}
             value={budgetUtilization != null ? `${budgetUtilization.toFixed(1)}%` : '—'}
             icon={<BarChart3 size={18} aria-hidden="true" />}
             alertLevel={alertLevel}
+            alertLabel={alertLevel ? tb(`alertLevels.${alertLevel}`) : undefined}
             description={budgetUtilization != null ? t('budgetUtilizationDesc') : t('fetchFailed')}
             href="/budgets"
           />
@@ -129,6 +130,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
+            href={`/analytics?period=${period}&group_by=user`}
           />
           <KPICard
             title={t('dailyAvg')}
@@ -139,6 +141,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
                 ? t('dailyAvgProjection', { amount: fmtUsd(projection) })
                 : t('dailyAvgDesc')
             }
+            href={`/analytics?period=${period}`}
           />
         </div>
       </section>
@@ -154,12 +157,14 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? kpi.total_requests.toLocaleString() : '—'}
             icon={<Activity size={18} aria-hidden="true" />}
             description={t('totalRequestsDesc')}
+            href={`/analytics?period=${period}`}
           />
           <KPICard
             title={t('totalTokens')}
             value={kpi ? formatTokens(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
+            href={`/analytics?period=${period}`}
           />
           <KPICard
             title={t('activeKeys')}
@@ -264,6 +269,7 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
     name: tm.name,
     usedUsd: tm.cost_usd,
     usagePct: teamPctById.get(tm.team_id) ?? null,
+    href: `/budgets?team=${tm.team_id}`,
   }));
 
   // 실제 비용 기준. 본인 예산이 없더라도(usagePct=null) 소속 팀에 예산이 설정돼
@@ -280,6 +286,7 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
       subtitle: u.team_name,
       usedUsd: u.cost_usd,
       usagePct,
+      href: `/users?node=${u.user_id}`,
       teamBudgetApplied,
       teamBudget:
         teamBudgetApplied && u.team_id && teamLimit != null

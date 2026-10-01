@@ -28,11 +28,14 @@ interface AutoDowngradeConfigProps {
   scopeId: string;
   scopeName: string;
   models: ModelListItem[];
+  /** 페이지에서 /admin/models 조회가 실패했을 때 true — 규칙 select 가
+   *  "활성 모델 없음"으로 오독되지 않도록 로드 실패 경고를 표시한다. */
+  modelsLoadFailed?: boolean;
   /** 팀 월간 예산 현재 사용률(%) — 시뮬레이터 초기값 + "저장 즉시 적용" 경고용. */
   currentUsagePct?: number | null;
 }
 
-export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, currentUsagePct }: AutoDowngradeConfigProps) {
+export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, modelsLoadFailed, currentUsagePct }: AutoDowngradeConfigProps) {
   const t = useTranslations('budgets');
   const tc = useTranslations('common');
   const { toast } = useToast();
@@ -261,6 +264,11 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, cur
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {t('thresholdHint')}
           </p>
+          {modelsLoadFailed && (
+            <p className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              {t('modelsLoadFailed')}
+            </p>
+          )}
           {rules.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border px-4 py-5 text-center text-xs text-muted-foreground">
               {t('noRules')}

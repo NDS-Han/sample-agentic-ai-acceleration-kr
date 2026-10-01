@@ -3,8 +3,6 @@
 import { adminAPI } from '@/lib/api-client';
 import { getTranslations } from 'next-intl/server';
 import Link from 'next/link';
-import { Suspense } from 'react';
-import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { KeysListView } from '@/components/keys/KeysListView';
 import { ErrorState } from '@/components/common/ErrorState';
 import type { KeyListResponse } from '@/lib/actions/keys';
@@ -63,7 +61,7 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
         </button>
         {email && (
           <Link
-            href="/keys"
+            href={`/keys?status=${currentStatus}`}
             className="text-sm text-muted-foreground hover:text-foreground underline-offset-4 hover:underline"
           >
             {t('resetSearch')}
@@ -81,6 +79,7 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
             <Link
               key={status}
               href={`/keys?${params.toString()}`}
+              aria-current={isActive ? 'page' : undefined}
               className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
                 isActive
                   ? 'bg-primary text-primary-foreground border-primary'
@@ -93,22 +92,23 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
         })}
       </div>
 
-      <Suspense fallback={<SkeletonTable rows={10} columns={6} />}>
-        <div className="mt-4">
-          {keysDataResult.ok ? (
-            <KeysListView
-              initialItems={keysDataResult.value.items}
-              initialCursor={keysDataResult.value.pagination.cursor}
-              hasMore={keysDataResult.value.pagination.has_more}
-              email={email}
-              status={currentStatus}
-              limit={PAGE_LIMIT}
-            />
-          ) : (
-            <ErrorState />
-          )}
-        </div>
-      </Suspense>
+      <div className="mt-4">
+        {keysDataResult.ok ? (
+          // key = 필터 조합: status/email 소프트 네비 시 remount되어
+          // useState(initialItems)가 이전 필터의 목록을 들고 있지 않게 한다.
+          <KeysListView
+            key={`${currentStatus}:${email}`}
+            initialItems={keysDataResult.value.items}
+            initialCursor={keysDataResult.value.pagination.cursor}
+            hasMore={keysDataResult.value.pagination.has_more}
+            email={email}
+            status={currentStatus}
+            limit={PAGE_LIMIT}
+          />
+        ) : (
+          <ErrorState />
+        )}
+      </div>
     </div>
   );
 }

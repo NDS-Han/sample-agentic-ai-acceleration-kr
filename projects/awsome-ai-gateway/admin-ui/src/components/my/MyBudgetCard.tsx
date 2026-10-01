@@ -6,7 +6,8 @@
 import { useTranslations } from 'next-intl';
 import type { MyBudgetResponse } from '@/lib/actions/my';
 import { fmtUsd } from '@/lib/utils/format';
-import { UsageBar, alertLevelOf } from '@/components/budgets/budgetVisuals';
+import { UsageBar } from '@/components/budgets/budgetVisuals';
+import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { AlertLevel } from '@/types/enums';
 
 const KNOWN_POLICIES = ['HARD_BLOCK', 'SOFT_WARNING', 'THROTTLE'];

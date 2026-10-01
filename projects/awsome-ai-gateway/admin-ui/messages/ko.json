@@ -377,7 +377,8 @@
       "userBlockedByDefaultCap": "기본 cap으로 즉시 차단됩니다",
       "appBlocked": "해당 앱이 즉시 차단됩니다"
     },
-    "allowedClientsNote": "이 사용자는 {list}만 허용됨"
+    "allowedClientsNote": "이 사용자는 {list}만 허용됨",
+    "modelsLoadFailed": "모델 목록을 불러오지 못했습니다 — 모델 선택이 비어 보입니다. 새로고침 후 다시 시도하세요."
   },
   "models": {
     "title": "모델 관리",
