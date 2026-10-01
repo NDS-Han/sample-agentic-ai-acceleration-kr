@@ -18,7 +18,13 @@ from app.models.auth import Team, User
 from app.models.model import ModelAlias, RateLimitConfig, RateLimitScope
 from app.repositories.model_repository import RateLimitConfigRepository
 from app.repositories.user_repository import UserRepository
-from app.schemas.rate_limits import RateLimitConfigItem, RateLimitResponse, RateLimitSetRequest, RateLimitTreeNode
+from app.schemas.rate_limits import (
+    RateLimitConfigItem,
+    RateLimitResponse,
+    RateLimitScopeStatus,
+    RateLimitSetRequest,
+    RateLimitTreeNode,
+)
 
 logger = structlog.get_logger()
 
@@ -32,6 +38,19 @@ def _team_display_name(team: Team) -> str:
     if dept is not None and team.dept_id != default_dept_id:
         return f"{dept.name}_{team.name}"
     return team.name
+
+
+def _to_config_item(cfg: RateLimitConfig, scope: str) -> RateLimitConfigItem:
+    """RateLimitConfig ORM → API 항목. 트리와 단건 GET 이 같은 변환을 써야
+    배지/표시가 어긋나지 않는다."""
+    return RateLimitConfigItem(
+        target_id=str(cfg.scope_id) if cfg.scope_id else "",
+        scope=scope,
+        rpm=cfg.rpm_limit,
+        tpm=cfg.tpm_limit,
+        cpm=cfg.cpm_limit_usd,
+        cph=cfg.cph_limit_usd,
+    )
 
 
 class RateLimitService:
@@ -132,14 +151,7 @@ class RateLimitService:
         }
 
         def _make_config(cfg: RateLimitConfig, scope: str) -> RateLimitConfigItem:
-            return RateLimitConfigItem(
-                target_id=str(cfg.scope_id) if cfg.scope_id else "",
-                scope=scope,
-                rpm=cfg.rpm_limit,
-                tpm=cfg.tpm_limit,
-                cpm=cfg.cpm_limit_usd,
-                cph=cfg.cph_limit_usd,
-            )
+            return _to_config_item(cfg, scope)
 
         nodes: list[RateLimitTreeNode] = []
         for team in teams:
@@ -183,6 +195,74 @@ class RateLimitService:
             )
 
         return nodes
+
+    async def get_rate_limit_status(
+        self,
+        session: AsyncSession,
+        *,
+        scope: RateLimitScope,
+        scope_id: uuid.UUID,
+    ) -> RateLimitScopeStatus:
+        """단건 조회 — /users 패널용. USER 는 own 이 없으면 팀 설정을
+        inherited 로 내려준다(get_rate_limit_tree 의 USER 분기와 동일 규칙).
+        TEAM 은 상위 상속이 없다."""
+        repo = RateLimitConfigRepository(session)
+        own = await repo.get_active(scope, scope_id)
+        inherited = None
+        inherited_scope = None
+        if scope is RateLimitScope.USER and own is None:
+            user = await session.get(User, scope_id)
+            if user is None:
+                raise NotFoundError("User", str(scope_id))
+            if user.team_id:
+                team_cfg = await repo.get_active(RateLimitScope.TEAM, user.team_id)
+                if team_cfg is not None:
+                    inherited = _to_config_item(team_cfg, "TEAM")
+                    inherited_scope = "TEAM"
+        return RateLimitScopeStatus(
+            own=_to_config_item(own, scope.value) if own else None,
+            inherited=inherited,
+            inherited_scope=inherited_scope,
+        )
+
+    async def delete_rate_limit(
+        self,
+        session: AsyncSession,
+        *,
+        scope: RateLimitScope,
+        scope_id: uuid.UUID,
+        actor: CurrentUser,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> None:
+        """own 설정을 비활성화해 상위 상속(USER→TEAM) 또는 무제한(TEAM)으로
+        되돌린다. 설정이 없으면 멱등 성공 — /users 의 "상위 정책 따라가기"가
+        이미 상속 상태에서 호출돼도 에러가 아니어야 한다."""
+        repo = RateLimitConfigRepository(session)
+        removed = await repo.deactivate_configs(scope, scope_id)
+
+        # proxy 가 읽는 건 rl:config:* 뿐이지만, _set_rate_limit 이 쓰는
+        # ratelimit:config:* 도 대칭으로 지워 stale 상태를 남기지 않는다.
+        sid = str(scope_id)
+        await self._cache_mgr._redis.delete(
+            f"ratelimit:config:{scope.value.lower()}:{sid}"
+        )
+        await self._cache_mgr.invalidate_pattern(
+            f"rl:config:{scope.value}:{sid}:*",
+            session=session,
+        )
+
+        await audit_logger.log(
+            session,
+            actor_user_id=actor.user_id,
+            actor_role=actor.role.value,
+            action="DELETE_RATE_LIMIT",
+            resource_type="RateLimitConfig",
+            resource_id=sid,
+            changes={"after": {"scope": scope.value, "deactivated": removed}},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
 
     async def get_live_usage(
         self, scope: str, scope_id: str, *, window_ms: int = 60_000

@@ -10,7 +10,7 @@
 //   /analytics   → Analytics    h1: t('analytics.pageTitle') ko="분석 (ROI 대시보드)"
 //   /users       → Users/Teams  h1: t('users.title')       ko="사용자/팀 관리"
 //   /monitoring  → Monitoring   h1: t('monitoring.title')  ko="실시간 모니터링"
-//   /rate-limits → Rate Limits  h1: t('rateLimits.title')  ko="Rate Limits" (same in en)
+//   /rate-limits → /users 로 redirect (rate-limit 편집이 /users 패널로 이전됨)
 //
 // Note: /chat, /my, /cli, /analytics/models routes exist but are not covered here —
 //   /chat requires active admin-chat-agent; /my is personal usage (role-scoped);
@@ -34,7 +34,8 @@ const ROUTES = [
   { path: '/analytics',   heading: '분석 (ROI 대시보드)',   level: 1 as const },
   { path: '/users',       heading: '사용자/팀 관리',        level: 1 as const },
   { path: '/monitoring',  heading: '실시간 모니터링',       level: 1 as const },
-  { path: '/rate-limits', heading: 'Rate Limits',          level: 1 as const },
+  // /rate-limits 는 /users 로 영구 redirect — 도착지 h1 을 검증해 리다이렉트 자체를 커버.
+  { path: '/rate-limits', heading: '사용자/팀 관리',        level: 1 as const },
 ] as const;
 
 test.describe('Main route smoke navigation', () => {

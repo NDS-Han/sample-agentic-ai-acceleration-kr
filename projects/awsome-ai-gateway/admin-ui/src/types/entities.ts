@@ -116,16 +116,6 @@ export interface RateLimitConfig {
   cph: number | null; // cost per hour (USD)
 }
 
-export interface RateLimitTreeNode {
-  id: string;
-  label: string;
-  scope: RateLimitScope;
-  is_active?: boolean;
-  config: RateLimitConfig | null;
-  children: RateLimitTreeNode[];
-  inherited_from: string | null; // node id of config source when inherited
-}
-
 // ─── Organisation Tree ────────────────────────────────────────────────────────
 
 /**

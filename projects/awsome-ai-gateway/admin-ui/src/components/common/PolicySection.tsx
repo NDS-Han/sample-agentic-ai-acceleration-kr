@@ -2,7 +2,10 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useEffect, useState, type ReactNode } from 'react';
+import { createContext, useEffect, useState, type ReactNode } from 'react';
+
+/** 섹션이 지금 펼쳐져 있는지 — lazy 자식(폴링·차트)이 열릴 때만 활성화하는 데 쓴다. */
+export const PolicySectionOpenContext = createContext(false);
 
 interface PolicySectionProps {
   title: string;
@@ -70,7 +73,13 @@ export function PolicySection({
           ▾
         </span>
       </summary>
-      {mounted && <div className="mt-2">{children}</div>}
+      {mounted && (
+        <div className="mt-2">
+          <PolicySectionOpenContext.Provider value={open}>
+            {children}
+          </PolicySectionOpenContext.Provider>
+        </div>
+      )}
     </details>
   );
 }

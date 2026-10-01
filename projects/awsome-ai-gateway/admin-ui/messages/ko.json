@@ -4,7 +4,6 @@
     "keys": "API Keys",
     "budgets": "예산 관리",
     "models": "모델 관리",
-    "rateLimits": "Rate Limits",
     "users": "사용자/팀",
     "apps": "앱 정책",
     "monitoring": "모니터링",
@@ -712,7 +711,24 @@
     "emptyTeamBadge": "멤버 0",
     "userModelsCustomCaption": "개별 설정이 적용 중입니다 — 팀 정책으로 되돌리려면 전체 해제 후 적용하거나 아래 버튼을 사용하세요.",
     "customBadge": "앱/모델 개별 정책 적용 중",
-    "customCount": "개별 {count}명"
+    "customCount": "개별 {count}명",
+    "rateLimit": {
+      "title": "Rate limit",
+      "loading": "로딩 중…",
+      "loadError": "Rate limit 설정을 불러오지 못했습니다.",
+      "saveSuccess": "Rate limit이 저장되었습니다",
+      "unlimited": "무제한",
+      "emptyMeansUnlimited": "비워두면 무제한",
+      "inheritCaption": "{source} 정책을 상속 중입니다 — 입력하면 개별 설정으로 저장됩니다.",
+      "inheritTeamFallback": "팀",
+      "inheritGlobalFallback": "전역",
+      "customCaption": "개별 설정이 적용 중입니다.",
+      "followTeam": "팀 정책 따라가기",
+      "clearLimit": "설정 해제",
+      "pendingDeleteHint": "적용하면 개별 설정이 삭제되고 상위 정책(또는 무제한)을 따릅니다.",
+      "liveRpm": "최근 {seconds}초 요청 수",
+      "noRecentRequests": "최근 {seconds}초 동안 요청이 없습니다."
+    }
   },
   "analytics": {
     "title": "분석",
@@ -1143,6 +1159,7 @@
     "failed": "저장 실패",
     "readonly": "읽기 전용",
     "nodeTypeTeam": "팀",
-    "nodeTypeUser": "사용자"
+    "nodeTypeUser": "사용자",
+    "limited": "{count}개 한도"
   }
 }

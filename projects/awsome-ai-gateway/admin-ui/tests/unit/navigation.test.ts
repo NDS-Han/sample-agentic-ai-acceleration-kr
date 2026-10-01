@@ -168,8 +168,12 @@ describe('Sidebar NAV_ITEMS', () => {
 
   it('has an entry for every page in PAGE_PERMISSIONS', () => {
     const linked = new Set(NAV.map((i) => i.href));
-    // /403 은 에러 페이지라 메뉴에 넣지 않는다. 그 외 권한표의 모든 경로는 도달 가능해야 한다.
-    const expected = Object.keys(PAGE_PERMISSIONS).filter((p) => p !== '/403');
+    // /403 은 에러 페이지라 메뉴에 넣지 않는다. /rate-limits 는 /users 로
+    // redirect 되는 호환 경로(권한표에는 유지 — middleware 가 redirect 보다
+    // 먼저 default-deny 한다). 그 외 권한표의 모든 경로는 도달 가능해야 한다.
+    const expected = Object.keys(PAGE_PERMISSIONS).filter(
+      (p) => p !== '/403' && p !== '/rate-limits'
+    );
     const missing = expected.filter((p) => !linked.has(p));
     expect(missing, `사이드바에서 도달할 수 없는 페이지: ${missing.join(', ')}`).toEqual([]);
   });

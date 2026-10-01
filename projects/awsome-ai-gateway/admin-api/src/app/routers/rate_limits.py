@@ -9,7 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
-from app.schemas.rate_limits import RateLimitResponse, RateLimitSetRequest, RateLimitTreeNode
+from app.schemas.rate_limits import (
+    RateLimitResponse,
+    RateLimitScopeStatus,
+    RateLimitSetRequest,
+    RateLimitTreeNode,
+)
 
 router = APIRouter(prefix="/admin/rate-limits", tags=["Rate Limit Management"])
 
@@ -95,6 +100,79 @@ async def set_team_rate_limit(
         session,
         team_id=uuid.UUID(team_id),
         data=body,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
+
+@router.get("/user/{user_id}", response_model=RateLimitScopeStatus)
+async def get_user_rate_limit(
+    request: Request,
+    user_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """단건 조회 — /users 패널용. own 없으면 팀 설정을 inherited 로 반환."""
+    from app.models.model import RateLimitScope
+
+    svc: RateLimitService = request.app.state.rate_limit_service
+    return await svc.get_rate_limit_status(
+        session, scope=RateLimitScope.USER, scope_id=uuid.UUID(user_id)
+    )
+
+
+@router.get("/team/{team_id}", response_model=RateLimitScopeStatus)
+async def get_team_rate_limit(
+    request: Request,
+    team_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    from app.models.model import RateLimitScope
+
+    svc: RateLimitService = request.app.state.rate_limit_service
+    return await svc.get_rate_limit_status(
+        session, scope=RateLimitScope.TEAM, scope_id=uuid.UUID(team_id)
+    )
+
+
+@router.delete("/user/{user_id}", status_code=204)
+async def delete_user_rate_limit(
+    request: Request,
+    user_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """개별 설정 해제 → 팀 상속 복귀. 설정이 없어도 멱등 성공(204)."""
+    from app.models.model import RateLimitScope
+
+    svc: RateLimitService = request.app.state.rate_limit_service
+    await svc.delete_rate_limit(
+        session,
+        scope=RateLimitScope.USER,
+        scope_id=uuid.UUID(user_id),
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
+
+@router.delete("/team/{team_id}", status_code=204)
+async def delete_team_rate_limit(
+    request: Request,
+    team_id: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """팀 설정 해제 → 제한 없음 복귀. 설정이 없어도 멱등 성공(204)."""
+    from app.models.model import RateLimitScope
+
+    svc: RateLimitService = request.app.state.rate_limit_service
+    await svc.delete_rate_limit(
+        session,
+        scope=RateLimitScope.TEAM,
+        scope_id=uuid.UUID(team_id),
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),

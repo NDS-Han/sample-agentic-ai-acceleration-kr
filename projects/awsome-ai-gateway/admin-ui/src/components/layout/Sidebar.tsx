@@ -12,7 +12,6 @@ import {
   BarChart3,
   BrainCircuit,
   Download,
-  Gauge,
   KeyRound,
   LayoutDashboard,
   Sparkles,
@@ -76,12 +75,6 @@ const NAV_ITEMS: NavItemDef[] = [
     href: '/budgets',
     icon: <Wallet size={18} />,
     allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
-  },
-  {
-    key: 'rateLimits',
-    href: '/rate-limits',
-    icon: <Gauge size={18} />,
-    allowedRoles: [UserRoleConst.ADMIN],
   },
   {
     key: 'keys',

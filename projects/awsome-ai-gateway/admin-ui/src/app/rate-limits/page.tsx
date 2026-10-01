@@ -1,23 +1,11 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { getTranslations } from 'next-intl/server';
-import { adminAPI } from '@/lib/api-client';
-import type { RateLimitTreeNode } from '@/types/entities';
-import { RateLimitTreeView } from '@/components/rate-limits/RateLimitTreeView';
-import { ErrorState } from '@/components/common/ErrorState';
+// Rate limit 관리는 /users 의 유저·팀 패널(Rate limit 섹션)로 이전됐다.
+// 사용량 프록시(/api/rate-limits/*)는 그대로 유지. PAGE_PERMISSIONS 의
+// '/rate-limits' 항목도 유지 — middleware 가 이 redirect 보다 먼저
+// default-deny 하므로 지우면 admin 도 /403 으로 간다.
+import { redirect } from 'next/navigation';
 
-export default async function RateLimitsPage() {
-  const t = await getTranslations('rateLimits');
-  // 실패를 "설정 없음"과 구분 — 빈 트리로 접으면 한도 미설정처럼 보인다.
-  const treeResult = await adminAPI
-    .get<RateLimitTreeNode[]>('/admin/rate-limits/tree')
-    .then((v) => ({ ok: true as const, value: v }))
-    .catch(() => ({ ok: false as const }));
-
-  return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">{t('title')}</h1>
-      {treeResult.ok ? <RateLimitTreeView nodes={treeResult.value} /> : <ErrorState />}
-    </div>
-  );
+export default function RateLimitsPage() {
+  redirect('/users');
 }

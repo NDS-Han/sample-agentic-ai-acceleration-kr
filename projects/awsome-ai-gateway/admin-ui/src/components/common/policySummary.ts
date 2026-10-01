@@ -11,6 +11,8 @@ export interface PolicySummary {
   restricted: boolean;
   /** 제한 목록 길이 — restricted 일 때만 의미 있다. */
   count: number;
+  /** 정책 출처 — own=이 스코프 직접 설정, team=상위 상속, none=정책 없음. */
+  source?: 'own' | 'team' | 'none';
 }
 
 export const EMPTY_POLICY_SUMMARY: PolicySummary = {

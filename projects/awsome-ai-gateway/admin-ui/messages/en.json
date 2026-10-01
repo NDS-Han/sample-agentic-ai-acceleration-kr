@@ -4,7 +4,6 @@
     "keys": "API Keys",
     "budgets": "Budget Management",
     "models": "Model Management",
-    "rateLimits": "Rate Limits",
     "users": "Users/Teams",
     "apps": "App Policy",
     "monitoring": "Monitoring",
@@ -712,7 +711,24 @@
     "emptyTeamBadge": "0 members",
     "userModelsCustomCaption": "A custom policy is applied — to revert to the team policy, uncheck all and apply, or use the button below.",
     "customBadge": "Custom app/model policy",
-    "customCount": "{count} custom"
+    "customCount": "{count} custom",
+    "rateLimit": {
+      "title": "Rate limit",
+      "loading": "Loading…",
+      "loadError": "Could not load the rate limit settings.",
+      "saveSuccess": "Rate limit saved",
+      "unlimited": "Unlimited",
+      "emptyMeansUnlimited": "Empty = unlimited",
+      "inheritCaption": "Inheriting the {source} policy — entering a value saves it as an individual setting.",
+      "inheritTeamFallback": "team",
+      "inheritGlobalFallback": "global",
+      "customCaption": "A custom limit is applied.",
+      "followTeam": "Follow team policy",
+      "clearLimit": "Clear limit",
+      "pendingDeleteHint": "Applying deletes the individual setting and follows the parent policy (or unlimited).",
+      "liveRpm": "Requests in last {seconds}s",
+      "noRecentRequests": "No requests in the last {seconds}s."
+    }
   },
   "analytics": {
     "title": "Analytics",
@@ -1143,6 +1159,7 @@
     "failed": "Save failed",
     "readonly": "Read-only",
     "nodeTypeTeam": "Team",
-    "nodeTypeUser": "User"
+    "nodeTypeUser": "User",
+    "limited": "{count} limits"
   }
 }

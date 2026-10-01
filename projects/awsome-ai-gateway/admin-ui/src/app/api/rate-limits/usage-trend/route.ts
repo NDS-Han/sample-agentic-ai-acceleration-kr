@@ -1,6 +1,6 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-// 사용량 트렌드 프록시 — RateLimitConfigPanel 의 트렌드 차트가 노드/윈도우
+// 사용량 트렌드 프록시 — /users ScopeRateLimitPanel 의 트렌드 차트가 노드/윈도우
 // 변경 시 호출. admin-api /admin/rate-limits/usage-trend/{scope}/{scope_id} 로 전달.
 // fail-soft 규칙은 usage 프록시와 동일(401 만 진짜 오류, 나머지는 available:false).
 

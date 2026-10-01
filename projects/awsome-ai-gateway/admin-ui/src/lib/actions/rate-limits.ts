@@ -31,7 +31,56 @@ export async function setRateLimitAction(formData: unknown): Promise<ActionResul
     await withRetry(() =>
       adminAPI.put(`/admin/rate-limits/${scope.toLowerCase()}/${target_id}`, limits)
     );
-    revalidatePath('/rate-limits');
+    // 편집 지점은 /users 패널 — 옛 /rate-limits 페이지는 리다이렉트다.
+    revalidatePath('/users');
+    return { success: true, data: undefined };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// ─── 단건 조회 / 개별설정 해제 — /users 패널용 ──────────────────────────────────
+
+export interface RateLimitScopeStatusData {
+  /** 이 스코프에 직접 설정된 활성 설정 — 없으면 상속/무제한. */
+  own: {
+    rpm: number | null;
+    tpm: number | null;
+    cpm: number | null;
+    cph: number | null;
+  } | null;
+  /** USER 전용 — own 이 없을 때 적용되는 팀 설정. */
+  inherited: {
+    rpm: number | null;
+    tpm: number | null;
+    cpm: number | null;
+    cph: number | null;
+  } | null;
+  inherited_scope: 'TEAM' | null;
+}
+
+export async function getRateLimitStatusAction(
+  scope: 'user' | 'team',
+  scopeId: string
+): Promise<ActionResult<RateLimitScopeStatusData>> {
+  try {
+    const data = await adminAPI.get<RateLimitScopeStatusData>(
+      `/admin/rate-limits/${scope}/${scopeId}`
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+/** own 설정 해제 → USER 는 팀 상속, TEAM 은 제한 없음으로 복귀. 멱등. */
+export async function deleteRateLimitAction(
+  scope: 'user' | 'team',
+  scopeId: string
+): Promise<ActionResult<void>> {
+  try {
+    await withRetry(() => adminAPI.delete(`/admin/rate-limits/${scope}/${scopeId}`));
+    revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };

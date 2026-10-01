@@ -1,6 +1,6 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-// 실시간 RPM 사용량(§60.9) 클라이언트 폴링용 프록시 — RateLimitConfigPanel 이
+// 실시간 RPM 사용량(§60.9) 클라이언트 폴링용 프록시 — /users ScopeRateLimitPanel 이
 // 10초마다 호출. admin-api /admin/rate-limits/usage/{scope}/{scope_id} 로 전달.
 
 import { cookies } from 'next/headers';

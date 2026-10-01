@@ -28,6 +28,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/models/TeamModelPermissionPanel';
+import { ScopeRateLimitPanel, type ScopeRateLimitHandle } from '@/components/users/ScopeRateLimitPanel';
 import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
 import { EffectivePolicyCard } from '@/components/users/EffectivePolicyCard';
 import { BudgetGaugeRow } from '@/components/budgets/budgetVisuals';
@@ -226,7 +227,11 @@ function UserPanel({
   // 상속값이 개인 override 로 굳어 이후 팀 변경이 안 따라온다.
   const [modelBaseline, setModelBaseline] = useState<string[]>([]);
   // 통합 Apply 의 실패 섹션 — 헤더에 "저장 실패" 배지 + 자동 펼침에 쓴다.
-  const [failedSection, setFailedSection] = useState<'apps' | 'models' | null>(null);
+  const [failedSection, setFailedSection] = useState<'apps' | 'models' | 'ratelimit' | null>(null);
+  // Rate limit 섹션 — 앱/모델과 같은 ref+save 패턴으로 통합 Apply에 합류한다.
+  const rateLimitRef = useRef<ScopeRateLimitHandle>(null);
+  const [rlDirty, setRlDirty] = useState(false);
+  const [rlSummary, setRlSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
   // 개인 앱 정책 행 존재 여부 — policy 로드 실패 시 배지 폴백에서 "상속"을
   // 구분하는 데 쓴다(행 없음 = 상속, 있음 = 자체 정책).
   const [hasOwnAppPolicy, setHasOwnAppPolicy] = useState(false);
@@ -379,6 +384,13 @@ function UserPanel({
         savedAliases = mr.data.modelAliases;
       }
 
+      // 3) rate limit — 자식 패널이 실패 토스트를 직접 띄운다.
+      if (rlDirty && !(await rateLimitRef.current?.save())) {
+        if (!mountedRef.current) return;
+        setFailedSection('ratelimit');
+        return;
+      }
+
       // 모두 성공 — 유효 정책을 먼저 다시 읽어 출처 배지·상속 프리필을 갱신한다.
       const p2 = await getEffectivePolicyAction(node.id);
       if (!mountedRef.current) return;
@@ -461,8 +473,8 @@ function UserPanel({
     effModels.length > 0 &&
     (models.length === 0 || effModels.length < models.length);
   const modelBadgeCount = effModels?.length ?? 0;
-  const dirty = accessDirty || modelsDirty;
-  const dirtyCount = (accessDirty ? 1 : 0) + (modelsDirty ? 1 : 0);
+  const dirty = accessDirty || modelsDirty || rlDirty;
+  const dirtyCount = (accessDirty ? 1 : 0) + (modelsDirty ? 1 : 0) + (rlDirty ? 1 : 0);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
@@ -514,7 +526,7 @@ function UserPanel({
           )}
           {failedSection && (
             <span className="text-destructive whitespace-nowrap">
-              {tp('failed')}: {failedSection === 'apps' ? t('appAccess.title') : t('userModels.title')}
+              {tp('failed')}: {failedSection === 'apps' ? t('appAccess.title') : failedSection === 'models' ? t('userModels.title') : t('rateLimit.title')}
             </span>
           )}
         </div>
@@ -692,6 +704,45 @@ function UserPanel({
       </PolicySection>
 
       <PolicySection
+        title={t('rateLimit.title')}
+        autoOpen={rlDirty || failedSection === 'ratelimit'}
+        badges={
+          <>
+            {rlSummary.loaded &&
+              (rlSummary.restricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('limited', { count: rlSummary.count })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {rlSummary.loaded && rlSummary.source === 'team' && (
+              <span className="badge badge-neutral whitespace-nowrap">{tp('sourceTeam')}</span>
+            )}
+            {rlSummary.loaded && rlSummary.source === 'own' && (
+              <span className="badge badge-neutral whitespace-nowrap">{tp('sourceOwn')}</span>
+            )}
+            {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'ratelimit' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
+        <ScopeRateLimitPanel
+          ref={rateLimitRef}
+          scope="user"
+          scopeId={node.id}
+          inheritedFromLabel={node.meta.team_name ?? undefined}
+          hideActions
+          bare
+          disabled={busy}
+          onDirtyChange={setRlDirty}
+          onSummaryChange={setRlSummary}
+        />
+      </PolicySection>
+
+      <PolicySection
         title={t('budgetInput.title')}
         badges={
           <span className="badge badge-neutral whitespace-nowrap">{tp('readonly')}</span>
@@ -774,6 +825,15 @@ function UserPanel({
                   },
                 ]
               : []),
+            ...(rlDirty
+              ? [
+                  {
+                    key: 'ratelimit',
+                    label: t('rateLimit.title'),
+                    onRevert: () => rateLimitRef.current?.revert(),
+                  },
+                ]
+              : []),
           ]}
         />
       )}
@@ -814,16 +874,19 @@ function TeamPanel({
   // dirty/save 를 이 ref·콜백에 맡긴다. UserPanel 의 플로팅 바와 같은 패턴.
   const appAccessRef = useRef<ScopeAppAccessHandle>(null);
   const modelPolicyRef = useRef<TeamModelPermissionHandle>(null);
+  const rateLimitRef = useRef<ScopeRateLimitHandle>(null);
   const [appDirty, setAppDirty] = useState(false);
   const [modelDirty, setModelDirty] = useState(false);
+  const [rlDirty, setRlDirty] = useState(false);
   const [isPolicySavePending, startPolicySaveTransition] = useTransition();
-  const policyDirty = appDirty || modelDirty;
-  const dirtyCount = (appDirty ? 1 : 0) + (modelDirty ? 1 : 0);
+  const policyDirty = appDirty || modelDirty || rlDirty;
+  const dirtyCount = (appDirty ? 1 : 0) + (modelDirty ? 1 : 0) + (rlDirty ? 1 : 0);
   // 섹션 헤더 배지용 저장 상태 요약 — 자식 패널이 로드할 때마다 보고한다.
   const [appSummary, setAppSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
   const [modelSummary, setModelSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
+  const [rlSummary, setRlSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
   // 통합 Apply 의 실패 섹션 — 헤더 "저장 실패" 배지 + 자동 펼침에 쓴다.
-  const [failedSection, setFailedSection] = useState<'apps' | 'models' | null>(null);
+  const [failedSection, setFailedSection] = useState<'apps' | 'models' | 'ratelimit' | null>(null);
 
   useEffect(() => {
     onDirtyChange?.(policyDirty);
@@ -844,6 +907,10 @@ function TeamPanel({
       }
       if (modelDirty && !(await modelPolicyRef.current?.save())) {
         setFailedSection('models');
+        return;
+      }
+      if (rlDirty && !(await rateLimitRef.current?.save())) {
+        setFailedSection('ratelimit');
         return;
       }
       toast({ type: 'success', message: t('saveSuccess'), auto_dismiss_ms: 5000 });
@@ -934,7 +1001,7 @@ function TeamPanel({
           )}
           {failedSection && (
             <span className="text-destructive whitespace-nowrap">
-              {tp('failed')}: {failedSection === 'apps' ? t('scopeAppAccess.title') : tm('teamModelAccess')}
+              {tp('failed')}: {failedSection === 'apps' ? t('scopeAppAccess.title') : failedSection === 'models' ? tm('teamModelAccess') : t('rateLimit.title')}
             </span>
           )}
         </div>
@@ -1105,6 +1172,41 @@ function TeamPanel({
         )}
       </PolicySection>
 
+      <PolicySection
+        title={t('rateLimit.title')}
+        autoOpen={rlDirty || failedSection === 'ratelimit'}
+        badges={
+          <>
+            {rlSummary.loaded &&
+              (rlSummary.restricted ? (
+                <span className="badge badge-amber whitespace-nowrap">
+                  {tp('limited', { count: rlSummary.count })}
+                </span>
+              ) : (
+                <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
+              ))}
+            {rlSummary.loaded && rlSummary.source === 'own' && (
+              <span className="badge badge-neutral whitespace-nowrap">{tp('sourceOwn')}</span>
+            )}
+            {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
+            {failedSection === 'ratelimit' && (
+              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+            )}
+          </>
+        }
+      >
+        <ScopeRateLimitPanel
+          ref={rateLimitRef}
+          scope="team"
+          scopeId={node.id}
+          hideActions
+          bare
+          disabled={isPolicySavePending}
+          onDirtyChange={setRlDirty}
+          onSummaryChange={setRlSummary}
+        />
+      </PolicySection>
+
       {/* 예산·다운그레이드는 예산 페이지 소유 — 여기선 진입 링크만 둔다. */}
       <div className="mb-4 flex items-center justify-between rounded-apple-md border px-3 py-2.5">
         <span className="text-sm font-medium">{t('budgetSectionTitle')}</span>
@@ -1135,6 +1237,15 @@ function TeamPanel({
                     key: 'models',
                     label: tm('teamModelAccess'),
                     onRevert: () => modelPolicyRef.current?.revert(),
+                  },
+                ]
+              : []),
+            ...(rlDirty
+              ? [
+                  {
+                    key: 'ratelimit',
+                    label: t('rateLimit.title'),
+                    onRevert: () => rateLimitRef.current?.revert(),
                   },
                 ]
               : []),
