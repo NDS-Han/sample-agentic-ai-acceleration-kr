@@ -33,7 +33,7 @@ export default async function ModelCostPage({ searchParams }: ModelCostPageProps
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <Link
-            href="/analytics"
+            href={`/analytics?period=${effectiveMonth}`}
             className="text-sm text-muted-foreground hover:text-foreground transition-colors"
           >
             ← {t('backToAnalytics')}

@@ -33,9 +33,13 @@ interface AutoDowngradeConfigProps {
   modelsLoadFailed?: boolean;
   /** 팀 월간 예산 현재 사용률(%) — 시뮬레이터 초기값 + "저장 즉시 적용" 경고용. */
   currentUsagePct?: number | null;
+  /** 저장/삭제 성공 시 부모 행의 다운그레이드 배지를 즉시 갱신한다(N2) —
+   *  revalidatePath 를 쓰지 않는 이 컴포넌트 특성상 부모의 서버 데이터는
+   *  stale 한 채 남기 때문. */
+  onSaved?: (_ruleCount: number, _enabled: boolean) => void;
 }
 
-export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, modelsLoadFailed, currentUsagePct }: AutoDowngradeConfigProps) {
+export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, modelsLoadFailed, currentUsagePct, onSaved }: AutoDowngradeConfigProps) {
   const t = useTranslations('budgets');
   const tc = useTranslations('common');
   const { toast } = useToast();
@@ -187,6 +191,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
         // 끄기 저장은 규칙을 삭제하지 않고 비활성화만 한다 — 규칙은 저장된
         // 설정으로 남으므로 스냅샷도 현재 규칙으로 갱신한다.
         setSavedRules(rules.map(r => ({ ...r })));
+        onSaved?.(result.data.rules.length, result.data.enabled);
         toast({ type: 'success', message: t('downgradeSaved'), auto_dismiss_ms: 3000 });
       } else {
         let msg = result.error;
@@ -205,6 +210,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
         setEnabled(false);
         setRules([]);
         setSavedRules([]);
+        onSaved?.(0, false);
         toast({ type: 'success', message: t('downgradeCleared'), auto_dismiss_ms: 3000 });
       } else {
         toast({ type: 'error', message: result.error, auto_dismiss_ms: 5000 });

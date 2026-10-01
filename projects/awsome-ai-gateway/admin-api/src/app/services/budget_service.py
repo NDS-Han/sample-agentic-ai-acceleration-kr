@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.clients import CLIENT_ORDER
 from app.core.budget_cache import (
     defer_redis_write_until_commit,
+    read_budget_config,
     refresh_user_app_clients,
     write_user_budget_config,
 )
@@ -39,6 +40,7 @@ from app.schemas.budgets import (
     AllocateBudgetRequest,
     AutoDowngradeConfigRequest,
     AutoDowngradeConfigResponse,
+    BudgetConfigDetailResponse,
     BudgetSummaryItem,
     BudgetSummaryResponse,
     DowngradeRuleResponse,
@@ -268,6 +270,72 @@ class BudgetService:
             results=results,
         )
 
+    async def get_budget_config(
+        self,
+        session: AsyncSession,
+        *,
+        scope: BudgetScope,
+        scope_id: uuid.UUID,
+    ) -> BudgetConfigDetailResponse:
+        """다이얼로그 prefill 용 현재 총액 설정 — DB(config) + Redis(thresholds) 병합.
+
+        ``alert_thresholds`` 는 Redis 만이 저장소라 키 미스/만료면 ``None`` 을
+        돌린다 — 프론트는 그 경우 PUT 에서 키를 생략해 보존해야 하므로
+        "기본값" 과 "값 불명" 을 구분해 줘야 한다.
+        """
+        cfg = await BudgetRepository(session).get_latest_config(scope, scope_id)
+        if cfg is None or not cfg.is_active:
+            return BudgetConfigDetailResponse(configured=False)
+        cached = await read_budget_config(
+            self._cache_mgr._redis,
+            f"budget:config:{scope.value.lower()}:{{{scope_id}}}",
+        )
+        prev = cached.get("thresholds") if cached else None
+        thresholds = (
+            sorted(v for v in prev if isinstance(v, int))
+            if isinstance(prev, list)
+            else None
+        )
+        return BudgetConfigDetailResponse(
+            configured=True,
+            max_budget_usd=cfg.max_budget_usd,
+            policy=BudgetPolicy(cfg.policy.value),
+            alert_thresholds=thresholds,
+            default_user_cap_usd=cfg.default_user_cap_usd,
+        )
+
+    async def _resolve_policy_thresholds(
+        self,
+        data: SetBudgetRequest,
+        *,
+        latest: BudgetConfig | None,
+        config_key: str,
+    ) -> tuple[BudgetPolicy, list[int]]:
+        """policy/alert_thresholds 미전송 시 기존값을 보존한다.
+
+        SetBudgetRequest 에 스키마 기본값이 있어 "관리자가 기본값을 골랐다" 와
+        "키를 안 보냈다" 는 ``model_fields_set`` 으로만 구분된다 — 다이얼로그가
+        금액만 바꿔 저장해도 enforcement 정책이 기본값으로 리셋되지 않게 한다.
+        thresholds 의 기존값은 Redis(유일한 저장소)에서 읽고, 캐시 미스면
+        스키마 기본값으로 돌아간다(게이트웨이도 키 미스 시 같은 기본값을 쓴다).
+        """
+        fields = data.model_fields_set
+        if "policy" in fields:
+            policy = BudgetPolicy(data.policy.value)
+        else:
+            policy = BudgetPolicy(latest.policy.value) if latest else BudgetPolicy.HARD_BLOCK
+        if "alert_thresholds" in fields:
+            thresholds = list(data.alert_thresholds)
+        else:
+            cached = await read_budget_config(self._cache_mgr._redis, config_key)
+            prev = cached.get("thresholds") if cached else None
+            thresholds = (
+                [v for v in prev if isinstance(v, int)]
+                if isinstance(prev, list) and prev
+                else list(data.alert_thresholds)
+            )
+        return policy, thresholds
+
     async def set_team_budget(
         self,
         session: AsyncSession,
@@ -298,6 +366,10 @@ class BudgetService:
         else:
             new_cap = latest.default_user_cap_usd if latest else None
         old_cap = latest.default_user_cap_usd if latest else None
+
+        policy, alert_thresholds = await self._resolve_policy_thresholds(
+            data, latest=latest, config_key=f"budget:config:team:{{{team_id}}}"
+        )
 
         # 확인 필요 사유를 모두 수집해 한 번에 409 로 돌린다 — 첫 409 에서 못 본
         # 경고가 confirm 재시도에서 조용히 통과되는 일이 없도록.
@@ -338,7 +410,7 @@ class BudgetService:
             scope_id=team_id,
             max_budget_usd=data.max_budget_usd,
             period_type=PeriodType.MONTHLY,
-            policy=BudgetPolicy(data.policy.value),
+            policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
             default_user_cap_usd=new_cap,
@@ -356,7 +428,13 @@ class BudgetService:
         #    DEL-only 는 불가라, 지연 SET 이 둘 다 지킨다.
         await defer_redis_write_until_commit(
             session,
-            lambda: self._sync_redis_thresholds("team", team_id, data, default_cap=new_cap),
+            lambda: self._sync_redis_thresholds(
+                "team", team_id,
+                max_budget_usd=data.max_budget_usd,
+                policy=policy,
+                alert_thresholds=alert_thresholds,
+                default_cap=new_cap,
+            ),
         )
 
         await audit_logger.log(
@@ -366,7 +444,7 @@ class BudgetService:
             action=_confirmed_action("SET_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
-            changes={"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": data.policy.value, "alert_thresholds": data.alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}},
+            changes={"after": {"team_id": str(team_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds, "default_user_cap_usd": str(new_cap) if new_cap is not None else None}},
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -704,6 +782,11 @@ class BudgetService:
 
         repo = BudgetRepository(session)
 
+        latest = await repo.get_latest_config(BudgetScope.USER, user_id)
+        policy, alert_thresholds = await self._resolve_policy_thresholds(
+            data, latest=latest, config_key=f"budget:config:user:{{{user_id}}}"
+        )
+
         # D-4/I-2 거부: A_u_new < max(app_c) → 하위 앱 cap 이 부모를 넘는 모순.
         max_app = await repo.max_app_budget(user_id)
         if max_app is not None and data.max_budget_usd < max_app:
@@ -740,7 +823,7 @@ class BudgetService:
             scope_id=user_id,
             max_budget_usd=data.max_budget_usd,
             period_type=PeriodType.MONTHLY,
-            policy=BudgetPolicy(data.policy.value),
+            policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
             is_active=True,
@@ -754,7 +837,12 @@ class BudgetService:
 
         await defer_redis_write_until_commit(
             session,
-            lambda: self._sync_redis_thresholds("user", user_id, data),
+            lambda: self._sync_redis_thresholds(
+                "user", user_id,
+                max_budget_usd=data.max_budget_usd,
+                policy=policy,
+                alert_thresholds=alert_thresholds,
+            ),
         )
 
         await audit_logger.log(
@@ -764,7 +852,7 @@ class BudgetService:
             action=_confirmed_action("SET_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
-            changes={"after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": data.policy.value, "alert_thresholds": data.alert_thresholds}},
+            changes={"after": {"user_id": str(user_id), "max_budget_usd": str(data.max_budget_usd), "policy": policy.value, "alert_thresholds": alert_thresholds}},
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -963,6 +1051,14 @@ class BudgetService:
                     },
                 )
 
+        # 총액과 동일한 보존 규칙 — 앱 cap 금액만 바꿔도 정책이 기본값으로 리셋되지 않게.
+        latest_app = await repo.get_first_active_app_config(BudgetScope.USER, user_id, client)
+        policy, alert_thresholds = await self._resolve_policy_thresholds(
+            data,
+            latest=latest_app,
+            config_key=f"budget:config:user:{{{user_id}}}:{client}",
+        )
+
         config = BudgetConfig(
             id=uuid.uuid4(),
             scope=BudgetScope.USER,
@@ -970,7 +1066,7 @@ class BudgetService:
             client=client,
             max_budget_usd=data.max_budget_usd,
             period_type=PeriodType.MONTHLY,
-            policy=BudgetPolicy(data.policy.value),
+            policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
             is_active=True,
@@ -996,7 +1092,12 @@ class BudgetService:
 
         await defer_redis_write_until_commit(
             session,
-            lambda: self._sync_redis_app_config(user_id, client, data),
+            lambda: self._sync_redis_app_config(
+                user_id, client,
+                max_budget_usd=data.max_budget_usd,
+                policy=policy,
+                alert_thresholds=alert_thresholds,
+            ),
         )
         # DB 읽기는 트랜잭션 안에서 — 지연 쓰기는 Redis 만 건드린다.
         active_clients = await repo.list_active_app_clients(user_id)
@@ -1017,8 +1118,8 @@ class BudgetService:
                     "user_id": str(user_id),
                     "client": client,
                     "max_budget_usd": str(data.max_budget_usd),
-                    "policy": data.policy.value,
-                    "alert_thresholds": data.alert_thresholds,
+                    "policy": policy.value,
+                    "alert_thresholds": alert_thresholds,
                 }
             },
             ip_address=ip_address,
@@ -1670,7 +1771,11 @@ class BudgetService:
             logger.warning("redis_team_config_cache_write_failed", scope_id=str(scope_id))
 
     async def _sync_redis_thresholds(
-        self, scope_type: str, scope_id: uuid.UUID, data: SetBudgetRequest,
+        self, scope_type: str, scope_id: uuid.UUID,
+        *,
+        max_budget_usd: Decimal,
+        policy: BudgetPolicy,
+        alert_thresholds: list[int],
         default_cap: Decimal | None = None,
     ) -> None:
         import json
@@ -1683,9 +1788,9 @@ class BudgetService:
             # actually fires on the Redis fast path. Other admin-api paths that
             # write this key (cli_service, internal.py) already use .lower().
             config_data = {
-                "limit_usd": str(data.max_budget_usd),
-                "policy": data.policy.value.lower(),
-                "thresholds": sorted(data.alert_thresholds),
+                "limit_usd": str(max_budget_usd),
+                "policy": policy.value.lower(),
+                "thresholds": sorted(alert_thresholds),
             }
             if scope_type == "team":
                 # team 캐시에만 D 를 싣는다 — gateway 가 미설정 멤버 cap_u 를
@@ -1712,7 +1817,11 @@ class BudgetService:
             logger.warning("redis_threshold_sync_failed", scope_type=scope_type, scope_id=str(scope_id))
 
     async def _sync_redis_app_config(
-        self, user_id: uuid.UUID, client: str, data: SetBudgetRequest
+        self, user_id: uuid.UUID, client: str,
+        *,
+        max_budget_usd: Decimal,
+        policy: BudgetPolicy,
+        alert_thresholds: list[int],
     ) -> None:
         """Write the per-app Redis config key that the gateway Lua reads.
 
@@ -1724,9 +1833,9 @@ class BudgetService:
             redis = self._cache_mgr._redis
             config_key = f"budget:config:user:{{{user_id}}}:{client}"
             config_data = {
-                "limit_usd": str(data.max_budget_usd),
-                "policy": data.policy.value.lower(),
-                "thresholds": sorted(data.alert_thresholds),
+                "limit_usd": str(max_budget_usd),
+                "policy": policy.value.lower(),
+                "thresholds": sorted(alert_thresholds),
             }
             await redis.set(config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
         except Exception:

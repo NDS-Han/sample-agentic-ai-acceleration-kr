@@ -15,6 +15,7 @@ from app.schemas.budgets import (
     AllocateBudgetRequest,
     AutoDowngradeConfigRequest,
     AutoDowngradeConfigResponse,
+    BudgetConfigDetailResponse,
     BudgetSummaryResponse,
     EqualSplitRequest,
     SeedSpentRequest,
@@ -309,6 +310,27 @@ async def get_budget_summary(
         target_id=uuid.UUID(target_id) if target_id else None,
         period=period,
         actor=user,
+    )
+
+
+@router.get("/{scope}/{scope_id}", response_model=BudgetConfigDetailResponse)
+async def get_budget_config(
+    request: Request,
+    scope: str,
+    scope_id: str,
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """예산 설정 다이얼로그 prefill — 현재 policy/thresholds/D 를 돌려준다.
+
+    summary 응답에는 enforcement 설정이 없어 다이얼로그가 기본값으로만 열렸고,
+    금액만 고쳐 저장하면 정책이 조용히 리셋됐다(버그).
+    """
+    svc: BudgetService = request.app.state.budget_service
+    return await svc.get_budget_config(
+        session,
+        scope=BudgetScope(scope.upper()),
+        scope_id=uuid.UUID(scope_id),
     )
 
 

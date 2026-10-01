@@ -137,6 +137,27 @@ async def refresh_user_app_clients(redis, user_id, clients: list[str], ttl: int)
         return False
 
 
+async def read_budget_config(redis, key: str) -> dict | None:
+    """``budget:config:*`` 키를 읽어 dict 로 반환한다 — 없거나 깨졌으면 ``None``.
+
+    thresholds 같은 설정의 **유일한 저장소가 Redis** 라서, PUT 이 해당 필드를
+    생략했을 때 기존값 보존이나 다이얼로그 prefill 은 이 함수로 읽어야 한다.
+    읽기는 멱등이라 예외를 올리지 않는다 — 미스는 None 으로 보고해 호출자가
+    "서버값 불명" 을 "기본값" 과 구분하게 한다.
+    """
+    if redis is None:
+        return None
+    try:
+        raw = await redis.get(key)
+        if not raw:
+            return None
+        data = json.loads(raw)
+        return data if isinstance(data, dict) else None
+    except Exception:
+        logger.warning("budget_config_cache_read_failed", key=key)
+        return None
+
+
 async def defer_redis_write_until_commit(
     session: AsyncSession,
     write: Callable[[], Awaitable[None]],

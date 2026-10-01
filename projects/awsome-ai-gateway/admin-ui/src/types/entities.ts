@@ -108,6 +108,16 @@ export interface AutoDowngradeConfig {
   rules: DowngradeRule[];
 }
 
+/** GET /admin/budgets/{scope}/{scope_id} — 예산 다이얼로그 prefill 용 현재 설정. */
+export interface BudgetConfigDetail {
+  configured: boolean;
+  max_budget_usd: string | null;
+  policy: 'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE' | null;
+  /** null = 서버값 불명(Redis 키 미스) — PUT 생략으로 보존해야 한다. */
+  alert_thresholds: number[] | null;
+  default_user_cap_usd: string | null;
+}
+
 // ─── Rate Limits ──────────────────────────────────────────────────────────────
 
 export interface RateLimitConfig {

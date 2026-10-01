@@ -33,16 +33,18 @@ export interface BudgetSetForm {
   target_id: string;
   target_type: 'TEAM' | 'USER';
   max_budget_usd: number;
-  policy: 'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE';
-  alert_thresholds: number[];
+  // undefined=보존(백엔드 optional-preserve) — 다이얼로그가 금액만 바꿔
+  // 저장해도 enforcement 설정이 기본값으로 리셋되지 않는다.
+  policy?: 'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE';
+  alert_thresholds?: number[];
 }
 
 export const BudgetSetSchema = z.object({
   target_id: z.string().min(1, 'Target ID is required'),
   target_type: z.enum(['TEAM', 'USER']),
   max_budget_usd: z.number().nonnegative('Budget must be 0 or greater'),
-  policy: z.enum(['HARD_BLOCK', 'SOFT_WARNING', 'THROTTLE']),
-  alert_thresholds: z.array(z.number().int().min(1).max(100)).min(1),
+  policy: z.enum(['HARD_BLOCK', 'SOFT_WARNING', 'THROTTLE']).optional(),
+  alert_thresholds: z.array(z.number().int().min(1).max(100)).min(1).optional(),
   // TEAM 전용: 기본 유저 cap D — undefined=보존, null=해제(§3-1).
   default_user_cap_usd: z.number().nonnegative().nullish(),
 });

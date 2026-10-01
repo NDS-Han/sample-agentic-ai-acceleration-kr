@@ -129,6 +129,7 @@ class TestSetTeamBudget:
 
         latest = MagicMock(spec=BudgetConfig)
         latest.default_user_cap_usd = Decimal("25.00")
+        latest.policy = BudgetPolicy.SOFT_WARNING
 
         written = []
 
@@ -148,6 +149,141 @@ class TestSetTeamBudget:
             await budget_service.set_team_budget(mock_session, team_id=team_id, data=data, actor=admin_user)
 
         assert written[0].default_user_cap_usd == Decimal("25.00")
+
+    async def test_team_budget_preserves_policy_and_thresholds_when_omitted(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """금액만 바꾼 저장이 policy/thresholds 를 기본값으로 리셋하면 안 된다.
+
+        다이얼로그가 두 필드를 생략하면: policy 는 직전 config 행에서,
+        thresholds 는 Redis(유일한 저장소)에서 이어받는다.
+        """
+        import json as _json
+
+        team_id = uuid.uuid4()
+        data = SetBudgetRequest(max_budget_usd=Decimal("2000.00"))
+        assert "policy" not in data.model_fields_set
+        assert "alert_thresholds" not in data.model_fields_set
+
+        latest = MagicMock(spec=BudgetConfig)
+        latest.default_user_cap_usd = None
+        latest.policy = BudgetPolicy.SOFT_WARNING
+
+        fake_redis = MagicMock()
+        fake_redis.get = AsyncMock(
+            return_value=_json.dumps({"thresholds": [50, 75]})
+        )
+        budget_service._cache_mgr._redis = fake_redis
+
+        synced = {}
+
+        async def _capture_sync(scope, sid, **kw):
+            synced.update(kw)
+
+        written = []
+
+        async def _immediate(_s, write):
+            await write()
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
+             patch("app.services.budget_service.audit_logger") as mock_audit, \
+             patch.object(budget_service, "_sync_redis_thresholds", side_effect=_capture_sync), \
+             patch("app.services.budget_service.defer_redis_write_until_commit", side_effect=_immediate):
+            MockUserRepo.return_value.get_team = AsyncMock(return_value=_team_mock(team_id))
+            repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=latest)
+            repo.get_usage = AsyncMock(return_value=None)
+            repo.upsert_config = AsyncMock(side_effect=lambda cfg: written.append(cfg))
+            mock_audit.log = AsyncMock()
+
+            await budget_service.set_team_budget(mock_session, team_id=team_id, data=data, actor=admin_user)
+
+        assert written[0].policy == BudgetPolicy.SOFT_WARNING
+        assert synced["policy"] == BudgetPolicy.SOFT_WARNING
+        assert synced["alert_thresholds"] == [50, 75]
+
+    async def test_omitted_policy_thresholds_fall_back_when_nothing_stored(
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """이전 config 없고 Redis 미스 → 스키마 기본값(HARD_BLOCK/[80,90,100])."""
+        team_id = uuid.uuid4()
+        data = SetBudgetRequest(max_budget_usd=Decimal("2000.00"))
+
+        fake_redis = MagicMock()
+        fake_redis.get = AsyncMock(return_value=None)
+        budget_service._cache_mgr._redis = fake_redis
+
+        written = []
+
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo, \
+             patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo, \
+             patch("app.services.budget_service.audit_logger") as mock_audit:
+            MockUserRepo.return_value.get_team = AsyncMock(return_value=_team_mock(team_id))
+            repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=None)
+            repo.get_usage = AsyncMock(return_value=None)
+            repo.upsert_config = AsyncMock(side_effect=lambda cfg: written.append(cfg))
+            mock_audit.log = AsyncMock()
+
+            await budget_service.set_team_budget(mock_session, team_id=team_id, data=data, actor=admin_user)
+
+        assert written[0].policy == BudgetPolicy.HARD_BLOCK
+
+
+class TestGetBudgetConfig:
+    async def test_returns_db_policy_and_redis_thresholds(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        import json as _json
+
+        scope_id = uuid.uuid4()
+        cfg = MagicMock(spec=BudgetConfig)
+        cfg.is_active = True
+        cfg.max_budget_usd = Decimal("500.00")
+        cfg.policy = BudgetPolicy.THROTTLE
+        cfg.default_user_cap_usd = Decimal("20.00")
+
+        fake_redis = MagicMock()
+        fake_redis.get = AsyncMock(
+            return_value=_json.dumps({"thresholds": [90, 60], "policy": "throttle"})
+        )
+        budget_service._cache_mgr._redis = fake_redis
+
+        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=cfg)
+            res = await budget_service.get_budget_config(
+                mock_session, scope=BudgetScope.TEAM, scope_id=scope_id
+            )
+
+        assert res.configured is True
+        assert res.policy == BudgetPolicy.THROTTLE
+        assert res.alert_thresholds == [60, 90]  # 정렬돼 돌아온다
+        assert res.default_user_cap_usd == Decimal("20.00")
+
+    async def test_unconfigured_returns_flag(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=None)
+            res = await budget_service.get_budget_config(
+                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4()
+            )
+        assert res.configured is False
+        assert res.policy is None
+
+    async def test_inactive_config_is_not_prefilled(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        """해제된 예산의 최신 행(is_active=False)은 configured=False 로 보고."""
+        cfg = MagicMock(spec=BudgetConfig)
+        cfg.is_active = False
+        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=cfg)
+            res = await budget_service.get_budget_config(
+                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4()
+            )
+        assert res.configured is False
 
 
 class TestSetUserBudget:
@@ -223,6 +359,7 @@ class TestSetUserBudget:
              patch("app.services.budget_service.audit_logger") as mock_audit:
             MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
             repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=None)
             repo.get_usage = AsyncMock(return_value=None)
             repo.upsert_config = AsyncMock()
@@ -250,6 +387,7 @@ class TestSetUserBudget:
              patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
             MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
             repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=Decimal("10.00"))
 
             with pytest.raises(BudgetRuleError) as excinfo:
@@ -277,6 +415,7 @@ class TestSetUserBudget:
              patch("app.services.budget_service.audit_logger") as mock_audit:
             MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
             repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=None)
             repo.get_usage = AsyncMock(return_value=usage)
             repo.upsert_config = AsyncMock()
@@ -322,6 +461,7 @@ class TestSetUserBudget:
              patch("app.services.budget_service.audit_logger") as mock_audit:
             MockUserRepo.return_value.get_user = AsyncMock(return_value=user)
             repo = MockBudgetRepo.return_value
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=None)
             repo.get_usage = AsyncMock(return_value=None)
             repo.upsert_config = AsyncMock()
@@ -366,6 +506,7 @@ class TestAllocateTeamBudget:
             MockUserRepo.return_value.get_team = AsyncMock(return_value=team)
             repo = MockBudgetRepo.return_value
             repo.get_active_config = AsyncMock(return_value=team_config)
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=None)
             repo.get_usage = AsyncMock(return_value=None)
             repo.upsert_config = AsyncMock()
@@ -501,6 +642,7 @@ class TestAllocateTeamBudget:
             MockUserRepo.return_value.get_team = AsyncMock(return_value=team)
             repo = MockBudgetRepo.return_value
             repo.get_active_config = AsyncMock(return_value=team_config)
+            repo.get_latest_config = AsyncMock(return_value=None)
             repo.max_app_budget = AsyncMock(return_value=None)
             repo.get_usage = AsyncMock(return_value=None)
             repo.upsert_config = AsyncMock()
@@ -677,12 +819,12 @@ async def test_sync_redis_thresholds_sets_5min_ttl(budget_service):
     fake_redis.eval = AsyncMock(return_value=1)
     budget_service._cache_mgr._redis = fake_redis
 
-    data = SetBudgetRequest(
+    await budget_service._sync_redis_thresholds(
+        "user",
+        uuid.UUID("00000000-0000-4000-a000-000000000001"),
         max_budget_usd=Decimal("100"),
         policy=BudgetPolicy.HARD_BLOCK,
-    )
-    await budget_service._sync_redis_thresholds(
-        "user", uuid.UUID("00000000-0000-4000-a000-000000000001"), data
+        alert_thresholds=[80, 90, 100],
     )
 
     fake_redis.eval.assert_awaited_once()

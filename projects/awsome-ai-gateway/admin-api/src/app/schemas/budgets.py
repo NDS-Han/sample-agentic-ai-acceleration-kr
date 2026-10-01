@@ -122,6 +122,24 @@ class BudgetSummaryResponse(BaseModel):
     summary: list[BudgetSummaryItem]
 
 
+class BudgetConfigDetailResponse(BaseModel):
+    """GET /{scope}/{scope_id} — 예산 설정 다이얼로그 prefill 용 현재 설정.
+
+    다이얼로그가 금액만 바꿔 저장해도 policy/thresholds 가 프론트 기본값으로
+    리셋되지 않으려면, 열 때 현재값을 미리 채워야 한다.
+
+    - ``configured=False``: 활성 총액 config 없음 → 프론트는 기본값으로 시작.
+    - ``alert_thresholds=None``: thresholds 의 유일한 저장소인 Redis 키가
+      만료/미스라 서버값을 모른다 → 프론트는 기본값을 **표시만** 하고,
+      관리자가 thresholds 를 건드리지 않으면 PUT 에서 생략해 보존한다.
+    """
+    configured: bool
+    max_budget_usd: Decimal | None = None
+    policy: BudgetPolicy | None = None
+    alert_thresholds: list[int] | None = None
+    default_user_cap_usd: Decimal | None = None
+
+
 class AppBudgetItem(BaseModel):
     client: str
     max_budget_usd: Decimal

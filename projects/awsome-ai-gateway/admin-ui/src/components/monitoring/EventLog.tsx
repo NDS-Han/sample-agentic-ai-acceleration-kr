@@ -11,6 +11,7 @@ import {
   type MonitoringEventTypeFilter,
 } from '@/lib/actions/monitoring';
 import type { BadgeTone } from '@/components/common/Badge';
+import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
@@ -33,6 +34,7 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
   const t = useTranslations('monitoring');
   const locale = useLocale();
   const tz = useReportingTz();
+  const { toast } = useToast();
   const [filter, setFilter] = useState<MonitoringEventTypeFilter>('all');
   const [data, setData] = useState<MonitoringEventsResponse>(initialData);
   const [isPending, startTransition] = useTransition();
@@ -56,7 +58,17 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
   const handleFilterChange = (next: MonitoringEventTypeFilter) => {
     setFilter(next);
     startTransition(async () => {
-      const fresh = await fetchMonitoringEvents(50, next);
+      // 필터 변경은 사용자 액션 — 실패를 조용히 삼키면 선택만 바뀌고 목록은
+      // 이전 필터의 데이터로 보인다. 폴링과 달리 명시 알림이 필요하다.
+      const fresh = await fetchMonitoringEvents(50, next).catch(() => null);
+      if (fresh === null) {
+        toast({
+          type: 'error',
+          message: t('events.fetchFailed'),
+          auto_dismiss_ms: 4000,
+        });
+        return;
+      }
       setData(fresh);
     });
   };

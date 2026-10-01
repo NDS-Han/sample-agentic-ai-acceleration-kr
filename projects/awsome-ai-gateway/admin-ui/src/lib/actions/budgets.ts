@@ -10,7 +10,7 @@ import { normalizeAllocation } from '@/lib/budget-allocation';
 import { BudgetSetSchema } from '@/types/api';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
-import type { AllocationEntry, TeamBudgetAllocation } from '@/types/entities';
+import type { AllocationEntry, BudgetConfigDetail, TeamBudgetAllocation } from '@/types/entities';
 import type { ActionResult } from './types';
 
 // ─── setBudgetAction ──────────────────────────────────────────────────────────
@@ -39,8 +39,12 @@ export async function setBudgetAction(
         ? `/admin/budgets/team/${target_id}`
         : `/admin/budgets/user/${target_id}`;
 
+    // 미전송 필드는 백엔드가 기존값을 보존한다(model_fields_set) — 다이얼로그
+    // prefill 실패 시 기본값을 보내 정책을 리셋하지 않도록 키 자체를 생략한다.
+    const body: Record<string, unknown> = { max_budget_usd, confirm };
+    if (policy !== undefined) body.policy = policy;
+    if (alert_thresholds !== undefined) body.alert_thresholds = alert_thresholds;
     // TEAM: default_user_cap_usd 는 키를 보낼 때만 D 변경 — undefined 면 보존(§3-1).
-    const body: Record<string, unknown> = { max_budget_usd, policy, alert_thresholds, confirm };
     if (target_type === 'TEAM' && default_user_cap_usd !== undefined) {
       body.default_user_cap_usd = default_user_cap_usd;
     }
@@ -49,6 +53,25 @@ export async function setBudgetAction(
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, ...toActionError(err) };
+  }
+}
+
+// ─── getBudgetConfigAction (다이얼로그 prefill — 현재 policy/thresholds/D) ────
+
+export async function getBudgetConfigAction(
+  scope: 'team' | 'user',
+  scopeId: string
+): Promise<ActionResult<BudgetConfigDetail>> {
+  if (!scopeId) {
+    return { success: false, error: 'Scope ID is required' };
+  }
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<BudgetConfigDetail>(`/admin/budgets/${scope}/${scopeId}`)
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
   }
 }
 

@@ -170,24 +170,14 @@
   },
   "keys": {
     "title": "API Keys 관리",
-    "createKey": "키 생성",
     "keyPrefix": "키 프리픽스",
-    "owner": "소유자",
     "status": "상태",
     "createdAt": "생성일",
     "expiresAt": "만료일",
-    "lastUsedAt": "마지막 사용",
     "revokeKey": "키 폐기",
     "revokeConfirmTitle": "API Key 폐기",
     "revokeConfirmMessage": "이 키를 폐기하면 더 이상 사용할 수 없습니다. 계속하시겠습니까?",
-    "rotationPolicy": "로테이션 정책",
-    "rotationDays": "로테이션 주기 (일)",
-    "warningDays": "만료 전 경고 (일)",
-    "autoBlock": "만료 시 자동 차단",
-    "keyCreated": "API Key가 생성되었습니다.",
     "keyRevoked": "API Key가 폐기되었습니다.",
-    "copyKey": "키 복사",
-    "keyCopied": "클립보드에 복사되었습니다.",
     "keyStatus": {
       "ACTIVE": "활성",
       "EXPIRED": "만료됨",
@@ -198,7 +188,6 @@
     "searchPlaceholder": "사용자 이메일로 검색 (부분 일치)",
     "searchButton": "검색",
     "resetSearch": "초기화",
-    "moreKeysHint": "더 많은 키가 있습니다. 검색어를 사용해 범위를 좁혀주세요.",
     "noKeys": "등록된 API Key가 없습니다.",
     "userEmail": "사용자 이메일",
     "actions": "액션",
@@ -378,7 +367,8 @@
       "appBlocked": "해당 앱이 즉시 차단됩니다"
     },
     "allowedClientsNote": "이 사용자는 {list}만 허용됨",
-    "modelsLoadFailed": "모델 목록을 불러오지 못했습니다 — 모델 선택이 비어 보입니다. 새로고침 후 다시 시도하세요."
+    "modelsLoadFailed": "모델 목록을 불러오지 못했습니다 — 모델 선택이 비어 보입니다. 새로고침 후 다시 시도하세요.",
+    "configFetchFailed": "현재 enforcement 설정 조회 실패 — 정책과 임계값은 변경하지 않는 한 그대로 보존됩니다."
   },
   "models": {
     "title": "모델 관리",
@@ -1071,7 +1061,8 @@
         "slow": "지연 (첫 응답 3s 초과)",
         "abnormal": "이상 (에러/타임아웃/지연)"
       },
-      "copyUserId": "사용자 ID 복사"
+      "copyUserId": "사용자 ID 복사",
+      "fetchFailed": "이벤트 새로고침 실패 — 다시 시도하세요."
     },
     "bodyLogging": {
       "label": "본문 로깅 (Invocation Body Logging)",

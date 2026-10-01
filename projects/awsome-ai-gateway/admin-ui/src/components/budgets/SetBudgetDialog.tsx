@@ -10,6 +10,7 @@ import type { BudgetScope } from '@/types/enums';
 import {
   setBudgetAction,
   deleteUserBudgetAction,
+  getBudgetConfigAction,
 } from '@/lib/actions/budgets';
 import {
   getUserAllowedClientsAction,
@@ -77,6 +78,12 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const [value, setValue] = useState<string>(String(target?.currentLimit ?? ''));
   const [policy, setPolicy] = useState<'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE'>('HARD_BLOCK');
   const [thresholds, setThresholds] = useState<number[]>(DEFAULT_THRESHOLDS);
+  // 서버에서 읽은 현재 policy/thresholds — null 은 "서버값 불명"(prefill 실패
+  // 또는 Redis thresholds 키 미스). 불명인 필드는 관리자가 바꾸지 않는 한
+  // PUT 에서 생략해 기존값을 보존한다 — 금액만 바꾼 저장이 enforcement 를
+  // 기본값으로 리셋하던 버그(F1) 방지.
+  const [basePolicy, setBasePolicy] = useState<typeof policy | null>(null);
+  const [baseThresholds, setBaseThresholds] = useState<number[] | null>(null);
   const [newThreshold, setNewThreshold] = useState<string>('50');
   // TEAM scope — 기본 유저 cap D 입력. 빈 문자열 = D 해제(null 전송).
   const [defaultCap, setDefaultCap] = useState<string>(
@@ -86,6 +93,14 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const [confirmation, setConfirmation] = useState<ConfirmationPayload | null>(null);
   // 409 를 낸 마지막 시도의 재시도 콜백 (총예산 저장 / 팀예산 전환 중 어느 것인지).
   const pendingConfirmRef = useRef<(() => void) | null>(null);
+  // 409 확인 재시도 시 이미 성공한 쓰기를 건너뛴다 — 재시도가 성공한 PUT 을
+  // 다시내면 중복 audit 행과 불필요한 쓰기가 생긴다 (N1).
+  const mainSavedRef = useRef(false);
+  const doneAppsRef = useRef<Set<string>>(new Set());
+  // 비동기 prefill 응답이 현재 대상과 맞는지 판별용 — 도중에 대상이 바뀌면
+  // 늦게 도착한 응답이 새 폼을 오염시키지 않도록 최신 target 을 추적.
+  const dialogTargetRef = useRef(target);
+  dialogTargetRef.current = target;
 
   // per-app(client) 예산 — USER scope 에서만 사용. 빈 문자열 = 미설정.
   // loaded* 는 prefill 시점 값 기억 → 비우고 저장하면 clear 로 이어진다. client→문자열 map.
@@ -109,9 +124,48 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       );
       setPolicy('HARD_BLOCK');
       setThresholds(DEFAULT_THRESHOLDS);
+      setBasePolicy(null);
+      setBaseThresholds(null);
       setConfirmation(null);
       pendingConfirmRef.current = null;
+      mainSavedRef.current = false;
+      doneAppsRef.current = new Set();
+
+      // 현재 enforcement 설정을 prefill — 금액만 고쳐도 정책이 기본값으로
+      // 리셋되는 걸 막는다. 실패 시 baseline 은 null 유지 → 해당 필드를
+      // PUT 에서 생략해 서버가 보존하게 한다.
+      const scope = target.type === 'TEAM' ? 'team' : 'user';
+      const targetId = target.id;
+      getBudgetConfigAction(scope, targetId).then((res) => {
+        // 대상이 이미 바뀐 뒤 도착한 응답은 버린다 — 이전 대상의 설정이
+        // 새 대상 폼에 덮어씌워지는 교차 오염 방지.
+        if (targetId !== (dialogTargetRef.current?.id ?? '')) return;
+        if (!res.success) {
+          toast({
+            type: 'error',
+            message: t('configFetchFailed'),
+            auto_dismiss_ms: 5000,
+          });
+          return;
+        }
+        if (res.data.configured) {
+          if (res.data.policy) {
+            setPolicy(res.data.policy);
+            setBasePolicy(res.data.policy);
+          }
+          if (res.data.alert_thresholds) {
+            const sorted = [...res.data.alert_thresholds].sort((a, b) => a - b);
+            setThresholds(sorted);
+            setBaseThresholds(sorted);
+          }
+        } else {
+          // 새 예산 — 표시된 기본값이 곧 서버 기대값이므로 baseline 도 기본값.
+          setBasePolicy('HARD_BLOCK');
+          setBaseThresholds(DEFAULT_THRESHOLDS);
+        }
+      });
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
 
   const parsedValue = parseFloat(value);
@@ -204,6 +258,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const doSubmit = (confirm: boolean) => {
     setError(null);
 
+    // 새 시도(비-confirm)면 진행 상황 리셋 — 확인 재시도는 이미 성공한
+    // 쓰기를 건너뛰어 중복 PUT/audit 을 피한다.
+    if (!confirm) {
+      mainSavedRef.current = false;
+      doneAppsRef.current = new Set();
+    }
+
     if (thresholds.length === 0) {
       setError(t('minThresholdError'));
       return;
@@ -227,24 +288,37 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
     }
     const dChanged = isTeamScope && dParsed !== (target.currentDefaultCap ?? null);
 
-    startTransition(async () => {
-      const result = await setBudgetAction({
-        target_id: target.id,
-        target_type: target.type,
-        max_budget_usd: numericValue,
-        policy,
-        alert_thresholds: thresholds,
-        ...(isTeamScope && dChanged ? { default_user_cap_usd: dParsed } : {}),
-      }, confirm);
+    // baseline=null 은 서버값 불명 — 관리자가 그 필드를 안 건드렸으면 PUT
+    // 에서 생략해 보존한다. baseline 이 있으면 현재 선택값을 항상 보낸다
+    // (prefill 된 값이거나, 새 예산의 기본값이거나, 관리자가 고른 값).
+    const sendPolicy =
+      basePolicy === null ? policy !== 'HARD_BLOCK' : true;
+    const sendThresholds =
+      baseThresholds === null
+        ? thresholds.join(',') !== DEFAULT_THRESHOLDS.join(',')
+        : true;
 
-      if (!result.success) {
-        if (result.confirmation) {
-          pendingConfirmRef.current = () => doSubmit(true);
-          setConfirmation(result.confirmation);
-        } else {
-          setError(result.error);
+    startTransition(async () => {
+      if (!mainSavedRef.current) {
+        const result = await setBudgetAction({
+          target_id: target.id,
+          target_type: target.type,
+          max_budget_usd: numericValue,
+          ...(sendPolicy ? { policy } : {}),
+          ...(sendThresholds ? { alert_thresholds: thresholds } : {}),
+          ...(isTeamScope && dChanged ? { default_user_cap_usd: dParsed } : {}),
+        }, confirm);
+
+        if (!result.success) {
+          if (result.confirmation) {
+            pendingConfirmRef.current = () => doSubmit(true);
+            setConfirmation(result.confirmation);
+          } else {
+            setError(result.error);
+          }
+          return;
         }
-        return;
+        mainSavedRef.current = true;
       }
 
       // 총 예산 저장 성공. USER scope 에서는 이어서 앱별(per-app) 예산도 저장한다.
@@ -273,17 +347,22 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         }
 
         // 각 앱: 값이 있으면 set, 비었고 기존 예산이 있었으면 clear.
-        // policy·thresholds 는 관리자가 이 다이얼로그에서 고른 값을 그대로 상속.
+        // policy·thresholds 는 관리자가 이 다이얼로그에서 고른 값을 그대로 상속
+        // (단, 서버값 불명+미변경이면 생략해 백엔드가 보존).
+        // doneAppsRef: 409 확인 재시도에서 이미 저장된 앱을 건너뛴다(N1).
         for (const tgt of targets) {
+          if (doneAppsRef.current.has(tgt.client)) continue;
           const trimmed = tgt.value.trim();
           if (trimmed !== '') {
             const res = await setUserClientBudgetAction(target.id, tgt.client, {
               max_budget_usd: trimmed,
-              policy,
-              alert_thresholds: thresholds,
+              ...(sendPolicy ? { policy } : {}),
+              ...(sendThresholds ? { alert_thresholds: thresholds } : {}),
               confirm,
             });
-            if (!res.success && appError === null) {
+            if (res.success) {
+              doneAppsRef.current.add(tgt.client);
+            } else if (appError === null) {
               appError = res.error;
               if (res.confirmation) {
                 pendingConfirmRef.current = () => doSubmit(true);
@@ -293,7 +372,9 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             }
           } else if (tgt.loaded.trim() !== '') {
             const res = await clearUserClientBudgetAction(target.id, tgt.client);
-            if (!res.success && appError === null) {
+            if (res.success) {
+              doneAppsRef.current.add(tgt.client);
+            } else if (appError === null) {
               appError = res.error;
               if (res.confirmation) {
                 pendingConfirmRef.current = () => doSubmit(true);

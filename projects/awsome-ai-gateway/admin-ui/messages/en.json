@@ -170,24 +170,14 @@
   },
   "keys": {
     "title": "API Key Management",
-    "createKey": "Create Key",
     "keyPrefix": "Key Prefix",
-    "owner": "Owner",
     "status": "Status",
     "createdAt": "Created At",
     "expiresAt": "Expires At",
-    "lastUsedAt": "Last Used",
     "revokeKey": "Revoke Key",
     "revokeConfirmTitle": "Revoke API Key",
     "revokeConfirmMessage": "Revoking this key will make it unusable immediately. Are you sure?",
-    "rotationPolicy": "Rotation Policy",
-    "rotationDays": "Rotation Interval (days)",
-    "warningDays": "Warning Before Expiry (days)",
-    "autoBlock": "Auto Block On Expiry",
-    "keyCreated": "API Key created successfully.",
     "keyRevoked": "API Key has been revoked.",
-    "copyKey": "Copy Key",
-    "keyCopied": "Copied to clipboard.",
     "keyStatus": {
       "ACTIVE": "Active",
       "EXPIRED": "Expired",
@@ -198,7 +188,6 @@
     "searchPlaceholder": "Search by user email (partial match)",
     "searchButton": "Search",
     "resetSearch": "Reset",
-    "moreKeysHint": "More keys available. Use search to narrow results.",
     "noKeys": "No API Keys registered.",
     "userEmail": "User Email",
     "actions": "Actions",
@@ -378,7 +367,8 @@
       "appBlocked": "This app will be blocked immediately"
     },
     "allowedClientsNote": "This user is only allowed {list}",
-    "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again."
+    "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again.",
+    "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed."
   },
   "models": {
     "title": "Model Management",
@@ -1071,7 +1061,8 @@
         "slow": "Slow (first token over 3s)",
         "abnormal": "Abnormal (error/timeout/slow)"
       },
-      "copyUserId": "copy user ID"
+      "copyUserId": "copy user ID",
+      "fetchFailed": "Failed to refresh events — please try again."
     },
     "bodyLogging": {
       "label": "Body logging (Invocation Body Logging)",

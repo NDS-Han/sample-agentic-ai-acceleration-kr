@@ -53,6 +53,11 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
   const [showInactive, setShowInactive] = useState(true);
   // D-21: admin 이 펼친 팀 행에서 "팀원 일괄 편집" 모달을 여는 대상.
   const [memberEditTeam, setMemberEditTeam] = useState<{ id: string; name: string } | null>(null);
+  // 다운그레이드 저장 후 배지 즉시 갱신 — 테이블 revalidate 가 없으므로
+  // 저장 컴포넌트가 결과를 올려보낸다(N2).
+  const [badgeOverrides, setBadgeOverrides] = useState<
+    Record<string, { count: number; enabled: boolean }>
+  >({});
 
   const alertLabels: Record<string, string> = {
     [AlertLevel.NORMAL]: t('alertLevels.NORMAL'),
@@ -284,21 +289,24 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                               </span>
                             )}
                             {/* 다운그레이드 최신 배치 규칙 수 — 접힌 상태에서도
-                                설정 유무가 보인다. 꺼진 배치는 neutral 로 구분. */}
-                            {(team.downgrade_rule_count ?? 0) > 0 && (
-                              <span
-                                className={`badge whitespace-nowrap ${
-                                  team.downgrade_enabled ? 'badge-sky' : 'badge-neutral'
-                                }`}
-                                title={
-                                  team.downgrade_enabled
-                                    ? undefined
-                                    : t('downgradeBadgeOff')
-                                }
-                              >
-                                {t('downgradeBadge', { count: team.downgrade_rule_count! })}
-                              </span>
-                            )}
+                                설정 유무가 보인다. 꺼진 배치는 neutral 로 구분.
+                                저장 직후는 badgeOverrides(로컬 결과) 우선. */}
+                            {(() => {
+                              const badge = badgeOverrides[team.target_id] ?? {
+                                count: team.downgrade_rule_count ?? 0,
+                                enabled: team.downgrade_enabled ?? false,
+                              };
+                              return badge.count > 0 && (
+                                <span
+                                  className={`badge whitespace-nowrap ${
+                                    badge.enabled ? 'badge-sky' : 'badge-neutral'
+                                  }`}
+                                  title={badge.enabled ? undefined : t('downgradeBadgeOff')}
+                                >
+                                  {t('downgradeBadge', { count: badge.count })}
+                                </span>
+                              );
+                            })()}
                           </div>
                         </Td>
                         <Td>
@@ -374,6 +382,12 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                                 models={models}
                                 modelsLoadFailed={modelsLoadFailed}
                                 currentUsagePct={team.usage_pct}
+                                onSaved={(count, enabled) =>
+                                  setBadgeOverrides((prev) => ({
+                                    ...prev,
+                                    [team.target_id]: { count, enabled },
+                                  }))
+                                }
                               />
                             </div>
                           </Td>
