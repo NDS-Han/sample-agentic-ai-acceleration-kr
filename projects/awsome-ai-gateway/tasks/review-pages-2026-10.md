@@ -111,3 +111,9 @@
 
 - **B1 (차단, 수정됨)**: 신설 `GET /admin/budgets/{scope}/{scope_id}`에 팀리더 스코핑이 없어 크로스-팀 IDOR — 형제 읽기 경로(`get_user_app_budgets`, `get_team_allocation`)가 이미 막은 BR-BUD-03 회귀. 서비스에 `actor` 전달 + TEAM은 `scope_id != actor.team_id`, USER는 대상 유저의 `team_id` 비교로 거부 + 테스트 3건 추가.
 - 통과: 라우트 섀도잉 없음(정적 라우트 뒤 등록), 비활성 행 policy 이어받기 의도 일치(§3-1), Redis 미스 폴백=Lua 기본값 `[80,90,100]` 일치, 프론트 baseline 판별 3경우 정상, mainSavedRef 스킵 데이터 무결성 문제 없음.
+
+## 배포 (3차 리뷰 수정)
+
+- 커밋: `d255291`(기능) + `8fab506`(B1 IDOR 조건)
+- 이미지: `llm-gateway/admin-api:8fab506` + `llm-gateway/admin-ui:8fab506` — 롤아웃 완료
+- 라이브 스모크: `GET /admin/budgets/team/{id}` 무인증 → **401** (라우트 존재·인증 필요 확인)
