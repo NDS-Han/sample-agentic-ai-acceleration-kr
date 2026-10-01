@@ -74,8 +74,11 @@ export function KPICard({
     </>
   );
 
+  // 링크 모드에서는 aria-label 을 두지 않는다 — 자식 텍스트(제목·값·설명)가
+  // 접근성명이 되어 스크린리더가 카드 내용을 그대로 읽는다. aria-label 로
+  // 덮으면 "제목: 값" 만 읽혀 링크 목적지 단서가 사라진다.
   return href ? (
-    <Link href={href} className={className} aria-label={ariaLabel}>
+    <Link href={href} className={className}>
       {inner}
     </Link>
   ) : (
