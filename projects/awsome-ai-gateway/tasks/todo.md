@@ -90,6 +90,15 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 ### Checkpoint: Phase 4 — 완료
 - [x] 라이브 스모크: ?team= 펼침·?user= 다이얼로그 오픈 확인 — 배포됨
 
+## Phase 4.5 — 나머지 페이지 감사+수정 — 완료 `c953e5c`+`449104e` (상세: `tasks/plan-remaining-pages.md`)
+
+- [x] F-K1 /keys revoke 후 stale 행 — 낙관적 제거 (Opus 교정)
+- [x] F-K2 /keys 검색 시 status 필터 유실 — hidden input
+- [x] F-A1 /apps 허용 유저 → /users?node= 딥링크
+- [x] F-A2 /apps default_model 허용 해제 고착 — 재동기화+경고 (Opus 발견)
+- [x] F-D1 KPI 카드 → /keys·/budgets·/models 링크
+- [x] 라이브 스모크 통과, 배포됨 (admin-ui `4b4e570d`)
+
 ## Phase 5 — 후속 (별도 검토)
 
 - [ ] **T14** 팀 effective-policy 백엔드 엔드포인트 + TeamPanel 카드

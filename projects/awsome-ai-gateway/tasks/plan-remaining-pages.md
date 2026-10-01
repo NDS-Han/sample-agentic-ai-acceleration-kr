@@ -50,8 +50,13 @@ Phase 0~4 완료 후 남은 페이지 전수 감사 결과. 전반적으로 성�
 - `/analytics` custom 범위 역전 시 안내 문구: 이미 처리됨.
 - `/my`, `/cli`, `/chat`: 구조상 이슈 없음.
 
-## 구현 순서
+## 구현 완료 (배포됨 — admin-ui `4b4e570d`)
 
-1. F-K1 + F-K2 (같은 파일 묶음)
-2. F-A1 + F-D1 (링크 추가)
-3. tsc/vitest/build → 커밋 → Opus 구현 리뷰 → 배포
+- 커밋: `c953e5c` (기능) + `449104e` (KPICard 링크 aria-label 정리 — Opus 권고)
+- F-K1 낙관적 제거, F-K2 hidden status, F-A1 ?node= 딥링크, F-A2 재동기화+경고,
+  F-D1 KPICard href — 전부 구현
+- Opus 구현 리뷰: **SHIP** — REVOKED 필터에서 revoke 불가(버튼 disabled)라
+  유령행 엣지 구조적 불가 확인, 미저장 select 덮어쓰기는 올바른 동작으로 판정
+- 테스트: KeysTable revoke 제거/실패보존 2건 + KPICard href 2건 추가 (321 통과)
+- 라이브 스모크: KPI 카드 3개 링크 렌더, /apps 유저 딥링크 5건,
+  /keys?status=REVOKED hidden input 유지 확인
