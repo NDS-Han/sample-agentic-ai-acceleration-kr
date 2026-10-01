@@ -118,4 +118,5 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 
 ### Checkpoint: Complete
 - [x] tsc/eslint/vitest/build/admin-api pytest 전부 통과
-- [ ] dev 배포 + 스모크 확인
+- [x] dev 배포 + 스모크 확인 (b6af3ef — admin-api `bebb73f` + admin-ui `afc26d5`,
+  팀 패널 유효 정책 카드: 다운그레이드 다이어그램 + 모델×앱 매트릭스 라이브 확인)
