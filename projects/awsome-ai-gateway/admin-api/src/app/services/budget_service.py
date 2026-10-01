@@ -276,13 +276,30 @@ class BudgetService:
         *,
         scope: BudgetScope,
         scope_id: uuid.UUID,
+        actor: CurrentUser,
     ) -> BudgetConfigDetailResponse:
         """다이얼로그 prefill 용 현재 총액 설정 — DB(config) + Redis(thresholds) 병합.
 
         ``alert_thresholds`` 는 Redis 만이 저장소라 키 미스/만료면 ``None`` 을
         돌린다 — 프론트는 그 경우 PUT 에서 키를 생략해 보존해야 하므로
         "기본값" 과 "값 불명" 을 구분해 줘야 한다.
+
+        BR-BUD-03: 리더는 자기 팀/자기 팀 멤버만 읽는다 — 형제 읽기 경로
+        (get_user_app_budgets, get_team_allocation)와 같은 스코핑.
         """
+        if actor.role == UserRole.TEAM_LEADER:
+            if scope == BudgetScope.TEAM:
+                if scope_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team"
+                    )
+            else:
+                target = await UserRepository(session).get_user(scope_id)
+                if target is None or target.team_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team members"
+                    )
+
         cfg = await BudgetRepository(session).get_latest_config(scope, scope_id)
         if cfg is None or not cfg.is_active:
             return BudgetConfigDetailResponse(configured=False)

@@ -233,7 +233,7 @@ class TestSetTeamBudget:
 
 class TestGetBudgetConfig:
     async def test_returns_db_policy_and_redis_thresholds(
-        self, budget_service: BudgetService, mock_session: AsyncMock
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
         import json as _json
 
@@ -253,7 +253,7 @@ class TestGetBudgetConfig:
         with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
             MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=cfg)
             res = await budget_service.get_budget_config(
-                mock_session, scope=BudgetScope.TEAM, scope_id=scope_id
+                mock_session, scope=BudgetScope.TEAM, scope_id=scope_id, actor=admin_user
             )
 
         assert res.configured is True
@@ -262,18 +262,18 @@ class TestGetBudgetConfig:
         assert res.default_user_cap_usd == Decimal("20.00")
 
     async def test_unconfigured_returns_flag(
-        self, budget_service: BudgetService, mock_session: AsyncMock
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
         with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
             MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=None)
             res = await budget_service.get_budget_config(
-                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4()
+                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4(), actor=admin_user
             )
         assert res.configured is False
         assert res.policy is None
 
     async def test_inactive_config_is_not_prefilled(
-        self, budget_service: BudgetService, mock_session: AsyncMock
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
         """해제된 예산의 최신 행(is_active=False)은 configured=False 로 보고."""
         cfg = MagicMock(spec=BudgetConfig)
@@ -281,9 +281,50 @@ class TestGetBudgetConfig:
         with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
             MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=cfg)
             res = await budget_service.get_budget_config(
-                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4()
+                mock_session, scope=BudgetScope.USER, scope_id=uuid.uuid4(), actor=admin_user
             )
         assert res.configured is False
+
+    async def test_team_leader_cannot_read_other_team(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        """BR-BUD-03: 리더는 자기 팀의 설정만 읽는다 — 타 팀은 403."""
+        with pytest.raises(ForbiddenError):
+            await budget_service.get_budget_config(
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=uuid.uuid4(),  # actor.team_id 가 아닌 팀
+                actor=team_leader_user,
+            )
+
+    async def test_team_leader_cannot_read_other_team_member(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        """BR-BUD-03: 타 팀 멤버의 USER 설정도 403 (존재 여부와 무관하게 거부)."""
+        other = MagicMock(spec=User)
+        other.team_id = uuid.uuid4()
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=other)
+            with pytest.raises(ForbiddenError):
+                await budget_service.get_budget_config(
+                    mock_session,
+                    scope=BudgetScope.USER,
+                    scope_id=uuid.uuid4(),
+                    actor=team_leader_user,
+                )
+
+    async def test_team_leader_reads_own_team(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
+            MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=None)
+            res = await budget_service.get_budget_config(
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=team_leader_user.team_id,
+                actor=team_leader_user,
+            )
+        assert res.configured is False  # 통과 + 미설정
 
 
 class TestSetUserBudget:

@@ -73,3 +73,41 @@
   - `GET /cli/download/linux/x64` 미인증 → 307 (서브패스도 차단)
   - `GET /api/cli-download/...` 미인증 → 404 (공개 유지, 프록시 정상 도달)
   - `GET /` 미인증 → 307 (기존 동작 유지)
+
+## 3차 리뷰 — 페이지별 기능 검토 (구현 완료)
+
+1차(내 감사) + Opus 독립 검증으로 발견된 기능 결함.
+
+### F1 🔴 HIGH — 예산 다이얼로그 policy/thresholds 조용한 리셋
+
+`SetBudgetDialog`가 기본값(`HARD_BLOCK`/`[80,90,100]`)으로만 열리고 `setBudgetAction`이 항상 전송 → 기존 `SOFT_WARNING`+커스텀 thresholds인 예산도 **금액만 수정하면 정책이 리셋**됐다.
+
+수정 (prefill + optional-preserve 병행):
+
+- 백엔드: `GET /admin/budgets/{scope}/{scope_id}` 신설 — DB `BudgetConfig`(policy·T·D) + Redis(`thresholds`, 유일한 저장소) 병합. `configured=false`(미설정)/`alert_thresholds=null`(Redis 미스)로 "값 불명"을 기본값과 구분.
+- 백엔드: `SetBudgetRequest`의 `policy`/`alert_thresholds`를 `model_fields_set`으로 판별해 **미전송 시 기존값 보존** — `set_team_budget`/`set_user_budget`/`set_user_client_budget` 모두 적용 (`_resolve_policy_thresholds`). 기존 D 보존 패턴과 동일.
+- 프론트: 다이얼로그 오픈 시 prefill. baseline=null(서버값 불명)인 필드는 관리자가 바꾸지 않으면 PUT 생략. 대상 전환 중 응답 도착 오염 방지 stale 가드.
+- `_sync_redis_thresholds`/`_sync_redis_app_config`는 명시값 시그니처로 변경.
+
+### N1 — per-app confirm 재시도 중복 PUT
+
+409 확인 재시도가 성공한 총예산/이전 앱 PUT을 재전송 → `mainSavedRef`/`doneAppsRef`로 완료분 스킵.
+
+### N2 — 다운그레이드 배지 stale
+
+저장 후 팀 행 배지가 재조회 전까지 구값 → `AutoDowngradeConfig.onSaved` 콜백으로 로컬 배지 즉시 갱신.
+
+### F2/F3/F4 — 소규모
+
+- `/analytics/models` 백 링크 `?period=` 보존.
+- `EventLog` 필터 변경 경로 `.catch` + 에러 토스트(폴링 경로와 구분 — 사용자 액션은 명시 알림).
+- keys dead i18n 11키 제거 (createKey/copyKey/rotation* 등 — CLI 발급 경유가 의도된 설계).
+
+검증: admin-api pytest 710 ✓ (신규 5: 보존 2 + get_config 3) / vitest 338 ✓ / tsc ✓ / lint 신규 경고 0 / build ✓.
+
+## Opus 구현 리뷰 2 (커밋 d255291)
+
+**Verdict: CONDITIONAL SHIP → 조건 반영 완료.**
+
+- **B1 (차단, 수정됨)**: 신설 `GET /admin/budgets/{scope}/{scope_id}`에 팀리더 스코핑이 없어 크로스-팀 IDOR — 형제 읽기 경로(`get_user_app_budgets`, `get_team_allocation`)가 이미 막은 BR-BUD-03 회귀. 서비스에 `actor` 전달 + TEAM은 `scope_id != actor.team_id`, USER는 대상 유저의 `team_id` 비교로 거부 + 테스트 3건 추가.
+- 통과: 라우트 섀도잉 없음(정적 라우트 뒤 등록), 비활성 행 policy 이어받기 의도 일치(§3-1), Redis 미스 폴백=Lua 기본값 `[80,90,100]` 일치, 프론트 baseline 판별 3경우 정상, mainSavedRef 스킵 데이터 무결성 문제 없음.
