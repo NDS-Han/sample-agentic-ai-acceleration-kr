@@ -2,9 +2,13 @@
 
 Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 
-## 진행 현황 (2026-09-30)
+## 진행 현황 (2026-10-01)
 
 - Phase 0 완료 — `0cd0f62`
+- `/users` 개별설정 가시성 완료 — `68a10c5` (팀 정책 따라가기 버튼·트리 개별 점/카운트,
+  저장 후 트리 재조회) + 툴팁 네임드그룹 수정 `b563683` — 배포됨
+- Phase 3 완료 — `3026167`+`8ce0b80` (rate-limit → /users 이전, 배포+라이브 스모크 확인)
+  - Opus 구현 리뷰: CONDITIONAL SHIP → 조건(forward-ref 정리) 반영 완료
 - `/users` S1 안전장치 완료 — `9a8873f` (T2·T3·T4 상당: `?node=`는 router.push 대신
   `window.history.replaceState` 사용 — Opus 검토로 서버 라운드트립·remount 회피)
 - `/users` S2 섹션 구조 완료 — `3147c9e` (PolicySection+배지+통합Apply+무제한표현)
@@ -60,23 +64,22 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 - [x] 팀 모델 편집이 /users에서만 가능 (prod 빌드 시각 확인)
 - [x] 신규 빈 팀 설정 가능 — include_empty 포함 admin-api 배포됨 (dev 조직에 빈 팀이 없어 표시 자체는 미확인)
 
-## Phase 3 — rate limit을 `/users`로 이전
+## Phase 3 — rate limit을 `/users`로 이전 — 완료 `3026167`+`8ce0b80` (상세: `tasks/plan-ratelimits.md`)
 
-- [ ] **T8** 백엔드: `GET /admin/rate-limits/{scope}/{id}` 단건 + `DELETE` (inherit 복귀)
-  - 규모: M
-- [ ] **T9** inherit→save 버그 수정
-  - 상속값은 placeholder로만 사용, 필드 value에 넣지 않음
-  - 규모: S
-- [ ] **T10** TeamPanel/UserPanel에 Rate limit 섹션 추가
-  - collapsed `<details>` 안에 편집 폼 + 사용량 차트 (펼칠 때만 마운트·폴링 시작)
-  - 상태 배지: 상속/override/unlimited
-  - 규모: L
-- [ ] **T11** `/rate-limits` → `/users` 리다이렉트 + 정리
-  - 사이드바 제거, PAGE_PERMISSIONS, navigation.test.ts, GLOBAL 죽은 분기 제거
-  - 규모: M
+- [x] **T8** 백엔드: `GET /admin/rate-limits/{user|team}/{id}` (own/inherited 분리,
+  USER→TEAM 상속은 트리와 동일 규칙) + `DELETE` (deactivate + rl:config:* 무효화 + audit, 멱등)
+- [x] **T9** inherit→save 버그 수정 — 상속값은 placeholder만, 필드 value 비움
+- [x] **T10** `ScopeRateLimitPanel` — UserPanel·TeamPanel 통합 Apply 합류,
+  staged "팀 정책 따라가기/설정 해제"(pendingDelete→Apply 시 DELETE),
+  `PolicySectionOpenContext`로 접힌 섹션 폴링·차트 게이트
+- [x] **T11** `/rate-limits` → `redirect('/users')` + 정리
+  - Sidebar 항목·nav 키·구 트리 컴포넌트·RateLimitTreeNode 타입 삭제
+  - `PAGE_PERMISSIONS['/rate-limits']` ADMIN 유지 (middleware가 redirect보다 먼저 default-deny)
+  - `/api/rate-limits/*` 프록시·UsageTrendChart 유지, e2e·navigation.test 갱신
 
-### Checkpoint: Phase 3
-- [ ] /rate-limits 접속 시 /users로 리다이렉트, 노드별 rate limit이 /users에서 편집됨
+### Checkpoint: Phase 3 — 완료
+- [x] /rate-limits → /users 리다이렉트, 라이브에서 유저 패널 Rate limit 섹션
+  (제한 없음 배지·실시간 사용량·트렌드 차트·무제한 placeholder) 확인 — 배포됨
 
 ## Phase 4 — `/budgets` 딥링크 + 다운그레이드 노출
 
