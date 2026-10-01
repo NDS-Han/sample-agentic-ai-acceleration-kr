@@ -45,6 +45,9 @@ export default async function KeysPage({ searchParams }: KeysPageProps) {
       </div>
 
       <form method="GET" className="flex items-center gap-2">
+        {/* status 를 hidden 으로 실어야 email 검색 submit 이 현재 상태 필터를
+            ACTIVE 기본값으로 리셋하지 않는다(상태 pill → email 보존의 역방향). */}
+        <input type="hidden" name="status" value={currentStatus} />
         <input
           type="search"
           name="email"

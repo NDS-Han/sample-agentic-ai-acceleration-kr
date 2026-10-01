@@ -35,4 +35,19 @@ describe('KPICard', () => {
     expect(cls).not.toContain('border-destructive');
     expect(cls).not.toContain('border-warning');
   });
+
+  it('href 가 있으면 카드 전체가 링크로 렌더된다', () => {
+    render(<KPICard title="키" value={5} icon={<span>icon</span>} href="/keys" />);
+    const link = screen.getByRole('link', { name: '키: 5' });
+    expect(link).toHaveAttribute('href', '/keys');
+  });
+
+  it('href 없으면 div 로 렌더되고 alert 보더를 유지한다', () => {
+    const { container } = render(
+      <KPICard title="예산" value="90%" icon={<span>icon</span>} alertLevel="WARNING" href="/budgets" />
+    );
+    const link = screen.getByRole('link', { name: '예산: 90%' });
+    expect(link.className).toContain('border-warning');
+    expect(container.querySelectorAll('a')).toHaveLength(1);
+  });
 });

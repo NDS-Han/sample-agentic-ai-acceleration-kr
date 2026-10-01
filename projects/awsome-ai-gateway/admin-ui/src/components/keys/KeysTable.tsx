@@ -17,6 +17,10 @@ import { KeyStatus } from '@/types/enums';
 
 interface KeysTableProps {
   keys: VirtualKeyListItem[];
+  /** revoke 성공 시 호출 — 부모가 items state 에서 행을 제거한다.
+      (revalidatePath 로 서버 컴포넌트는 갱신돼도 KeysListView 의
+      useState(initialItems) 는 유지되므로 로컬 동기화가 필요하다.) */
+  onRevoked?: (_keyId: string) => void;
 }
 
 const STATUS_TONE: Record<string, BadgeTone> = {
@@ -31,7 +35,7 @@ function formatDate(iso: string | null, noExpiry: string, timeZone: string): str
   return fmtDate(iso, timeZone);
 }
 
-export function KeysTable({ keys }: KeysTableProps) {
+export function KeysTable({ keys, onRevoked }: KeysTableProps) {
   const t = useTranslations('keys');
   const tz = useReportingTz();
   const { toast } = useToast();
@@ -49,6 +53,9 @@ export function KeysTable({ keys }: KeysTableProps) {
     const result = await revokeKeyAction(revokeState.keyId);
     setRevokingId(null);
     if (result.success) {
+      // ACTIVE 필터 화면에서 revoke 한 행을 REVOKED 로 덮어쓰지 않고 제거 —
+      // 필터 의미(활성만 보임)와 모순되는 유령 행을 남기지 않기 위함.
+      onRevoked?.(revokeState.keyId);
       toast({
         type: 'success',
         message: t('revokeSuccess', { prefix: revokeState.keyPrefix }),

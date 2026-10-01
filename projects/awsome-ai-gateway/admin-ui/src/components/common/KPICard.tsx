@@ -1,5 +1,6 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
+import Link from 'next/link';
 import type { AlertLevel } from '@/types/enums';
 import { AlertLevel as AlertLevelConst } from '@/types/enums';
 
@@ -9,6 +10,8 @@ interface KPICardProps {
   icon: React.ReactNode;
   alertLevel?: AlertLevel;
   description?: string;
+  /** 주어지면 카드 전체가 관련 페이지로 가는 링크가 된다. */
+  href?: string;
 }
 
 const ALERT_BORDER_CLASSES: Record<AlertLevel, string> = {
@@ -29,19 +32,22 @@ export function KPICard({
   icon,
   alertLevel = AlertLevelConst.NORMAL,
   description,
+  href,
 }: KPICardProps) {
   const borderClass = ALERT_BORDER_CLASSES[alertLevel];
   const iconWrapperClass = ALERT_ICON_WRAPPER_CLASSES[alertLevel];
 
-  return (
-    <div
-      className={[
-        'glass glass-hover rounded-apple p-6 flex flex-col gap-4',
-        // normal 은 glass 기본 보더, alert 일 때만 강조 보더 덮어쓰기
-        alertLevel === AlertLevelConst.NORMAL ? '' : borderClass,
-      ].join(' ')}
-      aria-label={`${title}: ${value}`}
-    >
+  const className = [
+    'glass glass-hover rounded-apple p-6 flex flex-col gap-4',
+    // normal 은 glass 기본 보더, alert 일 때만 강조 보더 덮어쓰기
+    alertLevel === AlertLevelConst.NORMAL ? '' : borderClass,
+    // 링크 모드: 키보드 포커스 링 — div 경로에는 불필요.
+    href ? 'block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring' : '',
+  ].join(' ');
+  const ariaLabel = `${title}: ${value}`;
+
+  const inner = (
+    <>
       {/* Header: title + icon */}
       <div className="flex items-center justify-between">
         <p className="text-sm font-medium text-muted-foreground">{title}</p>
@@ -65,6 +71,16 @@ export function KPICard({
       {description && (
         <p className="text-xs text-muted-foreground">{description}</p>
       )}
+    </>
+  );
+
+  return href ? (
+    <Link href={href} className={className} aria-label={ariaLabel}>
+      {inner}
+    </Link>
+  ) : (
+    <div className={className} aria-label={ariaLabel}>
+      {inner}
     </div>
   );
 }

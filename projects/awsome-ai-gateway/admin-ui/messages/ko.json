@@ -1142,7 +1142,8 @@
     "accessExplicit": "명시 허용",
     "accessUnrestricted": "제한 없음",
     "appStatusUnrestrictedHint": "제한 없음 — 향후 추가되는 앱도 자동 포함",
-    "noAllowedModelsHint": "아래에서 허용 모델을 먼저 추가해야 기본 모델을 선택할 수 있습니다."
+    "noAllowedModelsHint": "아래에서 허용 모델을 먼저 추가해야 기본 모델을 선택할 수 있습니다.",
+    "defaultModelNotAllowedHint": "현재 기본 모델이 이 앱의 허용 목록에서 제외됐습니다 — 허용된 모델을 선택해 저장하면 라우팅이 복구됩니다."
   },
   "forbidden": {
     "title": "접근 권한 없음",

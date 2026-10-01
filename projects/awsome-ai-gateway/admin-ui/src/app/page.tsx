@@ -122,6 +122,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             icon={<BarChart3 size={18} aria-hidden="true" />}
             alertLevel={alertLevel}
             description={budgetUtilization != null ? t('budgetUtilizationDesc') : t('fetchFailed')}
+            href="/budgets"
           />
           <KPICard
             title={t('avgCostPerUser')}
@@ -165,12 +166,14 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? kpi.active_keys.toLocaleString() : '—'}
             icon={<Key size={18} aria-hidden="true" />}
             description={kpi ? t('activeKeysDesc') : t('fetchFailed')}
+            href="/keys"
           />
           <KPICard
             title={t('activeModels')}
             value={kpi ? kpi.active_models.toLocaleString() : '—'}
             icon={<Cpu size={18} aria-hidden="true" />}
             description={kpi ? t('activeModelsDesc') : t('fetchFailed')}
+            href="/models"
           />
         </div>
       </section>

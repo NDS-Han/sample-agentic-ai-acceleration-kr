@@ -1142,7 +1142,8 @@
     "accessExplicit": "explicit",
     "accessUnrestricted": "unrestricted",
     "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically",
-    "noAllowedModelsHint": "Add allowed models below to select a default model."
+    "noAllowedModelsHint": "Add allowed models below to select a default model.",
+    "defaultModelNotAllowedHint": "The current default model is no longer allowed for this app — select an allowed model and save to restore routing."
   },
   "forbidden": {
     "title": "Access denied",

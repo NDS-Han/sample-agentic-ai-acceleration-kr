@@ -60,7 +60,10 @@ export function KeysListView({
 
   return (
     <>
-      <KeysTable keys={items} />
+      <KeysTable
+        keys={items}
+        onRevoked={(keyId) => setItems((prev) => prev.filter((k) => k.key_id !== keyId))}
+      />
       {hasMore && (
         <div className="mt-4 flex justify-center">
           <button

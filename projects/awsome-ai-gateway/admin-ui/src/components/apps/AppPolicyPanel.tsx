@@ -2,6 +2,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useState, useTransition, useEffect } from 'react';
+import Link from 'next/link';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } from '@/lib/actions/apps';
@@ -141,7 +142,14 @@ export function AppPolicyPanel() {
     startSaveTransition(async () => {
       const result = await toggleAppModelAction(selectedClient, alias, allowed);
       if (result.success) {
-        setPolicy(result.data);
+        const next = result.data;
+        setPolicy(next);
+        // 허용 해제로 select 의 입력값이 허용 목록 밖이 되면 서버값으로 재동기화한다.
+        // 백엔드는 toggle 시 routing_profiles.default_model 을 건드리지 않으므로
+        // default 가 허용 목록에서 빠지면 아래 카드의 경고 문구가 안내를 담당한다.
+        setDefaultModelInput((prev) =>
+          next.allowed_models.includes(prev) ? prev : (next.default_model ?? ''),
+        );
         toast({ type: 'success', message: t('toggleSaved'), auto_dismiss_ms: 2500 });
       } else {
         toast({ type: 'error', message: result.error, auto_dismiss_ms: 4000 });
@@ -258,6 +266,14 @@ export function AppPolicyPanel() {
               // select 가 disabled 인 이유가 없으면 고장으로 보인다 — 원인 안내.
               <p className="text-xs text-muted-foreground">{t('noAllowedModelsHint')}</p>
             )}
+            {policy.default_model &&
+              !policy.allowed_models.includes(policy.default_model) && (
+                // 방금 허용 해제된 모델이 기본 모델로 남은 상태 — 백엔드는 그대로
+                // 두므로 gateway 가 비허용 모델로 라우팅할 수 있다. 재설정 안내.
+                <p className="text-xs font-medium text-warning">
+                  {t('defaultModelNotAllowedHint')}
+                </p>
+              )}
             {saveError && <FormError error={saveError} />}
           </div>
 
@@ -375,7 +391,16 @@ export function AppPolicyPanel() {
                     policy.allowed_users.map((u) => (
                       <Tr key={u.user_id}>
                         <Td emphasis>
-                          {u.email ?? <span className="text-muted-foreground">{t('noEmail')}</span>}
+                          {/* 유저 정책 편집으로 이어지는 딥링크 — OrgTreeView 가
+                              ?node=<user_id> 로 선택 복원+조상 펼침을 한다. */}
+                          <Link
+                            href={`/users?node=${u.user_id}`}
+                            className="hover:underline underline-offset-4 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                          >
+                            {u.email ?? (
+                              <span className="text-muted-foreground">{t('noEmail')}</span>
+                            )}
+                          </Link>
                         </Td>
                         <Td>
                           <span
