@@ -1159,6 +1159,7 @@
     "sourceOrganization": "조직 정책",
     "sourceDefault": "기본",
     "modified": "수정됨",
+    "saved": "저장됨",
     "failed": "저장 실패",
     "readonly": "읽기 전용",
     "nodeTypeTeam": "팀",

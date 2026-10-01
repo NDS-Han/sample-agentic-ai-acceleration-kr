@@ -390,6 +390,22 @@ export async function getEffectivePolicyAction(
   }
 }
 
+// 팀 스코프 합성 정책 뷰 — user 단계만 제거된 의미(apps: team→org→none,
+// models: team→none). 같은 EffectivePolicy 스키마, user_id/email 은 null.
+export async function getTeamEffectivePolicyAction(
+  teamId: string,
+): Promise<ActionResult<EffectivePolicy>> {
+  if (!teamId) return { success: false, error: 'Team ID is required' };
+  try {
+    const res = await withRetry(() =>
+      adminAPI.get<EffectivePolicy>(`/admin/teams/${teamId}/effective-policy`),
+    );
+    return { success: true, data: res };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 // ─── getOrgTreeAction ─────────────────────────────────────────────────────────
 
 // /users 의 "빈 팀 표시" 토글이 클라이언트에서 트리를 재조회할 때 쓴다.

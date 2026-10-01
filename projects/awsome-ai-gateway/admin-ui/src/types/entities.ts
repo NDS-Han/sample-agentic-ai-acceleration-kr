@@ -332,7 +332,8 @@ export interface EffectiveDowngradeRule {
 }
 
 export interface EffectivePolicy {
-  user_id: string;
+  // 팀 스코프 뷰(GET /admin/teams/{id}/effective-policy)에서는 null.
+  user_id: string | null;
   email: string | null;
   team_id: string | null;
   team_name: string | null;

@@ -46,7 +46,8 @@ class EffectiveDowngradeRule(BaseModel):
 
 
 class EffectivePolicyResponse(BaseModel):
-    user_id: str
+    # 팀 스코프 뷰(get_for_team)에서는 user_id/email 이 None — 팀에는 의미가 없다.
+    user_id: str | None = None
     email: str | None
     team_id: str | None
     team_name: str | None

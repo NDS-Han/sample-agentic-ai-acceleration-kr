@@ -684,3 +684,20 @@ async def get_user_effective_policy(
     from app.services.effective_policy_service import EffectivePolicyService
 
     return await EffectivePolicyService(session).get_for_user(user_id)
+
+
+@router.get("/teams/{team_id}/effective-policy")
+async def get_team_effective_policy(
+    team_id: uuid.UUID,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """팀에 실제로 적용되는 정책의 합성 뷰 — 읽기 전용.
+
+    user 버전에서 user 단계만 제거된 의미(apps: team→org→none,
+    models: team→none, rate limit: GLOBAL+TEAM, downgrade: TEAM).
+    user effective-policy 와 같은 ADMIN 전용.
+    """
+    from app.services.effective_policy_service import EffectivePolicyService
+
+    return await EffectivePolicyService(session).get_for_team(team_id)

@@ -13,6 +13,7 @@ import {
   getUserAllowedClientsAction,
   setUserAllowedClientsAction,
   getEffectivePolicyAction,
+  getTeamEffectivePolicyAction,
   getUserAllowedModelsAction,
   setUserAllowedModelsAction,
   setTeamLeaderAction,
@@ -207,6 +208,8 @@ function UserPanel({
   // 유효 정책 합성 결과 — 앱별 예산/모델 정책 출처 표시와 EffectivePolicyCard 가
   // 같은 데이터를 쓰므로 한 번만 가져와 공유한다.
   const [policy, setPolicy] = useState<EffectivePolicy | null>(null);
+  // policy 로드 실패 — null policy(로딩 중)와 구분해 카드에 전달한다.
+  const [policyFailed, setPolicyFailed] = useState(false);
 
   const toggleClient = (c: ClientId) => {
     setSelected((prev) => (prev.includes(c) ? prev.filter((x) => x !== c) : [...prev, c]));
@@ -226,8 +229,15 @@ function UserPanel({
   // 토글했다 원상태로 되돌리면 dirty 가 아니고, 그런 상태를 저장하면
   // 상속값이 개인 override 로 굳어 이후 팀 변경이 안 따라온다.
   const [modelBaseline, setModelBaseline] = useState<string[]>([]);
-  // 통합 Apply 의 실패 섹션 — 헤더에 "저장 실패" 배지 + 자동 펼침에 쓴다.
-  const [failedSection, setFailedSection] = useState<'apps' | 'models' | 'ratelimit' | null>(null);
+  // 통합 Apply 의 섹션별 결과 — 부분 실패 시 저장됨/실패를 칩으로 표시한다.
+  // 실패 섹션은 dirty 가 유지되므로 결과도 그대로 남고, 전체 해소 시 지운다.
+  const [applyResults, setApplyResults] = useState<
+    { key: 'apps' | 'models' | 'ratelimit'; status: 'saved' | 'failed' }[] | null
+  >(null);
+  const sectionFailed = (k: 'apps' | 'models' | 'ratelimit') =>
+    applyResults?.some((r) => r.key === k && r.status === 'failed') ?? false;
+  const sectionLabel = (k: 'apps' | 'models' | 'ratelimit') =>
+    k === 'apps' ? t('appAccess.title') : k === 'models' ? t('userModels.title') : t('rateLimit.title');
   // Rate limit 섹션 — 앱/모델과 같은 ref+save 패턴으로 통합 Apply에 합류한다.
   const rateLimitRef = useRef<ScopeRateLimitHandle>(null);
   const [rlDirty, setRlDirty] = useState(false);
@@ -250,7 +260,8 @@ function UserPanel({
     setLoadedModelAliases([]);
     setSelectedModelAliases([]);
     setHasOwnAppPolicy(false);
-    setFailedSection(null);
+    setApplyResults(null);
+    setPolicyFailed(false);
     startLoadTransition(async () => {
       const [r, p, m, cat] = await Promise.all([
         getUserAllowedClientsAction(node.id),
@@ -288,6 +299,7 @@ function UserPanel({
         setPolicy(p.data);
       } else {
         setPolicy(null);
+        setPolicyFailed(true);
       }
       if (cat.success) {
         setModels(cat.data);
@@ -334,7 +346,12 @@ function UserPanel({
 
   const handleApply = () => {
     startSaveTransition(async () => {
-      setFailedSection(null);
+      setApplyResults(null);
+      // 세 섹션은 독립 리소스(user_allowed_clients / user_allowed_models /
+      // rate_limit_configs)라 순서 의존이 없다 — 실패해도 나머지를 계속 시도하고
+      // 결과를 모아 sticky 스트립에 저장됨/실패를 구분해 보여준다.
+      const results: { key: 'apps' | 'models' | 'ratelimit'; status: 'saved' | 'failed' }[] = [];
+
       // 1) 접근 권한 — 실제로 바뀐 경우만 저장. 상속 프리필을 그대로 저장하면
       //    팀/조직 정책이 개인 override 로 굳어 이후 상위 변경이 안 따라온다.
       //    accessDirty 는 clientsLoaded 를 내포하므로 별도 게이트 불필요 —
@@ -344,11 +361,12 @@ function UserPanel({
         const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
         if (!mountedRef.current) return;
         if (!r.success) {
-          setFailedSection('apps');
+          results.push({ key: 'apps', status: 'failed' });
           toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
-          return;
+        } else {
+          results.push({ key: 'apps', status: 'saved' });
+          savedClients = r.data.clients;
         }
-        savedClients = r.data.clients;
       }
 
       // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
@@ -359,42 +377,35 @@ function UserPanel({
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
         if (!mountedRef.current) return;
         if (!mr.success) {
-          // 접근 권한은 이미 저장됐을 수 있다 — 출처 배지가 stale 해지지 않게
-          // 유효 정책을 재조회하고 앱 섹션 표시도 저장 결과로 동기화한다.
-          const p3 = await getEffectivePolicyAction(node.id);
-          if (!mountedRef.current) return;
-          if (p3.success) setPolicy(p3.data);
-          if (savedClients !== null) {
-            setHasOwnAppPolicy(savedClients.length > 0);
-            const disp =
-              savedClients.length > 0
-                ? clientsToSelected(savedClients)
-                : p3.success &&
-                    p3.data.allowed_clients_source !== 'user' &&
-                    p3.data.allowed_clients
-                  ? clientsToSelected(p3.data.allowed_clients)
-                  : [...ALL_CLIENTS];
-            setLoadedSelected(disp);
-            setSelected(disp);
-          }
-          setFailedSection('models');
+          results.push({ key: 'models', status: 'failed' });
           toast({ type: 'error', message: mr.error, auto_dismiss_ms: 4000 });
-          return;
+        } else {
+          results.push({ key: 'models', status: 'saved' });
+          savedAliases = mr.data.modelAliases;
         }
-        savedAliases = mr.data.modelAliases;
       }
 
       // 3) rate limit — 자식 패널이 실패 토스트를 직접 띄운다.
-      if (rlDirty && !(await rateLimitRef.current?.save())) {
+      if (rlDirty) {
+        const ok = await rateLimitRef.current?.save();
         if (!mountedRef.current) return;
-        setFailedSection('ratelimit');
-        return;
+        results.push({ key: 'ratelimit', status: ok ? 'saved' : 'failed' });
       }
 
-      // 모두 성공 — 유효 정책을 먼저 다시 읽어 출처 배지·상속 프리필을 갱신한다.
-      const p2 = await getEffectivePolicyAction(node.id);
+      const anyFailed = results.some((r) => r.status === 'failed');
+      const anySaved = results.some((r) => r.status === 'saved');
+      if (anyFailed) setApplyResults(results);
+
+      // 성공분이 하나라도 있으면 유효 정책을 다시 읽어 출처 배지·상속 프리필을
+      // 갱신한다 — 부분 실패여도 성공 섹션의 배지가 stale 해지면 안 된다.
+      const p2 = anySaved ? await getEffectivePolicyAction(node.id) : null;
       if (!mountedRef.current) return;
-      if (p2.success) setPolicy(p2.data);
+      if (p2?.success) {
+        setPolicy(p2.data);
+        setPolicyFailed(false);
+      } else if (p2) {
+        setPolicyFailed(true);
+      }
       if (savedClients !== null) {
         setHasOwnAppPolicy(savedClients.length > 0);
         // [] 저장(override 해제) 후엔 상속 목록을 다시 표시 — 전체 체크 잔존은
@@ -402,7 +413,7 @@ function UserPanel({
         const disp =
           savedClients.length > 0
             ? clientsToSelected(savedClients)
-            : p2.success &&
+            : p2?.success &&
                 p2.data.allowed_clients_source !== 'user' &&
                 p2.data.allowed_clients
               ? clientsToSelected(p2.data.allowed_clients)
@@ -415,7 +426,7 @@ function UserPanel({
         // override 해제([]) 후엔 상속 목록을 다시 표시해야 한다 — 전부 미체크는
         // "차단" 처럼 읽히므로 유효 목록으로 채운다. 저장 전 policy 는 stale 이므로
         // 방금 다시 읽은 p2 만 쓰고, 실패하면 전체 허용으로 폴백한다.
-        const effective = p2.success ? p2.data.allowed_models : null;
+        const effective = p2?.success ? p2.data.allowed_models : null;
         const display =
           savedAliases.length > 0
             ? savedAliases
@@ -425,13 +436,15 @@ function UserPanel({
         setSelectedModelAliases(display);
         setModelBaseline(display);
       }
-      toast({
-        type: 'success',
-        message: t('saveSuccess'),
-        auto_dismiss_ms: 5000,
-      });
-      // 개별설정 점/팀 카운트는 트리 메타에서 오므로 저장 후 재조회해 stale 를 막는다.
-      onSaved?.();
+      if (!anyFailed) {
+        toast({
+          type: 'success',
+          message: t('saveSuccess'),
+          auto_dismiss_ms: 5000,
+        });
+        // 개별설정 점/팀 카운트는 트리 메타에서 오므로 저장 후 재조회해 stale 를 막는다.
+        onSaved?.();
+      }
     });
   };
 
@@ -480,11 +493,32 @@ function UserPanel({
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
 
-  // dirty 가 모두 해소되면(되돌리기/저장 성공) 실패 마커도 지운다 — 그대로 두면
-  // 노드 전환까지 빨간 "저장 실패" 배지가 남는다.
+  // dirty 가 모두 해소되면(되돌리기/저장 성공) 결과 칩도 지운다 — 그대로 두면
+  // 노드 전환까지 "저장 실패" 배지가 남는다.
   useEffect(() => {
-    if (!dirty) setFailedSection(null);
+    if (!dirty) setApplyResults(null);
   }, [dirty]);
+
+  // 재편집된 섹션의 결과 칩은 무효 — false→true 로 새로 더럽혀진 키만 뺀다.
+  // 실패 섹션은 dirty 가 계속 true 라 전환이 없어 칩이 유지되고, 되돌리기로
+  // clean 이 된 키의 failed 칩만 지운다(saved 칩은 저장 확인 피드백이라 유지).
+  const prevDirtyRef = useRef({ apps: false, models: false, ratelimit: false });
+  useEffect(() => {
+    const now = { apps: accessDirty, models: modelsDirty, ratelimit: rlDirty };
+    const prev = prevDirtyRef.current;
+    prevDirtyRef.current = now;
+    const reEdited = (Object.keys(now) as (keyof typeof now)[]).filter((k) => now[k] && !prev[k]);
+    const reverted = (Object.keys(now) as (keyof typeof now)[]).filter((k) => !now[k] && prev[k]);
+    if (reEdited.length === 0 && reverted.length === 0) return;
+    setApplyResults(
+      (curr) =>
+        curr?.filter(
+          (r) =>
+            !reEdited.includes(r.key) &&
+            !(r.status === 'failed' && reverted.includes(r.key)),
+        ) ?? null,
+    );
+  }, [accessDirty, modelsDirty, rlDirty]);
 
   const btn = (active: boolean) =>
     [
@@ -514,9 +548,9 @@ function UserPanel({
         <span className="font-medium">{teamName}</span>
       </div>
 
-      {/* sticky 요약 스트립 — 노드 타입 · 수정된 섹션 수 · 마지막 실패 섹션.
+      {/* sticky 요약 스트립 — 노드 타입 · 수정된 섹션 수 · 섹션별 저장 결과.
           긴 패널을 스크롤해도 "무엇이 바뀌었는지"가 헤더에서 읽힌다. */}
-      {(dirty || failedSection) && (
+      {(dirty || applyResults) && (
         <div className="sticky top-2 z-20 mb-3 flex w-fit flex-wrap items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
           <span className="badge badge-neutral whitespace-nowrap">{tp('nodeTypeUser')}</span>
           {dirty && (
@@ -524,17 +558,20 @@ function UserPanel({
               {tp('modified')} {dirtyCount}
             </span>
           )}
-          {failedSection && (
-            <span className="text-destructive whitespace-nowrap">
-              {tp('failed')}: {failedSection === 'apps' ? t('appAccess.title') : failedSection === 'models' ? t('userModels.title') : t('rateLimit.title')}
+          {applyResults?.map((r) => (
+            <span
+              key={r.key}
+              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-pink'}`}
+            >
+              {r.status === 'saved' ? tp('saved') : tp('failed')}: {sectionLabel(r.key)}
             </span>
-          )}
+          ))}
         </div>
       )}
 
       <PolicySection
         title={t('appAccess.title')}
-        autoOpen={accessDirty || failedSection === 'apps'}
+        autoOpen={accessDirty || sectionFailed('apps')}
         badges={
           <>
             {(clientsLoaded || policy) &&
@@ -553,7 +590,7 @@ function UserPanel({
               </span>
             )}
             {accessDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'apps' && (
+            {sectionFailed('apps') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -621,7 +658,7 @@ function UserPanel({
 
       <PolicySection
         title={t('userModels.title')}
-        autoOpen={modelsDirty || failedSection === 'models'}
+        autoOpen={modelsDirty || sectionFailed('models')}
         badges={
           <>
             {(modelsLoaded || loadedModelAliases.length > 0 || policy) &&
@@ -640,7 +677,7 @@ function UserPanel({
               </span>
             )}
             {modelsDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'models' && (
+            {sectionFailed('models') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -705,7 +742,7 @@ function UserPanel({
 
       <PolicySection
         title={t('rateLimit.title')}
-        autoOpen={rlDirty || failedSection === 'ratelimit'}
+        autoOpen={rlDirty || sectionFailed('ratelimit')}
         badges={
           <>
             {rlSummary.loaded &&
@@ -723,7 +760,7 @@ function UserPanel({
               <span className="badge badge-neutral whitespace-nowrap">{tp('sourceOwn')}</span>
             )}
             {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'ratelimit' && (
+            {sectionFailed('ratelimit') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -797,7 +834,7 @@ function UserPanel({
         <p className="text-xs text-muted-foreground mb-3">
           {t('effectivePolicy.hint')}
         </p>
-        <EffectivePolicyCard userId={node.id} policy={policy} models={models} />
+        <EffectivePolicyCard userId={node.id} policy={policy} loadFailed={policyFailed} models={models} />
       </PolicySection>
 
       {/* 플로팅 Apply 바 — dirty 일 때만 뜬다. 공용 UnsavedApplyBar 와 통일. */}
@@ -885,35 +922,83 @@ function TeamPanel({
   const [appSummary, setAppSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
   const [modelSummary, setModelSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
   const [rlSummary, setRlSummary] = useState<PolicySummary>(EMPTY_POLICY_SUMMARY);
-  // 통합 Apply 의 실패 섹션 — 헤더 "저장 실패" 배지 + 자동 펼침에 쓴다.
-  const [failedSection, setFailedSection] = useState<'apps' | 'models' | 'ratelimit' | null>(null);
+  // 통합 Apply 의 섹션별 결과 — 부분 실패 시 저장됨/실패를 칩으로 표시한다.
+  // 자식 save() 는 실패 시 baseline/dirty 를 그대로 두므로 실패 섹션만 수정됨으로 남는다.
+  const [applyResults, setApplyResults] = useState<
+    { key: 'apps' | 'models' | 'ratelimit'; status: 'saved' | 'failed' }[] | null
+  >(null);
+  const sectionFailed = (k: 'apps' | 'models' | 'ratelimit') =>
+    applyResults?.some((r) => r.key === k && r.status === 'failed') ?? false;
+  const sectionLabel = (k: 'apps' | 'models' | 'ratelimit') =>
+    k === 'apps' ? t('scopeAppAccess.title') : k === 'models' ? tm('teamModelAccess') : t('rateLimit.title');
+  // 팀 유효 정책 — "유효 정책" 읽기 전용 섹션 + 정책 출처 배지 데이터 소스.
+  const [teamPolicy, setTeamPolicy] = useState<EffectivePolicy | null>(null);
+  const [teamPolicyFailed, setTeamPolicyFailed] = useState(false);
 
   useEffect(() => {
     onDirtyChange?.(policyDirty);
   }, [policyDirty, onDirtyChange]);
 
-  // dirty 가 모두 해소되면(되돌리기/저장 성공) 실패 마커도 지운다.
+  // dirty 가 모두 해소되면(되돌리기/저장 성공) 결과 칩도 지운다.
   useEffect(() => {
-    if (!policyDirty) setFailedSection(null);
+    if (!policyDirty) setApplyResults(null);
   }, [policyDirty]);
+
+  // 재편집된 섹션의 결과 칩은 무효 — false→true 로 새로 더럽혀진 키만 뺀다.
+  // 실패 섹션은 dirty 가 계속 true 라 전환이 없어 칩이 유지되고, 되돌리기로
+  // clean 이 된 키의 failed 칩만 지운다(saved 칩은 저장 확인 피드백이라 유지).
+  const prevDirtyRef = useRef({ apps: false, models: false, ratelimit: false });
+  useEffect(() => {
+    const now = { apps: appDirty, models: modelDirty, ratelimit: rlDirty };
+    const prev = prevDirtyRef.current;
+    prevDirtyRef.current = now;
+    const reEdited = (Object.keys(now) as (keyof typeof now)[]).filter((k) => now[k] && !prev[k]);
+    const reverted = (Object.keys(now) as (keyof typeof now)[]).filter((k) => !now[k] && prev[k]);
+    if (reEdited.length === 0 && reverted.length === 0) return;
+    setApplyResults(
+      (curr) =>
+        curr?.filter(
+          (r) =>
+            !reEdited.includes(r.key) &&
+            !(r.status === 'failed' && reverted.includes(r.key)),
+        ) ?? null,
+    );
+  }, [appDirty, modelDirty, rlDirty]);
 
   const handleApplyAll = () => {
     startPolicySaveTransition(async () => {
-      setFailedSection(null);
-      // 앱 접근 → 모델 순서로 저장(UserPanel 과 동일). 앞이 실패하면 뒤는 저장하지 않는다.
-      if (appDirty && !(await appAccessRef.current?.save())) {
-        setFailedSection('apps');
-        return;
+      setApplyResults(null);
+      // 세 섹션은 독립 리소스라 순서 의존이 없다 — 실패해도 나머지를 계속 시도하고
+      // 결과를 모아 sticky 스트립에 저장됨/실패를 구분해 보여준다. 자식 save() 가
+      // 실패 시 baseline 을 건드리지 않으므로 실패 섹션은 dirty 로 남는다.
+      const results: { key: 'apps' | 'models' | 'ratelimit'; status: 'saved' | 'failed' }[] = [];
+      if (appDirty) {
+        results.push({ key: 'apps', status: (await appAccessRef.current?.save()) ? 'saved' : 'failed' });
       }
-      if (modelDirty && !(await modelPolicyRef.current?.save())) {
-        setFailedSection('models');
-        return;
+      if (modelDirty) {
+        results.push({ key: 'models', status: (await modelPolicyRef.current?.save()) ? 'saved' : 'failed' });
       }
-      if (rlDirty && !(await rateLimitRef.current?.save())) {
-        setFailedSection('ratelimit');
-        return;
+      if (rlDirty) {
+        results.push({ key: 'ratelimit', status: (await rateLimitRef.current?.save()) ? 'saved' : 'failed' });
       }
-      toast({ type: 'success', message: t('saveSuccess'), auto_dismiss_ms: 5000 });
+      const anyFailed = results.some((r) => r.status === 'failed');
+      if (anyFailed) {
+        setApplyResults(results);
+      } else {
+        toast({ type: 'success', message: t('saveSuccess'), auto_dismiss_ms: 5000 });
+      }
+      // 성공분이 있으면 팀 유효 정책을 재조회해 읽기 전용 카드가 stale 해지지 않게 한다.
+      // 실패 플래그는 양방향으로 동기화 — 성공 재조회에서 리셋하지 않으면 유효한
+      // 데이터를 쥐고도 카드가 loadFailed 에 고착된다.
+      if (results.some((r) => r.status === 'saved')) {
+        const p = await getTeamEffectivePolicyAction(node.id);
+        if (p.success) {
+          setTeamPolicy(p.data);
+          setTeamPolicyFailed(false);
+        } else {
+          setTeamPolicyFailed(true);
+        }
+      }
     });
   };
 
@@ -930,6 +1015,21 @@ function TeamPanel({
       }
     });
   }, []);
+
+  // 팀 유효 정책 — 노드 전환 시 재조회. 저장 성공 후엔 handleApplyAll 이 재조회한다.
+  useEffect(() => {
+    let cancelled = false;
+    setTeamPolicy(null);
+    setTeamPolicyFailed(false);
+    getTeamEffectivePolicyAction(node.id).then((r) => {
+      if (cancelled) return;
+      if (r.success) setTeamPolicy(r.data);
+      else setTeamPolicyFailed(true);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [node.id]);
 
   const memberCount = node.meta.member_count ?? 0;
   const members = node.children ?? [];
@@ -991,7 +1091,7 @@ function TeamPanel({
       </div>
 
       {/* sticky 요약 스트립 — 노드 타입 · 수정된 섹션 수 · 마지막 실패 섹션 */}
-      {(policyDirty || failedSection) && (
+      {(policyDirty || applyResults) && (
         <div className="sticky top-2 z-20 mb-3 flex w-fit flex-wrap items-center gap-2 rounded-full border border-border bg-card/95 px-3 py-1.5 text-xs shadow-sm backdrop-blur">
           <span className="badge badge-neutral whitespace-nowrap">{tp('nodeTypeTeam')}</span>
           {policyDirty && (
@@ -999,11 +1099,14 @@ function TeamPanel({
               {tp('modified')} {dirtyCount}
             </span>
           )}
-          {failedSection && (
-            <span className="text-destructive whitespace-nowrap">
-              {tp('failed')}: {failedSection === 'apps' ? t('scopeAppAccess.title') : failedSection === 'models' ? tm('teamModelAccess') : t('rateLimit.title')}
+          {applyResults?.map((r) => (
+            <span
+              key={r.key}
+              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-pink'}`}
+            >
+              {r.status === 'saved' ? tp('saved') : tp('failed')}: {sectionLabel(r.key)}
             </span>
-          )}
+          ))}
         </div>
       )}
 
@@ -1097,7 +1200,7 @@ function TeamPanel({
 
       <PolicySection
         title={t('scopeAppAccess.title')}
-        autoOpen={appDirty || failedSection === 'apps'}
+        autoOpen={appDirty || sectionFailed('apps')}
         badges={
           <>
             {appSummary.loaded &&
@@ -1109,7 +1212,7 @@ function TeamPanel({
                 <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
               ))}
             {appDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'apps' && (
+            {sectionFailed('apps') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -1133,7 +1236,7 @@ function TeamPanel({
 
       <PolicySection
         title={tm('teamModelAccess')}
-        autoOpen={modelDirty || failedSection === 'models'}
+        autoOpen={modelDirty || sectionFailed('models')}
         badges={
           <>
             {modelSummary.loaded &&
@@ -1145,7 +1248,7 @@ function TeamPanel({
                 <span className="badge badge-teal whitespace-nowrap">{tp('unrestricted')}</span>
               ))}
             {modelDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'models' && (
+            {sectionFailed('models') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -1174,7 +1277,7 @@ function TeamPanel({
 
       <PolicySection
         title={t('rateLimit.title')}
-        autoOpen={rlDirty || failedSection === 'ratelimit'}
+        autoOpen={rlDirty || sectionFailed('ratelimit')}
         badges={
           <>
             {rlSummary.loaded &&
@@ -1189,7 +1292,7 @@ function TeamPanel({
               <span className="badge badge-neutral whitespace-nowrap">{tp('sourceOwn')}</span>
             )}
             {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
-            {failedSection === 'ratelimit' && (
+            {sectionFailed('ratelimit') && (
               <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
@@ -1204,6 +1307,22 @@ function TeamPanel({
           disabled={isPolicySavePending}
           onDirtyChange={setRlDirty}
           onSummaryChange={setRlSummary}
+        />
+      </PolicySection>
+
+      <PolicySection
+        title={t('effectivePolicy.title')}
+        badges={
+          <span className="badge badge-neutral whitespace-nowrap">{tp('readonly')}</span>
+        }
+      >
+        <p className="text-xs text-muted-foreground mb-3">
+          {t('effectivePolicy.hint')}
+        </p>
+        <EffectivePolicyCard
+          policy={teamPolicy}
+          loadFailed={teamPolicyFailed}
+          models={teamModels}
         />
       </PolicySection>
 

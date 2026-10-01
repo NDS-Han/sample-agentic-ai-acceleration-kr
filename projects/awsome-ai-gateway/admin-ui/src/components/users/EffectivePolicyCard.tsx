@@ -5,15 +5,20 @@
 
 import { useEffect, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import { getEffectivePolicyAction } from '@/lib/actions/users';
+import { getEffectivePolicyAction, getTeamEffectivePolicyAction } from '@/lib/actions/users';
 import { DowngradeDiagram } from '@/components/common/DowngradeDiagram';
 import { CLIENTS as GATEWAY_CLIENTS } from '@/lib/constants/gateway';
 import type { EffectivePolicy, EffectivePolicyCell, ModelListItem } from '@/types/entities';
 
 interface Props {
-  userId: string;
-  /** 부모(UserPanel)가 이미 fetch한 정책을 넘기면 재조회를 건너뛴다. */
+  /** policy 를 넘기면 불필요(자체 fetch 용). 팀 뷰처럼 부모 소유 데이터면 생략. */
+  userId?: string;
+  /** 팀 유효 정책 자체 조회용 — policy 를 넘기면 불필요. */
+  teamId?: string;
+  /** 부모(UserPanel/TeamPanel)가 이미 fetch한 정책을 넘기면 재조회를 건너뛴다. */
   policy?: EffectivePolicy | null;
+  /** 부모가 policy 를 소유할 때 로드 실패를 함께 전달 — null policy 와 구분한다. */
+  loadFailed?: boolean;
   /** 다운그레이드 다이어그램의 output 단가 표기용 — 없으면 단가 칸은 '—'. */
   models?: ModelListItem[];
 }
@@ -26,7 +31,7 @@ const AXIS_KEYS = ['user_app', 'user_model', 'model_app'] as const;
  * model×app 매트릭스(어느 축에서 막혔는지) + 예산·rate limit·downgrade·web search 요약.
  * 다운그레이드 규칙은 매트릭스보다 위에 둔다 — 모델 수만큼 표가 길어져도 스크롤 없이 보이게.
  */
-export function EffectivePolicyCard({ userId, policy: policyProp, models }: Props) {
+export function EffectivePolicyCard({ userId, teamId, policy: policyProp, loadFailed, models }: Props) {
   const t = useTranslations('users.effectivePolicy');
   const [fetched, setFetched] = useState<EffectivePolicy | null>(null);
   const [failed, setFailed] = useState(false);
@@ -35,15 +40,19 @@ export function EffectivePolicyCard({ userId, policy: policyProp, models }: Prop
 
   useEffect(() => {
     if (policyProp !== undefined) return; // 부모가 데이터를 소유
+    if (!userId && !teamId) return; // 부모 데이터도 id 도 없으면 조회 불가
     setFetched(null);
     setFailed(false);
-    getEffectivePolicyAction(userId).then((r) => {
+    const fetcher = teamId
+      ? () => getTeamEffectivePolicyAction(teamId)
+      : () => getEffectivePolicyAction(userId as string);
+    fetcher().then((r) => {
       if (r.success) setFetched(r.data);
       else setFailed(true);
     });
-  }, [userId, policyProp]);
+  }, [userId, teamId, policyProp]);
 
-  if (failed) {
+  if (failed || loadFailed) {
     return <p className="text-xs text-destructive py-1">{t('loadFailed')}</p>;
   }
   if (!policy) {

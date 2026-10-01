@@ -99,12 +99,23 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 - [x] F-D1 KPI 카드 → /keys·/budgets·/models 링크
 - [x] 라이브 스모크 통과, 배포됨 (admin-ui `4b4e570d`)
 
-## Phase 5 — 후속 (별도 검토)
+## Phase 5 — 후속
 
-- [ ] **T14** 팀 effective-policy 백엔드 엔드포인트 + TeamPanel 카드
-- [ ] **T15** 통합 Apply bar 부분 실패 시 섹션별 결과 표시
-- [ ] **T16** (결정 필요) USER-scope 다운그레이드 편집 UI on/off, 모델별 전역 rate limit UI
+- [x] **T14** 팀 effective-policy — `GET /admin/teams/{id}/effective-policy`
+  (require_admin) + `get_for_team` 서비스 + TeamPanel "유효 정책" 읽기 전용 카드.
+  `EffectivePolicyResponse.user_id` nullable 화, `EffectivePolicyCard`에
+  `teamId`/`loadFailed` 추가, 저장 후 팀 정책 재조회.
+- [x] **T15** 통합 Apply 섹션별 결과 — `failedSection` → `applyResults[]`,
+  dirty 섹션 전부 시도 + sticky 스트립에 saved/failed 칩(`policyState.saved`
+  신규 키). UserPanel·TeamPanel 모두 적용.
+- [x] **T16** 결정됨 — USER-scope 다운그레이드 편집 없음(팀 단위만 유지),
+  모델별 전역 rate limit UI 없음(현재 GLOBAL/TEAM/USER 스코프만 유지).
+
+### 검증
+- [x] admin-api pytest 20 ✓ (`get_for_team` 회귀 포함)
+- [x] vitest 327 ✓ (`TeamPanel.test.tsx` 신규 6건)
+- [x] tsc / lint(기존 경고만) / build ✓
 
 ### Checkpoint: Complete
-- [ ] tsc/eslint/vitest/build/admin-api pytest 전부 통과
+- [x] tsc/eslint/vitest/build/admin-api pytest 전부 통과
 - [ ] dev 배포 + 스모크 확인

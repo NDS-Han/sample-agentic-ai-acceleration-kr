@@ -1159,6 +1159,7 @@
     "sourceOrganization": "Org policy",
     "sourceDefault": "Default",
     "modified": "Modified",
+    "saved": "Saved",
     "failed": "Save failed",
     "readonly": "Read-only",
     "nodeTypeTeam": "Team",

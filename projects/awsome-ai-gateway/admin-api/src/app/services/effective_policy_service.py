@@ -312,3 +312,190 @@ class EffectivePolicyService:
             rate_limits=rate_limits,
             downgrade_rules=downgrade_rules,
         )
+
+    async def get_for_team(self, team_id: uuid.UUID) -> EffectivePolicyResponse:
+        """팀 스코프의 합성 정책 뷰 — get_for_user 에서 user 단계만 제거한 의미.
+
+        게이트웨이 판정과 동일 규칙:
+          * apps : team_allowed_clients → org(team→dept→org) → None(fail-open)
+          * models: team_allowed_models → None
+          * rate limit: GLOBAL + TEAM(scope_id=team)
+          * downgrade : TEAM scope만 (gateway-proxy 가 TEAM 규칙만 평가)
+          * 예산      : scope_id == team_id 행만
+        """
+        team = (
+            await self.session.execute(select(Team).where(Team.id == team_id))
+        ).scalar_one_or_none()
+        if team is None:
+            raise NotFoundError("Team", str(team_id))
+
+        # ── apps: team → org → none ──
+        tac = list(
+            (
+                await self.session.execute(
+                    select(TeamAllowedClient.client).where(
+                        TeamAllowedClient.team_id == team_id
+                    )
+                )
+            ).scalars()
+        )
+        if tac:
+            allowed_clients: list[str] | None = tac
+            clients_source = "team"
+        elif team.dept_id:
+            dept = (
+                await self.session.execute(
+                    select(Department.org_id).where(Department.id == team.dept_id)
+                )
+            ).scalar_one_or_none()
+            oac = (
+                list(
+                    (
+                        await self.session.execute(
+                            select(OrgAllowedClient.client).where(
+                                OrgAllowedClient.org_id == dept
+                            )
+                        )
+                    ).scalars()
+                )
+                if dept
+                else []
+            )
+            allowed_clients = oac if oac else None
+            clients_source = "organization" if oac else "none"
+        else:
+            allowed_clients = None
+            clients_source = "none"
+
+        # ── models: team → none ──
+        tam = list(
+            (
+                await self.session.execute(
+                    select(TeamAllowedModel.model_alias).where(
+                        TeamAllowedModel.team_id == team_id
+                    )
+                )
+            ).scalars()
+        )
+        effective_models = tam if tam else None
+        models_source = "team" if tam else "none"
+
+        # ── model→app (ACTIVE 전체) + cells ──
+        model_rows = list(
+            (
+                await self.session.execute(
+                    select(ModelAlias.alias, ModelAlias.allowed_clients).where(
+                        ModelAlias.status == ModelStatus.ACTIVE
+                    )
+                )
+            ).all()
+        )
+        cells = compute_cells(allowed_clients, effective_models, model_rows)
+
+        # ── budgets (team 만) ──
+        period = current_kst_period()
+        budget_rows = list(
+            (
+                await self.session.execute(
+                    select(BudgetConfig)
+                    .where(BudgetConfig.is_active.is_(True))
+                    .where(BudgetConfig.scope_id == team_id)
+                )
+            ).scalars()
+        )
+        usage_rows = list(
+            (
+                await self.session.execute(
+                    select(BudgetUsage)
+                    .where(BudgetUsage.period == period)
+                    .where(BudgetUsage.scope_id == team_id)
+                )
+            ).scalars()
+        )
+        usage_map = {
+            (u.scope.value if hasattr(u.scope, "value") else u.scope, u.scope_id, u.client): u.used_usd
+            for u in usage_rows
+        }
+        budgets = []
+        for b in budget_rows:
+            b_scope = b.scope.value if hasattr(b.scope, "value") else str(b.scope)
+            used = usage_map.get((b_scope, b.scope_id, b.client))
+            budgets.append(
+                EffectiveBudgetEntry(
+                    scope=b_scope,
+                    client=b.client,
+                    max_budget_usd=str(b.max_budget_usd),
+                    used_usd=str(used) if used is not None else None,
+                    policy=b.policy.value if hasattr(b.policy, "value") else str(b.policy),
+                )
+            )
+
+        # ── rate limits (GLOBAL + 이 팀의 TEAM) ──
+        rl_rows = list(
+            (
+                await self.session.execute(
+                    select(RateLimitConfig)
+                    .where(RateLimitConfig.is_active.is_(True))
+                    .where(
+                        or_(
+                            RateLimitConfig.scope == RateLimitScope.GLOBAL,
+                            RateLimitConfig.scope_id == team_id,
+                        )
+                    )
+                )
+            ).scalars()
+        )
+        rate_limits = [
+            EffectiveRateLimitEntry(
+                scope=r.scope.value if hasattr(r.scope, "value") else str(r.scope),
+                model_alias=r.model_alias,
+                rpm_limit=r.rpm_limit,
+                tpm_limit=r.tpm_limit,
+                cpm_limit_usd=str(r.cpm_limit_usd) if r.cpm_limit_usd is not None else None,
+                cph_limit_usd=str(r.cph_limit_usd) if r.cph_limit_usd is not None else None,
+            )
+            for r in rl_rows
+        ]
+
+        # ── downgrade (TEAM scope, 이 팀) ──
+        dg_rows = list(
+            (
+                await self.session.execute(
+                    select(DowngradePolicy)
+                    .where(DowngradePolicy.is_active.is_(True))
+                    .where(DowngradePolicy.scope == BudgetScope.TEAM)
+                    .where(DowngradePolicy.scope_id == team_id)
+                )
+            ).scalars()
+        )
+        downgrade_rules = [
+            EffectiveDowngradeRule(
+                scope=d.scope.value if hasattr(d.scope, "value") else str(d.scope),
+                threshold_pct=d.threshold_pct,
+                from_model_alias=d.from_model_alias,
+                to_model_alias=d.to_model_alias,
+            )
+            for d in dg_rows
+        ]
+
+        # ── web search per app ──
+        rp_rows = list(
+            (await self.session.execute(select(RoutingProfile))).scalars()
+        )
+        web_search = {r.client: bool(r.web_search_enabled) for r in rp_rows}
+
+        return EffectivePolicyResponse(
+            user_id=None,
+            email=None,
+            team_id=str(team.id),
+            team_name=team.name,
+            allowed_clients=allowed_clients,
+            allowed_clients_source=clients_source,
+            allowed_models=effective_models,
+            allowed_models_source=models_source,
+            web_search=web_search,
+            cells=cells,
+            budgets=budgets,
+            rate_limits=rate_limits,
+            downgrade_rules=downgrade_rules,
+        )
