@@ -303,6 +303,7 @@
     "appAccessFetchFailed": "앱 접근 권한 조회 실패 — 새로고침 후 다시 시도하세요.",
     "appBudgetFetchFailed": "앱별 예산 조회 실패 — 새로고침 후 다시 시도하세요.",
     "loadingText": "로딩 중…",
+    "loadFailed": "모델 접근 정책을 불러오지 못했습니다. 저장이 비활성화됩니다.",
     "autoDowngrade": "자동 다운그레이드",
     "autoDowngradeSection": "자동 다운그레이드 설정",
     "autoDowngradeDesc": "{scope} — 예산 임계치 초과 시 자동으로 하위 모델로 라우팅",
@@ -573,12 +574,13 @@
     },
     "appAccess": {
       "title": "앱 접근 권한",
-      "description": "전부 선택(또는 전체 해제) = 모든 앱 허용. 일부만 선택하면 화이트리스트로 제한됩니다.",
+      "description": "체크한 목록 그대로 저장됩니다. 전부 선택 = 모든 앱을 허용하는 명시적 개별 설정. 전체 해제 = 이 사용자의 정책을 지우고 팀/조직 정책을 상속합니다.",
       "groupLabel": "앱 접근 권한 선택",
       "all": "전체",
       "loading": "로딩 중…",
       "unrestricted": "제한 없음",
       "restricted": "목록: {count}개 앱",
+      "emptyHint": "선택 없음: 저장하면 이 사용자의 정책이 지워지고 팀/조직 정책이 적용됩니다. 전면 차단이 아닙니다.",
       "inheritTeam": "현재 팀 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다.",
       "inheritOrg": "현재 조직 정책을 상속 중입니다 — 변경하면 이 사용자만의 개별 설정으로 저장됩니다."
     },
@@ -697,15 +699,17 @@
     "userModelsInheritNone": "개인 설정 없음 — 모든 모델 허용 상태입니다(팀 정책도 없음).",
     "scopeAppAccess": {
       "title": "앱 접근 정책",
-      "descriptionTeam": "개별 설정이 없는 팀 멤버에게 적용됩니다. 전부 선택 = 팀 정책 없음(조직 정책을 따름).",
-      "descriptionOrg": "팀/개별 설정이 없는 전체 사용자에게 적용되는 기본값입니다. 전부 선택 = 조직 정책 없음(제한 없음).",
+      "descriptionTeam": "개별 설정이 없는 팀 멤버에게 적용됩니다. 체크한 목록 그대로 저장되며, 전체 해제로 저장하면 팀 정책이 지워지고 조직 정책을 상속합니다.",
+      "descriptionOrg": "팀/개별 설정이 없는 전체 사용자에게 적용되는 기본값입니다. 전부 선택 또는 전체 해제 = 제한 없음(조직 정책 없음).",
       "groupLabel": "허용 앱 선택",
       "unrestricted": "제한 없음",
       "restricted": "목록: {count}개 앱",
       "loading": "로딩 중…",
       "apply": "적용",
       "saveSuccess": "앱 접근 정책이 저장되었습니다",
-      "loadError": "앱 접근 정책을 불러오지 못했습니다"
+      "loadError": "앱 접근 정책을 불러오지 못했습니다",
+      "emptyHintTeam": "선택 없음: 저장하면 팀 정책이 지워지고 조직 정책이 적용됩니다.",
+      "emptyHintOrg": "선택 없음: 저장하면 조직 정책이 지워지고 모든 앱이 허용됩니다."
     },
     "budgetSectionTitle": "예산"
   },
@@ -1129,6 +1133,7 @@
   "policyState": {
     "unrestricted": "제한 없음",
     "restricted": "{count}개 허용",
+    "inherit": "상속",
     "sourceOwn": "개별 설정",
     "sourceTeam": "팀 정책",
     "sourceOrganization": "조직 정책",

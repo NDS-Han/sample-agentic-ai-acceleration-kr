@@ -36,6 +36,8 @@ interface OrgDetailPanelProps {
   node: OrgTreeNode | null;
   /** 패널 내 미저장 편집 여부를 부모(OrgTreeView 의 노드 전환 가드)에 보고한다. */
   onDirtyChange?: (_dirty: boolean) => void;
+  /** 트리 root(ORGANIZATION) 의 id — 팀 패널이 조직 정책 상속 표시에 쓴다. */
+  orgId?: string;
 }
 
 // Role labels are now i18n-driven — see t('roleLabel.ADMIN') etc.
@@ -46,7 +48,7 @@ const ROLE_TONE: Record<string, BadgeTone> = {
   DEVELOPER: 'teal',
 };
 
-export function OrgDetailPanel({ node, onDirtyChange }: OrgDetailPanelProps) {
+export function OrgDetailPanel({ node, onDirtyChange, orgId }: OrgDetailPanelProps) {
   const t = useTranslations('users');
 
   if (!node) {
@@ -120,7 +122,7 @@ export function OrgDetailPanel({ node, onDirtyChange }: OrgDetailPanelProps) {
   if (node.type === 'TEAM') {
     // key=node.id — 팀 A→B 전환 시 같은 컴포넌트 재사용으로 리더 선택·다이얼로그·
     // dirty·로드 상태가 새 팀으로 새는 것을 막는다.
-    return <TeamPanel key={node.id} node={node} onDirtyChange={onDirtyChange} />;
+    return <TeamPanel key={node.id} node={node} onDirtyChange={onDirtyChange} orgId={orgId} />;
   }
 
   // ── USER ────────────────────────────────────────────────────────────────────
@@ -144,21 +146,23 @@ const CLIENT_OPTIONS: Array<{ value: ClientId; label: string }> = [
   { value: 'codex', label: 'Codex' },
 ];
 
-// API allowed_clients([] = 전체 허용) → UI 체크 상태. [] 면 전부 체크로 표시.
+// API allowed_clients([] = 이 레벨 정책 없음 = 상속) → UI 체크 상태.
 function clientsToSelected(clients: string[]): ClientId[] {
   if (clients.length === 0) return [...ALL_CLIENTS];
   return ALL_CLIENTS.filter((c) => clients.includes(c));
 }
 
-// UI 체크 상태 → API allowed_clients. 전부 체크(또는 0개) = 전체 허용 → [](빈 배열).
-// 부분 선택만 화이트리스트로 저장. (0개 체크로 잠그는 상태는 허용하지 않음 — 기존 동작 유지.)
+// UI 체크 상태 → API allowed_clients (Option A — 체크한 목록을 그대로 저장).
+//   · 빈 선택   → [] = 개인 정책 해제 → 팀/조직 정책 상속 (전면 거부 아님)
+//   · 부분 선택 → 명시 화이트리스트
+//   · 전체 선택 → 명시 [3개] 목록 — 상속을 끊는 "이 유저는 전부 허용" override.
+//     ([] 로내면 상속이 되어 팀 제한이 그대로 적용되던 기존 버그를 막는다)
 function selectedToClients(selected: string[]): string[] {
-  const chosen = ALL_CLIENTS.filter((c) => selected.includes(c));
-  if (chosen.length === 0 || chosen.length === ALL_CLIENTS.length) return [];
-  return chosen;
+  return ALL_CLIENTS.filter((c) => selected.includes(c));
 }
 
-// allowed_clients 비교용 canonical key ([] 와 전체선택을 동일 취급).
+// allowed_clients 비교용 canonical key — 저장값 기준으로 비교(0개=[]=상속과
+// 전체=명시목록은 다르다).
 function clientsKey(clients: string[]): string {
   return selectedToClients(clients).slice().sort().join(',');
 }
@@ -219,6 +223,9 @@ function UserPanel({
   const [modelBaseline, setModelBaseline] = useState<string[]>([]);
   // 통합 Apply 의 실패 섹션 — 헤더에 "저장 실패" 배지 + 자동 펼침에 쓴다.
   const [failedSection, setFailedSection] = useState<'apps' | 'models' | null>(null);
+  // 개인 앱 정책 행 존재 여부 — policy 로드 실패 시 배지 폴백에서 "상속"을
+  // 구분하는 데 쓴다(행 없음 = 상속, 있음 = 자체 정책).
+  const [hasOwnAppPolicy, setHasOwnAppPolicy] = useState(false);
 
   useEffect(() => {
     // 사용자 전환 시 이전 사용자 상태 잔존 방지(잘못된 저장 차단).
@@ -227,6 +234,8 @@ function UserPanel({
     setClientsLoaded(false);
     setLoadedModelAliases([]);
     setSelectedModelAliases([]);
+    setHasOwnAppPolicy(false);
+    setFailedSection(null);
     startLoadTransition(async () => {
       const [r, p, m, cat] = await Promise.all([
         getUserAllowedClientsAction(node.id),
@@ -237,6 +246,7 @@ function UserPanel({
       // 빠른 A→B→A 전환에서 늦게 돌아온 응답이 새 노드 상태를 덮지 않게 한다.
       if (cancelled) return;
       if (r.success) {
+        setHasOwnAppPolicy(r.data.clients.length > 0);
         const sel = clientsToSelected(r.data.clients);
         // 개인 정책 행이 없으면 상속된 유효 목록(팀/조직 정책)을 프리필해 보여준다 —
         // userModels 와 같은 규칙: 빈 전체체크는 "제한 없음"으로 오독되므로 실제
@@ -310,19 +320,11 @@ function UserPanel({
   const handleApply = () => {
     startSaveTransition(async () => {
       setFailedSection(null);
-      // ★ 허용 클라이언트 정책이 정상 로드되지 않았으면 stale 전체허용([])을
-      //   저장해 의도치 않게 허용되는 사고를 막기 위해 저장 자체를 중단한다.
-      if (!clientsLoaded) {
-        toast({
-          type: 'error',
-          message: t('loadErrors.appAccess'),
-          auto_dismiss_ms: 4000,
-        });
-        return;
-      }
       // 1) 접근 권한 — 실제로 바뀐 경우만 저장. 상속 프리필을 그대로 저장하면
       //    팀/조직 정책이 개인 override 로 굳어 이후 상위 변경이 안 따라온다.
-      let savedSelected = selected;
+      //    accessDirty 는 clientsLoaded 를 내포하므로 별도 게이트 불필요 —
+      //    앱 정책 로드 실패가 모델 저장까지 막지 않게 한다.
+      let savedClients: string[] | null = null;
       if (accessDirty) {
         const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
         if (!r.success) {
@@ -330,7 +332,7 @@ function UserPanel({
           toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
           return;
         }
-        savedSelected = clientsToSelected(r.data.clients);
+        savedClients = r.data.clients;
       }
 
       // 2) 사용자별 허용 모델 저장 — 빈 배열이면 action 이 DELETE(override 해제)로 처리.
@@ -340,9 +342,23 @@ function UserPanel({
       if (modelsDirty) {
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
         if (!mr.success) {
-          // 접근 권한은 이미 저장됨 — 모델만 실패. loaded 상태를 동기화 후 알림.
-          setLoadedSelected(savedSelected);
-          setSelected(savedSelected);
+          // 접근 권한은 이미 저장됐을 수 있다 — 출처 배지가 stale 해지지 않게
+          // 유효 정책을 재조회하고 앱 섹션 표시도 저장 결과로 동기화한다.
+          const p3 = await getEffectivePolicyAction(node.id);
+          if (p3.success) setPolicy(p3.data);
+          if (savedClients !== null) {
+            setHasOwnAppPolicy(savedClients.length > 0);
+            const disp =
+              savedClients.length > 0
+                ? clientsToSelected(savedClients)
+                : p3.success &&
+                    p3.data.allowed_clients_source !== 'user' &&
+                    p3.data.allowed_clients
+                  ? clientsToSelected(p3.data.allowed_clients)
+                  : [...ALL_CLIENTS];
+            setLoadedSelected(disp);
+            setSelected(disp);
+          }
           setFailedSection('models');
           toast({ type: 'error', message: mr.error, auto_dismiss_ms: 4000 });
           return;
@@ -350,19 +366,30 @@ function UserPanel({
         savedAliases = mr.data.modelAliases;
       }
 
-      // 모두 성공 — loaded 상태를 낙관적 값으로 갱신. 유효 정책도 다시 읽어
-      // 앱 정책 출처(상속 → 개인 override) 캡션이 즉시 갱신되게 한다.
-      setLoadedSelected(savedSelected);
-      setSelected(savedSelected);
+      // 모두 성공 — 유효 정책을 먼저 다시 읽어 출처 배지·상속 프리필을 갱신한다.
       const p2 = await getEffectivePolicyAction(node.id);
       if (p2.success) setPolicy(p2.data);
+      if (savedClients !== null) {
+        setHasOwnAppPolicy(savedClients.length > 0);
+        // [] 저장(override 해제) 후엔 상속 목록을 다시 표시 — 전체 체크 잔존은
+        // 무제한처럼 읽히지만 실제 적용은 상위 정책이다.
+        const disp =
+          savedClients.length > 0
+            ? clientsToSelected(savedClients)
+            : p2.success &&
+                p2.data.allowed_clients_source !== 'user' &&
+                p2.data.allowed_clients
+              ? clientsToSelected(p2.data.allowed_clients)
+              : [...ALL_CLIENTS];
+        setLoadedSelected(disp);
+        setSelected(disp);
+      }
       if (savedAliases !== null) {
         setLoadedModelAliases(savedAliases);
         // override 해제([]) 후엔 상속 목록을 다시 표시해야 한다 — 전부 미체크는
         // "차단" 처럼 읽히므로 유효 목록으로 채운다. 저장 전 policy 는 stale 이므로
-        // 방금 다시 읽은 p2 를 우선 쓴다.
-        const effective =
-          (p2.success ? p2.data.allowed_models : policy?.allowed_models) ?? null;
+        // 방금 다시 읽은 p2 만 쓰고, 실패하면 전체 허용으로 폴백한다.
+        const effective = p2.success ? p2.data.allowed_models : null;
         const display =
           savedAliases.length > 0
             ? savedAliases
@@ -394,31 +421,42 @@ function UserPanel({
 
   // 헤더 배지는 저장된 "유효" 상태를 보여야 한다 — 개인 override 가 없어
   // 상속이면 loaded* 은 비어 있지만 실제 제한은 팀/조직 정책이 정한다.
-  // policy 로드 실패 시에는 표시 기준선(loadedSelected/modelBaseline)으로 추정한다.
-  const appBadgeRestricted = policy
-    ? (policy.allowed_clients?.length ?? 0) > 0
-    : selectedToClients(loadedSelected).length > 0;
-  const appBadgeCount = policy
-    ? (policy.allowed_clients?.length ?? 0)
-    : selectedToClients(loadedSelected).length;
-  const modelBadgeRestricted = policy
-    ? (policy.allowed_models?.length ?? 0) > 0
+  // policy 로드 실패 + 자체 행 없음이면 유효 상태를 모르므로 "상속" 배지를
+  // 보여 확정 오표기(제한인데 제한없음 표시)를 막는다.
+  // 유효 목록이 카탈로그 전체를 덮으면(명시적 전체 허용 override) "제한 없음".
+  const effClients = policy
+    ? (policy.allowed_clients ?? [])
+    : hasOwnAppPolicy
+      ? selectedToClients(loadedSelected)
+      : null;
+  const appBadgeInherit = effClients === null;
+  const appBadgeRestricted =
+    effClients !== null && effClients.length > 0 && effClients.length < ALL_CLIENTS.length;
+  const appBadgeCount = effClients?.length ?? 0;
+
+  const effModels = policy
+    ? (policy.allowed_models ?? [])
     : loadedModelAliases.length > 0
-      ? true // 개인 override 존재 = 명시적 제한
-      : models.length > 0 &&
-        modelBaseline.length > 0 &&
-        modelBaseline.length < models.length;
-  const modelBadgeCount = policy
-    ? (policy.allowed_models?.length ?? 0)
-    : loadedModelAliases.length > 0
-      ? loadedModelAliases.length
-      : modelBaseline.length;
+      ? loadedModelAliases // 개인 override 존재 = 명시적 제한
+      : null;
+  const modelBadgeInherit = effModels === null;
+  const modelBadgeRestricted =
+    effModels !== null &&
+    effModels.length > 0 &&
+    (models.length === 0 || effModels.length < models.length);
+  const modelBadgeCount = effModels?.length ?? 0;
   const dirty = accessDirty || modelsDirty;
   const dirtyCount = (accessDirty ? 1 : 0) + (modelsDirty ? 1 : 0);
 
   useEffect(() => {
     onDirtyChange?.(dirty);
   }, [dirty, onDirtyChange]);
+
+  // dirty 가 모두 해소되면(되돌리기/저장 성공) 실패 마커도 지운다 — 그대로 두면
+  // 노드 전환까지 빨간 "저장 실패" 배지가 남는다.
+  useEffect(() => {
+    if (!dirty) setFailedSection(null);
+  }, [dirty]);
 
   const btn = (active: boolean) =>
     [
@@ -472,7 +510,9 @@ function UserPanel({
         badges={
           <>
             {(clientsLoaded || policy) &&
-              (appBadgeRestricted ? (
+              (appBadgeInherit ? (
+                <span className="badge badge-neutral whitespace-nowrap">{tp('inherit')}</span>
+              ) : appBadgeRestricted ? (
                 <span className="badge badge-amber whitespace-nowrap">
                   {tp('restricted', { count: appBadgeCount })}
                 </span>
@@ -519,13 +559,17 @@ function UserPanel({
                 type="button"
                 onClick={() => toggleClient(o.value)}
                 aria-pressed={selected.includes(o.value)}
-                disabled={busy}
+                disabled={busy || !clientsLoaded}
                 className={btn(selected.includes(o.value))}
               >
                 {o.label}
               </button>
             ))}
           </div>
+        )}
+        {/* 빈 선택의 저장 결과 — 0개 체크는 "전면 거부"가 아니라 개인 정책 해제(상속)다. */}
+        {clientsLoaded && selected.length === 0 && (
+          <p className="text-xs text-amber-600 mb-3">{t('appAccess.emptyHint')}</p>
         )}
       </PolicySection>
 
@@ -534,8 +578,10 @@ function UserPanel({
         autoOpen={modelsDirty || failedSection === 'models'}
         badges={
           <>
-            {(modelsLoaded || policy) &&
-              (modelBadgeRestricted ? (
+            {(modelsLoaded || loadedModelAliases.length > 0 || policy) &&
+              (modelBadgeInherit ? (
+                <span className="badge badge-neutral whitespace-nowrap">{tp('inherit')}</span>
+              ) : modelBadgeRestricted ? (
                 <span className="badge badge-amber whitespace-nowrap">
                   {tp('restricted', { count: modelBadgeCount })}
                 </span>
@@ -689,9 +735,11 @@ function UserPanel({
 function TeamPanel({
   node,
   onDirtyChange,
+  orgId,
 }: {
   node: OrgTreeNode;
   onDirtyChange?: (_dirty: boolean) => void;
+  orgId?: string;
 }) {
   const t = useTranslations('users');
   const tm = useTranslations('models');
@@ -704,6 +752,9 @@ function TeamPanel({
   const [isLeaderPending, startLeaderTransition] = useTransition();
   const [selectedMemberId, setSelectedMemberId] = useState('');
   const [teamModels, setTeamModels] = useState<ModelListItem[]>([]);
+  // 모델 카탈로그 로드 상태 — 실패를 추적해야 "빈 목록 = 무제한" 오표기와
+  // stale [] 저장(기존 제한 삭제 사고)을 막을 수 있다.
+  const [catalogStatus, setCatalogStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
   // 해제할 리더를 확인 모달에서 명확히 지정 — 팀에 리더가 여러 명일 수 있으므로
   // "리더 해제" 버튼 하나로는 어느 사람을 내릴지 알 수 없다.
   const [leaderToRemove, setLeaderToRemove] = useState<{ id: string; name: string } | null>(null);
@@ -727,6 +778,11 @@ function TeamPanel({
     onDirtyChange?.(policyDirty);
   }, [policyDirty, onDirtyChange]);
 
+  // dirty 가 모두 해소되면(되돌리기/저장 성공) 실패 마커도 지운다.
+  useEffect(() => {
+    if (!policyDirty) setFailedSection(null);
+  }, [policyDirty]);
+
   const handleApplyAll = () => {
     startPolicySaveTransition(async () => {
       setFailedSection(null);
@@ -744,9 +800,16 @@ function TeamPanel({
   };
 
   // 팀별 허용 모델 패널용 모델 목록 — 팀 상세가 열릴 때만 로드한다.
+  // 실패는 ready 로 덮지 않는다: 카탈로그 미로드 상태의 섹션은 저장 불가여야 한다.
   useEffect(() => {
+    setCatalogStatus('loading');
     listActiveModelsAction().then((r) => {
-      if (r.success) setTeamModels(r.data);
+      if (r.success) {
+        setTeamModels(r.data);
+        setCatalogStatus('ready');
+      } else {
+        setCatalogStatus('failed');
+      }
     });
   }, []);
 
@@ -941,6 +1004,7 @@ function TeamPanel({
           ref={appAccessRef}
           scope="team"
           scopeId={node.id}
+          orgScopeId={orgId}
           hideActions
           bare
           disabled={isPolicySavePending}
@@ -969,16 +1033,25 @@ function TeamPanel({
           </>
         }
       >
-        <TeamModelPermissionPanel
-          ref={modelPolicyRef}
-          teamId={node.id}
-          models={teamModels}
-          hideActions
-          bare
-          disabled={isPolicySavePending}
-          onDirtyChange={setModelDirty}
-          onSummaryChange={setModelSummary}
-        />
+        {/* 모델 카탈로그가 로드되기 전/실패 상태에서는 패널을 마운트하지 않는다 —
+            빈 카탈로그로 렌더하면 "전체 미체크 = 무제한" 으로 읽히고, 저장 시
+            stale [] 가 기존 팀 제한을 지운다. */}
+        {catalogStatus === 'failed' ? (
+          <div className="text-xs text-destructive py-1">{tm('loadFailed')}</div>
+        ) : catalogStatus === 'loading' ? (
+          <div className="text-xs text-muted-foreground py-1">{tm('loadingText')}</div>
+        ) : (
+          <TeamModelPermissionPanel
+            ref={modelPolicyRef}
+            teamId={node.id}
+            models={teamModels}
+            hideActions
+            bare
+            disabled={isPolicySavePending}
+            onDirtyChange={setModelDirty}
+            onSummaryChange={setModelSummary}
+          />
+        )}
       </PolicySection>
 
       {/* 예산·다운그레이드는 예산 페이지 소유 — 여기선 진입 링크만 둔다. */}

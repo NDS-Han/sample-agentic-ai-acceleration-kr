@@ -216,7 +216,11 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
         )}
       </div>
       <div className="flex-1 p-6">
-        <OrgDetailPanel node={selectedNode} onDirtyChange={setPanelDirty} />
+        <OrgDetailPanel
+          node={selectedNode}
+          onDirtyChange={setPanelDirty}
+          orgId={root?.type === 'ORGANIZATION' ? root.id : undefined}
+        />
       </div>
       </div>
       <ConfirmDialog

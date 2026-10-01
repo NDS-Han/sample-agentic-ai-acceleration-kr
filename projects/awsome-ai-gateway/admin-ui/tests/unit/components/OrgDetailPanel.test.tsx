@@ -20,10 +20,13 @@ import type { OrgTreeNode } from '@/types/entities';
 
 // next-intl 을 실제 메시지 대신 키 기반 스텁으로 — 이 테스트의 관심사는 **어느 값이
 // 어느 라벨에 붙는가** 이고, 번역 문구가 바뀌어도 그 계약은 유지돼야 한다.
-vi.mock('next-intl', () => ({
-  useTranslations: () => (key: string, params?: Record<string, unknown>) =>
-    params && 'count' in params ? `${key}=${params.count}` : key,
-}));
+// t 함수는 모듈 스코프의 안정 참조여야 한다 — 매 렌더 새 함수를 반환하면
+// effect deps 에 t 를 넣은 컴포넌트가 무한 재실행된다(실제 next-intl 은 안정값).
+vi.mock('next-intl', () => {
+  const tFn = (key: string, params?: Record<string, unknown>) =>
+    params && 'count' in params ? `${key}=${params.count}` : key;
+  return { useTranslations: () => tFn };
+});
 
 function userNode(name: string): OrgTreeNode {
   return {

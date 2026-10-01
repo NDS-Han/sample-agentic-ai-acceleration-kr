@@ -303,6 +303,7 @@
     "appAccessFetchFailed": "Failed to fetch app access permissions — please refresh and try again.",
     "appBudgetFetchFailed": "Failed to fetch per-app budgets — please refresh and try again.",
     "loadingText": "Loading...",
+    "loadFailed": "Failed to load the model access policy. Saving is disabled.",
     "autoDowngrade": "Auto downgrade",
     "autoDowngradeSection": "Auto downgrade settings",
     "autoDowngradeDesc": "{scope} — routes to a lower model automatically when the budget threshold is exceeded",
@@ -573,12 +574,13 @@
     },
     "appAccess": {
       "title": "App access",
-      "description": "Select all (or deselect all) = allow every app. Select a subset to restrict to a whitelist.",
+      "description": "Saves exactly what is checked. Select all = explicit allow-everything override. Deselect all = clear this user's policy and inherit the team/org policy.",
       "groupLabel": "Select app access",
       "all": "All",
       "loading": "Loading…",
       "unrestricted": "No restriction",
       "restricted": "Allowlist: {count} apps",
+      "emptyHint": "Nothing selected: saving clears this user's policy and applies the team/org policy. This is not a full block.",
       "inheritTeam": "Currently inheriting the team policy — any change is saved as this user's individual setting.",
       "inheritOrg": "Currently inheriting the organization policy — any change is saved as this user's individual setting."
     },
@@ -697,15 +699,17 @@
     "userModelsInheritNone": "No personal override — all models allowed (no team policy either).",
     "scopeAppAccess": {
       "title": "App access policy",
-      "descriptionTeam": "Applies to team members without an individual setting. All selected = no team policy (inherits the organization policy).",
-      "descriptionOrg": "Default for every user without a team or individual setting. All selected = no organization policy (unrestricted).",
+      "descriptionTeam": "Applies to team members without an individual setting. Saves exactly what is checked; an empty selection clears the team policy and inherits the organization policy.",
+      "descriptionOrg": "Default for every user without a team or individual setting. All selected or none selected = unrestricted (no organization policy).",
       "groupLabel": "Allowed apps",
       "unrestricted": "Unrestricted",
       "restricted": "Allowlist: {count} apps",
       "loading": "Loading…",
       "apply": "Apply",
       "saveSuccess": "App access policy saved",
-      "loadError": "Failed to load the app access policy"
+      "loadError": "Failed to load the app access policy",
+      "emptyHintTeam": "Nothing selected: saving clears the team policy and applies the organization policy.",
+      "emptyHintOrg": "Nothing selected: saving clears the organization policy and allows every app."
     },
     "budgetSectionTitle": "Budget"
   },
@@ -1129,6 +1133,7 @@
   "policyState": {
     "unrestricted": "Unrestricted",
     "restricted": "{count} allowed",
+    "inherit": "Inherited",
     "sourceOwn": "Custom",
     "sourceTeam": "Team policy",
     "sourceOrganization": "Org policy",

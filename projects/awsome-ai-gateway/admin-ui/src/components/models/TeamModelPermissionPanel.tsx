@@ -69,11 +69,22 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
     () => models.filter((m) => m.is_active).map((m) => m.alias),
     [models],
   );
-  const allAliasKey = activeAliases.join('');
+  const activeSet = useMemo(() => new Set(activeAliases), [activeAliases]);
+  // JSON.stringify — join('') 은 ["ab","c"] 와 ["a","bc"] 를 구분 못한다.
+  const allAliasKey = JSON.stringify(activeAliases);
+  // 카탈로그가 아직 안 왔거나 로드 실패면 빈 배열 — 이 상태로 저장하면
+  // toSaved 가 무조건 [] 를 반환해 팀 제한이 무제한으로 지워진다(F1).
+  const catalogReady = activeAliases.length > 0;
+  const [loadFailed, setLoadFailed] = useState(false);
 
-  /** 체크 상태 → 저장용 raw 목록. 전체 체크 = 무제한 → []. */
-  const toSaved = (sel: string[]) =>
-    sel.length >= activeAliases.length ? [] : [...sel].sort();
+  /** 체크 상태 → 저장용 raw 목록. 카탈로그 전부 체크 = 무제한 → [].
+      카탈로그 밖(비활성·삭제된) alias 는 저장 목록에서 제외한다 —
+      개수 비교(sel.length>=N)로는 저장 목록에 stale alias 가 섞일 때
+      로드 직후부터 phantom dirty + 저장 시 [] 로 덮는 버그가 생긴다(F2). */
+  const toSaved = (sel: string[]) => {
+    const inCatalog = sel.filter((a) => activeSet.has(a));
+    return inCatalog.length >= activeAliases.length ? [] : [...inCatalog].sort();
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -82,17 +93,25 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
     setSelected([]);
     setLoadedAliases([]);
     setLoaded(false);
+    setLoadFailed(false);
     if (!selectedTeamId) return;
     startTransition(async () => {
       const result = await getTeamAllowedModelsAction(selectedTeamId);
       // 빠른 A→B→A 전환에서 늦게 돌아온 응답이 새 팀 상태를 덮지 않게 한다.
       if (cancelled) return;
       if (result.success) {
-        const saved = result.data.model_aliases;
+        // 카탈로그 밖(비활성·삭제) alias 는 정규화 — 다음 저장에서 자연 정리되고
+        // 로드 직후 phantom dirty 가 생기지 않는다.
+        const saved = result.data.model_aliases.filter((a) => activeSet.has(a));
         setLoadedAliases(saved);
         setSelected(saved.length > 0 ? saved : activeAliases);
+        setLoaded(true);
+      } else {
+        // 실패를 성공으로 처리하면 !loaded 가드가 절대 안 걸리고 헤더에
+        // "제한 없음" 이 오표기된다(F3) — 저장은 가드가 차단한다.
+        setLoadFailed(true);
+        toast({ type: 'error', message: t('loadFailed'), auto_dismiss_ms: 5000 });
       }
-      setLoaded(true);
     });
     return () => {
       cancelled = true;
@@ -127,14 +146,15 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
 
   const save = async (): Promise<boolean> => {
     if (!selectedTeamId) return false;
-    if (!loaded) {
+    if (!loaded || !catalogReady) {
       // 부모의 통합 저장이 이 경로를 친다 — 조용히 false 만 반환하면 앞 섹션은
       // 저장됐는데 왜 멈췄는지 사용자가 알 수 없다.
       toast({ type: 'error', message: t('saveNotReady'), auto_dismiss_ms: 4000 });
       return false;
     }
-    // 0개 체크 = "전부 차단" 처럼 보이지만 저장하면 무제한(전체 허용)과 구분이
-    // 없다 — 모호한 상태는 저장 자체를 막는다(앱 접근 패널과 같은 규칙).
+    // 0개 체크는 전면 거부처럼 보이지만 이 표현으로는 전면 거부를 저장할 수 없다
+    // ([] = 제한 없음). 모호한 상태는 막고, 무제한은 "전체 선택 후 저장"으로
+    // 표현하게 한다 — 앱 접근 패널의 0체크=상속과는 다른 규칙이다.
     if (selected.length === 0) {
       toast({ type: 'error', message: t('minOneModel'), auto_dismiss_ms: 3000 });
       return false;
@@ -209,7 +229,11 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
       </div>
       )}
 
-      {selectedTeamId && loaded && (
+      {selectedTeamId && loaded && !catalogReady && (
+        <div className="text-xs text-muted-foreground py-1">{t('noActiveModels')}</div>
+      )}
+
+      {selectedTeamId && loaded && catalogReady && (
         <>
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -274,7 +298,11 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
         </>
       )}
 
-      {selectedTeamId && !loaded && (
+      {selectedTeamId && !loaded && loadFailed && (
+        <div className="text-xs text-destructive py-1">{t('loadFailed')}</div>
+      )}
+
+      {selectedTeamId && !loaded && !loadFailed && (
         <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
           <div className="h-4 w-4 animate-spin rounded-full border-2 border-primary border-t-transparent" />
           {t('loadingText')}
