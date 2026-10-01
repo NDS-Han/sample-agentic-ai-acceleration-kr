@@ -176,13 +176,14 @@ async def list_teams(
 @router.get("/users/tree", response_model=OrgTreeNode | None)
 async def get_users_tree(
     request: Request,
+    include_empty: bool = Query(default=False),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     from app.services.user_team_service import UserTeamService
 
     svc: UserTeamService = request.app.state.user_team_service
-    return await svc.get_org_tree(session)
+    return await svc.get_org_tree(session, include_empty=include_empty)
 
 
 @router.get("/users/search", response_model=UserSearchResponse)

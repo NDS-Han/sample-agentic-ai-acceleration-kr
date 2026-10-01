@@ -436,7 +436,12 @@ class UserTeamService:
             for user_id, email, display_name, role, team_id, team_name in rows
         ], truncated
 
-    async def get_org_tree(self, session: AsyncSession) -> OrgTreeNode | None:
+    async def get_org_tree(
+        self, session: AsyncSession, include_empty: bool = False
+    ) -> OrgTreeNode | None:
+        """조직 트리. ``include_empty`` 가 True 면 활성 멤버 0인 팀도 포함한다 —
+        신규 Cognito 팀에 멤버 배정 전 정책을 미리 설정할 진입점이 필요하기 때문.
+        팀이 하나도 없는 부서는 include_empty 에서도 제외한다(노이즈)."""
         repo = UserRepository(session)
         orgs = await repo.list_all_orgs()
         if not orgs:
@@ -452,7 +457,7 @@ class UserTeamService:
                     None,
                 )
                 active_members = [m for m in team.members if m.is_active]
-                if not active_members:
+                if not active_members and not include_empty:
                     continue
                 member_nodes: list[OrgTreeNode] = []
                 for member in active_members:

@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { adminAPI } from '@/lib/api-client';
 import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
-import type { UserSearchItem } from '@/types/entities';
+import type { OrgTreeNode, UserSearchItem } from '@/types/entities';
 import type { ActionResult } from './types';
 
 // ─── setTeamLeaderAction ──────────────────────────────────────────────────────
@@ -385,6 +385,26 @@ export async function getEffectivePolicyAction(
       adminAPI.get<EffectivePolicy>(`/admin/users/${userId}/effective-policy`),
     );
     return { success: true, data: res };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// ─── getOrgTreeAction ─────────────────────────────────────────────────────────
+
+// /users 의 "빈 팀 표시" 토글이 클라이언트에서 트리를 재조회할 때 쓴다.
+// page.tsx 의 최초 fetch 는 include_empty=false — 토글 ON 일 때만 true 로
+// 다시 가져온다(라우트 네비게이션 없이 root state 만 교체해 dirty 보존).
+export async function getOrgTreeAction(
+  includeEmpty: boolean
+): Promise<ActionResult<OrgTreeNode | null>> {
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<OrgTreeNode | null>(
+        `/admin/users/tree${includeEmpty ? '?include_empty=true' : ''}`
+      )
+    );
+    return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
   }

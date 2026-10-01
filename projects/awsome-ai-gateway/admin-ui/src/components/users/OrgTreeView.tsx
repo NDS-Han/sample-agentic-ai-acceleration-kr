@@ -10,6 +10,8 @@ import { OrgTree } from './OrgTree';
 import { OrgDetailPanel } from './OrgDetailPanel';
 import { OrgSearchBox } from './OrgSearchBox';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
+import { useToast } from '@/components/common/ToastProvider';
+import { getOrgTreeAction } from '@/lib/actions/users';
 import {
   findNodeById,
   findNodeExpandPath,
@@ -25,6 +27,14 @@ const EXPANDED_NODES_STORAGE_KEY = 'users:orgtree:expandedNodes';
 
 export function OrgTreeView({ root }: OrgTreeViewProps) {
   const t = useTranslations('users');
+  const { toast } = useToast();
+  // "빈 팀 표시" 토글이 켜지면 include_empty 트리로 교체한다 — 라우트
+  // 네비게이션 없이 서버 액션으로 재조회해 선택·dirty 상태를 보존한다.
+  // prop root 는 서버가 준 기본 트리(빈 팀 제외)라 OFF 복귀 시 재조회 불필요.
+  const [treeOverride, setTreeOverride] = useState<OrgTreeNode | null>(null);
+  const [showEmptyTeams, setShowEmptyTeams] = useState(false);
+  const [treeLoading, setTreeLoading] = useState(false);
+  const effectiveRoot = treeOverride ?? root;
   // 선택은 id 가 정본 — 노드 객체는 매 렌더 root 에서 다시 찾는다.
   // router.refresh() 로 root 가 갱신돼도 선택이 유지되고 표시는 최신 데이터다
   // (예전엔 선택된 node 객체가 stale 해 리더 지정 후 목록이 안 바뀌었다).
@@ -39,14 +49,14 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
 
   const selectedNode = useMemo(() => {
     if (!selectedId) return null;
-    const found = findNodeById(root, selectedId);
+    const found = findNodeById(effectiveRoot, selectedId);
     // 검색으로 선택한 USER 는 트리 노드보다 메타(team_name 등)가 충실한 합성
     // 노드를 우선한다. TEAM/DEPARTMENT 는 항상 최신 root 노드를 쓴다.
     if (found?.type === 'USER' && syntheticNode?.id === selectedId) {
       return syntheticNode;
     }
     return found ?? (syntheticNode?.id === selectedId ? syntheticNode : null);
-  }, [root, selectedId, syntheticNode]);
+  }, [effectiveRoot, selectedId, syntheticNode]);
 
   // sessionStorage에서 펼침 상태 복원 + ?node= 딥링크 복원 (mount 1회)
   useEffect(() => {
@@ -63,18 +73,30 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     }
     // 딥링크 — 트리에 실제로 있는 노드만 복원한다(검색 전용 합성 노드는 불가).
     const deepId = new URLSearchParams(window.location.search).get('node');
-    if (deepId) {
-      const found = findNodeById(root, deepId);
-      if (found) {
-        setSelectedId(found.id);
-        const path = findNodeExpandPath(root, found.id) ?? [];
-        // 팀이면 자신도 펼친다 — 트리 클릭과 같은 결과(멤버 노출)가 돼야 한다.
-        const toExpand = found.type === 'TEAM' ? [...path, found.id] : path;
-        if (toExpand.length > 0) {
-          setExpandedNodes((prev) => new Set([...prev, ...toExpand]));
-        }
+    if (!deepId) return;
+    const applyDeepLink = (tree: OrgTreeNode | null) => {
+      const found = findNodeById(tree, deepId);
+      if (!found) return false;
+      setSelectedId(found.id);
+      const path = findNodeExpandPath(tree, found.id) ?? [];
+      // 팀이면 자신도 펼친다 — 트리 클릭과 같은 결과(멤버 노출)가 돼야 한다.
+      const toExpand = found.type === 'TEAM' ? [...path, found.id] : path;
+      if (toExpand.length > 0) {
+        setExpandedNodes((prev) => new Set([...prev, ...toExpand]));
       }
-    }
+      return true;
+    };
+    if (applyDeepLink(root)) return;
+    // 기본 트리에 없으면 빈 팀일 수 있다 — include_empty 로 한 번 더 조회해
+    // 딥링크가 멤버 0인 팀에서도 동작하게 한다.
+    void (async () => {
+      const r = await getOrgTreeAction(true);
+      if (!r.success || !r.data) return;
+      if (applyDeepLink(r.data)) {
+        setTreeOverride(r.data);
+        setShowEmptyTeams(true);
+      }
+    })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount 1회 복원 전용
   }, []);
 
@@ -99,14 +121,16 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     setPanelDirty(false);
   }, [selectedId]);
 
-  // Cognito 동기화 등으로 root 가 갱신됐는데 선택 노드가 사라졌으면 선택을 해제한다.
+  // Cognito 동기화·빈 팀 토글 OFF 등으로 트리에서 선택 노드가 사라졌으면
+  // 선택을 해제한다. dirty 폼이 있으면 토글 자체가 가드(아래 handleToggleEmpty)
+  // 를 거치므로 이 경로는 비dirty 전환만 처리한다.
   useEffect(() => {
     if (!selectedId || syntheticNode?.id === selectedId) return;
-    if (root && !findNodeById(root, selectedId)) {
+    if (effectiveRoot && !findNodeById(effectiveRoot, selectedId)) {
       setSelectedId(null);
       syncUrl(null);
     }
-  }, [root, selectedId, syntheticNode]);
+  }, [effectiveRoot, selectedId, syntheticNode]);
 
   /**
    * 선택을 ?node= 에 기록한다. router.push 를 쓰지 않는다 — 서버 라운드트립으로
@@ -177,7 +201,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
       syncUrl(user.id);
 
       if (!user.team_id) return; // 팀 미배정 — 트리에 드러낼 자리가 없다
-      const path = findTeamExpandPath(root, user.team_id);
+      const path = findTeamExpandPath(effectiveRoot, user.team_id);
       if (!path) return; // 팀이 트리에 없다(멤버 0명 등) — 상세 패널만
       setExpandedNodes((prev) => new Set([...prev, ...path]));
     });
@@ -192,24 +216,76 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     });
   };
 
+  // ── 빈 팀 표시 토글 ─────────────────────────────────────────────────────────
+  // 멤버 0인 팀은 서버가 기본 트리에서 생략한다 — 신규 Cognito 팀에 멤버 배정 전
+  // 정책을 미리 설정할 진입점이 필요해 ON 일 때 include_empty 트리로 교체한다.
+  const applyShowEmpty = async (checked: boolean) => {
+    setShowEmptyTeams(checked);
+    if (!checked) {
+      // 기본 트리는 prop root 가 이미 들고 있다 — 재조회 불필요.
+      setTreeOverride(null);
+      return;
+    }
+    if (treeOverride) return; // 이미 가져온 트리 재사용
+    setTreeLoading(true);
+    const r = await getOrgTreeAction(true);
+    setTreeLoading(false);
+    if (r.success) {
+      setTreeOverride(r.data);
+    } else {
+      setShowEmptyTeams(false);
+      toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
+    }
+  };
+
+  /**
+   * 토글 OFF 시 선택된 빈 팀이 트리에서 사라진다 — dirty 폼이 있으면
+   * 노드 전환과 같은 ConfirmDialog 가드를 거친다.
+   */
+  const handleToggleEmpty = (checked: boolean) => {
+    if (!checked && panelDirty && selectedId && syntheticNode?.id !== selectedId) {
+      const survives = !!findNodeById(root, selectedId);
+      if (!survives) {
+        setPendingSelect(() => () => {
+          void applyShowEmpty(false);
+        });
+        return;
+      }
+    }
+    void applyShowEmpty(checked);
+  };
+
   return (
     <div className="flex flex-col gap-3">
-      <OrgSearchBox
-        root={root}
-        onSelectOrgNode={handleSelectOrgNode}
-        onSelectUser={handleSelectUser}
-      />
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <OrgSearchBox
+          root={effectiveRoot}
+          onSelectOrgNode={handleSelectOrgNode}
+          onSelectUser={handleSelectUser}
+        />
+        <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground select-none">
+          <input
+            type="checkbox"
+            checked={showEmptyTeams}
+            onChange={(e) => handleToggleEmpty(e.target.checked)}
+            disabled={treeLoading}
+            className="h-3.5 w-3.5 rounded border-gray-300"
+          />
+          {t('showEmptyTeams')}
+        </label>
+      </div>
       <div className="flex gap-0 border rounded-lg overflow-hidden min-h-[600px]">
       <div className="w-72 border-r overflow-y-auto">
-        {root ? (
+        {effectiveRoot ? (
           <OrgTree
-            node={root}
+            node={effectiveRoot}
             selectedNodeId={selectedId}
             expandedNodes={expandedNodes}
             onSelect={(node) => {
               if (node.id !== selectedId) requestSelect(() => selectTreeNode(node));
             }}
             onToggle={handleToggle}
+            emptyTeamLabel={t('emptyTeamBadge')}
           />
         ) : (
           <p className="p-4 text-muted-foreground text-sm">{t('noOrgData')}</p>
@@ -219,7 +295,7 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
         <OrgDetailPanel
           node={selectedNode}
           onDirtyChange={setPanelDirty}
-          orgId={root?.type === 'ORGANIZATION' ? root.id : undefined}
+          orgId={effectiveRoot?.type === 'ORGANIZATION' ? effectiveRoot.id : undefined}
         />
       </div>
       </div>

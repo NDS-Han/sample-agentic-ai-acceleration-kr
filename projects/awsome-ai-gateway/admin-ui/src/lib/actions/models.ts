@@ -331,7 +331,9 @@ export async function setTeamAllowedModelsAction(
         { model_aliases: modelAliases }
       )
     );
-    revalidatePath('/models');
+    // 팀 모델 정책의 유일한 편집지는 /users 팀 패널이다 — /models 는
+    // 카탈로그 전용으로 축소됐고 이 저장의 표시 영향은 /users 에만 있다.
+    revalidatePath('/users');
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };

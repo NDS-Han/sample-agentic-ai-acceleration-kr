@@ -11,6 +11,8 @@ interface OrgTreeProps {
   onSelect: (node: OrgTreeNode) => void;
   onToggle: (id: string) => void;
   depth?: number;
+  /** 멤버 0인 팀 노드 옆에 붙는 배지 텍스트(빈 팀 표시 토글 ON 때 보임). */
+  emptyTeamLabel?: string;
 }
 
 function NodeIcon({ type, isExpanded }: { type: OrgNodeType; isExpanded: boolean }) {
@@ -46,6 +48,7 @@ export function OrgTree({
   onSelect,
   onToggle,
   depth = 0,
+  emptyTeamLabel,
 }: OrgTreeProps) {
   const isSelected = selectedNodeId === node.id;
   const hasChildren = node.children && node.children.length > 0;
@@ -131,6 +134,11 @@ export function OrgTree({
 
         <NodeIcon type={node.type} isExpanded={isExpanded} />
         <span className="flex-1 truncate">{node.name}</span>
+        {emptyTeamLabel && node.type === 'TEAM' && node.meta.member_count === 0 && (
+          <span className="text-[10px] text-muted-foreground flex-shrink-0">
+            {emptyTeamLabel}
+          </span>
+        )}
       </button>
     </div>
   );
@@ -146,6 +154,7 @@ export function OrgTree({
           onSelect={onSelect}
           onToggle={onToggle}
           depth={depth + 1}
+          emptyTeamLabel={emptyTeamLabel}
         />
       ))}
     </div>

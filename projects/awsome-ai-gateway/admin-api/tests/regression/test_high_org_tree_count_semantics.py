@@ -69,7 +69,7 @@ def _org(*, name: str, departments: list):
     return o
 
 
-async def _build(org):
+async def _build(org, *, include_empty: bool = False):
     """``get_org_tree`` 를 태워 트리 노드를 얻는다. 리포지토리만 대체한다.
 
     실제 시그니처는 ``UserTeamService(cache_mgr=..., key_service=...)`` 이고 트리는
@@ -85,7 +85,7 @@ async def _build(org):
     session = AsyncMock()
     with patch("app.services.user_team_service.UserRepository") as MockRepo:
         MockRepo.return_value.list_all_orgs = AsyncMock(return_value=[org])
-        return await svc.get_org_tree(session)
+        return await svc.get_org_tree(session, include_empty=include_empty)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -257,3 +257,61 @@ def test_department_panel_reads_team_count_not_member_count():
     assert "member_count" not in expr, (
         f"teamCount 폴백에 member_count 가 남아 있다 — 팀 수 자리에 사람 수가 뜬다: {expr}"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. include_empty — 멤버 0인 팀의 정책 진입점 (/users "빈 팀 표시" 토글)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# /models 의 팀 모델 편집기가 /users 로 이전되면서, 서버가 생략하는 빈 팀은
+# 정책을 설정할 진입점이 사라진다. include_empty=true 일 때 빈 팀을 포함해야
+# 하고, 빈 팀만 있는 부서도 그 팀을 담기 위해 포함돼야 한다 — 그렇지 않으면
+# 빈 팀은 트리에서 영원히 도달 불가다.
+
+
+@pytest.fixture
+def org_with_empty_teams():
+    """부서 C: 활성 팀 + 빈 팀 + 전원 비활성 팀. 부서 D: 빈 팀만. 부서 E: 팀 없음."""
+    dept_c = _dept(
+        name="C",
+        teams=[
+            _team(name="C-active", members=[_member(name="c1")]),
+            _team(name="C-empty", members=[]),
+            _team(name="C-inactive", members=[_member(name="cx", active=False)]),
+        ],
+    )
+    dept_d = _dept(name="D", teams=[_team(name="D-empty", members=[])])
+    dept_e = _dept(name="E", teams=[])
+    return _org(name="Org", departments=[dept_c, dept_d, dept_e])
+
+
+async def test_empty_teams_excluded_by_default(org_with_empty_teams):
+    """기본 동작은 기존과 같다 — 빈 팀도, 빈 팀만의 부서도, 팀 없는 부서도 없다."""
+    built = await _build(org_with_empty_teams)
+    teams = {t.name for t in _by_type(built, "TEAM")}
+    depts = {d.name for d in _by_type(built, "DEPARTMENT")}
+    assert teams == {"C-active"}
+    assert depts == {"C"}
+
+
+async def test_include_empty_keeps_empty_teams(org_with_empty_teams):
+    """include_empty=true — 활성 멤버 0인 팀(멤버 없음·전원 비활성)이 보인다."""
+    built = await _build(org_with_empty_teams, include_empty=True)
+    teams = {t.name: t for t in _by_type(built, "TEAM")}
+    assert {"C-active", "C-empty", "C-inactive", "D-empty"} <= set(teams)
+    assert teams["C-empty"].meta.member_count == 0
+
+
+async def test_include_empty_keeps_dept_with_only_empty_teams(org_with_empty_teams):
+    """빈 팀을 담은 부서는 포함돼야 한다 — 아니면 그 팀에 UI 로 도달 불가."""
+    built = await _build(org_with_empty_teams, include_empty=True)
+    depts = {d.name: d for d in _by_type(built, "DEPARTMENT")}
+    assert "D" in depts, "빈 팀만 있는 부서가 빠져 D-empty 에 도달할 수 없다"
+    assert "C" in depts
+
+
+async def test_include_empty_still_drops_dept_with_no_teams(org_with_empty_teams):
+    """팀이 하나도 없는 부서는 include_empty 에서도 제외 — 노이즈 방지."""
+    built = await _build(org_with_empty_teams, include_empty=True)
+    depts = {d.name for d in _by_type(built, "DEPARTMENT")}
+    assert "E" not in depts
