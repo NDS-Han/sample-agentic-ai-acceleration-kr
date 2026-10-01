@@ -44,21 +44,21 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 - [x] tsc/eslint/vitest/build 전부 통과
 - [x] 시각 검증: 팀 패널(배지 2종)·유저 패널(4섹션+출처 배지) prod 빌드에서 확인
 
-## Phase 2 — 중복 편집기 제거
+## Phase 2 — 중복 편집기 제거 — 완료 `e44827e` (상세: `tasks/plan-models.md`)
 
-- [ ] **T5** `/models`에서 WebSearchTogglePanel 제거 (웹서치는 `/apps` 소유)
-  - 관련 i18n/import 정리
-  - 규모: S
-- [ ] **T6** 백엔드: `/admin/users/tree`에 `include_empty` 플래그 + `/users`에 "빈 팀 표시" 토글
-  - 목적: 멤버 0인 신규 Cognito 팀의 정책을 /users에서 설정 가능하게 (현재는 /models가 유일 진입점)
-  - 규모: M (백엔드+프론트)
-- [ ] **T7** `/models`에서 TeamModelPermissionPanel 제거
-  - 페이지의 `/admin/users/teams` fetch 제거, 팀 모델 액션의 `revalidatePath('/models')` 수정
-  - (선택) 모델 행에 "N개 팀 제한" 배지 + `/users?node=` 링크
-  - 규모: M
+- [x] **T5** `/models`에서 WebSearchTogglePanel 제거 (웹서치는 `/apps` 소유)
+- [x] **T6** `GET /admin/users/tree?include_empty=true` + `/users` "빈 팀 표시" 토글
+  - Opus 교정: 프론트 필터 불가(서버가 생략) → 백엔드 플래그 + 서버 액션 재조회
+  - 빈 팀 노드 "멤버 0" 배지, 딥링크 자동 include_empty 재조회, OFF 시 dirty-guard
+  - ⚠️ admin-api 배포 전까지 토글은 no-op(구 API가 쿼리 무시)
+- [x] **T7** `/models`에서 TeamModelPermissionPanel 제거
+  - `setTeamAllowedModelsAction`의 revalidatePath 1줄만 `/users`로 정정
+  - (제외) "N개 팀 제한" 배지 → Phase 5 후속 (Opus 동의, 신규 엔드포인트 필요)
+- [ ] 후속: TeamModelPermissionPanel 드롭다운 경로 dead-code 정리 (별도 커밋, Opus 권고)
 
-### Checkpoint: Phase 2
-- [ ] 팀 모델 편집이 /users에서만 가능, 신규 빈 팀도 설정 가능 확인
+### Checkpoint: Phase 2 — 완료
+- [x] 팀 모델 편집이 /users에서만 가능 (prod 빌드 시각 확인)
+- [ ] 신규 빈 팀 설정 가능 — admin-api 배포 후 확인 필요 (include_empty 미배포)
 
 ## Phase 3 — rate limit을 `/users`로 이전
 
