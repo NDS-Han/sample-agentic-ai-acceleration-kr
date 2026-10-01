@@ -226,6 +226,12 @@ function UserPanel({
   // 개인 앱 정책 행 존재 여부 — policy 로드 실패 시 배지 폴백에서 "상속"을
   // 구분하는 데 쓴다(행 없음 = 상속, 있음 = 자체 정책).
   const [hasOwnAppPolicy, setHasOwnAppPolicy] = useState(false);
+  // 언마운트 후 setState 방지 — 저장 후 유효정책 재조회는 로드 effect의
+  // cancelled 가드 밖에서 돌기 때문이다.
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
 
   useEffect(() => {
     // 사용자 전환 시 이전 사용자 상태 잔존 방지(잘못된 저장 차단).
@@ -327,6 +333,7 @@ function UserPanel({
       let savedClients: string[] | null = null;
       if (accessDirty) {
         const r = await setUserAllowedClientsAction(node.id, selectedToClients(selected));
+        if (!mountedRef.current) return;
         if (!r.success) {
           setFailedSection('apps');
           toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
@@ -341,10 +348,12 @@ function UserPanel({
       let savedAliases: string[] | null = null;
       if (modelsDirty) {
         const mr = await setUserAllowedModelsAction(node.id, selectedModelAliases);
+        if (!mountedRef.current) return;
         if (!mr.success) {
           // 접근 권한은 이미 저장됐을 수 있다 — 출처 배지가 stale 해지지 않게
           // 유효 정책을 재조회하고 앱 섹션 표시도 저장 결과로 동기화한다.
           const p3 = await getEffectivePolicyAction(node.id);
+          if (!mountedRef.current) return;
           if (p3.success) setPolicy(p3.data);
           if (savedClients !== null) {
             setHasOwnAppPolicy(savedClients.length > 0);
@@ -368,6 +377,7 @@ function UserPanel({
 
       // 모두 성공 — 유효 정책을 먼저 다시 읽어 출처 배지·상속 프리필을 갱신한다.
       const p2 = await getEffectivePolicyAction(node.id);
+      if (!mountedRef.current) return;
       if (p2.success) setPolicy(p2.data);
       if (savedClients !== null) {
         setHasOwnAppPolicy(savedClients.length > 0);

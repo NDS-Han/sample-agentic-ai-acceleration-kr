@@ -17,7 +17,7 @@
 // hideActions=true 로 임베드하면 자체 Apply 를 숨기고 ref.save() / onDirtyChange 를
 // 부모의 통합 저장(OrgDetailPanel TeamPanel 의 플로팅 Apply 바)에 맡긴다.
 
-import { forwardRef, useImperativeHandle, useState, useEffect, useTransition } from 'react';
+import { forwardRef, useImperativeHandle, useState, useEffect, useRef, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import {
   getScopeAllowedClientsAction,
@@ -76,6 +76,11 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
     // 정책이 정상 로드됐는지 추적 — 로드 실패 상태에서 저장하면 stale 전체허용이
     // 기존 제한을 덮어쓸 수 있으므로 저장·편집을 차단한다(UserPanel 과 같은 규칙).
     const [loaded, setLoaded] = useState(false);
+    // 언마운트 후 setState 방지 — 저장 후 재조회는 로드 effect의 cancelled 가드 밖이다.
+    const mountedRef = useRef(true);
+    useEffect(() => () => {
+      mountedRef.current = false;
+    }, []);
 
     /** 체크 상태 → 저장용 rows. 빈 선택 = [](정책 해제=상속). 리프(조직)는 전체도 []. */
     const toSaved = (sel: ClientId[]): string[] => {
@@ -170,6 +175,7 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
         return false;
       }
       const r = await setScopeAllowedClientsAction(scope, scopeId, toSaved(selected));
+      if (!mountedRef.current) return r.success;
       if (!r.success) {
         toast({ type: 'error', message: r.error, auto_dismiss_ms: 4000 });
         return false;
@@ -180,9 +186,11 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
       let org = orgClients;
       if (scope === 'team' && saved.length === 0 && orgScopeId) {
         const g = await getScopeAllowedClientsAction('organization', orgScopeId);
+        if (!mountedRef.current) return true;
         if (g.success) org = g.data.clients;
         setOrgClients(org);
       }
+      if (!mountedRef.current) return true;
       const display =
         saved.length > 0
           ? clientsToSelected(saved)
