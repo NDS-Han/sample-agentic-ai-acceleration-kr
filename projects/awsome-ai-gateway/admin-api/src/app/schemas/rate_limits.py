@@ -31,19 +31,6 @@ class RateLimitResponse(BaseModel):
     is_active: bool
 
 
-class RateLimitScopeStatus(BaseModel):
-    """단건 조회 — /users 패널이 한 스코프의 own/inherited 상태만 필요로 한다.
-
-    own = 이 스코프에 직접 설정된 활성 설정. inherited = 상위(USER→TEAM)에서
-    물려받은 유효 설정. 둘 다 없으면 제한 없음. ``get_rate_limit_tree`` 의
-    USER 분기와 동일한 상속 규칙을 쓴다(두 경로가 갈리면 배지가 어긋난다).
-    """
-
-    own: "RateLimitConfigItem | None" = None
-    inherited: "RateLimitConfigItem | None" = None
-    inherited_scope: str | None = None  # "TEAM" — USER 에만 존재
-
-
 # ── Rate Limit Tree ──
 
 
@@ -54,6 +41,19 @@ class RateLimitConfigItem(BaseModel):
     tpm: int | None = None
     cpm: Decimal | None = None
     cph: Decimal | None = None
+
+
+class RateLimitScopeStatus(BaseModel):
+    """단건 조회 — /users 패널이 한 스코프의 own/inherited 상태만 필요로 한다.
+
+    own = 이 스코프에 직접 설정된 활성 설정. inherited = 상위(USER→TEAM)에서
+    물려받은 유효 설정. 둘 다 없으면 제한 없음. ``get_rate_limit_tree`` 의
+    USER 분기와 동일한 상속 규칙을 쓴다(두 경로가 갈리면 배지가 어긋난다).
+    """
+
+    own: RateLimitConfigItem | None = None
+    inherited: RateLimitConfigItem | None = None
+    inherited_scope: str | None = None  # "TEAM" — USER 에만 존재
 
 
 class RateLimitTreeNode(BaseModel):
