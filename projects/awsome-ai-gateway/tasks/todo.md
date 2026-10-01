@@ -58,7 +58,7 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 
 ### Checkpoint: Phase 2 — 완료
 - [x] 팀 모델 편집이 /users에서만 가능 (prod 빌드 시각 확인)
-- [ ] 신규 빈 팀 설정 가능 — admin-api 배포 후 확인 필요 (include_empty 미배포)
+- [x] 신규 빈 팀 설정 가능 — include_empty 포함 admin-api 배포됨 (dev 조직에 빈 팀이 없어 표시 자체는 미확인)
 
 ## Phase 3 — rate limit을 `/users`로 이전
 
