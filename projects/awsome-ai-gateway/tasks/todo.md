@@ -81,13 +81,14 @@ Plan: `tasks/plan.md` · `/users` 페이지: `tasks/plan-users.md`
 - [x] /rate-limits → /users 리다이렉트, 라이브에서 유저 패널 Rate limit 섹션
   (제한 없음 배지·실시간 사용량·트렌드 차트·무제한 placeholder) 확인 — 배포됨
 
-## Phase 4 — `/budgets` 딥링크 + 다운그레이드 노출
+## Phase 4 — `/budgets` 딥링크 + 다운그레이드 노출 — 완료 `8546663` (상세: `tasks/plan-budgets.md`)
 
-- [ ] **T12** `/budgets?team=<uuid>` 팀 행 자동 펼침·스크롤, `?user=<uuid>` SetBudgetDialog 오픈
-  - UUID 검증, 알 수 없는 id 무시. `/users` 패널의 "budgets에서 편집" 링크를 파라미터 포함으로 수정
-  - 규모: M
-- [ ] **T13** BudgetSummaryTable 팀 행에 다운그레이드 규칙 수 배지 (노출 개선)
-  - 규모: S
+- [x] **T12** `/budgets?team=<uuid>` 팀 행 자동 펼침·스크롤, `?user=<uuid>` SetBudgetDialog 오픈
+  - UUID 검증, 비활성 대상 시 includeInactive 강제, /users 링크 2곳 딥링크화
+- [x] **T13** 팀 행 다운그레이드 배지 — 최신 배치 규칙 수+활성 여부 (get_current_rules 동일 기준)
+
+### Checkpoint: Phase 4 — 완료
+- [x] 라이브 스모크: ?team= 펼침·?user= 다이얼로그 오픈 확인 — 배포됨
 
 ## Phase 5 — 후속 (별도 검토)
 

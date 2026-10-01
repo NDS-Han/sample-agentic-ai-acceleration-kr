@@ -78,7 +78,7 @@
 - 스크롤 대상: 유저 행은 펼침 후에야 렌더되므로 항상 렌더된 **팀/그룹 행**에
   `id="budget-row-<id>"` 부여해 그쪽으로 scrollIntoView.
 
-## 구현 완료 (배포 전)
+## 구현 완료 (배포됨 — admin-api `eb960ea` + admin-ui `13873e5`)
 
 - 백엔드 `get_budget_summary` — TEAM 스코프 `downgrade_policies` 최신 배치
   그룹집계 1쿼리(scope_id → count, bool_or(is_active)) → `BudgetSummaryItem`
@@ -90,3 +90,7 @@
 - `OrgDetailPanel` — `/budgets` 링크 2곳을 `?user=`/`?team=` 딥링크로.
 - i18n `budgets.downgradeBadge`/`downgradeBadgeOff` (ko/en).
 - 검증: tsc ✓ / vitest 317 ✓ / build ✓ / admin-api budget 64+2 ✓ / lint 클린.
+- Opus 구현 리뷰: **SHIP** — 딥링크 effect(1회성·StrictMode·스크롤 대상)·
+  집계 SQL(최신 배치 join)·스키마 하위호환·배지 오부착 없음 확인.
+- 라이브 스모크: `/users` 팀 링크→`/budgets?team=`(행 펼침 확인),
+  `?user=`→예산 다이얼로그 자동 오픈 확인.
