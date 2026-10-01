@@ -53,3 +53,23 @@
 3. **C** — `budgets/page.tsx`/`page.tsx`가 `alertLevelOf`(>=90/>=70)를 공유 사용하도록 통일. 과금 경보 정확성.
 4. D·E·F·G — UX 일관성 개선.
 5. H~L — 소규모 정리.
+
+## Opus 구현 리뷰 (커밋 9980729)
+
+**Verdict: SHIP** — 6개 검증 포인트 전부 직접 확인:
+- 백엔드 `_alert_level` (`budget_service.py:1286`) ≥90/≥70 과 `alertLevelOf` 완전 일치
+- `/api/cli-download` 공개 유지 확인, 레거시 `/cli/download` 라우트 부재 확인
+- `key` remount가 cursor/hasMore와 충돌 없음 (KeysListView에 resync effect가 없어 remount가 유일한 리셋 경로)
+- 딥링크 소비처 확인 (`/users?node=`는 OrgTreeView가 window.location.search로 소비)
+- 전체 테스트 338 passed / tsc exit 0 실측 재현
+- 비차단 관찰: UsageBar aria-valuenow(캡 100) vs aria-label(실제 %) 비대칭 — 결함 아님
+
+## 배포 (admin-ui 만 — 백엔드 변경 없음)
+
+- 이미지: `llm-gateway/admin-ui:9980729` (digest sha256:4d75a73…)
+- 롤아웃: `llm-gateway-admin-ui` 완료
+- 라이브 스모크:
+  - `GET /cli` 미인증 → **307 /api/auth/login** (이전 200 — 우회 수정 확인)
+  - `GET /cli/download/linux/x64` 미인증 → 307 (서브패스도 차단)
+  - `GET /api/cli-download/...` 미인증 → 404 (공개 유지, 프록시 정상 도달)
+  - `GET /` 미인증 → 307 (기존 동작 유지)
