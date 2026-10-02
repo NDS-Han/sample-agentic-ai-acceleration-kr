@@ -4,6 +4,7 @@
 
 
 import { useState, useTransition } from 'react';
+import Link from 'next/link';
 import { useTranslations } from 'next-intl';
 import type { ModelListItem } from '@/types/entities';
 import { activateModelAction } from '@/lib/actions/models';
@@ -104,7 +105,26 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     {model.display_name ?? <span className="text-muted-foreground">—</span>}
                   </Td>
                   <Td>
-                    <ProviderBadge provider={model.provider} />
+                    <div className="flex flex-col gap-1 items-start">
+                      <ProviderBadge provider={model.provider} />
+                      {/* 모델×앱 제한 축(allowed_clients) — 편집은 /apps 에서만 가능.
+                          null=무제한은 표시하지 않고, 제한이 있을 때만 배지를 띄워
+                          "왜 이 모델이 이 앱에서 안 되지" 를 이 화면에서 발견 가능하게 한다.
+                          [] = 전면 차단(0개 앱)은 제한 있음과 구분해 destructive 톤으로. */}
+                      {model.allowed_clients !== null && (
+                        <Link
+                          href="/apps"
+                          title={model.allowed_clients.join(', ') || undefined}
+                          className="focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
+                        >
+                          <Badge tone={model.allowed_clients.length === 0 ? 'pink' : 'amber'}>
+                            {model.allowed_clients.length === 0
+                              ? t('appScopeBlocked')
+                              : t('appScopeRestricted', { count: model.allowed_clients.length })}
+                          </Badge>
+                        </Link>
+                      )}
+                    </div>
                   </Td>
                   <Td className="text-muted-foreground font-mono mono-id text-xs">{model.model_id}</Td>
                   {/* 단가는 앱 표준 per-1M 표기 — 가격동기화 다이얼로그·

@@ -55,10 +55,9 @@ async function EventsSection() {
 
 async function BodyLoggingSection() {
   const result = await getBodyLoggingAction();
-  // 읽기 실패 시 OFF 로 렌더한다 — 상태를 모를 때 "켜져 있다" 고 보여 주는 것이
-  // 더 나쁘다(운영자가 수집되고 있다고 믿는다). 실제 상태는 백엔드가 갖고 있고,
-  // 토글을 조작하면 그 응답으로 다시 맞춰진다.
-  const enabled = result.success ? result.data.enabled : false;
+  // 읽기 실패는 null(상태 불명)로 넘긴다 — OFF 로 렌더하면 실제로 수집 중인데
+  // "꺼짐"으로 보여 프롬프트 캡처가 숨겨진다(프라이버시상 최악 방향).
+  const enabled = result.success ? result.data.enabled : null;
   return <BodyLoggingToggle initialEnabled={enabled} />;
 }
 

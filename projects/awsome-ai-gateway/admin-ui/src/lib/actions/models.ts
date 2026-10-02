@@ -47,7 +47,9 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       BEDROCK_RUNTIME_OPENAI: 'OPENAI_RESPONSES',
       OPENMODEL: 'OPENAI_COMPATIBLE',
     };
-    await withRetry(() => adminAPI.post('/admin/models', {
+    // 생성 POST 는 멱등이 아니다 — 타임아웃 후 재시도하면 첫 요청이 이미
+    // 성공했을 때 409 만 돌아와 "생성됐는데 실패" 처럼 보인다.
+    await adminAPI.post('/admin/models', {
       alias: d.alias,
       provider,
       provider_model_id: d.model_id,
@@ -60,7 +62,7 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
       cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
       cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
-    }));
+    });
     revalidatePath('/models');
     return { success: true, data: undefined };
   } catch (err) {
@@ -98,15 +100,18 @@ export async function updateModelAction(
       description: d.description || null,
       display_name: d.display_name || null,
     }));
-    // Update pricing
-    await withRetry(() => adminAPI.put(`/admin/models/${alias}/pricing`, {
-      input_price_per_1k_tokens: d.input_price_per_1k,
-      output_price_per_1k_tokens: d.output_price_per_1k,
-      cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
-      cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
-      cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
-      effective_from: new Date().toISOString(),
-    }));
+    // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
+    // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
+    if (d.pricing_changed !== false) {
+      await withRetry(() => adminAPI.put(`/admin/models/${alias}/pricing`, {
+        input_price_per_1k_tokens: d.input_price_per_1k,
+        output_price_per_1k_tokens: d.output_price_per_1k,
+        cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
+        cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
+        cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
+        effective_from: new Date().toISOString(),
+      }));
+    }
     revalidatePath('/models');
     return { success: true, data: undefined };
   } catch (err) {
@@ -170,6 +175,7 @@ interface AdminModelItem {
   status: string;
   description: string | null;
   display_name: string | null;
+  allowed_clients?: string[] | null;
   current_pricing: {
     input_price_per_1k_tokens: string;
     output_price_per_1k_tokens: string;
@@ -209,6 +215,7 @@ export async function listActiveModelsAction(): Promise<ActionResult<ModelListIt
           context_window: 0,
           description: item.description,
           display_name: item.display_name,
+          allowed_clients: item.allowed_clients ?? null,
         };
       });
     return { success: true, data: models };

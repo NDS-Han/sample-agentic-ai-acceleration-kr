@@ -143,6 +143,22 @@ class ModelService:
             await session.flush()
             update_kwargs["allowed_clients"] = None
 
+        # ── description / display_name 의 "명시적 null = 값 삭제" ──
+        #
+        # admin-ui 편집 폼은 두 필드를 기존값으로 미리 채워 보낸다 — 폼에서 지운
+        # 경우만 null 이 오므로, 명시적 null 을 삭제 의도로 취급해도 안전하다
+        # (생략과의 구별은 allowed_clients 와 같은 model_fields_set 규칙).
+        # endpoint_url 은 제외 — endpoint 가 필요한 provider 에서 지우면
+        # 런타임에만 깨지므로 "삭제" 의도 자체를 허용하지 않는 게 안전하다.
+        _cleared = False
+        for field in ("description", "display_name"):
+            if field in data.model_fields_set and getattr(data, field) is None:
+                setattr(model, field, None)
+                update_kwargs[field] = None
+                _cleared = True
+        if _cleared:
+            await session.flush()
+
         pricing = await repo.get_current_pricing(alias)
 
         # BR-MOD-04: Cache invalidation

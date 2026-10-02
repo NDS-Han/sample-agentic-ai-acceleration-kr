@@ -81,6 +81,8 @@ export interface ModelListItem {
   context_window: number;
   description: string | null;
   display_name: string | null;
+  /** 모델×앱 허용 축. null=제한 없음, []=모든 앱 차단, 목록=그 앱만. 편집은 /apps. */
+  allowed_clients: string[] | null;
 }
 
 // ─── Team Model Access ───────────────────────────────────────────────────────

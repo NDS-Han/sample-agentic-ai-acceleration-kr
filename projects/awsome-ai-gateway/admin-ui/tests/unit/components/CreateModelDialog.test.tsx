@@ -163,6 +163,7 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
     context_window: 0,
     description: 'Cowork Opus',
     display_name: 'Cowork Opus',
+    allowed_clients: null,
   };
 
   beforeEach(() => {
@@ -215,6 +216,31 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
     // ⚠️ disabled 셀렉트가 값을 잃으면 ModelCreateSchema 의 provider min(1) 이 깨져
     //    편집이 100% 실패한다(zod 는 create/update 양쪽에 같은 스키마를 쓴다).
     expect(payload.provider).toBe('BEDROCK_MANTLE');
+  });
+
+  it('가격이 안 바뀐 편집은 pricing_changed=false 를 보낸다 (불필요한 가격 버전 방지)', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={editModel} />);
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.pricing_changed).toBe(false);
+  });
+
+  it('가격이 바뀐 편집은 pricing_changed=true 를 보낸다', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={editModel} />);
+    fireEvent.change(screen.getByLabelText('priceInput'), {
+      target: { name: 'input_price_per_1k', value: '0.02' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.pricing_changed).toBe(true);
   });
 
   it('providerReadonly 안내 문구가 ko/en 양쪽에 있다 (키가 그대로 노출되지 않게)', () => {

@@ -10,8 +10,8 @@ import { useToast } from '@/components/common/ToastProvider';
 import { setBodyLoggingAction } from '@/lib/actions/settings';
 
 interface Props {
-  /** 서버에서 읽어 온 현재 저장 상태. */
-  initialEnabled: boolean;
+  /** 서버에서 읽어 온 현재 저장 상태. null = 읽기 실패(상태 불명) — 스위치 비활성화. */
+  initialEnabled: boolean | null;
 }
 
 /**
@@ -59,7 +59,7 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
   };
 
   const handleClick = () => {
-    if (isPending) return;
+    if (isPending || enabled === null) return;
     setPendingNext(!enabled);
   };
 
@@ -71,10 +71,19 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
       <div className="flex flex-col gap-1">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">{t('label')}</span>
-          <Badge tone={enabled ? 'amber' : 'neutral'}>{enabled ? 'ON' : 'OFF'}</Badge>
+          {enabled === null ? (
+            // 읽기 실패는 OFF 와 구분한다 — 실제로는 켜져 있을 수 있는데 "꺼짐" 으로
+            // 보이면 프롬프트 수집이 숨겨진다(프라이버시상 최악 방향).
+            <Badge tone="amber">{t('statusUnknown')}</Badge>
+          ) : (
+            <Badge tone={enabled ? 'amber' : 'neutral'}>{enabled ? 'ON' : 'OFF'}</Badge>
+          )}
         </div>
         <p className="text-xs text-muted-foreground">{t('description')}</p>
-        {enabled && (
+        {enabled === null && (
+          <p className="text-xs text-destructive">{t('statusUnknownWarning')}</p>
+        )}
+        {enabled === true && (
           // 켜져 있는 동안 상시 보이는 경고. 배지만으로는 "무엇이" 수집되는지 알 수 없다.
           <p className="text-xs text-destructive">{t('activeWarning')}</p>
         )}
@@ -83,15 +92,15 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
       <button
         type="button"
         role="switch"
-        aria-checked={enabled}
+        aria-checked={enabled === true}
         aria-label={t('toggleLabel')}
-        disabled={isPending}
+        disabled={isPending || enabled === null}
         onClick={handleClick}
         className={[
           'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
           'focus:outline-none focus-visible:ring-2 focus-visible:ring-primary',
           enabled ? 'bg-primary' : 'bg-muted-foreground/40',
-          isPending ? 'opacity-60 cursor-wait' : 'cursor-pointer',
+          isPending || enabled === null ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
         ].join(' ')}
       >
         <span

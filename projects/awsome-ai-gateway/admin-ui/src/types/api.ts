@@ -86,6 +86,9 @@ export const ModelCreateSchema = z.object({
   // (두 필드는 ModelListItem 표시용 타입에만 존재하며 항상 0 으로 채워진다.)
   description: z.string().max(512).optional(),
   display_name: z.string().max(128).optional(),
+  // 편집 경로 전용 힌트: 가격 필드가 기존값과 동일하면 false — 불필요한 pricing
+  // 버전 생성(effective_from=now)을 건너뛴다. 생성 경로는 항상 미설정(=가격 등록).
+  pricing_changed: z.boolean().optional(),
 })
   // BEDROCK_RUNTIME_OPENAI 은 endpoint_url 이 **필수**다. 게이트웨이 어댑터가 SigV4 서명
   // 리전을 endpoint 호스트(bedrock-runtime.{region}.amazonaws.com)에서 뽑아내므로, 비어

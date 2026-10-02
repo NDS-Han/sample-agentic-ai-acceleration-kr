@@ -75,10 +75,13 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
   const isEditMode = !!editModel;
 
   useEffect(() => {
-    if (editModel) {
+    // 열릴 때마다 리셋 — 생성 후 다시 열면 이전 값/에러가 남아 있던 문제.
+    if (isOpen) {
       setForm(getInitialState(editModel));
+      setError(null);
+      setFieldErrors({});
     }
-  }, [editModel]);
+  }, [isOpen, editModel]);
 
   const handleChange = (
     e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>
@@ -111,6 +114,20 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       cache_read_price_per_1k: parseFloat(form.cache_read_price_per_1k || '0'),
       description: form.description || undefined,
       display_name: form.display_name || undefined,
+      // 편집 모드: 가격이 안 바뀌면 pricing PUT 을 건너뛰라는 힌트(불필요한 버전 생성 방지).
+      ...(isEditMode && {
+        pricing_changed: [
+          'input_price_per_1k',
+          'output_price_per_1k',
+          'cache_creation_5m_price_per_1k',
+          'cache_creation_1h_price_per_1k',
+          'cache_read_price_per_1k',
+        ].some((f) => {
+          const key = f as keyof typeof form;
+          const orig = editModel[f as keyof typeof editModel];
+          return Math.abs(parseFloat(String(form[key]) || '0') - (Number(orig) || 0)) > 1e-9;
+        }),
+      }),
     };
 
     startTransition(async () => {
@@ -235,22 +252,38 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
             {fieldErrors.model_id && <FormError error={fieldErrors.model_id} />}
           </div>
 
-          {/* Endpoint URL — OPENMODEL(vLLM) 등 커스텀 엔드포인트 모델에서만 의미있음 */}
-          <div className="space-y-1">
-            <label htmlFor="endpoint_url" className="text-sm font-medium">
-              {t('endpointUrl')} <span className="text-muted-foreground text-xs">{t('endpointUrlOptional')}</span>
-            </label>
-            <input
-              id="endpoint_url"
-              name="endpoint_url"
-              type="text"
-              value={form.endpoint_url}
-              onChange={handleChange}
-              className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-              placeholder={t('endpointUrlPlaceholder')}
-            />
-            {fieldErrors.endpoint_url && <FormError error={fieldErrors.endpoint_url} />}
-          </div>
+          {/* Endpoint URL — BEDROCK(native) 외 provider 는 필수: 어댑터가
+              호스트/리전을 이 값에서 뽑으므로 비우면 런타임에만 깨진다.
+              편집 시 비워 저장하면 서버가 무시해 "지워진 줄 아는" 조용한 불일치가
+              생기므로, endpoint 필요 provider 에서는 지울 수 없게 한다. */}
+          {(() => {
+            const endpointRequired = isEditMode
+              ? editModel.provider !== 'BEDROCK'
+              : form.provider !== 'BEDROCK' && form.provider !== '';
+            return (
+              <div className="space-y-1">
+                <label htmlFor="endpoint_url" className="text-sm font-medium">
+                  {t('endpointUrl')}{' '}
+                  {endpointRequired ? (
+                    <span className="text-destructive">*</span>
+                  ) : (
+                    <span className="text-muted-foreground text-xs">{t('endpointUrlOptional')}</span>
+                  )}
+                </label>
+                <input
+                  id="endpoint_url"
+                  name="endpoint_url"
+                  type="text"
+                  value={form.endpoint_url}
+                  onChange={handleChange}
+                  required={endpointRequired}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  placeholder={t('endpointUrlPlaceholder')}
+                />
+                {fieldErrors.endpoint_url && <FormError error={fieldErrors.endpoint_url} />}
+              </div>
+            );
+          })()}
 
           {/* Price fields — 수직 일렬 배치 */}
           <div className="space-y-3">

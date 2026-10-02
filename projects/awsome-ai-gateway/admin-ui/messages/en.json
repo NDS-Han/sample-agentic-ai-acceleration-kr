@@ -487,7 +487,9 @@
       }
     },
     "selectedCount": "{count}/{total} selected",
-    "emptySaveHint": "Selecting none cannot be saved — to allow all models, select all and save."
+    "emptySaveHint": "Selecting none cannot be saved — to allow all models, select all and save.",
+    "appScopeBlocked": "No apps allowed",
+    "appScopeRestricted": "{count} apps"
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -1076,7 +1078,9 @@
       "confirmOnLabel": "Turn on",
       "confirmOffTitle": "Turn off body logging?",
       "confirmOffMessage": "Request and response bodies will no longer be stored in S3. Bodies from the period it was off cannot be recovered later. You can turn it back on at any time.",
-      "confirmOffLabel": "Turn off"
+      "confirmOffLabel": "Turn off",
+      "statusUnknown": "Unknown",
+      "statusUnknownWarning": "Could not read the current setting — it may actually be on. Refresh to check again."
     }
   },
   "errors": {

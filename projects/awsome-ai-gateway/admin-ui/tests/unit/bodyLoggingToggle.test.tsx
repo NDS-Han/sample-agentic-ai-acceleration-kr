@@ -158,9 +158,14 @@ describe('배선', () => {
     expect(src).toContain('getBodyLoggingAction');
   });
 
-  it('읽기 실패 시 OFF 로 렌더한다 — 모를 때 ON 으로 보이면 안 된다', () => {
-    const src = read('src/app/monitoring/page.tsx');
-    expect(src).toMatch(/result\.success \?\s*result\.data\.enabled\s*:\s*false/);
+  it('읽기 실패 시 상태 불명(null)으로 렌더한다 — 켜져 있을 수 있는데 OFF 로 보이면 안 된다', () => {
+    // 프라이버시 방향: 실제로 수집 중인데 "꺼짐"으로 보이는 게 최악의 오답이다.
+    // 페이지는 실패를 null 로 넘기고, 컴포넌트는 null 을 비활성 "알 수 없음"으로 렌더한다.
+    const page = read('src/app/monitoring/page.tsx');
+    expect(page).toMatch(/result\.success \?\s*result\.data\.enabled\s*:\s*null/);
+    const comp = read('src/components/monitoring/BodyLoggingToggle.tsx');
+    expect(comp).toMatch(/statusUnknown/);
+    expect(comp).toMatch(/enabled === null/);
   });
 
   it('쓰기 액션은 재시도하지 않는다 — 감사 로그가 중복된다', () => {

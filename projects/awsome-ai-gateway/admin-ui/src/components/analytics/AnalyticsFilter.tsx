@@ -109,27 +109,37 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
             {t('lastMonth')}
           </button>
           {dropdownMonths.length > 0 && (
-            <select
-              aria-label={t('selectPeriod')}
-              value={dropdownActive ? currentMonth : ''}
-              onChange={(e) => {
-                if (e.target.value) handleMonthChange(e.target.value);
-              }}
-              className={[btn(dropdownActive), 'appearance-none bg-transparent pr-7 cursor-pointer bg-[length:14px] bg-no-repeat bg-[right_0.4rem_center]'].join(' ')}
-              style={{
-                backgroundImage:
-                  "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")",
-              }}
-            >
-              <option value="" disabled>
-                {t('selectPeriod')}
-              </option>
-              {dropdownMonths.map((p) => (
-                <option key={p} value={p}>
-                  {monthLabel(p)}
+            <span className={`relative inline-flex ${dropdownActive ? 'text-primary' : 'text-muted-foreground'}`}>
+              <select
+                aria-label={t('selectPeriod')}
+                value={dropdownActive ? currentMonth : ''}
+                onChange={(e) => {
+                  if (e.target.value) handleMonthChange(e.target.value);
+                }}
+                className={[btn(dropdownActive), 'appearance-none pr-7 cursor-pointer', dropdownActive ? '' : 'bg-transparent'].join(' ')}
+              >
+                <option value="" disabled>
+                  {t('selectPeriod')}
                 </option>
-              ))}
-            </select>
+                {dropdownMonths.map((p) => (
+                  <option key={p} value={p}>
+                    {monthLabel(p)}
+                  </option>
+                ))}
+              </select>
+              <svg
+                aria-hidden="true"
+                className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2.5"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <polyline points="6 9 12 15 18 9" />
+              </svg>
+            </span>
           )}
           <button
             type="button"

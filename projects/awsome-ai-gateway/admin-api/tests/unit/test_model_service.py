@@ -23,7 +23,11 @@ def model_service(cache_mgr: CacheInvalidationManager) -> ModelService:
     return ModelService(cache_mgr=cache_mgr)
 
 
-def _make_model(alias: str = "claude-sonnet") -> ModelAlias:
+def _make_model(
+    alias: str = "claude-sonnet",
+    description: str | None = "test model",
+    display_name: str | None = None,
+) -> ModelAlias:
     m = MagicMock(spec=ModelAlias)
     m.alias = alias
     m.provider = Provider.BEDROCK
@@ -31,8 +35,8 @@ def _make_model(alias: str = "claude-sonnet") -> ModelAlias:
     m.endpoint_url = None
     m.api_format = ApiFormat.BEDROCK_NATIVE
     m.status = ModelStatus.ACTIVE
-    m.description = "test model"
-    m.display_name = None  # _to_response reads display_name; MagicMock would yield a non-str → pydantic error
+    m.description = description
+    m.display_name = display_name  # _to_response reads display_name; MagicMock would yield a non-str → pydantic error
     m.created_at = datetime.now(timezone.utc)
     m.updated_at = datetime.now(timezone.utc)
     return m
@@ -138,6 +142,49 @@ class TestUpdateModel:
 
         # Cache invalidation called
         assert mock_redis.delete.call_count >= 1
+
+    async def test_update_model_explicit_null_clears_description_and_display_name(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 폼이 필드를 비워 보낸 경우(명시적 null) — 기존값을 지우는 게 의도된 동작.
+        # "키 생략"과 구별하므로 생략된 필드는 유지돼야 한다.
+        data = ModelUpdateRequest(description=None, display_name=None)
+        model = _make_model(description="old desc", display_name="Old Name")
+        pricing = _make_pricing()
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=pricing)
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        assert model.description is None
+        assert model.display_name is None
+        mock_session.flush.assert_awaited()
+
+    async def test_update_model_omitted_nullable_fields_are_preserved(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 키 자체를 안 보낸 경우 — 기존 "null=무시" 관례대로 값이 유지돼야 한다.
+        # (명시적 null 과 생략의 구별이 핵심 — 섞이면 PATCH 가 부분 업데이트를 못 한다.)
+        data = ModelUpdateRequest(provider_model_id="new-id")
+        model = _make_model(description="keep me", display_name="Keep")
+        pricing = _make_pricing()
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=pricing)
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        assert model.description == "keep me"
+        assert model.display_name == "Keep"
 
 
 class TestSetPricing:

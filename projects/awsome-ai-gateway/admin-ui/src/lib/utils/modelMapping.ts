@@ -24,6 +24,7 @@ export interface APIModelItem {
   } | null;
   context_window: number | null;
   max_output_tokens: number | null;
+  allowed_clients?: string[] | null;
 }
 
 export function mapToModelListItem(item: APIModelItem): ModelListItem {
@@ -49,5 +50,6 @@ export function mapToModelListItem(item: APIModelItem): ModelListItem {
     context_window: item.context_window ?? 0,
     description: item.description,
     display_name: item.display_name,
+    allowed_clients: item.allowed_clients ?? null,
   };
 }

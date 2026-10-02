@@ -32,9 +32,11 @@ export default async function MyPage({ searchParams }: MyPageProps) {
   // 스코프의 /admin/my/periods 를 쓴다. 실패 시 이번 달만 보이게 한다.
   const periods = await fetchMyPeriods().catch(() => [] as string[]);
   const requested = searchParams.period;
+  // 기본은 이번 달 — 옆의 예산 카드가 항상 이번 달 기준이라, 데이터 있는 최신 월로
+  // 열리면 두 카드의 기준이 어긋난다. 이번 달 사용이 없으면 빈 상태를 보인다.
   const effectiveMonth = isMonth(requested)
     ? requested
-    : (periods[0] ?? currentCalendarMonth());
+    : currentCalendarMonth();
   // 이번 달이 목록에 없어도 버튼은 항상 보이게(신규 사용자·월초 빈 상태).
   const selectorPeriods = periods.includes(currentCalendarMonth())
     ? periods

@@ -3,11 +3,10 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import {
   currentCalendarMonth,
   monthsAgo,
-  toKoreanMonthLabel,
 } from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 
@@ -24,10 +23,18 @@ interface PeriodSelectorProps {
  */
 export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
   const t = useTranslations('dashboard');
+  const locale = useLocale();
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const reportingTz = useReportingTz();
+
+  const monthLabel = (period: string) => {
+    const [year, month] = period.split('-').map(Number);
+    return new Intl.DateTimeFormat(locale, { year: 'numeric', month: 'long', timeZone: 'UTC' }).format(
+      new Date(Date.UTC(year, month - 1, 1)),
+    );
+  };
 
   const thisMonth = currentCalendarMonth(reportingTz);
   const lastMonth = monthsAgo(1, reportingTz);
@@ -84,33 +91,36 @@ export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
       </button>
 
       {dropdownMonths.length > 0 && (
-        <div className="relative">
+        <div className={`relative ${dropdownActive ? 'text-primary' : 'text-muted-foreground'}`}>
           <select
             aria-label={t('periodSelectMonth')}
             value={dropdownActive ? current : ''}
             onChange={(e) => {
               if (e.target.value) go(e.target.value);
             }}
-            className={[
-              btn(dropdownActive),
-              'appearance-none bg-transparent pr-7 cursor-pointer',
-              // 드롭다운 화살표
-              'bg-[length:14px] bg-no-repeat bg-[right_0.4rem_center]',
-            ].join(' ')}
-            style={{
-              backgroundImage:
-                "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E\")",
-            }}
+            className={[btn(dropdownActive), 'appearance-none pr-7 cursor-pointer', dropdownActive ? '' : 'bg-transparent'].join(' ')}
           >
             <option value="" disabled>
               {t('periodSelect')}
             </option>
             {dropdownMonths.map((p) => (
               <option key={p} value={p}>
-                {toKoreanMonthLabel(p)}
+                {monthLabel(p)}
               </option>
             ))}
           </select>
+          <svg
+            aria-hidden="true"
+            className="pointer-events-none absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2.5"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <polyline points="6 9 12 15 18 9" />
+          </svg>
         </div>
       )}
     </div>
