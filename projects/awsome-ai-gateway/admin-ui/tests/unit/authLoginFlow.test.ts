@@ -482,6 +482,20 @@ describe('GET /api/auth/callback — happy path', () => {
     expect(jar['oidc_verifier']).toMatch(/Max-Age=0/i);
   });
 
+  it('DEVELOPER 는 / 가 403 이라 /my 로 보낸다 — 로그인 직후 403 첫 화면 방지', async () => {
+    configureOidc();
+    const idToken = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, {
+      role: 'DEVELOPER',
+    });
+    stubTokenEndpoint({ id_token: idToken });
+
+    const res = await callbackGET(callbackReq());
+
+    expect(res.status).toBe(303);
+    expectRelativeRedirect(res, '/my');
+    expect(setCookies(res)['admin_jwt']).toBeTruthy();
+  });
+
   it('token 요청에 code_verifier / code / redirect_uri / client_id 를 싣는다 (PKCE 실사용)', async () => {
     configureOidc();
     const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });

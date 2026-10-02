@@ -56,12 +56,16 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
   ];
 
   const handleFilterChange = (next: MonitoringEventTypeFilter) => {
+    const prev = filter;
     setFilter(next);
     startTransition(async () => {
       // 필터 변경은 사용자 액션 — 실패를 조용히 삼키면 선택만 바뀌고 목록은
-      // 이전 필터의 데이터로 보인다. 폴링과 달리 명시 알림이 필요하다.
+      // 이전 필터의 데이터로 보인다. 폴링과 달리 명시 알림이 필요하고,
+      // 실패 시 셀렉트도 되돌려 "보이는 목록 ≠ 표시된 필터" 상태를 남기지 않는다
+      // (pending 동안 셀렉트가 disabled 라 연속 변경 race 는 없다).
       const fresh = await fetchMonitoringEvents(50, next).catch(() => null);
       if (fresh === null) {
+        setFilter(prev);
         toast({
           type: 'error',
           message: t('events.fetchFailed'),

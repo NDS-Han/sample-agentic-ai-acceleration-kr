@@ -24,7 +24,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
-import { parseJWT, isSessionExpired } from '@/lib/auth';
+import { parseJWT, isSessionExpired, checkPagePermission } from '@/lib/auth';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -347,7 +347,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   // 303 — POST/GET 구분 없이 GET 으로 이동시킨다(logout/route.ts:19 와 같은 이유).
   // 상대 Location — CloudFront/ALB 뒤에서 Host 헤더가 내부 오리진일 수 있다(lib/redirect.ts).
-  const res = redirectRelative('/');
+  //
+  // 랜딩은 역할별로 가른다 — '/' 는 ADMIN/TEAM_LEADER 전용(PAGE_PERMISSIONS)이라
+  // DEVELOPER 를 그대로내면 로그인 직후 첫 화면이 403 이 된다. 권한표 기준으로
+  // '/' 가 안 되면 /my(개발자 홈)로 보낸다. 어느 쪽도 못 여는 역할이면 /my 에서
+  // middleware 가 403 으로 정리한다 — 콜백이 흉내낼 필요는 없다.
+  const res = redirectRelative(checkPagePermission('/', parsedSession.role) ? '/' : '/my');
   res.cookies.set('admin_jwt', cookieToken, {
     httpOnly: true,
     sameSite: 'lax',

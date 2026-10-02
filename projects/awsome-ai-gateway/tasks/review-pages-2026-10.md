@@ -164,3 +164,31 @@
 - 이미지: `admin-api:9c8f90c` + `admin-ui:9c8f90c` — EKS 롤아웃 완료
 - 라이브 스모크(admin-dev/admin-api-dev 호스트): `/` → 307 로그인 리다이렉트, `/analytics` → 307, admin-api `/health` → 200, `/admin/models` 무인증 → 401 ✓
   - ⚠️ `gateway-dev.*` 호스트로 admin 경로를 치면 전부 401 — 그 도메인은 LLM 게이트웨이(VK 필요)이며 정상 동작이다.
+
+---
+
+# 5차 — 페이지/기능 재검토 (정적 리뷰)
+
+## 배경
+
+4차 배포 후 테스트 잔여물 정리(로컬 Docker stop, hung vitest kill, dev DB 테스트 상태 원복 — `claude-code` backend `invoke` 복구, `gpt-6.1-sol`/`codex-gpt-6.1-sol` INACTIVE, 팀 허용 행 삭제; 배포 이미지/IAM 무수정). 사용자 요청으로 나머지 페이지(users/apps/keys/monitoring/chat/cli/effective-policy) 정적 기능 리뷰.
+
+## 발견·수정
+
+| # | 발견 | 처리 |
+|---|------|------|
+| 1 | **OIDC 로그인 직후 DEVELOPER 는 첫 화면이 403** — `api/auth/callback`이 전원 `/`로 리다이렉트하는데 `/`는 ADMIN/TEAM_LEADER 전용(PAGE_PERMISSIONS). dev-login은 ADMIN/TL만 받아 무문제, OIDC 개발자만 해당 | 콜백 랜딩을 `checkPagePermission('/', role) ? '/' : '/my'`로 역할별 분기. 회귀 테스트 추가(DEVELOPER → /my, 303) |
+| 2 | `/monitoring` EventLog 필터 fetch 실패 시 토스트만 띄우고 셀렉트는 새 필터·목록은 이전 데이터 — "표시된 필터 ≠ 보이는 데이터" 상태 | 실패 시 `setFilter(prev)`로 셀렉트 되돌림(pending 동안 disabled라 race 없음) |
+| 3 | TZ 불일치 — MonitoringOverview timestamp·UserTopTable `last_request_at`만 브라우저 로컬 시각(`toLocaleString`/`toLocaleTimeString`), 같은 페이지의 나머지는 reporting TZ | 둘 다 `fmtDateTime`/`fmtTime` + `useReportingTz()`로 통일 |
+
+## 확인하고 수정하지 않은 것
+
+- 대시보드 `fetchBudgetSummary`의 `target_type` 소문자 필터 ↔ 백엔드 `scope_enum.value.lower()` 응답 — 일치 확인(budgets 페이지의 대문자 normalize는 UI 입력 측라 무관).
+- `/my`의 임의 `?period=` 허용 — 서버 응답 기준 렌더라 무해.
+- admin-api `slow` 이벤트 임계(TTFT>3s) 하드코딩 — 의도된 단순 기준.
+- 기간 선택 드롭다운이 "이전 월 전용"(이번/지난 달은 버튼) — 사용자 확인으로 현 구조 유지.
+
+## 검증
+
+- tsc ✓ / vitest authLoginFlow 51 ✓(신규 DEVELOPER 랜딩 포함) / eslint 변경 파일 0
+- 미배포 — 배포 요청 시 별도 진행.

@@ -3,7 +3,8 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtDateTime, fmtUsd } from '@/lib/utils/format';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import type { MonitoringOverviewResponse } from '@/lib/actions/monitoring';
 
 function StatCard({ label, value, sub }: { label: string; value: string; sub?: string }) {
@@ -19,6 +20,7 @@ function StatCard({ label, value, sub }: { label: string; value: string; sub?: s
 export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse }) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
+  const tz = useReportingTz();
   const h = data.last_1h;
 
   return (
@@ -26,7 +28,7 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
       <div className="flex items-center justify-between">
         <h2 className="text-base font-semibold">{t('lastHourSummary')}</h2>
         <span className="text-xs text-muted-foreground">
-          {new Date(data.timestamp).toLocaleString(locale)}
+          {fmtDateTime(data.timestamp, locale, tz)}
         </span>
       </div>
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-4">
