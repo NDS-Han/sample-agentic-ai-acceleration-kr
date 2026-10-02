@@ -102,15 +102,17 @@ export async function updateModelAction(
     }));
     // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
     // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
+    // 비멱등 쓰기(effective_from 을 요청마다 새로 계산)라 withRetry 로 감싸지 않는다 —
+    // 타임아웃 후 재시도하면 방금 쓴 가격 행을 닫고 중복 버전이 생긴다.
     if (d.pricing_changed !== false) {
-      await withRetry(() => adminAPI.put(`/admin/models/${alias}/pricing`, {
+      await adminAPI.put(`/admin/models/${alias}/pricing`, {
         input_price_per_1k_tokens: d.input_price_per_1k,
         output_price_per_1k_tokens: d.output_price_per_1k,
         cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
         cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
         cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
         effective_from: new Date().toISOString(),
-      }));
+      });
     }
     revalidatePath('/models');
     return { success: true, data: undefined };

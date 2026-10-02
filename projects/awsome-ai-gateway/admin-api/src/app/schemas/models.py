@@ -92,8 +92,8 @@ class ModelUpdateRequest(BaseModel):
     description: str | None = None
     # max_length matches VARCHAR(128); without it an overlong update would 500 at the DB
     # instead of a clean 422 (mirrors ModelCreateRequest.display_name).
-    # NOTE: update uses an is-not-None filter, so display_name can be SET/changed but not
-    # cleared back to NULL via the API (repo-wide behavior for all nullable update fields).
+    # NOTE: update distinguishes "omitted" (keep) from "explicit null" (clear to NULL)
+    # via model_fields_set — same rule as allowed_clients below.
     display_name: str | None = Field(default=None, max_length=128)
     #: 3-상태. ⚠️ 여기서 "생략 = 유지" 와 "명시적 null = 제한 해제" 를 구별해야 한다.
     #:    null 을 생략과 같이 다루면 한 번 목록이 박힌 모델을 "제한 없음" 으로 되돌릴 API

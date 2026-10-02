@@ -117,3 +117,43 @@
 - 커밋: `d255291`(기능) + `8fab506`(B1 IDOR 조건)
 - 이미지: `llm-gateway/admin-api:8fab506` + `llm-gateway/admin-ui:8fab506` — 롤아웃 완료
 - 라이브 스모크: `GET /admin/budgets/team/{id}` 무인증 → **401** (라우트 존재·인증 필요 확인)
+
+---
+
+# 4차 — 서비스 목적 정합성 리뷰 (Devin + Opus 5.5)
+
+## 배경
+
+사용자가 `/analytics` 기간 선택 `<select>`의 화살표가 hover 시 여러 개로 깨져 보이는 스크린샷을 보고하고, "서비스 목적에 맞게" 페이지별 기능 재검토를 요청. 이번 리뷰 초점은 스타일이 아니라 **"운영자가 보는 화면이 게이트웨이 실제 상태와 일치하는가"**.
+
+## 발견·수정 (커밋 2e18d08 + 조건 반영)
+
+| # | 발견 | 처리 |
+|---|------|------|
+| 1 | 셀렉트 화살표: `appearance-none` + 인라인 SVG `background-image`가 일부 브라우저에서 세로 타일링되어 쌓여 보임 (`AnalyticsFilter`, `PeriodSelector`) | 인라인 SVG 오버레이(pointer-events-none, aria-hidden)로 교체. Opus 미용 지적 2건(chevron이 select의 활성 text 색을 못 따라감 — wrapper가 `currentColor` 제공, `bg-transparent`와 활성 `bg-primary/10` 순서 경쟁 — 비활성만 transparent)도 반영 |
+| 2 | **`/monitoring` body logging 읽기 실패를 OFF로 표시** — 주석 논리와 반대로 프라이버시 최악 방향(실제로 수집 중인데 "꺼짐"으로 보임) | `initialEnabled: null` 추가 → "알 수 없음" 배지 + 스위치 비활성화. 테스트 갱신 |
+| 3 | **모든 모델 편집이 새 가격 버전 생성** — 설명만 고쳐도 `effective_from=now` pricing PUT (이력 오염 + 비원자적 2-PUT) | `pricing_changed` 플래그(1e-9 float 비교)로 미변경 시 스킵. Opus 지적 추가: pricing PUT은 비멱등이라 `withRetry` 제거(재시도 시 중복 버전) |
+| 4 | **optional 필드 삭제가 silent no-op** — description/display_name 비워도 null→백엔드 무시→성공 토스트만 | 백엔드 `model_fields_set`로 "생략=유지 / 명시적 null=삭제" 구별 구현(allowed_clients와 동일 규칙). endpoint_url은 의도적으로 제외(endpoint 필요 provider에서 지우면 런타임 파손) + UI에서 비BEDROCK는 required |
+| 5 | **`/models`에 allowed_clients(모델×앱 제한)가 전무** — 제약 편집은 `/apps` AppPolicyPanel에만 존재(발견가능성 갭) | 테이블에 읽기 전용 배지(null=미표시/[]=전면 차단/목록=N개 앱) + `/apps` 링크. `ModelListItem.allowed_clients` + listActiveModelsAction 매핑 |
+| 6 | create 다이얼로그 재오픈 시 이전 값/에러 유지 | `isOpen` 전이 시 폼 리셋 |
+| 7 | 모델 생성 POST가 `withRetry` 안 — 타임아웃 재시도 시 409 오인 | retry 제거(비멱등) |
+| 8 | `/my`가 `?period` 없을 때 최신 데이터 월 표시 — 미사용자는 과거 월 + 이번 달 예산 카드 병존 | 기본값=현재 월, 데이터 월 목록에 없으면 목록에 추가 |
+| 9 | `toKoreanMonthLabel`이 로케일 무관 "YYYY년 M월" 하드코드 | `Intl.DateTimeFormat(locale, {month:'long', year:'numeric', timeZone:'UTC'})` |
+
+## 반박된 제 발견
+
+- `/models`의 `allowed_clients` 편집 UI 부재 → `/apps` AppPolicyPanel에 3-상태 confirm까지 이미 존재. 남은 건 발견가능성뿐이라 배지로 해소(#5).
+
+## Opus 구현 리뷰 3 (2e18d08) — CONDITIONAL SHIP → 조건 반영
+
+- 조건(완료): `model_service.update_model`의 allowed_clients 주석이 "다른 nullable 필드는 null=무시 유지"라고 쓰여 있으나 바로 아래 코드가 description/display_name을 null=삭제로 처리 — 주석 갱신. `schemas/models.py`의 display_name NOTE도 stale — 갱신.
+- 반영: pricing PUT `withRetry` 제거(비멱등 — 위 #3에 병합).
+- 확인됨: UI는 항상 4키를내므로 "생략"이 백엔드에 도달하지 않음 → 프리필 폼에서 비우기=삭제 의도와 일치. 외부 호출자의 `null="no change"` 관례는 계약 변경이므로 changelog 언급 필요.
+- 통과: `/cli`·`/chat` 이상 없음, chevron/unknown/i18n/로케일 라벨 정상.
+- 잔여(비차단): 편집 폼의 endpoint_url은 HTML required만(whitespace 통과), BEDROCK에서 endpoint 비워도 무시되어 UI-DB 불일치 가능, 두 admin 동시 편집 lost-update(전 필드 공통 기존 사양).
+
+## 검증
+
+- admin-ui: tsc ✓ / vitest 변경분 31 ✓ (이전 전체 342 + stale 테스트 갱신) / lint 신규 0 / build ✓
+- admin-api: pytest 715 ✓ (model_service 26 + 회귀: 명시적 null 삭제/생략 유지)
+- 라우트·스키마 계약 변경: `PUT /admin/models/{alias}`의 `description`/`display_name` explicit null이 이제 삭제를 의미

@@ -135,9 +135,10 @@ class ModelService:
         # pydantic 의 `model_fields_set` 이 "키를 안 보냄" 과 "null 을 보냄" 을
         # 구별해 주므로, **명시적 null 만** 해제로 취급한다.
         #
-        # ⚠️ 다른 nullable 필드(description / display_name / endpoint_url)는 오늘의
-        #    "null = 무시" 동작을 그대로 둔다. 그 셋까지 바꾸면 null 을 "변경 안 함"
-        #    으로 보내던 기존 호출자의 동작이 조용히 바뀐다 — 별건으로 다뤄야 한다.
+        # ⚠️ 나머지 nullable 필드 중 endpoint_url 만 "null = 무시" 를 유지한다 —
+        #    endpoint 가 필요한 provider(Mantle/Runtime OpenAI/OPENMODEL)에서
+        #    지워지면 어댑터가 호스트/서명 리전을 못 잡아 런타임에만 깨진다.
+        #    description/display_name 은 아래 블록에서 명시적 null = 삭제로 처리한다.
         if "allowed_clients" in data.model_fields_set and data.allowed_clients is None:
             model.allowed_clients = None
             await session.flush()
