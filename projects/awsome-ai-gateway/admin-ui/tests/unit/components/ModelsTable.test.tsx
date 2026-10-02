@@ -118,7 +118,7 @@ describe('ModelsTable — LiteLLM 스타일 확장 행', () => {
       />
     );
     fireEvent.click(screen.getByRole('button', { name: 'expand' }));
-    expect(screen.getByText('anthropic.claude-x')).not.toBeNull();
+    expect(screen.getAllByText('anthropic.claude-x').length).toBe(2);
     expect(screen.getByText('codex')).not.toBeNull();
     expect(screen.getByText('cowork')).not.toBeNull();
   });

@@ -180,6 +180,14 @@ export function ModelsTable({ models }: ModelsTableProps) {
                               <span className="font-mono mono-id text-xs text-muted-foreground">
                                 {model.alias}
                               </span>
+                              {/* 실제 호출되는 공급자 모델 ID — 라우팅 키인 alias와
+                                  함께 접힌 행에서도 보여야 매핑을 즉시 확인할 수 있다 */}
+                              <span
+                                className="max-w-56 truncate font-mono mono-id text-xs text-muted-foreground/80"
+                                title={model.model_id}
+                              >
+                                {model.model_id}
+                              </span>
                               <ProviderBadge provider={model.provider} />
                               {/* 모델×앱 제한 — null=무제한은 배지 생략, []=전면 차단은
                                   destructive 톤. 편집은 /apps 소유라 여기선 링크만. */}
