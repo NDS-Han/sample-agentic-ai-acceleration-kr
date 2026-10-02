@@ -49,8 +49,8 @@ describe('mapToModelListItem', () => {
       context_window: null,
       endpoint_url: 'https://x',
     });
-    expect(m.max_tokens).toBe(0);
-    expect(m.context_window).toBe(0);
+    expect(m.max_tokens).toBeNull();
+    expect(m.context_window).toBeNull();
     expect(m.endpoint_url).toBe('https://x');
   });
 });

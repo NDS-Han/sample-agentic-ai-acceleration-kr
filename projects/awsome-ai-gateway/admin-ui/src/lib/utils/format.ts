@@ -46,6 +46,22 @@ export function fmtDateTime(iso: string, locale: string, timeZone?: string): str
   });
 }
 
+/**
+ * 토큰 수 컴팩트 포맷 — 컨텍스트 윈도우/최대 출력 표시용.
+ * Intl compact 는 ko 로케일에서 '25.6만' 같이 로케일 종속 단위로 나와
+ * 표 안에서 열 폭과 의미가 흔들린다 — K/M 고정 접미사로 통일한다.
+ * 반올림 기준: 262,144 → '262K'(가장 가까운 K), 1,048,576 → '1M'.
+ */
+export function fmtTokensCompact(n: number | null | undefined): string {
+  if (n == null || !Number.isFinite(n) || n <= 0) return '—';
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return `${m >= 10 ? Math.round(m) : Math.round(m * 10) / 10}M`;
+  }
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return `${n}`;
+}
+
 export function fmtTime(iso: string, locale: string, timeZone?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;

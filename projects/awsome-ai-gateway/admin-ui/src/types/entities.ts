@@ -77,8 +77,14 @@ export interface ModelListItem {
   cache_creation_5m_price_per_1k: number;
   cache_creation_1h_price_per_1k: number;
   cache_read_price_per_1k: number;
-  max_tokens: number;
-  context_window: number;
+  /** current_pricing 행 존재 여부 — false 면 위 가격 필드는 placeholder(0)로
+      '$0.00000/M' 가 아니라 '—' 로 렌더해야 한다. */
+  has_pricing: boolean;
+  /** null = API 에 스펙이 등록돼 있지 않음. 0K 처럼 가짜 값으로 렌더 금지. */
+  max_tokens: number | null;
+  context_window: number | null;
+  /** 카탈로그 등록일(모델 릴리즈일이 아님). ISO. */
+  created_at: string | null;
   description: string | null;
   display_name: string | null;
   /** 모델×앱 허용 축. null=제한 없음, []=모든 앱 차단, 목록=그 앱만. 편집은 /apps. */

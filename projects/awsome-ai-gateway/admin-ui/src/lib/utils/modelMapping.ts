@@ -25,6 +25,7 @@ export interface APIModelItem {
   context_window: number | null;
   max_output_tokens: number | null;
   allowed_clients?: string[] | null;
+  created_at?: string | null;
 }
 
 export function mapToModelListItem(item: APIModelItem): ModelListItem {
@@ -46,8 +47,12 @@ export function mapToModelListItem(item: APIModelItem): ModelListItem {
     cache_read_price_per_1k: p?.cache_read_price_per_1k_tokens
       ? parseFloat(p.cache_read_price_per_1k_tokens)
       : 0,
-    max_tokens: item.max_output_tokens ?? 0,
-    context_window: item.context_window ?? 0,
+    has_pricing: p != null,
+    // 스펙 미등록은 null 을 유지한다 — 0 으로 바꾸면 표가 '0K' 라는
+    // 거짓 스펙을 보여준다. 숫자 비교 소비자는 없고 표만 참조한다.
+    max_tokens: item.max_output_tokens,
+    context_window: item.context_window,
+    created_at: item.created_at ?? null,
     description: item.description,
     display_name: item.display_name,
     allowed_clients: item.allowed_clients ?? null,

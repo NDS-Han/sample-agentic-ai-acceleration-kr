@@ -489,7 +489,22 @@
     "selectedCount": "{count}/{total} selected",
     "emptySaveHint": "Selecting none cannot be saved — to allow all models, select all and save.",
     "appScopeBlocked": "No apps allowed",
-    "appScopeRestricted": "{count} apps"
+    "appScopeRestricted": "{count} apps",
+    "modelColumn": "Model",
+    "context": "Context",
+    "cacheWrite5m": "Cache Write (5m)",
+    "expand": "Expand {name}",
+    "collapse": "Collapse {name}",
+    "copyModelId": "Copy model ID",
+    "copyFailed": "Copy failed.",
+    "sectionPricing": "Token Pricing",
+    "per1m": "(per 1M tokens)",
+    "sectionInfo": "Model Info",
+    "sectionScope": "App Scope",
+    "maxOutput": "Max Output",
+    "registered": "Registered",
+    "appScopeAll": "Allowed for all apps",
+    "manageInApps": "Manage in App Policy"
   },
   "rateLimits": {
     "title": "Rate Limits",

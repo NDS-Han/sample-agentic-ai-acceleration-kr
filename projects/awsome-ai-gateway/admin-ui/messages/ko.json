@@ -489,7 +489,22 @@
     "selectedCount": "{count}/{total}개 선택됨",
     "emptySaveHint": "0개 선택은 저장할 수 없습니다. 전체 허용하려면 모두 선택 후 저장하세요.",
     "appScopeBlocked": "모든 앱 차단",
-    "appScopeRestricted": "{count}개 앱"
+    "appScopeRestricted": "{count}개 앱",
+    "modelColumn": "모델",
+    "context": "컨텍스트",
+    "cacheWrite5m": "캐시 쓰기 (5m)",
+    "expand": "{name} 펼치기",
+    "collapse": "{name} 접기",
+    "copyModelId": "모델 ID 복사",
+    "copyFailed": "복사에 실패했습니다.",
+    "sectionPricing": "토큰 단가",
+    "per1m": "(1M 토큰당)",
+    "sectionInfo": "모델 정보",
+    "sectionScope": "앱 범위",
+    "maxOutput": "최대 출력",
+    "registered": "등록일",
+    "appScopeAll": "모든 앱 허용",
+    "manageInApps": "앱 정책에서 관리"
   },
   "rateLimits": {
     "title": "Rate Limits",

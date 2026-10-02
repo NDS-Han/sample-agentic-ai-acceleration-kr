@@ -11,6 +11,7 @@ import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
 import type { ActionResult } from './types';
 import type { ModelListItem } from '@/types/entities';
+import { mapToModelListItem } from '@/lib/utils/modelMapping';
 
 // ─── createModelAction ────────────────────────────────────────────────────────
 
@@ -178,6 +179,9 @@ interface AdminModelItem {
   description: string | null;
   display_name: string | null;
   allowed_clients?: string[] | null;
+  context_window: number | null;
+  max_output_tokens: number | null;
+  created_at?: string | null;
   current_pricing: {
     input_price_per_1k_tokens: string;
     output_price_per_1k_tokens: string;
@@ -194,32 +198,7 @@ export async function listActiveModelsAction(): Promise<ActionResult<ModelListIt
     );
     const models: ModelListItem[] = (res.items ?? [])
       .filter((item) => item.status === 'ACTIVE')
-      .map((item) => {
-        const p = item.current_pricing;
-        return {
-          alias: item.alias,
-          provider: item.provider,
-          model_id: item.provider_model_id,
-          endpoint_url: item.endpoint_url ?? null,
-          is_active: item.status === 'ACTIVE',
-          input_price_per_1k: p ? parseFloat(p.input_price_per_1k_tokens) : 0,
-          output_price_per_1k: p ? parseFloat(p.output_price_per_1k_tokens) : 0,
-          cache_creation_5m_price_per_1k: p?.cache_creation_5m_price_per_1k_tokens
-            ? parseFloat(p.cache_creation_5m_price_per_1k_tokens)
-            : 0,
-          cache_creation_1h_price_per_1k: p?.cache_creation_1h_price_per_1k_tokens
-            ? parseFloat(p.cache_creation_1h_price_per_1k_tokens)
-            : 0,
-          cache_read_price_per_1k: p?.cache_read_price_per_1k_tokens
-            ? parseFloat(p.cache_read_price_per_1k_tokens)
-            : 0,
-          max_tokens: 0,
-          context_window: 0,
-          description: item.description,
-          display_name: item.display_name,
-          allowed_clients: item.allowed_clients ?? null,
-        };
-      });
+      .map(mapToModelListItem);
     return { success: true, data: models };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
