@@ -225,3 +225,9 @@
 ## 미배포
 
 배포 시 admin-api + admin-ui 둘 다 필요(콜백이 새 엔드포인트 호출 — admin-api 없으면 whoami 404 → 쿠키 미설정 → 현행과 동일하게 동작, 회귀 없음).
+
+## 배포 (6차 수정)
+
+- 커밋: `ee8a505` — 이미지: `admin-api:ee8a505` + `admin-ui:ee8a505` — EKS 롤아웃 완료
+- 라이브 스모크: admin-api `/health` → 200, `/admin/my/profile` 무인증 → 401(신규 엔드포인트 등록 확인), UI `/` → 307 로그인, `/analytics` → 307 ✓
+- 확인 필요: TEAM_LEADER 계정으로 OIDC 로그인 시 `/` 랜딩 + 대시보드 표시되는지 실계정 확인 권장
