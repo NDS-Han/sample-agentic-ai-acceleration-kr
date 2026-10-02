@@ -258,5 +258,5 @@
 
 ## 배포
 
-- 커밋: `1a3f21a` — 이미지: `admin-ui:1a3f21a` (admin-api 무변경) — EKS 롤아웃 완료
+- 커밋: `1a3f21a` — 이미지: `admin-ui:05e69e0` (admin-api 무변경) — EKS 롤아웃 완료
 - 라이브 스모크: `/` → 307 로그인, `/models` → 307 ✓
