@@ -157,3 +157,10 @@
 - admin-ui: tsc ✓ / vitest 변경분 31 ✓ (이전 전체 342 + stale 테스트 갱신) / lint 신규 0 / build ✓
 - admin-api: pytest 715 ✓ (model_service 26 + 회귀: 명시적 null 삭제/생략 유지)
 - 라우트·스키마 계약 변경: `PUT /admin/models/{alias}`의 `description`/`display_name` explicit null이 이제 삭제를 의미
+
+## 배포 (4차 리뷰 수정)
+
+- 커밋: `2e18d08`(기능) + `9c8f90c`(Opus 조건 — stale 주석 + pricing retry 제거 + 본 문서)
+- 이미지: `admin-api:9c8f90c` + `admin-ui:9c8f90c` — EKS 롤아웃 완료
+- 라이브 스모크(admin-dev/admin-api-dev 호스트): `/` → 307 로그인 리다이렉트, `/analytics` → 307, admin-api `/health` → 200, `/admin/models` 무인증 → 401 ✓
+  - ⚠️ `gateway-dev.*` 호스트로 admin 경로를 치면 전부 401 — 그 도메인은 LLM 게이트웨이(VK 필요)이며 정상 동작이다.
