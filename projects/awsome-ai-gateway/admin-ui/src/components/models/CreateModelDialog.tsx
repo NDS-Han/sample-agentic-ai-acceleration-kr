@@ -69,9 +69,9 @@ function getInitialState(editModel?: ModelListItem): FormState {
     endpoint_url: '',
     input_price_per_1m: '',
     output_price_per_1m: '',
-    cache_creation_5m_price_per_1m: '0',
-    cache_creation_1h_price_per_1m: '0',
-    cache_read_price_per_1m: '0',
+    cache_creation_5m_price_per_1m: '',
+    cache_creation_1h_price_per_1m: '',
+    cache_read_price_per_1m: '',
     description: '',
     display_name: '',
   };
@@ -366,7 +366,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 value={form.cache_creation_5m_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="e.g. 3.00"
+                placeholder="0"
               />
               {fieldErrors.cache_creation_5m_price_per_1m && <FormError error={fieldErrors.cache_creation_5m_price_per_1m} />}
             </div>
@@ -382,7 +382,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 value={form.cache_creation_1h_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="e.g. 3.00"
+                placeholder="0"
               />
               {fieldErrors.cache_creation_1h_price_per_1m && <FormError error={fieldErrors.cache_creation_1h_price_per_1m} />}
             </div>
@@ -398,7 +398,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 value={form.cache_read_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="e.g. 3.00"
+                placeholder="0"
               />
               {fieldErrors.cache_read_price_per_1m && <FormError error={fieldErrors.cache_read_price_per_1m} />}
             </div>

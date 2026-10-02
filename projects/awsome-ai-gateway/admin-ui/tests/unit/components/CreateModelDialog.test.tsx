@@ -154,6 +154,26 @@ describe('CreateModelDialog — 검증 실패 관측성', () => {
     // 폼 키가 아닌 API 키로만 보낸다 — per_1m 키가 새지 않아야 한다.
     expect(payload).not.toHaveProperty('input_price_per_1m');
   });
+
+  it('캐시 단가는 빈칸이 기본값이고 비워 두면 0 으로 저장한다', async () => {
+    createModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    // 회귀 방지: 생성 폼의 캐시 3개 입력란은 '0' 이 아니라 빈칸이어야 한다
+    // ('0' 프리필은 필수 입력처럼 읽히고, 카탈로그에 없는 값을 0 으로 착각하게 만든다).
+    expect(screen.getByLabelText('priceCacheCreate5m')).toHaveValue(null);
+    expect(screen.getByLabelText('priceCacheCreate1h')).toHaveValue(null);
+    expect(screen.getByLabelText('priceCacheRead')).toHaveValue(null);
+
+    fillRequiredFields();
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => expect(createModelAction).toHaveBeenCalled());
+    const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.cache_creation_5m_price_per_1k).toBe(0);
+    expect(payload.cache_creation_1h_price_per_1k).toBe(0);
+    expect(payload.cache_read_price_per_1k).toBe(0);
+  });
 });
 
 /**
