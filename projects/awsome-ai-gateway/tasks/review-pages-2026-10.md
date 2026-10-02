@@ -231,3 +231,32 @@
 - 커밋: `ee8a505` — 이미지: `admin-api:ee8a505` + `admin-ui:ee8a505` — EKS 롤아웃 완료
 - 라이브 스모크: admin-api `/health` → 200, `/admin/my/profile` 무인증 → 401(신규 엔드포인트 등록 확인), UI `/` → 307 로그인, `/analytics` → 307 ✓
 - 확인 필요: TEAM_LEADER 계정으로 OIDC 로그인 시 `/` 랜딩 + 대시보드 표시되는지 실계정 확인 권장
+
+---
+
+# 7차 — /models LiteLLM 스타일 리디자인 (커밋 5bed9e3 + 1a3f21a)
+
+## 결정 (Opus 5.5 리뷰 반영)
+
+- 11컬럼 플랫 테이블 → **확장 행**: 접힌 행 = 이름 + `alias`(mono) + provider + 앱제한 배지, 컨텍스트, 입력/출력/캐시읽기/캐시쓰기(5m) 단가, 상태, 액션. 펼침 = 단가 5종 전체, provider_model_id+복사, 스펙, 등록일, 앱 범위 의미 + /apps 링크
+- **alias·상태·앱제한 배지는 접힌 행 유지** — 라우팅/예산/다운그레이드가 전부 alias 키 기준이고, "왜 이 앱에서 안 되지" 발견가능성이 배지의 존재 이유
+- Radix Accordion 미사용 — `<tr>` 안 heading/div 부적합 + 테이블 키보드 네비 충돌. `BudgetSummaryTable` 확장 패턴 재사용(Fragment + aria-expanded/aria-controls)
+- 패널은 카드 3개(bg-card, 얇은 보더) — muted 표면에 평면 나열 시 섹션 구분이 안 된다는 피드백 반영(1a3f21a)
+- REGISTERED 컬럼 미노출 — 등록일은 패널에만. 기본 정렬: 활성 → 최근 등록순
+
+## 함께 수정된 기존 결함
+
+- null 스펙/가격이 `0K`/`$0.00/M`으로 표시되던 것 → `has_pricing` 플래그 + `—` 렌더
+- 활성화 클릭 시 모든 행 버튼이 잠기던 공유 isPending → 클릭한 행만 (`activatingAlias`)
+- `listActiveModelsAction`의 복제 매핑 → `mapToModelListItem` 단일 출처로 통합
+- 컨텍스트 포맷 `fmtTokensCompact` 신규 — Intl compact는 ko에서 '만' 단위로 나와 K/M 고정 접미사로 통일
+
+## 검증
+
+- vitest 358 ✓ (신규 6: 확장 토글/ARIA, null 렌더, 컨텍스트 포맷, 패널 내용) / tsc ✓ / eslint 0 / next build ✓
+- 로컬 dev 서버 + admin-api 포트포워드로 라이트/다크/768px 스크린샷 확인
+
+## 배포
+
+- 커밋: `1a3f21a` — 이미지: `admin-ui:1a3f21a` (admin-api 무변경) — EKS 롤아웃 완료
+- 라이브 스모크: `/` → 307 로그인, `/models` → 307 ✓
