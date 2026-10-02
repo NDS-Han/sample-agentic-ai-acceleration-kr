@@ -16,7 +16,7 @@ const pretendard = localFont({
   display: 'swap',
   weight: '45 920', // variable axis 범위
 });
-import { parseJWT, isSessionExpired } from '@/lib/auth';
+import { parseJWT, isSessionExpired, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import { resolveLocale } from '@/i18n/locale';
 import { Sidebar } from '@/components/layout/Sidebar';
 import { Header } from '@/components/layout/Header';
@@ -49,7 +49,13 @@ export default async function RootLayout({
       // 만료 검사 없이 통과시키므로, 여기서 만료를 세션 무효로 처리하지 않으면
       // 만료된 쿠키 위에 Sidebar+Header 가 그려진다.
       if (!isSessionExpired(parsed)) {
-        session = parsed;
+        // 유효 역할은 admin_role 쿠키(admin-api 판정) 우선 — IdP 토큰에는 role
+        // 클레임이 없어 TEAM_LEADER/DEVELOPER 가 여기서 undefined 로 지워졌다.
+        // middleware 와 같은 병합 규칙이다.
+        session = {
+          ...parsed,
+          role: roleFromCookie(cookieStore.get(ADMIN_ROLE_COOKIE)?.value) ?? parsed.role,
+        };
       }
     } catch {
       // Malformed token — middleware will redirect to login

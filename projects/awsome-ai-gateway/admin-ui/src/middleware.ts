@@ -8,7 +8,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { parseJWT } from '@/lib/auth';
+import { parseJWT, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import { checkPagePermission, isSessionExpired } from '@/lib/auth';
 
 export const config = {
@@ -78,6 +78,7 @@ function redirectToLogin(request: NextRequest, clearCookie: boolean): NextRespon
     // 만료/손상된 자격증명은 응답에서 즉시 제거한다 — 안 지우면 다음 요청도 같은 쿠키로
     // 다시 이 분기를 타고, 사용자는 못 쓰는 쿠키를 계속 들고 다닌다.
     redirectResponse.cookies.delete('admin_jwt');
+    redirectResponse.cookies.delete(ADMIN_ROLE_COOKIE);
   }
   applySecurityHeaders(redirectResponse);
   return redirectResponse;
@@ -125,7 +126,12 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
       return redirectToLogin(request, true);
     }
 
-    const hasPermission = checkPagePermission(pathname, session.role);
+    // 역할 판정 순서: admin_role 쿠키(admin-api 가 판정한 유효 역할 — 콜백이 구움)
+    // → 토큰 role 클레임(dev/내부 JWT). IdP 토큰에는 role 이 없어서 쿠키가 없으면
+    // TEAM_LEADER/DEVELOPER 를 구별할 수 없다(콜백 route.ts 주석 참조).
+    const role =
+      roleFromCookie(request.cookies.get(ADMIN_ROLE_COOKIE)?.value) ?? session.role;
+    const hasPermission = checkPagePermission(pathname, role);
 
     if (!hasPermission) {
       const redirectResponse = redirectSameOrigin(request, '/403', 307);

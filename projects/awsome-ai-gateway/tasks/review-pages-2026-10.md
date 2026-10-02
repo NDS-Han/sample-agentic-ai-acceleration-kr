@@ -192,3 +192,36 @@
 
 - tsc ✓ / vitest authLoginFlow 51 ✓(신규 DEVELOPER 랜딩 포함) / eslint 변경 파일 0
 - 미배포 — 배포 요청 시 별도 진행.
+
+---
+
+# 6차 — TEAM_LEADER OIDC 로그인 불가 수정
+
+## 배경
+
+사용자 보고: "유저 2명(admin + team leader)인데 팀 리더는 UI에 접근이 안 된다".
+
+## 근본 원인
+
+프론트 `resolveRole`(admin-ui/src/lib/auth.ts)은 토큰의 `role` 클레임 또는 `ADMIN_GROUPS` 그룹 매핑만 읽는다 — **ADMIN 아니면 undefined**. 백엔드 `_resolve_idp_identity`(admin-api/src/app/core/auth.py)는 `sso_subject`로 DB를 조회해 `DB role + 그룹 매핑`을 병합하므로 TEAM_LEADER/DEVELOPER가 정상 인가되는데, **프론트 게이트는 그 DB 역할을 알 방법이 없었다** → TL/DEVELOPER 모두 모든 페이지 403.
+
+## 수정
+
+| 변경 | 내용 |
+|------|------|
+| admin-api `GET /admin/my/profile` | `get_current_user`의 유효 신원(user_id/email/role/team_id) 반환. 인증만 요구, 역할 제한 없음 |
+| 콜백 route | 토큰 교환 후 whoami를 best-effort 조회(5s 타임아웃) → `admin_role` httpOnly 쿠키로 구움. 실패 시 로그인 자체는 계속(fail-open 로그인, 게이트는 fail-closed 유지) |
+| middleware + layout | 역할 판정: `admin_role` 쿠키(백엔드 유효 역할) 우선 → 토큰 `role` 클레임 폴백. 쿠키 우선 이유: 백엔드는 IdP 토큰의 `role` 클레임을 신뢰하지 않고 iss 기준으로 DB/그룹 재해석하므로, 클레임 우선이면 게이트와 실제 인가가 갈림 |
+| logout/middleware 정리 | `admin_jwt` 삭제 시 `admin_role`도 함께 삭제 |
+
+위협 모델: `admin_role`은 미서명 쿠키 — 사용자가 고치면 UI 게이트만 속이고 모든 API는 admin-api가 다시 인가한다. middleware가 admin_jwt 서명을 검증하지 않는 것과 동일 등급.
+
+## 검증
+
+- admin-api: `test_my_profile.py` 3개 신규 ✓ (TL/Developer/ADMIN 무팀)
+- admin-ui: authLoginFlow 55 + middleware 19 + 전체 스위트 352 ✓ / tsc ✓ / eslint 0
+- 신규 테스트: whoami TL → 쿠키+`/` 랜딩, whoami DEVELOPER → 쿠키+`/my`, whoami 5xx → 쿠키 없이 로그인 계속, 비정상 role → 쿠키 안 굽음, middleware 4건(쿠키 TL `/` 통과, DEVELOPER `/`→403 `/my` 통과, 쿠키 없음 fail-closed, 조작값 fail-closed)
+
+## 미배포
+
+배포 시 admin-api + admin-ui 둘 다 필요(콜백이 새 엔드포인트 호출 — admin-api 없으면 whoami 404 → 쿠키 미설정 → 현행과 동일하게 동작, 회귀 없음).

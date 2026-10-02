@@ -1,7 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import type { AdminSession } from '@/types/entities';
-import type { UserRole } from '@/types/enums';
+import { UserRole } from '@/types/enums';
 import { PAGE_PERMISSIONS } from './permissions';
 
 /**
@@ -198,4 +198,27 @@ export function checkPagePermission(pathname: string, role: UserRole): boolean {
 
   const [, allowedRoles] = matchingEntry;
   return allowedRoles.includes(role);
+}
+
+/**
+ * OIDC 콜백이 admin-api `GET /admin/my/profile`의 유효 역할을 구워 두는 보조 쿠키.
+ *
+ * `admin_jwt` 가 IdP 토큰이면 `role` 클레임이 없어서 이 파일의 resolveRole 만으로는
+ * ADMIN 또는 undefined 밖에 모른다 — DB 역할(TEAM_LEADER/DEVELOPER)은 백엔드만
+ * 안다. 콜백이 로그인 시점에 admin-api 에 물어 그 결과를 여기에 적는다.
+ *
+ * ⚠️ 서명되지 않은 값이다 — 사용자가 자기 쿠키를 고치면 UI 게이트만 속일 수 있다.
+ *    실제 인가는 admin-api 가 매 요청 다시 하므로 권한 상승은 안 되고, 깨진 화면과
+ *    403 응답만 보게 된다. middleware 가 admin_jwt 서명을 검증하지 않는 것과 같은
+ *    위협 등급이다(게이트는 UX, 경계는 API).
+ */
+export const ADMIN_ROLE_COOKIE = 'admin_role';
+
+export function isKnownRole(v: unknown): v is UserRole {
+  return v === UserRole.ADMIN || v === UserRole.TEAM_LEADER || v === UserRole.DEVELOPER;
+}
+
+/** 보조 쿠키 값 → 역할. 조작/손상된 값은 undefined — 호출부에서 토큰 클레임으로 폴백. */
+export function roleFromCookie(value: string | undefined): UserRole | undefined {
+  return isKnownRole(value) ? value : undefined;
 }

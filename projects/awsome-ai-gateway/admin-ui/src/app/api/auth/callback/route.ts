@@ -24,7 +24,14 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
-import { parseJWT, isSessionExpired, checkPagePermission } from '@/lib/auth';
+import {
+  parseJWT,
+  isSessionExpired,
+  checkPagePermission,
+  isKnownRole,
+  ADMIN_ROLE_COOKIE,
+} from '@/lib/auth';
+import type { UserRole } from '@/types/enums';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -33,6 +40,34 @@ export const runtime = 'nodejs';
 const FALLBACK_COOKIE_MAX_AGE = 3600;
 /** 쿠키 수명 상한(초). IdP 가 비정상적으로 긴 exp 를 줘도 브라우저에 하루 이상 남기지 않는다. */
 const MAX_COOKIE_MAX_AGE = 12 * 60 * 60;
+
+/** api-client.ts 와 같은 폴백 — server action 과 이 라우트가 같은 admin-api 를 본다. */
+const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
+/** whoami 조회가 로그인 자체를 붙잡지 않도록 하는 상한. */
+const WHOAMI_TIMEOUT_MS = 5000;
+
+/**
+ * admin-api 가 판정한 **유효 역할**을 묻는다 (GET /admin/my/profile).
+ *
+ * IdP 토큰에는 `role` 클레임이 없으므로 UI 의 권한 게이트는 이 호출 결과를 보조
+ * 쿠키(admin_role)로 받아야 TEAM_LEADER/DEVELOPER 를 구별할 수 있다. 실패(네트워크,
+ * 5xx, 타임아웃) 시 undefined — 로그인을 막지 않고 역할 없음으로 두면 게이트가
+ * fail-closed 로 동작한다(기존과 같은 마지노선).
+ */
+async function fetchEffectiveRole(token: string): Promise<UserRole | undefined> {
+  try {
+    const res = await fetch(`${ADMIN_API_URL}/admin/my/profile`, {
+      headers: { Authorization: `Bearer ${token}` },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(WHOAMI_TIMEOUT_MS),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { role?: unknown };
+    return isKnownRole(body?.role) ? body.role : undefined;
+  } catch {
+    return undefined;
+  }
+}
 /** 쿠키 수명 하한(초). 시계 오차로 0/음수가 나오면 Set-Cookie 가 즉시 삭제 지시가 된다.
  *
  * ⚠️ 이 값이 무한 리다이렉트를 막아주지는 **않는다.** middleware 의 판정 근거는 Max-Age 가
@@ -345,6 +380,15 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
 
   const maxAge = cookieMaxAge(cookieToken, tokens.expires_in);
 
+  // 유효 역할 조회. IdP 토큰에 role 클레임이 없어서(보통 groups 만 온다) 이 호출이
+  // 없으면 middleware 가 모든 페이지를 403 으로 돌린다 — 백엔드는 DB role 로
+  // TEAM_LEADER 를 인가하는데 UI 는 undefined 로 읽는 어긋남이 실제로 발생했다.
+  // 쿠키 쪽을 우선한다: 백엔드는 IdP 토큰의 `role` 클레임을 신뢰하지 않는다
+  // (admin-api auth.py — iss 가 IdP 면 DB/그룹으로 재해석) — 클레임 우선이면
+  // 프론트 게이트와 실제 인가가 갈린다.
+  const whoamiRole = await fetchEffectiveRole(cookieToken);
+  const effectiveRole = whoamiRole ?? parsedSession.role;
+
   // 303 — POST/GET 구분 없이 GET 으로 이동시킨다(logout/route.ts:19 와 같은 이유).
   // 상대 Location — CloudFront/ALB 뒤에서 Host 헤더가 내부 오리진일 수 있다(lib/redirect.ts).
   //
@@ -352,7 +396,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   // DEVELOPER 를 그대로내면 로그인 직후 첫 화면이 403 이 된다. 권한표 기준으로
   // '/' 가 안 되면 /my(개발자 홈)로 보낸다. 어느 쪽도 못 여는 역할이면 /my 에서
   // middleware 가 403 으로 정리한다 — 콜백이 흉내낼 필요는 없다.
-  const res = redirectRelative(checkPagePermission('/', parsedSession.role) ? '/' : '/my');
+  const res = redirectRelative(checkPagePermission('/', effectiveRole) ? '/' : '/my');
   res.cookies.set('admin_jwt', cookieToken, {
     httpOnly: true,
     sameSite: 'lax',
@@ -360,6 +404,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     maxAge,
     secure,
   });
+  if (whoamiRole) {
+    // admin_jwt 와 같은 수명 — 토큰이 만료되면 middleware 가 어차피 로그인으로 돌린다.
+    res.cookies.set(ADMIN_ROLE_COOKIE, whoamiRole, {
+      httpOnly: true,
+      sameSite: 'lax',
+      path: '/',
+      maxAge,
+      secure,
+    });
+  }
   clearTempCookies(res, secure);
   res.headers.set('Cache-Control', 'no-store');
   return res;

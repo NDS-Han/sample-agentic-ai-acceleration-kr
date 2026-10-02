@@ -184,3 +184,48 @@ describe('middleware — /cli is not public', () => {
     expectSameOriginRedirect(res, '/403');
   });
 });
+
+describe('middleware — admin_role 보조 쿠키', () => {
+  // IdP id_token 에는 role 클레임이 없다 — 콜백이 admin-api /admin/my/profile 의
+  // 유효 역할을 admin_role 쿠키로 굽고, middleware 는 쿠키 → 클레임 순으로 읽는다.
+  const IDP_TOKEN_NO_ROLE = `header.${b64url({
+    sub: '33333333-3333-3333-3333-333333333333',
+    exp: Math.floor(Date.now() / 1000) + 3600,
+  })}.sig`;
+
+  function requestWithRole(role: string | undefined, pathname = '/'): NextRequest {
+    const req = new NextRequest(`http://admin.test${pathname}`);
+    req.cookies.set('admin_jwt', IDP_TOKEN_NO_ROLE);
+    if (role !== undefined) {
+      req.cookies.set('admin_role', role);
+    }
+    return req;
+  }
+
+  it('role 없는 IdP 토큰 + admin_role=TEAM_LEADER → / 통과', async () => {
+    const res = await middleware(requestWithRole('TEAM_LEADER', '/'));
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
+  });
+
+  it('admin_role=DEVELOPER → / 는 403, /my 는 통과', async () => {
+    const root = await middleware(requestWithRole('DEVELOPER', '/'));
+    expect(root.status).toBe(307);
+    expectSameOriginRedirect(root, '/403');
+
+    const mine = await middleware(requestWithRole('DEVELOPER', '/my'));
+    expect(mine.status).toBe(200);
+  });
+
+  it('admin_role 없는 IdP 토큰 → 역할 모름 → / 는 403(fail-closed)', async () => {
+    const res = await middleware(requestWithRole(undefined, '/'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/403');
+  });
+
+  it('조작된 admin_role 값 → 알 수 없는 역할 → fail-closed', async () => {
+    const res = await middleware(requestWithRole('SUPERADMIN', '/'));
+    expect(res.status).toBe(307);
+    expectSameOriginRedirect(res, '/403');
+  });
+});

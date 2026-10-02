@@ -496,13 +496,110 @@ describe('GET /api/auth/callback — happy path', () => {
     expect(setCookies(res)['admin_jwt']).toBeTruthy();
   });
 
+  // ── admin_role 보조 쿠키 (whoami) ────────────────────────────────────────
+  // IdP id_token 에는 role 클레임이 없다 — 콜백이 admin-api /admin/my/profile 로
+  // 유효 역할을 물어 admin_role 쿠키에 굽고, 게이트(middleware/Sidebar)는 그걸 읽는다.
+
+  /** token 엔드포인트 + whoami 를 URL 로 분기하는 fetch 스텁. */
+  function stubExchange(
+    idToken: string,
+    profile: { body: unknown; status: number } | null,
+  ) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string | URL) => {
+        if (String(url).includes('/admin/my/profile')) {
+          if (profile === null) {
+            return { ok: false, status: 500, json: async () => ({}) } as unknown as Response;
+          }
+          return {
+            ok: profile.status < 300,
+            status: profile.status,
+            json: async () => profile.body,
+          } as unknown as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ id_token: idToken, expires_in: 3600 }),
+        } as unknown as Response;
+      }),
+    );
+  }
+
+  /** role 클레임이 **아예 없는** IdP 토큰(실제 Cognito id_token 형상). */
+  function idTokenWithoutRole(): string {
+    const exp = Math.floor(Date.now() / 1000) + 3600;
+    // jwtWithExp 는 role: 'ADMIN' 을 기본으로 넣으므로 undefined 로 덮어 키를 없앤다
+    // (JSON.stringify 는 undefined 프로퍼티를 누락시킨다).
+    return jwtWithExp(exp, { role: undefined });
+  }
+
+  it('role 없는 IdP 토큰 + whoami TEAM_LEADER → admin_role 쿠키 + / 랜딩', async () => {
+    configureOidc();
+    stubExchange(idTokenWithoutRole(), {
+      status: 200,
+      body: { user_id: 'u', email: 'tl@x.test', role: 'TEAM_LEADER', team_id: 't' },
+    });
+
+    const res = await callbackGET(callbackReq());
+
+    expect(res.status).toBe(303);
+    expectRelativeRedirect(res, '/');
+    const jar = setCookies(res);
+    expect(cookieValue(jar['admin_role'])).toBe('TEAM_LEADER');
+    expect(jar['admin_role']).toMatch(/HttpOnly/i);
+  });
+
+  it('whoami DEVELOPER → admin_role 쿠키 + /my 랜딩', async () => {
+    configureOidc();
+    stubExchange(idTokenWithoutRole(), {
+      status: 200,
+      body: { user_id: 'u', email: 'dev@x.test', role: 'DEVELOPER', team_id: null },
+    });
+
+    const res = await callbackGET(callbackReq());
+
+    expect(res.status).toBe(303);
+    expectRelativeRedirect(res, '/my');
+    expect(cookieValue(setCookies(res)['admin_role'])).toBe('DEVELOPER');
+  });
+
+  it('whoami 실패(5xx) → 쿠키 없이 로그인은 계속된다(fail-open 로그인, fail-closed 게이트)', async () => {
+    configureOidc();
+    stubExchange(idTokenWithoutRole(), null);
+
+    const res = await callbackGET(callbackReq());
+
+    expect(res.status).toBe(303);
+    expect(setCookies(res)['admin_jwt']).toBeTruthy();
+    expect(setCookies(res)['admin_role']).toBeUndefined();
+  });
+
+  it('whoami 의 비정상 role 값은 무시한다 — 쿠키를 굽지 않는다', async () => {
+    configureOidc();
+    stubExchange(idTokenWithoutRole(), {
+      status: 200,
+      body: { role: 'SUPERUSER' },
+    });
+
+    const res = await callbackGET(callbackReq());
+
+    expect(setCookies(res)['admin_role']).toBeUndefined();
+  });
+
   it('token 요청에 code_verifier / code / redirect_uri / client_id 를 싣는다 (PKCE 실사용)', async () => {
     configureOidc();
     const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });
 
     await callbackGET(callbackReq());
 
-    expect(calls.length).toBe(1);
+    // 콜백은 token 엔드포인트 외에 whoami(/admin/my/profile)도 호출한다 — token
+    // 엔드포인트 호출만 걸러 검증한다.
+    const tokenCalls = calls.filter(
+      (c) => c.url === 'https://idp.example.test/oauth2/token',
+    );
+    expect(tokenCalls.length).toBe(1);
     expect(calls[0].url).toBe('https://idp.example.test/oauth2/token');
     expect(calls[0].init.method).toBe('POST');
     const sent = new URLSearchParams(String(calls[0].init.body));

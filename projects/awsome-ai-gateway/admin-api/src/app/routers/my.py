@@ -15,6 +15,26 @@ from app.models.usage import UsageLog
 router = APIRouter(prefix="/admin/my", tags=["My Usage"])
 
 
+@router.get("/profile")
+async def get_my_profile(user: CurrentUser = Depends(get_current_user)):
+    """로그인 사용자의 **유효 신원**(role 포함)을 돌려준다.
+
+    admin-ui 는 OIDC 콜백에서 IdP id_token 을 `admin_jwt` 로 굽는데, IdP 토큰에는
+    `role` 클레임이 없다 — 그래서 UI 의 권한 게이트(middleware/Sidebar)가 역할을
+    모른 채 판정해야 했다. 이 엔드포인트는 get_current_user 와 **동일한 판정**
+    (DB role + ADMIN_EMAILS/ADMIN_GROUPS 병합) 결과를 주므로, 콜백이 로그인 시점에
+    여기를 한 번 물어 유효 역할을 보조 쿠키로 구워 둔다.
+
+    인증만 요구한다 — 자기 자신의 신원을 돌려줄 뿐이라 역할 제한은 없다.
+    """
+    return {
+        "user_id": str(user.user_id),
+        "email": user.email,
+        "role": user.role.value,
+        "team_id": str(user.team_id) if user.team_id else None,
+    }
+
+
 @router.get("/budget")
 async def get_my_budget(
     request: Request,
