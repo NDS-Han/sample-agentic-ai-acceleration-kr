@@ -246,11 +246,13 @@ export function ModelsTable({ models }: ModelsTableProps) {
                       // muted 표면만. 행 hover 틴트는 상세 행에서 끈다.
                       <Tr id={detailId} className="bg-muted/30 hover:bg-muted/30 dark:bg-white/[0.03] dark:hover:bg-white/[0.03]">
                         <Td colSpan={colCount}>
-                          <div className="grid gap-4 py-2 md:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr]">
-                            <section>
-                              <h3 className="mb-2 text-xs font-medium text-muted-foreground">
+                          {/* 섹션을 얇은 보더 카드로 분리 — muted 패널 위에
+                              평면으로 나열하면 경계가 안 보인다는 피드백 반영. */}
+                          <div className="grid gap-3 py-2 md:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr]">
+                            <section className="rounded-lg border border-border bg-card p-4">
+                              <h3 className="mb-3 text-xs font-semibold tracking-wide text-foreground/80">
                                 {t('sectionPricing')}
-                                <span className="ml-1.5 font-normal">{t('per1m')}</span>
+                                <span className="ml-1.5 font-normal text-muted-foreground">{t('per1m')}</span>
                               </h3>
                               <dl className="space-y-1.5 text-sm">
                                 {[
@@ -271,8 +273,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                 ))}
                               </dl>
                             </section>
-                            <section>
-                              <h3 className="mb-2 text-xs font-medium text-muted-foreground">
+                            <section className="rounded-lg border border-border bg-card p-4">
+                              <h3 className="mb-3 text-xs font-semibold tracking-wide text-foreground/80">
                                 {t('sectionInfo')}
                               </h3>
                               <dl className="space-y-1.5 text-sm">
@@ -322,8 +324,8 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                 </div>
                               </dl>
                             </section>
-                            <section>
-                              <h3 className="mb-2 text-xs font-medium text-muted-foreground">
+                            <section className="rounded-lg border border-border bg-card p-4">
+                              <h3 className="mb-3 text-xs font-semibold tracking-wide text-foreground/80">
                                 {t('sectionScope')}
                               </h3>
                               <div className="space-y-1.5 text-sm">
