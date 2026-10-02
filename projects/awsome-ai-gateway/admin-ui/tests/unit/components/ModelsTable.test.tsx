@@ -1,12 +1,9 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 /**
- * 모델 테이블 — 모델×앱 제한(allowed_clients) 읽기 전용 배지.
+ * 모델 테이블 — LiteLLM 스타일 확장 행 + null 안전 렌더.
  *
- * 배경: model_aliases.allowed_clients( null=무제한 / []=전면 차단 / 목록=그 앱만 )은
- * admin-api·effective-policy·게이트웨이 인가가 전부 아는 축인데 /models 에는 표시가
- * 없어, codex 요청이 model_app 축에서 거부돼도 운영자가 이 화면에서 원인을 못 본다.
- * 배지는 3-상태를 구분해야 한다 — [] 를 "무제한"처럼 보이게 하면 전면 차단이 숨겨진다.
+ * 모델×앱 제한(allowed_clients) 표시는 /apps 소유로 /models 에서는 제거됐다.
  */
 
 import { describe, it, expect, vi } from 'vitest';
@@ -51,32 +48,6 @@ function makeModel(overrides: Partial<ModelListItem>): ModelListItem {
   };
 }
 
-describe('ModelsTable — allowed_clients 배지', () => {
-  it('null(무제한)이면 배지를 렌더하지 않는다', () => {
-    render(<ModelsTable models={[makeModel({ allowed_clients: null })]} />);
-    expect(screen.queryByText('appScopeRestricted')).toBeNull();
-    expect(screen.queryByText('appScopeBlocked')).toBeNull();
-  });
-
-  it('목록이 있으면 제한 배지를 /apps 링크로 렌더한다', () => {
-    render(
-      <ModelsTable
-        models={[makeModel({ allowed_clients: ['codex', 'claude-code'] })]}
-      />
-    );
-    const link = screen.getByText('appScopeRestricted').closest('a');
-    expect(link).not.toBeNull();
-    expect(link?.getAttribute('href')).toBe('/apps');
-    expect(link?.getAttribute('title')).toBe('codex, claude-code');
-  });
-
-  it('빈 목록 [] 은 전면 차단 배지로 구분한다', () => {
-    render(<ModelsTable models={[makeModel({ allowed_clients: [] })]} />);
-    expect(screen.getByText('appScopeBlocked')).not.toBeNull();
-    expect(screen.queryByText('appScopeRestricted')).toBeNull();
-  });
-});
-
 describe('ModelsTable — LiteLLM 스타일 확장 행', () => {
   it('확장 버튼은 aria-expanded 를 가지고 클릭 시 상세 행을 연다', () => {
     render(<ModelsTable models={[makeModel({ display_name: 'Claude Sonnet' })]} />);
@@ -111,15 +82,14 @@ describe('ModelsTable — LiteLLM 스타일 확장 행', () => {
     expect(screen.getByText('200K')).not.toBeNull();
   });
 
-  it('펼친 행에는 provider_model_id 와 앱 범위 상세가 보인다', () => {
-    render(
-      <ModelsTable
-        models={[makeModel({ allowed_clients: ['codex', 'cowork'] })]}
-      />
-    );
+  it('model_id 는 접힌 행과 펼친 패널 둘 다에 보인다', () => {
+    render(<ModelsTable models={[makeModel({})]} />);
     fireEvent.click(screen.getByRole('button', { name: 'expand' }));
     expect(screen.getAllByText('anthropic.claude-x').length).toBe(2);
-    expect(screen.getByText('codex')).not.toBeNull();
-    expect(screen.getByText('cowork')).not.toBeNull();
+  });
+
+  it('alias === model_id 이면 접힌 행에서 중복 표시하지 않는다', () => {
+    render(<ModelsTable models={[makeModel({ alias: 'same-id', model_id: 'same-id', display_name: 'Nice Name' })]} />);
+    expect(screen.getAllByText('same-id').length).toBe(1);
   });
 });

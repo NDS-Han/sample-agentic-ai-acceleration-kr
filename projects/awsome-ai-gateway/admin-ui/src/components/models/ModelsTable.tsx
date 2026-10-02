@@ -15,7 +15,6 @@
  */
 
 import { Fragment, useMemo, useState, useTransition } from 'react';
-import Link from 'next/link';
 import { useTranslations } from 'next-intl';
 import { ChevronRight, Check, Copy } from 'lucide-react';
 import type { ModelListItem } from '@/types/entities';
@@ -175,36 +174,24 @@ export function ModelsTable({ models }: ModelsTableProps) {
                             />
                           </button>
                           <div className="min-w-0">
-                            <div className="truncate font-medium">{displayName}</div>
-                            <div className="mt-0.5 flex flex-wrap items-center gap-1.5">
-                              <span className="font-mono mono-id text-xs text-muted-foreground">
-                                {model.alias}
-                              </span>
-                              {/* 실제 호출되는 공급자 모델 ID — 라우팅 키인 alias와
-                                  함께 접힌 행에서도 보여야 매핑을 즉시 확인할 수 있다 */}
-                              <span
-                                className="max-w-56 truncate font-mono mono-id text-xs text-muted-foreground/80"
+                            <div className="flex items-center gap-2">
+                              <span className="truncate font-medium">{displayName}</span>
+                              <ProviderBadge provider={model.provider} />
+                            </div>
+                            {/* 라우팅 키(alias)와 실제 호출되는 model_id 는 역할이 다른
+                                식별자라 같은 줄에 두면 구분이 안 된다 — 두 줄로 분리.
+                                완전히 같을 때는 중복 표시하지 않는다. */}
+                            <div className="mt-0.5 font-mono mono-id text-xs text-foreground/80">
+                              {model.alias}
+                            </div>
+                            {model.model_id !== model.alias && (
+                              <div
+                                className="mt-0.5 max-w-72 truncate font-mono mono-id text-xs text-muted-foreground"
                                 title={model.model_id}
                               >
                                 {model.model_id}
-                              </span>
-                              <ProviderBadge provider={model.provider} />
-                              {/* 모델×앱 제한 — null=무제한은 배지 생략, []=전면 차단은
-                                  destructive 톤. 편집은 /apps 소유라 여기선 링크만. */}
-                              {model.allowed_clients !== null && (
-                                <Link
-                                  href="/apps"
-                                  title={model.allowed_clients.join(', ') || undefined}
-                                  className="rounded focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                                >
-                                  <Badge tone={model.allowed_clients.length === 0 ? 'pink' : 'amber'}>
-                                    {model.allowed_clients.length === 0
-                                      ? t('appScopeBlocked')
-                                      : t('appScopeRestricted', { count: model.allowed_clients.length })}
-                                  </Badge>
-                                </Link>
-                              )}
-                            </div>
+                              </div>
+                            )}
                           </div>
                         </div>
                       </Td>
@@ -255,8 +242,9 @@ export function ModelsTable({ models }: ModelsTableProps) {
                       <Tr id={detailId} className="bg-muted/30 hover:bg-muted/30 dark:bg-white/[0.03] dark:hover:bg-white/[0.03]">
                         <Td colSpan={colCount}>
                           {/* 섹션을 얇은 보더 카드로 분리 — muted 패널 위에
-                              평면으로 나열하면 경계가 안 보인다는 피드백 반영. */}
-                          <div className="grid gap-3 py-2 md:grid-cols-2 lg:grid-cols-[1.2fr_1fr_1fr]">
+                              평면으로 나열하면 경계가 안 보인다는 피드백 반영.
+                              앱 범위는 /apps 소유 정책이라 여기선 표시하지 않는다. */}
+                          <div className="grid gap-3 py-2 md:grid-cols-2 lg:grid-cols-[1.2fr_1fr]">
                             <section className="rounded-lg border border-border bg-card p-4">
                               <h3 className="mb-3 text-xs font-semibold tracking-wide text-foreground/80">
                                 {t('sectionPricing')}
@@ -331,34 +319,6 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                   </dd>
                                 </div>
                               </dl>
-                            </section>
-                            <section className="rounded-lg border border-border bg-card p-4">
-                              <h3 className="mb-3 text-xs font-semibold tracking-wide text-foreground/80">
-                                {t('sectionScope')}
-                              </h3>
-                              <div className="space-y-1.5 text-sm">
-                                {model.allowed_clients === null ? (
-                                  <p className="text-muted-foreground">{t('appScopeAll')}</p>
-                                ) : model.allowed_clients.length === 0 ? (
-                                  <Badge tone="pink">{t('appScopeBlocked')}</Badge>
-                                ) : (
-                                  <ul className="flex flex-wrap gap-1.5">
-                                    {model.allowed_clients.map((client) => (
-                                      <li key={client}>
-                                        <Badge tone="amber">{client}</Badge>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                )}
-                                <p>
-                                  <Link
-                                    href="/apps"
-                                    className="text-xs text-primary underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded"
-                                  >
-                                    {t('manageInApps')}
-                                  </Link>
-                                </p>
-                              </div>
                             </section>
                           </div>
                           {model.description && (
