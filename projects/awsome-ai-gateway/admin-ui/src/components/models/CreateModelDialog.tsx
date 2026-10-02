@@ -10,6 +10,7 @@ import { createModelAction, updateModelAction } from '@/lib/actions/models';
 import { AppDialog } from '@/components/common/AppDialog';
 import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
+import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { useToast } from '@/components/common/ToastProvider';
 
 interface CreateModelDialogProps {
@@ -169,9 +170,14 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       <form onSubmit={handleSubmit} className="space-y-4 mt-4">
           {/* Alias */}
           <div className="space-y-1">
-            <label htmlFor="alias" className="text-sm font-medium">
-              Alias <span className="text-destructive">*</span>
-            </label>
+            <div className="flex items-center gap-1">
+              <label htmlFor="alias" className="text-sm font-medium">
+                Alias <span className="text-destructive">*</span>
+              </label>
+              {/* label 안에 두면 버튼이 필드 라벨로 연결돼 접근성 쿼리가
+                  'Alias' 를 버튼에도 잡는다 — label 밖 형제로 둔다 */}
+              <InfoTooltip label={t('fieldHelp')} side="top">{t('aliasTooltip')}</InfoTooltip>
+            </div>
             <input
               id="alias"
               name="alias"
@@ -183,11 +189,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-60 disabled:cursor-not-allowed"
               placeholder="e.g. claude-3-5-sonnet"
             />
-            {isEditMode && (
-              <p className="text-xs text-muted-foreground">
-                {t('aliasReadonly')}
-              </p>
-            )}
+            <p className="text-xs text-muted-foreground">
+              {t(isEditMode ? 'aliasReadonly' : 'aliasHintInline')}
+            </p>
             {fieldErrors.alias && <FormError error={fieldErrors.alias} />}
           </div>
 
@@ -236,9 +240,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
           {/* Model ID */}
           <div className="space-y-1">
-            <label htmlFor="model_id" className="text-sm font-medium">
-              Model ID <span className="text-destructive">*</span>
-            </label>
+            <div className="flex items-center gap-1">
+              <label htmlFor="model_id" className="text-sm font-medium">
+                Model ID <span className="text-destructive">*</span>
+              </label>
+              <InfoTooltip label={t('fieldHelp')} side="top">{t('modelIdTooltip')}</InfoTooltip>
+            </div>
             <input
               id="model_id"
               name="model_id"
