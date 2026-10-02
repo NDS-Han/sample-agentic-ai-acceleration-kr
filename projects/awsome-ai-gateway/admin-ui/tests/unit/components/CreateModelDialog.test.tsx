@@ -47,11 +47,12 @@ function fillRequiredFields() {
   fireEvent.change(screen.getByLabelText(/Model ID/), {
     target: { name: 'model_id', value: 'openai.gpt-5.6-sol' },
   });
+  // 폼은 USD/1M 기준 — 카탈로그 단가를 그대로 입력한다 (API 페이로드는 per_1k 로 환산).
   fireEvent.change(screen.getByLabelText('priceInput'), {
-    target: { name: 'input_price_per_1k', value: '0.011' },
+    target: { name: 'input_price_per_1m', value: '11' },
   });
   fireEvent.change(screen.getByLabelText('priceOutput'), {
-    target: { name: 'output_price_per_1k', value: '0.0495' },
+    target: { name: 'output_price_per_1m', value: '49.5' },
   });
 }
 
@@ -132,6 +133,26 @@ describe('CreateModelDialog — 검증 실패 관측성', () => {
     expect(payload).not.toHaveProperty('context_window');
     expect(payload.alias).toBe('codex-gpt-5.6-sol');
     expect(payload.provider).toBe('BEDROCK_MANTLE_OPENAI');
+  });
+
+  it('1M 기준 입력을 API 페이로드의 1K 단가로 환산한다', async () => {
+    createModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fireEvent.change(screen.getByLabelText('priceCacheRead'), {
+      target: { name: 'cache_read_price_per_1m', value: '0.375' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => expect(createModelAction).toHaveBeenCalled());
+    const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
+    // $11/M 입력 → $0.011/K 저장 (API 스키마는 *_per_1k 고정)
+    expect(payload.input_price_per_1k).toBeCloseTo(0.011, 9);
+    expect(payload.output_price_per_1k).toBeCloseTo(0.0495, 9);
+    expect(payload.cache_read_price_per_1k).toBeCloseTo(0.000375, 9);
+    // 폼 키가 아닌 API 키로만 보낸다 — per_1m 키가 새지 않아야 한다.
+    expect(payload).not.toHaveProperty('input_price_per_1m');
   });
 });
 
@@ -220,6 +241,14 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
     expect(payload.provider).toBe('BEDROCK_MANTLE');
   });
 
+  it('편집 모드 가격 입력란은 저장된 1K 단가를 1M 기준으로 표시한다', () => {
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={editModel} />);
+
+    // DB 0.015/K → 입력란에는 15 ($/M) — 사용자가 카탈로그 값과 직접 비교 가능해야 한다.
+    expect(screen.getByLabelText('priceInput')).toHaveValue(15);
+    expect(screen.getByLabelText('priceOutput')).toHaveValue(75);
+  });
+
   it('가격이 안 바뀐 편집은 pricing_changed=false 를 보낸다 (불필요한 가격 버전 방지)', async () => {
     updateModelAction.mockResolvedValue({ success: true, data: undefined });
 
@@ -236,7 +265,7 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
 
     render(<CreateModelDialog isOpen onClose={() => {}} editModel={editModel} />);
     fireEvent.change(screen.getByLabelText('priceInput'), {
-      target: { name: 'input_price_per_1k', value: '0.02' },
+      target: { name: 'input_price_per_1m', value: '20' },
     });
     fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
 

@@ -24,13 +24,26 @@ interface FormState {
   provider: string;
   model_id: string;
   endpoint_url: string;
-  input_price_per_1k: string;
-  output_price_per_1k: string;
-  cache_creation_5m_price_per_1k: string;
-  cache_creation_1h_price_per_1k: string;
-  cache_read_price_per_1k: string;
+  // 운영자가 보는 외부 카탈로그는 USD/1M 기준 — 폼도 1M 으로 받고 API 전송 시 ÷1000 한다.
+  // (DB/API 컬럼은 *_per_1k_tokens Numeric(10,6) — 최소 단위 $0.001/M)
+  input_price_per_1m: string;
+  output_price_per_1m: string;
+  cache_creation_5m_price_per_1m: string;
+  cache_creation_1h_price_per_1m: string;
+  cache_read_price_per_1m: string;
   description: string;
   display_name: string;
+}
+
+/** 1K 단가 → 1M 표시값. DB 는 6자리 소수라 ×1000 은 3자리까지 의미가 있고,
+    *  부동소수점 찌꺼기(0.00465*1000=4.6499…)는 toFixed(6) 로 잘라낸다. */
+function perKtoM(v: number): string {
+  return String(parseFloat((v * 1000).toFixed(6)));
+}
+
+/** 1M 입력값 → API/DB 의 1K 단가. */
+function perMtoK(v: string): number {
+  return parseFloat(v) / 1000;
 }
 
 function getInitialState(editModel?: ModelListItem): FormState {
@@ -40,11 +53,11 @@ function getInitialState(editModel?: ModelListItem): FormState {
       provider: editModel.provider,
       model_id: editModel.model_id,
       endpoint_url: editModel.endpoint_url ?? '',
-      input_price_per_1k: editModel.input_price_per_1k.toString(),
-      output_price_per_1k: editModel.output_price_per_1k.toString(),
-      cache_creation_5m_price_per_1k: editModel.cache_creation_5m_price_per_1k.toString(),
-      cache_creation_1h_price_per_1k: editModel.cache_creation_1h_price_per_1k.toString(),
-      cache_read_price_per_1k: editModel.cache_read_price_per_1k.toString(),
+      input_price_per_1m: perKtoM(editModel.input_price_per_1k),
+      output_price_per_1m: perKtoM(editModel.output_price_per_1k),
+      cache_creation_5m_price_per_1m: perKtoM(editModel.cache_creation_5m_price_per_1k),
+      cache_creation_1h_price_per_1m: perKtoM(editModel.cache_creation_1h_price_per_1k),
+      cache_read_price_per_1m: perKtoM(editModel.cache_read_price_per_1k),
       description: editModel.description ?? '',
       display_name: editModel.display_name ?? '',
     };
@@ -54,11 +67,11 @@ function getInitialState(editModel?: ModelListItem): FormState {
     provider: '',
     model_id: '',
     endpoint_url: '',
-    input_price_per_1k: '',
-    output_price_per_1k: '',
-    cache_creation_5m_price_per_1k: '0',
-    cache_creation_1h_price_per_1k: '0',
-    cache_read_price_per_1k: '0',
+    input_price_per_1m: '',
+    output_price_per_1m: '',
+    cache_creation_5m_price_per_1m: '0',
+    cache_creation_1h_price_per_1m: '0',
+    cache_read_price_per_1m: '0',
     description: '',
     display_name: '',
   };
@@ -108,25 +121,26 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       provider: form.provider,
       model_id: form.model_id,
       endpoint_url: form.endpoint_url,
-      input_price_per_1k: parseFloat(form.input_price_per_1k),
-      output_price_per_1k: parseFloat(form.output_price_per_1k),
-      cache_creation_5m_price_per_1k: parseFloat(form.cache_creation_5m_price_per_1k || '0'),
-      cache_creation_1h_price_per_1k: parseFloat(form.cache_creation_1h_price_per_1k || '0'),
-      cache_read_price_per_1k: parseFloat(form.cache_read_price_per_1k || '0'),
+      input_price_per_1k: perMtoK(form.input_price_per_1m),
+      output_price_per_1k: perMtoK(form.output_price_per_1m),
+      cache_creation_5m_price_per_1k: perMtoK(form.cache_creation_5m_price_per_1m || '0'),
+      cache_creation_1h_price_per_1k: perMtoK(form.cache_creation_1h_price_per_1m || '0'),
+      cache_read_price_per_1k: perMtoK(form.cache_read_price_per_1m || '0'),
       description: form.description || undefined,
       display_name: form.display_name || undefined,
       // 편집 모드: 가격이 안 바뀌면 pricing PUT 을 건너뛰라는 힌트(불필요한 버전 생성 방지).
       ...(isEditMode && {
-        pricing_changed: [
-          'input_price_per_1k',
-          'output_price_per_1k',
-          'cache_creation_5m_price_per_1k',
-          'cache_creation_1h_price_per_1k',
-          'cache_read_price_per_1k',
-        ].some((f) => {
-          const key = f as keyof typeof form;
-          const orig = editModel[f as keyof typeof editModel];
-          return Math.abs(parseFloat(String(form[key]) || '0') - (Number(orig) || 0)) > 1e-9;
+        pricing_changed: (
+          [
+            ['input_price_per_1m', 'input_price_per_1k'],
+            ['output_price_per_1m', 'output_price_per_1k'],
+            ['cache_creation_5m_price_per_1m', 'cache_creation_5m_price_per_1k'],
+            ['cache_creation_1h_price_per_1m', 'cache_creation_1h_price_per_1k'],
+            ['cache_read_price_per_1m', 'cache_read_price_per_1k'],
+          ] as const
+        ).some(([formKey, apiKey]) => {
+          const orig = editModel[apiKey];
+          return Math.abs(perMtoK(form[formKey] || '0') - (Number(orig) || 0)) > 1e-9;
         }),
       }),
     };
@@ -150,6 +164,14 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
         // 실제로 그래서 max_tokens/context_window 스키마 드리프트가 원인 없는 "Validation failed"
         // 로만 보였다. 렌더 불가한 키는 상단 에러 메시지에 합쳐 항상 화면에 노출한다.
         const fe = (!result.success && result.fieldErrors) || {};
+        // API/zod 는 *_per_1k 키로 에러를 돌려준다 — 폼은 *_per_1m 이므로 되돌려
+        // 필드 아래 인라인으로 붙인다(안 하면 orphan 키로 상단 에러에만 합산됨).
+        for (const k of Object.keys(fe)) {
+          if (k.endsWith('_per_1k')) {
+            fe[k.replace(/_per_1k$/, '_per_1m')] = fe[k];
+            delete fe[k];
+          }
+        }
         const orphanKeys = Object.keys(fe).filter((k) => !(k in form));
         setError(
           orphanKeys.length
@@ -294,88 +316,91 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
           {/* Price fields — 수직 일렬 배치 */}
           <div className="space-y-3">
-            <span className="text-sm font-medium">{t('priceLabel')}</span>
+            <div>
+              <span className="text-sm font-medium">{t('priceLabel')}</span>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('priceHint')}</p>
+            </div>
 
             <div className="space-y-1">
-              <label htmlFor="input_price_per_1k" className="text-xs text-muted-foreground">{t('priceInput')}</label>
+              <label htmlFor="input_price_per_1m" className="text-xs text-muted-foreground">{t('priceInput')}</label>
               <input
-                id="input_price_per_1k"
-                name="input_price_per_1k"
+                id="input_price_per_1m"
+                name="input_price_per_1m"
                 type="number"
                 min={0}
-                step={0.000001}
-                value={form.input_price_per_1k}
+                step={0.001}
+                value={form.input_price_per_1m}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="e.g. 3.00"
               />
-              {fieldErrors.input_price_per_1k && <FormError error={fieldErrors.input_price_per_1k} />}
+              {fieldErrors.input_price_per_1m && <FormError error={fieldErrors.input_price_per_1m} />}
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="output_price_per_1k" className="text-xs text-muted-foreground">{t('priceOutput')}</label>
+              <label htmlFor="output_price_per_1m" className="text-xs text-muted-foreground">{t('priceOutput')}</label>
               <input
-                id="output_price_per_1k"
-                name="output_price_per_1k"
+                id="output_price_per_1m"
+                name="output_price_per_1m"
                 type="number"
                 min={0}
-                step={0.000001}
-                value={form.output_price_per_1k}
+                step={0.001}
+                value={form.output_price_per_1m}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="e.g. 3.00"
               />
-              {fieldErrors.output_price_per_1k && <FormError error={fieldErrors.output_price_per_1k} />}
+              {fieldErrors.output_price_per_1m && <FormError error={fieldErrors.output_price_per_1m} />}
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="cache_creation_5m_price_per_1k" className="text-xs text-muted-foreground">{t('priceCacheCreate5m')}</label>
+              <label htmlFor="cache_creation_5m_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheCreate5m')}</label>
               <input
-                id="cache_creation_5m_price_per_1k"
-                name="cache_creation_5m_price_per_1k"
+                id="cache_creation_5m_price_per_1m"
+                name="cache_creation_5m_price_per_1m"
                 type="number"
                 min={0}
-                step={0.000001}
-                value={form.cache_creation_5m_price_per_1k}
+                step={0.001}
+                value={form.cache_creation_5m_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="e.g. 3.00"
               />
-              {fieldErrors.cache_creation_5m_price_per_1k && <FormError error={fieldErrors.cache_creation_5m_price_per_1k} />}
+              {fieldErrors.cache_creation_5m_price_per_1m && <FormError error={fieldErrors.cache_creation_5m_price_per_1m} />}
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="cache_creation_1h_price_per_1k" className="text-xs text-muted-foreground">{t('priceCacheCreate1h')}</label>
+              <label htmlFor="cache_creation_1h_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheCreate1h')}</label>
               <input
-                id="cache_creation_1h_price_per_1k"
-                name="cache_creation_1h_price_per_1k"
+                id="cache_creation_1h_price_per_1m"
+                name="cache_creation_1h_price_per_1m"
                 type="number"
                 min={0}
-                step={0.000001}
-                value={form.cache_creation_1h_price_per_1k}
+                step={0.001}
+                value={form.cache_creation_1h_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="e.g. 3.00"
               />
-              {fieldErrors.cache_creation_1h_price_per_1k && <FormError error={fieldErrors.cache_creation_1h_price_per_1k} />}
+              {fieldErrors.cache_creation_1h_price_per_1m && <FormError error={fieldErrors.cache_creation_1h_price_per_1m} />}
             </div>
 
             <div className="space-y-1">
-              <label htmlFor="cache_read_price_per_1k" className="text-xs text-muted-foreground">{t('priceCacheRead')}</label>
+              <label htmlFor="cache_read_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheRead')}</label>
               <input
-                id="cache_read_price_per_1k"
-                name="cache_read_price_per_1k"
+                id="cache_read_price_per_1m"
+                name="cache_read_price_per_1m"
                 type="number"
                 min={0}
-                step={0.000001}
-                value={form.cache_read_price_per_1k}
+                step={0.001}
+                value={form.cache_read_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="e.g. 3.00"
               />
-              {fieldErrors.cache_read_price_per_1k && <FormError error={fieldErrors.cache_read_price_per_1k} />}
+              {fieldErrors.cache_read_price_per_1m && <FormError error={fieldErrors.cache_read_price_per_1m} />}
             </div>
           </div>
 

@@ -376,8 +376,8 @@
     "alias": "Alias",
     "provider": "Provider",
     "modelId": "Model ID",
-    "inputPrice": "Input Price (per 1K tokens)",
-    "outputPrice": "Output Price (per 1K tokens)",
+    "inputPrice": "Input Price (per 1M tokens)",
+    "outputPrice": "Output Price (per 1M tokens)",
     "maxTokens": "Max Tokens",
     "contextWindow": "Context Window",
     "description": "Description",
@@ -419,7 +419,7 @@
     "mantleEndpointNote": "/v1/messages is appended automatically.",
     "allowedAppsLabel": "Allowed Apps",
     "allowedAppsHint": "All allowed if none selected",
-    "priceLabel": "Price (USD/1K tokens)",
+    "priceLabel": "Price (USD/1M tokens)",
     "priceInput": "Input",
     "priceOutput": "Output",
     "priceCacheCreate5m": "Cache Create 5min",
@@ -503,7 +503,8 @@
     "aliasTooltip": "The name clients (Claude Code, Cowork, Codex, etc.) send as the model parameter when calling the gateway. The gateway routes this alias to the Model ID and Provider below. Example: client calls model='claude-opus-5-5' → provider runs 'global.anthropic.claude-opus-5-5'.",
     "aliasHintInline": "The model name clients send to the gateway. It cannot be changed after creation — choose the name you will register in client configs.",
     "modelIdTooltip": "The identifier of the model the provider (Bedrock, Mantle, etc.) actually runs. Clients send the alias above, not this value — the gateway maps alias → this Model ID. For Bedrock, use an inference profile ID (us./global. prefix).",
-    "fieldHelp": "Help"
+    "fieldHelp": "Help",
+    "priceHint": "Enter prices per 1M tokens, same as external catalogs. Stored internally per 1K tokens (min step $0.001)."
   },
   "rateLimits": {
     "title": "Rate Limits",
