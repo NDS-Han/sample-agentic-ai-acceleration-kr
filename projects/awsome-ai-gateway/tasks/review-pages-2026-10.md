@@ -258,5 +258,14 @@
 
 ## 배포
 
-- 커밋: `1a3f21a` — 이미지: `admin-ui:05e69e0` (admin-api 무변경) — EKS 롤아웃 완료
+- 커밋: `d99f020` — 이미지: `admin-ui:d99f020` (admin-api 무변경) — EKS 롤아웃 완료
 - 라이브 스모크: `/` → 307 로그인, `/models` → 307 ✓
+
+## 후속 조정 (d99f020 — 운영자 피드백 반영)
+
+- **앱 범위 표시 /models 에서 전면 제거** — `null` vs `[등록 앱 전체]` 는 오늘은 멱등이지만
+  미래 앱에 대해 달라, 이 화면에서 보여주면 "왜 다르지" 혼란만 생긴다. 모델×앱 정책은
+  `/apps` AppPolicyPanel 단일 소유로 유지 (Opus 지적: `null`=미래 앱 포함 허용이므로
+  '모든 앱' 라벨 병합은 거짓말이 됨 → 표시 제거로 해결)
+- **모델 셀 3줄 구조**: 이름+provider / alias(mono, foreground) / model_id(mono, muted).
+  같은 톤 나열은 식별자 구분이 안 됐고, alias===model_id 면 중복 생략
