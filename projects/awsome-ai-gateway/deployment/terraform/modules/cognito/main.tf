@@ -101,6 +101,16 @@ resource "aws_cognito_user_pool_domain" "this" {
 }
 
 # ------------------------------------------------------------------------------
+# Hosted UI 브랜딩 — 로고 + CSS (classic Hosted UI 가 허용하는 선택자만 유효)
+# ------------------------------------------------------------------------------
+resource "aws_cognito_user_pool_ui_customization" "this" {
+  user_pool_id = aws_cognito_user_pool.this.id
+  client_id    = aws_cognito_user_pool_client.cli.id
+  image_file   = filebase64("${path.module}/logo.png")
+  css          = file("${path.module}/hosted-ui.css")
+}
+
+# ------------------------------------------------------------------------------
 # App Client — Public (PKCE 강제), gateway-cli 용
 # ------------------------------------------------------------------------------
 resource "aws_cognito_user_pool_client" "cli" {
@@ -121,9 +131,14 @@ resource "aws_cognito_user_pool_client" "cli" {
   logout_urls   = var.logout_urls
 
   # Token TTL — 우리 spec 의 권장값
-  access_token_validity  = 1 # 1시간
-  id_token_validity      = 1 # 1시간
-  refresh_token_validity = 7 # 7일
+  #
+  # id_token: admin-ui 는 이 토큰을 admin_jwt 쿠키로 쓰고 만료를 토큰 exp 에 맞춘다.
+  # 1시간이던 것을 12시간으로 올린다 — 콜백의 쿠키 수명 상한(MAX_COOKIE_MAX_AGE)과
+  # 동일한 값이며, 그 이상 줘도 쿠키가 12h 에 잘라버리므로 의미가 없다.
+  # access_token 은 gateway-cli 가 쓰며 ALLOW_REFRESH_TOKEN_AUTH 로 갱신하므로 1h 유지.
+  access_token_validity  = 1  # 1시간
+  id_token_validity      = 12 # 12시간 — 하루 업무 세션 동안 재로그인 없게
+  refresh_token_validity = 7  # 7일
   token_validity_units {
     access_token  = "hours"
     id_token      = "hours"
