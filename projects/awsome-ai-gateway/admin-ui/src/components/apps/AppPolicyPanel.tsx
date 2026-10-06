@@ -301,7 +301,10 @@ export function AppPolicyPanel() {
           </div>
 
           <div className="space-y-3">
-            <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
+            <div className="flex items-baseline justify-between gap-2">
+              <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
+              <p className="text-xs text-muted-foreground">{t('chipLegend')}</p>
+            </div>
             <div className="glass rounded-apple overflow-hidden">
               {/* 모델 수만큼 길어지는 표 — max-h + overflow-y 로 스크롤시키고
                   헤더는 sticky 로 고정(bg-card 로 아래 행을 가림). */}
@@ -343,6 +346,7 @@ export function AppPolicyPanel() {
                                   return (
                                     <span
                                       key={c}
+                                      title={CLIENT_LABELS[c] ?? c}
                                       className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
                                         on
                                           ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'

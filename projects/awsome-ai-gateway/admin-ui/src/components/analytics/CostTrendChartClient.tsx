@@ -13,6 +13,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import '@/lib/utils/chartDefaults';
 import { Line } from 'react-chartjs-2';
 import { useTranslations } from 'next-intl';
 import { fmtUsd } from '@/lib/utils/format';

@@ -1129,7 +1129,7 @@
     "toggleSaved": "Access setting updated.",
     "modelManagement": "Model access",
     "colAlias": "Model alias",
-    "colAllowAll": "All apps",
+    "colAllowAll": "Per-app status",
     "colAllowThisApp": "This app",
     "noModels": "No models.",
     "allBadge": "All",
@@ -1153,6 +1153,7 @@
     "accessExplicit": "explicit",
     "accessUnrestricted": "unrestricted",
     "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically",
+    "chipLegend": "Chips: per-app status · strikethrough = blocked",
     "noAllowedModelsHint": "Add allowed models below to select a default model.",
     "defaultModelNotAllowedHint": "The current default model is no longer allowed for this app — select an allowed model and save to restore routing."
   },

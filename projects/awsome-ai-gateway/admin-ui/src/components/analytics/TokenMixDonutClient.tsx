@@ -10,6 +10,7 @@ import {
   Tooltip,
   Legend,
 } from 'chart.js';
+import '@/lib/utils/chartDefaults';
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 

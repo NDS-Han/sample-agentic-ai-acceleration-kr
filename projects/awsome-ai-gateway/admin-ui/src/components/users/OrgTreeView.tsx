@@ -76,7 +76,16 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     }
     // 딥링크 — 트리에 실제로 있는 노드만 복원한다(검색 전용 합성 노드는 불가).
     const deepId = new URLSearchParams(window.location.search).get('node');
-    if (!deepId) return;
+    // 딥링크가 없으면 루트를 펼치고 선택한다 — 우측 패널이 빈 상태로 시작해
+    // 무엇을 해야 할지 보이지 않던 데드엔드(리뷰 TOP-2) 해소. 선택은 id 기반이고
+    // 지속되지 않으므로 매 진입 시 루트 조직 패널이 열리는 것이 정상 동작이다.
+    if (!deepId) {
+      if (root) {
+        setExpandedNodes((prev) => new Set([...prev, root.id]));
+        setSelectedId(root.id);
+      }
+      return;
+    }
     const applyDeepLink = (tree: OrgTreeNode | null) => {
       const found = findNodeById(tree, deepId);
       if (!found) return false;
