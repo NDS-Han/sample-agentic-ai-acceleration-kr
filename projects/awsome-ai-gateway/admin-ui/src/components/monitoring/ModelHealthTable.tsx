@@ -65,7 +65,8 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
                 <Badge tone={m.status === 'ACTIVE' ? 'teal' : 'neutral'}>{m.status}</Badge>
               </Td>
               <Td numeric>{m.last_1h_requests.toLocaleString()}</Td>
-              <Td numeric>{m.avg_latency_ms}ms</Td>
+              {/* 요청 0건이면 avg 는 NULL→0 — '0ms' 가 아니라 대시로 표시. */}
+              <Td numeric>{m.avg_latency_ms > 0 ? `${m.avg_latency_ms}ms` : '—'}</Td>
               <Td numeric className={errorColor(m.error_rate_pct)}>
                 <span className="inline-flex items-center justify-end gap-1">
                   <SeverityIcon pct={m.error_rate_pct} />

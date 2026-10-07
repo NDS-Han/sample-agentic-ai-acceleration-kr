@@ -10,6 +10,7 @@ from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db_session
 from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
 from app.models.budget import BudgetConfig, BudgetScope
+from app.models.model import ModelAlias
 from app.models.usage import UsageLog
 
 router = APIRouter(prefix="/admin/my", tags=["My Usage"])
@@ -156,9 +157,12 @@ async def get_my_usage(
         for row in daily_result.all()
     ]
 
+    # display_name 카탈로그 조인 — 대시보드/analytics 와 같은 표기 규칙(modelDisplay).
+    # 미등록 alias 는 None → 프론트가 alias 로 fallback.
     model_stmt = (
         select(
             UsageLog.model_alias,
+            func.max(ModelAlias.display_name).label("display_name"),
             func.sum(UsageLog.cost_usd).label("cost_usd"),
             func.count().label("requests"),
             func.sum(
@@ -168,6 +172,7 @@ async def get_my_usage(
                 + UsageLog.cache_read_tokens
             ).label("tokens"),
         )
+        .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
         .where(
             UsageLog.user_id == user.user_id,
             cost_period_filter(period),  # §59 SUCCESS + KST
@@ -179,6 +184,7 @@ async def get_my_usage(
     by_model = [
         {
             "model_alias": row.model_alias,
+            "display_name": row.display_name,
             "cost_usd": round(float(row.cost_usd), 4),
             "requests": row.requests,
             "tokens": row.tokens or 0,

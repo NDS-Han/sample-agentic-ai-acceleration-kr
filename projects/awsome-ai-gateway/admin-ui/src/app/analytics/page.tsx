@@ -139,7 +139,9 @@ async function ModelCostSection({
     end_date: filter.period === 'custom' ? filter.end_date : null,
     scope: filter.scope ?? 'all',
   }).catch(() => null);
-  return data ? <ModelCostDetail data={data} /> : <ErrorState />;
+  // 같은 섹션의 형제 카드들은 compact 에러 — 여기만 전체 크기면 섹션 높이가
+  // 튄다.
+  return data ? <ModelCostDetail data={data} /> : <ErrorState compact />;
 }
 
 export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps) {

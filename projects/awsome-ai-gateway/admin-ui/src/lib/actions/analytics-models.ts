@@ -8,6 +8,8 @@ import { withRetry } from '@/lib/utils/retry';
 
 export interface ModelCostItem {
   model_alias: string;
+  /** 카탈로그 표시명 — modelDisplay(alias, display_name)의 재료. 미등록이면 null. */
+  display_name: string | null;
   request_count: number;
   total_cost_usd: number;
   input_tokens: number;

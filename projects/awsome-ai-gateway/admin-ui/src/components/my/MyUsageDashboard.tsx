@@ -6,6 +6,7 @@
 import { useTranslations } from 'next-intl';
 import type { MyUsageResponse } from '@/lib/actions/my';
 import { fmtUsd } from '@/lib/utils/format';
+import { modelDisplay } from '@/lib/utils/modelLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
 export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
@@ -83,7 +84,9 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
             <TBody>
               {data.by_model.map((row) => (
                 <Tr key={row.model_alias}>
-                  <Td emphasis className="font-mono mono-id text-xs">{row.model_alias}</Td>
+                  <Td emphasis className="text-xs" title={row.model_alias}>
+                    {modelDisplay(row.model_alias, row.display_name)}
+                  </Td>
                   <Td numeric>{fmtUsd(row.cost_usd)}</Td>
                   <Td numeric>{row.requests.toLocaleString()}</Td>
                   <Td numeric>{row.tokens.toLocaleString()}</Td>

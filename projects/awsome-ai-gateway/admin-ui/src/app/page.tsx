@@ -35,7 +35,7 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 
 
@@ -44,12 +44,8 @@ import { teamDisplayName } from '@/lib/utils/trendSeries';
 // (>=90 CRITICAL / >=70 WARNING)과 동일. 별도 임계를 두면 대시보드 카드와
 // /budgets 표가 같은 수치에 다른 심각도를 표시한다.
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
-}
+// 토큰 포맷의 단일 출처는 lib/utils/format 의 fmtTokensCompact — 로컬 구현을
+// 두면 같은 토큰 수가 페이지마다 다른 단위(1050M vs 1.1B)로 표시된다.
 
 /**
  * 일 평균 소비 + (당월이면) 월말 예상.
@@ -162,7 +158,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
           <KPICard
             title={t('totalTokens')}
-            value={kpi ? formatTokens(kpi.total_tokens) : '—'}
+            value={kpi ? fmtTokensCompact(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
             href={`/analytics?period=${period}`}

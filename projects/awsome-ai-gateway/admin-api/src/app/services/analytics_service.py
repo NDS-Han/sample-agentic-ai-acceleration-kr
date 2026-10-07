@@ -175,13 +175,36 @@ class AnalyticsService:
 
         # requests 를 채운다 — 예전엔 기본값 0 이 그대로 나가서, Analytics 화면에서
         # 내려받는 JSON export 가 모든 모델에 대해 "요청 0건" 을 보고했다.
+        # ⚠️ 비용 내림차순 정렬 필수 — repo 는 ORDER BY 없이 dict 를 주므로(DB 반환
+        #    순서) 그대로 나가면 막대 차트가 같은 페이지의 상세 표(cost DESC)와 다른
+        #    순서로 그려진다. 색상도 index 기반이라 순서가 어긋나면 모델별 색까지 달라진다.
+        sorted_models = sorted(
+            cost_by_model.items(), key=lambda kv: kv[1], reverse=True
+        )
+
+        # 카탈로그 표시명 룩업 — 프론트의 modelDisplay(alias, display_name) 재료.
+        from app.models.model import ModelAlias
+        from sqlalchemy import select as _sel
+
+        display_names: dict[str, str] = {}
+        if sorted_models:
+            rows = (
+                await session.execute(
+                    _sel(ModelAlias.alias, ModelAlias.display_name).where(
+                        ModelAlias.alias.in_([m for m, _ in sorted_models])
+                    )
+                )
+            ).all()
+            display_names = {r.alias: r.display_name for r in rows if r.display_name}
+
         by_model = [
             ModelBreakdown(
                 model=model,
                 cost_usd=cost,
                 requests=requests_by_model.get(model, 0),
+                display_name=display_names.get(model),
             )
-            for model, cost in cost_by_model.items()
+            for model, cost in sorted_models
         ]
 
         # Team breakdown — aggregate per team from usage_logs
@@ -204,13 +227,17 @@ class AnalyticsService:
         stmt = select(
             UsageLog.team_id,
             Team.name.label("team_name"),
+            Department.name.label("dept_name"),
             func.sum(UsageLog.cost_usd).label("cost"),
             func.count(distinct(UsageLog.user_id)).label("users"),
         ).join(
             Team, Team.id == UsageLog.team_id
+        ).outerjoin(
+            # 부서 없는 팀도 행이 나와야 한다(trends_by_team 과 같은 이유).
+            Department, Department.id == Team.dept_id
         ).where(
             *team_where,
-        ).group_by(UsageLog.team_id, Team.name)
+        ).group_by(UsageLog.team_id, Team.name, Department.name)
         result = await session.execute(stmt)
         for row in result:
             if row.team_id:
@@ -219,6 +246,7 @@ class AnalyticsService:
                     team_id=str(row.team_id),
                     cost_usd=row.cost or Decimal("0"),
                     active_users=row.users or 0,
+                    dept_name=row.dept_name,
                 ))
 
 
@@ -460,9 +488,15 @@ class AnalyticsService:
         if (cf := client_filter(client)) is not None:
             where.append(cf)
 
+        # display_name 은 ModelAlias 카탈로그에서 온다 — alias 원시값만 내리면
+        # 대시보드 도넛(modelDisplay 사용)과 이 표가 같은 모델을 다르게 표기한다.
+        # 카탈로그에 없는 alias 도 있으므로 OUTER JOIN + 프론트 fallback.
+        from app.models.model import ModelAlias
+
         model_stmt = (
             select(
                 UsageLog.model_alias,
+                func.max(ModelAlias.display_name).label("display_name"),
                 func.count().label("request_count"),
                 func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
                 func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
@@ -471,6 +505,8 @@ class AnalyticsService:
                 func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label("cache_creation_tokens"),
                 func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
             )
+            .select_from(UsageLog)
+            .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
             .where(*where)
             .group_by(UsageLog.model_alias)
             .order_by(func.sum(UsageLog.cost_usd).desc())
@@ -494,6 +530,7 @@ class AnalyticsService:
             cost_per_1k = (float(row.total_cost_usd) / total_tokens * 1000) if total_tokens > 0 else 0
             models.append({
                 "model_alias": row.model_alias,
+                "display_name": row.display_name,
                 "request_count": row.request_count,
                 "total_cost_usd": round(float(row.total_cost_usd), 4),
                 "input_tokens": row.input_tokens,
@@ -542,17 +579,21 @@ class AnalyticsService:
         period: str,
         group_by: str,
         actor: CurrentUser,
+        scope: str = "all",
+        client: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> tuple[str, str]:
         """Returns (content, content_type)."""
+        # ⚠️ scope/client 를 그대로 넘겨야 화면에 보이는 집합과 파일이 일치한다 —
+        #    예전엔 scope="all" 고정이라 팀 스코프 화면에서 전사 CSV 가 나갔다.
         response = await self.get_analytics(
-            session, period=period, group_by=group_by, scope="all", actor=actor,
-            start_date=start_date, end_date=end_date,
+            session, period=period, group_by=group_by, scope=scope, client=client,
+            actor=actor, start_date=start_date, end_date=end_date,
         )
 
         if format == "csv":
-            return self._to_csv(response), "text/csv"
+            return self._to_csv(response, group_by), "text/csv"
         else:
             return response.model_dump_json(indent=2), "application/json"
 
@@ -842,10 +883,27 @@ class AnalyticsService:
         return UsageByUserResponse(period=period, date=date, items=items)
 
     @staticmethod
-    def _to_csv(data: AnalyticsResponse) -> str:
+    def _to_csv(data: AnalyticsResponse, group_by: str) -> str:
+        # 화면의 group_by 와 같은 차원을 쓴다 — 이전엔 항상 by_model 이라
+        # '팀별' 보고내면 모델 CSV 가 나왔다.
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["period", "model", "cost_usd"])
-        for item in data.by_model:
-            writer.writerow([data.period, item.model, str(item.cost_usd)])
+        if group_by == "team":
+            writer.writerow(["period", "team", "dept_name", "team_id", "active_users", "cost_usd"])
+            for item in data.by_team:
+                writer.writerow([
+                    data.period, item.team, item.dept_name or "",
+                    item.team_id, item.active_users, str(item.cost_usd),
+                ])
+        elif group_by == "user":
+            writer.writerow(["period", "user", "email", "requests", "cost_usd"])
+            for item in data.by_user:
+                writer.writerow([data.period, item.user, item.email, item.requests, str(item.cost_usd)])
+        else:
+            writer.writerow(["period", "model", "display_name", "requests", "cost_usd"])
+            for item in data.by_model:
+                writer.writerow([
+                    data.period, item.model, item.display_name or "",
+                    item.requests, str(item.cost_usd),
+                ])
         return output.getvalue()
