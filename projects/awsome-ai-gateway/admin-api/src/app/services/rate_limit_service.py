@@ -265,7 +265,7 @@ class RateLimitService:
         )
 
     async def get_live_usage(
-        self, scope: str, scope_id: str, *, window_ms: int = 60_000
+        self, session: AsyncSession, scope: str, scope_id: str, *, window_ms: int = 60_000
     ) -> dict:
         """gateway-proxy 가 적재하는 **실시간 RPM 카운터**(Redis ZSET)를 읽어 현재
         사용량/잔여를 반환(§60.9). 설정값만 보던 RL 화면에 실시간 상태를 더한다.
@@ -292,6 +292,22 @@ class RateLimitService:
         #    `[*]` 는 Redis 글롭에서 **리터럴 별표** 문자 클래스라, 임의 scope_id 까지
         #    싸잡지 않으면서 `*` 키만 정확히 잡는다.
         sid = scope_id if sc != "GLOBAL" else "[*]"
+
+        # tracked: RPM 한도가 설정된 scope 에만 proxy 가 카운터를 적재한다
+        # (check_multi_scope_rpm — limit>0 일 때만 ZADD). 한도 미설정 scope 의
+        # rpm_used_total=0 은 "요청 없음"이 아니라 "계량 안 함"이므로 UI 가 두
+        # 상태를 구분할 수 있게 플래그로 내려준다. 조회 실패 시 None(미상) —
+        # 프론트는 None 을 기존 동작(수치 표시)으로 간주한다.
+        tracked: bool | None = None
+        try:
+            cfg_sid = uuid.UUID(scope_id) if sc != "GLOBAL" else None
+            cfg = await RateLimitConfigRepository(session).get_active(
+                RateLimitScope(sc), cfg_sid
+            )
+            tracked = bool(cfg and cfg.rpm_limit and cfg.rpm_limit > 0)
+        except Exception:  # noqa: BLE001 — 설정 조회 실패도 라이브 조회를 막지 않음
+            pass
+
         now_ms = int(time.time() * 1000)
         window_start = now_ms - window_ms
         pattern = f"{{{sc}:{sid}:*}}:rpm"  # 해당 scope 의 모든 모델 rpm ZSET
@@ -317,6 +333,7 @@ class RateLimitService:
                 "scope": sc,
                 "scope_id": scope_id,
                 "window_sec": window_ms // 1000,
+                "tracked": tracked,
                 "rpm_used_total": total,
                 "by_model": sorted(per_model, key=lambda x: -x["rpm_used"]),
             }

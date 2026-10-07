@@ -299,21 +299,27 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
           <div className="text-xs text-destructive py-1">{t('loadError')}</div>
         ) : (
           <>
-            {/* 실시간 사용량 — 섹션이 열려 있을 때만 폴링됐다. */}
+            {/* 실시간 사용량 — 섹션이 열려 있을 때만 폴링됐다.
+                tracked=false(RPM 한도 미설정)면 proxy 가 카운터를 적재하지 않으므로
+                0 을 "요청 없음"으로 오독하지 않게 — 표시로 구분한다. */}
             {usage?.available && (
               <div className="mb-4 rounded-md border border-border bg-card/50 px-3 py-2.5">
                 <div className="flex items-center justify-between">
                   <span className="text-xs font-medium text-muted-foreground">
                     {t('liveRpm', { seconds: usage.window_sec })}
                   </span>
-                  <span className="num text-sm font-semibold text-foreground">
-                    {usage.rpm_used_total}
-                    {effective?.rpm != null && (
-                      <span className="text-muted-foreground font-normal"> / {effective.rpm}</span>
-                    )}
-                  </span>
+                  {usage.tracked === false ? (
+                    <span className="text-sm font-semibold text-muted-foreground">—</span>
+                  ) : (
+                    <span className="num text-sm font-semibold text-foreground">
+                      {usage.rpm_used_total}
+                      {effective?.rpm != null && (
+                        <span className="text-muted-foreground font-normal"> / {effective.rpm}</span>
+                      )}
+                    </span>
+                  )}
                 </div>
-                {effective?.rpm != null && effective.rpm > 0 && (
+                {usage.tracked !== false && effective?.rpm != null && effective.rpm > 0 && (
                   <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full rounded-full bg-primary transition-all"
@@ -333,10 +339,18 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
                     ))}
                   </ul>
                 )}
-                {usage.rpm_used_total === 0 && (
+                {usage.tracked === false ? (
                   <p className="mt-1 text-[11px] text-muted-foreground">
-                    {t('noRecentRequests', { seconds: usage.window_sec })}
+                    {scope === 'user' && inherited
+                      ? t('untrackedHintInherited')
+                      : t('untrackedHint')}
                   </p>
+                ) : (
+                  usage.rpm_used_total === 0 && (
+                    <p className="mt-1 text-[11px] text-muted-foreground">
+                      {t('noRecentRequests', { seconds: usage.window_sec })}
+                    </p>
+                  )
                 )}
               </div>
             )}

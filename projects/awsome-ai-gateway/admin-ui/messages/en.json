@@ -740,7 +740,9 @@
       "clearLimit": "Clear limit",
       "pendingDeleteHint": "Applying deletes the individual setting and follows the parent policy (or unlimited).",
       "liveRpm": "Requests in last {seconds}s",
-      "noRecentRequests": "No requests in the last {seconds}s."
+      "noRecentRequests": "No requests in the last {seconds}s.",
+      "untrackedHint": "No live counter is recorded without an RPM limit. Check the usage trend below for actual traffic.",
+      "untrackedHintInherited": "This counter is not recorded without an individual RPM limit. Requests count toward the shared team limit — see the team panel."
     },
     "rateLimitsMovedTitle": "Rate limits moved",
     "rateLimitsMovedDesc": "Rate limits are now managed in user and team panels. Select a team or user in the tree to view or edit its limits."

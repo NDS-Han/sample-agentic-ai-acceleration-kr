@@ -9,6 +9,10 @@ export interface RateLimitUsage {
   scope?: string;
   scope_id?: string;
   window_sec: number;
+  /** RPM 한도가 설정된 scope 에만 proxy 가 카운터를 적재한다. false 면
+   *  rpm_used_total 은 "요청 없음"이 아니라 "계량 안 함"이므로 UI 가
+   *  0 대신 한도 미설정 상태로 렌더해야 한다. null/undefined = 미상. */
+  tracked?: boolean | null;
   rpm_used_total: number;
   by_model: { model_alias: string; rpm_used: number }[];
   reason?: string;
@@ -24,6 +28,7 @@ export async function fetchRateLimitUsage(scope: string, scopeId: string): Promi
       scope: data.scope,
       scope_id: data.scope_id,
       window_sec: data.window_sec ?? 60,
+      tracked: data.tracked ?? null,
       rpm_used_total: data.rpm_used_total ?? 0,
       by_model: Array.isArray(data.by_model) ? data.by_model : [],
       reason: data.reason,

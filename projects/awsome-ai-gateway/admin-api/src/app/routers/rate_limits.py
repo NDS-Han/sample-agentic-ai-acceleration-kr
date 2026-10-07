@@ -37,6 +37,7 @@ async def get_rate_limit_usage(
     scope: str,
     scope_id: str,
     admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """실시간 RPM 사용량(§60.9) — gateway-proxy 가 Redis 에 적재하는 sliding-window
     카운터를 읽어 현재 사용/모델별 분해 반환. 설정값(tree)과 별개의 라이브 상태.
@@ -44,7 +45,7 @@ async def get_rate_limit_usage(
     from app.services.rate_limit_service import RateLimitService
 
     svc: RateLimitService = request.app.state.rate_limit_service
-    return await svc.get_live_usage(scope, scope_id)
+    return await svc.get_live_usage(session, scope, scope_id)
 
 
 @router.get("/usage-trend/{scope}/{scope_id}")

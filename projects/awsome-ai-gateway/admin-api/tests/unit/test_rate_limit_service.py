@@ -11,6 +11,7 @@ import pytest
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.exceptions import ValidationError
+from app.models.model import RateLimitScope
 from app.schemas.rate_limits import RateLimitSetRequest
 from app.services.rate_limit_service import RateLimitService
 
@@ -204,6 +205,118 @@ class TestGatewayCacheInvalidation:
         deleted_keys = [c.args[0] for c in mock_redis.delete.call_args_list]
         assert "rl:config:GLOBAL:NULL:claude-opus" in deleted_keys
         mock_redis.scan_iter.assert_not_called()
+
+
+class TestGetLiveUsage:
+    """get_live_usage — tracked 플래그.
+
+    proxy 는 RPM 한도가 설정된 scope 에만 카운터를 적재하므로, 한도 미설정
+    scope 의 0 은 '요청 없음'이 아니라 '계량 안 함'이다. UI 가 두 상태를
+    구분하도록 tracked 플래그를 내려준다 (설정 조회 실패 시 None=미상).
+    """
+
+    @staticmethod
+    def _scan(keys: list[str]):
+        async def _gen(*_args, **_kwargs):
+            for k in keys:
+                yield k
+        return _gen
+
+    async def test_tracked_when_rpm_limit_configured(
+        self,
+        rate_limit_service: RateLimitService,
+        mock_session: AsyncMock,
+        mock_redis: AsyncMock,
+    ):
+        team_id = uuid.uuid4()
+        cfg = MagicMock(rpm_limit=100)
+        mock_redis.scan_iter = MagicMock(
+            side_effect=lambda *a, **kw: self._scan(
+                [f"{{TEAM:{team_id}:claude-sonnet}}:rpm"]
+            )()
+        )
+        mock_redis.zcount = AsyncMock(return_value=5)
+
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.get_active = AsyncMock(return_value=cfg)
+            out = await rate_limit_service.get_live_usage(
+                mock_session, "TEAM", str(team_id)
+            )
+
+        assert out["available"] is True
+        assert out["tracked"] is True
+        assert out["rpm_used_total"] == 5
+        assert out["by_model"] == [{"model_alias": "claude-sonnet", "rpm_used": 5}]
+        MockRepo.return_value.get_active.assert_awaited_once_with(
+            RateLimitScope.TEAM, team_id
+        )
+
+    async def test_untracked_when_no_config(
+        self,
+        rate_limit_service: RateLimitService,
+        mock_session: AsyncMock,
+        mock_redis: AsyncMock,
+    ):
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.get_active = AsyncMock(return_value=None)
+            out = await rate_limit_service.get_live_usage(
+                mock_session, "TEAM", str(uuid.uuid4())
+            )
+
+        assert out["available"] is True
+        assert out["tracked"] is False
+        assert out["rpm_used_total"] == 0
+        assert out["by_model"] == []
+
+    async def test_untracked_when_rpm_null(
+        self,
+        rate_limit_service: RateLimitService,
+        mock_session: AsyncMock,
+        mock_redis: AsyncMock,
+    ):
+        # TPM 만 설정된 경우 — rpm 카운터는 적재되지 않으므로 untracked.
+        cfg = MagicMock(rpm_limit=None)
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.get_active = AsyncMock(return_value=cfg)
+            out = await rate_limit_service.get_live_usage(
+                mock_session, "USER", str(uuid.uuid4())
+            )
+
+        assert out["tracked"] is False
+
+    async def test_tracked_none_on_config_lookup_error(
+        self,
+        rate_limit_service: RateLimitService,
+        mock_session: AsyncMock,
+        mock_redis: AsyncMock,
+    ):
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.get_active = AsyncMock(
+                side_effect=RuntimeError("db down")
+            )
+            out = await rate_limit_service.get_live_usage(
+                mock_session, "USER", str(uuid.uuid4())
+            )
+
+        assert out["available"] is True
+        assert out["tracked"] is None
+
+    async def test_global_scope_uses_null_scope_id(
+        self,
+        rate_limit_service: RateLimitService,
+        mock_session: AsyncMock,
+        mock_redis: AsyncMock,
+    ):
+        with patch("app.services.rate_limit_service.RateLimitConfigRepository") as MockRepo:
+            MockRepo.return_value.get_active = AsyncMock(return_value=None)
+            out = await rate_limit_service.get_live_usage(
+                mock_session, "GLOBAL", "claude-sonnet"
+            )
+
+        assert out["tracked"] is False
+        MockRepo.return_value.get_active.assert_awaited_once_with(
+            RateLimitScope.GLOBAL, None
+        )
 
 
 class TestGetUsageTrend:

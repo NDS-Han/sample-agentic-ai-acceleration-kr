@@ -740,7 +740,9 @@
       "clearLimit": "설정 해제",
       "pendingDeleteHint": "적용하면 개별 설정이 삭제되고 상위 정책(또는 무제한)을 따릅니다.",
       "liveRpm": "최근 {seconds}초 요청 수",
-      "noRecentRequests": "최근 {seconds}초 동안 요청이 없습니다."
+      "noRecentRequests": "최근 {seconds}초 동안 요청이 없습니다.",
+      "untrackedHint": "RPM 한도가 설정되지 않아 실시간 사용량이 집계되지 않습니다. 실제 요청 추이는 아래 사용량 추세에서 확인하세요.",
+      "untrackedHintInherited": "개별 RPM 한도가 없어 이 카운터는 집계되지 않습니다. 팀 공용 한도로 계량되며 사용량은 팀 패널에서 확인하세요."
     },
     "rateLimitsMovedTitle": "Rate limit 설정이 이동했습니다",
     "rateLimitsMovedDesc": "Rate limit 은 이제 사용자·팀 패널에서 관리합니다. 아래 트리에서 팀 또는 사용자를 선택하면 패널에서 설정·사용량을 볼 수 있습니다."
