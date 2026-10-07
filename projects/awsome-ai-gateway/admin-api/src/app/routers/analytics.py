@@ -9,14 +9,12 @@ from typing import Literal
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import Response
-from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.db import get_db_session
-from app.core.usage_filters import cost_period_filter, current_kst_period, reporting_tz_sql
+from app.core.usage_filters import current_kst_period
 from app.models.auth import UserRole
-from app.models.usage import UsageLog
 
 logger = logging.getLogger(__name__)
 
@@ -143,85 +141,35 @@ async def get_analytics(
 async def get_model_cost_analytics(
     request: Request,
     period: str = Query(default=None, description="YYYY-MM format"),
-    admin: CurrentUser = Depends(require_admin),
+    scope: str = Query("all", description="all | team:{uuid}"),
+    client: str = Query(default=None, description="claude-code|cowork|codex|other|all"),
+    start_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 시작(end_date 필요)"),
+    end_date: str | None = Query(default=None, description="YYYY-MM-DD — custom 구간 끝(포함)"),
+    user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
+    """모델별 상세 비용 — /analytics 페이지의 상세 섹션.
+
+    overview(/admin/analytics)와 같은 필터셋(월 또는 custom 구간·client·scope·
+    TEAM_LEADER 팀 격리)을 받는다 — 예전엔 period 만 받아서 별도 페이지였을 때는
+    괜찮았지만, 같은 화면에 붙은 이상 필터가 다르면 카드와 표의 숫자가 어긋난다.
+    집계·격리 로직은 AnalyticsService.get_model_cost_detail 이 단일 소스다.
+    """
+    from app.services.analytics_service import AnalyticsService
+
     if not period:
         period = current_kst_period()  # KST 월(§59) — pod TZ(UTC) 아님
 
-    model_stmt = (
-        select(
-            UsageLog.model_alias,
-            func.count().label("request_count"),
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
-            func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
-            func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
-            func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
-            func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label("cache_creation_tokens"),
-            func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
-        )
-        .where(cost_period_filter(period))  # §59 SUCCESS + KST
-        .group_by(UsageLog.model_alias)
-        .order_by(func.sum(UsageLog.cost_usd).desc())
+    svc: AnalyticsService = request.app.state.analytics_service
+    return await svc.get_model_cost_detail(
+        session,
+        period=period,
+        actor=user,
+        scope=scope,
+        client=client,
+        start_date=start_date,
+        end_date=end_date,
     )
-    model_result = await session.execute(model_stmt)
-
-    models = []
-    for row in model_result.all():
-        # ⚠️ 분자(total_cost_usd)와 분모(total_tokens)의 버킷이 같아야 한다. 예전엔
-        #    분모가 input+output 뿐이라 캐시를 많이 쓰는 모델의 단가가 실제보다 크게
-        #    부풀어, "1k 토큰당 비용" 열이 두 Opus 모델의 가격 순위를 뒤집어 보였다.
-        #    cache_creation/cache_read 는 별도 과금 버킷이므로 더한다.
-        #    reasoning_tokens 는 이미 output_tokens 안에 포함(models/usage.py:61)이라
-        #    더하면 이중계상 — 넣지 않는다.
-        total_tokens = (
-            (row.input_tokens or 0)
-            + (row.output_tokens or 0)
-            + (row.cache_creation_tokens or 0)
-            + (row.cache_read_tokens or 0)
-        )
-        cost_per_1k = (float(row.total_cost_usd) / total_tokens * 1000) if total_tokens > 0 else 0
-        models.append({
-            "model_alias": row.model_alias,
-            "request_count": row.request_count,
-            "total_cost_usd": round(float(row.total_cost_usd), 4),
-            "input_tokens": row.input_tokens,
-            "output_tokens": row.output_tokens,
-            "cache_read_tokens": row.cache_read_tokens,
-            "cache_creation_tokens": row.cache_creation_tokens,
-            "avg_latency_ms": round(float(row.avg_latency_ms or 0)),
-            "cost_per_1k_tokens": round(cost_per_1k, 6),
-        })
-
-    # 일별 binning 도 KST(§59) — func.date(timestamptz)는 세션 TZ(UTC)라 KST 변환 후 date.
-    _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
-    daily_stmt = (
-        select(
-            _kst_day.label("day"),
-            UsageLog.model_alias,
-            func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-        )
-        .where(cost_period_filter(period))  # §59 SUCCESS + KST
-        .group_by(_kst_day, UsageLog.model_alias)
-        .order_by(_kst_day)
-    )
-    daily_result = await session.execute(daily_stmt)
-    daily_trend = [
-        {
-            "date": str(row.day),
-            "model_alias": row.model_alias,
-            "cost_usd": round(float(row.cost_usd), 4),
-        }
-        for row in daily_result.all()
-    ]
-
-    grand_total = sum(m["total_cost_usd"] for m in models)
-    return {
-        "period": period,
-        "total_cost_usd": round(grand_total, 4),
-        "models": models,
-        "daily_trend": daily_trend,
-    }
 
 
 @router.get("/export")

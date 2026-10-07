@@ -1,11 +1,11 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { Suspense } from 'react';
-import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import type { AnalyticsFilterForm } from '@/types/api';
 import type { PeriodType, GroupByType } from '@/types/enums';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
+import { ErrorState } from '@/components/common/ErrorState';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
@@ -19,8 +19,10 @@ import { TokenAnalysisCard } from '@/components/analytics/TokenAnalysisCard';
 // 후 복원. DEVLOG §21 "개발 필요" 참조. (ingest 엔드포인트는 admin-api 에 보존.)
 import { ExportButton } from '@/components/analytics/ExportButton';
 import { RefreshButton } from '@/components/analytics/RefreshButton';
+import { ModelCostDetail } from '@/components/analytics/ModelCostDetail';
 import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
-import { isMonth } from '@/lib/utils/period';
+import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
+import { isMonth, resolveMonth } from '@/lib/utils/period';
 
 interface AnalyticsPageProps {
   searchParams: {
@@ -118,6 +120,28 @@ async function ContextSection({
   );
 }
 
+/**
+ * 모델별 상세 비용 섹션 — 과거엔 /analytics/models 별도 페이지였다. 개요 카드·
+ * 차트와 같은 화면에 붙었으므로 같은 필터(월/custom 구간·scope)를 그대로 전달한다
+ * (group_by 는 이 섹션의 고정 차원이라 적용하지 않는다). 백엔드 /admin/analytics/models
+ * 도 같은 필터·TEAM_LEADER 격리를 받는다.
+ */
+async function ModelCostSection({
+  filter,
+  latestMonth,
+}: {
+  filter: AnalyticsFilterForm;
+  latestMonth: string;
+}) {
+  const data = await fetchModelCostAnalytics({
+    period: resolveMonth(filter, latestMonth),
+    start_date: filter.period === 'custom' ? filter.start_date : null,
+    end_date: filter.period === 'custom' ? filter.end_date : null,
+    scope: filter.scope ?? 'all',
+  }).catch(() => null);
+  return data ? <ModelCostDetail data={data} /> : <ErrorState />;
+}
+
 export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps) {
   const t = await getTranslations('analytics');
   // 월 데이터 소스 (대시보드와 동일: /admin/dashboard/periods).
@@ -156,12 +180,6 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
       <div className="flex items-center justify-between">
         <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
         <div className="flex gap-2">
-          <Link
-            href={`/analytics/models?period=${effectiveMonth}`}
-            className="inline-flex items-center gap-1.5 rounded-md px-3 py-2 text-sm font-medium transition-colors border border-border bg-background hover:bg-muted focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-          >
-            {t('viewModelDetail')}
-          </Link>
           <RefreshButton />
           <ExportButton filter={filter} latestMonth={effectiveMonth} />
         </div>
@@ -196,6 +214,14 @@ export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps
               </div>
             </Suspense>
           </div>
+
+          {/* 모델별 상세 — 기간(scope 포함)이 바뀌면 재요청. group_by 는 고정(model). */}
+          <Suspense
+            key={`models-${sectionKey}-${filter.scope ?? 'all'}`}
+            fallback={<SkeletonCard count={2} />}
+          >
+            <ModelCostSection filter={filter} latestMonth={effectiveMonth} />
+          </Suspense>
         </>
       )}
     </div>

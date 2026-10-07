@@ -806,12 +806,10 @@
     "costSeriesOther": "Other",
     "item": "Item",
     "date": "Date",
-    "viewModelDetail": "Model cost detail",
     "invalidDateRange": "The start date must be before the end date. Please adjust the date range."
   },
   "analyticsModels": {
-    "pageTitle": "Cost by Model",
-    "backToAnalytics": "Analytics",
+    "summaryMeta": "{count} models · {cost} total",
     "totalCost": "Total cost",
     "activeModels": "Models used",
     "period": "Period",

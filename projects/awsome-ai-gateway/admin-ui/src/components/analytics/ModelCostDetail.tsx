@@ -28,20 +28,13 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
 
   return (
     <div className="space-y-6">
-      {/* Summary */}
-      <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-        <div className="glass glass-hover rounded-apple p-4">
-          <p className="text-sm text-muted-foreground">{t('totalCost')}</p>
-          <p className="text-2xl font-bold mt-1 tracking-tight num">{fmtUsd(data.total_cost_usd)}</p>
-        </div>
-        <div className="glass glass-hover rounded-apple p-4">
-          <p className="text-sm text-muted-foreground">{t('activeModels')}</p>
-          <p className="text-2xl font-bold mt-1">{models.length}</p>
-        </div>
-        <div className="glass glass-hover rounded-apple p-4">
-          <p className="text-sm text-muted-foreground">{t('period')}</p>
-          <p className="text-2xl font-bold mt-1">{data.period}</p>
-        </div>
+      {/* 섹션 헤더 — 별도 페이지의 요약 카드(총 비용/기간)는 위 ROI 카드·필터바와
+          중복이라 제거하고, 여기엔 모델 수·합계만 한 줄로 둔다. */}
+      <div className="flex items-baseline justify-between flex-wrap gap-2">
+        <h2 className="text-lg font-semibold">{t('detailTitle')}</h2>
+        <span className="text-xs text-muted-foreground">
+          {t('summaryMeta', { count: models.length, cost: fmtUsd(data.total_cost_usd) })}
+        </span>
       </div>
 
       {/* Cost Breakdown Bar */}
@@ -86,9 +79,6 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
 
       {/* Model Table */}
       <div className="glass rounded-apple overflow-hidden">
-        <div className="px-4 py-3 border-b border-border">
-          <h3 className="text-sm font-semibold">{t('detailTitle')}</h3>
-        </div>
         {models.length === 0 ? (
           <p className="text-sm text-muted-foreground p-4">{t('empty')}</p>
         ) : (

@@ -806,12 +806,10 @@
     "costSeriesOther": "기타",
     "item": "항목",
     "date": "날짜",
-    "viewModelDetail": "모델별 비용 상세",
     "invalidDateRange": "시작일이 종료일보다 늦습니다. 날짜 범위를 확인해주세요."
   },
   "analyticsModels": {
-    "pageTitle": "모델별 비용 추적",
-    "backToAnalytics": "Analytics",
+    "summaryMeta": "모델 {count}개 · 총 {cost}",
     "totalCost": "총 비용",
     "activeModels": "사용된 모델 수",
     "period": "기간",

@@ -32,13 +32,34 @@ export interface ModelCostAnalyticsResponse {
   daily_trend: DailyModelCost[];
 }
 
+export interface ModelCostFilter {
+  /** YYYY-MM — 생략 시 백엔드가 KST 현재 월. */
+  period?: string;
+  /** custom 구간 — 둘 다 있을 때만 의미 있다(백엔드는 한쪽만 오면 400). */
+  start_date?: string | null;
+  end_date?: string | null;
+  /** 'all' | 'team:{uuid}' */
+  scope?: string | null;
+  client?: string | null;
+}
+
+// overview(/admin/analytics)와 같은 필터를 그대로 전달 — 같은 화면의 카드와
+// 표가 같은 집합을 보게 하기 위함. 섹션 통합 후에도 단일 소스는 이 함수.
 export async function fetchModelCostAnalytics(
-  period?: string
+  filter: ModelCostFilter = {}
 ): Promise<ModelCostAnalyticsResponse> {
+  const params: Record<string, string> = {};
+  if (filter.period) params.period = filter.period;
+  if (filter.start_date && filter.end_date) {
+    params.start_date = filter.start_date;
+    params.end_date = filter.end_date;
+  }
+  if (filter.scope) params.scope = filter.scope;
+  if (filter.client && filter.client !== 'all') params.client = filter.client;
   return withRetry(() =>
     adminAPI.get<ModelCostAnalyticsResponse>(
       '/admin/analytics/models',
-      period ? { period } : undefined
+      Object.keys(params).length ? params : undefined
     )
   );
 }
