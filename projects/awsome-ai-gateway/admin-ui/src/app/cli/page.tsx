@@ -24,8 +24,10 @@ function buildEnvText(): string {
   // Cognito 는 access_token 에 aud 가 없어 OIDC_AUDIENCE 를 비워 두는데, CLI 쪽
   // audience 는 client_id 와 같다 — 비어 있으면 clientId 로 채운다.
   const audience = env('OIDC_AUDIENCE', clientId);
-  const gateway = env('GATEWAY_PUBLIC_URL', "https://'<gateway-host>'");
-  const adminApi = env('ADMIN_API_PUBLIC_URL', "https://'<admin-api-host>'");
+  // 사용자가 접속하는 주소 — 사내망/프라이빗 DNS 등 공인이 아니어도 된다
+  // (Helm 의 *_INGRESS_URL, 예전 이름 *_PUBLIC_URL 과 의미 동일).
+  const gateway = env('GATEWAY_INGRESS_URL', "https://'<gateway-host>'");
+  const adminApi = env('ADMIN_API_INGRESS_URL', "https://'<admin-api-host>'");
   return [
     `export OIDC_ISSUER_URL="${issuer}"`,
     `export OIDC_CLIENT_ID="${clientId}"`,

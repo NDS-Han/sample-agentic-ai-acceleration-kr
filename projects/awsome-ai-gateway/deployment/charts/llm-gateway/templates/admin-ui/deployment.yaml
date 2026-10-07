@@ -91,13 +91,17 @@ spec:
                 configMapKeyRef:
                   name: {{ include "llm-gateway.fullname" . }}-config
                   key: REPORTING_TIMEZONE
-            # /cli 페이지의 사전 준비 env 블록을 실값으로 채우기 위한 공개 주소.
-            # ingress host 가 비어 있으면(방식 A — ALB DNS 직접) 빈 문자열이 내려가
-            # 페이지가 placeholder 로 폴백한다. 클러스터 내부 주소(ADMIN_API_URL)와
-            # 혼동 금지 — 사용자 셸에서 export 하는 값이므로 **공개 호스트**여야 한다.
-            - name: GATEWAY_PUBLIC_URL
+            # /cli 페이지의 사전 준비 env 블록을 실값으로 채우기 위한 **사용자 접속 주소**.
+            # 공인(public)이란 뜻이 아니다 — 사내망/프라이빗 DNS로만 열리는 내부
+            # ingress 도 포함한다. ingress host 가 비어 있으면(방식 A — ALB DNS
+            # 직접) 빈 문자열이 내려가 페이지가 placeholder 로 폴백한다.
+            # 클러스터 내부 주소(ADMIN_API_URL)와 혼동 금지 — 사용자 셸에서
+            # export 하는 값이므로 **사용자 측 네트워크에서 닿는 호스트**여야 한다.
+            # 운영 override 가 필요하면 adminUi.env 에 같은 이름으로 넣는다
+            # (같은 이름 env 는 마지막 것이 이긴다 — 아래 range 가 뒤에 있다).
+            - name: GATEWAY_INGRESS_URL
               value: {{ if .Values.ingress.gateway.host }}{{ printf "%s://%s" (ternary "https" "http" .Values.ingress.gateway.tls.enabled) .Values.ingress.gateway.host | quote }}{{ else }}""{{ end }}
-            - name: ADMIN_API_PUBLIC_URL
+            - name: ADMIN_API_INGRESS_URL
               value: {{ if .Values.ingress.adminApi.host }}{{ printf "%s://%s" (ternary "https" "http" .Values.ingress.adminApi.tls.enabled) .Values.ingress.adminApi.host | quote }}{{ else }}""{{ end }}
             # OIDC issuer/audience 도 같은 이유로 admin-ui 에 내려준다 — CLI 설정 안내가
             # 클라이언트의 OIDC_* env 를 실값으로 보여줘야 한다. 비밀값 아님(공개 issuer).
