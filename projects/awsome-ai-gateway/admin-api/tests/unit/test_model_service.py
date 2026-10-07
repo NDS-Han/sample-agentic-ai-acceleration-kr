@@ -311,3 +311,98 @@ class TestDisplayName:
         model.display_name = "Sonnet 5 (표시명)"
         resp = model_service._to_response(model, None)
         assert resp.display_name == "Sonnet 5 (표시명)"
+
+
+# ── 모델 삭제 (deprecated 정리) ──────────────────────────────────────────────
+#
+# 정책: usage_logs 는 남기고 카탈로그만 지운다. 참조별 처리:
+#   to_model_alias → 409(다른 모델의 살아있는 fallback 목적지)
+#   나머지(pricing/허용목록/rate limit/from 정책) → 같은 트랜잭션에서 정리.
+
+
+def _count_seq(mock_session: AsyncMock, counts: list[int]) -> None:
+    """deletion_impact 의 7개 count 질의에 순서대로 scalar 값을 돌려준다."""
+    results = [MagicMock(scalar_one=MagicMock(return_value=n)) for n in counts]
+    mock_session.execute.side_effect = results + [MagicMock() for _ in range(16)]
+
+
+class TestDeleteModel:
+    async def test_impact_reports_counts_and_block_flag(
+        self, model_service: ModelService, mock_session: AsyncMock
+    ):
+        model = _make_model()
+        _count_seq(mock_session, [1234, 2, 3, 1, 2, 1, 1])
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=model)
+            impact = await model_service.deletion_impact(mock_session, alias="claude-sonnet")
+
+        assert impact.usage_logs == 1234
+        assert impact.downgrade_to == 1
+        assert impact.blocked is True
+
+    async def test_impact_404_on_unknown_alias(
+        self, model_service: ModelService, mock_session: AsyncMock
+    ):
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=None)
+            with pytest.raises(NotFoundError):
+                await model_service.deletion_impact(mock_session, alias="ghost")
+
+    async def test_delete_blocked_when_model_is_downgrade_target(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """to_model_alias 참조가 있으면 409 — 정책을 몰래 지우면 다른 모델의
+        예산 초과 시 전환이 아니라 에러가 난다."""
+        model = _make_model()
+        _count_seq(mock_session, [0, 0, 0, 0, 0, 0, 2])  # downgrade_to=2
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=model)
+            with pytest.raises(ConflictError):
+                await model_service.delete_model(
+                    mock_session, alias="claude-sonnet", actor=admin_user
+                )
+        # delete 계열 실행이 없어야 한다 — count 질의 7건만.
+        assert mock_session.execute.call_count == 7
+
+    async def test_delete_cascades_children_and_keeps_usage_logs(
+        self, model_service: ModelService, mock_session: AsyncMock,
+        admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        """사용 이력이 있어도 삭제 가능 — 자식 설정만 정리, usage_logs 는 유지."""
+        model = _make_model()
+        _count_seq(mock_session, [500, 3, 2, 1, 1, 1, 0])  # downgrade_to=0
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            mock_audit.log = AsyncMock()
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=model)
+            out = await model_service.delete_model(
+                mock_session, alias="claude-sonnet", actor=admin_user
+            )
+
+        # 7 counts + 6 deletes (pricing/team/user/rate_limit/downgrade_from/alias)
+        assert mock_session.execute.call_count == 13
+        assert out.alias == "claude-sonnet"
+        assert out.deleted.usage_logs == 500
+
+        # 캐시 무효화 — 게이트웨이가 삭제된 모델을 계속 라우팅하면 안 된다.
+        mock_redis.delete.assert_called()
+        deleted_keys = {c.args[0] for c in mock_redis.delete.call_args_list}
+        assert "model:claude-sonnet" in deleted_keys or mock_redis.execute.called
+
+        mock_audit.log.assert_called_once()
+        kw = mock_audit.log.call_args.kwargs
+        assert kw["action"] == "DELETE_MODEL"
+        assert kw["changes"]["usage_logs_retained"] == 500
+
+    async def test_delete_404_on_unknown_alias(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        with patch("app.services.model_service.ModelRepository") as MockRepo:
+            MockRepo.return_value.get_by_alias = AsyncMock(return_value=None)
+            with pytest.raises(NotFoundError):
+                await model_service.delete_model(
+                    mock_session, alias="ghost", actor=admin_user
+                )

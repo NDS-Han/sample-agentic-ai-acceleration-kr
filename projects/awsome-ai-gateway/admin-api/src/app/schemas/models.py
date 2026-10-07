@@ -247,3 +247,30 @@ class AllowedModelsSetRequest(BaseModel):
 class AllowedModelsResponse(BaseModel):
     team_id: str
     model_aliases: list[str]
+
+
+class ModelDeletionImpactResponse(BaseModel):
+    """DELETE /admin/models/{alias} 사전 영향 조회 — 확인 다이얼로그의 재료.
+
+    각 필드는 삭제 시 같이 정리되거나 차단 사유가 되는 참조 수다.
+    blocked: downgrade_policies.to_model_alias 참조가 있으면 true — 이 모델이
+    다른 모델의 살아있는 fallback 목적지라서, 정책 해제 없이 지우면 예산 초과 시
+    전환 대신 에러가 나므로 삭제를 거부한다.
+    """
+
+    alias: str
+    usage_logs: int = 0
+    pricings: int = 0
+    team_allowed: int = 0
+    user_allowed: int = 0
+    rate_limits: int = 0
+    downgrade_from: int = 0
+    downgrade_to: int = 0
+    blocked: bool = False
+
+
+class ModelDeleteResponse(BaseModel):
+    """삭제 결과 — 함께 정리된 자식 행 수를 돌려준다(토스트/감사 표시용)."""
+
+    alias: str
+    deleted: ModelDeletionImpactResponse
