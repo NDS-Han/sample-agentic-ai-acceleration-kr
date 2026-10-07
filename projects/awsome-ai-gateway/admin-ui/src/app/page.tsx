@@ -36,6 +36,7 @@ import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
 import { fmtUsd } from '@/lib/utils/format';
+import { teamDisplayName } from '@/lib/utils/trendSeries';
 
 
 
@@ -266,7 +267,8 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
 
   const teamRows: TopSpendRow[] = topTeams.map((tm) => ({
     id: tm.team_id,
-    name: tm.name,
+    // 동명 팀 구분 — 예산 표와 같은 canonical 규칙(부서_팀).
+    name: teamDisplayName({ team: tm.name, dept_name: tm.department_name }),
     usedUsd: tm.cost_usd,
     usagePct: teamPctById.get(tm.team_id) ?? null,
     href: `/budgets?team=${tm.team_id}`,
@@ -283,7 +285,9 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
     return {
       id: u.user_id,
       name: u.name || u.email,
-      subtitle: u.team_name,
+      subtitle: u.team_name
+        ? teamDisplayName({ team: u.team_name, dept_name: u.department_name })
+        : null,
       usedUsd: u.cost_usd,
       usagePct,
       href: `/users?node=${u.user_id}`,

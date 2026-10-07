@@ -217,7 +217,8 @@ export function AppPolicyPanel() {
 
       {policy && !isLoadPending && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* 기본 모델은 아래 폼이 현재 저장값을 그대로 보여주므로 카드는 중복 — 제외 (리뷰 MED) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
               <p className="text-sm font-medium text-muted-foreground">{t('allowedModels')}</p>
               <p className="text-2xl font-bold num">{policy.allowed_models.length}</p>
@@ -225,14 +226,6 @@ export function AppPolicyPanel() {
             <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
               <p className="text-sm font-medium text-muted-foreground">{t('allowedUsers')}</p>
               <p className="text-2xl font-bold num">{policy.allowed_users.length}</p>
-            </div>
-            <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
-              <p className="text-sm font-medium text-muted-foreground">{t('defaultModel')}</p>
-              <p className="text-sm font-mono mono-id truncate">
-                {policy.default_model ?? (
-                  <span className="text-muted-foreground font-sans">{t('notSet')}</span>
-                )}
-              </p>
             </div>
           </div>
 

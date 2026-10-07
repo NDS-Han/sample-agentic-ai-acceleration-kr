@@ -3,7 +3,7 @@
 import Link from 'next/link';
 import { cookies } from 'next/headers';
 import { getTranslations } from 'next-intl/server';
-import { parseJWT, isSessionExpired } from '@/lib/auth';
+import { parseJWT, isSessionExpired, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import { UserRole } from '@/types/enums';
 
 export default async function ForbiddenPage() {
@@ -13,11 +13,19 @@ export default async function ForbiddenPage() {
   // 페이지로 돌아오는 무한루프가 된다. 개발자 홈은 /my.
   const token = cookies().get('admin_jwt')?.value;
   let home = '/';
+  let isAdmin = false;
   if (token) {
     try {
       const session = parseJWT(token);
-      if (!isSessionExpired(session) && session.role === UserRole.DEVELOPER) {
-        home = '/my';
+      if (!isSessionExpired(session)) {
+        // IdP id_token 에는 role 클레임이 없다 — layout 과 같은 규칙으로
+        // admin_role 쿠키(admin-api 판정)를 우선 병합한다.
+        const role =
+          roleFromCookie(cookies().get(ADMIN_ROLE_COOKIE)?.value) ?? session.role;
+        if (role === UserRole.DEVELOPER) {
+          home = '/my';
+        }
+        isAdmin = role === UserRole.ADMIN;
       }
     } catch {
       // 토큰 손상 → 기본 홈으로
@@ -50,7 +58,9 @@ export default async function ForbiddenPage() {
           <h1 className="text-3xl font-bold text-foreground">403</h1>
           <h2 className="text-xl font-semibold text-foreground">{t('title')}</h2>
           <p className="text-sm text-muted-foreground max-w-sm">
-            {t('description')}
+            {/* ADMIN 에게 "관리자에게 문의" 는 자기 자신을 가리킨다 — 역할 제한
+                페이지(/my 등)로 들어온 경우라고 설명을 분기한다. */}
+            {isAdmin ? t('descriptionAdmin') : t('description')}
           </p>
         </div>
       </div>

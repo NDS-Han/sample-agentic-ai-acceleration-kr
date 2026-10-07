@@ -93,7 +93,7 @@
     "title": "Dashboard",
     "totalUsage": "Total Usage This Month",
     "activeKeys": "Active API Keys",
-    "activeModels": "Active Models",
+    "activeModels": "Catalog models",
     "budgetUtilization": "Budget Utilization",
     "recentActivity": "Recent Activity",
     "usageTrend": "Usage Trend",
@@ -108,7 +108,7 @@
     "dailyAvgProjection": "Month-end projection {amount} (linear estimate)",
     "dailyAvgDesc": "Daily average based on elapsed days",
     "usageAndSystem": "Usage & System",
-    "totalRequests": "Total Requests",
+    "totalRequests": "Successful requests",
     "totalRequestsDesc": "SUCCESS requests this month",
     "totalTokens": "Total Tokens",
     "totalTokensDesc": "Input + Output + Cache total",
@@ -201,7 +201,8 @@
     "noExpiry": "None",
     "loadMore": "Load more",
     "loadMoreFailed": "Failed to load more keys.",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "noKeysCliLink": "See the CLI download page for how keys are issued →"
   },
   "budgets": {
     "title": "Budget Management",
@@ -368,7 +369,9 @@
     },
     "allowedClientsNote": "This user is only allowed {list}",
     "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again.",
-    "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed."
+    "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed.",
+    "zeroBudgetBadge": "Blocked",
+    "zeroBudgetHint": "Budget $0 — all requests are rejected"
   },
   "models": {
     "title": "Model Management",
@@ -738,7 +741,9 @@
       "pendingDeleteHint": "Applying deletes the individual setting and follows the parent policy (or unlimited).",
       "liveRpm": "Requests in last {seconds}s",
       "noRecentRequests": "No requests in the last {seconds}s."
-    }
+    },
+    "rateLimitsMovedTitle": "Rate limits moved",
+    "rateLimitsMovedDesc": "Rate limits are now managed in user and team panels. Select a team or user in the tree to view or edit its limits."
   },
   "analytics": {
     "title": "Analytics",
@@ -806,7 +811,7 @@
     "pageTitle": "Cost by Model",
     "backToAnalytics": "Analytics",
     "totalCost": "Total cost",
-    "activeModels": "Active models",
+    "activeModels": "Models used",
     "period": "Period",
     "costShare": "Cost share",
     "costShareAria": "Cost share by model (stacked bar; see legend for values)",
@@ -817,8 +822,11 @@
     "colCost": "Cost (USD)",
     "colInputTokens": "Input tokens",
     "colOutputTokens": "Output tokens",
-    "colPer1M": "$/1M tokens",
-    "colAvgLatency": "Avg latency"
+    "colPer1M": "Effective rate ($/1M)",
+    "colAvgLatency": "Avg latency",
+    "colCacheTokens": "Cache tokens",
+    "cacheSplit": "Write {write} / Read {read}",
+    "per1MHint": "Effective rate = total cost ÷ billed tokens (Input + Output + Cache). Cache tokens count toward the denominator."
   },
   "cli": {
     "title": "CLI Download",
@@ -829,10 +837,10 @@
     "checksum": "SHA256 Checksum",
     "download": "Download",
     "copyChecksum": "Copy Checksum",
-    "subtitle": "Install the AWSome AI Gateway CLI and connect Claude Code to the corporate gateway via Cognito (OIDC) login. The first login automatically provisions your user and team.",
+    "subtitle": "Install the AWSome AI Gateway CLI and connect Claude Code, Cowork, and Codex to the corporate gateway via Cognito (OIDC) login. The first login automatically provisions your user and team.",
     "prereqTitle": "Prerequisites",
-    "prereqDesc": "Get the three values below from your administrator and export them in your shell. These are the OIDC settings issued by the Cognito User Pool.",
-    "prereqEnv": "export OIDC_ISSUER_URL=\"https://cognito-idp.ap-south-1.amazonaws.com/'<POOL_ID>'\"\nexport OIDC_CLIENT_ID=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport OIDC_AUDIENCE=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport GATEWAY_URL=\"http://'<gateway-host>':8000\"\nexport GATEWAY_ADMIN_URL=\"http://'<admin-api-host>':8080\"",
+    "prereqDesc": "Export the environment variables below in your shell. OIDC values come from the Cognito User Pool; URLs come from the gateway deployment. (Values are pre-filled when deployment settings are detected.)",
+    "prereqPsNote": "On Windows PowerShell, use $env:NAME=\"value\" syntax.",
     "installTitle": "Install & Activate",
     "installLinuxLabel": "Linux / macOS",
     "installWindowsLabel": "Windows (PowerShell, admin)",
@@ -861,6 +869,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyCommand": "Copy command",
+    "copyEnv": "Copy env vars",
     "copyFailed": "Copy failed — select the text and copy it manually.",
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder."
   },
@@ -1032,7 +1041,7 @@
     "avgLatency": "Avg Latency",
     "p95Latency": "P95 Latency",
     "totalCost": "Total Cost",
-    "activeModels": "Active Models",
+    "activeModels": "Active models (catalog)",
     "title": "Live Monitoring",
     "table": {
       "model": "Model",
@@ -1096,7 +1105,8 @@
       "confirmOffLabel": "Turn off",
       "statusUnknown": "Unknown",
       "statusUnknownWarning": "Could not read the current setting — it may actually be on. Refresh to check again."
-    }
+    },
+    "emptyAnalyticsLink": "View longer-term stats in Analytics →"
   },
   "errors": {
     "generic": "An error occurred. Please try again later.",
@@ -1160,7 +1170,8 @@
   "forbidden": {
     "title": "Access denied",
     "description": "You do not have permission to view this page. Contact an administrator if you need access.",
-    "backHome": "Back to home"
+    "backHome": "Back to home",
+    "descriptionAdmin": "This page is for team leaders and developers. View overall usage on the dashboard, analytics, or monitoring."
   },
   "policyState": {
     "unrestricted": "Unrestricted",

@@ -20,7 +20,7 @@ from app.core.usage_filters import (
     current_kst_period,
     kst_month_expr,
 )
-from app.models.auth import KeyStatus, Team, User, VirtualKey
+from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog
@@ -283,17 +283,27 @@ async def top_users(
 
     stmt = (
         select(
+            User.id.label("user_id"),
             User.display_name.label("name"),
             User.email.label("email"),
+            User.team_id.label("team_id"),
+            Team.name.label("team_name"),
+            Department.name.label("department_name"),
             func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
             func.count().label("call_count"),
         )
         .join(User, User.id == UsageLog.user_id)
+        # team/dept 는 달려 있지 않을 수 있어 OUTER — 무소속 사용자도 나와야 한다.
+        .outerjoin(Team, Team.id == User.team_id)
+        .outerjoin(Department, Department.id == Team.dept_id)
         .where(
             cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
             *([cf] if (cf := client_filter(client)) is not None else []),
         )
-        .group_by(User.id, User.display_name, User.email)
+        .group_by(
+            User.id, User.display_name, User.email,
+            User.team_id, Team.name, Department.name,
+        )
         .order_by(func.sum(UsageLog.cost_usd).desc())
         .limit(limit)
     )
@@ -303,8 +313,14 @@ async def top_users(
         "period": period,
         "users": [
             {
+                # 표시명은 UI 가 team_name + department_name 을 canonical 규칙
+                # (부서_팀)으로 조합한다 — 동명 팀이 부서별로 존재할 수 있다.
+                "user_id": str(r.user_id),
                 "name": r.name,
                 "email": r.email,
+                "team_id": str(r.team_id) if r.team_id else None,
+                "team_name": r.team_name,
+                "department_name": r.department_name,
                 "cost_usd": round(float(r.cost_usd or 0), 4),
                 "call_count": int(r.call_count or 0),
             }
@@ -333,16 +349,20 @@ async def top_teams(
 
     stmt = (
         select(
+            Team.id.label("team_id"),
             Team.name.label("name"),
+            Department.name.label("department_name"),
             func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
             func.count().label("call_count"),
         )
         .join(Team, Team.id == UsageLog.team_id)
+        # dept 는 팀에 안 달려 있을 수 있어 OUTER — 부서 없는 팀도 나와야 한다.
+        .outerjoin(Department, Department.id == Team.dept_id)
         .where(
             cost_period_filter(period),  # §59 SUCCESS + KST (대시보드 단일 진실원)
             *([cf] if (cf := client_filter(client)) is not None else []),
         )
-        .group_by(Team.id, Team.name)
+        .group_by(Team.id, Team.name, Department.name)
         .order_by(func.sum(UsageLog.cost_usd).desc())
         .limit(limit)
     )
@@ -352,7 +372,11 @@ async def top_teams(
         "period": period,
         "teams": [
             {
+                # 같은 이름의 팀이 부서별로 중복 존재할 수 있어(예: NDS/SSIR 산하
+                # 동명 Developers) 표시명은 UI 가 department_name 과 조합해 만든다.
+                "team_id": str(r.team_id),
                 "name": r.name,
+                "department_name": r.department_name,
                 "cost_usd": round(float(r.cost_usd or 0), 4),
                 "call_count": int(r.call_count or 0),
             }

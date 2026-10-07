@@ -91,6 +91,20 @@ spec:
                 configMapKeyRef:
                   name: {{ include "llm-gateway.fullname" . }}-config
                   key: REPORTING_TIMEZONE
+            # /cli 페이지의 사전 준비 env 블록을 실값으로 채우기 위한 공개 주소.
+            # ingress host 가 비어 있으면(방식 A — ALB DNS 직접) 빈 문자열이 내려가
+            # 페이지가 placeholder 로 폴백한다. 클러스터 내부 주소(ADMIN_API_URL)와
+            # 혼동 금지 — 사용자 셸에서 export 하는 값이므로 **공개 호스트**여야 한다.
+            - name: GATEWAY_PUBLIC_URL
+              value: {{ if .Values.ingress.gateway.host }}{{ printf "%s://%s" (ternary "https" "http" .Values.ingress.gateway.tls.enabled) .Values.ingress.gateway.host | quote }}{{ else }}""{{ end }}
+            - name: ADMIN_API_PUBLIC_URL
+              value: {{ if .Values.ingress.adminApi.host }}{{ printf "%s://%s" (ternary "https" "http" .Values.ingress.adminApi.tls.enabled) .Values.ingress.adminApi.host | quote }}{{ else }}""{{ end }}
+            # OIDC issuer/audience 도 같은 이유로 admin-ui 에 내려준다 — CLI 설정 안내가
+            # 클라이언트의 OIDC_* env 를 실값으로 보여줘야 한다. 비밀값 아님(공개 issuer).
+            - name: OIDC_ISSUER_URL
+              value: {{ .Values.adminApi.oidc.issuerUrl | default "" | quote }}
+            - name: OIDC_AUDIENCE
+              value: {{ .Values.adminApi.oidc.audience | default "" | quote }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
             {{/* admin-api 와 **같은 values 키**에서 그룹 매핑 두 값을 받는다.
                  어긋나면 관리자 잠김(_helpers.tpl adminUiIdpEnv 주석 참조). */}}

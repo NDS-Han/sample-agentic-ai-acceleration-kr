@@ -3,6 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useLocale, useTranslations } from 'next-intl';
+import Link from 'next/link';
 import { AlertTriangle, AlertCircle } from 'lucide-react';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtTime } from '@/lib/utils/format';
@@ -31,8 +32,11 @@ export function ModelHealthTable({ data }: { data: MonitoringModelsResponse }) {
 
   if (data.models.length === 0) {
     return (
-      <div className="glass rounded-apple p-6">
+      <div className="glass rounded-apple p-6 space-y-1">
         <p className="text-sm text-muted-foreground">{t('models.empty')}</p>
+        <Link href="/analytics" className="text-xs text-primary hover:underline">
+          {t('emptyAnalyticsLink')}
+        </Link>
       </div>
     );
   }

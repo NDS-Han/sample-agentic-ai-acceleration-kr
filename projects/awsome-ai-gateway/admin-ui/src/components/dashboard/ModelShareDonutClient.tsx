@@ -18,6 +18,7 @@ import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
+import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
 ChartJS.register(ArcElement, Tooltip, Legend);
@@ -141,7 +142,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
             <option value="all">{t('scopeAll')}</option>
             {teams.map((team) => (
               <option key={team.id} value={team.id}>
-                {team.department_name ? `${team.name} (${team.department_name})` : team.name}
+                {teamDisplayName({ team: team.name, dept_name: team.department_name })}
               </option>
             ))}
           </select>

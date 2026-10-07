@@ -38,8 +38,15 @@ export function MonitoringOverview({ data }: { data: MonitoringOverviewResponse 
           value={h.error_count.toLocaleString()}
           sub={`${h.error_rate_pct}%`}
         />
-        <StatCard label={t('avgLatency')} value={`${h.avg_latency_ms}ms`} />
-        <StatCard label={t('p95Latency')} value={`${h.p95_latency_ms}ms`} />
+        {/* 요청 0건일 때 0ms 는 실측이 아니라 빈 값 — — 로 표시해 오독 방지 */}
+        <StatCard
+          label={t('avgLatency')}
+          value={h.total_requests > 0 ? `${h.avg_latency_ms}ms` : '—'}
+        />
+        <StatCard
+          label={t('p95Latency')}
+          value={h.total_requests > 0 ? `${h.p95_latency_ms}ms` : '—'}
+        />
         <StatCard label={t('totalCost')} value={fmtUsd(h.total_cost_usd)} />
         <StatCard label={t('activeModels')} value={String(data.active_models)} />
       </div>

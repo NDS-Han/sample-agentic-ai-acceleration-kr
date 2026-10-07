@@ -100,24 +100,43 @@ export function ModelCostDetail({ data }: { data: ModelCostAnalyticsResponse }) 
                 <Th numeric>{t('colCost')}</Th>
                 <Th numeric>{t('colInputTokens')}</Th>
                 <Th numeric>{t('colOutputTokens')}</Th>
+                <Th numeric>{t('colCacheTokens')}</Th>
                 <Th numeric>{t('colPer1M')}</Th>
                 <Th numeric>{t('colAvgLatency')}</Th>
               </Tr>
             </THead>
             <TBody>
-              {models.map((m) => (
-                <Tr key={m.model_alias}>
-                  <Td emphasis className="font-mono mono-id text-xs">{m.model_alias}</Td>
-                  <Td numeric>{m.request_count.toLocaleString()}</Td>
-                  <Td numeric className="font-semibold">{fmtUsd(m.total_cost_usd)}</Td>
-                  <Td numeric>{m.input_tokens.toLocaleString()}</Td>
-                  <Td numeric>{m.output_tokens.toLocaleString()}</Td>
-                  <Td numeric>{fmtPricePerM(m.cost_per_1k_tokens)}</Td>
-                  <Td numeric>{m.avg_latency_ms}ms</Td>
-                </Tr>
-              ))}
+              {models.map((m) => {
+                const cacheTokens =
+                  (m.cache_creation_tokens ?? 0) + (m.cache_read_tokens ?? 0);
+                return (
+                  <Tr key={m.model_alias}>
+                    <Td emphasis className="font-mono mono-id text-xs">{m.model_alias}</Td>
+                    <Td numeric>{m.request_count.toLocaleString()}</Td>
+                    <Td numeric className="font-semibold">{fmtUsd(m.total_cost_usd)}</Td>
+                    <Td numeric>{m.input_tokens.toLocaleString()}</Td>
+                    <Td numeric>{m.output_tokens.toLocaleString()}</Td>
+                    <Td
+                      numeric
+                      title={t('cacheSplit', {
+                        write: (m.cache_creation_tokens ?? 0).toLocaleString(),
+                        read: (m.cache_read_tokens ?? 0).toLocaleString(),
+                      })}
+                    >
+                      {cacheTokens.toLocaleString()}
+                    </Td>
+                    <Td numeric>{fmtPricePerM(m.cost_per_1k_tokens)}</Td>
+                    <Td numeric>{m.avg_latency_ms}ms</Td>
+                  </Tr>
+                );
+              })}
             </TBody>
           </Table>
+        )}
+        {/* 실효 단가의 분모 안내 — input/output 만 합하면 API 계산(캐시 포함)과
+            안 맞아 단가가 부풀어 보인다(리뷰 TOP-5). */}
+        {models.length > 0 && (
+          <p className="text-xs text-muted-foreground px-4 pb-3">{t('per1MHint')}</p>
         )}
       </div>
     </div>

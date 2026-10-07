@@ -7,5 +7,7 @@
 import { redirect } from 'next/navigation';
 
 export default function RateLimitsPage() {
-  redirect('/users');
+  // ?from=rate-limits → /users 상단에 "rate limit 은 유저/팀 패널로 이동" 안내 배너.
+  // 첫 노드 선택 시 ?node= 로 덮어씌워져 자연 소멸한다.
+  redirect('/users?from=rate-limits');
 }

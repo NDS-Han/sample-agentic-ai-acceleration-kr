@@ -5,6 +5,7 @@
 
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
+import Link from 'next/link';
 import { revokeKeyAction } from '@/lib/actions/keys';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useToast } from '@/components/common/ToastProvider';
@@ -72,8 +73,13 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
 
   if (keys.length === 0) {
     return (
-      <div className="flex items-center justify-center glass rounded-apple py-16 text-sm text-muted-foreground">
-        {t('noKeys')}
+      <div className="flex flex-col items-center justify-center gap-2 glass rounded-apple py-16 text-sm text-muted-foreground">
+        <p>{t('noKeys')}</p>
+        {/* 발급 동선 안내 — VK 는 gateway-cli 로만 발급되므로 빈 상태에서
+            설정 페이지로 이어준다(리뷰: 빈 상태가 데드엔드) */}
+        <Link href="/cli" className="text-xs text-primary hover:underline">
+          {t('noKeysCliLink')}
+        </Link>
       </div>
     );
   }

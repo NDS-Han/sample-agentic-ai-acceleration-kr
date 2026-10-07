@@ -12,6 +12,9 @@ export interface ModelCostItem {
   total_cost_usd: number;
   input_tokens: number;
   output_tokens: number;
+  /** 별도 과금 버킷 — input/output 에 미포함. 실효 단가 분모에는 포함. */
+  cache_read_tokens: number;
+  cache_creation_tokens: number;
   avg_latency_ms: number;
   cost_per_1k_tokens: number;
 }
