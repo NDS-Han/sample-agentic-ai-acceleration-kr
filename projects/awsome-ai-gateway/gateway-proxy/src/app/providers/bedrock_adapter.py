@@ -38,12 +38,18 @@ def _extract_bedrock_usage(response_body: dict) -> TokenUsage:
     output_tokens = usage.get("output_tokens", usage.get("outputTokens", 0))
     cache_creation = usage.get("cache_creation_input_tokens", 0)
     cache_read = usage.get("cache_read_input_tokens", 0)
+    # Anthropic 응답의 usage.cache_creation.ephemeral_1h_input_tokens —
+    # 혼합 TTL 요청의 1h 캐시 쓰기만 분리해 정확 과금(R2-12).
+    cache_creation_1h = (usage.get("cache_creation") or {}).get(
+        "ephemeral_1h_input_tokens", 0
+    )
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
+        cache_creation_1h_input_tokens=cache_creation_1h,
     )
 
 

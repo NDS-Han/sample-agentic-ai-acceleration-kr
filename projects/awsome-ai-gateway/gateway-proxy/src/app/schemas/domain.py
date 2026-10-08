@@ -266,9 +266,16 @@ class TokenUsage(BaseModel):
     # and ALREADY counts them inside output_tokens; Anthropic extended-thinking tokens
     # also land here when present. Do NOT add to total/cost/TPM (double-billing). 0 = none.
     reasoning_tokens: int = 0
-    # True when any cache_control block in the request used ttl=3600 (1-hour cache).
-    # Used by calculate_cost to select cache_write_1h_per_1k vs cache_write_per_1k.
+    # True when any cache_control block in the request used 1-hour cache
+    # (Anthropic wire literal is "1h"; legacy "3600"도 허용).
+    # Used by calculate_cost to select cache_write_1h_per_1k vs cache_write_per_1k
+    # **as a fallback** — provider 가 응답 usage 의 cache_creation.ephemeral_*
+    # 분해를 보고하면 cache_creation_1h_input_tokens 가 정확한 분할을 준다.
     cache_ttl_1h: bool = False
+    # Anthropic 응답 usage.cache_creation.ephemeral_1h_input_tokens —
+    # 1시간 TTL 로 쓰인 캐시 생성 토큰만 분리한 값. 혼합 TTL 요청에서
+    # 5m 부분을 1h 단가로 잘못 과금하지 않기 위해 사용한다.
+    cache_creation_1h_input_tokens: int = 0
     # KI-08: 스트리밍 disconnect 시 누적 텍스트로 역산한 경우 True.
     # 진짜 provider usage 이벤트면 False. 감사/청구 정확도 분석 용도.
     estimated: bool = False

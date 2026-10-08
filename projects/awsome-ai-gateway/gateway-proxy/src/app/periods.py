@@ -53,7 +53,7 @@ gateway-proxy 만 ``datetime.now(tz=timezone.utc).strftime("%Y-%m")`` 로 UTC �
 
 from __future__ import annotations
 
-from contextvars import ContextVar
+from contextvars import ContextVar, Token
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
@@ -131,9 +131,19 @@ _request_started_at: ContextVar[datetime | None] = ContextVar(
 )
 
 
-def set_request_started_at(dt: datetime) -> None:
-    """요청 시작 절대시각을 ContextVar 에 심는다 (middleware 전용)."""
-    _request_started_at.set(dt)
+def set_request_started_at(dt: datetime) -> Token[datetime | None]:
+    """요청 시작 절대시각을 ContextVar 에 심는다 (middleware 전용).
+
+    반환 토큰을 `reset_request_started_at` 에 넘기면 이전 값으로 복원된다 —
+    요청 처리가 끝난 뒤 되돌리면 같은 태스크를 재사용하는 커스텀 ASGI
+    하네스/테스트에서도 이전 요청 시각이 새지 않는다(uvicorn 은 요청마다
+    새 태스크라 현재는 오염이 없지만, 전제 비의존 강건화).
+    """
+    return _request_started_at.set(dt)
+
+
+def reset_request_started_at(token: Token[datetime | None]) -> None:
+    _request_started_at.reset(token)
 
 
 def request_started_at() -> datetime | None:
@@ -141,9 +151,13 @@ def request_started_at() -> datetime | None:
     return _request_started_at.get()
 
 
-def set_request_period(period: str) -> None:
+def set_request_period(period: str) -> Token[str | None]:
     """요청 시작 시각의 리포팅 월을 ContextVar 에 심는다 (middleware 전용)."""
-    _request_period.set(period)
+    return _request_period.set(period)
+
+
+def reset_request_period(token: Token[str | None]) -> None:
+    _request_period.reset(token)
 
 
 def request_period() -> str:

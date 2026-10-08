@@ -10,6 +10,8 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.periods import (
     period_at,
+    reset_request_period,
+    reset_request_started_at,
     set_request_period,
     set_request_started_at,
 )
@@ -39,8 +41,26 @@ class BudgetMiddleware:
         # request_started_at 도 함께 심는다 — cost:stream 엔트리의
         # requested_at/period/date 가 이 시작 시각에서 파생된다.
         request_start = datetime.now(UTC)
-        set_request_started_at(request_start)
-        set_request_period(period_at(request_start))
+        tok_started = set_request_started_at(request_start)
+        tok_period = set_request_period(period_at(request_start))
+        try:
+            await self._dispatch(scope, receive, send, request_start)
+        finally:
+            # 요청 처리 후 이전 값으로 복원 — uvicorn 은 요청마다 새 태스크를
+            # 만들어 전제상 오염이 없지만, 태스크를 재사용하는 커스텀 ASGI
+            # 하네스/테스트에서도 이전 요청 시각이 새지 않게 방어한다.
+            # (백그라운드 drain 태스크는 생성 시점에 context 를 복사하므로
+            # 여기서 리셋해도 그쪽에는 영향이 없다.)
+            reset_request_started_at(tok_started)
+            reset_request_period(tok_period)
+
+    async def _dispatch(
+        self,
+        scope: Scope,
+        receive: Receive,
+        send: Send,
+        request_start: datetime,
+    ) -> None:
 
         path: str = scope.get("path", "")
         state = scope.setdefault("state", {})

@@ -89,6 +89,7 @@ async def bedrock_anthropic_sse_stream(
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_creation": 0,
+        "cache_creation_1h": 0,  # usage.cache_creation.ephemeral_1h_input_tokens
         "cache_read": 0,
     }
     accumulated_text: list[str] = []  # KI-08: content_block_delta.delta.text 누적
@@ -124,6 +125,10 @@ async def bedrock_anthropic_sse_stream(
                 "cache_creation_input_tokens", counters["cache_creation"]
             )
             counters["cache_read"] = u.get("cache_read_input_tokens", counters["cache_read"])
+            # 1h TTL 캐시 쓰기 분해 — 혼합 TTL 정확 과금(R2-12)
+            cc = u.get("cache_creation") or {}
+            if v := cc.get("ephemeral_1h_input_tokens"):
+                counters["cache_creation_1h"] = v
         elif etype == "content_block_delta":
             # KI-08: 스트림 도중 생성된 텍스트 누적. disconnect 시 tokenizer 역산용.
             delta = data.get("delta", {})
@@ -157,6 +162,7 @@ async def bedrock_anthropic_sse_stream(
             total_tokens=it + ot,
             cache_creation_input_tokens=counters["cache_creation"],
             cache_read_input_tokens=counters["cache_read"],
+            cache_creation_1h_input_tokens=counters["cache_creation_1h"],
         )
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
@@ -184,6 +190,7 @@ async def bedrock_anthropic_sse_stream(
             total_tokens=it + estimated_ot,
             cache_creation_input_tokens=counters["cache_creation"],
             cache_read_input_tokens=counters["cache_read"],
+            cache_creation_1h_input_tokens=counters["cache_creation_1h"],
             estimated=True,
         )
 
@@ -745,74 +752,6 @@ async def responses_sse_stream(
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")
-
-
-async def stream_response(
-    request: Request,
-    chunk_iterator: AsyncIterator[bytes],
-    on_usage: callable,
-    idle_timeout: float | None = None,
-    drain_timeout: float | None = None,
-) -> AsyncIterator[bytes]:
-    """스트리밍 응답 프록시.
-
-    클라이언트에 chunk를 yield하며, 연결이 끊어지면 백그라운드에서
-    스트림을 계속 소비하여 usage를 기록한다.
-
-    ⚠️ 현재 **호출부 없음**(dialect 별 전용 헬퍼가 대체). 그래도 타임아웃 기본값을
-    Settings 에서 해석하도록 맞춰 둔다 — 나중에 누가 이 함수를 쓰기 시작할 때
-    하드코딩 60s 로 되돌아가는 회귀를 원천 차단하기 위함.
-    """
-    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
-    usage: TokenUsage | None = None
-    client_disconnected = False
-
-    async def consume_remaining():
-        """클라이언트 연결 끊김 후 백그라운드 소비."""
-        nonlocal usage
-        deadline = time.monotonic() + drain_timeout
-        try:
-            async for chunk in chunk_iterator:
-                if time.monotonic() > deadline:
-                    logger.warning("stream_drain_timeout")
-                    break
-                parsed_usage = _try_extract_usage(chunk)
-                if parsed_usage:
-                    usage = parsed_usage
-        except Exception:
-            logger.exception("stream_drain_error")
-        finally:
-            if usage and callable(on_usage):
-                try:
-                    await on_usage(usage, None)
-                except Exception:
-                    logger.exception("on_usage_callback_failed")
-
-    try:
-        async for chunk in chunk_iterator:
-            # 클라이언트 연결 확인
-            if await request.is_disconnected():
-                logger.info("client_disconnected_during_stream")
-                client_disconnected = True
-                # 백그라운드에서 나머지 소비
-                asyncio.create_task(consume_remaining())
-                return
-
-            parsed_usage = _try_extract_usage(chunk)
-            if parsed_usage:
-                usage = parsed_usage
-
-            yield chunk
-
-    except Exception:
-        logger.exception("stream_proxy_error")
-        client_disconnected = True
-
-    if not client_disconnected and usage and callable(on_usage):
-        try:
-            await on_usage(usage, None)
-        except Exception:
-            logger.exception("on_usage_callback_failed")
 
 
 def _try_extract_usage(chunk: bytes) -> TokenUsage | None:

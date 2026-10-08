@@ -123,6 +123,9 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
         state["input_tokens"] = u.get("input_tokens", 0)
         state["cache_read"] = u.get("cache_read_input_tokens", 0)
         state["cache_write"] = u.get("cache_creation_input_tokens", 0)
+        state["cache_write_1h"] = (u.get("cache_creation") or {}).get(
+            "ephemeral_1h_input_tokens", 0
+        )
         state["output_tokens"] = max(
             state.get("output_tokens", 0), u.get("output_tokens", 0)
         )
@@ -321,6 +324,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                             ),
                             cache_creation_input_tokens=bedrock_usage.get("cache_write", 0),
                             cache_read_input_tokens=bedrock_usage.get("cache_read", 0),
+                            cache_creation_1h_input_tokens=bedrock_usage.get(
+                                "cache_write_1h", 0
+                            ),
                         )
                     else:
                         u = _try_extract_usage(chunk)

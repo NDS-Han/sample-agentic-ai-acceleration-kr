@@ -313,8 +313,10 @@ def test_every_period_site_uses_the_shared_helper():
             "KST",
             "request_period",
             "set_request_period",
+            "reset_request_period",
             "request_started_at",
             "set_request_started_at",
+            "reset_request_started_at",
             "period_at",
             "date_at",
         }, (

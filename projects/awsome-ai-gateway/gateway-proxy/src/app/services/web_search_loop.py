@@ -685,6 +685,7 @@ def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     acc.input_tokens += turn.input_tokens
     acc.output_tokens += turn.output_tokens
     acc.cache_creation_input_tokens += turn.cache_creation_input_tokens
+    acc.cache_creation_1h_input_tokens += turn.cache_creation_1h_input_tokens
     acc.cache_read_input_tokens += turn.cache_read_input_tokens
     acc.reasoning_tokens += turn.reasoning_tokens
     acc.total_tokens = acc.input_tokens + acc.output_tokens
@@ -1945,6 +1946,11 @@ async def _anthropic_stream(
                     u = (ev.get("message") or {}).get("usage") or {}
                     merged.input_tokens += int(u.get("input_tokens", 0) or 0)
                     merged.cache_creation_input_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
+                    merged.cache_creation_1h_input_tokens += int(
+                        (u.get("cache_creation") or {}).get(
+                            "ephemeral_1h_input_tokens", 0
+                        ) or 0
+                    )
                     merged.cache_read_input_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
                     if first_turn is None:
                         first_turn = _prompt_snapshot(

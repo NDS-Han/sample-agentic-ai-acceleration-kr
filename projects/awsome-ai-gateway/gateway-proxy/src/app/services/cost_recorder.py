@@ -24,15 +24,28 @@ COST_STREAM_MAXLEN = 100_000
 def calculate_cost(usage: TokenUsage, pricing: ModelConfigSchema) -> Decimal:
     """비용 계산: input + output + cache_write + cache_read.
 
-    cache_write 단가는 요청의 cache TTL에 따라 분기:
+    cache_write 단가는 TTL 별로 분기:
       - 5-min (default): pricing.cache_write_per_1k
-      - 1-hour (ttl=3600): pricing.cache_write_1h_per_1k
+      - 1-hour (ttl="1h"): pricing.cache_write_1h_per_1k
+
+    응답 usage 의 ``cache_creation.ephemeral_1h_input_tokens`` 분해가 보고되면
+    그 비율대로 정확히 나눠 과금한다(혼합 TTL 요청에서 5m 부분까지 1h 단가로
+    과금되던 오류 방지). 분해가 없으면 요청 측 cache_ttl_1h 신호로 전체를
+    1h 로 취급하는 구 동작에 폴백한다.
     """
     p = pricing.pricing
     input_cost = (Decimal(usage.input_tokens) / 1000) * p.input_per_1k
     output_cost = (Decimal(usage.output_tokens) / 1000) * p.output_per_1k
-    cache_write_rate = p.cache_write_1h_per_1k if usage.cache_ttl_1h else p.cache_write_per_1k
-    cache_write_cost = (Decimal(usage.cache_creation_input_tokens) / 1000) * cache_write_rate
+    cache_creation_total = usage.cache_creation_input_tokens
+    one_h = min(usage.cache_creation_1h_input_tokens, cache_creation_total)
+    five_m = cache_creation_total - one_h
+    if one_h == 0 and usage.cache_ttl_1h:
+        # 응답 분해를 보고하지 않는 프로바이더 — 요청 측 신호로 전체 1h 취급.
+        five_m, one_h = 0, cache_creation_total
+    cache_write_cost = (
+        (Decimal(one_h) / 1000) * p.cache_write_1h_per_1k
+        + (Decimal(five_m) / 1000) * p.cache_write_per_1k
+    )
     cache_read_cost = (Decimal(usage.cache_read_input_tokens) / 1000) * p.cache_read_per_1k
     return (input_cost + output_cost + cache_write_cost + cache_read_cost).quantize(
         COST_PRECISION, rounding=ROUND_HALF_UP
