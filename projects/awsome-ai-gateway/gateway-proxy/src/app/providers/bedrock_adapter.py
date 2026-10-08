@@ -177,6 +177,15 @@ class BedrockAdapter(ProviderAdapter):
                 usage = TokenUsage(
                     input_tokens=response.get("usage", {}).get("inputTokens", 0),
                     output_tokens=response.get("usage", {}).get("outputTokens", 0),
+                    # ⚠️ Converse 의 usage 에는 캐시 카운터도 camelCase 로 온다
+                    #    (cacheReadInputTokens/cacheWriteInputTokens). 읽지 않으면
+                    #    캐시된 토큰이 usage_logs 와 과금 양쪽에서 0 이 된다.
+                    cache_read_input_tokens=response.get("usage", {}).get(
+                        "cacheReadInputTokens", 0
+                    ),
+                    cache_creation_input_tokens=response.get("usage", {}).get(
+                        "cacheWriteInputTokens", 0
+                    ),
                 )
                 usage.total_tokens = usage.input_tokens + usage.output_tokens
                 body = json.dumps(response).encode()

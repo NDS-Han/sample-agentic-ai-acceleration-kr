@@ -387,13 +387,18 @@ async def openai_sse_stream(
             estimated_ot = None
         if not estimated_ot or estimated_ot <= 0:
             return usage
-        # OpenAI path에서는 input_tokens가 없음 (usage 이벤트 없으면) — 0으로 둠.
-        it = usage.input_tokens if usage else 0
-        return TokenUsage(
-            input_tokens=it,
-            output_tokens=estimated_ot,
-            total_tokens=it + estimated_ot,
-            estimated=True,
+        # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다** — Responses 방언(아래
+        #    `_estimate_output_tokens`)과 같은 규칙. 새 TokenUsage 로 만들면
+        #    cache 버킷·web_search_count·cache_ttl_1h 가 지워져, 끊긴 스트림의
+        #    캐시된 입력 토큰이 과금에서 증발했다. usage 자체가 없으면 input 은
+        #    모르는 그대로 0 — 최소한 output 추정치는 남긴다.
+        base = usage or TokenUsage()
+        return base.model_copy(
+            update={
+                "output_tokens": estimated_ot,
+                "total_tokens": base.input_tokens + estimated_ot,
+                "estimated": True,
+            }
         )
 
     async def _fire_on_complete(status: str) -> None:
