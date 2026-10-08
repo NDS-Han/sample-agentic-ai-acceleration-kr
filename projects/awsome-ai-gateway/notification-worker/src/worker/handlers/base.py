@@ -105,7 +105,7 @@ class BaseHandler(ABC):
                     event_payload=event.payload,
                 )
 
-                # 3d. DB 저장 (실패해도 전송 계속)
+                # 3d. DB 저장 — 유니크 슬롯 선점으로 중복 발송 방지.
                 # ⚠️ ux_notification_logs_event_recipient 유니크 인덱스가
                 #    (event_id, event_type, recipient_email) 슬롯을 여기서 선점한다.
                 #    같은 이벤트의 재배송(cost-recorder replay 재발행, pub/sub
@@ -114,11 +114,33 @@ class BaseHandler(ABC):
                 #    재배송" 케이스는 pending 행이 남아 후속 재배송도 스킵된다
                 #    (유실보다 중복 방지를 택함 — retry_executor 가 이벤트 내에서
                 #    이미 재시도한다).
-                try:
-                    session.add(log)
-                    await session.commit()
-                except IntegrityError:
-                    await session.rollback()
+                # ⚠️ IntegrityError **외** 실패(일시 DB 끊김/타임아웃)는 1회 재시도해
+                #    슬롯을 다시 잡는다 — 예전엔 슬롯 없이 발송해 재배송 시 중복 메일이
+                #    나갔다(R2-6). 그래도 실패하면 **발송을 우선**한다 — 알림 채널이
+                #    lossy pub/sub 이라 스킵하면 영구 유실이 되므로, 지속적 DB 장애
+                #    하에서는 "중복 가능한 발송"이 "유실"보다 낫다(운영 결정).
+                duplicate = False
+                slot_claimed = False
+                for _claim_attempt in (1, 2):
+                    try:
+                        session.add(log)
+                        await session.commit()
+                        slot_claimed = True
+                        break
+                    except IntegrityError:
+                        await session.rollback()
+                        duplicate = True
+                        break
+                    except Exception as exc:
+                        await session.rollback()
+                        logger.warning(
+                            "dedup_slot_claim_failed",
+                            attempt=_claim_attempt,
+                            event_type=event.type.value,
+                            recipient=recipient.email,
+                            error=str(exc),
+                        )
+                if duplicate:
                     logger.info(
                         "duplicate_event_skipped",
                         event_id=event.event_id,
@@ -126,16 +148,14 @@ class BaseHandler(ABC):
                         recipient=recipient.email,
                     )
                     continue
-                except Exception as exc:
-                    await session.rollback()
-                    logger.error(
-                        "db_write_failed",
-                        event_type=event.type.value,
-                        recipient=recipient.email,
-                        error=str(exc),
-                    )
+                if not slot_claimed:
                     if self._metrics:
                         self._metrics.errors_total.add(1, {"error_type": "db"})
+                    logger.warning(
+                        "dedup_slot_unclaimed_sending_anyway",
+                        event_type=event.type.value,
+                        recipient=recipient.email,
+                    )
 
                 # 3e. 렌더링 결과 래핑
                 rendered = RenderedEmail(

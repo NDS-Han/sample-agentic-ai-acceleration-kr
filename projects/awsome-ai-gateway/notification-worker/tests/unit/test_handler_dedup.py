@@ -33,11 +33,21 @@ def _event() -> NotificationEvent:
 
 
 class _Session:
-    """commit()이 설정된 side-effect를 내는 최소 AsyncSession 대역."""
+    """commit()이 설정된 side-effect를 내는 최소 AsyncSession 대역.
 
-    def __init__(self, commit_exc: Exception | None = None):
+    ``commit_exc`` 는 매번 던지는 예외, ``fail_first_n_commits`` 는 처음 N회만
+    던지고 이후 성공하는 일시 장애 시뮬레이션이다.
+    """
+
+    def __init__(
+        self,
+        commit_exc: Exception | None = None,
+        fail_first_n_commits: int = 0,
+    ):
         self._commit_exc = commit_exc
+        self._fail_left = fail_first_n_commits
         self.added: list = []
+        self.commits = 0
 
     async def __aenter__(self):
         return self
@@ -49,6 +59,10 @@ class _Session:
         self.added.append(obj)
 
     async def commit(self):
+        self.commits += 1
+        if self._fail_left > 0:
+            self._fail_left -= 1
+            raise RuntimeError("transient db error")
         if self._commit_exc is not None:
             raise self._commit_exc
 
@@ -56,11 +70,13 @@ class _Session:
         pass
 
 
-def _session_factory_with(commit_exc: Exception | None):
+def _session_factory_with(
+    commit_exc: Exception | None = None, fail_first_n_commits: int = 0
+):
     sessions: list[_Session] = []
 
     def factory() -> _Session:
-        s = _Session(commit_exc)
+        s = _Session(commit_exc, fail_first_n_commits)
         sessions.append(s)
         return s
 
@@ -68,7 +84,7 @@ def _session_factory_with(commit_exc: Exception | None):
     return factory
 
 
-def _handler(commit_exc=None, send_fail=False):
+def _handler(commit_exc=None, send_fail=False, fail_first_n_commits=0):
     config = MagicMock()
     config.enabled = True
     config.recipient_roles = [RecipientRole.ADMIN]
@@ -102,7 +118,7 @@ def _handler(commit_exc=None, send_fail=False):
     retry_executor = MagicMock()
     retry_executor.execute = AsyncMock(side_effect=_execute)
 
-    factory = _session_factory_with(commit_exc)
+    factory = _session_factory_with(commit_exc, fail_first_n_commits)
     handler = BudgetHandler(
         session_factory=factory,
         config_cache=config_cache,
@@ -139,7 +155,22 @@ async def test_first_delivery_still_sends_and_logs():
 
 @pytest.mark.asyncio
 async def test_generic_db_error_does_not_block_send():
-    """IntegrityError 가 아닌 DB 장애는 기존 정책대로 전송을 계속한다."""
+    """슬롯 선점 재시도까지 실패하는 지속 DB 장애 — 발송을 우선한다(유실<중복)."""
     handler, sender, _ = _handler(commit_exc=RuntimeError("db down"))
     await handler.handle(_event())
     sender.send.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_transient_slot_claim_retried_then_sends():
+    """일시 DB 실패는 슬롯 선점을 1회 재시도한다 (R2-6).
+
+    첫 commit 만 실패하면 두 번째 시도에서 슬롯이 잡혀, 후속 재배송 시
+    IntegrityError dedup 이 그대로 동작한다 — 예전엔 슬롯 없이 발송해
+    재배송 때 중복 메일이 나갔다.
+    """
+    handler, sender, factory = _handler(fail_first_n_commits=1)
+    await handler.handle(_event())
+    sender.send.assert_awaited_once()
+    # 슬롯 선점 재시도 + 최종 상태 commit — 세션 하나에서 commit 2회 이상 시도.
+    assert factory.sessions[0].commits >= 2
