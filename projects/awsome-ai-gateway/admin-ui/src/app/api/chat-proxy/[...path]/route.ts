@@ -32,7 +32,36 @@ export const maxDuration = 300;
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
+/**
+ * 경로 화이트리스트 (R3-2). 이 라우트는 `/api/chat-proxy/admin/chat/...` 만
+ * 서비스해야 한다. catch-all 세그먼트를 그대로 join 하면 `..`/`%2e%2e` 가
+ * URL 정규화로 상위 디렉터리를 빠져나가 — 라이브로
+ * `/api/chat-proxy/admin/chat/%2e%2e/%2e%2e/internal/cache/retry` →
+ * admin-api `/internal/cache/retry` 도달이 확인됐다. 사용자의 admin_jwt 가
+ * 임의 admin-api 경로로 전달되는 것을 차단한다.
+ */
+function isAllowedPath(pathParts: string[]): boolean {
+  if (pathParts.length < 3) return false;
+  if (pathParts[0] !== 'admin' || pathParts[1] !== 'chat') return false;
+  // 세그먼트 디코딩 후에도 위험 문자가 남으면 거절 — `..`, `.`, 빈 세그먼트,
+  // 이중 인코딩(`%`), 백슬래시. 슬래시는 catch-all 분할로 이미 나뉜다.
+  return pathParts.every(
+    (seg) =>
+      seg !== '' &&
+      seg !== '.' &&
+      seg !== '..' &&
+      !seg.includes('%') &&
+      !seg.includes('\\'),
+  );
+}
+
 async function forward(req: NextRequest, pathParts: string[]): Promise<Response> {
+  if (!isAllowedPath(pathParts)) {
+    return Response.json(
+      { error: 'chat-proxy path not allowed' },
+      { status: 400 },
+    );
+  }
   const jwt = cookies().get('admin_jwt')?.value;
   const search = req.nextUrl.search || '';
   const target = `${ADMIN_API_URL}/${pathParts.join('/')}${search}`;
