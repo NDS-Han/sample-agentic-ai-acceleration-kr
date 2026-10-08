@@ -10,10 +10,16 @@ Granularity: (date, user_id, model_alias) per row — date 는 settings.reportin
 (기본 "Asia/Seoul"/KST) 기준 캘린더 날짜. admin-api 의 REPORTING_TIMEZONE 과 같은
 값으로 맞춰야 대시보드(usage_logs 실시간 집계)와 이 테이블의 날짜 경계가 일치한다.
 
-Idempotent: 어제 윈도우를 **DELETE 후 전체 재집계**한다 — 예전엔 ON CONFLICT
-DO NOTHING 이었는데, 그러면 크론(KST 00:10) 이후 스트림 백로그/재처리로 늦게
-INSERT 된 어제분 usage_logs 가 재실행돼도 합산되지 않아 daily_aggregates 에
-영구 누락됐다. 윈도우 전체 재계산이라 중복 실행도 안전하다.
+Idempotent: 어제 윈도우를 **전체 재집계 후 ON CONFLICT DO UPDATE**로 덮어쓴다 —
+예전엔 DO NOTHING 이라 크론(KST 00:10) 이후 스트림 백로그/재처리로 늦게 INSERT 된
+어제분 usage_logs 가 재실행돼도 합산되지 않아 영구 누락됐다. DO UPDATE 덮어쓰기로
+늦게 온 행도 반영된다.
+
+⚠️ 멀티-replica 동시 실행 안전: DELETE+INSERT 로는 N개 pod 의 동일 크론이 같은
+   윈도우를 지우고 넣다가 유니크 키에 깨졌다(N-1 pod 매일 UniqueViolation).
+   UPSERT 는 같은 키에 대해 행 잠금으로 직렬화되고, 양쪽이 결정적으로 같은 값을
+   계산하므로 마지막 커밋이 이겨도 결과가 같다. usage_logs 행은 삭제되지 않으므로
+   DELETE 없이도 집계가 그룹을 놓치지 않는다.
 
 ⚠️ GROUP BY 는 충돌키 (date, user_id, model_alias) 와 같은 입도로 맞춘다 —
    team_id/dept_id 를 GROUP BY 에 넣으면 팀 이동한 유저가 같은 날 같은 모델로
@@ -48,10 +54,6 @@ def _yesterday_window(tz_name: str) -> tuple[datetime, datetime, date]:
     )
 
 
-_DELETE_WINDOW_SQL = """
-DELETE FROM usage.daily_aggregates WHERE date = :day_local;
-"""
-
 _AGG_SQL = """
 INSERT INTO usage.daily_aggregates
   (date, user_id, team_id, dept_id, model_alias,
@@ -74,7 +76,17 @@ FROM usage.usage_logs
 WHERE requested_at >= :start AND requested_at < :end
 GROUP BY
   DATE((requested_at AT TIME ZONE :tz)::timestamp),
-  user_id, model_alias;
+  user_id, model_alias
+ON CONFLICT (date, user_id, model_alias) DO UPDATE SET
+  team_id = EXCLUDED.team_id,
+  dept_id = EXCLUDED.dept_id,
+  input_tokens = EXCLUDED.input_tokens,
+  output_tokens = EXCLUDED.output_tokens,
+  cache_creation_tokens = EXCLUDED.cache_creation_tokens,
+  cache_read_tokens = EXCLUDED.cache_read_tokens,
+  total_tokens = EXCLUDED.total_tokens,
+  total_cost_usd = EXCLUDED.total_cost_usd,
+  request_count = EXCLUDED.request_count;
 """
 
 
@@ -113,9 +125,8 @@ async def _is_empty(session: AsyncSession) -> bool:
 async def aggregate_yesterday(session: AsyncSession) -> int:
     tz_name = get_settings().reporting_timezone
     start, end, day_local = _yesterday_window(tz_name)
-    # 같은 트랜잭션에서 어제 윈도우를 지우고 다시 집계 — 늦게 도착한 행도
-    # 재실행 때마다 반영된다.
-    await session.execute(text(_DELETE_WINDOW_SQL), {"day_local": day_local})
+    # 어제 윈도우 전체를 재집계해 UPSERT — 늦게 도착한 행도 재실행 때마다 반영되고,
+    # 멀티-replica 크론 동시 실행도 유니크 키 행 잠금으로 직렬화돼 안전하다.
     result = await session.execute(text(_AGG_SQL), {"start": start, "end": end, "tz": tz_name})
     count: int = result.rowcount
     await session.commit()
