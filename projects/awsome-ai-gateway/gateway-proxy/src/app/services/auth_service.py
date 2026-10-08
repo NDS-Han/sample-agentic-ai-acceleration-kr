@@ -21,6 +21,43 @@ logger = structlog.get_logger(__name__)
 VK_CACHE_TTL = 300  # 5분
 JWT_KEY_CACHE_TTL = 3600  # 1시간
 
+# 공개키 테이블(admin_jwt_configs)은 비대칭 알고리즘만 허용한다 — 대칭 HMAC
+# (HS256 등)이 등록되면 공개 PEM 텍스트가 곧 서명 비밀이 돼 alg-confusion 위조가
+# 성립한다. DB 오설정/침해 방어선. HS* 를 공개키 테이블에 둘 합법적 이유가 없다.
+_ALLOWED_JWT_ALGORITHMS = frozenset(
+    {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}
+)
+
+
+def _decode_jwt(
+    token: str,
+    pem: str,
+    algorithm: str,
+    *,
+    issuer: str | None,
+    audience: str | None,
+) -> dict:
+    """admin_jwt_configs 의 키 레코드 계약으로 JWT 를 검증한다.
+
+    admin-api 의 JWTVerifier(core/auth.py:65-74)와 동일하게 issuer/audience 를
+    강제한다 — 예전엔 둘 다 넘기지 않아 (a) 같은 키로 서명된 다른 용도의 토큰이
+    수용되고(confused-deputy), (b) PyJWT 기본 verify_aud=True 때문에 `aud`
+    클레임을 실은 정상 토큰이 InvalidAudienceError 로 전부 401 이 났다.
+    audience 가 비어 있으면 aud 검증을 끄고, issuer 도 비어 있을 때만 생략한다.
+    """
+    if algorithm not in _ALLOWED_JWT_ALGORITHMS:
+        # 대칭/알 수 없는 알고리즘 레코드는 검증에 쓰지 않는다.
+        raise jwt.InvalidAlgorithmError(f"disallowed jwt algorithm: {algorithm}")
+    options: dict = {"require": ["user_id", "team_id", "dept_id", "roles", "exp"]}
+    kwargs: dict = {}
+    if audience:
+        kwargs["audience"] = audience
+    else:
+        options["verify_aud"] = False
+    if issuer:
+        kwargs["issuer"] = issuer
+    return jwt.decode(token, pem, algorithms=[algorithm], options=options, **kwargs)
+
 
 def _extract_bearer_token(authorization: str) -> str:
     if not authorization or not authorization.startswith("Bearer "):
@@ -53,6 +90,15 @@ class VKAuthStrategy:
         if redis is not None:
             cached = await redis.get(f"key:cache:vk:{key_hash}")
             if cached:
+                # VK 폐기 시 admin-api 가 key:vk:{hash} 와 key:cache:vk:{hash} 를
+                # 함께 DEL 한다. 캐시 DEL 이 일시 Redis 장애로 실패하면 AuthContext
+                # 가 남아 폐기 키가 TTL(≤300s) 동안 통과했다 — 그래서 캐시 히트도
+                # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
+                # 매핑 부재 = 폐기됨.
+                vk_mapping = await redis.get(f"key:vk:{key_hash}")
+                if vk_mapping is None:
+                    await redis.delete(f"key:cache:vk:{key_hash}")
+                    raise PermissionError("Invalid or inactive virtual key")
                 data = json.loads(cached)
                 # user.is_active 재확인 — 캐시 TTL(300s) 안에 계정 비활성화된 경우 즉시 차단
                 if db is not None:
@@ -203,8 +249,10 @@ class JWTAuthStrategy:
         if not kid:
             raise PermissionError("JWT missing kid claim")
 
-        # public key 조회 — 캐시는 {"pem", "algorithm"} JSON (레거시 순수 PEM 호환).
-        cached_pair: tuple[str, str] | None = None
+        # public key 조회 — 캐시는 {"pem","algorithm","issuer","audience"} JSON.
+        # 레거시 형태(순수 PEM 문자열, iss/aud 없는 JSON)는 iss/aud 를 모르므로
+        # 캐시 검증 없이 DB 재조회로 새 형태 레코드로 갱신한다.
+        cached_rec: tuple[str, str, str | None, str | None] | None = None
         if redis is not None:
             cached_key = await redis.get(f"key:cache:jwt:{kid}")
             if cached_key:
@@ -213,9 +261,15 @@ class JWTAuthStrategy:
                 )
                 try:
                     data = json.loads(raw)
-                    cached_pair = (data["pem"], data.get("algorithm", "RS256"))
+                    if data.get("pem") and "issuer" in data and "audience" in data:
+                        cached_rec = (
+                            data["pem"],
+                            data.get("algorithm", "RS256"),
+                            data["issuer"],
+                            data["audience"],
+                        )
                 except Exception:
-                    cached_pair = (raw, "RS256")
+                    pass
 
         # ⚠️ auth.admin_jwt_configs 에는 `kid` / `status` 컬럼이 없다. 실제 플래그는
         #    `is_active` 다 (db/init/02_create_tables.sql, app/models/auth.py:50-59,
@@ -232,13 +286,11 @@ class JWTAuthStrategy:
         #    캐시돼 같은 kid 의 후속 요청까지 계속 실패했다. admin-api 의
         #    JWTVerifier 와 같은 전략이다.
         claims: dict | None = None
-        if cached_pair is not None:
+        if cached_rec is not None:
+            pem, algorithm, issuer, audience = cached_rec
             try:
-                claims = jwt.decode(
-                    token,
-                    cached_pair[0],
-                    algorithms=[cached_pair[1]],
-                    options={"require": ["user_id", "team_id", "dept_id", "roles", "exp"]},
+                claims = _decode_jwt(
+                    token, pem, algorithm, issuer=issuer, audience=audience
                 )
             except jwt.ExpiredSignatureError:
                 raise PermissionError("JWT expired")
@@ -265,13 +317,12 @@ class JWTAuthStrategy:
             last_err: Exception | None = None
             for jwt_key in jwt_keys:
                 try:
-                    claims = jwt.decode(
+                    claims = _decode_jwt(
                         token,
                         jwt_key.public_key_pem,
-                        algorithms=[jwt_key.algorithm],
-                        options={
-                            "require": ["user_id", "team_id", "dept_id", "roles", "exp"]
-                        },
+                        jwt_key.algorithm,
+                        issuer=jwt_key.issuer,
+                        audience=jwt_key.audience,
                     )
                     matched_key = jwt_key
                     break
@@ -294,6 +345,8 @@ class JWTAuthStrategy:
                         {
                             "pem": matched_key.public_key_pem,
                             "algorithm": matched_key.algorithm,
+                            "issuer": matched_key.issuer,
+                            "audience": matched_key.audience,
                         }
                     ),
                 )

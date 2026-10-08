@@ -33,7 +33,7 @@ async def trigger_aggregation(
 ):
     """Manual trigger for ROI aggregation (testing/debug only)."""
     settings = get_settings()
-    if settings.APP_ENV == "production":
+    if settings.is_production:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=403, detail="Not available in production")
@@ -55,7 +55,7 @@ async def test_issue_key(
 ):
     """[DEV ONLY] Issue a VK without STS auth — for integration testing."""
     settings = get_settings()
-    if settings.APP_ENV == "production":
+    if settings.is_production:
         from fastapi import HTTPException
 
         raise HTTPException(status_code=403, detail="Not available in production")

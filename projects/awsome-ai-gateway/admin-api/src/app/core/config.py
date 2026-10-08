@@ -69,9 +69,17 @@ class Settings(BaseSettings):
 
     # ── Application ──
     APP_NAME: str = "llm-gateway-admin-api"
-    APP_ENV: str = "development"  # development | staging | production
+    APP_ENV: str = "development"  # development | staging | production — Helm 은 dev|staging|prod 주입
     DEBUG: bool = False
     LOG_LEVEL: str = "INFO"
+
+    @property
+    def is_production(self) -> bool:
+        """Helm values(global.environment)는 prod|dev|staging, 코드 기본값은
+        development|production — 두 표기를 모두 수용해 prod 가드를 실효화한다.
+        (이전엔 `== "production"` 비교가 `prod` 에 매칭되지 않아 prod 가드가
+        무력화됐다 — internal 디버그 엔드포인트가 열리는 사전 버그.)"""
+        return self.APP_ENV in ("production", "prod")
 
     # ── Database (PostgreSQL) ──
     DATABASE_URL: str = "postgresql+asyncpg://admin_api_user:changeme@localhost:5432/ds_gateway"
