@@ -241,3 +241,59 @@ ADMIN이 `http://169.254.169.254/...`나 내부 VPC 서비스를 등록하면 �
 | F13 | ⏸️ 보류 | pub/sub → Stream/DLQ 전환은 아키텍처 변경 — F3 슬롯 선점이 중복 방지는 해결 |
 
 검증: gateway-proxy 1120 / admin-api 764 / cost-recorder 23 / notification-worker 47 passed.
+
+---
+
+# 라운드 2 (수정 후 재검증 — Devin + kiro-cli claude-opus-5.5)
+
+kiro 리포트: `/tmp/kiro-review-r2.out` (773줄). 5개 병렬 서브리뷰 + 주 리뷰어 교차검증.
+**라운드-1 수정사항 검증 결과: F1/F2/F5/F10/F12 구현 모두 정상 확인** (recorded 정렬, 어댑터 이벤트 경계 전달, ContextVar 가시성·오염 없음, DELETE↔SELECT 윈도우 1:1, 재시도 payload 동일 — 전부 로컬 실험으로 확인). 마이그레이션 0040 concurrency-safe.
+
+## 신규 발견 (R2)
+
+| # | 심각도 | 출처 | 요약 |
+|---|--------|------|------|
+| R2-1 | HIGH | kiro | `endpoint_url` SSRF: 숫자형 호스트(`2130706433`, `0x7f000001`, `127.1`, `localhost.`)가 `ip_address()` ValueError → DNS 취급으로 통과. httpx 실측으로 127.0.0.1 접속 확인 → IMDS 자격증명 절취형 SSRF 성립 |
+| R2-2 | HIGH | kiro | IPv6 ULA `fd00:ec2::254`(EC2 IMDS IPv6) 미차단 — `is_private` 미검사라 fc00::/7 통과 |
+| R2-3 | MED | kiro | `daily_aggregator` DELETE+재집계가 멀티-replica(prod 3) 크론 동시 실행에서 UniqueViolation — F10 수정의 동시성 회귀. MVCC 롤백으로 데이터 유실은 없으나 매일 N-1 pod 실패 로그 |
+| R2-4 | MED | kiro | gateway JWT `jwt.decode`에 `issuer`/`audience` 미전달 — admin-api는 둘 다 검증, 주석의 "같은 전략" 주장 거짓 → 교차 용도 토큰 수용(confused-deputy) 가능 |
+| R2-5 | MED | kiro | PyJWT 기본 `verify_aud=True` → `aud` 클레임 있는 정상 IdP 토큰 전부 401 (InvalidAudienceError 로컬 재현). admin-api는 수용 → 서비스 간 상반 판정 |
+| R2-6 | MED | kiro | notification 슬롯 INSERT가 IntegrityError 외 예외(일시 DB 장애)면 `continue` 없이 메일 발송 + 로그 0행 → 재배송 시 중복 메일 (F3이 막은 창 재개방) |
+| R2-7 | MED | kiro | `GET /admin/budgets/{scope}/{scope_id}/downgrade` — TEAM_LEADER 허용인데 서비스에 `actor` 미전달 → 타 팀/유저 다운그레이드 정책 교차 열람(IDOR). 형제 `get_budget_config`는 스코프 검사 있음 |
+| R2-8 | MED | kiro | VK 캐시 히트 경로가 `User.is_active`만 재확인 — 폐기 시 Redis DEL 실패하면 폐기 VK가 TTL(≤300s) 동안 통과 |
+| R2-9 | MED | kiro | web_search 루프 입장심사 1회만 — max_iterations 턴 분량 한도 초과 지출 가능(사후 정산, 상한 있음) |
+| R2-10 | MED | kiro | ROI 집계가 USER/DEPT 스코프를 쓰지 않음(GLOBAL+TEAM만) — reader 부재로 잠재 결함 |
+| R2-11 | MED | kiro | `169.254.169.254.nip.io` 류 DNS→메타데이터 리졸브는 코드로 차단 불가 — egress 네트워크 정책 전제를 문서화 필요 |
+| R2-12 | MED | Devin | `_has_1h_cache_control`이 `ttl=="3600"`만 매칭 — Anthropic API는 `"1h"` 리터럴 → **1h 캐시 전부 5m 단가로 저과금**. + 단일 boolean이라 혼합 TTL 시 5m 부분까지 1h 과금(응답의 `cache_creation.ephemeral_5m/1h_input_tokens` 분해 미사용) |
+| R2-13 | LOW | kiro | `usage:daily:*:cost` incrbyfloat 누적 → "오늘 비용" 표시값 float 드리프트(예산 enforcement는 Decimal 별도 경로라 무영향) |
+| R2-14 | LOW | kiro | dev 토큰(`dev.<b64>.sig`) 무서명 ADMIN 우회 — `DEV_LOGIN_ENABLED=true` 게이트, prod false 확인됨. env 단일 의존 |
+| R2-15 | LOW | kiro | JWT algorithm 비대칭 allowlist 미고정 — DB 오설정(HS256+공개PEM) 시 alg-confusion 가능(표준 공격은 키별 단일 alg 고정으로 이미 차단) |
+| R2-16~ | LOW | kiro | ContextVar reset 부재(uvicorn 요청별 태스크라 오염 없음, 방어적 reset 권장) / 셧다운 시 drain task GC로 꼬리 usage 유실(best-effort) / 미사용 `stream_response`가 F11 버퍼링 미적용(회귀 함정) / pending 행 영구 잔류(F3 명시 트레이드오프) / `localhost.` trailing-dot(R2-1과 동결함군) / CSRF·Secure 쿠키·OIDC nonce / web_search 무서명 이력 / `team:vk_hashes` EXPIRED 잔존·`rl:config` TTL 의존 / ROI float |
+
+## 기각 확인 (재수정 불요)
+- batch_flusher `recorded` 언바운드/빈 insert 경로 없음, per-row 폴백 정합
+- Bedrock 스트림: botocore EventStream이 이벤트 단위 전달 → `json.loads` 분할 불가
+- ContextVar: 요청별 태스크 격리로 reset 누락 오염 없음, drain task도 컨텍스트 복사로 정상
+- `_call_with_connect_retry` 재시도 payload 동일(closure 캡처), ClientError 재시도 안 함
+- admin-api text() SQL 24건 전부 바인드 파라미터, analytics 캐시 격리, revoke 무효화 체인 정합
+- usage 중복 발화 없음(usage_fired/complete_fired 가드 + 덮어쓰기 카운터)
+
+## R2 수정 상태 (2026-10 구현)
+
+| # | 상태 | 수정 내용 |
+|---|------|-----------|
+| R2-1/2/11 | ✅ 수정 | `admin-api/schemas/models.py::_validate_endpoint_url` — `socket.getaddrinfo` 리졸브 기반 검증으로 재작성. 숫자형 호스트(2130706433/0x7f000001/127.1/0), trailing-dot `localhost.`, 메타데이터로 리졸브되는 이름(169.254.169.254.nip.io 류) 전부 차단 — 리졸브 결과 IP **전부**에 loopback/link-local/unspecified/multicast + 명시 차단 목록(`fd00:ec2::254` EC2 IMDS IPv6) 적용. 사설 RFC1918(vLLM 내부)은 허용. 잔여 한계: 등록 시점 리졸브와 어댑터 요청 시점이 다르면 DNS rebinding 가능 — 네트워크 egress 정책으로 방어해야 함(코드 주석 문서화). 회귀: `test_model_service.py` 숫자형/DNS 케이스 23건 |
+| R2-3 | ✅ 수정 | `daily_aggregator` — DELETE+INSERT 제거, `INSERT … ON CONFLICT (date,user_id,model_alias) DO UPDATE` (어제 윈도우 전체 재집계로 덮어쓰기 — 늦은 행 반영 + replica 안전 둘 다). startup backfill은 `DO NOTHING` 유지(빈 테이블 전용 의도). 회귀: `test_daily_aggregator.py` 4건 |
+| R2-4/5/15 | ✅ 수정 | `auth_service._decode_jwt` 헬퍼 신설 — `issuer`/`audience` 를 DB 레코드에서 전달(audience 공란 시 `verify_aud=False` 명시로 PyJWT 기본값 함정 제거). 캐시 레코드 `{pem,algorithm,issuer,audience}` 로 확장, 레거시 PEM/iss-aud-없는 JSON 은 DB 재조회로 갱신. 비대칭 alg allowlist(RS/ES/PS) — admin-api `JWTVerifier.load_configs` 에도 동일 allowlist 적용. 회귀: `test_auth_service` JWT 케이스 |
+| R2-6 | ✅ 수정 | notification 슬롯 INSERT — IntegrityError=중복 스킵(기존), **그 외 예외는 1회 재시도 후 슬롯 재확보**, 그래도 실패하면 경고+메트릭 남기고 **발송 우선**(유실 < 중복, 운영 결정). 회귀: `test_handler_dedup` transient/persistent 케이스 |
+| R2-7 | ✅ 수정 | `budgets.get_downgrade_config` 에 `actor` 추가 — TEAM_LEADER 는 자기 팀(TEAM) / 자기 팀 멤버(USER, UserRepository 조회)만. `get_budget_config` 와 동일 스코핑. 회귀: `test_budget_service` IDOR 케이스 |
+| R2-8 | ✅ 수정 | VK 캐시 히트 시 `key:vk:{hash}` 존재 확인 추가 — 매핑 부재(폐기 DEL 성공·캐시 DEL 실패 케이스)면 캐시 제거 후 거절. `is_active` 재확인 유지. 회귀: 캐시 히트/폐기/비활성 경로 |
+| R2-9 | ✅ 수정(보수적 예약) | web_search 입장심사용 body 의 max_tokens 를 `× web_search_max_iterations` 로 선반영(상류 바디와 무관한 심사 복사본) — 정산 시 settle 이 차액 환불. 턴 경계 재심사는 더 침습적인 설계 변경으로 별도 보류 |
+| R2-10 | ✅ 문서화 | `roi_aggregator.aggregate_usage` docstring 에 "GLOBAL+TEAM 만 기록, USER/DEPT 는 소비자가 생길 때 함께 추가" 계약 명시 — 지원 주장과 실제 행의 괴리 해소 |
+| R2-12 | ✅ 수정 | `TokenUsage.cache_creation_1h_input_tokens` 추가 + `calculate_cost` 가 5m/1h 부분을 분리 과금(분해 없는 프로바이더는 요청 신호 폴백). `_has_1h_cache_control` 이 `"1h"`/`"3600"` 모두 인식. Anthropic streaming/비스트림·Bedrock invoke/converse·web_search 누적 전 경로 배선. 회귀: `test_calculate_cost_1h_*` 3건 |
+| R2-13 | ⏸️ 문서화 | `usage:daily:*` incrbyfloat 드리프트 — 표시 전용(예산 집행은 Decimal 경로). 정수 micro-USD 전환은 기존 float 키와 비호환(INCRBY 실패)이라 별도 마이그레이션으로 |
+| R2-14 | ✅ 수정 | admin-api `Settings.is_production` 신설(`prod`/`production` 모두 수용 — Helm values 가 `prod` 인데 코드가 `"production"` 과 비교해 internal 디버그 가드가 무력화된 **사전 버그도 함께 수정**) + `_parse_dev_token` 에 prod 이중 가드 |
+| LOW | ✅ 수정 | ContextVar 토큰 기반 reset(BudgetMiddleware finally) / 미사용 `stream_response` 삭제(F11 미적용 회귀 함정 제거) / admin-ui OIDC `nonce` 바인딩(login→콜백 id_token 검증) + `/api/` 변형 메서드 Origin/Referer CSRF 차단 + `SECURE_COOKIES` 강제 스위치(lib/cookies.ts) |
+| LOW 보류 | ⏸️ | `team:vk_hashes` EXPIRED 잔존 정리 / `rl:config` TTL / 셧다운 drain task GC / pending 알림 행 리퍼 / ROI float → 모두 명시 트레이드오프 또는 별도 작업 |
+
+검증: gateway-proxy **1128** / admin-api **774** / cost-recorder **23** / notification-worker **48** / admin-ui **388** passed (전부 증가분 포함).
