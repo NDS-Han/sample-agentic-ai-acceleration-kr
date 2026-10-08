@@ -4,21 +4,49 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import hmac
+
 from fastapi import APIRouter, Depends, Request
+from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
 
 router = APIRouter(tags=["Internal"])
 
 
+async def _require_internal_token(request: Request) -> None:
+    """`/internal/*` 비-health 엔드포인트의 공유 시크릿 게이트.
+
+    admin-api 는 ALB 로 전 경로가 공개되므로, ops/test 용도의 internal 경로는
+    `is_production` 게이트만으로는 부족하다 — dev 도 공개 도메인이라 무인증
+    VK 발급(`/internal/test/issue-key`)이 라이브로 확인됐다(R3-1).
+
+    토큰 미설정이면 항상 403(fail-closed). 호출자는 `X-Internal-Token` 헤더로
+    `INTERNAL_API_TOKEN` 과 일치하는 값을 보낸다(통합 테스트·smoke-test 용).
+    비교는 hmac.compare_digest 로 타이밍 상수화.
+    """
+    settings = get_settings()
+    expected = settings.INTERNAL_API_TOKEN
+    if not expected:
+        raise HTTPException(status_code=403, detail="Internal endpoint disabled")
+    provided = request.headers.get("x-internal-token", "")
+    if not hmac.compare_digest(provided, expected):
+        raise HTTPException(status_code=403, detail="Invalid internal token")
+
+
 @router.post("/internal/cache/retry")
 async def retry_cache_invalidation(
     request: Request,
+    admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Retry all unresolved cache invalidation failures."""
+    """Retry all unresolved cache invalidation failures.
+
+    ⚠️ 인증 필요 — 예전엔 무인증이었는데 admin-api 가 ALB 로 전 경로 공개되어
+       누구나 캐시 무효화 재시도를 발동할 수 있었다(R3-1)."""
     from app.core.cache_invalidation import CacheInvalidationManager
 
     cache_mgr: CacheInvalidationManager = request.app.state.cache_mgr
@@ -26,7 +54,7 @@ async def retry_cache_invalidation(
     return {"resolved": resolved}
 
 
-@router.post("/internal/scheduler/run")
+@router.post("/internal/scheduler/run", dependencies=[Depends(_require_internal_token)])
 async def trigger_aggregation(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
@@ -48,12 +76,15 @@ async def trigger_aggregation(
     return {"status": "ok", "period": period}
 
 
-@router.post("/internal/test/issue-key")
+@router.post("/internal/test/issue-key", dependencies=[Depends(_require_internal_token)])
 async def test_issue_key(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
 ):
-    """[DEV ONLY] Issue a VK without STS auth — for integration testing."""
+    """[DEV ONLY] Issue a VK without STS auth — for integration testing.
+
+    ⚠️ prod 게이트 + `X-Internal-Token` 게이트 이중. dev 의 admin-api 도 ALB 로
+       공개되어 있으므로 토큰 없이 무인증 VK 발급이 가능했던 것이 확인됐다."""
     settings = get_settings()
     if settings.is_production:
         from fastapi import HTTPException

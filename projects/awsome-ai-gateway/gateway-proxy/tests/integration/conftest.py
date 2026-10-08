@@ -42,6 +42,31 @@ import pytest
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
 
+
+def internal_headers() -> dict[str, str]:
+    """`/internal/*` 공유 시크릿 헤더 (R3-1 게이트).
+
+    admin-api 는 `INTERNAL_API_TOKEN` 이 설정돼 있으면 `X-Internal-Token` 매치를
+    요구하고, 비어 있으면 항상 403 이다. 테스트 쪽은 env `INTERNAL_API_TOKEN` 을
+    먼저 보고, 없으면 repo 루트 `.env` 를 한 번 파싱한다(docker compose 가 같은
+    파일을 admin-api 의 env_file 로 쓰므로 로컬에서 어긋나지 않는다).
+    """
+    token = os.environ.get("INTERNAL_API_TOKEN")
+    if token is None:
+        env_file = os.path.join(
+            os.path.dirname(__file__), "..", "..", "..", ".env"
+        )
+        try:
+            with open(env_file) as f:
+                for line in f:
+                    line = line.strip()
+                    if line.startswith("INTERNAL_API_TOKEN="):
+                        token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                        break
+        except OSError:
+            pass
+    return {"X-Internal-Token": token or ""}
+
 # 루프백으로 간주하는 호스트. IPv6 루프백과 compose 내부 서비스명도 포함
 # (compose 네트워크 안에서 돌릴 때는 호스트가 서비스명이다).
 _LOCAL_HOSTS = frozenset(

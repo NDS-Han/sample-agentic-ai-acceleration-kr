@@ -283,6 +283,9 @@ admin = os.environ.get("SMOKE_ADMIN_URL", "").strip()
 gw = os.environ.get("SMOKE_GW_URL", "http://localhost:8000").strip()
 alias = os.environ.get("SMOKE_MODEL_ALIAS", "").strip()
 attempts = int(os.environ.get("SMOKE_APP_ATTEMPTS", "3") or "3")
+# /internal/* 공유 시크릿 (R3-1). admin-api 의 INTERNAL_API_TOKEN 과 같은 값.
+internal_token = os.environ.get("INTERNAL_API_TOKEN", "").strip()
+internal_headers = {"X-Internal-Token": internal_token} if internal_token else {}
 if not admin or not alias:
     emit("setup", "FAIL", "SMOKE_ADMIN_URL / SMOKE_MODEL_ALIAS 미설정")
     sys.exit(0)
@@ -307,12 +310,14 @@ try:
     st, out = post(admin + "/internal/test/issue-key",
                    {"email": "smoke-test@example.com",
                     "display_name": "Smoke Test",
-                    "expires_seconds": 900})
+                    "expires_seconds": 900},
+                   headers=internal_headers)
 except Exception as e:
     emit("vk", "FAIL", "issue-key 도달 실패: %s: %s" % (type(e).__name__, e))
     sys.exit(0)
 if st == 403:
-    emit("vk", "WARN", "issue-key 403 (production 가드) — 앱 경로 생략")
+    emit("vk", "WARN",
+         "issue-key 403 (production 가드 또는 INTERNAL_API_TOKEN 불일치/미설정) — 앱 경로 생략")
     sys.exit(0)
 if st != 200 or not out.get("virtual_key"):
     emit("vk", "FAIL", "issue-key HTTP %s (%s)" % (st, json.dumps(out)[:200]))

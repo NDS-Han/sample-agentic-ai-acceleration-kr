@@ -12,7 +12,7 @@ import os
 import pytest
 import httpx
 
-from tests.integration.conftest import live_stack_gate
+from tests.integration.conftest import internal_headers, live_stack_gate
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
@@ -26,6 +26,7 @@ def virtual_key():
     """admin-api dev endpoint으로 VK 발급."""
     resp = httpx.post(
         f"{ADMIN_URL}/internal/test/issue-key",
+        headers=internal_headers(),
         json={"email": "test-models-endpoint@test.local"},
         timeout=10,
     )

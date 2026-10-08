@@ -78,11 +78,14 @@ echo "Admin UI : $ADMIN_UI_URL"
 
 ## 4. 첫 API 실호출 (dev 빠른 경로)
 
-dev 환경 admin-api 는 인증 없이 VK 를 뽑아주는 `/internal/test/issue-key` 를 제공한다(prod 비활성). Cognito 온보딩 전에 파이프라인이 살아있는지 30초 만에 확인하는 용도:
+dev 환경 admin-api 는 `/internal/test/issue-key` 로 VK 를 뽑아준다(prod 비활성). Cognito 온보딩 전에 파이프라인이 살아있는지 30초 만에 확인하는 용도:
+
+> ⚠️ R3-1 이후 `/internal/*` 는 `X-Internal-Token` 헤더가 `INTERNAL_API_TOKEN` 과 일치해야 한다(무인증 공개 노출 차단). 토큰은 `<release>-app` Secret 의 `internal_api_token` 키에서 주입된다 — `kubectl get secret llm-gateway-app -n llm-gateway -o jsonpath='{.data.internal_api_token}' | base64 -d`. 키가 없으면 엔드포인트 자체가 403(fail-closed).
 
 ```bash
 export VK=$(curl -s -X POST "$ADMIN_API_URL/internal/test/issue-key" \
-  -H "Content-Type: application/json" -d '{}' | jq -r .virtual_key)
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: $INTERNAL_API_TOKEN" -d '{}' | jq -r .virtual_key)
 echo "VK length: ${#VK}"          # vk- 로 시작하는 64자+ 면 정상
 
 # 모델 목록
