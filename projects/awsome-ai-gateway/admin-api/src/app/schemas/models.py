@@ -55,6 +55,11 @@ class ModelCreateRequest(BaseModel):
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
     )
 
+    #: 스펙 정보 — ``None`` = 미상(수동 커스텀 모델). 카탈로그 동기화가 채우지 못한
+    #: 신규 모델을 운영자가 수동 등록할 때 쓴다. ``ge=1`` — 0 이하 스펙은 무의미.
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
     #: 이 모델을 쓸 수 있는 앱 허용목록. **3-상태**(models/model.py 주석 참조):
     #:   생략/``null``  제한 없음
     #:   ``[]``         명시적으로 빈 허용목록 = 어떤 앱도 허용되지 않음
@@ -101,6 +106,10 @@ class ModelUpdateRequest(BaseModel):
     #:    거부이므로 "제한 해제" 버튼이 그 모델을 통째로 막는다.
     #:    구별은 서비스 계층에서 ``model_fields_set`` 으로 한다.
     allowed_clients: list[str] | None = None
+    #: 스펙 정보 — 생략=유지, 명시적 null=삭제(미상으로 되돌림). model_fields_set 규칙은
+    #: description/display_name 과 동일하게 서비스에서 처리한다.
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
     @field_validator("allowed_clients")
     @classmethod

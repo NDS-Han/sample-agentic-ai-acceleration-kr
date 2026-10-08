@@ -68,7 +68,8 @@ describe('CreateModelDialog — 검증 실패 관측성', () => {
       success: false,
       error: 'Validation failed',
       // 폼에 대응 <input> 이 없는 키 — 과거에는 조용히 버려졌다.
-      fieldErrors: { max_tokens: 'Required', context_window: 'Required' },
+      // (context_window 는 이제 폼 필드라 orphan 이 아니다 — api_format 으로 대체)
+      fieldErrors: { max_tokens: 'Required', api_format: 'Invalid enum' },
     });
 
     render(<CreateModelDialog isOpen onClose={() => {}} />);
@@ -81,7 +82,26 @@ describe('CreateModelDialog — 검증 실패 관측성', () => {
       expect(joined).toContain('Validation failed');
       // 핵심: 원인 키가 화면에 보여야 한다.
       expect(joined).toContain('max_tokens');
-      expect(joined).toContain('context_window');
+      expect(joined).toContain('api_format');
+    });
+  });
+
+  it('spec 필드 에러는 해당 입력란 아래 필드 에러로 표시된다', async () => {
+    createModelAction.mockResolvedValue({
+      success: false,
+      error: 'Validation failed',
+      fieldErrors: { context_window: 'must be positive' },
+    });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => {
+      const joined = screen.getAllByRole('alert').map((n) => n.textContent ?? '').join(' | ');
+      expect(joined).toContain('must be positive');
+      // 폼 필드가 있으므로 상단 요약에 orphan 키로 합산되지 않는다.
+      expect(joined).not.toContain('context_window (');
     });
   });
 

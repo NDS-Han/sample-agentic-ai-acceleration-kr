@@ -66,6 +66,8 @@ class ModelService:
             status=ModelStatus.ACTIVE,
             description=data.description,
             display_name=data.display_name,
+            context_window=data.context_window,
+            max_output_tokens=data.max_output_tokens,
             # None = 제한 없음(하위호환 기본값), [] = 허용 앱 없음, 목록 = 그 앱만.
             allowed_clients=data.allowed_clients,
             created_by=actor.user_id,
@@ -154,7 +156,9 @@ class ModelService:
         # endpoint_url 은 제외 — endpoint 가 필요한 provider 에서 지우면
         # 런타임에만 깨지므로 "삭제" 의도 자체를 허용하지 않는 게 안전하다.
         _cleared = False
-        for field in ("description", "display_name"):
+        # context_window/max_output_tokens 도 같은 규칙 — 명시적 null 은
+        # "스펙 미상으로 되돌림" 으로 취급(편집 폼에서 필드를 비운 경우).
+        for field in ("description", "display_name", "context_window", "max_output_tokens"):
             if field in data.model_fields_set and getattr(data, field) is None:
                 setattr(model, field, None)
                 update_kwargs[field] = None

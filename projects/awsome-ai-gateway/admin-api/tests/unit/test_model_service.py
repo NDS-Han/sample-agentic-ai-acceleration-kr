@@ -27,6 +27,8 @@ def _make_model(
     alias: str = "claude-sonnet",
     description: str | None = "test model",
     display_name: str | None = None,
+    context_window: int | None = None,
+    max_output_tokens: int | None = None,
 ) -> ModelAlias:
     m = MagicMock(spec=ModelAlias)
     m.alias = alias
@@ -37,6 +39,8 @@ def _make_model(
     m.status = ModelStatus.ACTIVE
     m.description = description
     m.display_name = display_name  # _to_response reads display_name; MagicMock would yield a non-str → pydantic error
+    m.context_window = context_window
+    m.max_output_tokens = max_output_tokens
     m.created_at = datetime.now(timezone.utc)
     m.updated_at = datetime.now(timezone.utc)
     return m
@@ -185,6 +189,103 @@ class TestUpdateModel:
 
         assert model.description == "keep me"
         assert model.display_name == "Keep"
+
+
+class TestSpecFields:
+    """context_window / max_output_tokens — 생성 시 기록 + 편집 시 fields_set 규칙."""
+
+    async def test_create_model_persists_spec_fields(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        data = ModelCreateRequest(
+            alias="claude-sonnet",
+            provider=ProviderEnum.BEDROCK,
+            provider_model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            api_format=ApiFormatEnum.BEDROCK_NATIVE,
+            input_price_per_1k_tokens=Decimal("0.003"),
+            output_price_per_1k_tokens=Decimal("0.015"),
+            context_window=200000,
+            max_output_tokens=64000,
+        )
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.alias_exists_ci = AsyncMock(return_value=False)
+
+            async def _set_timestamps(model):
+                model.created_at = datetime.now(timezone.utc)
+                model.updated_at = datetime.now(timezone.utc)
+
+            repo.create_model = AsyncMock(side_effect=_set_timestamps)
+            repo.create_pricing = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            result = await model_service.create_model(mock_session, data=data, actor=admin_user)
+
+        created = repo.create_model.call_args.args[0]
+        assert created.context_window == 200000
+        assert created.max_output_tokens == 64000
+        assert result.context_window == 200000
+        assert result.max_output_tokens == 64000
+
+    async def test_update_model_sets_spec_values_via_repo(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 값이 들어오면 repo kwargs 로 넘겨 저장한다.
+        data = ModelUpdateRequest(context_window=400000)
+        model = _make_model(context_window=200000)
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        assert repo.update_model.call_args.kwargs["context_window"] == 400000
+
+    async def test_update_model_explicit_null_clears_spec_fields(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 편집 폼이 필드를 비워 보낸 경우(명시적 null) — "미상" 으로 되돌리는 게 의도된 동작.
+        data = ModelUpdateRequest(context_window=None, max_output_tokens=None)
+        model = _make_model(context_window=200000, max_output_tokens=64000)
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        assert model.context_window is None
+        assert model.max_output_tokens is None
+        mock_session.flush.assert_awaited()
+
+    async def test_update_model_omitted_spec_fields_are_preserved(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 키 자체를 안 보낸 경우 — 기존 값 유지(repo kwargs 에도 안 실린다).
+        data = ModelUpdateRequest(provider_model_id="new-id")
+        model = _make_model(context_window=200000, max_output_tokens=64000)
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        assert "context_window" not in repo.update_model.call_args.kwargs
+        assert "max_output_tokens" not in repo.update_model.call_args.kwargs
+        assert model.context_window == 200000
 
 
 class TestSetPricing:

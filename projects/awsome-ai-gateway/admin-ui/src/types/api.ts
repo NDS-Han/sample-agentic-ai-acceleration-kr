@@ -78,12 +78,12 @@ export const ModelCreateSchema = z.object({
   // 박혀 1시간 캐시 사용분 청구가 누락되던 버그 수정(deepdive Q-pricing).
   cache_creation_1h_price_per_1k: z.number().nonnegative().default(0),
   cache_read_price_per_1k: z.number().nonnegative().default(0),
-  // NOTE: max_tokens / context_window 를 여기에 두면 안 된다. 모델 추가/편집 폼에는 두 필드의
-  // 입력란이 없고(CreateModelDialog 의 FormState 에도 없음), 백엔드 ModelCreateRequest 와
-  // model.model_aliases 테이블에도 대응 필드가 없다. required 로 남겨두면 폼이 값을 보낼 방법이
-  // 없어 safeParse 가 항상 {max_tokens: Required, context_window: Required} 로 실패하고,
-  // 화면에는 필드 단위 안내 없이 "Validation failed" 만 떠서 모델 등록·편집이 100% 막힌다.
-  // (두 필드는 ModelListItem 표시용 타입에만 존재하며 항상 0 으로 채워진다.)
+  // 스펙 필드 — optional. 컬럼은 model_aliases 에 존재(context_window/max_output_tokens,
+  // litellm spec 동기화가 채움). 과거엔 폼/스키마 양쪽에 없어 required 로 두면 safeParse 가
+  // 항상 실패했는데, 지금은 optional 입력란이 폼에 있으므로 optional 로 둔다.
+  // 수정 경로에서 폼이 비워 보내면 action 이 null 로 변환해 "미상으로 되돌림" 이 된다.
+  context_window: z.number().int().positive().optional(),
+  max_output_tokens: z.number().int().positive().optional(),
   description: z.string().max(512).optional(),
   display_name: z.string().max(128).optional(),
   // 편집 경로 전용 힌트: 가격 필드가 기존값과 동일하면 false — 불필요한 pricing

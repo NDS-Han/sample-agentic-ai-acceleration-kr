@@ -58,6 +58,8 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       api_format: apiFormatByProvider[provider] ?? 'OPENAI_COMPATIBLE',
       description: d.description || null,
       display_name: d.display_name || null,
+      context_window: d.context_window ?? null,
+      max_output_tokens: d.max_output_tokens ?? null,
       input_price_per_1k_tokens: d.input_price_per_1k,
       output_price_per_1k_tokens: d.output_price_per_1k,
       cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
@@ -100,6 +102,9 @@ export async function updateModelAction(
       endpoint_url: d.endpoint_url || null,
       description: d.description || null,
       display_name: d.display_name || null,
+      // 비워 보내면 명시적 null → 서버가 "미상으로 되돌림"(fields_set null=삭제 규칙).
+      context_window: d.context_window ?? null,
+      max_output_tokens: d.max_output_tokens ?? null,
     }));
     // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
     // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
