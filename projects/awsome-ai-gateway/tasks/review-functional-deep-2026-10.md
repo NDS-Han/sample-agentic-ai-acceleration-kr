@@ -297,3 +297,87 @@ kiro 리포트: `/tmp/kiro-review-r2.out` (773줄). 5개 병렬 서브리뷰 + �
 | LOW 보류 | ⏸️ | `team:vk_hashes` EXPIRED 잔존 정리 / `rl:config` TTL / 셧다운 drain task GC / pending 알림 행 리퍼 / ROI float → 모두 명시 트레이드오프 또는 별도 작업 |
 
 검증: gateway-proxy **1128** / admin-api **774** / cost-recorder **23** / notification-worker **48** / admin-ui **388** passed (전부 증가분 포함).
+
+---
+
+# 라운드 3 (재검증 — Devin + kiro-cli claude-opus-5.5)
+
+kiro: 4개 서브리뷰 리포트 완결(`/tmp/r3-partA1/A2/B1/B2.md`, 로컬 실험 증거 `/tmp/r3scratch/`).
+주 에이전트가 자체 교차검증 수행 중 세션 종료 — 최종 합성 파일 미작성이나 서브리포트는 완결,
+미검증 잔여분(chat-proxy traversal end-to-end, /internal 노출)은 Devin이 **라이브 dev 배포로
+직접 확정**.
+
+## 신규 발견 (R3)
+
+| # | 심각도 | 출처 | 요약 |
+|---|--------|------|------|
+| R3-1 | **HIGH** | Devin+kiro | **`/internal/*` 무인증 + 공개 노출.** `POST /internal/cache/retry` 가 모든 환경에서 무인증·무 prod 게이트(dev 라이브 200 실측). `POST /internal/test/issue-key` 는 `is_production` 게이트뿐이라 **dev 공개 admin-api 에서 무인증 VK 발급**(라이브로 `probe@example.com` VK 실제 발급·정리 완료). admin-api ingress 가 전 경로 통과 |
+| R3-2 | **HIGH** | kiro→Devin | **chat-proxy 경로 traversal end-to-end 확정.** `POST /api/chat-proxy/admin/chat/%2e%2e/%2e%2e/internal/cache/retry` → admin-api `/internal/cache/retry` 도달(200). 인증 경로도 도달(`/admin/users/search` → admin-api 401 봉투). 로그인 사용자의 `admin_jwt` 가 임의 admin-api 경로로 전달됨 — 무인증 `/internal/*` 와 결합 시 dev 에서 무인증 VK 발급 경로가 admin-ui origin 으로도 열림 |
+| R3-3 | MED | kiro | **Cognito 비활성화가 VK를 폐기하지 않음.** `deactivate_missing_oidc_users`/`_deactivate_missing_user` 는 `is_active=False` 만 — `revoke_key`/`key:vk` DEL/`key_revoked` 이벤트 없음. 차단은 게이트웨이 per-request `is_active` 재확인에 전적으로 의존(DB 열화 시 캐시 경로로 ≤TTL 통과). 재활성화 시 옛 VK 그대로 부활 |
+| R3-4 | MED | Devin | **Cognito 부분 실패 → 대량 비활성화.** `sync_all` 의 그룹 멤버 조회 실패는 `result.errors` + `continue` 만 — 해당 그룹 멤버가 `seen_subjects` 에 빠진 채 4단계 `deactivate_missing_oidc_users` 실행 → Cognito 에 살아있는 유저 대량 비활성. 극단적으로 멤버 조회가 전부 실패하면 **OIDC 유저 전원 비활성화**. 다음 성공 sync 에서 `is_active` 복원되지만 그 사이 인증 전면 중단 |
+| R3-5 | MED | kiro | **codex web_search 경로 보수 예약 미적용 (R2-9 불완전).** `/v1/responses`·`/v1/chat/*` 는 `enforce_rate_limits` 가 web_search 분기 **전에** 미부풀린 body 로 실행 → 최대 `web_search_max_iterations`(기본 2) 배 초과 지출 창이 codex 경로에 그대로 |
+| R3-6 | MED | kiro | **OIDC unknown-kid JWKS 강제 리페치 증폭.** `/v1/auth/exchange` 무인증 + 공격자가 임의 kid 제어 → 요청마다 IdP JWKS GET(negative cache 없음) — admin-api outbound + IdP 양쪽 DoS 벡터 |
+| R3-7 | MED | kiro | **client 헤더 스푸핑 → 크로스어카운트 라우팅 + per-app 예산 우회.** `anthropic-client-platform: desktop_app` 하나로 cowork 프로파일(Rule A → cowork AWS 어카운트 역할) 강제 + `budget:user:{u}:{client}` 버킷 회피. `allowed_clients=None` 기본 ACL에서 유효 |
+| R3-8 | MED | Devin | **team allowed-models 캐시 무효화가 커밋 전.** `set_for_team`/`clear_for_team` 이 서비스 내부에서 즉시 DEL — CommittingRoute 커밋 전 윈도에 게이트웨이가 구 정책으로 `key:cache:vk` 재생성 → ≤300s 정책 롤백. user 경로는 post-commit 으로 수정됐는데 team 경로는 누락(MF3 회귀) |
+| R3-9 | LOW/MED | kiro | **Cognito sync 상호배제 부재 + 빈 email 충돌.** advisory lock 없음 — 동시 sync 가 `teams` 유니크에서 충돌/전체 롤백 가능. `sync_user`/`sync_group` 은 per-user savepoint 없어 email UNIQUE 충돌(빈 email)이 트랜잭션 오염 |
+| R3-10 | LOW/MED | kiro | **Redis-down 인메모리 RPM 폴백이 fleet 한도를 pod 수만큼 증폭.** `rl_fallback_replicas` 기본 1 → pods×workers 각자 `limit/workers` 허용 → 합계 `limit×pods` (HPA 10~30배 초과) |
+| R3-11 | LOW/MED | kiro→Devin | **poison-only 배치 PEL 누수.** `_consume_live` — `batch_entries` 비면 `xack` 없이 continue → 파싱 실패 ID 가 이 consumer PEL 에 잔류(`>` 신규만 읽으므로 재독 없음). 단일 레플리카 dev 에서 재시작까지 누적, MAXLEN 압박 |
+| R3-12 | LOW | 양쪽 | **A2-2** 고아 IDOR(TEAM_LEADER `team_id=None` ↔ 대상 user `team_id=None` → `None!=None` False 로 통과) / **A2-3** `/model/*` converse 경로 `cache_ttl_1h` 미설정 → 1h 캐시 5m 단가 저과금(네이티브 경로만, 현 트래픽 미사용) / **A2-4** 분해 응답이 1h=0 을 명시해도 요청측 ttl=1h 폴백이 전부 1h 과금(삼값 상태 필요) / **A1-1** `::127.0.0.1`·NAT64·6to4 형태 validator 통과(심화 방어) / **A3-1** attacker kid → `key:cache:jwt:{kid}` 무제한 증가(서명 통과 후라 실질 낮음) / **A2-7** `APP_ENV=="development"` 비교는 배포값 `dev` 와 불일치로 CORS `*` 미발동(fail-safe) / **A2-8** prod values 에 `SECURE_COOKIES` 미배선 / **B1-4** `_refund_committed_cost` 시그니처 2-tuple 오표기 / **B1-5** RPM phantom +1 미환불(비대칭, 자기교정) / **B2-5** pub/sub fan-out + send-anyway 폴백의 레플리카 증폭(명시 트레이드오프) / **A4-1** dedup 테스트가 mock session 이라 실 ORM 상태 미커버 / **Devin** 복수 팀 리더가 analytics 에서 자기 `team_id` 팀만 조회(리더십 그래프 미반영) / **A2-5/A2-6** VK 매핑 user_id 미대조·폐기가 Redis DEL 성공에 전적 의존(INFO) |
+
+## 기각 확인 (R3, 양쪽 교차검증)
+
+- **R2 수정 전부 정상**: SSRF 리졸브 검증(숫자형/mapped/nip.io/multi-IP 전부 차단, create·update 양쪽 적용), daily_aggregator UPSERT(40×3-way 동시실행 데드락·이중계상 없음, GROUP BY=충돌키 구조적 일치), JWT iss/aud/alg(gateway·admin-api 동일 계약, aud 리스트·레거시 캐시·키 로테이션 모두 정상), notification 슬롯 재시도(실 SQLAlchemy+asyncpg로 transient/persistent/lost-ack 전 시나리오 정합), ContextVar 순수 ASGI 확인(스트림 완료 후 reset, drain 태스크는 생성 시점 컨텍스트 복사), admin-ui nonce/CSRF(84 테스트 통과, Host 비교 방식 ALB 안전), `is_production` 정규화(internal 가드 실효 확인)
+- TPM/cost 예약-정산: 롤오버 환불이 reserved 버킷에 적중(음수 없음), 부분 거절 시 커밋 scope 만 환불, Lua 단일슬롯 원자성
+- VK 무차별대입 불가(256bit·sha256 조회·캐시미스 시 DB 미개방), 한 유저 ACTIVE VK 1개(유니크 인덱스+CTE), 폐기 체인(R2-8 + is_active) 정합
+- body 로깅: 헤더 미수집(VK 유출 없음), 런타임 플래그 기본 OFF + admin-only 토글 + 감사행
+- analytics 격리: TEAM_LEADER 자기 팀 강제 + 캐시가 ADMIN+all 에만, rate-limits 조회는 admin-only
+- scheduler: Recreate + replicas:1 — 이중 실행 리스크 없음. ROI upsert 멱등
+- XAUTOCLAIM: min_idle 5m + 재처리 필터 이중방어, BUSYGROUP 정상, consumer 이름=pod 이름
+
+## R3 수정 제안 (우선순위)
+
+1. **R3-1/R3-2** — `/internal/*` 에 인증 또는 prod/dev 모두 명시 게이트 + chat-proxy 세그먼트 화이트리스트(`admin`/`chat` prefix 고정, `..`·`%`·`\` 거부)
+2. **R3-3/R3-4/R3-9** — Cognito offboarding 시 VK 폐기 + 부분 실패 시 reconcile 스킵 + advisory lock/개별 savepoint
+3. **R3-5** — openai_compat 에도 보수 예약 헬퍼 공용화 적용
+4. **R3-6** — unknown-kid negative cache(30s) 또는 force-refresh 쓰로틀
+5. **R3-7** — 크로스어카운트/예산 경계에서 client 를 신뢰 신호로 교체(VK 바인딩) — 최소 문서화
+6. **R3-8** — team allowed-models 무효화를 커밋 후로 이동(user 경로 MF3와 동일)
+7. **R3-10/R3-11 + LOW** — fallback replicas 현실값/문서화, poison 배치 xack, 잔여 LOW 일괄
+
+## R3 구현 상태
+
+| # | 상태 | 수정 내용 |
+|---|------|-----------|
+| R3-1 | ✅ | `/internal/cache/retry` → `require_admin`; `scheduler/run`·`test/issue-key` → `X-Internal-Token` 공유시크릿(`INTERNAL_API_TOKEN`, 미설정 시 fail-closed, hmac.compare_digest). Helm `-app` Secret `internal_api_token` optional 참조. 통합테스트/smoke-test/문서 갱신. `test_internal_token_gate` 3건 |
+| R3-2 | ✅ | chat-proxy 세그먼트 화이트리스트 — `admin/chat/<sub>` 구조 + `..`/`.`/`%`·`\`·빈 세그먼트 거부(traversal·이중인코딩 차단). `chatProxyPathWhitelist` 3건 |
+| R3-3 | ✅ | `revoke_keys_for_users` 벌크 폐기(VK+hash 쌍 수집으로 decrypt 실패 정렬오류 방지) + cognito 비활성화 경로 연결. `test_key_service_offboard` 2건 |
+| R3-4 | ✅ | `reconcile_incomplete` 플래그 — 멤버/전체 유저 조회 실패 시 4단계 비활성화 스킵 |
+| R3-5 | ✅ | `web_search_loop.reserve_admission_output` 공용화 — `/v1/responses`·`/v1/chat`·Anthropic 모두 `max_output × max_iterations` 예약, 정산 시 차액 환불 |
+| R3-6 | ✅ | unknown-kid 강제 리페치 최소 30s 간격(asyncio.Lock + in-lock double-check 유지). `test_oidc_unknown_kid_throttle` |
+| R3-7 | 📝 문서화 | `client_identifier.py` 위협모델 주석 — client 헤더는 스푸핑 가능 힌트이며 신뢰 신호가 아님. VK 바인딩 전환은 설계 변경으로 별도 과제 |
+| R3-8 | ✅ | `set_for_team`/`clear_for_team` 무효화를 서비스에서 제거 → 라우터가 commit 후 `invalidate_for_team` 호출(CommittingRoute 패턴, allowed-clients와 동일) |
+| R3-9 | ✅ | `pg_try_advisory_lock` 상호배제(커넥션 고정 + finally unlock), reconcile savepoint, `deactivate_missing_oidc_users` RETURNING 으로 대상 유저 회수 → VK 폐기 연결 |
+| R3-10 | ✅ | `rl_fallback_replicas` 주석 정확화 — Helm 이 minReplicas 주입 중임을 반영 + HPA 스케일아웃 잔여 한계 문서화 |
+| R3-11 | ✅ | poison-only 배치 xack — PEL 잔류/무한 재실패 루프 해소. `test_poison_ack` |
+| A2-2 | ✅ | TEAM_LEADER `team_id=None` fail-closed — budget_service 7곳 + analytics/downgrade 등 `actor.team_id is None` 가드 추가 |
+| A2-3 | ✅ | `/model/*` converse 경로 `cache_ttl_1h` 요청 신호 전파 |
+| A2-4 | ✅ | `cache_creation_1h_input_tokens` 삼값(None=미보고/0=보고됨) — 분해 보고된 응답에 요청 플래그 폴백 적용 안 함 |
+| A1-1 | ✅ | IPv4-compatible/mapped/NAT64/6to4 언래핑 후 임베디드 IPv4 차단 |
+| A3-1 | ✅ | JWT kid 문자열 검증(길이·문자셋) + sha256 캐시키 바인딩 |
+| A2-7 | ✅ | `is_development` 정규화 + CORS 는 명시 `CORS_ALLOW_ORIGINS` 목록만(기본 빈 목록) |
+| A2-8 | ✅ | prod values `SECURE_COOKIES` 배선 |
+| B1-4 | ✅ | `_refund_committed_cost` 시그니처 주석 정정 |
+
+검증: gateway-proxy **1128** / admin-api **780** / cost-recorder **24** / notification-worker **48** / admin-ui **391** passed, `tsc --noEmit` 클린.
+
+### 구현 중 발견·수정된 자체 버그
+
+- `revoke_keys_for_users` 의 `zip(vks, hashes)` 정렬 오류 — decrypt 실패 시 쌍 어긋남 → (key,hash) 쌍 수집으로 교정
+- `_sync_all_locked` 의 `user_pool_id` F821 — 리팩터 시 정의 누락 → 재추가
+- advisory lock 누수 경로 — `pg_try_advisory_lock`(세션-레벨)이 내부 commit 시 커넥션 풀 반환으로 락 잔류 → `session.connection()` 고정 + finally `rollback()` 후 unlock
+- NAT64 프리픽스 상수 64비트 시프트 누락 → `0x64FF9B00000000 << 64` 정정 후 형태별 차단/허용 재검증
+
+### R3 잔여 보류
+
+- **R3-7 실수정**(client → VK 바인딩): 정책 결정 필요, 문서화로 마무리
+- **B1-5** RPM phantom +1 / **B2-5** pub-sub 증폭 / **A4-1** mock-session 커버리지 / **A2-5·A2-6** INFO 항목 — 명시 트레이드오프 또는 저위험으로 보류

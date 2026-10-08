@@ -109,6 +109,10 @@ spec:
               value: {{ .Values.adminApi.oidc.issuerUrl | default "" | quote }}
             - name: OIDC_AUDIENCE
               value: {{ .Values.adminApi.oidc.audience | default "" | quote }}
+            # A2-8: auth 쿠키 Secure 강제 — TLS ingress 에서는 항상 켠다.
+            # adminUi.env 로 같은 이름을 넣으면 마지막 range 가 이긴다(수동 override).
+            - name: SECURE_COOKIES
+              value: {{ ternary "true" "false" .Values.ingress.adminUi.tls.enabled | quote }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
             {{/* admin-api 와 **같은 values 키**에서 그룹 매핑 두 값을 받는다.
                  어긋나면 관리자 잠김(_helpers.tpl adminUiIdpEnv 주석 참조). */}}

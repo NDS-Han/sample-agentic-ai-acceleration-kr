@@ -571,10 +571,13 @@ class RateLimitService:
     async def _refund_committed_cost(
         self,
         redis,
-        committed: list[tuple[str, str]],
+        committed: list[tuple[str, str, str]],
         reserved_cost: Decimal,
     ) -> None:
         """거절 시점까지 커밋된 비용 예약을 되돌린다.
+
+        ``committed`` 항목은 3-튜플 ``(scope_label, cpm_key, cph_key)`` —
+        예전에 2-튜플로 잘못 적혀 있었다(아래 언패킹과 대조).
 
         Lua 예약 경로가 EXPIRE(cpm 120s / cph 7200s)를 걸었으므로 여기서는
         INCRBYFLOAT 만 — TTL 을 다시 쓰면 남은 창보다 늘어날 수 있다.

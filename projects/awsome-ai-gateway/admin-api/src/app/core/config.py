@@ -81,6 +81,29 @@ class Settings(BaseSettings):
         무력화됐다 — internal 디버그 엔드포인트가 열리는 사전 버그.)"""
         return self.APP_ENV in ("production", "prod")
 
+    @property
+    def is_development(self) -> bool:
+        """APP_ENV 의 개발 판정 — `dev`/`development` 모두 수용.
+
+        ⚠️ 배포된 dev(APP_ENV=dev)도 참이다. CORS 개방 같은 "로컬 전용" 완화에는
+           쓰지 말 것 — 그 용도는 CORS_ALLOW_ORIGINS 에 있다."""
+        return self.APP_ENV in ("development", "dev")
+
+    # CORS 허용 오리진 명시 목록. 비어 있으면(기본) 와일드카드 없음 — credentials 와
+    # `*` 조합은 Starlette 가 요청 Origin 을 그대로 echo 하므로 임의 사이트의
+    # credentialed fetch 가 허용돼 절대 기본값으로 열지 않는다. 로컬 개발에서
+    # localhost:3000 → localhost:8080 직접 호출이 필요할 때만 채운다
+    # (admin-ui 는 /api/* 자체 프록시로 same-origin 접근하므로 배포 환경은 불필요).
+    CORS_ALLOW_ORIGINS: list[str] = []
+
+    # ── Internal endpoints (/internal/*) ──
+    # ⚠️ 공유 시크릿 게이트. admin-api 는 ALB 로 전 경로가 공개 노출되므로
+    #    `/internal/*`(ops/test)는 인증 없이 열리면 안 된다 — dev 에서
+    #    `/internal/test/issue-key` 가 무인증 VK 발급기가 되는 것이 라이브로 확인됐다.
+    #    이 값이 비어 있으면 해당 엔드포인트는 항상 403(fail-closed). 배포 환경은
+    #    `<release>-app` Secret 의 `internal_api_token` 키로 주입한다.
+    INTERNAL_API_TOKEN: str = ""
+
     # ── Database (PostgreSQL) ──
     DATABASE_URL: str = "postgresql+asyncpg://admin_api_user:changeme@localhost:5432/ds_gateway"
     DB_POOL_SIZE: int = 10

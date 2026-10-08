@@ -51,14 +51,42 @@ _BLOCKED_ENDPOINT_IPS = {
 }
 
 
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """IPv6 임베디드 IPv4 껍질 벗기기 (A1-1).
+
+    다음 형태는 IPv4 를 IPv6 안에 싣는데, `is_loopback`/`is_link_local` 등의
+    플래그는 껍데기 주소 기준이라 임베디드 목적지를 안 본다 — `::127.0.0.1`
+    (IPv4-compatible)과 `64:ff9b::7f00:1`(NAT64)은 `is_global=True` 로 통과했다.
+      - IPv4-mapped   ::ffff:a.b.c.d   → ipaddress.ipv4_mapped
+      - 6to4          2002:aabb:ccdd:: → ipaddress.sixtofour
+      - IPv4-compat   ::a.b.c.d        → ::/96 최하위 32bit (::, ::1 제외)
+      - NAT64         64:ff9b::a.b.c.d → 64:ff9b::/96 최하위 32bit
+    """
+    mapped = ip.ipv4_mapped or ip.sixtofour
+    if mapped is not None:
+        return mapped
+    v6 = int(ip)
+    if (v6 >> 32) == 0 and (v6 & 0xFFFFFFFF) > 1:  # ::/96, ::/::1 제외
+        return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
+    if (v6 >> 32) == (0x64FF9B << 64):  # NAT64 well-known prefix 64:ff9b::/96
+        return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
+    return None
+
+
 def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
-    return (
+    if (
         ip.is_loopback
         or ip.is_link_local
         or ip.is_unspecified
         or ip.is_multicast
         or ip in _BLOCKED_ENDPOINT_IPS
-    )
+    ):
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        inner = _embedded_ipv4(ip)
+        if inner is not None and _blocked_ip(inner):
+            return True
+    return False
 
 
 def _resolved_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:

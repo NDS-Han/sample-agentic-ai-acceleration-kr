@@ -601,7 +601,9 @@ def create_app() -> FastAPI:
     # ── CORS (Admin UI) ──
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"] if settings.APP_ENV == "development" else [],
+        # 명시 목록만 — `APP_ENV=="development"` 비교는 Helm 의 `dev` 와 불일치해
+        # 죽은 분기였고, `*`+credentials 조합을 기본으로 열 수도 없다(A2-7).
+        allow_origins=settings.CORS_ALLOW_ORIGINS,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

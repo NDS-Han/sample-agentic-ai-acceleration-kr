@@ -111,9 +111,16 @@ class Settings(BaseSettings):
     # 쿼타가 현실과 불일치(부하테스트 429×6 의 배경, deepdive Q46/Q50).
     #
     # rl_fallback_replicas 를 **현재 환경의 대표 replica 수(예: HPA minReplicas)**로
-    # 설정하면 divisor 가 현실을 추종한다. 기본 1 = 과거 동작(divisor=uvicorn_workers)
-    # 보존(무행동변경) — hot-path 라 변경 전 load A/B 필요. Redis 장애 시 발동하는
-    # 경로라 SCARD 로 실시간 pod 수를 셀 수 없어 env 설정이 현실적 해법.
+    # 설정하면 divisor 가 현실을 추종한다. Helm chart 는 이미
+    # `gatewayProxy.autoscaling.minReplicas`(없으면 replicaCount)를 주입한다
+    # (templates/common/configmap.yaml). 기본 1 = 비-Helm 환경의 과거 동작
+    # (divisor=uvicorn_workers) 보존.
+    #
+    # ⚠️ 잔여 한계(R3-10): HPA 가 minReplicas 위로 스케일하면 fallback 총합이
+    #    limit × (실제/minReplicas) 만큼 열린다. Redis 장애 중 스케일아웃은
+    #    이 창을 넓힌다 — 공유 백엔드 없이는 구조적 한계이며, 완화는
+    #    (a) fallback 발동 알림으로 운영자 인지, (b) minReplicas 를 평상시
+    #    replica 수에 가깝게 유지.
     rl_fallback_replicas: int = 1
 
     # Logging
