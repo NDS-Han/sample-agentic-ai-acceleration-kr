@@ -26,6 +26,7 @@ import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { FormError } from '@/components/common/FormError';
 import { useToast } from '@/components/common/ToastProvider';
 import type { PolicySummary } from '@/components/common/policySummary';
+import { NumberInput } from '@/components/common/NumberInput';
 
 export interface ScopeRateLimitHandle {
   save: () => Promise<boolean>;
@@ -250,8 +251,7 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
     ) => (
       <div className="space-y-1" key={key}>
         <label className="text-sm font-medium">{label}</label>
-        <input
-          type="number"
+        <NumberInput
           min={float ? 0 : 1}
           step={float ? '0.0001' : undefined}
           value={fields[key]}
