@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import structlog
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from app.periods import current_kst_period, set_request_period
+from app.periods import (
+    period_at,
+    set_request_period,
+    set_request_started_at,
+)
 from app.services.budget_service import BudgetService
 
 logger = structlog.get_logger(__name__)
@@ -31,7 +36,11 @@ class BudgetMiddleware:
         # D-20/§6-4: 비용·사용량 카운터는 **요청 시작 시각**이 속한 월에 귀속된다.
         # 월 경계를 넘겨 끝나는 스트리밍 요청이 다음 달 카운터에 새지 않도록
         # 시작 시점의 period 를 ContextVar 에 심어 cost_recorder 가 읽는다.
-        set_request_period(current_kst_period())
+        # request_started_at 도 함께 심는다 — cost:stream 엔트리의
+        # requested_at/period/date 가 이 시작 시각에서 파생된다.
+        request_start = datetime.now(UTC)
+        set_request_started_at(request_start)
+        set_request_period(period_at(request_start))
 
         path: str = scope.get("path", "")
         state = scope.setdefault("state", {})
@@ -61,7 +70,8 @@ class BudgetMiddleware:
         # KST 월 — 예산 카운터를 쓰는 쪽(cost_recorder.py)과 같은 경계여야 한다.
         # UTC 였을 때는 매월 1일 KST 00:00~09:00 동안 지난달 카운터를 계속 조회해,
         # 지난달 예산을 소진한 사용자/팀이 새 달 첫 9시간 동안 차단된 채로 남았다.
-        period = current_kst_period()
+        # 위에서 심은 request_start 와 같은 시각을 써야 체크와 차감이 같은 버킷을 본다.
+        period = period_at(request_start)
 
         from app.schemas.domain import DegradationLevel
 

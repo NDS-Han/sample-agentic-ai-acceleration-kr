@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
 
-from app.periods import request_period
+from app.periods import request_period, request_started_at
 from app.schemas.cost_stream import CostStreamEntry
 from app.schemas.domain import AuthContext, ModelConfigSchema, TokenUsage
 
@@ -421,6 +421,9 @@ class CostRecorder:
             sso_subject=auth_context.sso_subject,
             bedrock_request_id=bedrock_request_id,
             client=client,
+            # 요청 시작 시각 — requested_at/period/date 가 여기서 파생돼, 위 Redis
+            # 카운터의 request_period() 와 같은 버킷을 가리킨다.
+            requested_at=request_started_at(),
         )
 
         payload_json = entry.model_dump_json()

@@ -74,6 +74,17 @@ def _reporting_tz() -> ZoneInfo:
     return ZoneInfo(get_settings().reporting_timezone)
 
 
+def period_at(dt: datetime) -> str:
+    """주어진 시각이 속한 리포팅 타임존 월을 ``YYYY-MM`` 으로."""
+    local = dt.astimezone(_reporting_tz())
+    return f"{local.year}-{local.month:02d}"
+
+
+def date_at(dt: datetime) -> str:
+    """주어진 시각이 속한 리포팅 타임존 날짜를 ``YYYY-MM-DD`` 으로."""
+    return dt.astimezone(_reporting_tz()).strftime("%Y-%m-%d")
+
+
 def current_kst_period() -> str:
     """"지금"이 속한 리포팅 타임존 월을 ``YYYY-MM`` 으로.
 
@@ -82,8 +93,7 @@ def current_kst_period() -> str:
     두 서비스가 같은 행/키를 읽고 쓰고, 둘 다 REPORTING_TIMEZONE(기본 Asia/Seoul)을
     따른다.
     """
-    now_local = datetime.now(_reporting_tz())
-    return f"{now_local.year}-{now_local.month:02d}"
+    return period_at(datetime.now(timezone.utc))
 
 
 def current_kst_date() -> str:
@@ -100,7 +110,7 @@ def current_kst_date() -> str:
     즉 매일 몇 시간 분량이 조용히 사라진다. 두 경계를 리포팅 타임존으로 통일해야
     이어붙는다.
     """
-    return datetime.now(_reporting_tz()).strftime("%Y-%m-%d")
+    return date_at(datetime.now(timezone.utc))
 
 
 # ── 요청 시작 시각의 period (D-20/§6-4) ─────────────────────────────────────
@@ -110,6 +120,25 @@ def current_kst_date() -> str:
 # BudgetMiddleware 가 요청 시작 시점에 이 ContextVar 를 심고 cost_recorder 가
 # 읽는다. 미들웨어를 타지 않는 호출(테스트 등)은 지금 시각으로 폴백한다.
 _request_period: ContextVar[str | None] = ContextVar("budget_request_period", default=None)
+
+#: 요청 시작의 **절대 시각**(UTC aware datetime). CostStreamEntry 의
+#: ``requested_at``/``period``/``date`` 가 여기서 파생된다 — 예전엔 엔트리가
+#: ``datetime.now()``(완료 시각)을 써서, 월 경계를 넘긴 스트리밍이 Redis 카운터
+#: (시작 월, ``request_period()``)와 ``budget_usages`` 행(완료 월)을 서로 다른
+#: 달에 남겼고 ``usage_logs.requested_at`` 도 실제 요청 시각이 아니었다.
+_request_started_at: ContextVar[datetime | None] = ContextVar(
+    "request_started_at", default=None
+)
+
+
+def set_request_started_at(dt: datetime) -> None:
+    """요청 시작 절대시각을 ContextVar 에 심는다 (middleware 전용)."""
+    _request_started_at.set(dt)
+
+
+def request_started_at() -> datetime | None:
+    """요청 시작 절대시각. 미설정 시 None(호출자가 지금 시각으로 폴백)."""
+    return _request_started_at.get()
 
 
 def set_request_period(period: str) -> None:

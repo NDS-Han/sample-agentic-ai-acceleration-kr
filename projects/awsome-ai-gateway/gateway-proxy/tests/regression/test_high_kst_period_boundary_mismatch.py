@@ -304,12 +304,19 @@ def test_every_period_site_uses_the_shared_helper():
         )
         # request_period/set_request_period — D-20(요청 시작 시각 월 귀속)의
         # ContextVar 경로. budget.py 가 시작 시점에 심고 cost_recorder 가 읽는다.
+        # request_started_at/set_request_started_at — 요청 시작 절대시각 경로
+        # (cost_stream 엔트리의 requested_at/period/date 가 시작 시각에서 파생).
+        # period_at/date_at — 임의 시각 → 리포팅 월/일 파생 헬퍼(파생 지점 전용).
         assert imported <= {
             "current_kst_period",
             "current_kst_date",
             "KST",
             "request_period",
             "set_request_period",
+            "request_started_at",
+            "set_request_started_at",
+            "period_at",
+            "date_at",
         }, (
             f"{path.name} 이 app.periods 에서 예상 외 이름을 가져온다: {imported}"
         )
