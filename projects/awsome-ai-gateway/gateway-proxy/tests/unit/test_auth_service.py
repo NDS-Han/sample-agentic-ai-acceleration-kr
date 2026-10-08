@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.schemas.domain import AuthType, Role
+from app.schemas.domain import AuthType
 from app.services.auth_service import (
     DualAuthStrategy,
     JWTAuthStrategy,
@@ -292,3 +291,130 @@ async def test_vk_auth_clients_all_empty_means_unrestricted():
     auth = await auth_mod.VKAuthStrategy().authenticate("Bearer vk-4", redis, db)
 
     assert auth.allowed_clients is None
+
+
+# ── F4: JWT 키 로테이션 — 활성 키 전체 순회 ────────────────────────────────
+
+
+def _make_rsa_pair():
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa
+
+    priv = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    priv_pem = priv.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    )
+    pub_pem = priv.public_key().public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    return priv_pem, pub_pem
+
+
+def _make_jwt(priv_pem: bytes, kid: str, **claims) -> str:
+    import time as _time
+
+    import jwt as _jwt
+
+    payload = {
+        "user_id": "u1",
+        "team_id": "t1",
+        "dept_id": "d1",
+        "roles": ["USER"],
+        "exp": int(_time.time()) + 3600,
+        **claims,
+    }
+    return _jwt.encode(payload, priv_pem, algorithm="RS256", headers={"kid": kid})
+
+
+def _jwt_key_row(pub_pem: bytes, algorithm: str = "RS256"):
+    row = MagicMock()
+    row.public_key_pem = pub_pem.decode()
+    row.algorithm = algorithm
+    return row
+
+
+@pytest.mark.asyncio
+async def test_jwt_rotation_second_active_key_verifies():
+    """활성 키가 2개일 때 `.first()` 가 아닌 키로 서명된 토큰도 통과해야 한다.
+
+    예전 코드는 활성 키 중 첫 행만 시도해, 로테이션 겹침 동안 다른 키로 서명된
+    정상 토큰이 401 을 맞았다.
+    """
+    priv_a, pub_a = _make_rsa_pair()
+    priv_b, pub_b = _make_rsa_pair()
+
+    # DB 가 돌려주는 순서: A 가 먼저. 토큰은 B 로 서명.
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalars = MagicMock(
+        return_value=MagicMock(
+            all=MagicMock(return_value=[_jwt_key_row(pub_a), _jwt_key_row(pub_b)])
+        )
+    )
+    db.execute = AsyncMock(return_value=result)
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    redis.setex = AsyncMock()
+
+    token = _make_jwt(priv_b, kid="key-b")
+
+    auth = await JWTAuthStrategy().authenticate(
+        f"Bearer {token}", redis=redis, db=db
+    )
+    assert auth.user_id == "u1"
+    # 캐시에는 **검증 성공한 B 키**(pem+algorithm JSON)가 저장돼야 한다.
+    cached = json.loads(redis.setex.await_args.args[2])
+    assert cached["pem"] == pub_b.decode()
+    assert cached["algorithm"] == "RS256"
+
+
+@pytest.mark.asyncio
+async def test_jwt_wrong_key_cached_falls_back_to_db():
+    """kid 아래 잘못된 키가 캐시돼 있어도 DB 전체 키로 재시도한다."""
+    priv_a, pub_a = _make_rsa_pair()
+    _priv_x, pub_x = _make_rsa_pair()
+
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalars = MagicMock(
+        return_value=MagicMock(all=MagicMock(return_value=[_jwt_key_row(pub_a)]))
+    )
+    db.execute = AsyncMock(return_value=result)
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(
+        return_value=json.dumps({"pem": pub_x.decode(), "algorithm": "RS256"})
+    )
+    redis.setex = AsyncMock()
+
+    token = _make_jwt(priv_a, kid="key-a")
+    auth = await JWTAuthStrategy().authenticate(
+        f"Bearer {token}", redis=redis, db=db
+    )
+    assert auth.user_id == "u1"
+
+
+@pytest.mark.asyncio
+async def test_jwt_no_matching_key_401():
+    priv_a, pub_a = _make_rsa_pair()
+    priv_b, _pub_b = _make_rsa_pair()
+
+    db = AsyncMock()
+    result = MagicMock()
+    result.scalars = MagicMock(
+        return_value=MagicMock(all=MagicMock(return_value=[_jwt_key_row(pub_a)]))
+    )
+    db.execute = AsyncMock(return_value=result)
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+
+    token = _make_jwt(priv_b, kid="key-b")  # DB 에 없는 키로 서명
+    with pytest.raises(PermissionError):
+        await JWTAuthStrategy().authenticate(
+            f"Bearer {token}", redis=redis, db=db
+        )

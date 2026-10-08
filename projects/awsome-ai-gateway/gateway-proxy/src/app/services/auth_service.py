@@ -203,57 +203,100 @@ class JWTAuthStrategy:
         if not kid:
             raise PermissionError("JWT missing kid claim")
 
-        # public key 조회
-        public_key_pem: str | None = None
-
+        # public key 조회 — 캐시는 {"pem", "algorithm"} JSON (레거시 순수 PEM 호환).
+        cached_pair: tuple[str, str] | None = None
         if redis is not None:
             cached_key = await redis.get(f"key:cache:jwt:{kid}")
             if cached_key:
-                public_key_pem = cached_key.decode()
+                raw = (
+                    cached_key if isinstance(cached_key, str) else cached_key.decode()
+                )
+                try:
+                    data = json.loads(raw)
+                    cached_pair = (data["pem"], data.get("algorithm", "RS256"))
+                except Exception:
+                    cached_pair = (raw, "RS256")
 
-        if public_key_pem is None:
+        # ⚠️ auth.admin_jwt_configs 에는 `kid` / `status` 컬럼이 없다. 실제 플래그는
+        #    `is_active` 다 (db/init/02_create_tables.sql, app/models/auth.py:50-59,
+        #    admin-api 의 같은 테이블 미러도 동일). 예전 코드는 존재하지 않는 두 컬럼을
+        #    참조해 AttributeError 를 냈고, middleware/auth.py 가 (PermissionError,
+        #    ValueError) 만 잡으므로 3-part 토큰(만료 JWT·Cognito id_token·`a.b.c`)이면
+        #    무인증 엔드포인트에서 HTTP 500 이 났다. kid 는 캐시 키로만 쓴다.
+        #    per-kid 선택이 필요해지면 kid 컬럼을 마이그레이션으로 추가한 뒤 필터를
+        #    되살릴 것 — 없는 컬럼을 참조하는 쿼리로 되돌리지 말 것.
+        #
+        # ⚠️ 검증은 **활성 키 전체 순회**다 — 예전엔 `.first()` 로 임의의 키 하나만
+        #    시도해, 로테이션 겹침(구키+신키 동시 active) 동안 다른 키로 서명된 정상
+        #    토큰이 401 을 맞고, 그 잘못된 PEM 이 `key:cache:jwt:{kid}` 로 1시간
+        #    캐시돼 같은 kid 의 후속 요청까지 계속 실패했다. admin-api 의
+        #    JWTVerifier 와 같은 전략이다.
+        claims: dict | None = None
+        if cached_pair is not None:
+            try:
+                claims = jwt.decode(
+                    token,
+                    cached_pair[0],
+                    algorithms=[cached_pair[1]],
+                    options={"require": ["user_id", "team_id", "dept_id", "roles", "exp"]},
+                )
+            except jwt.ExpiredSignatureError:
+                raise PermissionError("JWT expired")
+            except jwt.InvalidTokenError:
+                # 캐시된 키가 이 토큰과 안 맞을 수 있다(로테이션/재발급) —
+                # DB 의 전체 활성 키로 재시도한다.
+                claims = None
+
+        if claims is None:
             if db is None:
                 raise PermissionError("DB unavailable, JWT key cache miss")
-
-            # ⚠️ auth.admin_jwt_configs 에는 `kid` / `status` 컬럼이 없다. 실제 플래그는
-            #    `is_active` 다 (db/init/02_create_tables.sql, app/models/auth.py:50-59,
-            #    admin-api 의 같은 테이블 미러도 동일). 예전 코드는 존재하지 않는 두 컬럼을
-            #    참조해 AttributeError 를 냈고, middleware/auth.py 가 (PermissionError,
-            #    ValueError) 만 잡으므로 3-part 토큰(만료 JWT·Cognito id_token·`a.b.c`)이면
-            #    무인증 엔드포인트에서 HTTP 500 이 났다. kid 는 캐시 키로만 쓴다.
-            #    per-kid 선택이 필요해지면 kid 컬럼을 마이그레이션으로 추가한 뒤 필터를
-            #    되살릴 것 — 없는 컬럼을 참조하는 쿼리로 되돌리지 말 것.
             try:
                 result = await db.execute(
                     select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
                 )
-                jwt_key = result.scalars().first()
+                jwt_keys = list(result.scalars().all())
             except Exception as e:  # 내부 장애도 401 로 — 500 유발 경로를 남기지 않는다
                 logger.warning("jwt_key_lookup_failed", error=str(e))
                 raise PermissionError(f"JWT key lookup failed: {e}")
-            if jwt_key is None:
+            if not jwt_keys:
                 raise PermissionError(f"Unknown JWT kid: {kid}")
 
-            public_key_pem = jwt_key.public_key_pem
-            algorithm = jwt_key.algorithm
+            matched_key: JwtPublicKey | None = None
+            last_err: Exception | None = None
+            for jwt_key in jwt_keys:
+                try:
+                    claims = jwt.decode(
+                        token,
+                        jwt_key.public_key_pem,
+                        algorithms=[jwt_key.algorithm],
+                        options={
+                            "require": ["user_id", "team_id", "dept_id", "roles", "exp"]
+                        },
+                    )
+                    matched_key = jwt_key
+                    break
+                except jwt.ExpiredSignatureError:
+                    # 서명이 맞았는데 만료됐다 — 다른 키를 볼 이유가 없다.
+                    raise PermissionError("JWT expired")
+                except jwt.InvalidTokenError as e:
+                    last_err = e
+                    continue
+            if matched_key is None:
+                raise PermissionError(f"JWT invalid: {last_err}")
 
+            # 검증에 성공한 **그 키**를 kid 아래에 캐시한다 — 잘못된 키가
+            # 캐시돼 후속 요청을 계속 실패시키는 일이 없게.
             if redis is not None:
-                await redis.setex(f"key:cache:jwt:{kid}", JWT_KEY_CACHE_TTL, public_key_pem)
-        else:
-            algorithm = "RS256"
-
-        # JWT 서명 검증 및 클레임 추출
-        try:
-            claims = jwt.decode(
-                token,
-                public_key_pem,
-                algorithms=[algorithm],
-                options={"require": ["user_id", "team_id", "dept_id", "roles", "exp"]},
-            )
-        except jwt.ExpiredSignatureError:
-            raise PermissionError("JWT expired")
-        except jwt.InvalidTokenError as e:
-            raise PermissionError(f"JWT invalid: {e}")
+                await redis.setex(
+                    f"key:cache:jwt:{kid}",
+                    JWT_KEY_CACHE_TTL,
+                    json.dumps(
+                        {
+                            "pem": matched_key.public_key_pem,
+                            "algorithm": matched_key.algorithm,
+                        }
+                    ),
+                )
 
         # 알 수 없는 role 라벨은 통째로 401 을 만드는 대신 건너뛰고 경고를 남긴다.
         # (Role(r) 가 ValueError → middleware 가 이유 없는 401 로 바꿔버렸다.)
