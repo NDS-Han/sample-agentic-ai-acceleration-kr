@@ -165,6 +165,13 @@ class CostLimitResult(BaseModel):
     retry_after: int | None = None
     reserved_cost: Decimal = Decimal("0")
     window_reset: int = 0
+    # 예약이 실제로 커밋된 스코프('USER'/'TEAM')와 그 때의 윈도우 타임스탬프.
+    # settle 이 *예약된* 스코프·*예약된* 윈도우 키에만 차액을 쓰게 하는 근거 —
+    # 없으면 settle 이 무제한 스코프에 TTL 없는 음수 팬텀 키를 만들고,
+    # 분/시 경계를 넘은 스트리밍 요청의 환불이 다음 버킷에 들어간다.
+    committed_scopes: list[str] = Field(default_factory=list)
+    cpm_window_ts: int = 0
+    cph_window_ts: int = 0
 
 
 def split_cached_input(input_total: int, cached_tokens: int) -> tuple[int, int]:

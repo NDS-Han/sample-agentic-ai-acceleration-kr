@@ -110,6 +110,7 @@ class CostRecorder:
                         rate_limit_state.get("tpm_descriptors", []),
                         rate_limit_state.get("tpm_reserved", 0),
                         0,  # actual=0 → 전액 환불
+                        reserved_at=rate_limit_state.get("tpm_reserved_at"),
                     )
                 except Exception:
                     logger.warning(
@@ -127,6 +128,9 @@ class CostRecorder:
                             actual_cost=Decimal("0"),
                             reserved_cost=reserved_cost,
                             team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                            committed_scopes=rate_limit_state.get("cost_committed_scopes"),
+                            cpm_window_ts=rate_limit_state.get("cost_cpm_window_ts") or None,
+                            cph_window_ts=rate_limit_state.get("cost_cph_window_ts") or None,
                         )
                     except Exception:
                         logger.warning(
@@ -221,21 +225,25 @@ class CostRecorder:
             # user_config_key 가 비어(limit=0) budget_threshold 알림이 영원히 발행되지
             # 않는 버그였다. USER 스코프에서 이미 트리거됐으면 그걸 우선하고, 아니면
             # TEAM 스코프 교차도 threshold_triggered 로 채택한다.
-            try:
-                team_raw = await redis.eval(
-                    LuaScriptLoader.get("budget_deduct"),
-                    2,
-                    team_usage_key,
-                    team_config_key,
-                    str(cost_usd),
-                )
-                team_result = json.loads(team_raw)
-                if threshold_triggered is None:
-                    threshold_triggered = team_result.get("threshold_triggered")
-                    if threshold_triggered is not None:
-                        threshold_scope = "team"
-            except Exception:
-                logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
+            # ⚠️ team_id 가 없는 유저는 건너뛴다 — 예전엔 `budget:team:{}:{period}` 라는
+            #    모든 무소속 유저 공유의 팬텀 글로벌 카운터에 계속 쌓였다.
+            team_result = None
+            if auth_context.team_id:
+                try:
+                    team_raw = await redis.eval(
+                        LuaScriptLoader.get("budget_deduct"),
+                        2,
+                        team_usage_key,
+                        team_config_key,
+                        str(cost_usd),
+                    )
+                    team_result = json.loads(team_raw)
+                    if threshold_triggered is None:
+                        threshold_triggered = team_result.get("threshold_triggered")
+                        if threshold_triggered is not None:
+                            threshold_scope = "team"
+                except Exception:
+                    logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
 
             # 앱(client) 예산 차감.
             #
@@ -292,6 +300,21 @@ class CostRecorder:
                     actual_cost=cost_usd,
                     reserved_cost=cost_reserved,
                     team_id=auth_context.team_id,
+                    committed_scopes=(
+                        rate_limit_state.get("cost_committed_scopes")
+                        if rate_limit_state
+                        else None
+                    ),
+                    cpm_window_ts=(
+                        rate_limit_state.get("cost_cpm_window_ts")
+                        if rate_limit_state
+                        else None
+                    ) or None,
+                    cph_window_ts=(
+                        rate_limit_state.get("cost_cph_window_ts")
+                        if rate_limit_state
+                        else None
+                    ) or None,
                 )
             except Exception:
                 logger.warning("cost_settle_failed", user_id=auth_context.user_id)
@@ -306,7 +329,11 @@ class CostRecorder:
 
                 actual_tpm = compute_tpm_incr(usage)
                 await RateLimitService().settle_tpm(
-                    redis, tpm_descriptors, tpm_reserved, actual_tpm
+                    redis,
+                    tpm_descriptors,
+                    tpm_reserved,
+                    actual_tpm,
+                    reserved_at=rate_limit_state.get("tpm_reserved_at"),
                 )
             except Exception:
                 logger.warning("tpm_settle_failed", user_id=auth_context.user_id)

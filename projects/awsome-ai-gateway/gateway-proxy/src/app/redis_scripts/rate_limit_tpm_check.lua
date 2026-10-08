@@ -86,13 +86,19 @@ for i = 1, num_scopes do
     local limit   = tonumber(ARGV[4 + i])
 
     if limit and limit > 0 then
+        local prev_key = KEYS[3 * i - 1]
         redis.call('INCRBY', cur_key, reserved)
-        -- TTL Preservation (LiteLLM v3 패턴): 이미 TTL 있으면 건드리지 않음
+        -- TTL Preservation (LiteLLM v3 패턴): 이미 TTL 있으면 건드리지 않음.
+        -- prev 는 Phase1 의 SET 이 TTL 을 날렸을 수 있으므로 여기서 같이 건다 —
+        -- 예전에는 prev 가 영구 키로 남았다.
         if redis.call('TTL', cur_key) < 0 then
             redis.call('EXPIRE', cur_key, ttl_sec)
         end
         if redis.call('TTL', win_key) < 0 then
             redis.call('EXPIRE', win_key, ttl_sec)
+        end
+        if redis.call('TTL', prev_key) < 0 then
+            redis.call('EXPIRE', prev_key, ttl_sec)
         end
     end
 end
