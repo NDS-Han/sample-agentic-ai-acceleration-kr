@@ -5,6 +5,9 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+import ipaddress
+from urllib.parse import urlparse
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.clients import validate_clients
@@ -22,6 +25,51 @@ from app.schemas.common import ApiFormatEnum, ProviderEnum
 #    le 를 쓴다: pyproject 가 pydantic>=2.0.0 만 요구하므로 그 파생 규칙에 기대지 않고
 #    DB 최대값을 그대로 적는 편이 버전에 무관하고 에러 메시지도 사람이 읽을 수 있다.
 MAX_PRICE_PER_1K = Decimal("9999.999999")
+
+
+# ── endpoint_url 검증 ──
+#
+# endpoint_url 은 gateway 어댑터가 그대로 요청 URL로 쓰는 저장형 값이다
+# (mantle_adapter `POST {endpoint}/v1/messages` 등). 검증 없이 저장하면
+# ADMIN 이 메타데이터 엔드포인트(169.254.169.254 등)나 게이트웨이 loopback 을
+# 등록해, 게이트웨이가 사용자 요청 본문을 그쪽으로 POST 하는 SSRF 경로가 열린다.
+#
+# 허용/차단 기준:
+#   * 스킴은 http/https 만 (file://, gopher:// 등 차단)
+#   * userinfo(`http://u:p@h`)·fragment 금지 — 자격증명 내장/파서 혼동 방지
+#   * 호스트 필수. link-local(169.254.0.0/16 메타데이터 대역), loopback,
+#     unspecified, multicast 리터럴 IP 차단
+#   * RFC1918 사설 IP·내부 DNS 는 **허용** — OPENMODEL 같은 사내 vLLM 엔드포인트가
+#     정당한 사용처다. 사내망 차단은 프록시/네트워크 정책의 일이다.
+_BLOCKED_ENDPOINT_HOSTNAMES = {"localhost", "localhost.localdomain"}
+
+
+def _validate_endpoint_url(v: str | None) -> str | None:
+    if v is None:
+        return None
+    parsed = urlparse(v.strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("endpoint_url은 http(s) URL이어야 합니다")
+    if parsed.username or parsed.password:
+        raise ValueError("endpoint_url에 자격증명(userinfo)을 포함할 수 없습니다")
+    if parsed.fragment:
+        raise ValueError("endpoint_url에 fragment(#)를 포함할 수 없습니다")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("endpoint_url에 유효한 호스트가 없습니다")
+    if host.lower() in _BLOCKED_ENDPOINT_HOSTNAMES:
+        raise ValueError("endpoint_url에 loopback 호스트를 사용할 수 없습니다")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None  # DNS 이름은 허용 — 리졸브 결과는 배포망의 몫이다
+    if ip is not None and (
+        ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast
+    ):
+        raise ValueError(
+            "endpoint_url에 loopback/link-local/메타데이터 IP를 사용할 수 없습니다"
+        )
+    return v
 
 
 # ── Requests ──
@@ -73,6 +121,11 @@ class ModelCreateRequest(BaseModel):
         #    "전면 거부" 로 바뀐다(정확히 반대 방향의 사고).
         return validate_clients(v)
 
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_endpoint_url(cls, v: str | None) -> str | None:
+        return _validate_endpoint_url(v)
+
 
 class ModelUpdateRequest(BaseModel):
     # ⚠️ extra="forbid" 필수. pydantic 기본값(extra="ignore")이면 여기 선언되지 않은 키가
@@ -116,6 +169,10 @@ class ModelUpdateRequest(BaseModel):
     def _validate_update_clients(cls, v: list[str] | None) -> list[str] | None:
         return validate_clients(v)
 
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_update_endpoint_url(cls, v: str | None) -> str | None:
+        return _validate_endpoint_url(v)
 
 
 class PricingRequest(BaseModel):

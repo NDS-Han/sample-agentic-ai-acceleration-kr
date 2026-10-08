@@ -507,3 +507,59 @@ class TestDeleteModel:
                 await model_service.delete_model(
                     mock_session, alias="ghost", actor=admin_user
                 )
+
+
+# ── F6: endpoint_url SSRF 검증 ──────────────────────────────────────────────
+
+
+def _create_kwargs(**over):
+    base = dict(
+        alias="m1",
+        provider=ProviderEnum.BEDROCK,
+        provider_model_id="anthropic.test-v1:0",
+        api_format=ApiFormatEnum.BEDROCK_NATIVE,
+        input_price_per_1k_tokens=Decimal("0.003"),
+        output_price_per_1k_tokens=Decimal("0.015"),
+    )
+    base.update(over)
+    return base
+
+
+class TestEndpointUrlValidation:
+    """endpoint_url 은 어댑터가 그대로 POST 대상으로 쓴다 — SSRF 표면 차단."""
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "http://169.254.169.254/latest/meta-data/",       # EC2 메타데이터
+            "http://169.254.170.2/v2/credentials",            # ECS 태스크 메타데이터
+            "http://127.0.0.1:8080/admin",                    # loopback
+            "http://localhost/v1",                            # loopback 이름
+            "http://0.0.0.0/",                                # unspecified
+            "file:///etc/passwd",                             # 비-http 스킴
+            "gopher://internal/",                             # 비-http 스킴
+            "ftp://host/",                                    # 비-http 스킴
+            "http://user:pass@model.internal/v1",             # userinfo 자격증명
+            "https://model.internal/v1#frag",                 # fragment
+        ],
+    )
+    def test_rejects_dangerous_endpoint(self, url):
+        with pytest.raises(Exception):
+            ModelCreateRequest(**_create_kwargs(endpoint_url=url))
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "https://bedrock-mantle.ap-south-1.amazonaws.com",
+            "http://vllm.internal:8000",                      # 사내 vLLM (정당)
+            "http://10.0.1.20:8080/v1",                       # RFC1918 사설 IP (정당)
+            "https://models.example.com:8443/api",
+        ],
+    )
+    def test_accepts_legit_endpoint(self, url):
+        req = ModelCreateRequest(**_create_kwargs(endpoint_url=url))
+        assert req.endpoint_url == url
+
+    def test_update_rejects_metadata_ip(self):
+        with pytest.raises(Exception):
+            ModelUpdateRequest(endpoint_url="http://169.254.169.254/")
