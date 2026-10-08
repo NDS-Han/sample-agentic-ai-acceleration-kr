@@ -84,8 +84,56 @@ function redirectToLogin(request: NextRequest, clearCookie: boolean): NextRespon
   return redirectResponse;
 }
 
+/**
+ * Origin 기반 CSRF 차단 — 변형 메서드 전용.
+ *
+ * admin_jwt 는 SameSite=Lax 라 크로스사이트 POST 에 브라우저가 쿠키를 안 실어
+ * 주는 게 1차 방어다. 여기서 한 겹 더: 크로스오리진 fetch·폼 POST 에는 브라우저가
+ * 반드시 Origin(또는 구형 클라이언트는 Referer)을 실어내므로, 그 호스트가
+ * 우리 Host 와 다르면 거절한다. curl 같은 비브라우저 클라이언트는 Origin 을
+ * 안 보내는데 그건 피해자 브라우저를 탈취하는 CSRF 위협 모델 밖이라 허용한다.
+ * GET/HEAD 는 대상이 아니다 — 브라우저가 top-level GET 에도 쿠키를 싣는 게
+ * Lax 의 의도된 동작이고, 이 서버는 GET 에 부수효과를 두지 않는다.
+ */
+const MUTATING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function crossOriginRejected(request: NextRequest): NextResponse | null {
+  if (!MUTATING_METHODS.has(request.method)) return null;
+
+  const host = request.headers.get('host')?.toLowerCase();
+  const origin = request.headers.get('origin');
+  if (origin) {
+    try {
+      if (new URL(origin).host.toLowerCase() === host) return null;
+    } catch {
+      /* 파싱 불가 Origin — 아래에서 거절 */
+    }
+    return NextResponse.json(
+      { error: 'cross-origin request rejected' },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+  const referer = request.headers.get('referer');
+  if (referer) {
+    try {
+      if (new URL(referer).host.toLowerCase() === host) return null;
+    } catch {
+      /* 파싱 불가 Referer — 아래에서 거절 */
+    }
+    return NextResponse.json(
+      { error: 'cross-origin request rejected' },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } },
+    );
+  }
+  return null;
+}
+
 export async function middleware(request: NextRequest): Promise<NextResponse> {
   const { pathname } = request.nextUrl;
+
+  // CSRF — 변형 요청의 크로스오리진 발신을 먼저 끊는다 (인증 쿠키 존재 여부와 무관).
+  const csrfReject = crossOriginRejected(request);
+  if (csrfReject) return applySecurityHeaders(csrfReject);
 
   // Always start with a pass-through response so we can attach headers
   const response = NextResponse.next();

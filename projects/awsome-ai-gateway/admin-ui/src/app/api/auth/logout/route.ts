@@ -18,6 +18,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
+import { secureCookieFlag } from '@/lib/cookies';
 import { ADMIN_ROLE_COOKIE } from '@/lib/auth';
 
 /** OIDC_LOGOUT_URL → 없으면 authorize URL 의 오리진에서 유도 (Cognito 는 /logout). */
@@ -60,7 +61,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     sameSite: 'lax',
     path: '/',
     maxAge: 0,
-    secure: proto === 'https',
+    secure: secureCookieFlag(proto),
   });
   // 역할 보조 쿠키도 함께 — 남겨 두면 다음 로그인(다른 역할) 전까지 stale 역할로 게이트된다.
   response.cookies.set(ADMIN_ROLE_COOKIE, '', {
@@ -68,7 +69,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     sameSite: 'lax',
     path: '/',
     maxAge: 0,
-    secure: proto === 'https',
+    secure: secureCookieFlag(proto),
   });
   return response;
 }
