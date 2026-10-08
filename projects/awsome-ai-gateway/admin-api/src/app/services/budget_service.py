@@ -1970,7 +1970,24 @@ class BudgetService:
         *,
         scope: BudgetScope,
         scope_id: uuid.UUID,
+        actor: CurrentUser,
     ) -> AutoDowngradeConfigResponse:
+        # BR-BUD-03: 리더는 자기 팀/자기 팀 멤버의 정책만 읽는다 — 형제 읽기 경로
+        # (get_budget_config)와 동일 스코핑. 예전엔 actor 검사 자체가 없어
+        # TEAM_LEADER 가 임의 팀/유저의 다운그레이드 정책을 열람할 수 있었다(IDOR).
+        if actor.role == UserRole.TEAM_LEADER:
+            if scope == BudgetScope.TEAM:
+                if scope_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team"
+                    )
+            else:
+                target = await UserRepository(session).get_user(scope_id)
+                if target is None or target.team_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team members"
+                    )
+
         rule_repo = DowngradePolicyRepository(session)
         # 최신 저장 배치 — 비활성화(끄기)된 규칙도 포함해 화면에서 사라지지 않게 한다.
         rules = await rule_repo.get_current_rules(scope, scope_id)
@@ -2129,7 +2146,9 @@ class BudgetService:
             request_id=request_id,
         )
 
-        return await self.get_downgrade_config(session, scope=scope, scope_id=scope_id)
+        return await self.get_downgrade_config(
+            session, scope=scope, scope_id=scope_id, actor=actor
+        )
 
     async def delete_downgrade_config(
         self,

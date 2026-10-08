@@ -348,6 +348,7 @@ async def get_downgrade_config(
         session,
         scope=BudgetScope(scope.upper()),
         scope_id=uuid.UUID(scope_id),
+        actor=user,
     )
 
 
