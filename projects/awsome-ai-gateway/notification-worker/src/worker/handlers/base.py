@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.models.notification import NotificationLog
@@ -105,9 +106,26 @@ class BaseHandler(ABC):
                 )
 
                 # 3d. DB 저장 (실패해도 전송 계속)
+                # ⚠️ ux_notification_logs_event_recipient 유니크 인덱스가
+                #    (event_id, event_type, recipient_email) 슬롯을 여기서 선점한다.
+                #    같은 이벤트의 재배송(cost-recorder replay 재발행, pub/sub
+                #    다중 구독 등)은 IntegrityError → **중복 메일 발송 없이 스킵**.
+                #    송신 전에 슬롯을 잡으므로 "insert 성공 → send 전 crash →
+                #    재배송" 케이스는 pending 행이 남아 후속 재배송도 스킵된다
+                #    (유실보다 중복 방지를 택함 — retry_executor 가 이벤트 내에서
+                #    이미 재시도한다).
                 try:
                     session.add(log)
                     await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    logger.info(
+                        "duplicate_event_skipped",
+                        event_id=event.event_id,
+                        event_type=event.type.value,
+                        recipient=recipient.email,
+                    )
+                    continue
                 except Exception as exc:
                     await session.rollback()
                     logger.error(
