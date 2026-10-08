@@ -227,6 +227,12 @@ class BatchFlusher:
         # 배치 안 중복을 먼저 접는다 — 크래시 없이도 spool 재발행으로 생긴다.
         entries = _dedup_in_batch(entries)
 
+        # ⚠️ recorded: DB에 **실제로 기록된** entries 만 모은다. 일별 카운터와
+        #    threshold 알림은 반드시 recorded 기준으로 돌려야 한다 — 예전엔 원본
+        #    entries(재처리 포함)로 돌려서, spool 재발행/XAUTOCLAIM 겹침 등 부분
+        #    replay 시 usage:daily:* 가 이중 계상되고 임계 메일이 재발송됐다.
+        recorded: list[CostStreamEntry]
+
         # 1. DB 쓰기 — 단일 트랜잭션. FK 위반 시 per-row fallback.
         try:
             async with self._session_factory() as session:
@@ -240,40 +246,47 @@ class BatchFlusher:
                 await self._insert_usage_logs(session, fresh)
                 await self._upsert_budget_usages(session, fresh)
                 await session.commit()
+                recorded = fresh
         except IntegrityError as ie:
             logger.warning(
                 "batch_integrity_error_fallback_per_row",
                 batch_size=len(entries),
                 error=str(ie)[:200],
             )
-            await self._flush_per_row(entries)
+            recorded = await self._flush_per_row(entries)
 
         # 2. Redis 당일 카운터 (best-effort, 실패해도 DB는 이미 커밋됨)
         try:
-            await self._bump_daily_counters(entries)
+            await self._bump_daily_counters(recorded)
         except Exception:
-            logger.exception("daily_counter_update_failed", batch_size=len(entries))
+            logger.exception("daily_counter_update_failed", batch_size=len(recorded))
 
         # 3. Threshold 알림 발행
-        await self._publish_thresholds(entries)
+        await self._publish_thresholds(recorded)
 
         if self._metrics:
             self._metrics.entries_flushed.add(
-                len(entries), {"worker": "cost-recorder"}
+                len(recorded), {"worker": "cost-recorder"}
             )
 
         logger.info(
             "batch_flushed",
-            count=len(entries),
-            threshold_events=sum(1 for e in entries if e.threshold_triggered),
+            count=len(recorded),
+            threshold_events=sum(1 for e in recorded if e.threshold_triggered),
         )
 
-    async def _flush_per_row(self, entries: list[CostStreamEntry]) -> None:
+    async def _flush_per_row(
+        self, entries: list[CostStreamEntry]
+    ) -> list[CostStreamEntry]:
         """Per-row fallback: FK 위반/기타 integrity 문제가 있는 row만 스킵.
 
         각 entry 마다 개별 트랜잭션으로 INSERT + UPSERT. 실패는 warn만 하고 스킵
         (Stream ACK는 호출자가 진행하므로 해당 entry는 drop).
+
+        실제로 기록된 entry 리스트를 반환한다 — 일별 카운터/threshold 알림은
+        반환값 기준으로만 돌려야 replay/spool 중복이 이중 계상되지 않는다.
         """
+        written: list[CostStreamEntry] = []
         skipped = 0
         for e in entries:
             try:
@@ -286,6 +299,7 @@ class BatchFlusher:
                     await self._insert_usage_logs(session, [e])
                     await self._upsert_budget_usages(session, [e])
                     await session.commit()
+                    written.append(e)
             except IntegrityError as ie:
                 skipped += 1
                 logger.warning(
@@ -304,8 +318,9 @@ class BatchFlusher:
                 "per_row_flush_done",
                 total=len(entries),
                 skipped=skipped,
-                written=len(entries) - skipped,
+                written=len(written),
             )
+        return written
 
     async def _insert_usage_logs(
         self, session: AsyncSession, entries: list[CostStreamEntry]

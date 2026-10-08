@@ -9,7 +9,16 @@ admin-api/scheduler/daily_usage_aggregator.py 로부터 이관 (2026-04-21).
 Granularity: (date, user_id, model_alias) per row — date 는 settings.reporting_timezone
 (기본 "Asia/Seoul"/KST) 기준 캘린더 날짜. admin-api 의 REPORTING_TIMEZONE 과 같은
 값으로 맞춰야 대시보드(usage_logs 실시간 집계)와 이 테이블의 날짜 경계가 일치한다.
-Idempotent: ON CONFLICT DO NOTHING — cron 재실행/중복 run 안전.
+
+Idempotent: 어제 윈도우를 **DELETE 후 전체 재집계**한다 — 예전엔 ON CONFLICT
+DO NOTHING 이었는데, 그러면 크론(KST 00:10) 이후 스트림 백로그/재처리로 늦게
+INSERT 된 어제분 usage_logs 가 재실행돼도 합산되지 않아 daily_aggregates 에
+영구 누락됐다. 윈도우 전체 재계산이라 중복 실행도 안전하다.
+
+⚠️ GROUP BY 는 충돌키 (date, user_id, model_alias) 와 같은 입도로 맞춘다 —
+   team_id/dept_id 를 GROUP BY 에 넣으면 팀 이동한 유저가 같은 날 같은 모델로
+   두 그룹을 만들어 유니크 키에 자체 충돌한다(한 행이 조용히 유실). 대신 그 날
+   **마지막 요청 시점의** team/dept 를 귀속시킨다.
 """
 from __future__ import annotations
 
@@ -25,15 +34,23 @@ from worker.config import get_settings
 logger = structlog.get_logger(__name__)
 
 
-def _yesterday_window(tz_name: str) -> tuple[datetime, datetime]:
-    """[어제 00:00, 오늘 00:00) 를 tz_name 기준으로 계산해 UTC 구간으로 반환."""
+def _yesterday_window(tz_name: str) -> tuple[datetime, datetime, date]:
+    """[어제 00:00, 오늘 00:00) UTC 구간 + 어제 로컬 날짜를 반환."""
     tz = ZoneInfo(tz_name)
     now_local = datetime.now(tz)
     yesterday_local_date = (now_local - timedelta(days=1)).date()
     start_local = datetime.combine(yesterday_local_date, datetime.min.time(), tzinfo=tz)
     end_local = start_local + timedelta(days=1)
-    return start_local.astimezone(timezone.utc), end_local.astimezone(timezone.utc)
+    return (
+        start_local.astimezone(timezone.utc),
+        end_local.astimezone(timezone.utc),
+        yesterday_local_date,
+    )
 
+
+_DELETE_WINDOW_SQL = """
+DELETE FROM usage.daily_aggregates WHERE date = :day_local;
+"""
 
 _AGG_SQL = """
 INSERT INTO usage.daily_aggregates
@@ -42,7 +59,10 @@ INSERT INTO usage.daily_aggregates
    total_tokens, total_cost_usd, request_count)
 SELECT
   DATE((requested_at AT TIME ZONE :tz)::timestamp) AS date,
-  user_id, team_id, dept_id, model_alias,
+  user_id,
+  (array_agg(team_id ORDER BY requested_at DESC))[1],
+  (array_agg(dept_id ORDER BY requested_at DESC))[1],
+  model_alias,
   SUM(input_tokens),
   SUM(output_tokens),
   SUM(cache_creation_tokens),
@@ -54,8 +74,7 @@ FROM usage.usage_logs
 WHERE requested_at >= :start AND requested_at < :end
 GROUP BY
   DATE((requested_at AT TIME ZONE :tz)::timestamp),
-  user_id, team_id, dept_id, model_alias
-ON CONFLICT (date, user_id, model_alias) DO NOTHING;
+  user_id, model_alias;
 """
 
 
@@ -66,7 +85,10 @@ INSERT INTO usage.daily_aggregates
    total_tokens, total_cost_usd, request_count)
 SELECT
   DATE((requested_at AT TIME ZONE :tz)::timestamp) AS date,
-  user_id, team_id, dept_id, model_alias,
+  user_id,
+  (array_agg(team_id ORDER BY requested_at DESC))[1],
+  (array_agg(dept_id ORDER BY requested_at DESC))[1],
+  model_alias,
   SUM(input_tokens),
   SUM(output_tokens),
   SUM(cache_creation_tokens),
@@ -78,7 +100,7 @@ FROM usage.usage_logs
 WHERE (requested_at AT TIME ZONE :tz)::date < :today_local
 GROUP BY
   DATE((requested_at AT TIME ZONE :tz)::timestamp),
-  user_id, team_id, dept_id, model_alias
+  user_id, model_alias
 ON CONFLICT (date, user_id, model_alias) DO NOTHING;
 """
 
@@ -90,7 +112,10 @@ async def _is_empty(session: AsyncSession) -> bool:
 
 async def aggregate_yesterday(session: AsyncSession) -> int:
     tz_name = get_settings().reporting_timezone
-    start, end = _yesterday_window(tz_name)
+    start, end, day_local = _yesterday_window(tz_name)
+    # 같은 트랜잭션에서 어제 윈도우를 지우고 다시 집계 — 늦게 도착한 행도
+    # 재실행 때마다 반영된다.
+    await session.execute(text(_DELETE_WINDOW_SQL), {"day_local": day_local})
     result = await session.execute(text(_AGG_SQL), {"start": start, "end": end, "tz": tz_name})
     count: int = result.rowcount
     await session.commit()
