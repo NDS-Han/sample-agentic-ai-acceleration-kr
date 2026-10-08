@@ -541,11 +541,43 @@ class TestEndpointUrlValidation:
             "ftp://host/",                                    # 비-http 스킴
             "http://user:pass@model.internal/v1",             # userinfo 자격증명
             "https://model.internal/v1#frag",                 # fragment
+            "http://2130706433/",                             # decimal → 127.0.0.1
+            "http://0x7f000001/",                             # hex → 127.0.0.1
+            "http://127.1/",                                  # 축약 → 127.0.0.1
+            "http://localhost./",                             # trailing dot → 127.0.0.1
+            "http://0/",                                      # → 0.0.0.0
+            "http://[fd00:ec2::254]/",                        # EC2 IMDS IPv6 (ULA)
         ],
     )
     def test_rejects_dangerous_endpoint(self, url):
         with pytest.raises(Exception):
             ModelCreateRequest(**_create_kwargs(endpoint_url=url))
+
+    def test_rejects_dns_name_resolving_to_metadata_ip(self, monkeypatch):
+        """nip.io 류 — 이름은 평범해 보여도 리졸브 결과가 메타데이터 IP면 차단."""
+        import socket as _socket
+
+        def _fake_getaddrinfo(host, port, *a, **kw):
+            return [
+                (_socket.AF_INET, _socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))
+            ]
+
+        monkeypatch.setattr(_socket, "getaddrinfo", _fake_getaddrinfo)
+        with pytest.raises(Exception):
+            ModelCreateRequest(
+                **_create_kwargs(endpoint_url="http://sneaky.example/v1")
+            )
+
+    def test_unresolvable_internal_name_allowed(self, monkeypatch):
+        """admin-api 에서 리졸브 안 되는 사내 이름 — 리터럴 검사만 적용하고 허용."""
+        import socket as _socket
+
+        def _fail_getaddrinfo(host, port, *a, **kw):
+            raise _socket.gaierror("name or service not known")
+
+        monkeypatch.setattr(_socket, "getaddrinfo", _fail_getaddrinfo)
+        req = ModelCreateRequest(**_create_kwargs(endpoint_url="http://vllm.internal:8000"))
+        assert req.endpoint_url == "http://vllm.internal:8000"
 
     @pytest.mark.parametrize(
         "url",

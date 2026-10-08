@@ -6,6 +6,7 @@ from datetime import datetime
 from decimal import Decimal
 
 import ipaddress
+import socket
 from urllib.parse import urlparse
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -43,6 +44,51 @@ MAX_PRICE_PER_1K = Decimal("9999.999999")
 #     정당한 사용처다. 사내망 차단은 프록시/네트워크 정책의 일이다.
 _BLOCKED_ENDPOINT_HOSTNAMES = {"localhost", "localhost.localdomain"}
 
+# loopback/link-local 플래그로 잡히지 않는 클라우드 메타데이터 주소를 명시 차단한다.
+# fd00:ec2::254 는 EC2 IPv6 IMDS — ULA(fc00::/7, is_private)라 일반 플래그를 통과한다.
+_BLOCKED_ENDPOINT_IPS = {
+    ipaddress.ip_address("fd00:ec2::254"),  # EC2 IMDS (IPv6)
+}
+
+
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_multicast
+        or ip in _BLOCKED_ENDPOINT_IPS
+    )
+
+
+def _resolved_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """호스트명을 OS 리졸버로 해소해 실제 접속 대상 IP를 돌려준다.
+
+    `ipaddress.ip_address()`는 점표기 리터럴만 인식해 `2130706433`(decimal),
+    `0x7f000001`(hex), `127.1`(축약), `localhost.`(trailing dot) 같은 표기를
+    DNS 이름으로 오인한다 — 그런데 어댑터의 httpx/OS 리졸버는 이들을 실제
+    주소로 해석해 접속한다(127.0.0.1 등). 저장 시점에 리졸브 결과를 검사해야
+    이 표기 우회와 메타데이터로 리졸브되는 이름(169.254.169.254.nip.io 류)이
+    함께 차단된다.
+
+    잔여 한계(문서화): DNS rebinding — 검증 시점과 어댑터 요청 시점의 리졸브
+    결과가 다른 이름은 이 검사로 못 막는다. 그 한계는 배포망 egress 정책의 몫이다.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, OSError):
+        # admin-api 컨텍스트에서 리졸브가 안 되는 이름(사내 DNS 차이 등)은
+        # 리터럴 검사 결과를 그대로 따른다 — 리졸브 불가 이름은 어차피 어댑터에서도
+        # 연결이 안 되며, 정당한 내부 엔드포인트 등록을 막지 않기 위함이다.
+        return []
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            ips.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return ips
+
 
 def _validate_endpoint_url(v: str | None) -> str | None:
     if v is None:
@@ -57,18 +103,21 @@ def _validate_endpoint_url(v: str | None) -> str | None:
     host = parsed.hostname
     if not host:
         raise ValueError("endpoint_url에 유효한 호스트가 없습니다")
-    if host.lower() in _BLOCKED_ENDPOINT_HOSTNAMES:
+    if host.lower().rstrip(".") in _BLOCKED_ENDPOINT_HOSTNAMES:
         raise ValueError("endpoint_url에 loopback 호스트를 사용할 수 없습니다")
     try:
         ip = ipaddress.ip_address(host)
     except ValueError:
-        ip = None  # DNS 이름은 허용 — 리졸브 결과는 배포망의 몫이다
-    if ip is not None and (
-        ip.is_loopback or ip.is_link_local or ip.is_unspecified or ip.is_multicast
-    ):
+        ip = None  # DNS 이름/숫자형 표기 — 아래 리졸브 검사가 실제 목적지를 검증한다
+    if ip is not None and _blocked_ip(ip):
         raise ValueError(
             "endpoint_url에 loopback/link-local/메타데이터 IP를 사용할 수 없습니다"
         )
+    for resolved in _resolved_ips(host):
+        if _blocked_ip(resolved):
+            raise ValueError(
+                "endpoint_url 호스트가 loopback/link-local/메타데이터 IP로 해석됩니다"
+            )
     return v
 
 
