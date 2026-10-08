@@ -237,9 +237,6 @@ class BedrockAdapter(ProviderAdapter):
         path_suffix: str = "invoke-with-response-stream",
         **kwargs,
     ) -> tuple[int, AsyncIterator[bytes], dict, str | None]:
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         try:
             client = await self._get_client()
             if path_suffix == "invoke-with-response-stream":
@@ -268,12 +265,15 @@ class BedrockAdapter(ProviderAdapter):
 
             elif path_suffix == "converse-stream":
                 parsed_req = json.loads(request_body)
-                response = await loop.run_in_executor(
-                    _bedrock_executor,
+                # invoke-with-response-stream 과 같은 이유 — 죽은 풀 연결의
+                # 연결 수준 오류만 1회 재시도(응답 시작 전이라 중복 과금 없음).
+                response = await self._call_with_connect_retry(
+                    client, _bedrock_executor,
                     lambda: client.converse_stream(
                         modelId=model_id,
                         **{k: v for k, v in parsed_req.items() if k != "modelId"},
                     ),
+                    model_id=model_id, event="converse_stream_connect_retry",
                 )
                 aws_request_id = response.get("ResponseMetadata", {}).get("RequestId")
                 stream = response.get("stream")
