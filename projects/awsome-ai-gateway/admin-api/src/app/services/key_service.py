@@ -9,6 +9,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -281,7 +282,12 @@ class KeyService:
         )
 
     async def _publish_key_revoked(
-        self, vk: VirtualKey, actor: CurrentUser
+        self,
+        vk: VirtualKey,
+        actor: CurrentUser | None = None,
+        *,
+        revoked_by: str | None = None,
+        reason: str | None = None,
     ) -> None:
         """VK 폐기 시 notification-worker에 key_revoked 이벤트 발행."""
         redis = self._cache_mgr._redis
@@ -296,14 +302,94 @@ class KeyService:
                 "user_id": str(vk.user_id),
                 "key_id": str(vk.id),
                 "key_prefix": vk.key_prefix,
-                "revoked_by": actor.role.value,
-                "reason": None,
+                "revoked_by": revoked_by or (actor.role.value if actor else "SYSTEM"),
+                "reason": reason,
             },
         }
         try:
             await redis.publish("notifications:key", json.dumps(event, default=str))
         except Exception:
             logger.warning("key_revoked.publish_failed", exc_info=True)
+
+    async def revoke_keys_for_users(
+        self,
+        session: AsyncSession,
+        *,
+        user_ids: list[uuid.UUID],
+        reason: str | None = None,
+    ) -> int:
+        """지정 사용자들의 ACTIVE VK 전량 폐기 — 시스템 주도 offboarding(R3-3).
+
+        Cognito sync 가 사용자를 is_active=False 로 만들 때 함께 호출된다.
+        DB 만 비활성화하면 게이트웨이의 per-request 재확인에만 의존하게 되고
+        (Redis 장애 시 캐시된 키가 최대 TTL 까지 살아남음), 재활성화 시 폐기되지
+        않은 옛 키가 그대로 부활한다. 여기서 VK 상태/캐시/역인덱스/알림까지
+        정리한다.
+
+        호출자의 트랜잭션 안에서 flush 만 한다 — commit 은 호출자 책임.
+        반환값은 실제로 폐기된 키 수.
+        """
+        repo = KeyRepository(session)
+        vks = await repo.list_active_for_users(user_ids)
+        if not vks:
+            return 0
+
+        now = datetime.now(timezone.utc)
+        revoked = await repo.revoke_many([vk.id for vk in vks], now)
+
+        # Redis 무효화용 해시 — revoke_key 와 동일하게 raw key 를 복호화해 sha256.
+        # (vk, hash) 쌍으로 유지한다 — 복호화 실패분을 건너뛰면 평행 리스트는 어긋난다.
+        hashed: list[tuple[VirtualKey, str]] = []
+        for vk in vks:
+            try:
+                raw_key = self._encryption.decrypt(vk.key_value_encrypted)
+            except Exception:
+                logger.warning(
+                    "vk_offboard.decrypt_failed", key_id=str(vk.id), exc_info=True
+                )
+                continue
+            hashed.append((vk, hashlib.sha256(raw_key.encode()).hexdigest()))
+
+        await self._cache_mgr.invalidate(
+            [k for _, h in hashed for k in (f"key:vk:{h}", f"key:cache:vk:{h}")],
+            session=session,
+        )
+
+        # team 역인덱스(team:vk_hashes:{team_id})에서 제거.
+        try:
+            stmt = select(User.id, User.team_id).where(User.id.in_(user_ids))
+            team_by_user = {
+                r.id: r.team_id for r in (await session.execute(stmt)).all()
+            }
+            team_hashes: dict[uuid.UUID, list[str]] = {}
+            for vk, h in hashed:
+                tid = team_by_user.get(vk.user_id)
+                if tid is not None:
+                    team_hashes.setdefault(tid, []).append(h)
+            redis = self._cache_mgr._redis
+            if redis is not None:
+                for tid, hs in team_hashes.items():
+                    try:
+                        await redis.srem(f"team:vk_hashes:{tid}", *hs)
+                    except Exception:
+                        logger.warning(
+                            "vk_reverse_index.srem_failed",
+                            team_id=str(tid), exc_info=True,
+                        )
+        except Exception:
+            logger.warning("vk_offboard.team_index_failed", exc_info=True)
+
+        # 폐기 알림 — per-key key_revoked (revoked_by=SYSTEM).
+        for vk in vks:
+            await self._publish_key_revoked(
+                vk, revoked_by="SYSTEM", reason=reason
+            )
+
+        logger.info(
+            "vk_offboard.revoked",
+            users=len(user_ids), keys=len(vks), revoked=revoked,
+        )
+        return revoked
 
     async def revoke_key(
         self,
@@ -377,10 +463,6 @@ class KeyService:
         cursor: str | None = None,
         limit: int = 50,
     ) -> tuple[list[KeyResponse], bool]:
-        from sqlalchemy import select
-
-        from app.models.auth import User
-
         repo = KeyRepository(session)
         cursor_uuid = uuid.UUID(cursor) if cursor else None
         keys = await repo.list_keys(

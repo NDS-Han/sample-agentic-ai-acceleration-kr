@@ -285,11 +285,12 @@ class UserRepository:
 
     async def deactivate_missing_oidc_users(
         self, seen_subjects: set[str], provider: str
-    ) -> int:
+    ) -> list[uuid.UUID]:
         """provider 유저 중 seen_subjects 에 없고 현재 활성인 유저를 bulk 비활성화.
 
         sync_all reconcile 전용. ORM 객체를 로드하지 않고 단일 UPDATE 로 처리해
-        1만+ 유저 로드 시의 메모리 폭발을 회피한다. 변경 행 수를 반환한다.
+        1만+ 유저 로드 시의 메모리 폭발을 회피한다. 비활성화된 user id 목록을
+        반환한다 — 호출자가 이 id 로 VK 폐기(R3-3)를 이어서 수행한다.
         """
         if seen_subjects:
             subject_filter = User.sso_subject != all_(
@@ -303,10 +304,11 @@ class UserRepository:
             .where(User.is_active.is_(True))
             .where(subject_filter)
             .values(is_active=False)
+            .returning(User.id)
             .execution_options(synchronize_session=False)
         )
         result = await self._session.execute(stmt)
-        return result.rowcount or 0
+        return list(result.scalars().all())
 
     async def iter_all_users(self) -> list[User]:
         """예산 요약처럼 **전수**가 필요한 집계용 — limit 없이 모든 사용자를 돌려준다.

@@ -235,14 +235,19 @@ async def set_team_allowed_models(
     from app.services.team_allowed_model_service import TeamAllowedModelService
 
     svc: TeamAllowedModelService = request.app.state.team_allowed_model_service
-    return await svc.set_for_team(
+    tid = uuid.UUID(team_id)
+    res = await svc.set_for_team(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=tid,
         model_aliases=body.model_aliases,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
+    # R3-8: 캐시 무효화는 commit 후 — DEL→commit 창의 구 정책 재캐시 방지.
+    await session.commit()
+    await svc.invalidate_for_team(session, tid)
+    return res
 
 
 @router.delete("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
@@ -255,13 +260,17 @@ async def clear_team_allowed_models(
     from app.services.team_allowed_model_service import TeamAllowedModelService
 
     svc: TeamAllowedModelService = request.app.state.team_allowed_model_service
-    return await svc.clear_for_team(
+    tid = uuid.UUID(team_id)
+    res = await svc.clear_for_team(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=tid,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
     )
+    await session.commit()
+    await svc.invalidate_for_team(session, tid)
+    return res
 
 
 # ── per-TEAM / per-ORG app allow-list (alembic 0038) ──────────────────────────
@@ -415,7 +424,9 @@ async def sync_cognito(
     cognito_client = boto3.client(
         "cognito-idp", region_name=settings.COGNITO_REGION
     )
-    svc = CognitoSyncService(cognito_client)
+    svc = CognitoSyncService(
+        cognito_client, key_service=request.app.state.key_service
+    )
     result = await svc.sync_all(session)
 
     return {
@@ -428,10 +439,13 @@ async def sync_cognito(
     }
 
 
-def _build_cognito_sync_service():
+def _build_cognito_sync_service(key_service=None):
     """COGNITO_USER_POOL_ID 확인 + boto3 cognito client 로 CognitoSyncService 생성.
 
     미설정 시 ``HTTPException(400)`` 을 raise 한다.
+
+    ``key_service`` 는 비활성화 시 VK 폐기(R3-3)에 필요 — 호출부는
+    ``request.app.state.key_service`` 를 넘겨야 한다.
 
     ⚠️ 예전엔 ``(None, error_dict)`` 2-튜플을 돌려주고 호출부가
     ``return JSONResponse(status_code=400, content=err)`` 를 했다. 직접 만든 응답은 어떤
@@ -447,12 +461,13 @@ def _build_cognito_sync_service():
         raise HTTPException(status_code=400, detail="COGNITO_USER_POOL_ID not configured")
     import boto3
     client = boto3.client("cognito-idp", region_name=settings.COGNITO_REGION)
-    return CognitoSyncService(client)
+    return CognitoSyncService(client, key_service=key_service)
 
 
 @router.post("/users/sync-cognito/user/{username}")
 async def sync_cognito_user(
     username: str,
+    request: Request,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -465,7 +480,7 @@ async def sync_cognito_user(
     동기 처리(단일 사용자 ~sub-second). 전역 reconciliation 미수행.
     svc- 서비스 토큰 또는 admin JWT 로 호출 가능(require_admin).
     """
-    svc = _build_cognito_sync_service()
+    svc = _build_cognito_sync_service(request.app.state.key_service)
     result = await svc.sync_user(session, username)
     return {
         "username": username,

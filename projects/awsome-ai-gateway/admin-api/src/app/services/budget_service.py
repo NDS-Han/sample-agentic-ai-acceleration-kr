@@ -295,7 +295,7 @@ class BudgetService:
                     )
             else:
                 target = await UserRepository(session).get_user(scope_id)
-                if target is None or target.team_id != actor.team_id:
+                if target is None or actor.team_id is None or target.team_id != actor.team_id:
                     raise ForbiddenError(
                         "Team leaders can only read budgets for their own team members"
                     )
@@ -783,7 +783,7 @@ class BudgetService:
 
         # BR-BUD-03: Team leader can only set budgets for own team
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
             # D-13/§4-1: 리더는 본인의 예산을 스스로 설정할 수 없다.
             if actor.user_id == user_id:
@@ -894,7 +894,7 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only delete budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -1009,7 +1009,7 @@ class BudgetService:
 
         # BR-BUD-03 + D-13: 리더는 자기 팀 멤버만, 본인은 제외.
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -1164,7 +1164,7 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only clear budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -1225,7 +1225,7 @@ class BudgetService:
         user = await user_repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
-        if actor.role == UserRole.TEAM_LEADER and user.team_id != actor.team_id:
+        if actor.role == UserRole.TEAM_LEADER and (actor.team_id is None or user.team_id != actor.team_id):
             raise ForbiddenError("Team leaders can only read budgets for their own team members")
 
         repo = BudgetRepository(session)
@@ -1983,7 +1983,7 @@ class BudgetService:
                     )
             else:
                 target = await UserRepository(session).get_user(scope_id)
-                if target is None or target.team_id != actor.team_id:
+                if target is None or actor.team_id is None or target.team_id != actor.team_id:
                     raise ForbiddenError(
                         "Team leaders can only read budgets for their own team members"
                     )
