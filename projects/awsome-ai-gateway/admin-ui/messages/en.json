@@ -529,7 +529,7 @@
     "aliasHintInline": "The model name clients send to the gateway. It cannot be changed after creation — choose the name you will register in client configs.",
     "modelIdTooltip": "The identifier of the model the provider (Bedrock, Mantle, etc.) actually runs. Clients send the alias above, not this value — the gateway maps alias → this Model ID. For Bedrock, use an inference profile ID (us./global. prefix).",
     "fieldHelp": "Help",
-    "priceHint": "Enter prices per 1M tokens, same as external catalogs. Stored internally per 1K tokens (min step $0.001)."
+    "priceHint": "Enter prices per 1M tokens, same as external catalogs (min step $0.001)."
   },
   "rateLimits": {
     "title": "Rate Limits",
