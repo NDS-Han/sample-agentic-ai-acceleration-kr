@@ -339,13 +339,14 @@ async def openai_sse_stream(
         payload = {"error": {"type": err_type, "message": message}}
         return f"data: {json.dumps(payload)}\n\n".encode()
 
-    def _scan_usage(chunk: bytes) -> TokenUsage | None:
-        """Scan a (possibly multi-frame) chunk for usage + accumulate delta content."""
+    # aiter_bytes 청크는 SSE 프레임 경계와 무관하게 끊긴다 — `data: {...}` 라인이
+    # 두 청크에 걸치면 json.loads 가 실패해 그 프레임의 usage 가 통째로 유실된다
+    # (vLLM 은 usage 를 마지막 프레임에만 실으므로 최악의 경우 input 토큰이 0 으로
+    # 기록됐다). 마지막 개행까지만 완결 라인으로 파싱하고 꼬리는 다음 청크로 넘긴다.
+    _pending_sse = bytearray()
+
+    def _scan_lines(text: str) -> TokenUsage | None:
         nonlocal first_token_time
-        try:
-            text = chunk.decode("utf-8", errors="ignore")
-        except Exception:
-            return None
         found: TokenUsage | None = None
         for line in text.split("\n"):
             line = line.strip()
@@ -373,6 +374,33 @@ async def openai_sse_stream(
                 # sends them and would otherwise be billed as if nothing were cached.
                 found = extract_chat_usage(u)
         return found
+
+    def _scan_usage(chunk: bytes) -> TokenUsage | None:
+        """청크를 버퍼에 붙이고 완결 라인까지만 스캔한다."""
+        _pending_sse.extend(chunk)
+        nl = _pending_sse.rfind(b"\n")
+        if nl == -1:
+            return None
+        try:
+            text = bytes(_pending_sse[:nl]).decode("utf-8", errors="ignore")
+        except Exception:
+            del _pending_sse[: nl + 1]
+            return None
+        del _pending_sse[: nl + 1]
+        return _scan_lines(text)
+
+    def _flush_pending_usage() -> TokenUsage | None:
+        """스트림 종료 시 개행 없이 남은 꼬리도 스캔 (업스트림이 마지막 프레임을
+        개행 없이 닫는 경우 usage 유실 방지)."""
+        if not _pending_sse:
+            return None
+        tail = bytes(_pending_sse)
+        _pending_sse.clear()
+        try:
+            text = tail.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+        return _scan_lines(text)
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
         """KI-08: usage 없고 누적 텍스트 있으면 tokenizer 역산."""
@@ -452,6 +480,8 @@ async def openai_sse_stream(
         except Exception:
             logger.exception("stream_drain_error")
         finally:
+            if u := _flush_pending_usage():
+                latest_usage = u
             await _fire_on_usage()
             await _fire_on_complete("partial")
 
@@ -468,6 +498,8 @@ async def openai_sse_stream(
             except TimeoutError:
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                if u := _flush_pending_usage():
+                    latest_usage = u
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
                 yield _emit_error_chunk(
@@ -495,12 +527,16 @@ async def openai_sse_stream(
 
     except Exception as exc:
         logger.exception("openai_stream_proxy_error")
+        if u := _flush_pending_usage():
+            latest_usage = u
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 
     if not client_disconnected:
+        if u := _flush_pending_usage():
+            latest_usage = u
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")
