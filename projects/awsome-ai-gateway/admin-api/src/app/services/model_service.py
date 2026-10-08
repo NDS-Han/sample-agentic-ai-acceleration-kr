@@ -164,8 +164,13 @@ class ModelService:
 
         pricing = await repo.get_current_pricing(alias)
 
-        # BR-MOD-04: Cache invalidation
-        await self._cache_mgr.invalidate([f"model:{alias}", "model:list"], session=session)
+        # BR-MOD-04: Cache invalidation — 게이트웨이는 resolve 성공 시
+        # model:{alias} 와 model:{provider_model_id} **두 키**를 쓴다(router_service).
+        # pmid 키를 빠지면 pmid 경유 조회가 최대 300s 동안 옛 설정을 본다.
+        await self._cache_mgr.invalidate(
+            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            session=session,
+        )
 
         await audit_logger.log(
             session,
@@ -212,7 +217,10 @@ class ModelService:
         )
         await repo.create_pricing(pricing)
 
-        await self._cache_mgr.invalidate([f"model:{alias}"], session=session)
+        await self._cache_mgr.invalidate(
+            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            session=session,
+        )
 
         await audit_logger.log(
             session,
@@ -405,8 +413,12 @@ class ModelService:
 
         pricing = await repo.get_current_pricing(alias)
 
-        # BR-MOD-03/04: Immediate cache invalidation on INACTIVE
-        await self._cache_mgr.invalidate([f"model:{alias}", "model:list"], session=session)
+        # BR-MOD-03/04: Immediate cache invalidation on INACTIVE — pmid 키도 함께
+        # (kill switch 가 provider_model_id 조회 경로에는 최대 300s 지연됐다).
+        await self._cache_mgr.invalidate(
+            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            session=session,
+        )
 
         await audit_logger.log(
             session,
@@ -528,8 +540,11 @@ class ModelService:
         await session.flush()
 
         # BR-MOD-04 와 같은 규칙 — DEL 만 하고 재적재는 게이트웨이의 cache-miss 에 맡긴다.
+        # pmid 키도 지운다 — resolve 가 model:{provider_model_id} 도 쓰므로, 이걸
+        # 놔두면 삭제된 모델이 pmid 조회로 최대 300s 더 살아난다.
         await self._cache_mgr.invalidate(
-            [f"model:{alias}", "model:list"], session=session
+            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            session=session,
         )
 
         await audit_logger.log(
