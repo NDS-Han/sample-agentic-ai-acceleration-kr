@@ -85,6 +85,11 @@ class OIDCVerifier:
         self._jwks_uri: str | None = None
         self._jwks_keys: dict[str, dict] = {}  # kid -> JWK dict
         self._jwks_fetched_at: float = 0.0
+        # R3-6: unknown-kid 강제 리페치 최소 간격(초). `/v1/auth/exchange` 는
+        # 무인증이라 공격자가 임의 kid 헤더로 요청할 때마다 IdP 에 JWKS GET 을
+        # 유발할 수 있었다. 강제 리페치는 이 간격당 최대 1회로 제한한다 —
+        # 정상 키 로테이션도 수 초~수십 초 지연을 감내한다.
+        self._force_refresh_min_interval = 30.0
         # asyncio.Lock (NOT threading.Lock): _ensure_jwks_async 가 lock 을 잡은 채
         # await 한다. blocking lock 이면 두 번째 요청이 OS 스레드를 park 시켜
         # event loop 자체가 멈추고, JWKS 응답을 읽을 수도 없어 복구 불가.
@@ -204,9 +209,14 @@ class OIDCVerifier:
         except OIDCConfigError:
             raise
 
-        # 3. kid 로 키 매칭. 없으면 force-refresh (rotation 시나리오).
+        # 3. kid 로 키 매칭. 없으면 force-refresh (rotation 시나리오) — 단
+        #    최근에 fetch 했으면 생략한다 (R3-6: 임의 kid 로 IdP GET 증폭 방지).
         key_dict = self._jwks_keys.get(kid) if kid else None
-        if key_dict is None:
+        if (
+            key_dict is None
+            and (time.monotonic() - self._jwks_fetched_at)
+            >= self._force_refresh_min_interval
+        ):
             await self._ensure_jwks_async(http_client, force=True)
             key_dict = self._jwks_keys.get(kid) if kid else None
         if key_dict is None:

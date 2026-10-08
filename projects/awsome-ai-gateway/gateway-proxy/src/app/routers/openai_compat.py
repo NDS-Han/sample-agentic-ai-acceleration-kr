@@ -642,12 +642,29 @@ async def _handle_responses(request: Request):
     # Pre-reserve RPM + TPM (USER/TEAM/GLOBAL) — same enforcement as chat path.
     if auth_context:
         from app.services.rate_limit_enforcement import enforce_rate_limits
+        from app.services.web_search_loop import conservative_admission_body
+
+        _admission_body = req_data if isinstance(req_data, dict) else {}
+        # R3-5: web_search 가 켜진 프로파일의 /v1/responses 도 다중 턴 상한으로
+        #   예약한다. 이 경로는 심사가 웹서치 루프 진입 전에 돌아 원본 바디만
+        #   예약됐고, 루프가 최대 max_iterations 턴을 돌며 한도의 최대 N 배까지
+        #   지출할 수 있었다. messages.py /v1/messages 와 같은 헬퍼·같은 값.
+        if (
+            getattr(request.app.state, "agentcore_mcp_client", None) is not None
+            and getattr(profile, "web_search_enabled", False)
+            and isinstance(req_data, dict)
+        ):
+            from app.config import get_settings as _gs
+
+            _admission_body = conservative_admission_body(
+                req_data, _gs().web_search_max_iterations
+            )
 
         rejected = await enforce_rate_limits(
             redis=redis,
             auth_context=auth_context,
             model_config=model_config,
-            body=req_data if isinstance(req_data, dict) else {},
+            body=_admission_body,
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),

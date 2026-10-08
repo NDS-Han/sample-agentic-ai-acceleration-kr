@@ -249,12 +249,20 @@ class JWTAuthStrategy:
         if not kid:
             raise PermissionError("JWT missing kid claim")
 
+        # 캐시 키는 kid 원문이 아니라 sha256 digest(A3-1) — kid 는 공격자가 고르는
+        # 서명 헤더라, 원문을 그대로 쓰면 무제한 길이/임의 문자열의 Redis 키를
+        # 무한히 만들 수 있다. digest 는 64자 고정. 충돌 시 캐시된 PEM 이 이 토큰과
+        # 안 맞아 verify 실패 → DB 전체 키 순회로 떨어져 올바른 키로 덮어쓴다.
+        kid_cache_key = (
+            f"key:cache:jwt:{hashlib.sha256(kid.encode()).hexdigest()}"
+        )
+
         # public key 조회 — 캐시는 {"pem","algorithm","issuer","audience"} JSON.
         # 레거시 형태(순수 PEM 문자열, iss/aud 없는 JSON)는 iss/aud 를 모르므로
         # 캐시 검증 없이 DB 재조회로 새 형태 레코드로 갱신한다.
         cached_rec: tuple[str, str, str | None, str | None] | None = None
         if redis is not None:
-            cached_key = await redis.get(f"key:cache:jwt:{kid}")
+            cached_key = await redis.get(kid_cache_key)
             if cached_key:
                 raw = (
                     cached_key if isinstance(cached_key, str) else cached_key.decode()
@@ -339,7 +347,7 @@ class JWTAuthStrategy:
             # 캐시돼 후속 요청을 계속 실패시키는 일이 없게.
             if redis is not None:
                 await redis.setex(
-                    f"key:cache:jwt:{kid}",
+                    kid_cache_key,
                     JWT_KEY_CACHE_TTL,
                     json.dumps(
                         {

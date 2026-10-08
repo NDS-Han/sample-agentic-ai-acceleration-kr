@@ -275,7 +275,12 @@ class TokenUsage(BaseModel):
     # Anthropic 응답 usage.cache_creation.ephemeral_1h_input_tokens —
     # 1시간 TTL 로 쓰인 캐시 생성 토큰만 분리한 값. 혼합 TTL 요청에서
     # 5m 부분을 1h 단가로 잘못 과금하지 않기 위해 사용한다.
-    cache_creation_1h_input_tokens: int = 0
+    #
+    # ★ 삼값(None | int, A2-4): None = 응답이 분해를 보고하지 않음 → calculate_cost 는
+    #   요청 측 cache_ttl_1h 로 전체 1h 폴백. 0 = 분해가 **보고됐는데** 1h 부분이 0
+    #   → 전부 5m 과금이 정답. 이 둘을 구분하지 못하면 분해를 보고하는 프로바이더의
+    #   "캐시는 있는데 전부 5m" 응답이 요청 플래그 때문에 전량 1h 로 과금된다.
+    cache_creation_1h_input_tokens: int | None = None
     # KI-08: 스트리밍 disconnect 시 누적 텍스트로 역산한 경우 True.
     # 진짜 provider usage 이벤트면 False. 감사/청구 정확도 분석 용도.
     estimated: bool = False

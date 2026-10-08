@@ -465,7 +465,10 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         and _profile is not None
         and getattr(_profile, "web_search_enabled", False)
     ):
-        from app.services.web_search_loop import run_web_search_loop
+        from app.services.web_search_loop import (
+            conservative_admission_body,
+            run_web_search_loop,
+        )
 
         # ⚠️ **입장 심사를 여기서 해야 한다.** 이 분기는 아래 `run_fallback_loop` 보다
         #    먼저 리턴하고, 그 폴백 루프가 `/v1/messages` 에서 스코프 2축과 레이트리밋을
@@ -485,23 +488,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         #    부푼 max_tokens 를 넣고(상류 바디와 무관), 실제 사용분과의 차액은
         #    finalize 의 settle 이 환불한다. 한도 근처 유저가 조금 더 빨리
         #    429 를 맞는 대가로, 한도를 넘는 다중 턴 지출을 막는다.
+        #    헬퍼는 web_search_loop.conservative_admission_body — openai_compat 의
+        #    /v1/responses 경로(R3-5)도 같은 함수로 같은 값을 예약한다.
         _settings_ws = get_settings()
-        _max_iters = max(1, int(_settings_ws.web_search_max_iterations))
-        _admission_body = dict(req_data)
-        if _max_iters > 1:
-            # enforce._extract_max_output 과 동일한 키 우선순위·타입 가드.
-            _single_turn = None
-            for _k in (
-                "max_tokens", "max_completion_tokens", "max_new_tokens",
-                "max_output_tokens",
-            ):
-                _v = _admission_body.get(_k)
-                if isinstance(_v, int) and _v > 0:
-                    _single_turn = _v
-                    break
-            if _single_turn is None:
-                _single_turn = 4096  # enforce 쪽 _DEFAULT_MAX_OUTPUT 과 동일한 대체값
-            _admission_body["max_tokens"] = _single_turn * _max_iters
+        _admission_body = conservative_admission_body(
+            req_data, _settings_ws.web_search_max_iterations
+        )
         _admission = await enforce_candidate_admission(
             router_service=_router_service,
             auth_context=auth_context,

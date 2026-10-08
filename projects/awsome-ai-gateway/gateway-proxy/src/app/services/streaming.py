@@ -89,7 +89,8 @@ async def bedrock_anthropic_sse_stream(
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_creation": 0,
-        "cache_creation_1h": 0,  # usage.cache_creation.ephemeral_1h_input_tokens
+        # 삼값(None|int): 키가 보고될 때만 설정 — 0 기본값은 "미보고"와 구분 불가(A2-4).
+        "cache_creation_1h": None,  # usage.cache_creation.ephemeral_1h_input_tokens
         "cache_read": 0,
     }
     accumulated_text: list[str] = []  # KI-08: content_block_delta.delta.text 누적
@@ -125,10 +126,12 @@ async def bedrock_anthropic_sse_stream(
                 "cache_creation_input_tokens", counters["cache_creation"]
             )
             counters["cache_read"] = u.get("cache_read_input_tokens", counters["cache_read"])
-            # 1h TTL 캐시 쓰기 분해 — 혼합 TTL 정확 과금(R2-12)
-            cc = u.get("cache_creation") or {}
-            if v := cc.get("ephemeral_1h_input_tokens"):
-                counters["cache_creation_1h"] = v
+            # 1h TTL 캐시 쓰기 분해 — 혼합 TTL 정확 과금(R2-12).
+            # ⚠️ `if v :=` 로 걸러선 안 된다 — 0 이 보고되면 "분해는 있는데 1h=0"
+            #    (전부 5m 과금이 정답) 인데 미보고로 잘못 기록된다(A2-4).
+            cc = u.get("cache_creation")
+            if isinstance(cc, dict) and "ephemeral_1h_input_tokens" in cc:
+                counters["cache_creation_1h"] = cc["ephemeral_1h_input_tokens"] or 0
         elif etype == "content_block_delta":
             # KI-08: 스트림 도중 생성된 텍스트 누적. disconnect 시 tokenizer 역산용.
             delta = data.get("delta", {})

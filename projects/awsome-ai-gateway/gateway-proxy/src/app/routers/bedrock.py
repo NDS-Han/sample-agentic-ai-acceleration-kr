@@ -123,9 +123,11 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
         state["input_tokens"] = u.get("input_tokens", 0)
         state["cache_read"] = u.get("cache_read_input_tokens", 0)
         state["cache_write"] = u.get("cache_creation_input_tokens", 0)
-        state["cache_write_1h"] = (u.get("cache_creation") or {}).get(
-            "ephemeral_1h_input_tokens", 0
-        )
+        # 삼값 보존(A2-4) — 키가 보고될 때만 설정. 미보고(None)면 calculate_cost 가
+        # 요청 측 cache_ttl_1h 폴백을 쓰고, 보고=0 이면 전량 5m 과금이 정답이다.
+        _cc = u.get("cache_creation")
+        if isinstance(_cc, dict) and "ephemeral_1h_input_tokens" in _cc:
+            state["cache_write_1h"] = _cc["ephemeral_1h_input_tokens"] or 0
         state["output_tokens"] = max(
             state.get("output_tokens", 0), u.get("output_tokens", 0)
         )
@@ -228,18 +230,25 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
 
     body = await _get_request_body(request)
 
+    # 요청 바디 1회 파싱 — rate-limit 예상 추정과 1h 캐시 TTL 신호(A2-3) 둘 다 쓴다.
+    import json as _json
+
+    try:
+        body_dict = _json.loads(body) if body else {}
+        if not isinstance(body_dict, dict):
+            body_dict = {}
+    except Exception:
+        body_dict = {}
+
+    # invoke/* 경로는 Anthropic 와이어를 그대로 통과시키므로 cache_control ttl="1h"
+    # 가 그대로 온다 — 응답이 분해를 보고하지 않을 때의 과금 폴백 신호.
+    from app.routers.messages import _has_1h_cache_control
+
+    cache_ttl_1h = _has_1h_cache_control(body_dict)
+
     # Pre-reserve RPM + TPM (3-scope: USER/TEAM/GLOBAL)
     if auth_context:
-        import json as _json
-
         from app.services.rate_limit_enforcement import enforce_rate_limits
-
-        try:
-            body_dict = _json.loads(body) if body else {}
-            if not isinstance(body_dict, dict):
-                body_dict = {}
-        except Exception:
-            body_dict = {}
 
         rejected = await enforce_rate_limits(
             redis=redis,
@@ -324,9 +333,11 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                             ),
                             cache_creation_input_tokens=bedrock_usage.get("cache_write", 0),
                             cache_read_input_tokens=bedrock_usage.get("cache_read", 0),
+                            # 삼값 — 미보고 시 None 이어야 요청 측 폴백이 산다(A2-4).
                             cache_creation_1h_input_tokens=bedrock_usage.get(
-                                "cache_write_1h", 0
+                                "cache_write_1h"
                             ),
+                            cache_ttl_1h=cache_ttl_1h,
                         )
                     else:
                         u = _try_extract_usage(chunk)
@@ -376,6 +387,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             # 예외가 아니라 상태코드로 실패가 오는 경우(어댑터가 응답을 그대로 넘긴다).
             record_provider_error(_pm, _pm_labels, status=status)
         if auth_context and (usage.input_tokens + usage.output_tokens) > 0:
+            # 요청 측 1h 캐시 신호 — 응답이 ephemeral 분해를 보고하지 않으면
+            # calculate_cost 의 폴백이 이 값을 쓴다(A2-3).
+            usage.cache_ttl_1h = cache_ttl_1h
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await cost_recorder.finalize(
                 redis,

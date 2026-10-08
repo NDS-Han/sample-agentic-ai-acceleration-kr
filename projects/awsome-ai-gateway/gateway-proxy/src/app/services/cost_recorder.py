@@ -30,18 +30,20 @@ def calculate_cost(usage: TokenUsage, pricing: ModelConfigSchema) -> Decimal:
 
     응답 usage 의 ``cache_creation.ephemeral_1h_input_tokens`` 분해가 보고되면
     그 비율대로 정확히 나눠 과금한다(혼합 TTL 요청에서 5m 부분까지 1h 단가로
-    과금되던 오류 방지). 분해가 없으면 요청 측 cache_ttl_1h 신호로 전체를
-    1h 로 취급하는 구 동작에 폴백한다.
+    과금되던 오류 방지). 분해가 없으면(``None``) 요청 측 cache_ttl_1h 신호로
+    전체를 1h 로 취급하는 구 동작에 폴백한다. 분해가 보고됐는데 1h=0 이면
+    전부 5m — 요청 플래그는 보고된 분해보다 우선하지 않는다(A2-4).
     """
     p = pricing.pricing
     input_cost = (Decimal(usage.input_tokens) / 1000) * p.input_per_1k
     output_cost = (Decimal(usage.output_tokens) / 1000) * p.output_per_1k
     cache_creation_total = usage.cache_creation_input_tokens
-    one_h = min(usage.cache_creation_1h_input_tokens, cache_creation_total)
-    five_m = cache_creation_total - one_h
-    if one_h == 0 and usage.cache_ttl_1h:
+    if usage.cache_creation_1h_input_tokens is None:
         # 응답 분해를 보고하지 않는 프로바이더 — 요청 측 신호로 전체 1h 취급.
-        five_m, one_h = 0, cache_creation_total
+        one_h = cache_creation_total if usage.cache_ttl_1h else 0
+    else:
+        one_h = min(usage.cache_creation_1h_input_tokens, cache_creation_total)
+    five_m = cache_creation_total - one_h
     cache_write_cost = (
         (Decimal(one_h) / 1000) * p.cache_write_1h_per_1k
         + (Decimal(five_m) / 1000) * p.cache_write_per_1k

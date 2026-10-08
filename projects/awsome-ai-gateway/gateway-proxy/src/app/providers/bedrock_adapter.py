@@ -40,8 +40,10 @@ def _extract_bedrock_usage(response_body: dict) -> TokenUsage:
     cache_read = usage.get("cache_read_input_tokens", 0)
     # Anthropic 응답의 usage.cache_creation.ephemeral_1h_input_tokens —
     # 혼합 TTL 요청의 1h 캐시 쓰기만 분리해 정확 과금(R2-12).
+    # 미보고 시 None 유지(삼값, A2-4) — 0 으로 채우면 "분해가 보고됐는데 0"과
+    # 구분이 안 돼 요청 측 1h 플래그가 잘못 발동한다.
     cache_creation_1h = (usage.get("cache_creation") or {}).get(
-        "ephemeral_1h_input_tokens", 0
+        "ephemeral_1h_input_tokens"
     )
     return TokenUsage(
         input_tokens=input_tokens,
