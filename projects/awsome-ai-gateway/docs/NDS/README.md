@@ -4,19 +4,27 @@
 기존 `docs/us-llm-gateway/` 는 특정 사이트(US, us-west-2, 단일 AWS 계정 구조)에
 고정된 운영 문서이고, 이 디렉토리의 절차는 리전·계정·규모에 관계없이 동작합니다.
 
-## 핵심 개념 — 명령 흐름
+## 핵심 개념 — 명령 책임
 
-```
-./deploy init       →  대화형으로 gateway.yaml 생성 (배포의 source of truth)
-./deploy configure  →  기존 설정을 기본값으로 항목별 재확인 → 배포까지 이어짐
-./deploy render     →  배포 대상에 맞는 산출물 생성
-./deploy apply      →  plan 미리보기 → 확인 → 실제 적용 (--plan = 미리보기만)
-./deploy doctor     →  배포 상태·드리프트 점검, --capture = 기존 배포 역생성
-```
+**일상에서 쓰는 명령은 3개**입니다:
 
-모든 설정은 **`deployment/gateway.yaml` 한 파일**에 있습니다. 변경은
-`./deploy configure`(항목별 확인 마법사) 또는 파일 직접 편집 후 render/apply —
-환경별로 스크립트를 찾아 실행하는 방식이 아닙니다.
+| 명령 | 역할 |
+|---|---|
+| `./deploy configure` | **설정 마법사** — 현재 값을 기본값으로 항목별 확인 → 저장 → "지금 배포?" 까지. 처음엔 `init` 이 같은 역할 |
+| `./deploy apply` | **yaml 그대로 배포** — 파일을 직접 고쳤거나 CI/스크립트에서. render를 내부에서 수행 + plan 미리보기 → 확인 → 적용 → doctor |
+| `./deploy doctor` | **상태 확인** — 헬스·드리프트 점검. `--capture` = 기존 배포를 yaml 로 역생성 |
+
+고급/디버깅 명령(일상 경로에선 불필요 — `configure`/`apply` 가 내부에서 다 합니다):
+
+| 명령 | 역할 |
+|---|---|
+| `./deploy render` | 산출물만 생성해서 눈으로 확인 (`apply` 가 자동으로 render 함) |
+| `./deploy validate` | yaml 문법 검증만 (`configure`/`apply` 도 시작 시 검증) |
+| `./deploy init` | 최초 1회 — yaml 이 없을 때의 configure |
+
+모든 설정은 **`deployment/gateway.yaml` 한 파일**이 원본입니다. 두 입구가 있습니다:
+대화형(`configure`)과 파일 직접 편집(`vi` 후 `apply`) — 어느 쪽이든 최종 적용은
+같은 apply 경로를 탑니다.
 
 > 이 디렉토리는 배포 도구도 함께 담고 있습니다 — `deploy.sh` (실행 진입점),
 > `deploy/` (파이썬 패키지). 루트의 `./deploy` 는 `docs/NDS/deploy.sh` 로

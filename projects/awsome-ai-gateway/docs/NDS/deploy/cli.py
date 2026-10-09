@@ -716,27 +716,27 @@ def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="deploy", description="gateway.yaml 기반 LLM Gateway 배포 도구")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("init", help="대화형으로 gateway.yaml 생성")
+    sp = sub.add_parser("init", help="[최초 1회] 대화형으로 gateway.yaml 생성")
     sp.add_argument("--out", default="")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser("configure",
-                        help="기존 gateway.yaml 을 기본값으로 대화형 재설정 → 배포까지")
+                        help="[일상 경로] 설정 변경 마법사 — 항목별 확인 → 저장 → 배포까지")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--no-apply", action="store_true",
                     help="설정만 저장하고 배포는 안 함")
     sp.set_defaults(fn=cmd_configure)
 
-    sp = sub.add_parser("validate", help="gateway.yaml 검증")
+    sp = sub.add_parser("validate", help="[고급] yaml 검증 — configure/apply 도 시작 시 검증하므로 생략 가능")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_validate)
 
-    sp = sub.add_parser("render", help="배포 산출물 생성")
+    sp = sub.add_parser("render", help="[고급] 산출물만 생성 — apply 가 내부에서 render 하므로 생략 가능")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_render)
 
-    sp = sub.add_parser("apply", help="render + 기동 + doctor")
+    sp = sub.add_parser("apply", help="[파일 편집/CI 경로] yaml 그대로 배포 — render 내장 + 확인 + doctor")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--build", action="store_true", help="이미지를 강제로 다시 빌드 (compose)")
     sp.add_argument("--plan", action="store_true",
@@ -745,7 +745,7 @@ def main(argv=None) -> int:
                     help="적용 전 확인 프롬프트 생략 (CI/자동화)")
     sp.set_defaults(fn=cmd_apply)
 
-    sp = sub.add_parser("doctor", help="배포 상태·드리프트 점검")
+    sp = sub.add_parser("doctor", help="[상태 확인] 배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml)")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--capture", action="store_true",
                     help="기존 배포 상태를 읽어 gateway.yaml 후보를 역생성")
