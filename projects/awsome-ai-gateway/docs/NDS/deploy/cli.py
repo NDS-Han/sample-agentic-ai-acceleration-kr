@@ -32,6 +32,18 @@ class Cancelled(Exception):
     pass
 
 
+def _questionary():
+    """questionary 가 없으면(런타임 의존 미설치) 설치법을 안내하고 종료."""
+    try:
+        import questionary
+        return questionary
+    except ImportError:
+        from .capture import CaptureError
+        raise CaptureError(
+            "questionary 가 없습니다 — `pip install -r docs/NDS/deploy/requirements.txt` "
+            "또는 docs/NDS/.venv 생성 후 사용하십시오.")
+
+
 def _unwrap(v):
     if v is None:
         raise Cancelled
@@ -39,7 +51,7 @@ def _unwrap(v):
 
 
 def cmd_init(args) -> int:
-    import questionary
+    questionary = _questionary()
     from questionary import Choice
 
     out_path = Path(args.out) if args.out else DEFAULT_CONFIG
@@ -247,9 +259,12 @@ def _confirm_apply(args, preview=None) -> bool:
     if not sys.stdin.isatty():
         console.print("[red]대화형이 아닙니다 — 확인 없이 적용하려면 --yes 를 쓰십시오")
         return False
-    import questionary
-    ok = _unwrap(questionary.confirm(
-        "위 계획을 실제 환경에 적용합니까?", default=False).ask())
+    try:
+        ok = _unwrap(_questionary().confirm(
+            "위 계획을 실제 환경에 적용합니까?", default=False).ask())
+    except Exception as exc:  # questionary 미설치 등 — 적용 거부가 안전 쪽
+        console.print(f"[red]확인 프롬프트 실패 — 적용하지 않습니다: {exc}")
+        return False
     return bool(ok)
 
 
@@ -343,11 +358,15 @@ def _detect_gen_dir(args) -> tuple[Path, str]:
     if len(found) == 1:
         return found[0], found[0].name
     if found and sys.stdin.isatty():
-        import questionary
-        pick = _unwrap(questionary.select(
-            "캡처할 배포를 선택하세요",
-            choices=[d.name for d in found]).ask())
-        return GEN_ROOT / pick, pick
+        try:
+            questionary = _questionary()
+        except Exception:
+            questionary = None  # 선택 UI 없으면 아래 힌트로 빠진다
+        if questionary:
+            pick = _unwrap(questionary.select(
+                "캡처할 배포를 선택하세요",
+                choices=[d.name for d in found]).ask())
+            return GEN_ROOT / pick, pick
     from .capture import CaptureError
     hint = "\n".join(f"    --gen-dir {d}" for d in found) or "    (gen/ 에 산출물 없음)"
     raise CaptureError(
@@ -432,7 +451,7 @@ def cmd_capture(args) -> int:
                 table.add_row(k, str(dv), str(cv))
             console.print(table)
             if args.interactive:
-                import questionary
+                questionary = _questionary()
                 from questionary import Choice
                 adopted = 0
                 for k, dv, cv in diffs:
@@ -524,6 +543,13 @@ def main(argv=None) -> int:
     except Cancelled:
         console.print("\n[yellow]취소됨")
         return 130
+    except Exception as exc:
+        # CaptureError 등 사용자 대면용 오류 — traceback 은 숨긴다
+        from .capture import CaptureError
+        if isinstance(exc, CaptureError):
+            console.print(f"[red]{exc}")
+            return 1
+        raise
 
 
 if __name__ == "__main__":
