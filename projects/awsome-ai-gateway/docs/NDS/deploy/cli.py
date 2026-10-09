@@ -326,7 +326,10 @@ def cmd_apply(args) -> int:
 
 
 def _detect_gen_dir(args) -> tuple[Path, str]:
-    """캡처 대상 산출물 디렉토리를 찾는다 — 명시 > 기존 config 의 env > gen/ 자동 탐색."""
+    """캡처 대상 산출물 디렉토리를 찾는다 — 명시 > 기존 config 의 env > gen/ 탐색.
+
+    gen/ 밖 디렉토리(수작업 compose 프로젝트 등)도 --gen-dir 로 가리키면 된다.
+    """
     if getattr(args, "gen_dir", ""):
         return Path(args.gen_dir), ""
     cfg_path = Path(args.config)
@@ -336,11 +339,20 @@ def _detect_gen_dir(args) -> tuple[Path, str]:
             return GEN_ROOT / env, env
         except schema.SchemaError:
             pass
-    found = [d for d in GEN_ROOT.iterdir() if d.is_dir()] if GEN_ROOT.exists() else []
+    found = sorted([d for d in GEN_ROOT.iterdir() if d.is_dir()] if GEN_ROOT.exists() else [])
     if len(found) == 1:
         return found[0], found[0].name
+    if found and sys.stdin.isatty():
+        import questionary
+        pick = _unwrap(questionary.select(
+            "캡처할 배포를 선택하세요",
+            choices=[d.name for d in found]).ask())
+        return GEN_ROOT / pick, pick
     from .capture import CaptureError
-    raise CaptureError(f"캡처 대상을 못 찾았습니다 — --gen-dir 로 지정 (후보: {[d.name for d in found]})")
+    hint = "\n".join(f"    --gen-dir {d}" for d in found) or "    (gen/ 에 산출물 없음)"
+    raise CaptureError(
+        "캡처 대상이 여러 개이거나 없습니다 — 대상을 지정하세요:\n" + hint +
+        "\n  이 도구로 만들지 않은 배포는 --gen-dir <compose 파일이 있는 디렉토리>")
 
 
 def _captured_to_yaml(path: Path, doc: dict, notes: list[str]) -> None:
@@ -378,7 +390,8 @@ def cmd_capture(args) -> int:
             doc, notes = capture.capture_compose(gen_dir)
         elif target == "ecs":
             region = args.region or (existing.get("aws") or {}).get("region", "ap-northeast-2")
-            env_dir = REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
+            env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
+                REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
             doc, notes = capture.capture_ecs(env_dir, region)
         else:
             console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs 또는 --gen-dir 지정")
@@ -496,6 +509,8 @@ def main(argv=None) -> int:
     sp.add_argument("--target", choices=["compose", "ecs"], default="",
                     help="capture 대상 backend (미지정 시 자동 판별)")
     sp.add_argument("--gen-dir", default="", help="capture 할 산출물 디렉토리")
+    sp.add_argument("--env-dir", default="",
+                    help="capture 할 terraform 환경 디렉토리 (ecs, 기본 gateway-ecs)")
     sp.add_argument("--region", default="", help="capture 용 AWS 리전 (ecs)")
     sp.add_argument("--out", default="", help="capture 결과 쓸 경로")
     sp.add_argument("--interactive", action="store_true",
