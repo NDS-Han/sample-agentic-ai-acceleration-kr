@@ -103,3 +103,16 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
 
 인프라 변경이 필요하면 해당 terraform env(`environments/llm-gateway-<env>`)에서
 `terraform plan/apply` — doctor 가 그쪽 drift 도 같이 봅니다.
+
+## 배포 삭제
+
+```bash
+./deploy teardown             # helm release(앱)만 삭제 — 인프라는 남음
+./deploy teardown --infra     # 앱 + terraform env 인프라 전부 삭제
+```
+
+`--infra`는 `deploy.yaml`의 `env_dir`이 가리키는 terraform env에서
+`plan -destroy` 미리보기 → 환경 이름 입력 확인 → helm uninstall --wait →
+`terraform destroy` 순서로 진행합니다. 앱을 먼저 내려 ALB controller가 만든
+리소스가 정리된 뒤 인프라를 지웁니다. 상세 주의사항은
+[update.md](update.md#배포-삭제-teardown) 참조.

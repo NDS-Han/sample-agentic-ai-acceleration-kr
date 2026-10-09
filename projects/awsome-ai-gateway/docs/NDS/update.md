@@ -166,7 +166,7 @@ private 에서도 NAT 는 유지됩니다(ECR pull·Bedrock 호출 경로).
 |---|---|---|
 | **compose** | 컨테이너 + 네트워크. `--purge` 시 볼륨까지 (**DB 데이터 영구 삭제**) | 볼륨(기본), `gen/<env>/` 산출물(.env 시크릿 포함), 빌드된 이미지 |
 | **ecs** | terraform이 만든 전부 — VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR(repo+이미지) | `deployment/gen/` 산출물, terraform state backend(수동 관리) |
-| **eks** | helm release(앱 전체). `--infra` 시 terraform env 인프라까지 | `--infra` 없이: **인프라 전부**(EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA). `--infra` 사용 시: state backend, Secrets 복구 유예기간, 수동 생성 리소스 |
+| **eks** | 기본: helm release(앱 전체)만. `--infra` 추가 시 terraform env 인프라(EKS·Aurora·VPC 등)까지 | 기본: 인프라 전부 보존. `--infra` 시: terraform state backend·Secrets 복구 유예기간·수동 생성 리소스 보존 |
 
 ```bash
 ./deploy teardown                    # 삭제 대상 미리보기 → 환경 이름 입력 → 삭제

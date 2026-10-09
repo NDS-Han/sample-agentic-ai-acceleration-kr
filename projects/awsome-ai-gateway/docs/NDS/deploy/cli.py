@@ -564,6 +564,8 @@ def _confirm_destroy(env: str, args) -> bool:
     try:
         typed = _unwrap(_questionary().text(
             f"삭제를 확인하려면 환경 이름 '{env}' 를 그대로 입력하세요").ask())
+    except Cancelled:
+        raise
     except Exception as exc:
         console.print(f"[red]확인 실패 — 삭제하지 않습니다: {exc}")
         return False
@@ -581,6 +583,11 @@ def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
         console.print(f"[red]{compose_file} 없음 — render 산출물이 없습니다 "
                       "(기동 중인 스택은 `docker compose ls` 로 확인)")
         return 1
+    env_file = out / ".env"
+    if not env_file.exists():
+        console.print(f"[red]{env_file} 없음 — `deploy render` 후 재시도하거나, "
+                      "수작업으로 올린 배포면 그 디렉토리에서 compose down 하십시오")
+        return 1
     purge = getattr(args, "purge", False)
     console.print(Panel(
         f"삭제: compose 프로젝트 llm-gateway-{cfg.env} 의 컨테이너 + 네트워크\n"
@@ -591,7 +598,7 @@ def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
         title=f"teardown — {cfg.env} (compose)", expand=False))
     if not _confirm_destroy(cfg.env, args):
         return 130
-    argv = ["docker", "compose", "--env-file", str(out / ".env"),
+    argv = ["docker", "compose", "--env-file", str(env_file),
             "-f", str(compose_file), "down", "--remove-orphans"]
     if purge:
         argv.append("--volumes")
@@ -632,13 +639,17 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         title=f"teardown — {cfg.env} (ecs)", expand=False))
     if not _confirm_destroy(cfg.env, args):
         return 130
-    if safeguards_on:
-        ecs_render.render(cfg, out, extra_vars={
-            **ecs_apply.load_extra_vars(out), "db_safeguards": False})
-        ecs_apply._run(["terraform", "apply", "-auto-approve", "-input=false",
+    try:
+        if safeguards_on:
+            ecs_render.render(cfg, out, extra_vars={
+                **ecs_apply.load_extra_vars(out), "db_safeguards": False})
+            ecs_apply._run(["terraform", "apply", "-auto-approve", "-input=false",
+                            f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
+        ecs_apply._run(["terraform", "destroy", "-auto-approve", "-input=false",
                         f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
-    ecs_apply._run(["terraform", "destroy", "-auto-approve", "-input=false",
-                    f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
+    except SystemExit:
+        raise SystemExit("teardown 중간 실패 — 일부 리소스가 남았을 수 있습니다. 잔여는 "
+                         f"`terraform -chdir={env_dir} plan -destroy` 로 확인하십시오")
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 
@@ -673,8 +684,16 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                         title=f"teardown — {cfg.env} (eks)", expand=False))
 
     if infra:
-        # 삭제 대상을 먼저 보여준다 (read-only)
-        eks_apply._run(["terraform", "init", "-input=false", "-reconfigure"], cwd=env_dir)
+        # 삭제 대상을 먼저 보여준다 (read-only). eks env 의 backend.tf 는
+        # partial config — bucket/table 은 최초 init 시 -backend-config 로 주입돼
+        # .terraform 에 저장되므로 -reconfigure 를 쓰면 그 설정을 버려 실패한다
+        try:
+            eks_apply._run(["terraform", "init", "-input=false"], cwd=env_dir)
+        except SystemExit:
+            raise SystemExit(
+                f"{env_dir} init 실패 — 이 env 는 partial backend 라 저장된 "
+                ".terraform 이 없으면 init 할 수 없습니다. 최초 구성 때와 같은 "
+                "-backend-config(bucket/dynamodb_table)로 먼저 init 하십시오")
         console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
         eks_apply._run(["terraform", "plan", "-destroy", "-input=false"], cwd=env_dir)
 
@@ -685,17 +704,41 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     r = eks_apply._run_quiet(
         ["helm", "status", meta["release"], "-n", meta["namespace"], *ctx_args],
         cwd=REPO_ROOT)
+    uninstalled = False
     if r.returncode == 0:
         # 앱을 먼저 내려야 ALB controller 가 만든 ALB/타겟그룹이 정리되고
         # --infra 의 VPC destroy 가 의존성에 막히지 않는다
         eks_apply._run(["helm", "uninstall", meta["release"], "-n",
                         meta["namespace"], "--wait", *ctx_args], cwd=REPO_ROOT)
-    else:
+        uninstalled = True
+    elif r.returncode == 127:
+        # helm 부재를 release 부재와 혼동하면 앱을 안 내리고 인프라만 지워
+        # ALB 잔여물이 destroy 를 멈추게 한다
+        console.print("[red]helm 명령을 못 찾았습니다 — helm 설치 후 재시도하십시오")
+        return 1
+    elif "not found" in f"{r.stdout}{r.stderr}".lower():
         console.print("ⓘ release 가 없습니다 — helm 단계 생략")
+    else:
+        # 클러스터 접속 실패·잘못된 context 도 rc=1 — release 부재로 착각해
+        # 건너뛰면 --infra 가 살아있는 앱 아래에서 인프라를 지운다
+        tail = (r.stderr or r.stdout or "").strip().splitlines()
+        console.print(f"[red]helm status 실패 (rc={r.returncode})"
+                      f"{' — ' + tail[-1] if tail else ''}\n"
+                      "클러스터 접속·kubeconfig context(--context)를 확인하세요. "
+                      "앱이 살아있는 상태로 인프라 삭제는 진행하지 않습니다.")
+        return 1
     if not infra:
-        console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 (--infra 로 함께 삭제 가능)")
+        if uninstalled:
+            console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 "
+                          "(--infra 로 함께 삭제 가능)")
         return 0
-    eks_apply._run(["terraform", "destroy", "-auto-approve", "-input=false"], cwd=env_dir)
+    try:
+        eks_apply._run(["terraform", "destroy", "-auto-approve", "-input=false"],
+                       cwd=env_dir)
+    except SystemExit:
+        raise SystemExit("terraform destroy 가 중간에 실패했습니다 — 일부 리소스가 "
+                         "남았을 수 있습니다. 잔여는 "
+                         f"`terraform -chdir={env_dir} plan -destroy` 로 확인하십시오")
     console.print("[green]teardown 완료 — helm release 와 terraform env 인프라가 삭제됐습니다")
     return 0
 
