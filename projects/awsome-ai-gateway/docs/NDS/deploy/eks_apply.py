@@ -38,7 +38,7 @@ def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> 
     return r
 
 
-def load_meta(gen_dir: Path) -> dict:
+def load_meta(gen_dir: Path, repo_root: Path | None = None) -> dict:
     p = gen_dir / "deploy.yaml"
     if not p.exists():
         raise SystemExit(f"{p} 없음 — 먼저 `deploy render` 를 실행하십시오")
@@ -46,12 +46,32 @@ def load_meta(gen_dir: Path) -> dict:
     missing = [k for k in ("release", "namespace", "chart") if not meta.get(k)]
     if missing:
         raise SystemExit(f"{p} 가 불완전합니다({', '.join(missing)} 없음) — `deploy render` 로 재생성하십시오")
+    # values 레이어 파일이 실제 있는지 — 없으면 helm 이 apply 중간에 죽는다
+    for layer in meta.get("values_layers", []):
+        lp = Path(layer)
+        if not lp.is_absolute() and repo_root:
+            lp = repo_root / lp
+        if not lp.exists():
+            raise SystemExit(f"values layer 없음: {layer} — `deploy render` 로 재생성하십시오")
     return meta
 
 
+def _run_quiet(argv: list[str], *, cwd: Path | None = None,
+               timeout: int = 60) -> subprocess.CompletedProcess:
+    """best-effort 조회용 — 바이너리 부재/타임아웃을 traceback 대신 rc≠0 으로."""
+    try:
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "",
+                                           f"{argv[0]} 명령을 못 찾았습니다")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "",
+                                           f"{argv[0]} 응답 없음({timeout}s)")
+
+
 def tf_outputs(env_dir: Path) -> dict:
-    r = subprocess.run(["terraform", "output", "-json"], cwd=env_dir,
-                       capture_output=True, text=True, timeout=120)
+    r = _run_quiet(["terraform", "output", "-json"], cwd=env_dir, timeout=120)
     if r.returncode != 0:
         return {}
     try:
@@ -61,18 +81,22 @@ def tf_outputs(env_dir: Path) -> dict:
 
 
 def _aws_account_id(region: str) -> str:
-    r = subprocess.run(["aws", "sts", "get-caller-identity", "--query", "Account",
-                        "--output", "text", "--region", region],
-                       capture_output=True, text=True, timeout=30)
+    r = _run_quiet(["aws", "sts", "get-caller-identity", "--query", "Account",
+                    "--output", "text", "--region", region], timeout=30)
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     """install-eks.sh 의 SET_ARGS 와 동일한 --set 목록 (terraform output 기반)."""
     args: list[str] = []
-    account = _aws_account_id(region)
-    if account and not cfg.images.registry:
-        args += ["--set", f"global.imageRegistry={account}.dkr.ecr.{region}.amazonaws.com"]
+    if not cfg.images.registry:
+        account = _aws_account_id(region)
+        if account:
+            args += ["--set", f"global.imageRegistry={account}.dkr.ecr.{region}.amazonaws.com"]
+        else:
+            print("⚠ aws sts 조회 실패 — images.registry 미지정인데 ECR 자동 추론을 "
+                  "못했습니다. 차트 기본 registry 가 쓰일 수 있습니다.",
+                  file=sys.stderr)
 
     aurora = outs.get("application_db_endpoint") or outs.get("aurora_endpoint")
     if aurora:
@@ -107,8 +131,7 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
 
 
 def _rollback_flag() -> str:
-    r = subprocess.run(["helm", "version", "--template", "{{.Version}}"],
-                       capture_output=True, text=True)
+    r = _run_quiet(["helm", "version", "--template", "{{.Version}}"], timeout=15)
     major = 3
     m = re.search(r"v(\d+)", r.stdout or "")
     if m:
@@ -117,10 +140,13 @@ def _rollback_flag() -> str:
 
 
 def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
-               extra_sets: list[str] | None = None) -> list[str]:
+               extra_sets: list[str] | None = None,
+               context: str = "") -> list[str]:
     argv = ["helm", "upgrade", "--install", meta["release"], meta["chart"],
             "--namespace", meta["namespace"], "--create-namespace",
             "--timeout", "15m"]
+    if context:
+        argv += ["--kube-context", context]
     if not dry_run:
         argv += ["--wait", _rollback_flag(), "--cleanup-on-fail"]
     for f in meta.get("values_layers", []):
@@ -132,9 +158,11 @@ def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
     return argv
 
 
-def live_alb_hostname(meta: dict) -> str:
-    r = subprocess.run(["kubectl", "get", "ingress", "-n", meta["namespace"],
-                        "-o", "json"], capture_output=True, text=True, timeout=60)
+def live_alb_hostname(meta: dict, context: str = "") -> str:
+    argv = ["kubectl", "get", "ingress", "-n", meta["namespace"], "-o", "json"]
+    if context:
+        argv += ["--context", context]
+    r = _run_quiet(argv, timeout=60)
     if r.returncode != 0:
         return ""
     try:
@@ -147,34 +175,36 @@ def live_alb_hostname(meta: dict) -> str:
     return ""
 
 
-def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> None:
+def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
     """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다."""
-    meta = load_meta(gen_dir)
+    meta = load_meta(gen_dir, repo_root)
     outs = tf_outputs(repo_root / meta["env_dir"]) if meta.get("env_dir") else {}
     if meta.get("env_dir") and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — "
               "동적 --set 값(DB/Redis/IRSA/cognito) 없이 dry-run 합니다", file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
-    _run(_helm_argv(meta, set_args, dry_run=True), cwd=repo_root)
+    _run(_helm_argv(meta, set_args, dry_run=True, context=context), cwd=repo_root)
 
 
-def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> dict:
-    meta = load_meta(gen_dir)
+def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
+    meta = load_meta(gen_dir, repo_root)
     outs = tf_outputs(repo_root / meta["env_dir"]) if meta.get("env_dir") else {}
     if meta.get("env_dir") and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — helm 만 "
               "업데이트합니다 (인프라 동적값 주입 생략)", file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
 
-    _run(_helm_argv(meta, set_args), cwd=repo_root)
+    _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)
+    # 확인 게이트는 1차 upgrade 전에만 있다 — 2차는 같은 트랜잭션의 후속 조치
     if not cfg.domain.name:
-        host = live_alb_hostname(meta)
+        host = live_alb_hostname(meta, context)
         if host:
-            print("adminUi.nextauthUrl 을 live ALB 주소로 반영...", file=sys.stderr)
-            _run(_helm_argv(meta, set_args,
+            print(f"adminUi.nextauthUrl 을 live ALB 주소({host})로 반영 — "
+                  "이 2차 upgrade 는 1차에서 확인된 계획의 후속입니다", file=sys.stderr)
+            _run(_helm_argv(meta, set_args, context=context,
                             extra_sets=["--set", f"adminUi.nextauthUrl=http://{host}"]),
                  cwd=repo_root)
     return {"release": meta["release"], "namespace": meta["namespace"],
-            "alb_hostname": live_alb_hostname(meta)}
+            "alb_hostname": live_alb_hostname(meta, context)}

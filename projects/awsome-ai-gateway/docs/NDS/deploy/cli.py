@@ -178,6 +178,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "authorize URL", default=str(prev_oidc.get("authorize_url", "")) or None).ask())
         oidc["token_url"] = _unwrap(questionary.text(
             "token URL", default=str(prev_oidc.get("token_url", "")) or None).ask())
+        # 질문하지 않는 OIDC 필드는 기존 값을 보존 — configure 한 번에
+        # required_group/audience/client_secret 가 조용히 사라지는 걸 막는다
+        for k in ("audience", "client_secret", "required_group", "provider_name"):
+            if prev_oidc.get(k) and k not in oidc:
+                oidc[k] = prev_oidc[k]
 
     images = {}
     if target in ("ecs", "eks"):
@@ -202,16 +207,22 @@ def _collect_doc(existing: dict | None = None) -> dict:
         deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
         deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
         deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
+        # 질문하지 않는 deploy 필드(sizing override 등)는 보존
+        if prev_dep.get("sizing"):
+            deploy_extra["sizing"] = prev_dep["sizing"]
 
     prev_cidrs = _g(ex, "network", "allowed_cidrs", default=[]) or []
     allowed = _unwrap(questionary.text(
         "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)",
-        default=",".join(prev_cidrs)).ask())
+        default=",".join(str(c) for c in prev_cidrs)).ask())
 
     doc = {
         "version": 1,
         "env": env,
-        "aws": {"region": region},
+        "aws": {"region": region,
+                # account_id 는 질문하지 않지만 tfstate 추론에 쓰인다 — 보존
+                **({"account_id": str(_g(ex, "aws", "account_id"))}
+                   if _g(ex, "aws", "account_id") else {})},
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()]},
@@ -244,6 +255,7 @@ def _write_config(out_path: Path, doc: dict) -> int:
         "# gateway.yaml — 이 배포의 source of truth.\n"
         "# 변경 → `deploy configure`(대화형) 또는 직접 편집 → render → apply.\n"
         + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    out_path.chmod(0o600)  # oidc.client_secret 등이 들어갈 수 있어 소유자 전용
     console.print(f"[green]저장: {out_path}")
     for w in cfg.warnings():
         console.print(f"[yellow]⚠ {w}")
@@ -277,6 +289,8 @@ def cmd_configure(args) -> int:
             return yaml.safe_load(p.read_text()) or {}
         except yaml.YAMLError as exc:
             raise schema.SchemaError(f"{p} 의 YAML이 유효하지 않습니다: {exc}")
+        except UnicodeDecodeError as exc:
+            raise schema.SchemaError(f"{p} 가 UTF-8 텍스트가 아닙니다: {exc}")
 
     existing: dict = {}
     if cfg_path.exists():
@@ -454,6 +468,7 @@ def cmd_apply(args) -> int:
     if cfg.deploy.target == "eks":
         from . import eks_apply, doctor as doc
         from .render import eks as eks_render
+        context = getattr(args, "context", "") or ""
         out = GEN_ROOT / cfg.env / "eks"
         res = eks_render.render(cfg, out)
         console.print(f"[green]render 완료 ({out})")
@@ -461,16 +476,16 @@ def cmd_apply(args) -> int:
             console.print(f"  [yellow]ⓘ {n}")
         if args.plan:
             try:
-                eks_apply.plan(cfg, out, REPO_ROOT)
+                eks_apply.plan(cfg, out, REPO_ROOT, context)
             except SystemExit as exc:
                 console.print(f"[red]{exc}")
                 return 1
             console.print("\n[cyan]plan 전용 — 적용되지 않았습니다. 적용: ./deploy apply")
             return 0
-        if not _confirm_apply(args, preview=lambda: eks_apply.plan(cfg, out, REPO_ROOT)):
+        if not _confirm_apply(args, preview=lambda: eks_apply.plan(cfg, out, REPO_ROOT, context)):
             return 130
         try:
-            result = eks_apply.apply(cfg, out, REPO_ROOT)
+            result = eks_apply.apply(cfg, out, REPO_ROOT, context)
         except SystemExit as exc:
             console.print(f"[red]{exc}")
             return 1
@@ -580,8 +595,8 @@ def cmd_capture(args) -> int:
         if cfg_path.exists():
             try:
                 existing = yaml.safe_load(cfg_path.read_text()) or {}
-            except yaml.YAMLError as exc:
-                console.print(f"[yellow]{cfg_path} 파싱 실패 — 캡처본과 비교는 건너뜁니다: {exc}")
+            except (yaml.YAMLError, UnicodeDecodeError) as exc:
+                console.print(f"[yellow]{cfg_path} 읽기 실패 — 캡처본과 비교는 건너뜁니다: {exc}")
         existing_target = (existing.get("deploy") or {}).get("target", "")
 
         # eks/ecs 는 gen 디렉토리가 필요 없다 — helm·kubectl·terraform 이 정보원
@@ -676,8 +691,15 @@ def cmd_capture(args) -> int:
                         _set_path(existing, k, cv)
                         adopted += 1
                 if adopted:
+                    # 흡수 결과가 스키마를 통과해야 저장 — 깨진 yaml 을 쓰지 않는다
+                    try:
+                        schema.from_dict(existing)
+                    except schema.SchemaError as exc:
+                        console.print(f"[red]흡수 결과가 유효하지 않아 저장하지 않았습니다:\n{exc}")
+                        return 1
                     cfg_path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True))
-                    console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다")
+                    console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다 "
+                                  f"(주석은 보존되지 않습니다 — 원본은 git 에서 확인)")
             else:
                 console.print("[yellow]--interactive 로 각 항목의 채택/유지를 선택할 수 있습니다")
         return 0
@@ -743,6 +765,9 @@ def main(argv=None) -> int:
                     help="변경 계획만 보여주고 적용하지 않음")
     sp.add_argument("-y", "--yes", action="store_true",
                     help="적용 전 확인 프롬프트 생략 (CI/자동화)")
+    sp.add_argument("--context", default="",
+                    help="eks: kubeconfig context (미지정 시 현재 context — "
+                         "여러 클러스터가 있으면 명시 권장)")
     sp.set_defaults(fn=cmd_apply)
 
     sp = sub.add_parser("doctor", help="[상태 확인] 배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml)")

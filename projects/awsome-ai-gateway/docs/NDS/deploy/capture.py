@@ -41,7 +41,12 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     if not compose_path.exists():
         raise CaptureError(f"{compose_path} 없음 — compose 배포 산출물이 아닙니다")
 
-    composed = yaml.safe_load(compose_path.read_text())
+    try:
+        composed = yaml.safe_load(compose_path.read_text()) or {}
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise CaptureError(f"{compose_path} 파싱 실패: {exc}")
+    if not isinstance(composed, dict):
+        raise CaptureError(f"{compose_path} 의 최상위가 mapping 이 아닙니다")
     services = composed.get("services") or {}
     env = parse_env_file(out_dir / ".env")
     caddy_path = out_dir / "Caddyfile"
@@ -176,10 +181,13 @@ def _aws_json(argv: list[str], region: str) -> dict:
     r = _sp(["aws", *argv, "--region", region, "--output", "json"], tool="aws")
     if r.returncode != 0:
         raise CaptureError(f"aws {' '.join(argv[:2])} 실패: {r.stderr.strip()[:200]}")
-    return json.loads(r.stdout or "{}")
+    try:
+        return json.loads(r.stdout or "{}")
+    except json.JSONDecodeError as e:
+        raise CaptureError(f"aws {' '.join(argv[:2])} 출력 파싱 실패: {e}")
 
 
-def _taskdef_env(env_dir: Path, region: str, task_arn: str) -> dict[str, str]:
+def _taskdef_env(region: str, task_arn: str) -> dict[str, str]:
     td = _aws_json(["ecs", "describe-task-definition", "--task-definition", task_arn], region)
     try:
         cenv = td["taskDefinition"]["containerDefinitions"][0].get("environment") or []
@@ -206,14 +214,14 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         domain = {"mode": "none"}
 
     # task def 에서 env 계약 역추출
-    api_td = (outputs.get("service_names") or {})
+    service_names = list((outputs.get("service_names") or {}).values())
     image_tag, sizing, sender_type, sizing_env = "", {}, "mock", {}
     try:
         # admin-api task def — env 계약의 진원지
         api_arn = _aws_json(
             ["ecs", "describe-services", "--cluster", cluster,
              "--services", "admin-api"], region)["services"][0]["taskDefinition"]
-        sizing_env = _taskdef_env(env_dir, region, api_arn)
+        sizing_env = _taskdef_env(region, api_arn)
         sender_type = sizing_env.get("EMAIL_SENDER_TYPE", "mock")
     except (CaptureError, KeyError, IndexError) as e:
         notes.append(f"admin-api task def 조회 실패 — env 기반 항목은 추정입니다: {e}")
@@ -221,7 +229,7 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
     # 이미지 태그 + 레지스트리
     try:
         gws = _aws_json(["ecs", "describe-services", "--cluster", cluster,
-                         "--services", *list(api_td or ["gateway-proxy"])], region)["services"]
+                         "--services", *(service_names or ["gateway-proxy"])], region)["services"]
         for s in gws:
             td_arn = s.get("taskDefinition", "")
             td = _aws_json(["ecs", "describe-task-definition",
@@ -470,7 +478,11 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "version": 1,
         "env": env,
         "aws": {"region": region},
-        "deploy": {"target": "eks", "size_tier": "t3"},
+        # 실제 릴리스/namespace/env_dir 를 기록 — 기본값이 아닌 배포도
+        # 채택 후 apply 가 같은 대상을 가리키도록
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "release": release, "namespace": namespace,
+                   "tf_env_dir": str(env_dir) if env_dir else ""},
         "network": {"mode": "public", "allowed_cidrs": cidrs},
         "domain": domain,
         "features": features,

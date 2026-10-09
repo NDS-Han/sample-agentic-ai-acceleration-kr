@@ -15,7 +15,18 @@ import yaml
 from .schema import GatewayConfig
 from .render import common
 
-MIGRATION_HEAD = "0040"
+def _migration_head() -> str:
+    """repo 의 db/versions 에서 최신 revision 을 읽는다 — 하드코드된 head 는
+    마이그레이션 추가 때마다 정상 배포를 오진하므로."""
+    versions = Path(__file__).resolve().parents[3] / "db" / "versions"
+    try:
+        nums = [int(f.name.split("_", 1)[0])
+                for f in versions.glob("0*.py") if f.name.split("_", 1)[0].isdigit()]
+        return f"{max(nums):04d}" if nums else ""
+    except OSError:
+        return ""
+
+
 EXPECTED_SERVICES = (
     "postgres", "redis", "migration", "gateway-proxy", "admin-api",
     "admin-ui", "scheduler", "cost-recorder-worker",
@@ -83,15 +94,25 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
     if r.returncode != 0:
         rep.add("WARN", "services", f"docker compose ps 실패: {r.stderr.strip()[:200]}")
         return rep
+    # compose v2 의 --format json 은 버전에 따라 NDJSON(줄당 객체) 또는
+    # JSON 배열 — 둘 다 받는다
+    rows: list[dict] = []
+    try:
+        parsed = json.loads(r.stdout)
+        if isinstance(parsed, list):
+            rows = [x for x in parsed if isinstance(x, dict)]
+        elif isinstance(parsed, dict):
+            rows = [parsed]
+    except json.JSONDecodeError:
+        for line in r.stdout.splitlines():
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(row, dict):
+                rows.append(row)
     states: dict[str, str] = {}
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+    for row in rows:
         name = row.get("Service") or row.get("Name", "")
         health = row.get("Health") or ""
         state = row.get("State", "")
@@ -113,16 +134,18 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
         else:
             rep.add("WARN", "services", f"{svc} 상태: {state}")
 
-    # 4. 마이그레이션 head — DB 에서 직접 확인
+    # 4. 마이그레이션 head — DB 에서 직접 확인, 기대값은 repo 의 versions 에서
     r = _run(compose_argv + ["exec", "-T",
               "postgres", "psql", "-U", "gateway", "-d", "gateway",
               "-tAc", "SELECT version_num FROM alembic_version"])
+    expected = _migration_head()
     if r.returncode == 0:
         head = r.stdout.strip()
-        if head == MIGRATION_HEAD:
+        if expected and head == expected:
             rep.add("OK", "migration", f"alembic head = {head}")
         elif head:
-            rep.add("HIGH", "migration", f"alembic head = {head} (기대 {MIGRATION_HEAD})")
+            exp = f" (기대 {expected})" if expected else " (repo versions 조회 불가)"
+            rep.add("HIGH", "migration", f"alembic head = {head}{exp}")
         else:
             rep.add("WARN", "migration", "alembic_version 행 없음 — migration 미실행?")
     else:
@@ -194,6 +217,11 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
 
     # 3. terraform plan — tfvars·라이브 인프라 드리프트 통합 탐지.
     #    refresh 를 켜서 콘솔/CLI 수동변경까지 잡는다 (수 초~수십 초 소요).
+    #    신선한 checkout 에선 backend init 이 먼저 필요하다
+    backend = out_dir / "backend.hcl"
+    if backend.exists() and not (env_dir / ".terraform").exists():
+        _run(["terraform", "init", "-input=false",
+              f"-backend-config={backend}"], cwd=env_dir, timeout=180)
     r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false",
               f"-var-file={var_file}"],
              cwd=env_dir, timeout=300)
@@ -341,7 +369,16 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             items = json.loads(r.stdout).get("items", [])
         except json.JSONDecodeError:
             items = []
-        by_name = {i["metadata"]["name"].replace("llm-gateway-", ""): i for i in items}
+        # 배포명은 <release>-<svc> — 기본 release 면 llm-gateway- 를 떼고,
+        # 커스텀 release 면 그 프리픽스를 뗀다
+        by_name = {}
+        for i in items:
+            n = i["metadata"]["name"]
+            for p in (f"{rel}-", "llm-gateway-"):
+                if n.startswith(p):
+                    n = n[len(p):]
+                    break
+            by_name[n] = i
         for name in EKS_DEPLOYMENTS:
             d = by_name.get(name) or by_name.get(f"{rel}-{name}")
             if not d:

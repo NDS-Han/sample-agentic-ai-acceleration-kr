@@ -242,7 +242,16 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     """산출물을 out_dir 에 생성한다. 반환: {"files": [...], "filled": [...], "preserved": [...]}"""
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    base = yaml.safe_load((repo_root / "docker-compose.yml").read_text())
+    base_path = repo_root / "docker-compose.yml"
+    try:
+        base = yaml.safe_load(base_path.read_text())
+    except FileNotFoundError:
+        raise SystemExit(f"{base_path} 없음 — compose 렌더링은 repo 의 기본 "
+                         f"docker-compose.yml 이 필요합니다")
+    except (yaml.YAMLError, UnicodeDecodeError) as exc:
+        raise SystemExit(f"{base_path} 파싱 실패: {exc}")
+    if not isinstance(base, dict) or not base.get("services"):
+        raise SystemExit(f"{base_path} 에 services 가 없습니다 — 기본 compose 파일 확인 필요")
     services = transform_services(base, cfg)
 
     # 선언은 하되 아무 서비스도 안 쓰는 volume(grafana-data 등)은 싣지 않는다

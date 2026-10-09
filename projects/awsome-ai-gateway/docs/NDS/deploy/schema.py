@@ -2,6 +2,7 @@
 """gateway.yaml 스키마 — 로드·검증·직렬화. 외부 의존 없이 dataclass + yaml 만 쓴다."""
 from __future__ import annotations
 
+import ipaddress
 import re
 import yaml
 from dataclasses import dataclass, field
@@ -194,6 +195,17 @@ class GatewayConfig:
             e.append("notifications.provider=smtp 이면 notifications.smtp_host 가 필요합니다.")
         if self.features.bi_insight and self.deploy.target == "compose":
             e.append("bi_insight(AgentCore Runtime)는 compose backend에서 지원하지 않습니다.")
+        if self.domain.mode == "cloudfront-temp" and self.deploy.target == "compose":
+            e.append("domain.mode=cloudfront-temp 는 compose 에서 지원하지 않습니다 — "
+                     "none 또는 route53-acm 을 쓰십시오 (ecs 는 none 으로 수렴).")
+        for c in self.network.allowed_cidrs:
+            if not isinstance(c, str):
+                e.append(f"allowed_cidrs 항목은 문자열이어야 합니다: {c!r}")
+                continue
+            try:
+                ipaddress.ip_network(c, strict=False)
+            except ValueError:
+                e.append(f"allowed_cidrs '{c}' 는 유효한 CIDR 이 아닙니다 (예: 1.2.3.4/32)")
         if self.clients.models_profile not in MODEL_PROFILES:
             e.append(f"clients.models_profile 은 {MODEL_PROFILES} 중 하나여야 합니다.")
         if self.oidc.enabled:
@@ -202,6 +214,14 @@ class GatewayConfig:
             if not (self.oidc.authorize_url and self.oidc.token_url):
                 e.append("oidc 를 쓰려면 authorize_url / token_url 도 필요합니다 (hosted-ui 엔드포인트).")
         return e
+
+
+def _safe_int(v: Any, errors: list[str], path: str) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        errors.append(f"{path} 는 정수여야 합니다: {v!r}")
+        return 0
 
 
 def _require_mapping(node: Any, path: str, errors: list[str]) -> dict:
@@ -249,7 +269,10 @@ def from_dict(raw: dict) -> GatewayConfig:
         ),
         network=NetworkConfig(
             mode=str(network.get("mode", "public")),
-            allowed_cidrs=list(network.get("allowed_cidrs") or []),
+            # 문자열을 넣으면 list() 가 글자 단위로 분해하므로 단일 항목으로 감싼다
+            allowed_cidrs=([network["allowed_cidrs"]]
+                           if isinstance(network.get("allowed_cidrs"), str)
+                           else list(network.get("allowed_cidrs") or [])),
         ),
         domain=DomainConfig(
             mode=str(domain.get("mode", "none")),
@@ -260,7 +283,8 @@ def from_dict(raw: dict) -> GatewayConfig:
             notifications=NotificationConfig(
                 provider=str(notif.get("provider", "mock")),
                 smtp_host=str(notif.get("smtp_host", "")),
-                smtp_port=int(notif.get("smtp_port", 587)),
+                smtp_port=_safe_int(notif.get("smtp_port", 587), errors,
+                                    "features.notifications.smtp_port"),
                 smtp_from=str(notif.get("smtp_from", "")),
                 ses_from=str(notif.get("ses_from", "")),
                 sender_name=str(notif.get("sender_name", "")),
@@ -302,6 +326,8 @@ def load(path: Path) -> GatewayConfig:
         raise SchemaError(
             f"{path} 가 없습니다 — 새 배포는 `./deploy init`, "
             f"기존 배포 온보딩은 `./deploy doctor --capture` 로 생성하십시오.") from exc
+    except UnicodeDecodeError as exc:
+        raise SchemaError(f"{path} 가 UTF-8 텍스트가 아닙니다: {exc}") from exc
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
