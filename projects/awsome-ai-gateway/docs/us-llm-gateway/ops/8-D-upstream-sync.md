@@ -176,27 +176,38 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
 bash 07-client-values.sh
 ```
-기대: 14 는 `OK no failures`. 07 출력 끝의 `export OIDC_ISSUER_URL=…` `export OIDC_CLIENT_ID=…`
-`export ADMIN_API_URL=…` `export ANTHROPIC_BASE_URL=…` 4줄을 복사합니다.
+기대: 14 는 `OK no failures`. 07 출력의 `macOS / Linux` 아래 `export …` 4줄을 이 EC2 셸에
+붙여 넣습니다.
 
-▶ 실행 · Mac — VK 받기 (`gateway-cli` 가 설치된 새 터미널 탭에 위 4줄을 먼저 붙여 넣은 뒤)
+▶ 실행 · Mac — 터널 (새 터미널 탭. 멈춘 것처럼 보이는 것이 정상이니 로그인이 끝날 때까지 둡니다)
+```bash
+ssh -N -L 8090:localhost:8090 -i ~/.ssh/<키>.pem ubuntu@<배포 EC2 공인 IP>
+```
+로그인 뒤 브라우저가 돌아오는 `localhost:8090` 을 EC2 로 넘겨 줍니다. `<배포 EC2 공인 IP>` 는
+지금 SSH 로 접속할 때 쓰는 주소입니다. VS Code·Cursor Remote-SSH 로 붙었다면 자동으로 넘겨 주므로
+건너뜁니다.
+
+▶ 실행 · EC2 — 로그인과 VK (출력된 URL 을 Mac 브라우저로 엽니다)
 ```bash
 gateway-cli login --redirect-port 8090
-api-key-helper 2>/dev/null | grep -m1 '^vk-'
+export GATEWAY_KEY=$(api-key-helper | grep -m1 '^vk-')
+echo ${GATEWAY_KEY:0:3}
 ```
-브라우저에 Cognito 로그인 창 → `Login successful` → `vk-…` 한 줄이 VK 입니다.
-- 8090 이 점유돼 있으면 `--redirect-port 8091`(US 풀 등록 포트 8090·8091).
-- `Missing required OIDC config` 로 실패하면 4줄을 같은 터미널에 넣지 않은 것입니다.
-- 다 쓰면 이 탭은 닫습니다. `ANTHROPIC_BASE_URL` 이 남아 있으면 그 탭에서 쓰는 Claude Code 가 401 이 납니다.
-- Cowork 가 `Credential helper exited with code 1` 이면 같은 로그인을 한 뒤 Cowork 를 Cmd+Q 로 껐다 켭니다(`setup` 재실행 금지).
+기대: `Login successful` → `vk-`(키 자체는 화면에 나오지 않습니다). 끝에 `Next: run gateway-cli setup`
+이 나와도 setup 은 하지 않습니다. 이제 Mac 의 터널 탭을 `Ctrl+C` 로 닫습니다.
+- 브라우저가 `localhost refused to connect` → 터널이 없거나 멈췄습니다.
+- 터널이 `Address already in use` → Mac 의 8090 을 다른 앱이 씁니다. 터널과 `--redirect-port` 를
+  둘 다 8091 로 바꿉니다(등록 포트 8090·8091·8092).
+- `Missing required OIDC config` → 07 의 4줄을 이 셸에 붙여 넣지 않은 것입니다.
+- VK 를 `ANTHROPIC_AUTH_TOKEN` 으로 export 하지 않습니다. 같은 셸의 Claude Code 가 만료 뒤 401 이 납니다.
 
-▶ 실행 · EC2 — 종단 1건 (`<VK>` 자리에 위에서 받은 값을, 꺾쇠까지 지우고 넣습니다)
+▶ 실행 · EC2 — 종단 1건
 ```bash
 GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
-bash 04-verify.sh --base-url $GW --vk <VK>
+bash 04-verify.sh --base-url $GW --vk $GATEWAY_KEY
 ```
 기대: `HTTP 200` + 「C」 표에 새 행(비용 = 입력·출력 토큰 × Standard 단가 — 예: 491/10 토큰이면
-0.002976). 꺾쇠를 그대로 두면 bash 리다이렉션 오류가 납니다.
+0.002976).
 
 | 확인 | 어떻게 | 기대 |
 |---|---|---|
@@ -315,12 +326,15 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
 bash 07-client-values.sh
 ```
-▶ 실행 · Mac — VK 받기: (9) 의 Mac 단계를 prod EC2 의 07 출력 4줄로 합니다.
+▶ 실행 · Client VPN 에 연결된 PC — VK 받기. prod admin-api 는 internal 이라 prod EC2 에서는
+로그인할 수 없습니다. PC 셸에 07 출력에서 그 OS 의 4줄을 붙여 넣고 `gateway-cli login --redirect-port 8090`
+→ `api-key-helper` 의 `vk-…` 를 복사합니다(같은 PC 라 터널은 필요 없습니다). 그다음 prod EC2 에서
+`read -rs GATEWAY_KEY && export GATEWAY_KEY` 를 실행해 붙여 넣습니다(화면에 안 보입니다).
 
 ▶ 실행 · prod EC2 — 종단 1건
 ```bash
 GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
-bash 04-verify.sh --base-url $GW --vk <VK>
+bash 04-verify.sh --base-url $GW --vk $GATEWAY_KEY
 ```
 
 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
