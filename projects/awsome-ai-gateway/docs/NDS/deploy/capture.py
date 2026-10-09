@@ -88,7 +88,7 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
         notif["ses_from"] = env.get("EMAIL_SENDER_ADDRESS", "")
     elif provider == "smtp":
         notif.update({"smtp_host": env.get("SMTP_HOST", ""),
-                      "smtp_port": int(env.get("SMTP_PORT", "587") or 587),
+                      "smtp_port": _safe_int(env.get("SMTP_PORT"), 587),
                       "smtp_from": env.get("EMAIL_SENDER_ADDRESS", "")})
     elif provider not in ("mock", "ses", "smtp"):
         notes.append(f"EMAIL_SENDER_TYPE={provider} 는 스키마에 없는 값 — mock 으로 두고 확인하세요")
@@ -143,9 +143,27 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
 # ecs — terraform output + 라이브 task def / service 상태
 # ==============================================================================
 
+def _sp(argv: list[str], *, cwd: Path | None = None, timeout: int = 60,
+        tool: str = "") -> subprocess.CompletedProcess:
+    """subprocess 래퍼 — 바이너리 부재/타임아웃을 CaptureError 로 번역."""
+    try:
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
+                              timeout=timeout)
+    except FileNotFoundError:
+        raise CaptureError(f"{tool or argv[0]} 명령을 못 찾았습니다 — 설치/PATH 확인 필요")
+    except subprocess.TimeoutExpired:
+        raise CaptureError(f"{tool or argv[0]} 응답 없음({timeout}s) — 네트워크/자격 확인 필요")
+
+
+def _safe_int(v, default: int = 0) -> int:
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return default
+
+
 def _tf_outputs(env_dir: Path) -> dict:
-    r = subprocess.run(["terraform", "output", "-json"], cwd=env_dir,
-                       capture_output=True, text=True, timeout=120)
+    r = _sp(["terraform", "output", "-json"], cwd=env_dir, timeout=120, tool="terraform")
     if r.returncode != 0:
         raise CaptureError(f"terraform output 실패 (init/자격 확인 필요): {r.stderr.strip()[:200]}")
     try:
@@ -155,8 +173,7 @@ def _tf_outputs(env_dir: Path) -> dict:
 
 
 def _aws_json(argv: list[str], region: str) -> dict:
-    r = subprocess.run(["aws", *argv, "--region", region, "--output", "json"],
-                       capture_output=True, text=True, timeout=60)
+    r = _sp(["aws", *argv, "--region", region, "--output", "json"], tool="aws")
     if r.returncode != 0:
         raise CaptureError(f"aws {' '.join(argv[:2])} 실패: {r.stderr.strip()[:200]}")
     return json.loads(r.stdout or "{}")
@@ -213,8 +230,8 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             if ":" in img:
                 image_tag = img.rsplit(":", 1)[1]
             sizing[s["serviceName"]] = {
-                "cpu": int(td.get("cpu", "0") or 0),
-                "memory": int(td.get("memory", "0") or 0),
+                "cpu": _safe_int(td.get("cpu")),
+                "memory": _safe_int(td.get("memory")),
                 "desired_count": s.get("desiredCount", 0),
             }
     except (CaptureError, KeyError, IndexError) as e:
@@ -225,7 +242,7 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         notif["ses_from"] = sizing_env.get("EMAIL_SENDER_ADDRESS", "")
     elif sender_type == "smtp":
         notif.update({"smtp_host": sizing_env.get("SMTP_HOST", ""),
-                      "smtp_port": int(sizing_env.get("SMTP_PORT", "587") or 587),
+                      "smtp_port": _safe_int(sizing_env.get("SMTP_PORT"), 587),
                       "smtp_from": sizing_env.get("EMAIL_SENDER_ADDRESS", "")})
 
     # tier 추론 — serverless ACU 범위는 출력에 없어 sizing/env 로 유추
@@ -281,7 +298,7 @@ def _helm_values(release: str, namespace: str, context: str = "") -> dict:
     argv = ["helm", "get", "values", release, "-n", namespace, "--all", "-o", "yaml"]
     if context:
         argv += ["--kube-context", context]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    r = _sp(argv, tool="helm")
     if r.returncode != 0:
         raise CaptureError(
             f"helm get values 실패 — 릴리스 '{release}' 가 ns '{namespace}' 에 있는지, "
@@ -293,7 +310,10 @@ def _kubectl_json(resource: str, namespace: str, context: str = "") -> dict:
     argv = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
     if context:
         argv += ["--context", context]
-    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    try:
+        r = _sp(argv, tool="kubectl")
+    except CaptureError:
+        return {}
     if r.returncode != 0:
         return {}  # 라이브 조회는 best-effort — values 만으로도 캡처는 된다
     try:

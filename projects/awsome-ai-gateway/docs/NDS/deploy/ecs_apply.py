@@ -36,7 +36,10 @@ BUILD_CONTEXTS = {
 
 def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
     print(f"$ {' '.join(str(a) for a in argv)}", file=sys.stderr)
-    r = subprocess.run([str(a) for a in argv], cwd=cwd, capture_output=capture, text=True)
+    try:
+        r = subprocess.run([str(a) for a in argv], cwd=cwd, capture_output=capture, text=True)
+    except FileNotFoundError:
+        raise SystemExit(f"{argv[0]} 명령을 못 찾았습니다 — 설치와 PATH 확인 필요")
     if r.returncode != 0:
         if capture:
             print(r.stdout)

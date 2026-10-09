@@ -48,7 +48,12 @@ class DoctorReport:
 
 
 def _run(argv: list[str], cwd: Path | None = None, timeout: int = 60) -> subprocess.CompletedProcess:
-    return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    try:
+        return subprocess.run(argv, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        return subprocess.CompletedProcess(argv, 127, "", f"{argv[0]} 명령을 못 찾았습니다 — 설치/PATH 확인 필요")
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(argv, 124, "", f"{argv[0]} 응답 없음({timeout}s)")
 
 
 def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:

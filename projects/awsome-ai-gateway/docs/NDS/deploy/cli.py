@@ -50,13 +50,30 @@ def _unwrap(v):
     return v
 
 
+def _load_config(args):
+    """gateway.yaml 로드 — 없으면 근처 캡처본/힌트를 찾아 다음 명령을 안내."""
+    path = Path(args.config)
+    if not path.exists():
+        captured = sorted(path.parent.glob("gateway.captured-*.yaml"))
+        hint = ""
+        if captured:
+            hint = ("\n캡처본이 있습니다 — 채택하거나 바로 쓸 수 있습니다:\n"
+                    + "\n".join(f"  ./deploy validate --config {c}" for c in captured[:3])
+                    + f"\n  cp {captured[0]} {path}   # 채택")
+        console.print(f"[red]{path} 가 없습니다."
+                      f"\n새 배포: ./deploy init   |   기존 배포 온보딩: ./deploy doctor --capture"
+                      + hint)
+        raise SystemExit(1)
+    return schema.load(path)
+
+
 def cmd_init(args) -> int:
     questionary = _questionary()
     from questionary import Choice
 
     out_path = Path(args.out) if args.out else DEFAULT_CONFIG
     if out_path.exists() and not args.force:
-        console.print(f"[yellow]{out_path} 가 이미 있습니다 — --force 로 덮어씁니다.")
+        console.print(f"[yellow]{out_path} 가 이미 있습니다 — 덮어쓰려면 --force 를 붙이세요.")
         return 1
 
     console.print(Panel("LLM Gateway 배포 설정 마법사 — 답하면 gateway.yaml 을 만듭니다"))
@@ -180,7 +197,7 @@ def cmd_init(args) -> int:
 
 def cmd_validate(args) -> int:
     try:
-        cfg = schema.load(Path(args.config))
+        cfg = _load_config(args)
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
@@ -202,7 +219,7 @@ def cmd_validate(args) -> int:
 
 def cmd_render(args) -> int:
     try:
-        cfg = schema.load(Path(args.config))
+        cfg = _load_config(args)
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
@@ -283,7 +300,7 @@ def _confirm_apply(args, preview=None) -> bool:
 def cmd_apply(args) -> int:
     """render → 기동 → doctor 한 단계로 (backend 별 실행기)."""
     try:
-        cfg = schema.load(Path(args.config))
+        cfg = _load_config(args)
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
@@ -368,7 +385,11 @@ def cmd_apply(args) -> int:
         return 0
     if not _confirm_apply(args):
         return 130
-    r = subprocess.run(argv)
+    try:
+        r = subprocess.run(argv)
+    except FileNotFoundError:
+        console.print("[red]docker 명령을 못 찾았습니다 — Docker(compose plugin) 설치 필요")
+        return 1
     if r.returncode != 0:
         console.print("[red]compose up 실패 — 로그를 확인하십시오")
         return 1
@@ -439,12 +460,17 @@ def cmd_capture(args) -> int:
 
     try:
         cfg_path = Path(args.config)
-        existing: dict = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        existing: dict = {}
+        if cfg_path.exists():
+            try:
+                existing = yaml.safe_load(cfg_path.read_text()) or {}
+            except yaml.YAMLError as exc:
+                console.print(f"[yellow]{cfg_path} 파싱 실패 — 캡처본과 비교는 건너뜁니다: {exc}")
         existing_target = (existing.get("deploy") or {}).get("target", "")
 
-        # eks 는 gen 디렉토리가 필요 없다 — helm/kubectl 이 정보원
-        if args.target == "eks":
-            gen_dir, target = Path(""), "eks"
+        # eks/ecs 는 gen 디렉토리가 필요 없다 — helm·kubectl·terraform 이 정보원
+        if args.target in ("eks", "ecs"):
+            gen_dir, target = Path(""), args.target
         else:
             gen_dir, _ = _detect_gen_dir(args)
             target = args.target or existing_target or (
@@ -477,11 +503,15 @@ def cmd_capture(args) -> int:
 
         out_path = Path(args.out) if args.out else \
             cfg_path.parent / f"gateway.captured-{doc.get('env', 'env')}.yaml"
-        if out_path.exists() and not args.force:
-            console.print(f"[yellow]{out_path} 가 있습니다 — --force 로 덮어씁니다.")
-            return 1
+        if out_path.exists():
+            # 생성물이라 덮어도 안전 — 대신 이전본을 백업해 둔다
+            backup = out_path.with_suffix(out_path.suffix + ".bak")
+            backup.write_text(out_path.read_text())
+            console.print(f"[yellow]기존 캡처본을 {backup.name} 으로 백업하고 덮어씁니다")
         _captured_to_yaml(out_path, doc, notes)
         console.print(f"[green]캡처됨: {out_path}")
+        console.print("채택: [bold]cp %s %s[/bold]  또는  [bold]--config %s[/bold] 로 바로 사용"
+                      % (out_path, cfg_path, out_path))
         for n in notes:
             console.print(f"  [yellow]ⓘ {n}")
 
@@ -531,7 +561,7 @@ def cmd_doctor(args) -> int:
         return cmd_capture(args)
     from . import doctor as doc
     try:
-        cfg = schema.load(Path(args.config))
+        cfg = _load_config(args)
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
@@ -600,13 +630,13 @@ def main(argv=None) -> int:
     args = p.parse_args(argv)
     try:
         return args.fn(args)
-    except Cancelled:
+    except (Cancelled, KeyboardInterrupt):
         console.print("\n[yellow]취소됨")
         return 130
     except Exception as exc:
-        # CaptureError 등 사용자 대면용 오류 — traceback 은 숨긴다
+        # 사용자 대면용 오류는 traceback 없이 출력 — 나머지는 버그라 노출
         from .capture import CaptureError
-        if isinstance(exc, CaptureError):
+        if isinstance(exc, (CaptureError, schema.SchemaError)):
             console.print(f"[red]{exc}")
             return 1
         raise

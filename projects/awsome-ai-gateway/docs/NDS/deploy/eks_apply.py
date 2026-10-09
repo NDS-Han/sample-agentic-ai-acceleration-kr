@@ -26,7 +26,10 @@ from .schema import GatewayConfig
 
 def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
     print(f"$ {' '.join(str(a) for a in argv)}", file=sys.stderr)
-    r = subprocess.run([str(a) for a in argv], cwd=cwd, capture_output=capture, text=True)
+    try:
+        r = subprocess.run([str(a) for a in argv], cwd=cwd, capture_output=capture, text=True)
+    except FileNotFoundError:
+        raise SystemExit(f"{argv[0]} 명령을 못 찾았습니다 — helm/kubectl/terraform 설치와 PATH 확인 필요")
     if r.returncode != 0:
         if capture:
             print(r.stdout)
@@ -39,7 +42,11 @@ def load_meta(gen_dir: Path) -> dict:
     p = gen_dir / "deploy.yaml"
     if not p.exists():
         raise SystemExit(f"{p} 없음 — 먼저 `deploy render` 를 실행하십시오")
-    return yaml.safe_load(p.read_text()) or {}
+    meta = yaml.safe_load(p.read_text()) or {}
+    missing = [k for k in ("release", "namespace", "chart") if not meta.get(k)]
+    if missing:
+        raise SystemExit(f"{p} 가 불완전합니다({', '.join(missing)} 없음) — `deploy render` 로 재생성하십시오")
+    return meta
 
 
 def tf_outputs(env_dir: Path) -> dict:
