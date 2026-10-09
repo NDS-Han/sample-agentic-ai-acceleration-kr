@@ -166,37 +166,41 @@ admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthrop
 
 ## (9) 사후 점검 — 14 + 종단 1건, 그리고 24h
 
-> **US-18** — 아래 표의 스키마 기대값은 `0039` 입니다. 그 밖에 두 가지를 더 봅니다.
+> **US-18** — 아래 표에 더해 두 가지를 더 봅니다.
 > 예산 알림 기준(임계값을 50 으로 저장 → 6분 뒤 다시 열어도 50) · 분석 화면(30초 안에 두 번
 > 열어도 정상, 앱 필터를 바꾸면 숫자가 바뀜).
 
-▶ 실행
+▶ 실행 · EC2 — 자동 점검과 접속값
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
-GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
-bash 04-verify.sh --base-url $GW --vk <VK>
-```
-기대: 14 `OK no failures` · 04 는 `HTTP 200` + 「C」 표에 새 행(비용 = 입력·출력 토큰 × Standard 단가 — 예: 491/10 토큰이면 0.002976). `<VK>` 만 손으로 넣는다 — 꺾쇠를 그대로 두면 bash 리다이렉션 오류가 난다.
-
-**VK 얻기** — EC2 에서 값 4줄을 뽑아 Mac 에 붙여 넣고 로그인한다. Cowork 도 이 로그인을 재사용한다.
-
-▶ 실행 · EC2
-```bash
 bash 07-client-values.sh
 ```
-출력 끝의 `export OIDC_ISSUER_URL=…` `export OIDC_CLIENT_ID=…` `export ADMIN_API_URL=…` `export ANTHROPIC_BASE_URL=…` 4줄을 복사한다.
+기대: 14 는 `OK no failures`. 07 출력 끝의 `export OIDC_ISSUER_URL=…` `export OIDC_CLIENT_ID=…`
+`export ADMIN_API_URL=…` `export ANTHROPIC_BASE_URL=…` 4줄을 복사합니다.
 
-▶ 실행 · Mac (`gateway-cli` 가 설치된 터미널, 위 4줄을 먼저 붙여 넣은 뒤)
+▶ 실행 · Mac — VK 받기 (`gateway-cli` 가 설치된 새 터미널 탭에 위 4줄을 먼저 붙여 넣은 뒤)
 ```bash
 gateway-cli login --redirect-port 8090
 api-key-helper 2>/dev/null | grep -m1 '^vk-'
 ```
-브라우저에 Cognito 로그인 창 → `Login successful` → `vk-…` 한 줄이 `<VK>` 다. 8090 이 점유돼 있으면 `--redirect-port 8091`(US 풀 등록 포트 8090·8091). `gateway-cli login` 이 `Missing required OIDC config` 로 실패하면 4줄을 같은 터미널에 안 넣은 것. Cowork 가 `Credential helper exited with code 1` 이면 같은 로그인을 한 뒤 Cowork 를 Cmd+Q 로 껐다 켠다(`setup` 재실행 금지).
+브라우저에 Cognito 로그인 창 → `Login successful` → `vk-…` 한 줄이 VK 입니다.
+- 8090 이 점유돼 있으면 `--redirect-port 8091`(US 풀 등록 포트 8090·8091).
+- `Missing required OIDC config` 로 실패하면 4줄을 같은 터미널에 넣지 않은 것입니다.
+- 다 쓰면 이 탭은 닫습니다. `ANTHROPIC_BASE_URL` 이 남아 있으면 그 탭에서 쓰는 Claude Code 가 401 이 납니다.
+- Cowork 가 `Credential helper exited with code 1` 이면 같은 로그인을 한 뒤 Cowork 를 Cmd+Q 로 껐다 켭니다(`setup` 재실행 금지).
+
+▶ 실행 · EC2 — 종단 1건 (`<VK>` 자리에 위에서 받은 값을, 꺾쇠까지 지우고 넣습니다)
+```bash
+GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
+bash 04-verify.sh --base-url $GW --vk <VK>
+```
+기대: `HTTP 200` + 「C」 표에 새 행(비용 = 입력·출력 토큰 × Standard 단가 — 예: 491/10 토큰이면
+0.002976). 꺾쇠를 그대로 두면 bash 리다이렉션 오류가 납니다.
 
 | 확인 | 어떻게 | 기대 |
 |---|---|---|
-| 스키마 | 14 `alembic_version` | `0036`(마지막 마이그레이션 번호 = repo 의 최신) |
+| 스키마 | 14 `alembic_version` | repo 의 최신 마이그레이션 번호(US-18 은 `0039`) |
 | 단가 | 14 price 행 · 호출 1건 뒤 `usage_logs.cost_usd` 검산 | pricing.tsv 와 일치 |
 | 라우팅 | 14 `claude-… -> us.anthropic.…` | `us.` 그대로(Global 로 안 바뀜) |
 | web search | Claude Code 로 검색 필요한 질문 1건 → 14 의 W(24h) | `web_search_count` ≥ 1 |
@@ -303,13 +307,18 @@ bash 08-set-model-pricing.sh --apply
 ```
 그다음 admin UI › Models 에서 시드 alias INACTIVE(8단계와 같음).
 
-**(10-9) 사후 점검**
+**(10-9) 사후 점검** — 순서·기대·기능별 확인 표는 (9) 와 같습니다.
 
-▶ 실행
+▶ 실행 · prod EC2 — 자동 점검과 접속값
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 14-postdeploy-check.sh --compare snapshots/pre.numbers
+bash 07-client-values.sh
+```
+▶ 실행 · Mac — VK 받기: (9) 의 Mac 단계를 prod EC2 의 07 출력 4줄로 합니다.
+
+▶ 실행 · prod EC2 — 종단 1건
+```bash
 GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
 bash 04-verify.sh --base-url $GW --vk <VK>
-```
-기대·기능별 확인 표·VK 얻기는 (9) 와 같다(`07-client-values.sh` 는 prod EC2 에서). 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
+``` 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
