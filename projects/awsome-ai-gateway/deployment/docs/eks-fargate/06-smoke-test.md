@@ -85,11 +85,12 @@ ADMIN_UI_URL="https://admin-dev.llm-gateway.mycompany.com"
 
 #### 2.1.2 VK 발급 (dev 전용 엔드포인트)
 
-admin-api 는 dev 환경에서 **인증 없이 바로 VK 를 발급**하는 `/internal/test/issue-key` endpoint 를 제공합니다 (prod 에서는 비활성화됨). 이 endpoint 가 smoke test 전용 가장 빠른 경로:
+admin-api 는 dev 환경에서 `/internal/test/issue-key` endpoint 로 VK 를 발급합니다 (prod 에서는 비활성화됨). R3-1 이후 이 endpoint 는 `X-Internal-Token` 헤더가 `INTERNAL_API_TOKEN` 과 일치해야 합니다 — 공개 ingress 로 무인증 호출이 가능했던 문제를 막기 위함입니다. 이 endpoint 가 smoke test 전용 가장 빠른 경로:
 
 ```bash
 VK_RESPONSE=$(curl -s -X POST "$ADMIN_API_URL/internal/test/issue-key" \
-  -H "Content-Type: application/json" -d '{}')
+  -H "Content-Type: application/json" \
+  -H "X-Internal-Token: $INTERNAL_API_TOKEN" -d '{}')
 
 echo "$VK_RESPONSE" | jq .
 

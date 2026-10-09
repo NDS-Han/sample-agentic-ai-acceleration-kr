@@ -29,6 +29,8 @@ export interface DailyUsage {
 
 export interface ModelUsage {
   model_alias: string;
+  /** 카탈로그 표시명 — modelDisplay(alias, display_name) 재료. 미등록이면 null. */
+  display_name?: string | null;
   cost_usd: number;
   requests: number;
   tokens: number;

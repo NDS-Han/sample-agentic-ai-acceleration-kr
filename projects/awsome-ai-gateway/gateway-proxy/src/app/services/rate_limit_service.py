@@ -210,6 +210,7 @@ class RateLimitService:
         descriptors: list[ScopeDescriptor],
         reserved_tokens: int,
         window_sec: int = 60,
+        committed_out: list[ScopeDescriptor] | None = None,
     ) -> RateLimitResult:
         """TPM Sliding Window Counter Pre-reserve 체크 — **스코프별 1회 Lua 호출**.
 
@@ -221,6 +222,18 @@ class RateLimitService:
 
         `reserved_tokens`는 `estimate_reserved_tokens()`로 사전 계산 (input +
         cache_creation 추정 + max_output). 응답 완료 후 `settle_tpm()`으로 차액 조정.
+
+        ⚠️ 스코프별 분리는 "한 스코프는 이미 커밋됐는데 뒤 스코프가 거절" 상태를
+           만든다 — 거절 시 이미 INCRBY 된 앞 스코프의 예약을 여기서 되돌린다
+           (settle_tpm(committed, actual=0)). 그렇지 않으면 거절당한 요청 1건이
+           예약량(est_input + max_output, 수만 토큰)만큼 앞 스코프 버킷을
+           부풀린다 — TEAM 에서 연속 거절당하는 유저가 자기 USER 카운터를,
+           나중 단계(cost) 거절은 TEAM 까지 오염시키는 재시도 증폭이었다.
+           eval 이 예외로 죽은 스코프는 커밋 여부를 모르므로 되돌리지 않는다
+           (루아 스크립트가 Phase2 INCRBY 까지 간 뒤 실패할 경로가 없음).
+
+        ``committed_out`` 이 주어지면 통과해 커밋된 descriptor 를 append 한다 —
+           호출자가 *다음* 단계(비용 예약) 거절 시 이 목록으로 TPM 을 되돌린다.
         """
         effective = [d for d in descriptors if d.tpm_limit and d.tpm_limit > 0]
         if not effective or reserved_tokens <= 0:
@@ -229,6 +242,7 @@ class RateLimitService:
         now_sec = int(time.time())
         script = LuaScriptLoader.get("rate_limit_tpm_check")
 
+        committed: list[ScopeDescriptor] = []
         last: dict | None = None
         for d in effective:
             cur, prev, win = build_tpm_key_group(d.scope, d.scope_id, d.model_alias)
@@ -249,9 +263,12 @@ class RateLimitService:
                 logger.exception("rate_limit_tpm_scope_failed", scope=d.scope.value)
                 blocked = _on_eval_failure(d.scope.value, "tpm")
                 if blocked is not None:
+                    # closed 정책 차단도 거절이다 — 이미 커밋된 앞 스코프를 되돌린다.
+                    await self._refund_committed_tpm(redis, committed, reserved_tokens)
                     return blocked
                 continue
             if not result["allowed"]:
+                await self._refund_committed_tpm(redis, committed, reserved_tokens)
                 return RateLimitResult(
                     allowed=False,
                     remaining=result.get("remaining", -1),
@@ -261,6 +278,9 @@ class RateLimitService:
                     scope=result.get("scope"),
                     limit_type=result.get("limit_type"),
                 )
+            committed.append(d)
+            if committed_out is not None:
+                committed_out.append(d)
             last = result
 
         if last is not None:
@@ -272,18 +292,48 @@ class RateLimitService:
             )
         return RateLimitResult(allowed=True, remaining=-1, limit=-1)
 
+    async def _refund_committed_tpm(
+        self,
+        redis,
+        committed: list[ScopeDescriptor],
+        reserved_tokens: int,
+    ) -> None:
+        """거절 시점까지 커밋된 TPM 예약을 되돌린다 (actual=0 으로 정산).
+
+        멱등 아님 — 이미 settle 된 스코프에 다시 부르면 이중 환불이 되므로
+        호출자는 한 요청에서 한 경로로만 호출해야 한다. 실패해도 거절 응답을
+        지연시키지 않도록 예외는 삼킨다(누수분은 버킷 TTL 이 회수).
+        """
+        if not committed:
+            return
+        try:
+            await self.settle_tpm(redis, committed, reserved_tokens, 0)
+        except Exception:
+            logger.warning(
+                "tpm_partial_unwind_failed",
+                scopes=[d.scope.value for d in committed],
+            )
+
     async def settle_tpm(
         self,
         redis,
         descriptors: list[ScopeDescriptor],
         reserved_tokens: int,
         actual_tokens: int,
+        reserved_at: float | None = None,
     ) -> None:
         """TPM 사후 정산 — 실제 토큰과 예약분 차이 조정 (설계 §D2).
 
         차액이 음수면 환불 (예약 > 실제), 양수면 추가 차감 (예약 < 실제).
         adjustment == 0 이면 Redis 호출 생략.
         실패 시 경고만 남기고 무시 — rate limit 의 정확도는 다음 윈도우에서 자연 보정됨.
+
+        ``reserved_at`` (예약 시각 epoch 초)가 주어지면 **예약이 들어간 버킷**에
+        차액을 쓴다. 없으면 옛 동작(항상 ``cur``). 예전 코드는 무조건 ``cur`` 에
+        썼는데, 버킷 로테이션(분 경계)을 지나 끝난 스트리밍 요청은 예약이 이미
+        ``prev`` 로 이동한 상태라 환불이 새 ``cur`` 을 음수로 만들어 그 창의
+        한도를 부풀렸다 — Opus thinking 같은 >60s 스트림에서 매번 발생.
+        마커가 두 칸 이상 밀렸으면 예약 버킷은 이미 사라진 것이므로 건너뛴다.
         """
         adjustment = int(actual_tokens) - int(reserved_tokens)
         if adjustment == 0:
@@ -293,15 +343,58 @@ class RateLimitService:
         if not effective:
             return
 
+        reserved_bucket = int(reserved_at // 60) if reserved_at is not None else None
+
         # 파이프라이닝(deepdive Q50): N 스코프 incrby 를 순차 await(왕복 N) 대신 한
         # 파이프라인으로 묶어 응답완료 경로 지연을 줄인다. 비트랜잭션 파이프라인은
         # cluster 모드에서 키별로 노드 라우팅되므로 서로 다른 슬롯이어도 안전.
         try:
-            pipe = redis.pipeline(transaction=False)
+            if reserved_bucket is None:
+                pipe = redis.pipeline(transaction=False)
+                for d in effective:
+                    cur, _prev, _win = build_tpm_key_group(
+                        d.scope, d.scope_id, d.model_alias
+                    )
+                    pipe.incrby(cur, adjustment)
+                await pipe.execute()
+                return
+
+            # 버킷 마커 판독 → 예약 버킷이 아직 cur 이면 cur, 한 칸 밀렸으면 prev.
+            targets: list[tuple[str, str]] = []  # (key, scope_label) 로깅용
             for d in effective:
-                cur, _prev, _win = build_tpm_key_group(d.scope, d.scope_id, d.model_alias)
-                pipe.incrby(cur, adjustment)
-            await pipe.execute()
+                cur, prev, win = build_tpm_key_group(d.scope, d.scope_id, d.model_alias)
+                try:
+                    marker_raw = await redis.get(win)
+                    marker = int(marker_raw) if marker_raw is not None else None
+                except (TypeError, ValueError):
+                    marker = None
+                except Exception:
+                    marker = None
+                if marker is None:
+                    # win 키는 예약 성공 시 반드시 SET+EXPIRE 된다 — 없다는 건
+                    # 예약 버킷이 이미 만료됐다는 뜻. cur 에 쓰면 죽은 예약의
+                    # 차액이 새 창을 더럽히므로 건너뛴다.
+                    logger.info(
+                        "tpm_settle_marker_gone",
+                        scope=d.scope.value,
+                        reserved_bucket=reserved_bucket,
+                    )
+                elif marker == reserved_bucket:
+                    targets.append((cur, d.scope.value))
+                elif marker == reserved_bucket + 1:
+                    targets.append((prev, d.scope.value))
+                else:
+                    logger.info(
+                        "tpm_settle_bucket_expired",
+                        scope=d.scope.value,
+                        reserved_bucket=reserved_bucket,
+                        current_bucket=marker,
+                    )
+            if targets:
+                pipe = redis.pipeline(transaction=False)
+                for key, _label in targets:
+                    pipe.incrby(key, adjustment)
+                await pipe.execute()
         except Exception:
             logger.warning(
                 "tpm_settle_failed",
@@ -411,6 +504,7 @@ class RateLimitService:
         if has_team_limit:
             scopes.append(("TEAM", "team", team_id, team_cpm, team_cph))
 
+        committed: list[tuple[str, str, str]] = []  # (label, cpm_key, cph_key) — 이미 커밋된 스코프
         for label, prefix, sid, cpm, cph in scopes:
             cpm_key = f"rl:cost:{prefix}:{{{sid}}}:cpm:{cpm_window_ts}"
             cph_key = f"rl:cost:{prefix}:{{{sid}}}:cph:{cph_window_ts}"
@@ -432,6 +526,7 @@ class RateLimitService:
                 logger.exception("cost_reserve_scope_failed", scope=label, user_id=user_id)
                 _record_fail_open(label, "cost")
                 if _fail_closed():
+                    await self._refund_committed_cost(redis, committed, estimated_cost)
                     return CostLimitResult(
                         allowed=False,
                         scope=label,
@@ -441,6 +536,13 @@ class RateLimitService:
                     )
                 continue
             if not result["allowed"]:
+                # ⚠️ 앞 스코프(USER)는 이미 예약을 커밋했다 — 거절 응답 전에 되돌린다.
+                #    되돌리지 않으면 거절당한 요청이 예약 비용만큼 앞 스코프 카운터를
+                #    키 만료(cpm 120s / cph 최대 2h)까지 부풀린다 — 옛 주석이 주장한
+                #    "다음 settle 이 환불" 은 거짓이었다(settle 은 자기 요청 차액만
+                #    조정하고, 거절된 요청은 rate_limit_state 가 채워지지 않아
+                #    어느 정산 경로도 타지 않는다).
+                await self._refund_committed_cost(redis, committed, estimated_cost)
                 return CostLimitResult(
                     allowed=False,
                     scope=result.get("scope"),
@@ -454,9 +556,43 @@ class RateLimitService:
                     retry_after=result.get("retry_after"),
                     reserved_cost=Decimal("0"),
                 )
+            committed.append((label, cpm_key, cph_key))
 
         # 전 scope 통과 — 예약 커밋됨(각 scope eval 이 INCRBYFLOAT 수행).
-        return CostLimitResult(allowed=True, reserved_cost=estimated_cost)
+        # settle 이 같은 윈도우·같은 스코프 키를 치게 커밋 정보를 돌려준다.
+        return CostLimitResult(
+            allowed=True,
+            reserved_cost=estimated_cost,
+            committed_scopes=[label for label, *_ in committed],
+            cpm_window_ts=cpm_window_ts,
+            cph_window_ts=cph_window_ts,
+        )
+
+    async def _refund_committed_cost(
+        self,
+        redis,
+        committed: list[tuple[str, str, str]],
+        reserved_cost: Decimal,
+    ) -> None:
+        """거절 시점까지 커밋된 비용 예약을 되돌린다.
+
+        ``committed`` 항목은 3-튜플 ``(scope_label, cpm_key, cph_key)`` —
+        예전에 2-튜플로 잘못 적혀 있었다(아래 언패킹과 대조).
+
+        Lua 예약 경로가 EXPIRE(cpm 120s / cph 7200s)를 걸었으므로 여기서는
+        INCRBYFLOAT 만 — TTL 을 다시 쓰면 남은 창보다 늘어날 수 있다.
+        """
+        if not committed:
+            return
+        try:
+            pipe = redis.pipeline(transaction=False)
+            adj = -float(reserved_cost)
+            for _label, cpm_key, cph_key in committed:
+                pipe.incrbyfloat(cpm_key, adj)
+                pipe.incrbyfloat(cph_key, adj)
+            await pipe.execute()
+        except Exception:
+            logger.warning("cost_partial_unwind_failed", reserved=str(reserved_cost))
 
     async def settle_cost(
         self,
@@ -466,24 +602,48 @@ class RateLimitService:
         actual_cost: Decimal,
         reserved_cost: Decimal,
         team_id: str | None = None,
+        committed_scopes: list[str] | None = None,
+        cpm_window_ts: int | None = None,
+        cph_window_ts: int | None = None,
     ) -> None:
-        """CPM/CPH 사후 정산 — 실제 비용과 예약분 차이 조정 (USER + TEAM)."""
+        """CPM/CPH 사후 정산 — 실제 비용과 예약분 차이 조정 (USER + TEAM).
+
+        ``committed_scopes``/``*_window_ts`` 가 주어지면 **예약이 커밋된 스코프의,
+        예약 시점 윈도우 키에만** 차액을 쓴다.
+
+        ⚠️ 둘 다 실제 결함이었다:
+          - 스코프: 예약은 한도가 있는 스코프에만 커밋되는데, 예전 settle 은
+            team_id 만 있으면 무조건 팀 키를 써서 TTL 없는 음수 팬텀 카운터를
+            만들었다(한도 미설정 스코프에 예약이 커밋된 적 없으므로).
+          - 윈도우: 예약은 요청 시작 시점 버킷에 들어가는데, 예전 settle 은
+            **정산 시점**의 ts 로 키를 만들었다. 60s 를 넘는 스트리밍 응답
+            (정상 케이스)이 분 경계를 건너면 환불이 새 분 버킷을 음수로 만들어
+            그 창의 한도를 부풀렸다.
+        """
         adjustment = actual_cost - reserved_cost
         if adjustment == Decimal("0"):
             return
 
-        now = int(time.time())
-        cpm_window_ts = (now // 60) * 60
-        cph_window_ts = (now // 3600) * 3600
+        if cpm_window_ts is None or cph_window_ts is None:
+            now = int(time.time())
+            cpm_window_ts = (now // 60) * 60 if cpm_window_ts is None else cpm_window_ts
+            cph_window_ts = (now // 3600) * 3600 if cph_window_ts is None else cph_window_ts
         adj_float = float(adjustment)
+
+        # committed_scopes 를 모르면(구 rate_limit_state 형태) 양쪽 다 쓰는
+        # 옛 동작으로 — 누락보다 과잉 정산이 낫다.
+        do_user = committed_scopes is None or "USER" in committed_scopes
+        do_team = committed_scopes is None or "TEAM" in committed_scopes
+        do_team = do_team and bool(team_id)
 
         # 파이프라이닝(deepdive Q50): 2~4 incrbyfloat 를 순차 await 대신 한 파이프라인으로.
         # 비트랜잭션 파이프라인은 cluster 에서 키별 노드 라우팅 → cross-slot 안전.
         try:
             pipe = redis.pipeline(transaction=False)
-            pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}", adj_float)
-            pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}", adj_float)
-            if team_id:
+            if do_user:
+                pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}", adj_float)
+                pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}", adj_float)
+            if do_team:
                 pipe.incrbyfloat(f"rl:cost:team:{{{team_id}}}:cpm:{cpm_window_ts}", adj_float)
                 pipe.incrbyfloat(f"rl:cost:team:{{{team_id}}}:cph:{cph_window_ts}", adj_float)
             await pipe.execute()

@@ -36,6 +36,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
+import { secureCookieFlag } from '@/lib/cookies';
 
 // 로그인 진입점 — 캐시/정적최적화 금지. 여기서 만든 state/PKCE 가 캐시되면 모든 사용자가
 // 같은 state·verifier 를 쓰게 되어 CSRF 보호가 무력화된다(cli-download/route.ts:21 과 같은 이유).
@@ -179,6 +180,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const state = randomToken();
   const verifier = randomToken();
   const challenge = await s256(verifier);
+  // nonce — state 가 authorize 요청↔콜백 왕복을 묶는다면, nonce 는 **발급된
+  // id_token 자체**를 이 로그인 시도에 묶는다. 없으면 다른 세션에서 훔친
+  // (아직 유효한) code/token 응답을 재사용하는 replay 가 원리적으로 가능하다.
+  // OIDC 코어 규약상 nonce 를내면 IdP 는 id_token 에 같은 값을 실어야 하고,
+  // callback 은 그 일치를 검증한다(clearTempCookies 가 임시 쿠키를 정리).
+  const nonce = randomToken();
 
   let authorizeUrl: URL;
   try {
@@ -193,6 +200,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   authorizeUrl.searchParams.set('redirect_uri', redirectUri);
   authorizeUrl.searchParams.set('scope', env('OIDC_SCOPES') || DEFAULT_SCOPES);
   authorizeUrl.searchParams.set('state', state);
+  authorizeUrl.searchParams.set('nonce', nonce);
   authorizeUrl.searchParams.set('code_challenge', challenge);
   authorizeUrl.searchParams.set('code_challenge_method', 'S256');
 
@@ -208,10 +216,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     maxAge: TEMP_COOKIE_MAX_AGE,
     // dev-login/route.ts:118 과 동일 판단 — HTTP 종단(ALB 평문)에서 Secure 를 붙이면
     // 브라우저가 쿠키를 저장하지 못해 콜백이 state 불일치로 죽는다.
-    secure: proto === 'https',
+    // SECURE_COOKIES=true 로 강제 가능(lib/cookies.ts).
+    secure: secureCookieFlag(proto),
   };
   res.cookies.set('oidc_state', state, cookieOpts);
   res.cookies.set('oidc_verifier', verifier, cookieOpts);
+  res.cookies.set('oidc_nonce', nonce, cookieOpts);
   res.headers.set('Cache-Control', 'no-store');
 
   return res;

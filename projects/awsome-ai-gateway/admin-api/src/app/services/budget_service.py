@@ -20,7 +20,10 @@ from app.core.budget_cache import (
 )
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.config import get_settings
 from app.core.exceptions import (
     BudgetRuleError,
@@ -295,7 +298,7 @@ class BudgetService:
                     )
             else:
                 target = await UserRepository(session).get_user(scope_id)
-                if target is None or target.team_id != actor.team_id:
+                if target is None or actor.team_id is None or target.team_id != actor.team_id:
                     raise ForbiddenError(
                         "Team leaders can only read budgets for their own team members"
                     )
@@ -435,9 +438,8 @@ class BudgetService:
         )
         await repo.upsert_config(config)
 
-        await self._cache_mgr.invalidate(
-            [f"budget:config:team:{{{team_id}}}"],
-            session=session,
+        await invalidate_after_commit(
+            session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
         )
 
         # ⚠️ SET 은 커밋 후로 미룬다 — 커밋 전 SET 은 롤백 시 미커밋 T/D 를 TTL
@@ -495,8 +497,8 @@ class BudgetService:
         old_cap = cfg.default_user_cap_usd if cfg else None
         if old_cap == value:
             # no-op 이어도 팀 캐시를 갱신 — stale/유실된 D 를 즉시 자가치유한다.
-            await self._cache_mgr.invalidate(
-                [f"budget:config:team:{{{team_id}}}"], session=session
+            await invalidate_after_commit(
+                session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
             )
             return value
 
@@ -542,8 +544,8 @@ class BudgetService:
         # 캐시는 DEL 만 — commit 전 SET 은 미커밋 D 를 광고하고(§6-6 위반),
         # T=NULL 행의 limit_usd:null 을 미리 쓰면 gateway 가 unset 판정을 하기
         # 전에 위험하다. miss 시 gateway 가 커밋된 DB 행(D 포함)으로 재수화한다.
-        await self._cache_mgr.invalidate(
-            [f"budget:config:team:{{{team_id}}}"], session=session
+        await invalidate_after_commit(
+            session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
         )
 
         await audit_logger.log(
@@ -597,8 +599,8 @@ class BudgetService:
         cfg.is_active = False
         await session.flush()
 
-        await self._cache_mgr.invalidate(
-            [f"budget:config:team:{{{team_id}}}"], session=session
+        await invalidate_after_commit(
+            session, self._cache_mgr, [f"budget:config:team:{{{team_id}}}"]
         )
 
         await audit_logger.log(
@@ -716,17 +718,19 @@ class BudgetService:
                 if removed or app_rows:
                     cleared_users += 1
                     cleared_app_keys.append(f"budget:config:user:{{{m.id}}}")
-                    for r in app_rows:
-                        await self._delete_redis_app_config(m.id, r.client)
+                    # per-app 키(`budget:config:user:{uid}:{client}`)는 이미
+                    # cleared_app_keys 에 수집돼 아래 invalidate 가 DEL 한다 —
+                    # 별도 _delete_redis_app_config 루프는 중복이라 제거.
 
         cfg.default_user_cap_usd = cap_d
         await session.flush()
 
         # DEL 만 — commit 전 SET 시 미커밋 D/clear 결과가 광고된다(§6-6).
         # miss → gateway 가 커밋된 DB 행으로 재수화.
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [f"budget:config:team:{{{team_id}}}", *cleared_app_keys],
-            session=session,
         )
 
         await audit_logger.log(
@@ -783,7 +787,7 @@ class BudgetService:
 
         # BR-BUD-03: Team leader can only set budgets for own team
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
             # D-13/§4-1: 리더는 본인의 예산을 스스로 설정할 수 없다.
             if actor.user_id == user_id:
@@ -847,9 +851,8 @@ class BudgetService:
         )
         await repo.upsert_config(config)
 
-        await self._cache_mgr.invalidate(
-            [f"budget:config:user:{{{user_id}}}"],
-            session=session,
+        await invalidate_after_commit(
+            session, self._cache_mgr, [f"budget:config:user:{{{user_id}}}"]
         )
 
         await defer_redis_write_until_commit(
@@ -894,7 +897,7 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only delete budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -944,9 +947,15 @@ class BudgetService:
 
         invalidate_keys = [f"budget:config:user:{{{user_id}}}"]
         invalidate_keys += [f"budget:config:user:{{{user_id}}}:{c}" for c in cascaded]
-        await self._cache_mgr.invalidate(invalidate_keys, session=session)
-        for c in cascaded:
-            await self._delete_redis_app_config(user_id, c)
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
+            invalidate_keys,
+            extra=[
+                (lambda c=c: self._delete_redis_app_config(user_id, c))
+                for c in cascaded
+            ],
+        )
 
         await audit_logger.log(
             session,
@@ -1009,7 +1018,7 @@ class BudgetService:
 
         # BR-BUD-03 + D-13: 리더는 자기 팀 멤버만, 본인은 제외.
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only set budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -1099,12 +1108,13 @@ class BudgetService:
         # guarantees the gateway sees a miss and rehydrates from DB
         # (ensure_config_cached), rather than enforcing a stale app_clients that
         # silently bypasses the per-app limit forever.
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [
                 f"budget:config:user:{{{user_id}}}:{client}",
                 f"budget:config:user:{{{user_id}}}",
             ],
-            session=session,
         )
 
         await defer_redis_write_until_commit(
@@ -1164,7 +1174,7 @@ class BudgetService:
         if user is None:
             raise NotFoundError("User", str(user_id))
         if actor.role == UserRole.TEAM_LEADER:
-            if user.team_id != actor.team_id:
+            if actor.team_id is None or user.team_id != actor.team_id:
                 raise ForbiddenError("Team leaders can only clear budgets for their own team members")
             if actor.user_id == user_id:
                 raise BudgetRuleError(
@@ -1183,15 +1193,17 @@ class BudgetService:
 
         # P0-③ durability: durably DEL both the per-app key and the parent
         # user-config key (app_clients list shrank). See set_user_client_budget.
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [
                 f"budget:config:user:{{{user_id}}}:{client}",
                 f"budget:config:user:{{{user_id}}}",
             ],
-            session=session,
         )
 
-        await self._delete_redis_app_config(user_id, client)
+        # per-app 키는 위 invalidate 목록(`budget:config:user:{uid}:{client}`)에
+        # 이미 포함 — 별도 _delete_redis_app_config 호출은 중복이라 제거.
         active_clients = await repo.list_active_app_clients(user_id)
         await defer_redis_write_until_commit(
             session,
@@ -1225,7 +1237,7 @@ class BudgetService:
         user = await user_repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
-        if actor.role == UserRole.TEAM_LEADER and user.team_id != actor.team_id:
+        if actor.role == UserRole.TEAM_LEADER and (actor.team_id is None or user.team_id != actor.team_id):
             raise ForbiddenError("Team leaders can only read budgets for their own team members")
 
         repo = BudgetRepository(session)
@@ -1354,7 +1366,7 @@ class BudgetService:
             await repo.upsert_config(config)
             cache_keys.append(f"budget:config:user:{{{uid}}}")
 
-        await self._cache_mgr.invalidate(cache_keys, session=session)
+        await invalidate_after_commit(session, self._cache_mgr, cache_keys)
 
         await audit_logger.log(
             session,
@@ -1970,7 +1982,24 @@ class BudgetService:
         *,
         scope: BudgetScope,
         scope_id: uuid.UUID,
+        actor: CurrentUser,
     ) -> AutoDowngradeConfigResponse:
+        # BR-BUD-03: 리더는 자기 팀/자기 팀 멤버의 정책만 읽는다 — 형제 읽기 경로
+        # (get_budget_config)와 동일 스코핑. 예전엔 actor 검사 자체가 없어
+        # TEAM_LEADER 가 임의 팀/유저의 다운그레이드 정책을 열람할 수 있었다(IDOR).
+        if actor.role == UserRole.TEAM_LEADER:
+            if scope == BudgetScope.TEAM:
+                if scope_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team"
+                    )
+            else:
+                target = await UserRepository(session).get_user(scope_id)
+                if target is None or actor.team_id is None or target.team_id != actor.team_id:
+                    raise ForbiddenError(
+                        "Team leaders can only read budgets for their own team members"
+                    )
+
         rule_repo = DowngradePolicyRepository(session)
         # 최신 저장 배치 — 비활성화(끄기)된 규칙도 포함해 화면에서 사라지지 않게 한다.
         rules = await rule_repo.get_current_rules(scope, scope_id)
@@ -2014,7 +2043,7 @@ class BudgetService:
             removed = await rule_repo.deactivate_rules(scope, scope_id)
 
             cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
-            await self._cache_mgr.invalidate([cache_key], session=session)
+            await invalidate_after_commit(session, self._cache_mgr, [cache_key])
 
             await audit_logger.log(
                 session,
@@ -2089,6 +2118,23 @@ class BudgetService:
                     f"request in this scope would fail once the threshold is crossed."
                 )
 
+        # R4: 강등 대상이 팀의 allowed-models 밖이면, 강등된 요청이 서빙 경로에서
+        # 모델 게이트 403 으로 죽는다 — provider 불일치와 같은 부류(저장 시점이
+        # 막을 수 있는 유일한 지점). 팀에 허용 목록이 없으면 제한 없음으로 통과.
+        from app.repositories.model_repository import TeamAllowedModelRepository
+
+        team_allowed = set(
+            await TeamAllowedModelRepository(session).list_by_team(scope_id)
+        )
+        if team_allowed:
+            for rule in data.rules:
+                if rule.to_model_alias not in team_allowed:
+                    raise ValidationError(
+                        f"Downgrade target '{rule.to_model_alias}' is not in this team's "
+                        f"allowed models — a downgraded request would be rejected (403) "
+                        f"by the model gate once the threshold is crossed."
+                    )
+
         budget_repo = BudgetRepository(session)
         config = await budget_repo.get_first_active_config(scope, scope_id)
         if config is None:
@@ -2112,7 +2158,7 @@ class BudgetService:
         await rule_repo.set_rules(scope, scope_id, new_rules)
 
         cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
-        await self._cache_mgr.invalidate([cache_key], session=session)
+        await invalidate_after_commit(session, self._cache_mgr, [cache_key])
 
         await audit_logger.log(
             session,
@@ -2129,7 +2175,9 @@ class BudgetService:
             request_id=request_id,
         )
 
-        return await self.get_downgrade_config(session, scope=scope, scope_id=scope_id)
+        return await self.get_downgrade_config(
+            session, scope=scope, scope_id=scope_id, actor=actor
+        )
 
     async def delete_downgrade_config(
         self,
@@ -2146,7 +2194,7 @@ class BudgetService:
         await rule_repo.clear_rules(scope, scope_id)
 
         cache_key = f"budget:downgrade:{scope.value.lower()}:{scope_id}"
-        await self._cache_mgr.invalidate([cache_key], session=session)
+        await invalidate_after_commit(session, self._cache_mgr, [cache_key])
 
         await audit_logger.log(
             session,

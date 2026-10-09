@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import Team, User
@@ -244,12 +247,16 @@ class RateLimitService:
         # proxy 가 읽는 건 rl:config:* 뿐이지만, _set_rate_limit 이 쓰는
         # ratelimit:config:* 도 대칭으로 지워 stale 상태를 남기지 않는다.
         sid = str(scope_id)
-        await self._cache_mgr._redis.delete(
-            f"ratelimit:config:{scope.value.lower()}:{sid}"
-        )
-        await self._cache_mgr.invalidate_pattern(
-            f"rl:config:{scope.value}:{sid}:*",
-            session=session,
+        rl_scope = scope.value.lower()
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
+            pattern=f"rl:config:{scope.value}:{sid}:*",
+            extra=[
+                lambda: self._cache_mgr._redis.delete(
+                    f"ratelimit:config:{rl_scope}:{sid}"
+                )
+            ],
         )
 
         await audit_logger.log(
@@ -265,7 +272,7 @@ class RateLimitService:
         )
 
     async def get_live_usage(
-        self, scope: str, scope_id: str, *, window_ms: int = 60_000
+        self, session: AsyncSession, scope: str, scope_id: str, *, window_ms: int = 60_000
     ) -> dict:
         """gateway-proxy 가 적재하는 **실시간 RPM 카운터**(Redis ZSET)를 읽어 현재
         사용량/잔여를 반환(§60.9). 설정값만 보던 RL 화면에 실시간 상태를 더한다.
@@ -292,6 +299,22 @@ class RateLimitService:
         #    `[*]` 는 Redis 글롭에서 **리터럴 별표** 문자 클래스라, 임의 scope_id 까지
         #    싸잡지 않으면서 `*` 키만 정확히 잡는다.
         sid = scope_id if sc != "GLOBAL" else "[*]"
+
+        # tracked: RPM 한도가 설정된 scope 에만 proxy 가 카운터를 적재한다
+        # (check_multi_scope_rpm — limit>0 일 때만 ZADD). 한도 미설정 scope 의
+        # rpm_used_total=0 은 "요청 없음"이 아니라 "계량 안 함"이므로 UI 가 두
+        # 상태를 구분할 수 있게 플래그로 내려준다. 조회 실패 시 None(미상) —
+        # 프론트는 None 을 기존 동작(수치 표시)으로 간주한다.
+        tracked: bool | None = None
+        try:
+            cfg_sid = uuid.UUID(scope_id) if sc != "GLOBAL" else None
+            cfg = await RateLimitConfigRepository(session).get_active(
+                RateLimitScope(sc), cfg_sid
+            )
+            tracked = bool(cfg and cfg.rpm_limit and cfg.rpm_limit > 0)
+        except Exception:  # noqa: BLE001 — 설정 조회 실패도 라이브 조회를 막지 않음
+            pass
+
         now_ms = int(time.time() * 1000)
         window_start = now_ms - window_ms
         pattern = f"{{{sc}:{sid}:*}}:rpm"  # 해당 scope 의 모든 모델 rpm ZSET
@@ -317,6 +340,7 @@ class RateLimitService:
                 "scope": sc,
                 "scope_id": scope_id,
                 "window_sec": window_ms // 1000,
+                "tracked": tracked,
                 "rpm_used_total": total,
                 "by_model": sorted(per_model, key=lambda x: -x["rpm_used"]),
             }
@@ -460,14 +484,20 @@ class RateLimitService:
         )
         await repo.upsert(config)
 
-        # Write config to Redis for Gateway Proxy
+        # Write config to Redis for Gateway Proxy — commit 후 지연(§6-6:
+        # commit 전 SET 은 rollback 시 미커밋 정책을 TTL 동안 광고한다).
         config_json = json.dumps({
             "rpm": data.rpm,
             "tpm": data.tpm,
             "cpm": str(data.cpm) if data.cpm else None,
             "cph": str(data.cph) if data.cph else None,
         })
-        await self._cache_mgr._redis.set(cache_key, config_json)
+        from app.core.budget_cache import defer_redis_write_until_commit
+
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._cache_mgr._redis.set(cache_key, config_json),
+        )
 
         # Invalidate gateway-proxy's rate-limit policy cache so the new policy
         # takes effect on the next request instead of waiting for the 5-min TTL.
@@ -475,14 +505,16 @@ class RateLimitService:
         # USER/TEAM with model_alias=None covers all models → wildcard delete.
         sid = str(scope_id) if scope_id is not None else "NULL"
         if model_alias is not None:
-            await self._cache_mgr.invalidate(
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
                 [f"rl:config:{scope.value}:{sid}:{model_alias}"],
-                session=session,
             )
         else:
-            await self._cache_mgr.invalidate_pattern(
-                f"rl:config:{scope.value}:{sid}:*",
-                session=session,
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
+                pattern=f"rl:config:{scope.value}:{sid}:*",
             )
 
         await audit_logger.log(

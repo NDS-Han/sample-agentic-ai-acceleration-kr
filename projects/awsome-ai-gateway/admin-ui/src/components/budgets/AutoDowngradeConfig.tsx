@@ -16,6 +16,7 @@ import {
   deleteDowngradeConfigAction,
 } from '@/lib/actions/budgets';
 import type { ModelListItem } from '@/types/entities';
+import { NumberInput } from '@/components/common/NumberInput';
 
 interface DowngradeRuleForm {
   from_model_alias: string;
@@ -347,8 +348,7 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
                     className="flex shrink-0 items-center gap-1 rounded-lg border border-input bg-background px-2 py-1 focus-within:ring-1 focus-within:ring-ring"
                     title={t('thresholdInputTitle')}
                   >
-                    <input
-                      type="number"
+                    <NumberInput
                       min={1}
                       max={100}
                       value={rule.threshold_pct}

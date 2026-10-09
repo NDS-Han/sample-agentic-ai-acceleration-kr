@@ -10,6 +10,8 @@ from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.schemas.models import (
     ModelCreateRequest,
+    ModelDeleteResponse,
+    ModelDeletionImpactResponse,
     ModelListResponse,
     ModelResponse,
     ModelUpdateRequest,
@@ -208,6 +210,39 @@ async def patch_status(
         session,
         alias=alias,
         data=body,
+        actor=admin,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
+
+@router.get("/{alias}/deletion-impact", response_model=ModelDeletionImpactResponse)
+async def deletion_impact(
+    request: Request,
+    alias: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """삭제 확인 다이얼로그의 사전 영향 조회 — 실제 DELETE 와 같은 카운트를 반환."""
+    svc: ModelService = request.app.state.model_service
+    return await svc.deletion_impact(session, alias=alias)
+
+
+@router.delete("/{alias}", response_model=ModelDeleteResponse)
+async def delete_model(
+    request: Request,
+    alias: str,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """모델 카탈로그 삭제 — deprecated 정리용. 정책은 ModelService.delete_model.
+
+    다른 모델의 다운그레이드 목적지이면 409. 사용 이력(usage_logs)은 유지된다.
+    """
+    svc: ModelService = request.app.state.model_service
+    return await svc.delete_model(
+        session,
+        alias=alias,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),

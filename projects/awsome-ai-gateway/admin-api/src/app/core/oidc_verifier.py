@@ -85,6 +85,16 @@ class OIDCVerifier:
         self._jwks_uri: str | None = None
         self._jwks_keys: dict[str, dict] = {}  # kid -> JWK dict
         self._jwks_fetched_at: float = 0.0
+        # R3-6: unknown-kid 강제 리페치 최소 간격(초). `/v1/auth/exchange` 는
+        # 무인증이라 공격자가 임의 kid 헤더로 요청할 때마다 IdP 에 JWKS GET 을
+        # 유발할 수 있었다. 강제 리페치는 이 간격당 최대 1회로 제한한다 —
+        # 정상 키 로테이션도 수 초~수십 초 지연을 감내한다.
+        self._force_refresh_min_interval = 30.0
+        # R4-A2-4: 강제 리페치 "시도" 시각 — `_jwks_fetched_at` 는 성공 시에만
+        # 갱신되므로 IdP 장애 + 마지막 성공이 30s 경과 상태면 **모든** unknown-kid
+        # 요청이 쓰로틀 게이트를 통과해 다운 IdP 로 JWKS GET 을 날렸다(negative
+        # cache 부재). 시도 시각을 별도로 둬 실패해도 쓰로틀이 걸리게 한다.
+        self._jwks_force_attempt_at: float = 0.0
         # asyncio.Lock (NOT threading.Lock): _ensure_jwks_async 가 lock 을 잡은 채
         # await 한다. blocking lock 이면 두 번째 요청이 OS 스레드를 park 시켜
         # event loop 자체가 멈추고, JWKS 응답을 읽을 수도 없어 복구 불가.
@@ -204,10 +214,25 @@ class OIDCVerifier:
         except OIDCConfigError:
             raise
 
-        # 3. kid 로 키 매칭. 없으면 force-refresh (rotation 시나리오).
+        # 3. kid 로 키 매칭. 없으면 force-refresh (rotation 시나리오) — 단
+        #    최근에 fetch 했으면 생략한다 (R3-6: 임의 kid 로 IdP GET 증폭 방지).
+        #    R4-A2-4: 시도 시각 기준으로 쓰로틀 — fetch **실패**해도 다음
+        #    `_force_refresh_min_interval` 동안은 재시도하지 않는다(negative
+        #    cache). IdP 장애 시 성공 시각만 보면 게이트가 무의미해진다.
         key_dict = self._jwks_keys.get(kid) if kid else None
-        if key_dict is None:
-            await self._ensure_jwks_async(http_client, force=True)
+        if (
+            key_dict is None
+            and (time.monotonic() - self._jwks_force_attempt_at)
+            >= self._force_refresh_min_interval
+        ):
+            self._jwks_force_attempt_at = time.monotonic()
+            try:
+                await self._ensure_jwks_async(http_client, force=True)
+            except OIDCConfigError:
+                # stale JWKS 로 계속 — 실패 전파 대신 unknown-kid 401 로 수렴.
+                # (IdP 장애 중 임의 kid 요청마다 5xx 를 뿌리는 것보다 fail-closed
+                #  401 이 낫고, 쓰로틀 덕에 리페치 자체는 30s 당 1회로 제한된다.)
+                pass
             key_dict = self._jwks_keys.get(kid) if kid else None
         if key_dict is None:
             raise OIDCVerifyError(f"unknown kid: {kid}")

@@ -37,9 +37,11 @@ BILLED_BUCKETS = {
 }
 
 # 토큰을 합산하는 모듈들 (dashboard.py 는 기준 구현으로 함께 검사).
+# /admin/analytics/models 집계는 라우터 → services/analytics_service.py 로 이동했다
+# (라우터는 위임만 한다) — 가드도 같은 파일을 봐야 한다.
 TOKEN_SUM_MODULES = [
     "repositories/analytics_repository.py",
-    "routers/analytics.py",
+    "services/analytics_service.py",
     "routers/dashboard.py",
     "routers/my.py",
     "routers/monitoring.py",
@@ -117,14 +119,14 @@ def test_cost_per_1k_denominator_matches_the_cost_numerator():
     분자 total_cost_usd 는 캐시 비용까지 포함하므로, 분모에서 캐시를 빼면
     캐시를 많이 쓰는 모델의 단가가 실제보다 부풀어 순위가 뒤집힌다.
     """
-    tree = ast.parse((SRC / "routers" / "analytics.py").read_text())
+    tree = ast.parse((SRC / "services" / "analytics_service.py").read_text())
     targets = [
         n
         for n in ast.walk(tree)
         if isinstance(n, ast.Assign)
         and any(isinstance(t, ast.Name) and t.id == "total_tokens" for t in n.targets)
     ]
-    assert targets, "routers/analytics.py 에 total_tokens 대입이 없다"
+    assert targets, "analytics_service.py 에 total_tokens 대입이 없다"
     for node in targets:
         # row.<bucket> 형태로 읽는다 — UsageLog.* 가 아니라 결과행 속성.
         attrs = {

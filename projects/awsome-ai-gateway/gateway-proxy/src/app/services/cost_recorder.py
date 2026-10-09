@@ -7,7 +7,7 @@ from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
 
-from app.periods import request_period
+from app.periods import request_period, request_started_at
 from app.schemas.cost_stream import CostStreamEntry
 from app.schemas.domain import AuthContext, ModelConfigSchema, TokenUsage
 
@@ -24,15 +24,30 @@ COST_STREAM_MAXLEN = 100_000
 def calculate_cost(usage: TokenUsage, pricing: ModelConfigSchema) -> Decimal:
     """비용 계산: input + output + cache_write + cache_read.
 
-    cache_write 단가는 요청의 cache TTL에 따라 분기:
+    cache_write 단가는 TTL 별로 분기:
       - 5-min (default): pricing.cache_write_per_1k
-      - 1-hour (ttl=3600): pricing.cache_write_1h_per_1k
+      - 1-hour (ttl="1h"): pricing.cache_write_1h_per_1k
+
+    응답 usage 의 ``cache_creation.ephemeral_1h_input_tokens`` 분해가 보고되면
+    그 비율대로 정확히 나눠 과금한다(혼합 TTL 요청에서 5m 부분까지 1h 단가로
+    과금되던 오류 방지). 분해가 없으면(``None``) 요청 측 cache_ttl_1h 신호로
+    전체를 1h 로 취급하는 구 동작에 폴백한다. 분해가 보고됐는데 1h=0 이면
+    전부 5m — 요청 플래그는 보고된 분해보다 우선하지 않는다(A2-4).
     """
     p = pricing.pricing
     input_cost = (Decimal(usage.input_tokens) / 1000) * p.input_per_1k
     output_cost = (Decimal(usage.output_tokens) / 1000) * p.output_per_1k
-    cache_write_rate = p.cache_write_1h_per_1k if usage.cache_ttl_1h else p.cache_write_per_1k
-    cache_write_cost = (Decimal(usage.cache_creation_input_tokens) / 1000) * cache_write_rate
+    cache_creation_total = usage.cache_creation_input_tokens
+    if usage.cache_creation_1h_input_tokens is None:
+        # 응답 분해를 보고하지 않는 프로바이더 — 요청 측 신호로 전체 1h 취급.
+        one_h = cache_creation_total if usage.cache_ttl_1h else 0
+    else:
+        one_h = min(usage.cache_creation_1h_input_tokens, cache_creation_total)
+    five_m = cache_creation_total - one_h
+    cache_write_cost = (
+        (Decimal(one_h) / 1000) * p.cache_write_1h_per_1k
+        + (Decimal(five_m) / 1000) * p.cache_write_per_1k
+    )
     cache_read_cost = (Decimal(usage.cache_read_input_tokens) / 1000) * p.cache_read_per_1k
     return (input_cost + output_cost + cache_write_cost + cache_read_cost).quantize(
         COST_PRECISION, rounding=ROUND_HALF_UP
@@ -110,6 +125,7 @@ class CostRecorder:
                         rate_limit_state.get("tpm_descriptors", []),
                         rate_limit_state.get("tpm_reserved", 0),
                         0,  # actual=0 → 전액 환불
+                        reserved_at=rate_limit_state.get("tpm_reserved_at"),
                     )
                 except Exception:
                     logger.warning(
@@ -127,6 +143,9 @@ class CostRecorder:
                             actual_cost=Decimal("0"),
                             reserved_cost=reserved_cost,
                             team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                            committed_scopes=rate_limit_state.get("cost_committed_scopes"),
+                            cpm_window_ts=rate_limit_state.get("cost_cpm_window_ts") or None,
+                            cph_window_ts=rate_limit_state.get("cost_cph_window_ts") or None,
                         )
                     except Exception:
                         logger.warning(
@@ -221,21 +240,25 @@ class CostRecorder:
             # user_config_key 가 비어(limit=0) budget_threshold 알림이 영원히 발행되지
             # 않는 버그였다. USER 스코프에서 이미 트리거됐으면 그걸 우선하고, 아니면
             # TEAM 스코프 교차도 threshold_triggered 로 채택한다.
-            try:
-                team_raw = await redis.eval(
-                    LuaScriptLoader.get("budget_deduct"),
-                    2,
-                    team_usage_key,
-                    team_config_key,
-                    str(cost_usd),
-                )
-                team_result = json.loads(team_raw)
-                if threshold_triggered is None:
-                    threshold_triggered = team_result.get("threshold_triggered")
-                    if threshold_triggered is not None:
-                        threshold_scope = "team"
-            except Exception:
-                logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
+            # ⚠️ team_id 가 없는 유저는 건너뛴다 — 예전엔 `budget:team:{}:{period}` 라는
+            #    모든 무소속 유저 공유의 팬텀 글로벌 카운터에 계속 쌓였다.
+            team_result = None
+            if auth_context.team_id:
+                try:
+                    team_raw = await redis.eval(
+                        LuaScriptLoader.get("budget_deduct"),
+                        2,
+                        team_usage_key,
+                        team_config_key,
+                        str(cost_usd),
+                    )
+                    team_result = json.loads(team_raw)
+                    if threshold_triggered is None:
+                        threshold_triggered = team_result.get("threshold_triggered")
+                        if threshold_triggered is not None:
+                            threshold_scope = "team"
+                except Exception:
+                    logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
 
             # 앱(client) 예산 차감.
             #
@@ -292,6 +315,21 @@ class CostRecorder:
                     actual_cost=cost_usd,
                     reserved_cost=cost_reserved,
                     team_id=auth_context.team_id,
+                    committed_scopes=(
+                        rate_limit_state.get("cost_committed_scopes")
+                        if rate_limit_state
+                        else None
+                    ),
+                    cpm_window_ts=(
+                        rate_limit_state.get("cost_cpm_window_ts")
+                        if rate_limit_state
+                        else None
+                    ) or None,
+                    cph_window_ts=(
+                        rate_limit_state.get("cost_cph_window_ts")
+                        if rate_limit_state
+                        else None
+                    ) or None,
                 )
             except Exception:
                 logger.warning("cost_settle_failed", user_id=auth_context.user_id)
@@ -306,7 +344,11 @@ class CostRecorder:
 
                 actual_tpm = compute_tpm_incr(usage)
                 await RateLimitService().settle_tpm(
-                    redis, tpm_descriptors, tpm_reserved, actual_tpm
+                    redis,
+                    tpm_descriptors,
+                    tpm_reserved,
+                    actual_tpm,
+                    reserved_at=rate_limit_state.get("tpm_reserved_at"),
                 )
             except Exception:
                 logger.warning("tpm_settle_failed", user_id=auth_context.user_id)
@@ -394,6 +436,9 @@ class CostRecorder:
             sso_subject=auth_context.sso_subject,
             bedrock_request_id=bedrock_request_id,
             client=client,
+            # 요청 시작 시각 — requested_at/period/date 가 여기서 파생돼, 위 Redis
+            # 카운터의 request_period() 와 같은 버킷을 가리킨다.
+            requested_at=request_started_at(),
         )
 
         payload_json = entry.model_dump_json()

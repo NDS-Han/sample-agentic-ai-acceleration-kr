@@ -231,6 +231,12 @@ class StreamConsumer:
                 batch_ids.extend(ids)
 
             if not batch_entries:
+                # R3-11: poison-only 배치 — 디코딩 불가 메시지도 읽은 ID 는 ACK 해
+                # PEL 에 남기지 않는다. 안 하면 XAUTOCLAIM 이 계속 회수해 무한
+                # 재실패 루프가 된다. 디코딩 불가 메시지는 재처리해도 영원히
+                # 실패하므로 drop 이 맞다.
+                if batch_ids:
+                    await self._redis.xack(self._stream, self._group, *batch_ids)
                 # yield back to event loop — xreadgroup 호출이 이미 blocking이지만
                 # 예외 없이 빈 결과 온 경우에도 tight loop 방지.
                 await asyncio.sleep(0)

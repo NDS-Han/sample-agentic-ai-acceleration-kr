@@ -246,7 +246,8 @@ export interface TopUserItem {
   name: string;
   email: string;
   team_id: string | null;
-  team_name: string | null; // 부서 접두어 포함(예: "NDS_Developers") — budget_service 와 동일 규칙
+  /** 팀명 그대로 — 표시는 teamDisplayName(부서_팀)으로 canonical 화한다. */
+  team_name: string | null;
   department_name: string | null;
   cost_usd: number;
   call_count: number;
@@ -266,7 +267,8 @@ export async function fetchTopUsers(period?: string, limit = 5, client?: string)
 // 동형으로, 예산 미설정 팀도 포함(기존 budgets/summary 소스는 예산설정 팀만 누락 위험).
 export interface TopTeamItem {
   team_id: string;
-  name: string; // 부서 접두어 포함(예: "NDS_Developers") — budget_service 와 동일 규칙
+  /** 팀명 그대로 — 표시는 teamDisplayName(부서_팀)으로 canonical 화한다. */
+  name: string;
   department_name: string | null;
   cost_usd: number;
   call_count: number;

@@ -271,3 +271,53 @@ async def test_openai_streaming_multiline_chunk_parses_usage():
     await asyncio.sleep(0)
     assert captured[-1].input_tokens == 2
     assert captured[-1].output_tokens == 3
+
+
+@pytest.mark.asyncio
+async def test_openai_streaming_usage_frame_split_across_chunks():
+    """aiter_bytes 청크가 usage 프레임을 쪼개도 usage 가 유실되지 않는다.
+
+    버그: _scan_usage 가 청크별 독립 split("\\n") + json.loads 라, 프레임이
+    청크 경계에 걸치면 파싱 실패 → vLLM 최종 usage 프레임이 그 케이스면
+    input 토큰이 0 으로 기록됐다.
+    """
+    usage_frame = (
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":123,"completion_tokens":45,"total_tokens":168}}\n\n'
+    )
+    mid = len(usage_frame) // 2  # 프레임 정중앙에서 절단
+
+    chunks = [
+        _sse({"choices": [{"delta": {"content": "hi"}}]}),
+        usage_frame[:mid],
+        usage_frame[mid:],
+        b"data: [DONE]\n\n",
+    ]
+    captured: list[TokenUsage] = []
+
+    async def on_usage(u: TokenUsage, first_token_time=None) -> None:
+        captured.append(u)
+
+    out = [c async for c in openai_sse_stream(FakeRequest(), _aiter(chunks), on_usage=on_usage)]
+    assert captured, "usage 콜백이 호출되지 않았다"
+    assert captured[0].input_tokens == 123
+    assert captured[0].output_tokens == 45
+    # 바이트는 그대로 패스스루돼야 한다
+    assert b"".join(out) == b"".join(chunks)
+
+
+@pytest.mark.asyncio
+async def test_openai_streaming_trailing_frame_without_newline():
+    """업스트림이 마지막 프레임을 개행 없이 닫아도 usage 를 잡는다."""
+    tail = (
+        b'data: {"choices":[{"delta":{},"finish_reason":"stop"}],'
+        b'"usage":{"prompt_tokens":9,"completion_tokens":3,"total_tokens":12}}'
+    )  # 개행 없음
+    chunks = [_sse({"choices": [{"delta": {"content": "x"}}]}), tail]
+    captured: list[TokenUsage] = []
+
+    async def on_usage(u: TokenUsage, first_token_time=None) -> None:
+        captured.append(u)
+
+    [c async for c in openai_sse_stream(FakeRequest(), _aiter(chunks), on_usage=on_usage)]
+    assert captured and captured[0].input_tokens == 9

@@ -25,6 +25,7 @@ import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
 import { ConfirmImpactBox } from './ConfirmImpactBox';
 import { fmtUsd } from '@/lib/utils/format';
+import { NumberInput } from '@/components/common/NumberInput';
 
 interface SetBudgetDialogProps {
   isOpen: boolean;
@@ -475,8 +476,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               />
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">$</span>
-                <input
-                  type="number"
+                <NumberInput
                   min={0}
                   max={numberMax}
                   step={0.01}
@@ -512,8 +512,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               <p className="text-xs text-muted-foreground">{t('defaultCapDesc')}</p>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">$</span>
-                <input
-                  type="number"
+                <NumberInput
                   min={0}
                   step={0.01}
                   value={defaultCap}
@@ -568,8 +567,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               ))}
             </div>
             <div className="flex items-center gap-2">
-              <input
-                type="number"
+              <NumberInput
                 min={1}
                 max={100}
                 value={newThreshold}
@@ -612,8 +610,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                       <label className="block text-xs text-muted-foreground mb-1">
                         {CLIENT_LABELS[c]}
                       </label>
-                      <input
-                        type="number"
+                      <NumberInput
                         min={0}
                         step={0.01}
                         value={budgets[c] ?? ''}

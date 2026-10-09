@@ -134,6 +134,42 @@ InvokeFn = Callable[[dict], Awaitable[tuple[int, bytes, dict, TokenUsage]]]
 InvokeStreamFn = Callable[[dict], Awaitable[tuple[int, AsyncIterator[bytes], dict, Optional[str]]]]
 
 
+# rate_limit_enforcement._extract_max_output 과 동일한 키 우선순위·대체값.
+# 두 경로(messages /v1/messages, openai_compat /v1/responses)의 입장 심사가 같은
+# 값으로 예약해야 하므로 어느 한쪽만 다르면 과금 경계가 갈린다.
+_ADMISSION_MAX_OUTPUT_KEYS = (
+    "max_tokens", "max_completion_tokens", "max_new_tokens", "max_output_tokens",
+)
+_ADMISSION_DEFAULT_MAX_OUTPUT = 4096
+
+
+def conservative_admission_body(req_data: dict, max_iterations: int) -> dict:
+    """웹서치 루프 입장 심사용 보수 예약 바디 (R2-9 / R3-5).
+
+    루프는 최대 ``max_iterations`` 턴까지 상류를 풀 호출하는데 턴 사이에 한도
+    재평가가 없으므로, 입장 예약을 단일 턴이 아니라 "턴 상한 × 단일턴 max_output"
+    으로 잡는다. 심사용 복사본에만 부푼 ``max_tokens`` 를 넣는다(상류에 나가는
+    바디와 무관). 실제 사용분과의 차액은 finalize 의 settle 이 환불한다.
+
+    한도 근처 유저가 조금 더 빨리 429 를 맞는 대가로, 한도를 넘는 다중 턴 지출을
+    막는다. ``max_iterations <= 1`` 이면 원본을 그대로 복사해 돌려준다.
+    """
+    body = dict(req_data)
+    iters = max(1, int(max_iterations))
+    if iters <= 1:
+        return body
+    single = None
+    for key in _ADMISSION_MAX_OUTPUT_KEYS:
+        value = body.get(key)
+        if isinstance(value, int) and value > 0:
+            single = value
+            break
+    if single is None:
+        single = _ADMISSION_DEFAULT_MAX_OUTPUT
+    body["max_tokens"] = single * iters
+    return body
+
+
 def _budget_sentence(budget: Optional[tuple[int, int]]) -> str:
     """Sentence appended to the tool description telling the model its search budget.
 
@@ -685,6 +721,11 @@ def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     acc.input_tokens += turn.input_tokens
     acc.output_tokens += turn.output_tokens
     acc.cache_creation_input_tokens += turn.cache_creation_input_tokens
+    # 삼값(None=미보고) 보존 — 어느 한 턴도 분해를 보고하지 않았으면 None 유지.
+    if turn.cache_creation_1h_input_tokens is not None:
+        acc.cache_creation_1h_input_tokens = (
+            acc.cache_creation_1h_input_tokens or 0
+        ) + turn.cache_creation_1h_input_tokens
     acc.cache_read_input_tokens += turn.cache_read_input_tokens
     acc.reasoning_tokens += turn.reasoning_tokens
     acc.total_tokens = acc.input_tokens + acc.output_tokens
@@ -1945,6 +1986,15 @@ async def _anthropic_stream(
                     u = (ev.get("message") or {}).get("usage") or {}
                     merged.input_tokens += int(u.get("input_tokens", 0) or 0)
                     merged.cache_creation_input_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
+                    # 삼값 보존 — 키가 실제 보고될 때만 누적(0 보고 포함, A2-4).
+                    _cc = u.get("cache_creation")
+                    if (
+                        isinstance(_cc, dict)
+                        and "ephemeral_1h_input_tokens" in _cc
+                    ):
+                        merged.cache_creation_1h_input_tokens = (
+                            merged.cache_creation_1h_input_tokens or 0
+                        ) + int(_cc["ephemeral_1h_input_tokens"] or 0)
                     merged.cache_read_input_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
                     if first_turn is None:
                         first_turn = _prompt_snapshot(

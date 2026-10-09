@@ -58,6 +58,8 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       api_format: apiFormatByProvider[provider] ?? 'OPENAI_COMPATIBLE',
       description: d.description || null,
       display_name: d.display_name || null,
+      context_window: d.context_window ?? null,
+      max_output_tokens: d.max_output_tokens ?? null,
       input_price_per_1k_tokens: d.input_price_per_1k,
       output_price_per_1k_tokens: d.output_price_per_1k,
       cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
@@ -100,6 +102,9 @@ export async function updateModelAction(
       endpoint_url: d.endpoint_url || null,
       description: d.description || null,
       display_name: d.display_name || null,
+      // 비워 보내면 명시적 null → 서버가 "미상으로 되돌림"(fields_set null=삭제 규칙).
+      context_window: d.context_window ?? null,
+      max_output_tokens: d.max_output_tokens ?? null,
     }));
     // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
     // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
@@ -287,6 +292,64 @@ export async function applyPriceSyncAction(
     revalidatePath('/models');
     return { success: true, data };
   } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+// ─── Model deletion (deprecated 정리) ────────────────────────────────────────
+//
+// hard delete 정책은 백엔드 ModelService.delete_model 에 있다:
+//   usage_logs 유지 / to_model_alias 참조 시 409 / 나머지 자식 행은 함께 삭제.
+// 여기서는 경로 인코딩과 revalidate 만 담당한다.
+
+export interface ModelDeletionImpact {
+  alias: string;
+  /** 삭제되지 않고 남는 사용 이력 수 — '데이터는 남는다'를 UI가 명시하는 근거. */
+  usage_logs: number;
+  pricings: number;
+  team_allowed: number;
+  user_allowed: number;
+  rate_limits: number;
+  /** 이 모델에서 출발하는 전환 정책 — 삭제 시 함께 제거된다. */
+  downgrade_from: number;
+  /** 이 모델을 목적지로 쓰는 정책 — 0보다 크면 삭제 불가(백엔드 409와 같은 규칙). */
+  downgrade_to: number;
+  blocked: boolean;
+}
+
+export async function getModelDeletionImpactAction(
+  alias: string
+): Promise<ActionResult<ModelDeletionImpact>> {
+  if (!alias) {
+    return { success: false, error: 'Model alias is required' };
+  }
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<ModelDeletionImpact>(
+        `/admin/models/${encodeURIComponent(alias)}/deletion-impact`
+      )
+    );
+    return { success: true, data };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
+export async function deleteModelAction(alias: string): Promise<ActionResult<ModelDeletionImpact>> {
+  if (!alias) {
+    return { success: false, error: 'Model alias is required' };
+  }
+  try {
+    const data = await withRetry(() =>
+      adminAPI.delete<{ deleted: ModelDeletionImpact }>(
+        `/admin/models/${encodeURIComponent(alias)}`
+      )
+    );
+    revalidatePath('/models');
+    return { success: true, data: data.deleted };
+  } catch (err) {
+    // 409(다운그레이드 목적지)는 APIError.message 에 백엔드 사유가 실려 온다 —
+    // 다이얼로그가 그대로 보여준다.
     return { success: false, error: toErrorMessage(err) };
   }
 }

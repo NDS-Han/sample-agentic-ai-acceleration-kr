@@ -156,3 +156,34 @@ class KeyRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_active_for_users(
+        self, user_ids: list[uuid.UUID]
+    ) -> list[VirtualKey]:
+        """여러 사용자의 ACTIVE VK 일괄 조회 — Cognito offboarding(R3-3)용."""
+        if not user_ids:
+            return []
+        stmt = select(VirtualKey).where(
+            VirtualKey.user_id.in_(user_ids),
+            VirtualKey.status == KeyStatus.ACTIVE,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def revoke_many(
+        self, key_ids: list[uuid.UUID], revoked_at
+    ) -> int:
+        """주어진 ACTIVE 키들을 일괄 REVOKED 로 — 시스템 주도 offboarding 용."""
+        if not key_ids:
+            return 0
+        stmt = (
+            update(VirtualKey)
+            .where(
+                VirtualKey.id.in_(key_ids),
+                VirtualKey.status == KeyStatus.ACTIVE,
+            )
+            .values(status=KeyStatus.REVOKED, revoked_at=revoked_at)
+            .execution_options(synchronize_session=False)
+        )
+        result = await self._session.execute(stmt)
+        return result.rowcount or 0
+

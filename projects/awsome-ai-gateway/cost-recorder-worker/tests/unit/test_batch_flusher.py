@@ -274,3 +274,111 @@ async def test_threshold_team_scope_looks_up_team_id():
 
     event = json.loads(redis.publish.await_args_list[0].args[1])
     assert event["payload"]["current_usage_usd"] == "9.99"
+
+
+def _mock_session_with_replays(existing_ids: set[str]) -> MagicMock:
+    """_filter_replays 가 existing_ids 를 돌려주는 session factory.
+
+    호출 순서: replay SELECT → INSERT → UPSERT user → UPSERT team (+ 앱별 있으면
+    1건 더). execute 가 MagicMock iterator 를 돌려주도록 세팅한다.
+    """
+    replay_result = MagicMock()
+    replay_result.__iter__ = MagicMock(
+        return_value=iter([(rid,) for rid in existing_ids])
+    )
+    writes = MagicMock()
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+    session.execute = AsyncMock(
+        side_effect=[replay_result, writes, writes, writes, writes]
+    )
+    return MagicMock(return_value=session)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_partial_replay_does_not_double_count_or_republish():
+    """부분 replay: DB는 replay-filter로 보호되지만 카운터/알림도 같은 기준이어야 한다.
+
+    spool 재발행/XAUTOCLAIM 겹침으로 이미 기록된 request_id 가 새 배치에 섞여
+    들어오면, 예전엔 _bump_daily_counters/_publish_thresholds 가 원본 entries 로
+    돌아 일별 카운터 이중 계상 + 임계 메일 재발송이 됐다. 수정 후 두 단계 모두
+    실제 기록된(fresh) entries 만 반영해야 한다.
+    """
+    session_factory = _mock_session_with_replays({"req-replayed"})
+
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    pipe.incrbyfloat = MagicMock()
+    pipe.incrby = MagicMock()
+    pipe.sadd = MagicMock()
+    pipe.expire = MagicMock()
+
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+
+    replayed_user = "11111111-1111-1111-1111-111111111111"
+    fresh_user = "22222222-2222-2222-2222-222222222222"
+    entries = [
+        _make_entry(
+            request_id="req-replayed", user_id=replayed_user,
+            cost="9.99", threshold=80,
+        ),
+        _make_entry(
+            request_id="req-fresh", user_id=fresh_user,
+            cost="0.10", threshold=90,
+        ),
+    ]
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    # 일별 카운터: replayed 유저의 키는 절대 터치되면 안 된다.
+    bumped_keys = [c.args[0] for c in pipe.incrbyfloat.call_args_list]
+    bumped_keys += [c.args[0] for c in pipe.incrby.call_args_list]
+    bumped_keys += [c.args[0] for c in pipe.sadd.call_args_list]
+    assert bumped_keys, "fresh 항목의 카운터가 bump 되지 않았다"
+    assert all(f"{{{replayed_user}}}" not in k for k in bumped_keys), (
+        f"replay entry가 일별 카운터를 또 계상했다: {bumped_keys}"
+    )
+    assert any(f"{{{fresh_user}}}" in k for k in bumped_keys)
+
+    # threshold 알림도 fresh 항목(threshold=90) 1건만 — replayed 의 80% 재발행 금지.
+    assert redis.publish.await_count == 1
+    import json
+
+    event = json.loads(redis.publish.await_args_list[0].args[1])
+    assert event["payload"]["threshold_pct"] == 90
+    assert event["event_id"] == "req-fresh"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_all_replays_skips_counters_and_publish():
+    """배치 전체가 replay 면 조기 반환 — 카운터/알림 모두 건드리지 않는다."""
+    session_factory = _mock_session_with_replays({"req-a", "req-b"})
+
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    pipe.incrbyfloat = MagicMock()
+    pipe.incrby = MagicMock()
+    pipe.sadd = MagicMock()
+    pipe.expire = MagicMock()
+
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+
+    entries = [
+        _make_entry(request_id="req-a", threshold=80),
+        _make_entry(request_id="req-b", threshold=100),
+    ]
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    redis.pipeline.assert_not_called()
+    redis.publish.assert_not_called()

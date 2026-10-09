@@ -229,3 +229,59 @@ describe('middleware — admin_role 보조 쿠키', () => {
     expectSameOriginRedirect(res, '/403');
   });
 });
+
+describe('middleware — Origin 기반 CSRF 차단 (변형 메서드)', () => {
+  function mutating(
+    method: string,
+    headers: Record<string, string> = {},
+    pathname = '/api/chat-proxy/anything',
+  ): NextRequest {
+    return new NextRequest(`http://admin.test${pathname}`, { method, headers });
+  }
+
+  it('크로스오리진 Origin 의 POST 는 403', async () => {
+    const res = await middleware(
+      mutating('POST', { origin: 'https://evil.example', host: 'admin.test' }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('같은 호스트의 Origin 을 가진 POST 는 통과', async () => {
+    const res = await middleware(
+      mutating('POST', { origin: 'http://admin.test', host: 'admin.test' }),
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it('Origin 없이 크로스오리진 Referer 만 있으면 403', async () => {
+    const res = await middleware(
+      mutating('POST', { referer: 'https://evil.example/x', host: 'admin.test' }),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('Origin/Referer 둘 다 없는 비브라우저 POST 는 허용 (API 클라이언트)', async () => {
+    const res = await middleware(mutating('POST', { host: 'admin.test' }));
+    expect(res.status).not.toBe(403);
+  });
+
+  it('GET 은 Origin 이 다르더라도 검사 대상이 아니다', async () => {
+    const res = await middleware(
+      new NextRequest('http://admin.test/api/auth/login', {
+        method: 'GET',
+        headers: { origin: 'https://evil.example', host: 'admin.test' },
+      }),
+    );
+    expect(res.status).not.toBe(403);
+  });
+
+  it('크로스오리진 server action(페이지 경로 POST)도 403', async () => {
+    const res = await middleware(
+      new NextRequest('http://admin.test/settings', {
+        method: 'POST',
+        headers: { origin: 'https://evil.example', host: 'admin.test' },
+      }),
+    );
+    expect(res.status).toBe(403);
+  });
+});

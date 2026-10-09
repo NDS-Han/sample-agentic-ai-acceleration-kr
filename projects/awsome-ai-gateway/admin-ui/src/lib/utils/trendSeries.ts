@@ -25,7 +25,7 @@ export interface TrendPoint {
 export interface TeamTrendSeries {
   team: string;
   team_id: string;
-  /** 팀의 소속 부서명 — 있으면 라벨을 "부서-팀"으로 표시한다. */
+  /** 팀의 소속 부서명 — 있으면 라벨을 "부서_팀"으로 표시한다. */
   dept_name?: string | null;
   points: TrendPoint[];
 }
@@ -80,9 +80,14 @@ interface RankedTeam {
   byDate: Map<string, number>;
 }
 
-/** 표시용 팀 라벨 — 부서가 있으면 "부서-팀", 없으면 팀명 그대로. */
+/**
+ * 표시용 팀 라벨 — 부서가 있으면 "부서_팀", 없으면 팀명 그대로.
+ * 구분자 `_` 는 Cognito 그룹 규약(`<prefix><dept>_<team>`)과
+ * admin-api budget_service._team_display_name 의 canonical 규칙에 맞춘다 —
+ * 동명 팀(부서별 Developers 등)이 대시보드/분석/예산에서 같은 이름으로 보여야 한다.
+ */
 export function teamDisplayName(tt: Pick<TeamTrendSeries, 'team' | 'dept_name'>): string {
-  return tt.dept_name ? `${tt.dept_name}-${tt.team}` : tt.team;
+  return tt.dept_name ? `${tt.dept_name}_${tt.team}` : tt.team;
 }
 
 function rankTeams(trendsByTeam: TeamTrendSeries[]): RankedTeam[] {

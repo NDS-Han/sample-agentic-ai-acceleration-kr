@@ -154,11 +154,18 @@ def test_bounded_drop_oldest_counts():
 @pytest.mark.asyncio
 async def test_cost_recorder_enqueues_payload_on_xadd_failure():
     """When XADD fails, CostRecorder spools the payload and does NOT raise."""
-    from app.services.cost_recorder import CostRecorder
     from app.schemas.domain import (
-        ApiFormat, AuthContext, AuthType, ModelConfigSchema,
-        ModelPricingSchema, ModelStatus, ProviderType, Role, TokenUsage,
+        ApiFormat,
+        AuthContext,
+        AuthType,
+        ModelConfigSchema,
+        ModelPricingSchema,
+        ModelStatus,
+        ProviderType,
+        Role,
+        TokenUsage,
     )
+    from app.services.cost_recorder import CostRecorder
 
     spool = CostStreamSpool(stream_key="cost:stream")
     recorder = CostRecorder(metrics=None, spool=spool)
@@ -192,3 +199,65 @@ async def test_cost_recorder_enqueues_payload_on_xadd_failure():
     assert spool.size == 1
     buffered = spool._buf[0]
     assert "req-xyz" in buffered
+
+
+def test_make_uses_request_start_for_bucket_labels():
+    """F5: period/date/requested_at 은 완료 시각이 아니라 요청 시작 시각에서 파생.
+
+    월 경계를 넘긴 스트리밍(시작 9월 KST → 완료 10월 KST)이 Redis 카운터
+    (request_period, 시작 월)와 다른 budget_usages 행(완료 월)에 귀속되던
+    불일치를 막는다.
+    """
+    from datetime import datetime
+
+    from app.schemas.cost_stream import CostStreamEntry
+
+    # KST 2026-10-01 00:30 완료, 요청 시작은 KST 2026-09-30 23:55
+    # (= UTC 2026-09-30 14:55)
+    started = datetime.fromisoformat("2026-09-30T14:55:00+00:00")
+    entry = CostStreamEntry.make(
+        request_id="r1",
+        user_id="u",
+        team_id="t",
+        dept_id="d",
+        model_alias="m",
+        provider="BEDROCK",
+        input_tokens=1,
+        output_tokens=1,
+        cache_creation_tokens=0,
+        cache_read_tokens=0,
+        cost_usd="0.001",
+        latency_ms=100,
+        is_streaming=True,
+        estimated_usage=False,
+        downgraded_from=None,
+        requested_at=started,
+    )
+    assert entry.requested_at == started.isoformat()
+    assert entry.period == "2026-09"  # 완료 월(2026-10)이 아니라 시작 월
+    assert entry.date == "2026-09-30"
+
+
+def test_make_without_start_falls_back_to_now():
+    """미들웨어 우회(테스트 등) 시에는 완료 시각 버킷으로 폴백."""
+    from app.schemas.cost_stream import CostStreamEntry
+
+    entry = CostStreamEntry.make(
+        request_id="r1",
+        user_id="u",
+        team_id="t",
+        dept_id="d",
+        model_alias="m",
+        provider="BEDROCK",
+        input_tokens=1,
+        output_tokens=1,
+        cache_creation_tokens=0,
+        cache_read_tokens=0,
+        cost_usd="0.001",
+        latency_ms=1,
+        is_streaming=False,
+        estimated_usage=False,
+        downgraded_from=None,
+    )
+    assert entry.requested_at == entry.completed_at
+    assert entry.period and entry.date

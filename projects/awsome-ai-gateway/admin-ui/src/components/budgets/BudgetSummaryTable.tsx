@@ -207,7 +207,14 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
         </div>
       </Td>
       <Td>
-        <AlertBadge level={user.alert_level} labels={alertLabels} />
+        {/* limit=0 은 실제로 저장된 $0 예산 — "정상"과 구분해 요청 차단 상태로 표시 */}
+        {user.limit === 0 ? (
+          <span className="badge badge-amber" title={t('zeroBudgetHint')}>
+            {t('zeroBudgetBadge')}
+          </span>
+        ) : (
+          <AlertBadge level={user.alert_level} labels={alertLabels} />
+        )}
       </Td>
       {isAdmin && (
         <Td>
@@ -339,7 +346,13 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                           </div>
                         </Td>
                         <Td>
-                          <AlertBadge level={team.alert_level} labels={alertLabels} />
+                          {team.limit === 0 ? (
+                            <span className="badge badge-amber" title={t('zeroBudgetHint')}>
+                              {t('zeroBudgetBadge')}
+                            </span>
+                          ) : (
+                            <AlertBadge level={team.alert_level} labels={alertLabels} />
+                          )}
                         </Td>
                         {isAdmin && (
                           <Td>

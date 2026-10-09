@@ -3,9 +3,39 @@
 import type { CLIDownloadItem } from '@/types/entities';
 import { adminAPI } from '@/lib/api-client';
 import { CLIDownloadCard } from '@/components/cli/CLIDownloadCard';
+import { CliEnvBlock } from '@/components/cli/CliEnvBlock';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
+
+/**
+ * 사전 준비 env 블록 — Helm 이 내려준 배포값으로 채우고, 없으면(로컬 dev·방식 A
+ * ALB-DNS 직접 등) placeholder 를 보여 준다. 사용자가 카탈로그 값을 수동 변환
+ * 하던 마찰(리뷰 TOP-4) 해소.
+ */
+function buildEnvText(): string {
+  const env = (name: string, placeholder: string) =>
+    (process.env[name] ?? '').trim() || placeholder;
+  const issuer = env(
+    'OIDC_ISSUER_URL',
+    "https://cognito-idp.<region>.amazonaws.com/'<POOL_ID>'"
+  );
+  const clientId = env('OIDC_CLIENT_ID', "'<COGNITO_APP_CLIENT_ID>'");
+  // Cognito 는 access_token 에 aud 가 없어 OIDC_AUDIENCE 를 비워 두는데, CLI 쪽
+  // audience 는 client_id 와 같다 — 비어 있으면 clientId 로 채운다.
+  const audience = env('OIDC_AUDIENCE', clientId);
+  // 사용자가 접속하는 주소 — 사내망/프라이빗 DNS 등 공인이 아니어도 된다
+  // (Helm 의 *_INGRESS_URL, 예전 이름 *_PUBLIC_URL 과 의미 동일).
+  const gateway = env('GATEWAY_INGRESS_URL', "https://'<gateway-host>'");
+  const adminApi = env('ADMIN_API_INGRESS_URL', "https://'<admin-api-host>'");
+  return [
+    `export OIDC_ISSUER_URL="${issuer}"`,
+    `export OIDC_CLIENT_ID="${clientId}"`,
+    `export OIDC_AUDIENCE="${audience}"`,
+    `export GATEWAY_URL="${gateway}"`,
+    `export GATEWAY_ADMIN_URL="${adminApi}"`,
+  ].join('\n');
+}
 
 export default async function CLIPage() {
   const t = await getTranslations('cli');
@@ -45,9 +75,8 @@ export default async function CLIPage() {
       <section className="glass glass-hover rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('prereqTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('prereqDesc')}</p>
-        <pre className="bg-muted rounded p-3 text-xs overflow-x-auto">
-          {t('prereqEnv')}
-        </pre>
+        <CliEnvBlock text={buildEnvText()} />
+        <p className="text-xs text-muted-foreground">{t('prereqPsNote')}</p>
       </section>
 
       {/* 설치 가이드 — OS 병렬 */}

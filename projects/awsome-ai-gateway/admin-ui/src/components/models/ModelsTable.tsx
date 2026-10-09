@@ -27,6 +27,7 @@ import { fmtDate, fmtTokensCompact } from '@/lib/utils/format';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
+import { DeleteModelDialog } from './DeleteModelDialog';
 
 interface ModelsTableProps {
   models: ModelListItem[];
@@ -68,6 +69,7 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const [selectedModel, setSelectedModel] = useState<ModelListItem | null>(null);
   const [editDialogOpen, setEditDialogOpen] = useState(false);
   const [deactivateDialogOpen, setDeactivateDialogOpen] = useState(false);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
   // 기본 정렬: 활성 먼저, 같은 상태면 최근 등록순 — 운영에서 켜진 모델이 위에 온다.
   const sorted = useMemo(
@@ -91,6 +93,11 @@ export function ModelsTable({ models }: ModelsTableProps) {
   const handleDeactivate = (model: ModelListItem) => {
     setSelectedModel(model);
     setDeactivateDialogOpen(true);
+  };
+
+  const handleDelete = (model: ModelListItem) => {
+    setSelectedModel(model);
+    setDeleteDialogOpen(true);
   };
 
   const handleActivate = (model: ModelListItem) => {
@@ -233,6 +240,15 @@ export function ModelsTable({ models }: ModelsTableProps) {
                               {t('activate')}
                             </button>
                           )}
+                          {/* 삭제는 비활성화와 다른 동작 — 카탈로그에서 완전히
+                              지우는 deprecated 정리용. 다이얼로그에서 영향도 +
+                              alias 재입력을 거친다. */}
+                          <button
+                            onClick={() => handleDelete(model)}
+                            className="inline-flex items-center justify-center rounded-md border border-destructive/40 bg-destructive/5 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/15 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                          >
+                            {t('deleteButton')}
+                          </button>
                         </div>
                       </Td>
                     </Tr>
@@ -350,6 +366,15 @@ export function ModelsTable({ models }: ModelsTableProps) {
         isOpen={deactivateDialogOpen}
         onClose={() => {
           setDeactivateDialogOpen(false);
+          setSelectedModel(null);
+        }}
+        model={selectedModel}
+      />
+
+      <DeleteModelDialog
+        isOpen={deleteDialogOpen}
+        onClose={() => {
+          setDeleteDialogOpen(false);
           setSelectedModel(null);
         }}
         model={selectedModel}

@@ -19,7 +19,12 @@ logger = structlog.get_logger()
 async def aggregate_usage(session: AsyncSession, period: str) -> None:
     """Aggregate UsageLog into ROIAggregation for the given period.
 
-    Runs per-scope: GLOBAL, then per-TEAM, per-USER, per-DEPT.
+    **지원 스코프 계약: GLOBAL + TEAM 만 기록한다.**
+    ROIScope enum 에 USER/DEPT 가 있어도 집계하지 않는다 — 이 행을 읽는
+    API/리포지토리 소비자가 현재 없으므로(dead write 방지). USER/DEPT
+    스코프 집계는 실제 소비자가 생길 때 함께 추가한다 — docstring 에만
+    있고 행이 없는 상태로 두면 조회 코드가 조용히 빈 결과를 돌린다.
+
     MVP: cost metrics only. Productivity metrics = null.
     """
     repo = AnalyticsRepository(session)

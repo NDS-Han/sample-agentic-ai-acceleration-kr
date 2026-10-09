@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState, useTransition } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
+import Link from 'next/link';
 import {
   fetchMonitoringEvents,
   type MonitoringEventsResponse,
@@ -122,8 +123,11 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
       {/* 필터 재조회 중엔 stale 행이 그대로 보인다 — 흐리게 표시해 "예전 결과"임을 전달 */}
       <div aria-busy={isPending} className={isPending ? 'opacity-50 transition-opacity' : 'transition-opacity'}>
       {data.events.length === 0 ? (
-        <div className="p-6">
+        <div className="p-6 space-y-1">
           <p className="text-sm text-muted-foreground">{t('events.empty')}</p>
+          <Link href="/analytics" className="text-xs text-primary hover:underline">
+            {t('emptyAnalyticsLink')}
+          </Link>
         </div>
       ) : (
         <Table density="compact">

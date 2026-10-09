@@ -55,6 +55,63 @@ def _validate_period_date(period: str, date: str) -> None:
         raise ValidationError(f"date {date} must fall within period {period}")
 
 
+def _resolve_scope(
+    actor: CurrentUser, scope: str
+) -> tuple[ROIScope | None, list[uuid.UUID] | None]:
+    """scope 문자열 → (roi_scope, scope_ids) 해석 — get_analytics 와
+    /admin/analytics/models 상세 질의가 **같은** 격리 규칙을 쓰게 단일화.
+
+    Returns:
+        roi_scope: TEAM/GLOBAL/None(None=GLOBAL 취급 — 호출부에서 or GLOBAL)
+        scope_ids: None 이면 전사(제한 없음), list 면 team_id 필터 집합.
+
+    ⚠️ 비-GLOBAL 이면 scope_ids 가 반드시 채워진다 — 빈 list 가 GLOBAL 처럼
+       취급되는 경로를 막기 위해 TEAM_LEADER 의 team_id 가 없으면 여기서 403.
+    """
+    roi_scope: ROIScope | None = None
+    # TEAM scope 의 실제 필터 집합 — auth.teams.leader_user_id 는 여러 팀이 같은
+    # 사용자를 가리킬 수 있어(한 사람이 복수 팀 리더) 단일 UUID 가 아니라 목록이다.
+    scope_ids: list[uuid.UUID] | None = None
+
+    if scope.startswith("team:"):
+        team_id = uuid.UUID(scope.split(":")[1])
+        # TEAM_LEADER 는 소속 팀만 볼 수 있다
+        if actor.role == UserRole.TEAM_LEADER and team_id != actor.team_id:
+            raise ForbiddenError("Team leaders can only view analytics for their own team")
+        roi_scope = ROIScope.TEAM
+        scope_ids = [team_id]
+    elif scope == "all":
+        # TEAM_LEADER restricted to own team
+        if actor.role == UserRole.TEAM_LEADER:
+            # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. scope_ids 가 비면
+            #    아래 모든 WHERE 가 가드 뒤에 있어서 **전부 사라진다** → 전사 분석
+            #    (비용·사용자·모델·추이)과 /admin/analytics/export CSV 가 그대로
+            #    나간다. 도달 경로: JWT 에 team_id 클레임이 없으면
+            #    (core/auth.py:157) 또는 auth.users.team_id 가 NULL 이면(nullable)
+            #    team_id 는 None 이다. dev 토큰은 role 을 본문에서 읽고 team_id 를
+            #    항상 None 으로 만들기 때문에 `dev.{"role":"TEAM_LEADER"}` 하나로
+            #    재현된다.
+            scope_ids = [actor.team_id] if actor.team_id else []
+            if not scope_ids:
+                raise ForbiddenError(
+                    "Team leader has no team assigned — cannot scope analytics. "
+                    "Ask an administrator to assign a team."
+                )
+            roi_scope = ROIScope.TEAM
+    # ADMIN: no restriction
+
+    # 불변식: 비-GLOBAL scope 라면 scope_ids 가 반드시 있다. 아래의 by_user/trends 는
+    # `scope_ids` 진위로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만 조용히
+    # 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
+    # assert 를 쓰지 않는다 — python -O 로 사라지는 검사에 데이터 격리를 맡길 수 없다.
+    if roi_scope not in (None, ROIScope.GLOBAL) and not scope_ids:
+        raise ForbiddenError(
+            f"Analytics scope isolation could not be applied (scope={roi_scope}) — "
+            "refusing to return organization-wide data."
+        )
+    return roi_scope, scope_ids
+
+
 class AnalyticsService:
     async def get_analytics(
         self,
@@ -80,48 +137,9 @@ class AnalyticsService:
                 raise ValidationError("custom range requires both start_date and end_date")
             range_where = cost_date_range_filter(start_date, end_date)
 
-        # Determine scope filter
-        roi_scope: ROIScope | None = None
-        # TEAM scope 의 실제 필터 집합 — auth.teams.leader_user_id 는 여러 팀이 같은
-        # 사용자를 가리킬 수 있어(한 사람이 복수 팀 리더) 단일 UUID 가 아니라 목록이다.
-        scope_ids: list[uuid.UUID] | None = None
-
-        if scope.startswith("team:"):
-            team_id = uuid.UUID(scope.split(":")[1])
-            # TEAM_LEADER 는 소속 팀만 볼 수 있다
-            if actor.role == UserRole.TEAM_LEADER and team_id != actor.team_id:
-                raise ForbiddenError("Team leaders can only view analytics for their own team")
-            roi_scope = ROIScope.TEAM
-            scope_ids = [team_id]
-        elif scope == "all":
-            # TEAM_LEADER restricted to own team
-            if actor.role == UserRole.TEAM_LEADER:
-                # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. scope_ids 가 비면
-                #    아래 모든 WHERE 가 가드 뒤에 있어서 **전부 사라진다** → 전사 분석
-                #    (비용·사용자·모델·추이)과 /admin/analytics/export CSV 가 그대로
-                #    나간다. 도달 경로: JWT 에 team_id 클레임이 없으면
-                #    (core/auth.py:157) 또는 auth.users.team_id 가 NULL 이면(nullable)
-                #    team_id 는 None 이다. dev 토큰은 role 을 본문에서 읽고 team_id 를
-                #    항상 None 으로 만들기 때문에 `dev.{"role":"TEAM_LEADER"}` 하나로
-                #    재현된다.
-                scope_ids = [actor.team_id] if actor.team_id else []
-                if not scope_ids:
-                    raise ForbiddenError(
-                        "Team leader has no team assigned — cannot scope analytics. "
-                        "Ask an administrator to assign a team."
-                    )
-                roi_scope = ROIScope.TEAM
-        # ADMIN: no restriction
-
-        # 불변식: 비-GLOBAL scope 라면 scope_ids 가 반드시 있다. 아래의 by_user/trends 는
-        # `scope_ids` 진위로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만 조용히
-        # 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
-        # assert 를 쓰지 않는다 — python -O 로 사라지는 검사에 데이터 격리를 맡길 수 없다.
-        if roi_scope not in (None, ROIScope.GLOBAL) and not scope_ids:
-            raise ForbiddenError(
-                f"Analytics scope isolation could not be applied (scope={roi_scope}) — "
-                "refusing to return organization-wide data."
-            )
+        # Determine scope filter — 해석 규칙은 _resolve_scope 가 단일 소스
+        # (/admin/analytics/models 도 같은 규칙을 공유한다).
+        roi_scope, scope_ids = _resolve_scope(actor, scope)
 
         # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
         query_scope = roi_scope or ROIScope.GLOBAL
@@ -157,13 +175,36 @@ class AnalyticsService:
 
         # requests 를 채운다 — 예전엔 기본값 0 이 그대로 나가서, Analytics 화면에서
         # 내려받는 JSON export 가 모든 모델에 대해 "요청 0건" 을 보고했다.
+        # ⚠️ 비용 내림차순 정렬 필수 — repo 는 ORDER BY 없이 dict 를 주므로(DB 반환
+        #    순서) 그대로 나가면 막대 차트가 같은 페이지의 상세 표(cost DESC)와 다른
+        #    순서로 그려진다. 색상도 index 기반이라 순서가 어긋나면 모델별 색까지 달라진다.
+        sorted_models = sorted(
+            cost_by_model.items(), key=lambda kv: kv[1], reverse=True
+        )
+
+        # 카탈로그 표시명 룩업 — 프론트의 modelDisplay(alias, display_name) 재료.
+        from app.models.model import ModelAlias
+        from sqlalchemy import select as _sel
+
+        display_names: dict[str, str] = {}
+        if sorted_models:
+            rows = (
+                await session.execute(
+                    _sel(ModelAlias.alias, ModelAlias.display_name).where(
+                        ModelAlias.alias.in_([m for m, _ in sorted_models])
+                    )
+                )
+            ).all()
+            display_names = {r.alias: r.display_name for r in rows if r.display_name}
+
         by_model = [
             ModelBreakdown(
                 model=model,
                 cost_usd=cost,
                 requests=requests_by_model.get(model, 0),
+                display_name=display_names.get(model),
             )
-            for model, cost in cost_by_model.items()
+            for model, cost in sorted_models
         ]
 
         # Team breakdown — aggregate per team from usage_logs
@@ -186,13 +227,17 @@ class AnalyticsService:
         stmt = select(
             UsageLog.team_id,
             Team.name.label("team_name"),
+            Department.name.label("dept_name"),
             func.sum(UsageLog.cost_usd).label("cost"),
             func.count(distinct(UsageLog.user_id)).label("users"),
         ).join(
             Team, Team.id == UsageLog.team_id
+        ).outerjoin(
+            # 부서 없는 팀도 행이 나와야 한다(trends_by_team 과 같은 이유).
+            Department, Department.id == Team.dept_id
         ).where(
             *team_where,
-        ).group_by(UsageLog.team_id, Team.name)
+        ).group_by(UsageLog.team_id, Team.name, Department.name)
         result = await session.execute(stmt)
         for row in result:
             if row.team_id:
@@ -201,6 +246,7 @@ class AnalyticsService:
                     team_id=str(row.team_id),
                     cost_usd=row.cost or Decimal("0"),
                     active_users=row.users or 0,
+                    dept_name=row.dept_name,
                 ))
 
 
@@ -403,6 +449,128 @@ class AnalyticsService:
             token_breakdown=token_breakdown,
         )
 
+    async def get_model_cost_detail(
+        self,
+        session: AsyncSession,
+        *,
+        period: str,
+        actor: CurrentUser,
+        scope: str = "all",
+        client: str | None = None,
+        start_date: str | None = None,
+        end_date: str | None = None,
+    ) -> dict:
+        """모델별 상세 비용 — /analytics 페이지의 상세 섹션 데이터.
+
+        overview(get_analytics)와 같은 필터셋을 받는다 — 기간(월 또는 custom
+        구간)·client·scope·역할 격리가 한 근원에서 나오지 않으면 같은 화면의
+        카드와 표가 서로 다른 집합을 보게 된다.
+        격리 규칙은 _resolve_scope 가 단일 소스다.
+        """
+        from sqlalchemy import func, select
+
+        from app.core.usage_filters import cost_date_range_filter, cost_period_filter
+        from app.models.usage import UsageLog
+
+        _roi_scope, scope_ids = _resolve_scope(actor, scope)
+
+        # custom 날짜 구간 — get_analytics 와 같은 규칙(둘 다 있어야 적용, 아니면 400).
+        if start_date or end_date:
+            if not (start_date and end_date):
+                raise ValidationError("custom range requires both start_date and end_date")
+            base_where = cost_date_range_filter(start_date, end_date)
+        else:
+            base_where = cost_period_filter(period)  # §59 SUCCESS + KST
+
+        where: list = [base_where]
+        if scope_ids:  # TEAM_LEADER/team scope 격리 — 본인 팀(들)만
+            where.append(UsageLog.team_id.in_(scope_ids))
+        if (cf := client_filter(client)) is not None:
+            where.append(cf)
+
+        # display_name 은 ModelAlias 카탈로그에서 온다 — alias 원시값만 내리면
+        # 대시보드 도넛(modelDisplay 사용)과 이 표가 같은 모델을 다르게 표기한다.
+        # 카탈로그에 없는 alias 도 있으므로 OUTER JOIN + 프론트 fallback.
+        from app.models.model import ModelAlias
+
+        model_stmt = (
+            select(
+                UsageLog.model_alias,
+                func.max(ModelAlias.display_name).label("display_name"),
+                func.count().label("request_count"),
+                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
+                func.coalesce(func.sum(UsageLog.input_tokens), 0).label("input_tokens"),
+                func.coalesce(func.sum(UsageLog.output_tokens), 0).label("output_tokens"),
+                func.coalesce(func.sum(UsageLog.cache_read_tokens), 0).label("cache_read_tokens"),
+                func.coalesce(func.sum(UsageLog.cache_creation_tokens), 0).label("cache_creation_tokens"),
+                func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
+            )
+            .select_from(UsageLog)
+            .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
+            .where(*where)
+            .group_by(UsageLog.model_alias)
+            .order_by(func.sum(UsageLog.cost_usd).desc())
+        )
+        model_result = await session.execute(model_stmt)
+
+        models = []
+        for row in model_result.all():
+            # ⚠️ 분자(total_cost_usd)와 분모(total_tokens)의 버킷이 같아야 한다. 예전엔
+            #    분모가 input+output 뿐이라 캐시를 많이 쓰는 모델의 단가가 실제보다 크게
+            #    부풀어, "1k 토큰당 비용" 열이 두 Opus 모델의 가격 순위를 뒤집어 보였다.
+            #    cache_creation/cache_read 는 별도 과금 버킷이므로 더한다.
+            #    reasoning_tokens 는 이미 output_tokens 안에 포함(models/usage.py:61)이라
+            #    더하면 이중계상 — 넣지 않는다.
+            total_tokens = (
+                (row.input_tokens or 0)
+                + (row.output_tokens or 0)
+                + (row.cache_creation_tokens or 0)
+                + (row.cache_read_tokens or 0)
+            )
+            cost_per_1k = (float(row.total_cost_usd) / total_tokens * 1000) if total_tokens > 0 else 0
+            models.append({
+                "model_alias": row.model_alias,
+                "display_name": row.display_name,
+                "request_count": row.request_count,
+                "total_cost_usd": round(float(row.total_cost_usd), 4),
+                "input_tokens": row.input_tokens,
+                "output_tokens": row.output_tokens,
+                "cache_read_tokens": row.cache_read_tokens,
+                "cache_creation_tokens": row.cache_creation_tokens,
+                "avg_latency_ms": round(float(row.avg_latency_ms or 0)),
+                "cost_per_1k_tokens": round(cost_per_1k, 6),
+            })
+
+        # 일별 binning 도 KST(§59) — func.date(timestamptz)는 세션 TZ(UTC)라 KST 변환 후 date.
+        _kst_day = func.date(func.timezone(reporting_tz_sql(), UsageLog.requested_at))
+        daily_stmt = (
+            select(
+                _kst_day.label("day"),
+                UsageLog.model_alias,
+                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
+            )
+            .where(*where)
+            .group_by(_kst_day, UsageLog.model_alias)
+            .order_by(_kst_day)
+        )
+        daily_result = await session.execute(daily_stmt)
+        daily_trend = [
+            {
+                "date": str(row.day),
+                "model_alias": row.model_alias,
+                "cost_usd": round(float(row.cost_usd), 4),
+            }
+            for row in daily_result.all()
+        ]
+
+        grand_total = sum(m["total_cost_usd"] for m in models)
+        return {
+            "period": f"{start_date}~{end_date}" if start_date and end_date else period,
+            "total_cost_usd": round(grand_total, 4),
+            "models": models,
+            "daily_trend": daily_trend,
+        }
+
     async def export_analytics(
         self,
         session: AsyncSession,
@@ -411,17 +579,21 @@ class AnalyticsService:
         period: str,
         group_by: str,
         actor: CurrentUser,
+        scope: str = "all",
+        client: str | None = None,
         start_date: str | None = None,
         end_date: str | None = None,
     ) -> tuple[str, str]:
         """Returns (content, content_type)."""
+        # ⚠️ scope/client 를 그대로 넘겨야 화면에 보이는 집합과 파일이 일치한다 —
+        #    예전엔 scope="all" 고정이라 팀 스코프 화면에서 전사 CSV 가 나갔다.
         response = await self.get_analytics(
-            session, period=period, group_by=group_by, scope="all", actor=actor,
-            start_date=start_date, end_date=end_date,
+            session, period=period, group_by=group_by, scope=scope, client=client,
+            actor=actor, start_date=start_date, end_date=end_date,
         )
 
         if format == "csv":
-            return self._to_csv(response), "text/csv"
+            return self._to_csv(response, group_by), "text/csv"
         else:
             return response.model_dump_json(indent=2), "application/json"
 
@@ -711,10 +883,27 @@ class AnalyticsService:
         return UsageByUserResponse(period=period, date=date, items=items)
 
     @staticmethod
-    def _to_csv(data: AnalyticsResponse) -> str:
+    def _to_csv(data: AnalyticsResponse, group_by: str) -> str:
+        # 화면의 group_by 와 같은 차원을 쓴다 — 이전엔 항상 by_model 이라
+        # '팀별' 보고내면 모델 CSV 가 나왔다.
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(["period", "model", "cost_usd"])
-        for item in data.by_model:
-            writer.writerow([data.period, item.model, str(item.cost_usd)])
+        if group_by == "team":
+            writer.writerow(["period", "team", "dept_name", "team_id", "active_users", "cost_usd"])
+            for item in data.by_team:
+                writer.writerow([
+                    data.period, item.team, item.dept_name or "",
+                    item.team_id, item.active_users, str(item.cost_usd),
+                ])
+        elif group_by == "user":
+            writer.writerow(["period", "user", "email", "requests", "cost_usd"])
+            for item in data.by_user:
+                writer.writerow([data.period, item.user, item.email, item.requests, str(item.cost_usd)])
+        else:
+            writer.writerow(["period", "model", "display_name", "requests", "cost_usd"])
+            for item in data.by_model:
+                writer.writerow([
+                    data.period, item.model, item.display_name or "",
+                    item.requests, str(item.cost_usd),
+                ])
         return output.getvalue()

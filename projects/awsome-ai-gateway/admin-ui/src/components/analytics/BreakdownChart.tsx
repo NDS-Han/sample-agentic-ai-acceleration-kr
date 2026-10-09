@@ -6,6 +6,8 @@ import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
 import { LazyBreakdownChart } from './LazyCharts';
 import { ErrorState } from '@/components/common/ErrorState';
+import { teamDisplayName } from '@/lib/utils/trendSeries';
+import { modelDisplay } from '@/lib/utils/modelLabel';
 
 interface BreakdownChartProps {
   filter: AnalyticsFilterForm;
@@ -13,8 +15,14 @@ interface BreakdownChartProps {
 }
 
 interface AnalyticsAPIResponse {
-  by_model: { model: string; requests: number; cost_usd: number }[];
-  by_team: { team: string; team_id: string; cost_usd: number; active_users: number }[];
+  by_model: { model: string; requests: number; cost_usd: number; display_name?: string | null }[];
+  by_team: {
+    team: string;
+    team_id: string;
+    cost_usd: number;
+    active_users: number;
+    dept_name?: string | null;
+  }[];
   by_user: { user: string; email: string; cost_usd: number; requests: number }[];
 }
 
@@ -30,7 +38,11 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
 
   if (data) {
     if (filter.group_by === 'team') {
-      labels = (data.by_team ?? []).map((b) => b.team);
+      // canonical 규칙과 동일: 같은 화면의 추이 범례(teamDisplayName)와 라벨이
+      // 갈라지면 동명 팀(NDS_Developers vs SSIR_Developers)을 구분할 수 없다.
+      labels = (data.by_team ?? []).map((b) =>
+        teamDisplayName({ team: b.team, dept_name: b.dept_name ?? null })
+      );
       values = (data.by_team ?? []).map((b) => Number(b.cost_usd));
       title = t('costByTeam');
     } else if (filter.group_by === 'user') {
@@ -39,7 +51,8 @@ export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProp
       values = (data.by_user ?? []).map((b) => Number(b.cost_usd));
       title = t('costByUser');
     } else {
-      labels = (data.by_model ?? []).map((b) => b.model);
+      // 대시보드 도넛과 같은 표기 규칙 — 카탈로그 display_name 우선, 없으면 alias.
+      labels = (data.by_model ?? []).map((b) => modelDisplay(b.model, b.display_name));
       values = (data.by_model ?? []).map((b) => Number(b.cost_usd));
       title = t('costByModel');
     }

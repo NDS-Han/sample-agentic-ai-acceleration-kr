@@ -12,6 +12,7 @@ import { FormError } from '@/components/common/FormError';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
 import { useToast } from '@/components/common/ToastProvider';
+import { NumberInput } from '@/components/common/NumberInput';
 
 interface CreateModelDialogProps {
   isOpen: boolean;
@@ -33,6 +34,8 @@ interface FormState {
   cache_read_price_per_1m: string;
   description: string;
   display_name: string;
+  context_window: string;
+  max_output_tokens: string;
 }
 
 /** 1K 단가 → 1M 표시값. DB 는 6자리 소수라 ×1000 은 3자리까지 의미가 있고,
@@ -60,6 +63,8 @@ function getInitialState(editModel?: ModelListItem): FormState {
       cache_read_price_per_1m: perKtoM(editModel.cache_read_price_per_1k),
       description: editModel.description ?? '',
       display_name: editModel.display_name ?? '',
+      context_window: editModel.context_window != null ? String(editModel.context_window) : '',
+      max_output_tokens: editModel.max_tokens != null ? String(editModel.max_tokens) : '',
     };
   }
   return {
@@ -74,6 +79,8 @@ function getInitialState(editModel?: ModelListItem): FormState {
     cache_read_price_per_1m: '',
     description: '',
     display_name: '',
+    context_window: '',
+    max_output_tokens: '',
   };
 }
 
@@ -128,6 +135,10 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       cache_read_price_per_1k: perMtoK(form.cache_read_price_per_1m || '0'),
       description: form.description || undefined,
       display_name: form.display_name || undefined,
+      // 빈 문자열 → 키 생략(생성: 서버 default null / 편집: action 이 null 로 바꿔
+      // "미상으로 되돌림"). 숫자 아닌 값은 NaN 으로 보내 zod 가 필드 에러로 돌려준다.
+      ...(form.context_window.trim() !== '' && { context_window: Number(form.context_window) }),
+      ...(form.max_output_tokens.trim() !== '' && { max_output_tokens: Number(form.max_output_tokens) }),
       // 편집 모드: 가격이 안 바뀌면 pricing PUT 을 건너뛰라는 힌트(불필요한 버전 생성 방지).
       ...(isEditMode && {
         pricing_changed: (
@@ -323,10 +334,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
             <div className="space-y-1">
               <label htmlFor="input_price_per_1m" className="text-xs text-muted-foreground">{t('priceInput')}</label>
-              <input
+              <NumberInput
                 id="input_price_per_1m"
                 name="input_price_per_1m"
-                type="number"
                 min={0}
                 step={0.001}
                 value={form.input_price_per_1m}
@@ -340,10 +350,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
             <div className="space-y-1">
               <label htmlFor="output_price_per_1m" className="text-xs text-muted-foreground">{t('priceOutput')}</label>
-              <input
+              <NumberInput
                 id="output_price_per_1m"
                 name="output_price_per_1m"
-                type="number"
                 min={0}
                 step={0.001}
                 value={form.output_price_per_1m}
@@ -357,10 +366,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
             <div className="space-y-1">
               <label htmlFor="cache_creation_5m_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheCreate5m')}</label>
-              <input
+              <NumberInput
                 id="cache_creation_5m_price_per_1m"
                 name="cache_creation_5m_price_per_1m"
-                type="number"
                 min={0}
                 step={0.001}
                 value={form.cache_creation_5m_price_per_1m}
@@ -373,10 +381,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
             <div className="space-y-1">
               <label htmlFor="cache_creation_1h_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheCreate1h')}</label>
-              <input
+              <NumberInput
                 id="cache_creation_1h_price_per_1m"
                 name="cache_creation_1h_price_per_1m"
-                type="number"
                 min={0}
                 step={0.001}
                 value={form.cache_creation_1h_price_per_1m}
@@ -389,10 +396,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
 
             <div className="space-y-1">
               <label htmlFor="cache_read_price_per_1m" className="text-xs text-muted-foreground">{t('priceCacheRead')}</label>
-              <input
+              <NumberInput
                 id="cache_read_price_per_1m"
                 name="cache_read_price_per_1m"
-                type="number"
                 min={0}
                 step={0.001}
                 value={form.cache_read_price_per_1m}
@@ -438,6 +444,48 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
               className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             />
             {fieldErrors.display_name && <FormError error={fieldErrors.display_name} />}
+          </div>
+
+          {/* Spec — optional. 카탈로그 동기화가 못 채운 모델을 수동 등록할 때
+              쓰고, 비우면 NULL(미상)로 저장된다. */}
+          <div className="space-y-3">
+            <div>
+              <span className="text-sm font-medium">
+                {t('specLabel')}{' '}
+                <span className="text-muted-foreground text-xs">({t('specOptional')})</span>
+              </span>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('specHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="context_window" className="text-xs text-muted-foreground">{t('specContextWindow')}</label>
+              <NumberInput
+                id="context_window"
+                name="context_window"
+                min={1}
+                step={1}
+                value={form.context_window}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. 200000"
+              />
+              {fieldErrors.context_window && <FormError error={fieldErrors.context_window} />}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="max_output_tokens" className="text-xs text-muted-foreground">{t('specMaxOutput')}</label>
+              <NumberInput
+                id="max_output_tokens"
+                name="max_output_tokens"
+                min={1}
+                step={1}
+                value={form.max_output_tokens}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. 64000"
+              />
+              {fieldErrors.max_output_tokens && <FormError error={fieldErrors.max_output_tokens} />}
+            </div>
           </div>
 
           <FormError error={error} />

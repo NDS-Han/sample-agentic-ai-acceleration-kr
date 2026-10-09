@@ -549,6 +549,15 @@ adminApi:
   enabled: true
   replicaCount: 2
 
+  # /webhooks/git GitHub HMAC 수신(R4-A1-2). true 면 ExternalSecret 에
+  # `github_webhook_secret` 매핑이 추가된다 — ⚠️ 먼저 SM 의
+  # `<secretPathPrefix><env>/app` JSON 에 `github_webhook_secret` 속성을
+  # 넣어야 한다(없으면 remoteRef 실패로 ExternalSecret sync 전체 실패).
+  # false/미설정이면 GITHUB_WEBHOOK_SECRET 이 빈 값이라 엔드포인트는 403
+  # fail-closed.
+  githubWebhook:
+    enabled: false
+
   image:
     repository: "llm-gateway/admin-api"
     tag: "1.0.69-idpjwks"  # = 라이브(dev·prod)

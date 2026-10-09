@@ -93,7 +93,7 @@
     "title": "대시보드",
     "totalUsage": "이번 달 총 사용 비용",
     "activeKeys": "활성 API Keys",
-    "activeModels": "활성 모델 수",
+    "activeModels": "카탈로그 모델 수",
     "budgetUtilization": "예산 사용률",
     "recentActivity": "최근 활동",
     "usageTrend": "사용량 추세",
@@ -108,7 +108,7 @@
     "dailyAvgProjection": "월말 예상 {amount} (선형 추정)",
     "dailyAvgDesc": "경과일 기준 일평균",
     "usageAndSystem": "사용량 & 시스템",
-    "totalRequests": "총 요청 수",
+    "totalRequests": "성공 요청 수",
     "totalRequestsDesc": "이번달 SUCCESS 요청",
     "totalTokens": "총 토큰 수",
     "totalTokensDesc": "입력+출력+캐시 합계",
@@ -201,7 +201,8 @@
     "noExpiry": "없음",
     "loadMore": "더 보기",
     "loadMoreFailed": "키를 더 불러오지 못했습니다.",
-    "loading": "불러오는 중…"
+    "loading": "불러오는 중…",
+    "noKeysCliLink": "VK 발급 방법은 CLI 다운로드 페이지에서 확인 →"
   },
   "budgets": {
     "title": "예산 관리",
@@ -368,7 +369,9 @@
     },
     "allowedClientsNote": "이 사용자는 {list}만 허용됨",
     "modelsLoadFailed": "모델 목록을 불러오지 못했습니다 — 모델 선택이 비어 보입니다. 새로고침 후 다시 시도하세요.",
-    "configFetchFailed": "현재 enforcement 설정 조회 실패 — 정책과 임계값은 변경하지 않는 한 그대로 보존됩니다."
+    "configFetchFailed": "현재 enforcement 설정 조회 실패 — 정책과 임계값은 변경하지 않는 한 그대로 보존됩니다.",
+    "zeroBudgetBadge": "차단됨",
+    "zeroBudgetHint": "예산 $0 — 모든 요청이 거부됩니다"
   },
   "models": {
     "title": "모델 관리",
@@ -430,6 +433,11 @@
     "descriptionPlaceholder": "모델에 대한 설명을 입력하세요",
     "displayNameLabel": "표시 이름 (예: Cowork · Opus 4.8)",
     "displayNamePlaceholder": "미설정 시 alias 로 표시 (등록 시점)",
+    "specLabel": "스펙",
+    "specHint": "context window / 최대 출력 토큰. 비워 두면 미상으로 등록됩니다.",
+    "specOptional": "선택",
+    "specContextWindow": "Context Window",
+    "specMaxOutput": "Max Output Tokens",
     "editSuccess": "{alias} 모델이 수정되었습니다.",
     "createSuccess": "{alias} 모델이 등록되었습니다.",
     "register": "등록",
@@ -452,6 +460,23 @@
     "deactivateImmediateLead": "비활성화는",
     "deactivateImmediateEmphasis": "즉시 적용",
     "deactivateImmediateTail": "됩니다. 비활성 모델은 신규 요청에서 사용할 수 없으며, 언제든 다시 활성화할 수 있습니다.",
+    "deleteButton": "삭제",
+    "deleteConfirmTitle": "모델 삭제",
+    "deleteTarget": "다음 모델을 카탈로그에서 삭제합니다:",
+    "deleteWarningTitle": "이 작업은 되돌릴 수 없습니다",
+    "deleteWarningBody": "모델과 연결된 설정(단가 이력·팀/사용자 허용 목록·레이트 리밋·다운그레이드 출발 정책)이 함께 삭제됩니다. 일시적으로 막으려면 삭제가 아니라 비활성화를 사용하세요.",
+    "deleteImpactLoading": "삭제 영향도 조회 중…",
+    "deleteImpactUsageLogs": "사용 이력 (usage logs)",
+    "deleteImpactRetained": "보존",
+    "deleteImpactRemoved": "삭제",
+    "deleteImpactPricings": "단가 이력",
+    "deleteImpactTeamAllowed": "팀 허용 목록",
+    "deleteImpactUserAllowed": "사용자 허용 목록",
+    "deleteImpactRateLimits": "레이트 리밋 설정",
+    "deleteImpactDowngradeFrom": "다운그레이드 출발 정책",
+    "deleteBlockedDowngradeTo": "다운그레이드 정책 {count}건이 이 모델을 전환 목적지로 사용 중입니다. 예산 관리에서 해당 정책을 먼저 해제해야 삭제할 수 있습니다.",
+    "deleteTypeAlias": "계속하려면 모델 alias \"{alias}\" 를 입력하세요.",
+    "deleteSuccess": "{alias} 모델이 삭제되었습니다. 사용 이력은 보존됩니다.",
     "addModelButton": "+ 모델 추가",
     "priceSync": {
       "button": "단가 동기화",
@@ -504,7 +529,7 @@
     "aliasHintInline": "클라이언트가 게이트웨이에 요청할 때 쓰는 model 이름입니다. 한번 만들면 바꿀 수 없으니, 클라이언트 설정에 등록할 이름으로 지으세요.",
     "modelIdTooltip": "공급자(Bedrock, Mantle 등)가 실제로 실행하는 모델의 식별자입니다. 클라이언트는 이 값이 아니라 위의 alias 를 보냅니다 — 게이트웨이가 alias → 이 Model ID 로 매핑합니다. Bedrock 이면 추론 프로파일 ID(us./global. 접두사)를 쓰세요.",
     "fieldHelp": "도움말",
-    "priceHint": "외부 카탈로그와 같은 1백만 토큰 기준으로 입력하세요. 저장 시 1K 토큰 단가로 자동 환산됩니다 (최소 단위 $0.001)."
+    "priceHint": "외부 카탈로그와 같은 1백만 토큰 기준으로 입력하세요 (최소 단위 $0.001)."
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -737,8 +762,12 @@
       "clearLimit": "설정 해제",
       "pendingDeleteHint": "적용하면 개별 설정이 삭제되고 상위 정책(또는 무제한)을 따릅니다.",
       "liveRpm": "최근 {seconds}초 요청 수",
-      "noRecentRequests": "최근 {seconds}초 동안 요청이 없습니다."
-    }
+      "noRecentRequests": "최근 {seconds}초 동안 요청이 없습니다.",
+      "untrackedHint": "RPM 한도가 설정되지 않아 실시간 사용량이 집계되지 않습니다. 실제 요청 추이는 아래 사용량 추세에서 확인하세요.",
+      "untrackedHintInherited": "개별 RPM 한도가 없어 이 카운터는 집계되지 않습니다. 팀 공용 한도로 계량되며 사용량은 팀 패널에서 확인하세요."
+    },
+    "rateLimitsMovedTitle": "Rate limit 설정이 이동했습니다",
+    "rateLimitsMovedDesc": "Rate limit 은 이제 사용자·팀 패널에서 관리합니다. 아래 트리에서 팀 또는 사용자를 선택하면 패널에서 설정·사용량을 볼 수 있습니다."
   },
   "analytics": {
     "title": "분석",
@@ -780,8 +809,8 @@
     "customInput": "직접 입력",
     "loadFailed": "분석 데이터를 불러오지 못했습니다.",
     "noData": "데이터가 없습니다.",
-    "totalRequests": "총 요청 수",
-    "totalRequestsDescription": "기간 내 총 API 요청 수",
+    "totalRequests": "성공 요청 수",
+    "totalRequestsDescription": "기간 내 성공(SUCCESS) API 요청 수 — 실패·차단 요청은 미포함",
     "totalTokens": "총 토큰 수",
     "totalTokensDescription": "기간 내 소비된 총 토큰 수",
     "tokenAnalysis": "토큰 분석",
@@ -799,26 +828,27 @@
     "costSeriesOther": "기타",
     "item": "항목",
     "date": "날짜",
-    "viewModelDetail": "모델별 비용 상세",
     "invalidDateRange": "시작일이 종료일보다 늦습니다. 날짜 범위를 확인해주세요."
   },
   "analyticsModels": {
-    "pageTitle": "모델별 비용 추적",
-    "backToAnalytics": "Analytics",
+    "summaryMeta": "모델 {count}개 · 총 {cost}",
     "totalCost": "총 비용",
-    "activeModels": "활성 모델 수",
+    "activeModels": "사용된 모델 수",
     "period": "기간",
     "costShare": "비용 비중",
     "costShareAria": "모델별 비용 비중 (스택 바; 수치는 범례 참조)",
     "detailTitle": "모델별 상세 비용",
     "empty": "이 기간에 사용 기록이 없습니다.",
     "colModel": "모델",
-    "colRequests": "요청",
+    "colRequests": "성공 요청",
     "colCost": "비용 (USD)",
     "colInputTokens": "Input 토큰",
     "colOutputTokens": "Output 토큰",
-    "colPer1M": "$/1M 토큰",
-    "colAvgLatency": "평균 지연"
+    "colPer1M": "실효 단가 ($/1M)",
+    "colAvgLatency": "평균 지연",
+    "colCacheTokens": "캐시 토큰",
+    "cacheSplit": "쓰기 {write} / 읽기 {read}",
+    "per1MHint": "실효 단가 = 총 비용 ÷ 과금 토큰 합계(Input + Output + 캐시). 캐시 토큰도 분모에 포함됩니다."
   },
   "cli": {
     "title": "CLI 다운로드",
@@ -829,10 +859,10 @@
     "checksum": "SHA256 체크섬",
     "download": "다운로드",
     "copyChecksum": "체크섬 복사",
-    "subtitle": "AWSome AI Gateway CLI를 설치하고 Cognito(OIDC) 로그인으로 Claude Code를 사내 게이트웨이에 연결합니다. 최초 로그인 시 사용자·팀이 자동으로 프로비저닝됩니다.",
+    "subtitle": "AWSome AI Gateway CLI를 설치하고 Cognito(OIDC) 로그인으로 Claude Code·Cowork·Codex를 사내 게이트웨이에 연결합니다. 최초 로그인 시 사용자·팀이 자동으로 프로비저닝됩니다.",
     "prereqTitle": "사전 준비",
-    "prereqDesc": "사내 관리자에게 아래 3개 값을 받아 쉘 환경에 export 해두세요. Cognito User Pool에서 발급되는 OIDC 설정값입니다.",
-    "prereqEnv": "export OIDC_ISSUER_URL=\"https://cognito-idp.ap-south-1.amazonaws.com/'<POOL_ID>'\"\nexport OIDC_CLIENT_ID=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport OIDC_AUDIENCE=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport GATEWAY_URL=\"http://'<gateway-host>':8000\"\nexport GATEWAY_ADMIN_URL=\"http://'<admin-api-host>':8080\"",
+    "prereqDesc": "아래 환경변수를 셸에 export 해두세요. OIDC 값은 Cognito User Pool, URL은 게이트웨이 배포값입니다. (배포 설정이 감지되면 실제 값이 채워집니다)",
+    "prereqPsNote": "Windows PowerShell은 $env:NAME=\"값\" 형식으로 설정하세요.",
     "installTitle": "설치 및 활성화",
     "installLinuxLabel": "Linux / macOS",
     "installWindowsLabel": "Windows (PowerShell 관리자 권한)",
@@ -861,6 +891,7 @@
     "copy": "복사",
     "copied": "복사됨",
     "copyCommand": "명령어 복사",
+    "copyEnv": "환경변수 복사",
     "copyFailed": "복사에 실패했습니다 — 텍스트를 직접 선택해 복사해주세요.",
     "windowsInstallHint": "압축 파일을 다운로드·해제한 후 폴더의 install.bat 또는 gateway-cli.exe 를 실행하세요."
   },
@@ -879,13 +910,13 @@
   "my": {
     "title": "내 사용량",
     "totalCost": "총 비용",
-    "totalRequests": "총 요청 수",
+    "totalRequests": "성공 요청 수",
     "totalTokens": "총 토큰",
     "dailyUsage": "일별 사용량",
     "noDailyRecords": "이 기간의 사용 기록이 없습니다.",
     "colDate": "날짜",
     "colCostUsd": "비용 (USD)",
-    "colRequests": "요청",
+    "colRequests": "성공 요청",
     "colTokens": "토큰",
     "modelUsage": "모델별 사용량",
     "noModelRecords": "이 기간의 모델별 기록이 없습니다.",
@@ -1032,7 +1063,7 @@
     "avgLatency": "평균 지연",
     "p95Latency": "P95 지연",
     "totalCost": "총 비용",
-    "activeModels": "활성 모델",
+    "activeModels": "활성 모델 (카탈로그)",
     "title": "실시간 모니터링",
     "table": {
       "model": "모델",
@@ -1096,7 +1127,8 @@
       "confirmOffLabel": "끄기",
       "statusUnknown": "알 수 없음",
       "statusUnknownWarning": "현재 설정을 읽지 못했습니다 — 실제로 켜져 있을 수 있습니다. 새로고침해서 확인하세요."
-    }
+    },
+    "emptyAnalyticsLink": "장기 통계는 분석 페이지에서 확인 →"
   },
   "errors": {
     "generic": "오류가 발생했습니다. 잠시 후 다시 시도해 주세요.",
@@ -1129,7 +1161,7 @@
     "toggleSaved": "허용 설정이 변경되었습니다.",
     "modelManagement": "모델 허용 관리",
     "colAlias": "모델 Alias",
-    "colAllowAll": "전체 허용",
+    "colAllowAll": "앱별 허용 현황",
     "colAllowThisApp": "이 앱 허용",
     "noModels": "모델이 없습니다.",
     "allBadge": "전체",
@@ -1153,13 +1185,15 @@
     "accessExplicit": "명시 허용",
     "accessUnrestricted": "제한 없음",
     "appStatusUnrestrictedHint": "제한 없음 — 향후 추가되는 앱도 자동 포함",
+    "chipLegend": "칩: 앱별 허용 현황 · 취소선=차단",
     "noAllowedModelsHint": "아래에서 허용 모델을 먼저 추가해야 기본 모델을 선택할 수 있습니다.",
     "defaultModelNotAllowedHint": "현재 기본 모델이 이 앱의 허용 목록에서 제외됐습니다 — 허용된 모델을 선택해 저장하면 라우팅이 복구됩니다."
   },
   "forbidden": {
     "title": "접근 권한 없음",
     "description": "이 페이지에 접근할 권한이 없습니다. 권한이 필요한 경우 관리자에게 문의하세요.",
-    "backHome": "홈으로 돌아가기"
+    "backHome": "홈으로 돌아가기",
+    "descriptionAdmin": "이 페이지는 팀 리더·개발자 전용입니다. 전체 사용량은 대시보드·분석·모니터링에서 확인하세요."
   },
   "policyState": {
     "unrestricted": "제한 없음",

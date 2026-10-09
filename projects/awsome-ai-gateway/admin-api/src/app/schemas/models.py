@@ -5,6 +5,10 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.clients import validate_clients
@@ -22,6 +26,139 @@ from app.schemas.common import ApiFormatEnum, ProviderEnum
 #    le 를 쓴다: pyproject 가 pydantic>=2.0.0 만 요구하므로 그 파생 규칙에 기대지 않고
 #    DB 최대값을 그대로 적는 편이 버전에 무관하고 에러 메시지도 사람이 읽을 수 있다.
 MAX_PRICE_PER_1K = Decimal("9999.999999")
+
+
+# ── endpoint_url 검증 ──
+#
+# endpoint_url 은 gateway 어댑터가 그대로 요청 URL로 쓰는 저장형 값이다
+# (mantle_adapter `POST {endpoint}/v1/messages` 등). 검증 없이 저장하면
+# ADMIN 이 메타데이터 엔드포인트(169.254.169.254 등)나 게이트웨이 loopback 을
+# 등록해, 게이트웨이가 사용자 요청 본문을 그쪽으로 POST 하는 SSRF 경로가 열린다.
+#
+# 허용/차단 기준:
+#   * 스킴은 http/https 만 (file://, gopher:// 등 차단)
+#   * userinfo(`http://u:p@h`)·fragment 금지 — 자격증명 내장/파서 혼동 방지
+#   * 호스트 필수. link-local(169.254.0.0/16 메타데이터 대역), loopback,
+#     unspecified, multicast 리터럴 IP 차단
+#   * RFC1918 사설 IP·내부 DNS 는 **허용** — OPENMODEL 같은 사내 vLLM 엔드포인트가
+#     정당한 사용처다. 사내망 차단은 프록시/네트워크 정책의 일이다.
+_BLOCKED_ENDPOINT_HOSTNAMES = {"localhost", "localhost.localdomain"}
+
+# loopback/link-local 플래그로 잡히지 않는 클라우드 메타데이터 주소를 명시 차단한다.
+# fd00:ec2::254 는 EC2 IPv6 IMDS — ULA(fc00::/7, is_private)라 일반 플래그를 통과한다.
+_BLOCKED_ENDPOINT_IPS = {
+    ipaddress.ip_address("fd00:ec2::254"),  # EC2 IMDS (IPv6)
+}
+
+
+def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
+    """IPv6 임베디드 IPv4 껍질 벗기기 (A1-1).
+
+    다음 형태는 IPv4 를 IPv6 안에 싣는데, `is_loopback`/`is_link_local` 등의
+    플래그는 껍데기 주소 기준이라 임베디드 목적지를 안 본다 — `::127.0.0.1`
+    (IPv4-compatible)과 `64:ff9b::7f00:1`(NAT64)은 `is_global=True` 로 통과했다.
+      - IPv4-mapped   ::ffff:a.b.c.d   → ipaddress.ipv4_mapped
+      - 6to4          2002:aabb:ccdd:: → ipaddress.sixtofour
+      - IPv4-compat   ::a.b.c.d        → ::/96 최하위 32bit (::, ::1 제외)
+      - NAT64         64:ff9b::a.b.c.d → 64:ff9b::/96 최하위 32bit
+      - Teredo        2001::/32 → client IPv4 = 최하위 32bit 의 bit-flip
+    """
+    mapped = ip.ipv4_mapped or ip.sixtofour
+    if mapped is not None:
+        return mapped
+    v6 = int(ip)
+    if (v6 >> 32) == 0 and (v6 & 0xFFFFFFFF) > 1:  # ::/96, ::/::1 제외
+        return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
+    if (v6 >> 32) == (0x64FF9B << 64):  # NAT64 well-known prefix 64:ff9b::/96
+        return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
+    if (v6 >> 96) == 0x20010000:  # Teredo 2001:0::/32 — client IPv4 는 low32 bit-flip
+        return ipaddress.IPv4Address((v6 & 0xFFFFFFFF) ^ 0xFFFFFFFF)
+    return None
+
+
+# RFC 8215 NAT64 local-use 예약 블록 — 외부 엔드포인트로 정당한 리터럴이 아니며
+# PL=48 임베딩 레이아웃(u-octet 분리)이 다르고 복잡하므로 블록 전체를 차단한다.
+_BLOCKED_V6_RANGES = (
+    ipaddress.ip_network("64:ff9b:1::/48"),   # NAT64 local-use
+)
+
+
+def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if (
+        ip.is_loopback
+        or ip.is_link_local
+        or ip.is_unspecified
+        or ip.is_multicast
+        or ip in _BLOCKED_ENDPOINT_IPS
+    ):
+        return True
+    if isinstance(ip, ipaddress.IPv6Address):
+        if any(ip in net for net in _BLOCKED_V6_RANGES):
+            return True
+        inner = _embedded_ipv4(ip)
+        if inner is not None and _blocked_ip(inner):
+            return True
+    return False
+
+
+def _resolved_ips(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """호스트명을 OS 리졸버로 해소해 실제 접속 대상 IP를 돌려준다.
+
+    `ipaddress.ip_address()`는 점표기 리터럴만 인식해 `2130706433`(decimal),
+    `0x7f000001`(hex), `127.1`(축약), `localhost.`(trailing dot) 같은 표기를
+    DNS 이름으로 오인한다 — 그런데 어댑터의 httpx/OS 리졸버는 이들을 실제
+    주소로 해석해 접속한다(127.0.0.1 등). 저장 시점에 리졸브 결과를 검사해야
+    이 표기 우회와 메타데이터로 리졸브되는 이름(169.254.169.254.nip.io 류)이
+    함께 차단된다.
+
+    잔여 한계(문서화): DNS rebinding — 검증 시점과 어댑터 요청 시점의 리졸브
+    결과가 다른 이름은 이 검사로 못 막는다. 그 한계는 배포망 egress 정책의 몫이다.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (socket.gaierror, UnicodeError, OSError):
+        # admin-api 컨텍스트에서 리졸브가 안 되는 이름(사내 DNS 차이 등)은
+        # 리터럴 검사 결과를 그대로 따른다 — 리졸브 불가 이름은 어차피 어댑터에서도
+        # 연결이 안 되며, 정당한 내부 엔드포인트 등록을 막지 않기 위함이다.
+        return []
+    ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
+    for info in infos:
+        try:
+            ips.append(ipaddress.ip_address(info[4][0]))
+        except ValueError:
+            continue
+    return ips
+
+
+def _validate_endpoint_url(v: str | None) -> str | None:
+    if v is None:
+        return None
+    parsed = urlparse(v.strip())
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError("endpoint_url은 http(s) URL이어야 합니다")
+    if parsed.username or parsed.password:
+        raise ValueError("endpoint_url에 자격증명(userinfo)을 포함할 수 없습니다")
+    if parsed.fragment:
+        raise ValueError("endpoint_url에 fragment(#)를 포함할 수 없습니다")
+    host = parsed.hostname
+    if not host:
+        raise ValueError("endpoint_url에 유효한 호스트가 없습니다")
+    if host.lower().rstrip(".") in _BLOCKED_ENDPOINT_HOSTNAMES:
+        raise ValueError("endpoint_url에 loopback 호스트를 사용할 수 없습니다")
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        ip = None  # DNS 이름/숫자형 표기 — 아래 리졸브 검사가 실제 목적지를 검증한다
+    if ip is not None and _blocked_ip(ip):
+        raise ValueError(
+            "endpoint_url에 loopback/link-local/메타데이터 IP를 사용할 수 없습니다"
+        )
+    for resolved in _resolved_ips(host):
+        if _blocked_ip(resolved):
+            raise ValueError(
+                "endpoint_url 호스트가 loopback/link-local/메타데이터 IP로 해석됩니다"
+            )
+    return v
 
 
 # ── Requests ──
@@ -55,6 +192,11 @@ class ModelCreateRequest(BaseModel):
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
     )
 
+    #: 스펙 정보 — ``None`` = 미상(수동 커스텀 모델). 카탈로그 동기화가 채우지 못한
+    #: 신규 모델을 운영자가 수동 등록할 때 쓴다. ``ge=1`` — 0 이하 스펙은 무의미.
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
+
     #: 이 모델을 쓸 수 있는 앱 허용목록. **3-상태**(models/model.py 주석 참조):
     #:   생략/``null``  제한 없음
     #:   ``[]``         명시적으로 빈 허용목록 = 어떤 앱도 허용되지 않음
@@ -67,6 +209,11 @@ class ModelCreateRequest(BaseModel):
         # ⚠️ None 을 그대로 통과시켜야 한다 — [] 로 정규화하면 "제한 없음" 이
         #    "전면 거부" 로 바뀐다(정확히 반대 방향의 사고).
         return validate_clients(v)
+
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_endpoint_url(cls, v: str | None) -> str | None:
+        return _validate_endpoint_url(v)
 
 
 class ModelUpdateRequest(BaseModel):
@@ -101,12 +248,20 @@ class ModelUpdateRequest(BaseModel):
     #:    거부이므로 "제한 해제" 버튼이 그 모델을 통째로 막는다.
     #:    구별은 서비스 계층에서 ``model_fields_set`` 으로 한다.
     allowed_clients: list[str] | None = None
+    #: 스펙 정보 — 생략=유지, 명시적 null=삭제(미상으로 되돌림). model_fields_set 규칙은
+    #: description/display_name 과 동일하게 서비스에서 처리한다.
+    context_window: int | None = Field(default=None, ge=1)
+    max_output_tokens: int | None = Field(default=None, ge=1)
 
     @field_validator("allowed_clients")
     @classmethod
     def _validate_update_clients(cls, v: list[str] | None) -> list[str] | None:
         return validate_clients(v)
 
+    @field_validator("endpoint_url")
+    @classmethod
+    def _check_update_endpoint_url(cls, v: str | None) -> str | None:
+        return _validate_endpoint_url(v)
 
 
 class PricingRequest(BaseModel):
@@ -247,3 +402,30 @@ class AllowedModelsSetRequest(BaseModel):
 class AllowedModelsResponse(BaseModel):
     team_id: str
     model_aliases: list[str]
+
+
+class ModelDeletionImpactResponse(BaseModel):
+    """DELETE /admin/models/{alias} 사전 영향 조회 — 확인 다이얼로그의 재료.
+
+    각 필드는 삭제 시 같이 정리되거나 차단 사유가 되는 참조 수다.
+    blocked: downgrade_policies.to_model_alias 참조가 있으면 true — 이 모델이
+    다른 모델의 살아있는 fallback 목적지라서, 정책 해제 없이 지우면 예산 초과 시
+    전환 대신 에러가 나므로 삭제를 거부한다.
+    """
+
+    alias: str
+    usage_logs: int = 0
+    pricings: int = 0
+    team_allowed: int = 0
+    user_allowed: int = 0
+    rate_limits: int = 0
+    downgrade_from: int = 0
+    downgrade_to: int = 0
+    blocked: bool = False
+
+
+class ModelDeleteResponse(BaseModel):
+    """삭제 결과 — 함께 정리된 자식 행 수를 돌려준다(토스트/감사 표시용)."""
+
+    alias: str
+    deleted: ModelDeletionImpactResponse

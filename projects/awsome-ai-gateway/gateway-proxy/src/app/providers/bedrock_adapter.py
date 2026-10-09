@@ -38,12 +38,20 @@ def _extract_bedrock_usage(response_body: dict) -> TokenUsage:
     output_tokens = usage.get("output_tokens", usage.get("outputTokens", 0))
     cache_creation = usage.get("cache_creation_input_tokens", 0)
     cache_read = usage.get("cache_read_input_tokens", 0)
+    # Anthropic 응답의 usage.cache_creation.ephemeral_1h_input_tokens —
+    # 혼합 TTL 요청의 1h 캐시 쓰기만 분리해 정확 과금(R2-12).
+    # 미보고 시 None 유지(삼값, A2-4) — 0 으로 채우면 "분해가 보고됐는데 0"과
+    # 구분이 안 돼 요청 측 1h 플래그가 잘못 발동한다.
+    cache_creation_1h = (usage.get("cache_creation") or {}).get(
+        "ephemeral_1h_input_tokens"
+    )
     return TokenUsage(
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         total_tokens=input_tokens + output_tokens,
         cache_creation_input_tokens=cache_creation,
         cache_read_input_tokens=cache_read,
+        cache_creation_1h_input_tokens=cache_creation_1h,
     )
 
 
@@ -177,6 +185,15 @@ class BedrockAdapter(ProviderAdapter):
                 usage = TokenUsage(
                     input_tokens=response.get("usage", {}).get("inputTokens", 0),
                     output_tokens=response.get("usage", {}).get("outputTokens", 0),
+                    # ⚠️ Converse 의 usage 에는 캐시 카운터도 camelCase 로 온다
+                    #    (cacheReadInputTokens/cacheWriteInputTokens). 읽지 않으면
+                    #    캐시된 토큰이 usage_logs 와 과금 양쪽에서 0 이 된다.
+                    cache_read_input_tokens=response.get("usage", {}).get(
+                        "cacheReadInputTokens", 0
+                    ),
+                    cache_creation_input_tokens=response.get("usage", {}).get(
+                        "cacheWriteInputTokens", 0
+                    ),
                 )
                 usage.total_tokens = usage.input_tokens + usage.output_tokens
                 body = json.dumps(response).encode()
@@ -228,9 +245,6 @@ class BedrockAdapter(ProviderAdapter):
         path_suffix: str = "invoke-with-response-stream",
         **kwargs,
     ) -> tuple[int, AsyncIterator[bytes], dict, str | None]:
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         try:
             client = await self._get_client()
             if path_suffix == "invoke-with-response-stream":
@@ -259,12 +273,15 @@ class BedrockAdapter(ProviderAdapter):
 
             elif path_suffix == "converse-stream":
                 parsed_req = json.loads(request_body)
-                response = await loop.run_in_executor(
-                    _bedrock_executor,
+                # invoke-with-response-stream 과 같은 이유 — 죽은 풀 연결의
+                # 연결 수준 오류만 1회 재시도(응답 시작 전이라 중복 과금 없음).
+                response = await self._call_with_connect_retry(
+                    client, _bedrock_executor,
                     lambda: client.converse_stream(
                         modelId=model_id,
                         **{k: v for k, v in parsed_req.items() if k != "modelId"},
                     ),
+                    model_id=model_id, event="converse_stream_connect_retry",
                 )
                 aws_request_id = response.get("ResponseMetadata", {}).get("RequestId")
                 stream = response.get("stream")

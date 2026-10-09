@@ -217,7 +217,8 @@ export function AppPolicyPanel() {
 
       {policy && !isLoadPending && (
         <div className="space-y-6">
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+          {/* 기본 모델은 아래 폼이 현재 저장값을 그대로 보여주므로 카드는 중복 — 제외 (리뷰 MED) */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
               <p className="text-sm font-medium text-muted-foreground">{t('allowedModels')}</p>
               <p className="text-2xl font-bold num">{policy.allowed_models.length}</p>
@@ -225,14 +226,6 @@ export function AppPolicyPanel() {
             <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
               <p className="text-sm font-medium text-muted-foreground">{t('allowedUsers')}</p>
               <p className="text-2xl font-bold num">{policy.allowed_users.length}</p>
-            </div>
-            <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
-              <p className="text-sm font-medium text-muted-foreground">{t('defaultModel')}</p>
-              <p className="text-sm font-mono mono-id truncate">
-                {policy.default_model ?? (
-                  <span className="text-muted-foreground font-sans">{t('notSet')}</span>
-                )}
-              </p>
             </div>
           </div>
 
@@ -301,7 +294,10 @@ export function AppPolicyPanel() {
           </div>
 
           <div className="space-y-3">
-            <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
+            <div className="flex items-baseline justify-between gap-2">
+              <h2 className="text-sm font-semibold">{t('modelManagement')}</h2>
+              <p className="text-xs text-muted-foreground">{t('chipLegend')}</p>
+            </div>
             <div className="glass rounded-apple overflow-hidden">
               {/* 모델 수만큼 길어지는 표 — max-h + overflow-y 로 스크롤시키고
                   헤더는 sticky 로 고정(bg-card 로 아래 행을 가림). */}
@@ -343,6 +339,7 @@ export function AppPolicyPanel() {
                                   return (
                                     <span
                                       key={c}
+                                      title={CLIENT_LABELS[c] ?? c}
                                       className={`inline-flex items-center rounded px-1.5 py-0.5 text-[10px] font-medium ${
                                         on
                                           ? 'bg-teal-500/15 text-teal-700 dark:text-teal-300'

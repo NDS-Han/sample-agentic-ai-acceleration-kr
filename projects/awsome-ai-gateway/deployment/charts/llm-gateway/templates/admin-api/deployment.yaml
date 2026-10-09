@@ -67,6 +67,23 @@ spec:
             {{- include "llm-gateway.authEnv" . | nindent 12 }}
             {{- include "llm-gateway.oidcEnv" . | nindent 12 }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
+            # /internal/* 공유 시크릿 게이트(R3-1). app Secret 의 internal_api_token
+            # 키에서 읽는다 — optional: 키가 없으면 INTERNAL_API_TOKEN 이 비어
+            # 엔드포인트가 fail-closed(403)로 동작. 켜려면 Secret 에 키 추가.
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llm-gateway.fullname" . }}-app
+                  key: internal_api_token
+                  optional: true
+            # /webhooks/git GitHub 서명 검증용(R4-A1-2). app Secret 의
+            # github_webhook_secret 키 — optional: 없으면 엔드포인트 fail-closed.
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llm-gateway.fullname" . }}-app
+                  key: github_webhook_secret
+                  optional: true
             {{- range $key, $value := .Values.adminApi.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

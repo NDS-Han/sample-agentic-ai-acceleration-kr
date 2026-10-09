@@ -165,6 +165,13 @@ class CostLimitResult(BaseModel):
     retry_after: int | None = None
     reserved_cost: Decimal = Decimal("0")
     window_reset: int = 0
+    # 예약이 실제로 커밋된 스코프('USER'/'TEAM')와 그 때의 윈도우 타임스탬프.
+    # settle 이 *예약된* 스코프·*예약된* 윈도우 키에만 차액을 쓰게 하는 근거 —
+    # 없으면 settle 이 무제한 스코프에 TTL 없는 음수 팬텀 키를 만들고,
+    # 분/시 경계를 넘은 스트리밍 요청의 환불이 다음 버킷에 들어간다.
+    committed_scopes: list[str] = Field(default_factory=list)
+    cpm_window_ts: int = 0
+    cph_window_ts: int = 0
 
 
 def split_cached_input(input_total: int, cached_tokens: int) -> tuple[int, int]:
@@ -259,9 +266,21 @@ class TokenUsage(BaseModel):
     # and ALREADY counts them inside output_tokens; Anthropic extended-thinking tokens
     # also land here when present. Do NOT add to total/cost/TPM (double-billing). 0 = none.
     reasoning_tokens: int = 0
-    # True when any cache_control block in the request used ttl=3600 (1-hour cache).
-    # Used by calculate_cost to select cache_write_1h_per_1k vs cache_write_per_1k.
+    # True when any cache_control block in the request used 1-hour cache
+    # (Anthropic wire literal is "1h"; legacy "3600"도 허용).
+    # Used by calculate_cost to select cache_write_1h_per_1k vs cache_write_per_1k
+    # **as a fallback** — provider 가 응답 usage 의 cache_creation.ephemeral_*
+    # 분해를 보고하면 cache_creation_1h_input_tokens 가 정확한 분할을 준다.
     cache_ttl_1h: bool = False
+    # Anthropic 응답 usage.cache_creation.ephemeral_1h_input_tokens —
+    # 1시간 TTL 로 쓰인 캐시 생성 토큰만 분리한 값. 혼합 TTL 요청에서
+    # 5m 부분을 1h 단가로 잘못 과금하지 않기 위해 사용한다.
+    #
+    # ★ 삼값(None | int, A2-4): None = 응답이 분해를 보고하지 않음 → calculate_cost 는
+    #   요청 측 cache_ttl_1h 로 전체 1h 폴백. 0 = 분해가 **보고됐는데** 1h 부분이 0
+    #   → 전부 5m 과금이 정답. 이 둘을 구분하지 못하면 분해를 보고하는 프로바이더의
+    #   "캐시는 있는데 전부 5m" 응답이 요청 플래그 때문에 전량 1h 로 과금된다.
+    cache_creation_1h_input_tokens: int | None = None
     # KI-08: 스트리밍 disconnect 시 누적 텍스트로 역산한 경우 True.
     # 진짜 provider usage 이벤트면 False. 감사/청구 정확도 분석 용도.
     estimated: bool = False

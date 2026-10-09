@@ -17,6 +17,7 @@ Step 5에서 `_load_scope_limits()`를 `model.rate_limit_configs` DB 조회로 �
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal
 
 import structlog
@@ -174,8 +175,12 @@ async def enforce_rate_limits(
         max_output_tokens=max_output,
     )
 
+    # TPM 커밋 목록 — 비용 단계가 거절하면 이 목록으로 예약을 되돌린다.
+    # (check_multi_scope_tpm 내부에서 스코프 간 거절은 이미 해제한다.)
+    tpm_committed: list[ScopeDescriptor] = []
+    tpm_reserved_at = time.time()
     tpm_result = await svc.check_multi_scope_tpm(
-        redis, descriptors, reserved_tokens=reserved
+        redis, descriptors, reserved_tokens=reserved, committed_out=tpm_committed
     )
     if not tpm_result.allowed:
         return _build_429(tpm_result, metrics)
@@ -193,13 +198,29 @@ async def enforce_rate_limits(
         team_cph_limit=limits.team.cph,
     )
     if not cost_result.allowed:
+        # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
+        #    수만 토큰의 예약이 버킷 만료까지 남아, 거절당한 재시도가 TEAM TPM
+        #    카운터를 부풀려 팀 전체를 기아시키는 양의 피드백이 됐다.
+        #    rate_limit_state 는 전 단계 통과 후에만 채워지므로 여기서 직접
+        #    해제해야 한다. 실패해도 거절은 진행(누수분은 버킷 TTL 이 회수).
+        try:
+            await svc.settle_tpm(redis, tpm_committed, reserved, 0)
+        except Exception:
+            logger.warning("tpm_unwind_on_cost_reject_failed")
         return _build_cost_429(cost_result, metrics)
 
-    # 통과 — settle용 정보 주입
+    # 통과 — settle용 정보 주입. 윈도우/커밋 스코프도 싣는다 — settle 이
+    # **예약이 실제로 들어간** 버킷/스코프 키를 치게 하는 근거이다(윈도우 경계를
+    # 넘은 스트리밍 요청의 환불이 다음 버킷에 새는 결함 + 무한도 스코프에 TTL
+    # 없는 음수 팬텀 키가 생기던 결함).
     state["rate_limit_state"] = {
         "tpm_descriptors": _only_tpm(descriptors),
         "tpm_reserved": reserved,
+        "tpm_reserved_at": tpm_reserved_at,
         "cost_reserved": cost_result.reserved_cost,
+        "cost_committed_scopes": cost_result.committed_scopes,
+        "cost_cpm_window_ts": cost_result.cpm_window_ts,
+        "cost_cph_window_ts": cost_result.cph_window_ts,
     }
     return None
 

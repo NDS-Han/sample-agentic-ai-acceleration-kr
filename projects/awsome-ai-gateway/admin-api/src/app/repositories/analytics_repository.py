@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-from sqlalchemy import ColumnElement, distinct, func, select
+from sqlalchemy import ColumnElement, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage_filters import client_filter, cost_period_filter
@@ -33,7 +33,22 @@ class AnalyticsRepository:
         return list(result.scalars().all())
 
     async def upsert_aggregation(self, agg: ROIAggregation) -> ROIAggregation:
-        """UPSERT by period + scope + scope_id."""
+        """UPSERT by period + scope + scope_id.
+
+        ⚠️ SELECT→INSERT 레이스: 스케줄러와 ``/internal/scheduler/run`` 이 겹치면
+        둘 다 SELECT miss 후 INSERT 해서 한쪽이 UniqueViolation 으로 전체 배치를
+        롤백시켰다. ON CONFLICT 로는 커버가 안 된다 — ``scope_id`` 가 NULL(GLOBAL)
+        이면 유니크 인덱스 ``idx_roi_aggregations_unique`` 가 발동하지 않는다
+        (PG 는 NULL 을 서로 다르게 본다). 그래서 키별 advisory **xact** lock 으로
+        직렬화한다: 두 번째 트랜잭션은 첫 번째의 커밋을 기다렸다가 SELECT 하므로
+        (READ COMMITTED — 스냅샷이 문장 시작 시점) 커밋된 행을 보고 UPDATE 를 탄다.
+        해시 충돌은 직렬화만 키우고 정합성은 해치지 않는다.
+        """
+        lock_key = f"{agg.period}|{agg.scope.value}|{agg.scope_id or ''}"
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:k, 0))"),
+            {"k": lock_key},
+        )
         existing_stmt = select(ROIAggregation).where(
             ROIAggregation.period == agg.period,
             ROIAggregation.scope == agg.scope,

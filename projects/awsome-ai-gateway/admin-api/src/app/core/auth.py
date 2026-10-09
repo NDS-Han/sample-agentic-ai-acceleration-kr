@@ -32,6 +32,14 @@ class CurrentUser:
     service_token_id: uuid.UUID | None = None
 
 
+# 공개키 테이블(admin_jwt_configs)에는 비대칭 알고리즘만 등록돼야 한다 —
+# 대칭 HMAC(HS256 등)이 들어가면 공개 PEM 텍스트가 곧 서명 비밀이 돼
+# alg-confusion 위조가 성립한다. gateway-proxy(auth_service)도 같은 allowlist.
+_ALLOWED_JWT_ALGORITHMS = frozenset(
+    {"RS256", "RS384", "RS512", "ES256", "ES384", "ES512", "PS256", "PS384", "PS512"}
+)
+
+
 class JWTVerifier:
     """Loads Admin JWT public keys at startup and verifies RS256 tokens."""
 
@@ -40,6 +48,14 @@ class JWTVerifier:
 
     def load_configs(self, configs: list[dict]) -> None:
         for cfg in configs:
+            if cfg["algorithm"] not in _ALLOWED_JWT_ALGORITHMS:
+                # 오설정/침해로 대칭 alg 가 등록된 키는 검증에 쓰지 않는다.
+                logger.warning(
+                    "jwt_key_disallowed_algorithm",
+                    kid=str(cfg["id"]),
+                    algorithm=cfg["algorithm"],
+                )
+                continue
             kid = str(cfg["id"])
             self._public_keys[kid] = {
                 "pem": cfg["public_key_pem"],
@@ -110,6 +126,13 @@ def _parse_dev_token(token: str) -> dict | None:
     import os
 
     if not token.startswith("dev.") or os.getenv("DEV_LOGIN_ENABLED") != "true":
+        return None
+
+    # 이중 가드: configmap 실수로 DEV_LOGIN_ENABLED=true 가 prod 에 새어도
+    # dev 토큰은 절대 수용하지 않는다(백서명 없는 형식이므로 위조가 자유다).
+    from app.core.config import get_settings
+
+    if get_settings().is_production:
         return None
 
     parts = token.split(".")

@@ -52,6 +52,9 @@ class ModelBreakdown(BaseModel):
     model: str
     requests: int = 0
     cost_usd: Decimal = Decimal("0")
+    # 카탈로그 표시명 — 대시보드 도넛(modelDisplay)과 같은 규칙으로 쓰게 내린다.
+    # 미등록 alias 는 None → 프론트가 alias 로 fallback.
+    display_name: str | None = None
 
 
 class TeamBreakdown(BaseModel):
@@ -59,6 +62,9 @@ class TeamBreakdown(BaseModel):
     team_id: str
     cost_usd: Decimal = Decimal("0")
     active_users: int = 0
+    # canonical 표시명({dept}_{team}) 재료 — trends_by_team 과 같은 규칙으로
+    # 보내야 같은 화면의 두 차트가 같은 팀 라벨을 쓴다(동명 팀 구분).
+    dept_name: str | None = None
 
 
 class UserBreakdown(BaseModel):

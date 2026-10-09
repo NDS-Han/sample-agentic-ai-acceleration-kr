@@ -18,6 +18,7 @@ import { useToast } from '@/components/common/ToastProvider';
 import { Table, THead, TBody, TFoot, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { ConfirmImpactBox } from './ConfirmImpactBox';
 import { fmtUsd } from '@/lib/utils/format';
+import { NumberInput } from '@/components/common/NumberInput';
 
 interface TeamAllocationViewProps {
   teamId: string;
@@ -277,8 +278,7 @@ export function TeamAllocationView({
               </label>
               <div className="flex items-center gap-1">
                 <span className="text-muted-foreground text-sm">$</span>
-                <input
-                  type="number"
+                <NumberInput
                   min={0}
                   step={0.01}
                   value={capInput}
@@ -398,8 +398,7 @@ export function TeamAllocationView({
                     <Td>
                       <div className="flex items-center gap-1">
                         <span className="text-muted-foreground">$</span>
-                        <input
-                          type="number"
+                        <NumberInput
                           min={0}
                           step={0.01}
                           value={inputs[m.target_id] ?? ''}

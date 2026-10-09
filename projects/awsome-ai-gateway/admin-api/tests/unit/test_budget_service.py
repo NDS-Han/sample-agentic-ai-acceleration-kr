@@ -1050,11 +1050,44 @@ class TestSetDowngradeConfigDisabled:
         with patch("app.services.budget_service.DowngradePolicyRepository") as Repo:
             Repo.return_value.get_current_rules = AsyncMock(return_value=[rule])
             res = await budget_service.get_downgrade_config(
-                mock_session, scope=BudgetScope.TEAM, scope_id=uuid.uuid4()
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=uuid.uuid4(),
+                actor=admin_user,
             )
         assert res.enabled is False
         assert len(res.rules) == 1
         assert res.rules[0].from_model_alias == "anthropic.claude-opus"
+
+    @pytest.mark.asyncio
+    async def test_get_downgrade_config_team_leader_other_team_forbidden(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        """R2-7: TEAM_LEADER 가 타 팀의 다운그레이드 정책을 열람할 수 없다(IDOR)."""
+        with pytest.raises(ForbiddenError):
+            await budget_service.get_downgrade_config(
+                mock_session,
+                scope=BudgetScope.TEAM,
+                scope_id=uuid.uuid4(),  # 다른 팀
+                actor=team_leader_user,
+            )
+
+    @pytest.mark.asyncio
+    async def test_get_downgrade_config_team_leader_other_team_member_forbidden(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        """R2-7: USER 스코프도 같은 검사 — 타 팀 멤버 정책 열람 불가."""
+        other_team_user = MagicMock(spec=User)
+        other_team_user.team_id = uuid.uuid4()  # 리더의 팀이 아님
+        with patch("app.services.budget_service.UserRepository") as MockUserRepo:
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=other_team_user)
+            with pytest.raises(ForbiddenError):
+                await budget_service.get_downgrade_config(
+                    mock_session,
+                    scope=BudgetScope.USER,
+                    scope_id=uuid.uuid4(),
+                    actor=team_leader_user,
+                )
 
 
 class TestDeleteUserBudget:

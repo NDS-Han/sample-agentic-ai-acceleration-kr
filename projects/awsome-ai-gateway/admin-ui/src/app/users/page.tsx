@@ -19,8 +19,16 @@ function countOrgNodes(node: OrgTreeNode | null): Record<string, number> {
   return counts;
 }
 
-export default async function UsersPage() {
+interface UsersPageProps {
+  // searchParams 는 sync 객체다(await 금지 — 다른 페이지와 같은 패턴).
+  searchParams: { from?: string; node?: string };
+}
+
+export default async function UsersPage({ searchParams }: UsersPageProps) {
   const t = await getTranslations('users');
+  // /rate-limits → /users 리다이렉트로 온 경우, rate limit 이 어디로 갔는지
+  // 안내한다 — 빈 트리만 던지면 "기능이 사라졌나" 혼란을 준다(리뷰 TOP-2).
+  const fromRateLimits = searchParams?.from === 'rate-limits';
   // null = 조직 데이터 없음 / failed = 조회 실패 — 빈 트리와 실패를 구분한다.
   const orgTreeResult = await adminAPI
     .get<OrgTreeNode>('/admin/users/tree')
@@ -53,6 +61,12 @@ export default async function UsersPage() {
           </p>
         </div>
       </div>
+      {fromRateLimits && (
+        <div className="mb-4 rounded-apple border border-primary/30 bg-primary/5 px-4 py-3 text-sm">
+          <p className="font-semibold">{t('rateLimitsMovedTitle')}</p>
+          <p className="text-muted-foreground mt-0.5">{t('rateLimitsMovedDesc')}</p>
+        </div>
+      )}
       {orgTreeResult.ok ? <OrgTreeView root={orgTree} /> : <ErrorState />}
     </div>
   );

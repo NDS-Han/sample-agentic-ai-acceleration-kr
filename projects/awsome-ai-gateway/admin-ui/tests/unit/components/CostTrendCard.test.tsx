@@ -44,7 +44,7 @@ describe('buildTrendChartData', () => {
     expect(r.data[0].other).toBeUndefined();
   });
 
-  it('부서가 있는 팀은 라벨이 "부서-팀"이다 — 부서 없으면 팀명 그대로', () => {
+  it('부서가 있는 팀은 라벨이 "부서_팀"이다 — 부서 없으면 팀명 그대로', () => {
     const r = buildTrendChartData(
       [pt('2026-09-01', 10)],
       [
@@ -52,7 +52,9 @@ describe('buildTrendChartData', () => {
         team('b', 'Infra', [['2026-09-01', 4]]),
       ],
     );
-    expect(r.series.map((s) => s.name)).toEqual(['NDS-Developers', 'Infra']);
+    // canonical 규칙은 Cognito 그룹 꼬리와 같은 `부서_팀` — 예산 표의
+    // _team_display_name 과 동일해야 페이지 간 팀명이 일치한다.
+    expect(r.series.map((s) => s.name)).toEqual(['NDS_Developers', 'Infra']);
   });
 
   it('팀이 하나면 합계 + 그 팀 시리즈다', () => {

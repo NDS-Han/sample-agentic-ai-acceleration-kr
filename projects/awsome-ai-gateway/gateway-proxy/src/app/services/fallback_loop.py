@@ -210,7 +210,13 @@ async def release_reservations(
     tpm_reserved = rls.get("tpm_reserved", 0)
     if tpm_descriptors and tpm_reserved > 0:
         try:
-            await svc.settle_tpm(redis, tpm_descriptors, tpm_reserved, 0)
+            await svc.settle_tpm(
+                redis,
+                tpm_descriptors,
+                tpm_reserved,
+                0,
+                reserved_at=rls.get("tpm_reserved_at"),
+            )
         except Exception:
             logger.warning("fallback_unwind_tpm_failed")
 
@@ -223,6 +229,9 @@ async def release_reservations(
                 actual_cost=Decimal("0"),
                 reserved_cost=cost_reserved,
                 team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                committed_scopes=rls.get("cost_committed_scopes"),
+                cpm_window_ts=rls.get("cost_cpm_window_ts") or None,
+                cph_window_ts=rls.get("cost_cph_window_ts") or None,
             )
         except Exception:
             logger.warning("fallback_unwind_cost_failed")

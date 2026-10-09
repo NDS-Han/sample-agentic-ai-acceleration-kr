@@ -214,9 +214,13 @@ def _build_redis(allowed_models=None, budget_user=None, budget_team=None):
     cache_key = f"key:cache:vk:{VK_HASH}"
     model_key = f"model:{MODEL_ID}"
 
+    vk_map_key = f"key:vk:{VK_HASH}"
+
     def _get(key, *args, **kwargs):
         if key == cache_key:
             return auth_json  # VKAuthStrategy 캐시 히트
+        if key == vk_map_key:
+            return b"user-1"  # 폐기 재확인(R2-8) — 매핑 존재해야 캐시 히트 유효
         if key == model_key:
             return model_json  # RouterService 모델 캐시 히트
         return None  # rl:config:* miss → DB → 빈 결과 → 무제한

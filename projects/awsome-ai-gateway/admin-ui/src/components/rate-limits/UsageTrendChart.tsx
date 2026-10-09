@@ -25,6 +25,7 @@ import {
   type TrendWindow,
   type UsageTrend,
 } from '@/lib/utils/rateLimitUsage';
+import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 
 const WINDOWS: TrendWindow[] = ['1h', '6h', '24h', '7d'];
 const WINDOW_LABEL: Record<TrendWindow, string> = {
@@ -46,14 +47,25 @@ interface UsageTrendChartProps {
   };
 }
 
-function fmtTick(t: number, bucketSec: number): string {
-  const d = new Date(t * 1000);
-  const hh = String(d.getHours()).padStart(2, '0');
-  const mm = String(d.getMinutes()).padStart(2, '0');
+// X축/툴팁은 브라우저 로컬 TZ 가 아니라 앱 전역 리포팅 TZ(REPORTING_TIMEZONE)로
+// 그린다 — 버킷은 서버가 리포팅 TZ 기준으로 자르는데 라벨만 로컬 TZ 면 같은
+// 버킷이 다른 시각으로 읽힌다. timeZone 미지정 시 브라우저 TZ 로 fallback.
+export function fmtTick(t: number, bucketSec: number, timeZone?: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    month: 'numeric',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(new Date(t * 1000));
+  const get = (k: Intl.DateTimeFormatPartTypes) =>
+    parts.find((p) => p.type === k)?.value ?? '';
+  const hh = get('hour').padStart(2, '0');
   if (bucketSec >= 3600) {
-    return `${d.getMonth() + 1}/${d.getDate()} ${hh}시`;
+    return `${get('month')}/${get('day')} ${hh}시`;
   }
-  return `${hh}:${mm}`;
+  return `${hh}:${get('minute')}`;
 }
 
 function fmtValue(v: number, metric: Metric): string {
@@ -64,6 +76,7 @@ function fmtValue(v: number, metric: Metric): string {
 
 export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps) {
   const t = useTranslations('rateLimits');
+  const reportingTz = useReportingTz();
   const [window, setWindow] = useState<TrendWindow>('24h');
   const [metric, setMetric] = useState<Metric>('rpm');
   const [trend, setTrend] = useState<UsageTrend | null>(null);
@@ -156,7 +169,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
               <XAxis
                 dataKey="t"
-                tickFormatter={(v) => fmtTick(v, trend.bucket_sec)}
+                tickFormatter={(v) => fmtTick(v, trend.bucket_sec, reportingTz)}
                 tick={{ fontSize: 10 }}
                 tickLine={false}
                 axisLine={false}
@@ -170,7 +183,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
                 width={44}
               />
               <Tooltip
-                labelFormatter={(v) => fmtTick(Number(v), trend.bucket_sec)}
+                labelFormatter={(v) => fmtTick(Number(v), trend.bucket_sec, reportingTz)}
                 formatter={(v) => [fmtValue(Number(v), metric), metric.toUpperCase()]}
                 contentStyle={{
                   backgroundColor: 'hsl(var(--card))',

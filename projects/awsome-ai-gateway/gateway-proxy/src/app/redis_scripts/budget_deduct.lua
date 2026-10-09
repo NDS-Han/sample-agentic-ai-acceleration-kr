@@ -36,19 +36,30 @@ end
 local used = tonumber(redis.call('GET', usage_key) or '0')
 local new_used = used + cost
 
--- 차감 실행
+-- 차감 실행. period 가 키에 박혀 있어도 TTL 은 없던 상태였다 — 월이 지난 카운터가
+-- 영구히 남아 Redis 를 서서히 채운다. 마지막 쓰기로부터 45 일로 잡으면 해당 월
+-- 카운터가 다음 달 초의 조회(usage/me)까지 살아남고 그 뒤엔 정리된다.
 redis.call('INCRBYFLOAT', usage_key, cost)
+redis.call('EXPIRE', usage_key, 3888000)
 
--- 임계값 교차 체크
+-- 임계값 교차 체크 — **가장 높은** 교차값을 반환한다.
+-- 옛 코드는 첫 교차에서 break 했는데, 한 요청이 75%→105% 처럼 여러 임계값을
+-- 건너면 80 만 보고되고 90/100 은 이후 요청에서도 교차로 인식되지 않아
+-- "예산 100% 도달" 알림이 영구 누락됐다(알림은 교차 이벤트당 1회 발송).
 local triggered = cjson.null
 if limit > 0 then
     local old_pct = (used / limit) * 100
     local new_pct = (new_used / limit) * 100
+    local highest = nil
     for _, t in ipairs(thresholds) do
         if old_pct < t and new_pct >= t then
-            triggered = t
-            break
+            if highest == nil or t > highest then
+                highest = t
+            end
         end
+    end
+    if highest ~= nil then
+        triggered = highest
     end
 end
 

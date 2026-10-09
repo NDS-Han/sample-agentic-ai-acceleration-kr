@@ -95,8 +95,46 @@ class _TeamCache:
 class CognitoSyncService:
     """Cognito User Pool 전체 동기화."""
 
-    def __init__(self, cognito_client) -> None:
+    # pg advisory lock key — sync_all 상호배제(R3-9). 동시에 2개의 sync_all 이
+    # 돌면 reconcile 단계가 서로의 seen 집합을 모른 채 활성 유저를 비활성화한다.
+    _SYNC_LOCK_KEY = 0xC0A910  # 임의 상수
+
+    def __init__(self, cognito_client, key_service=None) -> None:
         self._cognito = cognito_client
+        # 비활성화 시 VK 폐기(R3-3)용. None 이면 폐기는 건너뛰고 is_active 만
+        # 내린다(테스트/폴백 호환) — 라우터는 반드시 key_service 를 주입한다.
+        self._key_service = key_service
+
+    async def _revoke_keys_for_users(self, session, user_ids, result):
+        """비활성화된 사용자들의 ACTIVE VK 일괄 폐기 — 트랜잭션 안(DB+해시 수집).
+        반환값은 (vk, hash) 쌍 리스트 — 호출자는 commit 후 `_finalize_revoked_keys`
+        로 Redis/알림 부수효과를 적용해야 한다(pre-commit DEL 경합 방지)."""
+        if not user_ids or self._key_service is None:
+            return []
+        try:
+            hashed = await self._key_service.revoke_keys_for_users(
+                session, user_ids=list(user_ids), reason="cognito_deactivated"
+            )
+            if hashed:
+                logger.info(
+                    "cognito_sync.keys_revoked",
+                    users=len(user_ids), keys=len(hashed),
+                )
+            return hashed
+        except Exception as e:
+            result.errors.append(f"Failed to revoke keys on deactivate: {e}")
+            return []
+
+    async def _finalize_revoked_keys(self, session, hashed, result) -> None:
+        """commit 후 부수효과 — Redis DEL·역인덱스·key_revoked publish."""
+        if not hashed or self._key_service is None:
+            return
+        try:
+            await self._key_service.finalize_revoked_keys(
+                session, hashed, reason="cognito_deactivated"
+            )
+        except Exception as e:
+            result.errors.append(f"Failed to finalize key revocation: {e}")
 
     async def sync_all(self, session) -> SyncResult:
         """Cognito 에서 그룹/사용자를 가져와 DB 동기화.
@@ -107,7 +145,7 @@ class CognitoSyncService:
         3. 팀 매핑 가능한 그룹 파싱 (Claude_<team>, Claude_<dept>_<team>)
         4. 사용자별로 첫 번째 매칭 그룹의 팀에 배정 + role 결정
         """
-        import asyncio
+        from sqlalchemy import text
 
         settings = get_settings()
         result = SyncResult()
@@ -117,7 +155,84 @@ class CognitoSyncService:
             result.errors.append("COGNITO_USER_POOL_ID not configured")
             return result
 
+        # 상호배제(R3-9): advisory lock 으로 동시 sync_all 을 한 개로 제한.
+        # Postgres 에서 lock 을 못 얻으면(동시 sync 진행 중) 이번 실행은 건너뛴다.
+        # 쿼리 자체가 실패하는 환경(모킹/비-PG 드라이버)은 잠금 없이 진행한다 —
+        # sync 를 막는 것보다 기존 동작 유지가 낫다.
+        #
+        # ⚠️ R4-A2-2: 이전엔 작업 세션의 커넥션에 **세션-레벨** 락을 걸었는데,
+        #   engine-bound 세션은 `commit()` 마다 커넥션을 풀에 반환한다 — 락이
+        #   반환된 커넥션에 잔류(누수)하고, 그 커넥션을 다음에 빌린 무관한 요청이
+        #   락을 상속받는다. finally 의 unlock 도 다른 커넥션에서 no-op 이 됨.
+        #   (`session.connection()` 도 commit 간 고정이 아니다 — 실측으로
+        #   commit 시 checkin 발생 확인.)
+        #   → engine-bound 세션이면 **전용 커넥션 + xact-레벨 락**:
+        #     락이 작업 세션의 commit 과 독립이고, 그 커넥션의 tx 종료
+        #     (rollback/commit/close) 시 자동 해제라 풀 잔류 경로가 없다.
+        #   connection-bound 세션(테스트의 conn-bound 바인딩)은 그 커넥션이
+        #   풀 반환 대상이 아니라 커밋 넘어 유지되므로 세션-레벨 락으로 충분.
+        from contextlib import AsyncExitStack
+
+        from sqlalchemy.ext.asyncio import AsyncConnection
+
+        lock_stack = AsyncExitStack()
+        lock_acquired = False
+        session_locked = False
+        try:
+            bind = session.get_bind()
+            if isinstance(bind, AsyncConnection):
+                # 커넥션 직접 바인딩(외부 소유 커넥션): 세션-레벨 락.
+                locked = await session.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"),
+                    {"k": self._SYNC_LOCK_KEY},
+                )
+                if not locked.scalar():
+                    result.errors.append("cognito sync already in progress")
+                    return result
+                session_locked = True
+            else:
+                # 엔진 바인딩: 락 전용 커넥션을 하나 빌려 xact 락을 건다.
+                lock_conn = await lock_stack.enter_async_context(bind.connect())
+                await lock_stack.enter_async_context(lock_conn.begin())
+                locked = await lock_conn.execute(
+                    text("SELECT pg_try_advisory_xact_lock(:k)"),
+                    {"k": self._SYNC_LOCK_KEY},
+                )
+                lock_acquired = bool(locked.scalar())
+                if not lock_acquired:
+                    result.errors.append("cognito sync already in progress")
+                    await lock_stack.aclose()
+                    return result
+        except Exception:
+            logger.warning("cognito_sync.advisory_lock_unavailable", exc_info=True)
+            await lock_stack.aclose()
+
+        try:
+            return await self._sync_all_locked(session, settings, result)
+        finally:
+            if lock_acquired:
+                # tx 블록 종료(commit/rollback)가 xact 락을 자동 해제하고,
+                # 커넥션 CM 종료가 커넥션을 풀에 반환한다(락 잔류 없음).
+                await lock_stack.aclose()
+            if session_locked:
+                try:
+                    # 실패한 트랜잭션 상태를 정리해야 unlock 쿼리가 실행 가능하다.
+                    # session-레벨 advisory unlock 은 실행 즉시 효력이 생긴다(commit 불필요).
+                    await session.rollback()
+                    await session.execute(
+                        text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": self._SYNC_LOCK_KEY},
+                    )
+                except Exception:
+                    logger.warning(
+                        "cognito_sync.advisory_unlock_failed", exc_info=True
+                    )
+
+    async def _sync_all_locked(self, session, settings, result) -> SyncResult:
+        import asyncio
+
         repo = UserRepository(session)
+        user_pool_id = settings.COGNITO_USER_POOL_ID
 
         # 0. 팀/부서 캐시 1회 구축 (멤버 미포함 경량 조회) — 그룹마다 전체 그래프를
         #    반복 로드하던 것을 대체(OOM 주원인 제거).
@@ -134,6 +249,12 @@ class CognitoSyncService:
         user_map: dict[str, dict] = {}
         # group_name → team_id (팀 매핑 가능한 그룹만)
         group_team_id: dict[str, uuid.UUID] = {}
+
+        # R3-4: reconcile 완전성 플래그 — 멤버/전체 유저 조회가 하나라도 실패하면
+        # seen 집합이 불완전하므로 4단계(비활성화)를 건너뛴다. 실패 그룹의 유저가
+        # seen 에 빠진 채 deactivate 를 돌리면 Cognito 에 살아있는 유저가 대량
+        # 비활성화된다(극단적으로 전원).
+        reconcile_incomplete = False
 
         for group in groups:
             group_name = group["GroupName"]
@@ -155,6 +276,7 @@ class CognitoSyncService:
                 )
             except Exception as e:
                 result.errors.append(f"Failed to list members of {group_name}: {e}")
+                reconcile_incomplete = True
                 continue
 
             for member in members:
@@ -188,6 +310,7 @@ class CognitoSyncService:
                     }
         except Exception as e:
             result.errors.append(f"Failed to list all users: {e}")
+            reconcile_incomplete = True
 
         # 3. 사용자별 DB upsert (배치 commit + expunge 로 메모리 상한)
         # 유저 upsert 전 기존 유저 스냅샷 일괄 prefetch (per-user 조회 N+1 제거).
@@ -245,17 +368,50 @@ class CognitoSyncService:
         # 잔여분 commit
         await session.commit()
 
+        # R4-A2-1: "조회 성공 + 0건" 도 장애로 취급. reconcile_incomplete 는 예외
+        # 경로만 잡는다 — IAM 권한 드리프트·잘못된 user pool id·페이지네이션 결함
+        # 등으로 Cognito 호출이 예외 없이 빈 결과를 반환하면 user_map/seen 이
+        # 공집합인 채로 deactivate 를 돌려 `sso_subject IS NOT NULL` 인
+        # **OIDC 유저 전원을 비활성화(+WIP 로 전원 VK 폐기)** 한다.
+        # "진짜 빈 풀" 과 "장애로 빈 응답" 을 구분할 수 없으므로 안전쪽으로 막는다.
+        # 진짜 빈 풀이면 사용자 전원이 off-boarding 대상이 맞지만, 그 상황을 API 로
+        # 판별할 방법이 없다 — 빈 응답 한 번에 조직 전체의 인증을 끊는 쪽보다
+        # 비활성화를 미루는 쪽이 무해하다(다음 sync 가 재시도하고, 그간 인증은 유지).
+        if not user_map:
+            reconcile_incomplete = True
+            result.errors.append(
+                "Cognito returned zero groups/users — treating empty fetch as "
+                "failure, not an empty pool (deactivate skipped)"
+            )
+
         # 4. Cognito 에 없는 OIDC 사용자 비활성화 — bulk UPDATE (ORM 전량 로드 제거).
         #    반드시 전체 upsert 완료 후. seen 에 없는 유저만 비활성화.
-        if settings.COGNITO_SYNC_DEACTIVATE_MISSING:
+        #    fetch 가 불완전하면(reconcile_incomplete) 이 단계는 절대 돌리지 않는다.
+        if settings.COGNITO_SYNC_DEACTIVATE_MISSING and not reconcile_incomplete:
             try:
-                deactivated = await repo.deactivate_missing_oidc_users(
+                deactivated_ids = await repo.deactivate_missing_oidc_users(
                     seen_sso_subjects, settings.OIDC_PROVIDER_NAME
                 )
-                result.users_deactivated += deactivated
+                result.users_deactivated += len(deactivated_ids)
+                # R3-3: 비활성화된 유저의 ACTIVE VK 도 함께 폐기 — 같은 트랜잭션에서
+                # 폐기 후 commit. Redis DEL·publish 는 commit 후에 적용한다 —
+                # DEL→commit 창에 게이트웨이가 아직 ACTIVE 인 키를 재캐시하는
+                # 경합 방지(R4).
+                hashed = await self._revoke_keys_for_users(
+                    session, deactivated_ids, result
+                )
                 await session.commit()
+                await self._finalize_revoked_keys(session, hashed, result)
             except Exception as e:
                 result.errors.append(f"Failed to deactivate missing users: {e}")
+        elif settings.COGNITO_SYNC_DEACTIVATE_MISSING and reconcile_incomplete:
+            logger.warning(
+                "cognito_sync.reconcile_skipped_incomplete_fetch",
+                error_count=len(result.errors),
+            )
+            result.errors.append(
+                "Skipped deactivate-missing: Cognito fetch was incomplete"
+            )
 
         # 5. Cognito 에 없는 팀 정리 — 멤버 이동을 위해 members 포함 조회 유지.
         synced_team_ids = set(group_team_id.values())
@@ -479,7 +635,11 @@ class CognitoSyncService:
         if user.provider == settings.OIDC_PROVIDER_NAME and user.is_active:
             user.is_active = False
             result.users_deactivated += 1
+            # R3-3: 비활성화와 같은 트랜잭션에서 ACTIVE VK 폐기. 부수효과는
+            # commit 후 — finalize 없이는 Redis/알림이 적용되지 않는다.
+            hashed = await self._revoke_keys_for_users(session, [user.id], result)
             await session.commit()
+            await self._finalize_revoked_keys(session, hashed, result)
             logger.info(
                 "cognito_sync.user_deactivated",
                 username=username, user_id=result.user_id,
@@ -540,11 +700,15 @@ class CognitoSyncService:
             # 그 그룹 기준으로 팀 배정. role 은 이 그룹만으로 보수적 판정(개별 user sync 가
             # 전체 그룹 기준 role 을 정밀 보정). 여기선 team 배정이 주목적.
             try:
-                await self._upsert_one_user(
-                    repo, sub=sub, email=email, name=name, enabled=enabled,
-                    team_id=team_id, role=self._derive_role(email, [group_name]),
-                    result=result,
-                )
+                # SAVEPOINT 격리 — sync_all 과 같은 이유: flush 실패(UNIQUE 충돌)
+                # 가 트랜잭션을 중단 상태로 만들면 잔여 멤버가 전부 실패하고
+                # 마지막 commit 도 깨진다.
+                async with session.begin_nested():
+                    await self._upsert_one_user(
+                        repo, sub=sub, email=email, name=name, enabled=enabled,
+                        team_id=team_id, role=self._derive_role(email, [group_name]),
+                        result=result,
+                    )
             except Exception as e:
                 result.errors.append(f"Failed to upsert member {email or sub}: {e}")
 

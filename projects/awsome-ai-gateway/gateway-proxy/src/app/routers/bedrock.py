@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 
 import structlog
@@ -85,6 +86,76 @@ def _strip_region_prefix(model_id: str) -> str:
     return model_id
 
 
+def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> None:
+    """`/model/*` 패스스루 스트림 청크에서 usage 필드를 누적한다.
+
+    두 wire 포맷 모두 OpenAI SSE(`data: {...}`)가 아니라서 전용 스캐너가 필요하다:
+      * ``invoke-with-response-stream`` — ``chunk["bytes"]`` 가 Anthropic 이벤트
+        JSON. ``message_start``(input+cache), ``message_delta``(output 누적),
+        ``message_stop``(``amazon-bedrock-invocationMetrics`` 최종값).
+      * ``converse-stream`` — Converse 이벤트 JSON을 줄단위로 yield;
+        ``metadata.usage`` 에 camelCase(camel ``inputTokens`` 등)로 최종 usage.
+
+    ``state`` 는 스트림 수명 동안 유지되는 누적 dict. usage 필드를 본 순간
+    ``state["hit"]=True`` 가 된다 — 호출자는 이 플래그로 TokenUsage 를 만든다.
+    """
+    try:
+        data = json.loads(chunk)
+    except Exception:
+        return
+    if not isinstance(data, dict):
+        return
+
+    if path_suffix == "converse-stream":
+        usage = (data.get("metadata") or {}).get("usage")
+        if isinstance(usage, dict) and usage:
+            state["input_tokens"] = usage.get("inputTokens", 0)
+            state["output_tokens"] = usage.get("outputTokens", 0)
+            state["cache_read"] = usage.get("cacheReadInputTokens", 0)
+            state["cache_write"] = usage.get("cacheWriteInputTokens", 0)
+            state["hit"] = True
+        return
+
+    # invoke-with-response-stream — Anthropic 이벤트 JSON
+    ev_type = data.get("type")
+    if ev_type == "message_start":
+        u = (data.get("message") or {}).get("usage") or {}
+        state["input_tokens"] = u.get("input_tokens", 0)
+        state["cache_read"] = u.get("cache_read_input_tokens", 0)
+        state["cache_write"] = u.get("cache_creation_input_tokens", 0)
+        # 삼값 보존(A2-4) — 키가 보고될 때만 설정. 미보고(None)면 calculate_cost 가
+        # 요청 측 cache_ttl_1h 폴백을 쓰고, 보고=0 이면 전량 5m 과금이 정답이다.
+        _cc = u.get("cache_creation")
+        if isinstance(_cc, dict) and "ephemeral_1h_input_tokens" in _cc:
+            state["cache_write_1h"] = _cc["ephemeral_1h_input_tokens"] or 0
+        state["output_tokens"] = max(
+            state.get("output_tokens", 0), u.get("output_tokens", 0)
+        )
+        state["hit"] = True
+    elif ev_type == "message_delta":
+        u = data.get("usage") or {}
+        if "output_tokens" in u:
+            state["output_tokens"] = u["output_tokens"]
+            state["hit"] = True
+    elif ev_type == "message_stop":
+        m = data.get("amazon-bedrock-invocationMetrics") or {}
+        if m:
+            # invocationMetrics 가 최종 authoritative — cache 카운트도 여기 있다.
+            state["input_tokens"] = m.get(
+                "inputTokenCount", state.get("input_tokens", 0)
+            )
+            state["output_tokens"] = m.get(
+                "outputTokenCount", state.get("output_tokens", 0)
+            )
+            state["cache_read"] = m.get(
+                "cacheReadInputTokenCount", state.get("cache_read", 0)
+            )
+            state["cache_write"] = m.get(
+                "cacheWriteInputTokenCount", state.get("cache_write", 0)
+            )
+            state["hit"] = True
+
+
 async def _get_request_body(request: Request) -> bytes:
     return await request.body()
 
@@ -159,18 +230,25 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
 
     body = await _get_request_body(request)
 
+    # 요청 바디 1회 파싱 — rate-limit 예상 추정과 1h 캐시 TTL 신호(A2-3) 둘 다 쓴다.
+    import json as _json
+
+    try:
+        body_dict = _json.loads(body) if body else {}
+        if not isinstance(body_dict, dict):
+            body_dict = {}
+    except Exception:
+        body_dict = {}
+
+    # invoke/* 경로는 Anthropic 와이어를 그대로 통과시키므로 cache_control ttl="1h"
+    # 가 그대로 온다 — 응답이 분해를 보고하지 않을 때의 과금 폴백 신호.
+    from app.routers.messages import _has_1h_cache_control
+
+    cache_ttl_1h = _has_1h_cache_control(body_dict)
+
     # Pre-reserve RPM + TPM (3-scope: USER/TEAM/GLOBAL)
     if auth_context:
-        import json as _json
-
         from app.services.rate_limit_enforcement import enforce_rate_limits
-
-        try:
-            body_dict = _json.loads(body) if body else {}
-            if not isinstance(body_dict, dict):
-                body_dict = {}
-        except Exception:
-            body_dict = {}
 
         rejected = await enforce_rate_limits(
             redis=redis,
@@ -226,19 +304,45 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             raise
 
         async def stream_with_cost():
-            """Bedrock `/model/*` pass-through: 원본 바이트 유지. usage는 OpenAI 형식
-            (있을 경우) 탐지. KI-08 tokenizer 역산은 `/v1/messages` 경로에서만 적용
-            (이 경로는 Bedrock EventStream binary라 누적 텍스트 파싱 비용이 높음).
+            """Bedrock `/model/*` pass-through: 원본 바이트 유지 + 포맷별 usage 추출.
+
+            ⚠️ `_try_extract_usage`(OpenAI SSE `data: {...}` 전용)만으로는 이 경로의
+               usage 를 영원히 못 잡는다 — invoke-with-response-stream 은 Anthropic
+               이벤트 JSON(`chunk["bytes"]`), converse-stream 은 Converse 이벤트
+               JSON(`metadata.usage`)을 yield 하므로 `data:` 프레임이 없다.
+               usage=None 으로 finalize 되면 KI-08 zero-usage 가드가 XADD 자체를
+               생략해 **usage_logs 행조차 안 남는 무료 스트리밍**이 됐다.
+               `_scan_bedrock_stream_chunk` 가 누적 스캔하고, 혹시 모를 OpenAI-wire
+               업스트림을 위해 `_try_extract_usage` 도 폴백으로 둔다.
             """
             usage = None
             from app.schemas.domain import TokenUsage
             from app.services.streaming import _try_extract_usage
 
+            bedrock_usage: dict = {}
             try:
                 async for chunk in chunk_iter:
-                    u = _try_extract_usage(chunk)
-                    if u:
-                        usage = u
+                    _scan_bedrock_stream_chunk(chunk, path_suffix, bedrock_usage)
+                    if bedrock_usage.get("hit"):
+                        usage = TokenUsage(
+                            input_tokens=bedrock_usage.get("input_tokens", 0),
+                            output_tokens=bedrock_usage.get("output_tokens", 0),
+                            total_tokens=(
+                                bedrock_usage.get("input_tokens", 0)
+                                + bedrock_usage.get("output_tokens", 0)
+                            ),
+                            cache_creation_input_tokens=bedrock_usage.get("cache_write", 0),
+                            cache_read_input_tokens=bedrock_usage.get("cache_read", 0),
+                            # 삼값 — 미보고 시 None 이어야 요청 측 폴백이 산다(A2-4).
+                            cache_creation_1h_input_tokens=bedrock_usage.get(
+                                "cache_write_1h"
+                            ),
+                            cache_ttl_1h=cache_ttl_1h,
+                        )
+                    else:
+                        u = _try_extract_usage(chunk)
+                        if u:
+                            usage = u
                     yield chunk
             finally:
                 if auth_context and (usage or rate_limit_state):
@@ -261,6 +365,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                         ttft_ms=duration_ms,
                         rate_limit_state=rate_limit_state,
                         downgraded_from=state.get("downgraded_from"),
+                        # 비스트림 경로와 같게 Bedrock invocation log join 키를 남긴다.
+                        bedrock_request_id=_req_id,
                     )
 
         return StreamingResponse(
@@ -281,6 +387,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             # 예외가 아니라 상태코드로 실패가 오는 경우(어댑터가 응답을 그대로 넘긴다).
             record_provider_error(_pm, _pm_labels, status=status)
         if auth_context and (usage.input_tokens + usage.output_tokens) > 0:
+            # 요청 측 1h 캐시 신호 — 응답이 ephemeral 분해를 보고하지 않으면
+            # calculate_cost 의 폴백이 이 값을 쓴다(A2-3).
+            usage.cache_ttl_1h = cache_ttl_1h
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await cost_recorder.finalize(
                 redis,

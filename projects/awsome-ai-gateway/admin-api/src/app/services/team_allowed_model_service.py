@@ -66,7 +66,10 @@ class TeamAllowedModelService:
         before = await repo.list_by_team(team_id)
         after = await repo.set_for_team(team_id, model_aliases, actor.user_id)
 
-        await self._invalidate_team_vk_cache(session, team_id)
+        # ⚠️ VK 캐시 무효화는 여기서 하지 않는다 — 라우터가 commit **후**
+        #    ``invalidate_for_team`` 을 호출한다(allowed-clients 경로와 동일).
+        #    commit 전에 DEL 하면 DEL→commit 창에 게이트웨이가 옛 정책의
+        #    AuthContext 를 재캐시해 최대 TTL(300s) 동안 구 정책이 살아난다.
 
         await audit_logger.log(
             session,
@@ -100,7 +103,7 @@ class TeamAllowedModelService:
         before = await repo.list_by_team(team_id)
         await repo.clear_for_team(team_id)
 
-        await self._invalidate_team_vk_cache(session, team_id)
+        # 무효화는 라우터가 commit 후 호출(set_for_team 주석 참조).
 
         await audit_logger.log(
             session,
@@ -116,10 +119,14 @@ class TeamAllowedModelService:
 
         return AllowedModelsResponse(team_id=str(team_id), model_aliases=[])
 
-    async def _invalidate_team_vk_cache(
+    async def invalidate_for_team(
         self, session: AsyncSession, team_id: uuid.UUID
     ) -> None:
         """팀 소속 사용자의 AuthContext 캐시(`key:cache:vk:*`, `user_context:*`) 무효화.
+
+        반드시 호출 트랜잭션의 commit 이후에 호출할 것(R3-8) — commit 전 DEL 은
+        DEL→commit 창에서 구 AuthContext 의 재캐시를 허용한다. 라우터 계약은
+        allowed-clients 경로(`users.py` ~289행)와 동일.
 
         VK의 raw key 해시를 모르므로 `key:cache:vk:*`는 발급 시 저장한 reverse index
         `team:vk_hashes:{team_id}` 를 통해 DEL. reverse index 미존재 시 TTL(300s)

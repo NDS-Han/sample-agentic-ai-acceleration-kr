@@ -123,7 +123,9 @@ class FakeBedrock:
                                  b"x-amzn-ErrorType: ThrottlingException\r\nContent-Length: "
                                  + str(len(body)).encode() + b"\r\n\r\n" + body)
                     continue
-                if path.endswith("/invoke-with-response-stream"):
+                if path.endswith("/invoke-with-response-stream") or path.endswith(
+                    "/converse-stream"
+                ):
                     conn.sendall(b"HTTP/1.1 200 OK\r\n"
                                  b"Content-Type: application/vnd.amazon.eventstream\r\n"
                                  b"x-amzn-RequestId: req-stream\r\nContent-Length: 0\r\n\r\n")
@@ -192,6 +194,15 @@ async def test_one_stale_connection_every_call_kind(server):
     assert await adapter.count_tokens(b'{"messages":[]}', "m") == (200, 11)
 
     status, gen, _h, rid = await adapter.invoke_stream(b'{"messages":[]}', "m")
+    assert status == 200 and rid == "req-stream"
+    assert [c async for c in gen] == []
+
+    # converse-stream 도 같은 재시도 경로를 탄다 — 예전엔 이 호출만
+    # run_in_executor 직행이라 죽은 풀 연결이 그대로 502 로 나갔다(F12).
+    status, gen, _h, rid = await adapter.invoke_stream(
+        b'{"messages":[{"role":"user","content":[{"text":"hi"}]}]}',
+        "m", path_suffix="converse-stream",
+    )
     assert status == 200 and rid == "req-stream"
     assert [c async for c in gen] == []
 

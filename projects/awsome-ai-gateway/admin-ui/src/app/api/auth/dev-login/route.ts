@@ -9,6 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
+import { secureCookieFlag } from '@/lib/cookies';
 import { UserRole } from '@/types/enums';
 
 const DEV_COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours in seconds
@@ -168,7 +169,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     maxAge: DEV_COOKIE_MAX_AGE,
     // secure: true 로 하면 HTTP 환경에선 브라우저가 쿠키를 저장하지 못해 무한 리다이렉트.
     // NODE_ENV 대신 실제 연결 scheme 을 보는 게 정확 — ALB 가 HTTP 종단이면 'http'.
-    secure: proto === 'https',
+    secure: secureCookieFlag(proto),
   });
 
   return redirectResponse;

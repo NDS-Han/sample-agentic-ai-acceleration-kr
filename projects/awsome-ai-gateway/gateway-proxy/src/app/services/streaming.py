@@ -89,6 +89,8 @@ async def bedrock_anthropic_sse_stream(
         "input_tokens": 0,
         "output_tokens": 0,
         "cache_creation": 0,
+        # 삼값(None|int): 키가 보고될 때만 설정 — 0 기본값은 "미보고"와 구분 불가(A2-4).
+        "cache_creation_1h": None,  # usage.cache_creation.ephemeral_1h_input_tokens
         "cache_read": 0,
     }
     accumulated_text: list[str] = []  # KI-08: content_block_delta.delta.text 누적
@@ -124,6 +126,12 @@ async def bedrock_anthropic_sse_stream(
                 "cache_creation_input_tokens", counters["cache_creation"]
             )
             counters["cache_read"] = u.get("cache_read_input_tokens", counters["cache_read"])
+            # 1h TTL 캐시 쓰기 분해 — 혼합 TTL 정확 과금(R2-12).
+            # ⚠️ `if v :=` 로 걸러선 안 된다 — 0 이 보고되면 "분해는 있는데 1h=0"
+            #    (전부 5m 과금이 정답) 인데 미보고로 잘못 기록된다(A2-4).
+            cc = u.get("cache_creation")
+            if isinstance(cc, dict) and "ephemeral_1h_input_tokens" in cc:
+                counters["cache_creation_1h"] = cc["ephemeral_1h_input_tokens"] or 0
         elif etype == "content_block_delta":
             # KI-08: 스트림 도중 생성된 텍스트 누적. disconnect 시 tokenizer 역산용.
             delta = data.get("delta", {})
@@ -157,6 +165,7 @@ async def bedrock_anthropic_sse_stream(
             total_tokens=it + ot,
             cache_creation_input_tokens=counters["cache_creation"],
             cache_read_input_tokens=counters["cache_read"],
+            cache_creation_1h_input_tokens=counters["cache_creation_1h"],
         )
 
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
@@ -184,6 +193,7 @@ async def bedrock_anthropic_sse_stream(
             total_tokens=it + estimated_ot,
             cache_creation_input_tokens=counters["cache_creation"],
             cache_read_input_tokens=counters["cache_read"],
+            cache_creation_1h_input_tokens=counters["cache_creation_1h"],
             estimated=True,
         )
 
@@ -339,13 +349,14 @@ async def openai_sse_stream(
         payload = {"error": {"type": err_type, "message": message}}
         return f"data: {json.dumps(payload)}\n\n".encode()
 
-    def _scan_usage(chunk: bytes) -> TokenUsage | None:
-        """Scan a (possibly multi-frame) chunk for usage + accumulate delta content."""
+    # aiter_bytes 청크는 SSE 프레임 경계와 무관하게 끊긴다 — `data: {...}` 라인이
+    # 두 청크에 걸치면 json.loads 가 실패해 그 프레임의 usage 가 통째로 유실된다
+    # (vLLM 은 usage 를 마지막 프레임에만 실으므로 최악의 경우 input 토큰이 0 으로
+    # 기록됐다). 마지막 개행까지만 완결 라인으로 파싱하고 꼬리는 다음 청크로 넘긴다.
+    _pending_sse = bytearray()
+
+    def _scan_lines(text: str) -> TokenUsage | None:
         nonlocal first_token_time
-        try:
-            text = chunk.decode("utf-8", errors="ignore")
-        except Exception:
-            return None
         found: TokenUsage | None = None
         for line in text.split("\n"):
             line = line.strip()
@@ -374,6 +385,33 @@ async def openai_sse_stream(
                 found = extract_chat_usage(u)
         return found
 
+    def _scan_usage(chunk: bytes) -> TokenUsage | None:
+        """청크를 버퍼에 붙이고 완결 라인까지만 스캔한다."""
+        _pending_sse.extend(chunk)
+        nl = _pending_sse.rfind(b"\n")
+        if nl == -1:
+            return None
+        try:
+            text = bytes(_pending_sse[:nl]).decode("utf-8", errors="ignore")
+        except Exception:
+            del _pending_sse[: nl + 1]
+            return None
+        del _pending_sse[: nl + 1]
+        return _scan_lines(text)
+
+    def _flush_pending_usage() -> TokenUsage | None:
+        """스트림 종료 시 개행 없이 남은 꼬리도 스캔 (업스트림이 마지막 프레임을
+        개행 없이 닫는 경우 usage 유실 방지)."""
+        if not _pending_sse:
+            return None
+        tail = bytes(_pending_sse)
+        _pending_sse.clear()
+        try:
+            text = tail.decode("utf-8", errors="ignore")
+        except Exception:
+            return None
+        return _scan_lines(text)
+
     async def _estimate_if_needed(usage: TokenUsage | None) -> TokenUsage | None:
         """KI-08: usage 없고 누적 텍스트 있으면 tokenizer 역산."""
         if not tokenizer_hook or not accumulated_text:
@@ -387,13 +425,18 @@ async def openai_sse_stream(
             estimated_ot = None
         if not estimated_ot or estimated_ot <= 0:
             return usage
-        # OpenAI path에서는 input_tokens가 없음 (usage 이벤트 없으면) — 0으로 둠.
-        it = usage.input_tokens if usage else 0
-        return TokenUsage(
-            input_tokens=it,
-            output_tokens=estimated_ot,
-            total_tokens=it + estimated_ot,
-            estimated=True,
+        # ⚠️ 새로 만들지 않고 **복사 후 덮어쓴다** — Responses 방언(아래
+        #    `_estimate_output_tokens`)과 같은 규칙. 새 TokenUsage 로 만들면
+        #    cache 버킷·web_search_count·cache_ttl_1h 가 지워져, 끊긴 스트림의
+        #    캐시된 입력 토큰이 과금에서 증발했다. usage 자체가 없으면 input 은
+        #    모르는 그대로 0 — 최소한 output 추정치는 남긴다.
+        base = usage or TokenUsage()
+        return base.model_copy(
+            update={
+                "output_tokens": estimated_ot,
+                "total_tokens": base.input_tokens + estimated_ot,
+                "estimated": True,
+            }
         )
 
     async def _fire_on_complete(status: str) -> None:
@@ -447,6 +490,8 @@ async def openai_sse_stream(
         except Exception:
             logger.exception("stream_drain_error")
         finally:
+            if u := _flush_pending_usage():
+                latest_usage = u
             await _fire_on_usage()
             await _fire_on_complete("partial")
 
@@ -463,6 +508,8 @@ async def openai_sse_stream(
             except TimeoutError:
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                if u := _flush_pending_usage():
+                    latest_usage = u
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
                 yield _emit_error_chunk(
@@ -490,12 +537,16 @@ async def openai_sse_stream(
 
     except Exception as exc:
         logger.exception("openai_stream_proxy_error")
+        if u := _flush_pending_usage():
+            latest_usage = u
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 
     if not client_disconnected:
+        if u := _flush_pending_usage():
+            latest_usage = u
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")
@@ -704,74 +755,6 @@ async def responses_sse_stream(
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")
-
-
-async def stream_response(
-    request: Request,
-    chunk_iterator: AsyncIterator[bytes],
-    on_usage: callable,
-    idle_timeout: float | None = None,
-    drain_timeout: float | None = None,
-) -> AsyncIterator[bytes]:
-    """스트리밍 응답 프록시.
-
-    클라이언트에 chunk를 yield하며, 연결이 끊어지면 백그라운드에서
-    스트림을 계속 소비하여 usage를 기록한다.
-
-    ⚠️ 현재 **호출부 없음**(dialect 별 전용 헬퍼가 대체). 그래도 타임아웃 기본값을
-    Settings 에서 해석하도록 맞춰 둔다 — 나중에 누가 이 함수를 쓰기 시작할 때
-    하드코딩 60s 로 되돌아가는 회귀를 원천 차단하기 위함.
-    """
-    idle_timeout, drain_timeout = _resolve_timeouts(idle_timeout, drain_timeout)
-    usage: TokenUsage | None = None
-    client_disconnected = False
-
-    async def consume_remaining():
-        """클라이언트 연결 끊김 후 백그라운드 소비."""
-        nonlocal usage
-        deadline = time.monotonic() + drain_timeout
-        try:
-            async for chunk in chunk_iterator:
-                if time.monotonic() > deadline:
-                    logger.warning("stream_drain_timeout")
-                    break
-                parsed_usage = _try_extract_usage(chunk)
-                if parsed_usage:
-                    usage = parsed_usage
-        except Exception:
-            logger.exception("stream_drain_error")
-        finally:
-            if usage and callable(on_usage):
-                try:
-                    await on_usage(usage, None)
-                except Exception:
-                    logger.exception("on_usage_callback_failed")
-
-    try:
-        async for chunk in chunk_iterator:
-            # 클라이언트 연결 확인
-            if await request.is_disconnected():
-                logger.info("client_disconnected_during_stream")
-                client_disconnected = True
-                # 백그라운드에서 나머지 소비
-                asyncio.create_task(consume_remaining())
-                return
-
-            parsed_usage = _try_extract_usage(chunk)
-            if parsed_usage:
-                usage = parsed_usage
-
-            yield chunk
-
-    except Exception:
-        logger.exception("stream_proxy_error")
-        client_disconnected = True
-
-    if not client_disconnected and usage and callable(on_usage):
-        try:
-            await on_usage(usage, None)
-        except Exception:
-            logger.exception("on_usage_callback_failed")
 
 
 def _try_extract_usage(chunk: bytes) -> TokenUsage | None:

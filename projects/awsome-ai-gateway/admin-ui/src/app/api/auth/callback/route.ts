@@ -24,6 +24,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
+import { secureCookieFlag } from '@/lib/cookies';
 import {
   parseJWT,
   isSessionExpired,
@@ -107,7 +108,7 @@ function timingSafeEqual(a: string, b: string): boolean {
 
 /** 임시 쿠키를 응답에서 지운다. 실패 경로에서도 반드시 호출한다(재사용 방지). */
 function clearTempCookies(res: NextResponse, secure: boolean): void {
-  for (const name of ['oidc_state', 'oidc_verifier']) {
+  for (const name of ['oidc_state', 'oidc_verifier', 'oidc_nonce']) {
     res.cookies.set(name, '', {
       httpOnly: true,
       sameSite: 'lax',
@@ -162,19 +163,23 @@ function failure(
   return res;
 }
 
-/** 서명 검증 없이 payload 만 읽는다(검증은 admin-api 담당). 실패하면 null. */
-function readExpSeconds(token: string): number | null {
+/** 서명 검증 없이 payload 객체를 읽는다(검증은 admin-api 담당). 실패하면 null. */
+function readJwtPayload(token: string): { exp?: unknown; nonce?: unknown } | null {
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   try {
     const b64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
     const padded = b64.padEnd(b64.length + ((4 - (b64.length % 4)) % 4), '=');
-    const payload = JSON.parse(atob(padded)) as { exp?: unknown };
-    const exp = payload.exp;
-    return typeof exp === 'number' && Number.isFinite(exp) ? exp : null;
+    return JSON.parse(atob(padded)) as { exp?: unknown; nonce?: unknown };
   } catch {
     return null;
   }
+}
+
+/** 서명 검증 없이 exp 만 읽는다 — cookieMaxAge 전용. */
+function readExpSeconds(token: string): number | null {
+  const exp = readJwtPayload(token)?.exp;
+  return typeof exp === 'number' && Number.isFinite(exp) ? exp : null;
 }
 
 /**
@@ -202,7 +207,7 @@ function cookieMaxAge(token: string, expiresIn: unknown): number {
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const { proto, host } = schemeAndHost(request);
-  const secure = proto === 'https';
+  const secure = secureCookieFlag(proto);
   const params = request.nextUrl.searchParams;
 
   // ── provider 가 거절한 경우 — 크래시가 아니라 읽히는 페이지 ──
@@ -324,6 +329,30 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   const idToken = typeof tokens.id_token === 'string' ? tokens.id_token : '';
   const accessToken = typeof tokens.access_token === 'string' ? tokens.access_token : '';
   const cookieToken = preferAccess ? accessToken || idToken : idToken || accessToken;
+
+  // ── nonce 검사(login 이 authorize 에 실어 보낸 값 ↔ id_token 클레임) ──
+  // login/route.ts 가 매번 nonce 를내므로, OIDC 규약을 지키는 IdP 의 id_token 에는
+  // 반드시 같은 값이 들어 있다. 불일치/부재는 replay·code-substitution 공격 신호다.
+  // id_token 을 아예 안 주는 배치(access_token 전용)는 검증할 표면이 없어 건너뛴다 —
+  // 그 경우 PKCE+state 가 유일한 왕복 바인딩이다(문서화된 하한선).
+  const nonceCookie = request.cookies.get('oidc_nonce')?.value;
+  if (idToken) {
+    const tokenNonce = readJwtPayload(idToken)?.nonce;
+    if (
+      !nonceCookie ||
+      typeof tokenNonce !== 'string' ||
+      !timingSafeEqual(tokenNonce, nonceCookie)
+    ) {
+      return failure(
+        400,
+        'Invalid token nonce',
+        'id_token 의 nonce 가 로그인 요청의 nonce 와 일치하지 않습니다. ' +
+          '토큰 응답이 다른 세션의 것이거나(replay) 임시 쿠키가 만료됐습니다(10분). ' +
+          '/api/auth/login 에서 처음부터 다시 시작하세요.',
+        secure,
+      );
+    }
+  }
 
   if (!cookieToken) {
     return failure(

@@ -36,16 +36,16 @@ from app.services.streaming import (
     bedrock_anthropic_sse_stream,
     openai_sse_stream,
     responses_sse_stream,
-    stream_response,
 )
 
 # 타임아웃 인자를 받는 모든 공개 스트리밍 헬퍼. 새 헬퍼가 추가되면 여기에도 추가해야
 # 하며, 추가를 잊으면 아래 signature 테스트가 잡지 못하므로 목록 자체를 코드에서 유도한다.
+# (호출부 없는 범용 stream_response 는 F11 SSE 버퍼링 미적용 상태로 남는 회귀
+# 위험이 있어 제거됨 — dialect 별 헬퍼만 유지.)
 _TIMEOUT_HELPERS = [
     bedrock_anthropic_sse_stream,
     openai_sse_stream,
     responses_sse_stream,
-    stream_response,
 ]
 
 

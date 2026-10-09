@@ -24,7 +24,7 @@ import os
 import httpx
 import pytest
 
-from tests.integration.conftest import live_stack_gate
+from tests.integration.conftest import internal_headers, live_stack_gate
 
 GATEWAY_URL = os.environ.get("GATEWAY_URL", "http://localhost:8000")
 ADMIN_URL = os.environ.get("ADMIN_API_URL", "http://localhost:8080")
@@ -40,6 +40,7 @@ pytestmark = live_stack_gate()
 def virtual_key():
     resp = httpx.post(
         f"{ADMIN_URL}/internal/test/issue-key",
+        headers=internal_headers(),
         json={"email": "test-openai-compat@test.local"},
         timeout=10,
     )

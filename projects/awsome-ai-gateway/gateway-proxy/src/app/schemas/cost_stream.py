@@ -7,7 +7,7 @@ from decimal import Decimal
 
 from pydantic import BaseModel, Field
 
-from app.periods import current_kst_date, current_kst_period
+from app.periods import date_at, period_at
 
 
 class CostStreamEntry(BaseModel):
@@ -94,8 +94,12 @@ class CostStreamEntry(BaseModel):
         sso_subject: str | None = None,
         bedrock_request_id: str | None = None,
         client: str | None = None,
+        requested_at: datetime | None = None,
     ) -> CostStreamEntry:
         now = datetime.now(tz=UTC)
+        # 요청 시작 절대시각 — 미들웨어가 심은 값을 cost_recorder 가 넘긴다.
+        # 미설정(테스트·미들웨어 우회)이면 완료 시각으로 폴백한다.
+        started = requested_at or now
         return cls(
             request_id=request_id,
             user_id=user_id,
@@ -116,7 +120,11 @@ class CostStreamEntry(BaseModel):
             estimated_usage=estimated_usage,
             downgraded_from=downgraded_from,
             availability_fallback_from=availability_fallback_from,
-            requested_at=now.isoformat(),
+            # requested_at 은 **요청 시작** 시각이다 — 게이트웨이의 Redis 예산
+            # 카운터가 request_period()(시작 월)에 귀속되므로, budget_usages 행과
+            # usage:daily:* 카운터도 같은 시작 시각 버킷에 두어야 두 소스가
+            # 월/일 경계에서 어긋나지 않는다. 예전엔 둘 다 완료 시각의 버킷을 썼다.
+            requested_at=started.isoformat(),
             completed_at=now.isoformat(),
             # ⚠️ period/date 는 UTC 가 아니라 **KST** 경계다(app.periods 참조).
             # 이 두 값이 cost-recorder-worker 에서 그대로 키가 된다:
@@ -126,8 +134,8 @@ class CostStreamEntry(BaseModel):
             # 'Asia/Seoul') admin-api 는 KST 월로 읽으므로(§59), 여기서 UTC 로 쓰면
             # 매월/매일 경계에서 9시간 어긋난다. requested_at/completed_at 은 절대시각
             # (timestamptz)이므로 UTC 그대로가 맞다 — 버킷 라벨만 KST 다.
-            period=current_kst_period(),
-            date=current_kst_date(),
+            period=period_at(started),
+            date=date_at(started),
             threshold_triggered=threshold_triggered,
             threshold_scope=threshold_scope,
             threshold_policy=threshold_policy,

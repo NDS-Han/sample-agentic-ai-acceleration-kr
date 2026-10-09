@@ -67,6 +67,37 @@ async def test_mock_session_runs_immediately():
     assert calls == ["ran"]
 
 
+async def test_write_survives_savepoint_lifecycle():
+    """after_commit 은 SAVEPOINT release 에도 발화한다 — 지연 쓰기가 nested
+    commit 에서 조기 실행되면 outer commit 전에 Redis 가 새어나간다(R3-8 부류).
+    nested release/rollback 에는 발화하지 않고 outer commit 에서만 실행돼야 한다."""
+    session = _session_double()
+    calls: list[str] = []
+
+    async def write() -> None:
+        calls.append("ran")
+
+    sync = session.sync_session
+    sync.execute(text("SELECT 1"))  # 트랜잭션 오픈
+    await defer_redis_write_until_commit(session, write)
+
+    # savepoint release — after_commit 이 울려도 쓰기는 실행되면 안 된다.
+    with sync.begin_nested():
+        sync.execute(text("SELECT 2"))
+    await asyncio.sleep(0)
+    assert calls == []
+
+    # savepoint rollback — after_rollback 이 울려도 쓰기는 살아 있어야 한다.
+    try:
+        with sync.begin_nested():
+            sync.execute(text("SELECT bogus FROM nonexistent"))
+    except Exception:
+        pass
+    sync.commit()
+    await asyncio.sleep(0)
+    assert calls == ["ran"]
+
+
 async def test_write_failure_is_swallowed():
     """지연 쓰기 실패는 로그만 남기고 전파되지 않는다(best-effort warmer)."""
     session = _session_double()

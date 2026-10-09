@@ -3,7 +3,7 @@
 import type { AnalyticsFilterForm } from '@/types/api';
 import { adminAPI } from '@/lib/api-client';
 import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
-import { LazyCostTrendChart } from './LazyCharts';
+import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
 import { ErrorState } from '@/components/common/ErrorState';
 
 interface CostTrendChartProps {
@@ -42,13 +42,14 @@ export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProp
     })),
   }));
 
-  return (
+  // 대시보드와 같은 recharts 카드를 재사용한다 — 과거엔 여기만 Chart.js 로 따로
+  // 그려 색·범례·툴팁이 미묘하게 어긋났다(같은 /admin/analytics 응답인데 다른
+  // 렌더러). 시리즈 조립(buildTrendSeries)는 원래 단일 소스였으므로 렌더러만 통합.
+  return data ? (
+    <CostTrendCard trends={trends} trendsByTeam={trendsByTeam} />
+  ) : (
     <div className="glass glass-hover rounded-apple p-4">
-      {data ? (
-        <LazyCostTrendChart trends={trends} trendsByTeam={trendsByTeam} />
-      ) : (
-        <ErrorState compact />
-      )}
+      <ErrorState compact />
     </div>
   );
 }

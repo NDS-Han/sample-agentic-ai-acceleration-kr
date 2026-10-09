@@ -93,7 +93,7 @@
     "title": "Dashboard",
     "totalUsage": "Total Usage This Month",
     "activeKeys": "Active API Keys",
-    "activeModels": "Active Models",
+    "activeModels": "Catalog models",
     "budgetUtilization": "Budget Utilization",
     "recentActivity": "Recent Activity",
     "usageTrend": "Usage Trend",
@@ -108,7 +108,7 @@
     "dailyAvgProjection": "Month-end projection {amount} (linear estimate)",
     "dailyAvgDesc": "Daily average based on elapsed days",
     "usageAndSystem": "Usage & System",
-    "totalRequests": "Total Requests",
+    "totalRequests": "Successful requests",
     "totalRequestsDesc": "SUCCESS requests this month",
     "totalTokens": "Total Tokens",
     "totalTokensDesc": "Input + Output + Cache total",
@@ -201,7 +201,8 @@
     "noExpiry": "None",
     "loadMore": "Load more",
     "loadMoreFailed": "Failed to load more keys.",
-    "loading": "Loading…"
+    "loading": "Loading…",
+    "noKeysCliLink": "See the CLI download page for how keys are issued →"
   },
   "budgets": {
     "title": "Budget Management",
@@ -368,7 +369,9 @@
     },
     "allowedClientsNote": "This user is only allowed {list}",
     "modelsLoadFailed": "Failed to load model list — model selectors may appear empty. Refresh and try again.",
-    "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed."
+    "configFetchFailed": "Failed to fetch current enforcement settings — policy and thresholds will be preserved as-is unless changed.",
+    "zeroBudgetBadge": "Blocked",
+    "zeroBudgetHint": "Budget $0 — all requests are rejected"
   },
   "models": {
     "title": "Model Management",
@@ -430,6 +433,11 @@
     "descriptionPlaceholder": "Enter a description for the model",
     "displayNameLabel": "Display Name (e.g. Cowork · Opus 4.8)",
     "displayNamePlaceholder": "Uses alias if not set (at registration time)",
+    "specLabel": "Spec",
+    "specHint": "Context window / max output tokens. Left blank means unknown.",
+    "specOptional": "optional",
+    "specContextWindow": "Context Window",
+    "specMaxOutput": "Max Output Tokens",
     "editSuccess": "{alias} model has been updated.",
     "createSuccess": "{alias} model has been registered.",
     "register": "Register",
@@ -452,6 +460,23 @@
     "deactivateImmediateLead": "Deactivation",
     "deactivateImmediateEmphasis": "takes effect immediately",
     "deactivateImmediateTail": ". Inactive models cannot serve new requests, and you can reactivate them at any time.",
+    "deleteButton": "Delete",
+    "deleteConfirmTitle": "Delete Model",
+    "deleteTarget": "The following model will be deleted from the catalog:",
+    "deleteWarningTitle": "This cannot be undone",
+    "deleteWarningBody": "Linked configuration (pricing history, team/user allow lists, rate limits, downgrade source policies) is deleted together with the model. To block it temporarily, use Deactivate instead.",
+    "deleteImpactLoading": "Fetching deletion impact…",
+    "deleteImpactUsageLogs": "Usage history (usage logs)",
+    "deleteImpactRetained": "retained",
+    "deleteImpactRemoved": "removed",
+    "deleteImpactPricings": "Pricing history",
+    "deleteImpactTeamAllowed": "Team allow-list entries",
+    "deleteImpactUserAllowed": "User allow-list entries",
+    "deleteImpactRateLimits": "Rate limit configs",
+    "deleteImpactDowngradeFrom": "Downgrade source policies",
+    "deleteBlockedDowngradeTo": "{count} downgrade policy/policies use this model as their target. Remove or change them in Budget management before deleting.",
+    "deleteTypeAlias": "Type the model alias \"{alias}\" to continue.",
+    "deleteSuccess": "Model {alias} has been deleted. Usage history is retained.",
     "addModelButton": "+ Add model",
     "priceSync": {
       "button": "Sync Pricing",
@@ -504,7 +529,7 @@
     "aliasHintInline": "The model name clients send to the gateway. It cannot be changed after creation — choose the name you will register in client configs.",
     "modelIdTooltip": "The identifier of the model the provider (Bedrock, Mantle, etc.) actually runs. Clients send the alias above, not this value — the gateway maps alias → this Model ID. For Bedrock, use an inference profile ID (us./global. prefix).",
     "fieldHelp": "Help",
-    "priceHint": "Enter prices per 1M tokens, same as external catalogs. Stored internally per 1K tokens (min step $0.001)."
+    "priceHint": "Enter prices per 1M tokens, same as external catalogs (min step $0.001)."
   },
   "rateLimits": {
     "title": "Rate Limits",
@@ -737,8 +762,12 @@
       "clearLimit": "Clear limit",
       "pendingDeleteHint": "Applying deletes the individual setting and follows the parent policy (or unlimited).",
       "liveRpm": "Requests in last {seconds}s",
-      "noRecentRequests": "No requests in the last {seconds}s."
-    }
+      "noRecentRequests": "No requests in the last {seconds}s.",
+      "untrackedHint": "No live counter is recorded without an RPM limit. Check the usage trend below for actual traffic.",
+      "untrackedHintInherited": "This counter is not recorded without an individual RPM limit. Requests count toward the shared team limit — see the team panel."
+    },
+    "rateLimitsMovedTitle": "Rate limits moved",
+    "rateLimitsMovedDesc": "Rate limits are now managed in user and team panels. Select a team or user in the tree to view or edit its limits."
   },
   "analytics": {
     "title": "Analytics",
@@ -780,8 +809,8 @@
     "customInput": "Custom Range",
     "loadFailed": "Could not load analytics data.",
     "noData": "No data available.",
-    "totalRequests": "Total Requests",
-    "totalRequestsDescription": "Total API requests during the period",
+    "totalRequests": "Successful Requests",
+    "totalRequestsDescription": "Successful (SUCCESS) API requests during the period — failed/blocked excluded",
     "totalTokens": "Total Tokens",
     "totalTokensDescription": "Total tokens consumed during the period",
     "tokenAnalysis": "Token Analysis",
@@ -799,26 +828,27 @@
     "costSeriesOther": "Other",
     "item": "Item",
     "date": "Date",
-    "viewModelDetail": "Model cost detail",
     "invalidDateRange": "The start date must be before the end date. Please adjust the date range."
   },
   "analyticsModels": {
-    "pageTitle": "Cost by Model",
-    "backToAnalytics": "Analytics",
+    "summaryMeta": "{count} models · {cost} total",
     "totalCost": "Total cost",
-    "activeModels": "Active models",
+    "activeModels": "Models used",
     "period": "Period",
     "costShare": "Cost share",
     "costShareAria": "Cost share by model (stacked bar; see legend for values)",
     "detailTitle": "Model cost detail",
     "empty": "No usage records for this period.",
     "colModel": "Model",
-    "colRequests": "Requests",
+    "colRequests": "Successful",
     "colCost": "Cost (USD)",
     "colInputTokens": "Input tokens",
     "colOutputTokens": "Output tokens",
-    "colPer1M": "$/1M tokens",
-    "colAvgLatency": "Avg latency"
+    "colPer1M": "Effective rate ($/1M)",
+    "colAvgLatency": "Avg latency",
+    "colCacheTokens": "Cache tokens",
+    "cacheSplit": "Write {write} / Read {read}",
+    "per1MHint": "Effective rate = total cost ÷ billed tokens (Input + Output + Cache). Cache tokens count toward the denominator."
   },
   "cli": {
     "title": "CLI Download",
@@ -829,10 +859,10 @@
     "checksum": "SHA256 Checksum",
     "download": "Download",
     "copyChecksum": "Copy Checksum",
-    "subtitle": "Install the AWSome AI Gateway CLI and connect Claude Code to the corporate gateway via Cognito (OIDC) login. The first login automatically provisions your user and team.",
+    "subtitle": "Install the AWSome AI Gateway CLI and connect Claude Code, Cowork, and Codex to the corporate gateway via Cognito (OIDC) login. The first login automatically provisions your user and team.",
     "prereqTitle": "Prerequisites",
-    "prereqDesc": "Get the three values below from your administrator and export them in your shell. These are the OIDC settings issued by the Cognito User Pool.",
-    "prereqEnv": "export OIDC_ISSUER_URL=\"https://cognito-idp.ap-south-1.amazonaws.com/'<POOL_ID>'\"\nexport OIDC_CLIENT_ID=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport OIDC_AUDIENCE=\"'<COGNITO_APP_CLIENT_ID>'\"\nexport GATEWAY_URL=\"http://'<gateway-host>':8000\"\nexport GATEWAY_ADMIN_URL=\"http://'<admin-api-host>':8080\"",
+    "prereqDesc": "Export the environment variables below in your shell. OIDC values come from the Cognito User Pool; URLs come from the gateway deployment. (Values are pre-filled when deployment settings are detected.)",
+    "prereqPsNote": "On Windows PowerShell, use $env:NAME=\"value\" syntax.",
     "installTitle": "Install & Activate",
     "installLinuxLabel": "Linux / macOS",
     "installWindowsLabel": "Windows (PowerShell, admin)",
@@ -861,6 +891,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyCommand": "Copy command",
+    "copyEnv": "Copy env vars",
     "copyFailed": "Copy failed — select the text and copy it manually.",
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder."
   },
@@ -879,13 +910,13 @@
   "my": {
     "title": "My Usage",
     "totalCost": "Total cost",
-    "totalRequests": "Total requests",
+    "totalRequests": "Successful requests",
     "totalTokens": "Total tokens",
     "dailyUsage": "Daily usage",
     "noDailyRecords": "No usage records for this period.",
     "colDate": "Date",
     "colCostUsd": "Cost (USD)",
-    "colRequests": "Requests",
+    "colRequests": "Successful",
     "colTokens": "Tokens",
     "modelUsage": "Usage by model",
     "noModelRecords": "No per-model records for this period.",
@@ -1032,7 +1063,7 @@
     "avgLatency": "Avg Latency",
     "p95Latency": "P95 Latency",
     "totalCost": "Total Cost",
-    "activeModels": "Active Models",
+    "activeModels": "Active models (catalog)",
     "title": "Live Monitoring",
     "table": {
       "model": "Model",
@@ -1096,7 +1127,8 @@
       "confirmOffLabel": "Turn off",
       "statusUnknown": "Unknown",
       "statusUnknownWarning": "Could not read the current setting — it may actually be on. Refresh to check again."
-    }
+    },
+    "emptyAnalyticsLink": "View longer-term stats in Analytics →"
   },
   "errors": {
     "generic": "An error occurred. Please try again later.",
@@ -1129,7 +1161,7 @@
     "toggleSaved": "Access setting updated.",
     "modelManagement": "Model access",
     "colAlias": "Model alias",
-    "colAllowAll": "All apps",
+    "colAllowAll": "Per-app status",
     "colAllowThisApp": "This app",
     "noModels": "No models.",
     "allBadge": "All",
@@ -1153,13 +1185,15 @@
     "accessExplicit": "explicit",
     "accessUnrestricted": "unrestricted",
     "appStatusUnrestrictedHint": "Unrestricted — future apps are included automatically",
+    "chipLegend": "Chips: per-app status · strikethrough = blocked",
     "noAllowedModelsHint": "Add allowed models below to select a default model.",
     "defaultModelNotAllowedHint": "The current default model is no longer allowed for this app — select an allowed model and save to restore routing."
   },
   "forbidden": {
     "title": "Access denied",
     "description": "You do not have permission to view this page. Contact an administrator if you need access.",
-    "backHome": "Back to home"
+    "backHome": "Back to home",
+    "descriptionAdmin": "This page is for team leaders and developers. View overall usage on the dashboard, analytics, or monitoring."
   },
   "policyState": {
     "unrestricted": "Unrestricted",

@@ -451,21 +451,81 @@ describe('GET /api/auth/callback — state 검사(보안 핵심)', () => {
   });
 });
 
+describe('GET /api/auth/callback — nonce 검사(replay 차단)', () => {
+  const STATE = 'state-value-0123456789';
+  const VERIFIER = 'verifier-value-0123456789012345678901234';
+  const NONCE = 'nonce-value-0123456789012345678';
+
+  function callbackReq(cookies: Record<string, string>) {
+    return req(`http://admin.test/api/auth/callback?code=CODE&state=${STATE}`, {
+      headers: { host: 'admin.test' },
+      cookies: { oidc_state: STATE, oidc_verifier: VERIFIER, ...cookies },
+    });
+  }
+
+  function idJwt(extra: Record<string, unknown> = {}): string {
+    return jwtWithExp(Math.floor(Date.now() / 1000) + 3600, extra);
+  }
+
+  it('id_token 의 nonce 가 쿠키와 다르면 400 — 다른 세션의 토큰 재사용(replay) 차단', async () => {
+    configureOidc();
+    stubTokenEndpoint({ id_token: idJwt({ nonce: 'OTHER-SESSION-NONCE' }) });
+    const res = await callbackGET(callbackReq({ oidc_nonce: NONCE }));
+    expect(res.status).toBe(400);
+    expect(await res.text()).toContain('nonce');
+    expect(setCookies(res)['admin_jwt']).toBeUndefined();
+  });
+
+  it('id_token 에 nonce 클레임이 없으면 400 — nonce 를낸 요청에는 IdP 가 답해야 한다', async () => {
+    configureOidc();
+    stubTokenEndpoint({ id_token: idJwt() }); // nonce 없음
+    const res = await callbackGET(callbackReq({ oidc_nonce: NONCE }));
+    expect(res.status).toBe(400);
+    expect(setCookies(res)['admin_jwt']).toBeUndefined();
+  });
+
+  it('oidc_nonce 쿠키 자체가 없으면 400 — 임시 쿠키 유실/만료와 동일 취급', async () => {
+    configureOidc();
+    stubTokenEndpoint({ id_token: idJwt({ nonce: NONCE }) });
+    const res = await callbackGET(callbackReq({})); // nonce 쿠키 없음
+    expect(res.status).toBe(400);
+    expect(setCookies(res)['admin_jwt']).toBeUndefined();
+  });
+
+  it('id_token 이 아예 없는 응답(access_token 전용)은 nonce 검사 없이 진행한다', async () => {
+    configureOidc({ OIDC_COOKIE_TOKEN: 'access_token' });
+    stubTokenEndpoint({ access_token: idJwt(), expires_in: 3600 });
+    const res = await callbackGET(callbackReq({}));
+    expect(res.status).toBe(303);
+    expect(setCookies(res)['admin_jwt']).toBeTruthy();
+  });
+});
+
 describe('GET /api/auth/callback — happy path', () => {
   const STATE = 'state-value-0123456789';
   const VERIFIER = 'verifier-value-0123456789012345678901234';
+  const NONCE = 'nonce-value-0123456789012345678';
+
+  // login 이 authorize 요청에 싣는 nonce 와 id_token.nonce 클레임이 일치해야
+  // 콜백이 통과한다 — 이 describe 의 모든 id_token 에 NONCE 를 싣는다.
+  function jwtWithNonce(
+    expSeconds: number | null,
+    extraClaims: Record<string, unknown> = {},
+  ): string {
+    return jwtWithExp(expSeconds, { nonce: NONCE, ...extraClaims });
+  }
 
   function callbackReq(query = `code=CODE&state=${STATE}`, headers: Record<string, string> = {}) {
     return req(`http://admin.test/api/auth/callback?${query}`, {
       headers: { host: 'admin.test', ...headers },
-      cookies: { oidc_state: STATE, oidc_verifier: VERIFIER },
+      cookies: { oidc_state: STATE, oidc_verifier: VERIFIER, oidc_nonce: NONCE },
     });
   }
 
   it('admin_jwt httpOnly 쿠키를 세우고 / 로 보낸다', async () => {
     configureOidc();
     const exp = Math.floor(Date.now() / 1000) + 3600;
-    const idToken = jwtWithExp(exp);
+    const idToken = jwtWithNonce(exp);
     stubTokenEndpoint({ id_token: idToken, access_token: 'AT', expires_in: 999 });
 
     const res = await callbackGET(callbackReq());
@@ -484,7 +544,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('DEVELOPER 는 / 가 403 이라 /my 로 보낸다 — 로그인 직후 403 첫 화면 방지', async () => {
     configureOidc();
-    const idToken = jwtWithExp(Math.floor(Date.now() / 1000) + 3600, {
+    const idToken = jwtWithNonce(Math.floor(Date.now() / 1000) + 3600, {
       role: 'DEVELOPER',
     });
     stubTokenEndpoint({ id_token: idToken });
@@ -532,7 +592,7 @@ describe('GET /api/auth/callback — happy path', () => {
     const exp = Math.floor(Date.now() / 1000) + 3600;
     // jwtWithExp 는 role: 'ADMIN' 을 기본으로 넣으므로 undefined 로 덮어 키를 없앤다
     // (JSON.stringify 는 undefined 프로퍼티를 누락시킨다).
-    return jwtWithExp(exp, { role: undefined });
+    return jwtWithNonce(exp, { role: undefined });
   }
 
   it('role 없는 IdP 토큰 + whoami TEAM_LEADER → admin_role 쿠키 + / 랜딩', async () => {
@@ -590,7 +650,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('token 요청에 code_verifier / code / redirect_uri / client_id 를 싣는다 (PKCE 실사용)', async () => {
     configureOidc();
-    const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    const calls = stubTokenEndpoint({ id_token: jwtWithNonce(null) });
 
     await callbackGET(callbackReq());
 
@@ -612,7 +672,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('public client — Authorization 헤더를 붙이지 않는다', async () => {
     configureOidc();
-    const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    const calls = stubTokenEndpoint({ id_token: jwtWithNonce(null) });
     await callbackGET(callbackReq());
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBeUndefined();
@@ -621,7 +681,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('confidential client — HTTP Basic 으로 secret 을 보낸다', async () => {
     configureOidc({ OIDC_CLIENT_SECRET: 's3cr3t' });
-    const calls = stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    const calls = stubTokenEndpoint({ id_token: jwtWithNonce(null) });
     await callbackGET(callbackReq());
     const headers = calls[0].init.headers as Record<string, string>;
     expect(headers.Authorization).toBe(`Basic ${btoa('admin-ui-client:s3cr3t')}`);
@@ -633,7 +693,7 @@ describe('GET /api/auth/callback — happy path', () => {
     configureOidc();
     // expires_in 은 일부러 크게 준다 — exp 가 이겨야 한다.
     stubTokenEndpoint({
-      id_token: jwtWithExp(Math.floor(Date.now() / 1000) + 1800),
+      id_token: jwtWithNonce(Math.floor(Date.now() / 1000) + 1800),
       expires_in: 86400,
     });
 
@@ -645,14 +705,14 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('exp 가 없으면 expires_in 으로 폴백한다', async () => {
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(null), expires_in: 600 });
+    stubTokenEndpoint({ id_token: jwtWithNonce(null), expires_in: 600 });
     const res = await callbackGET(callbackReq());
     expect(Number(/Max-Age=(\d+)/i.exec(setCookies(res)['admin_jwt'])![1])).toBe(600);
   });
 
   it('exp/expires_in 둘 다 없으면 1시간 폴백 (무기한 금지)', async () => {
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    stubTokenEndpoint({ id_token: jwtWithNonce(null) });
     const res = await callbackGET(callbackReq());
     expect(Number(/Max-Age=(\d+)/i.exec(setCookies(res)['admin_jwt'])![1])).toBe(3600);
   });
@@ -664,7 +724,7 @@ describe('GET /api/auth/callback — happy path', () => {
     //    아무리 크게 줘도 다음 요청에서 쿠키가 지워지고 로그인으로 되돌아와, IdP 세션이
     //    살아 있는 동안 **영원히 반복**된다. 그래서 굽지 않는 것이 유일한 해결이다.
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(Math.floor(Date.now() / 1000) - 10) });
+    stubTokenEndpoint({ id_token: jwtWithNonce(Math.floor(Date.now() / 1000) - 10) });
     const res = await callbackGET(callbackReq());
 
     expect(res.status).toBe(502);
@@ -682,7 +742,7 @@ describe('GET /api/auth/callback — happy path', () => {
     //    미리 빼고 보므로 `now+5` 는 이미 만료로 판정돼 위 502 경로를 탄다(실제로 그렇게
     //    한 번 틀렸다). 45초면 skew(30) 는 넘고 하한(60) 아래라 클램프만 검증된다.
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(Math.floor(Date.now() / 1000) + 45) });
+    stubTokenEndpoint({ id_token: jwtWithNonce(Math.floor(Date.now() / 1000) + 45) });
     const res = await callbackGET(callbackReq());
 
     expect(res.status).toBe(303);
@@ -695,7 +755,7 @@ describe('GET /api/auth/callback — happy path', () => {
     // parseJWT 가 throw → 쿠키 제거 → /api/auth/login → IdP 세션 살아있음 → 콜백 →
     // 같은 쿠키 → 무한 루프였다. 화면에는 아무 진단도 없었다.
     configureOidc({ OIDC_COOKIE_TOKEN: 'access_token' });
-    stubTokenEndpoint({ id_token: jwtWithExp(null), access_token: 'opaque-okta-token-abc123' });
+    stubTokenEndpoint({ id_token: jwtWithNonce(null), access_token: 'opaque-okta-token-abc123' });
     const res = await callbackGET(callbackReq());
 
     expect(res.status).toBe(502);
@@ -708,7 +768,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('id_token 이 없으면 access_token 으로 폴백한다', async () => {
     configureOidc();
-    stubTokenEndpoint({ access_token: jwtWithExp(null) });
+    stubTokenEndpoint({ access_token: jwtWithNonce(null) });
     const res = await callbackGET(callbackReq());
     expect(res.status).toBe(303);
     expect(setCookies(res)['admin_jwt']).toBeTruthy();
@@ -719,8 +779,8 @@ describe('GET /api/auth/callback — happy path', () => {
     //    썼는데, 이제 콜백이 굽기 전에 parseJWT 로 가독성을 검사하므로 더미는 502 가 된다
     //    (그 검사가 무한 리다이렉트를 막는다). 어느 토큰이 선택됐는지는 클레임으로 구분한다.
     configureOidc({ OIDC_COOKIE_TOKEN: 'access_token' });
-    const accessJwt = jwtWithExp(null, { which: 'access' });
-    stubTokenEndpoint({ id_token: jwtWithExp(null, { which: 'id' }), access_token: accessJwt });
+    const accessJwt = jwtWithNonce(null, { which: 'access' });
+    stubTokenEndpoint({ id_token: jwtWithNonce(null, { which: 'id' }), access_token: accessJwt });
     const res = await callbackGET(callbackReq());
     expect(res.status).toBe(303);
     expect(cookieValue(setCookies(res)['admin_jwt'])).toBe(accessJwt);
@@ -728,7 +788,7 @@ describe('GET /api/auth/callback — happy path', () => {
 
   it('https 종단이면 admin_jwt 에 Secure 가 붙는다', async () => {
     configureOidc();
-    stubTokenEndpoint({ id_token: jwtWithExp(null) });
+    stubTokenEndpoint({ id_token: jwtWithNonce(null) });
     const res = await callbackGET(callbackReq(undefined, { 'x-forwarded-proto': 'https' }));
     expect(setCookies(res)['admin_jwt']).toMatch(/Secure/i);
     // 리다이렉트는 상대 경로라 scheme 이 없다 — 브라우저가 https 오리진을 그대로 쓴다.

@@ -60,10 +60,16 @@ _router_service = RouterService()
 
 
 def _has_1h_cache_control(req_data: dict) -> bool:
-    """Detect if any cache_control block in the request uses 1-hour TTL (ttl=3600).
+    """Detect if any cache_control block in the request uses 1-hour TTL.
 
-    Scans system, messages, and tools for cache_control.ttl == "3600" or 3600.
+    Anthropic wire 의 ttl 리터럴은 ``"1h"`` 다 (``"5m"`` 가 기본). 레거시 숫자
+    표기 ``"3600"``/``3600`` 도 함께 허용한다 — 예전엔 ``"3600"`` 만 매칭해
+    실제 1h 요청이 전부 5m 단가로 저과금됐다(R2-12). 정확한 혼합 과금은
+    응답 usage 의 ``cache_creation.ephemeral_1h_input_tokens`` 분해가 담당하고,
+    이 불리언은 분해를 보고하지 않는 경로의 폴백 신호다.
     """
+    _1H_TTLS = {"1h", "3600"}
+
     def _check_blocks(blocks):
         if not isinstance(blocks, list):
             return False
@@ -71,7 +77,7 @@ def _has_1h_cache_control(req_data: dict) -> bool:
             if not isinstance(block, dict):
                 continue
             cc = block.get("cache_control")
-            if isinstance(cc, dict) and str(cc.get("ttl", "")) == "3600":
+            if isinstance(cc, dict) and str(cc.get("ttl", "")).lower() in _1H_TTLS:
                 return True
         return False
 
@@ -90,7 +96,7 @@ def _has_1h_cache_control(req_data: dict) -> bool:
     for tool in req_data.get("tools", []):
         if isinstance(tool, dict):
             cc = tool.get("cache_control")
-            if isinstance(cc, dict) and str(cc.get("ttl", "")) == "3600":
+            if isinstance(cc, dict) and str(cc.get("ttl", "")).lower() in _1H_TTLS:
                 return True
 
     return False
@@ -459,7 +465,10 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         and _profile is not None
         and getattr(_profile, "web_search_enabled", False)
     ):
-        from app.services.web_search_loop import run_web_search_loop
+        from app.services.web_search_loop import (
+            conservative_admission_body,
+            run_web_search_loop,
+        )
 
         # ⚠️ **입장 심사를 여기서 해야 한다.** 이 분기는 아래 `run_fallback_loop` 보다
         #    먼저 리턴하고, 그 폴백 루프가 `/v1/messages` 에서 스코프 2축과 레이트리밋을
@@ -472,12 +481,25 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         #
         #    같은 함수를 폴백 루프도 쓴다(단일 구현). 여기서 거절되면 상류를 호출하지
         #    않으므로 예약도 남지 않는다.
+        #
+        # ⚠️ 루프는 최대 max_iterations 턴까지 상류를 풀 호출하는데 턴 사이에
+        #    한도 재평가가 없다(R2-9). 그래서 입장심사 예약량을 단일 턴이 아니라
+        #    "턴 상한 × max_output"으로 보수적으로 선반영한다 — 심사용 복사본에만
+        #    부푼 max_tokens 를 넣고(상류 바디와 무관), 실제 사용분과의 차액은
+        #    finalize 의 settle 이 환불한다. 한도 근처 유저가 조금 더 빨리
+        #    429 를 맞는 대가로, 한도를 넘는 다중 턴 지출을 막는다.
+        #    헬퍼는 web_search_loop.conservative_admission_body — openai_compat 의
+        #    /v1/responses 경로(R3-5)도 같은 함수로 같은 값을 예약한다.
+        _settings_ws = get_settings()
+        _admission_body = conservative_admission_body(
+            req_data, _settings_ws.web_search_max_iterations
+        )
         _admission = await enforce_candidate_admission(
             router_service=_router_service,
             auth_context=auth_context,
             candidate_config=model_config,
             redis=redis,
-            req_data=req_data,
+            req_data=_admission_body,
             state=state,
             request_id=request_id,
             budget_status=state.get("budget_status"),
@@ -489,8 +511,6 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 headers=_admission.headers or None,
                 media_type="application/json",
             )
-
-        _settings_ws = get_settings()
 
         async def _ws_invoke(turn_body: dict) -> tuple[int, bytes, dict, TokenUsage]:
             body_b, _sk, nsk = _build_candidate_body(turn_body, model_config, False)

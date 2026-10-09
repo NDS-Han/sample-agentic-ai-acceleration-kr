@@ -42,9 +42,14 @@ def apply_chain(
     visited = {alias}
     hops = 0
     for _ in range(max_depth):
-        rule = next(
+        # ⚠️ from_alias 당 규칙이 여러 개일 수 있다(유니크 제약 없음). 임계값 오름차순
+        #    + 첫 매치로 고르면 100% 사용률에서도 80% 규칙이 이겨, 운영자가 "100% 에는
+        #    가장 싼 모델로" 걸어둔 상위 단계가 영구 무시됐다. **조건을 만족하는 규칙 중
+        #    가장 높은 임계값**을 고른다 — 단계적 하향의 자연스러운 의미론.
+        rule = max(
             (r for r in rules if r.from_alias == alias and current_pct >= r.threshold_pct),
-            None,
+            key=lambda r: r.threshold_pct,
+            default=None,
         )
         if rule is None or rule.to_alias in visited:
             break

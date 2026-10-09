@@ -54,6 +54,12 @@ export function fmtDateTime(iso: string, locale: string, timeZone?: string): str
  */
 export function fmtTokensCompact(n: number | null | undefined): string {
   if (n == null || !Number.isFinite(n) || n <= 0) return '—';
+  // B 분기 필수 — 없으면 10억 이상이 '1050M'처럼 다른 위젯(대시보드 KPI의
+  // '1.05B')과 다른 단위로 렌더된다.
+  if (n >= 1_000_000_000) {
+    const b = n / 1_000_000_000;
+    return `${b >= 10 ? Math.round(b) : Math.round(b * 10) / 10}B`;
+  }
   if (n >= 1_000_000) {
     const m = n / 1_000_000;
     return `${m >= 10 ? Math.round(m) : Math.round(m * 10) / 10}M`;

@@ -35,7 +35,8 @@ import { TopSpendTable, type TopSpendRow } from '@/components/dashboard/TopSpend
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ClientFilter } from '@/components/dashboard/ClientFilter';
 import { reportingNowParts } from '@/lib/utils/period';
-import { fmtUsd } from '@/lib/utils/format';
+import { fmtUsd, fmtTokensCompact } from '@/lib/utils/format';
+import { teamDisplayName } from '@/lib/utils/trendSeries';
 
 
 
@@ -43,12 +44,8 @@ import { fmtUsd } from '@/lib/utils/format';
 // (>=90 CRITICAL / >=70 WARNING)과 동일. 별도 임계를 두면 대시보드 카드와
 // /budgets 표가 같은 수치에 다른 심각도를 표시한다.
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(2)}B`;
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return n.toLocaleString();
-}
+// 토큰 포맷의 단일 출처는 lib/utils/format 의 fmtTokensCompact — 로컬 구현을
+// 두면 같은 토큰 수가 페이지마다 다른 단위(1050M vs 1.1B)로 표시된다.
 
 /**
  * 일 평균 소비 + (당월이면) 월말 예상.
@@ -161,7 +158,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           />
           <KPICard
             title={t('totalTokens')}
-            value={kpi ? formatTokens(kpi.total_tokens) : '—'}
+            value={kpi ? fmtTokensCompact(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
             href={`/analytics?period=${period}`}
@@ -266,7 +263,8 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
 
   const teamRows: TopSpendRow[] = topTeams.map((tm) => ({
     id: tm.team_id,
-    name: tm.name,
+    // 동명 팀 구분 — 예산 표와 같은 canonical 규칙(부서_팀).
+    name: teamDisplayName({ team: tm.name, dept_name: tm.department_name }),
     usedUsd: tm.cost_usd,
     usagePct: teamPctById.get(tm.team_id) ?? null,
     href: `/budgets?team=${tm.team_id}`,
@@ -283,7 +281,9 @@ async function TeamUserRanking({ period, client }: { period: string; client: str
     return {
       id: u.user_id,
       name: u.name || u.email,
-      subtitle: u.team_name,
+      subtitle: u.team_name
+        ? teamDisplayName({ team: u.team_name, dept_name: u.department_name })
+        : null,
       usedUsd: u.cost_usd,
       usagePct,
       href: `/users?node=${u.user_id}`,

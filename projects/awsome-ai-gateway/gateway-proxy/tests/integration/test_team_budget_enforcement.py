@@ -207,6 +207,9 @@ def _build_redis(budget_eval_resps) -> AsyncMock:
         if key.startswith("key:cache:vk:"):
             # VKAuthStrategy Redis-first 인증
             return _auth_context_json().encode()
+        if key.startswith("key:vk:"):
+            # 폐기 재확인(R2-8) — 캐시 히트 유효하려면 매핑 키가 존재해야 한다
+            return b"user-1"
         if key.startswith("model:"):
             # RouterService 모델 설정 캐시 — DB 조회 없이 캐시 히트로 처리
             return _model_config_json

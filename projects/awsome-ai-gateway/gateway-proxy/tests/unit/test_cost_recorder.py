@@ -175,3 +175,44 @@ def test_calculate_cost_precision(model_config_openai):
     usage = TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)
     cost = calculate_cost(usage, model_config_openai)
     assert len(str(cost).split(".")[-1]) <= 6
+
+
+def test_calculate_cost_1h_cache_split(model_config_bedrock):
+    """R2-12: 응답 분해가 있으면 5m/1h 부분을 각각 단가로 과금한다.
+
+    pricing: cache_write_per_1k=0.00375 (5m), cache_write_1h_per_1k=0.006 (1h)
+    """
+    usage = TokenUsage(
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cache_creation_input_tokens=1000,
+        cache_creation_1h_input_tokens=400,  # 400은 1h, 600은 5m
+    )
+    cost = calculate_cost(usage, model_config_bedrock)
+    # 400/1000*0.006 + 600/1000*0.00375 = 0.0024 + 0.00225 = 0.00465
+    assert cost == Decimal("0.004650")
+
+
+def test_calculate_cost_1h_boolean_fallback(model_config_bedrock):
+    """응답 분해가 없는 경로(비Anthropic) — 요청 신호로 전체를 1h 단가로."""
+    usage = TokenUsage(
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cache_creation_input_tokens=1000,
+        cache_ttl_1h=True,
+    )
+    cost = calculate_cost(usage, model_config_bedrock)
+    assert cost == Decimal("0.006000")
+
+
+def test_calculate_cost_5m_default(model_config_bedrock):
+    usage = TokenUsage(
+        input_tokens=0,
+        output_tokens=0,
+        total_tokens=0,
+        cache_creation_input_tokens=1000,
+    )
+    cost = calculate_cost(usage, model_config_bedrock)
+    assert cost == Decimal("0.003750")
