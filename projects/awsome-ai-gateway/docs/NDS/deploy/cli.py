@@ -103,9 +103,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
         Choice(f"{t.name}: {t.label}  [{t.users}, {t.monthly_cost_usd}]", t.name)
         for t in tiers.TIERS.values() if t.backend == target
     ]
+    prev_tier = _g(ex, "deploy", "size_tier")
+    tier_vals = {c.value for c in tier_choices}
     size_tier = _unwrap(questionary.select(
         "규모 티어", choices=tier_choices,
-        default=_g(ex, "deploy", "size_tier") or tier_choices[0].value).ask())
+        default=prev_tier if prev_tier in tier_vals else tier_choices[0].value).ask())
+    same_target = target == _g(ex, "deploy", "target")
 
     domain_mode = _unwrap(questionary.select(
         "HTTPS 도메인",
@@ -159,8 +162,14 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     prev_oidc = _g(ex, "oidc", default={}) or {}
     oidc = {}
-    if _unwrap(questionary.confirm("OIDC 로그인(Cognito 등)을 설정합니까?",
-                                   default=bool(prev_oidc)).ask()):
+    oidc_on = _unwrap(questionary.confirm(
+        "OIDC 로그인(Cognito 등)을 설정합니까?", default=bool(prev_oidc)).ask())
+    if not oidc_on and prev_oidc:
+        if not _unwrap(questionary.confirm(
+                "기존 OIDC 설정이 있습니다 — 제거합니까?", default=False).ask()):
+            oidc_on = True
+            oidc = dict(prev_oidc)
+    if oidc_on and not oidc:
         oidc["issuer_url"] = _unwrap(questionary.text(
             "OIDC issuer URL", default=str(prev_oidc.get("issuer_url", "")) or None).ask())
         oidc["client_id"] = _unwrap(questionary.text(
@@ -172,25 +181,27 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     images = {}
     if target in ("ecs", "eks"):
-        prev_img = _g(ex, "images", default={}) or {}
+        # target 이 바뀌면 이전 backend 의 이미지/tfstate 는 프리필하지 않는다
+        prev_img = (_g(ex, "images", default={}) or {}) if same_target else {}
         images["registry"] = _unwrap(questionary.text(
             "외부 이미지 registry (비우면 ECR 자동 추론)",
-            default=str(prev_img.get("registry", ""))).ask())
+            default=str(prev_img.get("registry", "")) or None).ask())
         images["tag"] = _unwrap(questionary.text(
             "이미지 태그 (명시적 핀 필수)",
             default=str(prev_img.get("tag", "")) or None).ask())
 
     deploy_extra = {}
     if target in ("ecs", "eks"):
+        prev_dep = (_g(ex, "deploy", default={}) or {}) if same_target else {}
         deploy_extra["tfstate_bucket"] = _unwrap(questionary.text(
             "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)",
-            default=str(_g(ex, "deploy", "tfstate_bucket"))).ask())
+            default=str(prev_dep.get("tfstate_bucket", "")) or None).ask())
         deploy_extra["tfstate_table"] = _unwrap(questionary.text(
             "Terraform lock DynamoDB table (없으면 비움)",
-            default=str(_g(ex, "deploy", "tfstate_table"))).ask())
-        deploy_extra["release"] = _g(ex, "deploy", "release") or "llm-gateway"
-        deploy_extra["namespace"] = _g(ex, "deploy", "namespace") or "llm-gateway"
-        deploy_extra["tf_env_dir"] = _g(ex, "deploy", "tf_env_dir") or ""
+            default=str(prev_dep.get("tfstate_table", "")) or None).ask())
+        deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
+        deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
+        deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
 
     prev_cidrs = _g(ex, "network", "allowed_cidrs", default=[]) or []
     allowed = _unwrap(questionary.text(
@@ -256,17 +267,27 @@ def cmd_configure(args) -> int:
     """기존 gateway.yaml 을 기본값으로 다시 물어보고, 원하면 바로 배포까지."""
     questionary = _questionary()
     cfg_path = Path(args.config)
+    if cfg_path.name.startswith("gateway.captured-"):
+        console.print(f"[yellow]{cfg_path.name} 은 캡처 산출물입니다 — "
+                      f"검토본을 보존하기 위해 {DEFAULT_CONFIG} 에 씁니다")
+        cfg_path = DEFAULT_CONFIG
+
+    def _read_doc(p: Path) -> dict:
+        try:
+            return yaml.safe_load(p.read_text()) or {}
+        except yaml.YAMLError as exc:
+            raise schema.SchemaError(f"{p} 의 YAML이 유효하지 않습니다: {exc}")
+
     existing: dict = {}
     if cfg_path.exists():
-        existing = yaml.safe_load(cfg_path.read_text()) or {}
+        existing = _read_doc(cfg_path)
         console.print(Panel(
             f"{cfg_path} 를 기본값으로 다시 설정합니다 — Enter 는 현재 값 유지"))
     else:
         captured = sorted(cfg_path.parent.glob("gateway.captured-*.yaml"))
         if captured:
             console.print(f"[yellow]{cfg_path} 없음 — 캡처본 {captured[0].name} 을 기본값으로 씁니다")
-            existing = yaml.safe_load(captured[0].read_text()) or {}
-            cfg_path = cfg_path
+            existing = _read_doc(captured[0])
         else:
             console.print(f"[yellow]{cfg_path} 없음 — 새로 만듭니다 (init 과 동일)")
 
