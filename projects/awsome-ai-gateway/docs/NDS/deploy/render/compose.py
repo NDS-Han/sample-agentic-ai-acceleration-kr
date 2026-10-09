@@ -18,7 +18,7 @@ from pathlib import Path
 from ..schema import GatewayConfig
 from . import common
 
-REPO_ROOT = Path(__file__).resolve().parents[3]
+REPO_ROOT = Path(__file__).resolve().parents[4]  # docs/NDS/deploy/render/compose.py → 루트
 
 DROP_ALWAYS = {"mock-vllm"}
 OBSERVABILITY = {"otel-collector", "prometheus", "loki", "tempo", "grafana"}

@@ -16,6 +16,18 @@
 고치고 다시 render/apply 하는 것 — 환경별로 스크립트를 찾아 실행하는 방식이
 아닙니다.
 
+> 이 디렉토리는 배포 도구도 함께 담고 있습니다 — `deploy.sh` (실행 진입점),
+> `deploy/` (파이썬 패키지). 루트의 `./deploy` 는 `docs/NDS/deploy.sh` 로
+> 전달하는 래퍼입니다. 처음 쓰기 전에 의존성을 설치하세요:
+>
+> ```bash
+> python3 -m venv docs/NDS/.venv
+> docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
+> ```
+>
+> (`deploy` 는 venv 가 없으면 시스템 python3 으로 폴백합니다 — PyYAML 과
+> `rich` 가 있으면 바로 동작합니다.)
+
 ## 어떤 경로로 배포할까
 
 | 규모 | 배포 대상 (`deploy.target`) | 티어 | 특징 |

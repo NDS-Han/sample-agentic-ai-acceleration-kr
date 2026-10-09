@@ -1,5 +1,0 @@
-# deploy 도구 런타임 의존성
-# 설치: uv venv deployment/deploy/.venv && uv pip install -r deployment/deploy/requirements.txt -p deployment/deploy/.venv/bin/python
-#   또는: python3 -m pip install -r deployment/deploy/requirements.txt
-PyYAML>=6.0
-rich>=13.0

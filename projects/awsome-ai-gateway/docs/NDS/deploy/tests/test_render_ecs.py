@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from deployment.deploy import schema
-from deployment.deploy.render import ecs as ecs_render
+from deploy import schema
+from deploy.render import ecs as ecs_render
 
 
 def _cfg(**over) -> schema.GatewayConfig:
@@ -162,7 +162,7 @@ def test_extra_vars_merge(tmp_path):
 
 
 def test_derived_url_vars():
-    from deployment.deploy import ecs_apply
+    from deploy import ecs_apply
     cfg = _cfg()
     out = {"alb_dns_name": "lb-1.elb.amazonaws.com"}
     v = ecs_apply._derived_url_vars(cfg, out)

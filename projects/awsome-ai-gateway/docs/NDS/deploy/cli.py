@@ -23,7 +23,7 @@ from .render import ecs as ecs_render
 
 console = Console()
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]  # docs/NDS/deploy/cli.py → 프로젝트 루트
 DEFAULT_CONFIG = REPO_ROOT / "deployment" / "gateway.yaml"
 GEN_ROOT = REPO_ROOT / "deployment" / "gen"
 
