@@ -156,3 +156,32 @@ ACM 인증서는 모듈이 만들고 DNS 검증 레코드도 자동 생성됩니
 프라이빗 hosted zone 또는 사내 DNS 해석이 필요합니다. `render` → `apply` 가
 ALB 를 교체하므로 짧은 다운타임이 생깁니다 — 유지보수 창에서 진행하세요.
 private 에서도 NAT 는 유지됩니다(ECR pull·Bedrock 호출 경로).
+
+## 배포 삭제 (teardown)
+
+`./deploy teardown` — apply가 소유한 범위만 지웁니다. 확인은 y/n이 아니라
+**환경 이름을 그대로 입력**해야 하고, CI에서는 `--yes`로 생략 가능합니다.
+
+| backend | 지워지는 것 | 남는 것 |
+|---|---|---|
+| **compose** | 컨테이너 + 네트워크. `--purge` 시 볼륨까지 (**DB 데이터 영구 삭제**) | 볼륨(기본), `gen/<env>/` 산출물(.env 시크릿 포함), 빌드된 이미지 |
+| **ecs** | terraform이 만든 전부 — VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR(repo+이미지) | `deployment/gen/` 산출물, terraform state backend(수동 관리) |
+| **eks** | helm release(앱 전체)만 | **인프라 전부** — EKS 클러스터·Aurora·ElastiCache·Cognito·Secrets·IRSA는 terraform env 소유. 인프라 삭제는 그 디렉토리에서 `terraform destroy` |
+
+```bash
+./deploy teardown                    # 삭제 대상 미리보기 → 환경 이름 입력 → 삭제
+./deploy teardown --purge            # compose: 볼륨(DB)까지 삭제
+./deploy teardown --yes              # 비대화형 (CI) — 확인 생략, 주의
+./deploy teardown --context <ctx>    # eks: 대상 클러스터 명시
+```
+
+주의:
+
+- **ecs**: `db_safeguards`가 켜진 티어(t2 등)는 Aurora deletion protection이
+  destroy를 막으므로, CLI가 해제 apply 후 destroy합니다. **최종 스냅샷 없이
+  완전 삭제**됩니다 — 보존이 필요하면 먼저
+  `aws rds create-db-cluster-snapshot`으로 수동 스냅샷을 만드세요.
+- **eks**: helm uninstall은 앱만 지웁니다. namespace에 남은 secret/pvc
+  잔여물과 인프라는 각각 kubectl/terraform으로 정리해야 합니다.
+- **공통**: teardown은 `VIRTUAL_KEY_ENCRYPTION_KEY` 백업을 하지 않습니다 —
+  삭제 전 `.env`(compose) 또는 Secrets Manager 값을 별도 보관하세요.

@@ -36,7 +36,14 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 ./deploy validate    # [고급] yaml 검증만
 ./deploy render      # [고급] 산출물만 생성해서 확인
 ./deploy apply --plan   # 변경 계획만 보기 — 아무것도 안 바뀜
+./deploy teardown    # [위험] 배포 삭제 — 소유 범위별 (환경 이름 입력으로 확인)
 ```
+
+`teardown`은 apply가 소유하는 것만 지웁니다 — compose는 컨테이너+네트워크
+(`--purge`로 볼륨=DB까지), ecs는 terraform이 만든 AWS 리소스 전부
+(deletion protection이 켜진 티어는 해제 후 삭제), eks는 helm release만
+(클러스터·DB·인프라는 terraform env 소유로 남습니다). 자세한 절차는
+[update.md](update.md#배포-삭제-teardown) 참조.
 
 ## 이 도구가 하는 것 / 하지 않는 것
 

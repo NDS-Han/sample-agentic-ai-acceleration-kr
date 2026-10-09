@@ -5,6 +5,7 @@
   deploy validate  gateway.yaml 스키마·조합 검증
   deploy render    산출물 생성 (compose: gen/<env>/ 에 compose+.env+Caddyfile)
   deploy doctor    배포 상태·드리프트 점검
+  deploy teardown  배포 삭제 — backend 별 소유 범위만
 """
 from __future__ import annotations
 
@@ -553,6 +554,134 @@ def cmd_apply(args) -> int:
     return 0 if rep.worst != "HIGH" else 1
 
 
+def _confirm_destroy(env: str, args) -> bool:
+    """삭제 확인 — y/n 이 아니라 환경 이름을 그대로 타이핑하게 한다."""
+    if getattr(args, "yes", False):
+        return True
+    if not sys.stdin.isatty():
+        console.print("[red]대화형이 아닙니다 — 확인 없이 삭제하려면 --yes 를 쓰십시오")
+        return False
+    try:
+        typed = _unwrap(_questionary().text(
+            f"삭제를 확인하려면 환경 이름 '{env}' 를 그대로 입력하세요").ask())
+    except Exception as exc:
+        console.print(f"[red]확인 실패 — 삭제하지 않습니다: {exc}")
+        return False
+    if typed != env:
+        console.print("[yellow]입력이 환경 이름과 다릅니다 — 취소됨")
+        return False
+    return True
+
+
+def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
+    import subprocess
+    out = GEN_ROOT / cfg.env
+    compose_file = out / "docker-compose.yml"
+    if not compose_file.exists():
+        console.print(f"[red]{compose_file} 없음 — render 산출물이 없습니다 "
+                      "(기동 중인 스택은 `docker compose ls` 로 확인)")
+        return 1
+    purge = getattr(args, "purge", False)
+    console.print(Panel(
+        f"삭제: compose 프로젝트 llm-gateway-{cfg.env} 의 컨테이너 + 네트워크\n"
+        + ("[red]+ 볼륨 전부(--volumes) — postgres DB 데이터가 영구 삭제됩니다[/red]"
+           if purge else
+           "볼륨(pgdata 등)은 보존됩니다 — 함께 지우려면 --purge")
+        + f"\n남는 것: {out}/ 산출물(.env 시크릿 포함), 빌드된 이미지",
+        title=f"teardown — {cfg.env} (compose)", expand=False))
+    if not _confirm_destroy(cfg.env, args):
+        return 130
+    argv = ["docker", "compose", "--env-file", str(out / ".env"),
+            "-f", str(compose_file), "down", "--remove-orphans"]
+    if purge:
+        argv.append("--volumes")
+    console.print(f"[cyan]$ {' '.join(argv)}")
+    try:
+        r = subprocess.run(argv)
+    except FileNotFoundError:
+        console.print("[red]docker 명령을 못 찾았습니다 — Docker(compose plugin) 설치 필요")
+        return 1
+    if r.returncode != 0:
+        console.print("[red]compose down 실패 — 로그를 확인하십시오")
+        return 1
+    console.print(f"[green]삭제 완료 — 산출물 디렉토리는 남아 있습니다: {out}")
+    return 0
+
+
+def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
+    from . import ecs_apply
+    out = GEN_ROOT / cfg.env / "ecs"
+    env_dir = REPO_ROOT / ecs_apply.ENV_DIR
+    # destroy 도 required 변수(environment/aws_region/image_tag)가 필요 —
+    # 현재 선언으로 tfvars 를 재생성한다
+    ecs_render.render(cfg, out, extra_vars=ecs_apply.load_extra_vars(out))
+    ecs_apply._run(["terraform", "init", "-input=false", "-reconfigure",
+                    f"-backend-config={out / 'backend.hcl'}"], cwd=env_dir)
+    console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
+    ecs_apply._run(["terraform", "plan", "-destroy", "-input=false",
+                    f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
+    safeguards_on = tiers.preset(cfg.deploy.size_tier).ha != "none"
+    console.print(Panel(
+        "삭제: 위 plan 의 모든 AWS 리소스 — VPC/Aurora/ElastiCache/ALB/ECS/"
+        "Cognito/Secrets Manager/ECR(repo+이미지)\n[red]이 배포의 데이터는 "
+        "영구 삭제됩니다.[/red]"
+        + ("\n[yellow]db_safeguards(deletion protection)가 켜져 있어 먼저 해제 "
+           "apply 후 destroy 합니다 — Aurora 최종 스냅샷 없이 완전 삭제됩니다. "
+           "보존이 필요하면 지금 중단하고 `aws rds create-db-cluster-snapshot` "
+           "으로 수동 스냅샷을 먼저 만드세요.[/yellow]" if safeguards_on else ""),
+        title=f"teardown — {cfg.env} (ecs)", expand=False))
+    if not _confirm_destroy(cfg.env, args):
+        return 130
+    if safeguards_on:
+        ecs_render.render(cfg, out, extra_vars={
+            **ecs_apply.load_extra_vars(out), "db_safeguards": False})
+        ecs_apply._run(["terraform", "apply", "-auto-approve", "-input=false",
+                        f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
+    ecs_apply._run(["terraform", "destroy", "-auto-approve", "-input=false",
+                    f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
+    console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
+    return 0
+
+
+def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
+    from . import eks_apply
+    context = getattr(args, "context", "") or ""
+    meta = eks_apply.load_meta(GEN_ROOT / cfg.env / "eks", REPO_ROOT)
+    console.print(Panel(
+        f"삭제: helm release '{meta['release']}' (ns={meta['namespace']}) — "
+        "게이트웨이 앱 전체\n"
+        f"[yellow]남는 것: EKS 클러스터·Aurora·ElastiCache·Cognito·Secrets·VPC·"
+        f"IRSA 등 인프라 전부 — terraform env({meta.get('env_dir', '?')})가 소유. "
+        "인프라까지 지우려면 그 디렉토리에서 terraform destroy 하십시오.\n"
+        "참고: uninstall 후 ns 에 k8s secrets/pvc 잔여물이 남을 수 있습니다.",
+        title=f"teardown — {cfg.env} (eks)", expand=False))
+    if not _confirm_destroy(cfg.env, args):
+        return 130
+    argv = ["helm", "uninstall", meta["release"], "-n", meta["namespace"], "--wait"]
+    if context:
+        argv += ["--kube-context", context]
+    eks_apply._run(argv, cwd=REPO_ROOT)
+    console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 (위 참조)")
+    return 0
+
+
+def cmd_teardown(args) -> int:
+    """배포 삭제 — 각 backend 가 소유하는 범위만 지운다 (apply 와 같은 경계)."""
+    try:
+        cfg = _load_config(args)
+    except schema.SchemaError as exc:
+        console.print(f"[red]gateway.yaml 오류:\n{exc}")
+        return 1
+    if cfg.deploy.target == "compose":
+        return _teardown_compose(cfg, args)
+    if cfg.deploy.target == "ecs":
+        return _teardown_ecs(cfg, args)
+    if cfg.deploy.target == "eks":
+        return _teardown_eks(cfg, args)
+    console.print(f"[red]deploy.target={cfg.deploy.target} 의 teardown 은 구현 전입니다.")
+    return 1
+
+
 def _detect_gen_dir(args) -> tuple[Path, str]:
     """캡처 대상 산출물 디렉토리를 찾는다 — 명시 > 기존 config 의 env > gen/ 탐색.
 
@@ -811,6 +940,16 @@ def main(argv=None) -> int:
                     help="기존 config 와 다른 항목을 absorb/keep/skip 선택")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("teardown",
+                        help="[위험] 배포 삭제 — backend 별 소유 범위만 지움 (확인: 환경 이름 입력)")
+    sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="확인 생략 (CI/스크립트용 — 주의)")
+    sp.add_argument("--purge", action="store_true",
+                    help="compose: 볼륨까지 삭제 — postgres DB 데이터 영구 삭제")
+    sp.add_argument("--context", default="", help="eks backend: kubeconfig context")
+    sp.set_defaults(fn=cmd_teardown)
 
     args = p.parse_args(argv)
     try:
