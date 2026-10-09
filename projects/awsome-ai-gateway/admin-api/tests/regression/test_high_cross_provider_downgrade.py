@@ -74,6 +74,18 @@ async def _save(rows: dict[str, str], rules, monkeypatch):
     repo = _FakeModelRepo(rows)
     monkeypatch.setattr(mr, "ModelRepository", lambda _session: repo)
 
+    # R4 allowed-models 검증 대역 — 빈 목록은 "팀 제한 없음" 의미라 검증을 통과한다.
+    class _FakeTeamAllowedRepo:
+        def __init__(self, _session):
+            pass
+
+        async def list_by_team(self, _team_id):
+            return []
+
+    monkeypatch.setattr(
+        mr, "TeamAllowedModelRepository", _FakeTeamAllowedRepo, raising=False
+    )
+
     reached_budget_lookup = {"hit": False}
 
     class _BudgetRepo:
@@ -209,6 +221,49 @@ async def test_each_alias_is_looked_up_once(monkeypatch):
         )
     # 서로 다른 alias 3개 → 조회 3회.
     assert repo.lookups == 3, f"조회가 {repo.lookups}회 — alias 당 1회여야 한다"
+
+
+async def test_downgrade_target_outside_team_allowed_models_is_refused(monkeypatch):
+    """R4: 강등 대상이 팀 allowed-models 밖이면 강등된 요청이 모델 게이트 403 으로
+    죽는다 — provider 불일치와 같은 부류로 저장 시점에 거부한다."""
+    from app.core.exceptions import ValidationError
+    from app.schemas.budgets import AutoDowngradeConfigRequest
+    from app.services import budget_service as bs
+    import app.repositories.model_repository as mr
+
+    rows = {"claude-opus-4-8": "BEDROCK", "codex-gpt": "BEDROCK"}
+    monkeypatch.setattr(mr, "ModelRepository", lambda _s: _FakeModelRepo(rows))
+
+    class _RestrictiveTeamRepo:
+        def __init__(self, _s):
+            pass
+
+        async def list_by_team(self, _tid):
+            return ["claude-opus-4-8"]  # codex-gpt 는 허용 밖
+
+    monkeypatch.setattr(
+        mr, "TeamAllowedModelRepository", _RestrictiveTeamRepo, raising=False
+    )
+
+    class _BudgetRepo:
+        def __init__(self, _s):
+            pass
+
+        async def get_first_active_config(self, _scope, _sid):
+            return None
+
+    monkeypatch.setattr(bs, "BudgetRepository", _BudgetRepo, raising=False)
+    actor = type("A", (), {"user_id": uuid.uuid4(), "role": type("R", (), {"value": "ADMIN"})()})
+    with pytest.raises(ValidationError, match="allowed models"):
+        await bs.BudgetService(cache_mgr=None).set_downgrade_config(
+            None,
+            scope=bs.BudgetScope.TEAM,
+            scope_id=uuid.uuid4(),
+            data=AutoDowngradeConfigRequest(
+                rules=[_rule("claude-opus-4-8", "codex-gpt")]
+            ),
+            actor=actor,
+        )
 
 
 def test_the_validation_lives_before_any_write():

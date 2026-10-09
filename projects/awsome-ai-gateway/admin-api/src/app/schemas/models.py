@@ -61,6 +61,7 @@ def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
       - 6to4          2002:aabb:ccdd:: → ipaddress.sixtofour
       - IPv4-compat   ::a.b.c.d        → ::/96 최하위 32bit (::, ::1 제외)
       - NAT64         64:ff9b::a.b.c.d → 64:ff9b::/96 최하위 32bit
+      - Teredo        2001::/32 → client IPv4 = 최하위 32bit 의 bit-flip
     """
     mapped = ip.ipv4_mapped or ip.sixtofour
     if mapped is not None:
@@ -70,7 +71,16 @@ def _embedded_ipv4(ip: ipaddress.IPv6Address) -> ipaddress.IPv4Address | None:
         return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
     if (v6 >> 32) == (0x64FF9B << 64):  # NAT64 well-known prefix 64:ff9b::/96
         return ipaddress.IPv4Address(v6 & 0xFFFFFFFF)
+    if (v6 >> 96) == 0x20010000:  # Teredo 2001:0::/32 — client IPv4 는 low32 bit-flip
+        return ipaddress.IPv4Address((v6 & 0xFFFFFFFF) ^ 0xFFFFFFFF)
     return None
+
+
+# RFC 8215 NAT64 local-use 예약 블록 — 외부 엔드포인트로 정당한 리터럴이 아니며
+# PL=48 임베딩 레이아웃(u-octet 분리)이 다르고 복잡하므로 블록 전체를 차단한다.
+_BLOCKED_V6_RANGES = (
+    ipaddress.ip_network("64:ff9b:1::/48"),   # NAT64 local-use
+)
 
 
 def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -83,6 +93,8 @@ def _blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     ):
         return True
     if isinstance(ip, ipaddress.IPv6Address):
+        if any(ip in net for net in _BLOCKED_V6_RANGES):
+            return True
         inner = _embedded_ipv4(ip)
         if inner is not None and _blocked_ip(inner):
             return True

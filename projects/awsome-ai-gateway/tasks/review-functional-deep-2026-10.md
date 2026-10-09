@@ -381,3 +381,36 @@ kiro: 4개 서브리뷰 리포트 완결(`/tmp/r3-partA1/A2/B1/B2.md`, 로컬 �
 
 - **R3-7 실수정**(client → VK 바인딩): 정책 결정 필요, 문서화로 마무리
 - **B1-5** RPM phantom +1 / **B2-5** pub-sub 증폭 / **A4-1** mock-session 커버리지 / **A2-5·A2-6** INFO 항목 — 명시 트레이드오프 또는 저위험으로 보류
+
+## 라운드-4 (2026-10): kiro 5개 서브리뷰 + 내 감사 — R3 수정분의 재검증 포함
+
+kiro(claude-opus-5.5) 서브리포트 5건: `/tmp/r4-partA1.md`(auth/프록시·내부표면), `/tmp/r4-partA2.md`(OIDC·Cognito·세션), `/tmp/r4-partA3.md`(스키마·검증), `/tmp/r4-partB1.md`(게이트웨이·스트리밍·회계), `/tmp/r4-partB2.md`(예산·레이트리밋·집계·캐시). 실험 증거 `/tmp/r4scratch/partA*/`. 최종 합성 파일은 미작성(세션 종료)이나 5개 리포트는 완결.
+
+### R4 신규 발견 → 수정 상태
+
+| # | 심각도 | 내용 | 상태 |
+|---|--------|------|------|
+| R4A1-1 | HIGH | **chat-proxy R3-2 우회**: Next.js 가 `%2f` 를 세그먼트 내부 `/` 로 디코딩(`..%2finternal`→`../internal`) → 세그먼트 검사 통과 → `join('/')`+URL 정규화로 탈출 | ✅ 세그먼트 내 `/` 거부 + `buildTargetUrl` 심층방어(정규화 경로가 `/admin/chat/` 밖이면 400). 회귀 테스트 3케이스 추가 |
+| R4A1-2 | HIGH | `/internal/productivity`·`/webhooks/git` 이 별도 라우터라 R3-1 게이트 누락 → 무인증 DB 쓰기 | ✅ productivity → `_require_internal_token`, git webhook → `X-Hub-Signature-256` HMAC(`compare_digest`, 미설정 403). `GITHUB_WEBHOOK_SECRET` 설정+Helm optional 참조+ESO 조건부 매핑(`adminApi.githubWebhook.enabled`). 테스트 5건 |
+| R4-A2-1 | HIGH | Cognito "성공+0건"(IAM 드리프트·잘못된 pool id·페이지네이션 결함)은 `reconcile_incomplete` 가 안 잡음 → 빈 seen 으로 OIDC 유저 전원 비활성화+VK 폐기 | ✅ `user_map` 공집합이면 reconcile 불완전 취급·비활성화 스킵+errors 기록 |
+| R4-A2-2 | HIGH | R3-9 의 advisory lock 실측 결함 — `session.connection()` 은 commit 간 고정이 아니고, 첫 commit 시 커넥션이 풀에 checkin(세션락 잔류·상호배제 무력화·무관 요청이 락 상속) | ✅ 엔진 바인딩 세션은 **전용 AsyncConnection + `pg_try_advisory_xact_lock`**(tx 종료 시 자동 해제, 풀 잔류 경로 없음), 커넥션 바인딩 세션(테스트)은 세션락 유지, 비-PG/mock 은 잠금 없이 진행 |
+| R4-A2-3/B2-3/B2-4 | MED | model/budget/rate-limit/downgrade/transfer/revoke 경로에 pre-commit 캐시 무효화 잔여 — DEL→commit 창에 구 정책이 ≤TTL 재캐시 | ✅ `invalidate_after_commit` 헬퍼 신설(별도 세션 실패기록 유지) + budget 13곳·rate-limit(SET/DELETE/pattern)·model 6곳·user_team swap·key revoke 전부 전환. `cli_service` warm-SET 도 지연 |
+| — | MED(자체 발견) | **`after_commit` 이 SAVEPOINT release/rollback 에도 발화** — nested commit 에서 지연 쓰기가 조기 실행되면 같은 레이스 재도입 | ✅ `in_nested_transaction()` 가드(outer commit 시점엔 False, nested 이벤트엔 True — 실측). `in_transaction()` 은 outer after_commit 에도 True 라 구분 불가. 회귀 테스트 1건 |
+| R4-A2-4 | MED | unknown-kid 리페치: 마지막 **성공** 시각 기준 쓰로틀이라 IdP 장애 시 30s 경과 후 모든 임의 kid 가 JWKS GET 증폭 | ✅ 시도 시각(`_jwks_force_attempt_at`) 기준 쓰로틀로 negative-cache 효과 — 실패해도 30s 내 재시도 안 함, fetch 실패는 stale JWKS + 401 로 수렴(OIDCConfigError 삼킴). 테스트 확장 |
+| R4-B2-1 | MED | ROI `upsert_aggregation` SELECT→INSERT 레이스(UniqueViolation → 배치 롤백). **scope_id NULL(GLOBAL)은 유니크 인덱스가 못 잡아 ON CONFLICT 도 무력** | ✅ 키별 `pg_advisory_xact_lock(hashtextextended)` 직렬화 — 락 대기 후 SELECT 라 커밋된 행을 봄(READ COMMITTED). NULL 커버·마이그레이션 불필요. 테스트 3건 |
+| R4 MED | MED | downgrade `to_model_alias` 가 팀 allowed-models 밖이면 강등 요청이 모델 게이트 403 | ✅ 저장 시점 검증(허용 목록 있는 팀만 적용 — 빈 목록=제한없음). 회귀 테스트 1건 |
+| R4 LOW | LOW | SSRF 잔여: NAT64 local-use `64:ff9b:1::/48`(RFC 8215), Teredo `2001::/32` 임베디드 IPv4 | ✅ local-use 블록 전체 차단, Teredo client IPv4(low32 bit-flip) 언래핑 차단. 실측 검증 |
+| R4 LOW | LOW | CORS CSV 크래시 위험, README migration head 불일치(`0028`→`0040`), srem 실패 미기록 | ✅ `CORS_ALLOW_ORIGINS` `_split_csv`+`NoDecode`, README 정정, transfer swap 실패기록은 전용 세션으로 durability 복원 |
+
+### R4 검증
+
+- admin-api **791** passed(57 skip) / admin-ui **391** + tsc 클린 / 신규 테스트: defer savepoint 1, webhook/internal 게이트 5, ROI lock 3, downgrade allowed-models 1, chat-proxy %2f 케이스
+- SQLAlchemy 이벤트 실측: `after_commit`/`after_rollback` 이 savepoint 에도 발화 + `in_nested_transaction()` 구분자 확인(sqlite), advisory lock 커넥션 반환 실측(checkin 이벤트)
+
+### R4 잔여 보류
+
+- `/model/*` raw Bedrock 스트림 drain 비대칭(조기 단절 시 usage 과소기록) — 스트리밍 재설계급, 별도 과제
+- ESO 시크릿 로테이션 시 pod 재시작 미전파 — 운영 절차(rollout restart)로 커버
+- daily 집계의 늦은 도착 행 영구 누락(yesterday 창만 처리) — 백필 잡 설계 필요
+- `sync_user` 단건 savepoint — 단건 upsert 직후 commit 이라 이점 미미
+- R3-7 client→VK 바인딩 실수정 — 정책 결정 필요(문서화 유지)
