@@ -78,10 +78,9 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```
 기대: `"creating"` → wait 가 조용히 끝남(수 분) → 마지막 줄 `llm-gateway-dev-pre-sync-<날짜>  available`. 이 이름을 §롤백에서 쓴다.
 
-## (4) terraform — 드리프트 확인 후 apply
+## (4) terraform — 인프라 변경 확인 (필요할 때만 apply)
 
-> **US-18** — 인프라 변경이 없어 `exit=0` 과 `No changes.` 가 나와야 합니다. 그러면 아래 apply 블록은
-> 건너뛰고 (5) 로 넘어갑니다. 다른 결과면 apply 하지 말고 멈춥니다.
+> **US-18** — `exit=0` 과 `No changes.` 가 나와야 합니다. 그러면 apply 없이 (5) 로 넘어갑니다.
 
 ▶ 실행
 ```bash
@@ -90,25 +89,17 @@ terraform init
 terraform plan -no-color -detailed-exitcode > ~/plan.txt 2>&1; echo "exit=$?"
 grep -E '# .* (will be|must be)|^Plan:|No changes|Error' ~/plan.txt
 ```
-plan 결과는 `~/plan.txt` 에 남고, 종료 코드로 판정한다 — `exit=0` 변경 없음(`No changes.`, apply 블록은 건너뜀) · `exit=2` 변경 있음(아래와 대조) · `exit=1` plan 오류(`Error` 줄, 멈춘다). 출력이 비면 terraform 폴더가 아닌 곳에서 친 것이다.
+`exit=` 값으로 판정합니다.
+- `0` — 변경 없음. apply 하지 않고 (5) 로 넘어갑니다.
+- `1` — plan 오류. `Error` 줄을 보고 멈춥니다(출력이 비면 terraform 폴더 밖에서 친 것입니다).
+- `2` — 변경 있음. 아래 「멈출 때」에 해당하지 않으면 `terraform apply`(`yes` 입력)로 적용하고,
+  위 plan 두 줄을 다시 쳐서 `exit=0` 을 확인합니다.
 
-기대(2026-09 dev 실측): `exit=2` + 아래 4줄 + `Plan: 3 to add, 1 to change, 3 to destroy.`
-```
-# module.aurora.aws_secretsmanager_secret_version.db[0] must be replaced
-# module.irsa.aws_iam_policy.admin_api must be replaced
-# module.irsa.aws_iam_policy.bedrock will be updated in-place
-# module.irsa.module.admin_api_irsa.aws_iam_role_policy_attachment.this["admin_api"] must be replaced
-```
-replace 3건은 파괴가 아니다 — 정책 description 변경·시크릿 JSON 에서 `master_password` 키 제거로 새로 만드는 것. 비밀번호 값은 그대로(앱은 2단계 `15` 의 RDS 시크릿을 쓴다).
-
-**멈추는 조건**: 위 4줄 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)) · `external-secrets` 줄 — fork 의 ESO OFF 설정이 upstream 에 덮인 것이다. 켜면 cert-controller 가 영구 0/1(2026-08-14 실측). apply 하지 말고 `modules/external-secrets/main.tf` 의 3줄을 복원한 뒤 다시 plan.
-
-▶ 실행 — `exit=2` 이고 요약이 위와 같을 때만, `yes`
-```bash
-terraform apply
-terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
-```
-기대: `Apply complete! Resources: 3 added, 1 changed, 3 destroyed.` → `No changes.` apply 순간 admin-api 정책이 재생성돼 VK 발급이 수 초 실패할 수 있다(트래픽 없는 지금이 적기). `init` 이 lock 을 고쳐 써도 커밋하지 않는다([8-U](8-U-update.md#terraform-output-실패로-멈추면--terraform-apply-를-돌리지-말-것)).
+멈출 때(apply 하지 않습니다):
+- 이유를 모르는 destroy·replace
+- EKS 버전·애드온 변경 — tfvars 의 버전 고정을 확인합니다([8-E](8-E-eks-upgrade.md)).
+- `external-secrets` 줄 — fork 의 ESO OFF 설정이 덮인 것입니다. `modules/external-secrets/main.tf`
+  의 3줄을 복원한 뒤 다시 plan 합니다(켜면 cert-controller 가 0/1 로 멈춥니다).
 
 ## (5) 이미지 태그 올림 — 새 코드는 새 태그로
 
@@ -263,7 +254,7 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```
 기대: 마지막 줄 `llm-gateway-prod-pre-sync-<날짜>  available`.
 
-**(10-4) terraform — 확인 후 apply**
+**(10-4) terraform — 인프라 변경 확인**
 
 ▶ 실행
 ```bash
@@ -272,13 +263,7 @@ terraform init
 terraform plan -no-color -detailed-exitcode > ~/plan.txt 2>&1; echo "exit=$?"
 grep -E '# .* (will be|must be)|^Plan:|No changes|Error' ~/plan.txt
 ```
-`exit=2` 이고 요약이 (4) 와 같을 때만(`exit=0` 이면 건너뜀):
-```bash
-terraform apply
-terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
-```
-기대·멈추는 조건은 (4) 와 같다(4줄 → `yes` → `No changes.`).
-prod 실측(2026-09-20): `bedrock` 줄이 없고 대신 `module.aurora.time_static.final_snapshot[0] will be created` · `aws_rds_cluster … updated in-place`(`final_snapshot_identifier` 만) 2줄 — `Plan: 4 to add, 1 to change, 3 to destroy.` 이 2줄은 prod 첫 apply 에만 나오고 DB 에 쓰기 호출이 없다.
+판정·apply·멈출 때는 (4) 와 같습니다.
 
 **(10-5) 태그 올림**
 
