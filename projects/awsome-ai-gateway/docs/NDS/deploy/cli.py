@@ -411,6 +411,7 @@ def _detect_gen_dir(args) -> tuple[Path, str]:
     hint = "\n".join(f"    --gen-dir {d}" for d in found) or "    (gen/ 에 산출물 없음)"
     raise CaptureError(
         "캡처 대상이 여러 개이거나 없습니다 — 대상을 지정하세요:\n" + hint +
+        "\n  EKS 배포: --target eks [--namespace --release --context]"
         "\n  이 도구로 만들지 않은 배포는 --gen-dir <compose 파일이 있는 디렉토리>")
 
 
@@ -441,10 +442,14 @@ def cmd_capture(args) -> int:
         existing: dict = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
         existing_target = (existing.get("deploy") or {}).get("target", "")
 
-        gen_dir, _ = _detect_gen_dir(args)
-        target = args.target or existing_target or (
-            "compose" if (gen_dir / "docker-compose.yml").exists()
-            else "ecs" if (gen_dir / "ecs").is_dir() else "")
+        # eks 는 gen 디렉토리가 필요 없다 — helm/kubectl 이 정보원
+        if args.target == "eks":
+            gen_dir, target = Path(""), "eks"
+        else:
+            gen_dir, _ = _detect_gen_dir(args)
+            target = args.target or existing_target or (
+                "compose" if (gen_dir / "docker-compose.yml").exists()
+                else "ecs" if (gen_dir / "ecs").is_dir() else "")
         if target == "compose":
             doc, notes = capture.capture_compose(gen_dir)
         elif target == "ecs":
