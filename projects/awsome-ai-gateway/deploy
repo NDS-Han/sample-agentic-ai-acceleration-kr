@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# LLM Gateway 배포 도구 — gateway.yaml 기반
+# 사용: ./deploy init|validate|render|doctor [--config deployment/gateway.yaml]
+set -euo pipefail
+cd "$(dirname "$0")"
+PY="deployment/deploy/.venv/bin/python"
+[ -x "$PY" ] || PY="python3"
+exec "$PY" -m deployment.deploy "$@"

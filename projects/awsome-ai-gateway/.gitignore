@@ -2,6 +2,14 @@
 .env
 .env.local
 .env.*.local
+
+# deploy 렌더 산출물 — gen/<env>/.env 에 시크릿이 들어간다
+deployment/gen/
+
+# deploy 도구 venv / 캐시
+deployment/deploy/.venv/
+__pycache__/
+*.pyc
 *.pem
 *.key
 
