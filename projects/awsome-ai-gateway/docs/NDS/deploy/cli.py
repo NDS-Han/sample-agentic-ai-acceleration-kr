@@ -67,33 +67,45 @@ def _load_config(args):
     return schema.load(path)
 
 
-def cmd_init(args) -> int:
+def _g(d: dict, *path, default=""):
+    cur = d or {}
+    for p in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(p)
+    return cur if cur is not None else default
+
+
+def _collect_doc(existing: dict | None = None) -> dict:
+    """대화형으로 gateway.yaml doc 을 만든다. existing 이 있으면 각 질문의
+    기본값으로 현재 설정을 넣는다 (configure = init 의 prefill 버전)."""
     questionary = _questionary()
     from questionary import Choice
+    ex = existing or {}
 
-    out_path = Path(args.out) if args.out else DEFAULT_CONFIG
-    if out_path.exists() and not args.force:
-        console.print(f"[yellow]{out_path} 가 이미 있습니다 — 덮어쓰려면 --force 를 붙이세요.")
-        return 1
+    env = _unwrap(questionary.text(
+        "환경 이름 (소문자·숫자·하이픈, 예: acme-small)",
+        default=str(_g(ex, "env")) or None).ask())
+    region = _unwrap(questionary.text(
+        "AWS 리전", default=str(_g(ex, "aws", "region")) or "ap-northeast-2").ask())
 
-    console.print(Panel("LLM Gateway 배포 설정 마법사 — 답하면 gateway.yaml 을 만듭니다"))
-
-    env = _unwrap(questionary.text("환경 이름 (소문자·숫자·하이픈, 예: acme-small)").ask())
-    region = _unwrap(questionary.text("AWS 리전", default="ap-northeast-2").ask())
-
+    target_default = _g(ex, "deploy", "target")
     target = _unwrap(questionary.select(
         "배포 대상",
         choices=[
             Choice("compose — 단일 호스트 Docker (평가·최소비용)", "compose"),
             Choice("ecs — ECS Fargate (소규모~표준 권장)", "ecs"),
             Choice("eks — EKS Fargate (대규모·기존 프로덕션)", "eks"),
-        ]).ask())
+        ],
+        default=target_default or "compose").ask())
 
     tier_choices = [
         Choice(f"{t.name}: {t.label}  [{t.users}, {t.monthly_cost_usd}]", t.name)
         for t in tiers.TIERS.values() if t.backend == target
     ]
-    size_tier = _unwrap(questionary.select("규모 티어", choices=tier_choices).ask())
+    size_tier = _unwrap(questionary.select(
+        "규모 티어", choices=tier_choices,
+        default=_g(ex, "deploy", "size_tier") or tier_choices[0].value).ask())
 
     domain_mode = _unwrap(questionary.select(
         "HTTPS 도메인",
@@ -101,64 +113,96 @@ def cmd_init(args) -> int:
             Choice("none — 도메인 없이 시작 (HTTP, Cowork 불가)", "none"),
             Choice("route53-acm — 도메인 확정 (자동 TLS)", "route53-acm"),
             Choice("cloudfront-temp — 임시 https (EKS 전용)", "cloudfront-temp"),
-        ]).ask())
+        ], default=_g(ex, "domain", "mode") or "none").ask())
     domain_name, zone_id = "", ""
     if domain_mode == "route53-acm":
-        domain_name = _unwrap(questionary.text("베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)").ask())
-        if target in ("ecs", "eks"):
-            zone_id = _unwrap(questionary.text("Route53 hosted zone ID (예: Z0123456ABCD)").ask())
+        domain_name = _unwrap(questionary.text(
+            "베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)",
+            default=str(_g(ex, "domain", "name")) or None).ask())
+        if target == "ecs":  # eks 는 env values 의 기존 인증서를 씀
+            zone_id = _unwrap(questionary.text(
+                "Route53 hosted zone ID (예: Z0123456ABCD)",
+                default=str(_g(ex, "domain", "zone_id")) or None).ask())
 
+    prev_notif = _g(ex, "features", "notifications", default={}) or {}
     notif = _unwrap(questionary.select(
         "알림 provider",
         choices=[Choice("mock — 발송 안 함(기본)", "mock"),
                  Choice("ses — Amazon SES", "ses"),
-                 Choice("smtp — 외부 SMTP", "smtp")]).ask())
+                 Choice("smtp — 외부 SMTP", "smtp")],
+        default=prev_notif.get("provider", "mock")).ask())
     notif_extra = {}
     if notif == "ses":
-        notif_extra["ses_from"] = _unwrap(questionary.text("SES 발신 주소").ask())
+        notif_extra["ses_from"] = _unwrap(questionary.text(
+            "SES 발신 주소", default=str(prev_notif.get("ses_from", "")) or None).ask())
     elif notif == "smtp":
-        notif_extra["smtp_host"] = _unwrap(questionary.text("SMTP 호스트").ask())
-        notif_extra["smtp_from"] = _unwrap(questionary.text("발신 주소").ask())
+        notif_extra["smtp_host"] = _unwrap(questionary.text(
+            "SMTP 호스트", default=str(prev_notif.get("smtp_host", "")) or None).ask())
+        notif_extra["smtp_from"] = _unwrap(questionary.text(
+            "발신 주소", default=str(prev_notif.get("smtp_from", "")) or None).ask())
 
+    prev_feat = _g(ex, "features", default={}) or {}
     features = _unwrap(questionary.checkbox(
         "추가 기능 (기본 전부 off)",
         choices=[
-            Choice("web_search — AgentCore 웹검색 (us-east-1, 별도 프로비저닝)", "web_search"),
-            Choice("body_logging — 요청 본문 S3 로깅", "body_logging"),
-            Choice("bi_insight — BI 어시스턴트 (AgentCore Runtime)", "bi_insight"),
-            Choice("pricing_lambda — LiteLLM 단가 조회 Lambda", "pricing_lambda"),
-            Choice("observability — OTel/Prometheus/Grafana (compose)", "observability"),
+            Choice("web_search — AgentCore 웹검색 (us-east-1, 별도 프로비저닝)", "web_search",
+                   checked=bool(prev_feat.get("web_search"))),
+            Choice("body_logging — 요청 본문 S3 로깅", "body_logging",
+                   checked=bool(prev_feat.get("body_logging"))),
+            Choice("bi_insight — BI 어시스턴트 (AgentCore Runtime)", "bi_insight",
+                   checked=bool(prev_feat.get("bi_insight"))),
+            Choice("pricing_lambda — LiteLLM 단가 조회 Lambda", "pricing_lambda",
+                   checked=bool(prev_feat.get("pricing_lambda"))),
+            Choice("observability — OTel/Prometheus/Grafana (compose)", "observability",
+                   checked=bool(prev_feat.get("observability"))),
         ]).ask())
 
+    prev_oidc = _g(ex, "oidc", default={}) or {}
     oidc = {}
-    if _unwrap(questionary.confirm("OIDC 로그인(Cognito 등)을 설정합니까?", default=True).ask()):
-        oidc["issuer_url"] = _unwrap(questionary.text("OIDC issuer URL").ask())
-        oidc["client_id"] = _unwrap(questionary.text("OIDC client id (admin-ui SSO)").ask())
-        oidc["authorize_url"] = _unwrap(questionary.text("authorize URL").ask())
-        oidc["token_url"] = _unwrap(questionary.text("token URL").ask())
+    if _unwrap(questionary.confirm("OIDC 로그인(Cognito 등)을 설정합니까?",
+                                   default=bool(prev_oidc)).ask()):
+        oidc["issuer_url"] = _unwrap(questionary.text(
+            "OIDC issuer URL", default=str(prev_oidc.get("issuer_url", "")) or None).ask())
+        oidc["client_id"] = _unwrap(questionary.text(
+            "OIDC client id (admin-ui SSO)", default=str(prev_oidc.get("client_id", "")) or None).ask())
+        oidc["authorize_url"] = _unwrap(questionary.text(
+            "authorize URL", default=str(prev_oidc.get("authorize_url", "")) or None).ask())
+        oidc["token_url"] = _unwrap(questionary.text(
+            "token URL", default=str(prev_oidc.get("token_url", "")) or None).ask())
 
     images = {}
     if target in ("ecs", "eks"):
+        prev_img = _g(ex, "images", default={}) or {}
         images["registry"] = _unwrap(questionary.text(
-            "외부 이미지 registry (비우면 ECR repo 자동 생성 — ecs)", default="").ask())
-        images["tag"] = _unwrap(questionary.text("이미지 태그 (명시적 핀 필수)").ask())
+            "외부 이미지 registry (비우면 ECR 자동 추론)",
+            default=str(prev_img.get("registry", ""))).ask())
+        images["tag"] = _unwrap(questionary.text(
+            "이미지 태그 (명시적 핀 필수)",
+            default=str(prev_img.get("tag", "")) or None).ask())
 
     deploy_extra = {}
     if target in ("ecs", "eks"):
         deploy_extra["tfstate_bucket"] = _unwrap(questionary.text(
-            "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)", default="").ask())
+            "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)",
+            default=str(_g(ex, "deploy", "tfstate_bucket"))).ask())
         deploy_extra["tfstate_table"] = _unwrap(questionary.text(
-            "Terraform lock DynamoDB table (없으면 비움)", default="").ask())
+            "Terraform lock DynamoDB table (없으면 비움)",
+            default=str(_g(ex, "deploy", "tfstate_table"))).ask())
+        deploy_extra["release"] = _g(ex, "deploy", "release") or "llm-gateway"
+        deploy_extra["namespace"] = _g(ex, "deploy", "namespace") or "llm-gateway"
+        deploy_extra["tf_env_dir"] = _g(ex, "deploy", "tf_env_dir") or ""
 
+    prev_cidrs = _g(ex, "network", "allowed_cidrs", default=[]) or []
     allowed = _unwrap(questionary.text(
-        "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)", default="").ask())
+        "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)",
+        default=",".join(prev_cidrs)).ask())
 
     doc = {
         "version": 1,
         "env": env,
         "aws": {"region": region},
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
-        "network": {"mode": "public",
+        "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()]},
         "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id},
         "features": {
@@ -169,30 +213,81 @@ def cmd_init(args) -> int:
             "pricing_lambda": "pricing_lambda" in features,
             "observability": "observability" in features,
         },
-        "clients": {"models_profile": "global"},
+        "clients": _g(ex, "clients", default={}) or {"models_profile": "global"},
     }
     if oidc:
         doc["oidc"] = oidc
     if images:
         doc["images"] = images
+    return doc
 
-    # 작성 전 스키마 검증 — 못 쓰는 파일을 만들지 않는다
+
+def _write_config(out_path: Path, doc: dict) -> int:
     try:
         cfg = schema.from_dict(doc)
     except schema.SchemaError as exc:
         console.print(f"[red]입력 조합이 유효하지 않습니다:\n{exc}")
         return 1
-
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(
         "# gateway.yaml — 이 배포의 source of truth.\n"
-        "# 변경 → `deploy render` → 백엔드별 apply 절차. 수동 편집한 인프라는 doctor 가 감지합니다.\n"
+        "# 변경 → `deploy configure`(대화형) 또는 직접 편집 → render → apply.\n"
         + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
-    console.print(f"[green]생성: {out_path}")
+    console.print(f"[green]저장: {out_path}")
     for w in cfg.warnings():
         console.print(f"[yellow]⚠ {w}")
+    return 0
+
+
+def cmd_init(args) -> int:
+    out_path = Path(args.out) if args.out else DEFAULT_CONFIG
+    if out_path.exists() and not args.force:
+        console.print(f"[yellow]{out_path} 가 이미 있습니다 — 덮어쓰려면 --force 를 붙이세요.")
+        return 1
+    console.print(Panel("LLM Gateway 배포 설정 마법사 — 답하면 gateway.yaml 을 만듭니다"))
+    doc = _collect_doc()
+    if _write_config(out_path, doc):
+        return 1
     console.print(f"다음: [bold]deploy render --config {out_path}")
     return 0
+
+
+def cmd_configure(args) -> int:
+    """기존 gateway.yaml 을 기본값으로 다시 물어보고, 원하면 바로 배포까지."""
+    questionary = _questionary()
+    cfg_path = Path(args.config)
+    existing: dict = {}
+    if cfg_path.exists():
+        existing = yaml.safe_load(cfg_path.read_text()) or {}
+        console.print(Panel(
+            f"{cfg_path} 를 기본값으로 다시 설정합니다 — Enter 는 현재 값 유지"))
+    else:
+        captured = sorted(cfg_path.parent.glob("gateway.captured-*.yaml"))
+        if captured:
+            console.print(f"[yellow]{cfg_path} 없음 — 캡처본 {captured[0].name} 을 기본값으로 씁니다")
+            existing = yaml.safe_load(captured[0].read_text()) or {}
+            cfg_path = cfg_path
+        else:
+            console.print(f"[yellow]{cfg_path} 없음 — 새로 만듭니다 (init 과 동일)")
+
+    doc = _collect_doc(existing)
+    if _write_config(cfg_path, doc):
+        return 1
+
+    # 마지막에 배포까지 — 확인 게이트는 그대로 (plan 출력 후 y)
+    if args.no_apply:
+        console.print(f"다음: [bold]deploy render --config {cfg_path}")
+        return 0
+    go = _unwrap(questionary.confirm(
+        "지금 배포 절차를 진행합니까? (render → plan 미리보기 → 확인 → apply)",
+        default=True).ask())
+    if not go:
+        console.print(f"나중에: [bold]./deploy apply --config {cfg_path}")
+        return 0
+    import types
+    apply_args = types.SimpleNamespace(config=str(cfg_path), build=False,
+                                       plan=False, yes=False)
+    return cmd_apply(apply_args)
 
 
 def cmd_validate(args) -> int:
@@ -604,6 +699,13 @@ def main(argv=None) -> int:
     sp.add_argument("--out", default="")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_init)
+
+    sp = sub.add_parser("configure",
+                        help="기존 gateway.yaml 을 기본값으로 대화형 재설정 → 배포까지")
+    sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.add_argument("--no-apply", action="store_true",
+                    help="설정만 저장하고 배포는 안 함")
+    sp.set_defaults(fn=cmd_configure)
 
     sp = sub.add_parser("validate", help="gateway.yaml 검증")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
