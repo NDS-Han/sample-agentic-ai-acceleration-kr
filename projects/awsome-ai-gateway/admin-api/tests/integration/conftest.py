@@ -15,6 +15,14 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from tests.session_double import wire_savepoint
+
+
+def _session() -> AsyncMock:
+    """AsyncMock 세션 — begin_nested 는 wire_savepoint 가 실물과 같은
+    sync 호출 → async CM 으로 다시 배선한다(그 전에 쓰이는 경로용 안전값)."""
+    session = AsyncMock()
+    session.begin_nested = MagicMock(return_value=MagicMock())
+    return session
 from fastapi import FastAPI, Request
 from httpx import ASGITransport, AsyncClient
 
