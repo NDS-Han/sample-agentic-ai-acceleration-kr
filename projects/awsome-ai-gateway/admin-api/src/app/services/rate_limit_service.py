@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.config import get_settings
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import Team, User
@@ -244,12 +247,16 @@ class RateLimitService:
         # proxy 가 읽는 건 rl:config:* 뿐이지만, _set_rate_limit 이 쓰는
         # ratelimit:config:* 도 대칭으로 지워 stale 상태를 남기지 않는다.
         sid = str(scope_id)
-        await self._cache_mgr._redis.delete(
-            f"ratelimit:config:{scope.value.lower()}:{sid}"
-        )
-        await self._cache_mgr.invalidate_pattern(
-            f"rl:config:{scope.value}:{sid}:*",
-            session=session,
+        rl_scope = scope.value.lower()
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
+            pattern=f"rl:config:{scope.value}:{sid}:*",
+            extra=[
+                lambda: self._cache_mgr._redis.delete(
+                    f"ratelimit:config:{rl_scope}:{sid}"
+                )
+            ],
         )
 
         await audit_logger.log(
@@ -477,14 +484,20 @@ class RateLimitService:
         )
         await repo.upsert(config)
 
-        # Write config to Redis for Gateway Proxy
+        # Write config to Redis for Gateway Proxy — commit 후 지연(§6-6:
+        # commit 전 SET 은 rollback 시 미커밋 정책을 TTL 동안 광고한다).
         config_json = json.dumps({
             "rpm": data.rpm,
             "tpm": data.tpm,
             "cpm": str(data.cpm) if data.cpm else None,
             "cph": str(data.cph) if data.cph else None,
         })
-        await self._cache_mgr._redis.set(cache_key, config_json)
+        from app.core.budget_cache import defer_redis_write_until_commit
+
+        await defer_redis_write_until_commit(
+            session,
+            lambda: self._cache_mgr._redis.set(cache_key, config_json),
+        )
 
         # Invalidate gateway-proxy's rate-limit policy cache so the new policy
         # takes effect on the next request instead of waiting for the 5-min TTL.
@@ -492,14 +505,16 @@ class RateLimitService:
         # USER/TEAM with model_alias=None covers all models → wildcard delete.
         sid = str(scope_id) if scope_id is not None else "NULL"
         if model_alias is not None:
-            await self._cache_mgr.invalidate(
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
                 [f"rl:config:{scope.value}:{sid}:{model_alias}"],
-                session=session,
             )
         else:
-            await self._cache_mgr.invalidate_pattern(
-                f"rl:config:{scope.value}:{sid}:*",
-                session=session,
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
+                pattern=f"rl:config:{scope.value}:{sid}:*",
             )
 
         await audit_logger.log(

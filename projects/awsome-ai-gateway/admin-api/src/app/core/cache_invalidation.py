@@ -126,3 +126,50 @@ class CacheInvalidationManager:
             context={"source": "admin-api"},
         )
         session.add(entry)
+
+
+async def invalidate_after_commit(
+    session: AsyncSession,
+    cache_mgr: CacheInvalidationManager,
+    keys: list[str] | None = None,
+    *,
+    pattern: str | None = None,
+    extra: list | None = None,
+) -> None:
+    """cache DEL 을 ``session`` 의 커밋 이후로 지연한다 (R4: commit-전 DEL race).
+
+    왜 DEL 도 미뤄야 하는가 — CommittingRoute 는 핸들러 반환 후에 commit 한다.
+    DEL→commit 창에 게이트웨이 요청이 cache-miss 로 들어오면 **아직 커밋 안 된**
+    구 정책 행을 읽어 ≤TTL 동안 재캐시한다: 방금 내린 예산/끈 모델이 수 분간
+    살아있는다(R3-8 부류 — team/user allowed-models·apps·routing 은 이미
+    post-commit 패턴). 롤백 자가치유 논리는 **rollback 케이스**만 커버하고
+    이 commit-성공 재캐시 창은 커버하지 못한다.
+
+    실패 기록(``cache_invalidation_failures``)은 요청 세션과 경합하지 않도록
+    별도 세션에서 커밋한다 — 지연 콜백은 ``asyncio.create_task`` 로 응답 경로와
+    동시에 실행될 수 있고 AsyncSession 은 태스크 간 공유가 불가능하다.
+    세션이 이벤트를 지원하지 않으면(mock 테스트) 즉시 실행해 기존 동작을 유지.
+
+    ``extra``: DEL 이후 같은 타이밍에 실행할 부가 Redis 연산 callable 목록
+    (예: per-app 키 직접 DEL, 역인덱스 srem). 실패해도 로그만 남기고 계속한다.
+    """
+    from app.core.budget_cache import defer_redis_write_until_commit
+    from app.core.db import AsyncSessionLocal
+
+    async def _do() -> None:
+        try:
+            async with AsyncSessionLocal() as s2:
+                if keys:
+                    await cache_mgr.invalidate(keys, session=s2)
+                if pattern:
+                    await cache_mgr.invalidate_pattern(pattern, session=s2)
+                await s2.commit()
+        except Exception:
+            logger.warning("cache.deferred_invalidate_failed", exc_info=True)
+        for op in extra or []:
+            try:
+                await op()
+            except Exception:
+                logger.warning("cache.deferred_op_failed", exc_info=True)
+
+    await defer_redis_write_until_commit(session, _do)

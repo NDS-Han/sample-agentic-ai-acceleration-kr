@@ -10,7 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import Department, Team, User, UserAllowedClient, UserRole
 from app.models.budget import BudgetScope
@@ -316,24 +319,30 @@ class UserTeamService:
             ],
             *[f"key:cache:vk:{h}" for h in vk_hashes],
         ]
-        await self._cache_mgr.invalidate(cache_keys, session=session)
-
-        # Reverse-index swap: move VK hashes from old team set to new team set
+        # R4-A2-3: DEL/swap 은 commit 후로 지연 — CommittingRoute 가 핸들러
+        # 반환 후 commit 하므로 여기서 즉시 DEL 하면 DEL→commit 창에 게이트웨이가
+        # 미커밋 구 정책을 재캐시한다(R3-8 부류).
+        swap_extra = []
         if old_team_id is not None and vk_hashes:
-            try:
-                await self._cache_mgr.swap_reverse_index_membership(
-                    old_key=f"team:vk_hashes:{old_team_id}",
-                    new_key=f"team:vk_hashes:{new_team_id}",
-                    members=vk_hashes,
-                    session=session,
-                )
-            except Exception:
-                logger.exception(
-                    "transfer_user.reverse_index_swap_failed",
-                    user_id=str(user_id),
-                    old_team_id=str(old_team_id),
-                    new_team_id=str(new_team_id),
-                )
+
+            async def _swap() -> None:
+                # 실패 기록(cache_invalidation_failures)을 위해 전용 세션 사용 —
+                # 요청 세션은 지연 실행 시점에 이미 닫혀 있다.
+                from app.core.db import AsyncSessionLocal
+
+                async with AsyncSessionLocal() as s3:
+                    await self._cache_mgr.swap_reverse_index_membership(
+                        old_key=f"team:vk_hashes:{old_team_id}",
+                        new_key=f"team:vk_hashes:{new_team_id}",
+                        members=vk_hashes,
+                        session=s3,
+                    )
+                    await s3.commit()
+
+            swap_extra.append(_swap)
+        await invalidate_after_commit(
+            session, self._cache_mgr, cache_keys, extra=swap_extra
+        )
 
         await audit_logger.log(
             session,

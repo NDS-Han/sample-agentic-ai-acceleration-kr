@@ -166,8 +166,11 @@ async def defer_redis_write_until_commit(
 
     왜 필요한가 — 예산 서비스의 캐시 갱신에는 두 부류가 있다:
 
-    * **DEL** — 커밋 전에 실행해도 안전하다. 트랜잭션이 롤백돼도 캐시 미스로
-      남아 게이트웨이가 커밋된 DB 행으로 재수화하므로 자가치유된다.
+    * **DEL** — 커밋 전 실행은 **rollback 케이스에서만** 자가치유된다(캐시 미스로
+      남아 게이트웨이가 커밋된 DB 행으로 재수화). 그러나 **commit-성공 경로의
+      레이스**는 다르다: DEL→commit 창에 들어온 요청이 miss 로 **미커밋 구 행**을
+      읽어 ≤TTL 동안 재캐시한다(R4-A2-3). 그래서 신규 코드는 DEL 도
+      ``invalidate_after_commit``(core/cache_invalidation.py)으로 지연한다.
     * **SET** — 커밋 전에 실행하면, 그 뒤 롤백 시 DB 에 존재하지 않는 예산
       설정을 TTL 동안 광고한다(§6-6 위반 — 미커밋 T/D 로 실제 요청이 차단될 수
       있다). 그렇다고 DEL-only 로 바꿀 수도 없다: ``alert_thresholds`` 는 DB
@@ -190,8 +193,19 @@ async def defer_redis_write_until_commit(
         except Exception:
             logger.warning("redis_deferred_write_failed", exc_info=True)
 
+    # 리스너 해제는 안 한다 — 디스패치 도중 event.remove 를 부르면 SQLAlchemy 가
+    # deque mutation RuntimeError 를 낸다. fired 플래그가 재실행을 막고, 리스너는
+    # 세션과 함께 GC 된다.
     def _on_commit(_s) -> None:
         if not fired["live"]:
+            return
+        if sync_session.in_nested_transaction():
+            # SAVEPOINT(release) 에도 after_commit 이 발화한다 — 이 이벤트가
+            # nested 트랜잭션의 것이면 외부 트랜잭션은 아직 열려 있으므로 쓰기를
+            # 실행하면 안 된다. 여기서 DEL/SET 이 새어나가면 outer commit 전에
+            # 게이트웨이가 미커밋 상태를 읽어간다(조기실행은 R3-8 과 같은 부류).
+            # in_transaction() 은 outer commit 의 after_commit 시점에도 True 라
+            # 구분자로 쓸 수 없고, in_nested_transaction() 이 정확하다(실측 확인).
             return
         fired["live"] = False
         try:
@@ -202,6 +216,9 @@ async def defer_redis_write_until_commit(
             logger.warning("redis_deferred_write_no_loop")
 
     def _on_rollback(_s) -> None:
+        if sync_session.in_nested_transaction():
+            # SAVEPOINT 롤백 — 외부 트랜잭션은 계속 진행 중이므로 지연 쓰기 유지.
+            return
         fired["live"] = False
 
     sync_session = getattr(session, "sync_session", None)

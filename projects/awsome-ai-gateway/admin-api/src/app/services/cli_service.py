@@ -162,7 +162,15 @@ class CLIService:
 
         # ── Cache budget config and model configs in Redis for Gateway Proxy ──
         if redis is not None:
-            await self._cache_for_gateway(redis, user, user_budget)
+            # issue_key 가 세션에 유저/예산/키를 함께 flush 하므로, 이 warm-write
+            # 는 outer commit 뒤로 지연한다 — 커밋 전 SET 은 롤백 시 미커밋 예산을
+            # ≤TTL 동안 광고한다.
+            from app.core.budget_cache import defer_redis_write_until_commit
+
+            await defer_redis_write_until_commit(
+                session,
+                lambda: self._cache_for_gateway(redis, user, user_budget),
+            )
 
         return VirtualKeyIssueResponse(
             virtual_key=key_result.virtual_key or "",

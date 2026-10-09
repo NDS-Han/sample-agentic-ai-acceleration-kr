@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.exceptions import ConflictError, NotFoundError
 from app.models.model import ApiFormat, ModelAlias, ModelPricing, ModelStatus, Provider
 from app.repositories.model_repository import ModelRepository
@@ -93,8 +96,8 @@ class ModelService:
         # pattern: DEL both keys and let the gateway populate model:{alias} with
         # the correct nested shape + TTL on first cache-miss (router_service
         # self-heal). Keeps admin writes and gateway reads on one cache contract.
-        await self._cache_mgr.invalidate(
-            [f"model:{model.alias}", "model:list"], session=session
+        await invalidate_after_commit(
+            session, self._cache_mgr, [f"model:{model.alias}", "model:list"]
         )
 
         await audit_logger.log(
@@ -171,9 +174,10 @@ class ModelService:
         # BR-MOD-04: Cache invalidation — 게이트웨이는 resolve 성공 시
         # model:{alias} 와 model:{provider_model_id} **두 키**를 쓴다(router_service).
         # pmid 키를 빠지면 pmid 경유 조회가 최대 300s 동안 옛 설정을 본다.
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
-            session=session,
         )
 
         await audit_logger.log(
@@ -221,9 +225,10 @@ class ModelService:
         )
         await repo.create_pricing(pricing)
 
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
-            session=session,
         )
 
         await audit_logger.log(
@@ -391,9 +396,10 @@ class ModelService:
                 spec_changed = True
             if spec_changed:
                 await session.flush()
-                await self._cache_mgr.invalidate(
+                await invalidate_after_commit(
+                    session,
+                    self._cache_mgr,
                     [f"model:{alias}", f"model:{model.provider_model_id}"],
-                    session=session,
                 )
             applied.append(alias)
 
@@ -419,9 +425,10 @@ class ModelService:
 
         # BR-MOD-03/04: Immediate cache invalidation on INACTIVE — pmid 키도 함께
         # (kill switch 가 provider_model_id 조회 경로에는 최대 300s 지연됐다).
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
-            session=session,
         )
 
         await audit_logger.log(
@@ -546,9 +553,10 @@ class ModelService:
         # BR-MOD-04 와 같은 규칙 — DEL 만 하고 재적재는 게이트웨이의 cache-miss 에 맡긴다.
         # pmid 키도 지운다 — resolve 가 model:{provider_model_id} 도 쓰므로, 이걸
         # 놔두면 삭제된 모델이 pmid 조회로 최대 300s 더 살아난다.
-        await self._cache_mgr.invalidate(
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
             [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
-            session=session,
         )
 
         await audit_logger.log(
