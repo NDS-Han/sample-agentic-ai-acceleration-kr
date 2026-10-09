@@ -32,7 +32,23 @@ mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 
 > 캡처가 못 읽는 값: `.env` 의 시크릿, compose 의 `network.mode`, ecs 의
 > `zone_id`/`allowed_cidrs`/`tfstate_*` — 파일 끝의 `# capture notes` 를
-> 확인하고 직접 채우세요. `eks` 캡처는 아직 미구현입니다.
+> 확인하고 직접 채우세요.
+
+**eks 캡처** — helm release 의 effective values + kubectl 라이브 상태를 읽습니다
+(kubeconfig 에 클러스터 접근이 필요):
+
+```bash
+./deploy doctor --capture --target eks \
+  [--namespace llm-gateway] [--release llm-gateway] [--context <ctx>] \
+  [--env-dir deployment/terraform/environments/llm-gateway-dev]
+```
+
+읽는 것: 리전, 도메인/CIDR(ingress 어노테이션), notification provider,
+feature 플래그(WEB_SEARCH/FIREHOSE/otel), OIDC 계약, 서비스별 이미지 태그.
+라이브 ingress/deployment 와 values 가 다르면(kubectl 패치·set image) notes 로
+드리프트를 알립니다. 서비스별로 태그가 다른 것(단일 `images.tag`로 표현 불가),
+ESO/Fargate/RDS Proxy 등 eks 고유 구성도 notes 에 기록됩니다 — 캡처본은
+**온보딩용 후보**이지 eks 재배포 가능한 완전한 선언이 아닙니다.
 
 ## 일반 업데이트 (기능 on/off, 설정 변경)
 

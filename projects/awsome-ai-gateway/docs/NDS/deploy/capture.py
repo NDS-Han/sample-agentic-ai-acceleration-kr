@@ -274,6 +274,197 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
 
 
 # ==============================================================================
+# eks — helm release 의 effective values + kubectl 라이브 상태
+# ==============================================================================
+
+def _helm_values(release: str, namespace: str, context: str = "") -> dict:
+    argv = ["helm", "get", "values", release, "-n", namespace, "--all", "-o", "yaml"]
+    if context:
+        argv += ["--kube-context", context]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        raise CaptureError(
+            f"helm get values 실패 — 릴리스 '{release}' 가 ns '{namespace}' 에 있는지, "
+            f"kubeconfig/context 를 확인하세요: {r.stderr.strip()[:200]}")
+    return yaml.safe_load(r.stdout) or {}
+
+
+def _kubectl_json(resource: str, namespace: str, context: str = "") -> dict:
+    argv = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
+    if context:
+        argv += ["--context", context]
+    r = subprocess.run(argv, capture_output=True, text=True, timeout=60)
+    if r.returncode != 0:
+        return {}  # 라이브 조회는 best-effort — values 만으로도 캡처는 된다
+    try:
+        return json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
+
+
+def _val(d: dict, *path, default=""):
+    cur = d
+    for p in path:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(p)
+    return cur if cur is not None else default
+
+
+def _domain_base(host: str, env: str) -> str:
+    """gateway.<base> / gateway-<env>.<base> 형태에서 베이스 도메인만 추출."""
+    for prefix in ("gateway.", f"gateway-{env}.", "gateway-"):
+        if host.startswith(prefix):
+            rest = host[len(prefix):]
+            # gateway-<env>.<base> 는 .base 부분만
+            if prefix == "gateway-" and "." in rest:
+                return rest.split(".", 1)[1]
+            return rest
+    return ""
+
+
+def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
+                context: str = "", env_dir: Path | None = None) -> tuple[dict, list[str]]:
+    notes: list[str] = []
+    v = _helm_values(release, namespace, context)
+
+    env = str(_val(v, "global", "environment") or release)
+    region = str(_val(v, "aws", "region"))
+    genv = _val(v, "gatewayProxy", "env", default={}) or {}
+
+    # ── 라이브 대조용 수집 ─────────────────────────────────────────────────
+    live = _kubectl_json("ingress", namespace, context)
+    deploys = _kubectl_json("deployments", namespace, context)
+
+    # ── ingress → domain / allowed_cidrs ───────────────────────────────────
+    ing = v.get("ingress") or {}
+    ann = dict(ing.get("annotations") or {})
+    cidrs_raw = ann.get("alb.ingress.kubernetes.io/inbound-cidrs", "")
+    cidrs = [c.strip() for c in str(cidrs_raw).split(",") if c.strip()]
+
+    gw_host = str(_val(ing, "gateway", "host"))
+    cert_arn = ann.get("alb.ingress.kubernetes.io/certificate-arn", "")
+    if cert_arn or str(_val(ing, "gateway", "tls", "enabled")) == "True":
+        domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
+        notes.append(f"ingress hosts: gateway={gw_host} admin={_val(ing,'adminUi','host')} "
+                     f"admin-api={_val(ing,'adminApi','host')} — 우리 네이밍 규칙"
+                     f"(gateway./admin./admin-api.{{domain}})과 다르면 직접 맞추세요")
+        notes.append("zone_id 는 values 에 없어 비워둡니다 — Route53 에서 확인해 채우세요")
+    elif gw_host:
+        domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
+        notes.append("ingress 에 인증서가 없어 HTTP 일 수 있습니다 — domain.mode 확인 필요")
+    else:
+        domain = {"mode": "none"}
+        notes.append("ingress.host 비어 있음 — ALB DNS 직접 접근 모드로 추정")
+
+    # 라이브 ingress 와 values 의 host 가 다른지 (kubectl 패치 드리프트)
+    live_hosts = []
+    for item in live.get("items", []):
+        anns = (item.get("metadata") or {}).get("annotations") or {}
+        for rule in (item.get("spec") or {}).get("rules") or []:
+            live_hosts.append((item["metadata"]["name"], rule.get("host", "")))
+        live_cidrs = anns.get("alb.ingress.kubernetes.io/inbound-cidrs")
+        if live_cidrs and live_cidrs != cidrs_raw:
+            notes.append(f"⚠ ingress/{item['metadata']['name']} 의 live inbound-cidrs "
+                         f"({live_cidrs})가 helm values 와 다릅니다 — kubectl 패치 드리프트")
+
+    # ── images — per-service 태그가 다르다 (스키마는 단일 tag) ───────────────
+    tags = {}
+    for svc, key in (("gateway-proxy", "gatewayProxy"), ("admin-api", "adminApi"),
+                     ("admin-ui", "adminUi"), ("scheduler", "scheduler"),
+                     ("notification-worker", "notificationWorker"),
+                     ("cost-recorder-worker", "costRecorderWorker")):
+        tags[svc] = str(_val(v, key, "image", "tag"))
+    unique = {t for t in tags.values() if t}
+    tag = tags.get("gateway-proxy", "")
+    if len(unique) > 1:
+        notes.append(f"서비스별 이미지 태그가 다릅니다 {tags} — gateway.yaml 의 단일 "
+                     f"images.tag 로는 표현 불가. 배포를 한 태그로 통일할지 결정하세요")
+
+    # 라이브 이미지 drift
+    for item in deploys.get("items", []):
+        name = item["metadata"]["name"]
+        containers = ((item.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []
+        for c in containers:
+            img = c.get("image", "")
+            live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
+            svc_key = name.replace("llm-gateway-", "")
+            if svc_key in tags and live_tag and live_tag != tags[svc_key]:
+                notes.append(f"⚠ {svc_key} 라이브 이미지 태그 {live_tag} ≠ helm values "
+                             f"{tags[svc_key]} — 수동 set image 또는 stale release")
+
+    # ── features ────────────────────────────────────────────────────────────
+    email = _val(v, "notificationWorker", "email", default={}) or {}
+    provider = str(email.get("provider", "mock"))
+    notif = {"provider": provider}
+    if provider == "ses":
+        notif["ses_from"] = str(_val(email, "ses", "fromAddress"))
+    elif provider not in ("mock", "ses", "smtp"):
+        notes.append(f"email.provider={provider} 는 스키마에 없는 값(internal_api 등) — "
+                     "notifications.provider 를 직접 맞추세요")
+
+    otel_mode = str(_val(v, "observability", "otel", "mode"))
+    features = {
+        "notifications": notif,
+        "observability": otel_mode not in ("", "disabled", "none"),
+        "web_search": str(genv.get("WEB_SEARCH_ENABLED")) == "true",
+        "body_logging": bool(genv.get("FIREHOSE_STREAM_NAME")),
+    }
+
+    # ── oidc — adminApi.oidc + adminUi.env (admin-ui 는 env 직접 주입) ───────
+    oidc = {}
+    issuer = str(_val(v, "adminApi", "oidc", "issuerUrl") or _val(v, "gatewayProxy", "oidc", "issuerUrl"))
+    if issuer:
+        ui_env = _val(v, "adminUi", "env", default={}) or {}
+        oidc = {
+            "issuer_url": issuer,
+            "client_id": str(ui_env.get("OIDC_CLIENT_ID", "")),
+            "authorize_url": str(ui_env.get("OIDC_AUTHORIZE_URL", "")),
+            "token_url": str(ui_env.get("OIDC_TOKEN_URL", "")),
+            "provider_name": str(_val(v, "adminApi", "oidc", "providerName", default="oidc:cognito")),
+            "required_group": str(_val(v, "adminApi", "oidc", "requiredGroup") or
+                                  _val(v, "gatewayProxy", "oidc", "requiredGroup")),
+        }
+        if not ui_env.get("OIDC_CLIENT_ID"):
+            notes.append("adminUi.env.OIDC_CLIENT_ID 를 못 읽었습니다 — 확인해 채우세요")
+    else:
+        notes.append("OIDC issuer 없음 — admin-ui 는 dev-login 모드일 수 있습니다")
+
+    # ── terraform outputs (env_dir 있으면) — region/cognito 보강 ─────────────
+    if env_dir and env_dir.exists():
+        try:
+            outs = _tf_outputs(env_dir)
+            if not region:
+                region = str(outs.get("aws_region", "") or outs.get("region", ""))
+            if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
+                oidc["issuer_url"] = outs["cognito_issuer_url"]
+                notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")
+        except CaptureError:
+            notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
+
+    notes.append("size_tier 는 eks=t3 으로 둡니다 — 실제 리소스 스펙은 HPA/requests 참조")
+    notes.append("externalSecrets/ESO, Fargate profile, RDS Proxy 등 eks 고유 구성은 "
+                 "gateway.yaml 에 표현이 없습니다 — 캡처본만으로 eks 재배포는 아직 불가")
+
+    doc = {
+        "version": 1,
+        "env": env,
+        "aws": {"region": region},
+        "deploy": {"target": "eks", "size_tier": "t3"},
+        "network": {"mode": "public", "allowed_cidrs": cidrs},
+        "domain": domain,
+        "features": features,
+        "images": {"tag": tag},
+        "clients": {"models_profile": "global"},
+    }
+    if _val(v, "global", "imageRegistry"):
+        doc["images"]["registry"] = str(v["global"]["imageRegistry"])
+    if oidc:
+        doc["oidc"] = oidc
+    return doc, notes
+
+
+# ==============================================================================
 # 비교 — 선언된 doc 과 캡처된 doc 의 차이를 key path 단위로
 # ==============================================================================
 

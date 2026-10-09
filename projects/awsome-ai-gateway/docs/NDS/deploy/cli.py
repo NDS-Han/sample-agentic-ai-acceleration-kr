@@ -412,6 +412,13 @@ def cmd_capture(args) -> int:
             env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
                 REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
             doc, notes = capture.capture_ecs(env_dir, region)
+        elif target == "eks":
+            env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else None
+            doc, notes = capture.capture_eks(
+                namespace=args.namespace or "llm-gateway",
+                release=args.release or "llm-gateway",
+                context=args.context or "",
+                env_dir=env_dir)
         else:
             console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs 또는 --gen-dir 지정")
             return 1
@@ -525,8 +532,11 @@ def main(argv=None) -> int:
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--capture", action="store_true",
                     help="기존 배포 상태를 읽어 gateway.yaml 후보를 역생성")
-    sp.add_argument("--target", choices=["compose", "ecs"], default="",
+    sp.add_argument("--target", choices=["compose", "ecs", "eks"], default="",
                     help="capture 대상 backend (미지정 시 자동 판별)")
+    sp.add_argument("--namespace", default="", help="eks capture 용 k8s namespace")
+    sp.add_argument("--release", default="", help="eks capture 용 helm release 이름")
+    sp.add_argument("--context", default="", help="eks capture 용 kubeconfig context")
     sp.add_argument("--gen-dir", default="", help="capture 할 산출물 디렉토리")
     sp.add_argument("--env-dir", default="",
                     help="capture 할 terraform 환경 디렉토리 (ecs, 기본 gateway-ecs)")
