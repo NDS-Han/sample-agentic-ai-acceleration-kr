@@ -218,3 +218,37 @@ async def test_admin_global_request_is_cached_and_hits():
     )
     assert a == b
     assert svc.calls == 1, f"두 번째 요청이 캐시를 타지 않았다 (calls={svc.calls})"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) 캐시 직렬화 — 적중 응답이 첫 응답과 같은 JSON 객체여야 한다
+# ──────────────────────────────────────────────────────────────────────────────
+#
+# 서비스는 pydantic 모델(AnalyticsResponse)을 돌려준다. 그걸 json.dumps(..., default=str)
+# 로 저장하면 모델 통째가 str() repr 문자열로 들어가, 30초 안의 두 번째 요청이 JSON 객체가
+# 아니라 문자열을 받는다 — admin-ui 는 cost_summary 가 undefined 라 분석 화면이 깨진다.
+
+
+class _Model(__import__("pydantic").BaseModel):
+    period: str
+    total_cost_usd: float
+
+
+@pytest.mark.asyncio
+async def test_cache_round_trip_of_a_pydantic_response_is_a_dict():
+    redis = _SpyRedis()
+    req = _Req(redis, _Svc())
+    await an._cache_set(req, "k", _Model(period="2026-09", total_cost_usd=1.5))
+    got = await an._cache_get(req, "k")
+    assert got == {"period": "2026-09", "total_cost_usd": 1.5}, (
+        f"캐시 적중 값이 JSON 객체가 아니다 — 화면이 깨진다: {got!r}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_cache_get_treats_a_non_object_entry_as_a_miss():
+    """이미 문자열로 잘못 저장된 항목(예전 형식)은 돌려주지 말고 다시 계산하게 한다."""
+    redis = _SpyRedis()
+    redis.store["k"] = '"period=\'2026-09\' total_cost_usd=1.5"'
+    req = _Req(redis, _Svc())
+    assert await an._cache_get(req, "k") is None
