@@ -6,6 +6,11 @@
 # deploy 렌더 산출물 — gen/<env>/.env 에 시크릿이 들어간다
 deployment/gen/
 
+# 배포별 설정 — gateway.yaml 에 oidc.client_secret 등이 들어갈 수 있다.
+# 배포 설정은 소스 관리 밖(배포 머신)에 두는 것이 원칙 — 예제는 docs/NDS/gateway-yaml.md 참조
+deployment/gateway.yaml
+deployment/gateway.captured-*.yaml
+
 # deploy 도구 venv / 캐시 (docs/NDS/deploy/ 패키지)
 docs/NDS/.venv/
 __pycache__/
