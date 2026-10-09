@@ -510,10 +510,24 @@ def cmd_capture(args) -> int:
             console.print(f"[yellow]기존 캡처본을 {backup.name} 으로 백업하고 덮어씁니다")
         _captured_to_yaml(out_path, doc, notes)
         console.print(f"[green]캡처됨: {out_path}")
-        console.print("채택: [bold]cp %s %s[/bold]  또는  [bold]--config %s[/bold] 로 바로 사용"
-                      % (out_path, cfg_path, out_path))
         for n in notes:
             console.print(f"  [yellow]ⓘ {n}")
+
+        rel = out_path.relative_to(REPO_ROOT) if out_path.is_relative_to(REPO_ROOT) else out_path
+        console.print(Panel(
+            f"[bold]다음 단계[/bold]\n"
+            f"  1. 검토 — 위 notes 의 빈칸/주의사항을 채우세요\n"
+            f"       vi {rel}\n"
+            f"  2. 채택 — gateway.yaml 로 승격하거나 --config 로 바로 사용\n"
+            f"       cp {rel} deployment/gateway.yaml\n"
+            f"  3. 검증 + 산출물 생성\n"
+            f"       ./deploy render --config {rel}\n"
+            f"  4. 변경 미리보기 (아무것도 안 바뀜)\n"
+            f"       ./deploy apply --plan --config {rel}\n"
+            f"  5. 적용 + 상태 확인\n"
+            f"       ./deploy apply --config {rel}\n"
+            f"       ./deploy doctor --config {rel}",
+            title="capture 완료", expand=False))
 
         # 기존 config 와 diff → interactive 흡수
         if existing and cfg_path.exists():
