@@ -234,6 +234,25 @@ def cmd_render(args) -> int:
     return 1
 
 
+def _confirm_apply(args, preview=None) -> bool:
+    """실제 변경 전 확인 게이트. --yes/-y 또는 CI 가 아니면 preview 출력 후 y 확인."""
+    if getattr(args, "yes", False):
+        return True
+    if preview:
+        try:
+            preview()
+        except SystemExit as exc:
+            console.print(f"[red]plan 실패 — 적용하지 않습니다: {exc}")
+            return False
+    if not sys.stdin.isatty():
+        console.print("[red]대화형이 아닙니다 — 확인 없이 적용하려면 --yes 를 쓰십시오")
+        return False
+    import questionary
+    ok = _unwrap(questionary.confirm(
+        "위 계획을 실제 환경에 적용합니까?", default=False).ask())
+    return bool(ok)
+
+
 def cmd_apply(args) -> int:
     """render → 기동 → doctor 한 단계로 (backend 별 실행기)."""
     try:
@@ -249,6 +268,16 @@ def cmd_apply(args) -> int:
         console.print(f"[green]render 완료 ({out})")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
+        if args.plan:
+            try:
+                ecs_apply.terraform_plan(cfg, out, REPO_ROOT)
+            except SystemExit as exc:
+                console.print(f"[red]{exc}")
+                return 1
+            console.print("\n[cyan]plan 전용 — 아무것도 적용되지 않았습니다. 적용: ./deploy apply")
+            return 0
+        if not _confirm_apply(args, preview=lambda: ecs_apply.terraform_plan(cfg, out, REPO_ROOT)):
+            return 130
         try:
             outputs = ecs_apply.apply(cfg, out, REPO_ROOT)
         except SystemExit as exc:
@@ -279,6 +308,11 @@ def cmd_apply(args) -> int:
     if args.build:
         argv.append("--build")
     console.print(f"[cyan]$ {' '.join(argv)}")
+    if args.plan:
+        console.print("[cyan]plan 전용 — 기동하지 않았습니다. 적용: ./deploy apply")
+        return 0
+    if not _confirm_apply(args):
+        return 130
     r = subprocess.run(argv)
     if r.returncode != 0:
         console.print("[red]compose up 실패 — 로그를 확인하십시오")
@@ -446,9 +480,13 @@ def main(argv=None) -> int:
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_render)
 
-    sp = sub.add_parser("apply", help="render + 기동 + doctor (compose)")
+    sp = sub.add_parser("apply", help="render + 기동 + doctor")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
-    sp.add_argument("--build", action="store_true", help="이미지를 강제로 다시 빌드")
+    sp.add_argument("--build", action="store_true", help="이미지를 강제로 다시 빌드 (compose)")
+    sp.add_argument("--plan", action="store_true",
+                    help="변경 계획만 보여주고 적용하지 않음")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="적용 전 확인 프롬프트 생략 (CI/자동화)")
     sp.set_defaults(fn=cmd_apply)
 
     sp = sub.add_parser("doctor", help="배포 상태·드리프트 점검")

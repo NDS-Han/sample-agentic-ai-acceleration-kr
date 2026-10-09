@@ -51,6 +51,15 @@ def tf_outputs(env_dir: Path) -> dict:
     return {k: v.get("value") for k, v in raw.items()}
 
 
+def terraform_plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> None:
+    """적용하지 않고 변경 계획만 출력 — apply 전 확인/--plan 용."""
+    env_dir = repo_root / ENV_DIR
+    _run(["terraform", "init", "-input=false",
+          f"-backend-config={gen_dir / 'backend.hcl'}"], cwd=env_dir)
+    _run(["terraform", "plan", "-input=false",
+          f"-var-file={gen_dir / 'terraform.tfvars'}"], cwd=env_dir)
+
+
 def terraform_apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, bootstrap: bool) -> dict:
     env_dir = repo_root / ENV_DIR
     var_file = gen_dir / "terraform.tfvars"

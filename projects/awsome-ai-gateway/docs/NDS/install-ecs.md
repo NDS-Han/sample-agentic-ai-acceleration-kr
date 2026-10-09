@@ -86,8 +86,13 @@ deploy:
 ## 3. Apply — 배포
 
 ```bash
-./deploy apply
+./deploy apply --plan   # 변경 계획만 확인 (아무것도 안 바뀜)
+./deploy apply          # plan 출력 → 확인 프롬프트(y) → 적용
+./deploy apply --yes    # 확인 생략 (CI/자동화)
 ```
+
+`apply` 는 기본적으로 terraform plan 결과를 먼저 보여주고 확인을 요청합니다 —
+기존 환경에 무엇이 바뀌는지 보고 결정할 수 있습니다.
 
 내부 순서 (각 단계 멱등 — 실패해도 재실행하면 이어감):
 
