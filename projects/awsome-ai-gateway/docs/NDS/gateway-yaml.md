@@ -18,6 +18,8 @@ deploy:
   target: compose             # compose | ecs | eks
   size_tier: t0               # t0 | t1 | t2 | t3
   sizing: {}                  # 티어 기본값 세부 override (선택)
+  tfstate_bucket: ""          # ecs/eks: terraform state S3 bucket
+  tfstate_table: ""           # ecs/eks: lock DynamoDB table (권장)
 
 network:
   mode: public                # public | private
@@ -42,7 +44,7 @@ features:
   observability: false        # OTel/Prometheus/Grafana (compose 전용 스위치)
 
 images:
-  registry: ""                # ECR 레지스트리 — ecs/eks 필수
+  registry: ""                # 외부 레지스트리 — 비우면 ecs 가 ECR repo 자동 생성 (eks 는 필수)
   tag: ""                     # 이미지 태그 — ecs/eks 필수 (명시적 핀)
 
 clients:
@@ -69,6 +71,26 @@ oidc:                          # 비워두면 OIDC 비활성(dev-login)
 | compose | t0 만 (단일 호스트) |
 | ecs | t1, t2 |
 | eks | t2, t3 |
+
+### `deploy.sizing`
+
+ecs 경로에서 서비스별 cpu/memory/desired_count 를 티어 기본값에서 override:
+
+```yaml
+deploy:
+  sizing:
+    gateway-proxy: { cpu: 2048, memory: 4096, desired_count: 4 }
+```
+
+지정한 키만 바뀌고 나머지는 티어 값이 유지됩니다.
+`cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를
+늘리면 안 됩니다 (렌더러가 항상 1 로 고정).
+
+### `deploy.tfstate_bucket` / `deploy.tfstate_table`
+
+ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<account_id>`
+규칙으로 추론하고, account_id 도 없으면 placeholder 가 생성됩니다
+(그 경우 apply 전에 채워야 합니다).
 
 ### `domain.mode`
 

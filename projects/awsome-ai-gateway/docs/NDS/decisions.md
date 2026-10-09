@@ -71,6 +71,42 @@ backend별 렌더러**.
 업데이트가 깨지는 이유는 "바뀐 것"을 아무도 안 보기 때문. doctor는 매 실행마다
 산출물/시크릿/서비스 헬스/마이그레이션 head/`.env` drift를 검증한다.
 
+### 9. ECS 경로는 helm 계약을 이식한다 — 다시 설계하지 않는다
+
+ecs-gateway 모듈의 task-def env 는 `deployment/charts/llm-gateway` 의
+commonEnv/configmap/admin-ui/deployment 계약을 1:1 로 옮긴다 (DB_URL
+`ssl=` 파라미터, `rediss://:` 형식, Q50 의 Redis/RL 복원력 값,
+INTERNAL_API_TOKEN, SECURE_COOKIES, CLI_DIST_DIR 등). env 가 달라지면
+EKS 와 ECS 가 다른 앱이 된다 — 계약의 진원지는 helm 차트다.
+
+### 10. 비밀번호가 들어간 URL 은 task-def 가 아니라 컨테이너가 조립한다
+
+helm 의 `$(DB_PASSWORD)` 치환과 같은 방식: `secrets:` 가 env 로 주입하고
+`sh -c` 래퍼가 DB_URL/REDIS_URL 을 만들어 exec 한다. task def JSON 과
+terraform state 에 평문이 남지 않고, SM 값 회전 시 재시작만으로 반영된다.
+
+### 11. migration 은 helm hook 과 같은 게이트 — terraform_data + run-task
+
+서비스가 스키마 없이 먼저 뜨면 크래시루프 + circuit breaker 오작동.
+`terraform_data.migration`(trigger=image_tag)이 `aws ecs run-task` 를 apply
+중에 실행하고 exitCode!=0 이면 apply 가 멈춘다. 서비스는 depends_on 으로
+그 완료를 기다린다 — EKS 의 pre-install/pre-upgrade hook 과 같은 순서 보장.
+
+### 12. is_prod 이진 분기를 명시 토폴로지 변수로 대체
+
+vpc(`nat_ha`)/aurora(`db_mode`+`safeguards`)/elasticache(`cache_mode`)에
+명시 변수를 넣었다 — 기본값은 기존 environment 추론이므로 기존 EKS 환경의
+plan 은 그대로다. 토폴로지(provisioned 여부)와 데이터 안전장치
+(deletion protection)는 다른 축이라 분리했다 — t1 도 운영이면 safeguards 가
+켜져야 한다.
+
+### 13. domain=none 의 외부 URL 은 2-phase apply
+
+NEXTAUTH_URL 은 task-def 생성 시점에 ALB DNS 를 모른다. 첫 apply 가
+DNS 를 발견하면 `extra-vars.json` 에 기록하고 tfvars 를 다시 렌더해 두 번째
+apply — 발견값이 gateway.yaml 을 오염시키지 않으면서 plan drift 에도
+잡히지 않는다 (helm 의 `--set adminUi.nextauthUrl=<alb-dns>` 와 같은 결).
+
 ## 의도적으로 하지 않은 것
 
 - **dual-render** (yaml → helm values): TF output `--set` 브릿지가 이미 단일

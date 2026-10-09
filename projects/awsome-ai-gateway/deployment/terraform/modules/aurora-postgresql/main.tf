@@ -10,13 +10,23 @@
 # ==============================================================================
 
 locals {
-  is_prod = var.environment == "prod"
+  # 두 개의 독립 축 — 예전엔 environment=="prod" 하나가 둘 다 결정했다:
+  #   provisioned : DB **토폴로지** (Serverless v2 vs provisioned 인스턴스/개수)
+  #   safeguards  : **데이터 안전장치** (deletion protection / final snapshot /
+  #                 백업 보존 / PI 보존) — 소규모라도 prod 성격이면 켜야 한다
+  #
+  # db_mode 명시 시 토폴로지는 그 값이 결정하고, safeguards 는
+  #   provisioned → 자동 ON, serverless → environment 추론 + var.safeguards 로 override.
+  provisioned = var.db_mode != "" ? var.db_mode == "provisioned" : var.environment == "prod"
+  safeguards = var.db_mode == "provisioned" ? true : (
+    var.safeguards != null ? var.safeguards : var.environment == "prod"
+  )
 
-  # prod는 provisioned 클래스, dev는 Serverless v2
-  cluster_instance_class = local.is_prod ? var.prod_instance_class : "db.serverless"
+  # prod(provisioned)는 provisioned 클래스, 아니면 Serverless v2
+  cluster_instance_class = local.provisioned ? var.prod_instance_class : "db.serverless"
 
-  # prod는 최소 2 인스턴스 (writer + reader), dev는 1 인스턴스
-  instance_count = local.is_prod ? 2 : 1
+  # provisioned 는 최소 2 인스턴스 (writer + reader), serverless 는 1 인스턴스
+  instance_count = local.provisioned ? 2 : 1
 
   # final snapshot 이름에 박을 타임스탬프.
   # time_static 이 count=0 (dev) 이면 [] -> "" 가 되므로 인덱스 에러가 나지 않는다.
@@ -45,7 +55,7 @@ locals {
 # dev 는 skip_final_snapshot=true 이고 식별자도 null 이라 count=0 (dev plan 무영향).
 # ------------------------------------------------------------------------------
 resource "time_static" "final_snapshot" {
-  count = local.is_prod ? 1 : 0
+  count = local.safeguards ? 1 : 0
 }
 
 module "aurora" {
@@ -61,9 +71,9 @@ module "aurora" {
   # Serverless v2 capacity (dev용 — prod는 빈 맵으로 전달).
   # 하위 module `terraform-aws-modules/rds-aurora` 가 `length()` 로 이 값을 검사하는데
   # null 이면 "argument must not be null" 에러. 빈 map 을 넘기면 serverless 모드 비활성.
-  serverlessv2_scaling_configuration = local.is_prod ? {} : {
-    min_capacity = 0.5
-    max_capacity = 4.0
+  serverlessv2_scaling_configuration = local.provisioned ? {} : {
+    min_capacity = var.serverless_min_acu
+    max_capacity = var.serverless_max_acu
   }
 
   # 인스턴스 정의
@@ -94,15 +104,15 @@ module "aurora" {
   # availability_zones 는 넘기지 않음 (null 로 두면 AWS 가 DBSubnetGroup 에서 자동 선택).
   # 명시하면 subnet group AZ 와 불일치할 때 cluster replace 가 트리거됨.
   # availability_zones       = var.availability_zones
-  backup_retention_period   = local.is_prod ? 14 : 7
+  backup_retention_period   = local.safeguards ? 14 : 7
   preferred_backup_window   = "17:00-19:00" # KST 02:00-04:00 (UTC 17-19)
-  deletion_protection       = local.is_prod
-  skip_final_snapshot       = !local.is_prod
-  final_snapshot_identifier = local.is_prod ? "${var.project}-${var.environment}-final-${local.final_snapshot_suffix}" : null
+  deletion_protection       = local.safeguards
+  skip_final_snapshot       = !local.safeguards
+  final_snapshot_identifier = local.safeguards ? "${var.project}-${var.environment}-final-${local.final_snapshot_suffix}" : null
 
   # 성능 관측성
   performance_insights_enabled          = true
-  performance_insights_retention_period = local.is_prod ? 62 : 7
+  performance_insights_retention_period = local.safeguards ? 62 : 7
   monitoring_interval                   = 60
   create_monitoring_role                = true
 
@@ -121,7 +131,7 @@ module "aurora" {
   db_cluster_parameter_group_parameters = [
     {
       name         = "log_statement"
-      value        = local.is_prod ? "ddl" : "all"
+      value        = local.safeguards ? "ddl" : "all"
       apply_method = "pending-reboot"
     },
     {

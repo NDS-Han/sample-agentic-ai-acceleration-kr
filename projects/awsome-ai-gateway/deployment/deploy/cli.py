@@ -19,6 +19,7 @@ from rich.table import Table
 
 from . import schema, tiers
 from .render import compose as compose_render
+from .render import ecs as ecs_render
 
 console = Console()
 
@@ -72,9 +73,11 @@ def cmd_init(args) -> int:
             Choice("route53-acm — 도메인 확정 (자동 TLS)", "route53-acm"),
             Choice("cloudfront-temp — 임시 https (EKS 전용)", "cloudfront-temp"),
         ]).ask())
-    domain_name = ""
+    domain_name, zone_id = "", ""
     if domain_mode == "route53-acm":
         domain_name = _unwrap(questionary.text("베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)").ask())
+        if target in ("ecs", "eks"):
+            zone_id = _unwrap(questionary.text("Route53 hosted zone ID (예: Z0123456ABCD)").ask())
 
     notif = _unwrap(questionary.select(
         "알림 provider",
@@ -107,8 +110,16 @@ def cmd_init(args) -> int:
 
     images = {}
     if target in ("ecs", "eks"):
-        images["registry"] = _unwrap(questionary.text("ECR registry (예: 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com/llm-gateway)").ask())
+        images["registry"] = _unwrap(questionary.text(
+            "외부 이미지 registry (비우면 ECR repo 자동 생성 — ecs)", default="").ask())
         images["tag"] = _unwrap(questionary.text("이미지 태그 (명시적 핀 필수)").ask())
+
+    deploy_extra = {}
+    if target in ("ecs", "eks"):
+        deploy_extra["tfstate_bucket"] = _unwrap(questionary.text(
+            "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)", default="").ask())
+        deploy_extra["tfstate_table"] = _unwrap(questionary.text(
+            "Terraform lock DynamoDB table (없으면 비움)", default="").ask())
 
     allowed = _unwrap(questionary.text(
         "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)", default="").ask())
@@ -117,10 +128,10 @@ def cmd_init(args) -> int:
         "version": 1,
         "env": env,
         "aws": {"region": region},
-        "deploy": {"target": target, "size_tier": size_tier},
+        "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()]},
-        "domain": {"mode": domain_mode, "name": domain_name},
+        "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id},
         "features": {
             "notifications": {"provider": notif, **notif_extra},
             "web_search": "web_search" in features,
@@ -205,17 +216,52 @@ def cmd_render(args) -> int:
             "   기본값으로 interpolate 되어 앱과 DB의 비밀번호가 어긋납니다)")
         return 0
 
-    console.print(f"[red]deploy.target={cfg.deploy.target} 렌더러는 아직 구현 전입니다 (compose 부터).")
+    if cfg.deploy.target == "ecs":
+        out = GEN_ROOT / cfg.env / "ecs"
+        res = ecs_render.render(cfg, out)
+        console.print(f"[green]생성 완료 ({out}):")
+        for f in res["files"]:
+            console.print(f"  {f}")
+        for n in res.get("notes", []):
+            console.print(f"  [yellow]ⓘ {n}")
+        console.print(
+            f"\n적용: [bold]terraform -chdir={res['env_dir']} init -backend-config={out/'backend.hcl'} "
+            f"&& terraform -chdir={res['env_dir']} apply -var-file={out/'terraform.tfvars'}[/bold]\n"
+            "  또는 ./deploy apply 가 이 절차를 실행합니다.")
+        return 0
+
+    console.print(f"[red]deploy.target={cfg.deploy.target} 렌더러는 아직 구현 전입니다 (compose, ecs 지원).")
     return 1
 
 
 def cmd_apply(args) -> int:
-    """compose: render → up -d → doctor 한 단계로."""
+    """render → 기동 → doctor 한 단계로 (backend 별 실행기)."""
     try:
         cfg = schema.load(Path(args.config))
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
+
+    if cfg.deploy.target == "ecs":
+        from . import ecs_apply, doctor as doc
+        out = GEN_ROOT / cfg.env / "ecs"
+        res = ecs_render.render(cfg, out)
+        console.print(f"[green]render 완료 ({out})")
+        for n in res.get("notes", []):
+            console.print(f"  [yellow]ⓘ {n}")
+        try:
+            outputs = ecs_apply.apply(cfg, out, REPO_ROOT)
+        except SystemExit as exc:
+            console.print(f"[red]{exc}")
+            return 1
+        console.print("\n[green]배포 완료 — 엔드포인트:")
+        for k in ("gateway_url", "admin_ui_url", "alb_dns_name"):
+            if outputs.get(k):
+                console.print(f"  {k}: {outputs[k]}")
+        rep = doc.check_ecs(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+        console.print(doc.format_report(cfg, rep))
+        return 0 if rep.worst != "HIGH" else 1
+
     if cfg.deploy.target != "compose":
         console.print(f"[red]deploy.target={cfg.deploy.target} 의 apply 는 아직 구현 전입니다.")
         return 1
@@ -254,6 +300,10 @@ def cmd_doctor(args) -> int:
         return 1
     if cfg.deploy.target == "compose":
         rep = doc.check_compose(cfg, GEN_ROOT / cfg.env)
+        console.print(doc.format_report(cfg, rep))
+        return 0 if rep.worst != "HIGH" else 1
+    if cfg.deploy.target == "ecs":
+        rep = doc.check_ecs(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
         console.print(doc.format_report(cfg, rep))
         return 0 if rep.worst != "HIGH" else 1
     console.print("[yellow]이 backend 의 doctor 는 아직 구현 전입니다.")

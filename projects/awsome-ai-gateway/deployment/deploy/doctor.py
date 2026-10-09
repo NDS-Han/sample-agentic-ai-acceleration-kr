@@ -142,6 +142,142 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
     return rep
 
 
+# ==============================================================================
+# ecs backend doctor
+#   산출물 → AWS 자격 → terraform plan(드리프트) → 서비스 running/desired →
+#   migration task exit → 엔드포인트 응답
+# ==============================================================================
+
+ECS_ENV_DIR = Path("deployment/terraform/environments/gateway-ecs")
+ECS_SERVICES = ("gateway-proxy", "admin-api", "admin-ui", "scheduler",
+                "cost-recorder-worker", "notification-worker")
+
+
+def _tf_outputs(env_dir: Path) -> dict:
+    r = _run(["terraform", "output", "-json"], cwd=env_dir, timeout=120)
+    if r.returncode != 0:
+        return {}
+    try:
+        return {k: v.get("value") for k, v in json.loads(r.stdout).items()}
+    except (json.JSONDecodeError, AttributeError):
+        return {}
+
+
+def _aws(argv: list[str], region: str, timeout: int = 30) -> subprocess.CompletedProcess:
+    return _run(["aws", *argv, "--region", region, "--output", "json"], timeout=timeout)
+
+
+def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorReport:
+    rep = DoctorReport()
+    out_dir = gen_dir / "ecs"
+    env_dir = repo_root / ECS_ENV_DIR
+    var_file = out_dir / "terraform.tfvars"
+
+    # 1. 산출물
+    for name in ("terraform.tfvars", "backend.hcl"):
+        if not (out_dir / name).exists():
+            rep.add("HIGH", "artifacts", f"{name} 없음 — `deploy render` 먼저 실행")
+            return rep
+    rep.add("OK", "artifacts", "render 산출물 존재")
+
+    # 2. AWS 자격
+    r = _aws(["sts", "get-caller-identity"], cfg.aws.region)
+    if r.returncode != 0:
+        rep.add("HIGH", "aws", f"AWS 자격증명 없음/만료: {r.stderr.strip()[:150]}")
+        return rep
+    rep.add("OK", "aws", "AWS 자격증명 유효")
+
+    # 3. terraform plan — tfvars·라이브 인프라 드리프트 통합 탐지.
+    #    refresh 를 켜서 콘솔/CLI 수동변경까지 잡는다 (수 초~수십 초 소요).
+    r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false",
+              f"-var-file={var_file}"],
+             cwd=env_dir, timeout=300)
+    if r.returncode == 0:
+        rep.add("OK", "drift", "terraform plan no-op — gateway.yaml 과 라이브 인프라 일치")
+    elif r.returncode == 2:
+        # diff 가 있으면 요약만 — 전체 plan 출력은 너무 김
+        changed = [ln for ln in r.stdout.splitlines()
+                   if ln.startswith(("  # ", "Plan:"))][-5:]
+        rep.add("WARN", "drift", "인프라 드리프트 감지 — " + " / ".join(changed)[:200])
+    else:
+        rep.add("WARN", "drift",
+                f"terraform plan 실행 불가(init 필요?): {r.stderr.strip()[:150]}")
+
+    # 4. 서비스 상태
+    outputs = _tf_outputs(env_dir)
+    cluster = outputs.get("ecs_cluster_name")
+    if not cluster:
+        rep.add("HIGH", "services", "terraform output 에 클러스터 없음 — apply 됐는지 확인")
+        return rep
+    names = list((outputs.get("service_names") or {}).values()) or list(ECS_SERVICES)
+    r = _aws(["ecs", "describe-services", "--cluster", cluster, "--services", *names],
+             cfg.aws.region)
+    if r.returncode != 0:
+        rep.add("WARN", "services", f"describe-services 실패: {r.stderr.strip()[:150]}")
+    else:
+        try:
+            svcs = json.loads(r.stdout).get("services", [])
+        except json.JSONDecodeError:
+            svcs = []
+        by_name = {s["serviceName"]: s for s in svcs}
+        for name in ECS_SERVICES:
+            s = by_name.get(name)
+            if s is None:
+                rep.add("HIGH", "services", f"{name} 서비스 없음")
+                continue
+            running, desired = s.get("runningCount", 0), s.get("desiredCount", 0)
+            deps = s.get("deployments") or []
+            rolling = len([d for d in deps if d.get("rolloutState") != "COMPLETED"])
+            if running >= desired and desired > 0 and rolling == 0:
+                rep.add("OK", "services", f"{name} {running}/{desired} running")
+            elif rolling:
+                rep.add("WARN", "services", f"{name} 배포 진행 중 ({running}/{desired})")
+            else:
+                rep.add("HIGH", "services", f"{name} {running}/{desired} running")
+
+    # 5. migration task — taskArns 는 시간순을 보장하지 않으므로 stoppedAt 이
+    #    가장 최근인 STOPPED task 를 찾아 exitCode 를 본다
+    fam = (outputs.get("migration_task_definition_arn") or "").split("/")[-1]
+    if fam:
+        r = _aws(["ecs", "list-tasks", "--cluster", cluster, "--family", fam,
+                  "--desired-status", "STOPPED"], cfg.aws.region)
+        try:
+            arns = json.loads(r.stdout).get("taskArns", [])
+        except json.JSONDecodeError:
+            arns = []
+        if not arns:
+            rep.add("HIGH", "migration", "migration task 실행 기록 없음")
+        else:
+            r = _aws(["ecs", "describe-tasks", "--cluster", cluster,
+                      "--tasks", *arns[:100]], cfg.aws.region)
+            try:
+                tasks = json.loads(r.stdout).get("tasks", [])
+                task = max(tasks, key=lambda t: t.get("stoppedAt", ""))
+                code = (task.get("containers") or [{}])[0].get("exitCode")
+            except (json.JSONDecodeError, ValueError, IndexError, KeyError):
+                code = None
+            if code == 0:
+                rep.add("OK", "migration", "마지막 migration task exitCode=0")
+            else:
+                rep.add("HIGH", "migration",
+                        f"마지막 migration task 비정상 (exitCode={code})")
+
+    # 6. 엔드포인트 — ALB DNS 로 gateway health 확인 (도메인 없으면 http)
+    import urllib.request
+    base = outputs.get("gateway_url") or (
+        f"http://{outputs['alb_dns_name']}" if outputs.get("alb_dns_name") else "")
+    if base:
+        for path, expect in (("/health", "gateway-proxy"),):
+            try:
+                code = urllib.request.urlopen(base + path, timeout=10).status
+            except Exception as exc:  # URLError 등 — 원인 요약만
+                code = str(exc)[:80]
+            rep.add("OK" if code == 200 else "HIGH", "endpoint",
+                    f"{expect} {base}{path} → {code}")
+
+    return rep
+
+
 def format_report(cfg: GatewayConfig, rep: DoctorReport) -> str:
     icon = {"OK": "✓", "WARN": "!", "HIGH": "✗"}
     lines = [f"doctor — {cfg.env} ({cfg.deploy.target}/{cfg.deploy.size_tier})", ""]

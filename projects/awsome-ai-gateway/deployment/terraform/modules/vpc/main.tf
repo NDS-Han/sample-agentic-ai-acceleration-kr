@@ -7,6 +7,11 @@
 # EKS Fargate에 필요한 subnet 태그를 자동 주입.
 # ==============================================================================
 
+locals {
+  # nat_ha 명시 시 environment 추론보다 우선 — t1 은 단일 NAT(비용), t2+ 는 AZ 당 NAT
+  nat_ha = var.nat_ha != null ? var.nat_ha : var.environment == "prod"
+}
+
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
   version = "~> 5.13"
@@ -21,10 +26,10 @@ module "vpc" {
   database_subnets    = var.database_subnet_cidrs
   elasticache_subnets = var.elasticache_subnet_cidrs
 
-  # NAT — prod는 AZ별 분리, dev는 비용 절감 위해 단일 NAT
+  # NAT — HA 는 AZ별 분리, 아니면 비용 절감 위해 단일 NAT
   enable_nat_gateway     = true
-  single_nat_gateway     = var.environment != "prod"
-  one_nat_gateway_per_az = var.environment == "prod"
+  single_nat_gateway     = !local.nat_ha
+  one_nat_gateway_per_az = local.nat_ha
 
   enable_dns_hostnames = true
   enable_dns_support   = true

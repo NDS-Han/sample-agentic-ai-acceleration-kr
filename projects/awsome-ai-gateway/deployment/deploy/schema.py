@@ -11,7 +11,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 DEPLOY_TARGETS = ("compose", "ecs", "eks")
-IMPLEMENTED_TARGETS = ("compose",)   # 렌더러가 있는 backend — 나머지는 validate 만
+IMPLEMENTED_TARGETS = ("compose", "ecs")   # 렌더러가 있는 backend — 나머지는 validate 만
 SIZE_TIERS = ("t0", "t1", "t2", "t3")
 NETWORK_MODES = ("public", "private")
 DOMAIN_MODES = ("none", "cloudfront-temp", "route53-acm")
@@ -37,6 +37,10 @@ class DeployConfig:
     target: str = "compose"
     size_tier: str = "t1"
     sizing: dict[str, Any] = field(default_factory=dict)
+    # terraform state backend (ecs/eks 경로). 비우면 account_id 규칙으로 추론하거나
+    # render 가 placeholder 를 둔다.
+    tfstate_bucket: str = ""
+    tfstate_table: str = ""
 
 
 @dataclass
@@ -59,6 +63,7 @@ class NotificationConfig:
     smtp_port: int = 587
     smtp_from: str = ""
     ses_from: str = ""
+    sender_name: str = ""          # 비우면 "LLM Gateway"
 
 
 @dataclass
@@ -153,18 +158,27 @@ class GatewayConfig:
             e.append(f"deploy.size_tier 는 {SIZE_TIERS} 중 하나여야 합니다: {self.deploy.size_tier}")
         if self.deploy.target == "compose" and self.deploy.size_tier != "t0":
             e.append("compose backend 는 size_tier=t0 만 지원합니다 (단일 노드).")
-        if self.deploy.target != "compose" and self.deploy.size_tier == "t0":
+        if self.deploy.target == "ecs" and self.deploy.size_tier not in ("t1", "t2"):
+            e.append("ecs backend 는 size_tier=t1|t2 를 지원합니다 (t3 는 eks 경로).")
+        if self.deploy.target == "eks" and self.deploy.size_tier not in ("t2", "t3"):
+            e.append("eks backend 는 size_tier=t2|t3 입니다.")
+        if self.deploy.size_tier == "t0" and self.deploy.target != "compose":
             e.append("size_tier=t0 는 compose backend 전용입니다.")
         if self.deploy.target in ("ecs", "eks") and not self.images.tag:
             e.append(f"deploy.target={self.deploy.target} 는 images.tag 명시가 필수입니다.")
-        if self.deploy.target in ("ecs", "eks") and not self.images.registry:
-            e.append(f"deploy.target={self.deploy.target} 는 images.registry(ECR) 가 필요합니다.")
+        # images.registry 비우면 ecs env 가 ECR repo 를 자동 생성한다 (eks 는 필수)
+        if self.deploy.target == "eks" and not self.images.registry:
+            e.append("deploy.target=eks 는 images.registry(ECR) 가 필요합니다.")
         if self.network.mode not in NETWORK_MODES:
             e.append(f"network.mode 는 {NETWORK_MODES} 중 하나여야 합니다.")
         if self.domain.mode not in DOMAIN_MODES:
             e.append(f"domain.mode 은 {DOMAIN_MODES} 중 하나여야 합니다.")
         if self.domain.mode == "route53-acm" and not self.domain.name:
             e.append("domain.mode=route53-acm 이면 domain.name 이 필수입니다.")
+        if (self.domain.mode == "route53-acm"
+                and self.deploy.target in ("ecs", "eks")
+                and not self.domain.zone_id):
+            e.append("ecs/eks 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다.")
         if self.features.notifications.provider not in NOTIFICATION_PROVIDERS:
             e.append(f"notifications.provider 는 {NOTIFICATION_PROVIDERS} 중 하나여야 합니다.")
         if self.features.notifications.provider == "ses" and not self.features.notifications.ses_from:
@@ -220,6 +234,8 @@ def from_dict(raw: dict) -> GatewayConfig:
             target=str(deploy.get("target", "compose")),
             size_tier=str(deploy.get("size_tier", "t1")),
             sizing=dict(deploy.get("sizing") or {}),
+            tfstate_bucket=str(deploy.get("tfstate_bucket", "")),
+            tfstate_table=str(deploy.get("tfstate_table", "")),
         ),
         network=NetworkConfig(
             mode=str(network.get("mode", "public")),
@@ -237,6 +253,7 @@ def from_dict(raw: dict) -> GatewayConfig:
                 smtp_port=int(notif.get("smtp_port", 587)),
                 smtp_from=str(notif.get("smtp_from", "")),
                 ses_from=str(notif.get("ses_from", "")),
+                sender_name=str(notif.get("sender_name", "")),
             ),
             bi_insight=bool(features.get("bi_insight", False)),
             pricing_lambda=bool(features.get("pricing_lambda", False)),
