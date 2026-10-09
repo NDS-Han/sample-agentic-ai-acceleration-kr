@@ -51,7 +51,9 @@ TIERS: dict[str, TierPreset] = {
         name="t2",
         # Multi-AZ 는 NAT·캐시·task 에만 적용 — Aurora serverless 모듈은
         # instance_count=1 이라 DB 는 단일 writer 이다 (multi_az 키를 두지 않는다:
-        # render 가 읽는 값만 둬서 "정의된 것과 실제" 가 어긋나지 않게)
+        # render 가 읽는 값만 둬서 "정의된 것과 실제" 가 어긋나지 않게).
+        # cost-recorder/notification 워커도 desired_count=1 고정이다 (스트림
+        # consumer 중복 방지) — 이 둘은 t2 에서도 단일 장애점이다.
         label="표준 — NAT/캐시/task Multi-AZ (DB는 serverless 단일 writer)",
         users="300~1000명",
         backend="ecs",
@@ -64,6 +66,10 @@ TIERS: dict[str, TierPreset] = {
         monthly_cost_usd="~$500",
     ),
     "t3": TierPreset(
+        # ⚠️ eks 경로는 기존 인프라를 이어받는 모델이라 tier spec 을 소비하지
+        # 않는다 — 아래 db_spec/cache_spec/compute_spec 은 "현재 prod 수준"
+        # 문서용 수치이며 어떤 렌더러도 읽지 않는다. eks 의 실제 크기는
+        # 차트 values/HPA/requests 가 결정한다.
         name="t3",
         label="대규모 — EKS + cluster mode (현재 prod)",
         users="1000명+",

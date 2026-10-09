@@ -341,7 +341,8 @@ def cmd_configure(args) -> int:
         return 0
     import types
     apply_args = types.SimpleNamespace(config=str(cfg_path), build=False,
-                                       plan=False, yes=False)
+                                       plan=False, yes=False,
+                                       context=getattr(args, "context", "") or "")
     return cmd_apply(apply_args)
 
 
@@ -768,6 +769,8 @@ def main(argv=None) -> int:
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--no-apply", action="store_true",
                     help="설정만 저장하고 배포는 안 함")
+    sp.add_argument("--context", default="",
+                    help="eks: apply 시 쓸 kubeconfig context")
     sp.set_defaults(fn=cmd_configure)
 
     sp = sub.add_parser("validate", help="[고급] yaml 검증 — configure/apply 도 시작 시 검증하므로 생략 가능")

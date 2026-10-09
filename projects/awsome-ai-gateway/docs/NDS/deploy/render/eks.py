@@ -180,6 +180,9 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     if not env_vals:
         notes.append(f"env overlay(values-eks-fargate-{cfg.env}.yaml)를 못 찾았습니다 — "
                      "차트 기본값 + 이 오버레이만으로 배포됩니다. 기존 배포를 업데이트하는 "
-                     "거라면 env 값이 빠져 의도와 달라질 수 있습니다.")
+                     "거라면 env 값이 빠져 의도와 달라질 수 있습니다. 특히 시크릿은 "
+                     "이 오버레이가 공급하지 않습니다 — chart 는 externalSecrets.enabled(ESO) "
+                     "또는 .Values.secrets 중 하나가 반드시 필요하며, 둘 다 없으면 "
+                     "migration Job과 전 pod가 Secret 참조 실패로 뜨지 못합니다.")
     return {"files": [values_path, deploy_path], "notes": notes,
             "env_dir": meta["env_dir"]}

@@ -219,8 +219,10 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
     #    refresh 를 켜서 콘솔/CLI 수동변경까지 잡는다 (수 초~수십 초 소요).
     #    신선한 checkout 에선 backend init 이 먼저 필요하다
     backend = out_dir / "backend.hcl"
-    if backend.exists() and not (env_dir / ".terraform").exists():
-        _run(["terraform", "init", "-input=false",
+    if backend.exists():
+        # .terraform 존재 여부로 생략하면 backend.hcl 변경(bucket/table 바꿈)이
+        # plan 에 반영되지 않는다 — init 은 멱등이므로 항상 실행한다
+        _run(["terraform", "init", "-input=false", "-reconfigure",
               f"-backend-config={backend}"], cwd=env_dir, timeout=180)
     r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false",
               f"-var-file={var_file}"],

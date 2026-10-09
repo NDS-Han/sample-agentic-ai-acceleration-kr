@@ -114,7 +114,14 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
 
     issuer = outs.get("cognito_issuer_url")
     if issuer and not cfg.oidc.enabled:
-        # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존 스크립트 계약
+        # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존 스크립트 계약.
+        # 단 render 는 adminUi DEV_LOGIN_ENABLED=true 로 내므로 admin-api=OIDC /
+        # admin-ui=dev-login 의 비일관 상태가 된다 — 의도면 yaml 에 oidc 를 채우라고 경고.
+        print("⚠ gateway.yaml 의 oidc 가 비어 있는데 terraform 이 Cognito 를 만들어 "
+              "둔 상태입니다 — admin-api 에 OIDC 를 강제 활성화합니다 "
+              "(admin-ui 는 dev-login 모드로 렌더됨 — 의도가 아니면 gateway.yaml 에 "
+              "oidc: issuer_url/client_id/authorize_url/token_url 을 채우세요)",
+              file=sys.stderr)
         args += ["--set", "adminApi.oidc.enabled=true",
                  "--set", f"adminApi.oidc.issuerUrl={issuer}",
                  "--set", "adminApi.oidc.providerName=oidc:cognito",

@@ -264,12 +264,51 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
                       "smtp_port": _safe_int(sizing_env.get("SMTP_PORT"), 587),
                       "smtp_from": sizing_env.get("EMAIL_SENDER_ADDRESS", "")})
 
-    # tier 추론 — serverless ACU 범위는 출력에 없어 sizing/env 로 유추
-    tier = "t1"
-    if sizing.get("gateway-proxy", {}).get("desired_count", 1) >= 4:
-        tier = "t2"
-    notes.append(f"size_tier 는 task 수로 추론(t{tier[-1]}) — DB/캐시 토폴로지는 "
-                 "tfvars 기대값과 맞는지 validate 후 확인하세요")
+    # tier 추론 — 실제 DB/캐시 토폴로지를 읽어 task 수와 교차검증한다.
+    # task 수만 보면 운영 중 축소된 배포를 과소평가해 채택 후 apply 가
+    # ACU/캐시를 다운사이즈한다 — 실제 스펙을 우선으로 읽는다.
+    tier_signals: list[str] = []
+    db_acu_max, cache_nodes = 0.0, 0
+    try:
+        db_ep = outputs.get("db_endpoint") or ""
+        clusters = _aws_json(
+            ["rds", "describe-db-clusters"], region).get("DBClusters", [])
+        for c in clusters:
+            ep = (c.get("Endpoint") or "")
+            if db_ep and ep and ep in db_ep:
+                sc = c.get("ServerlessV2ScalingConfiguration") or {}
+                db_acu_max = float(sc.get("MaxCapacity") or 0)
+                tier_signals.append(f"Aurora max {db_acu_max}ACU"
+                                    + ("(serverless)" if sc else f"({c.get('DBClusterInstanceClass','?')})"))
+                break
+    except (CaptureError, KeyError, ValueError):
+        pass
+    try:
+        redis_ep = outputs.get("redis_endpoint") or ""
+        rgs = _aws_json(
+            ["elasticache", "describe-replication-groups"], region
+        ).get("ReplicationGroups", [])
+        for rg in rgs:
+            eps = [m.get("PrimaryEndpoint", {}).get("Address", "")
+                   for m in rg.get("NodeGroups", [{}])]
+            members = rg.get("MemberClusters", [])
+            if redis_ep and (redis_ep in eps or
+                             any(redis_ep in (m or "") for m in members)):
+                cache_nodes = len(members)
+                tier_signals.append(f"cache {rg.get('CacheNodeType','?')}x{cache_nodes}")
+                break
+    except (CaptureError, KeyError, ValueError):
+        pass
+
+    gw_tasks = sizing.get("gateway-proxy", {}).get("desired_count", 1)
+    # 신호 종합: task 4+/ACU>4/캐시 multi-node 중 하나라도 크면 t2
+    is_big = gw_tasks >= 4 or db_acu_max > 4 or cache_nodes >= 2
+    tier = "t2" if is_big else "t1"
+    sig = ", ".join(tier_signals) or "읽지 못함"
+    notes.append(
+        f"size_tier={tier} 추론 근거: gateway task {gw_tasks}개, {sig}. "
+        f"⚠️ 실제보다 작게 추론되면 다음 apply 가 ACU/캐시/task를 축소합니다 — "
+        f"채택 전 실제 스펙과 대조하세요")
 
     oidc = {}
     issuer = outputs.get("cognito_issuer_url") or sizing_env.get("OIDC_ISSUER_URL", "")
@@ -480,6 +519,21 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")
         except CaptureError:
             notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
+
+    # 시크릿 공급 경로 — chart 는 externalSecrets(ESO) 또는 .Values.secrets 중
+    # 하나가 없으면 pod 가 기동하지 못한다. 캡처본엔 이 설정이 없으니 상태를 기록한다.
+    eso = _val(v, "externalSecrets", "enabled")
+    inline_secrets = bool(_val(v, "secrets", default={}) or {})
+    if str(eso).lower() == "true":
+        notes.append("시크릿 경로: externalSecrets(ESO) 사용 중 — 채택 후 apply 도 이 "
+                     "전제가 유지돼야 합니다 (env values 가 공급)")
+    elif inline_secrets:
+        notes.append("시크릿 경로: chart .Values.secrets 인라인 — env values 파일이 "
+                     "공급 중인지 확인하세요 (values 파일은 git 에 올리지 말 것)")
+    else:
+        notes.append("⚠️ 시크릿 공급 경로를 helm values 에서 못 읽었습니다 — "
+                     "externalSecrets/.Values.secrets 둘 다 비어 있으면 채택 후 "
+                     "apply 시 migration Job과 pod 가 기동하지 못합니다")
 
     notes.append("size_tier 는 eks=t3 으로 둡니다 — 실제 리소스 스펙은 HPA/requests 참조")
     notes.append("externalSecrets/ESO, Fargate profile, RDS Proxy 등 eks 고유 구성은 "

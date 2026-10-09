@@ -119,6 +119,10 @@ def _absolutize_mount(v) -> str:
     src, sep, rest = v.partition(":")
     if src.startswith("./") and sep:
         return f"{REPO_ROOT}/{src[2:]}:{rest}"
+    # compose 는 bind source 의 `~` 를 전개하지 않아 gen/<env>/ 아래에
+    # 리터럴 `~` 디렉토리가 생긴다 — render 하는 사용자의 홈으로 확장
+    if src.startswith("~/") and sep:
+        return f"{Path.home()}/{src[2:]}:{rest}"
     return v
 
 
@@ -232,6 +236,11 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             ".env 에 LITELLM_PRICING_LAMBDA=<arn> 을 추가하십시오.")
     if cfg.features.observability:
         notes.append("observability: OTel/Prometheus/Loki/Tempo/Grafana 스택을 포함해 렌더했습니다.")
+    if cfg.oidc.enabled and cfg.domain.mode == "none":
+        notes.append(
+            "oidc + domain=none: admin-ui 가 NEXTAUTH_URL 없이 Host 헤더에 의존합니다 — "
+            "리버스 프록시/포트포워딩 뒤에서 접속하면 SSO 콜백 origin 이 어긋날 수 있습니다. "
+            "문제가 되면 gen/<env>/.env 에 NEXTAUTH_URL=http://<호스트>:3000 을 추가하세요.")
     if cfg.clients.models_profile == "regional":
         notes.append("models_profile=regional: 시드 alias 는 마이그레이션 관리 — "
                      "리전별 프로필 추가는 마이그레이션/관리 UI 에서 진행하십시오.")
