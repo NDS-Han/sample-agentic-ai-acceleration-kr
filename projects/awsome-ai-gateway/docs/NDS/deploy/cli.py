@@ -291,7 +291,126 @@ def cmd_apply(args) -> int:
     return 0 if rep.worst != "HIGH" else 1
 
 
+def _detect_gen_dir(args) -> tuple[Path, str]:
+    """캡처 대상 산출물 디렉토리를 찾는다 — 명시 > 기존 config 의 env > gen/ 자동 탐색."""
+    if getattr(args, "gen_dir", ""):
+        return Path(args.gen_dir), ""
+    cfg_path = Path(args.config)
+    if cfg_path.exists():
+        try:
+            env = schema.load(cfg_path).env
+            return GEN_ROOT / env, env
+        except schema.SchemaError:
+            pass
+    found = [d for d in GEN_ROOT.iterdir() if d.is_dir()] if GEN_ROOT.exists() else []
+    if len(found) == 1:
+        return found[0], found[0].name
+    from .capture import CaptureError
+    raise CaptureError(f"캡처 대상을 못 찾았습니다 — --gen-dir 로 지정 (후보: {[d.name for d in found]})")
+
+
+def _captured_to_yaml(path: Path, doc: dict, notes: list[str]) -> None:
+    body = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
+    if notes:
+        body += "\n# --- capture notes ---\n" + "".join(f"# {n}\n" for n in notes)
+    path.write_text(
+        "# captured by deploy doctor --capture — 검토 후 gateway.yaml 로 채택하세요.\n"
+        "# 빈 값과 notes 는 캡처가 못 읽은 부분입니다.\n" + body)
+    path.chmod(0o600)
+
+
+def _set_path(doc: dict, dotted: str, value) -> None:
+    cur = doc
+    parts = dotted.split(".")
+    for p in parts[:-1]:
+        cur = cur.setdefault(p, {})
+    cur[parts[-1]] = value
+
+
+def cmd_capture(args) -> int:
+    """기존 배포 → gateway.yaml 후보 역생성 + 기존 config 와 diff."""
+    from . import capture
+
+    try:
+        cfg_path = Path(args.config)
+        existing: dict = yaml.safe_load(cfg_path.read_text()) if cfg_path.exists() else {}
+        existing_target = (existing.get("deploy") or {}).get("target", "")
+
+        gen_dir, _ = _detect_gen_dir(args)
+        target = args.target or existing_target or (
+            "compose" if (gen_dir / "docker-compose.yml").exists()
+            else "ecs" if (gen_dir / "ecs").is_dir() else "")
+        if target == "compose":
+            doc, notes = capture.capture_compose(gen_dir)
+        elif target == "ecs":
+            region = args.region or (existing.get("aws") or {}).get("region", "ap-northeast-2")
+            env_dir = REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
+            doc, notes = capture.capture_ecs(env_dir, region)
+        else:
+            console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs 또는 --gen-dir 지정")
+            return 1
+
+        # 캡처 결과가 스키마를 통과하는지 — 안 되는 필드는 사람이 채워야 함
+        try:
+            schema.from_dict(doc)
+            console.print("[green]캡처 결과 스키마 유효")
+        except schema.SchemaError as exc:
+            console.print(f"[yellow]캡처 결과에 미완성 필드가 있습니다:\n{exc}")
+
+        out_path = Path(args.out) if args.out else \
+            cfg_path.parent / f"gateway.captured-{doc.get('env', 'env')}.yaml"
+        if out_path.exists() and not args.force:
+            console.print(f"[yellow]{out_path} 가 있습니다 — --force 로 덮어씁니다.")
+            return 1
+        _captured_to_yaml(out_path, doc, notes)
+        console.print(f"[green]캡처됨: {out_path}")
+        for n in notes:
+            console.print(f"  [yellow]ⓘ {n}")
+
+        # 기존 config 와 diff → interactive 흡수
+        if existing and cfg_path.exists():
+            # 스키마로 정규화해 비교 — 미기재 키 vs 기본값 캡처는 차이가 아니다
+            try:
+                from dataclasses import asdict
+                diffs = capture.diff_docs(
+                    asdict(schema.from_dict(existing)), asdict(schema.from_dict(doc)))
+            except schema.SchemaError:
+                diffs = capture.diff_docs(existing, doc)
+            if not diffs:
+                console.print("\n[green]기존 gateway.yaml 과 일치 — 드리프트 없음")
+                return 0
+            table = Table(title="기존 gateway.yaml ←→ 배포 상태 차이")
+            table.add_column("키"); table.add_column("yaml"); table.add_column("캡처(실제)")
+            for k, dv, cv in diffs:
+                table.add_row(k, str(dv), str(cv))
+            console.print(table)
+            if args.interactive:
+                import questionary
+                from questionary import Choice
+                adopted = 0
+                for k, dv, cv in diffs:
+                    c = _unwrap(questionary.select(f"{k}: yaml={dv} / 실제={cv}", choices=[
+                        Choice("absorb — 실제 값을 yaml 에 채택", "absorb"),
+                        Choice("keep — yaml 유지 (나중에 apply 로 되돌림)", "keep"),
+                        Choice("skip — 지금은 건너뜀", "skip"),
+                    ]).ask())
+                    if c == "absorb" and cv is not None:
+                        _set_path(existing, k, cv)
+                        adopted += 1
+                if adopted:
+                    cfg_path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True))
+                    console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다")
+            else:
+                console.print("[yellow]--interactive 로 각 항목의 채택/유지를 선택할 수 있습니다")
+        return 0
+    except capture.CaptureError as exc:
+        console.print(f"[red]{exc}")
+        return 1
+
+
 def cmd_doctor(args) -> int:
+    if getattr(args, "capture", False):
+        return cmd_capture(args)
     from . import doctor as doc
     try:
         cfg = schema.load(Path(args.config))
@@ -334,6 +453,16 @@ def main(argv=None) -> int:
 
     sp = sub.add_parser("doctor", help="배포 상태·드리프트 점검")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.add_argument("--capture", action="store_true",
+                    help="기존 배포 상태를 읽어 gateway.yaml 후보를 역생성")
+    sp.add_argument("--target", choices=["compose", "ecs"], default="",
+                    help="capture 대상 backend (미지정 시 자동 판별)")
+    sp.add_argument("--gen-dir", default="", help="capture 할 산출물 디렉토리")
+    sp.add_argument("--region", default="", help="capture 용 AWS 리전 (ecs)")
+    sp.add_argument("--out", default="", help="capture 결과 쓸 경로")
+    sp.add_argument("--interactive", action="store_true",
+                    help="기존 config 와 다른 항목을 absorb/keep/skip 선택")
+    sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_doctor)
 
     args = p.parse_args(argv)
