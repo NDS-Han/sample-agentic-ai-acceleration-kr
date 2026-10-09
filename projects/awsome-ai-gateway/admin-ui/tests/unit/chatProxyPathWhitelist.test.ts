@@ -81,6 +81,14 @@ describe('chat-proxy path whitelist', () => {
       ['admin', 'chat', 'x%25y'],
       ['admin', 'chat', 'a\\b'],
       ['admin', 'chat', ''],
+      // R4A1-1: Next.js 가 `%2f` 를 세그먼트 "내부"의 `/` 로 디코딩해 전달한다.
+      // `..%2finternal` → `../internal` — join('/') 이 되살려 경로 구분자로
+      // 부활하므로 세그먼트 내 슬래시는 거절한다.
+      ['admin', 'chat', '../internal', 'cache', 'retry'],
+      ['admin', 'chat', 'foo/bar'],
+      // URL 정규화 탈출을 한 번 더 막는 심층방어(buildTargetUrl)의 먹이:
+      // 세그먼트 검사를 통과해도 결과 경로가 /admin/chat/ 밖이면 400.
+      ['admin', 'chat', '..', 'users'],
     ];
     for (const parts of cases) {
       const res = await GET(makeReq(parts.join('/')), param(...parts));

@@ -76,6 +76,14 @@ spec:
                   name: {{ include "llm-gateway.fullname" . }}-app
                   key: internal_api_token
                   optional: true
+            # /webhooks/git GitHub 서명 검증용(R4-A1-2). app Secret 의
+            # github_webhook_secret 키 — optional: 없으면 엔드포인트 fail-closed.
+            - name: GITHUB_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "llm-gateway.fullname" . }}-app
+                  key: github_webhook_secret
+                  optional: true
             {{- range $key, $value := .Values.adminApi.env }}
             - name: {{ $key }}
               value: {{ $value | quote }}

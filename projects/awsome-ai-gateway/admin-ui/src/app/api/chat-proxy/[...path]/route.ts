@@ -44,15 +44,36 @@ function isAllowedPath(pathParts: string[]): boolean {
   if (pathParts.length < 3) return false;
   if (pathParts[0] !== 'admin' || pathParts[1] !== 'chat') return false;
   // 세그먼트 디코딩 후에도 위험 문자가 남으면 거절 — `..`, `.`, 빈 세그먼트,
-  // 이중 인코딩(`%`), 백슬래시. 슬래시는 catch-all 분할로 이미 나뉜다.
+  // 이중 인코딩(`%`), 백슬래시.
+  // R4: 슬래시도 거절 — Next.js 는 `%2f` 를 세그먼트 "내부"의 `/` 로
+  // 디코딩하므로(예: `..%2finternal` → 세그먼트 `../internal`), 세그먼트 안
+  // 슬래시는 join('/') 이 되살리면서 실제 경로 구분자로 부활한다.
   return pathParts.every(
     (seg) =>
       seg !== '' &&
       seg !== '.' &&
       seg !== '..' &&
       !seg.includes('%') &&
-      !seg.includes('\\'),
+      !seg.includes('\\') &&
+      !seg.includes('/'),
   );
+}
+
+/**
+ * 조립된 upstream URL 을 정규화한 뒤 `/admin/chat/` 아래인지 재확인(R4
+ * 심층방어). 세그먼트 검사가 우회되더라도 URL 의 `..` 정규화로 탈출한
+ * 경로는 여기서 걸린다. 실패하면 null → 400.
+ */
+function buildTargetUrl(pathParts: string[], search: string): URL | null {
+  try {
+    const url = new URL(
+      `${ADMIN_API_URL}/${pathParts.join('/')}${search}`,
+    );
+    if (!url.pathname.startsWith('/admin/chat/')) return null;
+    return url;
+  } catch {
+    return null;
+  }
 }
 
 async function forward(req: NextRequest, pathParts: string[]): Promise<Response> {
@@ -64,7 +85,14 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
   }
   const jwt = cookies().get('admin_jwt')?.value;
   const search = req.nextUrl.search || '';
-  const target = `${ADMIN_API_URL}/${pathParts.join('/')}${search}`;
+  const targetUrl = buildTargetUrl(pathParts, search);
+  if (!targetUrl) {
+    return Response.json(
+      { error: 'chat-proxy path not allowed' },
+      { status: 400 },
+    );
+  }
+  const target = targetUrl.toString();
 
   const headers: Record<string, string> = {
     'Content-Type': req.headers.get('content-type') || 'application/json',

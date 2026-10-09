@@ -48,6 +48,7 @@ class Settings(BaseSettings):
 
     @field_validator(
         "ALLOWED_STS_REGIONS", "ALLOWED_IAM_ROLES", "ADMIN_EMAILS", "ADMIN_GROUPS",
+        "CORS_ALLOW_ORIGINS",
         mode="before",
     )
     @classmethod
@@ -94,7 +95,7 @@ class Settings(BaseSettings):
     # credentialed fetch 가 허용돼 절대 기본값으로 열지 않는다. 로컬 개발에서
     # localhost:3000 → localhost:8080 직접 호출이 필요할 때만 채운다
     # (admin-ui 는 /api/* 자체 프록시로 same-origin 접근하므로 배포 환경은 불필요).
-    CORS_ALLOW_ORIGINS: list[str] = []
+    CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
 
     # ── Internal endpoints (/internal/*) ──
     # ⚠️ 공유 시크릿 게이트. admin-api 는 ALB 로 전 경로가 공개 노출되므로
@@ -103,6 +104,11 @@ class Settings(BaseSettings):
     #    이 값이 비어 있으면 해당 엔드포인트는 항상 403(fail-closed). 배포 환경은
     #    `<release>-app` Secret 의 `internal_api_token` 키로 주입한다.
     INTERNAL_API_TOKEN: str = ""
+
+    # GitHub webhook 수신 검증용 공유 시크릿(`/webhooks/git` 의
+    # `X-Hub-Signature-256` HMAC). 미설정이면 그 엔드포인트는 403(fail-closed) —
+    # 서명 없는 수신 경로를 공개 ALB 에 열어두면 git_events 가 위조 적재된다.
+    GITHUB_WEBHOOK_SECRET: str = ""
 
     # ── Database (PostgreSQL) ──
     DATABASE_URL: str = "postgresql+asyncpg://admin_api_user:changeme@localhost:5432/ds_gateway"

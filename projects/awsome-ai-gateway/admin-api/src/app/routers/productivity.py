@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import uuid
 from datetime import datetime, timezone
 
@@ -11,10 +13,34 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
+from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.usage import GitEvent, GitEventType, ProductivityEvent, ProductivityEventType
+from app.routers.internal import _require_internal_token
 
 router = APIRouter(tags=["Productivity"])
+
+
+async def _verify_github_signature(request: Request) -> None:
+    """GitHub webhook HMAC 검증 (`X-Hub-Signature-256`).
+
+    `/webhooks/git` 는 GitHub→admin-api 수신 경로라 `admin_jwt`/`X-Internal-Token`
+    를 달 수 없다 — 대신 GitHub 가 webhook secret 으로 서명한 바디 해시를 검증한다.
+    `GITHUB_WEBHOOK_SECRET` 미설정이면 403(fail-closed) — 공개 ALB 에 서명 없는
+    수신 엔드포인트를 열어두면 임의 git_event 가 위조 적재된다(R4-A1-2).
+    `await request.body()` 는 Starlette 가 캐시하므로 핸들러의 `request.json()`
+    에는 영향 없다.
+    """
+    secret = get_settings().GITHUB_WEBHOOK_SECRET
+    if not secret:
+        raise HTTPException(
+            status_code=403, detail="Webhook disabled (no secret configured)"
+        )
+    body = await request.body()
+    signature = request.headers.get("x-hub-signature-256", "")
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(status_code=403, detail="Invalid webhook signature")
 
 
 # ── Schemas ──
@@ -41,7 +67,9 @@ class GitWebhookPayload(BaseModel):
 # ── POST /internal/productivity ──
 
 
-@router.post("/internal/productivity")
+@router.post(
+    "/internal/productivity", dependencies=[Depends(_require_internal_token)]
+)
 async def record_productivity_event(
     request: Request,
     body: ProductivityEventRequest,
@@ -122,7 +150,7 @@ async def record_productivity_event(
 # ── POST /webhooks/git ──
 
 
-@router.post("/webhooks/git")
+@router.post("/webhooks/git", dependencies=[Depends(_verify_github_signature)])
 async def receive_git_webhook(
     request: Request,
     session: AsyncSession = Depends(get_db_session),
