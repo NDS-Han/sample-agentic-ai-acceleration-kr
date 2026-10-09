@@ -80,8 +80,8 @@ def _aws_account_id(existing: str = "") -> str:
         if r.returncode == 0 and acct.isdigit():
             console.print(f"  [cyan]ⓘ aws.account_id 를 sts 로 조회했습니다: {acct}")
             return acct
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        pass
+    except (OSError, subprocess.TimeoutExpired):
+        pass  # FileNotFoundError(미설치)/PermissionError(실행불가) 등 — sts 조회는 선택사항
     return ""
 
 
