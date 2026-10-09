@@ -4,17 +4,19 @@
 기존 `docs/us-llm-gateway/` 는 특정 사이트(US, us-west-2, 단일 AWS 계정 구조)에
 고정된 운영 문서이고, 이 디렉토리의 절차는 리전·계정·규모에 관계없이 동작합니다.
 
-## 핵심 개념 — 세 개의 명령
+## 핵심 개념 — 명령 흐름
 
 ```
-./deploy init      →  대화형으로 gateway.yaml 생성 (배포의 source of truth)
-./deploy render    →  배포 대상에 맞는 산출물 생성
-./deploy doctor    →  배포 상태·드리프트 점검 (업데이트 전후에도 사용)
+./deploy init       →  대화형으로 gateway.yaml 생성 (배포의 source of truth)
+./deploy configure  →  기존 설정을 기본값으로 항목별 재확인 → 배포까지 이어짐
+./deploy render     →  배포 대상에 맞는 산출물 생성
+./deploy apply      →  plan 미리보기 → 확인 → 실제 적용 (--plan = 미리보기만)
+./deploy doctor     →  배포 상태·드리프트 점검, --capture = 기존 배포 역생성
 ```
 
-모든 설정은 **`deployment/gateway.yaml` 한 파일**에 있습니다. 변경은 이 파일을
-고치고 다시 render/apply 하는 것 — 환경별로 스크립트를 찾아 실행하는 방식이
-아닙니다.
+모든 설정은 **`deployment/gateway.yaml` 한 파일**에 있습니다. 변경은
+`./deploy configure`(항목별 확인 마법사) 또는 파일 직접 편집 후 render/apply —
+환경별로 스크립트를 찾아 실행하는 방식이 아닙니다.
 
 > 이 디렉토리는 배포 도구도 함께 담고 있습니다 — `deploy.sh` (실행 진입점),
 > `deploy/` (파이썬 패키지). 루트의 `./deploy` 는 `docs/NDS/deploy.sh` 로

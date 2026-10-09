@@ -20,6 +20,7 @@ ElastiCache·Cognito·IRSA·ESO 같은 인프라는 기존 terraform env 가 계
 # → deployment/gateway.captured-dev.yaml
 
 vi deployment/gateway.captured-dev.yaml   # notes 의 빈칸 채우기
+#   (대화형이 나으면: ./deploy configure --config deployment/gateway.captured-dev.yaml --no-apply)
 ./deploy validate --config deployment/gateway.captured-dev.yaml
 mv deployment/gateway.captured-dev.yaml deployment/gateway.yaml
 ```
@@ -34,6 +35,13 @@ capture notes 가 알려주는 주의점:
   `gateway-dev.*` 패턴과 다르면 URL 이 바뀌니 확인하세요.
 
 ## 2. 업데이트 — 변경 반영
+
+```bash
+./deploy configure   # 현재 설정을 기본값으로 항목별 확인 → 끝에서 "지금 배포?" y
+                     # → render → plan → 확인 → apply 까지 자동 연결
+```
+
+또는 파일 직접 편집 경로:
 
 ```bash
 vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로

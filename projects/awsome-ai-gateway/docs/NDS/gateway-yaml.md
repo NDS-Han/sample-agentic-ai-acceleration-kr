@@ -1,8 +1,9 @@
 # gateway.yaml 설정 설명서
 
 `deployment/gateway.yaml` 은 배포의 **유일한 설정 원본**입니다. 이 파일을 고치고
-`./deploy render`(compose) 또는 해당 백엔드 apply 를 실행하는 것이 모든 변경의
-표준 경로입니다.
+`./deploy apply`(plan 미리보기 → 확인 → 적용)를 실행하는 것이 모든 변경의
+표준 경로입니다. 직접 편집 대신 `./deploy configure` 로 현재 값을 기본값으로
+항목을 하나씩 확인하며 바꿀 수도 있습니다.
 
 ## 전체 구조
 

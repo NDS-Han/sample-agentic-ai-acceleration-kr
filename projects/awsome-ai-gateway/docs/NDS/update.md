@@ -52,11 +52,21 @@ ESO/Fargate/RDS Proxy 등 eks 고유 구성도 notes 에 기록됩니다 — 캡
 
 ## 일반 업데이트 (기능 on/off, 설정 변경)
 
+가장 쉬운 경로 — 현재 설정을 기본값으로 항목을 다시 물어보는 마법사:
+
+```bash
+./deploy configure     # 항목별 확인(Enter=유지) → 저장 → "지금 배포?" y
+                       # → render → plan 미리보기 → 확인 → apply 까지 자동 연결
+./deploy doctor        # ✓ 확인
+```
+
+파일을 직접 고치는 경로도 그대로 지원합니다:
+
 ```bash
 vi deployment/gateway.yaml        # 변경
 ./deploy validate                 # 검증
-./deploy render                   # 산출물 재생성 — 시크릿은 보존됨
-docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/docker-compose.yml up -d --build
+./deploy apply --plan             # 변경 미리보기 (아무것도 안 바뀜)
+./deploy apply                    # 확인 → 실제 적용
 ./deploy doctor                   # ✓ 확인
 ```
 
