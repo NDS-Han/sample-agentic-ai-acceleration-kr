@@ -15,6 +15,27 @@
 
 📋 용어: **마이그레이션** = DB 스키마를 한 단계씩 바꾸는 번호 붙은 스크립트(`db/versions/0034_….py` 식). 이번 배포는 0026~0036 의 11개가 `install-eks.sh` 안에서 순서대로 돈다. 아래의 0032·0034 같은 번호는 그 파일 번호다.
 
+## US-18 로 따라 할 때 달라지는 것
+
+2026-10 의 US-18 도 이 문서 순서 그대로다. 다른 점만:
+
+- ② `15`·`17` 은 `nothing to do` 가 정상. `14 --save pre` 의 `XX` 는 스키마(0036)·Sonnet 5.5 단가 2개면 정상.
+- ③ 스냅샷 이름은 `…-pre-us18-<날짜>` — `SNAP=` 줄의 `pre-sync` 를 `pre-us18` 로 바꿔 친다.
+- ④ 기대 = `No changes.`(인프라 변경 없음). 무언가 나오면 apply 하지 않고 멈춘다.
+- ⑤ `<- change` 5행 — migration·gateway-proxy·admin-api·admin-ui·cost-recorder-worker. notification-worker 는 그대로.
+- ⑥ 루프에서 `notification-worker` 를 뺀다(같은 태그로 다시 빌드하면 옛 이미지가 덮인다) — 아래 명령을 ⑥ 대신 친다.
+- ⑦ 마이그레이션은 0037~0039 의 3개(열 추가뿐).
+- ⑧ `08` 차이 표에 `claude-sonnet-5-5` 캐시 읽기 `0.000220 → 0.000110` 한 줄.
+- ⑨ 표에 더 확인할 것 3가지 — 스키마 `0039` · 예산 알림 기준(관리 화면에서 예산 하나의 임계값을 50 으로 저장 → 6분 뒤 다시 열어 50 그대로) · 분석 화면(30초 안에 두 번 열어 둘 다 정상, 앱 필터를 바꾸면 숫자가 바뀜).
+- **단가만 먼저**: ① → ⑧ 만(이미지·DB 변경 없음, 5분). 나머지는 나중에 처음부터.
+
+▶ 실행 — ⑥ 대신(US-18)
+```bash
+cd ~/awsome-ai-gateway
+for s in migration gateway-proxy admin-api admin-ui cost-recorder-worker; do
+  ./deployment/scripts/rebuild-image.sh $s dev || break; done
+```
+
 ## ① 저장소 최신화 — [README §3 ①](../README.md#3-적용하기-배포-ec2-에서) 그대로
 
 ▶ 실행

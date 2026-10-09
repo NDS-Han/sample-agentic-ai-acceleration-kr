@@ -16,7 +16,7 @@
 | ID | 절 | 언제 | 문서 |
 |---|---|---|---|
 | §8-U | 업데이트 (코드 변경 반영) | 코드·차트·terraform 이 바뀔 때마다 | [ops/8-U-update.md](ops/8-U-update.md) |
-| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
+| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 (US-10 · US-18) | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
 | §8-M | 모델 추가와 교체 | 모델 추가·교체 | [ops/8-M-models.md](ops/8-M-models.md) |
 | §8-R | 모델 단가 맞추기 (AWS 실제 청구와 같게) | 단가가 바뀔 때마다 · upstream 동기화 직후 (US-11) | [ops/8-R-pricing.md](ops/8-R-pricing.md) |
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |

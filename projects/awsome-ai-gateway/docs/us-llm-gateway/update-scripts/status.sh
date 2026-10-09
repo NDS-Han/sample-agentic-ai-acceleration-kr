@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # status.sh — which updates this gateway has applied
 #
-# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15 and US-16 as
+# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15, US-16 and US-18 as
 #       applied, partially applied, or not applied, and print the next command
 #       for each. Every other US-NN gets a `--` line that says where it is
 #       checked instead (another account, the employee PC, 14-postdeploy-check.sh),
@@ -91,8 +91,12 @@ SELECT 'S55=' || status || '|' || coalesce(provider_model_id, '') FROM model.mod
 SELECT 'S55P=' || count(*) FROM model.model_pricings
  WHERE model_alias='claude-sonnet-5-5' AND effective_until IS NULL;
 SELECT 'OLD=' || count(*) FROM model.model_aliases
- WHERE alias IN ('claude-opus-5','claude-sonnet-5','claude-opus-4-8') AND status='ACTIVE';" 2>&1)
-  US02_OUT="$out"   # probe_us13/us16 read their markers from the same query (one psql pod)
+ WHERE alias IN ('claude-opus-5','claude-sonnet-5','claude-opus-4-8') AND status='ACTIVE';
+SELECT 'ALEMBIC=' || version_num FROM public.alembic_version;
+SELECT 'S55CR=' || cache_read_price_per_1k_tokens FROM model.model_pricings
+ WHERE model_alias='claude-sonnet-5-5' AND effective_until IS NULL
+ ORDER BY effective_from DESC LIMIT 1;" 2>&1)
+  US02_OUT="$out"   # probe_us13/us16/us18 read their markers from the same query (one psql pod)
 
   routing=$(grep -o 'ROUTING=[a-z]*' <<<"$out" | head -1 | cut -d= -f2)
   alias_n=$(grep -o 'ALIAS=[0-9]*'   <<<"$out" | head -1 | cut -d= -f2)
@@ -492,6 +496,39 @@ probe_us16() {
   fi
 }
 
+# ── US-18 — budget/cost/permission fixes (required; part of a fresh install) ──
+# Same query as US-13. Applied = schema at 0039 or later (upstream 0037-0039 come
+# with the new images, ops/8-D-upstream-sync.md) AND, when Sonnet 5.5 is
+# registered, its open cache-read price equals pricing.tsv (Bedrock cut it 50%
+# from 2026-10-07). The price step can run before the images, so "schema old,
+# price new" and "schema new, price old" are both normal in-between states.
+probe_us18() {
+  local head s55cr want="" a in out c5m c1h cread asof src
+  if ! grep -q 'ALEMBIC=' <<<"${US02_OUT:-}"; then
+    row warn "US-18" "예산·비용·권한 결함 수정 — 판정 불가"
+    detail "DB 조회 결과가 없습니다 (US-02 줄 참조)"
+    return
+  fi
+  head=$(grep -o 'ALEMBIC=[0-9]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  s55cr=$(grep -o 'S55CR=[0-9.]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  while IFS=$'\t' read -r a in out c5m c1h cread asof src; do
+    [ "$a" = claude-sonnet-5-5 ] && want=$cread
+  done < "$LIB_DIR/pricing.tsv"
+  if [ -z "$head" ] || [ "$((10#$head))" -lt 39 ]; then
+    row bad "US-18" "예산·비용·권한 결함 수정 — 미적용 (필수)"
+    detail "DB 스키마 ${head:-?} (0039 필요) — 절차는 ops/8-D-upstream-sync.md 「US-18 로 따라 할 때」"
+    TODO+=("(수동) docs/us-llm-gateway/ops/8-D-upstream-sync.md — US-18 (이미지 5개 + DB 0037~0039 + 단가 08)")
+  elif [ -n "$s55cr" ] && [ -n "$want" ] && \
+       ! awk -v a="$s55cr" -v b="$want" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+    row warn "US-18" "예산·비용·권한 결함 수정 — 부분 적용 (Sonnet 5.5 단가)"
+    detail "DB 스키마 $head · claude-sonnet-5-5 캐시 읽기 $s55cr (pricing.tsv $want)"
+    TODO+=("bash 08-set-model-pricing.sh --alias claude-sonnet-5-5 --apply")
+  else
+    row ok "US-18" "예산·비용·권한 결함 수정"
+    detail "DB 스키마 $head${s55cr:+ · claude-sonnet-5-5 캐시 읽기 $s55cr}"
+  fi
+}
+
 # ── Items this script does not judge — listed so nothing reads as "applied" by
 #    omission. Each line says where the real check is.
 info_us08() {
@@ -535,6 +572,7 @@ info_rows "US-14" "Claude Code Windows 설치 파일 — 직원 PC 쪽 (이 스�
   "설치 여부는 직원 PC 에서 — claude-code/installer/cc-installer-admin-e2e-windows.md"
 probe_us15
 probe_us16
+probe_us18
 
 echo
 if [ "${#TODO[@]}" -eq 0 ]; then
