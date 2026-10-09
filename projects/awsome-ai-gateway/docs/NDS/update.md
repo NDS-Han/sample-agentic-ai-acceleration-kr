@@ -166,11 +166,12 @@ private 에서도 NAT 는 유지됩니다(ECR pull·Bedrock 호출 경로).
 |---|---|---|
 | **compose** | 컨테이너 + 네트워크. `--purge` 시 볼륨까지 (**DB 데이터 영구 삭제**) | 볼륨(기본), `gen/<env>/` 산출물(.env 시크릿 포함), 빌드된 이미지 |
 | **ecs** | terraform이 만든 전부 — VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR(repo+이미지) | `deployment/gen/` 산출물, terraform state backend(수동 관리) |
-| **eks** | helm release(앱 전체)만 | **인프라 전부** — EKS 클러스터·Aurora·ElastiCache·Cognito·Secrets·IRSA는 terraform env 소유. 인프라 삭제는 그 디렉토리에서 `terraform destroy` |
+| **eks** | helm release(앱 전체). `--infra` 시 terraform env 인프라까지 | `--infra` 없이: **인프라 전부**(EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA). `--infra` 사용 시: state backend, Secrets 복구 유예기간, 수동 생성 리소스 |
 
 ```bash
 ./deploy teardown                    # 삭제 대상 미리보기 → 환경 이름 입력 → 삭제
 ./deploy teardown --purge            # compose: 볼륨(DB)까지 삭제
+./deploy teardown --infra            # eks: helm 앱 + terraform env 인프라 전부 삭제
 ./deploy teardown --yes              # 비대화형 (CI) — 확인 생략, 주의
 ./deploy teardown --context <ctx>    # eks: 대상 클러스터 명시
 ```
@@ -181,7 +182,15 @@ private 에서도 NAT 는 유지됩니다(ECR pull·Bedrock 호출 경로).
   destroy를 막으므로, CLI가 해제 apply 후 destroy합니다. **최종 스냅샷 없이
   완전 삭제**됩니다 — 보존이 필요하면 먼저
   `aws rds create-db-cluster-snapshot`으로 수동 스냅샷을 만드세요.
-- **eks**: helm uninstall은 앱만 지웁니다. namespace에 남은 secret/pvc
-  잔여물과 인프라는 각각 kubectl/terraform으로 정리해야 합니다.
+- **eks**: 기본은 helm uninstall만 — 앱만 지웁니다. `--infra`를 붙이면
+  `deploy.yaml`의 `env_dir`이 가리키는 terraform env에서
+  `plan -destroy` 미리보기 → 확인 후 `destroy`로 **인프라 전체**(EKS 클러스터·
+  Aurora·ElastiCache·Cognito·Secrets·VPC·IRSA·ALB controller)를 지웁니다.
+  앱을 먼저 내린 뒤 인프라를 지우므로 ALB controller가 만든 리소스가 정리됩니다.
+  - `environment=prod` 또는 provisioned DB는 Aurora deletion protection이
+    destroy를 막습니다 — env 디렉토리의 설정으로 먼저 해제하세요.
+  - 이미 helm release를 수동으로 지운 상태라도 `--infra`는 동작합니다
+    (release가 없으면 helm 단계를 자동으로 건너뜁니다).
+  - terraform state backend와 수동 생성 리소스는 지워지지 않습니다.
 - **공통**: teardown은 `VIRTUAL_KEY_ENCRYPTION_KEY` 백업을 하지 않습니다 —
   삭제 전 `.env`(compose) 또는 Secrets Manager 값을 별도 보관하세요.

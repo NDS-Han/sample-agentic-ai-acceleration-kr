@@ -647,21 +647,56 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     from . import eks_apply
     context = getattr(args, "context", "") or ""
     meta = eks_apply.load_meta(GEN_ROOT / cfg.env / "eks", REPO_ROOT)
-    console.print(Panel(
-        f"삭제: helm release '{meta['release']}' (ns={meta['namespace']}) — "
-        "게이트웨이 앱 전체\n"
-        f"[yellow]남는 것: EKS 클러스터·Aurora·ElastiCache·Cognito·Secrets·VPC·"
-        f"IRSA 등 인프라 전부 — terraform env({meta.get('env_dir', '?')})가 소유. "
-        "인프라까지 지우려면 그 디렉토리에서 terraform destroy 하십시오.\n"
-        "참고: uninstall 후 ns 에 k8s secrets/pvc 잔여물이 남을 수 있습니다.",
-        title=f"teardown — {cfg.env} (eks)", expand=False))
+    infra = getattr(args, "infra", False)
+    env_dir = REPO_ROOT / meta["env_dir"] if meta.get("env_dir") else None
+    if infra and (not env_dir or not env_dir.is_dir()):
+        console.print(f"[red]terraform env 디렉토리가 없습니다: "
+                      f"{meta.get('env_dir') or '(deploy.yaml 에 미기록)'} — "
+                      "인프라 삭제는 해당 env 디렉토리에서 terraform destroy 하십시오")
+        return 1
+
+    lines = [f"삭제: helm release '{meta['release']}' (ns={meta['namespace']}) — 게이트웨이 앱"]
+    if infra:
+        lines.append(
+            f"[red]+ 인프라 — terraform destroy {meta['env_dir']}:\n"
+            "    EKS 클러스터·Aurora·ElastiCache·Cognito·Secrets Manager·VPC·"
+            "IRSA·ALB controller 전부[/red]\n"
+            "    ⚠️ Aurora deletion protection(prod/provisioned)이 켜져 있으면 destroy 가 "
+            "실패합니다 — env 디렉토리 설정으로 먼저 해제하세요. 최종 스냅샷 여부도 그쪽이 결정합니다.\n"
+            "남는 것: terraform state backend, Secrets 복구 유예기간(~7일), 수동 생성 리소스")
+    else:
+        lines.append(
+            f"[yellow]남는 것: 인프라 전부 (EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA) — "
+            f"terraform env({meta.get('env_dir', '?')}) 소유. 함께 지우려면 --infra[/yellow]\n"
+            "참고: uninstall 후 ns 에 k8s secrets/pvc 잔여물이 남을 수 있습니다.")
+    console.print(Panel("\n".join(lines),
+                        title=f"teardown — {cfg.env} (eks)", expand=False))
+
+    if infra:
+        # 삭제 대상을 먼저 보여준다 (read-only)
+        eks_apply._run(["terraform", "init", "-input=false", "-reconfigure"], cwd=env_dir)
+        console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
+        eks_apply._run(["terraform", "plan", "-destroy", "-input=false"], cwd=env_dir)
+
     if not _confirm_destroy(cfg.env, args):
         return 130
-    argv = ["helm", "uninstall", meta["release"], "-n", meta["namespace"], "--wait"]
-    if context:
-        argv += ["--kube-context", context]
-    eks_apply._run(argv, cwd=REPO_ROOT)
-    console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 (위 참조)")
+
+    ctx_args = ["--kube-context", context] if context else []
+    r = eks_apply._run_quiet(
+        ["helm", "status", meta["release"], "-n", meta["namespace"], *ctx_args],
+        cwd=REPO_ROOT)
+    if r.returncode == 0:
+        # 앱을 먼저 내려야 ALB controller 가 만든 ALB/타겟그룹이 정리되고
+        # --infra 의 VPC destroy 가 의존성에 막히지 않는다
+        eks_apply._run(["helm", "uninstall", meta["release"], "-n",
+                        meta["namespace"], "--wait", *ctx_args], cwd=REPO_ROOT)
+    else:
+        console.print("ⓘ release 가 없습니다 — helm 단계 생략")
+    if not infra:
+        console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 (--infra 로 함께 삭제 가능)")
+        return 0
+    eks_apply._run(["terraform", "destroy", "-auto-approve", "-input=false"], cwd=env_dir)
+    console.print("[green]teardown 완료 — helm release 와 terraform env 인프라가 삭제됐습니다")
     return 0
 
 
@@ -948,6 +983,8 @@ def main(argv=None) -> int:
                     help="확인 생략 (CI/스크립트용 — 주의)")
     sp.add_argument("--purge", action="store_true",
                     help="compose: 볼륨까지 삭제 — postgres DB 데이터 영구 삭제")
+    sp.add_argument("--infra", action="store_true",
+                    help="eks: terraform env 의 인프라까지 삭제 (EKS·Aurora·VPC 등 전부)")
     sp.add_argument("--context", default="", help="eks backend: kubeconfig context")
     sp.set_defaults(fn=cmd_teardown)
 
