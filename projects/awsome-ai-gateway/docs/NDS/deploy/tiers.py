@@ -49,11 +49,14 @@ TIERS: dict[str, TierPreset] = {
     ),
     "t2": TierPreset(
         name="t2",
-        label="표준 — Multi-AZ, replica 캐시",
+        # Multi-AZ 는 NAT·캐시·task 에만 적용 — Aurora serverless 모듈은
+        # instance_count=1 이라 DB 는 단일 writer 이다 (multi_az 키를 두지 않는다:
+        # render 가 읽는 값만 둬서 "정의된 것과 실제" 가 어긋나지 않게)
+        label="표준 — NAT/캐시/task Multi-AZ (DB는 serverless 단일 writer)",
         users="300~1000명",
         backend="ecs",
         db_mode="rds-serverless",
-        db_spec={"engine": "aurora-postgresql", "min_acu": 1.0, "max_acu": 16.0, "multi_az": True},
+        db_spec={"engine": "aurora-postgresql", "min_acu": 1.0, "max_acu": 16.0},
         cache_mode="elasticache-ha",
         cache_spec={"node_type": "cache.t4g.medium", "replicas": 1},
         compute_spec={"tasks_per_service": 2, "gateway_tasks": 4},

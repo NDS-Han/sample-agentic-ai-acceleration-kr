@@ -127,6 +127,17 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     if not env.get("VIRTUAL_KEY_ENCRYPTION_KEY"):
         notes.append(".env 에 VIRTUAL_KEY_ENCRYPTION_KEY 가 없습니다 — VK DEK 유실 시 발급 키 전부 무효")
 
+    # 이 산출물이 gen/<env> 아래가 아니면(수작업 배포) 채택 시 새 .env 가 생성되고
+    # compose 프로젝트명(llm-gateway-<env>)이 달라져 볼륨이 새로 만들어진다 —
+    # 기존 DB 데이터와 VK 가 이어지지 않는다. 채택 절차에 반드시 안내해야 한다.
+    if out_dir.resolve().name != env_name or "gen" not in out_dir.resolve().parts:
+        notes.append(
+            f"⚠️ 수작업 배포를 채택하면 새 프로젝트(llm-gateway-{env_name})와 "
+            f"새 볼륨으로 뜹니다 — 기존 DB 데이터·시크릿이 이어지지 않습니다. "
+            f"채택 전에 ① 기존 .env 를 deployment/gen/{env_name}/.env 로 복사하고 "
+            f"② 기존 볼륨(<old-project>_pgdata)을 옮기거나 DB 덤프로 이관하세요 "
+            f"(update.md '수작업 compose 온보딩' 절).")
+
     doc = {
         "version": 1,
         "env": env_name,

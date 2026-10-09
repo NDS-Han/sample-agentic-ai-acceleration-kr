@@ -25,8 +25,8 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
 
 ### 비용 감각 (목표치, 실제는 사용량 의존)
 
-- t1: ~$200/월 — Fargate 6서비스 + ALB + NAT 1 + Aurora Serverless v2(0.5~4 ACU) + Valkey 단일노드
-- t2: ~$500/월 — Multi-AZ, NAT 2, Valkey replica, task 수 2배
+- t1: ~$200/월 — Fargate 6서비스 + ALB + NAT 1 + Aurora Serverless v2(1~4 ACU) + Valkey 단일노드
+- t2: ~$500/월 — NAT·캐시(replica)·task Multi-AZ, task 수 2배. **DB는 Aurora Serverless 단일 writer** — Multi-AZ 아님
 
 ## 1. 저장소와 gateway.yaml
 

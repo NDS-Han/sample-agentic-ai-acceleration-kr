@@ -146,6 +146,9 @@ class GatewayConfig:
             )
         if self.features.web_search and self.deploy.target == "compose":
             w.append("web_search 는 AgentCore(us-east-1) 의존 — compose 경로에서는 수동 프로비저닝이 필요합니다.")
+        if self.deploy.target == "eks":
+            w.append("size_tier 는 eks 경로에서 실제 리소스를 바꾸지 않습니다 — "
+                     "컴퓨트 크기는 차트 values/HPA/requests 가 결정합니다 (기존 인프라 이어받기 모델).")
         if self.deploy.target == "eks" and not self.images.registry:
             w.append("images.registry 비어 있음 — apply 시 계정 기본 ECR 로 추론합니다.")
         if self.deploy.target not in IMPLEMENTED_TARGETS:

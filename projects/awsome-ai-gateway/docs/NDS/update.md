@@ -35,6 +35,29 @@ mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 > `zone_id`/`allowed_cidrs`/`tfstate_*` — 파일 끝의 `# capture notes` 를
 > 확인하고 직접 채우세요.
 
+### 수작업 compose 배포 온보딩 — 데이터 이관 주의
+
+`--gen-dir`이 `deployment/gen/<env>` 밖(예: 수작업으로 `docker compose up` 한
+디렉토리)을 가리키면, 채택 후 `apply`는 **새 compose 프로젝트**(`llm-gateway-<env>`)와
+**새 볼륨**으로 기동합니다 — 기존 DB 데이터와 `.env` 시크릿이 **이어지지 않습니다**.
+같은 호스트에서 기존 스택이 떠 있으면 포트 충돌로 실패합니다.
+
+데이터를 이어가려면 apply 전에:
+
+```bash
+# 1. 시크릿 보존 — 기존 .env 를 새 gen 디렉토리로 (render 가 기존 키를 보존)
+./deploy render --config deployment/gateway.yaml   # gen/<env>/ 먼저 생성
+cp <기존 디렉토리>/.env deployment/gen/<env>/.env
+
+# 2. DB 데이터 이관 — 볼륨명이 프로젝트에 붙는다 (<old-project>_pgdata)
+docker run --rm -v <old-project>_pgdata:/from -v llm-gateway-<env>_pgdata:/to \
+  alpine sh -c 'cp -a /from/. /to/'
+#   (기존 스택을 내린 뒤 실행 — 쓰기 중 복사는 손상될 수 있음)
+```
+
+그래도 `VIRTUAL_KEY_ENCRYPTION_KEY`가 바뀌면 발급된 Virtual Key는 전부 무효입니다 —
+.env의 이 키만큼은 반드시 옮기세요.
+
 **eks 캡처** — helm release 의 effective values + kubectl 라이브 상태를 읽습니다
 (kubeconfig 에 클러스터 접근이 필요):
 

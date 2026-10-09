@@ -67,6 +67,24 @@ def _load_config(args):
     return schema.load(path)
 
 
+def _aws_account_id(existing: str = "") -> str:
+    """기존 값 우선 — 없으면 aws sts 로 조회. 실패 시 "" (backend.hcl 이 placeholder 로 안내)."""
+    if existing:
+        return existing
+    import subprocess
+    try:
+        r = subprocess.run(["aws", "sts", "get-caller-identity",
+                            "--query", "Account", "--output", "text"],
+                           capture_output=True, text=True, timeout=15)
+        acct = r.stdout.strip()
+        if r.returncode == 0 and acct.isdigit():
+            console.print(f"  [cyan]ⓘ aws.account_id 를 sts 로 조회했습니다: {acct}")
+            return acct
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        pass
+    return ""
+
+
 def _g(d: dict, *path, default=""):
     cur = d or {}
     for p in path:
@@ -220,9 +238,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
         "version": 1,
         "env": env,
         "aws": {"region": region,
-                # account_id 는 질문하지 않지만 tfstate 추론에 쓰인다 — 보존
-                **({"account_id": str(_g(ex, "aws", "account_id"))}
-                   if _g(ex, "aws", "account_id") else {})},
+                # account_id 는 tfstate 추론에 쓰인다 — 기존 값 보존, 없으면
+                # ecs/eks 경로에서 aws sts 로 자동 조회 (없으면 비워두고
+                # backend.hcl 이 placeholder + 경고를 낸다)
+                **({"account_id": _aws_account_id(str(_g(ex, "aws", "account_id")))}
+                   if (_g(ex, "aws", "account_id") or target in ("ecs", "eks")) else {})},
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()]},
