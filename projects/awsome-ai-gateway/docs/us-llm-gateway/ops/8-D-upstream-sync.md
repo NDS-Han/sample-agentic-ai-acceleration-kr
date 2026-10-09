@@ -18,43 +18,11 @@
 
 ## US-18 로 따라 할 때 달라지는 것
 
-US-18 도 이 문서의 (1)부터 (9)까지 순서를 그대로 따릅니다. 이번 업데이트가 바꾸는 것은
-**이미지 5개 · DB 열 추가 3개(0037·0038·0039) · Sonnet 5.5 캐시 읽기 단가 1개**뿐입니다.
-아래 단계만 본문과 다르게 확인하거나 칩니다. 나머지 단계는 본문 그대로입니다.
+US-18 도 아래 (1)부터 (9)까지를 순서대로 따라 합니다. 이번 업데이트가 바꾸는 것은
+**이미지 5개 · DB 열 추가 3개(0037·0038·0039) · Sonnet 5.5 캐시 읽기 단가 1개**입니다.
+본문과 다른 점은 각 단계 맨 앞의 **US-18** 줄에 있습니다. prod 의 (10-1)부터 (10-9)까지도 같습니다.
 
-- **(2) 사전 점검** — `14-postdeploy-check.sh --save pre`(배포 전 상태를 기록해 두는
-  점검)에 실패 표시 `XX` 가 2개 나오면 정상입니다 — 스키마가 아직 `0036` 인 것과,
-  Sonnet 5.5 단가가 새 값과 다른 것. 둘 다 이번 업데이트가 고칩니다.
-- **(3) DB 스냅샷** — `SNAP=` 줄의 `pre-sync` 를 `pre-us18` 로 바꿔 칩니다
-  (예: `llm-gateway-dev-pre-us18-20261010`). 나중에 롤백할 때 이 이름으로 찾습니다.
-- **(4) terraform** — 이번에는 인프라 변경이 없어 `No changes.` 가 나와야 합니다.
-  다른 결과가 나오면 apply 하지 말고 멈춥니다.
-- **(5) 이미지 태그 올림** — `13-bump-image-tags.sh` 가 보여 주는 표에서 `<- change`
-  (태그가 바뀜)가 붙는 행은 5개입니다: migration · gateway-proxy · admin-api · admin-ui ·
-  cost-recorder-worker. notification-worker 는 바뀌지 않습니다.
-- **(6) 이미지 빌드** — 본문 명령 대신 아래 명령을 칩니다. notification-worker 를 빼고
-  5개만 빌드합니다. 태그가 그대로인 이미지를 다시 빌드하면 옛 이미지를 덮어써서,
-  문제가 생겼을 때 이전 이미지로 되돌릴 수 없기 때문입니다.
-- **(8) 단가** — `08-set-model-pricing.sh` 가 보여 주는 차이 표(DB 단가와 새 단가가 다른
-  행)에 한 줄만 나오면 정상입니다: `claude-sonnet-5-5` 캐시 읽기 `0.000220 → 0.000110`.
-- **(9) 사후 점검** — 본문 표의 스키마 기대값은 `0036` 이 아니라 `0039` 입니다.
-  그 밖에 두 가지를 더 확인합니다.
-  - 예산 알림 기준: 관리 화면에서 예산 하나의 임계값을 50 으로 저장하고,
-    6분 뒤 다시 열어도 50 이면 정상입니다(고치기 전에는 5분 뒤 80/90/100 으로 돌아갔습니다).
-  - 분석 화면: 30초 안에 두 번 열어도 둘 다 정상으로 보이고,
-    앱 필터를 바꾸면 숫자가 바뀌면 정상입니다.
-
-**단가만 급할 때** — (1) 저장소 최신화와 (8) 단가, 두 단계만 먼저 해도 됩니다
-(5분, 이미지·DB 는 그대로). 나머지는 나중에 (1) 부터 다시 합니다.
-
-▶ 실행 — (6) 대신 (US-18)
-```bash
-cd ~/awsome-ai-gateway
-for s in migration gateway-proxy admin-api admin-ui cost-recorder-worker; do
-  ./deployment/scripts/rebuild-image.sh $s dev || break; done
-```
-
-## (1) 저장소 최신화 — [README §3 ①](../README.md#3-적용하기-배포-ec2-에서) 그대로
+## (1) 저장소 최신화 — [README §3 의 「저장소 최신화」](../README.md#3-적용하기-배포-ec2-에서)와 같음
 
 ▶ 실행
 ```bash
@@ -70,6 +38,9 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 📋 참고: 이번 upstream 이 추가한 값(스트리밍 타임아웃·감사 로그 env)은 chart 기본값으로 충분하다. 단 **DB 마스터 비밀번호 참조 2줄**은 values 에 있어야 한다 — (2) 의 `15` 가 확인·삽입한다. 태그는 (5) 에서.
 
 ## (2) 사전 점검 · 설정 적용 — values 파일까지만, 15분
+
+> **US-18** — `14-postdeploy-check.sh --save pre` 의 `XX` 가 2개(스키마 `0036` · Sonnet 5.5 단가)면
+> 정상입니다. 둘 다 이번 업데이트가 고칩니다.
 
 ▶ 실행
 ```bash
@@ -92,6 +63,8 @@ bash 17-set-websearch-caps.sh --apply
 
 ## (3) DB 스냅샷 — 되돌리기의 기준점
 
+> **US-18** — `SNAP=` 줄의 `pre-sync` 를 `pre-us18` 로 바꿔 칩니다(롤백 때 이 이름으로 찾습니다).
+
 helm rollback 은 코드만 되돌린다. 마이그레이션 11개(0026~0036)는 되돌리지 않으므로 DB 는 이 스냅샷으로만 되돌린다(§롤백).
 
 ▶ 실행
@@ -106,6 +79,8 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 기대: `"creating"` → wait 가 조용히 끝남(수 분) → 마지막 줄 `llm-gateway-dev-pre-sync-<날짜>  available`. 이 이름을 §롤백에서 쓴다.
 
 ## (4) terraform — 드리프트 확인 후 apply
+
+> **US-18** — 인프라 변경이 없어 `No changes.` 가 나와야 합니다. 다른 결과면 apply 하지 말고 멈춥니다.
 
 ▶ 실행
 ```bash
@@ -133,6 +108,9 @@ terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 
 ## (5) 이미지 태그 올림 — 새 코드는 새 태그로
 
+> **US-18** — `<- change` 는 5행(migration · gateway-proxy · admin-api · admin-ui ·
+> cost-recorder-worker)입니다. notification-worker 는 바뀌지 않습니다.
+
 같은 태그로 rebuild 하면 옛 이미지가 덮여 helm rollback 이 무의미해진다. 표의 `template` 열이 기대값이다(숫자를 외우지 않는다).
 
 ▶ 실행
@@ -146,6 +124,14 @@ bash 13-bump-image-tags.sh dev --apply
 📋 참고(동기화 담당자용): upstream 이 코드를 바꾸고도 태그를 안 올린 서비스는 13 이 "변경 없음" 으로 본다. 리베이스 뒤 서비스마다 `git log <이전 배포 base>..HEAD -- <서비스 디렉터리>` 로 코드 변경을 보고, 변경됐는데 템플릿 태그가 그대로면 **fork 템플릿(dev·prod)에서 새 태그를 매긴 뒤** (5) 를 돈다. 같은 태그로 rebuild 하면 helm 이 변화를 못 봐 롤아웃이 없고(옛 코드 계속 실행) 옛 이미지만 덮인다(2026-09-15: notification-worker·cost-recorder-worker 가 그 경우). upstream 이 태그 이후 한 번도 빌드하지 않은 커밋은 우리가 첫 실행이 되므로 (9) 의 기능 확인을 생략하지 않는다(같은 날 admin-ui 미들웨어 500 이 그렇게 잡혔다).
 
 ## (6) 이미지 6개 빌드·push — 15분
+
+> **US-18** — 아래 본문 명령 대신 이 명령을 칩니다(notification-worker 를 빼고 5개만 —
+> 태그가 그대로인 이미지를 다시 빌드하면 옛 이미지를 덮어써 되돌릴 수 없습니다).
+> ```bash
+> cd ~/awsome-ai-gateway
+> for s in migration gateway-proxy admin-api admin-ui cost-recorder-worker; do
+>   ./deployment/scripts/rebuild-image.sh $s dev || break; done
+> ```
 
 ▶ 실행
 ```bash
@@ -171,6 +157,8 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 
 ## (8) 단가·시드 alias — 5분 + 캐시 5분
 
+> **US-18** — 차이 표에 `claude-sonnet-5-5` 캐시 읽기 `0.000220 → 0.000110` 한 줄이면 정상입니다.
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -182,6 +170,10 @@ bash 08-set-model-pricing.sh --apply
 admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthropic.claude-opus-5`·`…-sonnet-5`·`gpt-5.6-*`·`llama-3-70b`)는 **INACTIVE** 로 — US 가 서비스하지 않는다. (9) 의 14 가 남은 것을 알려준다.
 
 ## (9) 사후 점검 — 14 + 종단 1건, 그리고 24h
+
+> **US-18** — 아래 표의 스키마 기대값은 `0039` 입니다. 그 밖에 두 가지를 더 봅니다.
+> 예산 알림 기준(임계값을 50 으로 저장 → 6분 뒤 다시 열어도 50) · 분석 화면(30초 안에 두 번
+> 열어도 정상, 앱 필터를 바꾸면 숫자가 바뀜).
 
 ▶ 실행
 ```bash

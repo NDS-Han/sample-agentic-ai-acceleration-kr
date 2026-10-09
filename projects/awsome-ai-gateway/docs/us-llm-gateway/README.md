@@ -76,7 +76,7 @@ cmp -s $V ~/values.bak && echo "values restored OK" || echo "RESTORE FAILED"
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash status.sh
 ```
 
-**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md). **`US-10`·`US-11`**(upstream 대량 동기화 — 코드·스키마·단가 일괄)은 [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) 한 절차로 함께 적용한다 — prod 는 같은 문서 ⑩.
+**③ 미적용 항목만** 위 §2 표의 문서로. 상세 절차·함정·롤백은 [ops/8-U-update.md](ops/8-U-update.md). **`US-10`·`US-11`**(upstream 대량 동기화 — 코드·스키마·단가 일괄)은 [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) 한 절차로 함께 적용한다 — prod 는 같은 문서 (10).
 
 ---
 
