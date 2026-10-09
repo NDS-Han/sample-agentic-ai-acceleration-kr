@@ -43,6 +43,7 @@
 |---|---|
 | [install-compose.md](install-compose.md) | **t0 — 단일 호스트 설치** (검증 완료) |
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 설치** (권장 표준 경로) |
+| [install-eks.md](install-eks.md) | **t2/t3 — 기존 EKS 배포 온보딩·업데이트** |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [update.md](update.md) | 업데이트·롤백 절차 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |

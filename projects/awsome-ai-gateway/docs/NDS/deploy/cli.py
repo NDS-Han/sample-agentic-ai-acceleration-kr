@@ -242,6 +242,18 @@ def cmd_render(args) -> int:
             "  또는 ./deploy apply 가 이 절차를 실행합니다.")
         return 0
 
+    if cfg.deploy.target == "eks":
+        from .render import eks as eks_render
+        out = GEN_ROOT / cfg.env / "eks"
+        res = eks_render.render(cfg, out)
+        console.print(f"[green]생성 완료 ({out}):")
+        for f in res["files"]:
+            console.print(f"  {f}")
+        for n in res.get("notes", []):
+            console.print(f"  [yellow]ⓘ {n}")
+        console.print("\n적용: [bold]./deploy apply[/bold] (helm upgrade --install, 확인 게이트 있음)")
+        return 0
+
     console.print(f"[red]deploy.target={cfg.deploy.target} 렌더러는 아직 구현 전입니다 (compose, ecs 지원).")
     return 1
 
@@ -303,6 +315,34 @@ def cmd_apply(args) -> int:
             if outputs.get(k):
                 console.print(f"  {k}: {outputs[k]}")
         rep = doc.check_ecs(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+        console.print(doc.format_report(cfg, rep))
+        return 0 if rep.worst != "HIGH" else 1
+
+    if cfg.deploy.target == "eks":
+        from . import eks_apply, doctor as doc
+        from .render import eks as eks_render
+        out = GEN_ROOT / cfg.env / "eks"
+        res = eks_render.render(cfg, out)
+        console.print(f"[green]render 완료 ({out})")
+        for n in res.get("notes", []):
+            console.print(f"  [yellow]ⓘ {n}")
+        if args.plan:
+            try:
+                eks_apply.plan(cfg, out, REPO_ROOT)
+            except SystemExit as exc:
+                console.print(f"[red]{exc}")
+                return 1
+            console.print("\n[cyan]plan 전용 — 적용되지 않았습니다. 적용: ./deploy apply")
+            return 0
+        if not _confirm_apply(args, preview=lambda: eks_apply.plan(cfg, out, REPO_ROOT)):
+            return 130
+        try:
+            result = eks_apply.apply(cfg, out, REPO_ROOT)
+        except SystemExit as exc:
+            console.print(f"[red]{exc}")
+            return 1
+        console.print(f"\n[green]helm upgrade 완료 — {result['release']} @ ns={result['namespace']}")
+        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
         console.print(doc.format_report(cfg, rep))
         return 0 if rep.worst != "HIGH" else 1
 
@@ -496,6 +536,11 @@ def cmd_doctor(args) -> int:
         return 0 if rep.worst != "HIGH" else 1
     if cfg.deploy.target == "ecs":
         rep = doc.check_ecs(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+        console.print(doc.format_report(cfg, rep))
+        return 0 if rep.worst != "HIGH" else 1
+    if cfg.deploy.target == "eks":
+        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT,
+                            context=getattr(args, "context", ""))
         console.print(doc.format_report(cfg, rep))
         return 0 if rep.worst != "HIGH" else 1
     console.print("[yellow]이 backend 의 doctor 는 아직 구현 전입니다.")

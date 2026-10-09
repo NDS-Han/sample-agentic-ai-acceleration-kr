@@ -278,6 +278,148 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
     return rep
 
 
+# ==============================================================================
+# eks backend doctor
+#   산출물 → kubectl/helm 접근 → release 상태 → deployment readiness →
+#   migration hook job → 관리 키 drift (이미지 태그·CIDR·리전)
+# ==============================================================================
+
+EKS_DEPLOYMENTS = ("gateway-proxy", "admin-api", "admin-ui", "scheduler",
+                   "cost-recorder-worker", "notification-worker")
+
+
+def _eks_meta(gen_dir: Path, rep: DoctorReport) -> dict:
+    p = gen_dir / "eks" / "deploy.yaml"
+    if not p.exists():
+        rep.add("HIGH", "artifacts", "gen/<env>/eks/deploy.yaml 없음 — `deploy render` 먼저 실행")
+        return {}
+    rep.add("OK", "artifacts", "render 산출물 존재")
+    return yaml.safe_load(p.read_text()) or {}
+
+
+def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
+              context: str = "") -> DoctorReport:
+    rep = DoctorReport()
+    meta = _eks_meta(gen_dir, rep)
+    if not meta:
+        return rep
+    ns, rel = meta.get("namespace", "llm-gateway"), meta.get("release", "llm-gateway")
+    ctx = ["--context", context] if context else []
+    kctx = ["--kube-context", context] if context else []
+
+    # 1. 클러스터 접근
+    r = _run(["kubectl", "get", "ns", ns, *ctx], timeout=30)
+    if r.returncode != 0:
+        rep.add("HIGH", "cluster",
+                f"kubectl 접근 실패 (ns={ns}): {r.stderr.strip()[:150]} — context 확인")
+        return rep
+    rep.add("OK", "cluster", f"namespace {ns} 접근 가능")
+
+    # 2. helm release
+    r = _run(["helm", "status", rel, "-n", ns, "-o", "json", *kctx])
+    if r.returncode != 0:
+        rep.add("HIGH", "release", f"helm release '{rel}' 없음 — 배포되지 않았거나 이름/namespace 다름")
+        return rep
+    try:
+        st = json.loads(r.stdout)
+        info = st.get("info") or {}
+        status, rev = info.get("status", "?"), st.get("version", "?")
+        lvl = "OK" if status == "deployed" else "HIGH"
+        rep.add(lvl, "release", f"{rel} status={status} revision={rev}")
+    except json.JSONDecodeError:
+        rep.add("WARN", "release", "helm status 파싱 실패")
+
+    # 3. deployment readiness + 라이브 이미지 태그
+    r = _run(["kubectl", "get", "deployments", "-n", ns, "-o", "json", *ctx])
+    if r.returncode == 0:
+        try:
+            items = json.loads(r.stdout).get("items", [])
+        except json.JSONDecodeError:
+            items = []
+        by_name = {i["metadata"]["name"].replace("llm-gateway-", ""): i for i in items}
+        for name in EKS_DEPLOYMENTS:
+            d = by_name.get(name) or by_name.get(f"{rel}-{name}")
+            if not d:
+                rep.add("WARN", "deploy", f"{name} deployment 없음")
+                continue
+            spec = d.get("spec") or {}
+            stt = d.get("status") or {}
+            want = spec.get("replicas", 1)
+            ready = stt.get("readyReplicas", 0)
+            img = ""
+            try:
+                img = d["spec"]["template"]["spec"]["containers"][0]["image"]
+                tag = img.rsplit(":", 1)[-1]
+            except (KeyError, IndexError):
+                tag = ""
+            msg = f"{name} {ready}/{want} ready"
+            if cfg.images.tag and tag and tag != cfg.images.tag:
+                rep.add("WARN", "deploy", f"{msg} — tag {tag} ≠ yaml {cfg.images.tag}")
+            elif ready and ready >= want:
+                rep.add("OK", "deploy", msg)
+            else:
+                rep.add("HIGH", "deploy", msg)
+
+    # 4. migration hook Job — 가장 최근 것의 상태
+    r = _run(["kubectl", "get", "jobs", "-n", ns, "-o", "json", *ctx])
+    if r.returncode == 0:
+        try:
+            jobs = [j for j in json.loads(r.stdout).get("items", [])
+                    if "migration" in j["metadata"]["name"]]
+            job = max(jobs, key=lambda j: j["metadata"].get("creationTimestamp", "")) if jobs else None
+        except (json.JSONDecodeError, ValueError, KeyError):
+            job = None
+        if job is None:
+            rep.add("WARN", "migration", "migration Job 을 못 찾았습니다")
+        else:
+            conds = (job.get("status") or {}).get("conditions") or []
+            done = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conds)
+            failed = any(c.get("type") == "Failed" and c.get("status") == "True" for c in conds)
+            name = job["metadata"]["name"]
+            if done:
+                rep.add("OK", "migration", f"{name} Complete")
+            elif failed:
+                rep.add("HIGH", "migration", f"{name} Failed — kubectl logs job/{name}")
+            else:
+                rep.add("WARN", "migration", f"{name} 진행 중/상태 불명")
+
+    # 5. values drift — 관리 키만 대조 (전체 values 는 차트가 소유)
+    r = _run(["helm", "get", "values", rel, "-n", ns, "--all", "-o", "yaml", *kctx])
+    if r.returncode == 0:
+        live = yaml.safe_load(r.stdout) or {}
+        drifts = []
+        if cfg.images.tag:
+            t = (((live.get("gatewayProxy") or {}).get("image") or {}).get("tag"))
+            if t and t != cfg.images.tag:
+                drifts.append(f"gatewayProxy.image.tag={t}≠{cfg.images.tag}")
+        cidr = (((live.get("ingress") or {}).get("annotations") or {})
+                .get("alb.ingress.kubernetes.io/inbound-cidrs", ""))
+        want_cidrs = ",".join(cfg.network.allowed_cidrs)
+        if cfg.network.allowed_cidrs and cidr and cidr != want_cidrs:
+            drifts.append(f"inbound-cidrs={cidr}≠{want_cidrs}")
+        live_region = (live.get("aws") or {}).get("region")
+        if live_region and live_region != cfg.aws.region:
+            drifts.append(f"aws.region={live_region}≠{cfg.aws.region}")
+        rep.add("WARN" if drifts else "OK", "drift",
+                "; ".join(drifts) if drifts else "관리 키가 release values 와 일치")
+
+    # 6. terraform plan drift — env_dir 이 있고 state 가 있으면
+    env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    if env_dir and env_dir.exists():
+        r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false"],
+                 cwd=env_dir, timeout=300)
+        if r.returncode == 0:
+            rep.add("OK", "tf-drift", "terraform plan no-op")
+        elif r.returncode == 2:
+            changed = [ln for ln in r.stdout.splitlines()
+                       if ln.startswith(("  # ", "Plan:"))][-5:]
+            rep.add("WARN", "tf-drift", "인프라 드리프트 — " + " / ".join(changed)[:200])
+        else:
+            rep.add("WARN", "tf-drift", "terraform plan 불가(init/state 없음?) — 인프라는 별도 확인")
+
+    return rep
+
+
 def format_report(cfg: GatewayConfig, rep: DoctorReport) -> str:
     icon = {"OK": "✓", "WARN": "!", "HIGH": "✗"}
     lines = [f"doctor — {cfg.env} ({cfg.deploy.target}/{cfg.deploy.size_tier})", ""]

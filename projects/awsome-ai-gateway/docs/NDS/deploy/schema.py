@@ -11,7 +11,7 @@ from typing import Any
 SCHEMA_VERSION = 1
 
 DEPLOY_TARGETS = ("compose", "ecs", "eks")
-IMPLEMENTED_TARGETS = ("compose", "ecs")   # 렌더러가 있는 backend — 나머지는 validate 만
+IMPLEMENTED_TARGETS = ("compose", "ecs", "eks")   # 렌더러가 있는 backend
 SIZE_TIERS = ("t0", "t1", "t2", "t3")
 NETWORK_MODES = ("public", "private")
 DOMAIN_MODES = ("none", "cloudfront-temp", "route53-acm")
@@ -41,6 +41,11 @@ class DeployConfig:
     # render 가 placeholder 를 둔다.
     tfstate_bucket: str = ""
     tfstate_table: str = ""
+    # eks 경로 — helm release/namespace(기본 llm-gateway) 와 인프라를 소유한
+    # terraform env 디렉토리(기본 environments/llm-gateway-<env>)
+    release: str = "llm-gateway"
+    namespace: str = "llm-gateway"
+    tf_env_dir: str = ""
 
 
 @dataclass
@@ -140,6 +145,8 @@ class GatewayConfig:
             )
         if self.features.web_search and self.deploy.target == "compose":
             w.append("web_search 는 AgentCore(us-east-1) 의존 — compose 경로에서는 수동 프로비저닝이 필요합니다.")
+        if self.deploy.target == "eks" and not self.images.registry:
+            w.append("images.registry 비어 있음 — apply 시 계정 기본 ECR 로 추론합니다.")
         if self.deploy.target not in IMPLEMENTED_TARGETS:
             w.append(f"deploy.target={self.deploy.target} 의 렌더러는 아직 구현 전입니다 (validate 만 지원).")
         return w
@@ -166,9 +173,8 @@ class GatewayConfig:
             e.append("size_tier=t0 는 compose backend 전용입니다.")
         if self.deploy.target in ("ecs", "eks") and not self.images.tag:
             e.append(f"deploy.target={self.deploy.target} 는 images.tag 명시가 필수입니다.")
-        # images.registry 비우면 ecs env 가 ECR repo 를 자동 생성한다 (eks 는 필수)
-        if self.deploy.target == "eks" and not self.images.registry:
-            e.append("deploy.target=eks 는 images.registry(ECR) 가 필요합니다.")
+        # registry 비우면 ecs 는 모듈이 ECR repo 를 만들고, eks 는 apply 가
+        # <account>.dkr.ecr.<region> 으로 추론한다 (install-eks.sh 와 동일)
         if self.network.mode not in NETWORK_MODES:
             e.append(f"network.mode 는 {NETWORK_MODES} 중 하나여야 합니다.")
         if self.domain.mode not in DOMAIN_MODES:
@@ -176,9 +182,10 @@ class GatewayConfig:
         if self.domain.mode == "route53-acm" and not self.domain.name:
             e.append("domain.mode=route53-acm 이면 domain.name 이 필수입니다.")
         if (self.domain.mode == "route53-acm"
-                and self.deploy.target in ("ecs", "eks")
+                and self.deploy.target == "ecs"
                 and not self.domain.zone_id):
-            e.append("ecs/eks 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다.")
+            e.append("ecs 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다 — "
+                     "ACM 검증·레코드 생성에 필요. eks 는 env values 의 기존 인증서를 씁니다.")
         if self.features.notifications.provider not in NOTIFICATION_PROVIDERS:
             e.append(f"notifications.provider 는 {NOTIFICATION_PROVIDERS} 중 하나여야 합니다.")
         if self.features.notifications.provider == "ses" and not self.features.notifications.ses_from:
@@ -236,6 +243,9 @@ def from_dict(raw: dict) -> GatewayConfig:
             sizing=dict(deploy.get("sizing") or {}),
             tfstate_bucket=str(deploy.get("tfstate_bucket", "")),
             tfstate_table=str(deploy.get("tfstate_table", "")),
+            release=str(deploy.get("release", "llm-gateway")),
+            namespace=str(deploy.get("namespace", "llm-gateway")),
+            tf_env_dir=str(deploy.get("tf_env_dir", "")),
         ),
         network=NetworkConfig(
             mode=str(network.get("mode", "public")),

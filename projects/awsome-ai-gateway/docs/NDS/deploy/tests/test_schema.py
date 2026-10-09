@@ -40,11 +40,19 @@ def test_ecs_requires_image_tag():
             images={"registry": "r.example.com"}))
 
 
-def test_eks_requires_registry():
-    with pytest.raises(schema.SchemaError, match="registry"):
+def test_eks_registry_optional_but_warns():
+    # eks 는 apply 가 <account>.dkr.ecr.<region> 으로 추론 — 에러가 아니라 경고
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "abc123"}))
+    assert any("registry" in w for w in cfg.warnings())
+
+
+def test_eks_requires_tag():
+    with pytest.raises(schema.SchemaError, match="tag"):
         schema.from_dict(minimal(
             deploy={"target": "eks", "size_tier": "t3"},
-            images={"tag": "abc123"}))
+            images={}))
 
 
 def test_domain_route53_requires_name():
