@@ -80,15 +80,19 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 
 ## (4) terraform — 드리프트 확인 후 apply
 
-> **US-18** — 인프라 변경이 없어 `No changes.` 가 나와야 합니다. 다른 결과면 apply 하지 말고 멈춥니다.
+> **US-18** — 인프라 변경이 없어 `exit=0` 과 `No changes.` 가 나와야 합니다. 그러면 아래 apply 블록은
+> 건너뛰고 (5) 로 넘어갑니다. 다른 결과면 apply 하지 말고 멈춥니다.
 
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
 terraform init
-terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
+terraform plan -no-color -detailed-exitcode > ~/plan.txt 2>&1; echo "exit=$?"
+grep -E '# .* (will be|must be)|^Plan:|No changes|Error' ~/plan.txt
 ```
-기대(2026-09 dev 실측): 아래 4줄 + `Plan: 3 to add, 1 to change, 3 to destroy.`
+plan 결과는 `~/plan.txt` 에 남고, 종료 코드로 판정한다 — `exit=0` 변경 없음(`No changes.`, apply 블록은 건너뜀) · `exit=2` 변경 있음(아래와 대조) · `exit=1` plan 오류(`Error` 줄, 멈춘다). 출력이 비면 terraform 폴더가 아닌 곳에서 친 것이다.
+
+기대(2026-09 dev 실측): `exit=2` + 아래 4줄 + `Plan: 3 to add, 1 to change, 3 to destroy.`
 ```
 # module.aurora.aws_secretsmanager_secret_version.db[0] must be replaced
 # module.irsa.aws_iam_policy.admin_api must be replaced
@@ -99,7 +103,7 @@ replace 3건은 파괴가 아니다 — 정책 description 변경·시크릿 JSO
 
 **멈추는 조건**: 위 4줄 밖의 destroy/replace · EKS 버전·애드온 변경(tfvars pin → [8-E](8-E-eks-upgrade.md)) · `external-secrets` 줄 — fork 의 ESO OFF 설정이 upstream 에 덮인 것이다. 켜면 cert-controller 가 영구 0/1(2026-08-14 실측). apply 하지 말고 `modules/external-secrets/main.tf` 의 3줄을 복원한 뒤 다시 plan.
 
-▶ 실행 — 요약이 위와 같으면 `yes`
+▶ 실행 — `exit=2` 이고 요약이 위와 같을 때만, `yes`
 ```bash
 terraform apply
 terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
@@ -265,7 +269,11 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ```bash
 cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-prod
 terraform init
-terraform plan -no-color 2>/dev/null | grep -E '^\s*# .* (will be|must be)|^Plan:'
+terraform plan -no-color -detailed-exitcode > ~/plan.txt 2>&1; echo "exit=$?"
+grep -E '# .* (will be|must be)|^Plan:|No changes|Error' ~/plan.txt
+```
+`exit=2` 이고 요약이 (4) 와 같을 때만(`exit=0` 이면 건너뜀):
+```bash
 terraform apply
 terraform plan -no-color 2>/dev/null | grep -E '^Plan:|No changes'
 ```
