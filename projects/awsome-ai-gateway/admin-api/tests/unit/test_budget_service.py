@@ -251,7 +251,7 @@ class TestAllocateTeamBudget:
 class TestGetBudgetSummary:
     @pytest.mark.asyncio
     async def test_budget_summary_returns_user_and_team_rows(
-        self, budget_service: BudgetService, mock_session: AsyncMock
+        self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
         team_id = uuid.uuid4()
         user_id = uuid.uuid4()
@@ -286,7 +286,8 @@ class TestGetBudgetSummary:
             URepo.return_value.list_all_teams = AsyncMock(return_value=[team_obj])
 
             result = await budget_service.get_budget_summary(
-                mock_session, scope=None, target_id=None, period="2026-04"
+                mock_session, scope=None, target_id=None, period="2026-04",
+                actor=admin_user,
             )
 
         target_types = sorted({i.target_type for i in result.summary})
@@ -295,6 +296,66 @@ class TestGetBudgetSummary:
         user_row = next(i for i in result.summary if i.target_type == "user")
         assert team_row.limit_usd == Decimal("1000")
         assert user_row.limit_usd is None  # 미설정 user → limit 없음
+
+    @pytest.mark.asyncio
+    async def test_budget_summary_requires_actor(
+        self, budget_service: BudgetService, mock_session: AsyncMock
+    ):
+        """actor 는 필수다 — 기본값 None 이면 actor 를 빠뜨린 호출이 TEAM_LEADER 필터 없이
+        전사 예산을 돌려준다(fail-open). 빠뜨리면 호출 시점에 TypeError 로 실패해야 한다."""
+        with pytest.raises(TypeError):
+            await budget_service.get_budget_summary(mock_session, period="2026-04")
+
+    @pytest.mark.asyncio
+    async def test_budget_summary_team_leader_sees_only_own_team(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        """TEAM_LEADER 는 소속 팀 행과 소속 팀 사용자 행만 받는다 — scope/target_id 를
+        비워 전사 요약을 요청해도 타 팀 예산·사용액이 나오면 안 된다(IDOR)."""
+        own_team_id = team_leader_user.team_id
+        other_team_id = uuid.uuid4()
+
+        def _team(tid: uuid.UUID, name: str) -> MagicMock:
+            t = MagicMock()
+            t.id = tid
+            t.name = name
+            t.department = None
+            t.members = []
+            return t
+
+        def _user(team_id: uuid.UUID, name: str) -> MagicMock:
+            u = MagicMock()
+            u.id = uuid.uuid4()
+            u.team_id = team_id
+            u.display_name = name
+            u.email = f"{name.lower()}@b"
+            u.is_active = True
+            return u
+
+        own_user = _user(own_team_id, "Own")
+        other_user = _user(other_team_id, "Other")
+
+        execute_result = MagicMock()
+        execute_result.scalar_one = MagicMock(return_value="0")
+        mock_session.execute = AsyncMock(return_value=execute_result)
+
+        with patch("app.services.budget_service.BudgetRepository") as BRepo, \
+             patch("app.repositories.user_repository.UserRepository") as URepo:
+            BRepo.return_value.list_configs = AsyncMock(return_value=[])
+            URepo.return_value.iter_all_users = AsyncMock(return_value=[own_user, other_user])
+            URepo.return_value.list_all_teams = AsyncMock(
+                return_value=[_team(own_team_id, "Mine"), _team(other_team_id, "Theirs")]
+            )
+
+            result = await budget_service.get_budget_summary(
+                mock_session, scope=None, target_id=None, period="2026-04",
+                actor=team_leader_user,
+            )
+
+        team_ids = {i.target_id for i in result.summary if i.target_type == "team"}
+        user_ids = {i.target_id for i in result.summary if i.target_type == "user"}
+        assert team_ids == {str(own_team_id)}
+        assert user_ids == {str(own_user.id)}
 
 
 @pytest.mark.asyncio

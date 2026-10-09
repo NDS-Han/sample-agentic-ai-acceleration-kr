@@ -706,7 +706,9 @@ class BudgetService:
         scope: str | None = None,
         target_id: uuid.UUID | None = None,
         period: str,
-        actor: CurrentUser | None = None,
+        # ⚠️ 필수 인자다. 기본값 None 을 두면 actor 를 빠뜨린 호출이 아래 TEAM_LEADER
+        #    필터를 건너뛰어 전사 예산·사용액을 그대로 돌려준다(fail-open).
+        actor: CurrentUser,
     ) -> BudgetSummaryResponse:
         if not re.match(r'^\d{4}-\d{2}$', period):
             raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
@@ -733,7 +735,7 @@ class BudgetService:
 
         # TEAM_LEADER 는 소속 팀만 — scope/target_id 쿼리 파라미터로 다른
         # 팀을 넘겨도 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
-        if actor is not None and actor.role == UserRole.TEAM_LEADER:
+        if actor.role == UserRole.TEAM_LEADER:
             led = {actor.team_id} if actor.team_id else set()
             teams = [t for t in teams if t.id in led]
             users = [u for u in users if u.team_id in led]
