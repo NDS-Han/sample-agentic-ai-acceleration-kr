@@ -1,8 +1,22 @@
 # EKS — 기존 배포 온보딩 및 업데이트
 
-대상: 이미 `install-eks.sh` + helm + terraform 으로 배포된 EKS 환경(dev/prod).
+대상: 이미 `install-eks.sh` + helm + terraform 으로 배포된 EKS 환경.
 이 경로는 **기존 배포를 이어받아** helm 릴리스만 관리합니다 — EKS 클러스터·Aurora·
 ElastiCache·Cognito·IRSA·ESO 같은 인프라는 기존 terraform env 가 계속 소유합니다.
+
+## 개념 정리 — `env` 이름 vs `size_tier`
+
+이 둘은 직교하는 별개 개념입니다:
+
+| 개념 | 의미 | 예 |
+|---|---|---|
+| `env` / `tf_env_dir` | **어느 인프라 스택인가** — DB·Redis·IRSA·Cognito·시크릿 경로(`/llm-gateway/<env>/*`)를 만든 terraform env | `llm-gateway-dev`, `llm-gateway-prod` |
+| `size_tier` | **그 스택의 크기** — 우리가 옵션으로 선택 | `t2`, `t3` |
+
+`dev`는 크기가 아니라 스택 식별자입니다 — 같은 t3로 dev/prod 두 스택을 띄울
+수 있습니다. `--env-dir`에는 **실제로 그 인프라를 만든 디렉토리**를 지정하면
+되고 이름이 꼭 `*-dev`일 필요는 없습니다. 아래 예의 `llm-gateway-dev`는
+기존 배포가 그 이름으로 만들어졌기 때문에 쓰는 것입니다.
 
 ## 사전 조건
 
@@ -16,13 +30,14 @@ ElastiCache·Cognito·IRSA·ESO 같은 인프라는 기존 terraform env 가 계
 ```bash
 ./deploy doctor --capture --target eks \
   --namespace llm-gateway --release llm-gateway \
-  --env-dir deployment/terraform/environments/llm-gateway-dev
-# → deployment/gateway.captured-dev.yaml
+  --env-dir deployment/terraform/environments/llm-gateway-<env>
+#    ↑ 인프라를 만든 terraform env 디렉토리 (예: llm-gateway-dev)
+# → deployment/gateway.captured-<env>.yaml
 
-vi deployment/gateway.captured-dev.yaml   # notes 의 빈칸 채우기
-#   (대화형이 나으면: ./deploy configure --config deployment/gateway.captured-dev.yaml --no-apply)
-./deploy validate --config deployment/gateway.captured-dev.yaml
-mv deployment/gateway.captured-dev.yaml deployment/gateway.yaml
+vi deployment/gateway.captured-<env>.yaml   # notes 의 빈칸 채우기
+#   (대화형이 나으면: ./deploy configure --config deployment/gateway.captured-<env>.yaml --no-apply)
+./deploy validate --config deployment/gateway.captured-<env>.yaml
+mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 ```
 
 capture notes 가 알려주는 주의점:

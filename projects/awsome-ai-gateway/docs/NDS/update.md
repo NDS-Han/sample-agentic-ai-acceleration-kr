@@ -41,7 +41,7 @@ mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 ```bash
 ./deploy doctor --capture --target eks \
   [--namespace llm-gateway] [--release llm-gateway] [--context <ctx>] \
-  [--env-dir deployment/terraform/environments/llm-gateway-dev]
+  [--env-dir deployment/terraform/environments/llm-gateway-<env>]
 ```
 
 읽는 것: 리전, 도메인/CIDR(ingress 어노테이션), notification provider,
