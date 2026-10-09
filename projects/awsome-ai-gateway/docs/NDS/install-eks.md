@@ -86,8 +86,9 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
 ## 3. 상태 확인
 
 ```bash
-./deploy doctor    # release 상태, deployment readiness, migration job,
-                   # 관리 키 drift, terraform plan drift
+./deploy doctor    # release 상태, 클러스터 버전 skew(live vs tfvars 선언),
+                   # deployment readiness, migration job, 관리 키 drift,
+                   # terraform plan drift
 ```
 
 ## 이 경로가 관리하는 것 / 하지 않는 것

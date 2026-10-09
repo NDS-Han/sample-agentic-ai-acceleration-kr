@@ -6,6 +6,7 @@ compose backend: 산출물 존재 → 서비스 기동/헬스 → .env 완결성
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -332,6 +333,57 @@ def _eks_meta(gen_dir: Path, rep: DoctorReport) -> dict:
     return yaml.safe_load(p.read_text()) or {}
 
 
+def _minor_tuple(v: str) -> tuple[int, int]:
+    m = re.match(r"(\d+)\.(\d+)", v)
+    return (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+
+
+def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
+                           ctx: list[str]) -> None:
+    """라이브 서버 버전 vs tfvars 의 eks_cluster_version skew.
+
+    eks terraform env 의 정책은 "선언값 = 라이브"(variables.tf 주석) — 선언이
+    라이브보다 낮으면 다음 terraform apply 가 다운그레이드를 시도해 막히고,
+    높으면 예고 없이 컨트롤플레인 업그레이드를 수행한다. addon_versions 핀도
+    같은 방향으로 어긋난다.
+    """
+    declared = ""
+    env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    tfvars = env_dir / "terraform.tfvars" if env_dir else None
+    if tfvars and tfvars.exists():
+        m = re.search(r'eks_cluster_version\s*=\s*"(\d+\.\d+)"',
+                      tfvars.read_text())
+        declared = m.group(1) if m else ""
+
+    live = ""
+    r = _run(["kubectl", "version", "-o", "json", *ctx], timeout=20)
+    if r.returncode == 0:
+        try:
+            gv = (json.loads(r.stdout).get("serverVersion") or {}).get(
+                "gitVersion", "")
+            m = re.match(r"v?(\d+\.\d+)", gv)
+            live = m.group(1) if m else ""
+        except json.JSONDecodeError:
+            pass
+
+    if not declared or not live:
+        rep.add("WARN", "k8s-version",
+                f"버전 비교 불가 (tfvars 선언={declared or '?'}, "
+                f"live={live or '?'})")
+        return
+    if declared == live:
+        rep.add("OK", "k8s-version", f"클러스터 {live} = tfvars 선언")
+    elif _minor_tuple(declared) < _minor_tuple(live):
+        rep.add("HIGH", "k8s-version",
+                f"라이브 {live} > tfvars 선언 {declared} — 다음 terraform apply 가 "
+                "다운그레이드를 시도해 막힙니다. tfvars 의 eks_cluster_version 을 "
+                f"{live} 로 올리고 eks_addon_versions 도 그 버전용으로 갱신하세요")
+    else:
+        rep.add("WARN", "k8s-version",
+                f"라이브 {live} < tfvars 선언 {declared} — 다음 terraform apply 가 "
+                "컨트롤플레인 업그레이드를 수행합니다 (의도된 홉이면 진행)")
+
+
 def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
               context: str = "") -> DoctorReport:
     rep = DoctorReport()
@@ -349,6 +401,10 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 f"kubectl 접근 실패 (ns={ns}): {r.stderr.strip()[:150]} — context 확인")
         return rep
     rep.add("OK", "cluster", f"namespace {ns} 접근 가능")
+
+    # 1.5 클러스터 버전 skew — 선언 ≠ 라이브면 다음 terraform 이 막히거나
+    #     예고 없이 업그레이드한다 (다운그레이드 커밋은 과거 실제 사고)
+    _check_cluster_version(rep, meta, repo_root, ctx)
 
     # 2. helm release
     r = _run(["helm", "status", rel, "-n", ns, "-o", "json", *kctx])
