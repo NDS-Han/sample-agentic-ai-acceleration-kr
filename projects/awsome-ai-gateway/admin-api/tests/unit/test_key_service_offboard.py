@@ -64,14 +64,19 @@ async def test_revokes_db_and_invalidates_cache(
         repo.list_active_for_users = AsyncMock(return_value=vks)
         repo.revoke_many = AsyncMock(return_value=1)
 
-        n = await key_service.revoke_keys_for_users(
+        hashed = await key_service.revoke_keys_for_users(
             mock_session, user_ids=[uid], reason="cognito_deactivated"
         )
 
-    assert n == 1
+    assert len(hashed) == 1
     repo.revoke_many.assert_awaited_once()
     assert repo.revoke_many.await_args[0][0] == [vks[0].id]
+    # 부수효과는 아직 없어야 한다 — commit 후 finalize 가 적용(R4).
+    mock_redis.delete.assert_not_called()
 
+    await key_service.finalize_revoked_keys(
+        mock_session, hashed, reason="cognito_deactivated"
+    )
     h = hashlib.sha256(b"sk-raw-one").hexdigest()
     deleted = {c.args[0] for c in mock_redis.delete.await_args_list}
     assert f"key:vk:{h}" in deleted
@@ -102,11 +107,16 @@ async def test_decrypt_failure_still_revokes_others(
         repo.list_active_for_users = AsyncMock(return_value=vks)
         repo.revoke_many = AsyncMock(return_value=2)
 
-        n = await key_service.revoke_keys_for_users(
+        hashed = await key_service.revoke_keys_for_users(
             mock_session, user_ids=[uid]
         )
 
-    assert n == 2  # DB 폐기는 둘 다
+    # DB 폐기는 둘 다 호출됐고, 복호화 가능한 쪽만 해시에 남는다.
+    repo.revoke_many.assert_awaited_once()
+    assert len(repo.revoke_many.await_args[0][0]) == 2
+    assert len(hashed) == 1
+
+    await key_service.finalize_revoked_keys(mock_session, hashed)
     h = hashlib.sha256(b"sk-raw-ok").hexdigest()
     deleted = {c.args[0] for c in mock_redis.delete.await_args_list}
     assert f"key:vk:{h}" in deleted  # 복호화 가능한 쪽만 캐시 정리

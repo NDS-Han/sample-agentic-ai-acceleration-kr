@@ -15,7 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
-from app.core.cache_invalidation import CacheInvalidationManager
+from app.core.cache_invalidation import (
+    CacheInvalidationManager,
+    invalidate_after_commit,
+)
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import KeyStatus, User, VirtualKey
@@ -317,25 +320,30 @@ class KeyService:
         *,
         user_ids: list[uuid.UUID],
         reason: str | None = None,
-    ) -> int:
+    ) -> list[tuple["VirtualKey", str]]:
         """지정 사용자들의 ACTIVE VK 전량 폐기 — 시스템 주도 offboarding(R3-3).
 
         Cognito sync 가 사용자를 is_active=False 로 만들 때 함께 호출된다.
         DB 만 비활성화하면 게이트웨이의 per-request 재확인에만 의존하게 되고
         (Redis 장애 시 캐시된 키가 최대 TTL 까지 살아남음), 재활성화 시 폐기되지
-        않은 옛 키가 그대로 부활한다. 여기서 VK 상태/캐시/역인덱스/알림까지
-        정리한다.
+        않은 옛 키가 그대로 부활한다.
+
+        이 메서드는 **DB 상태와 해시 수집만** 한다 — Redis DEL·역인덱스 srem·
+        key_revoked publish 같은 부수효과는 `finalize_revoked_keys` 가 담당하며
+        반드시 **commit 후** 호출해야 한다. commit 전에 DEL 하면 DEL→commit
+        창에 들어온 게이트웨이 요청이 아직 ACTIVE 인 DB 행을 다시 캐시한다
+        (R3-8/R4와 같은 pre-commit 무효화 경합).
 
         호출자의 트랜잭션 안에서 flush 만 한다 — commit 은 호출자 책임.
-        반환값은 실제로 폐기된 키 수.
+        반환값은 ``(vk, sha256(raw_key))`` 쌍 리스트(decrypt 실패분 제외).
         """
         repo = KeyRepository(session)
         vks = await repo.list_active_for_users(user_ids)
         if not vks:
-            return 0
+            return []
 
         now = datetime.now(timezone.utc)
-        revoked = await repo.revoke_many([vk.id for vk in vks], now)
+        await repo.revoke_many([vk.id for vk in vks], now)
 
         # Redis 무효화용 해시 — revoke_key 와 동일하게 raw key 를 복호화해 sha256.
         # (vk, hash) 쌍으로 유지한다 — 복호화 실패분을 건너뛰면 평행 리스트는 어긋난다.
@@ -349,7 +357,24 @@ class KeyService:
                 )
                 continue
             hashed.append((vk, hashlib.sha256(raw_key.encode()).hexdigest()))
+        return hashed
 
+    async def finalize_revoked_keys(
+        self,
+        session: AsyncSession,
+        hashed: list[tuple["VirtualKey", str]],
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """`revoke_keys_for_users` 의 부수효과 — **commit 후** 호출할 것.
+
+        key:vk/key:cache:vk DEL, team 역인덱스 srem, key_revoked publish 를
+        수행한다. pub/sub·DEL 은 부수효과라 commit 실패 시 실행되지 않는 것이
+        정확하다(폐기됐다고 알렸는데 롤백되는 모순 방지).
+        """
+        if not hashed:
+            return
+        vks = [vk for vk, _ in hashed]
         await self._cache_mgr.invalidate(
             [k for _, h in hashed for k in (f"key:vk:{h}", f"key:cache:vk:{h}")],
             session=session,
@@ -357,6 +382,7 @@ class KeyService:
 
         # team 역인덱스(team:vk_hashes:{team_id})에서 제거.
         try:
+            user_ids = [vk.user_id for vk in vks]
             stmt = select(User.id, User.team_id).where(User.id.in_(user_ids))
             team_by_user = {
                 r.id: r.team_id for r in (await session.execute(stmt)).all()
@@ -386,10 +412,9 @@ class KeyService:
             )
 
         logger.info(
-            "vk_offboard.revoked",
-            users=len(user_ids), keys=len(vks), revoked=revoked,
+            "vk_offboard.revoked_finalized",
+            keys=len(vks), hashes=len(hashed),
         )
-        return revoked
 
     async def revoke_key(
         self,
@@ -417,21 +442,42 @@ class KeyService:
         # Decrypt to get raw key, then hash it.
         raw_key = self._encryption.decrypt(vk.key_value_encrypted)
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-        await self._cache_mgr.invalidate(
-            [f"key:vk:{key_hash}", f"key:cache:vk:{key_hash}"],
-            session=session,
-        )
 
-        # Remove from team VK hash reverse index (FR-2.6)
+        # Remove from team VK hash reverse index (FR-2.6) — commit 후로 지연.
         user_repo = UserRepository(session)
         user = await user_repo.get_user(vk.user_id)
-        if user is not None and user.team_id is not None:
-            try:
-                await self._cache_mgr._redis.srem(
-                    f"team:vk_hashes:{user.team_id}", key_hash
-                )
-            except Exception:
-                logger.warning("vk_reverse_index.srem_failed", user_id=str(vk.user_id), exc_info=True)
+        team_id_for_index = user.team_id if user is not None else None
+
+        # R4-A2-3: DEL/srem/publish 는 commit 후 — CommittingRoute 가 핸들러
+        # 반환 뒤 commit 하므로 즉시 DEL 하면 DEL→commit 창에 게이트웨이가
+        # 아직 ACTIVE 인 행을 재캐시한다. publish 도 rollback 시 거짓 알림이 된다.
+        # DEL 실패는 invalidate_after_commit 이 별도 세션으로
+        # cache_invalidation_failures 에 기록한다(기존 durability 유지).
+        extras = []
+        if team_id_for_index is not None:
+
+            async def _srem(
+                tid: uuid.UUID = team_id_for_index,
+                uid: uuid.UUID = vk.user_id,
+            ) -> None:
+                try:
+                    await self._cache_mgr._redis.srem(
+                        f"team:vk_hashes:{tid}", key_hash
+                    )
+                except Exception:
+                    logger.warning(
+                        "vk_reverse_index.srem_failed",
+                        user_id=str(uid), exc_info=True,
+                    )
+
+            extras.append(_srem)
+        extras.append(lambda: self._publish_key_revoked(vk, actor))
+        await invalidate_after_commit(
+            session,
+            self._cache_mgr,
+            [f"key:vk:{key_hash}", f"key:cache:vk:{key_hash}"],
+            extra=extras,
+        )
 
         # BR-KEY-04: Audit log for revocation
         await audit_logger.log(
@@ -449,8 +495,7 @@ class KeyService:
             request_id=request_id,
         )
 
-        # notification-worker 에 key_revoked 발행
-        await self._publish_key_revoked(vk, actor)
+        # notification-worker 발행은 _post_revoke(deferred)에 포함됨.
 
     async def list_keys(
         self,

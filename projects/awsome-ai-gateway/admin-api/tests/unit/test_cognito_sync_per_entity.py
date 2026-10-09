@@ -326,6 +326,10 @@ async def test_sync_group_upserts_members_no_global_cleanup(monkeypatch):
     """그룹 sync: 팀 확보 + 멤버 upsert. 전역 정리(list_all_teams sweep) 미수행."""
     s = _settings(monkeypatch)
     session = AsyncMock()
+    # sync_group 은 멤버별 SAVEPOINT(session.begin_nested)를 쓴다 — AsyncMock 의
+    # 반환값도 MagicMock 이라 async with 가 자동 지원되지만, 호출 결과가 코루틴이
+    # 되지 않도록 begin_nested 만은 동기 MagicMock 으로 둔다.
+    session.begin_nested = MagicMock(return_value=MagicMock())
     team = MagicMock(); team.id = uuid.uuid4()
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=None)
