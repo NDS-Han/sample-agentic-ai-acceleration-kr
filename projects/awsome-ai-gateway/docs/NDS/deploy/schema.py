@@ -287,7 +287,13 @@ def from_dict(raw: dict) -> GatewayConfig:
 
 def load(path: Path) -> GatewayConfig:
     try:
-        raw = yaml.safe_load(path.read_text())
+        text = path.read_text()
+    except FileNotFoundError as exc:
+        raise SchemaError(
+            f"{path} 가 없습니다 — 새 배포는 `./deploy init`, "
+            f"기존 배포 온보딩은 `./deploy doctor --capture` 로 생성하십시오.") from exc
+    try:
+        raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
         raise SchemaError(f"gateway.yaml 파싱 실패: {exc}") from exc
     return from_dict(raw or {})
