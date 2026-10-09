@@ -321,4 +321,6 @@ bash 07-client-values.sh
 ```bash
 GW=https://$(kubectl -n llm-gateway get ingress llm-gateway-gateway -o jsonpath='{.spec.rules[0].host}')
 bash 04-verify.sh --base-url $GW --vk <VK>
-``` 롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
+```
+
+롤백은 §롤백에서 `dev`→`prod`(스냅샷 `llm-gateway-prod-pre-sync-…`, 백업 `snapshots/<ts>-values-prod.yaml.bak`).
