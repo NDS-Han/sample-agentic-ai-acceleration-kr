@@ -65,10 +65,12 @@ deploy:
   tfstate_table: my-tflock
 ```
 
-## 2. Render — tfvars 생성
+## 2. (선택) Render — tfvars 미리 확인
+
+> `apply`가 내부에서 render를 이미 수행하므로 이 단계는 **생략 가능**입니다.
+> 생성물을 눈으로 확인하고 싶을 때만 실행합니다.
 
 ```bash
-./deploy validate        # 조합 검증 + 티어 요약 표시
 ./deploy render          # deployment/gen/<env>/ecs/ 에 생성
 ```
 

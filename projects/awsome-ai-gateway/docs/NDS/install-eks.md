@@ -45,11 +45,12 @@ capture notes 가 알려주는 주의점:
 
 ```bash
 vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
-./deploy validate
-./deploy render                # → gen/<env>/eks/values.yaml + deploy.yaml
-./deploy apply --plan          # helm upgrade --dry-run (변경 없음)
+./deploy apply --plan          # helm upgrade --dry-run (변경 없음, render 내장)
 ./deploy apply                 # plan 출력 → 확인(y) → helm upgrade --install
 ```
+
+> 다른 클러스터 context가 잡혀 있을 수 있으면 `--context <ctx>`를 붙여
+> 대상을 명시하세요 — apply가 helm/kubectl 전부에 그 context를 전달합니다.
 
 ### 내부 동작
 

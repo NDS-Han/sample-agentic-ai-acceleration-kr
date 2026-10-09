@@ -1,168 +1,254 @@
-# t0 설치 — 단일 호스트 Docker Compose
+# t0 설치 — EC2 1대에 Docker Compose로 배포 (실행 런북)
 
-**대상**: 평가·POC·소규모(~50명). 하나의 VM에 전체 게이트웨이를 올립니다.
+> **대상**: 평가·POC·소규모(~50명) 또는 다른 AWS 계정에서의 배포 테스트.
+> **방법**: 위에서 아래로 순서대로 실행합니다. 각 절 첫 줄의 "한 줄" 요약만 봐도 흐름이 잡힙니다.
 
-완성되면: PostgreSQL + Redis + 마이그레이션 + 6개 앱 서비스 + Caddy(HTTP/HTTPS 인입점)
+**완성되면**: PostgreSQL + Redis + 마이그레이션 + 앱 6개(gateway-proxy·admin-api·admin-ui·scheduler·cost-recorder-worker·notification-worker) + Caddy(유일한 인입점)
 
-> ⚠️ **알고 시작하세요** — t0 는 단일 노드입니다. 서버가 죽으면 서비스가 멈추고,
-> 복구는 백업에서 합니다. 100명 이상·운영 중요도가 있으면 `ecs`(t1) 경로를 선택하세요.
+> ⚠️ **알고 시작하세요** — t0는 단일 노드입니다. 서버가 죽으면 서비스가 멈추고 복구는 백업에서 합니다(§6). 100명 이상·운영 중요도가 있으면 [install-ecs.md](install-ecs.md)(t1)를 선택하세요.
 
 ---
 
-## 0. 준비물
+## 1. 사전 준비
 
-| 항목 | 요구 |
+### 1-1. 작업자 환경 (랩톱)
+
+> **한 줄**: 랩톱에는 SSH 클라이언트만 있으면 됩니다 — 모든 명령은 배포 EC2 안에서 돌립니다.
+
+- **VS Code + Remote-SSH 확장**을 쓰면 터미널과 파일 편집을 한 화면에서 할 수 있습니다(선택). 터미널 ssh만으로도 충분합니다.
+- **SSH 클라이언트**: Mac은 내장. Windows는 PowerShell에서 `ssh -V`로 확인 — 없으면 *설정 ▸ 앱 ▸ 선택적 기능 ▸ OpenSSH 클라이언트* 설치.
+- 랩톱에 aws-cli는 **필요 없습니다** — AWS 명령은 전부 배포 EC2 또는 콘솔 CloudShell에서 돌립니다.
+
+### 1-2. 배포용 EC2 만들기
+
+> **한 줄**: 액세스 키를 파일에 두는 대신 **IAM instance role**로 인증합니다(임시 자격증명 자동 순환 — 키 유출 경로 자체를 없앰).
+
+**사양**
+
+| 항목 | 값 |
 |---|---|
-| 머신 | Linux VM 1대 (권장 4 vCPU / 16GB, 최소 2 vCPU / 8GB). EC2 t3.xlarge 기준 |
-| 소프트웨어 | Docker Engine 24+ 와 Compose 플러그인 (`docker compose version` 으로 확인), git |
-| AWS | Bedrock 모델 접근이 켜진 계정 + 자격증명(EC2 instance profile 또는 access key) |
-| Bedrock 모델 | Claude 모델의 `global.*` inference profile 사용 가능 리전 (ap-northeast-2 등) |
-| 네트워크 | 사용자 PC → 이 서버의 80/443(도메인 있음) 또는 8000/8080/3000(도메인 없음) 도달 가능 |
-| 선택 | HTTPS용 도메인 — 없어도 시작 가능, 나중에 추가 가능 |
+| AMI | Ubuntu LTS x86_64 (22.04/24.04/26.04) |
+| 타입 | `t3.xlarge` 이상 (4 vCPU·16GB — 이미지 6개 빌드 필요) |
+| 스토리지 | gp3 **40GB+** (이미지 빌드·로그 여유로 128GB 권장) |
+| 리전 | 사용할 리전 — 모델이 `global.*` 프로파일이라 리전에 덜 민감 |
 
-### AWS 자격증명 두 가지 방법
+**① IAM 역할 만들기** — EC2를 띄우기 **전에** 만들어야 시작 마법사 목록에 뜹니다.
+AWS 콘솔 **CloudShell**(왼쪽 하단)에서 실행합니다. IAM은 글로벌이라 리전 무관:
 
-**EC2 instance profile (권장)** — 인스턴스에 `bedrock:InvokeModel` 권한 IAM role 부여. 추가 작업 없음.
-
-**Access key** — `.env` 에 `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` 를 추가 (아래 4단계).
-
----
-
-## 1. 저장소 받기
+▶ **실행** · AWS 콘솔 CloudShell
 
 ```bash
-git clone <이 저장소> awsome-ai-gateway
-cd awsome-ai-gateway/projects/awsome-ai-gateway
+ROLE=llm-gateway-host
+
+# ① 신뢰 정책 — EC2 서비스가 이 역할을 맡을 수 있게
+cat > /tmp/ec2-trust.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Principal": { "Service": "ec2.amazonaws.com" },
+    "Action": "sts:AssumeRole"
+  }]
+}
+EOF
+
+# ② Bedrock 호출만 허용하는 최소권한 정책 (앱 서버는 인프라 생성이 아니라
+#    모델 호출만 하므로 AdministratorAccess 는 필요 없습니다)
+cat > /tmp/bedrock-policy.json <<'EOF'
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
+    "Resource": "*"
+  }]
+}
+EOF
+
+aws iam create-role --role-name "$ROLE" \
+  --assume-role-policy-document file:///tmp/ec2-trust.json
+aws iam put-role-policy --role-name "$ROLE" \
+  --policy-name bedrock-invoke --policy-document file:///tmp/bedrock-policy.json
+aws iam attach-role-policy --role-name "$ROLE" \
+  --policy-arn arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+# ③ instance profile — EC2가 붙이는 건 역할이 아니라 이것.
+#    (이 두 줄을 빼먹으면 시작 마법사 목록에 안 뜹니다)
+aws iam create-instance-profile --instance-profile-name "$ROLE"
+aws iam add-role-to-instance-profile \
+  --instance-profile-name "$ROLE" --role-name "$ROLE"
 ```
 
-## 2. 배포 설정 만들기 — `./deploy init`
+> 💡 **SES 알림을 쓸 예정이면** 위 정책의 `Action` 배열에 `"ses:SendEmail"`, `"ses:SendRawEmail"`을 추가하세요(§4에서 provider=ses 선택 시).
+
+**② EC2 시작** — 시작 마법사에서:
+
+- 이름 `llm-gateway-t0` · AMI Ubuntu LTS · 타입 `t3.xlarge` · **Key pair** 선택(없으면 새로 생성해 `.pem` 다운로드)
+- 스토리지 gp3 40GB+
+- **Advanced details ▸ IAM instance profile = `llm-gateway-host`**
+- Security group:
+
+| 포트 | 소스 | 용도 |
+|---|---|---|
+| 22 | 작업자 랩톱 공인 IP `/32` | SSH |
+| 8000 | 사용자 PC 대역 (또는 `allowed_cidrs`) | 게이트웨이 (도메인 없을 때) |
+| 8080 | 관리자 대역 | Admin API (도메인 없을 때) |
+| 3000 | 관리자 대역 | Admin UI (도메인 없을 때) |
+| 80, 443 | 사용자 대역 | 도메인(route53-acm)을 쓸 때 |
+
+> ⚠️ SSH를 `0.0.0.0/0`으로 열지 마세요 — 랩톱 공인 IP `/32`로 좁히세요.
+> 이미 띄운 EC2라면 프로파일을 나중에 붙여도 됩니다(재시작 불필요):
+> `aws ec2 associate-iam-instance-profile --instance-id <i-xxxx> --iam-instance-profile Name=llm-gateway-host`
+
+**③ 접속 + 역할 확인** — EC2 안에서 IMDS를 두드려 역할 부착을 확인:
+
+▶ **실행** · 배포 EC2
 
 ```bash
+TOKEN=$(curl -sX PUT http://169.254.169.254/latest/api/token \
+  -H "X-aws-ec2-metadata-token-ttl-seconds: 60")
+curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
+  http://169.254.169.254/latest/meta-data/iam/security-credentials/
+# → llm-gateway-host 가 나오면 성공
+```
+
+### 1-3. Bedrock 모델 액세스 확인
+
+> **한 줄**: Anthropic 모델은 최초 호출 전 use case form이 **계정당 1회** 필요합니다 — 대개 이미 돼 있으니 확인만 합니다.
+
+다른 계정에서 처음 배포하는 경우 이 절이 특히 중요합니다. aws-cli가 아직 없으면 콘솔 CloudShell에서:
+
+▶ **실행** · CloudShell (리전 = 배포할 리전)
+
+```bash
+aws bedrock get-foundation-model-availability \
+  --region <배포리전> --model-id global.anthropic.claude-sonnet-4-5 \
+  --query authorizationStatus --output text
+# → AUTHORIZED 면 OK. 아니면 콘솔 Bedrock ▸ Model catalog 에서
+#   Anthropic 모델 하나를 골라 use case form 을 1회 제출 (즉시 승인, 3모델 모두 열림)
+```
+
+### 1-4. 도구 설치
+
+> **한 줄**: 도구 설치는 `bootstrap-ec2.sh`가 한 번에 합니다 — 손으로 깔 건 없습니다.
+
+먼저 저장소를 받고(스크립트가 그 안에 있습니다) 부트스트랩을 돌립니다:
+
+▶ **실행** · 배포 EC2
+
+```bash
+cd ~
+git clone <이 저장소> sample-agentic-ai-acceleration-kr
+ln -s ~/sample-agentic-ai-acceleration-kr/projects/awsome-ai-gateway ~/awsome-ai-gateway
+cd ~/awsome-ai-gateway
+bash deployment/scripts/bootstrap-ec2.sh   # git·docker+buildx·aws-cli·jq 등 + 버전 검증
+```
+
+> compose 경로에 terraform/kubectl/helm은 안 쓰지만 스크립트가 함께 깔아도 해롭지 않습니다.
+> **docker-buildx + BuildKit**이 이 스크립트가 설치하는 핵심입니다 — 기본 docker.io만으로는 일부 Dockerfile이 빌드되지 않습니다.
+
+**새 셸에서 마무리** — bootstrap이 추가한 docker 그룹은 현재 셸에 반영되지 않습니다:
+
+▶ **실행** · 배포 EC2
+
+```bash
+pkill -f 'vscode-server|cursor-server'   # VS Code/ Cursor 로 붙어있다면 Reload 후 새 세션
+# 또는 그냥 SSH 재접속
+
+docker ps && aws sts get-caller-identity
+# → 컨테이너 목록(비어도 OK) + assumed-role/llm-gateway-host ARN 이 나오면 준비 완료
+```
+
+---
+
+## 2. 설정 만들기 — `./deploy init` (또는 `configure`)
+
+> **한 줄**: 질문에 답하면 `deployment/gateway.yaml`(이 배포의 유일한 설정 원본)이 생깁니다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+cd ~/awsome-ai-gateway
+python3 -m venv docs/NDS/.venv
+docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 ./deploy init
 ```
 
-질문에 답하면 `deployment/gateway.yaml` 이 생성됩니다:
+질문 흐름(Enter = 기본값):
 
 ```
 환경 이름: my-gw
-AWS 리전 [ap-northeast-2]: ap-northeast-2
+AWS 리전: <배포 리전>
 배포 대상: compose
 규모 티어: t0
-HTTPS 도메인: none          ← 도메인이 없으면 none. 있으면 route53-acm
-알림 provider: mock         ← 이메일 발송이 필요하면 ses/smtp
-추가 기능: (스페이스로 선택, 기본 전부 off)
-OIDC 로그인 설정: y → Cognito issuer/client 정보 입력
+HTTPS 도메인: none            ← 도메인 없으면 none (나중에 추가 가능)
+알림 provider: mock           ← 이메일 발송 필요하면 ses/smtp
+추가 기능: (기본 전부 off — 다른 계정 테스트면 전부 off 권장)
+OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-login으로 접속)
+접근 허용 CIDR: <사용자 PC 대역>
 ```
 
-생성된 파일 예시:
+> ⚠️ `allowed_cidrs`를 비우면 **인터넷 전체에 게이트웨이가 열립니다** — 반드시 대역을 넣으세요.
 
-```yaml
-version: 1
-env: my-gw
-aws: { region: ap-northeast-2 }
-deploy: { target: compose, size_tier: t0 }
-network:
-  mode: public
-  allowed_cidrs: ["203.0.113.0/24"]   # ← 회사/VPN 대역을 넣으세요
-domain: { mode: none }
-features:
-  notifications: { provider: mock }
-clients:
-  models_profile: global
-```
+## 3. 배포 — `./deploy apply`
 
-> `allowed_cidrs` 를 비우면 **인터넷 전체에 게이트웨이가 열립니다** — 반드시
-> 사용자가 접속하는 공인 IP 대역을 넣으세요.
+> **한 줄**: render(산출물 생성) → 확인 → `docker compose up -d` 까지 한 명령입니다.
 
-## 3. 산출물 생성 — `./deploy render`
+▶ **실행** · 배포 EC2
 
 ```bash
-./deploy render
+./deploy apply --plan    # 무엇을 만들지 먼저 확인 (아무것도 안 바뀜)
+./deploy apply           # 확인 프롬프트 y → 빌드+기동 (첫 빌드 10~20분)
 ```
 
-`deployment/gen/<env>/` 에 세 파일이 생깁니다:
-
-| 파일 | 내용 |
-|---|---|
-| `docker-compose.yml` | 배포용 서비스 집합 (로컬개발용 mock·관측스택 제거됨) |
-| `.env` | DB 비밀번호·VK 암호화키·세션 시크릿 — **자동 생성, 권한 0600** |
-| `Caddyfile` | 포트/도메인 라우팅 + IP 허용목록 |
-
-> ⚠️ **`deployment/gen/<env>/.env` 를 잃으면 발급된 Virtual Key가 전부 무효화됩니다.**
-> `VIRTUAL_KEY_ENCRYPTION_KEY` 값을 비밀번호 관리자나 Secrets Manager에 별도 보관하세요.
-
-시크릿은 다시 `render` 해도 바뀌지 않습니다 (없는 키만 채움).
-
-## 4. 기동
-
-```bash
-docker compose --env-file deployment/gen/<env>/.env \
-  -f deployment/gen/<env>/docker-compose.yml up -d --build
-```
-
-> ⚠️ **`--env-file` 을 빼면 안 됩니다.** 없으면 compose가 `${POSTGRES_PASSWORD}`
-> 등을 repo 루트의 `.env`나 기본값으로 interpolate 해서 **앱과 DB의 비밀번호가
-> 어긋납니다.** `deploy apply` 명령은 이 플래그를 자동으로 붙입니다:
-> `./deploy apply --build`
-
-첫 실행은 이미지 빌드에 10~20분 걸립니다. 이후 `up -d` 만으로 재기동됩니다.
-
-AWS 자격증명을 access key로 쓰는 경우, `deployment/gen/<env>/.env` 에 추가:
-
-```bash
-AWS_ACCESS_KEY_ID=AKIA...
-AWS_SECRET_ACCESS_KEY=...
-```
-
-## 5. 확인 — `./deploy doctor`
-
-```bash
-./deploy doctor
-```
+끝나면 doctor가 자동 실행됩니다 — 전부 ✓이면 설치 완료:
 
 ```
-✓ [OK  ] artifacts: render 산출물 존재
 ✓ [OK  ] secrets: 필수 시크릿 존재
-✓ [OK  ] services: postgres healthy
-✓ [OK  ] services: migration 완료 (exited)
-✓ [OK  ] services: gateway-proxy healthy
-✓ [OK  ] services: admin-api healthy
-✓ [OK  ] migration: alembic head = 0040
+✓ [OK  ] services: postgres healthy / migration 완료 / gateway-proxy healthy ...
 ✓ [OK  ] drift: .env 가 gateway.yaml 과 일치
 ```
 
-전부 ✓ 이면 설치 완료입니다. ✗ 가 있으면 해당 항목 메시지대로 조치하세요.
+> ⚠️ `deployment/gen/<env>/.env`에는 DB 비밀번호와 `VIRTUAL_KEY_ENCRYPTION_KEY`가
+> 자동 생성돼 들어갑니다(권한 0600). **이 파일을 잃으면 발급된 Virtual Key가 전부
+> 무효화됩니다** — 값을 비밀번호 관리자에 별도 보관하세요(§6).
 
-## 6. 접속 주소
+## 4. 접속 확인
 
-**도메인 없이 설치한 경우** (`domain.mode: none`):
+`domain.mode: none`으로 설치했다면 포트로 접속:
 
 | 서비스 | 주소 |
 |---|---|
-| 게이트웨이 (클라이언트가 쓸 주소) | `http://<서버IP>:8000` |
-| Admin API | `http://<서버IP>:8080` |
-| Admin UI | `http://<서버IP>:3000` |
+| 게이트웨이 (Claude Code/Codex가 쓸 주소) | `http://<EC2 퍼블릭 IP>:8000` |
+| Admin API | `http://<EC2 퍼블릭 IP>:8080` |
+| Admin UI | `http://<EC2 퍼블릭 IP>:3000` — OIDC를 끄고 설치했으면 dev-login 버튼 |
 
-**도메인으로 설치한 경우**: `gateway.<도메인>`, `admin-api.<도메인>`, `admin.<도메인>` (자동 HTTPS)
+**테스트**: 게이트웨이에 요청이 가는지 — `curl http://<IP>:8000/health`
 
-> Cowork(Claude Desktop)는 `https://` 주소만 받습니다 — Cowork 사용자가 있으면
-> 도메인을 준비하고 `domain.mode` 를 변경해 재배포하세요 ([update.md](update.md)).
+> Cowork(Claude Desktop)는 `https://`만 받습니다 — `domain.mode: none`이면
+> Cowork는 동작하지 않습니다(Claude Code·Codex는 됨). 도메인을 나중에 얻으면
+> [update.md](update.md)의 도메인 추가 절로 전환하세요.
 
-## 7. 첫 관리자 로그인
-
-OIDC를 설정했다면 Admin UI에서 SSO 로그인. 설정하지 않았다면 dev-login 버튼으로
-들어간 뒤 **반드시 OIDC를 설정하고 `DEV_LOGIN_ENABLED=false` 로 바꾸세요**
-(`gateway.yaml`에 `oidc:` 블록 추가 → `render` → 재기동).
-
-## 8. 백업 설정 (중요 — 단일 노드라 백업이 전부입니다)
+## 5. 이후 운영
 
 ```bash
-# DB 백업 (cron 등록 예시 — 매일 02:00, 7일 보관)
-0 2 * * * docker compose -f ~/awsome-ai-gateway/projects/awsome-ai-gateway/deployment/gen/<env>/docker-compose.yml \
-  exec -T postgres pg_dump -U gateway gateway | gzip > ~/backups/gateway-$(date +\%F).sql.gz
+./deploy configure     # 설정 변경 — 항목별 확인 → 끝에서 배포까지
+./deploy doctor        # 상태·드리프트 점검
+./deploy apply --plan  # 변경 미리보기
 ```
 
-함께 보관할 것: `deployment/gen/<env>/.env` (특히 `VIRTUAL_KEY_ENCRYPTION_KEY`).
+## 6. 백업 (중요 — 단일 노드라 백업이 전부입니다)
+
+▶ **실행** · 배포 EC2 — cron 등록 예시
+
+```bash
+mkdir -p ~/backups
+# 매일 02:00, DB 덤프 + .env 사본
+(crontab -l; echo '0 2 * * * docker compose --env-file ~/awsome-ai-gateway/deployment/gen/<env>/.env \
+  -f ~/awsome-ai-gateway/deployment/gen/<env>/docker-compose.yml \
+  exec -T postgres pg_dump -U gateway gateway | gzip > ~/backups/gateway-$(date +\%F).sql.gz') | crontab -
+cp ~/awsome-ai-gateway/deployment/gen/<env>/.env ~/backups/env-$(date +%F).bak
+```
 
 ---
 
@@ -170,8 +256,10 @@ OIDC를 설정했다면 Admin UI에서 SSO 로그인. 설정하지 않았다면 
 
 | 증상 | 확인 |
 |---|---|
+| `docker ps` permission denied | bootstrap 후 재로그인 안 함 → SSH 재접속 |
+| 이미지 빌드 실패 (COPY … no source files) | buildx 미설치 → `bootstrap-ec2.sh`가 BuildKit을 켭니다. 재실행 |
 | 컨테이너가 안 뜸 | `docker compose -f gen/<env>/docker-compose.yml logs <서비스>` |
-| 마이그레이션 실패 | postgres 이미지가 `pgvector/pgvector:pg16` 인지 확인 (stock postgres는 실패) |
-| Bedrock 호출 4xx/5xx | 서버의 AWS 자격증명·리전·모델 접근 권한. `docker compose logs gateway-proxy` |
-| 로그인이 안 됨 | OIDC 4개 값(issuer/client/authorize/token) 확인 — hosted-ui URL은 issuer가 아님 |
-| 클라이언트 403 | 사용자 PC 공인 IP가 `allowed_cidrs` 안에 있는지 |
+| Bedrock 4xx | §1-3 모델 액세스 + §1-2 instance role 확인. `docker compose logs gateway-proxy` |
+| 로그인 안 됨 | OIDC 4개 값 확인 — hosted-ui authorize/token URL은 issuer가 아님 |
+| 클라이언트 403 | 사용자 PC 공인 IP가 `allowed_cidrs`와 SG 양쪽에 있는지 |
+| `deploy` 명령 에러 | 메시지에 다음 행동이 같이 나옵니다 — 안내를 그대로 따르세요 |
