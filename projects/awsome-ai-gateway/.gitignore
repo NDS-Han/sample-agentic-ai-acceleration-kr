@@ -11,6 +11,10 @@ deployment/gen/
 deployment/gateway.yaml
 deployment/gateway.captured-*.yaml
 
+# eks 라이브 values 오버레이 — 실 계정/엔드포인트/시크릿 참조가 들어가므로
+# 머신별 *.local.yaml 로 두고 추적된 템플릿은 건드리지 않는다 (브랜치 전환 자유)
+deployment/charts/llm-gateway/values-eks-*.local.yaml
+
 # deploy 도구 venv / 캐시 (docs/NDS/deploy/ 패키지)
 docs/NDS/.venv/
 __pycache__/

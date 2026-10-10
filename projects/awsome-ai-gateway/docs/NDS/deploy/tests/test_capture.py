@@ -82,7 +82,10 @@ def test_diff_docs_finds_changes():
 # ==============================================================================
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
-DEV_VALUES = REPO_ROOT / "deployment/charts/llm-gateway/values-eks-fargate-dev.yaml"
+# 라이브 실측값은 .local.yaml(git 미추적 오버레이)에 둔다 — env_values_file 과 같은 우선순위
+DEV_VALUES = REPO_ROOT / "deployment/charts/llm-gateway/values-eks-fargate-dev.local.yaml"
+if not DEV_VALUES.exists():
+    DEV_VALUES = REPO_ROOT / "deployment/charts/llm-gateway/values-eks-fargate-dev.yaml"
 
 
 def _fake_eks(monkeypatch):

@@ -69,8 +69,12 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
 
 ### 내부 동작
 
-1. values 레이어 = `values.yaml`(차트 기본) → `values-eks-fargate-<env>.yaml`(기존)
+1. values 레이어 = `values.yaml`(차트 기본) → `values-eks-fargate-<env>[.local].yaml`
    → `gen/<env>/eks/values.yaml`(우리 오버레이, 마지막이 이긴다)
+   - **라이브 값은 `values-eks-fargate-<env>.local.yaml`에 두세요** — git이
+     무시하는(gitignore) 머신별 파일이라 실 계정·엔드포인트·이미지 태그를
+     담아도 커밋되지 않고, 추적된 템플릿이 깨끗해 브랜치 전환을 막지 않습니다.
+     `.local.yaml`이 있으면 추적본보다 우선 선택됩니다.
 2. `--set` 동적값 = terraform output 에서 해석 (install-eks.sh 와 동일 계약):
    `global.imageRegistry`, `database.external.host`, `redis.external.host`,
    `*.serviceAccount.annotations.eks.amazonaws.com/role-arn`, cognito issuer,

@@ -2,6 +2,8 @@
 """eks 렌더러 테스트 — 오버레이가 관리 키만 담고 env values 와 레이어링."""
 from __future__ import annotations
 
+import re
+
 import yaml
 import pytest
 
@@ -64,9 +66,9 @@ def test_deploy_meta_layers_env_values_first(tmp_path):
     assert meta["release"] == "llm-gateway"
     assert meta["namespace"] == "llm-gateway"
     assert meta["env_dir"] == "deployment/terraform/environments/llm-gateway-dev"
-    # env overlay(values-eks-fargate-dev.yaml 이 실제 존재)가 먼저, 우리 것이 마지막
+    # env overlay(values-eks-fargate-dev[.local].yaml 이 실제 존재)가 먼저, 우리 것이 마지막
     layers = meta["values_layers"]
-    assert layers[0].endswith("values-eks-fargate-dev.yaml")
+    assert re.search(r"values-eks-fargate-dev(\.local)?\.yaml$", layers[0])
     assert layers[-1].endswith("eks/values.yaml")
 
 

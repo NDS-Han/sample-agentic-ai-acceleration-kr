@@ -4,8 +4,10 @@
 설계: 기존 배포(install-eks.sh + values-eks-fargate-<env>.yaml)를 **이어받는다**.
 차트의 기본 values 와 env overlay 는 그대로 쓰고, 이 렌더러는 gateway.yaml 이
 소유하는 키만 담은 마지막 오버레이를 만든다 — helm 의 -f 는 나중 파일이 이기므로
-  base values.yaml → values-eks-fargate-<env>.yaml → gen/<env>/eks/values.yaml
-순으로 쌓인다. generate, don't mutate — env values 파일 자체는 건드리지 않는다.
+  base values.yaml → values-eks-fargate-<env>[.local].yaml → gen/<env>/eks/values.yaml
+순으로 쌓인다. *.local.yaml(git 미추적, 머신별 라이브 값)이 있으면 우선 —
+추적된 템플릿을 배포값으로 더럽히지 않아 브랜치 전환을 막지 않는다.
+generate, don't mutate — env values 파일 자체는 건드리지 않는다.
 
 산출물 (out_dir):
   values.yaml  — helm -f 로 전달할 오버레이 (관리 키만)
@@ -30,8 +32,15 @@ TAGGED_SERVICES = (
 
 
 def env_values_file(cfg: GatewayConfig, repo_root: Path = REPO_ROOT) -> Path | None:
-    """기존 배포가 쓰던 env overlay 를 찾는다 — 없으면 None (차트 기본값만)."""
+    """기존 배포가 쓰던 env overlay 를 찾는다 — 없으면 None (차트 기본값만).
+
+    우선순위: *.local.yaml(머신별 라이브 값, git 미추적 — 브랜치 전환을 막지 않음)
+    → 추적된 env 파일(템플릿). 라이브 계정·엔드포인트·태그 같은 실측값은
+    반드시 .local.yaml 쪽에 둔다.
+    """
     for cand in (
+        repo_root / CHART_DIR / f"values-eks-fargate-{cfg.env}.local.yaml",
+        repo_root / CHART_DIR / f"values-eks-{cfg.env}.local.yaml",
         repo_root / CHART_DIR / f"values-eks-fargate-{cfg.env}.yaml",
         repo_root / CHART_DIR / f"values-eks-{cfg.env}.yaml",
     ):
