@@ -2,6 +2,8 @@
 
 > ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-A** · 업데이트 ID **US-17** · 등급 **권장**
 
+> ⚠️ US-18(2026-10-09)부터 이 기능은 US-18 배포에 함께 들어간다. 아직 적용 전이면 [8-D](8-D-upstream-sync.md#us-18-로-따라-할-때-달라지는-것) 를 「US-18」 차이대로 따라 한다 — 3·4·5절처럼 gateway-proxy 만 바꾸면 안 된다(새 이미지가 DB 변경 0037~0039 를 전제로 한다). 이 문서는 2절·6절 확인과 7절 끄기에 쓴다.
+
 Claude Code 의 Auto mode 는 도구를 실행하기 전에 "안전한가" 판정을 받는다. Claude Code 는 판정을 부탁하는 표시(`anthropic-beta` 헤더의 `dangerous-tool-use`)와 판단 재료(본문 `safeguards`)를 실어 보내고, 응답의 `safeguard_results` 로 판정을 받는다. 지금 게이트웨이는 beta 헤더를 전부 버려서 두 가지가 생긴다.
 
 - 판정이 오지 않으니 Claude Code 가 PC 쪽 분류기로 바꾼다. 판정이 필요한 도구마다 별도 요청(약 4.7만 토큰)이 나가고, "classifier 요청 과금" 안내가 뜬다.
@@ -48,10 +50,9 @@ US-17 은 beta 중 정해 둔 4개와 `safeguards` 만 Bedrock 으로 넘기고(
 
 ⑤⑥ 은 curl 처럼 판정이 필요한 명령일 때만 생긴다.
 
-- 바뀌는 것: gateway-proxy 이미지 하나(`1.0.85-betas`). DB, 다른 서비스, values 의 다른 값은 그대로다.
+- 바뀌는 것: gateway-proxy 이미지(`1.0.85` 이상, US-18 에서는 `1.0.86-us18`).
 - 넘기는 beta: `dangerous-tool-use-2026-09-03`(본문 `safeguards` 와 함께), `per-turn-control-2026-07-01`, `inline-tools-2026-09-15`, `thinking-display-updates-2026-08-18`
 - 끄기: 설정 `BEDROCK_FORWARD_BETAS` 를 빈 값으로 하면 재빌드 없이 이전 동작이 된다(7절).
-- 시간: 약 20분(이미지 빌드 포함). gateway-proxy 만 롤링되어 추론은 끊기지 않는다.
 - 직원 PC 는 바꿀 것이 없다.
 
 명령 블록 위의 ▶ **실행** 표시가 실행할 곳이다(배포 EC2 / 관리자 PC). 📋 = 기대 출력.
@@ -213,7 +214,7 @@ kubectl -n llm-gateway get deploy llm-gateway-gateway-proxy \
   -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
 ```
 
-📋 `…/gateway-proxy:1.0.85-betas`
+📋 `…/gateway-proxy:<태그>` 가 나온다. 예: `…/gateway-proxy:1.0.86-us18`.
 
 키와 주소를 다시 받는다. 빌드·배포 사이에 SSH 창이 바뀌었을 수 있으므로 같은 창이어도 그대로 한다 — 이미 있으면 같은 값으로 다시 채워질 뿐이다. 로그인은 2절에서 했으므로 터널·로그인은 필요 없다.
 
