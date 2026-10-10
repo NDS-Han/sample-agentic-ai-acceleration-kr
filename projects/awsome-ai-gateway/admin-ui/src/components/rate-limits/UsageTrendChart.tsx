@@ -9,7 +9,7 @@
 // 데이터는 노드/윈도우 변경 시에만 fetch — 폴링은 live RPM 카드가 담당.
 
 import { useEffect, useMemo, useState } from 'react';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import {
   ResponsiveContainer,
   AreaChart,
@@ -50,7 +50,14 @@ interface UsageTrendChartProps {
 // X축/툴팁은 브라우저 로컬 TZ 가 아니라 앱 전역 리포팅 TZ(REPORTING_TIMEZONE)로
 // 그린다 — 버킷은 서버가 리포팅 TZ 기준으로 자르는데 라벨만 로컬 TZ 면 같은
 // 버킷이 다른 시각으로 읽힌다. timeZone 미지정 시 브라우저 TZ 로 fallback.
-export function fmtTick(t: number, bucketSec: number, timeZone?: string): string {
+// 시 suffix 는 로케일로 — "14시" 는 ko 전용, en 은 "14:00" 이 자연스럽다.
+// locale 생략 시 ko 로 취급(기존 호출·테스트 시그니처 유지).
+export function fmtTick(
+  t: number,
+  bucketSec: number,
+  timeZone?: string,
+  locale: string = 'ko',
+): string {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
     month: 'numeric',
@@ -63,7 +70,7 @@ export function fmtTick(t: number, bucketSec: number, timeZone?: string): string
     parts.find((p) => p.type === k)?.value ?? '';
   const hh = get('hour').padStart(2, '0');
   if (bucketSec >= 3600) {
-    return `${get('month')}/${get('day')} ${hh}시`;
+    return `${get('month')}/${get('day')} ${locale === 'ko' ? `${hh}시` : `${hh}:00`}`;
   }
   return `${hh}:${get('minute')}`;
 }
@@ -77,6 +84,7 @@ function fmtValue(v: number, metric: Metric): string {
 export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps) {
   const t = useTranslations('rateLimits');
   const reportingTz = useReportingTz();
+  const locale = useLocale();
   const [window, setWindow] = useState<TrendWindow>('24h');
   const [metric, setMetric] = useState<Metric>('rpm');
   const [trend, setTrend] = useState<UsageTrend | null>(null);
@@ -109,6 +117,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
       rpm: (p.requests * 60) / b,
       tpm: (p.tokens * 60) / b,
       cph: (p.cost_usd * 3600) / b,
+      partial: p.partial === true,
     }));
   }, [trend]);
 
@@ -169,7 +178,7 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
               <CartesianGrid strokeDasharray="3 3" className="stroke-border" vertical={false} />
               <XAxis
                 dataKey="t"
-                tickFormatter={(v) => fmtTick(v, trend.bucket_sec, reportingTz)}
+                tickFormatter={(v) => fmtTick(v, trend.bucket_sec, reportingTz, locale)}
                 tick={{ fontSize: 10 }}
                 tickLine={false}
                 axisLine={false}
@@ -183,7 +192,11 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
                 width={44}
               />
               <Tooltip
-                labelFormatter={(v) => fmtTick(Number(v), trend.bucket_sec, reportingTz)}
+                // 진행 중 버킷(마지막 점)은 아직 다 차지 않았다 — 툴팁 라벨에 표시.
+                labelFormatter={(v, items) =>
+                  fmtTick(Number(v), trend.bucket_sec, reportingTz, locale) +
+                  (items?.[0]?.payload?.partial ? ` ${t('trendPartial')}` : '')
+                }
                 formatter={(v) => [fmtValue(Number(v), metric), metric.toUpperCase()]}
                 contentStyle={{
                   backgroundColor: 'hsl(var(--card))',

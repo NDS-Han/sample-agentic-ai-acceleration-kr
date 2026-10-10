@@ -145,7 +145,7 @@ fi
 
 hdr "Next steps"
 cat <<EOT
-  The keys take effect at the next install-eks.sh $DEPLOY_ENV (8-D ⑦): the ExternalSecret
+  The keys take effect at the next install-eks.sh $DEPLOY_ENV (8-D step 7): the ExternalSecret
   is recreated, ESO fetches the master password from $SECRET_NAME, the migration
   Job reads it as DB_MASTER_PASSWORD.
 EOT

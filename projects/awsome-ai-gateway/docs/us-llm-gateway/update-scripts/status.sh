@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # status.sh — which updates this gateway has applied
 #
-# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15 and US-16 as
+# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15, US-16 and US-18 as
 #       applied, partially applied, or not applied, and print the next command
 #       for each. Every other US-NN gets a `--` line that says where it is
 #       checked instead (another account, the employee PC, 14-postdeploy-check.sh),
@@ -91,8 +91,12 @@ SELECT 'S55=' || status || '|' || coalesce(provider_model_id, '') FROM model.mod
 SELECT 'S55P=' || count(*) FROM model.model_pricings
  WHERE model_alias='claude-sonnet-5-5' AND effective_until IS NULL;
 SELECT 'OLD=' || count(*) FROM model.model_aliases
- WHERE alias IN ('claude-opus-5','claude-sonnet-5','claude-opus-4-8') AND status='ACTIVE';" 2>&1)
-  US02_OUT="$out"   # probe_us13/us16 read their markers from the same query (one psql pod)
+ WHERE alias IN ('claude-opus-5','claude-sonnet-5','claude-opus-4-8') AND status='ACTIVE';
+SELECT 'ALEMBIC=' || version_num FROM public.alembic_version;
+SELECT 'S55CR=' || cache_read_price_per_1k_tokens FROM model.model_pricings
+ WHERE model_alias='claude-sonnet-5-5' AND effective_until IS NULL
+ ORDER BY effective_from DESC LIMIT 1;" 2>&1)
+  US02_OUT="$out"   # probe_us13/us16/us18 read their markers from the same query (one psql pod)
 
   routing=$(grep -o 'ROUTING=[a-z]*' <<<"$out" | head -1 | cut -d= -f2)
   alias_n=$(grep -o 'ALIAS=[0-9]*'   <<<"$out" | head -1 | cut -d= -f2)
@@ -349,21 +353,28 @@ probe_us07() {
 # role·ServiceAccount annotation 정합까지 본다. 스크립트 번호(21/22)는 US 번호가
 # 아니라 이 디렉터리의 실행 순서 번호다.
 probe_notif_ses() {
-  local role arn sa_arn role_state sa_state sender
+  local role sa_name arn sa_arn role_state sa_state sender
   role="llm-gateway-${DEPLOY_ENV}-notification-worker-ses"
-  sa_name="notification-worker"
   role_state="ok"
   sa_state="ok"
 
   sender=$(kubectl get deploy "${HELM_RELEASE}-notification-worker" -n "$NS" \
-    -o jsonpath='{.spec.template.spec.containers[?(@.name=="notification-worker")].env[?(@.name=="EMAIL_SENDER_TYPE")].value}' 2>/dev/null)
+    -o jsonpath='{.spec.template.spec.containers[?(@.name=="notification-worker")].env[?(@.name=="EMAIL_SENDER_TYPE")].value}' 2>/dev/null) \
+    || { row warn "SES" "Notification worker — deployment 조회 실패 (kubectl)"; return; }
+  # SA 이름은 하드코딩하지 않는다 — serviceAccount.name override 가 있으면
+  # trust policy sub 와 이 조회가 같이 어긋난다. deployment 가 실제로 쓰는
+  # SA 를 읽고, 못 읽으면 차트 기본값으로 떨어진다.
+  sa_name=$(kubectl get deploy "${HELM_RELEASE}-notification-worker" -n "$NS" \
+    -o jsonpath='{.spec.template.spec.serviceAccountName}' 2>/dev/null || true)
+  sa_name="${sa_name:-notification-worker}"
   raw "sender=$sender"
 
-  # mock 이면 이메일이 실제 발송되지 않는다. IRSA 상태와 무관하게 먼저 알린다.
+  # mock 이면 이메일이 실제 발송되지 않는다 — 알림은 선택 기능이라 warn/TODO 가
+  # 아니라 정보 행으로 내린다(mock 으로 두는 배포에서는 "모두 적용"이 영영
+  # 나오지 않는다). IRSA 상태와 무관하게 먼저 알리고 돌아간다.
   if [ -z "$sender" ] || [ "$sender" = "mock" ]; then
-    row warn "SES" "Notification email — 발송하지 않음 (provider=${sender:-unknown})"
-    detail "21-set-notification-provider.sh 로 internal_api / smtp / ses 를 선택해야 실제 메일이 나간다"
-    TODO+=("bash 21-set-notification-provider.sh <mock|internal-api|smtp|ses> --apply   # provider 선택")
+    row skip "SES" "Notification email — 미사용 (provider=${sender:-unknown}, 선택 기능)"
+    detail "메일이 필요하면 21-set-notification-provider.sh 로 internal_api / smtp / ses 를 선택"
     return
   fi
 
@@ -374,15 +385,17 @@ probe_notif_ses() {
     return
   fi
 
+  # role 유무와 무관하게 SA 어노테이션은 읽는다 — role 이 없어도 SA 에
+  # 옛 ARN 이 남아 있으면 "annotation 달림 ≠ 권한 있음"을 구분해서 보여줘야 한다.
+  sa_arn=$(kubectl get sa "$sa_name" -n "$NS" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null)
   if ! aws iam get-role --role-name "$role" >/dev/null 2>&1; then
     role_state="missing"
-    sa_state="unknown"
     arn=""
-    sa_arn=""
+    if [ -n "$sa_arn" ]; then sa_state="mismatch"; else sa_state="missing"; fi
   else
     arn=$(aws iam get-role --role-name "$role" --query 'Role.Arn' --output text 2>/dev/null)
-    sa_arn=$(kubectl get sa "$sa_name" -n "$NS" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null)
-    [ "$sa_arn" = "$arn" ] || sa_state="mismatch"
+    if [ -z "$sa_arn" ]; then sa_state="missing"
+    elif [ "$sa_arn" != "$arn" ]; then sa_state="mismatch"; fi
   fi
 
   if [ "$role_state" = "ok" ] && [ "$sa_state" = "ok" ]; then
@@ -391,8 +404,8 @@ probe_notif_ses() {
   else
     row warn "SES" "Notification worker (ses) + IRSA — 미적용"
     [ "$role_state" = "missing" ] && detail "IAM role $role not found"
-    [ "$sa_state" = "mismatch" ] && detail "ServiceAccount annotation($sa_arn) != role($arn)"
-    [ "$sa_state" = "unknown" ]  && detail "ServiceAccount $sa_name not annotated"
+    [ "$sa_state" = "mismatch" ] && detail "ServiceAccount annotation($sa_arn) != role(${arn:-missing})"
+    [ "$sa_state" = "missing" ]  && detail "ServiceAccount $sa_name not annotated"
     TODO+=("bash 22-setup-notification-ses-irsa.sh --apply   # SES 사용 시 IRSA")
   fi
   raw "role=$role arn=$arn sa=$sa_name sa_arn=$sa_arn"
@@ -546,6 +559,39 @@ probe_us16() {
   fi
 }
 
+# ── US-18 — budget/cost/permission fixes (required; part of a fresh install) ──
+# Same query as US-13. Applied = schema at 0039 or later (upstream 0037-0039 come
+# with the new images, ops/8-D-upstream-sync.md) AND, when Sonnet 5.5 is
+# registered, its open cache-read price equals pricing.tsv (Bedrock cut it 50%
+# from 2026-10-07). The price step can run before the images, so "schema old,
+# price new" and "schema new, price old" are both normal in-between states.
+probe_us18() {
+  local head s55cr want="" a in out c5m c1h cread asof src
+  if ! grep -q 'ALEMBIC=' <<<"${US02_OUT:-}"; then
+    row warn "US-18" "예산·비용·권한 결함 수정 — 판정 불가"
+    detail "DB 조회 결과가 없습니다 (US-02 줄 참조)"
+    return
+  fi
+  head=$(grep -o 'ALEMBIC=[0-9]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  s55cr=$(grep -o 'S55CR=[0-9.]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  while IFS=$'\t' read -r a in out c5m c1h cread asof src; do
+    [ "$a" = claude-sonnet-5-5 ] && want=$cread
+  done < "$LIB_DIR/pricing.tsv"
+  if [ -z "$head" ] || [ "$((10#$head))" -lt 39 ]; then
+    row bad "US-18" "예산·비용·권한 결함 수정 — 미적용 (필수)"
+    detail "DB 스키마 ${head:-?} (0039 필요) — 절차는 ops/8-D-upstream-sync.md 「US-18 로 따라 할 때」"
+    TODO+=("(수동) docs/us-llm-gateway/ops/8-D-upstream-sync.md — US-18 (이미지 5개 + DB 0037~0039 + 단가 08)")
+  elif [ -n "$s55cr" ] && [ -n "$want" ] && \
+       ! awk -v a="$s55cr" -v b="$want" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+    row warn "US-18" "예산·비용·권한 결함 수정 — 부분 적용 (Sonnet 5.5 단가)"
+    detail "DB 스키마 $head · claude-sonnet-5-5 캐시 읽기 $s55cr (pricing.tsv $want)"
+    TODO+=("bash 08-set-model-pricing.sh --alias claude-sonnet-5-5 --apply")
+  else
+    row ok "US-18" "예산·비용·권한 결함 수정"
+    detail "DB 스키마 $head${s55cr:+ · claude-sonnet-5-5 캐시 읽기 $s55cr}"
+  fi
+}
+
 # ── Items this script does not judge — listed so nothing reads as "applied" by
 #    omission. Each line says where the real check is.
 info_us08() {
@@ -589,8 +635,7 @@ info_rows "US-14" "Claude Code Windows 설치 파일 — 직원 PC 쪽 (이 스�
   "설치 여부는 직원 PC 에서 — claude-code/installer/cc-installer-admin-e2e-windows.md"
 probe_us15
 probe_us16
-
-# ── notification-worker SES 발송 설정·IRSA 판정 (스크립트 21/22 — US 번호 아님)
+probe_us18
 probe_notif_ses
 
 echo

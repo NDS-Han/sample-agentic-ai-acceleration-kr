@@ -18,7 +18,7 @@
 | role | 해석 | 비고 |
 |---|---|---|
 | `affected_user` | `payload.user_id` → `auth.users` | `is_active` 사용자만. 없으면 스킵 |
-| `team_leader` | `payload.team_id` → `auth.teams.leader_user_id` → `auth.users` | `team_id` 없으면 user의 소속 팀으로 폴백. **리더 미지정 팀이면 발송 안 함**(BR-RCP-04) |
+| `team_leader` | `payload.team_id` → `auth.users` 중 `role='TEAM_LEADER'` + `is_active` 전원 | `team_id` 없으면 user의 소속 팀으로 폴백. 팀에 리더가 여러 명일 수 있어 포인터(`auth.teams.leader_user_id`, 표시용)가 아니라 role로 판정. **리더가 없으면 발송 안 함**(BR-RCP-04) |
 | `admin` | `auth.users` 전체 조회 | `role='ADMIN'` + `is_active` 인 **모든** 사용자 |
 
 공통 규칙:
@@ -33,7 +33,7 @@
 | event_type | 본인 | 팀 리더 | Admin | 상태 | 비고 |
 |---|:-:|:-:|:-:|:-:|---|
 | `budget_threshold` | ✅ | ✅* | | live | 유일하게 팀 리더에게 가는 이벤트. *리더 미지정 팀은 리더 메일 없음 |
-| `key_revoked` | ✅ | | ✅ | live | |
+| `key_revoked` | ✅ | | ✅ | live | 일괄 폐기(`payload.bulk=true`, force_reauth)는 admin 역할 생략 — admin 메일 폭풍 방지 |
 | `auth_failure_spike` | | | ✅ | live | |
 | `degradation_mode` | ✅* | | ✅ | live | *seed는 admin만 — dev DB에 affected_user 추가됨(§4 참고) |
 | `key_expiring` | ✅ | | | dead | producer 없음 — api-key-helper가 자동 갱신 |

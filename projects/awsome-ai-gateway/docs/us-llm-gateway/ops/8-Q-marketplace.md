@@ -99,14 +99,16 @@ aws bedrock-runtime invoke-model --region ap-south-1 \
 
 Claude Code의 모델 피커에서 Default/1M 항목은 `claude-opus-5[1m]` 같은 **`[1m]` 접미 와이어
 이름**을 보낸다. 게이트웨이에서는 별도 alias로 등록한다(선례: `claude-sonnet-4-6[1m]` →
-`global.anthropic.claude-sonnet-4-6`). 단, Bedrock은 `anthropic_beta` 헤더를 받지 않아
-게이트웨이가 제거하므로 **현재 [1m] 요청은 일반 모델 호출과 동일**하다 — 진짜 1M 컨텍스트는
-Bedrock 측 지원 방식이 확인되면 별도 작업이다.
+`global.anthropic.claude-sonnet-4-6`). 진짜 1M 컨텍스트가 되려면 클라이언트의 beta 가
+`anthropic_beta` 본문 필드로 Bedrock 까지 도달해야 하는데, 게이트웨이는
+`BEDROCK_FORWARD_BETAS` 에 나열된 beta 만 전달한다 — 목록에 없는 beta 는 버려지므로
+**현재 [1m] 요청은 일반 모델 호출과 동일**하다. 1M 이 실제로 필요하면 해당 beta 를
+forward 목록에 추가하는 설정 변경과 함께 Bedrock 측 지원 여부를 검증해야 한다.
 
 ## 참고 — 이 에러와 무관한 비슷한 403
 
 | 에러 | 원인 |
 |---|---|
 | `AccessDeniedException … aws-marketplace` | 이 절 — Marketplace 구독 없음 |
-| `not_found_error` (HTTP 404, 게이트웨이 응답) | alias 미등록 — §8-M 또는 /models 에서 등록. invoke-backend는 `default_model` 폴백(2026-09 추가)으로 대체 가능 |
+| `not_found_error` (HTTP 404, 게이트웨이 응답) | alias 미등록 — §8-M 또는 /models 에서 등록 |
 | `ValidationException … model identifier` | `provider_model_id` 오타 — `global.`/`us.` 접두사 확인(§8-M ⓒ) |

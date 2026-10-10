@@ -50,6 +50,7 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
     cap_source?: 'individual' | 'team_default' | null;
     downgrade_rule_count?: number | null;
     downgrade_enabled?: boolean | null;
+    alert_thresholds?: number[] | null;
   }
 
   // 조회 실패를 "예산 없음"과 구분 — 실패 시 재시도 가능한 에러 상태를 렌더한다.
@@ -84,6 +85,8 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
       cap_source: r.cap_source ?? null,
       downgrade_rule_count: r.downgrade_rule_count ?? null,
       downgrade_enabled: r.downgrade_enabled ?? null,
+      // 빈 배열은 "알림 없음" 이라는 유효한 설정 — null(예산 미설정)과 구별해 그대로 넘긴다.
+      alert_thresholds: r.alert_thresholds ?? null,
     } as BudgetSummaryItem;
   });
 

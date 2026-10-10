@@ -38,7 +38,7 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.cli import VirtualKeyIssueResponse
 from app.services.cli_service import CLIService
 from app.services.key_service import KeyService
-from app.services.user_team_service import UserTeamService
+from app.services.user_team_service import UserTeamService, release_stale_leader_pointer
 
 logger = structlog.get_logger()
 
@@ -480,7 +480,8 @@ class OIDCService:
         # 되돌아가지 않도록 보존한다. ADMIN_GROUPS 매칭(승격) / 제외(강등)는 그대로 반영.
         if existing.role == UserRole.TEAM_LEADER and role == UserRole.DEVELOPER:
             role = UserRole.TEAM_LEADER
-        if existing.role != role:
+        role_changed = existing.role != role
+        if role_changed:
             logger.info(
                 "oidc.user_role_changed",
                 user_id=str(existing.id),
@@ -488,4 +489,27 @@ class OIDCService:
                 new_role=role.value,
             )
             existing.role = role
+        # 팀/역할이 바뀌면서 옛 팀의 leader_user_id 가 이 사람을 계속 가리키는
+        # 스테일 포인터를 정리한다 — 승격(ADMIN)·그룹 변경 강등·팀 이동 경로.
+        # 변동 없는 로그인마다 savepoint+SELECT 를 타지 않도록 변경 시에만 돌린다
+        # — 이 경로는 issue_key 의 10k boot storm 에 맞춰 튜닝된 핫 패스다.
+        # 과거에 남은 스테일 포인터는 DELETE /teams/{id}/leaders/{uid} 로 정리.
+        # 표시용 포인터라 정리 실패가 로그인 자체를 깨면 안 된다(최선노력).
+        # id 는 try 전에 빼둔다 — 세션이 깨진 뒤 속성 접근이 다시 터질 수 있다.
+        if team_changed or role_changed or not existing.is_active:
+            uid = existing.id
+            try:
+                await release_stale_leader_pointer(
+                    session,
+                    user_id=uid,
+                    team_id=existing.team_id,
+                    role=existing.role,
+                    is_active=existing.is_active,
+                )
+            except Exception:
+                logger.warning(
+                    "oidc.stale_leader_pointer_cleanup_failed",
+                    user_id=str(uid),
+                    exc_info=True,
+                )
         return existing, False, team_changed

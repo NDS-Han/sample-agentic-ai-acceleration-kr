@@ -30,7 +30,7 @@ bash 21-set-notification-provider.sh internal-api --apply \
 
 ## 수동으로 values 고치기
 
-`21-set-notification-provider.sh`를 쓰지 않고 `deployment/charts/llm-gateway/values-eks-fargate-<env>.yaml`를 직접 고치는 경우(yq 권장):
+`21-set-notification-provider.sh`를 쓰지 않고 `deployment/charts/llm-gateway/values-eks-fargate-<env>.yaml`를 직접 고치는 경우(주석·서식을 해치지 않게 해당 블록만 편집):
 
 ```yaml
 notificationWorker:

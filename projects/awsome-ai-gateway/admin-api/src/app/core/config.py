@@ -13,7 +13,7 @@ from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 _TZ_ALIAS_HINTS: dict[str, str] = {
     "KST": "Asia/Seoul",
     "JST": "Asia/Tokyo",
-    "IST": "Asia/Kolkata", 
+    "IST": "Asia/Kolkata",
     "PST": "America/Los_Angeles",
     "PDT": "America/Los_Angeles",
     "EST": "America/New_York",

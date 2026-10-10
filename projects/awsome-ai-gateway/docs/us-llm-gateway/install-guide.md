@@ -803,7 +803,7 @@ INSERT INTO model.model_pricings
      cache_read_price_per_1k_tokens,
      effective_from, created_by)
 VALUES (gen_random_uuid(), 'claude-sonnet-5-5',
-        0.002200, 0.011000, 0.002750, 0.004400, 0.000220,
+        0.002200, 0.011000, 0.002750, 0.004400, 0.000110,
         now(), '00000000-0000-4000-a000-000000000010'::uuid);
 UPDATE model.model_pricings SET effective_until = now()
  WHERE model_alias = 'claude-haiku-4-5-20251001' AND effective_until IS NULL;

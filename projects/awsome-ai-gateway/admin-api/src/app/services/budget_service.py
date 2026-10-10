@@ -8,7 +8,8 @@ from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 
 import structlog
-from sqlalchemy import text
+from redis.asyncio.cluster import RedisCluster
+from sqlalchemy import func, select as sa_select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients import CLIENT_ORDER
@@ -32,9 +33,10 @@ from app.core.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from app.core.usage_filters import current_kst_period
+from app.core.usage_filters import cost_period_filter, current_kst_period
 from app.models.auth import Team, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, DowngradePolicy, PeriodType
+from app.models.usage import UsageLog
 from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
@@ -434,6 +436,10 @@ class BudgetService:
             allocated_by=actor.user_id,
             effective_from=date.today(),
             default_user_cap_usd=new_cap,
+            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
+            #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
+            alert_thresholds=sorted(set(data.alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -847,6 +853,10 @@ class BudgetService:
             policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
+            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
+            #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
+            alert_thresholds=sorted(set(data.alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -1095,6 +1105,10 @@ class BudgetService:
             policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
+            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
+            #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
+            alert_thresholds=sorted(set(data.alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -1361,6 +1375,9 @@ class BudgetService:
                 policy=team_config.policy,
                 allocated_by=actor.user_id,
                 effective_from=date.today(),
+                # 팀에서 파생된 사용자 예산은 팀의 임계값을 물려받는다 — 여기서 기본값을
+                # 다시 쓰면 팀 설정과 어긋난 알림이 나간다.
+                alert_thresholds=list(team_config.alert_thresholds or []),
                 is_active=True,
             )
             await repo.upsert_config(config)
@@ -1492,7 +1509,9 @@ class BudgetService:
         scope: str | None = None,
         target_id: uuid.UUID | None = None,
         period: str,
-        actor: CurrentUser | None = None,
+        # ⚠️ 필수 인자다. 기본값 None 을 두면 actor 를 빠뜨린 호출이 아래 TEAM_LEADER
+        #    필터를 건너뛰어 전사 예산·사용액을 그대로 돌려준다(fail-open).
+        actor: CurrentUser,
     ) -> BudgetSummaryResponse:
         if not re.match(r'^\d{4}-\d{2}$', period):
             raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
@@ -1519,7 +1538,7 @@ class BudgetService:
 
         # TEAM_LEADER 는 소속 팀만 — scope/target_id 쿼리 파라미터로 다른
         # 팀을 넘겨도 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
-        if actor is not None and actor.role == UserRole.TEAM_LEADER:
+        if actor.role == UserRole.TEAM_LEADER:
             led = {actor.team_id} if actor.team_id else set()
             teams = [t for t in teams if t.id in led]
             users = [u for u in users if u.team_id in led]
@@ -1536,85 +1555,126 @@ class BudgetService:
 
         # 예산 설정(BudgetConfig) 유무와 무관하게 실사용액은 항상 계산해야 한다.
         # 이전엔 cfg 가 없으면(예: 팀 예산만 적용받는 사용자) used=0 으로 하드코딩돼
-        # 실제 usage_logs 비용이 있어도 "$0.00" 로 표시되는 버그가 있었다. 사용자/팀
-        # 전체를 한 번에 그룹집계(N+1 방지) 해두고 조회 시 dict lookup 만 한다.
-        from sqlalchemy import func, select as sa_select
-        from app.models.usage import UsageLog
-        from app.core.usage_filters import cost_period_filter
+        # 실제 usage_logs 비용이 있어도 "$0.00" 로 표시되는 버그가 있었다.
+        #
+        # 1) Redis enforcement 카운터 — 대상 전체를 MGET 한 번으로 조회한다.
+        #    대상마다 개별 GET 하면 round-trip 이 표시 대상 수만큼 쌓인다.
+        #    0/미스는 "아직 증가 안 함"과 구분이 안 되므로 신뢰하지 않고
+        # 2) usage_logs 일괄 그룹집계로 채운다 — 표시 대상만 IN 으로 좁힌다
+        #    (팀 리더는 위에서 소속 팀/멤버로 이미 좁혀져 있다).
+        user_sids = [
+            str(u.id) for u in users
+            if (budget_scope is None or budget_scope == BudgetScope.USER)
+            and (not target_id_str or str(u.id) == target_id_str)
+        ]
+        team_sids = [
+            str(t.id) for t in teams
+            if (budget_scope is None or budget_scope == BudgetScope.TEAM)
+            and (not target_id_str or str(t.id) == target_id_str)
+        ]
+        key_pairs = (
+            [(BudgetScope.USER, sid) for sid in user_sids]
+            + [(BudgetScope.TEAM, sid) for sid in team_sids]
+        )
 
+        used_by_key: dict[tuple[BudgetScope, str], Decimal] = {}
+        if redis is not None and key_pairs:
+            try:
+                # 카운터 키의 해시태그가 sid 마다 달라 슬롯이 흩어진다 — prod 는
+                # RedisCluster 라 mget 은 CROSSSLOT 으로 실패해 클러스터는
+                # non-atomic fan-out 으로 간다(결과 순서·개수는 mget 과 동일).
+                keys = [
+                    f"budget:{sc.value.lower()}:{{{sid}}}:{period}"
+                    for sc, sid in key_pairs
+                ]
+                if isinstance(redis, RedisCluster):
+                    raws = await redis.mget_nonatomic(keys)
+                else:
+                    raws = await redis.mget(keys)
+                for (sc, sid), raw in zip(key_pairs, raws):
+                    if raw:
+                        val = Decimal(raw.decode() if isinstance(raw, bytes) else raw)
+                        if val != 0:
+                            used_by_key[(sc, sid)] = val
+            except Exception:
+                logger.warning(
+                    "budget_summary.redis_read_failed", exc_info=True,
+                    hint="사용액을 usage_logs 집계로 대체합니다",
+                )
+                used_by_key = {}
+
+        # Redis 미스분만 usage_logs 에서 그룹집계(N+1·대상 단위 쿼리 방지).
         # 비용 집계 표준(§59): SUCCESS 만 + KST 월 경계. 대시보드 Top 사용자/팀·
         # chat 과 동일 기준으로 통일(실패 호출 비용 제외, UTC 9시간 오차 제거).
-        user_usage_rows = (
-            await session.execute(
-                sa_select(UsageLog.user_id, func.coalesce(func.sum(UsageLog.cost_usd), 0))
-                .where(cost_period_filter(period))
-                .group_by(UsageLog.user_id)
+        # TEAM_LEADER 는 표시 대상이 소속 팀/멤버뿐이라 IN 으로 좁힌다. ADMIN 은
+        # 표시 대상이 전사라 전체 집계가 기본이지만, target 지정 요청처럼 미스
+        # 대상이 소수일 때는 IN 이 훨씬 싸다 — 그 경우에도 좁힌다.
+        narrow = actor.role == UserRole.TEAM_LEADER
+        user_miss = [uuid.UUID(s) for s in user_sids if (BudgetScope.USER, s) not in used_by_key]
+        team_miss = [uuid.UUID(s) for s in team_sids if (BudgetScope.TEAM, s) not in used_by_key]
+
+        async def _aggregate(scope_enum: BudgetScope, col, miss: list[uuid.UUID]) -> None:
+            if not miss:
+                return  # Redis 가 표시 대상 전부 커버 — SQL 불필요
+            conds = [cost_period_filter(period)]
+            if narrow or len(miss) <= 500:
+                conds.append(col.in_(miss))
+            rows = (
+                await session.execute(
+                    sa_select(col, func.coalesce(func.sum(UsageLog.cost_usd), 0))
+                    .where(*conds)
+                    .group_by(col)
+                )
+            ).all()
+            used_by_key.update(
+                {
+                    (scope_enum, str(sid)): Decimal(str(cost))
+                    for sid, cost in rows
+                    if sid is not None and (scope_enum, str(sid)) not in used_by_key
+                }
             )
-        ).all()
-        team_usage_rows = (
-            await session.execute(
-                sa_select(UsageLog.team_id, func.coalesce(func.sum(UsageLog.cost_usd), 0))
-                .where(cost_period_filter(period))
-                .group_by(UsageLog.team_id)
-            )
-        ).all()
-        user_used_by_id: dict[str, Decimal] = {
-            str(uid): Decimal(str(cost)) for uid, cost in user_usage_rows if uid is not None
-        }
-        team_used_by_id: dict[str, Decimal] = {
-            str(tid): Decimal(str(cost)) for tid, cost in team_usage_rows if tid is not None
-        }
+
+        await _aggregate(BudgetScope.USER, UsageLog.user_id, user_miss)
+        await _aggregate(BudgetScope.TEAM, UsageLog.team_id, team_miss)
 
         # TEAM 행의 다운그레이드 배지 — "최신 저장 배치" 규칙 수 + 활성 여부.
         # get_current_rules 와 같은 기준(max created_at 배치, is_active 무관)이라
         # 꺼진 규칙도 펼친 패널과 배지가 일치한다. 팀당 1행 그룹집계(N+1 없음).
-        from app.models.budget import DowngradePolicy
-
-        latest_batch = (
-            sa_select(
-                DowngradePolicy.scope_id,
-                func.max(DowngradePolicy.created_at).label("latest"),
-            )
-            .where(DowngradePolicy.scope == BudgetScope.TEAM)
-            .group_by(DowngradePolicy.scope_id)
-            .subquery()
-        )
-        downgrade_rows = (
-            await session.execute(
+        # 표시 대상 팀이 없으면(scope=user 등) 쿼리 자체를 건너뛴다.
+        downgrade_by_team: dict[str, tuple[int, bool]] = {}
+        if team_sids:
+            latest_batch = (
                 sa_select(
                     DowngradePolicy.scope_id,
-                    func.count().label("cnt"),
-                    func.bool_or(DowngradePolicy.is_active).label("enabled"),
-                )
-                .join(
-                    latest_batch,
-                    (DowngradePolicy.scope_id == latest_batch.c.scope_id)
-                    & (DowngradePolicy.created_at == latest_batch.c.latest),
+                    func.max(DowngradePolicy.created_at).label("latest"),
                 )
                 .where(DowngradePolicy.scope == BudgetScope.TEAM)
                 .group_by(DowngradePolicy.scope_id)
+                .subquery()
             )
-        ).all()
-        downgrade_by_team: dict[str, tuple[int, bool]] = {
-            str(sid): (cnt, bool(enabled)) for sid, cnt, enabled in downgrade_rows
-        }
-
-        async def _resolve_used(scope_enum: BudgetScope, sid: str) -> Decimal:
-            scope_type = scope_enum.value.lower()
-            if redis is not None:
-                redis_key = f"budget:{scope_type}:{{{sid}}}:{period}"
-                try:
-                    raw = await redis.get(redis_key)
-                    if raw is not None:
-                        return Decimal(raw.decode() if isinstance(raw, bytes) else raw)
-                except Exception:
-                    pass
-            fallback = user_used_by_id if scope_enum == BudgetScope.USER else team_used_by_id
-            return fallback.get(sid, Decimal("0"))
+            downgrade_rows = (
+                await session.execute(
+                    sa_select(
+                        DowngradePolicy.scope_id,
+                        func.count().label("cnt"),
+                        func.bool_or(DowngradePolicy.is_active).label("enabled"),
+                    )
+                    .join(
+                        latest_batch,
+                        (DowngradePolicy.scope_id == latest_batch.c.scope_id)
+                        & (DowngradePolicy.created_at == latest_batch.c.latest),
+                    )
+                    .where(DowngradePolicy.scope == BudgetScope.TEAM)
+                    .group_by(DowngradePolicy.scope_id)
+                )
+            ).all()
+            downgrade_by_team = {
+                str(sid): (cnt, bool(enabled)) for sid, cnt, enabled in downgrade_rows
+            }
 
         items: list[BudgetSummaryItem] = []
 
-        async def _append(
+        def _append(
             scope_enum: BudgetScope,
             sid: str,
             name: str,
@@ -1624,11 +1684,12 @@ class BudgetService:
             department_name: str | None = None,
         ) -> None:
             cfg = cfg_by_target.get((scope_enum, sid))
-            used = await _resolve_used(scope_enum, sid)
+            used = used_by_key.get((scope_enum, sid), Decimal("0"))
             cap_source: str | None = None
             default_cap: Decimal | None = None
             if scope_enum == BudgetScope.TEAM:
                 default_cap = cfg.default_user_cap_usd if cfg else None
+            thresholds = list(cfg.alert_thresholds or []) if cfg is not None else None
             if cfg is not None and cfg.max_budget_usd is not None:
                 limit = cfg.max_budget_usd
                 remaining = limit - used
@@ -1644,6 +1705,7 @@ class BudgetService:
                     remaining = limit - used
                     pct = (used / limit * 100) if limit > 0 else Decimal("0")
                     cap_source = "team_default"
+                    thresholds = list(team_cfg.alert_thresholds or [])
                 else:
                     limit = None
                     remaining = None
@@ -1667,6 +1729,7 @@ class BudgetService:
                     department_name=department_name,
                     default_user_cap_usd=default_cap,
                     cap_source=cap_source,
+                    alert_thresholds=thresholds,
                     **(
                         {
                             "downgrade_rule_count": downgrade_by_team[sid][0],
@@ -1685,7 +1748,7 @@ class BudgetService:
                     continue
                 u_team_id = getattr(u, "team_id", None)
                 u_dept = dept_by_team.get(str(u_team_id)) if u_team_id else None
-                await _append(
+                _append(
                     BudgetScope.USER,
                     uid,
                     u.display_name or u.email,
@@ -1702,7 +1765,7 @@ class BudgetService:
                     continue
                 has_active_members = any(m.is_active for m in t.members)
                 t_dept = dept_by_team.get(tid)
-                await _append(
+                _append(
                     BudgetScope.TEAM,
                     tid,
                     _team_display_name(t),
@@ -1927,7 +1990,9 @@ class BudgetService:
                 scope_id=cfg.scope_id,
                 max_budget_usd=cfg.max_budget_usd,
                 policy=cfg.policy,
-                alert_thresholds=[80, 90, 100],  # DB에 컬럼 없음 — 표준 기본값
+                # migration 0037 이후 DB 가 진실의 원천이다(예전 하드코딩은 운영자
+                # 설정을 워밍업이 덮어쓰게 만들었다).
+                alert_thresholds=list(cfg.alert_thresholds or []),
                 default_cap=cfg.default_user_cap_usd,
             )
             count += 1

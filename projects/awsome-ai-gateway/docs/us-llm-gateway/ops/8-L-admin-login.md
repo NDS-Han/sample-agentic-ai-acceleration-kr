@@ -278,10 +278,6 @@ JIT 형(링크 없이 federated 사용자 생성)이면 groups 가 IdP 클레임
 - **로그인 뒤 403 `user_not_provisioned`** — 그 관리자가 DB 에 없다. 본인이 `gateway-cli login` 한 번 → 다시 로그인.
 - **로그인 뒤 `/403` 화면** — 그 계정이 `ClaudeAdmin` 그룹이 아니다([8-Y](8-Y-onboarding.md)). 사내 IdP 연동 배포면 그룹이 토큰에 안 실린 것일 수 있다 — [사내 IdP 절](#사내-idp-연동-배포-adfs-등).
 - **로그인은 되는데 대시보드 숫자가 비고 모니터링이 500** — admin-api 가 `1.0.69-idpjwks` 미만이다(admin-api 로그에 `JWKError … Invalid symbol 95`). ② 의 admin-api 갱신을 하고 설치 스크립트를 다시 돌린다.
-- **로그인은 되는데 대시보드가 비고 API 가 전부 401** — admin-api 가 쿠키 토큰의 서명을 검증하지 못하는 상태다(500 과 다른 증상).
-  - `1.0.69-idpjwks` 이상은 토큰의 `iss` 가 설정된 OIDC issuer 이면 IdP 의 JWKS 로 검증하므로 별도 키 등록은 필요 없다. 더 낡은 이미지라면 **Cognito JWKS 를 `auth.admin_jwt_configs` 에 등록**해야 한다 — issuer = user pool issuer URL, audience = 앱 클라이언트 ID, RS256 PEM. 등록 후 admin-api 재시작(키는 시작 시에만 로드). Cognito 가 서명키를 로테이션하면 같은 절차로 다시 등록한다.
-  - Cognito id_token 의 `at_hash` 클레임은 `python-jose` 가 access_token 없이는 검증하지 못해 실패한다 — `JWTVerifier.verify()` 가 `options={"verify_at_hash": False}` 를 쓰는지 확인한다.
-- **로그아웃 눌러도 바로 대시보드로 돌아온다** — admin 쿠키만 지우면 Cognito 세션이 살아 있어 즉시 재로그인된다. 로그아웃이 Cognito `/logout` 으로 보내는 이미지인지, Cognito 앱 클라이언트의 **로그아웃 URL** 에 admin 주소가 등록됐는지(`cognito_logout_urls`) 본다.
 
 ## 되돌리기
 
@@ -298,10 +294,11 @@ JIT 형(링크 없이 federated 사용자 생성)이면 groups 가 IdP 클레임
 - **키 교체에 약하다** — IdP 는 서명키를 주기적으로 교체한다. 정적 PEM 은 교체되는 순간 로그인이 끊기고, 사람이 다시 넣어야 한다.
 - **같은 토큰을 두 방식으로 검증하고 있었다** — admin-api 는 VK 발급(`/v1/auth/exchange`)에서 이미 같은 IdP 의 토큰을 JWKS 로 검증한다(`OIDCVerifier` — issuer 의 discovery 문서에서 JWKS 주소를 찾아 키를 받고, `kid` 로 고르고, 모르는 `kid` 면 다시 받는다). 관리 화면만 다른 방식이었다.
 
-그래서 `1.0.69-idpjwks` 부터는 토큰의 `iss` 가 설정된 OIDC issuer(values `adminApi.oidc.issuerUrl`)이면 `OIDCVerifier` 로 검증한다. 그 밖의 토큰(개발용 로그인 · 서비스 토큰)은 예전과 같다. 정적 키가 깨져 있어도 이제 500 이 아니라 401 이다. 검증 항목은 서명 · issuer · 만료이고, `aud` 는 `adminApi.oidc.audience` 가 있을 때만 본다 — VK 발급과 같은 수준이다.
+그래서 `1.0.69-idpjwks` 부터는 토큰의 `iss` 가 설정된 OIDC issuer(values `adminApi.oidc.issuerUrl`)이면 `OIDCVerifier` 로 검증한다. 그 밖의 토큰(개발용 로그인 · 서비스 토큰 · 내부 admin JWT)은 예전과 같다. 정적 키가 깨져 있어도 이제 500 이 아니라 401 이다. 검증 항목은 서명 · issuer · 만료이고, `aud` 는 `adminApi.oidc.audience` 가 있을 때만 본다 — VK 발급과 같은 수준이다.
 
 ## 알아둘 점
 
 - **세션 1시간** — admin 쿠키는 Cognito id_token 이라 1시간 뒤 만료되고 로그인 화면으로 돌아간다. 수명은 [8-Z](8-Z-token-ttl.md) 머리말의 Cognito 안내(terraform).
-- **로그아웃은 admin 쿠키만 지운다** — Cognito 쪽 로그인 세션은 별개다. 다른 계정으로 바꿀 때는 시크릿 창으로.
+- **로그아웃은 IdP 세션까지 끊는다** — admin 쿠키를 지우고 Cognito 의 `/logout` 으로 보내 hosted-UI 세션도 닫은 뒤 `https://<admin-ui host>/` 로 돌아온다. 이 URL 은 앱 클라이언트의 **Allowed sign-out URLs**(`cognito_logout_urls`, callback 목록과는 별개)에 등록돼 있어야 한다 — `19-admin-login.sh callback` 이 두 목록을 함께 tfvars 에 넣는다. **등록이 없으면** 로컬 쿠키만 지워진 채 Cognito 400 오류 화면에 도착한다(조용한 폴백이 아니라 실패다 — 재적용이 필요하면 `callback` 단계를 다시). `logout_uri` 오리진은 `OIDC_REDIRECT_URI` 에서 파생되므로 CloudFront·ALB 뒤에서도 등록된 오리진과 일치한다. Cognito 가 아닌 IdP 는 `OIDC_LOGOUT_URL` 을 명시해야 이 경로가 동작한다.
+  - **배포 순서 주의** — 이 동작이 포함된 UI 가 sign-out URL 등록(`19-admin-login.sh callback` + terraform apply)보다 먼저 나가면 그 기간 모든 로그아웃이 Cognito 400 에 도착한다. 등록 전 기간에는 admin-ui 환경의 `OIDC_LOGOUT_URL=off` 로 IdP 로그아웃을 끌 수 있다(로컬 쿠키만 지워지고 `/` 로 돌아간다) — 등록 후 값을 지우면 자동 파생 경로가 다시 켜진다.
 - **관리자 권한은 그룹이 정한다** — `ClaudeAdmin` 에서 빼면 그 사람의 다음 토큰(최대 1시간 뒤)부터 관리자가 아니다.

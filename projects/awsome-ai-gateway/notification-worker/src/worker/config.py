@@ -77,7 +77,13 @@ class Settings(BaseSettings):
     # SMTP (optional)
     smtp_host: str | None = None
     smtp_port: int | None = None
-    smtp_starttls: bool = False
+    # implicit TLS — 465 포트 서버용. use_tls 와 starttls 는 상호배타다.
+    # None(미설정)은 sender 가 포트로 자동 판정한다 — 465 면 implicit TLS,
+    # 아니면 starttls 기준. 차트는 useTls 가 명시된(bool) 경우에만 이 env 를
+    # 렌더하므로, 기본 values(useTls 비움)의 배포는 여기로 온다.
+    smtp_use_tls: bool | None = None
+    # STARTTLS — 587 등. implicit TLS(use_tls=True/미설정)면 무시된다.
+    smtp_starttls: bool = True
     smtp_username: str | None = None
     smtp_password: SecretStr | None = None
 

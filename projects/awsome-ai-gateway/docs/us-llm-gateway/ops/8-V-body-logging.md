@@ -2,7 +2,7 @@
 
 > ← [operations.md](../operations.md) §8 목차로 · 이 절 = **§8-V**
 
-> 📒 **`US-15` · 등급 선택(감사·디버깅 필요 시)** — [README.md 「최신 업데이트」](../README.md#2-최신-업데이트). 적용 여부는 `docs/us-llm-gateway/update-scripts/20-enable-body-logging.sh verify` 로 확인한다.
+> 📒 **등급 선택(감사·디버깅 필요 시)** — 적용 여부는 `docs/us-llm-gateway/update-scripts/20-enable-body-logging.sh verify` 로 확인한다.
 
 > ⚠️ **무엇이 저장되는지 먼저 알아야 한다.** 켜면 게이트웨이가 **요청 JSON 전문과
 > 응답 전문**(스트리밍이면 재구성된 SSE 텍스트)을 S3 에 보낸다 — 사용자가 프롬프트에
@@ -64,10 +64,11 @@ tfvars 의 `enable_body_logging` · terraform output · 파드 env · values 키
 
 ```bash
 bash 20-enable-body-logging.sh tfvars --apply     # terraform.tfvars 편집
-cd ../../deployment/terraform/environments/llm-gateway-dev
-terraform plan -target=module.body_logging -target=module.irsa
-terraform apply
-cd - && bash 20-enable-body-logging.sh env --apply  # values 의 gatewayProxy.env 주입
+cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
+terraform plan  -target=module.body_logging -target=module.irsa
+terraform apply -target=module.body_logging -target=module.irsa
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+bash 20-enable-body-logging.sh env --apply        # values 의 gatewayProxy.env 주입
 cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 ```
 
@@ -78,10 +79,11 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 `gatewayProxy.env` 에 두 키 주입 + helm 렌더로 검증 → `install-eks.sh` 가
 배포와 gateway-proxy 롤아웃.
 
-> ℹ️ `-target` 을 쓰는 이유는 오래 운영한 배포의 무관한 드리프트가 같이 적용되는
-> 것을 막기 위해서다(8-N 절의 사례: VPC 엔드포인트 추가 때 DB 시크릿 replace 가
-> 딸려 나옴). IRSA 는 게이트웨이에 `firehose:PutRecordBatch` + 버킷 `s3:PutObject`
-> 권한을 얹는다 — 새 권한이므로 같이 타깃한다.
+> ℹ️ plan 과 apply **둘 다** `-target` 을 쓰는 이유는 오래 운영한 배포의 무관한
+> 드리프트가 같이 적용되는 것을 막기 위해서다(8-N 절의 사례: VPC 엔드포인트
+> 추가 때 DB 시크릿 replace 가 딸려 나옴). IRSA 는 게이트웨이에
+> `firehose:PutRecordBatch` + 버킷 `s3:PutObject` 권한을 얹는다 — 새 권한이므로
+> 같이 타깃한다.
 >
 > 🔴 **배포는 반드시 `install-eks.sh` 로 — bare `helm upgrade -f` 금지.**
 > install-eks.sh 만 terraform outputs 에서 `--set` 으로 주입하는 값들

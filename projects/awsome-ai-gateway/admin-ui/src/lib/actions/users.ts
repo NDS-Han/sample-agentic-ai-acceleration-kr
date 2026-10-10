@@ -42,6 +42,9 @@ export async function setTeamLeaderAction(
 }
 
 // ─── unsetTeamLeaderAction ────────────────────────────────────────────────────
+// DELETE /admin/teams/{teamId}/leaders/{userId} — 리더 해제(그 사람만 DEVELOPER 로).
+// 인자 순서는 OrgDetailPanel 의 호출(unsetTeamLeaderAction(node.id, leaderToRemove.id))
+// 에 맞춰 (teamId, userId) 이다 — setTeamLeaderAction 과 순서가 다르므로 주의.
 
 export async function unsetTeamLeaderAction(
   teamId: string,
@@ -55,7 +58,9 @@ export async function unsetTeamLeaderAction(
   }
 
   try {
-    await withRetry(() => adminAPI.delete(`/admin/teams/${teamId}/leaders/${userId}`));
+    await withRetry(() =>
+      adminAPI.delete(`/admin/teams/${teamId}/leaders/${userId}`)
+    );
     revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {

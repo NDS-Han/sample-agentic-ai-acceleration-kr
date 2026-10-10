@@ -92,7 +92,7 @@ cd ~/awsome-ai-gateway
 ./deployment/scripts/install-eks.sh dev
 ```
 
-> ⚠️ **같은 태그로 rebuild 하지 말 것** — 옛 이미지가 덮여 helm rollback 이 무의미해진다. 코드가 바뀌었으면 먼저 `bash update-scripts/13-bump-image-tags.sh dev --apply` 로 태그를 올린다([8-D ⑤](8-D-upstream-sync.md)).
+> ⚠️ **같은 태그로 rebuild 하지 말 것** — 옛 이미지가 덮여 helm rollback 이 무의미해진다. 코드가 바뀌었으면 먼저 `bash update-scripts/13-bump-image-tags.sh dev --apply` 로 태그를 올린다([8-D (5)](8-D-upstream-sync.md)).
 
 > ℹ️ `install-eks.sh dev` **= 앱을 클러스터에 (재)배포하는 한 방 명령.** 인프라 값(주소·권한)을 알아서 읽어 게이트웨이 서비스(추론·관리 API·화면·워커)를 EKS 에 올리고, **DB 스키마 변경까지 같이 반영**한다 — 그래서 A·B·C 모두 이 줄로 끝난다.
 > **작동 방식**: `terraform output`(엔드포인트·IRSA 역할·Cognito)을 helm `--set` 으로 주입 → 릴리스 `llm-gateway`(gateway-proxy·admin-api·admin-ui·scheduler·workers + pre-install **migration Job**)를 `helm upgrade --install --wait`. kubectl 컨텍스트 설정·네임스페이스·ExternalSecrets 확인까지 한 번에.

@@ -28,6 +28,21 @@ DEFAULT_THROTTLE_RPM_PCT = 50
 DEFAULT_THRESHOLDS = [80, 90, 100]
 
 
+def _row_thresholds(config) -> list[int]:
+    """``BudgetConfig`` 행의 알림 임계값 — DB 가 진실의 원천이다(migration 0037).
+
+    ⚠️ 빈 배열은 **유효한 설정**이고 "이 예산에는 임계값 알림을 보내지 않는다" 를 뜻한다.
+       그래서 ``or DEFAULT_THRESHOLDS`` 로 채우지 않는다 — 그러면 운영자가 의도적으로 비운
+       설정을 재수화가 되살린다.
+
+    컬럼이 없는 구 스키마(0037 미적용)에서는 속성 자체가 없으므로 그때만 기본값을 쓴다.
+    """
+    raw = getattr(config, "alert_thresholds", None)
+    if raw is None:
+        return list(DEFAULT_THRESHOLDS)
+    return sorted({int(v) for v in raw})
+
+
 def _policy_to_lua_value(policy: BudgetPolicy | str) -> str:
     """Python BudgetPolicy(lowercase value) → Lua/Redis 내부 표현(lowercase)."""
     return policy.value if isinstance(policy, BudgetPolicy) else str(policy).lower()
@@ -164,6 +179,11 @@ def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetSta
     # team 계층은 도달 시 항상 config_present — best 는 비어 있을 수 없다.
     assert best is not None
     remaining, tier, decisive = best
+    # 임계값은 팀 계층 dict 에 실린 값을 쓴다 — Redis 경로의 lua 결과는 이 키를
+    # 싣지 않으므로(None → 기본값) 예전 동작과 같고, DB degrade 경로는 호출자가
+    # ``_row_thresholds(team_config)`` 를 넣어준다. 빈 배열은 유효한 설정
+    # (알림 끔)이라 ``or`` 로 기본값을 쓰지 않는다(_row_thresholds 주석 참조).
+    thresholds = team_result.get("thresholds")
     return BudgetStatus(
         remaining_usd=remaining,
         limit_usd=Decimal(str(decisive.get("limit_usd", 0))),
@@ -171,6 +191,7 @@ def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetSta
         policy=BudgetPolicy(team_result.get("policy", "hard_block")),
         throttle_rpm_pct=min(active_throttle_pcts) if active_throttle_pcts else 50,
         threshold_pct=team_result.get("threshold_pct", 0),
+        thresholds=thresholds if thresholds is not None else list(DEFAULT_THRESHOLDS),
         throttle_active=bool(active_throttle_pcts),
         soft_warning=bool(warning_tiers),
         tier=tier,
@@ -332,6 +353,11 @@ class BudgetService:
                         )
                         d_cap = team_cfg.get("default_user_cap_usd")
                         if d_cap is not None:
+                            # 캐시된 팀 config 에 thresholds 가 없는 구버전 엔트리 대비
+                            # 폴백 — 재수화는 _row_thresholds 가 DB 행에서 쓴다.
+                            d_thresholds = (
+                                team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                            )
                             user_fallback = json.dumps({
                                 "limit_usd": str(d_cap),
                                 "policy": team_cfg.get("policy", "hard_block"),
@@ -339,8 +365,7 @@ class BudgetService:
                                 or DEFAULT_SOFT_LIMIT_PCT,
                                 "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
                                 or DEFAULT_THROTTLE_RPM_PCT,
-                                "thresholds": team_cfg.get("thresholds")
-                                or list(DEFAULT_THRESHOLDS),
+                                "thresholds": d_thresholds,
                             })
 
                 # §6-1 단계 2: USER (A_u 또는 D)
@@ -440,8 +465,8 @@ class BudgetService:
         """DB SELECT 기반 예산 확인 (Redis fallback 경로).
 
         DB 컬럼: scope / scope_id / max_budget_usd (KI-09 수정 반영).
-        soft_limit_pct, throttle_rpm_pct, thresholds는 현재 DB 스키마에 없으므로
-        Python 기본값 사용.
+        soft_limit_pct, throttle_rpm_pct 는 현재 DB 스키마에 없으므로 Python 기본값 사용.
+        thresholds 는 migration 0037 이후 DB 컬럼(``alert_thresholds``)이 원천이다.
         client 가 설정된 경우 앱별 BudgetConfig/BudgetUsage 도 확인한다.
         앱 예산 미설정(config=None) → pass-through.
         """
@@ -461,11 +486,18 @@ class BudgetService:
         )
         user_config = user_cfg_result.scalar_one_or_none()
 
-        def _layer(used: Decimal, limit: Decimal, policy: BudgetPolicy) -> tuple[str | None, dict]:
+        def _layer(
+            used: Decimal,
+            limit: Decimal,
+            policy: BudgetPolicy,
+            thresholds: list[int],
+        ) -> tuple[str | None, dict]:
             """한 계층을 평가해 (block_reason, normalized dict) 를 돌려준다.
 
             dict 는 budget_check.lua 반환 JSON 과 같은 shape — _build_status 가
-            Redis 경로와 이 경로를 같은 코드로 조합할 수 있게 한다.
+            Redis 경로와 이 경로를 같은 코드로 조합할 수 있게 한다. ``thresholds``
+            는 호출자가 해당 BudgetConfig 행의 ``_row_thresholds`` 값을 넘긴다 —
+            기본값을 여기서 구우면 degrade 동안만 알림 기준이 달라진다(0037).
             """
             block, sw, ta = _evaluate_layer(used, limit, policy)
             return block, {
@@ -475,7 +507,7 @@ class BudgetService:
                 "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
                 "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
                 "threshold_pct": int(used / limit * 100) if limit > 0 else 0,
-                "thresholds": list(DEFAULT_THRESHOLDS),
+                "thresholds": thresholds,
                 "soft_warning": sw,
                 "throttle_active": ta,
                 "config_present": True,
@@ -517,6 +549,7 @@ class BudgetService:
                 await _user_used(),
                 user_config.max_budget_usd,
                 _db_policy_to_domain(user_config.policy),
+                _row_thresholds(user_config),
             )
             if user_block:
                 raise PermissionError(f"user_{user_block}")
@@ -524,7 +557,10 @@ class BudgetService:
         else:
             cap_d = team_config.default_user_cap_usd
             if cap_d is not None:
-                user_block, d = _layer(await _user_used(), cap_d, policy)
+                # D 유저의 thresholds 는 팀 것을 따른다(Redis 경로의 D 합성과 동일).
+                user_block, d = _layer(
+                    await _user_used(), cap_d, policy, _row_thresholds(team_config)
+                )
                 if user_block:
                     raise PermissionError(f"user_{user_block}")
                 tiers.append(("user", d))
@@ -539,7 +575,11 @@ class BudgetService:
         team_used = team_usage.used_usd if team_usage else Decimal("0")
 
         max_budget = team_config.max_budget_usd
-        team_block, team_dict = _layer(team_used, max_budget, policy)
+        # Redis degrade 중에도 임계값은 DB 행의 값이어야 한다 — 기본값을 구우면
+        # degrade 동안만 알림 기준이 달라진다(migration 0037: alert_thresholds).
+        team_block, team_dict = _layer(
+            team_used, max_budget, policy, _row_thresholds(team_config)
+        )
         if team_block:
             raise PermissionError(f"team_{team_block}")
         tiers.append(("team", team_dict))
@@ -568,6 +608,7 @@ class BudgetService:
                     client_used,
                     client_config.max_budget_usd,
                     _db_policy_to_domain(client_config.policy),
+                    _row_thresholds(client_config),
                 )
                 if client_block:
                     raise PermissionError(f"client_{client_block}")
@@ -584,8 +625,10 @@ class BudgetService:
         """예산 설정이 Redis에 없으면 DB에서 조회하여 캐시.
 
         Lua 스크립트는 lowercase policy 값('hard_block' 등)을 기대하므로
-        DB UPPERCASE enum을 변환해서 저장. 정책 파라미터(soft/throttle/thresholds)는
-        Python 기본값 사용 (DB 스키마에 없음).
+        DB UPPERCASE enum을 변환해서 저장. soft/throttle 파라미터는 DB 스키마에 없어
+        Python 기본값을 쓰지만, thresholds 는 migration 0037 이후 DB 컬럼
+        (``alert_thresholds``)이 원천이다 — 예전에 여기서 기본값을 쓴 것이 운영자 설정을
+        캐시 TTL(300초)마다 되돌린 원인이었다.
         """
         config_key = f"budget:config:user:{{{user_id}}}"
         if redis is None:
@@ -620,7 +663,11 @@ class BudgetService:
                 "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
                 "soft_limit_pct": DEFAULT_SOFT_LIMIT_PCT,
                 "throttle_rpm_pct": DEFAULT_THROTTLE_RPM_PCT,
-                "thresholds": list(DEFAULT_THRESHOLDS),
+                # ⚠️ 여기가 운영자 설정이 되돌아간 지점이다. 이 재수화는 Redis 설정 키가
+                #    만료(ex=300)될 때마다 돌고, 예전에는 DB 에 저장된 값이 없어서
+                #    DEFAULT_THRESHOLDS 를 써 넣었다 — admin-api 가 방금 써 둔 운영자
+                #    임계값을 5분마다 조용히 덮었다. migration 0037 이후 DB 가 원천이다.
+                "thresholds": _row_thresholds(config),
                 "app_clients": app_clients,
             }
             # TTL 300s to match team/client hydrate + admin warmers. Without it a
@@ -658,7 +705,7 @@ class BudgetService:
             config_data = {
                 "limit_usd": str(config.max_budget_usd),
                 "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-                "thresholds": list(DEFAULT_THRESHOLDS),
+                "thresholds": _row_thresholds(config),
                 # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
                 # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
                 "default_user_cap_usd": (
@@ -710,7 +757,7 @@ class BudgetService:
             config_data = {
                 "limit_usd": str(config.max_budget_usd),
                 "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-                "thresholds": list(DEFAULT_THRESHOLDS),
+                "thresholds": _row_thresholds(config),
             }
             config_key = f"budget:config:user:{{{user_id}}}:{client}"
             await redis.set(config_key, json.dumps(config_data), ex=300)

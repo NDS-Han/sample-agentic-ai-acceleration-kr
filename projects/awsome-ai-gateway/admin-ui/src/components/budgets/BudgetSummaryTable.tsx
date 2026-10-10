@@ -41,6 +41,8 @@ type DialogTarget = {
   capSource?: 'individual' | 'team_default' | null;
   /** TEAM 행: 현재 D — 다이얼로그의 D 입력 초기값. */
   currentDefaultCap?: number | null;
+  // 저장된 임계값. undefined/null 이면 다이얼로그가 기본값으로 초기화한다.
+  alertThresholds?: number[] | null;
 };
 
 const UNASSIGNED_KEY = '__unassigned__';
@@ -128,6 +130,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
         teamDefaultCap: parentTeam?.default_user_cap_usd ?? null,
         capSource: user.cap_source ?? null,
         currentDefaultCap: null,
+        alertThresholds: user.alert_thresholds ?? null,
       });
       setIsDialogOpen(true);
     }
@@ -150,6 +153,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
       teamDefaultCap: parentTeam?.default_user_cap_usd ?? null,
       capSource: item.cap_source ?? null,
       currentDefaultCap: item.target_type === BudgetScope.TEAM ? item.default_user_cap_usd ?? null : null,
+      alertThresholds: item.alert_thresholds ?? null,
     });
     setIsDialogOpen(true);
   };

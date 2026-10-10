@@ -43,6 +43,8 @@ interface SetBudgetDialogProps {
     capSource?: 'individual' | 'team_default' | null;
     /** TEAM: 현재 기본 유저 cap D — 입력 초기값. */
     currentDefaultCap?: number | null;
+    // 저장된 임계값 — 요약 API 가 돌려준 값. null/undefined 면 기본값으로 초기화.
+    alertThresholds?: number[] | null;
   } | null;
 }
 
@@ -78,7 +80,16 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const [error, setError] = useState<string | null>(null);
   const [value, setValue] = useState<string>(String(target?.currentLimit ?? ''));
   const [policy, setPolicy] = useState<'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE'>('HARD_BLOCK');
-  const [thresholds, setThresholds] = useState<number[]>(DEFAULT_THRESHOLDS);
+  // ⚠️ 저장된 값으로 초기화한다. 예전에는 항상 DEFAULT_THRESHOLDS 였고(서버가 값을
+  //    돌려주지 않았다), 50% 를 저장한 뒤 다시 열면 저장한 값이 사라진 것처럼 보였다.
+  //    부모가 `key={selectedItem?.id}` 로 대상마다 리마운트하므로 이 초기화가 매번 돈다.
+  //    아래 getBudgetConfigAction prefill 이 도착하면 서버값으로 다시 덮어쓴다.
+  //
+  //    빈 배열은 "알림 없음" 이라는 유효한 설정이므로 `|| DEFAULT` 로 채우면 안 된다 —
+  //    운영자가 비운 설정이 되살아난다. null/undefined(예산 미설정)만 기본값을 쓴다.
+  const [thresholds, setThresholds] = useState<number[]>(
+    target?.alertThresholds ?? DEFAULT_THRESHOLDS,
+  );
   // 서버에서 읽은 현재 policy/thresholds — null 은 "서버값 불명"(prefill 실패
   // 또는 Redis thresholds 키 미스). 불명인 필드는 관리자가 바꾸지 않는 한
   // PUT 에서 생략해 기존값을 보존한다 — 금액만 바꾼 저장이 enforcement 를
@@ -124,7 +135,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         target.currentDefaultCap != null ? String(target.currentDefaultCap) : ''
       );
       setPolicy('HARD_BLOCK');
-      setThresholds(DEFAULT_THRESHOLDS);
+      setThresholds(target.alertThresholds ?? DEFAULT_THRESHOLDS);
       setBasePolicy(null);
       setBaseThresholds(null);
       setConfirmation(null);

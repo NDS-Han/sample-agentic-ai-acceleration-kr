@@ -31,6 +31,7 @@ bash 22-setup-notification-ses-irsa.sh --apply  # IAM + values 반영
 `--apply` 후 차트를 다시 적용해야 ServiceAccount 어노테이션이 Pod에 전달됩니다:
 
 ```bash
+cd ~/awsome-ai-gateway
 bash deployment/scripts/install-eks.sh dev
 ```
 
@@ -104,7 +105,7 @@ AWS SES 콘솔에서 아래를 먼저 마칩니다.
 
 ## 수동으로 values 고치기
 
-`21-set-notification-provider.sh`를 쓰지 않고 `deployment/charts/llm-gateway/values-eks-fargate-<env>.yaml`를 직접 고치는 경우(yq 권장):
+`21-set-notification-provider.sh`를 쓰지 않고 `deployment/charts/llm-gateway/values-eks-fargate-<env>.yaml`를 직접 고치는 경우(주석·서식을 해치지 않게 해당 블록만 편집):
 
 ```yaml
 notificationWorker:

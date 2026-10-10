@@ -26,7 +26,7 @@
 
 ## 제공자 전환 (권장)
 
-`update-scripts/21-set-notification-provider.sh`가 `values-eks-fargate-<env>.yaml`의 `notificationWorker.email` 블록을 **yq**(구조화 YAML 도구)로 채워준다. values 파일을 수동으로 grep/sed 편집하지 않는다. 환경(`dev`/`prod`)은 `config.env`의 `DEPLOY_ENV`에서 해석된다.
+`update-scripts/21-set-notification-provider.sh`가 `values-eks-fargate-<env>.yaml`의 `notificationWorker.email` 블록만 스코프 편집으로 채워준다(손으로 쓴 주석·서식을 보존). values 파일을 수동으로 grep/sed 편집하지 않는다. 환경(`dev`/`prod`)은 `config.env`의 `DEPLOY_ENV`에서 해석된다.
 
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -66,6 +66,8 @@ bash 21-set-notification-provider.sh ses --apply \
 > ⚠️ **SMTP 자격증명 경로 주의** — 차트는 `notificationWorker.email.smtp.credentialsSecretName`만 읽는다. `email` 바로 아래에 쓰면 인증이 **조용히** 빠진다. 스크립트는 올바른 경로에 쓰고, `--apply` 시 helm 렌더로 `SMTP_USERNAME`이 실제 env에 타는지 검증한다.
 
 > ℹ️ **notification-worker 기본 이미지는 `mock`/`internal_api`/`smtp`/`ses` 모두 포함한다.** `Dockerfile`이 `http`·`aiosmtplib`·`boto3` extras를 기본 설치하므로, 제공자 전환 시 별도 이미지 rebuild는 필요 없다.
+>
+> ⚠️ **최초 1회는 SES 코드가 들어간 이미지로 배포해야 한다.** 이 변경 이전 이미지(`1.0.44-phase2` 등)에는 `ses` provider가 없다. 머지 후 `bash deployment/scripts/rebuild-image.sh notification-worker <env>`로 빌드하고 `13-bump-image-tags.sh`로 태그를 올린 뒤 `install-eks.sh`로 배포할 것 — values의 `notificationWorker.image.tag`는 운영 태그 정책이 관리하므로 이 커밋은 건드리지 않는다.
 
 ---
 

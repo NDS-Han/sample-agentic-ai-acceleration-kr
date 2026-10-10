@@ -395,6 +395,13 @@ class RateLimitService:
         except Exception:  # noqa: BLE001 — 캐시 실패는 무시하고 DB 조회로 진행
             pass
 
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+        # 조회 하한을 버킷 경계로 내린다 — now-win 이 버킷 중간에 걸리면
+        # 첫 버킷이 반쪽만 집계돼("언더카운트") 차트 시작점이 낮게 찍힌다.
+        # 창이 최대 bucket_sec 만큼 길어지는 대가는 있다(bounded).
+        start_ts = now_ts - win_sec
+        start_ts -= start_ts % bucket_sec
+
         try:
             rows = (
                 await session.execute(
@@ -409,12 +416,12 @@ class RateLimitService:
                                coalesce(sum(cost_usd), 0) AS cost
                         FROM usage.usage_logs
                         WHERE {col} = :sid
-                          AND requested_at >= now() - (:win * interval '1 second')
+                          AND requested_at >= to_timestamp(:start)
                         GROUP BY b
                         ORDER BY b
                         """
                     ),
-                    {"bucket": bucket_sec, "sid": sid, "win": win_sec},
+                    {"bucket": bucket_sec, "sid": sid, "start": start_ts},
                 )
             ).all()
         except Exception as exc:  # noqa: BLE001
@@ -422,9 +429,7 @@ class RateLimitService:
             return {"available": False, "reason": f"{type(exc).__name__}"}
 
         by_t = {int(r.b.timestamp()): r for r in rows}
-        now_ts = int(datetime.now(timezone.utc).timestamp())
-        start_ts = now_ts - win_sec
-        start_ts -= start_ts % bucket_sec
+        live_bucket_ts = now_ts - now_ts % bucket_sec
         points = []
         t = start_ts
         while t <= now_ts:
@@ -435,6 +440,9 @@ class RateLimitService:
                     "requests": int(r.req) if r else 0,
                     "tokens": int(r.tok) if r else 0,
                     "cost_usd": float(r.cost) if r else 0.0,
+                    # 진행 중인 버킷은 아직 다 차지 않았다 — UI 가 툴팁 등으로
+                    # 구분할 수 있게 표시한다(나머지 버킷은 완전 집계).
+                    "partial": t == live_bucket_ts,
                 }
             )
             t += bucket_sec

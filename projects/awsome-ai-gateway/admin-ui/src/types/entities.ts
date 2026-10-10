@@ -62,6 +62,10 @@ export interface BudgetSummaryItem {
   /** TEAM 행만: 다운그레이드 최신 배치 규칙 수 + 활성 여부(펼친 패널과 같은 기준). */
   downgrade_rule_count?: number | null;
   downgrade_enabled?: boolean | null;
+  // 저장된 알림 임계값. ⚠️ 예전에는 서버가 이 값을 돌려주지 않아서 SetBudgetDialog 가
+  // 항상 [80,90,100] 으로 초기화됐다 — 50% 를 저장한 뒤 다시 열면 저장한 값이 사라진
+  // 것처럼 보였다. null = 예산 미설정, [] = "알림 없음"(유효한 설정).
+  alert_thresholds?: number[] | null;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────

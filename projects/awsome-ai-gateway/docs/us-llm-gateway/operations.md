@@ -16,7 +16,7 @@
 | ID | 절 | 언제 | 문서 |
 |---|---|---|---|
 | §8-U | 업데이트 (코드 변경 반영) | 코드·차트·terraform 이 바뀔 때마다 | [ops/8-U-update.md](ops/8-U-update.md) |
-| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
+| §8-D | upstream 동기화 배포 (코드·스키마·단가 일괄) | upstream 을 크게 들여왔을 때 (US-10 · US-18) | [ops/8-D-upstream-sync.md](ops/8-D-upstream-sync.md) |
 | §8-M | 모델 추가와 교체 | 모델 추가·교체 | [ops/8-M-models.md](ops/8-M-models.md) |
 | §8-R | 모델 단가 맞추기 (AWS 실제 청구와 같게) | 단가가 바뀔 때마다 · upstream 동기화 직후 (US-11) | [ops/8-R-pricing.md](ops/8-R-pricing.md) |
 | §8-Q | Bedrock Marketplace 구독 (AccessDenied 해결) | 신형 모델이 AccessDenied aws-marketplace 로 거절될 때 | [ops/8-Q-marketplace.md](ops/8-Q-marketplace.md) |
@@ -28,7 +28,8 @@
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
 | §8-H | ALB HTTPS — 커스텀 도메인 + ACM (방식 A → B) | 도메인이 있을 때 (US-06, 선택 · 운영이면 강력 권장) | [ops/8-H-alb-https.md](ops/8-H-alb-https.md) |
 | §8-I | admin ALB 2개를 internal 로 (고객사 최종형) | S2S VPN 개통 후 (US-07, 선택) | [ops/8-I-admin-internal.md](ops/8-I-admin-internal.md) |
-| §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (US-15, 선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
+| §8-V | 본문 로깅 활성화 (요청/응답 전문 → S3) | 감사·디버깅이 필요할 때 (선택 · 프라이버시 검토 필수) | [ops/8-V-body-logging.md](ops/8-V-body-logging.md) |
+| §8-W | notification 메일 발송 채널 변경 | 알림 메일을 실제로 보낼 때 (선택) | [ops/8-W-notifications.md](ops/8-W-notifications.md) |
 | §8-T | teardown (과금 중단 · 초기화) | 과금 중단 | [아래](#8-t-teardown-과금-중단--초기화) |
 | §8-Z | 토큰 TTL 조절 | 토큰 수명 바꿀 때 (US-15, 선택) | [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md) |
 | §8-P | dev → prod 승격 — 별도 계정에 prod 스택 신설 | prod 승격 (US-08) | [ops/8-P-prod.md](ops/8-P-prod.md) |
@@ -125,26 +126,11 @@ Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 beta 2개와 `safeguar
 `US-07` 선택 — 전제 S2S VPN. values 주석 2곳 해제 → `install-eks.sh`(ALB 재생성) → admin SG·CNAME 교체. VPN 없이 적용하면 VK 발급이 끊겨 게이트웨이 사용 불가. terraform 무변경. 신규 설치는 `US-01` 때 values 로 포함.
 → **[ops/8-I-admin-internal.md](ops/8-I-admin-internal.md)**
 
-
----
-
-### 8-W. Notification 발송 채널 변경
-
-메일을 실제로내려면 `notificationWorker.email.provider`를 `mock`에서 `internal_api`·`smtp`·`ses`로 전환한다. values 파일은 `update-scripts/21-set-notification-provider.sh`가 yq로 편집한다(수동 grep/sed 금지). `ses` 선택 시 IAM/IRSA는 `update-scripts/22-setup-notification-ses-irsa.sh`로 설정한다.
-
-```bash
-cd docs/us-llm-gateway/update-scripts
-bash 21-set-notification-provider.sh internal-api --apply --url http://mail-api.internal/send
-bash deployment/scripts/install-eks.sh dev   # 실제 반영은 install-eks.sh
-```
-
-상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**
-
 ---
 
 ### 8-V. 본문 로깅 활성화 (요청/응답 전문 → S3)
 
-`US-15` 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`update-scripts/20-enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `env --apply` + install-eks.sh 후에도 수집은 꺼져 있다.
+선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`update-scripts/20-enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `env --apply` + install-eks.sh 후에도 수집은 꺼져 있다.
 
 ```bash
 bash 20-enable-body-logging.sh                  # 상태 (읽기 전용)
@@ -154,6 +140,21 @@ bash 20-enable-body-logging.sh verify            # 버킷/스트림/env 검증
 ```
 
 → **[ops/8-V-body-logging.md](ops/8-V-body-logging.md)**
+
+---
+
+### 8-W. notification 메일 발송 채널 변경
+
+선택 — 기본 `mock` 은 메일을 보내지 않는다. 실제 발송은 `notificationWorker.email.provider` 를 `internal_api`·`smtp`·`ses` 중 하나로 전환해야 한다. values 파일은 `update-scripts/21-set-notification-provider.sh` 가 스코프 편집으로 채우고(수동 grep/sed 금지 — 주석·서식이 날아간다), `ses` 선택 시 IAM/IRSA 는 `update-scripts/22-setup-notification-ses-irsa.sh` 가 만든다.
+
+```bash
+cd docs/us-llm-gateway/update-scripts
+bash 21-set-notification-provider.sh                       # 현재 상태
+bash 21-set-notification-provider.sh <provider> --apply    # mock|internal-api|smtp|ses
+./deployment/scripts/install-eks.sh dev                    # 실제 반영은 install-eks.sh
+```
+
+상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**
 
 ---
 

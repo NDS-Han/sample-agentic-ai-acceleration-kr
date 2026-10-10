@@ -47,6 +47,7 @@ export interface UsageTrendPoint {
   requests: number;
   tokens: number;
   cost_usd: number;
+  partial?: boolean; // 진행 중인(아직 다 안 찬) 마지막 버킷 — 서버가 표시
 }
 
 export interface UsageTrend {

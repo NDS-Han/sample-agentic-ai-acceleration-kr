@@ -113,5 +113,6 @@ enable_chat_db_tools = true
 #   /monitoring 토글이 실제로 동작한다 (수집 on/off 는 그 토글이 관리).
 #   절차: tfvars 에 true 로 apply → terraform output(body_log_firehose_stream /
 #   body_log_bucket) 을 helm values 의 gatewayProxy.env 두 키에 주입 → install-eks.sh
+#   (docs/us-llm-gateway/ops/8-V-body-logging.md, update-scripts/20-enable-body-logging.sh)
 # enable_body_logging = true
 # body_log_retention_days = 90

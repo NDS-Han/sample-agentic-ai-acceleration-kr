@@ -7,7 +7,7 @@ Claude Code 의 Auto mode 는 도구를 실행하기 전에 "안전한가" 판�
 - 판정이 오지 않으니 Claude Code 가 PC 쪽 분류기로 바꾼다. 판정이 필요한 도구마다 별도 요청(약 4.7만 토큰)이 나가고, "classifier 요청 과금" 안내가 뜬다.
 - Claude Code 2.1.289 이상은 대화 중간 메시지에 턴별 effort(`output_config`)를 붙인다. 그 beta 가 없으면 세션 첫 요청이 400 으로 한 번 실패한 뒤 다시 보낸다.
 
-US-17 은 beta 중 두 개와 `safeguards` 만 Bedrock 으로 넘기고(나머지는 지금처럼 버린다 — Bedrock 은 모르는 beta 하나에도 요청 전체를 거절한다), 웹 검색 경로에서도 판정을 그대로 돌려준다.
+US-17 은 beta 중 정해 둔 4개와 `safeguards` 만 Bedrock 으로 넘기고(나머지는 지금처럼 버린다 — Bedrock 은 모르는 beta 하나에도 요청 전체를 거절한다), 웹 검색 경로에서도 판정을 그대로 돌려준다. 4개 중 2개(대화 중간 도구 추가 `tool_addition`, thinking 표시 `updates`)는 2026-10-09 에 더했다 — 계정 기능 플래그가 켜진 Claude Code 가 보내며, 버리면 대화마다 첫 요청이 400 이었다.
 
 ```text
 [지금] 게이트웨이가 beta·safeguards 를 버림
@@ -33,7 +33,7 @@ US-17 은 beta 중 두 개와 `safeguards` 만 Bedrock 으로 넘기고(나머�
 ```
 
 ```text
-[수정 후] 게이트웨이가 beta 2개·safeguards 를 넘기고 판정을 돌려줌
+[수정 후] 게이트웨이가 정해 둔 beta·safeguards 를 넘기고 판정을 돌려줌
 
  사용자 프롬프트
    |
@@ -48,15 +48,17 @@ US-17 은 beta 중 두 개와 `safeguards` 만 Bedrock 으로 넘기고(나머�
 
 ⑤⑥ 은 curl 처럼 판정이 필요한 명령일 때만 생긴다.
 
-- 바뀌는 것: gateway-proxy 이미지 하나(`1.0.84-safeguards`). DB, 다른 서비스, values 의 다른 값은 그대로다.
-- 넘기는 beta: `dangerous-tool-use-2026-09-03`(본문 `safeguards` 와 함께), `per-turn-control-2026-07-01`
+- 바뀌는 것: gateway-proxy 이미지 하나(`1.0.85-betas`). DB, 다른 서비스, values 의 다른 값은 그대로다.
+- 넘기는 beta: `dangerous-tool-use-2026-09-03`(본문 `safeguards` 와 함께), `per-turn-control-2026-07-01`, `inline-tools-2026-09-15`, `thinking-display-updates-2026-08-18`
 - 끄기: 설정 `BEDROCK_FORWARD_BETAS` 를 빈 값으로 하면 재빌드 없이 이전 동작이 된다(7절).
 - 시간: 약 20분(이미지 빌드 포함). gateway-proxy 만 롤링되어 추론은 끊기지 않는다.
 - 직원 PC 는 바꿀 것이 없다.
 
-▶ **실행** · 배포 EC2 — 위에서부터 그대로. 📋 = 기대 출력.
+명령 블록 위의 ▶ **실행** 표시가 실행할 곳이다(배포 EC2 / 관리자 PC). 📋 = 기대 출력.
 
 ## 1. 저장소 최신화
+
+▶ **실행** · 배포 EC2
 
 ```bash
 cd ~/awsome-ai-gateway && git remote -v
@@ -70,17 +72,80 @@ cmp -s $V ~/values.bak && echo "values restored OK" || echo "RESTORE FAILED"
 
 ## 2. 지금 상태 확인 (패치 전)
 
-확인 스크립트는 Claude Code 와 같은 모양의 요청 3개(턴별 effort · 판정 비스트리밍 · 판정 스트리밍)를 게이트웨이에 보내 결과를 판정한다. 모델이 도구를 부르더라도 실행하지 않는다. 비용은 짧은 요청 몇 건이다.
+확인 스크립트는 Claude Code 와 같은 모양의 요청 5개(턴별 effort · 판정 비스트리밍 · 판정 스트리밍 · 도구 추가 블록 · thinking 표시)를 게이트웨이에 보내 결과를 판정한다. 모델이 도구를 부르더라도 실행하지 않는다. 비용은 짧은 요청 몇 건이다.
 
-키(VK)는 직원 PC 와 같은 방법으로 관리자 PC 에서 받는다: `api-key-helper 2>/dev/null | grep -m1 '^vk-'`. 배포 EC2 에는 브라우저 로그인이 없어 직접 받기 어렵다. 게이트웨이 주소는 직원 PC 의 `ANTHROPIC_BASE_URL` 값이다.
+**키(VK)와 주소 — 배포 EC2 에서 받는다.** 설치 가이드 §6-0 에서 배포 EC2 에 `gateway-cli` 를 깔아 두었다. 로그인은 업데이트 사이에 대개 만료되므로 매번 새로 한다.
+
+① **접속 값 4줄** — 배포 EC2
+
+▶ **실행** · 배포 EC2
+
+```bash
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+bash 07-client-values.sh --claude-code
+```
+
+출력에서 `macOS / Linux` 아래의 `export …` 4줄을 이 셸에 붙여 넣는다. 새 SSH 창을 열면 다시 붙여 넣는다 — 새 셸에는 `~/.bashrc` 의 옛 값이 들어 있을 수 있다.
+
+② **터널** — 관리자 PC 의 새 터미널. 로그인 뒤 브라우저가 돌아오는 `localhost:8090` 을 배포 EC2 로 넘긴다. 멈춘 것처럼 보이는 게 정상이니 ③ 이 끝날 때까지 그대로 둔다(`Ctrl+C`·`Ctrl+Z` 를 누르지 않는다). VS Code·Cursor Remote-SSH 로 붙었다면 자동으로 넘겨 주므로 건너뛴다.
+
+▶ **실행** · 관리자 PC (새 터미널)
+
+```bash
+ssh -N -L 8090:localhost:8090 -i ~/.ssh/<키>.pem ubuntu@<배포 EC2 공인 IP>
+```
+
+예 — 키 파일이 `~/.ssh/my-key.pem`, 배포 EC2 공인 IP 가 `203.0.113.10` 일 때(설명용 값). `<배포 EC2 공인 IP>` 는 지금 SSH 로 접속할 때 쓰는 주소다.
+
+```bash
+ssh -N -L 8090:localhost:8090 -i ~/.ssh/my-key.pem ubuntu@203.0.113.10
+```
+
+③ **로그인** — 배포 EC2. 출력된 URL 을 관리자 PC 브라우저로 연다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+gateway-cli login --redirect-port 8090
+```
+
+📋 `Login successful`. 끝에 `Next: run gateway-cli setup` 이 나와도 setup 은 하지 않는다. 이제 ② 의 창을 `Ctrl+C` 로 닫는다.
+
+④ **키 받기** — 배포 EC2
+
+▶ **실행** · 배포 EC2
+
+```bash
+export GATEWAY_KEY=$(api-key-helper | grep -m1 '^vk-')
+echo ${GATEWAY_KEY:0:3} $ANTHROPIC_BASE_URL
+```
+
+📋 로그 몇 줄 뒤에 `vk- <게이트웨이 주소>` 가 나온다. 예: `vk- https://gateway-dev.awsome-ai-gw.click`. 키 자체는 화면에 나오지 않는다.
+
+키를 `ANTHROPIC_AUTH_TOKEN` 으로 export 하지 않는다 — 같은 셸에서 Claude Code 를 띄우면 그 값을 먼저 써서, 키가 만료된 뒤 401 이 난다.
+
+**막히면**
+
+- 브라우저가 `localhost refused to connect` 를 낸다 → ② 터널이 없거나 멈췄다. `Ctrl+Z` 를 눌렀다면 그 창에서 `fg` 를 친다.
+- ② 가 `Address already in use` 를 낸다 → 관리자 PC 의 8090 을 다른 앱이 쓴다. ②·③ 포트를 둘 다 8091 로 바꾼다(Cognito 등록 포트는 8090·8091·8092).
+- ④ 가 `ConnectTimeout … elb.amazonaws.com` 을 낸다 → 셸에 HTTPS 전환 전의 옛 주소가 남았다. ① 의 4줄을 다시 붙여 넣는다.
+- `gateway-cli: command not found` → 이 EC2 에 클라이언트가 없다. 게이트웨이에 로그인된 PC 에서 키를 복사한다. macOS 는 `api-key-helper 2>/dev/null | grep -m1 '^vk-' | pbcopy`, Windows 는 아래 명령이다. 배포 EC2 에서 `read -rs GATEWAY_KEY && export GATEWAY_KEY` 를 실행해 붙여 넣는다(화면에 안 보인다). PC 가 `Missing required OIDC config` 를 내면 07 출력에서 그 OS 블록 4줄을 먼저 붙여 넣는다.
+
+  ▶ **실행** · 관리자 PC (Windows PowerShell)
+
+  ```powershell
+  api-key-helper 2>$null | sls '^vk-' |
+    select -First 1 -ExpandProperty Line | Set-Clipboard
+  ```
+
+**확인 스크립트 실행.**
+
+▶ **실행** · 배포 EC2
 
 ```bash
 cd ~/awsome-ai-gateway/deployment/scripts
-read -rs GATEWAY_KEY && export GATEWAY_KEY
-python3 check-safeguards-passthrough.py https://<게이트웨이 주소>
+python3 check-safeguards-passthrough.py "$ANTHROPIC_BASE_URL"
 ```
-
-둘째 줄에서 `vk-…` 를 붙여 넣고 Enter 를 누른다(화면에 안 보인다). 키를 `ANTHROPIC_AUTH_TOKEN` 으로 export 하지 않는다 — 같은 셸에서 Claude Code 를 띄우면 그 값을 먼저 써서, 키가 만료된 뒤 401 이 난다.
 
 📋
 
@@ -88,19 +153,28 @@ python3 check-safeguards-passthrough.py https://<게이트웨이 주소>
   FAIL   1) 턴별 effort       400 per-turn-control 이 Bedrock 까지 가지 않음
   FAIL   2) 판정 (비스트리밍) 판정 없음 (safeguards 또는 판정이 중간에 사라짐)
   FAIL   3) 판정 (스트리밍)   판정 없음 (safeguards 또는 판정이 중간에 사라짐)
+  FAIL   4) 도구 추가 블록    400 inline-tools 가 Bedrock 까지 가지 않음
+  FAIL   5) thinking 표시     400 thinking-display-updates 가 Bedrock 까지 가지 않음
 결과: 패치 미적용 (이전 동작)
 ```
 
+`1.0.84-safeguards` 가 이미 배포된 곳은 1~3 이 PASS, 4·5 가 FAIL 이고 결과가 `서버 판정은 적용됨, 2026-10-09 beta 2개는 미적용` 이다. 이 경우도 3절부터 그대로 진행한다.
+
 ## 3. 이미지 태그 올리기
+
+▶ **실행** · 배포 EC2
 
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 13-bump-image-tags.sh dev
 ```
 
-📋 `<- change` 는 **gateway-proxy 한 줄**(→ `1.0.84-safeguards`)만 나와야 한다. 왼쪽(current) 값은 설치마다 다르다. 다른 서비스에도 `<- change` 가 붙으면 멈춘다 — 이 EC2 가 다른 업데이트를 덜 적용한 상태라 [8-U](8-U-update.md) 또는 [8-D](8-D-upstream-sync.md) 대상이다.
+📋 `<- change` 는 **gateway-proxy 한 줄**(→ `1.0.85-betas`)만 나와야 한다. 왼쪽(current) 값은 설치마다 다르다. 다른 서비스에도 `<- change` 가 붙으면 멈춘다 — 이 EC2 가 다른 업데이트를 덜 적용한 상태라 [8-U](8-U-update.md) 또는 [8-D](8-D-upstream-sync.md) 대상이다.
+
+▶ **실행** · 배포 EC2
 
 ```bash
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 13-bump-image-tags.sh dev --apply
 ```
 
@@ -108,34 +182,64 @@ bash 13-bump-image-tags.sh dev --apply
 
 ## 4. gateway-proxy 이미지 빌드
 
+▶ **실행** · 배포 EC2
+
 ```bash
 cd ~/awsome-ai-gateway
 ./deployment/scripts/rebuild-image.sh gateway-proxy dev
 ```
 
-📋 `tag : 1.0.84-safeguards` 로 빌드해 ECR 에 올린다. region 오류가 나면 `export AWS_DEFAULT_REGION=us-west-2` 뒤 다시 실행한다.
+📋 `tag : 1.0.85-betas` 로 빌드해 ECR 에 올린다. region 오류가 나면 `export AWS_DEFAULT_REGION=us-west-2` 뒤 다시 실행한다.
 
 ## 5. 배포
 
+▶ **실행** · 배포 EC2
+
 ```bash
+cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
+terraform init | tail -3
+terraform output -json >/dev/null && echo "output OK"
 cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 ```
 
-📋 helm REVISION 이 하나 오르고, gateway-proxy 파드만 새로 뜬다.
+📋 `output OK` 뒤에 배포 로그가 나오고, helm REVISION 이 하나 오르며 gateway-proxy 파드만 새로 뜬다.
 
 ## 6. 확인 (패치 후)
 
+▶ **실행** · 배포 EC2
+
 ```bash
-kubectl -n llm-gateway get deploy gateway-proxy \
+kubectl -n llm-gateway get deploy llm-gateway-gateway-proxy \
   -o jsonpath='{.spec.template.spec.containers[0].image}'; echo
 ```
 
-📋 `…/gateway-proxy:1.0.84-safeguards`
+📋 `…/gateway-proxy:1.0.85-betas`
+
+키와 주소를 다시 받는다. 빌드·배포 사이에 SSH 창이 바뀌었을 수 있으므로 같은 창이어도 그대로 한다 — 이미 있으면 같은 값으로 다시 채워질 뿐이다. 로그인은 2절에서 했으므로 터널·로그인은 필요 없다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+bash 07-client-values.sh --claude-code
+```
+
+출력에서 `macOS / Linux` 아래의 `export …` 4줄을 붙여 넣고 키를 받는다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+export GATEWAY_KEY=$(api-key-helper | grep -m1 '^vk-')
+echo ${GATEWAY_KEY:0:3} $ANTHROPIC_BASE_URL
+```
+
+📋 `vk- <게이트웨이 주소>` 가 나온다. 예: `vk- https://gateway-dev.awsome-ai-gw.click`. `vk-` 가 없으면 2절 ②·③ 으로 다시 로그인한다.
+
+▶ **실행** · 배포 EC2
 
 ```bash
 cd ~/awsome-ai-gateway/deployment/scripts
-read -rs GATEWAY_KEY && export GATEWAY_KEY
-python3 check-safeguards-passthrough.py https://<게이트웨이 주소>
+python3 check-safeguards-passthrough.py "$ANTHROPIC_BASE_URL"
 ```
 
 📋
@@ -144,6 +248,8 @@ python3 check-safeguards-passthrough.py https://<게이트웨이 주소>
   PASS   1) 턴별 effort       200
   PASS   2) 판정 (비스트리밍) toolu_… -> not_flagged
   PASS   3) 판정 (스트리밍)   toolu_… -> not_flagged
+  PASS   4) 도구 추가 블록    200
+  PASS   5) thinking 표시     200
 결과: 패치 적용됨
 ```
 
@@ -151,16 +257,32 @@ python3 check-safeguards-passthrough.py https://<게이트웨이 주소>
 
 ### Claude Code 로 확인 (관리자 PC)
 
-확인 스크립트는 게이트웨이만 본다. 실제 Claude Code 가 서버 판정을 쓰는지는 게이트웨이에 연결된 관리자 PC 에서 아래 세 단계로 본다. **배포 뒤 새로 연 세션**이어야 한다 — 배포 전에 연 세션은 끝날 때까지 PC 쪽 분류기를 쓴다.
+확인 스크립트는 게이트웨이만 본다. 실제 Claude Code 가 서버 판정을 쓰는지는 게이트웨이에 연결된 관리자 PC 에서 아래 단계로 본다. **배포 뒤 새로 연 세션**이어야 한다 — 배포 전에 연 세션은 끝날 때까지 PC 쪽 분류기를 쓴다.
 
-**① 서버 판정이 켜져 있는지** — 새 터미널에서 `claude` 를 열고 `/status` 를 친다.
+**① 빈 폴더에서 시작** — 설정에 `curl` 허용 규칙이 있으면 판정 없이 실행돼 거짓으로 통과한다. 홈 폴더에서 열면 `~/.claude/settings.local.json` 이 폴더 설정으로도 읽히므로 빈 폴더에서 한다.
 
-📋 `Auto mode server: Enabled`. 확인했으면 `/exit`.
+▶ **실행** · 관리자 PC
+
+```bash
+mkdir -p /tmp/am-test && cd /tmp/am-test
+grep -n "Bash(curl" ~/.claude/settings.json
+```
+
+📋 grep 이 아무것도 출력하지 않아야 한다. 나오면 그 줄을 잠시 빼고 한다(사용자 설정은 어느 폴더에서나 적용된다).
+
+**② 서버 판정이 켜져 있는지** — 그 폴더에서 `claude` 를 열고 `/status` 를 친다.
+
+📋 두 가지를 본다. 확인했으면 `/exit`.
+
+- `Auto mode server: Enabled`
+- `Setting sources` 에 `Project local settings`·`Shared project settings` 가 없다(예: `User settings, Enterprise managed settings (drop-ins)`)
 
 - `Disabled` 면 관리형 설정이나 환경 변수에 `CLAUDE_CODE_AUTO_MODE_SERVER=0` 이 있다. 서버 판정을 시도하지 않는 상태라 아래 확인이 거짓으로 통과하므로, 그 값이 없는 PC 에서 한다.
 - 모델은 Sonnet 5.5 또는 Opus 5.5 다(Auto mode 는 Haiku 4.5 를 지원하지 않는다).
 
-**② 판정이 필요한 명령을 Auto mode 로 한 번 실행**
+**③ 판정이 필요한 명령을 Auto mode 로 한 번 실행** — 같은 폴더에서 한다.
+
+▶ **실행** · 관리자 PC
 
 ```bash
 P="Run: curl -s -o /dev/null -w '%{http_code}' https://example.com"
@@ -169,10 +291,14 @@ claude -p "$P" --permission-mode auto --debug-file /tmp/cc.log
 
 📋 답에 `200` 이 들어 있다(확인 창 없이 실행됨). `curl` 은 네트워크 명령이라 판정 대상이다. `ls` 같은 읽기 명령은 판정 없이 실행돼 확인이 되지 않는다.
 
-**③ 로그 확인**
+**④ 로그 확인**
+
+▶ **실행** · 관리자 PC
 
 ```bash
-grep -E "server-classifier|classifier_request_started" /tmp/cc.log
+PAT='server-classifier|classifier_request_started'
+PAT="$PAT|late-tool-additions|thinking\] a request was refused"
+grep -E "$PAT" /tmp/cc.log
 ```
 
 📋 **아무것도 나오지 않으면 통과**다. 패치 전에는 아래 같은 줄이 나온다.
@@ -181,19 +307,60 @@ grep -E "server-classifier|classifier_request_started" /tmp/cc.log
 [server-classifier] the platform gave no classification ... (server_no_result) ...
 [server-classifier] Bash: no server verdict for this call (server_no_result) ...
 [Stall] classifier_request_started reqId=... tool=Bash ...
+[late-tool-additions] tool_addition rejected (block_type_unknown) ...
+[thinking] a request was refused with thinking.display 'updates' ...
 ```
 
 - `server_no_result` = 응답에 판정이 없어 PC 쪽 분류기로 바꿨다는 뜻이다.
 - `classifier_request_started` = 판정용 요청(약 4.7만 토큰)을 따로 보냈다는 뜻이다. 과금 안내가 뜨는 원인이 이것이다.
+- `late-tool-additions`·`[thinking]` = 도구 추가 블록·thinking 표시가 400 을 받아 그 기능을 빼고 다시 보냈다는 뜻이다. 계정 기능 플래그가 켜진 PC 에서만 나온다.
+
+통과는 "PC 쪽 분류기로 바꾸지 않았다"는 뜻이다. 서버 판정이 정상이면 Claude Code 는 판정 결과를 어디에도 남기지 않는다(디버그 로그·`ANTHROPIC_LOG=debug`·대화 기록 모두). 판정 자체는 ⑤ 에서 본다.
 
 로그에는 프롬프트와 경로가 남으므로 확인 뒤 지운다: `rm /tmp/cc.log`
 
-**Windows (PowerShell)** — ②③ 을 이렇게 한다.
+**⑤ (선택) Bedrock 호출 로그에서 판정 보기** — 게이트웨이 계정에서 Bedrock 호출 로깅이 켜져 있을 때만 된다. ③ 을 실행하고 15분 안에 한다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+G=$(aws bedrock get-model-invocation-logging-configuration \
+  --query loggingConfig.cloudWatchConfig.logGroupName --output text)
+echo $G
+```
+
+📋 `<로그 그룹 이름>` 이 나온다. 예: `/aws/bedrock/invocations`. `None` 이면 로깅이 꺼져 있어 이 단계는 할 수 없다.
+
+▶ **실행** · 배포 EC2
+
+```bash
+aws logs filter-log-events --log-group-name "$G" \
+  --start-time $(( ($(date +%s) - 900) * 1000 )) \
+  --filter-pattern '"safeguard_results"' \
+  --query 'events[].message' --output text \
+  | grep -oE '"outcome": ?"[a-z_]+"' | sort | uniq -c
+```
+
+📋 최근 15분의 판정 수가 나온다. 판정 결과만 세고 프롬프트는 출력하지 않는다.
+
+```text
+      2 "outcome":"not_flagged"
+```
+
+아무것도 안 나오면 1~2분 뒤 다시 한다(로그는 늦게 들어올 수 있다). 그래도 없으면 서버 판정이 오지 않은 것이다.
+
+**Windows (PowerShell)** — ①③④ 를 이렇게 한다(② 는 위와 같다).
+
+▶ **실행** · 관리자 PC (Windows PowerShell)
 
 ```powershell
+mkdir $env:TEMP\am-test -Force | Out-Null; cd $env:TEMP\am-test
+sls 'Bash\(curl' $env:USERPROFILE\.claude\settings.json
 $P = "Run: curl -s -o /dev/null -w '%{http_code}' https://example.com"
 claude -p $P --permission-mode auto --debug-file $env:TEMP\cc.log
-sls $env:TEMP\cc.log "server-classifier|classifier_request_started"
+$PAT = "server-classifier|classifier_request_started"
+$PAT += "|late-tool-additions|thinking\] a request was refused"
+sls $env:TEMP\cc.log $PAT
 ```
 
 **과금 안내는 판정 근거로 쓰지 않는다** — 대화형 세션에서는 "classifier 요청 과금" 안내가 안 떠야 맞다. 하지만 한 번 확인한 안내는 24시간 동안 원래 안 뜨고, `-p` 실행에서는 아예 안 뜬다.
@@ -202,9 +369,13 @@ sls $env:TEMP\cc.log "server-classifier|classifier_request_started"
 
 **끄기 스위치 (재빌드 없이 이전 동작)** — values 의 `gatewayProxy:` → `env:` 아래에 한 줄을 넣고 배포한다.
 
+📋 **참고** · values 파일에 넣을 줄 (실행 아님)
+
 ```yaml
     BEDROCK_FORWARD_BETAS: ""
 ```
+
+▶ **실행** · 배포 EC2
 
 ```bash
 cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
@@ -212,18 +383,30 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 
 📋 2절의 확인 스크립트가 다시 `패치 미적용` 이 된다. 다시 켜려면 그 줄을 지우고 배포한다.
 
+2026-10-09 에 더한 beta 2개만 끄려면 같은 자리에 아래 값을 넣는다.
+
+```yaml
+    BEDROCK_FORWARD_BETAS: >-
+      dangerous-tool-use-2026-09-03:safeguards,
+      per-turn-control-2026-07-01
+```
+
 **이미지까지 되돌리기** — [8-U](8-U-update.md) 4단계와 같다.
+
+▶ **실행** · 배포 EC2
 
 ```bash
 helm -n llm-gateway history llm-gateway
 helm -n llm-gateway rollback llm-gateway <직전 REVISION>
 ```
 
+예 — `history` 의 마지막 줄(이번 배포)이 REVISION 50 이면 바로 전인 49 로 되돌린다.
+
+```bash
+helm -n llm-gateway rollback llm-gateway 49
+```
+
 ## 8. 참고
 
-- **넘기는 beta 가 두 개인 이유**: Claude Code 가 보내는 11개를 Bedrock 에 직접 시험했다. `prompt-caching-scope` 는 Bedrock 이 모르는 이름이라 섞이면 요청 전체가 400 이다. 나머지는 넘기지 않아도 동작이 같거나 이번 기능과 무관하다.
-- **Mantle 경로는 대상이 아니다**: beta 를 넘기지 않는다. 그 경로의 Claude Code 는 이전처럼 PC 쪽 분류기를 쓴다.
-- **새 beta 가 생기면**: Claude Code 를 올린 뒤 2절 확인 스크립트를 다시 돌린다. 게이트웨이 로그의 `upstream_compat.beta_dropped` 에 처음 보는 이름이 나오면, Bedrock 에 직접 시험한 뒤 `BEDROCK_FORWARD_BETAS` 에 넣을지 정한다. 그 기능이 웹 검색·사용량 집계와 얽히면 코드 변경이 필요하다.
+- **새 beta 가 생기면**: Claude Code 를 올린 뒤 게이트웨이 로그에서 처음 보는 beta 이름(`upstream_compat.beta_dropped`)과 Bedrock 의 거부(`bedrock_stream_client_error`·`bedrock_client_error`)를 본다. 400 이 있어도 Claude Code 가 그 기능을 빼고 다시 보내 겉으로는 동작하지만, Claude Code 가 모르는 400 이면 그 대화는 서버 판정 대신 PC 쪽 분류기를 쓴다(6절 확인으로는 보이지 않는다). 점검 명령, 지금까지 본 beta 표, 넣을지 정하는 기준은 [beta 헤더 기록](../beta-headers/README.md)에 있다.
 - **보안**: `safeguards` 의 판단 재료에는 작업 경로, git 상태, 사용자 이름이 들어 있고, 이제 Bedrock 까지(호출 로그를 켰다면 그 로그에도) 간다. 프롬프트와 같은 경계다.
-- **비용**: 응답 사용량(usage)에 판정 몫 토큰은 보이지 않았다(실측). 따로 나가던 분류기 요청이 사라지는 만큼 줄어든다.
-- **prod**: dev 확인 뒤 이 문서에 prod 절을 덧붙인다.
