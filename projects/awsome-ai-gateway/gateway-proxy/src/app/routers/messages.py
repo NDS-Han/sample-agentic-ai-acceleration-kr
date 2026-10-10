@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config import get_settings
 from app.providers.bedrock_adapter import BedrockAdapter
 from app.routers.bedrock import _rewrite_model_id_for_region, _strip_region_prefix
+from app.schemas.errors import anthropic_error
 from app.schemas.domain import (
     DegradationLevel,
     ModelConfigSchema,
@@ -231,7 +232,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     except Exception:
         return JSONResponse(
             status_code=400,
-            content={"error": {"type": "invalid_request_error", "message": "Invalid JSON body"}},
+            content=anthropic_error("invalid_request_error", "Invalid JSON body"),
         )
 
     # 클라이언트가 보낸 anthropic-beta 와 넘길 목록은 요청마다 한 번만 읽는다.
@@ -244,9 +245,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     if not model_alias:
         return JSONResponse(
             status_code=400,
-            content={
-                "error": {"type": "invalid_request_error", "message": "model field is required"}
-            },
+            content=anthropic_error("invalid_request_error", "model field is required"),
         )
 
     # Resolve backend (client routing profile) → model config (short-lived session)
@@ -284,7 +283,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     except LookupError as e:
         return JSONResponse(
             status_code=404,
-            content={"error": {"type": "not_found_error", "message": str(e)}},
+            content=anthropic_error("not_found_error", str(e)),
         )
 
     # cross-account(claude-code→374) 일 때만 Bedrock 분기에서 profile.region 으로 설정.
@@ -767,12 +766,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             try:
                 err_content = json.loads(chunk_iter)
             except (json.JSONDecodeError, ValueError):
-                err_content = {
-                    "error": {
-                        "type": "service_unavailable",
-                        "message": "All fallback models failed",
-                    }
-                }
+                err_content = anthropic_error(
+                    "service_unavailable", "All fallback models failed"
+                )
             return JSONResponse(status_code=status, content=err_content)
 
         # If the fallback loop returned a non-200 status for streaming, the
@@ -924,7 +920,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         try:
             content = json.loads(response_body)
         except Exception:
-            content = {"error": {"type": "api_error", "message": "Invalid response from provider"}}
+            content = anthropic_error("api_error", "Invalid response from provider")
         return JSONResponse(
             status_code=status,
             content=content,
@@ -970,15 +966,13 @@ async def count_tokens(request: Request) -> JSONResponse:
     except Exception:
         return JSONResponse(
             status_code=400,
-            content={"error": {"type": "invalid_request_error", "message": "Invalid JSON body"}},
+            content=anthropic_error("invalid_request_error", "Invalid JSON body"),
         )
 
     if not model_alias:
         return JSONResponse(
             status_code=400,
-            content={
-                "error": {"type": "invalid_request_error", "message": "model field is required"}
-            },
+            content=anthropic_error("invalid_request_error", "model field is required"),
         )
 
     dm = state.get("_degradation_manager")
@@ -1001,7 +995,7 @@ async def count_tokens(request: Request) -> JSONResponse:
     except LookupError as e:
         return JSONResponse(
             status_code=404,
-            content={"error": {"type": "not_found_error", "message": str(e)}},
+            content=anthropic_error("not_found_error", str(e)),
         )
 
     if auth_context:
@@ -1013,12 +1007,10 @@ async def count_tokens(request: Request) -> JSONResponse:
         except PermissionError:
             return JSONResponse(
                 status_code=400,
-                content={
-                    "error": {
-                        "type": "invalid_request_error",
-                        "message": f"Your account does not have access to model '{model_config.alias}'. Contact your administrator to request access.",
-                    }
-                },
+                content=anthropic_error(
+                    "invalid_request_error",
+                    f"Your account does not have access to model '{model_config.alias}'. Contact your administrator to request access.",
+                ),
             )
 
     # CountTokens rejects cross-region inference profile IDs (global./us./apac./eu.)
@@ -1067,7 +1059,7 @@ async def count_tokens(request: Request) -> JSONResponse:
     if status != 200:
         return JSONResponse(
             status_code=status,
-            content={"error": {"type": "provider_error", "message": "count_tokens failed"}},
+            content=anthropic_error("provider_error", "count_tokens failed"),
         )
 
     return JSONResponse(status_code=200, content={"input_tokens": input_tokens})

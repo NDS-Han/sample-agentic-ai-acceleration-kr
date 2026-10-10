@@ -466,7 +466,9 @@ class TestAllOpenReturnsSynthetic503:
         assert result.status == 503
         assert result.all_open is True
         body = json.loads(result.payload[0])
-        assert body["error"]["type"] == "service_unavailable"
+        # Anthropic 표준 오류 스키마 — {"type":"error","error":{canonical type}}
+        assert body["type"] == "error"
+        assert body["error"]["type"] == "overloaded_error"
         # Adapter never called
         adapter.invoke.assert_not_awaited()
 

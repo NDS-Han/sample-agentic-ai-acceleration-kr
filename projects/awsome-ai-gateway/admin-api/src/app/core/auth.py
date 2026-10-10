@@ -261,20 +261,6 @@ def _idp_verifier_for(request: Request, token: str) -> OIDCVerifier | None:
     return verifier
 
 
-def _idp_verifier_for(request: Request, token: str) -> OIDCVerifier | None:
-    """토큰의 (검증 전) ``iss`` 가 설정된 OIDC issuer 면 그 검증기를, 아니면 None."""
-    verifier = getattr(request.app.state, "oidc_verifier", None)
-    if not isinstance(verifier, OIDCVerifier):
-        return None
-    try:
-        iss = jwt.get_unverified_claims(token).get("iss")
-    except JWTError:
-        return None
-    if not isinstance(iss, str) or iss.rstrip("/") != verifier.issuer_url:
-        return None
-    return verifier
-
-
 async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     """IdP id_token 클레임 → DB 신원.
 

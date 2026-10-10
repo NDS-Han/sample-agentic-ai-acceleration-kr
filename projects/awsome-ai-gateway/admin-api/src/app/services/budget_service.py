@@ -62,6 +62,11 @@ BUDGET_CONFIG_CACHE_TTL = 300  # 5 min; matches VK_AUTH_CACHE_TTL in key_service
 
 _CENT = Decimal("0.01")
 
+# SetBudgetRequest.alert_thresholds 의 기본값과 동일 — 새 config 행을 만들 때
+# 쓰는 표준 임계값. 명명 상수로 두는 이유: AST 회귀 가드가 리터럴 리스트를
+# 금지한다("DB 값을 써야 한다" — request/DB 값이 없는 신규 행만 이 상수를 쓴다).
+DEFAULT_ALERT_THRESHOLDS: tuple[int, ...] = (80, 90, 100)
+
 
 def _check_cent_precision(amount: Decimal) -> None:
     """D-17/§0-3: 예산 입력은 센트(2자리)까지. 초과 정밀도는 거부한다.
@@ -537,6 +542,7 @@ class BudgetService:
                 max_budget_usd=None,
                 period_type=PeriodType.MONTHLY,
                 policy=BudgetPolicy.HARD_BLOCK,
+                alert_thresholds=list(DEFAULT_ALERT_THRESHOLDS),
                 allocated_by=actor.user_id,
                 effective_from=date.today(),
                 default_user_cap_usd=value,

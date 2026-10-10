@@ -9,6 +9,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.schemas.domain import AuthType
+from app.schemas.errors import anthropic_error
 from app.services.auth_service import resolve_auth_strategy
 
 logger = structlog.get_logger(__name__)
@@ -104,13 +105,7 @@ class AuthMiddleware:
 
     async def _send_401(self, scope: Scope, send: Send, detail: str) -> None:
         body = json.dumps(
-            {
-                "error": {
-                    "type": "authentication_error",
-                    "message": "Unauthorized",
-                    "code": "auth_failed",
-                }
-            }
+            anthropic_error("authentication_error", "Unauthorized", code="auth_failed")
         ).encode()
         await send(
             {
@@ -123,7 +118,7 @@ class AuthMiddleware:
 
     async def _send_503(self, scope: Scope, send: Send) -> None:
         body = json.dumps(
-            {"error": {"type": "service_unavailable", "message": "Service temporarily unavailable"}}
+            anthropic_error("service_unavailable", "Service temporarily unavailable")
         ).encode()
         await send(
             {

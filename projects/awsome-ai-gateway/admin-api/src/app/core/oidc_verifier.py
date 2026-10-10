@@ -244,6 +244,9 @@ class OIDCVerifier:
                 "algorithms": [alg],
                 "issuer": self._issuer_url,
                 "options": {
+                    # IdP ↔ 게이트웨이 시계 드리프트 허용 — 0 이면 nbf/exp 경계의
+                    # 정상 토큰이 조기 401/지연 수용될 수 있다. 30s 는 표준 관행.
+                    "leeway": 30,
                     "verify_signature": True,
                     "verify_exp": True,
                     "verify_nbf": True,

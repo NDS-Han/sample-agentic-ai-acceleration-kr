@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 import structlog
 from starlette.types import ASGIApp, Receive, Scope, Send
 
+from app.schemas.errors import anthropic_error
 from app.periods import (
     period_at,
     reset_request_period,
@@ -168,13 +169,7 @@ class BudgetMiddleware:
             code = reason
 
         body = json.dumps(
-            {
-                "error": {
-                    "type": "budget_exceeded",
-                    "message": message,
-                    "code": code,
-                }
-            }
+            anthropic_error("budget_exceeded", message, code=code)
         ).encode()
         await send(
             {

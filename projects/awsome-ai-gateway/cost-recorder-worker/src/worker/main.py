@@ -18,6 +18,7 @@ import signal
 import sys
 
 import structlog
+from opentelemetry.metrics import Observation
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
@@ -87,6 +88,11 @@ async def main() -> None:
     flusher = BatchFlusher(session_factory=session_factory, redis=redis, metrics=metrics)
     consumer = StreamConsumer(
         redis=redis, flusher=flusher, settings=settings, metrics=metrics
+    )
+    # Observable gauge 콜백 — StreamConsumer._sample_lag 이 reclaim 주기마다 갱신.
+    # lag 상승 = usage_logs/예산 카운터가 뒤처지는 중 (워커 장애·DB 다운의 신호).
+    metrics.register_stream_lag_callback(
+        lambda _opts: [Observation(consumer.last_lag)]
     )
 
     # 7. APScheduler — daily aggregator cron + startup backfill

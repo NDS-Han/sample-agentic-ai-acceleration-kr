@@ -10,9 +10,10 @@ from fastapi import APIRouter, Depends, Request
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.db import get_db_session
+from app.models.auth import UserRole
 
 router = APIRouter(tags=["Internal"])
 
@@ -37,16 +38,32 @@ async def _require_internal_token(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 
-@router.post("/internal/cache/retry")
+async def _require_admin_or_internal(request: Request) -> None:
+    """X-Internal-Token(머신·자동화) 또는 admin JWT(운영자 수동 작업) 게이트.
+
+    다른 `/internal/*` 경로는 토큰만 받지만 cache/retry 는 스케줄러·수동 ops
+    양쪽에서 호출될 수 있어 둘 중 하나면 통과한다. 토큰 불일치 시 admin
+    인증으로 폴백 — 둘 다 아니면 401/403."""
+    settings = get_settings()
+    expected = settings.INTERNAL_API_TOKEN
+    provided = request.headers.get("x-internal-token", "")
+    if expected and hmac.compare_digest(provided, expected):
+        return
+    user = await get_current_user(request)
+    if user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Admin role required")
+
+
+@router.post("/internal/cache/retry", dependencies=[Depends(_require_admin_or_internal)])
 async def retry_cache_invalidation(
     request: Request,
-    admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Retry all unresolved cache invalidation failures.
 
     ⚠️ 인증 필요 — 예전엔 무인증이었는데 admin-api 가 ALB 로 전 경로 공개되어
-       누구나 캐시 무효화 재시도를 발동할 수 있었다(R3-1)."""
+       누구나 캐시 무효화 재시도를 발동할 수 있었다(R3-1). admin JWT 와
+       X-Internal-Token 둘 다 받는다(스케줄러/수동 ops 양용)."""
     from app.core.cache_invalidation import CacheInvalidationManager
 
     cache_mgr: CacheInvalidationManager = request.app.state.cache_mgr
@@ -100,6 +117,7 @@ async def test_issue_key(
     from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, PeriodType
     from app.repositories.budget_repository import BudgetRepository
     from app.repositories.user_repository import UserRepository
+    from app.services.budget_service import DEFAULT_ALERT_THRESHOLDS
     from app.services.key_service import KeyService
 
     body = await request.json()
@@ -138,6 +156,7 @@ async def test_issue_key(
                 max_budget_usd=Decimal(str(budget_usd)),
                 period_type=PeriodType.MONTHLY,
                 policy=BudgetPolicy.HARD_BLOCK,
+                alert_thresholds=list(DEFAULT_ALERT_THRESHOLDS),
                 allocated_by=user.id,
                 effective_from=date.today(),
                 is_active=True,

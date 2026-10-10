@@ -25,6 +25,7 @@ from fastapi.responses import JSONResponse
 
 from app.observability.provider_metrics import record_rate_limit_hit
 from app.schemas.domain import AuthContext, BudgetStatus, DegradationLevel, ModelConfigSchema
+from app.schemas.errors import anthropic_error
 from app.services.rate_limit_config_loader import (
     AllScopeLimits,
     ScopeLimits,
@@ -254,19 +255,15 @@ def _build_cost_429(result, metrics=None) -> JSONResponse:
 
     return JSONResponse(
         status_code=429,
-        content={
-            "error": {
-                "type": "rate_limit_error",
-                "message": (
-                    f"Cost rate limit exceeded at {scope} scope ({limit_type}). "
-                    f"Please retry after {retry_after} seconds."
-                ),
-                "code": code,
-                "scope": result.scope,
-                "limit_type": result.limit_type,
-                "retry_after": result.retry_after,
-            }
-        },
+        content=anthropic_error(
+            "rate_limit_error",
+            f"Cost rate limit exceeded at {scope} scope ({limit_type}). "
+            f"Please retry after {retry_after} seconds.",
+            code=code,
+            scope=result.scope,
+            limit_type=result.limit_type,
+            retry_after=result.retry_after,
+        ),
         headers={
             "Retry-After": retry_after,
             "X-RateLimit-Scope": scope,
@@ -291,19 +288,15 @@ def _build_429(result, metrics=None) -> JSONResponse:
 
     return JSONResponse(
         status_code=429,
-        content={
-            "error": {
-                "type": "rate_limit_error",
-                "message": (
-                    f"Rate limit exceeded at {scope} scope ({limit_type}). "
-                    f"Please retry after {retry_after} seconds."
-                ),
-                "code": code,
-                "scope": result.scope,
-                "limit_type": result.limit_type,
-                "retry_after": result.retry_after,
-            }
-        },
+        content=anthropic_error(
+            "rate_limit_error",
+            f"Rate limit exceeded at {scope} scope ({limit_type}). "
+            f"Please retry after {retry_after} seconds.",
+            code=code,
+            scope=result.scope,
+            limit_type=result.limit_type,
+            retry_after=result.retry_after,
+        ),
         headers={
             "Retry-After": retry_after,
             "X-RateLimit-Scope": scope,

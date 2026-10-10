@@ -15,6 +15,7 @@ import structlog
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.config import get_settings
+from app.schemas.errors import anthropic_error
 from app.services.rate_limit_scope import GLOBAL_WILDCARD, RateLimitScope, build_rl_key
 from app.services.rate_limit_service import InMemoryRateLimiter
 
@@ -129,20 +130,16 @@ class RateLimitMiddleware:
         self, scope: Scope, send: Send, result, scope_name: str = "USER"
     ) -> None:
         body = json.dumps(
-            {
-                "error": {
-                    "type": "rate_limit_error",
-                    "message": (
-                        f"Rate limit exceeded (degraded mode). "
-                        f"Please retry after {result.retry_after} seconds."
-                    ),
-                    "code": f"{scope_name.lower()}_rpm_exceeded",
-                    "scope": scope_name,
-                    "limit_type": "rpm",
-                    "retry_after": result.retry_after,
-                    "degraded": True,
-                }
-            }
+            anthropic_error(
+                "rate_limit_error",
+                f"Rate limit exceeded (degraded mode). "
+                f"Please retry after {result.retry_after} seconds.",
+                code=f"{scope_name.lower()}_rpm_exceeded",
+                scope=scope_name,
+                limit_type="rpm",
+                retry_after=result.retry_after,
+                degraded=True,
+            )
         ).encode()
         headers = [
             (b"content-type", b"application/json"),

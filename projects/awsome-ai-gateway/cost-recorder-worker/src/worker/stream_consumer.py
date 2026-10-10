@@ -67,6 +67,7 @@ class StreamConsumer:
         self._claim_min_idle_ms = settings.xautoclaim_min_idle_ms
         self._claim_task: asyncio.Task | None = None
         self._metrics = metrics
+        self.last_lag = 0
 
     async def ensure_group(self) -> None:
         """Consumer group MKSTREAM create. BUSYGROUP은 정상 상황."""
@@ -136,11 +137,36 @@ class StreamConsumer:
             await self._redis.xack(self._stream, self._group, *ids)
             logger.info("backlog_batch_processed", count=len(ids))
 
+    async def _sample_lag(self) -> None:
+        """consumer group 의 미처리 entry 수를 `last_lag` 에 반영한다 (메트릭용).
+
+        XINFO GROUPS 의 `lag`(Redis 7+)는 미배달+pending 합산이라 실제 backlog 에
+        가장 가깝다. 구버전 Valkey/Redis 에 lag 이 없으면 `pending`(PEL 크기)으로
+        폴백한다. 실패해도 소비 루프에 영향을 주지 않는다.
+        """
+        try:
+            groups = await self._redis.xinfo_groups(self._stream)
+            for g in groups or []:
+                name = g.get("name")
+                if isinstance(name, bytes):
+                    name = name.decode()
+                if name == self._group:
+                    lag = g.get("lag")
+                    if lag is None:
+                        lag = g.get("pending", 0)
+                    self.last_lag = int(lag)
+                    return
+            # 그룹 행이 없다 = 아직 메시지를 읽은 적 없음 → backlog 0
+            self.last_lag = 0
+        except Exception as e:
+            logger.debug("stream_lag_sample_failed", error=str(e)[:160])
+
     async def _reclaim_loop(self) -> None:
         """주기적으로 고아 PEL 을 회수한다. 예외로 소비 루프를 죽이지 않는다."""
         while True:
             try:
                 await asyncio.sleep(self._claim_interval)
+                await self._sample_lag()
                 await self._reclaim_orphans()
             except asyncio.CancelledError:
                 raise

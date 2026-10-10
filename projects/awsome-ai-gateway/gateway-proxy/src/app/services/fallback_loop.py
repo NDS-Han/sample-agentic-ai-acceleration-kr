@@ -37,6 +37,7 @@ from app.observability.provider_metrics import (
     record_provider_request,
 )
 from app.schemas.domain import ModelConfigSchema, TokenUsage
+from app.schemas.errors import anthropic_error
 from app.services.circuit_breaker import CircuitBreakerService
 from app.services.rate_limit_enforcement import enforce_rate_limits
 from app.services.rate_limit_service import RateLimitService
@@ -83,7 +84,7 @@ def scope_denial_body(candidate_config: Any, *, client_scoped: bool) -> bytes:
             f"Your account does not have access to model '{alias}'. "
             "Contact your administrator to request access."
         )
-    return json.dumps({"error": {"type": "invalid_request_error", "message": message}}).encode()
+    return json.dumps(anthropic_error("invalid_request_error", message)).encode()
 
 
 async def enforce_candidate_admission(
@@ -388,7 +389,7 @@ async def run_fallback_loop(
             )
             status = 503  # treat as 503 for unwind/CB purposes
             response_body = json.dumps(
-                {"error": {"type": "connection_error", "message": str(exc)}}
+                anthropic_error("connection_error", str(exc))
             ).encode()
             headers = {}
             usage = TokenUsage()
@@ -410,7 +411,7 @@ async def run_fallback_loop(
                 await cb.record_failure(redis, pmid)
 
             error_bytes = response_body if not is_stream else json.dumps(
-                {"error": {"type": "provider_error", "message": f"Backend returned {status}"}}
+                anthropic_error("provider_error", f"Backend returned {status}")
             ).encode()
             last_error = (status, error_bytes)
 
@@ -459,12 +460,10 @@ async def run_fallback_loop(
             status=503,
             payload=(
                 json.dumps(
-                    {
-                        "error": {
-                            "type": "service_unavailable",
-                            "message": "All fallback models are temporarily unavailable",
-                        }
-                    }
+                    anthropic_error(
+                        "service_unavailable",
+                        "All fallback models are temporarily unavailable",
+                    )
                 ).encode(),
                 {},
                 TokenUsage(),

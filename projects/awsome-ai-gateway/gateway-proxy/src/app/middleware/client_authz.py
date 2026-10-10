@@ -5,6 +5,7 @@ import json
 
 import structlog
 
+from app.schemas.errors import anthropic_error
 from app.services.router_service import check_client_scope
 
 logger = structlog.get_logger(__name__)
@@ -39,7 +40,7 @@ class ClientAuthorizationMiddleware:
             except PermissionError as e:
                 logger.info("client_authz_denied", client=client, message=str(e))
                 body = json.dumps(
-                    {"error": {"type": "permission_error", "message": str(e)}}
+                    anthropic_error("permission_error", str(e))
                 ).encode()
                 await send({
                     "type": "http.response.start", "status": 403,
