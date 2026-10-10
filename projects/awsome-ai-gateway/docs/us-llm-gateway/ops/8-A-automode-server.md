@@ -9,7 +9,7 @@ Claude Code 의 Auto mode 는 도구를 실행하기 전에 "안전한가" 판�
 - 판정이 오지 않으니 Claude Code 가 PC 쪽 분류기로 바꾼다. 판정이 필요한 도구마다 별도 요청(약 4.7만 토큰)이 나가고, "classifier 요청 과금" 안내가 뜬다.
 - Claude Code 2.1.289 이상은 대화 중간 메시지에 턴별 effort(`output_config`)를 붙인다. 그 beta 가 없으면 세션 첫 요청이 400 으로 한 번 실패한 뒤 다시 보낸다.
 
-US-17 은 beta 중 정해 둔 4개와 `safeguards` 만 Bedrock 으로 넘기고(나머지는 지금처럼 버린다 — Bedrock 은 모르는 beta 하나에도 요청 전체를 거절한다), 웹 검색 경로에서도 판정을 그대로 돌려준다. 4개 중 2개(대화 중간 도구 추가 `tool_addition`, thinking 표시 `updates`)는 2026-10-09 에 더했다 — 계정 기능 플래그가 켜진 Claude Code 가 보내며, 버리면 대화마다 첫 요청이 400 이었다.
+US-17 은 beta 중 정해 둔 4개와 `safeguards` 만 Bedrock 으로 넘기고(나머지는 지금처럼 버린다 — Bedrock 은 모르는 beta 하나에도 요청 전체를 거절한다), 웹 검색 경로에서도 판정을 그대로 돌려준다. 4개 중 2개(대화 중간 도구 추가 `tool_addition`, thinking 표시 `updates`)는 2026-10-09 에 더했다 — 계정 기능 플래그가 켜진 Claude Code 가 보내며, 버리면 대화마다 첫 요청이 400 이었다. 어떤 beta 를 왜 넘기고 버리는지는 [beta 헤더 기록](../beta-headers/README.md) 에 있다.
 
 ```text
 [지금] 게이트웨이가 beta·safeguards 를 버림
@@ -51,7 +51,7 @@ US-17 은 beta 중 정해 둔 4개와 `safeguards` 만 Bedrock 으로 넘기고(
 ⑤⑥ 은 curl 처럼 판정이 필요한 명령일 때만 생긴다.
 
 - 바뀌는 것: gateway-proxy 이미지(`1.0.85` 이상, US-18 에서는 `1.0.86-us18`).
-- 넘기는 beta: `dangerous-tool-use-2026-09-03`(본문 `safeguards` 와 함께), `per-turn-control-2026-07-01`, `inline-tools-2026-09-15`, `thinking-display-updates-2026-08-18`
+- 넘기는 beta: `dangerous-tool-use-2026-09-03`(본문 `safeguards` 와 함께), `per-turn-control-2026-07-01`, `inline-tools-2026-09-15`, `thinking-display-updates-2026-08-18` — beta 별 근거와 시험 기록은 [beta-headers](../beta-headers/README.md)
 - 끄기: 설정 `BEDROCK_FORWARD_BETAS` 를 빈 값으로 하면 재빌드 없이 이전 동작이 된다(7절).
 - 직원 PC 는 바꿀 것이 없다.
 
@@ -314,7 +314,7 @@ grep -E "$PAT" /tmp/cc.log
 
 - `server_no_result` = 응답에 판정이 없어 PC 쪽 분류기로 바꿨다는 뜻이다.
 - `classifier_request_started` = 판정용 요청(약 4.7만 토큰)을 따로 보냈다는 뜻이다. 과금 안내가 뜨는 원인이 이것이다.
-- `late-tool-additions`·`[thinking]` = 도구 추가 블록·thinking 표시가 400 을 받아 그 기능을 빼고 다시 보냈다는 뜻이다. 계정 기능 플래그가 켜진 PC 에서만 나온다.
+- `late-tool-additions`·`[thinking]` = 도구 추가 블록·thinking 표시가 400 을 받아 그 기능을 빼고 다시 보냈다는 뜻이다. 계정 기능 플래그가 켜진 PC 에서만 나온다. 자세한 내용은 [2026-10-09 조사](../beta-headers/2026-10-09-new-betas.md).
 
 통과는 "PC 쪽 분류기로 바꾸지 않았다"는 뜻이다. 서버 판정이 정상이면 Claude Code 는 판정 결과를 어디에도 남기지 않는다(디버그 로그·`ANTHROPIC_LOG=debug`·대화 기록 모두). 판정 자체는 ⑤ 에서 본다.
 
@@ -384,7 +384,7 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 
 📋 2절의 확인 스크립트가 다시 `패치 미적용` 이 된다. 다시 켜려면 그 줄을 지우고 배포한다.
 
-2026-10-09 에 더한 beta 2개만 끄려면 같은 자리에 아래 값을 넣는다.
+2026-10-09 에 더한 beta 2개([2026-10-09 조사](../beta-headers/2026-10-09-new-betas.md))만 끄려면 같은 자리에 아래 값을 넣는다.
 
 ```yaml
     BEDROCK_FORWARD_BETAS: >-

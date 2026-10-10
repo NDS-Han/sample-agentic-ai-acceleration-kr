@@ -120,6 +120,7 @@
 | [prd.md](prd.md)                                                   | 요구사항 · 확정 범위 · out-of-scope                                                    | 시작 전 · 고객사와 범위 합의할 때          |
 | [architecture.md](architecture.md)                                 | **전체 그림 1장** — ASCII 아키텍처 · 요청 흐름 5개 · 벤더 레퍼런스 대비                              | 시작 전 · 구조를 한눈에 보고 싶을 때        |
 | [web-search/](web-search/README.md) | web search 문서 입구 — 원리 · 데모 영상 · 토큰·비용 |
+| [beta-headers/](beta-headers/README.md) | Claude Code beta 헤더 기록 — Bedrock 에 넘기는 beta 와 그 근거 · Claude Code 를 올린 뒤 점검 | Claude Code 를 올릴 때 · 400 원인을 찾을 때 |
 | [web-search-explained.md](web-search/web-search-explained.md)                 | 서버측 web search 가 동작하는 원리 (초보자용 ASCII 흐름)                                       | §5 를 개념부터 이해하고 싶을 때           |
 | [client-setup-explained.md](client-setup-explained.md)             | 클라이언트 설치·인증 흐름 (초보자용 ASCII 흐름)                                                 | §6 을 개념부터 이해하고 싶을 때           |
 | [telemetry-explained.md](telemetry-explained.md)                   | Claude Code 텔레메트리(OTEL) — 무엇을 수집·어디로·켤까끌까                                      | §6 setup 이 켜는 텔레메트리를 이해·결정할 때 |
