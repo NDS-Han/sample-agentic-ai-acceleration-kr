@@ -1,5 +1,7 @@
 # US LLM Gateway — 직원 PC 클라이언트 설치 (§6-1 ~ §6-3)
 
+> ⚡ **빠른 버전** — Claude Code · Cowork · Codex(CLI+Desktop) 4개 클라이언트를 한 페이지에: [client-quickstart.md](client-quickstart.md). 이 문서는 Claude Code 의 상세·OS별 함정·복구 절차다.
+
 > **누가 보나**: **직원**(또는 직원 PC 를 세팅해 주는 IT 담당자). 운영자는 게이트웨이 설치를 마친 뒤 **이 문서만** 직원에게 전달하면 된다 — 1,000줄이 넘는 인프라 런북은 필요 없다.
 >
 > **시작 전 운영자에게서 받을 것**
