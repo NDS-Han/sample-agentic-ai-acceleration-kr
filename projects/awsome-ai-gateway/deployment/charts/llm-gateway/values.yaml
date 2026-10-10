@@ -964,7 +964,9 @@ notificationWorker:
 
   # 이메일 발송 설정 — 고객 내부 메일 API / SMTP / SES / mock
   email:
-    provider: "internal_api"  # "internal_api" | "smtp" | "ses" | "mock"
+    # 기본값은 mock — internal_api 는 url 필수라 기본 상태로 기동하면 crashloop.
+    # 실제 발송이 필요하면 env values 에서 provider 를 명시할 것.
+    provider: "mock"          # "internal_api" | "smtp" | "ses" | "mock"
     internalApi:
       url: ""                 # 고객 내부 메일 API URL (예: http://mail-api.internal/send)
       fromAddress: "no-reply@llm-gateway.local"

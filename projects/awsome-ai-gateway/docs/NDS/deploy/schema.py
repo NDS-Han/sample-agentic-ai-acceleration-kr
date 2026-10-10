@@ -84,6 +84,9 @@ class FeaturesConfig:
 
 @dataclass
 class ImagesConfig:
+    # registry 는 "레지스트리 호스트" 의미 (예: 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com).
+    # eks 는 차트가 host 뒤에 llm-gateway/<svc> 를 붙이고, ecs 렌더도 같은 규칙으로
+    # /llm-gateway 를 붙인다 — 두 backend 가 동일 값을 같은 의미로 쓴다.
     registry: str = ""
     tag: str = ""
 

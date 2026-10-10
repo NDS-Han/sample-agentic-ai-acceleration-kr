@@ -480,7 +480,7 @@ class CostRecorder:
             availability_fallback_from=availability_fallback_from,
             threshold_triggered=threshold_triggered,
             threshold_scope=threshold_scope,
-            threshold_policy=None,  # worker가 budget_configs에서 조회해 채움
+            threshold_policy=None,  # worker는 조회 없이 "hard_block" 기본값으로 발행 — 알림 템플릿이 policy를 읽지 않아 현재 무영향
             sso_subject=auth_context.sso_subject,
             bedrock_request_id=bedrock_request_id,
             client=client,

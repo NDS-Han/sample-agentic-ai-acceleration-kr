@@ -170,3 +170,25 @@ def test_derived_url_vars():
     # 도메인 있으면 발견값 없음 (도메인에서 파생)
     cfg2 = _cfg(domain={"mode": "route53-acm", "name": "ex.com", "zone_id": "Z1"})
     assert ecs_apply._derived_url_vars(cfg2, out) == {}
+
+
+def test_registry_host_gets_project_prefix_appended():
+    # images.registry 의 정본 의미는 "레지스트리 호스트" (eks chart 의
+    # global.imageRegistry 와 동일 — 차트가 뒤에 llm-gateway/<svc> 를 붙인다).
+    # ecs 모듈은 image_registry/<svc> 로 조립하므로 render 가 /llm-gateway 를
+    # 붙여 실제 repo(host/llm-gateway/<svc>)와 일치시킨다.
+    v = ecs_render.desired_tfvars(_cfg(
+        images={"tag": "v1", "registry": "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com"}))
+    assert v["image_registry"] == "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/llm-gateway"
+
+
+def test_registry_with_project_prefix_passes_through():
+    # 이미 path 가 붙은 경우(비표준 repo prefix)는 사용자 의도로 간주해 그대로 둔다.
+    v = ecs_render.desired_tfvars(_cfg(
+        images={"tag": "v1", "registry": "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/custom"}))
+    assert v["image_registry"] == "111122223333.dkr.ecr.ap-northeast-2.amazonaws.com/custom"
+
+
+def test_empty_registry_leaves_module_to_create_repos():
+    v = ecs_render.desired_tfvars(_cfg())
+    assert "image_registry" not in v

@@ -234,6 +234,16 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     # ── 17. Graceful shutdown ─────────────────────────────────────────────────
     await supervisor.stop_all(grace_period=30)
 
+    # DB 장애로 버퍼에 쌓인 알림은 종료 전 한 번 드레인 — 복구됐다면 유실 방지.
+    # 실패 시 drain 이 재큐로 되돌리므로 아래 경고가 잔여를 정확히 보고한다.
+    if notification_buffer.size:
+        try:
+            await asyncio.wait_for(
+                notification_buffer.drain(process_buffered_event), timeout=10
+            )
+        except Exception:
+            logger.exception("buffer_drain_on_shutdown_failed")
+
     remaining = notification_buffer.size
     if remaining > 0:
         logger.warning("buffer_events_unprocessed_on_shutdown", count=remaining)

@@ -105,9 +105,15 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     elif cfg.domain.mode == "none" or cfg.domain.mode == "cloudfront-temp":
         vars_["domain_name"] = ""
 
-    # ── 이미지 — 외부 registry 지정 시 ECR repo 생성 생략
+    # ── 이미지 — 외부 registry 지정 시 ECR repo 생성 생략.
+    # images.registry 의 정본 의미는 레지스트리 "호스트" (eks chart 의
+    # global.imageRegistry 와 동일 — 차트가 뒤에 llm-gateway/<svc> 를 붙인다).
+    # ecs 모듈은 image_registry/<svc> 로 조립하므로 bare host 이면 프로젝트
+    # prefix 를 붙여 repo(host/llm-gateway/<svc>)와 일치시킨다. path 가 이미
+    # 붙어 있으면 사용자가 repo prefix 까지 지정한 것으로 보고 그대로 둔다.
     if cfg.images.registry:
-        vars_["image_registry"] = cfg.images.registry
+        reg = cfg.images.registry.rstrip("/")
+        vars_["image_registry"] = reg if "/" in reg else f"{reg}/llm-gateway"
 
     # ── notifications
     vars_["email_sender_type"] = n.provider
