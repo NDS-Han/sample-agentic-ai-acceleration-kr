@@ -85,7 +85,7 @@ upstream 을 통째로 들여온 뒤 배포 EC2 에서 명령만 위에서 아�
 
 ### 8-A. Claude Code Auto mode 서버 분류기
 
-Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 beta 2개와 `safeguards` 를 넘긴다(US-17) — gateway-proxy 이미지만 바뀐다. 끄기 = `BEDROCK_FORWARD_BETAS` 빈 값.
+Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 정해 둔 beta 와 `safeguards` 를 넘긴다(US-17) — US-18 부터는 8-D(US-18) 배포에 함께 들어간다. 끄기 = `BEDROCK_FORWARD_BETAS` 빈 값.
 → **[ops/8-A-automode-server.md](ops/8-A-automode-server.md)**
 
 ---
