@@ -193,9 +193,48 @@ EOF
 
 ## 운영자 메모 — 직원에게 넘길 값은 어디서 나오나
 
-| 값 | 출처 |
+**한 번에 뽑기** (배포 머신에서):
+
+```bash
+./deploy client-values        # env 4줄을 출력 — 이 블록을 직원에게 전달
+```
+
+eks 는 `values-eks-*.local.yaml` 의 ingress host, ecs 는 terraform output
+(`alb_dns_name`, `cognito_*`), compose 는 공인 IP 자동 탐지를 씁니다.
+OIDC 가 비어 있거나 주소를 못 찾으면 `<TODO>` 로 표시하고 이유를 출력합니다.
+
+| 값 | 출처 (client-values 가 읽는 곳) |
 |---|---|
-| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` | `deployment/gateway.yaml` 의 `oidc:` (또는 배포된 Cognito 콘솔) |
-| 게이트웨이/admin-api URL | `domain.mode` 별 위 표 — `deployment/gen/<env>/` 산출물이나 ingress/SG 출력 |
+| `OIDC_ISSUER_URL` / `OIDC_CLIENT_ID` | `gateway.yaml` `oidc:` → 없으면 terraform output `cognito_*` |
+| 게이트웨이/admin-api URL | eks: values `ingress.*.host` / ecs: `alb_dns_name` / compose+도메인: `gateway.<domain>` / compose 무도메인: 공인 IP:8000 |
 | 사용자 계정 | OIDC 프로바이더(Cognito)에서 생성 — admin bootstrap 은 설치 문서 참조 |
 | 클라이언트 IP 허용 | `network.allowed_cidrs` 수정 후 `./deploy apply` (SG 는 backend 가 갱신) |
+
+---
+
+## 4. Windows — Cowork / Codex Desktop 은 어떻게?
+
+Windows 에서도 인증 구조는 동일(`gateway-cli login` → helper → VK)하지만
+**관리형 설정의 저장 위치가 레지스트리(HKLM)**이고, 배포 방식이 두 갈래입니다:
+
+### Cowork (Claude Desktop) — Windows
+
+| 경로 | 언제 | 무엇을 |
+|---|---|---|
+| **인스톨러 빌드** (권장, 직원 다수) | 조직 배포 | BUILD PC 에서 `installer/packaging/site-config.json` 에 env 값을 박고 `build.ps1` → **단일 .exe** 를 직원에게 배포. 직원 PC 에서는 `gateway-cli-cowork setup`(HKLM 정책 기록) → 사용자별 `login` 한 번 |
+| **수동** | 소수·검증 | `gateway-cli` 설치·로그인 → helper 스크립트 → Cowork `.msix` 설치 → 관리자 PowerShell 로 HKLM `inference*` 정책 6개 기록 |
+
+상세: `../us-llm-gateway/cowork/installer/cowork-installer-admin-e2e-windows.md`(인스톨러) ·
+`../us-llm-gateway/cowork/manual/cowork-client-install-windows.md`(수동, Windows Server 2025 실측 완료).
+
+### Codex (CLI + Desktop) — Windows
+
+`config.toml` 경로만 다르고 **내용은 macOS 와 동일**합니다:
+
+- 설정 파일: `%USERPROFILE%\.codex\config.toml` (PowerShell 에서 `~\.codex\config.toml`)
+- helper: mac 의 `/usr/local/bin/llm-gateway-helper.sh` 대신 `api-key-helper.exe` 를
+  직접 가리키는 `.ps1`/`.cmd` 래퍼를 만들어 `auth.command` 에 절대경로로 지정
+- Codex Desktop 도 같은 파일을 읽으므로 한 번 설정으로 둘 다 됩니다
+
+> ⚠️ Windows Codex 데스크톱 경로는 **미실측** — `auth.command` 의 Windows 지원은
+> Codex 버전에 따릅니다. CLI 에서 먼저 검증하고 데스크톱에 같은 설정을 적용하세요.

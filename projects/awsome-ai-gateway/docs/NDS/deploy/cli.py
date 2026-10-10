@@ -962,6 +962,113 @@ def cmd_doctor(args) -> int:
     return 0
 
 
+def _tf_env_dir(cfg) -> Path:
+    if cfg.deploy.target == "ecs":
+        return REPO_ROOT / "deployment" / "terraform" / "environments" / "gateway-ecs"
+    rel = cfg.deploy.tf_env_dir or f"deployment/terraform/environments/llm-gateway-{cfg.env}"
+    return REPO_ROOT / rel
+
+
+def _tf_outputs_soft(env_dir: Path) -> dict:
+    """terraform output best-effort — init/state 없으면 {} (값 추출은 선택 사항)."""
+    if not env_dir.exists():
+        return {}
+    try:
+        from .capture import _tf_outputs
+        return _tf_outputs(env_dir)
+    except Exception:
+        return {}
+
+
+def _eks_ingress_hosts(cfg) -> dict:
+    """env overlay values 의 ingress host — eks 의 실제 서비스 주소."""
+    from .render import eks as eks_render
+    p = eks_render.env_values_file(cfg)
+    if not p:
+        return {}
+    try:
+        data = yaml.safe_load(p.read_text()) or {}
+    except Exception:
+        return {}
+    ing = data.get("ingress") or {}
+    return {k: (ing.get(k) or {}).get("host", "")
+            for k in ("gateway", "adminApi", "adminUi")}
+
+
+def _public_ip() -> str:
+    import subprocess
+    try:
+        r = subprocess.run(["curl", "-s", "--max-time", "4",
+                            "https://checkip.amazonaws.com"],
+                           capture_output=True, text=True, timeout=6)
+        ip = r.stdout.strip()
+        return ip if r.returncode == 0 and "." in ip else ""
+    except Exception:
+        return ""
+
+
+def cmd_client_values(args) -> int:
+    """직원에게 전달할 env 4줄 출력 — gateway.yaml + 라이브 산출물에서 추출."""
+    cfg = _load_config(args)
+    target = cfg.deploy.target
+    notes: list[str] = []
+
+    gw = adm = ""
+    if target == "eks":
+        hosts = _eks_ingress_hosts(cfg)
+        gw_h = hosts.get("gateway") or (f"gateway.{cfg.domain.name}" if cfg.domain.name else "")
+        adm_h = hosts.get("adminApi") or (f"admin-api.{cfg.domain.name}" if cfg.domain.name else "")
+        gw = f"https://{gw_h}" if gw_h else ""
+        adm = f"https://{adm_h}" if adm_h else ""
+        if not gw_h:
+            notes.append("eks ingress host 를 못 찾았습니다 — values-eks-*.local.yaml 의 "
+                         "ingress.gateway.host 또는 `kubectl -n {ns} get ingress`로 확인")
+    elif cfg.domain.name:
+        gw = f"https://gateway.{cfg.domain.name}"
+        adm = f"https://admin-api.{cfg.domain.name}"
+    else:
+        outs = _tf_outputs_soft(_tf_env_dir(cfg))
+        dns = str(outs.get("alb_dns_name") or "")
+        if target == "ecs" and dns:
+            gw, adm = f"http://{dns}:8000", f"http://{dns}:8080"
+        elif target == "compose":
+            ip = _public_ip()
+            if ip:
+                gw, adm = f"http://{ip}:8000", f"http://{ip}:8080"
+                notes.append("compose+도메인 없음: 공인 IP 자동 탐지 — 배포 EC2 외 머신에서 "
+                             "실행했다면 출력 IP 대신 EC2 퍼블릭 IP 로 교체하세요")
+
+    issuer, cid = cfg.oidc.issuer_url, cfg.oidc.client_id
+    if not (issuer and cid) and target in ("ecs", "eks"):
+        outs = _tf_outputs_soft(_tf_env_dir(cfg))
+        issuer = issuer or str(outs.get("cognito_issuer_url") or "")
+        cid = cid or str(outs.get("cognito_client_id") or "")
+    if not (issuer and cid):
+        notes.append("OIDC 값이 비어 있습니다 — gateway.yaml oidc: 가 비활성(dev-login)이거나 "
+                     "terraform 미적용 상태입니다. 채운 뒤 다시 실행하세요")
+
+    if cfg.domain.mode == "none":
+        notes.append("domain.mode=none → http 주소: Cowork(Claude Desktop)는 https 만 "
+                     "받으므로 이 설정으로는 연결 불가 (Claude Code·Codex는 됨)")
+    if not cfg.network.allowed_cidrs:
+        notes.append("network.allowed_cidrs 가 비어 있습니다 — 게이트웨이가 인터넷 전체에 "
+                     "열려 있을 수 있으니 직원 IP 대역을 넣는 것을 권장")
+
+    def _v(x):  # 채워진 값 또는 placeholder
+        return x if x else "<TODO>"
+
+    console.print(Panel.fit(
+        "직원에게 전달할 블록 — docs/NDS/client-setup.md §0 의 export 4줄\n\n"
+        f'export OIDC_ISSUER_URL="{_v(issuer)}"\n'
+        f'export OIDC_CLIENT_ID="{_v(cid)}"\n'
+        f'export ADMIN_API_URL="{_v(adm)}"\n'
+        f'export ANTHROPIC_BASE_URL="{_v(gw)}"',
+        title=f"client-values ({cfg.env} / {target})"))
+    for n in notes:
+        console.print(f"  [yellow]! {n}")
+    return 0
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(prog="deploy", description="gateway.yaml 기반 LLM Gateway 배포 도구")
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1018,6 +1125,12 @@ def main(argv=None) -> int:
                     help="기존 config 와 다른 항목을 absorb/keep/skip 선택")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_doctor)
+
+    sp = sub.add_parser("client-values",
+                        help="[직원 온보딩] 직원에게 전달할 env 4줄 출력 "
+                             "(OIDC + 게이트웨이/admin-api URL)")
+    sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.set_defaults(fn=cmd_client_values)
 
     sp = sub.add_parser("teardown",
                         help="[위험] 배포 삭제 — backend 별 소유 범위만 지움 (확인: 환경 이름 입력)")

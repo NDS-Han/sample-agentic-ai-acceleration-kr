@@ -26,6 +26,7 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 ./deploy configure   # 설정 마법사 — 항목별 확인(Enter=유지) → 끝에서 "지금 배포?"
 ./deploy apply       # yaml 그대로 배포 — 파일을 직접 고쳤거나 CI에서. render 내장
 ./deploy doctor      # 상태·드리프트 점검  (--capture: 기존 배포 → yaml 역생성)
+./deploy client-values  # 직원에게 전달할 env 4줄 출력 — client-setup.md §0 의 값
 ```
 
 최초 생성은 `./deploy init` (yaml이 없을 때의 configure). 아래는 고급 명령 —
