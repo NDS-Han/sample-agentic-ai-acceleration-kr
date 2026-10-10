@@ -275,12 +275,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="input_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step="0.00000001"
                 value={form.input_price_per_1k}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00000000"
               />
               {fieldErrors.input_price_per_1k && <FormError error={fieldErrors.input_price_per_1k} />}
             </div>
@@ -292,12 +292,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="output_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step="0.00000001"
                 value={form.output_price_per_1k}
                 onChange={handleChange}
                 required
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00000000"
               />
               {fieldErrors.output_price_per_1k && <FormError error={fieldErrors.output_price_per_1k} />}
             </div>
@@ -309,11 +309,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_creation_5m_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step="0.00000001"
                 value={form.cache_creation_5m_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00000000"
               />
               {fieldErrors.cache_creation_5m_price_per_1k && <FormError error={fieldErrors.cache_creation_5m_price_per_1k} />}
             </div>
@@ -325,11 +325,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_creation_1h_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step="0.00000001"
                 value={form.cache_creation_1h_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00000000"
               />
               {fieldErrors.cache_creation_1h_price_per_1k && <FormError error={fieldErrors.cache_creation_1h_price_per_1k} />}
             </div>
@@ -341,11 +341,11 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 name="cache_read_price_per_1k"
                 type="number"
                 min={0}
-                step={0.000001}
+                step="0.00000001"
                 value={form.cache_read_price_per_1k}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                placeholder="0.000000"
+                placeholder="0.00000000"
               />
               {fieldErrors.cache_read_price_per_1k && <FormError error={fieldErrors.cache_read_price_per_1k} />}
             </div>

@@ -220,7 +220,7 @@ class ModelService:
         session: AsyncSession,
         *,
         pricing_sync_service,
-        quantize: Decimal = Decimal("0.000001"),
+        quantize: Decimal = Decimal("0.00000001"),
     ):
         """AWS Price List 단가 vs DB 현재가 diff 미리보기(쓰기 없음, deepdive 가격동기화).
 
@@ -299,7 +299,7 @@ class ModelService:
         actor: CurrentUser,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
-        quantize: Decimal = Decimal("0.000001"),
+        quantize: Decimal = Decimal("0.00000001"),
     ):
         """승인된 alias 목록만 AWS 단가로 적용 — 기존 set_pricing 재사용(시계열·감사·캐시).
 

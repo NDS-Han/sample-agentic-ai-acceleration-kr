@@ -229,3 +229,15 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
     }
   });
 });
+
+describe('CreateModelDialog — price inputs take 8 decimal places (US-19)', () => {
+  it('uses an 8-place step so the browser accepts 0.0001375', () => {
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    for (const id of ['input_price_per_1k', 'output_price_per_1k', 'cache_creation_5m_price_per_1k',
+                      'cache_creation_1h_price_per_1k', 'cache_read_price_per_1k']) {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      expect(el, id).not.toBeNull();
+      expect(el!.getAttribute('step')).toBe('0.00000001');
+    }
+  });
+});

@@ -12,6 +12,7 @@ import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { CreateModelDialog } from './CreateModelDialog';
 import { DeactivateModelDialog } from './DeactivateModelDialog';
+import { formatRate } from '@/lib/utils/rateFormat';
 
 interface ModelsTableProps {
   models: ModelListItem[];
@@ -110,21 +111,21 @@ export function ModelsTable({ models }: ModelsTableProps) {
                     <ProviderBadge provider={model.provider} />
                   </Td>
                   <Td className="text-muted-foreground font-mono mono-id text-xs">{model.model_id}</Td>
-                  <Td numeric>${model.input_price_per_1k.toFixed(4)}/1K</Td>
-                  <Td numeric>${model.output_price_per_1k.toFixed(4)}/1K</Td>
+                  <Td numeric>${formatRate(model.input_price_per_1k)}/1K</Td>
+                  <Td numeric>${formatRate(model.output_price_per_1k)}/1K</Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_creation_5m_price_per_1k > 0
-                      ? `$${model.cache_creation_5m_price_per_1k.toFixed(5)}/1K`
+                      ? `$${formatRate(model.cache_creation_5m_price_per_1k)}/1K`
                       : '—'}
                   </Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_creation_1h_price_per_1k > 0
-                      ? `$${model.cache_creation_1h_price_per_1k.toFixed(5)}/1K`
+                      ? `$${formatRate(model.cache_creation_1h_price_per_1k)}/1K`
                       : '—'}
                   </Td>
                   <Td numeric className="text-muted-foreground">
                     {model.cache_read_price_per_1k > 0
-                      ? `$${model.cache_read_price_per_1k.toFixed(5)}/1K`
+                      ? `$${formatRate(model.cache_read_price_per_1k)}/1K`
                       : '—'}
                   </Td>
                   <Td>

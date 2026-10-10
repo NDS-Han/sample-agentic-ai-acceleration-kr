@@ -12,6 +12,7 @@ import {
 } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { formatRate } from '@/lib/utils/rateFormat';
 
 /**
  * AWS Price List 단가 동기화 버튼 + diff 미리보기/승인 다이얼로그.
@@ -186,7 +187,7 @@ export function PriceSyncButton() {
 }
 
 function fmtChange(current: string | undefined, proposed: string | null): string {
-  const c = current != null ? `$${Number(current).toFixed(6)}` : '—';
-  const p = proposed != null ? `$${Number(proposed).toFixed(6)}` : '—';
+  const c = current != null ? `$${formatRate(Number(current))}` : '—';
+  const p = proposed != null ? `$${formatRate(Number(proposed))}` : '—';
   return `${c} → ${p}`;
 }

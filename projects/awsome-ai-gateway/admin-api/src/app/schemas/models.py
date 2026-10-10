@@ -11,17 +11,19 @@ from app.core.clients import validate_clients
 from app.schemas.common import ApiFormatEnum, ProviderEnum
 
 # 단가 상한 — DB 컬럼에서 유도한 값이지 임의로 고른 숫자가 아니다.
-#   app/models/model.py:100~109  → Numeric(10, 6)
-#   db/init/02_create_tables.sql:222~226 → NUMERIC(10,6)  (0003_rename_cache_5m.py:34~38 도 동일)
-# NUMERIC(10,6) = 전체 10자리 중 소수 6자리 ⇒ 정수부는 4자리뿐이므로 최대값이 9999.999999 다.
+#   app/models/model.py  → Numeric(12, 8)
+#   db/init/02_create_tables.sql → NUMERIC(12,8)  (US-19 에서 (10,6) → (12,8), 정본 phase-2 0043)
+#   db/versions/0003·0038 도 NUMERIC(12,8) — 새로 설치할 때 init SQL 뒤에 표·열을 다시 만든다.
+# NUMERIC(12,8) = 전체 12자리 중 소수 8자리 ⇒ 정수부는 4자리뿐이므로 최대값이 9999.99999999 다.
+# 소수 8자리는 Haiku 5.5 의 US 캐시 쓰기 단가 0.0001375(7자리) 때문이다 — 6자리일 땐 422.
 # 상한이 없으면 pydantic 은 통과시키고 asyncpg 가 INSERT 시점에 NumericValueOutOfRange 를
 # 던져 그냥 500 이 된다(입력 오류인데 서버 장애처럼 보이고, 어느 필드가 문제인지도 안 나온다).
-# ⚠️ 기존 decimal_places=6 **만으로는** 정수부를 전혀 제한하지 못한다(소수 자리 수만 본다).
-#    max_digits=10 을 더하는 방법도 있다 — pydantic 2.13.2 실측으로는 max_digits-decimal_places
+# ⚠️ 기존 decimal_places=8 **만으로는** 정수부를 전혀 제한하지 못한다(소수 자리 수만 본다).
+#    max_digits=12 를 더하는 방법도 있다 — pydantic 2.13.2 실측으로는 max_digits-decimal_places
 #    를 정수부 상한(4자리)으로 환산해 같은 결과를 낸다(decimal_whole_digits 에러). 그래도 여기서는
 #    le 를 쓴다: pyproject 가 pydantic>=2.0.0 만 요구하므로 그 파생 규칙에 기대지 않고
 #    DB 최대값을 그대로 적는 편이 버전에 무관하고 에러 메시지도 사람이 읽을 수 있다.
-MAX_PRICE_PER_1K = Decimal("9999.999999")
+MAX_PRICE_PER_1K = Decimal("9999.99999999")
 
 
 # ── Requests ──
@@ -43,16 +45,16 @@ class ModelCreateRequest(BaseModel):
     api_format: ApiFormatEnum
     description: str | None = None
     display_name: str | None = Field(default=None, max_length=128)
-    input_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=6)
-    output_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=6)
+    input_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=8)
+    output_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=8)
     cache_creation_5m_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     cache_creation_1h_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     cache_read_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
 
     #: 이 모델을 쓸 수 있는 앱 허용목록. **3-상태**(models/model.py 주석 참조):
@@ -118,22 +120,22 @@ class PricingRequest(BaseModel):
     #    보내면 200, 기록된 행은 5m=0 · 1h=0, 직전 행은 이미 닫힘.
     #    ⇒ "extra 키는 무해한 오타" 라는 이전 판단은 이 스키마에서 반증됐다.
     #
-    # le=MAX_PRICE_PER_1K: ModelCreateRequest 와 같은 이유(NUMERIC(10,6) 오버플로 → 500).
+    # le=MAX_PRICE_PER_1K: ModelCreateRequest 와 같은 이유(NUMERIC(12,8) 오버플로 → 500).
     # ⚠️ 이 스키마는 사용자 입력 외에 model_service.apply_price_sync 도 만들어 쓴다.
     #    AWS Price List 값이 비정상이면 DB 쓰기 전에 여기서 걸린다(더 이른 실패가 낫다).
     #    apply_price_sync 는 선언된 필드만 kwargs 로 넘기므로 forbid 의 영향을 받지 않는다.
     model_config = ConfigDict(extra="forbid")
 
-    input_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=6)
-    output_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=6)
+    input_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=8)
+    output_price_per_1k_tokens: Decimal = Field(ge=0, le=MAX_PRICE_PER_1K, decimal_places=8)
     cache_creation_5m_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     cache_creation_1h_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     cache_read_price_per_1k_tokens: Decimal = Field(
-        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=6
+        default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     effective_from: datetime
 
