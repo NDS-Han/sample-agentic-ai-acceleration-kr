@@ -436,7 +436,7 @@ class BudgetService:
             allocated_by=actor.user_id,
             effective_from=date.today(),
             default_user_cap_usd=new_cap,
-            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
             alert_thresholds=sorted(set(data.alert_thresholds)),
@@ -853,7 +853,7 @@ class BudgetService:
             policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
-            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
             alert_thresholds=sorted(set(data.alert_thresholds)),
@@ -1105,7 +1105,7 @@ class BudgetService:
             policy=policy,
             allocated_by=actor.user_id,
             effective_from=date.today(),
-            # ⚠️ migration 0037 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
+            # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
             alert_thresholds=sorted(set(data.alert_thresholds)),
@@ -1990,7 +1990,7 @@ class BudgetService:
                 scope_id=cfg.scope_id,
                 max_budget_usd=cfg.max_budget_usd,
                 policy=cfg.policy,
-                # migration 0037 이후 DB 가 진실의 원천이다(예전 하드코딩은 운영자
+                # migration 0041 이후 DB 가 진실의 원천이다(예전 하드코딩은 운영자
                 # 설정을 워밍업이 덮어쓰게 만들었다).
                 alert_thresholds=list(cfg.alert_thresholds or []),
                 default_cap=cfg.default_user_cap_usd,

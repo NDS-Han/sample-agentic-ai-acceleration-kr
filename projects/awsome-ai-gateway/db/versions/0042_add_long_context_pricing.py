@@ -2,8 +2,8 @@
 
 """컨텍스트 밴드 요금제: 프롬프트가 임계를 넘으면 요청 전체를 long 요율로 청구 (명시 요율)
 
-Revision ID: 0038
-Revises: 0037
+Revision ID: 0042
+Revises: 0041
 Create Date: 2026-09-23
 
 ## 무엇을 넣나
@@ -72,8 +72,8 @@ alias 이름/plane 에 무관하다. (long 이 short 변경을 자동 추적하�
 
 from alembic import op
 
-revision = "0038"
-down_revision = "0037"
+revision = "0042"
+down_revision = "0041"
 branch_labels = None
 depends_on = None
 

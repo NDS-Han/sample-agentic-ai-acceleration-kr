@@ -2,8 +2,8 @@
 
 """운영자가 설정한 예산 알림 임계값을 실제로 저장한다: budget_configs.alert_thresholds
 
-Revision ID: 0037
-Revises: 0036
+Revision ID: 0041
+Revises: 0040
 Create Date: 2026-09-15
 
 ## 왜 필요한가 — 기능이 DB 앞에서 끊겨 있었다
@@ -66,8 +66,8 @@ UI 와 API 스키마가 이미 같은 범위를 검증한다. 그럼에도 DB �
 
 from alembic import op
 
-revision = "0037"
-down_revision = "0036"
+revision = "0041"
+down_revision = "0040"
 branch_labels = None
 depends_on = None
 

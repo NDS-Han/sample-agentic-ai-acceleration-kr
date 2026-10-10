@@ -2,13 +2,13 @@
 
 """usage_logs 에 청구 티어 감사 기록: usage.usage_logs.context_tier
 
-Revision ID: 0039
-Revises: 0038
+Revision ID: 0043
+Revises: 0042
 Create Date: 2026-09-23
 
 ## 왜 필요한가
 
-0038 이 GPT-5.6 에 272K long-context 티어를 넣었다. 한 요청이 short 로 청구됐는지 long 으로
+0042 가 GPT-5.6 에 272K long-context 티어를 넣었다. 한 요청이 short 로 청구됐는지 long 으로
 청구됐는지를 **요청 단위로 감사**할 수 있어야 한다 — 안 그러면 "이 요청이 왜 2배였나" 를
 소명할 수 없다(입력 토큰 수만으로는 재구성이 어렵다; 캐시 포함 프롬프트 합이 임계를
 넘었는지가 판정이고, usage_logs 는 그 세 버킷을 담지만 판정 결과 자체는 안 담았다).
@@ -30,8 +30,8 @@ NULL 허용이라 기존 행 백필 없음(재작성 없음). 값이 없는 구�
 
 from alembic import op
 
-revision = "0039"
-down_revision = "0038"
+revision = "0043"
+down_revision = "0042"
 branch_labels = None
 depends_on = None
 

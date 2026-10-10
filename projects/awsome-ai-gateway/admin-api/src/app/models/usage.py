@@ -80,7 +80,7 @@ class UsageLog(Base):
     # gateway-proxy; read-only here. DB column is `text` (migration 0007) — use
     # unbounded String() to match it and avoid an autogenerate-truncation footgun.
     client: Mapped[str | None] = mapped_column(String(), nullable=True)
-    # 청구 티어 감사 (마이그레이션 0039). cost-recorder-worker 가 쓰고 여기선 읽기 전용.
+    # 청구 티어 감사 (마이그레이션 0043). cost-recorder-worker 가 쓰고 여기선 읽기 전용.
     # "short"|"long"|NULL(티어 없는 모델/구버전 행).
     context_tier: Mapped[str | None] = mapped_column(String(8), nullable=True)
     # SSO subject (OIDC `sub`). Written by gateway-proxy; read-only here.

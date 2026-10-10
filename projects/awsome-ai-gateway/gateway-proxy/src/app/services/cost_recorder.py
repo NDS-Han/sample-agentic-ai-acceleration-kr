@@ -23,7 +23,7 @@ COST_STREAM_MAXLEN = 100_000
 
 def resolve_context_tier(usage: TokenUsage, pricing: ModelConfigSchema) -> str | None:
     """272K long-context 티어 판정 — 과금과 감사기록(usage_logs.context_tier)이 공유하는
-    단일 판정점 (마이그레이션 0038/0039).
+    단일 판정점 (마이그레이션 0042/0043).
 
     반환:
       · None    = 티어 없는 모델(threshold 미설정: Claude 등) → 단일 요율.

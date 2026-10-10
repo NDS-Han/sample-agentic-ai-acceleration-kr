@@ -62,7 +62,7 @@ class BudgetConfig(Base):
     # NULL=팀 한도만 적용(pass-through), 0=차단, >0=개인 상한 (budget-rules.md §3-2).
     default_user_cap_usd: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    # 운영자가 설정한 임계값 알림 %. migration 0037.
+    # 운영자가 설정한 임계값 알림 %. migration 0041.
     #
     # ⚠️ 이 컬럼이 없던 동안 UI/API/Lua 는 모두 이 값을 다루고 있었고, 저장소만 없었다.
     #    그래서 운영자 설정이 Redis 설정 키의 TTL(300초) 동안만 살아 있다가 조용히

@@ -29,7 +29,7 @@ DEFAULT_THRESHOLDS = [80, 90, 100]
 
 
 def _row_thresholds(config) -> list[int]:
-    """``BudgetConfig`` 행의 알림 임계값 — DB 가 진실의 원천이다(migration 0037).
+    """``BudgetConfig`` 행의 알림 임계값 — DB 가 진실의 원천이다(migration 0041).
 
     ⚠️ 빈 배열은 **유효한 설정**이고 "이 예산에는 임계값 알림을 보내지 않는다" 를 뜻한다.
        그래서 ``or DEFAULT_THRESHOLDS`` 로 채우지 않는다 — 그러면 운영자가 의도적으로 비운
@@ -466,7 +466,7 @@ class BudgetService:
 
         DB 컬럼: scope / scope_id / max_budget_usd (KI-09 수정 반영).
         soft_limit_pct, throttle_rpm_pct 는 현재 DB 스키마에 없으므로 Python 기본값 사용.
-        thresholds 는 migration 0037 이후 DB 컬럼(``alert_thresholds``)이 원천이다.
+        thresholds 는 migration 0041 이후 DB 컬럼(``alert_thresholds``)이 원천이다.
         client 가 설정된 경우 앱별 BudgetConfig/BudgetUsage 도 확인한다.
         앱 예산 미설정(config=None) → pass-through.
         """
@@ -576,7 +576,7 @@ class BudgetService:
 
         max_budget = team_config.max_budget_usd
         # Redis degrade 중에도 임계값은 DB 행의 값이어야 한다 — 기본값을 구우면
-        # degrade 동안만 알림 기준이 달라진다(migration 0037: alert_thresholds).
+        # degrade 동안만 알림 기준이 달라진다(migration 0041: alert_thresholds).
         team_block, team_dict = _layer(
             team_used, max_budget, policy, _row_thresholds(team_config)
         )
@@ -626,7 +626,7 @@ class BudgetService:
 
         Lua 스크립트는 lowercase policy 값('hard_block' 등)을 기대하므로
         DB UPPERCASE enum을 변환해서 저장. soft/throttle 파라미터는 DB 스키마에 없어
-        Python 기본값을 쓰지만, thresholds 는 migration 0037 이후 DB 컬럼
+        Python 기본값을 쓰지만, thresholds 는 migration 0041 이후 DB 컬럼
         (``alert_thresholds``)이 원천이다 — 예전에 여기서 기본값을 쓴 것이 운영자 설정을
         캐시 TTL(300초)마다 되돌린 원인이었다.
         """
@@ -666,7 +666,7 @@ class BudgetService:
                 # ⚠️ 여기가 운영자 설정이 되돌아간 지점이다. 이 재수화는 Redis 설정 키가
                 #    만료(ex=300)될 때마다 돌고, 예전에는 DB 에 저장된 값이 없어서
                 #    DEFAULT_THRESHOLDS 를 써 넣었다 — admin-api 가 방금 써 둔 운영자
-                #    임계값을 5분마다 조용히 덮었다. migration 0037 이후 DB 가 원천이다.
+                #    임계값을 5분마다 조용히 덮었다. migration 0041 이후 DB 가 원천이다.
                 "thresholds": _row_thresholds(config),
                 "app_clients": app_clients,
             }
