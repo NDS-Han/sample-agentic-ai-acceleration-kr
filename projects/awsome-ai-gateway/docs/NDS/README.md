@@ -85,6 +85,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — 기존 EKS 배포 온보딩·업데이트** |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
+| [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
 
@@ -96,3 +97,5 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 - Codex/Cowork의 Mantle 크로스어카운트 라우팅은 배포 계정별 설정이 필요합니다
   (`model.routing_profiles.account_role_arn` — 관리 UI 또는 DB 시드에서 설정)
 - Cowork는 https가 필수 — `domain.mode: none`이면 동작하지 않습니다
+- 직원 PC 연결 절차는 [client-setup.md](client-setup.md) — 게이트웨이 배포가
+  끝나면 이 문서 하나만 직원에게 전달하면 됩니다
