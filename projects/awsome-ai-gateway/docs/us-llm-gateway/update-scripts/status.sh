@@ -496,6 +496,32 @@ probe_us16() {
   fi
 }
 
+# ── US-17 — Claude Code Auto mode server verdicts (recommended; part of US-18) ─
+# Not judged: the code ships inside the gateway-proxy image (US-18 builds it), and
+# a built image cannot be introspected — the real check sends requests with a
+# VK (check-safeguards-passthrough.py). The one thing readable here is the kill
+# switch: gatewayProxy.env.BEDROCK_FORWARD_BETAS set to "" turns it off.
+probe_us17() {
+  local dep val="<unset>"
+  dep=$(kubectl get deploy "${HELM_RELEASE}-gateway-proxy" -n "$NS" -o json 2>/dev/null)
+  if [ -n "$dep" ]; then
+    val=$(jq -r '[.spec.template.spec.containers[]? | select(.name == "gateway-proxy")
+                 | .env[]? | select(.name == "BEDROCK_FORWARD_BETAS") | .value // ""]
+                 | if length == 0 then "<unset>" else last end' <<<"$dep" 2>/dev/null) \
+      || val="<unset>"
+  fi
+  if [ -z "$val" ]; then
+    row warn "US-17" "Claude Code Auto mode 서버 판정 — 꺼짐 (BEDROCK_FORWARD_BETAS 빈 값)"
+    detail "다시 켜려면 values 의 그 줄을 지우고 install-eks.sh — ops/8-A-automode-server.md 7절"
+    TODO+=("(수동) values gatewayProxy.env.BEDROCK_FORWARD_BETAS 줄 삭제 → install-eks.sh $DEPLOY_ENV — ops/8-A 7절")
+    return
+  fi
+  row skip "US-17" "Claude Code Auto mode 서버 판정 — US-18 에 포함 (이 스크립트는 판정 안 함)"
+  detail "확정: GATEWAY_KEY 로 check-safeguards-passthrough.py (5개 PASS) — ops/8-A-automode-server.md 2절"
+  [ "$val" != "<unset>" ] && detail "values 에 BEDROCK_FORWARD_BETAS 직접 지정: $val"
+  return 0
+}
+
 # ── US-18 — budget/cost/permission fixes (required; part of a fresh install) ──
 # Same query as US-13. Applied = schema at 0039 or later (upstream 0037-0039 come
 # with the new images, ops/8-D-upstream-sync.md) AND, when Sonnet 5.5 is
@@ -572,6 +598,7 @@ info_rows "US-14" "Claude Code Windows 설치 파일 — 직원 PC 쪽 (이 스�
   "설치 여부는 직원 PC 에서 — claude-code/installer/cc-installer-admin-e2e-windows.md"
 probe_us15
 probe_us16
+probe_us17
 probe_us18
 
 echo
