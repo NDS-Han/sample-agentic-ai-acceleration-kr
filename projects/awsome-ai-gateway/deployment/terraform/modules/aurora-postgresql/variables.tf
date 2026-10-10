@@ -53,6 +53,43 @@ variable "prod_instance_class" {
   default     = "db.r7g.large"
 }
 
+# ------------------------------------------------------------------------------
+# 명시적 토폴로지 — environment=="prod" 이진 분기의 대체/보조
+# ------------------------------------------------------------------------------
+# "" 이면 기존 동작(environment=="prod" → provisioned). 명시하면 그 값이 이긴다:
+#   "serverless"   → Serverless v2 (serverless_min/max_acu 사용)
+#   "provisioned"  → prod_instance_class + Multi-AZ (기존 prod 경로)
+# ECS gateway 같은 새 배포 경로는 environment 이름과 사이징을 분리하기 위해 이
+# 변수를 쓴다 — 예: environment="acme-prod" 여도 T1 크기로 시작할 수 있다.
+variable "db_mode" {
+  description = "'' | 'serverless' | 'provisioned' — DB 토폴로지 명시 (기본: environment 기반)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "serverless", "provisioned"], var.db_mode)
+    error_message = "db_mode 는 '', 'serverless', 'provisioned' 중 하나여야 합니다."
+  }
+}
+
+variable "serverless_min_acu" {
+  description = "Serverless v2 최소 ACU — T1 권장 0.5 (저빈도 admin 쿼리 지연이 싫으면 1.0)"
+  type        = number
+  default     = 0.5
+}
+
+variable "serverless_max_acu" {
+  description = "Serverless v2 최대 ACU — T1 권장 4.0, T2 는 16 까지 여유"
+  type        = number
+  default     = 4.0
+}
+
+variable "safeguards" {
+  description = "데이터 안전장치(deletion protection / final snapshot / 백업 14d) 명시 override. null 이면 db_mode/provisioned·environment 로 추론 — serverless+운영환경이면 true 권장"
+  type        = bool
+  default     = null
+}
+
 variable "kms_key_id" {
   description = "스토리지 암호화용 KMS key ID"
   type        = string

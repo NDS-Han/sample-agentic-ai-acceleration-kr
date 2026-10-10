@@ -10,12 +10,20 @@
 # ==============================================================================
 
 locals {
-  is_prod = var.environment == "prod"
+  # cache_mode 명시 시 environment 추론보다 우선 (tier 기반 배포 — aurora 모듈의
+  # db_mode 와 같은 패턴):
+  #   "single"     → 단일 노드 (T1)
+  #   "replicated" → non-cluster primary+replica, failover/Multi-AZ (T2)
+  #   "cluster"    → cluster mode 샤드+replica (T3, 기존 prod 경로)
+  #   ""           → environment=="prod" 로 판별 (기존 동작)
+  is_prod = var.cache_mode != "" ? var.cache_mode == "cluster" : var.environment == "prod"
+
+  num_cache_clusters = var.cache_mode == "replicated" ? max(var.dev_num_cache_clusters, 2) : var.dev_num_cache_clusters
 
   # dev(비-클러스터)에서 replica 가 있으면(노드>1) failover/Multi-AZ 가 성립한다.
   # prod 는 cluster 모드라 항상 failover/Multi-AZ ON. 따라서 가용성 플래그는
   # "prod 이거나, dev 라도 노드가 2개 이상" 일 때 켠다(환경 이름 아닌 토폴로지 기준).
-  dev_has_replica = !local.is_prod && var.dev_num_cache_clusters > 1
+  dev_has_replica = !local.is_prod && local.num_cache_clusters > 1
   ha_enabled      = local.is_prod || local.dev_has_replica
 
   # 파라미터그룹 선택(deepdive Q50 Phase4):
@@ -165,7 +173,7 @@ resource "aws_elasticache_replication_group" "this" {
 
   engine         = "valkey"
   engine_version = var.engine_version
-  node_type      = local.is_prod ? var.prod_node_type : "cache.t4g.small"
+  node_type      = local.is_prod ? var.prod_node_type : var.dev_node_type
   port           = 6379
 
   # Cluster mode — prod만. 샤드당 replica 는 var.prod_replicas_per_node_group(기본1,
@@ -176,7 +184,7 @@ resource "aws_elasticache_replication_group" "this" {
   # non-cluster mode — dev. 기본 1 = 단일 노드(replica·failover·Multi-AZ 없음).
   # var.dev_num_cache_clusters 를 2+ 로 올리면 primary + (n-1) replica 가 되고
   # 아래 가용성 플래그(local.ha_enabled)가 자동으로 failover/Multi-AZ 를 켠다.
-  num_cache_clusters = local.is_prod ? null : var.dev_num_cache_clusters
+  num_cache_clusters = local.is_prod ? null : local.num_cache_clusters
 
   # 파라미터그룹: local.parameter_group 가 prod-custom/prod-default/dev 를 선택(상단 locals).
   parameter_group_name = local.parameter_group

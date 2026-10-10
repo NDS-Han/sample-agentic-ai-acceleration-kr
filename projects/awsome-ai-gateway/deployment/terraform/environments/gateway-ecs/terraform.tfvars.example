@@ -1,0 +1,69 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# ==============================================================================
+# gateway-ecs tfvars 예시 — deploy render 가 gateway.yaml 로부터 자동 생성한다.
+# 수동으로 쓰려면 terraform.tfvars 로 복사 후 값을 채운다.
+#
+# 사용법:
+#   terraform init -backend-config=backend.hcl
+#   terraform plan -var-file=deployment/gen/<env>/ecs/terraform.tfvars
+#   terraform apply -var-file=...
+# ==============================================================================
+
+environment = "acme-small"
+aws_region  = "ap-northeast-2"
+project     = "llm-gateway"
+
+# ─── 사이즈 티어 (T1 예시) ───
+db_mode            = "serverless"
+serverless_min_acu = 0.5
+serverless_max_acu = 4.0
+db_safeguards      = true
+cache_mode         = "single"
+nat_ha             = false
+
+# ─── 네트워크 ───
+alb_internal   = false
+allowed_cidrs  = ["1.2.3.0/24"] # 사내 공인 대역 — 비우면 인터넷 전체에 열림
+
+# ─── 도메인 (없으면 ALB DNS + 포트별 HTTP) ───
+domain_name    = "gw.example.com"
+hosted_zone_id = "" # Route53 zone 이 있으면 cert 발급~레코드까지 자동
+
+# ─── 이미지 ───
+image_registry = "" # 비우면 ECR repo 자동 생성
+image_tag      = "1.0.0-test"
+
+# ─── 서비스 사이징 (t1 프리셋 예시 — 비우면 모듈 기본 0.5vCPU/1GB/1task) ───
+service_sizing = {
+  gateway-proxy        = { cpu = 1024, memory = 2048, desired_count = 1 }
+  admin-api            = { cpu = 512, memory = 1024, desired_count = 1 }
+  admin-ui             = { cpu = 512, memory = 1024, desired_count = 1 }
+  scheduler            = { cpu = 256, memory = 512, desired_count = 1 }
+  cost-recorder-worker = { cpu = 256, memory = 512, desired_count = 1 }
+  notification-worker  = { cpu = 256, memory = 512, desired_count = 1 }
+  migration            = { cpu = 256, memory = 512, desired_count = 0 }
+}
+
+# ─── Cognito ───
+cognito_groups = ["ClaudeAdmin"]
+
+# ─── Notifications ───
+email_sender_type = "mock"
+# email_sender_type = "ses"
+# email_sender_address = "noreply@example.com"  # SES verified sender
+# email_sender_type = "smtp"
+# smtp_host = "smtp.example.com"
+# smtp_username = "gateway"
+# smtp_password = "..."
+
+# ─── 기능 ───
+enable_body_logging   = false
+agentcore_gateway_url = "" # Web Search — us-east-1 AgentCore Gateway URL
+
+# ─── 권한 범위 ───
+allowed_iam_roles = [] # CLI 인증에 쓸 IAM role 패턴 — 비어 있으면 CLI 로그인 불가
+
+tags = {
+  CostCenter = "platform-ai"
+}

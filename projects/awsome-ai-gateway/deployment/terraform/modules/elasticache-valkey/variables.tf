@@ -98,6 +98,26 @@ variable "kms_key_arn" {
   default     = null
 }
 
+# ------------------------------------------------------------------------------
+# 명시적 토폴로지 — environment=="prod" 이진 분기의 대체/보조 (aurora db_mode 와 동일 패턴)
+# ------------------------------------------------------------------------------
+variable "cache_mode" {
+  description = "'' | 'single' | 'replicated' | 'cluster' — 캐시 토폴로지 명시 (기본: environment 기반)"
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = contains(["", "single", "replicated", "cluster"], var.cache_mode)
+    error_message = "cache_mode 는 '', 'single', 'replicated', 'cluster' 중 하나여야 합니다."
+  }
+}
+
+variable "dev_node_type" {
+  description = "non-cluster 경로의 노드 타입 — T1 기본 cache.t4g.small"
+  type        = string
+  default     = "cache.t4g.small"
+}
+
 # CloudWatch Log Group 암호화 전용 KMS 키 ARN.
 # EN: CloudWatch Logs only accepts a CMK whose key policy grants the
 #     `logs.<region>.amazonaws.com` service principal `kms:Encrypt*`,

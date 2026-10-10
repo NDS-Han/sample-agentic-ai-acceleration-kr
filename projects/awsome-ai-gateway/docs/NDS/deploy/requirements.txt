@@ -1,0 +1,6 @@
+# deploy 도구 런타임 의존성
+# 설치: uv venv docs/NDS/.venv && uv pip install -r docs/NDS/deploy/requirements.txt -p docs/NDS/.venv/bin/python
+#   또는: python3 -m pip install -r docs/NDS/deploy/requirements.txt
+PyYAML>=6.0
+rich>=13.0
+questionary>=2.0
