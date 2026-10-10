@@ -46,6 +46,8 @@
   - **`US-10`** — 지금 코드가 곧 US-10 이다. 최신 DB 스키마 · 안정성 수정 · web search 비용 상한과 개선이 기본값으로 동작한다.
   - **`US-13`** — Opus 5.5 는 §4-2 의 SQL 이 등록한다(단가도 §4-2 (C) 가 심는다). 이미 설치한 곳만 US-13 을 따로 한다.
   - **`US-16`** — Sonnet 5.5 도 §4-2 의 SQL 이 등록하고 단가를 심는다. 이전 세대(Opus 5 · Sonnet 5 · Opus 4.8)는 (D) 가 INACTIVE 로 둔다. 이미 설치한 곳만 US-16 을 따로 한다.
+  - **`US-17`** — Claude Code Auto mode 서버 판정에 필요한 beta 전달이 gateway-proxy 코드의 기본값이다. 설치 뒤 [ops/8-A](ops/8-A-automode-server.md) 2절의 확인 스크립트로 확인만 한다.
+  - **`US-18`** — 예산·비용·권한 결함 수정이 코드에, DB 변경(0037~0039)이 init SQL 에, Sonnet 5.5 캐시 읽기 단가가 `update-scripts/pricing.tsv` 에 들어 있다. 이미 설치한 곳만 8-D 로 따로 한다.
   - **`US-11`** — install-guide §4-2 (C) 가 `update-scripts/pricing.tsv` 의 단가를 심는다(기본 = `us.` Standard 티어). **다른 리전·티어로 청구받는 배포**는 §4-2 전에 이 파일을 자기 청구 단가로 고친다(방법은 install-guide §4-2 (C) 의 설명대로).
 - **설치를 마친 뒤 따로 하는 것**:
   - **`US-12`(관리 화면 Cognito 로그인)** — 설치 절차에 들어 있지 않다. 설치가 끝나면 [ops/8-L-admin-login.md](ops/8-L-admin-login.md) 로 켠다(https 주소 = `US-06` 전제). 코드 조건(admin-api `1.0.69-idpjwks`)은 지금 코드로 설치하면 이미 충족한다. **운영(`US-08`)은 사실상 필수** — prod values 는 개발용 로그인이 꺼진 채로 나오므로, US-12 전에는 관리 화면에 들어갈 방법이 없다.

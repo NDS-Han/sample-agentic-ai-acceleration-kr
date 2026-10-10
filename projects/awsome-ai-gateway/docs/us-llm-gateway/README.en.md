@@ -38,7 +38,7 @@ What sets this edition apart: a region outside Korea · direct to Bedrock (not M
 
 **How each `US-NN` is handled in a new install** — details in [install-overview.md §1](install-overview.md#1-신규-설치와-us-nn) (Korean)
 
-- **Already included (nothing to apply)**: `US-03`·`04`·`05`·`10`·`11`·`13`
+- **Already included (nothing to apply)**: `US-03`·`04`·`05`·`10`·`11`·`13`·`16`·`17`·`18`
 - **Done separately after installation**: `US-12` (admin screen Cognito sign-in) — effectively required for production (`US-08`)
 - **Pick one of two**: set up employee PCs by hand ↔ installer file (`US-14` Claude Code · `US-09` Cowork)
 - **Optional for a POC**: `US-06` (https) · `US-07` (admin internal) · `US-02` is for existing deployments only
