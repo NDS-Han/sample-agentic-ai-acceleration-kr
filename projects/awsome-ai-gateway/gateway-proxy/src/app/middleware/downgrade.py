@@ -11,7 +11,7 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from app.observability.metrics import GatewayMetrics
 from app.services.downgrade_loader import DowngradePolicyLoader, apply_chain
-from app.services.router_service import RouterService
+from app.services.router_service import RouterService, check_client_model_scope
 from app.services.thinking_normalizer import normalize_thinking
 
 logger = structlog.get_logger(__name__)
@@ -159,23 +159,61 @@ class DowngradeMiddleware:
         # `_redis` 폴백.
         redis = state.get("_redis_effective", state.get("_redis"))
 
+        # 경로별 모델 해소자 — /v1/responses 는 Codex 평면(BEDROCK_MANTLE_OPENAI +
+        # BEDROCK_RUNTIME_OPENAI)을 받아야 해서 resolve_openai_model(OPENMODEL +
+        # RUNTIME_OPENAI)로는 Mantle alias 가 항상 미스였다(E2E S3-M5).
+        def _resolver_for_path(p: str):
+            if p.startswith("/v1/responses"):
+                return self.router.resolve_codex_model
+            if _is_openai_path(p):
+                return self.router.resolve_openai_model
+            return self.router.resolve_bedrock_model
+
+        _resolve_for_path = _resolver_for_path(path)
+
         normalized = original
+        _resolved_ok = True
         try:
             if session_factory is not None:
                 async with session_factory() as db:
-                    if _is_openai_path(path):
-                        cfg = await self.router.resolve_openai_model(redis, db, original)
-                    else:
-                        cfg = await self.router.resolve_bedrock_model(redis, db, original)
+                    cfg = await _resolve_for_path(redis, db, original)
             else:
-                if _is_openai_path(path):
-                    cfg = await self.router.resolve_openai_model(redis, None, original)
-                else:
-                    cfg = await self.router.resolve_bedrock_model(redis, None, original)
+                cfg = await _resolve_for_path(redis, None, original)
             normalized = cfg.alias or original
         except Exception:
             # 미등록/INACTIVE/DB 미가용 — raw 매칭으로 fallback
             normalized = original
+            _resolved_ok = False
+
+        # ⚠️ /v1/responses 특수(E2E S3-M5-3): Codex 는 보통 미등록 이름
+        #    (`gpt-5.5-codex` 등)을 보내고 openai_compat._resolve_model 이 조용히
+        #    profile.default_model 로 서빙한다. 요청 문자열로는 정책이 절대 매칭되지
+        #    않아 이 경로의 요청은 예산 강등이 한 번도 적용되지 않았다 — 해석에
+        #    실패했을 때만 실제 서빙 모델(default_model)을 체인 평가 기준으로 삼는다.
+        #    재작성된 payload["model"] 은 라우터에서 usable ref 로 해석돼 대상이
+        #    실제로 서빙된다.
+        if (
+            path.startswith("/v1/responses")
+            and not _resolved_ok
+            and normalized == original
+        ):
+            _prof_loader = getattr(
+                getattr(scope.get("app"), "state", None), "routing_profile_loader", None
+            )
+            _client_id = state.get("client")
+            if _prof_loader is not None and _client_id:
+                try:
+                    if session_factory is not None:
+                        async with session_factory() as db:
+                            _prof = await _prof_loader.load(redis, db, _client_id)
+                    else:
+                        _prof = await _prof_loader.load(redis, None, _client_id)
+                    _default = getattr(_prof, "default_model", None)
+                    if isinstance(_default, str) and _default:
+                        normalized = _default
+                except Exception:
+                    # 프로파일 조회 실패는 raw 매칭 그대로 — 기존 동작 유지.
+                    pass
 
         try:
             if session_factory is not None:
@@ -205,6 +243,12 @@ class DowngradeMiddleware:
 
         current_pct = int(getattr(budget_status, "threshold_pct", 0) or 0)
         effective, hops = apply_chain(normalized, rules, current_pct)
+        if effective == normalized and normalized.endswith("[1m]"):
+            # `[1m]` 변형은 같은 모델의 컨텍스트 파생 alias — 예산 정책 키는 보통
+            # base alias(`claude-sonnet-4-6`)에 걸린다. 그대로 두면 1M 컨텍스트
+            # 사용자만 예산 강등을 영구 우회한다(E2E S3-M5). 변형 자체 규칙이
+            # 먼저 매칭됐으면 그쪽이 이긴다(위 호출이 이미 바꿨으므로 여긴 미스만).
+            effective, hops = apply_chain(normalized[:-4], rules, current_pct)
 
         logger.info(
             "downgrade_mw_evaluated",
@@ -222,6 +266,26 @@ class DowngradeMiddleware:
         )
 
         if effective == normalized:
+            await self.app(scope, _replay(body_bytes, receive), send)
+            return
+
+        # 강등 대상이 실제로 서빙 가능한지 검증한다(E2E S3-M6). 대상이 미등록/
+        # INACTIVE/다른 provider/이 앱 미허용이면, 원래 모델이면 성공했을 요청이
+        # 재작성 뒤 404/400 이 된다 — 강등 자체가 가용성을 해치는 최악의 모드다.
+        # 해석 캐시(최대 300s)라 추가 비용은 사실상 없다.
+        try:
+            if session_factory is not None:
+                async with session_factory() as db:
+                    _target_cfg = await _resolve_for_path(redis, db, effective)
+            else:
+                _target_cfg = await _resolve_for_path(redis, None, effective)
+            check_client_model_scope(_target_cfg, state.get("client"))
+        except Exception:
+            logger.info(
+                "downgrade_mw_skip_target_unusable",
+                target=effective,
+                normalized=normalized,
+            )
             await self.app(scope, _replay(body_bytes, receive), send)
             return
 

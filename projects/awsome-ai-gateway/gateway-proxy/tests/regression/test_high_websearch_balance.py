@@ -150,7 +150,8 @@ async def test_stream_invoke_gives_up_after_the_second_connection_error():
         endpoint_url="https://bedrock")
     adapter = BedrockAdapter(client)
     status, gen, _h, _rid = await adapter.invoke_stream(b"{}", "model-id")
-    assert status == 502 and client.invoke_model_with_response_stream.call_count == 2
+    # E2E S3-M3: 연결 수준 실패는 503(가용성 신호) — catch-all 502 와 같은 폴백 대상.
+    assert status == 503 and client.invoke_model_with_response_stream.call_count == 2
     body = b"".join([c async for c in gen])
     assert b"provider_error" in body
 

@@ -248,8 +248,11 @@ async def test_set_default_model_commits_before_invalidating(mock_session: Async
     assert order == ["commit", "invalidate"], (
         f"expected commit-then-invalidate; got {order}"
     )
+    # :stale 백업 키도 같이 지운다 — 게이트웨이가 DB 열화 시 마지막 값을 서빙하는
+    # 키라, 놔두면 새 default 가 적용돼도 장애 동안 구 프로파일이 부활한다.
     req.app.state.cache_mgr.invalidate.assert_awaited_once_with(
-        ["routing_profile:claude-code"], session=mock_session
+        ["routing_profile:claude-code", "routing_profile:claude-code:stale"],
+        session=mock_session,
     )
 
 

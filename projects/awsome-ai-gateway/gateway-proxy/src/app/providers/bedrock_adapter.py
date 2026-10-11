@@ -4,12 +4,19 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from collections.abc import AsyncIterator
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import structlog
-from botocore.exceptions import ClientError, ConnectionClosedError, EndpointConnectionError
+from botocore.exceptions import (
+    ClientError,
+    ConnectTimeoutError,
+    ConnectionClosedError,
+    EndpointConnectionError,
+    ReadTimeoutError,
+)
 
 from app.providers.base import ProviderAdapter
 from app.schemas.domain import TokenUsage
@@ -19,13 +26,31 @@ _bedrock_executor = ThreadPoolExecutor(max_workers=_BEDROCK_POOL_SIZE, thread_na
 
 logger = structlog.get_logger(__name__)
 
+# 상류 오류 본문에서 인프라 식별자를 지우는 패턴 — cross-account assume role ARN,
+# 추론프로파일 ARN, 12자리 계정 ID 가 클라이언트로 새어 나가지 않게 한다(E2E S3-M4).
+_ARN_RE = re.compile(
+    r"arn:aws[a-zA-Z-]*:[^\s'\"]+|assumed-role/[^\s'\"]+|(?<!\d)\d{12}(?!\d)"
+)
+
+
+def _redact_arns(text: str) -> str:
+    return _ARN_RE.sub("[redacted]", text)
+
+
 # boto3 예외 → HTTP 상태 코드 매핑
 _BOTO_ERROR_MAP: dict[str, int] = {
     "ValidationException": 400,
-    "AccessDeniedException": 403,
+    # ⚠️ AccessDenied 는 403 으로 내보내지 않는다. (1) Anthropic 클라이언트는 403 을
+    #    자격증명 문제로 읽어 재인증 루프를 돈다 — 실제로는 우리 IAM 의 미설정이라
+    #    재인증으로 풀리지 않는다. (2) 본문에 assumed-role ARN/계정 ID 가 새어 나간다.
+    #    상류 권한 문제는 우리 쪽 결함이므로 502 provider_error + 일반 문구로 환원한다
+    #    (원문은 로그에만). 502 라 폴백 체인이 허용되는 다른 모델도 시도한다.
+    "AccessDeniedException": 502,
     "ResourceNotFoundException": 404,
     "ThrottlingException": 429,
     "ModelTimeoutException": 504,
+    "ServiceUnavailableException": 503,
+    "ServiceQuotaExceededException": 429,
     "ServiceException": 502,
     "InternalServerException": 502,
 }
@@ -203,10 +228,42 @@ class BedrockAdapter(ProviderAdapter):
             code = e.response["Error"]["Code"]
             status = _BOTO_ERROR_MAP.get(code, 502)
             logger.warning("bedrock_client_error", error_code=code, model_id=model_id)
-            error_body = json.dumps(
-                {"error": {"type": "provider_error", "message": str(e)}}
-            ).encode()
+            if code == "AccessDeniedException":
+                # str(e) 에 assumed-role ARN/계정이 들어 있다 — 일반 문구로 환원.
+                error_body = json.dumps(
+                    {"error": {"type": "provider_error",
+                               "message": "Bedrock denied access to this model (upstream IAM)"}}
+                ).encode()
+            else:
+                # 원문을 내보내되 ARN/계정 식별자는 삭제한다 — ValidationException 메시지는
+                # 클라이언트가 요청을 고치는 데 필요하고, 대신 ResourceNotFound 계열에는
+                # 우리가 쓴 추론프로파일 ARN 이 들어갈 수 있다(E2E S3-M4). 원문은 로그에.
+                error_body = json.dumps(
+                    {"error": {"type": "provider_error", "message": _redact_arns(str(e))}}
+                ).encode()
             return status, error_body, {}, TokenUsage()
+        except ReadTimeoutError:
+            # 읽기 타임아웃 — 상류 추론이 끝났을 수도 있다(과금됨). 504 = 폴백 대상이지만
+            # CB 실패는 아니라는 기존 ModelTimeoutException 의미론과 같게 둔다(E2E S3-M3).
+            # 예전에는 catch-all 이 502 로 바꿔 CB 를 오염시키고, 실제 성공했을 수 있는
+            # 추론을 다음 후보에 중복 청구했다.
+            logger.warning("bedrock_invoke_read_timeout", model_id=model_id)
+            return (
+                504,
+                b'{"error":{"type":"provider_error","message":"Bedrock read timeout"}}',
+                {},
+                TokenUsage(),
+            )
+        except (ConnectTimeoutError, EndpointConnectionError, ConnectionClosedError):
+            # 연결 수준 실패 — 상류에 도달하지 않아 과금이 없다. 503(가용성 신호)로
+            # 명시한다 — catch-all 502 와 같은 폴백 대상이지만 의미가 정확하다.
+            logger.warning("bedrock_invoke_connect_failed", model_id=model_id)
+            return (
+                503,
+                b'{"error":{"type":"provider_error","message":"Bedrock connection failed"}}',
+                {},
+                TokenUsage(),
+            )
         except Exception:
             logger.exception("bedrock_invoke_failed", model_id=model_id)
             return (
@@ -299,6 +356,32 @@ class BedrockAdapter(ProviderAdapter):
             logger.warning(
                 "bedrock_stream_client_error", error_code=code, model_id=model_id, error=error_msg
             )
+            if code == "AccessDeniedException":
+                # ARN/계정 누출 방지 — invoke 경로와 같은 환원.
+                error_msg = "Bedrock denied access to this model (upstream IAM)"
+            else:
+                # invoke 경로와 같은 이유 — 인프라 식별자만 지우고 메시지는 보존.
+                error_msg = _redact_arns(error_msg)
+
+            async def error_gen():
+                yield json.dumps(
+                    {"error": {"type": "provider_error", "message": error_msg}}
+                ).encode()
+
+            return status, error_gen(), {}, None
+        except (
+            ReadTimeoutError,
+            ConnectTimeoutError,
+            EndpointConnectionError,
+            ConnectionClosedError,
+        ) as exc:
+            # invoke() 와 같은 이유 — 타임아웃/연결 오류를 502 로 뭉개지 않는다.
+            is_timeout = isinstance(exc, ReadTimeoutError)
+            status = 504 if is_timeout else 503
+            error_msg = "Bedrock read timeout" if is_timeout else "Bedrock connection failed"
+            logger.warning(
+                "bedrock_stream_connect_failed", model_id=model_id, status=status, error=str(exc)
+            )
 
             async def error_gen():
                 yield json.dumps(
@@ -307,7 +390,7 @@ class BedrockAdapter(ProviderAdapter):
 
             return status, error_gen(), {}, None
         except Exception as exc:
-            error_msg = str(exc)
+            error_msg = _redact_arns(str(exc))
             logger.exception("bedrock_stream_failed", model_id=model_id)
 
             async def error_gen():

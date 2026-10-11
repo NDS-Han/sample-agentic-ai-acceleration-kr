@@ -686,3 +686,124 @@ class TestMantleOriginalNoBedrockCandidate:
         # The Bedrock alias was never passed to the adapter
         assert bedrock_alias not in invoked_model_ids
         assert mantle_config.provider_model_id in invoked_model_ids
+
+
+# ===========================================================================
+# TC-9: upstream (provider) 429 DOES fall back — throttling is per-model
+# ===========================================================================
+
+class TestUpstreamFourTwoNineFallsBack:
+    """Bedrock ThrottlingException maps to 429. Model quotas are per-model, so a
+    throttled original can be served by a chained candidate — unlike our own
+    admission 429 (TC-3), which is a quota decision that must not be bypassed.
+    The provider 429 must also NOT count as a circuit-breaker failure."""
+
+    @pytest.mark.asyncio
+    async def test_provider_429_falls_back_without_cb_failure(self):
+        original_alias = "claude-sonnet-4-6"
+        fallback_alias = "claude-haiku-4-5"
+
+        original_config = _make_model_config(original_alias)
+        fallback_config = _make_model_config(fallback_alias)
+
+        adapter = _make_adapter([
+            (429, _error_bytes(429), {}, TokenUsage()),
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=5, output_tokens=5, total_tokens=10)),
+        ])
+        cb = _make_cb()
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias, fallback_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            resolve_map={fallback_alias: fallback_config},
+        )
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        assert result.availability_fallback_from == original_alias
+        assert adapter.invoke.await_count == 2
+        # 429 is transient quota — never opens the circuit
+        cb.record_failure.assert_not_awaited()
+        cb.record_success.assert_awaited()
+
+
+# ===========================================================================
+# TC-10: circuit_scope — CB 키는 (계정 차원|pmid) 다 (E2E S3-L3)
+# ===========================================================================
+
+class TestCircuitScopeKeysBreaker:
+    """circuit_scope 가 있으면 CB 호출이 `scope|pmid` 키로 간다 — 같은 pmid 를
+    쓰는 cross-account 장애가 in-account 회로를 열지 않게 하는 계약."""
+
+    @pytest.mark.asyncio
+    async def test_cb_calls_use_scoped_key(self):
+        original_alias = "claude-sonnet-4-6"
+        fallback_alias = "claude-haiku-4-5"
+        original_config = _make_model_config(original_alias)
+        fallback_config = _make_model_config(fallback_alias)
+
+        adapter = _make_adapter([
+            (502, _error_bytes(502), {}, TokenUsage()),
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)),
+        ])
+        cb = _make_cb()
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias, fallback_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            resolve_map={fallback_alias: fallback_config},
+        )
+        kwargs["circuit_scope"] = "acct:arn:aws:iam::333:role/x:ap-northeast-2"
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        scoped_orig = f"acct:arn:aws:iam::333:role/x:ap-northeast-2|{original_config.provider_model_id}"
+        scoped_fb = f"acct:arn:aws:iam::333:role/x:ap-northeast-2|{fallback_config.provider_model_id}"
+        cb.record_failure.assert_awaited_with(None, scoped_orig)
+        cb.record_success.assert_awaited_with(None, scoped_fb)
+        # 게이트도 같은 스코프 키로 조회한다.
+        checked = {c.args[1] for c in cb.is_open.await_args_list}
+        assert checked == {scoped_orig, scoped_fb}
+
+    @pytest.mark.asyncio
+    async def test_empty_scope_keeps_legacy_pmid_key(self):
+        original_alias = "claude-sonnet-4-6"
+        original_config = _make_model_config(original_alias)
+
+        adapter = _make_adapter([
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)),
+        ])
+        cb = _make_cb()
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+        )
+        # circuit_scope 미전달 → 종전과 같은 pmid 단독 키.
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        cb.record_success.assert_awaited_with(None, original_config.provider_model_id)

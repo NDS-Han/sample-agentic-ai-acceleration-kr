@@ -242,9 +242,28 @@ class RouterService:
             LookupError: 미등록 또는 provider 화이트리스트 불일치.
         """
         provider_values = [p.value for p in providers]
+        # 음수 캐시 키는 provider 집합으로 네임스페이스한다 — 한 평면(BEDROCK)에서
+        # 미스로 찍은 nx 가, 그 이름이 등록된 다른 평면(Codex OpenAI)의 해석까지
+        # 15s 간 404 로 오염시키는 것을 막는다(E2E S3-M8 후속).
+        _nx_key = f"model:nx:{'+'.join(sorted(provider_values))}:{model_ref}"
 
         if redis is not None:
+            # 음수 캐시 — 미등록 ref 는 매 요청 DB 를 두 번 두드린다(최대 ~5 쿼리/
+            # 요청: downgrade 해소 + alias_provider + 본 해석). 인증된 사용자가
+            # 임의 모델명으로 DB 풀을 고갈시키는 증폭을 막는다(E2E S3-M8). TTL 은
+            # 짧게 둬서 신규 등록이 늦어도 15s 안에 보이게 하고, admin-api 의
+            # 모델 생성이 ``model:nx:*:{alias}`` 도 DEL 하므로 사실상 즉시 반영된다.
+            # 레거시 단일 키 ``model:nx:{ref}`` 도 본다 — 롤링 배포 중 구 버전 파드가
+            # 쓴 키가 남아 있을 수 있다.
+            if await redis.get(_nx_key) or await redis.get(f"model:nx:{model_ref}"):
+                raise LookupError(f"Model alias '{model_ref}' not found")
             cached = await redis.get(f"model:{model_ref}")
+            if not cached:
+                # pmid 네임스페이스 — ``model:{ref}`` 와 분리한다(E2E S3-H2). 예전에는
+                # 같은 pmid 를 쓰는 두 alias 가 ``model:{pmid}`` 를 공유해, 한 alias 의
+                # schema 가 다른 alias 의 키를 오염시켰다: INACTIVE kill switch 우회,
+                # ACL·단가·레이트리밋 버킷이 어느 alias 가 마지막으로 썼느냐로 결정됐다.
+                cached = await redis.get(f"model:pmid:{model_ref}")
             if cached:
                 schema = _parse_cached_model(cached, model_ref)
                 if schema is not None:
@@ -271,17 +290,32 @@ class RouterService:
         )
         alias_row = result.scalar_one_or_none()
 
+        # pmid 경유 해소 여부 — 아래 pmid 캐시 쓰기의 조건이다.
+        _via_pmid = False
         if alias_row is None:
+            # pmid 참조 — 같은 pmid 를 쓰는 alias 가 여러 개일 수 있다(예: base 와
+            # `[1m]` 변형, geo alias). ORDER BY 없는 LIMIT 1 은 행 순서에 따라
+            # 비결정적이라, 한 alias 만 INACTIVE 로 꺼도 pmid 요청이 무작위로 404
+            # 나가거나 어떤 alias 의 단가·ACL 이 적용될지 정해지지 않았다(E2E S3-M1).
+            # 규칙: ACTIVE 우선, 그 다음 alias 오름차순(canonical base alias 가 먼저).
+            _via_pmid = True
             result = await db.execute(
                 select(ModelAlias).where(
                     and_(
                         ModelAlias.provider.in_(provider_values),
                         ModelAlias.provider_model_id == model_ref,
                     )
-                ).limit(1)
+                )
+                .order_by((ModelAlias.status == "ACTIVE").desc(), ModelAlias.alias)
+                .limit(1)
             )
             alias_row = result.scalar_one_or_none()
         if alias_row is None:
+            if redis is not None:
+                try:
+                    await redis.setex(_nx_key, 15, "1")
+                except Exception:
+                    pass  # 캐시 실패가 해석을 막으면 안 된다
             raise LookupError(f"Model alias '{model_ref}' not found")
 
         if alias_row.status != "ACTIVE":
@@ -292,8 +326,15 @@ class RouterService:
 
         if redis is not None:
             payload = schema.model_dump_json()
+            # alias 키는 항상 쓴다. pmid 키는 **pmid 경로로 해석됐을 때만** 쓴다 —
+            # 어느 alias 가 pmid 의 canonical 승자인지는 위의 결정적 ORDER BY 만이
+            # 알 수 있어서, alias 경로가 자기 schema 를 pmid 키에 쓰면 last-writer-wins
+            # 경합으로 같은 비결정성이 돌아온다(E2E S3-H2).
             await redis.setex(f"model:{schema.alias}", MODEL_CACHE_TTL, payload)
-            await redis.setex(f"model:{schema.provider_model_id}", MODEL_CACHE_TTL, payload)
+            if _via_pmid:
+                await redis.setex(
+                    f"model:pmid:{schema.provider_model_id}", MODEL_CACHE_TTL, payload
+                )
 
         return schema
 
@@ -357,20 +398,35 @@ class RouterService:
         Checks Redis model cache first (avoids a DB round-trip on hot paths),
         then falls back to a direct DB query.
         """
-        cache_key = f"model:{alias}"
         if redis is not None:
-            cached = await redis.get(cache_key)
-            if cached:
-                try:
-                    return ProviderType(json.loads(cached).get("provider"))
-                except Exception:
-                    pass
+            for cache_key in (f"model:{alias}", f"model:pmid:{alias}"):
+                cached = await redis.get(cache_key)
+                if cached:
+                    try:
+                        return ProviderType(json.loads(cached).get("provider"))
+                    except Exception:
+                        pass
         if db is None:
             return None
+        from sqlalchemy import or_ as sa_or
         from sqlalchemy import select as sa_select
+        # alias 만 보면 pmid 참조는 해석이 캐시 상태에 따라 달라진다(E2E S3-L9) —
+        # pmid 도 같은 규칙(ACTIVE 우선, alias asc)으로 찾는다.
         row = (
             await db.execute(
-                sa_select(ModelAlias.provider).where(ModelAlias.alias == alias)
+                sa_select(ModelAlias.provider)
+                .where(
+                    sa_or(
+                        ModelAlias.alias == alias,
+                        ModelAlias.provider_model_id == alias,
+                    )
+                )
+                .order_by(
+                    (ModelAlias.alias == alias).desc(),
+                    (ModelAlias.status == "ACTIVE").desc(),
+                    ModelAlias.alias,
+                )
+                .limit(1)
             )
         ).scalar_one_or_none()
         return ProviderType(row) if row else None

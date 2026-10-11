@@ -40,7 +40,8 @@ from app.services.fallback_loop import (
     release_reservations,
     run_fallback_loop,
 )
-from app.services.fallback_resolver import make_same_provider
+from app.services.downgrade_loader import DowngradePolicyLoader
+from app.services.fallback_resolver import FallbackResolver, make_same_provider
 from app.services.router_service import RouterService
 from app.services.streaming import bedrock_anthropic_sse_stream
 from app.services.thinking_normalizer import (
@@ -219,8 +220,36 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # returned, so other requests are byte-identical.
         req_for_bedrock = (normalize_inbound_native_blocks(req_data)
                            if isinstance(req_data, dict) else req_data)
+        if not isinstance(req_data, dict):
+            return JSONResponse(
+                status_code=400,
+                content=anthropic_error(
+                    "invalid_request_error", "Request body must be a JSON object"
+                ),
+            )
         model_alias = req_data.get("model", "")
         is_stream = req_data.get("stream", False)
+
+        # untrusted JSON 의 model 값 가드 — /v1/responses 의 _is_usable_model_ref 와
+        # 같은 이유다: non-str 은 asyncpg 가 DBAPIError 로, NUL 은
+        # CharacterNotInRepertoireError 로, lone surrogate 는 redis-py 의
+        # UnicodeEncodeError 로 터져 500 이 됐다(E2E S3-L7). 여기서는 프로파일
+        # default 폴백이 없으므로 400 이 정직하다.
+        _model_ref_ok = (
+            isinstance(model_alias, str)
+            and bool(model_alias)
+            and "\x00" not in model_alias
+        )
+        if _model_ref_ok:
+            try:
+                model_alias.encode("utf-8")
+            except UnicodeEncodeError:
+                _model_ref_ok = False
+        if not _model_ref_ok:
+            return JSONResponse(
+                status_code=400,
+                content=anthropic_error("invalid_request_error", "Invalid 'model' value"),
+            )
 
         # ⚠️ 정규화는 여기서 하지 않는다 — 모델 해석(아래 resolve_*) 전이라 alias
         #    밖에 모르는데, alias 추정이 실제 모델을 오판하면 필드를 잘못 지운다.
@@ -291,9 +320,13 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # cross-account(claude-code→374) 일 때만 Bedrock 분기에서 profile.region 으로 설정.
     # 분기 전 명시 초기화 → 아래 _rewrite 클로저가 locals() 리플렉션 없이 직접 참조(리팩터 안전).
     _region_for_rewrite = None
+    # CB 키 차원 — 회로는 (모델 × 계정) 자원 단위다(E2E S3-L3). 빈 문자열이면
+    # 종전과 같은 pmid 단독 키라 in-account 경로는 키가 그대로다.
+    _circuit_scope = ""
     if decision.provider == ProviderType.BEDROCK_MANTLE:
         model_config = decision.model_config
         adapter = registry.get(ProviderType.BEDROCK_MANTLE)
+        _circuit_scope = f"mantle:{decision.endpoint or ''}"
         call_model_id = decision.model_id
         stream_kwargs: dict = {"profile": decision.profile, "endpoint": decision.endpoint}
         nonstream_kwargs: dict = {"profile": decision.profile, "endpoint": decision.endpoint}
@@ -327,6 +360,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     fallback_client=getattr(_inacct_adapter, "_client", None),  # assume 실패 시 859 폴백
                 )
                 _region_for_rewrite = _prof.region
+                # 대상 계정+리전이 회로 단위다 — 이 계정의 장애가 in-account 회로를 오염시키지 않는다.
+                _circuit_scope = f"acct:{_role}:{_reg or ''}"
             else:
                 adapter = _inacct_adapter
                 _region_for_rewrite = None
@@ -365,10 +400,38 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     state["model_config"] = model_config
 
     # --- Fallback chain resolution ---
-    # For BEDROCK: resolve the chain and attempt fallback on 5xx.
+    # For BEDROCK: resolve the chain and attempt fallback on 5xx/429.
     # For BEDROCK_MANTLE: resolver returns [original] only (no same-provider alternatives).
+    #
+    # ⚠️ 체인은 두 층으로 만든다. (1) 부팅 스냅샷의 **전역 층** — 어떤 팀/사용자의
+    #    규칙이든 다른 주체의 가용성 폴백으로 병합됐다(E2E S3: 팀 A 의 절감 규칙이
+    #    팀 B 의 failover 를 바꾸는 누출 + 재시작 전 정책 미반영). (2) **요청자 팀 층** —
+    #    예산 다운그레이드 미들웨어와 같은 로더·같은 60s 캐시·같은 무효화 경로라
+    #    정책 변경이 재시작 없이 반영된다. 팀 층이 같은 from_alias 의 전역 행을
+    #    덮어쓰므로, 규칙을 가진 팀은 자기 규칙만 보고, 없는 팀은 전역 층의
+    #    best-effort 폴백을 그대로 쓴다(502 보다는 낫다).
     cb = getattr(request.app.state, "circuit_breaker", None)
     fallback_resolver = getattr(request.app.state, "fallback_resolver", None)
+
+    _team_chain: dict[str, str] = {}
+    _team_id_raw = getattr(auth_context, "team_id", None) if auth_context else None
+    if _team_id_raw:
+        try:
+            from app.middleware.downgrade import _coerce_uuid
+
+            _team_uuid = _coerce_uuid(_team_id_raw)
+            _dl = DowngradePolicyLoader()
+            if not is_db_degraded and session_factory is not None:
+                async with session_factory() as _db_chain:
+                    _fb_rules = await _dl.get_active_rules(redis, _db_chain, _team_uuid)
+            else:
+                _fb_rules = await _dl.get_active_rules(redis, None, _team_uuid)
+            # 로더는 threshold 오름차순 — from_alias 당 첫 규칙이 이기게 두면
+            # 가장 덜 공격적인 치환(품질 손실 최소)이 가용성 폴백이 된다.
+            for _r in _fb_rules:
+                _team_chain.setdefault(_r.from_alias, _r.to_alias)
+        except Exception as _exc:
+            logger.warning("fallback_team_chain_load_failed", error=str(_exc))
 
     original_provider = model_config.provider
 
@@ -380,7 +443,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # We also ensure the original alias is always present (guard for the edge case where
     # it was somehow absent from the DB snapshot; the original is always same-provider).
     _startup_alias_provider_map: dict = getattr(request.app.state, "alias_provider_map", {})
-    _alias_provider_map: dict = {**_startup_alias_provider_map, model_alias: original_provider}
+    _alias_provider_map: dict = {
+        **_startup_alias_provider_map,
+        model_alias: original_provider,
+        model_config.alias: original_provider,
+    }
 
     _same_provider_as_original = make_same_provider(_alias_provider_map, original_provider)
 
@@ -388,14 +455,23 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         set(auth_context.allowed_models) if auth_context and auth_context.allowed_models else None
     )
 
+    # 체인의 from_alias 키는 표준 alias 다. 클라이언트의 model 값은
+    # 'claude-sonnet-4-6[1m]' 이나 pmid 일 수 있으므로 **해석된** alias 로
+    # 조회한다 — 미들웨어 다운그레이드가 이미 effective alias 로 재작성했으면
+    # 둘은 어차피 같다.
+    _chain_origin = model_config.alias or model_alias
     if fallback_resolver is not None:
-        try_order = fallback_resolver.resolve(
-            original=model_alias,
+        _merged_chain = (
+            {**fallback_resolver.chain, **_team_chain} if _team_chain
+            else fallback_resolver.chain
+        )
+        try_order = FallbackResolver(chain=_merged_chain).resolve(
+            original=_chain_origin,
             allowed=allowed_set,
             same_provider=_same_provider_as_original,
         )
     else:
-        try_order = [model_alias]
+        try_order = [_chain_origin]
 
     # --- Async model resolver for fallback candidates ---
     async def _resolve_candidate(alias: str) -> ModelConfigSchema:
@@ -446,10 +522,14 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             mantle_b = normalize_thinking(
                 mantle_b, cand_config.provider_model_id, request_id=request_id
             )
+            # 후보 자신의 endpoint 를 쓴다 — 원본의 decision.endpoint 로 Mantle→Mantle
+            # 후보를 호출하면 다른 리전/계정의 후보가 엉뚱한 엔드포인트로 나간다
+            # (E2E S3-L1). profile 은 클라이언트 축이라 후보에도 그대로다.
+            _cand_ep = cand_config.endpoint or decision.endpoint
             return (
                 json.dumps(mantle_b).encode(),
-                {"profile": decision.profile, "endpoint": decision.endpoint},
-                {"profile": decision.profile, "endpoint": decision.endpoint},
+                {"profile": decision.profile, "endpoint": _cand_ep},
+                {"profile": decision.profile, "endpoint": _cand_ep},
             )
         else:
             bedrock_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
@@ -505,10 +585,24 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # configured, run the tool-use loop instead of the plain fallback dispatch. The
     # loop injects a web_search tool, intercepts tool_use, calls AgentCore, and stitches
     # the answer. Skipped entirely otherwise → the existing path below is byte-identical.
+    #
+    # ⚠️ 이 분기는 폴백 루프(가용성 폴백·CB 기록)를 우회한다 — 회로가 열린 모델을
+    #    루프가 다시 두드리는 것을 허용하지 않는다(E2E S3-L8). 회로가 열려 있고
+    #    half-open 프로브도 못 얻었으면 이 분기를 건너뛰어 아래 폴백 루프가
+    #    대체 후보를 처리하게 한다.
+    _ws_allowed = True
+    if cb is not None and model_config is not None:
+        _pmid_ws = model_config.provider_model_id
+        _cb_key_ws = (f"{_circuit_scope}|{_pmid_ws}" if _circuit_scope else _pmid_ws)
+        if await cb.is_open(redis, _cb_key_ws):
+            _ws_allowed = await cb.try_acquire_halfopen_probe(redis, _cb_key_ws)
+            if not _ws_allowed:
+                logger.info("web_search_skipped_circuit_open", pmid=_pmid_ws)
     mcp_client = getattr(request.app.state, "agentcore_mcp_client", None)
     _profile = decision.profile
     if (
-        mcp_client is not None
+        _ws_allowed
+        and mcp_client is not None
         and _profile is not None
         and getattr(_profile, "web_search_enabled", False)
     ):
@@ -709,7 +803,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     result: FallbackResult = await run_fallback_loop(
         try_order=try_order,
-        original_alias=model_alias,
+        # 해석된 표준 alias — cowork override 처럼 요청값과 서빙 모델이 다를 때
+        # availability_fallback_from 이 실제 시도된 모델을 가리키게 한다(E2E S3-L2).
+        original_alias=_chain_origin,
         is_stream=is_stream,
         # The fallback loop goes out without our web_search tool, so it gets the body whose
         # replayed native search blocks were turned into text (req_for_bedrock); the original
@@ -732,6 +828,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         build_candidate_body=_build_candidate_body,
         rewrite_model_id=_rewrite,
         metrics=getattr(request.app.state, "metrics", None),
+        circuit_scope=_circuit_scope,
     )
 
     # --- Handle the result ---

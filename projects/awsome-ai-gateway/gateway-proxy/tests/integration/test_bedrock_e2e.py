@@ -501,8 +501,12 @@ class TestBedrockProviderError:
         assert resp.json()["error"]["type"] == "provider_error"
 
     @pytest.mark.asyncio
-    async def test_access_denied_returns_403(self):
-        """Bedrock AccessDeniedException → 403 provider_error."""
+    async def test_access_denied_returns_502_sanitized(self):
+        """Bedrock AccessDeniedException → 502 provider_error (E2E S3-M4).
+
+        403 은 Anthropic 클라이언트의 재인증 루프를 유발하고(실제로는 우리 IAM
+        미설정이라 재인증으로 풀리지 않는다), boto 원문에는 assumed-role ARN/계정이
+        들어 있다 — 502 + 일반 문구로 환원한다."""
         from botocore.exceptions import ClientError
 
         bedrock_client = MagicMock()
@@ -519,8 +523,12 @@ class TestBedrockProviderError:
                 content=b'{"prompt":"hello"}',
             )
 
-        assert resp.status_code == 403
-        assert resp.json()["error"]["type"] == "provider_error"
+        assert resp.status_code == 502
+        body = resp.json()
+        assert body["error"]["type"] == "provider_error"
+        # boto 원문(ARN/계정 식별자)은 본문에 새어 나가지 않는다.
+        assert "arn:aws" not in json.dumps(body)
+        assert "AccessDenied" not in body["error"]["message"]
 
 
 # ===========================================================================

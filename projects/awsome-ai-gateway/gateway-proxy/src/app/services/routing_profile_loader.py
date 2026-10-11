@@ -14,6 +14,12 @@ from app.schemas.routing import RoutingProfileSchema
 logger = structlog.get_logger(__name__)
 
 ROUTING_CACHE_TTL = 300  # 5 min, mirrors MODEL_CACHE_TTL
+# 마지막으로 확인된 프로파일의 장기 백업 — DB 열화 + 5분 캐시 만료가 겹치면
+# profile=None → cowork 가 Mantle 대신 in-account Bedrock 으로, cross-account 가
+# in-account 로 조용히 바뀐다(계정·리전·모델·단가 전부). 그 조용한 전환이 장애보다
+# 나쁘므로, DB 열화 시에만 이 키를 읽는다(E2E S3-M7). admin-api 무효화는 두 키를
+# 함께 지운다.
+STALE_CACHE_TTL = 86400  # 24h
 
 
 class RoutingProfileLoader:
@@ -43,6 +49,25 @@ class RoutingProfileLoader:
                     logger.warning("routing_profile_cache_parse_failed", client=client)
 
         if db is None:
+            # DB 열화 — 마지막으로 확인된 스냅샷을 서빙한다(24h TTL). 프로파일이 꼭
+            # 필요한 client(cowork, cross-account)를 조용한 in-account 전환에서 지킨다.
+            if redis is not None:
+                try:
+                    stale = await redis.get(f"{cache_key}:stale")
+                except Exception:
+                    stale = None
+                if stale:
+                    try:
+                        schema = RoutingProfileSchema(**json.loads(stale))
+                        if schema.enabled:
+                            logger.warning(
+                                "routing_profile_serving_stale_db_degraded", client=client
+                            )
+                            return schema
+                    except Exception:
+                        logger.warning(
+                            "routing_profile_stale_parse_failed", client=client
+                        )
             return None
 
         result = await db.execute(
@@ -64,9 +89,10 @@ class RoutingProfileLoader:
         )
         if redis is not None:
             try:
-                await redis.setex(
-                    cache_key, ROUTING_CACHE_TTL, json.dumps(schema.model_dump(mode="json"))
-                )
+                _payload = json.dumps(schema.model_dump(mode="json"))
+                await redis.setex(cache_key, ROUTING_CACHE_TTL, _payload)
+                # 장기 백업 — 위 주석 참조 (DB 열화 시에만 읽힌다).
+                await redis.setex(f"{cache_key}:stale", STALE_CACHE_TTL, _payload)
             except Exception:
                 logger.warning("routing_profile_cache_write_failed", client=client)
 

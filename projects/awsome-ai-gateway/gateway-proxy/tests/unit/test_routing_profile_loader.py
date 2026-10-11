@@ -71,9 +71,10 @@ async def test_load_db_path_maps_row_and_caches():
     assert profile.account_role_arn == "arn:aws:iam::123456789012:role/llm-gateway-cowork-bedrock"
     assert profile.external_id == "cowork-bedrock"
     assert profile.enabled is True
-    # cache write-back happened with the routing_profile:<client> key
-    redis.setex.assert_called_once()
-    assert redis.setex.call_args.args[0] == "routing_profile:cowork"
+    # cache write-back: hot key + long-TTL stale backup key (E2E S3-M7 — DB 장애 시
+    # 프로파일이 조용히 사라져 cowork/cross-account 가 in-account 로 라우팅되는 것을 막는다).
+    keys_written = {c.args[0] for c in redis.setex.call_args_list}
+    assert keys_written == {"routing_profile:cowork", "routing_profile:cowork:stale"}
 
 
 @pytest.mark.asyncio

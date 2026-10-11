@@ -15,10 +15,13 @@ def make_same_provider(
 ) -> Callable[[str], bool]:
     """Return a predicate that admits only aliases whose provider matches *original_provider*.
 
-    The predicate uses a strict deny-by-default policy: if an alias is absent
-    from *alias_provider_map* the predicate returns ``False`` (excluded).  This
-    prevents cross-provider candidates (e.g. Bedrock aliases when the original
-    is BEDROCK_MANTLE) from silently entering the fallback try_order.
+    The predicate denies aliases the map *knows* belong to a different provider,
+    but ADMITS aliases absent from the map: the map is a startup snapshot, so a
+    newly-registered alias is unknown until restart, and the per-candidate
+    resolver (``resolve_bedrock_model`` / ``resolve_mantle_model``) re-checks the
+    provider whitelist against the live DB/cache anyway — it is authoritative.
+    Denying the unknown would make post-boot registrations unusable as fallback
+    targets until every pod restarted (E2E S3).
 
     Type-safety note: ``ProviderType`` is a ``str``-``Enum``, so comparing a
     ``ProviderType`` value to a plain DB string (e.g. ``"BEDROCK"``) yields
@@ -37,7 +40,9 @@ def make_same_provider(
     """
 
     def _predicate(alias: str) -> bool:
-        return alias_provider_map.get(alias) == original_provider
+        # Unknown (absent) → admit; the candidate resolver enforces the provider
+        # whitelist against live data. Known-different → deny (cheap pre-filter).
+        return alias_provider_map.get(alias, original_provider) == original_provider
 
     return _predicate
 

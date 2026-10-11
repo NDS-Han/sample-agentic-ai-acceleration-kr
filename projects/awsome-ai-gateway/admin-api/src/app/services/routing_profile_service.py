@@ -74,8 +74,10 @@ class RoutingProfileService:
         if self._cache_mgr is None:
             return  # no-op → gateway's 300s TTL expires naturally
         try:
+            # {key}:stale 도 같이 지운다 — 게이트웨이의 DB-열화 백업 키.
             await self._cache_mgr.invalidate(
-                [_CACHE_KEY.format(client=client)], session=self._session
+                [_CACHE_KEY.format(client=client), f"{_CACHE_KEY.format(client=client)}:stale"],
+                session=self._session,
             )
         except Exception:
             logger.warning(

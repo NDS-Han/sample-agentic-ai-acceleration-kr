@@ -262,13 +262,17 @@ async def test_a_read_timeout_is_not_retried(server):
     t0 = time.monotonic()
     status, _b, _h, _u = await BedrockAdapter(_client(srv.port, read_timeout=1)).invoke(
         b'{"messages":[]}', "m")
-    assert status == 502
+    # E2E S3-M3: 읽기 타임아웃은 504 다(502 아님) — 프롬프트 단위 타임아웃이라
+    # CB 실패로 세지 않는다는 ModelTimeoutException 의미론과 같다.
+    assert status == 504
     assert len(srv.requests) == 1, "the request may be running on Bedrock — never send it twice"
     assert time.monotonic() - t0 < 4
 
 
-async def test_when_every_connection_dies_the_caller_gets_one_502_after_two_attempts(server):
+async def test_when_every_connection_dies_the_caller_gets_one_503_after_two_attempts(server):
     srv = server(lambda c, r, p: "drop")
     status, body, _h, _u = await BedrockAdapter(_client(srv.port)).invoke(b'{"messages":[]}', "m")
-    assert status == 502 and b"provider_error" in body
+    # E2E S3-M3: 연결 수준 실패는 503(가용성 신호) — catch-all 502 와 같은 폴백
+    # 대상이지만 의미가 정확하다.
+    assert status == 503 and b"provider_error" in body
     assert len(srv.requests) == 2, "exactly one retry — no storm"

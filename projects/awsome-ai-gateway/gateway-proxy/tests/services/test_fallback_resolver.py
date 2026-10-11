@@ -70,9 +70,10 @@ def test_original_always_first_even_if_not_in_allowed():
 class TestMakeSameProvider:
     """Unit tests for the make_same_provider factory extracted from messages.py.
 
-    The factory returns a predicate that admits only aliases whose provider
-    is positively known to match the original's provider.  Absent entries
-    are excluded (strict / deny-by-default).
+    The factory returns a predicate that denies only aliases the map *knows*
+    belong to a different provider.  Absent entries are ADMITTED — the map is
+    a startup snapshot, and the per-candidate resolver re-checks the provider
+    whitelist against live data (authoritative).
     """
 
     def test_bedrock_original_admits_bedrock_candidates(self):
@@ -117,14 +118,26 @@ class TestMakeSameProvider:
         order = r.resolve(original="cowork-opus", allowed=None, same_provider=pred)
         assert order == ["cowork-opus"]
 
-    def test_unknown_alias_not_in_map_is_excluded(self):
-        """An alias absent from the map returns False (deny-by-default / safe)."""
+    def test_unknown_alias_not_in_map_is_admitted_to_resolution(self):
+        """An alias absent from the map is admitted — the per-candidate resolver
+        (resolve_bedrock_model / resolve_mantle_model) enforces the provider
+        whitelist against live data, so a post-boot registration stays usable
+        as a fallback target without a restart (E2E S3)."""
         alias_provider_map = {
             "claude-opus-4-8": ProviderType.BEDROCK,
         }
         pred = make_same_provider(alias_provider_map, ProviderType.BEDROCK)
-        # "totally-unknown-model" not in map → excluded
-        assert pred("totally-unknown-model") is False
+        # "totally-unknown-model" not in map → admitted; the resolver layer
+        # will LookupError-skip it if it turns out not to be BEDROCK.
+        assert pred("totally-unknown-model") is True
+
+    def test_known_different_provider_still_denied(self):
+        """An alias the map knows is a different provider stays excluded."""
+        alias_provider_map = {
+            "some-openmodel": ProviderType.OPENMODEL,
+        }
+        pred = make_same_provider(alias_provider_map, ProviderType.BEDROCK)
+        assert pred("some-openmodel") is False
 
     def test_db_string_provider_compares_correctly_with_provider_type(self):
         """DB yields plain strings; ProviderType is str-Enum so equality holds without casting."""

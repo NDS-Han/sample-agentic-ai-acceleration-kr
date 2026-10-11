@@ -120,7 +120,13 @@ async def test_cache_hit_skips_db():
         status=ModelStatus.ACTIVE,
     )
     redis = AsyncMock()
-    redis.get = AsyncMock(return_value=cached_schema.model_dump_json())
+    # nx(음수) 키는 미스, alias 키는 히트 — nx 를 먼저 보므로 디스패치가 필요하다.
+    _payload = cached_schema.model_dump_json()
+
+    async def _get(key):
+        return None if key.startswith("model:nx:") else _payload
+
+    redis.get = AsyncMock(side_effect=_get)
     redis.setex = AsyncMock()
     db = AsyncMock()
     db.execute = AsyncMock()
@@ -134,7 +140,12 @@ async def test_cache_hit_skips_db():
 
 @pytest.mark.unit
 @pytest.mark.asyncio
-async def test_cache_miss_writes_both_keys(sample_alias_row, sample_pricing_row):
+async def test_cache_miss_alias_path_writes_alias_key_only(
+    sample_alias_row, sample_pricing_row
+):
+    """E2E S3-H2: alias 경로 해석은 ``model:{alias}`` 만 쓴다 — pmid 키는
+    결정적 ORDER BY 로 뽑힌 pmid 경유 해석만이 쓴다. 그렇지 않으면 같은 pmid 를
+    공유하는 alias 간에 last-writer-wins 오염이 돌아온다."""
     redis = AsyncMock()
     redis.get = AsyncMock(return_value=None)
     redis.setex = AsyncMock()
@@ -145,7 +156,30 @@ async def test_cache_miss_writes_both_keys(sample_alias_row, sample_pricing_row)
 
     keys_set = [call.args[0] for call in redis.setex.call_args_list]
     assert "model:claude-sonnet-4-6" in keys_set
-    assert "model:global.anthropic.claude-sonnet-4-6" in keys_set
+    assert "model:pmid:global.anthropic.claude-sonnet-4-6" not in keys_set
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_cache_miss_pmid_path_writes_pmid_namespace(
+    sample_alias_row, sample_pricing_row
+):
+    """pmid 참조 해석은 ``model:{canonical_alias}`` 와 ``model:pmid:{pmid}`` 를 쓴다."""
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    redis.setex = AsyncMock()
+    # 첫 쿼리(alias 정확 매칭)는 미스 → 두 번째(pmid)에서 행이 나온다.
+    db = _make_db_mock([None, sample_alias_row, sample_pricing_row])
+
+    rs = RouterService()
+    schema = await rs.resolve_bedrock_model(
+        redis, db, "global.anthropic.claude-sonnet-4-6"
+    )
+
+    assert schema.alias == "claude-sonnet-4-6"
+    keys_set = [call.args[0] for call in redis.setex.call_args_list]
+    assert "model:claude-sonnet-4-6" in keys_set
+    assert "model:pmid:global.anthropic.claude-sonnet-4-6" in keys_set
 
 
 @pytest.mark.unit
@@ -166,7 +200,12 @@ async def test_poison_flat_cache_falls_through_to_db(sample_alias_row, sample_pr
         "output_price_per_1k": "0.015",
     })
     redis = AsyncMock()
-    redis.get = AsyncMock(return_value=poison)
+
+    # nx 키는 미스, alias/pmid 키만 poison — 음수 캐시가 먼저 조회된다.
+    async def _get(key):
+        return None if key.startswith("model:nx:") else poison
+
+    redis.get = AsyncMock(side_effect=_get)
     redis.setex = AsyncMock()
     db = _make_db_mock([sample_alias_row, sample_pricing_row])
 

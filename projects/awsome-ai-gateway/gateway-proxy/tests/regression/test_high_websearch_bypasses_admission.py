@@ -452,3 +452,107 @@ def test_client_model_scope_raises_the_distinguishable_error():
     with pytest.raises(PermissionError) as ei:
         rs.check_key_scope(_auth(allowed_models=["other"]), _config())
     assert not isinstance(ei.value, ClientModelScopeError)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 4. 회로 게이트 — 웹서치 분기도 CB 를 우회하면 안 된다(E2E S3-L8)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+async def test_websearch_skipped_when_circuit_open(monkeypatch):
+    """회로가 열리고 프로브도 못 얻으면 웹서치 루프가 아니라 폴백 루프로 간다 —
+    열린 회로를 ws 분기가 다시 두드리지 않는다."""
+    import app.routers.messages as messages_mod
+    import app.services.web_search_loop as wsl_mod
+
+    config = _config()
+    monkeypatch.setattr(messages_mod, "_router_service", _FakeRouter(config))
+
+    ws_called: list[bool] = []
+
+    async def _fake_ws_loop(**kwargs):
+        ws_called.append(True)
+        return MagicMock(status_code=200)
+
+    monkeypatch.setattr(wsl_mod, "run_web_search_loop", _fake_ws_loop, raising=True)
+
+    fb_called: list[bool] = []
+
+    async def _fake_fb_loop(**kwargs):
+        fb_called.append(True)
+        return MagicMock(
+            status=503, all_open=True, model_config=config,
+            availability_fallback_from=None,
+            payload=(json.dumps({"error": {"type": "provider_error", "message": "all open"}}).encode(), {}, None),
+        )
+
+    monkeypatch.setattr(messages_mod, "run_fallback_loop", _fake_fb_loop, raising=True)
+
+    cb = MagicMock()
+    cb.is_open = AsyncMock(return_value=True)
+    cb.try_acquire_halfopen_probe = AsyncMock(return_value=False)
+
+    st = _app_state(web_search=True)
+    st.circuit_breaker = cb
+
+    auth = _auth(allowed_clients=["claude-code"]) if False else _auth()
+    state = {
+        "auth_context": auth,
+        "client": "claude-code",
+        "_redis": None,
+        "_session_factory": None,
+        "request_id": "req-cb-1",
+    }
+    req = _FakeRequest({"model": config.alias, "messages": [], "max_tokens": 16},
+                       state, st)
+    resp = await messages_mod.messages(req)
+
+    assert not ws_called, "회로가 열렸는데 웹서치 루프가 상류를 호출했다"
+    assert fb_called, "회로가 열리면 폴백 루프가 후보를 처리해야 한다"
+    assert resp.status_code == 503
+
+
+async def test_websearch_probe_winner_enters_loop(monkeypatch):
+    """half-open 프로브를 얻은 요청은 웹서치 루프로 들어간다 — 열린 회로를
+    무한정 건너뛰는 것도 아니다."""
+    import app.routers.messages as messages_mod
+    import app.services.web_search_loop as wsl_mod
+
+    config = _config()
+    monkeypatch.setattr(messages_mod, "_router_service", _FakeRouter(config))
+
+    ws_called: list[bool] = []
+
+    async def _fake_ws_loop(**kwargs):
+        ws_called.append(True)
+        return MagicMock(status_code=200)
+
+    monkeypatch.setattr(wsl_mod, "run_web_search_loop", _fake_ws_loop, raising=True)
+
+    async def _fake_admit(**kwargs):
+        return None
+
+    monkeypatch.setattr(
+        "app.services.fallback_loop.enforce_rate_limits", _fake_admit, raising=True
+    )
+
+    cb = MagicMock()
+    cb.is_open = AsyncMock(return_value=True)
+    cb.try_acquire_halfopen_probe = AsyncMock(return_value=True)
+
+    st = _app_state(web_search=True)
+    st.circuit_breaker = cb
+
+    state = {
+        "auth_context": _auth(),
+        "client": "claude-code",
+        "_redis": None,
+        "_session_factory": None,
+        "request_id": "req-cb-2",
+    }
+    req = _FakeRequest({"model": config.alias, "messages": [], "max_tokens": 16},
+                       state, st)
+    resp = await messages_mod.messages(req)
+
+    assert ws_called, "프로브 승자는 웹서치 루프로 들어가야 한다"
+    assert resp.status_code == 200

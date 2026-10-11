@@ -80,9 +80,18 @@ def test_an_already_correct_shape_is_left_alone():
     haiku 는 ``enabled`` 를 실제로 받는다. 예전 코드는 그것까지 지워서 사용자에게 200 을
     주면서 extended thinking 만 없앴다 — 실패가 아니라 조용한 기능 상실이다.
     """
-    body = {"thinking": {"type": "enabled", "budget_tokens": 1000}, "max_tokens": 4000}
+    body = {"thinking": {"type": "enabled", "budget_tokens": 2000}, "max_tokens": 4000}
     out = normalize_thinking(dict(body), "us.anthropic.claude-haiku-4-5-20251001")
     assert out["thinking"] == body["thinking"], f"유효한 형태가 바뀌었다: {out['thinking']}"
+
+
+def test_an_below_minimum_budget_is_corrected_not_dropped():
+    """budget_tokens < 1024 는 Bedrock 이 거부하는 무효 형태다 — enabled 자체를
+    지우는 대신(옛 결함) budget 만 기본값으로 고친다(E2E S3-L6)."""
+    body = {"thinking": {"type": "enabled", "budget_tokens": 1000}, "max_tokens": 4000}
+    out = normalize_thinking(dict(body), "us.anthropic.claude-haiku-4-5-20251001")
+    assert out["thinking"]["type"] == "enabled", "enabled 가 통째로 지워지면 옛 결함이다"
+    assert out["thinking"]["budget_tokens"] >= 1024
 
 
 def test_an_unclassified_model_is_untouched():

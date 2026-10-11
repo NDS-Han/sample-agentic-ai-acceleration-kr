@@ -314,6 +314,13 @@ async def _handle_openai(request: Request, path: str):
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
+            # ⚠️ rate_limit_state 는 **호출 시점**에 다시 읽는다 — 위에서 잡아 둔 지역
+            #    변수를 쓰면 비-2xx 스트림에서 이중 환불이 된다(E2E S3-H1): 상류 오류 시
+            #    release_reservations 가 환불하고 state 를 pop 하는데, 오류 청크를 다
+            #    소비한 제너레이터가 정상 종료 경로로 on_usage(0토큰) 를 발화해 예전 dict
+            #    로 settle 이 또 돌았다(settle_tpm/settle_cost 는 마커가 없어 멱등이 아님).
+            #    pop 된 뒤엔 None → finalize 가 정산을 건너뛴다.
+            _rl_state = state.get("rate_limit_state")
             duration_ms = int((time.monotonic() - start_time) * 1000)
             if first_token_time is not None:
                 ttft_ms = int((first_token_time - start_time) * 1000)
@@ -328,15 +335,15 @@ async def _handle_openai(request: Request, path: str):
                 True,
                 duration_ms,
                 ttft_ms=ttft_ms,
-                rate_limit_state=rate_limit_state,
+                rate_limit_state=_rl_state,
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=aws_request_id,
                 client=client,
             )
 
-        # ⚠️ 상류가 비-2xx 면 SSE 제너레이터는 오류 프레임만 내보내고 on_usage 는 발화하지
-        #    않는다 → finalize 가 돌지 않아 예약이 창(window) 끝까지 남는다. 스트림을
-        #    클라이언트에게 넘기기 **전에** 되돌린다(release_reservations 는 멱등).
+        # ⚠️ 상류가 비-2xx 면 스트림을 클라이언트에게 넘기기 **전에** 되돌린다.
+        #    release_reservations 는 state["rate_limit_state"] 를 pop 하므로 이후
+        #    on_usage 발화 시 위 _record 는 None 을 보고 정산을 건너뛴다.
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
@@ -625,6 +632,23 @@ async def _handle_responses(request: Request):
 
     state["model_config"] = model_config
 
+    # ⚠️ 강등 미들웨어가 재작성한 대상이 codex 평면에서 해소되지 않으면
+    #    _resolve_model 이 profile.default_model 로 조용히 대체한다 — 실제로
+    #    일어나지 않은 강등이 usage_logs/downgraded_from 에 기록되고, 더 비싼
+    #    default 로 돌아가도 "강등 성공"으로 집계됐다(E2E S3-M5-4). 서빙된 모델이
+    #    재작성 대상(=requested_alias, alias 또는 pmid 로 비교)이 아니면 플래그를 지운다.
+    if state.get("downgraded_from") and requested_alias not in (
+        model_config.alias,
+        model_config.provider_model_id,
+    ):
+        logger.info(
+            "downgrade_reverted_default_substituted",
+            downgraded_from=state.get("downgraded_from"),
+            requested=requested_alias[:128],
+            served=model_config.alias,
+        )
+        state.pop("downgraded_from", None)
+
     # Key scope (model allow-list) — the entitlement gate (trust axis).
     if auth_context:
         try:
@@ -870,14 +894,18 @@ async def _handle_responses(request: Request):
             body, model_config.provider_model_id, **invoke_kwargs
         )
 
-        # 비-2xx 면 on_usage 가 발화하지 않아 예약을 되돌리는 곳이 없다 — 근거는
-        # _handle_openai 의 같은 주석 참조.
+        # 비-2xx 면 예약을 스트림 전달 전에 되돌린다. release_reservations 가
+        # state["rate_limit_state"] 를 pop 하므로, 오류 청크 소비 후 정상 종료 경로로
+        # 발화하는 on_usage 가 예전 dict 로 settle 을 다시 돌리는 이중 환불을 막는다
+        # (E2E S3-H1 — _handle_openai 의 같은 블록 주석 참조).
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
+            # 호출 시점에 재조회 — 위 release 가 pop 한 뒤면 None (E2E S3-H1).
+            _rl_state = state.get("rate_limit_state")
             duration_ms = int((time.monotonic() - start_time) * 1000)
             if first_token_time is not None:
                 ttft_ms = int((first_token_time - start_time) * 1000)
@@ -886,7 +914,7 @@ async def _handle_responses(request: Request):
             await cost_recorder.finalize(
                 redis, auth_context, model_config, usage, request_id, True, duration_ms,
                 ttft_ms=ttft_ms,
-                rate_limit_state=rate_limit_state,
+                rate_limit_state=_rl_state,
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=aws_request_id,
                 client=client,

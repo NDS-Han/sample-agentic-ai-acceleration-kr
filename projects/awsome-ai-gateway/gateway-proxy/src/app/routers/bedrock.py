@@ -199,11 +199,19 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         DegradationLevel.BOTH_DEGRADED,
     )
 
-    if not is_db_degraded and session_factory is not None:
-        async with session_factory() as db:
-            model_config = await _router_service.resolve_bedrock_model(redis, db, model_id)
-    else:
-        model_config = await _router_service.resolve_bedrock_model(redis, None, model_id)
+    try:
+        if not is_db_degraded and session_factory is not None:
+            async with session_factory() as db:
+                model_config = await _router_service.resolve_bedrock_model(redis, db, model_id)
+        else:
+            model_config = await _router_service.resolve_bedrock_model(redis, None, model_id)
+    except LookupError as e:
+        # 미등록/INACTIVE/비-BEDROCK alias — /v1/messages 와 같은 404 계약.
+        # 잡지 않으면 글로벌 핸들러가 500 을 낸다(E2E S3).
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"type": "not_found", "message": str(e)}},
+        )
     state["model_config"] = model_config
 
     # Use resolved model_id (may differ from URL model_id due to aliasing)

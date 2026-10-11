@@ -45,10 +45,15 @@ from app.services.router_service import ClientModelScopeError
 
 logger = structlog.get_logger(__name__)
 
-# HTTP status codes that trigger a fallback attempt
-_FALLBACK_STATUSES = frozenset({502, 503, 504})
+# HTTP status codes that trigger a fallback attempt.
+# 429 = provider-side throttling (Bedrock ThrottlingException). Model quotas are
+# per-model, so a throttled original can be served by a chained candidate —
+# the same "temporary capacity" signal as 502/503. Our own admission 429s never
+# reach this check (they return earlier as AdmissionRejection).
+_FALLBACK_STATUSES = frozenset({429, 502, 503, 504})
 # Among fallback statuses, only these count as a CB failure
-# (504 = ModelTimeoutException = per-prompt fault, do NOT penalise the circuit)
+# (504 = ModelTimeoutException = per-prompt fault, 429 = transient quota — do
+# NOT penalise the circuit for either)
 _CB_FAILURE_STATUSES = frozenset({502, 503})
 
 
@@ -280,6 +285,11 @@ async def run_fallback_loop(
     rewrite_model_id,  # callable(provider_model_id) -> str
     # 프로바이더 호출 결과 지표(선택). None 이면 아무것도 기록하지 않는다.
     metrics=None,
+    # ⚠️ 회로 차원(선택). CB 키가 pmid 뿐이면 cross-account(333) 호출의 장애가
+    #    같은 pmid 를 쓰는 in-account 사용자의 회로까지 연다 — 실제 장애 자원은
+    #    (모델 × 계정) 이다(E2E S3-L3). 호출자는 계정/엔드포인트를 식별하는
+    #    문자열을 넘기고, 없으면 종전과 같은 pmid 단독 키다.
+    circuit_scope: str = "",
 ) -> FallbackResult:
     """Run the fallback loop over `try_order`.
 
@@ -313,10 +323,12 @@ async def run_fallback_loop(
             continue
 
         pmid = candidate_config.provider_model_id
+        # CB 키 = 회로 차원 + pmid — 같은 pmid 라도 계정이 다르면 회로가 다르다(E2E S3-L3).
+        cb_key = f"{circuit_scope}|{pmid}" if circuit_scope else pmid
 
         # --- 2. Circuit-breaker gate ---
-        if await cb.is_open(redis, pmid):
-            probe_won = await cb.try_acquire_halfopen_probe(redis, pmid)
+        if await cb.is_open(redis, cb_key):
+            probe_won = await cb.try_acquire_halfopen_probe(redis, cb_key)
             if not probe_won:
                 logger.info("fallback_cb_open_skip", alias=alias, pmid=pmid)
                 continue  # skip — circuit open, no probe slot
@@ -428,7 +440,7 @@ async def run_fallback_loop(
                 record_provider_error(metrics, _pm_labels, status=status)
             # CB: record failure only for {502,503} and connection errors, NOT 504
             if status in _CB_FAILURE_STATUSES or caught_connection_error:
-                await cb.record_failure(redis, pmid)
+                await cb.record_failure(redis, cb_key)
 
             error_bytes = response_body if not is_stream else json.dumps(
                 anthropic_error("provider_error", f"Backend returned {status}")
@@ -446,7 +458,7 @@ async def run_fallback_loop(
         else:
             # Non-fallback status (2xx, 4xx, etc.)
             if 200 <= status < 300:
-                await cb.record_success(redis, pmid)
+                await cb.record_success(redis, cb_key)
 
             availability_fallback_from = original_alias if not is_original else None
 

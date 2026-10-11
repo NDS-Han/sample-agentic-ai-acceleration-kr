@@ -96,8 +96,26 @@ class ModelService:
         # pattern: DEL both keys and let the gateway populate model:{alias} with
         # the correct nested shape + TTL on first cache-miss (router_service
         # self-heal). Keeps admin writes and gateway reads on one cache contract.
+        # model:nx:{alias} — 게이트웨이의 15s 음수 캐시도 함께 지워 신규 등록이
+        # 즉시 해석되게 한다. pmid 참조의 음수 캐시도 마찬가지 — 등록 전에 pmid 로
+        # 요청이 들어왔다면 15s 간 신규 모델이 404 로 남는다. nx 키는 게이트웨이에서
+        # provider 집합으로 네임스페이스(model:nx:{providers}:{ref})되므로 패턴으로
+        # 지우고, 구 버전 파드의 레거시 단일 키(model:nx:{ref})도 함께 지운다.
+        for _ref in (model.alias, model.provider_model_id):
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
+                [f"model:nx:{_ref}"],
+                pattern=f"model:nx:*:{_ref}",
+            )
         await invalidate_after_commit(
-            session, self._cache_mgr, [f"model:{model.alias}", "model:list"]
+            session,
+            self._cache_mgr,
+            [
+                f"model:{model.alias}",
+                f"model:pmid:{model.provider_model_id}",
+                "model:list",
+            ],
         )
 
         await audit_logger.log(
@@ -177,7 +195,7 @@ class ModelService:
         await invalidate_after_commit(
             session,
             self._cache_mgr,
-            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"],
         )
 
         await audit_logger.log(
@@ -245,7 +263,7 @@ class ModelService:
         await invalidate_after_commit(
             session,
             self._cache_mgr,
-            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"],
         )
 
         await audit_logger.log(
@@ -416,7 +434,7 @@ class ModelService:
                 await invalidate_after_commit(
                     session,
                     self._cache_mgr,
-                    [f"model:{alias}", f"model:{model.provider_model_id}"],
+                    [f"model:{alias}", f"model:pmid:{model.provider_model_id}"],
                 )
             applied.append(alias)
 
@@ -445,7 +463,7 @@ class ModelService:
         await invalidate_after_commit(
             session,
             self._cache_mgr,
-            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"],
         )
 
         await audit_logger.log(
@@ -573,7 +591,7 @@ class ModelService:
         await invalidate_after_commit(
             session,
             self._cache_mgr,
-            [f"model:{alias}", f"model:{model.provider_model_id}", "model:list"],
+            [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"],
         )
 
         await audit_logger.log(

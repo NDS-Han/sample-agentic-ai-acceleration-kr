@@ -522,3 +522,38 @@ def test_system_hoist_skips_non_system_block_types():
         OPUS_48,
     )
     assert b["system"] == "ok"  # 단일 text 블록은 문자열로 합쳐진다(기존 동작 유지)
+
+
+def test_legacy_enabled_missing_budget_tokens_is_defaulted():
+    """E2E S3-L6: enabled thinking 에 budget_tokens 가 없거나 최소(1024) 미만이면
+    상류 400 이다 — adaptive→enabled 변환과 같은 기본값으로 채운다."""
+    body = {
+        "thinking": {"type": "enabled"},
+        "max_tokens": 16000,
+        "messages": [],
+    }
+    out = normalize_thinking(body, "anthropic.claude-haiku-4-5")
+    assert out["thinking"]["type"] == "enabled"
+    assert out["thinking"]["budget_tokens"] == 4096  # _DEFAULT_BUDGET_TOKENS
+
+
+def test_legacy_enabled_tiny_budget_is_defaulted():
+    body = {
+        "thinking": {"type": "enabled", "budget_tokens": 512},
+        "max_tokens": 16000,
+        "messages": [],
+    }
+    out = normalize_thinking(body, "anthropic.claude-haiku-4-5")
+    assert out["thinking"]["budget_tokens"] == 4096
+
+
+def test_legacy_enabled_no_budget_room_drops_thinking():
+    """max_tokens <= 1024 면 budget 을 채울 자리가 없다 — 지우는 쪽이 400 보다 낫다
+    (adaptive→enabled 의 no-room 분기와 동일 의미론)."""
+    body = {
+        "thinking": {"type": "enabled"},
+        "max_tokens": 1024,
+        "messages": [],
+    }
+    out = normalize_thinking(body, "anthropic.claude-haiku-4-5")
+    assert "thinking" not in out

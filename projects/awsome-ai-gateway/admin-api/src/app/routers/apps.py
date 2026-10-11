@@ -361,7 +361,10 @@ async def set_default_model(
 
     # Invalidate routing_profile cache so gateway-proxy picks up the change
     cache_mgr = request.app.state.cache_mgr
-    await cache_mgr.invalidate([f"routing_profile:{client}"], session=session)
+    await cache_mgr.invalidate(
+        [f"routing_profile:{client}", f"routing_profile:{client}:stale"],
+        session=session,
+    )
 
     logger.info(
         "admin.set_default_model",

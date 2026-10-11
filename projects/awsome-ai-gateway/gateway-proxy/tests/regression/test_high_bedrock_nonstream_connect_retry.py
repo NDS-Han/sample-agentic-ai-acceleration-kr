@@ -65,7 +65,9 @@ async def test_invoke_gives_up_after_the_second_connection_error():
     client = MagicMock()
     client.invoke_model.side_effect = _closed()
     status, body, _h, usage = await BedrockAdapter(client).invoke(b"{}", "model-id")
-    assert status == 502 and client.invoke_model.call_count == 2, "exactly one retry, no storm"
+    # E2E S3-M3: 연결 수준 실패는 502 가 아니라 503(가용성 신호) — 같은 폴백
+    # 대상이지만 CB 오염 의미론이 정확하다.
+    assert status == 503 and client.invoke_model.call_count == 2, "exactly one retry, no storm"
     assert b"provider_error" in body and usage.input_tokens == 0
 
 

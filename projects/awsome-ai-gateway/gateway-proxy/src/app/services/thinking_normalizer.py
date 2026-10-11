@@ -232,6 +232,32 @@ def normalize_thinking(
             # (강등 haiku-4-5 에서 budget=100000 요청 재현).
             max_tokens = body.get("max_tokens")
             budget = thinking.get("budget_tokens")
+            # ⚠️ enabled 는 budget_tokens 필수+최소 1024 — 누락/부족이면 상류 400 이라
+            #    adaptive→enabled 변환과 같은 기본값으로 채운다(E2E S3-L6).
+            if not isinstance(budget, int) or budget < _MIN_BUDGET_TOKENS:
+                budget = _DEFAULT_BUDGET_TOKENS
+                if isinstance(max_tokens, int):
+                    budget = min(budget, max_tokens - 1)
+                if budget < _MIN_BUDGET_TOKENS:
+                    body.pop("thinking", None)
+                    _drop_legacy_output_config_fields(body)
+                    logger.info(
+                        "thinking_normalized",
+                        request_id=request_id,
+                        provider_model_id=provider_model_id,
+                        direction="enabled_dropped_no_budget_room",
+                        max_tokens=max_tokens,
+                    )
+                    return body
+                body["thinking"] = {**thinking, "budget_tokens": budget}
+                logger.info(
+                    "thinking_normalized",
+                    request_id=request_id,
+                    provider_model_id=provider_model_id,
+                    direction="enabled_budget_defaulted",
+                    budget_tokens=budget,
+                )
+                return body
             if (
                 isinstance(budget, int)
                 and isinstance(max_tokens, int)
