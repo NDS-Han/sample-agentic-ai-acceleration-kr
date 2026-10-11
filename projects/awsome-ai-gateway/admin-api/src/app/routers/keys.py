@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.db import get_db_session
 from app.models.auth import KeyStatus, UserRole
+from app.repositories._cursor import encode_cursor
 from app.schemas.common import (
     PAGE_LIMIT_DEFAULT,
     PAGE_LIMIT_MAX,
@@ -51,10 +52,14 @@ async def list_keys(
         cursor=cursor,
         limit=limit,
     )
-    last_id = str(items[-1].key_id) if items else None
+    next_cursor = (
+        encode_cursor(items[-1].created_at, uuid.UUID(items[-1].key_id))
+        if (items and has_more)
+        else None
+    )
     return KeyListResponse(
         items=items,
-        pagination=PaginationMeta(cursor=last_id if has_more else None, limit=limit, has_more=has_more),
+        pagination=PaginationMeta(cursor=next_cursor, limit=limit, has_more=has_more),
     )
 
 

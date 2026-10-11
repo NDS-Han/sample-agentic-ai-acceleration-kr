@@ -598,6 +598,14 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    # ── Trusted Host (defense-in-depth) ──
+    # ALB 가 Host/X-Forwarded-* 를 덮어쓰는 게 정상 경로지만, 그 규칙이 빠지면
+    # Host 스푸핑으로 리다이렉트·캐시 키를 오염시킬 수 있다 — 목록이 주어지면 강제.
+    if settings.TRUSTED_HOSTS:
+        from fastapi.middleware.trustedhost import TrustedHostMiddleware
+
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.TRUSTED_HOSTS)
+
     # ── CORS (Admin UI) ──
     app.add_middleware(
         CORSMiddleware,

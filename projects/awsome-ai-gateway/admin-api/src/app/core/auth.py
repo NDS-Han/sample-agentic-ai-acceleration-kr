@@ -15,6 +15,7 @@ from app.core.oidc_verifier import OIDCConfigError, OIDCVerifier, OIDCVerifyErro
 from app.models.auth import UserRole
 from app.services.service_token_service import (
     SERVICE_TOKEN_PREFIX,
+    SERVICE_TOKEN_RANDOM_BYTES,
     ServiceTokenService,
     hash_token,
 )
@@ -168,6 +169,14 @@ async def get_current_user(request: Request) -> CurrentUser:
     # Resolved against auth.service_tokens (sha256 hash). Synthesizes an ADMIN
     # identity. Non-`svc-` tokens fall through to the JWT path below (unchanged).
     if token.startswith(SERVICE_TOKEN_PREFIX):
+        # ⚠️ 형식이 아예 틀린 토큰은 DB 왕복 전에 끊는다 — 무효 svc- 토큰 홍수가
+        #    요청마다 새 세션+해시조회를 열지 못하게(VK 경로가 같은 이유로
+        #    invalid 키에 세션을 안 여는 것과 대칭).
+        body = token[len(SERVICE_TOKEN_PREFIX):]
+        if len(body) != SERVICE_TOKEN_RANDOM_BYTES * 2 or not all(
+            c in "0123456789abcdef" for c in body
+        ):
+            raise HTTPException(status_code=401, detail="Invalid or expired service token")
         svc_service = ServiceTokenService()
         async with AsyncSessionLocal() as session:
             svc_tok = await svc_service.verify(session, hash_token(token))

@@ -64,11 +64,14 @@ class HealthChecker:
 
     async def _check_db(self) -> None:
         try:
-            async with self._db_engine.connect() as conn:
-                await asyncio.wait_for(
-                    conn.execute(text("SELECT 1")),
-                    timeout=5.0,
-                )
+            # ⚠️ wait_for 는 커넥션 획득까지 감싸야 한다 — 풀 포화라는 바로 그
+            #    상황에서 connect() 가 pool_timeout 까지 블록해, 프로브가 측정해야
+            #    할 지연이 틱 전체를 잡아먹는다. 타임아웃은 pool_timeout 보다 작게.
+            async def _probe() -> None:
+                async with self._db_engine.connect() as conn:
+                    await conn.execute(text("SELECT 1"))
+
+            await asyncio.wait_for(_probe(), timeout=5.0)
             self._degradation.report_db_health(healthy=True)
         except Exception:
             logger.warning("db_health_check_failed")

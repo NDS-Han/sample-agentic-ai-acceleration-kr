@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
+from app.repositories._cursor import encode_cursor
 from app.services.user_allowed_client_service import UserAllowedClientService
 from app.services.user_allowed_model_service import UserAllowedModelService
 from app.schemas.common import (
@@ -539,10 +540,10 @@ async def list_users(
         cursor=cursor,
         limit=limit,
     )
-    last_id = items[-1].id if items else None
+    next_cursor = encode_cursor(items[-1].created_at, items[-1].id) if (items and has_more) else None
     return UserListResponse(
         items=items,
-        pagination=PaginationMeta(cursor=last_id if has_more else None, limit=limit, has_more=has_more),
+        pagination=PaginationMeta(cursor=next_cursor, limit=limit, has_more=has_more),
     )
 
 

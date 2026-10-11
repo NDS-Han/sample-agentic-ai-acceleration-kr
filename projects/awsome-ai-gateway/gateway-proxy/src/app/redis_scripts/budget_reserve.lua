@@ -12,6 +12,8 @@
 -- KEYS[1] = budget:{scope}:{<scope_id>}:<period>         -- usage counter
 -- KEYS[2] = budget:config:{scope}:{<scope_id>}           -- config (same hash tag)
 -- KEYS[3] = budget:pending:{scope}:{<scope_id>}:<req_id> -- per-request 예약 마커
+-- KEYS[4] = budget:resvsum:{scope}:{<scope_id>}:{period} -- 미정산 예약 합계
+--           (usage 카운터는 예약 포함 "확약액" — 표시용 실지출 = usage - resvsum)
 -- ARGV[1] = 'user' | 'team' | 'client'                    -- scope label
 -- ARGV[2] = estimate (USD, string decimal)               -- 최악비용 추정치
 -- ARGV[3] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
@@ -101,6 +103,8 @@ end
 -- (finalize 와 release_reservations 의 경쟁 호출, 혹은 재시도)이 안전하다.
 redis.call('INCRBYFLOAT', usage_key, estimate)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
+redis.call('INCRBYFLOAT', KEYS[4], estimate)
+redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('SET', marker_key, ARGV[2], 'EX', marker_ttl)
 
 return reply(true, true, nil, used + estimate, limit, true)

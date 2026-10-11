@@ -402,7 +402,7 @@ adminApi:
     enabled: true
     # CHANGE_ME (terraform output): cognito_issuer_url. 형식 https://cognito-idp.{region}.amazonaws.com/{pool_id}
     issuerUrl: "https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_nKW7FJWst"
-    audience: ""               # Cognito access_token 은 aud 없음 → 비워둠
+    audience: ""               # Cognito app client_id — 비우면 aud 검증 꺼짐(install 경로가 주입)
     providerName: "oidc:cognito"
     groupsClaim: "cognito:groups"
     groupPrefix: "Claude_"

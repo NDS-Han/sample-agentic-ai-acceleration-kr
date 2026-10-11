@@ -243,12 +243,12 @@ run_sql_file() {
     --command -- sh -c \
     'echo "$SQLB64" | base64 -d > /tmp/q.sql
      psql -h "$PGH" -U "$PGU" -d "$PGD" -v ON_ERROR_STOP=1 -P pager=off -f /tmp/q.sql' \
-    >/dev/null 2>&1
+    || die "kubectl run failed for $pod (image/RBAC/quota — check kubectl describe)"
 
   # Fargate scheduling is slow; wait generously before giving up
   for _ in $(seq 1 90); do
     phase=$(kubectl get pod "$pod" -n "$NS" -o jsonpath='{.status.phase}' 2>/dev/null)
-    [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ] && break
+    { [ "$phase" = "Succeeded" ] || [ "$phase" = "Failed" ]; } && break
     sleep 4
   done
 

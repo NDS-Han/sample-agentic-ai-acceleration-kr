@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import String, all_, any_, bindparam, func, select, update
+from sqlalchemy import String, all_, and_, any_, bindparam, func, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import lazyload, selectinload
@@ -318,10 +319,9 @@ class UserRepository:
         요약이 `list_users(limit=500)` 이라 가입이 오래된 사용자의 예산 행이 통째로 빠진
         채 사용률이 계산됐다 — 화면에 오류 없이 틀린 비율이 떴다.
 
-        ⚠️ `cursor` 페이징으로 우회하는 것도 안 된다. `list_users` 는
-        `order_by(created_at desc)` 인데 커서 조건이 `User.id < cursor` 여서 **정렬 키와
-        커서 키가 다르다.** 그 조합은 행을 건너뛰거나 같은 페이지를 반복한다(id 순서와
-        created_at 순서가 무관하므로). 커서 페이징을 쓰려면 정렬 키로 커서를 잡아야 한다.
+        ⚠️ `cursor` 페이징으로 우회하는 것도 비효율이다. 커서는 이제
+        ``(created_at, id)`` 복합 키라 정확하지만, 요약에는 어차피 전수가 필요해
+        N 페이지 순회는 왕복만 늘린다.
 
         전수 로드가 안전한 근거: 이 메서드는 관리자 화면의 요약 집계에서만 쓰이고,
         auth.users 는 조직 구성원 수(수천 규모) 상한이라 목록 자체가 크지 않다. 사용자가
@@ -340,10 +340,13 @@ class UserRepository:
         department_id: uuid.UUID | None = None,
         is_active: bool | None = None,
         email: str | None = None,
-        cursor: uuid.UUID | None = None,
+        cursor: tuple[datetime, uuid.UUID] | None = None,
+        legacy_id_cursor: uuid.UUID | None = None,
         limit: int = 50,
     ) -> list[User]:
-        stmt = select(User).order_by(User.created_at.desc())
+        # created_at 은 같은 시각(동시 bulk insert·seed)이 겹칠 수 있어 id 로
+        # 타이브레이크 — 커서 조건과 정렬 키가 같아야 keyset 이 성립한다.
+        stmt = select(User).order_by(User.created_at.desc(), User.id.desc())
         if team_id:
             stmt = stmt.where(User.team_id == team_id)
         if department_id:
@@ -354,8 +357,18 @@ class UserRepository:
             # email 은 unique 컬럼 → exact 매칭(0/1건). DB 는 email 을 정규화 없이
             # Cognito 값 그대로 저장하므로 대소문자 무시(lower) 비교.
             stmt = stmt.where(func.lower(User.email) == email.lower())
-        if cursor:
-            stmt = stmt.where(User.id < cursor)
+        if cursor is not None:
+            c_ts, c_id = cursor
+            stmt = stmt.where(
+                or_(
+                    User.created_at < c_ts,
+                    and_(User.created_at == c_ts, User.id < c_id),
+                )
+            )
+        elif legacy_id_cursor is not None:
+            # 구 형식(bare UUID) 커서 — 배포 중 스크롤 호환. 정렬 키와 어긋난
+            # 조건이라 근사치지만, 거부하는 것보다 낫다.
+            stmt = stmt.where(User.id < legacy_id_cursor)
         stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())

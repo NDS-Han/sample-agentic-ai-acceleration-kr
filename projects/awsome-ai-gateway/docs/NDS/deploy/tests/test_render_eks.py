@@ -45,6 +45,8 @@ def test_overlay_owns_managed_keys(tmp_path):
     assert v["gatewayProxy"]["env"]["WEB_SEARCH_ENABLED"] == "true"
     assert v["notificationWorker"]["email"]["provider"] == "ses"
     assert v["adminApi"]["oidc"]["issuerUrl"].startswith("https://cognito-idp")
+    # audience 미설정이면 aud 검증이 꺼진다 — 명시 audience 없으면 client_id 폴백.
+    assert v["adminApi"]["oidc"]["audience"] == "cid"
     assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
     ann = v["ingress"]["annotations"]
     assert ann["alb.ingress.kubernetes.io/inbound-cidrs"] == "10.0.0.0/8"

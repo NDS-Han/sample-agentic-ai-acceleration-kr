@@ -19,6 +19,8 @@
 -- KEYS[1] = budget:{scope}:{<scope_id>}:<period>         -- usage counter
 -- KEYS[2] = budget:config:{scope}:{<scope_id>}           -- config (same hash tag)
 -- KEYS[3] = budget:pending:{scope}:{<scope_id>}:<req_id> -- 예약 마커
+-- KEYS[4] = budget:resvsum:{scope}:{<scope_id>}:{period} -- 미정산 예약 합계
+--           (마커 TTL 로 settle 이 no-op 되면 잔류 — 표시가 과소로 기는 방향)
 -- ARGV[1] = actual cost (USD, string decimal)
 -- ARGV[2] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
 --
@@ -60,6 +62,8 @@ local delta = actual - reserved
 
 redis.call('INCRBYFLOAT', usage_key, delta)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
+redis.call('INCRBYFLOAT', KEYS[4], -reserved)
+redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('DEL', marker_key)
 
 -- 논리적 이전값 = 현재 카운터에서 이 요청의 예약분을 뺀 값.

@@ -44,9 +44,9 @@ def _settle_resp(*, settled=True, threshold=None):
 
 def _dispatch_by_scope(scope_map: dict[str, bytes]):
     """eval side_effect — reserve 호출 시그니처는
-    (script, 3, usage_key, config_key, marker_key, scope, est, fallback, ttl)."""
+    (script, 4, usage_key, config_key, marker_key, resvsum_key, scope, est, fallback, ttl)."""
     async def _side(*args, **_kw):
-        scope = args[5]
+        scope = args[6]
         return scope_map[scope]
     return _side
 
@@ -94,7 +94,7 @@ async def test_reserve_user_reject_refunds_team_commit(mock_redis):
                 allowed=False, reserved=False, scope="user",
                 reason="user_budget_exceeded",
             ),
-        }[args[5]]
+        }[args[6]]
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=True)
@@ -107,9 +107,9 @@ async def test_reserve_user_reject_refunds_team_commit(mock_redis):
 
     settle_calls = [c for c in calls if c[0] == "-- settle"]
     assert len(settle_calls) == 1
-    # settle(script, 3, usage, config, marker, actual, fallback) — 팀 마커 + actual=0
+    # settle(script, 4, usage, config, marker, resvsum, actual, fallback)
     assert settle_calls[0][4] == "budget:pending:team:{t1}:req-1"
-    assert settle_calls[0][5] == "0"
+    assert settle_calls[0][6] == "0"
 
 
 @pytest.mark.asyncio
@@ -188,9 +188,9 @@ async def test_reserve_eval_failure_fail_open_with_refund(mock_redis):
         call_count["n"] += 1
         if args[0] == "-- settle":
             return _settle_resp()
-        if args[5] == "user":
+        if args[6] == "user":
             raise ConnectionError("redis hiccup")
-        return {"team": _resv_resp(scope="team")}[args[5]]
+        return {"team": _resv_resp(scope="team")}[args[6]]
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=True)
@@ -208,8 +208,8 @@ async def test_reserve_d_fallback_synthesized(mock_redis):
     seen: dict = {}
 
     async def _side(*args, **_kw):
-        seen[args[5]] = args
-        return _resv_resp(scope=args[5])
+        seen[args[6]] = args
+        return _resv_resp(scope=args[6])
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=False)
@@ -225,9 +225,9 @@ async def test_reserve_d_fallback_synthesized(mock_redis):
     )
     assert [s["scope"] for s in committed] == ["team", "user"]
     user_call = seen["user"]
-    fallback = json.loads(user_call[7])  # (script,3,k1,k2,k3,scope,est,fallback,ttl)
+    fallback = json.loads(user_call[8])  # (script,4,k1,k2,k3,k4,scope,est,fallback,ttl)
     assert fallback["limit_usd"] == "25"
-    assert committed[1]["fallback"] == user_call[7]
+    assert committed[1]["fallback"] == user_call[8]
 
 
 @pytest.mark.asyncio
@@ -239,9 +239,9 @@ async def test_settle_budget_returns_threshold_and_scope(mock_redis):
     svc = BudgetService()
     scopes = [
         {"scope": "team", "usage_key": "k", "config_key": "c",
-         "marker_key": "m1", "fallback": ""},
+         "marker_key": "m1", "resvsum_key": "r1", "fallback": ""},
         {"scope": "user", "usage_key": "k", "config_key": "c",
-         "marker_key": "m2", "fallback": ""},
+         "marker_key": "m2", "resvsum_key": "r2", "fallback": ""},
     ]
     triggered, scope = await svc.settle_budget(mock_redis, scopes, Decimal("1.5"))
     assert triggered == 90
@@ -262,8 +262,10 @@ async def test_settle_budget_eval_failure_continues(mock_redis):
     mock_redis.eval = AsyncMock(side_effect=_side)
     svc = BudgetService()
     scopes = [
-        {"scope": "team", "usage_key": "k", "config_key": "c", "marker_key": "m1"},
-        {"scope": "user", "usage_key": "k", "config_key": "c", "marker_key": "m2"},
+        {"scope": "team", "usage_key": "k", "config_key": "c",
+         "marker_key": "m1", "resvsum_key": "r1"},
+        {"scope": "user", "usage_key": "k", "config_key": "c",
+         "marker_key": "m2", "resvsum_key": "r2"},
     ]
     await svc.settle_budget(mock_redis, scopes, Decimal("1.5"))
     assert len(calls) == 2

@@ -19,6 +19,17 @@ from worker.batch_flusher import BatchFlusher
 from worker.schemas.cost_stream import CostStreamEntry
 
 
+def _insert_returning_exec(stmt, params=None):
+    """session.execute side_effect — INSERT ... RETURNING 에 실제 삽입된
+    request_id 를 돌려준다. 그 외(replay SELECT/UPSERT)는 기본 MagicMock."""
+    result = MagicMock()
+    if "RETURNING" in str(stmt):
+        result.scalar_one_or_none.return_value = (
+            params["request_id"] if isinstance(params, dict) else None
+        )
+    return result
+
+
 def _make_entry(
     request_id: str = "req-1",
     user_id: str = "00000000-0000-0000-0000-000000000001",
@@ -69,7 +80,17 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock()
+
+    async def _exec(stmt, params=None):
+        result = MagicMock()
+        if "RETURNING" in str(stmt):
+            # 행 단위 INSERT ... RETURNING — 실제 삽입된 것처럼 request_id 반환
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        return result
+
+    session.execute = AsyncMock(side_effect=_exec)
     session.commit = AsyncMock()
 
     session_factory = MagicMock(return_value=session)
@@ -87,29 +108,28 @@ async def test_flush_inserts_usage_and_upserts_budgets():
     flusher = BatchFlusher(session_factory=session_factory, redis=redis)
     await flusher.flush(entries)
 
-    # 4 session.execute 호출: 재처리 필터 SELECT + INSERT usage_logs
+    # 6 session.execute 호출: 재처리 필터 SELECT + INSERT × 3(행 단위, RETURNING)
     # + UPSERT user budget + UPSERT team budget
     #
     # ⚠️ 첫 호출이 재처리 필터여야 한다. budget_usages 는 **가산** UPSERT 라, 재처리된
     #    entry 를 걸러내지 않으면 사용자의 기록 사용액이 영구히 두 배가 된다
     #    (batch_flusher._filter_replays 주석 참조). 개수만 세면 그 SELECT 가 뒤로 밀려
     #    무의미해진 것을 잡지 못하므로 순서를 함께 못 박는다.
-    assert session.execute.await_count == 4
+    assert session.execute.await_count == 6
     assert session.commit.await_count == 1
     replay_sql = str(session.execute.await_args_list[0].args[0]).lower()
     assert "from usage.usage_logs" in replay_sql and "request_id" in replay_sql, (
         f"첫 호출이 재처리 필터 SELECT 가 아니다: {replay_sql[:120]}"
     )
 
-    # 3번째 호출 = user UPSERT — 합산된 cost (0.30)
-    user_call = session.execute.await_args_list[2]
+    # 마지막 두 호출 = user UPSERT, team UPSERT — 합산된 cost (0.30)
+    user_call = session.execute.await_args_list[4]
     user_params = user_call.args[1]
     assert len(user_params) == 1  # 단일 (user, period) 그룹
     assert user_params[0]["scope"] == "USER"
     assert user_params[0]["cost"] == "0.30"
 
-    # 4번째 호출 = team UPSERT
-    team_call = session.execute.await_args_list[3]
+    team_call = session.execute.await_args_list[5]
     team_params = team_call.args[1]
     assert team_params[0]["scope"] == "TEAM"
     assert team_params[0]["cost"] == "0.30"
@@ -121,7 +141,7 @@ async def test_threshold_triggered_publishes_notification():
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock()
+    session.execute = AsyncMock(side_effect=_insert_returning_exec)
     session.commit = AsyncMock()
     session_factory = MagicMock(return_value=session)
 
@@ -153,7 +173,7 @@ async def test_daily_counter_pipeline_uses_hash_tag():
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
-    session.execute = AsyncMock()
+    session.execute = AsyncMock(side_effect=_insert_returning_exec)
     session.commit = AsyncMock()
     session_factory = MagicMock(return_value=session)
 
@@ -180,24 +200,28 @@ async def test_daily_counter_pipeline_uses_hash_tag():
 def _mock_session_with_cumulative(
     cumulative: object, scope_captures: list | None = None
 ) -> MagicMock:
-    """flush 호출 순서에 맞춘 session.execute side_effect.
+    """SQL 내용에 맞춘 session.execute side_effect.
 
-    호출 순서: replay SELECT → INSERT usage_logs → UPSERT user → UPSERT team
-    → (threshold 있으면) cumulative SELECT. 마지막만 scalar_one_or_none 설정.
+    INSERT ... RETURNING 은 request_id 를, 누적 SELECT 는 cumulative 를,
+    replay SELECT 는 빈 결과를 돌려준다.
     """
-    replay_result = MagicMock()
-    replay_result.__iter__ = MagicMock(return_value=iter([]))
-    writes = MagicMock()
-    cumulative_result = MagicMock()
-    cumulative_result.scalar_one_or_none = MagicMock(return_value=cumulative)
+
+    async def _exec(stmt, params=None):
+        sql = str(stmt)
+        result = MagicMock()
+        if "RETURNING" in sql:
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        elif "used_usd" in sql:
+            result.scalar_one_or_none.return_value = cumulative
+        return result
 
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     session.commit = AsyncMock()
-    session.execute = AsyncMock(
-        side_effect=[replay_result, writes, writes, writes, cumulative_result]
-    )
+    session.execute = AsyncMock(side_effect=_exec)
     return MagicMock(return_value=session)
 
 
@@ -282,19 +306,24 @@ def _mock_session_with_replays(existing_ids: set[str]) -> MagicMock:
     호출 순서: replay SELECT → INSERT → UPSERT user → UPSERT team (+ 앱별 있으면
     1건 더). execute 가 MagicMock iterator 를 돌려주도록 세팅한다.
     """
-    replay_result = MagicMock()
-    replay_result.__iter__ = MagicMock(
-        return_value=iter([(rid,) for rid in existing_ids])
-    )
-    writes = MagicMock()
+    async def _exec(stmt, params=None):
+        sql = str(stmt)
+        result = MagicMock()
+        if "RETURNING" in sql:
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        elif "request_id" in sql:
+            result.__iter__ = MagicMock(
+                return_value=iter([(rid,) for rid in existing_ids])
+            )
+        return result
 
     session = AsyncMock()
     session.__aenter__ = AsyncMock(return_value=session)
     session.__aexit__ = AsyncMock(return_value=None)
     session.commit = AsyncMock()
-    session.execute = AsyncMock(
-        side_effect=[replay_result, writes, writes, writes, writes]
-    )
+    session.execute = AsyncMock(side_effect=_exec)
     return MagicMock(return_value=session)
 
 

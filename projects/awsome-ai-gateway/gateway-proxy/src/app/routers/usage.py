@@ -123,12 +123,18 @@ async def usage_me(
         try:
             budget_config_raw = await redis.get(f"budget:config:user:{{{user_id}}}")
             budget_usage_raw = await redis.get(f"budget:user:{{{user_id}}}:{period}")
+            # usage 카운터는 in-flight 예약(최악비용 추정치)을 포함한 "확약액"이다 —
+            # enforce 단계의 하드캡에는 그 값이 맞지만, 사용자에게 보여주는 실지출은
+            # 미정산 예약 합계(resvsum)를 빼야 잔액이 위아래로 튀지 않는다.
+            resvsum_raw = await redis.get(f"budget:resvsum:user:{{{user_id}}}:{period}")
             if budget_config_raw:
                 import json
 
                 config = json.loads(budget_config_raw)
                 limit = Decimal(str(config.get("limit_usd", 0)))
                 used = Decimal(budget_usage_raw.decode() if budget_usage_raw else "0")
+                resv = Decimal(resvsum_raw.decode() if resvsum_raw else "0")
+                used = max(Decimal("0"), used - resv)
                 remaining = limit - used
                 pct = float((used / limit * 100) if limit > 0 else 0)
                 budget_info = UsageBudgetInfo(

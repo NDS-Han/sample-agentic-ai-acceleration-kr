@@ -18,14 +18,16 @@ import argparse
 import asyncio
 import os
 import sys
-from datetime import datetime, timedelta, timezone, date
+from datetime import datetime, date
+from zoneinfo import ZoneInfo
 
 import asyncpg
 import redis.asyncio as aioredis
 
-# KST = UTC+9 고정 오프셋. 이 스크립트는 standalone 실행이라 gateway-proxy 의
-# app.periods 를 import 할 수 없으므로 같은 상수를 둔다(두 곳을 함께 바꿀 것).
-KST = timezone(timedelta(hours=9))
+# gateway-proxy 의 REPORTING_TIMEZONE 과 동일한 env 로 읽는다 — 고정 +9 오프셋은
+# 리포팅 TZ 를 바꾼 배포(또는 DST 있는 존)에서 다른 버킷으로 복구한다.
+REPORTING_TZ_NAME = os.environ.get("REPORTING_TIMEZONE", "Asia/Seoul")
+KST = ZoneInfo(REPORTING_TZ_NAME)
 
 
 # ── 환경 변수 ──────────────────────────────────────────────────────────────
@@ -92,20 +94,33 @@ async def restore(
             )
             used_from_db = float(row2["total"]) if row2 else 0.0
 
-        if used_from_db > 0:
+        # 미정산 in-flight 예약 합 — budget_usages 는 정산된 실비만 알고,
+        # 예약은 budget:pending:* 마커에 살아있다. 카운터만 유실된 경우
+        # 마커분을 다시 얹지 않으면 settle 이 (실비-예약치) 델타로 과소 정산한다.
+        pending = 0.0
+        async for k in r.scan_iter(match=f"budget:pending:user:{{{uid}}}:*"):
+            v = await r.get(k)
+            if v:
+                pending += float(v)
+        resvsum_key = f"budget:resvsum:user:{{{uid}}}:{period}"
+
+        if used_from_db > 0 or pending > 0:
+            restore_val = used_from_db + pending
             if existing:
                 existing_val = float(existing)
-                if abs(existing_val - used_from_db) < 0.001:
+                if abs(existing_val - restore_val) < 0.001:
                     print(f"[{uid[:8]}] budget OK: ${existing_val:.4f} (no change needed)")
                 else:
-                    print(f"[{uid[:8]}] budget MISMATCH: Redis=${existing_val:.4f} DB=${used_from_db:.4f} → restoring from DB")
+                    print(f"[{uid[:8]}] budget MISMATCH: Redis=${existing_val:.4f} DB=${used_from_db:.4f} +pending=${pending:.4f} → restoring")
                     if not dry_run:
-                        await r.set(budget_key, str(used_from_db))
+                        await r.set(budget_key, str(restore_val))
+                        await r.set(resvsum_key, str(pending))
                         restored_count += 1
             else:
-                print(f"[{uid[:8]}] budget MISSING → restoring ${used_from_db:.4f}")
+                print(f"[{uid[:8]}] budget MISSING → restoring ${restore_val:.4f} (pending=${pending:.4f})")
                 if not dry_run:
-                    await r.set(budget_key, str(used_from_db))
+                    await r.set(budget_key, str(restore_val))
+                    await r.set(resvsum_key, str(pending))
                     restored_count += 1
 
         # ── 2. 일별 모델별 카운터 복구 ────────────────────────────────
@@ -125,13 +140,13 @@ async def restore(
               COUNT(*)                                  AS requests
             FROM usage.usage_logs
             -- ⚠️ DATE(requested_at) 는 **DB 세션 TZ**(pod 은 UTC)로 자른다. 일별
-            -- 카운터는 KST 일자 키이므로(daily_aggregator.py:43 과 같은 규칙)
-            -- 명시적으로 KST 로 변환해야 복구값이 키와 같은 구간을 담는다.
+            -- 카운터는 리포팅 TZ 일자 키이므로(daily_aggregator.py:43 과 같은 규칙)
+            -- 명시적으로 같은 TZ 로 변환해야 복구값이 키와 같은 구간을 담는다.
             WHERE user_id = $1::uuid
-              AND DATE(requested_at AT TIME ZONE 'Asia/Seoul') = $2::date
+              AND DATE(requested_at AT TIME ZONE $3) = $2::date
             GROUP BY model_alias
             """,
-            uid, date.fromisoformat(today),
+            uid, date.fromisoformat(today), REPORTING_TZ_NAME,
         )
 
         total_cost = 0.0

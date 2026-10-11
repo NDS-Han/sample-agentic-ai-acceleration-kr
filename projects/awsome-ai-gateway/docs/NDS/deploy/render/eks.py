@@ -116,7 +116,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
     # ── OIDC — adminApi/gatewayProxy/adminUi 세 곳에 동일 계약 ───────────────
     if cfg.oidc.enabled:
         claim = "cognito:groups" if "cognito" in cfg.oidc.provider_name else "groups"
+        # ⚠️ audience 미설정이면 verifier 가 aud 검증을 끈다 — 같은 user pool 의
+        #    다른 app client 용 id_token 도 issuer 만 맞으면 통과한다. Cognito 의
+        #    aud 는 app client_id 라 명시가 없으면 client_id 로 채운다.
         o = {"enabled": True, "issuerUrl": cfg.oidc.issuer_url,
+             "audience": cfg.oidc.audience or cfg.oidc.client_id,
              "providerName": cfg.oidc.provider_name, "groupsClaim": claim,
              "requiredGroup": cfg.oidc.required_group}
         v.setdefault("adminApi", {})["oidc"] = dict(o)

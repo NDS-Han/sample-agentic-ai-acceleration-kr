@@ -302,8 +302,9 @@ class CostRecorder:
                 if resv:
                     raw = await redis.eval(
                         settle_script,
-                        3,
+                        4,
                         resv["usage_key"], resv["config_key"], resv["marker_key"],
+                        resv["resvsum_key"],
                         str(cost_usd), resv.get("fallback") or "",
                     )
                 else:
@@ -334,8 +335,9 @@ class CostRecorder:
                     if resv:
                         team_raw = await redis.eval(
                             settle_script,
-                            3,
+                            4,
                             resv["usage_key"], resv["config_key"], resv["marker_key"],
+                            resv["resvsum_key"],
                             str(cost_usd), resv.get("fallback") or "",
                         )
                     else:
@@ -390,8 +392,9 @@ class CostRecorder:
                     if resv:
                         await redis.eval(
                             settle_script,
-                            3,
+                            4,
                             resv["usage_key"], resv["config_key"], resv["marker_key"],
+                            resv["resvsum_key"],
                             str(cost_usd), resv.get("fallback") or "",
                         )
                     else:

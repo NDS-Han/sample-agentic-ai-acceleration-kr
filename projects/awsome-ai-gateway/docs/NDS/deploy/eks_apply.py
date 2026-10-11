@@ -114,18 +114,34 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
 
     issuer = outs.get("cognito_issuer_url")
     if issuer and not cfg.oidc.enabled:
-        # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존 스크립트 계약.
-        # 단 render 는 adminUi DEV_LOGIN_ENABLED=true 로 내므로 admin-api=OIDC /
-        # admin-ui=dev-login 의 비일관 상태가 된다 — 의도면 yaml 에 oidc 를 채우라고 경고.
+        # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존
+        # 스크립트 계약. 단 admin-ui 까지 같은 OIDC 로 맞추지 않으면 admin-api=OIDC /
+        # admin-ui=dev-login 의 비일관 배포가 된다 — terraform output 으로 양쪽을
+        # 함께 배선하고, client_id 가 없으면 일관 상태를 만들 수 없으니 실패시킨다.
+        client_id = outs.get("cognito_client_id")
+        if not client_id:
+            raise SystemExit(
+                "terraform 이 Cognito 를 만들었지만 cognito_client_id output 이 "
+                "없습니다 — 일관된 OIDC 상태를 만들 수 없습니다. gateway.yaml 의 "
+                "oidc: issuer_url/client_id/authorize_url/token_url 을 채우세요"
+            )
+        hosted = outs.get("cognito_hosted_ui_domain")
         print("⚠ gateway.yaml 의 oidc 가 비어 있는데 terraform 이 Cognito 를 만들어 "
-              "둔 상태입니다 — admin-api 에 OIDC 를 강제 활성화합니다 "
-              "(admin-ui 는 dev-login 모드로 렌더됨 — 의도가 아니면 gateway.yaml 에 "
-              "oidc: issuer_url/client_id/authorize_url/token_url 을 채우세요)",
+              "둔 상태입니다 — terraform output 으로 admin-api/admin-ui 양쪽에 OIDC 를 "
+              "배선합니다 (의도가 아니면 gateway.yaml 에 oidc: 를 채우세요)",
               file=sys.stderr)
         args += ["--set", "adminApi.oidc.enabled=true",
                  "--set", f"adminApi.oidc.issuerUrl={issuer}",
+                 "--set", f"adminApi.oidc.audience={client_id}",
                  "--set", "adminApi.oidc.providerName=oidc:cognito",
-                 "--set", "adminApi.oidc.groupsClaim=cognito:groups"]
+                 "--set", "adminApi.oidc.groupsClaim=cognito:groups",
+                 "--set", "adminUi.env.DEV_LOGIN_ENABLED=false",
+                 "--set", f"adminUi.env.OIDC_CLIENT_ID={client_id}"]
+        if hosted:
+            args += ["--set",
+                     f"adminUi.env.OIDC_AUTHORIZE_URL=https://{hosted}/oauth2/authorize",
+                     "--set",
+                     f"adminUi.env.OIDC_TOKEN_URL=https://{hosted}/oauth2/token"]
 
     if cfg.features.body_logging:
         if outs.get("body_log_firehose_stream"):

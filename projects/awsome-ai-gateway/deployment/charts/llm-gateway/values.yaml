@@ -661,7 +661,9 @@ adminApi:
   oidc:
     enabled: false  # values-eks-fargate-{dev,prod}.yaml 에서 true 로 override
     issuerUrl: ""              # OIDC_ISSUER_URL — Cognito issuer URL
-    audience: ""               # OIDC_AUDIENCE — Cognito 면 빈 값 (access_token 에 aud 없음)
+    audience: ""               # OIDC_AUDIENCE — Cognito app client_id 권장. id_token 은 aud 를
+                               # 가지므로 비우면 aud 검증이 꺼져 같은 pool 의 다른 app client 토큰도
+                               # 통과한다. install 경로가 client_id 로 채워 넣는다.
     providerName: "oidc"       # OIDC_PROVIDER_NAME — 예: "oidc:cognito"
     discoveryUrlOverride: ""   # OIDC_DISCOVERY_URL_OVERRIDE — 보통 비워둠
     jwksCacheTtlSeconds: 3600

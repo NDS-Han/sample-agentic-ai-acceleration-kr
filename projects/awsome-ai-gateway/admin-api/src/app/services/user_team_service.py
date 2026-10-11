@@ -19,6 +19,7 @@ from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import Department, Team, User, UserAllowedClient, UserRole
 from app.models.budget import BudgetScope
 from app.models.model import RateLimitScope, UserAllowedModel
+from app.repositories._cursor import decode_cursor
 from app.repositories.budget_repository import BudgetRepository
 from app.repositories.model_repository import RateLimitConfigRepository
 from app.repositories.user_repository import UserRepository
@@ -461,13 +462,18 @@ class UserTeamService:
         limit: int = 50,
     ) -> tuple[list[UserResponse], bool]:
         repo = UserRepository(session)
-        cursor_uuid = uuid.UUID(cursor) if cursor else None
+        # 복합 커서(created_at|id) 우선, 구 형식(bare UUID)은 레거시 조건으로 폴백.
+        decoded = decode_cursor(cursor) if cursor else None
+        legacy_uuid = None
+        if cursor and decoded is None:
+            legacy_uuid = uuid.UUID(cursor)
         users = await repo.list_users(
             team_id=team_id,
             department_id=department_id,
             is_active=is_active,
             email=email,
-            cursor=cursor_uuid,
+            cursor=decoded,
+            legacy_id_cursor=legacy_uuid,
             limit=limit + 1,
         )
         has_more = len(users) > limit

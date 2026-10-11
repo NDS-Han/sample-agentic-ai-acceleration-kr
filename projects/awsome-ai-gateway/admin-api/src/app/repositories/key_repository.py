@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import uuid
+from datetime import datetime
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import KeyStatus, VirtualKey
+from app.repositories.user_repository import _escape_like
 
 
 class KeyRepository:
@@ -108,24 +110,35 @@ class KeyRepository:
         team_id: uuid.UUID | None = None,
         status: KeyStatus | None = None,
         email: str | None = None,
-        cursor: uuid.UUID | None = None,
+        cursor: tuple[datetime, uuid.UUID] | None = None,
+        legacy_id_cursor: uuid.UUID | None = None,
         limit: int = 50,
     ) -> list[VirtualKey]:
         from app.models.auth import User
 
-        stmt = select(VirtualKey).order_by(VirtualKey.created_at.desc())
+        # 커서 조건과 정렬 키 일치(created_at + id 타이브레이크) — list_users 참조.
+        stmt = select(VirtualKey).order_by(VirtualKey.created_at.desc(), VirtualKey.id.desc())
         if user_id:
             stmt = stmt.where(VirtualKey.user_id == user_id)
         if status:
             stmt = stmt.where(VirtualKey.status == status)
-        if cursor:
-            stmt = stmt.where(VirtualKey.id < cursor)
+        if cursor is not None:
+            c_ts, c_id = cursor
+            stmt = stmt.where(
+                or_(
+                    VirtualKey.created_at < c_ts,
+                    and_(VirtualKey.created_at == c_ts, VirtualKey.id < c_id),
+                )
+            )
+        elif legacy_id_cursor is not None:
+            stmt = stmt.where(VirtualKey.id < legacy_id_cursor)
         if team_id or email:
             stmt = stmt.join(User, VirtualKey.user_id == User.id)
             if team_id:
                 stmt = stmt.where(User.team_id == team_id)
             if email:
-                stmt = stmt.where(User.email.ilike(f"%{email}%"))
+                # list_users와 달리 키 목록은 부분검색 — ilike 와일드카드 이스케이프.
+                stmt = stmt.where(User.email.ilike(f"%{_escape_like(email)}%", escape="\\"))
         stmt = stmt.limit(limit)
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -150,7 +163,7 @@ class KeyRepository:
             if team_id:
                 stmt = stmt.where(User.team_id == team_id)
             if email:
-                stmt = stmt.where(User.email.ilike(f"%{email}%"))
+                stmt = stmt.where(User.email.ilike(f"%{_escape_like(email)}%", escape="\\"))
         result = await self._session.execute(stmt)
         return int(result.scalar_one())
 

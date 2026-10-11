@@ -103,14 +103,20 @@ class ValidationError(Exception):
 
 def validate_sql(sql: str) -> sqlglot.Expression:
     """1, 2, 3 단계 검증 — sqlglot AST + 화이트리스트."""
-    # 1. parse
+    # 1. parse — 단일 문장만 허용. parse_one 은 첫 문장만 돌려주므로
+    #    "SELECT 1; DROP ..." 의 두 번째 문장을 못 본다. 실행은 AST 재렌더라
+    #    실무적으로는 안전하지만, 방어가 재렌더 동작 하나에만 기대지 않게 명시 가드.
     try:
-        ast = sqlglot.parse_one(sql, dialect="postgres")
+        statements = sqlglot.parse(sql, dialect="postgres")
     except Exception as e:
         raise ValidationError(f"SQL parse error: {e}") from e
 
-    if ast is None:
+    statements = [s for s in statements if s is not None]
+    if not statements:
         raise ValidationError("Empty SQL")
+    if len(statements) > 1:
+        raise ValidationError("Only a single SQL statement is permitted")
+    ast = statements[0]
 
     # 2. 허용된 statement type 만 — SELECT 또는 WITH (CTE)
     if not isinstance(ast, (exp.Select, exp.With, exp.Subquery)):

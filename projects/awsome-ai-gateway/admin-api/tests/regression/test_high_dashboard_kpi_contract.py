@@ -184,25 +184,28 @@ def test_budget_summary_does_not_truncate_the_user_list():
 
 
 def test_cursor_pagination_is_not_used_as_the_workaround():
-    """커서 페이징으로 우회하는 것도 금지 — 정렬 키와 커서 키가 다르다.
+    """예산 요약은 커서 페이징으로 우회하지 않는다 — 전수 조회가 정답이다.
 
-    `list_users` 는 `order_by(created_at desc)` 인데 커서 조건이 `User.id < cursor` 다.
-    id 순서와 created_at 순서는 무관하므로 그 조합은 행을 건너뛰거나 같은 페이지를
-    반복한다. 이 테스트는 그 함정으로 '고쳤다' 고 착각하는 것을 막는다.
+    과거 `list_users` 는 `order_by(created_at desc)` 인데 커서 조건이
+    `User.id < cursor` 여서 2페이지부터 행을 건너뛰었다. 이제 커서는
+    `(created_at, id)` 복합 키라 정확하지만, 요약은 어차피 전수가 필요하므로
+    페이지 순회는 왕복만 늘린다 — 이 가드는 그 계약을 유지한다.
     """
     import inspect
 
     from app.repositories.user_repository import UserRepository
     from app.services.budget_service import BudgetService
 
-    # 전제 확인 — 정렬 키와 커서 키가 실제로 다른가(다르면 커서 사용 금지가 정당하다)
+    # 전제 확인 — 커서 조건이 정렬 키와 일치하는 복합 키인가
     lu = inspect.getsource(UserRepository.list_users)
-    assert "order_by(User.created_at.desc())" in lu, "정렬 키가 바뀌었다 — 이 가드 재검토"
-    assert "User.id < cursor" in lu, "커서 키가 바뀌었다 — 이 가드 재검토"
+    assert "order_by(User.created_at.desc(), User.id.desc())" in lu, (
+        "정렬 키가 바뀌었다 — 커서 조건과 함께 재검토"
+    )
+    assert "User.created_at < c_ts" in lu, "커서 조건이 바뀌었다 — 정렬 키와 재검토"
 
     src = inspect.getsource(BudgetService.get_budget_summary)
     assert "cursor=" not in src, (
-        "예산 요약이 커서 페이징을 쓴다 — created_at 정렬에 id 커서를 섞으면 행이 누락된다"
+        "예산 요약이 커서 페이징을 쓴다 — 요약은 전수 조회가 맞다"
     )
 
 

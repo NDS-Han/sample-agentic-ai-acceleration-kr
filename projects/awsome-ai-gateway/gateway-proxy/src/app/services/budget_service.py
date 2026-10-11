@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import structlog
 from sqlalchemy import select
@@ -202,6 +202,29 @@ def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetSta
 class BudgetService:
     """예산 정책 확인 서비스."""
 
+    @staticmethod
+    async def _pending_reservation_sum(redis, pattern: str) -> Decimal:
+        """살아있는 예약 마커(budget:pending:*) 값의 합.
+
+        카운터 유실 복원 시 DB 실비에 미정산 예약을 다시 얹기 위한 최선 노력
+        조회다 — SCAN 은 best-effort 라, 마커/카운터가 동시에 유실된 경우에는
+        0 을 돌려주고 settle 은 마커 부재로 안전하게 no-op 이 된다.
+        """
+        total = Decimal("0")
+        try:
+            async for key in redis.scan_iter(match=pattern, count=200):
+                val = await redis.get(key)
+                if val is None:
+                    continue
+                try:
+                    total += Decimal(str(val))
+                except InvalidOperation:
+                    continue
+        except Exception:
+            logger.exception("pending_reservation_scan_failed", pattern=pattern)
+            return Decimal("0")
+        return total
+
     async def check_budget(
         self,
         redis,
@@ -288,12 +311,24 @@ class BudgetService:
                         used_from_db = total_row
 
                     if used_from_db and used_from_db > 0:
-                        await redis.set(user_key, str(used_from_db))
+                        # ⚠️ budget_usages 는 **정산된 실비**만 안다 — in-flight 최악비용
+                        #    예약은 모른다. 카운터만 유실되고 예약 마커가 남아 있으면
+                        #    settle 이 (실비 - 예약치) 를 적용해 한 번도 더해지지 않은
+                        #    예약치를 빼버린다(과소 계상). 복원 시 살아있는 마커 합을
+                        #    다시 얹고 resvsum 도 그 합으로 재설정한다.
+                        pending = await self._pending_reservation_sum(
+                            redis, f"budget:pending:user:{{{user_id}}}:*"
+                        )
+                        await redis.set(user_key, str(Decimal(str(used_from_db)) + pending))
+                        await redis.set(
+                            f"budget:resvsum:user:{{{user_id}}}:{period}", str(pending)
+                        )
                         logger.info(
                             "budget_counter_restored",
                             user_id=user_id,
                             period=period,
                             used=str(used_from_db),
+                            pending_reservations=str(pending),
                         )
 
                     # ── 앱별 카운터도 복원한다 ──
@@ -309,13 +344,23 @@ class BudgetService:
                         app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
                         if await redis.exists(app_key):
                             continue
-                        await redis.set(app_key, str(used))
+                        # 총합 키와 같은 이유로 in-flight 예약을 재적용한다.
+                        pending = await self._pending_reservation_sum(
+                            redis,
+                            f"budget:pending:client:{{{user_id}}}:{client_name}:*",
+                        )
+                        await redis.set(app_key, str(Decimal(str(used)) + pending))
+                        await redis.set(
+                            f"budget:resvsum:user:{{{user_id}}}:{client_name}:{period}",
+                            str(pending),
+                        )
                         logger.info(
                             "budget_app_counter_restored",
                             user_id=user_id,
                             client=client_name,
                             period=period,
                             used=str(used),
+                            pending_reservations=str(pending),
                         )
                 except Exception:
                     logger.exception("budget_counter_restore_failed", user_id=user_id)
@@ -523,11 +568,15 @@ class BudgetService:
                     })
 
         # 평가 순서는 §6-1 과 같다: 1) team 2) user 3) client.
-        scope_specs: list[tuple[str, str, str, str]] = [
+        # resvsum 키는 usage 키와 같은 hash tag — 미정산 예약 합계를 따로 유지해
+        # 표시 경로(/v1/usage/me)가 "확약액"이 아닌 실지출을 보여주게 한다.
+        scope_specs: list[tuple[str, str, str, str, str]] = [
             ("team", team_usage_key, team_config_key,
-             f"budget:pending:team:{{{team_id}}}:{request_id}"),
+             f"budget:pending:team:{{{team_id}}}:{request_id}",
+             f"budget:resvsum:team:{{{team_id}}}:{period}"),
             ("user", user_usage_key, user_config_key,
-             f"budget:pending:user:{{{user_id}}}:{request_id}"),
+             f"budget:pending:user:{{{user_id}}}:{request_id}",
+             f"budget:resvsum:user:{{{user_id}}}:{period}"),
         ]
         if client in PER_APP_BUDGET_CLIENTS:
             scope_specs.append((
@@ -535,14 +584,15 @@ class BudgetService:
                 f"budget:user:{{{user_id}}}:{client}:{period}",
                 f"budget:config:user:{{{user_id}}}:{client}",
                 f"budget:pending:client:{{{user_id}}}:{client}:{request_id}",
+                f"budget:resvsum:user:{{{user_id}}}:{client}:{period}",
             ))
 
         committed: list[dict] = []
-        for scope, usage_key, config_key, marker_key in scope_specs:
+        for scope, usage_key, config_key, marker_key, resvsum_key in scope_specs:
             fallback = user_fallback if scope == "user" else ""
             try:
                 raw = await redis.eval(
-                    script, 3, usage_key, config_key, marker_key,
+                    script, 4, usage_key, config_key, marker_key, resvsum_key,
                     scope, est_str, fallback, marker_ttl,
                 )
             except Exception:
@@ -580,6 +630,7 @@ class BudgetService:
                     "usage_key": usage_key,
                     "config_key": config_key,
                     "marker_key": marker_key,
+                    "resvsum_key": resvsum_key,
                     "fallback": fallback,
                 })
 
@@ -602,8 +653,9 @@ class BudgetService:
         for s in scopes:
             try:
                 raw = await redis.eval(
-                    script, 3,
+                    script, 4,
                     s["usage_key"], s["config_key"], s["marker_key"],
+                    s["resvsum_key"],
                     str(actual), s.get("fallback") or "",
                 )
                 result = json.loads(raw)

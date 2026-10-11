@@ -68,6 +68,12 @@ _INSERT_USAGE_LOGS = text(
         :client, :context_tier
     )
     ON CONFLICT (request_id) DO NOTHING
+    -- ⚠️ RETURNING 이 없으면 "ON CONFLICT 로 건너뛴" 행과 "실제 삽입된" 행을
+    --    구별할 수 없다. budget_usages 가산 UPSERT 는 실제 삽입된 행만 더해야 한다 —
+    --    _filter_replays 의 SELECT-then-INSERT 창에서 두 소비자가 같은 request_id 를
+    --    "없음"으로 읽으면, INSERT 는 한쪽만 성공하지만 UPSERT 는 둘 다 더해 영구
+    --    이중청구가 된다. RETURNING 기준으로 가산하면 이 창이 완전히 닫힌다.
+    RETURNING request_id
     """
 )
 
@@ -243,10 +249,14 @@ class BatchFlusher:
                     logger.info("batch_all_replays_skipped", batch_size=len(entries))
                     await session.commit()
                     return
-                await self._insert_usage_logs(session, fresh)
-                await self._upsert_budget_usages(session, fresh)
+                inserted_ids = await self._insert_usage_logs(session, fresh)
+                # ⚠️ 가산 UPSERT 는 INSERT 가 **실제로 성공한** 행만 — SELECT-then-INSERT
+                #    창에서 다른 소비자가 먼저 같은 request_id 를 커밋했으면 우리 INSERT 는
+                #    no-op(RETURNING 없음)인데, 그 행까지 더하면 이중청구다.
+                written = [e for e in fresh if e.request_id in inserted_ids]
+                await self._upsert_budget_usages(session, written)
                 await session.commit()
-                recorded = fresh
+                recorded = written
         except IntegrityError as ie:
             logger.warning(
                 "batch_integrity_error_fallback_per_row",
@@ -296,11 +306,13 @@ class BatchFlusher:
                     if not await _filter_replays(session, [e]):
                         await session.commit()
                         continue
-                    await self._insert_usage_logs(session, [e])
-                    await self._upsert_budget_usages(session, [e])
+                    inserted_ids = await self._insert_usage_logs(session, [e])
+                    if e.request_id in inserted_ids:
+                        await self._upsert_budget_usages(session, [e])
+                        written.append(e)
                     await session.commit()
-                    written.append(e)
             except IntegrityError as ie:
+                # 영구 오류(FK 위반 등)만 스킵 — 재시도해도 같은 결과라 ACK 해도 된다.
                 skipped += 1
                 logger.warning(
                     "row_skipped_integrity_error",
@@ -308,11 +320,10 @@ class BatchFlusher:
                     user_id=e.user_id,
                     reason=str(ie)[:120],
                 )
-            except Exception:
-                skipped += 1
-                logger.exception(
-                    "row_skipped_unexpected_error", request_id=e.request_id
-                )
+            # ⚠️ IntegrityError 외(직렬화 실패·데드락·일시적 DB 끊김)는 전파한다.
+            #    여기서 삼키고 호출자가 XACK 하면 그 비용은 **영구 유실**(미청구)이다.
+            #    전파하면 배치가 unacked 로 남아 PEL reclaim 으로 재처리되고,
+            #    이미 커밋된 앞 행은 _filter_replays 가 걸러내 이중계상되지 않는다.
         if skipped:
             logger.info(
                 "per_row_flush_done",
@@ -324,9 +335,17 @@ class BatchFlusher:
 
     async def _insert_usage_logs(
         self, session: AsyncSession, entries: list[CostStreamEntry]
-    ) -> None:
-        params = [
-            {
+    ) -> set[str]:
+        """usage_logs INSERT 후 **실제로 삽입된** request_id 집합을 반환.
+
+        행 단위 INSERT 를 쓰는 이유: asyncpg executemany 는 RETURNING 행을
+        돌려주지 못해 bulk + RETURNING 조합이 불가하다. 배치 크기(수십~수백)
+        대비 왕복 비용은 감내 범위이고, 이 반환값이 budget_usages 이중가산의
+        마지막 방어선이다(SELECT-then-INSERT 창 — 파일 상단 주석 참조).
+        """
+        inserted: set[str] = set()
+        for e in entries:
+            params = {
                 "request_id": e.request_id,
                 "user_id": e.user_id,
                 "team_id": e.team_id,
@@ -356,9 +375,12 @@ class BatchFlusher:
                 "client": e.client,
                 "context_tier": e.context_tier,
             }
-            for e in entries
-        ]
-        await session.execute(_INSERT_USAGE_LOGS, params)
+            row_id = (
+                await session.execute(_INSERT_USAGE_LOGS, params)
+            ).scalar_one_or_none()
+            if row_id is not None:
+                inserted.add(row_id)
+        return inserted
 
     async def _upsert_budget_usages(
         self, session: AsyncSession, entries: list[CostStreamEntry]

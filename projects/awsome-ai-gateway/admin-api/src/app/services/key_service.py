@@ -23,6 +23,7 @@ from app.core.db import PENDING_REDIS_KEY, drain_pending_redis, enqueue_redis_pu
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import KeyStatus, User, VirtualKey
+from app.repositories._cursor import decode_cursor
 from app.repositories.key_repository import KeyRepository
 from app.repositories.model_repository import TeamAllowedModelRepository
 from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
@@ -529,13 +530,17 @@ class KeyService:
         limit: int = 50,
     ) -> tuple[list[KeyResponse], bool]:
         repo = KeyRepository(session)
-        cursor_uuid = uuid.UUID(cursor) if cursor else None
+        decoded = decode_cursor(cursor) if cursor else None
+        legacy_uuid = None
+        if cursor and decoded is None:
+            legacy_uuid = uuid.UUID(cursor)
         keys = await repo.list_keys(
             user_id=user_id,
             team_id=team_id,
             status=status,
             email=email,
-            cursor=cursor_uuid,
+            cursor=decoded,
+            legacy_id_cursor=legacy_uuid,
             limit=limit + 1,
         )
         has_more = len(keys) > limit

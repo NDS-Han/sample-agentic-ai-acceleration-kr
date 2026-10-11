@@ -97,6 +97,12 @@ class Settings(BaseSettings):
     # (admin-ui 는 /api/* 자체 프록시로 same-origin 접근하므로 배포 환경은 불필요).
     CORS_ALLOW_ORIGINS: Annotated[list[str], NoDecode] = []
 
+    # 허용 Host 헤더 목록. 비어 있으면(기본) 검사하지 않는다 — ALB/Ingress 가 Host 를
+    # 덮어쓰는 배포가 정상 경로이고, 목록이 틀리면 관리 화면 전체가 400 이 되므로
+    # opt-in. ALB 규칙이 제거됐을 때 Host 스푸핑 기반 리다이렉트/캐시 키 오염을
+    # 막는 심층 방어다. 와일드카드 `*.example.com` 도 Starlette 규칙대로 지원.
+    TRUSTED_HOSTS: Annotated[list[str], NoDecode] = []
+
     # ── Internal endpoints (/internal/*) ──
     # ⚠️ 공유 시크릿 게이트. admin-api 는 ALB 로 전 경로가 공개 노출되므로
     #    `/internal/*`(ops/test)는 인증 없이 열리면 안 된다 — dev 에서

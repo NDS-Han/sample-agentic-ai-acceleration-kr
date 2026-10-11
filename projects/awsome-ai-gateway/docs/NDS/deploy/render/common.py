@@ -82,5 +82,9 @@ def write_env_file(path: Path, env: dict[str, str], header: str) -> None:
     # write_text()+chmod 는 시크릿이 잠깐 umask 권한(0644)으로 노출되는
     # TOCTOU 창이 있다. 처음부터 0600 으로 생성한다.
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # os.open 의 mode 는 신규 생성에만 적용 — 기존 파일(0644 로 남은 재렌더,
+    # cp 로 가져온 백업)은 O_TRUNC 로 내용만 덮어 퍼미션이 그대로다. 무조건
+    # fchmod 해서 시크릿 파일이 0600 아래에 있음을 보장한다.
+    os.fchmod(fd, 0o600)
     with os.fdopen(fd, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
