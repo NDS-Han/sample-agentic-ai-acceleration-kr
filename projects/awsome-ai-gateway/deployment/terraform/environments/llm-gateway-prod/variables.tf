@@ -242,6 +242,7 @@ variable "bedrock_allowed_model_arns" {
     # 프로파일 부재). 실측으로 fable-5 는 이 목록에서 AccessDenied 유지됨을 확인했다.
     "arn:aws:bedrock:*::foundation-model/anthropic.claude-opus-5*",
     "arn:aws:bedrock:*::foundation-model/anthropic.claude-sonnet-5*",
+    "arn:aws:bedrock:*::foundation-model/anthropic.claude-haiku-5*", # Haiku 5.5 (US-19)
     # Global cross-region inference profiles (application 이 호출하는 엔트리포인트)
     "arn:aws:bedrock:*::inference-profile/global.anthropic.claude-*",
     "arn:aws:bedrock:*:*:inference-profile/global.anthropic.claude-*",
