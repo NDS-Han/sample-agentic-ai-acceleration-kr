@@ -206,6 +206,84 @@ def test_api_format_mirror_covers_every_db_label(name, path, extract):
     assert not missing, f"{name} is missing {sorted(missing)} from model.api_format"
 
 
+# ── usage.usage_status ─────────────────────────────────────────────────────
+#
+# usage_logs.status 는 E2E S5 에서부터 SUCCESS 외 값(ERROR/TIMEOUT)이 실제로
+# 쓰인다. 미러가 3곳 있다:
+#   * 두 SQLAlchemy Enum — READ 시 미등재 라벨이 오면 LookupError 로 조회 전체가
+#     깨진다(provider 드리프트와 같은 버그 클래스).
+#   * 두 _VALID_USAGE_STATUSES frozenset — 게이트웨이 발행층과 워커 INSERT 층의
+#     방어 집합. 여기가 빠지면 새 라벨은 ERROR 로 강등된다(조용한 오분류 — 치명적이진
+#     않지만 monitoring 이 새 라벨을 영원히 못 본다).
+USAGE_STATUS_MIRRORS = [
+    (
+        "gateway-proxy models.usage.UsageStatus (SQLAlchemy, validates on READ)",
+        REPO / "gateway-proxy/src/app/models/usage.py",
+        lambda p: _enum_class_values(p, "UsageStatus"),
+    ),
+    (
+        "admin-api models.usage.UsageStatus (SQLAlchemy, validates on READ)",
+        REPO / "admin-api/src/app/models/usage.py",
+        lambda p: _enum_class_values(p, "UsageStatus"),
+    ),
+    (
+        "gateway-proxy cost_recorder._VALID_USAGE_STATUSES (publish normalize)",
+        REPO / "gateway-proxy/src/app/services/cost_recorder.py",
+        lambda p: _frozenset_literal(p, "_VALID_USAGE_STATUSES"),
+    ),
+    (
+        "worker batch_flusher._VALID_USAGE_STATUSES (insert guard)",
+        REPO / "cost-recorder-worker/src/worker/batch_flusher.py",
+        lambda p: _frozenset_literal(p, "_VALID_USAGE_STATUSES"),
+    ),
+]
+
+
+def _frozenset_literal(path: Path, var: str) -> set[str]:
+    """``var = frozenset({...})`` 의 set 리터럴 원소를 AST 로 읽는다."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign) or not isinstance(node.value, ast.Call):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if var not in targets:
+            continue
+        for arg in node.value.args:
+            if isinstance(arg, ast.Set):
+                return {
+                    e.value
+                    for e in arg.elts
+                    if isinstance(e, ast.Constant) and isinstance(e.value, str)
+                }
+    raise AssertionError(f"{var} frozenset literal not found in {path}")
+
+
+def test_db_usage_status_labels_are_discoverable():
+    """Guard the guard: init SQL 의 DO $$ 블록 안 CREATE TYPE 도 파싱되는지."""
+    labels = _db_enum_labels("usage", "usage_status")
+    assert {"SUCCESS", "ERROR", "TIMEOUT"} <= labels, (
+        f"usage_status SQL parse failed: {sorted(labels)}"
+    )
+
+
+@pytest.mark.parametrize(
+    "name,path,extract", USAGE_STATUS_MIRRORS, ids=[m[0] for m in USAGE_STATUS_MIRRORS]
+)
+def test_usage_status_mirror_covers_every_db_label(name, path, extract):
+    missing = _db_enum_labels("usage", "usage_status") - extract(path)
+    assert not missing, f"{name} is missing {sorted(missing)} from usage.usage_status"
+
+
+@pytest.mark.parametrize(
+    "name,path,extract", USAGE_STATUS_MIRRORS, ids=[m[0] for m in USAGE_STATUS_MIRRORS]
+)
+def test_usage_status_mirror_invents_no_label(name, path, extract):
+    extra = extract(path) - _db_enum_labels("usage", "usage_status")
+    assert not extra, (
+        f"{name} lists {sorted(extra)}, which usage.usage_status cannot store."
+    )
+
+
 def test_runtime_openai_provider_is_actually_importable():
     """The AST checks prove the text; this proves the module really exposes the member.
 
