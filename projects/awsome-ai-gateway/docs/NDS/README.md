@@ -89,6 +89,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
+| [upstream-sync.md](upstream-sync.md) | **upstream PR 브랜치 → nds/dev 머지 절차** — 충돌 해결 원칙·자동머지 함정·rerere |
 
 ## 지원 클라이언트와 모델
 
