@@ -90,8 +90,10 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 > (imageRegistry·aurora/redis host·IRSA role ARN·OIDC issuer 등)을 채운다.
 > values 파일만 넘기는 helm upgrade 는 그 값들을 placeholder 로 되돌린다.
 >
-> 🔴 **plan 에 add 외 change/destroy 가 보이면 멈춘다.** body-logging 모듈과
-> 무관한 diff 는 이 작업의 범위가 아니다.
+> 🔴 **정상 plan 은 `9 add / 1 change / 0 destroy` 다.** `1 change` 는
+> gateway-proxy IRSA 정책(`aws_iam_policy.bedrock`)에 Firehose statement 가
+> 제자리 추가되는 것이다. 그 이상의 change 나 destroy 가 보이면 멈춘다 —
+> body-logging 모듈과 무관한 diff 는 이 작업의 범위가 아니다.
 
 **(3) 검증**
 

@@ -254,9 +254,30 @@ def test_new_fields_kept_for_beta_body_models(model_id):
         ], "output_config": {"effort": "high"}},
         {"role": "assistant", "content": "b", "output_config": {"effort": "low"}},
     ]
-    b = sanitize_bedrock_messages(_body(messages=msgs, max_tokens=128000), model_id)
+    b = sanitize_bedrock_messages(
+        _body(messages=msgs, max_tokens=128000), model_id,
+        forwarded_betas=["per-turn-control-2026-07-01", "inline-tools-2026-09-15"],
+    )
     assert b["messages"] == msgs
     assert b["max_tokens"] == 128000
+
+
+@pytest.mark.parametrize("model_id", [SONNET_55, OPUS_55])
+def test_beta_body_model_without_beta_still_strips(model_id):
+    """5.5 계열이어도 그 beta 가 전달되지 않으면 필드는 거절된다(2026-10-09 실측).
+
+    ``BEDROCK_FORWARD_BETAS=""`` 로 끄면 5.5 도 ``messages.N.output_config`` 400 —
+    지우는 쪽이 맞다.
+    """
+    msgs = [
+        {"role": "user", "content": "a"},
+        {"role": "system", "content": [{"type": "text", "text": "ctx"}],
+         "output_config": {"effort": "high"}},
+    ]
+    b = sanitize_bedrock_messages(_body(messages=msgs), model_id)
+    assert all("output_config" not in m for m in b["messages"])
+    assert [m["role"] for m in b["messages"]] == ["user"]
+    assert "ctx" in str(b["system"])
 
 
 def test_max_tokens_clamped_on_legacy():
@@ -281,13 +302,19 @@ def test_beta_body_fields_kept_by_alias():
     msgs = [{"role": "user", "content": "a"},
             {"role": "assistant", "content": "b", "output_config": {"effort": "low"}}]
     b = sanitize_bedrock_messages(
-        _body(messages=list(msgs)), None, alias="claude-sonnet-5-5-latest"
+        _body(messages=list(msgs)), None, alias="claude-sonnet-5-5-latest",
+        forwarded_betas=["per-turn-control-2026-07-01"],
     )
     assert b["messages"] == msgs
 
 
-def test_forwarded_beta_keeps_fields_on_rejecting_model():
-    """필드를 여는 beta 가 전달되면 4.x 모델에서도 필드를 그대로 둔다."""
+def test_forwarded_beta_stripped_on_rejecting_model():
+    """필드를 여는 beta 를 전달해도 거절 실측 모델에서는 필드를 지운다.
+
+    beta 이름은 전 모델이 받지만 필드는 모델이 받아야 한다 — 2026-10-09 us-west-2
+    InvokeModel 실측에서 output_config + per-turn-control 은 opus-5-5 · sonnet-5-5
+    만 200, opus-5 · sonnet-5 · 4.x · haiku-4-5 는 전부 400.
+    """
     msgs = [
         {"role": "user", "content": "a"},
         {"role": "system", "content": [{"type": "text", "text": "ctx"}],
@@ -297,7 +324,9 @@ def test_forwarded_beta_keeps_fields_on_rejecting_model():
         _body(messages=msgs), OPUS_48,
         forwarded_betas=["per-turn-control-2026-07-01", "inline-tools-2026-09-15"],
     )
-    assert b["messages"] == msgs
+    assert all("output_config" not in m for m in b["messages"])
+    assert [m["role"] for m in b["messages"]] == ["user"]
+    assert "ctx" in str(b["system"])
 
 
 def test_beta_without_opening_beta_still_strips():

@@ -417,10 +417,11 @@ scheduler:
 
 notificationWorker:
   replicaCount: 2
-  # 1.0.44-phase2: upstream 9203164 동기화 — notification-worker 코드 4커밋(+1,907줄)이 들어와
-  #   새 태그로 빌드한다. 같은 태그로 rebuild 하면 매니페스트가 안 바뀌어 롤아웃이 없고 옛 이미지만 덮인다.
+  # 1.0.45-ses: SES 발신 provider 추가 — 라이브 태그(1.0.44-phase2)를 덮어쓰지 않도록
+  #   새 태그로 올린다. 같은 태그로 rebuild 하면 매니페스트가 안 바뀌어 롤아웃이 없고
+  #   옛 이미지만 덮인다. 순서: 13-bump → rebuild-image → install-eks.
   image:
-    tag: "1.0.44-phase2"
+    tag: "1.0.45-ses"
   serviceAccount:
     # provider "ses" 사용 시 SES 발신용 IRSA role ARN 필요 (terraform output).
     # annotations:

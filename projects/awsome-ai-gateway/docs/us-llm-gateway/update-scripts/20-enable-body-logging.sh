@@ -279,7 +279,7 @@ status)
   hdr "Next"
   cat <<EOT
   tfvars 미적용 → bash $(basename "$0") tfvars --apply   then terraform plan/apply ($TF_DIR)
-  infra 있고 env 없음 → bash $(basename "$0") env --apply   then ./deployment/scripts/install-eks.sh $DEPLOY_ENV
+  infra 있고 env 없음 → bash $(basename "$0") env --apply   then cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
   확인 → bash $(basename "$0") verify
 EOT
   ;;
@@ -360,7 +360,8 @@ EOF
   hdr "Next — terraform (you run it, in $TF_DIR)"
   cat <<EOT
   terraform plan -target=module.body_logging -target=module.irsa
-    expect: S3 bucket + Firehose stream + IAM additions only — anything else: stop (ops/8-V)
+    expect: 9 add / 1 change (gateway-proxy IRSA policy in-place) / 0 destroy
+    — anything else: stop (ops/8-V)
   terraform apply -target=module.body_logging -target=module.irsa
   then: bash $(basename "$0") env
 EOT
@@ -376,14 +377,14 @@ env)
   load_rendered RV "$V"
   if [ "${RV[FIREHOSE_STREAM_NAME]:-}" = "$STREAM" ] && [ "${RV[BODY_LOG_S3_BUCKET]:-}" = "$BUCKET" ]; then
     ok "values already renders the terraform outputs — nothing to write"
-    note "next: ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
+    note "next: cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
     exit 0
   fi
   apply_values_edit "Writing body-logging env under gatewayProxy.env in $V (backup kept in $SNAP_DIR)." \
     set FIREHOSE_STREAM_NAME "$STREAM" set BODY_LOG_S3_BUCKET "$BUCKET" || { echo; exit 0; }
   hdr "Next — deploy (you run it)"
   cat <<EOT
-  ./deployment/scripts/install-eks.sh $DEPLOY_ENV
+  cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
     (never a bare helm upgrade — install-eks.sh re-injects the terraform-output
      --set values; a plain -f upgrade would roll them back to placeholders)
   then: bash $(basename "$0") verify  →  admin /monitoring body logging toggle ON
@@ -403,7 +404,7 @@ disable)
     del FIREHOSE_STREAM_NAME "" del BODY_LOG_S3_BUCKET "" || { echo; exit 0; }
   cat <<EOT
 
-  Next: ./deployment/scripts/install-eks.sh $DEPLOY_ENV   — proxy env 제거로 수집 중지.
+  Next: cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV   — proxy env 제거로 수집 중지.
   S3 버킷/Firehose 는 남는다 — 버킷엔 프롬프트 본문이 있을 수 있어(force_destroy=false)
   객체 비우기 후 terraform 에서 수동 처리.
 EOT

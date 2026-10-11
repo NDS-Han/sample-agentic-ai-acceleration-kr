@@ -151,7 +151,7 @@ bash 20-enable-body-logging.sh verify            # 버킷/스트림/env 검증
 cd docs/us-llm-gateway/update-scripts
 bash 21-set-notification-provider.sh                       # 현재 상태
 bash 21-set-notification-provider.sh <provider> --apply    # mock|internal-api|smtp|ses
-./deployment/scripts/install-eks.sh dev                    # 실제 반영은 install-eks.sh
+cd ../../.. && ./deployment/scripts/install-eks.sh dev     # 실제 반영은 install-eks.sh (repo 루트에서)
 ```
 
 상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**

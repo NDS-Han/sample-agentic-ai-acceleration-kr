@@ -118,7 +118,7 @@ CB_JSON=$(aws cognito-idp describe-user-pool-client --user-pool-id "$POOL_ID" --
           --query 'UserPoolClient.{cb:CallbackURLs,lo:LogoutURLs}' --output json 2>&1) \
   || die "cannot read Cognito app client $CLIENT_ID: $CB_JSON"
 LIVE_CB=$(jq -r '.cb[]?' <<<"$CB_JSON") || die "unexpected describe-user-pool-client output: $CB_JSON"
-LIVE_LO=$(jq -r '.lo[]?' <<<"$CB_JSON" 2>/dev/null) || LIVE_LO=""
+LIVE_LO=$(jq -r '.lo[]?' <<<"$CB_JSON") || die "unexpected describe-user-pool-client output: $CB_JSON"
 CB_LIVE=0; [[ $'\n'"$LIVE_CB"$'\n' == *$'\n'"$CALLBACK"$'\n'* ]] && CB_LIVE=1
 LO_LIVE=0; [[ $'\n'"$LIVE_LO"$'\n' == *$'\n'"$LOGOUT_URL"$'\n'* ]] && LO_LIVE=1
 
@@ -430,7 +430,7 @@ step_status() {
   hdr "② Cognito login (admin-ui OIDC_*)"
   if [ "$rl" = 1 ]; then ok "values: 4 keys render"; else bad "values: not set (or different)"; fi
   if [ "$LIVE_LOGIN" = 1 ]; then ok "live: admin-ui runs with them"
-  elif [ "$rl" = 1 ]; then warn "live: not deployed yet — install-eks.sh $DEPLOY_ENV"; : "${next:=./deployment/scripts/install-eks.sh $DEPLOY_ENV, then verify}"
+  elif [ "$rl" = 1 ]; then warn "live: not deployed yet — install-eks.sh $DEPLOY_ENV"; : "${next:=cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV, then verify}"
   else bad "live: not set"; : "${next:=bash $(basename "$0") login}"; fi
 
   hdr "③ dev-login (DEV_LOGIN_ENABLED)"
@@ -440,7 +440,7 @@ step_status() {
     if [ "$LIVE_LOGIN" = 1 ]; then ok "off — Cognito is the only way in"
     else bad "off, but the Cognito login is not live — nobody can sign in to the admin console"; fi
   elif [ "$r_api" != true ] && [ "$r_ui" != true ]; then
-    warn "values off, not deployed yet — install-eks.sh $DEPLOY_ENV"; : "${next:=./deployment/scripts/install-eks.sh $DEPLOY_ENV, then verify}"
+    warn "values off, not deployed yet — install-eks.sh $DEPLOY_ENV"; : "${next:=cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV, then verify}"
   else
     note "on (expected until the Cognito login is verified)"
     [ "$LIVE_LOGIN" = 1 ] && : "${next:=verify + browser login, then bash $(basename "$0") dev-login-off}"
@@ -479,7 +479,7 @@ step_callback() {
   if [ "$lo_tfv" = 0 ]; then
     guard_tfvar_unset cognito_logout_urls "$LOGOUT_URL"
     # logout_uri 는 오리진 루트 — admin-ui logout route 가 OIDC_REDIRECT_URI 의
-    # 오리진을내므로 값은 반드시 https://<ui-host>/ 다.
+    # 오리진을 내므로 값은 반드시 https://<ui-host>/ 다.
     block+=$(tfvar_list_block cognito_logout_urls "$tfv_lo" "$LOGOUT_URL")
   fi
 

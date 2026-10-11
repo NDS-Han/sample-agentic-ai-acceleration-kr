@@ -4,7 +4,9 @@
 
 > **한 줄**: Anthropic 신형 모델은 Bedrock **Model access 신청이 아니라 AWS Marketplace 구독**이다.
 > 모델을 게이트웨이에 등록(§8-M)해도 **계정에 구독이 없으면** 호출이 AccessDenied로 떨어진다.
-> 2026-09-21 dev 배포 계정에서 Claude Opus 5로 실측·재현한 절차다.
+> 2026-09-21 Claude Opus 5로 실측·재현한 절차다. 실측은 US dev 가 아닌 다른 배포 환경
+> (ap-south-1, `global.` 추론 프로필)에서 했다 — US dev 에서 재현할 때는 아래 명령의
+> 리전·모델 접두사를 본문대로 `us-west-2`·`us.` 로 읽는다.
 
 ---
 
@@ -32,16 +34,16 @@ Anthropic 모델은 **계정별 Marketplace 구독**이 필요하다(예전 Sonn
 호출 IAM 주체가 `aws-marketplace:ViewSubscriptions`/`aws-marketplace:Subscribe`를 못 가지면
 위 에러로 실패한다.
 
-실측(dev, 2026-09-21):
+실측(2026-09-21, 다른 배포 환경 — US dev 아님):
 
 ```bash
 # 같은 계정·같은 역할로 — 모델별로 결과가 갈림
-aws bedrock-runtime invoke-model --region ap-south-1 \
-  --model-id global.anthropic.claude-sonnet-5 --body fileb://body.json out.json
+aws bedrock-runtime invoke-model --region us-west-2 \
+  --model-id us.anthropic.claude-sonnet-5 --body fileb://body.json out.json
 # → 200 OK (구독 있음)
 
-aws bedrock-runtime invoke-model --region ap-south-1 \
-  --model-id global.anthropic.claude-opus-5 --body fileb://body.json out.json
+aws bedrock-runtime invoke-model --region us-west-2 \
+  --model-id us.anthropic.claude-opus-5 --body fileb://body.json out.json
 # → AccessDeniedException (Marketplace 구독 없음)
 ```
 
@@ -78,8 +80,8 @@ SELECT client, backend, default_model, account_role_arn
 ```bash
 echo '{"anthropic_version":"bedrock-2023-05-31","max_tokens":10,
  "messages":[{"role":"user","content":"hi"}]}' > /tmp/body.json
-aws bedrock-runtime invoke-model --region ap-south-1 \
-  --model-id global.anthropic.claude-opus-5 \
+aws bedrock-runtime invoke-model --region us-west-2 \
+  --model-id us.anthropic.claude-opus-5 \
   --body fileb:///tmp/body.json /tmp/out.json && cat /tmp/out.json | head -3
 ```
 
@@ -111,4 +113,4 @@ forward 목록에 추가하는 설정 변경과 함께 Bedrock 측 지원 여부
 |---|---|
 | `AccessDeniedException … aws-marketplace` | 이 절 — Marketplace 구독 없음 |
 | `not_found_error` (HTTP 404, 게이트웨이 응답) | alias 미등록 — §8-M 또는 /models 에서 등록 |
-| `ValidationException … model identifier` | `provider_model_id` 오타 — `global.`/`us.` 접두사 확인(§8-M ⓒ) |
+| `ValidationException … model identifier` | `provider_model_id` 오타 — `global.`/`us.` 접두사 확인(§8-M A1. 등록) |

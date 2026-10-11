@@ -215,8 +215,11 @@ async def test_route_sends_no_advisor_reference_and_forwards_inline_tools(monkey
     messages = [{"role": "user", "content": "hi"},
                 {"role": "system", "output_config": {"effort": "medium"},
                  "content": [_text(), _add("advisor", cache=True)]}]
+    # sonnet-5-5 — system 메시지·output_config 를 실측상 받는 모델(beta 전달 조건).
+    # 4-6 같은 거절 모델로 보내면 정규화가 필드를 지우는 게 맞는 동작이다.
     sent = await _sent_to_bedrock(
         monkeypatch, header=FLAGGED_HEADER,
+        provider_model_id="global.anthropic.claude-sonnet-5-5",
         extra={"tools": [READ, ADVISOR], "messages": messages,
                "safeguards": SAFEGUARDS})
     assert "advisor" not in json.dumps(sent)

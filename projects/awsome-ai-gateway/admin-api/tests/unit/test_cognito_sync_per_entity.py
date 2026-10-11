@@ -476,6 +476,18 @@ def test_effective_role_admin_promotion_still_applies():
     ) == UserRole.ADMIN
 
 
+def test_effective_role_admin_promotion_beats_team_transfer_demotion():
+    """팀 리더가 ADMIN 그룹에 들어가면서 같은 주기에 팀도 바뀌면 ADMIN 이어야 한다.
+
+    팀 이관 강등이 먼저 판정되면 DEVELOPER 가 되어 로그인 경로(ADMIN)와 어긋난다.
+    """
+    from app.services.cognito_sync_service import _effective_role
+
+    assert _effective_role(
+        UserRole.TEAM_LEADER, uuid.uuid4(), UserRole.ADMIN, uuid.uuid4()
+    ) == UserRole.ADMIN
+
+
 def test_effective_role_admin_demotion_still_applies():
     """ADMIN_GROUPS 에서 빠진 ADMIN 은 그대로 강등된다."""
     from app.services.cognito_sync_service import _effective_role

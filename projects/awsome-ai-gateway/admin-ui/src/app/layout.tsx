@@ -45,8 +45,9 @@ export default async function RootLayout({
   if (token) {
     try {
       const parsed = parseJWT(token);
-      // 만료된 쿠키도 파싱은 성공한다. '/login'·'/403' 은 public 이라 middleware 가
-      // 만료 검사 없이 통과시키므로, 여기서 만료를 세션 무효로 처리하지 않으면
+      // 만료된 쿠키도 파싱은 성공한다. middleware 는 만료를 미인증으로 처리하지만
+      // '/403' 같은 public 경로는 만료 검사 없이 통과시키므로, 만료 쿠키가 남아
+      // 있는 채 public 경로에 접근하면 여기서 만료를 세션 무효로 처리하지 않는 한
       // 만료된 쿠키 위에 Sidebar+Header 가 그려진다.
       if (!isSessionExpired(parsed)) {
         // 유효 역할은 admin_role 쿠키(admin-api 판정) 우선 — IdP 토큰에는 role

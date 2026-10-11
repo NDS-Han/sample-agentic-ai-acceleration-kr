@@ -316,7 +316,7 @@ cat <<EOF
   Then apply it — always through install-eks.sh, never a bare 'helm upgrade
   -f values' (the file still holds placeholders that install-eks.sh fills from
   terraform output):
-    ./deployment/scripts/install-eks.sh $DEPLOY_ENV
+    cd "$LIB_DIR/../../.." && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
 
   This file holds account-specific values and is not committed, so it lives
   only on this machine — keep a copy somewhere safe.

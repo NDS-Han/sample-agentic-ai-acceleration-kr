@@ -19,7 +19,8 @@
 # CloudFront returns 502 — the data plane goes down for a dashboard change.
 #
 # If the chart HAS the per-Ingress map and `06-persist-annotations.sh` has been
-# run, prefer the normal path — build the image, put the tag in values, then:
+# run, prefer the normal path — build the image, put the tag in values, then
+# (from the repo root):
 #     ./deployment/scripts/install-eks.sh <env>
 # NOT a raw `helm upgrade -f <values>`: the values file still holds placeholders
 # (<RDS_PROXY_ENDPOINT>, <ELASTICACHE_ENDPOINT>, IRSA ARNs, Cognito issuer) that
@@ -138,7 +139,7 @@ elif [ "$PER_INGRESS" = "1" ]; then
   warn "so the normal helm path is safe here — prefer it over this script"
   note "  1. build+push the image (steps 1-2 below, or rebuild-image.sh)"
   note "  2. set adminUi.image.tag: \"$TAG\" in $(basename "$VALUES_FILE")"
-  note "  3. ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
+  note "  3. cd \"$LIB_DIR/../../..\" && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
   note "Use install-eks.sh, never a bare 'helm upgrade -f values' — the values"
   note "file has placeholders that install-eks.sh fills from terraform output."
   note "kubectl set image leaves helm's stored release stale. Continue only if"

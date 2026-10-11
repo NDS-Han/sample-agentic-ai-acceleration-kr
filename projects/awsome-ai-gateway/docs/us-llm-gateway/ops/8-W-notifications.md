@@ -60,14 +60,14 @@ bash 21-set-notification-provider.sh smtp --apply \
 # 4. SES (IRSA 먼저)
 bash 22-setup-notification-ses-irsa.sh --apply
 bash 21-set-notification-provider.sh ses --apply \
-    --region ap-northeast-2 --from no-reply@example.com --from-name "LLM Gateway"
+    --region <SES-리전, 예: us-west-2> --from no-reply@example.com --from-name "LLM Gateway"
 ```
 
 > ⚠️ **SMTP 자격증명 경로 주의** — 차트는 `notificationWorker.email.smtp.credentialsSecretName`만 읽는다. `email` 바로 아래에 쓰면 인증이 **조용히** 빠진다. 스크립트는 올바른 경로에 쓰고, `--apply` 시 helm 렌더로 `SMTP_USERNAME`이 실제 env에 타는지 검증한다.
 
 > ℹ️ **notification-worker 기본 이미지는 `mock`/`internal_api`/`smtp`/`ses` 모두 포함한다.** `Dockerfile`이 `http`·`aiosmtplib`·`boto3` extras를 기본 설치하므로, 제공자 전환 시 별도 이미지 rebuild는 필요 없다.
 >
-> ⚠️ **최초 1회는 SES 코드가 들어간 이미지로 배포해야 한다.** 이 변경 이전 이미지(`1.0.44-phase2` 등)에는 `ses` provider가 없다. 머지 후 `bash deployment/scripts/rebuild-image.sh notification-worker <env>`로 빌드하고 `13-bump-image-tags.sh`로 태그를 올린 뒤 `install-eks.sh`로 배포할 것 — values의 `notificationWorker.image.tag`는 운영 태그 정책이 관리하므로 이 커밋은 건드리지 않는다.
+> ⚠️ **최초 1회는 SES 코드가 들어간 이미지로 배포해야 한다.** 이 변경 이전 이미지(`1.0.44-phase2` 등)에는 `ses` provider가 없다. 템플릿 태그는 `1.0.45-ses`로 이미 올라와 있다 — `rebuild-image.sh`는 helm이 당길 태그를 그대로 쓰므로, 태그 동기화(`13-bump-image-tags.sh`)가 rebuild보다 **먼저**다. 순서: `13-bump-image-tags.sh <env>` → `rebuild-image.sh notification-worker <env>` → `install-eks.sh <env>`. 순서를 바꾸면 ECR의 라이브 태그를 덮어쓴다.
 
 ---
 
@@ -96,10 +96,13 @@ kubectl -n llm-gateway logs -l app.kubernetes.io/component=notification-worker -
   ```bash
   kubectl -n llm-gateway get sa notification-worker -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'
   ```
-- 발송 기록은 DB `notification.notification_logs`에서 확인:
+- 발송 기록은 DB `notification.notification_logs`에서 확인 — admin-api 이미지에는 `psql`이 없으므로 임시 postgres 파드로 간다(`PGHOST`/`PGPASSWORD`는 배포 EC2의 저장된 접속 정보 사용):
   ```bash
-  kubectl -n llm-gateway exec -it deploy/llm-gateway-admin-api -- \
-    psql "$DATABASE_URL" -c "SELECT event_type, status, recipient_email, resolved_at FROM notification.notification_logs ORDER BY created_at DESC LIMIT 10;"
+  kubectl -n llm-gateway run psql-check --restart=Never --image=public.ecr.aws/docker/library/postgres:16 \
+    --env="PGHOST=$PGHOST" --env="PGUSER=gateway" --env="PGDATABASE=gateway" --env="PGPASSWORD=$PGPASSWORD" \
+    --command -- psql -c "SELECT event_type, status, recipient_email, resolved_at FROM notification.notification_logs ORDER BY created_at DESC LIMIT 10;"
+  kubectl -n llm-gateway wait --for=jsonpath='{.status.phase}'=Succeeded pod/psql-check --timeout=120s
+  kubectl -n llm-gateway logs psql-check; kubectl -n llm-gateway delete pod psql-check --wait=false
   ```
 
 ---

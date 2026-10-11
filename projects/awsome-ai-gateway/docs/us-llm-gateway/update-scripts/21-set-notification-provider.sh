@@ -416,7 +416,7 @@ apply_values_edit "Writing provider=$STEP to $V (backup kept in $SNAP_DIR)." \
 
 hdr "Next — deploy (you run it)"
 cat <<EOT
-  ./deployment/scripts/install-eks.sh $DEPLOY_ENV
+  cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
     (never a bare helm upgrade — install-eks.sh re-injects the terraform-output
      --set values; a plain -f upgrade would roll them back to placeholders)
   then: bash $(basename "$0") status  →  live pod EMAIL_SENDER_TYPE 확인

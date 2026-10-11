@@ -111,7 +111,7 @@ if [ "$DELETE" = 1 ]; then
     yq -i 'del(.adminApi.env.LITELLM_PRICING_LAMBDA)' "$VALUES" || die "values 편집 실패"
     ok "values 에서 LITELLM_PRICING_LAMBDA 제거 (백업 생성)"
   fi
-  note "adminApi.env 변경분 반영: deployment/scripts/install-eks.sh $DEPLOY_ENV"
+  note "adminApi.env 변경분 반영: cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
   exit 0
 fi
 
@@ -169,5 +169,5 @@ if [ "$val_cur" != "$FN_NAME" ]; then
 fi
 
 echo
-ok "완료 — adminApi.env 변경분 반영: deployment/scripts/install-eks.sh $DEPLOY_ENV"
+ok "완료 — adminApi.env 변경분 반영: cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
 note "직접 invoke 검증: aws lambda invoke --function-name $FN_NAME --payload '{}' /tmp/o.json && cat /tmp/o.json"

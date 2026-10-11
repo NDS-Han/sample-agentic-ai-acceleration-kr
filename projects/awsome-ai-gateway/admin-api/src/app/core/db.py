@@ -42,11 +42,7 @@ async def drain_pending_redis(
 
     ``redis`` 를 넘기면 request 없이도 쓸 수 있다 — 스케줄러 등 요청 밖 호출자용.
     """
-    # 실물 AsyncSession.info 는 항상 평범한 dict 다. 테스트 double(AsyncMock·
-    # FakeSession)은 dict 가 아니거나 attr 자체가 없을 수 있으니 방어한다 —
-    # 이 경우 대기열에 들어갔을 이벤트도 없으니 무시해도 안전하다.
-    info = getattr(session, "info", None)
-    pending = info.pop(PENDING_REDIS_KEY, None) if isinstance(info, dict) else None
+    pending = session.info.pop(PENDING_REDIS_KEY, None)
     if not pending:
         return
     if redis is None and request is not None:

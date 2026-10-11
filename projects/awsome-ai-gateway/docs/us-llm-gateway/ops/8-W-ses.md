@@ -9,7 +9,7 @@
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 21-set-notification-provider.sh ses --apply \
-    --region ap-northeast-2 --from no-reply@example.com --from-name "LLM Gateway"
+    --region <SES-리전, 예: us-west-2> --from no-reply@example.com --from-name "LLM Gateway"
 ```
 
 옵션: `--region`(기본: values의 `email.ses.region` 유지), `--from`, `--from-name`

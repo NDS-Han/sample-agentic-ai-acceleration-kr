@@ -147,6 +147,9 @@ def _mock_session(request: Request):
        (tests/integration/conftest.py 의 같은 함정 주석 참조).
     """
     session = AsyncMock()
+    # 실물 AsyncSession.info 는 항상 평범한 dict — drain_pending_redis 가 대기열을
+    # 여기서 꺼내므로 Mock 기본값(AsyncMock 반환)이면 .pop() 이 coroutine 을 돌려준다.
+    session.info = {}
     session.execute = AsyncMock(return_value=MagicMock())
     session.get = AsyncMock(return_value=None)
     session.add = MagicMock()

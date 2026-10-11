@@ -381,25 +381,30 @@ def sanitize_bedrock_messages(
     """Bedrock Messages 와이어가 거부하는 본문 요소를 정리한다. 같은 dict 를 고쳐 돌려준다.
 
     **그 필드를 받지 않는 요청에만** 아래 두 변환을 한다(2026-09-28 ap-south-1 실측
-    거절 규칙). 필드는 둘 경우가 그 뿐이다 — 신형 필드를 네이티브로 받는 모델
-    (``_accepts_beta_body_fields`` 판정: opus-5-5 · sonnet-5-5), 또는 그 필드를 여는
-    anthropic-beta 가 실제로 전달될 때(``forwarded_betas``). 지우면 ``tool_addition``
-    (도구 정의) · ``cache_control`` · 턴별 effort 가 통째로 사라진다(리뷰 재현).
-    legacy 계열은 beta 가 붙어도 필드를 받지 못하므로 항상 정규화한다 — 강등된
-    하위 모델에서 그대로 400 이 나는 것을 막는다.
+    거절 규칙). 필드는 둘 조건이 **모두** 참일 때만 둔다 — 필드를 받는 것으로 실측된
+    모델(``_accepts_beta_body_fields`` 판정: opus-5-5 · sonnet-5-5)이면서, 그 필드를
+    여는 anthropic-beta 가 실제로 전달될 때(``forwarded_betas``). 지우면
+    ``tool_addition`` (도구 정의) · ``cache_control`` · 턴별 effort 가 통째로
+    사라진다(리뷰 재현). 나머지 모델 — legacy 계열뿐 아니라 opus-5 · sonnet-5 ·
+    4.x 전부 — 는 beta 이름은 받아도 필드는 거절하므로 항상 정규화한다. 5.5 계열에서도
+    beta 전달을 끄면(``BEDROCK_FORWARD_BETAS=""``) 필드가 거절되어 400 이 나므로,
+    beta 가 전달되지 않는 한 둘지 않는다 — 강등·폴백된 하위 모델에서 그대로 400 이
+    나는 것을 막는다(2026-10-09 us-west-2 InvokeModel 실측).
 
       1. ``messages[].output_config`` — 거절 모델은 메시지 단위 필드를 받지 않는다
          ("messages.N.output_config: Extra inputs are not permitted"). Claude Code
-         v2.1.x 가 대화 이력 메시지에 싣는다. per-turn-control beta 가 전달되면 둔다.
+         v2.1.x 가 대화 이력 메시지에 싣는다. 5.5 계열 + per-turn-control beta
+         전달 시에만 둔다.
       2. ``messages[].role == "system"`` — 거절 모델은 받지 않는다 ("use the
          top-level 'system' parameter"). 텍스트를 최상위 ``system`` 으로 옮기고
          메시지에서 뺀다. 내용이 없는 system 메시지(``""``·``[]``)도 목록에서
          제거한다 — 남겨 두면 거절 모델에서 그대로 400 이 난다. 메시지가 하나라도
-         빠지면 ``body["messages"]`` 를 항상 다시 쓴다. inline-tools ·
-         mid-conversation-* beta 가 전달되면 메시지를 그대로 둔다.
+         빠지면 ``body["messages"]`` 를 항상 다시 쓴다. 5.5 계열 + inline-tools ·
+         mid-conversation-* beta 전달 시에만 메시지를 그대로 둔다.
 
-    두 변환은 계열을 몰라도(미상 모델) 적용한다 — 신형 필드를 몰라서 400 나는 것보다
-    보수적으로 걷어내는 편이 낫다. 세 번째 변환은 계열이 legacy 일 때만:
+    두 변환은 계열을 몰라도(미상 모델) 적용한다 — 처음 보는 모델은 필드를 지우고,
+    새 모델은 실측한 뒤 ``_BETA_BODY_FIELD_TOKENS`` 에 더한다. 세 번째 변환은
+    계열이 legacy 일 때만:
 
       3. legacy 계열(haiku-4-5)의 ``max_tokens`` — 상한 64000. 초과분만 클램프한다.
 
@@ -409,13 +414,9 @@ def sanitize_bedrock_messages(
     try:
         msgs = body.get("messages")
         family = _resolve_family(provider_model_id, alias)
-        if _accepts_beta_body_fields(provider_model_id, alias):
-            keep_oc = keep_sys = True
-        elif family == "legacy":
-            keep_oc = keep_sys = False
-        else:
-            keep_oc = _beta_opens(forwarded_betas, _OUTPUT_CONFIG_BETA)
-            keep_sys = _beta_opens(forwarded_betas, *_SYSTEM_MESSAGE_BETAS)
+        accepts = _accepts_beta_body_fields(provider_model_id, alias)
+        keep_oc = accepts and _beta_opens(forwarded_betas, _OUTPUT_CONFIG_BETA)
+        keep_sys = accepts and _beta_opens(forwarded_betas, *_SYSTEM_MESSAGE_BETAS)
 
         hoisted: list[str] = []
         if isinstance(msgs, list) and not (keep_oc and keep_sys):

@@ -813,6 +813,7 @@ adminUi:
     # OIDC_LOGOUT_URL: ""      # 비면 authorize URL 오리진의 /logout 을 유도하되, 그 규약은
     #                          # Cognito 에만 맞아 amazoncognito.com 일 때만 유도한다. Cognito 가
     #                          # 아닌 IdP 는 여기에 로그아웃 엔드포인트를 명시해야 세션까지 닫힌다.
+    #                          # "off"(대소문자 무관)면 IdP 로그아웃을 끄고 로컬 쿠키만 지운다.
     #
     # ⚠️ OIDC_CLIENT_SECRET 은 **여기에 절대 쓰지 않는다**. 이 차트의 시크릿 경로는
     #    templates/common/secret.yaml 의 `{{ fullname }}-app` Secret 이다

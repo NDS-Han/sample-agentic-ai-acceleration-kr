@@ -143,7 +143,7 @@ if [ "$DELETE" = 1 ]; then
          .adminApi.env.CHAT_STAGING_BUCKET = "" |
          .adminUi.env.CHAT_ENABLED = "false"' "$VALUES" || die "values 편집 실패"
   ok "values 정리: ARN/버킷 비우기 + CHAT_ENABLED=false (백업 생성)"
-  note "반영: deployment/scripts/install-eks.sh $DEPLOY_ENV"
+  note "반영: cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
   exit 0
 fi
 
@@ -252,5 +252,5 @@ ARN="$RT_ARN" REGION="$AWS_REGION" BUCKET="$STAGING" yq -i '
 ok "values 갱신: AGENTCORE_RUNTIME_ARN·REGION·CHAT_STAGING_BUCKET + CHAT_ENABLED=true"
 
 echo
-ok "완료 — 변경분 반영: deployment/scripts/install-eks.sh $DEPLOY_ENV"
+ok "완료 — 변경분 반영: cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
 note "반영되면 사이드바에 BI Insight 메뉴와 퀵챗이 나타난다 (ADMIN 전용)"

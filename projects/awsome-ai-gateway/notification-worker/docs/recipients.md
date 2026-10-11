@@ -35,7 +35,7 @@
 | `budget_threshold` | ✅ | ✅* | | live | 유일하게 팀 리더에게 가는 이벤트. *리더 미지정 팀은 리더 메일 없음 |
 | `key_revoked` | ✅ | | ✅ | live | 일괄 폐기(`payload.bulk=true`, force_reauth)는 admin 역할 생략 — admin 메일 폭풍 방지 |
 | `auth_failure_spike` | | | ✅ | live | |
-| `degradation_mode` | ✅* | | ✅ | live | *seed는 admin만 — dev DB에 affected_user 추가됨(§4 참고) |
+| `degradation_mode` | ✅* | | ✅ | dead | producer 없음 — `_publish_degradation_event`가 코드베이스에 없음. 핸들러·seed만 존재 |
 | `key_expiring` | ✅ | | | dead | producer 없음 — api-key-helper가 자동 갱신 |
 | `key_expired` | ✅ | | | dead | producer 없음 — key_expirer는 DB status만 갱신 |
 | `permission_violation` | | | ✅ | dead | producer 없음 — enum 값만 존재 |

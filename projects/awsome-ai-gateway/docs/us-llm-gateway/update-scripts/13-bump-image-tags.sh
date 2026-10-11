@@ -146,6 +146,7 @@ ok "values updated: $V (helm renders the template tags for every service)"
 
 hdr "Next steps"
 cat <<EOF
+  cd $ROOT
   for s in migration gateway-proxy admin-api admin-ui notification-worker cost-recorder-worker; do
     ./deployment/scripts/rebuild-image.sh \$s $ENV || break; done
   ./deployment/scripts/install-eks.sh $ENV

@@ -102,7 +102,7 @@ if [ "$APPLY" -eq 0 ]; then
   cat <<EOT
 
   Nothing changed yet ($CHANGES key(s) differ).
-  Apply:  bash $(basename "$0") --apply     (then ./deployment/scripts/install-eks.sh $DEPLOY_ENV)
+  Apply:  bash $(basename "$0") --apply     (then cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV)
 EOT
   exit 0
 fi

@@ -35,7 +35,7 @@ BaseHandler.handle()
 | `budget_threshold` | `notifications:budget` | `cost-recorder-worker/src/worker/batch_flusher.py` (`_publish_thresholds`) | ✅ live |
 | `key_revoked` | `notifications:key` | `admin-api/src/app/services/key_service.py` (`_publish_key_revoked`) | ✅ live |
 | `auth_failure_spike` | `notifications:security` | `gateway-proxy/src/app/security/event_detector.py` (IP당 5분/10회 실패) | ✅ live |
-| `degradation_mode` | `notifications:system` | `gateway-proxy/src/app/middleware/downgrade.py` (`_publish_degradation_event`) | ✅ live |
+| `degradation_mode` | `notifications:system` | **없음** — `downgrade.py`에 `_publish_degradation_event`가 없음(발행 코드 부재) | ⚠️ dead |
 | `key_expiring` | `notifications:key` | **없음** — api-key-helper가 VK를 자동 갱신하므로 만료 임박 개념이 없음 | ⚠️ dead |
 | `key_expired` | `notifications:key` | **없음** — `admin-api/scheduler/key_expirer.py`는 DB status만 EXPIRED로 갱신, 이벤트 미발행 | ⚠️ dead |
 | `permission_violation` | `notifications:security` | **없음** — `gateway-proxy/schemas/domain.py`에 enum 값만 존재 | ⚠️ dead |

@@ -205,7 +205,7 @@ if [ "$APPLY" = 0 ]; then
   echo; note "Nothing written."; note "Apply:  bash $(basename "$0") $ORIG_ARGS --apply"; rm -f "$NEW"; echo; exit 0
 fi
 
-confirm "Write the Ingress block into $VALUES_FILE (helm is NOT run — next: ./deployment/scripts/install-eks.sh $DEPLOY_ENV)."
+confirm "Write the Ingress block into $VALUES_FILE (helm is NOT run — next: cd $LIB_DIR/../../.. && ./deployment/scripts/install-eks.sh $DEPLOY_ENV)."
 BAK="$SNAP_DIR/${TS}-10-$(basename "$VALUES_FILE")"
 cp "$VALUES_FILE" "$BAK" || { rm -f "$NEW"; die "backup failed"; }
 cp "$NEW" "$VALUES_FILE" || { rm -f "$NEW"; die "write failed"; }

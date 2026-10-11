@@ -495,7 +495,7 @@ fi
 cat <<EOF
 
 다음으로 배포에 반영:
-    ./deployment/scripts/install-eks.sh $DEPLOY_ENV
+    cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
 
 그 다음 provider 전환:
     bash 21-set-notification-provider.sh ses --apply
