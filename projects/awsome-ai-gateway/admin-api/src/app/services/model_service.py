@@ -144,6 +144,14 @@ class ModelService:
     ) -> ModelResponse:
         repo = ModelRepository(session)
         update_kwargs = {k: v for k, v in data.model_dump().items() if v is not None}
+        # pmid 가 바뀌면 옛 pmid 의 게이트웨이 캐시 키(model:pmid:{old})를 지워야
+        # 한다 — 안 지우면 최대 300s(MODEL_CACHE_TTL) 동안 옛 pmid 참조 요청이
+        # 옛 스키마(옛 단가·ACL·pmid)로 서빙된다. update 후엔 옛 값을 알 수 없어
+        # 먼저 잡아둔다.
+        _old_pmid: str | None = None
+        if data.provider_model_id is not None:
+            _before = await repo.get_by_alias(alias)
+            _old_pmid = _before.provider_model_id if _before is not None else None
         model = await repo.update_model(alias, **update_kwargs)
         if model is None:
             raise NotFoundError("ModelAlias", alias)
@@ -192,10 +200,22 @@ class ModelService:
         # BR-MOD-04: Cache invalidation — 게이트웨이는 resolve 성공 시
         # model:{alias} 와 model:{provider_model_id} **두 키**를 쓴다(router_service).
         # pmid 키를 빠지면 pmid 경유 조회가 최대 300s 동안 옛 설정을 본다.
+        # pmid 자체가 바뀐 경우: 옛 pmid 키도 지워야 pmid 참조 요청이 옛 스키마를
+        # 받지 않고, 새 pmid 의 15s 음수캐시(model:nx:*:{new})도 지워야 즉시 해석된다
+        # (생성 경로의 nx 무효화와 같은 규칙).
+        _keys = [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"]
+        if _old_pmid is not None and _old_pmid != model.provider_model_id:
+            _keys.append(f"model:pmid:{_old_pmid}")
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
+                [f"model:nx:{model.provider_model_id}"],
+                pattern=f"model:nx:*:{model.provider_model_id}",
+            )
         await invalidate_after_commit(
             session,
             self._cache_mgr,
-            [f"model:{alias}", f"model:pmid:{model.provider_model_id}", "model:list"],
+            _keys,
         )
 
         await audit_logger.log(

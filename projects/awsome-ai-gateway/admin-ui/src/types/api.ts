@@ -1,43 +1,14 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { z } from 'zod';
-import type { GroupByType, PeriodType, RateLimitScope, UserRole } from './enums';
-
-// ─── Generic Response Wrappers ────────────────────────────────────────────────
-
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-  page: number;
-  page_size: number;
-  total_pages: number;
-}
-
-export interface APIError {
-  status_code: number;
-  error_code: string;
-  message: string;
-  details: unknown;
-}
-
-// ─── Virtual Keys ─────────────────────────────────────────────────────────────
-
-export interface VirtualKeyCreateForm {
-  user_id: string;
-  expires_at: string | null; // ISO 8601 or null for no expiry
-}
+import type { GroupByType, PeriodType, UserRole } from './enums';
 
 // ─── Budgets ──────────────────────────────────────────────────────────────────
 
-export interface BudgetSetForm {
-  target_id: string;
-  target_type: 'TEAM' | 'USER';
-  max_budget_usd: number;
-  // undefined=보존(백엔드 optional-preserve) — 다이얼로그가 금액만 바꿔
-  // 저장해도 enforcement 설정이 기본값으로 리셋되지 않는다.
-  policy?: 'HARD_BLOCK' | 'SOFT_WARNING' | 'THROTTLE';
-  alert_thresholds?: number[];
-}
+// 실제 페이지네이션 봉투는 offset/page 가 아니라 커서다 —
+// {items, pagination:{cursor,limit,has_more}} (actions/keys.ts KeyListResponse).
+// 예전 PaginatedResponse<T>(total/page/…) 타입은 와이어와 다른 형태라 삭제했다.
+// APIError 역시 여기 있던 interface 가 아니라 lib/utils/retry 의 class 를 쓴다.
 
 export const BudgetSetSchema = z.object({
   target_id: z.string().min(1, 'Target ID is required'),
@@ -50,21 +21,6 @@ export const BudgetSetSchema = z.object({
 });
 
 // ─── Models ───────────────────────────────────────────────────────────────────
-
-export interface ModelCreateForm {
-  alias: string;
-  provider: string;
-  model_id: string;
-  // OPENMODEL(vLLM) 등 커스텀 엔드포인트 모델용. Bedrock/Mantle 은 비워둔다(null 전송).
-  endpoint_url?: string;
-  input_price_per_1k: number;
-  output_price_per_1k: number;
-  cache_creation_5m_price_per_1k: number;
-  cache_creation_1h_price_per_1k: number;
-  cache_read_price_per_1k: number;
-  description?: string;
-  display_name?: string;
-}
 
 export const ModelCreateSchema = z.object({
   alias: z.string().min(1, 'Alias is required').max(64),
@@ -126,10 +82,6 @@ export const ModelCreateSchema = z.object({
     },
   );
 
-export interface ModelDeactivateForm {
-  alias: string;
-}
-
 // 즉시 비활성화만 지원(예약/유예 기능 없음). 백엔드 StatusPatchRequest 는 {active: bool} 만 받아
 // 즉시 전환한다 — UI 도 이에 맞춘다.
 export const ModelDeactivateSchema = z.object({
@@ -146,46 +98,7 @@ export interface AnalyticsFilterForm {
   scope?: string | null;
 }
 
-export const AnalyticsFilterSchema = z
-  .object({
-    period: z.enum(['7d', '30d', '90d', 'custom']),
-    start_date: z.string().date().nullable().optional(),
-    end_date: z.string().date().nullable().optional(),
-    group_by: z.enum(['model', 'team', 'user']),
-    scope: z.string().nullable().optional(),
-  })
-  .refine(
-    (data) => {
-      if (data.period === 'custom') {
-        return !!data.start_date && !!data.end_date;
-      }
-      return true;
-    },
-    { message: 'start_date and end_date are required for custom period', path: ['start_date'] }
-  );
-
-export interface ExportConfig {
-  format: 'csv' | 'json';
-  filters: AnalyticsFilterForm;
-}
-
-export const ExportConfigSchema = z.object({
-  format: z.enum(['csv', 'json']),
-  filters: AnalyticsFilterSchema,
-});
-
-// ─── Organisation ─────────────────────────────────────────────────────────────
-
 // ─── Rate Limits ──────────────────────────────────────────────────────────────
-
-export interface RateLimitSetForm {
-  target_id: string;
-  scope: RateLimitScope;
-  rpm?: number | null;
-  tpm?: number | null;
-  cpm?: number | null;
-  cph?: number | null;
-}
 
 export const RateLimitSetSchema = z.object({
   target_id: z.string().min(1),
@@ -204,11 +117,5 @@ export const RateLimitSetSchema = z.object({
  */
 export type PagePermissionMap = Record<string, UserRole[]>;
 
-// ─── Inferred Zod Types ───────────────────────────────────────────────────────
-
-export type BudgetSetInput = z.infer<typeof BudgetSetSchema>;
-export type ModelCreateInput = z.infer<typeof ModelCreateSchema>;
-export type ModelDeactivateInput = z.infer<typeof ModelDeactivateSchema>;
-export type AnalyticsFilterInput = z.infer<typeof AnalyticsFilterSchema>;
-export type ExportConfigInput = z.infer<typeof ExportConfigSchema>;
-export type RateLimitSetInput = z.infer<typeof RateLimitSetSchema>;
+// 스키마에서 파생되는 입력 타입이 필요하면 사용처에서 z.infer<typeof ...Schema>
+// 로 둔다 — 미사용 추론 타입을 export 해두면 와이어 계약과 따로 놀며 부패한다.

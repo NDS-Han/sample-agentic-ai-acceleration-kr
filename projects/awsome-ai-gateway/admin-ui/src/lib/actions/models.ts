@@ -283,12 +283,14 @@ export async function applyPriceSyncAction(
     return { success: false, error: '적용할 모델을 선택하세요' };
   }
   try {
-    const data = await withRetry(() =>
-      adminAPI.post<{ applied: string[]; skipped: string[]; errors: string[] }>(
-        '/admin/models/pricing/sync-apply',
-        { aliases, source }
-      )
-    );
+    // 비멱등 — 서버는 alias 마다 기존 가격 행을 닫고 새 버전+SET_PRICING 감사 행을
+    // 만든다(updateModelAction 의 pricing 경로와 같은 이유). 모호한 타임아웃/503 후
+    // 재시도하면 방금 쓴 행을 다시 닫고 동일 값의 중복 버전·이중 감사 행이 생긴다.
+    const data = await adminAPI.post<{
+      applied: string[];
+      skipped: string[];
+      errors: string[];
+    }>('/admin/models/pricing/sync-apply', { aliases, source });
     revalidatePath('/models');
     return { success: true, data };
   } catch (err) {

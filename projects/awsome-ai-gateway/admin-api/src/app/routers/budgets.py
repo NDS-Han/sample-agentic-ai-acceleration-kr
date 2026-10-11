@@ -296,7 +296,7 @@ async def allocate_team_budget(
 async def get_budget_summary(
     request: Request,
     scope: str | None = None,
-    target_id: str | None = None,
+    target_id: uuid.UUID | None = None,
     period: str = Query(description="YYYY-MM"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -307,17 +307,31 @@ async def get_budget_summary(
         session,
         redis=redis,
         scope=scope,
-        target_id=uuid.UUID(target_id) if target_id else None,
+        target_id=target_id,
         period=period,
         actor=user,
     )
+
+
+def _parse_scope(value: str) -> BudgetScope:
+    """scope 경로 파라미터를 대소문자 무관하게 enum 으로 — 무효 값은 400.
+
+    ``scope_id: uuid.UUID`` 시그니처 선언은 FastAPI 가 422 를 자동 반환하지만,
+    scope 는 경로값이 소문자(team/user)고 enum 값이 대문자라 수동 파싱이 필요하다.
+    """
+    from fastapi import HTTPException
+
+    try:
+        return BudgetScope(value.upper())
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"invalid scope: {value}")
 
 
 @router.get("/{scope}/{scope_id}", response_model=BudgetConfigDetailResponse)
 async def get_budget_config(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -329,8 +343,8 @@ async def get_budget_config(
     svc: BudgetService = request.app.state.budget_service
     return await svc.get_budget_config(
         session,
-        scope=BudgetScope(scope.upper()),
-        scope_id=uuid.UUID(scope_id),
+        scope=_parse_scope(scope),
+        scope_id=scope_id,
         actor=user,
     )
 
@@ -339,15 +353,15 @@ async def get_budget_config(
 async def get_downgrade_config(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc: BudgetService = request.app.state.budget_service
     return await svc.get_downgrade_config(
         session,
-        scope=BudgetScope(scope.upper()),
-        scope_id=uuid.UUID(scope_id),
+        scope=_parse_scope(scope),
+        scope_id=scope_id,
         actor=user,
     )
 
@@ -356,7 +370,7 @@ async def get_downgrade_config(
 async def set_downgrade_config(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     body: AutoDowngradeConfigRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -364,8 +378,8 @@ async def set_downgrade_config(
     svc: BudgetService = request.app.state.budget_service
     return await svc.set_downgrade_config(
         session,
-        scope=BudgetScope(scope.upper()),
-        scope_id=uuid.UUID(scope_id),
+        scope=_parse_scope(scope),
+        scope_id=scope_id,
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
@@ -377,15 +391,15 @@ async def set_downgrade_config(
 async def delete_downgrade_config(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc: BudgetService = request.app.state.budget_service
     await svc.delete_downgrade_config(
         session,
-        scope=BudgetScope(scope.upper()),
-        scope_id=uuid.UUID(scope_id),
+        scope=_parse_scope(scope),
+        scope_id=scope_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),

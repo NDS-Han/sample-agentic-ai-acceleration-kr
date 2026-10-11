@@ -3,10 +3,8 @@
 import type {
   AlertLevel,
   BudgetScope,
-  GroupByType,
   KeyStatus,
   OrgNodeType,
-  PeriodType,
   RateLimitScope,
   UserRole,
 } from './enums';
@@ -35,11 +33,6 @@ export interface VirtualKeyListItem {
   created_at: string; // ISO 8601
   expires_at: string | null; // ISO 8601
   last_used_at: string | null; // ISO 8601
-}
-
-export interface VirtualKeyDetail extends VirtualKeyListItem {
-  /** Full key value — only returned immediately after creation */
-  key_value: string;
 }
 
 // ─── Budgets ──────────────────────────────────────────────────────────────────
@@ -210,28 +203,12 @@ export interface CLIDownloadItem {
   checksum_sha256: string;
 }
 
-// ─── Dashboard KPIs ───────────────────────────────────────────────────────────
+// ─── Analytics breakdowns ─────────────────────────────────────────────────────
 
-export interface DashboardKPI {
-  total_usage_usd: number;
-  active_keys: number;
-  active_models: number;
-  budget_utilization_percent: number;
-}
-
-// ─── ROI / Analytics ─────────────────────────────────────────────────────────
-
-export interface ROIMetrics {
-  cost_per_line: number;
-  cost_per_commit: number;
-  productivity_gain_percent: number;
-  roi_ratio: number;
-}
-
-export interface TrendDataPoint {
-  date: string; // ISO 8601 date (YYYY-MM-DD)
-  cost_usd: number;
-}
+// ⚠️ 대시보드 KPI·ROI 계열은 여기가 아니라 actions/dashboard.ts·actions/analytics*.ts
+// 의 와이어 타입이 계약이다 — 예전 이 파일에 있던 DashboardKPI/ROIAnalyticsResponse
+// 타입들은 실제 응답(total_cost_usd·budget_utilization_pct)과 다른 필드명
+// (total_usage_usd·budget_utilization_percent)이었고 아무 데도 안 쓰여 삭제했다.
 
 export interface ModelBreakdown {
   model_alias: string;
@@ -246,32 +223,6 @@ export interface TeamBreakdown {
   cost_usd: number;
   token_count: number;
   request_count: number;
-}
-
-export interface CostSummary {
-  total_cost_usd: number;
-  period: PeriodType;
-  start_date: string; // ISO 8601
-  end_date: string; // ISO 8601
-  trend: TrendDataPoint[];
-  by_model: ModelBreakdown[];
-  by_team: TeamBreakdown[];
-}
-
-export interface ProductivitySummary {
-  period: PeriodType;
-  start_date: string;
-  end_date: string;
-  roi: ROIMetrics;
-  commits: number;
-  lines_generated: number;
-  active_developers: number;
-}
-
-export interface ROIAnalyticsResponse {
-  cost: CostSummary;
-  productivity: ProductivitySummary;
-  group_by: GroupByType;
 }
 
 // ─── Budget Allocation ────────────────────────────────────────────────────────

@@ -7,7 +7,7 @@ import { normalizeAllocation } from '@/lib/budget-allocation';
 import { currentCalendarMonth } from '@/lib/utils/period';
 import { alertLevelOf } from '@/lib/utils/alertLevel';
 import { mapToModelListItem, type APIModelItem } from '@/lib/utils/modelMapping';
-import { parseJWT } from '@/lib/auth';
+import { parseJWT, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import type { BudgetSummaryItem, ModelListItem, TeamBudgetAllocation } from '@/types/entities';
 import { BudgetSummaryTable } from '@/components/budgets/BudgetSummaryTable';
 import { TeamAllocationView } from '@/components/budgets/TeamAllocationView';
@@ -30,7 +30,30 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
   const cookieStore = cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
   const session = jwt ? parseJWT(jwt) : null;
-  const isAdmin = session?.role === 'ADMIN';
+  // IdP 토큰에는 role 클레임이 없다 — OIDC 로그인의 유효 역할은 콜백이
+  // /admin/my/profile 결과로 구워 둔 admin_role 쿠키에 있다(DB 역할/ADMIN_EMAILS
+  // 관리자는 JWT 상으로 role=undefined). layout/403 과 같은 병합 규칙을 쓴다 —
+  // 안 하면 쿠키 기준 ADMIN 인 관리자가 이 페이지에서만 팀 배정 뷰로 떨어졌다.
+  const role =
+    roleFromCookie(cookieStore.get(ADMIN_ROLE_COOKIE)?.value) ?? session?.role;
+  const isAdmin = role === 'ADMIN';
+
+  // 비관리자(TEAM_LEADER)의 팀·본인 신원도 JWT 에 기대지 않는다 — OIDC 토큰에는
+  // team_id 클레임이 없고 sub 도 DB user_id 와 다를 수 있어, 그대로 쓰면 팀 리더가
+  // 'noTeamAssigned' 로 떨어지거나 '내 행' 하이라이트가 어긋난다. /admin/my/profile
+  // 이 get_current_user 와 동일 판정의 유효 신원을 돌려준다(실패 시 JWT 폴백).
+  let myTeamId = session?.team_id ?? null;
+  let myUserId = session?.user_id;
+  if (!isAdmin) {
+    const profileResult = await adminAPI
+      .get<{ user_id: string; team_id: string | null }>('/admin/my/profile')
+      .then((v) => ({ ok: true as const, value: v }))
+      .catch(() => ({ ok: false as const }));
+    if (profileResult.ok) {
+      myTeamId = profileResult.value.team_id ?? myTeamId;
+      myUserId = profileResult.value.user_id ?? myUserId;
+    }
+  }
 
   // 리포팅 TZ 기준 현재월 — 로컬 new Date()(pod UTC)로 계산하면 매월 1일 리포팅 TZ
   // 새벽(UTC 자정~TZ 자정)에 지난달 요약을 보여준다. 백엔드 집계 버킷과 같은 env 값.
@@ -91,9 +114,9 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
   });
 
   let teamAllocation: TeamBudgetAllocation | null = null;
-  if (!isAdmin && session?.team_id) {
+  if (!isAdmin && myTeamId) {
     teamAllocation = await adminAPI
-      .get(`/admin/budgets/team/${session.team_id}/allocation`)
+      .get(`/admin/budgets/team/${myTeamId}/allocation`)
       .then(normalizeAllocation)
       .catch(() => null);
   }
@@ -160,12 +183,12 @@ export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
         ) : (
           <ErrorState />
         )
-      ) : session?.team_id ? (
+      ) : myTeamId ? (
         <TeamAllocationView
-          teamId={session.team_id}
+          teamId={myTeamId}
           initialAllocation={teamAllocation}
           isAdmin={false}
-          currentUserId={session?.user_id}
+          currentUserId={myUserId}
         />
       ) : (
         <p className="text-sm text-muted-foreground">{t('noTeamAssigned')}</p>

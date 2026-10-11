@@ -182,6 +182,7 @@ class TestUpdateModel:
              patch("app.services.model_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.update_model = AsyncMock(return_value=model)
+            repo.get_by_alias = AsyncMock(return_value=model)
             repo.get_current_pricing = AsyncMock(return_value=pricing)
             mock_audit.log = AsyncMock()
 
@@ -189,6 +190,55 @@ class TestUpdateModel:
 
         assert model.description == "keep me"
         assert model.display_name == "Keep"
+
+    async def test_update_model_pmid_change_invalidates_old_pmid_and_nx(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        # pmid 변경 시 게이트웨이 캐시의 옛 pmid 키(model:pmid:{old})가 남으면
+        # 최대 300s 동안 옛 pmid 참조 요청이 옛 스키마(단가·ACL·pmid)로 서빙된다.
+        # 새 pmid 의 15s 음수캐시(model:nx:*:{new})도 함께 지워야 즉시 해석된다.
+        data = ModelUpdateRequest(provider_model_id="new-pmid-2")
+        before = _make_model()  # provider_model_id = 기본(old pmid)
+        after = _make_model()
+        after.provider_model_id = "new-pmid-2"
+        pricing = _make_pricing()
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.get_by_alias = AsyncMock(return_value=before)
+            repo.update_model = AsyncMock(return_value=after)
+            repo.get_current_pricing = AsyncMock(return_value=pricing)
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        deleted = {c.args[0] for c in mock_redis.delete.await_args_list}
+        assert f"model:pmid:{before.provider_model_id}" in deleted  # 옛 pmid 키 제거
+        assert "model:pmid:new-pmid-2" in deleted
+        assert "model:nx:new-pmid-2" in deleted  # 레거시 단일 nx 키
+        patterns = {c.kwargs.get("match") or c.args[0] for c in mock_redis.scan_iter.call_args_list}
+        assert "model:nx:*:new-pmid-2" in patterns  # provider 네임스페이스 nx 패턴
+
+    async def test_update_model_unchanged_pmid_skips_old_key_invalidation(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        # pmid 를 안 바꾸는 update 는 옛 pmid 조회(get_by_alias)도 하지 않는다.
+        data = ModelUpdateRequest(description="only desc")
+        model = _make_model()
+        pricing = _make_pricing()
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.get_by_alias = AsyncMock(return_value=model)
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=pricing)
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        repo.get_by_alias.assert_not_awaited()
 
 
 class TestSpecFields:
@@ -278,6 +328,7 @@ class TestSpecFields:
              patch("app.services.model_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.update_model = AsyncMock(return_value=model)
+            repo.get_by_alias = AsyncMock(return_value=model)
             repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
             mock_audit.log = AsyncMock()
 
