@@ -58,6 +58,24 @@ async def drain_pending_tasks(timeout: float) -> int:
     return len(pending)
 
 
+async def _aclose_iter(iterator) -> None:
+    """버려지는 업스트림 이터레이터를 닫는다.
+
+    닫지 않으면 어댑터 제너레이터(예: botocore event-stream 을 executor 스레드로
+    돌리는 ``_bedrock_stream_gen``)의 finally 가 GC 시점까지 지연되고, 그동안
+    스레드가 죽은 상류 스트림의 blocking ``next()`` 에 묶인다. 스트림 헬퍼가
+    이터레이터를 중도 포기하는 모든 경로(idle-timeout/오류/드레인 완료)에서
+    호출한다 — aclose 없는 이터레이터는 no-op(E2E S4).
+    """
+    aclose = getattr(iterator, "aclose", None)
+    if aclose is None:
+        return
+    try:
+        await aclose()
+    except Exception:
+        pass
+
+
 def _resolve_timeouts(
     idle_timeout: float | None, drain_timeout: float | None
 ) -> tuple[float, float]:
@@ -145,6 +163,13 @@ async def bedrock_anthropic_sse_stream(
             return f"data: {raw}\n\n".encode()
 
         etype = data.get("type", "unknown")
+        if etype == "unknown" and isinstance(data.get("error"), dict):
+            # 어댑터의 미드스트림 오류 청크는 최상위 "type" 없이 {"error":{...}} 만 낸다
+            # (mantle_adapter._gen 등). 그대로 `event: unknown` 으로 나가면 SDK 가
+            # 무시해 상류 실패가 조용한 절단으로 보인다 — 표준 error 이벤트로
+            # 재프레임(web_search_loop 의 동형 처리와 합을 맞춘다, E2E S4).
+            data = {"type": "error", "error": data["error"]}
+            etype = "error"
         if etype == "message_start":
             u = data.get("message", {}).get("usage", {})
             if v := u.get("input_tokens"):
@@ -270,8 +295,21 @@ async def bedrock_anthropic_sse_stream(
     async def _drain_remaining() -> None:
         deadline = time.monotonic() + drain_timeout
         try:
-            async for chunk in iterator:
-                if time.monotonic() > deadline:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning("stream_drain_timeout")
+                    break
+                try:
+                    # ⚠️ async for 대신 wait_for — 상류가 스톨하면 async for 는
+                    #    deadline 을 무시하고 __anext__ 에서 무한 대기해, 클라이언트도
+                    #    사라진 드레인 태스크가 상류 커넥션을 붙잡는다(E2E S4).
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(), timeout=remaining
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
                     logger.warning("stream_drain_timeout")
                     break
                 _format(chunk)  # side effect: updates counters
@@ -280,6 +318,7 @@ async def bedrock_anthropic_sse_stream(
         finally:
             await _fire_on_usage()
             await _fire_on_complete("partial")
+            await _aclose_iter(iterator)
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -298,6 +337,7 @@ async def bedrock_anthropic_sse_stream(
                 # 이 경로의 과금이 다시 유실된다.
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
+                await _aclose_iter(iterator)
                 err = {
                     "type": "error",
                     "error": {
@@ -326,6 +366,7 @@ async def bedrock_anthropic_sse_stream(
         # timeout 경로와 동일 이유로 yield 앞에서 확정.
         await _fire_on_usage()
         await _fire_on_complete("partial")
+        await _aclose_iter(iterator)
         err = {
             "type": "error",
             "error": {"type": "stream_error", "message": str(exc) or "stream_error"},
@@ -508,8 +549,18 @@ async def openai_sse_stream(
         nonlocal latest_usage
         deadline = time.monotonic() + drain_timeout
         try:
-            async for chunk in iterator:
-                if time.monotonic() > deadline:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning("stream_drain_timeout")
+                    break
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(), timeout=remaining
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
                     logger.warning("stream_drain_timeout")
                     break
                 if u := _scan_usage(chunk):
@@ -521,6 +572,7 @@ async def openai_sse_stream(
                 latest_usage = u
             await _fire_on_usage()
             await _fire_on_complete("partial")
+            await _aclose_iter(iterator)
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -539,6 +591,7 @@ async def openai_sse_stream(
                     latest_usage = u
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
+                await _aclose_iter(iterator)
                 yield _emit_error_chunk(
                     "timeout_error", f"upstream idle timeout after {idle_timeout}s"
                 )
@@ -568,6 +621,7 @@ async def openai_sse_stream(
             latest_usage = u
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
+        await _aclose_iter(iterator)
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 
@@ -651,7 +705,10 @@ async def responses_sse_stream(
                 resp = data.get("response")
                 if isinstance(resp, dict) and (u := _usage_from_response(resp)):
                     latest_usage = u
-            etype_label = etype or "message"
+            # 어댑터 미드스트림 오류 청크({"error":{...}} 단일 형태, type 없음)가
+            # `event: message` 로 나가면 SDK 가 일반 이벤트로 삼키고 실패를 모른다 —
+            # error 이벤트로 명시(E2E S4).
+            etype_label = etype or ("error" if isinstance(data.get("error"), dict) else "message")
             return f"event: {etype_label}\ndata: {json.dumps(data)}\n\n".encode()
         # Non-dict JSON (unexpected) — re-frame defensively.
         return f"data: {json.dumps(data)}\n\n".encode()
@@ -729,8 +786,18 @@ async def responses_sse_stream(
     async def _drain_remaining() -> None:
         deadline = time.monotonic() + drain_timeout
         try:
-            async for chunk in iterator:
-                if time.monotonic() > deadline:
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    logger.warning("responses_stream_drain_timeout")
+                    break
+                try:
+                    chunk = await asyncio.wait_for(
+                        iterator.__anext__(), timeout=remaining
+                    )
+                except StopAsyncIteration:
+                    break
+                except TimeoutError:
                     logger.warning("responses_stream_drain_timeout")
                     break
                 _process(chunk)  # updates latest_usage/accumulated_text as a side effect
@@ -739,6 +806,7 @@ async def responses_sse_stream(
         finally:
             await _fire_on_usage()
             await _fire_on_complete("partial")
+            await _aclose_iter(iterator)
 
     try:
         while True:
@@ -751,6 +819,7 @@ async def responses_sse_stream(
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
+                await _aclose_iter(iterator)
                 yield _emit_error_chunk(
                     "timeout_error", f"upstream idle timeout after {idle_timeout}s"
                 )
@@ -775,6 +844,7 @@ async def responses_sse_stream(
         logger.exception("responses_stream_proxy_error")
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
+        await _aclose_iter(iterator)
         yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
         return
 

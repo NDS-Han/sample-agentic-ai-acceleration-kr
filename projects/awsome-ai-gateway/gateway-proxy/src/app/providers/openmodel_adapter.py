@@ -123,6 +123,11 @@ class OpenModelAdapter(ProviderAdapter):
                 yield chunk
         except Exception:
             logger.exception("sse_stream_error")
+            # 조용한 절단 금지 — 다른 어댑터와 같이 오류 프레임을 흘려보낸다(E2E S4).
+            yield (
+                b'data: {"error":{"type":"provider_error",'
+                b'"message":"upstream stream interrupted"}}\n\n'
+            )
         finally:
             await response.aclose()
 

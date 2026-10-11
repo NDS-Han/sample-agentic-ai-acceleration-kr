@@ -3240,6 +3240,14 @@ async def run_web_search_loop(
     """
     deadline = time.monotonic() + total_deadline_sec
 
+    # SSE 응답 공통 헤더 — nginx ingress 는 응답을 기본 버퍼링하므로 X-Accel-Buffering
+    # 없이는 스트림이 프록시 버퍼에 막혀 클라이언트가 청크를 뒤늦게 받는다(E2E S4).
+    response_headers = {
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+        **(response_headers or {}),
+    }
+
     def _log_stream(gen):
         """Wrap a streaming response with the body-log recorder (pass-through without a hook)."""
         if on_stream_complete is None:
@@ -3293,7 +3301,15 @@ async def run_web_search_loop(
         base = dict(initial_req_data)
         if is_stream:
             base["stream"] = True
-            status, chunk_iter, _h, _ = await invoke_stream(base)
+            try:
+                status, chunk_iter, _h, _ = await invoke_stream(base)
+            except Exception:
+                # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+                try:
+                    await on_usage(TokenUsage())
+                except Exception:
+                    logger.warning("web_search.on_usage_failed")
+                raise
             from app.services.streaming import (
                 bedrock_anthropic_sse_stream,
                 responses_sse_stream,
@@ -3304,9 +3320,20 @@ async def run_web_search_loop(
             return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
         base.pop("stream", None)
-        status, body, _h, usage = await invoke(base)
-        if usage and (usage.input_tokens + usage.output_tokens) > 0:
-            await on_usage(usage)
+        try:
+            status, body, _h, usage = await invoke(base)
+        except Exception:
+            # 어댑터 계약 밖 예외 — 보수적 입장 예약(최대 N턴치)이 걸려 있으므로
+            # 해제용 콜백을 발화한 뒤 재전파한다(E2E S4).
+            try:
+                await on_usage(TokenUsage())
+            except Exception:
+                logger.warning("web_search.on_usage_failed")
+            raise
+        # ⚠️ usage>0 가드로 걸러선 안 된다 — 비-2xx/파싱실패 시 on_usage(0토큰) 만이
+        #    입장 예약(보수적 max_iterations 배수)을 해제하는 유일한 경로다. 이 경로는
+        #    폴백 루프의 release_reservations 도 타지 않는다(E2E S4, F-9 와 동일 근거).
+        await on_usage(usage or TokenUsage())
         await _log_nonstream(status, body)
         try:
             content = json.loads(body)
@@ -3335,7 +3362,15 @@ async def run_web_search_loop(
         base.pop("stream", None)
         if is_stream:
             base["stream"] = True
-            status, chunk_iter, headers, _ = await invoke_stream(base)
+            try:
+                status, chunk_iter, headers, _ = await invoke_stream(base)
+            except Exception:
+                # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+                try:
+                    await on_usage(TokenUsage())
+                except Exception:
+                    logger.warning("web_search.on_usage_failed")
+                raise
             from app.services.streaming import (
                 bedrock_anthropic_sse_stream,
                 responses_sse_stream,
@@ -3350,9 +3385,17 @@ async def run_web_search_loop(
                     tokenizer_hook=tokenizer_hook)
             return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
-        status, body, _h, usage = await invoke(base)
-        if usage and (usage.input_tokens + usage.output_tokens) > 0:
-            await on_usage(usage)
+        try:
+            status, body, _h, usage = await invoke(base)
+        except Exception:
+            # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+            try:
+                await on_usage(TokenUsage())
+            except Exception:
+                logger.warning("web_search.on_usage_failed")
+            raise
+        # ⚠️ F-7 분기와 같은 이유로 0 토큰이어도 무조건 발화 — 예약 해제의 유일한 경로.
+        await on_usage(usage or TokenUsage())
         await _log_nonstream(status, body)
         try:
             content = json.loads(body)

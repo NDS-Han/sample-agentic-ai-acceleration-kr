@@ -272,7 +272,6 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             return rejected
 
     adapter = registry.get(ProviderType.BEDROCK)
-    rate_limit_state = state.get("rate_limit_state")
 
     # ── 프로바이더 호출 결과 지표 ──
     #
@@ -322,69 +321,163 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                생략해 **usage_logs 행조차 안 남는 무료 스트리밍**이 됐다.
                `_scan_bedrock_stream_chunk` 가 누적 스캔하고, 혹시 모를 OpenAI-wire
                업스트림을 위해 `_try_extract_usage` 도 폴백으로 둔다.
+
+            ⚠️ disconnect 시 백그라운드 드레인(E2E S4): converse-stream 의 usage 는
+               종결 `metadata` 이벤트에만 오므로, 클라이언트가 끊은 지점까지만 보면
+               input/output 이 0 으로 정산돼 상류가 이미 청구한 토큰이 무료가 된다.
+               나머지 SSE 경로(messages/chat/responses)와 같은 drain 계약을 따른다.
             """
             usage = None
             from app.schemas.domain import TokenUsage
-            from app.services.streaming import _try_extract_usage
+            from app.services.streaming import (
+                _aclose_iter,
+                _resolve_timeouts,
+                _spawn,
+                _try_extract_usage,
+            )
 
+            idle_timeout, drain_timeout = _resolve_timeouts(None, None)
+            iterator = chunk_iter.__aiter__()
             bedrock_usage: dict = {}
+            usage_fired = False  # 과금 멱등 가드 — 다른 SSE 경로와 동일 계약
+            client_disconnected = False
+            first_token_time: float | None = None
+
+            def _scan(chunk: bytes) -> None:
+                nonlocal usage, first_token_time
+                if first_token_time is None:
+                    first_token_time = time.monotonic()
+                _scan_bedrock_stream_chunk(chunk, path_suffix, bedrock_usage)
+                if bedrock_usage.get("hit"):
+                    usage = TokenUsage(
+                        input_tokens=bedrock_usage.get("input_tokens", 0),
+                        output_tokens=bedrock_usage.get("output_tokens", 0),
+                        total_tokens=(
+                            bedrock_usage.get("input_tokens", 0)
+                            + bedrock_usage.get("output_tokens", 0)
+                        ),
+                        cache_creation_input_tokens=bedrock_usage.get("cache_write", 0),
+                        cache_read_input_tokens=bedrock_usage.get("cache_read", 0),
+                        # 삼값 — 미보고 시 None 이어야 요청 측 폴백이 산다(A2-4).
+                        cache_creation_1h_input_tokens=bedrock_usage.get(
+                            "cache_write_1h"
+                        ),
+                        cache_ttl_1h=cache_ttl_1h,
+                    )
+                else:
+                    u = _try_extract_usage(chunk)
+                    if u:
+                        usage = u
+
+            async def _fire_finalize() -> None:
+                """정확히 1회만 정산한다(정상 종료/타임아웃/드레인 완료 어디서든)."""
+                nonlocal usage_fired
+                if usage_fired or not auth_context:
+                    return
+                usage_fired = True
+                # pop — 정산 완료 표시. 누군가 먼저 release 했으면 None 이 돼
+                # 이중 정산이 막힌다(E2E S3-H1/S4 계약).
+                _rl_state = state.pop("rate_limit_state", None)
+                if not (usage or _rl_state):
+                    return
+                effective_usage = usage or TokenUsage(
+                    input_tokens=0,
+                    output_tokens=0,
+                    total_tokens=0,
+                    cache_creation_input_tokens=0,
+                    cache_read_input_tokens=0,
+                )
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                ttft_ms = (
+                    int((first_token_time - start_time) * 1000)
+                    if first_token_time is not None
+                    else duration_ms
+                )
+                await cost_recorder.finalize(
+                    redis,
+                    auth_context,
+                    model_config,
+                    effective_usage,
+                    request_id,
+                    True,
+                    duration_ms,
+                    ttft_ms=ttft_ms,
+                    rate_limit_state=_rl_state,
+                    downgraded_from=state.get("downgraded_from"),
+                    # 비스트림 경로와 같게 Bedrock invocation log join 키를 남긴다.
+                    bedrock_request_id=_req_id,
+                    # ⚠️ client 를 빼면 enforce 가 잡은 per-app 예산 예약이
+                    #    정산되지 않아 앱별 카운터만 부풀어 허위
+                    #    client_budget_exceeded 가 난다(E2E S2).
+                    client=state.get("client"),
+                )
+
+            async def _drain_remaining() -> None:
+                deadline = time.monotonic() + drain_timeout
+                try:
+                    while True:
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            logger.warning("bedrock_passthrough_drain_timeout")
+                            break
+                        try:
+                            # 상류 스톨 시 __anext__ 무한 대기 방지 — services/
+                            # streaming.py 의 드레인과 같은 계약(E2E S4).
+                            chunk = await asyncio.wait_for(
+                                iterator.__anext__(), timeout=remaining
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError:
+                            logger.warning("bedrock_passthrough_drain_timeout")
+                            break
+                        _scan(chunk)
+                except Exception:
+                    logger.exception("bedrock_passthrough_drain_error")
+                finally:
+                    await _fire_finalize()
+                    await _aclose_iter(iterator)
+
             try:
-                async for chunk in chunk_iter:
-                    _scan_bedrock_stream_chunk(chunk, path_suffix, bedrock_usage)
-                    if bedrock_usage.get("hit"):
-                        usage = TokenUsage(
-                            input_tokens=bedrock_usage.get("input_tokens", 0),
-                            output_tokens=bedrock_usage.get("output_tokens", 0),
-                            total_tokens=(
-                                bedrock_usage.get("input_tokens", 0)
-                                + bedrock_usage.get("output_tokens", 0)
-                            ),
-                            cache_creation_input_tokens=bedrock_usage.get("cache_write", 0),
-                            cache_read_input_tokens=bedrock_usage.get("cache_read", 0),
-                            # 삼값 — 미보고 시 None 이어야 요청 측 폴백이 산다(A2-4).
-                            cache_creation_1h_input_tokens=bedrock_usage.get(
-                                "cache_write_1h"
-                            ),
-                            cache_ttl_1h=cache_ttl_1h,
+                while True:
+                    try:
+                        chunk = await asyncio.wait_for(
+                            iterator.__anext__(), timeout=idle_timeout
                         )
-                    else:
-                        u = _try_extract_usage(chunk)
-                        if u:
-                            usage = u
+                    except StopAsyncIteration:
+                        break
+                    except TimeoutError:
+                        # 상류 스톨 — event-stream 바이너리 프레이밍에 오류 프레임을
+                        # 끼워 넣을 수 없으므로 로그 후 스트림을 조용히 닫는다.
+                        # 예약/누적 usage 는 먼저 정산한다.
+                        logger.warning(
+                            "bedrock_passthrough_idle_timeout",
+                            idle_timeout=idle_timeout,
+                            path_suffix=path_suffix,
+                        )
+                        await _fire_finalize()
+                        return
+                    _scan(chunk)
                     yield chunk
+            except (asyncio.CancelledError, GeneratorExit):
+                # 클라이언트 끊김 — 종결 usage 가 아직 안 왔을 수 있으므로
+                # 백그라운드 드레인으로 잔여 청크를 스캔한 뒤 정산한다.
+                client_disconnected = True
+                _spawn(_drain_remaining())
+                raise
             finally:
-                if auth_context and (usage or rate_limit_state):
-                    effective_usage = usage or TokenUsage(
-                        input_tokens=0,
-                        output_tokens=0,
-                        total_tokens=0,
-                        cache_creation_input_tokens=0,
-                        cache_read_input_tokens=0,
-                    )
-                    duration_ms = int((time.monotonic() - start_time) * 1000)
-                    await cost_recorder.finalize(
-                        redis,
-                        auth_context,
-                        model_config,
-                        effective_usage,
-                        request_id,
-                        True,
-                        duration_ms,
-                        ttft_ms=duration_ms,
-                        rate_limit_state=rate_limit_state,
-                        downgraded_from=state.get("downgraded_from"),
-                        # 비스트림 경로와 같게 Bedrock invocation log join 키를 남긴다.
-                        bedrock_request_id=_req_id,
-                        # ⚠️ client 를 빼면 enforce 가 잡은 per-app 예산 예약이
-                        #    정산되지 않아 앱별 카운터만 부풀어 허위
-                        #    client_budget_exceeded 가 난다(E2E S2).
-                        client=state.get("client"),
-                    )
+                if not client_disconnected:
+                    await _fire_finalize()
+                    # disconnect 면 드레인 태스크가 소유권을 갖고 자기 finally 에서
+                    # 닫는다 — 여기서 닫으면 드레인이 죽은 이터레이터를 소비한다.
+                    await _aclose_iter(iterator)
 
         return StreamingResponse(
             stream_with_cost(),
             status_code=status,
             media_type=headers.get("Content-Type", "application/octet-stream"),
+            # nginx ingress 버퍼링으로 event-stream 이 막히지 않게(E2E S4).
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     else:
         try:
@@ -412,7 +505,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 False,
                 duration_ms,
                 ttft_ms=duration_ms,
-                rate_limit_state=rate_limit_state,
+                # pop — 정산 완료 표시(E2E S4).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 # Join key to the Bedrock model-invocation log record (adapter.invoke
                 # returns it in the headers dict; not forwarded to the client).

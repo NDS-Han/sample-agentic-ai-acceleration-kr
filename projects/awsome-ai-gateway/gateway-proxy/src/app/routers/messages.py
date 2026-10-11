@@ -680,7 +680,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 redis, auth_context, model_config, usage, request_id,
                 is_stream, duration_ms,
                 ttft_ms=ttft_ms,
-                rate_limit_state=state.get("rate_limit_state"),
+                # pop — 정산 완료 표시(E2E S4, _record 의 주석과 같은 계약).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 client=client,
             )
@@ -866,7 +867,6 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # If the fallback loop returned a non-200 status for streaming, the
         # chunk_iter is an error generator from the adapter — just stream it.
         call_model_id_final = _rewrite(effective_model_config.provider_model_id)
-        rate_limit_state = state.get("rate_limit_state")
 
         async def _estimate(text: str) -> int | None:
             if not tokenizer or is_mantle:
@@ -886,6 +886,11 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 ttft_ms = int((first_token_time - start_time) * 1000)
             else:
                 ttft_ms = duration_ms  # fallback: 첫 콘텐츠 델타 미검출
+            # ⚠️ pop — 정산됐다는 표시를 state 에 남긴다. finalize 는 pop 하지 않으므로
+            #    pop 없이 두면 이후 경로의 release_reservations 가 settle 을 다시 돌린다
+            #    (settle_tpm/settle_cost 는 비멱등 — E2E S4, release_reservations 주석의
+            #    전제와 같은 계약).
+            _rl_state = state.pop("rate_limit_state", None)
             await cost_recorder.finalize(
                 redis,
                 auth_context,
@@ -895,14 +900,18 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 True,
                 duration_ms,
                 ttft_ms=ttft_ms,
-                rate_limit_state=rate_limit_state,
+                rate_limit_state=_rl_state,
                 downgraded_from=state.get("downgraded_from"),
                 availability_fallback_from=availability_fallback_from,
                 bedrock_request_id=aws_request_id,
                 client=client,
             )
 
-        response_headers: dict = {}
+        # nginx ingress 의 기본 응답 버퍼링이 SSE 를 막지 않게 한다(E2E S4).
+        response_headers: dict = {
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        }
         if availability_fallback_from:
             response_headers["x-llm-gateway-fallback-from"] = availability_fallback_from
 
@@ -953,7 +962,6 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         )
     else:
         response_body, headers, usage = result.payload
-        rate_limit_state = state.get("rate_limit_state")
 
         if auth_context and isinstance(usage, TokenUsage) and (usage.input_tokens + usage.output_tokens) > 0:
             usage.cache_ttl_1h = cache_ttl_1h
@@ -967,7 +975,8 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 False,
                 duration_ms,
                 ttft_ms=duration_ms,
-                rate_limit_state=rate_limit_state,
+                # pop — 정산 완료 표시(E2E S4).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 availability_fallback_from=availability_fallback_from,
                 # Join key to the Bedrock model-invocation log record. The streaming

@@ -423,13 +423,44 @@ class BedrockAdapter(ProviderAdapter):
             except StopIteration:
                 return sentinel
 
-        while True:
-            event = await loop.run_in_executor(_bedrock_executor, _next)
-            if event is sentinel:
-                return
-            chunk = event.get("chunk", {})
-            if "bytes" in chunk:
-                yield chunk["bytes"]
+        try:
+            while True:
+                event = await loop.run_in_executor(_bedrock_executor, _next)
+                if event is sentinel:
+                    return
+                chunk = event.get("chunk", {})
+                if "bytes" in chunk:
+                    yield chunk["bytes"]
+                    continue
+                # ⚠️ `chunk` 가 아닌 멤버 중 *Exception/*Error 는 미드스트림
+                #    **예외 이벤트**다(internalServerException / modelStreamErrorException /
+                #    throttlingException / modelTimeoutException 등). 예전엔 조용히
+                #    드롭돼 클라이언트가 오류 신호 없이 잘린 스트림을 받았다(E2E S4).
+                #    Anthropic-wire error 이벤트로 합성해 흘려보낸다 — 상류 멤버
+                #    이름/메시지는 인프라 식별자를 담을 수 있어 살균한다.
+                #    그 외의 비-chunk 멤버(예: metadata)는 기존처럼 건너뛴다.
+                for key, val in event.items():
+                    if key == "chunk" or not key.endswith(("Exception", "Error")):
+                        continue
+                    msg = val.get("message") if isinstance(val, dict) else None
+                    payload = {
+                        "type": "error",
+                        "error": {
+                            "type": key,
+                            "message": _redact_arns(msg) if msg else key,
+                        },
+                    }
+                    yield json.dumps(payload).encode()
+        finally:
+            # ⚠️ 제너레이터가 버려지거나(aclose/취소/idle-timeout/GC) 닫힐 때 botocore
+            #    스트림도 반드시 닫는다. 닫지 않으면 executor 스레드가 죽은 상류
+            #    커넥션의 blocking next() 에 영구히 묶여, 반복되면 128개 풀이 고갈돼
+            #    모든 Bedrock 호출이 멈춘다(E2E S4). close() 하면 next() 가 즉시
+            #    예외/반환으로 풀려 스레드가 회수된다.
+            try:
+                stream.close()
+            except Exception:
+                pass
 
     async def _converse_stream_gen(self, stream) -> AsyncIterator[bytes]:
         import asyncio
@@ -444,8 +475,16 @@ class BedrockAdapter(ProviderAdapter):
             except StopIteration:
                 return sentinel
 
-        while True:
-            event = await loop.run_in_executor(_bedrock_executor, _next)
-            if event is sentinel:
-                return
-            yield json.dumps(event).encode()
+        try:
+            while True:
+                event = await loop.run_in_executor(_bedrock_executor, _next)
+                if event is sentinel:
+                    return
+                yield json.dumps(event).encode()
+        finally:
+            # _bedrock_stream_gen 의 finally 와 동일 — 버려진 제너레이터가 executor
+            # 스레드를 붙잡지 않도록 상류 스트림을 닫는다(E2E S4).
+            try:
+                stream.close()
+            except Exception:
+                pass

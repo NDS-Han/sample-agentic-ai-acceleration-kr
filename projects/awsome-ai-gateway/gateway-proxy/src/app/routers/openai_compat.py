@@ -283,23 +283,28 @@ async def _handle_openai(request: Request, path: str):
     else:
         adapter = registry.get(ProviderType.OPENMODEL)
         invoke_kwargs = {"path": path}
-    rate_limit_state = state.get("rate_limit_state")
     tokenizer = getattr(request.app.state, "tokenizer", None)
 
     if is_stream:
-        if is_bedrock_runtime:
-            # 4-tuple (…, aws_request_id) — the join key to the Bedrock model-invocation
-            # log for this call, persisted as usage_logs.bedrock_request_id below.
-            status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
-                body, model_config.provider_model_id, **invoke_kwargs
-            )
-        else:
-            # vLLM is a 3-tuple and has no AWS request id — there is no Bedrock
-            # invocation-log record to join to, so None is the truthful value.
-            status, chunk_iter, headers = await adapter.invoke_stream(
-                body, model_config.provider_model_id, **invoke_kwargs
-            )
-            aws_request_id = None
+        try:
+            if is_bedrock_runtime:
+                # 4-tuple (…, aws_request_id) — the join key to the Bedrock model-invocation
+                # log for this call, persisted as usage_logs.bedrock_request_id below.
+                status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+                    body, model_config.provider_model_id, **invoke_kwargs
+                )
+            else:
+                # vLLM is a 3-tuple and has no AWS request id — there is no Bedrock
+                # invocation-log record to join to, so None is the truthful value.
+                status, chunk_iter, headers = await adapter.invoke_stream(
+                    body, model_config.provider_model_id, **invoke_kwargs
+                )
+                aws_request_id = None
+        except Exception:
+            # 어댑터 계약 밖 예외 — 폴백 루프의 catch-all unwind 와 같은 이유로
+            # 해제 후 재전파(E2E S4 — 누수만 막고 에러 의미론 500 은 유지).
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            raise
 
         # KI-08: OpenAI path는 tiktoken(cl100k_base) 근사로 출력 토큰 역산.
         async def _estimate(text: str) -> int | None:
@@ -314,13 +319,15 @@ async def _handle_openai(request: Request, path: str):
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
-            # ⚠️ rate_limit_state 는 **호출 시점**에 다시 읽는다 — 위에서 잡아 둔 지역
+            # ⚠️ rate_limit_state 는 **호출 시점**에 pop 한다 — 위에서 잡아 둔 지역
             #    변수를 쓰면 비-2xx 스트림에서 이중 환불이 된다(E2E S3-H1): 상류 오류 시
             #    release_reservations 가 환불하고 state 를 pop 하는데, 오류 청크를 다
             #    소비한 제너레이터가 정상 종료 경로로 on_usage(0토큰) 를 발화해 예전 dict
             #    로 settle 이 또 돌았다(settle_tpm/settle_cost 는 마커가 없어 멱등이 아님).
-            #    pop 된 뒤엔 None → finalize 가 정산을 건너뛴다.
-            _rl_state = state.get("rate_limit_state")
+            #    pop 은 그 반대 방향도 막는다 — 정산된 뒤 어떤 경로가 release 를 다시
+            #    호출해도 비어 있어 no-op 이다(E2E S4 — finalize 가 pop 하지 않으므로
+            #    정산 주체가 pop 해야 release_reservations 주석의 전제가 성립한다).
+            _rl_state = state.pop("rate_limit_state", None)
             duration_ms = int((time.monotonic() - start_time) * 1000)
             if first_token_time is not None:
                 ttft_ms = int((first_token_time - start_time) * 1000)
@@ -386,11 +393,18 @@ async def _handle_openai(request: Request, path: str):
             ),
             status_code=status,
             media_type="text/event-stream",
+            # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     else:
-        status, response_body, resp_headers, usage = await adapter.invoke(
-            body, model_config.provider_model_id, **invoke_kwargs
-        )
+        try:
+            status, response_body, resp_headers, usage = await adapter.invoke(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+        except Exception:
+            # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            raise
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await cost_recorder.finalize(
@@ -402,7 +416,8 @@ async def _handle_openai(request: Request, path: str):
                 False,
                 duration_ms,
                 ttft_ms=duration_ms,
-                rate_limit_state=rate_limit_state,
+                # pop — 정산 완료 표시(E2E S4).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 # Both streaming and non-streaming are captured by Bedrock invocation
                 # logging (measured 2026-09-03 — one record per invocation either way), so
@@ -711,7 +726,6 @@ async def _handle_responses(request: Request):
         "endpoint": model_config.endpoint,
         "wire": "responses",
     }
-    rate_limit_state = state.get("rate_limit_state")
 
     # Rewrite the outgoing model id to the resolved provider_model_id (e.g. openai.gpt-5.5,
     # openai.gpt-5.6-terra on Mantle, us.openai.gpt-5.6-terra on the runtime plane), so the
@@ -790,7 +804,8 @@ async def _handle_responses(request: Request):
             await cost_recorder.finalize(
                 redis, auth_context, model_config, usage, request_id, is_stream, duration_ms,
                 ttft_ms=ttft_ms,
-                rate_limit_state=rate_limit_state,
+                # 호출 시점 pop — messages.py 의 _ws_record 와 같은 계약(E2E S4).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"), client=client,
             )
 
@@ -890,9 +905,14 @@ async def _handle_responses(request: Request):
         # the Bedrock model-invocation log record); always None on Mantle, which AWS does
         # not capture in invocation logging at all — so a NULL column here is a true
         # statement about the plane, not a lost value.
-        status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
-            body, model_config.provider_model_id, **invoke_kwargs
-        )
+        try:
+            status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+        except Exception:
+            # 계약 밖 예외 — 해제 후 재전파(E2E S4).
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            raise
 
         # 비-2xx 면 예약을 스트림 전달 전에 되돌린다. release_reservations 가
         # state["rate_limit_state"] 를 pop 하므로, 오류 청크 소비 후 정상 종료 경로로
@@ -904,8 +924,9 @@ async def _handle_responses(request: Request):
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
-            # 호출 시점에 재조회 — 위 release 가 pop 한 뒤면 None (E2E S3-H1).
-            _rl_state = state.get("rate_limit_state")
+            # 호출 시점에 pop — 정산 완료 표시. release 가 먼저 pop 했으면 None
+            # (E2E S3-H1), 정산 후 재-release 도 막는다(E2E S4).
+            _rl_state = state.pop("rate_limit_state", None)
             duration_ms = int((time.monotonic() - start_time) * 1000)
             if first_token_time is not None:
                 ttft_ms = int((first_token_time - start_time) * 1000)
@@ -965,17 +986,25 @@ async def _handle_responses(request: Request):
             ),
             status_code=status,
             media_type="text/event-stream",
+            # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
     else:
-        status, response_body, resp_headers, usage = await adapter.invoke(
-            body, model_config.provider_model_id, **invoke_kwargs
-        )
+        try:
+            status, response_body, resp_headers, usage = await adapter.invoke(
+                body, model_config.provider_model_id, **invoke_kwargs
+            )
+        except Exception:
+            # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            raise
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
             await cost_recorder.finalize(
                 redis, auth_context, model_config, usage, request_id, False, duration_ms,
                 ttft_ms=duration_ms,
-                rate_limit_state=rate_limit_state,
+                # pop — 정산 완료 표시(E2E S4).
+                rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
