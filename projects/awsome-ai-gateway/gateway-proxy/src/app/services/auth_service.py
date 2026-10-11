@@ -65,6 +65,104 @@ def _extract_bearer_token(authorization: str) -> str:
     return authorization[7:]
 
 
+async def _resolve_entitlements(
+    db: AsyncSession, user_id: str, team_id: str | None
+) -> tuple[list[str] | None, list[str] | None]:
+    """(allowed_models, allowed_clients) 해소 — VK/JWT 공용.
+
+    allowed_models — 우선순위 user > team > none (260626_comm_customer 항목2).
+      user_allowed_models 행 존재 → 그 화이트리스트만 (팀 무시).
+      user 행 0개 → team_allowed_models 로 폴백. 둘 다 없음 → None(전체 허용).
+    ★ fail-closed: 국가핵심기술 제한이므로, user override 조회가 DB 오류로 실패하면
+      제한을 우회시키지 않고 인증을 막는다(allowed_clients 의 fail-open 과 다름).
+
+    allowed_clients — 우선순위 user > team > org > none (alembic 0038).
+      각 스코프에서 행 0개 = 정책 없음 = 하위 스코프로 폴백. 전면 거부는 표현 불가.
+      모두 없음 → None(전체 허용). DB 조회 실패 시 막지 않음(allow-all) —
+      fail-open(soft gating) — 다만 무음으로 끄지 않고 경고 로그를 남긴다.
+    """
+    # allowed_models
+    try:
+        uam_result = await db.execute(
+            select(UserAllowedModel.model_alias).where(
+                UserAllowedModel.user_id == user_id
+            )
+        )
+        user_aliases = list(uam_result.scalars().all())
+    except Exception:
+        logger.warning(
+            "user_allowed_models_lookup_failed_fail_closed",
+            user_id=str(user_id),
+            exc_info=True,
+        )
+        raise PermissionError("model access policy unavailable (fail-closed)")
+
+    allowed_models: list[str] | None
+    if user_aliases:
+        allowed_models = user_aliases
+    elif team_id:
+        tam_result = await db.execute(
+            select(TeamAllowedModel.model_alias).where(
+                TeamAllowedModel.team_id == team_id
+            )
+        )
+        team_aliases = list(tam_result.scalars().all())
+        allowed_models = team_aliases if team_aliases else None
+    else:
+        allowed_models = None
+
+    # allowed_clients — 실패 시 fail-open 이지만 관측은 남긴다.
+    allowed_clients: list[str] | None = None
+    try:
+        rows = (
+            await db.execute(
+                _sql_text(
+                    "SELECT client FROM auth.user_allowed_clients WHERE user_id = :uid"
+                ),
+                {"uid": str(user_id)},
+            )
+        ).scalars().all()
+        if rows:
+            allowed_clients = list(rows)
+        elif team_id:
+            rows = (
+                await db.execute(
+                    _sql_text(
+                        "SELECT client FROM auth.team_allowed_clients WHERE team_id = :tid"
+                    ),
+                    {"tid": str(team_id)},
+                )
+            ).scalars().all()
+            if rows:
+                allowed_clients = list(rows)
+            else:
+                rows = (
+                    await db.execute(
+                        _sql_text(
+                            """
+                            SELECT oac.client FROM auth.org_allowed_clients oac
+                             WHERE oac.org_id = (
+                                 SELECT d.org_id FROM auth.teams t
+                                  JOIN auth.departments d ON d.id = t.dept_id
+                                 WHERE t.id = :tid
+                             )
+                            """
+                        ),
+                        {"tid": str(team_id)},
+                    )
+                ).scalars().all()
+                allowed_clients = list(rows) if rows else None
+    except Exception:
+        logger.warning(
+            "allowed_clients_lookup_failed_fail_open",
+            user_id=str(user_id),
+            exc_info=True,
+        )
+        allowed_clients = None
+
+    return allowed_models, allowed_clients
+
+
 def _is_jwt_token(token: str) -> bool:
     """JWT 형태 판별: '.' 구분 3-part."""
     parts = token.split(".")
@@ -131,82 +229,9 @@ class VKAuthStrategy:
         if user is None or not user.is_active:
             raise PermissionError("User not found or inactive")
 
-        # allowed_models 스냅샷 — 우선순위 user > team > none (260626_comm_customer 항목2).
-        #   user_allowed_models 행 존재 → 그 화이트리스트만 (팀 무시).
-        #   user 행 0개 → team_allowed_models 로 폴백. 둘 다 없음 → None(전체 허용).
-        # ★ fail-closed: 국가핵심기술 제한이므로, user override 조회가 DB 오류로 실패하면
-        #   제한을 우회시키지 않고 인증을 막는다(allowed_clients 의 fail-open 과 다름).
-        try:
-            uam_result = await db.execute(
-                select(UserAllowedModel.model_alias).where(
-                    UserAllowedModel.user_id == user.id
-                )
-            )
-            user_aliases = list(uam_result.scalars().all())
-        except Exception:
-            logger.warning(
-                "user_allowed_models_lookup_failed_fail_closed",
-                user_id=str(user.id),
-                exc_info=True,
-            )
-            raise PermissionError(
-                "model access policy unavailable (fail-closed)"
-            )
-
-        allowed_models: list[str] | None
-        if user_aliases:
-            allowed_models = user_aliases
-        elif user.team_id:
-            tam_result = await db.execute(
-                select(TeamAllowedModel.model_alias).where(
-                    TeamAllowedModel.team_id == user.team_id
-                )
-            )
-            team_aliases = list(tam_result.scalars().all())
-            allowed_models = team_aliases if team_aliases else None
-        else:
-            allowed_models = None
-
-        # allowed_clients — 우선순위 user > team > org > none (alembic 0038,
-        # allowed_models 의 user > team > none 과 같은 구조에 org 기본값 한 단계 추가).
-        #   각 스코프에서 행 0개 = 정책 없음 = 하위 스코프로 폴백. 전면 거부는 표현 불가.
-        #   모두 없음 → None(전체 허용).
-        # text 는 모듈 상단에서 import — except 가 ImportError 까지 삼켜 enforcement 를
-        # 조용히 끄지 않도록(실제 DB I/O 실패만 fail-open) 범위를 좁힌다.
-        allowed_clients: list[str] | None = None
-        try:
-            rows = (await db.execute(
-                _sql_text("SELECT client FROM auth.user_allowed_clients WHERE user_id = :uid"),
-                {"uid": str(user.id)},
-            )).scalars().all()
-            if rows:
-                allowed_clients = list(rows)
-            elif user.team_id:
-                rows = (await db.execute(
-                    _sql_text(
-                        "SELECT client FROM auth.team_allowed_clients WHERE team_id = :tid"
-                    ),
-                    {"tid": str(user.team_id)},
-                )).scalars().all()
-                if rows:
-                    allowed_clients = list(rows)
-                else:
-                    rows = (await db.execute(
-                        _sql_text(
-                            """
-                            SELECT oac.client FROM auth.org_allowed_clients oac
-                             WHERE oac.org_id = (
-                                 SELECT d.org_id FROM auth.teams t
-                                  JOIN auth.departments d ON d.id = t.dept_id
-                                 WHERE t.id = :tid
-                             )
-                            """
-                        ),
-                        {"tid": str(user.team_id)},
-                    )).scalars().all()
-                    allowed_clients = list(rows) if rows else None
-        except Exception:
-            allowed_clients = None  # DB 조회 실패 시 막지 않음(allow-all) — fail-open(soft gating)
+        allowed_models, allowed_clients = await _resolve_entitlements(
+            db, str(user.id), str(user.team_id) if user.team_id else None
+        )
 
         auth_context = AuthContext(
             user_id=str(user.id),
@@ -368,6 +393,32 @@ class JWTAuthStrategy:
             except ValueError:
                 logger.warning("unknown_role_in_jwt", role=str(r))
 
+        # ★ 계정 상태 + entitlement 재검증 — 서명만 맞으면 통과하던 시절에는
+        #    비활성화된 사용자의 생존 JWT 가 만료 때까지 유효했고, allowed_models/
+        #    allowed_clients 도 전부 None 으로 들어가 VK 의 Key Scope 를 우회할 수
+        #    있었다. db 가 있으면 VK 와 동일 정책을 적용한다. Role.ADMIN 은
+        #    콘솔 관리자라 모델/클라이언트 ACL 대상에서 제외(기존 계약 유지).
+        #    db is None(DB_DEGRADED) 이면 해소 자체가 불가 — 캐시된 kid 로 서명은
+        #    검증되지만 ACL 은 미검증(None)으로 통과시키는 디그레이드 계약 유지.
+        allowed_models: list[str] | None = None
+        allowed_clients: list[str] | None = None
+        if db is not None:
+            user_row = (
+                await db.execute(
+                    select(User.is_active, User.team_id).where(
+                        User.id == claims["user_id"]
+                    )
+                )
+            ).first()
+            if user_row is None or not user_row.is_active:
+                raise PermissionError("User not found or inactive")
+            if Role.ADMIN not in roles:
+                allowed_models, allowed_clients = await _resolve_entitlements(
+                    db,
+                    str(claims["user_id"]),
+                    str(user_row.team_id) if user_row.team_id else None,
+                )
+
         return AuthContext(
             user_id=claims["user_id"],
             team_id=claims["team_id"],
@@ -375,11 +426,8 @@ class JWTAuthStrategy:
             roles=roles,
             auth_type=AuthType.JWT,
             key_id=None,
-            allowed_models=None,  # JWT는 Key Scope 없음
-            # allowed_clients 미설정(None=both) — JWT 경로는 client 정책을 강제하지 않음.
-            # 의도적: Claude Code/Cowork 추론 트래픽은 VK(api-key-helper/inferenceGatewayApiKey)
-            # 로 인증하므로 VK 경로의 allowed_clients 로 커버됨. JWT 는 admin/console 경로.
-            # JWT 사용자까지 강제하려면 claims["user_id"] 로 동일 DB 조회를 추가하면 됨(향후).
+            allowed_models=allowed_models,
+            allowed_clients=allowed_clients,
         )
 
 

@@ -483,10 +483,13 @@ def create_app() -> FastAPI:
     # 미들웨어에서 app.state 접근을 위한 scope["state"] 주입 미들웨어 (pure ASGI).
     # BaseHTTPMiddleware (@app.middleware("http")) 는 StreamingResponse 와
     # 호환되지 않아 stream=true 요청이 anyio.EndOfStream → "No response returned"
-    # 로 500 을 반환하는 알려진 이슈가 있어 pure ASGI 로 작성. 의존 순서:
-    # OTel → Auth → Budget → Downgrade → RateLimit → HeaderInjector → state → router
-    # add_middleware 는 LIFO 라 "마지막 등록 = 가장 안쪽" 이므로 state 는
-    # 라우터 직전에 위치하도록 등록 순서상 최하단에 둔다.
+    # 로 500 을 반환하는 알려진 이슈가 있어 pure ASGI 로 작성.
+    #
+    # ⚠️ 위치 주의: add_middleware 는 user_middleware.insert(0,…) 이라 **마지막
+    #    등록 = 가장 바깥(outermost)** — StateInjection 은 라우터 직전이 아니라
+    #    OTel 보다도 먼저 실행돼 모든 consumer 앞에서 state 를 채운다. 이 순서가
+    #    맞아야 Auth/Budget/RateLimit 이 _redis/_session_factory 를 읽을 수 있다.
+    #    "라우터 직전"으로 옮기면 전 요청이 401 이 된다.
     class StateInjectionMiddleware:
         def __init__(self, app):
             self.app = app

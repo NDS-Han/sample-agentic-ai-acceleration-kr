@@ -23,6 +23,25 @@ from app.services.oidc_service import (
 
 router = APIRouter(prefix="/v1/auth", tags=["OIDC Auth"])
 
+# exchange 는 JWT 검증(JWKS 조회 가능) + 사용자/팀 upsert + VK 발급까지 하는
+# 무거운 쓰기 경로다. 인증 없이 열려 있으므로 호출당 비용을 공격자가 IP 만큼
+# 증폭할 수 있다 — IP 당 분당 횟수를 고정창으로 제한한다. 정상 CLI 는 로그인
+# 시 1~2회만 호출한다.
+_EXCHANGE_RPM_PER_IP = 10
+
+
+def _client_ip(request: Request) -> str:
+    """직접 프록시가 기록한 진짜 클라이언트 IP — XFF 가장 오른쪽 홉.
+
+    ALB 뒤에서 request.client 는 전부 같은 ALB 주소라 per-IP 리밋이 무의미해지고,
+    XFF 왼쪽 홉은 클라이언트 위조가 가능하다. 오른쪽 홉은 프록시가 직접 추가한
+    값이라 위조 불가(프록시가 덮어쓰는 배포 계약 전제). XFF 없으면 직접 피어.
+    """
+    xff = request.headers.get("x-forwarded-for", "")
+    if xff:
+        return xff.split(",")[-1].strip() or "unknown"
+    return request.client.host if request.client else "unknown"
+
 
 def _oidc_error(status_code: int, err_type: str, message: str) -> HTTPException:
     """프로젝트 에러 봉투를 **한 번만** 씌운 HTTPException 을 만든다.
@@ -82,6 +101,27 @@ async def exchange_oidc_jwt(
     token = _extract_bearer(request)
     redis = request.app.state.redis
 
+    # 비용 상한: 고정창 레이트리밋. INCR+EXPIRE 는 비원자적이지만 창 첫 요청에만
+    # EXPIRE 가 붙어 최악의 경우 창이 늘어날 뿐 제한이 풀리지는 않는다.
+    # redis 장애 시엔 VK 매핑 저장 자체가 불가라 리밋 skip 여부는 무의미(fail-open).
+    ip = _client_ip(request)
+    if redis is not None:
+        rl_key = f"rl:auth_exchange:{ip}"
+        try:
+            n = await redis.incr(rl_key)
+            if n == 1:
+                await redis.expire(rl_key, 60)
+            if n > _EXCHANGE_RPM_PER_IP:
+                raise _oidc_error(
+                    429,
+                    "rate_limited",
+                    f"Too many exchange requests (>{_EXCHANGE_RPM_PER_IP}/min). Retry later.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 리밋 카운터 자체의 장애는 요청을 막지 않는다
+
     try:
         return await svc.exchange_jwt_for_vk(
             session,
@@ -89,7 +129,7 @@ async def exchange_oidc_jwt(
             token=token,
             device_name=body.device_name,
             sso_session_expires_at=body.sso_session_expires_at,
-            ip_address=request.client.host if request.client else "0.0.0.0",
+            ip_address=ip,
             request_id=request.headers.get("x-request-id", ""),
         )
     except OIDCAuthError as e:
