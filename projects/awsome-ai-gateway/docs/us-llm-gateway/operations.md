@@ -133,6 +133,7 @@ Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 beta 2개와 `safeguar
 선택 — ⚠️ 켜면 요청 JSON·응답 전문이 **마스킹 없이** S3 에 저장된다. 잠금이 두 겹: ① terraform sink + `gatewayProxy.env` (`update-scripts/20-enable-body-logging.sh` 가 여는 쪽), ② `/monitoring` 런타임 토글(기본 OFF). `env --apply` + install-eks.sh 후에도 수집은 꺼져 있다.
 
 ```bash
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 20-enable-body-logging.sh                  # 상태 (읽기 전용)
 bash 20-enable-body-logging.sh tfvars --apply    # tfvars 편집 → 운영자가 terraform apply
 bash 20-enable-body-logging.sh env --apply       # values env 주입 → 운영자가 install-eks.sh
@@ -148,10 +149,11 @@ bash 20-enable-body-logging.sh verify            # 버킷/스트림/env 검증
 선택 — 기본 `mock` 은 메일을 보내지 않는다. 실제 발송은 `notificationWorker.email.provider` 를 `internal_api`·`smtp`·`ses` 중 하나로 전환해야 한다. values 파일은 `update-scripts/21-set-notification-provider.sh` 가 스코프 편집으로 채우고(수동 grep/sed 금지 — 주석·서식이 날아간다), `ses` 선택 시 IAM/IRSA 는 `update-scripts/22-setup-notification-ses-irsa.sh` 가 만든다.
 
 ```bash
-cd docs/us-llm-gateway/update-scripts
+cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 21-set-notification-provider.sh                       # 현재 상태
 bash 21-set-notification-provider.sh <provider> --apply    # mock|internal-api|smtp|ses
-cd ../../.. && ./deployment/scripts/install-eks.sh dev     # 실제 반영은 install-eks.sh (repo 루트에서)
+cd ~/awsome-ai-gateway                                     # install-eks.sh 는 repo 루트에서
+bash deployment/scripts/install-eks.sh dev                 # 실제 반영은 install-eks.sh
 ```
 
 상세 절차·제약·수동 설정 → **[ops/8-W-notifications.md](ops/8-W-notifications.md)**

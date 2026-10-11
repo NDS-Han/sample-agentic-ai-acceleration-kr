@@ -51,6 +51,7 @@ write-through → 게이트웨이는 요청당 인프로세스 캐시(TTL 기본
 ▶ **실행** · 배포 EC2
 
 ```bash
+export DEPLOY_ENV=dev    # prod 작업이면 prod — 스크립트·terraform 디렉터리·install-eks 가 모두 이 값을 따른다
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 20-enable-body-logging.sh
 ```
@@ -64,12 +65,12 @@ tfvars 의 `enable_body_logging` · terraform output · 파드 env · values 키
 
 ```bash
 bash 20-enable-body-logging.sh tfvars --apply     # terraform.tfvars 편집
-cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev
+cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-$DEPLOY_ENV
 terraform plan  -target=module.body_logging -target=module.irsa
 terraform apply -target=module.body_logging -target=module.irsa
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 20-enable-body-logging.sh env --apply        # values 의 gatewayProxy.env 주입
-cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
+cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
 ```
 
 스크립트는 **파일만** 쓰고 terraform·helm 은 직접 돌리지 않는다(update-scripts
@@ -90,10 +91,10 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 > (imageRegistry·aurora/redis host·IRSA role ARN·OIDC issuer 등)을 채운다.
 > values 파일만 넘기는 helm upgrade 는 그 값들을 placeholder 로 되돌린다.
 >
-> 🔴 **정상 plan 은 `9 add / 1 change / 0 destroy` 다.** `1 change` 는
-> gateway-proxy IRSA 정책(`aws_iam_policy.bedrock`)에 Firehose statement 가
-> 제자리 추가되는 것이다. 그 이상의 change 나 destroy 가 보이면 멈춘다 —
-> body-logging 모듈과 무관한 diff 는 이 작업의 범위가 아니다.
+> 🟢 **기대되는 plan 은 `9 add / 1 change / 0 destroy` 다.** 1 change 는
+> gateway-proxy IRSA 정책이 Firehose statement 를 받는 것 — 모듈 변경의
+> 일부다. 그 외의 change/destroy 가 보이면 멈춘다 — body-logging 모듈과
+> 무관한 diff 는 이 작업의 범위가 아니다.
 
 **(3) 검증**
 
@@ -123,7 +124,7 @@ s3://<bucket>/provider=<p>/client=<c>/dt=<YYYY-MM-DD>/<records>.gz
 
 ```bash
 bash 20-enable-body-logging.sh disable --apply
-cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
+cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
 ```
 
 env 두 개를 values 에서 제거하고 install-eks.sh 로 재배포한다. **S3 버킷과 Firehose 는 지우지

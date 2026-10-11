@@ -105,6 +105,27 @@ def test_enabled_untouched_on_legacy_family():
     assert b["thinking"] == {"type": "enabled", "budget_tokens": 1024}
 
 
+def test_legacy_enabled_budget_clamped_below_max_tokens():
+    """강등 haiku + enabled thinking: Bedrock 은 budget_tokens < max_tokens 를
+    요구한다 — sanitize 의 64000 클램프 뒤 budget 이 크면 그대로 400."""
+    b = normalize_thinking(
+        _body(max_tokens=64000,
+              thinking={"type": "enabled", "budget_tokens": 100000}), HAIKU_45
+    )
+    assert b["thinking"] == {"type": "enabled", "budget_tokens": 63999}
+
+
+def test_legacy_enabled_dropped_when_no_budget_room():
+    """max_tokens 가 최소 budget(1024)+1 이하면 thinking 을 통째로 뺀다 —
+    1024 미만 budget 은 Bedrock 이 거절하므로 enabled 로는 못 살린다."""
+    b = normalize_thinking(
+        _body(max_tokens=1024,
+              thinking={"type": "enabled", "budget_tokens": 5000}), HAIKU_45
+    )
+    assert "thinking" not in b
+    assert "output_config" not in b
+
+
 # --- pass-through cases -------------------------------------------------------
 
 
@@ -245,7 +266,7 @@ def test_empty_system_message_removed_for_rejecting_model():
 
 @pytest.mark.parametrize("model_id", [SONNET_55, OPUS_55])
 def test_new_fields_kept_for_beta_body_models(model_id):
-    """신형 필드를 받는 모델에는 output_config·system 메시지를 그대로 둔다."""
+    """신형 필드를 받는 모델 + 필드를 여는 beta 전달 = output_config·system 유지."""
     msgs = [
         {"role": "user", "content": "a"},
         {"role": "system", "content": [
@@ -262,20 +283,17 @@ def test_new_fields_kept_for_beta_body_models(model_id):
     assert b["max_tokens"] == 128000
 
 
-@pytest.mark.parametrize("model_id", [SONNET_55, OPUS_55])
-def test_beta_body_model_without_beta_still_strips(model_id):
-    """5.5 계열이어도 그 beta 가 전달되지 않으면 필드는 거절된다(2026-10-09 실측).
-
-    ``BEDROCK_FORWARD_BETAS=""`` 로 끄면 5.5 도 ``messages.N.output_config`` 400 —
-    지우는 쪽이 맞다.
-    """
-    msgs = [
-        {"role": "user", "content": "a"},
-        {"role": "system", "content": [{"type": "text", "text": "ctx"}],
-         "output_config": {"effort": "high"}},
-    ]
-    b = sanitize_bedrock_messages(_body(messages=msgs), model_id)
-    assert all("output_config" not in m for m in b["messages"])
+def test_new_fields_dropped_on_accepting_model_without_beta():
+    """5.5라도 필드를 여는 beta 가 전달되지 않으면 신형 필드는 걷어낸다 — beta 를
+    끈 요청(`BEDROCK_FORWARD_BETAS=""`)에선 5.5도 `Extra inputs` 400(리뷰 지적)."""
+    b = sanitize_bedrock_messages(
+        _body(messages=[
+            {"role": "user", "content": "a"},
+            {"role": "system", "content": [{"type": "text", "text": "ctx"}],
+             "output_config": {"effort": "high"}},
+        ]), SONNET_55,
+        forwarded_betas=[],
+    )
     assert [m["role"] for m in b["messages"]] == ["user"]
     assert "ctx" in str(b["system"])
 
@@ -298,7 +316,7 @@ def test_max_tokens_clamped_by_alias_family():
 
 
 def test_beta_body_fields_kept_by_alias():
-    """alias 로만 판정해도 신형 계열은 필드를 유지한다."""
+    """alias 로만 판정해도 신형 계열 + beta 전달이면 필드를 유지한다."""
     msgs = [{"role": "user", "content": "a"},
             {"role": "assistant", "content": "b", "output_config": {"effort": "low"}}]
     b = sanitize_bedrock_messages(
@@ -308,23 +326,21 @@ def test_beta_body_fields_kept_by_alias():
     assert b["messages"] == msgs
 
 
-def test_forwarded_beta_stripped_on_rejecting_model():
-    """필드를 여는 beta 를 전달해도 거절 실측 모델에서는 필드를 지운다.
+def test_forwarded_beta_strips_fields_on_rejecting_model():
+    """필드를 여는 beta 가 전달돼도, 필드를 거절하는 모델이면 정규화한다.
 
-    beta 이름은 전 모델이 받지만 필드는 모델이 받아야 한다 — 2026-10-09 us-west-2
-    InvokeModel 실측에서 output_config + per-turn-control 은 opus-5-5 · sonnet-5-5
-    만 200, opus-5 · sonnet-5 · 4.x · haiku-4-5 는 전부 400.
+    beta 는 모든 모델이 받지만 신형 필드는 모델이 받아야 한다 — 리뷰 실측에서
+    opus-5·sonnet-5·4.x·haiku-4-5 는 beta 가 붙어도 400. 필드 유지는
+    수용 실측 모델(opus-5-5·sonnet-5-5) AND beta 전달의 AND 조건이다.
     """
-    msgs = [
-        {"role": "user", "content": "a"},
-        {"role": "system", "content": [{"type": "text", "text": "ctx"}],
-         "output_config": {"effort": "high"}},
-    ]
     b = sanitize_bedrock_messages(
-        _body(messages=msgs), OPUS_48,
+        _body(messages=[
+            {"role": "user", "content": "a"},
+            {"role": "system", "content": [{"type": "text", "text": "ctx"}],
+             "output_config": {"effort": "high"}},
+        ]), OPUS_48,
         forwarded_betas=["per-turn-control-2026-07-01", "inline-tools-2026-09-15"],
     )
-    assert all("output_config" not in m for m in b["messages"])
     assert [m["role"] for m in b["messages"]] == ["user"]
     assert "ctx" in str(b["system"])
 

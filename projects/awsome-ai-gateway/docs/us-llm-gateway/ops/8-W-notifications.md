@@ -60,14 +60,22 @@ bash 21-set-notification-provider.sh smtp --apply \
 # 4. SES (IRSA 먼저)
 bash 22-setup-notification-ses-irsa.sh --apply
 bash 21-set-notification-provider.sh ses --apply \
-    --region <SES-리전, 예: us-west-2> --from no-reply@example.com --from-name "LLM Gateway"
+    --region us-west-2 --from no-reply@example.com --from-name "LLM Gateway"
 ```
 
 > ⚠️ **SMTP 자격증명 경로 주의** — 차트는 `notificationWorker.email.smtp.credentialsSecretName`만 읽는다. `email` 바로 아래에 쓰면 인증이 **조용히** 빠진다. 스크립트는 올바른 경로에 쓰고, `--apply` 시 helm 렌더로 `SMTP_USERNAME`이 실제 env에 타는지 검증한다.
 
 > ℹ️ **notification-worker 기본 이미지는 `mock`/`internal_api`/`smtp`/`ses` 모두 포함한다.** `Dockerfile`이 `http`·`aiosmtplib`·`boto3` extras를 기본 설치하므로, 제공자 전환 시 별도 이미지 rebuild는 필요 없다.
 >
-> ⚠️ **최초 1회는 SES 코드가 들어간 이미지로 배포해야 한다.** 이 변경 이전 이미지(`1.0.44-phase2` 등)에는 `ses` provider가 없다. 템플릿 태그는 `1.0.45-ses`로 이미 올라와 있다 — `rebuild-image.sh`는 helm이 당길 태그를 그대로 쓰므로, 태그 동기화(`13-bump-image-tags.sh`)가 rebuild보다 **먼저**다. 순서: `13-bump-image-tags.sh <env>` → `rebuild-image.sh notification-worker <env>` → `install-eks.sh <env>`. 순서를 바꾸면 ECR의 라이브 태그를 덮어쓴다.
+> ⚠️ **최초 1회는 SES 코드가 들어간 이미지로 배포해야 한다.** 이 변경 이전 이미지(`1.0.44-phase2` 등)에는 `ses` provider가 없다. 머지 후 **13 → rebuild → install-eks** 순으로 — 태그를 먼저 올려야 rebuild 가 그 태그로 푸시해 기존 ECR 태그를 덮어쓰지 않는다:
+>
+> ```bash
+> cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
+> bash 13-bump-image-tags.sh dev --apply                     # 템플릿 tag(1.0.45-ses)를 배포 values 에 반영
+> cd ~/awsome-ai-gateway
+> bash deployment/scripts/rebuild-image.sh notification-worker dev   # 새 태그로 빌드·푸시
+> bash deployment/scripts/install-eks.sh dev
+> ```
 
 ---
 
@@ -96,7 +104,7 @@ kubectl -n llm-gateway logs -l app.kubernetes.io/component=notification-worker -
   ```bash
   kubectl -n llm-gateway get sa notification-worker -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'
   ```
-- 발송 기록은 DB `notification.notification_logs`에서 확인 — admin-api 이미지에는 `psql`이 없으므로 임시 postgres 파드로 간다(`PGHOST`/`PGPASSWORD`는 배포 EC2의 저장된 접속 정보 사용):
+- 발송 기록은 DB `notification.notification_logs`에서 확인 — admin-api 이미지에는 `psql`이 없으므로 일회용 psql 파드로 간다([8-P](8-P-prod.md) ②-a의 `PGHOST`·`PGPASSWORD`가 있는 셸):
   ```bash
   kubectl -n llm-gateway run psql-check --restart=Never --image=public.ecr.aws/docker/library/postgres:16 \
     --env="PGHOST=$PGHOST" --env="PGUSER=gateway" --env="PGDATABASE=gateway" --env="PGPASSWORD=$PGPASSWORD" \

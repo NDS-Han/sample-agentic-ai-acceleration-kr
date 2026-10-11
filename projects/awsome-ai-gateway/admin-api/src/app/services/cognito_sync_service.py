@@ -47,10 +47,10 @@ def _effective_role(
     ``_needs_update`` (gate) 와 ``_upsert_one_user`` (실제 upsert) 양쪽이 반드시 이
     함수를 통해서만 role 을 비교/대입해야 결과가 일치한다.
     """
-    # ADMIN 승격이 팀 이관 강등보다 먼저다 — 팀 리더가 ADMIN 그룹에 들어가면서 같은
-    # 동기화 주기에 팀도 바뀌면 DEVELOPER 가 되어, 로그인 경로(ADMIN)와 어긋난다.
     if derived_role == UserRole.ADMIN:
-        return derived_role
+        # ADMIN 승격이 최우선 — TEAM_LEADER 이관 강등보다 먼저 봐야, 같은 동기화
+        # 주기에 ADMIN 그룹 진입 + 팀 이동이 겹쳐도 로그인 경로와 결과가 같다.
+        return UserRole.ADMIN
     if existing_role == UserRole.TEAM_LEADER:
         if existing_team_id != new_team_id:
             # 팀 리더십은 팀별 속성: 이관되면 DEVELOPER 로 강등

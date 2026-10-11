@@ -21,6 +21,7 @@ import { SetBudgetDialog } from '@/components/budgets/SetBudgetDialog';
 vi.mock('@/lib/actions/budgets', () => ({
   setBudgetAction: vi.fn(),
   deleteUserBudgetAction: vi.fn(),
+  getBudgetConfigAction: vi.fn(async () => ({ success: true, data: { configured: false } })),
 }));
 // ⚠️ 실제 export 이름과 맞춰야 한다. 처음에 이름을 틀렸더니 다이얼로그의 useEffect 가
 //    undefined 를 호출해 unhandled rejection 이 4건 났다 — 테스트는 "통과" 로 보이지만

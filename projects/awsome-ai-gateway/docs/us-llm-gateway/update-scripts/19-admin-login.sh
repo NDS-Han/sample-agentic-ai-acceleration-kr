@@ -128,12 +128,13 @@ LO_LIVE=0; [[ $'\n'"$LIVE_LO"$'\n' == *$'\n'"$LOGOUT_URL"$'\n'* ]] && LO_LIVE=1
 tf_var_callbacks() {
   local out
   out=$(echo 'jsonencode(var.cognito_callback_urls)' | terraform -chdir="$TF_DIR" console 2>/dev/null | tail -1)
-  jq -er 'fromjson | .[]' <<<"$out" 2>/dev/null
+  # -e 금지: 빈 리스트 [] 는 읽기 실패가 아니라 빈 목록 — 호출자가 die 하지 않게.
+  jq -r 'fromjson | .[]' <<<"$out" 2>/dev/null
 }
 tf_var_logouts() {
   local out
   out=$(echo 'jsonencode(var.cognito_logout_urls)' | terraform -chdir="$TF_DIR" console 2>/dev/null | tail -1)
-  jq -er 'fromjson | .[]' <<<"$out" 2>/dev/null
+  jq -r 'fromjson | .[]' <<<"$out" 2>/dev/null
 }
 # A tfvars attribute is a top-level `name =`; a second assignment is a
 # terraform error. Fail before writing when any var file already sets it —
@@ -156,7 +157,6 @@ tfvar_list_block() {  # <var> <existing-lines> <new-url>
   block+="  \"$3\","$'\n'"]"$'\n'
   printf '%s' "$block"
 }
-
 # "deploy<TAB>KEY<TAB>value" for admin-ui / admin-api container env, from the
 # chart rendered with <values>. Later duplicates win, as in the kubelet.
 render_env() {

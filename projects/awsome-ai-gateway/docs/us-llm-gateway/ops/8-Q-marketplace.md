@@ -4,9 +4,7 @@
 
 > **한 줄**: Anthropic 신형 모델은 Bedrock **Model access 신청이 아니라 AWS Marketplace 구독**이다.
 > 모델을 게이트웨이에 등록(§8-M)해도 **계정에 구독이 없으면** 호출이 AccessDenied로 떨어진다.
-> 2026-09-21 Claude Opus 5로 실측·재현한 절차다. 실측은 US dev 가 아닌 다른 배포 환경
-> (ap-south-1, `global.` 추론 프로필)에서 했다 — US dev 에서 재현할 때는 아래 명령의
-> 리전·모델 접두사를 본문대로 `us-west-2`·`us.` 로 읽는다.
+> 2026-09-21 다른 배포 환경(dev 계정, US dev 아님)에서 Claude Opus 5로 실측·재현한 절차다.
 
 ---
 
@@ -34,16 +32,19 @@ Anthropic 모델은 **계정별 Marketplace 구독**이 필요하다(예전 Sonn
 호출 IAM 주체가 `aws-marketplace:ViewSubscriptions`/`aws-marketplace:Subscribe`를 못 가지면
 위 에러로 실패한다.
 
-실측(2026-09-21, 다른 배포 환경 — US dev 아님):
+실측(다른 배포 환경 dev 계정, 2026-09-21 — US dev 아님):
 
 ```bash
+echo '{"anthropic_version":"bedrock-2023-05-31","max_tokens":10,
+ "messages":[{"role":"user","content":"hi"}]}' > /tmp/body.json
+
 # 같은 계정·같은 역할로 — 모델별로 결과가 갈림
 aws bedrock-runtime invoke-model --region us-west-2 \
-  --model-id us.anthropic.claude-sonnet-5 --body fileb://body.json out.json
+  --model-id us.anthropic.claude-sonnet-5 --body fileb:///tmp/body.json /tmp/out-sonnet.json
 # → 200 OK (구독 있음)
 
 aws bedrock-runtime invoke-model --region us-west-2 \
-  --model-id us.anthropic.claude-opus-5 --body fileb://body.json out.json
+  --model-id us.anthropic.claude-opus-5 --body fileb:///tmp/body.json /tmp/out-opus.json
 # → AccessDeniedException (Marketplace 구독 없음)
 ```
 
@@ -101,7 +102,7 @@ aws bedrock-runtime invoke-model --region us-west-2 \
 
 Claude Code의 모델 피커에서 Default/1M 항목은 `claude-opus-5[1m]` 같은 **`[1m]` 접미 와이어
 이름**을 보낸다. 게이트웨이에서는 별도 alias로 등록한다(선례: `claude-sonnet-4-6[1m]` →
-`global.anthropic.claude-sonnet-4-6`). 진짜 1M 컨텍스트가 되려면 클라이언트의 beta 가
+`us.anthropic.claude-sonnet-4-6`). 진짜 1M 컨텍스트가 되려면 클라이언트의 beta 가
 `anthropic_beta` 본문 필드로 Bedrock 까지 도달해야 하는데, 게이트웨이는
 `BEDROCK_FORWARD_BETAS` 에 나열된 beta 만 전달한다 — 목록에 없는 beta 는 버려지므로
 **현재 [1m] 요청은 일반 모델 호출과 동일**하다. 1M 이 실제로 필요하면 해당 beta 를

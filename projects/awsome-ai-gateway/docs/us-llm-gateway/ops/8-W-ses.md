@@ -9,7 +9,7 @@
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
 bash 21-set-notification-provider.sh ses --apply \
-    --region <SES-리전, 예: us-west-2> --from no-reply@example.com --from-name "LLM Gateway"
+    --region us-west-2 --from no-reply@example.com --from-name "LLM Gateway"
 ```
 
 옵션: `--region`(기본: values의 `email.ses.region` 유지), `--from`, `--from-name`
@@ -99,7 +99,7 @@ AWS SES 콘솔에서 아래를 먼저 마칩니다.
 
 - `fromAddress` 도메인/주소를 **Verified Identity**로 등록
 - Sandbox 해제 또는 수신자 도메인/주소를 SES Identity/Configuration Set으로 허용
-- `region`은 Verified Identity가 있는 리전으로 설정(예: `us-east-1`)
+- `region`은 Verified Identity가 있는 리전으로 설정(예: `us-west-2`)
 
 ---
 
@@ -113,7 +113,7 @@ notificationWorker:
   email:
     provider: "ses"
     ses:
-      region: "us-east-1"
+      region: "us-west-2"
       fromAddress: "no-reply@llm-gateway.local"
       fromName: "LLM Gateway"
 ```

@@ -130,10 +130,10 @@ _BEDROCK_ALLOWED_FIELDS = {
     #    (`output_config.effort`). 여기 없으면 클라이언트가 보내도 우리가 버려서, 정규화를
     #    배선해도 깊이 제어가 동작하지 않는다.
     #
-    # ⚠️ 이 필드를 받는 것으로 실측된 모델은 opus-5-5 · sonnet-5-5 뿐이고, 그들도
-    #    짝 beta(per-turn-control)가 전달될 때만 받는다. 그래서 이 필드를 허용하는 것은
-    #    `sanitize_bedrock_messages` 가 나머지 요청에서 이것을 **무조건 떨구는** 것과
-    #    한 쌍이다 — 하나만 바뀌면 거절 모델(4.x·haiku 포함)이 400 을 내기 시작한다.
+    # ⚠️ legacy 계열(haiku)은 `output_config.effort` 를 받지 않는다. 그래서 이 필드를
+    #    허용하는 것은 `normalize_thinking` 이 legacy 계열에서 effort 키만 떨구는
+    #    것과 한 쌍이다 (thinking 형태와 무관하게, format 등 나머지 키는 유지).
+    #    그 두 변경 중 하나만 하면 haiku 가 400 을 내기 시작한다.
     "output_config",
 }
 
