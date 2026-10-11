@@ -22,7 +22,7 @@ from app.services.body_log_records import (
 )
 from app.services.fallback_loop import release_reservations
 from app.services.router_service import ModelInactiveError, RouterService
-from app.services.streaming import openai_sse_stream
+from app.services.streaming import openai_sse_stream, usage_status_of
 
 logger = structlog.get_logger(__name__)
 
@@ -316,6 +316,10 @@ async def _handle_openai(request: Request, path: str):
                 model_id=model_config.provider_model_id,
             )
 
+        # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로
+        # 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 http_status 인자가 잡는다.
+        outcome: dict = {}
+
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
@@ -346,6 +350,7 @@ async def _handle_openai(request: Request, path: str):
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=aws_request_id,
                 client=client,
+                status=usage_status_of(outcome, status),
             )
 
         # ⚠️ 상류가 비-2xx 면 스트림을 클라이언트에게 넘기기 **전에** 되돌린다.
@@ -390,6 +395,7 @@ async def _handle_openai(request: Request, path: str):
                 on_usage=_record,
                 tokenizer_hook=_estimate,
                 on_complete=_on_complete,
+                outcome=outcome,
             ),
             status_code=status,
             media_type="text/event-stream",
@@ -425,9 +431,22 @@ async def _handle_openai(request: Request, path: str):
                 # vLLM returns {} here → None → column stays NULL (nothing to join to).
                 bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
+                status=usage_status_of(None, status),
+            )
+        elif auth_context and status >= 500:
+            # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
+            # finalize 의 zero-usage 분기가 예약 해제도 겸한다(E2E S5).
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await cost_recorder.finalize(
+                redis, auth_context, model_config, TokenUsage(),
+                request_id, False, duration_ms,
+                ttft_ms=duration_ms,
+                rate_limit_state=state.pop("rate_limit_state", None),
+                client=client,
+                status=usage_status_of(None, status),
             )
         else:
-            # ⚠️ finalize 를 타지 않는 경로다(상류 4xx/5xx, 또는 usage 가 비어 온 응답).
+            # ⚠️ finalize 를 타지 않는 경로다(상류 4xx, 또는 usage 가 비어 온 응답).
             #    그러면 enforce_rate_limits 가 잡아 둔 TPM/CPM/CPH 예약을 되돌리는 곳이
             #    아무 데도 없다 — 이 라우트에는 폴백 루프가 없어 그쪽 unwind 도 안 돈다.
             #    400 을 연속으로 받은 사용자가 실제 지출 0 으로 자기 한도를 소진했다.
@@ -785,6 +804,8 @@ async def _handle_responses(request: Request):
         # TTFT 를 안 넘긴다)라 ttft_ms 가 항상 NULL 로 기록돼 모니터링에 "ttft=-" 로
         # 나왔다. 응답 이터레이터의 첫 청크 시각을 잡아 기록한다.
         _ws_first_frame: dict[str, float | None] = {"t": None}
+        # 요청 종결 상태 — 루프가 채우고 _ws_record 가 usage_logs.status 로 옮긴다(E2E S5).
+        _ws_outcome: dict = {}
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
@@ -807,6 +828,7 @@ async def _handle_responses(request: Request):
                 # 호출 시점 pop — messages.py 의 _ws_record 와 같은 계약(E2E S4).
                 rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"), client=client,
+                status=usage_status_of(_ws_outcome),
             )
 
         # 본문 로깅 — 웹서치 경로 전용 훅. 이 경로는 아래 `if is_stream:` 블록보다 먼저
@@ -881,6 +903,7 @@ async def _handle_responses(request: Request):
             tokenizer_hook=_estimate,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
+            outcome=_ws_outcome,
         )
         # messages.py 의 웹서치 경로와 동일 — 첫 yield 시각을 _ws_record 가 ttft_ms 로
         # 쓰게 한다. 비스트리밍은 래핑 대상이 없어 duration_ms 폴백.
@@ -921,6 +944,10 @@ async def _handle_responses(request: Request):
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
+        # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로
+        # 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 http_status 인자가 잡는다.
+        outcome: dict = {}
+
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
                 return
@@ -939,6 +966,7 @@ async def _handle_responses(request: Request):
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=aws_request_id,
                 client=client,
+                status=usage_status_of(outcome, status),
             )
 
         async def _log_body_stream(sse_text: str, log_status: str) -> None:
@@ -983,6 +1011,7 @@ async def _handle_responses(request: Request):
                 # KI-08 역산 — 이 방언은 usage 가 종결 이벤트 안에만 있어서, 그 전에
                 # 끊기면 역산이 없으면 usage_logs 행이 아예 만들어지지 않는다.
                 tokenizer_hook=_estimate,
+                outcome=outcome,
             ),
             status_code=status,
             media_type="text/event-stream",
@@ -1008,6 +1037,19 @@ async def _handle_responses(request: Request):
                 downgraded_from=state.get("downgraded_from"),
                 bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
+                status=usage_status_of(None, status),
+            )
+        elif auth_context and status >= 500:
+            # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
+            # finalize 의 zero-usage 분기가 예약 해제도 겸한다(E2E S5).
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await cost_recorder.finalize(
+                redis, auth_context, model_config, TokenUsage(),
+                request_id, False, duration_ms,
+                ttft_ms=duration_ms,
+                rate_limit_state=state.pop("rate_limit_state", None),
+                client=client,
+                status=usage_status_of(None, status),
             )
         else:
             # 예약 되돌리기 — 근거는 _handle_openai 의 같은 블록 주석 참조.

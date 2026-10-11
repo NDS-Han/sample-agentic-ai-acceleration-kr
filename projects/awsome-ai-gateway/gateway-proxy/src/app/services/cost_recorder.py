@@ -20,6 +20,24 @@ COST_STREAM_KEY = "cost:stream"
 # MAXLEN approx trim: 500 RPS × ~3분 buffer.
 COST_STREAM_MAXLEN = 100_000
 
+# usage.usage_status enum 값 — 이 집합 밖의 값은 DB INSERT 시 enum 캐스트 오류로
+# 배치 전체가 poison retry 루프에 빠지므로, 발행 전에 여기서 정규화한다.
+_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+
+
+def _normalize_usage_status(status: str | None) -> str:
+    """usage_logs.status 값을 enum 안으로 정규화한다.
+
+    알 수 없는 값은 ERROR 로 보낸다 — SUCCESS 로 삼키면 실패한 요청이 유효사용량
+    집계에 섞이고, 그대로 보내면 INSERT 가 깨져 비용 행 전체가 유실된다. 둘 사이
+    에서 "실패로 표시되는 비용 행"이 손실보다 낫다.
+    """
+    s = (status or "SUCCESS").upper()
+    if s not in _VALID_USAGE_STATUSES:
+        logger.warning("unknown_usage_status_normalized", status=status)
+        return "ERROR"
+    return s
+
 
 def resolve_context_tier(usage: TokenUsage, pricing: ModelConfigSchema) -> str | None:
     """272K long-context 티어 판정 — 과금과 감사기록(usage_logs.context_tier)이 공유하는
@@ -143,6 +161,7 @@ class CostRecorder:
         availability_fallback_from: str | None = None,
         bedrock_request_id: str | None = None,
         client: str | None = None,
+        status: str = "SUCCESS",
     ) -> Decimal:
         """요청 완료 후 critical path 전체를 동기 await으로 수행. 실제 cost_usd 반환.
 
@@ -151,7 +170,9 @@ class CostRecorder:
         XADD 자체는 1-2ms (DB I/O 없음).
 
         ``usage.total_tokens == 0`` (KI-08 tokenizer 역산까지 실패) →
-        TPM 예약만 해제하고 return.
+        TPM 예약만 해제하고 return. 단 ``status`` 가 실패(ERROR/TIMEOUT)이면
+        monitoring 이 진실을 볼 수 있게 0 비용의 usage_logs 행도 남긴다 —
+        성공 요청의 0 토큰 행만 예전처럼 쓰지 않는다(E2E S5).
         """
         # KI-08: usage 없는 disconnect 경로 — 예약을 **전부** 되돌린다.
         #
@@ -213,6 +234,27 @@ class CostRecorder:
                             "cost_release_on_disconnect_failed",
                             user_id=auth_context.user_id,
                         )
+            # 실패 종결이면 0 토큰 행도 기록한다 — 모니터링의 ERROR/TIMEOUT
+            # 집계가 이 행을 읽는다. 성공 0 토큰은 예전처럼 행을 만들지 않는다.
+            norm_status = _normalize_usage_status(status)
+            if norm_status != "SUCCESS":
+                await self._publish_to_stream(
+                    redis,
+                    auth_context=auth_context,
+                    model_config=model_config,
+                    usage=usage,
+                    cost_usd=Decimal("0"),
+                    request_id=request_id,
+                    is_stream=is_stream,
+                    duration_ms=duration_ms,
+                    ttft_ms=ttft_ms,
+                    threshold_triggered=None,
+                    downgraded_from=downgraded_from,
+                    availability_fallback_from=availability_fallback_from,
+                    bedrock_request_id=bedrock_request_id,
+                    client=client,
+                    status=norm_status,
+                )
             return Decimal("0")
 
         cost_usd = calculate_cost(usage, model_config)
@@ -478,6 +520,7 @@ class CostRecorder:
             availability_fallback_from=availability_fallback_from,
             bedrock_request_id=bedrock_request_id,
             client=client,
+            status=_normalize_usage_status(status),
         )
 
         return cost_usd
@@ -500,6 +543,7 @@ class CostRecorder:
         availability_fallback_from: str | None = None,
         bedrock_request_id: str | None = None,
         client: str | None = None,
+        status: str = "SUCCESS",
     ) -> None:
         """XADD cost:stream — worker가 배치 소비하여 DB 쓰기 + threshold pub/sub.
 
@@ -538,6 +582,7 @@ class CostRecorder:
             estimated_usage=bool(usage.estimated),
             downgraded_from=downgraded_from,
             availability_fallback_from=availability_fallback_from,
+            status=status,
             threshold_triggered=threshold_triggered,
             threshold_scope=threshold_scope,
             threshold_policy=None,  # worker는 조회 없이 "hard_block" 기본값으로 발행 — 알림 템플릿이 policy를 읽지 않아 현재 무영향

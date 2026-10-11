@@ -46,6 +46,10 @@ class CostStreamEntry(BaseModel):
     estimated_usage: bool = False
     downgraded_from: str | None = None
     availability_fallback_from: str | None = None
+    # usage_logs.status — 요청 종결 상태. SUCCESS|ERROR|TIMEOUT (usage_status enum).
+    # 워커 도입 이후 SUCCESS 하드코딩이라 monitoring ERROR/TIMEOUT 집계가 사장됐다(E2E S5).
+    # 구버전(schema_version<3) 엔트리는 부재 → 기본 SUCCESS (종전 동작 그대로).
+    status: str = "SUCCESS"
 
     requested_at: str  # ISO format
     completed_at: str  # ISO format
@@ -66,7 +70,7 @@ class CostStreamEntry(BaseModel):
     # 게이트웨이 resolve_context_tier 가 청구와 동일 판정으로 채운다.
     context_tier: str | None = None
 
-    schema_version: int = Field(default=2)
+    schema_version: int = Field(default=3)
 
     @classmethod
     def make(
@@ -91,6 +95,7 @@ class CostStreamEntry(BaseModel):
         estimated_usage: bool,
         downgraded_from: str | None,
         availability_fallback_from: str | None = None,
+        status: str = "SUCCESS",
         threshold_triggered: int | None = None,
         threshold_scope: str | None = None,
         threshold_policy: str | None = None,
@@ -124,6 +129,7 @@ class CostStreamEntry(BaseModel):
             estimated_usage=estimated_usage,
             downgraded_from=downgraded_from,
             availability_fallback_from=availability_fallback_from,
+            status=status,
             # requested_at 은 **요청 시작** 시각이다 — 게이트웨이의 Redis 예산
             # 카운터가 request_period()(시작 월)에 귀속되므로, budget_usages 행과
             # usage:daily:* 카운터도 같은 시작 시각 버킷에 두어야 두 소스가

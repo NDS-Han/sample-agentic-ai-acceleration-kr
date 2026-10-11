@@ -86,6 +86,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
+from app.services.streaming import mark_outcome, outcome_from_http
 
 logger = structlog.get_logger(__name__)
 
@@ -1894,6 +1895,7 @@ async def _anthropic_stream(
     native_trace: bool = False,
     mixed_turn_run: bool = False,
     final_turn_soft: bool = False,
+    outcome: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -1938,6 +1940,8 @@ async def _anthropic_stream(
     #: All tool_use ids of our injected searches (used by the cache-breakpoint placement and
     #: by the plumbing strip if a caller removes the tool).
     our_tool_use_ids: set[str] = set()
+    #: 상류/루프 실패 — finally 의 outcome 마킹이 읽는다(E2E S5).
+    failed = False
 
     try:
         while True:
@@ -1963,6 +1967,7 @@ async def _anthropic_stream(
 
             status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
             if status != 200:
+                failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
                 async for b in _drain_error(chunk_iter, envelope_open):
                     yield b
                 return
@@ -2409,6 +2414,7 @@ async def _anthropic_stream(
                 {"role": "user", "content": tool_results},
             ]
     except Exception:
+        failed = True
         logger.exception("web_search.anthropic_stream_failed")
         if envelope_open:
             yield _sse("error", {"type": "error",
@@ -2418,6 +2424,10 @@ async def _anthropic_stream(
     finally:
         merged.web_search_count = searches_done
         merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # 요청 종결 상태 — 200 스트림 내부 오류(error_seen)·비-200 턴·예외 모두
+        # 실패로 기록한다. 클라이언트 disconnect 는 GeneratorExit(비-Exception)라
+        # failed 가 안 서고 성공으로 남는다 — 끊긴 건 게이트웨이 실패가 아니다(E2E S5).
+        mark_outcome(outcome, "error" if (failed or error_seen) else "success")
         try:
             await on_usage(merged)
         except Exception:
@@ -2456,6 +2466,7 @@ async def _anthropic_nonstream(
     native_trace: bool = False,
     mixed_turn_run: bool = False,
     final_turn_soft: bool = False,
+    outcome: dict | None = None,
 ) -> JSONResponse:
     """Non-streaming twin of ``_anthropic_stream``: loop with ``invoke()`` and return the
     assembled final body (our plumbing removed, traces/native blocks prepended, usage rewritten
@@ -2477,6 +2488,8 @@ async def _anthropic_nonstream(
     native_blocks: list[dict] = []   # native mode: server_tool_use + result per search
     final_status = 200
     final_body: dict = {}
+    #: 루프 예외 — finally 의 outcome 마킹이 읽는다(E2E S5).
+    failed = False
 
     try:
         while True:
@@ -2594,11 +2607,17 @@ async def _anthropic_nonstream(
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
             ]
+    except Exception:
+        failed = True  # E2E S5 — 종결 상태가 성공으로 오기록되지 않게
+        raise
     finally:
         # Fire on_usage whenever any tokens accrued — even if a LATER turn failed after
         # earlier turns succeeded (tokens were consumed and must be accounted) (F-9).
         merged.web_search_count = searches_done
         merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # 요청 종결 상태 — 비-200 턴/예외는 실패로(E2E S5). on_usage=finalize 가
+        # 읽기 **전에** 마킹해야 한다.
+        outcome_from_http(outcome, final_status, failed)
         # Called even with zero tokens. A `> 0` guard used to skip on_usage when the first
         # turn died with an upstream 4xx/5xx — but that callback is cost_recorder.finalize,
         # whose zero-usage path is the ONLY place that releases the RPM/TPM/cost
@@ -2708,6 +2727,7 @@ async def _responses_stream(
     max_searches_per_turn: int = 0,
     cache_results: bool = True,
     result_text_chars: int = 0,
+    outcome: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Stitch N Responses turns into ONE response.created … response.completed stream.
 
@@ -2739,6 +2759,8 @@ async def _responses_stream(
     envelope_response_id: str | None = None
     our_call_ids: set[str] = set()  # our web_search call_ids to strip from final output (F-3 Responses)
     error_seen = False       # a 200-stream `error` event occurred (NEW round2 High-1)
+    #: 상류/루프 실패 — finally 의 outcome 마킹이 읽는다(E2E S5).
+    failed = False
 
     try:
         while True:
@@ -2757,6 +2779,7 @@ async def _responses_stream(
             turn_body["stream"] = True
             status, chunk_iter, _h, _rid = await invoke_stream(turn_body)
             if status != 200:
+                failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
                 async for b in _drain_responses_error(chunk_iter, envelope_open):
                     yield b
                 return
@@ -2971,6 +2994,7 @@ async def _responses_stream(
                 outputs.append(_responses_call_output(ps["call_id"], result_text, ok, reason))
             conv_input = conv_input + turn_output_items + outputs
     except Exception:
+        failed = True
         logger.exception("web_search.responses_stream_failed")
         if envelope_open:
             # Close the already-open envelope with a terminal response.failed so the client
@@ -2986,6 +3010,14 @@ async def _responses_stream(
     finally:
         merged.web_search_count = searches_done
         merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # 요청 종결 상태 — 비-200 턴·예외·스트림 내 오류·response.failed 종결은
+        # 실패로 기록한다. disconnect 는 failed 가 안 서 성공으로 남는다(E2E S5).
+        mark_outcome(
+            outcome,
+            "error"
+            if (failed or error_seen or final_terminal_type == "response.failed")
+            else "success",
+        )
         try:
             await on_usage(merged)
         except Exception:
@@ -3077,6 +3109,7 @@ async def _responses_nonstream(
     max_searches_per_turn: int = 0,
     cache_results: bool = True,
     result_text_chars: int = 0,
+    outcome: dict | None = None,
 ) -> JSONResponse:
     """Non-streaming twin of ``_responses_stream``."""
     merged = TokenUsage()
@@ -3087,6 +3120,8 @@ async def _responses_nonstream(
     our_call_ids: set[str] = set()
     final_status = 200
     final_body: dict = {}
+    #: 루프 예외 — finally 의 outcome 마킹이 읽는다(E2E S5).
+    failed = False
 
     try:
         while True:
@@ -3152,9 +3187,14 @@ async def _responses_nonstream(
                 new_items.append(
                     _responses_call_output(call.get("call_id"), result_text, ok, reason))
             conv_input = conv_input + new_items
+    except Exception:
+        failed = True  # E2E S5 — 종결 상태가 성공으로 오기록되지 않게
+        raise
     finally:
         merged.web_search_count = searches_done  # fire on any accrued usage even on late failure (F-9)
         merged.total_tokens = merged.input_tokens + merged.output_tokens
+        # 요청 종결 상태 — 비-200 턴/예외는 실패로(E2E S5). on_usage 가 읽기 전에 마킹.
+        outcome_from_http(outcome, final_status, failed)
         # Called even with zero tokens — the reservation release depends on this callback;
         # see the same block in _anthropic_nonstream.
         try:
@@ -3217,6 +3257,9 @@ async def run_web_search_loop(
     response_headers: Optional[dict] = None,
     on_stream_complete: Callable[[str, str], Awaitable[None]] | None = None,
     on_nonstream_complete: Callable[[int, bytes], Awaitable[None]] | None = None,
+    #: 요청 종결 상태 수집 — 라우터가 on_usage=finalize 안에서 usage_status_of 로
+    #: 읽어 usage_logs.status 에 쓴다(E2E S5). None 이면 기록하지 않는다.
+    outcome: dict | None = None,
 ) -> StreamingResponse | JSONResponse:
     """Run the server-side web-search loop and return the client response.
 
@@ -3305,6 +3348,7 @@ async def run_web_search_loop(
                 status, chunk_iter, _h, _ = await invoke_stream(base)
             except Exception:
                 # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+                mark_outcome(outcome, "error")  # E2E S5
                 try:
                     await on_usage(TokenUsage())
                 except Exception:
@@ -3316,7 +3360,7 @@ async def run_web_search_loop(
             )
             gen = (bedrock_anthropic_sse_stream if dialect == "anthropic" else responses_sse_stream)(
                 request, chunk_iter, on_usage=_stream_on_usage,
-                tokenizer_hook=tokenizer_hook)
+                tokenizer_hook=tokenizer_hook, outcome=outcome)
             return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
         base.pop("stream", None)
@@ -3325,6 +3369,7 @@ async def run_web_search_loop(
         except Exception:
             # 어댑터 계약 밖 예외 — 보수적 입장 예약(최대 N턴치)이 걸려 있으므로
             # 해제용 콜백을 발화한 뒤 재전파한다(E2E S4).
+            mark_outcome(outcome, "error")  # E2E S5
             try:
                 await on_usage(TokenUsage())
             except Exception:
@@ -3333,6 +3378,8 @@ async def run_web_search_loop(
         # ⚠️ usage>0 가드로 걸러선 안 된다 — 비-2xx/파싱실패 시 on_usage(0토큰) 만이
         #    입장 예약(보수적 max_iterations 배수)을 해제하는 유일한 경로다. 이 경로는
         #    폴백 루프의 release_reservations 도 타지 않는다(E2E S4, F-9 와 동일 근거).
+        #    종결 상태는 on_usage=finalize 가 읽기 전에 마킹한다(E2E S5).
+        outcome_from_http(outcome, status)
         await on_usage(usage or TokenUsage())
         await _log_nonstream(status, body)
         try:
@@ -3366,6 +3413,7 @@ async def run_web_search_loop(
                 status, chunk_iter, headers, _ = await invoke_stream(base)
             except Exception:
                 # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+                mark_outcome(outcome, "error")  # E2E S5
                 try:
                     await on_usage(TokenUsage())
                 except Exception:
@@ -3378,23 +3426,25 @@ async def run_web_search_loop(
             if dialect == "anthropic":
                 gen = bedrock_anthropic_sse_stream(
                     request, chunk_iter, on_usage=_stream_on_usage,
-                    tokenizer_hook=tokenizer_hook)
+                    tokenizer_hook=tokenizer_hook, outcome=outcome)
             else:
                 gen = responses_sse_stream(
                     request, chunk_iter, on_usage=_stream_on_usage,
-                    tokenizer_hook=tokenizer_hook)
+                    tokenizer_hook=tokenizer_hook, outcome=outcome)
             return StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
         try:
             status, body, _h, usage = await invoke(base)
         except Exception:
             # 어댑터 계약 밖 예외 — 입장 예약 해제 후 재전파(E2E S4).
+            mark_outcome(outcome, "error")  # E2E S5
             try:
                 await on_usage(TokenUsage())
             except Exception:
                 logger.warning("web_search.on_usage_failed")
             raise
         # ⚠️ F-7 분기와 같은 이유로 0 토큰이어도 무조건 발화 — 예약 해제의 유일한 경로.
+        outcome_from_http(outcome, status)  # E2E S5 — finalize 가 읽기 전에 마킹
         await on_usage(usage or TokenUsage())
         await _log_nonstream(status, body)
         try:
@@ -3418,6 +3468,7 @@ async def run_web_search_loop(
             max_searches_per_turn=max_searches_per_turn,
             cache_results=cache_results,
             result_text_chars=result_text_chars,
+            outcome=outcome,
             **dialect_kw,
         )
         return StreamingResponse(
@@ -3438,6 +3489,7 @@ async def run_web_search_loop(
         max_searches_per_turn=max_searches_per_turn,
         cache_results=cache_results,
         result_text_chars=result_text_chars,
+        outcome=outcome,
         **dialect_kw,
     )
     # Record the final body the loop assembled. `resp.body` is read here because the loop

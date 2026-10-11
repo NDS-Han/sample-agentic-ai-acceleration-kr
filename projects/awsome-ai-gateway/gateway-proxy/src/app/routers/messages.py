@@ -43,7 +43,7 @@ from app.services.fallback_loop import (
 from app.services.downgrade_loader import DowngradePolicyLoader
 from app.services.fallback_resolver import FallbackResolver, make_same_provider
 from app.services.router_service import RouterService
-from app.services.streaming import bedrock_anthropic_sse_stream
+from app.services.streaming import bedrock_anthropic_sse_stream, usage_status_of
 from app.services.thinking_normalizer import (
     normalize_thinking,
     sanitize_bedrock_messages,
@@ -668,6 +668,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 항상 NULL 로 기록돼 모니터링에 "ttft=-" 로 나왔다. 응답 이터레이터의 첫
         # 청크 시각을 잡아 클라이언트가 첫 바이트를 받은 시점으로 기록한다.
         _ws_first_frame: dict[str, float | None] = {"t": None}
+        # 요청 종결 상태 — 루프가 경로별로 채우고 _ws_record 가 usage_logs.status 로
+        # 옮긴다(E2E S5, 아래 _record 의 outcome 과 같은 계약).
+        _ws_outcome: dict = {}
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
@@ -684,6 +687,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"),
                 client=client,
+                status=usage_status_of(_ws_outcome),
             )
 
         # Body logging — hooks for the web-search path only. This branch returns BEFORE the
@@ -774,6 +778,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             tokenizer_hook=_ws_estimate,
             on_stream_complete=_ws_log_stream if _ws_logging else None,
             on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
+            outcome=_ws_outcome,
         )
 
         # 스트리밍이면 첫 yield 시각을 잡아 _ws_record 가 ttft_ms 로 쓰게 한다.
@@ -841,6 +846,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # Synthetic all-open 503
     if result.all_open:
         _settings = get_settings()
+        # 상류 전부 회로개방 = 게이트웨이/상류 건강 실패 — monitoring 이 읽을
+        # ERROR usage_logs 행을 남긴다(0 토큰, 예약은 루프가 이미 풀었다 — E2E S5).
+        if auth_context:
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await cost_recorder.finalize(
+                redis, auth_context, result.model_config, TokenUsage(),
+                request_id, is_stream, duration_ms,
+                ttft_ms=duration_ms,
+                rate_limit_state=state.pop("rate_limit_state", None),
+                client=client, status="ERROR",
+            )
         return JSONResponse(
             status_code=503,
             content=json.loads(result.payload[0]),
@@ -862,11 +878,29 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 err_content = anthropic_error(
                     "service_unavailable", "All fallback models failed"
                 )
+            # 전 후보 실패(5xx 계열) — usage_logs ERROR 행으로 monitoring 에 남긴다.
+            # 4xx 거절(스코프/레이트리밋)은 게이트웨이 실패가 아니라 기록하지 않는다.
+            if auth_context and status >= 500:
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                await cost_recorder.finalize(
+                    redis, auth_context, effective_model_config, TokenUsage(),
+                    request_id, is_stream, duration_ms,
+                    ttft_ms=duration_ms,
+                    rate_limit_state=state.pop("rate_limit_state", None),
+                    availability_fallback_from=availability_fallback_from,
+                    client=client,
+                    status=usage_status_of(None, status),
+                )
             return JSONResponse(status_code=status, content=err_content)
 
         # If the fallback loop returned a non-200 status for streaming, the
         # chunk_iter is an error generator from the adapter — just stream it.
         call_model_id_final = _rewrite(effective_model_config.provider_model_id)
+
+        # 요청 종결 상태 — 스트림 헬퍼가 경로별로 채우고 _record 가 usage_logs.status
+        # 로 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 헬퍼에게 정상 종료로 보이므로
+        # usage_status_of 의 http_status 인자가 그 경우를 잡는다.
+        outcome: dict = {}
 
         async def _estimate(text: str) -> int | None:
             if not tokenizer or is_mantle:
@@ -905,6 +939,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 availability_fallback_from=availability_fallback_from,
                 bedrock_request_id=aws_request_id,
                 client=client,
+                status=usage_status_of(outcome, status),
             )
 
         # nginx ingress 의 기본 응답 버퍼링이 SSE 를 막지 않게 한다(E2E S4).
@@ -955,6 +990,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 on_usage=_record,
                 tokenizer_hook=_estimate,
                 on_complete=_on_complete,
+                outcome=outcome,
             ),
             status_code=status,
             media_type="text/event-stream",
@@ -986,6 +1022,20 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 # FallbackResult.payload and is never sent to the client.
                 bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
                 client=client,
+                status=usage_status_of(None, status),
+            )
+        elif auth_context and status >= 500:
+            # 전 후보 실패 — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
+            # finalize 의 zero-usage 분기가 예약 해제도 겸한다(E2E S5).
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await cost_recorder.finalize(
+                redis, auth_context, effective_model_config, TokenUsage(),
+                request_id, False, duration_ms,
+                ttft_ms=duration_ms,
+                rate_limit_state=state.pop("rate_limit_state", None),
+                availability_fallback_from=availability_fallback_from,
+                client=client,
+                status=usage_status_of(None, status),
             )
         else:
             # ⚠️ 2xx 인데 usage 가 비어 온 경로(응답 파싱 실패 → TokenUsage()).

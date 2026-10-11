@@ -58,6 +58,51 @@ async def drain_pending_tasks(timeout: float) -> int:
     return len(pending)
 
 
+def usage_status_of(outcome: dict | None, http_status: int | None = None) -> str:
+    """``usage_logs.status`` (SUCCESS/ERROR/TIMEOUT) 산출 — 라우터가 finalize 에 넘긴다.
+
+    스트림 헬퍼가 ``outcome`` dict 에 자기 종결 경로("success"|"error"|"timeout")를
+    기록하고, 라우터는 그것과 자기가 아는 상류 HTTP 상태를 합성한다. outcome 의
+    실패 판정이 우선하고, 없으면 HTTP 상태로 판정한다(비-2xx 오류 제너레이터는
+    헬퍼에게 정상 종료로 보이므로 라우터 쪽 상태가 필요).
+
+    클라이언트 끊김(disconnect drain)은 outcome 이 "success" 로 남는다 — 과금된
+    토큰은 정상 전달된 것이고 끊긴 것은 게이트웨이/상류 실패가 아니다.
+    """
+    o = (outcome or {}).get("status")
+    if o == "timeout" or http_status in (408, 504):
+        return "TIMEOUT"
+    if o == "error" or (http_status is not None and http_status >= 400):
+        return "ERROR"
+    return "SUCCESS"
+
+
+def mark_outcome(outcome: dict | None, status: str) -> None:
+    """스트림 종결 경로를 outcome dict 에 기록한다(None 이면 no-op).
+
+    값은 "success"|"error"|"timeout" 소문자 — usage_status_of 가 usage_logs 용
+    대문자 enum 으로 옮긴다.
+    """
+    if outcome is not None:
+        outcome["status"] = status
+
+
+def outcome_from_http(
+    outcome: dict | None, http_status: int | None, failed: bool = False
+) -> None:
+    """비스트림/멀티턴 종결을 ``outcome`` 에 반영 — ``usage_status_of`` 와 같은 판정.
+
+    ``failed`` 는 예외 등 HTTP 상태로 표현되지 않는 실패용이다. 성공 판정은
+    setdefault — 이미 기록된 실패(outcome 선행 마킹)를 덮지 않는다.
+    """
+    if outcome is None:
+        return
+    if failed or (http_status is not None and http_status >= 400):
+        outcome["status"] = "timeout" if http_status in (408, 504) else "error"
+    else:
+        outcome.setdefault("status", "success")
+
+
 async def _aclose_iter(iterator) -> None:
     """버려지는 업스트림 이터레이터를 닫는다.
 
@@ -111,6 +156,7 @@ async def bedrock_anthropic_sse_stream(
     drain_timeout: float | None = None,
     tokenizer_hook: TokenizerHook = None,
     on_complete: OnComplete = None,
+    outcome: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Bedrock EventStream chunks → Anthropic SSE-formatted bytes.
 
@@ -170,6 +216,11 @@ async def bedrock_anthropic_sse_stream(
             # 재프레임(web_search_loop 의 동형 처리와 합을 맞춘다, E2E S4).
             data = {"type": "error", "error": data["error"]}
             etype = "error"
+        if etype == "error":
+            # 200 스트림 안의 미드스트림 오류 — 상류(또는 합성) error 이벤트가 왔으면
+            # 이 요청은 실패 종결이다. 과금은 발생분만 남지만 status 는 ERROR 여야
+            # usage_logs/monitoring 이 진실을 보인다(E2E S5).
+            mark_outcome(outcome, "error")
         if etype == "message_start":
             u = data.get("message", {}).get("usage", {})
             if v := u.get("input_tokens"):
@@ -335,6 +386,7 @@ async def bedrock_anthropic_sse_stream(
                 # ⚠️ yield 보다 **먼저** 확정한다. 클라이언트가 이미 끊긴 상태면 아래
                 # yield 가 GeneratorExit 을 던져 except 절로 빠지므로, 뒤에 두면
                 # 이 경로의 과금이 다시 유실된다.
+                mark_outcome(outcome, "timeout")
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
                 await _aclose_iter(iterator)
@@ -358,11 +410,16 @@ async def bedrock_anthropic_sse_stream(
         # drain so usage is still recorded, then re-raise per asyncio contract.
         logger.info("bedrock_stream_cancelled")
         client_disconnected = True
+        # 클라이언트 측 종결 — 게이트웨이/상류 실패가 아니라 과금은 정상 성공 건.
+        # setdefault: 직전에 상류 error 이벤트를 받았다면 그 판정이 우선한다.
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         _spawn(_drain_remaining())
         raise
 
     except Exception as exc:
         logger.exception("bedrock_stream_proxy_error")
+        mark_outcome(outcome, "error")
         # timeout 경로와 동일 이유로 yield 앞에서 확정.
         await _fire_on_usage()
         await _fire_on_complete("partial")
@@ -375,6 +432,9 @@ async def bedrock_anthropic_sse_stream(
         return
 
     if not client_disconnected:
+        # setdefault: 미드스트림 error 이벤트를 받고 정상 종료한 경우 실패 판정 유지.
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")
@@ -388,6 +448,7 @@ async def openai_sse_stream(
     drain_timeout: float | None = None,
     tokenizer_hook: TokenizerHook = None,
     on_complete: OnComplete = None,
+    outcome: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """OpenAI-compatible SSE chunks → passthrough bytes (no re-formatting).
 
@@ -437,6 +498,9 @@ async def openai_sse_stream(
                 data = json.loads(payload)
             except json.JSONDecodeError:
                 continue
+            # 상류 오류 프레임(data: {"error":{...}}) — 요청은 실패 종결(E2E S5).
+            if isinstance(data.get("error"), dict):
+                mark_outcome(outcome, "error")
             # KI-08: delta content 누적. OpenAI SSE: {"choices":[{"delta":{"content":"..."}}]}
             for choice in data.get("choices", []) or []:
                 delta = choice.get("delta") or {}
@@ -587,6 +651,7 @@ async def openai_sse_stream(
             except TimeoutError:
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                mark_outcome(outcome, "timeout")
                 if u := _flush_pending_usage():
                     latest_usage = u
                 await _fire_on_usage()
@@ -612,11 +677,15 @@ async def openai_sse_stream(
         # handler in `bedrock_anthropic_sse_stream` for rationale.
         logger.info("openai_stream_cancelled")
         client_disconnected = True
+        # setdefault: 직전 상류 error 프레임 판정이 우선한다(E2E S5).
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         _spawn(_drain_remaining())
         raise
 
     except Exception as exc:
         logger.exception("openai_stream_proxy_error")
+        mark_outcome(outcome, "error")
         if u := _flush_pending_usage():
             latest_usage = u
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
@@ -626,6 +695,9 @@ async def openai_sse_stream(
         return
 
     if not client_disconnected:
+        # setdefault: 미드스트림 error 프레임 뒤 정상 종료면 실패 판정 유지.
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         if u := _flush_pending_usage():
             latest_usage = u
         await _fire_on_usage()
@@ -641,6 +713,7 @@ async def responses_sse_stream(
     drain_timeout: float | None = None,
     on_complete: OnComplete = None,
     tokenizer_hook: TokenizerHook = None,
+    outcome: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """OpenAI **Responses API** → re-framed SSE (`event: {type}\\ndata: {json}\\n\\n`).
 
@@ -705,9 +778,13 @@ async def responses_sse_stream(
                 resp = data.get("response")
                 if isinstance(resp, dict) and (u := _usage_from_response(resp)):
                     latest_usage = u
+                if etype == "response.failed":
+                    mark_outcome(outcome, "error")  # E2E S5
             # 어댑터 미드스트림 오류 청크({"error":{...}} 단일 형태, type 없음)가
             # `event: message` 로 나가면 SDK 가 일반 이벤트로 삼키고 실패를 모른다 —
             # error 이벤트로 명시(E2E S4).
+            if etype != "response.failed" and isinstance(data.get("error"), dict):
+                mark_outcome(outcome, "error")  # E2E S5
             etype_label = etype or ("error" if isinstance(data.get("error"), dict) else "message")
             return f"event: {etype_label}\ndata: {json.dumps(data)}\n\n".encode()
         # Non-dict JSON (unexpected) — re-frame defensively.
@@ -817,6 +894,7 @@ async def responses_sse_stream(
             except TimeoutError:
                 logger.warning("responses_stream_idle_timeout", idle_timeout=idle_timeout)
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
+                mark_outcome(outcome, "timeout")
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
                 await _aclose_iter(iterator)
@@ -837,11 +915,15 @@ async def responses_sse_stream(
     except (asyncio.CancelledError, GeneratorExit):
         logger.info("responses_stream_cancelled")
         client_disconnected = True
+        # setdefault: 직전 상류 error 판정이 우선한다(E2E S5).
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         _spawn(_drain_remaining())
         raise
 
     except Exception as exc:
         logger.exception("responses_stream_proxy_error")
+        mark_outcome(outcome, "error")
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
         await _aclose_iter(iterator)
@@ -849,6 +931,9 @@ async def responses_sse_stream(
         return
 
     if not client_disconnected:
+        # setdefault: response.failed / 미드스트림 error 뒤 종료면 실패 판정 유지.
+        if outcome is not None:
+            outcome.setdefault("status", "success")
         await _fire_on_usage()
         # 정상 종료 — 클라이언트가 끊기지 않았고 스트림이 끝까지 갔다.
         await _fire_on_complete("success")

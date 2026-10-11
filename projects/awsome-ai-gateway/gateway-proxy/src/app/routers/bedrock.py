@@ -16,7 +16,7 @@ from app.observability.provider_metrics import (
     record_provider_error,
     record_provider_request,
 )
-from app.schemas.domain import ProviderType
+from app.schemas.domain import ProviderType, TokenUsage
 from app.services.fallback_loop import release_reservations
 from app.services.router_service import RouterService
 
@@ -328,12 +328,13 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                나머지 SSE 경로(messages/chat/responses)와 같은 drain 계약을 따른다.
             """
             usage = None
-            from app.schemas.domain import TokenUsage
             from app.services.streaming import (
                 _aclose_iter,
                 _resolve_timeouts,
                 _spawn,
                 _try_extract_usage,
+                mark_outcome,
+                usage_status_of,
             )
 
             idle_timeout, drain_timeout = _resolve_timeouts(None, None)
@@ -342,6 +343,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             usage_fired = False  # 과금 멱등 가드 — 다른 SSE 경로와 동일 계약
             client_disconnected = False
             first_token_time: float | None = None
+            # 요청 종결 상태 — _fire_finalize 가 usage_logs.status 로 옮긴다(E2E S5).
+            outcome: dict = {}
 
             def _scan(chunk: bytes) -> None:
                 nonlocal usage, first_token_time
@@ -406,6 +409,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                     downgraded_from=state.get("downgraded_from"),
                     # 비스트림 경로와 같게 Bedrock invocation log join 키를 남긴다.
                     bedrock_request_id=_req_id,
+                    status=usage_status_of(outcome, status),
                     # ⚠️ client 를 빼면 enforce 가 잡은 per-app 예산 예약이
                     #    정산되지 않아 앱별 카운터만 부풀어 허위
                     #    client_budget_exceeded 가 난다(E2E S2).
@@ -455,6 +459,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                             idle_timeout=idle_timeout,
                             path_suffix=path_suffix,
                         )
+                        mark_outcome(outcome, "timeout")
                         await _fire_finalize()
                         return
                     _scan(chunk)
@@ -462,8 +467,13 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             except (asyncio.CancelledError, GeneratorExit):
                 # 클라이언트 끊김 — 종결 usage 가 아직 안 왔을 수 있으므로
                 # 백그라운드 드레인으로 잔여 청크를 스캔한 뒤 정산한다.
+                # 클라이언트 측 종결이라 성공 건과 동일 취급(상류 오류가 선행했으면 유지).
                 client_disconnected = True
+                outcome.setdefault("status", "success")
                 _spawn(_drain_remaining())
+                raise
+            except Exception:
+                mark_outcome(outcome, "error")
                 raise
             finally:
                 if not client_disconnected:
@@ -491,6 +501,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         if status >= 400:
             # 예외가 아니라 상태코드로 실패가 오는 경우(어댑터가 응답을 그대로 넘긴다).
             record_provider_error(_pm, _pm_labels, status=status)
+        from app.services.streaming import usage_status_of
+
         if auth_context and (usage.input_tokens + usage.output_tokens) > 0:
             # 요청 측 1h 캐시 신호 — 응답이 ephemeral 분해를 보고하지 않으면
             # calculate_cost 의 폴백이 이 값을 쓴다(A2-3).
@@ -514,6 +526,20 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 # per-app 예산 예약의 정산에 필요 — 생략 시 예약이 앱별 카운터에
                 # 영구 누적된다.
                 client=state.get("client"),
+                status=usage_status_of(None, status),
+            )
+        elif auth_context and status >= 500:
+            # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
+            # finalize 의 zero-usage 분기가 예약 해제도 겸한다(E2E S5).
+            duration_ms = int((time.monotonic() - start_time) * 1000)
+            await cost_recorder.finalize(
+                redis, auth_context, model_config,
+                TokenUsage(),
+                request_id, False, duration_ms,
+                ttft_ms=duration_ms,
+                rate_limit_state=state.pop("rate_limit_state", None),
+                client=state.get("client"),
+                status=usage_status_of(None, status),
             )
         else:
             # ⚠️ finalize 를 타지 않는 경로다(상류 4xx/5xx, 또는 usage 가 비어 온 응답).

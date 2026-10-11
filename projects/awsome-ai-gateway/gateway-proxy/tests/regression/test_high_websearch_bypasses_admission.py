@@ -263,6 +263,9 @@ def _app_state(*, web_search: bool):
     st = SimpleNamespace()
     st.provider_registry = MagicMock()
     st.cost_recorder = MagicMock()
+    # all_open 분기가 실패 종결의 usage_logs 마커 행을 finalize 로 남긴다(E2E S5) —
+    # 동기 MagicMock 이면 await 지점에서 터진다.
+    st.cost_recorder.finalize = AsyncMock()
     st.routing_profile_loader = loader
     # 웹서치 분기의 두 번째 조건. None 이면 분기 자체가 안 돌아 이 검사가 공허해진다.
     st.agentcore_mcp_client = MagicMock() if web_search else None

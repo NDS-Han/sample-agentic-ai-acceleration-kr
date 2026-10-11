@@ -83,6 +83,42 @@ _INSERT_USAGE_LOGS = text(
 #: 아무도 읽지 않는 행이 쌓인다.
 _PER_APP_CLIENTS = ("claude-code", "cowork", "codex")
 
+#: usage.usage_status enum 값 — INSERT 의 CAST(:status AS usage.usage_status) 가
+#: 이 집합 밖 값을 거부한다. 게이트웨이도 발행 전 정규화하지만, enum 에 나중에 값이
+#: 추가되거나 스키마가 어긋난 배포 조합에서는 여기서 한 번 더 걸러야 poison
+#: retry 루프가 안 생긴다.
+_VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+
+
+def _usage_status(entry: CostStreamEntry) -> str:
+    """enum 안의 값만 통과시킨다. 밖의 값은 ERROR 로 — SUCCESS 로 삼키면 실패
+    요청이 유효사용량 집계에 섞이고, 그대로 넣으면 배치가 통째로 깨진다."""
+    s = (entry.status or "SUCCESS").upper()
+    if s not in _VALID_USAGE_STATUSES:
+        logger.warning(
+            "invalid_usage_status_coerced",
+            request_id=entry.request_id,
+            status=entry.status,
+        )
+        return "ERROR"
+    return s
+
+
+def _has_metered_usage(entry: CostStreamEntry) -> bool:
+    """budget_usages 가산과 usage:daily:* 카운터에 올릴 가치가 있는 행인가.
+
+    0 토큰·0 비용 행은 실패 요청의 모니터링 마커다(status=ERROR/TIMEOUT) —
+    누적치에 올리면 합계는 안 변하지만 비어 있는 예산 스냅샷 행과 카운터 키만
+    생긴다. 성공 요청의 0 토큰 행은 게이트웨이가 애초에 발행하지 않는다.
+    """
+    return bool(
+        entry.input_tokens
+        or entry.output_tokens
+        or entry.cache_creation_tokens
+        or entry.cache_read_tokens
+        or entry.cost_usd
+    )
+
 #: threshold 알림의 "현재 사용액" 조회 — 해당 스코프의 기간 누적 총합(client=NULL 행).
 #: _upsert_budget_usages 가 같은 flush 안에서 이미 커밋됐으므로 이 값은 임계를 넘긴
 #: 요청까지 반영된 누적이다. entry.cost_usd 는 그 요청 1건의 비용이라 사용하면 안 된다.
@@ -361,7 +397,9 @@ class BatchFlusher:
                 "cost_usd": str(e.cost_usd),
                 "latency_ms": e.latency_ms,
                 "ttft_ms": e.ttft_ms,
-                "status": "SUCCESS",
+                # SUCCESS 하드코딩이던 것을 엔트리의 종결 상태로 — 워커 도입 이후
+                # monitoring ERROR/TIMEOUT 집계가 영구 0%였던 회귀의 핵심 수정(E2E S5).
+                "status": _usage_status(e),
                 # asyncpg requires datetime instances for timestamptz bindings,
                 # not ISO strings — parse here rather than letting CAST handle it.
                 "requested_at": datetime.fromisoformat(e.requested_at),
@@ -397,6 +435,8 @@ class BatchFlusher:
         # (user_id, period, client) → 앱별 누적. per-app 예산을 갖는 client 만.
         app_sums: dict[tuple[str, str, str], Decimal] = defaultdict(lambda: Decimal("0"))
         for e in entries:
+            if not _has_metered_usage(e):
+                continue  # 0 토큰·0 비용 마커 행 — 예산 스냅샷 행을 만들지 않는다
             user_sums[(e.user_id, e.period)] += e.cost_usd
             team_sums[(e.team_id, e.period)] += e.cost_usd
             if e.client in _PER_APP_CLIENTS:
@@ -434,6 +474,8 @@ class BatchFlusher:
         ttl_keys: set[str] = set()
 
         for e in entries:
+            if not _has_metered_usage(e):
+                continue  # 마커 행 — 카운터 키만 만들 뿐 지표에 기여가 없다
             daily_prefix = f"usage:daily:user:{{{e.user_id}}}:{e.date}"
             model_prefix = f"{daily_prefix}:model:{e.model_alias}"
 

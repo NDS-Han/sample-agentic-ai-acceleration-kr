@@ -411,3 +411,123 @@ async def test_all_replays_skips_counters_and_publish():
 
     redis.pipeline.assert_not_called()
     redis.publish.assert_not_called()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# E2E S5 — usage_logs.status 전파 (워커 SUCCESS 하드코딩 회귀)
+# ─────────────────────────────────────────────────────────────────────────────
+def _insert_param_capturing_exec(captured: list):
+    """INSERT 파라미터를 captured 에 기록하고 RETURNING 은 삽입 성공을 반환."""
+
+    async def _exec(stmt, params=None):
+        result = MagicMock()
+        if "RETURNING" in str(stmt):
+            if isinstance(params, dict):
+                captured.append(dict(params))
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        return result
+
+    return _exec
+
+
+def _session_factory_for(exec_fn) -> MagicMock:
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.commit = AsyncMock()
+    session.execute = AsyncMock(side_effect=exec_fn)
+    return MagicMock(return_value=session)
+
+
+def _counter_redis() -> tuple[MagicMock, MagicMock]:
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    pipe.incrbyfloat = MagicMock()
+    pipe.incrby = MagicMock()
+    pipe.sadd = MagicMock()
+    pipe.expire = MagicMock()
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+    return redis, pipe
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_entry_status_written_to_usage_logs():
+    """스트림 엔트리의 status 가 INSERT 파라미터까지 간다 — SUCCESS 하드코딩 회귀."""
+    captured: list = []
+    session_factory = _session_factory_for(_insert_param_capturing_exec(captured))
+    redis, _pipe = _counter_redis()
+
+    entries = [
+        _make_entry(request_id="req-ok"),
+        _make_entry(request_id="req-err"),
+        _make_entry(request_id="req-timeout"),
+    ]
+    entries[1].status = "ERROR"
+    entries[2].status = "TIMEOUT"
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    statuses = {p["request_id"]: p["status"] for p in captured}
+    assert statuses == {
+        "req-ok": "SUCCESS",
+        "req-err": "ERROR",
+        "req-timeout": "TIMEOUT",
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_invalid_status_coerced_to_error_not_success():
+    """enum 밖 값은 ERROR 로 — SUCCESS 삼킴(실패 오보고)도 배치 깨짐도 아니다."""
+    from worker.batch_flusher import _usage_status
+
+    e = _make_entry()
+    e.status = "PARTIAL"
+    assert _usage_status(e) == "ERROR"
+    e.status = "bogus"
+    assert _usage_status(e) == "ERROR"
+    e.status = None
+    assert _usage_status(e) == "SUCCESS"
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_zero_usage_error_marker_skips_budget_and_counters():
+    """0 토큰·0 비용 실패 마커 행은 INSERT 되지만 예산/카운터에는 올리지 않는다.
+
+    게이트웨이는 실패 종결의 0 토큰 행만 발행한다 — monitoring 의 ERROR/TIMEOUT
+    집계가 이 행을 읽는다. 예산 스냅샷과 일별 카운터는 이 행으로 아무것도
+    만들면 안 된다.
+    """
+    captured: list = []
+    session_factory = _session_factory_for(_insert_param_capturing_exec(captured))
+    redis, pipe = _counter_redis()
+
+    e = _make_entry(request_id="req-fail-zero", cost="0")
+    e.status = "ERROR"
+    e.input_tokens = 0
+    e.output_tokens = 0
+    e.cache_creation_tokens = 0
+    e.cache_read_tokens = 0
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush([e])
+
+    # usage_logs INSERT 는 일어난다(status=ERROR)
+    assert len(captured) == 1
+    assert captured[0]["status"] == "ERROR"
+    # budget UPSERT 는 호출되지 않는다(replay SELECT + INSERT 만 실행)
+    session = session_factory.return_value
+    sqls = [str(c.args[0]) for c in session.execute.await_args_list]
+    assert len(sqls) == 2, f"예산 UPSERT 가 추가 호출됐다: {sqls}"
+    assert not any("INTO budget.budget_usages" in s for s in sqls)
+    # daily 카운터도 건너뛴다
+    pipe.incrbyfloat.assert_not_called()
+    pipe.incrby.assert_not_called()
+    pipe.sadd.assert_not_called()

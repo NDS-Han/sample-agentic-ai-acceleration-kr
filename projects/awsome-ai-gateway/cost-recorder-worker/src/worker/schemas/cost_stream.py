@@ -41,6 +41,10 @@ class CostStreamEntry(BaseModel):
     estimated_usage: bool = False
     downgraded_from: str | None = None
     availability_fallback_from: str | None = None
+    # usage_logs.status — 요청 종결 상태. SUCCESS|ERROR|TIMEOUT (usage_status enum).
+    # 구버전(schema_version<3) 엔트리는 부재 → 기본 SUCCESS. INSERT 전에
+    # batch_flusher._usage_status 가 enum 밖 값을 방어적으로 걸러낸다.
+    status: str = "SUCCESS"
 
     requested_at: str  # ISO format
     completed_at: str
