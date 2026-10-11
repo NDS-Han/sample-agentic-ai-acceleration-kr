@@ -31,6 +31,33 @@ TokenizerHook = Callable[[str], Awaitable[int | None]] | None
 OnComplete = Callable[[str, str], Awaitable[None]] | None
 
 
+# fire-and-forget 백그라운드 태스크의 강한 참조 집합. asyncio 는 create_task
+# 결과를 약한 참조로만 잡으므로, 버려진 태스크는 GC 되어 조용히 죽을 수 있다 —
+# disconnect 드레인이 죽으면 그 스트림의 finalize(과금)가 유실된다.
+# shutdown drain 에서도 이 집합을 await 한다(스트림 과금 손실 방지).
+_PENDING_TASKS: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    t = asyncio.create_task(coro)
+    _PENDING_TASKS.add(t)
+    t.add_done_callback(_PENDING_TASKS.discard)
+    return t
+
+
+async def drain_pending_tasks(timeout: float) -> int:
+    """아직 안 끝난 백그라운드 태스크(스트림 드레인)를 timeout 안에서 기다린다.
+    shutdown 순서상 Redis/httpx 를 닫기 **전에** 호출해야 한다."""
+    pending = [t for t in _PENDING_TASKS if not t.done()]
+    if not pending:
+        return 0
+    try:
+        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout)
+    except asyncio.TimeoutError:
+        logger.warning("drain_pending_tasks_timeout", remaining=len(pending))
+    return len(pending)
+
+
 def _resolve_timeouts(
     idle_timeout: float | None, drain_timeout: float | None
 ) -> tuple[float, float]:
@@ -291,7 +318,7 @@ async def bedrock_anthropic_sse_stream(
         # drain so usage is still recorded, then re-raise per asyncio contract.
         logger.info("bedrock_stream_cancelled")
         client_disconnected = True
-        asyncio.create_task(_drain_remaining())
+        _spawn(_drain_remaining())
         raise
 
     except Exception as exc:
@@ -532,7 +559,7 @@ async def openai_sse_stream(
         # handler in `bedrock_anthropic_sse_stream` for rationale.
         logger.info("openai_stream_cancelled")
         client_disconnected = True
-        asyncio.create_task(_drain_remaining())
+        _spawn(_drain_remaining())
         raise
 
     except Exception as exc:
@@ -741,7 +768,7 @@ async def responses_sse_stream(
     except (asyncio.CancelledError, GeneratorExit):
         logger.info("responses_stream_cancelled")
         client_disconnected = True
-        asyncio.create_task(_drain_remaining())
+        _spawn(_drain_remaining())
         raise
 
     except Exception as exc:

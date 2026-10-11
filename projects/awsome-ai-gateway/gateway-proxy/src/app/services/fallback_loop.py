@@ -237,6 +237,17 @@ async def release_reservations(
         except Exception:
             logger.warning("fallback_unwind_cost_failed")
 
+    # 월예산 admission 예약 환불 — settle(0)은 마커 기반 멱등이라 finalize 와
+    # 경쟁해도 한 번만 적용된다. 별도 try 로 분리해 위 환불 실패와 격리한다.
+    budget_res = rls.get("budget_reservation")
+    if budget_res:
+        try:
+            from app.services.budget_service import BudgetService
+
+            await BudgetService().settle_budget(redis, budget_res, Decimal("0"))
+        except Exception:
+            logger.warning("fallback_unwind_budget_failed")
+
     # Clear so finalize() does not double-settle
     state.pop("rate_limit_state", None)
 

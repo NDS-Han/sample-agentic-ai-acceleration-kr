@@ -219,14 +219,20 @@ def load_tokens() -> Tokens | None:
         return None
 
 
+def _secure_write(path: Path, text: str) -> None:
+    """토큰/VK 캐시를 0600 으로 원자 생성한다.
+
+    write_text()+os.chmod 는 파일이 잠깐 umask 권한(0644)으로 존재하는
+    TOCTOU 창이 있어, 처음부터 0600 으로 연다."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
 def save_tokens(tokens: Tokens) -> None:
     path = _token_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(tokens.to_dict()), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+    _secure_write(path, json.dumps(tokens.to_dict()))
 
 
 def clear_tokens() -> None:
@@ -290,11 +296,7 @@ def load_vk_cache() -> CachedVK | None:
 def save_vk_cache(vk: CachedVK) -> None:
     path = _vk_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(vk.to_dict()), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+    _secure_write(path, json.dumps(vk.to_dict()))
 
 
 def clear_vk_cache() -> None:

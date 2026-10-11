@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import os
 import secrets
 from pathlib import Path
 
@@ -78,5 +79,8 @@ def write_env_file(path: Path, env: dict[str, str], header: str) -> None:
     lines = [header.rstrip(), ""]
     for k, v in env.items():
         lines.append(f"{k}={v}")
-    path.write_text("\n".join(lines) + "\n")
-    path.chmod(0o600)
+    # write_text()+chmod 는 시크릿이 잠깐 umask 권한(0644)으로 노출되는
+    # TOCTOU 창이 있다. 처음부터 0600 으로 생성한다.
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")

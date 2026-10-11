@@ -120,3 +120,51 @@ async def test_listener_increments_received_metric() -> None:
             await listener.run()
 
     assert len(metrics.events_received_total.calls) == 1
+
+
+async def test_listener_survives_handler_exception_and_continues() -> None:
+    """핸들러가 특정 이벤트에서 예외를 던져도 리스너는 뒤의 메시지를 계속 처리한다.
+
+    Pub/Sub 은 재생이 없다 — 재시작으로 실패 메시지를 복구할 수 없으므로
+    re-raise → Supervisor 재시작은 재구독 창의 다른 이벤트만 잃게 한다.
+    """
+    received: list[str] = []
+
+    class PoisonedHandler:
+        async def handle(self, event) -> None:
+            if event.event_id == "bad":
+                raise RuntimeError("template boom")
+            received.append(event.event_id)
+
+    metrics = MagicMock()
+
+    await _run_listener_with_messages(
+        [_make_raw_message("bad"), _make_raw_message("ok1"), _make_raw_message("ok2")],
+        PoisonedHandler(),
+    )
+
+    assert received == ["ok1", "ok2"]
+
+
+async def test_listener_propagates_subscription_errors() -> None:
+    """구독(이터레이션) 자체가 깨지면 Supervisor 재시작으로 전파되어야 한다."""
+    pubsub = AsyncMock()
+
+    async def listen_gen():
+        raise ConnectionError("redis connection lost")
+        yield  # pragma: no cover
+
+    pubsub.listen = listen_gen
+    pubsub.subscribe = AsyncMock()
+    pubsub.unsubscribe = AsyncMock()
+    pubsub.aclose = AsyncMock()
+
+    mock_redis = MagicMock()
+    mock_redis.pubsub.return_value = pubsub
+
+    handler = AsyncMock()
+
+    with patch("worker.listeners.channel_listener.get_redis_client", return_value=mock_redis):
+        with pytest.raises(ConnectionError):
+            listener = ChannelListener("notifications:budget", handler)
+            await listener.run()

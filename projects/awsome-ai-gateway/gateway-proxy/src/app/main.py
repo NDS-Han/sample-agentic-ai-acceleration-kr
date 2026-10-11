@@ -359,8 +359,9 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("otel_instrumentation_failed")
 
-    # 백그라운드 태스크 시작
-    asyncio.create_task(retry_worker.run())
+    # 백그라운드 태스크 시작 — start() 가 태스크를 self._task 에 강한 참조로
+    # 보관한다. bare create_task 는 약한 참조라 GC 되면 재시도 워커가 조용히 죽는다.
+    await retry_worker.start()
     await health_checker.start()
 
     # Body logger (요청/응답 본문 → Firehose → S3). 스트림 미설정이면 no-op.
@@ -430,6 +431,15 @@ async def lifespan(app: FastAPI):
             )
     except Exception:
         logger.warning("cost_stream_spool_shutdown_drain_failed")
+    # 클라이언트 disconnect 로 떠 있는 스트림 드레인 태스크가 Redis/httpx 가
+    # 닫히기 전에 finalize(과금)를 마치도록 기다린다. 드레인 자체는
+    # stream_disconnect_drain_timeout 으로 상한이 있으므로 추가 grace 는
+    # 짧게 잡아 SIGKILL 마진을 남긴다.
+    from app.services.streaming import drain_pending_tasks
+
+    drained = await drain_pending_tasks(timeout=10.0)
+    if drained:
+        logger.info("stream_drain_tasks_awaited_on_shutdown", count=drained)
     await httpx_client.aclose()
     await mantle_http.aclose()
     await redis.aclose()

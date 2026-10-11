@@ -99,7 +99,10 @@ class AuthMiddleware:
                 auth_type = AuthType.JWT if path.startswith("/v1/") else AuthType.VIRTUAL_KEY
                 import asyncio
 
-                asyncio.create_task(sec_detector.record_auth_failure(source_ip, auth_type))
+                from app.services.streaming import _spawn
+
+                # bare create_task 는 약한 참조라 태스크가 GC 되어 실패 기록이 유실될 수 있다.
+                _spawn(sec_detector.record_auth_failure(source_ip, auth_type))
 
             await self._send_401(scope, send, error_msg)
 

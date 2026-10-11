@@ -33,6 +33,10 @@ from worker.worker import TaskSupervisor
 
 logger = structlog.get_logger(__name__)
 
+# fire-and-forget 백그라운드 태스크 강한 참조 — bare create_task 결과는
+# 약한 참조만 남아 GC 되면 조용히 죽는다.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
 
 def _configure_logging(log_level: str, log_format: str) -> None:
     level = getattr(logging, log_level.upper(), logging.INFO)
@@ -106,7 +110,9 @@ async def main() -> None:
     )
     scheduler.start()
     # Backfill은 비차단으로 이벤트 루프에 스케줄 — startup 블로킹 금지.
-    asyncio.create_task(run_startup_backfill(session_factory))
+    # bare create_task 는 약한 참조라 GC 되면 backfill 이 조용히 죽으므로 강한 참조 유지.
+    _BACKGROUND_TASKS.add(t := asyncio.create_task(run_startup_backfill(session_factory)))
+    t.add_done_callback(_BACKGROUND_TASKS.discard)
     logger.info(
         "daily_aggregator_scheduled",
         cron=settings.daily_usage_agg_cron,

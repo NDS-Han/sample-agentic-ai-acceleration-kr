@@ -98,6 +98,13 @@ class Settings(BaseSettings):
     # 이 시간 안에 받은 토큰까지 usage 로 기록된다(과금 정확성).
     stream_disconnect_drain_timeout: int = 30
 
+    # 월예산 admission 예약 마커(budget:pending:*)의 수명. 요청이 이 시간보다
+    # 오래 살아있으면 마커가 먼저 만료돼 settle 이 no-op 되고 예약치만 남는다
+    # (보수적 방향 — 실비 미반영이 아니라 과대 계상). 파드 크래시로 정산 없이
+    # 사라진 예약의 정리 시한이기도 하다 — 마커가 지워져도 카운터의 누수분은
+    # 월 롤오버까지 남으므로, 이 값은 "누수 마커의 추적 가능 기간"이다.
+    budget_reservation_ttl_seconds: int = 14400  # 4h
+
     # Reliability
     usage_buffer_max: int = 10_000
     background_task_max_retries: int = 3

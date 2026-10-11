@@ -165,6 +165,21 @@ class CostRecorder:
                 from app.services.rate_limit_service import RateLimitService
 
                 svc = RateLimitService()
+                # 월예산 선예약 환불 — 마커 기반 settle(0) 이라 release_reservations
+                # 와 경쟁 호출돼도 한 번만 적용된다.
+                budget_res = rate_limit_state.get("budget_reservation")
+                if budget_res:
+                    try:
+                        from app.services.budget_service import BudgetService
+
+                        await BudgetService().settle_budget(
+                            redis, budget_res, Decimal("0")
+                        )
+                    except Exception:
+                        logger.warning(
+                            "budget_reservation_release_failed",
+                            user_id=auth_context.user_id,
+                        )
                 try:
                     await svc.settle_tpm(
                         redis,
@@ -246,6 +261,21 @@ class CostRecorder:
             user_config_key = f"budget:config:user:{{{auth_context.user_id}}}"
             team_config_key = f"budget:config:team:{{{auth_context.team_id}}}"
 
+            # admission 예약분 — scope 별 settle(델타) / 미예약 scope 는 plain deduct.
+            # 마커 기반이라 release_reservations 와 경쟁해도 한 번만 적용된다.
+            budget_reservation = {
+                s["scope"]: s
+                for s in (rate_limit_state or {}).get("budget_reservation", [])
+            }
+            try:
+                settle_script = LuaScriptLoader.get("budget_settle")
+            except KeyError:
+                # 스크립트 미로드 = 배포 결함. 예약분도 plain deduct 로 회귀해
+                # 회계 정확도(실비 차감)를 지킨다 — 예약치 잔류보다 낫다.
+                logger.warning("budget_settle_script_unloaded")
+                settle_script = None
+                budget_reservation = {}
+
             result = None
             try:
                 # D-10: 개인 config 없음 + 팀 기본 cap D → D 를 합성 config 로
@@ -268,14 +298,23 @@ class CostRecorder:
                                 "thresholds": team_cfg.get("thresholds") or [80, 90, 100],
                             })
 
-                raw = await redis.eval(
-                    LuaScriptLoader.get("budget_deduct"),
-                    2,
-                    user_usage_key,
-                    user_config_key,
-                    str(cost_usd),
-                    user_fallback,
-                )
+                resv = budget_reservation.get("user")
+                if resv:
+                    raw = await redis.eval(
+                        settle_script,
+                        3,
+                        resv["usage_key"], resv["config_key"], resv["marker_key"],
+                        str(cost_usd), resv.get("fallback") or "",
+                    )
+                else:
+                    raw = await redis.eval(
+                        LuaScriptLoader.get("budget_deduct"),
+                        2,
+                        user_usage_key,
+                        user_config_key,
+                        str(cost_usd),
+                        user_fallback,
+                    )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")
             except Exception:
@@ -291,13 +330,22 @@ class CostRecorder:
             team_result = None
             if auth_context.team_id:
                 try:
-                    team_raw = await redis.eval(
-                        LuaScriptLoader.get("budget_deduct"),
-                        2,
-                        team_usage_key,
-                        team_config_key,
-                        str(cost_usd),
-                    )
+                    resv = budget_reservation.get("team")
+                    if resv:
+                        team_raw = await redis.eval(
+                            settle_script,
+                            3,
+                            resv["usage_key"], resv["config_key"], resv["marker_key"],
+                            str(cost_usd), resv.get("fallback") or "",
+                        )
+                    else:
+                        team_raw = await redis.eval(
+                            LuaScriptLoader.get("budget_deduct"),
+                            2,
+                            team_usage_key,
+                            team_config_key,
+                            str(cost_usd),
+                        )
                     team_result = json.loads(team_raw)
                     if threshold_triggered is None:
                         threshold_triggered = team_result.get("threshold_triggered")
@@ -338,10 +386,19 @@ class CostRecorder:
                 client_usage_key = f"budget:user:{{{auth_context.user_id}}}:{client}:{period}"
                 client_config_key = f"budget:config:user:{{{auth_context.user_id}}}:{client}"
                 try:
-                    await redis.eval(
-                        LuaScriptLoader.get("budget_deduct"),
-                        2, client_usage_key, client_config_key, str(cost_usd),
-                    )
+                    resv = budget_reservation.get("client")
+                    if resv:
+                        await redis.eval(
+                            settle_script,
+                            3,
+                            resv["usage_key"], resv["config_key"], resv["marker_key"],
+                            str(cost_usd), resv.get("fallback") or "",
+                        )
+                    else:
+                        await redis.eval(
+                            LuaScriptLoader.get("budget_deduct"),
+                            2, client_usage_key, client_config_key, str(cost_usd),
+                        )
                 except Exception:
                     logger.warning("client_budget_deduct_failed", client=client)
 

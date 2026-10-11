@@ -23,6 +23,7 @@ from decimal import Decimal
 import structlog
 from fastapi.responses import JSONResponse
 
+from app.config import get_settings
 from app.observability.provider_metrics import record_rate_limit_hit
 from app.schemas.domain import AuthContext, BudgetStatus, DegradationLevel, ModelConfigSchema
 from app.schemas.errors import anthropic_error
@@ -210,6 +211,53 @@ async def enforce_rate_limits(
             logger.warning("tpm_unwind_on_cost_reject_failed")
         return _build_cost_429(cost_result, metrics)
 
+    # 월예산 admission 예약 — budget_check(middleware)는 읽기 전용이라
+    # 동시 요청이 같은 used 를 보고 전부 통과해 하드캡을 넘길 수 있었다.
+    # 여기서 최악비용을 원자적으로 선예약하고, finalize 의 settle 이 실비로
+    # 정산한다(실패/거절 경로는 release_reservations 가 환불).
+    from app.periods import request_period
+    from app.services.budget_service import BudgetService
+
+    worst_cost = _estimate_worst_cost(model_config, estimated_input, max_output)
+    try:
+        budget_reservation = await BudgetService().reserve_budget(
+            redis,
+            str(auth_context.user_id),
+            str(auth_context.team_id) if auth_context.team_id else None,
+            request_period(),
+            worst_cost,
+            request_id,
+            client=state.get("client"),
+            marker_ttl=get_settings().budget_reservation_ttl_seconds,
+        )
+    except PermissionError as exc:
+        # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
+        # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
+        try:
+            await svc.settle_tpm(redis, tpm_committed, reserved, 0)
+        except Exception:
+            logger.warning("tpm_unwind_on_budget_reject_failed")
+        if cost_result.reserved_cost is not None and cost_result.reserved_cost != Decimal("0"):
+            try:
+                await svc.settle_cost(
+                    redis,
+                    user_id=str(auth_context.user_id),
+                    actual_cost=Decimal("0"),
+                    reserved_cost=cost_result.reserved_cost,
+                    team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                    committed_scopes=cost_result.committed_scopes,
+                    cpm_window_ts=cost_result.cpm_window_ts or None,
+                    cph_window_ts=cost_result.cph_window_ts or None,
+                )
+            except Exception:
+                logger.warning("cost_unwind_on_budget_reject_failed")
+        return _build_budget_429(str(exc), metrics)
+    except Exception:
+        # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
+        # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.
+        logger.exception("budget_reserve_unexpected_failure")
+        budget_reservation = []
+
     # 통과 — settle용 정보 주입. 윈도우/커밋 스코프도 싣는다 — settle 이
     # **예약이 실제로 들어간** 버킷/스코프 키를 치게 하는 근거이다(윈도우 경계를
     # 넘은 스트리밍 요청의 환불이 다음 버킷에 새는 결함 + 무한도 스코프에 TTL
@@ -222,6 +270,7 @@ async def enforce_rate_limits(
         "cost_committed_scopes": cost_result.committed_scopes,
         "cost_cpm_window_ts": cost_result.cpm_window_ts,
         "cost_cph_window_ts": cost_result.cph_window_ts,
+        "budget_reservation": budget_reservation,
     }
     return None
 
@@ -239,6 +288,64 @@ def _estimate_cost(
     input_cost = (Decimal(estimated_input) / Decimal(1000)) * pricing.input_per_1k
     output_cost = (Decimal(max_output) / Decimal(1000)) * pricing.output_per_1k
     return (input_cost + output_cost).quantize(Decimal("0.000001"))
+
+
+def _estimate_worst_cost(
+    model_config: ModelConfigSchema, estimated_input: int, max_output: int
+) -> Decimal:
+    """월예산 선예약용 **최악비용** 추정 (USD).
+
+    ``_estimate_cost`` 와 달리 입력을 단가가 가장 비싼 버킷(1h cache write
+    포함)으로 청구되는 경우로 잡는다 — 캐시 쓰기 단가는 입력 단가보다 높아,
+    일반 추정으로는 실비가 예약을 초과해 하드캡이 새는 경계가 남는다.
+    프롬프트 추정치가 long-context 임계를 넘으면 long 요율을 적용한다.
+
+    잔여 구멍: ``_estimate_input_tokens`` 의 bytes/4 휴리스틱은 다바이트 언어
+    프롬프트를 과소 추정할 수 있어 완벽한 상한은 아니다 — 실입력이 추정을
+    크게 넘으면 그 차이만큼 한도 초과가 가능하다. 출력(max_tokens)은
+    API 강제 상한이라 완전히 덮인다.
+    """
+    p = model_config.pricing
+    long_ctx = (
+        p.long_context_threshold_tokens is not None
+        and estimated_input > p.long_context_threshold_tokens
+    )
+
+    def _rate(short: Decimal | None, long: Decimal | None) -> Decimal:
+        if long_ctx and long is not None:
+            return long
+        return short or Decimal("0")
+
+    # 입력 계열 4개 버킷 중 최고 단가 — 어떤 캐시 형태로 청구돼도 덮이게.
+    input_rate = max(
+        _rate(p.input_per_1k, p.long_input_per_1k),
+        _rate(p.cache_write_per_1k, p.long_cache_write_per_1k),
+        _rate(p.cache_write_1h_per_1k, p.long_cache_write_1h_per_1k),
+    )
+    output_rate = _rate(p.output_per_1k, p.long_output_per_1k)
+
+    cost = (Decimal(estimated_input) / 1000) * input_rate + (
+        Decimal(max_output) / 1000
+    ) * output_rate
+    return cost.quantize(Decimal("0.000001"))
+
+
+def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
+    """월예산 거절 429 — middleware/budget.py 의 에러 어휘와 맞춘다."""
+    messages = {
+        "no_team_assigned": "No team assigned. Contact your admin.",
+        "team_budget_unset": "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요.",
+    }
+    record_rate_limit_hit(metrics, scope="budget", limit_type="monthly")
+    return JSONResponse(
+        status_code=429,
+        content=anthropic_error(
+            "rate_limit_error",
+            messages.get(reason, "Budget limit exceeded."),
+            code=reason,
+        ),
+        headers={"Retry-After": "60"},
+    )
 
 
 def _build_cost_429(result, metrics=None) -> JSONResponse:

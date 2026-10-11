@@ -146,7 +146,7 @@ async def create_session(
     # __ping__ 은 agent 가 LLM/도구 없이 즉시 done 반환(비용 0). fire-and-forget —
     # 실패해도 세션 생성에 영향 없음(첫 질문이 조금 느릴 뿐).
     if AGENTCORE_RUNTIME_ARN:
-        asyncio.get_running_loop().create_task(_prewarm_agent(new_id))
+        _spawn(_prewarm_agent(new_id))
 
     return SessionResponse(
         session_id=new_id,
@@ -303,6 +303,17 @@ class _StreamRelay:
 # isStreaming 중 전송을 막음). 페이지 복귀 시 진행 중 분석을 재구독할 수 있다.
 _active_relays: dict[str, _StreamRelay] = {}
 
+# fire-and-forget 태스크 강한 참조 — asyncio 는 create_task 결과를 약한 참조로만
+# 잡아 GC 되면 분석이 조용히 죽는다(결과 미저장).
+_bg_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    t = asyncio.get_running_loop().create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
+
 
 # ─── Messages (SSE stream proxy) ───
 class MessageCreate(BaseModel):
@@ -363,7 +374,7 @@ async def post_message(
     # SSE 응답은 릴레이 tail(구독)일 뿐. 복귀 시 GET /stream 으로 재구독 가능.
     relay = _StreamRelay()
     _active_relays[session_id] = relay
-    asyncio.get_running_loop().create_task(
+    _spawn(
         _agentcore_producer(
             relay, session_id, req.content, req.screen_context, req.mode, req.language
         )

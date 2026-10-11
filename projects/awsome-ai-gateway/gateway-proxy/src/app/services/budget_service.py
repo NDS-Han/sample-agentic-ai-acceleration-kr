@@ -454,6 +454,179 @@ class BudgetService:
             logger.exception("budget_db_fallback_failed", user_id=user_id)
             raise PermissionError("no_budget_assigned")
 
+    async def reserve_budget(
+        self,
+        redis,
+        user_id: str,
+        team_id: str | None,
+        period: str,
+        estimate: Decimal,
+        request_id: str,
+        client: str | None = None,
+        marker_ttl: int = 14400,
+    ) -> list[dict]:
+        """Admission-time 최악비용 예약 (check-then-act 창 제거).
+
+        budget_check 가 읽기 전용이라, 동시 요청들이 같은 used 를 읽고 전부 통과한 뒤
+        각자 실비를 차감해 월 하드캡을 넘길 수 있었다. 이 메서드는 사용 카운터에
+        추정 최악비용을 **원자적으로 선차감**하고 per-request 마커를 남긴다 —
+        이후 요청의 check/reserve 는 in-flight 예약을 포함한 used 를 본다.
+        완료 시 ``settle_budget`` 이 (실비 - 예약) 델타로 정산한다.
+
+        반환: 커밋된 scope 디스크립터 목록 [{scope, usage_key, config_key,
+        marker_key, fallback}] — settle/refund 에 그대로 넘긴다.
+        거절 시 이미 커밋된 앞선 scope 를 되돌리고 PermissionError 를 던진다 —
+        reason 은 middleware 의 429 코드와 같은 어휘다.
+
+        ⚠️ config 해석은 ``check_budget`` 의 Redis 경로와 동일 규칙을 따른다
+           (team 미설정 → deny, user 미설정+D 없음 → pass, D 합성 config 폴백).
+           config 캐시는 직전 check_budget 이 수화해 뒀으므로 여기서는 재수화
+           하지 않는다 — 키가 증발한 엣지는 fail-closed 방향으로만 어긋난다.
+        """
+        if not team_id:
+            raise PermissionError("no_team_assigned")
+
+        script = LuaScriptLoader.get("budget_reserve")
+        est_str = str(estimate)
+
+        user_usage_key = f"budget:user:{{{user_id}}}:{period}"
+        user_config_key = f"budget:config:user:{{{user_id}}}"
+        team_usage_key = f"budget:team:{{{team_id}}}:{period}"
+        team_config_key = f"budget:config:team:{{{team_id}}}"
+
+        # D-3 와 동일: 개인 config 없음 + 팀 기본 cap D → 합성 config 를 ARGV 로.
+        user_fallback = ""
+        if not await redis.exists(user_config_key):
+            team_cfg_raw = await redis.get(team_config_key)
+            if team_cfg_raw:
+                team_cfg = json.loads(
+                    team_cfg_raw.decode()
+                    if isinstance(team_cfg_raw, bytes)
+                    else team_cfg_raw
+                )
+                d_cap = team_cfg.get("default_user_cap_usd")
+                if d_cap is not None:
+                    # check_budget 의 D-3 합성과 같은 규칙 — 캐시된 팀 config 에
+                    # thresholds 가 없는 구버전 엔트리 대비 폴백(변수 추출은
+                    # 재수화 기본값 주입 가드 테스트의 AST 패턴과 맞추기 위함).
+                    d_thresholds = (
+                        team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                    )
+                    user_fallback = json.dumps({
+                        "limit_usd": str(d_cap),
+                        "policy": team_cfg.get("policy", "hard_block"),
+                        "soft_limit_pct": team_cfg.get("soft_limit_pct")
+                        or DEFAULT_SOFT_LIMIT_PCT,
+                        "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
+                        or DEFAULT_THROTTLE_RPM_PCT,
+                        "thresholds": d_thresholds,
+                    })
+
+        # 평가 순서는 §6-1 과 같다: 1) team 2) user 3) client.
+        scope_specs: list[tuple[str, str, str, str]] = [
+            ("team", team_usage_key, team_config_key,
+             f"budget:pending:team:{{{team_id}}}:{request_id}"),
+            ("user", user_usage_key, user_config_key,
+             f"budget:pending:user:{{{user_id}}}:{request_id}"),
+        ]
+        if client in PER_APP_BUDGET_CLIENTS:
+            scope_specs.append((
+                "client",
+                f"budget:user:{{{user_id}}}:{client}:{period}",
+                f"budget:config:user:{{{user_id}}}:{client}",
+                f"budget:pending:client:{{{user_id}}}:{client}:{request_id}",
+            ))
+
+        committed: list[dict] = []
+        for scope, usage_key, config_key, marker_key in scope_specs:
+            fallback = user_fallback if scope == "user" else ""
+            try:
+                raw = await redis.eval(
+                    script, 3, usage_key, config_key, marker_key,
+                    scope, est_str, fallback, marker_ttl,
+                )
+            except Exception:
+                # Redis 일시 장애 — fail-open 방향으로 둔다. 예약 없이 진행하면
+                # 기존(체크만 하는) 동작과 같아지므로 안전하다. 커밋분은 되돌린다.
+                logger.exception("budget_reserve_eval_failed", scope=scope)
+                await self._refund_reservations(redis, committed)
+                return []
+
+            result = json.loads(raw)
+
+            if result.get("config_present") is False:
+                if scope == "team":
+                    # C-1: 팀 예산 미설정은 deny (check_budget 과 동일).
+                    await self._refund_reservations(redis, committed)
+                    raise PermissionError("team_budget_unset")
+                # user(Q)/client 미설정 → 예약 대상 자체가 없으므로 pass.
+                continue
+            if "config_present" not in result:
+                # 필드 자체가 없는 응답 = 구버전/다른 스크립트의 응답 형태 —
+                # 예약 계약을 알 수 없으니 이 scope 는 예약 없이 통과시킨다
+                # (기존 체크 전용 동작으로 회귀, 차단 방향으로 어긋나지 않게).
+                logger.warning("budget_reserve_malformed_response", scope=scope)
+                continue
+
+            if not result.get("allowed"):
+                await self._refund_reservations(redis, committed)
+                raise PermissionError(
+                    result.get("reason") or f"{scope}_budget_exceeded"
+                )
+
+            if result.get("reserved"):
+                committed.append({
+                    "scope": scope,
+                    "usage_key": usage_key,
+                    "config_key": config_key,
+                    "marker_key": marker_key,
+                    "fallback": fallback,
+                })
+
+        return committed
+
+    async def settle_budget(
+        self,
+        redis,
+        scopes: list[dict],
+        actual: Decimal,
+    ) -> tuple[Decimal | None, str | None]:
+        """예약된 월예산을 실비로 정산한다 (actual=0 이면 전액 환불).
+
+        마커 기반 멱등 — 같은 요청에 여러 번 불려도 한 번만 적용된다.
+        (threshold_triggered, scope) 를 돌려 호출자가 알림을 재사용하게 한다.
+        """
+        script = LuaScriptLoader.get("budget_settle")
+        triggered = None
+        triggered_scope = None
+        for s in scopes:
+            try:
+                raw = await redis.eval(
+                    script, 3,
+                    s["usage_key"], s["config_key"], s["marker_key"],
+                    str(actual), s.get("fallback") or "",
+                )
+                result = json.loads(raw)
+            except Exception:
+                # 정산 실패 = 카운터에 예약치 잔류(과대 계상, 보수적 방향).
+                # 마커도 남아 재시도 수단은 있으나, 현재는 경고만 남긴다.
+                logger.exception("budget_settle_failed", scope=s.get("scope"))
+                continue
+            t = result.get("threshold_triggered")
+            if triggered is None and t is not None:
+                triggered = t
+                triggered_scope = s.get("scope")
+        return triggered, triggered_scope
+
+    async def _refund_reservations(self, redis, scopes: list[dict]) -> None:
+        """거절/에러 경로의 예약 롤백 — settle_budget(0) 과 동일 효과."""
+        if not scopes:
+            return
+        try:
+            await self.settle_budget(redis, scopes, Decimal("0"))
+        except Exception:
+            logger.warning("budget_reservation_refund_failed")
+
     async def _check_budget_db(
         self,
         db: AsyncSession,
