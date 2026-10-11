@@ -326,3 +326,17 @@ describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회
     }
   });
 });
+
+describe('CreateModelDialog — price inputs take fine-grained decimals (US-19)', () => {
+  it('uses a 1e-5 step so the browser accepts 0.1375 ($0.0001375/1K)', () => {
+    // 폼은 per-1M 표기 — per-1K 1e-8 정밀도는 per-1M 에서 1e-5 스텝이다.
+    // Haiku 5.5 캐시 쓰기 단가 $0.1375/M 은 step 0.001 이면 브라우저가 거부한다.
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    for (const id of ['input_price_per_1m', 'output_price_per_1m', 'cache_creation_5m_price_per_1m',
+                      'cache_creation_1h_price_per_1m', 'cache_read_price_per_1m']) {
+      const el = document.getElementById(id) as HTMLInputElement | null;
+      expect(el, id).not.toBeNull();
+      expect(el!.getAttribute('step')).toBe('0.00001');
+    }
+  });
+});

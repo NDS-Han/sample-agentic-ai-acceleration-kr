@@ -231,11 +231,11 @@ ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS allowed_clients TEXT[];
 CREATE TABLE IF NOT EXISTS model.model_pricings (
     id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),
-    input_price_per_1k_tokens           NUMERIC(10,6) NOT NULL,
-    output_price_per_1k_tokens          NUMERIC(10,6) NOT NULL,
-    cache_creation_5m_price_per_1k_tokens NUMERIC(10,6) NOT NULL DEFAULT 0,
-    cache_creation_1h_price_per_1k_tokens NUMERIC(10,6) NOT NULL DEFAULT 0,
-    cache_read_price_per_1k_tokens      NUMERIC(10,6) NOT NULL DEFAULT 0,
+    input_price_per_1k_tokens           NUMERIC(12,8) NOT NULL,
+    output_price_per_1k_tokens          NUMERIC(12,8) NOT NULL,
+    cache_creation_5m_price_per_1k_tokens NUMERIC(12,8) NOT NULL DEFAULT 0,
+    cache_creation_1h_price_per_1k_tokens NUMERIC(12,8) NOT NULL DEFAULT 0,
+    cache_read_price_per_1k_tokens      NUMERIC(12,8) NOT NULL DEFAULT 0,
     effective_from                      TIMESTAMPTZ   NOT NULL,
     effective_until                     TIMESTAMPTZ,
     created_by                          UUID          NOT NULL REFERENCES auth.users(id)
@@ -687,11 +687,44 @@ ALTER TABLE budget.budget_configs
 -- 배수(long=short×2)가 아니라 명시 요율 컬럼을 두는 이유는 AWS Price List 자동연동 때문이다
 -- (Price List 는 달러 요율을 준다). 컬럼은 전부 NULLABLE(NULL='이 버킷 long 미설정').
 ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_threshold_tokens INTEGER;
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_input_price_per_1k_tokens NUMERIC(10,6);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_output_price_per_1k_tokens NUMERIC(10,6);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_5m_price_per_1k_tokens NUMERIC(10,6);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_1h_price_per_1k_tokens NUMERIC(10,6);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_read_price_per_1k_tokens NUMERIC(10,6);
+ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_input_price_per_1k_tokens NUMERIC(12,8);
+ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_output_price_per_1k_tokens NUMERIC(12,8);
+ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_5m_price_per_1k_tokens NUMERIC(12,8);
+ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_1h_price_per_1k_tokens NUMERIC(12,8);
+ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_read_price_per_1k_tokens NUMERIC(12,8);
+
+-- 요금 컬럼 정밀도 NUMERIC(10,6) -> NUMERIC(12,8) (정본 phase-2 마이그레이션 0043 미러).
+-- fork(US-19)는 alembic 파일 없이 이 블록만 둔다 — migration Job 이 배포마다 init SQL 을
+-- 먼저 실행하므로 기존 DB 도 여기서 넓어지고, 마이그레이션 번호가 upstream 과 엇갈리지 않는다.
+--
+-- 위 CREATE/ADD 는 새 DB 에만 (12,8) 을 준다. 이미 (10,6) 으로 만들어진 DB 는 이 블록이
+-- 넓힌다 — Haiku 5.5 Regional 의 캐시 쓰기 단가가 0.0001375(소수 7자리)라 6자리 컬럼에선
+-- Pydantic 이 422 로 거절하고 **등록 자체가 불가능**하기 때문이다.
+--
+-- ADD COLUMN IF NOT EXISTS 와 달리 ALTER COLUMN TYPE 에는 IF 가 없으므로 현재 scale 을
+-- 조회해 필요한 컬럼만 바꾼다(멱등). 이미 (12,8) 이면 한 건도 돌지 않는다. numeric scale
+-- 변경은 binary-coercible 이 아니라 테이블 재작성이지만 이 테이블은 행 수가 작다.
+--
+-- cost_usd(usage.usage_logs)는 여기 포함하지 않는다 — 단가가 아니라 **금액**이고
+-- cost_recorder.COST_PRECISION 이 같은 6자리로 양자화한다.
+DO $$
+DECLARE
+    col text;
+BEGIN
+    FOR col IN
+        SELECT column_name
+          FROM information_schema.columns
+         WHERE table_schema = 'model'
+           AND table_name = 'model_pricings'
+           AND data_type = 'numeric'
+           AND numeric_scale < 8
+    LOOP
+        EXECUTE format(
+            'ALTER TABLE model.model_pricings ALTER COLUMN %I TYPE NUMERIC(12,8)', col
+        );
+        RAISE NOTICE 'widened model.model_pricings.% to NUMERIC(12,8)', col;
+    END LOOP;
+END $$;
 
 -- 값-가드 시딩: 열린 gpt-5.6 행의 현재 short 요율에 카드 배수(in×2·out×1.5·cache×2)를 곱해
 -- long 을 채운다. alias 이름/plane 무관하게 pub 의 실제 short 요율을 추적한다.

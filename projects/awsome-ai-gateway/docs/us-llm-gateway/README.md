@@ -14,7 +14,7 @@
 - 🔴 **코드** — fork 의 **`us/deploy-fixes`** 브랜치: https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr/tree/us/deploy-fixes/projects/awsome-ai-gateway (원본 [aws-samples](https://github.com/aws-samples/sample-agentic-ai-acceleration-kr) 에 아직 없는 배포·벤더 픽스 포함, `forked from aws-samples/…` 배너가 정상). upstream 위로 **리베이스**되어 해시가 바뀌므로 버전은 **`US-NN`** 으로 센다
 - **리전** — `us-west-2`(인프라) · 추론은 **US Geo**(`us.anthropic.*`, us-east-1/2·us-west-2 분산) · 리전 변경/US 밖 설치는 [install-overview §0](install-overview.md#0-이번-배포의-범위-확정)
 - **추론 백엔드** — `bedrock-runtime` + US Geo 추론 프로파일 (Mantle 아님)
-- **클라이언트 · 모델** — Claude Code(Mac·Windows·Linux) · Cowork · **Opus 5.5 · Sonnet 5.5 · Haiku 4.5** — 전부 `US-01` 에 포함, 운영(`US-08`)도 포함
+- **클라이언트 · 모델** — Claude Code(Mac·Windows·Linux) · Cowork · **Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5** — 전부 `US-01` 에 포함, 운영(`US-08`)도 포함
 - **접속(입구)** — POC: http ALB + IP 허용목록(방식 A), 도메인이 있으면 https(`US-06`) · 운영(`US-08`): https 도메인 + admin ALB 2개 internal(S2S VPN)
 
 ---
@@ -31,12 +31,12 @@
 
 | 사용 구성 | POC (dev) | 운영 (prod) |
 |---|---|---|
-| Claude Code 만 (**Opus 5.5 · Sonnet 5.5 · Haiku 4.5**) | `US-01` | `US-08`(`US-01` 과 같은 설치를 prod 계정에서 8-P 대로 — https·admin internal·VPN 포함) |
+| Claude Code 만 (**Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5**) | `US-01` | `US-08`(`US-01` 과 같은 설치를 prod 계정에서 8-P 대로 — https·admin internal·VPN 포함) |
 | Claude Code + **Cowork** | `US-01` + https 입구 하나(도메인 있으면 `US-06`, 없으면 `US-02` 의 `03` CloudFront) | `US-08`(같음 · https 포함이라 입구 선택 없음) |
 
 **신규 설치에서 각 `US-NN` 은** — 자세한 설명은 [install-overview.md §1](install-overview.md#1-신규-설치와-us-nn)
 
-- **이미 포함 (따로 안 함)**: `US-03`·`04`·`05`·`10`·`11`·`13`
+- **이미 포함 (따로 안 함)**: `US-03`·`04`·`05`·`10`·`11`·`13`·`16`·`17`·`18`
 - **설치 뒤 따로**: `US-12`(관리 화면 Cognito 로그인) — 운영(`US-08`)은 사실상 필수
 - **둘 중 하나 고르기**: 직원 PC 를 수동 설치 ↔ 설치 파일(`US-14` Claude Code · `US-09` Cowork)
 - **POC 에서 선택**: `US-06`(https) · `US-07`(admin internal) · `US-02` 는 기존 배포 전용
@@ -49,11 +49,11 @@
 
 | ID (문서) | 무엇 | 등급 · 처음 설치한다면 | 이미 설치했다면 — 적용 방법 |
 |---|---|---|---|
+| [**US-19**](ops/8-D-upstream-sync.md#us-19-로-따라-할-때-달라지는-것) 2026/10 | **Haiku 5.5 추가** — 빠르고 싼 최신 Haiku 를 모델 목록에 넣는다(입력 단가가 Haiku 4.5 의 1/10). 프롬프트가 10만 토큰을 넘는 요청은 5배로 청구되므로 그 요금까지 기록하고, Haiku 5.5 호출이 400 으로 실패할 수 있던 게이트웨이 결함을 고친다. Haiku 4.5 는 Claude Code 의 배경 작업용으로 남는다 | 권장 · **신규 설치는 코드·§4-2 에 포함**(이미 설치한 곳만 이 절차) | [8-D](ops/8-D-upstream-sync.md#us-19-로-따라-할-때-달라지는-것) 를 「US-19」 차이대로 — 저장소 최신화 → DB 스냅샷 → 이미지 4개 새로 → `install-eks.sh`(단가 소수 8자리) → Haiku 5.5 등록(`02` → `08`) → `status.sh` (약 1시간) |
 | [**US-18**](ops/8-D-upstream-sync.md#us-18-로-따라-할-때-달라지는-것) 2026/10 | **예산·비용·권한 결함 수정** — 운영자가 바꾼 예산 알림 기준이 5분 뒤 기본값으로 되돌아가던 것 · 팀 예산만 쓰면 알림이 오지 않던 것 · 알림 메일의 사용액 빈칸 · 팀 리더가 다른 팀의 예산을 볼 수 있던 것 · 팀 리더의 예산 화면에 「팀 예산 정보를 불러올 수 없습니다」가 뜨던 것 · Sonnet 5.5 캐시 읽기 단가 인하(10/7)가 반영되지 않아 비용이 크게 기록되던 것 · 분석 화면을 다시 열면 깨지거나 앱 필터가 먹지 않던 것 | 필수 · 신규 설치는 코드·단가에 포함 | [8-D](ops/8-D-upstream-sync.md#us-18-로-따라-할-때-달라지는-것) 를 「US-18」 차이대로 — 저장소 최신화 → DB 스냅샷 → 이미지 5개 새로 → `install-eks.sh`(DB 변경 3개) → 단가 `08` → `status.sh` (약 1시간) · **단가만 급하면 `08` 먼저(5분)** |
-| [**US-17**](ops/8-A-automode-server.md) 2026/10 | Claude Code **Auto mode 의 안전 판정을 Bedrock 이 하도록** — 지금은 게이트웨이가 판정 요청 표시를 버려서, Claude Code 가 판정을 위한 요청을 따로 보내고(비용) 과금 안내를 띄운다. 표시 2개만 골라 Bedrock 으로 넘기면 따로 보내던 요청과 안내가 사라지고, 최신 Claude Code 에서 세션 첫 요청이 한 번 실패하던 것도 사라진다 | 권장 · Auto mode 를 쓰면 · 신규 설치는 코드에 포함 | [8-A](ops/8-A-automode-server.md) 순서대로 — 저장소 최신화 → 확인 스크립트(전) → gateway-proxy 이미지만 새로 → `install-eks.sh` → 확인 스크립트(후) (약 20분, 추론 무중단) |
+| [**US-17**](ops/8-A-automode-server.md) 2026/10 | Claude Code **Auto mode 의 안전 판정을 Bedrock 이 하도록** — 지금은 게이트웨이가 판정 요청 표시를 버려서, Claude Code 가 판정을 위한 요청을 따로 보내고(비용) 과금 안내를 띄운다. 필요한 표시만 골라 Bedrock 으로 넘기면 따로 보내던 요청과 안내가 사라지고, 최신 Claude Code 에서 세션 첫 요청이 한 번 실패하던 것도 사라진다 | 권장 · Auto mode 를 쓰면 · 신규 설치는 코드에 포함 | **US-18 에 포함** — [8-D](ops/8-D-upstream-sync.md#us-18-로-따라-할-때-달라지는-것) 를 「US-18」 차이대로 하면 함께 적용된다 · 확인은 [8-A](ops/8-A-automode-server.md) 의 확인 스크립트 |
 | [**US-16**](ops/8-M-models.md) 2026/10 | **Sonnet 5.5 를 기본 모델로** — Sonnet 5 의 다음 모델(단가 같음)을 등록하고, 직원 PC 의 기본 모델을 Sonnet 5.5 로 바꾼 뒤 이전 세대(Opus 5 · Sonnet 5 · Opus 4.8)를 목록에서 내린다. 남는 모델 = Opus 5.5 · Sonnet 5.5 · Haiku 4.5 | 권장 · **신규 설치는 §4-2 에 포함**(이미 설치한 곳만 이 절차) | [8-M](ops/8-M-models.md) 의 「0」 → 「A」 → 「B」 → 「C」 순서대로 — 등록(스크립트 또는 관리 화면) → 첫 호출 확인 → 직원 PC 기본 모델·폴백 규칙 전환 → 이전 세대 비활성화 → `status.sh` 로 확인 |
 | [**US-15**](ops/8-Z-token-ttl.md) 2026/10 | 게이트웨이 열쇠(VK) **수명 1시간 → 24시간** — 직원 PC 의 helper 가 매시간 관리 API 에서 열쇠를 다시 받던 것을 하루 한 번으로. 재발급 순간의 지연과 관리 API 부하가 줄고, 로그인 주기(7일)·모델·예산은 그대로 | 선택 · 보안 정책이 짧은 수명을 요구하면 1시간 유지 · 신규 설치는 values 한 줄이라 설치 때 함께 | [8-Z](ops/8-Z-token-ttl.md) 순서대로 — values `vkTtlHours: 24` 한 줄 → `install-eks.sh` → 관리 API 파드만 재시작(추론 무중단, 약 10분) |
-| [**US-14**](claude-code/installer/cc-installer-admin-e2e-windows.md) 2026/09 | Claude Code **Windows 설치 파일** — 관리자가 설치 파일 1개를 만들어 배포하면 직원은 실행 후 명령 두 개로 끝난다(지금은 PC 마다 Python·저장소·PATH 를 손으로 맞춘다) | 선택 · Windows 직원 PC 가 있으면 권장 · `US-01` §6-3(수동 설치)으로도 붙는다 · 게이트웨이는 바뀌지 않는다 | 소스 브랜치(`feat/cc-installer-import`)에서 설치 파일 만들기 → 직원 PC 에 설치 → 로그인 1회 |
 그 이전(`US-01` 최초 설치)과 항목별 이유·함정 → [updates.md](updates.md)
 
 ---

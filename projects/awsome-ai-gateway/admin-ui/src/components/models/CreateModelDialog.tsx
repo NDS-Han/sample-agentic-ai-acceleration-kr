@@ -26,7 +26,8 @@ interface FormState {
   model_id: string;
   endpoint_url: string;
   // 운영자가 보는 외부 카탈로그는 USD/1M 기준 — 폼도 1M 으로 받고 API 전송 시 ÷1000 한다.
-  // (DB/API 컬럼은 *_per_1k_tokens Numeric(10,6) — 최소 단위 $0.001/M)
+  // (DB/API 컬럼은 *_per_1k_tokens Numeric(12,8) — 최소 단위 $0.00001/M.
+  //  Haiku 5.5 캐시 쓰기 $0.1375/M 처럼 1/1000 달러보다 고운 단가가 있다 — US-19)
   input_price_per_1m: string;
   output_price_per_1m: string;
   cache_creation_5m_price_per_1m: string;
@@ -338,7 +339,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 id="input_price_per_1m"
                 name="input_price_per_1m"
                 min={0}
-                step={0.001}
+                step={0.00001}
                 value={form.input_price_per_1m}
                 onChange={handleChange}
                 required
@@ -354,7 +355,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 id="output_price_per_1m"
                 name="output_price_per_1m"
                 min={0}
-                step={0.001}
+                step={0.00001}
                 value={form.output_price_per_1m}
                 onChange={handleChange}
                 required
@@ -370,7 +371,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 id="cache_creation_5m_price_per_1m"
                 name="cache_creation_5m_price_per_1m"
                 min={0}
-                step={0.001}
+                step={0.00001}
                 value={form.cache_creation_5m_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -385,7 +386,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 id="cache_creation_1h_price_per_1m"
                 name="cache_creation_1h_price_per_1m"
                 min={0}
-                step={0.001}
+                step={0.00001}
                 value={form.cache_creation_1h_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
@@ -400,7 +401,7 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 id="cache_read_price_per_1m"
                 name="cache_read_price_per_1m"
                 min={0}
-                step={0.001}
+                step={0.00001}
                 value={form.cache_read_price_per_1m}
                 onChange={handleChange}
                 className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"

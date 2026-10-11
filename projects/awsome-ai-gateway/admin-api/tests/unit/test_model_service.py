@@ -303,6 +303,7 @@ class TestSetPricing:
              patch("app.services.model_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.get_by_alias = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=None)
             repo.close_current_pricing = AsyncMock()
             repo.create_pricing = AsyncMock()
             mock_audit.log = AsyncMock()
@@ -330,6 +331,7 @@ class TestSetPricing:
              patch("app.services.model_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.get_by_alias = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=None)
             repo.close_current_pricing = AsyncMock()
             repo.create_pricing = AsyncMock()
             mock_audit.log = AsyncMock()
@@ -365,6 +367,7 @@ class TestSetPricing:
              patch("app.services.model_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.get_by_alias = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=None)
             repo.close_current_pricing = AsyncMock()
             repo.create_pricing = AsyncMock()
             mock_audit.log = AsyncMock()
@@ -376,6 +379,85 @@ class TestSetPricing:
         created = repo.create_pricing.call_args.args[0]
         assert created.cache_creation_5m_price_per_1k_tokens == Decimal("0")
         assert created.cache_read_price_per_1k_tokens == Decimal("0")
+
+
+    async def _set_pricing_with_prior(self, model_service, mock_session, admin_user, prior):
+        data = PricingRequest(
+            input_price_per_1k_tokens=Decimal("0.00012"),
+            output_price_per_1k_tokens=Decimal("0.0006"),
+            cache_creation_5m_price_per_1k_tokens=Decimal("0.00015"),
+            cache_creation_1h_price_per_1k_tokens=Decimal("0.00024"),
+            cache_read_price_per_1k_tokens=Decimal("0.000012"),
+            effective_from=datetime.now(timezone.utc),
+        )
+        order: list[str] = []
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.get_by_alias = AsyncMock(return_value=_make_model("claude-haiku-5-5"))
+            repo.get_current_pricing = AsyncMock(
+                side_effect=lambda *a, **k: order.append("read") or prior)
+            repo.close_current_pricing = AsyncMock(
+                side_effect=lambda *a, **k: order.append("close"))
+            repo.create_pricing = AsyncMock()
+            mock_audit.log = AsyncMock()
+            await model_service.set_pricing(
+                mock_session, alias="claude-haiku-5-5", data=data, actor=admin_user
+            )
+        return repo.create_pricing.call_args.args[0], order
+
+    async def test_set_pricing_inherits_long_context_tier(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """US-19: 단가 수정(관리 화면·가격 동기화)은 구간 단가를 요청에 싣지 않는다. 새 행이
+        구간 6열을 NULL 로 만들면 100K 초과 요청이 조용히 1/5 로 기록되므로, 닫는 행의 값을
+        이어받아야 한다 — 그리고 그 행은 닫기 **전에** 읽어야 한다."""
+        prior = _make_pricing("claude-haiku-5-5")
+        prior.long_context_threshold_tokens = 100000
+        prior.long_context_input_price_per_1k_tokens = Decimal("0.00055")
+        prior.long_context_output_price_per_1k_tokens = Decimal("0.00275")
+        prior.long_context_cache_creation_5m_price_per_1k_tokens = Decimal("0.0006875")
+        prior.long_context_cache_creation_1h_price_per_1k_tokens = Decimal("0.0011")
+        prior.long_context_cache_read_price_per_1k_tokens = Decimal("0.000055")
+
+        created, order = await self._set_pricing_with_prior(
+            model_service, mock_session, admin_user, prior)
+
+        assert order == ["read", "close"]
+        assert created.long_context_threshold_tokens == 100000
+        assert created.long_context_input_price_per_1k_tokens == Decimal("0.00055")
+        assert created.long_context_output_price_per_1k_tokens == Decimal("0.00275")
+        assert created.long_context_cache_creation_5m_price_per_1k_tokens == Decimal("0.0006875")
+        assert created.long_context_cache_creation_1h_price_per_1k_tokens == Decimal("0.0011")
+        assert created.long_context_cache_read_price_per_1k_tokens == Decimal("0.000055")
+        # 요청이 바꾼 기본 단가는 그대로 새 값
+        assert created.input_price_per_1k_tokens == Decimal("0.00012")
+
+    async def test_set_pricing_prior_without_tier_stays_flat(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        prior = _make_pricing()
+        prior.long_context_threshold_tokens = None
+        prior.long_context_input_price_per_1k_tokens = None
+        prior.long_context_output_price_per_1k_tokens = None
+        prior.long_context_cache_creation_5m_price_per_1k_tokens = None
+        prior.long_context_cache_creation_1h_price_per_1k_tokens = None
+        prior.long_context_cache_read_price_per_1k_tokens = None
+
+        created, _ = await self._set_pricing_with_prior(
+            model_service, mock_session, admin_user, prior)
+
+        assert created.long_context_threshold_tokens is None
+        assert created.long_context_input_price_per_1k_tokens is None
+
+    async def test_set_pricing_first_row_has_no_tier(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        created, _ = await self._set_pricing_with_prior(
+            model_service, mock_session, admin_user, None)
+
+        assert created.long_context_threshold_tokens is None
+        assert created.long_context_cache_read_price_per_1k_tokens is None
 
 
 class TestPatchStatus:

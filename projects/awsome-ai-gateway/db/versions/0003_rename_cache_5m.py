@@ -25,17 +25,19 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # US-19(2026-10-10): 단가 열은 NUMERIC(12,8). 새로 설치할 때는 init SQL 다음에 이 revision 이
+    # 표를 다시 만들므로 여기도 (12,8) 이어야 한다. 기존 DB 는 init SQL 의 DO 블록이 넓힌다.
     op.execute("DROP TABLE IF EXISTS model.model_pricings CASCADE")
     op.execute(
         """
         CREATE TABLE model.model_pricings (
             id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
             model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),
-            input_price_per_1k_tokens           NUMERIC(10,6) NOT NULL,
-            output_price_per_1k_tokens          NUMERIC(10,6) NOT NULL,
-            cache_creation_5m_price_per_1k_tokens  NUMERIC(10,6) NOT NULL DEFAULT 0,
-            cache_creation_1h_price_per_1k_tokens  NUMERIC(10,6) NOT NULL DEFAULT 0,
-            cache_read_price_per_1k_tokens      NUMERIC(10,6) NOT NULL DEFAULT 0,
+            input_price_per_1k_tokens           NUMERIC(12,8) NOT NULL,
+            output_price_per_1k_tokens          NUMERIC(12,8) NOT NULL,
+            cache_creation_5m_price_per_1k_tokens  NUMERIC(12,8) NOT NULL DEFAULT 0,
+            cache_creation_1h_price_per_1k_tokens  NUMERIC(12,8) NOT NULL DEFAULT 0,
+            cache_read_price_per_1k_tokens      NUMERIC(12,8) NOT NULL DEFAULT 0,
             effective_from                      TIMESTAMPTZ   NOT NULL,
             effective_until                     TIMESTAMPTZ,
             created_by                          UUID          NOT NULL REFERENCES auth.users(id)

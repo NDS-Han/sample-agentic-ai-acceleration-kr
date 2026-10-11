@@ -27,7 +27,7 @@
 | Region | **us-west-2** (인프라·추론) — 추론은 US Geo라 us-east-1/us-east-2/us-west-2 분산                                       |
 | 클라이언트  | **Claude Code** (Mac, Windows, Linux)                                                                       |
 | 추론 백엔드 | `bedrock-runtime` **+ US Geo 추론 프로파일** (`us.anthropic.`*) — us-west-2 In-Region 미지원이라 Geo 사용. **Mantle 아님** |
-| 모델     | **Opus 5.5 · Sonnet 5.5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                               |
+| 모델     | **Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                   |
 | 핵심 기능  | **서버측 Web Search** (AgentCore 관리형 커넥터, **us-east-1 전용 → cross-region 호출**)                                  |
 | 보안(입구) | **IP 제한**(`inbound-cidrs`) · 도메인이 있으면 **HTTPS**(ACM, `US-06` [ops/8-H](ops/8-H-alb-https.md)) — 운영이면 강력 권장                    |
 
@@ -46,6 +46,9 @@
   - **`US-10`** — 지금 코드가 곧 US-10 이다. 최신 DB 스키마 · 안정성 수정 · web search 비용 상한과 개선이 기본값으로 동작한다.
   - **`US-13`** — Opus 5.5 는 §4-2 의 SQL 이 등록한다(단가도 §4-2 (C) 가 심는다). 이미 설치한 곳만 US-13 을 따로 한다.
   - **`US-16`** — Sonnet 5.5 도 §4-2 의 SQL 이 등록하고 단가를 심는다. 이전 세대(Opus 5 · Sonnet 5 · Opus 4.8)는 (D) 가 INACTIVE 로 둔다. 이미 설치한 곳만 US-16 을 따로 한다.
+  - **`US-17`** — Claude Code Auto mode 서버 판정에 필요한 beta 전달이 gateway-proxy 코드의 기본값이다. 설치 뒤 [ops/8-A](ops/8-A-automode-server.md) 2절의 확인 스크립트로 확인만 한다.
+  - **`US-18`** — 예산·비용·권한 결함 수정이 코드에, DB 변경(0037~0039)이 init SQL 에, Sonnet 5.5 캐시 읽기 단가가 `update-scripts/pricing.tsv` 에 들어 있다. 이미 설치한 곳만 8-D 로 따로 한다.
+  - **`US-19`** — Haiku 5.5 는 §4-2 의 SQL 이 등록하고 100K 초과 구간 단가까지 심는다. Haiku 5.5 의 thinking 처리와 단가 소수 8자리는 코드와 init SQL 에 들어 있다. Haiku 4.5 는 Claude Code 배경 작업의 기본 모델이라 함께 남는다. 이미 설치한 곳만 US-19 를 따로 한다.
   - **`US-11`** — install-guide §4-2 (C) 가 `update-scripts/pricing.tsv` 의 단가를 심는다(기본 = `us.` Standard 티어). **다른 리전·티어로 청구받는 배포**는 §4-2 전에 이 파일을 자기 청구 단가로 고친다(방법은 install-guide §4-2 (C) 의 설명대로).
 - **설치를 마친 뒤 따로 하는 것**:
   - **`US-12`(관리 화면 Cognito 로그인)** — 설치 절차에 들어 있지 않다. 설치가 끝나면 [ops/8-L-admin-login.md](ops/8-L-admin-login.md) 로 켠다(https 주소 = `US-06` 전제). 코드 조건(admin-api `1.0.69-idpjwks`)은 지금 코드로 설치하면 이미 충족한다. **운영(`US-08`)은 사실상 필수** — prod values 는 개발용 로그인이 꺼진 채로 나오므로, US-12 전에는 관리 화면에 들어갈 방법이 없다.
@@ -118,6 +121,7 @@
 | [prd.md](prd.md)                                                   | 요구사항 · 확정 범위 · out-of-scope                                                    | 시작 전 · 고객사와 범위 합의할 때          |
 | [architecture.md](architecture.md)                                 | **전체 그림 1장** — ASCII 아키텍처 · 요청 흐름 5개 · 벤더 레퍼런스 대비                              | 시작 전 · 구조를 한눈에 보고 싶을 때        |
 | [web-search/](web-search/README.md) | web search 문서 입구 — 원리 · 데모 영상 · 토큰·비용 |
+| [beta-headers/](beta-headers/README.md) | Claude Code beta 헤더 기록 — Bedrock 에 넘기는 beta 와 그 근거 · Claude Code 를 올린 뒤 점검 | Claude Code 를 올릴 때 · 400 원인을 찾을 때 |
 | [web-search-explained.md](web-search/web-search-explained.md)                 | 서버측 web search 가 동작하는 원리 (초보자용 ASCII 흐름)                                       | §5 를 개념부터 이해하고 싶을 때           |
 | [client-setup-explained.md](client-setup-explained.md)             | 클라이언트 설치·인증 흐름 (초보자용 ASCII 흐름)                                                 | §6 을 개념부터 이해하고 싶을 때           |
 | [telemetry-explained.md](telemetry-explained.md)                   | Claude Code 텔레메트리(OTEL) — 무엇을 수집·어디로·켤까끌까                                      | §6 setup 이 켜는 텔레메트리를 이해·결정할 때 |

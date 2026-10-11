@@ -22,6 +22,7 @@ case is the provider's own error, never one we introduced.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Any
 
@@ -37,6 +38,11 @@ _ADAPTIVE_ONLY_PREFIXES: tuple[str, ...] = (
     "anthropic.claude-sonnet-5",
     "anthropic.claude-fable-5",
     "anthropic.claude-mythos-5",
+    # Haiku 5.5 — measured on Bedrock us-west-2 (2026-10-10): `enabled` is a 400
+    # ("thinking.type.enabled is not supported for this model. Use thinking.type.adaptive
+    # and output_config.effort"), `adaptive` is 200. Haiku 4.5 is the opposite (legacy
+    # list below), so "haiku" alone never decides the family — the version does.
+    "anthropic.claude-haiku-5-5",
 )
 
 # Models that accept only the legacy `enabled` form and reject `adaptive`.
@@ -78,16 +84,39 @@ def _family_from_alias(alias: str | None) -> str | None:
     ⚠️ 접두사가 아니라 **부분 문자열**로 본다. alias 는 운영자가 자유롭게 짓는 이름이라
        접두사 규약을 강제할 수 없다. 대가는 오탐 가능성이지만, 두 변환 모두 상류가
        거부하는 형태를 받아들이는 형태로 바꾸는 것이라 오탐의 비용이 낮다.
+
+    ⚠️ "haiku" 만으로는 계열이 정해지지 않는다(2026-10-10, US-19). haiku-4-5 는 legacy,
+       haiku-5-5 는 adaptive 전용이다. 예전처럼 haiku 면 무조건 legacy 로 보면, 강등
+       경로가 Haiku 5.5 의 adaptive 를 enabled 로 바꾸고 output_config 를 지워 400 이 난다.
+       그래서 haiku 뒤의 버전을 읽는다: 5 이상 → adaptive, 4.x → legacy. 버전을 읽을 수
+       없으면(``cowork-haiku``, 날짜형 ``claude-haiku-20251001``) 예전과 같은 legacy.
     """
     if not alias:
         return None
     a = alias.lower()
     if "haiku" in a:
-        return "legacy"
+        return _haiku_family(a)
     for token in ("opus-4-7", "opus-4-8", "opus-5", "sonnet-5", "fable-5", "mythos-5"):
         if token in a:
             return "adaptive"
     return None
+
+
+def _haiku_family(alias: str) -> str:
+    """Family of a haiku alias by its version: ``4.5``/``4-5``/``4_5``/``45`` → legacy,
+    5 and up → adaptive; no readable version → legacy (the behaviour before the split).
+    """
+    match = re.search(r"haiku\D{0,2}(\d+)(?:[.\-_](\d+))?", alias)
+    if match is None:
+        return "legacy"
+    major_raw, minor = match.group(1), match.group(2)
+    if minor is not None or len(major_raw) == 1:
+        major = int(major_raw)
+    elif len(major_raw) == 2:
+        major = int(major_raw[0])          # "haiku45" is 4.5, not version 45
+    else:
+        return "legacy"                    # a date stamp or build number, not a version
+    return "adaptive" if major >= 5 else "legacy"
 
 
 def _resolve_family(provider_model_id: str | None, alias: str | None) -> str | None:
@@ -158,6 +187,9 @@ def normalize_thinking(
         if t_type not in ("enabled", "adaptive"):
             return body
 
+        # alias 추정은 provider id 가 **없을 때만**(강등 미들웨어) — _resolve_family 가
+        # "id 가 있으면 그것만으로, 없을 때만 alias" 계약을 한 곳에서 지킨다. id 가 있는데
+        # 목록에 없는 새 모델은 "그대로 통과"가 계약이다.
         family = _resolve_family(provider_model_id, alias)
         if family is None:
             return body

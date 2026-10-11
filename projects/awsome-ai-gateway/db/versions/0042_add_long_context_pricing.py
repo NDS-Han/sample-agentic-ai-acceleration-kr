@@ -26,11 +26,11 @@ input x2, cache(read/write) x2, output x1.5.
 short 요율과 같은 단위(per-1k Decimal)로 5개 long 컬럼을 둔다:
 
     long_context_threshold_tokens                            INTEGER  NULL
-    long_context_input_price_per_1k_tokens                   NUMERIC(10,6) NULL
-    long_context_output_price_per_1k_tokens                  NUMERIC(10,6) NULL
-    long_context_cache_creation_5m_price_per_1k_tokens       NUMERIC(10,6) NULL
-    long_context_cache_creation_1h_price_per_1k_tokens       NUMERIC(10,6) NULL
-    long_context_cache_read_price_per_1k_tokens              NUMERIC(10,6) NULL
+    long_context_input_price_per_1k_tokens                   NUMERIC(12,8) NULL
+    long_context_output_price_per_1k_tokens                  NUMERIC(12,8) NULL
+    long_context_cache_creation_5m_price_per_1k_tokens       NUMERIC(12,8) NULL
+    long_context_cache_creation_1h_price_per_1k_tokens       NUMERIC(12,8) NULL
+    long_context_cache_read_price_per_1k_tokens              NUMERIC(12,8) NULL
 
 배수(long = short × 2) 대신 명시 요율을 쓰는 이유는 **AWS Price List 자동연동** 때문이다
 (후속 PR): Price List 는 배수가 아니라 달러 요율을 준다. 명시 컬럼이라야 sync 가 fetch 한
@@ -100,7 +100,7 @@ def upgrade() -> None:
     )
     for col in PRICE_COLS:
         op.execute(
-            f"ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS {col} NUMERIC(10,6)"
+            f"ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS {col} NUMERIC(12,8)"
         )
 
     # 값-가드 시딩: 열린 gpt-5.6 행의 현재 short 요율에 카드 배수를 곱해 long 을 채운다.

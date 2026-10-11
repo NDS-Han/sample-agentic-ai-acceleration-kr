@@ -411,13 +411,6 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     is_mantle = decision.provider == ProviderType.BEDROCK_MANTLE
 
-    # 클라이언트가 보낸 anthropic-beta 와 넘길 목록은 요청마다 한 번만 읽는다.
-    # _build_candidate_body 는 폴백 후보·웹 검색 턴마다 불리므로 그 안에서 읽지 않는다.
-    # English: read the client's anthropic-beta and the forward list once per request;
-    # _build_candidate_body runs once per fallback candidate and per web-search turn.
-    _client_betas = client_betas(request.headers.getlist("anthropic-beta"))
-    _fwd_map = forward_beta_map(get_settings().bedrock_forward_betas)
-
     def _build_candidate_body(
         req_d: dict, cand_config: ModelConfigSchema, streaming: bool
     ) -> tuple[bytes, dict, dict]:

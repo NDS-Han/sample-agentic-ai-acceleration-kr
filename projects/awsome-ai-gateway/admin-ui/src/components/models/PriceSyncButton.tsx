@@ -15,6 +15,7 @@ import { AppDialog } from '@/components/common/AppDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { formatRate } from '@/lib/utils/rateFormat';
 
 /**
  * 외부 단가 소스(AWS Price List / LiteLLM Catalog) 동기화 버튼 + diff 미리보기/승인 다이얼로그.

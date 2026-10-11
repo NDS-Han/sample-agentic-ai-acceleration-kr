@@ -14,9 +14,20 @@ export function fmtPricePerM(per1k: number | string | null | undefined): string 
   const str =
     per1m >= 1000 ? per1m.toFixed(0)
     : per1m >= 1 ? per1m.toFixed(2)
-    : per1m >= 0.01 ? per1m.toFixed(3)
-    : per1m.toFixed(5);
+    : _trimDecimals(per1m, 5, 3);
   return `$${str}/M`;
+}
+
+/**
+ * 소수 최대 `max`자리까지 보이되 끝의 0 은 지우고 최소 `min`자리는 둔다.
+ * NUMERIC(12,8) per-1K 는 per-1M 환산 시 소수 5자리까지 의미가 있다 —
+ * Haiku 5.5 캐시 쓰기 $0.1375/M 처럼 toFixed(3) 으로 잘리는 값이 있다(US-19).
+ */
+function _trimDecimals(v: number, max: number, min: number): string {
+  const [whole, frac = ''] = v.toFixed(max).split('.');
+  let f = frac.replace(/0+$/, '');
+  if (f.length < min) f = f.padEnd(min, '0');
+  return `${whole}.${f}`;
 }
 
 /** per-1M 입력값 → DB 저장용 per-1K. NaN 은 그대로 NaN 을 돌려줘 검증에 걸리게 한다. */

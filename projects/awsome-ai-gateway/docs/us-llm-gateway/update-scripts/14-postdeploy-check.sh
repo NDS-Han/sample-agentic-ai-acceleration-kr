@@ -54,16 +54,24 @@ require_env
 FAIL=0; WARN=0
 fail() { bad "$1"; FAIL=$((FAIL+1)); }
 warnc() { warn "$1"; WARN=$((WARN+1)); }
-norm() { awk "BEGIN{printf \"%.6f\", $1}"; }
+norm() { awk "BEGIN{printf \"%.8f\", $1}"; }
+# Same price? Both empty (no long-prompt rate card) counts as same; one empty does not.
+same_price() { [ -z "$1$2" ] || { [ -n "$1" ] && [ -n "$2" ] && [ "$(norm "$1")" = "$(norm "$2")" ]; }; }
+long_str() { [ -z "$1" ] && { printf 'none'; return; }; printf '>%s: %s / %s / %s / %s / %s' "$@"; }
 
 # ── Expected values from the repo ────────────────────────────────────────
 EXPECTED_HEAD=$(ls "$ROOT"/db/versions/[0-9][0-9][0-9][0-9]_*.py 2>/dev/null | sed 's#.*/##' | cut -c1-4 | sort | tail -1)
 [ -n "$EXPECTED_HEAD" ] || die "cannot find db/versions under $ROOT"
 
-declare -a ALIASES=(); declare -A T_IN T_OUT T_C5M T_C1H T_CREAD
-while IFS=$'\t' read -r a in out c5m c1h cread asof src extra; do
+declare -a ALIASES=(); declare -A T_IN T_OUT T_C5M T_C1H T_CREAD T_LONG
+# 14 columns: 5 prices, 6 long_* ("-" = no long-prompt rate card), asof, source.
+# 08-set-model-pricing.sh validates the table; this only reads it.
+while IFS=$'\t' read -r a in out c5m c1h cread labove lin lout lc5m lc1h lcread asof src extra; do
   [ -z "${a// }" ] && continue; [[ "$a" == \#* ]] && continue; [ "$a" = alias ] && continue
+  [ -n "${src:-}" ] || die "$TSV: $a has fewer than 14 columns — check it with 08-set-model-pricing.sh --print-sql"
   ALIASES+=("$a"); T_IN[$a]=$in; T_OUT[$a]=$out; T_C5M[$a]=$c5m; T_C1H[$a]=$c1h; T_CREAD[$a]=$cread
+  if [ "$labove" = "-" ]; then T_LONG[$a]="|||||"
+  else T_LONG[$a]="$labove|$lin|$lout|$lc5m|$lc1h|$lcread"; fi
 done < "$TSV"
 [ ${#ALIASES[@]} -gt 0 ] || die "no aliases in $TSV"
 alist=""; for a in "${ALIASES[@]}"; do alist="${alist:+$alist,}'$a'"; done
@@ -79,7 +87,10 @@ SELECT 'V', version_num FROM public.alembic_version;
 SELECT 'T', (to_regclass('public.system_settings') IS NOT NULL)::text;
 SELECT 'P', model_alias, input_price_per_1k_tokens, output_price_per_1k_tokens,
        cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
-       cache_read_price_per_1k_tokens
+       cache_read_price_per_1k_tokens,
+       long_context_threshold_tokens, long_context_input_price_per_1k_tokens,
+       long_context_output_price_per_1k_tokens, long_context_cache_creation_5m_price_per_1k_tokens,
+       long_context_cache_creation_1h_price_per_1k_tokens, long_context_cache_read_price_per_1k_tokens
   FROM model.model_pricings WHERE effective_until IS NULL AND model_alias IN ($alist) ORDER BY model_alias;
 SELECT 'A', alias, status FROM model.model_aliases WHERE alias IN ($SEEDED_ALIASES) ORDER BY alias;
 SELECT 'R', alias, provider_model_id, status FROM model.model_aliases WHERE alias IN ($alist) ORDER BY alias;
@@ -100,12 +111,12 @@ hdr "1. Database (one psql pod, ~1 min)"
 raw=$(run_sql "$SQL") || { printf '%s\n' "$raw"; die "database query failed"; }
 DB_HEAD=""; HAS_SS=""; BODYLOG=""; U_COST=""; U_N=""; B_SUM=""; W_SUM=""; W_N=""; E_OK=""; E_BAD=""
 declare -A CUR_P SEED_ST ROUTE
-while IFS='|' read -r tag f1 f2 f3 f4 f5 f6; do
+while IFS='|' read -r tag f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12; do
   case "$tag" in
     V) DB_HEAD="$f1" ;;
     T) HAS_SS="$f1" ;;
     S) BODYLOG="$f1" ;;
-    P) CUR_P[$f1]="$f2|$f3|$f4|$f5|$f6" ;;
+    P) CUR_P[$f1]="$f2|$f3|$f4|$f5|$f6|$f7|$f8|$f9|$f10|$f11|$f12" ;;
     A) SEED_ST[$f1]="$f2" ;;
     U) U_COST="$f1"; U_N="$f2" ;;
     B) B_SUM="$f1" ;;
@@ -133,13 +144,16 @@ fi
 for a in "${ALIASES[@]}"; do
   cur="${CUR_P[$a]:-}"
   if [ -z "$cur" ]; then warnc "$a: no open price row (alias not registered?)"; continue; fi
-  IFS='|' read -r ci co c5 c1 cr <<<"$cur"
-  if [ "$(norm "$ci")" = "$(norm "${T_IN[$a]}")" ] && [ "$(norm "$co")" = "$(norm "${T_OUT[$a]}")" ] \
-     && [ "$(norm "$c5")" = "$(norm "${T_C5M[$a]}")" ] && [ "$(norm "$c1")" = "$(norm "${T_C1H[$a]}")" ] \
-     && [ "$(norm "$cr")" = "$(norm "${T_CREAD[$a]}")" ]; then
-    ok "$a price = pricing.tsv ($ci / $co / $c5 / $c1 / $cr)"
+  IFS='|' read -r ci co c5 c1 cr la li lo l5 l1 lr <<<"$cur"
+  IFS='|' read -r ta ti to t5 t1 tr <<<"${T_LONG[$a]}"
+  if same_price "$ci" "${T_IN[$a]}" && same_price "$co" "${T_OUT[$a]}" \
+     && same_price "$c5" "${T_C5M[$a]}" && same_price "$c1" "${T_C1H[$a]}" \
+     && same_price "$cr" "${T_CREAD[$a]}" && [ "$la" = "$ta" ] \
+     && same_price "$li" "$ti" && same_price "$lo" "$to" && same_price "$l5" "$t5" \
+     && same_price "$l1" "$t1" && same_price "$lr" "$tr"; then
+    ok "$a price = pricing.tsv ($ci / $co / $c5 / $c1 / $cr; long $(long_str "$la" "$li" "$lo" "$l5" "$l1" "$lr"))"
   else
-    fail "$a price $ci / $co / $c5 / $c1 / $cr ≠ price table $TSV — run 08-set-model-pricing.sh --apply; if the DB values are what AWS bills you, edit that file instead (asof/source too) and this turns OK"
+    fail "$a price $ci / $co / $c5 / $c1 / $cr; long $(long_str "$la" "$li" "$lo" "$l5" "$l1" "$lr") ≠ price table $TSV (long $(long_str "$ta" "$ti" "$to" "$t5" "$t1" "$tr")) — run 08-set-model-pricing.sh --apply; if the DB values are what AWS bills you, edit that file instead (asof/source too) and this turns OK"
   fi
 done
 

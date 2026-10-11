@@ -334,8 +334,11 @@ class TestImmutableFieldsRejected:
 
 class TestPriceUpperBound:
     async def test_bound_matches_the_column(self):
-        """상한이 컬럼(NUMERIC(10,6))에서 유도된 값인지 못 박는다 — 임의 상수 표류 방지."""
-        assert MAX_PRICE_PER_1K == Decimal("9999.999999")
+        """상한이 컬럼(NUMERIC(12,8))에서 유도된 값인지 못 박는다 — 임의 상수 표류 방지.
+
+        US-19(2026-10-10)에서 단가 열이 (10,6) → (12,8) 로 넓어져 9999.999999 → 9999.99999999.
+        """
+        assert MAX_PRICE_PER_1K == Decimal("9999.99999999")
 
     async def test_pricing_overflow_is_422_not_500(
         self, client: AsyncClient, repo: _RecordingRepo

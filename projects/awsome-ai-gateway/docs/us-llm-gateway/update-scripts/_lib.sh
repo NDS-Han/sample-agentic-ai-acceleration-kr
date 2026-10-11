@@ -258,6 +258,22 @@ run_sql_file() {
   [ "$phase" = "Succeeded" ]
 }
 
+# ── Price precision guard ───────────────────────────────────────────────────
+# model_pricings price columns keep a fixed number of decimals (6 before US-19,
+# 8 after). PostgreSQL ROUNDS a longer value on insert without an error, so
+# 0.0001375 (Haiku 5.5 cache write) would land as 0.000138 on an old schema.
+# Scripts compare a price's places with the column scale and stop first.
+price_places() {   # <price> → decimal places it needs (trailing zeros don't count)
+  local d="${1#*.}"
+  [ "$d" = "$1" ] && { echo 0; return; }
+  while [ "${d%0}" != "$d" ]; do d="${d%0}"; done
+  echo "${#d}"
+}
+# Prints "S|<scale>" in unaligned/tuples-only output.
+PRICE_SCALE_SQL="SELECT 'S', numeric_scale FROM information_schema.columns
+ WHERE table_schema='model' AND table_name='model_pricings'
+   AND column_name='cache_creation_5m_price_per_1k_tokens';"
+
 # Convenience wrapper: run an inline SQL string by writing it to a temp file
 run_sql() {
   local tmp; tmp=$(mktemp)

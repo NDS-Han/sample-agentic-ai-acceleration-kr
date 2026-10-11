@@ -95,8 +95,8 @@ Anthropic 신형 모델은 계정별 **AWS Marketplace 구독**이 필요하다 
 
 ### 8-A. Claude Code Auto mode 서버 분류기
 
-Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 beta 2개와 `safeguards` 를 넘긴다(US-17) — gateway-proxy 이미지만 바뀐다. 끄기 = `BEDROCK_FORWARD_BETAS` 빈 값.
-→ **[ops/8-A-automode-server.md](ops/8-A-automode-server.md)**
+Claude Code 의 Auto mode 판정을 Bedrock 이 하도록 정해 둔 beta 와 `safeguards` 를 넘긴다(US-17) — US-18 부터는 8-D(US-18) 배포에 함께 들어간다. 끄기 = `BEDROCK_FORWARD_BETAS` 빈 값.
+→ **[ops/8-A-automode-server.md](ops/8-A-automode-server.md)** · beta 기록 [beta-headers/](beta-headers/README.md)
 
 ---
 

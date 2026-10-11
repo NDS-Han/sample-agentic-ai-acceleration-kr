@@ -209,6 +209,22 @@ class ModelService:
         if model is None:
             raise NotFoundError("ModelAlias", alias)
 
+        # 구간 단가(0038 long_context_*)는 이 요청에 실리지 않는다 — 관리 화면·가격 동기화는
+        # 기본 단가 5개만 보낸다. 새 행이 그 6열을 NULL 로 두면 100K 초과 요청이 조용히 기본
+        # 단가로 기록되므로(Haiku 5.5 는 1/5), 닫는 행의 값을 이어받는다. 닫기 **전에** 읽는다.
+        prior = await repo.get_current_pricing(alias)
+        long_tier = {
+            f: getattr(prior, f, None) if prior is not None else None
+            for f in (
+                "long_context_threshold_tokens",
+                "long_context_input_price_per_1k_tokens",
+                "long_context_output_price_per_1k_tokens",
+                "long_context_cache_creation_5m_price_per_1k_tokens",
+                "long_context_cache_creation_1h_price_per_1k_tokens",
+                "long_context_cache_read_price_per_1k_tokens",
+            )
+        }
+
         # BR-MOD-02: Close current pricing, preserve history
         await repo.close_current_pricing(alias, data.effective_from)
 
@@ -220,6 +236,7 @@ class ModelService:
             cache_creation_5m_price_per_1k_tokens=data.cache_creation_5m_price_per_1k_tokens,
             cache_creation_1h_price_per_1k_tokens=data.cache_creation_1h_price_per_1k_tokens,
             cache_read_price_per_1k_tokens=data.cache_read_price_per_1k_tokens,
+            **long_tier,
             effective_from=data.effective_from,
             created_by=actor.user_id,
         )
@@ -256,7 +273,7 @@ class ModelService:
         session: AsyncSession,
         *,
         pricing_sync_service,
-        quantize: Decimal = Decimal("0.000001"),
+        quantize: Decimal = Decimal("0.00000001"),
     ):
         """AWS Price List 단가 vs DB 현재가 diff 미리보기(쓰기 없음, deepdive 가격동기화).
 
@@ -344,7 +361,7 @@ class ModelService:
         actor: CurrentUser,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
-        quantize: Decimal = Decimal("0.000001"),
+        quantize: Decimal = Decimal("0.00000001"),
     ):
         """승인된 alias 목록만 AWS 단가로 적용 — 기존 set_pricing 재사용(시계열·감사·캐시).
 

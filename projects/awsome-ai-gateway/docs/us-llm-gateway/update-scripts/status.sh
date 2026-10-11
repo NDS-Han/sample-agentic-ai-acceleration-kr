@@ -95,8 +95,26 @@ SELECT 'OLD=' || count(*) FROM model.model_aliases
 SELECT 'ALEMBIC=' || version_num FROM public.alembic_version;
 SELECT 'S55CR=' || cache_read_price_per_1k_tokens FROM model.model_pricings
  WHERE model_alias='claude-sonnet-5-5' AND effective_until IS NULL
+ ORDER BY effective_from DESC LIMIT 1;
+SELECT 'PSCALE=' || numeric_scale FROM information_schema.columns
+ WHERE table_schema='model' AND table_name='model_pricings'
+   AND column_name='cache_creation_5m_price_per_1k_tokens';
+SELECT 'H55=' || status || '|' || coalesce(provider_model_id, '') FROM model.model_aliases
+ WHERE alias='claude-haiku-5-5';
+SELECT 'H55P=' || count(*) FROM model.model_pricings
+ WHERE model_alias='claude-haiku-5-5' AND effective_until IS NULL;
+SELECT 'H55R=' || concat_ws('|', input_price_per_1k_tokens, output_price_per_1k_tokens,
+         cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+         cache_read_price_per_1k_tokens,
+         coalesce(long_context_threshold_tokens::text, ''),
+         coalesce(long_context_input_price_per_1k_tokens::text, ''),
+         coalesce(long_context_output_price_per_1k_tokens::text, ''),
+         coalesce(long_context_cache_creation_5m_price_per_1k_tokens::text, ''),
+         coalesce(long_context_cache_creation_1h_price_per_1k_tokens::text, ''),
+         coalesce(long_context_cache_read_price_per_1k_tokens::text, ''))
+  FROM model.model_pricings WHERE model_alias='claude-haiku-5-5' AND effective_until IS NULL
  ORDER BY effective_from DESC LIMIT 1;" 2>&1)
-  US02_OUT="$out"   # probe_us13/us16/us18 read their markers from the same query (one psql pod)
+  US02_OUT="$out"   # probe_us13/us16/us18/us19 read their markers from the same query (one psql pod)
 
   routing=$(grep -o 'ROUTING=[a-z]*' <<<"$out" | head -1 | cut -d= -f2)
   alias_n=$(grep -o 'ALIAS=[0-9]*'   <<<"$out" | head -1 | cut -d= -f2)
@@ -559,6 +577,32 @@ probe_us16() {
   fi
 }
 
+# ── US-17 — Claude Code Auto mode server verdicts (recommended; part of US-18) ─
+# Not judged: the code ships inside the gateway-proxy image (US-18 builds it), and
+# a built image cannot be introspected — the real check sends requests with a
+# VK (check-safeguards-passthrough.py). The one thing readable here is the kill
+# switch: gatewayProxy.env.BEDROCK_FORWARD_BETAS set to "" turns it off.
+probe_us17() {
+  local dep val="<unset>"
+  dep=$(kubectl get deploy "${HELM_RELEASE}-gateway-proxy" -n "$NS" -o json 2>/dev/null)
+  if [ -n "$dep" ]; then
+    val=$(jq -r '[.spec.template.spec.containers[]? | select(.name == "gateway-proxy")
+                 | .env[]? | select(.name == "BEDROCK_FORWARD_BETAS") | .value // ""]
+                 | if length == 0 then "<unset>" else last end' <<<"$dep" 2>/dev/null) \
+      || val="<unset>"
+  fi
+  if [ -z "$val" ]; then
+    row warn "US-17" "Claude Code Auto mode 서버 판정 — 꺼짐 (BEDROCK_FORWARD_BETAS 빈 값)"
+    detail "다시 켜려면 values 의 그 줄을 지우고 install-eks.sh — ops/8-A-automode-server.md 7절"
+    TODO+=("(수동) values gatewayProxy.env.BEDROCK_FORWARD_BETAS 줄 삭제 → install-eks.sh $DEPLOY_ENV — ops/8-A 7절")
+    return
+  fi
+  row skip "US-17" "Claude Code Auto mode 서버 판정 — US-18 에 포함 (이 스크립트는 판정 안 함)"
+  detail "확정: GATEWAY_KEY 로 check-safeguards-passthrough.py (5개 PASS) — ops/8-A-automode-server.md 2절"
+  [ "$val" != "<unset>" ] && detail "values 에 BEDROCK_FORWARD_BETAS 직접 지정: $val"
+  return 0
+}
+
 # ── US-18 — budget/cost/permission fixes (required; part of a fresh install) ──
 # Same query as US-13. Applied = schema at 0039 or later (upstream 0037-0039 come
 # with the new images, ops/8-D-upstream-sync.md) AND, when Sonnet 5.5 is
@@ -566,7 +610,7 @@ probe_us16() {
 # from 2026-10-07). The price step can run before the images, so "schema old,
 # price new" and "schema new, price old" are both normal in-between states.
 probe_us18() {
-  local head s55cr want="" a in out c5m c1h cread asof src
+  local head s55cr want="" a in out c5m c1h cread rest
   if ! grep -q 'ALEMBIC=' <<<"${US02_OUT:-}"; then
     row warn "US-18" "예산·비용·권한 결함 수정 — 판정 불가"
     detail "DB 조회 결과가 없습니다 (US-02 줄 참조)"
@@ -574,7 +618,7 @@ probe_us18() {
   fi
   head=$(grep -o 'ALEMBIC=[0-9]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
   s55cr=$(grep -o 'S55CR=[0-9.]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
-  while IFS=$'\t' read -r a in out c5m c1h cread asof src; do
+  while IFS=$'\t' read -r a in out c5m c1h cread rest; do
     [ "$a" = claude-sonnet-5-5 ] && want=$cread
   done < "$LIB_DIR/pricing.tsv"
   if [ -z "$head" ] || [ "$((10#$head))" -lt 39 ]; then
@@ -589,6 +633,79 @@ probe_us18() {
   else
     row ok "US-18" "예산·비용·권한 결함 수정"
     detail "DB 스키마 $head${s55cr:+ · claude-sonnet-5-5 캐시 읽기 $s55cr}"
+  fi
+}
+
+# ── US-19 — Haiku 5.5 (recommended) ────────────────────────────────────────
+# Three things must line up: the price columns take 8 decimals (the US-19 images
+# and migration widen them — Haiku 5.5's 5m cache write is 0.0001375/1K), the
+# alias is registered on a us. profile, and its open price row equals the
+# pricing.tsv row INCLUDING the long-prompt rate card. A missing rate card is
+# the expensive failure: every request above 100K prompt tokens is recorded at
+# 1/5 of what Bedrock bills, with nothing else looking wrong.
+probe_us19() {
+  local scale h55 h55p h55r st pid a rest want="" i same=1
+  local -a cur tab
+  if ! grep -q 'PSCALE=' <<<"${US02_OUT:-}"; then
+    row warn "US-19" "Haiku 5.5 — 판정 불가"
+    detail "DB 조회 결과가 없습니다 (US-02 줄 참조)"
+    return
+  fi
+  scale=$(grep -o 'PSCALE=[0-9]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  h55=$(grep -o 'H55=[^[:space:]]*' <<<"$US02_OUT" | head -1 | cut -d= -f2-)
+  h55p=$(grep -o 'H55P=[0-9]*' <<<"$US02_OUT" | head -1 | cut -d= -f2)
+  h55r=$(grep -o 'H55R=[^[:space:]]*' <<<"$US02_OUT" | head -1 | cut -d= -f2-)
+  st=${h55%%|*}; pid=${h55#*|}
+  while IFS=$'\t' read -r a rest; do
+    [ "$a" = claude-haiku-5-5 ] && want=$(cut -f1-11 <<<"$rest" | tr '\t' '|' | sed 's/|-/|/g')
+  done < "$LIB_DIR/pricing.tsv"
+  if [ "${scale:-0}" -lt 8 ]; then
+    row warn "US-19" "Haiku 5.5 — 미적용 (권장)"
+    detail "단가 열 소수 ${scale:-?}자리 (8 필요) — 이미지·DB 를 먼저 올립니다: ops/8-D-upstream-sync.md 「US-19 로 따라 할 때」"
+    TODO+=("(수동) docs/us-llm-gateway/ops/8-D-upstream-sync.md — US-19 (이미지 4개 + DB 단가 자릿수)")
+    return
+  fi
+  if [ -z "$h55" ] || [ "$st" != ACTIVE ]; then
+    row warn "US-19" "Haiku 5.5 — 등록 전 (이미지·DB 는 적용됨)"
+    detail "claude-haiku-5-5 ${h55:+($st) }— 등록 절차는 ops/8-M-models.md 「A」"
+    TODO+=("(수동) docs/us-llm-gateway/ops/8-M-models.md 「A」 — claude-haiku-5-5 등록 (02) + 단가 (08)")
+    return
+  fi
+  if [ "${h55p:-0}" -lt 1 ]; then
+    row bad "US-19" "Haiku 5.5 — 단가 없음 (호출 비용이 0 으로 기록됨)"
+    detail "claude-haiku-5-5 ACTIVE · $pid · 열린 단가 행 0"
+    TODO+=("bash 08-set-model-pricing.sh --alias claude-haiku-5-5 --apply")
+    return
+  fi
+  if [[ "$pid" != us.* ]]; then
+    row warn "US-19" "Haiku 5.5 — 미국 리전 프로파일 아님"
+    detail "provider_model_id=$pid — us.anthropic.claude-haiku-5-5 로 (ops/8-M-models.md)"
+    return
+  fi
+  # Field by field: the DB prints 0.00011000, the table 0.000110 — compare as numbers.
+  IFS='|' read -r -a cur <<<"$h55r|"
+  IFS='|' read -r -a tab <<<"$want|"
+  for i in 0 1 2 3 4 5 6 7 8 9 10; do
+    if [ -z "${cur[$i]:-}${tab[$i]:-}" ]; then continue; fi
+    if [ -z "${cur[$i]:-}" ] || [ -z "${tab[$i]:-}" ] || \
+       ! awk -v a="${cur[$i]}" -v b="${tab[$i]}" 'BEGIN { exit !(a + 0 == b + 0) }'; then
+      same=0; break
+    fi
+  done
+  if [ -z "$want" ]; then
+    row warn "US-19" "Haiku 5.5 — pricing.tsv 에 claude-haiku-5-5 행 없음"
+    detail "저장소를 최신으로 (ops/8-M-models.md 「0」)"
+  elif [ "$same" -eq 1 ]; then
+    row ok "US-19" "Haiku 5.5"
+    detail "claude-haiku-5-5 ACTIVE · $pid · 단가 = pricing.tsv (100K 초과 구간 포함)"
+  elif [ -z "${cur[5]:-}" ]; then
+    row bad "US-19" "Haiku 5.5 — 100K 초과 구간 단가 없음 (그 요청이 1/5 로 기록됨)"
+    detail "열린 단가 행에 long_context_* 가 비어 있습니다"
+    TODO+=("bash 08-set-model-pricing.sh --alias claude-haiku-5-5 --apply")
+  else
+    row warn "US-19" "Haiku 5.5 — 단가가 pricing.tsv 와 다름"
+    detail "DB ${h55r//|/ / }"
+    TODO+=("bash 08-set-model-pricing.sh --alias claude-haiku-5-5 --apply")
   fi
 }
 
@@ -635,7 +752,9 @@ info_rows "US-14" "Claude Code Windows 설치 파일 — 직원 PC 쪽 (이 스�
   "설치 여부는 직원 PC 에서 — claude-code/installer/cc-installer-admin-e2e-windows.md"
 probe_us15
 probe_us16
+probe_us17
 probe_us18
+probe_us19
 probe_notif_ses
 
 echo
