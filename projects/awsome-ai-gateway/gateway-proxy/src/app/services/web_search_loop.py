@@ -2285,6 +2285,10 @@ async def _anthropic_stream(
                     # closes the stream. `saw_message_delta` False means the same: no
                     # terminal frame arrived (socket cut / timeout) and we have no basis to
                     # invent one.
+                    if not saw_message_delta:
+                        # 종결 프레임 없이 끊긴 상류 — 요청 미완료이므로 실패 마킹.
+                        # error_seen 면 이미 실패다(E2E S5).
+                        failed = True
                     if not error_seen:
                         yield _sse(
                             "error",
@@ -2936,6 +2940,12 @@ async def _responses_stream(
                         final_terminal_type = "response.failed"
                     else:
                         final_terminal_type = "response.incomplete"
+                        # 합성 incomplete = 상류가 종결 프레임 없이 끊긴 잘린 응답 —
+                        # 요청은 완료되지 않았으므로 실패로 마킹한다(E2E S5). 진짜
+                        # 상류 response.incomplete(max_tokens 등의 유효 종결)는
+                        # 이 분기에 오지 않아 SUCCESS 로 남는다 — 이 둘을 구분해야
+                        # 한다.
+                        failed = True
                         yield _sse(
                             "error",
                             {"type": "error",

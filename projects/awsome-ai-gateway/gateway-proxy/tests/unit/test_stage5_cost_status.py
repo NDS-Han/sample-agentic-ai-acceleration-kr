@@ -538,6 +538,119 @@ async def test_ws_anthropic_stream_exception_marks_error():
 
 
 @pytest.mark.asyncio
+async def test_ws_anthropic_stream_truncated_turn_marks_error():
+    """종결 프레임(message_delta) 없이 끊긴 상류 → '성공'이 아니라 'error'.
+
+    saw_message_delta=False 경로가 error_seen 도 아니고 예외도 아니어서
+    구형은 SUCCESS 로 오기록했다 — 클라이언트에는 error 프레임이 나가는데
+    usage_logs/monitoring 은 성공으로 본다.
+    """
+    outcome: dict = {}
+
+    async def on_usage(u):
+        pass
+
+    chunks = [
+        _b({"type": "message_start",
+            "message": {"id": "m", "type": "message", "role": "assistant",
+                        "content": [],
+                        "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        # message_delta/message_stop 없이 스트림 종료 — 소켓 절단.
+    ]
+
+    async def invoke_stream(_body):
+        return 200, _aiter(chunks), {}, None
+
+    gen = wsl._anthropic_stream(
+        invoke_stream=invoke_stream,
+        base_body={"messages": [{"role": "user", "content": "hi"}]},
+        mcp_client=AsyncMock(),
+        request=FakeRequest(),
+        on_usage=on_usage,
+        max_iterations=5,
+        deadline=time.monotonic() + 60,
+        default_max_results=10,
+        outcome=outcome,
+    )
+    async for _ in gen:
+        pass
+    assert outcome["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ws_responses_stream_truncated_turn_marks_error():
+    """상류가 response.completed 를 보내지 않고 끊김 → 합성 incomplete 는 실패.
+
+    진짜 상류 response.incomplete(max_tokens 유효 종결)는 SUCCESS 이고,
+    게이트웨이가 합성한 incomplete(무종결 절단)는 ERROR 다 — 둘을 구분해야
+    한다(E2E S5).
+    """
+    outcome: dict = {}
+
+    async def on_usage(u):
+        pass
+
+    chunks = [
+        _b({"type": "response.created", "response": {"id": "r1", "status": "in_progress"}}),
+        _b({"type": "response.output_text.delta", "delta": "partial"}),
+        # terminal event 없이 종료 — 상류 절단.
+    ]
+
+    async def invoke_stream(_body):
+        return 200, _aiter(chunks), {}, None
+
+    gen = wsl._responses_stream(
+        invoke_stream=invoke_stream,
+        base_body={"input": "hi"},
+        mcp_client=AsyncMock(),
+        request=FakeRequest(),
+        on_usage=on_usage,
+        max_iterations=5,
+        deadline=time.monotonic() + 60,
+        default_max_results=10,
+        outcome=outcome,
+    )
+    async for _ in gen:
+        pass
+    assert outcome["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ws_responses_stream_real_incomplete_is_success():
+    """상류가 보낸 진짜 response.incomplete — 유효 종결 → SUCCESS."""
+    outcome: dict = {}
+
+    async def on_usage(u):
+        pass
+
+    chunks = [
+        _b({"type": "response.created", "response": {"id": "r1", "status": "in_progress"}}),
+        _b({"type": "response.output_text.delta", "delta": "partial"}),
+        _b({"type": "response.incomplete",
+            "response": {"id": "r1", "status": "incomplete",
+                         "usage": {"input_tokens": 5, "output_tokens": 3}}}),
+    ]
+
+    async def invoke_stream(_body):
+        return 200, _aiter(chunks), {}, None
+
+    gen = wsl._responses_stream(
+        invoke_stream=invoke_stream,
+        base_body={"input": "hi"},
+        mcp_client=AsyncMock(),
+        request=FakeRequest(),
+        on_usage=on_usage,
+        max_iterations=5,
+        deadline=time.monotonic() + 60,
+        default_max_results=10,
+        outcome=outcome,
+    )
+    async for _ in gen:
+        pass
+    assert outcome["status"] == "success"
+
+
+@pytest.mark.asyncio
 async def test_ws_nonstream_passthrough_marks_error_on_non200():
     """MCP 실패 → no-search 패스스루가 상류 비-2xx 를 받으면 outcome 'error'."""
     outcome: dict = {}
