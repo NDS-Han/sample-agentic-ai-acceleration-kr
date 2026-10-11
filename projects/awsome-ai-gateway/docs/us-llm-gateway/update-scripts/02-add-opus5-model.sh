@@ -133,14 +133,21 @@ cur=$(run_sql "\\pset format unaligned
 \\pset fieldsep '|'
 \\pset tuples_only on
 SELECT 'A', provider_model_id, status FROM model.model_aliases WHERE alias = '$ALIAS';
-SELECT 'P', count(*) FROM model.model_pricings WHERE model_alias = '$ALIAS';") \
+SELECT 'P', count(*) FROM model.model_pricings WHERE model_alias = '$ALIAS';
+$PRICE_SCALE_SQL") \
   || die "could not read the current state of $ALIAS (see output above)"
+DB_SCALE=""
 while IFS='|' read -r tag f1 f2; do
   case "$tag" in
     A) CUR_MODEL_ID="$f1"; CUR_STATUS="$f2" ;;
     P) CUR_PRICE_ROWS="$f1" ;;
+    S) DB_SCALE="$f1" ;;
   esac
 done <<<"$cur"
+[ -n "$DB_SCALE" ] || die "could not read the price column scale of model.model_pricings"
+for v in "$P_IN" "$P_OUT" "$P_C5M" "$P_C1H" "$P_CREAD"; do
+  [ "$(price_places "$v")" -le "$DB_SCALE" ] || die "price $v needs $(price_places "$v") decimal places but model_pricings keeps $DB_SCALE — the DB would round it silently. Deploy the US-19 images (price columns NUMERIC(12,8)) first."
+done
 
 ALIAS_ACTION="INSERT"                       # INSERT | SAME | REMAP | EXISTS
 if [ -n "$CUR_MODEL_ID" ]; then

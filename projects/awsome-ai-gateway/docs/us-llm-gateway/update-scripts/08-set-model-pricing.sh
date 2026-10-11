@@ -40,7 +40,8 @@ $(basename "$0") — set model prices from pricing.tsv (USD per 1K tokens)
 
 How a row is chosen
   The open row = effective_until IS NULL. It is closed and replaced only when at
-  least one of the five prices differs from the table. effective_from is the
+  least one of the five prices, or the long-prompt rate card (long_* columns),
+  differs from the table. effective_from is the
   apply time: earlier usage_logs keep the price they were recorded with.
 
 Where the numbers come from
@@ -62,27 +63,46 @@ while [ $# -gt 0 ]; do
 done
 
 # ── Parse pricing.tsv ─────────────────────────────────────────────────────
-# Columns: alias input output cache_5m cache_1h cache_read asof source
+# Columns: alias input output cache_5m cache_1h cache_read
+#          long_above long_input long_output long_cache_5m long_cache_1h long_cache_read
+#          asof source
+# The six long_* columns are the long-prompt rate card (DB long_context_*): all
+# numbers, or all "-" for none. They are stored here as "" when "-".
 [ -f "$TSV" ] || die "price table not found: $TSV"
 declare -a ALIASES=()
 declare -A T_IN T_OUT T_C5M T_C1H T_CREAD T_ASOF T_SRC
-num_re='^[0-9]+\.[0-9]{1,6}$'
+declare -A T_LABOVE T_LIN T_LOUT T_LC5M T_LC1H T_LCREAD
+num_re='^[0-9]+\.[0-9]{1,8}$'
+int_re='^[1-9][0-9]*$'
 alias_re='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 date_re='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 lineno=0
-while IFS=$'\t' read -r a in out c5m c1h cread asof src extra; do
+while IFS=$'\t' read -r a in out c5m c1h cread labove lin lout lc5m lc1h lcread asof src extra; do
   lineno=$((lineno + 1))
   [ -z "${a// }" ] && continue
   [[ "$a" == \#* ]] && continue
   [ "$a" = "alias" ] && continue            # header
-  [ -n "${extra:-}" ] && die "$TSV:$lineno: more than 8 columns"
-  [ -n "${src:-}" ] || die "$TSV:$lineno: expected 8 tab-separated columns"
+  [ -n "${extra:-}" ] && die "$TSV:$lineno: more than 14 columns"
+  [ -n "${src:-}" ] || die "$TSV:$lineno: expected 14 tab-separated columns"
   [[ "$a" =~ $alias_re ]] || die "$TSV:$lineno: bad alias '$a'"
   for v in "$in" "$out" "$c5m" "$c1h" "$cread"; do
-    [[ "$v" =~ $num_re ]] || die "$TSV:$lineno: price must be a decimal with up to 6 places: '$v'"
+    [[ "$v" =~ $num_re ]] || die "$TSV:$lineno: price must be a decimal with up to 8 places: '$v'"
   done
   # A zero input/output price bills every call at \$0 (router_service falls back to 0).
   awk "BEGIN{exit !($in > 0 && $out > 0)}" || die "$TSV:$lineno: input/output price is 0 for $a"
+  if [ "$labove$lin$lout$lc5m$lc1h$lcread" = "------" ]; then
+    labove=""; lin=""; lout=""; lc5m=""; lc1h=""; lcread=""
+  else
+    # Half a rate card bills the missing buckets at the short rate without saying so
+    # (gateway falls back per bucket), so it is all six or none.
+    [[ "$labove" =~ $int_re ]] \
+      || die "$TSV:$lineno: long_above must be a token count, or all six long_* columns '-': '$labove'"
+    for v in "$lin" "$lout" "$lc5m" "$lc1h" "$lcread"; do
+      [[ "$v" =~ $num_re ]] \
+        || die "$TSV:$lineno: long_* price must be a decimal with up to 8 places, or all six '-': '$v'"
+    done
+    awk "BEGIN{exit !($lin > 0 && $lout > 0)}" || die "$TSV:$lineno: long input/output price is 0 for $a"
+  fi
   [[ "$asof" =~ $date_re ]] || die "$TSV:$lineno: asof must be YYYY-MM-DD: '$asof'"
   [ -n "${T_IN[$a]:-}" ] && die "$TSV:$lineno: duplicate alias $a"
   if [ ${#ONLY[@]} -gt 0 ]; then
@@ -91,6 +111,8 @@ while IFS=$'\t' read -r a in out c5m c1h cread asof src extra; do
   fi
   ALIASES+=("$a")
   T_IN[$a]=$in; T_OUT[$a]=$out; T_C5M[$a]=$c5m; T_C1H[$a]=$c1h; T_CREAD[$a]=$cread
+  T_LABOVE[$a]=$labove; T_LIN[$a]=$lin; T_LOUT[$a]=$lout
+  T_LC5M[$a]=$lc5m; T_LC1H[$a]=$lc1h; T_LCREAD[$a]=$lcread
   T_ASOF[$a]=$asof; T_SRC[$a]=$src
 done < "$TSV"
 [ ${#ALIASES[@]} -gt 0 ] || die "no aliases selected from $TSV${ONLY:+ (filter: ${ONLY[*]})}"
@@ -110,26 +132,44 @@ SELECT 'A', alias, status FROM model.model_aliases
  WHERE alias IN ($(sql_list)) ORDER BY alias;
 SELECT 'P', model_alias, input_price_per_1k_tokens, output_price_per_1k_tokens,
        cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
-       cache_read_price_per_1k_tokens, effective_from
+       cache_read_price_per_1k_tokens,
+       long_context_threshold_tokens, long_context_input_price_per_1k_tokens,
+       long_context_output_price_per_1k_tokens, long_context_cache_creation_5m_price_per_1k_tokens,
+       long_context_cache_creation_1h_price_per_1k_tokens, long_context_cache_read_price_per_1k_tokens,
+       effective_from
   FROM model.model_pricings
  WHERE effective_until IS NULL AND model_alias IN ($(sql_list))
- ORDER BY model_alias, effective_from;"
+ ORDER BY model_alias, effective_from;
+$PRICE_SCALE_SQL"
+
+sqlv() { [ -n "$1" ] && printf '%s' "$1" || printf 'NULL'; }   # "" → SQL NULL
+
+# INSERT for one price row: <alias> <in> <out> <c5m> <c1h> <cread> <6 long_* or "">
+price_insert_sql() {
+  cat <<EOF
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     long_context_threshold_tokens, long_context_input_price_per_1k_tokens,
+     long_context_output_price_per_1k_tokens, long_context_cache_creation_5m_price_per_1k_tokens,
+     long_context_cache_creation_1h_price_per_1k_tokens, long_context_cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), '$1', $2, $3, $4, $5, $6,
+        $(sqlv "$7"), $(sqlv "$8"), $(sqlv "$9"), $(sqlv "${10}"), $(sqlv "${11}"), $(sqlv "${12}"),
+        now(), '$SEED_ADMIN_UUID');
+EOF
+}
 
 apply_sql_for() {                 # <alias> → close open row + insert table row
   local a="$1"
   cat <<EOF
 UPDATE model.model_pricings SET effective_until = now()
  WHERE model_alias = '$a' AND effective_until IS NULL;
-INSERT INTO model.model_pricings
-    (id, model_alias,
-     input_price_per_1k_tokens, output_price_per_1k_tokens,
-     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
-     cache_read_price_per_1k_tokens,
-     effective_from, created_by)
-VALUES (gen_random_uuid(), '$a',
-        ${T_IN[$a]}, ${T_OUT[$a]}, ${T_C5M[$a]}, ${T_C1H[$a]}, ${T_CREAD[$a]},
-        now(), '$SEED_ADMIN_UUID');
 EOF
+  price_insert_sql "$a" "${T_IN[$a]}" "${T_OUT[$a]}" "${T_C5M[$a]}" "${T_C1H[$a]}" "${T_CREAD[$a]}" \
+    "${T_LABOVE[$a]}" "${T_LIN[$a]}" "${T_LOUT[$a]}" "${T_LC5M[$a]}" "${T_LC1H[$a]}" "${T_LCREAD[$a]}"
 }
 
 if [ "$PRINT_SQL" -eq 1 ]; then
@@ -146,25 +186,45 @@ require_env
 # ── Read current state ────────────────────────────────────────────────────
 hdr "Reading current prices (${#ALIASES[@]} alias(es) from $(basename "$TSV"))"
 declare -A DB_STATUS CUR_IN CUR_OUT CUR_C5M CUR_C1H CUR_CREAD CUR_FROM CUR_N
+declare -A CUR_LABOVE CUR_LIN CUR_LOUT CUR_LC5M CUR_LC1H CUR_LCREAD
+DB_SCALE=""
 raw=$(run_sql "$SQL_READ") || die "could not read model_pricings (see output above)"
-while IFS='|' read -r tag f1 f2 f3 f4 f5 f6 f7; do
+while IFS='|' read -r tag f1 f2 f3 f4 f5 f6 f7 f8 f9 f10 f11 f12 f13; do
   case "$tag" in
     A) DB_STATUS[$f1]="$f2" ;;
+    S) DB_SCALE="$f1" ;;
     P) CUR_N[$f1]=$(( ${CUR_N[$f1]:-0} + 1 ))
        CUR_IN[$f1]=$f2; CUR_OUT[$f1]=$f3; CUR_C5M[$f1]=$f4; CUR_C1H[$f1]=$f5
-       CUR_CREAD[$f1]=$f6; CUR_FROM[$f1]=$f7 ;;
+       CUR_CREAD[$f1]=$f6
+       CUR_LABOVE[$f1]=$f7; CUR_LIN[$f1]=$f8; CUR_LOUT[$f1]=$f9
+       CUR_LC5M[$f1]=$f10; CUR_LC1H[$f1]=$f11; CUR_LCREAD[$f1]=$f12
+       CUR_FROM[$f1]=$f13 ;;
   esac
 done <<<"$raw"
 
-norm() { awk "BEGIN{printf \"%.6f\", $1}"; }
-same5() {                          # <alias> → 0 if all five prices already match
+norm() { awk "BEGIN{printf \"%.8f\", $1}"; }
+# Same price? Both empty (no long-prompt rate card) counts as same; one empty does not.
+same_price() { [ -z "$1$2" ] || { [ -n "$1" ] && [ -n "$2" ] && [ "$(norm "$1")" = "$(norm "$2")" ]; }; }
+same_all() {                       # <alias> → 0 if the open row already equals the table row
   local a="$1"
-  [ "$(norm "${CUR_IN[$a]}")"    = "$(norm "${T_IN[$a]}")" ]    &&
-  [ "$(norm "${CUR_OUT[$a]}")"   = "$(norm "${T_OUT[$a]}")" ]   &&
-  [ "$(norm "${CUR_C5M[$a]}")"   = "$(norm "${T_C5M[$a]}")" ]   &&
-  [ "$(norm "${CUR_C1H[$a]}")"   = "$(norm "${T_C1H[$a]}")" ]   &&
-  [ "$(norm "${CUR_CREAD[$a]}")" = "$(norm "${T_CREAD[$a]}")" ]
+  same_price "${CUR_IN[$a]}"     "${T_IN[$a]}"     &&
+  same_price "${CUR_OUT[$a]}"    "${T_OUT[$a]}"    &&
+  same_price "${CUR_C5M[$a]}"    "${T_C5M[$a]}"    &&
+  same_price "${CUR_C1H[$a]}"    "${T_C1H[$a]}"    &&
+  same_price "${CUR_CREAD[$a]}"  "${T_CREAD[$a]}"  &&
+  [ "${CUR_LABOVE[$a]}" = "${T_LABOVE[$a]}" ]      &&
+  same_price "${CUR_LIN[$a]}"    "${T_LIN[$a]}"    &&
+  same_price "${CUR_LOUT[$a]}"   "${T_LOUT[$a]}"   &&
+  same_price "${CUR_LC5M[$a]}"   "${T_LC5M[$a]}"   &&
+  same_price "${CUR_LC1H[$a]}"   "${T_LC1H[$a]}"   &&
+  same_price "${CUR_LCREAD[$a]}" "${T_LCREAD[$a]}"
 }
+long_str() {                       # <above> <in> <out> <c5m> <c1h> <cread> → one display line
+  [ -z "$1" ] && { printf 'none'; return; }
+  printf 'prompt > %s tokens: %s / %s / %s / %s / %s' "$1" "$2" "$3" "$4" "$5" "$6"
+}
+t_long()   { long_str "${T_LABOVE[$1]}" "${T_LIN[$1]}" "${T_LOUT[$1]}" "${T_LC5M[$1]}" "${T_LC1H[$1]}" "${T_LCREAD[$1]}"; }
+cur_long() { long_str "${CUR_LABOVE[$1]}" "${CUR_LIN[$1]}" "${CUR_LOUT[$1]}" "${CUR_LC5M[$1]}" "${CUR_LC1H[$1]}" "${CUR_LCREAD[$1]}"; }
 
 # ── Diff ──────────────────────────────────────────────────────────────────
 hdr "Current vs table (USD per 1K tokens: input / output / cache5m / cache1h / cacheread)"
@@ -178,21 +238,46 @@ for a in "${ALIASES[@]}"; do
     printf '  %-28s %-8s current: (no open price row)\n' "$a" "$st"
     printf '  %-28s %-8s table:   %s / %s / %s / %s / %s   -> INSERT\n' "" "" \
       "${T_IN[$a]}" "${T_OUT[$a]}" "${T_C5M[$a]}" "${T_C1H[$a]}" "${T_CREAD[$a]}"
+    printf '  %-28s %-8s   long:  %s\n' "" "" "$(t_long "$a")"
     CHANGE+=("$a"); continue
   fi
   printf '  %-28s %-8s current: %s / %s / %s / %s / %s   (since %s)\n' "$a" "$st" \
     "${CUR_IN[$a]}" "${CUR_OUT[$a]}" "${CUR_C5M[$a]}" "${CUR_C1H[$a]}" "${CUR_CREAD[$a]}" "${CUR_FROM[$a]:0:19}"
-  if same5 "$a"; then
+  printf '  %-28s %-8s   long:  %s\n' "" "" "$(cur_long "$a")"
+  if same_all "$a"; then
     printf '  %-28s %-8s table:   same                                   -> SKIP\n' "" ""
   else
     printf '  %-28s %-8s table:   %s / %s / %s / %s / %s   -> CHANGE (asof %s)\n' "" "" \
       "${T_IN[$a]}" "${T_OUT[$a]}" "${T_C5M[$a]}" "${T_C1H[$a]}" "${T_CREAD[$a]}" "${T_ASOF[$a]}"
+    printf '  %-28s %-8s   long:  %s\n' "" "" "$(t_long "$a")"
     CHANGE+=("$a")
   fi
   [ "${CUR_N[$a]}" -gt 1 ] && warn "$a has ${CUR_N[$a]} open rows — all will be closed"
   [ "$st" != "ACTIVE" ] && note "$a is $st — price row still updated (takes effect if re-activated)"
 done
 
+# The DB rounds a longer price on insert without an error (0.0001375 → 0.000138 on
+# a 6-place column). Such an alias is left out — the rest of the table still applies.
+[ -n "$DB_SCALE" ] || die "could not read the price column scale of model.model_pricings"
+KEEP=(); SKIP_SCALE=()
+for a in "${CHANGE[@]}"; do
+  long_v=""
+  for v in "${T_IN[$a]}" "${T_OUT[$a]}" "${T_C5M[$a]}" "${T_C1H[$a]}" "${T_CREAD[$a]}" \
+           "${T_LIN[$a]}" "${T_LOUT[$a]}" "${T_LC5M[$a]}" "${T_LC1H[$a]}" "${T_LCREAD[$a]}"; do
+    [ -n "$v" ] && [ "$(price_places "$v")" -gt "$DB_SCALE" ] && { long_v="$v"; break; }
+  done
+  if [ -n "$long_v" ]; then
+    SKIP_SCALE+=("$a")
+    warn "$a  SKIPPED — price $long_v needs $(price_places "$long_v") decimal places, model_pricings keeps $DB_SCALE (the DB would round it). Deploy the US-19 images (NUMERIC(12,8)) first."
+  else
+    KEEP+=("$a")
+  fi
+done
+CHANGE=("${KEEP[@]}")
+
+if [ ${#CHANGE[@]} -eq 0 ] && [ ${#SKIP_SCALE[@]} -gt 0 ]; then
+  echo; die "nothing applied — ${SKIP_SCALE[*]} skipped (decimal places, see above)"
+fi
 if [ ${#CHANGE[@]} -eq 0 ]; then
   echo; ok "nothing to change — every registered alias already matches $(basename "$TSV")"; exit 0
 fi
@@ -221,7 +306,10 @@ COMMIT;
 SELECT 'V', model_alias, count(*),
        min(input_price_per_1k_tokens), min(output_price_per_1k_tokens),
        min(cache_creation_5m_price_per_1k_tokens), min(cache_creation_1h_price_per_1k_tokens),
-       min(cache_read_price_per_1k_tokens)
+       min(cache_read_price_per_1k_tokens),
+       min(long_context_threshold_tokens), min(long_context_input_price_per_1k_tokens),
+       min(long_context_output_price_per_1k_tokens), min(long_context_cache_creation_5m_price_per_1k_tokens),
+       min(long_context_cache_creation_1h_price_per_1k_tokens), min(long_context_cache_read_price_per_1k_tokens)
   FROM model.model_pricings
  WHERE effective_until IS NULL AND model_alias IN ($(sql_list))
  GROUP BY model_alias ORDER BY model_alias;"
@@ -233,13 +321,9 @@ RB="$SNAP_DIR/${TS}-08-pricing-rollback.sql"
   echo "BEGIN;"
   for a in "${CHANGE[@]}"; do
     [ -n "${CUR_N[$a]:-}" ] || { echo "-- $a had no open row before; nothing to restore"; continue; }
-    cat <<EOF
-UPDATE model.model_pricings SET effective_until = now() WHERE model_alias = '$a' AND effective_until IS NULL;
-INSERT INTO model.model_pricings (id, model_alias, input_price_per_1k_tokens, output_price_per_1k_tokens,
-  cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens, cache_read_price_per_1k_tokens,
-  effective_from, created_by)
-VALUES (gen_random_uuid(), '$a', ${CUR_IN[$a]}, ${CUR_OUT[$a]}, ${CUR_C5M[$a]}, ${CUR_C1H[$a]}, ${CUR_CREAD[$a]}, now(), '$SEED_ADMIN_UUID');
-EOF
+    echo "UPDATE model.model_pricings SET effective_until = now() WHERE model_alias = '$a' AND effective_until IS NULL;"
+    price_insert_sql "$a" "${CUR_IN[$a]}" "${CUR_OUT[$a]}" "${CUR_C5M[$a]}" "${CUR_C1H[$a]}" "${CUR_CREAD[$a]}" \
+      "${CUR_LABOVE[$a]}" "${CUR_LIN[$a]}" "${CUR_LOUT[$a]}" "${CUR_LC5M[$a]}" "${CUR_LC1H[$a]}" "${CUR_LCREAD[$a]}"
   done
   echo "COMMIT;"
 } > "$RB"
@@ -250,16 +334,20 @@ out=$(run_sql "$SQL_APPLY") || { printf '%s\n' "$out"; die "apply failed — tra
 
 hdr "Verification (open rows after apply)"
 fail=0
-while IFS='|' read -r tag a n in out5 c5m c1h cread; do
+while IFS='|' read -r tag a n in out5 c5m c1h cread labove lin lout lc5m lc1h lcread; do
   [ "$tag" = "V" ] || continue
   keep=0; for c in "${CHANGE[@]}"; do [ "$c" = "$a" ] && keep=1; done
   [ $keep -eq 1 ] || continue
-  if [ "$n" = "1" ] && [ "$(norm "$in")" = "$(norm "${T_IN[$a]}")" ] && [ "$(norm "$out5")" = "$(norm "${T_OUT[$a]}")" ] \
-     && [ "$(norm "$c5m")" = "$(norm "${T_C5M[$a]}")" ] && [ "$(norm "$c1h")" = "$(norm "${T_C1H[$a]}")" ] \
-     && [ "$(norm "$cread")" = "$(norm "${T_CREAD[$a]}")" ]; then
-    ok "$a  open row = table ($in / $out5 / $c5m / $c1h / $cread)"
+  got="$in / $out5 / $c5m / $c1h / $cread; long: $(long_str "$labove" "$lin" "$lout" "$lc5m" "$lc1h" "$lcread")"
+  if [ "$n" = "1" ] && same_price "$in" "${T_IN[$a]}" && same_price "$out5" "${T_OUT[$a]}" \
+     && same_price "$c5m" "${T_C5M[$a]}" && same_price "$c1h" "${T_C1H[$a]}" \
+     && same_price "$cread" "${T_CREAD[$a]}" && [ "$labove" = "${T_LABOVE[$a]}" ] \
+     && same_price "$lin" "${T_LIN[$a]}" && same_price "$lout" "${T_LOUT[$a]}" \
+     && same_price "$lc5m" "${T_LC5M[$a]}" && same_price "$lc1h" "${T_LC1H[$a]}" \
+     && same_price "$lcread" "${T_LCREAD[$a]}"; then
+    ok "$a  open row = table ($got)"
   else
-    bad "$a  open rows=$n  values=$in / $out5 / $c5m / $c1h / $cread (expected table values)"; fail=1
+    bad "$a  open rows=$n  values=$got (expected table values)"; fail=1
   fi
 done <<<"$out"
 [ $fail -eq 0 ] || die "verification failed — inspect model.model_pricings for the aliases above"
