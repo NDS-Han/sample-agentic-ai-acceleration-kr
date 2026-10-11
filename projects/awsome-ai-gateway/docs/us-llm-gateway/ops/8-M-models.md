@@ -4,7 +4,7 @@
 
 > 📒 모델 구성이 바뀔 때마다 쓰는 **범용 절차**다. 어떤 모델을 넣고 무엇을 내리는지는
 > [README.md 「최신 업데이트」](../README.md#2-최신-업데이트)의 `US-NN` 행이 정하고(예: `US-13`
-> Opus 5.5 추가 · `US-16` Sonnet 5.5 로 교체), 그 값은 아래 「현재 구성」 한 곳에 모여 있다.
+> Opus 5.5 추가 · `US-16` Sonnet 5.5 로 교체 · `US-19` Haiku 5.5 추가), 그 값은 아래 「현재 구성」 한 곳에 모여 있다.
 > **Cowork 와 무관하며 Claude Code 만 쓰는 배포에도 해당**한다.
 
 **어디부터 읽나** — 모두 「0」 을 먼저 하고, 「작업 고르기」 에서 고른 절을 위에서 아래로 따라 한다.
@@ -64,13 +64,13 @@ EC2 에 들어갈 수 없으면 관리 화면 **모델** 에서 ACTIVE 목록이
 
 ---
 
-## 현재 구성 (2026-10 · `US-16` 기준)
+## 현재 구성 (2026-10 · `US-19` 기준)
 
 새 모델이 나오면 이 절부터 고친다(아래 「부록」 체크리스트). 단가의 정본은
 `update-scripts/pricing.tsv` 이고 여기는 사람이 읽기 위한 사본이다 — 둘이 다르면 `pricing.tsv`
 가 맞다.
 
-- **모델 목록** — Opus 5.5 · Sonnet 5.5 · Haiku 4.5
+- **모델 목록** — Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5
 - **기본 모델** — `claude-sonnet-5-5`
 - **폴백 규칙** — `claude-opus-5-5 → claude-sonnet-5-5` 하나
 - **내린 모델** — Opus 5 · Sonnet 5 · Opus 4.8 (`US-16`). INACTIVE 라 과거 사용량·비용 기록은 남는다
@@ -87,9 +87,16 @@ EC2 에 들어갈 수 없으면 관리 화면 **모델** 에서 ACTIVE 목록이
 - **Opus 5.5** — 별칭 `claude-opus-5-5` · 모델 ID `us.anthropic.claude-opus-5-5` · 표시명 `Claude Opus 5.5`
   - 입력 `0.004400` · 출력 `0.022000` · 캐시 `0.005500` / `0.008800` / `0.000220`
   - ⚠️ 캐시 읽기가 입력의 **0.05배**다(다른 모델은 0.1배).
+- **Haiku 5.5** — 별칭 `claude-haiku-5-5` · 모델 ID `us.anthropic.claude-haiku-5-5` · 표시명 `Claude Haiku 5.5`
+  - 입력 `0.000110` · 출력 `0.000550` · 캐시 `0.0001375` / `0.000220` / `0.000011`
+  - ⚠️ 요청 하나의 프롬프트(입력 + 캐시 쓰기 + 캐시 읽기)가 **10만 토큰을 넘으면 그 요청 전체가
+    5배**다 — 입력 `0.000550` · 출력 `0.002750` · 캐시 `0.0006875` / `0.001100` / `0.000055`.
+    이 구간 단가는 `08-set-model-pricing.sh` 로만 넣는다(관리 화면에 입력란이 없다).
+  - 5분 캐시 쓰기가 소수 7자리라 `US-19` 이미지(단가 소수 8자리)를 올린 뒤에만 등록된다.
 - **Haiku 4.5** — 별칭 `claude-haiku-4-5-20251001` · 모델 ID `us.anthropic.claude-haiku-4-5-20251001-v1:0`
   - 입력 `0.001100` · 출력 `0.005500` · 캐시 `0.001375` / `0.002200` / `0.000110`
   - 기본 시드에 있는 모델이라 따로 등록하지 않는다.
+  - Claude Code 와 Cowork 가 배경 작업(대화 제목 등)에 쓰는 기본 모델이라 Haiku 5.5 가 있어도 남긴다.
 
 ---
 
@@ -97,7 +104,7 @@ EC2 에 들어갈 수 없으면 관리 화면 **모델** 에서 ACTIVE 목록이
 
 | 하려는 일 | 읽을 절 | 예 |
 |---|---|---|
-| 새 모델을 목록에 **추가만** 한다(기본 모델은 그대로) | 「A」 | `US-13` Opus 5.5 |
+| 새 모델을 목록에 **추가만** 한다(기본 모델은 그대로) | 「A」 | `US-13` Opus 5.5 · `US-19` Haiku 5.5 |
 | **기본 모델을 새 모델로 바꾸고** 옛 모델을 정리한다 | 「A」 → 「B」 → 「C」 | `US-16` Sonnet 5.5 |
 | 안 쓰는 모델만 **내린다** | 「C」 | Opus 4.8 정리 |
 | **단가만** 고친다 | [8-R](8-R-pricing.md) | `US-11` |
@@ -171,6 +178,17 @@ bash 02-add-opus5-model.sh
 bash 02-add-opus5-model.sh --apply
 ```
 
+**구간 단가가 있는 모델(Haiku 5.5)** — `02` 는 기본 단가 5개만 넣는다. 이어서 `08` 로 10만 토큰
+초과 구간 단가를 넣는다(값은 `pricing.tsv`). 미리보기의 `long:` 줄이
+`none` → `prompt > 100000 tokens: …` 이면 맞다.
+
+▶ **실행** · 배포 EC2 — 구간 단가 (Haiku 5.5)
+
+```bash
+bash 08-set-model-pricing.sh --alias claude-haiku-5-5
+bash 08-set-model-pricing.sh --alias claude-haiku-5-5 --apply
+```
+
 **4) 5분 기다린 뒤 확인한다** — 스크립트는 DB 를 직접 고치므로 모델 목록 캐시(300초, 외부
 ElastiCache)가 그대로 남는다. 파드를 재시작해도 소용없다.
 
@@ -195,8 +213,12 @@ bash 04-verify.sh
 
 저장하면 바로 목록에 반영된다(기다릴 필요가 없다). 그리고 두 가지를 지킨다.
 
-- **「AWS 단가 동기화」 버튼은 누르지 않는다** — AWS Price List 에 신모델이 없고, 있어도 `us.`
-  지리 단가(× 1.1)와 다르다.
+- **「AWS 단가 동기화」 버튼은 누르지 않는다** — 이 버튼은 Claude 단가를 찾지 못한다(Claude 단가가
+  있는 Price List 서비스를 읽지 않는다).
+- **구간 단가가 있는 모델(Haiku 5.5)** — 관리 화면에는 구간 단가 입력란이 없다. 저장한 뒤 배포
+  EC2 에서 `bash 08-set-model-pricing.sh --alias claude-haiku-5-5 --apply` 로 구간을 넣는다. 안
+  하면 10만 토큰 초과 요청이 1/5 로 기록된다(`status.sh` 의 `US-19` 가 잡는다). 한 번 넣은 구간은
+  관리 화면에서 단가를 고쳐도 유지된다.
 - **팀별 허용 모델을 쓰는 팀이 있으면** **사용자/팀** 화면에서 그 팀의 허용 모델에 새 모델을
   더한다. 안 하면 그 팀은 새 모델을 부를 때 400 이 난다.
 
@@ -407,11 +429,15 @@ aws bedrock get-foundation-model-availability --region us-west-2 \
 - **예외** — 캐시 읽기 배수는 모델마다 다를 수 있다(Opus 5.5 는 × 0.05, Sonnet 5.5 는 2026-10-07 부터 × 0.05, Fable 5.1 은 × 0.025).
   공식 가격표의 각주를 확인한다.
 
-AWS Pricing API 에는 신모델이 없어 단가는 수동이고, 조용히 낡는다. `asof` 날짜를 반드시 적는다.
+AWS Price List(`AmazonBedrockFoundationModels`)에는 있지만 게이트웨이의 단가 동기화가 그것을
+읽지 못해 단가는 수동이고, 조용히 낡는다. `asof` 날짜를 반드시 적는다.
+- **구간 단가** — 프롬프트 길이로 요금이 바뀌는 모델(Haiku 5.5: 10만 토큰 초과 시 5배)은
+  `pricing.tsv` 의 `long_*` 6칸을 채운다. Price List 의 `*_long_ctx_standard` 값과 맞춘다.
 
 **3) 반영할 곳**
 
-- `update-scripts/pricing.tsv` — 한 줄 추가(`asof` · 출처 포함), 헤더 주석에 계산 근거.
+- `update-scripts/pricing.tsv` — 한 줄 추가(`asof` · 출처 포함, 구간이 없으면 `long_*` 6칸은 `-`),
+  헤더 주석에 계산 근거.
 - `update-scripts/config.env.example` — 그 모델의 주석 블록(별칭 · 모델 ID · 표시명 · 설명 ·
   단가 5종 · `MODEL_PRICE_ASOF`).
 - 이 문서 — 「현재 구성」 전체와, 명령 예시의 모델 값(「A1-1」 · 「A2」 · 「A3」 · 「B1」).
@@ -424,7 +450,7 @@ AWS Pricing API 에는 신모델이 없어 단가는 수동이고, 조용히 낡
 - 클라이언트 문서의 모델 목록 — Cowork(Windows 수동 · 자동 · 설치기 빌드 · macOS)와 Claude Code
   설치기의 `--model`.
 - `deployment/scripts/bootstrap-ec2.sh` — 배포 EC2 의 Claude Code 고정 모델.
-- IAM — `terraform.tfvars` 의 `bedrock_model_arns` 와일드카드가 새 모델 이름을 잡는지 본다.
+- IAM — `terraform.tfvars` 의 `bedrock_allowed_model_arns` 와일드카드가 새 모델 이름을 잡는지 본다.
   비-Claude 모델이면 ARN 을 더하고 `terraform apply` 한다.
 
 **4) dev 에서 실제로 돌려 본다** — 「0」 → 「A」 를 따라 해 `status.sh` 가 OK, 첫 호출(「A2」)이

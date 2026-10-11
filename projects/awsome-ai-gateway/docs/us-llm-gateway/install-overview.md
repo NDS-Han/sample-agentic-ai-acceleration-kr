@@ -27,7 +27,7 @@
 | Region | **us-west-2** (인프라·추론) — 추론은 US Geo라 us-east-1/us-east-2/us-west-2 분산                                       |
 | 클라이언트  | **Claude Code** (Mac, Windows, Linux)                                                                       |
 | 추론 백엔드 | `bedrock-runtime` **+ US Geo 추론 프로파일** (`us.anthropic.`*) — us-west-2 In-Region 미지원이라 Geo 사용. **Mantle 아님** |
-| 모델     | **Opus 5.5 · Sonnet 5.5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                               |
+| 모델     | **Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5** (Geo ID `us.anthropic.`*)                                   |
 | 핵심 기능  | **서버측 Web Search** (AgentCore 관리형 커넥터, **us-east-1 전용 → cross-region 호출**)                                  |
 | 보안(입구) | **IP 제한**(`inbound-cidrs`) · 도메인이 있으면 **HTTPS**(ACM, `US-06` [ops/8-H](ops/8-H-alb-https.md)) — 운영이면 강력 권장                    |
 
@@ -48,6 +48,7 @@
   - **`US-16`** — Sonnet 5.5 도 §4-2 의 SQL 이 등록하고 단가를 심는다. 이전 세대(Opus 5 · Sonnet 5 · Opus 4.8)는 (D) 가 INACTIVE 로 둔다. 이미 설치한 곳만 US-16 을 따로 한다.
   - **`US-17`** — Claude Code Auto mode 서버 판정에 필요한 beta 전달이 gateway-proxy 코드의 기본값이다. 설치 뒤 [ops/8-A](ops/8-A-automode-server.md) 2절의 확인 스크립트로 확인만 한다.
   - **`US-18`** — 예산·비용·권한 결함 수정이 코드에, DB 변경(0037~0039)이 init SQL 에, Sonnet 5.5 캐시 읽기 단가가 `update-scripts/pricing.tsv` 에 들어 있다. 이미 설치한 곳만 8-D 로 따로 한다.
+  - **`US-19`** — Haiku 5.5 는 §4-2 의 SQL 이 등록하고 100K 초과 구간 단가까지 심는다. Haiku 5.5 의 thinking 처리와 단가 소수 8자리는 코드와 init SQL 에 들어 있다. Haiku 4.5 는 Claude Code 배경 작업의 기본 모델이라 함께 남는다. 이미 설치한 곳만 US-19 를 따로 한다.
   - **`US-11`** — install-guide §4-2 (C) 가 `update-scripts/pricing.tsv` 의 단가를 심는다(기본 = `us.` Standard 티어). **다른 리전·티어로 청구받는 배포**는 §4-2 전에 이 파일을 자기 청구 단가로 고친다(방법은 install-guide §4-2 (C) 의 설명대로).
 - **설치를 마친 뒤 따로 하는 것**:
   - **`US-12`(관리 화면 Cognito 로그인)** — 설치 절차에 들어 있지 않다. 설치가 끝나면 [ops/8-L-admin-login.md](ops/8-L-admin-login.md) 로 켠다(https 주소 = `US-06` 전제). 코드 조건(admin-api `1.0.69-idpjwks`)은 지금 코드로 설치하면 이미 충족한다. **운영(`US-08`)은 사실상 필수** — prod values 는 개발용 로그인이 꺼진 채로 나오므로, US-12 전에는 관리 화면에 들어갈 방법이 없다.

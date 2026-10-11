@@ -22,6 +22,14 @@ US-18 도 아래 (1)부터 (9)까지를 순서대로 따라 합니다. 이번 �
 **이미지 5개 · DB 열 추가 3개(0037·0038·0039) · Sonnet 5.5 캐시 읽기 단가 1개**입니다.
 본문과 다른 점은 각 단계 맨 앞의 **US-18** 줄에 있습니다. prod 의 (10-1)부터 (10-9)까지도 같습니다.
 
+## US-19 로 따라 할 때 달라지는 것
+
+US-19(Haiku 5.5)도 아래 (1)부터 (9)까지를 순서대로 따라 합니다. 이번 업데이트가 바꾸는 것은
+**이미지 4개 · 단가 열 소수 자릿수(6 → 8) · Haiku 5.5 등록**입니다. 마이그레이션 번호는 늘지
+않습니다(`0039` 그대로) — 단가 열은 migration Job 이 먼저 실행하는 init SQL 이 넓힙니다.
+US-18 을 아직 하지 않았다면 US-18 부터 끝냅니다(구간 단가 열이 US-18 에서 생깁니다).
+본문과 다른 점은 각 단계 맨 앞의 **US-19** 줄에 있습니다. prod 의 (10-1)부터 (10-9)까지도 같습니다.
+
 ## (1) 저장소 최신화 — [README §3 의 「저장소 최신화」](../README.md#3-적용하기-배포-ec2-에서)와 같음
 
 ▶ 실행
@@ -41,6 +49,9 @@ ls docs/us-llm-gateway/update-scripts/1[34]-*.sh
 
 > **US-18** — `14-postdeploy-check.sh --save pre` 의 `XX` 가 2개(스키마 `0036` · Sonnet 5.5 단가)면
 > 정상입니다. 둘 다 이번 업데이트가 고칩니다.
+
+> **US-19** — `14-postdeploy-check.sh --save pre` 에 `XX` 가 없고, `!!` 에
+> `claude-haiku-5-5: no open price row` 한 줄이 더 나오면 정상입니다(아직 등록 전).
 
 ▶ 실행
 ```bash
@@ -65,6 +76,8 @@ bash 17-set-websearch-caps.sh --apply
 
 > **US-18** — `SNAP=` 줄의 `pre-sync` 를 `pre-us18` 로 바꿔 칩니다(롤백 때 이 이름으로 찾습니다).
 
+> **US-19** — `SNAP=` 줄의 `pre-sync` 를 `pre-us19` 로 바꿔 칩니다.
+
 helm rollback 은 코드만 되돌린다. 마이그레이션 11개(0026~0036)는 되돌리지 않으므로 DB 는 이 스냅샷으로만 되돌린다(§롤백).
 
 ▶ 실행
@@ -81,6 +94,9 @@ aws rds describe-db-cluster-snapshots --db-cluster-snapshot-identifier $SNAP \
 ## (4) terraform — 인프라 변경 확인 (필요할 때만 apply)
 
 > **US-18** — `exit=0` 과 `No changes.` 가 나와야 합니다. 그러면 apply 없이 (5) 로 넘어갑니다.
+
+> **US-19** — `exit=0` 과 `No changes.` 가 나와야 합니다. IAM 은 tfvars 에서 이미
+> `anthropic.claude-*` 로 열려 있습니다.
 
 ▶ 실행
 ```bash
@@ -106,6 +122,9 @@ grep -E '# .* (will be|must be)|^Plan:|No changes|Error' ~/plan.txt
 > **US-18** — `<- change` 는 5행(migration · gateway-proxy · admin-api · admin-ui ·
 > cost-recorder-worker)입니다. notification-worker 는 바뀌지 않습니다.
 
+> **US-19** — `<- change` 는 4행(migration · gateway-proxy · admin-api · admin-ui)입니다.
+> 두 워커는 바뀌지 않습니다.
+
 같은 태그로 rebuild 하면 옛 이미지가 덮여 helm rollback 이 무의미해진다. 표의 `template` 열이 기대값이다(숫자를 외우지 않는다).
 
 ▶ 실행
@@ -128,6 +147,13 @@ bash 13-bump-image-tags.sh dev --apply
 >   ./deployment/scripts/rebuild-image.sh $s dev || break; done
 > ```
 
+> **US-19** — 아래 본문 명령 대신 이 명령을 칩니다(바뀐 4개만).
+> ```bash
+> cd ~/awsome-ai-gateway
+> for s in migration gateway-proxy admin-api admin-ui; do
+>   ./deployment/scripts/rebuild-image.sh $s dev || break; done
+> ```
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway
@@ -137,6 +163,9 @@ for s in migration gateway-proxy admin-api admin-ui notification-worker \
 기대: `✅ push 완료: …:<새 태그>` 6번. 스크립트가 끝에 `rollout restart` 를 안내하지만 **하지 않는다** — (7) 이 한 번에 올린다. ECR 확인은 [8-P §2-5](8-P-prod.md#2-5-컨테이너-이미지-빌드--ecr-install-guide-3-5) 의 목록 명령.
 
 ## (7) 배포 — migration + 롤아웃, 10분
+
+> **US-19** — migration Job 이 init SQL 로 단가 열을 소수 8자리로 넓힙니다. 값은 그대로이고,
+> 다음 배포부터는 아무것도 하지 않습니다.
 
 ▶ 실행
 ```bash
@@ -154,6 +183,10 @@ cd ~/awsome-ai-gateway && ./deployment/scripts/install-eks.sh dev
 
 > **US-18** — 차이 표에 `claude-sonnet-5-5` 캐시 읽기 `0.000220 → 0.000110` 한 줄이면 정상입니다.
 
+> **US-19** — 본문의 `08` 앞에 Haiku 5.5 를 등록합니다. [8-M 「A1-1」](8-M-models.md#a1-1-스크립트--배포-ec2)
+> 대로 `config.env` 를 Haiku 5.5 블록으로 바꾸고 `02 --apply` → `08 --alias claude-haiku-5-5 --apply`
+> 를 칩니다. 그 뒤 본문의 `08` 은 `nothing to change` 면 정상입니다.
+
 ▶ 실행
 ```bash
 cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
@@ -169,6 +202,10 @@ admin UI › Models 에 새로 ACTIVE 로 보이는 시드 alias(`global.anthrop
 > **US-18** — 아래 표에 더해 두 가지를 더 봅니다.
 > 예산 알림 기준(임계값을 50 으로 저장 → 6분 뒤 다시 열어도 50) · 분석 화면(30초 안에 두 번
 > 열어도 정상, 앱 필터를 바꾸면 숫자가 바뀜).
+
+> **US-19** — 아래 표에 더해 두 가지를 봅니다. `bash status.sh` 의 US-19 가 OK 인지(구간 단가
+> 포함), 그리고 Claude Code 로 `claude --model claude-haiku-5-5 -p "hi"` 가 답하는지. thinking 400 이
+> 나면 gateway-proxy 가 옛 이미지입니다.
 
 ▶ 실행 · EC2 — 자동 점검과 접속값
 ```bash
@@ -211,7 +248,7 @@ bash 04-verify.sh --base-url $GW --vk $GATEWAY_KEY
 
 | 확인 | 어떻게 | 기대 |
 |---|---|---|
-| 스키마 | 14 `alembic_version` | repo 의 최신 마이그레이션 번호(US-18 은 `0039`) |
+| 스키마 | 14 `alembic_version` | repo 의 최신 마이그레이션 번호(US-18·US-19 는 `0039`) |
 | 단가 | 14 price 행 · 호출 1건 뒤 `usage_logs.cost_usd` 검산 | pricing.tsv 와 일치 |
 | 라우팅 | 14 `claude-… -> us.anthropic.…` | `us.` 그대로(Global 로 안 바뀜) |
 | web search | Claude Code 로 검색 필요한 질문 1건 → 14 의 W(24h) | `web_search_count` ≥ 1 |
@@ -225,6 +262,8 @@ bash 04-verify.sh --base-url $GW --vk $GATEWAY_KEY
 - **코드+DB 전부** — (3) 스냅샷 복원(새 클러스터로 생기므로 RDS Proxy 대상 교체가 따른다, 1h+) **+** `helm rollback`([8-U 4단계](8-U-update.md#4단계--안-되면-되돌린다)). 코드만 되돌리면 옛 이미지가 마이그레이션 0032 가 심은 행을 못 읽어 모델 목록이 깨진다.
 - **단가만** — `snapshots/<ts>-08-pricing-rollback.sql` 을 psql 파드로.
 - **values 태그만** — `snapshots/<ts>-values-dev.yaml.bak` 복원 후 `install-eks.sh dev`.
+- **US-19** — `helm rollback` 만으로 됩니다. 넓힌 단가 열은 옛 이미지와도 맞습니다. 단,
+  Haiku 5.5 를 등록했다면 관리 화면에서 INACTIVE 로 둡니다(옛 gateway-proxy 는 Haiku 5.5 에 400).
 
 ## (10) prod — prod 계정의 배포 EC2 에서, dev (9) 를 하루 지켜본 뒤
 

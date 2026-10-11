@@ -152,6 +152,7 @@ curl -s -H "X-aws-ec2-metadata-token: $TOKEN" \
 ```bash
 for m in us.anthropic.claude-opus-5-5 \
          us.anthropic.claude-sonnet-5-5 \
+         us.anthropic.claude-haiku-5-5 \
          us.anthropic.claude-haiku-4-5-20251001-v1:0; do
   s=$(aws bedrock get-foundation-model-availability \
     --region us-west-2 --model-id "$m" \
@@ -159,10 +160,10 @@ for m in us.anthropic.claude-opus-5-5 \
     --no-cli-pager | tr -d '\r')
   printf '%-45s %s\n' "$m" "$s"
 done
-# → 3줄 모두 AUTHORIZED 면 이 절 건너뜀
+# → 4줄 모두 AUTHORIZED 면 이 절 건너뜀
 ```
 
-**AUTHORIZED 가 아닐 때만** — 콘솔 **Bedrock ▸ Model catalog**(region **us-west-2**) → Anthropic 모델 **아무거나 하나** 선택 → **use case form 제출**(용도 설명 + **website URL** 필요, 제출 즉시 승인). **1회 제출로 3모델이 모두 열린다** — 모델별로 낼 필요 없다.
+**AUTHORIZED 가 아닐 때만** — 콘솔 **Bedrock ▸ Model catalog**(region **us-west-2**) → Anthropic 모델 **아무거나 하나** 선택 → **use case form 제출**(용도 설명 + **website URL** 필요, 제출 즉시 승인). **1회 제출로 4모델이 모두 열린다** — 모델별로 낼 필요 없다.
 
 ### 1-4. Git 저장소 세팅
 
@@ -736,7 +737,7 @@ kubectl -n llm-gateway run psql --rm -it --restart=Never --pod-running-timeout=5
 
 
 
-### 4-2. 3모델 alias 를 US Geo 프로파일로 (Opus 5.5·Sonnet 5.5 등록)
+### 4-2. 4모델 alias 를 US Geo 프로파일로 (Opus 5.5·Sonnet 5.5·Haiku 5.5 등록)
 
 > **한 줄**: 게이트웨이에 리전 접두어 **자동 교정기가 있는데도** 이 SQL 이 필요하다 — 교정기가 `apac.`→`us.` 는 고쳐주지만 `global.` **만은 일부러 통과시킨다**(`bedrock.py:60`, 주석: *"region-agnostic family … passed through unchanged"*). 
 
@@ -754,7 +755,7 @@ UPDATE model.model_aliases
  WHERE alias = 'claude-haiku-4-5-20251001';
 --  ⚠️ Haiku 는 runtime ID 라 날짜접미사+버전(-20251001-v1:0) 이 붙는다. Opus/Sonnet 은 안 붙음.
 
--- (B) Opus 5.5 · Sonnet 5.5 alias 등록 — 둘 다 기본 시드에 없다(마이그레이션이 넣지 않는다).
+-- (B) Opus 5.5 · Sonnet 5.5 · Haiku 5.5 alias 등록 — 셋 다 기본 시드에 없다(마이그레이션이 넣지 않는다).
 --     Bedrock 에서 INFERENCE_PROFILE 전용이라 us. 접두사가 필수다 — native + US Geo
 INSERT INTO model.model_aliases
     (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
@@ -774,15 +775,28 @@ VALUES
 ON CONFLICT (alias) DO UPDATE
    SET provider='BEDROCK', provider_model_id='us.anthropic.claude-sonnet-5-5',
        endpoint_url=NULL, api_format='BEDROCK_NATIVE', status='ACTIVE';
+INSERT INTO model.model_aliases
+    (alias, provider, provider_model_id, endpoint_url, api_format, status, description, created_by)
+VALUES
+    ('claude-haiku-5-5', 'BEDROCK', 'us.anthropic.claude-haiku-5-5', NULL, 'BEDROCK_NATIVE', 'ACTIVE',
+     'Claude Code -> bedrock-runtime US Geo Haiku 5.5 (source us-west-2)',
+     '00000000-0000-4000-a000-000000000010')
+ON CONFLICT (alias) DO UPDATE
+   SET provider='BEDROCK', provider_model_id='us.anthropic.claude-haiku-5-5',
+       endpoint_url=NULL, api_format='BEDROCK_NATIVE', status='ACTIVE';
 
--- (C) 단가 — Opus 5.5 · Sonnet 5.5 · Haiku 4.5, Standard 티어 (us. 지리 프로파일 = Global ×1.1).
+-- (C) 단가 — Opus 5.5 · Sonnet 5.5 · Haiku 5.5 · Haiku 4.5, Standard 티어 (us. 지리 프로파일 = Global ×1.1).
 --     기본 시드가 Haiku 의 Global 티어 단가 행을 먼저 넣어 두므로 "열린 행을 닫고 → 삽입" 순서다.
 --     ⚠️ 단가 행이 없으면 호출은 성공하고 비용만 $0 으로 쌓인다 — 새 alias 는 반드시 여기 넣는다.
 --   값의 정본은 update-scripts/pricing.tsv. 바뀌면 아래 명령으로 이 블록을 다시 뽑는다:
 --     bash update-scripts/08-set-model-pricing.sh --print-sql \
---       --alias claude-opus-5-5 --alias claude-sonnet-5-5 --alias claude-haiku-4-5-20251001
---   단가 /1M: Opus 5.5 $4.40/$22 · Sonnet 5.5 $2.20/$11 · Haiku 4.5 $1.10/$5.50 (아래는 /1K).
---   ⚠️ 캐시 읽기는 Opus 5.5 만 입력의 0.05배(나머지 0.1배).
+--       --alias claude-opus-5-5 --alias claude-sonnet-5-5 --alias claude-haiku-5-5 \
+--       --alias claude-haiku-4-5-20251001
+--   단가 /1M: Opus 5.5 $4.40/$22 · Sonnet 5.5 $2.20/$11 · Haiku 5.5 $0.11/$0.55 ·
+--             Haiku 4.5 $1.10/$5.50 (아래는 /1K).
+--   ⚠️ 캐시 읽기는 Opus 5.5 · Sonnet 5.5 가 입력의 0.05배(나머지 0.1배).
+--   ⚠️ Haiku 5.5 는 요청 하나의 프롬프트가 10만 토큰을 넘으면 그 요청 전체가 5배다 —
+--      그 구간 단가(long_context_*)까지 넣는다. 빠지면 그 요청이 1/5 로 기록된다.
 UPDATE model.model_pricings SET effective_until = now()
  WHERE model_alias = 'claude-opus-5-5' AND effective_until IS NULL;
 INSERT INTO model.model_pricings
@@ -806,6 +820,21 @@ VALUES (gen_random_uuid(), 'claude-sonnet-5-5',
         0.002200, 0.011000, 0.002750, 0.004400, 0.000110,
         now(), '00000000-0000-4000-a000-000000000010'::uuid);
 UPDATE model.model_pricings SET effective_until = now()
+ WHERE model_alias = 'claude-haiku-5-5' AND effective_until IS NULL;
+INSERT INTO model.model_pricings
+    (id, model_alias,
+     input_price_per_1k_tokens, output_price_per_1k_tokens,
+     cache_creation_5m_price_per_1k_tokens, cache_creation_1h_price_per_1k_tokens,
+     cache_read_price_per_1k_tokens,
+     long_context_threshold_tokens, long_context_input_price_per_1k_tokens,
+     long_context_output_price_per_1k_tokens, long_context_cache_creation_5m_price_per_1k_tokens,
+     long_context_cache_creation_1h_price_per_1k_tokens, long_context_cache_read_price_per_1k_tokens,
+     effective_from, created_by)
+VALUES (gen_random_uuid(), 'claude-haiku-5-5',
+        0.000110, 0.000550, 0.0001375, 0.000220, 0.000011,
+        100000, 0.000550, 0.002750, 0.0006875, 0.001100, 0.000055,
+        now(), '00000000-0000-4000-a000-000000000010'::uuid);
+UPDATE model.model_pricings SET effective_until = now()
  WHERE model_alias = 'claude-haiku-4-5-20251001' AND effective_until IS NULL;
 INSERT INTO model.model_pricings
     (id, model_alias,
@@ -817,19 +846,21 @@ VALUES (gen_random_uuid(), 'claude-haiku-4-5-20251001',
         0.001100, 0.005500, 0.001375, 0.002200, 0.000110,
         now(), '00000000-0000-4000-a000-000000000010'::uuid);
 
--- (D) 이 배포의 3모델 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음.
+-- (D) 이 배포의 4모델 외 전부 INACTIVE — ⚠️ 반드시 (A)(B) 다음.
 --   시드는 alias 를 여럿 ACTIVE 로 깐다:
---     · 이전 세대: claude-opus-5 · claude-sonnet-5 · claude-opus-4-8 (이 배포는 최신 3모델만 쓴다)
+--     · 이전 세대: claude-opus-5 · claude-sonnet-5 · claude-opus-4-8 (이 배포는 최신 모델만 쓴다)
 --     · global.* 잔재: claude-sonnet-4-6 · claude-sonnet-4-6[1m] · claude-opus-4-7 ·
 --       global.anthropic.claude-opus-4-6-v1 · global.anthropic.claude-opus-4-8
 --     · Claude 5 의 global.* full-ID 별칭(global.anthropic.claude-opus-5 / -sonnet-5)
 --     · out-of-scope Mantle/Codex: cowork-opus · codex-gpt · gpt-5.6-{sol,terra,luna} · llama-3-70b
 --   전부 이 배포엔 없는 백엔드(전세계 라우팅 / Mantle / Codex)이거나 이전 세대라, ACTIVE 로 두면
---   /v1/models 에 떠서 고르는 순간 실패하거나 목록만 길어진다. 3모델만 남긴다.
+--   /v1/models 에 떠서 고르는 순간 실패하거나 목록만 길어진다. 4모델만 남긴다.
+--   Haiku 4.5 를 남기는 이유: Claude Code 의 배경 작업(대화 제목 등) 기본 모델이 아직 Haiku 4.5 다.
 --   되돌리기: PATCH /admin/models/{alias}/status. INACTIVE 는 FK 안전(DELETE 아님).
 UPDATE model.model_aliases
    SET status = 'INACTIVE'
- WHERE alias NOT IN ('claude-opus-5-5','claude-sonnet-5-5','claude-haiku-4-5-20251001');
+ WHERE alias NOT IN ('claude-opus-5-5','claude-sonnet-5-5','claude-haiku-5-5',
+                     'claude-haiku-4-5-20251001');
 SQL
 ```
 
