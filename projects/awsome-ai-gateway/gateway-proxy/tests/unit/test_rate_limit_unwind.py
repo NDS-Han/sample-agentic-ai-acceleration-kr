@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 from decimal import Decimal
 from unittest.mock import AsyncMock
 
@@ -51,6 +52,10 @@ def _deny(scope: str, limit_type: str) -> bytes:
 async def test_tpm_team_reject_refunds_user_reservation(mock_redis):
     """USER TPM 통과(커밋) 후 TEAM 거절 → USER 예약이 되돌려져야 한다."""
     mock_redis.eval = AsyncMock(side_effect=[_ok(), _deny("TEAM", "tpm"), _ok()])
+    # settle_tpm 의 버킷 마커 판독 — 예약 직후라 현재 버킷과 같은 값을 돌려준다.
+    mock_redis.get = AsyncMock(
+        return_value=str(int(time.time() // 60)).encode()
+    )
     LuaScriptLoader._scripts["rate_limit_tpm_check"] = "-- mock"
 
     descriptors = build_scope_descriptors(
@@ -209,6 +214,10 @@ async def test_enforce_cost_reject_unwinds_tpm(mock_redis, mock_session_factory)
             _ok(),                       # TPM TEAM
             _deny("USER", "cpm"),        # cost USER 거절
         ]
+    )
+    # settle_tpm 의 버킷 마커 판독 — 예약 직후 환불이라 현재 버킷.
+    mock_redis.get = AsyncMock(
+        return_value=str(int(time.time() // 60)).encode()
     )
 
     async def _load(*, redis, db, user_id, team_id, model_alias):

@@ -167,6 +167,10 @@ def conservative_admission_body(req_data: dict, max_iterations: int) -> dict:
     if single is None:
         single = _ADMISSION_DEFAULT_MAX_OUTPUT
     body["max_tokens"] = single * iters
+    # 입력도 턴마다 다시 청구된다 — 누적 컨텍스트 + 검색 결과를 매 턴 재전송하므로
+    # 입력 예약을 한 번만 잡으면 최악비용 추정이 실제 지출을 밑돈다(E2E S2-5).
+    # _estimate_input_tokens 가 읽는 심사 전용 배수 — 상류 바디와 무관하다.
+    body["_gw_admission_input_mult"] = iters
     return body
 
 

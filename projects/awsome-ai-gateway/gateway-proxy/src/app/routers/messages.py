@@ -37,6 +37,7 @@ from app.services.body_log_records import (
 from app.services.fallback_loop import (
     FallbackResult,
     enforce_candidate_admission,
+    release_reservations,
     run_fallback_loop,
 )
 from app.services.fallback_resolver import make_same_provider
@@ -193,7 +194,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
     client = state.get("client")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
     registry = request.app.state.provider_registry
     cost_recorder = request.app.state.cost_recorder
@@ -880,6 +881,12 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
                 client=client,
             )
+        else:
+            # ⚠️ 2xx 인데 usage 가 비어 온 경로(응답 파싱 실패 → TokenUsage()).
+            #    finalize 도 안 돌고(0 토큰) 폴백 루프의 release 도 비-2xx 전용이라
+            #    어느 쪽도 예약을 되돌리지 않는다 — TPM/CPM/월예산 예약이 창 끝까지
+            #    남는다. 멱등이라 안전하다.
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
         # 본문 로깅(성공 **및** 오류). enqueue 만 하므로 응답을 지연시키지 않는다.
         # effective_model_config 를 쓴다 — 폴백이 일어났으면 실제로 응답한 모델이 남아야 한다.
@@ -932,7 +939,7 @@ async def count_tokens(request: Request) -> JSONResponse:
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
     client = state.get("client")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
     registry = request.app.state.provider_registry
     routing_loader = getattr(request.app.state, "routing_profile_loader", None)

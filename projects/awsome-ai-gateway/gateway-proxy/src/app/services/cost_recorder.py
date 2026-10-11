@@ -461,24 +461,24 @@ class CostRecorder:
 
         # 3. XADD cost:stream — cost-recorder-worker가 DB INSERT / daily counter /
         #    threshold pub/sub 배치 처리. 실패는 경고만 (gateway response는 영향 없음).
-        if redis is not None:
-            await self._publish_to_stream(
-                redis,
-                auth_context=auth_context,
-                model_config=model_config,
-                usage=usage,
-                cost_usd=cost_usd,
-                request_id=request_id,
-                is_stream=is_stream,
-                duration_ms=duration_ms,
-                ttft_ms=ttft_ms,
-                threshold_triggered=threshold_triggered,
-                threshold_scope=threshold_scope if threshold_triggered is not None else None,
-                downgraded_from=downgraded_from,
-                availability_fallback_from=availability_fallback_from,
-                bedrock_request_id=bedrock_request_id,
-                client=client,
-            )
+        #    Redis degraded(redis=None)면 스트림 호출 없이 곧바로 spool.
+        await self._publish_to_stream(
+            redis,
+            auth_context=auth_context,
+            model_config=model_config,
+            usage=usage,
+            cost_usd=cost_usd,
+            request_id=request_id,
+            is_stream=is_stream,
+            duration_ms=duration_ms,
+            ttft_ms=ttft_ms,
+            threshold_triggered=threshold_triggered,
+            threshold_scope=threshold_scope if threshold_triggered is not None else None,
+            downgraded_from=downgraded_from,
+            availability_fallback_from=availability_fallback_from,
+            bedrock_request_id=bedrock_request_id,
+            client=client,
+        )
 
         return cost_usd
 
@@ -551,22 +551,25 @@ class CostRecorder:
         )
 
         payload_json = entry.model_dump_json()
-        try:
-            await redis.xadd(
-                COST_STREAM_KEY,
-                {"payload": payload_json},
-                maxlen=COST_STREAM_MAXLEN,
-                approximate=True,
-            )
-        except Exception:
-            logger.exception(
-                "cost_stream_xadd_failed",
-                user_id=auth_context.user_id,
-                request_id=request_id,
-            )
+        published = False
+        if redis is not None:
+            try:
+                await redis.xadd(
+                    COST_STREAM_KEY,
+                    {"payload": payload_json},
+                    maxlen=COST_STREAM_MAXLEN,
+                    approximate=True,
+                )
+                published = True
+            except Exception:
+                logger.exception(
+                    "cost_stream_xadd_failed",
+                    user_id=auth_context.user_id,
+                    request_id=request_id,
+                )
+        if not published and self._spool is not None:
             # P0-②: don't lose the record — spool for re-publish on Redis recovery.
-            if self._spool is not None:
-                try:
-                    self._spool.enqueue(payload_json)
-                except Exception:
-                    logger.exception("cost_stream_spool_enqueue_failed", request_id=request_id)
+            try:
+                self._spool.enqueue(payload_json)
+            except Exception:
+                logger.exception("cost_stream_spool_enqueue_failed", request_id=request_id)

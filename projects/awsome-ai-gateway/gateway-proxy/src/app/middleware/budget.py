@@ -113,6 +113,10 @@ class BudgetMiddleware:
 
         try:
             # short-lived session: budget 조회 후 즉시 반환.
+            # ⚠️ try 범위는 체크 호출뿐이어야 한다 — await self.app(...) 까지
+            #    감싸면 다운스트림(라우터/다른 미들웨어)의 PermissionError 가
+            #    예산 거절 429 로 오보고되고, 응답이 이미 시작된 뒤라면 두 번째
+            #    response.start 로 ASGI 오류가 된다.
             if use_db:
                 async with session_factory() as db:
                     budget_status = await _budget_service.check_budget(
@@ -132,15 +136,16 @@ class BudgetMiddleware:
                     period,
                     client=client,
                 )
-            state["budget_status"] = budget_status
-            if budget_status.warning_tiers:
-                state["budget_soft_warning"] = True
-
-            await self.app(scope, receive, send)
-
         except PermissionError as e:
             reason = str(e)
             await self._send_429_budget(scope, send, reason)
+            return
+
+        state["budget_status"] = budget_status
+        if budget_status.warning_tiers:
+            state["budget_soft_warning"] = True
+
+        await self.app(scope, receive, send)
 
     async def _send_429_budget(self, scope: Scope, send: Send, reason: str) -> None:
         if reason == "no_team_assigned":

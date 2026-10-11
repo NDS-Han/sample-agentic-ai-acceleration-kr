@@ -110,6 +110,33 @@ async def test_finalize_xadd_payload_contains_cache_tokens_and_flags(
 
 
 @pytest.mark.asyncio
+async def test_finalize_redis_degraded_spools_cost_event(auth_context_vk, model_config_bedrock):
+    """E2E S2-13: REDIS_DEGRADED(redis=None)면 XADD 없이 spool로 비용 이벤트 보존."""
+    import json as _json
+    from unittest.mock import MagicMock
+
+    spool = MagicMock()
+    recorder = CostRecorder(spool=spool)
+    usage = TokenUsage(input_tokens=500, output_tokens=300, total_tokens=800)
+
+    cost = await recorder.finalize(
+        redis=None,  # 라우터가 넘기는 _redis_effective — degraded 시 None
+        auth_context=auth_context_vk,
+        model_config=model_config_bedrock,
+        usage=usage,
+        request_id="req-degraded",
+        is_stream=False,
+        duration_ms=150,
+    )
+
+    assert cost > Decimal("0")
+    spool.enqueue.assert_called_once()
+    payload = _json.loads(spool.enqueue.call_args.args[0])
+    assert payload["request_id"] == "req-degraded"
+    assert payload["cost_usd"] == str(cost) or payload["cost_usd"] is not None
+
+
+@pytest.mark.asyncio
 async def test_finalize_zero_usage_only_settles_tpm_ki08(
     mock_redis, auth_context_vk, model_config_bedrock
 ):

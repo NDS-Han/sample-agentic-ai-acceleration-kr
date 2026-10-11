@@ -23,7 +23,12 @@ class FakeBudgetStatus:
     threshold_pct: int = 0
 
 
-def _make_app(rules: list[DowngradeRule], threshold_pct: int, team_id: str | None):
+def _make_app(
+    rules: list[DowngradeRule],
+    threshold_pct: int,
+    team_id: str | None,
+    allowed_models: list[str] | None = None,
+):
     app = FastAPI()
 
     received_body: dict = {}
@@ -50,7 +55,9 @@ def _make_app(rules: list[DowngradeRule], threshold_pct: int, team_id: str | Non
     @app.middleware("http")
     async def inject_state(request: Request, call_next):
         request.scope.setdefault("state", {})
-        request.scope["state"]["auth_context"] = FakeAuthContext(team_id=team_id or "")
+        auth_ctx = FakeAuthContext(team_id=team_id or "")
+        auth_ctx.allowed_models = allowed_models
+        request.scope["state"]["auth_context"] = auth_ctx
         request.scope["state"]["budget_status"] = FakeBudgetStatus(threshold_pct=threshold_pct)
         request.scope["state"]["_redis"] = None
         request.scope["state"]["_session_factory"] = None
@@ -143,3 +150,54 @@ def test_non_downgrade_path_skipped():
     client = TestClient(app)
     res = client.get("/health")
     assert res.status_code == 200
+
+
+def test_bedrock_model_path_downgrades():
+    """E2E S2-10: /model/{id}/{op} 는 모델이 path 에 있다 — path segment 재작성."""
+    rules = [DowngradeRule("us.anthropic.claude-opus-4", "cheap-haiku", 50)]
+    app, recv, _ = _make_app(rules, threshold_pct=99, team_id=str(uuid.uuid4()))
+    seen: dict = {}
+
+    @app.post("/model/{model_id:path}/converse")
+    async def converse(model_id: str, request: Request):
+        seen["model_id"] = model_id
+        seen["downgraded_from"] = request.scope.get("state", {}).get("downgraded_from")
+        return {"ok": True}
+
+    client = TestClient(app)
+    res = client.post(
+        "/model/us.anthropic.claude-opus-4/converse", json={"messages": []}
+    )
+    assert res.status_code == 200
+    assert seen["model_id"] == "cheap-haiku"
+    assert seen["downgraded_from"] == "us.anthropic.claude-opus-4"
+
+
+def test_responses_path_downgrades():
+    """E2E S2-10: Codex /v1/responses 도 body model 재작성 대상."""
+    rules = [DowngradeRule("gpt-5-codex", "gpt-5-mini", 50)]
+    app, recv, _ = _make_app(rules, threshold_pct=99, team_id=str(uuid.uuid4()))
+
+    @app.post("/v1/responses")
+    async def responses(request: Request):
+        recv["responses_body"] = await request.json()
+        return {"ok": True}
+
+    client = TestClient(app)
+    res = client.post("/v1/responses", json={"model": "gpt-5-codex", "input": "hi"})
+    assert res.status_code == 200
+    assert recv["responses_body"]["model"] == "gpt-5-mini"
+
+
+def test_downgrade_target_outside_allowed_models_skipped():
+    """E2E S2-10: 강등 대상이 allowed_models 밖이면 재작성하지 않는다."""
+    rules = [DowngradeRule("opus", "sonnet", 50)]
+    app, recv, _ = _make_app(
+        rules, threshold_pct=99, team_id=str(uuid.uuid4()),
+        allowed_models=["opus"],  # sonnet 은 미허용
+    )
+
+    client = TestClient(app)
+    res = client.post("/v1/messages", json={"model": "opus"})
+    assert res.status_code == 200
+    assert recv["body"]["model"] == "opus"

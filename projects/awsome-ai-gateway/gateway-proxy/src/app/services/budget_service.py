@@ -319,9 +319,16 @@ class BudgetService:
                         pending = await self._pending_reservation_sum(
                             redis, f"budget:pending:user:{{{user_id}}}:*"
                         )
-                        await redis.set(user_key, str(Decimal(str(used_from_db)) + pending))
-                        await redis.set(
-                            f"budget:resvsum:user:{{{user_id}}}:{period}", str(pending)
+                        # budget_rebuild.lua: EXISTS→SET 사이의 동시 델타 보존 +
+                        # 동시 rebuild 는 NX 락으로 차단(락 키도 {uid} 해시태그).
+                        await redis.eval(
+                            LuaScriptLoader.get("budget_rebuild"),
+                            3,
+                            user_key,
+                            f"budget:resvsum:user:{{{user_id}}}:{period}",
+                            f"budget:rebuild-lock:{{{user_id}}}",
+                            str(Decimal(str(used_from_db)) + pending),
+                            str(pending),
                         )
                         logger.info(
                             "budget_counter_restored",
@@ -349,9 +356,13 @@ class BudgetService:
                             redis,
                             f"budget:pending:client:{{{user_id}}}:{client_name}:*",
                         )
-                        await redis.set(app_key, str(Decimal(str(used)) + pending))
-                        await redis.set(
+                        await redis.eval(
+                            LuaScriptLoader.get("budget_rebuild"),
+                            3,
+                            app_key,
                             f"budget:resvsum:user:{{{user_id}}}:{client_name}:{period}",
+                            f"budget:rebuild-lock:{{{user_id}}}:{client_name}",
+                            str(Decimal(str(used)) + pending),
                             str(pending),
                         )
                         logger.info(
@@ -364,6 +375,60 @@ class BudgetService:
                         )
                 except Exception:
                     logger.exception("budget_counter_restore_failed", user_id=user_id)
+
+            # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
+            # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
+            # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
+            # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
+            if not await redis.exists(team_key) and db is not None:
+                try:
+                    from sqlalchemy import text as _t
+
+                    result = await db.execute(
+                        _t(
+                            "SELECT used_usd FROM budget.budget_usages "
+                            "WHERE scope = 'TEAM' AND scope_id = :tid "
+                            "AND period = :period AND client IS NULL"
+                        ),
+                        {"tid": team_id, "period": period},
+                    )
+                    team_used = result.scalar_one_or_none()
+                    if team_used is None:
+                        from sqlalchemy import func as _f, select as _s
+
+                        from app.models.usage import UsageRecord
+
+                        team_used = (
+                            await db.execute(
+                                _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
+                                    UsageRecord.team_id == team_id,
+                                    _f.to_char(UsageRecord.requested_at, "YYYY-MM")
+                                    == period,
+                                )
+                            )
+                        ).scalar_one()
+                    if team_used and Decimal(str(team_used)) > 0:
+                        pending = await self._pending_reservation_sum(
+                            redis, f"budget:pending:team:{{{team_id}}}:*"
+                        )
+                        await redis.eval(
+                            LuaScriptLoader.get("budget_rebuild"),
+                            3,
+                            team_key,
+                            f"budget:resvsum:team:{{{team_id}}}:{period}",
+                            f"budget:rebuild-lock:{{{team_id}}}",
+                            str(Decimal(str(team_used)) + pending),
+                            str(pending),
+                        )
+                        logger.info(
+                            "budget_team_counter_restored",
+                            team_id=team_id,
+                            period=period,
+                            used=str(team_used),
+                            pending_reservations=str(pending),
+                        )
+                except Exception:
+                    logger.exception("budget_team_counter_restore_failed", team_id=team_id)
 
             # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
             # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고

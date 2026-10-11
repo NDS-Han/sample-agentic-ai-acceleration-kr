@@ -404,6 +404,15 @@ async def run_fallback_loop(
             ).encode()
             headers = {}
             usage = TokenUsage()
+        except Exception:
+            # 어댑터 계약 밖의 예외(예: bedrock_openai_adapter 의 ValueError,
+            # 본문 조립 버그)는 여기까지 못 오게 돼 있지만, 실제로 새면 루프를
+            # 빠져나가 500 이 되고 예약이 마커 TTL 까지 누수된다. 해제 후 재전파 —
+            # 에러 의미론(500)은 그대로 두고 누수만 막는다.
+            await release_reservations(
+                redis=redis, state=state, auth_context=auth_context
+            )
+            raise
 
         # --- 7. Handle result ---
         # ⚠️ 비-2xx 는 폴백 대상이 아니어도 예약을 되돌려야 한다. 상류가 400/404/422/429/

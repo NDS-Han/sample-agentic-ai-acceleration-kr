@@ -36,12 +36,18 @@ class ScopeLimits:
 
     ``None`` = 한도 미설정(unlimited). 해당 metric 체크 스킵.
     CPM/CPH는 USER/TEAM 스코프만 유효 (GLOBAL은 월 예산 엔진이 담당).
+
+    ``model_agnostic``: 한도 행이 ``model_alias=NULL``(전체 모델 합산)에서
+    왔으면 True — 카운터 키를 요청 모델이 아니라 ``*`` 로 만들어야 한다.
+    그렇지 않으면 NULL 한도가 "모델별 한도"로 오적용돼, 사용자가 N개 모델에
+    걸치면 N배의 실효 한도를 얻는다(rate_limit_scope.build_rl_key 의 `*` 계약).
     """
 
     rpm: int | None = None
     tpm: int | None = None
     cpm: Decimal | None = None
     cph: Decimal | None = None
+    model_agnostic: bool = False
 
 
 @dataclass
@@ -75,6 +81,7 @@ async def _load_scope_from_cache(
             tpm=data.get("tpm"),
             cpm=Decimal(str(cpm_raw)) if cpm_raw is not None else None,
             cph=Decimal(str(cph_raw)) if cph_raw is not None else None,
+            model_agnostic=bool(data.get("agg")),
         )
     except Exception:
         logger.warning("rl_config_cache_read_failed", scope=scope, scope_id=scope_id)
@@ -95,6 +102,7 @@ async def _save_scope_to_cache(
                     "tpm": limits.tpm,
                     "cpm": str(limits.cpm) if limits.cpm is not None else None,
                     "cph": str(limits.cph) if limits.cph is not None else None,
+                    "agg": limits.model_agnostic,
                 }
             ),
             ex=_CONFIG_CACHE_TTL_SEC,
@@ -142,6 +150,9 @@ async def _query_scope_from_db(
         tpm=chosen.tpm_limit,
         cpm=chosen.cpm_limit_usd if scope != "GLOBAL" else None,
         cph=chosen.cph_limit_usd if scope != "GLOBAL" else None,
+        # NULL 행 = "전체 모델 합산 한도" — 카운터 키를 `*` 로 만들어야
+        # 모델들이 하나의 버킷을 공유한다.
+        model_agnostic=chosen.model_alias is None,
     )
 
 

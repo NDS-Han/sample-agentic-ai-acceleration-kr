@@ -154,8 +154,9 @@ class RateLimitService:
         CROSSSLOT 에러 → 과거엔 그게 fail-open 으로 삼켜져 RPM 이 **무음 미집행**됐다.
         scope 별로 나눠 호출하면 각 eval 은 단일 슬롯(키 1개)이라 CROSSSLOT 불가.
         각 eval 은 단일 scope 원자적(check+increment). cross-scope all-or-nothing
-        은 포기 — 앞 scope 통과 후 뒤 scope 거부 시 앞 scope 에 phantom +1 이 남지만
-        보수적(과잉제한) 방향이고 다음 윈도우에 자가보정. budget_service 와 동형.
+        은 포기 — 대신 뒤 scope 거절 시 앞 scope 의 커밋분을 ZREM 으로 되돌린다.
+        eval 자체가 실패한 스코프는 커밋 여부를 모르므로 되돌리지 않는다(보수적
+        방향 — 과잉제한이 미집행보다 안전).
         """
         effective = [d for d in descriptors if d.rpm_limit and d.rpm_limit > 0]
         if not effective:
@@ -166,6 +167,7 @@ class RateLimitService:
         script = LuaScriptLoader.get("rate_limit_check")
 
         last: dict | None = None
+        committed_keys: list[str] = []
         for d in effective:
             key = build_rl_key(d.scope, d.scope_id, d.model_alias, "rpm")
             # num_scopes=1 — 동일 Lua 를 단일 스코프로 호출(슬롯 1개).
@@ -180,9 +182,13 @@ class RateLimitService:
                 logger.exception("rate_limit_scope_check_failed", scope=d.scope.value)
                 blocked = _on_eval_failure(d.scope.value, "rpm")
                 if blocked is not None:
+                    await self._zrem_committed(redis, committed_keys, req_id)
                     return blocked
                 continue
             if not result["allowed"]:
+                # 거절 전 통과한 스코프에는 이미 ZADD 가 커밋됐다 — phantom +1 은
+                # 거절당한 요청이 다음 분까지 자기 RPM 을 깎으므로 되돌린다.
+                await self._zrem_committed(redis, committed_keys, req_id)
                 return RateLimitResult(
                     allowed=False,
                     remaining=result.get("remaining", 0),
@@ -192,6 +198,7 @@ class RateLimitService:
                     scope=result.get("scope"),
                     limit_type=result.get("limit_type"),
                 )
+            committed_keys.append(key)
             last = result
 
         # 전 scope 통과 — 마지막(가장 광역) scope 결과의 remaining/limit 노출.
@@ -204,6 +211,39 @@ class RateLimitService:
             )
         return RateLimitResult(allowed=True, remaining=-1, limit=-1)
 
+    @staticmethod
+    async def _zrem_committed(redis, keys: list[str], request_id: str) -> None:
+        if not keys:
+            return
+        try:
+            pipe = redis.pipeline(transaction=False)
+            for k in keys:
+                pipe.zrem(k, request_id)
+            await pipe.execute()
+        except Exception:
+            logger.warning("rpm_undo_failed")
+
+    async def undo_rpm(
+        self,
+        redis,
+        descriptors: list[ScopeDescriptor],
+        request_id: str,
+    ) -> None:
+        """RPM 슬롯 해제 — 통과 후 뒤 단계(TPM/비용/예산)가 거절한 요청의
+        ZSET 엔트리를 제거한다.
+
+        ZADD 멤버가 request_id 라 ZREM 으로 정확히 되돌릴 수 있다. 하지
+        않으면 비용/예산으로 거절당한 요청이 요청-수 한도를 계속 물고 있어
+        반복 거절이 사용자의 RPM 을 소진한다. 실패해도 무시(윈도우 만료로
+        자연 회수).
+        """
+        keys = [
+            build_rl_key(d.scope, d.scope_id, d.model_alias, "rpm")
+            for d in descriptors
+            if d.rpm_limit and d.rpm_limit > 0
+        ]
+        await self._zrem_committed(redis, keys, request_id)
+
     async def check_multi_scope_tpm(
         self,
         redis,
@@ -211,6 +251,7 @@ class RateLimitService:
         reserved_tokens: int,
         window_sec: int = 60,
         committed_out: list[ScopeDescriptor] | None = None,
+        now_sec: int | None = None,
     ) -> RateLimitResult:
         """TPM Sliding Window Counter Pre-reserve 체크 — **스코프별 1회 Lua 호출**.
 
@@ -239,7 +280,11 @@ class RateLimitService:
         if not effective or reserved_tokens <= 0:
             return RateLimitResult(allowed=True, remaining=-1, limit=-1)
 
-        now_sec = int(time.time())
+        # 호출자가 넘긴 now_sec 를 우선한다 — settle 의 예약 버킷 판별
+        # (tpm_reserved_at) 이 같은 값이어야 분 경계(59.999→00.001)에서
+        # 환불이 예약과 다른 버킷에 쓰이지 않는다.
+        if now_sec is None:
+            now_sec = int(time.time())
         script = LuaScriptLoader.get("rate_limit_tpm_check")
 
         committed: list[ScopeDescriptor] = []
@@ -264,11 +309,15 @@ class RateLimitService:
                 blocked = _on_eval_failure(d.scope.value, "tpm")
                 if blocked is not None:
                     # closed 정책 차단도 거절이다 — 이미 커밋된 앞 스코프를 되돌린다.
-                    await self._refund_committed_tpm(redis, committed, reserved_tokens)
+                    await self._refund_committed_tpm(
+                        redis, committed, reserved_tokens, reserved_at=now_sec
+                    )
                     return blocked
                 continue
             if not result["allowed"]:
-                await self._refund_committed_tpm(redis, committed, reserved_tokens)
+                await self._refund_committed_tpm(
+                    redis, committed, reserved_tokens, reserved_at=now_sec
+                )
                 return RateLimitResult(
                     allowed=False,
                     remaining=result.get("remaining", -1),
@@ -297,6 +346,7 @@ class RateLimitService:
         redis,
         committed: list[ScopeDescriptor],
         reserved_tokens: int,
+        reserved_at: float | None = None,
     ) -> None:
         """거절 시점까지 커밋된 TPM 예약을 되돌린다 (actual=0 으로 정산).
 
@@ -307,7 +357,9 @@ class RateLimitService:
         if not committed:
             return
         try:
-            await self.settle_tpm(redis, committed, reserved_tokens, 0)
+            await self.settle_tpm(
+                redis, committed, reserved_tokens, 0, reserved_at=reserved_at
+            )
         except Exception:
             logger.warning(
                 "tpm_partial_unwind_failed",
@@ -638,14 +690,27 @@ class RateLimitService:
 
         # 파이프라이닝(deepdive Q50): 2~4 incrbyfloat 를 순차 await 대신 한 파이프라인으로.
         # 비트랜잭션 파이프라인은 cluster 에서 키별 노드 라우팅 → cross-slot 안전.
+        #
+        # ⚠️ EXPIRE 를 같이 건다 — 예약 윈도우 키가 CPM 120s / CPH 7200s TTL 로
+        #    만료된 뒤 긴 스트림이 settle 하면 incrbyfloat 가 **음수 값 + TTL 없는**
+        #    키를 새로 만든다. volatile-lru 에서는 TTL 없는 키가 축출되지 않아
+        #    영구 누적된다.
         try:
             pipe = redis.pipeline(transaction=False)
             if do_user:
-                pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}", adj_float)
-                pipe.incrbyfloat(f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}", adj_float)
+                cpm_key = f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}"
+                cph_key = f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}"
+                pipe.incrbyfloat(cpm_key, adj_float)
+                pipe.expire(cpm_key, 120)
+                pipe.incrbyfloat(cph_key, adj_float)
+                pipe.expire(cph_key, 7200)
             if do_team:
-                pipe.incrbyfloat(f"rl:cost:team:{{{team_id}}}:cpm:{cpm_window_ts}", adj_float)
-                pipe.incrbyfloat(f"rl:cost:team:{{{team_id}}}:cph:{cph_window_ts}", adj_float)
+                cpm_key = f"rl:cost:team:{{{team_id}}}:cpm:{cpm_window_ts}"
+                cph_key = f"rl:cost:team:{{{team_id}}}:cph:{cph_window_ts}"
+                pipe.incrbyfloat(cpm_key, adj_float)
+                pipe.expire(cpm_key, 120)
+                pipe.incrbyfloat(cph_key, adj_float)
+                pipe.expire(cph_key, 7200)
             await pipe.execute()
         except Exception:
             logger.warning("cost_settle_failed", user_id=user_id, adjustment=str(adjustment))
@@ -653,6 +718,10 @@ class RateLimitService:
 
 class InMemoryRateLimiter:
     """Redis 장애 시 Fixed Window 근사치 Rate Limiter (워커당 독립)."""
+
+    # 장애가 길어지고 유저/팀 수가 많으면 (scope,id,model) 키가 무한 누적된다 —
+    # 지난 윈도우 항목은 카운터로도 안 쓰이므로 임계 초과 시 한 바퀴 정리한다.
+    _SWEEP_THRESHOLD = 10_000
 
     def __init__(self, worker_count: int = 4) -> None:
         self._worker_count = max(1, worker_count)
@@ -662,6 +731,11 @@ class InMemoryRateLimiter:
         adjusted_limit = max(1, limit // self._worker_count)
         now = time.time()
         window_start = (now // window_sec) * window_sec
+
+        if len(self._counters) > self._SWEEP_THRESHOLD:
+            self._counters = {
+                k: v for k, v in self._counters.items() if v[1] == window_start
+            }
 
         count, stored_window = self._counters.get(key, (0, window_start))
         if stored_window != window_start:

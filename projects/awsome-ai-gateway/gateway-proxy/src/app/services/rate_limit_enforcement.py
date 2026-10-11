@@ -16,6 +16,7 @@ Step 5에서 `_load_scope_limits()`를 `model.rate_limit_configs` DB 조회로 �
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import time
 from decimal import Decimal
@@ -33,6 +34,8 @@ from app.services.rate_limit_config_loader import (
     load_all_scope_limits,
 )
 from app.services.rate_limit_scope import (
+    GLOBAL_WILDCARD,
+    RateLimitScope,
     ScopeDescriptor,
     build_scope_descriptors,
     estimate_reserved_tokens,
@@ -54,25 +57,93 @@ def _extract_max_output(body: dict) -> int:
 
     max_output_tokens 는 OpenAI **Responses API**(Codex/GPT-5.x) 필드 — 빠지면
     Codex 요청이 _DEFAULT_MAX_OUTPUT(4096)로 과대 예약돼 거짓 TPM/CPM throttle 유발.
+
+    여러 필드가 동시에 있으면 **최댓값**을 쓴다 — 예약은 과대 쪽이 안전하고,
+    max_tokens=1 + max_output_tokens=32k 같은 조합에서 앞 필드만 보면
+    예약이 실제 출력 한도를 밑돌아 하드캡이 샌다. Converse 는 한도가
+    ``inferenceConfig.maxTokens`` 에 중첩돼 있다.
     """
+    candidates: list[int] = []
     for key in ("max_tokens", "max_completion_tokens", "max_new_tokens", "max_output_tokens"):
         value = body.get(key)
         if isinstance(value, int) and value > 0:
-            return value
-    return _DEFAULT_MAX_OUTPUT
+            candidates.append(value)
+    nested = body.get("inferenceConfig")
+    if isinstance(nested, dict):
+        value = nested.get("maxTokens")
+        if isinstance(value, int) and value > 0:
+            candidates.append(value)
+    return max(candidates) if candidates else _DEFAULT_MAX_OUTPUT
+
+
+# 이미지 블록의 보수적 토큰 상한 — Anthropic 최대 해상도(~1568px) 기준
+# 실청구는 대부분 1.6k 이하라 3.5k 는 안전한 상한이다. base64 길이로 추정하면
+# 1MB 이미지가 ~330k 토큰으로 둔갑해 정상 요청이 TPM/CPM 에 막힌다(E2E S2-6).
+_TOKENS_PER_IMAGE = 3500
+
+# PDF 등 document 블록 — base64 길이에서 과금 근사. 텍스트 PDF 는 페이지당
+# ~2.5k 토큰, base64 는 원문의 ~4/3 배라 chars/27 ≈ 1KB→~37토큰(50KB/페이지
+# 상정). 스캔본은 페이지 이미지로 더 비싸므로 부족분은 이미지 근사와 병합.
+_BASE64_CHARS_PER_DOC_TOKEN = 27
+
+
+def _sanitize_media_blocks(node, media_tokens: list[int]):
+    """base64 미디어를 과금 근사 토큰으로 치환한 복사본을 만든다."""
+    if isinstance(node, dict):
+        ntype = node.get("type")
+        source = node.get("source")
+        if ntype == "image":
+            # Anthropic Messages — source.base64/data
+            media_tokens[0] += _TOKENS_PER_IMAGE
+            return {k: _sanitize_media_blocks(v, media_tokens)
+                    for k, v in node.items() if k != "source"}
+        if ntype in ("image_url", "input_image"):
+            # OpenAI chat(image_url 블록) / Responses(input_image — image_url 이
+            # data URI 문자열) — 양쪽 다 페이로드가 커지는 필드를 통째로 뺀다.
+            media_tokens[0] += _TOKENS_PER_IMAGE
+            return {k: _sanitize_media_blocks(v, media_tokens)
+                    for k, v in node.items()
+                    if k not in ("image_url", "source")}
+        if ntype == "document" and isinstance(source, dict) and isinstance(
+            source.get("data"), str
+        ):
+            media_tokens[0] += max(2000, len(source["data"]) // _BASE64_CHARS_PER_DOC_TOKEN)
+            return {k: _sanitize_media_blocks(v, media_tokens)
+                    for k, v in node.items() if k != "source"}
+        return {k: _sanitize_media_blocks(v, media_tokens) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_sanitize_media_blocks(i, media_tokens) for i in node]
+    return node
 
 
 def _estimate_input_tokens(body: dict) -> int:
     """body 전체 문자열 길이 기반 보수적 추정.
 
     정확한 카운팅은 tokenizer 필요하나 reserve는 과대 예약이 허용되므로
-    bytes/4 휴리스틱으로 시작. post-settle에서 차액 환불됨.
+    문자 계열별 상한으로 잡는다 — ASCII 는 ~4자/토큰, 비ASCII(한국어·CJK·
+    이모지)는 ~1자/토큰까지 낼 수 있어 예전 bytes/4 는 한국어 프롬프트를
+    0.75토큰/자로 과소 추정해 예약이 실입력 아래로 샜다. post-settle에서
+    차액 환불되므로 과대 쪽이 안전하다.
     """
+    media_tokens = [0]
+    sanitized = _sanitize_media_blocks(body, media_tokens)
     try:
-        serialized = json.dumps(body, ensure_ascii=False)
+        serialized = json.dumps(sanitized, ensure_ascii=False)
     except Exception:
         return _DEFAULT_MAX_OUTPUT
-    return max(1, len(serialized.encode("utf-8")) // _BYTES_PER_TOKEN)
+    ascii_count = 0
+    non_ascii_count = 0
+    for ch in serialized:
+        if ord(ch) < 128:
+            ascii_count += 1
+        else:
+            non_ascii_count += 1
+    estimate = ascii_count // _BYTES_PER_TOKEN + non_ascii_count + media_tokens[0]
+    # 심사 전용 배수(웹서치 루프): 턴당 입력이 재청구되므로 입장 예약도 배수로.
+    mult = body.get("_gw_admission_input_mult")
+    if isinstance(mult, int) and mult > 1:
+        estimate *= mult
+    return max(1, estimate)
 
 
 def _apply_budget_throttle(
@@ -88,9 +159,8 @@ def _apply_budget_throttle(
     if limits.user.rpm is None:
         return limits
     pct = budget_status.throttle_rpm_pct or 50
-    limits.user = ScopeLimits(
-        rpm=max(1, int(limits.user.rpm * pct / 100)),
-        tpm=limits.user.tpm,
+    limits.user = dataclasses.replace(
+        limits.user, rpm=max(1, int(limits.user.rpm * pct / 100))
     )
     return limits
 
@@ -118,10 +188,21 @@ async def enforce_rate_limits(
         # Redis 다운 — fail-open (NFR-2.4). Middleware의 in-memory fallback이 처리 중.
         return None
 
+    dm = state.get("_degradation_manager")
+
+    # REDIS_DEGRADED 에도 라우터는 raw _redis 를 넘긴다 — 그대로 쓰면
+    # reserve/settle 호출마다 소켓 타임아웃까지 기다려 요청을 지연시킨다.
+    # 디그레이드 시엔 미들웨어의 in-memory fallback 이 RPM 을 대신하므로
+    # 여기선 조기 통과시킨다.
+    if dm and dm.level in (
+        DegradationLevel.REDIS_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    ):
+        return None
+
     model_alias = model_config.alias or model_config.provider_model_id
 
     # DB fallback 가용성 확인 (NFR-2.4 degradation 반영)
-    dm = state.get("_degradation_manager")
     is_db_degraded = dm and dm.level in (
         DegradationLevel.DB_DEGRADED,
         DegradationLevel.BOTH_DEGRADED,
@@ -148,6 +229,12 @@ async def enforce_rate_limits(
         )
     limits = _apply_budget_throttle(limits, budget_status)
 
+    # 한도 행의 model_alias=NULL(전체 모델 합산)은 카운터 키도 `*` 여야 한다 —
+    # 실제 alias 로 만들면 모델별로 따로 세어 NULL 한도가 "모델별 한도"로
+    # 오적용되고, N개 모델을 쓰는 사용자는 N배의 실효 한도를 얻는다.
+    def _key_alias(scope_limits: ScopeLimits) -> str:
+        return GLOBAL_WILDCARD if scope_limits.model_agnostic else model_alias
+
     descriptors = build_scope_descriptors(
         user_id=auth_context.user_id,
         team_id=auth_context.team_id,
@@ -159,6 +246,14 @@ async def enforce_rate_limits(
         global_rpm=limits.global_.rpm,
         global_tpm=limits.global_.tpm,
     )
+    _scope_alias = {
+        RateLimitScope.USER: _key_alias(limits.user),
+        RateLimitScope.TEAM: _key_alias(limits.team),
+        RateLimitScope.GLOBAL: _key_alias(limits.global_),
+    }
+    descriptors = [
+        dataclasses.replace(d, model_alias=_scope_alias[d.scope]) for d in descriptors
+    ]
 
     svc = RateLimitService()
 
@@ -180,11 +275,18 @@ async def enforce_rate_limits(
     # TPM 커밋 목록 — 비용 단계가 거절하면 이 목록으로 예약을 되돌린다.
     # (check_multi_scope_tpm 내부에서 스코프 간 거절은 이미 해제한다.)
     tpm_committed: list[ScopeDescriptor] = []
-    tpm_reserved_at = time.time()
+    # now_sec 를 체크에 주입하고 그대로 reserved_at 으로 쓴다 — 따로 찍으면
+    # 분 경계에서 예약 버킷(Lua 의 now)과 환불 버킷이 어긋난다.
+    tpm_now_sec = int(time.time())
     tpm_result = await svc.check_multi_scope_tpm(
-        redis, descriptors, reserved_tokens=reserved, committed_out=tpm_committed
+        redis,
+        descriptors,
+        reserved_tokens=reserved,
+        committed_out=tpm_committed,
+        now_sec=tpm_now_sec,
     )
     if not tpm_result.allowed:
+        await svc.undo_rpm(redis, descriptors, request_id)
         return _build_429(tpm_result, metrics)
 
     # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
@@ -206,9 +308,10 @@ async def enforce_rate_limits(
         #    rate_limit_state 는 전 단계 통과 후에만 채워지므로 여기서 직접
         #    해제해야 한다. 실패해도 거절은 진행(누수분은 버킷 TTL 이 회수).
         try:
-            await svc.settle_tpm(redis, tpm_committed, reserved, 0)
+            await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
         except Exception:
             logger.warning("tpm_unwind_on_cost_reject_failed")
+        await svc.undo_rpm(redis, descriptors, request_id)
         return _build_cost_429(cost_result, metrics)
 
     # 월예산 admission 예약 — budget_check(middleware)는 읽기 전용이라
@@ -234,7 +337,7 @@ async def enforce_rate_limits(
         # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
         # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
         try:
-            await svc.settle_tpm(redis, tpm_committed, reserved, 0)
+            await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
         except Exception:
             logger.warning("tpm_unwind_on_budget_reject_failed")
         if cost_result.reserved_cost is not None and cost_result.reserved_cost != Decimal("0"):
@@ -251,6 +354,7 @@ async def enforce_rate_limits(
                 )
             except Exception:
                 logger.warning("cost_unwind_on_budget_reject_failed")
+        await svc.undo_rpm(redis, descriptors, request_id)
         return _build_budget_429(str(exc), metrics)
     except Exception:
         # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
@@ -265,7 +369,7 @@ async def enforce_rate_limits(
     state["rate_limit_state"] = {
         "tpm_descriptors": _only_tpm(descriptors),
         "tpm_reserved": reserved,
-        "tpm_reserved_at": tpm_reserved_at,
+        "tpm_reserved_at": float(tpm_now_sec),
         "cost_reserved": cost_result.reserved_cost,
         "cost_committed_scopes": cost_result.committed_scopes,
         "cost_cpm_window_ts": cost_result.cpm_window_ts,
@@ -300,10 +404,10 @@ def _estimate_worst_cost(
     일반 추정으로는 실비가 예약을 초과해 하드캡이 새는 경계가 남는다.
     프롬프트 추정치가 long-context 임계를 넘으면 long 요율을 적용한다.
 
-    잔여 구멍: ``_estimate_input_tokens`` 의 bytes/4 휴리스틱은 다바이트 언어
-    프롬프트를 과소 추정할 수 있어 완벽한 상한은 아니다 — 실입력이 추정을
-    크게 넘으면 그 차이만큼 한도 초과가 가능하다. 출력(max_tokens)은
-    API 강제 상한이라 완전히 덮인다.
+    잔여 구멍: ``_estimate_input_tokens`` 는 비ASCII 문자당 1토큰으로 잡지만
+    일부 토크나이저는 CJK 를 1자/토큰 이상으로 세므로 완벽한 상한은 아니다 —
+    실입력이 추정을 크게 넘으면 그 차이만큼 한도 초과가 가능하다.
+    출력(max_tokens)은 API 강제 상한이라 완전히 덮인다.
     """
     p = model_config.pricing
     long_ctx = (
@@ -337,6 +441,9 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
         "team_budget_unset": "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요.",
     }
     record_rate_limit_hit(metrics, scope="budget", limit_type="monthly")
+    # Retry-After 를 달지 않는다 — 월예산은 다음 달 롤오버까지 풀리지 않는데
+    # 60초 재시도를 시사하면 클라이언트 재시도 폭풍을 부른다. 재시도 의미가
+    # 있는 건 분/시간 창의 RPM/TPM/CPM/CPH 뿐이다.
     return JSONResponse(
         status_code=429,
         content=anthropic_error(
@@ -344,7 +451,6 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
             messages.get(reason, "Budget limit exceeded."),
             code=reason,
         ),
-        headers={"Retry-After": "60"},
     )
 
 

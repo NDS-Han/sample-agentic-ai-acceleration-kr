@@ -183,7 +183,7 @@ async def bedrock_converse_stream(model_id: str, request: Request) -> StreamingR
 async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, stream: bool):
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
     registry = request.app.state.provider_registry
     cost_recorder = request.app.state.cost_recorder
@@ -367,6 +367,10 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                         downgraded_from=state.get("downgraded_from"),
                         # 비스트림 경로와 같게 Bedrock invocation log join 키를 남긴다.
                         bedrock_request_id=_req_id,
+                        # ⚠️ client 를 빼면 enforce 가 잡은 per-app 예산 예약이
+                        #    정산되지 않아 앱별 카운터만 부풀어 허위
+                        #    client_budget_exceeded 가 난다(E2E S2).
+                        client=state.get("client"),
                     )
 
         return StreamingResponse(
@@ -405,6 +409,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 # Join key to the Bedrock model-invocation log record (adapter.invoke
                 # returns it in the headers dict; not forwarded to the client).
                 bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
+                # per-app 예산 예약의 정산에 필요 — 생략 시 예약이 앱별 카운터에
+                # 영구 누적된다.
+                client=state.get("client"),
             )
         else:
             # ⚠️ finalize 를 타지 않는 경로다(상류 4xx/5xx, 또는 usage 가 비어 온 응답).

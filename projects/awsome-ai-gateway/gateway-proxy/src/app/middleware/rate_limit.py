@@ -87,8 +87,33 @@ class RateLimitMiddleware:
         model_alias = (
             (model_config.alias or model_config.provider_model_id)
             if model_config
-            else "unknown"
+            else None
         )
+        if model_alias is None:
+            # 이 미들웨어는 라우터보다 먼저라 model_config 해석 전이다 — body 의
+            # `model` 필드(/model/* 는 path segment)로라도 잡아야 "unknown" 한
+            # 버킷에 모든 모델이 몰려 서로의 한도를 잡아먹지 않는다.
+            from app.middleware.downgrade import (
+                _drain_body,
+                _model_from_bedrock_path,
+                _replay,
+            )
+
+            if path.startswith("/model/"):
+                from_path = _model_from_bedrock_path(path)
+                model_alias = from_path[0] if from_path else "unknown"
+            else:
+                body_bytes = await _drain_body(receive)
+                try:
+                    parsed = json.loads(body_bytes) if body_bytes else None
+                except json.JSONDecodeError:
+                    parsed = None
+                model_alias = (
+                    parsed.get("model")
+                    if isinstance(parsed, dict) and isinstance(parsed.get("model"), str)
+                    else "unknown"
+                )
+                receive = _replay(body_bytes, receive)
 
         # Budget throttle 비율(있으면) 적용 — USER 한도에만(예산은 사용자 귀속).
         throttle_pct = None

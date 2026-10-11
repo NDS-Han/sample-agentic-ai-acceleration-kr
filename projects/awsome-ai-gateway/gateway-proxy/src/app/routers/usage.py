@@ -30,7 +30,7 @@ async def usage_me(
     if auth_context is None:
         return JSONResponse(status_code=401, content={"error": {"type": "unauthorized"}})
 
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
 
     # ⚠️ 둘 다 **KST** 경계다(app.periods 참조). 아래에서 이 값들이
@@ -214,7 +214,7 @@ async def usage_team(team_id: str, request: Request) -> JSONResponse:
         )
 
     session_factory = state.get("_session_factory")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     # KST 월 — daily_aggregates.date 가 KST 로 버킷돼 있으므로 월 경계도 KST 여야
     # 한다. UTC 면 매월 1일 KST 00:00~09:00 동안 지난달 합계를 보여준다.
     period = current_kst_period()

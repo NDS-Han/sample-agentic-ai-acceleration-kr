@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.parse
 import uuid
 
 import structlog
@@ -19,10 +20,19 @@ DOWNGRADE_PATH_PREFIXES = (
     "/v1/messages",
     "/v1/chat",
     "/v1/completions",
+    "/v1/responses",  # Codex(Responses API) — body 에 model 필드가 있어 재작성 가능
     "/model/",
 )
 
-_OPENAI_PATH_PREFIXES = ("/v1/chat", "/v1/completions")
+_OPENAI_PATH_PREFIXES = ("/v1/chat", "/v1/completions", "/v1/responses")
+
+# Bedrock-native 경로 — `/model/{model_id}/{op}` (model_id 는 path param, 인코딩됨).
+_BEDROCK_MODEL_OPS = (
+    "invoke",
+    "invoke-with-response-stream",
+    "converse",
+    "converse-stream",
+)
 
 
 def _path_eligible(path: str) -> bool:
@@ -31,6 +41,23 @@ def _path_eligible(path: str) -> bool:
 
 def _is_openai_path(path: str) -> bool:
     return any(path.startswith(p) for p in _OPENAI_PATH_PREFIXES)
+
+
+def _model_from_bedrock_path(path: str) -> tuple[str, str] | None:
+    """`/model/{model_id}/{op}` 에서 (디코딩된 model_id, op) 를 꺼낸다.
+
+    body 에 `model` 필드가 없는 Bedrock-native 요청용 — 다운그레이드 체인은
+    alias 단위라 path segment 도 같은 해석(resolve_bedrock_model)을 거친다.
+    """
+    if not path.startswith("/model/"):
+        return None
+    for op in _BEDROCK_MODEL_OPS:
+        suffix = "/" + op
+        if path.endswith(suffix):
+            mid = path[len("/model/") : -len(suffix)]
+            if mid:
+                return urllib.parse.unquote(mid), op
+    return None
 
 
 class DowngradeMiddleware:
@@ -106,6 +133,16 @@ class DowngradeMiddleware:
             return
 
         original = payload.get("model") if isinstance(payload, dict) else None
+        model_in_path = False
+        bedrock_op = ""
+        if not isinstance(original, str) or not original:
+            # Bedrock-native `/model/{id}/{op}` — 모델이 body 가 아니라 path 에
+            # 있다. 그대로 넘기면 이 경로의 요청은 다운그레이드가 영영 적용되지
+            # 않는다(E2E S2-10). 재작성은 아래에서 scope["path"] 로 한다.
+            from_path = _model_from_bedrock_path(path)
+            if from_path is not None:
+                original, bedrock_op = from_path
+                model_in_path = True
         if not isinstance(original, str) or not original:
             logger.info("downgrade_mw_skip_no_model_field", payload_type=type(payload).__name__)
             await self.app(scope, _replay(body_bytes, receive), send)
@@ -117,7 +154,10 @@ class DowngradeMiddleware:
         # 동일한 alias resolver 로 standard alias 로 정규화한 뒤 매칭한다.
         # 정규화 실패(미등록 alias)면 raw 문자열 그대로 매칭에 시도 — 기존 동작 유지.
         session_factory = state.get("_session_factory")
-        redis = state.get("_redis")
+        # 디그레이드 반영 실효 redis — REDIS_DEGRADED 시 raw _redis 로 모델 해소
+        # 하면 alias 캐시 조회마다 소켓 타임아웃 대기. 키 부재(테스트 앱) 시
+        # `_redis` 폴백.
+        redis = state.get("_redis_effective", state.get("_redis"))
 
         normalized = original
         try:
@@ -185,27 +225,48 @@ class DowngradeMiddleware:
             await self.app(scope, _replay(body_bytes, receive), send)
             return
 
-        payload["model"] = effective
+        # 강등 대상이 이 사용자의 allowed_models 밖이면 재작성하지 않는다 —
+        # 써 본 적도 없는 모델로 바뀐 뒤 라우터의 모델 ACL 에서 400/403 이
+        # 나는 것보다, 자격이 있는 원래 모델로 진행하는 편이 낫다(E2E S2-10).
+        allowed_models = getattr(auth_context, "allowed_models", None)
+        if allowed_models is not None and effective not in allowed_models:
+            logger.info(
+                "downgrade_mw_skip_target_not_allowed",
+                target=effective,
+                normalized=normalized,
+            )
+            await self.app(scope, _replay(body_bytes, receive), send)
+            return
 
-        # 강등 대상 모델이 받는 형태로 `thinking` 을 맞춘다.
-        #
-        # ⚠️ 예전에는 `effective.startswith("claude-haiku-4-5")` 일 때 **지웠다.** 두 가지가
-        #    틀렸다: (1) 운영자가 만든 alias(예: team-haiku-cheap)는 그 접두사로 시작하지
-        #    않아 판정을 빠져나가고 강등 뒤 400 이 됐다. (2) 지우는 것은 haiku 가 실제로
-        #    받는 `{"type":"enabled"}` 까지 없애서, 사용자는 200 을 받으면서 extended
-        #    thinking 만 조용히 잃는다.
-        #
-        # ⚠️ 이 계층은 모델 **해석 전**이라 provider_model_id 를 모른다 — alias 로 계열을
-        #    추정한다(_family_from_alias). 모르는 alias 는 그대로 통과시킨다(fail-open).
-        _before = json.dumps(payload.get("thinking"), sort_keys=True)
-        payload = normalize_thinking(
-            payload, None, alias=effective, request_id=state.get("request_id", "")
-        )
-        if json.dumps(payload.get("thinking"), sort_keys=True) != _before:
-            logger.info("downgrade_thinking_normalized", target=effective, original=original)
+        if not model_in_path:
+            payload["model"] = effective
 
-        # ensure_ascii=False: 한국어/일본어 content 보존; separators: 컴팩트 JSON
-        new_body = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        if isinstance(payload, dict):
+            # 강등 대상 모델이 받는 형태로 `thinking` 을 맞춘다.
+            #
+            # ⚠️ 예전에는 `effective.startswith("claude-haiku-4-5")` 일 때 **지웠다.** 두 가지가
+            #    틀렸다: (1) 운영자가 만든 alias(예: team-haiku-cheap)는 그 접두사로 시작하지
+            #    않아 판정을 빠져나가고 강등 뒤 400 이 됐다. (2) 지우는 것은 haiku 가 실제로
+            #    받는 `{"type":"enabled"}` 까지 없애서, 사용자는 200 을 받으면서 extended
+            #    thinking 만 조용히 잃는다.
+            #
+            # ⚠️ 이 계층은 모델 **해석 전**이라 provider_model_id 를 모른다 — alias 로 계열을
+            #    추정한다(_family_from_alias). 모르는 alias 는 그대로 통과시킨다(fail-open).
+            _before = json.dumps(payload.get("thinking"), sort_keys=True)
+            payload = normalize_thinking(
+                payload, None, alias=effective, request_id=state.get("request_id", "")
+            )
+            if json.dumps(payload.get("thinking"), sort_keys=True) != _before:
+                logger.info("downgrade_thinking_normalized", target=effective, original=original)
+
+            # ensure_ascii=False: 한국어/일본어 content 보존; separators: 컴팩트
+            new_body = json.dumps(
+                payload, ensure_ascii=False, separators=(",", ":")
+            ).encode("utf-8")
+        else:
+            # path-model 요청은 body 없이 올 수 있다(잘못된 converse 호출 등) —
+            # body 는 그대로 재생하고 path 만 재작성한다.
+            new_body = body_bytes
         state["downgraded_from"] = original
 
         # Content-Length header 갱신 — body byte 길이가 바뀌었음
@@ -215,6 +276,13 @@ class DowngradeMiddleware:
         new_headers.append((b"content-length", str(len(new_body)).encode()))
         scope = dict(scope)
         scope["headers"] = new_headers
+
+        if model_in_path:
+            # 모델은 path segment — 같은 segment 를 effective alias 로 교체한다.
+            # 라우터가 segment 를 resolve_bedrock_model 로 해석하므로 alias 도 OK.
+            new_path = f"/model/{urllib.parse.quote(effective, safe='')}/{bedrock_op}"
+            scope["path"] = new_path
+            scope["raw_path"] = new_path.encode("utf-8")
 
         metrics = self._get_metrics()
         if metrics:

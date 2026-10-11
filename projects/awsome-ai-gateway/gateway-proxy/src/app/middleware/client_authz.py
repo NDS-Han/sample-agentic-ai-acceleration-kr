@@ -12,7 +12,7 @@ logger = structlog.get_logger(__name__)
 
 
 class ClientAuthorizationMiddleware:
-    """Deny (403) when the identified client is not in the user's allowed_clients.
+    """Deny (400) when the identified client is not in the user's allowed_clients.
 
     Runs after Auth + ClientId so both state["auth_context"] and state["client"]
     are present. Soft entitlement gating: policy keyed on trusted user_id; client
@@ -39,11 +39,14 @@ class ClientAuthorizationMiddleware:
                 check_client_scope(allowed, client)
             except PermissionError as e:
                 logger.info("client_authz_denied", client=client, message=str(e))
+                # ⚠️ 403 이 아니라 400 — Anthropic 클라이언트는 403 을 자격증명
+                #    문제로 읽고 재인증 루프를 돌지만, 이 거부는 재시도로 풀리지
+                #    않는다(fallback_loop.scope_denial_body 와 같은 근거).
                 body = json.dumps(
                     anthropic_error("permission_error", str(e))
                 ).encode()
                 await send({
-                    "type": "http.response.start", "status": 403,
+                    "type": "http.response.start", "status": 400,
                     "headers": [(b"content-type", b"application/json")],
                 })
                 await send({"type": "http.response.body", "body": body})

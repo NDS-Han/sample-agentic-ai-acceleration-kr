@@ -36,7 +36,7 @@ from app.resilience.buffer_queue import UsageBufferQueue
 from app.resilience.cost_stream_spool import CostStreamSpool
 from app.resilience.retry_worker import RetryWorker
 from app.routers import bedrock, health, messages, openai_compat, usage
-from app.schemas.domain import ProviderType
+from app.schemas.domain import DegradationLevel, ProviderType
 from app.security.event_detector import SecurityEventDetector
 from app.services.agentcore_mcp_client import AgentCoreMcpClient
 from app.services.bedrock_account_client import BedrockAccountClientProvider
@@ -505,6 +505,19 @@ def create_app() -> FastAPI:
             state["_session_factory"] = app_state.session_factory
             state["_degradation_manager"] = app_state.degradation_manager
             state["_security_detector"] = app_state.security_detector
+
+            # 디그레이드 반영 실효 redis — REDIS_DEGRADED/BOTH_DEGRADED 일 때
+            # raw _redis 를 그대로 쓰면 라우터의 settle/캐시/XADD 호출이 전부
+            # 소켓 타임아웃까지 기다려 요청이 지연된다(E2E S2-13). 라우터는
+            # `_redis_effective` 를 쓰고, `_redis` 는 health/probe 용으로 남긴다.
+            dm = app_state.degradation_manager
+            if dm is not None and dm.level in (
+                DegradationLevel.REDIS_DEGRADED,
+                DegradationLevel.BOTH_DEGRADED,
+            ):
+                state["_redis_effective"] = None
+            else:
+                state["_redis_effective"] = app_state.redis
 
             # 주의: session 은 여기서 열지 않는다. 요청 전체 life cycle 동안
             # session 을 유지하면 SSE 스트리밍 중 "idle in transaction" 으로

@@ -91,7 +91,8 @@ async def test_cache_miss_falls_back_to_db_and_caches(mock_redis):
     )
 
     assert result.user == ScopeLimits(rpm=60, tpm=10000)
-    assert result.team == ScopeLimits(rpm=600, tpm=100000)
+    # TEAM 행은 model_alias=NULL — 전체 모델 합산 한도라 model_agnostic=True
+    assert result.team == ScopeLimits(rpm=600, tpm=100000, model_agnostic=True)
     assert result.global_ == ScopeLimits(rpm=10000, tpm=1000000)
 
     # 모든 스코프 결과가 캐시에 저장됐는지 확인

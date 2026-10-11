@@ -17,11 +17,11 @@ def test_load_all_scripts():
     LuaScriptLoader.load_all(script_dir)
     assert LuaScriptLoader.is_loaded("rate_limit_check")
     assert LuaScriptLoader.is_loaded("rate_limit_tpm_check")
-    assert LuaScriptLoader.is_loaded("cost_rate_limit")
     assert LuaScriptLoader.is_loaded("budget_check")
     assert LuaScriptLoader.is_loaded("budget_deduct")
     assert LuaScriptLoader.is_loaded("budget_reserve")
     assert LuaScriptLoader.is_loaded("budget_settle")
+    assert LuaScriptLoader.is_loaded("budget_rebuild")
 
 
 def test_get_script_not_loaded():

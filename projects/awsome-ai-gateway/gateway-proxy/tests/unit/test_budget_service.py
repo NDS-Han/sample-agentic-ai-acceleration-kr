@@ -207,8 +207,9 @@ async def test_check_budget_hydrates_team_config_when_redis_miss():
 
     fake_redis = MagicMock()
     # exists: team_config_key=False (cold-cache miss), user_config_key=False →
-    # ensure_config_cached 후 재확인=True(재수화됨), user_key counter=False
-    fake_redis.exists = AsyncMock(side_effect=[False, False, True, False])
+    # ensure_config_cached 후 재확인=True(재수화됨), user_key counter=False,
+    # team_key counter=True(이미 존재 → 팀 복원 경로 skip)
+    fake_redis.exists = AsyncMock(side_effect=[False, False, True, False, True])
     fake_redis.set = AsyncMock()
     fake_redis.eval = AsyncMock(side_effect=_eval_side_effect_user_team(
         _resp(allowed=True, scope="user", used_usd=0, remaining_usd=100, limit_usd=100),
@@ -224,10 +225,22 @@ async def test_check_budget_hydrates_team_config_when_redis_miss():
     team_cfg.policy = OrmBudgetPolicy.HARD_BLOCK
     team_cfg.is_active = True
 
-    db_execute_result = MagicMock()
-    db_execute_result.scalar_one_or_none = MagicMock(return_value=team_cfg)
+    def _dispatch_execute(stmt, params=None):
+        sql = str(stmt)
+        res = MagicMock()
+        if "budget_usages" in sql:
+            # 카운터 복원 조회 — 행 없음 → 복원 skip 경로로 유도
+            res.all = MagicMock(return_value=[])
+            res.scalar_one_or_none = MagicMock(return_value=None)
+        elif "usage_logs" in sql:
+            res.scalar_one = MagicMock(return_value=Decimal("0"))
+        else:
+            # BudgetConfig 조회
+            res.scalar_one_or_none = MagicMock(return_value=team_cfg)
+        return res
+
     fake_db = MagicMock(spec=AsyncSession)
-    fake_db.execute = AsyncMock(return_value=db_execute_result)
+    fake_db.execute = AsyncMock(side_effect=lambda stmt, params=None: _dispatch_execute(stmt, params))
 
     svc = BudgetService()
     await svc.check_budget(fake_redis, fake_db, "u1", team_id, "2026-04")
@@ -251,8 +264,9 @@ async def test_check_budget_no_set_when_db_has_no_team_config():
     LuaScriptLoader._scripts["budget_check"] = "-- mock"
 
     fake_redis = MagicMock()
-    # exists: team_config miss, user_config miss, ensure 후 재확인, user_key
-    fake_redis.exists = AsyncMock(side_effect=[False, False, False, False])
+    # exists: team_config miss, user_config miss, ensure 후 재확인, user_key,
+    # team_key (카운터 복원 경로 진입 — DB 행 없음 → skip)
+    fake_redis.exists = AsyncMock(side_effect=[False, False, False, False, False])
     fake_redis.set = AsyncMock()
     # user pass (config 없음 → pass-through), team config 없음 → team_budget_unset
     fake_redis.eval = AsyncMock(side_effect=_eval_side_effect_user_team(
@@ -261,9 +275,11 @@ async def test_check_budget_no_set_when_db_has_no_team_config():
     ))
     fake_redis.get = AsyncMock(return_value=None)
 
-    # DB mock: TEAM BudgetConfig 없음
+    # DB mock: TEAM BudgetConfig 없음 + 카운터 복원 조회는 빈 결과
     db_execute_result = MagicMock()
     db_execute_result.scalar_one_or_none = MagicMock(return_value=None)
+    db_execute_result.scalar_one = MagicMock(return_value=Decimal("0"))
+    db_execute_result.all = MagicMock(return_value=[])
     fake_db = MagicMock(spec=AsyncSession)
     fake_db.execute = AsyncMock(return_value=db_execute_result)
 

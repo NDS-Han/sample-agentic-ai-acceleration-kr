@@ -53,6 +53,11 @@ for i = 1, num_scopes do
             end
             redis.call('SET', cur_key, 0)
             redis.call('SET', win_key, current_bucket)
+            -- SET 은 TTL 을 날린다 — 이 호출이 거절로 끝나면 Phase 2 에
+            -- 못 가 영구 키가 남으므로 회전 즉시 TTL 을 다시 건다.
+            redis.call('EXPIRE', prev_key, ttl_sec)
+            redis.call('EXPIRE', cur_key, ttl_sec)
+            redis.call('EXPIRE', win_key, ttl_sec)
         end
 
         local cur_tokens  = tonumber(redis.call('GET', cur_key) or '0')

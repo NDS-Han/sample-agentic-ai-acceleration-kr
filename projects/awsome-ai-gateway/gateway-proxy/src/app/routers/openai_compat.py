@@ -44,7 +44,7 @@ _RESPONSES_BACKENDS = frozenset({"mantle", "bedrock_openai"})
 @router.get("/v1/models")
 async def list_models(request: Request) -> JSONResponse:
     state = request.scope.get("state", {})
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
 
     if session_factory is not None:
@@ -91,7 +91,7 @@ async def get_model(model_id: str, request: Request) -> JSONResponse:
     `/v1/messages` 호출을 아예 시작하지 않음.
     """
     state = request.scope.get("state", {})
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
 
     if session_factory is not None:
@@ -159,7 +159,7 @@ async def _handle_openai(request: Request, path: str):
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
     client = state.get("client")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
     registry = request.app.state.provider_registry
     cost_recorder = request.app.state.cost_recorder
@@ -453,7 +453,7 @@ async def _handle_responses(request: Request):
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
     client = state.get("client")
-    redis = state.get("_redis")
+    redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
     registry = request.app.state.provider_registry
     cost_recorder = request.app.state.cost_recorder
