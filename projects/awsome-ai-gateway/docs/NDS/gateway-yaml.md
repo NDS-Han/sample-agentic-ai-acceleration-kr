@@ -46,7 +46,11 @@ features:
 
 images:
   registry: ""                # 외부 레지스트리 — 비우면 ecs 가 ECR repo 자동 생성 (eks 는 필수)
-  tag: ""                     # 이미지 태그 — ecs/eks 필수 (명시적 핀)
+  tag: ""                     # 기본 이미지 태그 — ecs/eks 는 tag 또는 tags 중 하나 필수 (명시적 핀)
+  # tags:                     # eks 전용 — 서비스별 핀 (tag 위에 개별 키를 덮는다)
+  #   gatewayProxy: "1.0.87-us19"   # 허용 키: gatewayProxy adminApi adminUi scheduler
+  #   adminApi: "1.0.71-us19"       #            notificationWorker costRecorderWorker migration
+  #   migration: "1.0.54-us19"      # migration 은 단일 tag 로는 안 바뀜 — 여기서만 핀
 
 clients:
   models_profile: global      # global (권장) | regional

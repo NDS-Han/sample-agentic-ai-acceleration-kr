@@ -113,9 +113,11 @@ def test_eks_capture_from_real_dev_values(monkeypatch):
     assert doc["features"]["notifications"]["provider"] == "ses"
     # oidc — adminApi.oidc.issuerUrl
     assert "cognito-idp" in doc["oidc"]["issuer_url"]
-    # 이미지 — gateway-proxy 태그 + 서로 다른 태그 경고
+    # 이미지 — gateway-proxy 태그가 기본값, 태그가 다른 서비스는 images.tags 맵으로
     assert doc["images"]["tag"] == "1.0.86-liverpm"
-    assert any("이미지 태그가 다릅니다" in n for n in notes)
+    tags = doc["images"]["tags"]
+    assert tags["gatewayProxy"] == "1.0.86-liverpm"
+    assert "migration" in tags or "adminApi" in tags  # 멀티태그 실측이 맵에 담김
 
 
 def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):

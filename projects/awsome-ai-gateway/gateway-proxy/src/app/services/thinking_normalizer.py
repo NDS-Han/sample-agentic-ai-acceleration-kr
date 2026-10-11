@@ -105,6 +105,11 @@ def _family_from_alias(alias: str | None) -> str | None:
 def _haiku_family(alias: str) -> str:
     """Family of a haiku alias by its version: ``4.5``/``4-5``/``4_5``/``45`` → legacy,
     5 and up → adaptive; no readable version → legacy (the behaviour before the split).
+
+    가정: ``haiku-XY`` 형태의 두 자리는 major.minor 축약(45→4.5)으로 읽는다 —
+    진짜 버전 10 이상은 ``haiku-10-0`` 처럼 minor 구분자가 따라온다는 명명 규약에
+    기댄다. ``claude-5-haiku`` 처럼 haiku 앞에 오는 버전 숫자는 읽지 않는다 —
+    지금까지 그런 이름은 전부 legacy 계열이라 기본값과 일치한다.
     """
     match = re.search(r"haiku\D{0,2}(\d+)(?:[.\-_](\d+))?", alias)
     if match is None:

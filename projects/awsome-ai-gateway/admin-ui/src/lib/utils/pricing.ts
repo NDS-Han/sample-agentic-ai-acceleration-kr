@@ -30,14 +30,5 @@ function _trimDecimals(v: number, max: number, min: number): string {
   return `${whole}.${f}`;
 }
 
-/** per-1M 입력값 → DB 저장용 per-1K. NaN 은 그대로 NaN 을 돌려줘 검증에 걸리게 한다. */
-export function perMtoPer1k(per1m: number): number {
-  return per1m / 1000;
-}
-
-/** DB per-1K → 편집 폼 표시용 per-1M 문자열. */
-export function per1kToPerM(per1k: number): string {
-  const v = per1k * 1000;
-  // 부동소수점 잔여(0.0022*1000=2.2000000000000002)를 정리한다.
-  return String(Math.round(v * 1e6) / 1e6);
-}
+// ⚠️ per-1K↔per-1M 입력 변환은 CreateModelDialog 의 perMtoK/perKtoM 만 쓴다 —
+// 여기에 또 두면 float64 잔여/과학 표기(1e-7) 분기가 갈린다. (US-19 리뷰에서 제거)

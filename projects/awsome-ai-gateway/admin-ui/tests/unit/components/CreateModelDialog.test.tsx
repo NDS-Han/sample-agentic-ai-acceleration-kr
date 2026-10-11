@@ -339,4 +339,22 @@ describe('CreateModelDialog — price inputs take fine-grained decimals (US-19)'
       expect(el!.getAttribute('step')).toBe('0.00001');
     }
   });
+
+  it('1M 입력 ÷1000 의 float64 잔여를 제거한다 — 8자리 단가가 422 로 튀지 않게', async () => {
+    // 서버 스키마는 decimal_places=8 를 초과하면 거절한다.
+    // parseFloat('123.45678')/1000 = 0.12345677999999999 (17자리) 그대로 보내면
+    // 8자리 단가를 가진 모델이 편집·저장 자체가 불가능해진다.
+    createModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fireEvent.change(screen.getByLabelText('priceInput'), {
+      target: { name: 'input_price_per_1m', value: '123.45678' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => expect(createModelAction).toHaveBeenCalled());
+    const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.input_price_per_1k).toBe(0.12345678);
+  });
 });

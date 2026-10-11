@@ -446,18 +446,21 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             notes.append(f"⚠ ingress/{item['metadata']['name']} 의 live inbound-cidrs "
                          f"({live_cidrs})가 helm values 와 다릅니다 — kubectl 패치 드리프트")
 
-    # ── images — per-service 태그가 다르다 (스키마는 단일 tag) ───────────────
+    # ── images — per-service 태그가 다르면 images.tags 맵으로 기록한다 ───────
+    #    (US-19 같은 멀티태그 릴리스 — 단일 images.tag 로는 표현 불가)
     tags = {}
+    helm_keys = {}
     for svc, key in (("gateway-proxy", "gatewayProxy"), ("admin-api", "adminApi"),
                      ("admin-ui", "adminUi"), ("scheduler", "scheduler"),
                      ("notification-worker", "notificationWorker"),
-                     ("cost-recorder-worker", "costRecorderWorker")):
+                     ("cost-recorder-worker", "costRecorderWorker"),
+                     ("migration", "migration")):
         tags[svc] = str(_val(v, key, "image", "tag"))
+        helm_keys[svc] = key
     unique = {t for t in tags.values() if t}
     tag = tags.get("gateway-proxy", "")
-    if len(unique) > 1:
-        notes.append(f"서비스별 이미지 태그가 다릅니다 {tags} — gateway.yaml 의 단일 "
-                     f"images.tag 로는 표현 불가. 배포를 한 태그로 통일할지 결정하세요")
+    per_service = ({helm_keys[s]: t for s, t in tags.items() if t}
+                   if len(unique) > 1 else {})
 
     # 라이브 이미지 drift
     for item in deploys.get("items", []):
@@ -554,6 +557,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "images": {"tag": tag},
         "clients": {"models_profile": "global"},
     }
+    if per_service:
+        doc["images"]["tags"] = per_service
     if _val(v, "global", "imageRegistry"):
         doc["images"]["registry"] = str(v["global"]["imageRegistry"])
     if oidc:

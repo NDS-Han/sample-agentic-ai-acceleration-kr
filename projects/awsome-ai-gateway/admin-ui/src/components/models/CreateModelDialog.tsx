@@ -39,7 +39,7 @@ interface FormState {
   max_output_tokens: string;
 }
 
-/** 1K 단가 → 1M 표시값. DB 는 6자리 소수라 ×1000 은 3자리까지 의미가 있고,
+/** 1K 단가 → 1M 표시값. DB 는 8자리 소수라 ×1000 은 5자리까지 의미가 있고,
     *  부동소수점 찌꺼기(0.00465*1000=4.6499…)는 toFixed(6) 로 잘라낸다. */
 function perKtoM(v: number): string {
   return String(parseFloat((v * 1000).toFixed(6)));
@@ -47,7 +47,9 @@ function perKtoM(v: number): string {
 
 /** 1M 입력값 → API/DB 의 1K 단가. */
 function perMtoK(v: string): number {
-  return parseFloat(v) / 1000;
+  // ÷1000 의 float64 잔여(123.45678/1000=0.12345677999999999)는 서버의
+  // decimal_places=8 검증에서 422 로 튄다 — toFixed(8) 로 컬럼 정밀도에 맞춘다.
+  return parseFloat((parseFloat(v) / 1000).toFixed(8));
 }
 
 function getInitialState(editModel?: ModelListItem): FormState {

@@ -68,6 +68,10 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if cfg.images.tag:
         for svc in TAGGED_SERVICES:
             v.setdefault(svc, {})["image"] = {"tag": cfg.images.tag}
+    # 서비스별 핀 — US-19 같은 멀티태그 릴리스. tag 기본값 위에 개별 키를 덮고
+    # migration(TAGGED_SERVICES 에 없음)도 여기서만 핀할 수 있다.
+    for svc, tag in (cfg.images.tags or {}).items():
+        v.setdefault(svc, {})["image"] = {"tag": tag}
 
     # ── ingress — 도구는 CIDR 과 TLS 게이트를 소유. hosts 는 domain.name 이
     #    명시된 경우에만 우리 네이밍으로 쓴다(기존 gateway-dev.* 네이밍과 다를

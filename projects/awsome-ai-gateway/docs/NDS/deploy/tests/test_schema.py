@@ -55,6 +55,35 @@ def test_eks_requires_tag():
             images={}))
 
 
+def test_eks_tags_satisfy_tag_requirement():
+    # US-19 같은 멀티태그 릴리스 — tag 없이 tags 만으로도 eks 검증을 통과해야 한다
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tags": {"gatewayProxy": "1.0.87-us19", "adminApi": "1.0.71-us19"}}))
+    assert cfg.images.tags["gatewayProxy"] == "1.0.87-us19"
+
+
+def test_eks_tags_reject_unknown_service_key():
+    with pytest.raises(schema.SchemaError, match="images.tags"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tag": "x", "tags": {"bogusSvc": "1.0.0"}}))
+
+
+def test_tags_rejected_on_compose():
+    with pytest.raises(schema.SchemaError, match="eks"):
+        schema.from_dict(minimal(
+            images={"tags": {"gatewayProxy": "1.0.0"}}))
+
+
+def test_eks_tag_without_migration_pin_warns():
+    # 단일 tag 는 migration 이미지를 건드리지 않는다 — 운영자가 명시해야 인지 가능
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "1.0.87-us19"}))
+    assert any("migration" in w for w in cfg.warnings())
+
+
 def test_domain_route53_requires_name():
     with pytest.raises(schema.SchemaError, match="domain.name"):
         schema.from_dict(minimal(domain={"mode": "route53-acm"}))

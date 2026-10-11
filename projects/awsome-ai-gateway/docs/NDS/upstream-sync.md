@@ -162,6 +162,13 @@ git commit -m "merge: origin/pr/nds-delta ... (<새 head sha 7자리>)"
 - **`--theirs` 파일 전체 교체** — 재제출 베이스(upstream 쪽)에 없는 NDS 커밋이
   섞인 파일에 쓰면 NDS 수정이 통째로 삭제된다. `messages.py`(1h 캐시 TTL
   과금, `anthropic_error` 스키마)가 대표 사례.
+- **삭제-부활 (delete-vs-modify)** — 우리가 삭제한 파일이 PR 쪽에서 수정되면
+  머지가 그 파일을 **부활**시킨다. upstream 기준으론 컴파일되지만 우리 트리가
+  의도적으로 지운 심볼을 참조해 `tsc --noEmit`/`next build`가 깨진다
+  (실제 발생: `RateLimitConfigPanel.tsx`→`RateLimitTreeNode`,
+  `lib/actions/index.ts`→`create*Action`, `30261671`/`0cd0f626` 삭제분 부활).
+  머지 후 검사: `git diff <prev>..HEAD --diff-filter=A` + `git log --diff-filter=D
+  --follow` 교차 — 머지가 추가한 파일 중 우리 삭제 이력이 있으면 부활 의심.
 - **값 스키마 분기** — per-1M vs per-1K 단가 UI 컨벤션처럼 "같은 필드의 다른
   표현"은 충돌로 표시되지 않고 조용히 둘 다 살아남는다. diff를 읽어 의미를
   맞춰야 한다.

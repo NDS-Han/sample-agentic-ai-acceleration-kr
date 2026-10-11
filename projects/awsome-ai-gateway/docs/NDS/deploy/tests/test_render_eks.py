@@ -51,6 +51,29 @@ def test_overlay_owns_managed_keys(tmp_path):
     assert v["ingress"]["gateway"]["host"] == "gateway.gw.example.com"
 
 
+def test_per_service_tags_override_default_and_pin_migration(tmp_path):
+    # US-19 멀티태그 릴리스 — tags 가 tag 기본값 위에 개별 서비스를 덮고
+    # migration(TAGGED_SERVICES 밖)도 핀할 수 있어야 한다.
+    doc = dict(BASE, images={"tag": "1.0.170",
+                             "tags": {"gatewayProxy": "1.0.87-us19",
+                                      "migration": "1.0.54-us19"}})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["gatewayProxy"]["image"]["tag"] == "1.0.87-us19"
+    assert v["adminApi"]["image"]["tag"] == "1.0.170"          # 기본값 유지
+    assert v["migration"]["image"]["tag"] == "1.0.54-us19"
+
+
+def test_tags_only_render_without_default_tag(tmp_path):
+    doc = dict(BASE, images={"tags": {s: "1.0.87-us19" for s in
+                                      eks_render.TAGGED_SERVICES}})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    for svc in eks_render.TAGGED_SERVICES:
+        assert v[svc]["image"]["tag"] == "1.0.87-us19"
+    assert "tag" not in v["migration"].get("image", {})       # env overlay 에 위임
+
+
 def test_overlay_does_not_leak_dynamic_values(tmp_path):
     _, out, _ = _render(tmp_path)
     text = (out / "values.yaml").read_text()

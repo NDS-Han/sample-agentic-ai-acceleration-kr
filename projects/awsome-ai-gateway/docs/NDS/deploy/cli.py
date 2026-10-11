@@ -213,6 +213,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
         images["tag"] = _unwrap(questionary.text(
             "이미지 태그 (명시적 핀 필수)",
             default=str(prev_img.get("tag", "")) or None).ask())
+        # 서비스별 tags 맵은 질문으로 다루지 않는다 — configure 재실행 시
+        # 이전 값을 보존한다 (US-19 같은 멀티태그 릴리스가 지워지지 않게)
+        if prev_img.get("tags"):
+            images["tags"] = prev_img["tags"]
 
     deploy_extra = {}
     if target in ("ecs", "eks"):

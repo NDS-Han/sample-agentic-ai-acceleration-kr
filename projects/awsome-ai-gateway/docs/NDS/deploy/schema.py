@@ -82,6 +82,15 @@ class FeaturesConfig:
     observability: bool = False
 
 
+# eks helm 오버레이에서 이미지 태그를 가질 수 있는 키. migration 도 태그가
+# 있지만 자체 버전 라인(1.0.5x 계열)이라 단일 tag 기본값에는 포함하지 않고
+# images.tags.migration 으로만 핀한다.
+EKS_TAGGABLE_SERVICES = frozenset((
+    "gatewayProxy", "adminApi", "adminUi", "scheduler",
+    "notificationWorker", "costRecorderWorker", "migration",
+))
+
+
 @dataclass
 class ImagesConfig:
     # registry 는 "레지스트리 호스트" 의미 (예: 123456789012.dkr.ecr.ap-northeast-2.amazonaws.com).
@@ -89,6 +98,9 @@ class ImagesConfig:
     # /llm-gateway 를 붙인다 — 두 backend 가 동일 값을 같은 의미로 쓴다.
     registry: str = ""
     tag: str = ""
+    # 서비스별 태그 (eks 전용) — US-19 처럼 릴리스가 서비스별 태그로 나올 때
+    # 단일 tag 로는 표현 불가. tag 를 기본값으로 두고 tags 가 개별 키를 덮는다.
+    tags: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -154,6 +166,13 @@ class GatewayConfig:
                      "컴퓨트 크기는 차트 values/HPA/requests 가 결정합니다 (기존 인프라 이어받기 모델).")
         if self.deploy.target == "eks" and not self.images.registry:
             w.append("images.registry 비어 있음 — apply 시 계정 기본 ECR 로 추론합니다.")
+        if self.deploy.target == "eks":
+            uncovered = sorted(EKS_TAGGABLE_SERVICES - {"migration"} - set(self.images.tags))
+            if self.images.tags and not self.images.tag and uncovered:
+                w.append(f"images.tags 가 {uncovered} 를 덮지 않습니다 — env overlay 의 태그를 그대로 씁니다.")
+            if self.images.tag and "migration" not in self.images.tags:
+                w.append("images.tag 는 migration 이미지를 바꾸지 않습니다 — migration 은 "
+                         "images.tags.migration 또는 env overlay 태그를 따릅니다.")
         if self.deploy.target not in IMPLEMENTED_TARGETS:
             w.append(f"deploy.target={self.deploy.target} 의 렌더러는 아직 구현 전입니다 (validate 만 지원).")
         return w
@@ -178,8 +197,16 @@ class GatewayConfig:
             e.append("eks backend 는 size_tier=t2|t3 입니다.")
         if self.deploy.size_tier == "t0" and self.deploy.target != "compose":
             e.append("size_tier=t0 는 compose backend 전용입니다.")
-        if self.deploy.target in ("ecs", "eks") and not self.images.tag:
-            e.append(f"deploy.target={self.deploy.target} 는 images.tag 명시가 필수입니다.")
+        if self.deploy.target in ("ecs", "eks") and not (self.images.tag or self.images.tags):
+            e.append(f"deploy.target={self.deploy.target} 는 images.tag 또는 images.tags 명시가 필수입니다.")
+        if self.images.tags:
+            if self.deploy.target != "eks":
+                e.append("images.tags(서비스별 태그)는 eks 경로만 지원합니다 — compose/ecs 는 단일 images.tag 입니다.")
+            else:
+                bad = sorted(set(self.images.tags) - EKS_TAGGABLE_SERVICES)
+                if bad:
+                    e.append(f"images.tags 에 허용되지 않은 서비스 키: {bad} "
+                             f"(허용: {sorted(EKS_TAGGABLE_SERVICES)})")
         # registry 비우면 ecs 는 모듈이 ECR repo 를 만들고, eks 는 apply 가
         # <account>.dkr.ecr.<region> 으로 추론한다 (install-eks.sh 와 동일)
         if self.network.mode not in NETWORK_MODES:
@@ -304,6 +331,8 @@ def from_dict(raw: dict) -> GatewayConfig:
         images=ImagesConfig(
             registry=str(images.get("registry", "")),
             tag=str(images.get("tag", "")),
+            tags={str(k): str(v) for k, v in
+                  _require_mapping(images.get("tags"), "images.tags", errors).items()},
         ),
         clients=ClientsConfig(
             models_profile=str(clients.get("models_profile", "global")),

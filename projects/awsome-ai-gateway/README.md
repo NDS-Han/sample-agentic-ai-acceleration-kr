@@ -238,7 +238,7 @@ Helm이 배포하는 워크로드는 6 Deployment + 1 Job이고, admin-chat-agen
 | **scheduler** | ROI 집계(aggregate_usage) + VK 만료 정리(expire_virtual_keys). **admin-api 이미지 재사용**(command=`python -m app.scheduler.main`), `replicaCount:1` 고정 singleton (Deployment) |
 | **notification-worker** | 예산 임계값 알림 발송 (기본 배포는 provider=mock, 미발송) (Deployment) |
 | **cost-recorder-worker** | Redis Stream → Aurora 비용 기록 + 일일 집계 (Deployment) |
-| **migration** | Alembic DB 마이그레이션. helm pre-install/pre-upgrade **Job**(head=`0040`) |
+| **migration** | Alembic DB 마이그레이션. helm pre-install/pre-upgrade **Job**(`alembic upgrade head` — 동적) |
 | **admin-chat-agent** | BI 어시스턴트. **EKS 미배포** — Bedrock AgentCore Runtime(arm64 microVM)에 호스팅되고, admin-api가 SigV4로 InvokeAgentRuntime 호출. 차트에는 `AGENTCORE_RUNTIME_ARN` env로만 연결 |
 
 ---
@@ -253,7 +253,7 @@ Helm이 배포하는 워크로드는 6 Deployment + 1 Job이고, admin-chat-agen
 | `admin-chat-agent/` | BI 어시스턴트 — Strands agents-as-tools + AgentCore Runtime, `lambdas/`(query_db/get_schema), `config/`(schema_whitelist, golden_examples), `tests/`(골든 테스트) |
 | `cost-recorder-worker/` | Redis Stream → Aurora 비용 기록 워커 |
 | `notification-worker/` | 예산 임계값 알림 워커 |
-| `db/` | Alembic 마이그레이션 소스 (`alembic.ini`·`env.py`·`versions/`·`init/`; head=`0040`) |
+| `db/` | Alembic 마이그레이션 소스 (`alembic.ini`·`env.py`·`versions/`·`init/`; head=`0043`) |
 | `gateway-cli/` | 사용자 CLI (`gateway-cli`, `api-key-helper`, `statusline` 콘솔 스크립트) |
 | `gateway-clients/` | claude-code/codex 격리 컨테이너 유틸(`claude-box`/`codex-box` + `gw.sh`). Cowork(GUI)은 제외 |
 | `scripts/` | 온보딩 스크립트(`onboard-macos-linux.sh`, `onboard-windows.ps1`) + IAM 스크립트 |
