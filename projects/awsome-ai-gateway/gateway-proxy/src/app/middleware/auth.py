@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import structlog
+from redis.exceptions import RedisError
+from sqlalchemy.exc import SQLAlchemyError
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from app.schemas.domain import AuthType
 from app.schemas.errors import anthropic_error
-from app.services.auth_service import resolve_auth_strategy
+from app.services.auth_service import AuthBackendUnavailableError, resolve_auth_strategy
 
 logger = structlog.get_logger(__name__)
 
@@ -93,31 +96,64 @@ class AuthMiddleware:
             )
             await self.app(scope, receive, send)
 
+        except AuthBackendUnavailableError as e:
+            # 인프라 장애(DB/Redis 열화)로 인증 자체가 불가 — 자격증명 거부가 아니므로
+            # 401 이 아니라 503 을 내고 security 이벤트에도 기록하지 않는다
+            # (PermissionError 서브클래스라 순서상 여기가 먼저 와야 한다).
+            # inner app 실행 중(auth_context 설정 후)에 올라오면 기존 계약대로
+            # 인증-실패 경로를 탄다 — except 절 간 raise fall-through 는 없다.
+            if "auth_context" in state:
+                await self._handle_auth_failure(scope, send, state, path, e)
+                return
+            logger.warning("auth_backend_unavailable", path=path, reason=str(e))
+            await self._send_503(scope, send)
+            return
+
         except (PermissionError, ValueError) as e:
-            error_msg = str(e)
-            logger.info("auth_failed", path=path, reason=error_msg)
+            await self._handle_auth_failure(scope, send, state, path, e)
 
-            # 보안 이벤트 감지
-            sec_detector = state.get("_security_detector")
-            if sec_detector is not None:
-                # XFF 의 가장 오른쪽 홉 = 직접 프록시(ALB)가 기록한 진짜 클라이언트 IP.
-                # 왼쪽 홉은 클라이언트가 임의로 위조할 수 있어 브루트포스 감지에 쓰면
-                # 위조 IP 로 회피/오남용이 가능하다. XFF 없으면 직접 피어를 쓴다.
-                xff = dict(scope.get("headers", [])).get(b"x-forwarded-for", b"").decode()
-                if xff:
-                    source_ip = xff.split(",")[-1].strip() or "unknown"
-                else:
-                    peer = scope.get("client")
-                    source_ip = peer[0] if peer else "unknown"
-                auth_type = AuthType.JWT if path.startswith("/v1/") else AuthType.VIRTUAL_KEY
-                import asyncio
+        except (RedisError, SQLAlchemyError, asyncio.TimeoutError) as e:
+            # 헬스체커가 열화를 마킹하기 전의 미드요청 백엔드 단절 — 자격증명
+            # 문제가 아니라 인프라 장애라 503.
+            # ⚠️ 이 절은 **인증 구간**의 예외만 다룬다: auth_context 가 이미 세팅된
+            #    뒤(=inner app 실행 중)의 백엔드 예외는 기존 계약대로 전파한다 —
+            #    응답이 시작된 뒤 503 을 다시 쓰면 ASGI 프로토콜 위반이다.
+            #    OSError 를 튜플에 넣지 않는 이유도 같다(PermissionError ⊂ OSError
+            #    충돌 + SSE 중 ConnectionResetError/BrokenPipeError 오획).
+            #    소켓 오류는 redis-py 가 ConnectionError/TimeoutError 로, asyncpg 는
+            #    SQLAlchemy OperationalError 로 이미 래핑된다.
+            if "auth_context" in state:
+                raise
+            logger.warning("auth_backend_error", path=path, error=str(e))
+            await self._send_503(scope, send)
+            return
 
-                from app.services.streaming import _spawn
+    async def _handle_auth_failure(
+        self, scope: Scope, send: Send, state: dict, path: str, e: Exception
+    ) -> None:
+        """자격증명 거부 공통 경로 — security 이벤트 기록 + 401."""
+        error_msg = str(e)
+        logger.info("auth_failed", path=path, reason=error_msg)
 
-                # bare create_task 는 약한 참조라 태스크가 GC 되어 실패 기록이 유실될 수 있다.
-                _spawn(sec_detector.record_auth_failure(source_ip, auth_type))
+        # 보안 이벤트 감지
+        sec_detector = state.get("_security_detector")
+        if sec_detector is not None:
+            # XFF 의 가장 오른쪽 홉 = 직접 프록시(ALB)가 기록한 진짜 클라이언트 IP.
+            # 왼쪽 홉은 클라이언트가 임의로 위조할 수 있어 브루트포스 감지에 쓰면
+            # 위조 IP 로 회피/오남용이 가능하다. XFF 없으면 직접 피어를 쓴다.
+            xff = dict(scope.get("headers", [])).get(b"x-forwarded-for", b"").decode()
+            if xff:
+                source_ip = xff.split(",")[-1].strip() or "unknown"
+            else:
+                peer = scope.get("client")
+                source_ip = peer[0] if peer else "unknown"
+            auth_type = AuthType.JWT if path.startswith("/v1/") else AuthType.VIRTUAL_KEY
+            from app.services.streaming import _spawn
 
-            await self._send_401(scope, send, error_msg)
+            # bare create_task 는 약한 참조라 태스크가 GC 되어 실패 기록이 유실될 수 있다.
+            _spawn(sec_detector.record_auth_failure(source_ip, auth_type))
+
+        await self._send_401(scope, send, error_msg)
 
     async def _send_401(self, scope: Scope, send: Send, detail: str) -> None:
         body = json.dumps(

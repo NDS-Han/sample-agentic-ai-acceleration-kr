@@ -16,7 +16,7 @@ from app.periods import (
     set_request_period,
     set_request_started_at,
 )
-from app.services.budget_service import BudgetService
+from app.services.budget_service import BudgetBackendUnavailableError, BudgetService
 
 logger = structlog.get_logger(__name__)
 
@@ -136,6 +136,19 @@ class BudgetMiddleware:
                     period,
                     client=client,
                 )
+        except BudgetBackendUnavailableError as e:
+            # DB+Redis 양쪽 다 예산 체크 불가 — 'no_budget_assigned' 429 로 오보하지
+            # 않고 인프라 장애를 503 으로 돌려준다 (PermissionError 서브클래스라
+            # 순서상 먼저 잡아야 한다).
+            logger.warning("budget_backend_unavailable", path=path, reason=str(e))
+            body = json.dumps(
+                anthropic_error("service_unavailable", "Service temporarily unavailable")
+            ).encode()
+            await send({"type": "http.response.start", "status": 503,
+                        "headers": [(b"content-type", b"application/json")]})
+            await send({"type": "http.response.body", "body": body})
+            return
+
         except PermissionError as e:
             reason = str(e)
             await self._send_429_budget(scope, send, reason)

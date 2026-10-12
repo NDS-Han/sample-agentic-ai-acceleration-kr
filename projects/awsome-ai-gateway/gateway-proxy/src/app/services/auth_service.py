@@ -21,6 +21,16 @@ logger = structlog.get_logger(__name__)
 VK_CACHE_TTL = 300  # 5분
 JWT_KEY_CACHE_TTL = 3600  # 1시간
 
+
+class AuthBackendUnavailableError(PermissionError):
+    """인증 백엔드(DB/Redis) 장애로 인증 자체가 불가 — 자격증명 거부와 구분한다.
+
+    PermissionError 를 상속해 기존 except 경로는 유지되지만, 미들웨어는 이
+    서브클래스를 먼저 잡아 503 을 내고 security 이벤트로 기록하지 않는다 —
+    인프라 장애를 'Invalid or inactive virtual key' 401 로 오보하면 클라이언트가
+    정상 키를 재발급받으려 시도하고, auth-failure 카운터가 장애 트래픽으로 오염된다.
+    """
+
 # 공개키 테이블(admin_jwt_configs)은 비대칭 알고리즘만 허용한다 — 대칭 HMAC
 # (HS256 등)이 등록되면 공개 PEM 텍스트가 곧 서명 비밀이 돼 alg-confusion 위조가
 # 성립한다. DB 오설정/침해 방어선. HS* 를 공개키 테이블에 둘 합법적 이유가 없다.
@@ -210,7 +220,9 @@ class VKAuthStrategy:
                         raise PermissionError("User account is deactivated")
                 return AuthContext(**data)
 
-        # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장)
+        # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장). Redis 가 유일한
+        #    소스다 — DB 의 auth.virtual_keys 는 암호화된 원문이라 해시로 조회가
+        #    안 되고, 무효키 폭주가 DB 를 때리는 것을 막는 의도된 설계(§9).
         user_id = None
         if redis is not None:
             raw = await redis.get(f"key:vk:{key_hash}")
@@ -218,11 +230,13 @@ class VKAuthStrategy:
                 user_id = raw if isinstance(raw, str) else raw.decode()
 
         if user_id is None:
+            if redis is None:
+                raise AuthBackendUnavailableError("redis unavailable, VK lookup impossible")
             raise PermissionError("Invalid or inactive virtual key")
 
         # 3) 사용자 정보 조회
         if db is None:
-            raise PermissionError("DB unavailable, cache miss")
+            raise AuthBackendUnavailableError("DB unavailable, cache miss")
 
         user_result = await db.execute(select(User).where(User.id == user_id))
         user = user_result.scalar_one_or_none()
@@ -334,15 +348,15 @@ class JWTAuthStrategy:
 
         if claims is None:
             if db is None:
-                raise PermissionError("DB unavailable, JWT key cache miss")
+                raise AuthBackendUnavailableError("DB unavailable, JWT key cache miss")
             try:
                 result = await db.execute(
                     select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
                 )
                 jwt_keys = list(result.scalars().all())
-            except Exception as e:  # 내부 장애도 401 로 — 500 유발 경로를 남기지 않는다
+            except Exception as e:  # 인프라 장애는 503 — 401 이면 키 재발급 오해 + 이벤트 오염
                 logger.warning("jwt_key_lookup_failed", error=str(e))
-                raise PermissionError(f"JWT key lookup failed: {e}")
+                raise AuthBackendUnavailableError(f"JWT key lookup failed: {e}")
             if not jwt_keys:
                 raise PermissionError(f"Unknown JWT kid: {kid}")
 

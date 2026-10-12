@@ -9,6 +9,7 @@ import pytest
 
 from app.schemas.domain import AuthType
 from app.services.auth_service import (
+    AuthBackendUnavailableError,
     DualAuthStrategy,
     JWTAuthStrategy,
     VKAuthStrategy,
@@ -737,7 +738,11 @@ async def test_auth_middleware_security_detector_uses_rightmost_xff():
     )
     scope["state"]["_security_detector"] = detector
     scope["state"]["_degradation_manager"] = None
-    scope["state"]["_redis"] = None
+    # 진짜 무효키 경로를 타야 한다 — redis/db 가 둘 다 None 이면 백엔드 불가로
+    # 503 이 되어 401 + 실패 기록이 일어나지 않는다 (AuthBackendUnavailableError).
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)  # 매핑 없음 → invalid key
+    scope["state"]["_redis"] = redis
     scope["state"]["_session_factory"] = None
 
     sent = []
@@ -747,3 +752,122 @@ async def test_auth_middleware_security_detector_uses_rightmost_xff():
 
     assert sent[0]["status"] == 401
     assert recorded["ip"] == "10.0.0.9"
+
+
+# ── 인프라 장애 vs 자격증명 거부 — AuthBackendUnavailableError 계약 ────────────
+
+
+@pytest.mark.asyncio
+async def test_vk_auth_redis_down_is_backend_unavailable_not_401():
+    """REDIS_DEGRADED(redis=None): VK 매핑 조회 자체가 불가 — 인프라 장애를
+    'invalid key' 로 오보하면 클라이언트가 정상 키를 재발급받으려 한다."""
+    with pytest.raises(AuthBackendUnavailableError):
+        await VKAuthStrategy().authenticate("Bearer vk-x", None, None)
+
+
+@pytest.mark.asyncio
+async def test_vk_auth_invalid_key_still_permission_error():
+    """redis 가 살아 있고 매핑이 없으면 진짜 무효키 — 401 경로 유지."""
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    with pytest.raises(PermissionError) as ei:
+        await VKAuthStrategy().authenticate("Bearer vk-bad", redis, None)
+    assert not isinstance(ei.value, AuthBackendUnavailableError)
+
+
+@pytest.mark.asyncio
+async def test_vk_auth_db_down_cache_miss_is_backend_unavailable():
+    """DB_DEGRADED(db=None): Redis 매핑은 있어도 사용자 정보 조회가 불가 → 503."""
+    import hashlib
+
+    key_hash = hashlib.sha256(b"vk-x").hexdigest()
+
+    def _get(key, *a, **kw):
+        if isinstance(key, bytes):
+            key = key.decode()
+        if key == f"key:vk:{key_hash}":
+            return b"user-1"
+        return None
+
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=_get)
+    with pytest.raises(AuthBackendUnavailableError):
+        await VKAuthStrategy().authenticate("Bearer vk-x", redis, None)
+
+
+@pytest.mark.asyncio
+async def test_jwt_db_down_kid_cache_miss_is_backend_unavailable():
+    """DB_DEGRADED(db=None) + kid 캐시 미스 → 503 (서명 검증 자체가 불가)."""
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=None)
+    priv, _pub = _make_rsa_pair()
+    token = _make_jwt(priv, kid="kid-1")
+    with pytest.raises(AuthBackendUnavailableError):
+        await JWTAuthStrategy().authenticate(f"Bearer {token}", redis, None)
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_backend_unavailable_returns_503_no_security_event():
+    """인프라 장애는 503 + security 이벤트 미기록 — auth-failure 카운터 오염 방지."""
+    from app.middleware.auth import AuthMiddleware
+
+    class _DownStrategy:
+        async def authenticate(self, authorization, redis, db):
+            raise AuthBackendUnavailableError("redis unavailable")
+
+    detector = MagicMock()
+    detector.record_auth_failure = MagicMock()
+
+    async def inner(scope, receive, send):
+        raise AssertionError("inner must not run")
+
+    mw = AuthMiddleware(inner)
+    scope = _auth_scope(headers={"authorization": "Bearer vk-x"})
+    scope["state"]["_security_detector"] = detector
+    scope["state"]["_degradation_manager"] = None
+    scope["state"]["_redis"] = None
+    scope["state"]["_session_factory"] = None
+
+    import app.middleware.auth as auth_mw
+    orig = auth_mw.resolve_auth_strategy
+    auth_mw.resolve_auth_strategy = lambda p: _DownStrategy()
+    try:
+        sent = []
+        await mw(scope, AsyncMock(), lambda m: sent.append(m) or AsyncMock()())
+    finally:
+        auth_mw.resolve_auth_strategy = orig
+
+    assert sent[0]["status"] == 503
+    detector.record_auth_failure.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_mid_request_redis_drop_returns_503():
+    """헬스체커 마킹 전 미드요청 백엔드 단절(RedisError)도 503 — 500 아님."""
+    from redis.exceptions import ConnectionError as RedisConnError
+
+    from app.middleware.auth import AuthMiddleware
+
+    class _FlakyStrategy:
+        async def authenticate(self, authorization, redis, db):
+            raise RedisConnError("connection lost")
+
+    async def inner(scope, receive, send):
+        raise AssertionError("inner must not run")
+
+    mw = AuthMiddleware(inner)
+    scope = _auth_scope(headers={"authorization": "Bearer vk-x"})
+    scope["state"]["_degradation_manager"] = None
+    scope["state"]["_redis"] = AsyncMock()
+    scope["state"]["_session_factory"] = None
+
+    import app.middleware.auth as auth_mw
+    orig = auth_mw.resolve_auth_strategy
+    auth_mw.resolve_auth_strategy = lambda p: _FlakyStrategy()
+    try:
+        sent = []
+        await mw(scope, AsyncMock(), lambda m: sent.append(m) or AsyncMock()())
+    finally:
+        auth_mw.resolve_auth_strategy = orig
+
+    assert sent[0]["status"] == 503

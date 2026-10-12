@@ -15,6 +15,15 @@ from app.services.lua_loader import LuaScriptLoader
 
 logger = structlog.get_logger(__name__)
 
+
+class BudgetBackendUnavailableError(PermissionError):
+    """예산 체크 백엔드(DB+Redis 양쪽) 불가 — 예산 거절(429)과 구분한다.
+
+    PermissionError 를 상속해 기존 호출부는 유지되지만, 미들웨어는 이 서브클래스를
+    먼저 잡아 503 을 낸다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면
+    사용자가 예산을 문의하고 운영자는 장애 원인을 못 찾는다.
+    """
+
 BUDGET_CONFIG_TTL = None  # 무기한 (Admin 변경 시 DEL로 무효화)
 
 # per-app(client) 예산 대상 클라이언트. client_identifier 토큰과 동일 집합
@@ -562,7 +571,7 @@ class BudgetService:
             raise
         except Exception:
             logger.exception("budget_db_fallback_failed", user_id=user_id)
-            raise PermissionError("no_budget_assigned")
+            raise BudgetBackendUnavailableError("budget check failed: DB fallback error")
 
     async def reserve_budget(
         self,
@@ -761,7 +770,9 @@ class BudgetService:
         앱 예산 미설정(config=None) → pass-through.
         """
         if db is None:
-            raise PermissionError("no_budget_assigned")
+            # DB_DEGRADED — Redis 경로가 실패해 이 fallback 까지 왔는데 DB 도 없다.
+            # 'no_budget_assigned' 는 예산 미설정이라는 뜻이라 인프라 장애를 오보한다.
+            raise BudgetBackendUnavailableError("budget check unavailable: DB degraded")
 
         # Q 정책: USER 예산 미설정 → pass-through (차단 안 함)
         # client IS NULL 로 한정 — per-app(client) row 가 생기면 (scope,scope_id) 당
