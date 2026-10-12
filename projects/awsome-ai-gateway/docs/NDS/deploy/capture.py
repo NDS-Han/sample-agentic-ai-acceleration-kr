@@ -469,7 +469,10 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         for c in containers:
             img = c.get("image", "")
             live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
-            svc_key = name.replace("llm-gateway-", "")
+            # deployment 명명 = <fullname>-<svc>. fullname 은 release/chart override
+            # 로 달라지므로 접미사로 svc 를 맞춘다 (하드코딩 prefix 는 커스텀
+            # release 에서 drift 감지가 침묵 누락된다)
+            svc_key = next((s for s in tags if name.endswith(f"-{s}")), "")
             if svc_key in tags and live_tag and live_tag != tags[svc_key]:
                 notes.append(f"⚠ {svc_key} 라이브 이미지 태그 {live_tag} ≠ helm values "
                              f"{tags[svc_key]} — 수동 set image 또는 stale release")

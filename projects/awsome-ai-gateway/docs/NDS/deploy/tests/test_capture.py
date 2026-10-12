@@ -120,6 +120,55 @@ def test_eks_capture_from_real_dev_values(monkeypatch):
     assert "migration" in tags or "adminApi" in tags  # 멀티태그 실측이 맵에 담김
 
 
+def test_eks_capture_live_drift_custom_release_name(monkeypatch):
+    """커스텀 release 명명(<release>-llm-gateway-<svc>)에서도 live 이미지
+    drift 가 감지돼야 한다 — fullname 하드코딩 prefix 는 침묵 누락을 만든다."""
+    vals = {
+        "global": {"environment": "dev", "imageRegistry": "reg.example.com"},
+        "aws": {"region": "ap-northeast-2"},
+        "gatewayProxy": {"image": {"tag": "1.0.0"}},
+        "ingress": {},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+
+    def _kubectl(resource, *a, **kw):
+        if resource == "deployments":
+            return {"items": [{
+                "metadata": {"name": "myrelease-llm-gateway-gateway-proxy"},
+                "spec": {"template": {"spec": {"containers": [
+                    {"image": "reg.example.com/gateway-proxy:9.9.9"}]}}},
+            }]}
+        return {}
+    monkeypatch.setattr(capture, "_kubectl_json", _kubectl)
+
+    _, notes = capture.capture_eks(release="myrelease")
+    assert any("9.9.9" in n and "gateway-proxy" in n for n in notes), notes
+
+
+def test_eks_capture_live_drift_default_release_name(monkeypatch):
+    """기본 명명(llm-gateway-<svc>)의 live drift 도 감지된다."""
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "gatewayProxy": {"image": {"tag": "1.0.0"}},
+        "ingress": {},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+
+    def _kubectl(resource, *a, **kw):
+        if resource == "deployments":
+            return {"items": [{
+                "metadata": {"name": "llm-gateway-gateway-proxy"},
+                "spec": {"template": {"spec": {"containers": [
+                    {"image": "reg.example.com/gateway-proxy:9.9.9"}]}}},
+            }]}
+        return {}
+    monkeypatch.setattr(capture, "_kubectl_json", _kubectl)
+
+    _, notes = capture.capture_eks()
+    assert any("9.9.9" in n and "gateway-proxy" in n for n in notes), notes
+
+
 def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     """configure 가 질문 안 하는 필드(account_id/sizing/oidc 부가)를 보존."""
     import types
