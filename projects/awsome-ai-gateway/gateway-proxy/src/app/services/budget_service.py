@@ -707,14 +707,26 @@ class BudgetService:
                     script, 4, usage_key, config_key, marker_key, resvsum_key,
                     scope, est_str, fallback, marker_ttl,
                 )
+                result = json.loads(raw)
             except Exception:
                 # Redis 일시 장애 — fail-open 방향으로 둔다. 예약 없이 진행하면
                 # 기존(체크만 하는) 동작과 같아지므로 안전하다. 커밋분은 되돌린다.
                 logger.exception("budget_reserve_eval_failed", scope=scope)
+                # ⚠️ 클라이언트 타임아웃은 서버에서 eval 이 **실행 완료**됐을 수
+                #    있고, eval 성공 뒤 json.loads 가 실패했을 수도 있다 — 그때 이
+                #    scope 의 마커는 실존하는데 committed 에 없으면 영구 고아가
+                #    된다. 방금 시도한 scope 도 환불 대상에 포함시킨다 —
+                #    마커가 없으면 settle(0) 은 no-op 이라 안전하다.
+                committed.append({
+                    "scope": scope,
+                    "usage_key": usage_key,
+                    "config_key": config_key,
+                    "marker_key": marker_key,
+                    "resvsum_key": resvsum_key,
+                    "fallback": fallback,
+                })
                 await self._refund_reservations(redis, committed)
                 return []
-
-            result = json.loads(raw)
 
             if result.get("config_present") is False:
                 if scope == "team":

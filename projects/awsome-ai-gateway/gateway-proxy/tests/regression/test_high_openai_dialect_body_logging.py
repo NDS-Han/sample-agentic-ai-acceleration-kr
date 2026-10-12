@@ -447,3 +447,65 @@ async def test_non_utf8_bytes_do_not_raise():
     )
     assert out[0] == b"\xff\xfe"
     assert len(got) == 1
+
+
+async def test_multibyte_char_split_across_chunks_survives():
+    """한글(3바이트 UTF-8)이 청크 경계에 걸려도 감사 원문이 깨지면 안 된다.
+
+    청크별 독립 decode 는 경계 문자를 U+FFFD 로 깬다 — incremental decoder 로
+    경계를 넘나드는 바이트열을 잇는다.
+    """
+    text = "한국어 응답" + _ANTHROPIC_END.decode()
+    raw = text.encode("utf-8")
+    # 임의 위치(한글 한 글자의 바이트 중간)에서 쪼갠다.
+    mid = 5
+    got: list[str] = []
+
+    async def hook(t: str, status: str) -> None:
+        got.append(t)
+
+    out = await _drain(
+        wrap_stream_for_body_log(
+            _agen([raw[:mid], raw[mid:]]), dialect="anthropic", on_complete=hook
+        )
+    )
+    assert b"".join(out) == raw
+    assert got == [text]
+
+
+async def test_wrapper_aclose_closes_inner_generator():
+    """GeneratorExit 경로에서 내부 제너레이터를 명시적으로 닫아야 한다.
+
+    닫지 않으면 정산(finally)이 들어 있는 상류 gen 이 GC/asyncgen finalizer
+    시점까지 지연된다 — 과금 누락 방지용 aclosing 계약이 로깅 래퍼에서 무력화.
+    """
+    import asyncio as _asyncio
+
+    from app.services.body_log_records import _PENDING_FIRES
+
+    closed = False
+
+    async def inner():
+        nonlocal closed
+        try:
+            yield b"one"
+            yield b"two"
+        finally:
+            closed = True
+
+    got: list[str] = []
+
+    async def hook(t: str, status: str) -> None:
+        got.append(status)
+
+    gen = wrap_stream_for_body_log(inner(), dialect="anthropic", on_complete=hook)
+    assert await gen.__anext__() == b"one"
+    await gen.aclose()  # 클라이언트 끊김과 동일 — GeneratorExit 주입
+
+    # _close_then_fire 태스크가 스코프 밖에서 inner 를 닫는다.
+    for _ in range(50):
+        if closed and not _PENDING_FIRES:
+            break
+        await _asyncio.sleep(0.02)
+    assert closed
+    assert got == ["partial"]  # 터미널 마커 없이 끊겼으므로 partial 기록

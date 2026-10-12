@@ -142,6 +142,27 @@ async def test_openai_streaming_mid_stream_error_emits_openai_error_chunk():
 
 
 @pytest.mark.asyncio
+async def test_openai_streaming_error_after_partial_frame_closes_boundary():
+    """패스스루 청크가 SSE 프레임 중간에서 끊긴 뒤 상류가 죽으면 error 프레임이
+    `\\n\\n` 선행으로 경계를 닫고 나가야 한다. 개행 없이 붙으면 클라이언트 SSE
+    파서가 두 프레임을 한 라인으로 읽어 error 까지 파싱하지 못한다."""
+
+    async def bad_iter() -> AsyncIterator[bytes]:
+        # 완결 프레임 하나 + 개행 없이 끊긴 반쪽 프레임.
+        yield _sse({"choices": [{"delta": {"content": "hi"}}]})
+        yield b'data: {"choices": [{"delta": {"content": "trunc'
+        raise RuntimeError("upstream boom")
+
+    out: list[bytes] = []
+    async for b in openai_sse_stream(FakeRequest(), bad_iter(), on_usage=None, idle_timeout=5.0):
+        out.append(b)
+
+    assert out[-1].startswith(b"\n\ndata: ")
+    tail = json.loads(out[-1].decode().removeprefix("\n\ndata: ").strip())
+    assert tail["error"]["type"] == "stream_error"
+
+
+@pytest.mark.asyncio
 async def test_openai_streaming_idle_timeout_emits_error_chunk():
     async def slow_iter() -> AsyncIterator[bytes]:
         yield _sse({"choices": [{"delta": {"content": "start"}}]})

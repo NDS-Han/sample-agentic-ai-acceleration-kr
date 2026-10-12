@@ -209,7 +209,7 @@ class HealthChecker:
             logger.warning("budget_reconcile_snapshot_failed")
             return
 
-        script = LuaScriptLoader.get("budget_rebuild")
+        script = LuaScriptLoader.get("budget_reconcile")
 
         # ⚠️ pending 마커는 **한 번의 키스페이스 스캔**으로 전부 모은다 —
         #    행마다 SCAN MATCH 를 돌리면 MATCH 가 순회량을 줄여주지 않아
@@ -218,18 +218,14 @@ class HealthChecker:
         #      budget:pending:user:{uid}:{req_id}
         #      budget:pending:team:{tid}:{req_id}
         #      budget:pending:client:{uid}:{client}:{req_id}
-        pending_sums: dict[tuple[str, str, str], Decimal] = {}
+        #    값은 읽지 않는다 — eval 안에서 현재값을 읽어야 스캔 후 settle 된
+        #    마커(만료/소실은 GET nil 로 자연 제외)까지 정확히 반영된다.
+        pending_markers: dict[tuple[str, str, str], list[str]] = {}
         try:
             async for key in self._redis.scan_iter(
                 match="budget:pending:*", count=500
             ):
-                val = await self._redis.get(key)
-                if val is None:
-                    continue
                 try:
-                    amount = Decimal(
-                        val.decode() if isinstance(val, bytes) else str(val)
-                    )
                     kstr = key.decode() if isinstance(key, bytes) else key
                     # "budget:pending:" 이후 — [0]=user|team|client,
                     # [1]={sid}, client 이면 [2]=client 이름, 마지막=req_id.
@@ -237,18 +233,20 @@ class HealthChecker:
                     if parts[0] in ("user", "team") and len(parts) >= 3:
                         sid = parts[1].strip("{}")
                         if sid:
-                            k = (parts[0].upper(), sid, "")
-                            pending_sums[k] = pending_sums.get(k, Decimal("0")) + amount
+                            pending_markers.setdefault(
+                                (parts[0].upper(), sid, ""), []
+                            ).append(kstr)
                     elif parts[0] == "client" and len(parts) >= 4:
                         sid = parts[1].strip("{}")
                         if sid:
-                            k = ("USER", sid, parts[2])
-                            pending_sums[k] = pending_sums.get(k, Decimal("0")) + amount
+                            pending_markers.setdefault(
+                                ("USER", sid, parts[2]), []
+                            ).append(kstr)
                 except Exception:
                     continue
         except Exception:
             logger.warning("budget_reconcile_pending_scan_failed")
-            pending_sums = {}
+            pending_markers = {}
 
         reconciled = 0
         for i, (scope, scope_id, client, used_usd) in enumerate(rows):
@@ -266,58 +264,42 @@ class HealthChecker:
                     c = str(client)
                     usage_key = f"budget:user:{{{sid}}}:{c}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{c}:{period}"
-                    lock_key = f"budget:rebuild-lock:{{{sid}}}:{c}"
-                    pending = pending_sums.get(("USER", sid, c), Decimal("0"))
+                    markers = pending_markers.get(("USER", sid, c), [])
                 elif scope == "USER" and not client:
                     usage_key = f"budget:user:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{period}"
-                    lock_key = f"budget:rebuild-lock:{{{sid}}}"
-                    pending = pending_sums.get(("USER", sid, ""), Decimal("0"))
+                    markers = pending_markers.get(("USER", sid, ""), [])
                 elif scope == "TEAM" and not client:
                     # ⚠️ TEAM+client 행은 스키마상 만들어지지 않는다 — 있으면
                     #    같은 총합 키를 하위집합 값으로 반복 교정해 오염시키므로
                     #    명시적으로 걸러낸다.
                     usage_key = f"budget:team:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:team:{{{sid}}}:{period}"
-                    lock_key = f"budget:rebuild-lock:{{{sid}}}"
-                    pending = pending_sums.get(("TEAM", sid, ""), Decimal("0"))
+                    markers = pending_markers.get(("TEAM", sid, ""), [])
                 else:
                     continue
 
-                cur_raw = await self._redis.get(usage_key)
                 cursum_raw = await self._redis.get(resvsum_key)
                 # ⚠️ bytes 디코딩 — decode_responses=False 라 get() 은 bytes.
                 #    str(b'30.0') 은 InvalidOperation → 이 키가 조용히 스킵된다.
-                cur = (
-                    Decimal(cur_raw.decode() if isinstance(cur_raw, bytes) else str(cur_raw))
-                    if cur_raw
-                    else Decimal("0")
-                )
+                #    퀴에센스 스냅샷으로 Lua 에 넘긴다 — eval 순간 resvsum 이
+                #    이 값과 다르면 스캔 후 예약/정산이 끼어든 것이라 orphan
+                #    산정을 이번 틱 건너뛴다.
                 cursum = (
-                    Decimal(cursum_raw.decode() if isinstance(cursum_raw, bytes) else str(cursum_raw))
-                    if cursum_raw
-                    else Decimal("0")
-                )
-                # ⚠️ usage 교정은 **양수 방향만** 허용한다. 정상 운영 중에도
-                #    cur 은 finalize 즉시 올라가지만 db(budget_usages)는 워커
-                #    flush 까지 뒤처져, 활성 유저는 항상 cur > db 다 — 음수
-                #    교정을 허용하면 매 틱 카운터를 stale 스냅샷으로 끌어내려
-                #    미flush 파이프라인 깊이만큼 반복적 fail-open 창이 열린다.
-                #    반대 방향(cur>db 잔류, 스트림 유실)은 과대계상=fail-closed
-                #    라 보수적으로 그대로 둔다.
-                #    resvsum 은 양방향 — 마커 스캔이 곧 진실이라 stale over-hold
-                #    (죽은 예약의 잔여)를 풀어줘야 한다.
-                usage_delta = Decimal(str(used_usd)) + pending - cur
-                if usage_delta < 0:
-                    usage_delta = Decimal("0")
+                    cursum_raw.decode() if isinstance(cursum_raw, bytes) else str(cursum_raw)
+                ) if cursum_raw else "0"
+                # ⚠️ 교정은 Lua 안에서 원자적으로 — orphan(=resvsum-live) 되돌림
+                #    · resvsum 양방향 보정 · usage 양수 플로어(db+live).
+                #    Python 단계에서 마커 값을 합산해 넘기지 않는 이유: 스캔과
+                #    eval 사이에 만료/settle 된 마커가 어긋나기 때문이다.
                 await self._redis.eval(
                     script,
-                    3,
+                    2 + len(markers),
                     usage_key,
                     resvsum_key,
-                    lock_key,
-                    str(usage_delta),
-                    str(pending - cursum),
+                    *markers,
+                    str(used_usd),
+                    cursum,
                 )
                 reconciled += 1
             except Exception:

@@ -20,6 +20,7 @@ request just to throw it away.
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
@@ -191,6 +192,9 @@ def wrap_stream_for_body_log(
     async def _wrapped() -> AsyncIterator[bytes]:
         frames: list[str] = []
         fired = False
+        # 멀티바이트 문자가 청크 경계에 걸리면 bytes.decode 단독 호출은 U+FFFD 로
+        # 깬다 — 감사 원문이 실제 응답과 달라지므로 경계를 넘나드는 디코더를 쓴다.
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         async def _fire() -> None:
             nonlocal fired
@@ -207,15 +211,27 @@ def wrap_stream_for_body_log(
 
         try:
             async for chunk in gen:
-                frames.append(chunk.decode("utf-8", errors="replace"))
+                frames.append(decoder.decode(chunk))
                 yield chunk
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                frames.append(tail)
         except GeneratorExit:
-            # ⚠️ 여기서 `await _fire()` 를 하면 안 된다. GeneratorExit 처리 중에 이벤트
-            #    루프로 양보하는 await 가 있으면 Python 이 "async generator ignored
-            #    GeneratorExit" RuntimeError 를 던지고, 그 예외가 응답 태스크를 오염시킨다.
+            # ⚠️ yield 는 못 하지만 await 는 된다 — 그래도 정산 체인을 이 unwind 와
+            #    분리해 태스크로 떼어 보내는 편이 exit 경로의 재취소에서 안전하다.
             #    enqueue 는 큐에 put 하므로 양보할 수 있다 → 태스크로 떼어 보낸다.
             #    (`_fire` 는 로컬 frames 를 닫고 있으므로 제너레이터가 사라져도 안전하다.)
-            task = asyncio.ensure_future(_fire())
+            # 내부 gen 도 명시적으로 닫는다 — 닫지 않으면 정산이 들어 있는 상류
+            # 제너레이터의 finally 가 GC/asyncgen finalizer 시점까지 지연되고,
+            # aclosing 의도("명시적으로 닫아 과금 누락 방지")가 로깅 경로에서만
+            # 무력화된다.
+            async def _close_then_fire() -> None:
+                try:
+                    await gen.aclose()
+                finally:
+                    await _fire()
+
+            task = asyncio.ensure_future(_close_then_fire())
             # 태스크에 대한 강한 참조를 유지한다. 두지 않으면 GC 가 실행 전에 수거할 수 있고
             # 그러면 이 레코드만 조용히 사라진다.
             _PENDING_FIRES.add(task)

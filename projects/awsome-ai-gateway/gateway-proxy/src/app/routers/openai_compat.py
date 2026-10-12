@@ -20,7 +20,10 @@ from app.services.body_log_records import (
     provider_name,
     resolve_body_logger,
 )
-from app.services.fallback_loop import release_reservations
+from app.services.fallback_loop import (
+    release_reservations,
+    unsettled_reservation_guard,
+)
 from app.services.router_service import ModelInactiveError, RouterService
 from app.services.streaming import openai_sse_stream, usage_status_of
 
@@ -239,6 +242,27 @@ async def _handle_openai(request: Request, path: str):
                 },
             )
 
+    # Which plane serves this Chat request is decided by the RESOLVED MODEL, not by the
+    # path: OPENMODEL → in-house vLLM (default, unchanged), BEDROCK_RUNTIME_OPENAI →
+    # bedrock-runtime's OpenAI Chat endpoint (SigV4 + CRIS model id, GPT-5.6). The two
+    # adapters take different kwargs — vLLM is addressed by `path` against a fixed base
+    # URL, the Bedrock one by the alias's own endpoint + a wire selector — so the call
+    # kwargs are built here once and reused by both the streaming and non-streaming call.
+    is_bedrock_runtime = model_config.provider == ProviderType.BEDROCK_RUNTIME_OPENAI
+    if is_bedrock_runtime and path != "/v1/chat/completions":
+        # The runtime plane serves /openai/v1/chat/completions and
+        # /openai/v1/responses only — there is no legacy /v1/completions. Refusing is
+        # correct: silently rerouting a completions request to the chat wire would
+        # return a response shape the client cannot parse.
+        # ⚠️ enforce_rate_limits **전**에 거절해야 한다 — 예약을 잡은 뒤 여기서
+        #    404 를 내면 해제 경로가 없어 RPM/TPM/CPM·월예산 마커가 새고,
+        #    월예산 누수분은 카운터에 영구 잔류한다.
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"type": "not_found",
+                               "message": f"Model '{model_config.alias}' does not support {path}"}},
+        )
+
     # Pre-reserve RPM + TPM (3-scope: USER/TEAM/GLOBAL)
     if auth_context:
         from app.services.rate_limit_enforcement import enforce_rate_limits
@@ -256,24 +280,7 @@ async def _handle_openai(request: Request, path: str):
         if rejected is not None:
             return rejected
 
-    # Which plane serves this Chat request is decided by the RESOLVED MODEL, not by the
-    # path: OPENMODEL → in-house vLLM (default, unchanged), BEDROCK_RUNTIME_OPENAI →
-    # bedrock-runtime's OpenAI Chat endpoint (SigV4 + CRIS model id, GPT-5.6). The two
-    # adapters take different kwargs — vLLM is addressed by `path` against a fixed base
-    # URL, the Bedrock one by the alias's own endpoint + a wire selector — so the call
-    # kwargs are built here once and reused by both the streaming and non-streaming call.
-    is_bedrock_runtime = model_config.provider == ProviderType.BEDROCK_RUNTIME_OPENAI
     if is_bedrock_runtime:
-        if path != "/v1/chat/completions":
-            # The runtime plane serves /openai/v1/chat/completions and
-            # /openai/v1/responses only — there is no legacy /v1/completions. Refusing is
-            # correct: silently rerouting a completions request to the chat wire would
-            # return a response shape the client cannot parse.
-            return JSONResponse(
-                status_code=404,
-                content={"error": {"type": "not_found",
-                                   "message": f"Model '{model_config.alias}' does not support {path}"}},
-            )
         adapter = registry.get(ProviderType.BEDROCK_RUNTIME_OPENAI)
         # The routing profile only supplies the cross-account role here (the signing
         # region comes from the alias endpoint). Absent profile/loader → None → the
@@ -418,6 +425,7 @@ async def _handle_openai(request: Request, path: str):
             ),
             status_code=status,
             media_type="text/event-stream",
+            background=unsettled_reservation_guard(state),
             # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -1052,6 +1060,7 @@ async def _handle_responses(request: Request):
             media_type="text/event-stream",
             # nginx ingress 버퍼링으로 SSE 가 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            background=unsettled_reservation_guard(state),
         )
     else:
         try:

@@ -24,6 +24,7 @@ Design contract
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from decimal import Decimal
@@ -257,6 +258,47 @@ async def release_reservations(
     state.pop("rate_limit_state", None)
 
 
+def unsettled_reservation_guard(state: dict) -> "BackgroundTask":
+    """spec<2.4 경로 '미시작 제너레이터' disconnect 로 새는 예약의 안전망.
+
+    Starlette 의 spec<2.4 경로는 ``listen_for_disconnect`` 로 끊김을 감지해
+    task group 을 취소한다. 클라이언트가 첫 SSE 바이트 전에 끊으면 스트림
+    제너레이터가 **한 번도 시작되지 않는다** — 미시작 async generator 는
+    ``finally`` 조차 실행하지 않으므로 on_usage → pop + finalize 가 통째로
+    건너뛰어지고 TPM/CPM/CPH/월예산 예약이 남는다(마커 TTL 만료까지 resvsum,
+    usage 카운터는 무기한 — E 가 영구 부풀어 fail-closed 로 고착).
+
+    ``StreamingResponse.background`` 는 task group 탈출 뒤 **취소 스코프 밖**
+    에서 실행되므로 여기서 되돌린다. ``release_reservations`` 는 ``state.pop``
+    멱등이라 정상 정산 뒤에는 no-op 이다 — 모든 StreamingResponse 에 달아도
+    안전하다.
+    """
+
+    async def _guard() -> None:
+        # 막 _spawn 된 정산 태스크가 state 를 pop 할 한 틱을 준다 — release(0)
+        # 가 먼저 가면 뒤의 settle(actual) 이 마커 부재로 no-op 되어 실제 비용
+        # 만큼 카운터가 얇아진다.
+        await asyncio.sleep(0)
+        if not state.get("rate_limit_state"):
+            return
+        redis = state.get("_redis_effective", state.get("_redis"))
+        if redis is None:
+            # Redis 가 없으면 Lua 예약 자체를 안 잡는다 — 되돌릴 마커도 없다.
+            return
+        try:
+            await release_reservations(
+                redis=redis,
+                state=state,
+                auth_context=state.get("auth_context"),
+            )
+        except Exception:
+            logger.warning("unsettled_reservation_release_failed")
+
+    from starlette.background import BackgroundTask
+
+    return BackgroundTask(_guard)
+
+
 async def run_fallback_loop(
     *,
     try_order: list[str],
@@ -363,31 +405,41 @@ async def run_fallback_loop(
             continue
 
         # --- 5. Build invoke body for this candidate ---
-        invoke_body, cand_stream_kwargs, cand_nonstream_kwargs = build_candidate_body(
-            req_data, candidate_config, is_stream
-        )
+        # ⚠️ 예약(위 admission)과 invoke 의 try 사이 구간이다 — 본문 조립이나
+        #    지표 코드가 예외를 내면 예약이 해제 없이 새어 마커 TTL 까지 물리고,
+        #    usage 카운터에는 추정치가 영구 잔류한다. invoke 와 같은 계약으로
+        #    해제 후 재전파한다.
+        try:
+            invoke_body, cand_stream_kwargs, cand_nonstream_kwargs = build_candidate_body(
+                req_data, candidate_config, is_stream
+            )
 
-        # ⚠️ 예전에는 여기서 haiku 후보의 `thinking` 을 **무조건 지웠다.** 지금은
-        #    build_candidate_body 가 `normalize_thinking` 으로 계열에 맞게 변환하므로 그
-        #    strip 은 유해하다: haiku 가 실제로 받는 `{"type":"enabled"}` 까지 지워서,
-        #    사용자는 HTTP 200 을 받으면서 extended thinking 만 조용히 사라진다.
-        #    변환은 본문을 만드는 단일 지점에서만 한다.
+            # ⚠️ 예전에는 여기서 haiku 후보의 `thinking` 을 **무조건 지웠다.** 지금은
+            #    build_candidate_body 가 `normalize_thinking` 으로 계열에 맞게 변환하므로 그
+            #    strip 은 유해하다: haiku 가 실제로 받는 `{"type":"enabled"}` 까지 지워서,
+            #    사용자는 HTTP 200 을 받으면서 extended thinking 만 조용히 사라진다.
+            #    변환은 본문을 만드는 단일 지점에서만 한다.
 
-        call_model_id = rewrite_model_id(pmid)
+            call_model_id = rewrite_model_id(pmid)
 
-        any_invoked = True
+            any_invoked = True
 
-        # ── 이 후보 1건 = 프로바이더 호출 1건 ──
-        #
-        # 폴백 루프에서는 후보마다 따로 세는 것이 맞다. 요청 단위로 한 번만 세면
-        # "원본 모델이 죽어서 폴백이 성공했다" 가 **성공 1건**으로만 보이고, 원본의
-        # 실패는 지표에서 사라진다 — 정확히 알아야 할 사실이 그것이다.
-        _pm_labels = build_provider_labels(
-            model_config=candidate_config,
-            client=state.get("client"),
-            is_stream=is_stream,
-        )
-        record_provider_request(metrics, _pm_labels)
+            # ── 이 후보 1건 = 프로바이더 호출 1건 ──
+            #
+            # 폴백 루프에서는 후보마다 따로 세는 것이 맞다. 요청 단위로 한 번만 세면
+            # "원본 모델이 죽어서 폴백이 성공했다" 가 **성공 1건**으로만 보이고, 원본의
+            # 실패는 지표에서 사라진다 — 정확히 알아야 할 사실이 그것이다.
+            _pm_labels = build_provider_labels(
+                model_config=candidate_config,
+                client=state.get("client"),
+                is_stream=is_stream,
+            )
+            record_provider_request(metrics, _pm_labels)
+        except Exception:
+            await release_reservations(
+                redis=redis, state=state, auth_context=auth_context
+            )
+            raise
 
         # --- 6. Invoke ---
         caught_connection_error = False

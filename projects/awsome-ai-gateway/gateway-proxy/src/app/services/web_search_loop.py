@@ -86,7 +86,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
-from app.services.streaming import mark_outcome, outcome_from_http
+from app.services.streaming import _spawn, mark_outcome, outcome_from_http
 
 logger = structlog.get_logger(__name__)
 
@@ -2432,10 +2432,33 @@ async def _anthropic_stream(
         # 실패로 기록한다. 클라이언트 disconnect 는 GeneratorExit(비-Exception)라
         # failed 가 안 서고 성공으로 남는다 — 끊긴 건 게이트웨이 실패가 아니다(E2E S5).
         mark_outcome(outcome, "error" if (failed or error_seen) else "success")
-        try:
-            await on_usage(merged)
-        except Exception:
-            logger.warning("web_search.on_usage_failed")
+        await _settle_stream_usage(on_usage, merged)
+
+
+async def _settle_stream_usage(on_usage, merged: TokenUsage) -> None:
+    """스트림 종결 시 정산을 실행한다.
+
+    ⚠️ spec<2.4 경로(Starlette task-group)에서 disconnect 가 오면 이 제너레이터는
+       취소된 anyio 스코프 안에서 unwinding 된다. 그때 finally 의 await 는 스코프가
+       CancelledError 를 재전달해 정산 도중 죽는다 — 게다가 ``_record`` 의
+       ``state.pop`` 은 동기라 이미 실행된 뒤라 **복구 불가 누수**가 된다.
+       ``task.cancelling() > 0`` 이면 취소 전파 중이므로 정산을 스코프 밖 태스크로
+       뗀다(``_PENDING_TASKS`` 가 참조하고 종료 시 drain 한다). 정상 종결에서는
+       await 로 동기 정산해 예외를 관측한다.
+    """
+    task = asyncio.current_task()
+    if task is not None and task.cancelling() > 0:
+        async def _guarded() -> None:
+            try:
+                await on_usage(merged)
+            except Exception:
+                logger.warning("web_search.on_usage_failed")
+        _spawn(_guarded())
+        return
+    try:
+        await on_usage(merged)
+    except Exception:
+        logger.warning("web_search.on_usage_failed")
 
 
 async def _drain_error(chunk_iter: AsyncIterator[bytes], envelope_open: bool) -> AsyncIterator[bytes]:
@@ -3028,10 +3051,7 @@ async def _responses_stream(
             if (failed or error_seen or final_terminal_type == "response.failed")
             else "success",
         )
-        try:
-            await on_usage(merged)
-        except Exception:
-            logger.warning("web_search.on_usage_failed")
+        await _settle_stream_usage(on_usage, merged)
 
 
 def _finalize_responses_obj(

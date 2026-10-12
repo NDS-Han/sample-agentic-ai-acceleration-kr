@@ -19,7 +19,10 @@ from app.observability.provider_metrics import (
 from sqlalchemy.exc import DBAPIError
 
 from app.schemas.domain import ProviderType, TokenUsage
-from app.services.fallback_loop import release_reservations
+from app.services.fallback_loop import (
+    release_reservations,
+    unsettled_reservation_guard,
+)
 from app.services.router_service import RouterService
 
 logger = structlog.get_logger(__name__)
@@ -498,6 +501,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             media_type=headers.get("Content-Type", "application/octet-stream"),
             # nginx ingress 버퍼링으로 event-stream 이 막히지 않게(E2E S4).
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            background=unsettled_reservation_guard(state),
         )
     else:
         try:

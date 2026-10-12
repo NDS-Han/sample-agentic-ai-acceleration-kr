@@ -367,7 +367,10 @@ async def enforce_rate_limits(
     # 넘은 스트리밍 요청의 환불이 다음 버킷에 새는 결함 + 무한도 스코프에 TTL
     # 없는 음수 팬텀 키가 생기던 결함).
     state["rate_limit_state"] = {
-        "tpm_descriptors": _only_tpm(descriptors),
+        # tpm_committed — 실제로 예약이 들어간 스코프만. fail-open 으로 통과된
+        # 스코프(committed_out 미포함)에 환불/정산을 적용하면 예약하지 않은
+        # 버킷이 부풀어 그 분 창의 한도가 늘어난다.
+        "tpm_descriptors": _only_tpm(tpm_committed),
         "tpm_reserved": reserved,
         "tpm_reserved_at": float(tpm_now_sec),
         "cost_reserved": cost_result.reserved_cost,

@@ -41,6 +41,7 @@ from app.services.fallback_loop import (
     enforce_candidate_admission,
     release_reservations,
     run_fallback_loop,
+    unsettled_reservation_guard,
 )
 from app.services.downgrade_loader import DowngradePolicyLoader
 from app.services.fallback_resolver import FallbackResolver, make_same_provider
@@ -810,6 +811,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                         yield chunk
 
             _ws_resp.body_iterator = _ws_timed_iter()
+            # spec<2.4 '미시작 제너레이터' disconnect 안전망 — 제너레이터가 한 번도
+            # 돌지 않으면 예약이 그대로 남으므로 response 종결 시 되돌린다.
+            _ws_resp.background = unsettled_reservation_guard(state)
         return _ws_resp
 
     # Use a no-op CB when the service is not wired (e.g. tests that don't configure it)
@@ -1006,6 +1010,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             status_code=status,
             media_type="text/event-stream",
             headers=response_headers,
+            background=unsettled_reservation_guard(state),
         )
     else:
         response_body, headers, usage = result.payload

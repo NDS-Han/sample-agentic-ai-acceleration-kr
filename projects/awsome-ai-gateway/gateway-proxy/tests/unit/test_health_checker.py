@@ -124,9 +124,10 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
 
     열화 중엔 budget_deduct(INCRBYFLOAT)가 스킵돼 Redis 카운터가 DB 진실보다
     얇다. DEL 로 지우면 안 된다 — 복구 직후 finalize 의 INCRBYFLOAT 가 얇은
-    키를 재생성해 exists() 재수화 게이트를 중독시킨다. 대신 additive
-    budget_rebuild 를 base=(db+pending)-cur 로 호출해 최종값을 db+pending 에
-    맞춘다(동시 델타 보존 + NX 락). 워커 지연은 창을 열어 재시도로 커버한다.
+    키를 재생성해 exists() 재수화 게이트를 중독시킨다. 대신 budget_reconcile
+    eval 이 라이브 마커 키·used·resvsum 스냅샷을 받아 Lua 안에서
+    orphan·resvsum·플로어 교정을 원자 적용한다. 워커 지연은 창을 열어
+    재시도로 커버한다.
     """
     import asyncio
 
@@ -168,10 +169,9 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
             return True  # 리더 게이트 항상 획득
 
         async def get(self, key):
+            # resvsum 스냅샷만 Python 이 읽는다 — 마커 값과 usage 는 Lua 가 읽는다.
             return {
-                f"budget:user:{{u1}}:{period}": "30.0",  # 얇은 카운터
                 f"budget:resvsum:user:{{u1}}:{period}": "5.0",
-                "budget:pending:user:{u1}:r1": b"15.0",  # bytes 마커 값
             }.get(key)
 
         async def scan_iter(self, match=None, count=None):
@@ -185,7 +185,7 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
             raise AssertionError("reconcile must not delete keys")
 
     redis = _Redis()
-    LuaScriptLoader._scripts.setdefault("budget_rebuild", "-- mock")
+    LuaScriptLoader._scripts.setdefault("budget_reconcile", "-- mock")
     hc = HealthChecker(redis, engine, dm)
 
     for _ in range(3):
@@ -194,15 +194,16 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
 
     await asyncio.gather(*hc._bg_tasks, return_exceptions=True)
 
-    # 마커 1건(15.0, bytes 값)이 단일 스캔에서 파싱돼 pending=15 로 들어간다.
+    # 마커 키 1건이 단일 스캔에서 수집돼 eval KEYS 로 넘어간다.
     assert len(redis.eval_calls) == 1
     numkeys, args = redis.eval_calls[0]
     assert numkeys == 3
     assert args[0] == f"budget:user:{{u1}}:{period}"
-    # base = used(50) + pending(15) - cur(30) = 35 → 최종 카운터 = 65.0
-    assert float(args[3]) == pytest.approx(35.0)
-    # resvsum base = pending(15) - cursum(5) = +10 → resvsum = 15
-    assert float(args[4]) == pytest.approx(10.0)
+    assert args[1] == f"budget:resvsum:user:{{u1}}:{period}"
+    assert args[2] == "budget:pending:user:{u1}:r1"
+    # ARGV = used_usd, resvsum 스냅샷 — orphan·플로어 산정은 Lua 가 한다.
+    assert float(args[3]) == pytest.approx(50.0)
+    assert float(args[4]) == pytest.approx(5.0)
 
 
 @pytest.mark.asyncio
@@ -254,9 +255,8 @@ async def test_reconcile_never_lowers_usage_counter():
 
         async def get(self, key):
             return {
-                f"budget:user:{{u1}}:{period}": "100.0",  # 앞선 카운터
                 f"budget:resvsum:user:{{u1}}:{period}": "7.0",
-            }.get(key)  # 마커 get()→None → pending 0 합산
+            }.get(key)
 
         async def scan_iter(self, match=None, count=None):
             if match == "budget:pending:*":
@@ -266,7 +266,7 @@ async def test_reconcile_never_lowers_usage_counter():
             self.eval_calls.append((numkeys, args))
 
     redis = _Redis()
-    LuaScriptLoader._scripts.setdefault("budget_rebuild", "-- mock")
+    LuaScriptLoader._scripts.setdefault("budget_reconcile", "-- mock")
     hc = HealthChecker(redis, engine, dm)
     for _ in range(3):
         await hc._check_redis()
@@ -275,7 +275,7 @@ async def test_reconcile_never_lowers_usage_counter():
 
     assert len(redis.eval_calls) == 1
     _, args = redis.eval_calls[0]
-    # usage_delta = 80 + 0 - 100 = -20 → 0 클램프(카운터를 깎지 않는다)
-    assert float(args[3]) == pytest.approx(0.0)
-    # resvsum = pending(0) - cursum(7) = -7 → 양방향 유지
-    assert float(args[4]) == pytest.approx(-7.0)
+    # 마커 키가 KEYS 로 넘어가고 ARGV 는 used·resvsum 스냅샷 —
+    # cur > db 일 때 카운터를 깎지 않는 플로어 판정은 Lua 안에서 이뤄진다.
+    assert float(args[3]) == pytest.approx(80.0)
+    assert float(args[4]) == pytest.approx(7.0)

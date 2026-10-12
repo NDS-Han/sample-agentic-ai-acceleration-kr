@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -195,6 +196,8 @@ async def bedrock_anthropic_sse_stream(
     usage_fired = False
     # 본문 로깅용 원본 SSE 프레임 누적. on_complete 가 없으면 아무것도 쌓지 않는다.
     accumulated_frames: list[str] = []
+    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
+    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
     complete_fired = False
 
     def _format(chunk: bytes) -> bytes:
@@ -402,7 +405,7 @@ async def bedrock_anthropic_sse_stream(
 
             _frame = _format(chunk)
             if on_complete is not None:
-                accumulated_frames.append(_frame.decode("utf-8", errors="replace"))
+                accumulated_frames.append(_frame_decoder.decode(_frame))
             yield _frame
 
     except (asyncio.CancelledError, GeneratorExit):
@@ -473,10 +476,22 @@ async def openai_sse_stream(
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
     accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
     complete_fired = False
+    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
+    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
         return f"data: {json.dumps(payload)}\n\n".encode()
+
+    def _emit_error_chunk_framed(err_type: str, message: str, *, had_tail: bool) -> bytes:
+        """패스스루는 원시 바이트를 그대로 흘려보내므로 직전 청크가 프레임 중간에서
+        끊겼을 수 있다. 개행 없이 error 프레임을 붙이면 클라이언트 SSE 파서가
+        두 프레임을 한 라인으로 읽어 **error 프레임까지** 파싱하지 못한다.
+        미완결 꼬리가 있었으면(had_tail — _flush 가 지우기 전에 스냅샷) `\\n\\n` 로
+        그 프레임을 닫고 낸다 — 꼬리는 어차피 반쪽 JSON 이라 버려지는 이벤트가
+        되고, error 프레임은 온전히 전달된다."""
+        prefix = b"\n\n" if had_tail else b""
+        return prefix + _emit_error_chunk(err_type, message)
 
     # aiter_bytes 청크는 SSE 프레임 경계와 무관하게 끊긴다 — `data: {...}` 라인이
     # 두 청크에 걸치면 json.loads 가 실패해 그 프레임의 usage 가 통째로 유실된다
@@ -652,13 +667,15 @@ async def openai_sse_stream(
                 logger.warning("stream_idle_timeout", idle_timeout=idle_timeout)
                 # yield 보다 먼저 확정 (클라이언트가 이미 끊겼으면 yield 가 GeneratorExit).
                 mark_outcome(outcome, "timeout")
+                _had_tail = bool(_pending_sse)
                 if u := _flush_pending_usage():
                     latest_usage = u
                 await _fire_on_usage()
                 await _fire_on_complete("partial")
                 await _aclose_iter(iterator)
-                yield _emit_error_chunk(
-                    "timeout_error", f"upstream idle timeout after {idle_timeout}s"
+                yield _emit_error_chunk_framed(
+                    "timeout_error", f"upstream idle timeout after {idle_timeout}s",
+                    had_tail=_had_tail,
                 )
                 return
 
@@ -666,7 +683,7 @@ async def openai_sse_stream(
                 latest_usage = u
             if on_complete is not None:
                 accumulated_frames.append(
-                    chunk.decode("utf-8", errors="replace")
+                    _frame_decoder.decode(chunk)
                     if isinstance(chunk, bytes)
                     else str(chunk)
                 )
@@ -686,12 +703,15 @@ async def openai_sse_stream(
     except Exception as exc:
         logger.exception("openai_stream_proxy_error")
         mark_outcome(outcome, "error")
+        _had_tail = bool(_pending_sse)
         if u := _flush_pending_usage():
             latest_usage = u
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
         await _aclose_iter(iterator)
-        yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
+        yield _emit_error_chunk_framed(
+            "stream_error", str(exc) or "stream_error", had_tail=_had_tail
+        )
         return
 
     if not client_disconnected:
@@ -740,6 +760,8 @@ async def responses_sse_stream(
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
     accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
     complete_fired = False
+    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
+    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
@@ -906,7 +928,7 @@ async def responses_sse_stream(
             _frame = _process(chunk)
             if on_complete is not None:
                 accumulated_frames.append(
-                    _frame.decode("utf-8", errors="replace")
+                    _frame_decoder.decode(_frame)
                     if isinstance(_frame, bytes)
                     else str(_frame)
                 )
