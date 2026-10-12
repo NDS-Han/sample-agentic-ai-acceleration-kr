@@ -119,59 +119,163 @@ async def test_spool_drain_has_time_bound():
 
 
 @pytest.mark.asyncio
-async def test_redis_recovery_invalidates_stale_budget_counters():
-    """REDIS_DEGRADED 복구 전이 시 usage 카운터를 무효화해 lazy rebuild 시킨다.
+async def test_redis_recovery_reconciles_stale_budget_counters():
+    """REDIS_DEGRADED 복구 시 usage 카운터를 budget_usages 로 **교정**한다.
 
-    열화 중엔 budget_deduct(INCRBYFLOAT)가 스킵돼 Redis 카운터가 budget_usages
-    보다 얇다. 키는 "존재"하므로 exists() 재수화가 절대 안 돌고 열화 중 사용분이
-    영구 누락된다 — 복구 전이에 카운터를 지워 DB 진실로 재구축시킨다.
+    열화 중엔 budget_deduct(INCRBYFLOAT)가 스킵돼 Redis 카운터가 DB 진실보다
+    얇다. DEL 로 지우면 안 된다 — 복구 직후 finalize 의 INCRBYFLOAT 가 얇은
+    키를 재생성해 exists() 재수화 게이트를 중독시킨다. 대신 additive
+    budget_rebuild 를 base=(db+pending)-cur 로 호출해 최종값을 db+pending 에
+    맞춘다(동시 델타 보존 + NX 락). 워커 지연은 창을 열어 재시도로 커버한다.
     """
     import asyncio
 
-    dm = DegradationManager()  # 실제 상태머신 — 전이를 실제로 태운다.
+    from app.periods import request_period
+    from app.services.lua_loader import LuaScriptLoader
 
-    # Redis 강제 강등: FAIL_THRESHOLD(5) 연속 실패.
+    period = request_period()
+    dm = DegradationManager()
+
     for _ in range(5):
         dm.report_redis_health(False)
     from app.schemas.domain import DegradationLevel
 
     assert dm.level == DegradationLevel.REDIS_DEGRADED
 
+    # DB 스냅샷: u1 총합 50.0(실은 카운터엔 30.0 만 들어있다 = 20 누락).
+    engine = MagicMock()
+
+    class _Result:
+        def all(self):
+            return [("USER", "u1", None, 50.0)]
+
+    @asynccontextmanager
+    async def _connect():
+        conn = MagicMock()
+        conn.execute = AsyncMock(return_value=_Result())
+        yield conn
+
+    engine.connect = _connect
+
     class _Redis:
         def __init__(self):
-            self.unlinked: list = []
-            self.scanned_patterns: list = []
+            self.eval_calls: list = []
 
         async def ping(self):
             return True
 
-        async def scan_iter(self, match=None, count=None):
-            self.scanned_patterns.append(match)
-            if match == "budget:user:*":
-                yield b"budget:user:{u1}:2026-02"
-                yield b"budget:user:{u1}:codex:2026-02"
+        async def set(self, *args, **kwargs):
+            return True  # 리더 게이트 항상 획득
 
-        async def unlink(self, key):
-            self.unlinked.append(key)
+        async def get(self, key):
+            return {
+                f"budget:user:{{u1}}:{period}": "30.0",  # 얇은 카운터
+                f"budget:resvsum:user:{{u1}}:{period}": "5.0",
+            }.get(key)
+
+        async def scan_iter(self, match=None, count=None):
+            if match == "budget:pending:user:{u1}:*":
+                yield "budget:pending:user:{u1}:r1"
+
+        async def eval(self, script, numkeys, *args):
+            self.eval_calls.append((numkeys, args))
+
+        async def unlink(self, key):  # 교정 방식은 어떤 키도 지우지 않는다
+            raise AssertionError("reconcile must not delete keys")
 
     redis = _Redis()
-    hc = HealthChecker(redis, _fake_db_engine(ok=True), dm)
+    LuaScriptLoader._scripts.setdefault("budget_rebuild", "-- mock")
+    hc = HealthChecker(redis, engine, dm)
 
-    # SUCCESS_THRESHOLD(3) 연속 성공으로 복구 — 마지막 틱에 무효화가 발동한다.
     for _ in range(3):
         await hc._check_redis()
     assert dm.level == DegradationLevel.HEALTHY
 
-    # 백그라운드 태스크가 스케줄됐다 — 완료를 기다린다.
     await asyncio.gather(*hc._bg_tasks, return_exceptions=True)
 
-    assert redis.unlinked == [
-        b"budget:user:{u1}:2026-02",
-        b"budget:user:{u1}:codex:2026-02",
-    ]
-    # config/resvsum 은 절대 건드리지 않는다 — 스캔 패턴 계약.
-    assert set(redis.scanned_patterns) == {
-        "budget:user:*",
-        "budget:team:*",
-        "budget:pending:*",
-    }
+    # 카운터가 아직 5.0 인 pending 1건(15.0-? 아니라 마커 값 없이 0 취급 아님 —
+    # _pending_reservation_sum 은 get() 이 None 을 돌려 0 으로 합산한다).
+    assert len(redis.eval_calls) == 1
+    numkeys, args = redis.eval_calls[0]
+    assert numkeys == 3
+    assert args[0] == f"budget:user:{{u1}}:{period}"
+    # base = used(50) + pending(0) - cur(30) = 20 → 최종 카운터 = 50.0
+    assert float(args[3]) == pytest.approx(20.0)
+    # resvsum base = pending(0) - cursum(5) = -5 → resvsum = 0
+    assert float(args[4]) == pytest.approx(-5.0)
+
+
+@pytest.mark.asyncio
+async def test_reconcile_never_lowers_usage_counter():
+    """cur > db(파이프라인 깊이)일 때 usage 교정은 0 하한 — 카운터를 깎지 않는다.
+
+    정상 운영 중 활성 유저는 finalize 즉시 Redis 에 계상되고 워커 flush 까지
+    budget_usages 가 뒤처져 항상 cur > db 다. 음수 교정을 허용하면 매 틱
+    정당하게 계상된 사용분이 깎여 fail-open 예산 창이 반복적으로 열린다.
+    resvsum 은 양방향 유지(죽은 예약의 stale over-hold 해소가 목적).
+    """
+    import asyncio
+
+    from app.periods import request_period
+    from app.services.lua_loader import LuaScriptLoader
+
+    period = request_period()
+    dm = DegradationManager()
+    for _ in range(5):
+        dm.report_redis_health(False)
+    from app.schemas.domain import DegradationLevel
+
+    assert dm.level == DegradationLevel.REDIS_DEGRADED
+
+    # DB 스냅샷 80 — 하지만 Redis 카운터는 100(미flush 파이프라인 사용분 포함).
+    engine = MagicMock()
+
+    class _Result:
+        def all(self):
+            return [("USER", "u1", None, 80.0)]
+
+    @asynccontextmanager
+    async def _connect():
+        conn = MagicMock()
+        conn.execute = AsyncMock(return_value=_Result())
+        yield conn
+
+    engine.connect = _connect
+
+    class _Redis:
+        def __init__(self):
+            self.eval_calls: list = []
+
+        async def ping(self):
+            return True
+
+        async def set(self, *args, **kwargs):
+            return True  # 리더 게이트 항상 획득
+
+        async def get(self, key):
+            return {
+                f"budget:user:{{u1}}:{period}": "100.0",  # 앞선 카운터
+                f"budget:resvsum:user:{{u1}}:{period}": "7.0",
+            }.get(key)
+
+        async def scan_iter(self, match=None, count=None):
+            if match == "budget:pending:user:{u1}:*":
+                yield "budget:pending:user:{u1}:r1"  # get()→None → 0 합산
+
+        async def eval(self, script, numkeys, *args):
+            self.eval_calls.append((numkeys, args))
+
+    redis = _Redis()
+    LuaScriptLoader._scripts.setdefault("budget_rebuild", "-- mock")
+    hc = HealthChecker(redis, engine, dm)
+    for _ in range(3):
+        await hc._check_redis()
+    assert dm.level == DegradationLevel.HEALTHY
+    await asyncio.gather(*hc._bg_tasks, return_exceptions=True)
+
+    assert len(redis.eval_calls) == 1
+    _, args = redis.eval_calls[0]
+    # usage_delta = 80 + 0 - 100 = -20 → 0 클램프(카운터를 깎지 않는다)
+    assert float(args[3]) == pytest.approx(0.0)
+    # resvsum = pending(0) - cursum(7) = -7 → 양방향 유지
+    assert float(args[4]) == pytest.approx(-7.0)

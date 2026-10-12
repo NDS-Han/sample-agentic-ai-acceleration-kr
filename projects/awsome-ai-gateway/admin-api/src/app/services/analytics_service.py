@@ -335,6 +335,10 @@ class AnalyticsService:
                     .where(
                         BudgetUsage.scope == BudgetScope.USER,
                         BudgetUsage.period == period,
+                        # ⚠️ client IS NULL = 총합 행만. per-app 행(client='claude-code'
+                        #    등)은 그 부분집합이라 빼지 않으면 사용자당 사용액이
+                        #    최대 2배로 부풀려진다.
+                        BudgetUsage.client.is_(None),
                     )
                     .group_by(User.id, User.display_name, User.email)
                 )
@@ -791,7 +795,9 @@ class AnalyticsService:
                     recorded AS (
                         SELECT scope_id AS user_id, COALESCE(SUM(used_usd), 0) AS used
                         FROM budget.budget_usages
-                        WHERE scope = 'USER' AND period = :period
+                        -- ⚠️ client IS NULL = 총합 행만. per-app 행은 부분집합이라
+                        --    같이 더하면 사용액이 최대 2배로 부풀려진다.
+                        WHERE scope = 'USER' AND period = :period AND client IS NULL
                         GROUP BY scope_id
                     )
                     SELECT r.user_id,

@@ -708,3 +708,31 @@ async def test_db_fallback_code_bug_propagates_unwrapped():
 
     with pytest.raises(TypeError):
         await svc.check_budget(None, db, "u1", "t1", "2026-04")
+
+
+@pytest.mark.asyncio
+async def test_pending_reservation_sum_decodes_bytes_values():
+    """예약 마커 합산은 Redis 의 bytes 응답을 디코딩해야 한다.
+
+    클라이언트는 decode_responses=False 라 get() 이 b'1.50' 을 돌려준다.
+    Decimal(str(b'1.5')) 는 InvalidOperation → 전부 조용히 스킵돼 진행 중
+    예약이 재수화/교정에서 누락, 카운터가 얇아져 예산이 헐거워진다.
+    """
+    mock_redis = AsyncMock()
+
+    async def _scan(match=None, count=None):
+        yield b"budget:pending:user:{u1}:r1"
+        yield b"budget:pending:user:{u1}:r2"
+        yield b"budget:pending:user:{u1}:r3"
+
+    mock_redis.scan_iter = _scan
+    vals = {
+        b"budget:pending:user:{u1}:r1": b"1.50",
+        b"budget:pending:user:{u1}:r2": "2.25",   # str 클라이언트도 허용
+        b"budget:pending:user:{u1}:r3": b"junk",   # 깨진 값은 스킵
+    }
+    mock_redis.get = AsyncMock(side_effect=lambda k: vals.get(k))
+
+    svc = BudgetService()
+    total = await svc._pending_reservation_sum(mock_redis, "budget:pending:user:{u1}:*")
+    assert total == Decimal("3.75")

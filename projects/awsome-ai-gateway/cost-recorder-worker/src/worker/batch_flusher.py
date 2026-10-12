@@ -390,6 +390,41 @@ class BatchFlusher:
             )
         return written
 
+    async def flush_dead_letter(self, entries: list[CostStreamEntry]) -> int:
+        """죽은 편지 경로 — 반복 실패로 스트림 전체를 막는 배치를 행 단위로 소화한다.
+
+        성공한 행만 기록하고, 실패한 행은 request_id·오류를 남겨 스킵한다.
+        성공적으로 소화한 행 수를 반환한다.
+
+        ⚠️ 이 경로는 예외 종류를 가리지 않는다. 같은 배치 머리가 dead-letter
+           grace(기본 120s)를 넘도록 실패했다는 것은 "재시도하면 나아질 수도 있는
+           오류"를 더 기다리는 비용이, 스트림 봉쇄 → MAXLEN 트림으로 인한 **전량
+           유실**보다 크다는 뜻이다(결정적 오류 — 예: 워커 이미지가 마이그레이션보다
+           먼저 배포된 UndefinedColumn — 는 재시도로 절대 낫지 않는다).
+           유실은 허용하되 silent 하진 않다: 행마다 ERROR 로그를 남긴다.
+        """
+        written = 0
+        for e in entries:
+            try:
+                async with self._session_factory() as session:
+                    # 배치 경로와 같은 재처리 방어 — 부분 커밋된 행의 이중청구 방지.
+                    if not await _filter_replays(session, [e]):
+                        await session.commit()
+                        continue
+                    inserted_ids = await self._insert_usage_logs(session, [e])
+                    if e.request_id in inserted_ids:
+                        await self._upsert_budget_usages(session, [e])
+                    await session.commit()
+                    written += 1
+            except Exception as exc:
+                logger.error(
+                    "row_dead_lettered",
+                    request_id=e.request_id,
+                    user_id=e.user_id,
+                    error=str(exc)[:200],
+                )
+        return written
+
     async def _insert_usage_logs(
         self, session: AsyncSession, entries: list[CostStreamEntry]
     ) -> set[str]:
@@ -463,20 +498,23 @@ class BatchFlusher:
             if e.client in _PER_APP_CLIENTS:
                 app_sums[(e.user_id, e.period, e.client)] += e.cost_usd
 
+        # ⚠️ 행 잠금 순서 고정 — multi-replica 에서 두 트랜잭션이 같은 행 집합을
+        #    반대 순서로 잠그면 데드락이다. 데드락은 재시도로 풀리지만 그동안
+        #    소비가 멈추므로, (scope_id, period, client) 정렬로 발생 확률을 줄인다.
         user_params = [
             {"scope": "USER", "scope_id": uid, "period": period, "cost": str(cost),
              "client": None}
-            for (uid, period), cost in user_sums.items()
+            for (uid, period), cost in sorted(user_sums.items())
         ]
         team_params = [
             {"scope": "TEAM", "scope_id": tid, "period": period, "cost": str(cost),
              "client": None}
-            for (tid, period), cost in team_sums.items()
+            for (tid, period), cost in sorted(team_sums.items())
         ]
         app_params = [
             {"scope": "USER", "scope_id": uid, "period": period, "cost": str(cost),
              "client": client}
-            for (uid, period, client), cost in app_sums.items()
+            for (uid, period, client), cost in sorted(app_sums.items())
         ]
         if user_params:
             await session.execute(_UPSERT_BUDGET_USAGE, user_params)

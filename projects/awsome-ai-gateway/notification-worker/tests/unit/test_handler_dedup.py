@@ -11,7 +11,7 @@ IntegrityError 를 "이미 배송됨"으로 처리해 스킵한다.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -168,7 +168,12 @@ async def test_dead_claim_takeover_sends_and_resolves_row():
     유실돼 재시도가 슬롯 충돌을 만난 경우다. 스킵하면 그 수신자는 영구
     미발송 — 발송 우선 원칙에 따라 pending 행을 인수한다.
     """
-    dead = MagicMock(status="pending", attempt_count=0)
+    dead = MagicMock(
+        status="pending",
+        attempt_count=0,
+        created_at=datetime.now(UTC) - timedelta(seconds=600),
+        last_attempt_at=None,
+    )
     handler, sender, _ = _handler(
         commit_exc=IntegrityError("dup", {}, Exception()),
         existing_row=dead,
@@ -177,6 +182,55 @@ async def test_dead_claim_takeover_sends_and_resolves_row():
     sender.send.assert_awaited_once()
     assert dead.status == "sent"
     assert dead.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_recent_takeover_heartbeat_is_not_retaken():
+    """created_at 은 오래됐지만 last_attempt_at 이 최근이면 인수하지 않는다.
+
+    다른 워커가 방금 dead-claim 을 인수하고 하트비트를 찍은 행 — created_at
+    만 보면 dead 로 보여 두 워커가 동시에 인수·발송한다. 나이는 최근 활동
+    (max(created_at, last_attempt_at)) 기준이어야 한다.
+    """
+    taken = MagicMock(
+        status="pending",
+        attempt_count=1,
+        created_at=datetime.now(UTC) - timedelta(seconds=900),
+        last_attempt_at=datetime.now(UTC) - timedelta(seconds=10),
+    )
+    handler, sender, _ = _handler(
+        commit_exc=IntegrityError("dup", {}, Exception()),
+        existing_row=taken,
+    )
+    await handler.handle(_event())
+    sender.send.assert_not_called()
+    assert taken.status == "pending"
+    assert taken.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_inflight_pending_row_is_not_taken_over():
+    """방금 INSERT 된 'pending' 행은 dead-claim 이 아니라 **진행 중 발송**이다.
+
+    INSERT commit~최종 상태 갱신 사이에도 행은 'pending' — 이 창에 도착한
+    재배송이 행을 인수하면 두 워커가 같은 메일을 동시에 보낸다. 발송 창
+    상한(재시도 포함 ≈130s)보다 젊은 pending 은 스킵해야 한다.
+    """
+    inflight = MagicMock(
+        status="pending",
+        attempt_count=0,
+        created_at=datetime.now(UTC) - timedelta(seconds=5),
+        last_attempt_at=None,
+    )
+    handler, sender, _ = _handler(
+        commit_exc=IntegrityError("dup", {}, Exception()),
+        existing_row=inflight,
+    )
+    await handler.handle(_event())
+    sender.send.assert_not_called()
+    # 진행 중인 원 발송이 status 를 갱신할 것이므로 행을 건드리지 않는다.
+    assert inflight.status == "pending"
+    assert inflight.attempt_count == 0
 
 
 @pytest.mark.asyncio

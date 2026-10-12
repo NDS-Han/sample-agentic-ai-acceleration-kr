@@ -183,15 +183,57 @@ class BaseHandler(ABC):
                             )
                         )
                     ).scalar_one_or_none()
-                    if existing is not None and existing.status == "pending":
+                    # ⚠️ 'pending' 이라고 다 dead-claim이 아니다 — **지금 진행 중인**
+                    #    정상 발송도 INSERT commit~최종 갱신 사이에는 'pending'이다.
+                    #    그 행을 인수하면 두 워커가 같은 메일을 동시 발송한다.
+                    #    발송 창의 상한 = 재시도 3회×(connect10+read30)+backoff7s ≈
+                    #    130s — 그 두 배(300s)보다 오래된 pending 만 dead 로 인수한다.
+                    #    ⚠️ 나이는 created_at 이 아니라 **최근 활동**(last_attempt_at)
+                    #    기준이다 — 인수한 워커가 아래에서 하트비트를 찍으므로,
+                    #    created_at 만 보면 다른 워커가 지금 인수해 처리 중인
+                    #    오래된 행을 재인수해 중복 발송한다.
+                    _DEAD_CLAIM_AGE_SEC = 300.0
+                    if existing is not None:
+                        _last_activity = max(
+                            x
+                            for x in (existing.created_at, existing.last_attempt_at)
+                            if x is not None
+                        ) if (existing.created_at or existing.last_attempt_at) else None
+                        claim_age = (
+                            (datetime.now(timezone.utc) - _last_activity).total_seconds()
+                            if _last_activity is not None
+                            else 0.0
+                        )
+                    else:
+                        claim_age = 0.0
+                    if (
+                        existing is not None
+                        and existing.status == "pending"
+                        and claim_age > _DEAD_CLAIM_AGE_SEC
+                    ):
                         logger.warning(
                             "dedup_dead_claim_takeover",
                             event_id=event.event_id,
                             event_type=event.type.value,
                             recipient=recipient.email,
+                            claim_age_sec=round(claim_age, 1),
                         )
                         log = existing
                         log.attempt_count = (log.attempt_count or 0) + 1
+                        # 인수 하트비트 — 즉시 커밋해 다른 워커가 이 행을
+                        # '살아있는 인수'로 보고 재인수하지 않게 한다.
+                        # (최종 상태는 아래 3g 에서 다시 커밋)
+                        log.last_attempt_at = datetime.now(timezone.utc)
+                        try:
+                            await session.commit()
+                        except Exception:
+                            # 하트비트 실패해도 발송은 진행 — 최악은 중복 인수
+                            # 가능성으로 회귀하는 것뿐이고 발송 유실보다 낫다.
+                            logger.warning(
+                                "dedup_takeover_heartbeat_failed",
+                                event_id=event.event_id,
+                                recipient=recipient.email,
+                            )
                         # 기존 행을 인수했으므로 슬롯은 유효하다 — 아래
                         # 'unclaimed_sending_anyway' 경고/메트릭을 억제.
                         slot_claimed = True

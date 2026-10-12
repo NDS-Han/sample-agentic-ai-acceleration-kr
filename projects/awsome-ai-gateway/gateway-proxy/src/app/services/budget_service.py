@@ -243,7 +243,13 @@ class BudgetService:
                 if val is None:
                     continue
                 try:
-                    total += Decimal(str(val))
+                    # ⚠️ bytes 디코딩 필수 — 클라이언트는 decode_responses=False 라
+                    #    get() 이 bytes 를 돌려주고, str(b'1.5')="b'1.5'" 는
+                    #    InvalidOperation 으로 조용히 0 합산이 됐다(진행 중
+                    #    예약이 재수화/교정에서 전부 누락 → 카운터 얇아짐).
+                    total += Decimal(
+                        val.decode() if isinstance(val, bytes) else str(val)
+                    )
                 except InvalidOperation:
                     continue
         except Exception:

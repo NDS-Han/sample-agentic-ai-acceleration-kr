@@ -89,3 +89,47 @@ async def test_trimmed_entry_fields_none_is_acked():
     xack_calls = [c for c in redis.xack.await_args_list if "3-3" in c.args[2:]]
     assert xack_calls, "trimmed 메시지 ID 가 XACK 되지 않았다"
     consumer._flusher.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_deterministic_failure_dead_letters_after_grace():
+    """같은 배치 머리가 grace 를 넘어 flush 실패하면 행 단위 소화로 넘긴다.
+
+    결정적 오류(예: UndefinedColumn)는 재시도로 절대 낫지 않는다 — grace
+    안에서는 전파해 PEL 재처리(at-least-once)를 지키고, 초과하면 행 단위
+    소화 + ACK 으로 스트림을 진행시킨다. 안 하면 MAXLEN 트림으로 뒤의
+    정상 entry 까지 전량 유실된다.
+    """
+    redis = AsyncMock()
+    consumer = _make_consumer(redis)
+    consumer._dead_letter_grace = 0.0  # grace 0 → 두 번째 실패에서 즉시 dead-letter
+    consumer._flusher.flush = AsyncMock(side_effect=RuntimeError("undefined column"))
+    consumer._flusher.flush_dead_letter = AsyncMock(return_value=0)
+
+    entries, ids = [MagicMock()], ["1-1"]
+    with pytest.raises(RuntimeError):
+        await consumer._flush_or_dead_letter(entries, ids)
+    # 같은 head 의 두 번째 실패 — grace 초과 → 행 단위 소화 후 스트림 진행.
+    await consumer._flush_or_dead_letter(entries, ids)
+    consumer._flusher.flush_dead_letter.assert_awaited_once()
+    # 배치 머리가 바뀌면 카운터가 리셋된다 — 새 배치는 다시 grace 를 받는다.
+    with pytest.raises(RuntimeError):
+        await consumer._flush_or_dead_letter([MagicMock()], ["2-1"])
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_propagates_within_grace():
+    """grace 안의 실패는 dead-letter 없이 전파 — PEL 재처리(at-least-once) 유지."""
+    redis = AsyncMock()
+    consumer = _make_consumer(redis)
+    consumer._dead_letter_grace = 3600.0
+    consumer._flusher.flush = AsyncMock(side_effect=RuntimeError("db down"))
+
+    with pytest.raises(RuntimeError):
+        await consumer._flush_or_dead_letter(
+            entries=[MagicMock()], ids=["1-1"]
+        )
+    # 두 번째도 같은 head 인데 grace 안 — 역시 전파(dead-letter 아님).
+    with pytest.raises(RuntimeError):
+        await consumer._flush_or_dead_letter(entries=[MagicMock()], ids=["1-1"])
+    consumer._flusher.flush_dead_letter.assert_not_called()

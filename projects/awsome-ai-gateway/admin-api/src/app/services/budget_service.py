@@ -241,9 +241,13 @@ class BudgetService:
                     from sqlalchemy import text as sa_text
                     total_row = await session.execute(
                         sa_text(
+                            # ⚠️ client IS NULL = 총합 행만 — per-app 행까지 더하면
+                            #    Redis 집행 카운터가 실비의 ~2배로 부풀어 거짓
+                            #    budget_exceeded 를 만든다.
                             "SELECT COALESCE(SUM(used_usd), 0) "
                             "FROM budget.budget_usages "
-                            "WHERE scope = 'USER' AND scope_id = :sid AND period = :period"
+                            "WHERE scope = 'USER' AND scope_id = :sid AND period = :period "
+                            "AND client IS NULL"
                         ),
                         {"sid": str(sid), "period": item.period},
                     )

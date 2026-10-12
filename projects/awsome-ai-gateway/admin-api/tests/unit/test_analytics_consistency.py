@@ -257,3 +257,42 @@ async def test_export_team_leader_keeps_isolation(mock_session):
     # TEAM_LEADER + 'all' → repo 호출에 scope_ids(본인 팀)가 실려야 한다.
     kw = repo.sum_usage_by_model.call_args.kwargs
     assert kw["scope_ids"] == [TEAM_A]
+
+
+# ── per-app budget_usages 이중계상 회귀 ──────────────────────────────────
+
+@pytest.mark.unit
+async def test_seed_residual_query_filters_client_rows(mock_session, admin_user):
+    """budget_usages 시드 잔차 집계는 반드시 client IS NULL(총합 행)만 더한다.
+
+    워커는 (scope, scope_id, period, client) 단위로 per-app 행도 쓴다 —
+    'claude-code'/'cowork'/'codex' 행은 총합의 부분집합이라 client IS NULL
+    필터 없이 SUM 하면 사용액이 최대 2배로 부풀고, 잔차(seed)가 허위로 생겨
+    대시보드의 사용자 비용이 과대계상된다.
+    """
+    svc = AnalyticsService()
+    with patch(
+        "app.services.analytics_service.AnalyticsRepository", return_value=_empty_repo()
+    ):
+        await svc.get_analytics(
+            mock_session, period="2026-09", group_by="user", actor=admin_user
+        )
+
+    sqls = _executed_sqls(mock_session)
+    bu_sqls = [s for s in sqls if "budget_usages" in s]
+    assert bu_sqls, "seed 잔차 질의가 실행되지 않음"
+    for s in bu_sqls:
+        assert "CLIENT IS NULL" in s.upper(), f"client IS NULL 누락: {s[:200]}"
+
+
+@pytest.mark.unit
+async def test_usage_by_user_seed_query_filters_client_rows(mock_session):
+    """`get_usage_by_user`(대시보드 top users)의 seed CTE 도 총합 행만 더한다."""
+    svc = AnalyticsService()
+    await svc.get_usage_by_user(mock_session, period="2026-09", date="2026-09-15")
+
+    sqls = _executed_sqls(mock_session)
+    bu_sqls = [s for s in sqls if "budget_usages" in s]
+    assert bu_sqls, "seed 잔차 질의가 실행되지 않음"
+    for s in bu_sqls:
+        assert "CLIENT IS NULL" in s.upper(), f"client IS NULL 누락: {s[:200]}"

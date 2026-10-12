@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 
 import structlog
 from sqlalchemy import text
@@ -38,6 +39,11 @@ class HealthChecker:
         # 백그라운드 태스크 강한 참조 — asyncio 는 약한 참조만 들고 있어, 참조
         # 없이 만든 태스크는 완료 전 GC 될 수 있다.
         self._bg_tasks: set[asyncio.Task] = set()
+        # 예산 카운터 교정 창 — 열화 해제 전이 시점부터 이 시각까지 매 healthy
+        # 틱마다 재시도한다. 스풀 재발행→워커 flush→budget_usages 반영에 지연이
+        # 있어 단발 교정은 열화 중 사용분을 놓칠 수 있다(워커 지연).
+        self._budget_reconcile_until: float = 0.0
+        self._budget_reconcile_running = False
         # P0-②: drained on each healthy Redis check to re-publish cost:stream
         # payloads that failed XADD while Redis was down.
         self._cost_stream_spool = cost_stream_spool
@@ -100,12 +106,25 @@ class HealthChecker:
                 # REDIS_DEGRADED 동안 budget_deduct(INCRBYFLOAT)가 스킵돼 usage
                 # 카운터가 budget_usages(DB 진실)보다 얇다. 키는 "존재"하니
                 # exists() 기반 재수화가 절대 안 돌고, 누락분만큼 월예산이 헐거워진다.
-                # 복구 전이에 usage 카운터+pending 마커를 지우면 다음 check 이
-                # budget_usages 로부터 lazy rebuild 한다. resvsum 은 건드리지
-                # 않는다(버려진 예약만큼 과대집계 = 예산 방향으로 보수적).
-                _inv = asyncio.create_task(self._invalidate_stale_budget_keys())
-                self._bg_tasks.add(_inv)
-                _inv.add_done_callback(self._bg_tasks.discard)
+                # 복구 전이에 교정 창을 열고, 창이 닫힐 때까지 매 틱 재교정한다.
+                self._budget_reconcile_until = time.monotonic() + 600.0
+            # 창이 열려 있는 동안 매 healthy 틱 재교정 — 단발은 워커 지연(스풀
+            # 재발행→budget_usages 반영)을 놓친다. 교정 자체는 멱등.
+            if (
+                time.monotonic() < self._budget_reconcile_until
+                and not self._budget_reconcile_running
+            ):
+                self._budget_reconcile_running = True
+
+                async def _reconcile_once() -> None:
+                    try:
+                        await self._reconcile_budget_counters()
+                    finally:
+                        self._budget_reconcile_running = False
+
+                _rec = asyncio.create_task(_reconcile_once())
+                self._bg_tasks.add(_rec)
+                _rec.add_done_callback(self._bg_tasks.discard)
             # P0-②: Redis is up — re-publish any cost:stream payloads that were
             # spooled while it was down (best-effort; failures re-buffer).
             if self._cost_stream_spool is not None and self._cost_stream_spool.size:
@@ -132,29 +151,137 @@ class HealthChecker:
             logger.warning("redis_health_check_failed")
             self._degradation.report_redis_health(healthy=False)
 
-    async def _invalidate_stale_budget_keys(self) -> None:
-        """Redis 복구 전이에 얇아진 예산 카운터를 무효화한다 (틱 밖 백그라운드).
+    async def _reconcile_budget_counters(self) -> None:
+        """Redis 복구 후 usage 카운터를 budget_usages(DB 진실)로 교정한다.
 
-        삭제 대상:
-          - ``budget:user:*`` / ``budget:team:*`` — usage 카운터(총합+per-app).
-            다음 ``check_budget`` 이 ``exists()==False`` 를 보고 budget_usages
-            에서 lazy rebuild 한다(DB 가 진실의 원천).
-          - ``budget:pending:*`` — 복구 시점에 날아간 카운터 위의 예약 마커.
-            지워야 settle 이 삭제된 카운터를 음수 델타로 재생성해 재수화
-            (``exists``) 게이트를 오염시키지 않는다. settle 스킵된 예약은
-            resvsum 에 남아 과대집계(보수적)로 수렴한다.
-        건드리지 않는 것: ``budget:config:*``(설정, 소실 아님), ``budget:resvsum:*``
-        (표시용 미정산 합계 — 지우면 settle 가 음수로 만들어 표시가 부풀어진다).
+        ⚠️ DEL 방식이면 안 되는 이유:
+          1. ``budget_deduct``(finalize)는 exists 무관하게 INCRBYFLOAT 로 키를
+             **생성**한다 — DEL 직후 finalize 가 얇은 키를 만들면 그 키가
+             ``exists()==True`` 를 만족해 lazy rebuild 가 영구 안 돌고 전체
+             이력이 누락된 채로 남는다(원래 고치려던 갭 그대로).
+          2. 복구 시점의 budget_usages 스냅샷은 스풀 재발행+워커 flush 가 끝나기
+             전이라 열화 중 사용분을 아직 모른다 — 그래서 창을 열어 재시도한다.
+
+        ``budget_rebuild.lua`` 는 additive(`SET = base + cur`) + NX 락이다 —
+        base 에 ``(db + pending) - cur`` 를 넘기면 최종값이 정확히
+        ``db + pending`` 이 되면서, 호출 사이에 끼어든 reserve/settle 델타도
+        더해져 보존된다(check 경로의 동일 경합 계약). 단 usage 베이스는 0
+        으로 하한 클램프한다 — 활성 유저는 스트림 파이프라인 깊이만큼 항상
+        cur > db 이므로, 음수 교정은 정당하게 계상된 사용분을 깎아 매 틱
+        fail-open 창을 연다. resvsum 은 마커 스캔이 진실이라 양방향으로
+        ``pending`` 에 맞춘다.
+
+        행 없는 카운터(예약만 있는 유저 등)는 건드리지 않는다 — 그 카운터는
+        이미 db(0)+pending 과 일치한다.
         """
-        deleted = 0
+        from decimal import Decimal
+
+        from app.periods import request_period
+        from app.services.budget_service import BudgetService
+        from app.services.lua_loader import LuaScriptLoader
+
+        period = request_period()
+        # ⚠️ 리더 게이트 — 모든 파드의 health checker 가 같은 창에 같은 스캔을
+        #    돌리면 N× 배수의 Redis/DB 부하다. NX+TTL 로 한 파드만 교정하고,
+        #    그 파드가 죽으면 TTL 만료로 다음 틱에 다른 파드가 잇는다.
+        #    (교정은 멱등이라 리더가 아니어도 안전하지만 비용이 크다.)
         try:
-            for pattern in ("budget:user:*", "budget:team:*", "budget:pending:*"):
-                async for key in self._redis.scan_iter(match=pattern, count=500):
-                    try:
-                        await self._redis.unlink(key)
-                        deleted += 1
-                    except Exception:
-                        logger.warning("budget_key_invalidate_failed", key=str(key)[:64])
-            logger.info("budget_counters_invalidated_on_recovery", deleted=deleted)
+            if not await self._redis.set(
+                "budget:reconcile-leader", "1", nx=True, ex=45
+            ):
+                return
         except Exception:
-            logger.warning("budget_key_invalidation_scan_failed", deleted=deleted)
+            return  # Redis 방금 플랩 — 다음 틱이 재시도
+        try:
+            async with self._db_engine.connect() as conn:
+                rows = (
+                    await conn.execute(
+                        text(
+                            "SELECT scope, scope_id, client, used_usd "
+                            "FROM budget.budget_usages WHERE period = :period"
+                        ),
+                        {"period": period},
+                    )
+                ).all()
+        except Exception:
+            # DB 도 아직 열화 중 — 창 안의 다음 틱이 재시도한다.
+            logger.warning("budget_reconcile_snapshot_failed")
+            return
+
+        script = LuaScriptLoader.get("budget_rebuild")
+        reconciled = 0
+        for scope, scope_id, client, used_usd in rows:
+            scope = str(scope).upper()
+            sid = str(scope_id)
+            try:
+                if scope == "USER" and client:
+                    c = str(client)
+                    usage_key = f"budget:user:{{{sid}}}:{c}:{period}"
+                    resvsum_key = f"budget:resvsum:user:{{{sid}}}:{c}:{period}"
+                    lock_key = f"budget:rebuild-lock:{{{sid}}}:{c}"
+                    pending_pat = f"budget:pending:client:{{{sid}}}:{c}:*"
+                elif scope == "USER" and not client:
+                    usage_key = f"budget:user:{{{sid}}}:{period}"
+                    resvsum_key = f"budget:resvsum:user:{{{sid}}}:{period}"
+                    lock_key = f"budget:rebuild-lock:{{{sid}}}"
+                    pending_pat = f"budget:pending:user:{{{sid}}}:*"
+                elif scope == "TEAM" and not client:
+                    # ⚠️ TEAM+client 행은 스키마상 만들어지지 않는다 — 있으면
+                    #    같은 총합 키를 하위집합 값으로 반복 교정해 오염시키므로
+                    #    명시적으로 걸러낸다.
+                    usage_key = f"budget:team:{{{sid}}}:{period}"
+                    resvsum_key = f"budget:resvsum:team:{{{sid}}}:{period}"
+                    lock_key = f"budget:rebuild-lock:{{{sid}}}"
+                    pending_pat = f"budget:pending:team:{{{sid}}}:*"
+                else:
+                    continue
+
+                cur_raw = await self._redis.get(usage_key)
+                cursum_raw = await self._redis.get(resvsum_key)
+                # ⚠️ bytes 디코딩 — decode_responses=False 라 get() 은 bytes.
+                #    str(b'30.0') 은 InvalidOperation → 이 키가 조용히 스킵된다.
+                cur = (
+                    Decimal(cur_raw.decode() if isinstance(cur_raw, bytes) else str(cur_raw))
+                    if cur_raw
+                    else Decimal("0")
+                )
+                cursum = (
+                    Decimal(cursum_raw.decode() if isinstance(cursum_raw, bytes) else str(cursum_raw))
+                    if cursum_raw
+                    else Decimal("0")
+                )
+                pending = await BudgetService._pending_reservation_sum(
+                    self._redis, pending_pat
+                )
+                # ⚠️ usage 교정은 **양수 방향만** 허용한다. 정상 운영 중에도
+                #    cur 은 finalize 즉시 올라가지만 db(budget_usages)는 워커
+                #    flush 까지 뒤처져, 활성 유저는 항상 cur > db 다 — 음수
+                #    교정을 허용하면 매 틱 카운터를 stale 스냅샷으로 끌어내려
+                #    미flush 파이프라인 깊이만큼 반복적 fail-open 창이 열린다.
+                #    반대 방향(cur>db 잔류, 스트림 유실)은 과대계상=fail-closed
+                #    라 보수적으로 그대로 둔다.
+                #    resvsum 은 양방향 — 마커 스캔이 곧 진실이라 stale over-hold
+                #    (죽은 예약의 잔여)를 풀어줘야 한다.
+                usage_delta = Decimal(str(used_usd)) + pending - cur
+                if usage_delta < 0:
+                    usage_delta = Decimal("0")
+                await self._redis.eval(
+                    script,
+                    3,
+                    usage_key,
+                    resvsum_key,
+                    lock_key,
+                    str(usage_delta),
+                    str(pending - cursum),
+                )
+                reconciled += 1
+            except Exception:
+                logger.warning(
+                    "budget_reconcile_key_failed", scope=scope, scope_id=sid
+                )
+        if reconciled:
+            logger.info(
+                "budget_counters_reconciled",
+                period=period,
+                keys=reconciled,
+            )

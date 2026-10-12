@@ -426,13 +426,16 @@ CREATE TABLE IF NOT EXISTS usage.daily_aggregates (
     team_id                UUID          NOT NULL REFERENCES auth.teams(id),
     dept_id                UUID          NOT NULL REFERENCES auth.departments(id),
     model_alias            VARCHAR(128)  NOT NULL,
-    input_tokens           INTEGER       NOT NULL DEFAULT 0,
-    output_tokens          INTEGER       NOT NULL DEFAULT 0,
-    cache_creation_tokens  INTEGER       NOT NULL DEFAULT 0,
-    cache_read_tokens      INTEGER       NOT NULL DEFAULT 0,
-    total_tokens           INTEGER       NOT NULL DEFAULT 0,
+    -- 토큰/건수는 SUM(integer) 결과(bigint)를 받는다 — INTEGER 로 두면 하루 합계가
+    -- 2.1B 를 넘는 사용자·모델 조합 하나가 그날 집계 전체를 numeric out of range 로
+    -- 죽인다(0044 마이그레이션).
+    input_tokens           BIGINT        NOT NULL DEFAULT 0,
+    output_tokens          BIGINT        NOT NULL DEFAULT 0,
+    cache_creation_tokens  BIGINT        NOT NULL DEFAULT 0,
+    cache_read_tokens      BIGINT        NOT NULL DEFAULT 0,
+    total_tokens           BIGINT        NOT NULL DEFAULT 0,
     total_cost_usd         NUMERIC(12,6) NOT NULL DEFAULT 0,
-    request_count          INTEGER       NOT NULL DEFAULT 0,
+    request_count          BIGINT        NOT NULL DEFAULT 0,
     created_at             TIMESTAMPTZ   NOT NULL DEFAULT now(),
     UNIQUE (date, user_id, model_alias)
 );

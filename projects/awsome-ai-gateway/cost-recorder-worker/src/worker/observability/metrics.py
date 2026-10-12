@@ -35,6 +35,20 @@ class WorkerMetrics:
             description="Size of each flushed batch (entries)",
             unit="1",
         )
+        # 미래 schema_version entry 수 — 게이트웨이가 워커보다 새 버전으로
+        # 올라갔을 때 의미 롤링 변경을 놓치지 않기 위한 배포 검증 신호.
+        self.future_schema_entries = self._meter.create_counter(
+            "cost_recorder_future_schema_entries_total",
+            description="Entries with schema_version newer than the worker supports",
+            unit="1",
+        )
+        # dead-letter 로 소화돼 스트림에서는 진행됐지만 기록되지 않은 행 수 —
+        # 과소청구 유실의 직접 계측. 0 이어야 정상.
+        self.dead_letter_dropped = self._meter.create_counter(
+            "cost_recorder_dead_letter_dropped_total",
+            description="Entries dropped by dead-letter handling after grace",
+            unit="1",
+        )
 
         # Observable gauge — 콜백은 StreamConsumer 가 등록한다(주기 조회 결과를 들고 있음).
         self._stream_lag_callbacks: list[Callable] = []

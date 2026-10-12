@@ -84,12 +84,18 @@ class Settings(BaseSettings):
     #: 회수 대상의 최소 idle 시간(ms). 살아 있는 형제 replica 의 진행 중 배치를 빼앗지
     #: 않도록 넉넉히 둔다. 겹쳐 회수되더라도 배치 flusher 의 재처리 필터가 이중청구를 막는다.
     xautoclaim_min_idle_ms: int = 300_000
+    #: 같은 배치 머리가 이 시간(초) 넘게 계속 flush 실패하면 결정적 오류로 보고
+    #: dead-letter(행 단위 소화)로 전환한다. 그냥 재시도하면 스트림 전체 봉쇄 →
+    #: MAXLEN 트림 전량 유실. 일시 DB 장애는 이 창 안에서 자연 복구된다.
+    stream_dead_letter_grace_sec: float = 120.0
 
     # Daily aggregator cron. 기본 매일 00:10 (reporting_timezone 기준).
     daily_usage_agg_cron: str = "10 0 * * *"
     # 매 실행마다 재집계하는 최근 완료 일수 — 스트림 백로그로 늦게 INSERT 된
-    # 행이 기존 집계 키에 누락되지 않도록 어제+그제를 UPSERT(멱등).
-    daily_usage_agg_recent_days: int = 2
+    # 행이 기존 집계 키에 누락되지 않도록 최근 N일을 UPSERT(멱등).
+    # ⚠️ 2 일로 두면 소비가 주말 넘게 막힌 뒤 복구된 백로그가 집계에 영구 누락된다 —
+    #    스트림 보존(~100k entries)으로 실현 가능한 늦도착 상한인 1주일로 늘린다.
+    daily_usage_agg_recent_days: int = 8
     # 통째로 누락된 과거 날짜(크론 실패·워커 다운)를 탐지·백필하는 lookback 일수.
     daily_usage_agg_backfill_lookback_days: int = 30
 

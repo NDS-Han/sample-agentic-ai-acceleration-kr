@@ -502,7 +502,7 @@ def test_xautoclaim_response_shapes_are_both_handled():
 
     two = ("5-0", [("1-1", {"payload": "{}"})])
     three = ("5-0", [("1-1", {"payload": "{}"})], ["9-9"])
-    assert _parse_xautoclaim(two) == ("5-0", [("1-1", {"payload": "{}"})])
-    assert _parse_xautoclaim(three) == ("5-0", [("1-1", {"payload": "{}"})])
-    assert _parse_xautoclaim(None) == ("0-0", [])
-    assert _parse_xautoclaim([]) == ("0-0", [])
+    assert _parse_xautoclaim(two) == ("5-0", [("1-1", {"payload": "{}"})], [])
+    assert _parse_xautoclaim(three) == ("5-0", [("1-1", {"payload": "{}"})], ["9-9"])
+    assert _parse_xautoclaim(None) == ("0-0", [], [])
+    assert _parse_xautoclaim([]) == ("0-0", [], [])

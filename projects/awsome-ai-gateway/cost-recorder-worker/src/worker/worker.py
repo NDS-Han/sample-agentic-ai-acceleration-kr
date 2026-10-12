@@ -33,11 +33,19 @@ class TaskSupervisor:
             self._tasks[name] = task
         logger.info("supervisor_started", task_count=len(self._registry))
 
+    #: 이 시간 이상 안정적으로 돈 태스크가 죽으면 백오프를 초기화한다 — 파드
+    #: 수명 동안 일시 오류가 몇 번 누적되면 그 뒤엔 매 실패가 60s 씩 소비를
+    #: 멈추게 돼, 짧은 blip 도 정지에 가까운 지연을 누적시킨다.
+    _STABLE_RESET_SEC = 300.0
+
     async def _supervised_run(
         self, name: str, coro_fn: Callable[[], Awaitable[None]]
     ) -> None:
+        import time as _time
+
         backoff: float = 1.0
         while True:
+            started_at = _time.monotonic()
             try:
                 await coro_fn()
                 logger.warning("task_exited_normally", name=name)
@@ -46,6 +54,8 @@ class TaskSupervisor:
                 logger.info("task_cancelled", name=name)
                 raise
             except Exception as exc:
+                if _time.monotonic() - started_at > self._STABLE_RESET_SEC:
+                    backoff = 1.0  # 오래 살았던 실행의 실패 — 과거 누적과 무관하게 리셋
                 logger.error(
                     "task_failed_restarting", name=name, error=str(exc), backoff=backoff
                 )

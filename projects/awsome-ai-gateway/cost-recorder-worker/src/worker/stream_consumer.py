@@ -27,22 +27,34 @@ from worker.schemas.cost_stream import CostStreamEntry
 logger = structlog.get_logger(__name__)
 
 
-def _parse_xautoclaim(res: Any) -> tuple[str, list]:
-    """``XAUTOCLAIM`` 응답을 ``(next_cursor, messages)`` 로 정규화한다.
+#: 이 워커가 이해하는 cost:stream 스키마의 최신 버전. 게이트웨이는 3.
+#: additive(필드 추가) 업그레이드는 Pydantic extra-ignore 로 안전하게 넘어가고,
+#: 이를 넘는 entry 는 경고+메트릭으로 배포 검증에 신호를 남긴다. 의미 변경이
+#: 필요한 업그레이드는 워커 선배포가 전제다 — ARCHITECTURE.md 의 스트림 계약 참고.
+_SUPPORTED_SCHEMA_VERSION = 3
+
+
+def _parse_xautoclaim(res: Any) -> tuple[str, list, list]:
+    """``XAUTOCLAIM`` 응답을 ``(next_cursor, messages, deleted_ids)`` 로 정규화한다.
 
     ⚠️ redis-py 는 버전에 따라 2-tuple ``(cursor, msgs)`` 또는 3-tuple
        ``(cursor, msgs, deleted_ids)`` 를 돌려준다. 한쪽만 가정하면 다른 쪽에서
        ValueError 로 회수가 통째로 죽고, 그 실패는 "고아가 없다" 와 구별되지 않는다.
+
+    Redis 7+ 의 3번째 원소는 **본문이 이미 MAXLEN 트림된** PEL 항목 id 들 —
+    이 항목들은 PEL 에서도 제거되며 되돌릴 수 없다. 호출자가 반드시
+    계측해야 한다: 유실이 아예 로그 없이 일어나는 경로다.
     """
     if not res:
-        return "0-0", []
+        return "0-0", [], []
     if isinstance(res, (list, tuple)):
         cursor = res[0] if len(res) >= 1 else "0-0"
         msgs = res[1] if len(res) >= 2 else []
+        deleted = res[2] if len(res) >= 3 else []
         if isinstance(cursor, bytes):
             cursor = cursor.decode()
-        return str(cursor), list(msgs or [])
-    return "0-0", []
+        return str(cursor), list(msgs or []), list(deleted or [])
+    return "0-0", [], []
 
 
 class StreamConsumer:
@@ -68,6 +80,12 @@ class StreamConsumer:
         self._claim_task: asyncio.Task | None = None
         self._metrics = metrics
         self.last_lag = 0
+        # dead-letter 추적 — 같은 배치 머리(첫 entry id)가 grace 기간을 넘어
+        # 계속 flush 실패하면 결정적 오류로 보고 행 단위 소화로 넘긴다.
+        # 그냥 재시도하면 스트림 전체 봉쇄 → MAXLEN 트림 전량 유실로 번진다.
+        self._fail_head: str | None = None
+        self._first_fail_at: float | None = None
+        self._dead_letter_grace = settings.stream_dead_letter_grace_sec
 
     async def ensure_group(self) -> None:
         """Consumer group MKSTREAM create. BUSYGROUP은 정상 상황."""
@@ -116,6 +134,11 @@ class StreamConsumer:
     async def _drain_backlog(self) -> None:
         """이 consumer 이름으로 남아있는 unacked 메시지 재처리 (at-least-once)."""
         while True:
+            # ⚠️ crash-loop(DB 장애 등)에서 _claim_task 는 다시 만들어지기 전에
+            #    여기서 죽으므로 lag 샘플링이 얼어붙는다 — 소비가 멈춘 바로 그
+            #    상황에서 알람이 사라진다. drain 루프가 재시작마다 도는 곳이니
+            #    여기서도 샘플링한다.
+            await self._sample_lag()
             msgs = await self._redis.xreadgroup(
                 groupname=self._group,
                 consumername=self._consumer,
@@ -133,7 +156,7 @@ class StreamConsumer:
                     await self._redis.xack(self._stream, self._group, *ids)
                 break
 
-            await self._flusher.flush(entries)
+            await self._flush_or_dead_letter(entries, ids)
             await self._redis.xack(self._stream, self._group, *ids)
             logger.info("backlog_batch_processed", count=len(ids))
 
@@ -206,13 +229,26 @@ class StreamConsumer:
                 logger.warning("xautoclaim_unsupported", error=str(e)[:160])
                 return
 
-            cursor, msgs = _parse_xautoclaim(res)
+            cursor, msgs, deleted_ids = _parse_xautoclaim(res)
+            if deleted_ids:
+                # Redis 7+: 본문이 MAXLEN 으로 잘려 PEL 에서도 제거된 항목들.
+                # (id, None) 경로와 달리 본문이 없어 기록 자체가 불가하다 —
+                # 유실된 청구 행 수를 반드시 계측한다.
+                logger.error(
+                    "cost_stream_pel_trimmed",
+                    count=len(deleted_ids),
+                    consumer=self._consumer,
+                )
             if not msgs:
-                break
+                # cursor 가 0-0 이 아니면 스캔 페이지에 idle 미달만 있던 것 —
+                # 뒤쪽에 고아가 남았을 수 있으니 cursor 까지 간다.
+                if cursor in ("0-0", "0", None):
+                    break
+                continue
 
             entries, ids = self._decode([(self._stream, msgs)])
             if entries:
-                await self._flusher.flush(entries)
+                await self._flush_or_dead_letter(entries, ids)
             if ids:
                 await self._redis.xack(self._stream, self._group, *ids)
                 reclaimed += len(ids)
@@ -235,11 +271,9 @@ class StreamConsumer:
             deadline = time.monotonic() + self._batch_interval
 
             while len(batch_entries) < self._batch_max:
-                remaining_ms = max(
-                    100, int((deadline - time.monotonic()) * 1000)
-                )
+                remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
-                    break
+                    break  # 배치 간격 상한 — 지연보다 flush 를 우선.
 
                 msgs = await self._redis.xreadgroup(
                     groupname=self._group,
@@ -268,8 +302,55 @@ class StreamConsumer:
                 await asyncio.sleep(0)
                 continue
 
-            await self._flusher.flush(batch_entries)
+            await self._flush_or_dead_letter(batch_entries, batch_ids)
             await self._redis.xack(self._stream, self._group, *batch_ids)
+
+    async def _flush_or_dead_letter(
+        self, entries: list[CostStreamEntry], ids: list[str]
+    ) -> None:
+        """배치 flush + 결정적 실패 dead-letter.
+
+        같은 배치 머리(첫 entry id)가 ``stream_dead_letter_grace_sec`` 를 넘어
+        계속 실패하면 그 오류는 재시도로 낫지 않는 결정적 오류다(예: 워커가
+        마이그레이션보다 먼저 배포된 UndefinedColumn). 그냥 재전파하면 스트림
+        전체가 멈추고 MAXLEN 트림으로 배치뿐 아니라 **뒤의 전부**가 유실된다.
+        grace 를 넘기면 행 단위 소화(flush_dead_letter)로 전환해 살리는 행만
+        기록하고 스트림을 진행시킨다.
+
+        배치 머리 기준으로 추적한다 — 같은 배치가 재전달되면 머리 id 가 같고,
+        배치가 바뀌면 카운터가 리셋된다(supervisor 재시작 시 head 부터 다시 읽음).
+        """
+        try:
+            await self._flusher.flush(entries)
+            self._fail_head = None
+            self._first_fail_at = None
+            return
+        except Exception:
+            head = ids[0] if ids else None
+            now = time.monotonic()
+            if head != self._fail_head or self._first_fail_at is None:
+                self._fail_head = head
+                self._first_fail_at = now
+                raise
+            if now - self._first_fail_at < self._dead_letter_grace:
+                raise
+            logger.error(
+                "batch_dead_letter",
+                head=head,
+                batch_size=len(entries),
+                grace_sec=round(now - self._first_fail_at, 1),
+            )
+            written = await self._flusher.flush_dead_letter(entries)
+            dropped = len(entries) - written
+            logger.warning(
+                "batch_dead_letter_done",
+                written=written,
+                dropped=dropped,
+            )
+            if dropped and self._metrics:
+                self._metrics.dead_letter_dropped.add(dropped)
+            self._fail_head = None
+            self._first_fail_at = None
 
     def _decode(
         self, raw_msgs: list[Any]
@@ -296,11 +377,25 @@ class StreamConsumer:
                         payload.decode("utf-8") if isinstance(payload, bytes) else payload
                     )
                     data = json.loads(raw)
-                    entries.append(CostStreamEntry(**data))
+                    entry = CostStreamEntry(**data)
+                    entries.append(entry)
                 except Exception as exc:
                     logger.warning(
                         "cost_stream_entry_parse_failed",
                         msg_id=raw_id,
                         error=str(exc),
                     )
+                else:
+                    if entry.schema_version > _SUPPORTED_SCHEMA_VERSION:
+                        # 게이트웨이가 워커보다 새 스키마 — additive(필드 추가)면
+                        # 파싱은 안전하지만, 의미 변경이면 조용히 오염된다.
+                        # loud signal 을 남겨 배포 검증이 잡을 수 있게 한다.
+                        logger.warning(
+                            "cost_stream_future_schema",
+                            msg_id=raw_id,
+                            schema_version=entry.schema_version,
+                            supported=_SUPPORTED_SCHEMA_VERSION,
+                        )
+                        if self._metrics:
+                            self._metrics.future_schema_entries.add(1)
         return entries, ids
