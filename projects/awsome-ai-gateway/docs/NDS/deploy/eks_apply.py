@@ -182,6 +182,15 @@ def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
 
 
 def live_alb_hostname(meta: dict, context: str = "") -> str:
+    """admin-ui Ingress 의 ALB hostname — NEXTAUTH_URL 대상은 admin-ui 다.
+
+    차트는 gateway/admin-ui/admin-api **세 개의 별도 Ingress**(group.name 미사용,
+    각자 ALB)를 만들고, kubectl 리스트는 이름순(`…-admin-api` 가 먼저)이라
+    "첫 hostname" 을 집으면 admin-api 나 gateway 의 ALB 가 NEXTAUTH_URL 로
+    들어가 OIDC 콜백이 깨진다. 이름 끝이 `-admin-ui` 인 항목만 고른다
+    (install-eks.sh 의 `{release}-admin-ui` 명명과 동일 대상 — fullnameOverride
+    도 접미사는 같다).
+    """
     argv = ["kubectl", "get", "ingress", "-n", meta["namespace"], "-o", "json"]
     if context:
         argv += ["--context", context]
@@ -190,6 +199,9 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
         return ""
     try:
         for item in json.loads(r.stdout).get("items", []):
+            name = (item.get("metadata") or {}).get("name") or ""
+            if not name.endswith("-admin-ui"):
+                continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
                 return lb[0]["hostname"]

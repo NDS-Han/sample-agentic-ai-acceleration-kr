@@ -104,6 +104,25 @@ jobs:
       - name: pytest
         run: python -m pytest ${{ env.PROJECT_DIR }}/db/tests -q -p no:cacheprovider
 
+  deploy-tool:
+    name: pytest · deploy 도구 (gateway.yaml → render/capture/doctor)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      # docs/NDS/deploy 는 자체 pyproject 가 없다 — requirements.txt 가 정본이다
+      # (PyYAML + rich + questionary; questionary 는 lazy import 지만 rich 는
+      #  cli.py 모듈 수준이라 설치가 필요하다).
+      - name: Install deps
+        run: python -m pip install --disable-pip-version-check \
+          -r ${{ env.PROJECT_DIR }}/docs/NDS/deploy/requirements.txt pytest
+      - name: pytest
+        working-directory: ${{ env.PROJECT_DIR }}/docs/NDS
+        run: python -m pytest deploy/tests -q -p no:cacheprovider
+
   helm-render:
     name: pytest · helm 렌더 정합성 (admin-api ↔ admin-ui)
     runs-on: ubuntu-latest

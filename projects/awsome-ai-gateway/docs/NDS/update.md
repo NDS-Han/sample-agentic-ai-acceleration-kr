@@ -116,7 +116,9 @@ plane 별로 다릅니다 — "태그만 되돌리기"는 롤백이 아닙니다
 
 | 무엇이 바뀌었나 | 되돌리는 법 |
 |---|---|
-| 앱 코드/이미지 | 이전 커밋/태그로 `render` + `up -d` |
+| 앱 코드/이미지 (compose) | 이전 커밋/태그로 `render` + `up -d` |
+| 앱 코드/이미지 (eks) | `images.tag`/`images.tags` 를 이전 값으로 되돌려 `./deploy apply`. 실패한 upgrade 는 helm 이 자동 롤백(`--atomic`/`--rollback-on-failure`). 수동 리비전 복귀는 `helm rollback <release> -n <ns>` — 단 **migration hook 은 rollback 시 재실행되지 않는다** |
+| 앱 코드/이미지 (ecs) | `images.tag` 를 이전 값으로 되돌려 `./deploy apply`. 배포 실패는 circuit breaker 가 서비스를 자동으로 이전 task def 로 되돌린다 |
 | 설정(gateway.yaml) | 이전 값으로 되돌려 `render` + 재기동 |
 | **DB 마이그레이션** | 다운그레이드 없음 — forward-fix (새 마이그레이션으로 수복) |
 | `.env` 삭제/유실 | **백업에서 복원** — VIRTUAL_KEY_ENCRYPTION_KEY를 잃으면 발급된 Virtual Key 전부 재발급 필요 |

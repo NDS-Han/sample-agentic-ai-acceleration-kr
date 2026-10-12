@@ -323,6 +323,21 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
 EKS_DEPLOYMENTS = ("gateway-proxy", "admin-api", "admin-ui", "scheduler",
                    "cost-recorder-worker", "notification-worker")
 
+# deployment 이름(kebab) → images.tags / helm values 키(camel)
+_KEBAB_TO_CAMEL = {
+    "gateway-proxy": "gatewayProxy", "admin-api": "adminApi",
+    "admin-ui": "adminUi", "scheduler": "scheduler",
+    "notification-worker": "notificationWorker",
+    "cost-recorder-worker": "costRecorderWorker",
+}
+
+
+def _expected_tag(cfg: GatewayConfig, kebab_svc: str) -> str:
+    """해당 서비스의 기대 태그 — images.tags 핀이 images.tag 기본값을 덮는다
+    (render/eks.py 와 같은 규칙). 어느 쪽도 없으면 '' (검사 생략)."""
+    return (cfg.images.tags or {}).get(_KEBAB_TO_CAMEL.get(kebab_svc, kebab_svc),
+                                       cfg.images.tag)
+
 
 def _eks_meta(gen_dir: Path, rep: DoctorReport) -> dict:
     p = gen_dir / "eks" / "deploy.yaml"
@@ -453,8 +468,9 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             except (KeyError, IndexError):
                 tag = ""
             msg = f"{name} {ready}/{want} ready"
-            if cfg.images.tag and tag and tag != cfg.images.tag:
-                rep.add("WARN", "deploy", f"{msg} — tag {tag} ≠ yaml {cfg.images.tag}")
+            expected = _expected_tag(cfg, name)
+            if expected and tag and tag != expected:
+                rep.add("WARN", "deploy", f"{msg} — tag {tag} ≠ yaml {expected}")
             elif ready and ready >= want:
                 rep.add("OK", "deploy", msg)
             else:
@@ -488,10 +504,32 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     if r.returncode == 0:
         live = yaml.safe_load(r.stdout) or {}
         drifts = []
-        if cfg.images.tag:
-            t = (((live.get("gatewayProxy") or {}).get("image") or {}).get("tag"))
-            if t and t != cfg.images.tag:
-                drifts.append(f"gatewayProxy.image.tag={t}≠{cfg.images.tag}")
+        for kebab, camel in _KEBAB_TO_CAMEL.items():
+            expected = _expected_tag(cfg, kebab)
+            if not expected:
+                continue
+            t = (((live.get(camel) or {}).get("image") or {}).get("tag"))
+            if t and t != expected:
+                drifts.append(f"{camel}.image.tag={t}≠{expected}")
+
+        # migration 이미지 ↔ repo alembic head — images.tag 는 migration 을
+        # 바꾸지 않으므로(독립 버전 라인) 새 릴리스 배포 시 head 가 뒤처질 수 있다.
+        # 태그에 head(\d+) 마커가 있을 때만 비교한다.
+        mig_tag = str(((live.get("migration") or {}).get("image") or {}).get("tag") or "")
+        m = re.search(r"head(\d+)", mig_tag)
+        repo_head = _migration_head()
+        if m and repo_head:
+            mig_head = f"{int(m.group(1)):04d}"
+            if int(mig_head) < int(repo_head):
+                rep.add("HIGH", "migration",
+                        f"migration 이미지 head{mig_head} < repo head{repo_head} — "
+                        f"배포해도 DB 가 {repo_head} 까지 안 올라갑니다. "
+                        f"images.tags.migration 또는 env overlay 를 새 마이그레이션 "
+                        f"이미지로 갱신하세요")
+            elif int(mig_head) > int(repo_head):
+                rep.add("WARN", "migration",
+                        f"migration 이미지 head{mig_head} > repo head{repo_head} — "
+                        f"checkout 이 배포된 환경보다 오래됐거나 잘못된 이미지 핀입니다")
         cidr = (((live.get("ingress") or {}).get("annotations") or {})
                 .get("alb.ingress.kubernetes.io/inbound-cidrs", ""))
         want_cidrs = ",".join(cfg.network.allowed_cidrs)

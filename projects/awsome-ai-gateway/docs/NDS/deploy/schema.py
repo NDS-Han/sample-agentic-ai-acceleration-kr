@@ -90,6 +90,12 @@ EKS_TAGGABLE_SERVICES = frozenset((
     "notificationWorker", "costRecorderWorker", "migration",
 ))
 
+# deploy.sizing 이 다루는 ecs 서비스 (render/ecs.py 의 service_sizing 키와 동일)
+ECS_SERVICES = frozenset((
+    "gateway-proxy", "admin-api", "admin-ui", "scheduler",
+    "notification-worker", "cost-recorder-worker", "migration",
+))
+
 
 @dataclass
 class ImagesConfig:
@@ -144,10 +150,19 @@ class GatewayConfig:
     def warnings(self) -> list[str]:
         """검증은 통과하지만 운영상 주의가 필요한 조합."""
         w: list[str] = []
+        open_cidrs = {"0.0.0.0/0", "::/0"}
         if self.network.mode == "public" and not self.network.allowed_cidrs:
             w.append(
                 "network.allowed_cidrs 가 비어 있어 게이트웨이가 인터넷 전체에 열립니다. "
                 "사용자 PC의 공인 IP 대역을 지정하십시오."
+            )
+        elif (self.network.mode == "public"
+              and open_cidrs & set(self.network.allowed_cidrs)):
+            # 빈 리스트와 같은 효과인데 '규칙을 넣었다'고 믿기 쉽다 — 캡처된 실제
+            # 배포(dev) 에도 0.0.0.0/0 이 있었다
+            w.append(
+                "allowed_cidrs 에 0.0.0.0/0(또는 ::/0)이 포함되어 사실상 인터넷 전체에 열립니다 — "
+                "실제 사용자 IP 대역으로 좁히십시오."
             )
         if self.deploy.size_tier in ("t0", "t1"):
             w.append(
@@ -173,6 +188,15 @@ class GatewayConfig:
             if self.images.tag and "migration" not in self.images.tags:
                 w.append("images.tag 는 migration 이미지를 바꾸지 않습니다 — migration 은 "
                          "images.tags.migration 또는 env overlay 태그를 따릅니다.")
+        if self.deploy.target == "eks" and not self.oidc.enabled:
+            # eks 렌더는 oidc 비활성이면 DEV_LOGIN_ENABLED=true 를 쓴다 —
+            # 프로덕션 티어에서 admin-ui 가 무인증 로그인으로 열린다
+            w.append("oidc 가 비활성입니다 — eks render 가 admin-ui DEV_LOGIN_ENABLED=true 로 둡니다 "
+                     "(인증 없는 로그인). 프로덕션에서는 oidc: 를 채우십시오.")
+        if self.deploy.target == "ecs" and not self.deploy.tfstate_table:
+            w.append("deploy.tfstate_table 이 비어 있습니다 — terraform state 가 "
+                     "locking 없이 저장됩니다 (동시 apply 가 state 를 깨뜨릴 수 있음). "
+                     "DynamoDB lock table 을 지정하십시오.")
         if self.deploy.target not in IMPLEMENTED_TARGETS:
             w.append(f"deploy.target={self.deploy.target} 의 렌더러는 아직 구현 전입니다 (validate 만 지원).")
         return w
@@ -220,6 +244,22 @@ class GatewayConfig:
                 and not self.domain.zone_id):
             e.append("ecs 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다 — "
                      "ACM 검증·레코드 생성에 필요. eks 는 env values 의 기존 인증서를 씁니다.")
+        if self.deploy.sizing:
+            unknown = sorted(set(self.deploy.sizing) - ECS_SERVICES)
+            if unknown:
+                e.append(f"deploy.sizing 에 알 수 없는 서비스: {unknown} "
+                         f"(허용: {sorted(ECS_SERVICES)})")
+            for svc, ov in self.deploy.sizing.items():
+                if not isinstance(ov, dict):
+                    e.append(f"deploy.sizing.{svc} 는 mapping 이어야 합니다: {ov!r}")
+                    continue
+                bad = sorted(set(ov) - {"cpu", "memory", "desired_count"})
+                if bad:
+                    e.append(f"deploy.sizing.{svc} 에 알 수 없는 키: {bad} "
+                             f"(허용: cpu, memory, desired_count)")
+            if self.deploy.target != "ecs":
+                e.append(f"deploy.sizing 은 ecs 경로에서만 적용됩니다 "
+                         f"(deploy.target={self.deploy.target}) — 지우거나 target 을 ecs 로.")
         if self.features.notifications.provider not in NOTIFICATION_PROVIDERS:
             e.append(f"notifications.provider 는 {NOTIFICATION_PROVIDERS} 중 하나여야 합니다.")
         if self.features.notifications.provider == "ses" and not self.features.notifications.ses_from:
@@ -257,6 +297,18 @@ def _safe_int(v: Any, errors: list[str], path: str) -> int:
         return 0
 
 
+def _safe_bool(v: Any, errors: list[str], path: str, default: bool = False) -> bool:
+    """yaml 의 unquoted true/false/on/off 는 이미 bool 로 온다. 인용된 문자열
+    ("false")은 bool() 이 True 로 평가해 플래그가 조용히 켜지므로 명시적으로 거절한다.
+    int 0/1 은 허용."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, int) and v in (0, 1):
+        return bool(v)
+    errors.append(f"{path} 는 true/false 여야 합니다: {v!r}")
+    return default
+
+
 def _require_mapping(node: Any, path: str, errors: list[str]) -> dict:
     if node is None:
         return {}
@@ -264,6 +316,33 @@ def _require_mapping(node: Any, path: str, errors: list[str]) -> dict:
         errors.append(f"{path} 는 mapping 이어야 합니다.")
         return {}
     return node
+
+
+def _check_unknown(node: dict, allowed: frozenset, path: str, errors: list[str]) -> None:
+    """스키마에 없는 키 거부 — 오타(iamges: 등)가 기본값으로 침묵 적용되는 걸 막는다.
+    allowed_cidrs 오타가 방화벽을 여는 배포 사고와 같은 부류라 경고가 아니라 오류."""
+    for k in node:
+        if k not in allowed:
+            errors.append(f"{path}.{k} 는 알 수 없는 키입니다 (허용: {sorted(allowed)})")
+
+
+_TOP_LEVEL_KEYS = frozenset((
+    "version", "env", "aws", "deploy", "network", "domain",
+    "features", "images", "clients", "oidc",
+))
+_AWS_KEYS = frozenset(("region", "account_id"))
+_DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
+                          "tfstate_table", "release", "namespace", "tf_env_dir"))
+_NETWORK_KEYS = frozenset(("mode", "allowed_cidrs"))
+_DOMAIN_KEYS = frozenset(("mode", "name", "zone_id"))
+_FEATURE_KEYS = frozenset(("notifications", "bi_insight", "pricing_lambda",
+                           "web_search", "body_logging", "observability"))
+_NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
+                         "ses_from", "sender_name"))
+_IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
+_CLIENT_KEYS = frozenset(("models_profile",))
+_OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
+                        "authorize_url", "token_url", "provider_name", "required_group"))
 
 
 def from_dict(raw: dict) -> GatewayConfig:
@@ -283,6 +362,17 @@ def from_dict(raw: dict) -> GatewayConfig:
     images = _require_mapping(raw.get("images"), "images", errors)
     clients = _require_mapping(raw.get("clients"), "clients", errors)
     oidc = _require_mapping(raw.get("oidc"), "oidc", errors)
+
+    _check_unknown(raw, _TOP_LEVEL_KEYS, "gateway.yaml", errors)
+    _check_unknown(aws, _AWS_KEYS, "aws", errors)
+    _check_unknown(deploy, _DEPLOY_KEYS, "deploy", errors)
+    _check_unknown(network, _NETWORK_KEYS, "network", errors)
+    _check_unknown(domain, _DOMAIN_KEYS, "domain", errors)
+    _check_unknown(features, _FEATURE_KEYS, "features", errors)
+    _check_unknown(notif, _NOTIF_KEYS, "features.notifications", errors)
+    _check_unknown(images, _IMAGE_KEYS, "images", errors)
+    _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
+    _check_unknown(oidc, _OIDC_KEYS, "oidc", errors)
 
     cfg = GatewayConfig(
         env=str(raw.get("env", "")),
@@ -322,11 +412,16 @@ def from_dict(raw: dict) -> GatewayConfig:
                 ses_from=str(notif.get("ses_from", "")),
                 sender_name=str(notif.get("sender_name", "")),
             ),
-            bi_insight=bool(features.get("bi_insight", False)),
-            pricing_lambda=bool(features.get("pricing_lambda", False)),
-            web_search=bool(features.get("web_search", False)),
-            body_logging=bool(features.get("body_logging", False)),
-            observability=bool(features.get("observability", False)),
+            bi_insight=_safe_bool(features.get("bi_insight", False), errors,
+                                  "features.bi_insight"),
+            pricing_lambda=_safe_bool(features.get("pricing_lambda", False), errors,
+                                      "features.pricing_lambda"),
+            web_search=_safe_bool(features.get("web_search", False), errors,
+                                  "features.web_search"),
+            body_logging=_safe_bool(features.get("body_logging", False), errors,
+                                    "features.body_logging"),
+            observability=_safe_bool(features.get("observability", False), errors,
+                                     "features.observability"),
         ),
         images=ImagesConfig(
             registry=str(images.get("registry", "")),

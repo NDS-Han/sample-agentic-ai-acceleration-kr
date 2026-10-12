@@ -175,6 +175,12 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
     if cfg.features.web_search:
         notes.append("web_search: AGENTCORE_GATEWAY_URL 은 기존 env values 에 있어야 "
                      "합니다 — 없으면 플래그만 켜지고 라우터가 건너뜁니다.")
+    if cfg.oidc.enabled and cfg.oidc.client_secret:
+        # 차트 adminUi env 범위는 value: 만 렌더하고 secretKeyRef 를 못 만든다 —
+        # confidential client 는 템플릿 추가가 필요 (chart values.yaml 주석 §OIDC 참조)
+        notes.append("oidc.client_secret: eks 경로에서는 렌더되지 않습니다 — 차트 권장은 "
+                     "secret 없는 public client + PKCE 입니다. confidential client 가 "
+                     "필요하면 env values 의 시크릿 경로로 주입하세요.")
     return notes
 
 

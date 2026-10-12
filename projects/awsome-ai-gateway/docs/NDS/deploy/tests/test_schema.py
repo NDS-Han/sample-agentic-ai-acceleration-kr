@@ -151,3 +151,85 @@ def test_smtp_port_non_numeric_is_schema_error_not_valueerror():
 def test_cloudfront_temp_only_eks():
     with pytest.raises(schema.SchemaError, match="cloudfront-temp"):
         schema.from_dict(minimal(domain={"mode": "cloudfront-temp", "name": "x.com"}))
+
+
+# ── strict parsing — 오타 키/따옴표 bool 이 조용히 기본값이 되는 걸 막는다 ──
+
+def test_unknown_top_level_key_rejected():
+    with pytest.raises(schema.SchemaError, match="알 수 없는 키"):
+        schema.from_dict(minimal(iamges={"tag": "x"}))   # images 오타
+
+
+def test_unknown_section_key_rejected():
+    with pytest.raises(schema.SchemaError, match="network.allowd_cidrs"):
+        schema.from_dict(minimal(network={"allowd_cidrs": ["1.2.3.0/24"]}))
+
+
+def test_unknown_oidc_key_rejected():
+    with pytest.raises(schema.SchemaError, match="oidc"):
+        schema.from_dict(minimal(oidc={
+            "issuer_url": "https://idp.example.com",
+            "client_id": "c", "authorize_url": "https://a", "token_url": "https://t",
+            "client_secret_typo": "s"}))
+
+
+def test_string_bool_feature_flag_rejected():
+    # yaml 의 인용된 "false" 는 문자열 — bool() 이면 True 로 켜져버리므로 오류여야 한다
+    with pytest.raises(schema.SchemaError, match="web_search"):
+        schema.from_dict(minimal(features={"web_search": "false"}))
+
+
+def test_int_bool_feature_flag_allowed():
+    cfg = schema.from_dict(minimal(features={"web_search": 0}))
+    assert cfg.features.web_search is False
+
+
+def test_open_cidr_warns():
+    # 캡처된 dev 배포에 실제로 있던 조합 — 빈 리스트와 같은 효과인데 경고가 없었다
+    cfg = schema.from_dict(minimal(
+        network={"mode": "public", "allowed_cidrs": ["65.2.11.169/32", "0.0.0.0/0"]}))
+    assert any("0.0.0.0/0" in w for w in cfg.warnings())
+
+
+def test_narrow_cidr_no_open_warning():
+    cfg = schema.from_dict(minimal(
+        network={"mode": "public", "allowed_cidrs": ["65.2.11.169/32"]}))
+    assert not any("0.0.0.0/0" in w for w in cfg.warnings())
+
+
+def test_eks_no_oidc_warns_dev_login():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "abc"}))
+    assert any("DEV_LOGIN" in w for w in cfg.warnings())
+
+
+def test_ecs_no_lock_table_warns():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t1"},
+        images={"tag": "abc"}))
+    assert any("tfstate_table" in w for w in cfg.warnings())
+
+
+def test_sizing_unknown_service_rejected():
+    with pytest.raises(schema.SchemaError, match="deploy.sizing"):
+        schema.from_dict(minimal(
+            deploy={"target": "ecs", "size_tier": "t1",
+                    "sizing": {"gateway-prox": {"cpu": 2048}}},
+            images={"tag": "abc"}))
+
+
+def test_sizing_on_eks_rejected():
+    with pytest.raises(schema.SchemaError, match="ecs 경로"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3",
+                    "sizing": {"gateway-proxy": {"cpu": 2048}}},
+            images={"tag": "abc"}))
+
+
+def test_sizing_valid_on_ecs():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t1",
+                "sizing": {"gateway-proxy": {"cpu": 2048}}},
+        images={"tag": "abc"}))
+    assert cfg.deploy.sizing["gateway-proxy"]["cpu"] == 2048

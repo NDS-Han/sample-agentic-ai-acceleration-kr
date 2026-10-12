@@ -5,6 +5,10 @@
 표준 경로입니다. 직접 편집 대신 `./deploy configure` 로 현재 값을 기본값으로
 항목을 하나씩 확인하며 바꿀 수도 있습니다.
 
+스키마는 **엄격**합니다 — 목록에 없는 키(오타 포함)는 오류이며, bool 플래그는
+`true`/`false` 만 받습니다(인용된 `"false"` 문자열은 거부). 오타가 기본값으로
+조용히 적용되는 사고(예: `allowed_cidrs` 오타로 방화벽이 열림)를 막기 위해서입니다.
+
 ## 전체 구조
 
 ```yaml
@@ -29,7 +33,8 @@ network:
 domain:
   mode: none                  # none | cloudfront-temp | route53-acm
   name: example.com           # route53-acm 일 때 필수
-  zone_id: Z123...            # Route53 hosted zone (eks)
+  zone_id: Z123...            # Route53 hosted zone — ecs+route53-acm 이면 필수
+                              # (eks 는 env values 의 기존 인증서/레코드를 쓰므로 미사용)
 
 features:
   notifications:
