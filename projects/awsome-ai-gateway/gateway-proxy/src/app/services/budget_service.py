@@ -260,189 +260,192 @@ class BudgetService:
 
         # Redis 예산 설정 확인
         if redis is not None:
-            # TEAM config cold-cache fallback: init SQL / alembic backfill 로 DB에
-            # 삽입된 TEAM 예산이 Redis에 없으면 DB에서 조회해 캐시 (admin-api startup
-            # warmup 의 안전망).
-            if db is not None and not await redis.exists(team_config_key):
-                await self._hydrate_team_config_cache(redis, db, team_id)
-
-            # P0-③: USER config cold-cache fallback. If admin's best-effort SET of
-            # the user-config key (which carries app_clients) was lost, the per-app
-            # budget gate below would silently skip → budget bypass. Rehydrate from
-            # DB on miss (ensure_config_cached rebuilds app_clients from active
-            # per-app BudgetConfig rows) so the gate stays enforced.
-            user_config_present = await redis.exists(user_config_key)
-            if db is not None and not user_config_present:
-                await self.ensure_config_cached(redis, db, user_id)
-                user_config_present = await redis.exists(user_config_key)
-
-            # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
-            #
-            # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
-            #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
-            #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
-            #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
-            #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
-            #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
-            #    전체가 0 으로 리셋되고 전부 통과한다.**
-            #
-            #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
-            #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
-            #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
-            if not await redis.exists(user_key) and db is not None:
-                try:
-                    from sqlalchemy import func, select, text
-
-                    # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
-                    # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
-                    result = await db.execute(
-                        text(
-                            "SELECT client, used_usd FROM budget.budget_usages "
-                            "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
-                        ),
-                        {"uid": user_id, "period": period},
-                    )
-                    rows = result.all()
-                    by_client = {r[0]: r[1] for r in rows}
-                    total_row = by_client.get(None)
-
-                    if total_row is None:
-                        # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
-                        from app.models.usage import UsageRecord
-
-                        stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
-                            UsageRecord.user_id == user_id,
-                            func.to_char(UsageRecord.requested_at, "YYYY-MM") == period,
-                        )
-                        result2 = await db.execute(stmt2)
-                        used_from_db = result2.scalar_one()
-                    else:
-                        used_from_db = total_row
-
-                    if used_from_db and used_from_db > 0:
-                        # ⚠️ budget_usages 는 **정산된 실비**만 안다 — in-flight 최악비용
-                        #    예약은 모른다. 카운터만 유실되고 예약 마커가 남아 있으면
-                        #    settle 이 (실비 - 예약치) 를 적용해 한 번도 더해지지 않은
-                        #    예약치를 빼버린다(과소 계상). 복원 시 살아있는 마커 합을
-                        #    다시 얹고 resvsum 도 그 합으로 재설정한다.
-                        pending = await self._pending_reservation_sum(
-                            redis, f"budget:pending:user:{{{user_id}}}:*"
-                        )
-                        # budget_rebuild.lua: EXISTS→SET 사이의 동시 델타 보존 +
-                        # 동시 rebuild 는 NX 락으로 차단(락 키도 {uid} 해시태그).
-                        await redis.eval(
-                            LuaScriptLoader.get("budget_rebuild"),
-                            3,
-                            user_key,
-                            f"budget:resvsum:user:{{{user_id}}}:{period}",
-                            f"budget:rebuild-lock:{{{user_id}}}",
-                            str(Decimal(str(used_from_db)) + pending),
-                            str(pending),
-                        )
-                        logger.info(
-                            "budget_counter_restored",
-                            user_id=user_id,
-                            period=period,
-                            used=str(used_from_db),
-                            pending_reservations=str(pending),
-                        )
-
-                    # ── 앱별 카운터도 복원한다 ──
-                    #
-                    # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
-                    #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
-                    #    한도가 그 달 내내 사실상 없어진다.
-                    #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
-                    #    그 사이의 사용량을 잃는다).
-                    for client_name, used in by_client.items():
-                        if client_name is None or not used or used <= 0:
-                            continue
-                        app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
-                        if await redis.exists(app_key):
-                            continue
-                        # 총합 키와 같은 이유로 in-flight 예약을 재적용한다.
-                        pending = await self._pending_reservation_sum(
-                            redis,
-                            f"budget:pending:client:{{{user_id}}}:{client_name}:*",
-                        )
-                        await redis.eval(
-                            LuaScriptLoader.get("budget_rebuild"),
-                            3,
-                            app_key,
-                            f"budget:resvsum:user:{{{user_id}}}:{client_name}:{period}",
-                            f"budget:rebuild-lock:{{{user_id}}}:{client_name}",
-                            str(Decimal(str(used)) + pending),
-                            str(pending),
-                        )
-                        logger.info(
-                            "budget_app_counter_restored",
-                            user_id=user_id,
-                            client=client_name,
-                            period=period,
-                            used=str(used),
-                            pending_reservations=str(pending),
-                        )
-                except Exception:
-                    logger.exception("budget_counter_restore_failed", user_id=user_id)
-
-            # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
-            # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
-            # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
-            # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
-            if not await redis.exists(team_key) and db is not None:
-                try:
-                    from sqlalchemy import text as _t
-
-                    result = await db.execute(
-                        _t(
-                            "SELECT used_usd FROM budget.budget_usages "
-                            "WHERE scope = 'TEAM' AND scope_id = :tid "
-                            "AND period = :period AND client IS NULL"
-                        ),
-                        {"tid": team_id, "period": period},
-                    )
-                    team_used = result.scalar_one_or_none()
-                    if team_used is None:
-                        from sqlalchemy import func as _f, select as _s
-
-                        from app.models.usage import UsageRecord
-
-                        team_used = (
-                            await db.execute(
-                                _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
-                                    UsageRecord.team_id == team_id,
-                                    _f.to_char(UsageRecord.requested_at, "YYYY-MM")
-                                    == period,
-                                )
-                            )
-                        ).scalar_one()
-                    if team_used and Decimal(str(team_used)) > 0:
-                        pending = await self._pending_reservation_sum(
-                            redis, f"budget:pending:team:{{{team_id}}}:*"
-                        )
-                        await redis.eval(
-                            LuaScriptLoader.get("budget_rebuild"),
-                            3,
-                            team_key,
-                            f"budget:resvsum:team:{{{team_id}}}:{period}",
-                            f"budget:rebuild-lock:{{{team_id}}}",
-                            str(Decimal(str(team_used)) + pending),
-                            str(pending),
-                        )
-                        logger.info(
-                            "budget_team_counter_restored",
-                            team_id=team_id,
-                            period=period,
-                            used=str(team_used),
-                            pending_reservations=str(pending),
-                        )
-                except Exception:
-                    logger.exception("budget_team_counter_restore_failed", team_id=team_id)
-
-            # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
-            # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고
-            # Python 에서 결과를 합친다. Lua 내부 체크는 여전히 각 scope 원자적.
+            # 어느 지점의 Redis 실패든 같은 계약 — DB fallback. 재수화
+            # exists() 사전 호출까지 try 안이어야 헬스체커 마킹 전 미드요청
+            # 단절이 500 이 아니라 fallback 으로 간다.
             try:
+                # TEAM config cold-cache fallback: init SQL / alembic backfill 로 DB에
+                # 삽입된 TEAM 예산이 Redis에 없으면 DB에서 조회해 캐시 (admin-api startup
+                # warmup 의 안전망).
+                if db is not None and not await redis.exists(team_config_key):
+                    await self._hydrate_team_config_cache(redis, db, team_id)
+
+                # P0-③: USER config cold-cache fallback. If admin's best-effort SET of
+                # the user-config key (which carries app_clients) was lost, the per-app
+                # budget gate below would silently skip → budget bypass. Rehydrate from
+                # DB on miss (ensure_config_cached rebuilds app_clients from active
+                # per-app BudgetConfig rows) so the gate stays enforced.
+                user_config_present = await redis.exists(user_config_key)
+                if db is not None and not user_config_present:
+                    await self.ensure_config_cached(redis, db, user_id)
+                    user_config_present = await redis.exists(user_config_key)
+
+                # Redis 키 없으면 DB에서 복구 후 재캐싱 (LRU 삭제 / failover 대비)
+                #
+                # ⚠️ 이 경로는 **죽은 코드였다 — fail-OPEN 방향으로.** 쿼리에
+                #    `client IS NULL` 이 없어서, 그 (user, period) 에 per-app 행이 **하나만**
+                #    있어도 `scalar_one_or_none()` 이 MultipleResultsFound 로 터지고, 아래
+                #    `except Exception` 이 그것을 삼켰다. 그러면 user_key 가 복원되지 않은
+                #    채로 budget_check.lua 가 돌아 `used=0` 을 읽는다 — config 는 별도 키에서
+                #    재수화되므로 `config_present` 는 true 다. 즉 **그 사용자의 월 사용액
+                #    전체가 0 으로 리셋되고 전부 통과한다.**
+                #
+                #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
+                #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
+                #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
+                if not await redis.exists(user_key) and db is not None:
+                    try:
+                        from sqlalchemy import func, select, text
+
+                        # 총합 행과 앱별 행을 **한 번에** 읽는다. 총합은 client IS NULL 이고,
+                        # 앱별 행은 각자의 카운터 키로 복원해야 한다(아래).
+                        result = await db.execute(
+                            text(
+                                "SELECT client, used_usd FROM budget.budget_usages "
+                                "WHERE scope = 'USER' AND scope_id = :uid AND period = :period"
+                            ),
+                            {"uid": user_id, "period": period},
+                        )
+                        rows = result.all()
+                        by_client = {r[0]: r[1] for r in rows}
+                        total_row = by_client.get(None)
+
+                        if total_row is None:
+                            # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
+                            from app.models.usage import UsageRecord
+
+                            stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
+                                UsageRecord.user_id == user_id,
+                                func.to_char(UsageRecord.requested_at, "YYYY-MM") == period,
+                            )
+                            result2 = await db.execute(stmt2)
+                            used_from_db = result2.scalar_one()
+                        else:
+                            used_from_db = total_row
+
+                        if used_from_db and used_from_db > 0:
+                            # ⚠️ budget_usages 는 **정산된 실비**만 안다 — in-flight 최악비용
+                            #    예약은 모른다. 카운터만 유실되고 예약 마커가 남아 있으면
+                            #    settle 이 (실비 - 예약치) 를 적용해 한 번도 더해지지 않은
+                            #    예약치를 빼버린다(과소 계상). 복원 시 살아있는 마커 합을
+                            #    다시 얹고 resvsum 도 그 합으로 재설정한다.
+                            pending = await self._pending_reservation_sum(
+                                redis, f"budget:pending:user:{{{user_id}}}:*"
+                            )
+                            # budget_rebuild.lua: EXISTS→SET 사이의 동시 델타 보존 +
+                            # 동시 rebuild 는 NX 락으로 차단(락 키도 {uid} 해시태그).
+                            await redis.eval(
+                                LuaScriptLoader.get("budget_rebuild"),
+                                3,
+                                user_key,
+                                f"budget:resvsum:user:{{{user_id}}}:{period}",
+                                f"budget:rebuild-lock:{{{user_id}}}",
+                                str(Decimal(str(used_from_db)) + pending),
+                                str(pending),
+                            )
+                            logger.info(
+                                "budget_counter_restored",
+                                user_id=user_id,
+                                period=period,
+                                used=str(used_from_db),
+                                pending_reservations=str(pending),
+                            )
+
+                        # ── 앱별 카운터도 복원한다 ──
+                        #
+                        # ⚠️ 예전에는 총합 키만 복원했다. 그래서 Redis 데이터 유실/failover
+                        #    후 **소진된 앱별 예산이 조용히 0 으로 되돌아갔다** — 그 앱의
+                        #    한도가 그 달 내내 사실상 없어진다.
+                        #    이미 존재하는 키는 건드리지 않는다(진행 중인 카운트를 덮어쓰면
+                        #    그 사이의 사용량을 잃는다).
+                        for client_name, used in by_client.items():
+                            if client_name is None or not used or used <= 0:
+                                continue
+                            app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
+                            if await redis.exists(app_key):
+                                continue
+                            # 총합 키와 같은 이유로 in-flight 예약을 재적용한다.
+                            pending = await self._pending_reservation_sum(
+                                redis,
+                                f"budget:pending:client:{{{user_id}}}:{client_name}:*",
+                            )
+                            await redis.eval(
+                                LuaScriptLoader.get("budget_rebuild"),
+                                3,
+                                app_key,
+                                f"budget:resvsum:user:{{{user_id}}}:{client_name}:{period}",
+                                f"budget:rebuild-lock:{{{user_id}}}:{client_name}",
+                                str(Decimal(str(used)) + pending),
+                                str(pending),
+                            )
+                            logger.info(
+                                "budget_app_counter_restored",
+                                user_id=user_id,
+                                client=client_name,
+                                period=period,
+                                used=str(used),
+                                pending_reservations=str(pending),
+                            )
+                    except Exception:
+                        logger.exception("budget_counter_restore_failed", user_id=user_id)
+
+                # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
+                # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
+                # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
+                # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
+                if not await redis.exists(team_key) and db is not None:
+                    try:
+                        from sqlalchemy import text as _t
+
+                        result = await db.execute(
+                            _t(
+                                "SELECT used_usd FROM budget.budget_usages "
+                                "WHERE scope = 'TEAM' AND scope_id = :tid "
+                                "AND period = :period AND client IS NULL"
+                            ),
+                            {"tid": team_id, "period": period},
+                        )
+                        team_used = result.scalar_one_or_none()
+                        if team_used is None:
+                            from sqlalchemy import func as _f, select as _s
+
+                            from app.models.usage import UsageRecord
+
+                            team_used = (
+                                await db.execute(
+                                    _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
+                                        UsageRecord.team_id == team_id,
+                                        _f.to_char(UsageRecord.requested_at, "YYYY-MM")
+                                        == period,
+                                    )
+                                )
+                            ).scalar_one()
+                        if team_used and Decimal(str(team_used)) > 0:
+                            pending = await self._pending_reservation_sum(
+                                redis, f"budget:pending:team:{{{team_id}}}:*"
+                            )
+                            await redis.eval(
+                                LuaScriptLoader.get("budget_rebuild"),
+                                3,
+                                team_key,
+                                f"budget:resvsum:team:{{{team_id}}}:{period}",
+                                f"budget:rebuild-lock:{{{team_id}}}",
+                                str(Decimal(str(team_used)) + pending),
+                                str(pending),
+                            )
+                            logger.info(
+                                "budget_team_counter_restored",
+                                team_id=team_id,
+                                period=period,
+                                used=str(team_used),
+                                pending_reservations=str(pending),
+                            )
+                    except Exception:
+                        logger.exception("budget_team_counter_restore_failed", team_id=team_id)
+
+                # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
+                # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고
+                # Python 에서 결과를 합친다. Lua 내부 체크는 여전히 각 scope 원자적.
                 script = LuaScriptLoader.get("budget_check")
 
                 # §6-1 단계 1: TEAM 설정 존재 확인이 USER 평가보다 먼저다.

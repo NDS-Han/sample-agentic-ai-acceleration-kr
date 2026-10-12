@@ -623,3 +623,55 @@ async def test_app_budget_enforced_for_d_user_without_individual_config(mock_red
         )
     assert str(exc.value) == "client_budget_exceeded"
     assert calls == ["team", "user", "client"]
+
+
+@pytest.mark.asyncio
+async def test_check_budget_both_backends_down_raises_unavailable():
+    """DB+Redis 모두 없으면 예산 미설정(429)이 아니라 백엔드 불가(503) 계약."""
+    from app.services.budget_service import BudgetBackendUnavailableError
+
+    svc = BudgetService()
+    with pytest.raises(BudgetBackendUnavailableError):
+        await svc.check_budget(None, None, "u1", "t1", "2026-04")
+
+
+@pytest.mark.asyncio
+async def test_check_budget_redis_fail_db_none_raises_unavailable(mock_redis):
+    """Redis 경로 실패 + DB_DEGRADED(db=None) → BudgetBackendUnavailableError.
+
+    'no_budget_assigned' PermissionError 로 오보하면 인프라 장애가 예산
+    미설정 429 로 새어나간다 — 서브클래스 타입까지 검증.
+    """
+    from app.services.budget_service import BudgetBackendUnavailableError
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_check"] = "-- mock"
+    mock_redis.eval = AsyncMock(side_effect=ConnectionError("redis down"))
+
+    svc = BudgetService()
+    with pytest.raises(BudgetBackendUnavailableError):
+        await svc.check_budget(mock_redis, None, "u1", "t1", "2026-04")
+
+
+@pytest.mark.asyncio
+async def test_check_budget_db_fallback_error_raises_unavailable(mock_redis):
+    """Redis 경로 실패 후 DB fallback 자체가 터져도 백엔드 불가로 보존."""
+    from app.services.budget_service import BudgetBackendUnavailableError
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_check"] = "-- mock"
+    mock_redis.eval = AsyncMock(side_effect=ConnectionError("redis down"))
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+
+    svc = BudgetService()
+    with pytest.raises(BudgetBackendUnavailableError):
+        await svc.check_budget(mock_redis, db, "u1", "t1", "2026-04")
+
+
+def test_backend_unavailable_is_permission_error():
+    """기존 except PermissionError 호출부와의 호환 계약 — 서브클래스여야 한다."""
+    from app.services.budget_service import BudgetBackendUnavailableError
+
+    assert issubclass(BudgetBackendUnavailableError, PermissionError)

@@ -258,6 +258,9 @@ Bedrock/Mantle 은 Anthropic native server-side `web_search` 를 노출하지 �
 | **Redis 복원력** | `socket_timeout=2.0s`, `socket_connect_timeout=1.0s`, `retry(1회 ExponentialBackoff)`, `health_check_interval=30s` 배선(과거엔 max_connections 만 줘 느린 노드가 풀 고갈). rate-limit 회로 차단기(`rl_breaker_enabled` 기본 True)로 Redis 죽음 시 per-request fast-fail | `redis_client.py:24-37,70` |
 | **Cost stream spool** | `CostStreamSpool` 이 finalize 시 XADD 실패(Redis blip)를 스풀링 → HealthChecker 가 healthy Redis 체크마다 drain·재발행(영구유실 방지) | `main.py:127-135`, `services/cost_recorder.py` |
 | **DegradationManager** | DB/Redis 열화 상태를 게이지로 관리(HEALTHY / DB_DEGRADED / REDIS_DEGRADED / BOTH_DEGRADED). DB 열화 시 라우터가 routing profile 조회를 skip 하고 기본 Bedrock 경로로 강등 | `main.py:118-119`, `messages.py:185-215` |
+| **상태코드 계약(장애 vs 정책)** | 인증·예산 백엔드 불가는 **503**(`AuthBackendUnavailableError`/`BudgetBackendUnavailableError`, 둘 다 `PermissionError` 서브클래스로 호출부 호환) — 자격 실패 401/예산 거절 429 와 구분해 인프라 장애가 정책 오류로 오보·오염(security 이벤트·auth-failure 카운터)되지 않는다. 미들웨어는 `auth_context` 설정 여부로 인증 구간과 다운스트림 구간을 나눠, 응답 시작 후엔 재매핑하지 않는다(ASGI 이중응답 방지) | `middleware/auth.py`, `middleware/budget.py`, `services/auth_service.py` |
+| **VK 인증의 Redis 종속(의도)** | `key:vk:{hash}` 매핑은 Redis 전용 — §9 무효 VK 방어(DB 세션을 안 열어 폭주에도 풀 고갈 불가)와 양립하는 DB 폴백은 해시 인덱스 설계가 별도로 필요해 아직 없다. 따라서 **REDIS_DEGRADED 시 VK 데이터플레인은 503**(401 오보 아님), JWT 는 서명키 캐시가 살아있으면 계속 서빙. DB 쪽에 질의 가능한 키 해시 컬럼을 둘지는 별도 설계 항목 | `services/auth_service.py`, `models/auth.py` |
+| **예산 Redis→DB fallback 범위** | `check_budget` 의 Redis 경로는 재수화 `exists()` 사전 호출까지 try 안 — 헬스체커 마킹 전 미드요청 단절이 어느 지점에서 터져도 DB 폴백으로 간다(500 미노출). 반대로 `reserve_budget` 은 fail-open: 예약 실패는 요청을 막지 않고 체크 전용 동작으로 회귀(`budget_reserve_unexpected_failure` 로그) | `services/budget_service.py:262-577`, `rate_limit_enforcement.py:359-363` |
 
 ---
 
