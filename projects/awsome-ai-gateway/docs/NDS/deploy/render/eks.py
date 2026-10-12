@@ -60,6 +60,9 @@ def desired_values(cfg: GatewayConfig) -> dict:
         "aws": {
             "region": cfg.aws.region,
             "allowedStsRegions": [cfg.aws.region],
+            # VK 발급 허용 계정 — role 이름 검사는 외부 계정의 동명 role/IAM user 로
+            # 우회되므로 계정 경계가 필요. gateway.yaml 의 aws.account_id 사용.
+            **({"allowedAwsAccounts": [cfg.aws.account_id]} if cfg.aws.account_id else {}),
         },
         "migration": {"enabled": True},
     }

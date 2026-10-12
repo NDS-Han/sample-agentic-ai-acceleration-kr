@@ -27,8 +27,8 @@ logger = structlog.get_logger()
 # IAM Arn patterns:
 #   SSO:      arn:aws:sts::{account}:assumed-role/{role_name}/{session_name}
 #   IAM user: arn:aws:iam::{account}:user/{user_name}
-ARN_ASSUMED_ROLE = re.compile(r"arn:aws:sts::\d+:assumed-role/([^/]+)/(.+)")
-ARN_IAM_USER = re.compile(r"arn:aws:iam::\d+:user/(.+)")
+ARN_ASSUMED_ROLE = re.compile(r"arn:aws:sts::(\d+):assumed-role/([^/]+)/(.+)")
+ARN_IAM_USER = re.compile(r"arn:aws:iam::(\d+):user/(.+)")
 
 
 class CLIService:
@@ -90,14 +90,24 @@ class CLIService:
         match_role = ARN_ASSUMED_ROLE.match(arn)
         match_user = ARN_IAM_USER.match(arn)
 
+        account_id = ""
         if match_role:
-            role_name = match_role.group(1)
-            session_name = match_role.group(2)
+            account_id = match_role.group(1)
+            role_name = match_role.group(2)
+            session_name = match_role.group(3)
         elif match_user:
+            account_id = match_user.group(1)
             role_name = None  # IAM users don't have a role name
-            session_name = match_user.group(1)
+            session_name = match_user.group(2)
         else:
             raise STSVerificationError(f"Unexpected Arn format: {arn}")
+
+        # ⚠️ 계정 검증 — role 이름 비교만으로는 부족하다: 공격자가 자기 AWS
+        #    계정에 'admin' 같은 allowlist 이름의 role 을 만들거나 IAM user 로
+        #    (role_name=None → role 검사 우회) 들어오면 임의 외부 계정이 VK 를
+        #    발급받아 이 게이트웨이의 Bedrock 비용을 쓸 수 있었다.
+        if settings.ALLOWED_AWS_ACCOUNTS and account_id not in settings.ALLOWED_AWS_ACCOUNTS:
+            raise ForbiddenError(f"AWS account not allowed: {account_id}")
 
         if settings.ALLOWED_IAM_ROLES and role_name and role_name not in settings.ALLOWED_IAM_ROLES:
             raise ForbiddenError(f"IAM role not allowed: {role_name}")

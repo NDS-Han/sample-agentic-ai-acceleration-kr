@@ -212,6 +212,8 @@ imagePullSecrets:
   value: {{ join "," .Values.aws.allowedStsRegions | quote }}
 - name: ALLOWED_IAM_ROLES
   value: {{ join "," .Values.aws.allowedIamRoles | quote }}
+- name: ALLOWED_AWS_ACCOUNTS
+  value: {{ join "," .Values.aws.allowedAwsAccounts | quote }}
 {{- end -}}
 
 {{/* ---------------------------------------------------------------------------

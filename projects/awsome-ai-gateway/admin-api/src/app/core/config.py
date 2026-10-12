@@ -47,7 +47,8 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     @field_validator(
-        "ALLOWED_STS_REGIONS", "ALLOWED_IAM_ROLES", "ADMIN_EMAILS", "ADMIN_GROUPS",
+        "ALLOWED_STS_REGIONS", "ALLOWED_IAM_ROLES", "ALLOWED_AWS_ACCOUNTS",
+        "ADMIN_EMAILS", "ADMIN_GROUPS",
         "CORS_ALLOW_ORIGINS",
         mode="before",
     )
@@ -150,6 +151,11 @@ class Settings(BaseSettings):
     # ── STS / CLI Auth (legacy, dual-mode 유지) ──
     ALLOWED_STS_REGIONS: Annotated[list[str], NoDecode] = ["ap-northeast-2"]
     ALLOWED_IAM_ROLES: Annotated[list[str], NoDecode] = []
+    # VK 를 발급받을 수 있는 AWS 계정 ID allowlist. ARN 의 계정 부분이 여기 없으면
+    # 거부 — role 이름만으로는 검증이 안 된다(공격자 계정에도 'admin' role 을
+    # 만들 수 있고, IAM user ARN 은 role 검사 자체를 우회한다). 비어 있으면
+    # 미적용(하위호환) — 배포 스크립트가 배포자 계정을 자동 주입한다.
+    ALLOWED_AWS_ACCOUNTS: Annotated[list[str], NoDecode] = []
 
     # ── OIDC Auth (신규) ──
     # OIDC_ISSUER_URL 이 비어있으면 OIDC 비활성. 채워지면 활성 (POST /v1/auth/exchange 노출).

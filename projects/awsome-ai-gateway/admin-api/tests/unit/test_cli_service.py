@@ -80,6 +80,7 @@ class TestSSRFPrevention:
             settings = mock_settings.return_value
             settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
             settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
             settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
             settings.DEFAULT_USER_BUDGET_USD = 100.0
 
@@ -131,6 +132,7 @@ class TestIAMRoleCheck:
             settings = mock_settings.return_value
             settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
             settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
 
             mock_resp = MagicMock()
             mock_resp.status_code = 200
@@ -169,6 +171,7 @@ class TestAutoProvisioning:
             settings = mock_settings.return_value
             settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
             settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
             settings.DEFAULT_TEAM_ID = default_team_id
             settings.DEFAULT_USER_BUDGET_USD = 100.0
 
@@ -202,3 +205,129 @@ class TestAutoProvisioning:
 
         MockUserRepo.return_value.create_user.assert_called_once()
         assert result.user_id == str(new_user.id)
+
+
+class TestAwsAccountCheck:
+    """H1: 계정 allowlist — role 이름만으로는 외부 계정 우회를 못 막는다."""
+
+    async def test_rejects_foreign_account_even_with_allowed_role_name(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """공격자 계정의 'AllowedRole' role 도 거부한다 — 계정이 경계다."""
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={"Authorization": "AWS4-HMAC-SHA256 ..."},
+            ),
+            device_name="test",
+        )
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:sts::999888777:assumed-role/AllowedRole/attacker</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with pytest.raises(ForbiddenError, match="999888777"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+    async def test_rejects_iam_user_from_foreign_account(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """IAM user ARN 은 role 검사를 우회한다 — 계정 검사만이 막는다."""
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={"Authorization": "AWS4-HMAC-SHA256 ..."},
+            ),
+            device_name="test",
+        )
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:iam::999888777:user/attacker</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with pytest.raises(ForbiddenError, match="999888777"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+    async def test_empty_account_list_preserves_legacy_behavior(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """ALLOWED_AWS_ACCOUNTS 비어 있으면 계정 검사 미적용(하위호환)."""
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={"Authorization": "AWS4-HMAC-SHA256 ..."},
+            ),
+            device_name="test",
+        )
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:sts::999888777:assumed-role/AllowedRole/user@corp.com</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = []
+            settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
+            settings.DEFAULT_USER_BUDGET_USD = 100.0
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with patch("app.services.cli_service.UserRepository") as MockUserRepo, \
+                 patch("app.services.cli_service.BudgetRepository") as MockBudgetRepo:
+                user = MagicMock(spec=User)
+                user.id = uuid.uuid4()
+                user.email = "user@corp.com"
+                user.role = UserRole.DEVELOPER
+                user.team_id = uuid.UUID(settings.DEFAULT_TEAM_ID)
+                user.is_active = True
+                MockUserRepo.return_value.get_by_sso_subject = AsyncMock(return_value=user)
+                MockBudgetRepo.return_value.get_first_active_config = AsyncMock(return_value=None)
+
+                result = await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+        assert result.user_id == str(user.id)

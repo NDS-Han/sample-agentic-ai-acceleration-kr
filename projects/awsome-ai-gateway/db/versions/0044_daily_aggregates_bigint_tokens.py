@@ -47,6 +47,12 @@ _COLUMNS = (
 
 
 def upgrade() -> None:
+    # ⚠️ ACCESS EXCLUSIVE 락 대기에 상한을 둔다 — 긴 트랜잭션 뒤에서 무한 대기하면
+    #    이 테이블의 읽기/쓰기가 전부 그 뒤에 줄을 서고, migration Job 이 죽어도
+    #    PG backend 는 RDS Proxy 뒤에서 계속 기다린다(재시도도 같은 줄 뒤).
+    #    5s 안에 못 잡으면 실패 → Job 재시도가 다시 시도한다(멱등, 재작성만 재수행).
+    op.execute("SET LOCAL lock_timeout = '5s'")
+    op.execute("SET LOCAL statement_timeout = '10min'")
     # 한 문장 — 재작성 1 회 + 락 점유 최소화.
     alters = ", ".join(f"ALTER COLUMN {c} TYPE BIGINT" for c in _COLUMNS)
     op.execute(f"ALTER TABLE {_TABLE} {alters}")

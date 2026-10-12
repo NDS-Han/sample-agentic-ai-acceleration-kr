@@ -415,7 +415,10 @@ helm_install() {
         # SSRF 방어용 STS 허용 리전(admin-api VK 발급). 클라이언트가 GetCallerIdentity 를
         # presign 하는 곳 = 배포 리전이므로 aws.region 과 같은 값으로 자동 주입한다.
         # (values 기본값이 ap-northeast-2 라, 안 주입하면 다른 리전 배포에서 VK 발급 거부.)
-        --set "aws.allowedStsRegions={${AWS_REGION}}"
+        --set "aws.allowedStsRegions={${STS_REGIONS_CSV}}"
+        # VK 발급 허용 AWS 계정 — 배포자 계정을 기본으로. role 이름 검사는
+        # 공격자 계정의 동명 role/IAM user 로 우회되므로 계정 경계가 필요하다.
+        --set "aws.allowedAwsAccounts={${aws_account_id}}"
         --set "database.external.host=${AURORA_HOST}"
         --set "database.external.name=${AURORA_DB_NAME}"
         --set "redis.external.host=${REDIS_HOST}"
