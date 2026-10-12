@@ -20,8 +20,12 @@ daily_aggregates 만 넓힌다.
 
 ## 배포 순서
 
-ALTER COLUMN TYPE 은 테이블 재작성 없이 catalog 만 갱신한다(INTEGER→BIGINT 는
-binary-coercible). 읽기/쓰기 스키마가 느슨한 숫자라 배포 순서 제약 없음.
+⚠️ INTEGER→BIGINT 는 저장 폭(4→8B)이 달라 **테이블 전체 재작성 + 해당 컬럼
+인덱스 재생성**이 일어나고, 그동안 ACCESS EXCLUSIVE 락이 걸린다. 그래서
+컬럼 6 개를 **한 ALTER TABLE 문**으로 묶어 재작성을 1 회로 줄인다(컬럼별
+문장이면 재작성이 6 번 반복). daily_aggregates 가 큰 배포에선 마이그레이션
+Job 실행 중 이 테이블의 조회/집계가 잠시 멈춘다 — 배포 창을 저부하 시간으로.
+읽기/쓰기 스키마가 느슨한 숫자라 코드 배포 순서 제약은 없음.
 """
 
 from alembic import op
@@ -43,16 +47,13 @@ _COLUMNS = (
 
 
 def upgrade() -> None:
-    for col in _COLUMNS:
-        op.execute(
-            f"ALTER TABLE {_TABLE} ALTER COLUMN {col} TYPE BIGINT"
-        )
+    # 한 문장 — 재작성 1 회 + 락 점유 최소화.
+    alters = ", ".join(f"ALTER COLUMN {c} TYPE BIGINT" for c in _COLUMNS)
+    op.execute(f"ALTER TABLE {_TABLE} {alters}")
 
 
 def downgrade() -> None:
-    for col in _COLUMNS:
-        # overflow 행이 있으면 downgrade 는 실패한다 — 그 경우가 바로 이
-        # 마이그레이션의 존재 이유이므로 별도 변환을 두지 않는다.
-        op.execute(
-            f"ALTER TABLE {_TABLE} ALTER COLUMN {col} TYPE INTEGER"
-        )
+    # overflow 행이 있으면 downgrade 는 실패한다 — 그 경우가 바로 이
+    # 마이그레이션의 존재 이유이므로 별도 변환을 두지 않는다.
+    alters = ", ".join(f"ALTER COLUMN {c} TYPE INTEGER" for c in _COLUMNS)
+    op.execute(f"ALTER TABLE {_TABLE} {alters}")

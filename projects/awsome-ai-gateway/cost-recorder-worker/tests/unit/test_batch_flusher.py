@@ -604,3 +604,61 @@ async def test_transient_operational_error_still_propagates():
     flusher = BatchFlusher(session_factory=session_factory, redis=redis)
     with pytest.raises(OperationalError):
         await flusher.flush([_make_entry()])
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_flush_dead_letter_reraises_transient_errors():
+    """일시 계열 오류(연결·타임아웃)는 dead-letter 경로에서도 재전파한다.
+
+    grace(120s) 만료만으로는 결정적/일시를 구별할 수 없다 — RDS 페일오버처럼
+    120s 넘는 DB 장애에서 무작위로 삼키면 모든 행이 written=0 으로 **영구
+    과소청구 유실**. 일시 오류는 재전파해 배치를 PEL 에 남겨야 한다.
+    """
+    from sqlalchemy.exc import OperationalError
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(
+        side_effect=OperationalError("SELECT 1", {}, Exception("db down"))
+    )
+
+    session_factory = MagicMock(return_value=session)
+    flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
+
+    entries = [_make_entry(request_id=f"req-{i}") for i in range(2)]
+    with pytest.raises(OperationalError):
+        await flusher.flush_dead_letter(entries)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_flush_dead_letter_swallows_permanent_errors_per_row():
+    """영구 오류 행만 드롭하고 나머지 행은 기록한다 — 결정적 오류의 목적."""
+    from sqlalchemy.exc import DataError
+
+    calls = {"n": 0}
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+
+    async def _exec(stmt, params=None):
+        result = MagicMock()
+        sql = str(stmt)
+        if "RETURNING" in sql:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise DataError("INSERT", {}, Exception("bad uuid"))
+            result.scalar_one_or_none.return_value = params["request_id"]
+        return result
+
+    session.execute = AsyncMock(side_effect=_exec)
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
+    entries = [_make_entry(request_id=f"req-{i}") for i in range(2)]
+    written = await flusher.flush_dead_letter(entries)
+    assert written == 1  # 첫 행만 dead-letter, 둘째는 기록

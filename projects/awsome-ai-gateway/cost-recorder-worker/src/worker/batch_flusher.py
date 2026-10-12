@@ -396,12 +396,19 @@ class BatchFlusher:
         성공한 행만 기록하고, 실패한 행은 request_id·오류를 남겨 스킵한다.
         성공적으로 소화한 행 수를 반환한다.
 
-        ⚠️ 이 경로는 예외 종류를 가리지 않는다. 같은 배치 머리가 dead-letter
+        ⚠️ 이 경로는 **영구 오류만** 삼킨다. 같은 배치 머리가 dead-letter
            grace(기본 120s)를 넘도록 실패했다는 것은 "재시도하면 나아질 수도 있는
            오류"를 더 기다리는 비용이, 스트림 봉쇄 → MAXLEN 트림으로 인한 **전량
            유실**보다 크다는 뜻이다(결정적 오류 — 예: 워커 이미지가 마이그레이션보다
            먼저 배포된 UndefinedColumn — 는 재시도로 절대 낫지 않는다).
            유실은 허용하되 silent 하진 않다: 행마다 ERROR 로그를 남긴다.
+
+        ⚠️ grace 만료만으로는 결정적/일시를 구별할 수 없다 — DB 장애가 120s 를
+           넘으면(RDS 페일오버·업그레이드·풀 고갈) 여기까지 오지만, 그때 무작위로
+           삼키면 모든 행이 written=0 으로 **영구 유실(과소청구)** 된다.
+           일시 계열 예외(연결·타임아웃 등 _PERMANENT_FLUSH_ERRORS 밖)는 즉시
+           재전파해 배치를 PEL 에 남긴다 — grace 는 진행 선택지를 줄 뿐 유실
+           선택지를 주지 않는다.
         """
         written = 0
         for e in entries:
@@ -416,13 +423,16 @@ class BatchFlusher:
                         await self._upsert_budget_usages(session, [e])
                     await session.commit()
                     written += 1
-            except Exception as exc:
+            except _PERMANENT_FLUSH_ERRORS as exc:
                 logger.error(
                     "row_dead_lettered",
                     request_id=e.request_id,
                     user_id=e.user_id,
                     error=str(exc)[:200],
                 )
+            # 영구 오류 외(연결·데드락·타임아웃)는 전파 — 배치가 PEL 에 남아
+            # DB 복구 뒤 재처리된다. 여기서 삼키면 장애 기간 내내 배치 단위
+            # 과소청구 유실이 된다.
         return written
 
     async def _insert_usage_logs(

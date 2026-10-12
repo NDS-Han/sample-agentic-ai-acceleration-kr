@@ -83,8 +83,13 @@ class StreamConsumer:
         # dead-letter 추적 — 같은 배치 머리(첫 entry id)가 grace 기간을 넘어
         # 계속 flush 실패하면 결정적 오류로 보고 행 단위 소화로 넘긴다.
         # 그냥 재시도하면 스트림 전체 봉쇄 → MAXLEN 트림 전량 유실로 번진다.
+        # ⚠️ 소비 경로별로 분리 — reclaim(백그라운드 태스크)과 live/drain 이
+        #    같은 streak 를 공유하면, live 배치 성공이 reclaim 실패 추적을
+        #    지워 회수 대상 poison 배치가 grace 에 영원히 도달하지 못한다.
         self._fail_head: str | None = None
         self._first_fail_at: float | None = None
+        self._reclaim_fail_head: str | None = None
+        self._reclaim_first_fail_at: float | None = None
         self._dead_letter_grace = settings.stream_dead_letter_grace_sec
 
     async def ensure_group(self) -> None:
@@ -248,7 +253,7 @@ class StreamConsumer:
 
             entries, ids = self._decode([(self._stream, msgs)])
             if entries:
-                await self._flush_or_dead_letter(entries, ids)
+                await self._flush_or_dead_letter(entries, ids, reclaim=True)
             if ids:
                 await self._redis.xack(self._stream, self._group, *ids)
                 reclaimed += len(ids)
@@ -306,7 +311,7 @@ class StreamConsumer:
             await self._redis.xack(self._stream, self._group, *batch_ids)
 
     async def _flush_or_dead_letter(
-        self, entries: list[CostStreamEntry], ids: list[str]
+        self, entries: list[CostStreamEntry], ids: list[str], *, reclaim: bool = False
     ) -> None:
         """배치 flush + 결정적 실패 dead-letter.
 
@@ -315,30 +320,41 @@ class StreamConsumer:
         마이그레이션보다 먼저 배포된 UndefinedColumn). 그냥 재전파하면 스트림
         전체가 멈추고 MAXLEN 트림으로 배치뿐 아니라 **뒤의 전부**가 유실된다.
         grace 를 넘기면 행 단위 소화(flush_dead_letter)로 전환해 살리는 행만
-        기록하고 스트림을 진행시킨다.
+        기록하고 스트림을 진행시킨다. 단 일시 계열 오류(연결·타임아웃)는
+        dead-letter 경로에서도 재전파된다 — grace 는 유실이 아니라 진행
+        선택지만 준다.
 
         배치 머리 기준으로 추적한다 — 같은 배치가 재전달되면 머리 id 가 같고,
         배치가 바뀌면 카운터가 리셋된다(supervisor 재시작 시 head 부터 다시 읽음).
+        ``reclaim=True`` 는 XAUTOCLAIM 회수 경로 — 별도 streak 를 써서 live
+        소비의 성공이 회수 대상 poison 의 추적을 지우지 않게 한다.
         """
+        if reclaim:
+            fail_head_attr = "_reclaim_fail_head"
+            fail_at_attr = "_reclaim_first_fail_at"
+        else:
+            fail_head_attr = "_fail_head"
+            fail_at_attr = "_first_fail_at"
         try:
             await self._flusher.flush(entries)
-            self._fail_head = None
-            self._first_fail_at = None
+            setattr(self, fail_head_attr, None)
+            setattr(self, fail_at_attr, None)
             return
         except Exception:
             head = ids[0] if ids else None
             now = time.monotonic()
-            if head != self._fail_head or self._first_fail_at is None:
-                self._fail_head = head
-                self._first_fail_at = now
+            if head != getattr(self, fail_head_attr) or getattr(self, fail_at_attr) is None:
+                setattr(self, fail_head_attr, head)
+                setattr(self, fail_at_attr, now)
                 raise
-            if now - self._first_fail_at < self._dead_letter_grace:
+            if now - getattr(self, fail_at_attr) < self._dead_letter_grace:
                 raise
             logger.error(
                 "batch_dead_letter",
                 head=head,
                 batch_size=len(entries),
-                grace_sec=round(now - self._first_fail_at, 1),
+                reclaim=reclaim,
+                grace_sec=round(now - getattr(self, fail_at_attr), 1),
             )
             written = await self._flusher.flush_dead_letter(entries)
             dropped = len(entries) - written
@@ -349,8 +365,8 @@ class StreamConsumer:
             )
             if dropped and self._metrics:
                 self._metrics.dead_letter_dropped.add(dropped)
-            self._fail_head = None
-            self._first_fail_at = None
+            setattr(self, fail_head_attr, None)
+            setattr(self, fail_at_attr, None)
 
     def _decode(
         self, raw_msgs: list[Any]

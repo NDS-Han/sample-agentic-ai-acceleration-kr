@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import Enum as PyEnum
 
-from sqlalchemy import Boolean, Date, DateTime, Enum, Integer, Numeric, String
+from sqlalchemy import BigInteger, Boolean, Date, DateTime, Enum, Integer, Numeric, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -65,13 +65,15 @@ class DailyAggregate(Base):
     team_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False, index=True)
     dept_id: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
     model_alias: Mapped[str] = mapped_column(String(128), nullable=False)
-    input_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    output_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cache_creation_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    cache_read_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    total_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # BIGINT — SUM(integer) 의 PG 결과형은 bigint 라 INTEGER 로 두면 하루 합계가
+    # 2.1B 를 넘는 조합 하나가 집계 전체를 죽인다(마이그레이션 0044).
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_creation_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cache_read_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     total_cost_usd: Mapped[Decimal] = mapped_column(
         Numeric(12, 6), nullable=False, default=Decimal("0")
     )
-    request_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    request_count: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

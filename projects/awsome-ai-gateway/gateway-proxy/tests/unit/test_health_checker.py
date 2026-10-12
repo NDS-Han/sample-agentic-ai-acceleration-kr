@@ -171,10 +171,11 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
             return {
                 f"budget:user:{{u1}}:{period}": "30.0",  # 얇은 카운터
                 f"budget:resvsum:user:{{u1}}:{period}": "5.0",
+                "budget:pending:user:{u1}:r1": b"15.0",  # bytes 마커 값
             }.get(key)
 
         async def scan_iter(self, match=None, count=None):
-            if match == "budget:pending:user:{u1}:*":
+            if match == "budget:pending:*":
                 yield "budget:pending:user:{u1}:r1"
 
         async def eval(self, script, numkeys, *args):
@@ -193,16 +194,15 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
 
     await asyncio.gather(*hc._bg_tasks, return_exceptions=True)
 
-    # 카운터가 아직 5.0 인 pending 1건(15.0-? 아니라 마커 값 없이 0 취급 아님 —
-    # _pending_reservation_sum 은 get() 이 None 을 돌려 0 으로 합산한다).
+    # 마커 1건(15.0, bytes 값)이 단일 스캔에서 파싱돼 pending=15 로 들어간다.
     assert len(redis.eval_calls) == 1
     numkeys, args = redis.eval_calls[0]
     assert numkeys == 3
     assert args[0] == f"budget:user:{{u1}}:{period}"
-    # base = used(50) + pending(0) - cur(30) = 20 → 최종 카운터 = 50.0
-    assert float(args[3]) == pytest.approx(20.0)
-    # resvsum base = pending(0) - cursum(5) = -5 → resvsum = 0
-    assert float(args[4]) == pytest.approx(-5.0)
+    # base = used(50) + pending(15) - cur(30) = 35 → 최종 카운터 = 65.0
+    assert float(args[3]) == pytest.approx(35.0)
+    # resvsum base = pending(15) - cursum(5) = +10 → resvsum = 15
+    assert float(args[4]) == pytest.approx(10.0)
 
 
 @pytest.mark.asyncio
@@ -256,11 +256,11 @@ async def test_reconcile_never_lowers_usage_counter():
             return {
                 f"budget:user:{{u1}}:{period}": "100.0",  # 앞선 카운터
                 f"budget:resvsum:user:{{u1}}:{period}": "7.0",
-            }.get(key)
+            }.get(key)  # 마커 get()→None → pending 0 합산
 
         async def scan_iter(self, match=None, count=None):
-            if match == "budget:pending:user:{u1}:*":
-                yield "budget:pending:user:{u1}:r1"  # get()→None → 0 합산
+            if match == "budget:pending:*":
+                yield "budget:pending:user:{u1}:r1"
 
         async def eval(self, script, numkeys, *args):
             self.eval_calls.append((numkeys, args))

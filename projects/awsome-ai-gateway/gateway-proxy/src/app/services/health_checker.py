@@ -177,13 +177,14 @@ class HealthChecker:
         from decimal import Decimal
 
         from app.periods import request_period
-        from app.services.budget_service import BudgetService
         from app.services.lua_loader import LuaScriptLoader
 
         period = request_period()
         # ⚠️ 리더 게이트 — 모든 파드의 health checker 가 같은 창에 같은 스캔을
         #    돌리면 N× 배수의 Redis/DB 부하다. NX+TTL 로 한 파드만 교정하고,
         #    그 파드가 죽으면 TTL 만료로 다음 틱에 다른 파드가 잇는다.
+        #    TTL 은 루프 안에서 주기적으로 갱신한다 — 안 하면 실행이 45s 를
+        #    넘는 순간 다른 파드가 리더를 잡아 병렬 실행이 다시 시작된다.
         #    (교정은 멱등이라 리더가 아니어도 안전하지만 비용이 크다.)
         try:
             if not await self._redis.set(
@@ -209,22 +210,69 @@ class HealthChecker:
             return
 
         script = LuaScriptLoader.get("budget_rebuild")
+
+        # ⚠️ pending 마커는 **한 번의 키스페이스 스캔**으로 전부 모은다 —
+        #    행마다 SCAN MATCH 를 돌리면 MATCH 가 순회량을 줄여주지 않아
+        #    행 수 × 전체 키스페이스(Cluster 면 전 primary)만큼 왕복한다.
+        #    마커 형식:
+        #      budget:pending:user:{uid}:{req_id}
+        #      budget:pending:team:{tid}:{req_id}
+        #      budget:pending:client:{uid}:{client}:{req_id}
+        pending_sums: dict[tuple[str, str, str], Decimal] = {}
+        try:
+            async for key in self._redis.scan_iter(
+                match="budget:pending:*", count=500
+            ):
+                val = await self._redis.get(key)
+                if val is None:
+                    continue
+                try:
+                    amount = Decimal(
+                        val.decode() if isinstance(val, bytes) else str(val)
+                    )
+                    kstr = key.decode() if isinstance(key, bytes) else key
+                    # "budget:pending:" 이후 — [0]=user|team|client,
+                    # [1]={sid}, client 이면 [2]=client 이름, 마지막=req_id.
+                    parts = kstr.split("budget:pending:", 1)[1].split(":")
+                    if parts[0] in ("user", "team") and len(parts) >= 3:
+                        sid = parts[1].strip("{}")
+                        if sid:
+                            k = (parts[0].upper(), sid, "")
+                            pending_sums[k] = pending_sums.get(k, Decimal("0")) + amount
+                    elif parts[0] == "client" and len(parts) >= 4:
+                        sid = parts[1].strip("{}")
+                        if sid:
+                            k = ("USER", sid, parts[2])
+                            pending_sums[k] = pending_sums.get(k, Decimal("0")) + amount
+                except Exception:
+                    continue
+        except Exception:
+            logger.warning("budget_reconcile_pending_scan_failed")
+            pending_sums = {}
+
         reconciled = 0
-        for scope, scope_id, client, used_usd in rows:
+        for i, (scope, scope_id, client, used_usd) in enumerate(rows):
             scope = str(scope).upper()
             sid = str(scope_id)
             try:
+                # 리더 락 주기 갱신 — 실행이 TTL(45s)을 넘으면 다른 파드가
+                # 병렬 실행을 시작해 게이트가 무의미해진다.
+                if i and i % 200 == 0:
+                    try:
+                        await self._redis.expire("budget:reconcile-leader", 45)
+                    except Exception:
+                        pass
                 if scope == "USER" and client:
                     c = str(client)
                     usage_key = f"budget:user:{{{sid}}}:{c}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{c}:{period}"
                     lock_key = f"budget:rebuild-lock:{{{sid}}}:{c}"
-                    pending_pat = f"budget:pending:client:{{{sid}}}:{c}:*"
+                    pending = pending_sums.get(("USER", sid, c), Decimal("0"))
                 elif scope == "USER" and not client:
                     usage_key = f"budget:user:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{period}"
                     lock_key = f"budget:rebuild-lock:{{{sid}}}"
-                    pending_pat = f"budget:pending:user:{{{sid}}}:*"
+                    pending = pending_sums.get(("USER", sid, ""), Decimal("0"))
                 elif scope == "TEAM" and not client:
                     # ⚠️ TEAM+client 행은 스키마상 만들어지지 않는다 — 있으면
                     #    같은 총합 키를 하위집합 값으로 반복 교정해 오염시키므로
@@ -232,7 +280,7 @@ class HealthChecker:
                     usage_key = f"budget:team:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:team:{{{sid}}}:{period}"
                     lock_key = f"budget:rebuild-lock:{{{sid}}}"
-                    pending_pat = f"budget:pending:team:{{{sid}}}:*"
+                    pending = pending_sums.get(("TEAM", sid, ""), Decimal("0"))
                 else:
                     continue
 
@@ -249,9 +297,6 @@ class HealthChecker:
                     Decimal(cursum_raw.decode() if isinstance(cursum_raw, bytes) else str(cursum_raw))
                     if cursum_raw
                     else Decimal("0")
-                )
-                pending = await BudgetService._pending_reservation_sum(
-                    self._redis, pending_pat
                 )
                 # ⚠️ usage 교정은 **양수 방향만** 허용한다. 정상 운영 중에도
                 #    cur 은 finalize 즉시 올라가지만 db(budget_usages)는 워커
