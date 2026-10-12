@@ -233,3 +233,16 @@ def test_sizing_valid_on_ecs():
                 "sizing": {"gateway-proxy": {"cpu": 2048}}},
         images={"tag": "abc"}))
     assert cfg.deploy.sizing["gateway-proxy"]["cpu"] == 2048
+
+
+def test_compose_half_image_pair_warns():
+    """registry 만/tag 만 선언된 compose 는 한쪽이 침묵 무시된다 — 경고 필요."""
+    for images in ({"registry": "r.example.com"}, {"tag": "1.0.0"}):
+        cfg = schema.from_dict(minimal(images=images))
+        assert any("사전 빌드 이미지" in w for w in cfg.warnings()), images
+
+
+def test_compose_full_image_pair_no_warn():
+    cfg = schema.from_dict(minimal(
+        images={"registry": "r.example.com", "tag": "1.0.0"}))
+    assert not any("사전 빌드 이미지" in w for w in cfg.warnings())

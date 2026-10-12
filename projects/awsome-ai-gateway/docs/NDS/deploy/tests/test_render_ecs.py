@@ -172,6 +172,16 @@ def test_derived_url_vars():
     assert ecs_apply._derived_url_vars(cfg2, out) == {}
 
 
+def test_derived_url_vars_cloudfront_temp():
+    """cloudfront-temp 는 ecs 에서 domain_name="" 으로 수렴 — URL 발견 조건도
+    같은 수렴이어야 NEXTAUTH_URL 이 비지 않는다."""
+    from deploy import ecs_apply
+    cfg = _cfg(domain={"mode": "cloudfront-temp"})
+    out = {"alb_dns_name": "lb-1.elb.amazonaws.com"}
+    v = ecs_apply._derived_url_vars(cfg, out)
+    assert v["admin_ui_nextauth_url"] == "http://lb-1.elb.amazonaws.com:3000"
+
+
 def test_registry_host_gets_project_prefix_appended():
     # images.registry 의 정본 의미는 "레지스트리 호스트" (eks chart 의
     # global.imageRegistry 와 동일 — 차트가 뒤에 llm-gateway/<svc> 를 붙인다).

@@ -138,8 +138,11 @@ def _save_extra_vars(gen_dir: Path, extra: dict) -> None:
 
 
 def _derived_url_vars(cfg: GatewayConfig, outputs: dict) -> dict:
-    """domain=none 이면 ALB DNS 기반 외부 URL — task-def NEXTAUTH_URL 등에 필요."""
-    if cfg.domain.mode != "none" or not outputs.get("alb_dns_name"):
+    """도메인 없는 모드이면 ALB DNS 기반 외부 URL — task-def NEXTAUTH_URL 등에 필요.
+    tfvars 렌더와 같은 조건을 써야 한다 — cloudfront-temp 는 ecs 경로에서
+    domain_name="" 으로 수렴하는데 여기서 none 만 보면 NEXTAUTH_URL 이
+    영원히 비어 admin-ui OIDC 콜백이 깨진다."""
+    if cfg.domain.mode not in ("none", "cloudfront-temp") or not outputs.get("alb_dns_name"):
         return {}
     dns = outputs["alb_dns_name"]
     return {

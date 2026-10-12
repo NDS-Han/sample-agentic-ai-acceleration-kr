@@ -193,6 +193,10 @@ class GatewayConfig:
             # 프로덕션 티어에서 admin-ui 가 무인증 로그인으로 열린다
             w.append("oidc 가 비활성입니다 — eks render 가 admin-ui DEV_LOGIN_ENABLED=true 로 둡니다 "
                      "(인증 없는 로그인). 프로덕션에서는 oidc: 를 채우십시오.")
+        if self.deploy.target == "compose" and bool(self.images.tag) != bool(self.images.registry):
+            w.append("compose render 는 images.registry + images.tag 둘 다 있어야 "
+                     "사전 빌드 이미지를 씁니다 — 한쪽만 있으면 해당 선언이 무시되고 "
+                     "소스에서 빌드합니다.")
         if self.deploy.target == "ecs" and not self.deploy.tfstate_table:
             w.append("deploy.tfstate_table 이 비어 있습니다 — terraform state 가 "
                      "locking 없이 저장됩니다 (동시 apply 가 state 를 깨뜨릴 수 있음). "
