@@ -29,14 +29,25 @@ export async function GET(request: NextRequest) {
     return new Response('Export failed', { status: res.status });
   }
 
-  const contentType = res.headers.get('content-type') || 'application/octet-stream';
-  const contentDisposition = res.headers.get('content-disposition') || 'attachment';
-  const body = await res.blob();
+  // 상류 헤더의 파일명을 그대로 되돌려주지 않는다 — 따옴표·개행이 섞이면
+  // Content-Disposition 이 깨진다. cli-download 와 같은 화이트리스트 살균.
+  const upstreamName = res.headers
+    .get('content-disposition')
+    ?.match(/filename="?([^";]+)"?/)?.[1]
+    ?.replace(/[^A-Za-z0-9._-]/g, '');
+  const filename = upstreamName && upstreamName.length > 0
+    ? upstreamName
+    : 'analytics-export.csv';
 
-  return new Response(body, {
-    headers: {
-      'Content-Type': contentType,
-      'Content-Disposition': contentDisposition,
-    },
+  const headers = new Headers({
+    'Content-Type': res.headers.get('content-type') || 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Cache-Control': 'no-store',
   });
+  const length = res.headers.get('content-length');
+  if (length) headers.set('Content-Length', length);
+
+  // res.blob() 으로 전체를 메모리에 올리지 않는다 — export 가 클수록 admin-ui 파드
+  // 메모리를 그대로 먹는다(cli-download 와 같은 이유로 스트림 통과).
+  return new Response(res.body, { status: 200, headers });
 }
