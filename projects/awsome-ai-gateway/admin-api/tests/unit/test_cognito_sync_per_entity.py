@@ -59,6 +59,9 @@ def _wire_team_cache(repo):
     repo.get_first_org_id = AsyncMock(return_value=uuid.uuid4())
     repo.create_team = AsyncMock()
     repo.create_department = AsyncMock()
+    # sync_user(그룹 조회 실패 시 role/team 보존)·sync_group(기존 ADMIN 보존)이
+    # 기존 유저 스냅샷을 prefetch 한다 — 비워 두면 "신규"로 취급돼 유도값 적용.
+    repo.prefetch_users_by_subjects = AsyncMock(return_value={})
     return repo
 
 
@@ -581,3 +584,84 @@ async def test_deactivate_missing_user_clears_leader_pointer(monkeypatch):
     _, kwargs = release.await_args
     assert kwargs["is_active"] is False
     assert result.users_deactivated == 1
+
+
+@pytest.mark.asyncio
+async def test_sync_user_group_fetch_failure_preserves_admin(monkeypatch):
+    """admin_list_groups_for_user 실패는 '그룹 없음'이 아니다 — 기존 ADMIN 의
+    role/team 을 보존해야 한다(빈 리스트로 진행하면 강등 + default 팀 이동)."""
+    s = _settings(monkeypatch)
+    session = _session()
+    admin_team = uuid.uuid4()
+    existing = MagicMock()
+    existing.id = uuid.uuid4(); existing.sso_subject = "SUB-A"
+    existing.email = "admin@x.com"; existing.display_name = "A"
+    existing.role = UserRole.ADMIN; existing.team_id = admin_team
+    existing.is_active = True
+    snap = {
+        "id": existing.id, "email": existing.email,
+        "display_name": existing.display_name, "team_id": admin_team,
+        "role": UserRole.ADMIN, "is_active": True,
+    }
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=existing)
+    repo.create_user = AsyncMock()
+    repo.flush = AsyncMock()
+    _wire_team_cache(repo)
+    repo.prefetch_users_by_subjects = AsyncMock(return_value={"SUB-A": snap})
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("SUB-A", "admin@x.com", "A")
+    )
+    svc._list_groups_for_user = MagicMock(side_effect=Exception("throttled"))
+
+    result = await svc.sync_user(session, "admin@x.com")
+
+    assert existing.role == UserRole.ADMIN  # 강등 없음
+    assert existing.team_id == admin_team   # default 팀 이동 없음
+    assert any("Failed to list groups" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_sync_group_preserves_admin_from_other_group(monkeypatch):
+    """단일 그룹 sync 는 멤버의 **전체** 그룹을 모른다 — 다른 그룹(또는
+    ADMIN_EMAILS 외 경로)에서 온 기존 ADMIN 을 DEVELOPER 로 강등하지 않는다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    admin_team = uuid.uuid4()
+    existing = MagicMock()
+    existing.id = uuid.uuid4(); existing.sso_subject = "S-ADMIN"
+    existing.email = "boss@x.com"; existing.display_name = "Boss"
+    existing.role = UserRole.ADMIN; existing.team_id = admin_team
+    existing.is_active = True
+    snap = {
+        "id": existing.id, "email": existing.email,
+        "display_name": existing.display_name, "team_id": admin_team,
+        "role": UserRole.ADMIN, "is_active": True,
+    }
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=existing)
+    repo.get_by_email = AsyncMock(return_value=existing)
+    repo.create_user = AsyncMock()
+    repo.flush = AsyncMock()
+    _wire_team_cache(repo)
+    repo.prefetch_users_by_subjects = AsyncMock(return_value={"S-ADMIN": snap})
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._ensure_team_id = AsyncMock(return_value=admin_team)
+    svc._list_users_in_group = MagicMock(return_value=[
+        {"Username": "boss@x.com", "Enabled": True, "Attributes": [
+            {"Name": "sub", "Value": "S-ADMIN"},
+            {"Name": "email", "Value": "boss@x.com"}]},
+    ])
+
+    await svc.sync_group(session, "Claude_dept_team")
+
+    # 이 그룹(Claude_dept_team)은 admin 그룹이 아니므로 derived=DEVELOPER 였다 —
+    # 보존이 없었으면 여기서 DEVELOPER 로 덮어썼다.
+    assert existing.role == UserRole.ADMIN

@@ -27,6 +27,7 @@ from typing import Any
 import structlog
 
 from app.schemas.body_log import BodyLogRecord
+from app.schemas.domain import DegradationLevel
 
 logger = structlog.get_logger(__name__)
 
@@ -128,6 +129,15 @@ async def resolve_body_logger(app_state: Any, redis: Any, session_factory: Any) 
     bl = getattr(app_state, "body_logger", None)
     if bl is None or not bl.enabled_effective:
         return None
+    # DB 열화 시 플래그의 DB 재수화가 pool_timeout(기본 10s)까지 블로킹된다 —
+    # 요청 경로에서 지연을 피하기 위해 DB 다운 시에는 세션을 넘기지 않는다
+    # (Redis 히트는 여전히 읽히고, 미스면 flag 의 default 로 떨어진다).
+    dm = getattr(app_state, "degradation_manager", None)
+    if dm is not None and dm.level in (
+        DegradationLevel.DB_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    ):
+        session_factory = None
     flag = getattr(app_state, "body_log_flag", None)
     if flag is not None and not await flag.is_enabled(redis, session_factory):
         return None

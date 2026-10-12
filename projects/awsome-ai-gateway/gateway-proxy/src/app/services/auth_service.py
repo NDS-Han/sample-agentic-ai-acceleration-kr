@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from typing import Protocol
@@ -10,6 +11,7 @@ import jwt
 import structlog
 from sqlalchemy import select
 from sqlalchemy import text as _sql_text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import JwtPublicKey, User
@@ -105,7 +107,12 @@ async def _resolve_entitlements(
             user_id=str(user_id),
             exc_info=True,
         )
-        raise PermissionError("model access policy unavailable (fail-closed)")
+        # fail-closed 는 유지하되 상태코드는 정직하게: entitlement 해소 자체가
+        # 불가한 인프라 장애이므로 401(자격 거부)이 아니라 503 다 — 401 이면
+        # 클라이언트가 정상 키를 재발급받으려 하고 auth-failure 카운터가 오염된다.
+        raise AuthBackendUnavailableError(
+            "model access policy unavailable (fail-closed)"
+        )
 
     allowed_models: list[str] | None
     if user_aliases:
@@ -198,27 +205,41 @@ class VKAuthStrategy:
         if redis is not None:
             cached = await redis.get(f"key:cache:vk:{key_hash}")
             if cached:
-                # VK 폐기 시 admin-api 가 key:vk:{hash} 와 key:cache:vk:{hash} 를
-                # 함께 DEL 한다. 캐시 DEL 이 일시 Redis 장애로 실패하면 AuthContext
-                # 가 남아 폐기 키가 TTL(≤300s) 동안 통과했다 — 그래서 캐시 히트도
-                # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
-                # 매핑 부재 = 폐기됨.
-                vk_mapping = await redis.get(f"key:vk:{key_hash}")
-                if vk_mapping is None:
-                    await redis.delete(f"key:cache:vk:{key_hash}")
-                    raise PermissionError("Invalid or inactive virtual key")
-                data = json.loads(cached)
-                # user.is_active 재확인 — 캐시 TTL(300s) 안에 계정 비활성화된 경우 즉시 차단
-                if db is not None:
-                    from sqlalchemy import select as sa_select
-                    result = await db.execute(
-                        sa_select(User.is_active).where(User.id == data["user_id"])
-                    )
-                    is_active = result.scalar_one_or_none()
-                    if is_active is False:
-                        await redis.delete(f"key:cache:vk:{key_hash}", f"key:vk:{key_hash}")
-                        raise PermissionError("User account is deactivated")
-                return AuthContext(**data)
+                # 깨진 캐시 엔트리(JSON 손상, AuthContext 스키마 드리프트로 인한
+                # ValidationError)는 미스로 처리해 DB 해소로 떨어진다 — 401 이면
+                # 배포 직후 캐시 TTL(≤300s) 동안 전 VK 사용자가 잠긴다.
+                try:
+                    cached_ctx = AuthContext(**json.loads(cached))
+                except Exception:
+                    logger.warning("vk_auth_cache_corrupt", key_hash=key_hash[:16])
+                    cached_ctx = None
+                if cached_ctx is not None:
+                    # VK 폐기 시 admin-api 가 key:vk:{hash} 와 key:cache:vk:{hash} 를
+                    # 함께 DEL 한다. 캐시 DEL 이 일시 Redis 장애로 실패하면 AuthContext
+                    # 가 남아 폐기 키가 TTL(≤300s) 동안 통과했다 — 그래서 캐시 히트도
+                    # 매핑 키 존재를 함께 확인한다. revoke 가 두 키를 같이 지우므로
+                    # 매핑 부재 = 폐기됨.
+                    vk_mapping = await redis.get(f"key:vk:{key_hash}")
+                    if vk_mapping is None:
+                        try:
+                            await redis.delete(f"key:cache:vk:{key_hash}")
+                        except Exception:
+                            logger.warning("vk_cache_cleanup_failed")
+                        raise PermissionError("Invalid or inactive virtual key")
+                    # user.is_active 재확인 — 캐시 TTL(300s) 안에 계정 비활성화된 경우 즉시 차단
+                    if db is not None:
+                        from sqlalchemy import select as sa_select
+                        result = await db.execute(
+                            sa_select(User.is_active).where(User.id == cached_ctx.user_id)
+                        )
+                        is_active = result.scalar_one_or_none()
+                        if is_active is False:
+                            try:
+                                await redis.delete(f"key:cache:vk:{key_hash}", f"key:vk:{key_hash}")
+                            except Exception:
+                                logger.warning("vk_cache_cleanup_failed")
+                            raise PermissionError("User account is deactivated")
+                    return cached_ctx
 
         # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장). Redis 가 유일한
         #    소스다 — DB 의 auth.virtual_keys 는 암호화된 원문이라 해시로 조회가
@@ -259,13 +280,17 @@ class VKAuthStrategy:
             sso_subject=user.sso_subject,
         )
 
-        # 4) AuthContext 캐시 저장
+        # 4) AuthContext 캐시 저장 — best-effort: 쓰기 실패는 다음 요청의 캐시
+        #    미스일 뿐이라, 인증에 성공한 요청까지 RedisError→503 으로 만들면 안 된다.
         if redis is not None:
-            await redis.setex(
-                f"key:cache:vk:{key_hash}",
-                VK_CACHE_TTL,
-                auth_context.model_dump_json(),
-            )
+            try:
+                await redis.setex(
+                    f"key:cache:vk:{key_hash}",
+                    VK_CACHE_TTL,
+                    auth_context.model_dump_json(),
+                )
+            except Exception:
+                logger.warning("vk_auth_cache_write_failed")
 
         return auth_context
 
@@ -354,7 +379,12 @@ class JWTAuthStrategy:
                     select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
                 )
                 jwt_keys = list(result.scalars().all())
-            except Exception as e:  # 인프라 장애는 503 — 401 이면 키 재발급 오해 + 이벤트 오염
+            except Exception as e:
+                # 인프라 장애만 503 — 코드 버그(AttributeError 등)는 그대로 전파해
+                # 500 으로 남긴다. 'JWT key lookup failed' 로 싸면 디버깅 단서가
+                # 사라지고 재시도 가능한 장애처럼 보인다.
+                if not isinstance(e, (SQLAlchemyError, OSError, asyncio.TimeoutError)):
+                    raise
                 logger.warning("jwt_key_lookup_failed", error=str(e))
                 raise AuthBackendUnavailableError(f"JWT key lookup failed: {e}")
             if not jwt_keys:
@@ -384,19 +414,23 @@ class JWTAuthStrategy:
 
             # 검증에 성공한 **그 키**를 kid 아래에 캐시한다 — 잘못된 키가
             # 캐시돼 후속 요청을 계속 실패시키는 일이 없게.
+            # best-effort: 쓰기 실패는 다음 요청의 캐시 미스일 뿐이다.
             if redis is not None:
-                await redis.setex(
-                    kid_cache_key,
-                    JWT_KEY_CACHE_TTL,
-                    json.dumps(
-                        {
-                            "pem": matched_key.public_key_pem,
-                            "algorithm": matched_key.algorithm,
-                            "issuer": matched_key.issuer,
-                            "audience": matched_key.audience,
-                        }
-                    ),
-                )
+                try:
+                    await redis.setex(
+                        kid_cache_key,
+                        JWT_KEY_CACHE_TTL,
+                        json.dumps(
+                            {
+                                "pem": matched_key.public_key_pem,
+                                "algorithm": matched_key.algorithm,
+                                "issuer": matched_key.issuer,
+                                "audience": matched_key.audience,
+                            }
+                        ),
+                    )
+                except Exception:
+                    logger.warning("jwt_key_cache_write_failed")
 
         # 알 수 없는 role 라벨은 통째로 401 을 만드는 대신 건너뛰고 경고를 남긴다.
         # (Role(r) 가 ValueError → middleware 가 이유 없는 401 로 바꿔버렸다.)

@@ -43,6 +43,7 @@ class SMTPEmailSender:
         )
         self._sender_address = settings.email_sender_address
         self._sender_name = settings.email_sender_name
+        self._send_timeout = settings.email_send_read_timeout
 
     async def send(self, email: RenderedEmail) -> None:
         from email.mime.multipart import MIMEMultipart
@@ -65,6 +66,9 @@ class SMTPEmailSender:
                 password=self._password,
                 use_tls=self._use_tls,
                 start_tls=self._starttls,
+                # 무응답 서버가 워커를 붙잡지 않도록 상한 — 기본(None)은 OS TCP
+                # 타임아웃까지 기다린다.
+                timeout=self._send_timeout,
             )
         except aiosmtplib.SMTPRecipientsRefused as exc:
             raise EmailSendError(str(exc), retryable=False) from exc

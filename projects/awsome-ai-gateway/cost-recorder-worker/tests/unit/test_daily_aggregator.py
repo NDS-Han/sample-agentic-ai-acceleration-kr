@@ -92,3 +92,67 @@ def test_backfill_still_conflict_safe_and_same_grain():
     assert "ON CONFLICT" in _BACKFILL_SQL
     group_by = _BACKFILL_SQL.split("GROUP BY")[-1]
     assert "team_id" not in group_by and "dept_id" not in group_by
+
+
+@pytest.mark.asyncio
+async def test_backfill_missing_days_recovers_gap(monkeypatch):
+    """크론 실패로 통째로 빠진 날짜는 그대로 두면 영구 누락이다 —
+    usage_logs 에는 있고 daily_aggregates 에는 없는 날짜를 탐지해 재집계한다."""
+    from datetime import date
+
+    from worker.daily_aggregator import backfill_missing_days
+
+    s = MagicMock()
+    s.reporting_timezone = "Asia/Seoul"
+    import worker.daily_aggregator as mod
+    monkeypatch.setattr(mod, "get_settings", lambda: s)
+
+    session = AsyncMock()
+    calls: list[tuple[str, dict]] = []
+
+    async def _execute(stmt, params=None):
+        sql = str(stmt)
+        r = MagicMock()
+        if "NOT IN" in sql:
+            # 누락 날짜 탐지 쿼리 — 하루 갭을 돌려준다.
+            r.__iter__ = lambda self=None: iter([(date(2026, 4, 10),)])
+        else:
+            r.rowcount = 7
+        calls.append((sql, params or {}))
+        return r
+
+    session.execute = AsyncMock(side_effect=_execute)
+    total = await backfill_missing_days(session, lookback_days=30)
+
+    assert total == 7
+    agg_calls = [c for c in calls if "INSERT INTO usage.daily_aggregates" in c[0]]
+    assert len(agg_calls) == 1
+    # 누락일 윈도우로 재집계했는지 — KST 어제가 아니라 갭 날짜 기준이어야 한다.
+    assert "DO UPDATE" in agg_calls[0][0]  # 재집계도 충돌 안전(UPSERT)
+    session.commit.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_backfill_missing_days_no_gap_is_noop(monkeypatch):
+    """갭이 없으면 집계 INSERT 를 돌리지 않는다(매일 무해)."""
+    s = MagicMock()
+    s.reporting_timezone = "Asia/Seoul"
+    import worker.daily_aggregator as mod
+    monkeypatch.setattr(mod, "get_settings", lambda: s)
+
+    from worker.daily_aggregator import backfill_missing_days
+
+    session = AsyncMock()
+    calls: list[str] = []
+
+    async def _execute(stmt, params=None):
+        calls.append(str(stmt))
+        r = MagicMock()
+        r.__iter__ = lambda self=None: iter([])
+        return r
+
+    session.execute = AsyncMock(side_effect=_execute)
+    total = await backfill_missing_days(session, lookback_days=30)
+
+    assert total == 0
+    assert not any("INSERT INTO usage.daily_aggregates" in c for c in calls)

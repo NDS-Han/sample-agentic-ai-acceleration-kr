@@ -66,7 +66,12 @@ def create_engine():
         pool_timeout=settings.DB_POOL_TIMEOUT,
         pool_recycle=settings.DB_POOL_RECYCLE,
         echo=settings.DB_ECHO,
-        connect_args={"statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE},
+        connect_args={
+            "statement_cache_size": settings.DB_STATEMENT_CACHE_SIZE,
+            # 블랙홀 장애(무응답)에서 asyncpg 기본값(connect 60s·명령 무제한) 대기 방지.
+            "timeout": settings.DB_CONNECT_TIMEOUT,
+            "command_timeout": settings.DB_COMMAND_TIMEOUT,
+        },
     )
 
 

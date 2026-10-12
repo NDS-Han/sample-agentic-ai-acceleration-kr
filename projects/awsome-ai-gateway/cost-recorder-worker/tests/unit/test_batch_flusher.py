@@ -531,3 +531,76 @@ async def test_zero_usage_error_marker_skips_budget_and_counters():
     pipe.incrbyfloat.assert_not_called()
     pipe.incrby.assert_not_called()
     pipe.sadd.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_poison_value_error_row_skipped_others_recorded():
+    """깨진 requested_at(ValueError — fromisoformat 실패)은 영구 오류다.
+
+    페이로드가 스키마(str)를 통과하고 INSERT params 빌드에서 죽는 경로.
+    ValueError 가 전파되면 배치가 PEL 에 남아 flush 가 영원히 실패해
+    스트림 전체를 봉쇄한다 — poison 행만 스킵하고 나머지는 기록돼야 한다.
+    """
+    captured: list = []
+    session_factory = _session_factory_for(_insert_param_capturing_exec(captured))
+    redis, pipe = _counter_redis()
+
+    good = _make_entry(request_id="req-good")
+    poison = _make_entry(request_id="req-poison")
+    poison.requested_at = "not-a-timestamp"
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush([good, poison])  # 예외 없이 반환돼 호출자가 XACK 까지 진행
+
+    assert {p["request_id"] for p in captured} == {"req-good"}
+    assert not any(p["request_id"] == "req-poison" for p in captured)
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_poison_data_error_row_skipped_others_recorded():
+    """CAST(:user_id AS uuid) 실패(DataError)도 영구 오류 — poison 행만 스킵."""
+    from sqlalchemy.exc import DataError
+
+    async def _exec(stmt, params=None):
+        result = MagicMock()
+        if "RETURNING" in str(stmt):
+            if isinstance(params, dict) and params["request_id"] == "req-bad-uuid":
+                raise DataError("INSERT", params, Exception("invalid input for uuid"))
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        return result
+
+    session_factory = _session_factory_for(_exec)
+    redis, pipe = _counter_redis()
+
+    good = _make_entry(request_id="req-good")
+    bad = _make_entry(request_id="req-bad-uuid", user_id="not-a-uuid")
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush([good, bad])
+
+    # 정상 행은 배치 경로에서 기록됐고, per-row 재시도에서도 poison 만 걸린다
+    # (per-row 에서 req-good 이 재시도돼도 replay 필터가 걸러낸다 — 핵심은
+    # flush 가 예외 없이 끝나 XACK 되는 것과 배치가 봉쇄되지 않는 것).
+    session = session_factory.return_value
+    assert session.commit.await_count >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_transient_operational_error_still_propagates():
+    """일시 오류(OperationalError)는 전파 — 삼키면 미청구 유실(at-least-once 위반)."""
+    from sqlalchemy.exc import OperationalError
+
+    async def _exec(stmt, params=None):
+        raise OperationalError("SELECT", {}, Exception("connection reset"))
+
+    session_factory = _session_factory_for(_exec)
+    redis, _pipe = _counter_redis()
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    with pytest.raises(OperationalError):
+        await flusher.flush([_make_entry()])

@@ -44,6 +44,9 @@ def test_health_db_degraded():
 
 
 def test_health_both_degraded():
+    # Liveness 는 의존성 장애에도 200 — 재시작으로 고칠 수 없는 양중 장애에서
+    # 503 을 내면 kubelet 이 전 파드를 재시작해 스풀 유실 + crashloop 가 된다.
+    # 열화 보고는 본문 status/components 로, 트래픽 배제는 /health/ready 로.
     dm = DegradationManager()
     for _ in range(FAIL_THRESHOLD):
         dm.report_db_health(False)
@@ -52,5 +55,6 @@ def test_health_both_degraded():
     app = make_app_with_dm(dm)
     client = TestClient(app)
     resp = client.get("/health")
-    assert resp.status_code == 503
+    assert resp.status_code == 200
     assert resp.json()["status"] == "unhealthy"
+    assert resp.json()["degradation_level"] == "BOTH_DEGRADED"

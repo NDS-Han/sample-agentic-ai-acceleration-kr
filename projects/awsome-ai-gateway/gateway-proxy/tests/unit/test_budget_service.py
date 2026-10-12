@@ -663,7 +663,9 @@ async def test_check_budget_db_fallback_error_raises_unavailable(mock_redis):
     mock_redis.eval = AsyncMock(side_effect=ConnectionError("redis down"))
 
     db = AsyncMock()
-    db.execute = AsyncMock(side_effect=RuntimeError("db gone"))
+    # 인프라 계열(OSError 패밀리)만 BudgetBackendUnavailableError 로 싼다 —
+    # TypeError/RuntimeError 같은 코드 버그는 그대로 전파해 500 이다.
+    db.execute = AsyncMock(side_effect=ConnectionError("db gone"))
 
     svc = BudgetService()
     with pytest.raises(BudgetBackendUnavailableError):
@@ -675,3 +677,34 @@ def test_backend_unavailable_is_permission_error():
     from app.services.budget_service import BudgetBackendUnavailableError
 
     assert issubclass(BudgetBackendUnavailableError, PermissionError)
+
+
+@pytest.mark.asyncio
+async def test_team_config_hydrate_db_error_is_not_reported_as_unset(mock_redis):
+    """team config 콜드캐시 + DB 조회 실패 → team_budget_unset(429) 이 아니라
+    백엔드 불가(503) 여야 한다 — '조회 실패' 와 '행 없음' 의 구분."""
+    from app.services.budget_service import BudgetBackendUnavailableError
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_check"] = "-- mock"
+    # 팀 config 키 미스 → hydrate 시도
+    mock_redis.exists = AsyncMock(return_value=False)
+    mock_redis.eval = AsyncMock(return_value=_resp(allowed=True, scope="team"))
+
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=ConnectionError("db gone"))
+
+    svc = BudgetService()
+    with pytest.raises(BudgetBackendUnavailableError):
+        await svc.check_budget(mock_redis, db, "u1", "t1", "2026-04")
+
+
+@pytest.mark.asyncio
+async def test_db_fallback_code_bug_propagates_unwrapped():
+    """TypeError 같은 코드 버그는 503 으로 싸지 않는다 — 인프라 예외만 래핑."""
+    svc = BudgetService()
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=TypeError("NoneType limit"))
+
+    with pytest.raises(TypeError):
+        await svc.check_budget(None, db, "u1", "t1", "2026-04")

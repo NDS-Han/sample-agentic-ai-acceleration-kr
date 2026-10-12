@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.models.usage import DailyAggregate
 from app.periods import current_kst_date, current_kst_period
-from app.schemas.domain import Role
+from app.schemas.domain import DegradationLevel, Role
 from app.schemas.responses import DailyBreakdown, UsageBudgetInfo, UsageByModel, UsageMeResponse
 
 logger = structlog.get_logger(__name__)
@@ -71,7 +71,14 @@ async def usage_me(
     total_cost_db = Decimal("0")
     daily_breakdown = []
 
-    if session_factory is not None:
+    # DB 열화 시 세션 획득이 pool_timeout(기본 10s)까지 기다렸다 실패한다 —
+    # 다른 라우터와 같이 사전 가드로 지연을 피하고 Redis 당일 카운터만 응답한다.
+    dm = state.get("_degradation_manager")
+    is_db_degraded = dm and dm.level in (
+        DegradationLevel.DB_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    )
+    if not is_db_degraded and session_factory is not None:
         try:
             try:
                 period_year, period_month = (int(x) for x in period.split("-", 1))
@@ -223,7 +230,13 @@ async def usage_team(team_id: str, request: Request) -> JSONResponse:
     total_tokens = 0
     total_cost = Decimal("0")
 
-    if session_factory is not None:
+    # DB 열화 시 pool_timeout 지연 없이 바로 0 집계로 응답한다(usage_me 와 동일 계약).
+    dm = state.get("_degradation_manager")
+    is_db_degraded = dm and dm.level in (
+        DegradationLevel.DB_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    )
+    if not is_db_degraded and session_factory is not None:
         try:
             # ⚠️ `date` 는 DATE 컬럼이므로 문자열 LIKE 로 월을 걸러선 안 된다.
             # `DailyAggregate.date.like(f"{period}%")` 는 `date LIKE '2026-09%'` 를

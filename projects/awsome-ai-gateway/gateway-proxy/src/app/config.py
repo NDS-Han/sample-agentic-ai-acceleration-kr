@@ -77,6 +77,12 @@ class Settings(BaseSettings):
     # 커넥션 최대 수명(초). RDS Proxy/Aurora 가 유휴 커넥션을 끊으면 죽은 커넥션이 풀에 잔존.
     # pool_pre_ping 이 1차 방어하나, recycle 로 오래된 커넥션을 선제 폐기(기본 -1=무제한 회피).
     db_pool_recycle: int = 3600
+    # asyncpg connect/command 상한 — 블랙홀 장애(거부 없이 무응답: SG 변경·AZ 파티션)에서
+    # asyncpg 기본값(connect 60s, 명령 무제한)은 풀을 물고 요청을 붙잡는다.
+    # connect 는 health probe 의 5s 와 정합, command 는 이 서비스 쿼리가 전부
+    # 소규모라 30s 면 충분 — runaway 쿼리가 풀을 점유하는 것도 막는다.
+    db_connect_timeout: float = 5.0
+    db_command_timeout: float = 30.0
 
     # Timeouts
     lua_timeout_ms: int = 1000

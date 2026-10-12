@@ -125,6 +125,11 @@ class Settings(BaseSettings):
     DB_ECHO: bool = False
     # RDS Proxy 경유 시 0 으로 설정 (PostgreSQL pinning 회피). Aurora 직접 연결 시엔 기본값 유지.
     DB_STATEMENT_CACHE_SIZE: int = 100
+    # asyncpg connect/command 상한 — 블랙홀 장애(무응답)에서 asyncpg 기본값
+    # (connect 60s·명령 무제한) 대기가 풀을 물고 요청을 붙잡는다.
+    # command 는 analytics 집계/export 대비 60s.
+    DB_CONNECT_TIMEOUT: float = 5.0
+    DB_COMMAND_TIMEOUT: float = 60.0
 
     # ── Redis ──
     REDIS_URL: str = "redis://localhost:6379/0"

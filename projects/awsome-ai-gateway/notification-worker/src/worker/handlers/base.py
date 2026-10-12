@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from typing import Protocol
 
 import structlog
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -79,9 +80,34 @@ class BaseHandler(ABC):
             logger.warning("no_recipients_resolved", event_type=event.type.value)
             return
 
-        # 3. 수신자별 처리
+        # 3. 수신자별 처리 — 한 수신자의 렌더/DB/기타 실패가 나머지 수신자를
+        #    데려가지 않도록 수신자 단위로 격리한다(예외 전파 시 잔여 수신자 전부
+        #    미발송이 되던 결함).
         for recipient in recipients:
-            async with self._session_factory() as session:
+            try:
+                await self._deliver_to_recipient(event, recipient)
+            except Exception:
+                logger.exception(
+                    "recipient_processing_failed",
+                    event_type=event.type.value,
+                    recipient=getattr(recipient, "email", "?"),
+                )
+                if self._metrics:
+                    self._metrics.errors_total.add(1, {"error_type": "recipient"})
+
+        # 4. 처리 완료 메트릭
+        if self._metrics:
+            self._metrics.events_processed_total.add(
+                1, {"event_type": event.type.value, "status": "success"}
+            )
+            duration = time.monotonic() - start
+            self._metrics.event_processing_duration.record(
+                duration, {"event_type": event.type.value}
+            )
+
+    async def _deliver_to_recipient(self, event: NotificationEvent, recipient) -> None:
+        """단일 수신자 처리 — 호출자가 예외를 수신자 단위로 격리한다."""
+        async with self._session_factory() as session:
                 # 3a. 템플릿 컨텍스트 구성
                 context = TemplateEngine.build_context(
                     event, recipient.name, recipient.email
@@ -110,10 +136,9 @@ class BaseHandler(ABC):
                 #    (event_id, event_type, recipient_email) 슬롯을 여기서 선점한다.
                 #    같은 이벤트의 재배송(cost-recorder replay 재발행, pub/sub
                 #    다중 구독 등)은 IntegrityError → **중복 메일 발송 없이 스킵**.
-                #    송신 전에 슬롯을 잡으므로 "insert 성공 → send 전 crash →
-                #    재배송" 케이스는 pending 행이 남아 후속 재배송도 스킵된다
-                #    (유실보다 중복 방지를 택함 — retry_executor 가 이벤트 내에서
-                #    이미 재시도한다).
+                #    단 IntegrityError 가 'pending' dead-claim 이면(아래 takeover
+                #    분기) 인수해 발송한다 — 예전엔 스킵해 그 수신자가 영구
+                #    미발송이었다.
                 # ⚠️ IntegrityError **외** 실패(일시 DB 끊김/타임아웃)는 1회 재시도해
                 #    슬롯을 다시 잡는다 — 예전엔 슬롯 없이 발송해 재배송 시 중복 메일이
                 #    나갔다(R2-6). 그래도 실패하면 **발송을 우선**한다 — 알림 채널이
@@ -141,13 +166,43 @@ class BaseHandler(ABC):
                             error=str(exc),
                         )
                 if duplicate:
-                    logger.info(
-                        "duplicate_event_skipped",
-                        event_id=event.event_id,
-                        event_type=event.type.value,
-                        recipient=recipient.email,
-                    )
-                    continue
+                    # IntegrityError 는 두 경우다.
+                    #   (a) 진짜 재배송 — 상태가 확정된(sent/failed) 행이 이미 있으면 스킵.
+                    #   (b) dead-claim — 이전 시도가 INSERT 후 send 전 crash 했거나,
+                    #       commit 자체는 성공했는데 응답이 유실돼 재시도가 슬롯을 다시
+                    #       잡으려다 충돌한 경우. 행은 'pending' 으로 남는다.
+                    # (b) 를 그대로 스킵하면 이 수신자는 영구 미발송이다 —
+                    # 발송 우선 원칙(위 주석)에 따라 pending 행을 인수해 발송하고
+                    # 그 행을 갱신한다.
+                    existing = (
+                        await session.execute(
+                            select(NotificationLog).where(
+                                NotificationLog.event_id == event.event_id,
+                                NotificationLog.event_type == event.type.value,
+                                NotificationLog.recipient_email == recipient.email,
+                            )
+                        )
+                    ).scalar_one_or_none()
+                    if existing is not None and existing.status == "pending":
+                        logger.warning(
+                            "dedup_dead_claim_takeover",
+                            event_id=event.event_id,
+                            event_type=event.type.value,
+                            recipient=recipient.email,
+                        )
+                        log = existing
+                        log.attempt_count = (log.attempt_count or 0) + 1
+                        # 기존 행을 인수했으므로 슬롯은 유효하다 — 아래
+                        # 'unclaimed_sending_anyway' 경고/메트릭을 억제.
+                        slot_claimed = True
+                    else:
+                        logger.info(
+                            "duplicate_event_skipped",
+                            event_id=event.event_id,
+                            event_type=event.type.value,
+                            recipient=recipient.email,
+                        )
+                        return
                 if not slot_claimed:
                     if self._metrics:
                         self._metrics.errors_total.add(1, {"error_type": "db"})
@@ -204,13 +259,3 @@ class BaseHandler(ABC):
                     )
                     if self._metrics:
                         self._metrics.errors_total.add(1, {"error_type": "db"})
-
-        # 4. 처리 완료 메트릭
-        if self._metrics:
-            self._metrics.events_processed_total.add(
-                1, {"event_type": event.type.value, "status": "success"}
-            )
-            duration = time.monotonic() - start
-            self._metrics.event_processing_duration.record(
-                duration, {"event_type": event.type.value}
-            )

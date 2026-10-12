@@ -121,7 +121,7 @@ class StreamConsumer:
                 consumername=self._consumer,
                 streams={self._stream: "0"},
                 count=self._batch_max,
-                block=0,  # no block for backlog
+                block=None,  # PEL 읽기는 어차피 비블로킹 — BLOCK 을 생략해 의도를 명시
             )
             if not msgs:
                 break
@@ -281,6 +281,12 @@ class StreamConsumer:
             for msg_id, fields in records:
                 raw_id = msg_id.decode() if isinstance(msg_id, bytes) else msg_id
                 ids.append(raw_id)
+                # XAUTOCLAIM 은 PEL 만 남고 본문이 MAXLEN 으로 잘린 entry 를
+                # (id, None) 으로 돌려준다 — fields.get 이 AttributeError 로
+                # 소비 루프를 죽이기 전에 여기서 ACK 대상으로 분류한다.
+                if fields is None:
+                    logger.warning("cost_stream_entry_trimmed", msg_id=raw_id)
+                    continue
                 payload = fields.get(b"payload") or fields.get("payload")
                 if payload is None:
                     logger.warning("cost_stream_entry_missing_payload", msg_id=raw_id)

@@ -22,7 +22,7 @@ from typing import Any
 
 import structlog
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.schemas.cost_stream import CostStreamEntry
@@ -88,6 +88,17 @@ _PER_APP_CLIENTS = ("claude-code", "cowork", "codex")
 #: 추가되거나 스키마가 어긋난 배포 조합에서는 여기서 한 번 더 걸러야 poison
 #: retry 루프가 안 생긴다.
 _VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+
+#: 재시도해도 절대 성공하지 않는 "영구" 실패 계열. 이들은 배치 단위로도 per-row
+#: 로도 재처리해도 같은 결과라, 걸러내지 않으면 한 poison entry 가 flush 를
+#: 영원히 실패시켜 스트림 전체를 막는다(PEL 재전달 → supervisor 재시작 루프).
+#:   - IntegrityError: FK 위반 등(기존 계약)
+#:   - DataError:     CAST(:user_id AS uuid) 실패·numeric overflow 등 — 페이로드는
+#:                    스키마에서 str 이라 decode 를 통과하고 CAST 에서 죽는다
+#:   - ValueError:    datetime.fromisoformat 파싱 등 파이썬 레벨 변환 실패
+#: OperationalError/InterfaceError/데드락 등 **일시** 실패는 여전히 전파해
+#: PEL 재처리(at-least-once)에 맡긴다.
+_PERMANENT_FLUSH_ERRORS = (IntegrityError, DataError, ValueError)
 
 
 def _usage_status(entry: CostStreamEntry) -> str:
@@ -282,6 +293,12 @@ class BatchFlusher:
                 #    사용자의 기록 사용액이 영구히 두 배가 된다(_filter_replays 주석 참조).
                 fresh = await _filter_replays(session, entries)
                 if not fresh:
+                    # 전량 replay — usage_logs 는 이미 커밋됐다. 여기서 조기 반환하면
+                    # 전 트랜잭션 커밋 후 카운터/알림 단계에서 죽었던 배치의 daily
+                    # 카운터와 threshold 알림이 영구 생략된다. 그 파생효과들은
+                    # 비멱등(INCRBY·Pub/Sub)이라 replay 구분이 불가해 재시도할 수
+                    # 없다 — 문서화된 설계 한계(알림 유실 허용)이며, 카운터는
+                    # daily_aggregates 가 다음날 정정한다.
                     logger.info("batch_all_replays_skipped", batch_size=len(entries))
                     await session.commit()
                     return
@@ -293,7 +310,10 @@ class BatchFlusher:
                 await self._upsert_budget_usages(session, written)
                 await session.commit()
                 recorded = written
-        except IntegrityError as ie:
+        except _PERMANENT_FLUSH_ERRORS as ie:
+            # IntegrityError 외에도 DataError/ValueError 가 영구 실패다 — decode 를
+            # 통과한 poison 페이로드(깨진 uuid/날짜)가 여기서 걸리지 않으면 그 배치는
+            # 영원히 실패해 스트림 전체를 봉쇄한다.
             logger.warning(
                 "batch_integrity_error_fallback_per_row",
                 batch_size=len(entries),
@@ -347,8 +367,9 @@ class BatchFlusher:
                         await self._upsert_budget_usages(session, [e])
                         written.append(e)
                     await session.commit()
-            except IntegrityError as ie:
-                # 영구 오류(FK 위반 등)만 스킵 — 재시도해도 같은 결과라 ACK 해도 된다.
+            except _PERMANENT_FLUSH_ERRORS as ie:
+                # 영구 오류(FK 위반·깨진 uuid/날짜 등)만 스킵 — 재시도해도 같은
+                # 결과라 ACK 해도 된다.
                 skipped += 1
                 logger.warning(
                     "row_skipped_integrity_error",
@@ -356,7 +377,7 @@ class BatchFlusher:
                     user_id=e.user_id,
                     reason=str(ie)[:120],
                 )
-            # ⚠️ IntegrityError 외(직렬화 실패·데드락·일시적 DB 끊김)는 전파한다.
+            # ⚠️ 영구 오류 외(직렬화 실패·데드락·일시적 DB 끊김)는 전파한다.
             #    여기서 삼키고 호출자가 XACK 하면 그 비용은 **영구 유실**(미청구)이다.
             #    전파하면 배치가 unacked 로 남아 PEL reclaim 으로 재처리되고,
             #    이미 커밋된 앞 행은 _filter_replays 가 걸러내 이중계상되지 않는다.

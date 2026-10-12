@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from decimal import Decimal, InvalidOperation
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
@@ -23,6 +25,21 @@ class BudgetBackendUnavailableError(PermissionError):
     먼저 잡아 503 을 낸다 — 인프라 장애를 'no_budget_assigned' 429 로 오보하면
     사용자가 예산을 문의하고 운영자는 장애 원인을 못 찾는다.
     """
+
+
+async def _safe_rollback(db) -> None:
+    """best-effort DB 구문 실패 후 세션을 되돌린다 — 롤백 자체 실패는 무시.
+
+    Postgres 는 한 구문이 실패하면 트랜잭션이 aborted 상태로 남아 이후 모든
+    구문이 InFailedSQLTransaction/PendingRollbackError 로 연쇄 실패한다.
+    """
+    if db is None:
+        return
+    try:
+        await db.rollback()
+    except Exception:
+        pass
+
 
 BUDGET_CONFIG_TTL = None  # 무기한 (Admin 변경 시 DEL로 무효화)
 
@@ -388,6 +405,10 @@ class BudgetService:
                             )
                     except Exception:
                         logger.exception("budget_counter_restore_failed", user_id=user_id)
+                        # 실패한 구문은 트랜잭션을 aborted 상태로 남긴다 — 같은
+                        # 세션의 뒤 쿼리(팀 복원·eval 사전 조회)가 전부
+                        # PendingRollbackError 로 터지지 않게 되돌린다.
+                        await _safe_rollback(db)
 
                 # TEAM 사용 카운터도 복원한다 — 위가 USER/앱만 복원하고 팀은 놔두면,
                 # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
@@ -442,6 +463,7 @@ class BudgetService:
                             )
                     except Exception:
                         logger.exception("budget_team_counter_restore_failed", team_id=team_id)
+                        await _safe_rollback(db)
 
                 # Redis Cluster CROSSSLOT 대응: USER/TEAM 키는 hash tag 가 달라 slot 이
                 # 서로 다르므로 단일 Lua 호출에 묶을 수 없다. scope 별로 2번 호출하고
@@ -564,15 +586,22 @@ class BudgetService:
                 raise
             except Exception:
                 logger.exception("redis_budget_check_failed", user_id=user_id)
+                # Redis 경로 안에서 실패한 DB 구문(hydrate/복원)이 세션을
+                # aborted 상태로 남겼을 수 있다 — 같은 세션으로 가는
+                # DB fallback 이 즉시 PendingRollbackError 를 맞지 않게 되돌린다.
+                await _safe_rollback(db)
                 # Redis 실패 시 DB fallback
-                pass
 
         # DB fallback (REDIS_DEGRADED)
         try:
             return await self._check_budget_db(db, user_id, team_id, period, client=client)
         except PermissionError:
             raise
-        except Exception:
+        except Exception as e:
+            # 인프라 장애만 503 — 코드 버그(NULL 필드 TypeError 등)는 그대로
+            # 전파해 500 으로 남겨 재시도 가능한 장애처럼 보이지 않게 한다.
+            if not isinstance(e, (SQLAlchemyError, OSError, asyncio.TimeoutError)):
+                raise
             logger.exception("budget_db_fallback_failed", user_id=user_id)
             raise BudgetBackendUnavailableError("budget check failed: DB fallback error")
 
@@ -837,6 +866,7 @@ class BudgetService:
             select(BudgetConfig)
             .where(BudgetConfig.scope == BudgetScope.TEAM)
             .where(BudgetConfig.scope_id == team_id)
+            .where(BudgetConfig.client.is_(None))
             .where(BudgetConfig.is_active == True)  # noqa: E712
         )
         team_config = team_cfg_result.scalar_one_or_none()
@@ -874,6 +904,7 @@ class BudgetService:
             .where(BudgetUsage.scope == BudgetScope.TEAM)
             .where(BudgetUsage.scope_id == team_id)
             .where(BudgetUsage.period == period)
+            .where(BudgetUsage.client.is_(None))
         )
         team_usage = team_usage_result.scalar_one_or_none()
         team_used = team_usage.used_usd if team_usage else Decimal("0")
@@ -991,43 +1022,45 @@ class BudgetService:
         - init SQL seed 예산 또는 post-startup 신규 팀 등 admin-api warmup 이후에
           생성된 TEAM 예산이 아직 Redis에 없는 경우를 처리.
         - 키가 없으면 do-nothing → Lua 가 team_budget_unset 을 정상 반환.
-        """
-        try:
-            result = await db.execute(
-                select(BudgetConfig)
-                .where(BudgetConfig.scope == BudgetScope.TEAM)
-                .where(BudgetConfig.scope_id == team_id)
-                .where(BudgetConfig.is_active == True)  # noqa: E712
-                .limit(1)
-            )
-            config = result.scalar_one_or_none()
-            if config is None or config.max_budget_usd is None:
-                # T=NULL 'D-only' 행 — 키 부재로 두어 Lua 가 team_budget_unset
-                # 으로 fail-closed 판정하게 한다(§3-1: 행 없음과 동일 취급).
-                return
 
-            config_data = {
-                "limit_usd": str(config.max_budget_usd),
-                "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-                "thresholds": _row_thresholds(config),
-                # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
-                # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
-                "default_user_cap_usd": (
-                    str(config.default_user_cap_usd)
-                    if config.default_user_cap_usd is not None
-                    else None
-                ),
-            }
-            config_key = f"budget:config:team:{{{team_id}}}"
-            # TTL은 admin-api BUDGET_CONFIG_CACHE_TTL 과 일치 (5분)
-            await redis.set(config_key, json.dumps(config_data), ex=300)
-            logger.info(
-                "team_budget_config_hydrated",
-                team_id=team_id,
-                limit_usd=str(config.max_budget_usd),
-            )
-        except Exception:
-            logger.warning("team_budget_config_hydrate_failed", team_id=team_id)
+        ⚠️ 예외는 삼키지 않고 전파한다 — '조회 실패' 와 '행 없음' 을 구분해야 한다.
+           DB 오류를 삼키면 키 부재로 보여 Lua 가 team_budget_unset(429) 를 내고,
+           인프라 장애가 예산 미설정으로 오보된다. 전파되면 check_budget 의
+           바깥 try 가 DB fallback 으로 보낸다.
+        """
+        result = await db.execute(
+            select(BudgetConfig)
+            .where(BudgetConfig.scope == BudgetScope.TEAM)
+            .where(BudgetConfig.scope_id == team_id)
+            .where(BudgetConfig.is_active == True)  # noqa: E712
+            .limit(1)
+        )
+        config = result.scalar_one_or_none()
+        if config is None or config.max_budget_usd is None:
+            # T=NULL 'D-only' 행 — 키 부재로 두어 Lua 가 team_budget_unset
+            # 으로 fail-closed 판정하게 한다(§3-1: 행 없음과 동일 취급).
+            return
+
+        config_data = {
+            "limit_usd": str(config.max_budget_usd),
+            "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+            "thresholds": _row_thresholds(config),
+            # 팀 기본 유저 cap D — admin DEL-only 경로의 재수화가 D 를 잃지
+            # 않도록 DB 행에서 함께 싣는다(§6-6). 현행 Lua 는 미지 필드를 무시.
+            "default_user_cap_usd": (
+                str(config.default_user_cap_usd)
+                if config.default_user_cap_usd is not None
+                else None
+            ),
+        }
+        config_key = f"budget:config:team:{{{team_id}}}"
+        # TTL은 admin-api BUDGET_CONFIG_CACHE_TTL 과 일치 (5분)
+        await redis.set(config_key, json.dumps(config_data), ex=300)
+        logger.info(
+            "team_budget_config_hydrated",
+            team_id=team_id,
+            limit_usd=str(config.max_budget_usd),
+        )
 
     async def _hydrate_client_config_cache(
         self,
@@ -1044,34 +1077,33 @@ class BudgetService:
         `_sync_redis_app_config` 와 동일(limit_usd, lowercase policy, thresholds).
         키가 없으면(활성 행 없음) do-nothing → Lua 가 config_present=false 로
         pass-through (정상: 해당 client 에 per-app 예산이 없는 경우).
-        """
-        try:
-            result = await db.execute(
-                select(BudgetConfig)
-                .where(BudgetConfig.scope == BudgetScope.USER)
-                .where(BudgetConfig.scope_id == user_id)
-                .where(BudgetConfig.client == client)
-                .where(BudgetConfig.is_active == True)  # noqa: E712
-                .limit(1)
-            )
-            config = result.scalar_one_or_none()
-            if config is None:
-                return
 
-            config_data = {
-                "limit_usd": str(config.max_budget_usd),
-                "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
-                "thresholds": _row_thresholds(config),
-            }
-            config_key = f"budget:config:user:{{{user_id}}}:{client}"
-            await redis.set(config_key, json.dumps(config_data), ex=300)
-            logger.info(
-                "client_budget_config_hydrated",
-                user_id=user_id,
-                client=client,
-                limit_usd=str(config.max_budget_usd),
-            )
-        except Exception:
-            logger.warning(
-                "client_budget_config_hydrate_failed", user_id=user_id, client=client
-            )
+        ⚠️ 예외는 삼키지 않고 전파한다 — 조회 실패를 '행 없음' 으로 읽으면
+           per-app 예산이 조용히 우회된다(P0-③ 가 막으려던 바로 그 구멍).
+           전파되면 check_budget 의 바깥 try 가 DB fallback 으로 보낸다.
+        """
+        result = await db.execute(
+            select(BudgetConfig)
+            .where(BudgetConfig.scope == BudgetScope.USER)
+            .where(BudgetConfig.scope_id == user_id)
+            .where(BudgetConfig.client == client)
+            .where(BudgetConfig.is_active == True)  # noqa: E712
+            .limit(1)
+        )
+        config = result.scalar_one_or_none()
+        if config is None:
+            return
+
+        config_data = {
+            "limit_usd": str(config.max_budget_usd),
+            "policy": _policy_to_lua_value(_db_policy_to_domain(config.policy)),
+            "thresholds": _row_thresholds(config),
+        }
+        config_key = f"budget:config:user:{{{user_id}}}:{client}"
+        await redis.set(config_key, json.dumps(config_data), ex=300)
+        logger.info(
+            "client_budget_config_hydrated",
+            user_id=user_id,
+            client=client,
+            limit_usd=str(config.max_budget_usd),
+        )

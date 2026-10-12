@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     db_ssl_mode: str = "disable"
     # RDS Proxy 경유 시 0 으로 설정 (PostgreSQL pinning 회피). Aurora 직접 연결 시엔 기본값 유지.
     db_statement_cache_size: int = 100
+    # asyncpg connect/command 상한 — 블랙홀 장애(무응답)에서 asyncpg 기본값
+    # (connect 60s·명령 무제한) 대기를 막는다. 배치/집계 쿼리라 command 는 60s.
+    db_connect_timeout: float = 5.0
+    db_command_timeout: float = 60.0
 
     # Redis
     redis_url: str = "redis://redis:6379/0"
@@ -83,6 +87,11 @@ class Settings(BaseSettings):
 
     # Daily aggregator cron. 기본 매일 00:10 (reporting_timezone 기준).
     daily_usage_agg_cron: str = "10 0 * * *"
+    # 매 실행마다 재집계하는 최근 완료 일수 — 스트림 백로그로 늦게 INSERT 된
+    # 행이 기존 집계 키에 누락되지 않도록 어제+그제를 UPSERT(멱등).
+    daily_usage_agg_recent_days: int = 2
+    # 통째로 누락된 과거 날짜(크론 실패·워커 다운)를 탐지·백필하는 lookback 일수.
+    daily_usage_agg_backfill_lookback_days: int = 30
 
     # daily_aggregates 의 일별 캘린더 경계 + cron 실행 타임존(§59). IANA TZ 이름.
     # admin-api 의 REPORTING_TIMEZONE 과 동일 값으로 맞춰야 한다 — 안 그러면

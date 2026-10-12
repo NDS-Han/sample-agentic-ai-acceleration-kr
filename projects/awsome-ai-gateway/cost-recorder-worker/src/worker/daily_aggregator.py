@@ -40,18 +40,23 @@ from worker.config import get_settings
 logger = structlog.get_logger(__name__)
 
 
+def _day_window(tz: ZoneInfo, local_day: date) -> tuple[datetime, datetime]:
+    """로컬 날짜 하루의 [start, end) UTC 구간."""
+    start_local = datetime.combine(local_day, datetime.min.time(), tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(timezone.utc),
+        end_local.astimezone(timezone.utc),
+    )
+
+
 def _yesterday_window(tz_name: str) -> tuple[datetime, datetime, date]:
     """[어제 00:00, 오늘 00:00) UTC 구간 + 어제 로컬 날짜를 반환."""
     tz = ZoneInfo(tz_name)
     now_local = datetime.now(tz)
     yesterday_local_date = (now_local - timedelta(days=1)).date()
-    start_local = datetime.combine(yesterday_local_date, datetime.min.time(), tzinfo=tz)
-    end_local = start_local + timedelta(days=1)
-    return (
-        start_local.astimezone(timezone.utc),
-        end_local.astimezone(timezone.utc),
-        yesterday_local_date,
-    )
+    start, end = _day_window(tz, yesterday_local_date)
+    return (start, end, yesterday_local_date)
 
 
 _AGG_SQL = """
@@ -122,14 +127,24 @@ async def _is_empty(session: AsyncSession) -> bool:
     return result.scalar_one_or_none() is None
 
 
+async def _aggregate_window(
+    session: AsyncSession, start: datetime, end: datetime, tz_name: str
+) -> int:
+    """[start, end) UTC 구간 전체 재집계 + UPSERT + commit."""
+    result = await session.execute(
+        text(_AGG_SQL), {"start": start, "end": end, "tz": tz_name}
+    )
+    count: int = result.rowcount
+    await session.commit()
+    return count
+
+
 async def aggregate_yesterday(session: AsyncSession) -> int:
     tz_name = get_settings().reporting_timezone
     start, end, day_local = _yesterday_window(tz_name)
     # 어제 윈도우 전체를 재집계해 UPSERT — 늦게 도착한 행도 재실행 때마다 반영되고,
     # 멀티-replica 크론 동시 실행도 유니크 키 행 잠금으로 직렬화돼 안전하다.
-    result = await session.execute(text(_AGG_SQL), {"start": start, "end": end, "tz": tz_name})
-    count: int = result.rowcount
-    await session.commit()
+    count = await _aggregate_window(session, start, end, tz_name)
     logger.info(
         "daily_aggregator.ran",
         start=start.isoformat(),
@@ -138,6 +153,68 @@ async def aggregate_yesterday(session: AsyncSession) -> int:
         inserted=count,
     )
     return count
+
+
+#: daily_aggregates 행이 통째로 없는 과거 날짜 탐지 — 크론 실행이 실패하면
+#: 다음 실행은 어제만 집계하므로 그 날짜는 영구 누락된다. lookback 창 안에서
+#: usage_logs 에는 있는데 daily_aggregates 에는 없는 날짜를 찾아 재집계한다.
+_MISSING_DATES_SQL = """
+SELECT DISTINCT (requested_at AT TIME ZONE :tz)::date AS d
+FROM usage.usage_logs
+WHERE requested_at >= :lookback_start
+  AND requested_at < :today_start
+  AND (requested_at AT TIME ZONE :tz)::date NOT IN (
+      SELECT DISTINCT date FROM usage.daily_aggregates
+      WHERE date >= :lookback_start_date
+  )
+ORDER BY d
+"""
+
+
+async def backfill_missing_days(
+    session: AsyncSession, lookback_days: int = 30
+) -> int:
+    """집계가 통째로 누락된 과거 날짜(크론 실패·워커 장기 다운)를 재집계한다.
+
+    어제 윈도우만 매일 돌기 때문에 실패한 실행의 날짜는 그대로 두면 영구 누락이다.
+    기존 키의 늦도착 행은 이 경로가 아니라 `run_daily_aggregation` 의 최근 N일
+    재집계(UPSERT)가 잡는다 — 여기서는 "날짜 행 자체가 없는" 갭만 채운다.
+    """
+    tz_name = get_settings().reporting_timezone
+    tz = ZoneInfo(tz_name)
+    today_local = datetime.now(tz).date()
+    lookback_start_local = today_local - timedelta(days=lookback_days)
+    lookback_start, today_start = (
+        datetime.combine(d, datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+        for d in (lookback_start_local, today_local)
+    )
+    rows = await session.execute(
+        text(_MISSING_DATES_SQL),
+        {
+            "tz": tz_name,
+            "lookback_start": lookback_start,
+            "today_start": today_start,
+            "lookback_start_date": lookback_start_local,
+        },
+    )
+    missing = [r[0] for r in rows]
+    total = 0
+    for d in missing:
+        start, end = _day_window(tz, d)
+        count = await _aggregate_window(session, start, end, tz_name)
+        total += count
+        logger.info(
+            "daily_aggregator.backfilled_missing_day",
+            date=str(d),
+            inserted=count,
+        )
+    if missing:
+        logger.warning(
+            "daily_aggregator.gap_days_recovered",
+            days=[str(d) for d in missing],
+            inserted=total,
+        )
+    return total
 
 
 async def backfill_if_empty(session: AsyncSession) -> int:
@@ -163,10 +240,36 @@ async def backfill_if_empty(session: AsyncSession) -> int:
 async def run_daily_aggregation(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """APScheduler가 매일 호출하는 엔트리포인트."""
+    """APScheduler가 매일 호출하는 엔트리포인트.
+
+    단계:
+      1. 어제 윈도우 UPSERT (기본 경로)
+      2. 최근 재집계 창 — 스트림 백로그/재처리로 늦게 INSERT 된 그제~어제 행이
+         기존 집계 키에 영구 누락되지 않도록 어제+그제를 재집계한다(UPSERT 라
+         멱등, 비용은 하루분 추가 스캔).
+      3. 통째로 누락된 과거 날짜 백필 — 크론 실패분 복구.
+
+    한 단계가 실패해도 다음 스케줄 실행이 전체를 다시 시도한다(모두 멱등).
+    """
     try:
         async with session_factory() as session:
-            await aggregate_yesterday(session)
+            settings = get_settings()
+            tz_name = settings.reporting_timezone
+            tz = ZoneInfo(tz_name)
+            today_local = datetime.now(tz).date()
+            for offset in range(settings.daily_usage_agg_recent_days, 0, -1):
+                day = today_local - timedelta(days=offset)
+                start, end = _day_window(tz, day)
+                count = await _aggregate_window(session, start, end, tz_name)
+                logger.info(
+                    "daily_aggregator.ran",
+                    date=str(day),
+                    timezone=tz_name,
+                    inserted=count,
+                )
+            await backfill_missing_days(
+                session, settings.daily_usage_agg_backfill_lookback_days
+            )
     except Exception:
         logger.exception("daily_aggregator.failed")
 

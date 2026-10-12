@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from opentelemetry.metrics import Counter, Histogram, ObservableGauge, UpDownCounter
+from opentelemetry.metrics import Counter, Histogram, UpDownCounter
 
 from app.observability._setup import get_meter
 
@@ -131,34 +131,16 @@ class GatewayMetrics:
             description="Current degradation level (0=healthy, 1=db, 2=redis, 3=both)",
         )
 
-        # Observable gauge — 콜백 기반.
+        # ── `gateway_usage_buffer_size` / `gateway_budget_remaining_usd` 는 제거했다 ──
         #
-        # ⚠️ 콜백을 **등록하지 않으면 값이 하나도 나가지 않는다.** 예전엔
-        #    `register_buffer_size_callback` 이 코드베이스 어디에서도 호출되지 않아
-        #    이 게이지가 이름만 존재했다. Prometheus 에 시계열이 없으면 대시보드는
-        #    "No data" 를, 알람은 영구히 거짓을 낸다 — 사람은 둘 다 "정상" 으로 읽는다.
-        #    지표를 선언만 해 두는 것은 없는 것보다 나쁘다.
-        #    등록은 main.py 의 lifespan 에서 한다(UsageBufferQueue.size 를 읽는다).
-        self._buffer_size_callback: list = []
-
-        self.usage_buffer_size: ObservableGauge = meter.create_observable_gauge(
-            "gateway_usage_buffer_size",
-            callbacks=self._buffer_size_callback,
-            description="Current usage buffer queue size",
-        )
-
-        # ── `gateway_budget_remaining_usd` 는 제거했다 ──
+        # usage_buffer_size: 게이트웨이는 usage 를 cost:stream 에만 쓰고 DB 에 직접
+        # INSERT 하지 않는다 — UsageBufferQueue 는 스트림 아키텍처로 대체된 사장 설계로,
+        # enqueue/drain 호출부가 한 곳도 없어 게이지가 영구히 0 이었다(거짓 "정상" 신호).
         #
+        # budget_remaining_usd:
         # 남은 예산은 **사용자·팀 단위** 값이다. 라벨 없는 단일 게이지로는 무엇의 잔액인지
         # 말할 수 없고, 라벨을 붙이면 사용자 수만큼 시계열이 생긴다 — 이 Prometheus 는
         # prometheus-adapter 로 HPA 도 먹이므로 카디널리티 폭발은 관측성과 함께
         # 오토스케일링을 죽인다(provider_metrics.py 의 카디널리티 계약 참조).
         # 예산 잔액의 진실의 원천은 admin-api 의 예산 API/DB 이고, 게이트웨이는 요청
         # 시점 판정만 한다. 여기서 또 내보내면 두 개의 진실이 생긴다.
-
-    def register_buffer_size_callback(self, callback) -> None:
-        """OTel observable gauge 콜백 등록. main.py lifespan 에서 호출한다.
-
-        콜백 시그니처는 `(CallbackOptions) -> Iterable[Observation]` 이다.
-        """
-        self._buffer_size_callback.append(callback)

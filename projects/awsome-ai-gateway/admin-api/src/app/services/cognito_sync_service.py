@@ -264,6 +264,12 @@ class CognitoSyncService:
         # seen 에 빠진 채 deactivate 를 돌리면 Cognito 에 살아있는 유저가 대량
         # 비활성화된다(극단적으로 전원).
         reconcile_incomplete = False
+        # stale-team 정리(5단계)의 완전성은 별도 축이다 — synced_team_ids 는
+        # group_team_id 에서 나오고, 이것이 불완전한 유일한 길은 _ensure_team_id
+        # 실패다(그룹 목록 자체는 위에서 이미 전체 조회에 성공했다). 실패한 그룹의
+        # 팀은 synced 에서 빠져 그 팀 활성 멤버 전원이 default 로 이동하고 리더가
+        # 강등된다 — 멤버 조회 실패는 이 플래그에 영향 없다(팀은 synced 에 남는다).
+        teams_reconcile_incomplete = False
 
         for group in groups:
             group_name = group["GroupName"]
@@ -278,6 +284,7 @@ class CognitoSyncService:
                     group_team_id[group_name] = tid
                 except Exception as e:
                     result.errors.append(f"Failed to ensure team {team_name}: {e}")
+                    teams_reconcile_incomplete = True
 
             try:
                 members = await asyncio.to_thread(
@@ -434,31 +441,43 @@ class CognitoSyncService:
             )
 
         # 5. Cognito 에 없는 팀 정리 — 멤버 이동을 위해 members 포함 조회 유지.
+        #    _ensure_team_id 가 하나라도 실패하면 synced 집합이 불완전하다 — 실패한
+        #    그룹의 팀을 "Cognito 에 없는 팀"으로 오판해 활성 멤버 전원을 default
+        #    로 옮기고 리더를 강등시킨다. 불완전하면 이 단계는 통째로 건너뛴다.
         synced_team_ids = set(group_team_id.values())
-        try:
-            all_teams = await repo.list_all_teams()
-            for team in all_teams:
-                if team.id == default_team_id:
-                    continue
-                if team.id in synced_team_ids:
-                    continue
-                moved = [m for m in (team.members or []) if m.is_active]
-                moved_ids = {m.id for m in moved}
-                for member in moved:
-                    member.team_id = default_team_id
-                    # 팀 이동 시 TEAM_LEADER 는 다른 이동 경로(_effective_role·
-                    # transfer_user)와 같은 불변식으로 강등한다 — 그대로 두면
-                    # default 팀에 대해 리더 권한(role+team_id 기반 판정)을 얻는다.
-                    if member.role == UserRole.TEAM_LEADER:
-                        member.role = UserRole.DEVELOPER
-                # 옮겨간 사람을 가리키는 leader_user_id 도 정리한다 — 사라질 팀
-                # 이라 표시만의 문제지만 남은 활성 리더로는 맞춰 둔다.
-                if team.leader_user_id in moved_ids:
-                    _repoint_leader(team, exclude_user_id=team.leader_user_id)
-                if moved:
-                    result.teams_deleted += 1
-        except Exception as e:
-            result.errors.append(f"Failed to clean stale teams: {e}")
+        if teams_reconcile_incomplete:
+            logger.warning(
+                "cognito_sync.stale_team_cleanup_skipped_incomplete",
+                error_count=len(result.errors),
+            )
+            result.errors.append(
+                "Skipped stale-team cleanup: team resolution was incomplete"
+            )
+        else:
+            try:
+                all_teams = await repo.list_all_teams()
+                for team in all_teams:
+                    if team.id == default_team_id:
+                        continue
+                    if team.id in synced_team_ids:
+                        continue
+                    moved = [m for m in (team.members or []) if m.is_active]
+                    moved_ids = {m.id for m in moved}
+                    for member in moved:
+                        member.team_id = default_team_id
+                        # 팀 이동 시 TEAM_LEADER 는 다른 이동 경로(_effective_role·
+                        # transfer_user)와 같은 불변식으로 강등한다 — 그대로 두면
+                        # default 팀에 대해 리더 권한(role+team_id 기반 판정)을 얻는다.
+                        if member.role == UserRole.TEAM_LEADER:
+                            member.role = UserRole.DEVELOPER
+                    # 옮겨간 사람을 가리키는 leader_user_id 도 정리한다 — 사라질 팀
+                    # 이라 표시만의 문제지만 남은 활성 리더로는 맞춰 둔다.
+                    if team.leader_user_id in moved_ids:
+                        _repoint_leader(team, exclude_user_id=team.leader_user_id)
+                    if moved:
+                        result.teams_deleted += 1
+            except Exception as e:
+                result.errors.append(f"Failed to clean stale teams: {e}")
 
         await session.commit()
 
@@ -630,12 +649,14 @@ class CognitoSyncService:
         name = self._get_attr_admin(cu, "name") or email or cu.get("Username", "")
         enabled = cu.get("Enabled", True)
 
+        groups_fetch_failed = False
         try:
             user_groups = await asyncio.to_thread(
                 self._list_groups_for_user, user_pool_id, username
             )
         except Exception as e:
             result.errors.append(f"Failed to list groups for {username}: {e}")
+            groups_fetch_failed = True
             user_groups = []
 
         # 팀/부서 캐시를 한 번 만들어 그룹 해석에 넘긴다. 없으면 그룹 하나당 팀·부서를
@@ -645,6 +666,16 @@ class CognitoSyncService:
             repo, session, user_groups, result, cache=cache
         )
         role = self._derive_role(email, user_groups)
+
+        if groups_fetch_failed:
+            # 그룹 목록 실패를 빈 리스트로 취급하면 ADMIN 유저가 DEVELOPER 로
+            # 강등되고 소속 팀이 default 로 날아간다 — 조회 실패는 "그룹 없음"이
+            # 아니다. 기존 행이 있으면 role/team 을 보존하고, 신규 유저만
+            # (보존할 것이 없으므로) 위 유도값 기본을 쓴다.
+            snap = (await repo.prefetch_users_by_subjects({sub})).get(sub)
+            if snap is not None:
+                team_id = snap["team_id"] or team_id
+                role = snap["role"]
 
         try:
             user = await self._upsert_one_user(
@@ -758,6 +789,17 @@ class CognitoSyncService:
             result.errors.append(f"Failed to list members of {group_name}: {e}")
             return result
 
+        # 멤버 role 을 이 그룹 하나만으로 유추하면, ADMIN 권한이 **다른** 그룹에서
+        # 오는 유저가 DEVELOPER 로 강등된다(다음 sync_all/user_sync 가 복구하기
+        # 전까지 권한 공백). 기존 스냅샷을 prefetch 해 기존 ADMIN 은 보존한다 —
+        # 이 경로는 팀 배정이 주목적이고, ADMIN 해제 판정은 전체 그룹이 보이는
+        # sync_all/sync_user 만이 할 수 있다.
+        member_subs = {
+            s for m in members
+            if (s := self._get_attr(m, "sub") or m.get("Username"))
+        }
+        existing_snaps = await repo.prefetch_users_by_subjects(member_subs)
+
         for m in members:
             sub = self._get_attr(m, "sub") or m.get("Username")
             if not sub:
@@ -765,9 +807,13 @@ class CognitoSyncService:
             email = self._get_attr(m, "email") or ""
             name = self._get_attr(m, "name") or email or m.get("Username", "")
             enabled = m.get("Enabled", True)
-            # 그룹 멤버의 role 은 본인의 전체 그룹 기준이 정확하나, 단일 그룹 sync 에서는
-            # 그 그룹 기준으로 팀 배정. role 은 이 그룹만으로 보수적 판정(개별 user sync 가
-            # 전체 그룹 기준 role 을 정밀 보정). 여기선 team 배정이 주목적.
+            derived_role = self._derive_role(email, [group_name])
+            snap = existing_snaps.get(sub)
+            if snap is not None and snap["role"] == UserRole.ADMIN:
+                # 이 그룹에 없는 ADMIN 권한 출처를 단일 그룹 기준으로 박탈하지 않는다.
+                role = UserRole.ADMIN
+            else:
+                role = derived_role
             try:
                 # SAVEPOINT 격리 — sync_all 과 같은 이유: flush 실패(UNIQUE 충돌)
                 # 가 트랜잭션을 중단 상태로 만들면 잔여 멤버가 전부 실패하고
@@ -775,7 +821,7 @@ class CognitoSyncService:
                 async with session.begin_nested():
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
-                        team_id=team_id, role=self._derive_role(email, [group_name]),
+                        team_id=team_id, role=role,
                         result=result,
                     )
             except Exception as e:

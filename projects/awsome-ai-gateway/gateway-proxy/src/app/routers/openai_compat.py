@@ -9,7 +9,7 @@ import time
 import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, InterfaceError, OperationalError
 
 from app.schemas.domain import ProviderType, TokenUsage
 from app.schemas.responses import ModelObject, ModelPricingObject, ModelsListResponse
@@ -47,7 +47,18 @@ async def list_models(request: Request) -> JSONResponse:
     redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
 
-    if session_factory is not None:
+    # DB degraded 시 죽은 풀에 붙지 않는다 — 캐시 히트면 서빙, 아니면 빈 리스트
+    # (list_active_models(db=None) 계약). 빈 목록은 degraded dataplane 과 정합:
+    # /v1/messages 해소도 503 이라 실제로 서빙 가능한 모델이 없다.
+    from app.schemas.domain import DegradationLevel
+
+    dm = state.get("_degradation_manager")
+    is_db_degraded = dm and dm.level in (
+        DegradationLevel.DB_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    )
+
+    if not is_db_degraded and session_factory is not None:
         async with session_factory() as db:
             models = await _router_service.list_active_models(redis, db)
     else:
@@ -94,7 +105,15 @@ async def get_model(model_id: str, request: Request) -> JSONResponse:
     redis = state.get("_redis_effective", state.get("_redis"))
     session_factory = state.get("_session_factory")
 
-    if session_factory is not None:
+    from app.schemas.domain import DegradationLevel
+
+    dm = state.get("_degradation_manager")
+    is_db_degraded = dm and dm.level in (
+        DegradationLevel.DB_DEGRADED,
+        DegradationLevel.BOTH_DEGRADED,
+    )
+
+    if not is_db_degraded and session_factory is not None:
         async with session_factory() as db:
             models = await _router_service.list_active_models(redis, db)
     else:
@@ -606,7 +625,15 @@ async def _handle_responses(request: Request):
                 # served as some other model (which would also bill the wrong alias).
                 # Propagates as a 404 via the LookupError handler below.
                 raise
-            except (LookupError, DBAPIError):
+            except (LookupError, DBAPIError) as e:
+                # 인프라 장애(연결 끊김·타임아웃·드라이버 단절)는 "해석 불가"가 아니다 —
+                # profile.default_model 로 조용히 대체하면 엉뚱한 모델을 서빙하고 그
+                # alias 로 청구한다. 아래의 outer except 가 503 으로 매핑한다.
+                if isinstance(e, DBAPIError) and (
+                    e.connection_invalidated
+                    or isinstance(e, (OperationalError, InterfaceError))
+                ):
+                    raise
                 # The alias is genuinely not ours (unknown name, or a different
                 # provider's alias) → the pre-existing behaviour: profile default.
                 #
@@ -662,6 +689,14 @@ async def _handle_responses(request: Request):
     except LookupError as e:
         return JSONResponse(
             status_code=404, content={"error": {"type": "not_found", "message": str(e)}}
+        )
+    except DBAPIError:
+        # 헬스체커가 열화를 마킹하기 전 미드요청 DB 단절 — 500 이 아니라 503.
+        logger.exception("responses_model_resolution_db_failed", client=client)
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"type": "service_unavailable",
+                                "message": "Model resolution backend unavailable"}},
         )
 
     state["model_config"] = model_config

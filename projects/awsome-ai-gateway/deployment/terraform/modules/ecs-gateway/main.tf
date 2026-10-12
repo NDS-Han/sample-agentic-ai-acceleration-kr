@@ -33,7 +33,11 @@ locals {
       port    = 8000
       image   = "gateway-proxy"
       alb     = true
-      health  = "/health"
+      # ALB 헬스체크는 k8s readinessProbe 역할 — /health 는 liveness 라
+      # 의존성 장애에도 200 이다(restart cascade 회피). 엄격한 /health/ready
+      # 로 잡아야 DB_DEGRADED(fail-closed 계약) 태스크가 로테이션에서 빠진다.
+      # Redis 단독 열화는 /health/ready 도 200 — 폴백 스택이 서빙을 유지한다.
+      health  = "/health/ready"
       db      = true
       redis   = true
       command = "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${WORKERS:-4}"

@@ -20,6 +20,8 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.config import get_settings
 from app.providers.bedrock_adapter import BedrockAdapter
 from app.routers.bedrock import _rewrite_model_id_for_region, _strip_region_prefix
+from sqlalchemy.exc import DBAPIError
+
 from app.schemas.errors import anthropic_error
 from app.schemas.domain import (
     DegradationLevel,
@@ -315,6 +317,15 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         return JSONResponse(
             status_code=404,
             content=anthropic_error("not_found_error", str(e)),
+        )
+    except DBAPIError:
+        # 헬스체커 마킹 전 미드요청 DB 단절 — 인프라 장애는 500 이 아니라 503.
+        logger.exception("model_resolution_db_failed", model_alias=model_alias)
+        return JSONResponse(
+            status_code=503,
+            content=anthropic_error(
+                "service_unavailable", "Model resolution backend unavailable"
+            ),
         )
 
     # cross-account(claude-code→374) 일 때만 Bedrock 분기에서 profile.region 으로 설정.
@@ -1153,6 +1164,15 @@ async def count_tokens(request: Request) -> JSONResponse:
         return JSONResponse(
             status_code=404,
             content=anthropic_error("not_found_error", str(e)),
+        )
+    except DBAPIError:
+        # 헬스체커 마킹 전 미드요청 DB 단절 — 인프라 장애는 500 이 아니라 503.
+        logger.exception("count_tokens_model_resolution_db_failed", model_alias=model_alias)
+        return JSONResponse(
+            status_code=503,
+            content=anthropic_error(
+                "service_unavailable", "Model resolution backend unavailable"
+            ),
         )
 
     if auth_context:

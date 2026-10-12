@@ -61,6 +61,10 @@ class Settings(BaseSettings):
     db_ssl_mode: str = "disable"
     # RDS Proxy 경유 시 0 으로 설정 (PostgreSQL pinning 회피). Aurora 직접 연결 시엔 기본값 유지.
     db_statement_cache_size: int = 100
+    # asyncpg connect/command 상한 — 블랙홀 장애(무응답)에서 asyncpg 기본값
+    # (connect 60s·명령 무제한) 대기를 막는다.
+    db_connect_timeout: float = 5.0
+    db_command_timeout: float = 60.0
 
     # Redis
     redis_url: str = "redis://redis:6379/0"
@@ -73,6 +77,10 @@ class Settings(BaseSettings):
 
     # SES (optional)
     aws_ses_region: str | None = None
+    # 발송 호출 상한 — boto3 기본(connect 60s·read 60s)이나 SMTP 무응답 서버는
+    # 워커를 수십 초 붙잡고 재시도 3회와 곱해져 이벤트 처리를 정체시킨다.
+    email_send_connect_timeout: float = 10.0
+    email_send_read_timeout: float = 30.0
 
     # SMTP (optional)
     smtp_host: str | None = None

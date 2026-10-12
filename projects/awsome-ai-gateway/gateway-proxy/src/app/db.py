@@ -22,6 +22,9 @@ def create_db_engine(settings: Settings) -> AsyncEngine:
     if settings.db_ssl_mode != "disable":
         connect_args["ssl"] = settings.db_ssl_mode
     connect_args["statement_cache_size"] = settings.db_statement_cache_size
+    # 블랙홀 장애(무응답)에서 asyncpg 기본값(connect 60s·명령 무제한) 대기를 막는다.
+    connect_args["timeout"] = settings.db_connect_timeout
+    connect_args["command_timeout"] = settings.db_command_timeout
 
     return create_async_engine(
         settings.db_url,

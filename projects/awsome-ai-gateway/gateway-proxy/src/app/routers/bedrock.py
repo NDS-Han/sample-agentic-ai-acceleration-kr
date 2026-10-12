@@ -16,6 +16,8 @@ from app.observability.provider_metrics import (
     record_provider_error,
     record_provider_request,
 )
+from sqlalchemy.exc import DBAPIError
+
 from app.schemas.domain import ProviderType, TokenUsage
 from app.services.fallback_loop import release_reservations
 from app.services.router_service import RouterService
@@ -211,6 +213,14 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         return JSONResponse(
             status_code=404,
             content={"error": {"type": "not_found", "message": str(e)}},
+        )
+    except DBAPIError:
+        # 헬스체커 마킹 전 미드요청 DB 단절 — 인프라 장애는 500 이 아니라 503.
+        logger.exception("bedrock_model_resolution_db_failed", model=model_id)
+        return JSONResponse(
+            status_code=503,
+            content={"error": {"type": "service_unavailable",
+                                "message": "Model resolution backend unavailable"}},
         )
     state["model_config"] = model_config
 

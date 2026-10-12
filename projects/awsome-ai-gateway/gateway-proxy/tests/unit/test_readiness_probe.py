@@ -107,3 +107,13 @@ async def test_health_liveness_still_200_on_db_degraded():
     resp = await _get(_build_app(DegradationLevel.DB_DEGRADED), path="/health")
     assert resp.status_code == 200
     assert resp.json()["status"] == "degraded"
+
+
+@pytest.mark.asyncio
+async def test_health_liveness_still_200_on_both_degraded():
+    # /health(liveness)는 BOTH_DEGRADED 에도 200 — 양중 장애는 플릿 전체 상태라
+    # 503 을 내면 kubelet 이 전 파드를 재시작한다(스풀 유실 + HEALTHY 재탐지
+    # 지연으로 crashloop). 열화 보고는 본문으로, 트래픽 배제는 readiness 가 담당.
+    resp = await _get(_build_app(DegradationLevel.BOTH_DEGRADED), path="/health")
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "unhealthy"

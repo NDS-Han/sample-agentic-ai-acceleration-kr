@@ -77,6 +77,19 @@ class AuthMiddleware:
             degradation_level != DegradationLevel.DB_DEGRADED and session_factory is not None
         )
 
+        # inner app 의 send 를 감싸 응답 시작 여부를 추적한다 — 응답이 이미 시작된
+        # 뒤(SSE 스트림 중)에는 어떤 에러도 두 번째 http.response.start 를 쓸 수
+        # 없으므로, 아래 모든 except 절은 이 플래그로 "응답 작성"과 "재전파"를
+        # 결정한다. 라우터의 의도된 PermissionError 거부(모델/클라이언트 ACL)는
+        # 응답 전에만 발생하므로 401 계약은 그대로 보존된다.
+        response_started = False
+
+        async def send_tracking(message):
+            nonlocal response_started
+            if message["type"] == "http.response.start":
+                response_started = True
+            await send(message)
+
         try:
             if use_db:
                 # short-lived session: VK 인증 쿼리만 수행 후 즉시 반환.
@@ -94,35 +107,38 @@ class AuthMiddleware:
                 user_id=auth_context.user_id,
                 sso_subject=auth_context.sso_subject,
             )
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send_tracking)
 
         except AuthBackendUnavailableError as e:
             # 인프라 장애(DB/Redis 열화)로 인증 자체가 불가 — 자격증명 거부가 아니므로
             # 401 이 아니라 503 을 내고 security 이벤트에도 기록하지 않는다
             # (PermissionError 서브클래스라 순서상 여기가 먼저 와야 한다).
-            # inner app 실행 중(auth_context 설정 후)에 올라오면 기존 계약대로
-            # 인증-실패 경로를 탄다 — except 절 간 raise fall-through 는 없다.
-            if "auth_context" in state:
-                await self._handle_auth_failure(scope, send, state, path, e)
-                return
+            # inner app 구간에서 올라와도 인프라 장애인 사실은 변하지 않는다 —
+            # 응답 미시작이면 503, 시작 후면 재전파.
+            if response_started:
+                raise
             logger.warning("auth_backend_unavailable", path=path, reason=str(e))
             await self._send_503(scope, send)
             return
 
         except (PermissionError, ValueError) as e:
+            if response_started:
+                raise
             await self._handle_auth_failure(scope, send, state, path, e)
 
-        except (RedisError, SQLAlchemyError, asyncio.TimeoutError) as e:
+        except (
+            RedisError,
+            SQLAlchemyError,
+            asyncio.TimeoutError,
+            ConnectionError,
+        ) as e:
             # 헬스체커가 열화를 마킹하기 전의 미드요청 백엔드 단절 — 자격증명
             # 문제가 아니라 인프라 장애라 503.
-            # ⚠️ 이 절은 **인증 구간**의 예외만 다룬다: auth_context 가 이미 세팅된
-            #    뒤(=inner app 실행 중)의 백엔드 예외는 기존 계약대로 전파한다 —
-            #    응답이 시작된 뒤 503 을 다시 쓰면 ASGI 프로토콜 위반이다.
-            #    OSError 를 튜플에 넣지 않는 이유도 같다(PermissionError ⊂ OSError
-            #    충돌 + SSE 중 ConnectionResetError/BrokenPipeError 오획).
-            #    소켓 오류는 redis-py 가 ConnectionError/TimeoutError 로, asyncpg 는
-            #    SQLAlchemy OperationalError 로 이미 래핑된다.
-            if "auth_context" in state:
+            # builtin ConnectionError 포함 이유: SQLAlchemy 는 dbapi.Error 만 래핑
+            # 하므로 asyncpg 커넥트 단계의 소켓 오류(ConnectionRefusedError 등)는
+            # 미래핑으로 새나올 수 있다. PermissionError ⊄ ConnectionError 라
+            # 절 순서 충돌은 없고, inner app 응답 시작 후엔 어차피 재전파된다.
+            if response_started:
                 raise
             logger.warning("auth_backend_error", path=path, error=str(e))
             await self._send_503(scope, send)

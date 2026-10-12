@@ -37,15 +37,19 @@ class _Session:
 
     ``commit_exc`` 는 매번 던지는 예외, ``fail_first_n_commits`` 는 처음 N회만
     던지고 이후 성공하는 일시 장애 시뮬레이션이다.
+    ``existing_row`` 는 dead-claim 조회(IntegrityError 후 기존 슬롯 SELECT)가
+    돌려줄 NotificationLog 대역이다.
     """
 
     def __init__(
         self,
         commit_exc: Exception | None = None,
         fail_first_n_commits: int = 0,
+        existing_row=None,
     ):
         self._commit_exc = commit_exc
         self._fail_left = fail_first_n_commits
+        self._existing_row = existing_row
         self.added: list = []
         self.commits = 0
 
@@ -69,14 +73,21 @@ class _Session:
     async def rollback(self):
         pass
 
+    async def execute(self, stmt, params=None):
+        result = MagicMock()
+        result.scalar_one_or_none.return_value = self._existing_row
+        return result
+
 
 def _session_factory_with(
-    commit_exc: Exception | None = None, fail_first_n_commits: int = 0
+    commit_exc: Exception | None = None,
+    fail_first_n_commits: int = 0,
+    existing_row=None,
 ):
     sessions: list[_Session] = []
 
     def factory() -> _Session:
-        s = _Session(commit_exc, fail_first_n_commits)
+        s = _Session(commit_exc, fail_first_n_commits, existing_row)
         sessions.append(s)
         return s
 
@@ -84,7 +95,7 @@ def _session_factory_with(
     return factory
 
 
-def _handler(commit_exc=None, send_fail=False, fail_first_n_commits=0):
+def _handler(commit_exc=None, send_fail=False, fail_first_n_commits=0, existing_row=None):
     config = MagicMock()
     config.enabled = True
     config.recipient_roles = [RecipientRole.ADMIN]
@@ -118,7 +129,9 @@ def _handler(commit_exc=None, send_fail=False, fail_first_n_commits=0):
     retry_executor = MagicMock()
     retry_executor.execute = AsyncMock(side_effect=_execute)
 
-    factory = _session_factory_with(commit_exc, fail_first_n_commits)
+    factory = _session_factory_with(
+        commit_exc, fail_first_n_commits, existing_row
+    )
     handler = BudgetHandler(
         session_factory=factory,
         config_cache=config_cache,
@@ -136,11 +149,82 @@ async def test_duplicate_event_is_skipped_without_resending():
     """같은 (event_id, recipient) 의 두 번째 배송 시도는 send 없이 스킵된다.
 
     유니크 인덱스가 있는 실 DB 에서는 두 번째 INSERT commit 이 IntegrityError —
-    핸들러는 이를 잡아 continue 해야 한다 (메일 재발송 방지가 수정의 본체).
+    기존 슬롯이 확정 상태(sent)면 재발송 없이 스킵해야 한다.
     """
-    handler, sender, _ = _handler(commit_exc=IntegrityError("dup", {}, Exception()))
+    confirmed = MagicMock(status="sent", attempt_count=1)
+    handler, sender, _ = _handler(
+        commit_exc=IntegrityError("dup", {}, Exception()),
+        existing_row=confirmed,
+    )
     await handler.handle(_event())
     sender.send.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dead_claim_takeover_sends_and_resolves_row():
+    """슬롯 충돌인데 기존 행이 'pending' 이면 dead-claim — 인수해 발송한다.
+
+    이전 시도가 INSERT 후 send 전 crash 했거나, commit 은 성공했는데 응답이
+    유실돼 재시도가 슬롯 충돌을 만난 경우다. 스킵하면 그 수신자는 영구
+    미발송 — 발송 우선 원칙에 따라 pending 행을 인수한다.
+    """
+    dead = MagicMock(status="pending", attempt_count=0)
+    handler, sender, _ = _handler(
+        commit_exc=IntegrityError("dup", {}, Exception()),
+        existing_row=dead,
+    )
+    await handler.handle(_event())
+    sender.send.assert_awaited_once()
+    assert dead.status == "sent"
+    assert dead.attempt_count == 1
+
+
+@pytest.mark.asyncio
+async def test_one_bad_recipient_does_not_block_others():
+    """한 수신자의 렌더/처리 실패가 나머지 수신자를 데려가면 안 된다."""
+    config = MagicMock()
+    config.enabled = True
+    config.recipient_roles = [RecipientRole.ADMIN]
+    config_cache = MagicMock()
+    config_cache.get.return_value = config
+
+    resolver = MagicMock()
+    resolver.resolve = AsyncMock(
+        return_value=[
+            Recipient(email="a@x.com", name="A", user_id="u1",
+                      role=RecipientRole.ADMIN),
+            Recipient(email="b@x.com", name="B", user_id="u2",
+                      role=RecipientRole.ADMIN),
+        ]
+    )
+
+    template_engine = MagicMock()
+    # 첫 수신자 렌더가 터져도 두 번째 수신자는 발송돼야 한다.
+    template_engine.render = MagicMock(
+        side_effect=[RuntimeError("template broken"), ("s2", "<html/>")]
+    )
+
+    sender = MagicMock()
+    sender.send = AsyncMock()
+
+    async def _execute(fn, event_type=None):
+        return await fn()
+
+    retry_executor = MagicMock()
+    retry_executor.execute = AsyncMock(side_effect=_execute)
+
+    factory = _session_factory_with()
+    handler = BudgetHandler(
+        session_factory=factory,
+        config_cache=config_cache,
+        recipient_resolver=resolver,
+        template_engine=template_engine,
+        email_sender=sender,
+        retry_executor=retry_executor,
+        metrics=None,
+    )
+    await handler.handle(_event())
+    sender.send.assert_awaited_once()  # b@x.com 만 발송
 
 
 @pytest.mark.asyncio

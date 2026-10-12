@@ -37,7 +37,17 @@ class SESEmailSender:
                 "boto3 is required for SES sender. Install with: uv sync --extra ses"
             ) from exc
 
-        self._client = boto3.client("ses", region_name=settings.aws_ses_region or "us-east-1")
+        from botocore.config import Config
+
+        # connect/read 상한 — 기본값(60s)은 무응답 엔드포인트에서 워커를 오래 붙잡는다.
+        self._client = boto3.client(
+            "ses",
+            region_name=settings.aws_ses_region or "us-east-1",
+            config=Config(
+                connect_timeout=settings.email_send_connect_timeout,
+                read_timeout=settings.email_send_read_timeout,
+            ),
+        )
         self._sender_address = settings.email_sender_address
         self._sender_name = settings.email_sender_name
 

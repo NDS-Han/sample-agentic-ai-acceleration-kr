@@ -59,3 +59,33 @@ async def test_poison_only_batch_is_acked():
     ]
     assert xack_calls, "poison 메시지 ID 가 XACK 되지 않았다"
     consumer._flusher.flush.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_trimmed_entry_fields_none_is_acked():
+    """MAXLEN 트림으로 본문이 사라진 PEL entry(fields=None)도 XACK 한다.
+
+    XAUTOCLAIM/XREADGROUP 은 PEL 만 남고 스트림 본문이 잘린 entry 를
+    ``(id, None)`` 으로 돌려준다. fields.get 이 AttributeError 로 소비 루프를
+    죽이기 전에 decode 단계에서 분류해 ACK 해야 한다 — 복구 불가 데이터라
+    재처리해도 영원히 실패한다.
+    """
+    redis = AsyncMock()
+    trimmed = [[b"cost:stream", [(b"3-3", None)]]]
+    calls = {"n": 0}
+
+    async def xreadgroup(**kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return trimmed
+        return None
+
+    redis.xreadgroup = AsyncMock(side_effect=xreadgroup)
+    consumer = _make_consumer(redis)
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(consumer._consume_live(), timeout=1.0)
+
+    xack_calls = [c for c in redis.xack.await_args_list if "3-3" in c.args[2:]]
+    assert xack_calls, "trimmed 메시지 ID 가 XACK 되지 않았다"
+    consumer._flusher.flush.assert_not_awaited()

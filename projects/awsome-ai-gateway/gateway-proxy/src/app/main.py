@@ -12,8 +12,6 @@ import structlog
 from botocore.config import Config as BotoConfig
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from opentelemetry.metrics import Observation
-
 from app.config import get_settings
 from app.db import create_db_engine, create_session_factory
 from app.degradation.manager import DegradationManager
@@ -32,7 +30,6 @@ from app.providers.mantle_openai_adapter import MantleOpenAIAdapter
 from app.providers.openmodel_adapter import OpenModelAdapter
 from app.providers.registry import ProviderRegistry
 from app.redis_client import create_redis_client
-from app.resilience.buffer_queue import UsageBufferQueue
 from app.resilience.cost_stream_spool import CostStreamSpool
 from app.resilience.retry_worker import RetryWorker
 from app.routers import bedrock, health, messages, openai_compat, usage
@@ -149,9 +146,6 @@ async def lifespan(app: FastAPI):
     # 7. Degradation Manager
     degradation_manager = DegradationManager()
 
-    # 8. Usage Buffer Queue
-    usage_buffer = UsageBufferQueue(max_size=settings.usage_buffer_max)
-
     # 9. Retry Worker
     retry_worker = RetryWorker(max_retries=settings.background_task_max_retries)
 
@@ -173,14 +167,6 @@ async def lifespan(app: FastAPI):
     # 11. GatewayMetrics
     gateway_metrics = GatewayMetrics()
     degradation_manager.set_metrics(gateway_metrics.degradation_level)
-    usage_buffer.set_metrics(gateway_metrics.usage_records_dropped_total)
-    # ⚠️ observable gauge 는 콜백을 등록해야 값이 나간다. set_metrics 처럼 카운터를
-    #    넘기는 것과는 다른 메커니즘이고, 예전엔 이 한 줄이 없어서
-    #    `gateway_usage_buffer_size` 가 이름만 존재했다(시계열 0개 = 대시보드 "No data").
-    #    버퍼가 차오르는 것은 cost-recorder 경로가 막혔다는 가장 이른 신호다.
-    gateway_metrics.register_buffer_size_callback(
-        lambda _options: [Observation(usage_buffer.size)]
-    )
     retry_worker.set_metrics(gateway_metrics.background_task_errors_total)
     cost_stream_spool.set_metrics(gateway_metrics.usage_records_dropped_total)
     # rate-limit fail-open 관측성(deepdive Q50 Phase 3) — eval 예외로 집행 못한 횟수.
@@ -385,7 +371,6 @@ async def lifespan(app: FastAPI):
     app.state.httpx_client = httpx_client
     app.state.bedrock_client = bedrock_client
     app.state.degradation_manager = degradation_manager
-    app.state.usage_buffer = usage_buffer
     app.state.cost_stream_spool = cost_stream_spool
     app.state.retry_worker = retry_worker
     app.state.health_checker = health_checker
@@ -421,16 +406,25 @@ async def lifespan(app: FastAPI):
     await retry_worker.stop()
     # P0-②: last-chance drain of the cost-stream spool before closing Redis, so
     # records buffered during a recent blip get one final re-publish attempt.
+    # ⚠️ 상한 필수 — flapping Redis 에서 XADD 가 각 ~4s 블록하면 10k 스풀은
+    #    terminationGracePeriod 를 넘어 SIGKILL 되어 오히려 전부 유실된다.
+    #    drain() 은 취소안전(미완료 항목 복원)이므로 타임아웃은 안전하고,
+    #    남은 양은 lost_on_shutdown 경고로 가시화한다.
     try:
-        drained = await cost_stream_spool.drain(redis)
+        drained = await asyncio.wait_for(cost_stream_spool.drain(redis), timeout=15.0)
         if drained:
             logger.info("cost_stream_spool_drained_on_shutdown", count=drained)
-        if cost_stream_spool.size:
-            logger.warning(
-                "cost_stream_spool_lost_on_shutdown", remaining=cost_stream_spool.size
-            )
+    except TimeoutError:
+        logger.warning(
+            "cost_stream_spool_shutdown_drain_timed_out",
+            remaining=cost_stream_spool.size,
+        )
     except Exception:
         logger.warning("cost_stream_spool_shutdown_drain_failed")
+    if cost_stream_spool.size:
+        logger.warning(
+            "cost_stream_spool_lost_on_shutdown", remaining=cost_stream_spool.size
+        )
     # 클라이언트 disconnect 로 떠 있는 스트림 드레인 태스크가 Redis/httpx 가
     # 닫히기 전에 finalize(과금)를 마치도록 기다린다. 드레인 자체는
     # stream_disconnect_drain_timeout 으로 상한이 있으므로 추가 grace 는

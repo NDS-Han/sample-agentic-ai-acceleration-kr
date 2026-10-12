@@ -13,6 +13,16 @@ router = APIRouter()
 
 @router.get("/health")
 async def health_check(request: Request) -> JSONResponse:
+    """Liveness probe — **항상 200** (프로세스가 응답 가능한 한).
+
+    BOTH_DEGRADED 에 503 을 내던 이전 계약은 restart cascade 를 유발했다:
+    양중 장애는 플릿 전체가 동시에 들어가는 상태라, kubelet 이 모든 파드를
+    재시작하면서 ① 인메모리 cost 스풀/버퍼가 유실되고 ② 새 파드는 HEALTHY 로
+    시작해 failure 임계(~75s)까지 재탐지를 기다린 뒤 다시 재시작되는 루프가
+    된다. 의존성 장애는 재시작으로 고칠 수 없다 — 살아있는 프로세스를 죽이지
+    말고, 트래픽 배제는 아래 /health/ready 가 담당한다.
+    열화 상태는 본문의 status/components/degradation_level 에 그대로 보고한다.
+    """
     dm: DegradationManager = request.app.state.degradation_manager
     level = dm.level
 
@@ -30,14 +40,14 @@ async def health_check(request: Request) -> JSONResponse:
     }
 
     if level == DegradationLevel.BOTH_DEGRADED:
-        status, http_code = "unhealthy", 503
+        status = "unhealthy"
     elif level != DegradationLevel.HEALTHY:
-        status, http_code = "degraded", 200
+        status = "degraded"
     else:
-        status, http_code = "healthy", 200
+        status = "healthy"
 
     return JSONResponse(
-        status_code=http_code,
+        status_code=200,
         content={
             "status": status,
             "components": {k: v.model_dump() for k, v in components.items()},
