@@ -327,6 +327,38 @@ async def test_sync_user_fallback_hit_does_not_deactivate_live_federated_user(mo
     assert existing.is_active is True  # 비활성화 금지 — 살아있는 유저
     assert result.users_deactivated == 0
     svc._revoke_keys_for_users.assert_not_called()
+    # no-op 과 구분 — 거부된 offboarding 은 errors 에 식별자를 남긴다
+    assert any("still present in pool" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_sync_user_synthetic_fallback_ignores_sts_user(monkeypatch):
+    """STS CLI 유저도 "<session>@unknown" synthetic 이메일을 저장한다 —
+    호출자가 세션명을 넘기면 폴백이 STS 행을 찾아 user_id 를 엉뚱한 계정으로
+    반환하던 구멍의 회귀. 비-OIDC 폴백 매칭은 no-op."""
+    _settings(monkeypatch)
+    session = _session()
+    sts_user = MagicMock()
+    sts_user.id = uuid.uuid4()
+    sts_user.provider = "sts"  # CLI 세션 유저
+    sts_user.is_active = True
+
+    repo = MagicMock()
+    repo.get_by_email = AsyncMock(side_effect=lambda e: sts_user if e == "bob@unknown" else None)
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(return_value=None)
+
+    result = await svc.sync_user(session, "bob")
+
+    assert result.user_id is None          # STS 유저 id 가 새지 않는다
+    assert result.users_deactivated == 0
+    assert sts_user.is_active is True
+    svc._cognito.list_users.assert_not_called()  # 비-OIDC 는 확인조차 안 함
 
 
 @pytest.mark.asyncio

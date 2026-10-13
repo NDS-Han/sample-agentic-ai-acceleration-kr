@@ -167,10 +167,18 @@ async def lifespan(app: FastAPI):
             audience=settings.OIDC_AUDIENCE,
             provider_name=settings.OIDC_PROVIDER_NAME,
         )
+        # Cognito 이메일 보강은 issuer 가 그 풀일 때만 동작한다 — IdP 가
+        # Okta/Entra 인데 풀만 동기화용으로 설정된 배치에선 보강이 항상 미스.
+        cognito_is_issuer = bool(
+            settings.COGNITO_USER_POOL_ID
+            and (settings.OIDC_ISSUER_URL or "")
+            .rstrip("/")
+            .endswith("/" + settings.COGNITO_USER_POOL_ID)
+        )
         if (
             settings.ADMIN_EMAILS
             and settings.OIDC_EMAIL_CLAIM != "email"
-            and oidc_cognito_client is None
+            and not cognito_is_issuer
         ):
             # email_verified 클레임은 "email" 속성만 증명한다 — 매핑된 클레임이
             # email 이 아니면 (예: preferred_username/upn) ADMIN_EMAILS 매칭이

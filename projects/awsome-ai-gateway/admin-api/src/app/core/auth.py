@@ -292,6 +292,13 @@ async def _verified_email_for_subject(request: Request, sub: str) -> str:
     settings = get_settings()
     if not sub or not settings.ADMIN_EMAILS:
         return ""
+    # Cognito 보강은 issuer 가 그 풀일 때만 유효하다 — IdP 가 Okta/Entra 인데
+    # COGNITO_USER_POOL_ID 만 설정된(동기화용) 배치에선 admin_get_user 가
+    # 외부 sub 로 항상 미스 → "!" 캐시만 쌓는 무의미 호출이 된다.
+    pool_id = settings.COGNITO_USER_POOL_ID
+    issuer = (settings.OIDC_ISSUER_URL or "").rstrip("/")
+    if not (pool_id and issuer.endswith("/" + pool_id)):
+        return ""
     import time
 
     now = time.time()

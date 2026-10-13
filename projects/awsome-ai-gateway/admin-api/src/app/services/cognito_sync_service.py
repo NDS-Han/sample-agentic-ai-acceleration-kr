@@ -829,6 +829,16 @@ class CognitoSyncService:
             logger.info("cognito_sync.deactivate_noop", username=username)
             return
         if fallback_hit:
+            if user.provider != settings.OIDC_PROVIDER_NAME:
+                # 비-OIDC 행의 synthetic 이메일에 걸린 것 — STS CLI 유저도
+                # "<session_name>@unknown" 을 저장하므로, 호출자가 세션명을 넘기면
+                # 엉뚱한 계정의 user_id 가 반환돼 후속 정리가 잘못된 대상에 떨어진다.
+                # 폴백 매칭은 OIDC 유저에게만 인정한다.
+                logger.info(
+                    "cognito_sync.deactivate_fallback_non_oidc",
+                    username=username, provider=user.provider,
+                )
+                return
             # 폴백으로만 찾았다 = admin_get_user(Username) 가 못 찾았다. 그런데
             # federated 유저는 Username 이 "<Provider>_<id>" 라 sub 로 조회하면
             # UserNotFound 가 난다 — Cognito 에 **살아있는** 사용자를 여기서
@@ -847,6 +857,10 @@ class CognitoSyncService:
                 logger.info(
                     "cognito_sync.deactivate_skipped_still_in_pool",
                     username=username,
+                )
+                # no-op 과 구분 — 호출자가 "거부된 offboarding"을 식별할 수 있어야 한다
+                result.errors.append(
+                    f"{username} still present in pool (sub match); not deactivated"
                 )
                 return
 
