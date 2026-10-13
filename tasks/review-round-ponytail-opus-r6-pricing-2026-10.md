@@ -51,4 +51,4 @@
 
 - `pytest tests/` — **943 passed, 50 skipped** (회귀 7건 추가: 스택드 프리픽스, 0가격 파생, expected 누락, 구간캐시 드리프트, set_pricing 역전, 스키마 단위성)
 - admin-ui `tsc --noEmit` 0 errors
-- 커밋·helm·스모크: (아래 기록)
+- 커밋 `eb0658e8` · helm **rev 186** · 이미지 admin-api/scheduler/admin-ui `eb0658e8` · 스모크 **12 PASS / 0 FAIL** · `nds/dev` push 완료
