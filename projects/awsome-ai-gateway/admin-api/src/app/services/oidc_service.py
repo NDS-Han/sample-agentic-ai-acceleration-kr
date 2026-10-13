@@ -44,15 +44,7 @@ from app.services.user_team_service import UserTeamService, release_stale_leader
 logger = structlog.get_logger()
 
 
-def _truthy(v) -> bool:
-    """JWT 클레임/Cognito 속성의 불리언 표현 흡수 — true, "true", "True", 1, "1"."""
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return v == 1
-    if isinstance(v, str):
-        return v.strip().lower() == "true"
-    return False
+from app.core.oidc_identity import claims_truthy as _truthy
 
 
 class OIDCAuthError(Exception):
@@ -153,6 +145,12 @@ class OIDCService:
         if not email:
             # email claim 없는 토큰(Cognito access_token 등) → preferred_username 시도.
             email = claims.get("preferred_username") or ""
+            if email:
+                # preferred_username 은 사용자가 자유 기재하는 미검증 속성 —
+                # email_verified 클레임은 **email** 속성에 대한 것이지 이 값을
+                # 증명하지 않는다. 다른 계정의 주소를 적어 넣으면 연결 게이트를
+                # 통과하므로 미검증으로 고정한다.
+                email_verified = False
         if not email:
             # 그래도 없으면 Cognito AdminGetUser 로 enrich (best-effort).
             # 풀 속성은 서버측 값이라 verified 도 함께 신뢰할 수 있다.
@@ -162,9 +160,12 @@ class OIDCService:
             email_verified = pool_verified
         elif not email_verified:
             # 이메일 클레임은 있는데 verified 가 보이지 않는다(Cognito access_token
-            # 형태) — 풀 속성으로 한 번 보강한다. 못 확인하면 미검증으로 둔다.
-            _, pool_verified = await self._email_attrs_from_cognito(str(sub))
-            email_verified = pool_verified
+            # 형태) — 풀 속성으로 한 번 보강한다. 단 pool_verified 는 풀의 **email**
+            # 속성에 대한 값이라 주소가 일치할 때만 승계한다(위 preferred_username
+            # 경로는 일치하지 않아 미검증 유지).
+            pool_email, pool_verified = await self._email_attrs_from_cognito(str(sub))
+            if pool_email and pool_email == email:
+                email_verified = pool_verified
 
         # 3. 게이팅 (옵션)
         if settings.OIDC_REQUIRED_GROUP and settings.OIDC_REQUIRED_GROUP not in groups:
@@ -175,8 +176,8 @@ class OIDCService:
         # 4. 팀 결정 (필요 시 자동 생성)
         team_id = await self._resolve_team(session, groups)
 
-        # 5. Role 결정
-        role = self._derive_role(email, groups)
+        # 5. Role 결정 — ADMIN_EMAILS 매칭은 검증된 이메일만
+        role = self._derive_role(email, groups, email_verified=email_verified)
 
         # 6. User upsert (provider, sso_subject 기준)
         user, was_created, team_changed = await self._upsert_user(
@@ -440,7 +441,7 @@ class OIDCService:
         return dept
 
     @staticmethod
-    def _derive_role(email: str, groups: list[str]) -> UserRole:
+    def _derive_role(email: str, groups: list[str], *, email_verified: bool = False) -> UserRole:
         """ADMIN_EMAILS / ADMIN_GROUPS 둘 중 하나라도 매칭되면 ADMIN.
 
         ⚠️ 정책 본체는 ``core.oidc_identity.derive_role`` 하나뿐이다. 여기서 복제하면
@@ -457,7 +458,7 @@ class OIDCService:
         ``_upsert_user`` 가 이 수동 지정을 Cognito 재로그인/재동기화 때 덮어쓰지
         않도록 보존한다.
         """
-        return derive_role(email, groups)
+        return derive_role(email, groups, email_verified=email_verified)
 
     async def _upsert_user(
         self,
@@ -520,7 +521,10 @@ class OIDCService:
         if existing is None:
             user = User(
                 id=uuid.uuid4(),
-                email=email,
+                # 미검증 이메일은 DB 에 싣지 않는다 — 저장된 주소는 이후 세션의
+                # ADMIN_EMAILS 폴백 매칭(auth.py)과 이메일 조회의 신뢰 근거가
+                # 되므로, 검증 안 된 주소를 저장하면 그 신뢰가 위조된다.
+                email=email if email_verified else f"{sso_subject}@unknown",
                 display_name=display_name,
                 role=role,
                 sso_subject=sso_subject,
@@ -531,25 +535,48 @@ class OIDCService:
             # provider 속성이 모델에 추가되면 자동 반영. 아직 없으면 silently skip.
             if hasattr(User, "provider"):
                 user.provider = settings.OIDC_PROVIDER_NAME
-            user = await repo.create_user(user)
-            logger.info(
-                "oidc.user_auto_provisioned",
-                user_id=str(user.id),
-                email=email,
-                role=role.value,
-                team_id=str(team_id),
-                provider=settings.OIDC_PROVIDER_NAME,
-            )
-            return user, True, False
+            # 동시 최초 로그인 경합: 같은 sub 로 두 요청이 나란히 오면 패자는
+            # sso_subject/email UNIQUE 에 IntegrityError — savepoint 로 외부
+            # 트랜잭션을 살리고 승자 행을 재조회해 기존사용자 경로로 내린다.
+            try:
+                async with session.begin_nested():
+                    user = await repo.create_user(user)
+            except IntegrityError:
+                winner = await repo.get_by_sso_subject(sso_subject)
+                if winner is not None:
+                    logger.info(
+                        "oidc.user_create_race_lost",
+                        sso_subject=sso_subject,
+                        winner_user_id=str(winner.id),
+                    )
+                    existing = winner
+                else:
+                    raise
+            else:
+                logger.info(
+                    "oidc.user_auto_provisioned",
+                    user_id=str(user.id),
+                    email=email,
+                    role=role.value,
+                    team_id=str(team_id),
+                    provider=settings.OIDC_PROVIDER_NAME,
+                )
+                return user, True, False
 
         team_changed = existing.team_id != team_id
         # 기존 사용자: email/role/display_name 만 동기화. team 은 transfer_user 로 별도 처리.
         # email 가드: <sub>@unknown synthetic 이 admin Cognito-sync 가 채운 실제 email 을
         # 덮어쓰지 않도록. (Cognito access_token 엔 email claim 이 없어 매 로그인마다
         # synthetic 으로 회귀하던 버그 봉합.) 기존 email 도 synthetic 이면 갱신 허용.
+        # 미검증 클레임 이메일은 DB 이메일을 덮지 않는다 — 저장된 이메일은
+        # verified 통과분만 유지한다.
         incoming_is_synthetic = email.endswith("@unknown")
         existing_is_synthetic = (existing.email or "").endswith("@unknown")
-        if existing.email != email and (not incoming_is_synthetic or existing_is_synthetic):
+        if (
+            email_verified
+            and existing.email != email
+            and (not incoming_is_synthetic or existing_is_synthetic)
+        ):
             existing.email = email
         existing.display_name = display_name
         # role 변경은 admin 권한 변동이므로 명시 로그.

@@ -300,3 +300,94 @@ async def test_team_create_race_reraises_when_still_missing():
         await svc._get_or_create_team(
             repo, _nested_session(), dept_name=None, team_name="T1"
         )
+
+
+# ── _upsert_user: 동시 최초 로그인 경합 ───────────────────────────────────────
+# 같은 sub 로 두 exchange 가 나란히 오면 둘 다 "없음"을 보고 INSERT — 패자는
+# sso_subject UNIQUE 에 IntegrityError. savepoint 로 외부 트랜잭션을 살리고
+# 승자 행을 재조회해 기존사용자 경로로 내린다.
+
+@pytest.mark.asyncio
+async def test_first_login_race_loser_recovers_winner_row():
+    """create_user 가 IntegrityError 로 지면 sso_subject 재조회 승자를 쓴다."""
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.auth import UserRole
+    from app.services.oidc_service import OIDCService
+
+    svc = OIDCService.__new__(OIDCService)
+    session = _nested_session()
+
+    team_id = uuid.uuid4()
+    winner = MagicMock()
+    winner.id = uuid.uuid4()
+    winner.sso_subject = "SUB-1"
+    winner.email = "u@x.com"
+    winner.display_name = "U"
+    winner.role = UserRole.DEVELOPER
+    winner.team_id = team_id
+    winner.is_active = True
+
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(side_effect=[None, winner])
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock(
+        side_effect=IntegrityError("insert", {}, Exception("uq_users_sso"))
+    )
+    repo.flush = AsyncMock()
+
+    import app.services.oidc_service as mod
+    with patch.object(mod, "UserRepository", lambda sess: repo), patch.object(
+        mod, "release_stale_leader_pointer", new=AsyncMock()
+    ):
+        user, created, team_changed = await svc._upsert_user(
+            session=session,
+            sso_subject="SUB-1",
+            email="u@x.com",
+            display_name="U",
+            team_id=team_id,
+            role=UserRole.DEVELOPER,
+            email_verified=True,
+        )
+
+    assert created is False
+    assert user.id == winner.id
+
+
+@pytest.mark.asyncio
+async def test_first_login_race_reraises_when_winner_absent():
+    """재조회에서도 승자가 없으면(승자 롤백) IntegrityError 를 전파한다."""
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    import pytest as _pytest
+    from sqlalchemy.exc import IntegrityError
+
+    from app.models.auth import UserRole
+    from app.services.oidc_service import OIDCService
+
+    svc = OIDCService.__new__(OIDCService)
+    session = _nested_session()
+
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock(
+        side_effect=IntegrityError("insert", {}, Exception("uq_users_sso"))
+    )
+
+    import app.services.oidc_service as mod
+    with patch.object(mod, "UserRepository", lambda sess: repo):
+        with _pytest.raises(IntegrityError):
+            await svc._upsert_user(
+                session=session,
+                sso_subject="SUB-1",
+                email="u@x.com",
+                display_name="U",
+                team_id=uuid.uuid4(),
+                role=UserRole.DEVELOPER,
+                email_verified=True,
+            )

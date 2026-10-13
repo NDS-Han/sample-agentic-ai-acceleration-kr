@@ -23,8 +23,12 @@ class ServiceTokenRepository:
         stmt = select(ServiceToken).where(ServiceToken.token_hash == token_hash)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def get_by_id(self, token_id: uuid.UUID) -> ServiceToken | None:
+    async def get_by_id(
+        self, token_id: uuid.UUID, *, for_update: bool = False
+    ) -> ServiceToken | None:
         stmt = select(ServiceToken).where(ServiceToken.id == token_id)
+        if for_update:
+            stmt = stmt.with_for_update()
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_all(self) -> list[ServiceToken]:

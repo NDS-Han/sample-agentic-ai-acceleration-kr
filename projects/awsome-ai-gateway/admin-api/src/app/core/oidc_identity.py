@@ -64,17 +64,34 @@ def extract_claims(claims: dict) -> OIDCClaims:
     )
 
 
-def derive_role(email: str, groups: list[str]) -> UserRole:
+def claims_truthy(v) -> bool:
+    """JWT 클레임/Cognito 속성의 불리언 표현 흡수 — true, "true", "True", 1, "1"."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() == "true"
+    return False
+
+
+def derive_role(email: str, groups: list[str], *, email_verified: bool = False) -> UserRole:
     """``ADMIN_EMAILS`` / ``ADMIN_GROUPS`` 중 하나라도 맞으면 ADMIN, 아니면 DEVELOPER.
 
     이메일 비교는 대소문자 무시(주소는 대소문자 구분이 없다). 그룹 비교는 **정확히
     일치**해야 한다 — 그룹 이름은 IdP 의 식별자이고, 느슨하게 비교하면 위 주석의
     부분 문자열 승격이 그대로 재현된다.
+
+    ``email_verified`` — ADMIN_EMAILS 매칭의 전제. 이메일 클레임은 사용자가
+    쓸 수 있는 값이라(IdP 의 검증 요구 설정에 따라) 미검증 주소를 ADMIN 목록과
+    매칭하면 주장만으로 권한상승이 된다. 그룹 클레임은 IdP 가 관리하므로
+    이 게이트와 무관하다. DB 에 저장된 이메일(연결 시 verified 게이트를 통과한
+    값)을 호출부가 폴백으로 쓰는 경우엔 신뢰된 값이므로 True 로 호출한다.
     """
     settings = get_settings()
 
     admin_emails = {e.lower() for e in settings.ADMIN_EMAILS}
-    if email and email.lower() in admin_emails:
+    if email and email_verified and email.lower() in admin_emails:
         return UserRole.ADMIN
 
     admin_groups = set(settings.ADMIN_GROUPS)

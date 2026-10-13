@@ -580,6 +580,7 @@ async def test_upsert_one_user_releases_stale_pointer_with_session(monkeypatch):
     await svc._upsert_one_user(
         repo, session, sub="SUB-1", email="a@x.com", name="A",
         enabled=True, team_id=new_team, role=UserRole.DEVELOPER, result=result,
+        revoked_out=[],
     )
 
     release.assert_awaited_once()
@@ -699,3 +700,76 @@ async def test_sync_group_preserves_admin_from_other_group(monkeypatch):
     # 이 그룹(Claude_dept_team)은 admin 그룹이 아니므로 derived=DEVELOPER 였다 —
     # 보존이 없었으면 여기서 DEVELOPER 로 덮어썼다.
     assert existing.role == UserRole.ADMIN
+
+
+@pytest.mark.asyncio
+async def test_sync_user_revokes_vks_when_cognito_disables(monkeypatch):
+    """Cognito Enabled=false 전환 — 사용자가 풀에 남아 있어도 VK 는 폐기된다.
+
+    deactivate-missing 경로만 폐기하면 disable(재활성 가능) 유저의 VK 가
+    Redis TTL 까지 살아있다 — 재활성화 창에 옛 키로 인증이 이어진다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    existing = MagicMock()
+    existing.id = uuid.uuid4(); existing.sso_subject = "SUB-D"
+    existing.email = "d@x.com"; existing.display_name = "D"
+    existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
+    existing.is_active = True
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=existing)
+    repo.get_by_email = AsyncMock(return_value=existing)
+    repo.create_user = AsyncMock()
+    repo.flush = AsyncMock()
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    key_service = MagicMock()
+    key_service.revoke_keys_for_users = AsyncMock(return_value=[("enc", "hash1")])
+    key_service.finalize_revoked_keys = AsyncMock()
+    svc = CognitoSyncService(MagicMock(), key_service=key_service)
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("SUB-D", "d@x.com", enabled=False)
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    result = await svc.sync_user(session, "d@x.com")
+
+    assert existing.is_active is False
+    key_service.revoke_keys_for_users.assert_awaited_once()
+    # commit 이후에만 finalize — 부수효과가 커밋 전에 새면 안 된다.
+    key_service.finalize_revoked_keys.assert_awaited_once()
+    assert result.pending_key_revocations == []
+
+
+@pytest.mark.asyncio
+async def test_sync_user_active_stays_without_revoke(monkeypatch):
+    """활성 유지 사용자에는 폐기 경로가 절대 돌지 않는다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    existing = MagicMock()
+    existing.id = uuid.uuid4(); existing.sso_subject = "SUB-A"
+    existing.email = "a@x.com"; existing.display_name = "A"
+    existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
+    existing.is_active = True
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=existing)
+    repo.get_by_email = AsyncMock(return_value=existing)
+    repo.create_user = AsyncMock()
+    repo.flush = AsyncMock()
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    key_service = MagicMock()
+    key_service.revoke_keys_for_users = AsyncMock(return_value=[])
+    svc = CognitoSyncService(MagicMock(), key_service=key_service)
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("SUB-A", "a@x.com", enabled=True)
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    await svc.sync_user(session, "a@x.com")
+
+    assert existing.is_active is True
+    key_service.revoke_keys_for_users.assert_not_called()

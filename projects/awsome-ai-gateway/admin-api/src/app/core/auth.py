@@ -286,6 +286,7 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     """
     from app.core.oidc_identity import (
         admin_mapping_configured,
+        claims_truthy,
         derive_role,
         extract_claims,
         required_group_missing,
@@ -316,7 +317,16 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="user_deactivated")
 
-    role_from_claims = derive_role(parsed.email or (user.email or ""), parsed.groups)
+    # ADMIN_EMAILS 매칭은 검증된 이메일에만 허용한다 — 미검증 클레임 이메일은
+    # 사용자가 쓸 수 있는 값이라 주장만으로 ADMIN 승격이 된다. 클레임 이메일이
+    # 없어 DB 이메일로 폴백할 때는 연결 시 verified 게이트를 통과한 값이므로
+    # 신뢰한다.
+    claim_email_verified = claims_truthy(claims.get("email_verified"))
+    role_from_claims = derive_role(
+        parsed.email or (user.email or ""),
+        parsed.groups,
+        email_verified=claim_email_verified if parsed.email else bool(user.email),
+    )
     if role_from_claims == UserRole.ADMIN:
         role = UserRole.ADMIN
     elif user.role == UserRole.ADMIN and admin_mapping_configured():

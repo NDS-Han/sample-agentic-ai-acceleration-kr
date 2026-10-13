@@ -18,6 +18,7 @@ import uuid
 from dataclasses import dataclass, field
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from app.core.config import get_settings
 from app.models.auth import Department, Team, User, UserRole
@@ -33,13 +34,8 @@ logger = structlog.get_logger()
 
 def _attr_truthy(v) -> bool:
     """Cognito 속성값의 불리언 표현 — "true"/"True"/"1"/True/1 만 참."""
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return v == 1
-    if isinstance(v, str):
-        return v.strip().lower() == "true"
-    return False
+    from app.core.oidc_identity import claims_truthy
+    return claims_truthy(v)
 
 BATCH_SIZE = 500  # 유저 upsert 배치 commit 단위. 초과 시 commit + expunge_all 로
                   # identity map 을 비워 sync_all 메모리 상한을 확보한다.
@@ -100,6 +96,10 @@ class SyncResult:
     # 단일 사용자 sync 대상 유저의 DB id(str). 후속 처리(개인별 allowed_clients/
     # allowed_models)용. Cognito·DB 모두 없는 no-op 이면 None.
     user_id: str | None = None
+    # upsert 중 비활성 전환된 유저의 폐기 VK (vk, hash) 쌍 — Redis DEL·publish 는
+    # commit 후에만 유효하므로(_finalize_revoked_keys docstring) 호출부가 각
+    # commit 뒤에 drain 한다.
+    pending_key_revocations: list = field(default_factory=list)
 
 
 @dataclass
@@ -156,6 +156,14 @@ class CognitoSyncService:
         except Exception as e:
             result.errors.append(f"Failed to finalize key revocation: {e}")
 
+    async def _flush_pending_revocations(self, session, result) -> None:
+        """commit 직후 호출 — upsert 중 수집된 비활성 전환분 VK 의 Redis
+        부수효과를 적용하고 목록을 비운다."""
+        pending, result.pending_key_revocations = (
+            result.pending_key_revocations, [],
+        )
+        await self._finalize_revoked_keys(session, pending, result)
+
     async def sync_all(self, session) -> SyncResult:
         """Cognito 에서 그룹/사용자를 가져와 DB 동기화.
 
@@ -193,15 +201,23 @@ class CognitoSyncService:
         #   풀 반환 대상이 아니라 커밋 넘어 유지되므로 세션-레벨 락으로 충분.
         from contextlib import AsyncExitStack
 
-        from sqlalchemy.ext.asyncio import AsyncConnection
+        from sqlalchemy import Connection as SyncConnection
+        from sqlalchemy import Engine as SyncEngine
+        from sqlalchemy.ext.asyncio import AsyncEngine
 
         lock_stack = AsyncExitStack()
         lock_acquired = False
         session_locked = False
         try:
+            # ⚠️ AsyncSession.get_bind() 는 sync_session.get_bind 에 프록시돼
+            #   항상 **sync** Engine/Connection 을 돌려준다 — AsyncConnection
+            #   isinstance 검사는 영원히 False 다. sync Engine.connect() 가 주는
+            #   것도 sync Connection 이라 await 가 깨지고, 예외 삼킴 경로로 가면
+            #   락 없이 sync 가 돈다(실사고 이력).
             bind = session.get_bind()
-            if isinstance(bind, AsyncConnection):
-                # 커넥션 직접 바인딩(외부 소유 커넥션): 세션-레벨 락.
+            if isinstance(bind, SyncConnection):
+                # 커넥션 직접 바인딩(외부 소유 커넥션): 그 커넥션은 풀 반환
+                # 대상이 아니라 커밋을 넘어 유지되므로 세션-레벨 락으로 충분.
                 locked = await session.execute(
                     text("SELECT pg_try_advisory_lock(:k)"),
                     {"k": self._SYNC_LOCK_KEY},
@@ -210,9 +226,13 @@ class CognitoSyncService:
                     result.errors.append("cognito sync already in progress")
                     return result
                 session_locked = True
-            else:
+            elif isinstance(bind, SyncEngine):
                 # 엔진 바인딩: 락 전용 커넥션을 하나 빌려 xact 락을 건다.
-                lock_conn = await lock_stack.enter_async_context(bind.connect())
+                # AsyncEngine(sync_engine) 는 같은 풀을 참조하는 래퍼다 —
+                # dispose 하면 공유 풀이 닫히므로 절대 하지 않는다.
+                lock_conn = await lock_stack.enter_async_context(
+                    AsyncEngine(bind).connect()
+                )
                 await lock_stack.enter_async_context(lock_conn.begin())
                 locked = await lock_conn.execute(
                     text("SELECT pg_try_advisory_xact_lock(:k)"),
@@ -367,7 +387,7 @@ class CognitoSyncService:
             # skip 여부와 무관하게 항상 seen 에 추가 — reconcile(4단계)이 skip 된
             # 유저를 잘못 비활성화하지 않도록 (불변식).
             seen_sso_subjects.add(sub)
-            role = self._derive_role(email, user_groups)
+            role = self._derive_role(email, user_groups, email_verified=email_verified)
 
             # gate: 확실히 안 바뀐 기존 유저는 upsert 를 건너뜀 (DB 왕복 0).
             # snap None(신규/재생성 새 sub)은 절대 skip 하지 않는다 — email reconcile
@@ -383,21 +403,28 @@ class CognitoSyncService:
                 # 충돌)가 발생해도 savepoint 만 롤백되고 외부 트랜잭션은 건강하게
                 # 유지된다 → 이후 배치/잔여 commit + reconcile/stale-team 이 정상 수행.
                 async with session.begin_nested():
+                    revoked_local: list = []
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role, result=result,
                         email_verified=email_verified,
+                        revoked_out=revoked_local,
                     )
+                # savepoint 성공 후에만 이관 — 롤백된 upsert 의 폐기 해시가
+                # 남으면 DB ACTIVE 인 키를 커밋 후 DEL 하게 된다.
+                result.pending_key_revocations.extend(revoked_local)
             except Exception as e:
                 result.errors.append(f"Failed to sync user {email}: {e}")
 
             processed += 1
             if processed % BATCH_SIZE == 0:
                 await session.commit()
+                await self._flush_pending_revocations(session, result)
                 session.expunge_all()
 
         # 잔여분 commit
         await session.commit()
+        await self._flush_pending_revocations(session, result)
 
         # R4-A2-1: "조회 성공 + 0건" 도 장애로 취급. reconcile_incomplete 는 예외
         # 경로만 잡는다 — IAM 권한 드리프트·잘못된 user pool id·페이지네이션 결함
@@ -517,6 +544,7 @@ class CognitoSyncService:
         self, repo: UserRepository, session, *, sub: str, email: str, name: str,
         enabled: bool, team_id: uuid.UUID, role: UserRole, result: SyncResult,
         email_verified: bool = False,
+        revoked_out: list,
     ) -> User:
         """단일 사용자 upsert. sync_all 의 163-217 블록과 동일 규약(get_by_sso_subject
         → get_by_email fallback(재생성 시 새 sub 재조정) → 없으면 create).
@@ -565,7 +593,9 @@ class CognitoSyncService:
             result.users_created += 1
             return new_user
         else:
-            if email and existing.email != email:
+            # 미검증 이메일은 DB 에 싣지 않는다 — 저장된 주소는 ADMIN_EMAILS
+            # 폴백 매칭·이메일 조회의 신뢰 근거다.
+            if email and email_verified and existing.email != email:
                 existing.email = email
                 updated = True
             if existing.display_name != name:
@@ -578,6 +608,7 @@ class CognitoSyncService:
             if existing.role != role:
                 existing.role = role
                 updated = True
+            deactivated = existing.is_active and not enabled
             if existing.is_active != enabled:
                 existing.is_active = enabled
                 updated = True
@@ -610,6 +641,21 @@ class CognitoSyncService:
                 # result.errors) and users_updated stays untouched.
                 await repo.flush()
                 result.users_updated += 1
+            if deactivated:
+                # Cognito Enabled=false 전환 — 사용자가 풀에서 지워지지 않고
+                # disable 만 된 경우도 키는 즉시 폐기한다. 안 그러면 재활성화
+                # 시점까지 Redis 에 살아있는 VK 로 인증이 이어진다(TTL 경합).
+                # ⚠️ 수집은 호출부가 준 revoked_out 에만 한다 — 이 함수는
+                #   per-user savepoint 안에서 돌고 result.pending_* 은 트랜잭션을
+                #   모르는 파이썬 리스트라, savepoint 롤백 후에도 해시가 남아
+                #   DB ACTIVE 인 키를 커밋 후 DEL 하는 정합 붕괴가 생긴다.
+                #   호출부는 savepoint 가 성공적으로 빠져나온 뒤에만 result 로
+                #   옮기고, 각 commit 뒤에 drain 한다.
+                revoked_out.extend(
+                    await self._revoke_keys_for_users(
+                        session, [existing.id], result
+                    )
+                )
             return existing
 
     async def _resolve_team_id_from_groups(
@@ -696,7 +742,7 @@ class CognitoSyncService:
         team_id = await self._resolve_team_id_from_groups(
             repo, session, user_groups, result, cache=cache
         )
-        role = self._derive_role(email, user_groups)
+        role = self._derive_role(email, user_groups, email_verified=email_verified)
 
         if groups_fetch_failed:
             # 그룹 목록 실패를 빈 리스트로 취급하면 ADMIN 유저가 DEVELOPER 로
@@ -709,16 +755,20 @@ class CognitoSyncService:
                 role = snap["role"]
 
         try:
+            revoked_local: list = []
             user = await self._upsert_one_user(
                 repo, session, sub=sub, email=email, name=name, enabled=enabled,
                 team_id=team_id, role=role, result=result,
                 email_verified=email_verified,
+                revoked_out=revoked_local,
             )
+            result.pending_key_revocations.extend(revoked_local)
             result.user_id = str(user.id)
         except Exception as e:
             result.errors.append(f"Failed to upsert user {email or username}: {e}")
 
         await session.commit()
+        await self._flush_pending_revocations(session, result)
         logger.info(
             "cognito_sync.user_synced", username=username,
             created=result.users_created, updated=result.users_updated,
@@ -840,7 +890,7 @@ class CognitoSyncService:
             name = self._get_attr(m, "name") or email or m.get("Username", "")
             enabled = m.get("Enabled", True)
             email_verified = _attr_truthy(self._get_attr(m, "email_verified"))
-            derived_role = self._derive_role(email, [group_name])
+            derived_role = self._derive_role(email, [group_name], email_verified=email_verified)
             snap = existing_snaps.get(sub)
             if snap is not None and snap["role"] == UserRole.ADMIN:
                 # 이 그룹에 없는 ADMIN 권한 출처를 단일 그룹 기준으로 박탈하지 않는다.
@@ -852,16 +902,20 @@ class CognitoSyncService:
                 # 가 트랜잭션을 중단 상태로 만들면 잔여 멤버가 전부 실패하고
                 # 마지막 commit 도 깨진다.
                 async with session.begin_nested():
+                    revoked_local: list = []
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role,
                         result=result,
                         email_verified=email_verified,
+                        revoked_out=revoked_local,
                     )
+                result.pending_key_revocations.extend(revoked_local)
             except Exception as e:
                 result.errors.append(f"Failed to upsert member {email or sub}: {e}")
 
         await session.commit()
+        await self._flush_pending_revocations(session, result)
         logger.info(
             "cognito_sync.group_synced", group_name=group_name,
             members=len(members), created=result.users_created,
@@ -987,8 +1041,20 @@ class CognitoSyncService:
                 if dept:
                     break
             if dept is None and orgs:
-                dept = Department(id=uuid.uuid4(), org_id=orgs[0].id, name=dept_name)
-                await repo.create_department(dept)
+                # check-then-act 경합: uq_departments_org_name 이 패자를
+                # IntegrityError 로 만든다. savepoint 로 감싸지 않으면 외부
+                # 트랜잭션 전체가 abort 되어 잔여 멤버 upsert·최종 commit 이
+                # 전부 깨진다(sync_all 의 per-user savepoint 밖에서 호출됨).
+                try:
+                    async with session.begin_nested():
+                        dept = Department(
+                            id=uuid.uuid4(), org_id=orgs[0].id, name=dept_name
+                        )
+                        await repo.create_department(dept)
+                except IntegrityError:
+                    dept = await repo.get_department_by_name(orgs[0].id, dept_name)
+                    if dept is None:
+                        raise
 
         if dept is None:
             raise ValueError(f"Cannot resolve department for {dept_name}")
@@ -999,9 +1065,15 @@ class CognitoSyncService:
             if t.dept_id == dept.id and t.name == team_name:
                 return t
 
-        # 자동 생성
-        team = Team(id=uuid.uuid4(), dept_id=dept.id, name=team_name)
-        await repo.create_team(team)
+        # 자동 생성 — 같은 check-then-act 경합(uq_teams_dept_name).
+        try:
+            async with session.begin_nested():
+                team = Team(id=uuid.uuid4(), dept_id=dept.id, name=team_name)
+                await repo.create_team(team)
+        except IntegrityError:
+            team = await repo.get_team_by_dept_and_name(dept.id, team_name)
+            if team is None:
+                raise
         return team
 
     async def _build_team_cache(self, repo: UserRepository) -> _TeamCache:
@@ -1057,23 +1129,21 @@ class CognitoSyncService:
         return team.id
 
     @staticmethod
-    def _derive_role(email: str, user_groups: list[str]) -> UserRole:
+    def _derive_role(email: str, user_groups: list[str], *, email_verified: bool = False) -> UserRole:
         """ADMIN_EMAILS / ADMIN_GROUPS 매칭 시 ADMIN.
 
         user_groups 는 해당 사용자가 속한 Cognito 그룹 이름 목록.
+
+        ⚠️ 정책 본체는 ``core.oidc_identity.derive_role`` 하나뿐 — 여기서
+        복제하면 OIDC 로그인 경로와 조용히 어긋난다(실사고 이력 있음).
+        ADMIN_EMAILS 매칭은 ``email_verified``(Cognito 풀 속성)가 참일 때만
+        허용한다 — 풀에 미검증으로 등록된 주소를 ADMIN 목록과 맞추면 주장만으로
+        권한상승이 된다.
 
         TEAM_LEADER 는 여기서 부여하지 않는다 — admin-ui 의 "팀 리더 지정"
         (``UserTeamService.set_team_leader``)으로만 설정되며, ``_upsert_one_user``
         가 sync 때 그 값을 DEVELOPER 로 덮어쓰지 않도록 보존한다 (oidc_service.py
         의 ``_derive_role``/``_upsert_user`` 와 동일한 정책).
         """
-        settings = get_settings()
-        admin_emails = {e.lower() for e in settings.ADMIN_EMAILS}
-        if email and email.lower() in admin_emails:
-            return UserRole.ADMIN
-
-        admin_groups = set(settings.ADMIN_GROUPS)
-        if any(g in admin_groups for g in user_groups):
-            return UserRole.ADMIN
-
-        return UserRole.DEVELOPER
+        from app.core.oidc_identity import derive_role
+        return derive_role(email, user_groups, email_verified=email_verified)

@@ -108,14 +108,20 @@ class ServiceTokenService:
         created_by: uuid.UUID,
     ) -> ServiceTokenCreateResponse:
         repo = ServiceTokenRepository(session)
-        old = await repo.get_by_id(token_id)
+        # FOR UPDATE — 두 개의 동시 rotate 가 같은 구 토큰에서 신 토큰을 각각
+        # 발급하는 것을 직렬화한다. 락 없이 두 rotate 가 통과하면 grace 창의
+        # 구 토큰 사본이 둘 다 유효한 교체 토큰을 생산한다.
+        old = await repo.get_by_id(token_id, for_update=True)
         if old is None:
             raise NotFoundError("ServiceToken", str(token_id))
 
         now = datetime.now(timezone.utc)
         if old.expires_at <= now:
             raise ValidationError("expired service token cannot be rotated")
-        if old.revoked_at is not None and old.revoked_at <= now:
+        # revoked_at 이 세팅됐다는 것 자체가 "이미 rotate(또는 revoke) 됐다" 는
+        # 뜻이다. 미래 시각(grace)도 거부 — grace 중 재rotate 를 허용하면
+        # 유출 토큰이 신 토큰을 무한히 연쇄 발급할 수 있다.
+        if old.revoked_at is not None:
             raise ValidationError("revoked service token cannot be rotated")
 
         # 새 토큰 수명은 구 토큰의 잔여 수명을 넘지 못한다. 로테이션은 자격
@@ -135,12 +141,10 @@ class ServiceTokenService:
             session, name=old.name, created_by=old.created_by, rotated_from=old.id,
             expires_at=new_expires_at,
         )
-        # grace 재로테이션 상한: revoked_at 이 이미 미래 시각(기존 grace)이면
-        # 그 시각을 넘기지 않는다 — 아니면 유출 토큰이 <24h 마다 rotate 를
-        # 반복해 폐기 시점을 무기한 연장할 수 있다.
+        # grace — 구 토큰은 24h 간 진행 중 호출이 끊기지 않게 유효를 유지.
+        # revoked_at != None 인 토큰은 위에서 이미 거부했으므로 이 값은 최초
+        # 1회만 쓰인다(재rotate 불가 → grace 연장 루프 없음).
         grace_until = now + timedelta(hours=SERVICE_TOKEN_ROTATE_GRACE_HOURS)
-        if old.revoked_at is not None:
-            grace_until = min(grace_until, old.revoked_at)
         await repo.set_revoked_at(old.id, grace_until)
         logger.info(
             "service_token.rotated",

@@ -279,7 +279,7 @@ async def test_db_admin_is_preserved_when_group_mapping_is_unused():
 
 
 async def test_admin_email_bootstrap_applies_on_this_path_too():
-    claims = {"sub": "s", "email": "Boss@Example.COM"}
+    claims = {"sub": "s", "email": "Boss@Example.COM", "email_verified": True}
     p1, p2, p3, _ = _resolve(
         claims,
         db_user=_db_user(role=UserRole.DEVELOPER, email="Boss@Example.COM"),
@@ -287,7 +287,44 @@ async def test_admin_email_bootstrap_applies_on_this_path_too():
     )
     with p1, p2, p3:
         user = await get_current_user(_request(claims))
-    assert user.role == UserRole.ADMIN, "이메일 비교가 대소문자를 구분했다"
+    assert user.role == UserRole.ADMIN, "검증된 이메일의 ADMIN_EMAILS 매칭이 막혔다"
+
+
+async def test_unverified_email_claim_cannot_bootstrap_admin():
+    """email_verified 없는/거짓인 이메일 클레임은 ADMIN_EMAILS 에 매칭되지 않는다.
+
+    이메일 클레임은 IdP 설정에 따라 사용자가 쓸 수 있는 값이다 — 미검증 주소를
+    ADMIN 목록과 맞추면 주장만으로 권한상승이 된다. 라이브는 ADMIN_EMAILS 를
+    실제로 쓰므로 이 게이트는 장식이 아니다.
+    """
+    for verified_claim in (False, None):
+        claims = {"sub": "s", "email": "boss@example.com"}
+        if verified_claim is not None:
+            claims["email_verified"] = verified_claim
+        p1, p2, p3, _ = _resolve(
+            claims,
+            db_user=_db_user(role=UserRole.DEVELOPER, email="x@example.com"),
+            settings=_settings(admin_emails=["boss@example.com"]),
+        )
+        with p1, p2, p3:
+            user = await get_current_user(_request(claims))
+        assert user.role == UserRole.DEVELOPER, (
+            f"email_verified={verified_claim} 인데 ADMIN 승격됐다"
+        )
+
+
+async def test_db_email_fallback_counts_as_trusted_for_admin_emails():
+    """토큰에 email 이 없을 때 DB 이메일 폴백은 연결 시 verified 게이트를
+    통과한 값이므로 ADMIN_EMAILS 매칭에 쓸 수 있다."""
+    claims = {"sub": "s"}  # email 클레임 없음 (Cognito access_token 형태)
+    p1, p2, p3, _ = _resolve(
+        claims,
+        db_user=_db_user(role=UserRole.DEVELOPER, email="boss@example.com"),
+        settings=_settings(admin_emails=["boss@example.com"]),
+    )
+    with p1, p2, p3:
+        user = await get_current_user(_request(claims))
+    assert user.role == UserRole.ADMIN
 
 
 # ─────────────────────────────────────────────────────────────────────────────

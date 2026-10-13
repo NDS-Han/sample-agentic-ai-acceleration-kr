@@ -125,12 +125,12 @@ async def test_revoked_token_cannot_rotate():
 
 
 @pytest.mark.asyncio
-async def test_rerotate_during_grace_does_not_extend_old_token_life():
-    """grace 기간 중 재로테이션이 구 토큰의 폐기 시각을 뒤로 밀지 않는다.
+async def test_rerotate_during_grace_is_rejected():
+    """grace 기간 중 재로테이션은 거부된다.
 
-    authenticate 는 ``revoked_at > now`` 를 아직 유효로 본다 — 매 rotate 마다
-    ``revoked_at = now+24h`` 로 덮으면, grace 안에 rotate 를 반복하는 것만으로
-    유출 토큰이 영구히 산다. 종료 시각은 min(신규 grace, 기존 revoked_at) 여야 한다.
+    authenticate 는 ``revoked_at > now`` 를 아직 유효로 본다 — grace 중인 구
+    토큰으로 다시 rotate 를 허용하면 유출 토큰이 신 토큰을 무한히 연쇄 발급할
+    수 있다. revoked_at 이 세팅된 토큰은 시각과 무관하게 rotate 를 거부한다.
     """
     session = AsyncMock()
     now = datetime.now(timezone.utc)
@@ -147,8 +147,26 @@ async def test_rerotate_during_grace_does_not_extend_old_token_life():
         "app.services.service_token_service.ServiceTokenRepository",
         return_value=repo,
     ):
+        with pytest.raises(ValidationError):
+            await svc.rotate(session, token_id=old.id, created_by=uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_rotate_locks_old_token_row():
+    """rotate 는 구 토큰 행을 FOR UPDATE 로 잠근다 — 동시 rotate 직렬화."""
+    session = AsyncMock()
+    old = _old_token(days_left=30)
+    svc = _svc()
+
+    repo = MagicMock()
+    repo.get_by_id = AsyncMock(return_value=old)
+    repo.set_revoked_at = AsyncMock()
+    repo.create = AsyncMock()
+
+    with patch(
+        "app.services.service_token_service.ServiceTokenRepository",
+        return_value=repo,
+    ):
         await svc.rotate(session, token_id=old.id, created_by=uuid.uuid4())
 
-    set_args = repo.set_revoked_at.call_args[0]
-    # 폐기 시각이 기존 grace(20h 후)를 넘기면 안 된다 — 연장이면 무한 연장 루프.
-    assert set_args[1] <= old.revoked_at
+    repo.get_by_id.assert_awaited_once_with(old.id, for_update=True)

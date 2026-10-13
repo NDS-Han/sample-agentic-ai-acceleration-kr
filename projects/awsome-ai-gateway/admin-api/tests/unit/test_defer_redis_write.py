@@ -98,6 +98,49 @@ async def test_write_survives_savepoint_lifecycle():
     assert calls == ["ran"]
 
 
+async def test_write_inside_rolled_back_savepoint_is_discarded():
+    """savepoint 안에서 등록된 지연 쓰기는 그 savepoint 가 롤백되면 폐기된다.
+
+    안 그러면 롤백된 DB 변경(per-user savepoint 안의 VK 폐기 실패 등)의
+    Redis DEL 이 외부 커밋 때 실행돼 DB 는 ACTIVE 인데 캐시는 지워지는
+    정합 붕괴가 생긴다."""
+    session = _session_double()
+    calls: list[str] = []
+
+    async def write() -> None:
+        calls.append("ran")
+
+    sync = session.sync_session
+    sync.execute(text("SELECT 1"))  # 외부 트랜잭션 오픈
+    nested = sync.begin_nested()
+    await defer_redis_write_until_commit(session, write)
+    nested.rollback()  # savepoint 만 롤백 — 외부 트랜잭션은 계속
+    sync.commit()
+    await asyncio.sleep(0)
+    assert calls == []
+
+
+async def test_write_survives_unrelated_savepoint_rollback():
+    """등록 후 *다른* savepoint 가 롤백돼도 바깥에서 등록한 쓰기는 산다.
+
+    위 폐기 테스트와 짝 — soft-rollback 폐기가 지연 쓰기 전체를 죽이는
+    과잉 반응이 아니라 등록 스코프 기준인지 확인한다."""
+    session = _session_double()
+    calls: list[str] = []
+
+    async def write() -> None:
+        calls.append("ran")
+
+    sync = session.sync_session
+    sync.execute(text("SELECT 1"))
+    await defer_redis_write_until_commit(session, write)  # 외부 스코프 등록
+    nested = sync.begin_nested()
+    nested.rollback()  # 관련 없는 savepoint 롤백
+    sync.commit()
+    await asyncio.sleep(0)
+    assert calls == ["ran"]
+
+
 async def test_write_failure_is_swallowed():
     """지연 쓰기 실패는 로그만 남기고 전파되지 않는다(best-effort warmer)."""
     session = _session_double()

@@ -75,8 +75,13 @@ def merge_tfvars(existing: str, values: dict) -> str:
         line = lines[i]
         stripped = line.strip()
         at_top = depth == 0
+        if stripped.startswith("#") or stripped.startswith("//"):
+            # 주석 안의 브레이스는 depth 를 오염시킨다 — 그대로 보존하고 건너뛴다.
+            out.append(line)
+            i += 1
+            continue
         opens, closes = stripped.count("{"), stripped.count("}")
-        m = _TFVARS_KEY_RE.match(line) if at_top and not stripped.startswith("#") else None
+        m = _TFVARS_KEY_RE.match(line) if at_top else None
         if m and m.group(1) in values:
             key = m.group(1)
             seen.add(key)

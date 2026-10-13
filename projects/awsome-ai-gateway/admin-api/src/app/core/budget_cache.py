@@ -52,7 +52,31 @@ async def defer_redis_write_until_commit(
     태스크 간 공유가 안전하지 않다). DB 값이 필요하면 커밋 전에 읽어 클로저로
     넘긴다.
     """
+    sync_session = getattr(session, "sync_session", None)
+    if not isinstance(sync_session, Session):
+        # mock 세션(단위/통합 테스트) — 즉시 실행해 기존 동작을 유지한다.
+        await write()
+        return
+
     fired = {"live": True}
+    # 지연 쓰기가 등록된 트랜잭션 스코프 — savepoint 안에서 등록됐으면 그
+    # savepoint(또는 더 깊은 중첩)가 롤백될 때 함께 죽어야 한다. 안 그러면
+    # 롤백된 변경의 DEL/SET 이 외부 커밋 때 실행돼 DB 는 ACTIVE 인데 Redis 에선
+    # 지워지는 정합 붕괴가 생긴다(예: per-user savepoint 안의 VK 폐기 실패).
+    # 현재 진행 중인 가장 깊은 트랜잭션 — get_nested_transaction() 이 savepoint
+    # 안이면 그 SessionTransaction 을, 아니면 루트를 잡는다(SessionTransaction
+    # .nested 는 자식 링크가 아니라 flag 라 아래로 못 내려간다 — 실측 확인).
+    txn_at_defer = (
+        sync_session.get_nested_transaction()
+        or sync_session.get_transaction()
+    )
+
+    def _is_ancestor_or_self(t, ancestor) -> bool:
+        while t is not None:
+            if t is ancestor:
+                return True
+            t = t.parent
+        return False
 
     async def _guarded() -> None:
         try:
@@ -84,14 +108,18 @@ async def defer_redis_write_until_commit(
 
     def _on_rollback(_s) -> None:
         if sync_session.in_nested_transaction():
-            # SAVEPOINT 롤백 — 외부 트랜잭션은 계속 진행 중이므로 지연 쓰기 유지.
+            # SAVEPOINT 롤백 — _on_soft_rollback 이 등록 스코프 기준으로 판별한다.
             return
         fired["live"] = False
 
-    sync_session = getattr(session, "sync_session", None)
-    if not isinstance(sync_session, Session):
-        # mock 세션(단위/통합 테스트) — 즉시 실행해 기존 동작을 유지한다.
-        await write()
-        return
+    def _on_soft_rollback(_s, previous_transaction) -> None:
+        """savepoint/중첩 롤백 — 지연 쓰기의 등록 트랜잭션이 롤백된 트랜잭션의
+        자신~자손이면 그 쓰기는 롤백된 DB 변경에 대한 것이므로 함께 폐기한다."""
+        if txn_at_defer is None:
+            return
+        if _is_ancestor_or_self(txn_at_defer, previous_transaction):
+            fired["live"] = False
+
     event.listen(sync_session, "after_commit", _on_commit)
     event.listen(sync_session, "after_rollback", _on_rollback)
+    event.listen(sync_session, "after_soft_rollback", _on_soft_rollback)
