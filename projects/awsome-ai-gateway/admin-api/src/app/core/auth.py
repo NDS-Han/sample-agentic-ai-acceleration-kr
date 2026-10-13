@@ -270,13 +270,21 @@ def _idp_verifier_for(request: Request, token: str) -> OIDCVerifier | None:
     return verifier
 
 
+# sub -> (unix 만료시각, email 또는 "") — Redis 다운 시 인프로세스 폴백 캐시.
+# 두 번째 계층이 없으면 Redis 장애 중 email-less 토큰 사용자 전원이 매 요청마다
+# Cognito AdminGetUser 를 호출해 계정 전체 읽기 쿼터를 소진한다.
+_EMAIL_ENRICH_CACHE: dict[str, tuple[float, str]] = {}
+_EMAIL_ENRICH_TTL = 300
+_EMAIL_ENRICH_MISS_TTL = 30  # 미해결("!")은 짧게 — Cognito 일시 오류가 5분 강등이 되지 않도록
+
+
 async def _verified_email_for_subject(request: Request, sub: str) -> str:
     """토큰에 검증된 이메일이 없을 때 Cognito 서버측 속성으로 ADMIN_EMAILS 평가 근거를 보강.
 
     access token(Cognito 는 email claim 없음)이나 email 클레임을 안 주는 배치에서
     ADMIN_EMAILS 만 설정된 관리자는 매칭할 이메일이 없어 DEVELOPER 로 강등된다 —
-    sub 가 신원을 증명하므로 풀 속성의 검증된 이메일을 대신 쓴다. 요청마다
-    Cognito 를 두드리지 않도록 `oidc:emailver:{sub}` 에 5분 캐시("!"=미해결).
+    sub 가 신원을 증명하므로 풀 속성의 검증된 이메일을 대신 쓴다. 캐시는 인프로세스
+    → Redis(`oidc:emailver:{sub}`) 순으로, Cognito 왕복은 sub 당 TTL 에 한 번.
     ADMIN_EMAILS 가 비어 있으면 평가할 것 자체가 없어 바로 "".
     """
     from app.core.config import get_settings
@@ -284,6 +292,12 @@ async def _verified_email_for_subject(request: Request, sub: str) -> str:
     settings = get_settings()
     if not sub or not settings.ADMIN_EMAILS:
         return ""
+    import time
+
+    now = time.time()
+    hit = _EMAIL_ENRICH_CACHE.get(sub)
+    if hit and hit[0] > now:
+        return hit[1]
     redis = getattr(request.app.state, "redis", None)
     cache_key = f"oidc:emailver:{sub}"
     if redis is not None:
@@ -292,7 +306,12 @@ async def _verified_email_for_subject(request: Request, sub: str) -> str:
         except Exception:
             cached = None
         if cached is not None:
-            return "" if cached == "!" else cached
+            email = "" if cached == "!" else cached
+            _EMAIL_ENRICH_CACHE[sub] = (
+                now + (_EMAIL_ENRICH_MISS_TTL if cached == "!" else _EMAIL_ENRICH_TTL),
+                email,
+            )
+            return email
     email = ""
     oidc_service = getattr(request.app.state, "oidc_service", None)
     if oidc_service is not None:
@@ -304,9 +323,15 @@ async def _verified_email_for_subject(request: Request, sub: str) -> str:
             pool_email, pool_verified = None, False
         if pool_email and pool_verified:
             email = pool_email
+    # 미해결은 짧은 TTL — Cognito 일시 장애(스로틀링 등)가 관리자를 5분간
+    # 강등시키는 것보다 30초마다 재시도가 낫다.
+    ttl = _EMAIL_ENRICH_TTL if email else _EMAIL_ENRICH_MISS_TTL
+    _EMAIL_ENRICH_CACHE[sub] = (now + ttl, email)
+    if len(_EMAIL_ENRICH_CACHE) > 10000:
+        _EMAIL_ENRICH_CACHE.clear()  # 무한 증가 방지 — 만료항목 재구축
     if redis is not None:
         try:
-            await redis.set(cache_key, email or "!", ex=300)
+            await redis.set(cache_key, email or "!", ex=ttl)
         except Exception:
             pass
     return email

@@ -14,6 +14,7 @@ Cognito User Pool 에서 전체 사용자/그룹 목록을 가져와
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
 
@@ -285,7 +286,6 @@ class CognitoSyncService:
                     )
 
     async def _sync_all_locked(self, session, settings, result) -> SyncResult:
-        import asyncio
 
         repo = UserRepository(session)
         user_pool_id = settings.COGNITO_USER_POOL_ID
@@ -722,7 +722,6 @@ class CognitoSyncService:
         있으나 admin_get_user(Username) 로 조회되어 sub/attributes 를 정확히 가져온다).
         role/team 은 그룹 멤버십에서 나오므로 admin_list_groups_for_user 도 함께 호출.
         """
-        import asyncio
         settings = get_settings()
         result = SyncResult()
         user_pool_id = settings.COGNITO_USER_POOL_ID
@@ -811,6 +810,7 @@ class CognitoSyncService:
         - 이미 비활성이면 users_deactivated 를 올리지 않는다(멱등).
         """
         settings = get_settings()
+        fallback_hit = False
         try:
             user = await repo.get_by_email(username)
             if user is None:
@@ -821,12 +821,34 @@ class CognitoSyncService:
                 user = await repo.get_by_sso_subject(username) or await repo.get_by_email(
                     f"{username}@unknown"
                 )
+                fallback_hit = user is not None
         except Exception as e:
             result.errors.append(f"Failed to look up user {username}: {e}")
             return
         if user is None:
             logger.info("cognito_sync.deactivate_noop", username=username)
             return
+        if fallback_hit:
+            # 폴백으로만 찾았다 = admin_get_user(Username) 가 못 찾았다. 그런데
+            # federated 유저는 Username 이 "<Provider>_<id>" 라 sub 로 조회하면
+            # UserNotFound 가 난다 — Cognito 에 **살아있는** 사용자를 여기서
+            # 비활성화하면 안 되므로, sub 필터 조회로 실제 삭제를 확인한다.
+            # 확인이 불가하면(예외) fail-closed 로 스킵.
+            try:
+                still_exists = await asyncio.to_thread(
+                    self._user_exists_by_sub, settings.COGNITO_USER_POOL_ID, username
+                )
+            except Exception as e:
+                result.errors.append(
+                    f"Could not confirm deletion of {username}: {e}"
+                )
+                return
+            if still_exists:
+                logger.info(
+                    "cognito_sync.deactivate_skipped_still_in_pool",
+                    username=username,
+                )
+                return
 
         result.user_id = str(user.id)
         if user.provider == settings.OIDC_PROVIDER_NAME and user.is_active:
@@ -867,7 +889,6 @@ class CognitoSyncService:
 
     async def sync_group(self, session, group_name: str) -> SyncResult:
         """단일 그룹만 동기화: 팀 확보 + 그 그룹 멤버 upsert. 전역 정리 없음."""
-        import asyncio
         settings = get_settings()
         result = SyncResult()
         user_pool_id = settings.COGNITO_USER_POOL_ID
@@ -969,6 +990,15 @@ class CognitoSyncService:
                 break
             params["NextToken"] = token
         return groups
+
+    def _user_exists_by_sub(self, user_pool_id: str, sub: str) -> bool:
+        """list_users(sub 필터)로 풀 잔존 확인 — federated 유저는 Username!=sub 라
+        admin_get_user 가 못 찾아도 살아있을 수 있어, 폴백 경로의 비활성화 전에
+        실제 삭제 여부를 확인한다."""
+        resp = self._cognito.list_users(
+            UserPoolId=user_pool_id, Filter=f'sub = "{sub}"', Limit=1
+        )
+        return bool(resp.get("Users"))
 
     def _admin_get_user(self, user_pool_id: str, username: str) -> dict | None:
         """admin_get_user — 단일 사용자 속성 조회. 없으면 None."""

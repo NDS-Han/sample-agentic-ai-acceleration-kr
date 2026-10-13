@@ -288,12 +288,45 @@ async def test_sync_user_deactivates_synthetic_email_user_by_sub_or_suffix(monke
     svc = CognitoSyncService(MagicMock())
     svc._admin_get_user = MagicMock(return_value=None)
     svc._revoke_keys_for_users = AsyncMock(return_value=[])
+    # 폴백 매칭은 Cognito sub 필터로 실제 삭제 확인 후에만 비활성화한다
+    svc._cognito.list_users = MagicMock(return_value={"Users": []})
 
     result = await svc.sync_user(session, "claimed@x.com")
 
     assert existing.is_active is False
     assert result.users_deactivated == 1
     svc._revoke_keys_for_users.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_sync_user_fallback_hit_does_not_deactivate_live_federated_user(monkeypatch):
+    """federated 유저의 Cognito Username 은 "Provider_xxx" 라 admin_get_user(sub)
+    이 UserNotFound — 폴백이 DB 행을 찾아도 풀에 살아있으면 비활성화 금지."""
+    s = _settings(monkeypatch)
+    session = _session()
+    existing = MagicMock()
+    existing.id = uuid.uuid4()
+    existing.provider = s.OIDC_PROVIDER_NAME
+    existing.is_active = True
+
+    repo = MagicMock()
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.get_by_sso_subject = AsyncMock(return_value=existing)  # sub 폴백 hit
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(return_value=None)  # Username!=sub → 미발견
+    svc._revoke_keys_for_users = AsyncMock(return_value=[])
+    # 그러나 풀엔 살아있다 (federated Username 으로 존재)
+    svc._cognito.list_users = MagicMock(return_value={"Users": [{"Username": "Google_abc"}]})
+
+    result = await svc.sync_user(session, "SOME-SUB")
+
+    assert existing.is_active is True  # 비활성화 금지 — 살아있는 유저
+    assert result.users_deactivated == 0
+    svc._revoke_keys_for_users.assert_not_called()
 
 
 @pytest.mark.asyncio

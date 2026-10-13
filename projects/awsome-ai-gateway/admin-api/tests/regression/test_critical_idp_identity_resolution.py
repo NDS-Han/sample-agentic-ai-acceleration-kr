@@ -319,6 +319,8 @@ async def test_access_token_admin_email_enriched_via_cognito_pool_attrs():
     보강이 없으면 ADMIN_EMAILS 만 설정된 관리자가 admin-ui 세션(access_token 쿠키)
     에서 DEVELOPER 로 강등됐다 — sub 가 신원을 증명하므로 풀 속성의 검증된
     이메일은 신뢰할 수 있다."""
+    from app.core import auth as auth_mod
+    auth_mod._EMAIL_ENRICH_CACHE.clear()  # 모듈-레벨 캐시 — 테스트 간 오염 방지
     settings = _settings(admin_emails=["boss@example.com"])
     claims = {"sub": "s"}  # Cognito access_token — email 클레임 없음
     p1, p2, p3, _ = _resolve(
@@ -337,6 +339,8 @@ async def test_access_token_admin_email_enriched_via_cognito_pool_attrs():
 
 async def test_access_token_unverified_pool_email_still_denied():
     """보강도 email_verified 게이트를 우회하지 않는다 — 풀 속성이 미검증이면 강등 유지."""
+    from app.core import auth as auth_mod
+    auth_mod._EMAIL_ENRICH_CACHE.clear()
     settings = _settings(admin_emails=["boss@example.com"])
     claims = {"sub": "s"}
     p1, p2, p3, _ = _resolve(

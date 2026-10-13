@@ -167,11 +167,15 @@ async def lifespan(app: FastAPI):
             audience=settings.OIDC_AUDIENCE,
             provider_name=settings.OIDC_PROVIDER_NAME,
         )
-        if settings.ADMIN_EMAILS and settings.OIDC_EMAIL_CLAIM != "email":
+        if (
+            settings.ADMIN_EMAILS
+            and settings.OIDC_EMAIL_CLAIM != "email"
+            and oidc_cognito_client is None
+        ):
             # email_verified 클레임은 "email" 속성만 증명한다 — 매핑된 클레임이
             # email 이 아니면 (예: preferred_username/upn) ADMIN_EMAILS 매칭이
             # 영구 실패하고 신규 유저 전원이 synthetic 이메일로 저장된다.
-            # 비-Cognito IdP 에는 서버측 이메일 보강도 없어 명시적으로 경고한다.
+            # Cognito 풀이 있으면 서버측 이메일 보강이 커버하므로 경고는 그 외만.
             logger.error(
                 "oidc.admin_emails_unusable",
                 oidc_email_claim=settings.OIDC_EMAIL_CLAIM,
