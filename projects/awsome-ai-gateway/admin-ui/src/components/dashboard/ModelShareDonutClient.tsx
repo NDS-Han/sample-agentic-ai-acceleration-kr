@@ -186,10 +186,10 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
           {t('noUsageForScope')}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-[14rem_minmax(0,1fr)] gap-6 items-center">
-          {/* 도넛은 고정폭, 범례가 나머지 전부 — 절반씩 나누면 모델명이
-              2~3줄로 꺾여 행이 세로로 불어난다. */}
-          <div className="relative h-64">
+        <div className="flex flex-col gap-4">
+          {/* 도넛 위 · 범례 전폭 아래 — 나란히 두면 범례 열이 좁아 모델명이
+              2~3줄로 꺾여 한눈에 안 들어온다. 행이 카드 전폭을 쓰면 한 줄로 끝난다. */}
+          <div className="relative h-56 w-56 mx-auto">
             <Doughnut data={chartData} options={options} />
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
@@ -228,7 +228,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               );
             })()}
           </div>
-          <ul className="space-y-2">
+          <ul className="space-y-1">
             {displayModels.map((m, i) => {
               const isOther = m.model_alias === '__other__';
               const label = isOther
