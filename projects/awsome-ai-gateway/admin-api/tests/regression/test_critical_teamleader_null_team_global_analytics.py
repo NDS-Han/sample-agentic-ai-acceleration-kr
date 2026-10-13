@@ -144,7 +144,9 @@ def _recording_session() -> tuple[AsyncMock, list[str]]:
 
 @pytest.mark.asyncio
 async def test_team_leader_without_a_team_is_refused_not_given_everything():
-    """팀 없는 TEAM_LEADER 의 scope=all → 403. DB 질의는 한 건도 나가지 않는다."""
+    """팀 없고 리드하는 팀도 없는 TEAM_LEADER 의 scope=all → 403.
+    데이터 질의(usage_logs/budget_usages)는 한 건도 나가지 않는다 —
+    인가 판정에 필요한 auth.teams 조회만 허용된다."""
     session, seen = _recording_session()
     svc = AnalyticsService()
 
@@ -155,7 +157,10 @@ async def test_team_leader_without_a_team_is_refused_not_given_everything():
 
     # 운영자가 무엇을 해야 하는지 알 수 있는 메시지여야 한다(팀 배정).
     assert "team" in str(exc.value).lower()
-    assert not seen, f"막기 전에 질의가 나갔다 — 전사 데이터를 이미 읽었다: {seen[:2]}"
+    # 인가 판정용 auth.teams 조회(리드 팀 확인)는 허용 — 데이터 테이블만 차단.
+    assert not any(
+        "usage_logs" in q or "budget_usages" in q for q in seen
+    ), f"막기 전에 데이터 질의가 나갔다: {seen[:2]}"
 
 
 @pytest.mark.asyncio
@@ -168,7 +173,9 @@ async def test_csv_export_is_refused_too():
         await svc.export_analytics(
             session, format="csv", period="2026-09", group_by="user", actor=_leader(None)
         )
-    assert not seen
+    assert not any(
+        "usage_logs" in q or "budget_usages" in q for q in seen
+    )
 
 
 @pytest.mark.asyncio
@@ -203,7 +210,16 @@ async def test_team_leader_with_a_team_is_still_scoped_to_it():
         "users.team_id = ",
         "users.team_id IN ",
     )
-    unscoped = [s for s in seen if not any(p in s for p in SCOPE_PREDICATES)]
+    # 인가 판정용 리드-팀 조회(auth.teams)와, 잔차 산출용 사용자-전체 실사용
+    # 집계(AS actual)는 의도적으로 무스코프다 — 후자는 budget_usages(사용자
+    # 전체 카운터)와 단위를 맞추기 위한 뺄 값이라 결과 행이 호출자에게
+    # 직접 나가지 않는다.
+    EXEMPT = ("auth.teams", "AS actual")
+    unscoped = [
+        s for s in seen
+        if not any(p in s for p in SCOPE_PREDICATES)
+        and not any(e in s for e in EXEMPT)
+    ]
     assert not unscoped, (
         f"team_id 격리가 없는 질의 {len(unscoped)}건 — 전사 데이터가 섞여 나온다. "
         f"예: {unscoped[0][:400]}"

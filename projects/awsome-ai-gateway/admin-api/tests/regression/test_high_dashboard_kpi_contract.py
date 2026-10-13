@@ -89,16 +89,21 @@ def test_budget_denominator_excludes_team_member_user_configs():
     assert "or_(" in body, "TEAM 또는 팀없는USER 의 OR 결합이 없다"
 
 
-def test_budget_numerator_does_not_read_budget_usages():
-    """분자는 usage_logs SUCCESS 합계여야 한다 — budget_usages 는 status 무관 누적이다."""
+def test_budget_numerator_reads_enforcement_counter():
+    """분자는 **budget_usages**(집행 계수)여야 한다 — 분모가 BudgetConfig(집행 한도)
+    이므로, 사용액도 enforcement 가 실제로 부과하는 카운터여야 사용률이 실제와 같다.
+    usage_logs SUCCESS 합계는 실패 호출 비용과 시드 이관분을 빼먹어, 하드블록 상태인
+    조직에 "잔액 있음"을 표시하는 불일치가 있었다(R13-M5)."""
     body = inspect.getsource(dash.dashboard_kpi)
-    assert "BudgetUsage" not in body, (
-        "budget_usages 에서 사용액을 읽는다 — ERROR/TIMEOUT 비용이 섞여 §59(SUCCESS only) "
-        "기준인 같은 화면의 다른 카드와 숫자가 어긋난다"
+    assert "BudgetUsage" in body, (
+        "분자가 enforcement 계수(budget_usages)를 읽지 않는다 — 표시 사용액과 "
+        "실제 부과액이 어긋난다"
     )
-    assert "cost_period_filter" in body, (
-        "cost_period_filter(SUCCESS + KST 월)를 쓰지 않는다 — 집계 기준이 갈린다"
+    # 분모와 같은 스코프(TEAM + 팀없는 USER)와 총합 행(client IS NULL)만 합산해야 한다.
+    assert "BudgetUsage.client.is_(None)" in body, (
+        "per-app 행까지 합산하면 사용액이 이중계상된다"
     )
+    assert "BudgetScope.TEAM" in body or "BudgetScope.USER" in body
 
 
 def test_zero_limit_yields_null_utilization_not_zero_percent():

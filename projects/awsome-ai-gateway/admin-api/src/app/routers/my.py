@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db_session
 from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
-from app.models.budget import BudgetConfig, BudgetScope
+from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias
 from app.models.usage import UsageLog
 
@@ -72,9 +72,14 @@ async def get_my_budget(
     limit_usd = float(config.max_budget_usd) if config else None
     policy = config.policy.value if config else None
 
-    usage_stmt = select(func.coalesce(func.sum(UsageLog.cost_usd), 0)).where(
-        UsageLog.user_id == user.user_id,
-        cost_period_filter(period),  # §59 SUCCESS + KST
+    # 사용액은 enforcement 계수(budget_usages)와 같은 행에서 읽는다 — usage_logs
+    # SUCCESS 합계는 실패 호출 비용과 시드 이관분을 빼먹어, 하드블록 상태인 사용자에게
+    # "잔액 있음"을 보여주는 불일치가 있었다.
+    usage_stmt = select(func.coalesce(func.sum(BudgetUsage.used_usd), 0)).where(
+        BudgetUsage.scope == BudgetScope.USER,
+        BudgetUsage.scope_id == user.user_id,
+        BudgetUsage.period == period,
+        BudgetUsage.client.is_(None),
     )
     used_result = await session.execute(usage_stmt)
     used_usd = float(used_result.scalar_one())

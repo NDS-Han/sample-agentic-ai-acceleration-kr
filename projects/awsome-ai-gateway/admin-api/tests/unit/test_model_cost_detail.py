@@ -104,6 +104,8 @@ async def test_team_leader_all_scope_is_forced_to_own_team(mock_session):
     svc = AnalyticsService()
     await svc.get_model_cost_detail(mock_session, period="2026-09", actor=leader)
     for sql in _executed_sqls(mock_session):
+        if "auth.teams" in sql:
+            continue  # 인가 판정용 리드-팀 조회 — 데이터 질의가 아님
         assert "team_id" in sql and "IN" in sql
 
 
@@ -118,7 +120,9 @@ async def test_team_leader_other_team_forbidden(mock_session):
         await svc.get_model_cost_detail(
             mock_session, period="2026-09", actor=leader, scope=f"team:{TEAM_B}"
         )
-    mock_session.execute.assert_not_called()
+    # 인가 판정용 auth.teams 조회는 허용 — 데이터 테이블 접근만 차단.
+    for sql in _executed_sqls(mock_session):
+        assert "auth.teams" in sql and "usage_logs" not in sql
 
 
 @pytest.mark.unit
@@ -131,7 +135,8 @@ async def test_team_leader_without_team_forbidden(mock_session):
     svc = AnalyticsService()
     with pytest.raises(ForbiddenError):
         await svc.get_model_cost_detail(mock_session, period="2026-09", actor=leader)
-    mock_session.execute.assert_not_called()
+    for sql in _executed_sqls(mock_session):
+        assert "auth.teams" in sql and "usage_logs" not in sql
 
 
 @pytest.mark.unit

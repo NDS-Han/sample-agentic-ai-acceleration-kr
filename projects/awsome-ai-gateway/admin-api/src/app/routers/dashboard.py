@@ -21,7 +21,7 @@ from app.core.usage_filters import (
     kst_month_expr,
 )
 from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
-from app.models.budget import BudgetConfig, BudgetScope
+from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias, ModelStatus
 from app.models.usage import UsageLog
 
@@ -477,6 +477,9 @@ async def dashboard_kpi(
             )
             .where(
                 BudgetConfig.is_active.is_(True),
+                # client IS NULL = 총한도 행만. per-app config(claude-code 등)는
+                # 그 부분집합이라 더하면 팀없는 USER 의 한도가 이중 합산된다.
+                BudgetConfig.client.is_(None),
                 or_(
                     BudgetConfig.scope == BudgetScope.TEAM,
                     and_(
@@ -489,15 +492,33 @@ async def dashboard_kpi(
     ).one()
     total_limit = Decimal(str(limit_row.total_limit or 0))
 
-    # ── 3) 예산 사용액(분자): usage_logs SUCCESS 합계.
-    #    한도가 TEAM+팀없는USER 를 덮으므로 사용액도 전사 합계와 같다(모든 사용자는
-    #    팀에 속하거나 속하지 않는다 — 두 집합의 합집합이 전체다). client 필터는
-    #    적용하지 않는다: 예산은 client 축과 무관한 전체 한도이므로 분자도 전체여야
-    #    비율이 의미를 갖는다.
+    # ── 3) 예산 사용액(분자): **budget_usages** — 집행과 같은 계수.
+    #    usage_logs SUCCESS 합계는 실패 호출 비용과 시드 이관분을 빼먹어,
+    #    사용자가 "used $13" 을 보는 동안 enforcement 는 $963 에 하드블록하는
+    #    불일치가 생겼다. 분모(한도)와 같은 스코프(TEAM + 팀없는 USER, 총합 행만)로
+    #    합산한다. client 필터는 적용하지 않는다(예산은 client 축과 무관).
     budget_used_row = (
         await session.execute(
-            select(func.coalesce(func.sum(UsageLog.cost_usd), 0).label("used"))
-            .where(cost_period_filter(period))
+            select(func.coalesce(func.sum(BudgetUsage.used_usd), 0).label("used"))
+            .select_from(BudgetUsage)
+            .outerjoin(
+                User,
+                and_(
+                    BudgetUsage.scope == BudgetScope.USER,
+                    User.id == BudgetUsage.scope_id,
+                ),
+            )
+            .where(
+                BudgetUsage.period == period,
+                BudgetUsage.client.is_(None),
+                or_(
+                    BudgetUsage.scope == BudgetScope.TEAM,
+                    and_(
+                        BudgetUsage.scope == BudgetScope.USER,
+                        User.team_id.is_(None),
+                    ),
+                ),
+            )
         )
     ).one()
     budget_used = Decimal(str(budget_used_row.used or 0))

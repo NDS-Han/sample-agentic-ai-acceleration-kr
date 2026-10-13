@@ -55,8 +55,30 @@ def _validate_period_date(period: str, date: str) -> None:
         raise ValidationError(f"date {date} must fall within period {period}")
 
 
-def _resolve_scope(
-    actor: CurrentUser, scope: str
+async def _leader_allowed_team_ids(
+    actor: CurrentUser, session: AsyncSession
+) -> set[uuid.UUID]:
+    """TEAM_LEADER 가 볼 수 있는 팀 집합 — 소속 팀 + leader_user_id 로 리드하는 팀들.
+
+    auth.teams.leader_user_id 는 여러 팀이 같은 사용자를 가리킬 수 있다 —
+    소속 팀 하나만 허용하면 리더가 자기가 리드하는 다른 팀을 영영 못 연다.
+    """
+    from sqlalchemy import select
+
+    from app.models.auth import Team
+
+    allowed: set[uuid.UUID] = set()
+    if actor.team_id:
+        allowed.add(actor.team_id)
+    rows = await session.execute(
+        select(Team.id).where(Team.leader_user_id == actor.user_id)
+    )
+    allowed.update(r[0] for r in rows.all())
+    return allowed
+
+
+async def _resolve_scope(
+    actor: CurrentUser, scope: str, session: AsyncSession
 ) -> tuple[ROIScope | None, list[uuid.UUID] | None]:
     """scope 문자열 → (roi_scope, scope_ids) 해석 — get_analytics 와
     /admin/analytics/models 상세 질의가 **같은** 격리 규칙을 쓰게 단일화.
@@ -65,51 +87,42 @@ def _resolve_scope(
         roi_scope: TEAM/GLOBAL/None(None=GLOBAL 취급 — 호출부에서 or GLOBAL)
         scope_ids: None 이면 전사(제한 없음), list 면 team_id 필터 집합.
 
-    ⚠️ 비-GLOBAL 이면 scope_ids 가 반드시 채워진다 — 빈 list 가 GLOBAL 처럼
-       취급되는 경로를 막기 위해 TEAM_LEADER 의 team_id 가 없으면 여기서 403.
+    ⚠️ **기본-거부**: `all`·`team:<uuid>` 외의 값은 400. 예전엔 매칭 안 되는
+       임의 문자열이 (None, None) 으로 떨어져 호출부가 GLOBAL 로 처리했고,
+       TEAM_LEADER 가 `scope=x` 로 전사 분석을 받아 가는 권한 누출이었다.
     """
-    roi_scope: ROIScope | None = None
-    # TEAM scope 의 실제 필터 집합 — auth.teams.leader_user_id 는 여러 팀이 같은
-    # 사용자를 가리킬 수 있어(한 사람이 복수 팀 리더) 단일 UUID 가 아니라 목록이다.
-    scope_ids: list[uuid.UUID] | None = None
+    if not isinstance(scope, str) or not scope:
+        raise ValidationError("scope must be 'all' or 'team:<uuid>'")
 
-    if scope.startswith("team:"):
-        team_id = uuid.UUID(scope.split(":")[1])
-        # TEAM_LEADER 는 소속 팀만 볼 수 있다
-        if actor.role == UserRole.TEAM_LEADER and team_id != actor.team_id:
-            raise ForbiddenError("Team leaders can only view analytics for their own team")
-        roi_scope = ROIScope.TEAM
-        scope_ids = [team_id]
-    elif scope == "all":
-        # TEAM_LEADER restricted to own team
+    if scope == "all":
         if actor.role == UserRole.TEAM_LEADER:
             # ⚠️ 팀이 없는 TEAM_LEADER 를 통과시키면 안 된다. scope_ids 가 비면
-            #    아래 모든 WHERE 가 가드 뒤에 있어서 **전부 사라진다** → 전사 분석
-            #    (비용·사용자·모델·추이)과 /admin/analytics/export CSV 가 그대로
-            #    나간다. 도달 경로: JWT 에 team_id 클레임이 없으면
-            #    (core/auth.py:157) 또는 auth.users.team_id 가 NULL 이면(nullable)
-            #    team_id 는 None 이다. dev 토큰은 role 을 본문에서 읽고 team_id 를
-            #    항상 None 으로 만들기 때문에 `dev.{"role":"TEAM_LEADER"}` 하나로
-            #    재현된다.
-            scope_ids = [actor.team_id] if actor.team_id else []
+            #    모든 WHERE 가 가드 뒤에 있어서 전부 사라진다 → 전사 분석 누출.
+            scope_ids = sorted(await _leader_allowed_team_ids(actor, session))
             if not scope_ids:
                 raise ForbiddenError(
                     "Team leader has no team assigned — cannot scope analytics. "
                     "Ask an administrator to assign a team."
                 )
-            roi_scope = ROIScope.TEAM
-    # ADMIN: no restriction
+            return ROIScope.TEAM, scope_ids
+        return None, None  # ADMIN — 전사
 
-    # 불변식: 비-GLOBAL scope 라면 scope_ids 가 반드시 있다. 아래의 by_user/trends 는
-    # `scope_ids` 진위로 격리를 걸기 때문에, 이 둘이 어긋나면 그 두 질의만 조용히
-    # 전사로 넓어진다(repo 쪽은 이제 터진다). 한곳에서 못 박는다.
-    # assert 를 쓰지 않는다 — python -O 로 사라지는 검사에 데이터 격리를 맡길 수 없다.
-    if roi_scope not in (None, ROIScope.GLOBAL) and not scope_ids:
-        raise ForbiddenError(
-            f"Analytics scope isolation could not be applied (scope={roi_scope}) — "
-            "refusing to return organization-wide data."
-        )
-    return roi_scope, scope_ids
+    if scope.startswith("team:"):
+        try:
+            team_id = uuid.UUID(scope.split(":", 1)[1])
+        except (ValueError, IndexError):
+            # 잘못된 UUID 는 500 이 아니라 400 — 형식 오류는 입력 오류다.
+            raise ValidationError(
+                f"scope team id must be a UUID (got {scope!r})"
+            ) from None
+        if actor.role == UserRole.TEAM_LEADER:
+            if team_id not in await _leader_allowed_team_ids(actor, session):
+                raise ForbiddenError(
+                    "Team leaders can only view analytics for their own teams"
+                )
+        return ROIScope.TEAM, [team_id]
+
+    raise ValidationError(f"scope must be 'all' or 'team:<uuid>' (got {scope!r})")
 
 
 class AnalyticsService:
@@ -139,7 +152,7 @@ class AnalyticsService:
 
         # Determine scope filter — 해석 규칙은 _resolve_scope 가 단일 소스
         # (/admin/analytics/models 도 같은 규칙을 공유한다).
-        roi_scope, scope_ids = _resolve_scope(actor, scope)
+        roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
 
         # Real-time aggregation from usage_logs (not pre-aggregated roi_aggregations)
         query_scope = roi_scope or ROIScope.GLOBAL
@@ -278,7 +291,10 @@ class AnalyticsService:
                 .where(*user_where)
                 .group_by(User.id, User.display_name, User.email)
                 .order_by(func.sum(UsageLog.cost_usd).desc())
-                .limit(50)
+                # seed 병합이 LIMIT 뒤에 일어나므로 후보를 넓게 잡는다 —
+                # 실사용 51위 밑인데 시드 잔차가 있는 사용자는 "seed only" 로
+                # 끼어들어 실사용분이 빠진 틀린 합계로 재정렬된다.
+                .limit(500)
             )
             # ── 마이그레이션 주입분(seed) 반영 ──
             #
@@ -299,17 +315,22 @@ class AnalyticsService:
 
             # seed 잔차는 월 버킷(budget_usages.period='YYYY-MM') 개념이라 임의 일자
             # 구간에는 사상되지 않는다 — custom range 에서는 실사용만 표시한다.
+            # client 필터 시에도 건너뛴다 — 시드는 client 무구분 총액이라 특정 앱에
+            # 전액 귀속시키면 그 앱의 지출이 부풀고, seed-only 사용자가 모든
+            # client 필터 아래에 나타난다.
             seeded: dict[uuid.UUID, tuple[str | None, str | None, Decimal]] = {}
-            if range_where is None:
+            if range_where is None and client_filter(client) is None:
                 m_start, m_end = period_to_utc_range(period)
 
                 # 월 실사용(전 status) — 잔차의 뺄 값.
+                # ⚠️ 팀 스코프 필터를 **넣지 않는다** — budget_usages(USER) 는
+                #    사용자 전체 카운터인데 사용액을 팀 소속 행으로만 빼면, 월중
+                #    팀 이동 사용자는 A팀 시절 사용분이 빼지지 않아 잔차가 그만큼
+                #    부풀고(= A팀 지출이 B팀 리더에게 seed 로 노출된다).
                 actual_where = [
                     UsageLog.requested_at >= m_start,
                     UsageLog.requested_at < m_end,
                 ]
-                if scope_ids:
-                    actual_where.append(UsageLog.team_id.in_(scope_ids))
                 actual_stmt = (
                     select(
                         UsageLog.user_id.label("user_id"),
@@ -476,7 +497,7 @@ class AnalyticsService:
         from app.core.usage_filters import cost_date_range_filter, cost_period_filter
         from app.models.usage import UsageLog
 
-        _roi_scope, scope_ids = _resolve_scope(actor, scope)
+        _roi_scope, scope_ids = await _resolve_scope(actor, scope, session)
 
         # custom 날짜 구간 — get_analytics 와 같은 규칙(둘 다 있어야 적용, 아니면 400).
         if start_date or end_date:
