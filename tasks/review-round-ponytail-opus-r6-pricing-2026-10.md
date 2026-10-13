@@ -25,6 +25,6 @@
 
 ## 배포
 
-- 커밋: (아래 기록) · helm revision: (아래 기록)
-- 이미지: admin-api + scheduler + admin-ui(프론트 expected 맵 배선 포함)
-- 스모크: (아래 기록)
+- 커밋: `1c511714` · helm **rev 185**
+- 이미지: admin-api + scheduler + admin-ui(expected 승인값 배선) — `1c511714`
+- 스모크: **12 PASS / 0 FAIL** · `nds/dev` push 완료
