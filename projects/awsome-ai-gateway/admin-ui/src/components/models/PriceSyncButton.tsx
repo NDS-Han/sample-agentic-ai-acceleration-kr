@@ -203,7 +203,10 @@ export function PriceSyncButton() {
                             <Tr>
                               <Td />
                               <Td className="text-xs text-muted-foreground">
-                                {`> ${d.long_context_threshold_tokens.toLocaleString()}tok`}
+                                {`> ${(d.current?.long_context_threshold_tokens ?? d.long_context_threshold_tokens).toLocaleString()}tok`}
+                                {d.current?.long_context_threshold_tokens != null &&
+                                  d.current.long_context_threshold_tokens !== d.long_context_threshold_tokens &&
+                                  ` → ${d.long_context_threshold_tokens.toLocaleString()}`}
                               </Td>
                               <Td className="text-xs text-muted-foreground">{d.provider_model_id}</Td>
                               <Td numeric>{fmtChange(d.current?.long_context_input_price_per_1k_tokens, d.proposed_long_input_per_1k)}</Td>

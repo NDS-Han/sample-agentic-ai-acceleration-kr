@@ -360,7 +360,7 @@ class LiteLLMPricingSyncService:
                     base_read_eff * scale if scale is not None else long_in_eff * _CACHE_READ_MULT
                 )
                 # 구간별 1h 필드는 카탈로그에 없다 — 발행 1h 기본가를 같은 비율로
-                # 스케일. 기본 5m 가 0 이면 비율 대신 모델 비율·배수 폴백.
+                # 스케일. scale 은 input==0 일 때만 None(그땐 배수 폴백).
                 long_1h_eff = (
                     base_1h_eff * scale if scale is not None else long_in_eff * _CACHE_1H_MULT
                 )

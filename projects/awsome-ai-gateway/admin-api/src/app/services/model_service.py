@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -268,9 +269,15 @@ class ModelService:
         prior = await repo.get_current_pricing(alias)
         # 시간 역전 금지 — 새 행의 effective_from 이 현재 open 행보다 **앞서면**
         # close_current_pricing 이 effective_until < effective_from 인 역전 행을
-        # 만든다. 같은 시각은 허용(예약 행 교정 — open 행이 미래 시작이면 제로-길이
-        # 행으로 닫히고 같은 from 의 새 행으로 대체된다).
-        if prior is not None and data.effective_from < prior.effective_from:
+        # 만든다. 같은 시각은 예약 행 교정일 때만 허용 — open 행이 이미 시작됐는데
+        # 같은 from 으로 닫으면 [t,t) 제로-길이 행이 돼 과거 청구 이력이 지워진다.
+        if prior is not None and (
+            data.effective_from < prior.effective_from
+            or (
+                data.effective_from == prior.effective_from
+                and prior.effective_from <= datetime.now(timezone.utc)
+            )
+        ):
             raise ConflictError(
                 f"새 단가의 effective_from({data.effective_from.isoformat()})이 현재 open 행"
                 f"({prior.effective_from.isoformat()}) 이상이어야 합니다 — 미래 시작 예약 행이 "
@@ -627,7 +634,12 @@ class ModelService:
                             self._cache_mgr,
                             [f"model:{alias}", f"model:pmid:{model.provider_model_id}"],
                         )
-            except (ConflictError, ValidationError, PydanticValidationError) as exc:
+            except (
+                ConflictError,
+                ValidationError,
+                PydanticValidationError,
+                IntegrityError,  # 동시 적용 경합(open 행 유니크 등)도 이 행만 스킵
+            ) as exc:
                 skipped.append(alias)
                 errors.append(f"{alias}: 적용 실패 — {exc}")
                 continue

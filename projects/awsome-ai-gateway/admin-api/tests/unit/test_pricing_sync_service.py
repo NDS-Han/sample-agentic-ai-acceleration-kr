@@ -275,18 +275,30 @@ def test_fetch_result_lookup_global_boundary_never_crossed():
 
 
 def test_litellm_zero_base_cache_derives_long_1h():
-    """기본 캐시 단가가 0 이면(유효 값) 구간 1h 파생은 비율이 아니라 표준 배수 —
-    0 으로 나누기 회피 + 결손 방지."""
+    """기본 캐시 5m=0(게시값)이면 비율 스케일이 0을 보존 — 구간 5m도 0.
+    구간 1h 는 발행 1h 기본가(여기선 파생값)에 동일 비율을 곱한다."""
     svc = LiteLLMPricingSyncService(fetcher=None)
     m = _llm_model("openai.gpt-z", 2e-06, 1e-05)
     m["cache_creation_input_token_cost"] = 0
     m["input_cost_per_token_above_272k_tokens"] = 4e-06
     out = svc._normalize_models([m])
     np = out.prices["openai.gpt-z"]
-    # 기본 5m=0(게시값), 1h=input*배수. 구간 1h 는 비율 대신 표준 배수.
+    # 게시 5m=0 → 구간 5m=0 (고정 배수였다면 0 아닌 값이 생겼을 것)
     assert np.cache_5m_per_1k == Decimal("0")
+    assert np.long_cache_5m_per_1k == Decimal("0")
     assert np.long_context_threshold_tokens == 272000
     assert np.long_cache_1h_per_1k == np.long_input_per_1k * Decimal("2.0")
+
+
+def test_litellm_long_cache_scales_published_base_ratio():
+    """구간 캐시 파생은 모델 자체의 발행 비율 스케일(long_in/input × 기본가).
+    read 비율이 표준(0.1)이 아닌 모델에서 고정 배수와 결과가 갈려야 한다."""
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    m = _llm_model("openai.gpt-w", 2e-06, 1e-05, cache_read=1e-07)
+    m["input_cost_per_token_above_272k_tokens"] = 4e-06  # scale = 2
+    np = svc._normalize_models([m]).prices["openai.gpt-w"]
+    # 발행 read 1e-7 × scale 2 = 2e-7 → 0.0002. 고정 배수(0.1)면 0.0004.
+    assert np.long_cache_read_per_1k == Decimal("0.0002")
 
 
 def test_litellm_long_context_tier_extracted():

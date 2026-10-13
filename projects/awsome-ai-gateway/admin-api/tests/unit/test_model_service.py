@@ -993,12 +993,8 @@ class TestPriceSyncApply:
 
     @pytest.mark.asyncio
     async def test_one_bad_alias_does_not_abort_batch(self, monkeypatch):
-        """예약 행 충돌 alias 가 있어도 나머지 alias 는 적용돼야 한다 —
-        배치가 단일 예외로 통째 롤백되면 안 된다(per-alias savepoint)."""
-        from datetime import timedelta
-
-        future_row = _make_pricing()
-        future_row.effective_from = datetime.now(timezone.utc) + timedelta(days=7)
+        """한 alias 의 set_pricing 이 savepoint 안에서 ConflictError 를 던져도
+        나머지 alias 는 적용돼야 한다 — 배치가 단일 예외로 통째 롤백되면 안 된다."""
         normal_row = _make_pricing()
         m1, m2 = self._model(), self._model()
         m2.alias = "gpt-5.6-sol"
@@ -1008,14 +1004,17 @@ class TestPriceSyncApply:
         repo.get_by_alias = AsyncMock(
             side_effect=lambda a: {"gpt-6.1-sol": m1, "gpt-5.6-sol": m2}.get(a)
         )
-        repo.get_current_pricing = AsyncMock(
-            side_effect=lambda a: future_row if a == "gpt-6.1-sol" else normal_row
-        )
+        repo.get_current_pricing = AsyncMock(return_value=normal_row)
         monkeypatch.setattr(
             "app.services.model_service.ModelRepository", lambda sess: repo
         )
         svc = ModelService(MagicMock())
-        svc.set_pricing = AsyncMock()
+
+        async def _set(*a, **kw):
+            if kw.get("alias") == "gpt-6.1-sol":
+                raise ConflictError("open 행 유니크 경합")
+
+        svc.set_pricing = AsyncMock(side_effect=_set)
 
         from app.schemas.models import PriceSyncExpected
 
@@ -1026,16 +1025,20 @@ class TestPriceSyncApply:
             cache_1h_per_1k=Decimal("0.004"),
             cache_read_per_1k=Decimal("0.0002"),
         )
+        sess = self._session()
         out = await svc.apply_price_sync(
-            self._session(),
+            sess,
             pricing_sync_service=self._sync_src(),
-            aliases=["gpt-6.1-sol", "gpt-5.6-sol"],
+            aliases=["gpt-6.1-sol", "gpt-5.6-sol", "gpt-5.6-sol"],  # 중복 제거 확인
             actor=MagicMock(),
             expected={"gpt-6.1-sol": exp, "gpt-5.6-sol": exp},
         )
         assert out.applied == ["gpt-5.6-sol"]
         assert out.skipped == ["gpt-6.1-sol"]
-        svc.set_pricing.assert_awaited_once()  # 정상 행만
+        assert svc.set_pricing.await_count == 2  # 중복 alias 재적용 없음
+        # savepoint __aexit__ 이 예외를 받았는지 — except 경로가 실제로 탔다는 증거
+        aexit = sess.begin_nested.return_value.__aexit__
+        assert any(c.args[0] is ConflictError for c in aexit.await_args_list)
 
     @pytest.mark.asyncio
     async def test_set_pricing_rejects_backdated_or_scheduled_conflict(self, monkeypatch):
