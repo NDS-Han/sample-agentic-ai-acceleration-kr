@@ -288,6 +288,8 @@ class CostRecorder:
                             committed_scopes=rate_limit_state.get("cost_committed_scopes"),
                             cpm_window_ts=rate_limit_state.get("cost_cpm_window_ts") or None,
                             cph_window_ts=rate_limit_state.get("cost_cph_window_ts") or None,
+                            committed_keys=rate_limit_state.get("cost_committed_keys")
+                            or None,
                         )
                     except Exception:
                         logger.warning(
@@ -535,6 +537,11 @@ class CostRecorder:
                     ) or None,
                     cph_window_ts=(
                         rate_limit_state.get("cost_cph_window_ts")
+                        if rate_limit_state
+                        else None
+                    ) or None,
+                    committed_keys=(
+                        rate_limit_state.get("cost_committed_keys")
                         if rate_limit_state
                         else None
                     ) or None,

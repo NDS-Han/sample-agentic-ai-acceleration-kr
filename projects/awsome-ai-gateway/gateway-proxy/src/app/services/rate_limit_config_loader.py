@@ -197,7 +197,16 @@ async def load_all_scope_limits(
                 scope_id=scope_id,
                 model_alias=model_alias,
             )
-            limits = ScopeLimits()
+            # 공유 세션은 실패 후 aborted — rollback 해야 다음 스코프 쿼리가 산다.
+            # 안 하면 한 스코프의 일시 장애가 TEAM/GLOBAL 까지 전부 실패로 번진다.
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            # 실패한 스코프는 캐시하지 않는다 — unlimited 를 300s 캐시하면 DB 일시
+            # 장애 한 번이 (GLOBAL 포함) 모든 한도를 캐시 만료까지 꺼버린다.
+            # 이번 요청만 unlimited 로 통과시키고 다음 요청에 DB 를 다시 본다.
+            continue
 
         setattr(result, attr, limits)
         await _save_scope_to_cache(redis, scope_name, scope_id, model_alias, limits)

@@ -186,6 +186,10 @@ class CostLimitResult(BaseModel):
     committed_scopes: list[str] = Field(default_factory=list)
     cpm_window_ts: int = 0
     cph_window_ts: int = 0
+    # (scope_label, cpm_key, cph_key) — 예약이 실제로 쓴 정확한 키 목록.
+    # 모델 차원이 키에 들어간 뒤로는 라벨+윈도우만으로는 settle 키를 복원할 수
+    # 없으므로(alias 결정 불가) settle_cost 에 그대로 넘긴다.
+    committed_keys: list[tuple[str, str, str]] = Field(default_factory=list)
 
 
 def split_cached_input(input_total: int, cached_tokens: int) -> tuple[int, int]:

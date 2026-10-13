@@ -316,7 +316,12 @@ class BudgetService:
                 #    per-app 행은 pub 에서 실제로 만들어진다(admin-api seed_spent 가
                 #    client 를 받아 INSERT 한다). 그리고 이 파일의 DB 폴백 경로는 이미 같은
                 #    교훈을 배워 `client.is_(None)` 을 걸고 있었다 — 복원 경로만 남겨졌다.
-                if not await redis.exists(user_key) and db is not None:
+                # 카운터가 없거나(**음수**)면 복원 — 축출된 키 위로 in-flight
+                # settle 의 INCRBYFLOAT 델타만 담긴 음수 키가 생기면, 그 키가
+                # 존재한다는 이유로 복원이 스킵돼 한도가 그 달 내내 해제됐다.
+                # budget_rebuild.lua 는 base+cur 이라 양수 델타는 보존된다.
+                _uk = await redis.get(user_key)
+                if db is not None and (_uk is None or float(_uk) < 0):
                     try:
                         from sqlalchemy import func, select, text
 
@@ -395,7 +400,8 @@ class BudgetService:
                             if client_name is None or not used or used <= 0:
                                 continue
                             app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
-                            if await redis.exists(app_key):
+                            _ak = await redis.get(app_key)
+                            if _ak is not None and float(_ak) >= 0:
                                 continue
                             # 총합 키와 같은 이유로 in-flight 예약을 재적용한다.
                             pending = await self._pending_reservation_sum(
@@ -430,7 +436,8 @@ class BudgetService:
                 # 카운터 유실(축출/failover) 뒤 budget_check.lua 가 used=0 을 읽어
                 # 팀 하드캡이 그 달 내내 사실상 해제된다(E2E S2-1). 사용자와 같은
                 # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
-                if not await redis.exists(team_key) and db is not None:
+                _tk = await redis.get(team_key)
+                if db is not None and (_tk is None or float(_tk) < 0):
                     try:
                         from sqlalchemy import text as _t
 
@@ -744,6 +751,13 @@ class BudgetService:
                     "fallback": fallback,
                 })
                 await self._refund_reservations(redis, committed)
+                # rl_fail_mode=closed 정책을 존중한다 — 다른 한도 경로(RPM/TPM/
+                # 비용)는 eval 실패를 차단으로 번역하는데 예약만 항상 fail-open
+                # 하면 모드 설정이 예산 예약에만 무의미해진다.
+                from app.config import get_settings as _gs
+
+                if _gs().rl_fail_mode.strip().lower() == "closed":
+                    raise PermissionError("budget_backend_unavailable")
                 return []
 
             if result.get("config_present") is False:

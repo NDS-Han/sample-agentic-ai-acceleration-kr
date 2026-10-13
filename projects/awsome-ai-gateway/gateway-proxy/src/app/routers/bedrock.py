@@ -358,6 +358,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             first_token_time: float | None = None
             # 요청 종결 상태 — _fire_finalize 가 usage_logs.status 로 옮긴다(E2E S5).
             outcome: dict = {}
+            state["_stream_outcome"] = outcome
 
             def _scan(chunk: bytes) -> None:
                 nonlocal usage, first_token_time
@@ -454,6 +455,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 finally:
                     await _fire_finalize()
                     await _aclose_iter(iterator)
+                    outcome.pop("drain_pending", None)
 
             try:
                 while True:
@@ -483,6 +485,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 # 클라이언트 측 종결이라 성공 건과 동일 취급(상류 오류가 선행했으면 유지).
                 client_disconnected = True
                 outcome.setdefault("status", "success")
+                # guard(release 0)와의 경쟁 방지 — drain이 정산 소유.
+                outcome["drain_pending"] = True
                 _spawn(_drain_remaining())
                 raise
             except Exception:

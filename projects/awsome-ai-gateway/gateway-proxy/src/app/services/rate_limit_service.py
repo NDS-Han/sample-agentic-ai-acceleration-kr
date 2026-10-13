@@ -218,7 +218,11 @@ class RateLimitService:
         try:
             pipe = redis.pipeline(transaction=False)
             for k in keys:
-                pipe.zrem(k, request_id)
+                # rate_limit_check.lua 가 멤버를 `request_id:1`(스코프 인덱스
+                # 접미사)로 ZADD 한다 — bare request_id 는 절대 매칭되지 않아
+                # 롤백이 no-op 이 되던 결함이 있었다. 두 형태를 모두 지운다
+                # (단일/다중 스코프 eval 양쪽 대비).
+                pipe.zrem(k, request_id, f"{request_id}:1")
             await pipe.execute()
         except Exception:
             logger.warning("rpm_undo_failed")
@@ -232,7 +236,7 @@ class RateLimitService:
         """RPM 슬롯 해제 — 통과 후 뒤 단계(TPM/비용/예산)가 거절한 요청의
         ZSET 엔트리를 제거한다.
 
-        ZADD 멤버가 request_id 라 ZREM 으로 정확히 되돌릴 수 있다. 하지
+        ZADD 멤버(`request_id:<scope_idx>`)를 ZREM 으로 정확히 되돌릴 수 있다. 하지
         않으면 비용/예산으로 거절당한 요청이 요청-수 한도를 계속 물고 있어
         반복 거절이 사용자의 RPM 을 소진한다. 실패해도 무시(윈도우 만료로
         자연 회수).
@@ -520,6 +524,8 @@ class RateLimitService:
         team_id: str | None = None,
         team_cpm_limit: Decimal | None = None,
         team_cph_limit: Decimal | None = None,
+        user_key_alias: str | None = None,
+        team_key_alias: str | None = None,
     ) -> CostLimitResult:
         """CPM/CPH 사전 예약 (USER + TEAM) — **스코프별 1회 Lua 호출**.
 
@@ -550,16 +556,25 @@ class RateLimitService:
         script = LuaScriptLoader.get("cost_rate_limit_scope")
 
         # 검사할 스코프 목록 (USER → TEAM fast-fail 순서). 한도 미설정 scope 는 스킵.
-        scopes: list[tuple[str, str, str, Decimal, Decimal]] = []
+        # *_key_alias 는 RPM/TPM 의 _key_alias 와 같은 규칙 — 한도 행이 모델별이면
+        # 카운터도 모델별이어야 한다. alias 를 안 넣으면 모델별 CPM 한도가 사용자의
+        # *전 모델* 지출에 대고, 서로 다른 한도의 모델이 한 카운터를 공유한다.
+        # model_alias=NULL(전체 합산) 행은 '*' 로 모델 무관 단일 카운터를 유지.
+        scopes: list[tuple[str, str, str, Decimal, Decimal, str]] = []
         if has_user_limit:
-            scopes.append(("USER", "user", user_id, user_cpm, user_cph))
+            scopes.append(
+                ("USER", "user", user_id, user_cpm, user_cph, user_key_alias or "*")
+            )
         if has_team_limit:
-            scopes.append(("TEAM", "team", team_id, team_cpm, team_cph))
+            scopes.append(
+                ("TEAM", "team", team_id, team_cpm, team_cph, team_key_alias or "*")
+            )
 
         committed: list[tuple[str, str, str]] = []  # (label, cpm_key, cph_key) — 이미 커밋된 스코프
-        for label, prefix, sid, cpm, cph in scopes:
-            cpm_key = f"rl:cost:{prefix}:{{{sid}}}:cpm:{cpm_window_ts}"
-            cph_key = f"rl:cost:{prefix}:{{{sid}}}:cph:{cph_window_ts}"
+        for label, prefix, sid, cpm, cph, key_alias in scopes:
+            # alias 는 hash tag 밖 — 스코프 식별 태그({sid})만 슬롯을 정한다.
+            cpm_key = f"rl:cost:{prefix}:{{{sid}}}:{key_alias}:cpm:{cpm_window_ts}"
+            cph_key = f"rl:cost:{prefix}:{{{sid}}}:{key_alias}:cph:{cph_window_ts}"
             try:
                 raw = await _guarded_eval(
                     redis,
@@ -618,6 +633,7 @@ class RateLimitService:
             committed_scopes=[label for label, *_ in committed],
             cpm_window_ts=cpm_window_ts,
             cph_window_ts=cph_window_ts,
+            committed_keys=list(committed),
         )
 
     async def _refund_committed_cost(
@@ -657,6 +673,7 @@ class RateLimitService:
         committed_scopes: list[str] | None = None,
         cpm_window_ts: int | None = None,
         cph_window_ts: int | None = None,
+        committed_keys: list[tuple[str, str, str]] | None = None,
     ) -> None:
         """CPM/CPH 사후 정산 — 실제 비용과 예약분 차이 조정 (USER + TEAM).
 
@@ -697,20 +714,28 @@ class RateLimitService:
         #    영구 누적된다.
         try:
             pipe = redis.pipeline(transaction=False)
-            if do_user:
-                cpm_key = f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}"
-                cph_key = f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}"
-                pipe.incrbyfloat(cpm_key, adj_float)
-                pipe.expire(cpm_key, 120)
-                pipe.incrbyfloat(cph_key, adj_float)
-                pipe.expire(cph_key, 7200)
-            if do_team:
-                cpm_key = f"rl:cost:team:{{{team_id}}}:cpm:{cpm_window_ts}"
-                cph_key = f"rl:cost:team:{{{team_id}}}:cph:{cph_window_ts}"
-                pipe.incrbyfloat(cpm_key, adj_float)
-                pipe.expire(cpm_key, 120)
-                pipe.incrbyfloat(cph_key, adj_float)
-                pipe.expire(cph_key, 7200)
+            if committed_keys is not None:
+                # 예약이 실제로 쓴 키(모델 차원 + 예약 시점 윈도우 포함)에만 차액.
+                for _label, cpm_key, cph_key in committed_keys:
+                    pipe.incrbyfloat(cpm_key, adj_float)
+                    pipe.expire(cpm_key, 120)
+                    pipe.incrbyfloat(cph_key, adj_float)
+                    pipe.expire(cph_key, 7200)
+            else:
+                if do_user:
+                    cpm_key = f"rl:cost:user:{{{user_id}}}:cpm:{cpm_window_ts}"
+                    cph_key = f"rl:cost:user:{{{user_id}}}:cph:{cph_window_ts}"
+                    pipe.incrbyfloat(cpm_key, adj_float)
+                    pipe.expire(cpm_key, 120)
+                    pipe.incrbyfloat(cph_key, adj_float)
+                    pipe.expire(cph_key, 7200)
+                if do_team:
+                    cpm_key = f"rl:cost:team:{{{team_id}}}:cpm:{cpm_window_ts}"
+                    cph_key = f"rl:cost:team:{{{team_id}}}:cph:{cph_window_ts}"
+                    pipe.incrbyfloat(cpm_key, adj_float)
+                    pipe.expire(cpm_key, 120)
+                    pipe.incrbyfloat(cph_key, adj_float)
+                    pipe.expire(cph_key, 7200)
             await pipe.execute()
         except Exception:
             logger.warning("cost_settle_failed", user_id=user_id, adjustment=str(adjustment))

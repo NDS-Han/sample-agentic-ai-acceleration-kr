@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
@@ -239,6 +240,7 @@ async def release_reservations(
                 committed_scopes=rls.get("cost_committed_scopes"),
                 cpm_window_ts=rls.get("cost_cpm_window_ts") or None,
                 cph_window_ts=rls.get("cost_cph_window_ts") or None,
+                committed_keys=rls.get("cost_committed_keys") or None,
             )
         except Exception:
             logger.warning("fallback_unwind_cost_failed")
@@ -279,6 +281,30 @@ def unsettled_reservation_guard(state: dict) -> "BackgroundTask":
         # 가 먼저 가면 뒤의 settle(actual) 이 마커 부재로 no-op 되어 실제 비용
         # 만큼 카운터가 얇아진다.
         await asyncio.sleep(0)
+        if not state.get("rate_limit_state"):
+            return
+        # disconnect 경로는 백그라운드 drain 태스크가 잔여 청크에서 usage 를
+        # 수거한 뒤 정산한다(streamer 가 outcome["drain_pending"] 을 세운다).
+        # 한 틱만 재우면 드레인(최대 stream_disconnect_drain_timeout 초)보다
+        # 항상 먼저 깨어 release(0) 로 이기고, 뒤의 settle(actual) 은 마커 부재로
+        # no-op — 실비 유실 + TPM/CPM 이중 환불이었다. drain 이 살아있는 동안엔
+        # 기다리고, 데드라인(드레인 타임아웃+버퍼)까지 정산이 안 끝나면 여기서
+        # 되돌린다(드레인 사망/스폰 실패 시 예약 누수 방지).
+        outcome = state.get("_stream_outcome")
+        if outcome and outcome.get("drain_pending"):
+            from app.config import get_settings
+
+            deadline = (
+                time.monotonic()
+                + get_settings().stream_disconnect_drain_timeout
+                + 10
+            )
+            while (
+                time.monotonic() < deadline
+                and outcome.get("drain_pending")
+                and state.get("rate_limit_state")
+            ):
+                await asyncio.sleep(0.25)
         if not state.get("rate_limit_state"):
             return
         redis = state.get("_redis_effective", state.get("_redis"))

@@ -373,6 +373,8 @@ async def bedrock_anthropic_sse_stream(
             await _fire_on_usage()
             await _fire_on_complete("partial")
             await _aclose_iter(iterator)
+            if outcome is not None:
+                outcome.pop("drain_pending", None)
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -417,6 +419,9 @@ async def bedrock_anthropic_sse_stream(
         # setdefault: 직전에 상류 error 이벤트를 받았다면 그 판정이 우선한다.
         if outcome is not None:
             outcome.setdefault("status", "success")
+            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
         raise
 
@@ -652,6 +657,10 @@ async def openai_sse_stream(
             await _fire_on_usage()
             await _fire_on_complete("partial")
             await _aclose_iter(iterator)
+            if outcome is not None:
+                outcome.pop("drain_pending", None)
+            if outcome is not None:
+                outcome.pop("drain_pending", None)
 
     # Starlette `is_disconnected()` 는 ASGI 스트리밍 응답 컨텍스트에서 신뢰할
     # 수 없어 (false positive 로 첫 iteration 부터 True 반환) 명시적 체크를
@@ -697,6 +706,9 @@ async def openai_sse_stream(
         # setdefault: 직전 상류 error 프레임 판정이 우선한다(E2E S5).
         if outcome is not None:
             outcome.setdefault("status", "success")
+            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
         raise
 
@@ -906,6 +918,8 @@ async def responses_sse_stream(
             await _fire_on_usage()
             await _fire_on_complete("partial")
             await _aclose_iter(iterator)
+            if outcome is not None:
+                outcome.pop("drain_pending", None)
 
     try:
         while True:
@@ -940,6 +954,9 @@ async def responses_sse_stream(
         # setdefault: 직전 상류 error 판정이 우선한다(E2E S5).
         if outcome is not None:
             outcome.setdefault("status", "success")
+            # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+            # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
+            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
         raise
 

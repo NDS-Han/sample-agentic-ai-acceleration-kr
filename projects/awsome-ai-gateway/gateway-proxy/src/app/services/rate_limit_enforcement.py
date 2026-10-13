@@ -310,6 +310,9 @@ async def enforce_rate_limits(
         team_id=auth_context.team_id,
         team_cpm_limit=limits.team.cpm,
         team_cph_limit=limits.team.cph,
+        # RPM/TPM 의 _key_alias 와 동일 규칙 — 모델별 한도는 모델별 카운터에.
+        user_key_alias=_scope_alias[RateLimitScope.USER],
+        team_key_alias=_scope_alias[RateLimitScope.TEAM],
     )
     if not cost_result.allowed:
         # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
@@ -361,6 +364,7 @@ async def enforce_rate_limits(
                     committed_scopes=cost_result.committed_scopes,
                     cpm_window_ts=cost_result.cpm_window_ts or None,
                     cph_window_ts=cost_result.cph_window_ts or None,
+                    committed_keys=cost_result.committed_keys or None,
                 )
             except Exception:
                 logger.warning("cost_unwind_on_budget_reject_failed")
@@ -385,6 +389,7 @@ async def enforce_rate_limits(
         "tpm_reserved_at": float(tpm_now_sec),
         "cost_reserved": cost_result.reserved_cost,
         "cost_committed_scopes": cost_result.committed_scopes,
+        "cost_committed_keys": cost_result.committed_keys,
         "cost_cpm_window_ts": cost_result.cpm_window_ts,
         "cost_cph_window_ts": cost_result.cph_window_ts,
         "budget_reservation": budget_reservation,
@@ -457,6 +462,7 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
     messages = {
         "no_team_assigned": "No team assigned. Contact your admin.",
         "team_budget_unset": "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요.",
+        "budget_backend_unavailable": "Budget service temporarily unavailable. Please retry.",
     }
     record_rate_limit_hit(metrics, scope="budget", limit_type="monthly")
     # Retry-After 를 달지 않는다 — 월예산은 다음 달 롤오버까지 풀리지 않는데

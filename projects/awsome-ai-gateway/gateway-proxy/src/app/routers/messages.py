@@ -683,6 +683,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 요청 종결 상태 — 루프가 경로별로 채우고 _ws_record 가 usage_logs.status 로
         # 옮긴다(E2E S5, 아래 _record 의 outcome 과 같은 계약).
         _ws_outcome: dict = {}
+        state["_stream_outcome"] = _ws_outcome
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
@@ -916,6 +917,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 로 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 헬퍼에게 정상 종료로 보이므로
         # usage_status_of 의 http_status 인자가 그 경우를 잡는다.
         outcome: dict = {}
+        state["_stream_outcome"] = outcome
 
         async def _estimate(text: str) -> int | None:
             if not tokenizer or is_mantle:

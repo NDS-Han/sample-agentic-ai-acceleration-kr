@@ -231,7 +231,7 @@ class TestFallsBackOn502ThenSucceeds:
         async def _fake_settle_tpm(redis, descriptors, reserved, actual, reserved_at=None):
             settle_tpm_calls.append({"descriptors": descriptors, "reserved": reserved, "actual": actual})
 
-        async def _fake_settle_cost(redis, *, user_id, actual_cost, reserved_cost, team_id, committed_scopes=None, cpm_window_ts=None, cph_window_ts=None):
+        async def _fake_settle_cost(redis, *, user_id, actual_cost, reserved_cost, team_id, committed_scopes=None, cpm_window_ts=None, cph_window_ts=None, committed_keys=None):
             settle_cost_calls.append({"user_id": user_id, "actual": actual_cost, "reserved": reserved_cost})
 
         from fakeredis import aioredis as fr

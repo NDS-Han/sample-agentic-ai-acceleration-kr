@@ -345,6 +345,7 @@ async def _handle_openai(request: Request, path: str):
         # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로
         # 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 http_status 인자가 잡는다.
         outcome: dict = {}
+        state["_stream_outcome"] = outcome
 
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
@@ -849,6 +850,7 @@ async def _handle_responses(request: Request):
         _ws_first_frame: dict[str, float | None] = {"t": None}
         # 요청 종결 상태 — 루프가 채우고 _ws_record 가 usage_logs.status 로 옮긴다(E2E S5).
         _ws_outcome: dict = {}
+        state["_stream_outcome"] = _ws_outcome
 
         async def _ws_record(usage: TokenUsage) -> None:
             if not auth_context:
@@ -990,6 +992,7 @@ async def _handle_responses(request: Request):
         # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로
         # 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 http_status 인자가 잡는다.
         outcome: dict = {}
+        state["_stream_outcome"] = outcome
 
         async def _record(usage: TokenUsage, first_token_time: float | None) -> None:
             if not auth_context:
