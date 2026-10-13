@@ -16,7 +16,7 @@ import { fmtUsd } from '@/lib/utils/format';
 import type { ActiveElement, ChartEvent } from 'chart.js';
 import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
-import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
+import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
@@ -40,6 +40,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
+  const theme = useChartTheme();
   const isFirstRender = useRef(true);
 
   useEffect(() => {
@@ -85,7 +86,8 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
   const TOP_N = 7;
   const displayModels: ((typeof data.models)[number] & { otherCount?: number })[] =
     useMemo(() => {
-      if (data.models.length <= TOP_N) return data.models;
+      // 8개면 8개 전부 보여주는 게 낫다 — "기타 1개 모델"은 숨기는 값보다 못하다.
+      if (data.models.length <= TOP_N + 1) return data.models;
       const rest = data.models.slice(TOP_N);
       return [
         ...data.models.slice(0, TOP_N),
@@ -99,8 +101,14 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       ];
     }, [data]);
 
+  // 데이터 재조회(team 변경 등)로 목록이 바뀌면 hover 인덱스가 범위를 벗어나거나
+  // 다른 모델을 가리킨다 — 중앙 표시·행 강조가 어긋나므로 초기화한다.
+  useEffect(() => setHoverIndex(null), [data]);
+
+  // canvas fillStyle 은 CSS 변수를 못 읽어 'var(--muted-foreground)' 는 검정으로
+  // 떨어진다 — chartTheme 이 해석한 실제 색을 쓴다. 범례 점도 같은 값으로 맞춤.
   const sliceColor = (i: number, isOther: boolean) =>
-    isOther ? 'var(--muted-foreground)' : COLORS[i % COLORS.length];
+    isOther ? theme.textMuted : COLORS[i % COLORS.length];
 
   const chartData = useMemo(() => {
     return {
@@ -124,7 +132,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
         },
       ],
     };
-  }, [data]);
+  }, [displayModels, theme, t]);
 
   const options = useMemo(
     () => ({
