@@ -143,6 +143,7 @@
     "fetchFailedWith": "조회 실패: {error}",
     "noUsageForScope": "이 기간/범위에 사용 기록이 없습니다.",
     "topShare": "점유 1위 · 총 ${total}",
+    "otherModels": "기타 {count}개 모델",
     "costTrendTitle": "비용 추이",
     "costTrendSubtitle": "기간 내 일별 비용 · 요청 수",
     "costTrendEmpty": "기간 내 집계된 사용량이 없습니다.",

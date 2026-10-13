@@ -80,13 +80,41 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
     };
   }, [teamId, period, client]);
 
+  // 모델 수가 늘면 도넛 조각은 슬라이버가 되고 범례는 세로로 넘친다 —
+  // 상위 TOP_N 개만 남기고 나머지는 "기타" 한 조각/한 행으로 합친다.
+  const TOP_N = 7;
+  const displayModels: ((typeof data.models)[number] & { otherCount?: number })[] =
+    useMemo(() => {
+      if (data.models.length <= TOP_N) return data.models;
+      const rest = data.models.slice(TOP_N);
+      return [
+        ...data.models.slice(0, TOP_N),
+        {
+          model_alias: '__other__',
+          display_name: null,
+          cost_usd: rest.reduce((s, m) => s + m.cost_usd, 0),
+          share_pct: rest.reduce((s, m) => s + m.share_pct, 0),
+          otherCount: rest.length,
+        },
+      ];
+    }, [data]);
+
+  const sliceColor = (i: number, isOther: boolean) =>
+    isOther ? 'var(--muted-foreground)' : COLORS[i % COLORS.length];
+
   const chartData = useMemo(() => {
     return {
-      labels: data.models.map((m) => modelDisplay(m.model_alias, m.display_name)),
+      labels: displayModels.map((m) =>
+        m.model_alias === '__other__'
+          ? t('otherModels', { count: m.otherCount ?? 0 })
+          : modelDisplay(m.model_alias, m.display_name)
+      ),
       datasets: [
         {
-          data: data.models.map((m) => m.cost_usd),
-          backgroundColor: data.models.map((_, i) => COLORS[i % COLORS.length]),
+          data: displayModels.map((m) => m.cost_usd),
+          backgroundColor: displayModels.map((m, i) =>
+            sliceColor(i, m.model_alias === '__other__')
+          ),
           // 세그먼트 주변에 선/테두리/gap 일절 없음 (사용자 지시). 조각 직접 맞닿음.
           // 시인성은 (1) 색 자체 + (2) hover 강조 + (3) 가운데 1위 모델 표기로 확보.
           borderWidth: 0,
@@ -164,14 +192,15 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
             {(() => {
-              const centerItem = (hoverIndex != null ? data.models[hoverIndex] : null) ?? data.models[0];
+              const centerItem = (hoverIndex != null ? displayModels[hoverIndex] : null) ?? displayModels[0];
               const centerIdx = hoverIndex ?? 0;
+              const isOther = centerItem?.model_alias === '__other__';
               return (
                 <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
                   {centerItem && (
                     <span
                       className="mb-1 h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: COLORS[centerIdx % COLORS.length] }}
+                      style={{ backgroundColor: sliceColor(centerIdx, isOther) }}
                       aria-hidden="true"
                     />
                   )}
@@ -179,7 +208,11 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                     {centerItem ? `${centerItem.share_pct.toFixed(0)}%` : '—'}
                   </p>
                   <p className="mt-1 max-w-full truncate text-xs font-medium text-foreground">
-                    {centerItem ? modelDisplay(centerItem.model_alias, centerItem.display_name) : ''}
+                    {centerItem
+                      ? isOther
+                        ? t('otherModels', { count: centerItem.otherCount ?? 0 })
+                        : modelDisplay(centerItem.model_alias, centerItem.display_name)
+                      : ''}
                   </p>
                   <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                     {hoverIndex != null && centerItem
@@ -194,7 +227,12 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
             })()}
           </div>
           <ul className="space-y-2">
-            {data.models.map((m, i) => (
+            {displayModels.map((m, i) => {
+              const isOther = m.model_alias === '__other__';
+              const label = isOther
+                ? t('otherModels', { count: m.otherCount ?? 0 })
+                : modelDisplay(m.model_alias, m.display_name);
+              return (
               <li
                 key={m.model_alias}
                 className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
@@ -202,11 +240,11 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                 <div className="flex items-center gap-2 min-w-0">
                   <span
                     className="w-3 h-3 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: COLORS[i % COLORS.length] }}
+                    style={{ backgroundColor: sliceColor(i, isOther) }}
                   />
                   {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용. */}
-                  <span className="font-medium break-words leading-snug" title={modelDisplay(m.model_alias, m.display_name)}>
-                    {modelDisplay(m.model_alias, m.display_name)}
+                  <span className="font-medium break-words leading-snug" title={label}>
+                    {label}
                   </span>
                 </div>
                 <span className="tabular-nums text-xs text-right">
@@ -216,7 +254,8 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                   {m.share_pct.toFixed(1)}%
                 </span>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}

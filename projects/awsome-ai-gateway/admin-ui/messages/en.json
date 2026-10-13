@@ -143,6 +143,7 @@
     "fetchFailedWith": "Fetch failed: {error}",
     "noUsageForScope": "No usage records for this period/scope.",
     "topShare": "Top share · ${total} total",
+    "otherModels": "Other ({count} models)",
     "costTrendTitle": "Cost trend",
     "costTrendSubtitle": "Daily cost and requests for the period",
     "costTrendEmpty": "No usage aggregated for this period.",
