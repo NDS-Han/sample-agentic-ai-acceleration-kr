@@ -53,3 +53,23 @@
 
 - 회귀 테스트 +7: 추정입력 과금(전0/부분텍스트/비스트림/ERROR 4경로), 턴별 장문 판정+1h 플래그, teamless 페이로드·TEAM 집계 스킵, 트림 경계 3케이스, seed 델타+조건부incr+총합키 미기록
 - gateway **1369**, worker **42**, admin **946** 전부 통과
+
+## 최종 확인 라운드 (kiro claude-opus-5.5) — CONVERGED
+
+`6a69d151` diff 재검증 — 직전 라운드의 must-fix 2건이 정확히 수정됐고 새 결함 없음.
+
+| 확인 항목 | 결과 |
+|---|---|
+| 트림 bytes 디코딩 | 정합 — floor·last_delivered 둘 다 비교 전 decode, `xtrim` 에 항상 str, `"b'5-0'"` 패턴 불가, 테스트가 실제 redis-py 반환형(bytes)으로 3케이스 커버 |
+| 트림 경계 레이스 | 정합 — XINFO(last-delivered) 를 XPENDING 보다 먼저 읽고 `min(pending최솟값, last-delivered)` 경계 사용 |
+| bedrock 스트림 ≥400 | 정합 — `estimated_input` 만 제거하고 `rate_limit_state` 유지 → `_fire_finalize` 실행 → 예약 3종 환불 + `$0` ERROR/TIMEOUT 마커 행 기록. 추정 과금 키가 제거돼 거부 요청 과금 불가(TIMEOUT 이 `!= "ERROR"` 게이트를 통과하던 이전 함정 해소) |
+| 예약 누수 | 없음 — 제너레이터 미시작 시 `unsettled_reservation_guard`, 중간 단절 시 drain `finally`, 단일 settle 은 `state.pop` 가드 |
+| `usage_status_of` | 408/504→TIMEOUT, 나머지 비-2xx→ERROR (disconnect 가 outcome 을 바꿔도 status 검사가 우선) |
+
+### 수용 잔여(신규)
+- bedrock 스트림 ≥400 경로는 `record_provider_error` 미호출(비스트림은 호출) — 메트릭만, 과금 무관
+
+### 최종 배포
+- helm **rev 196** · 이미지 `6a69d151`(gateway-proxy, admin-api+scheduler, cost-recorder-worker)
+- **스모크 12 PASS / 0 FAIL** · 전 파드 1/1 Ready · `nds/dev` push 완료
+- 워킹 트리 clean(cowork 문서 사용자 수정분 미스테이징 유지)
