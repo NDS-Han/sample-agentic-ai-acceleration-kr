@@ -490,8 +490,15 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         if decision.provider == ProviderType.BEDROCK_MANTLE:
             if not is_db_degraded and session_factory is not None:
                 async with session_factory() as db:
-                    return await _router_service.resolve_mantle_model(redis, db, alias)
-            return await _router_service.resolve_mantle_model(redis, None, alias)
+                    _cand = await _router_service.resolve_mantle_model(redis, db, alias)
+            else:
+                _cand = await _router_service.resolve_mantle_model(redis, None, alias)
+            # endpoint 가 비어 있는 후보를 원본의 endpoint 로 보내면 잘못 설정된
+            # 후보가 다른 리전/계정으로 나간다 — 차라리 그 슬롯을 건너뛴다
+            # (fallback_loop 가 LookupError 를 슬롯 스킵으로 처리한다).
+            if not getattr(_cand, "endpoint", None):
+                raise LookupError(f"mantle candidate '{alias}' has no endpoint")
+            return _cand
         else:
             if not is_db_degraded and session_factory is not None:
                 async with session_factory() as db:
@@ -602,22 +609,27 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     #    루프가 다시 두드리는 것을 허용하지 않는다(E2E S3-L8). 회로가 열려 있고
     #    half-open 프로브도 못 얻었으면 이 분기를 건너뛰어 아래 폴백 루프가
     #    대체 후보를 처리하게 한다.
-    _ws_allowed = True
-    if cb is not None and model_config is not None:
-        _pmid_ws = model_config.provider_model_id
-        _cb_key_ws = (f"{_circuit_scope}|{_pmid_ws}" if _circuit_scope else _pmid_ws)
-        if await cb.is_open(redis, _cb_key_ws):
-            _ws_allowed = await cb.try_acquire_halfopen_probe(redis, _cb_key_ws)
-            if not _ws_allowed:
-                logger.info("web_search_skipped_circuit_open", pmid=_pmid_ws)
     mcp_client = getattr(request.app.state, "agentcore_mcp_client", None)
     _profile = decision.profile
-    if (
-        _ws_allowed
-        and mcp_client is not None
+    _ws_enabled = (
+        mcp_client is not None
         and _profile is not None
         and getattr(_profile, "web_search_enabled", False)
-    ):
+    )
+    # ⚠️ 회로 게이트는 웹서치가 **실제로 켜진** 경우에만 연다. 비-웹서치 요청이
+    #    여기서 half-open 프로브를 먼저 잡으면 아래 폴백 루프의 재획득이 SET NX 에
+    #    실패해, 정당하게 프로브를 딴 요청이 원본을 건너뛰고 8s 창의 유일한 프로브가
+    #    낭비됐다(체인이 없으면 허구의 all-open 503).
+    _ws_allowed = True
+    _ws_cb_key: str | None = None
+    if _ws_enabled and cb is not None and model_config is not None:
+        _pmid_ws = model_config.provider_model_id
+        _ws_cb_key = (f"{_circuit_scope}|{_pmid_ws}" if _circuit_scope else _pmid_ws)
+        if await cb.is_open(redis, _ws_cb_key):
+            _ws_allowed = await cb.try_acquire_halfopen_probe(redis, _ws_cb_key)
+            if not _ws_allowed:
+                logger.info("web_search_skipped_circuit_open", pmid=_pmid_ws)
+    if _ws_allowed and _ws_enabled:
         from app.services.web_search_loop import (
             conservative_admission_body,
             run_web_search_loop,
@@ -665,15 +677,44 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 media_type="application/json",
             )
 
+        # 웹서치 턴의 상류 결과를 회로에 반영한다. 이 분기는 폴백 루프를 우회하므로
+        # 여기서 기록하지 않으면 (a) 닫힌 회로에서 턴 실패가 누적되지 않아 회로가
+        # 열리지 않고, (b) half-open 프로브가 성공해도 회로가 닫히지 않아 ws 는
+        # 사실상 8s 당 1요청만 통과하는 반개방 상태에 갇힌다.
+        async def _ws_cb_record(status: int, *, conn_error: bool = False) -> None:
+            if _ws_cb_key is None:
+                return
+            try:
+                if 200 <= status < 300:
+                    await cb.record_success(redis, _ws_cb_key)
+                elif status in (502, 503) or conn_error:
+                    await cb.record_failure(redis, _ws_cb_key)
+            except Exception:
+                logger.warning("ws_cb_record_failed")
+
         async def _ws_invoke(turn_body: dict) -> tuple[int, bytes, dict, TokenUsage]:
             body_b, _sk, nsk = _build_candidate_body(turn_body, model_config, False)
-            return await adapter.invoke(body_b, _rewrite(model_config.provider_model_id), **nsk)
+            try:
+                result = await adapter.invoke(
+                    body_b, _rewrite(model_config.provider_model_id), **nsk
+                )
+            except Exception:
+                await _ws_cb_record(503, conn_error=True)
+                raise
+            await _ws_cb_record(result[0])
+            return result
 
         async def _ws_invoke_stream(turn_body: dict):
             body_b, sk, _nsk = _build_candidate_body(turn_body, model_config, True)
-            return await adapter.invoke_stream(
-                body_b, _rewrite(model_config.provider_model_id), **sk
-            )
+            try:
+                result = await adapter.invoke_stream(
+                    body_b, _rewrite(model_config.provider_model_id), **sk
+                )
+            except Exception:
+                await _ws_cb_record(503, conn_error=True)
+                raise
+            await _ws_cb_record(result[0])
+            return result
 
         # 클라이언트 체감 TTFT — 루프의 on_usage 는 1-arg(멀티턴 합산이라 per-turn
         # TTFT 를 안 넘긴다 — web_search_loop.py 의 _stream_on_usage 주석)라 ttft_ms 가
@@ -859,6 +900,18 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     availability_fallback_from = result.availability_fallback_from
     tokenizer = getattr(request.app.state, "tokenizer", None)
 
+    # Admission 거절(Retry-After, x-ratelimit-*) 헤더를 클라이언트에 전달한다 —
+    # FallbackResult.payload[1] 은 어댑터 응답 헤더 또는 거절 헤더로, 라우터가
+    # 별도 응답 헤더를 만들며 이 안내 헤더들을 버리고 있었다. hop-by-hop/본문
+    # 헤더는 절대 넘기지 않는다(화이트리스트 방식).
+    def _advisory_headers(src: dict | None) -> dict:
+        if not src:
+            return {}
+        return {
+            k: v for k, v in src.items()
+            if k.lower() == "retry-after" or k.lower().startswith("x-ratelimit")
+        }
+
     # Synthetic all-open 503
     if result.all_open:
         _settings = get_settings()
@@ -907,10 +960,45 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     client=client,
                     status=usage_status_of(None, status),
                 )
-            return JSONResponse(status_code=status, content=err_content)
+            return JSONResponse(
+                status_code=status,
+                content=err_content,
+                headers=_advisory_headers(headers) or None,
+            )
 
-        # If the fallback loop returned a non-200 status for streaming, the
-        # chunk_iter is an error generator from the adapter — just stream it.
+        # 비-2xx 인데 chunk_iter 가 살아 있으면 어댑터의 오류 제너레이터다(단일
+        # JSON 페이로드를 낸다). 이걸 SSE 본문으로 4xx/5xx 에 내보내면 Anthropic
+        # SDK 가 비-2xx 본문을 JSON 오류 객체로 파싱하지 못한다 — 제너레이터를
+        # 소비해 JSON 응답으로 환원한다.
+        if not (200 <= status < 300):
+            err_payload = bytearray()
+            try:
+                async for _err_chunk in chunk_iter:
+                    err_payload += _err_chunk
+            except Exception:
+                pass
+            try:
+                err_content = json.loads(bytes(err_payload))
+            except (json.JSONDecodeError, ValueError):
+                err_content = anthropic_error(
+                    "provider_error", f"Backend returned {status}"
+                )
+            if auth_context and status >= 500:
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                await cost_recorder.finalize(
+                    redis, auth_context, effective_model_config, TokenUsage(),
+                    request_id, is_stream, duration_ms,
+                    ttft_ms=duration_ms,
+                    rate_limit_state=state.pop("rate_limit_state", None),
+                    availability_fallback_from=availability_fallback_from,
+                    client=client,
+                    status=usage_status_of(None, status),
+                )
+            return JSONResponse(
+                status_code=status,
+                content=err_content,
+                headers=_advisory_headers(headers) or None,
+            )
         call_model_id_final = _rewrite(effective_model_config.provider_model_id)
 
         # 요청 종결 상태 — 스트림 헬퍼가 경로별로 채우고 _record 가 usage_logs.status
@@ -958,6 +1046,21 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 client=client,
                 status=usage_status_of(outcome, status),
             )
+            # 폴백 루프는 헤더 도착(2xx) 시점에 record_success 한다 — 스트림이
+            # 헤더 뒤에 죽는(미드스트림 예외 이벤트/오류 청크) 모델은 회로가 닫힌
+            # 채로 남는다. 종결 outcome 이 "error" 면 그 성공 기록을 상쇄한다
+            # (disconnect drain 은 outcome 을 "success" 로 둔다 — 클라이언트
+            # 이탈을 상류 장애로 오인하지 않는다, streaming.py 주석 참조).
+            if cb is not None and outcome.get("status") == "error":
+                try:
+                    _cb_key_mid = (
+                        f"{_circuit_scope}|{effective_model_config.provider_model_id}"
+                        if _circuit_scope
+                        else effective_model_config.provider_model_id
+                    )
+                    await cb.record_failure(redis, _cb_key_mid)
+                except Exception:
+                    logger.warning("midstream_cb_record_failed")
 
         # nginx ingress 의 기본 응답 버퍼링이 SSE 를 막지 않게 한다(E2E S4).
         response_headers: dict = {
@@ -1086,7 +1189,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 )
             )
 
-        response_headers_out: dict = {}
+        response_headers_out: dict = _advisory_headers(headers)
         if availability_fallback_from:
             response_headers_out["x-llm-gateway-fallback-from"] = availability_fallback_from
 

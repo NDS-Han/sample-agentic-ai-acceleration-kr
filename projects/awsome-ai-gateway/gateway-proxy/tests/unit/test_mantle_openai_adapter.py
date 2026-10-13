@@ -101,14 +101,29 @@ async def test_invoke_http_error_maps_status():
 
 
 @pytest.mark.asyncio
-async def test_invoke_network_error_returns_502():
+async def test_invoke_network_error_returns_503():
+    """ConnectError → 503: 요청 미도달이라 폴백 안전한 가용성 신호."""
     http_client = MagicMock()
     http_client.post = AsyncMock(side_effect=httpx.ConnectError("boom"))
     adapter = _adapter(http_client)
     status, body, headers, usage = await adapter.invoke(
         b"{}", "openai.gpt-5.5", profile=_profile(), endpoint="https://x/openai",
     )
-    assert status == 502
+    assert status == 503
+
+
+@pytest.mark.asyncio
+async def test_invoke_read_timeout_returns_504_unsettled():
+    from app.providers.base import ATTEMPT_UNSETTLED_HEADER
+
+    http_client = MagicMock()
+    http_client.post = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+    adapter = _adapter(http_client)
+    status, body, headers, usage = await adapter.invoke(
+        b"{}", "openai.gpt-5.5", profile=_profile(), endpoint="https://x/openai",
+    )
+    assert status == 504
+    assert headers.get(ATTEMPT_UNSETTLED_HEADER) == "1"
 
 
 @pytest.mark.asyncio

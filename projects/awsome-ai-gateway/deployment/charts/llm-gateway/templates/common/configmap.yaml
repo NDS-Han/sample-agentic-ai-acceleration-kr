@@ -117,6 +117,12 @@ data:
   # default 가 0 을 삼켜 30 으로 되살리면 "끄기"가 불가능해진다.
   STREAM_IDLE_TIMEOUT: {{ .Values.gatewayProxy.streaming.idleTimeout | quote }}
   STREAM_DISCONNECT_DRAIN_TIMEOUT: {{ .Values.gatewayProxy.streaming.disconnectDrainTimeout | quote }}
+  # Mantle/httpx read timeout — 상류가 청크 사이에 침묵할 수 있는 상한이므로
+  # STREAM_IDLE_TIMEOUT 보다 작으면 긴 thinking/스트림을 끊는다(R14: 기본 120s 가
+  # dev 240s idle 보다 짧아 Mantle 스트림이 timeout_error 대신 stream_failed 로
+  # 죽었다). idle + 30s 마진을 기본으로 둔다 — 명시 override 는
+  # gatewayProxy.mantleHttpTimeout.
+  MANTLE_HTTP_TIMEOUT: {{ (.Values.gatewayProxy.mantleHttpTimeout | default (add .Values.gatewayProxy.streaming.idleTimeout 30)) | quote }}
 
   # ----------------------------------------------------------------------------
   # 비용/사용량 집계 캘린더 경계 타임존(§59) — admin-api·cost-recorder-worker·

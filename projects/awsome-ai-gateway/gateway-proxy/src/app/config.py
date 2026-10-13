@@ -166,6 +166,10 @@ class Settings(BaseSettings):
     cb_open_jitter_sec: int = 5
     bedrock_inference_read_timeout: int = 60
     bedrock_max_attempts: int = 1
+    # 가용성 폴백 **총** 시간 예산 — 후보(원본+체인 최대 5)마다 상류 타임아웃이
+    # 걸리면 누적 대기가 ALB idle 한도를 넘는다. 데드라인을 넘으면 새 후보 시도를
+    # 멈추고 마지막 오류를 돌려준다(첫 후보는 항상 시도).
+    fallback_budget_sec: int = 180
 
     # Features
     cors_enabled: bool = False

@@ -8,7 +8,7 @@ from typing import Protocol
 import httpx
 import structlog
 
-from app.providers.base import ProviderAdapter
+from app.providers.base import ProviderAdapter, classify_transport_error
 from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 
@@ -59,12 +59,16 @@ class MantleOpenAIAdapter(ProviderAdapter):
         try:
             headers = await self._headers(profile)
             resp = await self._http.post(url, content=request_body, headers=headers)
-        except Exception:
+        except Exception as exc:
             logger.exception("mantle_openai_invoke_failed", model_id=model_id)
+            status, hdrs, msg = classify_transport_error(exc)
             return (
-                502,
-                b'{"error":{"type":"provider_error","message":"Mantle (OpenAI) call failed"}}',
-                {},
+                status,
+                json.dumps(
+                    {"error": {"type": "provider_error",
+                               "message": f"Mantle (OpenAI) {msg}"}}
+                ).encode(),
+                hdrs,
                 TokenUsage(),
             )
 
@@ -105,15 +109,17 @@ class MantleOpenAIAdapter(ProviderAdapter):
         cm = self._http.stream("POST", url, content=request_body, headers=headers)
         try:
             resp = await cm.__aenter__()
-        except Exception:
+        except Exception as exc:
             logger.exception("mantle_openai_stream_connect_failed", model_id=model_id)
+            status, hdrs, msg = classify_transport_error(exc)
 
             async def _conn_err() -> AsyncIterator[bytes]:
                 yield json.dumps(
-                    {"error": {"type": "provider_error", "message": "Mantle (OpenAI) stream failed"}}
+                    {"error": {"type": "provider_error",
+                               "message": f"Mantle (OpenAI) {msg}"}}
                 ).encode()
 
-            return 502, _conn_err(), {}, None
+            return status, _conn_err(), hdrs, None
 
         if resp.status_code != 200:
             status = resp.status_code

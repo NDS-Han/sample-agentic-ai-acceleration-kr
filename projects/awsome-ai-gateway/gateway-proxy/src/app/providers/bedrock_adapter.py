@@ -18,7 +18,7 @@ from botocore.exceptions import (
     ReadTimeoutError,
 )
 
-from app.providers.base import ProviderAdapter
+from app.providers.base import ATTEMPT_UNSETTLED_HEADER, ProviderAdapter
 from app.schemas.domain import TokenUsage
 
 _BEDROCK_POOL_SIZE = int(os.environ.get("BEDROCK_THREAD_POOL_SIZE", "128"))
@@ -247,11 +247,14 @@ class BedrockAdapter(ProviderAdapter):
             # CB 실패는 아니라는 기존 ModelTimeoutException 의미론과 같게 둔다(E2E S3-M3).
             # 예전에는 catch-all 이 502 로 바꿔 CB 를 오염시키고, 실제 성공했을 수 있는
             # 추론을 다음 후보에 중복 청구했다.
+            # ATTEMPT_UNSETTLED — 클라이언트측 소켓 타임아웃이라 상류가 이미 처리·과금
+            # 했을 수 있다. 폴백 루프는 이 표시를 보고 다음 후보 호출을 중단한다(서버가
+            # 명시 거부한 ModelTimeoutException 과는 다른 경우다 — 그것은 폴백 허용).
             logger.warning("bedrock_invoke_read_timeout", model_id=model_id)
             return (
                 504,
                 b'{"error":{"type":"provider_error","message":"Bedrock read timeout"}}',
-                {},
+                {ATTEMPT_UNSETTLED_HEADER: "1"},
                 TokenUsage(),
             )
         except (ConnectTimeoutError, EndpointConnectionError, ConnectionClosedError):
@@ -388,7 +391,11 @@ class BedrockAdapter(ProviderAdapter):
                     {"error": {"type": "provider_error", "message": error_msg}}
                 ).encode()
 
-            return status, error_gen(), {}, None
+            # 읽기 타임아웃은 상류 처리·과금 가능성이 있어 폴백을 멈추게 표시한다
+            # (invoke() 의 같은 블록 주석 참조).
+            return status, error_gen(), (
+                {ATTEMPT_UNSETTLED_HEADER: "1"} if is_timeout else {}
+            ), None
         except Exception as exc:
             error_msg = _redact_arns(str(exc))
             logger.exception("bedrock_stream_failed", model_id=model_id)

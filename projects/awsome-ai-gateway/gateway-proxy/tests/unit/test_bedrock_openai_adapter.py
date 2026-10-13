@@ -224,14 +224,30 @@ async def test_signing_failure_is_502_and_never_reaches_the_network():
 
 
 @pytest.mark.asyncio
-async def test_transport_failure_is_502_not_an_exception():
+async def test_transport_failure_is_503_not_an_exception():
+    """ConnectError = 요청이 상류에 닿지 않음 → 과금 없음 → 503(폴백 안전)."""
     http = MagicMock()
     http.post = AsyncMock(side_effect=httpx.ConnectError("boom"))
     status, body, _h, usage = await _adapter(http).invoke(
         b"{}", MODEL, profile=_profile(), endpoint=ENDPOINT
     )
-    assert status == 502
-    assert b"call failed" in body
+    assert status == 503
+    assert b"connection failed" in body
+    assert usage.total_tokens == 0
+
+
+@pytest.mark.asyncio
+async def test_read_timeout_is_504_and_marks_attempt_unsettled():
+    """ReadTimeout = 상류가 처리/과금했을 수 있음 → 504 + 폴백 금지 마커."""
+    from app.providers.base import ATTEMPT_UNSETTLED_HEADER
+
+    http = MagicMock()
+    http.post = AsyncMock(side_effect=httpx.ReadTimeout("slow"))
+    status, body, headers, usage = await _adapter(http).invoke(
+        b"{}", MODEL, profile=_profile(), endpoint=ENDPOINT
+    )
+    assert status == 504
+    assert headers.get(ATTEMPT_UNSETTLED_HEADER) == "1"
     assert usage.total_tokens == 0
 
 
@@ -379,15 +395,19 @@ async def test_stream_non_200_surfaces_the_real_status_before_yielding():
 
 
 @pytest.mark.asyncio
-async def test_stream_connect_failure_is_502_with_no_request_id():
-    """No response means no id to give — None here is "nothing to join to", not a drop."""
+async def test_stream_connect_failure_is_503_with_no_request_id():
+    """No response means no id to give — None here is "nothing to join to", not a drop.
+
+    ConnectError → 503: the request never reached upstream, so it is an
+    availability signal safe for fallback, not a billing-ambiguous timeout.
+    """
     stream = _FakeStream(raise_on_enter=httpx.ConnectError("boom"))
     status, gen, _h, req_id = await _adapter(_streaming_http(stream)).invoke_stream(
         b"{}", MODEL, profile=_profile(), endpoint=ENDPOINT, wire="responses"
     )
-    assert status == 502
+    assert status == 503
     assert req_id is None
-    assert b"stream failed" in [c async for c in gen][0]
+    assert b"connection failed" in [c async for c in gen][0]
 
 
 @pytest.mark.asyncio

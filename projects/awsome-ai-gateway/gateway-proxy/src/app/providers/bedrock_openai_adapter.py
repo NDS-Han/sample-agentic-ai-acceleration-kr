@@ -62,7 +62,7 @@ from typing import Optional, Protocol
 import httpx
 import structlog
 
-from app.providers.base import ProviderAdapter
+from app.providers.base import ProviderAdapter, classify_transport_error
 from app.providers.openai_usage import extract_chat_usage, extract_responses_usage
 from app.schemas.domain import TokenUsage
 
@@ -192,12 +192,16 @@ class BedrockOpenAIAdapter(ProviderAdapter):
             )
         try:
             resp = await self._http.post(url, content=request_body, headers=headers)
-        except Exception:
+        except Exception as exc:
             logger.exception("bedrock_openai_invoke_failed", model_id=model_id, wire=wire)
+            status, hdrs, msg = classify_transport_error(exc)
             return (
-                502,
-                b'{"error":{"type":"provider_error","message":"Bedrock (OpenAI) call failed"}}',
-                {},
+                status,
+                json.dumps(
+                    {"error": {"type": "provider_error",
+                               "message": f"Bedrock (OpenAI) {msg}"}}
+                ).encode(),
+                hdrs,
                 TokenUsage(),
             )
 
@@ -268,13 +272,14 @@ class BedrockOpenAIAdapter(ProviderAdapter):
         cm = self._http.stream("POST", url, content=request_body, headers=headers)
         try:
             resp = await cm.__aenter__()
-        except Exception:
+        except Exception as exc:
             logger.exception("bedrock_openai_stream_connect_failed", model_id=model_id, wire=wire)
+            status, hdrs, msg = classify_transport_error(exc)
 
             async def _conn_err() -> AsyncIterator[bytes]:
-                yield _error_chunk(wire, "Bedrock (OpenAI) stream failed")
+                yield _error_chunk(wire, f"Bedrock (OpenAI) {msg}")
 
-            return 502, _conn_err(), {}, None
+            return status, _conn_err(), hdrs, None
 
         aws_request_id = resp.headers.get("x-amzn-requestid")
         if resp.status_code != 200:

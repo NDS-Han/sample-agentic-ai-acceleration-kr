@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 
 import structlog
@@ -834,15 +835,59 @@ async def _handle_responses(request: Request):
 
         _pmid = model_config.provider_model_id
 
+        # 회로 게이트 — messages.py /v1/messages 웹서치 분기와 같은 계약. 회로가
+        # 열려 있으면(다른 표면의 트래픽이 같은 pmid 에서 연 경우 포함) 프로브를
+        # 따낸 요청만 상류를 두드리고, 턴 결과를 회로에 반영한다.
+        _cb = getattr(request.app.state, "circuit_breaker", None)
+        if not asyncio.iscoroutinefunction(getattr(_cb, "is_open", None)):
+            _cb = None  # 미배선(또는 테스트 MagicMock) — 게이트 생략
+        _ws_cb_key: str | None = _pmid if _cb is not None else None
+        if _ws_cb_key is not None and await _cb.is_open(redis, _ws_cb_key):
+            if not await _cb.try_acquire_halfopen_probe(redis, _ws_cb_key):
+                logger.info("web_search_skipped_circuit_open", pmid=_pmid)
+                # 입장심사 예약(위 enforce_rate_limits)은 이미 잡혀 있다 — 상류를
+                # 호출하지 않고 돌려보내므로 여기서 되돌린다.
+                await release_reservations(redis=redis, state=state, auth_context=auth_context)
+                return JSONResponse(
+                    status_code=503,
+                    content={"error": {"type": "service_unavailable",
+                                       "message": "Model temporarily unavailable"}},
+                )
+
+        async def _ws_cb_record(status: int, *, conn_error: bool = False) -> None:
+            if _ws_cb_key is None:
+                return
+            try:
+                if 200 <= status < 300:
+                    await _cb.record_success(redis, _ws_cb_key)
+                elif status in (502, 503) or conn_error:
+                    await _cb.record_failure(redis, _ws_cb_key)
+            except Exception:
+                logger.warning("ws_cb_record_failed")
+
         async def _ws_invoke(turn_body: dict) -> tuple[int, bytes, dict, TokenUsage]:
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
+            try:
+                result = await adapter.invoke(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
+            except Exception:
+                await _ws_cb_record(503, conn_error=True)
+                raise
+            await _ws_cb_record(result[0])
+            return result
 
         async def _ws_invoke_stream(turn_body: dict):
             tb = dict(turn_body)
             tb["model"] = _pmid
-            return await adapter.invoke_stream(json.dumps(tb).encode(), _pmid, **invoke_kwargs)
+            try:
+                result = await adapter.invoke_stream(
+                    json.dumps(tb).encode(), _pmid, **invoke_kwargs
+                )
+            except Exception:
+                await _ws_cb_record(503, conn_error=True)
+                raise
+            await _ws_cb_record(result[0])
+            return result
 
         # 클라이언트 체감 TTFT — 루프의 on_usage 는 1-arg(멀티턴 합산이라 per-turn
         # TTFT 를 안 넘긴다)라 ttft_ms 가 항상 NULL 로 기록돼 모니터링에 "ttft=-" 로
@@ -966,6 +1011,10 @@ async def _handle_responses(request: Request):
                         yield chunk
 
             _ws_resp.body_iterator = _ws_timed_iter()
+            # spec<2.4 '미시작 제너레이터' disconnect 안전망 — messages.py 의 같은
+            # 분기처럼, 스트림이 한 번도 시작되지 못한 채 끊기면 예약(최대
+            # max_iterations×max_output)이 마커 TTL 까지 남는다.
+            _ws_resp.background = unsettled_reservation_guard(state)
         return _ws_resp
 
     if is_stream:
@@ -988,6 +1037,20 @@ async def _handle_responses(request: Request):
         # (E2E S3-H1 — _handle_openai 의 같은 블록 주석 참조).
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            # 오류 제너레이터를 SSE 로 내보내면 OpenAI SDK 가 비-2xx 본문을 JSON
+            # 오류로 파싱하지 못한다 — JSON 응답으로 환원한다(messages.py 동일).
+            err_payload = bytearray()
+            try:
+                async for _err_chunk in chunk_iter:
+                    err_payload += _err_chunk
+            except Exception:
+                pass
+            try:
+                err_content = json.loads(bytes(err_payload))
+            except (json.JSONDecodeError, ValueError):
+                err_content = {"error": {"type": "provider_error",
+                                         "message": f"Backend returned {status}"}}
+            return JSONResponse(status_code=status, content=err_content)
 
         # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로
         # 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 http_status 인자가 잡는다.

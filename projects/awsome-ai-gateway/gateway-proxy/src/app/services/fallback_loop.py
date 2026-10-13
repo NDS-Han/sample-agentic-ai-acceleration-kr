@@ -38,6 +38,8 @@ from app.observability.provider_metrics import (
     record_provider_error,
     record_provider_request,
 )
+from app.config import get_settings
+from app.providers.base import ATTEMPT_UNSETTLED_HEADER
 from app.schemas.domain import ModelConfigSchema, TokenUsage
 from app.schemas.errors import anthropic_error
 from app.services.circuit_breaker import CircuitBreakerService
@@ -292,8 +294,6 @@ def unsettled_reservation_guard(state: dict) -> "BackgroundTask":
         # 되돌린다(드레인 사망/스폰 실패 시 예약 누수 방지).
         outcome = state.get("_stream_outcome")
         if outcome and outcome.get("drain_pending"):
-            from app.config import get_settings
-
             deadline = (
                 time.monotonic()
                 + get_settings().stream_disconnect_drain_timeout
@@ -375,9 +375,19 @@ async def run_fallback_loop(
     """
     last_error: tuple[int, bytes] | None = None
     any_invoked = False
+    # 총 폴백 시간 예산 — 후보별 상류 타임아웃이 누적해 클라이언트/ALB 데드라인을
+    # 넘는 것을 막는다. 첫 후보는 항상 시도하고, 이후 후보는 데드라인 전까지만.
+    _deadline = time.monotonic() + get_settings().fallback_budget_sec
 
     for idx, alias in enumerate(try_order):
         is_original = idx == 0
+        if not is_original and time.monotonic() >= _deadline:
+            logger.info(
+                "fallback_budget_exhausted",
+                alias=alias,
+                budget_sec=get_settings().fallback_budget_sec,
+            )
+            break
 
         # --- 1. Resolve model config for this candidate ---
         try:
@@ -388,6 +398,11 @@ async def run_fallback_loop(
                 candidate_config = await resolve_model_config(alias)
         except LookupError as exc:
             logger.warning("fallback_candidate_not_found", alias=alias, error=str(exc))
+            continue
+        except Exception:
+            # DB/Redis blip while resolving a CANDIDATE — skip the slot instead of
+            # escaping as a 500 that replaces the original's real error.
+            logger.exception("fallback_candidate_resolve_failed", alias=alias)
             continue
 
         pmid = candidate_config.provider_model_id
@@ -512,6 +527,22 @@ async def run_fallback_loop(
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
+        # 클라이언트측 타임아웃(어댑터가 ATTEMPT_UNSETTLED 를 단다)은 상류가 요청을
+        # 이미 처리·과금했을 수 있다 — 다음 후보로 재시도하면 같은 추론을 두 모델에
+        # 이중 청구할 수 있으므로 폴백하지 않고 이 오류를 그대로 돌려준다.
+        if headers.get(ATTEMPT_UNSETTLED_HEADER):
+            if not caught_connection_error:
+                record_provider_error(metrics, _pm_labels, status=status)
+            error_bytes = response_body if not is_stream else json.dumps(
+                anthropic_error("provider_error", f"Backend returned {status}")
+            ).encode()
+            return FallbackResult(
+                status=status,
+                payload=(error_bytes, {}, TokenUsage() if not is_stream else None),
+                model_config=candidate_config,
+                availability_fallback_from=original_alias if not is_original else None,
+            )
+
         if status in _FALLBACK_STATUSES or caught_connection_error:
             # ⚠️ 연결 오류는 위 except 에서 이미 셌다 — 여기서 또 세면 2배가 된다.
             if not caught_connection_error:
@@ -537,6 +568,22 @@ async def run_fallback_loop(
             # Non-fallback status (2xx, 4xx, etc.)
             if 200 <= status < 300:
                 await cb.record_success(redis, cb_key)
+            elif not is_original:
+                # 후보가 비-폴백 오류(400 ValidationException, 404 잘못된 pmid, 500 등)를
+                # 주면 그 슬롯만 건너뛴다 — 그대로 돌려주면 원본의 진짜 오류(예: 503)가
+                # 잘못된 후보의 4xx 로 바뀌어, 클라이언트는 요청이 유효했는데
+                # invalid_request_error 를 받는다. 원본의 오류가 우선이다.
+                logger.info(
+                    "fallback_candidate_error_skipped",
+                    alias=alias,
+                    status=status,
+                )
+                if last_error is None:
+                    err_bytes = response_body if not is_stream else json.dumps(
+                        anthropic_error("provider_error", f"Backend returned {status}")
+                    ).encode()
+                    last_error = (status, err_bytes)
+                continue
 
             availability_fallback_from = original_alias if not is_original else None
 
