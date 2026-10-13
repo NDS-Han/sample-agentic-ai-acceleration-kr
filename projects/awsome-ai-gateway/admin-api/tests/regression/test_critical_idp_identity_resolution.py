@@ -313,6 +313,46 @@ async def test_unverified_email_claim_cannot_bootstrap_admin():
         )
 
 
+async def test_access_token_admin_email_enriched_via_cognito_pool_attrs():
+    """email 클레임 없는 토큰(access token)은 Cognito 서버측 이메일로 ADMIN_EMAILS 를 평가.
+
+    보강이 없으면 ADMIN_EMAILS 만 설정된 관리자가 admin-ui 세션(access_token 쿠키)
+    에서 DEVELOPER 로 강등됐다 — sub 가 신원을 증명하므로 풀 속성의 검증된
+    이메일은 신뢰할 수 있다."""
+    settings = _settings(admin_emails=["boss@example.com"])
+    claims = {"sub": "s"}  # Cognito access_token — email 클레임 없음
+    p1, p2, p3, _ = _resolve(
+        claims, db_user=_db_user(role=UserRole.DEVELOPER), settings=settings
+    )
+    request = _request(claims)
+    request.app.state.oidc_service = MagicMock()
+    request.app.state.oidc_service._email_attrs_from_cognito = AsyncMock(
+        return_value=("boss@example.com", True)
+    )
+    request.app.state.redis = None  # 캐시 없이 Cognito 직행
+    with p1, p2, p3, patch("app.core.config.get_settings", return_value=settings):
+        user = await get_current_user(request)
+    assert user.role == UserRole.ADMIN
+
+
+async def test_access_token_unverified_pool_email_still_denied():
+    """보강도 email_verified 게이트를 우회하지 않는다 — 풀 속성이 미검증이면 강등 유지."""
+    settings = _settings(admin_emails=["boss@example.com"])
+    claims = {"sub": "s"}
+    p1, p2, p3, _ = _resolve(
+        claims, db_user=_db_user(role=UserRole.DEVELOPER), settings=settings
+    )
+    request = _request(claims)
+    request.app.state.oidc_service = MagicMock()
+    request.app.state.oidc_service._email_attrs_from_cognito = AsyncMock(
+        return_value=("boss@example.com", False)
+    )
+    request.app.state.redis = None
+    with p1, p2, p3, patch("app.core.config.get_settings", return_value=settings):
+        user = await get_current_user(request)
+    assert user.role == UserRole.DEVELOPER
+
+
 async def test_db_email_fallback_does_not_grant_admin():
     """토큰에 email 이 없을 때 DB 이메일은 ADMIN_EMAILS 매칭에 쓰지 않는다.
 

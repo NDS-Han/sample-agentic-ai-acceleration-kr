@@ -44,6 +44,15 @@ class RecipientResolver:
                     continue
 
                 for r in new:
+                    if r.email.endswith("@unknown"):
+                        # Cognito 미검증 이메일 사용자는 admin-api 가
+                        # "<sub>@unknown" synthetic 을 저장한다 — SES 로
+                        # 보내면 거부/바운스라 수신자에서 제외한다.
+                        logger.warning(
+                            "recipient_synthetic_email_dropped",
+                            user_id=str(r.user_id),
+                        )
+                        continue
                     if r.email not in seen_emails:
                         seen_emails.add(r.email)
                         recipients.append(r)

@@ -68,15 +68,20 @@ def _effective_role(
 
 
 def _needs_update(
-    snap: dict, *, email: str, name: str, team_id, role, enabled: bool
+    snap: dict, *, email: str, name: str, team_id, role, enabled: bool,
+    email_verified: bool = False,
 ) -> bool:
     """prefetch gate 판정. _upsert_one_user 의 update 분기와 1:1 동일 조건이어야 한다.
-    (email 이 truthy 이고 다르면) OR display_name/team_id/role/is_active 변경.
+    (verified 인 email 이 다르면) OR display_name/team_id/role/is_active 변경.
+
+    email 비교는 ``email_verified`` 일 때만 — 미검증이면 update 분기가
+    ``<sub>@unknown`` 을 유지하므로 snap 의 synthetic 과 풀 이메일을 비교하면
+    매 sync 마다 "다르다"고 오판해 모든 미검증 유저가 upsert 를 탄다.
 
     role 비교는 ``_effective_role`` 로 보존된 값 기준 — 안 그러면 팀 리더는 실제로
     아무것도 안 바뀌어도 매번 "role 이 다르다"고 오판해 불필요한 upsert 를 탄다."""
     return (
-        (bool(email) and snap["email"] != email)
+        (bool(email) and email_verified and snap["email"] != email)
         or snap["display_name"] != name
         or snap["team_id"] != team_id
         or snap["role"]
@@ -405,7 +410,8 @@ class CognitoSyncService:
             # 규약(_upsert_one_user 내부)이 보존돼야 하므로 항상 upsert 경로로.
             snap = existing_snaps.get(sub)
             if snap is not None and not _needs_update(
-                snap, email=email, name=name, team_id=team_id, role=role, enabled=enabled
+                snap, email=email, name=name, team_id=team_id, role=role,
+                enabled=enabled, email_verified=email_verified,
             ):
                 continue
 
@@ -807,6 +813,14 @@ class CognitoSyncService:
         settings = get_settings()
         try:
             user = await repo.get_by_email(username)
+            if user is None:
+                # 호출자가 Cognito Username(이 풀들에선 sub 와 동일)을 넘겼거나,
+                # 미검증 이메일로 "<sub>@unknown" synthetic 으로 저장된 사용자다 —
+                # get_by_email(username) 만으로는 못 찾아 offboarding 이 no-op 되고
+                # ACTIVE VK 가 계속 인증된다.
+                user = await repo.get_by_sso_subject(username) or await repo.get_by_email(
+                    f"{username}@unknown"
+                )
         except Exception as e:
             result.errors.append(f"Failed to look up user {username}: {e}")
             return

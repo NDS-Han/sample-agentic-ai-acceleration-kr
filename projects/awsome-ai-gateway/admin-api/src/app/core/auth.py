@@ -208,7 +208,7 @@ async def get_current_user(request: Request) -> CurrentUser:
         except OIDCConfigError as e:
             logger.error("auth.idp_jwks_unavailable", error=str(e))
             raise HTTPException(status_code=503, detail="Identity provider unavailable")
-        return await _resolve_idp_identity(claims)
+        return await _resolve_idp_identity(request, claims)
 
     verifier: JWTVerifier = request.app.state.jwt_verifier
 
@@ -240,7 +240,7 @@ async def get_current_user(request: Request) -> CurrentUser:
 
     oidc_issuer = get_settings().OIDC_ISSUER_URL
     if (oidc_issuer and payload.get("iss") == oidc_issuer) or "role" not in payload:
-        return await _resolve_idp_identity(payload)
+        return await _resolve_idp_identity(request, payload)
 
     team_id_raw = payload.get("team_id")
     try:
@@ -270,7 +270,49 @@ def _idp_verifier_for(request: Request, token: str) -> OIDCVerifier | None:
     return verifier
 
 
-async def _resolve_idp_identity(claims: dict) -> CurrentUser:
+async def _verified_email_for_subject(request: Request, sub: str) -> str:
+    """토큰에 검증된 이메일이 없을 때 Cognito 서버측 속성으로 ADMIN_EMAILS 평가 근거를 보강.
+
+    access token(Cognito 는 email claim 없음)이나 email 클레임을 안 주는 배치에서
+    ADMIN_EMAILS 만 설정된 관리자는 매칭할 이메일이 없어 DEVELOPER 로 강등된다 —
+    sub 가 신원을 증명하므로 풀 속성의 검증된 이메일을 대신 쓴다. 요청마다
+    Cognito 를 두드리지 않도록 `oidc:emailver:{sub}` 에 5분 캐시("!"=미해결).
+    ADMIN_EMAILS 가 비어 있으면 평가할 것 자체가 없어 바로 "".
+    """
+    from app.core.config import get_settings
+
+    settings = get_settings()
+    if not sub or not settings.ADMIN_EMAILS:
+        return ""
+    redis = getattr(request.app.state, "redis", None)
+    cache_key = f"oidc:emailver:{sub}"
+    if redis is not None:
+        try:
+            cached = await redis.get(cache_key)
+        except Exception:
+            cached = None
+        if cached is not None:
+            return "" if cached == "!" else cached
+    email = ""
+    oidc_service = getattr(request.app.state, "oidc_service", None)
+    if oidc_service is not None:
+        try:
+            pool_email, pool_verified = await oidc_service._email_attrs_from_cognito(
+                str(sub)
+            )
+        except Exception:
+            pool_email, pool_verified = None, False
+        if pool_email and pool_verified:
+            email = pool_email
+    if redis is not None:
+        try:
+            await redis.set(cache_key, email or "!", ex=300)
+        except Exception:
+            pass
+    return email
+
+
+async def _resolve_idp_identity(request: Request, claims: dict) -> CurrentUser:
     """IdP id_token 클레임 → DB 신원.
 
     ``auth.users`` 를 ``sso_subject`` 로 조회한다. 여기서 프로비저닝은 **하지 않는다** —
@@ -332,8 +374,13 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
         if get_settings().OIDC_EMAIL_CLAIM == "email"
         else False
     )
+    email_for_role = parsed.email or ""
+    if not (email_for_role and claim_email_verified):
+        enriched = await _verified_email_for_subject(request, parsed.subject)
+        if enriched:
+            email_for_role, claim_email_verified = enriched, True
     role_from_claims = derive_role(
-        parsed.email or "",
+        email_for_role,
         parsed.groups,
         email_verified=claim_email_verified,
     )

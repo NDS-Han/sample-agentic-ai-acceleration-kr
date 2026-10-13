@@ -243,6 +243,7 @@ async def test_sync_user_missing_in_cognito_and_db_is_noop(monkeypatch):
     session = _session()
     repo = MagicMock()
     repo.get_by_email = AsyncMock(return_value=None)
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
     repo.create_user = AsyncMock()
     _wire_team_cache(repo)
     import app.services.cognito_sync_service as mod
@@ -257,6 +258,42 @@ async def test_sync_user_missing_in_cognito_and_db_is_noop(monkeypatch):
     assert result.users_deactivated == 0
     assert result.errors == []
     repo.create_user.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_user_deactivates_synthetic_email_user_by_sub_or_suffix(monkeypatch):
+    """미검증 이메일 사용자는 ``<sub>@unknown`` synthetic 으로 저장된다 —
+    offboarding 호출이 실제 이메일을 넘겨도 get_by_email 이 빗나가
+    비활성화 no-op 이 되던 구멍의 회귀. Username(=sub) 또는 synthetic
+    주소로라도 찾아 비활성화해야 한다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    existing = MagicMock()
+    existing.id = uuid.uuid4()
+    existing.provider = s.OIDC_PROVIDER_NAME
+    existing.is_active = True
+    existing.role = UserRole.DEVELOPER
+    existing.team_id = None
+
+    repo = MagicMock()
+    # 실제 이메일 조회는 miss, synthetic 주소 조회가 hit
+    async def _get_by_email(e):
+        return existing if e.endswith("@unknown") else None
+    repo.get_by_email = AsyncMock(side_effect=_get_by_email)
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(return_value=None)
+    svc._revoke_keys_for_users = AsyncMock(return_value=[])
+
+    result = await svc.sync_user(session, "claimed@x.com")
+
+    assert existing.is_active is False
+    assert result.users_deactivated == 1
+    svc._revoke_keys_for_users.assert_awaited()
 
 
 @pytest.mark.asyncio
