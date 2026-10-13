@@ -728,3 +728,71 @@ class TestEndpointUrlValidation:
     def test_update_rejects_metadata_ip(self):
         with pytest.raises(Exception):
             ModelUpdateRequest(endpoint_url="http://169.254.169.254/")
+
+
+class TestPriceSyncProviderGate:
+    """PRICE_SYNC_PROVIDERS 게이트 — provider 가 "plane" 이름이라 Mantle/runtime
+    행도 Bedrock 단가로 sync 된다. `!= BEDROCK` 게이트가 BEDROCK_MANTLE_OPENAI
+    (gpt-6.1-sol)·BEDROCK_RUNTIME_OPENAI(gpt-5.6-*) 전부를 스킵하던 실측 사고."""
+
+    def _repo_with(self, models):
+        repo = MagicMock()
+        repo.list_all = AsyncMock(return_value=models)
+        repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+        return repo
+
+    def _sync_src(self, hit: bool = True):
+        from app.services.pricing_sync_service import FetchResult, NormalizedPrice
+
+        src = MagicMock()
+        src.region = "ap-south-1"  # getattr(src, "region") 이 MagicMock 을 돌려주면 pydantic str 검증 실패
+        fetched = FetchResult()
+        if hit:
+            fetched.prices["global.openai.gpt-6.1-sol"] = NormalizedPrice(
+                input_per_1k=Decimal("0.002"),
+                output_per_1k=Decimal("0.01"),
+                cache_5m_per_1k=Decimal("0.0025"),
+                cache_1h_per_1k=Decimal("0.004"),
+                cache_read_per_1k=Decimal("0.0002"),
+            )
+        src.fetch_bedrock_prices = AsyncMock(return_value=fetched)
+        return src
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "provider",
+        [Provider.BEDROCK_MANTLE, Provider.BEDROCK_MANTLE_OPENAI, Provider.BEDROCK_RUNTIME_OPENAI],
+    )
+    async def test_bedrock_plane_providers_are_synced(self, provider, monkeypatch):
+        """Mantle/runtime 계열도 preview 대상 — LiteLLM 카탈로그에 해당 id 의 단가 존재."""
+        m = _make_model(alias="gpt-6.1-sol")
+        m.provider = provider
+        m.provider_model_id = "global.openai.gpt-6.1-sol"
+        m.allowed_clients = []
+        repo = self._repo_with([m])
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+
+        svc = ModelService(MagicMock())
+        out = await svc.preview_price_sync(
+            MagicMock(), pricing_sync_service=self._sync_src()
+        )
+
+        assert len(out.diffs) == 1
+        assert out.diffs[0].matched is True, "Bedrock-계열 provider 가 sync 게이트에서 스킵됐다"
+
+    @pytest.mark.asyncio
+    async def test_openmodel_still_skipped(self, monkeypatch):
+        m = _make_model(alias="llama-3-70b")
+        m.provider = Provider.OPENMODEL
+        m.allowed_clients = []
+        repo = self._repo_with([m])
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        out = await svc.preview_price_sync(
+            MagicMock(), pricing_sync_service=self._sync_src()
+        )
+        assert out.diffs == []

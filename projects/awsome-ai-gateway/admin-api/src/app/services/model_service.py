@@ -32,6 +32,19 @@ from app.schemas.models import (
 logger = structlog.get_logger()
 
 
+# 단가 동기화 대상 provider — plane 이름이 아니라 "AWS Bedrock 단가표가 적용되는가"가
+# 기준이다. Mantle(BEDROCK_MANTLE/BEDROCK_MANTLE_OPENAI)과 runtime-openai 평면도
+# 전부 Bedrock 모델이라 LiteLLM bedrock_converse/AWS Price List 단가가 유효.
+# OPENMODEL(vLLM)만 제외. 새 Bedrock-계열 provider 추가 시 여기에 넣는다 —
+# 안 넣으면 단가 sync 가 그 모델을 조용히 스킵한다(gpt-6.1-sol 사고 이력).
+PRICE_SYNC_PROVIDERS = frozenset({
+    Provider.BEDROCK,
+    Provider.BEDROCK_MANTLE,
+    Provider.BEDROCK_MANTLE_OPENAI,
+    Provider.BEDROCK_RUNTIME_OPENAI,
+})
+
+
 class ModelService:
     def __init__(self, cache_mgr: CacheInvalidationManager) -> None:
         self._cache_mgr = cache_mgr
@@ -315,7 +328,8 @@ class ModelService:
     ):
         """AWS Price List 단가 vs DB 현재가 diff 미리보기(쓰기 없음, deepdive 가격동기화).
 
-        BEDROCK provider 모델만 대상. AWS 에서 못 찾으면 matched=False 로 표시(스킵 후보).
+        Bedrock-계열 provider 모델만 대상(PRICE_SYNC_PROVIDERS). source 에서 못
+        찾으면 matched=False 로 표시(스킵 후보).
         """
         from app.schemas.models import (
             PriceSyncDiff,
@@ -330,8 +344,8 @@ class ModelService:
         matched = 0
         changed = 0
         for m in models:
-            if m.provider != Provider.BEDROCK:
-                continue  # OpenModel/vLLM 은 AWS 단가 없음
+            if m.provider not in PRICE_SYNC_PROVIDERS:
+                continue  # OPENMODEL/vLLM 은 AWS 단가 없음
             cur = await repo.get_current_pricing(m.alias)
             cur_resp = self._to_response(m, cur).current_pricing
             np = fetched.lookup(m.provider_model_id)
@@ -340,7 +354,7 @@ class ModelService:
                     alias=m.alias,
                     provider_model_id=m.provider_model_id,
                     matched=False,
-                    note="AWS Price List 에서 단가 미발견(모델ID 매칭 실패 또는 미게시)",
+                    note="단가 소스에서 미발견(모델ID 매칭 실패 또는 미게시)",
                     current=cur_resp,
                 ))
                 continue
@@ -420,7 +434,7 @@ class ModelService:
             if model is None:
                 errors.append(f"{alias}: 모델 없음")
                 continue
-            if model.provider != Provider.BEDROCK:
+            if model.provider not in PRICE_SYNC_PROVIDERS:
                 skipped.append(alias)
                 continue
             np = fetched.lookup(model.provider_model_id)
