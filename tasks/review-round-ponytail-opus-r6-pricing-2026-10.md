@@ -52,3 +52,24 @@
 - `pytest tests/` — **943 passed, 50 skipped** (회귀 7건 추가: 스택드 프리픽스, 0가격 파생, expected 누락, 구간캐시 드리프트, set_pricing 역전, 스키마 단위성)
 - admin-ui `tsc --noEmit` 0 errors
 - 커밋 `eb0658e8` · helm **rev 186** · 이미지 admin-api/scheduler/admin-ui `eb0658e8` · 스모크 **12 PASS / 0 FAIL** · `nds/dev` push 완료
+
+---
+
+# R8 — eb0658e8 보강분 재검증
+
+| # | 심각도 | 발견 | 조치 |
+|---|---|---|---|
+| R8-1 | Med | naive `effective_from`(offset 없는 ISO)이 timestamptz 행과 비교돼 TypeError→500 | `effective_from: AwareDatetime` — 422로 거부 |
+| R8-2 | Med | 구간 단가가 페이로드엔 있는데 UI 표엔 없음 — 운영자가 안 본 값을 승인 | 미리보기 표에 `>272K tok` 서브행(현재→제안 5열 전부) |
+| R8-3 | Med | alias 하나의 예외(중복 alias·범위 밖 카탈로그 값·시간 역전)가 배치 전체 롤백 | alias dedupe(`dict.fromkeys`) + per-alias `begin_nested` savepoint + 도메인 오류만 per-alias skip/errors. 지연 Redis 쓰기는 savepoint 롤백을 따라 폐기(R1 계약) |
+| R8-4 | Med | 구간 캐시 파생이 Claude 고정 배수 사용 — GPT 계열(read≈5%)에 과대추정 | 모델 자체 발행 기본비율 스케일(`long_x = base_x × long_in/input`), input=0 이면 표준 배수 폴백 |
+| R8-5 | Low | 수동 PUT 이 threshold+in/out 만 싣고 캐시 구간 NULL → cost_recorder 단락요율 폴백 과소청구 | 해소된 구간에 단가 결손 있으면 ValidationError 거부 |
+| R8-6 | Low | 예약 행을 같은 `effective_from` 으로 교정 불가 — `<=` 거부 + 삭제 경로 없음 | 가드를 `<` 로 — 같은 시각 허용(제로-길이 행으로 닫히고 대체) |
+| R8-7 | Low | AWS 소스는 구간 미제공 — 구간 있는 모델이 기본가만 개정돼도 무경고 | preview note "장문 구간 단가 미동기화(소스 미제공 — 이전 행 유지됨)" |
+| R8-8 | Low(수용) | AWS normalizer 의 리전/티어 미필터(model 속성 병합) | 실데이터 미검증 — 잔여로 문서화, AWS 소스는 보조 경로 |
+| — | nit(수용) | context_window/max_output_tokens 는 expected 대조 밖 | 비과금 필드 — 수용 |
+
+## 검증·배포
+
+- `pytest tests/` — **944 passed, 50 skipped** · tsc 0 errors
+- 커밋·helm·스모크: (아래 기록)

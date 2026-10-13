@@ -1,0 +1,26 @@
+You are a senior engineer doing a verification code review of billing-pricing fixes in a FastAPI admin service. Read the diff AND connected code.
+
+Repo root: /home/ubuntu/github/sample-agentic-ai-acceleration-kr/projects/awsome-ai-gateway
+Diff under review: r7_fixes.diff (at repo root — read it). Files: admin-api/src/app/services/pricing_sync_service.py, model_service.py, schemas/models.py, routers/models.py, admin-ui/src/lib/actions/models.ts.
+
+Context: model_alias rows carry versioned pricing rows (model_pricings, effective_from/effective_until, exactly one open row per alias). set_pricing closes the open row at new effective_from then inserts. apply_price_sync applies operator-approved catalog prices. Prices are per-1k Decimal(12,8). long_context_* = prices for tokens above threshold (currently LiteLLM above_272k fields only).
+
+Previous review found and this diff claims to fix:
+1. expected approved-values map was optional/bypassable -> now required (min_length=1), missing alias = reject, router no longer collapses {} to None.
+2. Long cache tier fields (5m/1h/read) were invisible to preview/apply/expected check -> now in PriceSyncDiff, PriceSyncExpected, fresh dict, tier_changed, TS payload, ModelPricingResponse.
+3. Zero-price falsy bugs in long-tier derivation (if base_5m_eff:, long_in or input_cost) -> is not None everywhere; base 5m=0 falls back to standard multiplier for long 1h.
+4. Audit now logs resolved long_tier + cache_derived/long_cache_derived.
+5. PricingRequest: threshold ge=1 + model_validator requiring long in/out when threshold set.
+6. Time-inversion guard moved into set_pricing itself: reject when data.effective_from <= prior.effective_from — covers manual PUT too; apply keeps per-alias skip precheck.
+7. Stacked prefix 'us.global.X' no longer bypasses the global boundary.
+
+Verify concretely:
+- lookup: any remaining path where a stored non-global id resolves a global catalog price, or a global id resolves a regional/plain price? Check _strip_region_prefix edge cases.
+- normalizer: per-token vs per-1k units, division, Decimal types, has_long logic, tier completeness guarantee (can any long_* be None when threshold is set?), zero/negative handling.
+- set_pricing guard: does `effective_from <= prior.effective_from` break legitimate flows (manual edit now, scheduled replacement, first-ever pricing row, sync apply when open row is a current row)? naive vs aware datetime compare?
+- expected check: all 11 fields compared? client can tamper expected to inject wrong prices? (apply writes fetched values — is that still true?) missing alias handling; can expected contain keys never approved?
+- UI: does expected map cover all fields the server compares? null vs missing handling.
+- Any caller of set_pricing/PricingRequest/apply_price_sync broken by the changes; audit shape; the extra=”forbid” schemas.
+- Billing edge cases not covered.
+
+Output: numbered findings with severity, file:line, concrete failure scenario, smallest fix. End with 'Verdict: CONVERGED' if zero actionable findings, else 'Verdict: fix N first'.

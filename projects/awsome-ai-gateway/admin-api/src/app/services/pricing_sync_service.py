@@ -342,20 +342,27 @@ class LiteLLMPricingSyncService:
             long_in_eff = long_out_eff = long_5m_eff = long_1h_eff = long_read_eff = None
             if has_long:
                 # 구간 값은 하나의 단위 — 일부만 채우면 threshold+NULL 조합(구간
-                # 미적용 → 기본 단가로 과소청구)이 생기므로 결손은 기본 단가/배수로
-                # 채운다. 0 가격도 유효 값이라 `is not None` 으로만 판정.
+                # 미적용 → 기본 단가로 과소청구)이 생기므로 결손은 채운다.
+                # 0 가격도 유효 값이라 `is not None` 으로만 판정.
+                # 파생은 모델 자체의 발행 비율 스케일(long_in/input × base_x)을
+                # 우선한다 — Claude 계열 고정 배수를 GPT 계열(read≈5%)에 그대로
+                # 쓰면 과대추정된다. input==0 이면 비율을 못 구해 표준 배수 폴백.
                 long_in_eff = long_in if long_in is not None else input_cost
                 long_out_eff = long_out if long_out is not None else output_cost
-                long_5m_eff = long_5m if long_5m is not None else long_in_eff * _CACHE_5M_MULT
-                long_read_eff = long_read if long_read is not None else long_in_eff * _CACHE_READ_MULT
-                # 구간별 1h 필드는 카탈로그에 없다 — 기본 행의 1h/5m 비율을 구간
-                # 5m 에 적용해 파생. 기본 5m 가 0 이면 비율을 못 구해 표준 배수 사용.
+                scale = long_in_eff / input_cost if input_cost != 0 else None
                 base_5m_eff = cache_5m if cache_5m is not None else input_cost * _CACHE_5M_MULT
                 base_1h_eff = cache_1h if cache_1h is not None else input_cost * _CACHE_1H_MULT
+                base_read_eff = cache_read if cache_read is not None else input_cost * _CACHE_READ_MULT
+                long_5m_eff = long_5m if long_5m is not None else (
+                    base_5m_eff * scale if scale is not None else long_in_eff * _CACHE_5M_MULT
+                )
+                long_read_eff = long_read if long_read is not None else (
+                    base_read_eff * scale if scale is not None else long_in_eff * _CACHE_READ_MULT
+                )
+                # 구간별 1h 필드는 카탈로그에 없다 — 발행 1h 기본가를 같은 비율로
+                # 스케일. 기본 5m 가 0 이면 비율 대신 모델 비율·배수 폴백.
                 long_1h_eff = (
-                    long_5m_eff * (base_1h_eff / base_5m_eff)
-                    if base_5m_eff != 0
-                    else long_in_eff * _CACHE_1H_MULT
+                    base_1h_eff * scale if scale is not None else long_in_eff * _CACHE_1H_MULT
                 )
 
             result.prices[key] = NormalizedPrice(

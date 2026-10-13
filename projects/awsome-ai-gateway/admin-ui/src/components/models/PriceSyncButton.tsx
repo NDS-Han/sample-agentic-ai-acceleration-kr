@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useState, useTransition } from 'react';
+import { Fragment, useState, useTransition } from 'react';
 import { useTranslations } from 'next-intl';
 import { RefreshCw, Loader2 } from 'lucide-react';
 import {
@@ -180,7 +180,8 @@ export function PriceSyncButton() {
                       </THead>
                       <TBody>
                         {changedDiffs.map((d) => (
-                          <Tr key={d.alias}>
+                          <Fragment key={d.alias}>
+                          <Tr>
                             <Td>
                               <input
                                 type="checkbox"
@@ -198,6 +199,22 @@ export function PriceSyncButton() {
                             <Td numeric>{fmtChange(d.current?.cache_read_price_per_1k_tokens, d.proposed_cache_read_per_1k)}</Td>
                             <Td>{d.note ? <span className="text-amber-600 dark:text-amber-400 text-[11px]">{d.note}</span> : ''}</Td>
                           </Tr>
+                          {d.long_context_threshold_tokens != null && (
+                            <Tr>
+                              <Td />
+                              <Td className="text-xs text-muted-foreground">
+                                {`> ${d.long_context_threshold_tokens.toLocaleString()}tok`}
+                              </Td>
+                              <Td className="text-xs text-muted-foreground">{d.provider_model_id}</Td>
+                              <Td numeric>{fmtChange(d.current?.long_context_input_price_per_1k_tokens, d.proposed_long_input_per_1k)}</Td>
+                              <Td numeric>{fmtChange(d.current?.long_context_output_price_per_1k_tokens, d.proposed_long_output_per_1k)}</Td>
+                              <Td numeric>{fmtChange(d.current?.long_context_cache_creation_5m_price_per_1k_tokens, d.proposed_long_cache_5m_per_1k)}</Td>
+                              <Td numeric>{fmtChange(d.current?.long_context_cache_creation_1h_price_per_1k_tokens, d.proposed_long_cache_1h_per_1k)}</Td>
+                              <Td numeric>{fmtChange(d.current?.long_context_cache_read_price_per_1k_tokens, d.proposed_long_cache_read_per_1k)}</Td>
+                              <Td />
+                            </Tr>
+                          )}
+                          </Fragment>
                         ))}
                       </TBody>
                     </Table>
@@ -238,7 +255,7 @@ function fmtPrice(value: string | undefined | null): string {
   return fmtPricePerM(value);  // per-1K 저장값 → per-1M 표시
 }
 
-function fmtChange(current: string | undefined | null, proposed: string | null): string {
+function fmtChange(current: string | undefined | null, proposed: string | null | undefined): string {
   const c = fmtPrice(current);
   const p = proposed != null ? fmtPricePerM(proposed) : '—';
   return `${c} → ${p}`;

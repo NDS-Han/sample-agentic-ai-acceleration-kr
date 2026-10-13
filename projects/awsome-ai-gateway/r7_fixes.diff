@@ -1,0 +1,693 @@
+diff --git a/projects/awsome-ai-gateway/ARCHITECTURE.md b/projects/awsome-ai-gateway/ARCHITECTURE.md
+index 079d3482..53f710cf 100644
+--- a/projects/awsome-ai-gateway/ARCHITECTURE.md
++++ b/projects/awsome-ai-gateway/ARCHITECTURE.md
+@@ -285,8 +285,8 @@ Bedrock/Mantle 은 Anthropic native server-side `web_search` 를 노출하지 
+ | **계정 연결은 검증된 이메일만** | `_upsert_user` 의 email 기반 계정 연결은 `email_verified`(OIDC claim 또는 Cognito `AdminGetUser` 속성)가 참일 때만 허용 — 미검증 이메일이 기존 계정과 일치하면 `OIDCNotProvisionableError` 로 연결 거부(타인 이메일 claim 으로 계정 탈취 차단). cognito_sync 의 sync_all/user/group 3 경로도 동일 게이트, `ValueError` 거부는 per-entity errors 로 집계. subject 직접 일치는 여전히 이메일 무관 | `services/oidc_service.py`, `services/cognito_sync_service.py` |
+ | **`team:vk_hashes` 라이브 정리** | 역인덱스 소비자는 `CacheInvalidationManager.live_vk_hashes`(파이프라인 `key:vk` 존재 확인)만 사용 — 만료/폐기로 매핑이 사라진 해시는 set 에서 srem+반환 제외해 역인덱스 무한 증가·죽은 키 DEL 폭풍 방지 | `core/cache_invalidation.py`, `services/team_allowed_model_service.py`, `services/allowed_client_scope_service.py` |
+ | **단가 sync 의 리전 경계** | `FetchResult.lookup` 은 **global ↔ 비-global 을 절대 교차 폴백하지 않는다** — Global CRIS 단가(≈9% 저가)를 in-region 모델에 적용하면 조용히 과소청구되고, 역방향은 과다청구. 매칭은 exact → geo prefix(us./eu./apac./jp./us-gov.)만 plain `<base>` 로 폴백. global 행이 카탈로그에 없으면 미매칭으로 남겨 사람이 판단한다 | `services/pricing_sync_service.py(FetchResult.lookup)` |
+-| **장문(>272K) 구간 단가 동기화** | `set_pricing` 은 요청이 구간 값을 안 실으면 이전 행을 이어받는다 — sync 가 LiteLLM `*_above_272k_tokens` 를 명시로 실어 보내지 않으면 기본 단가 개정 후 구간 단가만 부패(실측: 기본 $0.002 를 받은 gpt-6.1-sol 의 >272K 단가가 NULL/구값 잔존 → 최대 ~2× 과소청구). 카탈로그에 구간이 없으면 이전 행을 그대로 이어간다(명시적 계약 — 구간 상실보다 보존). 1h 캐시 구간은 카탈로그에 필드가 없어 5m 구간과 같은 1h/5m 비율로 파생. `SET_PRICING` 감사에 `cache_derived`+`long_context_threshold` 기록 | `services/pricing_sync_service.py`, `services/model_service.py(set_pricing)` |
+-| **단가 sync 적용 안전** | (a) **미래 시작 예약 행 보호** — 현재 open 행의 `effective_from` 이 미래면 `close_current_pricing` 이 `effective_until < effective_from` 역전 행을 만들어 예약을 소실시키므로 해당 alias 는 적용 보류+errors 명시. (b) **승인값 드리프트 차단** — `sync-apply` 의 `expected` 에 preview 승인값이 실리면 재수집 값과 대조, 다르면 해당 alias 거부(카탈로그가 preview↔apply 사이에 바뀌어 운영자가 본 것과 다른 단가가 감사에 박히는 것 차단). `expected` 비어 있으면 레거시 동작 | `services/model_service.py(apply_price_sync)`, `schemas/models.py(PriceSyncExpected)` |
++| **장문(>272K) 구간 단가 동기화** | `set_pricing` 은 요청이 구간 값을 안 실으면 이전 행을 이어받는다 — sync 가 LiteLLM `*_above_272k_tokens` 를 명시로 실어 보내지 않으면 기본 단가 개정 후 구간 단가만 부패(실측: 기본 $0.002 를 받은 gpt-6.1-sol 의 >272K 단가가 NULL/구값 잔존 → 최대 ~2× 과소청구). 카탈로그에 구간이 없으면 이전 행을 그대로 이어간다(명시적 계약 — 구간 상실보다 보존). 구간이 있으면 6 필드 전부 비-NULL 보장(결손은 기본 단가/표준 배수로 파생, `0` 도 유효 값). 1h 캐시 구간은 카탈로그 필드 부재로 항상 파생. `SET_PRICING` 감사에 해소된 구간 단가+`cache_derived`+`long_cache_derived` 출처 기록. `PricingRequest` 에 threshold 를 싣는 요청은 in/out 단가 동반 필수(threshold-only 선언은 기본 단가 과소청구 상태) | `services/pricing_sync_service.py`, `services/model_service.py(set_pricing)` |
++| **단가 적용 안전** | (a) **시간 역전 금지** — `set_pricing` 은 새 행 `effective_from` ≤ 현재 open 행 `effective_from` 이면 거부. open 행이 미래 시작 예약 행일 때 now-적용하면 `close_current_pricing` 이 `effective_until < effective_from` 역전 행을 만들어 예약 소실 — 수동 PUT 경로 포함 전 경로 fail-closed. sync apply 는 해당 alias 를 보류+errors 명시. (b) **승인값 드리프트 차단** — `sync-apply` 의 `expected`(필수, min_length=1)는 preview 승인값: 재수집 값과 11 필드(기본 5+구간 6)를 대조, 불일치·alias 누락 시 거부. 클라이언트 변조 expected 는 자기 거절만 유발(적용값은 항상 재수집값이라 안전 방향) | `services/model_service.py(set_pricing/apply_price_sync)`, `schemas/models.py(PriceSyncExpected)` |
+ | **팀/부서 자동생성 경합** | `_get_or_create_{department,team}` 는 savepoint 격리 생성 — 동시 로그인 경합의 IntegrityError 는 승자 row 재조회(`id` 정렬 결정적 LIMIT 1). 마이그레이션 0045 `departments(name)`+`teams(dept,name)` UNIQUE(기존 환경 중복 백필 없음 — 라이브 검증 완료) | `repositories/user_repository.py`, `services/oidc_service.py`, `db/versions/0045` |
+ | **`seed_spent` 격리+post-commit Redis** | item 마다 `begin_nested` savepoint — 잘못된 item 이 배치 전체를 롤백하지 않고 per-item status(성공/실패+전후값) 반환. Redis 무효화는 전부 커밋 후 — 유휴 DEL→stale 재수화 방지 | `services/budget_service.py(seed_spent)` |
+ | **service-token 회전 수명 상한** | `rotate()` 의 신 토큰 `expires_at = min(기본 90d, 구토큰 expires_at)` — self-rotate 반복으로 무기한 연장 차단. 구 토큰은 `FOR UPDATE` 로 잠그고 **`revoked_at != None` 이면(미래 grace 포함) 회전 거부** — 토큰당 회전은 1회, grace 중 재로테이션으로 신 토큰을 연쇄 발급하는 루프 차단(`authenticate` 는 revoked_at>now 를 유효로 봄). 신 토큰 `created_by` 는 구 토큰의 것(FK — synthetic service user 는 users 행이 아님). 구 토큰은 `revoked_at=now+24h` grace | `services/service_token_service.py`, `repositories/service_token_repository.py` |
+diff --git a/projects/awsome-ai-gateway/admin-api/src/app/routers/models.py b/projects/awsome-ai-gateway/admin-api/src/app/routers/models.py
+index bbff3f08..e26ddf3a 100644
+--- a/projects/awsome-ai-gateway/admin-api/src/app/routers/models.py
++++ b/projects/awsome-ai-gateway/admin-api/src/app/routers/models.py
+@@ -194,7 +194,7 @@ async def price_sync_apply(
+         actor=admin,
+         ip_address=request.client.host if request.client else "0.0.0.0",
+         request_id=request.headers.get("x-request-id", ""),
+-        expected=body.expected or None,
++        expected=body.expected,
+     )
+ 
+ 
+diff --git a/projects/awsome-ai-gateway/admin-api/src/app/schemas/models.py b/projects/awsome-ai-gateway/admin-api/src/app/schemas/models.py
+index d15b11df..4bda82a9 100644
+--- a/projects/awsome-ai-gateway/admin-api/src/app/schemas/models.py
++++ b/projects/awsome-ai-gateway/admin-api/src/app/schemas/models.py
+@@ -9,7 +9,7 @@ import ipaddress
+ import socket
+ from urllib.parse import urlparse
+ 
+-from pydantic import BaseModel, ConfigDict, Field, field_validator
++from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+ 
+ from app.core.clients import validate_clients
+ from app.schemas.common import ApiFormatEnum, ProviderEnum
+@@ -295,7 +295,7 @@ class PricingRequest(BaseModel):
+     #: 장문(>threshold) 구간 단가 — None 이면 set_pricing 이 이전 행 값을 이어받는다.
+     #: 가격 동기화가 LiteLLM `*_above_272k_tokens` 를 매핑해 채운다. 기본 단가만
+     #: 개정하고 구간 단가를 얼리면 >272K 요청이 구 단가 비율로 과소청구된다.
+-    long_context_threshold_tokens: int | None = Field(default=None, ge=0)
++    long_context_threshold_tokens: int | None = Field(default=None, ge=1)
+     long_context_input_price_per_1k_tokens: Decimal | None = Field(
+         default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+     )
+@@ -313,8 +313,24 @@ class PricingRequest(BaseModel):
+     )
+     #: 캐시 단가가 소스 미게시 값의 파생(추정)인지 — 감사 로그에 출처를 남긴다.
+     cache_derived: bool = False
++    #: 구간 캐시 단가 중 파생 포함 여부(1h 구간은 항상 파생).
++    long_cache_derived: bool = False
+     effective_from: datetime
+ 
++    @model_validator(mode="after")
++    def _long_tier_is_one_unit(self):
++        """threshold 를 싣는 요청은 in/out 단가를 동반해야 한다 — threshold 만
++        있고 단가가 결손이면 구간이 조용히 기본 단가로 과소청구된다."""
++        if self.long_context_threshold_tokens is not None:
++            if (
++                self.long_context_input_price_per_1k_tokens is None
++                or self.long_context_output_price_per_1k_tokens is None
++            ):
++                raise ValueError(
++                    "long_context_threshold 설정 시 장문 input/output 단가가 필요합니다"
++                )
++        return self
++
+ 
+ class StatusPatchRequest(BaseModel):
+     active: bool
+@@ -329,6 +345,13 @@ class ModelPricingResponse(BaseModel):
+     cache_creation_5m_price_per_1k_tokens: Decimal = Decimal("0")
+     cache_creation_1h_price_per_1k_tokens: Decimal = Decimal("0")
+     cache_read_price_per_1k_tokens: Decimal = Decimal("0")
++    #: 장문(>threshold) 구간 단가 — 0038 이후 시계열에 존재. 미설정 행은 None.
++    long_context_threshold_tokens: int | None = None
++    long_context_input_price_per_1k_tokens: Decimal | None = None
++    long_context_output_price_per_1k_tokens: Decimal | None = None
++    long_context_cache_creation_5m_price_per_1k_tokens: Decimal | None = None
++    long_context_cache_creation_1h_price_per_1k_tokens: Decimal | None = None
++    long_context_cache_read_price_per_1k_tokens: Decimal | None = None
+     effective_from: datetime
+     effective_until: datetime | None = None
+ 
+@@ -379,6 +402,9 @@ class PriceSyncDiff(BaseModel):
+     long_context_threshold_tokens: int | None = None
+     proposed_long_input_per_1k: Decimal | None = None
+     proposed_long_output_per_1k: Decimal | None = None
++    proposed_long_cache_5m_per_1k: Decimal | None = None
++    proposed_long_cache_1h_per_1k: Decimal | None = None
++    proposed_long_cache_read_per_1k: Decimal | None = None
+     changed: bool = False  # 현재가와 제안가가 다른가
+     #: 카탈로그 스펙(context_window/max_output_tokens)과 DB 값이 다른가.
+     #: 단가 변경이 0이어도 이 플래그가 있으면 적용 대상에 포함되어야 한다 —
+@@ -413,6 +439,9 @@ class PriceSyncExpected(BaseModel):
+     long_context_threshold_tokens: int | None = None
+     long_input_per_1k: Decimal | None = None
+     long_output_per_1k: Decimal | None = None
++    long_cache_5m_per_1k: Decimal | None = None
++    long_cache_1h_per_1k: Decimal | None = None
++    long_cache_read_per_1k: Decimal | None = None
+ 
+ 
+ class PriceSyncApplyRequest(BaseModel):
+@@ -420,8 +449,9 @@ class PriceSyncApplyRequest(BaseModel):
+ 
+     aliases: list[str] = Field(min_length=1)
+     source: str = "aws"  # "aws" | "litellm"
+-    #: preview 승인값(비어 있으면 레거시 동작 — 재수집 값 그대로 적용).
+-    expected: dict[str, PriceSyncExpected] = Field(default_factory=dict)
++    #: preview 승인값(**필수**) — 카탈로그가 preview↔apply 사이에 바뀌면 운영자가
++    #: 승인하지 않은 단가가 감사에 박힌다. 생략/빈 맵은 fail-closed(적용 없음).
++    expected: dict[str, PriceSyncExpected] = Field(min_length=1)
+ 
+ 
+ class PriceSyncApplyResponse(BaseModel):
+diff --git a/projects/awsome-ai-gateway/admin-api/src/app/services/model_service.py b/projects/awsome-ai-gateway/admin-api/src/app/services/model_service.py
+index a0aed94a..99f73013 100644
+--- a/projects/awsome-ai-gateway/admin-api/src/app/services/model_service.py
++++ b/projects/awsome-ai-gateway/admin-api/src/app/services/model_service.py
+@@ -264,6 +264,15 @@ class ModelService:
+         # 기본 단가 5개만 보낸다. 새 행이 그 6열을 NULL 로 두면 100K 초과 요청이 조용히 기본
+         # 단가로 기록되므로(Haiku 5.5 는 1/5), 닫는 행의 값을 이어받는다. 닫기 **전에** 읽는다.
+         prior = await repo.get_current_pricing(alias)
++        # 시간 역전 금지 — 새 행의 effective_from 이 현재 open 행보다 앞서면
++        # close_current_pricing 이 effective_until < effective_from 인 역전 행을
++        # 만든다. open 행이 미래 시작 예약 행일 때 now-적용이 이에 해당 → 예약 소실.
++        if prior is not None and data.effective_from <= prior.effective_from:
++            raise ConflictError(
++                f"새 단가의 effective_from({data.effective_from.isoformat()})이 현재 open 행"
++                f"({prior.effective_from.isoformat()}) 이후여야 합니다 — 미래 시작 예약 행이 "
++                "있으면 자동 덮어쓰기를 하지 않습니다"
++            )
+         # 요청이 구간 값을 싣지 않으면(None) 이전 행을 이어받는다 — 가격 동기화는
+         # 카탈로그의 above_272k 값을 명시로 실어 보내 덮어쓴다.
+         long_tier = {
+@@ -317,7 +326,21 @@ class ModelService:
+                 "cache_read_price": str(data.cache_read_price_per_1k_tokens),
+                 # 파생 여부 출처 — 소스 미게시 추정값을 게시가로 오인 못 하게.
+                 "cache_derived": data.cache_derived,
+-                "long_context_threshold": data.long_context_threshold_tokens,
++                "long_cache_derived": data.long_cache_derived,
++                # 해소된 구간 단가(요청값 또는 이전 행 이어받기 결과)를 기록한다 —
++                # data.* 는 None 이 남을 수 있어 실제 기록값이 불명.
++                "long_context": (
++                    {
++                        "threshold": long_tier["long_context_threshold_tokens"],
++                        "input": str(long_tier["long_context_input_price_per_1k_tokens"]),
++                        "output": str(long_tier["long_context_output_price_per_1k_tokens"]),
++                        "cache_5m": str(long_tier["long_context_cache_creation_5m_price_per_1k_tokens"]),
++                        "cache_1h": str(long_tier["long_context_cache_creation_1h_price_per_1k_tokens"]),
++                        "cache_read": str(long_tier["long_context_cache_read_price_per_1k_tokens"]),
++                    }
++                    if long_tier["long_context_threshold_tokens"] is not None
++                    else None
++                ),
+             }},
+             ip_address=ip_address,
+             request_id=request_id,
+@@ -381,10 +404,14 @@ class ModelService:
+             # 기본 단가 동일 + 구간만 갱신돼야 할 때도 적용 대상에 포함한다.
+             long_vals = None
+             if np.long_context_threshold_tokens is not None:
++                _q = lambda v: v.quantize(quantize) if v is not None else None
+                 long_vals = {
+                     "threshold": np.long_context_threshold_tokens,
+-                    "in": np.long_input_per_1k.quantize(quantize) if np.long_input_per_1k is not None else None,
+-                    "out": np.long_output_per_1k.quantize(quantize) if np.long_output_per_1k is not None else None,
++                    "in": _q(np.long_input_per_1k),
++                    "out": _q(np.long_output_per_1k),
++                    "5m": _q(np.long_cache_5m_per_1k),
++                    "1h": _q(np.long_cache_1h_per_1k),
++                    "read": _q(np.long_cache_read_per_1k),
+                 }
+             tier_changed = bool(
+                 long_vals
+@@ -393,6 +420,9 @@ class ModelService:
+                     or cur.long_context_threshold_tokens != long_vals["threshold"]
+                     or cur.long_context_input_price_per_1k_tokens != long_vals["in"]
+                     or cur.long_context_output_price_per_1k_tokens != long_vals["out"]
++                    or cur.long_context_cache_creation_5m_price_per_1k_tokens != long_vals["5m"]
++                    or cur.long_context_cache_creation_1h_price_per_1k_tokens != long_vals["1h"]
++                    or cur.long_context_cache_read_price_per_1k_tokens != long_vals["read"]
+                 )
+             )
+             if tier_changed:
+@@ -432,6 +462,15 @@ class ModelService:
+                 proposed_long_output_per_1k=(
+                     long_vals["out"] if long_vals else None
+                 ),
++                proposed_long_cache_5m_per_1k=(
++                    long_vals["5m"] if long_vals else None
++                ),
++                proposed_long_cache_1h_per_1k=(
++                    long_vals["1h"] if long_vals else None
++                ),
++                proposed_long_cache_read_per_1k=(
++                    long_vals["read"] if long_vals else None
++                ),
+                 changed=is_changed,
+                 spec_changed=spec_changed,
+             ))
+@@ -453,7 +492,7 @@ class ModelService:
+         ip_address: str = "0.0.0.0",
+         request_id: str = "",
+         quantize: Decimal = Decimal("0.00000001"),
+-        expected=None,
++        expected,  # 필수 — preview 승인값과 재수집 대조 없이는 적용하지 않는다
+     ):
+         """승인된 alias 목록만 AWS 단가로 적용 — 기존 set_pricing 재사용(시계열·감사·캐시).
+ 
+@@ -483,28 +522,30 @@ class ModelService:
+                 continue
+             # preview 승인값과 재수집 값이 다르면 적용 거부 — 카탈로그가 두 호출
+             # 사이에 바뀌면 운영자가 본 것과 다른 단가가 감사 로그에 박힌다.
+-            if expected:
+-                exp = expected.get(alias)
+-                if exp is None:
+-                    skipped.append(alias)
+-                    errors.append(f"{alias}: 승인된 단가 값이 없어 적용 거부(다시 미리보기)")
+-                    continue
+-                fresh = {
+-                    "input_per_1k": np.input_per_1k.quantize(quantize),
+-                    "output_per_1k": np.output_per_1k.quantize(quantize),
+-                    "cache_5m_per_1k": np.cache_5m_per_1k.quantize(quantize),
+-                    "cache_1h_per_1k": np.cache_1h_per_1k.quantize(quantize),
+-                    "cache_read_per_1k": np.cache_read_per_1k.quantize(quantize),
+-                    "long_context_threshold_tokens": np.long_context_threshold_tokens,
+-                    "long_input_per_1k": (np.long_input_per_1k.quantize(quantize)
+-                                        if np.long_input_per_1k is not None else None),
+-                    "long_output_per_1k": (np.long_output_per_1k.quantize(quantize)
+-                                         if np.long_output_per_1k is not None else None),
+-                }
+-                if any(fresh[k] != getattr(exp, k) for k in fresh):
+-                    skipped.append(alias)
+-                    errors.append(f"{alias}: 미리보기 승인값과 소스 단가가 달라짐(다시 미리보기 후 적용)")
+-                    continue
++            # expected 는 필수(스키마 min_length=1): alias 누락은 승인값 없음 = 거부.
++            exp = expected.get(alias)
++            if exp is None:
++                skipped.append(alias)
++                errors.append(f"{alias}: 승인된 단가 값이 없어 적용 거부(다시 미리보기)")
++                continue
++            _q = lambda v: v.quantize(quantize) if v is not None else None
++            fresh = {
++                "input_per_1k": np.input_per_1k.quantize(quantize),
++                "output_per_1k": np.output_per_1k.quantize(quantize),
++                "cache_5m_per_1k": np.cache_5m_per_1k.quantize(quantize),
++                "cache_1h_per_1k": np.cache_1h_per_1k.quantize(quantize),
++                "cache_read_per_1k": np.cache_read_per_1k.quantize(quantize),
++                "long_context_threshold_tokens": np.long_context_threshold_tokens,
++                "long_input_per_1k": _q(np.long_input_per_1k),
++                "long_output_per_1k": _q(np.long_output_per_1k),
++                "long_cache_5m_per_1k": _q(np.long_cache_5m_per_1k),
++                "long_cache_1h_per_1k": _q(np.long_cache_1h_per_1k),
++                "long_cache_read_per_1k": _q(np.long_cache_read_per_1k),
++            }
++            if any(fresh[k] != getattr(exp, k) for k in fresh):
++                skipped.append(alias)
++                errors.append(f"{alias}: 미리보기 승인값과 소스 단가가 달라짐(다시 미리보기 후 적용)")
++                continue
+             # 미래 시점 예약 단가 행을 건드리면 안 된다 — close_current_pricing 이
+             # 예약 행을 now 로 닫아 effective_until < effective_from 인 역전 행을
+             # 만들어 예약이 영구 소실된다. 예약 존재 시 이 alias 는 사람이 처리한다.
+@@ -522,6 +563,7 @@ class ModelService:
+                 cache_creation_1h_price_per_1k_tokens=np.cache_1h_per_1k.quantize(quantize),
+                 cache_read_price_per_1k_tokens=np.cache_read_per_1k.quantize(quantize),
+                 cache_derived=np.cache_derived,
++                long_cache_derived=np.long_cache_derived,
+                 long_context_threshold_tokens=np.long_context_threshold_tokens,
+                 long_context_input_price_per_1k_tokens=(
+                     np.long_input_per_1k.quantize(quantize)
+@@ -759,6 +801,12 @@ class ModelService:
+                 cache_creation_5m_price_per_1k_tokens=pricing.cache_creation_5m_price_per_1k_tokens,
+                 cache_creation_1h_price_per_1k_tokens=pricing.cache_creation_1h_price_per_1k_tokens,
+                 cache_read_price_per_1k_tokens=pricing.cache_read_price_per_1k_tokens,
++                long_context_threshold_tokens=pricing.long_context_threshold_tokens,
++                long_context_input_price_per_1k_tokens=pricing.long_context_input_price_per_1k_tokens,
++                long_context_output_price_per_1k_tokens=pricing.long_context_output_price_per_1k_tokens,
++                long_context_cache_creation_5m_price_per_1k_tokens=pricing.long_context_cache_creation_5m_price_per_1k_tokens,
++                long_context_cache_creation_1h_price_per_1k_tokens=pricing.long_context_cache_creation_1h_price_per_1k_tokens,
++                long_context_cache_read_price_per_1k_tokens=pricing.long_context_cache_read_price_per_1k_tokens,
+                 effective_from=pricing.effective_from,
+                 effective_until=pricing.effective_until,
+             )
+diff --git a/projects/awsome-ai-gateway/admin-api/src/app/services/pricing_sync_service.py b/projects/awsome-ai-gateway/admin-api/src/app/services/pricing_sync_service.py
+index b152b6ee..69de282c 100644
+--- a/projects/awsome-ai-gateway/admin-api/src/app/services/pricing_sync_service.py
++++ b/projects/awsome-ai-gateway/admin-api/src/app/services/pricing_sync_service.py
+@@ -61,6 +61,9 @@ class NormalizedPrice:
+     long_cache_5m_per_1k: Decimal | None = None
+     long_cache_1h_per_1k: Decimal | None = None
+     long_cache_read_per_1k: Decimal | None = None
++    #: 구간 캐시 단가 중 파생(추정) 포함 여부 — 1h 구간은 카탈로그에 필드가 없어
++    #: 구간이 존재하면 항상 True. 감사 로그 출처 표시용.
++    long_cache_derived: bool = False
+ 
+ 
+ @dataclass
+@@ -92,6 +95,9 @@ class FetchResult:
+             # 로 남겨 사람이 판단하게 한다.
+             return None
+         # geo prefix(us./eu./apac./jp./us-gov.)만 plain in-region 단가로 폴백.
++        # 스택드 프리픽스("us.global.X")는 base 도 prefix 라 매칭하지 않는다.
++        if _strip_region_prefix(base) != base:
++            return None
+         if base in self.prices:
+             return self.prices[base]
+         return None
+@@ -333,14 +339,24 @@ class LiteLLMPricingSyncService:
+             long_5m = self._to_decimal(m.get("cache_creation_input_token_cost_above_272k_tokens"))
+             long_read = self._to_decimal(m.get("cache_read_input_token_cost_above_272k_tokens"))
+             has_long = long_in is not None or long_out is not None
+-            long_1h = None
++            long_in_eff = long_out_eff = long_5m_eff = long_1h_eff = long_read_eff = None
+             if has_long:
+-                # 카탈로그에 구간별 1h 필드는 없다 — 5m 구간과 같은 비율로 파생
+-                # (1h/5m 기본 비율 유지). 기본 단가의 파생 계약과 같은 추정.
++                # 구간 값은 하나의 단위 — 일부만 채우면 threshold+NULL 조합(구간
++                # 미적용 → 기본 단가로 과소청구)이 생기므로 결손은 기본 단가/배수로
++                # 채운다. 0 가격도 유효 값이라 `is not None` 으로만 판정.
++                long_in_eff = long_in if long_in is not None else input_cost
++                long_out_eff = long_out if long_out is not None else output_cost
++                long_5m_eff = long_5m if long_5m is not None else long_in_eff * _CACHE_5M_MULT
++                long_read_eff = long_read if long_read is not None else long_in_eff * _CACHE_READ_MULT
++                # 구간별 1h 필드는 카탈로그에 없다 — 기본 행의 1h/5m 비율을 구간
++                # 5m 에 적용해 파생. 기본 5m 가 0 이면 비율을 못 구해 표준 배수 사용.
+                 base_5m_eff = cache_5m if cache_5m is not None else input_cost * _CACHE_5M_MULT
+                 base_1h_eff = cache_1h if cache_1h is not None else input_cost * _CACHE_1H_MULT
+-                if base_5m_eff:
+-                    long_1h = (long_5m or (long_in or input_cost) * _CACHE_5M_MULT) * (base_1h_eff / base_5m_eff)
++                long_1h_eff = (
++                    long_5m_eff * (base_1h_eff / base_5m_eff)
++                    if base_5m_eff != 0
++                    else long_in_eff * _CACHE_1H_MULT
++                )
+ 
+             result.prices[key] = NormalizedPrice(
+                 input_per_1k=input_cost * Decimal(1000),
+@@ -353,11 +369,14 @@ class LiteLLMPricingSyncService:
+                 or self._to_int(m.get("max_tokens")),
+                 max_output_tokens=self._to_int(m.get("max_output_tokens")),
+                 long_context_threshold_tokens=272000 if has_long else None,
+-                long_input_per_1k=(long_in if long_in is not None else input_cost) * Decimal(1000) if has_long else None,
+-                long_output_per_1k=(long_out if long_out is not None else output_cost) * Decimal(1000) if has_long else None,
+-                long_cache_5m_per_1k=((long_5m if long_5m is not None else (long_in or input_cost) * _CACHE_5M_MULT) * Decimal(1000) if has_long else None),
+-                long_cache_1h_per_1k=(long_1h * Decimal(1000) if long_1h is not None else None),
+-                long_cache_read_per_1k=((long_read if long_read is not None else (long_in or input_cost) * _CACHE_READ_MULT) * Decimal(1000) if has_long else None),
++                long_input_per_1k=(long_in_eff * Decimal(1000) if long_in_eff is not None else None),
++                long_output_per_1k=(long_out_eff * Decimal(1000) if long_out_eff is not None else None),
++                long_cache_5m_per_1k=(long_5m_eff * Decimal(1000) if long_5m_eff is not None else None),
++                long_cache_1h_per_1k=(long_1h_eff * Decimal(1000) if long_1h_eff is not None else None),
++                long_cache_read_per_1k=(long_read_eff * Decimal(1000) if long_read_eff is not None else None),
++                # 구간 캐시는 출처 추적 대상 — 1h 구간 필드는 카탈로그에 없어
++                # 항상 파생(5m/read 도 소스 생략 시 파생)이라 구간 존재 = 파생 포함.
++                long_cache_derived=has_long,
+             )
+         return result
+ 
+diff --git a/projects/awsome-ai-gateway/admin-api/tests/integration/test_model_management.py b/projects/awsome-ai-gateway/admin-api/tests/integration/test_model_management.py
+index 3b9f52be..c556f31a 100644
+--- a/projects/awsome-ai-gateway/admin-api/tests/integration/test_model_management.py
++++ b/projects/awsome-ai-gateway/admin-api/tests/integration/test_model_management.py
+@@ -36,6 +36,12 @@ def _make_pricing() -> ModelPricing:
+     p.cache_creation_5m_price_per_1k_tokens = Decimal("0.00375")
+     p.cache_creation_1h_price_per_1k_tokens = Decimal("0.006")  # ModelPricingResponse field
+     p.cache_read_price_per_1k_tokens = Decimal("0.0003")
++    p.long_context_threshold_tokens = None
++    p.long_context_input_price_per_1k_tokens = None
++    p.long_context_output_price_per_1k_tokens = None
++    p.long_context_cache_creation_5m_price_per_1k_tokens = None
++    p.long_context_cache_creation_1h_price_per_1k_tokens = None
++    p.long_context_cache_read_price_per_1k_tokens = None
+     p.effective_from = datetime.now(timezone.utc)
+     p.effective_until = None
+     return p
+diff --git a/projects/awsome-ai-gateway/admin-api/tests/regression/test_medium_model_update_silent_drop.py b/projects/awsome-ai-gateway/admin-api/tests/regression/test_medium_model_update_silent_drop.py
+index 4efac665..899743f7 100644
+--- a/projects/awsome-ai-gateway/admin-api/tests/regression/test_medium_model_update_silent_drop.py
++++ b/projects/awsome-ai-gateway/admin-api/tests/regression/test_medium_model_update_silent_drop.py
+@@ -33,7 +33,7 @@ NumericValueOutOfRange 를 던졌다 → 입력 오류인데 **필드명도 없
+ from __future__ import annotations
+ 
+ import uuid
+-from datetime import datetime, timezone
++from datetime import datetime, timedelta, timezone
+ from decimal import Decimal
+ from typing import Any
+ 
+@@ -95,6 +95,12 @@ class _FakePricing:
+         self.cache_creation_5m_price_per_1k_tokens = Decimal("0.00375")
+         self.cache_creation_1h_price_per_1k_tokens = Decimal("0.006")
+         self.cache_read_price_per_1k_tokens = Decimal("0.0003")
++        self.long_context_threshold_tokens = None
++        self.long_context_input_price_per_1k_tokens = None
++        self.long_context_output_price_per_1k_tokens = None
++        self.long_context_cache_creation_5m_price_per_1k_tokens = None
++        self.long_context_cache_creation_1h_price_per_1k_tokens = None
++        self.long_context_cache_read_price_per_1k_tokens = None
+         self.effective_from = datetime.now(timezone.utc)
+         self.effective_until = None
+ 
+@@ -386,13 +392,16 @@ class TestPriceUpperBound:
+     async def test_boundary_value_still_accepted(
+         self, client: AsyncClient, repo: _RecordingRepo
+     ):
+-        """상한이 정당한 입력을 막지 않는지(과잉 차단 아님) — 결함 ② 쪽 vacuity control."""
++        """상한이 정당한 입력을 막지 않는지(과잉 차단 아님) — 결함 ② 쪽 vacuity control.
++
++        effective_from 은 현재 open 행 이후여야 한다(시간 역전 금지 계약) —
++        _FakePricing.effective_from 이 "지금" 이므로 요청도 그 이후 시각을 쓴다."""
+         resp = await client.put(
+             f"/admin/models/{ALIAS}/pricing",
+             json={
+                 "input_price_per_1k_tokens": str(MAX_PRICE_PER_1K),
+                 "output_price_per_1k_tokens": "0.015",
+-                "effective_from": "2026-05-01T00:00:00Z",
++                "effective_from": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
+             },
+         )
+         assert resp.status_code == 200, resp.text[:400]
+diff --git a/projects/awsome-ai-gateway/admin-api/tests/unit/test_model_service.py b/projects/awsome-ai-gateway/admin-api/tests/unit/test_model_service.py
+index d7ebfd9a..4d843204 100644
+--- a/projects/awsome-ai-gateway/admin-api/tests/unit/test_model_service.py
++++ b/projects/awsome-ai-gateway/admin-api/tests/unit/test_model_service.py
+@@ -53,6 +53,12 @@ def _make_pricing(alias: str = "claude-sonnet") -> ModelPricing:
+     p.cache_creation_5m_price_per_1k_tokens = Decimal("0.00375")
+     p.cache_creation_1h_price_per_1k_tokens = Decimal("0.006")
+     p.cache_read_price_per_1k_tokens = Decimal("0.0003")
++    p.long_context_threshold_tokens = None
++    p.long_context_input_price_per_1k_tokens = None
++    p.long_context_output_price_per_1k_tokens = None
++    p.long_context_cache_creation_5m_price_per_1k_tokens = None
++    p.long_context_cache_creation_1h_price_per_1k_tokens = None
++    p.long_context_cache_read_price_per_1k_tokens = None
+     p.effective_from = datetime.now(timezone.utc)
+     p.effective_until = None
+     return p
+@@ -832,6 +838,20 @@ class TestPriceSyncApply:
+         m.max_output_tokens = 32000
+         return m
+ 
++    def _expected_for_gpt(self):
++        """_sync_src 기본값과 일치하는 승인값 — expected 게이트 통과용."""
++        from app.schemas.models import PriceSyncExpected
++
++        return {
++            "gpt-6.1-sol": PriceSyncExpected(
++                input_per_1k=Decimal("0.002"),
++                output_per_1k=Decimal("0.01"),
++                cache_5m_per_1k=Decimal("0.0025"),
++                cache_1h_per_1k=Decimal("0.004"),
++                cache_read_per_1k=Decimal("0.0002"),
++            )
++        }
++
+     @pytest.mark.asyncio
+     async def test_future_dated_row_blocks_apply(self, monkeypatch):
+         """미래 시작 예약 단가가 있으면 자동 적용 보류 — 역전 행·예약 소실 금지."""
+@@ -852,12 +872,146 @@ class TestPriceSyncApply:
+             pricing_sync_service=self._sync_src(),
+             aliases=["gpt-6.1-sol"],
+             actor=MagicMock(),
++            expected=self._expected_for_gpt(),
+         )
+         assert out.applied == []
+         assert "gpt-6.1-sol" in out.skipped
+         assert any("예약" in e for e in out.errors)
+         svc.set_pricing.assert_not_awaited()
+ 
++    @pytest.mark.asyncio
++    async def test_missing_expected_alias_rejects(self, monkeypatch):
++        """승인값 맵에 없는 alias 는 적용 거부 — 승인 없는 재수집 값 기입 차단."""
++        m = self._model()
++        repo = self._repo_with(m)
++        monkeypatch.setattr(
++            "app.services.model_service.ModelRepository", lambda sess: repo
++        )
++        svc = ModelService(MagicMock())
++        svc.set_pricing = AsyncMock()
++
++        out = await svc.apply_price_sync(
++            MagicMock(),
++            pricing_sync_service=self._sync_src(),
++            aliases=["gpt-6.1-sol"],
++            actor=MagicMock(),
++            expected={"other-alias": self._expected_for_gpt()["gpt-6.1-sol"]},
++        )
++        assert out.applied == []
++        assert "gpt-6.1-sol" in out.skipped
++        assert any("승인된 단가" in e for e in out.errors)
++        svc.set_pricing.assert_not_awaited()
++
++    @pytest.mark.asyncio
++    async def test_long_cache_drift_rejects(self, monkeypatch):
++        """구간 캐시 단가만 바뀌어도 승인값 대조가 잡는다 — 보이지 않는 필드의
++        드리프트가 조용히 통과하면 안 된다."""
++        from app.schemas.models import PriceSyncExpected
++        from app.services.pricing_sync_service import NormalizedPrice
++
++        np = NormalizedPrice(
++            input_per_1k=Decimal("0.002"),
++            output_per_1k=Decimal("0.01"),
++            cache_5m_per_1k=Decimal("0.0025"),
++            cache_1h_per_1k=Decimal("0.004"),
++            cache_read_per_1k=Decimal("0.0002"),
++            long_context_threshold_tokens=272000,
++            long_input_per_1k=Decimal("0.004"),
++            long_output_per_1k=Decimal("0.015"),
++            long_cache_5m_per_1k=Decimal("0.006"),   # 승인값과 다름
++            long_cache_1h_per_1k=Decimal("0.008"),
++            long_cache_read_per_1k=Decimal("0.0004"),
++        )
++        m = self._model()
++        repo = self._repo_with(m)
++        monkeypatch.setattr(
++            "app.services.model_service.ModelRepository", lambda sess: repo
++        )
++        svc = ModelService(MagicMock())
++        svc.set_pricing = AsyncMock()
++
++        out = await svc.apply_price_sync(
++            MagicMock(),
++            pricing_sync_service=self._sync_src(np),
++            aliases=["gpt-6.1-sol"],
++            actor=MagicMock(),
++            expected={
++                "gpt-6.1-sol": PriceSyncExpected(
++                    input_per_1k=Decimal("0.002"),
++                    output_per_1k=Decimal("0.01"),
++                    cache_5m_per_1k=Decimal("0.0025"),
++                    cache_1h_per_1k=Decimal("0.004"),
++                    cache_read_per_1k=Decimal("0.0002"),
++                    long_context_threshold_tokens=272000,
++                    long_input_per_1k=Decimal("0.004"),
++                    long_output_per_1k=Decimal("0.015"),
++                    long_cache_5m_per_1k=Decimal("0.005"),  # preview 당시 값
++                    long_cache_1h_per_1k=Decimal("0.008"),
++                    long_cache_read_per_1k=Decimal("0.0004"),
++                )
++            },
++        )
++        assert out.applied == []
++        assert any("승인값" in e for e in out.errors)
++        svc.set_pricing.assert_not_awaited()
++
++    def test_pricing_request_threshold_requires_tier_prices(self):
++        """threshold 만 싣고 in/out 결손인 요청은 거부 — 구간 단가 없는 구간
++        선언은 기본 단가로 과소청구되는 조용한 상태를 만든다."""
++        import pytest as _p
++
++        from app.schemas.models import PricingRequest
++
++        base = dict(
++            input_price_per_1k_tokens=Decimal("0.001"),
++            output_price_per_1k_tokens=Decimal("0.002"),
++            effective_from=datetime.now(timezone.utc),
++        )
++        with _p.raises(Exception):
++            PricingRequest(**base, long_context_threshold_tokens=272000)
++        # in/out 동반 시 통과
++        req = PricingRequest(
++            **base,
++            long_context_threshold_tokens=272000,
++            long_context_input_price_per_1k_tokens=Decimal("0.002"),
++            long_context_output_price_per_1k_tokens=Decimal("0.004"),
++        )
++        assert req.long_context_threshold_tokens == 272000
++        # threshold 0 은 무의미(모든 토큰이 구간 요율) — 거부
++        with _p.raises(Exception):
++            PricingRequest(**base, long_context_threshold_tokens=0)
++
++    @pytest.mark.asyncio
++    async def test_set_pricing_rejects_backdated_or_scheduled_conflict(self, monkeypatch):
++        """수동 PUT 포함 모든 경로에서 시간 역전 금지 — open 행이 미래 시작
++        예약 행이면 now 적용은 역전 행을 만들어 예약을 소실시킨다."""
++        from datetime import timedelta
++
++        from app.core.exceptions import ConflictError
++        from app.schemas.models import PricingRequest
++
++        prior = _make_pricing()
++        prior.effective_from = datetime.now(timezone.utc) + timedelta(days=7)
++        m = self._model()
++        repo = MagicMock()
++        repo.get_by_alias = AsyncMock(return_value=m)
++        repo.get_current_pricing = AsyncMock(return_value=prior)
++        monkeypatch.setattr(
++            "app.services.model_service.ModelRepository", lambda sess: repo
++        )
++        svc = ModelService(MagicMock())
++        with pytest.raises(ConflictError):
++            await svc.set_pricing(
++                MagicMock(),
++                alias="gpt-6.1-sol",
++                data=PricingRequest(
++                    input_price_per_1k_tokens=Decimal("0.001"),
++                    output_price_per_1k_tokens=Decimal("0.002"),
++                    effective_from=datetime.now(timezone.utc),
++                ),
++                actor=MagicMock(),
++            )
++
+     @pytest.mark.asyncio
+     async def test_expected_drift_rejects(self, monkeypatch):
+         """preview 승인값과 재수집 값이 다르면 적용 거부."""
+@@ -951,11 +1105,28 @@ class TestPriceSyncApply:
+             captured["data"] = data
+ 
+         svc.set_pricing = _capture
++        from app.schemas.models import PriceSyncExpected
++
+         out = await svc.apply_price_sync(
+             MagicMock(),
+             pricing_sync_service=self._sync_src(np),
+             aliases=["gpt-6.1-sol"],
+             actor=MagicMock(),
++            expected={
++                "gpt-6.1-sol": PriceSyncExpected(
++                    input_per_1k=Decimal("0.002"),
++                    output_per_1k=Decimal("0.01"),
++                    cache_5m_per_1k=Decimal("0.0025"),
++                    cache_1h_per_1k=Decimal("0.004"),
++                    cache_read_per_1k=Decimal("0.0002"),
++                    long_context_threshold_tokens=272000,
++                    long_input_per_1k=Decimal("0.004"),
++                    long_output_per_1k=Decimal("0.015"),
++                    long_cache_5m_per_1k=Decimal("0.005"),
++                    long_cache_1h_per_1k=Decimal("0.006"),
++                    long_cache_read_per_1k=Decimal("0.0004"),
++                )
++            },
+         )
+         assert out.applied == ["gpt-6.1-sol"]
+         req = captured["data"]
+diff --git a/projects/awsome-ai-gateway/admin-api/tests/unit/test_pricing_sync_service.py b/projects/awsome-ai-gateway/admin-api/tests/unit/test_pricing_sync_service.py
+index 84414343..58e43bb8 100644
+--- a/projects/awsome-ai-gateway/admin-api/tests/unit/test_pricing_sync_service.py
++++ b/projects/awsome-ai-gateway/admin-api/tests/unit/test_pricing_sync_service.py
+@@ -269,6 +269,24 @@ def test_fetch_result_lookup_global_boundary_never_crossed():
+     # us 엔트리만 있는 모델의 eu 행 → 교차 리전 금지
+     assert result.lookup("eu.anthropic.claude-fable-5") is None
+     assert result.lookup("anthropic.claude-nonexistent") is None
++    # 스택드 프리픽스("us.global.X")는 한 번 strip 하면 global.X 가 남아
++    # global 경계를 우회한다 — 미매칭이어야 한다.
++    assert result.lookup("us.global.anthropic.claude-opus-4-6") is None
++
++
++def test_litellm_zero_base_cache_derives_long_1h():
++    """기본 캐시 단가가 0 이면(유효 값) 구간 1h 파생은 비율이 아니라 표준 배수 —
++    0 으로 나누기 회피 + 결손 방지."""
++    svc = LiteLLMPricingSyncService(fetcher=None)
++    m = _llm_model("openai.gpt-z", 2e-06, 1e-05)
++    m["cache_creation_input_token_cost"] = 0
++    m["input_cost_per_token_above_272k_tokens"] = 4e-06
++    out = svc._normalize_models([m])
++    np = out.prices["openai.gpt-z"]
++    # 기본 5m=0(게시값), 1h=input*배수. 구간 1h 는 비율 대신 표준 배수.
++    assert np.cache_5m_per_1k == Decimal("0")
++    assert np.long_context_threshold_tokens == 272000
++    assert np.long_cache_1h_per_1k == np.long_input_per_1k * Decimal("2.0")
+ 
+ 
+ def test_litellm_long_context_tier_extracted():
+diff --git a/projects/awsome-ai-gateway/admin-ui/src/lib/actions/models.ts b/projects/awsome-ai-gateway/admin-ui/src/lib/actions/models.ts
+index 3a32a946..7d2c561a 100644
+--- a/projects/awsome-ai-gateway/admin-ui/src/lib/actions/models.ts
++++ b/projects/awsome-ai-gateway/admin-ui/src/lib/actions/models.ts
+@@ -233,6 +233,9 @@ export interface PriceSyncDiff {
+   long_context_threshold_tokens?: number | null;
+   proposed_long_input_per_1k?: string | null;
+   proposed_long_output_per_1k?: string | null;
++  proposed_long_cache_5m_per_1k?: string | null;
++  proposed_long_cache_1h_per_1k?: string | null;
++  proposed_long_cache_read_per_1k?: string | null;
+   changed: boolean;
+   /** 단가 동일해도 카탈로그 스펙(context_window/max_output_tokens)이 갱신되면 true. */
+   spec_changed?: boolean;
+@@ -302,6 +305,9 @@ export async function applyPriceSyncAction(
+         long_context_threshold_tokens: d.long_context_threshold_tokens ?? null,
+         long_input_per_1k: d.proposed_long_input_per_1k ?? null,
+         long_output_per_1k: d.proposed_long_output_per_1k ?? null,
++        long_cache_5m_per_1k: d.proposed_long_cache_5m_per_1k ?? null,
++        long_cache_1h_per_1k: d.proposed_long_cache_1h_per_1k ?? null,
++        long_cache_read_per_1k: d.proposed_long_cache_read_per_1k ?? null,
+       };
+     }
+   }

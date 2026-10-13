@@ -9,7 +9,7 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.clients import validate_clients
 from app.schemas.common import ApiFormatEnum, ProviderEnum
@@ -315,7 +315,8 @@ class PricingRequest(BaseModel):
     cache_derived: bool = False
     #: 구간 캐시 단가 중 파생 포함 여부(1h 구간은 항상 파생).
     long_cache_derived: bool = False
-    effective_from: datetime
+    #: aware 강제 — naive 는 timestamptz 행과의 비교에서 TypeError(500)를 유발한다.
+    effective_from: AwareDatetime
 
     @model_validator(mode="after")
     def _long_tier_is_one_unit(self):

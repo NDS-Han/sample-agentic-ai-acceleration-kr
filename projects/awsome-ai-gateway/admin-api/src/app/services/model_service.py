@@ -15,7 +15,9 @@ from app.core.cache_invalidation import (
     CacheInvalidationManager,
     invalidate_after_commit,
 )
-from app.core.exceptions import ConflictError, NotFoundError
+from pydantic import ValidationError as PydanticValidationError
+
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError
 from app.models.model import ApiFormat, ModelAlias, ModelPricing, ModelStatus, Provider
 from app.repositories.model_repository import ModelRepository
 from app.schemas.models import (
@@ -264,13 +266,14 @@ class ModelService:
         # 기본 단가 5개만 보낸다. 새 행이 그 6열을 NULL 로 두면 100K 초과 요청이 조용히 기본
         # 단가로 기록되므로(Haiku 5.5 는 1/5), 닫는 행의 값을 이어받는다. 닫기 **전에** 읽는다.
         prior = await repo.get_current_pricing(alias)
-        # 시간 역전 금지 — 새 행의 effective_from 이 현재 open 행보다 앞서면
+        # 시간 역전 금지 — 새 행의 effective_from 이 현재 open 행보다 **앞서면**
         # close_current_pricing 이 effective_until < effective_from 인 역전 행을
-        # 만든다. open 행이 미래 시작 예약 행일 때 now-적용이 이에 해당 → 예약 소실.
-        if prior is not None and data.effective_from <= prior.effective_from:
+        # 만든다. 같은 시각은 허용(예약 행 교정 — open 행이 미래 시작이면 제로-길이
+        # 행으로 닫히고 같은 from 의 새 행으로 대체된다).
+        if prior is not None and data.effective_from < prior.effective_from:
             raise ConflictError(
                 f"새 단가의 effective_from({data.effective_from.isoformat()})이 현재 open 행"
-                f"({prior.effective_from.isoformat()}) 이후여야 합니다 — 미래 시작 예약 행이 "
+                f"({prior.effective_from.isoformat()}) 이상이어야 합니다 — 미래 시작 예약 행이 "
                 "있으면 자동 덮어쓰기를 하지 않습니다"
             )
         # 요청이 구간 값을 싣지 않으면(None) 이전 행을 이어받는다 — 가격 동기화는
@@ -287,6 +290,22 @@ class ModelService:
             )
             for v in (getattr(data, f, None),)
         }
+        # threshold 가 해소됐는데 단가가 하나라도 결손이면 거부 — 수동 요청이
+        # in/out 만 싣고 캐시 구간을 비우면 cost_recorder 가 단락 요율로 폴백해
+        # 조용히 과소청구된다(첫 행이라 이어받을 것도 없는 경우).
+        if long_tier["long_context_threshold_tokens"] is not None and any(
+            long_tier[f] is None
+            for f in (
+                "long_context_input_price_per_1k_tokens",
+                "long_context_output_price_per_1k_tokens",
+                "long_context_cache_creation_5m_price_per_1k_tokens",
+                "long_context_cache_creation_1h_price_per_1k_tokens",
+                "long_context_cache_read_price_per_1k_tokens",
+            )
+        ):
+            raise ValidationError(
+                "장문 구간 threshold 가 설정되면 5개 구간 단가가 모두 필요합니다"
+            )
 
         # BR-MOD-02: Close current pricing, preserve history
         await repo.close_current_pricing(alias, data.effective_from)
@@ -442,6 +461,16 @@ class ModelService:
                 note = (note + " · " if note else "") + (
                     f"장문(>{long_vals['threshold']:,}tok) 단가 갱신"
                 )
+            elif (
+                cur is not None
+                and cur.long_context_threshold_tokens is not None
+                and is_changed
+            ):
+                # 소스(AWS Price List 등)가 구간 단가를 제공하지 않는데 기본 단가만
+                # 개정되면 이전 행의 구간이 그대로 이어져 부패한다 — 운영자에게 표시.
+                note = (note + " · " if note else "") + (
+                    "장문 구간 단가 미동기화(소스 미제공 — 이전 행 유지됨)"
+                )
             diffs.append(PriceSyncDiff(
                 alias=m.alias,
                 provider_model_id=m.provider_model_id,
@@ -508,7 +537,7 @@ class ModelService:
         skipped: list[str] = []
         errors: list[str] = list(fetched.errors)
 
-        for alias in aliases:
+        for alias in dict.fromkeys(aliases):  # 중복 제거 — 같은 alias 재적용 시 시간 가드 오발
             model = await repo.get_by_alias(alias)
             if model is None:
                 errors.append(f"{alias}: 모델 없음")
@@ -556,58 +585,52 @@ class ModelService:
                     f"{alias}: 미래 시작 예약 단가({_cur.effective_from.isoformat()})가 있어 자동 적용 보류"
                 )
                 continue
-            req = PricingRequest(
-                input_price_per_1k_tokens=np.input_per_1k.quantize(quantize),
-                output_price_per_1k_tokens=np.output_per_1k.quantize(quantize),
-                cache_creation_5m_price_per_1k_tokens=np.cache_5m_per_1k.quantize(quantize),
-                cache_creation_1h_price_per_1k_tokens=np.cache_1h_per_1k.quantize(quantize),
-                cache_read_price_per_1k_tokens=np.cache_read_per_1k.quantize(quantize),
-                cache_derived=np.cache_derived,
-                long_cache_derived=np.long_cache_derived,
-                long_context_threshold_tokens=np.long_context_threshold_tokens,
-                long_context_input_price_per_1k_tokens=(
-                    np.long_input_per_1k.quantize(quantize)
-                    if np.long_input_per_1k is not None else None
-                ),
-                long_context_output_price_per_1k_tokens=(
-                    np.long_output_per_1k.quantize(quantize)
-                    if np.long_output_per_1k is not None else None
-                ),
-                long_context_cache_creation_5m_price_per_1k_tokens=(
-                    np.long_cache_5m_per_1k.quantize(quantize)
-                    if np.long_cache_5m_per_1k is not None else None
-                ),
-                long_context_cache_creation_1h_price_per_1k_tokens=(
-                    np.long_cache_1h_per_1k.quantize(quantize)
-                    if np.long_cache_1h_per_1k is not None else None
-                ),
-                long_context_cache_read_price_per_1k_tokens=(
-                    np.long_cache_read_per_1k.quantize(quantize)
-                    if np.long_cache_read_per_1k is not None else None
-                ),
-                effective_from=now,
-            )
-            # 기존 set_pricing 재사용 → close_current_pricing + 새 행 + 캐시무효화 + SET_PRICING 감사
-            await self.set_pricing(
-                session, alias=alias, data=req, actor=actor,
-                ip_address=ip_address, request_id=request_id,
-            )
-            # 카탈로그가 스펙을 주면 같이 채운다 — LiteLLM만 제공, AWS 소스는 None.
-            # 모델 행은 캐시 키(model:{alias})를 공유하므로 변경 시 무효화 필요.
-            spec_changed = False
-            if np.context_window and model.context_window != np.context_window:
-                model.context_window = np.context_window
-                spec_changed = True
-            if np.max_output_tokens and model.max_output_tokens != np.max_output_tokens:
-                model.max_output_tokens = np.max_output_tokens
-                spec_changed = True
-            if spec_changed:
-                await session.flush()
-                await invalidate_after_commit(
-                    session,
-                    self._cache_mgr,
-                    [f"model:{alias}", f"model:pmid:{model.provider_model_id}"],
-                )
+            # per-alias savepoint — PricingRequest 검증 실패(범위 밖 카탈로그 값)
+            # 나 set_pricing 도메인 오류(시간 역전)가 발생해도 이 행만 롤백한다.
+            # 지연 Redis 쓰기는 savepoint 롤백을 따라 폐기되므로 정합 유지.
+            try:
+                async with session.begin_nested():
+                    req = PricingRequest(
+                        input_price_per_1k_tokens=np.input_per_1k.quantize(quantize),
+                        output_price_per_1k_tokens=np.output_per_1k.quantize(quantize),
+                        cache_creation_5m_price_per_1k_tokens=np.cache_5m_per_1k.quantize(quantize),
+                        cache_creation_1h_price_per_1k_tokens=np.cache_1h_per_1k.quantize(quantize),
+                        cache_read_price_per_1k_tokens=np.cache_read_per_1k.quantize(quantize),
+                        cache_derived=np.cache_derived,
+                        long_cache_derived=np.long_cache_derived,
+                        long_context_threshold_tokens=np.long_context_threshold_tokens,
+                        long_context_input_price_per_1k_tokens=_q(np.long_input_per_1k),
+                        long_context_output_price_per_1k_tokens=_q(np.long_output_per_1k),
+                        long_context_cache_creation_5m_price_per_1k_tokens=_q(np.long_cache_5m_per_1k),
+                        long_context_cache_creation_1h_price_per_1k_tokens=_q(np.long_cache_1h_per_1k),
+                        long_context_cache_read_price_per_1k_tokens=_q(np.long_cache_read_per_1k),
+                        effective_from=now,
+                    )
+                    # 기존 set_pricing 재사용 → close_current_pricing + 새 행 + 캐시무효화 + SET_PRICING 감사
+                    await self.set_pricing(
+                        session, alias=alias, data=req, actor=actor,
+                        ip_address=ip_address, request_id=request_id,
+                    )
+                    # 카탈로그가 스펙을 주면 같이 채운다 — LiteLLM만 제공, AWS 소스는 None.
+                    # 모델 행은 캐시 키(model:{alias})를 공유하므로 변경 시 무효화 필요.
+                    spec_changed = False
+                    if np.context_window and model.context_window != np.context_window:
+                        model.context_window = np.context_window
+                        spec_changed = True
+                    if np.max_output_tokens and model.max_output_tokens != np.max_output_tokens:
+                        model.max_output_tokens = np.max_output_tokens
+                        spec_changed = True
+                    if spec_changed:
+                        await session.flush()
+                        await invalidate_after_commit(
+                            session,
+                            self._cache_mgr,
+                            [f"model:{alias}", f"model:pmid:{model.provider_model_id}"],
+                        )
+            except (ConflictError, ValidationError, PydanticValidationError) as exc:
+                skipped.append(alias)
+                errors.append(f"{alias}: 적용 실패 — {exc}")
+                continue
             applied.append(alias)
 
         return PriceSyncApplyResponse(applied=applied, skipped=skipped, errors=errors)

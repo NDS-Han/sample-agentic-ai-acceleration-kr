@@ -808,6 +808,16 @@ class TestPriceSyncApply:
     """apply 안전 계약 — 미래 예약 행 보호(F3), 승인값 드리프트 거부(F4),
     장문 구간 값이 set_pricing 까지 흐름(F2)."""
 
+    def _session(self):
+        """begin_nested savepoint 를 정직하게 모사 — MagicMock 기본 __aexit__ 의
+        반환값은 truthy 라 예외를 삼켜버리므로 False 를 명시한다."""
+        sess = MagicMock()
+        ctx = MagicMock()
+        ctx.__aenter__ = AsyncMock(return_value=None)
+        ctx.__aexit__ = AsyncMock(return_value=False)
+        sess.begin_nested = MagicMock(return_value=ctx)
+        return sess
+
     def _repo_with(self, model, pricing=None):
         repo = MagicMock()
         repo.get_by_alias = AsyncMock(return_value=model)
@@ -868,7 +878,7 @@ class TestPriceSyncApply:
         svc.set_pricing = AsyncMock()
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),
@@ -891,7 +901,7 @@ class TestPriceSyncApply:
         svc.set_pricing = AsyncMock()
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),
@@ -931,7 +941,7 @@ class TestPriceSyncApply:
         svc.set_pricing = AsyncMock()
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(np),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),
@@ -982,6 +992,52 @@ class TestPriceSyncApply:
             PricingRequest(**base, long_context_threshold_tokens=0)
 
     @pytest.mark.asyncio
+    async def test_one_bad_alias_does_not_abort_batch(self, monkeypatch):
+        """예약 행 충돌 alias 가 있어도 나머지 alias 는 적용돼야 한다 —
+        배치가 단일 예외로 통째 롤백되면 안 된다(per-alias savepoint)."""
+        from datetime import timedelta
+
+        future_row = _make_pricing()
+        future_row.effective_from = datetime.now(timezone.utc) + timedelta(days=7)
+        normal_row = _make_pricing()
+        m1, m2 = self._model(), self._model()
+        m2.alias = "gpt-5.6-sol"
+        m2.provider_model_id = "global.openai.gpt-6.1-sol"  # 같은 카탈로그 키
+
+        repo = MagicMock()
+        repo.get_by_alias = AsyncMock(
+            side_effect=lambda a: {"gpt-6.1-sol": m1, "gpt-5.6-sol": m2}.get(a)
+        )
+        repo.get_current_pricing = AsyncMock(
+            side_effect=lambda a: future_row if a == "gpt-6.1-sol" else normal_row
+        )
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        svc.set_pricing = AsyncMock()
+
+        from app.schemas.models import PriceSyncExpected
+
+        exp = PriceSyncExpected(
+            input_per_1k=Decimal("0.002"),
+            output_per_1k=Decimal("0.01"),
+            cache_5m_per_1k=Decimal("0.0025"),
+            cache_1h_per_1k=Decimal("0.004"),
+            cache_read_per_1k=Decimal("0.0002"),
+        )
+        out = await svc.apply_price_sync(
+            self._session(),
+            pricing_sync_service=self._sync_src(),
+            aliases=["gpt-6.1-sol", "gpt-5.6-sol"],
+            actor=MagicMock(),
+            expected={"gpt-6.1-sol": exp, "gpt-5.6-sol": exp},
+        )
+        assert out.applied == ["gpt-5.6-sol"]
+        assert out.skipped == ["gpt-6.1-sol"]
+        svc.set_pricing.assert_awaited_once()  # 정상 행만
+
+    @pytest.mark.asyncio
     async def test_set_pricing_rejects_backdated_or_scheduled_conflict(self, monkeypatch):
         """수동 PUT 포함 모든 경로에서 시간 역전 금지 — open 행이 미래 시작
         예약 행이면 now 적용은 역전 행을 만들어 예약을 소실시킨다."""
@@ -1026,7 +1082,7 @@ class TestPriceSyncApply:
         svc.set_pricing = AsyncMock()
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),
@@ -1058,7 +1114,7 @@ class TestPriceSyncApply:
         svc.set_pricing = AsyncMock()
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),
@@ -1108,7 +1164,7 @@ class TestPriceSyncApply:
         from app.schemas.models import PriceSyncExpected
 
         out = await svc.apply_price_sync(
-            MagicMock(),
+            self._session(),
             pricing_sync_service=self._sync_src(np),
             aliases=["gpt-6.1-sol"],
             actor=MagicMock(),

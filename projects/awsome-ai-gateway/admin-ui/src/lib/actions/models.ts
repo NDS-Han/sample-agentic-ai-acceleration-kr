@@ -223,6 +223,11 @@ export interface PriceSyncDiff {
     cache_creation_5m_price_per_1k_tokens?: string;
     cache_creation_1h_price_per_1k_tokens?: string;
     cache_read_price_per_1k_tokens?: string;
+    long_context_input_price_per_1k_tokens?: string | null;
+    long_context_output_price_per_1k_tokens?: string | null;
+    long_context_cache_creation_5m_price_per_1k_tokens?: string | null;
+    long_context_cache_creation_1h_price_per_1k_tokens?: string | null;
+    long_context_cache_read_price_per_1k_tokens?: string | null;
   } | null;
   proposed_input_per_1k: string | null;
   proposed_output_per_1k: string | null;
