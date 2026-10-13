@@ -235,7 +235,7 @@ def test_retry_is_bounded():
 
 async def test_happy_path_opens_savepoint_once(session, key_service, actor):
     user_id = uuid.uuid4()
-    repo = _CountingRepo([(1, uuid.uuid4())])
+    repo = _CountingRepo([(1, uuid.uuid4(), [])])
     with _isolated(repo, user_id):
         await key_service.issue_key(session, user_id=user_id, actor=actor)
     assert repo.calls == 1, f"정상 경로에서 {repo.calls} 번 시도했다 — 1 이어야 한다"
@@ -247,7 +247,7 @@ async def test_happy_path_opens_savepoint_once(session, key_service, actor):
 async def test_first_attempt_conflict_succeeds_on_retry(session, key_service, actor):
     """동시 발급 경합 — 호출자는 예외를 보지 않아야 한다(CLI 로그인이 죽으면 안 된다)."""
     user_id = uuid.uuid4()
-    repo = _CountingRepo([_integrity(), (1, uuid.uuid4())])
+    repo = _CountingRepo([_integrity(), (1, uuid.uuid4(), [])])
     with _isolated(repo, user_id):
         result = await key_service.issue_key(session, user_id=user_id, actor=actor)
     assert result.virtual_key.startswith("vk-"), "재시도 후에도 정상 VK 를 돌려줘야 한다"

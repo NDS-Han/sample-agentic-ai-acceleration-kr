@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.exceptions import NotFoundError
+from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import ServiceToken
 from app.repositories.service_token_repository import ServiceTokenRepository
 from app.schemas.service_tokens import (
@@ -39,12 +39,14 @@ class ServiceTokenService:
         created_by: uuid.UUID,
         expiry_days: int | None = None,
         rotated_from: uuid.UUID | None = None,
+        expires_at: datetime | None = None,
     ) -> ServiceTokenCreateResponse:
         raw = SERVICE_TOKEN_PREFIX + secrets.token_hex(SERVICE_TOKEN_RANDOM_BYTES)
         token_prefix = raw[:12]  # "svc-a3b9c1d2"
         now = datetime.now(timezone.utc)
-        days = expiry_days if expiry_days is not None else SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS
-        expires_at = now + timedelta(days=days)
+        if expires_at is None:
+            days = expiry_days if expiry_days is not None else SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS
+            expires_at = now + timedelta(days=days)
 
         tok = ServiceToken(
             id=uuid.uuid4(),
@@ -110,13 +112,28 @@ class ServiceTokenService:
         if old is None:
             raise NotFoundError("ServiceToken", str(token_id))
 
+        now = datetime.now(timezone.utc)
+        if old.expires_at <= now:
+            raise ValidationError("expired service token cannot be rotated")
+        if old.revoked_at is not None and old.revoked_at <= now:
+            raise ValidationError("revoked service token cannot be rotated")
+
+        # 새 토큰 수명은 구 토큰의 잔여 수명을 넘지 못한다. 로테이션은 자격
+        # 교체이지 수명 연장이 아니다 — 이 상한이 없으면 유출된 토큰이 self-rotate
+        # 를 반복해 expires_at 을 무기한 밀어낼 수 있다. days 가 아니라
+        # expires_at 을 직접 넘겨 µs 단위 오버슛도 허용하지 않는다.
+        new_expires_at = min(
+            now + timedelta(days=SERVICE_TOKEN_DEFAULT_EXPIRY_DAYS), old.expires_at
+        )
+
         # Preserve the original human bootstrapper as the issuer of the new token.
         # On the rotate path the caller is always a service token, so `created_by`
         # is the synthetic service-token id which does NOT exist in auth.users and
         # would violate the service_tokens.created_by FK. old.created_by was a real
         # human admin from the original issue, so it is always FK-safe.
         resp = await self.issue(
-            session, name=old.name, created_by=old.created_by, rotated_from=old.id
+            session, name=old.name, created_by=old.created_by, rotated_from=old.id,
+            expires_at=new_expires_at,
         )
         grace_until = datetime.now(timezone.utc) + timedelta(hours=SERVICE_TOKEN_ROTATE_GRACE_HOURS)
         await repo.set_revoked_at(old.id, grace_until)

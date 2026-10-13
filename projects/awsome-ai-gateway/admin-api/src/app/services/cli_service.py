@@ -212,34 +212,21 @@ class CLIService:
 
     @staticmethod
     async def _cache_for_gateway(redis, user, user_budget) -> None:
-        """Cache budget config and model configs in Redis for Gateway Proxy."""
+        """Invalidate the user's budget config cache for Gateway Proxy."""
 
-        # Budget config — format must match what budget_check.lua expects.
-        #
-        # ⚠️ `redis.set` 을 직접 쓰면 안 된다. 이 페이로드에는 `app_clients`(앱별 하위
-        #    한도 게이트)가 없고, `ex=` 도 없어서 **기존 TTL 까지 버린다**(Redis SET 은
-        #    KEEPTTL 없이 TTL 을 폐기한다). 이 함수는 CLI 로그인과 OIDC 교환 **매번**
-        #    실행되므로, 예전 코드는 로그인 한 번으로 그 사용자의 앱별 예산 하위 한도를
-        #    영구히 꺼 버렸다 — 게이트웨이는 키가 **없을 때만** 재수화하기 때문에
-        #    present-and-persistent 가 된 키는 자가치유되지 않는다.
-        #    core/budget_cache.write_user_budget_config 는 Lua 로 병합하며 app_clients
-        #    를 보존하고 TTL 을 다시 건다.
+        # ⚠️ 이 키는 SET 하지 않는다 — DEL 만 한다(H3).
+        #    ``budget:config:user:{uid}`` 는 총액 필드와 ``app_clients`` 게이트를
+        #    공유하는데, 로그인 경로의 SET 은 세 가지로 깨졌다: app_clients 없는
+        #    페이로드로 클로버, 하드코딩 thresholds [80,90,100] 으로 운영자 설정
+        #    덮어쓰기, admin 커밋 후 DEL 과의 순서 경합으로 stale 스냅샷 잔류.
+        #    게이트웨이는 키 미스 시 ``ensure_config_cached`` 로 DB 에서 완전한
+        #    설정을 원자 재도출하므로 DEL 만 하면 된다 — 오래된 버전이 남긴
+        #    TTL 없는 잔존 키도 이 경로에서 자가치유된다.
         if user_budget:
-            from app.core.budget_cache import write_user_budget_config
-            from app.services.budget_service import BUDGET_CONFIG_CACHE_TTL
-
-            await write_user_budget_config(
-                redis,
-                user.id,
-                {
-                    "limit_usd": str(user_budget.max_budget_usd),
-                    "policy": user_budget.policy.value.lower(),
-                    "soft_limit_pct": 110,
-                    "throttle_rpm_pct": 50,
-                    "thresholds": [80, 90, 100],
-                },
-                BUDGET_CONFIG_CACHE_TTL,
-            )
+            try:
+                await redis.delete(f"budget:config:user:{{{user.id}}}")
+            except Exception:
+                logger.warning("cli_budget_config_invalidate_failed", user_id=str(user.id))
 
         # NOTE: Model config Redis cache 는 gateway-proxy 의 router_service 가 DB 에서
         # 동적으로 로드하여 관리 (ModelConfigSchema 포맷). admin-api 가 여기서 미리 넣던

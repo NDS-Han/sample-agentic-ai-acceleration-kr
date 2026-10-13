@@ -141,18 +141,10 @@ class TeamAllowedModelService:
         user_ids = [str(uid) for uid in result.scalars().all()]
         user_keys = [f"user_context:{uid}" for uid in user_ids]
 
-        # VK hash reverse index (populated at issue time)
-        try:
-            vk_hashes = await self._cache_mgr._redis.smembers(
-                f"team:vk_hashes:{team_id}"
-            )
-            vk_keys = [
-                f"key:cache:vk:{h.decode() if isinstance(h, bytes) else h}"
-                for h in vk_hashes
-            ]
-        except Exception:
-            vk_keys = []
-            logger.warning("team_allowed_models.vk_index_read_failed", team_id=str(team_id), exc_info=True)
+        # VK hash reverse index (populated at issue time) — 살아있는 해시만.
+        # live_vk_hashes 가 죽은 멤버를 srem 해 인덱스 무한 증가를 막는다.
+        vk_hashes = await self._cache_mgr.live_vk_hashes(team_id)
+        vk_keys = [f"key:cache:vk:{h}" for h in vk_hashes]
 
         all_keys = user_keys + vk_keys
         if all_keys:

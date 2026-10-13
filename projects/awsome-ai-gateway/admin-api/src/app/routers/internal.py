@@ -9,11 +9,14 @@ import hmac
 from fastapi import APIRouter, Depends, Request
 from fastapi import HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
+import structlog
 
 from app.core.auth import get_current_user
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.auth import UserRole
+
+logger = structlog.get_logger()
 
 router = APIRouter(tags=["Internal"])
 
@@ -180,23 +183,19 @@ async def test_issue_key(
         request_id=request.headers.get("x-request-id", ""),
     )
 
-    # Cache budget config in Redis
+    # Invalidate budget config in Redis — H3: 이 키는 SET 하지 않는다.
+    # app_clients 없는 페이로드 클로버 + 하드코딩 thresholds + ex= 없는 SET
+    # (TTL 까지 폐기)이라 로그인마다 그 사용자의 앱별 예산 게이트와 운영자
+    # 임계값을 깎았다. 게이트웨이가 미스 시 DB 에서 완전히 재도출하므로 DEL 만
+    # 한다 — 예전 버전이 남긴 TTL 없는 잔존 키의 자가치유 경로이기도 하다.
     redis = request.app.state.redis
     budget_repo = BudgetRepository(session)
     user_budget = await budget_repo.get_active_config(BudgetScope.USER, user.id)
     if user_budget:
-        import json
-
-        await redis.set(
-            f"budget:config:user:{{{user.id}}}",
-            json.dumps({
-                "limit_usd": str(user_budget.max_budget_usd),
-                "policy": user_budget.policy.value.lower(),
-                "soft_limit_pct": 110,
-                "throttle_rpm_pct": 50,
-                "thresholds": [80, 90, 100],
-            }),
-        )
+        try:
+            await redis.delete(f"budget:config:user:{{{user.id}}}")
+        except Exception:
+            logger.warning("internal_budget_config_invalidate_failed", user_id=str(user.id))
 
     # NOTE: 모델 config Redis 캐시는 gateway-proxy 의 router_service 가 DB 에서
     # 동적 로드/관리. 여기서 미리 쓰던 fallback 은 옛 스키마 (model_id / BEDROCK / active)

@@ -155,11 +155,10 @@ class TestSetTeamBudget:
     ):
         """금액만 바꾼 저장이 policy/thresholds 를 기본값으로 리셋하면 안 된다.
 
-        다이얼로그가 두 필드를 생략하면: policy 는 직전 config 행에서,
-        thresholds 는 Redis(유일한 저장소)에서 이어받는다.
+        다이얼로그가 두 필드를 생략하면: policy 와 thresholds 둘 다 직전 config
+        행의 DB 값에서 이어받는다(migration 0041 컬럼이 원천 — Redis 캐시는
+        부재·지연될 수 있다).
         """
-        import json as _json
-
         team_id = uuid.uuid4()
         data = SetBudgetRequest(max_budget_usd=Decimal("2000.00"))
         assert "policy" not in data.model_fields_set
@@ -168,16 +167,11 @@ class TestSetTeamBudget:
         latest = MagicMock(spec=BudgetConfig)
         latest.default_user_cap_usd = None
         latest.policy = BudgetPolicy.SOFT_WARNING
-
-        fake_redis = MagicMock()
-        fake_redis.get = AsyncMock(
-            return_value=_json.dumps({"thresholds": [50, 75]})
-        )
-        budget_service._cache_mgr._redis = fake_redis
+        latest.alert_thresholds = [50, 75]
 
         synced = {}
 
-        async def _capture_sync(scope, sid, **kw):
+        async def _capture_sync(sid, **kw):
             synced.update(kw)
 
         written = []
@@ -232,23 +226,16 @@ class TestSetTeamBudget:
 
 
 class TestGetBudgetConfig:
-    async def test_returns_db_policy_and_redis_thresholds(
+    async def test_returns_db_policy_and_thresholds(
         self, budget_service: BudgetService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
-        import json as _json
-
         scope_id = uuid.uuid4()
         cfg = MagicMock(spec=BudgetConfig)
         cfg.is_active = True
         cfg.max_budget_usd = Decimal("500.00")
         cfg.policy = BudgetPolicy.THROTTLE
         cfg.default_user_cap_usd = Decimal("20.00")
-
-        fake_redis = MagicMock()
-        fake_redis.get = AsyncMock(
-            return_value=_json.dumps({"thresholds": [90, 60], "policy": "throttle"})
-        )
-        budget_service._cache_mgr._redis = fake_redis
+        cfg.alert_thresholds = [90, 60]
 
         with patch("app.services.budget_service.BudgetRepository") as MockBudgetRepo:
             MockBudgetRepo.return_value.get_latest_config = AsyncMock(return_value=cfg)
@@ -999,35 +986,29 @@ class TestGetBudgetSummary:
 
 @pytest.mark.asyncio
 async def test_sync_redis_thresholds_sets_5min_ttl(budget_service):
-    """USER 예산 설정 캐시는 5분 TTL 이어야 한다(Z 정책).
+    """TEAM 예산 설정 캐시는 5분 TTL 이어야 한다(Z 정책).
 
-    ⚠️ USER 경로는 이제 `redis.set` 이 아니라 **Lua(`redis.eval`)** 로 쓴다 —
-       app_clients 를 애플리케이션에서 GET-modify-SET 하면 로그인/동시 요청이 서로의
-       필드를 지웠기 때문이다(core/budget_cache.py 참조). TTL 은 스크립트의 ARGV[2] 로
-       넘어가므로 그 인자를 검사한다. 계약은 그대로다: 5분.
+    ⚠️ 이 함수는 이제 TEAM 키만 쓴다 — ``budget:config:user:*`` 는 DEL-only
+       (H3). 키 이름에 team scope 가 박혀 있는지도 함께 확인한다.
     """
+    team_id = uuid.UUID("00000000-0000-4000-a000-000000000001")
     fake_redis = MagicMock()
     fake_redis.set = AsyncMock()
-    fake_redis.eval = AsyncMock(return_value=1)
     budget_service._cache_mgr._redis = fake_redis
 
     await budget_service._sync_redis_thresholds(
-        "user",
-        uuid.UUID("00000000-0000-4000-a000-000000000001"),
+        team_id,
         max_budget_usd=Decimal("100"),
         policy=BudgetPolicy.HARD_BLOCK,
         alert_thresholds=[80, 90, 100],
     )
 
-    fake_redis.eval.assert_awaited_once()
-    args = fake_redis.eval.await_args.args
-    # eval(script, numkeys, key, payload_json, ttl_str)
-    assert args[1] == 1, "단일 키 스크립트여야 한다(클러스터 슬롯 안전)"
-    assert str(BUDGET_CONFIG_CACHE_TTL) in args[4], (
-        f"USER budget config cache 는 5분 TTL 이어야 함 (Z 정책). 받은 인자: {args[4]!r}"
+    fake_redis.set.assert_awaited_once()
+    args, kwargs = fake_redis.set.await_args
+    assert args[0] == f"budget:config:team:{{{team_id}}}"
+    assert kwargs.get("ex") == BUDGET_CONFIG_CACHE_TTL, (
+        f"TEAM budget config cache 는 5분 TTL 이어야 함 (Z 정책)"
     )
-    # ⚠️ 이 경로에서 redis.set 을 쓰면 안 된다 — 그게 클로버의 형태다.
-    fake_redis.set.assert_not_called()
 
 
 @pytest.mark.asyncio

@@ -280,10 +280,16 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
 
     role 은 DB 값이 아니라 **현재 토큰의 그룹**으로 판정한다. IdP 에서 관리자 그룹을
     떼어낸 사용자가 DB 에 ADMIN 으로 남아 있는 동안 계속 ADMIN 으로 도는 것을 막아야
-    한다(권한 회수가 즉시 반영되어야 하는 방향). 단, 그룹으로 ADMIN 이 아니어도 DB
-    role 이 더 높으면 그쪽을 쓴다 — 그룹 매핑을 안 쓰는 운영 형태를 깨지 않기 위해서다.
+    한다(권한 회수가 즉시 반영되어야 하는 방향). 단, ADMIN 매핑(그룹/이메일)을
+    아예 설정하지 않은 운영 형태에서는 ``derive_role`` 이 ADMIN 을 낼 수 없으므로
+    DB role 을 그대로 신뢰한다 — 안 그러면 수동 부여한 관리자가 전원 잠긴다.
     """
-    from app.core.oidc_identity import derive_role, extract_claims, required_group_missing
+    from app.core.oidc_identity import (
+        admin_mapping_configured,
+        derive_role,
+        extract_claims,
+        required_group_missing,
+    )
     from app.repositories.user_repository import UserRepository
 
     parsed = extract_claims(claims)
@@ -310,8 +316,16 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="user_deactivated")
 
-    role_from_groups = derive_role(parsed.email or (user.email or ""), parsed.groups)
-    role = UserRole.ADMIN if UserRole.ADMIN in (role_from_groups, user.role) else user.role
+    role_from_claims = derive_role(parsed.email or (user.email or ""), parsed.groups)
+    if role_from_claims == UserRole.ADMIN:
+        role = UserRole.ADMIN
+    elif user.role == UserRole.ADMIN and admin_mapping_configured():
+        # ADMIN 출처가 IdP 로 설정된 환경에서 토큰이 더 이상 ADMIN 을 내지 않는다
+        # — 그룹 회수(또는 ADMIN_EMAILS 제외)다. DB role 은 마지막 로그인 시점의
+        # 스냅샷일 뿐이라 그대로 쓰면 회수가 영구 지연된다.
+        role = UserRole.DEVELOPER
+    else:
+        role = user.role
 
     return CurrentUser(
         user_id=user.id,

@@ -251,7 +251,9 @@ class OIDCVerifier:
                     "verify_exp": True,
                     "verify_nbf": True,
                     "verify_iat": True,
-                    "verify_aud": self._audience is not None,
+                    # aud 는 아래서 수동 검증 — Cognito access_token 은 aud 가
+                    # 없고 client_id 만 있어 jose 의 verify_aud 로는 못 받는다.
+                    "verify_aud": False,
                     "verify_iss": True,
                     "require_exp": True,
                     "require_iat": True,
@@ -271,7 +273,23 @@ class OIDCVerifier:
         except JWTError as e:
             raise OIDCVerifyError(str(e)) from e
 
-        # 5. sub 필수 (auto-provisioning 식별자)
+        # 5. audience — 다른 앱 클라이언트용 토큰(같은 IdP, 다른 aud)의
+        #    confused-deputy 수용 차단. 표준 aud 또는 Cognito access_token 의
+        #    client_id 중 하나가 설정된 audience 와 일치해야 한다.
+        if self._audience is not None:
+            aud = payload.get("aud")
+            auds = aud if isinstance(aud, list) else ([aud] if aud else [])
+            if self._audience not in auds and payload.get("client_id") != self._audience:
+                raise OIDCVerifyError("audience mismatch")
+
+        # 6. token_use — Cognito 는 access|id 를 낸다. 다른 값(또는 IdP 가
+        #    token_use 를 싣는 경우의 비표준 값)은 거부한다. 클레임 자체가
+        #    없는 IdP(Keycloak 등)는 이 단계를 통과한다.
+        token_use = payload.get("token_use")
+        if token_use is not None and token_use not in ("access", "id"):
+            raise OIDCVerifyError(f"token_use not allowed: {token_use}")
+
+        # 7. sub 필수 (auto-provisioning 식별자)
         if not payload.get("sub"):
             raise OIDCVerifyError("missing 'sub' claim")
 

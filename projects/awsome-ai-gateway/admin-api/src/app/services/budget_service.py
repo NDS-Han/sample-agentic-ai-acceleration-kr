@@ -13,12 +13,7 @@ from sqlalchemy import func, select as sa_select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.clients import CLIENT_ORDER
-from app.core.budget_cache import (
-    defer_redis_write_until_commit,
-    read_budget_config,
-    refresh_user_app_clients,
-    write_user_budget_config,
-)
+from app.core.budget_cache import defer_redis_write_until_commit
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import (
@@ -186,6 +181,9 @@ class BudgetService:
         """
         results: list[SeedSpentResult] = []
         user_repo = UserRepository(session)
+        # 성공한 item 의 (redis_key, value) — outer commit 까지 지연한다.
+        # 커밋 전 SET 은 롤백 시 DB 에 없는 지출액을 게이트웨이에 광고한다(§6-6).
+        pending_sets: list[tuple[str, str]] = []
 
         for item in items:
             scope = item.scope.upper()
@@ -195,86 +193,101 @@ class BudgetService:
                 period=item.period, status="ok",
             )
             try:
-                # --- validation ---
-                if scope not in ("USER", "TEAM"):
-                    raise ValueError(f"invalid scope: {item.scope}")
-                if not _PERIOD_RE.match(item.period):
-                    raise ValueError(f"invalid period format: {item.period} (expected YYYY-MM)")
-                if client is not None:
-                    if scope != "USER":
-                        raise ValueError("client is only valid with scope=USER")
-                    if client not in _ALLOWED_CLIENTS:
-                        raise ValueError(f"invalid client: {client}")
-                sid = uuid.UUID(item.scope_id)
-                if scope == "USER":
-                    if await user_repo.get_user(sid) is None:
-                        raise ValueError("user not found")
-                else:
-                    if await user_repo.get_team(sid) is None:
-                        raise ValueError("team not found")
+                # SAVEPOINT 격리 — 한 item 의 DB 실패가 외부 트랜잭션을 중단 상태로
+                # 만들면 이후 모든 item 과 최종 commit 이 연쇄 실패한다.
+                async with session.begin_nested():
+                    # --- validation ---
+                    if scope not in ("USER", "TEAM"):
+                        raise ValueError(f"invalid scope: {item.scope}")
+                    if not _PERIOD_RE.match(item.period):
+                        raise ValueError(f"invalid period format: {item.period} (expected YYYY-MM)")
+                    if client is not None:
+                        if scope != "USER":
+                            raise ValueError("client is only valid with scope=USER")
+                        if client not in _ALLOWED_CLIENTS:
+                            raise ValueError(f"invalid client: {client}")
+                    sid = uuid.UUID(item.scope_id)
+                    if scope == "USER":
+                        if await user_repo.get_user(sid) is None:
+                            raise ValueError("user not found")
+                    else:
+                        if await user_repo.get_team(sid) is None:
+                            raise ValueError("team not found")
 
-                # --- before value ---
-                before_row = await session.execute(
-                    self._SEED_SELECT_BEFORE,
-                    {"scope": scope, "scope_id": str(sid), "period": item.period, "client": client},
-                )
-                before = before_row.scalar_one_or_none()
-                res.before_usd = Decimal(str(before)) if before is not None else Decimal("0")
-
-                # --- DB upsert (overwrite) ---
-                await session.execute(
-                    self._SEED_UPSERT,
-                    {"scope": scope, "scope_id": str(sid), "period": item.period,
-                     "client": client, "spent": item.spent_usd},
-                )
-
-                # --- Redis SET (best-effort; DB is source of truth) ---
-                redis_key = _redis_usage_key(scope, str(sid), item.period, client)
-                try:
-                    await self._cache_mgr._redis.set(redis_key, str(item.spent_usd))
-                except Exception:
-                    logger.warning("seed_spent.redis_set_failed", key=redis_key)
-
-                # Per-app seed must also refresh the total key (client=None) so
-                # enforcement sees the correct aggregate.
-                if client is not None and scope == "USER":
-                    from sqlalchemy import text as sa_text
-                    total_row = await session.execute(
-                        sa_text(
-                            # ⚠️ client IS NULL = 총합 행만 — per-app 행까지 더하면
-                            #    Redis 집행 카운터가 실비의 ~2배로 부풀어 거짓
-                            #    budget_exceeded 를 만든다.
-                            "SELECT COALESCE(SUM(used_usd), 0) "
-                            "FROM budget.budget_usages "
-                            "WHERE scope = 'USER' AND scope_id = :sid AND period = :period "
-                            "AND client IS NULL"
-                        ),
-                        {"sid": str(sid), "period": item.period},
+                    # --- before value ---
+                    before_row = await session.execute(
+                        self._SEED_SELECT_BEFORE,
+                        {"scope": scope, "scope_id": str(sid), "period": item.period, "client": client},
                     )
-                    total_val = total_row.scalar() or 0
-                    total_key = _redis_usage_key(scope, str(sid), item.period, None)
-                    try:
-                        await self._cache_mgr._redis.set(total_key, str(total_val))
-                    except Exception:
-                        logger.warning("seed_spent.redis_total_refresh_failed", key=total_key)
+                    before = before_row.scalar_one_or_none()
+                    res.before_usd = Decimal(str(before)) if before is not None else Decimal("0")
 
-                res.after_usd = item.spent_usd
+                    # --- DB upsert (overwrite) ---
+                    await session.execute(
+                        self._SEED_UPSERT,
+                        {"scope": scope, "scope_id": str(sid), "period": item.period,
+                         "client": client, "spent": item.spent_usd},
+                    )
 
-                await audit_logger.log(
-                    session,
-                    actor_user_id=actor.user_id,
-                    actor_role=actor.role.value,
-                    action="SEED_BUDGET_SPENT",
-                    resource_type="BudgetUsage",
-                    resource_id=f"{scope}:{sid}:{client or ''}:{item.period}",
-                    changes={"before": str(res.before_usd), "after": str(item.spent_usd)},
-                    ip_address=ip_address,
-                    request_id=request_id,
-                )
+                    redis_key = _redis_usage_key(scope, str(sid), item.period, client)
+
+                    # Per-app seed must also refresh the total key (client=None) so
+                    # enforcement sees the correct aggregate. 같은 트랜잭션 내
+                    # SELECT 라 방금 upsert 한 값을 본다.
+                    total_key: str | None = None
+                    total_val = None
+                    if client is not None and scope == "USER":
+                        from sqlalchemy import text as sa_text
+                        total_row = await session.execute(
+                            sa_text(
+                                # ⚠️ client IS NULL = 총합 행만 — per-app 행까지 더하면
+                                #    Redis 집행 카운터가 실비의 ~2배로 부풀어 거짓
+                                #    budget_exceeded 를 만든다.
+                                "SELECT COALESCE(SUM(used_usd), 0) "
+                                "FROM budget.budget_usages "
+                                "WHERE scope = 'USER' AND scope_id = :sid AND period = :period "
+                                "AND client IS NULL"
+                            ),
+                            {"sid": str(sid), "period": item.period},
+                        )
+                        total_val = total_row.scalar() or 0
+                        total_key = _redis_usage_key(scope, str(sid), item.period, None)
+
+                    res.after_usd = item.spent_usd
+
+                    await audit_logger.log(
+                        session,
+                        actor_user_id=actor.user_id,
+                        actor_role=actor.role.value,
+                        action="SEED_BUDGET_SPENT",
+                        resource_type="BudgetUsage",
+                        resource_id=f"{scope}:{sid}:{client or ''}:{item.period}",
+                        changes={"before": str(res.before_usd), "after": str(item.spent_usd)},
+                        ip_address=ip_address,
+                        request_id=request_id,
+                    )
             except Exception as exc:
                 res.status = "error"
                 res.error = str(exc)
+            else:
+                # savepoint 를 빠져나온 item 만 Redis 갱신 대상 — 실패 item 의
+                # deferred write 가 외부 commit 시 실행되는 걸 막는다.
+                pending_sets.append((redis_key, str(item.spent_usd)))
+                if total_key is not None:
+                    pending_sets.append((total_key, str(total_val)))
             results.append(res)
+
+        if pending_sets:
+            redis = self._cache_mgr._redis
+
+            async def _write_seeded(sets: list[tuple[str, str]] = pending_sets) -> None:
+                for k, v in sets:
+                    try:
+                        await redis.set(k, v)
+                    except Exception:
+                        logger.warning("seed_spent.redis_set_failed", key=k)
+
+            await defer_redis_write_until_commit(session, _write_seeded)
 
         succeeded = sum(1 for r in results if r.status == "ok")
         return SeedSpentResponse(
@@ -317,16 +330,10 @@ class BudgetService:
         cfg = await BudgetRepository(session).get_latest_config(scope, scope_id)
         if cfg is None or not cfg.is_active:
             return BudgetConfigDetailResponse(configured=False)
-        cached = await read_budget_config(
-            self._cache_mgr._redis,
-            f"budget:config:{scope.value.lower()}:{{{scope_id}}}",
-        )
-        prev = cached.get("thresholds") if cached else None
-        thresholds = (
-            sorted(v for v in prev if isinstance(v, int))
-            if isinstance(prev, list)
-            else None
-        )
+        # thresholds 원천은 DB 컬럼이다(migration 0041) — Redis 설정 키는 캐시일
+        # 뿐이고 미스/경합으로 부재·지연될 수 있어 응답에 쓰면 운영자 설정과
+        # 어긋난다.
+        thresholds = sorted(cfg.alert_thresholds)
         return BudgetConfigDetailResponse(
             configured=True,
             max_budget_usd=cfg.max_budget_usd,
@@ -340,15 +347,15 @@ class BudgetService:
         data: SetBudgetRequest,
         *,
         latest: BudgetConfig | None,
-        config_key: str,
     ) -> tuple[BudgetPolicy, list[int]]:
         """policy/alert_thresholds 미전송 시 기존값을 보존한다.
 
         SetBudgetRequest 에 스키마 기본값이 있어 "관리자가 기본값을 골랐다" 와
         "키를 안 보냈다" 는 ``model_fields_set`` 으로만 구분된다 — 다이얼로그가
         금액만 바꿔 저장해도 enforcement 정책이 기본값으로 리셋되지 않게 한다.
-        thresholds 의 기존값은 Redis(유일한 저장소)에서 읽고, 캐시 미스면
-        스키마 기본값으로 돌아간다(게이트웨이도 키 미스 시 같은 기본값을 쓴다).
+        기존 thresholds 는 DB 컬럼(migration 0041, NOT NULL)에서 읽는다 —
+        Redis 설정 키에서 읽던 시절에는 캐시 미스/경합 시 스키마 기본값으로
+        되돌아가는 함정이 있었다.
         """
         fields = data.model_fields_set
         if "policy" in fields:
@@ -358,11 +365,9 @@ class BudgetService:
         if "alert_thresholds" in fields:
             thresholds = list(data.alert_thresholds)
         else:
-            cached = await read_budget_config(self._cache_mgr._redis, config_key)
-            prev = cached.get("thresholds") if cached else None
             thresholds = (
-                [v for v in prev if isinstance(v, int)]
-                if isinstance(prev, list) and prev
+                list(latest.alert_thresholds)
+                if latest is not None
                 else list(data.alert_thresholds)
             )
         return policy, thresholds
@@ -399,7 +404,7 @@ class BudgetService:
         old_cap = latest.default_user_cap_usd if latest else None
 
         policy, alert_thresholds = await self._resolve_policy_thresholds(
-            data, latest=latest, config_key=f"budget:config:team:{{{team_id}}}"
+            data, latest=latest
         )
 
         # 확인 필요 사유를 모두 수집해 한 번에 409 로 돌린다 — 첫 409 에서 못 본
@@ -463,7 +468,7 @@ class BudgetService:
         await defer_redis_write_until_commit(
             session,
             lambda: self._sync_redis_thresholds(
-                "team", team_id,
+                team_id,
                 max_budget_usd=data.max_budget_usd,
                 policy=policy,
                 alert_thresholds=alert_thresholds,
@@ -735,8 +740,7 @@ class BudgetService:
                     cleared_users += 1
                     cleared_app_keys.append(f"budget:config:user:{{{m.id}}}")
                     # per-app 키(`budget:config:user:{uid}:{client}`)는 이미
-                    # cleared_app_keys 에 수집돼 아래 invalidate 가 DEL 한다 —
-                    # 별도 _delete_redis_app_config 루프는 중복이라 제거.
+                    # cleared_app_keys 에 수집돼 아래 invalidate 가 DEL 한다.
 
         cfg.default_user_cap_usd = cap_d
         await session.flush()
@@ -821,7 +825,7 @@ class BudgetService:
 
         latest = await repo.get_latest_config(BudgetScope.USER, user_id)
         policy, alert_thresholds = await self._resolve_policy_thresholds(
-            data, latest=latest, config_key=f"budget:config:user:{{{user_id}}}"
+            data, latest=latest
         )
 
         # D-4/I-2 거부: A_u_new < max(app_c) → 하위 앱 cap 이 부모를 넘는 모순.
@@ -871,18 +875,16 @@ class BudgetService:
         )
         await repo.upsert_config(config)
 
+        # H3: 이 키는 DEL-only 다 — 커밋 후 SET 으로 데우지 않는다.
+        # ``budget:config:user:{uid}`` 는 총액 필드와 ``app_clients`` 게이트가
+        # 공유하므로, 어느 쪽의 지연 SET 도 다른 쪽 커밋과 얽혀 마지막에 도착한
+        # stale 스냅샷이 TTL(300s) 동안 이길 수 있다. 유저 단위 락은 트랜잭션만
+        # 직렬화하고 지연 태스크 실행 순서는 보장하지 않는다. 게이트웨이는 키
+        # 미스 시 ``ensure_config_cached`` 로 DB 에서 완전한 설정(총액+
+        # thresholds+app_clients)을 원자 재도출하므로, DEL 만이 교환
+        # 가능(commutative)하고 안전한 쓰기다.
         await invalidate_after_commit(
             session, self._cache_mgr, [f"budget:config:user:{{{user_id}}}"]
-        )
-
-        await defer_redis_write_until_commit(
-            session,
-            lambda: self._sync_redis_thresholds(
-                "user", user_id,
-                max_budget_usd=data.max_budget_usd,
-                policy=policy,
-                alert_thresholds=alert_thresholds,
-            ),
         )
 
         await audit_logger.log(
@@ -971,10 +973,6 @@ class BudgetService:
             session,
             self._cache_mgr,
             invalidate_keys,
-            extra=[
-                (lambda c=c: self._delete_redis_app_config(user_id, c))
-                for c in cascaded
-            ],
         )
 
         await audit_logger.log(
@@ -1100,9 +1098,7 @@ class BudgetService:
         # 총액과 동일한 보존 규칙 — 앱 cap 금액만 바꿔도 정책이 기본값으로 리셋되지 않게.
         latest_app = await repo.get_first_active_app_config(BudgetScope.USER, user_id, client)
         policy, alert_thresholds = await self._resolve_policy_thresholds(
-            data,
-            latest=latest_app,
-            config_key=f"budget:config:user:{{{user_id}}}:{client}",
+            data, latest=latest_app
         )
 
         config = BudgetConfig(
@@ -1123,15 +1119,13 @@ class BudgetService:
         )
         await repo.upsert_config(config)
 
-        # P0-③ durability: DURABLY invalidate (DEL via retry infra → recorded to
-        # cache_invalidation_failures on failure) BOTH the per-app config key AND
-        # the parent user-config key (whose app_clients list just changed). The
-        # subsequent _sync_redis_app_config/_write_user_app_clients SETs are
-        # best-effort cache-warmers ONLY, deferred until commit — a rollback
-        # never advertises uncommitted budgets, and if they fail the durable DEL
-        # guarantees the gateway sees a miss and rehydrates from DB
-        # (ensure_config_cached), rather than enforcing a stale app_clients that
-        # silently bypasses the per-app limit forever.
+        # P0-③ durability + H3: 두 키 모두 DEL-only — 커밋 후 SET/refresh 로
+        # 데우지 않는다. per-app SET 이나 app_clients refresh 가 다른 요청의
+        # 지연 DEL·SET 과 얽혀 마지막에 도착하면 stale 스냅샷이 TTL 동안 이기고,
+        # refresh 는 키 부재 시 조용히 no-op 이라 최신 app_clients 가 유실될 수
+        # 있다. 게이트웨이는 두 키 모두 미스 시 DB 에서 재도출한다
+        # (ensure_config_cached / _hydrate_client_config_cache) — DEL 만이
+        # 교환 가능하고 안전한 쓰기다.
         await invalidate_after_commit(
             session,
             self._cache_mgr,
@@ -1139,22 +1133,6 @@ class BudgetService:
                 f"budget:config:user:{{{user_id}}}:{client}",
                 f"budget:config:user:{{{user_id}}}",
             ],
-        )
-
-        await defer_redis_write_until_commit(
-            session,
-            lambda: self._sync_redis_app_config(
-                user_id, client,
-                max_budget_usd=data.max_budget_usd,
-                policy=policy,
-                alert_thresholds=alert_thresholds,
-            ),
-        )
-        # DB 읽기는 트랜잭션 안에서 — 지연 쓰기는 Redis 만 건드린다.
-        active_clients = await repo.list_active_app_clients(user_id)
-        await defer_redis_write_until_commit(
-            session,
-            lambda: self._write_user_app_clients(user_id, active_clients),
         )
 
         await audit_logger.log(
@@ -1215,8 +1193,9 @@ class BudgetService:
         existing.is_active = False
         await session.flush()
 
-        # P0-③ durability: durably DEL both the per-app key and the parent
-        # user-config key (app_clients list shrank). See set_user_client_budget.
+        # P0-③ durability + H3: durably DEL both the per-app key and the parent
+        # user-config key (app_clients list shrank). DEL-only — 게이트웨이가
+        # 미스 시 DB 에서 재도출한다. See set_user_client_budget.
         await invalidate_after_commit(
             session,
             self._cache_mgr,
@@ -1224,14 +1203,6 @@ class BudgetService:
                 f"budget:config:user:{{{user_id}}}:{client}",
                 f"budget:config:user:{{{user_id}}}",
             ],
-        )
-
-        # per-app 키는 위 invalidate 목록(`budget:config:user:{uid}:{client}`)에
-        # 이미 포함 — 별도 _delete_redis_app_config 호출은 중복이라 제거.
-        active_clients = await repo.list_active_app_clients(user_id)
-        await defer_redis_write_until_commit(
-            session,
-            lambda: self._write_user_app_clients(user_id, active_clients),
         )
 
         await audit_logger.log(
@@ -1873,110 +1844,40 @@ class BudgetService:
             logger.warning("redis_team_config_cache_write_failed", scope_id=str(scope_id))
 
     async def _sync_redis_thresholds(
-        self, scope_type: str, scope_id: uuid.UUID,
+        self, scope_id: uuid.UUID,
         *,
         max_budget_usd: Decimal,
         policy: BudgetPolicy,
         alert_thresholds: list[int],
         default_cap: Decimal | None = None,
     ) -> None:
+        """TEAM config 키만 쓴다 — ``budget:config:user:*`` 키는 DEL-only
+        (H3: 지연 SET 이 다른 커밋과 얽혀 stale 스냅샷이 TTL 동안 이기는 것을
+        막기 위해 admin-api 는 user-scope 설정 키를 SET 하지 않는다. 팀 키는
+        공유 필드가 없는 완전 페이로드라 SET 이 안전하다)."""
         import json
         try:
             redis = self._cache_mgr._redis
-            config_key = f"budget:config:{scope_type}:{{{scope_id}}}"
+            config_key = f"budget:config:team:{{{scope_id}}}"
             # budget_check.lua / budget_deduct.lua compare policy against lowercase
             # constants ('hard_block', 'soft_warning', 'throttle'). admin-api's
             # BudgetPolicy enum stores UPPERCASE values; convert here so enforcement
-            # actually fires on the Redis fast path. Other admin-api paths that
-            # write this key (cli_service, internal.py) already use .lower().
+            # actually fires on the Redis fast path.
             config_data = {
                 "limit_usd": str(max_budget_usd),
                 "policy": policy.value.lower(),
                 "thresholds": sorted(alert_thresholds),
-            }
-            if scope_type == "team":
                 # team 캐시에만 D 를 싣는다 — gateway 가 미설정 멤버 cap_u 를
                 # 읽는 유일한 경로(§6-6).
-                config_data["default_user_cap_usd"] = (
+                "default_user_cap_usd": (
                     str(default_cap) if default_cap is not None else None
-                )
-            # ⚠️ app_clients 보존을 **애플리케이션에서** GET-modify-SET 으로 하면 안 된다.
-            #    `await redis.get` 이 이벤트 루프를 양보하므로 uvicorn 워커 하나 안에서도
-            #    두 요청(set_user_budget / set_user_client_budget /
-            #    clear_user_client_budget)이 교차하고, 나중에 SET 하는 쪽이 상대의 필드를
-            #    지운다. 그리고 그 손실은 조용하다 — budget_check.lua 는 없는 필드를
-            #    빈 테이블로 읽고, 게이트웨이는 앱별 예산 평가를 통째로 건너뛴다.
-            #    Lua 로 Redis 안에서 병합한다(core/budget_cache.py).
-            if scope_type == "user":
-                await write_user_budget_config(
-                    redis, scope_id, config_data, BUDGET_CONFIG_CACHE_TTL
-                )
-            else:
-                await redis.set(
-                    config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL
-                )
-        except Exception:
-            logger.warning("redis_threshold_sync_failed", scope_type=scope_type, scope_id=str(scope_id))
-
-    async def _sync_redis_app_config(
-        self, user_id: uuid.UUID, client: str,
-        *,
-        max_budget_usd: Decimal,
-        policy: BudgetPolicy,
-        alert_thresholds: list[int],
-    ) -> None:
-        """Write the per-app Redis config key that the gateway Lua reads.
-
-        Key: budget:config:user:{<user_id>}:{client}
-        Shape: {limit_usd, policy (lowercase), thresholds}
-        """
-        import json
-        try:
-            redis = self._cache_mgr._redis
-            config_key = f"budget:config:user:{{{user_id}}}:{client}"
-            config_data = {
-                "limit_usd": str(max_budget_usd),
-                "policy": policy.value.lower(),
-                "thresholds": sorted(alert_thresholds),
+                ),
             }
-            await redis.set(config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL)
-        except Exception:
-            logger.warning(
-                "redis_app_config_sync_failed", user_id=str(user_id), client=client
-            )
-
-    async def _delete_redis_app_config(self, user_id: uuid.UUID, client: str) -> None:
-        """Delete the per-app Redis config key (on clear)."""
-        try:
-            redis = self._cache_mgr._redis
-            config_key = f"budget:config:user:{{{user_id}}}:{client}"
-            await redis.delete(config_key)
-        except Exception:
-            logger.warning(
-                "redis_app_config_delete_failed", user_id=str(user_id), client=client
-            )
-
-    async def _write_user_app_clients(
-        self, user_id: uuid.UUID, active_clients: list[str]
-    ) -> None:
-        """Update the user-config Redis key's app_clients field WITHOUT clobbering
-        other fields. If the key is absent, does nothing (gateway re-derives on miss).
-
-        Redis 만 건드린다 — 호출자가 ``defer_redis_write_until_commit`` 로 커밋 후
-        실행을 예약할 수 있게 DB 접근은 호출자가 먼저 끝낸다.
-        """
-        try:
-
-            # ⚠️ 여기가 가장 아픈 GET-modify-SET 이었다. 이 쓰기는 **새로 추가된
-            #    client 를 싣는** 쓰기이므로, 경합에서 지면 단순 staleness 가 아니라
-            #    그 앱의 예산 한도가 적용되지 않는 상태가 된다(우회).
-            #    키가 없으면 아무것도 하지 않는다 — 총액 필드를 모르는 채로 키를 만들면
-            #    게이트웨이가 한도 없는 설정으로 읽는다. 게이트웨이가 DB 에서 재도출한다.
-            await refresh_user_app_clients(
-                self._cache_mgr._redis, user_id, active_clients, BUDGET_CONFIG_CACHE_TTL
+            await redis.set(
+                config_key, json.dumps(config_data), ex=BUDGET_CONFIG_CACHE_TTL
             )
         except Exception:
-            logger.warning("redis_refresh_user_app_clients_failed", user_id=str(user_id))
+            logger.warning("redis_threshold_sync_failed", scope_id=str(scope_id))
 
     async def warm_team_budget_cache(self, session: AsyncSession) -> int:
         """startup 시 활성 TEAM 예산 설정을 Redis에 일괄 동기화.

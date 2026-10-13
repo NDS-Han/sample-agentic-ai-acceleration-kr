@@ -158,3 +158,62 @@ class TestRetryFailed:
 
         assert resolved == 0
         assert failure.retry_count == 3
+
+
+class TestLiveVkHashes:
+    """team:vk_hashes 역인덱스 — 자연 만료로 남은 죽은 멤버를 읽는 시점에 정리."""
+
+    async def test_prunes_dead_members_and_returns_live(self):
+        """key:vk:{h} 가 없는 멤버는 srem 되고 반환값에서도 빠진다."""
+        team_id = uuid.uuid4()
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(return_value={b"live1", "dead1", b"live2"})
+        # smembers 는 set 순서가 비결정 — 질의된 키 순서에 맞춰 생존 여부를 돌려준다
+        exists_calls: list[str] = []
+        pipe = MagicMock()
+        pipe.exists = MagicMock(side_effect=lambda k: exists_calls.append(k))
+        pipe.execute = AsyncMock(
+            side_effect=lambda: [0 if k == "key:vk:dead1" else 1 for k in exists_calls]
+        )
+        redis.pipeline = MagicMock(return_value=pipe)
+        mgr = CacheInvalidationManager(redis)
+
+        live = await mgr.live_vk_hashes(team_id)
+
+        assert sorted(live) == ["live1", "live2"]
+        assert set(exists_calls) == {
+            "key:vk:live1", "key:vk:dead1", "key:vk:live2"
+        }
+        redis.srem.assert_awaited_once_with(f"team:vk_hashes:{team_id}", "dead1")
+
+    async def test_empty_set_returns_empty(self):
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(return_value=set())
+        mgr = CacheInvalidationManager(redis)
+
+        assert await mgr.live_vk_hashes(uuid.uuid4()) == []
+        redis.pipeline.assert_not_called()
+
+    async def test_srem_failure_does_not_lose_live_result(self):
+        """srem 실패해도 이번 읽기의 live 목록은 반환된다."""
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(return_value={b"a", b"dead"})
+        exists_calls: list[str] = []
+        pipe = MagicMock()
+        pipe.exists = MagicMock(side_effect=lambda k: exists_calls.append(k))
+        pipe.execute = AsyncMock(
+            side_effect=lambda: [0 if k == "key:vk:dead" else 1 for k in exists_calls]
+        )
+        redis.pipeline = MagicMock(return_value=pipe)
+        redis.srem = AsyncMock(side_effect=Exception("Redis down"))
+        mgr = CacheInvalidationManager(redis)
+
+        assert await mgr.live_vk_hashes(uuid.uuid4()) == ["a"]
+
+    async def test_read_failure_returns_empty(self):
+        """smembers 자체가 실패하면 빈 리스트 — 호출부는 TTL 자연 만료에 맡긴다."""
+        redis = AsyncMock()
+        redis.smembers = AsyncMock(side_effect=Exception("Redis down"))
+        mgr = CacheInvalidationManager(redis)
+
+        assert await mgr.live_vk_hashes(uuid.uuid4()) == []

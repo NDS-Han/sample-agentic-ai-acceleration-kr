@@ -36,8 +36,12 @@ def build_llm_workflow(*, env: str, backend: BackendConfig,
     wf.append(Step("tf-init",
                    ["terraform", "init", "-input=false", "-reconfigure", *backend.backend_args()],
                    cwd=tf_dir))
-    wf.append(Step("tf-plan", ["terraform", "plan", "-input=false"], cwd=tf_dir))
-    wf.append(Step("tf-apply", ["terraform", "apply", "-auto-approve", "-input=false"], cwd=tf_dir))
+    # plan 을 파일로 저장하고 그 파일을 apply — 화면에 보여준 플랜과 실제 적용이
+    #   무조건 일치한다. `apply -auto-approve`(plan 재계산)는 보여준 것과 다른
+    #   변경을 승인 없이 적용할 수 있어서(drift/동시변경) 쓰지 않는다.
+    wf.append(Step("tf-plan",
+                   ["terraform", "plan", "-input=false", "-out=tfplan"], cwd=tf_dir))
+    wf.append(Step("tf-apply", ["terraform", "apply", "tfplan"], cwd=tf_dir))
 
     # ★함정③: install-eks에 격리 KUBECONFIG + 실행 플래그 env 주입.
     #   install-eks.sh가 이 파일에 kubectl context를 써 넣는다.

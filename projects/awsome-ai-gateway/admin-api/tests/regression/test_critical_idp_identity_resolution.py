@@ -291,6 +291,68 @@ async def test_admin_email_bootstrap_applies_on_this_path_too():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# 3b. ADMIN 강등 — IdP 권한 회수가 세션에 즉시 반영되는가
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 과거 결함: DB role 은 마지막 로그인의 스냅샷인데, 그룹 매핑을 쓰는 운영 형태에서
+# ``role = ADMIN if ADMIN in (claims, db)`` 식으로 DB ADMIN 을 무조건 보존했다.
+# IdP 에서 관리자 그룹을 떼어내도 다음 로그인(DB 갱신)까지가 아니라 — 사용자가
+# exchange 를 다시 치지 않는 한 영원히 — 세션이 ADMIN 으로 남았다.
+
+
+async def test_admin_group_removal_demotes_db_admin_in_session():
+    """그룹 매핑을 쓰는 운영 형태에서, 토큰에 관리자 그룹이 없으면 DB ADMIN 도 강등."""
+    claims = {"sub": "s", "email": "a@b.c", "groups": ["Developers"]}
+    p1, p2, p3, _ = _resolve(
+        claims,
+        db_user=_db_user(role=UserRole.ADMIN),
+        settings=_settings(admin_groups=["GatewayAdmin"]),
+    )
+    with p1, p2, p3:
+        user = await get_current_user(_request(claims))
+    assert user.role == UserRole.DEVELOPER, "그룹 회수가 세션에 반영되지 않았다"
+
+
+async def test_admin_email_removal_demotes_db_admin_in_session():
+    """ADMIN_EMAILS 출처도 같다 — 목록에서 빠지면 세션은 즉시 DEVELOPER."""
+    claims = {"sub": "s", "email": "a@b.c"}
+    p1, p2, p3, _ = _resolve(
+        claims,
+        db_user=_db_user(role=UserRole.ADMIN, email="a@b.c"),
+        settings=_settings(admin_emails=["other@example.com"]),
+    )
+    with p1, p2, p3:
+        user = await get_current_user(_request(claims))
+    assert user.role == UserRole.DEVELOPER
+
+
+async def test_db_admin_survives_when_token_still_carries_admin_group():
+    """역방향 과잉강등 방지 — 토큰이 ADMIN 을 내면 그대로 ADMIN."""
+    claims = {"sub": "s", "email": "a@b.c", "groups": ["GatewayAdmin"]}
+    p1, p2, p3, _ = _resolve(
+        claims,
+        db_user=_db_user(role=UserRole.ADMIN),
+        settings=_settings(admin_groups=["GatewayAdmin"]),
+    )
+    with p1, p2, p3:
+        user = await get_current_user(_request(claims))
+    assert user.role == UserRole.ADMIN
+
+
+async def test_team_leader_is_not_demoted_by_missing_admin_group():
+    """TEAM_LEADER 는 그룹이 아니라 admin-ui 부여 — 그룹 판정이 건드리면 안 된다."""
+    claims = {"sub": "s", "email": "a@b.c", "groups": ["Developers"]}
+    p1, p2, p3, _ = _resolve(
+        claims,
+        db_user=_db_user(role=UserRole.TEAM_LEADER),
+        settings=_settings(admin_groups=["GatewayAdmin"]),
+    )
+    with p1, p2, p3:
+        user = await get_current_user(_request(claims))
+    assert user.role == UserRole.TEAM_LEADER
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # 4. OIDC_REQUIRED_GROUP 게이트
 # ─────────────────────────────────────────────────────────────────────────────
 

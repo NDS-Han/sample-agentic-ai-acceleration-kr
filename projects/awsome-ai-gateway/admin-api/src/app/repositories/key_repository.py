@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -43,14 +43,17 @@ class KeyRepository:
         self,
         user_id: uuid.UUID,
         new_vk: VirtualKey,
-    ) -> tuple[int, uuid.UUID]:
+    ) -> tuple[int, uuid.UUID, list]:
         """Atomically expire all ACTIVE keys for user_id and insert new ACTIVE key.
 
         단일 SQL (CTE) 로 round-trip 1회. 같은 트랜잭션 내에서 호출해야 하며
         호출자가 commit 책임을 가짐.
 
         Returns:
-            (expired_count, new_id)
+            (expired_count, new_id, expired_encs) — expired_encs 는 방금
+            EXPIRED 로 바뀐 행들의 key_value_encrypted 목록. 호출자가 복호화해
+            sha256 으로 key:vk:{hash} Redis 엔트리를 정리하는 데 쓴다
+            (DB 만 EXPIRED 여도 Redis 는 TTL 까지 살아 있어 옛 키가 계속 인증됨).
         """
         from sqlalchemy import text
 
@@ -60,7 +63,7 @@ class KeyRepository:
                 UPDATE auth.virtual_keys
                 SET status = 'EXPIRED'
                 WHERE user_id = :user_id AND status = 'ACTIVE'
-                RETURNING id
+                RETURNING key_value_encrypted
             ),
             inserted AS (
                 INSERT INTO auth.virtual_keys (
@@ -75,7 +78,9 @@ class KeyRepository:
             )
             SELECT
                 (SELECT COUNT(*) FROM expired) AS expired_count,
-                (SELECT id FROM inserted) AS new_id
+                (SELECT id FROM inserted) AS new_id,
+                (SELECT COALESCE(array_agg(key_value_encrypted), '{}'::bytea[])
+                 FROM expired) AS expired_encs
             """
         )
         result = await self._session.execute(
@@ -90,7 +95,7 @@ class KeyRepository:
             },
         )
         row = result.one()
-        return int(row.expired_count), row.new_id
+        return int(row.expired_count), row.new_id, list(row.expired_encs or [])
 
     async def revoke(self, key_id: uuid.UUID, revoked_by: uuid.UUID) -> VirtualKey | None:
         from datetime import datetime, timezone
@@ -175,15 +180,28 @@ class KeyRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
-    async def list_active_for_users(
+    async def list_revocable_for_users(
         self, user_ids: list[uuid.UUID]
     ) -> list[VirtualKey]:
-        """여러 사용자의 ACTIVE VK 일괄 조회 — Cognito offboarding(R3-3)용."""
+        """여러 사용자의 폐기 대상 VK 일괄 조회 — Cognito offboarding(R3-3)용.
+
+        ACTIVE 외에 status=EXPIRED 인데 expires_at 이 아직 안 지난 키도 포함한다.
+        EXPIRED 행의 Redis key:vk:{hash} 엔트리는 발급 시 TTL=expires_at 로
+        심어지므로 expires_at > now 이면 게이트웨이가 그 키를 아직 인증한다 —
+        offboarding 때 같이 죽여야 한다.
+        """
         if not user_ids:
             return []
+        now = datetime.now(timezone.utc)
         stmt = select(VirtualKey).where(
             VirtualKey.user_id.in_(user_ids),
-            VirtualKey.status == KeyStatus.ACTIVE,
+            or_(
+                VirtualKey.status == KeyStatus.ACTIVE,
+                and_(
+                    VirtualKey.status == KeyStatus.EXPIRED,
+                    VirtualKey.expires_at > now,
+                ),
+            ),
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -191,14 +209,14 @@ class KeyRepository:
     async def revoke_many(
         self, key_ids: list[uuid.UUID], revoked_at
     ) -> int:
-        """주어진 ACTIVE 키들을 일괄 REVOKED 로 — 시스템 주도 offboarding 용."""
+        """주어진 ACTIVE/EXPIRED 키들을 일괄 REVOKED 로 — 시스템 주도 offboarding 용."""
         if not key_ids:
             return 0
         stmt = (
             update(VirtualKey)
             .where(
                 VirtualKey.id.in_(key_ids),
-                VirtualKey.status == KeyStatus.ACTIVE,
+                VirtualKey.status.in_((KeyStatus.ACTIVE, KeyStatus.EXPIRED)),
             )
             .values(status=KeyStatus.REVOKED, revoked_at=revoked_at)
             .execution_options(synchronize_session=False)

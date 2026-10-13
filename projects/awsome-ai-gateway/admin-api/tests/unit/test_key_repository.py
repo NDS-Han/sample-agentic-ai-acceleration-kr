@@ -32,11 +32,14 @@ def _vk(user_id: uuid.UUID) -> VirtualKey:
     )
 
 
-def _mock_session_returning(expired_count: int, new_id: uuid.UUID) -> AsyncMock:
+def _mock_session_returning(
+    expired_count: int, new_id: uuid.UUID, expired_encs: list | None = None
+) -> AsyncMock:
     """Build a mock AsyncSession whose execute() returns a row with given fields."""
     row = MagicMock()
     row.expired_count = expired_count
     row.new_id = new_id
+    row.expired_encs = expired_encs or []
     result = MagicMock()
     result.one = MagicMock(return_value=row)
     session = AsyncMock()
@@ -51,7 +54,7 @@ async def test_expire_and_create_first_key():
     new_vk = _vk(user_id)
     session = _mock_session_returning(expired_count=0, new_id=new_vk.id)
     repo = KeyRepository(session)
-    expired_count, new_id = await repo.expire_and_create(user_id, new_vk)
+    expired_count, new_id, _ = await repo.expire_and_create(user_id, new_vk)
     assert expired_count == 0
     assert new_id == new_vk.id
 
@@ -63,7 +66,7 @@ async def test_expire_and_create_replaces_active():
     new_vk = _vk(user_id)
     session = _mock_session_returning(expired_count=1, new_id=new_vk.id)
     repo = KeyRepository(session)
-    expired_count, new_id = await repo.expire_and_create(user_id, new_vk)
+    expired_count, new_id, _ = await repo.expire_and_create(user_id, new_vk)
     assert expired_count == 1
     assert new_id == new_vk.id
 
@@ -75,7 +78,7 @@ async def test_expire_and_create_replaces_multi():
     new_vk = _vk(user_id)
     session = _mock_session_returning(expired_count=2, new_id=new_vk.id)
     repo = KeyRepository(session)
-    expired_count, new_id = await repo.expire_and_create(user_id, new_vk)
+    expired_count, new_id, _ = await repo.expire_and_create(user_id, new_vk)
     assert expired_count == 2
 
 
@@ -102,7 +105,8 @@ async def test_expire_and_create_uses_single_sql_call_with_correct_params():
     assert "update auth.virtual_keys" in sql_text
     assert "status = 'expired'" in sql_text
     assert "insert into auth.virtual_keys" in sql_text
-    assert "returning id" in sql_text  # both CTE branches
+    assert "returning key_value_encrypted" in sql_text  # expired CTE — H2 Redis 정리용
+    assert "returning id" in sql_text  # inserted CTE
 
     # Second arg: params dict with correct bindings
     params = args[1]
@@ -112,3 +116,19 @@ async def test_expire_and_create_uses_single_sql_call_with_correct_params():
     assert params["prefix"] == new_vk.key_prefix
     assert params["expires_at"] == new_vk.expires_at
     assert params["issued_at"] == new_vk.issued_at
+
+
+@pytest.mark.asyncio
+async def test_expire_and_create_returns_expired_encs():
+    """H2: expired CTE 의 key_value_encrypted 가 그대로 반환된다 —
+    서비스가 복호화→sha256 해 옛 키의 key:vk:{hash} Redis 엔트리를 지운다."""
+    user_id = uuid.uuid4()
+    new_vk = _vk(user_id)
+    old_enc = b"v1:oldkey-encrypted-blob"
+    session = _mock_session_returning(
+        expired_count=1, new_id=new_vk.id, expired_encs=[old_enc]
+    )
+    repo = KeyRepository(session)
+    expired_count, _, expired_encs = await repo.expire_and_create(user_id, new_vk)
+    assert expired_count == 1
+    assert expired_encs == [old_enc]

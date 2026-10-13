@@ -160,10 +160,13 @@ class KeyService:
         #    호출자에게 있으므로(docstring), 바깥 트랜잭션을 살려두려면 실패를
         #    savepoint 안에 격리해야 한다.
         expired_count = 0
+        expired_encs: list = []
         for attempt in (1, 2):
             try:
                 async with session.begin_nested():
-                    expired_count, _ = await repo.expire_and_create(user_id, vk)
+                    expired_count, _, expired_encs = await repo.expire_and_create(
+                        user_id, vk
+                    )
                 break
             except IntegrityError:
                 if attempt == 2:
@@ -186,6 +189,57 @@ class KeyService:
             user = await user_repo.get_user(user_id)
             if user is None:
                 raise NotFoundError("User", str(user_id))
+
+        # H2: 방금 EXPIRED 처리된 옛 키의 Redis 엔트리를 정리한다.
+        # DB status 만 바꾸고 key:vk:{hash} 를 그대로 두면 게이트웨이가 옛 키를
+        # TTL 만료까지 계속 인증한다 — gateway 의 VK→user 매핑 소스는 이 Redis
+        # 키 하나뿐이고(auth_service.py:244-256), DB 행은 암호화된 원문이라
+        # 해시로 폴백 조회조차 안 된다. DEL 은 commit 후로 미룬다 — 롤백되면
+        # 옛 키가 계속 유효해야 하므로(revoke_key 와 동일 계약, R4-A2-3).
+        # DEL→commit 창 재캐시 경합은 key:vk 를 게이트웨이가 쓰지 않아 없다.
+        if expired_encs:
+            old_hashes: list[str] = []
+            for enc in expired_encs:
+                try:
+                    old_raw = self._encryption.decrypt(enc)
+                except Exception:
+                    logger.warning(
+                        "key.expired_decrypt_failed",
+                        user_id=str(user_id),
+                        exc_info=True,
+                    )
+                    continue
+                old_hashes.append(hashlib.sha256(old_raw.encode()).hexdigest())
+            if old_hashes:
+                extras: list = []
+                if user.team_id is not None:
+
+                    async def _srem_expired(
+                        tid: uuid.UUID = user.team_id,
+                        uid: uuid.UUID = user_id,
+                        hs: list[str] = old_hashes,
+                    ) -> None:
+                        try:
+                            await self._cache_mgr._redis.srem(
+                                f"team:vk_hashes:{tid}", *hs
+                            )
+                        except Exception:
+                            logger.warning(
+                                "vk_reverse_index.srem_failed",
+                                user_id=str(uid), exc_info=True,
+                            )
+
+                    extras.append(_srem_expired)
+                await invalidate_after_commit(
+                    session,
+                    self._cache_mgr,
+                    [
+                        k
+                        for h in old_hashes
+                        for k in (f"key:vk:{h}", f"key:cache:vk:{h}")
+                    ],
+                    extra=extras,
+                )
 
         # ── AuthContext 스냅샷 (gateway-proxy 가 캐시 히트 시 그대로 되살린다) ──
         # ⚠️ 이 payload 는 gateway-proxy 가 `AuthContext(**data)` 로 **검증 없이 복원**한다
@@ -331,7 +385,10 @@ class KeyService:
         user_ids: list[uuid.UUID],
         reason: str | None = None,
     ) -> list[tuple["VirtualKey", str]]:
-        """지정 사용자들의 ACTIVE VK 전량 폐기 — 시스템 주도 offboarding(R3-3).
+        """지정 사용자들의 폐기 대상 VK 전량 폐기 — 시스템 주도 offboarding(R3-3).
+
+        ACTIVE 외에 status=EXPIRED 인데 expires_at 이 아직 안 지난 키도 대상이다
+        — Redis key:vk:{hash} 엔트리가 살아 있어 게이트웨이가 계속 인증한다.
 
         Cognito sync 가 사용자를 is_active=False 로 만들 때 함께 호출된다.
         DB 만 비활성화하면 게이트웨이의 per-request 재확인에만 의존하게 되고
@@ -348,7 +405,7 @@ class KeyService:
         반환값은 ``(vk, sha256(raw_key))`` 쌍 리스트(decrypt 실패분 제외).
         """
         repo = KeyRepository(session)
-        vks = await repo.list_active_for_users(user_ids)
+        vks = await repo.list_revocable_for_users(user_ids)
         if not vks:
             return []
 
@@ -446,9 +503,12 @@ class KeyService:
         vk = await repo.get_by_id(key_id, for_update=True)
         if vk is None:
             raise NotFoundError("VirtualKey", str(key_id))
-        if vk.status != KeyStatus.ACTIVE:
+        # EXPIRED 도 폐기를 허용한다 — DB status 가 EXPIRED 여도 Redis 의
+        # key:vk:{hash} 는 TTL 까지 살아 있어 게이트웨이가 그 키를 계속 인증
+        # 한다. EXPIRED 를 막으면 "Redis 에는 살아 있는데 폐기 불가" 상태가 된다.
+        if vk.status == KeyStatus.REVOKED:
             raise ValidationError(
-                f"Only ACTIVE virtual keys can be revoked (status: {vk.status.value})"
+                f"Virtual key is already revoked (status: {vk.status.value})"
             )
 
         original_status = vk.status

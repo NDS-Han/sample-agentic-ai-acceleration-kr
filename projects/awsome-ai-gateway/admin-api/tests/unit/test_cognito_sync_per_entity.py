@@ -65,7 +65,7 @@ def _wire_team_cache(repo):
     return repo
 
 
-def _admin_get_user(sub, email, name="N", enabled=True):
+def _admin_get_user(sub, email, name="N", enabled=True, email_verified=True):
     return {
         "Username": email,
         "Enabled": enabled,
@@ -73,6 +73,7 @@ def _admin_get_user(sub, email, name="N", enabled=True):
             {"Name": "sub", "Value": sub},
             {"Name": "email", "Value": email},
             {"Name": "name", "Value": name},
+            {"Name": "email_verified", "Value": "true" if email_verified else "false"},
         ],
     }
 
@@ -170,6 +171,39 @@ async def test_sync_user_reconciles_recreated_sub(monkeypatch):
 
     repo.create_user.assert_not_called()
     assert existing.sso_subject == "NEW-SUB"  # reconciled
+
+
+@pytest.mark.asyncio
+async def test_sync_user_refuses_email_link_when_unverified(monkeypatch):
+    """미검증 이메일로 기존 계정에 새 sub 를 연결하면 계정 탈취 — 거부+에러 기록."""
+    s = _settings(monkeypatch)
+    session = _session()
+    existing = MagicMock()
+    existing.id = uuid.uuid4(); existing.sso_subject = "VICTIM-SUB"
+    existing.email = "a@x.com"; existing.display_name = "A"
+    existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
+    existing.is_active = True
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=existing)
+    repo.create_user = AsyncMock()
+    repo.list_users = AsyncMock(return_value=[])
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("ATTACKER-SUB", "a@x.com", email_verified=False)
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    result = await svc.sync_user(session, "a@x.com")
+
+    # 연결 거부: sso_subject 미변경, 신규 생성 미시도(UNIQUE 충돌 방지), 에러 기록
+    assert existing.sso_subject == "VICTIM-SUB"
+    repo.create_user.assert_not_called()
+    assert any("email_unverified" in e for e in result.errors)
 
 
 @pytest.mark.asyncio

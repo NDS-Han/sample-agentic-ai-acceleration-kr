@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -51,8 +52,60 @@ def to_tfvars(values: dict) -> str:
     return "\n".join(f"{k} = {_hcl_value(v)}" for k, v in values.items()) + "\n"
 
 
+_TFVARS_KEY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
+
+
+def merge_tfvars(existing: str, values: dict) -> str:
+    """기존 tfvars 원문을 보존하면서 ``values`` 의 키만 갱신한다.
+
+    통째 덮어쓰기(``to_tfvars`` 직렬화)는 parse 가 못 읽는 내용을 전부
+    버린다 — 주석, 손으로 추가한 변수, 그리고 ``parse_tfvars`` 가 의도적으로
+    건너뛰는 중첩 블록(eks_access_entries·tags·azs 같은 멀티라인 값)이
+    TUI 실행 때마다 소실됐다.
+
+    규칙: 최상위 ``key = ...`` 정의가 ``values`` 에 있으면 새 직렬화로 교체
+    (블록 값이면 닫히는 ``}`` 까지 통째로 교체), 없으면 원문 그대로 보존.
+    파일에 없던 키는 끝에 추가한다.
+    """
+    lines = existing.splitlines()
+    out: list[str] = []
+    seen: set[str] = set()
+    i, depth = 0, 0
+    while i < len(lines):
+        line = lines[i]
+        stripped = line.strip()
+        at_top = depth == 0
+        opens, closes = stripped.count("{"), stripped.count("}")
+        m = _TFVARS_KEY_RE.match(line) if at_top and not stripped.startswith("#") else None
+        if m and m.group(1) in values:
+            key = m.group(1)
+            seen.add(key)
+            out.append(f"{key} = {_hcl_value(values[key])}")
+            if opens > closes:
+                # 블록 정의 전체를 건너뛴다 — 안의 줄을 보존하면 문법이 깨진다.
+                depth += opens - closes
+                i += 1
+                while i < len(lines) and depth > 0:
+                    s = lines[i]
+                    depth += s.count("{") - s.count("}")
+                    i += 1
+                continue
+            depth += opens - closes
+            i += 1
+            continue
+        depth += opens - closes
+        out.append(line)
+        i += 1
+    for k, v in values.items():
+        if k not in seen:
+            out.append(f"{k} = {_hcl_value(v)}")
+    return "\n".join(out) + "\n"
+
+
 def write_tfvars(path: Path, values: dict) -> None:
-    path.write_text(to_tfvars(values))
+    """merge-write — 기존 파일의 모르는 내용을 보존한다(``merge_tfvars`` 참조)."""
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    path.write_text(merge_tfvars(existing, values), encoding="utf-8")
 
 
 def to_key_file(keys: dict[str, str]) -> str:

@@ -61,7 +61,7 @@ async def test_revokes_db_and_invalidates_cache(
 
     with patch("app.services.key_service.KeyRepository") as MockRepo:
         repo = MockRepo.return_value
-        repo.list_active_for_users = AsyncMock(return_value=vks)
+        repo.list_revocable_for_users = AsyncMock(return_value=vks)
         repo.revoke_many = AsyncMock(return_value=1)
 
         hashed = await key_service.revoke_keys_for_users(
@@ -104,7 +104,7 @@ async def test_decrypt_failure_still_revokes_others(
 
     with patch("app.services.key_service.KeyRepository") as MockRepo:
         repo = MockRepo.return_value
-        repo.list_active_for_users = AsyncMock(return_value=vks)
+        repo.list_revocable_for_users = AsyncMock(return_value=vks)
         repo.revoke_many = AsyncMock(return_value=2)
 
         hashed = await key_service.revoke_keys_for_users(

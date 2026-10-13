@@ -233,3 +233,87 @@ async def test_internal_admin_jwt_still_verified_with_static_keys_when_oidc_is_o
     user = await get_current_user(request)
     assert user.user_id == user_id
     assert user.role == UserRole.ADMIN
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 5. audience / token_use 검증 (confused-deputy 차단)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# 같은 IdP 의 "다른 앱 클라이언트"용 토큰도 서명·iss·exp 는 전부 유효하다 —
+# aud 검증 없으면 그 토큰으로 우리 게이트웨이에 로그인된다(confused-deputy).
+# Cognito access_token 은 aud 가 없고 client_id 만 있어, 둘 다 검증해야
+# Cognito/비-Cognito IdP 를 모두 커버한다.
+
+from app.core.oidc_verifier import OIDCVerifyError  # noqa: E402
+
+
+async def _verify(verifier, token, private_pem):
+    client = _jwks_client(private_pem)
+    return await verifier.verify_async(token, client)
+
+
+async def test_wrong_audience_is_rejected():
+    """같은 IdP 의 다른 앱용 토큰 — 서명은 유효하지만 aud 가 틀리다."""
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    token = _id_token(priv, aud="some-other-app")
+    with pytest.raises(OIDCVerifyError, match="audience"):
+        await _verify(verifier, token, pub)
+
+
+async def test_correct_audience_passes():
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    token = _id_token(priv)
+    payload = await _verify(verifier, token, pub)
+    assert payload["sub"]
+
+
+async def test_cognito_access_token_accepted_via_client_id():
+    """aud 없이 client_id 만 있는 Cognito access_token 형태도 통과한다."""
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    now = int(time.time())
+    token = jwt.encode(
+        {
+            "iss": ISSUER,
+            "sub": "3861b390-20f1-7050-344e-a5d5dd0224a1",
+            "client_id": CLIENT_ID,   # aud 대신 client_id (Cognito access_token)
+            "token_use": "access",
+            "iat": now,
+            "exp": now + 3600,
+        },
+        priv, algorithm="RS256", headers={"kid": KID},
+    )
+    payload = await _verify(verifier, token, pub)
+    assert payload["client_id"] == CLIENT_ID
+
+
+async def test_missing_aud_and_client_id_is_rejected_when_audience_configured():
+    """audience 가 설정됐는데 토큰이 둘 다 없으면 거부 — 묵인 금지."""
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    now = int(time.time())
+    token = jwt.encode(
+        {"iss": ISSUER, "sub": "u1", "iat": now, "exp": now + 3600},
+        priv, algorithm="RS256", headers={"kid": KID},
+    )
+    with pytest.raises(OIDCVerifyError, match="audience"):
+        await _verify(verifier, token, pub)
+
+
+async def test_foreign_token_use_is_rejected():
+    """token_use 클레임이 표준 외 값이면 거부한다."""
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    token = _id_token(priv, token_use="refresh")
+    with pytest.raises(OIDCVerifyError, match="token_use"):
+        await _verify(verifier, token, pub)
+
+
+async def test_access_token_use_is_accepted():
+    priv, pub = _rsa_pair()
+    verifier = OIDCVerifier(issuer_url=ISSUER, audience=CLIENT_ID)
+    token = _id_token(priv, token_use="access")
+    payload = await _verify(verifier, token, pub)
+    assert payload["token_use"] == "access"

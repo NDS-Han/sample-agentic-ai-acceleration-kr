@@ -84,6 +84,18 @@ def derive_role(email: str, groups: list[str]) -> UserRole:
     return UserRole.DEVELOPER
 
 
+def admin_mapping_configured() -> bool:
+    """ADMIN 권한 출처가 IdP 클레임(그룹/이메일 목록)으로 설정된 운영 형태인지.
+
+    True 면 토큰 클레임이 ADMIN 판정의 원천이다 — 그룹/이메일 목록에서 빠지는
+    순간 권한 회수가 반영돼야 한다. False(둘 다 미설정)면 ``derive_role`` 이
+    ADMIN 을 낼 수 없으므로 DB role 이 유일한 원천 — 수동 부여 운영 형태라
+    클레임 기준 강등을 하면 관리자가 전원 잠긴다.
+    """
+    settings = get_settings()
+    return bool(settings.ADMIN_GROUPS or settings.ADMIN_EMAILS)
+
+
 def required_group_missing(groups: list[str]) -> str | None:
     """``OIDC_REQUIRED_GROUP`` 게이트. 통과면 None, 막히면 없는 그룹 이름.
 

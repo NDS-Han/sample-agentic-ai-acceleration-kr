@@ -67,6 +67,8 @@ class UserRepository:
         stmt = (
             select(Department)
             .where(Department.org_id == org_id, Department.name == name)
+            # 중복이 남아 있을 때도 결정적 승자 — 매 호출 같은 행을 반환한다.
+            .order_by(Department.created_at.asc(), Department.id.asc())
             .limit(1)
         )
         result = await self._session.execute(stmt)
@@ -93,6 +95,8 @@ class UserRepository:
         stmt = (
             select(Team)
             .where(Team.dept_id == dept_id, Team.name == name)
+            # 중복이 남아 있을 때도 결정적 승자 — 매 호출 같은 행을 반환한다.
+            .order_by(Team.created_at.asc(), Team.id.asc())
             .limit(1)
         )
         result = await self._session.execute(stmt)

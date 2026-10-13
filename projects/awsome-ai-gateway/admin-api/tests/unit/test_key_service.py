@@ -60,7 +60,7 @@ class TestIssueKey:
         # single CTE: `expired_count, _ = await repo.expire_and_create(user_id, vk)`.
         # Mock the real method with its real return shape: (expired_count, new_id).
         # issue_key sets vk.issued_at itself, so the old _populate_dates hook is obsolete.
-        repo.expire_and_create = AsyncMock(return_value=(expire_count, uuid.uuid4()))
+        repo.expire_and_create = AsyncMock(return_value=(expire_count, uuid.uuid4(), []))
         # issue_key dedup path awaits repo.list_active_for_user before generating a new key.
         repo.list_active_for_user = AsyncMock(return_value=[])
         return repo
@@ -105,6 +105,86 @@ class TestIssueKey:
         # expire + insert are now one atomic CTE: expire_and_create(user_id, vk)
         repo.expire_and_create.assert_called_once()
         assert repo.expire_and_create.call_args[0][0] == user_id
+
+    async def test_issue_key_cleans_up_expired_key_redis_entries(
+        self, key_service: KeyService, mock_session: AsyncMock,
+        admin_user: CurrentUser, mock_redis: AsyncMock,
+    ):
+        """H2: 재발급으로 EXPIRED 된 옛 키의 key:vk/key:cache:vk 를 DEL 한다.
+
+        DB status 만 EXPIRED 고 Redis 매핑이 남으면 게이트웨이가 옛 키를 TTL
+        까지 계속 인증한다 — expire_and_create 가 돌려준 암호문을 복호화해
+        sha256 으로 옛 해시를 찾아 지운다.
+        """
+        user_id = uuid.uuid4()
+        team_id = uuid.uuid4()
+        old_raw = "vk-" + "b" * 64
+        old_hash = hashlib.sha256(old_raw.encode()).hexdigest()
+        old_enc = key_service._encryption.encrypt(old_raw)
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo, \
+             patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
+            repo = MockRepo.return_value
+            repo.expire_and_create = AsyncMock(
+                return_value=(1, uuid.uuid4(), [old_enc])
+            )
+            repo.list_active_for_user = AsyncMock(return_value=[])
+            MockUserRepo.return_value.get_user = AsyncMock(
+                return_value=_stub_user(user_id, team_id)
+            )
+            MockTam.return_value.list_by_team = AsyncMock(return_value=[])
+
+            with patch("app.services.key_service.audit_logger") as mock_audit:
+                mock_audit.log = AsyncMock()
+                result = await key_service.issue_key(
+                    mock_session, user_id=user_id, actor=admin_user
+                )
+
+        deleted = {c[0][0] for c in mock_redis.delete.call_args_list}
+        assert f"key:vk:{old_hash}" in deleted
+        assert f"key:cache:vk:{old_hash}" in deleted
+
+        # 팀 역인덱스에서도 옛 해시 제거
+        srem_calls = [c for c in mock_redis.srem.call_args_list
+                      if c[0][0] == f"team:vk_hashes:{team_id}"]
+        assert len(srem_calls) == 1
+        assert old_hash in srem_calls[0][0][1:]
+
+        # 새 키는 그대로 발급·캐시된다
+        new_hash = hashlib.sha256(result.virtual_key.encode()).hexdigest()
+        assert f"key:vk:{new_hash}" not in deleted
+        new_setex = [c for c in mock_redis.setex.call_args_list
+                     if c[0][0] == f"key:vk:{new_hash}"]
+        assert len(new_setex) == 1
+
+    async def test_issue_key_expired_cleanup_survives_decrypt_failure(
+        self, key_service: KeyService, mock_session: AsyncMock,
+        admin_user: CurrentUser, mock_redis: AsyncMock,
+    ):
+        """옛 암호문 복호화 실패는 경고만 남기고 발급 자체는 성공한다."""
+        user_id = uuid.uuid4()
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo, \
+             patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
+            repo = MockRepo.return_value
+            repo.expire_and_create = AsyncMock(
+                return_value=(1, uuid.uuid4(), [b"not-a-valid-ciphertext"])
+            )
+            repo.list_active_for_user = AsyncMock(return_value=[])
+            MockUserRepo.return_value.get_user = AsyncMock(
+                return_value=_stub_user(user_id)
+            )
+            MockTam.return_value.list_by_team = AsyncMock(return_value=[])
+
+            with patch("app.services.key_service.audit_logger") as mock_audit:
+                mock_audit.log = AsyncMock()
+                result = await key_service.issue_key(
+                    mock_session, user_id=user_id, actor=admin_user
+                )
+
+        assert result.status == KeyStatus.ACTIVE
 
     async def test_issue_key_defaults_to_24h_without_expires_at(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
@@ -278,7 +358,7 @@ class TestIssueKey:
              patch("app.services.key_service.UserRepository") as MockUserRepo, \
              patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
             repo = MockRepo.return_value
-            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4()))
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
             repo.list_active_for_user = AsyncMock(return_value=[])
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id)
@@ -318,7 +398,7 @@ class TestIssueKey:
              patch("app.services.key_service.UserRepository") as MockUserRepo, \
              patch("app.services.key_service.TeamAllowedModelRepository"):
             repo = MockRepo.return_value
-            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4()))
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
             repo.list_active_for_user = AsyncMock(return_value=[])
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id=None)
@@ -378,6 +458,65 @@ class TestRevokeKey:
 
         # Redis DEL was called for two keys
         assert mock_redis.delete.call_count >= 2
+
+    async def test_revoke_key_allows_expired_status(
+        self, key_service: KeyService, mock_session: AsyncMock,
+        admin_user: CurrentUser, mock_redis: AsyncMock,
+    ):
+        """H2: EXPIRED 키도 폐기 가능해야 한다 — DB status 가 EXPIRED 여도
+        Redis key:vk:{hash} 는 TTL 까지 살아 있어 게이트웨이가 계속 인증한다."""
+        from app.core.exceptions import ValidationError  # noqa: F401
+
+        key_id = uuid.uuid4()
+        raw_key = "vk-" + "c" * 64
+        encrypted = key_service._encryption.encrypt(raw_key)
+
+        vk = MagicMock(spec=VirtualKey)
+        vk.id = key_id
+        vk.key_value_encrypted = encrypted
+        vk.user_id = uuid.uuid4()
+        vk.status = KeyStatus.EXPIRED
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo:
+            repo = MockRepo.return_value
+            repo.get_by_id = AsyncMock(return_value=vk)
+            repo.revoke = AsyncMock(return_value=vk)
+            MockUserRepo.return_value.get_user = AsyncMock(
+                return_value=_stub_user(vk.user_id)
+            )
+
+            with patch("app.services.key_service.audit_logger") as mock_audit:
+                mock_audit.log = AsyncMock()
+                await key_service.revoke_key(
+                    mock_session, key_id=key_id, actor=admin_user
+                )
+
+        repo.revoke.assert_awaited_once()
+        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        deleted = {c[0][0] for c in mock_redis.delete.call_args_list}
+        assert f"key:vk:{key_hash}" in deleted
+
+    async def test_revoke_key_rejects_already_revoked(
+        self, key_service: KeyService, mock_session: AsyncMock,
+        admin_user: CurrentUser,
+    ):
+        from app.core.exceptions import ValidationError
+
+        key_id = uuid.uuid4()
+        vk = MagicMock(spec=VirtualKey)
+        vk.key_value_encrypted = b"enc"
+        vk.user_id = uuid.uuid4()
+        vk.status = KeyStatus.REVOKED
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo:
+            repo = MockRepo.return_value
+            repo.get_by_id = AsyncMock(return_value=vk)
+
+            with pytest.raises(ValidationError):
+                await key_service.revoke_key(
+                    mock_session, key_id=key_id, actor=admin_user
+                )
 
 
 class TestListActiveVkHashesForUser:
@@ -589,7 +728,7 @@ class TestIssueKeyDedup:
              patch("app.services.key_service.audit_logger") as mock_audit:
             repo = MockRepo.return_value
             repo.list_active_for_user = AsyncMock(return_value=[existing])
-            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4()))
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id=None)
             )

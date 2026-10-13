@@ -223,6 +223,10 @@ class TestInvalidationIsPostCommitContract:
         r.scalars.return_value.all.return_value = []
         mock_session.execute = AsyncMock(return_value=r)
         mock_redis.smembers = AsyncMock(return_value={b"hash1", b"hash2"})
+        # live_vk_hashes 가 멤버별 key:vk:{h} exists 를 파이프라인으로 확인한다
+        pipe = MagicMock()
+        pipe.execute = AsyncMock(return_value=[1, 1])  # 두 해시 모두 생존
+        mock_redis.pipeline = MagicMock(return_value=pipe)
 
         await svc.invalidate_for_team(mock_session, team_id)
 

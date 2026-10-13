@@ -30,6 +30,17 @@ from app.services.user_team_service import (
 
 logger = structlog.get_logger()
 
+
+def _attr_truthy(v) -> bool:
+    """Cognito 속성값의 불리언 표현 — "true"/"True"/"1"/True/1 만 참."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() == "true"
+    return False
+
 BATCH_SIZE = 500  # 유저 upsert 배치 commit 단위. 초과 시 commit + expunge_all 로
                   # identity map 을 비워 sync_all 메모리 상한을 확보한다.
 
@@ -304,6 +315,7 @@ class CognitoSyncService:
                         "email": self._get_attr(member, "email") or "",
                         "name": self._get_attr(member, "name") or self._get_attr(member, "email") or member.get("Username", ""),
                         "enabled": member.get("Enabled", True),
+                        "email_verified": _attr_truthy(self._get_attr(member, "email_verified")),
                         "groups": [],
                     }
                 user_map[sub]["groups"].append(group_name)
@@ -322,6 +334,7 @@ class CognitoSyncService:
                         "email": self._get_attr(cu, "email") or "",
                         "name": self._get_attr(cu, "name") or self._get_attr(cu, "email") or cu.get("Username", ""),
                         "enabled": cu.get("Enabled", True),
+                        "email_verified": _attr_truthy(self._get_attr(cu, "email_verified")),
                         "groups": [],
                     }
         except Exception as e:
@@ -340,6 +353,7 @@ class CognitoSyncService:
             email = info["email"]
             name = info["name"] or email
             enabled = info["enabled"]
+            email_verified = info.get("email_verified", False)
             user_groups: list[str] = info["groups"]
 
             team_id: uuid.UUID | None = None
@@ -372,6 +386,7 @@ class CognitoSyncService:
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role, result=result,
+                        email_verified=email_verified,
                     )
             except Exception as e:
                 result.errors.append(f"Failed to sync user {email}: {e}")
@@ -501,11 +516,16 @@ class CognitoSyncService:
     async def _upsert_one_user(
         self, repo: UserRepository, session, *, sub: str, email: str, name: str,
         enabled: bool, team_id: uuid.UUID, role: UserRole, result: SyncResult,
+        email_verified: bool = False,
     ) -> User:
         """단일 사용자 upsert. sync_all 의 163-217 블록과 동일 규약(get_by_sso_subject
         → get_by_email fallback(재생성 시 새 sub 재조정) → 없으면 create).
 
-        upsert 된(생성/갱신) User 를 반환한다 — sync_user 가 응답 user_id 확보용."""
+        upsert 된(생성/갱신) User 를 반환한다 — sync_user 가 응답 user_id 확보용.
+
+        ``email_verified`` — email fallback(기존 계정에 새 sub 연결)의 전제.
+        풀에 미검증 이메일로 등록된 사용자가 다른 계정의 주소와 일치하면 연결은
+        계정 탈취가 된다 — 거부는 ValueError 로 던져 호출부의 errors 에 기록한다."""
         settings = get_settings()
         # Track whether this call mutated an existing row. We flush ONCE at the
         # end and only then increment users_updated — so a deferred flush failure
@@ -517,6 +537,16 @@ class CognitoSyncService:
         if existing is None and email:
             by_email = await repo.get_by_email(email)
             if by_email is not None:
+                if not email_verified:
+                    logger.warning(
+                        "cognito_sync.email_link_refused_unverified",
+                        email=email, existing_user_id=str(by_email.id),
+                        new_sso_subject=sub,
+                    )
+                    raise ValueError(
+                        f"email_unverified: {email} 은 Cognito 에서 미검증이라 "
+                        "기존 계정과 연결하지 않는다"
+                    )
                 logger.info(
                     "cognito_sync.sso_subject_reconciled",
                     user_id=str(by_email.id), email=email,
@@ -648,6 +678,7 @@ class CognitoSyncService:
         email = self._get_attr_admin(cu, "email") or ""
         name = self._get_attr_admin(cu, "name") or email or cu.get("Username", "")
         enabled = cu.get("Enabled", True)
+        email_verified = _attr_truthy(self._get_attr_admin(cu, "email_verified"))
 
         groups_fetch_failed = False
         try:
@@ -681,6 +712,7 @@ class CognitoSyncService:
             user = await self._upsert_one_user(
                 repo, session, sub=sub, email=email, name=name, enabled=enabled,
                 team_id=team_id, role=role, result=result,
+                email_verified=email_verified,
             )
             result.user_id = str(user.id)
         except Exception as e:
@@ -807,6 +839,7 @@ class CognitoSyncService:
             email = self._get_attr(m, "email") or ""
             name = self._get_attr(m, "name") or email or m.get("Username", "")
             enabled = m.get("Enabled", True)
+            email_verified = _attr_truthy(self._get_attr(m, "email_verified"))
             derived_role = self._derive_role(email, [group_name])
             snap = existing_snaps.get(sub)
             if snap is not None and snap["role"] == UserRole.ADMIN:
@@ -823,6 +856,7 @@ class CognitoSyncService:
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role,
                         result=result,
+                        email_verified=email_verified,
                     )
             except Exception as e:
                 result.errors.append(f"Failed to upsert member {email or sub}: {e}")

@@ -25,6 +25,7 @@ from decimal import Decimal
 
 import httpx
 import structlog
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
@@ -41,6 +42,17 @@ from app.services.key_service import KeyService
 from app.services.user_team_service import UserTeamService, release_stale_leader_pointer
 
 logger = structlog.get_logger()
+
+
+def _truthy(v) -> bool:
+    """JWT 클레임/Cognito 속성의 불리언 표현 흡수 — true, "true", "True", 1, "1"."""
+    if isinstance(v, bool):
+        return v
+    if isinstance(v, (int, float)):
+        return v == 1
+    if isinstance(v, str):
+        return v.strip().lower() == "true"
+    return False
 
 
 class OIDCAuthError(Exception):
@@ -70,29 +82,35 @@ class OIDCService:
         # Cognito access_token 에는 email claim 이 없어 ID token 만 갖던 fallback 을 보완.
         self._cognito_client = cognito_client
 
-    async def _email_from_cognito(self, sub: str) -> str | None:
-        """Cognito AdminGetUser 로 사용자 email 조회 (best-effort, never raise).
+    async def _email_attrs_from_cognito(self, sub: str) -> tuple[str | None, bool]:
+        """Cognito AdminGetUser 로 (email, email_verified) 조회 (best-effort, never raise).
 
         이 풀들은 UsernameAttributes=[email] 이므로 내부 Username 이 sub(UUID) 와 동일.
-        Cognito 미구성/조회 실패 시 None 반환 → 호출부가 <sub>@unknown 으로 fallback.
+        Cognito 미구성/조회 실패 시 (None, False) 반환 → 호출부가 <sub>@unknown 으로 fallback.
+
+        ``email_verified`` 는 **서버측 풀 속성**이라 토큰 클레임과 달리 사용자가
+        쓸 수 없다 — 이메일 기반 계정 연결의 검증 근거로 쓴다.
         """
         settings = get_settings()
         pool = settings.COGNITO_USER_POOL_ID
         if not self._cognito_client or not pool:
-            return None
+            return None, False
         try:
             resp = await asyncio.to_thread(
                 self._cognito_client.admin_get_user,
                 UserPoolId=pool,
                 Username=sub,
             )
+            email = verified = None
             for attr in resp.get("UserAttributes", []):
                 if attr.get("Name") == "email":
-                    return attr.get("Value")
-            return None
+                    email = attr.get("Value")
+                elif attr.get("Name") == "email_verified":
+                    verified = attr.get("Value")
+            return email, _truthy(verified)
         except Exception:
             logger.warning("oidc.email_from_cognito_failed", sub=sub, exc_info=True)
-            return None
+            return None, False
 
     # ------------------------------------------------------------------
     # Public API
@@ -131,13 +149,22 @@ class OIDCService:
 
         if not sub:
             raise OIDCAuthError(f"missing claim: {settings.OIDC_USER_ID_CLAIM}")
+        email_verified = _truthy(claims.get("email_verified"))
         if not email:
             # email claim 없는 토큰(Cognito access_token 등) → preferred_username 시도.
             email = claims.get("preferred_username") or ""
         if not email:
             # 그래도 없으면 Cognito AdminGetUser 로 enrich (best-effort).
+            # 풀 속성은 서버측 값이라 verified 도 함께 신뢰할 수 있다.
             # 실패 시 마지막 수단으로 <sub>@unknown.
-            email = (await self._email_from_cognito(str(sub))) or f"{sub}@unknown"
+            pool_email, pool_verified = await self._email_attrs_from_cognito(str(sub))
+            email = pool_email or f"{sub}@unknown"
+            email_verified = pool_verified
+        elif not email_verified:
+            # 이메일 클레임은 있는데 verified 가 보이지 않는다(Cognito access_token
+            # 형태) — 풀 속성으로 한 번 보강한다. 못 확인하면 미검증으로 둔다.
+            _, pool_verified = await self._email_attrs_from_cognito(str(sub))
+            email_verified = pool_verified
 
         # 3. 게이팅 (옵션)
         if settings.OIDC_REQUIRED_GROUP and settings.OIDC_REQUIRED_GROUP not in groups:
@@ -159,6 +186,7 @@ class OIDCService:
             display_name=str(name),
             team_id=team_id,
             role=role,
+            email_verified=email_verified,
         )
 
         # 7. 기존 사용자의 팀 변경 → transfer_user (모든 cache/RL/budget hook)
@@ -306,26 +334,43 @@ class OIDCService:
         if team is not None:
             return team
 
-        # 3) 자동 생성
-        team = Team(id=uuid.uuid4(), dept_id=dept.id, name=team_name)
-        await repo.create_team(team)
+        # 3) 자동 생성 — check-then-act 경합 대비:
+        #    동시 exchange 가 같은 (dept_id, name) 을 넣으면 uq_teams_dept_name
+        #    인덱스가 패자의 INSERT 를 승자 커밋까지 블록한 뒤 IntegrityError 를 낸다.
+        #    savepoint 로 감싸 외부 트랜잭션을 살리고, 승자 행을 재조회해 반환한다.
+        try:
+            async with session.begin_nested():
+                team = Team(id=uuid.uuid4(), dept_id=dept.id, name=team_name)
+                await repo.create_team(team)
 
-        # Budget=$0 (HARD_BLOCK) — admin 이 예산 관리에서 풀어줄 때까지 deny.
-        # team_allowed_models 행은 추가 안 함 → auth_service 가 None=전체 허용으로 처리.
-        budget_repo = BudgetRepository(session)
-        await budget_repo.upsert_config(
-            BudgetConfig(
-                id=uuid.uuid4(),
-                scope=BudgetScope.TEAM,
-                scope_id=team.id,
-                max_budget_usd=Decimal("0"),
-                period_type=PeriodType.MONTHLY,
-                policy=BudgetPolicy.HARD_BLOCK,
-                allocated_by=uuid.UUID(settings.SYSTEM_USER_ID),
-                effective_from=date.today(),
-                is_active=True,
-            )
-        )
+                # Budget=$0 (HARD_BLOCK) — admin 이 예산 관리에서 풀어줄 때까지 deny.
+                # team_allowed_models 행은 추가 안 함 → auth_service 가 None=전체 허용으로 처리.
+                budget_repo = BudgetRepository(session)
+                await budget_repo.upsert_config(
+                    BudgetConfig(
+                        id=uuid.uuid4(),
+                        scope=BudgetScope.TEAM,
+                        scope_id=team.id,
+                        max_budget_usd=Decimal("0"),
+                        period_type=PeriodType.MONTHLY,
+                        policy=BudgetPolicy.HARD_BLOCK,
+                        allocated_by=uuid.UUID(settings.SYSTEM_USER_ID),
+                        effective_from=date.today(),
+                        is_active=True,
+                    )
+                )
+        except IntegrityError:
+            # UNIQUE 충돌은 패자 트랜잭션이 승자 커밋을 기다린 뒤에야 발생하므로
+            # 여기서 재조회하면 승자 행이 반드시 보인다.
+            team = await repo.get_team_by_dept_and_name(dept.id, team_name)
+            if team is not None:
+                logger.info(
+                    "oidc.team_create_race_lost",
+                    team_name=team_name, dept_id=str(dept.id),
+                    winner_team_id=str(team.id),
+                )
+                return team
+            raise
 
         logger.info(
             "oidc.team_auto_created",
@@ -369,9 +414,23 @@ class OIDCService:
         if dept_existing is not None:
             return dept_existing
 
-        # 자동 생성 — 첫 번째 org 아래에 (단일 org 운영 가정)
-        dept = Department(id=uuid.uuid4(), org_id=target_org.id, name=dept_name)
-        await repo.create_department(dept)
+        # 자동 생성 — 첫 번째 org 아래에 (단일 org 운영 가정).
+        # 팀과 같은 check-then-act 경합: uq_departments_org_name 인덱스가 패자를
+        # IntegrityError 로 만들고, 승자 커밋 후 재조회하면 행이 보인다.
+        try:
+            async with repo._session.begin_nested():
+                dept = Department(id=uuid.uuid4(), org_id=target_org.id, name=dept_name)
+                await repo.create_department(dept)
+        except IntegrityError:
+            dept_existing = await repo.get_department_by_name(target_org.id, dept_name)
+            if dept_existing is not None:
+                logger.info(
+                    "oidc.dept_create_race_lost",
+                    dept_name=dept_name, org_id=str(target_org.id),
+                    winner_dept_id=str(dept_existing.id),
+                )
+                return dept_existing
+            raise
         logger.info(
             "oidc.department_auto_created",
             dept_id=str(dept.id),
@@ -409,12 +468,19 @@ class OIDCService:
         display_name: str,
         team_id: uuid.UUID,
         role: UserRole,
+        email_verified: bool = False,
     ) -> tuple[User, bool, bool]:
         """
         Returns (user, was_created, team_changed).
 
         provider 컬럼 추가 마이그레이션 적용 후 ``(provider, sso_subject)`` 복합키로 식별.
         마이그레이션 전 단계에서는 ``sso_subject`` 단독으로 동작.
+
+        ``email_verified`` — 이메일 기반 계정 연결(2차 fallback)의 전제다.
+        이메일은 검증 가능한 식별자가 아니다: IdP 가 검증하지 않은 이메일 클레임을
+        그대로 믿고 기존 계정에 sso_subject 를 갈아끼우면, 공격자가 피해자 주소를
+        자기 것이라고 주장하는 것만으로 계정을 탈취할 수 있다. 검증 근거는
+        ``email_verified`` 클레임 또는 Cognito AdminGetUser 의 서버측 속성뿐이다.
         """
         settings = get_settings()
         repo = UserRepository(session)
@@ -426,9 +492,21 @@ class OIDCService:
 
         # 2차 fallback: email 로 조회. 같은 사람이 새 sub 로 들어온 경우(이메일 동일)
         # 기존 row 재사용 + sso_subject 갱신 → email UNIQUE 충돌(500) 방지.
+        # ⚠️ 미검증 이메일로는 연결하지 않는다 — 아래는 계정 탈취 경로를 닫는 게이트.
+        # 그냥 넘기면 새 행 생성이 email UNIQUE 에 걸려 500 이므로 여기서 명시 거부.
         if existing is None:
             by_email = await repo.get_by_email(email)
             if by_email is not None:
+                if not email_verified:
+                    logger.warning(
+                        "oidc.email_link_refused_unverified",
+                        email=email,
+                        existing_user_id=str(by_email.id),
+                        new_sso_subject=sso_subject,
+                    )
+                    raise OIDCNotProvisionableError(
+                        "email_unverified: 이메일이 IdP 에서 검증되지 않아 기존 계정과 연결할 수 없다"
+                    )
                 logger.info(
                     "oidc.sso_subject_reconciled",
                     user_id=str(by_email.id),

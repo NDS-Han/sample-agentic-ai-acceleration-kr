@@ -89,6 +89,43 @@ class CacheInvalidationManager:
 
         return resolved_count
 
+    async def live_vk_hashes(self, team_id: uuid.UUID) -> list[str]:
+        """``team:vk_hashes:{tid}`` 역인덱스에서 **살아있는** VK 해시만 반환한다.
+
+        멤버는 발급 시 sadd 되고 폐기·만료·팀이동 시 srem 되지만, 자연 TTL 만료는
+        아무도 srem 하지 않아 집합이 무한히 자란다(죽은 해시가 smembers 마다
+        재처리된다). 읽는 지점에서 ``key:vk:{h}`` EXISTS 를 한 파이프라인으로
+        확인해 죽은 멤버를 srem 정리 — self-healing 으로 상한을 둔다.
+        읽기 실패 시 빈 리스트(호출부는 TTL 자연 만료에 맡긴다).
+        """
+        index_key = f"team:vk_hashes:{team_id}"
+        try:
+            raw = await self._redis.smembers(index_key)
+            members = [
+                m.decode() if isinstance(m, bytes) else m for m in raw
+            ]
+            if not members:
+                return []
+            pipe = self._redis.pipeline(transaction=False)
+            for h in members:
+                pipe.exists(f"key:vk:{h}")
+            alive = await pipe.execute()
+            dead = [h for h, ok in zip(members, alive) if not ok]
+            if dead:
+                try:
+                    await self._redis.srem(index_key, *dead)
+                except Exception:
+                    logger.warning(
+                        "vk_reverse_index.srem_failed",
+                        team_id=str(team_id), exc_info=True,
+                    )
+            return [h for h, ok in zip(members, alive) if ok]
+        except Exception:
+            logger.warning(
+                "vk_reverse_index.read_failed", team_id=str(team_id), exc_info=True,
+            )
+            return []
+
     async def swap_reverse_index_membership(
         self,
         *,

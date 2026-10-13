@@ -239,21 +239,10 @@ class ScopedAllowedClientService:
     async def _invalidate_team_vk_index(self, team_id: uuid.UUID) -> None:
         """`key:cache:vk:*` 는 raw 해시를 모르므로 발급 시 저장한 reverse index
         `team:vk_hashes:{team_id}` 경유로 DEL. 인덱스 없음/읽기 실패 → TTL(300s)
-        자연 만료(team_allowed_models 와 같은 tradeoff)."""
-        try:
-            vk_hashes = await self._cache_mgr._redis.smembers(
-                f"team:vk_hashes:{team_id}"
+        자연 만료(team_allowed_models 와 같은 tradeoff). 살아있는 해시만 읽어
+        죽은 멤버를 srem — 인덱스 무한 증가 방지."""
+        vk_hashes = await self._cache_mgr.live_vk_hashes(team_id)
+        if vk_hashes:
+            await self._cache_mgr.invalidate(
+                [f"key:cache:vk:{h}" for h in vk_hashes]
             )
-            keys = [
-                f"key:cache:vk:{h.decode() if isinstance(h, bytes) else h}"
-                for h in vk_hashes
-            ]
-        except Exception:
-            keys = []
-            logger.warning(
-                "allowed_clients.vk_index_read_failed",
-                team_id=str(team_id),
-                exc_info=True,
-            )
-        if keys:
-            await self._cache_mgr.invalidate(keys)

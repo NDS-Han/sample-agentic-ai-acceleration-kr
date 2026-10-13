@@ -171,3 +171,57 @@ def test_backend_config_omits_region_when_empty():
 def test_backend_config_injects_region_when_set():
     bc = config.BackendConfig(bucket="b", dynamodb_table="t", region="us-west-2")
     assert "-backend-config=region=us-west-2" in bc.backend_args()
+
+
+def test_merge_tfvars_preserves_unknown_keys_and_blocks(tmp_path=None):
+    """TUI 가 모르는 키/중첩 블록/주석이 재기록 때 소실되지 않는다."""
+    existing = '''# hand comment
+project_name = "llm-gateway"
+aws_region = "ap-northeast-2"
+
+custom_override = {
+  nested = "keep-me"
+  deeper = {
+    x = 1
+  }
+}
+extra_flag = true
+'''
+    out = config.merge_tfvars(existing, {"aws_region": "us-west-2", "new_key": "v"})
+    assert 'aws_region = "us-west-2"' in out
+    assert "# hand comment" in out
+    assert "custom_override = {" in out
+    assert 'nested = "keep-me"' in out
+    assert "extra_flag = true" in out
+    assert 'new_key = "v"' in out
+
+
+def test_merge_tfvars_replaces_block_value_whole():
+    """values 에 블록 값이 오면 기존 블록 전체가 교체된다(잔여 줄 미보존)."""
+    existing = '''azs = ["a", "b"]
+eks_access_entries = {
+  developer = {
+    principal_arn = "arn:old"
+  }
+}
+tags = { CostCenter = "cc" }
+'''
+    out = config.merge_tfvars(
+        existing,
+        {"eks_access_entries": {"developer": {"principal_arn": "arn:new"}},
+         "azs": ["x", "y"]},
+    )
+    assert "arn:new" in out and "arn:old" not in out
+    assert 'azs = ["x", "y"]' in out
+    # 모르는 블록(tags)은 보존
+    assert 'CostCenter = "cc"' in out
+
+
+def test_write_tfvars_merges_with_existing_file(tmp_path):
+    p = tmp_path / "terraform.tfvars"
+    p.write_text('keep_me = "yes"\nold = "1"\n')
+    config.write_tfvars(p, {"old": "2", "added": True})
+    text = p.read_text()
+    assert 'keep_me = "yes"' in text
+    assert 'old = "2"' in text
+    assert "added = true" in text
