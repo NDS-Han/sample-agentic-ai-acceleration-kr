@@ -36,6 +36,12 @@ def _make_pricing() -> ModelPricing:
     p.cache_creation_5m_price_per_1k_tokens = Decimal("0.00375")
     p.cache_creation_1h_price_per_1k_tokens = Decimal("0.006")  # ModelPricingResponse field
     p.cache_read_price_per_1k_tokens = Decimal("0.0003")
+    p.long_context_threshold_tokens = None
+    p.long_context_input_price_per_1k_tokens = None
+    p.long_context_output_price_per_1k_tokens = None
+    p.long_context_cache_creation_5m_price_per_1k_tokens = None
+    p.long_context_cache_creation_1h_price_per_1k_tokens = None
+    p.long_context_cache_read_price_per_1k_tokens = None
     p.effective_from = datetime.now(timezone.utc)
     p.effective_until = None
     return p

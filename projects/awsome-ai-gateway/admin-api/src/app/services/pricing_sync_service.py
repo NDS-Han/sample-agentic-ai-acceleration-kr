@@ -61,6 +61,9 @@ class NormalizedPrice:
     long_cache_5m_per_1k: Decimal | None = None
     long_cache_1h_per_1k: Decimal | None = None
     long_cache_read_per_1k: Decimal | None = None
+    #: 구간 캐시 단가 중 파생(추정) 포함 여부 — 1h 구간은 카탈로그에 필드가 없어
+    #: 구간이 존재하면 항상 True. 감사 로그 출처 표시용.
+    long_cache_derived: bool = False
 
 
 @dataclass
@@ -92,6 +95,9 @@ class FetchResult:
             # 로 남겨 사람이 판단하게 한다.
             return None
         # geo prefix(us./eu./apac./jp./us-gov.)만 plain in-region 단가로 폴백.
+        # 스택드 프리픽스("us.global.X")는 base 도 prefix 라 매칭하지 않는다.
+        if _strip_region_prefix(base) != base:
+            return None
         if base in self.prices:
             return self.prices[base]
         return None
@@ -333,14 +339,24 @@ class LiteLLMPricingSyncService:
             long_5m = self._to_decimal(m.get("cache_creation_input_token_cost_above_272k_tokens"))
             long_read = self._to_decimal(m.get("cache_read_input_token_cost_above_272k_tokens"))
             has_long = long_in is not None or long_out is not None
-            long_1h = None
+            long_in_eff = long_out_eff = long_5m_eff = long_1h_eff = long_read_eff = None
             if has_long:
-                # 카탈로그에 구간별 1h 필드는 없다 — 5m 구간과 같은 비율로 파생
-                # (1h/5m 기본 비율 유지). 기본 단가의 파생 계약과 같은 추정.
+                # 구간 값은 하나의 단위 — 일부만 채우면 threshold+NULL 조합(구간
+                # 미적용 → 기본 단가로 과소청구)이 생기므로 결손은 기본 단가/배수로
+                # 채운다. 0 가격도 유효 값이라 `is not None` 으로만 판정.
+                long_in_eff = long_in if long_in is not None else input_cost
+                long_out_eff = long_out if long_out is not None else output_cost
+                long_5m_eff = long_5m if long_5m is not None else long_in_eff * _CACHE_5M_MULT
+                long_read_eff = long_read if long_read is not None else long_in_eff * _CACHE_READ_MULT
+                # 구간별 1h 필드는 카탈로그에 없다 — 기본 행의 1h/5m 비율을 구간
+                # 5m 에 적용해 파생. 기본 5m 가 0 이면 비율을 못 구해 표준 배수 사용.
                 base_5m_eff = cache_5m if cache_5m is not None else input_cost * _CACHE_5M_MULT
                 base_1h_eff = cache_1h if cache_1h is not None else input_cost * _CACHE_1H_MULT
-                if base_5m_eff:
-                    long_1h = (long_5m or (long_in or input_cost) * _CACHE_5M_MULT) * (base_1h_eff / base_5m_eff)
+                long_1h_eff = (
+                    long_5m_eff * (base_1h_eff / base_5m_eff)
+                    if base_5m_eff != 0
+                    else long_in_eff * _CACHE_1H_MULT
+                )
 
             result.prices[key] = NormalizedPrice(
                 input_per_1k=input_cost * Decimal(1000),
@@ -353,11 +369,14 @@ class LiteLLMPricingSyncService:
                 or self._to_int(m.get("max_tokens")),
                 max_output_tokens=self._to_int(m.get("max_output_tokens")),
                 long_context_threshold_tokens=272000 if has_long else None,
-                long_input_per_1k=(long_in if long_in is not None else input_cost) * Decimal(1000) if has_long else None,
-                long_output_per_1k=(long_out if long_out is not None else output_cost) * Decimal(1000) if has_long else None,
-                long_cache_5m_per_1k=((long_5m if long_5m is not None else (long_in or input_cost) * _CACHE_5M_MULT) * Decimal(1000) if has_long else None),
-                long_cache_1h_per_1k=(long_1h * Decimal(1000) if long_1h is not None else None),
-                long_cache_read_per_1k=((long_read if long_read is not None else (long_in or input_cost) * _CACHE_READ_MULT) * Decimal(1000) if has_long else None),
+                long_input_per_1k=(long_in_eff * Decimal(1000) if long_in_eff is not None else None),
+                long_output_per_1k=(long_out_eff * Decimal(1000) if long_out_eff is not None else None),
+                long_cache_5m_per_1k=(long_5m_eff * Decimal(1000) if long_5m_eff is not None else None),
+                long_cache_1h_per_1k=(long_1h_eff * Decimal(1000) if long_1h_eff is not None else None),
+                long_cache_read_per_1k=(long_read_eff * Decimal(1000) if long_read_eff is not None else None),
+                # 구간 캐시는 출처 추적 대상 — 1h 구간 필드는 카탈로그에 없어
+                # 항상 파생(5m/read 도 소스 생략 시 파생)이라 구간 존재 = 파생 포함.
+                long_cache_derived=has_long,
             )
         return result
 

@@ -264,6 +264,15 @@ class ModelService:
         # 기본 단가 5개만 보낸다. 새 행이 그 6열을 NULL 로 두면 100K 초과 요청이 조용히 기본
         # 단가로 기록되므로(Haiku 5.5 는 1/5), 닫는 행의 값을 이어받는다. 닫기 **전에** 읽는다.
         prior = await repo.get_current_pricing(alias)
+        # 시간 역전 금지 — 새 행의 effective_from 이 현재 open 행보다 앞서면
+        # close_current_pricing 이 effective_until < effective_from 인 역전 행을
+        # 만든다. open 행이 미래 시작 예약 행일 때 now-적용이 이에 해당 → 예약 소실.
+        if prior is not None and data.effective_from <= prior.effective_from:
+            raise ConflictError(
+                f"새 단가의 effective_from({data.effective_from.isoformat()})이 현재 open 행"
+                f"({prior.effective_from.isoformat()}) 이후여야 합니다 — 미래 시작 예약 행이 "
+                "있으면 자동 덮어쓰기를 하지 않습니다"
+            )
         # 요청이 구간 값을 싣지 않으면(None) 이전 행을 이어받는다 — 가격 동기화는
         # 카탈로그의 above_272k 값을 명시로 실어 보내 덮어쓴다.
         long_tier = {
@@ -317,7 +326,21 @@ class ModelService:
                 "cache_read_price": str(data.cache_read_price_per_1k_tokens),
                 # 파생 여부 출처 — 소스 미게시 추정값을 게시가로 오인 못 하게.
                 "cache_derived": data.cache_derived,
-                "long_context_threshold": data.long_context_threshold_tokens,
+                "long_cache_derived": data.long_cache_derived,
+                # 해소된 구간 단가(요청값 또는 이전 행 이어받기 결과)를 기록한다 —
+                # data.* 는 None 이 남을 수 있어 실제 기록값이 불명.
+                "long_context": (
+                    {
+                        "threshold": long_tier["long_context_threshold_tokens"],
+                        "input": str(long_tier["long_context_input_price_per_1k_tokens"]),
+                        "output": str(long_tier["long_context_output_price_per_1k_tokens"]),
+                        "cache_5m": str(long_tier["long_context_cache_creation_5m_price_per_1k_tokens"]),
+                        "cache_1h": str(long_tier["long_context_cache_creation_1h_price_per_1k_tokens"]),
+                        "cache_read": str(long_tier["long_context_cache_read_price_per_1k_tokens"]),
+                    }
+                    if long_tier["long_context_threshold_tokens"] is not None
+                    else None
+                ),
             }},
             ip_address=ip_address,
             request_id=request_id,
@@ -381,10 +404,14 @@ class ModelService:
             # 기본 단가 동일 + 구간만 갱신돼야 할 때도 적용 대상에 포함한다.
             long_vals = None
             if np.long_context_threshold_tokens is not None:
+                _q = lambda v: v.quantize(quantize) if v is not None else None
                 long_vals = {
                     "threshold": np.long_context_threshold_tokens,
-                    "in": np.long_input_per_1k.quantize(quantize) if np.long_input_per_1k is not None else None,
-                    "out": np.long_output_per_1k.quantize(quantize) if np.long_output_per_1k is not None else None,
+                    "in": _q(np.long_input_per_1k),
+                    "out": _q(np.long_output_per_1k),
+                    "5m": _q(np.long_cache_5m_per_1k),
+                    "1h": _q(np.long_cache_1h_per_1k),
+                    "read": _q(np.long_cache_read_per_1k),
                 }
             tier_changed = bool(
                 long_vals
@@ -393,6 +420,9 @@ class ModelService:
                     or cur.long_context_threshold_tokens != long_vals["threshold"]
                     or cur.long_context_input_price_per_1k_tokens != long_vals["in"]
                     or cur.long_context_output_price_per_1k_tokens != long_vals["out"]
+                    or cur.long_context_cache_creation_5m_price_per_1k_tokens != long_vals["5m"]
+                    or cur.long_context_cache_creation_1h_price_per_1k_tokens != long_vals["1h"]
+                    or cur.long_context_cache_read_price_per_1k_tokens != long_vals["read"]
                 )
             )
             if tier_changed:
@@ -432,6 +462,15 @@ class ModelService:
                 proposed_long_output_per_1k=(
                     long_vals["out"] if long_vals else None
                 ),
+                proposed_long_cache_5m_per_1k=(
+                    long_vals["5m"] if long_vals else None
+                ),
+                proposed_long_cache_1h_per_1k=(
+                    long_vals["1h"] if long_vals else None
+                ),
+                proposed_long_cache_read_per_1k=(
+                    long_vals["read"] if long_vals else None
+                ),
                 changed=is_changed,
                 spec_changed=spec_changed,
             ))
@@ -453,7 +492,7 @@ class ModelService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
         quantize: Decimal = Decimal("0.00000001"),
-        expected=None,
+        expected,  # 필수 — preview 승인값과 재수집 대조 없이는 적용하지 않는다
     ):
         """승인된 alias 목록만 AWS 단가로 적용 — 기존 set_pricing 재사용(시계열·감사·캐시).
 
@@ -483,28 +522,30 @@ class ModelService:
                 continue
             # preview 승인값과 재수집 값이 다르면 적용 거부 — 카탈로그가 두 호출
             # 사이에 바뀌면 운영자가 본 것과 다른 단가가 감사 로그에 박힌다.
-            if expected:
-                exp = expected.get(alias)
-                if exp is None:
-                    skipped.append(alias)
-                    errors.append(f"{alias}: 승인된 단가 값이 없어 적용 거부(다시 미리보기)")
-                    continue
-                fresh = {
-                    "input_per_1k": np.input_per_1k.quantize(quantize),
-                    "output_per_1k": np.output_per_1k.quantize(quantize),
-                    "cache_5m_per_1k": np.cache_5m_per_1k.quantize(quantize),
-                    "cache_1h_per_1k": np.cache_1h_per_1k.quantize(quantize),
-                    "cache_read_per_1k": np.cache_read_per_1k.quantize(quantize),
-                    "long_context_threshold_tokens": np.long_context_threshold_tokens,
-                    "long_input_per_1k": (np.long_input_per_1k.quantize(quantize)
-                                        if np.long_input_per_1k is not None else None),
-                    "long_output_per_1k": (np.long_output_per_1k.quantize(quantize)
-                                         if np.long_output_per_1k is not None else None),
-                }
-                if any(fresh[k] != getattr(exp, k) for k in fresh):
-                    skipped.append(alias)
-                    errors.append(f"{alias}: 미리보기 승인값과 소스 단가가 달라짐(다시 미리보기 후 적용)")
-                    continue
+            # expected 는 필수(스키마 min_length=1): alias 누락은 승인값 없음 = 거부.
+            exp = expected.get(alias)
+            if exp is None:
+                skipped.append(alias)
+                errors.append(f"{alias}: 승인된 단가 값이 없어 적용 거부(다시 미리보기)")
+                continue
+            _q = lambda v: v.quantize(quantize) if v is not None else None
+            fresh = {
+                "input_per_1k": np.input_per_1k.quantize(quantize),
+                "output_per_1k": np.output_per_1k.quantize(quantize),
+                "cache_5m_per_1k": np.cache_5m_per_1k.quantize(quantize),
+                "cache_1h_per_1k": np.cache_1h_per_1k.quantize(quantize),
+                "cache_read_per_1k": np.cache_read_per_1k.quantize(quantize),
+                "long_context_threshold_tokens": np.long_context_threshold_tokens,
+                "long_input_per_1k": _q(np.long_input_per_1k),
+                "long_output_per_1k": _q(np.long_output_per_1k),
+                "long_cache_5m_per_1k": _q(np.long_cache_5m_per_1k),
+                "long_cache_1h_per_1k": _q(np.long_cache_1h_per_1k),
+                "long_cache_read_per_1k": _q(np.long_cache_read_per_1k),
+            }
+            if any(fresh[k] != getattr(exp, k) for k in fresh):
+                skipped.append(alias)
+                errors.append(f"{alias}: 미리보기 승인값과 소스 단가가 달라짐(다시 미리보기 후 적용)")
+                continue
             # 미래 시점 예약 단가 행을 건드리면 안 된다 — close_current_pricing 이
             # 예약 행을 now 로 닫아 effective_until < effective_from 인 역전 행을
             # 만들어 예약이 영구 소실된다. 예약 존재 시 이 alias 는 사람이 처리한다.
@@ -522,6 +563,7 @@ class ModelService:
                 cache_creation_1h_price_per_1k_tokens=np.cache_1h_per_1k.quantize(quantize),
                 cache_read_price_per_1k_tokens=np.cache_read_per_1k.quantize(quantize),
                 cache_derived=np.cache_derived,
+                long_cache_derived=np.long_cache_derived,
                 long_context_threshold_tokens=np.long_context_threshold_tokens,
                 long_context_input_price_per_1k_tokens=(
                     np.long_input_per_1k.quantize(quantize)
@@ -759,6 +801,12 @@ class ModelService:
                 cache_creation_5m_price_per_1k_tokens=pricing.cache_creation_5m_price_per_1k_tokens,
                 cache_creation_1h_price_per_1k_tokens=pricing.cache_creation_1h_price_per_1k_tokens,
                 cache_read_price_per_1k_tokens=pricing.cache_read_price_per_1k_tokens,
+                long_context_threshold_tokens=pricing.long_context_threshold_tokens,
+                long_context_input_price_per_1k_tokens=pricing.long_context_input_price_per_1k_tokens,
+                long_context_output_price_per_1k_tokens=pricing.long_context_output_price_per_1k_tokens,
+                long_context_cache_creation_5m_price_per_1k_tokens=pricing.long_context_cache_creation_5m_price_per_1k_tokens,
+                long_context_cache_creation_1h_price_per_1k_tokens=pricing.long_context_cache_creation_1h_price_per_1k_tokens,
+                long_context_cache_read_price_per_1k_tokens=pricing.long_context_cache_read_price_per_1k_tokens,
                 effective_from=pricing.effective_from,
                 effective_until=pricing.effective_until,
             )

@@ -194,7 +194,7 @@ async def price_sync_apply(
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=request.headers.get("x-request-id", ""),
-        expected=body.expected or None,
+        expected=body.expected,
     )
 
 

@@ -28,3 +28,27 @@
 - 커밋: `1c511714` · helm **rev 185**
 - 이미지: admin-api + scheduler + admin-ui(expected 승인값 배선) — `1c511714`
 - 스모크: **12 PASS / 0 FAIL** · `nds/dev` push 완료
+
+---
+
+# R7 — 1c511714 수정 검증 라운드
+
+리뷰어 재검증에서 11건 보고(내 수정의 미비점 포함):
+
+| # | 심각도 | 발견 | 조치 |
+|---|---|---|---|
+| F2' | High | 드리프트 가드가 **선택적** — `expected` 생략·빈 맵·미선택 alias 는 무방어로 재수집값 적용 | `expected` 스키마 필수(min_length=1), 라우터 `or None` 폐기, alias 누락 = 거부. API 직접 호출자도 fail-closed(422) |
+| F3' | Med-High | 구간 캐시 3필드(5m/1h/read)가 preview 미노출·승인 대조 밖 — 보이지 않는 필드 드리프트 통과 | PriceSyncDiff/PriceSyncExpected/fresh 대조에 3필드 추가, ModelPricingResponse 에 long_* 6필드 노출(현재 구간 비교 가능) |
+| F4' | Med | 0 가격 falsy 버그 — `if base_5m_eff:` 등이 0을 결손 처리해 threshold+NULL 조합 생성 가능 | 전 구간 `is not None` 판정, 기본 5m=0 시 표준 배수 파생, 구간 존재 시 5필드 전부 비-NULL 보장 |
+| F5' | Med | 감사에 `data.long_*`(이어받기 시 None)만 기록돼 실제 기록값 불명 | 해소된 `long_tier` 전체 + `long_cache_derived` 기록 |
+| F6' | Med | threshold-only 요청이 수동 PUT 에 허용(구간 선언만 있고 단가 결손) | threshold `ge=1` + model_validator(threshold 시 in/out 필수) |
+| F7' | Med | 시간 역전 가드가 sync apply 에만 — 수동 PUT 은 여전히 역전 행 생성 가능 | `set_pricing` 본체로 이동(`data.effective_from <= prior.effective_from` → ConflictError) — 전 경로 fail-closed |
+| F8' | Low | 스택드 프리픽스 `us.global.X` 가 strip 1회로 global 우회 | `base` 가 다시 prefix 지닐 때 미매칭 |
+| F9' | Med-Low(수용) | AWS normalizer 가 region/tier 필터 없이 `model` 속성으로 병합 — 리전·구간 SKU 혼합 가능성 | 실데이터 미검증 항목 — AWS 소스는 LiteLLM 보조 경로라 잔여로 문서화 |
+| F10' | Low(수용) | 272k 하드코딩 — LiteLLM 스키마가 `above_272k` 만 제공 | 계약 문서화(다른 임계값 변종은 카탈로그 필드 부재) |
+
+## 검증·배포
+
+- `pytest tests/` — **943 passed, 50 skipped** (회귀 7건 추가: 스택드 프리픽스, 0가격 파생, expected 누락, 구간캐시 드리프트, set_pricing 역전, 스키마 단위성)
+- admin-ui `tsc --noEmit` 0 errors
+- 커밋·helm·스모크: (아래 기록)

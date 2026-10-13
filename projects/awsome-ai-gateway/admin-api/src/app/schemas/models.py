@@ -9,7 +9,7 @@ import ipaddress
 import socket
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from app.core.clients import validate_clients
 from app.schemas.common import ApiFormatEnum, ProviderEnum
@@ -295,7 +295,7 @@ class PricingRequest(BaseModel):
     #: 장문(>threshold) 구간 단가 — None 이면 set_pricing 이 이전 행 값을 이어받는다.
     #: 가격 동기화가 LiteLLM `*_above_272k_tokens` 를 매핑해 채운다. 기본 단가만
     #: 개정하고 구간 단가를 얼리면 >272K 요청이 구 단가 비율로 과소청구된다.
-    long_context_threshold_tokens: int | None = Field(default=None, ge=0)
+    long_context_threshold_tokens: int | None = Field(default=None, ge=1)
     long_context_input_price_per_1k_tokens: Decimal | None = Field(
         default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
@@ -313,7 +313,23 @@ class PricingRequest(BaseModel):
     )
     #: 캐시 단가가 소스 미게시 값의 파생(추정)인지 — 감사 로그에 출처를 남긴다.
     cache_derived: bool = False
+    #: 구간 캐시 단가 중 파생 포함 여부(1h 구간은 항상 파생).
+    long_cache_derived: bool = False
     effective_from: datetime
+
+    @model_validator(mode="after")
+    def _long_tier_is_one_unit(self):
+        """threshold 를 싣는 요청은 in/out 단가를 동반해야 한다 — threshold 만
+        있고 단가가 결손이면 구간이 조용히 기본 단가로 과소청구된다."""
+        if self.long_context_threshold_tokens is not None:
+            if (
+                self.long_context_input_price_per_1k_tokens is None
+                or self.long_context_output_price_per_1k_tokens is None
+            ):
+                raise ValueError(
+                    "long_context_threshold 설정 시 장문 input/output 단가가 필요합니다"
+                )
+        return self
 
 
 class StatusPatchRequest(BaseModel):
@@ -329,6 +345,13 @@ class ModelPricingResponse(BaseModel):
     cache_creation_5m_price_per_1k_tokens: Decimal = Decimal("0")
     cache_creation_1h_price_per_1k_tokens: Decimal = Decimal("0")
     cache_read_price_per_1k_tokens: Decimal = Decimal("0")
+    #: 장문(>threshold) 구간 단가 — 0038 이후 시계열에 존재. 미설정 행은 None.
+    long_context_threshold_tokens: int | None = None
+    long_context_input_price_per_1k_tokens: Decimal | None = None
+    long_context_output_price_per_1k_tokens: Decimal | None = None
+    long_context_cache_creation_5m_price_per_1k_tokens: Decimal | None = None
+    long_context_cache_creation_1h_price_per_1k_tokens: Decimal | None = None
+    long_context_cache_read_price_per_1k_tokens: Decimal | None = None
     effective_from: datetime
     effective_until: datetime | None = None
 
@@ -379,6 +402,9 @@ class PriceSyncDiff(BaseModel):
     long_context_threshold_tokens: int | None = None
     proposed_long_input_per_1k: Decimal | None = None
     proposed_long_output_per_1k: Decimal | None = None
+    proposed_long_cache_5m_per_1k: Decimal | None = None
+    proposed_long_cache_1h_per_1k: Decimal | None = None
+    proposed_long_cache_read_per_1k: Decimal | None = None
     changed: bool = False  # 현재가와 제안가가 다른가
     #: 카탈로그 스펙(context_window/max_output_tokens)과 DB 값이 다른가.
     #: 단가 변경이 0이어도 이 플래그가 있으면 적용 대상에 포함되어야 한다 —
@@ -413,6 +439,9 @@ class PriceSyncExpected(BaseModel):
     long_context_threshold_tokens: int | None = None
     long_input_per_1k: Decimal | None = None
     long_output_per_1k: Decimal | None = None
+    long_cache_5m_per_1k: Decimal | None = None
+    long_cache_1h_per_1k: Decimal | None = None
+    long_cache_read_per_1k: Decimal | None = None
 
 
 class PriceSyncApplyRequest(BaseModel):
@@ -420,8 +449,9 @@ class PriceSyncApplyRequest(BaseModel):
 
     aliases: list[str] = Field(min_length=1)
     source: str = "aws"  # "aws" | "litellm"
-    #: preview 승인값(비어 있으면 레거시 동작 — 재수집 값 그대로 적용).
-    expected: dict[str, PriceSyncExpected] = Field(default_factory=dict)
+    #: preview 승인값(**필수**) — 카탈로그가 preview↔apply 사이에 바뀌면 운영자가
+    #: 승인하지 않은 단가가 감사에 박힌다. 생략/빈 맵은 fail-closed(적용 없음).
+    expected: dict[str, PriceSyncExpected] = Field(min_length=1)
 
 
 class PriceSyncApplyResponse(BaseModel):

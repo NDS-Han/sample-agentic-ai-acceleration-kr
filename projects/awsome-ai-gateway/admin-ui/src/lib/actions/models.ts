@@ -233,6 +233,9 @@ export interface PriceSyncDiff {
   long_context_threshold_tokens?: number | null;
   proposed_long_input_per_1k?: string | null;
   proposed_long_output_per_1k?: string | null;
+  proposed_long_cache_5m_per_1k?: string | null;
+  proposed_long_cache_1h_per_1k?: string | null;
+  proposed_long_cache_read_per_1k?: string | null;
   changed: boolean;
   /** 단가 동일해도 카탈로그 스펙(context_window/max_output_tokens)이 갱신되면 true. */
   spec_changed?: boolean;
@@ -302,6 +305,9 @@ export async function applyPriceSyncAction(
         long_context_threshold_tokens: d.long_context_threshold_tokens ?? null,
         long_input_per_1k: d.proposed_long_input_per_1k ?? null,
         long_output_per_1k: d.proposed_long_output_per_1k ?? null,
+        long_cache_5m_per_1k: d.proposed_long_cache_5m_per_1k ?? null,
+        long_cache_1h_per_1k: d.proposed_long_cache_1h_per_1k ?? null,
+        long_cache_read_per_1k: d.proposed_long_cache_read_per_1k ?? null,
       };
     }
   }

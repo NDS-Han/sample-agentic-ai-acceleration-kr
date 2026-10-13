@@ -33,7 +33,7 @@ NumericValueOutOfRange 를 던졌다 → 입력 오류인데 **필드명도 없�
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 
@@ -95,6 +95,12 @@ class _FakePricing:
         self.cache_creation_5m_price_per_1k_tokens = Decimal("0.00375")
         self.cache_creation_1h_price_per_1k_tokens = Decimal("0.006")
         self.cache_read_price_per_1k_tokens = Decimal("0.0003")
+        self.long_context_threshold_tokens = None
+        self.long_context_input_price_per_1k_tokens = None
+        self.long_context_output_price_per_1k_tokens = None
+        self.long_context_cache_creation_5m_price_per_1k_tokens = None
+        self.long_context_cache_creation_1h_price_per_1k_tokens = None
+        self.long_context_cache_read_price_per_1k_tokens = None
         self.effective_from = datetime.now(timezone.utc)
         self.effective_until = None
 
@@ -386,13 +392,16 @@ class TestPriceUpperBound:
     async def test_boundary_value_still_accepted(
         self, client: AsyncClient, repo: _RecordingRepo
     ):
-        """상한이 정당한 입력을 막지 않는지(과잉 차단 아님) — 결함 ② 쪽 vacuity control."""
+        """상한이 정당한 입력을 막지 않는지(과잉 차단 아님) — 결함 ② 쪽 vacuity control.
+
+        effective_from 은 현재 open 행 이후여야 한다(시간 역전 금지 계약) —
+        _FakePricing.effective_from 이 "지금" 이므로 요청도 그 이후 시각을 쓴다."""
         resp = await client.put(
             f"/admin/models/{ALIAS}/pricing",
             json={
                 "input_price_per_1k_tokens": str(MAX_PRICE_PER_1K),
                 "output_price_per_1k_tokens": "0.015",
-                "effective_from": "2026-05-01T00:00:00Z",
+                "effective_from": (datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),
             },
         )
         assert resp.status_code == 200, resp.text[:400]

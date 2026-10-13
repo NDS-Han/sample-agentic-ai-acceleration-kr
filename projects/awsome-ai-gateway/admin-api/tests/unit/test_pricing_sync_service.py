@@ -269,6 +269,24 @@ def test_fetch_result_lookup_global_boundary_never_crossed():
     # us 엔트리만 있는 모델의 eu 행 → 교차 리전 금지
     assert result.lookup("eu.anthropic.claude-fable-5") is None
     assert result.lookup("anthropic.claude-nonexistent") is None
+    # 스택드 프리픽스("us.global.X")는 한 번 strip 하면 global.X 가 남아
+    # global 경계를 우회한다 — 미매칭이어야 한다.
+    assert result.lookup("us.global.anthropic.claude-opus-4-6") is None
+
+
+def test_litellm_zero_base_cache_derives_long_1h():
+    """기본 캐시 단가가 0 이면(유효 값) 구간 1h 파생은 비율이 아니라 표준 배수 —
+    0 으로 나누기 회피 + 결손 방지."""
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    m = _llm_model("openai.gpt-z", 2e-06, 1e-05)
+    m["cache_creation_input_token_cost"] = 0
+    m["input_cost_per_token_above_272k_tokens"] = 4e-06
+    out = svc._normalize_models([m])
+    np = out.prices["openai.gpt-z"]
+    # 기본 5m=0(게시값), 1h=input*배수. 구간 1h 는 비율 대신 표준 배수.
+    assert np.cache_5m_per_1k == Decimal("0")
+    assert np.long_context_threshold_tokens == 272000
+    assert np.long_cache_1h_per_1k == np.long_input_per_1k * Decimal("2.0")
 
 
 def test_litellm_long_context_tier_extracted():
