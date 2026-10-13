@@ -495,6 +495,12 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                     # 닫는다 — 여기서 닫으면 드레인이 죽은 이터레이터를 소비한다.
                     await _aclose_iter(iterator)
 
+        if status >= 400:
+            # 상류 거부 — 프롬프트가 소비되지 않았을 수 있다. 예약을 되돌리고
+            # rate_limit_state 를 비워 finalize 의 추정 입력 과금이 이 경로에
+            # 발동하지 않게 한다(거부된 요청을 청구하지 않기 위해).
+            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+
         return StreamingResponse(
             stream_with_cost(),
             status_code=status,

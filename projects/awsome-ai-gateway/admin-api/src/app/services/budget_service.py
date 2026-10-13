@@ -151,7 +151,38 @@ class BudgetService:
             now()
         )
         ON CONFLICT (scope, scope_id, period, COALESCE(client,''))
-        DO UPDATE SET used_usd = EXCLUDED.used_usd, last_updated = now()
+        -- 델타 적용: 행은 SELECT ... FOR UPDATE 로 잠근 뒤 읽었으므로 읽은 값과
+        -- UPDATE 사이에 다른 writer 가 끼어들 수 없다. 절대값 덮어쓰기는 잠금 없는
+        -- 사이 구간의 worker 증분을 통째로 유실시킨다.
+        DO UPDATE SET used_usd = budget.budget_usages.used_usd + CAST(:delta AS numeric),
+                      last_updated = now()
+        """
+    )
+
+    _SEED_ENSURE = text(
+        """
+        INSERT INTO budget.budget_usages
+            (id, scope, scope_id, period, client, used_usd, limit_usd, last_updated)
+        VALUES (
+            gen_random_uuid(),
+            CAST(:scope AS budget.budget_scope),
+            CAST(:scope_id AS uuid),
+            :period,
+            CAST(:client AS varchar),
+            0,
+            COALESCE((
+                SELECT max_budget_usd FROM budget.budget_configs
+                WHERE scope = CAST(:scope AS budget.budget_scope)
+                  AND scope_id = CAST(:scope_id AS uuid)
+                  AND client IS NOT DISTINCT FROM CAST(:client AS varchar)
+                  AND is_active = true
+                ORDER BY effective_from DESC LIMIT 1
+            ), 0),
+            now()
+        )
+        -- FOR UPDATE 는 없는 행을 잠그지 못한다 — 먼저 0 으로 만들어 두면
+        -- 두 동시 첫 시드가 before=0 을 같이 읽어 델타를 두 번 더하는 것을 막는다.
+        ON CONFLICT (scope, scope_id, period, COALESCE(client,'')) DO NOTHING
         """
     )
 
@@ -162,6 +193,7 @@ class BudgetService:
           AND scope_id = CAST(:scope_id AS uuid)
           AND period = :period
           AND client IS NOT DISTINCT FROM CAST(:client AS varchar)
+        FOR UPDATE
         """
     )
 
@@ -185,7 +217,12 @@ class BudgetService:
         # 커밋 전 SET 은 롤백 시 DB 에 없는 지출액을 게이트웨이에 광고한다(§6-6).
         pending_sets: list[tuple[str, str]] = []
 
-        for item in items:
+        # 행 잠금 순서 고정 — 워커의 배치 UPSERT 도 정렬로 데드락을 줄인다.
+        ordered = sorted(
+            items,
+            key=lambda i: (i.scope.upper(), i.scope_id, i.period, i.client or ""),
+        )
+        for item in ordered:
             scope = item.scope.upper()
             client = item.client
             res = SeedSpentResult(
@@ -214,44 +251,39 @@ class BudgetService:
                         if await user_repo.get_team(sid) is None:
                             raise ValueError("team not found")
 
-                    # --- before value ---
+                    # --- 행 보장: 없으면 0 으로 만들어 FOR UPDATE 가 실제로
+                    #     잠그게 한다(없는 행은 잠금 불가 — 동시 첫 시드가
+                    #     before=0 을 같이 읽어 델타 이중적용되는 결함 방지) ---
+                    await session.execute(
+                        self._SEED_ENSURE,
+                        {"scope": scope, "scope_id": str(sid), "period": item.period,
+                         "client": client},
+                    )
+
+                    # --- before value (행 잠금 하에 읽는다) ---
                     before_row = await session.execute(
                         self._SEED_SELECT_BEFORE,
                         {"scope": scope, "scope_id": str(sid), "period": item.period, "client": client},
                     )
                     before = before_row.scalar_one_or_none()
                     res.before_usd = Decimal(str(before)) if before is not None else Decimal("0")
+                    # 델타 시맨틱: 목표 절대값 − 잠금 하에 읽은 현재값. Redis 카운터에도
+                    # 같은 델타를 더하면 in-flight 예약·동시 settle 증분이 보존된다.
+                    delta = item.spent_usd - res.before_usd
 
-                    # --- DB upsert (overwrite) ---
+                    # --- DB upsert (행이 있으면 used_usd + delta) ---
                     await session.execute(
                         self._SEED_UPSERT,
                         {"scope": scope, "scope_id": str(sid), "period": item.period,
-                         "client": client, "spent": item.spent_usd},
+                         "client": client, "spent": item.spent_usd, "delta": str(delta)},
                     )
 
                     redis_key = _redis_usage_key(scope, str(sid), item.period, client)
 
-                    # Per-app seed must also refresh the total key (client=None) so
-                    # enforcement sees the correct aggregate. 같은 트랜잭션 내
-                    # SELECT 라 방금 upsert 한 값을 본다.
-                    total_key: str | None = None
-                    total_val = None
-                    if client is not None and scope == "USER":
-                        from sqlalchemy import text as sa_text
-                        total_row = await session.execute(
-                            sa_text(
-                                # ⚠️ client IS NULL = 총합 행만 — per-app 행까지 더하면
-                                #    Redis 집행 카운터가 실비의 ~2배로 부풀어 거짓
-                                #    budget_exceeded 를 만든다.
-                                "SELECT COALESCE(SUM(used_usd), 0) "
-                                "FROM budget.budget_usages "
-                                "WHERE scope = 'USER' AND scope_id = :sid AND period = :period "
-                                "AND client IS NULL"
-                            ),
-                            {"sid": str(sid), "period": item.period},
-                        )
-                        total_val = total_row.scalar() or 0
-                        total_key = _redis_usage_key(scope, str(sid), item.period, None)
+                    # ⚠️ per-app 시드는 총합(client=None) 키를 건드리지 않는다.
+                    #    이 upsert 는 client 행만 바꾸고 총합 행은 그대로다 — 앱
+                    #    델타를 총합 카운터에 더하면 "총합 시드 + 앱 시드" 일괄
+                    #    마이그레이션에서 이중계상돼 거짓 budget_exceeded 가 된다.
 
                     res.after_usd = item.spent_usd
 
@@ -272,20 +304,30 @@ class BudgetService:
             else:
                 # savepoint 를 빠져나온 item 만 Redis 갱신 대상 — 실패 item 의
                 # deferred write 가 외부 commit 시 실행되는 걸 막는다.
-                pending_sets.append((redis_key, str(item.spent_usd)))
-                if total_key is not None:
-                    pending_sets.append((total_key, str(total_val)))
+                pending_sets.append((redis_key, str(delta)))
             results.append(res)
 
         if pending_sets:
             redis = self._cache_mgr._redis
 
+            # 키가 있을 때만 더한다 — 없는 키에 INCRBYFLOAT 하면 "델타만" 들어간
+            # 카운터가 만들어지고, 게이트웨이 복원 경로는 키가 존재하면 재구축하지
+            # 않아 그 달 내내 틀어진다. 키가 없으면 놔두면 DB(방금 시드된 값+예약)
+            # 로부터 게이트웨이가 재구축한다.
+            _INCR_IF_EXISTS = (
+                "if redis.call('EXISTS', KEYS[1]) == 1 "
+                "then return redis.call('INCRBYFLOAT', KEYS[1], ARGV[1]) "
+                "end return nil"
+            )
+
             async def _write_seeded(sets: list[tuple[str, str]] = pending_sets) -> None:
+                # INCRBYFLOAT — 절대값 SET 은 카운터에 섞인 in-flight 예약치를
+                # 지워 settle 이 (실비 − 예약치) 를 적용할 때 예약치만큼 음수로 새게 한다.
                 for k, v in sets:
                     try:
-                        await redis.set(k, v)
+                        await redis.eval(_INCR_IF_EXISTS, 1, k, v)
                     except Exception:
-                        logger.warning("seed_spent.redis_set_failed", key=k)
+                        logger.warning("seed_spent.redis_incr_failed", key=k)
 
             await defer_redis_write_until_commit(session, _write_seeded)
 

@@ -57,6 +57,12 @@ def _parse_xautoclaim(res: Any) -> tuple[str, list, list]:
     return "0-0", [], []
 
 
+def _stream_id_key(sid: str) -> tuple[int, int]:
+    """``"<ms>-<seq>"`` 스트림 id 를 비교 가능한 튜플로. ``"0"`` 같은 단축형도 받는다."""
+    ms, _, seq = sid.partition("-")
+    return int(ms or 0), int(seq or 0)
+
+
 class StreamConsumer:
     """cost:stream → BatchFlusher pipeline."""
 
@@ -163,7 +169,49 @@ class StreamConsumer:
 
             await self._flush_or_dead_letter(entries, ids)
             await self._redis.xack(self._stream, self._group, *ids)
+            await self._trim_consumed()
             logger.info("backlog_batch_processed", count=len(ids))
+
+    async def _trim_consumed(self) -> None:
+        """커밋된 entry 본문을 정리한다 — 스트림이 무한히 자라는 것을 막는다.
+
+        ⚠️ 게이트웨이 쪽의 ``XADD MAXLEN ~`` 근사 트림은 **미소비 entry 도**
+           잘라낸다 — 워커가 몇 분만 멈춰도 청구 기록이 영구 유실된다. 대신
+           여기서 커밋 경계를 경계로 둔다. 레이스 방지를 위해 읽는 순서가
+           중요하다: ``last-delivered-id`` 를 **먼저** 읽고 그 뒤에 pending
+           최솟값을 읽는다. pending 이 비어 보이는 사이 다른 소비자가 읽은
+           진행 중 entry 를 last-delivered-id 로 지우면 그 배치의 재처리가
+           ``(id, None)`` 으로 영구 유실되므로, 경계는 두 값의 **작은 쪽**
+           이다 — L 읽기 이후 배달된 것만 커질 수 있어 안전하다.
+           실패해도 소비에 영향 없다(다음 배치가 다시 시도).
+        """
+        try:
+            last_delivered: Any = None
+            for g in await self._redis.xinfo_groups(self._stream) or []:
+                name = g.get("name")
+                if isinstance(name, bytes):
+                    name = name.decode()
+                if name == self._group:
+                    last_delivered = g.get("last-delivered-id")
+                    break
+            pend = await self._redis.xpending_range(
+                self._stream, self._group, "-", "+", count=1
+            )
+            floor: Any = pend[0].get("message_id") if pend else last_delivered
+            if floor and last_delivered:
+                # pending 최솟값과 last-delivered 중 작은 쪽 — 둘 다 읽은 시점
+                # 이전의 커밋 경계를 넘지 않도록 보수적으로 잡는다.
+                if _stream_id_key(str(floor)) > _stream_id_key(str(last_delivered)):
+                    floor = last_delivered
+            if not floor:
+                return
+            if isinstance(floor, bytes):
+                floor = floor.decode()
+            await self._redis.xtrim(self._stream, minid=floor)
+        except Exception as e:
+            # 트림이 조용히 멈추면 스트림이 MAXLEN 백스톱(500K, 수백 MB)까지
+            # 자란다 — 소비 장애와 별개로 알 수 있어야 한다.
+            logger.warning("cost_stream_trim_failed", error=str(e)[:160])
 
     async def _sample_lag(self) -> None:
         """consumer group 의 미처리 entry 수를 `last_lag` 에 반영한다 (메트릭용).
@@ -256,6 +304,7 @@ class StreamConsumer:
                 await self._flush_or_dead_letter(entries, ids, reclaim=True)
             if ids:
                 await self._redis.xack(self._stream, self._group, *ids)
+                await self._trim_consumed()
                 reclaimed += len(ids)
             if cursor in ("0-0", "0", None):
                 break
@@ -309,6 +358,7 @@ class StreamConsumer:
 
             await self._flush_or_dead_letter(batch_entries, batch_ids)
             await self._redis.xack(self._stream, self._group, *batch_ids)
+            await self._trim_consumed()
 
     async def _flush_or_dead_letter(
         self, entries: list[CostStreamEntry], ids: list[str], *, reclaim: bool = False

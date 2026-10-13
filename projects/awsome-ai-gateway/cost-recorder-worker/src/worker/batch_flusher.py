@@ -504,7 +504,10 @@ class BatchFlusher:
             if not _has_metered_usage(e):
                 continue  # 0 토큰·0 비용 마커 행 — 예산 스냅샷 행을 만들지 않는다
             user_sums[(e.user_id, e.period)] += e.cost_usd
-            team_sums[(e.team_id, e.period)] += e.cost_usd
+            # 팀 없는 사용자 — team_id 는 default team 센티널이다. TEAM 스코프에
+            # 더하면 그 팀의 한도가 타인 지출로 소진돼 엉뚱한 팀이 hard_block 된다.
+            if not e.teamless:
+                team_sums[(e.team_id, e.period)] += e.cost_usd
             if e.client in _PER_APP_CLIENTS:
                 app_sums[(e.user_id, e.period, e.client)] += e.cost_usd
 

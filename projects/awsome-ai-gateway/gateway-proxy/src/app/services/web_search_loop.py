@@ -736,6 +736,10 @@ def _merge_usage(acc: TokenUsage, turn: TokenUsage) -> TokenUsage:
     acc.total_tokens = acc.input_tokens + acc.output_tokens
     acc.cache_ttl_1h = acc.cache_ttl_1h or turn.cache_ttl_1h
     acc.estimated = acc.estimated or turn.estimated
+    # 턴별 스냅샷을 보존한다 — 합산 프롬프트로 장문(>threshold) 티어를 판정하면
+    # 각 턴이 단문 과금이어야 할 요청이 전량 장문 요율로 과대청구된다.
+    # calculate_cost 는 목록이 있으면 턴별 비용 합산으로 간다.
+    acc.turn_usages = (acc.turn_usages or []) + [turn.model_copy()]
     return acc
 
 

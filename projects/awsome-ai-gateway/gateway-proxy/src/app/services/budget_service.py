@@ -335,11 +335,21 @@ class BudgetService:
 
                         if total_row is None:
                             # budget_usages 에 총합 행이 없으면 usage_logs 에서 SUM.
+                            from app.config import get_settings
                             from app.models.usage import UsageRecord
 
                             stmt2 = select(func.coalesce(func.sum(UsageRecord.cost_usd), 0)).where(
                                 UsageRecord.user_id == user_id,
-                                func.to_char(UsageRecord.requested_at, "YYYY-MM") == period,
+                                # period 는 리포팅 타임존 월 — to_char 를 UTC 타임스탬프에
+                                # 바로 걸면 월 경계 몇 시간이 다른 달로 새어 과다/과소 복원된다.
+                                func.to_char(
+                                    func.timezone(
+                                        get_settings().reporting_timezone,
+                                        UsageRecord.requested_at,
+                                    ),
+                                    "YYYY-MM",
+                                )
+                                == period,
                             )
                             result2 = await db.execute(stmt2)
                             used_from_db = result2.scalar_one()
@@ -436,13 +446,21 @@ class BudgetService:
                         if team_used is None:
                             from sqlalchemy import func as _f, select as _s
 
+                            from app.config import get_settings
                             from app.models.usage import UsageRecord
 
                             team_used = (
                                 await db.execute(
                                     _s(_f.coalesce(_f.sum(UsageRecord.cost_usd), 0)).where(
                                         UsageRecord.team_id == team_id,
-                                        _f.to_char(UsageRecord.requested_at, "YYYY-MM")
+                                        # user 경로와 같다 — 리포팅 타임존 월로 버킷.
+                                        _f.to_char(
+                                            _f.timezone(
+                                                get_settings().reporting_timezone,
+                                                UsageRecord.requested_at,
+                                            ),
+                                            "YYYY-MM",
+                                        )
                                         == period,
                                     )
                                 )

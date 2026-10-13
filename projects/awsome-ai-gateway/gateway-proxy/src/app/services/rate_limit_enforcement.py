@@ -267,6 +267,16 @@ async def enforce_rate_limits(
     # TPM 체크 (Pre-reserve)
     max_output = _extract_max_output(body)
     estimated_input = _estimate_input_tokens(body)
+    # 청구 폴백용 추정치 — _gw_admission_input_mult 는 입장 심사 전용 배수
+    # (웹서치 루프가 턴당 입력을 재청구하므로 예약도 배수). 종결 usage 미수신 시
+    # 과금에 쓰는 추정치는 단일 턴 기준이어야 한다 — 배수 그대로면 끊긴
+    # 웹서치 요청이 iters 배로 과대청구된다.
+    _mult = body.get("_gw_admission_input_mult")
+    estimated_input_billing = (
+        estimated_input // _mult
+        if isinstance(_mult, int) and _mult > 1
+        else estimated_input
+    )
     reserved = estimate_reserved_tokens(
         estimated_input_tokens=estimated_input,
         max_output_tokens=max_output,
@@ -378,6 +388,11 @@ async def enforce_rate_limits(
         "cost_cpm_window_ts": cost_result.cpm_window_ts,
         "cost_cph_window_ts": cost_result.cph_window_ts,
         "budget_reservation": budget_reservation,
+        # admission 시 계산한 입력 추정치(배수 제외) — 종결 usage 를 못 받은 채
+        # 끊긴 스트림(response.completed 미수신 disconnect/idle timeout)은
+        # finalize 가 0 토큰으로 보고 기록을 생략한다. provider 는 프롬프트를
+        # 이미 청구했으므로 이 추정치로 과금한다(cost_recorder 가 읽는다).
+        "estimated_input": estimated_input_billing,
     }
     return None
 

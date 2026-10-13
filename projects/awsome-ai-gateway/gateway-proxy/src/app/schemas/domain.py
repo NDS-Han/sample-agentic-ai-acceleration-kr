@@ -303,6 +303,12 @@ class TokenUsage(BaseModel):
     # reasoning_tokens, it is excluded from total_tokens/cost/TPM. Set by web_search_loop
     # (one increment per successful AgentCore WebSearch tools/call). 0 = no search / feature off.
     web_search_count: int = 0
+    # 웹검색 멀티턴 과금 정확도 — 각 턴의 usage 스냅샷 목록(_merge_usage 가 채운다).
+    # 합산 프롬프트로 장문 티어를 판정하면 턴 단위 short 과금이어야 할 요청이 전량
+    # long 요율로 과대청구된다(턴 A 120K + 턴 B 120K → 합산 240K… threshold 초과).
+    # calculate_cost 는 이 목록이 있으면 턴별 비용 합산으로 대체한다.
+    # 프로세스 내 전달 전용 — cost:stream 엔트리 필드가 아니므로 dump 에서 제외.
+    turn_usages: list["TokenUsage"] | None = Field(default=None, exclude=True)
 
 
 class BudgetThresholdEvent(BaseModel):

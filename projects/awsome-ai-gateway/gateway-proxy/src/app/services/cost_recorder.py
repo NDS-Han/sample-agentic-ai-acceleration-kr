@@ -17,8 +17,10 @@ COST_PRECISION = Decimal("0.000001")
 
 # Redis Stream key for cost-recorder-worker offload. Worker XREADGROUP에서 소비.
 COST_STREAM_KEY = "cost:stream"
-# MAXLEN approx trim: 500 RPS × ~3분 buffer.
-COST_STREAM_MAXLEN = 100_000
+# MAXLEN approx trim — **메모리 백스톱 전용**. 미소비 entry 도 잘라 청구 기록을
+# 영구 유실시키므로 크게 둔다(500 RPS 기준 수십 분). 실제 크기 제어는 워커가
+# ACK 후 `XTRIM MINID <미처리 최솟값>` 로 한다 — 미소비 entry 는 절대 안 잘린다.
+COST_STREAM_MAXLEN = 500_000
 
 # usage.usage_status enum 값 — 이 집합 밖의 값은 DB INSERT 시 enum 캐스트 오류로
 # 배치 전체가 poison retry 루프에 빠지므로, 발행 전에 여기서 정규화한다.
@@ -54,10 +56,20 @@ def resolve_context_tier(usage: TokenUsage, pricing: ModelConfigSchema) -> str |
       더해야 한다. input_tokens 만 보면 캐시 히트가 큰 요청이 임계값 아래로 오판돼 과소청구된다.
 
     청구와 감사가 어긋나지 않도록(청구=long/기록=short) 판정은 여기 한 곳에서만 한다.
+
+    멀티턴(웹검색 루프)은 turn_usages 가 심어져 있다 — 합산 프롬프트로 판정하면
+    턴 단위 short 인 요청이 합계만으로 long 이 되어 과대청구된다. 어느 한 턴도
+    임계를 넘었을 때만 "long" 으로 기록한다.
     """
     threshold = pricing.pricing.long_context_threshold_tokens
     if threshold is None:
         return None
+    if usage.turn_usages:
+        return (
+            "long"
+            if any(resolve_context_tier(t, pricing) == "long" for t in usage.turn_usages)
+            else "short"
+        )
     prompt_total = (
         usage.input_tokens
         + usage.cache_read_input_tokens
@@ -83,9 +95,28 @@ def calculate_cost(usage: TokenUsage, pricing: ModelConfigSchema) -> Decimal:
     재청구된다 — 판정은 resolve_context_tier 한 곳에서만(감사기록과 동일 판정
     공유). threshold 없는 모델은 None → 전부 short = 단일 요율 동작 그대로.
 
+    멀티턴(웹검색 루프)은 turn_usages 로 턴별 판정해 합산한다 — 합산 프롬프트로
+    한 번 판정하면 턴 단위 short 과금이어야 할 요청이 전량 장문 요율이 된다.
+
     quantize 는 마지막에 한 번만 — 항마다 반올림하면 오차가 누적된다.
     """
     p = pricing.pricing
+    if usage.turn_usages:
+        # 요청 레벨 cache_ttl_1h 는 라우터가 merged 객체에만 싣는다 — 턴 스냅샷엔
+        # 없으므로 전파한다. 안 하면 provider 가 ephemeral 분해를 미보고한 경우
+        # 1h 캐시 쓰기가 5m 요율로 과소청구된다.
+        return sum(
+            (
+                calculate_cost(
+                    t
+                    if t.cache_ttl_1h or not usage.cache_ttl_1h
+                    else t.model_copy(update={"cache_ttl_1h": True}),
+                    pricing,
+                )
+                for t in usage.turn_usages
+            ),
+            Decimal("0"),
+        ).quantize(COST_PRECISION, rounding=ROUND_HALF_UP)
     long_ctx = resolve_context_tier(usage, pricing) == "long"
 
     def _rate(short_rate: Decimal, long_rate: Decimal | None) -> Decimal:
@@ -174,6 +205,35 @@ class CostRecorder:
         monitoring 이 진실을 볼 수 있게 0 비용의 usage_logs 행도 남긴다 —
         성공 요청의 0 토큰 행만 예전처럼 쓰지 않는다(E2E S5).
         """
+        # 종결 usage 미수신(중간 disconnect/idle timeout — Responses 방언은 usage 를
+        # response.completed 에만 싣는다): provider 는 프롬프트를 이미 청구했으므로
+        # admission 의 입력 추정치로 과금한다 — 전량 $0 처리는 과소청구다.
+        # 입력 버킷만 본다 — 스트림 헬퍼는 끊긴 지점까지의 텍스트로 output 을
+        # 역산하므로 input=0/output>0 인 중간 절단도 여기서 잡는다.
+        # 제외 경로: ERROR(상류 거부 — 프롬프트가 소비되지 않았을 수 있다)와
+        # 비스트리밍(그 경로의 상류 4xx/5xx 는 추정 청구 대상이 아니다).
+        # 추정치가 없으면 예전 동작(환불 + 실패 시 0 행)으로 진행한다.
+        if (
+            is_stream
+            and _normalize_usage_status(status) != "ERROR"
+            and usage.input_tokens == 0
+            and usage.cache_read_input_tokens == 0
+            and usage.cache_creation_input_tokens == 0
+            and rate_limit_state
+            and rate_limit_state.get("estimated_input")
+        ):
+            est = int(rate_limit_state["estimated_input"])
+            usage = usage.model_copy(
+                update={
+                    "input_tokens": est,
+                    "total_tokens": est + usage.output_tokens,
+                    "estimated": True,
+                    # 턴 스냅샷이 있으면 calculate_cost 가 0 토큰 턴들을
+                    # 합산해 $0 을 돌려준다 — 추정치가 무시되지 않게 지운다.
+                    "turn_usages": None,
+                }
+            )
+
         # KI-08: usage 없는 disconnect 경로 — 예약을 **전부** 되돌린다.
         #
         # ⚠️ 오랫동안 여기서 TPM 만 해제했다. 비용(CPM/CPH) 예약은 그대로 남아, 응답을
@@ -566,6 +626,9 @@ class CostRecorder:
             request_id=request_id,
             user_id=auth_context.user_id,
             team_id=auth_context.team_id or _DEFAULT_TEAM_ID,
+            # 팀 없는 사용자 — team_id 는 NOT NULL 이라 센티널로 채우지만 워커가
+            # TEAM 스코프 집계를 건너뛰도록 표시한다(default team 한도 오염 방지).
+            teamless=not auth_context.team_id,
             dept_id=auth_context.dept_id or _DEFAULT_DEPT_ID,
             model_alias=model_config.alias or model_config.provider_model_id,
             provider=provider_str,

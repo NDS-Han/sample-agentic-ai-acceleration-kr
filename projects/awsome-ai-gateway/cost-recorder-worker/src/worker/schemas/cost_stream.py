@@ -64,5 +64,9 @@ class CostStreamEntry(BaseModel):
     client: str | None = None
     # 청구 티어 감사 (마이그레이션 0043) — 게이트웨이가 채운 값을 그대로 usage_logs 에 쓴다.
     context_tier: str | None = None
+    # 게이트웨이 additive 필드: 팀 없는 사용자의 요청. True 면 TEAM 스코프
+    # budget_usages 집계를 건너뛴다 — team_id 가 default 센티널이라 팀 없는
+    # 지출이 그 팀 한도를 잠식하는 것을 막는다.
+    teamless: bool = False
 
     schema_version: int = Field(default=2)

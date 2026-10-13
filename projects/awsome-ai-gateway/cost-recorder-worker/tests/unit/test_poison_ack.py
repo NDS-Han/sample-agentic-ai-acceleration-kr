@@ -133,3 +133,46 @@ async def test_transient_failure_propagates_within_grace():
     with pytest.raises(RuntimeError):
         await consumer._flush_or_dead_letter(entries=[MagicMock()], ids=["1-1"])
     consumer._flusher.flush_dead_letter.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_trim_uses_min_pending_boundary():
+    """스트림 정리는 가장 오래된 미처리 id 를 경계로 한다.
+
+    게이트웨이 MAXLEN 근사 트림은 미소비 entry 도 잘라 청구 기록을 유실시킨다 —
+    워커는 ACK 후 XPENDING 최솟값(없으면 last-delivered-id)까지 만 잘라
+    미소비 entry 가 절대 트림되지 않게 한다.
+    """
+    redis = AsyncMock()
+    redis.xpending_range = AsyncMock(
+        return_value=[{"message_id": "5-0", "consumer": "c1", "elapsed": 1, "count": 1}]
+    )
+    redis.xtrim = AsyncMock()
+    consumer = _make_consumer(redis)
+
+    await consumer._trim_consumed()
+    redis.xtrim.assert_awaited_once_with("cost:stream", minid="5-0")
+
+
+@pytest.mark.asyncio
+async def test_trim_falls_back_to_last_delivered_when_no_pending():
+    """pending 이 없으면 last-delivered-id 까지 커밋된 것으로 본다."""
+    redis = AsyncMock()
+    redis.xpending_range = AsyncMock(return_value=[])
+    redis.xinfo_groups = AsyncMock(
+        return_value=[{"name": b"grp", "last-delivered-id": "9-9"}]
+    )
+    redis.xtrim = AsyncMock()
+    consumer = _make_consumer(redis)
+
+    await consumer._trim_consumed()
+    redis.xtrim.assert_awaited_once_with("cost:stream", minid="9-9")
+
+
+@pytest.mark.asyncio
+async def test_trim_failure_does_not_propagate():
+    """트림 실패는 소비 루프를 죽이지 않는다 — 다음 배치가 재시도한다."""
+    redis = AsyncMock()
+    redis.xpending_range = AsyncMock(side_effect=RuntimeError("redis down"))
+    consumer = _make_consumer(redis)
+    await consumer._trim_consumed()  # 예외 없이 종료

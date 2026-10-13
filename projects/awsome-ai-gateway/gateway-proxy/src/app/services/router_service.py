@@ -130,6 +130,14 @@ def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -
             long_cache_read_per_1k=pricing_row.long_context_cache_read_price_per_1k_tokens,
         )
     else:
+        # 단가 행이 없으면 $0 과금으로 조용히 통과한다 — 활성 alias 의 과금 누락을
+        # 대시보드에서 발견하기 전까지 알 수 없으므로 loud signal 을 남긴다.
+        if str(getattr(alias_row, "status", "")).upper() == "ACTIVE":
+            logger.error(
+                "model_pricing_missing",
+                alias=alias_row.alias,
+                provider_model_id=alias_row.provider_model_id,
+            )
         p = ModelPricingSchema(input_per_1k=Decimal("0"), output_per_1k=Decimal("0"))
 
     return ModelConfigSchema(

@@ -69,6 +69,11 @@ class CostStreamEntry(BaseModel):
     # 청구 티어 감사 (마이그레이션 0043). "short"|"long"|None(티어 없는 모델).
     # 게이트웨이 resolve_context_tier 가 청구와 동일 판정으로 채운다.
     context_tier: str | None = None
+    # 사용자에게 팀이 없을 때 True — team_id 는 usage_logs NOT NULL 을 위해
+    # default team 센티널로 채워지지만, 워커는 이 플래그가 있으면 TEAM 스코프
+    # budget_usages 집계를 건너뛴다(팀 없는 사용자의 지출이 default team 한도를
+    # 소진해 엉뚱한 팀이 차단되는 것을 막는다).
+    teamless: bool = False
 
     schema_version: int = Field(default=3)
 
@@ -103,6 +108,7 @@ class CostStreamEntry(BaseModel):
         bedrock_request_id: str | None = None,
         client: str | None = None,
         context_tier: str | None = None,
+        teamless: bool = False,
         requested_at: datetime | None = None,
     ) -> CostStreamEntry:
         now = datetime.now(tz=UTC)
@@ -153,4 +159,5 @@ class CostStreamEntry(BaseModel):
             bedrock_request_id=bedrock_request_id,
             client=client,
             context_tier=context_tier,
+            teamless=teamless,
         )

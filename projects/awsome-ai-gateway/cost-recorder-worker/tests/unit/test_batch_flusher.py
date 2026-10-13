@@ -37,6 +37,7 @@ def _make_entry(
     cost: str = "0.01",
     threshold: int | None = None,
     threshold_scope: str | None = None,
+    teamless: bool = False,
 ) -> CostStreamEntry:
     return CostStreamEntry(
         request_id=request_id,
@@ -59,6 +60,7 @@ def _make_entry(
         date="2026-04-21",
         threshold_triggered=threshold,
         threshold_scope=threshold_scope,
+        teamless=teamless,
     )
 
 
@@ -662,3 +664,38 @@ async def test_flush_dead_letter_swallows_permanent_errors_per_row():
     entries = [_make_entry(request_id=f"req-{i}") for i in range(2)]
     written = await flusher.flush_dead_letter(entries)
     assert written == 1  # 첫 행만 dead-letter, 둘째는 기록
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_teamless_entry_skips_team_budget_upsert():
+    """팀 없는 사용자의 usage 는 TEAM 스코프 budget_usages 에 합산하지 않는다.
+
+    gateway 는 usage_logs NOT NULL 을 위해 default team 센티널을 채우는데,
+    그 행을 팀 집계에 넣으면 팀 없는 사용자의 지출이 default team 한도를
+    소진해 엉뚱한 팀이 hard_block 된다. teamless 플래그로 걸러낸다.
+    """
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(side_effect=_insert_returning_exec)
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+
+    entries = [_make_entry(request_id="req-t", teamless=True)]
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    upsert_scopes = [
+        c.args[1][0]["scope"]
+        for c in session.execute.await_args_list
+        if isinstance(c.args[1], list)
+    ]
+    assert "USER" in upsert_scopes
+    assert "TEAM" not in upsert_scopes
