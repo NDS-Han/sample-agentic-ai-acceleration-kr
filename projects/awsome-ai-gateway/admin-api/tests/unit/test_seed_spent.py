@@ -61,10 +61,14 @@ def _item(uid: uuid.UUID, spent: str = "1.5") -> SeedSpentItem:
 
 @pytest.mark.asyncio
 async def test_failed_item_does_not_poison_following_items():
-    """item#1 의 DB 실패가 savepoint 에 격리돼 item#2 는 정상 처리된다."""
-    uid1, uid2 = uuid.uuid4(), uuid.uuid4()
+    """한 item 의 DB 실패가 savepoint 에 격리돼 나머지 item 은 정상 처리된다.
+
+    ⚠️ items 는 데드락 감소를 위해 (scope, scope_id, ...) 로 정렬돼 처리된다 —
+       get_user 실패가 어느 item 에 걸리는지는 정렬 순서에 따른다.
+    """
+    uid1, uid2 = sorted([uuid.uuid4(), uuid.uuid4()])
     session = _nested_session()
-    # item#1: get_user 가 예외 → item#2: 정상
+    # 정렬상 첫 item: get_user 가 예외 → 둘째: 정상
     repo = MagicMock()
     repo.get_user = AsyncMock(side_effect=[Exception("db down"), MagicMock()])
 
@@ -79,7 +83,8 @@ async def test_failed_item_does_not_poison_following_items():
         )
 
     assert resp.succeeded == 1 and resp.failed == 1
-    assert resp.results[0].status == "error"
+    assert resp.results[0].status == "error"   # 정렬상 첫 item
+    assert resp.results[0].scope_id == str(uid1)
     assert resp.results[1].status == "ok"
     # 두 item 모두 begin_nested savepoint 안에서 실행됐다
     assert session.begin_nested.call_count == 2
@@ -87,8 +92,8 @@ async def test_failed_item_does_not_poison_following_items():
 
 @pytest.mark.asyncio
 async def test_failed_item_does_not_schedule_redis_write():
-    """실패한 item 의 Redis SET 은 commit 후에도 실행되지 않는다."""
-    uid1, uid2 = uuid.uuid4(), uuid.uuid4()
+    """실패한 item 의 Redis 쓰기는 commit 후에도 실행되지 않는다."""
+    uid1, uid2 = sorted([uuid.uuid4(), uuid.uuid4()])
     session = _nested_session()
     repo = MagicMock()
     repo.get_user = AsyncMock(side_effect=[Exception("db down"), MagicMock()])
@@ -103,7 +108,7 @@ async def test_failed_item_does_not_schedule_redis_write():
             session, items=[_item(uid1), _item(uid2)], actor=_actor()
         )
 
-    # AsyncMock 세션은 defer 가 즉시 실행 — 성공한 item#2 의 키만 쓰인다
+    # AsyncMock 세션은 defer 가 즉시 실행 — 성공한 item(정렬상 둘째)의 키만 쓰인다
     keys = [c.args[2] for c in redis.eval.call_args_list]
     assert len(keys) == 1
     assert str(uid2) in keys[0]

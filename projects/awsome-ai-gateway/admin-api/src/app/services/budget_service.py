@@ -206,10 +206,13 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> SeedSpentResponse:
-        """Overwrite-inject absolute spent (USD) per item into DB + Redis.
+        """Inject absolute spent (USD) per item into DB + Redis via delta.
 
-        Migration burn-rate continuation. Overwrite (not accumulate) → idempotent.
-        Per-item partial failure: failed items reported, others proceed.
+        Migration burn-rate continuation. 내부적으로는 델타 적용(행 잠금 하에 읽은
+        현재값과 목표값의 차를 DB 행과 Redis 카운터 양쪽에 더한다) — 동시
+        settle·in-flight 예약을 보존하면서 결과적으로 절대값과 같다. 재실행 시
+        델타가 0 이라 멱등. Per-item partial failure: failed items reported,
+        others proceed.
         """
         results: list[SeedSpentResult] = []
         user_repo = UserRepository(session)

@@ -198,6 +198,12 @@ class StreamConsumer:
                 self._stream, self._group, "-", "+", count=1
             )
             floor: Any = pend[0].get("message_id") if pend else last_delivered
+            # redis-py 는 decode_responses=False 로 bytes 를 돌려준다 — 비교와
+            # XTRIM 전에 반드시 디코드한다(str(b"1-0") → "b'1-0'" 으로 오염).
+            if isinstance(floor, bytes):
+                floor = floor.decode()
+            if isinstance(last_delivered, bytes):
+                last_delivered = last_delivered.decode()
             if floor and last_delivered:
                 # pending 최솟값과 last-delivered 중 작은 쪽 — 둘 다 읽은 시점
                 # 이전의 커밋 경계를 넘지 않도록 보수적으로 잡는다.
@@ -205,8 +211,6 @@ class StreamConsumer:
                     floor = last_delivered
             if not floor:
                 return
-            if isinstance(floor, bytes):
-                floor = floor.decode()
             await self._redis.xtrim(self._stream, minid=floor)
         except Exception as e:
             # 트림이 조용히 멈추면 스트림이 MAXLEN 백스톱(500K, 수백 MB)까지

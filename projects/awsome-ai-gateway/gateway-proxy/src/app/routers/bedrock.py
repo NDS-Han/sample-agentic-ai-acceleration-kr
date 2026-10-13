@@ -496,10 +496,13 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                     await _aclose_iter(iterator)
 
         if status >= 400:
-            # 상류 거부 — 프롬프트가 소비되지 않았을 수 있다. 예약을 되돌리고
-            # rate_limit_state 를 비워 finalize 의 추정 입력 과금이 이 경로에
-            # 발동하지 않게 한다(거부된 요청을 청구하지 않기 위해).
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            # 상류 거부 — 프롬프트가 소비되지 않았을 수 있으므로 추정 입력 과금만
+            # 끊는다(estimated_input 제거 → finalize 의 추정 대체 경로 미발동).
+            # 예약 자체는 놔둔다 — finalize 의 zero-usage 경로가 해제하고,
+            # ERROR/TIMEOUT 마커 행도 남긴다(monitoring 의 진실, E2E S5).
+            rls = state.get("rate_limit_state")
+            if rls:
+                rls.pop("estimated_input", None)
 
         return StreamingResponse(
             stream_with_cost(),

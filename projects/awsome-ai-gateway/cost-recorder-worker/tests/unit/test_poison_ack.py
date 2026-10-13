@@ -140,12 +140,16 @@ async def test_trim_uses_min_pending_boundary():
     """스트림 정리는 가장 오래된 미처리 id 를 경계로 한다.
 
     게이트웨이 MAXLEN 근사 트림은 미소비 entry 도 잘라 청구 기록을 유실시킨다 —
-    워커는 ACK 후 XPENDING 최솟값(없으면 last-delivered-id)까지 만 잘라
-    미소비 entry 가 절대 트림되지 않게 한다.
+    워커는 ACK 후 min(미처리 최솟값, last-delivered-id)까지만 잘라 미소비
+    entry 가 절대 트림되지 않게 한다. redis-py 는 bytes 를 돌려주므로
+    디코드 경로도 함께 검증한다.
     """
     redis = AsyncMock()
+    redis.xinfo_groups = AsyncMock(
+        return_value=[{"name": b"grp", "last-delivered-id": b"9-9"}]
+    )
     redis.xpending_range = AsyncMock(
-        return_value=[{"message_id": "5-0", "consumer": "c1", "elapsed": 1, "count": 1}]
+        return_value=[{"message_id": b"5-0", "consumer": b"c1", "elapsed": 1, "count": 1}]
     )
     redis.xtrim = AsyncMock()
     consumer = _make_consumer(redis)
@@ -160,13 +164,32 @@ async def test_trim_falls_back_to_last_delivered_when_no_pending():
     redis = AsyncMock()
     redis.xpending_range = AsyncMock(return_value=[])
     redis.xinfo_groups = AsyncMock(
-        return_value=[{"name": b"grp", "last-delivered-id": "9-9"}]
+        return_value=[{"name": b"grp", "last-delivered-id": b"9-9"}]
     )
     redis.xtrim = AsyncMock()
     consumer = _make_consumer(redis)
 
     await consumer._trim_consumed()
     redis.xtrim.assert_awaited_once_with("cost:stream", minid="9-9")
+
+
+@pytest.mark.asyncio
+async def test_trim_uses_last_delivered_when_below_pending_min():
+    """XINFO 를 먼저 읽는 이유: XPENDING 이 빈 사이 다른 소비자가 배달받은
+    진행 중 entry 를 last-delivered-id 로 지우면 재처리가 영구 유실된다.
+    pending 최솟값보다 last-delivered 가 작으면 작은 쪽을 경계로 둔다."""
+    redis = AsyncMock()
+    redis.xinfo_groups = AsyncMock(
+        return_value=[{"name": b"grp", "last-delivered-id": b"3-0"}]
+    )
+    redis.xpending_range = AsyncMock(
+        return_value=[{"message_id": b"5-0", "consumer": b"c1", "elapsed": 1, "count": 1}]
+    )
+    redis.xtrim = AsyncMock()
+    consumer = _make_consumer(redis)
+
+    await consumer._trim_consumed()
+    redis.xtrim.assert_awaited_once_with("cost:stream", minid="3-0")
 
 
 @pytest.mark.asyncio
