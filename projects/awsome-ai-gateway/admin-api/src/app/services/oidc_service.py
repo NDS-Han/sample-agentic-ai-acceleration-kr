@@ -141,7 +141,14 @@ class OIDCService:
 
         if not sub:
             raise OIDCAuthError(f"missing claim: {settings.OIDC_USER_ID_CLAIM}")
-        email_verified = _truthy(claims.get("email_verified"))
+        # email_verified 클레임은 "email" **속성**에 대한 검증 — 매핑된 이메일
+        # 클레임이 email 이 아니면(예: preferred_username, upn) 이 값으로 그
+        # 클레임을 증명할 수 없다.
+        email_verified = (
+            _truthy(claims.get("email_verified"))
+            if settings.OIDC_EMAIL_CLAIM == "email"
+            else False
+        )
         if not email:
             # email claim 없는 토큰(Cognito access_token 등) → preferred_username 시도.
             email = claims.get("preferred_username") or ""

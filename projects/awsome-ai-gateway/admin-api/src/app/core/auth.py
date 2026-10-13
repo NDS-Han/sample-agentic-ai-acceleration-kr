@@ -284,6 +284,7 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     아예 설정하지 않은 운영 형태에서는 ``derive_role`` 이 ADMIN 을 낼 수 없으므로
     DB role 을 그대로 신뢰한다 — 안 그러면 수동 부여한 관리자가 전원 잠긴다.
     """
+    from app.core.config import get_settings
     from app.core.oidc_identity import (
         admin_mapping_configured,
         claims_truthy,
@@ -317,15 +318,24 @@ async def _resolve_idp_identity(claims: dict) -> CurrentUser:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="user_deactivated")
 
-    # ADMIN_EMAILS 매칭은 검증된 이메일에만 허용한다 — 미검증 클레임 이메일은
-    # 사용자가 쓸 수 있는 값이라 주장만으로 ADMIN 승격이 된다. 클레임 이메일이
-    # 없어 DB 이메일로 폴백할 때는 연결 시 verified 게이트를 통과한 값이므로
-    # 신뢰한다.
-    claim_email_verified = claims_truthy(claims.get("email_verified"))
+    # ADMIN_EMAILS 매칭은 **이 토큰의 검증된 이메일 클레임**에만 허용한다 —
+    # 미검증 클레임 이메일은 사용자가 쓸 수 있는 값이라 주장만으로 ADMIN 승격이
+    # 된다. DB 이메일은 폴백으로 쓰지 않는다: 이 게이트 이전에 미검증으로 저장된
+    # 행이 남아 있을 수 있고, 클레임 이메일이 없는 토큰(access token)이면
+    # "DB 에 신뢰된 주소가 있다"는 가정 하나로 승격되던 경로가 열린다.
+    # 그룹 클레임은 IdP 가 관리하므로 이 게이트와 무관하다.
+    # email_verified 클레임은 "email" **속성**에 대한 검증 — 매핑된 이메일
+    # 클레임이 email 이 아니면(예: preferred_username, upn) 그 값을 증명하지
+    # 않으므로 미검증 취급한다.
+    claim_email_verified = (
+        claims_truthy(claims.get("email_verified"))
+        if get_settings().OIDC_EMAIL_CLAIM == "email"
+        else False
+    )
     role_from_claims = derive_role(
-        parsed.email or (user.email or ""),
+        parsed.email or "",
         parsed.groups,
-        email_verified=claim_email_verified if parsed.email else bool(user.email),
+        email_verified=claim_email_verified,
     )
     if role_from_claims == UserRole.ADMIN:
         role = UserRole.ADMIN

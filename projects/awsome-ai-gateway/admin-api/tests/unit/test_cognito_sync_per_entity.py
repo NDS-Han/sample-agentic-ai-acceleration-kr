@@ -773,3 +773,58 @@ async def test_sync_user_active_stays_without_revoke(monkeypatch):
 
     assert existing.is_active is True
     key_service.revoke_keys_for_users.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sync_user_stores_synthetic_email_when_unverified(monkeypatch):
+    """미검증 풀 이메일은 DB 에 싣지 않는다 — 저장된 이메일은 auth.py 의
+    DB-폴백 ADMIN_EMAILS 매칭·이메일 연결의 신뢰 근거라, 미검증 주소 저장은
+    공격자가 임의 주소를 '신뢰된' 값으로 만드는 경로가 된다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock()
+    repo.list_users = AsyncMock(return_value=[])
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("SUB-U", "claimed-admin@x.com", email_verified=False)
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    result = await svc.sync_user(session, "claimed-admin@x.com")
+
+    assert result.users_created == 1
+    created = repo.create_user.await_args[0][0]
+    assert created.email == "SUB-U@unknown"  # synthetic — 미검증 주소 미저장
+
+
+@pytest.mark.asyncio
+async def test_sync_user_stores_email_when_verified(monkeypatch):
+    """대조: verified 풀 이메일은 그대로 저장된다."""
+    s = _settings(monkeypatch)
+    session = _session()
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock()
+    repo.list_users = AsyncMock(return_value=[])
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user("SUB-V", "v@x.com", email_verified=True)
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    await svc.sync_user(session, "v@x.com")
+
+    created = repo.create_user.await_args[0][0]
+    assert created.email == "v@x.com"

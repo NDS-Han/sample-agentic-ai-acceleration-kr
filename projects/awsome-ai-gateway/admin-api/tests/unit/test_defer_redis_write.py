@@ -120,6 +120,29 @@ async def test_write_inside_rolled_back_savepoint_is_discarded():
     assert calls == []
 
 
+async def test_write_inside_released_savepoint_runs_on_outer_commit():
+    """savepoint 안에서 등록 → savepoint release → 외부 commit 이면 실행된다.
+
+    release 시점엔 실행되면 안 되고(외부 롤백 가능성), 외부 commit 이후엔
+    반드시 실행돼야 한다 — per-user savepoint 안의 정상 폐기 분."""
+    session = _session_double()
+    calls: list[str] = []
+
+    async def write() -> None:
+        calls.append("ran")
+
+    sync = session.sync_session
+    sync.execute(text("SELECT 1"))
+    nested = sync.begin_nested()
+    await defer_redis_write_until_commit(session, write)
+    nested.commit()  # RELEASE savepoint — 아직 외부 트랜잭션은 열려 있다
+    await asyncio.sleep(0)
+    assert calls == []
+    sync.commit()
+    await asyncio.sleep(0)
+    assert calls == ["ran"]
+
+
 async def test_write_survives_unrelated_savepoint_rollback():
     """등록 후 *다른* savepoint 가 롤백돼도 바깥에서 등록한 쓰기는 산다.
 

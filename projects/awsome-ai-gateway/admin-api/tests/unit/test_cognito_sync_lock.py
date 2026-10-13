@@ -132,3 +132,56 @@ async def test_conn_bound_session_uses_session_level_lock(monkeypatch):
     assert "pg_try_advisory_lock" in executed_sql
     svc._sync_all_locked.assert_awaited_once()
     assert result is sync_result
+
+
+@pytest.mark.asyncio
+async def test_lock_failure_on_postgres_refuses_to_run_unlocked(monkeypatch):
+    """Postgres 에서 락을 못 잡으면(풀 고갈 등) 락 없이 sync 하지 않는다.
+
+    이전에는 모든 예외를 삼키고 잠금 없이 진행했다 — 풀이 포화된 시점이 정확히
+    동시 sync 가 몰리는 시점이라 상호배제가 가장 필요한 때에 무너졌다.
+    비-PG/모킹 환경에서만 잠금 없이 진행한다."""
+    _settings(monkeypatch)
+    from sqlalchemy import create_engine
+
+    session = AsyncMock()
+    # dialect 는 클래스 속성이 아니라 spec-mock 에 못 단다 — 실제(postgres
+    # dialect) Engine 을 만들되 연결은 하지 않는다.
+    engine = create_engine("postgresql+asyncpg://u:p@localhost/db")
+    session.get_bind = MagicMock(return_value=engine)
+
+    ae = MagicMock()
+    ae.connect = MagicMock(side_effect=TimeoutError("pool exhausted"))
+
+    svc = CognitoSyncService(MagicMock())
+    svc._sync_all_locked = AsyncMock()
+
+    with patch("sqlalchemy.ext.asyncio.AsyncEngine", return_value=ae):
+        result = await svc.sync_all(session)
+
+    svc._sync_all_locked.assert_not_called()
+    assert any("advisory lock" in e for e in result.errors)
+
+
+@pytest.mark.asyncio
+async def test_lock_failure_on_non_postgres_proceeds(monkeypatch):
+    """비-PG/모킹 환경(다이얼렉트가 postgresql 이 아님)은 기존 동작 유지."""
+    _settings(monkeypatch)
+    from sqlalchemy import create_engine
+
+    session = AsyncMock()
+    engine = create_engine("sqlite://")
+    session.get_bind = MagicMock(return_value=engine)
+
+    ae = MagicMock()
+    ae.connect = MagicMock(side_effect=Exception("no advisory locks here"))
+
+    sync_result = SyncResult()
+    svc = CognitoSyncService(MagicMock())
+    svc._sync_all_locked = AsyncMock(return_value=sync_result)
+
+    with patch("sqlalchemy.ext.asyncio.AsyncEngine", return_value=ae):
+        result = await svc.sync_all(session)
+
+    svc._sync_all_locked.assert_awaited_once()
+    assert result is sync_result

@@ -208,6 +208,7 @@ class CognitoSyncService:
         lock_stack = AsyncExitStack()
         lock_acquired = False
         session_locked = False
+        bind = None
         try:
             # ⚠️ AsyncSession.get_bind() 는 sync_session.get_bind 에 프록시돼
             #   항상 **sync** Engine/Connection 을 돌려준다 — AsyncConnection
@@ -246,6 +247,16 @@ class CognitoSyncService:
         except Exception:
             logger.warning("cognito_sync.advisory_lock_unavailable", exc_info=True)
             await lock_stack.aclose()
+            # Postgres 에서 락을 못 잡는 것(풀 고갈·드라이버 오류)은 모킹/비-PG
+            # 환경과 다르다 — 락 없이 sync 를 돌리면 상호배제가 무너지는데,
+            # 풀이 포화됐을 때가 정확히 동시 sync 가 몰리는 시점이다. 그 경우엔
+            # 이번 실행을 포기하고 다음 sync 에 맡긴다.
+            dialect = getattr(bind, "dialect", None)
+            if dialect is not None and dialect.name == "postgresql":
+                result.errors.append(
+                    "advisory lock unavailable — sync skipped (mutual exclusion required)"
+                )
+                return result
 
         try:
             return await self._sync_all_locked(session, settings, result)
@@ -585,7 +596,14 @@ class CognitoSyncService:
                 updated = True
         if existing is None:
             new_user = User(
-                id=uuid.uuid4(), email=email, display_name=name, role=role,
+                id=uuid.uuid4(),
+                # 미검증 풀 이메일도 DB 에 싣지 않는다 — 저장된 이메일은
+                # auth.py 의 DB-폴백 ADMIN_EMAILS 매칭·이메일 계정 연결의
+                # 신뢰 근거다. 미검증 주소를 저장하면 공격자가 ADMIN 주소를
+                # 자기 것이라고 등록한 풀 유저가 DB 폴백을 통해 ADMIN 이 된다.
+                # OIDC 경로(oidc_service._upsert_user)와 같은 synthetic 계약.
+                email=email if email_verified else f"{sub}@unknown",
+                display_name=name, role=role,
                 sso_subject=sub, team_id=team_id, is_active=enabled,
                 provider=settings.OIDC_PROVIDER_NAME,
             )
@@ -1111,11 +1129,22 @@ class CognitoSyncService:
             if dept_id is None:
                 if cache.org_id is None:
                     raise ValueError(f"Cannot resolve department for {dept_name}")
-                new_dept = Department(
-                    id=uuid.uuid4(), org_id=cache.org_id, name=dept_name
-                )
-                await repo.create_department(new_dept)
-                dept_id = new_dept.id
+                # check-then-act 경합: uq_departments_org_name 이 패자를
+                # IntegrityError 로 만든다 — savepoint + 승자 재조회.
+                try:
+                    async with session.begin_nested():
+                        new_dept = Department(
+                            id=uuid.uuid4(), org_id=cache.org_id, name=dept_name
+                        )
+                        await repo.create_department(new_dept)
+                        dept_id = new_dept.id
+                except IntegrityError:
+                    winner = await repo.get_department_by_name(
+                        cache.org_id, dept_name
+                    )
+                    if winner is None:
+                        raise
+                    dept_id = winner.id
                 cache.depts_by_name[dept_name] = dept_id
 
         key = (dept_id, team_name)
@@ -1123,10 +1152,19 @@ class CognitoSyncService:
         if cached is not None:
             return cached
 
-        team = Team(id=uuid.uuid4(), dept_id=dept_id, name=team_name)
-        await repo.create_team(team)
-        cache.teams[key] = team.id
-        return team.id
+        # 같은 check-then-act 경합(uq_teams_dept_name) — 패자는 승자 행 재조회.
+        try:
+            async with session.begin_nested():
+                team = Team(id=uuid.uuid4(), dept_id=dept_id, name=team_name)
+                await repo.create_team(team)
+                team_id = team.id
+        except IntegrityError:
+            winner = await repo.get_team_by_dept_and_name(dept_id, team_name)
+            if winner is None:
+                raise
+            team_id = winner.id
+        cache.teams[key] = team_id
+        return team_id
 
     @staticmethod
     def _derive_role(email: str, user_groups: list[str], *, email_verified: bool = False) -> UserRole:

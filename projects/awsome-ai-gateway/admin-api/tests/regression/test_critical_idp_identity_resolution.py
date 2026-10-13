@@ -313,9 +313,12 @@ async def test_unverified_email_claim_cannot_bootstrap_admin():
         )
 
 
-async def test_db_email_fallback_counts_as_trusted_for_admin_emails():
-    """토큰에 email 이 없을 때 DB 이메일 폴백은 연결 시 verified 게이트를
-    통과한 값이므로 ADMIN_EMAILS 매칭에 쓸 수 있다."""
+async def test_db_email_fallback_does_not_grant_admin():
+    """토큰에 email 이 없을 때 DB 이메일은 ADMIN_EMAILS 매칭에 쓰지 않는다.
+
+    DB 이메일은 verified 게이트 이전에 미검증으로 저장됐을 수 있고, 클레임
+    이메일이 없는 토큰(access token)이면 저장된 주장 주소만으로 승격되던
+    경로가 열렸다. 그룹 매칭은 IdP 관리라 무관 — 어드민은 그룹으로 부여한다."""
     claims = {"sub": "s"}  # email 클레임 없음 (Cognito access_token 형태)
     p1, p2, p3, _ = _resolve(
         claims,
@@ -324,7 +327,7 @@ async def test_db_email_fallback_counts_as_trusted_for_admin_emails():
     )
     with p1, p2, p3:
         user = await get_current_user(_request(claims))
-    assert user.role == UserRole.ADMIN
+    assert user.role == UserRole.DEVELOPER
 
 
 # ─────────────────────────────────────────────────────────────────────────────

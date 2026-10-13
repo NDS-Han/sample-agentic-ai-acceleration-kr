@@ -85,8 +85,9 @@ def derive_role(email: str, groups: list[str], *, email_verified: bool = False) 
     ``email_verified`` — ADMIN_EMAILS 매칭의 전제. 이메일 클레임은 사용자가
     쓸 수 있는 값이라(IdP 의 검증 요구 설정에 따라) 미검증 주소를 ADMIN 목록과
     매칭하면 주장만으로 권한상승이 된다. 그룹 클레임은 IdP 가 관리하므로
-    이 게이트와 무관하다. DB 에 저장된 이메일(연결 시 verified 게이트를 통과한
-    값)을 호출부가 폴백으로 쓰는 경우엔 신뢰된 값이므로 True 로 호출한다.
+    이 게이트와 무관하다. Cognito 풀 속성(AdminGetUser 의 email_verified)은
+    서버측 값이라 검증 근거로 쓸 수 있다. DB 에 저장된 이메일은 쓰지 않는다 —
+    게이트 도입 이전에 미검증으로 저장된 행이 남아 있을 수 있다.
     """
     settings = get_settings()
 
