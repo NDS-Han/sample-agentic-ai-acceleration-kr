@@ -186,7 +186,9 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
           {t('noUsageForScope')}
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-center">
+        <div className="grid grid-cols-1 md:grid-cols-[14rem_minmax(0,1fr)] gap-6 items-center">
+          {/* 도넛은 고정폭, 범례가 나머지 전부 — 절반씩 나누면 모델명이
+              2~3줄로 꺾여 행이 세로로 불어난다. */}
           <div className="relative h-64">
             <Doughnut data={chartData} options={options} />
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
