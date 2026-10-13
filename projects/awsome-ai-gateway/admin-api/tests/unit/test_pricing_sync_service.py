@@ -247,22 +247,58 @@ def test_fetch_result_lookup_region_aware():
     assert result.lookup("eu.anthropic.claude-haiku-4-5").input_per_1k == Decimal("0.0013")
 
 
-def test_fetch_result_lookup_global_fallback():
-    """exact 가 없으면 global.<base> 기준가 → 없으면 plain <base> — 타 리전 교차 금지."""
+def test_fetch_result_lookup_global_boundary_never_crossed():
+    """global↔비-global 폴백 금지 — Global CRIS 단가(≈9% 저가)를 in-region 모델에
+    적용하면 조용히 과소청구된다. geo(us./eu./apac./jp.)만 plain base 로 폴백."""
     result = FetchResult(prices={
         "global.anthropic.claude-sonnet-4-6": _price("0.003"),
         "anthropic.claude-opus-4-6": _price("0.005"),
         "us.anthropic.claude-fable-5": _price("0.011"),
     })
-    # apac.DB id → apac 엔트리 없음 → global 기준가로 폴백
-    assert result.lookup("apac.anthropic.claude-sonnet-4-6").input_per_1k == Decimal("0.003")
-    # prefix 없는 DB id → global 우선
-    assert result.lookup("anthropic.claude-sonnet-4-6").input_per_1k == Decimal("0.003")
-    # us.DB id 에 exact 없고 global 도 없으면 → us 외 타 리전(eu 등)으로는 가지 않음
+    # geo prefix + plain base 존재 → plain(in-region) 단가로 폴백
+    assert result.lookup("us.anthropic.claude-opus-4-6").input_per_1k == Decimal("0.005")
+    assert result.lookup("apac.anthropic.claude-opus-4-6").input_per_1k == Decimal("0.005")
+    # geo 행은 global 기준가로 떨어지지 않는다 — apac 엔트리 없으면 미매칭
+    assert result.lookup("apac.anthropic.claude-sonnet-4-6") is None
+    # plain 저장 행도 global 단가를 집지 않는다
+    assert result.lookup("anthropic.claude-sonnet-4-6") is None
+    # global 저장 행은 plain 단가로 떨어지지 않는다(과다청구 방지)
+    assert result.lookup("global.anthropic.claude-opus-4-6") is None
+    # exact 매칭은 그대로
     assert result.lookup("us.anthropic.claude-fable-5").input_per_1k == Decimal("0.011")
-    # eu.DB id 가 us 엔트리만 있는 모델 → global/plain 없으면 미매칭(조용한 교차 리전 금지)
+    # us 엔트리만 있는 모델의 eu 행 → 교차 리전 금지
     assert result.lookup("eu.anthropic.claude-fable-5") is None
     assert result.lookup("anthropic.claude-nonexistent") is None
+
+
+def test_litellm_long_context_tier_extracted():
+    """*_above_272k_tokens 필드 → NormalizedPrice 장문 구간으로 매핑."""
+    m = _llm_model("openai.gpt-x", 2e-06, 1e-05)
+    m["input_cost_per_token_above_272k_tokens"] = 4e-06
+    m["output_cost_per_token_above_272k_tokens"] = 1.5e-05
+    m["cache_creation_input_token_cost_above_272k_tokens"] = 5e-06
+    m["cache_read_input_token_cost_above_272k_tokens"] = 2e-07
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    out = svc._normalize_models([m])
+    np = out.prices["openai.gpt-x"]
+    assert np.long_context_threshold_tokens == 272000
+    assert np.long_input_per_1k == Decimal("0.004")
+    assert np.long_output_per_1k == Decimal("0.015")
+    assert np.long_cache_5m_per_1k == Decimal("0.005")
+    assert np.long_cache_read_per_1k == Decimal("0.0002")
+    # 1h 구간은 카탈로그에 필드 없음 → 5m 구간과 같은 1h/5m 비율로 파생
+    assert np.long_cache_1h_per_1k == np.long_cache_5m_per_1k * (
+        np.cache_1h_per_1k / np.cache_5m_per_1k
+    )
+
+
+def test_litellm_no_long_context_fields():
+    """구간 필드가 없으면 장문 단가 None — 기존 행 이어받기 대상."""
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    out = svc._normalize_models([_llm_model("openai.gpt-y", 1e-06, 2e-06)])
+    np = out.prices["openai.gpt-y"]
+    assert np.long_context_threshold_tokens is None
+    assert np.long_input_per_1k is None
 
 
 @pytest.mark.asyncio

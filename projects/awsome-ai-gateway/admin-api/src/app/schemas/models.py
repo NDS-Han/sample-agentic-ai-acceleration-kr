@@ -292,6 +292,27 @@ class PricingRequest(BaseModel):
     cache_read_price_per_1k_tokens: Decimal = Field(
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
+    #: 장문(>threshold) 구간 단가 — None 이면 set_pricing 이 이전 행 값을 이어받는다.
+    #: 가격 동기화가 LiteLLM `*_above_272k_tokens` 를 매핑해 채운다. 기본 단가만
+    #: 개정하고 구간 단가를 얼리면 >272K 요청이 구 단가 비율로 과소청구된다.
+    long_context_threshold_tokens: int | None = Field(default=None, ge=0)
+    long_context_input_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_output_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_creation_5m_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_creation_1h_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_read_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    #: 캐시 단가가 소스 미게시 값의 파생(추정)인지 — 감사 로그에 출처를 남긴다.
+    cache_derived: bool = False
     effective_from: datetime
 
 
@@ -354,6 +375,10 @@ class PriceSyncDiff(BaseModel):
     proposed_cache_5m_per_1k: Decimal | None = None
     proposed_cache_1h_per_1k: Decimal | None = None
     proposed_cache_read_per_1k: Decimal | None = None
+    #: 장문(>threshold) 구간 제안 단가 — 카탈로그가 *_above_272k_tokens 를 줄 때만.
+    long_context_threshold_tokens: int | None = None
+    proposed_long_input_per_1k: Decimal | None = None
+    proposed_long_output_per_1k: Decimal | None = None
     changed: bool = False  # 현재가와 제안가가 다른가
     #: 카탈로그 스펙(context_window/max_output_tokens)과 DB 값이 다른가.
     #: 단가 변경이 0이어도 이 플래그가 있으면 적용 대상에 포함되어야 한다 —
@@ -370,11 +395,33 @@ class PriceSyncPreviewResponse(BaseModel):
     changed_count: int
 
 
+class PriceSyncExpected(BaseModel):
+    """미리보기에서 운영자가 승인한 alias 단가 — apply 시 재수집 값과 대조한다.
+
+    카탈로그는 preview 와 apply 사이에 변할 수 있다. 클라이언트가 이 값을
+    보내면 서버는 재수집 단가가 다를 때 해당 alias 를 적용하지 않고 거부해,
+    운영자가 본 값과 다른 단가가 감사 로그에 기록되는 드리프트를 차단한다.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    input_per_1k: Decimal
+    output_per_1k: Decimal
+    cache_5m_per_1k: Decimal
+    cache_1h_per_1k: Decimal
+    cache_read_per_1k: Decimal
+    long_context_threshold_tokens: int | None = None
+    long_input_per_1k: Decimal | None = None
+    long_output_per_1k: Decimal | None = None
+
+
 class PriceSyncApplyRequest(BaseModel):
     """승인 후 적용할 alias 목록(명시 선택 — 자동 전체적용 금지)."""
 
     aliases: list[str] = Field(min_length=1)
     source: str = "aws"  # "aws" | "litellm"
+    #: preview 승인값(비어 있으면 레거시 동작 — 재수집 값 그대로 적용).
+    expected: dict[str, PriceSyncExpected] = Field(default_factory=dict)
 
 
 class PriceSyncApplyResponse(BaseModel):

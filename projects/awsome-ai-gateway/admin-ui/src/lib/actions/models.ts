@@ -229,6 +229,10 @@ export interface PriceSyncDiff {
   proposed_cache_5m_per_1k: string | null;
   proposed_cache_1h_per_1k: string | null;
   proposed_cache_read_per_1k: string | null;
+  /** 카탈로그가 장문 구간 단가를 줄 때만 */
+  long_context_threshold_tokens?: number | null;
+  proposed_long_input_per_1k?: string | null;
+  proposed_long_output_per_1k?: string | null;
   changed: boolean;
   /** 단가 동일해도 카탈로그 스펙(context_window/max_output_tokens)이 갱신되면 true. */
   spec_changed?: boolean;
@@ -277,10 +281,29 @@ export async function previewPriceSyncAction(
 /** 승인된 alias 만 외부 단가로 적용(자동 전체적용 아님). */
 export async function applyPriceSyncAction(
   aliases: string[],
-  source: PriceSyncSource = 'aws'
+  source: PriceSyncSource = 'aws',
+  preview?: PriceSyncPreview | null
 ): Promise<ActionResult<{ applied: string[]; skipped: string[]; errors: string[] }>> {
   if (!aliases.length) {
     return { success: false, error: '적용할 모델을 선택하세요' };
+  }
+  // 미리보기 승인값 — 카탈로그가 preview↔apply 사이에 바뀌면 서버가 거부한다.
+  // 운영자가 본 단가와 다른 값이 감사 로그에 박히는 드리프트 차단.
+  const expected: Record<string, unknown> = {};
+  if (preview) {
+    for (const d of preview.diffs) {
+      if (!aliases.includes(d.alias) || !d.matched) continue;
+      expected[d.alias] = {
+        input_per_1k: d.proposed_input_per_1k,
+        output_per_1k: d.proposed_output_per_1k,
+        cache_5m_per_1k: d.proposed_cache_5m_per_1k,
+        cache_1h_per_1k: d.proposed_cache_1h_per_1k,
+        cache_read_per_1k: d.proposed_cache_read_per_1k,
+        long_context_threshold_tokens: d.long_context_threshold_tokens ?? null,
+        long_input_per_1k: d.proposed_long_input_per_1k ?? null,
+        long_output_per_1k: d.proposed_long_output_per_1k ?? null,
+      };
+    }
   }
   try {
     // 비멱등 — 서버는 alias 마다 기존 가격 행을 닫고 새 버전+SET_PRICING 감사 행을
@@ -290,7 +313,7 @@ export async function applyPriceSyncAction(
       applied: string[];
       skipped: string[];
       errors: string[];
-    }>('/admin/models/pricing/sync-apply', { aliases, source });
+    }>('/admin/models/pricing/sync-apply', { aliases, source, expected });
     revalidatePath('/models');
     return { success: true, data };
   } catch (err) {

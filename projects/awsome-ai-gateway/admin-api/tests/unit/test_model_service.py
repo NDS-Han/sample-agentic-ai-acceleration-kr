@@ -796,3 +796,170 @@ class TestPriceSyncProviderGate:
             MagicMock(), pricing_sync_service=self._sync_src()
         )
         assert out.diffs == []
+
+
+class TestPriceSyncApply:
+    """apply 안전 계약 — 미래 예약 행 보호(F3), 승인값 드리프트 거부(F4),
+    장문 구간 값이 set_pricing 까지 흐름(F2)."""
+
+    def _repo_with(self, model, pricing=None):
+        repo = MagicMock()
+        repo.get_by_alias = AsyncMock(return_value=model)
+        repo.get_current_pricing = AsyncMock(return_value=pricing or _make_pricing())
+        return repo
+
+    def _sync_src(self, np=None):
+        from app.services.pricing_sync_service import FetchResult, NormalizedPrice
+
+        src = MagicMock()
+        fetched = FetchResult()
+        fetched.prices["global.openai.gpt-6.1-sol"] = np or NormalizedPrice(
+            input_per_1k=Decimal("0.002"),
+            output_per_1k=Decimal("0.01"),
+            cache_5m_per_1k=Decimal("0.0025"),
+            cache_1h_per_1k=Decimal("0.004"),
+            cache_read_per_1k=Decimal("0.0002"),
+        )
+        src.fetch_bedrock_prices = AsyncMock(return_value=fetched)
+        return src
+
+    def _model(self):
+        m = _make_model(alias="gpt-6.1-sol")
+        m.provider = Provider.BEDROCK_MANTLE_OPENAI
+        m.provider_model_id = "global.openai.gpt-6.1-sol"
+        m.allowed_clients = []
+        m.context_window = 272000
+        m.max_output_tokens = 32000
+        return m
+
+    @pytest.mark.asyncio
+    async def test_future_dated_row_blocks_apply(self, monkeypatch):
+        """미래 시작 예약 단가가 있으면 자동 적용 보류 — 역전 행·예약 소실 금지."""
+        from datetime import timedelta
+
+        future_row = _make_pricing()
+        future_row.effective_from = datetime.now(timezone.utc) + timedelta(days=7)
+        m = self._model()
+        repo = self._repo_with(m, future_row)
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        svc.set_pricing = AsyncMock()
+
+        out = await svc.apply_price_sync(
+            MagicMock(),
+            pricing_sync_service=self._sync_src(),
+            aliases=["gpt-6.1-sol"],
+            actor=MagicMock(),
+        )
+        assert out.applied == []
+        assert "gpt-6.1-sol" in out.skipped
+        assert any("예약" in e for e in out.errors)
+        svc.set_pricing.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_expected_drift_rejects(self, monkeypatch):
+        """preview 승인값과 재수집 값이 다르면 적용 거부."""
+        from app.schemas.models import PriceSyncExpected
+
+        m = self._model()
+        repo = self._repo_with(m)
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        svc.set_pricing = AsyncMock()
+
+        out = await svc.apply_price_sync(
+            MagicMock(),
+            pricing_sync_service=self._sync_src(),
+            aliases=["gpt-6.1-sol"],
+            actor=MagicMock(),
+            expected={
+                "gpt-6.1-sol": PriceSyncExpected(
+                    input_per_1k=Decimal("0.999"),  # 카탈로그가 달라진 상황
+                    output_per_1k=Decimal("0.01"),
+                    cache_5m_per_1k=Decimal("0.0025"),
+                    cache_1h_per_1k=Decimal("0.004"),
+                    cache_read_per_1k=Decimal("0.0002"),
+                )
+            },
+        )
+        assert out.applied == []
+        assert any("승인값" in e for e in out.errors)
+        svc.set_pricing.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_expected_match_applies(self, monkeypatch):
+        """승인값이 일치하면 적용 진행."""
+        from app.schemas.models import PriceSyncExpected
+
+        m = self._model()
+        repo = self._repo_with(m)
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        svc.set_pricing = AsyncMock()
+
+        out = await svc.apply_price_sync(
+            MagicMock(),
+            pricing_sync_service=self._sync_src(),
+            aliases=["gpt-6.1-sol"],
+            actor=MagicMock(),
+            expected={
+                "gpt-6.1-sol": PriceSyncExpected(
+                    input_per_1k=Decimal("0.002"),
+                    output_per_1k=Decimal("0.01"),
+                    cache_5m_per_1k=Decimal("0.0025"),
+                    cache_1h_per_1k=Decimal("0.004"),
+                    cache_read_per_1k=Decimal("0.0002"),
+                )
+            },
+        )
+        assert out.applied == ["gpt-6.1-sol"]
+        svc.set_pricing.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_long_context_tier_flows_to_set_pricing(self, monkeypatch):
+        """카탈로그 장문 구간 단가가 PricingRequest 를 통해 set_pricing 에 전달."""
+        from app.services.pricing_sync_service import NormalizedPrice
+
+        np = NormalizedPrice(
+            input_per_1k=Decimal("0.002"),
+            output_per_1k=Decimal("0.01"),
+            cache_5m_per_1k=Decimal("0.0025"),
+            cache_1h_per_1k=Decimal("0.004"),
+            cache_read_per_1k=Decimal("0.0002"),
+            long_context_threshold_tokens=272000,
+            long_input_per_1k=Decimal("0.004"),
+            long_output_per_1k=Decimal("0.015"),
+            long_cache_5m_per_1k=Decimal("0.005"),
+            long_cache_1h_per_1k=Decimal("0.006"),
+            long_cache_read_per_1k=Decimal("0.0004"),
+        )
+        m = self._model()
+        repo = self._repo_with(m)
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        svc = ModelService(MagicMock())
+        captured = {}
+
+        async def _capture(session, *, alias, data, actor, ip_address, request_id):
+            captured["data"] = data
+
+        svc.set_pricing = _capture
+        out = await svc.apply_price_sync(
+            MagicMock(),
+            pricing_sync_service=self._sync_src(np),
+            aliases=["gpt-6.1-sol"],
+            actor=MagicMock(),
+        )
+        assert out.applied == ["gpt-6.1-sol"]
+        req = captured["data"]
+        assert req.long_context_threshold_tokens == 272000
+        assert req.long_context_input_price_per_1k_tokens == Decimal("0.00400000")
+        assert req.long_context_output_price_per_1k_tokens == Decimal("0.01500000")
+        assert req.cache_derived is False

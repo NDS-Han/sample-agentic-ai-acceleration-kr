@@ -52,6 +52,15 @@ class NormalizedPrice:
     #: 스펙 정보 — LiteLLM 카탈로그만 제공(AWS Price List 에는 없어 None 유지).
     context_window: int | None = None
     max_output_tokens: int | None = None
+    #: 장문 컨텍스트(>threshold) 구간 단가 — LiteLLM `*_above_272k_tokens` 계열.
+    #: sync 가 이 값을 안 채우면 기존 set_pricing 의 "이전 행 이어받기"가 절대값을
+    #: 그대로 남겨, 기본 단가 개정 때 구간 단가만 부패한다(과소청구 ~2×).
+    long_context_threshold_tokens: int | None = None
+    long_input_per_1k: Decimal | None = None
+    long_output_per_1k: Decimal | None = None
+    long_cache_5m_per_1k: Decimal | None = None
+    long_cache_1h_per_1k: Decimal | None = None
+    long_cache_read_per_1k: Decimal | None = None
 
 
 @dataclass
@@ -63,9 +72,11 @@ class FetchResult:
         """DB provider_model_id 와 source model_id 간 매칭(best-effort).
 
         region prefix(global./us./eu./apac./jp./us-gov.)는 같은 모델이라도
-        **리전별 단가가 다른 별도 상품**이므로 붕괴시키지 않는다.
-        매칭 순서: exact → global.<base> → <base>(plain). 다른 리전
-        (us.X 가 eu.X 단가를 받는 식의) 교차 fallback 은 하지 않는다.
+        **리전별 단가가 다른 별도 상품**이다 — Global CRIS 는 In-Region 대비
+        약 9% 싸고, geo(us./eu./apac./jp.)와 plain(무접두)은 In-Region 단가로
+        동일하다. 따라서 **global ↔ 비-global 경계는 절대 건너지 않는다**:
+        건너면 조용히 ~9-10% 잘못된 단가로 과금된다.
+        매칭 순서: exact → (geo/plain 한정) <base> 폴백.
         """
         if not provider_model_id:
             return None
@@ -75,10 +86,13 @@ class FetchResult:
         if mid in self.prices:
             return self.prices[mid]
         base = _strip_region_prefix(mid)
-        global_key = f"global.{base}"
-        if global_key in self.prices:
-            return self.prices[global_key]
-        if base != mid and base in self.prices:
+        if mid.startswith("global.") or base == mid:
+            # global.* 행이 카탈로그에 없으면 plain(=in-region 가격)으로
+            # 채우면 ~10% 과다 청구; plain 행도 geo/global 추측 없이 unmatched
+            # 로 남겨 사람이 판단하게 한다.
+            return None
+        # geo prefix(us./eu./apac./jp./us-gov.)만 plain in-region 단가로 폴백.
+        if base in self.prices:
             return self.prices[base]
         return None
 
@@ -312,6 +326,22 @@ class LiteLLMPricingSyncService:
             cache_1h = self._to_decimal(m.get("cache_creation_input_token_cost_above_1hr"))
             derived = cache_read is None or cache_5m is None or cache_1h is None
 
+            # 장문(>272K) 구간 — 카탈로그가 *_above_272k_tokens 필드를 줄 때만.
+            # ultrafast 프리미엄 변종은 제외(별도 상품).
+            long_in = self._to_decimal(m.get("input_cost_per_token_above_272k_tokens"))
+            long_out = self._to_decimal(m.get("output_cost_per_token_above_272k_tokens"))
+            long_5m = self._to_decimal(m.get("cache_creation_input_token_cost_above_272k_tokens"))
+            long_read = self._to_decimal(m.get("cache_read_input_token_cost_above_272k_tokens"))
+            has_long = long_in is not None or long_out is not None
+            long_1h = None
+            if has_long:
+                # 카탈로그에 구간별 1h 필드는 없다 — 5m 구간과 같은 비율로 파생
+                # (1h/5m 기본 비율 유지). 기본 단가의 파생 계약과 같은 추정.
+                base_5m_eff = cache_5m if cache_5m is not None else input_cost * _CACHE_5M_MULT
+                base_1h_eff = cache_1h if cache_1h is not None else input_cost * _CACHE_1H_MULT
+                if base_5m_eff:
+                    long_1h = (long_5m or (long_in or input_cost) * _CACHE_5M_MULT) * (base_1h_eff / base_5m_eff)
+
             result.prices[key] = NormalizedPrice(
                 input_per_1k=input_cost * Decimal(1000),
                 output_per_1k=output_cost * Decimal(1000),
@@ -322,6 +352,12 @@ class LiteLLMPricingSyncService:
                 context_window=self._to_int(m.get("max_input_tokens"))
                 or self._to_int(m.get("max_tokens")),
                 max_output_tokens=self._to_int(m.get("max_output_tokens")),
+                long_context_threshold_tokens=272000 if has_long else None,
+                long_input_per_1k=(long_in if long_in is not None else input_cost) * Decimal(1000) if has_long else None,
+                long_output_per_1k=(long_out if long_out is not None else output_cost) * Decimal(1000) if has_long else None,
+                long_cache_5m_per_1k=((long_5m if long_5m is not None else (long_in or input_cost) * _CACHE_5M_MULT) * Decimal(1000) if has_long else None),
+                long_cache_1h_per_1k=(long_1h * Decimal(1000) if long_1h is not None else None),
+                long_cache_read_per_1k=((long_read if long_read is not None else (long_in or input_cost) * _CACHE_READ_MULT) * Decimal(1000) if has_long else None),
             )
         return result
 

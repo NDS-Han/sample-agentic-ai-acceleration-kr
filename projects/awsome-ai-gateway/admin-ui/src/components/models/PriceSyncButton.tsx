@@ -78,7 +78,7 @@ export function PriceSyncButton() {
       return;
     }
     startApply(async () => {
-      const res = await applyPriceSyncAction(aliases, source);
+      const res = await applyPriceSyncAction(aliases, source, preview);
       if (!res.success) {
         toast({ type: 'error', message: res.error || t('toast.applyFailed'), auto_dismiss_ms: 5000 });
         return;
