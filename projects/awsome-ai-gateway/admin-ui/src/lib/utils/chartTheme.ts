@@ -62,8 +62,13 @@ export function useChartTheme(): ChartTheme {
   const [theme, setThemeState] = useState<ChartTheme>(() => computeTheme(resolvedTheme === 'dark'));
 
   useEffect(() => {
-    // 마운트/테마변경 후 실제 computed style 로 재계산 (SSR 기본값 보정).
-    setThemeState(computeTheme(document.documentElement.classList.contains('dark')));
+    // next-themes 는 ThemeProvider 자체 effect 에서 루트의 dark 클래스를 바꾼다 —
+    // 자식 effect 가 부모보다 먼저 실행되므로 이 시점의 classList 는 아직 옛 테마.
+    // 한 프레임 뒤(클래스 적용 후)에 재계산해야 테마 전환이 즉시 반영된다.
+    const raf = requestAnimationFrame(() =>
+      setThemeState(computeTheme(document.documentElement.classList.contains('dark')))
+    );
+    return () => cancelAnimationFrame(raf);
   }, [resolvedTheme]);
 
   return theme;

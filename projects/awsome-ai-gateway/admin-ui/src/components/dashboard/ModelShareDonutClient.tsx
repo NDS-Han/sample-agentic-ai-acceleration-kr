@@ -101,12 +101,14 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
       ];
     }, [data]);
 
-  // 데이터 재조회(team 변경 등)로 목록이 바뀌면 hover 인덱스가 범위를 벗어나거나
-  // 다른 모델을 가리킨다 — 중앙 표시·행 강조가 어긋나므로 초기화한다.
-  useEffect(() => setHoverIndex(null), [data]);
+  // 데이터 재조회(team 변경 등)로 목록이 짧아지면 hover 인덱스가 범위를 벗어난다 —
+  // 이펙트로 지우면 한 프레임 어긋남이 보이므로 사용 시점에 clamp 한다.
+  const hi = hoverIndex != null && hoverIndex < displayModels.length ? hoverIndex : null;
 
   // canvas fillStyle 은 CSS 변수를 못 읽어 'var(--muted-foreground)' 는 검정으로
-  // 떨어진다 — chartTheme 이 해석한 실제 색을 쓴다. 범례 점도 같은 값으로 맞춤.
+  // 떨어진다 — 캔버스 조각색에는 chartTheme 이 해석한 실제 색을 쓴다.
+  // DOM 점은 별도로 CSS 클래스(bg-muted-foreground)를 쓴다 — 인라인에 해석값을
+  // 박으면 SSR(항상 라이트 폴백)과 클라이언트 값이 어긋나 하이드레이션 불일치가 남는다.
   const sliceColor = (i: number, isOther: boolean) =>
     isOther ? theme.textMuted : COLORS[i % COLORS.length];
 
@@ -202,15 +204,15 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
             {(() => {
-              const centerItem = (hoverIndex != null ? displayModels[hoverIndex] : null) ?? displayModels[0];
-              const centerIdx = hoverIndex ?? 0;
+              const centerItem = (hi != null ? displayModels[hi] : null) ?? displayModels[0];
+              const centerIdx = hi ?? 0;
               const isOther = centerItem?.model_alias === '__other__';
               return (
                 <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center pointer-events-none">
                   {centerItem && (
                     <span
-                      className="mb-1 h-2.5 w-2.5 rounded-full"
-                      style={{ backgroundColor: sliceColor(centerIdx, isOther) }}
+                      className={`mb-1 h-2.5 w-2.5 rounded-full${isOther ? ' bg-muted-foreground' : ''}`}
+                      style={{ backgroundColor: isOther ? undefined : COLORS[centerIdx % COLORS.length] }}
                       aria-hidden="true"
                     />
                   )}
@@ -225,7 +227,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
                       : ''}
                   </p>
                   <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
-                    {hoverIndex != null && centerItem
+                    {hi != null && centerItem
                       ? fmtUsd(centerItem.cost_usd)
                       : t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
                           minimumFractionDigits: 2,
@@ -245,12 +247,12 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               return (
               <li
                 key={m.model_alias}
-                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hi ? 'bg-accent' : ''}`}
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <span
-                    className="w-3 h-3 rounded-full flex-shrink-0"
-                    style={{ backgroundColor: sliceColor(i, isOther) }}
+                    className={`w-3 h-3 rounded-full flex-shrink-0${isOther ? ' bg-muted-foreground' : ''}`}
+                    style={{ backgroundColor: isOther ? undefined : COLORS[i % COLORS.length] }}
                   />
                   {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용. */}
                   <span className="font-medium break-words leading-snug" title={label}>
