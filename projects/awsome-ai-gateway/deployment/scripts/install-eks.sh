@@ -553,7 +553,11 @@ patch_nextauth_url() {
     # migration.enabled=false: 방금 같은 실행의 helm_install 이 이미 alembic upgrade 를
     # 돌렸다. 이 두 번째 upgrade 는 env 한 개만 바꾸는 것이므로 pre-upgrade
     # migration hook 을 다시 띄울 이유가 없다 (재실행은 no-op 이지만 배포가 수 분 길어짐).
-    # --set 은 이 호출에만 적용되고 릴리즈 values 에 누적되지 않는다.
+    # ⚠️ --set 은 릴리즈 저장 values 에 누적된다 — 이후 `helm upgrade --reuse-values`
+    #    로 수동 업그레이드하면 migration hook 이 꺼진 채로 남는다(실측: rev175 가
+    #    0045 를 적용 못 함). 수동 upgrade 는 `--set migration.enabled=true` 를 함께
+    #    주거나 install-eks.sh 를 다시 쓸 것(비-reuse 경로는 chart 기본값 true 로
+    #    자동 복구된다).
     helm upgrade "$RELEASE_NAME" "$CHART_DIR" \
         --namespace "$NAMESPACE" \
         --values "$VALUES_FILE" \

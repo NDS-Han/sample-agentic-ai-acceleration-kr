@@ -81,8 +81,13 @@ aws ecr get-login-password | docker login --username AWS --password-stdin \
 docker build --platform linux/amd64 -t "$ECR_BASE/$SVC:$TAG" "$CTX"
 docker push "$ECR_BASE/$SVC:$TAG"
 
+# --reuse-values 는 저장 values 를 그대로 쓴다 — install-eks.sh 의 NEXTAUTH
+# 패치가 남긴 `migration.enabled=false` 도 그대로라, 새 SHA 에 마이그레이션이
+# 섞여 있어도 훅이 안 돌아 스키마가 뒤처진다(실측 rev175 사고). 명시적으로 true 로
+# 되돌려 둔다 — head 가 이미 최신이면 Job 은 no-op.
 HELM_CMD=(helm upgrade llm-gateway deployment/charts/llm-gateway
-  -n llm-gateway --reuse-values "${SET_ARGS[@]}")
+  -n llm-gateway --reuse-values "${SET_ARGS[@]}"
+  --set "migration.enabled=true")
 
 if [ "${DEPLOY:-0}" = "1" ]; then
   echo "── helm upgrade (migration hook 포함) ──"
