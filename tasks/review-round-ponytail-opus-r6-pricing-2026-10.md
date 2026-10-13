@@ -72,4 +72,4 @@
 ## 검증·배포
 
 - `pytest tests/` — **944 passed, 50 skipped** · tsc 0 errors
-- 커밋·helm·스모크: (아래 기록)
+- 커밋 `fbfcd213` · helm **rev 187** · 이미지 admin-api/scheduler/admin-ui `fbfcd213` · 스모크 **12 PASS / 0 FAIL** · `nds/dev` push 완료
