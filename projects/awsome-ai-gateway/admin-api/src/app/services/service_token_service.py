@@ -135,7 +135,12 @@ class ServiceTokenService:
             session, name=old.name, created_by=old.created_by, rotated_from=old.id,
             expires_at=new_expires_at,
         )
-        grace_until = datetime.now(timezone.utc) + timedelta(hours=SERVICE_TOKEN_ROTATE_GRACE_HOURS)
+        # grace 재로테이션 상한: revoked_at 이 이미 미래 시각(기존 grace)이면
+        # 그 시각을 넘기지 않는다 — 아니면 유출 토큰이 <24h 마다 rotate 를
+        # 반복해 폐기 시점을 무기한 연장할 수 있다.
+        grace_until = now + timedelta(hours=SERVICE_TOKEN_ROTATE_GRACE_HOURS)
+        if old.revoked_at is not None:
+            grace_until = min(grace_until, old.revoked_at)
         await repo.set_revoked_at(old.id, grace_until)
         logger.info(
             "service_token.rotated",

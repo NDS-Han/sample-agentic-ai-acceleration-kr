@@ -81,19 +81,21 @@ def merge_tfvars(existing: str, values: dict) -> str:
             key = m.group(1)
             seen.add(key)
             out.append(f"{key} = {_hcl_value(values[key])}")
-            if opens > closes:
-                # 블록 정의 전체를 건너뛴다 — 안의 줄을 보존하면 문법이 깨진다.
-                depth += opens - closes
+            # 블록/멀티라인 값 전체를 건너뛴다 — `{`(map/block)와 `[`(list) 둘 다
+            #   값이 여러 줄일 수 있다. 안의 줄을 보존하면 고아 파편으로 문법이 깨진다.
+            rest = opens - closes + stripped.count("[") - stripped.count("]")
+            if rest > 0:
+                depth += rest
                 i += 1
                 while i < len(lines) and depth > 0:
                     s = lines[i]
-                    depth += s.count("{") - s.count("}")
+                    depth += (s.count("{") - s.count("}")
+                              + s.count("[") - s.count("]"))
                     i += 1
                 continue
-            depth += opens - closes
             i += 1
             continue
-        depth += opens - closes
+        depth += opens - closes + stripped.count("[") - stripped.count("]")
         out.append(line)
         i += 1
     for k, v in values.items():

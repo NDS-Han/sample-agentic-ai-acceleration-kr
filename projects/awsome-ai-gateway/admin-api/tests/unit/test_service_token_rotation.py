@@ -122,3 +122,33 @@ async def test_revoked_token_cannot_rotate():
     ):
         with pytest.raises(ValidationError):
             await svc.rotate(session, token_id=old.id, created_by=uuid.uuid4())
+
+
+@pytest.mark.asyncio
+async def test_rerotate_during_grace_does_not_extend_old_token_life():
+    """grace 기간 중 재로테이션이 구 토큰의 폐기 시각을 뒤로 밀지 않는다.
+
+    authenticate 는 ``revoked_at > now`` 를 아직 유효로 본다 — 매 rotate 마다
+    ``revoked_at = now+24h`` 로 덮으면, grace 안에 rotate 를 반복하는 것만으로
+    유출 토큰이 영구히 산다. 종료 시각은 min(신규 grace, 기존 revoked_at) 여야 한다.
+    """
+    session = AsyncMock()
+    now = datetime.now(timezone.utc)
+    old = _old_token(days_left=30)
+    old.revoked_at = now + timedelta(hours=20)  # 기존 grace 4h 남은 상태
+    svc = _svc()
+
+    repo = MagicMock()
+    repo.get_by_id = AsyncMock(return_value=old)
+    repo.set_revoked_at = AsyncMock()
+    repo.create = AsyncMock(side_effect=lambda t: t)
+
+    with patch(
+        "app.services.service_token_service.ServiceTokenRepository",
+        return_value=repo,
+    ):
+        await svc.rotate(session, token_id=old.id, created_by=uuid.uuid4())
+
+    set_args = repo.set_revoked_at.call_args[0]
+    # 폐기 시각이 기존 grace(20h 후)를 넘기면 안 된다 — 연장이면 무한 연장 루프.
+    assert set_args[1] <= old.revoked_at

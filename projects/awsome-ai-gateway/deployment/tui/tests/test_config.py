@@ -225,3 +225,17 @@ def test_write_tfvars_merges_with_existing_file(tmp_path):
     assert 'keep_me = "yes"' in text
     assert 'old = "2"' in text
     assert "added = true" in text
+
+
+def test_merge_tfvars_replaces_multiline_list_without_orphans():
+    """여러 줄로 쓰인 list 값 교체 시 잔여 줄이 파일에 남지 않는다."""
+    existing = '''private_subnet_cidrs = [
+  "10.0.1.0/24",
+  "10.0.2.0/24",
+]
+aws_region = "ap-south-1"
+'''
+    out = config.merge_tfvars(existing, {"private_subnet_cidrs": ["10.9.0.0/24"]})
+    assert 'private_subnet_cidrs = ["10.9.0.0/24"]' in out
+    assert "10.0.1.0" not in out and '",\n]' not in out
+    assert 'aws_region = "ap-south-1"' in out

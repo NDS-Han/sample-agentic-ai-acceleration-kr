@@ -52,6 +52,8 @@ htmlcov/
 *.tfstate.*
 *.tfvars
 *.tfvars.json
+# plan -out 산출물 — 민감한 변수값이 들어갈 수 있어 커밋 금지
+*.tfplan
 # .terraform.lock.hcl is intentionally tracked for reproducibility
 crash.log
 crash.*.log
