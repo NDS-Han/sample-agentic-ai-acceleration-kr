@@ -390,7 +390,7 @@ describe('프록시 라우트 401 본문', () => {
         method: 'POST',
         body: JSON.stringify({ content: '안녕' }),
       }),
-      { params: { path: ['admin', 'chat', 'sessions', 's-1', 'messages'] } },
+      { params: Promise.resolve({ path: ['admin', 'chat', 'sessions', 's-1', 'messages'] }) },
     );
 
     expect(res.status).toBe(401);
@@ -414,7 +414,7 @@ describe('프록시 라우트 401 본문', () => {
         method: 'POST',
         body: JSON.stringify({ content: '안녕' }),
       }),
-      { params: { path: ['admin', 'chat', 'sessions', 's-1', 'messages'] } },
+      { params: Promise.resolve({ path: ['admin', 'chat', 'sessions', 's-1', 'messages'] }) },
     );
 
     expect(res.status).toBe(200);

@@ -6,10 +6,11 @@
 import { redirect } from 'next/navigation';
 
 interface ModelCostPageProps {
-  searchParams: Record<string, string | string[] | undefined>;
+  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
-export default function ModelCostPage({ searchParams }: ModelCostPageProps) {
+export default async function ModelCostPage(props: ModelCostPageProps) {
+  const searchParams = await props.searchParams;
   const qs = new URLSearchParams();
   for (const [k, v] of Object.entries(searchParams)) {
     if (typeof v === 'string') qs.set(k, v);

@@ -75,7 +75,7 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
       ),
     );
 
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
 
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/gzip');
@@ -91,7 +91,7 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
   it('상류 404(패키지 미빌드)를 502 로 뭉개지 않고 그대로 전달한다', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => upstream({ status: 404 })));
 
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
 
     // 이 구분이 실제 운영에서 중요했다: 버튼이 404 였던 원인은 admin-ui 가 아니라
     // admin-api 의 CLI_DIST_DIR 이 비어 있던 것이다. 502 로 덮으면 그 진단이 불가능해진다.
@@ -101,7 +101,7 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
 
   it('상류 5xx 도 상태코드를 보존한다', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => upstream({ status: 503 })));
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
     expect(res.status).toBe(503);
   });
 
@@ -113,7 +113,7 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
       }),
     );
 
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
 
     expect(res.status).toBe(502);
     expect(await res.text()).toContain('unreachable');
@@ -134,7 +134,7 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
       ),
     );
 
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
     const cd = res.headers.get('content-disposition')!;
 
     expect(cd).not.toContain('/');
@@ -147,30 +147,41 @@ describe('GET /api/cli-download/[os]/[arch]', () => {
   it('상류가 파일명을 안 주면 우리가 만든 이름으로 저장된다', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => upstream({ body: streamOf('x') })));
 
-    const res = await GET(req(), { params: { os: 'windows', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'windows', arch: 'amd64' }) });
     expect(res.headers.get('content-disposition')).toBe(
       'attachment; filename="gateway-cli-windows-amd64.zip"',
     );
   });
 
-  it('os/arch 를 인코딩해 상류 경로에 넣는다', async () => {
+  it('os/arch 가 안전 세그먼트가 아니면 400 으로 차단하고 상류를 호출하지 않는다', async () => {
     // url 파라미터를 선언해 둔다 — 선언이 없으면 mock.calls 가 빈 튜플 타입이라
     // calls[0][0] 이 타입 에러가 된다(tsc 로 실제로 잡혔다).
     const spy = vi.fn(async (_url: string | URL) => upstream({ body: streamOf('x') }));
     vi.stubGlobal('fetch', spy);
 
-    await GET(req(), { params: { os: '../secret', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: '../secret', arch: 'amd64' }) });
+    expect(res.status).toBe(400);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('허용 문자지만 인코딩이 필요한 값은 인코딩해 상류 경로에 넣는다', async () => {
+    const spy = vi.fn(async (_url: string | URL) => upstream({ body: streamOf('x') }));
+    vi.stubGlobal('fetch', spy);
+
+    // 현재 SAFE_SEGMENT 는 [a-z0-9_-]+(dot 불포함)이라 인코딩 대상 문자가
+    // 세그먼트에 들어올 수 없어 encodeURIComponent 는 사실상 no-op — 정규식이
+    // 넓어질 경우를 대비한 심층 방어로 호출 자체는 유지한다.
+    await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
 
     const calledUrl = String(spy.mock.calls[0][0]);
-    expect(calledUrl).not.toContain('../');
-    expect(calledUrl).toContain('%2F'); // '/' 가 인코딩됐다
+    expect(calledUrl).toContain('/cli/download/linux/amd64');
   });
 
   it('상류가 Content-Length 를 안 주면 그 헤더를 만들어내지 않는다', async () => {
     // 없는 길이를 지어내면 브라우저가 전송을 조기에 끊는다.
     vi.stubGlobal('fetch', vi.fn(async () => upstream({ body: streamOf('abc') })));
 
-    const res = await GET(req(), { params: { os: 'linux', arch: 'amd64' } });
+    const res = await GET(req(), { params: Promise.resolve({ os: 'linux', arch: 'amd64' }) });
     expect(res.headers.get('content-length')).toBeNull();
   });
 });

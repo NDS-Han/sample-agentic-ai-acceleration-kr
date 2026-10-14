@@ -9,9 +9,22 @@ import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 // admin-ui server-side proxy 경유 (api.ts 와 동일). SSE 스트림도 pass-through.
 const API_BASE = '/api/chat-proxy';
 
+// '\n\n' 프레임 경계가 영원히 안 오면 버퍼가 무한 커진다 — 악의적/버그 상류의
+// 메모리 공격을 막기 위해 상한을 두고 초과 시 스트림을 에러로 끝낸다.
+// 정상 프레임(리포트 JSON 포함)은 수백 KB 이하라 4 MiB 는 충분히 크다.
+const MAX_SSE_BUFFER_BYTES = 4 * 1024 * 1024;
+
 export interface ChatStreamOptions {
   onEvent: (event: StreamEvent) => void;
   onError?: (error: Error) => void;
+}
+
+/** 세션 TTL 만료(410) — 호출부가 새 세션을 만들어 재시도할 수 있게 구분한다. */
+export class SessionExpiredError extends Error {
+  constructor() {
+    super('Chat session expired');
+    this.name = 'SessionExpiredError';
+  }
 }
 
 /**
@@ -61,6 +74,13 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           return;
         }
 
+        // 410 Gone — 세션 TTL 만료(R17). 일반 HTTP 에러로 흘리면 사용자는
+        //    "HTTP 410" 만 보고 재시도 방법을 모른다. 호출부(ChatLayout)가 새
+        //    세션을 만들어 같은 메시지를 재전송하도록 typed error 로 던진다.
+        if (response.status === 410) {
+          throw new SessionExpiredError();
+        }
+
         if (!response.ok || !response.body) {
           throw new Error(`HTTP ${response.status}: ${await response.text()}`);
         }
@@ -74,17 +94,26 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
 
-          // SSE 메시지 = '\n\n' 구분
+          // SSE 메시지 = '\n\n' 구분 — 완결 프레임을 먼저 다 뽑고 남은 꼬리만
+          // 상한 검사한다(한 read 에 프레임 여러 개가 와도 오탐 없이).
           let idx;
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const block = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
             parseSseBlock(block, onEvent);
           }
+          if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+            // 잘린 프레임이 무한 누적 — 상류/메모리를 닫고 에러로 끝낸다.
+            await reader.cancel().catch(() => {});
+            throw new Error('SSE frame exceeded size limit — malformed stream');
+          }
         }
         // tail flush
         if (buffer.trim()) parseSseBlock(buffer, onEvent);
       } catch (e) {
+        // SessionExpiredError 는 호출부가 재시도 판단해야 하므로 재전파 —
+        //        onError 로 뭉개면 새 세션 생성 경로가 안 탄다.
+        if (e instanceof SessionExpiredError) throw e;
         if ((e as Error).name !== 'AbortError') {
           onError?.(e as Error);
         }
@@ -119,6 +148,9 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           }
         );
         if (response.status === 404) return; // 진행 중 분석 없음 — 무시
+        // 401 — 세션 사망. send() 와 같이 로그인으로 보낸다(R17 — 과거엔 조용히
+        // return 해서 스트림 부재 원인이 안 보였다).
+        if (redirectToLoginIfUnauthorized(response)) return;
         if (!response.ok || !response.body) return;
         setIsStreaming(true);
         const reader = response.body.getReader();
@@ -134,7 +166,14 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
             buffer = buffer.slice(idx + 2);
             parseSseBlock(block, onEvent);
           }
+          if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+            // reattach 는 조용히 포기하되 상류 연결은 반드시 닫는다.
+            await reader.cancel().catch(() => {});
+            return;
+          }
         }
+        // tail flush — send() 와 동일하게 마지막 미완결 블록도 처리.
+        if (buffer.trim()) parseSseBlock(buffer, onEvent);
       } catch {
         // 재구독 실패는 무해(완료분은 history 로 복원됨)
       } finally {
@@ -163,11 +202,18 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
  */
 export function parseSseBlock(block: string, onEvent: (e: StreamEvent) => void) {
   let event = ''; // '' = event: 줄 없음
-  let data = '';
+  // SSE 스펙: data: 줄이 여러 개면 '\n' 으로 이어 붙인다. 예전엔 trim 후 그냥
+  // 연결해 멀티라인 payload(행이 JSON 문자열 중간에서 끊긴 경우 포함)가
+  // 깨졌다. 앞의 선택적 공백 하나만 떼고(스펙) 줄바꿈으로 join 한다.
+  const dataParts: string[] = [];
   for (const line of block.split('\n')) {
     if (line.startsWith('event:')) event = line.slice(6).trim();
-    else if (line.startsWith('data:')) data += line.slice(5).trim();
+    else if (line.startsWith('data:')) {
+      const v = line.slice(5);
+      dataParts.push(v.startsWith(' ') ? v.slice(1) : v);
+    }
   }
+  const data = dataParts.join('\n');
   if (!data) return;
   let parsed: unknown;
   try {

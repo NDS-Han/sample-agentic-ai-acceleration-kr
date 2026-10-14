@@ -33,7 +33,9 @@ $$;
 GRANT CONNECT ON DATABASE gateway TO gateway_chat_reader;
 
 -- Schema USAGE — SELECT 가능하기 위한 prerequisite
-GRANT USAGE ON SCHEMA auth, public, model, budget, usage, chat_agent TO gateway_chat_reader;
+-- (R17-S1: chat_agent 는 SELECT 미부여 스키마라 USAGE 도 뺀다 — 테이블 권한이
+--  없으면 USAGE 는 아무 권한도 주지 않지만, 최소권한 원칙상 명시적으로 제외)
+GRANT USAGE ON SCHEMA auth, public, model, budget, usage TO gateway_chat_reader;
 
 -- 명시적 SELECT — 화이트리스트에 있는 테이블만. 컬럼명은 ground truth
 -- (db/init/02_create_tables.sql) 기준. 새 테이블 생기면 여기에 추가 +
@@ -66,18 +68,28 @@ GRANT SELECT (id, scope, scope_id, model_alias, rpm_limit, tpm_limit,
               cpm_limit_usd, cph_limit_usd, is_active, created_by, created_at, updated_at)
     ON model.rate_limit_configs TO gateway_chat_reader;
 
--- chat_agent schema (자기 작성 history 조회 가능)
--- ⚠️ 이 테이블들은 마이그레이션(chat_agent 스키마 생성) 이후에야 존재한다. clean 볼륨
---    첫 부팅에서는 아직 없을 수 있으므로, 테이블 존재 시에만 GRANT 한다. guard 없이
---    무조건 GRANT 하면 첫 부팅 init 이 여기서 실패(exit)해 컨테이너가 죽는다.
---    (재부팅/마이그레이션 이후 재실행 시 정상 부여됨.)
+-- chat_agent schema — 명시적으로 SELECT 를 **부여하지 않는다** (R17-S1).
+-- 예전엔 "자기 작성 history 조회" 목적으로 GRANT 했지만, 실제로는:
+--   - schema_whitelist.yaml 에 chat_agent 테이블이 없어 validate_sql 이
+--     해당 쿼리를 애초에 거절 → GRANT 는 죽은 권한이었고,
+--   - 함수 우회(QUERY_TO_XML 등 — R17 에서 차단)에만 살아있는 권한으로,
+--     한 관리자가 다른 관리자의 채팅 내용 전체를 읽는 경로였다.
+-- whitelist 가 진실의 원천이므로 권한을 회수한다. 기존 설치본은 GRANT 가 이미
+-- 부여된 상태라 명시 REVOKE 가 필요(없으면 과거 부여분이 계속 살아있다).
+-- 테이블 미존재 시(첫 부팅) REVOKE 는 실패하므로 to_regclass 가드 유지.
 DO $$
 BEGIN
     IF to_regclass('chat_agent.sessions') IS NOT NULL THEN
-        GRANT SELECT ON chat_agent.sessions, chat_agent.messages TO gateway_chat_reader;
+        REVOKE ALL ON chat_agent.sessions, chat_agent.messages FROM gateway_chat_reader;
     END IF;
     IF to_regclass('chat_agent.schema_embeddings') IS NOT NULL THEN
-        GRANT SELECT ON chat_agent.schema_embeddings, chat_agent.golden_examples TO gateway_chat_reader;
+        REVOKE ALL ON chat_agent.schema_embeddings, chat_agent.golden_examples FROM gateway_chat_reader;
+    END IF;
+    -- 스키마 USAGE 도 회수 — 기존 설치본은 위 GRANT 라인에서 이미 부여됐다.
+    -- (USAGE 만으로는 테이블 읽기 불가지만, 미래 테이블에 대한 DEFAULT
+    --  권한 결합을 막고 최소권한 의도를 명확히 한다)
+    IF EXISTS (SELECT 1 FROM pg_namespace WHERE nspname = 'chat_agent') THEN
+        REVOKE USAGE ON SCHEMA chat_agent FROM gateway_chat_reader;
     END IF;
 END $$;
 

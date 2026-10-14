@@ -3,20 +3,27 @@
 import { cookies } from 'next/headers';
 import { NextResponse } from 'next/server';
 import { unauthorizedBody } from '@/lib/utils/unauthorized';
+import { fetchUpstream, upstreamErrorStatus } from '@/lib/utils/upstream';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
 export async function GET() {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
 
-  const res = await fetch(`${ADMIN_API_URL}/admin/users/teams`, {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
-    },
-  });
+  // R17-S6 — upstream 연결 실패/타임아웃은 프레임워크 500 이 아니라 502 로.
+  let res: Response;
+  try {
+    res = await fetchUpstream(`${ADMIN_API_URL}/admin/users/teams`, {
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
+      },
+    });
+  } catch (e) {
+    return NextResponse.json({ error: 'upstream unreachable' }, { status: upstreamErrorStatus(e) });
+  }
 
   // ⚠️ 401 은 error_code 로 구분해 준다 — 소비자가 '조회 실패' 문구를 렌더하는 대신
   //    로그인으로 갈 수 있어야 한다. 403(권한 부족)은 여기 들어오지 않는다.

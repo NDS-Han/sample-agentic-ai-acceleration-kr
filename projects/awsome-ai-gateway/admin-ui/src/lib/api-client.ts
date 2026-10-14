@@ -17,6 +17,8 @@ import {
 } from '@/lib/utils/unauthorized';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
+// R17-S6 — admin-api 행 시 요청이 무기한 걸리지 않게 기본 상한.
+const UPSTREAM_TIMEOUT_MS = 15_000;
 
 /**
  * 401 전용 오류. 호출부가 "인증이 죽었다"(로그인으로 보내야 함)와 "권한이 없다"(403,
@@ -52,15 +54,48 @@ export function isUnauthorized(err: unknown): err is UnauthorizedError {
 
 class AdminAPIClient {
   private async fetch<T>(path: string, options?: RequestInit): Promise<T> {
-    const cookieStore = cookies();
+    const cookieStore = await cookies();
+    const adminJwt = cookieStore.get('admin_jwt')?.value;
     const url = `${ADMIN_API_URL}${path}`;
+
+    // R17-S3 — 서버 액션 인자는 클라이언트가 마음대로 정한다. 경로 보간이
+    // 인코딩 없이 들어가면(예: `../..`, `%2e%2e`) URL 정규화가 상위 디렉터리로
+    // 탈출해 사용자 쿠키를 붙인 요청이 의도 밖의 admin-api 경로로 나간다.
+    // 호출부 인코딩과 별개로, 정규화된 최종 경로가 /admin/ 아래인지 여기서
+    // 한 번 더 확인한다(심층 방어 — chat-proxy 와 같은 계약).
+    const normalized = new URL(url).pathname;
+    // '..'/'/.' 세그먼트는 정규화에서 사라져 startsWith 검사를 통과해도 의도와
+    //    다른 /admin/ 경로를 호출한다 (deleteRateLimitAction('..','x') →
+    //    DELETE /admin/x). 원본 path 의 세그먼트를 검사한다 (kiro R17 #15).
+    const rawSegments = path.split('?')[0].split('/');
+    if (rawSegments.some((s) => s === '.' || s === '..')) {
+      throw new APIError(
+        400,
+        'INVALID_PATH',
+        `admin-api path contains traversal segment: ${normalized}`,
+      );
+    }
+    if (!normalized.startsWith('/admin/')) {
+      throw new APIError(
+        400,
+        'INVALID_PATH',
+        `admin-api path escaped allowed prefix: ${normalized}`,
+      );
+    }
 
     const response = await fetch(url, {
       ...options,
       cache: 'no-store',
+      // R17-S6 — upstream(admin-api) 행/지연이 RSC 렌더와 프록시를 무기한
+      // 붙잡지 않게 기본 타임아웃을 둔다. 호출자 signal 과 병합(무시 금지).
+      signal: options?.signal
+        ? AbortSignal.any([options.signal, AbortSignal.timeout(UPSTREAM_TIMEOUT_MS)])
+        : AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       headers: {
         'Content-Type': 'application/json',
-        Cookie: cookieStore.toString(),
+        // R17 nit — 쿠키 전체(oidc_verifier/state/admin_role 등)를 넘기지 말고
+        // 인증에 필요한 admin_jwt 만 전달한다.
+        Cookie: adminJwt ? `admin_jwt=${adminJwt}` : '',
         ...options?.headers,
       },
     });

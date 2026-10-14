@@ -29,7 +29,7 @@ export async function setRateLimitAction(formData: unknown): Promise<ActionResul
 
   try {
     await withRetry(() =>
-      adminAPI.put(`/admin/rate-limits/${scope.toLowerCase()}/${target_id}`, limits)
+      adminAPI.put(`/admin/rate-limits/${encodeURIComponent(String(scope.toLowerCase()))}/${encodeURIComponent(String(target_id))}`, limits)
     );
     // 편집 지점은 /users 패널 — 옛 /rate-limits 페이지는 리다이렉트다.
     revalidatePath('/users');
@@ -65,7 +65,7 @@ export async function getRateLimitStatusAction(
 ): Promise<ActionResult<RateLimitScopeStatusData>> {
   try {
     const data = await adminAPI.get<RateLimitScopeStatusData>(
-      `/admin/rate-limits/${scope}/${scopeId}`
+      `/admin/rate-limits/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`
     );
     return { success: true, data };
   } catch (err) {
@@ -79,7 +79,7 @@ export async function deleteRateLimitAction(
   scopeId: string
 ): Promise<ActionResult<void>> {
   try {
-    await withRetry(() => adminAPI.delete(`/admin/rate-limits/${scope}/${scopeId}`));
+    await withRetry(() => adminAPI.delete(`/admin/rate-limits/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`));
     revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {

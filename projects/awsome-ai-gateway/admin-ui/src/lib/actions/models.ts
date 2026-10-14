@@ -97,7 +97,7 @@ export async function updateModelAction(
   try {
     const d = parsed.data;
     // Update model metadata
-    await withRetry(() => adminAPI.put(`/admin/models/${alias}`, {
+    await withRetry(() => adminAPI.put(`/admin/models/${encodeURIComponent(String(alias))}`, {
       provider_model_id: d.model_id,
       endpoint_url: d.endpoint_url || null,
       description: d.description || null,
@@ -111,7 +111,7 @@ export async function updateModelAction(
     // 비멱등 쓰기(effective_from 을 요청마다 새로 계산)라 withRetry 로 감싸지 않는다 —
     // 타임아웃 후 재시도하면 방금 쓴 가격 행을 닫고 중복 버전이 생긴다.
     if (d.pricing_changed !== false) {
-      await adminAPI.put(`/admin/models/${alias}/pricing`, {
+      await adminAPI.put(`/admin/models/${encodeURIComponent(String(alias))}/pricing`, {
         input_price_per_1k_tokens: d.input_price_per_1k,
         output_price_per_1k_tokens: d.output_price_per_1k,
         cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
@@ -143,7 +143,7 @@ export async function deactivateModelAction(formData: unknown): Promise<ActionRe
 
   try {
     await withRetry(() =>
-      adminAPI.patch(`/admin/models/${parsed.data.alias}/status`, {
+      adminAPI.patch(`/admin/models/${encodeURIComponent(String(parsed.data.alias))}/status`, {
         active: false,
       })
     );
@@ -163,7 +163,7 @@ export async function activateModelAction(alias: string): Promise<ActionResult<v
 
   try {
     await withRetry(() =>
-      adminAPI.patch(`/admin/models/${alias}/status`, { active: true })
+      adminAPI.patch(`/admin/models/${encodeURIComponent(String(alias))}/status`, { active: true })
     );
     revalidatePath('/models');
     return { success: true, data: undefined };

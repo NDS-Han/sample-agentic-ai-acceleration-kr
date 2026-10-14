@@ -206,3 +206,20 @@ describe('admin-api ↔ admin-ui 이벤트 계약', () => {
     expect(backend).not.toMatch(/_sse\(\s*"error",\s*\{[^}]*"type":/);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 2) 멀티라인 data: (R17) — SSE 스펙상 data: 줄들은 '\n' 으로 이어진다
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('멀티라인 data:', () => {
+  it('data: 줄이 여러 개면 줄바꿈으로 이어 붙인다', () => {
+    // 비-JSON 멀티라인 텍스트 프레임 — 예전엔 trim 후 그냥 연결해 'AB' 가 됐다.
+    const events = collect('event: text\ndata: A\ndata: B');
+    expect(events[0]).toEqual({ type: 'text', chunk: 'A\nB' });
+  });
+
+  it('data: 뒤 선택적 공백 하나만 뗀다(내부 공백 보존)', () => {
+    const events = collect('data: {"a": " x "}');
+    expect(events[0]).toMatchObject({ a: ' x ' });
+  });
+});

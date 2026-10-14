@@ -3,21 +3,28 @@
 import { cookies } from 'next/headers';
 import { NextRequest } from 'next/server';
 import { unauthorizedBody } from '@/lib/utils/unauthorized';
+import { fetchUpstream, upstreamErrorStatus } from '@/lib/utils/upstream';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
 export async function GET(request: NextRequest) {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
 
   const searchParams = request.nextUrl.searchParams.toString();
 
-  const res = await fetch(`${ADMIN_API_URL}/admin/analytics/export?${searchParams}`, {
-    cache: 'no-store',
-    headers: {
-      ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
-    },
-  });
+  // R17-S6 — upstream 연결 실패/타임아웃은 프레임워크 500 이 아니라 502 로.
+  let res: Response;
+  try {
+    res = await fetchUpstream(`${ADMIN_API_URL}/admin/analytics/export?${searchParams}`, {
+      cache: 'no-store',
+      headers: {
+        ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
+      },
+    });
+  } catch (e) {
+    return new Response('Export failed (upstream unreachable)', { status: upstreamErrorStatus(e) });
+  }
 
   // ⚠️ 401 에 'Export failed' 평문을 주면 ExportButton 은 다운로드가 왜 안 되는지 알 수
   //    없다(현재 구현은 console.error 만 남기고 화면엔 아무 변화가 없다). 기계 판독용

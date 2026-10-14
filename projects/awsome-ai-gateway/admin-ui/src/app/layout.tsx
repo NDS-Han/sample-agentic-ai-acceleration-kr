@@ -38,7 +38,7 @@ export default async function RootLayout({
   children: React.ReactNode;
 }) {
   // Read JWT cookie — session may be null if unauthenticated (middleware handles redirect)
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const token = cookieStore.get('admin_jwt')?.value;
 
   let session: AdminSession | null = null;

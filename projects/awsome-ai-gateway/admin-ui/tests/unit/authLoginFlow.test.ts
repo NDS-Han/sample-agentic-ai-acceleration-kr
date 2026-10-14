@@ -852,7 +852,10 @@ describe('GET /api/auth/callback — 실패를 읽히게', () => {
       }),
     );
     expect(res.status).toBe(502);
-    expect(await res.text()).toContain('ECONNREFUSED');
+    const body = await res.text();
+    // 내부 URL/에러 상세를 브라우저에 노출하지 않는다 (살균된 메시지만).
+    expect(body).not.toContain('ECONNREFUSED');
+    expect(body).toContain('Token endpoint unreachable');
   });
 
   it('토큰이 하나도 없으면 502 (쿠키를 빈 값으로 세우지 않는다)', async () => {

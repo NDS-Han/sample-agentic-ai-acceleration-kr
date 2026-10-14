@@ -358,6 +358,28 @@ async def post_message(
         raise HTTPException(404, "Session not found")
     if str(sess_row.user_id) != str(admin.user_id):
         raise HTTPException(403, "Forbidden")
+    # R17 — expires_at 를 조회만 하고 검증하지 않아 만료 세션이 계속 쓰였다.
+    # 만료 세션은 410: 프론트가 새 세션을 만들게 유도.
+    from datetime import datetime, timezone as _tz
+
+    exp = sess_row.expires_at
+    if exp is not None:
+        if exp.tzinfo is None:
+            exp = exp.replace(tzinfo=_tz.utc)
+        if exp <= datetime.now(_tz.utc):
+            raise HTTPException(410, "Session expired")
+        # 슬라이딩 갱신 — 활동 중인 세션이 생성 TTL 에 걸려 대화 도중 죽지 않게
+        # 사용할 때마다 만료를 연장한다(kiro R17 #10 — 과거엔 생성 시 한 번만
+        # 설정돼 8시간 넘는 분석 세션이 도중에 410 으로 끊겼다).
+        await session.execute(
+            text(
+                "UPDATE chat_agent.sessions SET expires_at = :exp "
+                "WHERE id = CAST(:sid AS uuid)"
+            ).bindparams(
+                exp=datetime.now(_tz.utc) + timedelta(hours=SESSION_TTL_HOURS),
+                sid=session_id,
+            )
+        )
 
     # user 메시지 저장
     user_msg_id = str(uuid.uuid4())

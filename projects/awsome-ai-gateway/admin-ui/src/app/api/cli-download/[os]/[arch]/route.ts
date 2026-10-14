@@ -16,6 +16,7 @@
  */
 
 import { NextRequest } from 'next/server';
+import { upstreamErrorStatus } from '@/lib/utils/upstream';
 
 // 파일 스트림 라우트 — 캐시/정적최적화 금지, node 런타임에서 body 를 그대로 흘린다.
 export const dynamic = 'force-dynamic';
@@ -24,11 +25,19 @@ export const fetchCache = 'force-no-store';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
+// R17 nit — os/arch 는 URL 세그먼트다. encodeURIComponent('..') 는 '..' 그대로라
+// `/cli/download/../..` 가 URL 정규화로 `/` 까지 탈출한다 — admin-api 의 화이트
+// 리스트가 실제 피해를 막지만 경계 의도상 세그먼트 문자셋으로 먼저 거른다.
+const SAFE_SEGMENT = /^[a-z0-9_-]+$/i;
+
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { os: string; arch: string } }
+  props: { params: Promise<{ os: string; arch: string }> }
 ) {
-  // 경로 조립 전에 인코딩 — os/arch 는 URL 에서 오는 값이다.
+  const params = await props.params;
+  if (!SAFE_SEGMENT.test(params.os) || !SAFE_SEGMENT.test(params.arch)) {
+    return new Response('Invalid download path', { status: 400 });
+  }
   const os = encodeURIComponent(params.os);
   const arch = encodeURIComponent(params.arch);
 
@@ -37,9 +46,9 @@ export async function GET(
     res = await fetch(`${ADMIN_API_URL}/cli/download/${os}/${arch}`, {
       cache: 'no-store',
     });
-  } catch {
-    // admin-api 에 닿지 못한 경우 — 502 로 구분해 준다(404 로 뭉개면 원인 추적 불가).
-    return new Response('Admin API unreachable', { status: 502 });
+  } catch (e) {
+    // admin-api 에 닿지 못한 경우 — 502/504 로 구분해 준다(404 로 뭉개면 원인 추적 불가).
+    return new Response('Admin API unreachable', { status: upstreamErrorStatus(e) });
   }
 
   if (!res.ok) {
@@ -50,7 +59,7 @@ export async function GET(
   }
 
   const fallbackName = `gateway-cli-${params.os}-${params.arch}${
-    params.os === 'windows' ? '.zip' : '.tar.gz'
+    params.os.toLowerCase() === 'windows' ? '.zip' : '.tar.gz'
   }`;
   // 상류 헤더에서 온 값이라 그대로 다시 헤더에 넣지 않는다. 따옴표·개행·경로 구분자가 섞이면
   // Content-Disposition 이 깨지거나(헤더 분리) 이상한 파일명으로 저장된다. 화이트리스트로

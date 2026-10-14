@@ -20,8 +20,17 @@ const SECURITY_HEADERS: Record<string, string> = {
   'X-Frame-Options': 'DENY',
   'Referrer-Policy': 'strict-origin-when-cross-origin',
   'Strict-Transport-Security': 'max-age=31536000; includeSubDomains',
+  'Permissions-Policy': 'camera=(), microphone=(), geolocation=()',
+  // R17-S7 — CSP 는 여기 한 곳에서만 정의한다. next.config.mjs 의 headers() 에도
+  // 따로 있었는데, 두 정책이 같이 내려가면 브라우저는 교집합을 적용해 어느 쪽이
+  // 유효한지 추적이 안 된다(그리고 그쪽 img-src 에는 S3 presigned 차트 이미지를
+  // 허용하는 규칙이 없어 kind:'image' 차트가 항상 차단됐다).
+  //   img-src … https://*.amazonaws.com — report/chart 의 presigned S3 URL.
+  //   unsafe-inline/-eval 는 Next 의 인라인 스크립트 구조상 즉시 제거 불가 —
+  //   nonce 기반 strict-dynamic 은 Next 15.5+ 라 가능하지만 next-intl/차트
+  //   라이브러리의 인라인 스크립트까지 nonce 도배가 필요해 별도 작업으로 분리.
   'Content-Security-Policy':
-    "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'self' data:",
+    "default-src 'self'; script-src 'self' 'unsafe-eval' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https://*.amazonaws.com; connect-src 'self'; font-src 'self' data:; frame-ancestors 'none'",
 };
 
 function applySecurityHeaders(response: NextResponse): NextResponse {

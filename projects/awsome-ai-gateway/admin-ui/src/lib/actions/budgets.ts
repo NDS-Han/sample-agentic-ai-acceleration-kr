@@ -67,7 +67,7 @@ export async function getBudgetConfigAction(
   }
   try {
     const data = await withRetry(() =>
-      adminAPI.get<BudgetConfigDetail>(`/admin/budgets/${scope}/${scopeId}`)
+      adminAPI.get<BudgetConfigDetail>(`/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`)
     );
     return { success: true, data };
   } catch (err) {
@@ -83,7 +83,7 @@ export async function deleteUserBudgetAction(
 ): Promise<ActionResult<void>> {
   try {
     await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/user/${userId}${confirm ? '?confirm=true' : ''}`)
+      adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}${confirm ? '?confirm=true' : ''}`)
     );
     revalidatePath('/budgets');
     return { success: true, data: undefined };
@@ -111,7 +111,7 @@ export async function allocateTeamBudgetAction(
       .filter((e) => e.target_type === 'USER')
       .map((e) => ({ user_id: e.target_id, allocated_usd: e.allocated_usd }));
     await withRetry(() =>
-      adminAPI.put(`/admin/budgets/team/${teamId}/allocate`, { allocations: items, confirm })
+      adminAPI.put(`/admin/budgets/team/${encodeURIComponent(String(teamId))}/allocate`, { allocations: items, confirm })
     );
     revalidatePath('/budgets');
     return { success: true, data: undefined };
@@ -130,7 +130,7 @@ export async function getTeamAllocationAction(
   }
   try {
     const data = await withRetry(() =>
-      adminAPI.get<TeamBudgetAllocation | null>(`/admin/budgets/team/${teamId}/allocation`)
+      adminAPI.get<TeamBudgetAllocation | null>(`/admin/budgets/team/${encodeURIComponent(String(teamId))}/allocation`)
     );
     return { success: true, data: normalizeAllocation(data) };
   } catch (err) {
@@ -151,7 +151,7 @@ export async function setTeamDefaultCapAction(
   try {
     const res = await withRetry(() =>
       adminAPI.put<{ default_user_cap_usd: string | null }>(
-        `/admin/budgets/team/${teamId}/default-cap`,
+        `/admin/budgets/team/${encodeURIComponent(String(teamId))}/default-cap`,
         { value, confirm }
       )
     );
@@ -175,7 +175,7 @@ export async function equalSplitTeamBudgetAction(
   try {
     const res = await withRetry(() =>
       adminAPI.post<{ default_user_cap_usd?: string | null }>(
-        `/admin/budgets/team/${teamId}/equal-split`,
+        `/admin/budgets/team/${encodeURIComponent(String(teamId))}/equal-split`,
         { clear_individual: clearIndividual, confirm }
       )
     );
@@ -197,7 +197,7 @@ export async function getDowngradeConfigAction(
   try {
     const data = await withRetry(() =>
       adminAPI.get<AutoDowngradeConfig>(
-        `/admin/budgets/${scope}/${scopeId}/downgrade`
+        `/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`
       )
     );
     return { success: true, data };
@@ -217,7 +217,7 @@ export async function setDowngradeConfigAction(
   try {
     const data = await withRetry(() =>
       adminAPI.put<AutoDowngradeConfig>(
-        `/admin/budgets/${scope}/${scopeId}/downgrade`,
+        `/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`,
         { enabled: config.enabled, rules: config.rules }
       )
     );
@@ -235,7 +235,7 @@ export async function deleteDowngradeConfigAction(
 ): Promise<ActionResult<void>> {
   try {
     await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/${scope}/${scopeId}/downgrade`)
+      adminAPI.delete(`/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`)
     );
     return { success: true, data: undefined };
   } catch (err) {

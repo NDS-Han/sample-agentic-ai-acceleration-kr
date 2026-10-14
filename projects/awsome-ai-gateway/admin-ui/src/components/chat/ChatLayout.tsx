@@ -7,7 +7,7 @@ import { useTranslations } from 'next-intl';
 import { Send, Loader2, StopCircle, MessageSquarePlus } from 'lucide-react';
 import { createSession, getHistory } from './api';
 import { MessageList } from './MessageList';
-import { useChatStream } from './useChatStream';
+import { useChatStream, SessionExpiredError } from './useChatStream';
 import { useChatPanelOptional } from './ChatProvider';
 import type { ChatMessage, ChartSpec, ValidatorResult, VerificationResult, AuditResult } from './types';
 
@@ -128,7 +128,21 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
       // 첫 메시지에만 화면 컨텍스트 동봉(이후 같은 세션은 대화 맥락으로 충분).
       const isFirst = messages.filter((m) => m.role === 'user').length === 0;
       const screenCtx = isFirst ? chatPanel?.screenContext ?? undefined : undefined;
-      await send(sessionId, text, screenCtx, mode);
+      try {
+        await send(sessionId, text, screenCtx, mode);
+      } catch (e) {
+        // 410 — 세션 TTL 만료. 새 세션을 만들어 같은 메시지를 한 번 재전송
+        // (사용자가 방금 입력한 내용이 유실되지 않게). 재전송도 만료/실패면
+        // onError 경로가 평소대로 에러 버블을 띄운다.
+        if (e instanceof SessionExpiredError) {
+          const s = await createSession();
+          sessionStorage.setItem(`chat-session-${mode}`, s.session_id);
+          setSessionId(s.session_id);
+          await send(s.session_id, text, screenCtx, mode).catch(() => {});
+        } else {
+          throw e;
+        }
+      }
 
       // streaming 완료 → pending 플래그 제거
       setMessages((prev) =>

@@ -16,6 +16,8 @@
 import { cookies } from 'next/headers';
 import { NextRequest } from 'next/server';
 import { unauthorizedBody } from '@/lib/utils/unauthorized';
+import { readBoundedBody } from '@/lib/utils/requestBody';
+import { upstreamErrorStatus } from '@/lib/utils/upstream';
 
 // SSE pass-through 라우트 — Next.js 가 응답을 버퍼링/정적최적화하지 않도록 강제.
 // 이 설정이 없으면 standalone 런타임이 ReadableStream(특히 admin-api 의 10초
@@ -31,6 +33,13 @@ export const fetchCache = 'force-no-store';
 export const maxDuration = 300;
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
+
+// R17-M2 — 요청 body 상한. 채팅 메시지는 수 KB 수준; JSON+컨텍스트 여유분 64KB.
+const MAX_BODY_BYTES = 64 * 1024;
+// R17-S6 — upstream fetch 의 연결+응답헤더 타임아웃. 응답이 열리면 해제해야
+// SSE 본문 스트림이 계속 흐를 수 있다(AbortSignal.timeout 은 헤더 도착 후에도
+// body 를 끊으므로 직접 controller + clearTimeout).
+const UPSTREAM_HEADER_TIMEOUT_MS = 15_000;
 
 /**
  * 경로 화이트리스트 (R3-2). 이 라우트는 `/api/chat-proxy/admin/chat/...` 만
@@ -83,7 +92,14 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
       { status: 400 },
     );
   }
-  const jwt = cookies().get('admin_jwt')?.value;
+  // ⚠️ 인증 쿠키 확인을 body 읽기 **앞에** 둔다 (R17-M2). 이 라우트는
+  //    middleware 의 /api/ 예외로 비인증 도달이 가능한데, body 를 먼저 버퍼링하면
+  //    비인증 대용량 POST 로 파드 메모리를 고갈시킬 수 있다. JWT 없는 요청은
+  //    upstream 에 갈 이유도 없으니 즉시 401.
+  const jwt = (await cookies()).get('admin_jwt')?.value;
+  if (!jwt) {
+    return Response.json(unauthorizedBody(), { status: 401 });
+  }
   const search = req.nextUrl.search || '';
   const targetUrl = buildTargetUrl(pathParts, search);
   if (!targetUrl) {
@@ -98,7 +114,7 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
     'Content-Type': req.headers.get('content-type') || 'application/json',
     Accept: req.headers.get('accept') || 'application/json',
   };
-  if (jwt) headers.Cookie = `admin_jwt=${jwt}`;
+  headers.Cookie = `admin_jwt=${jwt}`;
 
   const init: RequestInit = {
     method: req.method,
@@ -108,10 +124,32 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
     duplex: 'half',
   };
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    init.body = await req.text();
+    // R17-M2 — 상한 있는 읽기(req.text() 는 무제한 버퍼링). Content-Length 로
+    // 조기 거절 + chunked 는 읽으며 계수.
+    const body = await readBoundedBody(req, MAX_BODY_BYTES);
+    if (!body.ok) return body.response;
+    init.body = body.text;
   }
 
-  const upstream = await fetch(target, init);
+  // R17-S6 — admin-api 장애/지연 시 라우트가 무기한 대기하지 않게 헤더 도착까지
+  // 타임아웃을 건다. 응답이 열리면 즉시 해제해 SSE 본문은 끝까지 흐른다.
+  // upstream 연결 자체가 실패하면 빈 500 이 아니라 502 로.
+  const upstreamAbort = new AbortController();
+  const headerTimer = setTimeout(
+    () => upstreamAbort.abort(),
+    UPSTREAM_HEADER_TIMEOUT_MS,
+  );
+  let upstream: Response;
+  try {
+    upstream = await fetch(target, { ...init, signal: upstreamAbort.signal });
+  } catch (e) {
+    return Response.json(
+      { error: 'upstream unreachable' },
+      { status: upstreamErrorStatus(e) },
+    );
+  } finally {
+    clearTimeout(headerTimer);
+  }
 
   // ⚠️ pass-through 의 유일한 예외: 401. 인증 실패 응답은 SSE 스트림이 아니라 JSON 한
   //    덩이라서 흘려보낼 이유가 없고, 그대로 흘리면 useChatStream 이 `HTTP 401` 문자열만
@@ -135,16 +173,12 @@ async function forward(req: NextRequest, pathParts: string[]): Promise<Response>
   });
 }
 
-export async function GET(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
+export async function GET(req: NextRequest, props: { params: Promise<{ path: string[] }> }) {
+  const params = await props.params;
   return forward(req, params.path);
 }
 
-export async function POST(
-  req: NextRequest,
-  { params }: { params: { path: string[] } }
-) {
+export async function POST(req: NextRequest, props: { params: Promise<{ path: string[] }> }) {
+  const params = await props.params;
   return forward(req, params.path);
 }

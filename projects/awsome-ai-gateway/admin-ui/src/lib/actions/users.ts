@@ -32,7 +32,7 @@ export async function setTeamLeaderAction(
 
   try {
     await withRetry(() =>
-      adminAPI.put(`/admin/teams/${teamId}/leader`, { user_id: userId })
+      adminAPI.put(`/admin/teams/${encodeURIComponent(String(teamId))}/leader`, { user_id: userId })
     );
     revalidatePath('/users');
     return { success: true, data: undefined };
@@ -59,7 +59,7 @@ export async function unsetTeamLeaderAction(
 
   try {
     await withRetry(() =>
-      adminAPI.delete(`/admin/teams/${teamId}/leaders/${userId}`)
+      adminAPI.delete(`/admin/teams/${encodeURIComponent(String(teamId))}/leaders/${encodeURIComponent(String(userId))}`)
     );
     revalidatePath('/users');
     return { success: true, data: undefined };
@@ -81,7 +81,7 @@ export async function forceReauthTeamAction(
   try {
     const res = await withRetry(() =>
       adminAPI.post<{ revoked_count: number }>(
-        `/admin/teams/${teamId}/force-reauth`,
+        `/admin/teams/${encodeURIComponent(String(teamId))}/force-reauth`,
         {}
       )
     );
@@ -129,7 +129,7 @@ export async function getUserAllowedClientsAction(
   try {
     const res = await withRetry(() =>
       adminAPI.get<{ user_id: string; clients: string[] }>(
-        `/admin/users/${userId}/allowed-clients`,
+        `/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`,
       ),
     );
     return { success: true, data: { clients: res.clients ?? [] } };
@@ -148,12 +148,12 @@ export async function setUserAllowedClientsAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     if (clients.length === 0) {
-      await withRetry(() => adminAPI.delete(`/admin/users/${userId}/allowed-clients`));
+      await withRetry(() => adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`));
       return { success: true, data: { clients: [] } };
     }
     const res = await withRetry(() =>
       adminAPI.put<{ user_id: string; clients: string[] }>(
-        `/admin/users/${userId}/allowed-clients`,
+        `/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`,
         { clients },
       ),
     );
@@ -225,7 +225,7 @@ export async function getUserAllowedModelsAction(
   try {
     const res = await withRetry(() =>
       adminAPI.get<{ user_id: string; model_aliases: string[] }>(
-        `/admin/users/${userId}/allowed-models`,
+        `/admin/users/${encodeURIComponent(String(userId))}/allowed-models`,
       ),
     );
     return { success: true, data: { modelAliases: res.model_aliases ?? [] } };
@@ -245,12 +245,12 @@ export async function setUserAllowedModelsAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     if (modelAliases.length === 0) {
-      await withRetry(() => adminAPI.delete(`/admin/users/${userId}/allowed-models`));
+      await withRetry(() => adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-models`));
       return { success: true, data: { modelAliases: [] } };
     }
     const res = await withRetry(() =>
       adminAPI.put<{ user_id: string; model_aliases: string[] }>(
-        `/admin/users/${userId}/allowed-models`,
+        `/admin/users/${encodeURIComponent(String(userId))}/allowed-models`,
         { model_aliases: modelAliases },
       ),
     );
@@ -270,7 +270,7 @@ export async function getUserClientBudgetsAction(
   try {
     const res = await withRetry(() =>
       adminAPI.get<{ user_id: string; apps: Array<{ client: string; max_budget_usd: string; policy: string }> }>(
-        `/admin/budgets/user/${userId}/apps`,
+        `/admin/budgets/user/${encodeURIComponent(String(userId))}/apps`,
       ),
     );
     return { success: true, data: { apps: res.apps ?? [] } };
@@ -293,7 +293,7 @@ export async function setUserClientBudgetAction(
 ): Promise<ActionResult<void>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
-    await withRetry(() => adminAPI.put(`/admin/budgets/user/${userId}/app/${client}`, body));
+    await withRetry(() => adminAPI.put(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`, body));
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, ...toActionError(err) };
@@ -311,7 +311,7 @@ export async function clearUserClientBudgetAction(
     // 앱 예산 해제는 한도 완화라 409/confirm 흐름이 없다 — confirm 파라미터를
     // 보내지 않는다(엔드포인트가 받지 않는다).
     await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/user/${userId}/app/${client}`),
+      adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`),
     );
     return { success: true, data: undefined };
   } catch (err) {
@@ -387,7 +387,7 @@ export async function getEffectivePolicyAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     const res = await withRetry(() =>
-      adminAPI.get<EffectivePolicy>(`/admin/users/${userId}/effective-policy`),
+      adminAPI.get<EffectivePolicy>(`/admin/users/${encodeURIComponent(String(userId))}/effective-policy`),
     );
     return { success: true, data: res };
   } catch (err) {
@@ -403,7 +403,7 @@ export async function getTeamEffectivePolicyAction(
   if (!teamId) return { success: false, error: 'Team ID is required' };
   try {
     const res = await withRetry(() =>
-      adminAPI.get<EffectivePolicy>(`/admin/teams/${teamId}/effective-policy`),
+      adminAPI.get<EffectivePolicy>(`/admin/teams/${encodeURIComponent(String(teamId))}/effective-policy`),
     );
     return { success: true, data: res };
   } catch (err) {

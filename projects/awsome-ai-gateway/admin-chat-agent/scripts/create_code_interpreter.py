@@ -34,9 +34,11 @@ def create(role_arn: str) -> None:
     resp = ci.create_code_interpreter(
         name=NAME,
         execution_role_arn=role_arn,
-        # PUBLIC = agent runtime 과 동일. S3/KMS 는 execution role 로 도달(인터넷
-        # 무관 — AWS API 엔드포인트). VPC 가 필요하면 networkMode=VPC + vpcConfig.
-        network_configuration={"networkMode": "PUBLIC"},
+        # SANDBOX = 아웃바운드 차단 (R17-S2). PUBLIC 이면 LLM 생성 코드가 임의
+        # 호스트로 결과를 exfil 할 수 있다(프롬프트 인젝션 경로). S3 쓰기가
+        # 필요하면 PUBLIC 대신 VPC + vpcConfig(+S3 gateway endpoint)를 쓴다 —
+        # 인터넷은 안 열고 AWS API 만 도달하게.
+        network_configuration={"networkMode": "SANDBOX"},
         description="admin-chat-agent report/code specialist — execution-role S3 write",
     )
     print(f"codeInterpreterId={resp['codeInterpreterId']}")

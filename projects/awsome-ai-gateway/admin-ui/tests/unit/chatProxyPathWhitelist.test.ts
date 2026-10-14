@@ -46,7 +46,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const param = (...parts: string[]) => ({ params: { path: parts } });
+const param = (...parts: string[]) => ({ params: Promise.resolve({ path: parts }) });
 
 describe('chat-proxy path whitelist', () => {
   it('forwards allowed admin/chat paths upstream', async () => {

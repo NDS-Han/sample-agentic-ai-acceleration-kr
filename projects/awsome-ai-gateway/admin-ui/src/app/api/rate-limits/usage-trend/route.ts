@@ -7,12 +7,13 @@
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { unauthorizedBody } from '@/lib/utils/unauthorized';
+import { fetchUpstream } from '@/lib/utils/upstream';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 const WINDOWS = new Set(['1h', '6h', '24h', '7d']);
 
 export async function GET(req: NextRequest) {
-  const jwt = cookies().get('admin_jwt')?.value;
+  const jwt = (await cookies()).get('admin_jwt')?.value;
   const sp = req.nextUrl.searchParams;
   const scope = sp.get('scope') ?? '';
   const scopeId = sp.get('scope_id') ?? '';
@@ -23,7 +24,7 @@ export async function GET(req: NextRequest) {
 
   const upstream = `${ADMIN_API_URL}/admin/rate-limits/usage-trend/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}?window=${window}`;
   try {
-    const res = await fetch(upstream, {
+    const res = await fetchUpstream(upstream, {
       cache: 'no-store',
       headers: {
         'Content-Type': 'application/json',

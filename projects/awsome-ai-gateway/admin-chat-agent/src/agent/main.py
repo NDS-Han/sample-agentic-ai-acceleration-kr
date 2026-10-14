@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import functools
 import json
 import os
 import re
@@ -57,6 +58,7 @@ _mode: contextvars.ContextVar[str] = contextvars.ContextVar("_mode", default="qu
 _session_id: contextvars.ContextVar[str] = contextvars.ContextVar("_session_id", default="")
 
 
+@functools.lru_cache(maxsize=None)
 def load_prompt(name: str) -> str:
     return (PROMPTS_DIR / f"{name}.md").read_text(encoding="utf-8")
 
@@ -224,16 +226,15 @@ def _gpt_critic_call(payload: str) -> str:
 
 def _claude_critic_call(payload: str) -> str:
     """Claude cross-family critic 호출 — Phase 1 배선/메커니즘 검증용(가족 다양성
-    없음, 같은 Anthropic). sql_critic 프롬프트로 Opus 호출."""
-    global _claude_critic_agent
-    if _claude_critic_agent is None:
-        _claude_critic_agent = Agent(
-            model=_bedrock(MODEL_OPUS), tools=[], system_prompt=load_prompt("sql_critic"),
-        )
-    return str(_claude_critic_agent(payload))
+    없음, 같은 Anthropic). sql_critic 프롬프트로 Opus 호출.
 
-
-_claude_critic_agent = None
+    호출별 신규 인스턴스(R17-S5) — 공유 Agent 는 messages 가 누적돼 이전 턴의
+    지시가 잔류하고, 동시 호출은 Strands ConcurrencyException 을 낸다.
+    """
+    critic = Agent(
+        model=_bedrock(MODEL_OPUS), tools=[], system_prompt=load_prompt("sql_critic"),
+    )
+    return str(critic(payload))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -277,10 +278,18 @@ def query_db(sql: str, session_id: str = "", step_id: str = "") -> dict:
     fn = os.environ.get("LAMBDA_QUERY_DB")
     if not fn:
         return {"error": "query_db not configured (LAMBDA_QUERY_DB unset)"}
+    # session_id 는 LLM 인자를 믿지 않고 invoke 컨텍스트의 진짜 세션을 강제 주입
+    # (R17 nit — 모델이 다른 세션 id 를 넣어 staging 키를 오염시킬 수 있었다).
+    # contextvar 가 비어 있으면(Strands 가 context 를 tool 에 전파 못 한 버그)
+    # 모델 제공값으로 조용히 되돌아가지 말고 fail closed — staging 격리의
+    # 유일한 근거라 조용한 fallback 은 방어 무력화다.
+    effective_session = _session_id.get("")
+    if not effective_session:
+        return {"error": "internal error: session context unavailable"}
     response = client.invoke(
         FunctionName=fn,
         Payload=json.dumps(
-            {"sql": sql, "session_id": session_id, "step_id": step_id}
+            {"sql": sql, "session_id": effective_session, "step_id": step_id}
         ).encode(),
     )
     return json.loads(response["Payload"].read())
@@ -347,43 +356,62 @@ def execute_python(code: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Sub-agents (Specialists)
+# Sub-agents (Specialists) — **팩토리 함수** (R17-S5)
+#
+# Agent 인스턴스를 모듈 싱글턴으로 공유하면 세 가지가 깨진다:
+#   1. `agent.messages` 가 호출마다 누적 → 이전 턴의 지시가 잔류하고 토큰 비용이
+#      선형으로 늘어난다(L3 후보 k 개가 같은 history 를 공유하면 "독립 후보"
+#      전제도 깨진다 — self-consistency 왜곡).
+#   2. Strands 기본 ConcurrentToolExecutor 하에서 같은 인스턴스의 동시 호출은
+#      ConcurrencyException — orchestrator 가 같은 tool 을 병렬 호출하면 실패.
+#   3. 프롬프트 인젝션이 history 에 남아 같은 프로세스의 다음 세션까지 이어진다.
+# Agent 생성은 설정 객체라 싸고, 프롬프트 캐시는 Bedrock 측(system prompt 내용
+# 기준)이라 신규 인스턴스도 캐시를 그대로 탄다 — 호출마다 새로 만든다.
 # ─────────────────────────────────────────────────────────────────────────────
-sql_specialist = Agent(
-    model=_bedrock(MODEL_SQL),
-    tools=[get_schema, query_db],
-    system_prompt=load_prompt("sql_specialist"),
-)
+def _new_sql_specialist() -> Agent:
+    return Agent(
+        model=_bedrock(MODEL_SQL),
+        tools=[get_schema, query_db],
+        system_prompt=load_prompt("sql_specialist"),
+    )
 
-code_specialist = Agent(
-    model=_bedrock(MODEL_CODE),
-    tools=[execute_python],
-    system_prompt=load_prompt("code_specialist"),
-)
+
+def _new_code_specialist() -> Agent:
+    return Agent(
+        model=_bedrock(MODEL_CODE),
+        tools=[execute_python],
+        system_prompt=load_prompt("code_specialist"),
+    )
+
 
 # Validator / Viz 는 tool 없이 LLM 만 (분석 결과 → JSON 응답)
-sql_validator = Agent(
-    model=opus_model(),
-    tools=[],
-    system_prompt=load_prompt("sql_validator"),
-)
+def _new_sql_validator() -> Agent:
+    return Agent(
+        model=opus_model(),
+        tools=[],
+        system_prompt=load_prompt("sql_validator"),
+    )
 
-viz_specialist = Agent(
-    model=_bedrock(MODEL_VIZ),
-    tools=[],
-    system_prompt=load_prompt("viz_specialist"),
-)
+
+def _new_viz_specialist() -> Agent:
+    return Agent(
+        model=_bedrock(MODEL_VIZ),
+        tools=[],
+        system_prompt=load_prompt("viz_specialist"),
+    )
+
 
 # Report Specialist — 여러 SQL 결과를 모아 다운로드 가능한 리포트 파일(PDF/PPTX/
 # XLSX)을 Code Interpreter 샌드박스에서 생성(reportlab/python-pptx/openpyxl 사전
 # 설치 확인됨)하고 S3(reports/ prefix)에 업로드. get_schema/query_db 로 데이터
 # 수집, execute_python 으로 파일 생성. 모델은 MODEL_REPORT(기본 MODEL_CODE) —
 # 파일 생성 코드는 보일러플레이트라 지능 민감도 낮음(필요시 env 로 다운시프트).
-report_specialist = Agent(
-    model=_bedrock(MODEL_REPORT),
-    tools=[get_schema, query_db, execute_python],
-    system_prompt=load_prompt("report_specialist"),
-)
+def _new_report_specialist() -> Agent:
+    return Agent(
+        model=_bedrock(MODEL_REPORT),
+        tools=[get_schema, query_db, execute_python],
+        system_prompt=load_prompt("report_specialist"),
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -406,7 +434,7 @@ def ask_sql_specialist(question: str, hints: dict | None = None) -> dict:
     payload = json.dumps(
         {"question": question, "hints": hints or {}, "few_shot": fewshot_block}
     )
-    env = _agent_call(sql_specialist, payload, parse_json=True, tool_name="ask_sql_specialist")
+    env = _agent_call(_new_sql_specialist(), payload, parse_json=True, tool_name="ask_sql_specialist")
     # §58 결함⑨: SQL 이 나오면 **항상** validator 를 코드로 실행(비결정성 0).
     # orchestrator 가 ask_validator 를 부를지 말지에 의존하지 않는다.
     _auto_validate(question, env)
@@ -456,7 +484,7 @@ def ask_sql_verified(question: str, hints: dict | None = None) -> dict:
         )
         # 후보는 내부 시도 — SQL 스키마로 파싱하되 stash 안 함(채택 후보만 stash).
         env = _agent_call(
-            sql_specialist, payload, parse_json=True,
+            _new_sql_specialist(), payload, parse_json=True,
             schema_key="ask_sql_specialist", stash=False,
         )
         sql_text = str(env.get("sql", "")) if isinstance(env, dict) else ""
@@ -518,7 +546,7 @@ def ask_code_specialist(intent: str, data_ref: str, hints: dict | None = None) -
     payload = json.dumps(
         {"intent": intent, "data_ref": data_ref, "hints": hints or {}}
     )
-    return _agent_call(code_specialist, payload, parse_json=True, tool_name="ask_code_specialist")
+    return _agent_call(_new_code_specialist(), payload, parse_json=True, tool_name="ask_code_specialist")
 
 
 def _run_validator(
@@ -549,7 +577,7 @@ def _run_validator(
         }
     )
     return _agent_call(
-        sql_validator, payload, parse_json=True,
+        _new_sql_validator(), payload, parse_json=True,
         tool_name="ask_validator", stash=stash,
     )
 
@@ -686,19 +714,16 @@ def _cross_family_check(question: str, env: dict, mode: str) -> None:
         ).strip(" |")
 
 
-_answer_auditor_agent = None
-
-
 def _auditor_call(payload: str) -> str:
     """Answer auditor 호출(§60 L5). Phase 1: Claude(Opus) — sql_auditor 프롬프트.
     MODEL_AUDITOR=gpt 면 추후 Mantle Responses API 로 교체(critic 경로 재사용) —
-    지금은 Claude 로 배선 검증(GPT-5.5 us-east-2 안정 후 다른 패밀리로 diverse lens)."""
-    global _answer_auditor_agent
-    if _answer_auditor_agent is None:
-        _answer_auditor_agent = Agent(
-            model=_bedrock(MODEL_OPUS), tools=[], system_prompt=load_prompt("sql_auditor"),
-        )
-    return str(_answer_auditor_agent(payload))
+    지금은 Claude 로 배선 검증(GPT-5.5 us-east-2 안정 후 다른 패밀리로 diverse lens).
+
+    호출별 신규 인스턴스(R17-S5) — 싱글턴 공유 시 messages 누적/동시호출 예외."""
+    auditor = Agent(
+        model=_bedrock(MODEL_OPUS), tools=[], system_prompt=load_prompt("sql_auditor"),
+    )
+    return str(auditor(payload))
 
 
 def _run_answer_auditor(question: str, final_text: str, tool_results: list, mode: str) -> dict | None:
@@ -804,7 +829,7 @@ def ask_viz_specialist(data_shape: dict, user_intent: str) -> dict:
     Returns: {kind, x, y, color?, title}
     """
     payload = json.dumps({"data_shape": data_shape, "intent": user_intent})
-    return _agent_call(viz_specialist, payload, parse_json=True, tool_name="ask_viz_specialist")
+    return _agent_call(_new_viz_specialist(), payload, parse_json=True, tool_name="ask_viz_specialist")
 
 
 @tool
@@ -838,7 +863,7 @@ def ask_report_specialist(
         ensure_ascii=False,
     )
     return _agent_call(
-        report_specialist, payload, parse_json=True, tool_name="ask_report_specialist"
+        _new_report_specialist(), payload, parse_json=True, tool_name="ask_report_specialist"
     )
 
 
@@ -1002,17 +1027,23 @@ _ORCH_TOOLS = [
 
 ORCH_EFFORT_DEEP = os.environ.get("ORCH_EFFORT_DEEP", ORCH_EFFORT).strip().lower()
 
-orchestrator = Agent(
-    model=orchestrator_model(),
-    tools=_ORCH_TOOLS,
-    system_prompt=load_prompt("orchestrator"),
-)
+# orchestrator 도 팩토리(R17-S5) — invoke 마다 신규 인스턴스. 싱글턴이면 연속
+# 턴에서 대화 history 가 누적(의도는 턴 단위 stateless)하고 동시 세션에서
+# ConcurrencyException 이 난다. Bedrock 프롬프트 캐시는 내용 기반이라 무관.
+def _new_orchestrator() -> Agent:
+    return Agent(
+        model=orchestrator_model(),
+        tools=_ORCH_TOOLS,
+        system_prompt=load_prompt("orchestrator"),
+    )
 
-orchestrator_deep = Agent(
-    model=_bedrock(MODEL_OPUS, stream_thinking=True, effort=ORCH_EFFORT_DEEP or None),
-    tools=_ORCH_TOOLS,
-    system_prompt=load_prompt("orchestrator_deep"),
-)
+
+def _new_orchestrator_deep() -> Agent:
+    return Agent(
+        model=_bedrock(MODEL_OPUS, stream_thinking=True, effort=ORCH_EFFORT_DEEP or None),
+        tools=_ORCH_TOOLS,
+        system_prompt=load_prompt("orchestrator_deep"),
+    )
 
 
 def _valid_chart_spec(obj: object) -> bool:
@@ -1239,7 +1270,7 @@ async def invoke(payload: dict):
     # 퀵 경로는 기존 orchestrator 그대로 — 바이트 무변경(golden 회귀 0).
     mode = (payload or {}).get("mode", "quick")
     language = (payload or {}).get("language") or (payload or {}).get("locale") or "ko"
-    active_orchestrator = orchestrator_deep if mode == "deep" else orchestrator
+    active_orchestrator = _new_orchestrator_deep() if mode == "deep" else _new_orchestrator()
     logger.info(
         "agent_invoke", session_id=session_id, mode=mode, language=language,
         content_preview=content[:80],

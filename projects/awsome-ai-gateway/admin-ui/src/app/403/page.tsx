@@ -11,7 +11,7 @@ export default async function ForbiddenPage() {
 
   // 역할별 홈 — DEVELOPER 는 '/' 자체가 403 이라 대시보드 링크로 보내면 다시 이
   // 페이지로 돌아오는 무한루프가 된다. 개발자 홈은 /my.
-  const token = cookies().get('admin_jwt')?.value;
+  const token = (await cookies()).get('admin_jwt')?.value;
   let home = '/';
   let isAdmin = false;
   if (token) {
@@ -21,7 +21,7 @@ export default async function ForbiddenPage() {
         // IdP id_token 에는 role 클레임이 없다 — layout 과 같은 규칙으로
         // admin_role 쿠키(admin-api 판정)를 우선 병합한다.
         const role =
-          roleFromCookie(cookies().get(ADMIN_ROLE_COOKIE)?.value) ?? session.role;
+          roleFromCookie((await cookies()).get(ADMIN_ROLE_COOKIE)?.value) ?? session.role;
         if (role === UserRole.DEVELOPER) {
           home = '/my';
         }

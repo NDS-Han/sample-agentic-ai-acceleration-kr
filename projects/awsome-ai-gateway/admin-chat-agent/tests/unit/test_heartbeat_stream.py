@@ -43,7 +43,8 @@ async def test_heartbeat_fills_silence(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
 
     events = await _drain({"content": "6월 비용", "session_id": "s1"})
     types = [e["type"] for e in events]
@@ -75,7 +76,8 @@ async def test_heartbeat_stops_after_first_text(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
 
     events = await _drain({"content": "q", "session_id": "s2"})
     # 첫 text 이후 도착한 heartbeat 는 버려져야 한다 → text 뒤엔 heartbeat 없음.
@@ -103,7 +105,8 @@ async def test_validator_skip_gate_warns(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
 
     events = await _drain({"content": "6월 비용", "session_id": "s-skip"})
     validators = [e for e in events if e["type"] == "validator"]
@@ -130,7 +133,8 @@ async def test_validator_present_no_skip_warn(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
 
     events = await _drain({"content": "q", "session_id": "s-ok"})
     skip_warns = [
@@ -153,7 +157,8 @@ async def test_pump_exception_propagates(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
 
     with pytest.raises(RuntimeError, match="bedrock boom"):
         await _drain({"content": "q", "session_id": "s3"})

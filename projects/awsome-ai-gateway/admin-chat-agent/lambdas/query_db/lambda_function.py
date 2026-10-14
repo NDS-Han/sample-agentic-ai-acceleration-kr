@@ -36,6 +36,8 @@ import time
 import uuid
 from typing import Any
 
+import re
+
 import boto3
 import psycopg2
 import psycopg2.extras
@@ -118,68 +120,166 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         raise ValidationError("Only a single SQL statement is permitted")
     ast = statements[0]
 
-    # 2. 허용된 statement type 만 — SELECT 또는 WITH (CTE)
-    if not isinstance(ast, (exp.Select, exp.With, exp.Subquery)):
-        # WITH ... SELECT 도 sqlglot 에선 With 또는 Select 로 root
-        if ast.find(exp.Insert) or ast.find(exp.Update) or ast.find(exp.Delete):
-            raise ValidationError(
-                "DDL/DML not allowed (INSERT/UPDATE/DELETE/DROP). "
-                "Only SELECT statements are permitted."
-            )
+    # 2. 허용된 statement type 만 — SELECT 계열.
+    #    ⚠️ 과거 로직은 "비허용 root 인데 DML 노드를 못 찾으면" 조용히 통과시켰다 —
+    #    `SET`/`DISCARD`/`LISTEN` 같은 세션 조작문이 그대로 새고, `WITH x AS
+    #    (DELETE ...)` 는 root 가 Select 라 DML 검사 자체를 건너뛰었다 (R17-S1,
+    #    sqlglot 실측). 이제 root 는 엄격 화이트리스트 + DML/DDL 은 root 무관 전체
+    #    스캔(중첩 CTE 포함)이다.
+    _ALLOWED_ROOTS = (
+        exp.Select, exp.Union, exp.Intersect, exp.Except,
+        exp.With, exp.Subquery, exp.Values,
+    )
+    if not isinstance(ast, _ALLOWED_ROOTS):
+        raise ValidationError(
+            "Only SELECT statements are permitted "
+            "(SELECT/WITH/UNION/VALUES; SET, DDL, DML rejected)."
+        )
 
-    # forbidden operation 추가 검사 (CREATE, DROP, GRANT 등)
-    for op_name in ("Create", "Drop", "AlterTable", "Truncate", "Grant"):
+    for op_name in (
+        "Insert", "Update", "Delete", "Merge",
+        "Create", "Drop", "AlterTable", "Truncate", "Grant", "Copy",
+    ):
         op_cls = getattr(exp, op_name, None)
         if op_cls and ast.find(op_cls):
-            raise ValidationError(f"{op_name} statement not allowed")
+            raise ValidationError(
+                f"{op_name} is not allowed — only read-only SELECT."
+            )
+
+    # 잠금/쓰기 절 — SELECT 만으로 가능한 부수효과를 차단한다.
+    #   FOR UPDATE/SHARE  : reader role 의 SELECT grant 에 잠금 권한이 포함돼
+    #                       그대로 실행돼 writer(cost-recorder)를 최대
+    #                       statement_timeout 만큼 블로킹한다 (반복 호출 시 DoS).
+    #   SELECT INTO       : 테이블 생성. reader role 에 CREATE 가 없어 DB 가
+    #                       막지만 검증 의도상 여기서 거절한다 (심층 방어).
+    for sel in ast.find_all(exp.Select):
+        if sel.args.get("locks"):
+            raise ValidationError(
+                "Locking clauses (FOR UPDATE/FOR SHARE) are not allowed."
+            )
+        if sel.args.get("into"):
+            raise ValidationError("SELECT INTO is not allowed.")
+
+    # 위험 함수 거부 — 함수 인자의 SQL 문자열은 AST 에 Table 노드로 안 잡혀
+    # 테이블 화이트리스트를 완전히 우회한다 (R17-S1 실측:
+    # `QUERY_TO_XML('select content from chat_agent.messages', ...)` 통과 —
+    # chat_agent.* 에 reader SELECT grant 가 있어 다른 관리자의 대화를 읽는
+    # 경로가 실제로 열려 있었다). 파일/세션/잠금/네트워크 계열도 같은 이유로 거부.
+    _DENIED_FN = re.compile(
+        r"^(?:"
+        r"pg_.*|set_config|current_setting|"           # 세션/파일/잠금/백엔드 제어
+        r"dblink.*|postgres_fdw.*|"                     # 외부 연결
+        r"lo_.*|"                                       # large object 파일 접근
+        r".*to_xml.*|xpath|"                            # 문자열 SQL 실행(XML 계열)
+        r"ts_(?:stat|rewrite)|"                         # 문자열 SQL 실행(tsquery 계열)
+        r"(?:next|set|curr)val|txid_.*|"                # 시퀀스/트랜잭션 부수효과
+        r"http_.*|curl.*"                               # 네트워크 egress 확장
+        r")$",
+        re.IGNORECASE,
+    )
+    for fn in ast.find_all(exp.Func):
+        # ⚠️ 이름 추출은 노드 타입에 따라 다르다 (R17 실측):
+        #    - exp.Anonymous(미등록 함수): sql_name() 은 'ANONYMOUS' 를 반환하고
+        #      실제 이름은 .name 에 있다 (query_to_xml 등).
+        #    - 타입드 함수(exp.Concat 등): .name 은 Expression.name = 첫 인자
+        #      리터럴이 돼 concat('http_', x) 가 'http_' 로 오인되어 과거 구현은
+        #      정상 함수를 거절했다 — sql_name() 이 정답.
+        if isinstance(fn, exp.Anonymous):
+            name = (getattr(fn, "name", "") or "").lower()
+        else:
+            try:
+                name = (fn.sql_name() or "").lower()
+            except Exception:  # noqa: BLE001
+                name = ""
+        if name and _DENIED_FN.match(name):
+            raise ValidationError(
+                f"Function '{name}' is not allowed in read-only queries."
+            )
 
     # 3. 모든 참조 테이블이 화이트리스트에 있는지
+    #    traverse_scope 는 SQL 의 실제 이름 해석을 따라간다 — CTE 별칭은
+    #    Scope(비테이블)로, 실테이블만 Table 노드로 나타나므로
+    #    `WITH daily AS (...) SELECT * FROM daily` 가 정상 통과하고,
+    #    스코프 밖에서 CTE 이름을 도용해 실테이블을 가리키는 우회는 잡힌다
+    #    (과거 단순 find_all(Table) + 전역 CTE 이름 집합은 둘 다 실패했다).
+    from sqlglot.optimizer.scope import traverse_scope
+
     allowed = allowed_table_set()
-    for table in ast.find_all(exp.Table):
+    try:
+        scopes = traverse_scope(ast)
+        table_sources = [
+            src
+            for scope in scopes
+            for src in scope.sources.values()
+            if isinstance(src, exp.Table)
+        ]
+    except Exception as e:  # noqa: BLE001 — 스코프 해석 불가 = fail closed
+        raise ValidationError(f"Could not resolve table references: {e}") from e
+
+    for table in table_sources:
         # table.text("db") returns the schema as a plain string ("" if absent);
         # table.args.get("db") returns an Identifier object → no .lower(). Use text().
-        schema = (table.text("db") or "public").lower()
         name = (table.name or "").lower()
+        if not name:
+            # FROM generate_series(...) 등 UDTF — this 가 Identifier 가 아니라
+            # Func 라 name 이 비어 있다. 실테이블이 아니므로 스킵 (함수 자체는
+            # 위 denylist 검사를 받는다).
+            continue
+        schema = (table.text("db") or "public").lower()
         if (schema, name) not in {(s.lower(), t.lower()) for s, t in allowed}:
             raise ValidationError(
                 f"Table '{schema}.{name}' is not in the whitelist. "
                 f"Allowed tables: {sorted(allowed)}"
             )
 
-    # forbidden column — 컬럼 이름이 forbidden 에 매치되면 reject
+    # forbidden column — 컬럼 이름이 forbidden 에 매치되면 reject.
+    # ⚠️ 과거엔 `db.table.column` 완전 FQCN 일치만 걸렀다 — `password_hash`
+    #    (비수식)나 `u.password_hash`(별칭)는 전부 빠져나갔다 (R17). 실제 차단은
+    #    DB 컬럼 GRANT 가 했지만 검증 의도상 이름 기준으로 바로잡는다:
+    #    forbidden 항목의 마지막 세그먼트(컬럼명)와 동일한 이름의 컬럼 참조를
+    #    거절한다. 허용 테이블의 동명 컬럼까지 막을 수 있으나, 항목들이
+    #    `sso_subject`/`key_value_encrypted` 처럼 민감 전용 이름이라 실무상
+    #    false positive 가 없다.
+    # ⚠️ `SELECT u.*` / `row_to_json(u)` 처럼 이름을 명시하지 않는 참조는 AST 에
+    #    Column 노드를 남기지 않아 이 검사를 통과한다 — 최종 차단선은 DB 의
+    #    컬럼 단위 GRANT 다(08_create_chat_reader.sql 에서 민감 컬럼 미부여).
     forbidden = forbidden_columns()
     if forbidden:
-        sql_lower = sql.lower()
-        for fcol in forbidden:
-            # 'auth.users.password_hash' — 대략적 substring 매치
-            if fcol.lower() in sql_lower or fcol.split(".")[-1].lower() in sql_lower:
-                # 컬럼 이름만 매치되는 false positive 방지: identifier 단위로 확인
-                for col in ast.find_all(exp.Column):
-                    full = ".".join(p for p in [col.text("db"), col.text("table"), col.name] if p).lower()
-                    if full == fcol.lower():
-                        raise ValidationError(f"Column '{fcol}' is forbidden")
+        forbidden_names = {f.lower().split(".")[-1] for f in forbidden}
+        for col in ast.find_all(exp.Column):
+            if col.name.lower() in forbidden_names:
+                raise ValidationError(
+                    f"Column '{col.name}' is forbidden"
+                )
 
     return ast
 
 
 def force_limit(ast: sqlglot.Expression) -> str:
-    """4단계 — LIMIT 강제. 이미 LIMIT 있으면 작은 값 채택."""
-    select = ast if isinstance(ast, exp.Select) else ast.find(exp.Select)
-    if select is None:
-        return ast.sql(dialect="postgres")
+    """4단계 — LIMIT 강제. 이미 LIMIT 있으면 작은 값 채택.
 
-    existing_limit = select.args.get("limit")
+    ⚠️ R17-S1: `ast.find(exp.Select)` 는 첫 Select 만 반환해서 UNION root 에는
+    첫 브랜치에만 LIMIT 이 붙고 총 반환 행이 한도×브랜치 수로 늘었다.
+    - plain Select root: LIMIT 를 제자리에 설정 — 서브쿼리로 감싸면 안쪽
+      ORDER BY 의 순서 보장이 SQL 스펙상 사라지므로(실측 Postgres 는 보존하지만
+      의존하지 않는다) root 가 Select 일 때는 직접 설정한다.
+    - Union/Intersect/Except/With/Values root: LIMIT 을 root 에 직접 붙이면
+      마지막 브랜치에만 걸릴 수 있으므로 전체를 서브쿼리로 감싸 총량을 묶는다.
+    root LIMIT(union 포함)이 있으면 더 작은 값을 채택해 호출자 상한을 존중.
+    """
+    limit = QUERY_LIMIT
+    existing_limit = ast.args.get("limit")
     if existing_limit:
         try:
-            existing = int(existing_limit.expression.this)
-            if existing > QUERY_LIMIT:
-                select.set("limit", exp.Limit(expression=exp.Literal.number(QUERY_LIMIT)))
-        except Exception:
-            select.set("limit", exp.Limit(expression=exp.Literal.number(QUERY_LIMIT)))
-    else:
-        select.set("limit", exp.Limit(expression=exp.Literal.number(QUERY_LIMIT)))
-
-    return ast.sql(dialect="postgres")
+            limit = min(limit, int(existing_limit.expression.this))
+        except Exception:  # noqa: BLE001 — 비정수 LIMIT 표현은 기본 상한으로
+            pass
+    if isinstance(ast, exp.Select):
+        ast.set("limit", exp.Limit(expression=exp.Literal.number(limit)))
+        return ast.sql(dialect="postgres")
+    return (
+        f"SELECT * FROM ({ast.sql(dialect='postgres')}) AS _q LIMIT {limit}"
+    )
 
 
 # ─── DB connection ───
@@ -363,7 +463,11 @@ def upload_to_staging(rows: list[dict], session_id: str, step_id: str) -> str:
     # staging/ prefix — 중간 데이터(1일 만료). reports/(7일)와 키 공간 분리해
     # lifecycle 을 prefix 별로 독립 제어(§49). 과거 평면 키({session}/...)는 broad
     # 규칙이 reports 까지 1일에 삭제하는 문제가 있었음.
-    key = f"staging/{session_id}/{step_id}.jsonl"
+    # ⚠️ session_id/step_id 는 LLM 이 tool 인자로 넣는 값이다 — 신뢰 입력이
+    #    아니므로 키 문자셋으로 살균한다(다른 세션 키 덮어쓰기/이상 키 방지, R17).
+    safe_sid = re.sub(r"[^A-Za-z0-9_-]", "-", str(session_id))[:64]
+    safe_step = re.sub(r"[^A-Za-z0-9_-]", "-", str(step_id))[:64]
+    key = f"staging/{safe_sid}/{safe_step}.jsonl"
     s3.put_object(
         Bucket=S3_STAGING_BUCKET,
         Key=key,

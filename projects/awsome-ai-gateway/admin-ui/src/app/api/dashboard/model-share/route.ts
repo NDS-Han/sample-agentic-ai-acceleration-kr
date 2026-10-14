@@ -3,11 +3,12 @@
 import { cookies } from 'next/headers';
 import { NextRequest, NextResponse } from 'next/server';
 import { unauthorizedBody } from '@/lib/utils/unauthorized';
+import { fetchUpstream, upstreamErrorStatus } from '@/lib/utils/upstream';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
 export async function GET(req: NextRequest) {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
 
   const sp = req.nextUrl.searchParams;
@@ -20,13 +21,22 @@ export async function GET(req: NextRequest) {
   upstream.searchParams.set('team_id', teamId);
   if (client && client !== 'all') upstream.searchParams.set('client', client);
 
-  const res = await fetch(upstream.toString(), {
-    cache: 'no-store',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
-    },
-  });
+  // R17-S6 — upstream 연결 실패/타임아웃은 프레임워크 500 이 아니라 502 로.
+  let res: Response;
+  try {
+    res = await fetchUpstream(upstream.toString(), {
+      cache: 'no-store',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(jwt ? { Cookie: `admin_jwt=${jwt}` } : {}),
+      },
+    });
+  } catch (e) {
+    return NextResponse.json(
+      { error: '모델별 비용 점유율 조회 실패 (upstream unreachable)' },
+      { status: upstreamErrorStatus(e) },
+    );
+  }
 
   // ⚠️ 401 은 `!res.ok` 로 뭉개면 안 된다. middleware 는 `/api/` 전체를 공개 경로로
   //    통과시키므로 이 라우트에는 만료 검사가 없고, 여기가 세션 사망을 처음 알게 되는

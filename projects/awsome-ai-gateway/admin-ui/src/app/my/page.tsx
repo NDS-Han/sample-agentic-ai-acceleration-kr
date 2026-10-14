@@ -21,10 +21,11 @@ async function UsageSection({ period }: { period?: string }) {
 }
 
 interface MyPageProps {
-  searchParams: { period?: string };
+  searchParams: Promise<{ period?: string }>;
 }
 
-export default async function MyPage({ searchParams }: MyPageProps) {
+export default async function MyPage(props: MyPageProps) {
+  const searchParams = await props.searchParams;
   const t = await getTranslations('my');
 
   // ?period 지원은 있었지만 선택 UI 가 없었다 — 본인 월 목록 + 월 선택기를 둔다.

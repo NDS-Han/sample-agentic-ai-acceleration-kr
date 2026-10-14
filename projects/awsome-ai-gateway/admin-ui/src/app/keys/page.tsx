@@ -12,10 +12,11 @@ import { KeyStatus } from '@/types/enums';
 const PAGE_LIMIT = 50;
 
 interface KeysPageProps {
-  searchParams?: { email?: string; status?: string };
+  searchParams?: Promise<{ email?: string; status?: string }>;
 }
 
-export default async function KeysPage({ searchParams }: KeysPageProps) {
+export default async function KeysPage(props: KeysPageProps) {
+  const searchParams = await props.searchParams;
   const t = await getTranslations('keys');
   const email = searchParams?.email?.trim() ?? '';
   const rawStatus = searchParams?.status?.toUpperCase() as KeyStatus | undefined;

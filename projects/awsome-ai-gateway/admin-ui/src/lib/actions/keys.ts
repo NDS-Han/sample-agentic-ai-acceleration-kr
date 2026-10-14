@@ -54,7 +54,7 @@ export async function revokeKeyAction(keyId: string): Promise<ActionResult<void>
   }
 
   try {
-    await withRetry(() => adminAPI.delete(`/admin/keys/${keyId}`));
+    await withRetry(() => adminAPI.delete(`/admin/keys/${encodeURIComponent(String(keyId))}`));
     revalidatePath('/keys');
     return { success: true, data: undefined };
   } catch (err) {

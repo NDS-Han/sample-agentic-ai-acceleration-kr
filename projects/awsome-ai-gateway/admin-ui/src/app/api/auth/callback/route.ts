@@ -292,10 +292,16 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       cache: 'no-store',
     });
   } catch (e) {
+    // R17 nit — e.message 에는 내부 DNS/프록시 정보가 섞일 수 있다. 사용자 화면엔
+    // 정규화된 문구만, 원인은 서버 로그로.
+    console.error(
+      '[auth/callback] token endpoint unreachable',
+      e instanceof Error ? e.message : String(e),
+    );
     return failure(
       502,
       'Token endpoint unreachable',
-      `OIDC_TOKEN_URL(${tokenUrl}) 에 접속할 수 없습니다: ${e instanceof Error ? e.message : String(e)}`,
+      'token 엔드포인트에 접속할 수 없습니다. 서버 로그를 확인하세요.',
       secure,
     );
   }

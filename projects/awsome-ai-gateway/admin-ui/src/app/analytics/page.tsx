@@ -24,14 +24,17 @@ import { fetchAvailablePeriods } from '@/lib/actions/dashboard';
 import { fetchModelCostAnalytics } from '@/lib/actions/analytics-models';
 import { isMonth, resolveMonth } from '@/lib/utils/period';
 
+// Next 15: searchParams 는 Promise — 페이지에서 await 한 뒤 resolve 된 값을 쓴다.
+interface AnalyticsSearchParams {
+  period?: string;
+  start_date?: string;
+  end_date?: string;
+  group_by?: string;
+  scope?: string;
+}
+
 interface AnalyticsPageProps {
-  searchParams: {
-    period?: string;
-    start_date?: string;
-    end_date?: string;
-    group_by?: string;
-    scope?: string;
-  };
+  searchParams: Promise<AnalyticsSearchParams>;
 }
 
 /**
@@ -41,7 +44,7 @@ interface AnalyticsPageProps {
  * resolveMonth 가 존중하게 한다.
  */
 function parseFilter(
-  searchParams: AnalyticsPageProps['searchParams'],
+  searchParams: AnalyticsSearchParams,
   effectiveMonth: string,
 ): AnalyticsFilterForm {
   const validGroupBys: GroupByType[] = ['model', 'team', 'user'];
@@ -144,7 +147,8 @@ async function ModelCostSection({
   return data ? <ModelCostDetail data={data} /> : <ErrorState compact />;
 }
 
-export default async function AnalyticsPage({ searchParams }: AnalyticsPageProps) {
+export default async function AnalyticsPage(props: AnalyticsPageProps) {
+  const searchParams = await props.searchParams;
   const t = await getTranslations('analytics');
   // 월 데이터 소스 (대시보드와 동일: /admin/dashboard/periods).
   const { periods, latest } = await fetchAvailablePeriods();

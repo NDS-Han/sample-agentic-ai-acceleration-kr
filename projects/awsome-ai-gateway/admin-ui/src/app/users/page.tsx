@@ -20,11 +20,12 @@ function countOrgNodes(node: OrgTreeNode | null): Record<string, number> {
 }
 
 interface UsersPageProps {
-  // searchParams 는 sync 객체다(await 금지 — 다른 페이지와 같은 패턴).
-  searchParams: { from?: string; node?: string };
+  // Next 15 — searchParams 는 Promise(아래에서 await).
+  searchParams: Promise<{ from?: string; node?: string }>;
 }
 
-export default async function UsersPage({ searchParams }: UsersPageProps) {
+export default async function UsersPage(props: UsersPageProps) {
+  const searchParams = await props.searchParams;
   const t = await getTranslations('users');
   // /rate-limits → /users 리다이렉트로 온 경우, rate limit 이 어디로 갔는지
   // 안내한다 — 빈 트리만 던지면 "기능이 사라졌나" 혼란을 준다(리뷰 TOP-2).

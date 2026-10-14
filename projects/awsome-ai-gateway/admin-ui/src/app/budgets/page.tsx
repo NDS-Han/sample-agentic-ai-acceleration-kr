@@ -17,17 +17,18 @@ import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 interface BudgetsPageProps {
   // /users 패널의 "예산에서 편집" 딥링크 — ?team= 은 팀 행 펼침·스크롤,
   // ?user= 는 해당 유저의 예산 다이얼로그 자동 오픈(BudgetSummaryTable이 처리).
-  // searchParams 는 sync 객체다(await 금지 — 다른 페이지와 같은 패턴).
-  searchParams: { team?: string; user?: string };
+  // Next 15 — searchParams 는 Promise(아래에서 await).
+  searchParams: Promise<{ team?: string; user?: string }>;
 }
 
 const UUID_RE = /^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/;
 
-export default async function BudgetsPage({ searchParams }: BudgetsPageProps) {
+export default async function BudgetsPage(props: BudgetsPageProps) {
+  const searchParams = await props.searchParams;
   const t = await getTranslations('budgets');
   const focusTeam = searchParams.team && UUID_RE.test(searchParams.team) ? searchParams.team : undefined;
   const focusUser = searchParams.user && UUID_RE.test(searchParams.user) ? searchParams.user : undefined;
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const jwt = cookieStore.get('admin_jwt')?.value;
   const session = jwt ? parseJWT(jwt) : null;
   // IdP 토큰에는 role 클레임이 없다 — OIDC 로그인의 유효 역할은 콜백이

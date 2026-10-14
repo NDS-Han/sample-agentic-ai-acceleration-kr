@@ -346,13 +346,14 @@ async function ClientDistribution({ period }: { period: string }) {
 
 const ALLOWED_CLIENTS = ['all', 'claude-code', 'cowork', 'codex', 'other'];
 
-export default async function DashboardPage({
-  searchParams,
-}: {
-  searchParams: { period?: string; client?: string };
-}) {
+export default async function DashboardPage(
+  props: {
+    searchParams: Promise<{ period?: string; client?: string }>;
+  }
+) {
+  const searchParams = await props.searchParams;
   // 기간 해석은 한 번만. ?period 가 데이터 있는 월이면 존중, 아니면 latest(데이터
-  // 있는 가장 최근 월)로. Next 14.2.29 — searchParams 는 sync 객체(await 금지).
+  // 있는 가장 최근 월)로. Next 15 — searchParams 는 Promise(위에서 await).
   const { periods, latest } = await fetchAvailablePeriods();
   const requested = searchParams?.period;
   const period = requested && periods.includes(requested) ? requested : latest;

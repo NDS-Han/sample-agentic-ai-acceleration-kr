@@ -10,6 +10,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { redirectRelative } from '@/lib/redirect';
 import { secureCookieFlag } from '@/lib/cookies';
+import { readBoundedBody } from '@/lib/utils/requestBody';
 import { UserRole } from '@/types/enums';
 
 const DEV_COOKIE_MAX_AGE = 60 * 60 * 24; // 24 hours in seconds
@@ -135,13 +136,16 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   let role: string | null = null;
 
   try {
+    // dev 전용이지만 body 상한은 동일하게 — 무제한 text()/json() 은 이 라우트가
+    // 켜진 환경에서 그대로 메모리 DoS 이다(R17-M2 동일 표면).
+    const bounded = await readBoundedBody(request, 4 * 1024);
+    if (!bounded.ok) return bounded.response as NextResponse;
     const contentType = request.headers.get('content-type') ?? '';
     if (contentType.includes('application/x-www-form-urlencoded')) {
-      const text = await request.text();
-      const params = new URLSearchParams(text);
+      const params = new URLSearchParams(bounded.text);
       role = params.get('role');
     } else {
-      const body = (await request.json()) as { role?: string };
+      const body = JSON.parse(bounded.text || '{}') as { role?: string };
       role = body.role ?? null;
     }
   } catch {

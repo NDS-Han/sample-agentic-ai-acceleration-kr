@@ -5,7 +5,7 @@ import { cookies } from 'next/headers';
 import { resolveLocale } from './locale';
 
 export default getRequestConfig(async () => {
-  const cookieStore = cookies();
+  const cookieStore = await cookies();
   const locale = resolveLocale(cookieStore.get('locale')?.value);
 
   return {
