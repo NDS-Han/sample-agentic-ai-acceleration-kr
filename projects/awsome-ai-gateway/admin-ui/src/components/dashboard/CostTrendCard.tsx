@@ -120,7 +120,9 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
   };
 
   return (
-    <div className="glass glass-hover rounded-apple p-5">
+    // h-full + flex-col: 대시보드 그리드에서 옆 카드(모델 점유율) 높이까지 늘어날 때
+    // 늘어난 높이를 차트가 채우도록 — 카드 하단에 빈 밴드가 생기지 않는다.
+    <div className="glass glass-hover flex h-full flex-col rounded-apple p-5">
       <div className="text-sm font-semibold tracking-tight">{t('costTrendTitle')}</div>
       <div className="mb-3 text-xs text-muted-foreground">{t('costTrendSubtitle')}</div>
 
@@ -160,8 +162,10 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
         // recharts 는 SVG에 클릭/포커스 시 접근성용 포커스 링을 기본 표시한다.
         // 이 카드는 클릭 인터랙션이 없으므로(툴팁은 hover 로 충분) 시각적 잔상만
         // 남기지 않도록 아웃라인을 제거한다.
-        <div className="[&_.recharts-wrapper]:outline-none [&_.recharts-wrapper_*]:outline-none [&_svg]:outline-none">
-        <ResponsiveContainer width="100%" height={hasTeamSeries ? 232 : 200}>
+        // flex-1 로 카드 남은 높이를 전부 차지 — 옆 도넛 카드에 맞춰 늘어난 만큼
+        // 차트가 같이 커진다. 단독 배치(분석 페이지)에서는 min-h 만큼만 잡힌다.
+        <div className={`flex-1 [&_.recharts-wrapper]:outline-none [&_.recharts-wrapper_*]:outline-none [&_svg]:outline-none ${hasTeamSeries ? 'min-h-[232px]' : 'min-h-[200px]'}`}>
+        <ResponsiveContainer width="100%" height="100%">
           <ComposedChart data={data} margin={{ top: 8, right: 8, left: -8, bottom: 0 }}>
             <defs>
               <linearGradient id="costFill" x1="0" y1="0" x2="0" y2="1">
@@ -208,41 +212,40 @@ export function CostTrendCard({ trends, trendsByTeam = [] }: CostTrendCardProps)
                 wrapperStyle={{ fontSize: '11px', paddingTop: '6px' }}
               />
             )}
+            {/* type=linear + connectNulls 미설정: 실측이 없는 날은 곡선 보간도,
+                gap 잇기도 하지 않는다 — 사용량이 없는 날짜는 있는 그대로 비어 보인다. */}
             <Area
               yAxisId="cost"
-              type="monotone"
+              type="linear"
               dataKey="total"
               name={t('costSeriesTotal')}
               stroke="hsl(var(--chart-1))"
               strokeWidth={3}
               fill="url(#costFill)"
-              connectNulls
             />
             {series.map((s) => (
               <Line
                 key={s.dataKey}
                 yAxisId="cost"
-                type="monotone"
+                type="linear"
                 dataKey={s.dataKey}
                 name={s.name}
                 stroke={s.color}
                 strokeWidth={1.8}
                 strokeDasharray={s.dash}
                 dot={false}
-                connectNulls
               />
             ))}
             {showOther && (
               <Line
                 yAxisId="cost"
-                type="monotone"
+                type="linear"
                 dataKey="other"
                 name={t('costSeriesOther')}
                 stroke="hsl(var(--muted-foreground))"
                 strokeWidth={1.8}
                 strokeDasharray="2 4"
                 dot={false}
-                connectNulls
               />
             )}
           </ComposedChart>

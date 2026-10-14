@@ -10,7 +10,7 @@
  * 규칙:
  *  - 날짜 축 = 합계 + 모든 팀 포인트의 날짜 합집합(오름차순). 어느 시리즈든
  *    그 날짜에 포인트가 없으면 null — 0 으로 접으면 "그날 비용 0" 이라는 거짓
- *    사실이 되므로 차트에서 끊어 그린다(recharts connectNulls / Chart.js spanGaps).
+ *    사실이 되므로 차트에서 끊어 그린다(recharts 는 connectNulls 미설정 = gap).
  *  - selectedIds 에 든 팀만 개별 시리즈. 나머지 팀은 날짜별 합산 'other'
  *    시리즈 하나로 접는다 — 꺼둔 팀의 비용이 화면에서 사라지지 않는다.
  *  - 합계 시리즈는 trends 값 그대로 — 팀 시리즈 합산으로 재계산하지 않는다.
@@ -147,7 +147,20 @@ export function buildTrendSeries(
     allTeams,
     other:
       off.length > 0
-        ? dates.map((d) => off.reduce((s, tt) => s + (tt.byDate.get(d) ?? 0), 0))
+        ? dates.map((d) => {
+            // 꺼진 팀 전원이 그 날짜에 포인트가 없으면 0 이 아니라 null —
+            // '기타' 선도 실측이 없는 날에 가짜 0 을 긋지 않는다.
+            let sum = 0;
+            let hit = false;
+            for (const tt of off) {
+              const v = tt.byDate.get(d);
+              if (v !== undefined) {
+                sum += v;
+                hit = true;
+              }
+            }
+            return hit ? sum : null;
+          })
         : null,
     hasTeamSeries: ranked.length > 0,
   };
