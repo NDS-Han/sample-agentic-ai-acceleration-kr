@@ -283,6 +283,64 @@ async def test_bedrock_stream_gen_converts_exception_members_to_error_events():
 
 
 @pytest.mark.asyncio
+async def test_bedrock_stream_gen_converts_eventstream_error_to_error_event():
+    """botocore 는 미드스트림 예외 프레임을 EventStreamError(=ClientError)로
+    raise 한다 — dict 멤버가 아니므로, catch 없으면 스트림이 에러 신호 없이
+    잘긴다(R16-V5-M1)."""
+    from botocore.exceptions import ClientError
+
+    from app.providers.bedrock_adapter import BedrockAdapter
+
+    def bad_iter():
+        yield {"chunk": {"bytes": b'{"type":"message_start"}'}}
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "modelStreamErrorException",
+                    "Message": "boom arn:aws:bedrock:us-east-1:123456789012:model/x",
+                }
+            },
+            "InvokeModelWithResponseStream",
+        )
+
+    adapter = BedrockAdapter(MagicMock())
+    received = [c async for c in adapter._bedrock_stream_gen(bad_iter())]
+    assert len(received) == 2
+    err = json.loads(received[1])
+    assert err["type"] == "error"
+    assert err["error"]["type"] == "modelStreamErrorException"
+    assert "arn:aws" not in err["error"]["message"]
+    assert "123456789012" not in err["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_converse_stream_gen_converts_eventstream_error_to_union_member():
+    """converse-stream 은 예외를 유니온 멤버 모양 {code: {message}} 로 합성한다."""
+    from botocore.exceptions import ClientError
+
+    from app.providers.bedrock_adapter import BedrockAdapter
+
+    def bad_iter():
+        yield {"messageStart": {"role": "assistant"}}
+        raise ClientError(
+            {
+                "Error": {
+                    "Code": "throttlingException",
+                    "Message": "slow down arn:aws:x:123456789012",
+                }
+            },
+            "ConverseStream",
+        )
+
+    adapter = BedrockAdapter(MagicMock())
+    received = [c async for c in adapter._converse_stream_gen(bad_iter())]
+    assert len(received) == 2
+    payload = json.loads(received[1])
+    assert "throttlingException" in payload
+    assert "arn:aws" not in payload["throttlingException"]["message"]
+
+
+@pytest.mark.asyncio
 async def test_bedrock_stream_gen_skips_non_chunk_non_error_members():
     """metadata 같은 비오류 비-chunk 멤버는 기존처럼 건너뛴다."""
     from app.providers.bedrock_adapter import BedrockAdapter

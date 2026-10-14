@@ -37,7 +37,9 @@ async def _require_internal_token(request: Request) -> None:
     if not expected:
         raise HTTPException(status_code=403, detail="Internal endpoint disabled")
     provided = request.headers.get("x-internal-token", "")
-    if not hmac.compare_digest(provided, expected):
+    # bytes 로 비교 — str 끼리는 비-ASCII 포함 시 TypeError → 500 이 된다
+    # (R16). 바이트 비교는 어떤 입력도 False 로 안전하게 거절한다.
+    if not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Invalid internal token")
 
 
@@ -50,7 +52,9 @@ async def _require_admin_or_internal(request: Request) -> None:
     settings = get_settings()
     expected = settings.INTERNAL_API_TOKEN
     provided = request.headers.get("x-internal-token", "")
-    if expected and hmac.compare_digest(provided, expected):
+    if expected and hmac.compare_digest(
+        provided.encode("utf-8"), expected.encode("utf-8")
+    ):
         return
     user = await get_current_user(request)
     if user.role != UserRole.ADMIN:

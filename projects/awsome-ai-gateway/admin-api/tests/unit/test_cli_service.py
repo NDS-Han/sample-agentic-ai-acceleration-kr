@@ -282,10 +282,14 @@ class TestAwsAccountCheck:
             with pytest.raises(ForbiddenError, match="999888777"):
                 await cli_service.verify_sts_and_issue_key(mock_session, data=data)
 
-    async def test_empty_account_list_preserves_legacy_behavior(
+    async def test_empty_account_list_rejects(
         self, cli_service: CLIService, mock_session: AsyncMock
     ):
-        """ALLOWED_AWS_ACCOUNTS 비어 있으면 계정 검사 미적용(하위호환)."""
+        """R16: ALLOWED_AWS_ACCOUNTS 빈 리스트는 fail-closed — 계정 무관 VK 거부.
+
+        과거엔 "비어 있으면 미적용(하위호환)" 이라 설정 누락 배포가 임의 AWS
+        계정에 VK + 자동 프로비저닝을 열어줬다.
+        """
         data = VirtualKeyIssueRequest(
             sts_request=STSRequestPayload(
                 url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
@@ -317,17 +321,86 @@ class TestAwsAccountCheck:
             mock_client.__aexit__ = AsyncMock()
             mock_httpx.AsyncClient.return_value = mock_client
 
-            with patch("app.services.cli_service.UserRepository") as MockUserRepo, \
-                 patch("app.services.cli_service.BudgetRepository") as MockBudgetRepo:
-                user = MagicMock(spec=User)
-                user.id = uuid.uuid4()
-                user.email = "user@corp.com"
-                user.role = UserRole.DEVELOPER
-                user.team_id = uuid.UUID(settings.DEFAULT_TEAM_ID)
-                user.is_active = True
-                MockUserRepo.return_value.get_by_sso_subject = AsyncMock(return_value=user)
-                MockBudgetRepo.return_value.get_first_active_config = AsyncMock(return_value=None)
+            with pytest.raises(ForbiddenError, match="allowlist is empty"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
 
-                result = await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+    async def test_iam_user_rejected_when_role_allowlist_set(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """R16: ALLOWED_IAM_ROLES 설정 시 IAM user ARN 은 role 검사 우회로 거부."""
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={"Authorization": "AWS4-HMAC-SHA256 ..."},
+            ),
+            device_name="test",
+        )
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:iam::123456789:user/mallory</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
 
-        assert result.user_id == str(user.id)
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = ["AllowedRole"]
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+            settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
+            settings.DEFAULT_USER_BUDGET_USD = 100.0
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with pytest.raises(ForbiddenError, match="IAM user"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)
+
+    async def test_empty_role_list_rejects(
+        self, cli_service: CLIService, mock_session: AsyncMock
+    ):
+        """R16-M2: ALLOWED_IAM_ROLES 빈 리스트도 fail-closed.
+
+        과거엔 `if settings.ALLOWED_IAM_ROLES:` 가드 하나라 비어 있으면 역할
+        검사·IAM-user 거부가 통째로 스킵돼 허용 계정 안의 임의 assumed-role
+        (EC2/Lambda/CI role)이나 IAM user 가 VK 를 발급받을 수 있었다.
+        """
+        data = VirtualKeyIssueRequest(
+            sts_request=STSRequestPayload(
+                url="https://sts.amazonaws.com/?Action=GetCallerIdentity",
+                headers={"Authorization": "AWS4-HMAC-SHA256 ..."},
+            ),
+            device_name="test",
+        )
+        sts_xml = """<GetCallerIdentityResponse xmlns="https://sts.amazonaws.com/doc/2011-06-15/">
+            <GetCallerIdentityResult>
+                <Arn>arn:aws:sts::123456789:assumed-role/AnyRole/user@corp.com</Arn>
+            </GetCallerIdentityResult>
+        </GetCallerIdentityResponse>"""
+
+        with patch("app.services.cli_service.get_settings") as mock_settings, \
+             patch("app.services.cli_service.httpx") as mock_httpx:
+            settings = mock_settings.return_value
+            settings.ALLOWED_STS_REGIONS = ["ap-northeast-2"]
+            settings.ALLOWED_IAM_ROLES = []
+            settings.ALLOWED_AWS_ACCOUNTS = ["123456789"]
+            settings.DEFAULT_TEAM_ID = str(uuid.uuid4())
+            settings.DEFAULT_USER_BUDGET_USD = 100.0
+
+            mock_resp = MagicMock()
+            mock_resp.status_code = 200
+            mock_resp.text = sts_xml
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock()
+            mock_httpx.AsyncClient.return_value = mock_client
+
+            with pytest.raises(ForbiddenError, match="allowlist is empty"):
+                await cli_service.verify_sts_and_issue_key(mock_session, data=data)

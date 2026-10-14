@@ -357,6 +357,12 @@ class DowngradeMiddleware:
 
 
 async def _drain_body(receive: Receive) -> bytes:
+    """본문을 끝까지 읽는다. 중간 disconnect 는 예외로 전파한다 — 흡수하면
+    잘린 접두사가 _replay 에서 완전 본문(more_body=False)으로 위장돼,
+    MaxBodySizeMiddleware 의 상한 거부(disconnect 합성)나 실제 업로드 중단
+    요청이 잘린 채 처리·과금된다(R16 V3-S1)."""
+    from starlette.requests import ClientDisconnect
+
     chunks: list[bytes] = []
     while True:
         message = await receive()
@@ -365,8 +371,7 @@ async def _drain_body(receive: Receive) -> bytes:
             if not message.get("more_body", False):
                 break
         else:
-            # disconnect 등은 그대로 흡수
-            break
+            raise ClientDisconnect()
     return b"".join(chunks)
 
 

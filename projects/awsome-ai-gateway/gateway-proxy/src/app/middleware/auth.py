@@ -33,7 +33,6 @@ class AuthMiddleware:
 
         path: str = scope.get("path", "")
         state = scope.setdefault("state", {})
-        degradation_manager = state.get("degradation_manager") or scope.get("app", {})
 
         # 인증 면제 경로
         if path in EXEMPT_PATHS:
@@ -81,7 +80,8 @@ class AuthMiddleware:
         # 뒤(SSE 스트림 중)에는 어떤 에러도 두 번째 http.response.start 를 쓸 수
         # 없으므로, 아래 모든 except 절은 이 플래그로 "응답 작성"과 "재전파"를
         # 결정한다. 라우터의 의도된 PermissionError 거부(모델/클라이언트 ACL)는
-        # 응답 전에만 발생하므로 401 계약은 그대로 보존된다.
+        # 전부 라우터 내부에서 로컬 처리되므로 여기까지 올라오는 동종 예외는
+        # 라우터 버그로 간주해 재전파한다(401 위조 금지, 아래 except 참조).
         response_started = False
 
         async def send_tracking(message):
@@ -122,7 +122,10 @@ class AuthMiddleware:
             return
 
         except (PermissionError, ValueError) as e:
-            if response_started:
+            # auth_context 가 채워진 뒤의 예외는 inner app(라우터) 버그다 —
+            # 자격증명 거부가 아니므로 401+security 이벤트로 위조하면 안 된다
+            # (R16: 다운스트림 ValueError 가 401 + forged auth_failure 로 기록됐다).
+            if response_started or state.get("auth_context") is not None:
                 raise
             await self._handle_auth_failure(scope, send, state, path, e)
 

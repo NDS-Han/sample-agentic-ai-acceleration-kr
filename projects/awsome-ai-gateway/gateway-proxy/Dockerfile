@@ -36,5 +36,8 @@ EXPOSE 8000
 # ⚠️ 워커 수는 WORKERS env 로 제어(chart values 에서 환경별 조정). exec-form
 # CMD ["...","--workers","4"] 는 env 확장이 안 돼 chart 의 WORKERS 설정이 죽은
 # 설정이 됐었음 → shell-form + ${WORKERS:-4} 로 살림(미설정 시 기본 4 = 무회귀).
+# config.Settings.uvicorn_workers 도 같은 우선순위(WORKERS→UVICORN_WORKERS→4)를
+# 쓰므로 레거시 env 만 잡힌 배포에서도 실제 워커 수와 rate-limit divisor 가
+# 어긋나지 않게 둘 다 본다(R16-V5).
 # Fargate 0.5 vCPU 에서 4워커 = 워커당 0.125 vCPU CPU 기아 → values 에서 1~2 권장.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-4}"]
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers ${WORKERS:-${UVICORN_WORKERS:-4}}"]

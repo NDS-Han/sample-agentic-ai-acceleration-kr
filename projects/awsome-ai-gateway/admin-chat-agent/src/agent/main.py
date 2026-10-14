@@ -250,7 +250,10 @@ def get_schema(table_name: str | None = None) -> dict:
     import boto3
 
     client = boto3.client("lambda")
-    fn = os.environ.get("LAMBDA_GET_SCHEMA", "llm-gateway-prod-chat-agent-get-schema")
+    # query_db 와 같은 이유 — prod 함수명 기본값은 dev→prod 혼선이라 명시를 요구.
+    fn = os.environ.get("LAMBDA_GET_SCHEMA")
+    if not fn:
+        return {"error": "get_schema not configured (LAMBDA_GET_SCHEMA unset)"}
     response = client.invoke(
         FunctionName=fn,
         Payload=json.dumps({"table_name": table_name}).encode(),
@@ -269,7 +272,11 @@ def query_db(sql: str, session_id: str = "", step_id: str = "") -> dict:
     import boto3
 
     client = boto3.client("lambda")
-    fn = os.environ.get("LAMBDA_QUERY_DB", "llm-gateway-prod-chat-agent-query-db")
+    # 기본값을 prod 함수명으로 두면 env 누락 dev/dev-외 환경이 **prod** Lambda 를
+    # 호출한다 — 환경 간 경계를 넘는 조용한 실수라 기본값 없이 명시를 요구한다(R16).
+    fn = os.environ.get("LAMBDA_QUERY_DB")
+    if not fn:
+        return {"error": "query_db not configured (LAMBDA_QUERY_DB unset)"}
     response = client.invoke(
         FunctionName=fn,
         Payload=json.dumps(

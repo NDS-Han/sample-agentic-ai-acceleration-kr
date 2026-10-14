@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
 from app.repositories._cursor import encode_cursor
@@ -426,9 +427,30 @@ async def sync_cognito(
         "cognito-idp", region_name=settings.COGNITO_REGION
     )
     svc = CognitoSyncService(
-        cognito_client, key_service=request.app.state.key_service
+        cognito_client,
+        key_service=request.app.state.key_service,
+        cache_mgr=request.app.state.cache_mgr,
     )
     result = await svc.sync_all(session)
+
+    # R16: 전체 Cognito sync 는 대량 생성/비활성화를 하는데 audit_logs 행이 없었다.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="COGNITO_SYNC_ALL",
+        resource_type="CognitoSync",
+        resource_id="all",
+        changes={"result": {
+            "groups_synced": result.groups_synced,
+            "users_created": result.users_created,
+            "users_updated": result.users_updated,
+            "users_deactivated": result.users_deactivated,
+            "teams_deleted": result.teams_deleted,
+        }},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
 
     return {
         "groups_synced": result.groups_synced,
@@ -440,13 +462,14 @@ async def sync_cognito(
     }
 
 
-def _build_cognito_sync_service(key_service=None):
+def _build_cognito_sync_service(key_service=None, cache_mgr=None):
     """COGNITO_USER_POOL_ID 확인 + boto3 cognito client 로 CognitoSyncService 생성.
 
     미설정 시 ``HTTPException(400)`` 을 raise 한다.
 
-    ``key_service`` 는 비활성화 시 VK 폐기(R3-3)에 필요 — 호출부는
-    ``request.app.state.key_service`` 를 넘겨야 한다.
+    ``key_service`` 는 비활성화 시 VK 폐기(R3-3)에, ``cache_mgr`` 는 팀 이관 시
+    VK·user_context·예산 캐시 무효화(R16)에 필요 — 호출부는
+    ``request.app.state.key_service`` / ``request.app.state.cache_mgr`` 를 넘긴다.
 
     ⚠️ 예전엔 ``(None, error_dict)`` 2-튜플을 돌려주고 호출부가
     ``return JSONResponse(status_code=400, content=err)`` 를 했다. 직접 만든 응답은 어떤
@@ -462,7 +485,7 @@ def _build_cognito_sync_service(key_service=None):
         raise HTTPException(status_code=400, detail="COGNITO_USER_POOL_ID not configured")
     import boto3
     client = boto3.client("cognito-idp", region_name=settings.COGNITO_REGION)
-    return CognitoSyncService(client, key_service=key_service)
+    return CognitoSyncService(client, key_service=key_service, cache_mgr=cache_mgr)
 
 
 @router.post("/users/sync-cognito/user/{username}")
@@ -481,8 +504,26 @@ async def sync_cognito_user(
     동기 처리(단일 사용자 ~sub-second). 전역 reconciliation 미수행.
     svc- 서비스 토큰 또는 admin JWT 로 호출 가능(require_admin).
     """
-    svc = _build_cognito_sync_service(request.app.state.key_service)
+    svc = _build_cognito_sync_service(
+        request.app.state.key_service, request.app.state.cache_mgr
+    )
     result = await svc.sync_user(session, username)
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="COGNITO_SYNC_USER",
+        resource_type="CognitoSync",
+        resource_id=username,
+        changes={"result": {
+            "user_id": result.user_id,
+            "users_created": result.users_created,
+            "users_updated": result.users_updated,
+            "users_deactivated": result.users_deactivated,
+        }},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
     return {
         "username": username,
         "user_id": result.user_id,
@@ -496,12 +537,32 @@ async def sync_cognito_user(
 @router.post("/users/sync-cognito/group/{groupname:path}")
 async def sync_cognito_group(
     groupname: str,
+    request: Request,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """단일 그룹만 동기화: 팀 확보 + 그 그룹 멤버 upsert. 전역 정리 미수행."""
-    svc = _build_cognito_sync_service()
+    # key_service 주입 — 빠지면 그룹 sync 로 비활성화된 사용자의 VK 가 폐기되지
+    # 않고 계속 살아있었다(R16; 전역/단일 sync 경로는 이미 주입하고 있었다).
+    svc = _build_cognito_sync_service(
+        request.app.state.key_service, request.app.state.cache_mgr
+    )
     result = await svc.sync_group(session, groupname)
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="COGNITO_SYNC_GROUP",
+        resource_type="CognitoSync",
+        resource_id=groupname,
+        changes={"result": {
+            "groups_synced": result.groups_synced,
+            "users_created": result.users_created,
+            "users_updated": result.users_updated,
+        }},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
     return {
         "groupname": groupname,
         "groups_synced": result.groups_synced,
@@ -591,6 +652,18 @@ async def set_allowed_clients(
     # 커밋 **후** 무효화 — DEL→commit 창에 들어온 게이트웨이 요청이 옛(느슨한) 정책을
     # 다시 캐시하면 안 된다. allowed-models 경로와 같은 순서다(:494).
     await svc.invalidate_user_vk_cache(user_id)
+    # R16: per-user allowed clients 도 감사 대상 — 개인 앱 접근 제어 변경.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="SET_USER_ALLOWED_CLIENTS",
+        resource_type="UserAllowedClients",
+        resource_id=str(user_id),
+        changes={"after": {"clients": clients}},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
 
@@ -610,6 +683,16 @@ async def clear_allowed_clients(
     await session.commit()
     # 커밋 후 무효화 — set 경로와 같은 이유.
     await svc.invalidate_user_vk_cache(user_id)
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="CLEAR_USER_ALLOWED_CLIENTS",
+        resource_type="UserAllowedClients",
+        resource_id=str(user_id),
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
 
 
 # ── per-USER model allow-list (overrides team_allowed_models) ────────────────

@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from sqlalchemy import and_, exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.clients import VALID_CLIENTS as _VALID_CLIENTS
 from app.core.db import get_db_session
@@ -373,6 +374,20 @@ async def set_default_model(
         actor=str(admin.user_id),
     )
 
+    # R16: 앱 기본모델 변경도 감사 대상 — 클라이언트 전체 라우팅을 바꾼다.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="SET_APP_DEFAULT_MODEL",
+        resource_type="RoutingProfile",
+        resource_id=client,
+        changes={"before": {"default_model": current_default_alias},
+                 "after": {"default_model": body.default_model}},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
+
     # Return updated policy view (re-read from DB for consistency)
     return await _build_app_policy(session, client)
 
@@ -425,6 +440,20 @@ async def toggle_app_model(
         alias=body.alias,
         allowed=body.allowed,
         result=model.allowed_clients,
+    )
+
+    # R16: 앱별 모델 허용 목록 변경도 감사 대상 — 접근 제어 변경이다.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="TOGGLE_APP_MODEL",
+        resource_type="ModelAlias",
+        resource_id=body.alias,
+        changes={"after": {"client": client, "allowed": body.allowed,
+                           "allowed_clients": model.allowed_clients}},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
     )
 
     return await _build_app_policy(session, client)

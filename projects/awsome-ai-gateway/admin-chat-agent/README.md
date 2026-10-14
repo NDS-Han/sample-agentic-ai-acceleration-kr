@@ -68,6 +68,10 @@ ROLE_ARN=$(terraform -chdir=../deployment/terraform/environments/llm-gateway-$EN
     output -raw chat_agent_execution_role_arn)
 NAME=$(terraform -chdir=... output -raw chat_agent_name | tr '-' '_')
 STAGING=$(terraform -chdir=... output -raw chat_agent_staging_bucket)
+# BI 도구 Lambda 이름 — query_db/get_schema 코드는 env 가 없으면 미설정
+# 오류를 반환한다(과거엔 prod 함수명 기본값이라 dev→prod 혼선이 있었다).
+QUERY_DB=$(terraform -chdir=... output -raw chat_agent_query_db_function)
+GET_SCHEMA=$(terraform -chdir=... output -raw chat_agent_get_schema_function)
 
 cat > /tmp/create.json <<JSON
 {
@@ -80,7 +84,9 @@ cat > /tmp/create.json <<JSON
     "MODEL_OPUS": "global.anthropic.claude-opus-4-7",
     "MODEL_SONNET": "global.anthropic.claude-sonnet-4-6",
     "MODEL_HAIKU": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "CHAT_STAGING_BUCKET": "$STAGING"
+    "CHAT_STAGING_BUCKET": "$STAGING",
+    "LAMBDA_QUERY_DB": "$QUERY_DB",
+    "LAMBDA_GET_SCHEMA": "$GET_SCHEMA"
   }
 }
 JSON

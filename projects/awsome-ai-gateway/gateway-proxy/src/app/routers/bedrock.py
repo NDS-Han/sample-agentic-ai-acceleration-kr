@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import json
 import time
 
@@ -19,6 +20,12 @@ from app.observability.provider_metrics import (
 from sqlalchemy.exc import DBAPIError
 
 from app.schemas.domain import ProviderType, TokenUsage
+from app.services.body_log_records import (
+    build_body_record_for_nonstream,
+    build_body_record_for_stream,
+    provider_name,
+    resolve_body_logger,
+)
 from app.services.fallback_loop import (
     release_reservations,
     unsettled_reservation_guard,
@@ -112,6 +119,15 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
         return
 
     if path_suffix == "converse-stream":
+        # 유니온의 예외 멤버(internalServerException·modelStreamErrorException·
+        # throttlingException·modelTimeoutException…)나 어댑터가 EventStreamError
+        # 를 {code:{message}} 로 합성한 프레임 — usage 가 아니라 outcome 실패
+        # 마킹 대상이다(R16-V6-MF1: 프레임을 그대로 흘려보내도 상태가 SUCCESS
+        # 로 기록되던 회귀).
+        for key in data:
+            if key.endswith("Exception"):
+                state["error_type"] = key
+                return
         usage = (data.get("metadata") or {}).get("usage")
         if isinstance(usage, dict) and usage:
             state["input_tokens"] = usage.get("inputTokens", 0)
@@ -123,6 +139,12 @@ def _scan_bedrock_stream_chunk(chunk: bytes, path_suffix: str, state: dict) -> N
 
     # invoke-with-response-stream — Anthropic 이벤트 JSON
     ev_type = data.get("type")
+    if ev_type == "error":
+        # 어댑터 합성/Anthropic 네이티브 에러 이벤트 — outcome 실패 마킹 대상.
+        state["error_type"] = (
+            (data.get("error") or {}).get("type") or "stream_error"
+        )
+        return
     if ev_type == "message_start":
         u = (data.get("message") or {}).get("usage") or {}
         state["input_tokens"] = u.get("input_tokens", 0)
@@ -251,6 +273,46 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
 
     body = await _get_request_body(request)
 
+    # R16: `/model/*` 패스스루도 본문 감사 대상 — 이 라우터만 body-log 배선이
+    # 없어 토글을 켜도 요청/응답 본문이 기록되지 않았다(감사 구멍). 스트림은
+    # 전달 중 텍스트를 누적하므로 **디스패치 전**에 게이트를 연다 — 스트림이
+    # 시작된 뒤 물어보면 누적 자체를 놓친다(messages.py 의 사전 게이트와 같은
+    # 이유).
+    _bl = await resolve_body_logger(request.app.state, redis, session_factory)
+    _log_parts: list[str] | None = [] if _bl is not None else None
+
+    async def _enqueue_body_log(log_status: str, resp_body: bytes | None = None) -> None:
+        if _bl is None:
+            return
+        _identity = dict(
+            provider=provider_name(model_config),
+            client=state.get("client"),
+            model_alias=model_config.alias or model_config.provider_model_id,
+            request_body=body,
+            user_id=auth_context.user_id if auth_context else None,
+            team_id=auth_context.team_id if auth_context else None,
+            sso_subject=auth_context.sso_subject if auth_context else None,
+        )
+        if stream:
+            await _bl.enqueue(
+                build_body_record_for_stream(
+                    request_id=request_id,
+                    status=log_status,
+                    sse_text="".join(_log_parts or []),
+                    **_identity,
+                )
+            )
+        else:
+            await _bl.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    status_code=log_status,
+                    response_body=resp_body or b"",
+                    is_streaming=False,
+                    **_identity,
+                )
+            )
+
     # 요청 바디 1회 파싱 — rate-limit 예상 추정과 1h 캐시 TTL 신호(A2-3) 둘 다 쓴다.
     import json as _json
 
@@ -321,6 +383,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             # 예약을 되돌린 뒤 재던진다 — 스트림이 시작되지 못했으므로 정산할 usage 가
             # 영원히 오지 않는다.
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            # 디스패치 자체가 실패해도 요청 본문은 남긴다(감사 계약: 1요청=1레코드).
+            await _enqueue_body_log("error")
             raise
 
         async def stream_with_cost():
@@ -359,12 +423,28 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             # 요청 종결 상태 — _fire_finalize 가 usage_logs.status 로 옮긴다(E2E S5).
             outcome: dict = {}
             state["_stream_outcome"] = outcome
+            # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 U+FFFD 로 깨지지
+            # 않게 — streaming.py 의 다른 로깅 경로와 같은 방식이다(R16).
+            _log_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
             def _scan(chunk: bytes) -> None:
                 nonlocal usage, first_token_time
                 if first_token_time is None:
                     first_token_time = time.monotonic()
+                if _log_parts is not None:
+                    _log_parts.append(_log_decoder.decode(chunk))
                 _scan_bedrock_stream_chunk(chunk, path_suffix, bedrock_usage)
+                # 미드스트림 에러 프레임(invoke error 이벤트/converse 예외 멤버/
+                # 어댑터 합성)이 관측되면 종결 판정을 실패로 — 없으면 상류 에러가
+                # SUCCESS 로 기록되는 회귀가 된다(R16-V6-MF1).
+                err_type = bedrock_usage.get("error_type")
+                if err_type and "status" not in outcome:
+                    mark_outcome(
+                        outcome,
+                        "timeout"
+                        if err_type == "modelTimeoutException"
+                        else "error",
+                    )
                 if bedrock_usage.get("hit"):
                     usage = TokenUsage(
                         input_tokens=bedrock_usage.get("input_tokens", 0),
@@ -455,6 +535,11 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 finally:
                     await _fire_finalize()
                     await _aclose_iter(iterator)
+                    # disconnect 드레인 경로도 본문 레코드를 남긴다 — 정상 종료
+                    # finally 는 이미 지나갔으므로 여기가 마지막 enqueue 기회.
+                    await _enqueue_body_log(
+                        usage_status_of(outcome, status).lower()
+                    )
                     outcome.pop("drain_pending", None)
 
             try:
@@ -495,9 +580,14 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             finally:
                 if not client_disconnected:
                     await _fire_finalize()
+                    # enqueue 가 raise 하면 close 가 스킵돼 executor 스레드가 상류
+                    # 커넥션의 blocking next() 에 묶인다 — 닫기를 먼저(V5-SF).
                     # disconnect 면 드레인 태스크가 소유권을 갖고 자기 finally 에서
                     # 닫는다 — 여기서 닫으면 드레인이 죽은 이터레이터를 소비한다.
                     await _aclose_iter(iterator)
+                    await _enqueue_body_log(
+                        usage_status_of(outcome, status).lower()
+                    )
 
         if status >= 400:
             # 상류 거부 — 프롬프트가 소비되지 않았을 수 있으므로 추정 입력 과금만
@@ -524,6 +614,13 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         except Exception as e:
             record_provider_error(_pm, _pm_labels, status="exception", error_code=type(e).__name__)
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            await _enqueue_body_log(
+                502,
+                resp_body=json.dumps(
+                    {"error": {"type": "upstream_exception",
+                               "message": type(e).__name__}}
+                ).encode(),
+            )
             raise
         if status >= 400:
             # 예외가 아니라 상태코드로 실패가 오는 경우(어댑터가 응답을 그대로 넘긴다).
@@ -573,6 +670,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             #    이 라우트에는 폴백 루프가 없어 그쪽 unwind 도 돌지 않으므로, 여기서
             #    되돌리지 않으면 예약이 창(window) 끝까지 사용자 한도를 물고 있다.
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+        await _enqueue_body_log(status, resp_body=response_body)
         return JSONResponse(
             status_code=status,
             content=__import__("json").loads(response_body) if response_body else {},

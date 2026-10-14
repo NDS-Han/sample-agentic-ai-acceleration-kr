@@ -17,6 +17,8 @@ from botocore.exceptions import (
     EndpointConnectionError,
     ReadTimeoutError,
 )
+from urllib3.exceptions import ProtocolError as _U3ProtocolError
+from urllib3.exceptions import ReadTimeoutError as _U3ReadTimeoutError
 
 from app.providers.base import ATTEMPT_UNSETTLED_HEADER, ProviderAdapter
 from app.schemas.domain import TokenUsage
@@ -34,7 +36,11 @@ _ARN_RE = re.compile(
 
 
 def _redact_arns(text: str) -> str:
-    return _ARN_RE.sub("[redacted]", text)
+    # 전송 예외 문자열엔 ARN 이 URL 인코딩(arn%3Aaws%3A…)된 채 섞일 수 있다 —
+    # 디코드 후 치환해 추론프로파일명까지 가린다(R16-V6-N1).
+    from urllib.parse import unquote
+
+    return _ARN_RE.sub("[redacted]", unquote(text))
 
 
 # boto3 예외 → HTTP 상태 코드 매핑
@@ -432,7 +438,33 @@ class BedrockAdapter(ProviderAdapter):
 
         try:
             while True:
-                event = await loop.run_in_executor(_bedrock_executor, _next)
+                # ⚠️ botocore 는 미드스트림 **예외 프레임**(internalServerException /
+                #    modelStreamErrorException / throttlingException / modelTimeoutException)
+                #    을 EventStreamError(=ClientError) 로 *raise* 한다 — dict 멤버로
+                #    넘겨주지 않는다. catch 없이 두면 스트림이 에러 신호 없이 잘긴다.
+                try:
+                    event = await loop.run_in_executor(_bedrock_executor, _next)
+                except (
+                    ClientError,
+                    ConnectionClosedError,
+                    EndpointConnectionError,
+                    ReadTimeoutError,
+                    # 미드스트림 전송 실패는 botocore 예외로 감싸지지 않고 urllib3
+                    # 원형 그대로 올라온다(_raw_stream.stream() 경유) — 같이 잡지
+                    # 않으면 에러 프레임 없이 연결만 잘린다(R16-V6-SF1).
+                    _U3ProtocolError,
+                    _U3ReadTimeoutError,
+                ) as exc:
+                    err = getattr(exc, "response", {}).get("Error", {})
+                    code = err.get("Code") or "stream_error"
+                    msg = err.get("Message") or str(exc) or code
+                    yield json.dumps(
+                        {
+                            "type": "error",
+                            "error": {"type": code, "message": _redact_arns(msg)},
+                        }
+                    ).encode()
+                    return
                 if event is sentinel:
                     return
                 chunk = event.get("chunk", {})
@@ -484,7 +516,28 @@ class BedrockAdapter(ProviderAdapter):
 
         try:
             while True:
-                event = await loop.run_in_executor(_bedrock_executor, _next)
+                # converse-stream 유니온의 예외 멤버는 {"internalServerException": …}
+                # dict 로 오지만, 모델링되지 않은 예외 프레임은 EventStreamError 로
+                # raise 된다 — 유니온 모양 그대로 합성해 클라이언트에 흘려보낸다.
+                try:
+                    event = await loop.run_in_executor(_bedrock_executor, _next)
+                except (
+                    ClientError,
+                    ConnectionClosedError,
+                    EndpointConnectionError,
+                    ReadTimeoutError,
+                    # _bedrock_stream_gen 과 동일 — 래핑되지 않는 urllib3 전송
+                    # 예외도 유니온 모양 에러로 합성한다(R16-V6-SF1).
+                    _U3ProtocolError,
+                    _U3ReadTimeoutError,
+                ) as exc:
+                    err = getattr(exc, "response", {}).get("Error", {})
+                    code = err.get("Code") or "internalServerException"
+                    msg = err.get("Message") or str(exc) or code
+                    yield json.dumps(
+                        {code: {"message": _redact_arns(msg)}}
+                    ).encode()
+                    return
                 if event is sentinel:
                     return
                 yield json.dumps(event).encode()

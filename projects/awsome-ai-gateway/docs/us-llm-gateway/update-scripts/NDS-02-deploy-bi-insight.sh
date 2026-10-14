@@ -191,6 +191,24 @@ fi
 hdr "④ AgentCore Runtime 생성/갱신"
 RT_JSON=$(mktemp --suffix=.json)
 trap 'rm -f "$RT_JSON"' EXIT
+# BI 도구 Lambda 이름 — terraform output 에서 읽어 env 에 넣는다.
+# update-agent-runtime 은 environmentVariables 를 통째로 교체하므로 여기서
+# 빠뜨리면 agent 코드의 query_db/get_schema 가 미설정 오류로 죽는다(R16-MF1).
+# 이 스크립트 자체가 enable_chat_db_tools=true 를 강제하므로 output 이 비어 있으면
+# Lambda 가 아직 안 만들어진 것 — 조용히 넘기지 말고 실패시켜 apply 를 요구한다.
+LAMBDA_ENV_JSON=""
+QUERY_DB_FN=$(cd "$TF_DIR" && terraform output -raw chat_agent_query_db_function 2>/dev/null || true)
+GET_SCHEMA_FN=$(cd "$TF_DIR" && terraform output -raw chat_agent_get_schema_function 2>/dev/null || true)
+[ -n "$QUERY_DB_FN" ] || die "chat_agent_query_db_function output 없음 — $TF_DIR 에 enable_chat_db_tools=true 로 apply 후 재시도"
+[ -n "$GET_SCHEMA_FN" ] || die "chat_agent_get_schema_function output 없음 — $TF_DIR 에 enable_chat_db_tools=true 로 apply 후 재시도"
+# 조각 = ',<개행>    "K": "V"' 완결 쌍 — 앞의 '"' 로 버킷 문자열이 이미 닫혀 있으므로
+# 그대로 이어붙이면 유효한 JSON 멤버가 된다. 비어 있으면 JSON 도 그대로 유효.
+[ -n "$QUERY_DB_FN" ] && \
+  LAMBDA_ENV_JSON="${LAMBDA_ENV_JSON},
+    \"LAMBDA_QUERY_DB\": \"${QUERY_DB_FN}\""
+[ -n "$GET_SCHEMA_FN" ] && \
+  LAMBDA_ENV_JSON="${LAMBDA_ENV_JSON},
+    \"LAMBDA_GET_SCHEMA\": \"${GET_SCHEMA_FN}\""
 # create 와 update 는 식별자 키가 다르다 (agentRuntimeName vs agentRuntimeId) —
 # 공통 본문을 먼저 쓰고 앞에 식별자만 다르게 붙인다.
 RT_BODY='"agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "'"$ECR_REPO:$TAG"'"}},
@@ -201,7 +219,7 @@ RT_BODY='"agentRuntimeArtifact": {"containerConfiguration": {"containerUri": "'"
     "MODEL_OPUS": "global.anthropic.claude-opus-4-7",
     "MODEL_SONNET": "global.anthropic.claude-sonnet-4-6",
     "MODEL_HAIKU": "global.anthropic.claude-haiku-4-5-20251001-v1:0",
-    "CHAT_STAGING_BUCKET": "'"$STAGING"'"
+    "CHAT_STAGING_BUCKET": "'"$STAGING"'"'"$LAMBDA_ENV_JSON"'
   }'
 
 if [ -z "$RT_ID" ]; then
@@ -244,12 +262,15 @@ ok "invoke 정책 부여: $ADMIN_ROLE_NAME → $RT_ARN"
 
 hdr "⑥ values 주입"
 cp "$VALUES" "$VALUES.bak.$(date +%Y%m%d%H%M%S)"
-ARN="$RT_ARN" REGION="$AWS_REGION" BUCKET="$STAGING" yq -i '
+ARN="$RT_ARN" REGION="$AWS_REGION" BUCKET="$STAGING" \
+QDB_FN="$QUERY_DB_FN" GS_FN="$GET_SCHEMA_FN" yq -i '
   .adminApi.env.AGENTCORE_RUNTIME_ARN = strenv(ARN) |
   .adminApi.env.AGENTCORE_REGION = strenv(REGION) |
   .adminApi.env.CHAT_STAGING_BUCKET = strenv(BUCKET) |
+  .adminApi.env.LAMBDA_QUERY_DB = strenv(QDB_FN) |
+  .adminApi.env.LAMBDA_GET_SCHEMA = strenv(GS_FN) |
   .adminUi.env.CHAT_ENABLED = "true"' "$VALUES" || die "values 편집 실패"
-ok "values 갱신: AGENTCORE_RUNTIME_ARN·REGION·CHAT_STAGING_BUCKET + CHAT_ENABLED=true"
+ok "values 갱신: AGENTCORE_RUNTIME_ARN·REGION·CHAT_STAGING_BUCKET·LAMBDA_* + CHAT_ENABLED=true"
 
 echo
 ok "완료 — 변경분 반영: cd $REPO_ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"

@@ -66,6 +66,10 @@
 {{- if eq (len .Values.aws.allowedIamRoles) 0 }}
    ⚠ aws.allowedIamRoles 가 비어 있습니다. CLI 인증이 전부 거부됩니다 (FR-2.1a).
 {{- end }}
+{{- if eq (len .Values.aws.allowedAwsAccounts) 0 }}
+   ⚠ aws.allowedAwsAccounts 가 비어 있습니다. CLI VK 발급이 전부 거부됩니다 (fail-closed, R16).
+   --set "aws.allowedAwsAccounts={$(aws sts get-caller-identity --query Account --output text)}" 로 주입하세요.
+{{- end }}
 {{- if and (eq .Values.global.deploymentMode "eks-fargate") (eq (len .Values.gatewayProxy.serviceAccount.annotations) 0) }}
    ⚠ EKS Fargate 모드인데 gatewayProxy.serviceAccount.annotations 에 IRSA role-arn 이 없습니다.
 {{- end }}

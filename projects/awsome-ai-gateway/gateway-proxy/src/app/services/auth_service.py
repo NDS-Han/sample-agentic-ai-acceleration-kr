@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import time
 from typing import Protocol
 
 import jwt
@@ -21,7 +22,11 @@ from app.schemas.domain import AuthContext, AuthType, Role
 logger = structlog.get_logger(__name__)
 
 VK_CACHE_TTL = 300  # 5분
-JWT_KEY_CACHE_TTL = 3600  # 1시간
+# per-kid 캐시는 keyset 캐시(60s)를 우회하므로 그보다 길면 비활성화된 키가 최대
+# TTL 만큼 계속 유효하다(R16-V5). 재캐시는 keyset GET+검증이라 DB 를 치지 않는다.
+# ⚠️ 최악의 폐기 전파 지연은 ~2×TTL(≈120s): 폐기 직전 keyset 에서 캐시된 per-kid
+#    엔트리가 TTL 만큼 살고, 그 사이 keyset 자체도 최대 TTL 만큼 stale 하다.
+JWT_KEY_CACHE_TTL = 60
 
 
 class AuthBackendUnavailableError(PermissionError):
@@ -298,6 +303,82 @@ class VKAuthStrategy:
 class JWTAuthStrategy:
     """JWT 인증 (OpenAI 경로 /v1/*)."""
 
+    #: 활성 키 "세트" Redis 캐시 — TTL 자체가 클러스터 전체의 refresh 스로틀이다.
+    #: 캐시 미스(per-kid) 토큰은 이 세트로만 검증해 위조 kid 가 DB 를 전혀 치지
+    #: 않게 하고(무인증 DoS 증폭 차단), 세트 미스 시에만 DB 를 읽는다 — 워커 수와
+    #: 무관하게 DB 스캔은 TTL 당 최대 1회. 키 로테이션/비활성화가 반영되는 데
+    #: 최대 이 시간이 걸리는 것이 트레이드오프(기존 per-kid 1h 캐시보다 짧다).
+    _JWT_KEYSET_CACHE_KEY = "key:cache:jwt:keyset"
+    _JWT_KEYSET_CACHE_TTL = 60
+
+    def __init__(self) -> None:
+        # Redis 장애 시 쓰는 프로세스 로컬 keyset 사본 — (monotonic 시각, 레코드).
+        # "데이터" 캐시라 전역 스로틀과 달리 lockout 을 만들지 않는다: 위조 kid 는
+        # TTL 동안 DB 를 치지 않고, 정상 신키도 TTL 만료 후 재조회돼 통과한다.
+        self._local_keyset: tuple[float, list[dict]] | None = None
+
+    async def _get_active_keyset(
+        self, redis, db: AsyncSession | None
+    ) -> list[dict] | None:
+        """활성 JWT 키 세트 — Redis keyset 캐시 → 로컬 사본(TTL 내) → DB 순.
+
+        반환 None 은 "조회 수단 전무"(db=None 이고 캐시도 없거나, DB 장애 + 캐시
+        전무). DB 장애 시엔 **만료된** 로컬 사본이라도 반환한다 — 서명 검증은 캐시
+        데이터로 계속 가능하므로 DB 다운이 곧 전원 503 이 되지 않는다.
+        """
+        if redis is not None:
+            try:
+                raw_set = await redis.get(self._JWT_KEYSET_CACHE_KEY)
+                if raw_set:
+                    parsed = json.loads(
+                        raw_set if isinstance(raw_set, str) else raw_set.decode()
+                    )
+                    if isinstance(parsed, list):
+                        return parsed
+            except Exception:
+                pass
+        local = self._local_keyset
+        if local is not None and (
+            time.monotonic() - local[0] < self._JWT_KEYSET_CACHE_TTL
+        ):
+            return local[1]
+        if db is None:
+            # 조회 수단이 DB 뿐인데 없다 — 오래된 로컬 사본이라도 쓴다.
+            return local[1] if local is not None else None
+        try:
+            result = await db.execute(
+                select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
+            )
+            jwt_keys = list(result.scalars().all())
+        except Exception as e:
+            # 인프라 장애만 캐시 폴백/503 — 코드 버그(AttributeError 등)는 그대로
+            # 전파해 500 으로 남긴다. 싸버리면 디버깅 단서가 사라진다.
+            if not isinstance(e, (SQLAlchemyError, OSError, asyncio.TimeoutError)):
+                raise
+            logger.warning("jwt_key_lookup_failed", error=str(e))
+            return local[1] if local is not None else None
+        key_records = [
+            {
+                "pem": k.public_key_pem,
+                "algorithm": k.algorithm,
+                "issuer": k.issuer,
+                "audience": k.audience,
+            }
+            for k in jwt_keys
+        ]
+        self._local_keyset = (time.monotonic(), key_records)
+        # 빈 세트(활성 키 0개)도 짧게 캐시해 stampede 를 막는다.
+        if redis is not None:
+            try:
+                await redis.setex(
+                    self._JWT_KEYSET_CACHE_KEY,
+                    self._JWT_KEYSET_CACHE_TTL,
+                    json.dumps(key_records),
+                )
+            except Exception:
+                logger.warning("jwt_keyset_cache_write_failed")
+        return key_records
+
     async def authenticate(
         self, authorization: str, redis, db: AsyncSession | None
     ) -> AuthContext:
@@ -372,36 +453,36 @@ class JWTAuthStrategy:
                 claims = None
 
         if claims is None:
-            if db is None:
-                raise AuthBackendUnavailableError("DB unavailable, JWT key cache miss")
-            try:
-                result = await db.execute(
-                    select(JwtPublicKey).where(JwtPublicKey.is_active.is_(True))
+            # 활성 키 세트 — keyset 캐시 TTL 이 DB 스캔 빈도를 제한하므로
+            # 프로세스 내 스로틀은 필요 없다(전역 타임스탬프 스로틀은 위조 kid
+            # 하나가 정상 JWT 사용자 전원을 lockout 시키는 역 DoS 벡터였다).
+            # db=None(DB_DEGRADED) 여도 캐시된 세트로 서명 검증은 계속한다 —
+            # 세트가 없을 때만 백엔드 장애로 503.
+            key_records = await self._get_active_keyset(redis, db)
+            if key_records is None:
+                raise AuthBackendUnavailableError(
+                    "JWT key lookup unavailable (no cache, DB down)"
                 )
-                jwt_keys = list(result.scalars().all())
-            except Exception as e:
-                # 인프라 장애만 503 — 코드 버그(AttributeError 등)는 그대로 전파해
-                # 500 으로 남긴다. 'JWT key lookup failed' 로 싸면 디버깅 단서가
-                # 사라지고 재시도 가능한 장애처럼 보인다.
-                if not isinstance(e, (SQLAlchemyError, OSError, asyncio.TimeoutError)):
-                    raise
-                logger.warning("jwt_key_lookup_failed", error=str(e))
-                raise AuthBackendUnavailableError(f"JWT key lookup failed: {e}")
-            if not jwt_keys:
+            if not key_records:
                 raise PermissionError(f"Unknown JWT kid: {kid}")
 
-            matched_key: JwtPublicKey | None = None
+            matched_key: dict | None = None
             last_err: Exception | None = None
-            for jwt_key in jwt_keys:
+            for rec in key_records:
+                pem = rec.get("pem") if isinstance(rec, dict) else None
+                if not pem:
+                    # 캐시된 keyset 의 변형 레코드 — 건너뛰지 않으면 KeyError 가
+                    # 500 으로 새어나간다(401 로 떨어지는 게 정직한 판정).
+                    continue
                 try:
                     claims = _decode_jwt(
                         token,
-                        jwt_key.public_key_pem,
-                        jwt_key.algorithm,
-                        issuer=jwt_key.issuer,
-                        audience=jwt_key.audience,
+                        pem,
+                        rec.get("algorithm", "RS256"),
+                        issuer=rec.get("issuer"),
+                        audience=rec.get("audience"),
                     )
-                    matched_key = jwt_key
+                    matched_key = rec
                     break
                 except jwt.ExpiredSignatureError:
                     # 서명이 맞았는데 만료됐다 — 다른 키를 볼 이유가 없다.
@@ -420,14 +501,7 @@ class JWTAuthStrategy:
                     await redis.setex(
                         kid_cache_key,
                         JWT_KEY_CACHE_TTL,
-                        json.dumps(
-                            {
-                                "pem": matched_key.public_key_pem,
-                                "algorithm": matched_key.algorithm,
-                                "issuer": matched_key.issuer,
-                                "audience": matched_key.audience,
-                            }
-                        ),
+                        json.dumps(matched_key),
                     )
                 except Exception:
                     logger.warning("jwt_key_cache_write_failed")

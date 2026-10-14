@@ -154,7 +154,9 @@ class Settings(BaseSettings):
     # VK 를 발급받을 수 있는 AWS 계정 ID allowlist. ARN 의 계정 부분이 여기 없으면
     # 거부 — role 이름만으로는 검증이 안 된다(공격자 계정에도 'admin' role 을
     # 만들 수 있고, IAM user ARN 은 role 검사 자체를 우회한다). 비어 있으면
-    # 미적용(하위호환) — 배포 스크립트가 배포자 계정을 자동 주입한다.
+    # CLI 로그인 자체가 거부된다(fail-closed, R16) — 과거엔 "미적용" 이라 설정
+    # 누락 배포가 임의 계정에 VK 를 열어줬다. install-eks.sh 가 배포자 계정을
+    # 자동 주입하므로 정상 배포는 항상 채워져 있다.
     ALLOWED_AWS_ACCOUNTS: Annotated[list[str], NoDecode] = []
 
     # ── OIDC Auth (신규) ──

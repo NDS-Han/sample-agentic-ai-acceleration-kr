@@ -340,6 +340,38 @@ class TestIssueKey:
         expected_max = datetime.now(timezone.utc) + timedelta(hours=25)
         assert expected_min < result.expires_at < expected_max
 
+    async def test_issue_key_sso_expiry_naive_coerced_utc(
+        self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """R16: tz-naive sso_session_expires_at 는 UTC 간주 — 과거엔 aware
+        expires_at 과의 비교가 TypeError → 500 이 됐다."""
+        user_id = uuid.uuid4()
+        naive_sso = (datetime.now(timezone.utc) + timedelta(hours=1)).replace(
+            tzinfo=None
+        )
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo, \
+             patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
+            self._mock_repo(MockRepo)
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=_stub_user(user_id))
+            MockTam.return_value.list_by_team = AsyncMock(return_value=[])
+
+            with patch("app.services.key_service.audit_logger") as mock_audit:
+                mock_audit.log = AsyncMock()
+                result = await key_service.issue_key(
+                    mock_session,
+                    user_id=user_id,
+                    actor=admin_user,
+                    sso_session_expires_at=naive_sso,
+                )
+
+        # naive 1h SSO 만료로 캡됐는지(UTC 간주로 비교가 성공했다는 증거).
+        assert result.expires_at.tzinfo is not None
+        assert abs(
+            (result.expires_at - naive_sso.replace(tzinfo=timezone.utc)).total_seconds()
+        ) < 2
+
 
     async def test_issue_key_snapshots_team_allowed_models_into_cache(
         self,

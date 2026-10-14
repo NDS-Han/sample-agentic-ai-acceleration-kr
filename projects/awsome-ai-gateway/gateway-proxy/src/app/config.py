@@ -2,7 +2,7 @@
 
 from functools import lru_cache
 
-from pydantic import field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,7 +14,36 @@ class Settings(BaseSettings):
     )
 
     # Server
-    uvicorn_workers: int = 4
+    # Dockerfile CMD `${WORKERS:-4}` 가 실제 워커 수를 정하므로 WORKERS 도 읽는다 —
+    # 과거엔 차트가 WORKERS=2 를 주입했는데 이 설정은 4 에 머물러 Redis-down
+    # fallback divisor 가 실제 워커 수의 2배로 계산돼 fallback 쿼타가 절반으로
+    # 쪼그라들었다(R16). env 를 하나로 묶어 다시는 어긋나지 않게 한다.
+    # WORKERS 우선 — Dockerfile/Helm 이 주입하는 이름이 WORKERS 라, 둘이 다르게
+    # 잡히면 컨테이너가 실제로 띄운 프로세스 수가 설정값을 이긴다(R16 V-11).
+    uvicorn_workers: int = Field(
+        default=4, validation_alias=AliasChoices("WORKERS", "UVICORN_WORKERS")
+    )
+
+    @field_validator("uvicorn_workers", mode="before")
+    @classmethod
+    def _warn_worker_env_disagreement(cls, v):
+        """두 env 가 다르게 잡히면 WORKERS 가 이기는데 조용하다 — 배포자가
+        어느 쪽이 살았는지 모르면 같은 드리프트가 재발하므로 경고를 남긴다."""
+        import os
+
+        workers, uvicorn_w = os.environ.get("WORKERS"), os.environ.get(
+            "UVICORN_WORKERS"
+        )
+        if workers and uvicorn_w and workers != uvicorn_w:
+            import structlog
+
+            structlog.get_logger(__name__).warning(
+                "worker_env_disagreement",
+                WORKERS=workers,
+                UVICORN_WORKERS=uvicorn_w,
+                effective=workers,
+            )
+        return v
     uvicorn_host: str = "0.0.0.0"
     uvicorn_port: int = 8000
     max_body_size: int = 20_971_520  # 20MB
@@ -196,6 +225,9 @@ class Settings(BaseSettings):
     firehose_stream_name: str | None = None
     body_log_s3_bucket: str | None = None
     body_log_max_queue: int = 10_000
+    #: 인플라이트 body-log 버퍼의 바이트 상한 — 레코드 수 상한만으로는 대형
+    #: 프롬프트가 쌓였을 때 메모리가 무한 증가한다(R16, 최대 ~9GB 시나리오).
+    body_log_max_queue_bytes: int = 134_217_728  # 128 MiB
     body_log_batch_size: int = 100
     body_log_flush_interval: float = 5.0
     #: Firehose 레코드 상한(1 MB) 아래로. 초과분은 S3 에 직접 넣는다.

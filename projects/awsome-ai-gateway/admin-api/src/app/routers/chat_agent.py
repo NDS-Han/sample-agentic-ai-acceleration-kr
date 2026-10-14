@@ -826,9 +826,9 @@ async def _agentcore_producer(
 # 화이트리스트 + SELECT-only + EXPLAIN cost + LIMIT 강제 + read-only role +
 # statement_timeout)을 **그대로 재사용** — admin-api 는 검증 로직을 중복 구현하지
 # 않고 Lambda 에 위임한다. require_admin + 세션 소유 검증.
-LAMBDA_QUERY_DB = os.environ.get(
-    "LAMBDA_QUERY_DB", "llm-gateway-dev-chat-agent-query-db"
-)
+# R16: dev Lambda 이름을 전 환경 기본값으로 갖고 있었다 — prod 에서 env 누락 시
+# dev 리소스를 조용히 호출한다. 빈 값이면 엔드포인트가 503 으로 닫힌다(fail-safe).
+LAMBDA_QUERY_DB = os.environ.get("LAMBDA_QUERY_DB", "")
 
 
 class SqlExecuteRequest(BaseModel):
@@ -847,6 +847,8 @@ async def execute_sql(
     Lambda 의 ValidationError(화이트리스트 위반/DML 등)는 ok:false + error 로
     그대로 반환 — 에디터 UX 의 핵심(분석가가 에러를 보고 고침).
     """
+    if not LAMBDA_QUERY_DB:
+        raise HTTPException(503, "chat-agent query_db Lambda not configured")
     # 세션 소유 검증(임의 세션 키로 호출 방지)
     sess_row = (
         await session.execute(

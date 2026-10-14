@@ -106,10 +106,34 @@ class CLIService:
         #    계정에 'admin' 같은 allowlist 이름의 role 을 만들거나 IAM user 로
         #    (role_name=None → role 검사 우회) 들어오면 임의 외부 계정이 VK 를
         #    발급받아 이 게이트웨이의 Bedrock 비용을 쓸 수 있었다.
-        if settings.ALLOWED_AWS_ACCOUNTS and account_id not in settings.ALLOWED_AWS_ACCOUNTS:
+        #
+        #    빈 allowlist 는 **거부**(fail-closed)다 — 과거엔 "비어 있으면 미적용"
+        #    이라 설정 누락된 배포가 임의 AWS 계정에 VK + 자동 프로비저닝을 허용했다
+        #    (R16). install-eks.sh 는 배포자 계정을 자동 주입하므로 정상 배포는
+        #    항상 비어있지 않다.
+        if not settings.ALLOWED_AWS_ACCOUNTS:
+            raise ForbiddenError(
+                "AWS account allowlist is empty — CLI login is disabled. "
+                "Set aws.allowedAwsAccounts (install-eks.sh 주입 항목)."
+            )
+        if account_id not in settings.ALLOWED_AWS_ACCOUNTS:
             raise ForbiddenError(f"AWS account not allowed: {account_id}")
 
-        if settings.ALLOWED_IAM_ROLES and role_name and role_name not in settings.ALLOWED_IAM_ROLES:
+        # ⚠️ role allowlist 도 빈 리스트는 **거부**(fail-closed)다 — 과거엔
+        #    `if settings.ALLOWED_IAM_ROLES:` 만 검사해 비어 있으면 역할 검사와
+        #    IAM-user 거부가 통째로 스킵돼, 허용 계정 안의 임의 assumed-role
+        #    (EC2 인스턴스 role·Lambda role·CI role)이나 IAM user 가 VK 를
+        #    발급받을 수 있었다(R16-M2). 차트 NOTES 도 "비어 있으면 전량 거부" 를
+        #    명시한다.
+        if not settings.ALLOWED_IAM_ROLES:
+            raise ForbiddenError(
+                "IAM role allowlist is empty — CLI login is disabled. "
+                "Set aws.allowedIamRoles."
+            )
+        # IAM user ARN(role_name=None)은 role 검사 자체를 우회할 수 있어 항상 거부.
+        if role_name is None:
+            raise ForbiddenError("IAM user identities are not allowed")
+        if role_name not in settings.ALLOWED_IAM_ROLES:
             raise ForbiddenError(f"IAM role not allowed: {role_name}")
 
         # ── Auto-provisioning ──

@@ -73,6 +73,13 @@ class KeyService:
             expires_at = datetime.now(timezone.utc) + timedelta(hours=VK_DEFAULT_TTL_HOURS)
 
         # FR-2.2: cap VK expiry to SSO session expiry if provided
+        # R16: 클라이언트가 tz-naive ISO 문자열을 보내면 pydantic 은 naive datetime
+        # 을 만들고, aware expires_at 과의 비교가 TypeError → 500 이 됐다.
+        # naive 는 UTC 로 간주한다(게이트웨이 계약은 전부 UTC).
+        if sso_session_expires_at and sso_session_expires_at.tzinfo is None:
+            sso_session_expires_at = sso_session_expires_at.replace(
+                tzinfo=timezone.utc
+            )
         if sso_session_expires_at and sso_session_expires_at < expires_at:
             logger.info(
                 "key.sso_expiry_applied",

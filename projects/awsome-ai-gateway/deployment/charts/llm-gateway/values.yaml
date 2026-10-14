@@ -227,8 +227,9 @@ aws:
   # - Customer-Developer
   # VK 발급을 허용할 AWS 계정 ID 목록. role 이름만으로는 검증이 불충분하다 —
   # 공격자가 자기 계정에 'admin' role 을 만들거나 IAM user(role 검사 우회)로
-  # 들어와 외부 계정이 VK 를 발급받는다. 비어 있으면 미적용(하위호환) —
-  # install-eks.sh / gen apply 가 배포자 계정을 자동 주입한다.
+  # 들어와 외부 계정이 VK 를 발급받는다. **비어 있으면 CLI 발급 전량 거부**
+  # (fail-closed, R16) — install-eks.sh 가 배포자 계정을 자동 주입하고,
+  # 수동/ArgoCD 배포는 --set 으로 반드시 지정할 것.
   allowedAwsAccounts: []
 
 # ----------------------------------------------------------------------------

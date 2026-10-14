@@ -24,6 +24,9 @@ locals {
     AWS_DEFAULT_REGION  = var.aws_region
     ALLOWED_STS_REGIONS = join(",", var.allowed_sts_regions)
     ALLOWED_IAM_ROLES   = join(",", var.allowed_iam_roles)
+    # 비어 있으면 admin-api 가 CLI VK 발급을 전량 거부(fail-closed, R16) —
+    # 명시 목록이 없으면 이 배포의 AWS 계정만 허용한다.
+    ALLOWED_AWS_ACCOUNTS = join(",", coalescelist(var.allowed_aws_accounts, [data.aws_caller_identity.current.account_id]))
     REPORTING_TIMEZONE  = var.reporting_timezone
     REDIS_CLUSTER_MODE  = tostring(var.redis_cluster_mode)
     # ECS 경로엔 OTel collector 가 없다 — 명시 비활성화하지 않으면 SDK 가

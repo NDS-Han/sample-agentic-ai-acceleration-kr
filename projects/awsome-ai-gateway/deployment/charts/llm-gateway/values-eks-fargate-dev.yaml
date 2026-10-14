@@ -359,7 +359,10 @@ adminApi:
   autoscaling:
     enabled: false
   env:
-    DEV_LOGIN_ENABLED: "true"  # dev 환경에서만 허용
+    # ⚠️ 서명검증 없는 dev.<b64 {role:ADMIN}> 토큰은 ALB 가 인터넷 노출인 배포
+    #    dev 에서 원격 ADMIN 우회가 된다 — false 고정(admin-api 코드도 OIDC 설정
+    #    환경에선 dev 토큰을 이중으로 거부). 로컬 개발은 values-eks-fargate-dev.local.yaml.
+    DEV_LOGIN_ENABLED: "false"
     # CHANGE_ME (terraform output): Cognito User Pool ID. terraform output -raw cognito_user_pool_id
     COGNITO_USER_POOL_ID: "ap-northeast-2_nKW7FJWst"
     COGNITO_REGION: "ap-northeast-2"
@@ -369,6 +372,12 @@ adminApi:
     # values 에 명시(--set 유실 방지). ARN = aws bedrock-agentcore-control list-agent-runtimes.
     AGENTCORE_REGION: "ap-northeast-2"
     AGENTCORE_RUNTIME_ARN: "arn:aws:bedrock-agentcore:ap-northeast-2:123456789012:runtime/llm_gateway_dev_admin_chat_agent-a8AdBh8WM8"
+    # /sql/execute — query_db Lambda(sqlglot AST 검증 레이어). 비어 있으면
+    # chat_agent.py 가 503 반환. CHANGE_ME (terraform output):
+    #   terraform output -raw chat_agent_query_db_function
+    # NDS-02-deploy-bi-insight.sh 실행 시 자동으로 채워진다 — 미실행 환경에선
+    # 빈 값 유지가 의도된 fail-safe(R16-V6-N3).
+    LAMBDA_QUERY_DB: ""
     # 리포트 다운로드 presign 라우트도 같은 버킷의 reports/ prefix 를 쓴다.
     # IRSA role(llm-gateway-dev-admin-api)에 report-download-presign 정책 부여됨(§49).
 
@@ -439,7 +448,8 @@ adminUi:
   env:
     # admin-ui (Next.js) 도 dev-login route 를 렌더하려면 이 env 가 필요.
     # admin-api 쪽 DEV_LOGIN_ENABLED 와 별개 (두 컨테이너 따로 주입).
-    DEV_LOGIN_ENABLED: "true"
+    # 배포 dev 는 인터넷 노출이라 dev-login UI 도 숨긴다(토큰 자체도 admin-api 가 거부).
+    DEV_LOGIN_ENABLED: "false"
 
 scheduler:
   image:

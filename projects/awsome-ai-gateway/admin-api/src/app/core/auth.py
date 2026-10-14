@@ -133,7 +133,15 @@ def _parse_dev_token(token: str) -> dict | None:
     # dev 토큰은 절대 수용하지 않는다(백서명 없는 형식이므로 위조가 자유다).
     from app.core.config import get_settings
 
-    if get_settings().is_production:
+    settings = get_settings()
+    if settings.is_production:
+        return None
+
+    # 삼중 가드: OIDC 가 설정된 배포 환경(dev 도 인터넷 노출 ALB)에서는 dev
+    # 토큰을 거부한다 — 서명 없는 dev.<b64 {role:ADMIN}> 페이로드로 누구나
+    # ADMIN 이 되는 원격 우회였다. OIDC 미설정은 로컬 개발 뿐이므로 이 게이트는
+    # 로컬 dev-login 을 깨지 않으면서 배포 환경의 configmap 오설정까지 차단한다.
+    if settings.OIDC_ISSUER_URL:
         return None
 
     parts = token.split(".")

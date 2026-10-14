@@ -926,6 +926,27 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 rate_limit_state=state.pop("rate_limit_state", None),
                 client=client, status="ERROR",
             )
+        # 전회로개방 early return 도 본문 레코드를 남긴다(R16 — 요청=레코드 1건).
+        _bl = await resolve_body_logger(request.app.state, redis, session_factory)
+        if _bl is not None and effective_model_config is not None:
+            await _bl.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status_code=503,
+                    request_body=body,
+                    response_body=result.payload[0],
+                    is_streaming=is_stream,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                )
+            )
         return JSONResponse(
             status_code=503,
             content=json.loads(result.payload[0]),
@@ -934,6 +955,37 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
 
     if is_stream:
         chunk_iter, headers, aws_request_id = result.payload
+
+        async def _log_stream_error(err_bytes: bytes) -> None:
+            """상류 거부/전 후보 실패의 early JSON 반환도 본문 레코드를 남긴다(R16).
+
+            아래 두 return 이 body-log 배선보다 먼저 끝나 "요청 1건=레코드 1건"
+            계약이 오류 경로에서 깨졌다. 로깅 꺼져 있으면 resolve 가 None.
+            """
+            bl = await resolve_body_logger(
+                request.app.state, redis, session_factory
+            )
+            if bl is None:
+                return
+            await bl.enqueue(
+                build_body_record_for_nonstream(
+                    request_id=request_id,
+                    provider=provider_name(effective_model_config),
+                    client=client,
+                    model_alias=(
+                        effective_model_config.alias
+                        or effective_model_config.provider_model_id
+                    ),
+                    status_code=status,
+                    request_body=body,
+                    response_body=err_bytes,
+                    is_streaming=True,
+                    user_id=auth_context.user_id if auth_context else None,
+                    team_id=auth_context.team_id if auth_context else None,
+                    sso_subject=auth_context.sso_subject if auth_context else None,
+                    bedrock_request_id=aws_request_id,
+                )
+            )
 
         # When every fallback candidate failed (fallback_loop exhausted all
         # streaming candidates), the payload[0] is raw JSON error *bytes*, not
@@ -960,6 +1012,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     client=client,
                     status=usage_status_of(None, status),
                 )
+            await _log_stream_error(bytes(chunk_iter))
             return JSONResponse(
                 status_code=status,
                 content=err_content,
@@ -995,6 +1048,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     client=client,
                     status=usage_status_of(None, status),
                 )
+            await _log_stream_error(bytes(err_payload))
             return JSONResponse(
                 status_code=status,
                 content=err_content,

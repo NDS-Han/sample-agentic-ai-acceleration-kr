@@ -26,6 +26,7 @@ from app.models.auth import Department, Team, User, UserRole
 from app.repositories.user_repository import UserRepository
 from app.services.user_team_service import (
     _repoint_leader,
+    collect_team_transfer_side_effects,
     release_stale_leader_pointer,
     repoint_inactive_leader_pointers,
 )
@@ -106,6 +107,13 @@ class SyncResult:
     # commit 후에만 유효하므로(_finalize_revoked_keys docstring) 호출부가 각
     # commit 뒤에 drain 한다.
     pending_key_revocations: list = field(default_factory=list)
+    # 팀 이관으로 무효화할 Redis 캐시 키(VK·user_context·budget config) — 같은
+    # 이유로 commit 후에만 DEL 한다(R16).
+    pending_cache_deletes: list[str] = field(default_factory=list)
+    # 패턴 무효화(rl:config:USER:{uid}:*)와 역인덱스 스왑 등 부가 연산도 같은
+    # commit-후 규약으로 drain 한다.
+    pending_cache_patterns: list[str] = field(default_factory=list)
+    pending_cache_ops: list = field(default_factory=list)
 
 
 @dataclass
@@ -125,11 +133,14 @@ class CognitoSyncService:
     # 돌면 reconcile 단계가 서로의 seen 집합을 모른 채 활성 유저를 비활성화한다.
     _SYNC_LOCK_KEY = 0xC0A910  # 임의 상수
 
-    def __init__(self, cognito_client, key_service=None) -> None:
+    def __init__(self, cognito_client, key_service=None, cache_mgr=None) -> None:
         self._cognito = cognito_client
         # 비활성화 시 VK 폐기(R3-3)용. None 이면 폐기는 건너뛰고 is_active 만
         # 내린다(테스트/폴백 호환) — 라우터는 반드시 key_service 를 주입한다.
         self._key_service = key_service
+        # 팀 이관 시 캐시 무효화(R16)용. None 이면 캐시 DEL 은 건너뛴다 —
+        # 라우터는 request.app.state.cache_mgr 를 주입한다.
+        self._cache_mgr = cache_mgr
 
     async def _revoke_keys_for_users(self, session, user_ids, result):
         """비활성화된 사용자들의 ACTIVE VK 일괄 폐기 — 트랜잭션 안(DB+해시 수집).
@@ -164,10 +175,50 @@ class CognitoSyncService:
 
     async def _flush_pending_revocations(self, session, result) -> None:
         """commit 직후 호출 — upsert 중 수집된 비활성 전환분 VK 의 Redis
-        부수효과를 적용하고 목록을 비운다."""
+        부수효과와 팀 이관분 캐시 무효화를 적용하고 목록들을 비운다."""
         pending, result.pending_key_revocations = (
             result.pending_key_revocations, [],
         )
+        # 팀 이관 캐시 무효화 — commit 후라 미커밋 구정책 재캐시 창이 없다.
+        cache_keys, result.pending_cache_deletes = result.pending_cache_deletes, []
+        patterns, result.pending_cache_patterns = result.pending_cache_patterns, []
+        ops, result.pending_cache_ops = result.pending_cache_ops, []
+        if self._cache_mgr is not None:
+            if cache_keys:
+                try:
+                    # session 을 넘겨 무효화 실패를 cache_invalidation_failures
+                    # 에 기록한다 — 세션 없이 실패하면 로그만 남고 retry_failed
+                    # 의 재시도 대상에서 영원히 빠진다(R16-V8).
+                    await self._cache_mgr.invalidate(
+                        cache_keys, session=session
+                    )
+                except Exception as e:
+                    result.errors.append(
+                        f"Failed to invalidate caches on transfer: {e}"
+                    )
+            for pattern in patterns:
+                try:
+                    await self._cache_mgr.invalidate_pattern(
+                        pattern, session=session
+                    )
+                except Exception as e:
+                    result.errors.append(
+                        f"Failed to invalidate cache pattern on transfer: {e}"
+                    )
+            # _record_failure 의 session.add 행을 영속화 — 호출부는 전부 commit
+            # 직후라 이 커밋으로 새로 확정되는 건 실패 기록행 뿐이다.
+            try:
+                await session.commit()
+            except Exception:
+                logger.warning(
+                    "cognito_sync.invalidation_failure_persist_failed",
+                    exc_info=True,
+                )
+        for op in ops:
+            try:
+                await op()
+            except Exception as e:
+                result.errors.append(f"Post-commit transfer op failed: {e}")
         await self._finalize_revoked_keys(session, pending, result)
 
     async def sync_all(self, session) -> SyncResult:
@@ -421,15 +472,22 @@ class CognitoSyncService:
                 # 유지된다 → 이후 배치/잔여 commit + reconcile/stale-team 이 정상 수행.
                 async with session.begin_nested():
                     revoked_local: list = []
+                    cache_local = {"keys": [], "patterns": [], "ops": []}
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role, result=result,
                         email_verified=email_verified,
                         revoked_out=revoked_local,
+                        cache_out=cache_local,
                     )
                 # savepoint 성공 후에만 이관 — 롤백된 upsert 의 폐기 해시가
-                # 남으면 DB ACTIVE 인 키를 커밋 후 DEL 하게 된다.
+                # 남으면 DB ACTIVE 인 키를 커밋 후 DEL 하게 된다. 이관 캐시
+                # 작업도 마찬가지 — 롤백된 팀 이동의 DEL/swap 이 돌면 옛 팀
+                # 정책이 지워져 VK·정책이 어긋난다(R16-V2).
                 result.pending_key_revocations.extend(revoked_local)
+                result.pending_cache_deletes.extend(cache_local["keys"])
+                result.pending_cache_patterns.extend(cache_local["patterns"])
+                result.pending_cache_ops.extend(cache_local["ops"])
             except Exception as e:
                 result.errors.append(f"Failed to sync user {email}: {e}")
 
@@ -521,24 +579,92 @@ class CognitoSyncService:
                     if team.id in synced_team_ids:
                         continue
                     moved = [m for m in (team.members or []) if m.is_active]
-                    moved_ids = {m.id for m in moved}
+                    moved_ids: set = set()
+                    # savepoint 롤백은 savepoint 안에서 건드린 ORM 객체를 expire
+                    # 시킨다 — expire 된 속성 접근은 lazy load(MissingGreenlet)를
+                    # 내므로 이후에도 쓰는 값은 루프 전에 로컬로 캡처한다(V4-SF2).
+                    stale_team_id = team.id
+                    leader_uid = team.leader_user_id
+                    # 멤버 속성 스냅샷 — 실패 멤버는 savepoint 롤백으로 expire 되어
+                    # 이후 속성 접근이 MissingGreenlet 을 내므로 _repoint_leader
+                    # (team.members 순회) 대신 로컬 스냅샷으로 리더를 고른다(V5-SF).
+                    member_snapshot = [
+                        (m.id, m.role, m.is_active) for m in moved
+                    ]
                     for member in moved:
-                        member.team_id = default_team_id
-                        # 팀 이동 시 TEAM_LEADER 는 다른 이동 경로(_effective_role·
-                        # transfer_user)와 같은 불변식으로 강등한다 — 그대로 두면
-                        # default 팀에 대해 리더 권한(role+team_id 기반 판정)을 얻는다.
-                        if member.role == UserRole.TEAM_LEADER:
-                            member.role = UserRole.DEVELOPER
+                        member_id = member.id
+                        # 사용자 이관과 같은 부수효과(R16) — 과거엔 team_id 만
+                        # 바꿔 개별 예산/RL·VK·rl:config 캐시·역인덱스가 옛 팀
+                        # 정책으로 살아남았다.
+                        # 멤버당 savepoint + 로컬 수집 — 한 멤버의 부수효과 실패가
+                        # 트랜잭션을 poison 해 마지막 commit 전체를 쓰러뜨리거나
+                        # (예산 비활성만 커밋되고 이관은 안 된) 반쪽 상태로 남는 걸
+                        # 막는다(R16 V3-S3). 실패 멤버는 건너뛰고 다음 멤버로.
+                        m_keys: list[str] = []
+                        m_patterns: list[str] = []
+                        m_ops: list = []
+                        try:
+                            async with session.begin_nested():
+                                t_keys, t_patterns, t_ops = (
+                                    await collect_team_transfer_side_effects(
+                                        session,
+                                        user_id=member_id,
+                                        old_team_id=stale_team_id,
+                                        new_team_id=default_team_id,
+                                        cache_mgr=self._cache_mgr,
+                                        key_service=self._key_service,
+                                        errors=result.errors,
+                                    )
+                                )
+                                m_keys.extend(t_keys)
+                                m_patterns.extend(t_patterns)
+                                m_ops.extend(t_ops)
+                                member.team_id = default_team_id
+                                # 팀 이동 시 TEAM_LEADER 는 다른 이동 경로
+                                # (_effective_role·transfer_user)와 같은 불변식으로
+                                # 강등한다 — 그대로 두면 default 팀에 대해 리더
+                                # 권한(role+team_id 기반 판정)을 얻는다.
+                                if member.role == UserRole.TEAM_LEADER:
+                                    member.role = UserRole.DEVELOPER
+                        except Exception as e:
+                            result.errors.append(
+                                f"Failed to move member {member_id} "
+                                f"out of stale team: {e}"
+                            )
+                            continue
+                        moved_ids.add(member_id)
+                        result.pending_cache_deletes.extend(m_keys)
+                        result.pending_cache_patterns.extend(m_patterns)
+                        result.pending_cache_ops.extend(m_ops)
                     # 옮겨간 사람을 가리키는 leader_user_id 도 정리한다 — 사라질 팀
                     # 이라 표시만의 문제지만 남은 활성 리더로는 맞춰 둔다.
-                    if team.leader_user_id in moved_ids:
-                        _repoint_leader(team, exclude_user_id=team.leader_user_id)
-                    if moved:
+                    # 이관에 **성공한** 멤버만 카운트 — 실패 멤버는 아직 이 팀
+                    # 소속이라, 그 리더까지 포인터를 옮기면 양쪽 다 어긋난다(N2).
+                    if leader_uid in moved_ids:
+                        # 이관에 실패해 팀에 남은 멤버 중 TEAM_LEADER 만 후보 —
+                        # _repoint_leader(team, …) 는 expire 될 수 있는
+                        # team.members 를 순회하므로 여기선 스냅샷을 쓴다.
+                        remaining = next(
+                            (
+                                mid
+                                for mid, role, active in member_snapshot
+                                if mid != leader_uid
+                                and mid not in moved_ids
+                                and role == UserRole.TEAM_LEADER
+                                and active
+                            ),
+                            None,
+                        )
+                        team.leader_user_id = remaining
+                    if moved_ids:
                         result.teams_deleted += 1
             except Exception as e:
                 result.errors.append(f"Failed to clean stale teams: {e}")
 
         await session.commit()
+        # stale-team 이관이 수집한 캐시 작업(DEL·패턴·역인덱스 스왑)은 commit 후에만
+        # 적용 가능 — 여기서 drain 하지 않으면 수집만 하고 버려진다(R16-V1).
+        await self._flush_pending_revocations(session, result)
 
         logger.info(
             "cognito_sync.completed",
@@ -562,6 +688,7 @@ class CognitoSyncService:
         enabled: bool, team_id: uuid.UUID, role: UserRole, result: SyncResult,
         email_verified: bool = False,
         revoked_out: list,
+        cache_out: dict,
     ) -> User:
         """단일 사용자 upsert. sync_all 의 163-217 블록과 동일 규약(get_by_sso_subject
         → get_by_email fallback(재생성 시 새 sub 재조정) → 없으면 create).
@@ -627,6 +754,31 @@ class CognitoSyncService:
                 updated = True
             role = _effective_role(existing.role, existing.team_id, role, team_id)
             if existing.team_id != team_id:
+                # transfer_user(user_team_service)와 같은 이관 부수효과(R16) —
+                # 과거엔 team_id 만 바꿔서 ①개별 USER 예산/app 예산이 새 팀에서도
+                # 그대로 따라다니고 ②개별 레이트리밋 설정이 잔존하고 ③게이트웨이
+                # VK·user_context·rl:config 캐시가 옛 팀 정책으로 TTL 동안
+                # 살아남았다 ④team:vk_hashes 역인덱스가 옛 팀을 가리켰다.
+                # 캐시 DEL 은 commit 전 재캐시 창을 피해 pending_cache_* 로 모아
+                # _flush_pending_revocations(commit 후)가 적용한다.
+                t_keys, t_patterns, t_ops = (
+                    await collect_team_transfer_side_effects(
+                        session,
+                        user_id=existing.id,
+                        old_team_id=existing.team_id,
+                        new_team_id=team_id,
+                        cache_mgr=self._cache_mgr,
+                        key_service=self._key_service,
+                        errors=result.errors,
+                    )
+                )
+                # ⚠️ 수집은 호출부가 준 cache_out 에만 한다 — revoked_out 과 같은
+                #    이유로, 이 함수는 savepoint 안에서 불리므로 롤백돼도
+                #    result.pending_* 에는 이미 엔트리가 남는다. savepoint 종료 후
+                #    호출부가 result 로 이관한다(R16-V2).
+                cache_out["keys"].extend(t_keys)
+                cache_out["patterns"].extend(t_patterns)
+                cache_out["ops"].extend(t_ops)
                 existing.team_id = team_id
                 updated = True
             if existing.role != role:
@@ -779,13 +931,18 @@ class CognitoSyncService:
 
         try:
             revoked_local: list = []
+            cache_local = {"keys": [], "patterns": [], "ops": []}
             user = await self._upsert_one_user(
                 repo, session, sub=sub, email=email, name=name, enabled=enabled,
                 team_id=team_id, role=role, result=result,
                 email_verified=email_verified,
                 revoked_out=revoked_local,
+                cache_out=cache_local,
             )
             result.pending_key_revocations.extend(revoked_local)
+            result.pending_cache_deletes.extend(cache_local["keys"])
+            result.pending_cache_patterns.extend(cache_local["patterns"])
+            result.pending_cache_ops.extend(cache_local["ops"])
             result.user_id = str(user.id)
         except Exception as e:
             result.errors.append(f"Failed to upsert user {email or username}: {e}")
@@ -970,14 +1127,19 @@ class CognitoSyncService:
                 # 마지막 commit 도 깨진다.
                 async with session.begin_nested():
                     revoked_local: list = []
+                    cache_local = {"keys": [], "patterns": [], "ops": []}
                     await self._upsert_one_user(
                         repo, session, sub=sub, email=email, name=name, enabled=enabled,
                         team_id=team_id, role=role,
                         result=result,
                         email_verified=email_verified,
                         revoked_out=revoked_local,
+                        cache_out=cache_local,
                     )
                 result.pending_key_revocations.extend(revoked_local)
+                result.pending_cache_deletes.extend(cache_local["keys"])
+                result.pending_cache_patterns.extend(cache_local["patterns"])
+                result.pending_cache_ops.extend(cache_local["ops"])
             except Exception as e:
                 result.errors.append(f"Failed to upsert member {email or sub}: {e}")
 

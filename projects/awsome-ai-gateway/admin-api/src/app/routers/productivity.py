@@ -39,7 +39,9 @@ async def _verify_github_signature(request: Request) -> None:
     body = await request.body()
     signature = request.headers.get("x-hub-signature-256", "")
     expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected):
+    # bytes 비교 — signature 헤더에 비-ASCII 가 들어오면 str 끼리 비교는
+    # TypeError → 500 이 된다(R16; internal.py 와 같은 이유).
+    if not hmac.compare_digest(signature.encode("utf-8"), expected.encode("utf-8")):
         raise HTTPException(status_code=403, detail="Invalid webhook signature")
 
 

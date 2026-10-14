@@ -40,6 +40,18 @@ def _settings(monkeypatch):
     s.ADMIN_GROUPS = []
     import app.services.cognito_sync_service as mod
     monkeypatch.setattr(mod, "get_settings", lambda: s)
+    # R16: 팀 이관 부수효과 — collect_team_transfer_side_effects 는
+    # user_team_service 의 repo import 를 쓰므로 패치는 그 모듈에 둔다.
+    # 실제 repo 가 MagicMock 세션에 붙으면 await 실패.
+    import app.services.user_team_service as uts_mod
+    budget_repo = MagicMock()
+    budget_repo.list_active_app_clients = AsyncMock(return_value=[])
+    budget_repo.deactivate_configs = AsyncMock()
+    budget_repo.deactivate_app_configs_for_user = AsyncMock()
+    rl_repo = MagicMock()
+    rl_repo.deactivate_configs = AsyncMock()
+    monkeypatch.setattr(uts_mod, "BudgetRepository", lambda sess: budget_repo)
+    monkeypatch.setattr(uts_mod, "RateLimitConfigRepository", lambda sess: rl_repo)
     return s
 
 
@@ -682,7 +694,7 @@ async def test_upsert_one_user_releases_stale_pointer_with_session(monkeypatch):
     await svc._upsert_one_user(
         repo, session, sub="SUB-1", email="a@x.com", name="A",
         enabled=True, team_id=new_team, role=UserRole.DEVELOPER, result=result,
-        revoked_out=[],
+        revoked_out=[], cache_out={"keys": [], "patterns": [], "ops": []},
     )
 
     release.assert_awaited_once()

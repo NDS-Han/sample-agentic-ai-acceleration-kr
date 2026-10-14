@@ -339,6 +339,12 @@ variable "allowed_iam_roles" {
   default     = []
 }
 
+variable "allowed_aws_accounts" {
+  description = "CLI VK 발급을 허용하는 AWS 계정 ID (빈 리스트 = 이 배포의 계정만 허용)"
+  type        = list(string)
+  default     = []
+}
+
 # ------------------------------------------------------------------------------
 # Bedrock / cross-account
 # ------------------------------------------------------------------------------

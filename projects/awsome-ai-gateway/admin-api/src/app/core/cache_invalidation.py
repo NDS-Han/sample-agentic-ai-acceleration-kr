@@ -53,10 +53,7 @@ class CacheInvalidationManager:
         pattern as a single failure entry; partial deletes are not rolled back.
         """
         try:
-            deleted = 0
-            async for key in self._redis.scan_iter(match=pattern, count=200):
-                await self._redis.delete(key)
-                deleted += 1
+            deleted = await self._scan_delete(pattern)
             logger.debug("cache.invalidated_pattern", pattern=pattern, deleted=deleted)
             return deleted
         except Exception:
@@ -64,6 +61,14 @@ class CacheInvalidationManager:
             if session is not None:
                 await self._record_failure(session, f"pattern:{pattern}")
             return 0
+
+    async def _scan_delete(self, pattern: str) -> int:
+        """SCAN+DEL — 예외를 삼키지 않아 retry 경로에서도 쓸 수 있다."""
+        deleted = 0
+        async for key in self._redis.scan_iter(match=pattern, count=200):
+            await self._redis.delete(key)
+            deleted += 1
+        return deleted
 
     async def retry_failed(self, session: AsyncSession) -> int:
         """Retry all unresolved cache invalidation failures. Returns count of resolved."""
@@ -78,7 +83,9 @@ class CacheInvalidationManager:
         resolved_count = 0
         for failure in failures:
             try:
-                await self._redis.delete(failure.cache_key)
+                # cache_key 에는 실패 유형이 접두어로 박혀 있다 — 리터럴 DEL 로
+                # "해소" 처리하면 진짜 대상 키들은 stale 한 채로 남는다(R16-V8).
+                await self._retry_one(failure)
                 failure.resolved_at = datetime.now(timezone.utc)
                 resolved_count += 1
                 logger.info("cache.retry_resolved", key=failure.cache_key)
@@ -88,6 +95,29 @@ class CacheInvalidationManager:
                 logger.warning("cache.retry_failed", key=failure.cache_key, retry_count=failure.retry_count)
 
         return resolved_count
+
+    async def _retry_one(self, failure: CacheInvalidationFailure) -> None:
+        """실패 유형별 재시도 — pattern:/swap: 접두어를 복원해 실행한다."""
+        key = failure.cache_key
+        if key.startswith("pattern:"):
+            await self._scan_delete(key[len("pattern:"):])
+            return
+        if key.startswith("swap:"):
+            spec = key[len("swap:"):]
+            old_key, new_key = spec.split("->", 1)
+            members = (failure.context or {}).get("members") or []
+            if not members:
+                # 멤버 목록을 모르는 구형 실패행은 재시도 불가 — 예외로 두고
+                # unresolved 상태를 유지해 수동 처리 대상으로 남긴다.
+                raise RuntimeError(
+                    f"swap retry needs member list: {key}"
+                )
+            pipe = self._redis.pipeline(transaction=False)
+            pipe.srem(old_key, *members)
+            pipe.sadd(new_key, *members)
+            await pipe.execute()
+            return
+        await self._redis.delete(key)
 
     async def live_vk_hashes(self, team_id: uuid.UUID) -> list[str]:
         """``team:vk_hashes:{tid}`` 역인덱스에서 **살아있는** VK 해시만 반환한다.
@@ -151,16 +181,28 @@ class CacheInvalidationManager:
                 exc_info=True,
             )
             if session is not None:
-                await self._record_failure(session, f"swap:{old_key}->{new_key}")
+                # 멤버 목록을 함께 기록해 retry_failed 가 SREM/SADD 를 재실행
+                # 할 수 있게 한다 — 없으면 swap 실패행은 재시도 불가로 남는다.
+                await self._record_failure(
+                    session,
+                    f"swap:{old_key}->{new_key}",
+                    context={"members": list(members)},
+                )
             raise
 
-    async def _record_failure(self, session: AsyncSession, cache_key: str) -> None:
+    async def _record_failure(
+        self,
+        session: AsyncSession,
+        cache_key: str,
+        *,
+        context: dict | None = None,
+    ) -> None:
         entry = CacheInvalidationFailure(
             id=uuid.uuid4(),
             cache_key=cache_key,
             failed_at=datetime.now(timezone.utc),
             retry_count=0,
-            context={"source": "admin-api"},
+            context={"source": "admin-api", **(context or {})},
         )
         session.add(entry)
 

@@ -20,6 +20,7 @@ from app.middleware.budget import BudgetMiddleware
 from app.middleware.client_authz import ClientAuthorizationMiddleware
 from app.middleware.client_id import ClientIdentificationMiddleware
 from app.middleware.downgrade import DowngradeMiddleware
+from app.middleware.max_body_size import MaxBodySizeMiddleware
 from app.middleware.otel import HeaderInjectorMiddleware, OTelMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.observability import GatewayMetrics, init_otel, shutdown_otel
@@ -96,6 +97,7 @@ def build_body_logger(settings):
         batch_size=settings.body_log_batch_size,
         flush_interval=settings.body_log_flush_interval,
         max_record_bytes=settings.body_log_max_record_bytes,
+        max_queue_bytes=settings.body_log_max_queue_bytes,
     )
 
 
@@ -401,17 +403,30 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("gateway_proxy_shutting_down")
     await health_checker.stop()
-    # 큐에 남은 레코드를 flush 한다 — 종료 시 버리면 감사 기록에 구멍이 생긴다.
-    await body_logger.stop()
+    # P0-②: last-chance drain of the cost-stream spool — **body log 보다 먼저**
+    # 한다(R16). 과금 데이터가 감사 로그보다 먼저 안전하게 나가야 하고, 과거엔
+    # body_logger.stop() 의 무제한 drain 이 먼저 돌아 grace period 를 잡아먹어
+    # 스풀 drain 에 도달하지 못할 수 있었다.
     await retry_worker.stop()
-    # P0-②: last-chance drain of the cost-stream spool before closing Redis, so
-    # records buffered during a recent blip get one final re-publish attempt.
+    # 공용 데드라인 — 세 drain 의 개별 상한 합(15+10+15=40s)이
+    # terminationGracePeriod(60s, preStop 15s)의 SIGKILL 마진을 거의 다 쓴다.
+    # 앞 단계가 예산을 다 먹으면 뒷 단계가 아예 못 도는 순서 의존이 생기므로
+    # 남은 시간을 나눠 쓴다(R16 V-10).
+    import time as _time
+
+    _shutdown_deadline = _time.monotonic() + 40.0
+
+    def _remaining() -> float:
+        return max(0.5, _shutdown_deadline - _time.monotonic())
+
     # ⚠️ 상한 필수 — flapping Redis 에서 XADD 가 각 ~4s 블록하면 10k 스풀은
     #    terminationGracePeriod 를 넘어 SIGKILL 되어 오히려 전부 유실된다.
     #    drain() 은 취소안전(미완료 항목 복원)이므로 타임아웃은 안전하고,
     #    남은 양은 lost_on_shutdown 경고로 가시화한다.
     try:
-        drained = await asyncio.wait_for(cost_stream_spool.drain(redis), timeout=15.0)
+        drained = await asyncio.wait_for(
+            cost_stream_spool.drain(redis), timeout=min(15.0, _remaining())
+        )
         if drained:
             logger.info("cost_stream_spool_drained_on_shutdown", count=drained)
     except TimeoutError:
@@ -431,9 +446,20 @@ async def lifespan(app: FastAPI):
     # 짧게 잡아 SIGKILL 마진을 남긴다.
     from app.services.streaming import drain_pending_tasks
 
-    drained = await drain_pending_tasks(timeout=10.0)
+    drained = await drain_pending_tasks(timeout=min(10.0, _remaining()))
     if drained:
         logger.info("stream_drain_tasks_awaited_on_shutdown", count=drained)
+    # 큐에 남은 body-log 레코드를 flush 한다 — 종료 시 버리면 감사 기록에 구멍이
+    # 생긴다. 다만 stop() 의 내부 drain 루프는 상한이 없으므로 wait_for 로 묶는다
+    # (R16: 10k 레코드 × Firehose 지연 시 grace period 초과 → 스풀 drain/정리가
+    # 아예 도달 못 하는 순서였다). 타임아웃이면 남은 큐를 경고로 가시화.
+    try:
+        await asyncio.wait_for(body_logger.stop(), timeout=min(15.0, _remaining()))
+    except TimeoutError:
+        logger.warning(
+            "body_log_shutdown_drain_timed_out",
+            remaining=body_logger.queue_size,
+        )
     await httpx_client.aclose()
     await mantle_http.aclose()
     await redis.aclose()
@@ -451,12 +477,13 @@ def create_app() -> FastAPI:
     )
 
     # 실행 순서 (요청 처리 순):
-    #   OTel → ClientId → Auth → ClientAuthZ → Budget → Downgrade → RateLimit → HeaderInjector → router
+    #   OTel → MaxBodySize → ClientId → Auth → ClientAuthZ → Budget → Downgrade → RateLimit → HeaderInjector → router
     # 의존성 (변경 시 주의):
     #   - ClientAuthorizationMiddleware는 state["auth_context"] (Auth) + state["client"] (ClientId) 를 읽으므로 Auth/ClientId 뒤에 와야 함
     #   - DowngradeMiddleware는 state["budget_status"].threshold_pct 를 읽으므로 Budget 뒤에 와야 함
     #   - RateLimitMiddleware의 budget-throttle fallback도 budget_status.throttle_* 를 읽으므로
     #     Budget 뒤에 와야 함
+    #   - MaxBodySize는 인증보다 먼저 413을 내 본문 읽기 전에 거절한다 (R16)
     #   - starlette add_middleware는 LIFO이므로 코드 순서는 실행 순서의 역순
     app.add_middleware(HeaderInjectorMiddleware)
     app.add_middleware(RateLimitMiddleware)
@@ -465,6 +492,9 @@ def create_app() -> FastAPI:
     app.add_middleware(ClientAuthorizationMiddleware)   # runs after Auth+ClientId, before Budget
     app.add_middleware(AuthMiddleware)
     app.add_middleware(ClientIdentificationMiddleware)
+    app.add_middleware(
+        MaxBodySizeMiddleware, max_bytes=get_settings().max_body_size
+    )
     app.add_middleware(OTelMiddleware)
 
     # 라우터 등록

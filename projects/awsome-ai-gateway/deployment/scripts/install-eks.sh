@@ -427,7 +427,13 @@ helm_install() {
         --set-string "adminApi.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${ADMIN_API_ROLE_ARN}"
     )
 
-    # OIDC (Cognito) — terraform 에서 만든 경우 자동 주입
+    # OIDC (Cognito) — terraform 에서 만든 경우 자동 주입.
+    # ⚠️ 우선순위: --set 은 어떤 -f values 파일보다 항상 이긴다. R16 게이트로
+    #    OIDC_ISSUER_URL 이 설정된 환경에선 무서명 dev 토큰이 전부 거부되므로,
+    #    dev-login 의도 환경(DEV_LOGIN_ENABLED=true)을 이 스크립트+terraform
+    #    issuer 로 배포하면 dev 토큰이 전부 401 이 된다. dev-login 배포는
+    #    이 스크립트가 아니라 values-eks-fargate-*.local.yaml 직접 helm 경로를
+    #    쓸 것(그 파일은 issuerUrl 을 의도적으로 비워 둔다).
     if [ -n "${COGNITO_ISSUER_URL}" ]; then
         SET_ARGS+=(
             --set "adminApi.oidc.enabled=true"
@@ -435,6 +441,13 @@ helm_install() {
             --set "adminApi.oidc.providerName=oidc:cognito"
             --set "adminApi.oidc.groupsClaim=cognito:groups"
         )
+        # audience — Cognito app client_id. 비우면 aud 검증이 꺼져 같은 풀의
+        # 다른 app client 토큰도 통과한다(R16). client_id 가 있을 때만 주입.
+        if [ -n "${COGNITO_CLIENT_ID}" ]; then
+            SET_ARGS+=(
+                --set "adminApi.oidc.audience=${COGNITO_CLIENT_ID}"
+            )
+        fi
         # 다시 if 로 닫지 않고 dummy true (아래 fi 와 짝 맞춤 위해)
         true
     fi

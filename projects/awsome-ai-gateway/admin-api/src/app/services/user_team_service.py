@@ -117,6 +117,97 @@ async def repoint_inactive_leader_pointers(session: AsyncSession) -> int:
     return len(teams)
 
 
+async def collect_team_transfer_side_effects(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    old_team_id: uuid.UUID | None,
+    new_team_id: uuid.UUID,
+    cache_mgr: CacheInvalidationManager | None,
+    key_service: KeyService | None,
+    errors: list[str] | None = None,
+) -> tuple[list[str], list[str], list]:
+    """팀 이관 공통 부수효과 (R16 — transfer_user·cognito sync 공용).
+
+    DB 측: 개인 예산(BR-BUD-04 — 예산은 팀 속성이라 유저를 따라가지 않는다),
+    하위 app 예산, USER 스코프 레이트리밋 설정을 비활성화한다. 사용량 카운터는
+    유저 귀속으로 유지해 팀 이동으로 한도를 초기화하는 우회를 막는다.
+
+    반환값: ``(keys, patterns, ops)`` — 전부 **commit 후** 적용할 무효화 자산.
+    호출부는 ``invalidate_after_commit`` 또는 SyncResult.pending_cache_* 로
+    commit 이후에 적용해야 한다 — commit 전 DEL 은 미커밋 구정책 재캐시 창을
+    연다(R4-A2-3).
+
+    ``errors`` 가 주어지면 VK 해시 수집 실패는 거기 기록하고 이관은 계속한다
+    (cognito sync 의 최선노력 정책); ``None`` 이면 그대로 전파(transfer_user —
+    대화형 작업은 조용한 부분실패보다 500 이 낫다).
+    """
+    budget_repo = BudgetRepository(session)
+    removed_app_clients = await budget_repo.list_active_app_clients(user_id)
+    await budget_repo.deactivate_configs(BudgetScope.USER, user_id)
+    await budget_repo.deactivate_app_configs_for_user(user_id)
+    await RateLimitConfigRepository(session).deactivate_configs(
+        RateLimitScope.USER, user_id
+    )
+
+    vk_hashes: list[str] = []
+    if key_service is not None:
+        try:
+            vk_hashes = await key_service.list_active_vk_hashes_for_user(
+                session, user_id
+            )
+        except Exception as e:
+            if errors is None:
+                raise
+            errors.append(f"VK hash collection on transfer failed: {e}")
+
+    keys: list[str] = [
+        f"user_context:{user_id}",
+        f"budget:config:user:{{{user_id}}}",
+        *[
+            f"budget:config:user:{{{user_id}}}:{c}"
+            for c in removed_app_clients
+        ],
+        *[f"key:cache:vk:{h}" for h in vk_hashes],
+    ]
+    patterns: list[str] = []
+    ops: list = []
+    if cache_mgr is not None:
+        # 게이트웨이의 USER 스코프 RL 설정 캐시(rl:config:USER:{uid}:*, 300s TTL)
+        # 도 함께 지운다 — DB 만 비활성화하면 구 한도가 최대 5분 더 적용된다.
+        patterns.append(f"rl:config:USER:{user_id}:*")
+        if old_team_id is not None and vk_hashes:
+            async def _swap() -> None:
+                # 실패 기록(cache_invalidation_failures)을 위해 전용 세션 사용 —
+                # 요청 세션은 지연 실행 시점에 이미 닫혀 있다.
+                from app.core.db import AsyncSessionLocal
+
+                async with AsyncSessionLocal() as s3:
+                    try:
+                        await cache_mgr.swap_reverse_index_membership(
+                            old_key=f"team:vk_hashes:{old_team_id}",
+                            new_key=f"team:vk_hashes:{new_team_id}",
+                            members=vk_hashes,
+                            session=s3,
+                        )
+                    except Exception:
+                        # swap 이 실패하면 실패행이 session.add 된다 — 그대로
+                        # 재전파하면 `async with` 롤백이 기록까지 지워 retry_failed
+                        # 의 대상에서 영원히 빠진다. 기록을 커밋한 뒤 재전파(R16 V3-S2).
+                        try:
+                            await s3.commit()
+                        except Exception:
+                            logger.warning(
+                                "user_team.swap_failure_persist_failed",
+                                exc_info=True,
+                            )
+                        raise
+                    await s3.commit()
+
+            ops.append(_swap)
+    return keys, patterns, ops
+
+
 class UserTeamService:
     def __init__(self, cache_mgr: CacheInvalidationManager, key_service: KeyService) -> None:
         self._cache_mgr = cache_mgr
@@ -377,60 +468,30 @@ class UserTeamService:
                 if old_team is not None and old_team.leader_user_id == user_id:
                     _repoint_leader(old_team, exclude_user_id=user_id)
 
-        # BR-BUD-04 + D-15/I-3: 팀 이동 시 개별 cap A_u 와 하위 app_c 를 함께
-        # 제거한다 — 예산은 팀 속성이라 유저를 따라가지 않는다. 사용량 카운터는
-        # 유저 귀속으로 유지(팀 이동으로 한도를 초기화하는 우회 차단).
-        budget_repo = BudgetRepository(session)
-        removed_app_clients = await budget_repo.list_active_app_clients(user_id)
-        await budget_repo.deactivate_configs(BudgetScope.USER, user_id)
-        await budget_repo.deactivate_app_configs_for_user(user_id)
-
-        # BR-RL: Deactivate existing USER scope rate-limit configs
-        rl_repo = RateLimitConfigRepository(session)
-        await rl_repo.deactivate_configs(RateLimitScope.USER, user_id)
-
-        # Capture VK hashes before team update (still valid pre-transfer)
-        vk_hashes: list[str] = await self._key_service.list_active_vk_hashes_for_user(session, user_id)
+        # BR-BUD-04 + D-15/I-3: 팀 이동 부수효과 — 개별 예산/USER RL 비활성화 +
+        # user_context·예산·VK·rl:config 캐시 + team:vk_hashes 인덱스 스왑.
+        # cognito_sync_service 와 같은 공통 헬퍼로 모은다(R16).
+        cache_keys, patterns, ops = await collect_team_transfer_side_effects(
+            session,
+            user_id=user_id,
+            old_team_id=old_team_id,
+            new_team_id=new_team_id,
+            cache_mgr=self._cache_mgr,
+            key_service=self._key_service,
+        )
 
         # Transfer team
         user = await repo.update_user_team(user_id, new_team_id)
 
-        # Cache invalidation: user context + budget config cache + all VK caches
-        # RL config 캐시는 gateway-proxy 가 다른 namespace (rl:config:USER:<uid>:<model>) 로 관리.
-        # 현재 admin-api 에서 직접 invalidate 하는 표준 패턴이 없어 5분 TTL 자연 만료에 의존.
-        # 별도 후속 작업으로 wildcard invalidate 또는 통합 namespace 정리 필요.
-        cache_keys: list[str] = [
-            f"user_context:{user_id}",
-            f"budget:config:user:{{{user_id}}}",
-            *[
-                f"budget:config:user:{{{user_id}}}:{c}"
-                for c in removed_app_clients
-            ],
-            *[f"key:cache:vk:{h}" for h in vk_hashes],
-        ]
         # R4-A2-3: DEL/swap 은 commit 후로 지연 — CommittingRoute 가 핸들러
         # 반환 후 commit 하므로 여기서 즉시 DEL 하면 DEL→commit 창에 게이트웨이가
         # 미커밋 구 정책을 재캐시한다(R3-8 부류).
-        swap_extra = []
-        if old_team_id is not None and vk_hashes:
-
-            async def _swap() -> None:
-                # 실패 기록(cache_invalidation_failures)을 위해 전용 세션 사용 —
-                # 요청 세션은 지연 실행 시점에 이미 닫혀 있다.
-                from app.core.db import AsyncSessionLocal
-
-                async with AsyncSessionLocal() as s3:
-                    await self._cache_mgr.swap_reverse_index_membership(
-                        old_key=f"team:vk_hashes:{old_team_id}",
-                        new_key=f"team:vk_hashes:{new_team_id}",
-                        members=vk_hashes,
-                        session=s3,
-                    )
-                    await s3.commit()
-
-            swap_extra.append(_swap)
         await invalidate_after_commit(
-            session, self._cache_mgr, cache_keys, extra=swap_extra
+            session,
+            self._cache_mgr,
+            cache_keys,
+            pattern=patterns[0] if patterns else None,
+            extra=ops,
         )
 
         await audit_logger.log(

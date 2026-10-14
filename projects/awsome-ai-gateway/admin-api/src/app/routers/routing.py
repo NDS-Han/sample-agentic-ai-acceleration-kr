@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
 from app.services.routing_profile_service import RoutingProfileService
@@ -66,4 +67,17 @@ async def set_web_search(
     # 게이트웨이 요청이 토글 전 값을 다시 캐시해, 관리자는 성공을 봤는데 그 앱은
     # 300s 동안 옛 설정으로 돈다.
     await svc.invalidate_cache(client)
+    # R16: 앱별 web-search 토글도 감사 대상 — 과금/도구 동작을 바꾸는 변경인데
+    # audit_logs 행이 없었다.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        action="SET_WEB_SEARCH",
+        resource_type="RoutingProfile",
+        resource_id=client,
+        changes={"after": {"web_search_enabled": body.enabled}},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=request.headers.get("x-request-id", ""),
+    )
     return result

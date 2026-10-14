@@ -45,6 +45,42 @@ _router_service = RouterService()
 _RESPONSES_BACKENDS = frozenset({"mantle", "bedrock_openai"})
 
 
+async def _log_dispatch_error(
+    request: Request,
+    redis,
+    session_factory,
+    *,
+    request_id: str,
+    model_config,
+    client,
+    body: bytes,
+    auth_context,
+    is_streaming: bool,
+) -> None:
+    """어댑터 계약 밖 예외로 재전파되는 요청도 본문 레코드를 남긴다(R16) —
+    성공/비-2xx 경로만 로깅하면 "요청 1건 = 레코드 1건" 계약이 예외 경로에서
+    깨진다. 상류 응답이 없으므로 본문은 비우고 status 는 게이트웨이 관점 502.
+    """
+    bl = await resolve_body_logger(request.app.state, redis, session_factory)
+    if bl is None:
+        return
+    await bl.enqueue(
+        build_body_record_for_nonstream(
+            request_id=request_id,
+            provider=provider_name(model_config),
+            client=client,
+            model_alias=model_alias_of(model_config),
+            status_code=502,
+            request_body=body,
+            response_body=b"",
+            is_streaming=is_streaming,
+            user_id=auth_context.user_id if auth_context else None,
+            team_id=auth_context.team_id if auth_context else None,
+            sso_subject=auth_context.sso_subject if auth_context else None,
+        )
+    )
+
+
 @router.get("/v1/models")
 async def list_models(request: Request) -> JSONResponse:
     state = request.scope.get("state", {})
@@ -331,6 +367,11 @@ async def _handle_openai(request: Request, path: str):
             # 어댑터 계약 밖 예외 — 폴백 루프의 catch-all unwind 와 같은 이유로
             # 해제 후 재전파(E2E S4 — 누수만 막고 에러 의미론 500 은 유지).
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            await _log_dispatch_error(
+                request, redis, session_factory,
+                request_id=request_id, model_config=model_config, client=client,
+                body=body, auth_context=auth_context, is_streaming=True,
+            )
             raise
 
         # KI-08: OpenAI path는 tiktoken(cl100k_base) 근사로 출력 토큰 역산.
@@ -439,6 +480,11 @@ async def _handle_openai(request: Request, path: str):
         except Exception:
             # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            await _log_dispatch_error(
+                request, redis, session_factory,
+                request_id=request_id, model_config=model_config, client=client,
+                body=body, auth_context=auth_context, is_streaming=False,
+            )
             raise
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)
@@ -1029,6 +1075,11 @@ async def _handle_responses(request: Request):
         except Exception:
             # 계약 밖 예외 — 해제 후 재전파(E2E S4).
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            await _log_dispatch_error(
+                request, redis, session_factory,
+                request_id=request_id, model_config=model_config, client=client,
+                body=body, auth_context=auth_context, is_streaming=True,
+            )
             raise
 
         # 비-2xx 면 예약을 스트림 전달 전에 되돌린다. release_reservations 가
@@ -1064,6 +1115,26 @@ async def _handle_responses(request: Request):
                     bedrock_request_id=aws_request_id,
                     client=client,
                     status=usage_status_of(None, status),
+                )
+            # R16: early JSON 반환도 본문 레코드를 남긴다 — 이 경로가 body-log
+            # 배선을 우회해 오류 요청이 감사 없이 지나갔다(messages.py 동일 수정).
+            _bl = await resolve_body_logger(request.app.state, redis, session_factory)
+            if _bl is not None:
+                await _bl.enqueue(
+                    build_body_record_for_nonstream(
+                        request_id=request_id,
+                        provider=provider_name(model_config),
+                        client=client,
+                        model_alias=model_alias_of(model_config),
+                        status_code=status,
+                        request_body=body,
+                        response_body=bytes(err_payload),
+                        is_streaming=True,
+                        user_id=auth_context.user_id if auth_context else None,
+                        team_id=auth_context.team_id if auth_context else None,
+                        sso_subject=auth_context.sso_subject if auth_context else None,
+                        bedrock_request_id=aws_request_id,
+                    )
                 )
             return JSONResponse(status_code=status, content=err_content)
 
@@ -1151,6 +1222,11 @@ async def _handle_responses(request: Request):
         except Exception:
             # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            await _log_dispatch_error(
+                request, redis, session_factory,
+                request_id=request_id, model_config=model_config, client=client,
+                body=body, auth_context=auth_context, is_streaming=False,
+            )
             raise
         if auth_context and usage.total_tokens > 0:
             duration_ms = int((time.monotonic() - start_time) * 1000)

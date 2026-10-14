@@ -12,6 +12,7 @@ import structlog
 from starlette.requests import Request
 
 from app.config import get_settings
+from app.providers.bedrock_adapter import _redact_arns
 from app.providers.openai_usage import extract_chat_usage, extract_responses_usage
 from app.schemas.domain import TokenUsage
 
@@ -434,7 +435,12 @@ async def bedrock_anthropic_sse_stream(
         await _aclose_iter(iterator)
         err = {
             "type": "error",
-            "error": {"type": "stream_error", "message": str(exc) or "stream_error"},
+            # 예외 메시지에 상류 ARN/계정 ID 가 섞일 수 있다 — 그대로 내보내면
+            # 인프라 식별자가 클라이언트에 새므로 살균한다.
+            "error": {
+                "type": "stream_error",
+                "message": _redact_arns(str(exc)) or "stream_error",
+            },
         }
         yield f"event: error\ndata: {json.dumps(err)}\n\n".encode()
         return
@@ -722,7 +728,7 @@ async def openai_sse_stream(
         await _fire_on_complete("partial")
         await _aclose_iter(iterator)
         yield _emit_error_chunk_framed(
-            "stream_error", str(exc) or "stream_error", had_tail=_had_tail
+            "stream_error", _redact_arns(str(exc)) or "stream_error", had_tail=_had_tail
         )
         return
 
@@ -966,7 +972,7 @@ async def responses_sse_stream(
         await _fire_on_usage()  # yield 앞에서 확정 (timeout 경로와 동일 이유)
         await _fire_on_complete("partial")
         await _aclose_iter(iterator)
-        yield _emit_error_chunk("stream_error", str(exc) or "stream_error")
+        yield _emit_error_chunk("stream_error", _redact_arns(str(exc)) or "stream_error")
         return
 
     if not client_disconnected:

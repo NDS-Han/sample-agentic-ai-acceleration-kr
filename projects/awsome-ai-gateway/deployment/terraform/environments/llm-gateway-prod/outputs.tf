@@ -116,6 +116,23 @@ output "chat_agent_name" {
   description = "AgentCore Runtime 등록 시 사용할 agent name"
 }
 
+# ─── BI tool Lambdas (enable_chat_db_tools=true 일 때만) ───
+# NDS-02-deploy-bi-insight.sh 가 이 output 들을 읽어 AgentCore Runtime 의
+# LAMBDA_QUERY_DB / LAMBDA_GET_SCHEMA env 로 주입한다 — update-agent-runtime 은
+# environmentVariables 를 통째로 교체하므로 output 이 없으면 BI 도구가 죽는다.
+output "chat_agent_query_db_function" {
+  value       = try(module.agentcore_runtime[0].query_db_function_name, null)
+  description = "agent 의 LAMBDA_QUERY_DB env 값"
+}
+output "chat_agent_get_schema_function" {
+  value       = try(module.agentcore_runtime[0].get_schema_function_name, null)
+  description = "agent 의 LAMBDA_GET_SCHEMA env 값"
+}
+output "chat_agent_reader_secret_arn" {
+  value       = try(module.agentcore_runtime[0].chat_reader_secret_arn, null)
+  description = "gateway_chat_reader 비밀번호 secret ARN (apply 후 password 설정 필요)"
+}
+
 # ─── 게이트웨이 본문 로깅 sink (gateway-proxy 설정값) ───
 # helm values 의 `gatewayProxy.env.FIREHOSE_STREAM_NAME` / `gatewayProxy.env.BODY_LOG_S3_BUCKET`
 # 에 그대로 옮긴다(차트에 전용 블록은 없다 — gateway-proxy 앱 설정은 gatewayProxy.env
