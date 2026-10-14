@@ -19,18 +19,30 @@ ATTEMPT_UNSETTLED_HEADER = "x-gw-attempt-unsettled"
 def classify_transport_error(exc: BaseException) -> tuple[int, dict, str]:
     """httpx 전송 오류 → (HTTP 상태, 내부 헤더, 메시지) 분류.
 
-    - 연결 수립 실패(ConnectError/ConnectTimeout): 요청이 상류에 닿지 않았다 —
+    - 연결 수립/풀 대기/전송 실패(ConnectError·ConnectTimeout·PoolTimeout·
+      WriteTimeout): 요청이 상류에 닿지 않았거나 본문이 완성되지 않았다 —
       과금 없음. 503 가용성 신호 → 폴백 안전.
-    - 그 외 타임아웃(Read/Write/Pool): 상류가 요청을 받았을 수 있다 — 과금
-      불명. 504 + ATTEMPT_UNSETTLED → 폴백 루프가 재시도를 멈춘다.
+    - ReadTimeout: 상류가 요청을 받아 처리·과금했을 수 있다 — 과금 불명.
+      504 + ATTEMPT_UNSETTLED → 폴백 루프가 재시도를 멈춘다.
     - 기타: 502 (폴백 대상이지만 의미는 일반 실패).
     """
     import httpx
 
-    if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
-        return 503, {}, "upstream connection failed"
-    if isinstance(exc, httpx.TimeoutException):
+    if isinstance(exc, httpx.ReadTimeout):
         return 504, {ATTEMPT_UNSETTLED_HEADER: "1"}, "upstream read timeout"
+    if isinstance(
+        exc,
+        (
+            httpx.ConnectError,
+            httpx.ConnectTimeout,
+            httpx.PoolTimeout,
+            httpx.WriteTimeout,
+            httpx.TimeoutException,
+        ),
+    ):
+        # ReadTimeout 을 제외한 전송단계 실패 — 상류 미도달이 확실한 503.
+        # (TimeoutException 잔여 하위형도 "읽기 대기"가 아니면 요청이 안 나갔다.)
+        return 503, {}, "upstream connection failed"
     return 502, {}, "upstream call failed"
 
 

@@ -1050,6 +1050,21 @@ async def _handle_responses(request: Request):
             except (json.JSONDecodeError, ValueError):
                 err_content = {"error": {"type": "provider_error",
                                          "message": f"Backend returned {status}"}}
+            # 예전에는 오류 제너레이터가 스트림 헬퍼를 타며 _record 가 ERROR 행을
+            # 남겼다 — JSON 환원으로 그 기록이 빠지면 안 된다(모니터링 정합).
+            # 4xx 거절은 게이트웨이/상류 실패가 아니라 기록하지 않는다.
+            if auth_context and status >= 500:
+                duration_ms = int((time.monotonic() - start_time) * 1000)
+                await cost_recorder.finalize(
+                    redis, auth_context, model_config, TokenUsage(),
+                    request_id, True, duration_ms,
+                    ttft_ms=duration_ms,
+                    rate_limit_state=state.pop("rate_limit_state", None),
+                    downgraded_from=state.get("downgraded_from"),
+                    bedrock_request_id=aws_request_id,
+                    client=client,
+                    status=usage_status_of(None, status),
+                )
             return JSONResponse(status_code=status, content=err_content)
 
         # 요청 종결 상태 — 스트림 헬퍼가 채우고 _record 가 usage_logs.status 로

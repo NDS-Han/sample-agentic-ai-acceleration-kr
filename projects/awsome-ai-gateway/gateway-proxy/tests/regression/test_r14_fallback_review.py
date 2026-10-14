@@ -135,6 +135,59 @@ async def test_candidate_resolve_exception_skips_slot_not_500():
 
 
 @pytest.mark.asyncio
+async def test_skipped_candidate_errors_do_not_mask_all_unavailable():
+    """원본이 회로개방으로 시도 못 하고 후보들이 전부 비-폴백 오류(400)면,
+    후보의 400 이 아니라 503 service_unavailable 로 떨어져야 한다."""
+    cb = AsyncMock()
+    # 원본 회로는 열려 있고(프로브 패배), 후보 회로는 닫혀 있다.
+    cb.is_open = AsyncMock(side_effect=[True, False])
+    cb.try_acquire_halfopen_probe = AsyncMock(return_value=False)
+    adapter = AsyncMock()
+    adapter.invoke = AsyncMock(
+        return_value=(400, b'{"error":"bad pmid"}', {}, TokenUsage())
+    )
+    result = await run_fallback_loop(
+        try_order=["claude-sonnet", "claude-haiku"],
+        original_alias="claude-sonnet",
+        is_stream=False,
+        req_data={},
+        redis=AsyncMock(),
+        auth_context=None,
+        state={},
+        request_id="req-r14-mask",
+        budget_status=None,
+        adapter=adapter,
+        stream_kwargs={},
+        nonstream_kwargs={},
+        cb=cb,
+        router_service=MagicMock(),
+        session_factory=MagicMock(),
+        is_db_degraded=False,
+        original_model_config=_cfg("claude-sonnet"),
+        resolve_model_config=AsyncMock(return_value=_cfg("claude-haiku")),
+        build_candidate_body=lambda req, cfg, s: (json.dumps(req).encode(), {}, {}),
+        rewrite_model_id=lambda x: x,
+    )
+    assert result.status == 503
+    assert b"temporarily unavailable" in result.payload[0]
+
+
+@pytest.mark.asyncio
+async def test_pool_timeout_is_503_not_unsettled():
+    """PoolTimeout 은 연결을 못 얻은 것 — 요청이 안 나갔으니 폴백 안전(503)."""
+    import httpx
+
+    from app.providers.base import classify_transport_error
+
+    status, hdrs, _ = classify_transport_error(httpx.PoolTimeout("full"))
+    assert status == 503 and not hdrs
+    status, hdrs, _ = classify_transport_error(httpx.WriteTimeout("w"))
+    assert status == 503 and not hdrs
+    status, hdrs, _ = classify_transport_error(httpx.ReadTimeout("r"))
+    assert status == 504 and hdrs.get(ATTEMPT_UNSETTLED_HEADER) == "1"
+
+
+@pytest.mark.asyncio
 async def test_fallback_budget_stops_new_attempts():
     """총 예산을 넘으면 새 후보를 시도하지 않고 마지막 오류를 돌려준다."""
     adapter = AsyncMock()

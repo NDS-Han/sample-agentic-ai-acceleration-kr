@@ -573,16 +573,13 @@ async def run_fallback_loop(
                 # 주면 그 슬롯만 건너뛴다 — 그대로 돌려주면 원본의 진짜 오류(예: 503)가
                 # 잘못된 후보의 4xx 로 바뀌어, 클라이언트는 요청이 유효했는데
                 # invalid_request_error 를 받는다. 원본의 오류가 우선이다.
+                # last_error 에도 싣지 않는다 — 원본이 회로개방으로 시도조차 못 한
+                # 경우 후보의 4xx 가 유일한 오류로 남아 마스킹이 재발한다.
                 logger.info(
                     "fallback_candidate_error_skipped",
                     alias=alias,
                     status=status,
                 )
-                if last_error is None:
-                    err_bytes = response_body if not is_stream else json.dumps(
-                        anthropic_error("provider_error", f"Backend returned {status}")
-                    ).encode()
-                    last_error = (status, err_bytes)
                 continue
 
             availability_fallback_from = original_alias if not is_original else None
@@ -611,8 +608,11 @@ async def run_fallback_loop(
                 )
 
     # Loop exhausted
-    if not any_invoked:
-        # All candidates were circuit-open
+    if last_error is None:
+        # 아무것도 호출되지 않았거나, 호출된 후보가 전부 스킵된 비-폴백 오류였다
+        # (원본은 회로개방으로 시도 못 함). 후보의 오류로 원본 상황을 가리지 않고
+        # 일괄 503 을 돌려준다 — all_open 과 같은 계약이라 라우터가 ERROR 행과
+        # Retry-After 를 단다.
         return FallbackResult(
             status=503,
             payload=(
@@ -626,11 +626,11 @@ async def run_fallback_loop(
                 TokenUsage(),
             ),
             model_config=original_model_config,
-            all_open=True,
+            all_open=not any_invoked,
         )
 
     # All candidates failed with real backend errors — return last error
-    last_status, last_body = last_error  # type: ignore[misc]
+    last_status, last_body = last_error
     return FallbackResult(
         status=last_status,
         payload=(last_body, {}, TokenUsage() if not is_stream else None),

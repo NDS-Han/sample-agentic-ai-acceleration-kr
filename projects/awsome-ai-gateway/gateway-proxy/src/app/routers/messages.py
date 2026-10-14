@@ -991,6 +991,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     ttft_ms=duration_ms,
                     rate_limit_state=state.pop("rate_limit_state", None),
                     availability_fallback_from=availability_fallback_from,
+                    bedrock_request_id=aws_request_id,
                     client=client,
                     status=usage_status_of(None, status),
                 )
