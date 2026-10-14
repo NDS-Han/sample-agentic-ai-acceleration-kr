@@ -37,8 +37,9 @@ class _Session:
 
     ``commit_exc`` 는 매번 던지는 예외, ``fail_first_n_commits`` 는 처음 N회만
     던지고 이후 성공하는 일시 장애 시뮬레이션이다.
-    ``existing_row`` 는 dead-claim 조회(IntegrityError 후 기존 슬롯 SELECT)가
-    돌려줄 NotificationLog 대역이다.
+    ``existing_row`` 는 dead-claim 클레임 대상 NotificationLog 대역 — UPDATE
+    문은 ``status='pending' AND 마지막 활동이 300s 초과`` 조건을 에뮬레이션해
+    매칭될 때만 id 를 반환하고 행의 하트비트를 갱신한다.
     """
 
     def __init__(
@@ -74,8 +75,35 @@ class _Session:
         pass
 
     async def execute(self, stmt, params=None):
+        from sqlalchemy.sql.dml import Update
+
         result = MagicMock()
+        if isinstance(stmt, Update):
+            # 조건부 클레임 UPDATE 에뮬레이션 — stale pending 행만 매칭된다.
+            row = self._existing_row
+            activity = [
+                x
+                for x in (
+                    getattr(row, "created_at", None),
+                    getattr(row, "last_attempt_at", None),
+                )
+                if x is not None
+            ]
+            last_activity = max(activity) if activity else None
+            stale = (
+                last_activity is not None
+                and (datetime.now(UTC) - last_activity).total_seconds() > 300
+            )
+            if row is not None and getattr(row, "status", None) == "pending" and stale:
+                row.attempt_count += 1
+                row.last_attempt_at = datetime.now(UTC)
+                result.scalar_one_or_none.return_value = "claimed-id"
+            else:
+                result.scalar_one_or_none.return_value = None
+            return result
+        # SELECT — 클레임 후 재조회 / resend 조회
         result.scalar_one_or_none.return_value = self._existing_row
+        result.scalar_one.return_value = self._existing_row
         return result
 
 

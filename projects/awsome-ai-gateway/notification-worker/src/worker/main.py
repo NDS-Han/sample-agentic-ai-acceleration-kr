@@ -30,6 +30,7 @@ from worker.handlers.system_handler import SystemHandler
 from worker.listeners.channel_listener import ChannelListener
 from worker.listeners.config_reload_task import ConfigReloadTask
 from worker.listeners.health_check_task import HealthCheckTask
+from worker.listeners.pending_sweeper import PendingSweepTask
 from worker.observability import WorkerMetrics, init_otel, shutdown_otel
 from worker.redis_client import create_redis_client, set_redis_client
 from worker.schemas.events import EventType, NotificationEvent
@@ -163,6 +164,8 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
         "email_sender": email_sender,
         "retry_executor": retry_executor,
         "metrics": worker_metrics,
+        "redis_client": redis,
+        "cooldown_seconds": settings.notification_cooldown_seconds,
     }
     budget_handler = BudgetHandler(**handler_kwargs)
     key_handler = KeyHandler(**handler_kwargs)
@@ -205,12 +208,27 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     supervisor = TaskSupervisor()
 
     for channel, handler in channel_handler_map.items():
-        listener = ChannelListener(channel, handler, metrics=worker_metrics)
+        listener = ChannelListener(
+            channel,
+            handler,
+            metrics=worker_metrics,
+            max_inflight=settings.listener_max_inflight,
+        )
         supervisor.register(f"listener:{channel}", listener.run)
 
     config_reload_task = ConfigReloadTask()
     supervisor.register("config_reload", config_reload_task.run)
     supervisor.register("health_check", health_check_task.run)
+
+    # stuck pending/failed 알림 회수 — pub/sub 재전송이 없으므로 dead-claim
+    # 이나 최종 failed 행은 sweeper 없이는 영구 미발송이다.
+    pending_sweeper = PendingSweepTask(
+        session_factory=session_factory,
+        event_type_handler_map=event_type_handler_map,
+        sweep_interval=settings.pending_sweep_interval,
+        metrics=worker_metrics,
+    )
+    supervisor.register("pending_sweeper", pending_sweeper.run)
 
     # ── 14. Signal 핸들러 ─────────────────────────────────────────────────────
     loop = asyncio.get_event_loop()

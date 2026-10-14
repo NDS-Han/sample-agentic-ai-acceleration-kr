@@ -67,7 +67,14 @@ class HealthCheckTask:
             if not self._db_healthy:
                 self._db_healthy = True
                 logger.info("db_connection_restored")
-                drained = await self._notification_buffer.drain(self._process_buffered_event)
+
+            # drain 은 "다운→복구" 전이뿐 아니라 DB 정상이면 매 주기 돌린다 —
+            # 체크 간격(60s)보다 짧은 블립은 _db_healthy 플래그가 안 뒤집혀
+            # 버퍼에 쌓인 이벤트가 다음 감지 장애나 종료 시까지 메모리에 갇힌다.
+            if self._notification_buffer.size:
+                drained = await self._notification_buffer.drain(
+                    self._process_buffered_event
+                )
                 if drained > 0:
                     logger.info("buffer_drained", count=drained)
 

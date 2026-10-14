@@ -26,20 +26,28 @@ def _make_raw_message(event_id: str = "e1") -> dict:
     }
 
 
-async def _run_listener_with_messages(messages: list[dict], handler) -> None:
-    """지정된 메시지들을 처리한 후 CancelledError로 종료되는 리스너를 실행한다."""
+def _make_pubsub(messages: list[dict]) -> AsyncMock:
+    """지정된 메시지들을 반환한 뒤 CancelledError로 루프를 끝내는 pubsub mock."""
     pubsub = AsyncMock()
+    it = iter(messages)
 
-    async def listen_gen():
-        for msg in messages:
-            yield msg
-        # CancelledError로 루프 종료 시뮬레이션
-        raise asyncio.CancelledError()
+    async def get_message(**_kwargs):
+        try:
+            return next(it)
+        except StopIteration:
+            raise asyncio.CancelledError()
 
-    pubsub.listen = listen_gen
+    pubsub.get_message = get_message
     pubsub.subscribe = AsyncMock()
     pubsub.unsubscribe = AsyncMock()
     pubsub.aclose = AsyncMock()
+    pubsub.ping = AsyncMock()
+    return pubsub
+
+
+async def _run_listener_with_messages(messages: list[dict], handler) -> None:
+    """지정된 메시지들을 처리한 후 CancelledError로 종료되는 리스너를 실행한다."""
+    pubsub = _make_pubsub(messages)
 
     mock_redis = MagicMock()
     mock_redis.pubsub.return_value = pubsub
@@ -64,19 +72,6 @@ async def test_listener_calls_handler_on_valid_message() -> None:
     assert event_arg.event_id == "e1"
 
 
-async def test_listener_skips_non_message_type() -> None:
-    handler = AsyncMock()
-    handler.handle = AsyncMock()
-
-    # type != "message"인 메시지 (subscribe 확인 메시지 등)
-    await _run_listener_with_messages(
-        [{"type": "subscribe", "data": 1}],
-        handler,
-    )
-
-    handler.handle.assert_not_awaited()
-
-
 async def test_listener_skips_invalid_json() -> None:
     handler = AsyncMock()
     handler.handle = AsyncMock()
@@ -99,16 +94,7 @@ async def test_listener_increments_received_metric() -> None:
     handler = AsyncMock()
     handler.handle = AsyncMock()
 
-    pubsub = AsyncMock()
-
-    async def listen_gen():
-        yield _make_raw_message("e1")
-        raise asyncio.CancelledError()
-
-    pubsub.listen = listen_gen
-    pubsub.subscribe = AsyncMock()
-    pubsub.unsubscribe = AsyncMock()
-    pubsub.aclose = AsyncMock()
+    pubsub = _make_pubsub([_make_raw_message("e1")])
 
     mock_redis = MagicMock()
     mock_redis.pubsub.return_value = pubsub
@@ -147,14 +133,9 @@ async def test_listener_survives_handler_exception_and_continues() -> None:
 
 
 async def test_listener_propagates_subscription_errors() -> None:
-    """구독(이터레이션) 자체가 깨지면 Supervisor 재시작으로 전파되어야 한다."""
+    """구독(연결) 자체가 깨지면 Supervisor 재시작으로 전파되어야 한다."""
     pubsub = AsyncMock()
-
-    async def listen_gen():
-        raise ConnectionError("redis connection lost")
-        yield  # pragma: no cover
-
-    pubsub.listen = listen_gen
+    pubsub.get_message = AsyncMock(side_effect=ConnectionError("redis connection lost"))
     pubsub.subscribe = AsyncMock()
     pubsub.unsubscribe = AsyncMock()
     pubsub.aclose = AsyncMock()

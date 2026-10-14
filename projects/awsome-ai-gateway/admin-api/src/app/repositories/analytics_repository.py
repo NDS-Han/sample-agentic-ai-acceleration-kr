@@ -66,6 +66,13 @@ class AnalyticsRepository:
             existing.active_user_rate_pct = agg.active_user_rate_pct
             existing.requests_per_user_per_day = agg.requests_per_user_per_day
             existing.activation_gap_pct = agg.activation_gap_pct
+            # 생산성 지표도 갱신한다 — 예전엔 INSERT 시에만 쓰이고 UPDATE 분기는
+            # 첫 실행 값 그대로라 월 중 재집계가 반영되지 않았다(소비자 추가 시
+            # stale 값 노출).
+            existing.code_acceptance_rate_pct = agg.code_acceptance_rate_pct
+            existing.cost_per_accepted_code_usd = agg.cost_per_accepted_code_usd
+            existing.generated_lines_per_session = agg.generated_lines_per_session
+            existing.roi_index = agg.roi_index
             existing.aggregated_at = agg.aggregated_at
             existing.aggregated_by = agg.aggregated_by
             return existing

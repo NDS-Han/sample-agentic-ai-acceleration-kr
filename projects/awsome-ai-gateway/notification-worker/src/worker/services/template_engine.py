@@ -52,41 +52,49 @@ class TemplateEngine:
         html_body = self._render_body(event_type, context)
         return subject, html_body
 
-    def _render_subject(self, event_type: str, context: dict) -> str:
-        template_name = f"{event_type}.{self._locale}.subject.txt"
-        try:
-            tmpl = self._env.get_template(template_name)
-        except TemplateNotFound:
-            logger.debug("subject_locale_fallback", event_type=event_type, locale=self._locale)
-            # 비로켈 기본값 fallback
+    def _candidates(self, event_type: str, ext: str) -> list[str]:
+        """폴백 후보 순서. 비로케 파일({type}.html)은 **한국어**다 — 로케일별로
+        순서가 달라야 양쪽 회귀를 피한다:
+
+        - ko(기본): {type}.ko → {type}(한국어 특정) → default.ko → default.
+          비로케 특정이 default.ko 보다 앞에 와야 .ko 없는 7개 타입이 범용
+          템플릿으로 뭉개지지 않는다.
+        - en 등 외국어: {type}.{loc} → default.{loc} → {type} → default.
+          같은 언어의 범용 템플릿이 다른 언어의 특정 템플릿보다 우선 — 예전엔
+          en 설정인데 한국어 특정 템플릿이 먼저 잡혀 영어 메일이 한국어로 나갔다.
+        """
+        loc = self._locale
+        if loc == "ko":
+            return [
+                f"{event_type}.ko.{ext}",
+                f"{event_type}.{ext}",
+                f"default.ko.{ext}",
+                f"default.{ext}",
+            ]
+        return [
+            f"{event_type}.{loc}.{ext}",
+            f"default.{loc}.{ext}",
+            f"{event_type}.{ext}",
+            f"default.{ext}",
+        ]
+
+    def _pick_template(self, candidates: list[str]):
+        for name in candidates:
             try:
-                tmpl = self._env.get_template(f"{event_type}.subject.txt")
+                return self._env.get_template(name)
             except TemplateNotFound:
-                logger.debug("subject_template_fallback", event_type=event_type)
-                try:
-                    tmpl = self._env.get_template(f"default.{self._locale}.subject.txt")
-                except TemplateNotFound:
-                    tmpl = self._env.get_template("default.subject.txt")
+                continue
+        raise TemplateNotFound(candidates[-1])
+
+    def _render_subject(self, event_type: str, context: dict) -> str:
+        tmpl = self._pick_template(self._candidates(event_type, "subject.txt"))
 
         raw = tmpl.render(**context).strip()
         # 이메일 헤더 인젝션 방지: 줄바꿈/제어문자 제거 (BR-SEC-02)
         return _NEWLINE_RE.sub(" ", raw)
 
     def _render_body(self, event_type: str, context: dict) -> str:
-        template_name = f"{event_type}.{self._locale}.html"
-        try:
-            tmpl = self._env.get_template(template_name)
-        except TemplateNotFound:
-            logger.debug("body_locale_fallback", event_type=event_type, locale=self._locale)
-            # 비로켈 기본값 fallback
-            try:
-                tmpl = self._env.get_template(f"{event_type}.html")
-            except TemplateNotFound:
-                logger.debug("body_template_fallback", event_type=event_type)
-                try:
-                    tmpl = self._env.get_template(f"default.{self._locale}.html")
-                except TemplateNotFound:
-                    tmpl = self._env.get_template("default.html")
+        tmpl = self._pick_template(self._candidates(event_type, "html"))
 
         return tmpl.render(**context)
 

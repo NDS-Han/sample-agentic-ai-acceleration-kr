@@ -54,6 +54,10 @@ async def create_redis_client(settings: Settings) -> Redis:
     """
     kwargs: dict = {
         "max_connections": _REDIS_MAX_CONNECTIONS,
+        # 풀 연결의 idle keepalive — 페일오버 후 half-open 소켓 재사용을 줄인다.
+        # pub/sub 전용 연결의 무응답 감지는 ChannelListener 의 heartbeat ping 담당.
+        "socket_keepalive": True,
+        "health_check_interval": 30,
     }
 
     if settings.redis_tls_enabled:

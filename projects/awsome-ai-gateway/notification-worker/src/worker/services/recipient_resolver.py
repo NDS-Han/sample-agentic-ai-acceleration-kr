@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import structlog
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.models.auth import Team, User
@@ -39,6 +40,11 @@ class RecipientResolver:
             for role in roles:
                 try:
                     new = await self._resolve_role(role, payload, session)
+                except SQLAlchemyError:
+                    # DB 장애를 역할 단위 skip 으로 삼키면 resolve() 가 [] 를 반환해
+                    # 핸들러가 "수신자 없음"으로 이벤트를 폐기한다 — Pub/Sub 재전송이
+                    # 없어 영구 유실. 인프라 오류는 핸들러로 올려 버퍼에 넣는다.
+                    raise
                 except Exception:
                     logger.exception("recipient_resolve_error", role=role)
                     continue

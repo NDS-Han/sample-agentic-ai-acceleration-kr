@@ -101,6 +101,14 @@ class Settings(BaseSettings):
     # Reliability
     notification_buffer_max: int = 1_000
     health_check_interval: int = 60  # seconds
+    # 같은 정체성 이벤트의 쿨다운 창(초) — auth_failure_spike 같은 카운터형
+    # 이벤트 폭주 시 수신자당 이 창 안에 1통만 발송한다. 0 = dedup off.
+    notification_cooldown_seconds: int = 600
+    # stuck pending/failed 알림 회수 주기(초)
+    pending_sweep_interval: int = 120
+    # 채널 리스너의 동시 이벤트 처리 상한 — 느린 발송이 채널 읽기를 멈추는
+    # head-of-line blocking 완화용.
+    listener_max_inflight: int = 8
 
     # 이메일 본문의 "발송시각" 표시 타임존(§59). IANA TZ 이름.
     # admin-api 의 REPORTING_TIMEZONE 과 동일 값으로 맞추는 것을 권장(운영 기준 통일).
