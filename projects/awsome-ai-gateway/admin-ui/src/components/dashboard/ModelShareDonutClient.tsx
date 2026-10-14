@@ -196,10 +196,11 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
           {t('noUsageForScope')}
         </div>
       ) : (
-        <div className="flex flex-col gap-4">
-          {/* 도넛 위 · 범례 전폭 아래 — 나란히 두면 범례 열이 좁아 모델명이
-              2~3줄로 꺾여 한눈에 안 들어온다. 행이 카드 전폭을 쓰면 한 줄로 끝난다. */}
-          <div className="relative h-56 w-56 mx-auto">
+        {/* lg 부턴 도넛 왼쪽 + 범례 오른쪽 가로 배치. 범례는 도넛 높이(14rem)로
+            cap 하고 스크롤 — 범례가 아무리 길어도 카드 높이가 늘어나지 않아
+            옆 비용 추이 카드와 균형이 유지된다. 모바일은 종전대로 세로 스택. */}
+        <div className="flex flex-col items-center gap-4 lg:flex-row lg:items-center">
+          <div className="relative h-56 w-56 shrink-0">
             <Doughnut data={chartData} options={options} />
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
@@ -238,7 +239,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               );
             })()}
           </div>
-          <ul className="space-y-1">
+          <ul className="w-full space-y-1 lg:max-h-56 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
             {displayModels.map((m, i) => {
               const isOther = m.model_alias === '__other__';
               const label = isOther
