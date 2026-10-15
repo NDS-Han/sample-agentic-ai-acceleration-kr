@@ -77,3 +77,62 @@ sqlglot 실측 26+케이스 + 회귀 테스트 `tests/unit/test_query_db_validat
 - kiro 1라운드 must-fix 1·2번은 출력 절단으로 미확인 — 재실행이
   사용량 한도로 불가해 자체 심층 점검(인증 순서·경로 가드·스트림 처리)으로
   대체. 다음 라운드에서 재검증 권장.
+
+## Claude 검증 라운드(kiro 월 한도 소진으로 대체 진행)
+
+kiro 사용량 소진 후 Anthropic Claude(Bedrock)로 adversarial review 계속.
+
+### 라운드 1 (`830edb86` diff) — NOT CONVERGED
+
+| # | 발견 | 조치 |
+|---|---|---|
+| MF1 | `chat_agent.py` `timedelta` 미임포트 — 라이브 챗 post_message 전부 500 | import 추가 + 만료-세션 회귀 테스트 |
+| MF2 | `VALUES` 루트가 `traverse_scope` 비대상 → whitelist 우회 (`VALUES ((SELECT … FROM pg_stat_activity))`) | `_ALLOWED_ROOTS` 에서 `exp.Values` 제거 + 미해석 Table 노드 fail-closed |
+| M3 | 괄호 서브쿼리 `(...) FOR UPDATE` — Lock 이 Subquery 에 붙어 스캔 우회 | `exp.Lock`/`exp.Into` 전체 AST 스캔 |
+| SF4 | users/models/budgets 외 3개 액션 경로 미인코딩 | 전수 조사 + `encodeURIComponent` |
+| nits | api-client `%2e`/`#`/`?` 우회, ChatLayout 410 재시도 실패 시 에러 삼켜짐, TextDecoder tail flush 누락 | 정규화 경로 비교로 전환 / 재시도·세션생성 실패 setError / decode() tail flush |
+
+→ `b4341860` 커밋·배포(admin-api·scheduler `b4341860`, admin-ui `33ded004`).
+
+### 라운드 2 — NOT CONVERGED
+
+| # | 발견 | 조치 |
+|---|---|---|
+| M1 | 커버리지 검사의 전역 `cte_names` 면제 — `WITH a AS (…EXISTS(SELECT … FROM pg_roles x))…` 계열 미해석 노드가 동명 CTE 로 면제 | scope-로컬 해석으로 교체(`scope.sources` 키가 name·alias 모두 포함 확인) |
+| S1 | api-client `#` 세그먼트 미거절 | 거절 추가 |
+
+→ `33ded004`. 검증 도중 발생한 일회성 배치 이상 출력은 재현 불가 —
+pytest(권위) 46통과 + 단독 재실행 정상으로 확정.
+
+### 라운드 3 — NOT CONVERGED
+
+| # | 발견 | 조치 |
+|---|---|---|
+| M1 | 식별자 대소문자 폴딩 우회 — `WITH "PG_ROLES" AS (…) SELECT * FROM PG_ROLES` 가 Postgres 에서는 `pg_roles`(인용 없음→소문자 폴딩)를 참조하는데 validator 는 인용 CTE 별칭으로 면제 | `normalize_identifiers(ast, dialect="postgres")` 를 파싱 직후 적용. 인용은 대소문자 보존·비인용은 소문자 폴딩이라 의미론이 Postgres 와 일치 |
+
+→ `16a4ed89`.
+
+### 라운드 4 — CONVERGED
+
+must-fix 0. sqlglot 30.18 소스 실독 검증:
+`ASCII_ONLY_NORMALIZATION`(Unicode 폴딩 우회 불가), `branch()` 가 부모
+FROM 별칭을 자식에 넘기지 않음(서브쿼리·LATERAL 안전), `walk_in_scope` 가
+Query 경계에서 정지(미방문 테이블은 커버리지 fail-closed 에 걸림),
+WITH RECURSIVE 전방참조는 오탐 방향으로만 실패.
+
+| # | 잔여 | 조치 |
+|---|---|---|
+| S1 | 화이트리스트 비교가 양쪽 소문자화 — 인용된 `"USAGE_LOGS"` 가 `usage_logs` 에 매칭(오늘은 해당 릴레이션 부재로 runtime error 로 끝나지만, 동명-대소문자 테이블이 생기면 우회) | 정규화 후 정확 비교로 전환 |
+| S2 | 회귀 테스트 보강 | 케이스 6개 추가 → 58통과 |
+
+→ `4b89c43c`. **최종 verdict: CONVERGED.**
+
+### 최종 누계(R17)
+
+- 커밋: `830edb86` → `b4341860` → `33ded004` → `16a4ed89` → `4b89c43c` (push 완료)
+- 테스트: chat-agent 241 / admin-ui 418 / admin-api 970 / validator 회귀 58
+- 배포: Helm rev 212 · 스모크 12/0 · admin-api/scheduler `b4341860`,
+  admin-ui `33ded004`(timedelta 수정 + UI 수정 포함)
+- `query_db` Lambda 는 dev 미배포(`LAMBDA_QUERY_DB` 빈 값, terraform
+  `enable_chat_agent=false`) — 활성화 시 수정 코드가 함께 배포됨.
+  prod 활성화 전 terraform 재실행 필요.
