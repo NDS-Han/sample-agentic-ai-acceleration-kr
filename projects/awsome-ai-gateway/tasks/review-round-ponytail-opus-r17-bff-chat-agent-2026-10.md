@@ -171,3 +171,19 @@ validator 우회 시도 약 80건을 수행 — 전부 방어 확인.
 admin-ui 418 / tsc 클린.
 배포: Helm rev 214 — admin-api·scheduler·admin-ui `69b7a05e` · 스모크 13/0
 (migration 이미지는 `a4279bfb` 유지 — db/ 변경 없음).
+
+### 라운드 7 — NOT CONVERGED (must-fix 0, S-1·S-2 가 수렴 조건)
+
+| # | 발견 | 조치 |
+|---|---|---|
+| S-1 | 재수화 이력이 role 교대 미보장 — 고아 user 행(producer 취소/재시작으로 assistant 미저장)·빈 assistant 필터·LIMIT 12 패리티 깨짐으로 `[user,user]`/선두 assistant 시드 → Bedrock ValidationException 으로 해당 microVM 의 후속 턴 전부 실패 | `_seed_history` 정규화 — 선두 assistant 제거, 연속 같은 role 최신만, 후미 user 제거 |
+| S-2 | N1 스냅샷 인덱스(`del msgs[mark:]`)가 SlidingWindow 제자리 트림과 충돌 — strands `apply_management` 는 `finally` 에서 실행돼 예외 경로에도 window_size 40 으로 앞을 잘라 인덱스 복원 무효, CancelledError(BaseException)도 미포착 | 리스트 사본 스냅샷 + `orch_msgs[:] = snapshot` 통째 복원, `except BaseException` |
+| N-1 | `LIMIT (2+3)`(5행)·`LIMIT 2.9`(3행)·음수 LIMIT 이 LIMIT 1000 으로 치환돼 의미 확대/PG 오류→성공 변환 | 비리터럴·음수 LIMIT 도 FETCH 와 동일하게 서브쿼리 래핑 보존 |
+| N-2 | `CSP_HOST_RE` 는 형식만 검사 — `s3.리전.amazonaws.com` path-style 엔드포인트 허용 시 모든 버킷 경로 개방으로 R17-5 S1 재개방 | `s3.`/`s3-` 접두 호스트 거부 + values.yaml 문서화 |
+| N-3 | user 메시지 무제한 + 이력 SELECT 가 원문 통째로 읽은 뒤 Python 절단 | `MessageCreate.content` `max_length=16000` + `left(content,4000)` DB 절단 |
+| N-4 | 시드/복원/취소 경로 테스트 공백 + `payload.get` 직접 호출 | 회귀 테스트 4건 + middlewareCsp 4건 신설, `(payload or {}).get` |
+| 기타 | `handleSubmit` deps `t` 누락, values 주석의 deployment.yaml:87→120 stale | 정정 |
+
+→ `c4e71a8d`. 테스트: chat-agent 258 / admin-api 970 / admin-ui 422
+(middlewareCsp +4) / tsc 클린.
+배포: Helm rev 215 — admin-api·scheduler·admin-ui `c4e71a8d` · 스모크 13/0.
