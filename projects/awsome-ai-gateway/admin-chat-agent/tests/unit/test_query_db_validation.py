@@ -100,6 +100,13 @@ REJECT_QUERIES = [
     "(SELECT * FROM usage.usage_logs) FOR UPDATE",
     "(SELECT * FROM usage.usage_logs FOR UPDATE) s",
     "(SELECT * INTO tmp FROM usage.usage_logs)",
+    # claude R17-2 M1 — scope-local 면제 검증: traverse_scope 사각지대(LATERAL
+    # 안의 VALUES 서브쿼리)에 있는 Table 노드가 다른 스코프의 동명 CTE 로
+    # 위장해 면제되던 우회
+    "WITH pg_roles AS (SELECT 1 AS x) SELECT * FROM usage.usage_logs u, LATERAL (VALUES ((SELECT rolname FROM pg_roles))) v(r)",
+    "SELECT * FROM usage.usage_logs u, LATERAL (VALUES ((SELECT rolname FROM pg_roles))) v(r)",
+    "WITH pg_roles AS (VALUES ((SELECT string_agg(rolname, ',') FROM pg_roles))) SELECT * FROM pg_roles",
+    "WITH a AS (VALUES((SELECT datname FROM pg_stat_activity))), pg_stat_activity AS (SELECT 1) SELECT * FROM a",
 ]
 
 

@@ -64,13 +64,15 @@ class AdminAPIClient {
     // 호출부 인코딩과 별개로, 정규화된 최종 경로가 /admin/ 아래인지 여기서
     // 한 번 더 확인한다(심층 방어 — chat-proxy 와 같은 계약).
     const normalized = new URL(url).pathname;
-    const rawPath = path.split('?')[0].split('#')[0];
     // '..'/'/.'/`%2e` 세그먼트와 `#`/`?` 절단은 정규화된 pathname 을 원본과
-    //    다르게 만든다 — 일치 검사 하나로 위협군 전체를 거절한다
+    //    다르게 만든다 — 일치 검사가 위협군을 거절한다
     //    (deleteRateLimitAction('..','x') → DELETE /admin/x,
     //    scopeId='%2e%2e/keys/<id>#' → DELETE /admin/keys/<id> 차단;
-    //    claude R17 #4). 인코딩된 값은 pathname 에 그대로 남아 오탐이 없다.
-    if (normalized !== rawPath) {
+    //    claude R17 #4). `#` 는 양쪽이 같은 지점에서 잘려 비교로 못 잡으므로
+    //    별도 거절; `?` 절단은 진짜 쿼리스트링과 구분 불가라 호출부 인코딩이
+    //    계약이다(claude R17-2 S1). 인코딩된 값은 pathname 에 그대로 남아 오탐 없음.
+    const rawPath = path.split('?')[0].split('#')[0];
+    if (normalized !== rawPath || path.includes('#')) {
       throw new APIError(
         400,
         'INVALID_PATH',

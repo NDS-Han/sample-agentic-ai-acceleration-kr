@@ -138,7 +138,7 @@ def validate_sql(sql: str) -> sqlglot.Expression:
     if not isinstance(ast, _ALLOWED_ROOTS):
         raise ValidationError(
             "Only SELECT statements are permitted "
-            "(SELECT/WITH/UNION/VALUES; SET, DDL, DML rejected)."
+            "(SELECT/WITH/UNION; SET, DDL, DML, bare VALUES rejected)."
         )
 
     for op_name in (
@@ -224,33 +224,36 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         raise ValidationError(f"Could not resolve table references: {e}") from e
 
     # 커버리지 검사(fail closed) — traverse_scope 가 방문하지 않는 AST 영역에
-    #    Table 노드가 남아 있으면 화이트리스트 우회다. 면제는 둘뿐:
-    #    - CTE 별칭 참조: scope.sources 가 Table 이 아니라 Scope 로 해석되므로
-    #      노드 자체가 resolved_ids 에 없다. 이름이 어떤 스코프의 cte_sources 에
-    #      있고 스키마 한정이 없는(db 없음) 노드만 해당.
-    #    - UDTF(FROM generate_series): name 이 빈 Table — 위 denylist 가 함수를
-    #      이미 거절한다.
+    #    Table 노드가 남아 있으면 화이트리스트 우회다(실측: `LATERAL (VALUES
+    #    ((SELECT ... FROM t)))` 내부 t). 면제는 노드가 속한 **같은 스코프**에서
+    #    이름이 Scope 로 해석된 경우뿐 — 전역 CTE 이름 집합은 다른 스코프의
+    #    동명 CTE로 실테이블을 숨기는 우회를 연다(claude R17 M1:
+    #    `WITH pg_roles AS (SELECT 1) ... LATERAL (VALUES((SELECT ... FROM
+    #    pg_roles)))` — 안쪽 pg_roles 는 실테이블인데 이름이 면제돼 통과했다).
+    #    UDTF(FROM generate_series)는 name 이 빈 Table 이라 별도 스킵 — 위
+    #    denylist 가 함수 자체를 이미 거절한다.
     resolved_ids = {
         id(src)
         for scope in scopes
         for src in scope.sources.values()
         if isinstance(src, exp.Table)
     }
-    cte_names = {
-        str(n).lower()
-        for scope in scopes
-        for n in getattr(scope, "cte_sources", {})
-    }
+    covered_ids = set()
+    for scope in scopes:
+        for t in scope.tables:
+            if id(t) in resolved_ids:
+                covered_ids.add(id(t))
+                continue
+            src = scope.sources.get(t.name)
+            if src is not None and not isinstance(src, exp.Table):
+                covered_ids.add(id(t))  # CTE/서브쿼리 참조 — 이 스코프 한정
     for node in ast.find_all(exp.Table):
-        if id(node) in resolved_ids:
-            continue  # 실테이블 — 아래 화이트리스트 루프가 검사한다
         if not node.name:
             continue
-        if not node.args.get("db") and node.name.lower() in cte_names:
-            continue
-        raise ValidationError(
-            f"Could not resolve table reference: {node.sql()}"
-        )
+        if id(node) not in covered_ids:
+            raise ValidationError(
+                f"Could not resolve table reference: {node.sql()}"
+            )
 
     for table in table_sources:
         # table.text("db") returns the schema as a plain string ("" if absent);
