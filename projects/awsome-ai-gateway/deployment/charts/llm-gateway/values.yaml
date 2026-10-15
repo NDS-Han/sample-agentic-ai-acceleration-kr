@@ -784,7 +784,7 @@ adminUi:
   affinity: {}
 
   # admin-ui 앱 설정은 전용 블록 없이 전부 이 자유 map 을 통과한다 —
-  # templates/admin-ui/deployment.yaml:87 의 `range $key, $value := .Values.adminUi.env`.
+  # templates/admin-ui/deployment.yaml:120 의 `range $key, $value := .Values.adminUi.env`.
   env:
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
@@ -792,6 +792,8 @@ adminUi:
     # 채팅 kind:'image' 차트(presigned S3)의 CSP img-src 허용 호스트(쉼표 구분).
     # 정확한 버킷 호스트만 — 와일드카드/`*`는 CSP 문자열 인젝션 차단으로 폐기된다
     # (middleware CSP_HOST_RE). 비어 있으면 외부 이미지 전면 차단(fail-closed).
+    # virtual-hosted 버킷 호스트만 허용 — `s3.리전.amazonaws.com` 같은
+    # path-style 엔드포인트는 모든 버킷 경로가 열려 middleware 가 거부한다.
     # 예: CHAT_IMAGE_HOSTS: "my-bucket.s3.ap-south-1.amazonaws.com"
     #CHAT_IMAGE_HOSTS: ""
     # ── 브라우저 SSO (OIDC Authorization Code + PKCE) — 기본 OFF ──

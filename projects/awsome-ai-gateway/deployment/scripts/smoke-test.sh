@@ -111,7 +111,7 @@ test_health_endpoints() {
 
     # admin-ui
     if kc exec -n "$NAMESPACE" -it deploy/${RELEASE_NAME}-admin-ui -c admin-ui -- \
-        wget -qO- --spider http://localhost:3000/api/health 2>&1 | grep -qi 'ok\|200'; then
+        wget -qO- http://127.0.0.1:3000/api/health 2>&1 | grep -qi 'ok\|200'; then
         pass "admin-ui /api/health"
     else
         warn "admin-ui /api/health (wget/curl 미설치일 수 있음)"

@@ -217,3 +217,39 @@ def test_force_limit_fetch_percent_preserved():
     out = L.force_limit(ast)
     assert "PERCENT" in out
     assert out.startswith("SELECT * FROM (")
+
+
+# ─── force_limit 의 비리터럴/음수 LIMIT 처리 (kiro R17-7 N-1) ───
+def test_force_limit_nonliteral_limit_preserved():
+    # LIMIT (2+3) 은 실제 5행 — LIMIT 1000 으로 덮으면 의미가 넓어진다.
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT (2+3)")
+    out = L.force_limit(ast)
+    assert out.startswith("SELECT * FROM (")
+    assert "LIMIT (2 + 3)" in out
+    assert out.rstrip().endswith(f"LIMIT {L.QUERY_LIMIT}")
+
+
+def test_force_limit_float_limit_preserved():
+    # LIMIT 2.9 는 PG 에서 3행 — 상한 치환 대신 원래 절 보존.
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT 2.9")
+    out = L.force_limit(ast)
+    assert out.startswith("SELECT * FROM (")
+    assert "LIMIT 2.9" in out
+
+
+def test_force_limit_negative_limit_preserved():
+    # 음수 LIMIT 은 PG 가 거부할 문 — 상한으로 치환하면 오류가 성공으로 바뀐다.
+    try:
+        ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT -1")
+    except Exception:
+        return  # 파서/validator 단계 거절도 허용 — 어느 쪽이든 치환되면 안 됨
+    out = L.force_limit(ast)
+    assert out.startswith("SELECT * FROM (")
+
+
+def test_force_limit_literal_limit_still_inline():
+    # 정상 정수 리터럴은 기존처럼 제자리 축소(래핑 없음) — 회귀 방지.
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT 5")
+    out = L.force_limit(ast)
+    assert "LIMIT 5" in out
+    assert not out.startswith("SELECT * FROM (")

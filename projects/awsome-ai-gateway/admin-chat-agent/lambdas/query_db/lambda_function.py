@@ -356,10 +356,20 @@ def force_limit(ast: sqlglot.Expression) -> str:
         else:
             limit = min(limit, count)
     elif existing_limit:
+        # kiro R17-7 N-1 — `LIMIT (2+3)`(5행)이나 `LIMIT 2.9`(3행)를 LIMIT
+        # 1000 으로 덮으면 의미가 넓어진다. 음수 리터럴은 PG 가 거부해야 할
+        # 문인데 상한으로 치환하면 오류가 성공으로 바뀐다. 리터럴 정수이고
+        # 0 이상일 때만 제자리 축소, 나머지는 FETCH 와 같은 방식으로 감싸
+        # 원래 절(=원래 의미/오류)을 보존한다.
+        limit_value: int | None = None
         try:
-            limit = min(limit, int(existing_limit.expression.this))
-        except Exception:  # noqa: BLE001 — 비정수 LIMIT 표현은 기본 상한으로
+            limit_value = int(existing_limit.expression.this)
+        except Exception:  # noqa: BLE001 — 비리터럴 LIMIT 표현
             pass
+        if limit_value is None or limit_value < 0:
+            preserve_clause = True
+        else:
+            limit = min(limit, limit_value)
     if isinstance(ast, exp.Select) and not preserve_clause:
         ast.set("limit", exp.Limit(expression=exp.Literal.number(limit)))
         return ast.sql(dialect="postgres")

@@ -20,6 +20,11 @@ export const config = {
 // ⚠️ 모듈 초기화 순서: SECURITY_HEADERS 초기화가 contentSecurityPolicy() 를
 //    호출하므로 이 상수는 그보다 위에 있어야 한다(const 는 TDZ).
 const CSP_HOST_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:\d+)?$/;
+// kiro R17-7 N-2 — 호스트 형식만 검사하면 `s3.ap-south-1.amazonaws.com` 같은
+// path-style 리전 엔드포인트가 통과해 모든 버킷 경로가 허용돼 S1 유출 경로가
+// 다시 열린다. `s3.`/`s3-` 로 시작하는 호스트는 거부 — virtual-hosted
+// (버킷.s3.리전.amazonaws.com) 호스트만 허용한다.
+const CSP_HOST_PATHSTYLE_S3_RE = /^s3[.-]/i;
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
@@ -47,7 +52,7 @@ function contentSecurityPolicy(): string {
   const imgHosts = (process.env.CHAT_IMAGE_HOSTS ?? '')
     .split(',')
     .map((h) => h.trim())
-    .filter((h) => CSP_HOST_RE.test(h))
+    .filter((h) => CSP_HOST_RE.test(h) && !CSP_HOST_PATHSTYLE_S3_RE.test(h))
     .map((h) => `https://${h}`)
     .join(' ');
   return (

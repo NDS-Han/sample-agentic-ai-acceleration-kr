@@ -317,7 +317,9 @@ def _spawn(coro) -> asyncio.Task:
 
 # ─── Messages (SSE stream proxy) ───
 class MessageCreate(BaseModel):
-    content: str
+    # kiro R17-7 N-3 — 무제한 user 메시지는 요청마다 이력 SELECT 재조회와 함께
+    # 읽기·저장·Bedrock 전송 경로를 증폭한다. 상한을 둔다.
+    content: str = Field(max_length=16000)
     # "지금 보는 화면" 컨텍스트(선택). admin-ui 가 페이지 등록 데이터를 동봉 →
     # agent 가 컨텍스트 질의에 활용. {page, period?, data?} 형태. 없으면 None.
     screen_context: dict | None = None
@@ -385,14 +387,16 @@ async def post_message(
     # 대화 맥락을 복원할 수 있게 직전 이력을 payload 에 실어 보낸다. 에이전트는
     # messages 가 비어있을 때(새 microVM)만 시드한다. user INSERT **전에** 읽어
     # 방금 보낸 메시지는 제외 — 본문은 invoke 의 content 로 전달되므로 중복 방지.
+    # kiro R17-7 N-3 — 원문을 통째로 읽어 Python 에서 자르면 요청마다 최대
+    # 12행의 전체 본문이 메모리를 오간다. DB 에서 잘라서 가져온다.
     hist_rows = await session.execute(
         text(
-            "SELECT role, content FROM chat_agent.messages "
+            "SELECT role, left(content, 4000) AS content FROM chat_agent.messages "
             "WHERE session_id = CAST(:sid AS uuid) ORDER BY created_at DESC LIMIT 12"
         ).bindparams(sid=session_id)
     )
     history = [
-        {"role": r.role, "content": (r.content or "")[:4000]}
+        {"role": r.role, "content": r.content}
         for r in reversed(hist_rows.fetchall())
         if r.role in ("user", "assistant") and r.content
     ]

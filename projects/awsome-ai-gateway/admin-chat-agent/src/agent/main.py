@@ -1348,31 +1348,52 @@ async def invoke(payload: dict):
     # admin-api 가 보낸 직전 이력으로 재수화해 대화 맥락(특히 deep 모드 plan)
     # 을 복원한다. seed 는 messages 가 비어 있을 때만 — 락 안에서 검사해 같은
     # 세션의 동시 invoke 가 중복 시드하지 않게 한다.
-    history = payload.get("history")
+    history = (payload or {}).get("history")
 
     def _seed_history(agent: Agent) -> None:
         if getattr(agent, "messages", None) or not isinstance(history, list):
             return
+        # kiro R17-7 S-1 — 시드 이력은 Bedrock 의 role 교대 불변식을 만족해야
+        # 한다. 고아 user 행(assistant 저장 전 producer 취소/재시작)이나 LIMIT
+        # 패리티 깨짐으로 [user,user] / 선두 assistant 가 되면 Converse 가
+        # ValidationException 을 내고, N1 복원은 시드 위치까지만 되돌리므로 이
+        # microVM 의 후속 턴이 전부 실패한다. 시드 전에 정규화:
+        #   - 선두는 user 여야 함 → assistant 가 나올 때까지 앞에서 제거
+        #   - 같은 role 연속은 최신 것만 유지(교대 보장)
+        #   - 끝이 user 면 제거 — 새 user 턴은 invoke content 로 이어지므로
+        seeded: list[dict] = []
         for m in history:
             role = m.get("role")
             text = m.get("content")
             if role in ("user", "assistant") and isinstance(text, str) and text:
-                agent.messages.append({"role": role, "content": [{"text": text}]})
+                if seeded and seeded[-1]["role"] == role:
+                    seeded[-1] = {"role": role, "content": [{"text": text}]}
+                else:
+                    seeded.append({"role": role, "content": [{"text": text}]})
+        while seeded and seeded[0]["role"] != "user":
+            seeded.pop(0)
+        if seeded and seeded[-1]["role"] == "user":
+            seeded.pop()
+        agent.messages.extend(seeded)
 
     async def _pump() -> None:
         try:
             async with _ORCH_LOCK:  # 같은 세션의 동시 invoke 직렬화 — Agent 비재진입
                 _seed_history(active_orchestrator)
-                # kiro R17-6 N1 — 스트림 실패/취소 시 Agent.messages 에 user 턴만
-                # 남아 다음 턴이 [user, user] 로 실패 질문을 다시 합친다. 스냅샷으로 복원.
+                # kiro R17-7 S-2 — 스트림 실패/취소 시 Agent.messages 에 user 턴이나
+                # 짝 없는 toolUse 만 남아 이후 턴이 전부 실패한다. 인덱스 복원은
+                # Strands 가 _run_loop finally 의 apply_management(SlidingWindow,
+                # window_size 40)로 messages 를 **제자리** 트림하므로 무효 —
+                # 리스트 사본 스냅샷을 [:] 로 통째로 복원한다. CancelledError 는
+                # BaseException 이라 except Exception 에 잡히지 않으므로 넓게 잡는다.
                 orch_msgs = getattr(active_orchestrator, "messages", None)
-                msg_mark = len(orch_msgs) if orch_msgs is not None else 0
+                snapshot = list(orch_msgs) if orch_msgs is not None else None
                 try:
                     async for ev in active_orchestrator.stream_async(content):
                         queue.put_nowait(("stream", ev))
-                except Exception:
-                    if orch_msgs is not None:
-                        del orch_msgs[msg_mark:]
+                except BaseException:
+                    if orch_msgs is not None and snapshot is not None:
+                        orch_msgs[:] = snapshot
                     raise
         except Exception as exc:  # 펌프 예외를 consumer 로 전달(삼키지 않음)
             queue.put_nowait(("error", exc))

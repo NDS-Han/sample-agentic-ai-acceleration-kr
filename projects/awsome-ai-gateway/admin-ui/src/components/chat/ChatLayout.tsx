@@ -174,7 +174,7 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
         prev.map((m) => (m.pending ? { ...m, pending: false } : m))
       );
     },
-    [sessionId, isStreaming, send, messages, chatPanel, mode, handleError]
+    [sessionId, isStreaming, send, messages, chatPanel, mode, handleError, t]
   );
 
   // "새 대화" — 새 세션 생성 + sessionStorage 교체 + 화면 비우기. 기존 대화는

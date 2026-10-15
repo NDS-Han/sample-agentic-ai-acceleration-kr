@@ -225,3 +225,126 @@ async def test_concurrent_invokes_serialized_by_orch_lock(monkeypatch):
         _drain({"content": "b", "session_id": "s-conc"}),
     )
     assert overlap["max"] == 1, f"동시 스트림 진입: {overlap}"
+
+
+@pytest.mark.asyncio
+async def test_seed_history_normalizes_roles(monkeypatch):
+    """kiro R17-7 S-1 — 시드 이력이 Bedrock role 교대를 깨면(고아 user 행·
+    선두 assistant·LIMIT 패리티 깨짐) Converse ValidationException 으로 이
+    microVM 의 모든 후속 턴이 실패한다. 정규화 확인:
+    선두 assistant 제거 / 연속 같은 role 은 최신 것만 / 후미 user 제거."""
+
+    class _FakeOrch:
+        def __init__(self):
+            self.messages: list[dict] = []
+
+        async def stream_async(self, content):
+            yield {"data": "ok"}
+
+    fake = _FakeOrch()
+    monkeypatch.setattr(m, "orchestrator", fake)
+    monkeypatch.setattr(m, "orchestrator_deep", fake)
+
+    history = [
+        {"role": "assistant", "content": "패리티로 잘린 선두 assistant"},
+        {"role": "user", "content": "q1"},
+        {"role": "user", "content": "q1-재전송"},  # 고아 user 연속 → 최신만
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "assistant 저장 전 죽은 고아 user"},
+    ]
+    await _drain({"content": "새 질문", "session_id": "s-seed", "history": history})
+
+    roles = [mm["role"] for mm in fake.messages]
+    assert roles == ["user", "assistant"], roles
+    assert fake.messages[0]["content"][0]["text"] == "q1-재전송"
+
+
+@pytest.mark.asyncio
+async def test_seed_skipped_when_agent_has_memory(monkeypatch):
+    """같은 microVM 의 연속 턴은 in-memory 이력이 있으므로 시드하지 않는다
+    (시드하면 DB 이력과 이중 append)."""
+
+    class _FakeOrch:
+        def __init__(self):
+            self.messages = [{"role": "user", "content": [{"text": "기존 메모리"}]}]
+
+        async def stream_async(self, content):
+            yield {"data": "ok"}
+
+    fake = _FakeOrch()
+    monkeypatch.setattr(m, "orchestrator", fake)
+    monkeypatch.setattr(m, "orchestrator_deep", fake)
+
+    await _drain({
+        "content": "q", "session_id": "s-noseed",
+        "history": [{"role": "user", "content": "DB 이력"}],
+    })
+    assert len(fake.messages) == 1
+    assert fake.messages[0]["content"][0]["text"] == "기존 메모리"
+
+
+@pytest.mark.asyncio
+async def test_failed_turn_restores_snapshot_even_after_in_place_trim(monkeypatch):
+    """kiro R17-7 S-2 — 스트림 실패 시 messages 를 스냅샷으로 복원한다.
+    Strands SlidingWindow(apply_management in finally)는 messages 를 **제자리**
+    트림하므로 인덱스 기반 복원(del msgs[mark:])은 트림 후엔 무효 — 리스트
+    사본을 [:] 로 통째로 복원해야 한다."""
+
+    class _FakeOrch:
+        def __init__(self):
+            self.messages = [
+                {"role": "user", "content": [{"text": "이전 q"}]},
+                {"role": "assistant", "content": [{"text": "이전 a"}]},
+            ]
+
+        async def stream_async(self, content):
+            self.messages.append({"role": "user", "content": [{"text": content}]})
+            # SlidingWindow 트림 흉내 — 제자리에서 앞 요소 제거
+            self.messages[:] = self.messages[1:]
+            raise RuntimeError("bedrock boom")
+            yield  # pragma: no cover — unreachable, async-gen 형태 유지
+
+    fake = _FakeOrch()
+    expected = list(fake.messages)
+    monkeypatch.setattr(m, "orchestrator", fake)
+    monkeypatch.setattr(m, "orchestrator_deep", fake)
+
+    with pytest.raises(RuntimeError, match="bedrock boom"):
+        await _drain({"content": "새 질문", "session_id": "s-trim"})
+    assert fake.messages == expected
+
+
+@pytest.mark.asyncio
+async def test_cancelled_turn_restores_snapshot(monkeypatch):
+    """CancelledError 는 BaseException — except Exception 으로는 못 잡는다.
+    pump_task.cancel() 경로(generator 조기 종료)에서도 복원돼야 한다."""
+    started = asyncio.Event()
+
+    class _FakeOrch:
+        def __init__(self):
+            self.messages = [
+                {"role": "user", "content": [{"text": "이전 q"}]},
+                {"role": "assistant", "content": [{"text": "이전 a"}]},
+            ]
+
+        async def stream_async(self, content):
+            self.messages.append({"role": "user", "content": [{"text": content}]})
+            started.set()
+            await asyncio.sleep(60)  # cancel 될 때까지
+            yield  # pragma: no cover
+
+    fake = _FakeOrch()
+    expected = list(fake.messages)
+    monkeypatch.setattr(m, "orchestrator", fake)
+    monkeypatch.setattr(m, "orchestrator_deep", fake)
+
+    # 소비 task 를 돌리다가 취소 — consumer 중단 경로(실제로는 pump_task.cancel())
+    async def _consume():
+        async for _ in m.invoke({"content": "q", "session_id": "s-cancel"}):
+            pass
+
+    pull = asyncio.create_task(_consume())
+    await asyncio.wait_for(started.wait(), 2)
+    pull.cancel()
+    await asyncio.gather(pull, return_exceptions=True)
+    assert fake.messages == expected

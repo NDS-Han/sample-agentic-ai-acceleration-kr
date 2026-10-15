@@ -136,3 +136,38 @@ WITH RECURSIVE 전방참조는 오탐 방향으로만 실패.
 - `query_db` Lambda 는 dev 미배포(`LAMBDA_QUERY_DB` 빈 값, terraform
   `enable_chat_agent=false`) — 활성화 시 수정 코드가 함께 배포됨.
   prod 활성화 전 terraform 재실행 필요.
+
+## kiro(Opus 5.5) 추가 라운드 — Claude 수렴 후 재검증
+
+Claude 4라운드 CONVERGED 이후 kiro 토큰 회복, 동일 절차(누적 diff → 검증)
+로 라운드 5~6 진행. kiro 가 실측(실제 Postgres 컨테이너 기동 포함)으로
+validator 우회 시도 약 80건을 수행 — 전부 방어 확인.
+
+### 라운드 5 — NOT CONVERGED
+
+| # | 발견 | 조치 |
+|---|---|---|
+| M1 | deep mode 맥락 상실 — 매 invoke 마다 새 orchestrator 생성으로 plan 승인턴이 이전 턴을 못 봄 | 세션별 orchestrator 인스턴스 캐시(`runtimeSessionId` 로 세션 격리 유지, sub-agent 는 호출별 생성 유지) + 회귀 테스트 |
+| S1 | CSP `img-src https://*.amazonaws.com` — 마크다운 이미지로 임의 AWS 호스트 유출 경로 | `CHAT_IMAGE_HOSTS` 화이트리스트로 전환(fail-closed 기본) + 마크다운 임의 이미지 렌더 차단 + ChartRenderer https 강제 |
+| S2 | whitelist ↔ GRANT 드리프트 — `client`, `reasoning_tokens` 컬럼이 스키마에 있지만 chat_reader 그랜트 누락 | 마이그레이션 `0046_grant_chat_reader_client_reasoning.py` + whitelist↔GRANT 드리프트 회귀 테스트 |
+| S3 | `force_limit` 이 `FETCH FIRST n`/`WITH TIES` 를 LIMIT 1000 으로 덮어씀 | `exp.Fetch` 처리 — 비-ties 는 LIMIT 정규화, `WITH TIES` 는 내부 보존 + 외부 상한 |
+| N1-N4 | cli-download raw fetch, 주석 근거, `readBoundedBody` 예외, 410 재시도 맥락 소실 고지 | 전부 수정 |
+
+→ `a4279bfb`. 테스트: validator 61 / admin-ui 418 / chat-agent 전부 통과.
+배포: Helm rev 213 · 스모크 통과 · 마이그레이션 0046 적용.
+
+### 라운드 6 — NOT CONVERGED (must-fix 0)
+
+| # | 발견 | 조치 |
+|---|---|---|
+| S1 | 세션 리셋 notice 가 pending 버블 뒤에 삽입(유령 버블) + 하드코딩 한글 + report export 포함 | notice 를 pending 버블 앞에 삽입 + `sessionResetNotice` i18n(en/ko) + notice 플래그로 export 제외 |
+| S2 | AgentCore microVM idle timeout(기본 ~900s) 후 in-memory 이력 유실 → 재기동 시 맥락 상실 | admin-api 가 DB 이력을 payload 에 탑재, agent 는 `Agent.messages` 비어있을 때만 재수화(락 안, 이중 시드 방지) |
+| S3 | `FETCH FIRST ROW`(count 생략)·비정수 count·`PERCENT` 잔여 시맨틱 왜곡 | 생략 count 는 LIMIT 1 정규화, `WITH TIES`/`PERCENT`/비정수는 내부 보존 + 외부 상한 래핑 + 엣지 테스트 |
+| N1 | 실패 턴의 dangling user 메시지가 다음 프롬프트에 잔류 | 스트림 전 `len(messages)` 스냅샷 → 예외/취소 시 복원 |
+| N2 | `CHAT_IMAGE_HOSTS` 미검증 — `;`/`*`/scheme 으로 CSP 지시문 인젝션 가능 | `CSP_HOST_RE` 로 호스트 형식만 허용, 무효 값 폐기, 미구성 시 fail-closed |
+| N3 | `CHAT_IMAGE_HOSTS` Helm values 미연결/문서화 부재 | values.yaml 에 항목+주석 추가 |
+
+→ `69b7a05e`. 테스트: validator 65 / chat-agent 250 / admin-api 970 /
+admin-ui 418 / tsc 클린.
+배포: Helm rev 214 — admin-api·scheduler·admin-ui `69b7a05e` · 스모크 13/0
+(migration 이미지는 `a4279bfb` 유지 — db/ 변경 없음).
