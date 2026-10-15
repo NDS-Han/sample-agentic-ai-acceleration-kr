@@ -50,6 +50,7 @@ describe('middleware CSP — CHAT_IMAGE_HOSTS', () => {
       's3-ap-south-1.amazonaws.com',
       's3.amazonaws.com',
       'S3.ap-south-1.amazonaws.com',
+      'vpce-0123.s3.ap-south-1.vpce.amazonaws.com',
     ]) {
       const img = imgSrc(await cspFor(bad));
       expect(img).not.toContain(bad.toLowerCase());

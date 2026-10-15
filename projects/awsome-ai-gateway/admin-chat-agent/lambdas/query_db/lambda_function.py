@@ -333,6 +333,18 @@ def force_limit(ast: sqlglot.Expression) -> str:
     """
     limit = QUERY_LIMIT
     existing_limit = ast.args.get("limit")
+    def _literal_nonneg_int(node: sqlglot.Expression | None) -> int | None:
+        # kiro R17-8 N-c — 진짜 정수 리터럴만 인정한다. int(node.this) 는
+        # HexString('10') 을 10 으로 읽거나(PG16+ 에선 16, 이하는 구문 오류),
+        # bigint 오버플로 리터럴을 min() 으로 성공시켜 원래 의미/오류를 바꾼다.
+        # 형태(숫자만)와 범위(bigint)를 같이 검사해 아니면 원래 절을 보존한다.
+        if not isinstance(node, exp.Literal) or node.is_string:
+            return None
+        if not re.fullmatch(r"\d+", node.this):
+            return None
+        value = int(node.this)
+        return value if value <= 9_223_372_036_854_775_807 else None
+
     preserve_clause = False  # 내부 절을 지우지 않고 서브쿼리로 감싸야 하는 경우
     if isinstance(existing_limit, exp.Fetch):
         # FETCH FIRST n ROWS — count 는 expression 이 아니라 args["count"]
@@ -347,10 +359,7 @@ def force_limit(ast: sqlglot.Expression) -> str:
         if count_expr is None:
             count = 1 if not percent else None
         else:
-            try:
-                count = int(count_expr.this)
-            except Exception:  # noqa: BLE001 — (2+3) 같은 비리터럴
-                count = None
+            count = _literal_nonneg_int(count_expr)
         if percent or ties or count is None:
             preserve_clause = True
         else:
@@ -361,12 +370,8 @@ def force_limit(ast: sqlglot.Expression) -> str:
         # 문인데 상한으로 치환하면 오류가 성공으로 바뀐다. 리터럴 정수이고
         # 0 이상일 때만 제자리 축소, 나머지는 FETCH 와 같은 방식으로 감싸
         # 원래 절(=원래 의미/오류)을 보존한다.
-        limit_value: int | None = None
-        try:
-            limit_value = int(existing_limit.expression.this)
-        except Exception:  # noqa: BLE001 — 비리터럴 LIMIT 표현
-            pass
-        if limit_value is None or limit_value < 0:
+        limit_value = _literal_nonneg_int(existing_limit.expression)
+        if limit_value is None:
             preserve_clause = True
         else:
             limit = min(limit, limit_value)

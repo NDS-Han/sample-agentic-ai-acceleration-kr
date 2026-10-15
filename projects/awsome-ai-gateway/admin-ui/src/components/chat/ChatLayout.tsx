@@ -266,6 +266,9 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
         <div className="flex gap-2 items-end mx-auto max-w-4xl">
           <textarea
             value={input}
+            // 서버 상한(MessageCreate.content max_length=16000, kiro R17-7 N-3)과
+            // 일치 — 초과 입력이 422+pydantic 원문 에코로 노출되는 것을 막는다.
+            maxLength={16000}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={(e) => {
               // 한글 IME 조합 중 Enter 는 '조합 확정'이지 전송이 아니다.

@@ -239,12 +239,39 @@ def test_force_limit_float_limit_preserved():
 
 def test_force_limit_negative_limit_preserved():
     # 음수 LIMIT 은 PG 가 거부할 문 — 상한으로 치환하면 오류가 성공으로 바뀐다.
-    try:
-        ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT -1")
-    except Exception:
-        return  # 파서/validator 단계 거절도 허용 — 어느 쪽이든 치환되면 안 됨
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT -1")
+    out = L.force_limit(ast)
+    # 감싸서 원래 절(-1)을 보존 → PG 가 원래대로 오류를 낸다.
+    assert out.startswith("SELECT * FROM (")
+    assert "- 1" in out or "-1" in out
+
+
+def test_force_limit_null_limit_preserved():
+    # LIMIT NULL 은 PG 오류 — 감싸서 보존(성공으로 바꾸지 않음).
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT NULL")
     out = L.force_limit(ast)
     assert out.startswith("SELECT * FROM (")
+
+
+def test_force_limit_hex_limit_preserved():
+    # LIMIT 0x10 — PG16+ 에선 16, 이하에선 구문 오류. int('10')=10 으로 잘못 읽어
+    # 의미를 바꾸지 않게 비리터럴 취급해 보존한다(kiro R17-8 N-c).
+    try:
+        ast = L.validate_sql("SELECT id FROM usage.usage_logs LIMIT 0x10")
+    except Exception:
+        return  # 파서 거절도 허용
+    out = L.force_limit(ast)
+    assert out.startswith("SELECT * FROM (")
+
+
+def test_force_limit_bigint_overflow_limit_preserved():
+    # bigint 범위 초과 리터럴은 PG 오류 — min() 으로 성공시키지 않는다.
+    ast = L.validate_sql(
+        "SELECT id FROM usage.usage_logs LIMIT 99999999999999999999"
+    )
+    out = L.force_limit(ast)
+    assert out.startswith("SELECT * FROM (")
+    assert "99999999999999999999" in out
 
 
 def test_force_limit_literal_limit_still_inline():

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import copy
 import functools
 import json
 import os
@@ -1363,9 +1364,13 @@ async def invoke(payload: dict):
         #   - 끝이 user 면 제거 — 새 user 턴은 invoke content 로 이어지므로
         seeded: list[dict] = []
         for m in history:
+            if not isinstance(m, dict):  # kiro R17-8 N-a — 비-dict 원소 방어
+                continue
             role = m.get("role")
             text = m.get("content")
-            if role in ("user", "assistant") and isinstance(text, str) and text:
+            # blank/공백 텍스트는 Bedrock 이 "text field is blank" 로 거절하고,
+            # 거절 후에도 무효 시드가 남아 후속 턴이 계속 실패한다 — 시드 전 배제.
+            if role in ("user", "assistant") and isinstance(text, str) and text.strip():
                 if seeded and seeded[-1]["role"] == role:
                     seeded[-1] = {"role": role, "content": [{"text": text}]}
                 else:
@@ -1387,7 +1392,9 @@ async def invoke(payload: dict):
                 # 리스트 사본 스냅샷을 [:] 로 통째로 복원한다. CancelledError 는
                 # BaseException 이라 except Exception 에 잡히지 않으므로 넓게 잡는다.
                 orch_msgs = getattr(active_orchestrator, "messages", None)
-                snapshot = list(orch_msgs) if orch_msgs is not None else None
+                # kiro R17-8 N-b — SlidingWindow 의 _truncate_tool_results 는
+                # 메시지 dict 를 제자리 변형하므로 얕은 복사로는 원문이 안 돌아온다.
+                snapshot = copy.deepcopy(orch_msgs) if orch_msgs is not None else None
                 try:
                     async for ev in active_orchestrator.stream_async(content):
                         queue.put_nowait(("stream", ev))

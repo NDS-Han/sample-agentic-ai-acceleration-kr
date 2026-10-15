@@ -22,9 +22,10 @@ export const config = {
 const CSP_HOST_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:\d+)?$/;
 // kiro R17-7 N-2 — 호스트 형식만 검사하면 `s3.ap-south-1.amazonaws.com` 같은
 // path-style 리전 엔드포인트가 통과해 모든 버킷 경로가 허용돼 S1 유출 경로가
-// 다시 열린다. `s3.`/`s3-` 로 시작하는 호스트는 거부 — virtual-hosted
-// (버킷.s3.리전.amazonaws.com) 호스트만 허용한다.
-const CSP_HOST_PATHSTYLE_S3_RE = /^s3[.-]/i;
+// 다시 열린다. `s3.`/`s3-` 로 시작하는 호스트와 VPC endpoint 호스트
+// (`vpce-…​.s3.리전.vpce.amazonaws.com` — kiro R17-8 N-e, 경로로 임의 버킷
+// 지정 가능)는 거부 — virtual-hosted(버킷.s3.리전.amazonaws.com)만 허용.
+const CSP_HOST_PATHSTYLE_S3_RE = /^s3[.-]|^vpce-/i;
 
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',

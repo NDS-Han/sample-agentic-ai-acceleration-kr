@@ -24,7 +24,7 @@ from typing import Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -322,7 +322,15 @@ class MessageCreate(BaseModel):
     content: str = Field(max_length=16000)
     # "지금 보는 화면" 컨텍스트(선택). admin-ui 가 페이지 등록 데이터를 동봉 →
     # agent 가 컨텍스트 질의에 활용. {page, period?, data?} 형태. 없으면 None.
+    # kiro R17-8 N-h — 직렬화 크기에도 상한을 둔다(user content 와 같은 증폭 계열).
     screen_context: dict | None = None
+
+    @field_validator("screen_context")
+    @classmethod
+    def _screen_context_size(cls, v: dict | None) -> dict | None:
+        if v is not None and len(json.dumps(v, ensure_ascii=False)) > 16000:
+            raise ValueError("screen_context too large")
+        return v
     # 모드(§55): "quick"(퀵챗 드로어 — 즉답) | "deep"(사이드바 Chat — plan-first
     # 심층분석). agent 가 orchestrator 프로필을 선택한다. 기본 quick(하위호환).
     mode: Literal["quick", "deep"] = "quick"
@@ -831,7 +839,7 @@ async def _agentcore_producer(
         # None 을 돌려주는 경로(=루프의 `if line is None: break`)는 런타임 종료·네트워크
         # 절단·read timeout 으로 프레임이 중간에 끊긴 경우도 포함한다 — agent 는 정상
         # 완료 시 반드시 마지막에 {"type":"done"} 을 yield 하므로
-        # (admin-chat-agent/src/agent/main.py:1503) 그 부재가 절단의 신호다.
+        # (admin-chat-agent/src/agent/main.py:1601) 그 부재가 절단의 신호다.
         # 예전엔 이 경로에서도 `event: done` 만 발행해 **잘린 답변이 완결된 답변으로**
         # 표시됐다(사용자는 조용히 truncate 된 분석을 신뢰하게 된다).
         truncation_note: str | None = None
