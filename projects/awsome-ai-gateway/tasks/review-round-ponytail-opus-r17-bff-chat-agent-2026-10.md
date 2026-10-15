@@ -187,3 +187,33 @@ admin-ui 418 / tsc 클린.
 → `c4e71a8d`. 테스트: chat-agent 258 / admin-api 970 / admin-ui 422
 (middlewareCsp +4) / tsc 클린.
 배포: Helm rev 215 — admin-api·scheduler·admin-ui `c4e71a8d` · 스모크 13/0.
+
+### 라운드 8 — CONVERGED (M 0 / S 0 / N 8)
+
+라운드 7 수정 6건+minor 2건 전부 FIXED 확인. kiro 가 Strands 1.42 소스
+실독으로 재검증: `self.messages` 재할당은 `__init__`·`load_snapshot` 뿐이라
+스트림 경로의 `[:]` 복원이 유효, 대화 관리자는 in-place 변경만 함.
+잔여 N 8건은 동일 라운드에서 전부 조치:
+
+| # | 발견 | 조치 |
+|---|---|---|
+| N-a | 시드가 role 외 사유(비-dict 원소·blank 텍스트)로 무효하면 microVM 영구 실패 | `isinstance(m, dict)` + `text.strip()` 방어 |
+| N-b | 얕은 스냅샷 — `_truncate_tool_results` 의 dict 제자리 변형 미복원 | `copy.deepcopy` 스냅샷 |
+| N-c | `int(expr.this)` 가 hex(`0x10`)·bigint-오버플로 리터럴의 의미/오류를 바꿈 | `exp.Literal` 숫자+bigint 범위 검사로 제한(데드 `< 0` 분기 제거) |
+| N-d | 16000 초과 입력이 422 + pydantic 원문 에코 노출 | textarea `maxLength=16000` |
+| N-e | `vpce-*.s3.리전.vpce.amazonaws.com` VPC endpoint path-style 미차단 | `^vpce-` 거부 추가 |
+| N-f | 음수 LIMIT 테스트가 escape hatch 로 공허 + NULL/hex 미커버 | 테스트 강화 + NULL/hex/오버플로 케이스 |
+| N-g | chat_agent.py stale 주석(1503→1601) | 정정 |
+| N-h | `screen_context` 무제한 | 직렬화 16000 상한(field_validator) |
+
+→ `1d398dea`. **최종 verdict: CONVERGED.**
+
+### 최종 누계(R17, kiro 라운드 포함)
+
+- 커밋: … → `a4279bfb` → `69b7a05e` → `c4e71a8d` → `1d398dea`
+- 테스트: chat-agent 261 / admin-ui 422 / admin-api 970 / tsc 클린
+- 배포: Helm rev 216 — admin-api·scheduler·admin-ui `1d398dea`,
+  migration `a4279bfb` · 스모크 13/0
+- 알려진 트레이드오프: 실패 턴은 agent 메모리에서 지워지지만 부분 답변이
+  DB 에 남아 warm/재수화 microVM 의 맥락이 다를 수 있음(교대 규칙은 유지 —
+  kiro R17-8 에서 허용 가능으로 판정)
