@@ -64,15 +64,17 @@ class AdminAPIClient {
     // 호출부 인코딩과 별개로, 정규화된 최종 경로가 /admin/ 아래인지 여기서
     // 한 번 더 확인한다(심층 방어 — chat-proxy 와 같은 계약).
     const normalized = new URL(url).pathname;
-    // '..'/'/.' 세그먼트는 정규화에서 사라져 startsWith 검사를 통과해도 의도와
-    //    다른 /admin/ 경로를 호출한다 (deleteRateLimitAction('..','x') →
-    //    DELETE /admin/x). 원본 path 의 세그먼트를 검사한다 (kiro R17 #15).
-    const rawSegments = path.split('?')[0].split('/');
-    if (rawSegments.some((s) => s === '.' || s === '..')) {
+    const rawPath = path.split('?')[0].split('#')[0];
+    // '..'/'/.'/`%2e` 세그먼트와 `#`/`?` 절단은 정규화된 pathname 을 원본과
+    //    다르게 만든다 — 일치 검사 하나로 위협군 전체를 거절한다
+    //    (deleteRateLimitAction('..','x') → DELETE /admin/x,
+    //    scopeId='%2e%2e/keys/<id>#' → DELETE /admin/keys/<id> 차단;
+    //    claude R17 #4). 인코딩된 값은 pathname 에 그대로 남아 오탐이 없다.
+    if (normalized !== rawPath) {
       throw new APIError(
         400,
         'INVALID_PATH',
-        `admin-api path contains traversal segment: ${normalized}`,
+        `admin-api path was normalized differently (traversal/truncation): ${normalized}`,
       );
     }
     if (!normalized.startsWith('/admin/')) {

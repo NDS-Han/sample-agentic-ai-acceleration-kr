@@ -126,9 +126,14 @@ def validate_sql(sql: str) -> sqlglot.Expression:
     #    (DELETE ...)` 는 root 가 Select 라 DML 검사 자체를 건너뛰었다 (R17-S1,
     #    sqlglot 실측). 이제 root 는 엄격 화이트리스트 + DML/DDL 은 root 무관 전체
     #    스캔(중첩 CTE 포함)이다.
+    # ⚠️ bare `VALUES (...)` root 는 거부 — traverse_scope 가 그 내부를 전혀
+    #    방문하지 않아(scope 0개, sqlglot 실측) `VALUES ((SELECT ... FROM
+    #    pg_roles))` 같은 루트가 테이블 화이트리스트를 통째로 우회했다 (R17
+    #    claude 검증 #2). `WITH v AS (VALUES ...) SELECT` 처럼 SELECT 계열 안에
+    #    중첩된 VALUES 는 root 가 Select/With 이므로 영향 없다.
     _ALLOWED_ROOTS = (
         exp.Select, exp.Union, exp.Intersect, exp.Except,
-        exp.With, exp.Subquery, exp.Values,
+        exp.With, exp.Subquery,
     )
     if not isinstance(ast, _ALLOWED_ROOTS):
         raise ValidationError(
@@ -152,13 +157,15 @@ def validate_sql(sql: str) -> sqlglot.Expression:
     #                       statement_timeout 만큼 블로킹한다 (반복 호출 시 DoS).
     #   SELECT INTO       : 테이블 생성. reader role 에 CREATE 가 없어 DB 가
     #                       막지만 검증 의도상 여기서 거절한다 (심층 방어).
-    for sel in ast.find_all(exp.Select):
-        if sel.args.get("locks"):
-            raise ValidationError(
-                "Locking clauses (FOR UPDATE/FOR SHARE) are not allowed."
-            )
-        if sel.args.get("into"):
-            raise ValidationError("SELECT INTO is not allowed.")
+    # ⚠️ Select 노드만 보면 안 된다 — `(SELECT ...) FOR UPDATE` 는 locks 가
+    #    괄호 래핑된 Subquery root 에 붙는다(sqlglot 실측 — R17 claude #3).
+    #    Lock/Into 노드는 AST 어디에 있든 거절한다.
+    if ast.find(exp.Lock):
+        raise ValidationError(
+            "Locking clauses (FOR UPDATE/FOR SHARE) are not allowed."
+        )
+    if ast.find(exp.Into):
+        raise ValidationError("SELECT INTO is not allowed.")
 
     # 위험 함수 거부 — 함수 인자의 SQL 문자열은 AST 에 Table 노드로 안 잡혀
     # 테이블 화이트리스트를 완전히 우회한다 (R17-S1 실측:
@@ -215,6 +222,35 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         ]
     except Exception as e:  # noqa: BLE001 — 스코프 해석 불가 = fail closed
         raise ValidationError(f"Could not resolve table references: {e}") from e
+
+    # 커버리지 검사(fail closed) — traverse_scope 가 방문하지 않는 AST 영역에
+    #    Table 노드가 남아 있으면 화이트리스트 우회다. 면제는 둘뿐:
+    #    - CTE 별칭 참조: scope.sources 가 Table 이 아니라 Scope 로 해석되므로
+    #      노드 자체가 resolved_ids 에 없다. 이름이 어떤 스코프의 cte_sources 에
+    #      있고 스키마 한정이 없는(db 없음) 노드만 해당.
+    #    - UDTF(FROM generate_series): name 이 빈 Table — 위 denylist 가 함수를
+    #      이미 거절한다.
+    resolved_ids = {
+        id(src)
+        for scope in scopes
+        for src in scope.sources.values()
+        if isinstance(src, exp.Table)
+    }
+    cte_names = {
+        str(n).lower()
+        for scope in scopes
+        for n in getattr(scope, "cte_sources", {})
+    }
+    for node in ast.find_all(exp.Table):
+        if id(node) in resolved_ids:
+            continue  # 실테이블 — 아래 화이트리스트 루프가 검사한다
+        if not node.name:
+            continue
+        if not node.args.get("db") and node.name.lower() in cte_names:
+            continue
+        raise ValidationError(
+            f"Could not resolve table reference: {node.sql()}"
+        )
 
     for table in table_sources:
         # table.text("db") returns the schema as a plain string ("" if absent);

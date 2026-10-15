@@ -36,8 +36,8 @@ export async function setBudgetAction(
   try {
     const endpoint =
       target_type === 'TEAM'
-        ? `/admin/budgets/team/${target_id}`
-        : `/admin/budgets/user/${target_id}`;
+        ? `/admin/budgets/team/${encodeURIComponent(String(target_id))}`
+        : `/admin/budgets/user/${encodeURIComponent(String(target_id))}`;
 
     // 미전송 필드는 백엔드가 기존값을 보존한다(model_fields_set) — 다이얼로그
     // prefill 실패 시 기본값을 보내 정책을 리셋하지 않도록 키 자체를 생략한다.

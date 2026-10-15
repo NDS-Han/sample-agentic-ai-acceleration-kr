@@ -135,10 +135,18 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
         // (사용자가 방금 입력한 내용이 유실되지 않게). 재전송도 만료/실패면
         // onError 경로가 평소대로 에러 버블을 띄운다.
         if (e instanceof SessionExpiredError) {
-          const s = await createSession();
-          sessionStorage.setItem(`chat-session-${mode}`, s.session_id);
-          setSessionId(s.session_id);
-          await send(s.session_id, text, screenCtx, mode).catch(() => {});
+          try {
+            const s = await createSession();
+            sessionStorage.setItem(`chat-session-${mode}`, s.session_id);
+            setSessionId(s.session_id);
+            await send(s.session_id, text, screenCtx, mode);
+          } catch (retryErr) {
+            // 재시도 실패(재인증 410·세션 생성 실패 포함)도 조용히 삼키면
+            // pending 버블이 영구 회전한다 — 반드시 에러 표시.
+            handleError(
+              retryErr instanceof Error ? retryErr : new Error(String(retryErr))
+            );
+          }
         } else {
           throw e;
         }
@@ -149,7 +157,7 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
         prev.map((m) => (m.pending ? { ...m, pending: false } : m))
       );
     },
-    [sessionId, isStreaming, send, messages, chatPanel, mode]
+    [sessionId, isStreaming, send, messages, chatPanel, mode, handleError]
   );
 
   // "새 대화" — 새 세션 생성 + sessionStorage 교체 + 화면 비우기. 기존 대화는

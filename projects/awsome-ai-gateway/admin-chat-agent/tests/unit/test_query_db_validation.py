@@ -90,6 +90,16 @@ REJECT_QUERIES = [
     "SELECT * FROM (WITH alembic_version AS (SELECT 1) SELECT * FROM alembic_version) a, alembic_version",
     # 멀티문장
     "SELECT * FROM usage.usage_logs; DROP TABLE auth.users",
+    # claude R17 — bare VALUES root 는 traverse_scope 가 내부를 안 타서
+    # 서브쿼리 속 비화이트리스트 테이블이 검사를 통과했다
+    "VALUES ((SELECT string_agg(query, ' | ') FROM pg_catalog.pg_stat_activity))",
+    "VALUES (1,2)",
+    "WITH v AS (VALUES ((SELECT string_agg(rolname, ',') FROM pg_roles))) SELECT * FROM v",
+    "SELECT 1 UNION ALL VALUES ((SELECT datname FROM pg_database))",
+    # claude R17 — 괄호 래핑 root 의 locks 는 Select 가 아니라 Subquery 에 붙는다
+    "(SELECT * FROM usage.usage_logs) FOR UPDATE",
+    "(SELECT * FROM usage.usage_logs FOR UPDATE) s",
+    "(SELECT * INTO tmp FROM usage.usage_logs)",
 ]
 
 

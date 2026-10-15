@@ -170,9 +170,10 @@ export async function setUserAllowedClientsAction(
 type ClientPolicyScope = 'team' | 'organization';
 
 function scopeClientsPath(scope: ClientPolicyScope, scopeId: string): string {
+  const id = encodeURIComponent(String(scopeId));
   return scope === 'team'
-    ? `/admin/teams/${scopeId}/allowed-clients`
-    : `/admin/organizations/${scopeId}/allowed-clients`;
+    ? `/admin/teams/${id}/allowed-clients`
+    : `/admin/organizations/${id}/allowed-clients`;
 }
 
 export async function getScopeAllowedClientsAction(

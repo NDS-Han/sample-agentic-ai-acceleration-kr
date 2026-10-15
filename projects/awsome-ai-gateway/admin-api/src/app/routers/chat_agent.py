@@ -360,7 +360,7 @@ async def post_message(
         raise HTTPException(403, "Forbidden")
     # R17 — expires_at 를 조회만 하고 검증하지 않아 만료 세션이 계속 쓰였다.
     # 만료 세션은 410: 프론트가 새 세션을 만들게 유도.
-    from datetime import datetime, timezone as _tz
+    from datetime import datetime, timedelta, timezone as _tz
 
     exp = sess_row.expires_at
     if exp is not None:

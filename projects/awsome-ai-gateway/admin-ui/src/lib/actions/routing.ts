@@ -28,7 +28,7 @@ export async function setClientWebSearchAction(
   try {
     const res = await withRetry(() =>
       adminAPI.put<{ client: string; web_search_enabled: boolean }>(
-        `/admin/routing-profiles/${client}/web-search`,
+        `/admin/routing-profiles/${encodeURIComponent(String(client))}/web-search`,
         { enabled },
       ),
     );

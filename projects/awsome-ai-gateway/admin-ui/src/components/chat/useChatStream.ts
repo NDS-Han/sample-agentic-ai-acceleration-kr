@@ -12,7 +12,9 @@ const API_BASE = '/api/chat-proxy';
 // '\n\n' 프레임 경계가 영원히 안 오면 버퍼가 무한 커진다 — 악의적/버그 상류의
 // 메모리 공격을 막기 위해 상한을 두고 초과 시 스트림을 에러로 끝낸다.
 // 정상 프레임(리포트 JSON 포함)은 수백 KB 이하라 4 MiB 는 충분히 크다.
-const MAX_SSE_BUFFER_BYTES = 4 * 1024 * 1024;
+// UTF-16 code unit 수 기준 상한(정확한 바이트 아님) — 목적은 메모리 상한이라
+// 코드유닛 카운트로 충분하다. 이름에 BYTES 를 쓰지 않는다(claude R17 nit).
+const MAX_SSE_BUFFER_CHARS = 4 * 1024 * 1024;
 
 export interface ChatStreamOptions {
   onEvent: (event: StreamEvent) => void;
@@ -102,13 +104,14 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
             buffer = buffer.slice(idx + 2);
             parseSseBlock(block, onEvent);
           }
-          if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          if (buffer.length > MAX_SSE_BUFFER_CHARS) {
             // 잘린 프레임이 무한 누적 — 상류/메모리를 닫고 에러로 끝낸다.
             await reader.cancel().catch(() => {});
             throw new Error('SSE frame exceeded size limit — malformed stream');
           }
         }
-        // tail flush
+        // tail flush — 스트림 종료 시 디코더에 남은 partial UTF-8 도 토해낸다.
+        buffer += decoder.decode();
         if (buffer.trim()) parseSseBlock(buffer, onEvent);
       } catch (e) {
         // SessionExpiredError 는 호출부가 재시도 판단해야 하므로 재전파 —
@@ -166,13 +169,14 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
             buffer = buffer.slice(idx + 2);
             parseSseBlock(block, onEvent);
           }
-          if (buffer.length > MAX_SSE_BUFFER_BYTES) {
+          if (buffer.length > MAX_SSE_BUFFER_CHARS) {
             // reattach 는 조용히 포기하되 상류 연결은 반드시 닫는다.
             await reader.cancel().catch(() => {});
             return;
           }
         }
         // tail flush — send() 와 동일하게 마지막 미완결 블록도 처리.
+        buffer += decoder.decode();
         if (buffer.trim()) parseSseBlock(buffer, onEvent);
       } catch {
         // 재구독 실패는 무해(완료분은 history 로 복원됨)

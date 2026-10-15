@@ -64,7 +64,12 @@ function isAllowedPath(pathParts: string[]): boolean {
       seg !== '..' &&
       !seg.includes('%') &&
       !seg.includes('\\') &&
-      !seg.includes('/'),
+      !seg.includes('/') &&
+      // `%3F`/`%23` 디코딩 후 `?`/`#` 가 세그먼트에 남으면 조립된 URL 에서
+      // 경로를 절단한다 — 결과가 /admin/chat/ 아래에 머물더라도 호출부가
+      // 의도한 경로와 달라지므로 거절 (claude R17 nit).
+      !seg.includes('?') &&
+      !seg.includes('#'),
   );
 }
 

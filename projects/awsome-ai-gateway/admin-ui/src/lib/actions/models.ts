@@ -399,7 +399,7 @@ export async function getTeamAllowedModelsAction(
   try {
     const data = await withRetry(() =>
       adminAPI.get<{ team_id: string; model_aliases: string[] }>(
-        `/admin/teams/${teamId}/allowed-models`
+        `/admin/teams/${encodeURIComponent(String(teamId))}/allowed-models`
       )
     );
     return { success: true, data };
@@ -415,7 +415,7 @@ export async function setTeamAllowedModelsAction(
   try {
     const data = await withRetry(() =>
       adminAPI.put<{ team_id: string; model_aliases: string[] }>(
-        `/admin/teams/${teamId}/allowed-models`,
+        `/admin/teams/${encodeURIComponent(String(teamId))}/allowed-models`,
         { model_aliases: modelAliases }
       )
     );

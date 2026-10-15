@@ -11,8 +11,9 @@ import { NextRequest, NextResponse } from 'next/server';
  * 비인증 대용량 POST 몇 개로 파드가 OOM 난다(R17-M2 실측).
  *
  * 읽기 순서:
- *   1. Content-Length 헤더가 상한 초과면 읽지 않고 413 — 대부분의 공격은
- *      여기서 끝나 바이트를 한 개도 받지 않는다.
+ *   1. Content-Length 헤더가 상한 초과면 읽지 않고 413 — 우리가 버퍼링하지
+ *      않는다(런타임이 잔여 본문을 읽어 버리기는 한다 — 애플리케이션 메모리
+ *      상한과는 무관).
  *   2. 헤더가 없거나 거짓이면(chunked) req.body 를 청크로 읽으며 누적 바이트가
  *      상한을 넘는 순간 스트림을 cancel 하고 413.
  *
