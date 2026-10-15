@@ -65,6 +65,15 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
       cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
       cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
+      // 장문 티어 — 생략(undefined)이면 서버가 알려진 모델만 자동 파생한다.
+      ...(d.long_context_threshold_tokens != null && {
+        long_context_threshold_tokens: d.long_context_threshold_tokens,
+        long_context_input_price_per_1k_tokens: d.long_context_input_price_per_1k,
+        long_context_output_price_per_1k_tokens: d.long_context_output_price_per_1k,
+        long_context_cache_creation_5m_price_per_1k_tokens: d.long_context_cache_creation_5m_price_per_1k,
+        long_context_cache_creation_1h_price_per_1k_tokens: d.long_context_cache_creation_1h_price_per_1k,
+        long_context_cache_read_price_per_1k_tokens: d.long_context_cache_read_price_per_1k,
+      }),
     });
     revalidatePath('/models');
     return { success: true, data: undefined };
@@ -117,6 +126,17 @@ export async function updateModelAction(
         cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
         cache_creation_1h_price_per_1k_tokens: d.cache_creation_1h_price_per_1k,
         cache_read_price_per_1k_tokens: d.cache_read_price_per_1k,
+        // 장문 티어 — 생략하면 set_pricing 이 이전 행의 티어를 이어받는다.
+        // (폼이 6칸 전부 비우면 키 생략 = 유지; 명시적으로 지울 경로는 없다 —
+        //  구간 삭제는 임계 초과 요청을 즉시 과소청구로 돌리므로.)
+        ...(d.long_context_threshold_tokens != null && {
+          long_context_threshold_tokens: d.long_context_threshold_tokens,
+          long_context_input_price_per_1k_tokens: d.long_context_input_price_per_1k,
+          long_context_output_price_per_1k_tokens: d.long_context_output_price_per_1k,
+          long_context_cache_creation_5m_price_per_1k_tokens: d.long_context_cache_creation_5m_price_per_1k,
+          long_context_cache_creation_1h_price_per_1k_tokens: d.long_context_cache_creation_1h_price_per_1k,
+          long_context_cache_read_price_per_1k_tokens: d.long_context_cache_read_price_per_1k,
+        }),
         effective_from: new Date().toISOString(),
       });
     }

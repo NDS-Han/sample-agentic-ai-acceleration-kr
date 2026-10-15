@@ -442,9 +442,10 @@ function UserPanel({
           message: t('saveSuccess'),
           auto_dismiss_ms: 5000,
         });
-        // 개별설정 점/팀 카운트는 트리 메타에서 오므로 저장 후 재조회해 stale 를 막는다.
-        onSaved?.();
       }
+      // 개별설정 점/팀 카운트는 트리 메타에서 오므로 저장 후 재조회해 stale 를
+      // 막는다 — 부분 실패여도 성공한 섹션의 점은 바뀌었으므로 anySaved 기준.
+      if (anySaved) onSaved?.();
     });
   };
 

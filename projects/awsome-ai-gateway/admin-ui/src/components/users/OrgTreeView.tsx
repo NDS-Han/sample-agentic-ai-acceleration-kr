@@ -37,7 +37,78 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
   const [overrideHasEmpty, setOverrideHasEmpty] = useState(false);
   const [showEmptyTeams, setShowEmptyTeams] = useState(false);
   const [treeLoading, setTreeLoading] = useState(false);
+  // 트리 fetch 세대 — 토글·저장 재조회가 겹쳐 늦게 도착한 구 응답이
+  // 새 상태(include_empty 여부 포함)를 덮어쓰지 못하게 한다.
+  const treeGenRef = useRef(0);
+  // 로딩 플래그의 소유자 — 겹친 fetch 중 먼저 끝난 쪽이 해제해 나머지 동안
+  // 체크박스가 열리거나(조기 해제), 로딩을 안 거는 작업이 세대를 올려 아무도
+  // 해제하지 않는(영구 잠금) 경우를 막는다. 각 워커는 자기 세대만 지운다.
+  const loadingGensRef = useRef<Set<number>>(new Set());
+  const beginTreeLoad = (gen: number) => {
+    loadingGensRef.current.add(gen);
+    setTreeLoading(true);
+  };
+  const endTreeLoad = (gen: number) => {
+    loadingGensRef.current.delete(gen);
+    setTreeLoading(loadingGensRef.current.size > 0);
+  };
+  const clearTreeLoads = () => {
+    loadingGensRef.current.clear();
+    setTreeLoading(false);
+  };
+  // onSaved 는 Apply 클릭 시점의 클로저로 오래 살아남는다 — 토글 상태는
+  // 캡처값이 아니라 호출 시점의 최신값을 읽어야 응답이 구 모드를 되살리지 않는다.
+  const showEmptyRef = useRef(showEmptyTeams);
+  showEmptyRef.current = showEmptyTeams;
+  // 재조회 실패 시점에도 같은 이유로 최신값이 필요 — 오래된 클로저가
+  // "빈 팀 데이터 있음" 을 오판하면 일관 상태 롤백이 빠진다.
+  const overrideHasEmptyRef = useRef(overrideHasEmpty);
+  overrideHasEmptyRef.current = overrideHasEmpty;
   const effectiveRoot = treeOverride ?? root;
+  // router.refresh() 가 새 root 를 가져와도 override 가 그 위에 있으면 화면은
+  // 영원히 구 트리다 — root 가 바뀌면 override 를 폐기한다. 토글 ON 이면
+  // include_empty 트리를 다시 가져와 같은 모드를 유지한다.
+  const prevRootRef = useRef(root);
+  useEffect(() => {
+    if (prevRootRef.current === root) return;
+    prevRootRef.current = root;
+    const gen = ++treeGenRef.current; // 구 데이터 기준의 진행 중 fetch 는 버린다
+    if (!showEmptyRef.current) {
+      setTreeOverride(null);
+      setOverrideHasEmpty(false);
+      clearTreeLoads();
+      return;
+    }
+    beginTreeLoad(gen);
+    void (async () => {
+      try {
+        const r = await getOrgTreeAction(true);
+        if (gen !== treeGenRef.current) return;
+        if (r.success && r.data) {
+          setTreeOverride(r.data);
+          setOverrideHasEmpty(true);
+        } else {
+          // 재조회 실패로 구 override 를 남기면 새 root 가 또 가려진다 —
+          // override 를 버리고 토글을 꺼서 기본 트리로 되돌린다.
+          setTreeOverride(null);
+          setOverrideHasEmpty(false);
+          setShowEmptyTeams(false);
+          toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
+        }
+      } catch {
+        if (gen === treeGenRef.current) {
+          setTreeOverride(null);
+          setOverrideHasEmpty(false);
+          setShowEmptyTeams(false);
+          toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
+        }
+      } finally {
+        endTreeLoad(gen);
+      }
+    })();
+    // t/toast 는 안정 참조 — 불안정한 구현이 와도 조기 리턴으로 fetch 는 안 돈다.
+  }, [root, t, toast]);
+
   // 선택은 id 가 정본 — 노드 객체는 매 렌더 root 에서 다시 찾는다.
   // router.refresh() 로 root 가 갱신돼도 선택이 유지되고 표시는 최신 데이터다
   // (예전엔 선택된 node 객체가 stale 해 리더 지정 후 목록이 안 바뀌었다).
@@ -101,13 +172,26 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     if (applyDeepLink(root)) return;
     // 기본 트리에 없으면 빈 팀일 수 있다 — include_empty 로 한 번 더 조회해
     // 딥링크가 멤버 0인 팀에서도 동작하게 한다.
+    const gen = ++treeGenRef.current;
+    // 로딩 플래그를 걸어 토글을 잠근다 — 이 fetch 동안 토글이 세대를 올리면
+    // 응답이 버려져 ?node= 대상이 영영 선택되지 않는다(토글만이 아니라
+    // onSaved 도 세대를 올릴 수 있지만, 그 경우에 버리는 것이 맞다 —
+    // 살리면 선택이 딥링크 대상으로 되돌아간다).
+    beginTreeLoad(gen);
     void (async () => {
-      const r = await getOrgTreeAction(true);
-      if (!r.success || !r.data) return;
-      if (applyDeepLink(r.data)) {
-        setTreeOverride(r.data);
-        setOverrideHasEmpty(true);
-        setShowEmptyTeams(true);
+      try {
+        const r = await getOrgTreeAction(true);
+        if (gen !== treeGenRef.current) return;
+        if (!r.success || !r.data) return;
+        if (applyDeepLink(r.data)) {
+          setTreeOverride(r.data);
+          setOverrideHasEmpty(true);
+          setShowEmptyTeams(true);
+        }
+      } catch {
+        // transport 거부 — 플래그는 finally 가 자기 세대만 해제한다.
+      } finally {
+        endTreeLoad(gen);
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- mount 1회 복원 전용
@@ -236,19 +320,51 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
     setShowEmptyTeams(checked);
     if (!checked) {
       // 기본 트리로 복귀 — override 가 기본 트리면(onSaved 재조회) 그대로 쓰고,
-      // include_empty 결과면 빈 팀이 남지 않게 버린다.
+      // include_empty 결과면 빈 팀이 남지 않게 버린다. 세대 증가로 진행 중인
+      // fetch 응답은 stale 처리되므로 로딩 소유권도 여기서 전부 반납한다
+      // (stale 워커의 endTreeLoad 는 자기 세대만 지우는 no-op 이 된다).
+      ++treeGenRef.current;
       if (overrideHasEmpty) setTreeOverride(null);
       setOverrideHasEmpty(false);
+      clearTreeLoads();
       return;
     }
-    if (treeOverride && overrideHasEmpty) return; // 이미 가져온 트리 재사용
-    setTreeLoading(true);
-    const r = await getOrgTreeAction(true);
-    setTreeLoading(false);
-    if (r.success) {
-      setTreeOverride(r.data);
-      setOverrideHasEmpty(true);
-    } else {
+    // 이미 가져온 include_empty 트리 재사용 — fetch 를 새로 시작하지 않으니
+    // 진행 중인 다른 재조회의 세대를 무효화하면 안 된다.
+    if (treeOverride && overrideHasEmpty) return;
+    const gen = ++treeGenRef.current;
+    beginTreeLoad(gen);
+    try {
+      const r = await getOrgTreeAction(true);
+      // stale 응답은 버린다 — 플래그 해제는 finally 가 자기 세대만 처리하므로
+      // 뒤에 시작한 ON fetch 의 잠금은 유지된다.
+      if (gen !== treeGenRef.current) return;
+      if (r.success) {
+        setTreeOverride(r.data);
+        setOverrideHasEmpty(true);
+      } else {
+        setShowEmptyTeams(false);
+        toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
+      }
+    } catch {
+      // 서버 액션 transport 자체가 reject 하는 경우(네트워크 단절·배포 후
+      // action id 불일치) — 로딩 플래그를 남기면 체크박스가 영구 잠긴다.
+      if (gen === treeGenRef.current) {
+        setShowEmptyTeams(false);
+        toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
+      }
+    } finally {
+      endTreeLoad(gen);
+    }
+  };
+
+  /**
+   * 재조회 실패 공통 처리 — include_empty 데이터가 없는데 토글만 ON 이면
+   * 체크박스가 거짓 상태를 가리키므로 토글 실패 경로와 같이 되돌린다.
+   * 이미 빈 팀 데이터를 갖고 있으면 화면은 일관(메타만 stale)이라 유지한다.
+   */
+  const rollbackIfMissingEmpty = (withEmpty: boolean) => {
+    if (withEmpty && !overrideHasEmptyRef.current) {
       setShowEmptyTeams(false);
       toast({ type: 'error', message: t('loadErrors.tree'), auto_dismiss_ms: 5000 });
     }
@@ -316,11 +432,23 @@ export function OrgTreeView({ root }: OrgTreeViewProps) {
           orgId={effectiveRoot?.type === 'ORGANIZATION' ? effectiveRoot.id : undefined}
           onSaved={() => {
             // 저장으로 개별설정 점이 바뀔 수 있다 — 트리 메타를 재조회해 갱신.
+            // 이 클로저는 Apply 클릭 렌더에 묶여 오래 살아남으므로 토글 상태는
+            // 캡처값이 아니라 ref 의 최신값을 쓴다. 응답 전에 토글이 바뀌었으면
+            // (세대 증가) 이 응답은 버린다.
+            const gen = ++treeGenRef.current;
+            const withEmpty = showEmptyRef.current;
             void (async () => {
-              const r = await getOrgTreeAction(showEmptyTeams);
-              if (r.success && r.data) {
-                setTreeOverride(r.data);
-                setOverrideHasEmpty(showEmptyTeams);
+              try {
+                const r = await getOrgTreeAction(withEmpty);
+                if (gen !== treeGenRef.current) return;
+                if (r.success && r.data) {
+                  setTreeOverride(r.data);
+                  setOverrideHasEmpty(withEmpty);
+                } else {
+                  rollbackIfMissingEmpty(withEmpty);
+                }
+              } catch {
+                if (gen === treeGenRef.current) rollbackIfMissingEmpty(withEmpty);
               }
             })();
           }}

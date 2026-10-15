@@ -113,6 +113,11 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   // 늦게 도착한 응답이 새 폼을 오염시키지 않도록 최신 target 을 추적.
   const dialogTargetRef = useRef(target);
   dialogTargetRef.current = target;
+  // 사용자가 이미 손댄 필드 — 늦게 도착한 prefill 응답이 덮어쓰지 않는다.
+  // baseline(서버값)은 항상 기록하되 표시값은 유지해, 저장 시 사용자가
+  // 고른 값이 그대로 간다.
+  const policyTouchedRef = useRef(false);
+  const thresholdsTouchedRef = useRef(false);
 
   // per-app(client) 예산 — USER scope 에서만 사용. 빈 문자열 = 미설정.
   // loaded* 는 prefill 시점 값 기억 → 비우고 저장하면 clear 로 이어진다. client→문자열 map.
@@ -140,6 +145,8 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
       setBaseThresholds(null);
       setConfirmation(null);
       pendingConfirmRef.current = null;
+      policyTouchedRef.current = false;
+      thresholdsTouchedRef.current = false;
       mainSavedRef.current = false;
       doneAppsRef.current = new Set();
 
@@ -162,13 +169,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         }
         if (res.data.configured) {
           if (res.data.policy) {
-            setPolicy(res.data.policy);
             setBasePolicy(res.data.policy);
+            if (!policyTouchedRef.current) setPolicy(res.data.policy);
           }
           if (res.data.alert_thresholds) {
             const sorted = [...res.data.alert_thresholds].sort((a, b) => a - b);
-            setThresholds(sorted);
             setBaseThresholds(sorted);
+            if (!thresholdsTouchedRef.current) setThresholds(sorted);
           }
         } else {
           // 새 예산 — 표시된 기본값이 곧 서버 기대값이므로 baseline 도 기본값.
@@ -259,11 +266,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
   const addThreshold = () => {
     const val = parseInt(newThreshold) || 0;
     if (val >= 1 && val <= 100 && !thresholds.includes(val)) {
+      thresholdsTouchedRef.current = true;
       setThresholds(prev => [...prev, val].sort((a, b) => a - b));
     }
   };
 
   const removeThreshold = (val: number) => {
+    thresholdsTouchedRef.current = true;
     setThresholds(prev => prev.filter(v => v !== val));
   };
 
@@ -472,7 +481,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
         <div className="space-y-4">
           {/* Budget Amount */}
           <div className="space-y-2">
-            <label className="text-sm font-medium">
+            <label htmlFor="budget-amount" className="text-sm font-medium">
               {isTeamScope ? t('teamBudgetTotal') : t('maxBudgetUsd')}
             </label>
             <div className="space-y-3">
@@ -483,11 +492,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                 step={1}
                 value={numericValue}
                 onChange={(e) => setValue(e.target.value)}
+                aria-label={isTeamScope ? t('teamBudgetTotal') : t('maxBudgetUsd')}
                 className="w-full h-2 bg-gray-200 rounded-full appearance-none cursor-pointer accent-primary"
               />
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">$</span>
                 <NumberInput
+                  id="budget-amount"
                   min={0}
                   max={numberMax}
                   step={0.01}
@@ -519,11 +530,12 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
           {/* TEAM: 기본 유저 cap D (§3-2 — 미설정 유저에게 적용되는 상한) */}
           {isTeamScope && (
             <div className="space-y-2">
-              <label className="text-sm font-medium">{t('defaultCapInputLabel')}</label>
+              <label htmlFor="budget-default-cap" className="text-sm font-medium">{t('defaultCapInputLabel')}</label>
               <p className="text-xs text-muted-foreground">{t('defaultCapDesc')}</p>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-muted-foreground">$</span>
                 <NumberInput
+                  id="budget-default-cap"
                   min={0}
                   step={0.01}
                   value={defaultCap}
@@ -547,7 +559,10 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                     name="policy"
                     value={opt.value}
                     checked={policy === opt.value}
-                    onChange={() => setPolicy(opt.value)}
+                    onChange={() => {
+                      policyTouchedRef.current = true;
+                      setPolicy(opt.value);
+                    }}
                     className="mt-0.5 h-4 w-4"
                   />
                   <div>
@@ -564,12 +579,13 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
             <label className="text-sm font-medium">{t('alertThresholds')}</label>
             <p className="text-xs text-muted-foreground">{t('alertThresholdsDesc')}</p>
             <div className="flex flex-wrap gap-1.5">
-              {thresholds.map(t => (
-                <span key={t} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
-                  {t}%
+              {thresholds.map(pct => (
+                <span key={pct} className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-primary/10 text-primary">
+                  {pct}%
                   <button
                     type="button"
-                    onClick={() => removeThreshold(t)}
+                    onClick={() => removeThreshold(pct)}
+                    aria-label={t('removeThreshold', { pct })}
                     className="text-primary/60 hover:text-primary"
                   >
                     &times;
@@ -618,10 +634,11 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
                   )}
                   {ALL_CLIENTS.filter((c) => allowedClients.includes(c)).map((c) => (
                     <div key={c}>
-                      <label className="block text-xs text-muted-foreground mb-1">
+                      <label htmlFor={`budget-app-${c}`} className="block text-xs text-muted-foreground mb-1">
                         {CLIENT_LABELS[c]}
                       </label>
                       <NumberInput
+                        id={`budget-app-${c}`}
                         min={0}
                         step={0.01}
                         value={budgets[c] ?? ''}

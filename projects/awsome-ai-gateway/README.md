@@ -306,7 +306,7 @@ claude                                                               # 사용 �
 
 ## 빠른 시작 (운영자 — BI 어시스턴트)
 
-Admin UI 로그인 후 좌측 메뉴 **Chat** (또는 우하단 BI Chat 버튼)에서 자연어로 운영 데이터를 질의합니다. (ADMIN / TEAM_LEADER 권한)
+Admin UI 로그인 후 좌측 메뉴 **Chat** (또는 우하단 BI Chat 버튼)에서 자연어로 운영 데이터를 질의합니다. (ADMIN 권한 — chat_agent 라우터 전 엔드포인트가 `require_admin`)
 
 ```
 예) "이번 달 사용자별 총 비용을 표와 차트로 보여줘"

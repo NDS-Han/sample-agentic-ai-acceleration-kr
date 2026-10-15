@@ -402,6 +402,7 @@ export function TeamAllocationView({
                           min={0}
                           step={0.01}
                           value={inputs[m.target_id] ?? ''}
+                          aria-label={t('memberCapInput', { name: m.target_name })}
                           disabled={lockRow || isPending}
                           onChange={(e) =>
                             setInputs((prev) => ({ ...prev, [m.target_id]: e.target.value }))
@@ -421,10 +422,11 @@ export function TeamAllocationView({
           </TBody>
           <TFoot>
             <Tr>
-              <Td emphasis colSpan={4}>{t('sumAllocated')}</Td>
-              <Td numeric className="text-muted-foreground">
+              <Td emphasis colSpan={3}>{t('sumAllocated')}</Td>
+              <Td className="text-muted-foreground">
                 {fmtUsd(allocation.sum_allocated_usd ?? 0)}
               </Td>
+              <Td />
             </Tr>
           </TFoot>
         </Table>

@@ -8,6 +8,7 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from pydantic import ValidationError
 
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
@@ -1253,3 +1254,138 @@ class TestAutoLongTier:
         base = {k: Decimal("0.001") for k in ("input", "output", "cache_5m", "cache_1h", "cache_read")}
         assert _auto_long_tier("anthropic.claude-sonnet-4-5", base) is None
         assert _auto_long_tier(None, base) is None
+
+
+class TestCreateModelLongTier:
+    """R19 — 운영자가 생성 시 장문 티어를 명시 입력하는 경로(카탈로그 동기화가
+    안 되는 모델용). all-or-none 규약은 스키마가 거부하고, 명시된 티어는
+    자동 파생보다 우선한다 — 지역 프리미엄을 운영자가 직접 지정한 경우
+    ×5 파생이 값을 덮으면 안 된다."""
+
+    @pytest.mark.unit
+    def test_threshold_without_prices_rejected(self):
+        with pytest.raises(ValidationError):
+            ModelCreateRequest(
+                alias="m",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="x",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.002"),
+                long_context_threshold_tokens=100000,
+            )
+
+    @pytest.mark.unit
+    def test_prices_without_threshold_rejected(self):
+        with pytest.raises(ValidationError):
+            ModelCreateRequest(
+                alias="m",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="x",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.002"),
+                long_context_input_price_per_1k_tokens=Decimal("0.005"),
+            )
+
+    @pytest.mark.unit
+    def test_partial_prices_rejected(self):
+        with pytest.raises(ValidationError):
+            ModelCreateRequest(
+                alias="m",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="x",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.002"),
+                long_context_threshold_tokens=100000,
+                long_context_input_price_per_1k_tokens=Decimal("0.005"),
+                long_context_output_price_per_1k_tokens=Decimal("0.01"),
+                long_context_cache_creation_5m_price_per_1k_tokens=Decimal("0.006"),
+                long_context_cache_creation_1h_price_per_1k_tokens=Decimal("0.008"),
+                # cache_read 누락 → 거부
+            )
+
+    @pytest.mark.unit
+    async def test_explicit_tier_used_and_beats_auto_derive(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """haiku pmid + 명시 티어 → 자동 ×5 파생이 아니라 명시값이 들어간다."""
+        data = ModelCreateRequest(
+            alias="haiku-custom",
+            provider=ProviderEnum.BEDROCK,
+            provider_model_id="us.anthropic.claude-haiku-5-5",
+            api_format=ApiFormatEnum.BEDROCK_NATIVE,
+            input_price_per_1k_tokens=Decimal("0.00011"),
+            output_price_per_1k_tokens=Decimal("0.00055"),
+            long_context_threshold_tokens=80000,
+            long_context_input_price_per_1k_tokens=Decimal("0.001"),
+            long_context_output_price_per_1k_tokens=Decimal("0.002"),
+            long_context_cache_creation_5m_price_per_1k_tokens=Decimal("0.001"),
+            long_context_cache_creation_1h_price_per_1k_tokens=Decimal("0.001"),
+            long_context_cache_read_price_per_1k_tokens=Decimal("0.0001"),
+        )
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.alias_exists_ci = AsyncMock(return_value=False)
+
+            async def _set_timestamps(model):
+                model.created_at = datetime.now(timezone.utc)
+                model.updated_at = datetime.now(timezone.utc)
+
+            repo.create_model = AsyncMock(side_effect=_set_timestamps)
+            repo.create_pricing = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            await model_service.create_model(mock_session, data=data, actor=admin_user)
+
+        pricing = repo.create_pricing.call_args.args[0]
+        assert pricing.long_context_threshold_tokens == 80000
+        assert pricing.long_context_input_price_per_1k_tokens == Decimal("0.001")
+        # 자동 파생값(0.00055)이 아니라 명시값이다.
+        assert pricing.long_context_output_price_per_1k_tokens == Decimal("0.002")
+        # 수동 입력은 파생이 아니다 — 감사 플래그가 명시/파생을 구분해야 한다.
+        audit_changes = mock_audit.log.call_args.kwargs["changes"]["after"]
+        assert audit_changes["long_context_auto_derived"] is False
+        # 수동 입력값 자체도 감사에 남는다 — 형식은 SET_PRICING 의 long_context 와 같다.
+        assert audit_changes["long_context"]["threshold"] == 80000
+        assert audit_changes["long_context"]["input"] == "0.001"
+
+    @pytest.mark.unit
+    async def test_no_tier_fields_still_auto_derives(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """티어를 생략한 haiku 등록은 여전히 자동 ×5 파생된다 — 명시 입력
+        도입이 기존 자동 파생 경로를 깨지 않았음을 확인."""
+        data = ModelCreateRequest(
+            alias="haiku-auto",
+            provider=ProviderEnum.BEDROCK,
+            provider_model_id="global.anthropic.claude-haiku-5-5",
+            api_format=ApiFormatEnum.BEDROCK_NATIVE,
+            input_price_per_1k_tokens=Decimal("0.0001"),
+            output_price_per_1k_tokens=Decimal("0.0005"),
+            cache_creation_5m_price_per_1k_tokens=Decimal("0.000125"),
+            cache_creation_1h_price_per_1k_tokens=Decimal("0.0002"),
+            cache_read_price_per_1k_tokens=Decimal("0.00001"),
+        )
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.alias_exists_ci = AsyncMock(return_value=False)
+
+            async def _set_timestamps(model):
+                model.created_at = datetime.now(timezone.utc)
+                model.updated_at = datetime.now(timezone.utc)
+
+            repo.create_model = AsyncMock(side_effect=_set_timestamps)
+            repo.create_pricing = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            await model_service.create_model(mock_session, data=data, actor=admin_user)
+
+        pricing = repo.create_pricing.call_args.args[0]
+        assert pricing.long_context_threshold_tokens == 100000
+        assert pricing.long_context_input_price_per_1k_tokens == Decimal("0.0005")
+        audit_changes = mock_audit.log.call_args.kwargs["changes"]["after"]
+        assert audit_changes["long_context_auto_derived"] is True

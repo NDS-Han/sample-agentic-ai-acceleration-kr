@@ -33,6 +33,14 @@ interface FormState {
   cache_creation_5m_price_per_1m: string;
   cache_creation_1h_price_per_1m: string;
   cache_read_price_per_1m: string;
+  // 장문(>threshold) 구간 단가 — 임계를 비우면 무티어(생성)/기존 티어 유지(편집).
+  // all-or-none 규약은 서버·zod 모두에서 강제된다.
+  long_context_threshold_tokens: string;
+  long_context_input_price_per_1m: string;
+  long_context_output_price_per_1m: string;
+  long_context_cache_creation_5m_price_per_1m: string;
+  long_context_cache_creation_1h_price_per_1m: string;
+  long_context_cache_read_price_per_1m: string;
   description: string;
   display_name: string;
   context_window: string;
@@ -64,6 +72,30 @@ function getInitialState(editModel?: ModelListItem): FormState {
       cache_creation_5m_price_per_1m: perKtoM(editModel.cache_creation_5m_price_per_1k),
       cache_creation_1h_price_per_1m: perKtoM(editModel.cache_creation_1h_price_per_1k),
       cache_read_price_per_1m: perKtoM(editModel.cache_read_price_per_1k),
+      long_context_threshold_tokens:
+        editModel.long_context_threshold_tokens != null
+          ? String(editModel.long_context_threshold_tokens)
+          : '',
+      long_context_input_price_per_1m:
+        editModel.long_context_input_price_per_1k != null
+          ? perKtoM(editModel.long_context_input_price_per_1k)
+          : '',
+      long_context_output_price_per_1m:
+        editModel.long_context_output_price_per_1k != null
+          ? perKtoM(editModel.long_context_output_price_per_1k)
+          : '',
+      long_context_cache_creation_5m_price_per_1m:
+        editModel.long_context_cache_creation_5m_price_per_1k != null
+          ? perKtoM(editModel.long_context_cache_creation_5m_price_per_1k)
+          : '',
+      long_context_cache_creation_1h_price_per_1m:
+        editModel.long_context_cache_creation_1h_price_per_1k != null
+          ? perKtoM(editModel.long_context_cache_creation_1h_price_per_1k)
+          : '',
+      long_context_cache_read_price_per_1m:
+        editModel.long_context_cache_read_price_per_1k != null
+          ? perKtoM(editModel.long_context_cache_read_price_per_1k)
+          : '',
       description: editModel.description ?? '',
       display_name: editModel.display_name ?? '',
       context_window: editModel.context_window != null ? String(editModel.context_window) : '',
@@ -80,6 +112,12 @@ function getInitialState(editModel?: ModelListItem): FormState {
     cache_creation_5m_price_per_1m: '',
     cache_creation_1h_price_per_1m: '',
     cache_read_price_per_1m: '',
+    long_context_threshold_tokens: '',
+    long_context_input_price_per_1m: '',
+    long_context_output_price_per_1m: '',
+    long_context_cache_creation_5m_price_per_1m: '',
+    long_context_cache_creation_1h_price_per_1m: '',
+    long_context_cache_read_price_per_1m: '',
     description: '',
     display_name: '',
     context_window: '',
@@ -142,20 +180,63 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       // "미상으로 되돌림"). 숫자 아닌 값은 NaN 으로 보내 zod 가 필드 에러로 돌려준다.
       ...(form.context_window.trim() !== '' && { context_window: Number(form.context_window) }),
       ...(form.max_output_tokens.trim() !== '' && { max_output_tokens: Number(form.max_output_tokens) }),
+      // 장문 티어 — 채워진 키만 보낸다. 부분 세트를 조용히 버리지 않도록
+      // 스키마의 all-or-none 검증이 어느 쪽 결손이든 필드 에러로 돌려준다.
+      // 전부 비우면 키 자체를 생략 → 생성은 무티어(알려진 모델은 서버가
+      // 자동 파생), 편집은 set_pricing 이 기존 티어를 이어받는다.
+      ...(form.long_context_threshold_tokens.trim() !== '' && {
+        long_context_threshold_tokens: Number(form.long_context_threshold_tokens),
+      }),
+      ...(form.long_context_input_price_per_1m.trim() !== '' && {
+        long_context_input_price_per_1k: perMtoK(form.long_context_input_price_per_1m),
+      }),
+      ...(form.long_context_output_price_per_1m.trim() !== '' && {
+        long_context_output_price_per_1k: perMtoK(form.long_context_output_price_per_1m),
+      }),
+      ...(form.long_context_cache_creation_5m_price_per_1m.trim() !== '' && {
+        long_context_cache_creation_5m_price_per_1k: perMtoK(form.long_context_cache_creation_5m_price_per_1m),
+      }),
+      ...(form.long_context_cache_creation_1h_price_per_1m.trim() !== '' && {
+        long_context_cache_creation_1h_price_per_1k: perMtoK(form.long_context_cache_creation_1h_price_per_1m),
+      }),
+      ...(form.long_context_cache_read_price_per_1m.trim() !== '' && {
+        long_context_cache_read_price_per_1k: perMtoK(form.long_context_cache_read_price_per_1m),
+      }),
       // 편집 모드: 가격이 안 바뀌면 pricing PUT 을 건너뛰라는 힌트(불필요한 버전 생성 방지).
       ...(isEditMode && {
-        pricing_changed: (
-          [
+        pricing_changed: (() => {
+          const shortPairs = [
             ['input_price_per_1m', 'input_price_per_1k'],
             ['output_price_per_1m', 'output_price_per_1k'],
             ['cache_creation_5m_price_per_1m', 'cache_creation_5m_price_per_1k'],
             ['cache_creation_1h_price_per_1m', 'cache_creation_1h_price_per_1k'],
             ['cache_read_price_per_1m', 'cache_read_price_per_1k'],
-          ] as const
-        ).some(([formKey, apiKey]) => {
-          const orig = editModel[apiKey];
-          return Math.abs(perMtoK(form[formKey] || '0') - (Number(orig) || 0)) > 1e-9;
-        }),
+          ] as const;
+          const longPairs = [
+            ['long_context_input_price_per_1m', 'long_context_input_price_per_1k'],
+            ['long_context_output_price_per_1m', 'long_context_output_price_per_1k'],
+            ['long_context_cache_creation_5m_price_per_1m', 'long_context_cache_creation_5m_price_per_1k'],
+            ['long_context_cache_creation_1h_price_per_1m', 'long_context_cache_creation_1h_price_per_1k'],
+            ['long_context_cache_read_price_per_1m', 'long_context_cache_read_price_per_1k'],
+          ] as const;
+          const changed = (pairs: typeof shortPairs | typeof longPairs) =>
+            pairs.some(([formKey, apiKey]) => {
+              const orig = editModel[apiKey];
+              return Math.abs(perMtoK(form[formKey] || '0') - (Number(orig) || 0)) > 1e-9;
+            });
+          if (changed(shortPairs)) return true;
+          // 티어 6칸 전부 비움 = "유지" — 무티어면 무티어로, 티어가 있으면
+          // PUT 을 보내도 set_pricing 이 이어받으므로 불필요한 버전 생성 방지.
+          const tierBlank =
+            form.long_context_threshold_tokens.trim() === '' &&
+            longPairs.every(([formKey]) => form[formKey].trim() === '');
+          if (tierBlank) return false;
+          if (changed(longPairs)) return true;
+          return (
+            form.long_context_threshold_tokens.trim() !== '' &&
+            Number(form.long_context_threshold_tokens) !== editModel.long_context_threshold_tokens
+          );
+        })(),
       }),
     };
 
@@ -181,6 +262,10 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
         // API/zod 는 *_per_1k 키로 에러를 돌려준다 — 폼은 *_per_1m 이므로 되돌려
         // 필드 아래 인라인으로 붙인다(안 하면 orphan 키로 상단 에러에만 합산됨).
         for (const k of Object.keys(fe)) {
+          // fieldErrors 는 zod(ModelCreateSchema)에서만 온다 — 스키마 키는
+          // *_per_1k(_tokens 없음)라 그 접미사만 1m 폼 키로 되돌린다.
+          // 백엔드 422(_per_1k_tokens 키)는 toErrorMessage 로 단일 문자열이
+          // 되어 이 경로에 오지 않는다.
           if (k.endsWith('_per_1k')) {
             fe[k.replace(/_per_1k$/, '_per_1m')] = fe[k];
             delete fe[k];
@@ -410,6 +495,132 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 placeholder="0"
               />
               {fieldErrors.cache_read_price_per_1m && <FormError error={fieldErrors.cache_read_price_per_1m} />}
+            </div>
+          </div>
+
+          {/* 장문 구간 단가 — optional. 입력(입력+캐시 읽기+쓰기 합)이 임계를
+              넘으면 이 단가로 과금된다. 카탈로그 동기화가 안 되는 모델을
+              위한 수동 입력 경로. 6칸 전부 비우면 무티어(생성) 또는
+              기존 티어 유지(편집) — 티어 삭제 경로는 의도적으로 없다
+              (구간 제거는 임계 초과 요청을 즉시 과소청구로 돌리므로). */}
+          <div className="space-y-3 rounded-md border border-dashed border-border p-3">
+            <div>
+              <span className="text-sm font-medium">
+                {t('longContextLabel')}{' '}
+                <span className="text-muted-foreground text-xs">({t('longContextOptional')})</span>
+              </span>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('longContextHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_threshold_tokens" className="text-xs text-muted-foreground">
+                {t('longContextThreshold')}
+              </label>
+              <NumberInput
+                id="long_context_threshold_tokens"
+                name="long_context_threshold_tokens"
+                min={1}
+                step={1}
+                value={form.long_context_threshold_tokens}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. 100000"
+              />
+              {fieldErrors.long_context_threshold_tokens && (
+                <FormError error={fieldErrors.long_context_threshold_tokens} />
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_input_price_per_1m" className="text-xs text-muted-foreground">{t('longContextPriceInput')}
+              </label>
+              <NumberInput
+                id="long_context_input_price_per_1m"
+                name="long_context_input_price_per_1m"
+                min={0}
+                step={0.00001}
+                value={form.long_context_input_price_per_1m}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. 0.50"
+              />
+              {fieldErrors.long_context_input_price_per_1m && (
+                <FormError error={fieldErrors.long_context_input_price_per_1m} />
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_output_price_per_1m" className="text-xs text-muted-foreground">{t('longContextPriceOutput')}
+              </label>
+              <NumberInput
+                id="long_context_output_price_per_1m"
+                name="long_context_output_price_per_1m"
+                min={0}
+                step={0.00001}
+                value={form.long_context_output_price_per_1m}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. 2.50"
+              />
+              {fieldErrors.long_context_output_price_per_1m && (
+                <FormError error={fieldErrors.long_context_output_price_per_1m} />
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_cache_creation_5m_price_per_1m" className="text-xs text-muted-foreground">
+                {t('longContextPriceCacheCreate5m')}
+              </label>
+              <NumberInput
+                id="long_context_cache_creation_5m_price_per_1m"
+                name="long_context_cache_creation_5m_price_per_1m"
+                min={0}
+                step={0.00001}
+                value={form.long_context_cache_creation_5m_price_per_1m}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="0"
+              />
+              {fieldErrors.long_context_cache_creation_5m_price_per_1m && (
+                <FormError error={fieldErrors.long_context_cache_creation_5m_price_per_1m} />
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_cache_creation_1h_price_per_1m" className="text-xs text-muted-foreground">
+                {t('longContextPriceCacheCreate1h')}
+              </label>
+              <NumberInput
+                id="long_context_cache_creation_1h_price_per_1m"
+                name="long_context_cache_creation_1h_price_per_1m"
+                min={0}
+                step={0.00001}
+                value={form.long_context_cache_creation_1h_price_per_1m}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="0"
+              />
+              {fieldErrors.long_context_cache_creation_1h_price_per_1m && (
+                <FormError error={fieldErrors.long_context_cache_creation_1h_price_per_1m} />
+              )}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="long_context_cache_read_price_per_1m" className="text-xs text-muted-foreground">{t('longContextPriceCacheRead')}
+              </label>
+              <NumberInput
+                id="long_context_cache_read_price_per_1m"
+                name="long_context_cache_read_price_per_1m"
+                min={0}
+                step={0.00001}
+                value={form.long_context_cache_read_price_per_1m}
+                onChange={handleChange}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="0"
+              />
+              {fieldErrors.long_context_cache_read_price_per_1m && (
+                <FormError error={fieldErrors.long_context_cache_read_price_per_1m} />
+              )}
             </div>
           </div>
 

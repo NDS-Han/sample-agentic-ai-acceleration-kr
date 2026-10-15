@@ -194,6 +194,27 @@ class ModelCreateRequest(BaseModel):
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
 
+    #: 장문(>threshold) 구간 단가 — 생략 시 서비스가 알려진 구간요금 모델이면
+    #: ×배수로 자동 파생하고, 아니면 무티어로 둔다. 운영자가 카탈로그에 없는
+    #: 모델의 구간 단가를 수동 등록할 때 쓰는 경로. PricingRequest 와 같은
+    #: all-or-none 규약(아래 validator).
+    long_context_threshold_tokens: int | None = Field(default=None, ge=1, le=2147483647)
+    long_context_input_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_output_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_creation_5m_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_creation_1h_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+    long_context_cache_read_price_per_1k_tokens: Decimal | None = Field(
+        default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
+    )
+
     #: 스펙 정보 — ``None`` = 미상(수동 커스텀 모델). 카탈로그 동기화가 채우지 못한
     #: 신규 모델을 운영자가 수동 등록할 때 쓴다. ``ge=1`` — 0 이하 스펙은 무의미.
     context_window: int | None = Field(default=None, ge=1)
@@ -216,6 +237,44 @@ class ModelCreateRequest(BaseModel):
     @classmethod
     def _check_endpoint_url(cls, v: str | None) -> str | None:
         return _validate_endpoint_url(v)
+
+    @model_validator(mode="after")
+    def _long_tier_is_one_unit(self):
+        # PricingRequest._long_tier_is_one_unit 과 같은 규약 — threshold 만
+        # 있고 단가가 결손이면 그 차원이 조용히 단락 요율로 과소청구되고,
+        # 단가만 있고 threshold 가 없으면 설정한 줄 알고 무티어로 저장되는
+        # 조용한 불일치가 된다. 어느 쪽도 허용하지 않는다.
+        if self.long_context_threshold_tokens is not None:
+            missing = [
+                name
+                for name in (
+                    "long_context_input_price_per_1k_tokens",
+                    "long_context_output_price_per_1k_tokens",
+                    "long_context_cache_creation_5m_price_per_1k_tokens",
+                    "long_context_cache_creation_1h_price_per_1k_tokens",
+                    "long_context_cache_read_price_per_1k_tokens",
+                )
+                if getattr(self, name) is None
+            ]
+            if missing:
+                raise ValueError(
+                    "long_context_threshold 설정 시 장문 단가 5개가 모두 필요합니다: "
+                    + ", ".join(missing)
+                )
+        elif any(
+            getattr(self, name) is not None
+            for name in (
+                "long_context_input_price_per_1k_tokens",
+                "long_context_output_price_per_1k_tokens",
+                "long_context_cache_creation_5m_price_per_1k_tokens",
+                "long_context_cache_creation_1h_price_per_1k_tokens",
+                "long_context_cache_read_price_per_1k_tokens",
+            )
+        ):
+            raise ValueError(
+                "장문 단가를 설정하려면 long_context_threshold_tokens 도 함께 필요합니다"
+            )
+        return self
 
 
 class ModelUpdateRequest(BaseModel):
@@ -295,7 +354,8 @@ class PricingRequest(BaseModel):
     #: 장문(>threshold) 구간 단가 — None 이면 set_pricing 이 이전 행 값을 이어받는다.
     #: 가격 동기화가 LiteLLM `*_above_{N}k_tokens` 를 매핑해 채운다. 기본 단가만
     #: 개정하고 구간 단가를 얼리면 임계 초과 요청이 구 단가 비율로 과소청구된다.
-    long_context_threshold_tokens: int | None = Field(default=None, ge=1)
+    #: le 는 Integer 컬럼 상한 — 초과 시 422 대신 INSERT 500 이 난다.
+    long_context_threshold_tokens: int | None = Field(default=None, ge=1, le=2147483647)
     long_context_input_price_per_1k_tokens: Decimal | None = Field(
         default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )

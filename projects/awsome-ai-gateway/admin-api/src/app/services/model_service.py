@@ -129,27 +129,39 @@ class ModelService:
         )
         await repo.create_model(model)
 
-        # Initial pricing — 알려진 구간요금 모델이면 단락 ×공시 배수로
-        # 구간 단가를 자동 파생한다. 무티어로 등록하면 임계 초과 요청이
-        # 단락 요율로 과소청구된다(Haiku 5.5 = 전 차원 5배 — 마이그레이션은
-        # 기존 행만 고치고 신규 등록은 여기서 막는다).
-        auto_tier = _auto_long_tier(
-            data.provider_model_id,
-            {
-                "input": data.input_price_per_1k_tokens,
-                "output": data.output_price_per_1k_tokens,
-                "cache_5m": data.cache_creation_5m_price_per_1k_tokens,
-                "cache_1h": data.cache_creation_1h_price_per_1k_tokens,
-                "cache_read": data.cache_read_price_per_1k_tokens,
-            },
-        )
-        if auto_tier:
-            logger.info(
-                "tiered_model_long_context_auto_derived",
-                alias=data.alias,
-                provider_model_id=data.provider_model_id,
-                threshold=auto_tier["long_context_threshold_tokens"],
+        # Initial pricing — 운영자가 장문 티어를 명시하면 그 값을 쓰고,
+        # 아니면 알려진 구간요금 모델이면 단락 ×공시 배수로 자동 파생한다.
+        # 무티어로 등록하면 임계 초과 요청이 단락 요율로 과소청구된다
+        # (Haiku 5.5 = 전 차원 5배 — 마이그레이션은 기존 행만 고치고
+        # 신규 등록은 여기서 막는다).
+        explicit_tier = data.long_context_threshold_tokens is not None
+        if explicit_tier:
+            auto_tier = {
+                "long_context_threshold_tokens": data.long_context_threshold_tokens,
+                "long_context_input_price_per_1k_tokens": data.long_context_input_price_per_1k_tokens,
+                "long_context_output_price_per_1k_tokens": data.long_context_output_price_per_1k_tokens,
+                "long_context_cache_creation_5m_price_per_1k_tokens": data.long_context_cache_creation_5m_price_per_1k_tokens,
+                "long_context_cache_creation_1h_price_per_1k_tokens": data.long_context_cache_creation_1h_price_per_1k_tokens,
+                "long_context_cache_read_price_per_1k_tokens": data.long_context_cache_read_price_per_1k_tokens,
+            }
+        else:
+            auto_tier = _auto_long_tier(
+                data.provider_model_id,
+                {
+                    "input": data.input_price_per_1k_tokens,
+                    "output": data.output_price_per_1k_tokens,
+                    "cache_5m": data.cache_creation_5m_price_per_1k_tokens,
+                    "cache_1h": data.cache_creation_1h_price_per_1k_tokens,
+                    "cache_read": data.cache_read_price_per_1k_tokens,
+                },
             )
+            if auto_tier:
+                logger.info(
+                    "tiered_model_long_context_auto_derived",
+                    alias=data.alias,
+                    provider_model_id=data.provider_model_id,
+                    threshold=auto_tier["long_context_threshold_tokens"],
+                )
         pricing = ModelPricing(
             id=uuid.uuid4(),
             model_alias=data.alias,
@@ -202,7 +214,23 @@ class ModelService:
                 "alias": model.alias,
                 "provider": model.provider.value,
                 # 구간요금 모델의 자동 파생 여부 — 수동 등록과 구분.
-                "long_context_auto_derived": bool(auto_tier),
+                # 운영자 명시 티어(explicit_tier)는 파생이 아니므로 False.
+                "long_context_auto_derived": bool(auto_tier) and not explicit_tier,
+                # 수동 입력은 유일한 billing-critical 수동 경로라 입력값 자체를
+                # 감사에 남긴다. 형식은 SET_PRICING 의 long_context 와 동일하게
+                # 맞춘다 — 같은 질의 경로로 두 액션을 조회할 수 있게.
+                "long_context": (
+                    {
+                        "threshold": auto_tier["long_context_threshold_tokens"],
+                        "input": str(auto_tier["long_context_input_price_per_1k_tokens"]),
+                        "output": str(auto_tier["long_context_output_price_per_1k_tokens"]),
+                        "cache_5m": str(auto_tier["long_context_cache_creation_5m_price_per_1k_tokens"]),
+                        "cache_1h": str(auto_tier["long_context_cache_creation_1h_price_per_1k_tokens"]),
+                        "cache_read": str(auto_tier["long_context_cache_read_price_per_1k_tokens"]),
+                    }
+                    if auto_tier
+                    else None
+                ),
             }},
             ip_address=ip_address,
             request_id=request_id,

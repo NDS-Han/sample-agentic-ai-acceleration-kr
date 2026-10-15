@@ -74,6 +74,15 @@ export interface ModelListItem {
   cache_creation_5m_price_per_1k: number;
   cache_creation_1h_price_per_1k: number;
   cache_read_price_per_1k: number;
+  /** 장문(>threshold) 구간 단가 — threshold 가 null 이면 무티어 모델이고
+      아래 5개는 무의미(전부 null). 카탈로그 동기화가 안 되는 모델은
+      생성/편집 폼에서 수동 입력한다(백엔드 all-or-none 규약). */
+  long_context_threshold_tokens: number | null;
+  long_context_input_price_per_1k: number | null;
+  long_context_output_price_per_1k: number | null;
+  long_context_cache_creation_5m_price_per_1k: number | null;
+  long_context_cache_creation_1h_price_per_1k: number | null;
+  long_context_cache_read_price_per_1k: number | null;
   /** current_pricing 행 존재 여부 — false 면 위 가격 필드는 placeholder(0)로
       '$0.00000/M' 가 아니라 '—' 로 렌더해야 한다. */
   has_pricing: boolean;

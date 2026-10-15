@@ -47,26 +47,42 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
     keyPrefix: string;
   }>({ isOpen: false, keyId: '', keyPrefix: '' });
 
-  const [revokingId, setRevokingId] = useState<string | null>(null);
+  // 단일 id 가 아니라 Set 으로 잠근다 — A 가 진행 중일 때 B 를 확인하면
+  // 슬롯이 B 로 덮여 A 의 버튼이 풀리고, 같은 키를 중복 revoke 할 수 있었다.
+  const [revokingIds, setRevokingIds] = useState<ReadonlySet<string>>(new Set());
 
   const handleRevoke = async () => {
-    setRevokingId(revokeState.keyId);
-    const result = await revokeKeyAction(revokeState.keyId);
-    setRevokingId(null);
-    if (result.success) {
-      // ACTIVE 필터 화면에서 revoke 한 행을 REVOKED 로 덮어쓰지 않고 제거 —
-      // 필터 의미(활성만 보임)와 모순되는 유령 행을 남기지 않기 위함.
-      onRevoked?.(revokeState.keyId);
-      toast({
-        type: 'success',
-        message: t('revokeSuccess', { prefix: revokeState.keyPrefix }),
-        auto_dismiss_ms: 4000,
-      });
-    } else {
-      toast({
-        type: 'error',
-        message: result.error ?? t('revokeFailed'),
-        auto_dismiss_ms: 5000,
+    const keyId = revokeState.keyId;
+    const keyPrefix = revokeState.keyPrefix;
+    setRevokingIds((prev) => new Set(prev).add(keyId));
+    try {
+      const result = await revokeKeyAction(keyId);
+      if (result.success) {
+        // ACTIVE 필터 화면에서 revoke 한 행을 REVOKED 로 덮어쓰지 않고 제거 —
+        // 필터 의미(활성만 보임)와 모순되는 유령 행을 남기지 않기 위함.
+        // await 뒤의 revokeState 는 다음 확인 대상으로 바뀌어 있을 수 있으니 캡처값 사용.
+        onRevoked?.(keyId);
+        toast({
+          type: 'success',
+          message: t('revokeSuccess', { prefix: keyPrefix }),
+          auto_dismiss_ms: 4000,
+        });
+      } else {
+        toast({
+          type: 'error',
+          message: result.error ?? t('revokeFailed'),
+          auto_dismiss_ms: 5000,
+        });
+      }
+    } catch {
+      // transport 거부 — 서버 반영 여부를 모르므로 행은 남기고 재시도를 안내한다.
+      toast({ type: 'error', message: t('revokeFailed'), auto_dismiss_ms: 5000 });
+    } finally {
+      setRevokingIds((prev) => {
+        if (!prev.has(keyId)) return prev;
+        const next = new Set(prev);
+        next.delete(keyId);
+        return next;
       });
     }
   };
@@ -123,11 +139,11 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
                         })
                       }
                       disabled={
-                        key.status !== KeyStatus.ACTIVE || revokingId === key.key_id
+                        key.status !== KeyStatus.ACTIVE || revokingIds.has(key.key_id)
                       }
                       className="inline-flex items-center rounded-md border border-destructive/50 bg-background px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
                     >
-                      {revokingId === key.key_id ? t('revoking') : t('revoke')}
+                      {revokingIds.has(key.key_id) ? t('revoking') : t('revoke')}
                     </button>
                   </div>
                 </Td>

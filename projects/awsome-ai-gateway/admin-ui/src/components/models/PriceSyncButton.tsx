@@ -114,7 +114,14 @@ export function PriceSyncButton() {
                   </label>
                   <select
                     value={source}
-                    onChange={(e) => setSource(e.target.value as 'aws' | 'litellm')}
+                    onChange={(e) => {
+                      // 소스를 바꾸면 화면의 미리보기는 구 소스의 단가표 —
+                      // Apply 가 구 expected 값을 새 소스로 보내는 것을 막는다
+                      // (서버 drift guard 가 막아주지만 운영자는 원인을 모른다).
+                      setSource(e.target.value as 'aws' | 'litellm');
+                      setPreview(null);
+                      setSelected(new Set());
+                    }}
                     disabled={loading || applying}
                     className="block w-full rounded-md border border-border bg-background px-2 py-1.5 text-sm"
                   >

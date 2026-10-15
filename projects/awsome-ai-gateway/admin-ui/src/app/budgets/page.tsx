@@ -39,21 +39,19 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
     roleFromCookie(cookieStore.get(ADMIN_ROLE_COOKIE)?.value) ?? session?.role;
   const isAdmin = role === 'ADMIN';
 
-  // 비관리자(TEAM_LEADER)의 팀·본인 신원도 JWT 에 기대지 않는다 — OIDC 토큰에는
-  // team_id 클레임이 없고 sub 도 DB user_id 와 다를 수 있어, 그대로 쓰면 팀 리더가
-  // 'noTeamAssigned' 로 떨어지거나 '내 행' 하이라이트가 어긋난다. /admin/my/profile
+  // 관리자·팀 리더 모두 본인 신원을 JWT 에 기대지 않는다 — OIDC 토큰에는
+  // team_id 클레임이 없고 sub 도 DB user_id 와 다를 수 있어, 그대로 쓰면
+  // '내 행' 하이라이트가 어긋난다(관리자 행도 마찬가지). /admin/my/profile
   // 이 get_current_user 와 동일 판정의 유효 신원을 돌려준다(실패 시 JWT 폴백).
   let myTeamId = session?.team_id ?? null;
   let myUserId = session?.user_id;
-  if (!isAdmin) {
-    const profileResult = await adminAPI
-      .get<{ user_id: string; team_id: string | null }>('/admin/my/profile')
-      .then((v) => ({ ok: true as const, value: v }))
-      .catch(() => ({ ok: false as const }));
-    if (profileResult.ok) {
-      myTeamId = profileResult.value.team_id ?? myTeamId;
-      myUserId = profileResult.value.user_id ?? myUserId;
-    }
+  const profileResult = await adminAPI
+    .get<{ user_id: string; team_id: string | null }>('/admin/my/profile')
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
+  if (profileResult.ok) {
+    myTeamId = profileResult.value.team_id ?? myTeamId;
+    myUserId = profileResult.value.user_id ?? myUserId;
   }
 
   // 리포팅 TZ 기준 현재월 — 로컬 new Date()(pod UTC)로 계산하면 매월 1일 리포팅 TZ
@@ -177,7 +175,7 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
             isAdmin={isAdmin}
             models={models}
             modelsLoadFailed={modelsLoadFailed}
-            currentUserId={session?.user_id}
+            currentUserId={myUserId}
             focusTeam={focusTeam}
             focusUser={focusUser}
           />

@@ -34,6 +34,17 @@ export const ModelCreateSchema = z.object({
   // 박혀 1시간 캐시 사용분 청구가 누락되던 버그 수정(deepdive Q-pricing).
   cache_creation_1h_price_per_1k: z.number().nonnegative().default(0),
   cache_read_price_per_1k: z.number().nonnegative().default(0),
+  // 장문(>threshold) 구간 단가 — 백엔드 PricingRequest 와 같은 all-or-none
+  // 규약: threshold 가 있으면 5개 단가 전부 필요하고, threshold 없이
+  // 단가만 오면 조용히 버려지는 대신 거부한다(아래 superRefine).
+  // 생략 시 생성=무티어(알려진 모델은 서버가 자동 파생), 편집=기존 티어 유지.
+  // Integer 컬럼 상한 — 초과 시 서버 422 대신 INSERT 500 이 나므로 폼에서 막는다.
+  long_context_threshold_tokens: z.number().int().positive().max(2147483647).optional(),
+  long_context_input_price_per_1k: z.number().nonnegative().optional(),
+  long_context_output_price_per_1k: z.number().nonnegative().optional(),
+  long_context_cache_creation_5m_price_per_1k: z.number().nonnegative().optional(),
+  long_context_cache_creation_1h_price_per_1k: z.number().nonnegative().optional(),
+  long_context_cache_read_price_per_1k: z.number().nonnegative().optional(),
   // 스펙 필드 — optional. 컬럼은 model_aliases 에 존재(context_window/max_output_tokens,
   // litellm spec 동기화가 채움). 과거엔 폼/스키마 양쪽에 없어 required 로 두면 safeParse 가
   // 항상 실패했는데, 지금은 optional 입력란이 폼에 있으므로 optional 로 둔다.
@@ -80,7 +91,40 @@ export const ModelCreateSchema = z.object({
       path: ['model_id'],
       message: 'Must be a cross-region inference profile ID (e.g. us.openai.gpt-5.6-terra)',
     },
-  );
+  )
+  // 장문 티어 all-or-none — 백엔드 ModelCreateRequest._long_tier_is_one_unit
+  // 와 같은 규약. 결손 단가는 조용히 단락 요율로 과소청구되므로 둘 다 막는다.
+  .superRefine((d, ctx) => {
+    const priceKeys = [
+      'long_context_input_price_per_1k',
+      'long_context_output_price_per_1k',
+      'long_context_cache_creation_5m_price_per_1k',
+      'long_context_cache_creation_1h_price_per_1k',
+      'long_context_cache_read_price_per_1k',
+    ] as const;
+    if (d.long_context_threshold_tokens != null) {
+      for (const k of priceKeys) {
+        if (d[k] == null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: [k],
+            message: 'Required when a long-context threshold is set',
+          });
+        }
+      }
+    } else {
+      for (const k of priceKeys) {
+        if (d[k] != null) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['long_context_threshold_tokens'],
+            message: 'Threshold is required when long-context prices are set',
+          });
+          break;
+        }
+      }
+    }
+  });
 
 // 즉시 비활성화만 지원(예약/유예 기능 없음). 백엔드 StatusPatchRequest 는 {active: bool} 만 받아
 // 즉시 전환한다 — UI 도 이에 맞춘다.

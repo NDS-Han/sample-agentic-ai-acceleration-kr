@@ -97,6 +97,12 @@ describe('ModelCreateSchema — 폼 payload 정합성', () => {
       'cache_creation_5m_price_per_1k',
       'cache_creation_1h_price_per_1k',
       'cache_read_price_per_1k',
+      'long_context_threshold_tokens',
+      'long_context_input_price_per_1k',
+      'long_context_output_price_per_1k',
+      'long_context_cache_creation_5m_price_per_1k',
+      'long_context_cache_creation_1h_price_per_1k',
+      'long_context_cache_read_price_per_1k',
       'description',
       'display_name',
     ]);
@@ -249,5 +255,87 @@ describe('ModelCreateSchema — BEDROCK_RUNTIME_OPENAI plane', () => {
         })
       ).success
     ).toBe(true);
+  });
+});
+
+/**
+ * 장문(>threshold) 구간 단가 — all-or-none 규약.
+ *
+ * 배경: 백엔드 ModelCreateRequest._long_tier_is_one_unit / PricingRequest 와
+ * 같은 규약을 UI 스키마에도 둔다. threshold 만 있고 단가가 결손이면 그 차원이
+ * 조용히 단락 요율로 과소청구되고, 단가만 있고 threshold 가 없으면 설정한 줄
+ * 알고 무티어로 저장된다 — 둘 다 조용한 과금 불일치라 폼에서 먼저 거부한다.
+ */
+describe('ModelCreateSchema — 장문 티어 all-or-none', () => {
+  const base = buildPayloadLikeDialog(GPT56_SOL_FORM);
+  const TIER = {
+    long_context_threshold_tokens: 100000,
+    long_context_input_price_per_1k: 0.0005,
+    long_context_output_price_per_1k: 0.0025,
+    long_context_cache_creation_5m_price_per_1k: 0.000625,
+    long_context_cache_creation_1h_price_per_1k: 0.001,
+    long_context_cache_read_price_per_1k: 0.00005,
+  };
+
+  it('완전한 티어(임계+단가 5개)는 통과한다 — Haiku 5.5 값으로', () => {
+    const parsed = ModelCreateSchema.safeParse({ ...base, ...TIER });
+    const issues = parsed.success
+      ? []
+      : parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`);
+    expect(issues).toEqual([]);
+    expect(parsed.success).toBe(true);
+  });
+
+  it('티어를 전부 생략하면 통과한다 — 무티어 생성 경로 보존', () => {
+    const parsed = ModelCreateSchema.safeParse(base);
+    expect(parsed.success).toBe(true);
+    expect(parsed.success && parsed.data.long_context_threshold_tokens).toBeUndefined();
+  });
+
+  it('threshold 만 있고 단가가 빠지면 각 결손 단가 필드에 에러를 붙인다', () => {
+    const parsed = ModelCreateSchema.safeParse({
+      ...base,
+      long_context_threshold_tokens: 100000,
+    });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const keys = parsed.error.issues.map((i) => i.path.join('.'));
+      for (const k of [
+        'long_context_input_price_per_1k',
+        'long_context_output_price_per_1k',
+        'long_context_cache_creation_5m_price_per_1k',
+        'long_context_cache_creation_1h_price_per_1k',
+        'long_context_cache_read_price_per_1k',
+      ]) {
+        expect(keys).toContain(k);
+      }
+    }
+  });
+
+  it('단가만 있고 threshold 가 없으면 threshold 필드에 에러를 붙인다', () => {
+    const { long_context_threshold_tokens: _t, ...noThreshold } = TIER;
+    const parsed = ModelCreateSchema.safeParse({ ...base, ...noThreshold });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const keys = parsed.error.issues.map((i) => i.path.join('.'));
+      expect(keys).toContain('long_context_threshold_tokens');
+    }
+  });
+
+  it('단가 5개 중 하나라도 빠지면 거부한다 — 부분 티어는 과소청구다', () => {
+    const { long_context_cache_read_price_per_1k: _p, ...partial } = TIER;
+    const parsed = ModelCreateSchema.safeParse({ ...base, ...partial });
+    expect(parsed.success).toBe(false);
+    if (!parsed.success) {
+      const keys = parsed.error.issues.map((i) => i.path.join('.'));
+      expect(keys).toContain('long_context_cache_read_price_per_1k');
+    }
+  });
+
+  it('임계가 정수가 아니거나 0 이하면 거부한다', () => {
+    for (const t of [100000.5, 0, -1]) {
+      const parsed = ModelCreateSchema.safeParse({ ...base, ...TIER, long_context_threshold_tokens: t });
+      expect(parsed.success, `threshold=${t}`).toBe(false);
+    }
   });
 });

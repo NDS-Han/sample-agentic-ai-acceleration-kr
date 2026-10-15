@@ -184,6 +184,16 @@ export function ModelsTable({ models }: ModelsTableProps) {
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium">{displayName}</span>
                               <ProviderBadge provider={model.provider} />
+                              {model.long_context_threshold_tokens != null && (
+                                <span
+                                  className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] font-medium text-muted-foreground"
+                                  title={t('longContextBadgeTitle', {
+                                    threshold: model.long_context_threshold_tokens.toLocaleString('en-US'),
+                                  })}
+                                >
+                                  &gt;{fmtTokensCompact(model.long_context_threshold_tokens)}
+                                </span>
+                              )}
                             </div>
                             {/* 라우팅 키(alias)와 실제 호출되는 model_id 는 역할이 다른
                                 식별자라 같은 줄에 두면 구분이 안 된다 — 두 줄로 분리.
@@ -283,6 +293,34 @@ export function ModelsTable({ models }: ModelsTableProps) {
                                     </dd>
                                   </div>
                                 ))}
+                                {/* 장문 티어 — 있을 때만 노출. 임계 초과 요청이
+                                    이 단가로 과금되므로 단락 단가와 구분 표기. */}
+                                {model.long_context_threshold_tokens != null && (
+                                  <>
+                                    <div className="pt-1.5 text-xs font-semibold tracking-wide text-foreground/80">
+                                      {t('longContextDetail', {
+                                        // 과금 경계값이라 compact 반올림(101K)을 쓰지 않는다.
+                                        threshold: model.long_context_threshold_tokens.toLocaleString('en-US'),
+                                      })}
+                                    </div>
+                                    {[
+                                      [t('priceInput'), model.long_context_input_price_per_1k],
+                                      [t('priceOutput'), model.long_context_output_price_per_1k],
+                                      [t('priceCacheRead'), model.long_context_cache_read_price_per_1k],
+                                      [t('priceCacheCreate5m'), model.long_context_cache_creation_5m_price_per_1k],
+                                      [t('priceCacheCreate1h'), model.long_context_cache_creation_1h_price_per_1k],
+                                    ].map(([label, per1k]) => (
+                                      <div key={label as string} className="flex items-baseline justify-between gap-4">
+                                        <dt className="text-muted-foreground">{label}</dt>
+                                        <dd className="num font-medium">
+                                          {per1k != null && (per1k as number) > 0
+                                            ? fmtPricePerM(per1k as number)
+                                            : '—'}
+                                        </dd>
+                                      </div>
+                                    ))}
+                                  </>
+                                )}
                               </dl>
                             </section>
                             <section className="rounded-lg border border-border bg-card p-4">

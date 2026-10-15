@@ -21,6 +21,12 @@ export interface APIModelItem {
     cache_creation_5m_price_per_1k_tokens?: string;
     cache_creation_1h_price_per_1k_tokens?: string;
     cache_read_price_per_1k_tokens?: string;
+    long_context_threshold_tokens?: number | null;
+    long_context_input_price_per_1k_tokens?: string | null;
+    long_context_output_price_per_1k_tokens?: string | null;
+    long_context_cache_creation_5m_price_per_1k_tokens?: string | null;
+    long_context_cache_creation_1h_price_per_1k_tokens?: string | null;
+    long_context_cache_read_price_per_1k_tokens?: string | null;
   } | null;
   context_window: number | null;
   max_output_tokens: number | null;
@@ -47,6 +53,22 @@ export function mapToModelListItem(item: APIModelItem): ModelListItem {
     cache_read_price_per_1k: p?.cache_read_price_per_1k_tokens
       ? parseFloat(p.cache_read_price_per_1k_tokens)
       : 0,
+    long_context_threshold_tokens: p?.long_context_threshold_tokens ?? null,
+    long_context_input_price_per_1k: p?.long_context_input_price_per_1k_tokens != null
+      ? parseFloat(p.long_context_input_price_per_1k_tokens)
+      : null,
+    long_context_output_price_per_1k: p?.long_context_output_price_per_1k_tokens != null
+      ? parseFloat(p.long_context_output_price_per_1k_tokens)
+      : null,
+    long_context_cache_creation_5m_price_per_1k: p?.long_context_cache_creation_5m_price_per_1k_tokens != null
+      ? parseFloat(p.long_context_cache_creation_5m_price_per_1k_tokens)
+      : null,
+    long_context_cache_creation_1h_price_per_1k: p?.long_context_cache_creation_1h_price_per_1k_tokens != null
+      ? parseFloat(p.long_context_cache_creation_1h_price_per_1k_tokens)
+      : null,
+    long_context_cache_read_price_per_1k: p?.long_context_cache_read_price_per_1k_tokens != null
+      ? parseFloat(p.long_context_cache_read_price_per_1k_tokens)
+      : null,
     has_pricing: p != null,
     // 스펙 미등록은 null 을 유지한다 — 0 으로 바꾸면 표가 '0K' 라는
     // 거짓 스펙을 보여준다. 숫자 비교 소비자는 없고 표만 참조한다.

@@ -208,26 +208,34 @@ describe('CreateModelDialog — 검증 실패 관측성', () => {
  * (api_format 은 이 폼에 컨트롤 자체가 없고 create 시 provider 에서 파생되므로 잠글 대상이
  *  없다 — 그래서 안내 문구가 provider 와 api_format 을 함께 설명한다.)
  */
+const editModelFixture: ModelListItem = {
+  alias: 'cowork-opus',
+  provider: 'BEDROCK_MANTLE',
+  model_id: 'anthropic.claude-opus-4-1',
+  endpoint_url: null,
+  is_active: true,
+  input_price_per_1k: 0.015,
+  output_price_per_1k: 0.075,
+  cache_creation_5m_price_per_1k: 0.01875,
+  cache_creation_1h_price_per_1k: 0.03,
+  cache_read_price_per_1k: 0.0015,
+  long_context_threshold_tokens: null,
+  long_context_input_price_per_1k: null,
+  long_context_output_price_per_1k: null,
+  long_context_cache_creation_5m_price_per_1k: null,
+  long_context_cache_creation_1h_price_per_1k: null,
+  long_context_cache_read_price_per_1k: null,
+  has_pricing: true,
+  max_tokens: null,
+  context_window: null,
+  created_at: '2026-10-01T00:00:00Z',
+  description: 'Cowork Opus',
+  display_name: 'Cowork Opus',
+  allowed_clients: null,
+};
+
 describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회귀)', () => {
-  const editModel: ModelListItem = {
-    alias: 'cowork-opus',
-    provider: 'BEDROCK_MANTLE',
-    model_id: 'anthropic.claude-opus-4-1',
-    endpoint_url: null,
-    is_active: true,
-    input_price_per_1k: 0.015,
-    output_price_per_1k: 0.075,
-    cache_creation_5m_price_per_1k: 0.01875,
-    cache_creation_1h_price_per_1k: 0.03,
-    cache_read_price_per_1k: 0.0015,
-    has_pricing: true,
-    max_tokens: null,
-    context_window: null,
-    created_at: '2026-10-01T00:00:00Z',
-    description: 'Cowork Opus',
-    display_name: 'Cowork Opus',
-    allowed_clients: null,
-  };
+  const editModel = editModelFixture;
 
   beforeEach(() => {
     createModelAction.mockReset();
@@ -356,5 +364,210 @@ describe('CreateModelDialog — price inputs take fine-grained decimals (US-19)'
     await waitFor(() => expect(createModelAction).toHaveBeenCalled());
     const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
     expect(payload.input_price_per_1k).toBe(0.12345678);
+  });
+});
+
+/**
+ * 장문(>threshold) 구간 단가 — 카탈로그 동기화가 안 되는 모델의 수동 입력 경로.
+ *
+ * 백엔드는 long_context_* 가 all-or-none 으로만 저장된다(부분 세트는 그 차원이
+ * 조용히 단락 요율로 과소청구되는 결함). 폼은 "채워진 키만 보내고" 검증은 스키마에
+ * 맡긴다 — 부분 입력을 조용히 버리면 운영자는 설정한 줄 안다.
+ */
+describe('CreateModelDialog — 장문 티어 필드', () => {
+  beforeEach(() => {
+    createModelAction.mockReset();
+    updateModelAction.mockReset();
+    toast.mockReset();
+  });
+
+  /** 임계+단가 5개 전부 채운다 — 라벨은 단락 단가와 같은 키라 id 로 직접 잡는다. */
+  function fillLongTier() {
+    const set = (id: string, value: string) =>
+      fireEvent.change(document.getElementById(id)!, { target: { name: id, value } });
+    set('long_context_threshold_tokens', '100000');
+    set('long_context_input_price_per_1m', '0.5');
+    set('long_context_output_price_per_1m', '2.5');
+    set('long_context_cache_creation_5m_price_per_1m', '0.625');
+    set('long_context_cache_creation_1h_price_per_1m', '1.0');
+    set('long_context_cache_read_price_per_1m', '0.05');
+  }
+
+  it('티어를 채우면 임계와 단가 5개를 1K 단가로 환산해 보낸다', async () => {
+    createModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fillLongTier();
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => expect(createModelAction).toHaveBeenCalled());
+    const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.long_context_threshold_tokens).toBe(100000);
+    expect(payload.long_context_input_price_per_1k).toBe(0.0005);
+    expect(payload.long_context_output_price_per_1k).toBe(0.0025);
+    // Haiku 5.5 캐시 쓰기 $0.625/M 처럼 고운 단가도 8자리 정밀도로 간다.
+    expect(payload.long_context_cache_creation_5m_price_per_1k).toBe(0.000625);
+    expect(payload.long_context_cache_creation_1h_price_per_1k).toBe(0.001);
+    expect(payload.long_context_cache_read_price_per_1k).toBe(0.00005);
+  });
+
+  it('티어를 비우면 long_context 키를 하나도 보내지 않는다 — 0 주입 금지', async () => {
+    createModelAction.mockResolvedValue({ success: true, data: undefined });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => expect(createModelAction).toHaveBeenCalled());
+    const payload = createModelAction.mock.calls[0][0] as Record<string, unknown>;
+    for (const k of Object.keys(payload)) {
+      expect(k).not.toMatch(/^long_context/);
+    }
+  });
+
+  it('편집 모드는 기존 티어 값을 1M 표기로 프리필한다', () => {
+    const tiered: ModelListItem = {
+      ...editModelFixture,
+      long_context_threshold_tokens: 100000,
+      long_context_input_price_per_1k: 0.0005,
+      long_context_output_price_per_1k: 0.0025,
+      long_context_cache_creation_5m_price_per_1k: 0.000625,
+      long_context_cache_creation_1h_price_per_1k: 0.001,
+      long_context_cache_read_price_per_1k: 0.00005,
+    };
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={tiered} />);
+
+    expect((document.getElementById('long_context_threshold_tokens') as HTMLInputElement).value)
+      .toBe('100000');
+    expect((document.getElementById('long_context_input_price_per_1m') as HTMLInputElement).value)
+      .toBe('0.5');
+    expect((document.getElementById('long_context_cache_creation_5m_price_per_1m') as HTMLInputElement).value)
+      .toBe('0.625');
+  });
+
+  it('티어 모델을 그대로 저장하면 pricing_changed=false 다 (버전 낭비 방지)', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+    const tiered: ModelListItem = {
+      ...editModelFixture,
+      long_context_threshold_tokens: 100000,
+      long_context_input_price_per_1k: 0.0005,
+      long_context_output_price_per_1k: 0.0025,
+      long_context_cache_creation_5m_price_per_1k: 0.000625,
+      long_context_cache_creation_1h_price_per_1k: 0.001,
+      long_context_cache_read_price_per_1k: 0.00005,
+    };
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={tiered} />);
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.pricing_changed).toBe(false);
+  });
+
+  it('장문 단가만 바꿔도 pricing_changed=true 다', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+    const tiered: ModelListItem = {
+      ...editModelFixture,
+      long_context_threshold_tokens: 100000,
+      long_context_input_price_per_1k: 0.0005,
+      long_context_output_price_per_1k: 0.0025,
+      long_context_cache_creation_5m_price_per_1k: 0.000625,
+      long_context_cache_creation_1h_price_per_1k: 0.001,
+      long_context_cache_read_price_per_1k: 0.00005,
+    };
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={tiered} />);
+    fireEvent.change(document.getElementById('long_context_input_price_per_1m')!, {
+      target: { name: 'long_context_input_price_per_1m', value: '0.6' },
+    });
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.pricing_changed).toBe(true);
+    expect(payload.long_context_input_price_per_1k).toBe(0.0006);
+  });
+
+  it('무티어 모델 편집에서 티어를 새로 채우면 pricing_changed=true 다', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={editModelFixture} />);
+    fillLongTier();
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    expect(payload.pricing_changed).toBe(true);
+    expect(payload.long_context_threshold_tokens).toBe(100000);
+  });
+
+  it('티어를 전부 지우고 저장하면 pricing_changed=false 다 — 티어는 서버가 보존한다', async () => {
+    updateModelAction.mockResolvedValue({ success: true, data: undefined });
+    const tiered: ModelListItem = {
+      ...editModelFixture,
+      long_context_threshold_tokens: 100000,
+      long_context_input_price_per_1k: 0.0005,
+      long_context_output_price_per_1k: 0.0025,
+      long_context_cache_creation_5m_price_per_1k: 0.000625,
+      long_context_cache_creation_1h_price_per_1k: 0.001,
+      long_context_cache_read_price_per_1k: 0.00005,
+    };
+    render(<CreateModelDialog isOpen onClose={() => {}} editModel={tiered} />);
+    for (const id of [
+      'long_context_threshold_tokens',
+      'long_context_input_price_per_1m',
+      'long_context_output_price_per_1m',
+      'long_context_cache_creation_5m_price_per_1m',
+      'long_context_cache_creation_1h_price_per_1m',
+      'long_context_cache_read_price_per_1m',
+    ]) {
+      fireEvent.change(document.getElementById(id)!, { target: { name: id, value: '' } });
+    }
+    fireEvent.submit(screen.getByRole('button', { name: 'edit' }).closest('form')!);
+
+    await waitFor(() => expect(updateModelAction).toHaveBeenCalled());
+    const [, payload] = updateModelAction.mock.calls[0] as [string, Record<string, unknown>];
+    // 키 생략 = set_pricing 이 이전 티어를 이어받는다 — 구간 삭제 경로는 없다.
+    expect(payload.pricing_changed).toBe(false);
+    for (const k of Object.keys(payload)) {
+      expect(k).not.toMatch(/^long_context/);
+    }
+  });
+
+  it('zod가 long_context 키로 돌려준 필드 에러는 해당 입력란 아래에 붙는다', async () => {
+    // 서버 422(_per_1k_tokens)는 toErrorMessage 단일 문자열 경로라 fieldErrors
+    // 로 오지 않는다 — fieldErrors 는 zod(_per_1k 키)에서만 온다.
+    createModelAction.mockResolvedValue({
+      success: false,
+      error: 'Validation failed',
+      fieldErrors: { long_context_input_price_per_1k: 'Required when a long-context threshold is set' },
+    });
+
+    render(<CreateModelDialog isOpen onClose={() => {}} />);
+    fillRequiredFields();
+    fireEvent.submit(screen.getByRole('button', { name: 'register' }).closest('form')!);
+
+    await waitFor(() => {
+      const alerts = screen.getAllByRole('alert').map((n) => n.textContent ?? '').join(' | ');
+      expect(alerts).toContain('Required when a long-context threshold is set');
+      // 입력란 아래 필드 에러로 붙어야 상단 orphan 합산에 키가 안 나온다.
+      expect(alerts).not.toContain('long_context_input_price_per_1k (');
+    });
+  });
+
+  it('장문 티어 라벨·힌트 키가 ko/en 양쪽에 있다', () => {
+    for (const locale of ['ko', 'en']) {
+      const messages = JSON.parse(
+        readFileSync(path.join(process.cwd(), 'messages', `${locale}.json`), 'utf8')
+      );
+      for (const key of [
+        'longContextLabel', 'longContextOptional', 'longContextHint', 'longContextThreshold',
+        'longContextPriceInput', 'longContextPriceOutput', 'longContextPriceCacheCreate5m',
+        'longContextPriceCacheCreate1h', 'longContextPriceCacheRead',
+        'longContextDetail', 'longContextBadgeTitle',
+      ]) {
+        expect(typeof messages.models[key], `${locale}.${key}`).toBe('string');
+        expect(messages.models[key].length).toBeGreaterThan(0);
+      }
+    }
   });
 });

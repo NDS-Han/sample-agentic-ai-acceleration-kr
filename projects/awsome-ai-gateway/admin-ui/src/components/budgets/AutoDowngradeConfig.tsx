@@ -51,6 +51,8 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
   // 편집하면 스냅샷과 어긋나 테두리가 풀리고, 새 규칙은 처음부터 테두리가 없다.
   const [savedRules, setSavedRules] = useState<DowngradeRuleForm[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [retryGen, setRetryGen] = useState(0);
   const [clearOpen, setClearOpen] = useState(false);
   // 사용률 시뮬레이터 — null 이면 꺼짐(기본: 현재 사용률 또는 0).
   const [simPct, setSimPct] = useState<number | null>(null);
@@ -113,9 +115,16 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
   const effectiveSimPct = simPct ?? Math.round(currentUsagePct ?? 0);
 
   useEffect(() => {
+    // 스코프 전환 즉시 이전 설정을 지운다 — loaded=true 채로 남은 규칙이
+    // 새 스코프에 저장되면 그 스코프의 규칙을 통째로 덮어쓴다.
+    setLoaded(false);
+    setLoadFailed(false);
     if (!scopeId) return;
+    let cancelled = false;
     startTransition(async () => {
       const result = await getDowngradeConfigAction(scopeType, scopeId);
+      // 빠른 스코프 전환에서 늦게 돌아온 응답이 새 스코프 상태를 덮지 않게 한다.
+      if (cancelled) return;
       if (result.success) {
         setEnabled(result.data.enabled);
         const loaded = result.data.rules.map(r => ({
@@ -125,10 +134,20 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
         }));
         setRules(loaded);
         setSavedRules(loaded);
+        setLoaded(true);
+      } else {
+        // 실패를 "설정 없음"으로 렌더하면 다음 저장이 기존 규칙을 전부 지운다 —
+        // PUT 은 규칙 전체 교체이므로 loadFailed 상태로 저장 경로를 차단한다.
+        setLoadFailed(true);
+        toast({ type: 'error', message: t('downgradeLoadFailed'), auto_dismiss_ms: 5000 });
       }
-      setLoaded(true);
     });
-  }, [scopeType, scopeId]);
+    return () => {
+      cancelled = true;
+    };
+    // t/toast 는 안정 참조 — retryGen 은 재시도 버튼이 올리는 수동 트리거.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scopeType, scopeId, retryGen]);
 
   const addRule = () => {
     // 빈 규칙 — from/to 는 placeholder 를 보여주고 사용자가 고른다.
@@ -219,6 +238,21 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
     });
   };
 
+  if (loadFailed) {
+    return (
+      <div className="flex items-center gap-3 text-sm text-destructive py-4">
+        <span>{t('downgradeLoadFailed')}</span>
+        <button
+          type="button"
+          onClick={() => setRetryGen(g => g + 1)}
+          className="text-sm underline hover:no-underline"
+        >
+          {tc('retry')}
+        </button>
+      </div>
+    );
+  }
+
   if (!loaded) {
     return (
       <div className="flex items-center gap-2 text-sm text-muted-foreground py-4">
@@ -259,9 +293,10 @@ export function AutoDowngradeConfig({ scopeType, scopeId, scopeName, models, mod
               type="checkbox"
               checked={enabled}
               onChange={e => setEnabled(e.target.checked)}
+              aria-label={t('autoDowngrade')}
               className="sr-only peer"
             />
-            <div className="w-10 h-[22px] bg-muted-foreground/30 peer-checked:bg-primary rounded-full transition-colors after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:w-4 after:h-4 after:bg-background after:rounded-full after:shadow-sm after:transition-transform peer-checked:after:translate-x-[18px]" />
+            <div className="w-10 h-[22px] bg-muted-foreground/30 peer-checked:bg-primary rounded-full transition-colors after:content-[''] after:absolute after:top-[3px] after:left-[3px] after:w-4 after:h-4 after:bg-background after:rounded-full after:shadow-sm after:transition-transform peer-checked:after:translate-x-[18px] peer-focus-visible:ring-2 peer-focus-visible:ring-ring peer-focus-visible:ring-offset-1" />
           </div>
         </label>
       </div>
