@@ -107,6 +107,11 @@ REJECT_QUERIES = [
     "SELECT * FROM usage.usage_logs u, LATERAL (VALUES ((SELECT rolname FROM pg_roles))) v(r)",
     "WITH pg_roles AS (VALUES ((SELECT string_agg(rolname, ',') FROM pg_roles))) SELECT * FROM pg_roles",
     "WITH a AS (VALUES((SELECT datname FROM pg_stat_activity))), pg_stat_activity AS (SELECT 1) SELECT * FROM a",
+    # claude R17-3 M1 — sqlglot CTE 매칭은 대소문자 구분, Postgres 는 비인용
+    # 식별자를 소문자 폴딩 → 외부 PG_ROLES 는 실제 pg_catalog.pg_roles
+    'WITH "PG_ROLES" AS (SELECT 1) SELECT * FROM PG_ROLES',
+    # 비화이트리스트 스키마가 대소문자 변형으로도 못 빠져나가는지
+    "SELECT * FROM Usage.Usage_Logs x JOIN Pg_Roles p ON true",
 ]
 
 

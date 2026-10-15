@@ -120,6 +120,20 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         raise ValidationError("Only a single SQL statement is permitted")
     ast = statements[0]
 
+    # Postgres 식별자 의미론에 맞춰 비인용 식별자를 소문자로 폴딩한다.
+    #    sqlglot 은 CTE 매칭이 대소문자 구분인데 Postgres 는 비인용 이름을
+    #    소문자로 접는다 — `WITH "PG_ROLES" AS (...) SELECT * FROM PG_ROLES`
+    #    에서 sqlglot 은 외부 PG_ROLES 를 CTE 참조로 보지만 Postgres 는
+    #    (pg_roles ≠ "PG_ROLES") 실제 pg_catalog.pg_roles 를 읽어 스키마
+    #    카탈로그가 새는 우회였다 (claude R17-3 M1). 동시에
+    #    `WITH x AS ... SELECT * FROM X` 같은 정상 쿼리의 오탐도 사라진다.
+    from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+
+    try:
+        ast = normalize_identifiers(ast, dialect="postgres")
+    except Exception as e:  # noqa: BLE001 — 정규화 불가 = fail closed
+        raise ValidationError(f"Could not normalize identifiers: {e}") from e
+
     # 2. 허용된 statement type 만 — SELECT 계열.
     #    ⚠️ 과거 로직은 "비허용 root 인데 DML 노드를 못 찾으면" 조용히 통과시켰다 —
     #    `SET`/`DISCARD`/`LISTEN` 같은 세션 조작문이 그대로 새고, `WITH x AS
@@ -245,7 +259,13 @@ def validate_sql(sql: str) -> sqlglot.Expression:
                 covered_ids.add(id(t))
                 continue
             src = scope.sources.get(t.name)
-            if src is not None and not isinstance(src, exp.Table):
+            # sqlglot 자체 규칙(_traverse_tables)과 맞춘다 — 스키마 한정이
+            #    있는 노드는 절대 CTE 참조로 면제하지 않는다 (claude R17-3 S1).
+            if (
+                src is not None
+                and not isinstance(src, exp.Table)
+                and not t.args.get("db")
+            ):
                 covered_ids.add(id(t))  # CTE/서브쿼리 참조 — 이 스코프 한정
     for node in ast.find_all(exp.Table):
         if not node.name:
