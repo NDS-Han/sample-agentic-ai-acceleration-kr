@@ -1027,23 +1027,27 @@ _ORCH_TOOLS = [
 
 ORCH_EFFORT_DEEP = os.environ.get("ORCH_EFFORT_DEEP", ORCH_EFFORT).strip().lower()
 
-# orchestrator 도 팩토리(R17-S5) — invoke 마다 신규 인스턴스. 싱글턴이면 연속
-# 턴에서 대화 history 가 누적(의도는 턴 단위 stateless)하고 동시 세션에서
-# ConcurrencyException 이 난다. Bedrock 프롬프트 캐시는 내용 기반이라 무관.
-def _new_orchestrator() -> Agent:
-    return Agent(
-        model=orchestrator_model(),
-        tools=_ORCH_TOOLS,
-        system_prompt=load_prompt("orchestrator"),
-    )
+# orchestrator 는 프로세스 싱글턴 — AgentCore Runtime 은 runtimeSessionId 마다
+# 전용 microVM 을 띄우므로 프로세스 == 채팅 세션이다(세션 종료 시 microVM 통째로
+# 폐기 → 크로스 세션 오염 불가). agent.messages 가 그 세션의 대화 메모리 역할을
+# 하며, deep 모드 plan-first(계획 제시 턴 → "진행" 승인 턴 실행)와 퀵 모드
+# 후속 질의 맥락에 필수다. invoke 마다 새로 만들면 두 번째 턴이 계획/맥락을
+# 잃는다(kiro R17-5 M1 — R17-S5 의 "의도는 턴 단위 stateless" 주석은 오류였다).
+# ⚠️ 같은 세션 내 동시 invoke 는 같은 프로세스를 치므로 _ORCH_LOCK 으로 직렬화
+#    한다 (Strands Agent 는 동시 stream 비재진입 — ConcurrencyException 방지).
+orchestrator = Agent(
+    model=orchestrator_model(),
+    tools=_ORCH_TOOLS,
+    system_prompt=load_prompt("orchestrator"),
+)
 
+orchestrator_deep = Agent(
+    model=_bedrock(MODEL_OPUS, stream_thinking=True, effort=ORCH_EFFORT_DEEP or None),
+    tools=_ORCH_TOOLS,
+    system_prompt=load_prompt("orchestrator_deep"),
+)
 
-def _new_orchestrator_deep() -> Agent:
-    return Agent(
-        model=_bedrock(MODEL_OPUS, stream_thinking=True, effort=ORCH_EFFORT_DEEP or None),
-        tools=_ORCH_TOOLS,
-        system_prompt=load_prompt("orchestrator_deep"),
-    )
+_ORCH_LOCK = asyncio.Lock()
 
 
 def _valid_chart_spec(obj: object) -> bool:
@@ -1270,7 +1274,7 @@ async def invoke(payload: dict):
     # 퀵 경로는 기존 orchestrator 그대로 — 바이트 무변경(golden 회귀 0).
     mode = (payload or {}).get("mode", "quick")
     language = (payload or {}).get("language") or (payload or {}).get("locale") or "ko"
-    active_orchestrator = _new_orchestrator_deep() if mode == "deep" else _new_orchestrator()
+    active_orchestrator = orchestrator_deep if mode == "deep" else orchestrator
     logger.info(
         "agent_invoke", session_id=session_id, mode=mode, language=language,
         content_preview=content[:80],
@@ -1341,8 +1345,9 @@ async def invoke(payload: dict):
 
     async def _pump() -> None:
         try:
-            async for ev in active_orchestrator.stream_async(content):
-                queue.put_nowait(("stream", ev))
+            async with _ORCH_LOCK:  # 같은 세션의 동시 invoke 직렬화 — Agent 비재진입
+                async for ev in active_orchestrator.stream_async(content):
+                    queue.put_nowait(("stream", ev))
         except Exception as exc:  # 펌프 예외를 consumer 로 전달(삼키지 않음)
             queue.put_nowait(("error", exc))
         finally:

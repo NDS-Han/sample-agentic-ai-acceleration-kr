@@ -58,6 +58,13 @@ export async function readBoundedBody(
       chunks.push(decoder.decode(value, { stream: true }));
     }
     chunks.push(decoder.decode());
+  } catch {
+    // kiro R17-5 N4 — 클라이언트가 본문 중간에 연결을 끊으면 read() 가 reject 되고
+    // 그대로 올라가면 500 으로 기록된다. 이건 서버 장애가 아니라 잘린 요청이라 400.
+    return {
+      ok: false,
+      response: NextResponse.json({ error: 'request body read failed' }, { status: 400 }),
+    };
   } finally {
     reader.releaseLock();
   }

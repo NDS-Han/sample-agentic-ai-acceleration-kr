@@ -325,22 +325,39 @@ def force_limit(ast: sqlglot.Expression) -> str:
     - plain Select root: LIMIT 를 제자리에 설정 — 서브쿼리로 감싸면 안쪽
       ORDER BY 의 순서 보장이 SQL 스펙상 사라지므로(실측 Postgres 는 보존하지만
       의존하지 않는다) root 가 Select 일 때는 직접 설정한다.
-    - Union/Intersect/Except/With/Values root: LIMIT 을 root 에 직접 붙이면
-      마지막 브랜치에만 걸릴 수 있으므로 전체를 서브쿼리로 감싸 총량을 묶는다.
+    - Union/Intersect/Except/With/Values root: `a UNION b LIMIT n` 은 Postgres
+      에서 전체 union 에 적용되지만, root 타입별로 직접 LIMIT 의 렌더 위치와
+      의미가 달라 서브쿼리 래핑이 가장 보수적으로 일관된다(kiro R17-5 N3 — 구
+      주석의 "마지막 브랜치에만 걸린다" 는 부정확).
     root LIMIT(union 포함)이 있으면 더 작은 값을 채택해 호출자 상한을 존중.
     """
     limit = QUERY_LIMIT
     existing_limit = ast.args.get("limit")
-    if existing_limit:
+    fetch_with_ties = False
+    if isinstance(existing_limit, exp.Fetch):
+        # FETCH FIRST n ROWS — count 는 expression 이 아니라 args["count"].
+        # WITH TIES 는 LIMIT 의미론과 달라(동순위 초과 반환) 제자리 치환 금지
+        # (kiro R17-5 S3) — 쿼리를 감싸 원래 FETCH 를 보존하고 바깥 LIMIT 으로만 상한.
+        try:
+            count = int(existing_limit.args["count"].this)
+            opts = existing_limit.args.get("limit_options")
+            if opts and opts.args.get("with_ties"):
+                fetch_with_ties = True
+            else:
+                limit = min(limit, count)
+        except Exception:  # noqa: BLE001 — 비정수 FETCH 는 기본 상한으로
+            pass
+    elif existing_limit:
         try:
             limit = min(limit, int(existing_limit.expression.this))
         except Exception:  # noqa: BLE001 — 비정수 LIMIT 표현은 기본 상한으로
             pass
-    if isinstance(ast, exp.Select):
+    if isinstance(ast, exp.Select) and not fetch_with_ties:
         ast.set("limit", exp.Limit(expression=exp.Literal.number(limit)))
         return ast.sql(dialect="postgres")
+    outer = QUERY_LIMIT if fetch_with_ties else limit
     return (
-        f"SELECT * FROM ({ast.sql(dialect='postgres')}) AS _q LIMIT {limit}"
+        f"SELECT * FROM ({ast.sql(dialect='postgres')}) AS _q LIMIT {outer}"
     )
 
 

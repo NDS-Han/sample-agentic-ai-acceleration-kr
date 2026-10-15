@@ -159,3 +159,29 @@ def test_force_limit_preserves_order_by_on_plain_select():
     out = L.force_limit(ast)
     assert "ORDER BY" in out
     assert not out.startswith("SELECT * FROM (")
+
+
+# ─── force_limit 의 FETCH 절 처리 (kiro R17-5 S3) ───
+def test_force_limit_fetch_first_becomes_capped_limit():
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs FETCH FIRST 5 ROWS ONLY")
+    out = L.force_limit(ast)
+    assert "LIMIT 5" in out
+    assert "FETCH" not in out
+
+
+def test_force_limit_fetch_over_cap_is_clamped():
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs FETCH FIRST 5000 ROWS ONLY")
+    out = L.force_limit(ast)
+    assert f"LIMIT {L.QUERY_LIMIT}" in out
+    assert "FETCH" not in out
+
+
+def test_force_limit_fetch_with_ties_is_preserved():
+    ast = L.validate_sql(
+        "SELECT id FROM usage.usage_logs ORDER BY id DESC FETCH FIRST 5 ROWS WITH TIES"
+    )
+    out = L.force_limit(ast)
+    # WITH TIES 의미론(동순위 초과 행)을 살리려 원래 FETCH 를 남기고 바깥 LIMIT 으로 상한.
+    assert "WITH TIES" in out
+    assert out.startswith("SELECT * FROM (")
+    assert out.rstrip().endswith(f"LIMIT {L.QUERY_LIMIT}")

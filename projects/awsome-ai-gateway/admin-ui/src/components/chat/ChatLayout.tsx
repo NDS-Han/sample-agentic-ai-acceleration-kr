@@ -139,6 +139,19 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
             const s = await createSession();
             sessionStorage.setItem(`chat-session-${mode}`, s.session_id);
             setSessionId(s.session_id);
+            // kiro R17-5 N2 — 새 세션은 이전 대화 맥락이 없는데 화면의 이전
+            // 메시지는 그대로 보여 사용자가 "같은 대화" 로 착각한다. 경계 메시지
+            // 로 맥락 리셋을 알린다(새로고침하면 새 세션만 남는 것도 같은 이유).
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: `notice-${Date.now()}`,
+                role: 'assistant' as const,
+                content:
+                  '세션이 만료되어 새 대화로 이어집니다. 이전 대화 내용은 새 세션에는 공유되지 않으니 필요한 맥락을 다시 알려 주세요.',
+                createdAt: new Date().toISOString(),
+              },
+            ]);
             await send(s.session_id, text, screenCtx, mode);
           } catch (retryErr) {
             // 재시도 실패(재인증 410·세션 생성 실패 포함)도 조용히 삼키면

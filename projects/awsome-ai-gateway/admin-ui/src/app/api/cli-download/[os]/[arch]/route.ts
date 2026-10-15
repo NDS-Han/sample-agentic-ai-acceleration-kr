@@ -16,7 +16,7 @@
  */
 
 import { NextRequest } from 'next/server';
-import { upstreamErrorStatus } from '@/lib/utils/upstream';
+import { fetchUpstream, upstreamErrorStatus } from '@/lib/utils/upstream';
 
 // 파일 스트림 라우트 — 캐시/정적최적화 금지, node 런타임에서 body 를 그대로 흘린다.
 export const dynamic = 'force-dynamic';
@@ -43,7 +43,9 @@ export async function GET(
 
   let res: Response;
   try {
-    res = await fetch(`${ADMIN_API_URL}/cli/download/${os}/${arch}`, {
+    // kiro R17-5 N1 — 미인증 라우트라 상류 hang 이 소켓을 무한 점유할 수 있다.
+    // fetchUpstream 의 헤더-전용 타임아웃으로 상한(응답 바디 스트림은 안 끊김).
+    res = await fetchUpstream(`${ADMIN_API_URL}/cli/download/${os}/${arch}`, {
       cache: 'no-store',
     });
   } catch (e) {

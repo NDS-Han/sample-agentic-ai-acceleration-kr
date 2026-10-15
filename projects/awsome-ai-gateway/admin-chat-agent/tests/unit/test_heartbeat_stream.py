@@ -43,8 +43,8 @@ async def test_heartbeat_fills_silence(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
-    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
 
     events = await _drain({"content": "6월 비용", "session_id": "s1"})
     types = [e["type"] for e in events]
@@ -76,8 +76,8 @@ async def test_heartbeat_stops_after_first_text(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
-    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
 
     events = await _drain({"content": "q", "session_id": "s2"})
     # 첫 text 이후 도착한 heartbeat 는 버려져야 한다 → text 뒤엔 heartbeat 없음.
@@ -105,8 +105,8 @@ async def test_validator_skip_gate_warns(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
-    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
 
     events = await _drain({"content": "6월 비용", "session_id": "s-skip"})
     validators = [e for e in events if e["type"] == "validator"]
@@ -133,8 +133,8 @@ async def test_validator_present_no_skip_warn(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
-    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
 
     events = await _drain({"content": "q", "session_id": "s-ok"})
     skip_warns = [
@@ -157,8 +157,71 @@ async def test_pump_exception_propagates(monkeypatch):
     class _FakeOrch:
         stream_async = staticmethod(fake_stream)
 
-    monkeypatch.setattr(m, "_new_orchestrator", lambda: _FakeOrch)
-    monkeypatch.setattr(m, "_new_orchestrator_deep", lambda: _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
 
     with pytest.raises(RuntimeError, match="bedrock boom"):
         await _drain({"content": "q", "session_id": "s3"})
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_singleton_preserves_session_memory(monkeypatch):
+    """kiro R17-5 M1 회귀 — 한 세션의 연속 invoke 가 같은 orchestrator 인스턴스를
+    재사용해 대화 메모리(agent.messages)가 유지돼야 한다.
+
+    AgentCore Runtime 은 runtimeSessionId 마다 전용 microVM 을 띄우므로
+    프로세스 == 채팅 세션. invoke 마다 새 Agent 를 만들면 deep 모드의
+    plan → "진행" 2턴 흐름과 퀵 모드 후속 맥락이 깨진다.
+    """
+    async def fake_stream(content):
+        yield {"data": "ok"}
+
+    class _FakeOrch:
+        stream_async = staticmethod(fake_stream)
+
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
+    seen: list[object] = []
+
+    orig_select = m.orchestrator if False else None  # 선택 경로 검증은 아래 spy 로
+    used: list[object] = []
+
+    # invoke 가 선택하는 인스턴스를 직접 관측 — stream_async 를 spy 로 감싼다.
+    class _Spy:
+        @staticmethod
+        async def stream_async(content):
+            used.append(_Spy)
+            yield {"data": "ok"}
+
+    monkeypatch.setattr(m, "orchestrator", _Spy)
+    await _drain({"content": "계획 보여줘", "session_id": "s-mem"})
+    await _drain({"content": "진행", "session_id": "s-mem"})
+    assert used == [_Spy, _Spy]
+    del orig_select
+
+
+@pytest.mark.asyncio
+async def test_concurrent_invokes_serialized_by_orch_lock(monkeypatch):
+    """같은 세션의 동시 invoke 는 _ORCH_LOCK 으로 직렬화된다(Agent 비재진입 보호)."""
+    overlap = {"inside": 0, "max": 0}
+
+    async def fake_stream(content):
+        overlap["inside"] += 1
+        overlap["max"] = max(overlap["max"], overlap["inside"])
+        try:
+            await asyncio.sleep(0.05)
+            yield {"data": "ok"}
+        finally:
+            overlap["inside"] -= 1
+
+    class _FakeOrch:
+        stream_async = staticmethod(fake_stream)
+
+    monkeypatch.setattr(m, "orchestrator", _FakeOrch)
+    monkeypatch.setattr(m, "orchestrator_deep", _FakeOrch)
+
+    await asyncio.gather(
+        _drain({"content": "a", "session_id": "s-conc"}),
+        _drain({"content": "b", "session_id": "s-conc"}),
+    )
+    assert overlap["max"] == 1, f"동시 스트림 진입: {overlap}"

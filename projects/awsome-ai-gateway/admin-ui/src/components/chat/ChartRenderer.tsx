@@ -78,7 +78,14 @@ function ChartBody({ spec }: { spec: ChartSpec }) {
   if (kind === 'image') {
     // Code Specialist 가 만든 PNG 의 presigned URL 가정
     const url = (data?.[0]?.url as string) || (data?.[0]?.image_url as string);
-    if (!url) return <div className="text-sm text-muted-foreground">이미지 없음</div>;
+    // kiro R17-5 S1 — https 만 허용. 정확한 호스트 화이트리스트는 middleware
+    // CSP(CHAT_IMAGE_HOSTS)가 최종 차단 — 여기서는 javascript:/data: 같은
+    // 스킴 이상만 사전 차단한다.
+    let safe = false;
+    try {
+      safe = !!url && new URL(url).protocol === 'https:';
+    } catch { safe = false; }
+    if (!safe) return <div className="text-sm text-muted-foreground">이미지 없음</div>;
     // eslint-disable-next-line @next/next/no-img-element
     return <img src={url} alt={spec.title || 'chart'} className="max-w-full max-h-full" />;
   }

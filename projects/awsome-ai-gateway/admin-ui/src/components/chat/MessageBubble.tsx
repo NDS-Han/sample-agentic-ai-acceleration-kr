@@ -35,6 +35,11 @@ const MD_COMPONENTS: Components = {
   tr: ({ children }) => <Tr>{children}</Tr>,
   th: ({ children, style }) => <Th numeric={isRightAligned(style)}>{children}</Th>,
   td: ({ children, style }) => <Td numeric={isRightAligned(style)}>{children}</Td>,
+  // kiro R17-5 S1 — LLM 출력 마크다운의 img 는 렌더하지 않는다. 임의 URL 로
+  // 이미지를 요청하면 쿼리스트링 경유 데이터 유출 경로가 된다(간접 프롬프트
+  // 인젝션 대응). 차트 이미지는 마크다운이 아니라 ChartRenderer(kind:'image')
+  // 경로로만 렌더한다 — 거기서 https + CSP 가 제어한다.
+  img: () => null,
 };
 
 interface Props {
