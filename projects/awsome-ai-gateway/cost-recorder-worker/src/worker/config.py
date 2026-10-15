@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     #: ⚠️ 왜 필요한가: consumer 이름이 파드 이름이고 파드 이름은 롤아웃·축출·OOM 재시작마다
     #:    바뀐다. XREADGROUP id='0' 은 Redis 의미상 **자기 이름의 PEL 만** 돌려주므로,
     #:    죽은 파드가 남긴 unacked 메시지는 새 파드가 영원히 보지 못한다. cost:stream 은
-    #:    MAXLEN~100_000 으로 트림되므로 결국 데이터 자체가 사라진다 — usage_logs 행도,
+    #:    MAXLEN~500_000 으로 트림되므로 결국 데이터 자체가 사라진다 — usage_logs 행도,
     #:    budget_usages 차감도, 일별 카운터도 없다.
     xautoclaim_interval_sec: float = 60.0
     #: 회수 대상의 최소 idle 시간(ms). 살아 있는 형제 replica 의 진행 중 배치를 빼앗지

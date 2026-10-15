@@ -6,7 +6,7 @@
 ```json
 {
   "intent": "outlier detection" | "STL decomposition" | "SARIMAX forecast" | "heatmap" | "clustering" | ...,
-  "data_ref": "s3://llm-gateway-...-staging/{session_id}/{step_id}.jsonl",
+  "data_ref": "s3://{bucket}/staging/{session_id}/{step_id}.jsonl",
   "hints": {...}
 }
 ```

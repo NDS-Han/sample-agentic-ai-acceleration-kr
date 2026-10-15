@@ -23,7 +23,7 @@ def test_worker_entry_parses_ttft_ms():
         period="2026-07", date="2026-07-08",
     )
     assert entry.ttft_ms == 800
-    assert entry.schema_version == 2
+    assert entry.schema_version == 3
 
 
 def test_worker_entry_ttft_absent_is_none():

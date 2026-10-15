@@ -300,7 +300,12 @@ async def enforce_rate_limits(
         return _build_429(tpm_result, metrics)
 
     # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
-    estimated_cost = _estimate_cost(model_config, estimated_input, max_output)
+    # 티어 판정은 턴 단위 추정치 — 배수가 섞인 estimated_input 으로 판정하면
+    # 웹서치 요청이 iters×구간배수(5×) 과대예약된다.
+    estimated_cost = _estimate_cost(
+        model_config, estimated_input, max_output,
+        tier_input=estimated_input_billing,
+    )
     cost_result = await svc.reserve_cost(
         redis,
         user_id=auth_context.user_id,
@@ -334,7 +339,10 @@ async def enforce_rate_limits(
     from app.periods import request_period
     from app.services.budget_service import BudgetService
 
-    worst_cost = _estimate_worst_cost(model_config, estimated_input, max_output)
+    worst_cost = _estimate_worst_cost(
+        model_config, estimated_input, max_output,
+        tier_input=estimated_input_billing,
+    )
     try:
         budget_reservation = await BudgetService().reserve_budget(
             redis,
@@ -402,23 +410,69 @@ async def enforce_rate_limits(
     return None
 
 
+#: 문자 기반 입력 추정(``_estimate_input_tokens``)은 실제 토크나이저보다 가볍게
+#: 세므로 임계 경계 근처에서 실제 long/short 판정과 어긋날 수 있다. 선예약은
+#: settle 시 환불되므로 경계 아래를 long 으로 과대예약하는 편이 과소예약(한도
+#: 침투 — Haiku 5.5 는 5배 차이)보다 안전하다. 추정이 임계의 70% 를 넘으면
+#: long 요율을 적용한다.
+_LONG_TIER_ESTIMATE_MARGIN = Decimal("0.7")
+
+
+def _uses_long_tier(pricing, estimated_input: int) -> bool:
+    """선예약 단계의 보수적 티어 판정 — 실제 청구 판정(cost_recorder)보다
+    넓게 잡아 경계 추정 오차가 한도를 새지 않게 한다."""
+    t = pricing.long_context_threshold_tokens
+    return (
+        t is not None
+        and Decimal(estimated_input) > Decimal(t) * _LONG_TIER_ESTIMATE_MARGIN
+    )
+
+
 def _estimate_cost(
-    model_config: ModelConfigSchema, estimated_input: int, max_output: int
+    model_config: ModelConfigSchema,
+    estimated_input: int,
+    max_output: int,
+    *,
+    tier_input: int | None = None,
 ) -> Decimal:
     """Pre-reserve용 보수적 비용 추정 (USD).
 
     ``pricing.input_per_1k × input + pricing.output_per_1k × max_output`` 로
     *과대* 예약. post-settle에서 실제 비용과의 차액이 환불됨.
     Cache 단가는 Pre-reserve 단계에서 판정 불가하므로 제외.
+    추정 입력이 long-context 임계 근처를 넘으면 long 요율을 적용한다 —
+    short 로만 예약하면 100K 초과 요청이 CPM/CPH 창을 실비의 1/5 로 통과한다.
+
+    ``tier_input``: 티어 판정 전용 추정치 — ``estimated_input`` 은 웹서치
+    입장 배수(iters)가 곱해진 예약 총량이라, 그걸로 티어를 판정하면
+    턴당 단가가 실제보다 큰 구간으로 잡혀 iters×5배 과대예약이 된다.
+    실제 청구의 티어 판정은 턴 단위(resolve_context_tier)라 턴 추정치를 넘긴다.
     """
     pricing = model_config.pricing
-    input_cost = (Decimal(estimated_input) / Decimal(1000)) * pricing.input_per_1k
-    output_cost = (Decimal(max_output) / Decimal(1000)) * pricing.output_per_1k
+    long_ctx = _uses_long_tier(
+        pricing, tier_input if tier_input is not None else estimated_input
+    )
+    input_rate = (
+        pricing.long_input_per_1k
+        if long_ctx and pricing.long_input_per_1k is not None
+        else pricing.input_per_1k
+    )
+    output_rate = (
+        pricing.long_output_per_1k
+        if long_ctx and pricing.long_output_per_1k is not None
+        else pricing.output_per_1k
+    )
+    input_cost = (Decimal(estimated_input) / Decimal(1000)) * input_rate
+    output_cost = (Decimal(max_output) / Decimal(1000)) * output_rate
     return (input_cost + output_cost).quantize(Decimal("0.000001"))
 
 
 def _estimate_worst_cost(
-    model_config: ModelConfigSchema, estimated_input: int, max_output: int
+    model_config: ModelConfigSchema,
+    estimated_input: int,
+    max_output: int,
+    *,
+    tier_input: int | None = None,
 ) -> Decimal:
     """월예산 선예약용 **최악비용** 추정 (USD).
 
@@ -426,6 +480,8 @@ def _estimate_worst_cost(
     포함)으로 청구되는 경우로 잡는다 — 캐시 쓰기 단가는 입력 단가보다 높아,
     일반 추정으로는 실비가 예약을 초과해 하드캡이 새는 경계가 남는다.
     프롬프트 추정치가 long-context 임계를 넘으면 long 요율을 적용한다.
+    ``tier_input`` 은 턴 단위 티어 판정 전용 — 웹서치 배수는 비용 곱셈에만
+    적용한다(_estimate_cost 와 같은 이유).
 
     잔여 구멍: ``_estimate_input_tokens`` 는 비ASCII 문자당 1토큰으로 잡지만
     일부 토크나이저는 CJK 를 1자/토큰 이상으로 세므로 완벽한 상한은 아니다 —
@@ -433,9 +489,8 @@ def _estimate_worst_cost(
     출력(max_tokens)은 API 강제 상한이라 완전히 덮인다.
     """
     p = model_config.pricing
-    long_ctx = (
-        p.long_context_threshold_tokens is not None
-        and estimated_input > p.long_context_threshold_tokens
+    long_ctx = _uses_long_tier(
+        p, tier_input if tier_input is not None else estimated_input
     )
 
     def _rate(short: Decimal | None, long: Decimal | None) -> Decimal:

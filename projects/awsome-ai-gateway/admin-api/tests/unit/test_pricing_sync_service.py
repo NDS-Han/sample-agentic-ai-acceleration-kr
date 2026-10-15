@@ -418,3 +418,30 @@ async def test_service_requires_fetcher():
     """fetcher 없이는 인스턴스화 불가 — 직접 HTTP 호출 경로가 아예 없음."""
     with pytest.raises(TypeError):
         LiteLLMPricingSyncService()
+
+
+def test_litellm_long_context_non272_threshold():
+    """kiro R18 — 임계값이 272K 가 아닌 모델(Haiku 5.5=100K)도 필드명의 N 에서
+    threshold 를 읽는다. 272K 하드코딩이면 이 티어를 놓친다."""
+    m = _llm_model("anthropic.claude-haiku-5-5", 1e-07, 5e-07)
+    m["input_cost_per_token_above_100k_tokens"] = 5e-07
+    m["output_cost_per_token_above_100k_tokens"] = 2.5e-06
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    np = svc._normalize_models([m]).prices["anthropic.claude-haiku-5-5"]
+    assert np.long_context_threshold_tokens == 100000
+    assert np.long_input_per_1k == Decimal("0.0005")
+    assert np.long_output_per_1k == Decimal("0.0025")
+
+
+def test_litellm_conflicting_threshold_dims_rejects_tier():
+    """kiro R18 N1 — 차원별 above 필드의 N 이 갈리면 서로 다른 티어의 단가를
+    한 임계에 섞어 과대/과소청구되므로 티어 전체를 적용하지 않고 오류로 남긴다."""
+    m = _llm_model("openai.gpt-mix", 1e-06, 2e-06)
+    m["input_cost_per_token_above_100k_tokens"] = 2e-06
+    m["output_cost_per_token_above_272k_tokens"] = 4e-06
+    svc = LiteLLMPricingSyncService(fetcher=None)
+    res = svc._normalize_models([m])
+    np = res.prices["openai.gpt-mix"]
+    assert np.long_context_threshold_tokens is None
+    assert np.long_input_per_1k is None
+    assert any("conflicting" in e for e in res.errors)

@@ -39,6 +39,12 @@ def normalize_resultset(rows: list[dict], *, order_sensitive: bool | None = None
     order_sensitive=None 이면 휴리스틱: 행이 1개거나 단일 스칼라면 순서 무의미,
     그 외에는 순서 보존 안 함(집합 비교) — ranking 여부를 모르면 보수적으로
     집합 비교(같은 값들이면 같다고 본다)가 false-split 을 줄인다.
+
+    ⚠️ 행 비교는 **값의 멀티셋**으로 한다 — 같은 결과셋이 컬럼 별칭이나
+    컬럼 순서만 다르면 키/위치 포함 해시는 다른 클러스터로 갈라져(false-split)
+    합의가 무너진다. 키와 컬럼 순서를 버리고 정렬된 값 목록만 비교한다.
+    (서로 다른 값 순서의 같은 멀티셋 — 예: (1,2) vs (2,1) — 은 같은 클러스터로
+    병합된다. 관리자 집계 질의에서 드문 형태라 false-split 비용보다 작다.)
     """
     norm_rows = [_normalize_row(r) for r in rows]
     if order_sensitive is None:
@@ -48,11 +54,12 @@ def normalize_resultset(rows: list[dict], *, order_sensitive: bool | None = None
     return json.dumps(norm_rows, sort_keys=True, ensure_ascii=False)
 
 
-def _normalize_row(row: dict) -> dict:
-    out: dict[str, Any] = {}
-    for k, v in row.items():
-        out[str(k)] = _normalize_value(v)
-    return out
+def _normalize_row(row: dict) -> list:
+    # 키(별칭)·컬럼 순서 무관 — 값의 멀티셋만 남긴다.
+    return sorted(
+        (_normalize_value(v) for v in row.values()),
+        key=lambda v: json.dumps(v, ensure_ascii=False),
+    )
 
 
 def _normalize_value(v: Any) -> Any:
@@ -71,16 +78,76 @@ def resultset_hash(rows: list[dict], *, order_sensitive: bool | None = None) -> 
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
 
 
+def _normalize_stats_body(v: Any) -> Any:
+    if isinstance(v, dict):
+        # share_pct 제외 — 행별 val/sum 파생값이라 rows+stats 가 이미 품고,
+        # label 컬럼 선택이 결과 컬럼 순서 의존이라 같은 결과도 갈린다.
+        return {
+            str(k): _normalize_stats_body(x)
+            for k, x in v.items()
+            if k != "share_pct"
+        }
+    if isinstance(v, list):
+        # share_pct 같은 행 단위 목록 — 행 순서는 결과와 무관하므로 정렬.
+        items = [_normalize_stats_body(x) for x in v]
+        return sorted(
+            items,
+            key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False, default=str),
+        )
+    return _normalize_value(v)
+
+
+def _normalize_stats(stats: Any) -> Any:
+    """query_db 의 result_stats(전체 행 기준 결정적 요약)를 해시 입력으로
+    정규화. 최상위 키는 컬럼 **별칭**(compute_stats 의 stats[col])이라
+    별칭이 다른 같은 집계가 갈리지 않게 키를 버리고 값만 정렬한다 —
+    안쪽 키(min/max/sum/share_pct)는 통계 종류라 유지."""
+    if not isinstance(stats, dict):
+        return _normalize_value(stats)
+    entries = [_normalize_stats_body(v) for v in stats.values()]
+    return sorted(
+        entries,
+        key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False, default=str),
+    )
+
+
+def result_fingerprint(
+    rows: list[dict],
+    row_count: int | None = None,
+    stats: Any = None,
+    *,
+    order_sensitive: bool | None = None,
+) -> str:
+    """결과 지문 — 인라인 rows 는 상한(20행)이 있으므로 전체 행 수와 서버측
+    전체행 요약(stats)을 함께 해시한다. rows 만 보면 20행을 넘는 결과의
+    꼬리 차이가 허위 합의가 되고, 정렬 없는 질의는 false-split 이 된다."""
+    truncated = row_count is not None and row_count > len(rows or [])
+    if truncated and stats is not None:
+        # 상한을 넘는 결과 — 인라인 20행 부분집합은 물리 순서에 따라 달라
+        # 같은 결과도 지문이 갈린다. 전체행 신호(row_count+stats)만 쓴다.
+        # stats 가 없는(숫자 컬럼 없는) 결과는 rows 를 유지한다 — row_count
+        # 만으로 묶으면 허위 합의(전혀 다른 결과의 병합)가 된다.
+        canonical = ""
+    else:
+        canonical = normalize_resultset(rows, order_sensitive=order_sensitive)
+    tail = json.dumps(
+        {"row_count": row_count, "stats": _normalize_stats(stats)},
+        sort_keys=True, ensure_ascii=False,
+    )
+    return hashlib.sha256(f"{canonical}|{tail}".encode("utf-8")).hexdigest()[:16]
+
+
 class Candidate:
     """후보 1개 — SQL + 실행 결과 envelope."""
 
-    __slots__ = ("sql", "envelope", "ok", "rows", "row_count", "error", "accuracy_warnings")
+    __slots__ = ("sql", "envelope", "ok", "rows", "row_count", "stats", "error", "accuracy_warnings")
 
     def __init__(self, sql: str, envelope: dict):
         self.sql = sql
         self.envelope = envelope or {}
         self.rows = self.envelope.get("rows") or []
         self.row_count = self.envelope.get("row_count", len(self.rows))
+        self.stats = self.envelope.get("stats")
         self.error = self.envelope.get("error")
         self.accuracy_warnings = self.envelope.get("accuracy_warnings") or []
         # ⚠️ `ok` 필드에 의존하지 않는다(§58 _auto_validate 와 동형 버그 수정):
@@ -135,10 +202,11 @@ def select_by_execution(
                 "n_valid": 0, "n_clusters": 0, "tie": False, "tie_indices": [],
                 "clusters": [], "rejected_with_warnings": rejected_warn}
 
-    # 결과셋 해시로 클러스터링
+    # 결과셋 해시로 클러스터링 — 인라인 rows 상한을 넘는 차이까지 잡도록
+    # row_count·stats(전체행 요약)를 지문에 포함한다.
     clusters: dict[str, list[int]] = {}
     for i, c in valid:
-        h = resultset_hash(c.rows, order_sensitive=order_sensitive)
+        h = result_fingerprint(c.rows, c.row_count, c.stats, order_sensitive=order_sensitive)
         clusters.setdefault(h, []).append(i)
 
     cluster_list = [

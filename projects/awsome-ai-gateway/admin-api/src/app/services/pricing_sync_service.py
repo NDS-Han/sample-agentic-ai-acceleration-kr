@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -52,7 +53,8 @@ class NormalizedPrice:
     #: 스펙 정보 — LiteLLM 카탈로그만 제공(AWS Price List 에는 없어 None 유지).
     context_window: int | None = None
     max_output_tokens: int | None = None
-    #: 장문 컨텍스트(>threshold) 구간 단가 — LiteLLM `*_above_272k_tokens` 계열.
+    #: 장문 컨텍스트(>threshold) 구간 단가 — LiteLLM `*_cost_per_token_above_{N}k`
+    #: 계열. 임계값은 모델별로 다르다(GPT-5.6=272K, Haiku 5.5=100K).
     #: sync 가 이 값을 안 채우면 기존 set_pricing 의 "이전 행 이어받기"가 절대값을
     #: 그대로 남겨, 기본 단가 개정 때 구간 단가만 부패한다(과소청구 ~2×).
     long_context_threshold_tokens: int | None = None
@@ -332,13 +334,49 @@ class LiteLLMPricingSyncService:
             cache_1h = self._to_decimal(m.get("cache_creation_input_token_cost_above_1hr"))
             derived = cache_read is None or cache_5m is None or cache_1h is None
 
-            # 장문(>272K) 구간 — 카탈로그가 *_above_272k_tokens 필드를 줄 때만.
+            # 장문(>threshold) 구간 — 카탈로그가 `*_cost_per_token_above_{N}k_tokens`
+            # 계열 필드를 줄 때만. 임계값은 모델마다 다르다(GPT-5.6=272K,
+            # Haiku 5.5=100K — kiro R18: 272K 하드코딩은 100K 티어를 못 잡는다).
+            # 필드명의 N 에서 threshold 를 얻는다 — 차원별로 같은 N 을 쓴다는
+            # LiteLLM 규약을 따르되, 한 차원에 N 이 여럿이면 가장 작은(가장 먼저
+            # 구간이 시작하는) 것을 고르고, 차원 간 N 이 갈리면 서로 다른 티어의
+            # 단가를 한 임계에 섞게 돼 티어 전체를 적용하지 않는다.
             # ultrafast 프리미엄 변종은 제외(별도 상품).
-            long_in = self._to_decimal(m.get("input_cost_per_token_above_272k_tokens"))
-            long_out = self._to_decimal(m.get("output_cost_per_token_above_272k_tokens"))
-            long_5m = self._to_decimal(m.get("cache_creation_input_token_cost_above_272k_tokens"))
-            long_read = self._to_decimal(m.get("cache_read_input_token_cost_above_272k_tokens"))
-            has_long = long_in is not None or long_out is not None
+            def _above(field_prefix: str) -> tuple[Decimal | None, int | None]:
+                matches = [
+                    (int(mm.group(1)) * 1000, val)
+                    for key, val in m.items()
+                    if (mm := re.fullmatch(
+                        rf"{re.escape(field_prefix)}_above_(\d+)k_tokens", key
+                    )) and val is not None
+                ]
+                if not matches:
+                    return None, None
+                n, val = min(matches, key=lambda t: t[0])
+                return self._to_decimal(val), n
+
+            long_in, thr_in = _above("input_cost_per_token")
+            long_out, thr_out = _above("output_cost_per_token")
+            long_5m, thr_5m = _above("cache_creation_input_token_cost")
+            long_read, thr_read = _above("cache_read_input_token_cost")
+            thresholds = [t for t in (thr_in, thr_out, thr_5m, thr_read) if t is not None]
+            tier_threshold = None
+            if thresholds:
+                if len(set(thresholds)) == 1:
+                    tier_threshold = thresholds[0]
+                else:
+                    # 차원별 임계가 갈리는 카탈로그 — 임의로 min() 하면 다른
+                    # 구간의 단가를 한 임계에 섞어 과대/과소청구. 티어를 버리고
+                    # 오류로 남겨 사람이 확인하게 한다.
+                    result.errors.append(
+                        f"{key}: conflicting above_*k thresholds "
+                        f"{sorted(set(thresholds))} — long-context tier skipped"
+                    )
+                    long_in = long_out = long_5m = long_read = None
+            has_long = (
+                tier_threshold is not None
+                and (long_in is not None or long_out is not None)
+            )
             long_in_eff = long_out_eff = long_5m_eff = long_1h_eff = long_read_eff = None
             if has_long:
                 # 구간 값은 하나의 단위 — 일부만 채우면 threshold+NULL 조합(구간
@@ -375,7 +413,7 @@ class LiteLLMPricingSyncService:
                 context_window=self._to_int(m.get("max_input_tokens"))
                 or self._to_int(m.get("max_tokens")),
                 max_output_tokens=self._to_int(m.get("max_output_tokens")),
-                long_context_threshold_tokens=272000 if has_long else None,
+                long_context_threshold_tokens=tier_threshold if has_long else None,
                 long_input_per_1k=(long_in_eff * Decimal(1000) if long_in_eff is not None else None),
                 long_output_per_1k=(long_out_eff * Decimal(1000) if long_out_eff is not None else None),
                 long_cache_5m_per_1k=(long_5m_eff * Decimal(1000) if long_5m_eff is not None else None),

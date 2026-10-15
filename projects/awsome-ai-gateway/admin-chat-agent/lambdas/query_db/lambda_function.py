@@ -469,10 +469,18 @@ def compute_stats(rows: list[dict]) -> dict | None:
     """
     if not rows:
         return None
+    # 숫자 판별은 첫 행만 보면 안 된다 — rows[0].col 이 NULL 이면 숫자
+    # 컬럼이 통째로 빠져 stats 가 부정확해진다(행 순서만 다른 같은 결과도
+    # 지문이 갈림). 전 행을 훑되 모든 컬럼이 확정되면 조기 종료.
     numeric_cols: dict[str, list[float]] = {}
-    for col, val in rows[0].items():
-        if isinstance(val, (int, float)) and not isinstance(val, bool):
-            numeric_cols[col] = []
+    n_cols = len(rows[0])
+    for r in rows:
+        for col, val in r.items():
+            if col not in numeric_cols and isinstance(val, (int, float)) \
+                    and not isinstance(val, bool):
+                numeric_cols[col] = []
+        if len(numeric_cols) == n_cols:
+            break
     if not numeric_cols:
         return None
     for r in rows:
@@ -569,7 +577,9 @@ def upload_to_staging(rows: list[dict], session_id: str, step_id: str) -> str:
     #    아니므로 키 문자셋으로 살균한다(다른 세션 키 덮어쓰기/이상 키 방지, R17).
     safe_sid = re.sub(r"[^A-Za-z0-9_-]", "-", str(session_id))[:64]
     safe_step = re.sub(r"[^A-Za-z0-9_-]", "-", str(step_id))[:64]
-    key = f"staging/{safe_sid}/{safe_step}.jsonl"
+    # step_id 는 LLM 값 — 같은 세션에서 재사용하거나 살균 후 충돌('a.b'/'a-b')
+    # 하면 앞 객체를 덮어쓴다. 항상 uuid 접미사로 키를 유일하게 만든다.
+    key = f"staging/{safe_sid}/{safe_step}-{uuid.uuid4().hex[:8]}.jsonl"
     s3.put_object(
         Bucket=S3_STAGING_BUCKET,
         Key=key,

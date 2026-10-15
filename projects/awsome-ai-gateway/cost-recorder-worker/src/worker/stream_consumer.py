@@ -260,7 +260,7 @@ class StreamConsumer:
            랜덤 접미사가 붙고, 그 이름이 consumer 이름이다. 배치를 읽은 뒤 flush 가
            실패해(DB 페일오버 등) XACK 을 못 한 상태에서 파드가 롤되면, 새 파드는 **다른**
            이름이라 그 PEL 을 볼 수 없다. 그 배치는 영구히 unacked 로 남고, cost:stream 은
-           MAXLEN~100_000 으로 트림되므로 결국 원본 entry 까지 사라진다 — 그 요청들의
+           MAXLEN~500_000 으로 트림되므로 결국 원본 entry 까지 사라진다 — 그 요청들의
            usage_logs 행, budget_usages 차감, 일별 카운터가 모두 없다(즉 **과소청구**이며
            복구 불가).
 
@@ -410,12 +410,14 @@ class StreamConsumer:
                 reclaim=reclaim,
                 grace_sec=round(now - getattr(self, fail_at_attr), 1),
             )
-            written = await self._flusher.flush_dead_letter(entries)
-            dropped = len(entries) - written
+            written, dropped = await self._flusher.flush_dead_letter(entries)
+            # replay 로 걸러진 행(다른 소비자가 이미 커밋)은 dropped 가 아니다 —
+            # len(entries)-written 으로 세면 경합 스킵이 유실로 오집계된다.
             logger.warning(
                 "batch_dead_letter_done",
                 written=written,
                 dropped=dropped,
+                replay_skipped=len(entries) - written - dropped,
             )
             if dropped and self._metrics:
                 self._metrics.dead_letter_dropped.add(dropped)

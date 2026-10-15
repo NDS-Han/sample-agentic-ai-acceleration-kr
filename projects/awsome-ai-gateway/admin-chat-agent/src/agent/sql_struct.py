@@ -25,23 +25,45 @@ except ImportError:  # pragma: no cover
     exp = None
 
 
-def _alias_to_table(ast: Any) -> dict[str, str]:
-    """alias-or-name(소문자) -> 'schema.table'."""
-    m: dict[str, str] = {}
-    for t in ast.find_all(exp.Table):
-        sch = (t.text("db") or "").lower()
-        name = (t.name or "").lower()
-        fq = f"{sch}.{name}" if sch else name
-        m[(t.alias or name).lower()] = fq
-    return m
+def _scope_sources(sel: Any) -> dict[str, str]:
+    """한 Select 스코프의 FROM/JOIN 에 선언된 alias-or-name(소문자) ->
+    'schema.table'. 전 스코프를 한 map 으로 합치면 서브쿼리·CTE 의 동명
+    별칭이 외부 테이블로 오배정된다 — 스코프별로 따로 잡는다."""
+    src: dict[str, str] = {}
+    containers: list[Any] = []
+    f = sel.args.get("from_")
+    if f is not None:
+        containers.append(f.this)
+    for j in sel.args.get("joins") or []:
+        containers.append(j.this)
+    for c in containers:
+        if not isinstance(c, exp.Table):
+            continue  # 서브쿼리/CTE 참조 — 물리 테이블이 아니다
+        sch = (c.text("db") or "").lower()
+        name = (c.name or "").lower()
+        src[(c.alias or name).lower()] = f"{sch}.{name}" if sch else name
+    return src
 
 
-def _col_fq(col: Any, alias_map: dict[str, str]) -> str:
+def _col_fq(col: Any) -> str:
+    """컬럼의 테이블 한정자를 **가장 안쪽 스코프부터** 바깥으로 해석한다.
+
+    서브쿼리가 외부와 같은 별칭을 다르메 쓰면(``FROM t`` 안의
+    ``(SELECT … FROM x t)``) 글로벌 map 은 마지막에 본 쪽으로 전부
+    오배정한다 — 상관 서브쿼리의 외부 참조를 위해 안쪽에서 못 찾으면
+    바깥 스코프로 계속 올라간다."""
     tbl = (col.table or "").lower()
     name = (col.name or "").lower()
-    if tbl in alias_map:
-        return f"{alias_map[tbl]}.{name}"
-    return f"{tbl}.{name}".strip(".") if tbl else name
+    if not tbl:
+        return name
+    node = col.parent
+    while node is not None:
+        if isinstance(node, exp.Select):
+            src = _scope_sources(node)
+            if tbl in src:
+                return f"{src[tbl]}.{name}"
+        node = node.parent
+    return f"{tbl}.{name}"
 
 
 def extract_facts(sql: str) -> dict[str, Any]:
@@ -67,14 +89,21 @@ def extract_facts(sql: str) -> dict[str, Any]:
     if ast is None:
         return {"_parse_ok": False}
 
-    alias_map = _alias_to_table(ast)
     facts: dict[str, Any] = {"_parse_ok": True}
+
+    # CTE 이름 — `FROM t` 의 t 는 Table 노드로 파싱되지만 실제 테이블이 아니라
+    # CTE 참조다. 비한정 이름만 제외한다(schema 한정된 동명은 진짜 테이블).
+    cte_names = {
+        (c.alias or "").lower() for c in ast.find_all(exp.CTE) if c.alias
+    }
 
     # tables
     tables = []
     for t in ast.find_all(exp.Table):
         sch = (t.text("db") or "").lower()
         name = (t.name or "").lower()
+        if not sch and name in cte_names:
+            continue
         fq = f"{sch}.{name}" if sch else name
         if fq not in tables:
             tables.append(fq)
@@ -106,7 +135,7 @@ def extract_facts(sql: str) -> dict[str, Any]:
     for agg in ast.find_all(exp.AggFunc):
         fname = agg_types.get(type(agg), type(agg).__name__.upper())
         distinct = bool(agg.args.get("distinct")) or isinstance(agg.this, exp.Distinct)
-        cols = [_col_fq(c, alias_map) for c in agg.find_all(exp.Column)]
+        cols = [_col_fq(c) for c in agg.find_all(exp.Column)]
         if fname == "COUNT" and distinct:
             has_count_distinct = True
         aggs.append(
@@ -115,31 +144,66 @@ def extract_facts(sql: str) -> dict[str, Any]:
     facts["aggregates"] = aggs
     facts["has_count_distinct"] = has_count_distinct
 
-    # group by
-    select = ast if isinstance(ast, exp.Select) else ast.find(exp.Select)
-    gb = []
-    if select is not None:
-        group = select.args.get("group")
-        if group is not None:
-            for e in group.find_all(exp.Column):
-                gb.append(_col_fq(e, alias_map))
+    # group by — CTE/서브쿼리까지 **모든** Select 스코프를 본다(최외곽만 보면
+    # 집계가 내부에 숨은 쿼리를 "GROUP BY 없음"으로 오보고한다).
+    gb: list[str] = []
+    selects = list(ast.find_all(exp.Select))
+    if isinstance(ast, exp.Select) and not any(s is ast for s in selects):
+        selects.insert(0, ast)
+    for sel in selects:
+        group = sel.args.get("group")
+        if group is None:
+            continue
+        for e in group.expressions:
+            cols = list(e.find_all(exp.Column))
+            if cols:
+                for c in cols:
+                    fq = _col_fq(c)
+                    if fq not in gb:
+                        gb.append(fq)
+            else:
+                # 위치 기반 GROUP BY 1 → 해당 select 표현식으로 해석한다.
+                # 컬럼 해석이 안 되는 표현식·리터럴은 텍스트로라도 사실을
+                # 남긴다(빈 보고보다 정확하다).
+                txt = None
+                if e.is_int:
+                    idx = int(e.this) - 1
+                    projs = sel.expressions
+                    if 0 <= idx < len(projs):
+                        # 컬럼을 품은 투영이면 FQ 로 푼다 — 't.user_id' 보다
+                        # 'usage.usage_logs.user_id' 가 의도 판정에 정확하다.
+                        pcols = list(projs[idx].find_all(exp.Column))
+                        if pcols:
+                            txt = ", ".join(dict.fromkeys(_col_fq(c) for c in pcols))
+                        else:
+                            txt = projs[idx].sql(dialect="postgres")
+                if txt is None:
+                    try:
+                        txt = e.sql(dialect="postgres")
+                    except Exception:  # noqa: BLE001
+                        txt = "?"
+                if txt not in gb:
+                    gb.append(txt)
     facts["group_by"] = gb
 
-    # where columns + filter texts
+    # where columns + filter texts — 모든 스코프의 WHERE 를 모은다.
     where_cols: list[str] = []
     filters: list[str] = []
-    where = select.args.get("where") if select is not None else None
-    if where is not None:
+    for where in ast.find_all(exp.Where):
         for c in where.find_all(exp.Column):
-            fq = _col_fq(c, alias_map)
+            fq = _col_fq(c)
             if fq not in where_cols:
                 where_cols.append(fq)
-        # 술어 텍스트(EQ/IN 등) — 짧게
+        # 술어 텍스트(EQ/IN 등) — 짧게. 중첩 술어는 부모가 자식을 다시
+        # 품지 않으므로 EQ 안의 EQ 같은 이중 보고는 없지만, 동일 술어가
+        # 두 스코프에 있으면 중복된다 — 중복은 한 번만 남긴다.
         for pred in where.find_all((exp.EQ, exp.In, exp.GTE, exp.LTE, exp.GT, exp.LT)):
             try:
-                filters.append(pred.sql(dialect="postgres"))
+                txt = pred.sql(dialect="postgres")
             except Exception:  # noqa: BLE001
                 continue
+            if txt not in filters:
+                filters.append(txt)
     facts["where_columns"] = where_cols
     facts["filters"] = filters[:8]
 

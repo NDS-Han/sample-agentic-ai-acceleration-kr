@@ -101,7 +101,7 @@ class ModelPricingSchema(BaseModel):
     cache_write_1h_per_1k: Decimal = Decimal("0")    # 1-hour TTL
     cache_read_per_1k: Decimal = Decimal("0")
 
-    # ── long-context(입력 272K 초과) 단가 티어 (마이그레이션 0042) ──────────────
+    # ── long-context(임계 토큰 초과 — 모델별 상이: GPT-5.6 272K·Haiku 5.5 100K) ──
     # 전부 Optional/None 기본값이어야 한다: 이 필드를 모르는 구버전 Redis 캐시 항목
     # (model:{alias}/model:list, TTL 300s)이 배포 직후 최대 5분간 예외 가드 없이
     # ModelConfigSchema 로 되살려지므로, required 로 만들면 그 5분간 GET /v1/models 가 500.

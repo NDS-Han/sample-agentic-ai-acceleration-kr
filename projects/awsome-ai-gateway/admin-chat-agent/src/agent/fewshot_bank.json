@@ -6,21 +6,21 @@
       "id": "fs01",
       "tier": "A",
       "question": "오늘 모델별 호출 수",
-      "sql": "SELECT l.model_alias, COUNT(*) AS calls\nFROM usage.usage_logs l\nWHERE (l.requested_at AT TIME ZONE 'Asia/Seoul')::date = (now() AT TIME ZONE 'Asia/Seoul')::date\nGROUP BY l.model_alias\nORDER BY calls DESC",
+      "sql": "SELECT l.model_alias, COUNT(*) AS calls\nFROM usage.usage_logs l\nWHERE l.status = 'SUCCESS'\n  AND (l.requested_at AT TIME ZONE 'Asia/Seoul')::date = (now() AT TIME ZONE 'Asia/Seoul')::date\nGROUP BY l.model_alias\nORDER BY calls DESC",
       "teaches": "오늘=KST date 비교, model_alias(NOT model), COUNT 집계"
     },
     {
       "id": "fs02",
       "tier": "A",
       "question": "지난 7일 가장 비싼 모델 top 5",
-      "sql": "SELECT l.model_alias, SUM(l.cost_usd) AS cost_usd\nFROM usage.usage_logs l\nWHERE l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '7 days'\n  AND l.requested_at AT TIME ZONE 'Asia/Seoul' < date_trunc('day', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY l.model_alias\nORDER BY cost_usd DESC\nLIMIT 5",
+      "sql": "SELECT l.model_alias, SUM(l.cost_usd) AS cost_usd\nFROM usage.usage_logs l\nWHERE l.status = 'SUCCESS'\n  AND l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '7 days'\n  AND l.requested_at AT TIME ZONE 'Asia/Seoul' < date_trunc('day', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY l.model_alias\nORDER BY cost_usd DESC\nLIMIT 5",
       "teaches": "지난 N일=KST 날짜경계로 잘라 오늘(진행중) 제외 — 롤링윈도우도 양변을 AT TIME ZONE Asia/Seoul로 앵커(raw now()-interval 금지), SUM(cost_usd) 랭킹"
     },
     {
       "id": "fs03",
       "tier": "A",
       "question": "팀별 이번 달 평균 응답 지연시간",
-      "sql": "SELECT t.name AS team, AVG(l.latency_ms) AS avg_latency_ms\nFROM usage.usage_logs l\nLEFT JOIN auth.teams t ON t.id = l.team_id\nWHERE l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('month', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY t.name\nORDER BY avg_latency_ms DESC",
+      "sql": "SELECT t.name AS team, AVG(l.latency_ms) AS avg_latency_ms\nFROM usage.usage_logs l\nLEFT JOIN auth.teams t ON t.id = l.team_id\nWHERE l.status = 'SUCCESS'\n  AND l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('month', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY t.name\nORDER BY avg_latency_ms DESC",
       "teaches": "AVG(NOT SUM), latency_ms, 팀 귀속은 usage_logs.team_id 직접 사용(호출 시점 팀 보존 — users.team_id 경유 금지: 팀 이동 사용자 오귀속·default팀 누락 방지), 이번달=date_trunc month KST"
     },
     {
@@ -41,7 +41,7 @@
       "id": "fs06",
       "tier": "A",
       "question": "이번 주 캐시 적중 토큰이 가장 많은 사용자",
-      "sql": "SELECT u.email, SUM(l.cache_read_tokens) AS cache_read_tokens\nFROM usage.usage_logs l\nJOIN auth.users u ON u.id = l.user_id\nWHERE l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('week', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY u.email\nORDER BY cache_read_tokens DESC\nLIMIT 10",
+      "sql": "SELECT u.email, SUM(l.cache_read_tokens) AS cache_read_tokens\nFROM usage.usage_logs l\nJOIN auth.users u ON u.id = l.user_id\nWHERE l.status = 'SUCCESS'\n  AND l.requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('week', now() AT TIME ZONE 'Asia/Seoul')\nGROUP BY u.email\nORDER BY cache_read_tokens DESC\nLIMIT 10",
       "teaches": "cache_read_tokens, 이번주=date_trunc week KST, SUM 랭킹"
     },
     {
@@ -62,7 +62,7 @@
       "id": "fs09",
       "tier": "B",
       "question": "사용자별 비용·토큰 사용 패턴을 군집화해줘",
-      "sql": "SELECT user_id,\n       SUM(cost_usd) AS total_cost,\n       SUM(input_tokens + output_tokens) AS total_tokens,\n       COUNT(*) AS calls\nFROM usage.usage_logs\nWHERE requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '30 days'\nGROUP BY user_id",
+      "sql": "SELECT user_id,\n       SUM(cost_usd) AS total_cost,\n       SUM(input_tokens + output_tokens) AS total_tokens,\n       COUNT(*) AS calls\nFROM usage.usage_logs\nWHERE status = 'SUCCESS'\n  AND requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '30 days'\nGROUP BY user_id",
       "code_hint": "sklearn StandardScaler 후 KMeans 로 사용자 군집화 (n_clusters 3~4, random_state=42)",
       "teaches": "사용자 단위 집계 SQL, 롤링윈도우 KST 앵커, Tier B clustering(KMeans) 위임, input_tokens+output_tokens"
     },
@@ -70,7 +70,7 @@
       "id": "fs10",
       "tier": "B",
       "question": "최근 60일 일별 호출량의 7일 이동평균 추세",
-      "sql": "SELECT (requested_at AT TIME ZONE 'Asia/Seoul')::date AS d,\n       COUNT(*) AS calls\nFROM usage.usage_logs\nWHERE requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '60 days'\nGROUP BY d\nORDER BY d",
+      "sql": "SELECT (requested_at AT TIME ZONE 'Asia/Seoul')::date AS d,\n       COUNT(*) AS calls\nFROM usage.usage_logs\nWHERE status = 'SUCCESS'\n  AND requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '60 days'\nGROUP BY d\nORDER BY d",
       "code_hint": "pandas rolling(window=7).mean() 으로 이동평균 — line 차트(원본 + MA)",
       "teaches": "일별 시계열 SQL(롤링윈도우 KST 앵커), Tier B moving-average(rolling) 위임"
     },
@@ -78,7 +78,7 @@
       "id": "fs11",
       "tier": "B",
       "question": "요일별 평균 비용 패턴 분석",
-      "sql": "SELECT (requested_at AT TIME ZONE 'Asia/Seoul')::date AS d,\n       SUM(cost_usd) AS daily_cost\nFROM usage.usage_logs\nWHERE requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '90 days'\nGROUP BY d\nORDER BY d",
+      "sql": "SELECT (requested_at AT TIME ZONE 'Asia/Seoul')::date AS d,\n       SUM(cost_usd) AS daily_cost\nFROM usage.usage_logs\nWHERE status = 'SUCCESS'\n  AND requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '90 days'\nGROUP BY d\nORDER BY d",
       "code_hint": "pandas: d 를 datetime 변환 후 dt.dayofweek groupby 평균 — 요일별 bar",
       "teaches": "일별 cost SQL(90일, 롤링윈도우 KST 앵커), Tier B 요일 집계(pandas dayofweek)"
     },
@@ -86,7 +86,7 @@
       "id": "fs12",
       "tier": "B",
       "question": "모델별 비용 대비 토큰 효율 산점도",
-      "sql": "SELECT model_alias,\n       SUM(cost_usd) AS cost_usd,\n       SUM(input_tokens + output_tokens) AS tokens\nFROM usage.usage_logs\nWHERE requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '30 days'\nGROUP BY model_alias",
+      "sql": "SELECT model_alias,\n       SUM(cost_usd) AS cost_usd,\n       SUM(input_tokens + output_tokens) AS tokens\nFROM usage.usage_logs\nWHERE status = 'SUCCESS'\n  AND requested_at AT TIME ZONE 'Asia/Seoul' >= date_trunc('day', now() AT TIME ZONE 'Asia/Seoul') - interval '30 days'\nGROUP BY model_alias",
       "code_hint": "matplotlib scatter (x=tokens, y=cost_usd, model_alias 라벨) → PNG → S3 업로드",
       "teaches": "모델 단위 집계(롤링윈도우 KST 앵커), Tier B scatter PNG 위임(heatmap 과 다른 시각화)"
     },

@@ -20,9 +20,10 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
+import asyncpg.exceptions
 import structlog
 from sqlalchemy import text
-from sqlalchemy.exc import DataError, IntegrityError
+from sqlalchemy.exc import DBAPIError, DataError, IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from worker.schemas.cost_stream import CostStreamEntry
@@ -96,9 +97,52 @@ _VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
 #:   - DataError:     CAST(:user_id AS uuid) 실패·numeric overflow 등 — 페이로드는
 #:                    스키마에서 str 이라 decode 를 통과하고 CAST 에서 죽는다
 #:   - ValueError:    datetime.fromisoformat 파싱 등 파이썬 레벨 변환 실패
-#: OperationalError/InterfaceError/데드락 등 **일시** 실패는 여전히 전파해
-#: PEL 재처리(at-least-once)에 맡긴다.
+#: ⚠️ SQLAlchemy 의 asyncpg 방언은 PostgresError 를 DataError 가 아니라 범용
+#:    DBAPIError 로 변환하고(_asyncpg_error_translate), UndefinedColumn 계열은
+#:    ProgrammingError 로 올린다 — 클래스 매칭만으로는 class-22 poison 이
+#:    빠져나가므로 아래 판별 함수로 sqlstate 를 직접 본다.
 _PERMANENT_FLUSH_ERRORS = (IntegrityError, DataError, ValueError)
+
+#: **행 단위** 결정적 오류의 SQLSTATE 클래스 — 이 클래스들의 오류는 같은
+#: 페이로드로는 절대 성공하지 않는다.
+#:   22 = data exception (invalid input syntax · numeric overflow · truncation —
+#:        클라이언트측 인코딩 실패 포함, sqlstate 22000)
+#:   23 = integrity constraint (FK/NOT NULL/unique — 행 단위 위반)
+#: ⚠️ 42(syntax/access — UndefinedColumn·UndefinedTable·42501)는 **포함하지
+#:    않는다**. 그 오류들은 특정 행이 아니라 문장/배포 전체의 문제라, per-row
+#:    스킵으로 삼키면 배치 전량이 usage_logs·budget_usages 없이 XACK 되어
+#:    즉시 청구 유실이다. 42 는 전파해 배치를 PEL 에 남기고 lag 알람에 맡긴다 —
+#:    마이그레이션이 따라잡으면 데이터가 보존된 채 재처리된다.
+_PERMANENT_ROW_SQLSTATE_CLASSES = frozenset({"22", "23"})
+
+
+def _is_permanent_flush_error(exc: BaseException) -> bool:
+    """영구(결정적) **행 단위** flush 실패인가 — 재시도해도 같은 행이 죽는
+    오류만 True. 문장/스키마 수준 오류(42·ProgrammingError)는 행 poison 이
+    아니라 배포 문제라 False — 전파해 PEL 재처리에 맡긴다(전량 스킵은
+    청구·예산의 즉시 유실).
+
+    SQLAlchemy 클래스 매칭은 asyncpg 변환 매핑의 허점을 못 잡는다:
+      - class-22 서버 오류 → 범용 DBAPIError (DataError 아님)
+      - 클라이언트측 인코딩 실패 → orig=adapter Error(sqlstate 22000) +
+        __cause__=asyncpg DataError
+    따라서 orig 와 그 __cause__/__context__ 체인을 따라가며 sqlstate 클래스와
+    asyncpg 예외 타입을 검사한다.
+    """
+    if isinstance(exc, _PERMANENT_FLUSH_ERRORS):
+        return True
+    if isinstance(exc, DBAPIError):
+        cur = getattr(exc, "orig", None)
+        while cur is not None:
+            sqlstate = (getattr(cur, "sqlstate", None) or "")[:2]
+            if sqlstate in _PERMANENT_ROW_SQLSTATE_CLASSES:
+                return True
+            # 어댑터가 감싼 원본 asyncpg 예외 — 클라이언트측 인코딩 실패는
+            # 같은 값이 영원히 인코딩되지 않는다.
+            if isinstance(cur, asyncpg.exceptions.DataError):
+                return True
+            cur = getattr(cur, "__cause__", None) or getattr(cur, "__context__", None)
+    return False
 
 
 def _usage_status(entry: CostStreamEntry) -> str:
@@ -310,10 +354,12 @@ class BatchFlusher:
                 await self._upsert_budget_usages(session, written)
                 await session.commit()
                 recorded = written
-        except _PERMANENT_FLUSH_ERRORS as ie:
-            # IntegrityError 외에도 DataError/ValueError 가 영구 실패다 — decode 를
-            # 통과한 poison 페이로드(깨진 uuid/날짜)가 여기서 걸리지 않으면 그 배치는
-            # 영원히 실패해 스트림 전체를 봉쇄한다.
+        except Exception as ie:
+            if not _is_permanent_flush_error(ie):
+                raise
+            # 영구 실패(깨진 uuid/날짜·numeric overflow·스키마 불일치 등)만 per-row
+            # 폴백으로 내보낸다 — decode 를 통과한 poison 페이로드가 여기서 걸리지
+            # 않으면 그 배치는 영원히 실패해 스트림 전체를 봉쇄한다.
             logger.warning(
                 "batch_integrity_error_fallback_per_row",
                 batch_size=len(entries),
@@ -367,7 +413,9 @@ class BatchFlusher:
                         await self._upsert_budget_usages(session, [e])
                         written.append(e)
                     await session.commit()
-            except _PERMANENT_FLUSH_ERRORS as ie:
+            except Exception as ie:
+                if not _is_permanent_flush_error(ie):
+                    raise
                 # 영구 오류(FK 위반·깨진 uuid/날짜 등)만 스킵 — 재시도해도 같은
                 # 결과라 ACK 해도 된다.
                 skipped += 1
@@ -390,27 +438,35 @@ class BatchFlusher:
             )
         return written
 
-    async def flush_dead_letter(self, entries: list[CostStreamEntry]) -> int:
+    async def flush_dead_letter(
+        self, entries: list[CostStreamEntry]
+    ) -> tuple[int, int]:
         """죽은 편지 경로 — 반복 실패로 스트림 전체를 막는 배치를 행 단위로 소화한다.
 
         성공한 행만 기록하고, 실패한 행은 request_id·오류를 남겨 스킵한다.
-        성공적으로 소화한 행 수를 반환한다.
+        ``(written, dead_lettered)`` 를 반환한다 — replay 로 걸러진 행(이미
+        다른 소비자가 커밋)은 어느 쪽에도 세지 않아 dead_letter_dropped
+        메트릭이 정직하게 유지된다.
 
         ⚠️ 이 경로는 **영구 오류만** 삼킨다. 같은 배치 머리가 dead-letter
            grace(기본 120s)를 넘도록 실패했다는 것은 "재시도하면 나아질 수도 있는
            오류"를 더 기다리는 비용이, 스트림 봉쇄 → MAXLEN 트림으로 인한 **전량
-           유실**보다 크다는 뜻이다(결정적 오류 — 예: 워커 이미지가 마이그레이션보다
-           먼저 배포된 UndefinedColumn — 는 재시도로 절대 낫지 않는다).
-           유실은 허용하되 silent 하진 않다: 행마다 ERROR 로그를 남긴다.
+           유실**보다 크다는 뜻이다. 유실은 허용하되 silent 하진 않다:
+           행마다 ERROR 로그를 남긴다. 단 스키마/문장 수준 오류(42·
+           UndefinedColumn 등 — 워커가 마이그레이션보다 먼저 배포된 경우)는
+           행 poison 이 아니라 배포 문제라 이 경로에서도 삼키지 않고
+           재전파한다 — 전량 스킵은 usage_logs·budget_usages 의 즉시 유실이고,
+           PEL 보존이면 스키마가 따라잡은 뒤 데이터가 살아있다.
 
         ⚠️ grace 만료만으로는 결정적/일시를 구별할 수 없다 — DB 장애가 120s 를
            넘으면(RDS 페일오버·업그레이드·풀 고갈) 여기까지 오지만, 그때 무작위로
            삼키면 모든 행이 written=0 으로 **영구 유실(과소청구)** 된다.
-           일시 계열 예외(연결·타임아웃 등 _PERMANENT_FLUSH_ERRORS 밖)는 즉시
+           일시 계열 예외(연결·타임아웃 등 결정적 오류 판별 밖)는 즉시
            재전파해 배치를 PEL 에 남긴다 — grace 는 진행 선택지를 줄 뿐 유실
            선택지를 주지 않는다.
         """
         written = 0
+        dead_lettered = 0
         for e in entries:
             try:
                 async with self._session_factory() as session:
@@ -419,11 +475,18 @@ class BatchFlusher:
                         await session.commit()
                         continue
                     inserted_ids = await self._insert_usage_logs(session, [e])
-                    if e.request_id in inserted_ids:
+                    inserted = e.request_id in inserted_ids
+                    if inserted:
                         await self._upsert_budget_usages(session, [e])
                     await session.commit()
-                    written += 1
-            except _PERMANENT_FLUSH_ERRORS as exc:
+                    # 실제로 커밋된 행만 written 에 센다 — commit 실패(영구
+                    # 오류)면 dead_lettered 로 가므로 둘 다 세면 안 된다.
+                    if inserted:
+                        written += 1
+            except Exception as exc:
+                if not _is_permanent_flush_error(exc):
+                    raise
+                dead_lettered += 1
                 logger.error(
                     "row_dead_lettered",
                     request_id=e.request_id,
@@ -433,7 +496,7 @@ class BatchFlusher:
             # 영구 오류 외(연결·데드락·타임아웃)는 전파 — 배치가 PEL 에 남아
             # DB 복구 뒤 재처리된다. 여기서 삼키면 장애 기간 내내 배치 단위
             # 과소청구 유실이 된다.
-        return written
+        return written, dead_lettered
 
     async def _insert_usage_logs(
         self, session: AsyncSession, entries: list[CostStreamEntry]

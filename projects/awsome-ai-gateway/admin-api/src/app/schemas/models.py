@@ -293,8 +293,8 @@ class PricingRequest(BaseModel):
         default=Decimal("0"), ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
     )
     #: 장문(>threshold) 구간 단가 — None 이면 set_pricing 이 이전 행 값을 이어받는다.
-    #: 가격 동기화가 LiteLLM `*_above_272k_tokens` 를 매핑해 채운다. 기본 단가만
-    #: 개정하고 구간 단가를 얼리면 >272K 요청이 구 단가 비율로 과소청구된다.
+    #: 가격 동기화가 LiteLLM `*_above_{N}k_tokens` 를 매핑해 채운다. 기본 단가만
+    #: 개정하고 구간 단가를 얼리면 임계 초과 요청이 구 단가 비율로 과소청구된다.
     long_context_threshold_tokens: int | None = Field(default=None, ge=1)
     long_context_input_price_per_1k_tokens: Decimal | None = Field(
         default=None, ge=0, le=MAX_PRICE_PER_1K, decimal_places=8
@@ -320,15 +320,26 @@ class PricingRequest(BaseModel):
 
     @model_validator(mode="after")
     def _long_tier_is_one_unit(self):
-        """threshold 를 싣는 요청은 in/out 단가를 동반해야 한다 — threshold 만
-        있고 단가가 결손이면 구간이 조용히 기본 단가로 과소청구된다."""
+        """threshold 를 싣는 요청은 장문 단가 5개 전부를 동반해야 한다 —
+        threshold 만 있고 단가가 결손이면 구간이 조용히 기본 단가로
+        과소청구된다. 서비스(set_pricing)의 400 과 같은 규약 — 스키마에서
+        걸러 422 로 일찍 실패하게 한다(경계 불일치 방지)."""
         if self.long_context_threshold_tokens is not None:
-            if (
-                self.long_context_input_price_per_1k_tokens is None
-                or self.long_context_output_price_per_1k_tokens is None
-            ):
+            missing = [
+                name
+                for name in (
+                    "long_context_input_price_per_1k_tokens",
+                    "long_context_output_price_per_1k_tokens",
+                    "long_context_cache_creation_5m_price_per_1k_tokens",
+                    "long_context_cache_creation_1h_price_per_1k_tokens",
+                    "long_context_cache_read_price_per_1k_tokens",
+                )
+                if getattr(self, name) is None
+            ]
+            if missing:
                 raise ValueError(
-                    "long_context_threshold 설정 시 장문 input/output 단가가 필요합니다"
+                    "long_context_threshold 설정 시 장문 단가 5개가 모두 필요합니다: "
+                    + ", ".join(missing)
                 )
         return self
 
@@ -399,7 +410,7 @@ class PriceSyncDiff(BaseModel):
     proposed_cache_5m_per_1k: Decimal | None = None
     proposed_cache_1h_per_1k: Decimal | None = None
     proposed_cache_read_per_1k: Decimal | None = None
-    #: 장문(>threshold) 구간 제안 단가 — 카탈로그가 *_above_272k_tokens 를 줄 때만.
+    #: 장문(>threshold) 구간 제안 단가 — 카탈로그가 *_above_{N}k_tokens 를 줄 때만.
     long_context_threshold_tokens: int | None = None
     proposed_long_input_per_1k: Decimal | None = None
     proposed_long_output_per_1k: Decimal | None = None

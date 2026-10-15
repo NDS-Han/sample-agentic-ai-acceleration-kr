@@ -20,6 +20,7 @@ import functools
 import json
 import os
 import re
+import threading
 import time
 from pathlib import Path
 
@@ -249,9 +250,7 @@ def get_schema(table_name: str | None = None) -> dict:
     Otherwise returns columns of the specified table.
     """
     # Phase 3: AgentCore Gateway 로 Lambda 호출. MVP 는 직접 Lambda invoke.
-    import boto3
-
-    client = boto3.client("lambda")
+    client = _lambda_client()
     # query_db 와 같은 이유 — prod 함수명 기본값은 dev→prod 혼선이라 명시를 요구.
     fn = os.environ.get("LAMBDA_GET_SCHEMA")
     if not fn:
@@ -263,6 +262,24 @@ def get_schema(table_name: str | None = None) -> dict:
     return json.loads(response["Payload"].read())
 
 
+# boto3 클라이언트는 **생성**이 기본 세션에서 thread-safe 하지 않다(알려진
+# 경합) — L3 후보 병렬화로 k 개 스레드가 동시에 만들 수 있으므로 모듈
+# 싱글턴으로 고정한다. 사용은 thread-safe.
+_LAMBDA_CLIENT = None
+_LAMBDA_CLIENT_LOCK = threading.Lock()
+
+
+def _lambda_client():
+    global _LAMBDA_CLIENT
+    if _LAMBDA_CLIENT is None:
+        with _LAMBDA_CLIENT_LOCK:
+            if _LAMBDA_CLIENT is None:
+                import boto3
+
+                _LAMBDA_CLIENT = boto3.client("lambda")
+    return _LAMBDA_CLIENT
+
+
 @tool
 def query_db(sql: str, session_id: str = "", step_id: str = "") -> dict:
     """Execute a read-only SELECT against the gateway DB.
@@ -271,9 +288,7 @@ def query_db(sql: str, session_id: str = "", step_id: str = "") -> dict:
     gateway_chat_reader role with statement_timeout=10s. Stages large
     results to S3 for the Code Specialist.
     """
-    import boto3
-
-    client = boto3.client("lambda")
+    client = _lambda_client()
     # 기본값을 prod 함수명으로 두면 env 누락 dev/dev-외 환경이 **prod** Lambda 를
     # 호출한다 — 환경 간 경계를 넘는 조용한 실수라 기본값 없이 명시를 요구한다(R16).
     fn = os.environ.get("LAMBDA_QUERY_DB")
@@ -476,8 +491,21 @@ def ask_sql_verified(question: str, hints: dict | None = None) -> dict:
     k = max(1, min(k, len(_CANDIDATE_STRATEGIES)))
     fewshot_block = fewshot.build_fewshot_block(question)
 
-    candidates: list[candidate_select.Candidate] = []
-    for i in range(k):
+    # 후보 생성+실행을 병렬로 — LLM 호출(k×수 초)이 지배 비용이라 순차면
+    # 질의 1건이 k배 느려진다. 각 태스크에 context 사본을 줘 _session_id/
+    # _mode 가 전파되게 한다(copy_context 없는 스레드는 기본 컨텍스트라
+    # query_db 의 fail-closed 에 전부 걸린다). stash=False 라 태스크 간
+    # 공유 쓰기 없음 — 수집만 여기서 한다.
+    def _gen_candidate(i: int) -> candidate_select.Candidate:
+        try:
+            return _gen_candidate_inner(i)
+        except Exception as exc:  # noqa: BLE001 — 후보별 격리: 1개 실패가 k 전체를 죽이지 않게
+            logger.warning("l3_candidate_failed", index=i, error=str(exc)[:200])
+            return candidate_select.Candidate(
+                "", {"error": f"candidate generation failed: {exc}"}
+            )
+
+    def _gen_candidate_inner(i: int) -> candidate_select.Candidate:
         strat = _CANDIDATE_STRATEGIES[i]
         merged_hints = {**(hints or {}), **strat}
         payload = json.dumps(
@@ -489,7 +517,64 @@ def ask_sql_verified(question: str, hints: dict | None = None) -> dict:
             schema_key="ask_sql_specialist", stash=False,
         )
         sql_text = str(env.get("sql", "")) if isinstance(env, dict) else ""
-        candidates.append(candidate_select.Candidate(sql_text, env if isinstance(env, dict) else {}))
+        exec_env = env if isinstance(env, dict) else {}
+        if sql_text.strip():
+            # ⚠️ 클러스터링은 반드시 **실제 실행 결과**로 한다 — SqlEnvelope.rows 는
+            #    "최대 5행 sample" 이라 적힌 LLM 주장값이라, 그걸 해시하면 모델이
+            #    같은 값을 지어내면 허위 합의(또는 별칭만 다른 false-split)가 된다.
+            #    query_db 는 서버측 validate+force_limit+EXPLAIN 가드를 통과하므로
+            #    후보 SQL 의 추가 검증 없이 그대로 실행해도 안전하다.
+            actual = query_db(sql_text)
+            if isinstance(actual, dict) and actual.get("ok"):
+                exec_env = {
+                    **exec_env,
+                    # 결과를 지는 필드는 **전부** 실실행 값으로 덮어쓴다 —
+                    # sql/note 등 LLM 필드만 보존. 특히 stats 는 orchestrator 가
+                    # "결정적 계산 — 그대로 인용"하는 근거 집합이라 LLM 주장값이
+                    # 남으면 지어낸 숫자가 검증까지 통과한다. 실행에 성공했으니
+                    # LLM 측 실패 표시도 지운다.
+                    "ok": True,
+                    "error": None,
+                    "parse_error": None,
+                    "sql": actual.get("sql") or sql_text,
+                    "rows": actual.get("rows") or [],
+                    "row_count": actual.get("row_count", len(actual.get("rows") or [])),
+                    "columns": actual.get("columns") or [],
+                    "stats": actual.get("stats"),
+                    # s3_uri 도 실실행 값만 — 실행이 인라인(≤20행)이었으면 None.
+                    # LLM 주장 s3_uri 를 폴백으로 남기면 다른 SQL 의 결과를
+                    # 가리키는 댕글링 참조가 채택 후보에 남는다.
+                    "s3_uri": actual.get("s3_uri"),
+                    "accuracy_warnings": actual.get("accuracy_warnings") or [],
+                    "explain_cost": actual.get("explain_cost"),
+                }
+            else:
+                # 검증 실패/타임아웃/미실행 — 후보를 무효로 표시해 클러스터 제외.
+                # 결과 필드는 전부 비운다 — 전 후보 실패 시 candidates[0] 이
+                # 결과로 stash 돼 _reconcile_numbers 의 grounding 집합에 LLM
+                # 주장 rows/stats/s3_uri(지어낸 숫자·댕글링 참조)가 유입된다.
+                exec_env = {
+                    **exec_env,
+                    "error": (actual or {}).get("error", "candidate execution failed"),
+                    "rows": [],
+                    "row_count": 0,
+                    "columns": [],
+                    "stats": None,
+                    "s3_uri": None,
+                }
+        return candidate_select.Candidate(sql_text, exec_env)
+
+    if k > 1:
+        import concurrent.futures as _cf
+
+        with _cf.ThreadPoolExecutor(max_workers=k) as ex:
+            futs = [
+                ex.submit(contextvars.copy_context().run, _gen_candidate, i)
+                for i in range(k)
+            ]
+            candidates = [f.result() for f in futs]
+    else:
+        candidates = [_gen_candidate(0)]
 
     sel = candidate_select.select_by_execution(candidates)
 

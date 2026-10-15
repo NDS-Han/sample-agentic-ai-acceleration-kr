@@ -47,6 +47,42 @@ PRICE_SYNC_PROVIDERS = frozenset({
     Provider.BEDROCK_RUNTIME_OPENAI,
 })
 
+# 공식 **프롬프트 길이 구간 요금제**가 있는 provider 모델 — 식별자 부분
+# 문자열 → (threshold, 구간 배수). 이 ID 를 가리키는 alias 의 가격 행에
+# long_context 티어가 없으면 임계 초과 요청이 단락 요율로 과소청구된다
+# (Haiku 5.5 는 전 차원 5배 — 0047). create_model 은 배수로 자동 파생하고,
+# set_pricing/update_model 은 무티어로 끝날 때 감사·로그 경고를 남긴다.
+# 새 구간요금 모델 출시 시 여기에 추가.
+_KNOWN_TIERED_PROVIDER_IDS: dict[str, tuple[int, Decimal]] = {
+    "claude-haiku-5-5": (100000, Decimal("5")),
+}
+
+
+def _auto_long_tier(provider_model_id: str | None, base: dict[str, Decimal]) -> dict | None:
+    """알려진 구간요금 모델이면 단락 단가 ×공시 배수로 구간 단가를 파생한다.
+    공시 구조(×5)는 지역 프리미엄/할증과 무관하게 성립하므로 어떤 단락
+    단가로 등록돼도 비율이 보존된다."""
+    if not provider_model_id:
+        return None
+    for key, (threshold, mult) in _KNOWN_TIERED_PROVIDER_IDS.items():
+        if key in provider_model_id:
+            return {
+                "long_context_threshold_tokens": threshold,
+                "long_context_input_price_per_1k_tokens": base["input"] * mult,
+                "long_context_output_price_per_1k_tokens": base["output"] * mult,
+                "long_context_cache_creation_5m_price_per_1k_tokens": base["cache_5m"] * mult,
+                "long_context_cache_creation_1h_price_per_1k_tokens": base["cache_1h"] * mult,
+                "long_context_cache_read_price_per_1k_tokens": base["cache_read"] * mult,
+            }
+    return None
+
+
+def _is_known_tiered(provider_model_id: str | None) -> bool:
+    return bool(
+        provider_model_id
+        and any(k in provider_model_id for k in _KNOWN_TIERED_PROVIDER_IDS)
+    )
+
 
 class ModelService:
     def __init__(self, cache_mgr: CacheInvalidationManager) -> None:
@@ -93,7 +129,27 @@ class ModelService:
         )
         await repo.create_model(model)
 
-        # Initial pricing
+        # Initial pricing — 알려진 구간요금 모델이면 단락 ×공시 배수로
+        # 구간 단가를 자동 파생한다. 무티어로 등록하면 임계 초과 요청이
+        # 단락 요율로 과소청구된다(Haiku 5.5 = 전 차원 5배 — 마이그레이션은
+        # 기존 행만 고치고 신규 등록은 여기서 막는다).
+        auto_tier = _auto_long_tier(
+            data.provider_model_id,
+            {
+                "input": data.input_price_per_1k_tokens,
+                "output": data.output_price_per_1k_tokens,
+                "cache_5m": data.cache_creation_5m_price_per_1k_tokens,
+                "cache_1h": data.cache_creation_1h_price_per_1k_tokens,
+                "cache_read": data.cache_read_price_per_1k_tokens,
+            },
+        )
+        if auto_tier:
+            logger.info(
+                "tiered_model_long_context_auto_derived",
+                alias=data.alias,
+                provider_model_id=data.provider_model_id,
+                threshold=auto_tier["long_context_threshold_tokens"],
+            )
         pricing = ModelPricing(
             id=uuid.uuid4(),
             model_alias=data.alias,
@@ -104,6 +160,7 @@ class ModelService:
             cache_read_price_per_1k_tokens=data.cache_read_price_per_1k_tokens,
             effective_from=datetime.now(timezone.utc),
             created_by=actor.user_id,
+            **(auto_tier or {}),
         )
         await repo.create_pricing(pricing)
 
@@ -141,7 +198,12 @@ class ModelService:
             action="CREATE_MODEL",
             resource_type="ModelAlias",
             resource_id=model.alias,
-            changes={"after": {"alias": model.alias, "provider": model.provider.value}},
+            changes={"after": {
+                "alias": model.alias,
+                "provider": model.provider.value,
+                # 구간요금 모델의 자동 파생 여부 — 수동 등록과 구분.
+                "long_context_auto_derived": bool(auto_tier),
+            }},
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -212,6 +274,20 @@ class ModelService:
             await session.flush()
 
         pricing = await repo.get_current_pricing(alias)
+
+        # pmid 가 구간요금 모델로 바뀌었는데 열린 가격 행이 무티어면 임계 초과
+        # 요청이 단락 요율로 과소청구된다 — 경고만 남기고 정정은 set_pricing 경로.
+        if (
+            _is_known_tiered(model.provider_model_id)
+            and pricing is not None
+            and getattr(pricing, "long_context_threshold_tokens", None) is None
+        ):
+            logger.warning(
+                "tiered_model_missing_long_context_pricing",
+                alias=alias,
+                provider_model_id=model.provider_model_id,
+                hint="set_pricing으로 long_context_* 5개 차원을 등록하세요",
+            )
 
         # BR-MOD-04: Cache invalidation — 게이트웨이는 resolve 성공 시
         # model:{alias} 와 model:{provider_model_id} **두 키**를 쓴다(router_service).
@@ -284,7 +360,7 @@ class ModelService:
                 "있으면 자동 덮어쓰기를 하지 않습니다"
             )
         # 요청이 구간 값을 싣지 않으면(None) 이전 행을 이어받는다 — 가격 동기화는
-        # 카탈로그의 above_272k 값을 명시로 실어 보내 덮어쓴다.
+        # 카탈로그의 above_{N}k 값을 명시로 실어 보내 덮어쓴다.
         long_tier = {
             f: (v if v is not None else getattr(prior, f, None) if prior is not None else None)
             for f in (
@@ -312,6 +388,22 @@ class ModelService:
         ):
             raise ValidationError(
                 "장문 구간 threshold 가 설정되면 5개 구간 단가가 모두 필요합니다"
+            )
+
+        # 공식 구간 요금제가 있는 모델에 무티어 행이 열리면 임계 초과 요청이
+        # 단락 요율로 과소청구된다 — 마이그레이션은 실행 시점의 행만 고치므로
+        # 신규 등록·재설정이 무티어로 끝날 때 감사 로그와 경고로 드러낸다.
+        tiered_but_untiered = (
+            long_tier["long_context_threshold_tokens"] is None
+            and _is_known_tiered(model.provider_model_id)
+        )
+        if tiered_but_untiered:
+            logger.warning(
+                "tiered_model_pricing_without_long_context",
+                alias=alias,
+                provider_model_id=model.provider_model_id,
+                hint="프롬프트 길이 구간 요금제 모델입니다 — long_context_* 가 없으면 "
+                "임계 초과 요청이 단락 요율로 과소청구됩니다",
             )
 
         # BR-MOD-02: Close current pricing, preserve history
@@ -367,6 +459,8 @@ class ModelService:
                     if long_tier["long_context_threshold_tokens"] is not None
                     else None
                 ),
+                # 구간요금 모델인데 무티어로 열린 행 — 과소청구 재발 신호.
+                "tiered_model_missing_long_context": tiered_but_untiered,
             }},
             ip_address=ip_address,
             request_id=request_id,

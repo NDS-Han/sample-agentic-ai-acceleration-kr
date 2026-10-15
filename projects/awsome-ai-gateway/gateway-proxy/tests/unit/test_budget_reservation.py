@@ -315,8 +315,28 @@ def test_estimate_worst_cost_long_tier():
         "long_input_per_1k": Decimal("0.002"),
         "long_output_per_1k": Decimal("0.0075"),
     })
-    short = _estimate_worst_cost(mc, 199999, 1000)
-    long = _estimate_worst_cost(mc, 200001, 1000)
-    # short: 199.999*0.001 + 0.005 ≈ 0.204999; long: 200.001*0.002 + 0.0075
+    # 문자 추정 오차 마진 — 임계의 70%(140K) 를 넘으면 long 으로 과대예약한다.
+    # 경계 아래 과소예약(실비 5배 초과)보다 경계 위 과대예약이 안전하다.
+    short = _estimate_worst_cost(mc, 139999, 1000)
+    long = _estimate_worst_cost(mc, 140001, 1000)
+    # short: 139.999*0.001 + 0.005 ≈ 0.144999; long: 140.001*0.002 + 0.0075
     assert long > short
-    assert long == Decimal("0.407502")
+    assert long == Decimal("0.287502")
+
+
+def test_estimate_cost_uses_long_tier():
+    """kiro R18 S1 — CPM/CPH 선예약(_estimate_cost)도 long 요율을 본다.
+    예전엔 short 만 봐서 100K 초과 요청이 분/시간 한도를 실비의 1/5 로 통과했다."""
+    from app.services.rate_limit_enforcement import _estimate_cost
+
+    mc = _mc({
+        "input_per_1k": Decimal("0.0001"),
+        "output_per_1k": Decimal("0.0005"),
+        "long_context_threshold_tokens": 100000,
+        "long_input_per_1k": Decimal("0.0005"),
+        "long_output_per_1k": Decimal("0.0025"),
+    })
+    short = _estimate_cost(mc, 69000, 1000)   # 70% 경계 아래 — 단락 요율
+    long = _estimate_cost(mc, 71000, 1000)    # 70% 경계 위 — 장문 요율
+    assert short == Decimal("0.007400")       # 69*0.0001 + 0.0005
+    assert long == Decimal("0.038000")        # 71*0.0005 + 0.0025

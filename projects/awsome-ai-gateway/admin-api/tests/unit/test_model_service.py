@@ -979,12 +979,23 @@ class TestPriceSyncApply:
         )
         with _p.raises(Exception):
             PricingRequest(**base, long_context_threshold_tokens=272000)
-        # in/out 동반 시 통과
+        # in/out 만 동반해도 거부 — 서비스 규약(5개 전부)과 정렬(N9)
+        with _p.raises(Exception):
+            PricingRequest(
+                **base,
+                long_context_threshold_tokens=272000,
+                long_context_input_price_per_1k_tokens=Decimal("0.002"),
+                long_context_output_price_per_1k_tokens=Decimal("0.004"),
+            )
+        # 5개 전부 동반 시 통과
         req = PricingRequest(
             **base,
             long_context_threshold_tokens=272000,
             long_context_input_price_per_1k_tokens=Decimal("0.002"),
             long_context_output_price_per_1k_tokens=Decimal("0.004"),
+            long_context_cache_creation_5m_price_per_1k_tokens=Decimal("0.0025"),
+            long_context_cache_creation_1h_price_per_1k_tokens=Decimal("0.004"),
+            long_context_cache_read_price_per_1k_tokens=Decimal("0.0002"),
         )
         assert req.long_context_threshold_tokens == 272000
         # threshold 0 은 무의미(모든 토큰이 구간 요율) — 거부
@@ -1193,3 +1204,52 @@ class TestPriceSyncApply:
         assert req.long_context_input_price_per_1k_tokens == Decimal("0.00400000")
         assert req.long_context_output_price_per_1k_tokens == Decimal("0.01500000")
         assert req.cache_derived is False
+
+
+class TestAutoLongTier:
+    """R18 S-C 회귀 — 알려진 구간요금 모델(Haiku 5.5)은 등록 시 무티어 행이
+    되면 임계 초과 요청이 단락 요율로 과소청구된다(실측 사고). 단락 ×공시
+    배수 자동 파생으로 재발을 구조적으로 차단한다."""
+
+    @pytest.mark.unit
+    def test_haiku55_derives_5x_tier(self):
+        from app.services.model_service import _auto_long_tier
+
+        base = {
+            "input": Decimal("0.0001"),
+            "output": Decimal("0.0005"),
+            "cache_5m": Decimal("0.000125"),
+            "cache_1h": Decimal("0.0002"),
+            "cache_read": Decimal("0.00001"),
+        }
+        tier = _auto_long_tier("global.anthropic.claude-haiku-5-5", base)
+        assert tier is not None
+        assert tier["long_context_threshold_tokens"] == 100000
+        assert tier["long_context_input_price_per_1k_tokens"] == Decimal("0.0005")
+        assert tier["long_context_output_price_per_1k_tokens"] == Decimal("0.0025")
+        assert tier["long_context_cache_read_price_per_1k_tokens"] == Decimal("0.00005")
+
+    @pytest.mark.unit
+    def test_regional_profile_keeps_regional_base(self):
+        """지역 프리미엄 단가로 등록돼도 구조적 5배만 곱한다 — global 고정값을
+        쓰면 지역 행이 global 요율로 잘못 고정된다(0047 이 같은 이유로
+        파생 방식을 택했다)."""
+        from app.services.model_service import _auto_long_tier
+
+        base = {
+            "input": Decimal("0.00011"),
+            "output": Decimal("0.00055"),
+            "cache_5m": Decimal("0.0001375"),
+            "cache_1h": Decimal("0.00022"),
+            "cache_read": Decimal("0.000011"),
+        }
+        tier = _auto_long_tier("us.anthropic.claude-haiku-5-5", base)
+        assert tier["long_context_input_price_per_1k_tokens"] == Decimal("0.00055")
+
+    @pytest.mark.unit
+    def test_non_tiered_model_returns_none(self):
+        from app.services.model_service import _auto_long_tier
+
+        base = {k: Decimal("0.001") for k in ("input", "output", "cache_5m", "cache_1h", "cache_read")}
+        assert _auto_long_tier("anthropic.claude-sonnet-4-5", base) is None
+        assert _auto_long_tier(None, base) is None

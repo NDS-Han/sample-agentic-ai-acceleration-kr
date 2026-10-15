@@ -42,13 +42,15 @@ def _normalize_usage_status(status: str | None) -> str:
 
 
 def resolve_context_tier(usage: TokenUsage, pricing: ModelConfigSchema) -> str | None:
-    """272K long-context 티어 판정 — 과금과 감사기록(usage_logs.context_tier)이 공유하는
-    단일 판정점 (마이그레이션 0042/0043).
+    """long-context 티어 판정 — 과금과 감사기록(usage_logs.context_tier)이 공유하는
+    단일 판정점 (마이그레이션 0042/0043). 임계값은 행마다 다르다(GPT-5.6 272K,
+    Haiku 5.5 100K — 마이그레이션 0047).
 
     반환:
-      · None    = 티어 없는 모델(threshold 미설정: Claude 등) → 단일 요율.
+      · None    = 티어 없는 모델(threshold 미설정) → 단일 요율.
       · "short" = 티어 있는 모델이고 이번 요청 프롬프트가 임계값 이하.
-      · "long"  = 티어 있는 모델이고 임계값 초과 → 입력 2배·출력 1.5배로 청구됨.
+      · "long"  = 티어 있는 모델이고 임계값 초과 → long_context_* 요율로 청구됨
+        (모델별 배수 — GPT-5.6 입력 2배·출력 1.5배, Haiku 5.5 전 차원 5배).
 
     ★ 비교 대상은 usage.input_tokens 가 아니라 **프롬프트 총량**(세 입력 버킷의 합)이다.
       split_openai_input 이 OpenAI usage 를 서로 겹치지 않는 세 버킷(비캐시/캐시읽기/캐시쓰기)

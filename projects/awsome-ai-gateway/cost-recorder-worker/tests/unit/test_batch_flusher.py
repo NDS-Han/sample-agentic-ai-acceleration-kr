@@ -662,8 +662,120 @@ async def test_flush_dead_letter_swallows_permanent_errors_per_row():
 
     flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
     entries = [_make_entry(request_id=f"req-{i}") for i in range(2)]
-    written = await flusher.flush_dead_letter(entries)
+    written, dropped = await flusher.flush_dead_letter(entries)
     assert written == 1  # 첫 행만 dead-letter, 둘째는 기록
+    assert dropped == 1  # 첫 행만 dead-letter, 둘째는 기록
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_class22_dbapi_error_is_permanent_via_sqlstate():
+    """asyncpg 서버 data 오류(class-22)는 SQLAlchemy 가 DataError 가 아니라 범용
+    DBAPIError 로 변환한다(_asyncpg_error_translate 에 DataError 매핑 없음).
+    클래스 매칭만으로는 빠져나가 그룹 헤드가 영원히 전진하지 못하므로,
+    sqlstate 클래스 판별로 영구 오류로 분류돼야 한다."""
+    from sqlalchemy.exc import DBAPIError
+
+    class _Orig(Exception):
+        sqlstate = "22P02"  # invalid_text_representation
+
+    async def _exec(stmt, params=None):
+        result = MagicMock()
+        if "RETURNING" in str(stmt):
+            if isinstance(params, dict) and params["request_id"] == "req-bad":
+                raise DBAPIError("INSERT", params, _Orig("invalid input syntax"))
+            result.scalar_one_or_none.return_value = (
+                params["request_id"] if isinstance(params, dict) else None
+            )
+        return result
+
+    session_factory = _session_factory_for(_exec)
+    redis, _pipe = _counter_redis()
+
+    good = _make_entry(request_id="req-good")
+    bad = _make_entry(request_id="req-bad", user_id="not-a-uuid")
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush([good, bad])  # 예외 없이 끝나야 XACK 까지 진행된다
+
+    session = session_factory.return_value
+    assert session.commit.await_count >= 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_programming_error_propagates_not_dead_lettered():
+    """UndefinedColumn 등 class-42 오류는 **행 poison 이 아니라 문장/배포
+    문제**다 — dead-letter 경로에서도 삼키지 않고 재전파한다. 스킵하면
+    배치 전량이 usage_logs·budget_usages 없이 XACK 돼 즉시 청구 유실이고,
+    전파하면 PEL 에 남아 스키마가 따라잡은 뒤 재처리된다(실측:
+    sqlalchemy.exc.ProgrammingError, orig.sqlstate='42703')."""
+    from sqlalchemy.exc import ProgrammingError
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(
+        side_effect=ProgrammingError(
+            "INSERT", {}, Exception('column "new_col" does not exist')
+        )
+    )
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
+    with pytest.raises(ProgrammingError):
+        await flusher.flush_dead_letter([_make_entry(request_id="req-1")])
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_transient_sqlstate_class_still_propagates():
+    """데드락(40P01) 등 결정적이지 않은 DBAPIError 는 영구 판정하면 안 된다 —
+    삼키면 미청구 유실이라 전파해 PEL 재처리에 맡겨야 한다."""
+    from sqlalchemy.exc import DBAPIError
+
+    class _Orig(Exception):
+        sqlstate = "40P01"  # deadlock_detected — 재시도하면 성공할 수 있다
+
+    async def _exec(stmt, params=None):
+        raise DBAPIError("SELECT", {}, _Orig("deadlock detected"))
+
+    session_factory = _session_factory_for(_exec)
+    redis, _pipe = _counter_redis()
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    with pytest.raises(DBAPIError):
+        await flusher.flush([_make_entry()])
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_client_side_asyncpg_data_error_is_permanent():
+    """asyncpg 클라이언트 측 인코딩 실패(깨진 uuid 파라미터 등)의 **실제**
+    래핑 형태 — 실측으로 확인: `sqlalchemy.exc.DBAPIError` 이고
+    `orig` 는 어댑터 `Error`(sqlstate='22000'), 원본 asyncpg DataError 는
+    `orig.__cause__` 에 있다. 같은 값은 영원히 인코딩되지 않으므로 영구
+    판정돼야 한다."""
+    import asyncpg.exceptions
+    from sqlalchemy.exc import DBAPIError
+
+    class _AdapterError(Exception):
+        sqlstate = "22000"  # asyncpg DataError 의 class-level sqlstate
+
+    orig = _AdapterError("invalid input for query argument $1")
+    orig.__cause__ = asyncpg.exceptions.DataError("invalid input for query")
+
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(side_effect=DBAPIError("INSERT", {}, orig))
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    flusher = BatchFlusher(session_factory=session_factory, redis=MagicMock())
+    written, dropped = await flusher.flush_dead_letter([_make_entry(request_id="req-1")])
+    assert written == 0 and dropped == 1  # 전파되지 않고 dead-letter 로 소화됨
 
 
 @pytest.mark.asyncio

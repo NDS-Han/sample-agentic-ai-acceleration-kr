@@ -104,7 +104,7 @@ async def test_deterministic_failure_dead_letters_after_grace():
     consumer = _make_consumer(redis)
     consumer._dead_letter_grace = 0.0  # grace 0 → 두 번째 실패에서 즉시 dead-letter
     consumer._flusher.flush = AsyncMock(side_effect=RuntimeError("undefined column"))
-    consumer._flusher.flush_dead_letter = AsyncMock(return_value=0)
+    consumer._flusher.flush_dead_letter = AsyncMock(return_value=(0, 0))
 
     entries, ids = [MagicMock()], ["1-1"]
     with pytest.raises(RuntimeError):

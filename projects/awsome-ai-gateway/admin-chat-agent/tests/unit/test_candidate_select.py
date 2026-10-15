@@ -21,8 +21,10 @@ from agent.candidate_select import (  # noqa: E402
 )
 
 
-def _env(rows, ok=True, warnings=None, error=None):
-    return {"ok": ok, "rows": rows, "row_count": len(rows or []),
+def _env(rows, ok=True, warnings=None, error=None, stats=None, row_count=None):
+    return {"ok": ok, "rows": rows,
+            "row_count": len(rows or []) if row_count is None else row_count,
+            "stats": stats,
             "accuracy_warnings": warnings or [], "error": error}
 
 
@@ -141,3 +143,56 @@ class TestStructuredEnvelopeOk:
         pe = {"response": "...", "parse_error": True}
         c = Candidate("", pe)
         assert c.ok is False
+
+    def test_alias_only_difference_clusters(self):
+        # R18 S3 회귀 — 같은 결과셋이 컬럼 별칭만 다르면 예전엔 키 포함 해시가
+        # 갈라져 합의가 무너졌다(3개 후보 → 3 클러스터 → tie). 값 멀티셋 해시로
+        # 같은 클러스터로 모여야 한다.
+        a = _env([{"model_alias": "m", "cost_usd": 1.5}])
+        b = _env([{"m": "m", "c": 1.5}])
+        c = _env([{"alias": "m", "total": 1.5}])
+        r = select_by_execution([Candidate("s1", a), Candidate("s2", b), Candidate("s3", c)])
+        assert r["n_clusters"] == 1
+        assert r["agreement"] == 1.0
+        assert not r["tie"]
+
+
+class TestResultFingerprint:
+    """R18 S-B 회귀 — 인라인 rows 는 상한(20행)이 있어 꼬리 차이를 못 본다.
+    row_count·stats(전체행 서버 요약)를 지문에 섞어 허위 합의를 막는다."""
+
+    def test_stats_difference_splits_clusters(self):
+        # 같은 1행 샘플이지만 전체행 요약이 다르면 합의가 아니다.
+        e1 = _env([{"c": 1}], stats={"total_cost": 100.0})
+        e2 = _env([{"c": 1}], stats={"total_cost": 999.0})
+        r = select_by_execution([Candidate("a", e1), Candidate("b", e2)])
+        assert r["n_clusters"] == 2
+        assert r["tie"] is True or r["winner_index"] is None
+
+    def test_row_count_difference_splits(self):
+        e1 = _env([{"c": 1}], row_count=1)
+        e2 = _env([{"c": 1}], row_count=5000)
+        r = select_by_execution([Candidate("a", e1), Candidate("b", e2)])
+        assert r["n_clusters"] == 2
+
+    def test_same_rows_same_stats_cluster(self):
+        e1 = _env([{"c": 1}], row_count=1, stats={"total": 5})
+        e2 = _env([{"c": 1}], row_count=1, stats={"total": 5})
+        r = select_by_execution([Candidate("a", e1), Candidate("b", e2)])
+        assert r["n_clusters"] == 1
+        assert r["agreement"] == 1.0
+
+    def test_stats_alias_invariance(self):
+        # compute_stats 의 최상위 키는 컬럼 별칭 — 같은 집계를 다른 별칭으로
+        # 낸 후보가 갈리면 안 된다(별칭 무관성이 지문 전체 규약).
+        e1 = _env([{"c": 1}], stats={"cost_usd": {"min": 1, "sum": 100}})
+        e2 = _env([{"c": 1}], stats={"total_cost": {"min": 1, "sum": 100}})
+        r = select_by_execution([Candidate("a", e1), Candidate("b", e2)])
+        assert r["n_clusters"] == 1
+        assert r["agreement"] == 1.0
+
+    def test_stats_value_difference_still_splits(self):
+        e1 = _env([{"c": 1}], stats={"cost_usd": {"min": 1, "sum": 100}})
+        e2 = _env([{"c": 1}], stats={"cost_usd": {"min": 1, "sum": 999}})
+        r = select_by_execution([Candidate("a", e1), Candidate("b", e2)])
+        assert r["n_clusters"] == 2
