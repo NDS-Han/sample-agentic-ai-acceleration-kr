@@ -234,3 +234,13 @@ alias `claude-haiku-5-5` 로 호출해도 provider_model_id 기준 구간이 적
   멱등/downgrade 전 케이스 확인. asyncpg→SQLAlchemy 예외 변환 실형태
   실측(class-22 → DBAPIError+sqlstate, class-42 → ProgrammingError).
 - **결론**: material 0 — CONVERGED.
+
+## 후속 과제 (R19 UI 라운드로 이관)
+
+- **Admin UI 가격 폼 장문 티어 필드** — CreateModelDialog/가격 편집에
+  `long_context_threshold_tokens` + 5개 구간 단가 입력이 없어 UI 로는
+  티어 등록 불가(API 직접 호출만 가능). 카탈로그 자동조회는 3rd party
+  (LiteLLM) 활성화 의존라 대안으로 채택 — R19 에서 구현.
+- **주기 감사 체크**(제안) — "카탈로그엔 티어가 있는데 활성 행이 무티어"
+  또는 "임계 초과 요청이 있는 시점 행이 무티어" 를 찾는 배치 검사를
+  scheduler 에 추가하면 과소청구를 사후가 아니라 탐지로 잡는다.
