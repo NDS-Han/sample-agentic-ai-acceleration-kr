@@ -381,6 +381,22 @@ async def post_message(
             )
         )
 
+    # kiro R17-6 S2 — microVM idle timeout(기본 900s)으로 에이전트 메모리가 죽어도
+    # 대화 맥락을 복원할 수 있게 직전 이력을 payload 에 실어 보낸다. 에이전트는
+    # messages 가 비어있을 때(새 microVM)만 시드한다. user INSERT **전에** 읽어
+    # 방금 보낸 메시지는 제외 — 본문은 invoke 의 content 로 전달되므로 중복 방지.
+    hist_rows = await session.execute(
+        text(
+            "SELECT role, content FROM chat_agent.messages "
+            "WHERE session_id = CAST(:sid AS uuid) ORDER BY created_at DESC LIMIT 12"
+        ).bindparams(sid=session_id)
+    )
+    history = [
+        {"role": r.role, "content": (r.content or "")[:4000]}
+        for r in reversed(hist_rows.fetchall())
+        if r.role in ("user", "assistant") and r.content
+    ]
+
     # user 메시지 저장
     user_msg_id = str(uuid.uuid4())
     await session.execute(
@@ -398,7 +414,8 @@ async def post_message(
     _active_relays[session_id] = relay
     _spawn(
         _agentcore_producer(
-            relay, session_id, req.content, req.screen_context, req.mode, req.language
+            relay, session_id, req.content, req.screen_context, req.mode,
+            req.language, history,
         )
     )
 
@@ -505,6 +522,7 @@ async def _agentcore_producer(
     screen_context: dict | None = None,
     mode: str = "quick",
     language: str = "ko",
+    history: list[dict] | None = None,
 ) -> None:
     """AgentCore InvokeAgentRuntime → 릴레이 발행 + DB 영속화 (background, §56).
 
@@ -523,6 +541,8 @@ async def _agentcore_producer(
     payload = {"content": content, "session_id": session_id, "mode": mode, "language": language}
     if screen_context:
         payload["screen_context"] = screen_context
+    if history:
+        payload["history"] = history
 
     accumulated: list[str] = []
     # 영속화 누적: 스트림 종료 후 chat_agent.messages 에 저장해 새로고침/재조회

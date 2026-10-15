@@ -34,6 +34,11 @@ class _Result:
         return self._row
 
 
+class _HistoryResult:
+    def fetchall(self):
+        return []
+
+
 class _Session:
     """session.execute 를 호출된 SQL 로 기록하는 대역.
 
@@ -52,6 +57,8 @@ class _Session:
         self.calls.append(sql)
         if "SELECT user_id, expires_at" in sql:
             return _Result(self.row)
+        if "FROM chat_agent.messages" in sql:
+            return _HistoryResult()  # kiro R17-6 S2 — 이력 재수화용 SELECT
         if "INSERT INTO chat_agent.messages" in sql:
             raise RuntimeError("stop — beyond expiry branch")
         return _Result(None)

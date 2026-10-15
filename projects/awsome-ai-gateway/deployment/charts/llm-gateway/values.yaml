@@ -789,6 +789,11 @@ adminUi:
     NODE_ENV: "production"
     NEXT_TELEMETRY_DISABLED: "1"
     OTEL_SERVICE_NAME: "admin-ui"
+    # 채팅 kind:'image' 차트(presigned S3)의 CSP img-src 허용 호스트(쉼표 구분).
+    # 정확한 버킷 호스트만 — 와일드카드/`*`는 CSP 문자열 인젝션 차단으로 폐기된다
+    # (middleware CSP_HOST_RE). 비어 있으면 외부 이미지 전면 차단(fail-closed).
+    # 예: CHAT_IMAGE_HOSTS: "my-bucket.s3.ap-south-1.amazonaws.com"
+    #CHAT_IMAGE_HOSTS: ""
     # ── 브라우저 SSO (OIDC Authorization Code + PKCE) — 기본 OFF ──
     #
     # ⚠️ 이 세 개가 **admin-ui 의 유일한 prod 로그인 경로**를 켠다. 셋 다 비어 있고

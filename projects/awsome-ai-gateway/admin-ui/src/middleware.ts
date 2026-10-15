@@ -15,6 +15,12 @@ export const config = {
   matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
 };
 
+// kiro R17-6 N2 — env 값은 admin 설정이지만 검증은 한다: `;` 로 다른 디렉티브
+// 주입, `*` 와일드카드(S1 재개방), scheme 포함 값을 전부 걸러낸다.
+// ⚠️ 모듈 초기화 순서: SECURITY_HEADERS 초기화가 contentSecurityPolicy() 를
+//    호출하므로 이 상수는 그보다 위에 있어야 한다(const 는 TDZ).
+const CSP_HOST_RE = /^[A-Za-z0-9-]+(\.[A-Za-z0-9-]+)+(:\d+)?$/;
+
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
   'X-Frame-Options': 'DENY',
@@ -41,7 +47,7 @@ function contentSecurityPolicy(): string {
   const imgHosts = (process.env.CHAT_IMAGE_HOSTS ?? '')
     .split(',')
     .map((h) => h.trim())
-    .filter(Boolean)
+    .filter((h) => CSP_HOST_RE.test(h))
     .map((h) => `https://${h}`)
     .join(' ');
   return (

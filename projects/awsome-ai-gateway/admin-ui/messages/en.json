@@ -955,6 +955,7 @@
     "newChatTooltip": "Start a new chat (previous chats are preserved)",
     "sessionCreateFailed": "Session creation failed: {error}",
     "newChatFailed": "Failed to create new chat: {error}",
+    "sessionResetNotice": "Your session has expired, so this continues as a new conversation. The previous context is not shared with the new session - please restate anything needed.",
     "inputPlaceholder": "Type your message...",
     "sendButton": "Send",
     "cancelButton": "Stop",

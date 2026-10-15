@@ -333,29 +333,37 @@ def force_limit(ast: sqlglot.Expression) -> str:
     """
     limit = QUERY_LIMIT
     existing_limit = ast.args.get("limit")
-    fetch_with_ties = False
+    preserve_clause = False  # 내부 절을 지우지 않고 서브쿼리로 감싸야 하는 경우
     if isinstance(existing_limit, exp.Fetch):
-        # FETCH FIRST n ROWS — count 는 expression 이 아니라 args["count"].
-        # WITH TIES 는 LIMIT 의미론과 달라(동순위 초과 반환) 제자리 치환 금지
-        # (kiro R17-5 S3) — 쿼리를 감싸 원래 FETCH 를 보존하고 바깥 LIMIT 으로만 상한.
-        try:
-            count = int(existing_limit.args["count"].this)
-            opts = existing_limit.args.get("limit_options")
-            if opts and opts.args.get("with_ties"):
-                fetch_with_ties = True
-            else:
-                limit = min(limit, count)
-        except Exception:  # noqa: BLE001 — 비정수 FETCH 는 기본 상한으로
-            pass
+        # FETCH FIRST n ROWS — count 는 expression 이 아니라 args["count"]
+        # (kiro R17-5 S3). WITH TIES/PERCENT/비리터럴 count 는 LIMIT 의미론과
+        # 달라 제자리 치환 금지 — 쿼리를 감싸 원래 절을 보존하고 바깥 LIMIT 으로
+        # 상한만 둔다. `FETCH FIRST ROW ONLY`(count 생략)는 1로 취급(R17-6 S3).
+        count_expr = existing_limit.args.get("count")
+        opts = existing_limit.args.get("limit_options")
+        percent = bool(opts and opts.args.get("percent"))
+        ties = bool(opts and opts.args.get("with_ties"))
+        count: int | None = None
+        if count_expr is None:
+            count = 1 if not percent else None
+        else:
+            try:
+                count = int(count_expr.this)
+            except Exception:  # noqa: BLE001 — (2+3) 같은 비리터럴
+                count = None
+        if percent or ties or count is None:
+            preserve_clause = True
+        else:
+            limit = min(limit, count)
     elif existing_limit:
         try:
             limit = min(limit, int(existing_limit.expression.this))
         except Exception:  # noqa: BLE001 — 비정수 LIMIT 표현은 기본 상한으로
             pass
-    if isinstance(ast, exp.Select) and not fetch_with_ties:
+    if isinstance(ast, exp.Select) and not preserve_clause:
         ast.set("limit", exp.Limit(expression=exp.Literal.number(limit)))
         return ast.sql(dialect="postgres")
-    outer = QUERY_LIMIT if fetch_with_ties else limit
+    outer = QUERY_LIMIT if preserve_clause else limit
     return (
         f"SELECT * FROM ({ast.sql(dialect='postgres')}) AS _q LIMIT {outer}"
     )

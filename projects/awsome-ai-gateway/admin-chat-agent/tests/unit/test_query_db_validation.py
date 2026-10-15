@@ -185,3 +185,35 @@ def test_force_limit_fetch_with_ties_is_preserved():
     assert "WITH TIES" in out
     assert out.startswith("SELECT * FROM (")
     assert out.rstrip().endswith(f"LIMIT {L.QUERY_LIMIT}")
+
+
+def test_force_limit_fetch_omitted_count_is_one():
+    # FETCH FIRST ROW ONLY — count 생략은 1(kiro R17-6 S3, 상한이 1→1000 으로 벌어지면 안 됨)
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs FETCH FIRST ROW ONLY")
+    out = L.force_limit(ast)
+    assert "LIMIT 1" in out
+    assert "FETCH" not in out
+
+
+def test_force_limit_fetch_row_with_ties_preserved():
+    ast = L.validate_sql(
+        "SELECT id FROM usage.usage_logs ORDER BY id DESC FETCH FIRST ROW WITH TIES"
+    )
+    out = L.force_limit(ast)
+    assert "WITH TIES" in out
+    assert out.startswith("SELECT * FROM (")
+
+
+def test_force_limit_fetch_nonliteral_count_preserved():
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs FETCH FIRST (2+3) ROWS ONLY")
+    out = L.force_limit(ast)
+    # 비리터럴 count 는 치환하지 않고 내부 절 보존 + 외부 상한
+    assert "FETCH FIRST (2 + 3) ROWS ONLY" in out
+    assert out.startswith("SELECT * FROM (")
+
+
+def test_force_limit_fetch_percent_preserved():
+    ast = L.validate_sql("SELECT id FROM usage.usage_logs FETCH FIRST 10 PERCENT ROWS ONLY")
+    out = L.force_limit(ast)
+    assert "PERCENT" in out
+    assert out.startswith("SELECT * FROM (")

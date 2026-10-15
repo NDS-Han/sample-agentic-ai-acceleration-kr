@@ -142,15 +142,19 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
             // kiro R17-5 N2 — 새 세션은 이전 대화 맥락이 없는데 화면의 이전
             // 메시지는 그대로 보여 사용자가 "같은 대화" 로 착각한다. 경계 메시지
             // 로 맥락 리셋을 알린다(새로고침하면 새 세션만 남는 것도 같은 이유).
+            // kiro R17-6 S1 — notice 는 pending 버블 **앞에** 넣는다. 뒤에 넣으면
+            // 마지막 메시지가 pending 이 아니라 handleEvent 가 빈 유령 버블을
+            // 새로 만든다. notice 플래그로 export 버튼에서도 제외.
             setMessages((prev) => [
-              ...prev,
+              ...prev.slice(0, -1),
               {
                 id: `notice-${Date.now()}`,
                 role: 'assistant' as const,
-                content:
-                  '세션이 만료되어 새 대화로 이어집니다. 이전 대화 내용은 새 세션에는 공유되지 않으니 필요한 맥락을 다시 알려 주세요.',
+                content: t('sessionResetNotice'),
+                notice: true,
                 createdAt: new Date().toISOString(),
               },
+              prev[prev.length - 1],
             ]);
             await send(s.session_id, text, screenCtx, mode);
           } catch (retryErr) {

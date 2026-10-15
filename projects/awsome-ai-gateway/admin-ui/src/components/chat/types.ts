@@ -90,6 +90,8 @@ export interface ChatMessage {
   createdAt?: string;
   // streaming 중인지
   pending?: boolean;
+  // 시스템 고지 메시지(세션 리셋 경계 등) — 분석 결과가 아니므로 리포트 export 제외.
+  notice?: boolean;
   // 첫 토큰 전 "작업 중" 표시 (thinking 이벤트). 본문 도착하면 무시.
   thinkingText?: string;
   // 추론 요약 누적(orchestrator display:summarized). 침묵 구간을 메우는 연속

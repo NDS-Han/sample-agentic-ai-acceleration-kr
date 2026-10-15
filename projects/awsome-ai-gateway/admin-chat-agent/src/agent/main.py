@@ -1343,11 +1343,37 @@ async def invoke(payload: dict):
     # 실행 중인 tool"로 라벨링하도록 current_tool_use 관측을 공유. {toolUseId: (name, t0)}.
     in_flight: dict[str, tuple[str, float]] = {}
 
+    # kiro R17-6 S2 — microVM idle timeout(기본 900s) 후 재기동하면 같은
+    # runtimeSessionId 의 **새** microVM 이라 agent.messages 가 비어 있다.
+    # admin-api 가 보낸 직전 이력으로 재수화해 대화 맥락(특히 deep 모드 plan)
+    # 을 복원한다. seed 는 messages 가 비어 있을 때만 — 락 안에서 검사해 같은
+    # 세션의 동시 invoke 가 중복 시드하지 않게 한다.
+    history = payload.get("history")
+
+    def _seed_history(agent: Agent) -> None:
+        if getattr(agent, "messages", None) or not isinstance(history, list):
+            return
+        for m in history:
+            role = m.get("role")
+            text = m.get("content")
+            if role in ("user", "assistant") and isinstance(text, str) and text:
+                agent.messages.append({"role": role, "content": [{"text": text}]})
+
     async def _pump() -> None:
         try:
             async with _ORCH_LOCK:  # 같은 세션의 동시 invoke 직렬화 — Agent 비재진입
-                async for ev in active_orchestrator.stream_async(content):
-                    queue.put_nowait(("stream", ev))
+                _seed_history(active_orchestrator)
+                # kiro R17-6 N1 — 스트림 실패/취소 시 Agent.messages 에 user 턴만
+                # 남아 다음 턴이 [user, user] 로 실패 질문을 다시 합친다. 스냅샷으로 복원.
+                orch_msgs = getattr(active_orchestrator, "messages", None)
+                msg_mark = len(orch_msgs) if orch_msgs is not None else 0
+                try:
+                    async for ev in active_orchestrator.stream_async(content):
+                        queue.put_nowait(("stream", ev))
+                except Exception:
+                    if orch_msgs is not None:
+                        del orch_msgs[msg_mark:]
+                    raise
         except Exception as exc:  # 펌프 예외를 consumer 로 전달(삼키지 않음)
             queue.put_nowait(("error", exc))
         finally:

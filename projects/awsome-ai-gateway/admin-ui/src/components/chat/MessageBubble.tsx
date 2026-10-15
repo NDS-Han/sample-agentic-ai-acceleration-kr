@@ -129,6 +129,7 @@ export function MessageBubble({ message, onPlanProceed, sessionId }: Props) {
   const canExport =
     !isUser &&
     !message.pending &&
+    !message.notice &&
     ((message.charts?.length ?? 0) > 0 || (!!message.content?.trim() && !message.plan));
 
   function handleExport() {
