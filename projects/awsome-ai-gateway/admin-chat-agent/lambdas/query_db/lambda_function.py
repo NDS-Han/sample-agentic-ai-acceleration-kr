@@ -278,14 +278,17 @@ def validate_sql(sql: str) -> sqlglot.Expression:
     for table in table_sources:
         # table.text("db") returns the schema as a plain string ("" if absent);
         # table.args.get("db") returns an Identifier object → no .lower(). Use text().
-        name = (table.name or "").lower()
+        # ⚠️ normalize_identifiers 이후라 비인용 이름은 이미 소문자 — 소문자
+        #    변환을 다시 하면 인용된 "USAGE_LOGS" 같은 별개 릴레이션이 화이트
+        #    리스트를 통과한다(claude R17-4 S1). 정확 비교로 둔다.
+        name = table.name or ""
         if not name:
             # FROM generate_series(...) 등 UDTF — this 가 Identifier 가 아니라
             # Func 라 name 이 비어 있다. 실테이블이 아니므로 스킵 (함수 자체는
             # 위 denylist 검사를 받는다).
             continue
-        schema = (table.text("db") or "public").lower()
-        if (schema, name) not in {(s.lower(), t.lower()) for s, t in allowed}:
+        schema = table.text("db") or "public"
+        if (schema, name) not in allowed:
             raise ValidationError(
                 f"Table '{schema}.{name}' is not in the whitelist. "
                 f"Allowed tables: {sorted(allowed)}"

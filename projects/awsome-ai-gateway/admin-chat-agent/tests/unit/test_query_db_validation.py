@@ -50,6 +50,9 @@ OK_QUERIES = [
     "SELECT coalesce(model_alias, 'x') FROM usage.usage_logs",
     "SELECT count(*) FROM usage.usage_logs ORDER BY 1",
     "SELECT * FROM usage.usage_logs UNION ALL SELECT * FROM usage.usage_logs",
+    # normalize_identifiers — 비인용 대문자는 Postgres 와 같이 소문자 폴딩
+    "SELECT * FROM USAGE.USAGE_LOGS LIMIT 1",
+    "WITH Daily AS (SELECT count(*) c FROM usage.usage_logs) SELECT * FROM DAILY",
 ]
 
 REJECT_QUERIES = [
@@ -112,6 +115,13 @@ REJECT_QUERIES = [
     'WITH "PG_ROLES" AS (SELECT 1) SELECT * FROM PG_ROLES',
     # 비화이트리스트 스키마가 대소문자 변형으로도 못 빠져나가는지
     "SELECT * FROM Usage.Usage_Logs x JOIN Pg_Roles p ON true",
+    "SELECT * FROM PG_CATALOG.PG_ROLES",
+    # 인용된 대문자 — normalize 후에도 대소문자 유지 → 화이트리스트 불일치
+    'SELECT * FROM "USAGE"."USAGE_LOGS"',
+    # 인용된 위험 함수명도 denylist 에 걸려야 한다
+    'SELECT "PG_READ_FILE"(\'/x\') FROM usage.usage_logs',
+    # 인용 CTE 의 대소문자 불일치 참조는 CTE 가 아니라 실테이블(=비화이트리스트)
+    'WITH "pg_roles" AS (SELECT 1) SELECT * FROM "PG_ROLES"',
 ]
 
 
