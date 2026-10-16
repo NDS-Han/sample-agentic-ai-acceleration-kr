@@ -410,9 +410,13 @@ async def run_fallback_loop(
         cb_key = f"{circuit_scope}|{pmid}" if circuit_scope else pmid
 
         # --- 2. Circuit-breaker gate ---
+        probe_token: str | None = None
         if await cb.is_open(redis, cb_key):
-            probe_won = await cb.try_acquire_halfopen_probe(redis, cb_key)
+            probe_token = f"fb:{request_id}:{alias}"
+            probe_won = await cb.try_acquire_halfopen_probe(
+                redis, cb_key, token=probe_token)
             if not probe_won:
+                probe_token = None
                 logger.info("fallback_cb_open_skip", alias=alias, pmid=pmid)
                 continue  # skip — circuit open, no probe slot
             logger.info("fallback_cb_halfopen_probe", alias=alias, pmid=pmid)
@@ -421,17 +425,26 @@ async def run_fallback_loop(
         # ⚠️ 이 세 검사는 :func:`enforce_candidate_admission` 한 곳에 있다. 여기 인라인으로
         #    두면 폴백 루프 밖에서 상류를 호출하는 경로(웹서치 루프)가 그대로 우회한다 —
         #    실제로 그런 상태였다. 그 함수의 docstring 에 경위가 있다.
-        rejection = await enforce_candidate_admission(
-            router_service=router_service,
-            auth_context=auth_context,
-            candidate_config=candidate_config,
-            redis=redis,
-            req_data=req_data,
-            state=state,
-            request_id=request_id,
-            budget_status=budget_status,
-        )
+        try:
+            rejection = await enforce_candidate_admission(
+                router_service=router_service,
+                auth_context=auth_context,
+                candidate_config=candidate_config,
+                redis=redis,
+                req_data=req_data,
+                state=state,
+                request_id=request_id,
+                budget_status=budget_status,
+            )
+        except Exception:
+            # 프로브를 딴 뒤 심사가 예외로 죽어도 슬롯을 돌려준다(R20 round-2 N1).
+            if probe_token is not None:
+                await cb.release_halfopen_probe(redis, cb_key, probe_token)
+            raise
         if rejection is not None:
+            # 프로브를 따고도 상류를 호출하지 않는 거절 — 슬롯을 돌려준다(R20 N1).
+            if probe_token is not None:
+                await cb.release_halfopen_probe(redis, cb_key, probe_token)
             if is_original:
                 # 원본 후보의 거절은 그대로 클라이언트에게 돌려준다(스코프 400 /
                 # 레이트리밋 429). 레이트리밋에는 폴백을 시도하지 않는다 — 다른 모델로
@@ -477,6 +490,9 @@ async def run_fallback_loop(
             )
             record_provider_request(metrics, _pm_labels)
         except Exception:
+            # 프로브를 딴 채 상류 호출 전에 죽으면 슬롯을 돌려준다(R20 round-2 N1).
+            if probe_token is not None:
+                await cb.release_halfopen_probe(redis, cb_key, probe_token)
             await release_reservations(
                 redis=redis, state=state, auth_context=auth_context
             )
@@ -514,6 +530,8 @@ async def run_fallback_loop(
             # 본문 조립 버그)는 여기까지 못 오게 돼 있지만, 실제로 새면 루프를
             # 빠져나가 500 이 되고 예약이 마커 TTL 까지 누수된다. 해제 후 재전파 —
             # 에러 의미론(500)은 그대로 두고 누수만 막는다.
+            if probe_token is not None:
+                await cb.release_halfopen_probe(redis, cb_key, probe_token)
             await release_reservations(
                 redis=redis, state=state, auth_context=auth_context
             )

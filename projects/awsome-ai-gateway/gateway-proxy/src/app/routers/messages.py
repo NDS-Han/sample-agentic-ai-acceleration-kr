@@ -16,6 +16,7 @@ from dataclasses import dataclass
 import structlog
 from fastapi import APIRouter, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTasks
 
 from app.config import get_settings
 from app.providers.bedrock_adapter import BedrockAdapter
@@ -622,12 +623,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     #    낭비됐다(체인이 없으면 허구의 all-open 503).
     _ws_allowed = True
     _ws_cb_key: str | None = None
+    _ws_probe_token: str | None = None
+    _ws_probe_used = False
     if _ws_enabled and cb is not None and model_config is not None:
         _pmid_ws = model_config.provider_model_id
         _ws_cb_key = (f"{_circuit_scope}|{_pmid_ws}" if _circuit_scope else _pmid_ws)
         if await cb.is_open(redis, _ws_cb_key):
-            _ws_allowed = await cb.try_acquire_halfopen_probe(redis, _ws_cb_key)
+            _ws_probe_token = f"ws:{request_id}"
+            _ws_allowed = await cb.try_acquire_halfopen_probe(
+                redis, _ws_cb_key, token=_ws_probe_token)
             if not _ws_allowed:
+                _ws_probe_token = None
                 logger.info("web_search_skipped_circuit_open", pmid=_pmid_ws)
     if _ws_allowed and _ws_enabled:
         from app.services.web_search_loop import (
@@ -657,19 +663,33 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         #    /v1/responses 경로(R3-5)도 같은 함수로 같은 값을 예약한다.
         _settings_ws = get_settings()
         _admission_body = conservative_admission_body(
-            req_data, _settings_ws.web_search_max_iterations
+            req_data, _settings_ws.web_search_max_iterations,
+            max_result_chars=_settings_ws.web_search_max_result_chars,
+            max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
+            default_max_results=_settings_ws.web_search_max_results_default,
         )
-        _admission = await enforce_candidate_admission(
-            router_service=_router_service,
-            auth_context=auth_context,
-            candidate_config=model_config,
-            redis=redis,
-            req_data=_admission_body,
-            state=state,
-            request_id=request_id,
-            budget_status=state.get("budget_status"),
-        )
+        try:
+            _admission = await enforce_candidate_admission(
+                router_service=_router_service,
+                auth_context=auth_context,
+                candidate_config=model_config,
+                redis=redis,
+                req_data=_admission_body,
+                state=state,
+                request_id=request_id,
+                budget_status=state.get("budget_status"),
+            )
+        except Exception:
+            # 거절과 같은 이유 — 예외로 상류를 못 두드려도 프로브 슬롯이 타지
+            # 않게 돌려준다(R20 round-2 N1).
+            if _ws_probe_token is not None and cb is not None and _ws_cb_key is not None:
+                await cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
+            raise
         if _admission is not None:
+            # 프로브를 따고도 상류를 호출하지 않는 거절은 창의 유일한 슬롯을
+            # 낭비한다 — 우리가 딴 슬롯이면 돌려준다(R20 N1).
+            if _ws_probe_token is not None and cb is not None and _ws_cb_key is not None:
+                await cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
             return Response(
                 content=_admission.body,
                 status_code=_admission.status,
@@ -682,8 +702,10 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 열리지 않고, (b) half-open 프로브가 성공해도 회로가 닫히지 않아 ws 는
         # 사실상 8s 당 1요청만 통과하는 반개방 상태에 갇힌다.
         async def _ws_cb_record(status: int, *, conn_error: bool = False) -> None:
+            nonlocal _ws_probe_used
             if _ws_cb_key is None:
                 return
+            _ws_probe_used = True  # 실제 상류 호출 결과 — 슬롯은 소비된 것이다.
             try:
                 if 200 <= status < 300:
                     await cb.record_success(redis, _ws_cb_key)
@@ -810,30 +832,41 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             )
 
         # 사전 게이팅 — 훅을 넘기면 루프가 SSE 전문을 누적한다.
-        _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
+        # 프로브를 딴 뒤 첫 상류 호출 전에 죽으면 창의 유일한 슬롯이 탄다 —
+        # _ws_cb_record 가 한 번도 안 돌았으면 슬롯을 돌려준다(R20 round-2 N1).
+        try:
+            _ws_logging = await resolve_body_logger(request.app.state, redis, session_factory)
 
-        _ws_resp = await run_web_search_loop(
-            dialect="anthropic",
-            invoke=_ws_invoke,
-            invoke_stream=_ws_invoke_stream,
-            initial_req_data=req_data if isinstance(req_data, dict) else {},
-            is_stream=is_stream,
-            mcp_client=mcp_client,
-            request=request,
-            on_usage=_ws_record,
-            max_iterations=_settings_ws.web_search_max_iterations,
-            total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
-            default_max_results=_settings_ws.web_search_max_results_default,
-            max_result_chars=_settings_ws.web_search_max_result_chars,
-            max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
-            cache_results=_settings_ws.web_search_cache_results,
-            result_text_chars=_settings_ws.web_search_result_text_chars,
-            handshake_timeout=_settings_ws.agentcore_handshake_timeout,
-            tokenizer_hook=_ws_estimate,
-            on_stream_complete=_ws_log_stream if _ws_logging else None,
-            on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
-            outcome=_ws_outcome,
-        )
+            _ws_resp = await run_web_search_loop(
+                dialect="anthropic",
+                invoke=_ws_invoke,
+                invoke_stream=_ws_invoke_stream,
+                initial_req_data=req_data if isinstance(req_data, dict) else {},
+                is_stream=is_stream,
+                mcp_client=mcp_client,
+                request=request,
+                on_usage=_ws_record,
+                max_iterations=_settings_ws.web_search_max_iterations,
+                total_deadline_sec=_settings_ws.web_search_total_deadline_sec,
+                default_max_results=_settings_ws.web_search_max_results_default,
+                max_result_chars=_settings_ws.web_search_max_result_chars,
+                max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
+                cache_results=_settings_ws.web_search_cache_results,
+                result_text_chars=_settings_ws.web_search_result_text_chars,
+                handshake_timeout=_settings_ws.agentcore_handshake_timeout,
+                tokenizer_hook=_ws_estimate,
+                on_stream_complete=_ws_log_stream if _ws_logging else None,
+                on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
+                outcome=_ws_outcome,
+            )
+        except Exception:
+            if _ws_probe_token is not None and not _ws_probe_used:
+                await cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
+            raise
+        # 스티처가 삼킨 예외(예: 턴-1 _build_candidate_body 실패)로 상류를 한 번도
+        # 못 두드린 정상 반환 — 프로브 슬롯이 TTL 까지 타지 않게 돌려준다(R20 N-4).
+        if _ws_probe_token is not None and not _ws_probe_used:
+            await cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
 
         # 스트리밍이면 첫 yield 시각을 잡아 _ws_record 가 ttft_ms 로 쓰게 한다.
         # finalize 는 스트림 소비 중(usage 확정 시점)에 호출되므로 그때는 첫 청크
@@ -855,7 +888,16 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             _ws_resp.body_iterator = _ws_timed_iter()
             # spec<2.4 '미시작 제너레이터' disconnect 안전망 — 제너레이터가 한 번도
             # 돌지 않으면 예약이 그대로 남으므로 response 종결 시 되돌린다.
-            _ws_resp.background = unsettled_reservation_guard(state)
+            # run_web_search_loop 의 peek 는 턴-1 상류 호출을 이미 시작했으므로,
+            # 먼저 달아둔 스티처-클로즈 태스크가 guard 보다 먼저 돌아야
+            # drain_pending → 실비 정산이 성립한다(S-1). 덮어쓰지 말고 합성.
+            # F-7 패스스루/MCP 초기화 실패 경로는 루프가 background 를 안 단다 —
+            # BackgroundTasks([None, …]) 는 실행 시 TypeError 로 guard 까지 죽인다
+            # (R20 round-4 M-1). None 은 걸러서 합성한다.
+            _ws_resp.background = BackgroundTasks(tasks=[
+                t for t in (_ws_resp.background,
+                            unsettled_reservation_guard(state)) if t is not None
+            ])
         return _ws_resp
 
     # Use a no-op CB when the service is not wired (e.g. tests that don't configure it)

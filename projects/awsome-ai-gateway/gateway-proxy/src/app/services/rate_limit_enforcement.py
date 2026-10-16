@@ -130,7 +130,17 @@ def _estimate_input_tokens(body: dict) -> int:
     try:
         serialized = json.dumps(sanitized, ensure_ascii=False)
     except Exception:
-        return _DEFAULT_MAX_OUTPUT
+        # 직렬화 실패 폴백에도 심사 배수·가산을 적용해야 호출측의 역산
+        # (subtract add, divide mult) 이 정확히 폴백값을 복원한다 — 미적용
+        # 시 max(0, 4096-add)//mult ≈ 0 으로 과소청구됐다(R20 round-3 N-6).
+        _mult = body.get("_gw_admission_input_mult")
+        _add = body.get("_gw_admission_input_add")
+        fallback = _DEFAULT_MAX_OUTPUT
+        if isinstance(_mult, int) and _mult > 1:
+            fallback *= _mult
+        if isinstance(_add, int) and _add > 0:
+            fallback += _add
+        return fallback
     ascii_count = 0
     non_ascii_count = 0
     for ch in serialized:
@@ -143,6 +153,10 @@ def _estimate_input_tokens(body: dict) -> int:
     mult = body.get("_gw_admission_input_mult")
     if isinstance(mult, int) and mult > 1:
         estimate *= mult
+    # 루프 누적 결과 재전송분 가산 — 배수만으로는 짧은 프롬프트의 성장분을 놓친다.
+    add = body.get("_gw_admission_input_add")
+    if isinstance(add, int) and add > 0:
+        estimate += add
     return max(1, estimate)
 
 
@@ -267,16 +281,19 @@ async def enforce_rate_limits(
     # TPM 체크 (Pre-reserve)
     max_output = _extract_max_output(body)
     estimated_input = _estimate_input_tokens(body)
-    # 청구 폴백용 추정치 — _gw_admission_input_mult 는 입장 심사 전용 배수
-    # (웹서치 루프가 턴당 입력을 재청구하므로 예약도 배수). 종결 usage 미수신 시
-    # 과금에 쓰는 추정치는 단일 턴 기준이어야 한다 — 배수 그대로면 끊긴
-    # 웹서치 요청이 iters 배로 과대청구된다.
+    # 청구 폴백용 추정치 — _gw_admission_input_mult/_add 는 입장 심사 전용
+    # 배수·가산(웹서치 루프가 턴당 입력을 재청구하므로 예약도 늘린다). 종결
+    # usage 미수신 시 과금에 쓰는 추정치는 단일 턴 기준이어야 한다 — 그대로면
+    # 끊긴 웹서치 요청이 iters 배로 과대청구된다.
     _mult = body.get("_gw_admission_input_mult")
-    estimated_input_billing = (
-        estimated_input // _mult
-        if isinstance(_mult, int) and _mult > 1
-        else estimated_input
-    )
+    _add = body.get("_gw_admission_input_add")
+    # 추정치가 폴백값(4096)인데 가산분이 크면 음수가 된다 — 티어 판정 입력과
+    # 로그에 음수가 새지 않게 클램프한다(R20 round-2).
+    estimated_input_billing = max(0, estimated_input - (
+        _add if isinstance(_add, int) and _add > 0 else 0
+    ))
+    if isinstance(_mult, int) and _mult > 1:
+        estimated_input_billing //= _mult
     reserved = estimate_reserved_tokens(
         estimated_input_tokens=estimated_input,
         max_output_tokens=max_output,

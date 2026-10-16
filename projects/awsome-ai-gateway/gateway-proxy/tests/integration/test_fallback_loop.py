@@ -96,7 +96,7 @@ def _make_cb(*, open_pmids: set[str] | None = None, probe_wins: bool = True) -> 
     async def _is_open(redis, pmid: str) -> bool:
         return pmid in open_set
 
-    async def _probe(redis, pmid: str) -> bool:
+    async def _probe(redis, pmid: str, token: str | None = None) -> bool:
         return probe_wins
 
     async def _failure(redis, pmid: str) -> bool:

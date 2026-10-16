@@ -542,6 +542,9 @@ async def test_websearch_probe_winner_enters_loop(monkeypatch):
     cb = MagicMock()
     cb.is_open = AsyncMock(return_value=True)
     cb.try_acquire_halfopen_probe = AsyncMock(return_value=True)
+    # 목킹된 루프는 _ws_cb_record 를 부르지 않으므로 라우터는 프로브가 미사용으로
+    # 보고 반환을 시도한다(R20 N-4 post-dispatch release).
+    cb.release_halfopen_probe = AsyncMock()
 
     st = _app_state(web_search=True)
     st.circuit_breaker = cb

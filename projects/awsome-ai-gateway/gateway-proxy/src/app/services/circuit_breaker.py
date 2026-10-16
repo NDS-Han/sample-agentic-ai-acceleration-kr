@@ -79,15 +79,38 @@ class CircuitBreakerService:
                 logger.warning("cb_close_failed", pmid=pmid)
         return opened
 
-    async def try_acquire_halfopen_probe(self, redis, pmid: str) -> bool:
-        """Elect a single probe across pods via SET NX PX. Winner returns True."""
+    async def try_acquire_halfopen_probe(
+        self, redis, pmid: str, token: str | None = None
+    ) -> bool:
+        """Elect a single probe across pods via SET NX PX. Winner returns True.
+
+        ``token`` marks the winning holder so ``release_halfopen_probe`` can return
+        an UNUSED slot without deleting another pod's fresh acquire.
+        """
         if redis is None:
             return True  # fail-open: let the request through
         try:
             won = await redis.set(
-                f"cb:{pmid}:halfopen", "1", nx=True, px=self.halfopen_ttl_ms
+                f"cb:{pmid}:halfopen", token or "1", nx=True, px=self.halfopen_ttl_ms
             )
             return bool(won)
         except Exception:
             logger.warning("cb_halfopen_acquire_failed", pmid=pmid)
             return True
+
+    async def release_halfopen_probe(self, redis, pmid: str, token: str) -> None:
+        """Return a probe slot that was acquired but never used (e.g. the request
+        was rejected by admission AFTER winning the probe — R20 N1). The window's
+        only probe slot must not burn for ``halfopen_ttl_ms`` on a request that
+        never invoked upstream. Conditional delete: a TTL-expired slot re-acquired
+        by another pod must not be deleted by our stale token."""
+        if redis is None:
+            return
+        try:
+            await redis.eval(
+                "if redis.call('GET', KEYS[1]) == ARGV[1] "
+                "then return redis.call('DEL', KEYS[1]) else return 0 end",
+                1, f"cb:{pmid}:halfopen", token,
+            )
+        except Exception:
+            logger.warning("cb_halfopen_release_failed", pmid=pmid)

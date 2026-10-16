@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import re
 import time
@@ -82,11 +83,13 @@ from urllib.parse import urlparse
 import structlog
 from fastapi import Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.background import BackgroundTask
 
+from app.config import get_settings
 from app.providers.openai_usage import extract_responses_usage
 from app.schemas.domain import TokenUsage
 from app.services.agentcore_mcp_client import AgentCoreMcpClient, AgentCoreMcpError
-from app.services.streaming import _spawn, mark_outcome, outcome_from_http
+from app.services.streaming import _aclose_iter, _spawn, mark_outcome, outcome_from_http
 
 logger = structlog.get_logger(__name__)
 
@@ -144,21 +147,38 @@ _ADMISSION_MAX_OUTPUT_KEYS = (
 _ADMISSION_DEFAULT_MAX_OUTPUT = 4096
 
 
-def conservative_admission_body(req_data: dict, max_iterations: int) -> dict:
-    """웹서치 루프 입장 심사용 보수 예약 바디 (R2-9 / R3-5).
+def conservative_admission_body(
+    req_data: dict,
+    max_iterations: int,
+    *,
+    max_result_chars: int = 0,
+    max_searches_per_turn: int = 0,
+    default_max_results: int = 0,
+    bound_turns: int = 0,
+) -> dict:
+    """웹서치 루프 입장 심사용 보수 예약 바디 (R2-9 / R3-5 / R20-S1).
 
-    루프는 최대 ``max_iterations`` 턴까지 상류를 풀 호출하는데 턴 사이에 한도
-    재평가가 없으므로, 입장 예약을 단일 턴이 아니라 "턴 상한 × 단일턴 max_output"
-    으로 잡는다. 심사용 복사본에만 부푼 ``max_tokens`` 를 넣는다(상류에 나가는
-    바디와 무관). 실제 사용분과의 차액은 finalize 의 settle 이 환불한다.
+    루프의 실제 상류 호출 상한은 ``max_iterations`` 가 아니라 그보다 크다 —
+    Anthropic 스티처는 검색 턴 ``max_iterations`` 회에 soft-final 1회,
+    hard-final 1회, 빈 답변 nudge 1회가 더 붙어 ``max_iterations + 3`` 이
+    최악이다. Responses 스티처는 soft/nudge 가 없어 ``max_iterations + 1``.
+    ``bound_turns`` 로 호출자가 방언별 상한을 지정한다(0 이면 보수 상한
+    iters+3). 턴 사이에 한도 재평가가 없으므로 입장 예약을 그 최악치로 잡는다.
+    심사용 복사본에만 부푼 ``max_tokens`` 를 넣는다(상류에 나가는 바디와
+    무관). 실제 사용분과의 차액은 finalize 의 settle 이 환불한다.
 
-    한도 근처 유저가 조금 더 빨리 429 를 맞는 대가로, 한도를 넘는 다중 턴 지출을
-    막는다. ``max_iterations <= 1`` 이면 원본을 그대로 복사해 돌려준다.
+    입력은 턴마다 다시 청구되고, 각 검색 라운드의 결과가 다음 턴 입력에 누적
+    재전송된다 — 턴 t 의 입력에는 그 전에 끝난 ``min(t, iters)`` 라운드의
+    결과가 들어 있으므로 누적 상한은 ``Σ min(t, iters)`` 라운드분이다(R20 S-b:
+    T(T-1)/2 는 결과를 만들지 않는 soft/hard/nudge 턴도 성장으로 세어
+    Responses 경로를 ~3배 과대 예약했다). ``max_result_chars <= 0`` 이면 결과가
+    무캡이므로 실측 상한(24k, 2026-09-16)으로 예상한다. 한도 근처 유저가 조금
+    더 빨리 429 를 맞는 대가로 한도를 넘는 다중 턴 지출을 막는다.
     """
     body = dict(req_data)
     iters = max(1, int(max_iterations))
-    if iters <= 1:
-        return body
+    # 방언별 상한 — Anthropic iters+3(검색+soft+hard+nudge), Responses iters+1.
+    turns = bound_turns if bound_turns > 0 else iters + 3
     single = None
     for key in _ADMISSION_MAX_OUTPUT_KEYS:
         value = body.get(key)
@@ -167,11 +187,17 @@ def conservative_admission_body(req_data: dict, max_iterations: int) -> dict:
             break
     if single is None:
         single = _ADMISSION_DEFAULT_MAX_OUTPUT
-    body["max_tokens"] = single * iters
-    # 입력도 턴마다 다시 청구된다 — 누적 컨텍스트 + 검색 결과를 매 턴 재전송하므로
-    # 입력 예약을 한 번만 잡으면 최악비용 추정이 실제 지출을 밑돈다(E2E S2-5).
-    # _estimate_input_tokens 가 읽는 심사 전용 배수 — 상류 바디와 무관하다.
-    body["_gw_admission_input_mult"] = iters
+    body["max_tokens"] = single * turns
+    # _estimate_input_tokens 가 읽는 심사 전용 배수/가산 — 상류 바디와 무관하다.
+    body["_gw_admission_input_mult"] = turns
+    per_turn_results = max_searches_per_turn or default_max_results
+    per_result_cap = max_result_chars if max_result_chars > 0 else 24_000
+    if per_turn_results > 0:
+        # 턴 t 가 재전송하는 결과 라운드 수 = 완료된 검색 턴 수 min(t, iters).
+        growth_rounds = sum(min(t, iters) for t in range(turns))
+        growth_chars = per_turn_results * per_result_cap * growth_rounds
+        # 결과 텍스트는 대부분 ASCII — ~4자/토큰.
+        body["_gw_admission_input_add"] = growth_chars // 4
     return body
 
 
@@ -344,6 +370,15 @@ _FINAL_TURN_ANSWER_NOW = ("[These are all the search results available for this 
                           "steps such as saving notes or more lookups; anything that needs "
                           "a tool can happen in a later turn. Write the complete final "
                           "answer now.]")
+#: A terminal turn that produced no client-visible blocks still must not end the envelope
+#: empty — an assistant message with ``content: []`` is a Bedrock 400 when the client
+#: replays it, and SDKs misrecord a zero-block stream (R20 round-2: a ``max_tokens`` turn
+#: whose only block was our suppressed tool_use reaches the terminal branch with
+#: global_index == 0). The marker is honest about what happened.
+_EMPTY_TURN_PLACEHOLDER = "[The model ended its turn without visible text — the turn was cut short.]"
+#: 빈 종결턴이 잘림(max_tokens)이 아니라면 절단이라 주장하면 안 된다 — 정상
+#: ``end_turn``/stop_sequence 에는 중립 표기(R20 round-3 S-2).
+_EMPTY_TURN_NO_TEXT = "[The model returned no visible text.]"
 #: Appended to the last user message of the SOFT final turn (``final_turn_soft``): the first
 #: turn after the search budget is used up. Every tool stays callable there — a client tool
 #: call goes to the client as usual, a further web_search is answered with an error instead
@@ -498,7 +533,8 @@ def _final_turn_mode(search_attempts: int, max_iterations: int, past_deadline: b
       a web_search call is refused with an error (``_exhausted_error``).
     - otherwise → HARD: ``tool_choice: none`` + answer-now. A passed deadline is always hard
       (a soft round could cost one more model turn), and so is every turn after one refused
-      round — the loop is bounded by ``max_iterations + 2`` model calls.
+      round — the loop is bounded by ``max_iterations + 3`` model calls (soft,
+      hard, and one empty-turn nudge on top of the search turns).
     """
     if search_attempts < max_iterations and not past_deadline:
         return ""
@@ -1900,6 +1936,10 @@ async def _anthropic_stream(
     mixed_turn_run: bool = False,
     final_turn_soft: bool = False,
     outcome: dict | None = None,
+    #: Mutable out-param — the FIRST turn's upstream status. run_web_search_loop
+    #: peeks at the first yielded frame so a first-turn non-200 becomes the real
+    #: HTTP status instead of a 200 envelope (R20 S3).
+    status_holder: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Stitch N Anthropic model turns into ONE message_start … message_stop stream.
 
@@ -1946,6 +1986,15 @@ async def _anthropic_stream(
     our_tool_use_ids: set[str] = set()
     #: 상류/루프 실패 — finally 의 outcome 마킹이 읽는다(E2E S5).
     failed = False
+    #: 진행 중 턴의 스트림 — disconnect drain 이 이어서 소비한다(M2).
+    chunk_iter: AsyncIterator[bytes] | None = None
+    #: async for 안에 있는 동안만 True — drain 이 이 턴의 usage 를 merge 해야 하는지.
+    turn_open = False
+    #: disconnect drain 태스크가 정산을 소유하면 finally 는 발화를 건너뛴다(이중 과금 방지).
+    drain_owns_settle = False
+    #: 턴이 끝날 때까지 merged 에 합산하지 않는다 — turn_usages 스냅샷이 있어야
+    #: 장문 티어가 턴별 프롬프트로 판정된다(M1). None = 턴 밖(merge 완료).
+    turn_usage: TokenUsage | None = None
 
     try:
         while True:
@@ -1963,16 +2012,25 @@ async def _anthropic_stream(
             turn_body = dict(turn_body)
             # The hard final turn keeps the tool (tool_choice: none) so the history's tool
             # blocks stay valid; it only appends the answer-now instruction. The soft final
-            # turn changes nothing but the instruction.
-            turn_body["messages"] = (_with_answer_now(conversation) if force_final
-                                     else _with_search_exhausted(conversation) if soft_final
-                                     else conversation)
+            # turn changes nothing but the instruction. The note goes into `conversation`
+            # itself — the model answered it, and the next turn's prefix must match what
+            # was cached (the helpers are idempotent, re-appending is a no-op).
+            if force_final:
+                conversation = _with_answer_now(conversation)
+            elif soft_final:
+                conversation = _with_search_exhausted(conversation)
+            turn_body["messages"] = conversation
             turn_body["stream"] = True
 
             status, chunk_iter, _headers, _rid = await invoke_stream(turn_body)
             if status != 200:
                 failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
-                async for b in _drain_error(chunk_iter, envelope_open):
+                if status_holder is not None:
+                    status_holder["status"] = status
+                    ra = (_headers or {}).get("retry-after") or (_headers or {}).get("Retry-After")
+                    if ra:
+                        status_holder["retry_after"] = ra
+                async for b in _drain_error(chunk_iter, envelope_open, open_global_blocks):
                     yield b
                 return
 
@@ -1993,6 +2051,8 @@ async def _anthropic_stream(
             thinking_buf: dict[int, dict] = {}
             pending_searches: list[dict] = []   # [{id, name, input}] — support MANY per turn (F-3)
             client_tool_present = False
+            turn_usage = TokenUsage()
+            turn_open = True
 
             async for raw in chunk_iter:
                 try:
@@ -2003,18 +2063,7 @@ async def _anthropic_stream(
 
                 if etype == "message_start":
                     u = (ev.get("message") or {}).get("usage") or {}
-                    merged.input_tokens += int(u.get("input_tokens", 0) or 0)
-                    merged.cache_creation_input_tokens += int(u.get("cache_creation_input_tokens", 0) or 0)
-                    # 삼값 보존 — 키가 실제 보고될 때만 누적(0 보고 포함, A2-4).
-                    _cc = u.get("cache_creation")
-                    if (
-                        isinstance(_cc, dict)
-                        and "ephemeral_1h_input_tokens" in _cc
-                    ):
-                        merged.cache_creation_1h_input_tokens = (
-                            merged.cache_creation_1h_input_tokens or 0
-                        ) + int(_cc["ephemeral_1h_input_tokens"] or 0)
-                    merged.cache_read_input_tokens += int(u.get("cache_read_input_tokens", 0) or 0)
+                    _accumulate_anthropic_turn_usage(turn_usage, ev)
                     if first_turn is None:
                         first_turn = _prompt_snapshot(
                             u.get("input_tokens", 0),
@@ -2111,7 +2160,11 @@ async def _anthropic_stream(
                                    {"type": "content_block_delta", "index": gi,
                                     "delta": {"type": "text_delta", "text": emit}})
                         continue
-                    gi = local_to_global.get(idx, idx)
+                    if idx not in local_to_global:
+                        # 비-text_delta 델타(citations 등)가 미개봉 블록에 도착 — 로컬
+                        # 인덱스를 그대로 내보내면 클라이언트는 start 없는 인덱스를 받는다.
+                        continue
+                    gi = local_to_global[idx]
                     ev2 = dict(ev); ev2["index"] = gi
                     yield _sse("content_block_delta", ev2)
 
@@ -2175,7 +2228,11 @@ async def _anthropic_stream(
                                        {"type": "content_block_delta",
                                         "index": local_to_global[idx],
                                         "delta": {"type": "text_delta", "text": tail}})
-                    gi = local_to_global.get(idx, idx)
+                    if idx not in local_to_global:
+                        # start 를 보낸 적 없는 블록의 stop — 그대로 내보내면 로컬 인덱스가
+                        # 클라이언트에 새어 나간다(R20 N3).
+                        continue
+                    gi = local_to_global[idx]
                     ev2 = dict(ev); ev2["index"] = gi
                     open_global_blocks.discard(gi)
                     yield _sse("content_block_stop", ev2)
@@ -2186,8 +2243,7 @@ async def _anthropic_stream(
                     turn_delta = dict(d)
                     if d.get("stop_reason"):
                         stop_reason_final = d["stop_reason"]
-                    u = ev.get("usage") or {}
-                    merged.output_tokens += int(u.get("output_tokens", 0) or 0)
+                    _accumulate_anthropic_turn_usage(turn_usage, ev)
                     # captured; do NOT emit here (emitted once at envelope close)
 
                 elif etype == "message_stop":
@@ -2211,12 +2267,23 @@ async def _anthropic_stream(
                     inner = ev["error"]
                     yield _sse("error", {"type": "error", "error": inner})
 
+            # ---- turn ended: settle this turn's usage as ONE snapshot ----
+            # M1: merge per turn, not inline — turn_usages records each turn's
+            # prompt size so context-tier pricing decides per TURN, not on the
+            # multi-turn sum (N short turns must not bill as one long prompt).
+            _merge_usage(merged, turn_usage)
+            turn_open = False
+
             # ---- turn ended: decide terminal vs search ----
             # A turn that carried an error is never treated as a search turn; otherwise a
             # failed turn would be read as "the model asked for a search" and the loop
-            # would continue.
+            # would continue. The turn must also have ENDED on tool_use with a real
+            # message_delta: a max_tokens/missing-terminal turn can carry a parseable
+            # tool_use block but is truncated — running its "search" would bill an
+            # empty/garbage query and re-loop the same failure (R20 S5).
             is_search_turn = (
                 bool(pending_searches) and not client_tool_present and not error_seen
+                and saw_message_delta and stop_reason_final == "tool_use"
             )
             # A forced-final turn with thinking but no visible text is re-prompted once
             # (_FINAL_TURN_TEXT_NUDGE).
@@ -2331,18 +2398,26 @@ async def _anthropic_stream(
                 # input_tokens.
                 if envelope_open and global_index == 0:
                     # The filter must not leave the response empty (an empty content list
-                    # replayed by the client is a 400).
+                    # replayed by the client is a 400). A turn with no visible blocks at
+                    # all — e.g. a max_tokens turn whose only block was our suppressed
+                    # tool_use, now terminal under the S5 gate — gets the same treatment
+                    # with a placeholder (R20 round-2).
                     dropped = "".join(f.dropped for f in text_filters.values())
                     if dropped.strip():
-                        yield _sse("content_block_start",
-                                   {"type": "content_block_start", "index": 0,
-                                    "content_block": {"type": "text", "text": ""}})
-                        yield _sse("content_block_delta",
-                                   {"type": "content_block_delta", "index": 0,
-                                    "delta": {"type": "text_delta", "text": dropped}})
-                        yield _sse("content_block_stop",
-                                   {"type": "content_block_stop", "index": 0})
-                        global_index = 1
+                        placeholder = dropped
+                    elif stop_reason_final == "max_tokens" or pending_searches:
+                        placeholder = _EMPTY_TURN_PLACEHOLDER
+                    else:
+                        placeholder = _EMPTY_TURN_NO_TEXT
+                    yield _sse("content_block_start",
+                               {"type": "content_block_start", "index": 0,
+                                "content_block": {"type": "text", "text": ""}})
+                    yield _sse("content_block_delta",
+                               {"type": "content_block_delta", "index": 0,
+                                "delta": {"type": "text_delta", "text": placeholder}})
+                    yield _sse("content_block_stop",
+                               {"type": "content_block_stop", "index": 0})
+                    global_index = 1
                 if envelope_open:
                     gauge = _client_prompt_usage(first_turn, merged)
                     # 마지막 턴의 delta 를 복사하고 stop_reason 만 우리 값으로 덮어쓴다.
@@ -2421,12 +2496,42 @@ async def _anthropic_stream(
                 {"role": "assistant", "content": assistant_content},
                 {"role": "user", "content": tool_results},
             ]
+    except (asyncio.CancelledError, GeneratorExit):
+        # 클라이언트 disconnect — 진행 중 턴의 usage 를 잃지 않도록 남은 상류 청크를
+        # 백그라운드에서 drain 한다(streaming.py KI-08 과 같은 계약). GeneratorExit 는
+        # yield 지점에서만 발생하므로 turn_open=True 면 그 턴은 아직 merge 되지 않았고,
+        # 드레인이 나머지 message_delta 의 output 을 회수해 merged 에 합친 뒤 스스로
+        # 정산한다(M2). 턴 밖 disconnect 면 finally 가 직접 정산한다.
+        if turn_open and turn_usage is not None and chunk_iter is not None:
+            if outcome is not None:
+                outcome.setdefault("status", "success")
+            # _spawn 실패 시 finally 가 대신 정산하게 플래그는 스폰 후에 세운다
+            # (동기 구간이라 경쟁 없음 — R20 round-3 N-9). drain_pending 도
+            # 같이 — 스폰 실패로 마커만 남으면 guard 가 drain_timeout+10s 를
+            # 헛기다린다(R20 round-4 N-c).
+            _spawn(_drain_anthropic_turn_usage(
+                chunk_iter=chunk_iter, turn_usage=turn_usage, merged=merged,
+                searches_done=searches_done, on_usage=on_usage, outcome=outcome))
+            drain_owns_settle = True
+            if outcome is not None:
+                # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
+                # release(0) 하지 않게 소유권을 표시한다(streaming.py 와 동일).
+                outcome["drain_pending"] = True
+        elif outcome is not None:
+            # 끊긴 건 게이트웨이/상류 실패가 아니다 — 이미 본 에러 판정은 지키고.
+            outcome.setdefault("status", "success")
+        raise
     except Exception:
         failed = True
         logger.exception("web_search.anthropic_stream_failed")
         if envelope_open:
             yield _sse("error", {"type": "error",
                                  "error": {"type": "api_error", "message": "web search loop failed"}})
+            # 열린 블록을 닫지 않고 message_stop 만 보내면 SDK 파서 상태가
+            # 오픈 블록으로 남는다(_drain_error 와 같은 계약, R20 round-3 N-7).
+            for gi in sorted(open_global_blocks):
+                yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+            open_global_blocks.clear()
             yield _sse("message_stop", {"type": "message_stop"})
         return
     finally:
@@ -2436,7 +2541,14 @@ async def _anthropic_stream(
         # 실패로 기록한다. 클라이언트 disconnect 는 GeneratorExit(비-Exception)라
         # failed 가 안 서고 성공으로 남는다 — 끊긴 건 게이트웨이 실패가 아니다(E2E S5).
         mark_outcome(outcome, "error" if (failed or error_seen) else "success")
-        await _settle_stream_usage(on_usage, merged)
+        # disconnect drain 이 정산을 소유할 때는 여기서 발화하면 이중 과금이다.
+        if not drain_owns_settle:
+            # 예외/조기 종료로 merge 못 한 채 끝난 진행 턴 — message_start 의
+            # input·캐시 버킷은 이미 과금됐으므로 버리지 않는다(R20 M-b).
+            # drain 경로는 드레인 태스크가 스스로 merge 한다.
+            if turn_open and turn_usage is not None:
+                _merge_usage(merged, turn_usage)
+            await _settle_stream_usage(on_usage, merged)
 
 
 async def _settle_stream_usage(on_usage, merged: TokenUsage) -> None:
@@ -2465,7 +2577,179 @@ async def _settle_stream_usage(on_usage, merged: TokenUsage) -> None:
         logger.warning("web_search.on_usage_failed")
 
 
-async def _drain_error(chunk_iter: AsyncIterator[bytes], envelope_open: bool) -> AsyncIterator[bytes]:
+async def _aclose_quiet(gen, iterator=None) -> None:
+    """백그라운드 정리용 aclose — 예외를 삼킨다(뒤이을 guard 태스크를 막지 않게).
+
+    ``iterator`` 를 같이 받는 이유: 미시작 async generator 의 ``aclose()`` 는
+    no-op 이라 본문/finally 가 안 도는데, 패스스루 경로는 제너레이터를 만들기
+    전에 이미 ``invoke_stream`` 을 호출해 커넥션을 잡고 있다. 클라이언트가 첫
+    바이트 전에 끊으면 그 상류 스트림이 GC 까지 열려 있으므로 여기서 닫는다
+    (R20 round-5 N-1).
+    """
+    try:
+        await gen.aclose()
+    except Exception:
+        pass
+    if iterator is not None:
+        await _aclose_iter(iterator)
+
+
+def _sse_payload(frame: bytes | None) -> dict | None:
+    """Extract the JSON payload of one SSE frame (``data: {...}``).
+
+    Used by the first-turn-error path: the frame the stitcher emitted is SSE, but
+    a non-2xx response must carry the payload as a JSON body — SDKs never parse
+    event-stream framing off an error status (R20 S-c)."""
+    if not frame:
+        return None
+    try:
+        text = frame.decode("utf-8", "replace")
+    except AttributeError:
+        text = str(frame)
+    for line in text.splitlines():
+        if line.startswith("data:"):
+            try:
+                obj = json.loads(line[5:].strip())
+            except (ValueError, TypeError):
+                return None
+            if isinstance(obj, dict):
+                return obj
+    return None
+
+
+def _accumulate_anthropic_turn_usage(turn_usage: TokenUsage, ev: dict) -> None:
+    """한 턴의 usage 를 ``turn_usage`` 에 누적한다.
+
+    라이브 스트림과 disconnect 드레인이 같은 버킷 규칙을 써야 하므로 단일 함수로
+    둔다. 삼값 보존 — ``cache_creation.ephemeral_1h_input_tokens`` 키가 실제
+    보고될 때만 누적한다(0 보고 포함, A2-4).
+    """
+    etype = ev.get("type")
+    if etype == "message_start":
+        u = (ev.get("message") or {}).get("usage") or {}
+        turn_usage.input_tokens += int(u.get("input_tokens", 0) or 0)
+        turn_usage.cache_creation_input_tokens += int(
+            u.get("cache_creation_input_tokens", 0) or 0)
+        cc = u.get("cache_creation")
+        if isinstance(cc, dict) and "ephemeral_1h_input_tokens" in cc:
+            turn_usage.cache_creation_1h_input_tokens = (
+                turn_usage.cache_creation_1h_input_tokens or 0
+            ) + int(cc["ephemeral_1h_input_tokens"] or 0)
+        turn_usage.cache_read_input_tokens += int(
+            u.get("cache_read_input_tokens", 0) or 0)
+    elif etype == "message_delta":
+        u = ev.get("usage") or {}
+        turn_usage.output_tokens += int(u.get("output_tokens", 0) or 0)
+
+
+async def _drain_events_for_usage(
+    iterator: AsyncIterator[bytes],
+    handle_event: Callable[[dict], None],
+) -> None:
+    """끊긴 턴의 남은 상류 청크를 drain 타임아웃 안에서 소비한다.
+
+    클라이언트는 이미 없으므로 프레임을 릴레이하지 않고 usage 를 담은 이벤트만
+    ``handle_event`` 로 넘긴다 — streaming.py ``_drain_remaining`` 의 KI-08
+    계약과 같다. ``async for`` 대신 ``wait_for(__anext__)`` — 상류가 스톨해도
+    클라이언트도 사라진 드레인 태스크가 커넥션을 붙잡지 않게 한다(E2E S4).
+    """
+    deadline = time.monotonic() + float(get_settings().stream_disconnect_drain_timeout)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            logger.warning("web_search.drain_timeout")
+            break
+        try:
+            raw = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            break
+        except TimeoutError:
+            logger.warning("web_search.drain_timeout")
+            break
+        try:
+            ev = json.loads(raw)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(ev, dict):
+            try:
+                handle_event(ev)
+            except Exception:
+                logger.warning("web_search.drain_event_failed")
+
+
+async def _drain_anthropic_turn_usage(
+    *,
+    chunk_iter: AsyncIterator[bytes],
+    turn_usage: TokenUsage,
+    merged: TokenUsage,
+    searches_done: int,
+    on_usage: Callable[[TokenUsage], Awaitable[None]],
+    outcome: dict | None,
+) -> None:
+    """disconnect 시 진행 중이던 Anthropic 턴의 나머지 usage 를 회수해 정산한다.
+
+    message_start 의 input 은 이미 ``turn_usage`` 에 들어 있다 — 드레인이 아직
+    도착하지 않은 message_delta 의 output (과금된 채 유실되던 것, M2) 을 보태고
+    턴 스냅샷으로 merge 한 뒤 정산을 발화한다. 정산은 이 태스크가 소유한다 —
+    본 제너레이터의 finally 는 ``drain_owns_settle`` 로 건너뛴다.
+    """
+    iterator = chunk_iter.__aiter__()
+    try:
+        await _drain_events_for_usage(
+            iterator, lambda ev: _accumulate_anthropic_turn_usage(turn_usage, ev))
+    except Exception:
+        logger.exception("web_search.anthropic_drain_failed")
+    finally:
+        # 드레인이 비정상 종료(읽기 오류 등)해도 이미 모인 input·캐시 버킷은
+        # 과금됐다 — merge 는 예외 경로에서도 수행한다(R20 S-a).
+        _merge_usage(merged, turn_usage)
+        merged.web_search_count = searches_done
+        merged.total_tokens = merged.input_tokens + merged.output_tokens
+        await _aclose_iter(iterator)
+        await _settle_stream_usage(on_usage, merged)
+        if outcome is not None:
+            outcome.pop("drain_pending", None)
+
+
+async def _drain_responses_turn_usage(
+    *,
+    chunk_iter: AsyncIterator[bytes],
+    merged: TokenUsage,
+    searches_done: int,
+    on_usage: Callable[[TokenUsage], Awaitable[None]],
+    outcome: dict | None,
+) -> None:
+    """disconnect 시 진행 중이던 Responses 턴의 usage 를 회수해 정산한다.
+
+    Responses usage 는 종결 이벤트(response.completed|incomplete|failed)에만
+    실려 온다 — 종결 전에 끊기면 그 턴의 입출력이 전량 유실됐다(M2). 드레인이
+    남은 청크에서 종결 이벤트를 찾아 라이브 경로와 같은 추출로 merge 한다.
+    """
+    iterator = chunk_iter.__aiter__()
+
+    def _on_event(ev: dict) -> None:
+        if ev.get("type") in ("response.completed", "response.incomplete",
+                              "response.failed"):
+            _merge_usage(merged, extract_responses_usage(ev.get("response") or {}))
+
+    try:
+        await _drain_events_for_usage(iterator, _on_event)
+    except Exception:
+        logger.exception("web_search.responses_drain_failed")
+    finally:
+        merged.web_search_count = searches_done
+        merged.total_tokens = merged.input_tokens + merged.output_tokens
+        await _aclose_iter(iterator)
+        await _settle_stream_usage(on_usage, merged)
+        if outcome is not None:
+            outcome.pop("drain_pending", None)
+
+
+async def _drain_error(
+    chunk_iter: AsyncIterator[bytes],
+    envelope_open: bool,
+    open_global_blocks: set[int] | None = None,
+) -> AsyncIterator[bytes]:
     """Relay a provider error turn (non-200). If the envelope was already opened we
     close it cleanly; otherwise we surface the provider's error frames directly."""
     async for raw in chunk_iter:
@@ -2474,6 +2758,12 @@ async def _drain_error(chunk_iter: AsyncIterator[bytes], envelope_open: bool) ->
         except (ValueError, TypeError):
             continue
         yield _sse(ev.get("type", "error"), ev)
+    # 열린 채 끝난 블록을 닫는다 — message_stop 만 보내면 SDK 파서 상태가
+    # 오픈 블록으로 남아 상류 실패가 게이트웨이 버그처럼 보인다(R20 N2).
+    if open_global_blocks:
+        for gi in sorted(open_global_blocks):
+            yield _sse("content_block_stop", {"type": "content_block_stop", "index": gi})
+        open_global_blocks.clear()
     if envelope_open:
         yield _sse("message_stop", {"type": "message_stop"})
 
@@ -2538,9 +2828,13 @@ async def _anthropic_nonstream(
             turn_body = dict(turn_body)
             # Hard final turn: tool kept (tool_choice: none), answer-now instruction appended;
             # soft final turn: only the instruction — same contract as the streaming path.
-            turn_body["messages"] = (_with_answer_now(conversation) if force_final
-                                     else _with_search_exhausted(conversation) if soft_final
-                                     else conversation)
+            # The note persists in `conversation` (idempotent helper) so the next turn's
+            # prefix matches what was cached — see the streaming loop.
+            if force_final:
+                conversation = _with_answer_now(conversation)
+            elif soft_final:
+                conversation = _with_search_exhausted(conversation)
+            turn_body["messages"] = conversation
             turn_body.pop("stream", None)
             status, body, _h, usage = await invoke(turn_body)
             final_status = status
@@ -2602,7 +2896,12 @@ async def _anthropic_nonstream(
                 # streaming path.
                 traces.extend(_trace_line((c.get("input") or {}).get("query", ""),
                                           _trace_words("mixed")) for c in our_calls)
-            if force_final or not our_calls or client_calls:
+            # Only a turn that ended ON tool_use is a search turn. max_tokens /
+            # end_turn with our tool blocks means a truncated or confused turn —
+            # running its "search" would bill a garbage query and re-loop the
+            # same failure (R20 S5, same gate as the streaming stitcher).
+            if (force_final or not our_calls or client_calls
+                    or final_body.get("stop_reason") != "tool_use"):
                 break  # terminal — return this body
 
             search_attempts += 1
@@ -2714,10 +3013,21 @@ async def _anthropic_nonstream(
             final_body["content"][0:0] = lead
         # Only our blocks were removed, so a leftover `tool_use` stop_reason would make the
         # client wait for an invisible tool call — same decision as the streaming stitcher.
-        if final_body.get("stop_reason") == "tool_use" and not any(
+        # 재작성 전 원래 stop_reason — tool_use 였는데 우리 블록만 있어 비게 된
+        # 턴도 "잘림" 계열이어서 스트리밍(pending_searches 분기)과 문구를 맞춘다
+        # (R20 round-4 N-a).
+        _orig_stop = final_body.get("stop_reason")
+        if _orig_stop == "tool_use" and not any(
             _is_client_tool_use_block(b) for b in final_body["content"]
         ):
             final_body["stop_reason"] = "end_turn"
+        if not final_body["content"]:
+            # 스트리밍 경로와 같은 이유 — content: [] 는 재전송 시 400. 잘림이
+            # 아닌 빈 종결에는 절단이라 주장하지 않는다(R20 round-3 S-2).
+            _empty_text = (_EMPTY_TURN_PLACEHOLDER
+                           if _orig_stop in ("max_tokens", "tool_use")
+                           else _EMPTY_TURN_NO_TEXT)
+            final_body["content"] = [{"type": "text", "text": _empty_text}]
     # final_body 는 마지막 턴의 응답을 그대로 쓰고 필요한 키만 고친다. 그래서 최상위
     # safeguard_results(마지막 턴 판정)와 처음 보는 키가 그대로 전달된다 — 이 응답을
     # 새로 만들지 말 것(스트리밍 쪽 turn_delta 와 같은 이유).
@@ -2759,6 +3069,8 @@ async def _responses_stream(
     cache_results: bool = True,
     result_text_chars: int = 0,
     outcome: dict | None = None,
+    #: Mutable out-param — the FIRST turn's upstream status (see _anthropic_stream, R20 S3).
+    status_holder: dict | None = None,
 ) -> AsyncIterator[bytes]:
     """Stitch N Responses turns into ONE response.created … response.completed stream.
 
@@ -2792,6 +3104,10 @@ async def _responses_stream(
     error_seen = False       # a 200-stream `error` event occurred (NEW round2 High-1)
     #: 상류/루프 실패 — finally 의 outcome 마킹이 읽는다(E2E S5).
     failed = False
+    #: 진행 중 턴의 스트림 — disconnect drain 이 이어서 소비한다(M2).
+    chunk_iter: AsyncIterator[bytes] | None = None
+    turn_open = False
+    drain_owns_settle = False
 
     try:
         while True:
@@ -2811,6 +3127,11 @@ async def _responses_stream(
             status, chunk_iter, _h, _rid = await invoke_stream(turn_body)
             if status != 200:
                 failed = True  # 상류 비-200 종결 — 요청 실패(E2E S5)
+                if status_holder is not None:
+                    status_holder["status"] = status
+                    ra = (_h or {}).get("retry-after") or (_h or {}).get("Retry-After")
+                    if ra:
+                        status_holder["retry_after"] = ra
                 async for b in _drain_responses_error(chunk_iter, envelope_open):
                     yield b
                 return
@@ -2824,6 +3145,13 @@ async def _responses_stream(
             turn_output_items: list[dict] = []       # completed output items (rebuild conv_input)
             pending_searches: list[dict] = []         # [{call_id, input}] — many per turn (F-3)
             client_tool_present = False
+            #: reasoning items are HELD, not streamed, until the NEXT output item is
+            #: known (R20 S2): if it is our suppressed web_search call, the reasoning is
+            #: plumbing too — emitting it would leave the client an orphan reasoning item
+            #: that the Responses API 400s on replay ("reasoning item whose call is gone",
+            #: the same shape _strip_responses_web_search_items removes on the way in).
+            held_reasoning: dict[int, list[dict]] = {}
+            turn_open = True
 
             async for raw in chunk_iter:
                 try:
@@ -2831,6 +3159,16 @@ async def _responses_stream(
                 except (ValueError, TypeError):
                     continue
                 etype = ev.get("type", "")
+
+                _oidx_ev = ev.get("output_index")
+                if isinstance(_oidx_ev, int) and _oidx_ev in held_reasoning:
+                    # A held reasoning item's events buffer until its fate is known —
+                    # the done item still feeds the internal conversation (valid:
+                    # the call it reasoned about stays in conv_input).
+                    if etype == "response.output_item.done":
+                        turn_output_items.append(ev.get("item") or {})
+                    held_reasoning[_oidx_ev].append(ev)
+                    continue
 
                 if etype == "response.created":
                     if not envelope_open:
@@ -2845,6 +3183,28 @@ async def _responses_stream(
                     item = ev.get("item") or {}
                     oidx = ev.get("output_index", 0)
                     itype = item.get("type")
+                    if itype == "reasoning":
+                        # Hold — whether this reasoning is client-visible depends on
+                        # the NEXT item (ours → drop both, client's → flush).
+                        held_reasoning[oidx] = [ev]
+                        continue
+                    if held_reasoning:
+                        if itype == "function_call" and item.get("name") == GW_WEB_SEARCH_NAME:
+                            # Reasoning directly before OUR call is its private
+                            # deliberation — drop it with the call.
+                            held_reasoning.clear()
+                        else:
+                            # Client-visible item — its reasoning is real output; replay
+                            # the buffered events under a global index.
+                            for hoidx, hbuf in held_reasoning.items():
+                                gi = global_out_index
+                                global_out_index += 1
+                                local_to_global[hoidx] = gi
+                                for hev in hbuf:
+                                    hev2 = dict(hev)
+                                    hev2["output_index"] = gi
+                                    yield _sse(hev2.get("type", ""), hev2)
+                            held_reasoning.clear()
                     if itype == "function_call" and item.get("name") == GW_WEB_SEARCH_NAME:
                         suppressed_out[oidx] = {"kind": "web_search",
                                                 "call_id": item.get("call_id"),
@@ -2868,16 +3228,14 @@ async def _responses_stream(
                     oidx = ev.get("output_index", 0)
                     if oidx in suppressed_out:
                         fn_arg_buf[oidx] += ev.get("delta", "") or ""
-                    else:
-                        gi = local_to_global.get(oidx, oidx)
-                        ev2 = dict(ev); ev2["output_index"] = gi
+                    elif oidx in local_to_global:
+                        ev2 = dict(ev); ev2["output_index"] = local_to_global[oidx]
                         yield _sse(etype, ev2)
 
                 elif etype == "response.function_call_arguments.done":
                     oidx = ev.get("output_index", 0)
-                    if oidx not in suppressed_out:
-                        gi = local_to_global.get(oidx, oidx)
-                        ev2 = dict(ev); ev2["output_index"] = gi
+                    if oidx not in suppressed_out and oidx in local_to_global:
+                        ev2 = dict(ev); ev2["output_index"] = local_to_global[oidx]
                         yield _sse(etype, ev2)
 
                 elif etype == "response.output_item.done":
@@ -2891,8 +3249,9 @@ async def _responses_stream(
                             args = {}
                         pending_searches.append({"call_id": suppressed_out[oidx]["call_id"], "input": args})
                         continue  # suppress
-                    gi = local_to_global.get(oidx, oidx)
-                    ev2 = dict(ev); ev2["output_index"] = gi
+                    if oidx not in local_to_global:
+                        continue  # never emitted an `added` — the local index would leak
+                    ev2 = dict(ev); ev2["output_index"] = local_to_global[oidx]
                     yield _sse(etype, ev2)
 
                 elif etype in (
@@ -2901,10 +3260,9 @@ async def _responses_stream(
                     "response.reasoning_summary_text.delta", "response.reasoning_summary_text.done",
                 ):
                     oidx = ev.get("output_index", 0)
-                    if oidx in suppressed_out:
+                    if oidx in suppressed_out or oidx not in local_to_global:
                         continue
-                    gi = local_to_global.get(oidx, oidx)
-                    ev2 = dict(ev); ev2["output_index"] = gi
+                    ev2 = dict(ev); ev2["output_index"] = local_to_global[oidx]
                     yield _sse(etype, ev2)
 
                 elif etype in ("response.completed", "response.incomplete", "response.failed"):
@@ -2937,6 +3295,7 @@ async def _responses_stream(
                     error_seen = True
                     yield _sse("error", {"type": "error", "error": ev["error"]})
 
+            turn_open = False
             is_search_turn = bool(pending_searches) and not client_tool_present and not error_seen
             # An incomplete/failed upstream turn is terminal even if a search was requested —
             # never loop on a truncated/failed response (F-1).
@@ -2989,6 +3348,16 @@ async def _responses_stream(
                 # terminal signal in that case.
                 if not envelope_open:
                     break
+                # A held reasoning item in a TERMINAL turn is real client output —
+                # flush it under a global index before the terminal frame.
+                for hoidx, hbuf in held_reasoning.items():
+                    gi = global_out_index
+                    global_out_index += 1
+                    for hev in hbuf:
+                        hev2 = dict(hev)
+                        hev2["output_index"] = gi
+                        yield _sse(hev2.get("type", ""), hev2)
+                held_reasoning.clear()
                 if error_seen and final_terminal_type == "response.completed":
                     yield _sse("response.failed",
                                {"type": "response.failed",
@@ -3013,6 +3382,9 @@ async def _responses_stream(
             # in order. search_attempts guards the loop even if every search fails (F-5).
             # Per-search deadline recheck so a fan-out of many searches can't run uncapped
             # past the total deadline (NEW round2 High-2).
+            # A held reasoning in a SEARCH turn belongs to our suppressed call — drop it
+            # (the client never saw the call it reasoned about).
+            held_reasoning.clear()
             search_attempts += 1
             outputs = []
             # Per-turn cap — see the same comment in the Anthropic stitcher.
@@ -3030,6 +3402,23 @@ async def _responses_stream(
                     searches_done += 1
                 outputs.append(_responses_call_output(ps["call_id"], result_text, ok, reason))
             conv_input = conv_input + turn_output_items + outputs
+    except (asyncio.CancelledError, GeneratorExit):
+        # 클라이언트 disconnect — Responses usage 는 종결 이벤트에만 실려 오므로
+        # 종결 전에 끊긴 턴은 입출력이 전량 유실된다(M2). 남은 청크를 백그라운드에서
+        # drain 해 종결 이벤트의 usage 를 회수한 뒤 드레인 태스크가 스스로 정산한다
+        # (streaming.py KI-08 과 같은 계약).
+        if turn_open and chunk_iter is not None:
+            if outcome is not None:
+                outcome.setdefault("status", "success")
+            _spawn(_drain_responses_turn_usage(
+                chunk_iter=chunk_iter, merged=merged, searches_done=searches_done,
+                on_usage=on_usage, outcome=outcome))
+            drain_owns_settle = True  # _spawn 후에 세운다(스폰 실패 시 finally 정산)
+            if outcome is not None:
+                outcome["drain_pending"] = True
+        elif outcome is not None:
+            outcome.setdefault("status", "success")
+        raise
     except Exception:
         failed = True
         logger.exception("web_search.responses_stream_failed")
@@ -3055,7 +3444,9 @@ async def _responses_stream(
             if (failed or error_seen or final_terminal_type == "response.failed")
             else "success",
         )
-        await _settle_stream_usage(on_usage, merged)
+        # disconnect drain 이 정산을 소유할 때는 여기서 발화하면 이중 과금이다.
+        if not drain_owns_settle:
+            await _settle_stream_usage(on_usage, merged)
 
 
 def _finalize_responses_obj(
@@ -3084,11 +3475,18 @@ def _finalize_responses_obj(
     if envelope_id:
         obj["id"] = envelope_id
     if our_call_ids and isinstance(obj.get("output"), list):
-        obj["output"] = [
-            it for it in obj["output"]
-            if not (isinstance(it, dict) and it.get("type") == "function_call"
-                    and it.get("call_id") in our_call_ids)
-        ]
+        # Strip our calls AND the reasoning item directly preceding each — an
+        # orphan reasoning in the final output is the same replay-400 shape
+        # _strip_responses_web_search_items removes on the way in (R20 S2).
+        kept: list = []
+        for it in obj["output"]:
+            if (isinstance(it, dict) and it.get("type") == "function_call"
+                    and it.get("call_id") in our_call_ids):
+                if kept and isinstance(kept[-1], dict) and kept[-1].get("type") == "reasoning":
+                    kept.pop()
+                continue
+            kept.append(it)
+        obj["output"] = kept
     # WIRE representation, not the billing one: Responses `input_tokens` must be the GRAND
     # TOTAL prompt count (cache reads AND cache writes included), because that is what the
     # OpenAI spec says and what Codex CLI reads to track context. merged.input_tokens is
@@ -3313,7 +3711,7 @@ async def run_web_search_loop(
     function returns BEFORE that block: without the hooks, requests of a web-search-enabled
     profile would never pass the router's logging code and go unrecorded — and Codex on
     Mantle, the main web-search user, leaves no AWS invocation log either, so the body would
-    exist nowhere. All six return paths are wired and a test counts them.
+    exist nowhere. All seven return paths are wired and a test counts them.
     """
     deadline = time.monotonic() + total_deadline_sec
 
@@ -3395,8 +3793,12 @@ async def run_web_search_loop(
             gen = (bedrock_anthropic_sse_stream if dialect == "anthropic" else responses_sse_stream)(
                 request, chunk_iter, on_usage=_stream_on_usage,
                 tokenizer_hook=tokenizer_hook, outcome=outcome)
-            return StreamingResponse(_log_stream(gen), status_code=status,
+            resp = StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
+            # 스티처-클로즈 — 라우터가 guard 와 합성한다. 상류 스트림은
+            # invoke_stream 호출 시점에 이미 열려 있으므로 같이 닫는다.
+            resp.background = BackgroundTask(_aclose_quiet, gen, chunk_iter)
+            return resp
         base.pop("stream", None)
         try:
             status, body, _h, usage = await invoke(base)
@@ -3465,8 +3867,10 @@ async def run_web_search_loop(
                 gen = responses_sse_stream(
                     request, chunk_iter, on_usage=_stream_on_usage,
                     tokenizer_hook=tokenizer_hook, outcome=outcome)
-            return StreamingResponse(_log_stream(gen), status_code=status,
+            resp = StreamingResponse(_log_stream(gen), status_code=status,
                                      media_type="text/event-stream", headers=response_headers)
+            resp.background = BackgroundTask(_aclose_quiet, gen, chunk_iter)
+            return resp
         try:
             status, body, _h, usage = await invoke(base)
         except Exception:
@@ -3489,6 +3893,7 @@ async def run_web_search_loop(
 
     if is_stream:
         stitcher = _anthropic_stream if dialect == "anthropic" else _responses_stream
+        status_holder: dict = {}
         gen = stitcher(
             invoke_stream=invoke_stream,
             base_body=loop_req_data,
@@ -3503,12 +3908,104 @@ async def run_web_search_loop(
             cache_results=cache_results,
             result_text_chars=result_text_chars,
             outcome=outcome,
+            status_holder=status_holder,
             **dialect_kw,
         )
-        return StreamingResponse(
-            _log_stream(gen), status_code=200,
+        # Peek at the first frame BEFORE fixing the response status: a first-turn
+        # upstream non-200 must come back as the real status — SDKs key retries
+        # off 429/529/5xx, and a 200 envelope carrying an error event is never
+        # retried (R20 S3). Later-turn failures stay inside the 200 stream: the
+        # envelope is already open and SSE error frames are the in-band signal.
+        try:
+            first_frame = await gen.__anext__()
+        except StopAsyncIteration:
+            first_frame = None
+
+        peek_status = status_holder.get("status", 200)
+        first_payload = _sse_payload(first_frame)
+        # 인밴드 에러가 첫 프레임인 경우도 비-2xx 와 같이 다룬다 — 200 스트림 안의
+        # throttling/빈-스트림 오류는 봉투가 안 열렸으므로 SSE 가 아니라 JSON 에러가
+        # 맞는 형태다. 봉투가 열린 뒤의 에러는 첫 프레임이 message_start 라 여기
+        # 오지 않는다(R20 round-4 N-b).
+        first_is_error = first_payload is not None and (
+            first_payload.get("type") == "error"
+            or isinstance(first_payload.get("error"), dict))
+        if first_frame is None or not (200 <= peek_status < 300) or first_is_error:
+            # First-turn failure: the envelope never opened, so an SSE error frame
+            # is the wrong shape — SDKs parse a non-2xx body as JSON (R20 S-c).
+            # Surface the provider's payload (and Retry-After) instead. An EMPTY
+            # first frame means turn-1 invoke raised before any yield — status_holder
+            # stays at the 200 default, so the bound must EXCLUDE 2xx or the client
+            # gets "200 + error JSON", which SDKs never retry (R20 round-3 M-1).
+            # Consume `gen` to its end (then aclose for safety) so the inner error
+            # drain and chunk iterator unwind fully and finally settles usage.
+            try:
+                async for _f in gen:
+                    pass
+            except Exception:
+                pass
+            await gen.aclose()
+            payload = first_payload
+            if payload is None:
+                payload = {"error": {"type": "api_error",
+                                     "message": "upstream stream failed before first frame"}}
+            if dialect == "anthropic" and "type" not in payload:
+                # Messages SDK 의 에러 형태는 {"type":"error","error":{…}} —
+                # 어댑터의 nested 형태 그대로면 파서가 못 알아본다(R20 round-3 N-1).
+                payload = {"type": "error", **payload}
+            if dialect == "responses" and "error" not in payload:
+                # Responses SDK 는 {"error":{…}} 를 파싱한다 — 상류의
+                # {"type":"error","code":…,"message":…} 는 그대로 두면
+                # 메시지가 유실된다(R20 round-5 N-3).
+                payload = {"error": {
+                    "type": payload.get("type") or payload.get("code") or "api_error",
+                    "message": payload.get("message") or "upstream stream failed",
+                }}
+            err_status = peek_status if 400 <= peek_status < 600 else 502
+            # 인밴드 에러의 형태가 재시도 신호를 담고 있으면 상태에도 반영한다 —
+            # SDK 는 429/529 를 rate-limit 처리하고, 502 는 일반 오류로 본다
+            # (R20 round-5 N-3).
+            _err_type = str(
+                (payload.get("error") or {}).get("type")
+                if isinstance(payload.get("error"), dict) else payload.get("type")
+                or "").lower()
+            if err_status == 502 and any(
+                    k in _err_type for k in ("throttl", "rate_limit", "rate-limit")):
+                err_status = 429
+            elif err_status == 502 and "overload" in _err_type:
+                err_status = 529
+            err_headers = dict(response_headers or {})
+            retry_after = status_holder.get("retry_after")
+            if retry_after:
+                err_headers["Retry-After"] = str(retry_after)
+            # JSONResponse 형태로 바뀐 첫턴 실패도 본문 로깅에서 빠지면 안 된다 —
+            # 스트림으로 시작했어도 클라이언트에게 나가는 바디는 이 JSON 이다.
+            await _log_nonstream(err_status, json.dumps(payload).encode())
+            return JSONResponse(status_code=err_status, content=payload,
+                                headers=err_headers)
+
+        async def _replayed() -> AsyncIterator[bytes]:
+            # aclosing 안에서 소비해야 disconnect 시 aclose() 가 스티처까지 전파된다 —
+            # 바깥 래퍼가 닫혀도 `gen` 이 GeneratorExit 를 못 받으면 M2 의 드레인이
+            # GC 에 의존하고 정산 타이밍이 unsettled_reservation_guard 와 경쟁한다(R20 M-a).
+            async with contextlib.aclosing(gen) as g:
+                if first_frame is not None:
+                    yield first_frame
+                async for b in g:
+                    yield b
+
+        resp = StreamingResponse(
+            _log_stream(_replayed()), status_code=peek_status,
             media_type="text/event-stream", headers=response_headers,
         )
+        # S-1: peek 가 이미 턴-1 상류 호출을 시작했다. spec<2.4 에서 클라이언트가
+        # 첫 바이트 전에 끊으면 _replayed 가 한 번도 안 돌아 gen 을 닫는 자가
+        # 없고 — "미시작 = 미호출" 전제로 돌던 unsettled_reservation_guard 와의
+        # release-vs-settle 경쟁이 다시 열린다. 라우터가 다는 guard 보다 먼저
+        # 스티처를 닫아 drain_pending 이 서게 한다(라우터는 BackgroundTasks 로
+        # 이 태스크와 guard 를 합성한다 — 덮어쓰지 않는다).
+        resp.background = BackgroundTask(_aclose_quiet, gen)
+        return resp
 
     loop = _anthropic_nonstream if dialect == "anthropic" else _responses_nonstream
     resp = await loop(

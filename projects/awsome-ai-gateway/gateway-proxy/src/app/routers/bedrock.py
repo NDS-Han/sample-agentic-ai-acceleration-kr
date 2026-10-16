@@ -570,9 +570,10 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 # 클라이언트 측 종결이라 성공 건과 동일 취급(상류 오류가 선행했으면 유지).
                 client_disconnected = True
                 outcome.setdefault("status", "success")
-                # guard(release 0)와의 경쟁 방지 — drain이 정산 소유.
-                outcome["drain_pending"] = True
                 _spawn(_drain_remaining())
+                # guard(release 0)와의 경쟁 방지 — drain이 정산 소유. _spawn 성공
+                # 후에만 마킹(스폰 실패 시 마커만 남아 guard 가 헛기다린다).
+                outcome["drain_pending"] = True
                 raise
             except Exception:
                 mark_outcome(outcome, "error")

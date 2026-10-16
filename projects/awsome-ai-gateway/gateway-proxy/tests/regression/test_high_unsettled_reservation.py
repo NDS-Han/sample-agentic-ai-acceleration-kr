@@ -114,13 +114,20 @@ async def test_every_streaming_response_carries_the_guard():
 
 
 async def test_web_search_response_gets_guard_at_router():
-    """web-search 는 루프가 응답을 만들어 라우터가 background 를 붙인다."""
+    """web-search 는 루프가 응답을 만들어 라우터가 background 를 붙인다.
+
+    S-1 이후 guard 는 루프가 단 스티처-클로즈 태스크와 BackgroundTasks 로
+    합성된다 — 덮어쓰면 peek 가 시작한 턴-1 의 drain_pending 이 안 서서
+    release-vs-settle 경쟁이 다시 열린다."""
     import inspect
 
-    from app.routers import messages
+    from app.routers import messages, openai_compat
 
-    src = inspect.getsource(messages)
-    assert "_ws_resp.background = unsettled_reservation_guard(state)" in src
+    for mod in (messages, openai_compat):
+        src = inspect.getsource(mod)
+        assert "BackgroundTasks" in src, f"{mod.__name__} 에 합성이 없다"
+        assert "unsettled_reservation_guard(state)" in src, (
+            f"{mod.__name__} 에 guard 배선이 없다")
 
 
 async def test_settle_stream_usage_detaches_under_cancellation():

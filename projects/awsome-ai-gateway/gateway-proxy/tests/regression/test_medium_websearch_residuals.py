@@ -309,7 +309,11 @@ async def test_the_stop_reason_is_rewritten_when_only_our_call_was_present():
     }
     resp, _u, _m = await _run_anthropic_nonstream([(200, body)], max_iterations=0)
     got = json.loads(bytes(resp.body))
-    assert got["content"] == [], f"우리 블록이 남았다: {got['content']}"
+    # 우리 블록이 전부 지워져 비면 텍스트 하나가 남는다 — content: [] 는
+    # 재전송 시 Bedrock 400 이다(R20 round-2). 원래 stop_reason 이 tool_use
+    # (우리 호출만 있던 턴)라 스트리밍과 같은 절단 계열 문구다(R20 round-4 N-a).
+    assert got["content"] == [{"type": "text", "text": wsl._EMPTY_TURN_PLACEHOLDER}], (
+        f"우리 블록이 남았거나 placeholder 가 없다: {got['content']}")
     assert got["stop_reason"] == "end_turn", (
         f"stop_reason 이 {got['stop_reason']} — 클라이언트가 볼 수 없는 도구 호출을 "
         "기다리게 된다"

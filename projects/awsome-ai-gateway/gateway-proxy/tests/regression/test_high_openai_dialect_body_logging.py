@@ -172,8 +172,9 @@ def test_web_search_loop_accepts_both_body_log_hooks():
 def test_every_web_search_return_path_is_wired():
     """``run_web_search_loop`` 의 리턴 경로 개수와 로깅 배선 개수가 맞아야 한다.
 
-    리턴이 여섯이다: 클라이언트가 자기 web_search 툴을 가진 경우(스트림/비스트림),
-    MCP 초기화 실패 폴백(스트림/비스트림), 그리고 본 루프(스트림/비스트림).
+    리턴이 일곱이다: 클라이언트가 자기 web_search 툴을 가진 경우(스트림/비스트림),
+    MCP 초기화 실패 폴백(스트림/비스트림), 본 루프(스트림/비스트림), 그리고
+    스트림 첫 턴 비-200 의 JSONResponse(S3 — SSE 봉투가 안 열렸으므로 JSON 본문).
     하나를 빼먹으면 그 조건에서만 본문이 사라지고, 그 조건은 재현하기 어렵다.
     """
     tree, _ = _tree("services/web_search_loop.py")
@@ -192,8 +193,8 @@ def test_every_web_search_return_path_is_wired():
         for n in ast.walk(h)
     }
     returns = [n for n in returns if id(n) not in nested]
-    assert len(returns) == 6, (
-        f"리턴 경로가 {len(returns)}개다 — 6 을 기대했다. 경로가 늘었다면 그 경로에도 "
+    assert len(returns) == 7, (
+        f"리턴 경로가 {len(returns)}개다 — 7 을 기대했다. 경로가 늘었다면 그 경로에도 "
         "본문 로깅을 배선하고 이 숫자를 함께 올려야 한다"
     )
 
@@ -202,8 +203,9 @@ def test_every_web_search_return_path_is_wired():
     assert len(stream_wraps) == 3, (
         f"_log_stream 배선이 {len(stream_wraps)}곳 — 스트리밍 리턴 3곳 전부여야 한다"
     )
-    assert len(nonstream_logs) == 3, (
-        f"_log_nonstream 배선이 {len(nonstream_logs)}곳 — 비스트리밍 리턴 3곳 전부여야 한다"
+    assert len(nonstream_logs) == 4, (
+        f"_log_nonstream 배선이 {len(nonstream_logs)}곳 — 비스트리밍 리턴 3곳 + "
+        "스트림 첫턴 JSONResponse 1곳이어야 한다"
     )
 
 

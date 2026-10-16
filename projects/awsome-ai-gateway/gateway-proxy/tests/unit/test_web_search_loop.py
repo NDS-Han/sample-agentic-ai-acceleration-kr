@@ -690,3 +690,579 @@ async def test_responses_error_not_followed_by_fake_completed():
     assert "error" in types
     assert "response.completed" not in types  # no fake success after error
     assert "response.failed" in types  # closed cleanly with failed
+
+
+# ── R20 round-1 regressions ─────────────────────────────────────────────────
+from app.services.streaming import drain_pending_tasks  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_turn_usages_populated():
+    """R20 M1: the Anthropic stitcher must snapshot per-turn usage so context-tier
+    pricing judges each turn's prompt — N short turns must not bill as one long."""
+    turns = [
+        _anthropic_turn("searching", usage_in=40_000, usage_out=50,
+                        tool_use={"id": "t1", "name": "web_search", "input": {"query": "q"}}),
+        _anthropic_turn("answer", usage_in=45_000, usage_out=80),
+    ]
+    out, usage = await _run_anthropic_stream(turns, FakeMcp())
+    assert usage.input_tokens == 85_000 and usage.output_tokens == 130
+    assert usage.turn_usages is not None and len(usage.turn_usages) == 2
+    assert usage.turn_usages[0].input_tokens == 40_000
+    assert usage.turn_usages[0].output_tokens == 50
+    assert usage.turn_usages[1].input_tokens == 45_000
+    assert usage.turn_usages[1].output_tokens == 80
+
+
+@pytest.mark.asyncio
+async def test_anthropic_disconnect_drains_inflight_usage():
+    """R20 M2: a client disconnect mid-turn drains the rest so the turn's output
+    tokens are still billed — the KI-08 contract, not a silent drop."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 30, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "partial"}}),
+        # client goes away here — the rest is only seen by the drain task
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 44}}),
+        _raw({"type": "message_stop"}),
+    ]
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    async def invoke_stream(_body):
+        return 200, _aiter(turn), {}, None
+
+    import time as _t
+    gen = wsl._anthropic_stream(
+        invoke_stream=invoke_stream, base_body={"messages": [{"role": "user", "content": "hi"}]},
+        mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+        max_iterations=5, deadline=_t.monotonic() + 60, default_max_results=10,
+    )
+    await gen.__anext__()   # message_start
+    await gen.__anext__()   # content_block_start
+    await gen.__anext__()   # content_block_delta
+    await gen.aclose()      # client disconnect
+    await drain_pending_tasks(5)
+    usage = captured["usage"]
+    assert usage.input_tokens == 30 and usage.output_tokens == 44
+    assert len(usage.turn_usages) == 1
+    assert usage.turn_usages[0].output_tokens == 44
+
+
+@pytest.mark.asyncio
+async def test_responses_disconnect_drains_inflight_usage():
+    """R20 M2: Responses usage only exists in the terminal event — a disconnect
+    before it must still recover the whole turn's usage."""
+    turn = [
+        _raw({"type": "response.created", "response": {"id": "r"}}),
+        _raw({"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "message", "role": "assistant"}}),
+        _raw({"type": "response.output_text.delta", "output_index": 0, "delta": "part"}),
+        _raw({"type": "response.completed", "response": {"id": "r", "usage": {
+            "input_tokens": 33, "output_tokens": 17, "total_tokens": 50}}}),
+    ]
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    async def invoke_stream(_body):
+        return 200, _aiter(turn), {}, None
+
+    import time as _t
+    gen = wsl._responses_stream(
+        invoke_stream=invoke_stream, base_body={"input": "hi"},
+        mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+        max_iterations=5, deadline=_t.monotonic() + 60, default_max_results=10,
+    )
+    await gen.__anext__()   # response.created
+    await gen.aclose()      # client disconnect mid-turn
+    await drain_pending_tasks(5)
+    usage = captured["usage"]
+    assert usage.input_tokens == 33 and usage.output_tokens == 17
+    assert len(usage.turn_usages) == 1
+
+
+@pytest.mark.asyncio
+async def test_web_search_first_turn_error_real_status():
+    """R20 S3: a first-turn upstream non-200 must come back as the real HTTP
+    status — SDKs never retry a 200 envelope carrying an error event."""
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    async def invoke_stream(_body):
+        return 429, _aiter([_raw({"error": {"type": "throttled", "message": "slow down"}})]), {"Retry-After": "7"}, None
+
+    async def on_usage(_u):
+        pass
+
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={"messages": [{"role": "user", "content": "hi"}]},
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    assert resp.status_code == 429
+    # R20 S-c: the envelope never opened, so the body is JSON — SDKs never parse
+    # event-stream framing off an error status. Anthropic dialect wraps the
+    # provider payload in the SDK-native {"type":"error",…} shape (round-3 N-1).
+    assert json.loads(bytes(resp.body)) == {
+        "type": "error", "error": {"type": "throttled", "message": "slow down"}}
+    assert resp.headers.get("retry-after") == "7"
+
+
+@pytest.mark.asyncio
+async def test_web_search_disconnect_through_peek_still_drains():
+    """R20 M-a: the peek wrapper must propagate aclose() to the stitcher —
+    a disconnect mid-turn must still drain the in-flight turn's usage."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 30, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}}),
+        # client goes away here — the rest is only seen by the drain task
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "partial"}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 44}}),
+        _raw({"type": "message_stop"}),
+    ]
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    async def invoke_stream(_body):
+        return 200, _aiter(turn), {}, None
+
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={"messages": [{"role": "user", "content": "hi"}]},
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    assert resp.status_code == 200
+    await resp.body_iterator.__anext__()   # the peeked first frame
+    await resp.body_iterator.aclose()      # client disconnect
+    await drain_pending_tasks(5)
+    usage = captured["usage"]
+    # output 44 is reachable ONLY through the drain — if aclose never reached the
+    # stitcher there is no settle and this lookup KeyErrors.
+    assert usage.input_tokens == 30 and usage.output_tokens == 44
+
+
+@pytest.mark.asyncio
+async def test_anthropic_mid_turn_exception_merges_partial_usage():
+    """R20 M-b: a stream that dies mid-turn (upstream read error) must still
+    merge the turn's already-billed input/cache buckets — the merge happens at
+    turn end, so an exception before it must not silently drop the buckets."""
+    async def _dying_iter():
+        yield _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+                 "role": "assistant", "content": [],
+                 "usage": {"input_tokens": 30, "output_tokens": 0}}})
+        yield _raw({"type": "content_block_start", "index": 0,
+                 "content_block": {"type": "text", "text": ""}})
+        raise ConnectionError("upstream socket reset")
+
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    async def invoke_stream(_body):
+        return 200, _dying_iter(), {}, None
+
+    import time as _t
+    out = b""
+    async for f in wsl._anthropic_stream(
+        invoke_stream=invoke_stream, base_body={"messages": [{"role": "user", "content": "hi"}]},
+        mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+        max_iterations=5, deadline=_t.monotonic() + 60, default_max_results=10,
+    ):
+        out += f
+    usage = captured["usage"]
+    assert usage.input_tokens == 30   # pre-fix: 0 — the open turn was discarded
+    assert len(usage.turn_usages) == 1 and usage.turn_usages[0].input_tokens == 30
+    assert b"event: error" in out
+
+
+@pytest.mark.asyncio
+async def test_web_search_invoke_raise_first_turn_is_502():
+    """R20 round-3 M-1: turn-1 invoke raising before any yield leaves the
+    status_holder at its 200 default — the error response must still be a
+    non-2xx (502), never '200 + error JSON' which SDKs refuse to retry."""
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    async def invoke_stream(_body):
+        raise ConnectionError("upstream refused")
+
+    async def on_usage(_u):
+        pass
+
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={"messages": [{"role": "user", "content": "hi"}]},
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    assert resp.status_code == 502
+    body = json.loads(bytes(resp.body))
+    assert body["type"] == "error"   # anthropic dialect: SDK-native error shape
+
+
+@pytest.mark.asyncio
+async def test_web_search_background_closes_stitcher_and_drains():
+    """R20 round-3 S-1: the peek already invoked turn 1 — if the client
+    disconnects before _replayed ever starts (spec<2.4), the background task
+    attached to the response must still close the stitcher so the M2 drain
+    settles real usage instead of the guard releasing (0)."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 30, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "partial"}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 44}}),
+        _raw({"type": "message_stop"}),
+    ]
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    async def invoke_stream(_body):
+        return 200, _aiter(turn), {}, None
+
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={"messages": [{"role": "user", "content": "hi"}]},
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    assert resp.status_code == 200
+    assert resp.background is not None   # the stitcher-close task
+    # Never touch body_iterator — simulate spec<2.4 disconnect-before-first-byte.
+    await resp.background()
+    await drain_pending_tasks(5)
+    usage = captured["usage"]
+    # output 44 comes only via the drain — without the background close there is
+    # no settle at all and this lookup fails.
+    assert usage.input_tokens == 30 and usage.output_tokens == 44
+
+
+@pytest.mark.asyncio
+async def test_anthropic_empty_end_turn_neutral_text():
+    """R20 round-3 S-2: an empty terminal turn that was NOT truncated must not
+    claim 'cut short' — only max_tokens/our-tool turns get that wording."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 2}}),
+        _raw({"type": "message_stop"}),
+    ]
+    out, _usage = await _run_anthropic_stream([turn], FakeMcp())
+    events = _parse_sse(out)
+    deltas = [d.get("delta", {}) for e, d in events if e == "content_block_delta"]
+    texts = [d.get("text", "") for d in deltas]
+    assert texts == [wsl._EMPTY_TURN_NO_TEXT]
+    assert wsl._EMPTY_TURN_PLACEHOLDER not in "".join(texts)
+
+
+@pytest.mark.asyncio
+async def test_web_search_inband_error_first_frame_is_502_json():
+    """R20 round-4 N-b: a 200 upstream whose FIRST frame is an in-band error
+    (e.g. Bedrock throttlingException mapped to an error chunk) never opened
+    the envelope — the response must be JSON with a non-2xx status, not a 200
+    SSE that SDKs refuse to retry."""
+    turn = [
+        _raw({"type": "error", "error": {"type": "throttlingException",
+             "message": "Rate exceeded"}}),
+    ]
+
+    async def invoke_stream(_body):
+        return 200, _aiter(turn), {}, None
+
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    async def on_usage(_u):
+        pass
+
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={"messages": [{"role": "user", "content": "hi"}]},
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    # throttling 은 SDK 의 rate-limit 처리를 받게 429 로 매핑된다(round-5 N-3).
+    assert resp.status_code == 429
+    body = json.loads(bytes(resp.body))
+    assert body["type"] == "error" and body["error"]["type"] == "throttlingException"
+
+
+@pytest.mark.asyncio
+async def test_passthrough_responses_have_background_close():
+    """R20 round-5 N-4: every StreamingResponse the loop returns must carry the
+    stitcher-close background so router composition can't hit [None, guard].
+    Covers the F-7 client-tool pass-through (no peek — the regression shape)."""
+    from starlette.background import BackgroundTasks
+
+    async def invoke_stream(_body):
+        return 200, _aiter([
+            _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+                 "role": "assistant", "content": [],
+                 "usage": {"input_tokens": 5, "output_tokens": 0}}}),
+            _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+                 "usage": {"output_tokens": 3}}),
+            _raw({"type": "message_stop"}),
+        ]), {}, None
+
+    async def invoke(_b):
+        raise AssertionError("stream expected")
+
+    captured = {}
+
+    async def on_usage(u):
+        captured["usage"] = u
+
+    # 클라이언트가 자기 web_search 툴을 선언 → F-7 패스스루(루프 미진입).
+    resp = await wsl.run_web_search_loop(
+        dialect="anthropic", invoke=invoke, invoke_stream=invoke_stream,
+        initial_req_data={
+            "messages": [{"role": "user", "content": "hi"}],
+            "tools": [{"name": "web_search", "description": "mine",
+                       "input_schema": {"type": "object"}}],
+        },
+        is_stream=True, mcp_client=FakeMcp(), request=FakeRequest(), on_usage=on_usage,
+    )
+    assert resp.status_code == 200
+    # 라우터 합성과 같은 형태를 재현 — None 이면 여기서 TypeError 가 나던 결함.
+    called = {}
+
+    async def _guard():
+        called["guard"] = True
+
+    from starlette.background import BackgroundTask
+    composed = BackgroundTasks(tasks=[
+        t for t in (resp.background, BackgroundTask(_guard)) if t is not None])
+    await composed()          # must not raise — pre-fix TypeError on None
+    assert called["guard"]
+    await drain_pending_tasks(5)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_max_tokens_turn_not_search():
+    """R20 S5: a max_tokens turn carrying our tool_use is truncated — its parsed
+    input is garbage, so it must terminate, not bill an empty search and re-loop."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "t1", "name": "web_search", "input": {}}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"que'}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "max_tokens"},
+             "usage": {"output_tokens": 7}}),
+        _raw({"type": "message_stop"}),
+    ]
+    mcp = FakeMcp()
+    out, usage = await _run_anthropic_stream([turn], mcp)
+    assert mcp.calls == []  # no billed search on a truncated call
+    types = [e for e, _ in _parse_sse(out)]
+    assert types.count("message_stop") == 1
+
+
+@pytest.mark.asyncio
+async def test_anthropic_missing_terminal_not_search():
+    """R20 S5: a turn whose stream ends before message_delta is terminal —
+    the loop must not invent a search round on an un-terminated response."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "tool_use", "id": "t1", "name": "web_search", "input": {}}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "input_json_delta", "partial_json": '{"query":"q"}'}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_stop"}),   # NO message_delta — socket cut
+    ]
+    mcp = FakeMcp()
+    out, usage = await _run_anthropic_stream([turn], mcp)
+    assert mcp.calls == []
+    types = [e for e, _ in _parse_sse(out)]
+    assert "error" in types
+    assert types.count("message_stop") == 1
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_before_our_call_suppressed():
+    """R20 S2: a reasoning item directly before our suppressed function_call is
+    plumbing — emitting it leaves the client an orphan reasoning item that the
+    Responses API 400s on replay."""
+    turn1 = [
+        _raw({"type": "response.created", "response": {"id": "r"}}),
+        _raw({"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "reasoning", "summary": []}}),
+        _raw({"type": "response.reasoning_summary_text.delta", "output_index": 0,
+             "delta": "thinking about the query"}),
+        _raw({"type": "response.output_item.done", "output_index": 0,
+             "item": {"type": "reasoning", "summary": [{"text": "thinking about the query"}]}}),
+        _raw({"type": "response.output_item.added", "output_index": 1,
+             "item": {"type": "function_call", "name": "web_search", "call_id": "c1"}}),
+        _raw({"type": "response.function_call_arguments.delta", "output_index": 1,
+             "delta": '{"query":"aws"}'}),
+        _raw({"type": "response.function_call_arguments.done", "output_index": 1}),
+        _raw({"type": "response.output_item.done", "output_index": 1,
+             "item": {"type": "function_call", "name": "web_search", "call_id": "c1",
+                      "arguments": '{"query":"aws"}'}}),
+        _raw({"type": "response.completed", "response": {"id": "r", "usage": {
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}}),
+    ]
+    mcp = FakeMcp()
+    out, usage = await _run_responses_stream([turn1, _responses_turn("answer")], mcp)
+    events = _parse_sse(out)
+    assert mcp.calls == [("aws", 20)]
+    added_items = [d.get("item") or {} for e, d in events if e == "response.output_item.added"]
+    assert not any(it.get("type") == "reasoning" for it in added_items), added_items
+    assert not any(e == "response.reasoning_summary_text.delta" for e, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_responses_reasoning_before_client_item_flushed():
+    """R20 S2: a reasoning item before a CLIENT-visible item is real output —
+    it must be flushed under a global index, not dropped."""
+    turn = [
+        _raw({"type": "response.created", "response": {"id": "r"}}),
+        _raw({"type": "response.output_item.added", "output_index": 0,
+             "item": {"type": "reasoning", "summary": []}}),
+        _raw({"type": "response.output_item.done", "output_index": 0,
+             "item": {"type": "reasoning", "summary": [{"text": "hmm"}]}}),
+        _raw({"type": "response.output_item.added", "output_index": 1,
+             "item": {"type": "message", "role": "assistant"}}),
+        _raw({"type": "response.output_text.delta", "output_index": 1, "delta": "hi"}),
+        _raw({"type": "response.output_item.done", "output_index": 1,
+             "item": {"type": "message", "role": "assistant",
+                      "content": [{"type": "output_text", "text": "hi"}]}}),
+        _raw({"type": "response.completed", "response": {"id": "r", "usage": {
+            "input_tokens": 10, "output_tokens": 5, "total_tokens": 15}}}),
+    ]
+    mcp = FakeMcp()
+    out, _usage = await _run_responses_stream([turn], mcp)
+    events = _parse_sse(out)
+    added_items = [d.get("item") or {} for e, d in events if e == "response.output_item.added"]
+    assert any(it.get("type") == "reasoning" for it in added_items), added_items
+    # flushed reasoning must carry a GLOBAL output_index the client can correlate
+    reasoning_adds = [d for e, d in events
+                      if e == "response.output_item.added"
+                      and (d.get("item") or {}).get("type") == "reasoning"]
+    assert reasoning_adds and reasoning_adds[0].get("output_index") == 0
+
+
+def test_conservative_admission_body_covers_real_worst_case():
+    """R20 S1: reservation covers search turns + soft + hard + nudge AND the
+    input growth from replayed results — the old iters bound under-reserved."""
+    body = wsl.conservative_admission_body(
+        {"max_tokens": 1000, "messages": [{"role": "user", "content": "hi"}]},
+        2, max_result_chars=12000, max_searches_per_turn=3, default_max_results=5)
+    turns = 2 + 3
+    assert body["max_tokens"] == 1000 * turns
+    assert body["_gw_admission_input_mult"] == turns
+    assert body["_gw_admission_input_add"] > 0
+    # max_iterations=1 used to skip ALL inflation — now reserves the real bound
+    body1 = wsl.conservative_admission_body({"max_tokens": 100}, 1)
+    assert body1["max_tokens"] == 400
+    assert body1["_gw_admission_input_mult"] == 4
+
+
+@pytest.mark.asyncio
+async def test_anthropic_unopened_block_delta_suppressed():
+    """R20 N3: a non-text_delta on a never-opened block must not leak a local
+    index — the client never saw content_block_start for it."""
+    turn = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "text", "text": ""}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "citations_delta", "citation": {"title": "x"}}}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 5}}),
+        _raw({"type": "message_stop"}),
+    ]
+    out, _usage = await _run_anthropic_stream([turn], FakeMcp())
+    deltas = [d for e, d in _parse_sse(out) if e == "content_block_delta"]
+    assert not any(d.get("delta", {}).get("type") == "citations_delta" for d in deltas)
+
+
+@pytest.mark.asyncio
+async def test_anthropic_final_note_persists_for_cache_prefix():
+    """R20 N4: the answer-now note must persist in `conversation` — otherwise the
+    next turn (nudge retry) replays a different prefix at the same position."""
+    thinking_only = [
+        _raw({"type": "message_start", "message": {"id": "m", "type": "message",
+             "role": "assistant", "content": [],
+             "usage": {"input_tokens": 10, "output_tokens": 0}}}),
+        _raw({"type": "content_block_start", "index": 0,
+             "content_block": {"type": "thinking", "thinking": ""}}),
+        _raw({"type": "content_block_delta", "index": 0,
+             "delta": {"type": "thinking_delta", "thinking": "hmm"}}),
+        _raw({"type": "content_block_stop", "index": 0}),
+        _raw({"type": "message_delta", "delta": {"stop_reason": "end_turn"},
+             "usage": {"output_tokens": 5}}),
+        _raw({"type": "message_stop"}),
+    ]
+    turns = [
+        _anthropic_turn("", tool_use={"id": "t1", "name": "web_search",
+                                      "input": {"query": "q"}}),
+        thinking_only,
+        _anthropic_turn("final answer"),
+    ]
+    bodies = []
+    seq = iter(turns)
+    mcp = FakeMcp()
+
+    async def on_usage(_u):
+        pass
+
+    async def invoke_stream(body):
+        bodies.append(body)
+        return 200, _aiter(next(seq)), {}, None
+
+    import time as _t
+    out = b""
+    async for f in wsl._anthropic_stream(
+        invoke_stream=invoke_stream, base_body={"messages": [{"role": "user", "content": "hi"}]},
+        mcp_client=mcp, request=FakeRequest(), on_usage=on_usage,
+        max_iterations=1, deadline=_t.monotonic() + 60, default_max_results=10,
+    ):
+        out += f
+    # turn 2 was the hard-final that appended the note; turn 3 is the nudge retry.
+    # The note must still sit in the EARLIER user message it was persisted to —
+    # pre-fix it existed only in the outgoing copy, so turn 3's messages[2]
+    # diverged from what turn 2 had cached at the same position.
+    user_msgs = [m for m in bodies[2]["messages"] if m["role"] == "user"]
+    note = wsl._FINAL_TURN_ANSWER_NOW
+    assert len(user_msgs) >= 3
+    assert any(note in json.dumps(m, ensure_ascii=False) for m in user_msgs[:-1])

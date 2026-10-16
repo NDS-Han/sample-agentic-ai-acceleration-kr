@@ -422,8 +422,11 @@ async def bedrock_anthropic_sse_stream(
             outcome.setdefault("status", "success")
             # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
             # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
-            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
+        if outcome is not None:
+            # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가
+            # drain_timeout+10s 를 헛기다린다(web_search_loop 와 같은 계약).
+            outcome["drain_pending"] = True
         raise
 
     except Exception as exc:
@@ -714,8 +717,11 @@ async def openai_sse_stream(
             outcome.setdefault("status", "success")
             # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
             # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
-            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
+        if outcome is not None:
+            # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가
+            # drain_timeout+10s 를 헛기다린다(web_search_loop 와 같은 계약).
+            outcome["drain_pending"] = True
         raise
 
     except Exception as exc:
@@ -962,8 +968,11 @@ async def responses_sse_stream(
             outcome.setdefault("status", "success")
             # unsettled_reservation_guard 가 드레인 정산과 경쟁해 예약을 먼저
             # release(0) 하면 실비가 유실/이중정산된다 — 정산 소유권 표시.
-            outcome["drain_pending"] = True
         _spawn(_drain_remaining())
+        if outcome is not None:
+            # _spawn 성공 후에만 마킹 — 스폰 실패로 마커만 남으면 guard 가
+            # drain_timeout+10s 를 헛기다린다(web_search_loop 와 같은 계약).
+            outcome["drain_pending"] = True
         raise
 
     except Exception as exc:
