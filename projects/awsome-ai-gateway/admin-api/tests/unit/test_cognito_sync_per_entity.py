@@ -237,6 +237,9 @@ async def test_sync_user_deactivates_oidc_user_when_missing_in_cognito(monkeypat
 
     svc = CognitoSyncService(MagicMock())
     svc._admin_get_user = MagicMock(return_value=None)  # Cognito 삭제됨
+    svc._revoke_keys_for_users = AsyncMock(return_value=[])
+    # admin_get_user 미스만으로는 부족 — sub 필터 조회로 실제 삭제를 확인한다
+    svc._cognito.list_users = MagicMock(return_value={"Users": []})
 
     result = await svc.sync_user(session, "gone@x.com")
 
@@ -637,14 +640,29 @@ def test_effective_role_admin_beats_team_leader_transfer_demotion():
     ) == UserRole.ADMIN
 
 
-def test_effective_role_admin_demotion_still_applies():
-    """ADMIN_GROUPS 에서 빠진 ADMIN 은 그대로 강등된다."""
+def test_effective_role_admin_demotion_still_applies(monkeypatch):
+    """ADMIN 매핑이 설정된 운영에서, ADMIN_GROUPS 에서 빠진 ADMIN 은 강등된다."""
+    import app.services.cognito_sync_service as mod
     from app.services.cognito_sync_service import _effective_role
 
+    monkeypatch.setattr(mod, "admin_mapping_configured", lambda: True)
     team_id = uuid.uuid4()
     assert _effective_role(
         UserRole.ADMIN, team_id, UserRole.DEVELOPER, team_id
     ) == UserRole.DEVELOPER
+
+
+def test_effective_role_manual_admin_preserved_when_mapping_unset(monkeypatch):
+    """ADMIN_GROUPS/ADMIN_EMAILS 둘 다 미설정이면 DB 의 수동 ADMIN 이 유일한
+    원천 — sync 가 강등하면 관리자가 전원 잠긴다(R21 S7)."""
+    import app.services.cognito_sync_service as mod
+    from app.services.cognito_sync_service import _effective_role
+
+    monkeypatch.setattr(mod, "admin_mapping_configured", lambda: False)
+    team_id = uuid.uuid4()
+    assert _effective_role(
+        UserRole.ADMIN, team_id, UserRole.DEVELOPER, team_id
+    ) == UserRole.ADMIN
 
 
 def test_needs_update_does_not_flag_preserved_team_leader():
@@ -725,6 +743,9 @@ async def test_deactivate_missing_user_clears_leader_pointer(monkeypatch):
     monkeypatch.setattr(mod, "release_stale_leader_pointer", release)
 
     svc = CognitoSyncService(MagicMock())
+    svc._revoke_keys_for_users = AsyncMock(return_value=[])
+    # 삭제 확인 — pool 에 sub 잔존 시 비활성화하지 않는다(R21 S10)
+    svc._cognito.list_users = MagicMock(return_value={"Users": []})
     result = mod.SyncResult()
     await svc._deactivate_missing_user(repo, session, "gone@x.com", result)
 

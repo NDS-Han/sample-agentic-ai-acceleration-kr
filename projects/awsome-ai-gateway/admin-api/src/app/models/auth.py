@@ -119,6 +119,13 @@ class User(Base):
     # 마이그레이션 0002 에서 NOT NULL DEFAULT 'sts' 로 추가. 다중 IDP 동시 운영 시 식별자.
     provider: Mapped[str] = mapped_column(String(64), nullable=False, default="sts", server_default="sts")
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    #: 마지막 팀 배정의 출처 — 'sync'(OIDC/cognito 동기)면 다음 동기가 그룹
+    #: 유도 팀으로 갱신할 수 있고, 'manual'(관리자 transfer_user)이면 동기가
+    #: 건드리지 않는다. 이 표지가 없을 때 로그인/싱크가 수동 배정을 되돌리며
+    #: 이관 부수효과(개별 예산·RL 비활성)를 다시 발화했다(migration 0048).
+    team_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="sync", server_default="sync"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

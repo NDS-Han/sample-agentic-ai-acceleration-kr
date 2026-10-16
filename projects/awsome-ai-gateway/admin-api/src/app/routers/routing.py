@@ -73,11 +73,12 @@ async def set_web_search(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="SET_WEB_SEARCH",
         resource_type="RoutingProfile",
         resource_id=client,
         changes={"after": {"web_search_enabled": body.enabled}},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return result

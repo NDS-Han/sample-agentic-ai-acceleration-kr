@@ -130,9 +130,11 @@ class TestSetForTeam:
     ):
         team_id = uuid.uuid4()
         with patch("app.services.team_allowed_model_service.UserRepository") as MockUser, \
-             patch("app.services.team_allowed_model_service.ModelRepository") as MockModel:
+             patch("app.services.team_allowed_model_service.ModelRepository") as MockModel, \
+             patch("app.services.team_allowed_model_service.TeamAllowedModelRepository") as MockTam:
             MockUser.return_value.get_team = AsyncMock(return_value=_team(team_id))
             MockModel.return_value.get_by_alias = AsyncMock(return_value=None)
+            MockTam.return_value.list_by_team = AsyncMock(return_value=[])
 
             with pytest.raises(ValidationError):
                 await svc.set_for_team(

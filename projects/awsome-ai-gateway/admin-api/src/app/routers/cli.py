@@ -88,7 +88,7 @@ async def issue_virtual_key(
         redis=redis,
         data=body,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 

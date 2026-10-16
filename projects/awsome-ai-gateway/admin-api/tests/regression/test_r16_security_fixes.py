@@ -216,7 +216,9 @@ async def test_sync_all_stale_team_drains_pending_cache_work(monkeypatch):
     s.OIDC_GROUP_PREFIX = "Claude_"
     s.ADMIN_EMAILS = []
     s.ADMIN_GROUPS = []
-    s.COGNITO_SYNC_DEACTIVATE_MISSING = False
+    # stale-team 클린업은 opt-in 플래그 뒤로 갔다(R21 S7) — drain 검증은
+    # 클린업이 실제 도는 이 경로에서만 의미가 있다.
+    s.COGNITO_SYNC_DEACTIVATE_MISSING = True
     monkeypatch.setattr(mod, "get_settings", lambda: s)
 
     synced_tid = uuid.uuid4()

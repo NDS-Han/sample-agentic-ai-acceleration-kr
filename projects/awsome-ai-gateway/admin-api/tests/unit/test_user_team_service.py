@@ -35,11 +35,15 @@ def _team(team_id: uuid.UUID, *, members: list | None = None, leader_user_id=Non
 
 
 def _user(
-    user_id: uuid.UUID, team_id: uuid.UUID | None, role: UserRole = UserRole.DEVELOPER
+    user_id: uuid.UUID,
+    team_id: uuid.UUID | None,
+    role: UserRole = UserRole.DEVELOPER,
+    team_source: str = "manual",
 ) -> MagicMock:
     user = MagicMock(spec=User)
     user.id = user_id
     user.team_id = team_id
+    user.team_source = team_source
     user.role = role
     user.email = "dev@test.com"
     user.display_name = "Dev"
@@ -249,6 +253,8 @@ class TestTransferUser:
              patch("app.services.user_team_service.audit_logger") as mock_audit:
             user_repo = MockUserRepo.return_value
             user_repo.get_user = AsyncMock(return_value=user)
+            # 이관 대상 팀 존재 확인(transfer_user 의 404 게이트)
+            user_repo.get_team = AsyncMock(return_value=MagicMock(spec=Team))
             user_repo.update_user_team = AsyncMock(return_value=transferred_user)
             MockBudgetRepo.return_value.deactivate_configs = AsyncMock()
             MockBudgetRepo.return_value.list_active_app_clients = AsyncMock(
@@ -369,6 +375,85 @@ class TestTransferUser:
 
         URepo.return_value.update_user_role.assert_not_called()
         URepo.return_value.get_team.assert_not_called()
+        URepo.return_value.update_user_team.assert_not_called()
+        # M4: 같은 팀 재저장이 이관 부수효과를 발화하면 개별 예산/RL 이 초기화된다
+        BRepo.return_value.deactivate_configs.assert_not_called()
+        BRepo.return_value.deactivate_app_configs_for_user.assert_not_called()
+        RLRepo.return_value.deactivate_configs.assert_not_called()
+        mock_audit.log.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_same_team_resave_pins_team_source_and_audits(
+        self, user_team_service: UserTeamService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """같은 팀 재저장에 기본 'manual' 이 오면 sync 배정 사용자의 팀이
+        수동 고정된다 — 조용한 핀은 이후 sync 동작을 바꾸므로 감사한다(R21 r3 N2)."""
+        user_id = uuid.uuid4()
+        team_id = uuid.uuid4()
+        user = _user(user_id, team_id, team_source="sync")
+
+        with patch("app.services.user_team_service.UserRepository") as URepo, \
+             patch("app.services.user_team_service.audit_logger") as mock_audit:
+            URepo.return_value.get_user = AsyncMock(return_value=user)
+            URepo.return_value.get_team = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            await user_team_service.transfer_user(
+                mock_session, user_id=user_id, new_team_id=team_id, actor=admin_user
+            )
+
+        assert user.team_source == "manual"
+        mock_audit.log.assert_awaited_once()
+        changes = mock_audit.log.await_args.kwargs["changes"]
+        assert changes["before"]["team_source"] == "sync"
+        assert changes["after"]["team_source"] == "manual"
+
+    @pytest.mark.asyncio
+    async def test_admin_unpin_via_sync_source_releases_manual_pin(
+        self, user_team_service: UserTeamService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """관리자가 team_source='sync' 를내면 수동 핀이 풀린다 — r4 M1:
+        manual 가드가 관리자 요청까지 막아 unpin 이 200 조용히 무시됐다."""
+        user_id = uuid.uuid4()
+        team_id = uuid.uuid4()
+        user = _user(user_id, team_id, team_source="manual")
+
+        with patch("app.services.user_team_service.UserRepository") as URepo, \
+             patch("app.services.user_team_service.audit_logger") as mock_audit:
+            URepo.return_value.get_user = AsyncMock(return_value=user)
+            URepo.return_value.get_team = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            await user_team_service.transfer_user(
+                mock_session, user_id=user_id, new_team_id=team_id,
+                actor=admin_user, team_source="sync",
+            )
+
+        assert user.team_source == "sync"
+        mock_audit.log.assert_awaited_once()
+        URepo.return_value.get_team.assert_not_called()  # 같은 팀 — 부수효과 없음
+
+    @pytest.mark.asyncio
+    async def test_sync_caller_does_not_overwrite_manual_pin(
+        self, user_team_service: UserTeamService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """from_sync=True(OIDC/sync 경로) 호출은 manual 배정을 되돌리지 않는다
+        — 같은 팀이어도 다른 팀이어도."""
+        user_id = uuid.uuid4()
+        team_a = uuid.uuid4()
+        team_b = uuid.uuid4()
+        user = _user(user_id, team_a, team_source="manual")
+
+        with patch("app.services.user_team_service.UserRepository") as URepo:
+            URepo.return_value.get_user = AsyncMock(return_value=user)
+            resp = await user_team_service.transfer_user(
+                mock_session, user_id=user_id, new_team_id=team_b,
+                actor=admin_user, team_source="sync", from_sync=True,
+            )
+
+        assert user.team_id == team_a  # 미이관
+        assert resp.team_id == str(team_a)
+        URepo.return_value.update_user_team.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_transfer_user_invalidates_caches_and_swaps_reverse_index(
@@ -394,6 +479,7 @@ class TestTransferUser:
              patch("app.services.user_team_service.audit_logger") as mock_audit:
 
             URepo.return_value.get_user = AsyncMock(return_value=user_mock)
+            URepo.return_value.get_team = AsyncMock(return_value=MagicMock(spec=Team))
             URepo.return_value.update_user_team = AsyncMock(return_value=user_mock_after)
             BRepo.return_value.deactivate_configs = AsyncMock(return_value=1)
             BRepo.return_value.list_active_app_clients = AsyncMock(return_value=[])

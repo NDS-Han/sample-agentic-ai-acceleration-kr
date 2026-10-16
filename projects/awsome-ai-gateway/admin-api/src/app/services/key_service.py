@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
+from app.core.budget_cache import defer_redis_write_until_commit
 from app.core.cache_invalidation import (
     CacheInvalidationManager,
     invalidate_after_commit,
@@ -109,6 +110,91 @@ class KeyService:
             for existing in await repo.list_active_for_user(user_id):
                 age_s = (dedup_now - existing.issued_at).total_seconds()
                 if age_s <= VK_DEDUP_SECONDS and existing.expires_at <= expires_at:
+                    raw_key = self._encryption.decrypt(existing.key_value_encrypted)
+                    # 커밋됐지만 Redis SET 이 실패/취소된 키를 재사용하면 클라이언트는
+                    # 200 을 받고도 gateway 에서 401 — dead credential 을 다시
+                    # 건네지 않도록 key:vk:{hash} 생존을 확인한다(R21 r4 M2).
+                    # 없으면 회전이 아니라 in-place 보수(아래) — SET 이 아직
+                    # in-flight 인 동시 발급 창에서 회전은 200-후-즉시-401 을
+                    # 재생산한다(R21 r5 S1). redis 가 없으면(테스트) 기존
+                    # dedup 동작 유지.
+                    redis = self._cache_mgr._redis
+                    if redis is not None:
+                        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                        try:
+                            alive = await redis.exists(f"key:vk:{key_hash}")
+                        except Exception:
+                            alive = 0
+                        if not alive:
+                            # 신규 발급(expire_and_create)으로 넘어가면 이 키를
+                            # EXPIRED 로 바꾼다 — 하지만 직전 발급 응답(200)이
+                            # 이 키를 이미 건넸고 그 SET 이 아직 in-flight 일 수
+                            # 있어, 회전은 200-후-즉시-401 dead credential 을
+                            # 재생산한다(R21 r5 S1). SETEX 는 멱등이므로 in-place
+                            # 보수만 하고 같은 키를 돌려준다.
+                            # FOR UPDATE 재확인 — 우리가 잠그기 전에 커밋된 폐기가
+                            # 있으면 그 키를 부활시키지 않는다.
+                            locked = await repo.get_by_id(
+                                existing.id, for_update=True
+                            )
+                            if (
+                                locked is None
+                                or locked.status != KeyStatus.ACTIVE
+                                or locked.expires_at <= dedup_now
+                            ):
+                                continue
+                            # SETEX 0 은 Redis 에러 → surfaced 실패가 요청을
+                            # 500 으로 만든다 — 하위 1초는 올림한다(r6 N1).
+                            remaining = max(
+                                1,
+                                int(
+                                    (locked.expires_at - dedup_now).total_seconds()
+                                ),
+                            )
+                            # user 는 dedup 시점에 아직 미조회 — 팀 인덱스
+                            # 복구를 위해 여기서 읽는다.
+                            if user is None:
+                                user = await UserRepository(session).get_user(
+                                    user_id
+                                )
+                            repair_hash = key_hash
+                            repair_uid = str(user_id)
+                            repair_team_id = user.team_id if user else None
+
+                            async def _repair_key_caches() -> None:
+                                pipe = redis.pipeline(transaction=False)
+                                pipe.setex(
+                                    f"key:vk:{repair_hash}",
+                                    remaining,
+                                    repair_uid,
+                                )
+                                if repair_team_id is not None:
+                                    pipe.sadd(
+                                        f"team:vk_hashes:{repair_team_id}",
+                                        repair_hash,
+                                    )
+                                await pipe.execute()
+
+                            # 보수 SET 도 surfaced — 실패 시 500 으로 바꿔
+                            # 클라이언트가 재시도하게 한다(dead credential 방지).
+                            await defer_redis_write_until_commit(
+                                session, _repair_key_caches, surface_failure=True
+                            )
+                            logger.info(
+                                "key.dedup_repaired_missing_redis_entry",
+                                user_id=str(user_id),
+                                key_id=str(existing.id),
+                                request_id=request_id,
+                            )
+                            return KeyCreateResponse(
+                                key_id=str(locked.id),
+                                key_prefix=locked.key_prefix,
+                                user_id=str(user_id),
+                                status=locked.status,
+                                created_at=locked.issued_at,
+                                expires_at=locked.expires_at,
+                                virtual_key=raw_key,
+                            )
                     logger.info(
                         "key.dedup_returned_recent",
                         user_id=str(user_id),
@@ -116,7 +202,6 @@ class KeyService:
                         age_s=age_s,
                         request_id=request_id,
                     )
-                    raw_key = self._encryption.decrypt(existing.key_value_encrypted)
                     return KeyCreateResponse(
                         key_id=str(existing.id),
                         key_prefix=existing.key_prefix,
@@ -311,24 +396,40 @@ class KeyService:
 
         # Redis 작업 3건 (VK lookup, auth context, team reverse index) 을 pipeline 으로
         # 묶어 round-trip 절감. 각 key 가 독립적이라 순서/원자성 무관.
+        # ⚠️ SET 은 commit 이후로 미룬다 — commit 전에 심고 롤백되면 DB 에 없는
+        # VK 해시가 Redis 에 살아남아 게이트웨이가 유령 키를 TTL 동안 인증한다
+        # (key:vk 가 유일한 VK→user 매핑 소스). DEL 과 달리 SET 은 rollback
+        # 자가치유가 없으므로 defer 가 필수다(R21 N5).
         redis = self._cache_mgr._redis
-        pipe = redis.pipeline(transaction=False)
-        pipe.setex(f"key:vk:{key_hash}", seconds_until_expiry, f"{user_id}")
-        if acl_snapshot_ok:
-            pipe.setex(
-                f"key:cache:vk:{key_hash}",
-                auth_cache_ttl,
-                json.dumps(auth_context_payload),
-            )
-        if user.team_id is not None:
-            pipe.sadd(f"team:vk_hashes:{user.team_id}", key_hash)
-        await pipe.execute()
+        # 지연 콜백은 커밋 뒤에 실행돼 ORM 객체 접근이 lazy-load 를 유발한다 —
+        # 필요한 값은 전부 지역 변수로 캡처한다(docstring 계약).
+        team_id_snapshot = user.team_id
+        auth_json = json.dumps(auth_context_payload) if acl_snapshot_ok else None
+
+        async def _write_key_caches() -> None:
+            if redis is None:
+                return
+            pipe = redis.pipeline(transaction=False)
+            pipe.setex(f"key:vk:{key_hash}", seconds_until_expiry, f"{user_id}")
+            if auth_json is not None:
+                pipe.setex(f"key:cache:vk:{key_hash}", auth_cache_ttl, auth_json)
+            if team_id_snapshot is not None:
+                pipe.sadd(f"team:vk_hashes:{team_id_snapshot}", key_hash)
+            await pipe.execute()
+
+        # SET 실패는 클라이언트에게 dead credential(24h TTL 동안 401)을
+        # 건네는 것이므로 표면화한다 — 요청이 500 으로 바뀌어 재시도 가능
+        # (commit 자체는 성공, orphan DB 행은 무해). drain 은 응답 전이다(R21 r3 S1).
+        await defer_redis_write_until_commit(
+            session, _write_key_caches, surface_failure=True
+        )
 
         # Audit log
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="CREATE_KEY",
             resource_type="VirtualKey",
             resource_id=str(vk.id),
@@ -502,6 +603,7 @@ class KeyService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
         bulk: bool = False,
+        notify: bool = True,
     ) -> None:
         repo = KeyRepository(session)
         # FOR UPDATE 로 잠근다 — 동시 폐기 두 건이 ACTIVE 체크를 둘 다 통과해
@@ -567,6 +669,7 @@ class KeyService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="REVOKE_KEY",
             resource_type="VirtualKey",
             resource_id=str(key_id),
@@ -579,11 +682,13 @@ class KeyService:
         )
 
         # notification-worker 에 key_revoked 발행. force_reauth_team 도 이 경로를
-        # 쓰지만 사용자당 ACTIVE 키는 부분 유니크 인덱스로 1개뿐이라 멤버당
-        # 최대 메일 1통이다 — 폐기된 사용자에게 재실행 안내가 가는 의도된 동작.
-        # bulk=True 이면 admin 수신자는 생략돼 팀 단위 폐기가 admin 메일 폭풍이
-        # 되지 않는다(affected_user 안내 메일은 그대로 간다).
-        await self._publish_key_revoked(session, vk, actor, bulk=bulk)
+        # 쓰고 사용자당 ACTIVE 키는 부분 유니크 인덱스로 1개뿐이지만, 만료된 채
+        # Redis 에 살아있는 EXPIRED 키도 함께 폐기되므로 멤버당 여러 통이 나갈 수
+        # 있다 — force_reauth 는 EXPIRED 키엔 notify=False 를 넘겨 멤버당 최대
+        # 1통을 유지한다(R21 r3 N3). bulk=True 이면 admin 수신자는 생략돼 팀 단위
+        # 폐기가 admin 메일 폭풍이 되지 않는다(affected_user 안내는 그대로).
+        if notify:
+            await self._publish_key_revoked(session, vk, actor, bulk=bulk)
 
     async def list_keys(
         self,
@@ -675,47 +780,60 @@ class KeyService:
             revoked VK 개수.
         """
         repo = KeyRepository(session)
-        # 팀 멤버의 ACTIVE VK 만 대상 (이미 REVOKED/EXPIRED 는 무의미).
-        # limit=1000: 단일 팀 멤버 수 상한 가정. 넘으면 FK 로그 필요 (MVP 단계).
-        keys = await repo.list_keys(
-            team_id=team_id, status=KeyStatus.ACTIVE, cursor=None, limit=1000
-        )
-
+        # 대상은 "게이트웨이가 아직 인증하는 키" 전부 — ACTIVE 뿐 아니라
+        # expires_at 이 아직 안 지난 EXPIRED 행도 Redis 엔트리가 살아 있어
+        # 계속 인증된다(= offboarding 시 함께 죽여야 하는 것과 같은 판정).
+        # 1000 상한으로 조용히 잘리지 않도록 커서 페이지로 전부 돈다.
+        cursor = None
+        page_size = 500
         revoked = 0
-        for vk in keys:
-            # SAVEPOINT 롤백은 DB 만 되돌린다 — 이미 큐에 들어간 발행 이벤트는
-            # 직접 걷어내야 한다(안 그러면 폐기되지 않은 키의 폐기 알림이 나간다).
-            pending_before = len(session.info.get(PENDING_REDIS_KEY, ()))
-            # nested 롤백은 vk 를 만료시켜 except 에서 vk.id 를 읽으면 비동기
-            # lazy refresh(MissingGreenlet)가 터진다 — try 전에 값으로 빼둔다.
-            vk_id = vk.id
-            try:
-                # 키별 SAVEPOINT — 폐기가 중간에 실패해도(row 반변경·audit 오류)
-                # 그 키만 원상태로 돌리고 나머지는 진행한다. 반쪽 커밋(상태만
-                # REVOKED 에 audit/event 누락)을 막는다.
-                async with session.begin_nested():
-                    await self.revoke_key(
-                        session,
-                        key_id=vk_id,
-                        actor=actor,
-                        ip_address=ip_address,
-                        request_id=request_id,
-                        bulk=True,
+        while True:
+            keys = await repo.list_revocable_for_team(
+                team_id, cursor=cursor, limit=page_size
+            )
+            if not keys:
+                break
+            # 다음 페이지 커서 — revoke 가 행을 바꿔도 정렬 키(created_at,id)는
+            # 불변이라 안전하다.
+            cursor = (keys[-1].created_at, keys[-1].id)
+            for vk in keys:
+                # SAVEPOINT 롤백은 DB 만 되돌린다 — 이미 큐에 들어간 발행 이벤트는
+                # 직접 걷어내야 한다(안 그러면 폐기되지 않은 키의 폐기 알림이 나간다).
+                pending_before = len(session.info.get(PENDING_REDIS_KEY, ()))
+                # nested 롤백은 vk 를 만료시켜 except 에서 vk.id 를 읽으면 비동기
+                # lazy refresh(MissingGreenlet)가 터진다 — try 전에 값으로 빼둔다.
+                vk_id = vk.id
+                try:
+                    # 키별 SAVEPOINT — 폐기가 중간에 실패해도(row 반변경·audit 오류)
+                    # 그 키만 원상태로 돌리고 나머지는 진행한다. 반쪽 커밋(상태만
+                    # REVOKED 에 audit/event 누락)을 막는다.
+                    async with session.begin_nested():
+                        await self.revoke_key(
+                            session,
+                            key_id=vk_id,
+                            actor=actor,
+                            ip_address=ip_address,
+                            request_id=request_id,
+                            bulk=True,
+                            # 만료된 채 살아있던(EXPIRED) 키까지 폐기하면 멤버당
+                            # 메일이 여러 통이 된다 — ACTIVE 키만 알림(R21 r3 N3).
+                            notify=vk.status != KeyStatus.EXPIRED,
+                        )
+                    revoked += 1
+                except Exception:
+                    del session.info.setdefault(PENDING_REDIS_KEY, [])[pending_before:]
+                    logger.exception(
+                        "force_reauth_team.revoke_failed",
+                        team_id=str(team_id),
+                        key_id=str(vk_id),
                     )
-                revoked += 1
-            except Exception:
-                del session.info.setdefault(PENDING_REDIS_KEY, [])[pending_before:]
-                logger.exception(
-                    "force_reauth_team.revoke_failed",
-                    team_id=str(team_id),
-                    key_id=str(vk_id),
-                )
-                # 한 건 실패해도 나머지 계속 처리
+                    # 한 건 실패해도 나머지 계속 처리
 
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="FORCE_REAUTH_TEAM",
             resource_type="Team",
             resource_id=str(team_id),

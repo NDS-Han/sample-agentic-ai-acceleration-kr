@@ -13,6 +13,10 @@ logger = structlog.get_logger(__name__)
 # Redis key written by admin-api (write-through) and read here. String "1"/"0".
 BODY_LOG_REDIS_KEY = "bodylog:enabled"
 
+# Re-population TTL — admin-api 의 미러 TTL 과 같은 값을 둔다. 무TTL 이었을 때
+# 미러 실패가 오래된 값을 무기한 남겼다(OFF 인데 계속 수집); 만료되면 DB 재수화.
+_BODY_LOG_REDIS_TTL_S = 60
+
 # Raw read of the admin-mutable flag. gateway-proxy has no ORM model for
 # public.system_settings (admin-api owns it); a scalar read is enough.
 _DB_QUERY = text(
@@ -97,7 +101,10 @@ class BodyLogFlag:
         enabled = bool(row) if row is not None else self._default
         if redis is not None:
             try:
-                await redis.set(BODY_LOG_REDIS_KEY, "1" if enabled else "0")
+                await redis.set(
+                    BODY_LOG_REDIS_KEY, "1" if enabled else "0",
+                    ex=_BODY_LOG_REDIS_TTL_S,
+                )
             except Exception:
                 logger.warning("body_log_flag_redis_write_failed")
         return enabled

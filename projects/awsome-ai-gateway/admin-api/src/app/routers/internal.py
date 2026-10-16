@@ -117,7 +117,7 @@ async def test_issue_key(
 
     import uuid
     from datetime import date
-    from decimal import Decimal
+    from decimal import Decimal, InvalidOperation
 
     from app.core.auth import CurrentUser
     from app.models.auth import User, UserRole
@@ -127,15 +127,51 @@ async def test_issue_key(
     from app.services.budget_service import DEFAULT_ALERT_THRESHOLDS
     from app.services.key_service import KeyService
 
-    body = await request.json()
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(400, "request body must be valid JSON") from None
+    if not isinstance(body, dict):
+        raise HTTPException(400, "request body must be a JSON object")
+
     email = body.get("email", "test@example.com")
     display_name = body.get("display_name", "Test User")
-    budget_usd = body.get("budget_usd", settings.DEFAULT_USER_BUDGET_USD)
+    # 비문자열(123, {})이 get_by_email 에 들어가면 DB 드라이버 오류로 500 —
+    # DEV 전용이라도 입력 검증한다(R21 r3 N5).
+    if not isinstance(email, str) or not email:
+        raise HTTPException(400, "email must be a non-empty string")
+    if not isinstance(display_name, str) or not display_name:
+        raise HTTPException(400, "display_name must be a non-empty string")
+    budget_usd_raw = body.get("budget_usd", settings.DEFAULT_USER_BUDGET_USD)
     expires_seconds = body.get("expires_seconds")  # optional: short-lived VK for testing
+
+    # 숫자 필드는 명시 검증 — "abc" 같은 값이 Decimal()/비교 연산에서
+    # InvalidOperation/TypeError 로 500 을 냈던 결함(R21 N7).
+    try:
+        budget_usd = Decimal(str(budget_usd_raw))
+    except (InvalidOperation, ValueError):
+        raise HTTPException(400, "budget_usd must be numeric") from None
+    # NaN/Infinity 는 Decimal 으로 만들어지지만 `> 0` 비교에서 InvalidOperation
+    # (→500) 을 낸다 — 유한성까지 확인한다(R21 r2 N7).
+    if not budget_usd.is_finite():
+        raise HTTPException(400, "budget_usd must be a finite number")
+    if expires_seconds is not None:
+        try:
+            expires_seconds = int(expires_seconds)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "expires_seconds must be a positive integer") from None
+        # timedelta 오버플로(→500)도 400 으로.
+        if not 0 < expires_seconds <= 365 * 24 * 3600:
+            raise HTTPException(400, "expires_seconds must be a positive integer")
 
     # Find or create user
     user_repo = UserRepository(session)
     user = await user_repo.get_by_email(email)
+
+    # 테스트 엔드포인트가 기존 ADMIN 계정의 VK 를 발급하면 내부 토큰 하나로
+    # 관리자 가장 크리덴셜이 만들어진다 — DEV 전용이라도 차단(R21 N7).
+    if user is not None and user.role == UserRole.ADMIN:
+        raise HTTPException(400, "cannot issue test keys for ADMIN users")
 
     if user is None:
         team_id = uuid.UUID(settings.DEFAULT_TEAM_ID) if settings.DEFAULT_TEAM_ID else None
@@ -160,7 +196,7 @@ async def test_issue_key(
                 id=uuid.uuid4(),
                 scope=BudgetScope.USER,
                 scope_id=user.id,
-                max_budget_usd=Decimal(str(budget_usd)),
+                max_budget_usd=budget_usd,
                 period_type=PeriodType.MONTHLY,
                 policy=BudgetPolicy.HARD_BLOCK,
                 alert_thresholds=list(DEFAULT_ALERT_THRESHOLDS),
@@ -184,7 +220,7 @@ async def test_issue_key(
         actor=actor,
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_seconds) if expires_seconds else None,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
     # Invalidate budget config in Redis — H3: 이 키는 SET 하지 않는다.

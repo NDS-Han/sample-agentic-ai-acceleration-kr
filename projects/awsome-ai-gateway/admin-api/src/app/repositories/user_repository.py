@@ -274,7 +274,7 @@ class UserRepository:
             chunk = subs_list[i : i + CHUNK]
             stmt = select(
                 User.sso_subject, User.id, User.email, User.display_name,
-                User.team_id, User.role, User.is_active,
+                User.team_id, User.role, User.is_active, User.team_source,
             ).where(
                 User.sso_subject == any_(
                     bindparam("subs", value=chunk, type_=ARRAY(String))
@@ -285,6 +285,7 @@ class UserRepository:
                 result[r.sso_subject] = {
                     "id": r.id, "email": r.email, "display_name": r.display_name,
                     "team_id": r.team_id, "role": r.role, "is_active": r.is_active,
+                    "team_source": r.team_source,
                 }
         return result
 

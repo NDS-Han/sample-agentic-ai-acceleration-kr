@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import uuid
+
 import structlog
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel
@@ -379,13 +381,14 @@ async def set_default_model(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="SET_APP_DEFAULT_MODEL",
         resource_type="RoutingProfile",
         resource_id=client,
         changes={"before": {"default_model": current_default_alias},
                  "after": {"default_model": body.default_model}},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
     # Return updated policy view (re-read from DB for consistency)
@@ -414,7 +417,10 @@ async def toggle_app_model(
             f"Unknown client '{client}'. Valid values: {sorted(_VALID_CLIENTS)}"
         )
 
-    model = await session.get(ModelAlias, body.alias)
+    # FOR UPDATE — NULL 물질화는 read-modify-write 라서 두 관리자가 서로 다른
+    # 클라이언트를 동시에 revoke 하면 각자 "전체 집합 - 본인 것" 을 써서
+    # 먼저 건 revoke 가 되살아난다(행 잠금으로 직렬화).
+    model = await session.get(ModelAlias, body.alias, with_for_update=True)
     if model is None:
         raise NotFoundError("ModelAlias", body.alias)
 
@@ -447,13 +453,14 @@ async def toggle_app_model(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="TOGGLE_APP_MODEL",
         resource_type="ModelAlias",
         resource_id=body.alias,
         changes={"after": {"client": client, "allowed": body.allowed,
                            "allowed_clients": model.allowed_clients}},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
     return await _build_app_policy(session, client)

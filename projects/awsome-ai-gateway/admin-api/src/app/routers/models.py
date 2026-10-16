@@ -100,7 +100,7 @@ async def create_model(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -119,7 +119,7 @@ async def update_model(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -138,7 +138,7 @@ async def set_pricing(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -193,7 +193,7 @@ async def price_sync_apply(
         aliases=body.aliases,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         expected=body.expected,
     )
 
@@ -213,7 +213,7 @@ async def patch_status(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -246,5 +246,5 @@ async def delete_model(
         alias=alias,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )

@@ -25,8 +25,8 @@ router = APIRouter(prefix="/admin/keys", tags=["Key Management"])
 @router.get("", response_model=KeyListResponse)
 async def list_keys(
     request: Request,
-    user_id: str | None = None,
-    team_id: str | None = None,
+    user_id: uuid.UUID | None = None,
+    team_id: uuid.UUID | None = None,
     status: KeyStatus | None = None,
     email: str | None = None,
     cursor: str | None = None,
@@ -45,8 +45,8 @@ async def list_keys(
     email_q = email.strip() if email else None
     items, has_more = await svc.list_keys(
         session,
-        user_id=uuid.UUID(user_id) if user_id else None,
-        team_id=uuid.UUID(team_id) if team_id else None,
+        user_id=user_id if user_id else None,
+        team_id=team_id if team_id else None,
         status=status,
         email=email_q or None,
         cursor=cursor,
@@ -66,8 +66,8 @@ async def list_keys(
 @router.get("/count", response_model=KeyCountResponse)
 async def count_keys(
     request: Request,
-    user_id: str | None = None,
-    team_id: str | None = None,
+    user_id: uuid.UUID | None = None,
+    team_id: uuid.UUID | None = None,
     status: KeyStatus | None = None,
     email: str | None = None,
     actor: CurrentUser = Depends(require_admin_or_team_leader),
@@ -86,11 +86,11 @@ async def count_keys(
             return KeyCountResponse(count=0)
         scoped_team_id = actor.team_id
     else:
-        scoped_team_id = uuid.UUID(team_id) if team_id else None
+        scoped_team_id = team_id if team_id else None
 
     count = await svc.count_keys(
         session,
-        user_id=uuid.UUID(user_id) if user_id else None,
+        user_id=user_id if user_id else None,
         team_id=scoped_team_id,
         status=status,
         email=email_q or None,
@@ -101,7 +101,7 @@ async def count_keys(
 @router.delete("/{key_id}", status_code=204)
 async def revoke_key(
     request: Request,
-    key_id: str,
+    key_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -110,8 +110,8 @@ async def revoke_key(
     svc: KeyService = request.app.state.key_service
     await svc.revoke_key(
         session,
-        key_id=uuid.UUID(key_id),
+        key_id=key_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )

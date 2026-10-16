@@ -35,6 +35,7 @@ from app.main import register_exception_handlers
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 MIGRATION = REPO_ROOT / "db" / "versions" / "0034_add_missing_indexes_and_uniqueness.py"
+MIGRATIONS_DIR = REPO_ROOT / "db" / "versions"
 MAIN_PY = REPO_ROOT / "admin-api" / "src" / "app" / "main.py"
 
 
@@ -178,6 +179,18 @@ def test_handler_is_not_vacuous_control():
 
 
 def _migration_source() -> str:
+    """모든 마이그레이션의 합산 소스 — 제약은 0034 이후의 마이그레이션
+    (예: 0045 uq_teams_dept_name)에서도 만들어질 수 있다."""
+    assert MIGRATIONS_DIR.is_dir(), f"마이그레이션 디렉터리가 없다: {MIGRATIONS_DIR}"
+    return "\n".join(
+        p.read_text(encoding="utf-8") for p in sorted(MIGRATIONS_DIR.glob("*.py"))
+    )
+
+
+def _migration_0034_source() -> str:
+    """0034 단독 — 역방향 테스트(0034가 만든 인덱스는 전부 매핑돼야 한다)는
+    이 파일 기준으로만 본다. 후속 마이그레이션의 유니크 인덱스는 upsert 나
+    다른 경로로 처리돼 의도적으로 409 매핑 밖에 둘 수 있다."""
     assert MIGRATION.is_file(), f"마이그레이션이 없다: {MIGRATION}"
     return MIGRATION.read_text(encoding="utf-8")
 
@@ -219,7 +232,7 @@ def test_every_unique_index_in_the_migration_is_mapped_to_409():
 
     성능용 비-유니크 인덱스(idx_users_team_id)는 위반을 낼 수 없으므로 제외한다.
     """
-    src = _migration_source()
+    src = _migration_0034_source()
     created_unique = set()
     for line in src.splitlines():
         stripped = line.strip()

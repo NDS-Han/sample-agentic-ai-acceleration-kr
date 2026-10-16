@@ -31,6 +31,13 @@ class ServiceTokenRepository:
             stmt = stmt.with_for_update()
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_rotated_from(self, token_id: uuid.UUID) -> list[ServiceToken]:
+        """해당 토큰에서 rotate 된 직계 후속 토큰 목록."""
+        result = await self._session.execute(
+            select(ServiceToken).where(ServiceToken.rotated_from == token_id)
+        )
+        return list(result.scalars().all())
+
     async def list_all(self) -> list[ServiceToken]:
         stmt = select(ServiceToken).order_by(ServiceToken.created_at.desc())
         return list((await self._session.execute(stmt)).scalars().all())

@@ -32,7 +32,7 @@ router = APIRouter(prefix="/admin/budgets", tags=["Budget Management"])
 @router.put("/team/{team_id}")
 async def set_team_budget(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: SetBudgetRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -41,12 +41,12 @@ async def set_team_budget(
     svc: BudgetService = request.app.state.budget_service
     await svc.set_team_budget(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         data=body,
         actor=admin,
         confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {"status": "ok"}
 
@@ -54,7 +54,7 @@ async def set_team_budget(
 @router.delete("/team/{team_id}", status_code=204)
 async def delete_team_budget(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     confirm: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
@@ -63,18 +63,18 @@ async def delete_team_budget(
     svc: BudgetService = request.app.state.budget_service
     await svc.delete_team_budget(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         actor=admin,
         confirm=confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.put("/team/{team_id}/default-cap")
 async def set_team_default_cap(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: SetDefaultCapRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -83,12 +83,12 @@ async def set_team_default_cap(
     svc: BudgetService = request.app.state.budget_service
     value = await svc.set_team_default_cap(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         value=body.value,
         actor=admin,
         confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {
         "status": "ok",
@@ -99,7 +99,7 @@ async def set_team_default_cap(
 @router.post("/team/{team_id}/equal-split")
 async def equal_split_team_budget(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: EqualSplitRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -108,19 +108,19 @@ async def equal_split_team_budget(
     svc: BudgetService = request.app.state.budget_service
     return await svc.equal_split_team_budget(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         clear_individual=body.clear_individual,
         actor=admin,
         confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.put("/user/{user_id}")
 async def set_user_budget(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     body: SetBudgetRequest,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -128,12 +128,12 @@ async def set_user_budget(
     svc: BudgetService = request.app.state.budget_service
     await svc.set_user_budget(
         session,
-        user_id=uuid.UUID(user_id),
+        user_id=user_id,
         data=body,
         actor=user,
         confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {"status": "ok"}
 
@@ -156,14 +156,14 @@ async def seed_budget_spent(
         items=body.items,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.delete("/user/{user_id}", status_code=204)
 async def delete_user_budget(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     confirm: bool = Query(False),
     session: AsyncSession = Depends(get_db_session),
@@ -174,18 +174,18 @@ async def delete_user_budget(
     svc: BudgetService = request.app.state.budget_service
     await svc.delete_user_budget(
         session,
-        user_id=uuid.UUID(user_id),
+        user_id=user_id,
         actor=user,
         confirm=confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.put("/user/{user_id}/app/{client}")
 async def set_user_client_budget(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     client: str,
     body: SetBudgetRequest,
     user: CurrentUser = Depends(require_admin_or_team_leader),
@@ -198,13 +198,13 @@ async def set_user_client_budget(
     try:
         await svc.set_user_client_budget(
             session,
-            user_id=uuid.UUID(user_id),
+            user_id=user_id,
             client=client,
             data=body,
             actor=user,
             confirm=body.confirm,
             ip_address=request.client.host if request.client else "0.0.0.0",
-            request_id=request.headers.get("x-request-id", ""),
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -214,7 +214,7 @@ async def set_user_client_budget(
 @router.delete("/user/{user_id}/app/{client}", status_code=204)
 async def clear_user_client_budget(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     client: str,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -226,11 +226,11 @@ async def clear_user_client_budget(
     try:
         await svc.clear_user_client_budget(
             session,
-            user_id=uuid.UUID(user_id),
+            user_id=user_id,
             client=client,
             actor=user,
             ip_address=request.client.host if request.client else "0.0.0.0",
-            request_id=request.headers.get("x-request-id", ""),
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -239,21 +239,21 @@ async def clear_user_client_budget(
 @router.get("/user/{user_id}/apps", response_model=UserAppBudgetsResponse)
 async def get_user_app_budgets(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Read active per-app (client) budgets for a user, for UI prefill."""
 
     svc: BudgetService = request.app.state.budget_service
-    apps = await svc.get_user_app_budgets(session, user_id=uuid.UUID(user_id), actor=user)
+    apps = await svc.get_user_app_budgets(session, user_id=user_id, actor=user)
     return UserAppBudgetsResponse(user_id=str(user_id), apps=apps)
 
 
 @router.get("/team/{team_id}/allocation", response_model=TeamBudgetAllocation | None)
 async def get_team_allocation(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     period: str | None = Query(None, description="YYYY-MM (defaults to current month)"),
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -265,7 +265,7 @@ async def get_team_allocation(
     effective_period = period or current_kst_period()
     return await svc.get_team_allocation(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         period=effective_period,
         actor=user,
     )
@@ -274,7 +274,7 @@ async def get_team_allocation(
 @router.put("/team/{team_id}/allocate")
 async def allocate_team_budget(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: AllocateBudgetRequest,
     user: CurrentUser = Depends(require_admin_or_team_leader),
     session: AsyncSession = Depends(get_db_session),
@@ -282,12 +282,12 @@ async def allocate_team_budget(
     svc: BudgetService = request.app.state.budget_service
     await svc.allocate_team_budget(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         data=body,
         actor=user,
         confirm=body.confirm,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {"status": "ok"}
 
@@ -383,7 +383,7 @@ async def set_downgrade_config(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -402,5 +402,5 @@ async def delete_downgrade_config(
         scope_id=scope_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )

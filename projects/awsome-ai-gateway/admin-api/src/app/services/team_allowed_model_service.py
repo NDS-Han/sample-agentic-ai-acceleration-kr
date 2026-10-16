@@ -11,6 +11,7 @@ from app.core.audit import audit_logger
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
 from app.core.exceptions import NotFoundError, ValidationError
+from app.models.model import ModelStatus
 from app.repositories.model_repository import ModelRepository, TeamAllowedModelRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.models import AllowedModelsResponse
@@ -55,15 +56,26 @@ class TeamAllowedModelService:
         if team is None:
             raise NotFoundError("Team", str(team_id))
 
-        # Validate aliases exist and are ACTIVE
+        repo = TeamAllowedModelRepository(session)
+        before = await repo.list_by_team(team_id)
+
+        # Validate aliases exist and are ACTIVE — 비활성 별칭을 화이트리스트에
+        # 넣으면 죽은 별칭이 명단에 남고, 재활성화 순간 자동 허용된다(게이트웨이는
+        # 별칭 매칭만 본다). 주석과 구현이 어긋나 있던 결함(R21 N6).
+        # 단 이미 목록에 있는 별칭은 재전송을 허용한다 — 등록 후 비활성화된 별칭을
+        # 풀-리플레이스 PUT 이 다시내면 거부돼, 운영자가 그 항목을 찾아 제거할
+        # 때까지 목록 편집 자체가 막힌다(R21 r3 N4).
+        existing = set(before)
         model_repo = ModelRepository(session)
         for alias in set(model_aliases):
+            if alias in existing:
+                continue
             m = await model_repo.get_by_alias(alias)
             if m is None:
                 raise ValidationError(f"Unknown model alias: {alias}")
+            if m.status != ModelStatus.ACTIVE:
+                raise ValidationError(f"Model alias is not ACTIVE: {alias}")
 
-        repo = TeamAllowedModelRepository(session)
-        before = await repo.list_by_team(team_id)
         after = await repo.set_for_team(team_id, model_aliases, actor.user_id)
 
         # ⚠️ VK 캐시 무효화는 여기서 하지 않는다 — 라우터가 commit **후**
@@ -75,6 +87,7 @@ class TeamAllowedModelService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="SET_TEAM_ALLOWED_MODELS",
             resource_type="TeamAllowedModels",
             resource_id=str(team_id),
@@ -109,6 +122,7 @@ class TeamAllowedModelService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="CLEAR_TEAM_ALLOWED_MODELS",
             resource_type="TeamAllowedModels",
             resource_id=str(team_id),

@@ -74,8 +74,18 @@ class CacheInvalidationManager:
         """Retry all unresolved cache invalidation failures. Returns count of resolved."""
         from sqlalchemy import select
 
-        stmt = select(CacheInvalidationFailure).where(
-            CacheInvalidationFailure.resolved_at.is_(None)
+        # LIMIT + 재시도 횟수 상한 — 무제한 조회는 한 요청이 모든 미해소
+        # 실패를 들고 와 retry 폭풍/장기 트랜잭션을 만든다(R21 S9).
+        # 영구 실패 키는 retry_count 상한 이후 매 요청 재시도하지 않는다.
+        stmt = (
+            select(CacheInvalidationFailure)
+            .where(CacheInvalidationFailure.resolved_at.is_(None))
+            .where(CacheInvalidationFailure.retry_count < 100)
+            .order_by(CacheInvalidationFailure.failed_at)
+            .limit(500)
+            # SKIP LOCKED — 스케줄러와 수동 호출이 동시에 돌면 같은 미해소 행을
+            # 둘이 잡아 DEL 을 이중 실행한다(R21 r2).
+            .with_for_update(skip_locked=True)
         )
         result = await session.execute(stmt)
         failures = result.scalars().all()

@@ -22,6 +22,10 @@ logger = structlog.get_logger()
 BODY_LOGGING_KEY = "body_logging_enabled"
 #: gateway-proxy 가 읽는 Redis 키. 그쪽 ``services/body_log_flag.py`` 와 같아야 한다.
 BODY_LOG_REDIS_KEY = "bodylog:enabled"
+#: 미러 키 TTL — 이전에는 무TTL SET 이라 미러 실패 시 오래된 값이 무기한
+#: 남았다(OFF 인데 계속 수집). 만료되면 gateway 가 DB(진실)에서 재수화한다.
+#: gateway-proxy ``body_log_flag`` 의 재기록에도 같은 TTL 을 둔다.
+BODY_LOG_REDIS_TTL_S = 60
 
 
 class SystemSettingsService:
@@ -78,7 +82,9 @@ class SystemSettingsService:
         if redis is None:
             return
         try:
-            await redis.set(BODY_LOG_REDIS_KEY, "1" if enabled else "0")
+            await redis.set(
+                BODY_LOG_REDIS_KEY, "1" if enabled else "0", ex=BODY_LOG_REDIS_TTL_S
+            )
         except Exception:
             # ⚠️ 조용히 넘기지 않고 남긴다 — 전파가 늦어지는 창(gateway 의 in-process
             #    TTL + DB 재수화)이 생기므로 운영자가 알아야 한다.

@@ -475,6 +475,9 @@ def register_exception_handlers(app: FastAPI) -> None:
             "idx_virtual_keys_user_active_unique",
             "idx_model_aliases_lower_unique",
             "idx_productivity_events_idempotency",
+            # 팀/부서 이름 중복 (migration 0045) — 500 대신 409.
+            "uq_teams_dept_name",
+            "uq_departments_org_name",
         }
     )
 

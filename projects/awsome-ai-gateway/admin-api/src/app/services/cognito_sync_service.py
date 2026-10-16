@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 
 import structlog
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.models.auth import Department, Team, User, UserRole
@@ -38,6 +39,11 @@ def _attr_truthy(v) -> bool:
     """Cognito 속성값의 불리언 표현 — "true"/"True"/"1"/True/1 만 참."""
     from app.core.oidc_identity import claims_truthy
     return claims_truthy(v)
+
+
+def admin_mapping_configured() -> bool:
+    from app.core.oidc_identity import admin_mapping_configured as _impl
+    return _impl()
 
 BATCH_SIZE = 500  # 유저 upsert 배치 commit 단위. 초과 시 commit + expunge_all 로
                   # identity map 을 비워 sync_all 메모리 상한을 확보한다.
@@ -59,6 +65,14 @@ def _effective_role(
     if derived_role == UserRole.ADMIN:
         # ADMIN 승격이 최우선 — TEAM_LEADER 이관 강등보다 먼저 봐야, 같은 동기화
         # 주기에 ADMIN 그룹 진입 + 팀 이동이 겹쳐도 로그인 경로와 결과가 같다.
+        return UserRole.ADMIN
+    if (
+        existing_role == UserRole.ADMIN
+        and not admin_mapping_configured()
+    ):
+        # ADMIN_GROUPS/ADMIN_EMAILS 둘 다 미설정이면 클레임은 ADMIN 을 낼 수
+        # 없다 — DB 에 수동 부여된 ADMIN 이 유일한 원천이라 sync 가 강등하면
+        # 관리자가 전원 잠긴다(auth.py:429 의 DB-폴백과 같은 판정).
         return UserRole.ADMIN
     if existing_role == UserRole.TEAM_LEADER:
         if existing_team_id != new_team_id:
@@ -82,12 +96,17 @@ def _needs_update(
 
     role 비교는 ``_effective_role`` 로 보존된 값 기준 — 안 그러면 팀 리더는 실제로
     아무것도 안 바뀌어도 매번 "role 이 다르다"고 오판해 불필요한 upsert 를 탄다."""
+    # manual 이면 팀이 적용되지 않으므로 role 판정의 "새 팀" 도 기존 팀이다.
+    kept_team = snap["team_id"] if snap.get("team_source") == "manual" else team_id
     return (
         (bool(email) and email_verified and snap["email"] != email)
         or snap["display_name"] != name
-        or snap["team_id"] != team_id
+        # 수동 배정(manual)은 팀 차이가 "변경 필요"로 집계되지 않는다 —
+        # _upsert_one_user 의 가드와 같은 규칙으로 게이트를 맞춰야 매 sync 마다
+        # 불필요한 upsert 를 타지 않는다.
+        or (snap["team_id"] != team_id and snap.get("team_source") != "manual")
         or snap["role"]
-        != _effective_role(snap["role"], snap.get("team_id"), role, team_id)
+        != _effective_role(snap["role"], snap.get("team_id"), role, kept_team)
         or snap["is_active"] != enabled
     )
 
@@ -562,7 +581,12 @@ class CognitoSyncService:
         #    그룹의 팀을 "Cognito 에 없는 팀"으로 오판해 활성 멤버 전원을 default
         #    로 옮기고 리더를 강등시킨다. 불완전하면 이 단계는 통째로 건너뛴다.
         synced_team_ids = set(group_team_id.values())
-        if teams_reconcile_incomplete:
+        # stale-team 클린업은 활성 멤버를 default 팀으로 옮기는 파괴 재동기화 —
+        # 수동 생성 팀(POST /admin/teams)도 Cognito 에 없다는 이유로 해체됐다.
+        # DEACTIVATE_MISSING 과 같은 opt-in 플래그 뒤에 둔다(R21 S7).
+        if not settings.COGNITO_SYNC_DEACTIVATE_MISSING:
+            pass  # 비활성 — 수동 팀/배정 보존
+        elif teams_reconcile_incomplete:
             logger.warning(
                 "cognito_sync.stale_team_cleanup_skipped_incomplete",
                 error_count=len(result.errors),
@@ -578,7 +602,12 @@ class CognitoSyncService:
                         continue
                     if team.id in synced_team_ids:
                         continue
-                    moved = [m for m in (team.members or []) if m.is_active]
+                    # team_source='manual' 멤버는 관리자가 이 팀에 직접 둔
+                    # 사람이라 stale-team 이어도 옮기지 않는다(migration 0048).
+                    moved = [
+                        m for m in (team.members or [])
+                        if m.is_active and m.team_source != "manual"
+                    ]
                     moved_ids: set = set()
                     # savepoint 롤백은 savepoint 안에서 건드린 ORM 객체를 expire
                     # 시킨다 — expire 된 속성 접근은 lazy load(MissingGreenlet)를
@@ -620,6 +649,7 @@ class CognitoSyncService:
                                 m_patterns.extend(t_patterns)
                                 m_ops.extend(t_ops)
                                 member.team_id = default_team_id
+                                member.team_source = "sync"
                                 # 팀 이동 시 TEAM_LEADER 는 다른 이동 경로
                                 # (_effective_role·transfer_user)와 같은 불변식으로
                                 # 강등한다 — 그대로 두면 default 팀에 대해 리더
@@ -689,6 +719,7 @@ class CognitoSyncService:
         email_verified: bool = False,
         revoked_out: list,
         cache_out: dict,
+        preserve_existing_team: bool = False,
     ) -> User:
         """단일 사용자 upsert. sync_all 의 163-217 블록과 동일 규약(get_by_sso_subject
         → get_by_email fallback(재생성 시 새 sub 재조정) → 없으면 create).
@@ -744,6 +775,19 @@ class CognitoSyncService:
             result.users_created += 1
             return new_user
         else:
+            # 잠금+최신화 — 관리자의 수동 이관(transfer_user 는 FOR UPDATE)과
+            # 동기화가 동시에 쓰면 스테일 스냅샷 기준 manual 가드가 수동 배정을
+            # 되돌린다(R21 r3 S2). populate_existing 이 미플러시 변경
+            # (위 email-link 의 sso_subject 갱신)을 덮어쓰지 않게 먼저 flush.
+            # 테스트 더블 세션(AsyncMock)은 단일 실행이라 이 잠금을 건너뛴다.
+            if isinstance(session, AsyncSession):
+                await session.flush()
+                locked = await session.get(
+                    User, existing.id,
+                    with_for_update=True, populate_existing=True,
+                )
+                if locked is not None:
+                    existing = locked
             # 미검증 이메일은 DB 에 싣지 않는다 — 저장된 주소는 ADMIN_EMAILS
             # 폴백 매칭·이메일 조회의 신뢰 근거다.
             if email and email_verified and existing.email != email:
@@ -752,8 +796,25 @@ class CognitoSyncService:
             if existing.display_name != name:
                 existing.display_name = name
                 updated = True
-            role = _effective_role(existing.role, existing.team_id, role, team_id)
-            if existing.team_id != team_id:
+            # role 판정의 "새 팀" 은 실제로 적용될 팀이어야 한다 — manual/preserve
+            # 면 팀이 안 바뀌는데 요청 team_id 기준으로 강등하면 안 된다.
+            kept_team = (
+                existing.team_id
+                if (preserve_existing_team or existing.team_source == "manual")
+                else team_id
+            )
+            role = _effective_role(existing.role, existing.team_id, role, kept_team)
+            # 수동 배정(team_source='manual')은 sync 가 되돌리지 않는다 —
+            # OIDC 로그인 경로(_upsert_user)와 같은 규칙(migration 0048).
+            # preserve_existing_team(sync_group): 단일 그룹 시야로 기존 유저를
+            # 그 팀으로 옮기면 복수 그룹 소속 유저가 마지막 실행 그룹에 따라
+            # 팀을 오간다 — 기존 유저의 팀은 전체 그룹이 보이는 경로(sync_all/
+            # login)만 바꾼다(R21 S11).
+            if (
+                existing.team_id != team_id
+                and existing.team_source != "manual"
+                and not preserve_existing_team
+            ):
                 # transfer_user(user_team_service)와 같은 이관 부수효과(R16) —
                 # 과거엔 team_id 만 바꿔서 ①개별 USER 예산/app 예산이 새 팀에서도
                 # 그대로 따라다니고 ②개별 레이트리밋 설정이 잔존하고 ③게이트웨이
@@ -780,6 +841,7 @@ class CognitoSyncService:
                 cache_out["patterns"].extend(t_patterns)
                 cache_out["ops"].extend(t_ops)
                 existing.team_id = team_id
+                existing.team_source = "sync"
                 updated = True
             if existing.role != role:
                 existing.role = role
@@ -996,14 +1058,18 @@ class CognitoSyncService:
                     username=username, provider=user.provider,
                 )
                 return
-            # 폴백으로만 찾았다 = admin_get_user(Username) 가 못 찾았다. 그런데
-            # federated 유저는 Username 이 "<Provider>_<id>" 라 sub 로 조회하면
-            # UserNotFound 가 난다 — Cognito 에 **살아있는** 사용자를 여기서
-            # 비활성화하면 안 되므로, sub 필터 조회로 실제 삭제를 확인한다.
-            # 확인이 불가하면(예외) fail-closed 로 스킵.
+        result.user_id = str(user.id)
+        if user.provider == settings.OIDC_PROVIDER_NAME and user.is_active:
+            # admin_get_user(Username) 미스 ≠ 삭제 — Username 이 이메일이 아닌 풀
+            # (federated/"<Provider>_<id>")에서는 살아있는 유저가 미스로 나온다.
+            # 실제 비활성화를 할 때만 sub 필터 조회로 삭제를 확인한다
+            # (R21 S10) — 비-OIDC 유저는 어차피 건드리지 않으므로 확인 자체가
+            # 불필요하고, 확인 불가(예외)면 fail-closed 로 건너뛴다.
             try:
                 still_exists = await asyncio.to_thread(
-                    self._user_exists_by_sub, settings.COGNITO_USER_POOL_ID, username
+                    self._user_exists_by_sub,
+                    settings.COGNITO_USER_POOL_ID,
+                    user.sso_subject,
                 )
             except Exception as e:
                 result.errors.append(
@@ -1021,8 +1087,6 @@ class CognitoSyncService:
                 )
                 return
 
-        result.user_id = str(user.id)
-        if user.provider == settings.OIDC_PROVIDER_NAME and user.is_active:
             user.is_active = False
             result.users_deactivated += 1
             # R3-3: 비활성화와 같은 트랜잭션에서 ACTIVE VK 폐기. 부수효과는
@@ -1135,6 +1199,11 @@ class CognitoSyncService:
                         email_verified=email_verified,
                         revoked_out=revoked_local,
                         cache_out=cache_local,
+                        # 단일 그룹 시야 — 복수 그룹 유저가 마지막 실행 그룹으로
+                        # 팀을 옮기며 이관 부수효과가 반복 발화하는 걸 막는다.
+                        # 신규 유저(team_id 는 여전히 초기값으로 들어감)와
+                        # role/is_active 갱신에는 영향 없다.
+                        preserve_existing_team=True,
                     )
                 result.pending_key_revocations.extend(revoked_local)
                 result.pending_cache_deletes.extend(cache_local["keys"])

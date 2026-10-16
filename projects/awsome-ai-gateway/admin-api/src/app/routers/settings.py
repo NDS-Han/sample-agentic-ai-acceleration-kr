@@ -57,12 +57,13 @@ async def set_body_logging(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="SET_BODY_LOGGING",
         resource_type="SystemSetting",
         resource_id="body_logging_enabled",
         changes={"after": {"enabled": enabled}},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
     await session.commit()

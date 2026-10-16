@@ -42,6 +42,21 @@ async def drain_pending_redis(
 
     ``redis`` 를 넘기면 request 없이도 쓸 수 있다 — 스케줄러 등 요청 밖 호출자용.
     """
+    # 테스트 더블(MagicMock/AsyncMock) 세션은 info 가 dict 가 아닐 수 있다.
+    if not isinstance(getattr(session, "info", None), dict):
+        return
+    # 지연 Redis 쓰기 태스크를 먼저 비운다 — publish 대기열이 비어 있거나
+    # redis 가 없으면 조기 반환하므로, 먼저 하지 않으면 비-요청 세션
+    # (스케줄러·sync 워커)의 태스크 기록이 session.info 에 계속 쌓인다
+    # (R21 r4 N3, r5 N1). 요청 경로(CommittingRoute)에서는 이미 비어 있다.
+    from app.core.budget_cache import drain_deferred_redis_writes
+
+    try:
+        await drain_deferred_redis_writes(session)
+    except Exception:
+        # 응답 경로가 아닌 호출자는 실패를 올리지 않는다 — surfaced 실패는
+        # _guarded 가 이미 로그했다.
+        logger.warning("deferred_redis_write_drain_failed", exc_info=True)
     pending = session.info.pop(PENDING_REDIS_KEY, None)
     if not pending:
         return
@@ -100,22 +115,43 @@ async def get_db_session(request: Request) -> AsyncGenerator[AsyncSession, None]
             await session.rollback()
             raise
         else:
-            if session.in_transaction():
-                try:
+            # session.add()만으로는 트랜잭션이 열리지 않는 경우(버전/세션 구성 차이)를
+            # 대비한 안전망 — pending 객체만 남은 세션도 flush 로 트랜잭션을 열어
+            # 커밋 대상으로 만든다(R21 r3).
+            try:
+                if not session.in_transaction() and (
+                    session.new or session.dirty or session.deleted
+                ):
+                    await session.flush()
+                if session.in_transaction():
                     await session.commit()
-                except Exception:
-                    # 여기까지 온 커밋 실패는 응답에 반영할 길이 없다(이미 전송됨).
-                    # 최소한 조용히 사라지지 않게 크게 남긴다.
-                    await session.rollback()
-                    logger.error(
-                        "db.commit_failed_after_response",
-                        path=request.url.path,
-                        method=request.method,
-                        hint="응답은 이미 전송되어 상태코드를 바꿀 수 없다. 스트리밍 응답 경로.",
-                        exc_info=True,
-                    )
-                    raise
-                await drain_pending_redis(session, request)
+            except Exception:
+                # 여기까지 온 커밋/플러시 실패는 응답에 반영할 길이 없다(이미 전송됨).
+                # 최소한 조용히 사라지지 않게 크게 남긴다.
+                await session.rollback()
+                logger.error(
+                    "db.commit_failed_after_response",
+                    path=request.url.path,
+                    method=request.method,
+                    hint="응답은 이미 전송되어 상태코드를 바꿀 수 없다. 스트리밍 응답 경로.",
+                    exc_info=True,
+                )
+                raise
+            # 내부 커밋(핸들러 안 commit)으로 발사된 지연 Redis 쓰기 — 응답이
+            # 이미 나간 뒤라 실패는 로그로만 남긴다. drain_pending_redis 보다
+            # 먼저 불러야 한다 — 거기서도 지연 태스크를 비워(비-요청 호출자용)
+            # surfaced 실패가 warning 으로만 남게 된다(R21 r5 N3).
+            from app.core.budget_cache import drain_deferred_redis_writes
+
+            try:
+                await drain_deferred_redis_writes(session)
+            except Exception:
+                logger.error(
+                    "deferred_redis_write_failed_after_response",
+                    path=request.url.path,
+                    exc_info=True,
+                )
+            await drain_pending_redis(session, request)
 
 
 class CommittingRoute(APIRoute):
@@ -136,6 +172,30 @@ class CommittingRoute(APIRoute):
             response = await original(request)
 
             session: AsyncSession | None = getattr(request.state, SESSION_STATE_ATTR, None)
+            if session is not None:
+                # 핸들러가 내부적으로 commit 한 경우라도 그 커밋으로 발사된 지연
+                # Redis 쓰기는 응답 전에 완료를 보장한다 — issue_key 의
+                # key:vk:{hash} SET 이 응답 뒤에 끝나면 클라이언트의 첫 호출이
+                # 401 로 떨어지고, 실패는 24h 짜리 dead credential 이 된다
+                # (R21 r3 S1). surface_failure=True 쓰기의 예외는 여기서
+                # 올라가 응답을 500 으로 바꾼다 — 클라이언트가 재시도할 수 있다.
+                from app.core.budget_cache import drain_deferred_redis_writes
+
+                try:
+                    await drain_deferred_redis_writes(session)
+                finally:
+                    # surfaced 실패가 500 으로 올라가도 이미 커밋된 데이터의
+                    # publish 는 발송한다 — 큐에는 after_commit 이벤트로만
+                    # enqueue 되므로 미커밋 트랜잭션의 알림은 절대 못 들어온다.
+                    # ⚠️ enqueue_redis_publish 를 커밋 전에 직접 부르는 신규
+                    #    호출자를 두면 그 불변이 깨진다(R21 r6 N2).
+                    await drain_pending_redis(session, request)
+                # session.add() 로만 pending 인 객체가 남았다면 flush 로 트랜잭션을
+                # 연다(autobegin) — autobegin semantics 에 의존하지 않는다.
+                if not session.in_transaction() and (
+                    session.new or session.dirty or session.deleted
+                ):
+                    await session.flush()
             if session is None or not session.in_transaction():
                 return response  # DB 를 안 쓰는 엔드포인트이거나 이미 커밋됨
 
@@ -150,7 +210,16 @@ class CommittingRoute(APIRoute):
             except Exception:
                 await session.rollback()
                 raise  # 아직 응답 전이므로 예외 핸들러가 정상적으로 500 봉투를 만든다
-            await drain_pending_redis(session, request)
+            # 이번 커밋으로 발사된 지연 Redis 쓰기 — 응답 전 완료 보장(S1).
+            # drain_pending_redis 보다 먼저 불러야 한다 — 거기서도 지연 태스크를
+            # 비우는데(비-요청 호출자용) 실패를 로그로만 남겨 surfaced 예외가
+            # 여기로 올라오지 않는다.
+            from app.core.budget_cache import drain_deferred_redis_writes
+
+            try:
+                await drain_deferred_redis_writes(session)
+            finally:
+                await drain_pending_redis(session, request)
 
             return response
 

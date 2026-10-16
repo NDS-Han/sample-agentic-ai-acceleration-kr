@@ -49,8 +49,8 @@ async def _verify_github_signature(request: Request) -> None:
 
 
 class ProductivityEventRequest(BaseModel):
-    user_id: str
-    team_id: str | None = None
+    user_id: uuid.UUID
+    team_id: uuid.UUID | None = None
     event_type: ProductivityEventType
     session_id: str | None = None
     model_alias: str | None = None
@@ -106,8 +106,8 @@ async def record_productivity_event(
 
     event = ProductivityEvent(
         id=uuid.uuid4(),
-        user_id=uuid.UUID(body.user_id),
-        team_id=uuid.UUID(body.team_id) if body.team_id else None,
+        user_id=body.user_id,
+        team_id=body.team_id,
         event_type=body.event_type,
         session_id=body.session_id,
         model_alias=body.model_alias,

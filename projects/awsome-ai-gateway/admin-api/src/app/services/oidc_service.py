@@ -30,7 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser
 from app.core.config import get_settings
-from app.core.oidc_identity import derive_role
+from app.core.oidc_identity import admin_mapping_configured, derive_role
 from app.core.oidc_verifier import OIDCConfigError, OIDCVerifier, OIDCVerifyError
 from app.models.auth import Department, Team, User, UserRole
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, PeriodType
@@ -198,24 +198,41 @@ class OIDCService:
         )
 
         # 7. 기존 사용자의 팀 변경 → transfer_user (모든 cache/RL/budget hook)
-        if not was_created and team_changed:
+        #    단 team_source='manual'(관리자가 admin-ui 로 배정)인 사용자는
+        #    되돌리지 않는다 — 그룹-유도 팀으로의 자동 복귀가 수동 배정을
+        #    지우고 이관 부수효과를 다시 발화한다(migration 0048).
+        if not was_created and team_changed and user.team_source != "manual":
             actor = CurrentUser(
                 user_id=user.id, email=user.email, role=user.role, team_id=team_id,
             )
+            # 롤백은 savepoint 안에서 건드린 ORM 객체를 expire 시킨다 — except
+            # 이후에도 쓰는 값(user.id 등)은 미리 값으로 빼둔다(R21 r2 S-2).
+            uid = user.id
             try:
-                await self._user_team_service.transfer_user(
-                    session,
-                    user_id=user.id,
-                    new_team_id=team_id,
-                    actor=actor,
-                    ip_address=ip_address,
-                    request_id=request_id,
-                )
+                async with session.begin_nested():
+                    await self._user_team_service.transfer_user(
+                        session,
+                        user_id=uid,
+                        new_team_id=team_id,
+                        actor=actor,
+                        ip_address=ip_address,
+                        request_id=request_id,
+                        team_source="sync",
+                        from_sync=True,
+                    )
                 # transfer_user 가 user.team_id 업데이트
             except Exception:
+                # savepoint 롤백으로 부분 이관(예산만 비활성) 상태를 되돌린다 —
+                # 잡지 않던 예외가 반쪽 커밋을 남기던 결함(R21 S8).
+                # expire 된 user 를 아래 is_active/team_id 접근 전에 복구한다 —
+                # 안 하면 MissingGreenlet 으로 로그인 자체가 500 이 된다.
+                try:
+                    await session.refresh(user)
+                except Exception:
+                    pass
                 logger.exception(
                     "oidc.transfer_user_failed",
-                    user_id=str(user.id),
+                    user_id=str(uid),
                     new_team_id=str(team_id),
                 )
                 # 실패해도 인증은 진행 (다음 로그인 때 재시도)
@@ -592,6 +609,15 @@ class OIDCService:
         # 되돌아가지 않도록 보존한다. ADMIN_GROUPS 매칭(승격) / 제외(강등)는 그대로 반영.
         if existing.role == UserRole.TEAM_LEADER and role == UserRole.DEVELOPER:
             role = UserRole.TEAM_LEADER
+        # auth.py:429 와 같은 규칙 — ADMIN 출처가 IdP 로 설정되지 않은 환경에서는
+        # DB role 이 유일한 원천이라 클레임 기준 강등을 하면 수동 부여 admin 이
+        # 첫 로그인/다음 sync 에서 잠긴다.
+        elif (
+            existing.role == UserRole.ADMIN
+            and role != UserRole.ADMIN
+            and not admin_mapping_configured()
+        ):
+            role = UserRole.ADMIN
         role_changed = existing.role != role
         if role_changed:
             logger.info(

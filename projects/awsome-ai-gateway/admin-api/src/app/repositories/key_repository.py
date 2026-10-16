@@ -206,6 +206,49 @@ class KeyRepository:
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_revocable_for_team(
+        self,
+        team_id: uuid.UUID,
+        *,
+        cursor: tuple[datetime, uuid.UUID] | None = None,
+        limit: int = 500,
+    ) -> list[VirtualKey]:
+        """팀 멤버의 폐기 대상 VK — ACTIVE + 아직 유효한 EXPIRED.
+
+        ``list_revocable_for_users`` 와 같은 판정을 팀 축으로. EXPIRED 행의
+        Redis key:vk 엔트리는 expires_at 까지 살아 있어 게이트웨이가 계속
+        인증하므로 force-reauth 경로에서 빠뜨리면 안 된다.
+        """
+        from app.models.auth import User
+
+        now = datetime.now(timezone.utc)
+        stmt = (
+            select(VirtualKey)
+            .join(User, VirtualKey.user_id == User.id)
+            .where(User.team_id == team_id)
+            .where(
+                or_(
+                    VirtualKey.status == KeyStatus.ACTIVE,
+                    and_(
+                        VirtualKey.status == KeyStatus.EXPIRED,
+                        VirtualKey.expires_at > now,
+                    ),
+                )
+            )
+            .order_by(VirtualKey.created_at.desc(), VirtualKey.id.desc())
+        )
+        if cursor is not None:
+            c_ts, c_id = cursor
+            stmt = stmt.where(
+                or_(
+                    VirtualKey.created_at < c_ts,
+                    and_(VirtualKey.created_at == c_ts, VirtualKey.id < c_id),
+                )
+            )
+        stmt = stmt.limit(limit)
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def revoke_many(
         self, key_ids: list[uuid.UUID], revoked_at
     ) -> int:

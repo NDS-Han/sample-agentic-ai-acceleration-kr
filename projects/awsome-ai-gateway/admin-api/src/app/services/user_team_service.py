@@ -243,6 +243,7 @@ class UserTeamService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="CREATE_DEPARTMENT",
             resource_type="Department",
             resource_id=str(dept.id),
@@ -284,6 +285,7 @@ class UserTeamService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="CREATE_TEAM",
             resource_type="Team",
             resource_id=str(team.id),
@@ -345,6 +347,7 @@ class UserTeamService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="SET_TEAM_LEADER",
             resource_type="Team",
             resource_id=str(team_id),
@@ -396,7 +399,28 @@ class UserTeamService:
             # 오류 대신 포인터만 다시 맞춘다. 이 경로가 없으면 깨진 포인터를
             # 되돌릴 API 가 없다.
             if team.leader_user_id == user_id:
+                before_pointer = team.leader_user_id
                 _repoint_leader(team, exclude_user_id=user_id)
+                # 리더십 변경인데 감사 행이 없던 결함 — 스테일 포인터 정리도
+                # 누가 언제 바꿨는지 남아야 한다(R21 N8).
+                await audit_logger.log(
+                    session,
+                    actor_user_id=actor.user_id,
+                    actor_role=actor.role.value,
+                    service_token_id=getattr(actor, "service_token_id", None),
+                    action="UNSET_TEAM_LEADER",
+                    resource_type="Team",
+                    resource_id=str(team_id),
+                    changes={
+                        "stale_pointer_fix": True,
+                        "before": {"leader_user_id": str(before_pointer) if before_pointer else None},
+                        "after": {
+                            "leader_user_id": str(team.leader_user_id) if team.leader_user_id else None
+                        },
+                    },
+                    ip_address=ip_address,
+                    request_id=request_id,
+                )
                 return TeamResponse(
                     id=str(team.id),
                     name=team.name,
@@ -417,6 +441,7 @@ class UserTeamService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="UNSET_TEAM_LEADER",
             resource_type="Team",
             resource_id=str(team_id),
@@ -445,13 +470,89 @@ class UserTeamService:
         actor: CurrentUser,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
+        team_source: str = "manual",
+        from_sync: bool = False,
     ) -> UserResponse:
+        """``team_source`` — 'manual'(관리자 이관, 기본)이면 이후 OIDC 로그인·
+        Cognito sync 가 그룹-유도 팀으로 되돌리지 않는다. 'sync' 는 동기화
+        경로가 부르는 값(또 다시 덮일 수 있다)이고, 관리자 API 가 'sync' 를
+        명시하면 핀 해제(동기화 관리 복귀)다.
+
+        ``from_sync`` — True(OIDC/Cognito 동기화 경로)이면 'manual' 사용자를
+        되돌리지 않는다. 관리자 API 호출은 False 로 둬야 한다 — 값이 'sync' 인
+        요청이 이 가드에 걸리면 관리자의 핀 해제가 200 조용히 무시된다(R21 r4)."""
         repo = UserRepository(session)
 
         user = await repo.get_user(user_id)
         if user is None:
             raise NotFoundError("User", str(user_id))
+        if isinstance(session, AsyncSession):
+            # FOR UPDATE + populate_existing — OIDC 로그인/sync 와 관리자 이관이
+            # 같은 행을 동시에 쓰면 아이덴티티맵의 스테일 객체 기준으로 team_id /
+            # team_source 가 갱신돼 어느 한쪽 쓰기가 유실된다(R21 r3 S2).
+            # populate_existing 은 미플러시 변경을 덮어쓰므로(OIDC 경로가
+            # _upsert_user 의 갱신을 달고 들어온다) 잠금 전에 flush 해 보존한다.
+            # 테스트 더블 세션(MagicMock)은 단일 실행이라 이 잠금을 건너뛴다.
+            await session.flush()
+            user = await session.get(
+                User, user_id, with_for_update=True, populate_existing=True
+            )
+            if user is None:
+                raise NotFoundError("User", str(user_id))
         old_team_id = user.team_id
+
+        # 잠금 획득 뒤의 수동-배정 재확인 — 우리가 잠그기 전에 커밋된 수동
+        # 배정(admin-ui)이 있으면 sync 호출은 그 배정을 되돌리지 않는다.
+        # ⚠️ from_sync 로 caller 를 구분한다 — 관리자 API 가 명시한
+        #    team_source='sync'(핀 해제)가 이 가드에 걸리면 안 된다.
+        if from_sync and user.team_source == "manual":
+            return self._to_user_response(user)
+
+        # 같은 팀 재저장은 이관 부수효과(collect_team_transfer_side_effects)를
+        # 발화하지 않는다 — 개별 예산/USER rate-limit 비활성화가 재저장만으로
+        # 사용자 제한을 초기화하던 결함(M4). 단 team_source 가 실제로 바뀌면
+        # (수동 고정 또는 핀 해제) 그 변경만 반영하고 감사한다 — 조용한 핀은
+        # 이후 sync 동작을 바꾸므로 감사가 필요하다(R21 r2 S-3, r3 N2).
+        if new_team_id == old_team_id:
+            if user.team_source != team_source:
+                prev_source = user.team_source
+                user.team_source = team_source
+                await audit_logger.log(
+                    session,
+                    actor_user_id=actor.user_id,
+                    actor_role=actor.role.value,
+                    service_token_id=getattr(actor, "service_token_id", None),
+                    action="TRANSFER_USER",
+                    resource_type="User",
+                    resource_id=str(user_id),
+                    changes={
+                        "before": {
+                            "team_id": str(old_team_id) if old_team_id else None,
+                            "team_source": prev_source,
+                        },
+                        "after": {
+                            "team_id": str(new_team_id),
+                            "team_source": team_source,
+                        },
+                        "note": "same-team: team_source only",
+                    },
+                    ip_address=ip_address,
+                    request_id=request_id,
+                )
+            return self._to_user_response(user)
+        # 관리자가 team 을 바꾸면서 'sync' 를 명시하는 건 거부한다 — 다음
+        # OIDC 로그인에서 그룹-유도 팀으로 다시 옮겨져 이관 부수효과(예산/RL
+        # 비활성화)가 두 번 발화한다. 'sync' 요청은 같은 팀의 핀 해제(위의
+        # no-op 분기)에만 유효하다(R21 r5 N7).
+        if team_source == "sync" and not from_sync:
+            raise ValidationError(
+                "team_source='sync' unpin은 같은 팀 요청에만 유효합니다 — "
+                "cross-team 이관은 'manual' 을 사용하세요"
+            )
+        # 존재하지 않는 team_id 는 FK 위반 500 이라 먼저 확인해 404 로 돌린다.
+        new_team = await repo.get_team(new_team_id)
+        if new_team is None:
+            raise NotFoundError("Team", str(new_team_id))
 
         # 팀 리더십은 팀별 속성이라 이관되지 않는다 — 그대로 두면 옛 팀의 leader_user_id
         # 가 이제 그 팀 소속도 아닌 사람을 계속 가리키고(스테일 포인터), 동시에
@@ -480,8 +581,10 @@ class UserTeamService:
             key_service=self._key_service,
         )
 
-        # Transfer team
+        # Transfer team — 출처 표지도 함께 갱신한다(migration 0048).
         user = await repo.update_user_team(user_id, new_team_id)
+        if user is not None:
+            user.team_source = team_source
 
         # R4-A2-3: DEL/swap 은 commit 후로 지연 — CommittingRoute 가 핸들러
         # 반환 후 commit 하므로 여기서 즉시 DEL 하면 DEL→commit 창에 게이트웨이가
@@ -498,6 +601,7 @@ class UserTeamService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="TRANSFER_USER",
             resource_type="User",
             resource_id=str(user_id),

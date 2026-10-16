@@ -294,6 +294,7 @@ class BudgetService:
                         session,
                         actor_user_id=actor.user_id,
                         actor_role=actor.role.value,
+                        service_token_id=getattr(actor, "service_token_id", None),
                         action="SEED_BUDGET_SPENT",
                         resource_type="BudgetUsage",
                         resource_id=f"{scope}:{sid}:{client or ''}:{item.period}",
@@ -498,7 +499,10 @@ class BudgetService:
             # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
-            alert_thresholds=sorted(set(data.alert_thresholds)),
+            # model_fields_set 판정으로 보존된 기존값을 써야 한다 —
+            # data.alert_thresholds 는 키 미전송 시 스키마 기본값이라
+            # DB(source of truth, migration 0041)가 기본값으로 덮어졌다.
+            alert_thresholds=sorted(set(alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -525,6 +529,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("SET_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
@@ -618,6 +623,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("SET_TEAM_DEFAULT_CAP", confirm),
             resource_type="BudgetConfig",
             resource_id=str(cfg.id),
@@ -673,6 +679,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="DELETE_TEAM_BUDGET_CONFIRMED",
             resource_type="BudgetConfig",
             resource_id=str(cfg.id),
@@ -802,6 +809,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("EQUAL_SPLIT_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(cfg.id),
@@ -862,6 +870,16 @@ class BudgetService:
                     "self_allocation_forbidden",
                     403,
                 )
+            # 리더는 다른 리더/어드민의 예산도 건드릴 수 없다 — 팀에 리더가
+            # 여럿이면 A→B, B→A 상호 배정으로 self-allocation 규칙(D-13)을
+            # 우회할 수 있다. 대상 검사는 자기팀 검사 뒤에 온다.
+            if user.role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+                raise BudgetRuleError(
+                    "Team leaders cannot modify budgets of leaders/admins "
+                    "(leader_target_forbidden) — an admin must do it.",
+                    "leader_target_forbidden",
+                    403,
+                )
 
         # 유저 단위 직렬화 — 총액·앱별 쓰기가 엇갈려 I-2(app_c ≤ A_u)가 깨지는 것을 막는다.
         await _lock_user_budget_key(session, user_id)
@@ -915,7 +933,10 @@ class BudgetService:
             # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
-            alert_thresholds=sorted(set(data.alert_thresholds)),
+            # model_fields_set 판정으로 보존된 기존값을 써야 한다 —
+            # data.alert_thresholds 는 키 미전송 시 스키마 기본값이라
+            # DB(source of truth, migration 0041)가 기본값으로 덮어졌다.
+            alert_thresholds=sorted(set(alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -936,6 +957,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("SET_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
@@ -970,6 +992,16 @@ class BudgetService:
                 raise BudgetRuleError(
                     "Team leaders cannot delete their own budget (self_allocation_forbidden).",
                     "self_allocation_forbidden",
+                    403,
+                )
+            # 리더는 다른 리더/어드민의 예산도 건드릴 수 없다 — 팀에 리더가
+            # 여럿이면 A→B, B→A 상호 배정으로 self-allocation 규칙(D-13)을
+            # 우회할 수 있다. 대상 검사는 자기팀 검사 뒤에 온다.
+            if user.role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+                raise BudgetRuleError(
+                    "Team leaders cannot modify budgets of leaders/admins "
+                    "(leader_target_forbidden) — an admin must do it.",
+                    "leader_target_forbidden",
                     403,
                 )
 
@@ -1024,6 +1056,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("DELETE_USER_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(existing.id),
@@ -1087,6 +1120,16 @@ class BudgetService:
                 raise BudgetRuleError(
                     "Team leaders cannot set their own budget (self_allocation_forbidden).",
                     "self_allocation_forbidden",
+                    403,
+                )
+            # 리더는 다른 리더/어드민의 예산도 건드릴 수 없다 — 팀에 리더가
+            # 여럿이면 A→B, B→A 상호 배정으로 self-allocation 규칙(D-13)을
+            # 우회할 수 있다. 대상 검사는 자기팀 검사 뒤에 온다.
+            if user.role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+                raise BudgetRuleError(
+                    "Team leaders cannot modify budgets of leaders/admins "
+                    "(leader_target_forbidden) — an admin must do it.",
+                    "leader_target_forbidden",
                     403,
                 )
 
@@ -1159,7 +1202,10 @@ class BudgetService:
             # ⚠️ migration 0041 이전에는 이 값을 담을 컬럼이 없어서 Redis 설정 키에만
             #    써졌다 — 그 키의 TTL 은 300초이고, 만료되면 gateway-proxy 의 재수화가
             #    기본값으로 되돌렸다. 즉 운영자 설정이 5분만 살아 있었다.
-            alert_thresholds=sorted(set(data.alert_thresholds)),
+            # model_fields_set 판정으로 보존된 기존값을 써야 한다 —
+            # data.alert_thresholds 는 키 미전송 시 스키마 기본값이라
+            # DB(source of truth, migration 0041)가 기본값으로 덮어졌다.
+            alert_thresholds=sorted(set(alert_thresholds)),
             is_active=True,
         )
         await repo.upsert_config(config)
@@ -1184,6 +1230,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("SET_USER_CLIENT_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(config.id),
@@ -1229,6 +1276,16 @@ class BudgetService:
                     "self_allocation_forbidden",
                     403,
                 )
+            # 리더는 다른 리더/어드민의 예산도 건드릴 수 없다 — 팀에 리더가
+            # 여럿이면 A→B, B→A 상호 배정으로 self-allocation 규칙(D-13)을
+            # 우회할 수 있다. 대상 검사는 자기팀 검사 뒤에 온다.
+            if user.role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+                raise BudgetRuleError(
+                    "Team leaders cannot modify budgets of leaders/admins "
+                    "(leader_target_forbidden) — an admin must do it.",
+                    "leader_target_forbidden",
+                    403,
+                )
 
         repo = BudgetRepository(session)
         existing = await repo.get_active_app_config(BudgetScope.USER, user_id, client)
@@ -1254,6 +1311,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="CLEAR_USER_CLIENT_BUDGET",
             resource_type="BudgetConfig",
             resource_id=str(existing.id),
@@ -1333,7 +1391,7 @@ class BudgetService:
         member_ids = {m.id for m in team.members}
         for alloc in data.allocations:
             _check_cent_precision(alloc.allocated_usd)
-            uid = uuid.UUID(alloc.user_id)
+            uid = alloc.user_id
             if uid not in member_ids:
                 raise BudgetRuleError(
                     f"User {uid} is not a member of team {team_id} "
@@ -1341,28 +1399,40 @@ class BudgetService:
                     "user_not_in_team",
                     403,
                 )
-            # D-13: 리더는 자기 예산을 배정 목록에 넣을 수 없다.
-            if actor.role == UserRole.TEAM_LEADER and uid == actor.user_id:
-                raise BudgetRuleError(
-                    "Team leaders cannot allocate a budget to themselves "
-                    "(self_allocation_forbidden).",
-                    "self_allocation_forbidden",
-                    403,
+            # D-13: 리더는 자기 예산을 배정 목록에 넣을 수 없다. 다른
+            # 리더/어드민에게도 배정 불가 — 상호 배정으로 D-13 우회 방지.
+            if actor.role == UserRole.TEAM_LEADER:
+                member_role = next(
+                    (m.role for m in team.members if m.id == uid), None
                 )
+                if uid == actor.user_id:
+                    raise BudgetRuleError(
+                        "Team leaders cannot allocate a budget to themselves "
+                        "(self_allocation_forbidden).",
+                        "self_allocation_forbidden",
+                        403,
+                    )
+                if member_role in (UserRole.TEAM_LEADER, UserRole.ADMIN):
+                    raise BudgetRuleError(
+                        "Team leaders cannot allocate budgets to leaders/admins "
+                        "(leader_target_forbidden).",
+                        "leader_target_forbidden",
+                        403,
+                    )
 
         # D-1: ΣA_u ≤ T 합계 검증은 없다 — CAP 모델은 초과 약정을 허용한다.
 
         # 데드락 방지: 유저 키를 정렬된 순서로 잠근다.
         sorted_allocs = sorted(data.allocations, key=lambda a: a.user_id)
         for alloc in sorted_allocs:
-            await _lock_user_budget_key(session, uuid.UUID(alloc.user_id))
+            await _lock_user_budget_key(session, alloc.user_id)
 
         # 배치를 쓰기 전에 전수 검증한다 — 부분 성공(일부 유저만 새 cap)은
         # 관리자가 보는 상태와 DB 가 어긋나므로 허용하지 않는다.
         period = current_kst_period()
         warnings: list[dict] = []
         for alloc in sorted_allocs:
-            uid = uuid.UUID(alloc.user_id)
+            uid = alloc.user_id
             # I-2: 새 A_u 가 기존 app_c 보다 낮아지면 모순 → 배치 전체 거부.
             max_app = await repo.max_app_budget(uid)
             if max_app is not None and alloc.allocated_usd < max_app:
@@ -1391,7 +1461,7 @@ class BudgetService:
         # Batch upsert user budgets
         cache_keys: list[str] = []
         for alloc in sorted_allocs:
-            uid = uuid.UUID(alloc.user_id)
+            uid = alloc.user_id
             config = BudgetConfig(
                 id=uuid.uuid4(),
                 scope=BudgetScope.USER,
@@ -1415,10 +1485,11 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action=_confirmed_action("ALLOCATE_TEAM_BUDGET", confirm),
             resource_type="BudgetConfig",
             resource_id=str(team_id),
-            changes={"after": {"allocations": [a.model_dump() for a in data.allocations]}},
+            changes={"after": {"allocations": [a.model_dump(mode="json") for a in data.allocations]}},
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -2070,6 +2141,7 @@ class BudgetService:
                 session,
                 actor_user_id=actor.user_id,
                 actor_role=actor.role.value,
+                service_token_id=getattr(actor, "service_token_id", None),
                 action="SET_AUTO_DOWNGRADE",
                 resource_type="DowngradePolicy",
                 resource_id=str(scope_id),
@@ -2185,12 +2257,13 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="SET_AUTO_DOWNGRADE",
             resource_type="DowngradePolicy",
             resource_id=str(scope_id),
             changes={"after": {
                 "enabled": data.enabled,
-                "rules": [r.model_dump() for r in data.rules],
+                "rules": [r.model_dump(mode="json") for r in data.rules],
             }},
             ip_address=ip_address,
             request_id=request_id,
@@ -2221,6 +2294,7 @@ class BudgetService:
             session,
             actor_user_id=actor.user_id,
             actor_role=actor.role.value,
+            service_token_id=getattr(actor, "service_token_id", None),
             action="DELETE_AUTO_DOWNGRADE",
             resource_type="DowngradePolicy",
             resource_id=str(scope_id),

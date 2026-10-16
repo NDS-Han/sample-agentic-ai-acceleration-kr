@@ -130,7 +130,7 @@ async def exchange_oidc_jwt(
             device_name=body.device_name,
             sso_session_expires_at=body.sso_session_expires_at,
             ip_address=ip,
-            request_id=request.headers.get("x-request-id", ""),
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         )
     except OIDCAuthError as e:
         raise _oidc_error(401, "invalid_token", str(e))

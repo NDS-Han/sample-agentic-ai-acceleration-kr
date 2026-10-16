@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import uuid
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, Field
 
@@ -13,21 +15,26 @@ from app.schemas.common import PaginatedResponse, UserRole
 
 
 class DepartmentCreateRequest(BaseModel):
-    name: str = Field(max_length=255)
-    org_id: str | None = None  # defaults to the single org in MVP
+    name: str = Field(min_length=1, max_length=255)
+    org_id: uuid.UUID | None = None  # defaults to the single org in MVP
 
 
 class TeamCreateRequest(BaseModel):
-    name: str = Field(max_length=255)
-    department_id: str
+    name: str = Field(min_length=1, max_length=255)
+    department_id: uuid.UUID
 
 
 class SetLeaderRequest(BaseModel):
-    user_id: str
+    user_id: uuid.UUID
 
 
 class TransferUserRequest(BaseModel):
-    team_id: str
+    team_id: uuid.UUID
+    # 'manual'(기본): 관리자 배정 — 이후 Cognito/OIDC 그룹 동기화가 되돌리지
+    # 않는다. 같은 팀 재저장으로도 현재 팀이 수동 고정된다. 'sync' 는 핀 해제 —
+    # 다음 로그인/sync 부터 그룹-유도 팀이 다시 적용된다. 단 같은 팀 요청에만
+    # 유효하다 — 다른 팀으로 옮기며 'sync' 를 주면 400(R21 r5 N7).
+    team_source: Literal["manual", "sync"] = "manual"
 
 
 # ── Responses ──

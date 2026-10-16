@@ -35,7 +35,7 @@ async def get_rate_limit_tree(
 async def get_rate_limit_usage(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -45,14 +45,16 @@ async def get_rate_limit_usage(
     from app.services.rate_limit_service import RateLimitService
 
     svc: RateLimitService = request.app.state.rate_limit_service
-    return await svc.get_live_usage(session, scope, scope_id)
+    # 서비스 계약은 str — UUID 객체를 넘기면 내부의 uuid.UUID(scope_id) 변환이
+    # AttributeError 를 내 tracked 플래그가 항상 None 이 된다(R21 r3 S3).
+    return await svc.get_live_usage(session, scope, str(scope_id))
 
 
 @router.get("/usage-trend/{scope}/{scope_id}")
 async def get_rate_limit_usage_trend(
     request: Request,
     scope: str,
-    scope_id: str,
+    scope_id: uuid.UUID,
     window: str = "24h",
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -64,13 +66,15 @@ async def get_rate_limit_usage_trend(
     from app.services.rate_limit_service import RateLimitService
 
     svc: RateLimitService = request.app.state.rate_limit_service
-    return await svc.get_usage_trend(session, scope, scope_id, window)
+    # str 계약 — UUID 를 넘기면 uuid.UUID(scope_id) 가 AttributeError 를 내
+    # 트렌드 엔드포인트가 항상 available:false 로 죽는다(R21 r3 S3).
+    return await svc.get_usage_trend(session, scope, str(scope_id), window)
 
 
 @router.put("/user/{user_id}", response_model=RateLimitResponse)
 async def set_user_rate_limit(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     body: RateLimitSetRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -80,18 +84,18 @@ async def set_user_rate_limit(
     svc: RateLimitService = request.app.state.rate_limit_service
     return await svc.set_user_rate_limit(
         session,
-        user_id=uuid.UUID(user_id),
+        user_id=user_id,
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.put("/team/{team_id}", response_model=RateLimitResponse)
 async def set_team_rate_limit(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: RateLimitSetRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -99,18 +103,18 @@ async def set_team_rate_limit(
     svc: RateLimitService = request.app.state.rate_limit_service
     return await svc.set_team_rate_limit(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.get("/user/{user_id}", response_model=RateLimitScopeStatus)
 async def get_user_rate_limit(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -119,14 +123,14 @@ async def get_user_rate_limit(
 
     svc: RateLimitService = request.app.state.rate_limit_service
     return await svc.get_rate_limit_status(
-        session, scope=RateLimitScope.USER, scope_id=uuid.UUID(user_id)
+        session, scope=RateLimitScope.USER, scope_id=user_id
     )
 
 
 @router.get("/team/{team_id}", response_model=RateLimitScopeStatus)
 async def get_team_rate_limit(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -134,14 +138,14 @@ async def get_team_rate_limit(
 
     svc: RateLimitService = request.app.state.rate_limit_service
     return await svc.get_rate_limit_status(
-        session, scope=RateLimitScope.TEAM, scope_id=uuid.UUID(team_id)
+        session, scope=RateLimitScope.TEAM, scope_id=team_id
     )
 
 
 @router.delete("/user/{user_id}", status_code=204)
 async def delete_user_rate_limit(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -152,17 +156,17 @@ async def delete_user_rate_limit(
     await svc.delete_rate_limit(
         session,
         scope=RateLimitScope.USER,
-        scope_id=uuid.UUID(user_id),
+        scope_id=user_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.delete("/team/{team_id}", status_code=204)
 async def delete_team_rate_limit(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -173,10 +177,10 @@ async def delete_team_rate_limit(
     await svc.delete_rate_limit(
         session,
         scope=RateLimitScope.TEAM,
-        scope_id=uuid.UUID(team_id),
+        scope_id=team_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -195,5 +199,5 @@ async def set_global_rate_limit(
         data=body,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )

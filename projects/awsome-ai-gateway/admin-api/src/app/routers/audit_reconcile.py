@@ -232,8 +232,39 @@ async def invocation_log_record(
             "본문 조회가 비활성 상태입니다 (BEDROCK_INVOCATION_LOG_BODIES_ENABLED=false)",
         )
 
+    async def _audit_body_view(found: bool | None, error: str | None = None) -> None:
+        if not include_bodies:
+            return
+        # 조회 성공/실패/오류 무관하게 남긴다 — 오류 경로의 미기록이
+        # "본문 열람 시도는 무조건 감사된다"는 계약을 깨던 결함.
+        # 실패(미발견 404)·오류(4xx/5xx) 경로는 세션 롤백과 함께 버려지므로 큐로
+        # 보낸다. 성공(found=True)은 응답이 정상 커밋되므로 세션에 묶어 큐
+        # 유실(포화/배치 실패) 없이 기록한다(R21 r2).
+        await audit_logger.log(
+            session,
+            queue_only=found is not True,
+            actor_user_id=admin.user_id,
+            actor_role=admin.role.value,
+            service_token_id=getattr(admin, "service_token_id", None),
+            action="VIEW_INVOCATION_LOG_BODY",
+            resource_type="BedrockInvocationLog",
+            resource_id=bedrock_request_id[:256],
+            changes={
+                "log_group": getattr(svc, "log_group", None),
+                "region": getattr(svc, "region", None),
+                "found": found,
+                "window_hours": hours,
+                **({"error": error[:200]} if error else {}),
+            },
+            result="SUCCESS" if found else "FAILURE",
+            ip_address=request.client.host if request.client else "0.0.0.0",
+            request_id=getattr(request.state, "request_id", "")
+            or request.headers.get("x-request-id", ""),
+        )
+
     now = datetime.now(timezone.utc)
     log_start, log_end = padded_window(now - timedelta(hours=hours), now, pad_minutes=10)
+    svc = None
     try:
         svc = _build_invocation_log_service()
         record = await svc.fetch_record(
@@ -243,31 +274,16 @@ async def invocation_log_record(
             include_bodies=include_bodies,
         )
     except ValueError as exc:
+        await _audit_body_view(found=None, error=str(exc))
         raise HTTPException(400, str(exc)) from exc
     except InvocationLogNotConfigured as exc:
+        await _audit_body_view(found=None, error=str(exc))
         raise HTTPException(503, str(exc)) from exc
     except InvocationLogQueryError as exc:
+        await _audit_body_view(found=None, error=str(exc))
         raise HTTPException(502, str(exc)) from exc
 
-    if include_bodies:
-        # 조회 성공/실패 무관하게 남긴다 — "없더라" 도 열람 시도의 사실이다.
-        await audit_logger.log(
-            session,
-            actor_user_id=admin.user_id,
-            actor_role=admin.role.value,
-            action="VIEW_INVOCATION_LOG_BODY",
-            resource_type="BedrockInvocationLog",
-            resource_id=bedrock_request_id[:256],
-            changes={
-                "log_group": svc.log_group,
-                "region": svc.region,
-                "found": record is not None,
-                "window_hours": hours,
-            },
-            result="SUCCESS" if record is not None else "FAILURE",
-            ip_address=request.client.host if request.client else "0.0.0.0",
-            request_id=request.headers.get("x-request-id", ""),
-        )
+    await _audit_body_view(found=record is not None)
 
     if record is None:
         # 404 의 의미를 좁혀 준다: Mantle plane 호출이면 레코드는 애초에 존재하지 않는다.

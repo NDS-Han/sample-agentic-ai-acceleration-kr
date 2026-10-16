@@ -636,12 +636,15 @@ class TestForceReauthTeam:
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
         team_id = uuid.uuid4()
-        vk1 = MagicMock(id=uuid.uuid4())
-        vk2 = MagicMock(id=uuid.uuid4())
-        vk3 = MagicMock(id=uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        vk1 = MagicMock(id=uuid.uuid4(), created_at=now)
+        vk2 = MagicMock(id=uuid.uuid4(), created_at=now)
+        vk3 = MagicMock(id=uuid.uuid4(), created_at=now)
 
         with patch("app.services.key_service.KeyRepository") as KRepo:
-            KRepo.return_value.list_keys = AsyncMock(return_value=[vk1, vk2, vk3])
+            KRepo.return_value.list_revocable_for_team = AsyncMock(
+                side_effect=[[vk1, vk2, vk3], []]
+            )
             with patch.object(key_service, "revoke_key", new=AsyncMock()) as mock_revoke:
                 with patch("app.services.key_service.audit_logger.log", new=AsyncMock()):
                     count = await key_service.force_reauth_team(
@@ -649,10 +652,9 @@ class TestForceReauthTeam:
                     )
 
         assert count == 3
-        # list_keys 는 team_id + status=ACTIVE 로 호출됐어야 함
-        call_kwargs = KRepo.return_value.list_keys.call_args.kwargs
-        assert call_kwargs["team_id"] == team_id
-        assert call_kwargs["status"] == KeyStatus.ACTIVE
+        # list_revocable_for_team 은 team_id 로 호출됐어야 함 (ACTIVE + 유효 EXPIRED)
+        call_args = KRepo.return_value.list_revocable_for_team.call_args
+        assert call_args.args[0] == team_id
         # revoke_key 가 각 VK 에 대해 한 번씩 호출됨
         assert mock_revoke.call_count == 3
         revoked_key_ids = {c.kwargs["key_id"] for c in mock_revoke.call_args_list}
@@ -665,7 +667,7 @@ class TestForceReauthTeam:
         team_id = uuid.uuid4()
 
         with patch("app.services.key_service.KeyRepository") as KRepo:
-            KRepo.return_value.list_keys = AsyncMock(return_value=[])
+            KRepo.return_value.list_revocable_for_team = AsyncMock(return_value=[])
             with patch.object(key_service, "revoke_key", new=AsyncMock()) as mock_revoke:
                 with patch("app.services.key_service.audit_logger.log", new=AsyncMock()):
                     count = await key_service.force_reauth_team(
@@ -681,16 +683,19 @@ class TestForceReauthTeam:
     ):
         """한 건 revoke 실패해도 나머지 처리 계속, count 는 성공한 것만."""
         team_id = uuid.uuid4()
-        vk_ok1 = MagicMock(id=uuid.uuid4())
-        vk_fail = MagicMock(id=uuid.uuid4())
-        vk_ok2 = MagicMock(id=uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        vk_ok1 = MagicMock(id=uuid.uuid4(), created_at=now)
+        vk_fail = MagicMock(id=uuid.uuid4(), created_at=now)
+        vk_ok2 = MagicMock(id=uuid.uuid4(), created_at=now)
 
         async def revoke_side_effect(*args, **kwargs):
             if kwargs["key_id"] == vk_fail.id:
                 raise RuntimeError("redis down")
 
         with patch("app.services.key_service.KeyRepository") as KRepo:
-            KRepo.return_value.list_keys = AsyncMock(return_value=[vk_ok1, vk_fail, vk_ok2])
+            KRepo.return_value.list_revocable_for_team = AsyncMock(
+                side_effect=[[vk_ok1, vk_fail, vk_ok2], []]
+            )
             with patch.object(key_service, "revoke_key", new=AsyncMock(side_effect=revoke_side_effect)) as mock_revoke:
                 with patch("app.services.key_service.audit_logger.log", new=AsyncMock()):
                     count = await key_service.force_reauth_team(
@@ -761,6 +766,8 @@ class TestIssueKeyDedup:
             repo = MockRepo.return_value
             repo.list_active_for_user = AsyncMock(return_value=[existing])
             repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
+            # dedup repair-in-place 경로가 FOR UPDATE 재조회에 쓴다(R21 r5 S1).
+            repo.get_by_id = AsyncMock(return_value=existing)
             MockUserRepo.return_value.get_user = AsyncMock(
                 return_value=_stub_user(user_id, team_id=None)
             )
@@ -810,6 +817,81 @@ class TestIssueKeyDedup:
 
         repo.expire_and_create.assert_called_once()
         assert result.expires_at <= short_ttl
+
+    async def test_dedup_skips_key_whose_redis_entry_is_missing(
+        self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser,
+        mock_redis: AsyncMock
+    ):
+        """r4 M2/r5 S1 회귀: 커밋됐지만 key:vk:{hash} SET 이 실패/취소된 키를
+        dedup 이 그대로 재반환하면 200-후-401 dead credential. 회전(신규 발급)
+        도 마찬가지 — 직전 응답의 SET 이 in-flight 일 수 있다. 엔트리가 없으면
+        FOR UPDATE 재확인 후 멱등 SETEX 로 **in-place 보수**하고 같은 키를
+        돌려준다."""
+        user_id = uuid.uuid4()
+        existing, raw_key = self._existing_vk(key_service, age_s=2, ttl_h=1)
+        mock_redis.exists = AsyncMock(return_value=0)  # key:vk 없음
+
+        repo, result = await self._issue_and_get_repo(
+            key_service, mock_session, admin_user, user_id, existing,
+        )
+
+        # 회전이 아니라 보수 — 같은 키를 돌려주고 SETEX 로 Redis 엔트리를 심는다.
+        repo.expire_and_create.assert_not_called()
+        repo.get_by_id.assert_awaited_once_with(existing.id, for_update=True)
+        assert result.key_id == str(existing.id)
+        assert result.virtual_key == raw_key
+        mock_redis.setex.assert_called()
+
+    async def test_dedup_rotates_when_locked_key_no_longer_active(
+        self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser,
+        mock_redis: AsyncMock
+    ):
+        """r5 S1 대조군: EXISTS miss 이후 FOR UPDATE 재조회에서 이미 폐기된
+        키면 보수하지 않고(부활 금지) 회전으로 새 키를 발급한다."""
+        user_id = uuid.uuid4()
+        existing, _ = self._existing_vk(key_service, age_s=2, ttl_h=1)
+        mock_redis.exists = AsyncMock(return_value=0)
+        revoked = MagicMock(spec=VirtualKey)
+        revoked.status = KeyStatus.REVOKED
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo, \
+             patch("app.services.key_service.UserAllowedModelRepository") as MockUam, \
+             patch("app.services.key_service.UserAllowedClientRepository") as MockUac, \
+             patch("app.services.key_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.list_active_for_user = AsyncMock(return_value=[existing])
+            repo.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
+            repo.get_by_id = AsyncMock(return_value=revoked)
+            MockUserRepo.return_value.get_user = AsyncMock(
+                return_value=_stub_user(user_id, team_id=None)
+            )
+            MockUam.return_value.list_by_user = AsyncMock(return_value=[])
+            MockUac.return_value.list_by_user = AsyncMock(return_value=[])
+            mock_audit.log = AsyncMock()
+
+            result = await key_service.issue_key(
+                mock_session, user_id=user_id, actor=admin_user,
+            )
+
+        repo.expire_and_create.assert_called_once()
+        assert result.key_id != str(existing.id)
+
+    async def test_dedup_reuses_key_when_redis_entry_alive(
+        self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser,
+        mock_redis: AsyncMock
+    ):
+        """대조군 — key:vk:{hash} 가 살아있으면 dedup 은 여전히 재사용한다."""
+        user_id = uuid.uuid4()
+        existing, raw_key = self._existing_vk(key_service, age_s=2, ttl_h=1)
+        mock_redis.exists = AsyncMock(return_value=1)
+
+        repo, result = await self._issue_and_get_repo(
+            key_service, mock_session, admin_user, user_id, existing,
+        )
+
+        repo.expire_and_create.assert_not_called()
+        assert result.virtual_key == raw_key
 
     async def test_dedup_ignores_keys_older_than_window(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser,
@@ -896,16 +978,21 @@ class TestPendingRedisPublish:
         # 실패 키는 발행까지만 간 뒤 죽는다 — SAVEPOINT 롤백과 같은 상황 재현
         failing_id = vk_fail.id
 
-        async def fake_revoke(session, *, key_id, actor, ip_address="", request_id="", bulk=False):
+        async def fake_revoke(
+            session, *, key_id, actor, ip_address="", request_id="", bulk=False, notify=True
+        ):
             vk = vk_fail if key_id == failing_id else vk_ok
-            await key_service._publish_key_revoked(session, vk, actor, bulk=bulk)
+            if notify:
+                await key_service._publish_key_revoked(session, vk, actor, bulk=bulk)
             if key_id == failing_id:
                 raise RuntimeError("audit insert failed mid-revoke")
 
         with patch("app.services.key_service.KeyRepository") as KRepo, \
              patch.object(key_service, "revoke_key", new=AsyncMock(side_effect=fake_revoke)), \
              patch("app.services.key_service.audit_logger.log", new=AsyncMock()):
-            KRepo.return_value.list_keys = AsyncMock(return_value=[vk_ok, vk_fail])
+            KRepo.return_value.list_revocable_for_team = AsyncMock(
+                side_effect=[[vk_ok, vk_fail], []]
+            )
             count = await key_service.force_reauth_team(
                 mock_session, team_id=team_id, actor=admin_user
             )

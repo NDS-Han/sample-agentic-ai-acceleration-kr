@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from decimal import Decimal
 
 from typing import Annotated
@@ -62,12 +63,14 @@ class EqualSplitRequest(BaseModel):
 
 
 class AllocateBudgetItem(BaseModel):
-    user_id: str
+    user_id: uuid.UUID
     allocated_usd: Decimal = Field(ge=0, le=_BUDGET_MAX)
 
 
 class AllocateBudgetRequest(BaseModel):
-    allocations: list[AllocateBudgetItem] = Field(min_length=1)
+    # 배치 상한 — 아이템당 행 잠금+검증 쿼리가 붙으므로 무제한 요청은
+    # cost-recorder 와 락 경합을 일으킨다(R21 S9).
+    allocations: list[AllocateBudgetItem] = Field(min_length=1, max_length=500)
     # confirmation_required(409) 응답 뒤의 확인 재요청 표시.
     confirm: bool = False
 
@@ -81,7 +84,9 @@ class SeedSpentItem(BaseModel):
 
 
 class SeedSpentRequest(BaseModel):
-    items: list[SeedSpentItem] = Field(min_length=1)
+    # 무제한 배치는 budget_usages 행 잠금을 배치 내내 유지해 정산 워커와
+    # 경합한다 — 배치 상한(R21 S9).
+    items: list[SeedSpentItem] = Field(min_length=1, max_length=500)
 
 
 class SeedSpentResult(BaseModel):

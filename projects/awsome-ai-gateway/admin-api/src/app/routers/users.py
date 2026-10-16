@@ -52,10 +52,10 @@ async def create_department(
     return await svc.create_department(
         session,
         name=body.name,
-        org_id=uuid.UUID(body.org_id) if body.org_id else None,
+        org_id=body.org_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -70,17 +70,17 @@ async def create_team(
     return await svc.create_team(
         session,
         name=body.name,
-        department_id=uuid.UUID(body.department_id),
+        department_id=body.department_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.put("/teams/{team_id}/leader", response_model=TeamResponse)
 async def set_team_leader(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: SetLeaderRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -88,19 +88,19 @@ async def set_team_leader(
     svc: UserTeamService = request.app.state.user_team_service
     return await svc.set_team_leader(
         session,
-        team_id=uuid.UUID(team_id),
-        user_id=uuid.UUID(body.user_id),
+        team_id=team_id,
+        user_id=body.user_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.delete("/teams/{team_id}/leaders/{user_id}", response_model=TeamResponse)
 async def unset_team_leader(
     request: Request,
-    team_id: str,
-    user_id: str,
+    team_id: uuid.UUID,
+    user_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -110,18 +110,18 @@ async def unset_team_leader(
     svc: UserTeamService = request.app.state.user_team_service
     return await svc.unset_team_leader(
         session,
-        team_id=uuid.UUID(team_id),
-        user_id=uuid.UUID(user_id),
+        team_id=team_id,
+        user_id=user_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
 @router.post("/teams/{team_id}/force-reauth")
 async def force_reauth_team(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -135,10 +135,10 @@ async def force_reauth_team(
     svc: KeyService = request.app.state.key_service
     revoked_count = await svc.force_reauth_team(
         session,
-        team_id=uuid.UUID(team_id),
+        team_id=team_id,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {"revoked_count": revoked_count}
 
@@ -146,7 +146,7 @@ async def force_reauth_team(
 @router.put("/users/{user_id}/team", response_model=UserResponse)
 async def transfer_user(
     request: Request,
-    user_id: str,
+    user_id: uuid.UUID,
     body: TransferUserRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -154,11 +154,12 @@ async def transfer_user(
     svc: UserTeamService = request.app.state.user_team_service
     return await svc.transfer_user(
         session,
-        user_id=uuid.UUID(user_id),
-        new_team_id=uuid.UUID(body.team_id),
+        user_id=user_id,
+        new_team_id=body.team_id,
         actor=admin,
+        team_source=body.team_source,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -216,20 +217,20 @@ async def search_users(
 @router.get("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
 async def list_team_allowed_models(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     from app.services.team_allowed_model_service import TeamAllowedModelService
 
     svc: TeamAllowedModelService = request.app.state.team_allowed_model_service
-    return await svc.list_for_team(session, team_id=uuid.UUID(team_id))
+    return await svc.list_for_team(session, team_id=team_id)
 
 
 @router.put("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
 async def set_team_allowed_models(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: AllowedModelsSetRequest,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -237,14 +238,14 @@ async def set_team_allowed_models(
     from app.services.team_allowed_model_service import TeamAllowedModelService
 
     svc: TeamAllowedModelService = request.app.state.team_allowed_model_service
-    tid = uuid.UUID(team_id)
+    tid = team_id
     res = await svc.set_for_team(
         session,
         team_id=tid,
         model_aliases=body.model_aliases,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     # R3-8: 캐시 무효화는 commit 후 — DEL→commit 창의 구 정책 재캐시 방지.
     await session.commit()
@@ -255,20 +256,20 @@ async def set_team_allowed_models(
 @router.delete("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
 async def clear_team_allowed_models(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     from app.services.team_allowed_model_service import TeamAllowedModelService
 
     svc: TeamAllowedModelService = request.app.state.team_allowed_model_service
-    tid = uuid.UUID(team_id)
+    tid = team_id
     res = await svc.clear_for_team(
         session,
         team_id=tid,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_for_team(session, tid)
@@ -288,32 +289,32 @@ def _client_scope_svc(request: Request):
 @router.get("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def list_team_allowed_clients(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     return await _client_scope_svc(request).list_for_team(
-        session, team_id=uuid.UUID(team_id)
+        session, team_id=team_id
     )
 
 
 @router.put("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def set_team_allowed_clients(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     body: AllowedClientsBody,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = _client_scope_svc(request)
-    tid = uuid.UUID(team_id)
+    tid = team_id
     res = await svc.set_for_team(
         session,
         team_id=tid,
         clients=body.clients,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_for_team(session, tid)
@@ -323,18 +324,18 @@ async def set_team_allowed_clients(
 @router.delete("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def clear_team_allowed_clients(
     request: Request,
-    team_id: str,
+    team_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = _client_scope_svc(request)
-    tid = uuid.UUID(team_id)
+    tid = team_id
     res = await svc.clear_for_team(
         session,
         team_id=tid,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_for_team(session, tid)
@@ -344,32 +345,32 @@ async def clear_team_allowed_clients(
 @router.get("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def list_org_allowed_clients(
     request: Request,
-    org_id: str,
+    org_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     return await _client_scope_svc(request).list_for_org(
-        session, org_id=uuid.UUID(org_id)
+        session, org_id=org_id
     )
 
 
 @router.put("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def set_org_allowed_clients(
     request: Request,
-    org_id: str,
+    org_id: uuid.UUID,
     body: AllowedClientsBody,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = _client_scope_svc(request)
-    oid = uuid.UUID(org_id)
+    oid = org_id
     res = await svc.set_for_org(
         session,
         org_id=oid,
         clients=body.clients,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_for_org(session, oid)
@@ -379,18 +380,18 @@ async def set_org_allowed_clients(
 @router.delete("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
 async def clear_org_allowed_clients(
     request: Request,
-    org_id: str,
+    org_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     svc = _client_scope_svc(request)
-    oid = uuid.UUID(org_id)
+    oid = org_id
     res = await svc.clear_for_org(
         session,
         org_id=oid,
         actor=admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_for_org(session, oid)
@@ -438,6 +439,7 @@ async def sync_cognito(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="COGNITO_SYNC_ALL",
         resource_type="CognitoSync",
         resource_id="all",
@@ -449,7 +451,7 @@ async def sync_cognito(
             "teams_deleted": result.teams_deleted,
         }},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
     return {
@@ -512,6 +514,7 @@ async def sync_cognito_user(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="COGNITO_SYNC_USER",
         resource_type="CognitoSync",
         resource_id=username,
@@ -522,7 +525,7 @@ async def sync_cognito_user(
             "users_deactivated": result.users_deactivated,
         }},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {
         "username": username,
@@ -552,6 +555,7 @@ async def sync_cognito_group(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="COGNITO_SYNC_GROUP",
         resource_type="CognitoSync",
         resource_id=groupname,
@@ -561,7 +565,7 @@ async def sync_cognito_group(
             "users_updated": result.users_updated,
         }},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return {
         "groupname": groupname,
@@ -575,8 +579,8 @@ async def sync_cognito_group(
 @router.get("/users", response_model=UserListResponse)
 async def list_users(
     request: Request,
-    team_id: str | None = None,
-    department_id: str | None = None,
+    team_id: uuid.UUID | None = None,
+    department_id: uuid.UUID | None = None,
     is_active: bool | None = None,
     email: str | None = None,
     cursor: str | None = None,
@@ -594,8 +598,8 @@ async def list_users(
     svc: UserTeamService = request.app.state.user_team_service
     items, has_more = await svc.list_users(
         session,
-        team_id=uuid.UUID(team_id) if team_id else None,
-        department_id=uuid.UUID(department_id) if department_id else None,
+        team_id=team_id if team_id else None,
+        department_id=department_id if department_id else None,
         is_active=is_active,
         email=email,
         cursor=cursor,
@@ -613,7 +617,7 @@ class AllowedClientsBody(BaseModel):
 
 
 class AllowedClientsResponse(BaseModel):
-    user_id: str
+    user_id: uuid.UUID
     clients: list[str]   # [] = both allowed (default)
 
 
@@ -657,12 +661,13 @@ async def set_allowed_clients(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="SET_USER_ALLOWED_CLIENTS",
         resource_type="UserAllowedClients",
         resource_id=str(user_id),
         changes={"after": {"clients": clients}},
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
@@ -687,11 +692,12 @@ async def clear_allowed_clients(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="CLEAR_USER_ALLOWED_CLIENTS",
         resource_type="UserAllowedClients",
         resource_id=str(user_id),
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
 
 
@@ -701,7 +707,7 @@ async def clear_allowed_clients(
 
 
 class UserAllowedModelsResponse(BaseModel):
-    user_id: str
+    user_id: uuid.UUID
     model_aliases: list[str]  # [] = override 없음 → 팀 정책으로 폴백
 
 
@@ -734,7 +740,7 @@ async def set_user_allowed_models(
         aliases = await svc.set(
             user_id, body.model_aliases, admin,
             ip_address=request.client.host if request.client else "0.0.0.0",
-            request_id=request.headers.get("x-request-id", ""),
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
         )
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -763,7 +769,7 @@ async def clear_user_allowed_models(
     await svc.clear(
         user_id, admin,
         ip_address=request.client.host if request.client else "0.0.0.0",
-        request_id=request.headers.get("x-request-id", ""),
+        request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
     await session.commit()
     await svc.invalidate_user_vk_cache(user_id)
