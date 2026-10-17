@@ -238,7 +238,10 @@ class VKAuthStrategy:
                             sa_select(User.is_active).where(User.id == cached_ctx.user_id)
                         )
                         is_active = result.scalar_one_or_none()
-                        if is_active is False:
+                        # `is False` 는 행 없음(None — hard-deleted 유저)을 통과
+                        # 시킨다 — 삭제된 유저가 VK 캐시 TTL(300s) 동안 인증된다.
+                        # None 도 차단한다(R22 r1 N1).
+                        if not is_active:
                             try:
                                 await redis.delete(f"key:cache:vk:{key_hash}", f"key:vk:{key_hash}")
                             except Exception:
@@ -543,7 +546,14 @@ class JWTAuthStrategy:
 
         return AuthContext(
             user_id=claims["user_id"],
-            team_id=claims["team_id"],
+            # 팀 이관 후 JWT 클레임은 만료까지 옛 팀을 가리킨다 — 예산/레이트리밋
+            # 스코프가 옛 팀으로 계속 청구된다. DB 에서 읽은 team_id 를 우선하고
+            # db=None(DB_DEGRADED)일 때만 클레임으로 폴백한다(R22 r1 N6).
+            team_id=(
+                str(user_row.team_id)
+                if db is not None and user_row is not None and user_row.team_id
+                else claims["team_id"]
+            ),
             dept_id=claims["dept_id"],
             roles=roles,
             auth_type=AuthType.JWT,

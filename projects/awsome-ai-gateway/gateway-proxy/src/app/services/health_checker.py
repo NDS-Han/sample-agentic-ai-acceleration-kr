@@ -162,14 +162,13 @@ class HealthChecker:
           2. 복구 시점의 budget_usages 스냅샷은 스풀 재발행+워커 flush 가 끝나기
              전이라 열화 중 사용분을 아직 모른다 — 그래서 창을 열어 재시도한다.
 
-        ``budget_rebuild.lua`` 는 additive(`SET = base + cur`) + NX 락이다 —
-        base 에 ``(db + pending) - cur`` 를 넘기면 최종값이 정확히
-        ``db + pending`` 이 되면서, 호출 사이에 끼어든 reserve/settle 델타도
-        더해져 보존된다(check 경로의 동일 경합 계약). 단 usage 베이스는 0
-        으로 하한 클램프한다 — 활성 유저는 스트림 파이프라인 깊이만큼 항상
-        cur > db 이므로, 음수 교정은 정당하게 계상된 사용분을 깎아 매 틱
-        fail-open 창을 연다. resvsum 은 마커 스캔이 진실이라 양방향으로
-        ``pending`` 에 맞춘다.
+        ``budget_reconcile.lua`` 는 교정을 eval 안에서 원자 수행한다 —
+        마커 키들을 KEYS 로 넘겨 Lua 가 현재값을 읽어 live pending 을 계산하고,
+        orphan(resvsum - live) 되돌림 · resvsum 양방향 보정 · usage 를
+        ``db + live`` 플로어로 올리되 절대 내리지 않는다(활성 유저의 미flush
+        델타를 깎아 매 틱 fail-open 창을 여는 일을 막는다). 호출 직전의
+        resvsum 스냅샷(퀴에센스)이 eval 순간과 다르면 orphan 산정을
+        건너뛰어 스캔·eval 사이의 예약/정산 경합을 배제한다.
 
         행 없는 카운터(예약만 있는 유저 등)는 건드리지 않는다 — 그 카운터는
         이미 db(0)+pending 과 일치한다.

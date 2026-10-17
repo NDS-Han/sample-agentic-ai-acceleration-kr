@@ -102,7 +102,7 @@ def _make_cb(*, open_pmids: set[str] | None = None, probe_wins: bool = True) -> 
     async def _failure(redis, pmid: str) -> bool:
         return False
 
-    async def _success(redis, pmid: str) -> bool:
+    async def _success(redis, pmid: str, probe_token: str | None = None) -> bool:
         return False
 
     cb.is_open = AsyncMock(side_effect=_is_open)
@@ -776,7 +776,7 @@ class TestCircuitScopeKeysBreaker:
         scoped_orig = f"acct:arn:aws:iam::333:role/x:ap-northeast-2|{original_config.provider_model_id}"
         scoped_fb = f"acct:arn:aws:iam::333:role/x:ap-northeast-2|{fallback_config.provider_model_id}"
         cb.record_failure.assert_awaited_with(None, scoped_orig)
-        cb.record_success.assert_awaited_with(None, scoped_fb)
+        cb.record_success.assert_awaited_with(None, scoped_fb, probe_token=None)
         # 게이트도 같은 스코프 키로 조회한다.
         checked = {c.args[1] for c in cb.is_open.await_args_list}
         assert checked == {scoped_orig, scoped_fb}
@@ -806,4 +806,4 @@ class TestCircuitScopeKeysBreaker:
             result = await run_fallback_loop(**kwargs)
 
         assert result.status == 200
-        cb.record_success.assert_awaited_with(None, original_config.provider_model_id)
+        cb.record_success.assert_awaited_with(None, original_config.provider_model_id, probe_token=None)

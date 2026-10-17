@@ -140,6 +140,13 @@ class Settings(BaseSettings):
     # 월 롤오버까지 남으므로, 이 값은 "누수 마커의 추적 가능 기간"이다.
     budget_reservation_ttl_seconds: int = 14400  # 4h
 
+    # pendingidx 인덱스 롤아웃 웜업 — 인덱스 미포함 마커를 쓰는 구버전 파드가
+    # 남아 있을 수 있는 창(배포 시각 + marker TTL) 동안 rebuild 가 인덱스 대신
+    # 키스페이스 SCAN 을 쓴다. 전 파드가 인덱스 버전으로 올라간 뒤에는 False 로
+    # 두면 된다 — 그러면 Redis 플러시 직후(rebuild 가 가장 몰리는 창)에도
+    # 웜업이 재시작돼 SCAN 폭풍이 도는 일이 없다(R22 r4 N5).
+    budget_pendingidx_warmup: bool = True
+
     # Reliability
     usage_buffer_max: int = 10_000
     background_task_max_retries: int = 3

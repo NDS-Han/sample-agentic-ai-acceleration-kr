@@ -441,7 +441,9 @@ async def _handle_openai(request: Request, path: str):
         if not (200 <= status < 300):
             await release_reservations(redis=redis, state=state, auth_context=auth_context)
 
-        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+        async def _log_body_stream(
+                sse_text: str, log_status: str, truncated: bool = False
+            ) -> None:
             """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
@@ -455,6 +457,7 @@ async def _handle_openai(request: Request, path: str):
                     status=log_status,
                     request_body=body,
                     sse_text=sse_text,
+                    truncated=truncated,
                     user_id=auth_context.user_id if auth_context else None,
                     team_id=auth_context.team_id if auth_context else None,
                     sso_subject=auth_context.sso_subject if auth_context else None,
@@ -926,13 +929,18 @@ async def _handle_responses(request: Request):
                 )
 
         async def _ws_cb_record(status: int, *, conn_error: bool = False) -> None:
-            nonlocal _ws_probe_used
+            nonlocal _ws_probe_used, _ws_probe_token
             if _ws_cb_key is None:
                 return
             _ws_probe_used = True  # 실제 상류 호출 결과 — 슬롯은 소비된 것이다.
             try:
                 if 200 <= status < 300:
-                    await _cb.record_success(redis, _ws_cb_key)
+                    # 토큰은 첫 성공 기록과 함께 소비 — 다음 턴의 성공이 사이에
+                    # 재오픈된 회로를 지우지 못하게(R22 r3 S1).
+                    _token, _ws_probe_token = _ws_probe_token, None
+                    await _cb.record_success(
+                        redis, _ws_cb_key, probe_token=_token
+                    )
                 elif status in (502, 503) or conn_error:
                     await _cb.record_failure(redis, _ws_cb_key)
             except Exception:
@@ -1003,7 +1011,9 @@ async def _handle_responses(request: Request):
         #    같은 이유다. 루프는 턴마다 별개의 Bedrock 호출을 하므로 단일 요청 id 가
         #    이 레코드의 조인 키가 되지 못한다. 하나를 골라 넣으면 대조 리포트가 1:N 을
         #    1:1 로 오판한다.
-        async def _ws_log_stream(sse_text: str, log_status: str) -> None:
+        async def _ws_log_stream(
+                sse_text: str, log_status: str, truncated: bool = False
+            ) -> None:
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
                 return
@@ -1016,6 +1026,7 @@ async def _handle_responses(request: Request):
                     status=log_status,
                     request_body=body,
                     sse_text=sse_text,
+                    truncated=truncated,
                     user_id=auth_context.user_id if auth_context else None,
                     team_id=auth_context.team_id if auth_context else None,
                     sso_subject=auth_context.sso_subject if auth_context else None,
@@ -1211,7 +1222,9 @@ async def _handle_responses(request: Request):
                 status=usage_status_of(outcome, status),
             )
 
-        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+        async def _log_body_stream(
+                sse_text: str, log_status: str, truncated: bool = False
+            ) -> None:
             """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
@@ -1225,6 +1238,7 @@ async def _handle_responses(request: Request):
                     status=log_status,
                     request_body=body,
                     sse_text=sse_text,
+                    truncated=truncated,
                     user_id=auth_context.user_id if auth_context else None,
                     team_id=auth_context.team_id if auth_context else None,
                     sso_subject=auth_context.sso_subject if auth_context else None,

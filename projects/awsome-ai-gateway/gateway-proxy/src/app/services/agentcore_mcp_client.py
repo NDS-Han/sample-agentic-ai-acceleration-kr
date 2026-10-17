@@ -54,7 +54,17 @@ class AgentCoreMcpTimeout(AgentCoreMcpError):
 
 
 class AgentCoreMcpProtocolError(AgentCoreMcpError):
-    """A JSON-RPC error, malformed response, or tool-not-found."""
+    """A JSON-RPC error, malformed response, or tool-not-found.
+
+    ``transient=True`` 는 일시 장애(HTTP 429/5xx) — 세션/툴 디스커버리는 유효하므로
+    초기화를 리셋하지 않는다. transient 오류까지 리셋하면 스로틀링 중 매 호출이
+    3-call 핸드셰이크를 재수행해 이미 과부하인 엔드포인트를 세 배로 두드린다
+    (R22 r1 S5). tool-not-found/404 같은 구조적 오류만 리셋 대상.
+    """
+
+    def __init__(self, message: str, *, transient: bool = False) -> None:
+        super().__init__(message)
+        self.transient = transient
 
 
 @dataclass
@@ -130,6 +140,10 @@ class AgentCoreMcpClient:
         self._tool_name: Optional[str] = None
         self._tool_input_schema: Optional[dict] = None
         self._mcp_session_id: Optional[str] = None
+        #: 초기화 세대 — 비일시 프로토콜 오류가 세션을 리셋할 때, 리셋 시점의
+        #: 세대와 호출이 잡은 세대가 다르면(사이에 재핸드셰이크 성공) 리셋을
+        #: 건너뛴다. 늦게 도착한 실패가 새 세션을 지우는 것을 막는다(R22 r3 N8).
+        self._session_gen = 0
         self._cached_creds: Optional[_CachedCreds] = None
         self._rpc_id = 0
 
@@ -205,17 +219,25 @@ class AgentCoreMcpClient:
         except httpx.HTTPError as e:
             raise AgentCoreMcpError(f"AgentCore MCP transport error on {method}: {e}") from e
 
-        # Capture (or refresh) the session id the gateway may hand back on initialize.
-        sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get("mcp-session-id")
-        if sid:
-            self._mcp_session_id = sid
+        # Capture the session id — initialize 응답에서만. 다른 호출의 늦은
+        # 응답이 헤더를 에코하면 재핸드셰이크(새 세대) 뒤에 도착한 구버전 응답이
+        # 새 세션 id 를 덮어쓸 수 있다(R22 r4 N4).
+        if method == "initialize":
+            sid = resp.headers.get("Mcp-Session-Id") or resp.headers.get(
+                "mcp-session-id"
+            )
+            if sid:
+                self._mcp_session_id = sid
 
         if is_notification:
             return None
 
         if resp.status_code >= 400:
             raise AgentCoreMcpProtocolError(
-                f"AgentCore MCP HTTP {resp.status_code} on {method}: {resp.text[:300]}"
+                f"AgentCore MCP HTTP {resp.status_code} on {method}: {resp.text[:300]}",
+                # 429/5xx 는 일시 — 세션 초기화는 유효하다. 404(tool/session
+                # 소실)·4xx 는 구조적 오류로 리셋 대상.
+                transient=resp.status_code == 429 or resp.status_code >= 500,
             )
 
         message = self._parse_response(resp, method)
@@ -307,6 +329,9 @@ class AgentCoreMcpClient:
         Safe to cancel mid-way: ``_initialized`` only becomes True at the very end, and the
         caller's ``async with`` releases the lock.
         """
+        # 재핸드셰이크는 항상 새 세션 — 이전 세션 id 를 헤더로내면 서버가
+        # 만료된 세션의 initialize 를 거절할 수 있다(R22 r2 S8).
+        self._mcp_session_id = None
         await self._post_jsonrpc(
             "initialize",
             {
@@ -335,6 +360,7 @@ class AgentCoreMcpClient:
             (t.get("inputSchema") for t in tools if t.get("name") == name), None
         )
         self._initialized = True
+        self._session_gen += 1
         self._handshake_failed_at = None
         logger.info("agentcore_mcp.initialized", tool=name)
         return name
@@ -363,6 +389,7 @@ class AgentCoreMcpClient:
         tool_result). Empty results are NOT an error.
         """
         tool_name = await self.ensure_initialized()
+        gen_at_call = self._session_gen
         q = (query or "").strip()[:200]  # connector limit: query <= 200 chars
         if not q:
             raise AgentCoreMcpProtocolError("AgentCore MCP: empty query")
@@ -372,10 +399,18 @@ class AgentCoreMcpClient:
             result = await self._post_jsonrpc(
                 "tools/call", {"name": tool_name, "arguments": {"query": q, "maxResults": n}}
             )
-        except AgentCoreMcpProtocolError:
-            # Tool set may have changed under us → invalidate and let the next call re-discover.
-            self._initialized = False
-            self._tool_name = None
+        except AgentCoreMcpProtocolError as e:
+            # Tool set may have changed under us → invalidate and let the next call
+            # re-discover. 단 일시 오류(429/5xx)는 세션을 유지한다 — 스로틀링 중
+            # 리셋하면 모든 검색이 핸드셰이크를 재수행해 부하를 키운다(R22 r1 S5).
+            # 이 호출이 잡은 세대와 현재 세대가 다르면 이미 재핸드셰이크가
+            # 성공한 것 — 늦게 도착한 실패로 새 세션을 지우지 않는다(R22 r3 N8).
+            if not e.transient and self._session_gen == gen_at_call:
+                self._initialized = False
+                self._tool_name = None
+                # 죽은 세션 id 를 들고 재핸드셰이크하면 서버가 initialize 를
+                # 거절해 네거티브 캐시 TTL 만큼 반복 실패한다(R22 r2 S8).
+                self._mcp_session_id = None
             raise
 
         # MCP tools/call can return a successful JSON-RPC envelope but signal a TOOL-level

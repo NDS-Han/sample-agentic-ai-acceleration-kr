@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -13,6 +12,7 @@ from starlette.requests import Request
 
 from app.config import get_settings
 from app.providers.bedrock_adapter import _redact_arns
+from app.services.body_log_records import BoundedCapture
 from app.providers.openai_usage import extract_chat_usage, extract_responses_usage
 from app.schemas.domain import TokenUsage
 
@@ -24,13 +24,13 @@ OnUsage = Callable[[TokenUsage, float | None], Awaitable[None]] | None
 # None 반환 시 추정 불가 (cost_recorder는 0 토큰 + estimated=True로 기록).
 TokenizerHook = Callable[[str], Awaitable[int | None]] | None
 
-#: 스트림 종료 훅 — ``(누적된 원본 SSE 프레임 전문, status)``.
+#: 스트림 종료 훅 — ``(누적된 원본 SSE 프레임 텍스트, status, truncated)``.
 #: status 는 ``"success"`` 또는 ``"partial"``(disconnect / timeout / 중간 예외).
+#: truncated 는 누적이 ``_MAX_ACCUMULATED_CHARS`` 를 넘겨 절단됐음을 뜻한다.
 #:
-#: ⚠️ 이 훅이 설정되면 제너레이터가 **모든 프레임을 메모리에 누적한다.** 동시 스트림 수 ×
-#:    응답 크기만큼 메모리를 쓴다. 그래서 훅이 None 이면 한 바이트도 쌓지 않는다 —
-#:    본문 로깅이 꺼진 상태의 비용이 0 이어야 한다.
-OnComplete = Callable[[str, str], Awaitable[None]] | None
+#: ⚠️ 누적은 ``BoundedCapture`` 로 상한이 있지만(1M chars) 훅이 None 이면 한
+#:    바이트도 쌓지 않는다 — 본문 로깅이 꺼진 상태의 비용이 0 이어야 한다.
+OnComplete = Callable[[str, str, bool], Awaitable[None]] | None
 
 
 # fire-and-forget 백그라운드 태스크의 강한 참조 집합. asyncio 는 create_task
@@ -196,9 +196,10 @@ async def bedrock_anthropic_sse_stream(
     # (과거 동작: 두 경로가 함수 말미의 _fire_on_usage 를 건너뛰는 return 이었다).
     usage_fired = False
     # 본문 로깅용 원본 SSE 프레임 누적. on_complete 가 없으면 아무것도 쌓지 않는다.
-    accumulated_frames: list[str] = []
-    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
-    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # BoundedCapture — 장문 스트림이 진단 버퍼를 무제한으로 쓰지 않게 상한
+    # (R22 r2 S3). 클라이언트 스트림은 그대로, 로그 텍스트만 절단된다.
+    accumulated_frames = BoundedCapture()
+    # 멀티바이트 경계 안전 디코딩은 BoundedCapture 의 내장 디코더가 담당한다.
     complete_fired = False
 
     def _format(chunk: bytes) -> bytes:
@@ -315,7 +316,7 @@ async def bedrock_anthropic_sse_stream(
             return
         complete_fired = True
         try:
-            await on_complete("".join(accumulated_frames), status)
+            await on_complete(accumulated_frames.text, status, accumulated_frames.truncated)
         except Exception:
             logger.exception("on_complete_callback_failed")
 
@@ -408,7 +409,7 @@ async def bedrock_anthropic_sse_stream(
 
             _frame = _format(chunk)
             if on_complete is not None:
-                accumulated_frames.append(_frame_decoder.decode(_frame))
+                accumulated_frames.feed(_frame)
             yield _frame
 
     except (asyncio.CancelledError, GeneratorExit):
@@ -488,10 +489,10 @@ async def openai_sse_stream(
     iterator = chunk_iter.__aiter__()
     client_disconnected = False
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
-    accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
+    # 본문 로깅용(on_complete 없으면 미사용) — BoundedCapture 상한(R22 r2 S3).
+    accumulated_frames = BoundedCapture()
     complete_fired = False
-    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
-    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # 멀티바이트 경계 안전 디코딩은 BoundedCapture 의 내장 디코더가 담당한다.
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
@@ -611,7 +612,7 @@ async def openai_sse_stream(
             return
         complete_fired = True
         try:
-            await on_complete("".join(accumulated_frames), status)
+            await on_complete(accumulated_frames.text, status, accumulated_frames.truncated)
         except Exception:
             logger.exception("on_complete_callback_failed")
 
@@ -700,11 +701,7 @@ async def openai_sse_stream(
             if u := _scan_usage(chunk):
                 latest_usage = u
             if on_complete is not None:
-                accumulated_frames.append(
-                    _frame_decoder.decode(chunk)
-                    if isinstance(chunk, bytes)
-                    else str(chunk)
-                )
+                accumulated_frames.feed(chunk)
             yield chunk
 
     except (asyncio.CancelledError, GeneratorExit):
@@ -782,10 +779,10 @@ async def responses_sse_stream(
     iterator = chunk_iter.__aiter__()
     client_disconnected = False
     usage_fired = False  # 과금 멱등 가드 — bedrock_anthropic_sse_stream 과 동일 계약
-    accumulated_frames: list[str] = []  # 본문 로깅용(on_complete 없으면 미사용)
+    # 본문 로깅용(on_complete 없으면 미사용) — BoundedCapture 상한(R22 r2 S3).
+    accumulated_frames = BoundedCapture()
     complete_fired = False
-    # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 깨지지 않게.
-    _frame_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+    # 멀티바이트 경계 안전 디코딩은 BoundedCapture 의 내장 디코더가 담당한다.
 
     def _emit_error_chunk(err_type: str, message: str) -> bytes:
         payload = {"error": {"type": err_type, "message": message}}
@@ -847,7 +844,7 @@ async def responses_sse_stream(
             return
         complete_fired = True
         try:
-            await on_complete("".join(accumulated_frames), status)
+            await on_complete(accumulated_frames.text, status, accumulated_frames.truncated)
         except Exception:
             logger.exception("on_complete_callback_failed")
 
@@ -953,11 +950,7 @@ async def responses_sse_stream(
 
             _frame = _process(chunk)
             if on_complete is not None:
-                accumulated_frames.append(
-                    _frame_decoder.decode(_frame)
-                    if isinstance(_frame, bytes)
-                    else str(_frame)
-                )
+                accumulated_frames.feed(_frame)
             yield _frame
 
     except (asyncio.CancelledError, GeneratorExit):

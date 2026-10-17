@@ -98,12 +98,41 @@ class BodyLogFlag:
             logger.warning("body_log_flag_db_read_failed")
             return self._default
 
-        enabled = bool(row) if row is not None else self._default
+        # ⚠️ value 는 JSONB — 무형식 text() 쿼리에서 asyncpg 가 str 으로
+        #    디코딩해 row == "false" 가 되고, bool("false") = True 라 관리자가
+        #    꺼도 미러 만료(60s) 뒤 재수화가 로깅을 되살렸다(R22 r2 M2).
+        #    str/bytes 는 JSON 파싱으로만 판정한다.
+        if row is None:
+            enabled = self._default
+        elif isinstance(row, (str, bytes)):
+            try:
+                import json as _json
+
+                parsed = _json.loads(
+                    row.decode() if isinstance(row, bytes) else row
+                )
+                # JSONB 에 JSON 문자열 '"false"' 로 이중 인코딩된 행 — loads 가
+                # str 'false' 를 돌려주고 bool('false')=True 로 부활한다.
+                # 문자열이면 한 번 더 진리값 판정한다(R22 r3 N6 — postdeploy
+                # 체크 스크립트는 '"false"' 를 OFF 로 읽으므로 양쪽을 맞춘다).
+                enabled = (
+                    _truthy(parsed)
+                    if isinstance(parsed, str)
+                    else bool(parsed)
+                )
+            except Exception:
+                logger.warning("body_log_flag_db_value_unparsed")
+                enabled = self._default
+        else:
+            enabled = bool(row)
         if redis is not None:
             try:
+                # NX — admin 의 OFF 반영(SET '0')과 이 재수화 SET '1' 이 경주하면
+                # 나중에 도착한 '1' 이 최대 TTL+여유만큼 로깅을 되살린다. 미스만
+                # 채우고 이미 있는 값(최신 OFF)은 존중한다(R22 r1 N2).
                 await redis.set(
                     BODY_LOG_REDIS_KEY, "1" if enabled else "0",
-                    ex=_BODY_LOG_REDIS_TTL_S,
+                    ex=_BODY_LOG_REDIS_TTL_S, nx=True,
                 )
             except Exception:
                 logger.warning("body_log_flag_redis_write_failed")

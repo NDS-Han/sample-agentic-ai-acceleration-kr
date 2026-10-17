@@ -183,7 +183,17 @@ async def lifespan(app: FastAPI):
 
     # 12b. Mantle (Cowork cross-account) — broker assumes the 905 role at request time
     # (no long-lived 905 keys held). Mantle is HTTP+bearer, NOT boto3 invoke_model.
-    sts_client = boto3.client("sts", region_name=settings.mantle_assume_region)
+    # STS 에는 짧은 명시 타임아웃 — botocore 기본값(connect 60s·read 60s·legacy
+    # 5회 재시도)이면 STS 단절 시 요청 경로의 assume 이 분 단위로 잠긴다.
+    # 브로커는 per-key 단일비행+실패 백오프로 재시도 폭주를 막는다(R22 r1 M3).
+    sts_client = boto3.client(
+        "sts",
+        region_name=settings.mantle_assume_region,
+        config=BotoConfig(
+            connect_timeout=2, read_timeout=5,
+            retries={"max_attempts": 2, "mode": "standard"},
+        ),
+    )
     mantle_broker = MantleCredentialBroker(sts_client=sts_client)
     mantle_http = httpx.AsyncClient(
         timeout=httpx.Timeout(

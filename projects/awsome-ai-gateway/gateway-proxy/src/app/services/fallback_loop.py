@@ -585,7 +585,7 @@ async def run_fallback_loop(
         else:
             # Non-fallback status (2xx, 4xx, etc.)
             if 200 <= status < 300:
-                await cb.record_success(redis, cb_key)
+                await cb.record_success(redis, cb_key, probe_token=probe_token)
             elif not is_original:
                 # 후보가 비-폴백 오류(400 ValidationException, 404 잘못된 pmid, 500 등)를
                 # 주면 그 슬롯만 건너뛴다 — 그대로 돌려주면 원본의 진짜 오류(예: 503)가

@@ -304,7 +304,7 @@ async def test_wrapper_passes_bytes_through_unchanged():
     chunks = [b"a", b"bb", _ANTHROPIC_END]
     seen: list[tuple[str, str]] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         seen.append((text, status))
 
     out = await _drain(
@@ -322,7 +322,7 @@ async def test_wrapper_passes_bytes_through_unchanged():
 async def test_terminal_marker_means_success(dialect: str, terminal: bytes):
     got: list[str] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append(status)
 
     await _drain(
@@ -341,7 +341,7 @@ async def test_missing_terminal_marker_means_partial(dialect: str):
     """
     got: list[str] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append(status)
 
     await _drain(
@@ -358,7 +358,7 @@ async def test_cross_dialect_marker_does_not_count():
     """방언을 잘못 넘기면 success 가 되지 않는다(표지 표가 실제로 쓰인다는 대조군)."""
     got: list[str] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append(status)
 
     await _drain(
@@ -373,7 +373,7 @@ async def test_unknown_dialect_is_partial_not_a_crash():
     """모르는 방언은 partial 로 떨어진다 — 로깅이 요청을 깨뜨리는 것보다 낫다."""
     got: list[str] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append(status)
 
     out = await _drain(
@@ -386,7 +386,7 @@ async def test_unknown_dialect_is_partial_not_a_crash():
 async def test_hook_exception_does_not_break_the_stream():
     """감사 sink 실패로 사용자의 스트림을 깨뜨리는 것은 거래가 성립하지 않는다."""
 
-    async def boom(text: str, status: str) -> None:
+    async def boom(text: str, status: str, truncated: bool) -> None:
         raise RuntimeError("sink down")
 
     out = await _drain(
@@ -405,7 +405,7 @@ async def test_upstream_failure_still_records_what_arrived():
     """
     got: list[tuple[str, str]] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append((text, status))
 
     async def failing():
@@ -423,7 +423,7 @@ async def test_hook_fires_exactly_once():
     """두 번 발화하면 같은 요청의 본문 레코드가 중복 적재된다."""
     calls = 0
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         nonlocal calls
         calls += 1
 
@@ -439,7 +439,7 @@ async def test_non_utf8_bytes_do_not_raise():
     """프레임이 유효한 UTF-8 이 아니어도 요청을 깨뜨리지 않는다."""
     got: list[str] = []
 
-    async def hook(text: str, status: str) -> None:
+    async def hook(text: str, status: str, truncated: bool) -> None:
         got.append(text)
 
     out = await _drain(
@@ -463,7 +463,7 @@ async def test_multibyte_char_split_across_chunks_survives():
     mid = 5
     got: list[str] = []
 
-    async def hook(t: str, status: str) -> None:
+    async def hook(t: str, status: str, truncated: bool) -> None:
         got.append(t)
 
     out = await _drain(
@@ -497,7 +497,7 @@ async def test_wrapper_aclose_closes_inner_generator():
 
     got: list[str] = []
 
-    async def hook(t: str, status: str) -> None:
+    async def hook(t: str, status: str, truncated: bool) -> None:
         got.append(status)
 
     gen = wrap_stream_for_body_log(inner(), dialect="anthropic", on_complete=hook)

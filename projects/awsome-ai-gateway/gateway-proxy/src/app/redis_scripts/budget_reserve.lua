@@ -14,10 +14,14 @@
 -- KEYS[3] = budget:pending:{scope}:{<scope_id>}:<req_id> -- per-request 예약 마커
 -- KEYS[4] = budget:resvsum:{scope}:{<scope_id>}:{period} -- 미정산 예약 합계
 --           (usage 카운터는 예약 포함 "확약액" — 표시용 실지출 = usage - resvsum)
+-- KEYS[5] = budget:pendingidx:{scope}:{<scope_id>}       -- 마커 인덱스 해시
+--           (같은 hash tag — rebuild 의 pending 합산이 키스페이스 SCAN 없이
+--           HKEYS+필드별 GET 으로 끝나게 한다. settle 이 HDEL 로 지운다. R22 r1 S1)
 -- ARGV[1] = 'user' | 'team' | 'client'                    -- scope label
 -- ARGV[2] = estimate (USD, string decimal)               -- 최악비용 추정치
 -- ARGV[3] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
 -- ARGV[4] = marker TTL seconds                           -- 예약 마커 수명
+-- ARGV[5] = index field (req_id; client scope 는 <client>:<req_id>)
 --
 -- Returns: JSON {allowed, reserved, reason, used_usd, limit_usd,
 --               config_present, scope}
@@ -95,8 +99,23 @@ local function exceeds()
 end
 
 if exceeds() then
-    return reply(false, false, scope_label .. '_budget_exceeded', used, limit, true)
+    -- 잔량(used<limit)이 있는데 최악비용 예약으로 막힌 경우와 실제 소진을
+    -- 구분한다 — 잔량 아래 차단을 "예산 초과"로 보고하면 클라이언트 오보.
+    -- 코드는 동일하게 429 지만 reason suffix 로 구분한다(R22 r1 S6).
+    local reason = scope_label .. '_budget_exceeded'
+    if used < limit then
+        reason = scope_label .. '_budget_reservation_exceeded'
+    end
+    return reply(false, false, reason, used, limit, true)
 end
+
+-- 카운터 유실 감지(R22 r1 M1 / r2 S7): 이 reserve 가 usage 키를 **생성**하면
+-- (체크 통과 시점엔 있었거나, 이번 달 첫 쓰기거나, 축출/failover 로 사라졌거나)
+-- 센티넬을 세운다. resvsum 동시 유실로 pre>0 조건이 못 잡던 케이스까지
+-- 커버된다. 월 첫 예약의 정상 생성에도 세워지지만 rebuild 가 플로어
+-- 방식(3세대 budget_rebuild.lua)이라 결과는 no-op+센티넬 해제 — 스코프·월당
+-- 1회분 DB 조회만 든다.
+local usage_existed = redis.call('EXISTS', usage_key)
 
 -- 예약 커밋: 카운터에 추정치를 올리고 마커를 남긴다. 마커가 settle 의
 -- 멱등성 근거 — settle 은 마커가 있을 때만 델타를 적용하므로 이중 정산
@@ -106,5 +125,15 @@ redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 redis.call('INCRBYFLOAT', KEYS[4], estimate)
 redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('SET', marker_key, ARGV[2], 'EX', marker_ttl)
+if KEYS[5] and ARGV[5] and ARGV[5] ~= '' then
+    -- 마커와 같은 수명으로 인덱스 TTL 갱신 — 인덱스가 먼저 죽으면 읽기가
+    -- SCAN 폴백으로 돌아간다(정합은 유지, 비용만 커진다).
+    redis.call('HSET', KEYS[5], ARGV[5], ARGV[2])
+    redis.call('EXPIRE', KEYS[5], marker_ttl)
+end
+
+if usage_existed == 0 then
+    redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
+end
 
 return reply(true, true, nil, used + estimate, limit, true)

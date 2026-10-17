@@ -243,7 +243,16 @@ class CostRecorder:
         #    예약은 `max_tokens` 기준의 **과대** 추정이라, 큰 max_tokens 로 몇 번 끊기면
         #    실제 지출 $0 로도 자기 CPH 를 소진해 그 시간이 끝날 때까지 429 를 맞는다.
         #    TPM 만 돌려주면 두 한도 중 하나만 정상으로 보여 원인 추적이 더 어렵다.
-        if usage.total_tokens == 0 and usage.input_tokens == 0 and usage.output_tokens == 0:
+        # 캐시 토큰도 확인 — Converse 는 total 에 캐시를 안 넣고, 프로바이더가
+        # input=0·output=0+cache_read>0 으로 보고하면 전액 환불해 캐시읽기 비용이
+        # 증발한다(R22 r1 N5).
+        if (
+            usage.total_tokens == 0
+            and usage.input_tokens == 0
+            and usage.output_tokens == 0
+            and getattr(usage, "cache_read_input_tokens", 0) == 0
+            and getattr(usage, "cache_creation_input_tokens", 0) == 0
+        ):
             if rate_limit_state and redis is not None:
                 from app.services.rate_limit_service import RateLimitService
 
@@ -356,7 +365,10 @@ class CostRecorder:
         threshold_triggered = None
         threshold_scope = "user"
         if redis is not None:
-            from app.services.budget_service import PER_APP_BUDGET_CLIENTS
+            from app.services.budget_service import (
+                PER_APP_BUDGET_CLIENTS,
+                settle_eval_args,
+            )
             from app.services.lua_loader import LuaScriptLoader
 
             # Redis Cluster hash tag: {<scope_id>} ensures usage/config keys
@@ -408,10 +420,9 @@ class CostRecorder:
                 if resv:
                     raw = await redis.eval(
                         settle_script,
-                        4,
-                        resv["usage_key"], resv["config_key"], resv["marker_key"],
-                        resv["resvsum_key"],
+                        *settle_eval_args(resv),
                         str(cost_usd), resv.get("fallback") or "",
+                        resv.get("idx_field") or "",
                     )
                 else:
                     raw = await redis.eval(
@@ -441,10 +452,9 @@ class CostRecorder:
                     if resv:
                         team_raw = await redis.eval(
                             settle_script,
-                            4,
-                            resv["usage_key"], resv["config_key"], resv["marker_key"],
-                            resv["resvsum_key"],
+                            *settle_eval_args(resv),
                             str(cost_usd), resv.get("fallback") or "",
+                            resv.get("idx_field") or "",
                         )
                     else:
                         team_raw = await redis.eval(
@@ -498,10 +508,9 @@ class CostRecorder:
                     if resv:
                         await redis.eval(
                             settle_script,
-                            4,
-                            resv["usage_key"], resv["config_key"], resv["marker_key"],
-                            resv["resvsum_key"],
+                            *settle_eval_args(resv),
                             str(cost_usd), resv.get("fallback") or "",
+                            resv.get("idx_field") or "",
                         )
                     else:
                         await redis.eval(

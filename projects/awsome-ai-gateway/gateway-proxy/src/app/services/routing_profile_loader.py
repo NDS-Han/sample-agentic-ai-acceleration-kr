@@ -42,6 +42,10 @@ class RoutingProfileLoader:
             except Exception:
                 cached = None
             if cached:
+                # 음성 캐시 — 프로파일 없는 client(other 등)는 매 요청 DB 를
+                # 두드렸다. 짧은 TTL 로 부재를 캐시한다(R22 r1 N3).
+                if cached == "__absent__" or cached == b"__absent__":
+                    return None
                 try:
                     schema = RoutingProfileSchema(**json.loads(cached))
                     return schema if schema.enabled else None
@@ -75,6 +79,16 @@ class RoutingProfileLoader:
         )
         row = result.scalar_one_or_none()
         if row is None:
+            if redis is not None:
+                try:
+                    # 짧은 부재 캐시 — 신규 프로파일 등록이 최대 30s 늦게 반영된다.
+                    await redis.setex(cache_key, 30, "__absent__")
+                    # DB 정상 + 행 부재 = 프로파일이 삭제된 것 — 스테일 스냅샷을
+                    # 같이 지워 이후 DB 열화 창에서 삭제된 프로파일이 부활하지
+                    # 않게 한다(R22 r2 N3).
+                    await redis.delete(f"{cache_key}:stale")
+                except Exception:
+                    pass
             return None
 
         schema = RoutingProfileSchema(

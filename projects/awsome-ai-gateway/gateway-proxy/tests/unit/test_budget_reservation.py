@@ -44,9 +44,9 @@ def _settle_resp(*, settled=True, threshold=None):
 
 def _dispatch_by_scope(scope_map: dict[str, bytes]):
     """eval side_effect — reserve 호출 시그니처는
-    (script, 4, usage_key, config_key, marker_key, resvsum_key, scope, est, fallback, ttl)."""
+    (script, 5, usage_key, config_key, marker_key, resvsum_key, idx_key, scope, est, fallback, ttl, idx_field)."""
     async def _side(*args, **_kw):
-        scope = args[6]
+        scope = args[7]
         return scope_map[scope]
     return _side
 
@@ -94,7 +94,7 @@ async def test_reserve_user_reject_refunds_team_commit(mock_redis):
                 allowed=False, reserved=False, scope="user",
                 reason="user_budget_exceeded",
             ),
-        }[args[6]]
+        }[args[7]]
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=True)
@@ -107,9 +107,9 @@ async def test_reserve_user_reject_refunds_team_commit(mock_redis):
 
     settle_calls = [c for c in calls if c[0] == "-- settle"]
     assert len(settle_calls) == 1
-    # settle(script, 4, usage, config, marker, resvsum, actual, fallback)
+    # settle(script, 5, usage, config, marker, resvsum, idx, actual, fallback, field)
     assert settle_calls[0][4] == "budget:pending:team:{t1}:req-1"
-    assert settle_calls[0][6] == "0"
+    assert settle_calls[0][7] == "0"
 
 
 @pytest.mark.asyncio
@@ -188,9 +188,9 @@ async def test_reserve_eval_failure_fail_open_with_refund(mock_redis):
         call_count["n"] += 1
         if args[0] == "-- settle":
             return _settle_resp()
-        if args[6] == "user":
+        if args[7] == "user":
             raise ConnectionError("redis hiccup")
-        return {"team": _resv_resp(scope="team")}[args[6]]
+        return {"team": _resv_resp(scope="team")}[args[7]]
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=True)
@@ -208,8 +208,8 @@ async def test_reserve_d_fallback_synthesized(mock_redis):
     seen: dict = {}
 
     async def _side(*args, **_kw):
-        seen[args[6]] = args
-        return _resv_resp(scope=args[6])
+        seen[args[7]] = args
+        return _resv_resp(scope=args[7])
 
     mock_redis.eval = AsyncMock(side_effect=_side)
     mock_redis.exists = AsyncMock(return_value=False)
@@ -225,9 +225,9 @@ async def test_reserve_d_fallback_synthesized(mock_redis):
     )
     assert [s["scope"] for s in committed] == ["team", "user"]
     user_call = seen["user"]
-    fallback = json.loads(user_call[8])  # (script,4,k1,k2,k3,k4,scope,est,fallback,ttl)
+    fallback = json.loads(user_call[9])  # (script,5,k1..k5,scope,est,fallback,ttl,field)
     assert fallback["limit_usd"] == "25"
-    assert committed[1]["fallback"] == user_call[8]
+    assert committed[1]["fallback"] == user_call[9]
 
 
 @pytest.mark.asyncio

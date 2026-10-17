@@ -702,13 +702,20 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # 열리지 않고, (b) half-open 프로브가 성공해도 회로가 닫히지 않아 ws 는
         # 사실상 8s 당 1요청만 통과하는 반개방 상태에 갇힌다.
         async def _ws_cb_record(status: int, *, conn_error: bool = False) -> None:
-            nonlocal _ws_probe_used
+            nonlocal _ws_probe_used, _ws_probe_token
             if _ws_cb_key is None:
                 return
             _ws_probe_used = True  # 실제 상류 호출 결과 — 슬롯은 소비된 것이다.
             try:
                 if 200 <= status < 300:
-                    await cb.record_success(redis, _ws_cb_key)
+                    # 프로브 소유자의 성공만 회로를 닫는다 — 토큰 None(닫힌 회로
+                    # 경로)이면 카운터만 기록(R22 r1 M4). 토큰은 첫 성공 기록과
+                    # 함께 소비한다 — 멀티턴 웹서치에서 다음 턴의 성공이 사이에
+                    # 다른 파드가 재오픈한 회로를 지우지 못하게(R22 r3 S1).
+                    _token, _ws_probe_token = _ws_probe_token, None
+                    await cb.record_success(
+                        redis, _ws_cb_key, probe_token=_token
+                    )
                 elif status in (502, 503) or conn_error:
                     await cb.record_failure(redis, _ws_cb_key)
             except Exception:
@@ -772,7 +779,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         #
         # bedrock_request_id is None: the loop makes a separate Bedrock call per turn, so no
         # single request id can serve as the join key (same decision as `_ws_record`).
-        async def _ws_log_stream(sse_text: str, log_status: str) -> None:
+        async def _ws_log_stream(
+                sse_text: str, log_status: str, truncated: bool = False
+            ) -> None:
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
                 return
@@ -785,6 +794,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     status=log_status,
                     request_body=body,
                     sse_text=sse_text,
+                    truncated=truncated,
                     user_id=auth_context.user_id if auth_context else None,
                     team_id=auth_context.team_id if auth_context else None,
                     sso_subject=auth_context.sso_subject if auth_context else None,
@@ -1167,7 +1177,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         if availability_fallback_from:
             response_headers["x-llm-gateway-fallback-from"] = availability_fallback_from
 
-        async def _log_body_stream(sse_text: str, log_status: str) -> None:
+        async def _log_body_stream(
+                sse_text: str, log_status: str, truncated: bool = False
+            ) -> None:
             """스트림 종료 시 본문을 큐에 넣는다. 절대 블로킹하지 않는다(enqueue 만)."""
             bl = getattr(request.app.state, "body_logger", None)
             if bl is None:
@@ -1184,6 +1196,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     status=log_status,
                     request_body=body,
                     sse_text=sse_text,
+                    truncated=truncated,
                     user_id=auth_context.user_id if auth_context else None,
                     team_id=auth_context.team_id if auth_context else None,
                     sso_subject=auth_context.sso_subject if auth_context else None,

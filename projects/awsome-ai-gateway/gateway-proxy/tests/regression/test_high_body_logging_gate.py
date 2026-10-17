@@ -154,7 +154,7 @@ async def _drain(on_complete=None):
 async def test_hook_fires_exactly_once_on_success():
     calls: list[tuple[str, int]] = []
 
-    async def on_complete(text: str, status: str) -> None:
+    async def on_complete(text: str, status: str, truncated: bool) -> None:
         calls.append((status, len(text)))
 
     out = await _drain(on_complete)
@@ -168,7 +168,7 @@ async def test_output_is_identical_with_and_without_the_hook():
     """로깅이 켜졌다고 사용자가 받는 바이트가 달라지면 안 된다."""
     with_hook: list[bytes] = []
 
-    async def on_complete(text: str, status: str) -> None:
+    async def on_complete(text: str, status: str, truncated: bool) -> None:
         pass
 
     with_hook = await _drain(on_complete)
@@ -179,7 +179,7 @@ async def test_output_is_identical_with_and_without_the_hook():
 async def test_hook_exception_does_not_break_the_stream():
     """감사 실패로 사용자의 스트림을 깨뜨리는 것은 거래가 성립하지 않는다."""
 
-    async def boom(text: str, status: str) -> None:
+    async def boom(text: str, status: str, truncated: bool) -> None:
         raise RuntimeError("sink down")
 
     out = await _drain(boom)
@@ -200,11 +200,11 @@ def test_generator_does_not_accumulate_when_the_hook_is_absent():
         for n in ast.walk(tree)
         if isinstance(n, ast.Call)
         and isinstance(n.func, ast.Attribute)
-        and n.func.attr == "append"
+        and n.func.attr == "feed"
         and isinstance(n.func.value, ast.Name)
         and n.func.value.id == "accumulated_frames"
     ]
-    assert appends, "accumulated_frames.append 를 찾지 못했다 — 누적이 배선되지 않았다"
+    assert appends, "accumulated_frames.feed 를 찾지 못했다 — 누적이 배선되지 않았다"
 
     # 각 append 가 on_complete 를 검사하는 If 안에 있는지.
     guarded = 0
@@ -218,7 +218,7 @@ def test_generator_does_not_accumulate_when_the_hook_is_absent():
             if inner in appends:
                 guarded += 1
     assert guarded == len(appends), (
-        f"append {len(appends)}개 중 {guarded}개만 on_complete 가드 안에 있다 — "
+        f"feed {len(appends)}개 중 {guarded}개만 on_complete 가드 안에 있다 — "
         "가드 밖의 것은 로깅이 꺼져 있어도 응답 전문을 메모리에 쌓는다"
     )
 

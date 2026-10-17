@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import codecs
 import json
 import time
 
@@ -22,6 +21,7 @@ from sqlalchemy.exc import DBAPIError
 from app.schemas.domain import ProviderType, TokenUsage
 from app.services.body_log_records import (
     build_body_record_for_nonstream,
+    BoundedCapture,
     build_body_record_for_stream,
     provider_name,
     resolve_body_logger,
@@ -279,7 +279,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
     # 시작된 뒤 물어보면 누적 자체를 놓친다(messages.py 의 사전 게이트와 같은
     # 이유).
     _bl = await resolve_body_logger(request.app.state, redis, session_factory)
-    _log_parts: list[str] | None = [] if _bl is not None else None
+    # BoundedCapture — 장문 스트림이 진단 버퍼를 무제한으로 쓰지 않게 상한
+    # (R22 r2 S3). 클라이언트 스트림은 그대로, 로그 텍스트만 절단된다.
+    _log_parts = BoundedCapture() if _bl is not None else None
 
     async def _enqueue_body_log(log_status: str, resp_body: bytes | None = None) -> None:
         if _bl is None:
@@ -298,7 +300,8 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 build_body_record_for_stream(
                     request_id=request_id,
                     status=log_status,
-                    sse_text="".join(_log_parts or []),
+                    sse_text=_log_parts.text if _log_parts is not None else "",
+                    truncated=bool(_log_parts.truncated) if _log_parts is not None else False,
                     **_identity,
                 )
             )
@@ -423,16 +426,14 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             # 요청 종결 상태 — _fire_finalize 가 usage_logs.status 로 옮긴다(E2E S5).
             outcome: dict = {}
             state["_stream_outcome"] = outcome
-            # 멀티바이트 문자가 청크 경계에 걸려도 감사 원문이 U+FFFD 로 깨지지
-            # 않게 — streaming.py 의 다른 로깅 경로와 같은 방식이다(R16).
-            _log_decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            # 멀티바이트 경계 안전 디코딩은 BoundedCapture 의 내장 디코더가 담당한다.
 
             def _scan(chunk: bytes) -> None:
                 nonlocal usage, first_token_time
                 if first_token_time is None:
                     first_token_time = time.monotonic()
                 if _log_parts is not None:
-                    _log_parts.append(_log_decoder.decode(chunk))
+                    _log_parts.feed(chunk)
                 _scan_bedrock_stream_chunk(chunk, path_suffix, bedrock_usage)
                 # 미드스트림 에러 프레임(invoke error 이벤트/converse 예외 멤버/
                 # 어댑터 합성)이 관측되면 종결 판정을 실패로 — 없으면 상류 에러가

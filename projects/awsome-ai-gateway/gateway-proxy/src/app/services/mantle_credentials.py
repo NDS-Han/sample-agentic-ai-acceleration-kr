@@ -7,7 +7,13 @@ from dataclasses import dataclass, field
 from typing import Callable, Optional
 
 import structlog
+
 from botocore.credentials import Credentials
+
+from app.services.credential_backoff import (
+    failure_backoff_s,
+    reraise_fresh,
+)
 
 from app.schemas.routing import RoutingProfileSchema
 
@@ -30,6 +36,8 @@ _BEARER_TTL = 1800  # 30 min
 # expired creds (would 401).
 _BEARER_CRED_SKEW = 60  # 1 min grace before creds hard-expire
 _ASSUME_DURATION = 3600  # 1h
+# 키별 단일비행 + 실패 백오프 — 프로세스 전역 락이 AssumeRole/IRSA 체인을
+# 직렬화해, 한 키의 갱신이 무관한 키의 캐시 적중까지 막았다(R22 r1 M3/S7).
 
 
 @dataclass
@@ -65,6 +73,8 @@ class MantleCredentialBroker:
         # but differing region must not cross-serve tokens.
         self._bearers: dict[tuple[str, str], _CachedBearer] = {}
         self._lock = asyncio.Lock()
+        self._inflight: dict[tuple[str, str], asyncio.Task] = {}
+        self._failures: dict[tuple[str, str], tuple[Exception, float]] = {}
 
     def _in_account_creds(self) -> Credentials:
         """Pod's own IRSA credentials (no AssumeRole) for in-account Mantle (333)."""
@@ -84,27 +94,60 @@ class MantleCredentialBroker:
 
         cred_key = profile.account_role_arn or "in-account"
         bearer_key = (cred_key, profile.region)
+        # 락 없는 빠른 경로 — 캐시 적중/실패 백오프는 락/STS 없이 결정한다.
+        now = self._now()
+        cached_bearer = self._bearers.get(bearer_key)
+        if cached_bearer and cached_bearer.expires_at > now:
+            return cached_bearer.token
+        failure = self._failures.get(bearer_key)
+        if failure and failure[1] > now:
+            reraise_fresh(failure[0])
+
         async with self._lock:
             now = self._now()
             cached_bearer = self._bearers.get(bearer_key)
             if cached_bearer and cached_bearer.expires_at > now:
                 return cached_bearer.token
+            failure = self._failures.get(bearer_key)
+            if failure and failure[1] > now:
+                reraise_fresh(failure[0])
+            task = self._inflight.get(bearer_key)
+            if task is None:
+                task = asyncio.get_running_loop().create_task(
+                    self._refresh_bearer(bearer_key, profile)
+                )
+                self._inflight[bearer_key] = task
+                task.add_done_callback(
+                    lambda _t, k=bearer_key: self._inflight.pop(k, None)
+                )
+        try:
+            # 락 밖에서 공유 await — 무관한 키의 요청을 직렬화하지 않는다.
+            # 취소 전파 차단 — 대기자 취소가 공유 refresh task 를 취소하면
+            # 모든 대기 요청이 CancelledError 로 쓰러진다(R22 r2 S1).
+            return await asyncio.shield(task)
+        except Exception as exc:
+            self._failures[bearer_key] = (exc, self._now() + failure_backoff_s(exc))
+            raise
 
-            if profile.account_role_arn:
-                creds = await self._get_creds(profile.account_role_arn, profile.external_id, now)
-                cred_expiry = self._creds[profile.account_role_arn].expires_at
-            else:
-                creds = await asyncio.get_running_loop().run_in_executor(None, self._in_account_creds)
-                cred_expiry = now + _ASSUME_DURATION
+    async def _refresh_bearer(
+        self, bearer_key: tuple[str, str], profile: RoutingProfileSchema
+    ) -> str:
+        now = self._now()
+        if profile.account_role_arn:
+            creds = await self._get_creds(profile.account_role_arn, profile.external_id, now)
+            cred_expiry = self._creds[profile.account_role_arn].expires_at
+        else:
+            creds = await asyncio.get_running_loop().run_in_executor(None, self._in_account_creds)
+            cred_expiry = now + _ASSUME_DURATION
 
-            token = await asyncio.get_running_loop().run_in_executor(
-                None,
-                lambda: BedrockTokenGenerator().get_token(creds, profile.region),
-            )
-            # Never let the bearer outlive the underlying creds it was minted from.
-            bearer_expiry = min(now + _BEARER_TTL, cred_expiry - _BEARER_CRED_SKEW)
-            self._bearers[bearer_key] = _CachedBearer(token=token, expires_at=bearer_expiry)
-            return token
+        token = await asyncio.get_running_loop().run_in_executor(
+            None,
+            lambda: BedrockTokenGenerator().get_token(creds, profile.region),
+        )
+        # Never let the bearer outlive the underlying creds it was minted from.
+        bearer_expiry = min(now + _BEARER_TTL, cred_expiry - _BEARER_CRED_SKEW)
+        self._bearers[bearer_key] = _CachedBearer(token=token, expires_at=bearer_expiry)
+        return token
 
     async def _get_creds(
         self, role_arn: str, external_id: Optional[str], now: float

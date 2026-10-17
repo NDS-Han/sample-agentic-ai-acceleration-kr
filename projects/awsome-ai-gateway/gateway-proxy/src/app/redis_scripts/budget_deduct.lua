@@ -39,8 +39,16 @@ local new_used = used + cost
 -- 차감 실행. period 가 키에 박혀 있어도 TTL 은 없던 상태였다 — 월이 지난 카운터가
 -- 영구히 남아 Redis 를 서서히 채운다. 마지막 쓰기로부터 45 일로 잡으면 해당 월
 -- 카운터가 다음 달 초의 조회(usage/me)까지 살아남고 그 뒤엔 정리된다.
+-- 카운터 유실 감지(R22 r1 M1): 첫 쓰기가 키를 생성하면 센티넬을 세워 다음
+-- check 가 rebuild 를 검증하게 한다. 월 첫 deduct(정상 생성)에도 세워지지만
+-- rebuild 는 floor 방식이라 cur >= db+live 이면 no-op — 1회분 DB 조회 비용만
+-- 든다(R22 r2 M1 의 additive 는 이중가산으로 폐기됐다).
+local usage_existed = redis.call('EXISTS', usage_key)
 redis.call('INCRBYFLOAT', usage_key, cost)
 redis.call('EXPIRE', usage_key, 3888000)
+if usage_existed == 0 then
+    redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
+end
 
 -- 임계값 교차 체크 — **가장 높은** 교차값을 반환한다.
 -- 옛 코드는 첫 교차에서 break 했는데, 한 요청이 75%→105% 처럼 여러 임계값을

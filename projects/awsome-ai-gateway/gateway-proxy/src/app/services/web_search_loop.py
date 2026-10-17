@@ -3687,7 +3687,7 @@ async def run_web_search_loop(
     #: and no usage_logs row would be written (see the same comment in services/streaming.py).
     tokenizer_hook: Callable[[str], Awaitable[int | None]] | None = None,
     response_headers: Optional[dict] = None,
-    on_stream_complete: Callable[[str, str], Awaitable[None]] | None = None,
+    on_stream_complete: Callable[[str, str, bool], Awaitable[None]] | None = None,
     on_nonstream_complete: Callable[[int, bytes], Awaitable[None]] | None = None,
     #: 요청 종결 상태 수집 — 라우터가 on_usage=finalize 안에서 usage_status_of 로
     #: 읽어 usage_logs.status 에 쓴다(E2E S5). None 이면 기록하지 않는다.

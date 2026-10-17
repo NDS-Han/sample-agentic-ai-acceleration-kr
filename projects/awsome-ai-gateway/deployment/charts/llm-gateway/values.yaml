@@ -521,6 +521,11 @@ gatewayProxy:
     # Redis 스트림 / 예산 관련
     COST_STREAM_KEY: "cost:stream"
     BUDGET_DEFAULT_POLICY: "HARD_BLOCK"
+    # pendingidx 예약 인덱스 롤아웃 웜업 (R22). "true" 는 인덱스 미포함 마커를
+    # 쓰는 구버전 파드가 남았을 수 있는 창(배포 + marker TTL 4h)에 rebuild 가
+    # 키스페이스 SCAN 으로 폴백하게 한다. 전 파드 교체 + TTL 경과 후 "false" —
+    # 그러면 Redis 플러시 직후 rebuild 폭풍 창에도 SCAN 폭풍이 안 돈다.
+    BUDGET_PENDINGIDX_WARMUP: "true"
     # Rate limit cache TTL
     RATE_LIMIT_CONFIG_TTL_SEC: "300"
     # ── 요청/응답 **본문** 로깅 (기본 OFF) ──

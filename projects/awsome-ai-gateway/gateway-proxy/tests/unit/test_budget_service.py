@@ -734,5 +734,97 @@ async def test_pending_reservation_sum_decodes_bytes_values():
     mock_redis.get = AsyncMock(side_effect=lambda k: vals.get(k))
 
     svc = BudgetService()
-    total = await svc._pending_reservation_sum(mock_redis, "budget:pending:user:{u1}:*")
+    total = await svc._pending_reservation_sum(
+        mock_redis, "budget:pending:user:{u1}:*"
+    )
     assert total == Decimal("3.75")
+
+
+@pytest.mark.asyncio
+async def test_rebuild_counter_uses_lua_pending_after_warmup():
+    """R22 r2 — 웜업이 끝나면 pending 을 Lua 가 인덱스로 계산한다.
+
+    Python 은 '' 를 넘겨 Lua 내부 계산을 쓰게 하고 SCAN 을 돌지 않는다.
+    """
+    import time as _time
+
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_rebuild"] = "-- rebuild"
+
+    mock_redis = AsyncMock()
+    mock_redis.eval = AsyncMock(return_value=1)
+    # since 플래그가 충분히 오래됨 → 웜업 종료 → 인덱스 신뢰
+    mock_redis.get = AsyncMock(
+        return_value=str(int(_time.time()) - 99999).encode()
+    )
+
+    async def _scan_fail(**_kw):
+        raise AssertionError("scan_iter must not run outside warmup")
+        yield
+
+    mock_redis.scan_iter = _scan_fail
+
+    svc = BudgetService()
+    applied = await svc._rebuild_counter(
+        mock_redis,
+        usage_key="budget:user:{u1}:2026-10",
+        resvsum_key="budget:resvsum:user:{u1}:2026-10",
+        idx_key="budget:pendingidx:user:{u1}",
+        marker_prefix="budget:pending:user:{u1}:",
+        field_prefix="",
+        db_base=Decimal("10"),
+    )
+    assert applied is True
+    args = mock_redis.eval.await_args.args
+    assert args[1] == 3  # 3 keys: usage, resvsum, pendingidx
+    assert args[8] == ""  # pending_arg — Lua 내부 계산
+
+
+@pytest.mark.asyncio
+async def test_rebuild_counter_scans_during_index_warmup():
+    """웜업 창(인덱스 도입 직후 marker_ttl 이내)에는 SCAN 값을 ARGV 로 넘긴다 —
+    구버전 파드가 만든 인덱스 없는 마커를 놓치지 않기 위해서다."""
+    import time as _time
+
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_rebuild"] = "-- rebuild"
+
+    mock_redis = AsyncMock()
+    mock_redis.eval = AsyncMock(return_value=1)
+    # since 플래그가 방금 세워짐 → 웜업 중
+    mock_redis.get = AsyncMock(
+        return_value=str(int(_time.time())).encode()
+    )
+
+    async def _scan(match=None, count=None):
+        yield b"budget:pending:user:{u1}:r1"
+        yield b"budget:pending:user:{u1}:r2"
+
+    mock_redis.scan_iter = _scan
+    vals = {
+        b"budget:pending:user:{u1}:r1": b"1.50",
+        b"budget:pending:user:{u1}:r2": b"2.25",
+    }
+
+    async def _get(k):
+        if k == "budget:pendingidx:since":
+            return str(int(_time.time())).encode()
+        return vals.get(k)
+
+    mock_redis.get = AsyncMock(side_effect=_get)
+
+    svc = BudgetService()
+    applied = await svc._rebuild_counter(
+        mock_redis,
+        usage_key="budget:user:{u1}:2026-10",
+        resvsum_key="budget:resvsum:user:{u1}:2026-10",
+        idx_key="budget:pendingidx:user:{u1}",
+        marker_prefix="budget:pending:user:{u1}:",
+        field_prefix="",
+        db_base=Decimal("10"),
+    )
+    assert applied is True
+    args = mock_redis.eval.await_args.args
+    assert args[8] == "3.75"  # 스캔 합이 ARGV 로 전달됨

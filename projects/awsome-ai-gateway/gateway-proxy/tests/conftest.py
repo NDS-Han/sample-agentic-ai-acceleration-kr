@@ -31,6 +31,10 @@ def mock_redis():
     )
     redis.publish = AsyncMock()
     redis.ping = AsyncMock(return_value=True)
+    # MGET 기본은 전부 부재 — budget_service 핫패스가 카운터+:lost 센티넬을
+    # MGET 으로 묶어 읽는다(R22 r4 N3). 키별 응답이 필요한 테스트는
+    # side_effect 로 덮는다.
+    redis.mget = AsyncMock(side_effect=lambda keys: [None] * len(keys))
     redis.incrbyfloat = AsyncMock()
     redis.incrby = AsyncMock()
     redis.expire = AsyncMock()

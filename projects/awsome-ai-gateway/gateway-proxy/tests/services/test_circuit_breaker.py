@@ -49,10 +49,37 @@ async def test_halfopen_single_flight(fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_record_success_clears_open(fake_redis):
+async def test_plain_success_does_not_close_open(fake_redis):
+    """R22 M4 — 회로가 열리기 전 시작된 in-flight 요청의 늦은 성공이 open 을
+    지워 flap 하면 안 된다. probe_token 없는 성공은 카운터만 기록한다."""
     cb = CircuitBreakerService()
     pmid = "m"
-    await fake_redis.set(f"cb:{pmid}:open", "1")
+    await fake_redis.set(f"cb:{{{pmid}}}:open", "1")
     result = await cb.record_success(fake_redis, pmid)
-    assert result is True  # Lua short-circuits returning 1 when open flag present
-    assert await fake_redis.exists(f"cb:{pmid}:open") == 0
+    assert result is True  # Lua 는 open 존재 시 1 — 즉 회로가 그대로 열려 있다
+    assert await fake_redis.exists(f"cb:{{{pmid}}}:open") == 1
+
+
+@pytest.mark.asyncio
+async def test_probe_owner_success_closes_open(fake_redis):
+    """half-open 프로브 소유자의 성공만 open + 슬롯을 함께 지운다."""
+    cb = CircuitBreakerService(halfopen_ttl_ms=8000)
+    pmid = "m"
+    await fake_redis.set(f"cb:{{{pmid}}}:open", "1")
+    assert await cb.try_acquire_halfopen_probe(fake_redis, pmid, token="tok-1") is True
+    await cb.record_success(fake_redis, pmid, probe_token="tok-1")
+    assert await fake_redis.exists(f"cb:{{{pmid}}}:open") == 0
+    assert await fake_redis.exists(f"cb:{{{pmid}}}:halfopen") == 0
+
+
+@pytest.mark.asyncio
+async def test_stale_probe_token_closes_open_but_keeps_new_probe(fake_redis):
+    """스테일 토큰도 open 은 닫는다(프로브 성공 자체가 회복 증거) — 다만 다른
+    파드가 따낸 halfopen 슬롯은 지우지 않는다(R22 r2 N1)."""
+    cb = CircuitBreakerService(halfopen_ttl_ms=8000)
+    pmid = "m"
+    await fake_redis.set(f"cb:{{{pmid}}}:open", "1")
+    await fake_redis.set(f"cb:{{{pmid}}}:halfopen", "tok-other")
+    await cb.record_success(fake_redis, pmid, probe_token="tok-stale")
+    assert await fake_redis.exists(f"cb:{{{pmid}}}:open") == 0
+    assert await fake_redis.get(f"cb:{{{pmid}}}:halfopen") == "tok-other"

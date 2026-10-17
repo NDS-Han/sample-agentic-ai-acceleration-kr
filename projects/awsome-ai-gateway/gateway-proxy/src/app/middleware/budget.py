@@ -145,7 +145,8 @@ class BudgetMiddleware:
                 anthropic_error("service_unavailable", "Service temporarily unavailable")
             ).encode()
             await send({"type": "http.response.start", "status": 503,
-                        "headers": [(b"content-type", b"application/json")]})
+                        "headers": [(b"content-type", b"application/json"),
+                                    (b"retry-after", b"5")]})
             await send({"type": "http.response.body", "body": body})
             return
 
@@ -175,6 +176,14 @@ class BudgetMiddleware:
             code = "team_budget_unset"
         elif reason in ("team_budget_exceeded", "user_budget_exceeded"):
             message = "Budget limit exceeded."
+            code = reason
+        elif reason.endswith("_budget_reservation_exceeded"):
+            # 잔량은 있는데 최악비용 예약이 한도를 넘은 차단 — 실고갈과 구분
+            # (대시보드 잔량과의 불일치 오보 방지, R22 r1 S6).
+            message = (
+                "Budget reservation exceeded — worst-case estimate over remaining "
+                "budget. Reduce max_tokens or retry after in-flight requests settle."
+            )
             code = reason
         elif reason == "hard_block":
             message = "Monthly budget exhausted. Contact your team leader or admin."

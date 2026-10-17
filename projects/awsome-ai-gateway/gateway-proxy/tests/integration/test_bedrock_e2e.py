@@ -227,6 +227,22 @@ def _build_redis(allowed_models=None, budget_user=None, budget_team=None):
 
     redis.get = AsyncMock(side_effect=_get)
     redis.exists = AsyncMock(return_value=1)  # budget cold-cache hydrate/restore 분기 스킵
+
+    # 카운터+:lost 는 MGET 으로 묶어 읽는다(R22 r4 N3) — 카운터 존재·센티넬
+    # 부재로 응답해 복구 루프를 스킵한다(구 exists==1 의 의미).
+    def _mget(keys):
+        out = []
+        for key in keys:
+            k = key.decode() if isinstance(key, bytes) else key
+            if k.endswith(":lost"):
+                out.append(None)
+            elif k.startswith("budget:user:{") or k.startswith("budget:team:{"):
+                out.append(b"1.0")
+            else:
+                out.append(_get(k))
+        return out
+
+    redis.mget = AsyncMock(side_effect=_mget)
     redis.set = AsyncMock()
     redis.setex = AsyncMock()
     redis.delete = AsyncMock()

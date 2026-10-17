@@ -32,6 +32,75 @@ from app.schemas.domain import DegradationLevel
 
 logger = structlog.get_logger(__name__)
 
+# 스트림 누적 버퍼 상한 — 로깅된 스트림은 재프레임된 SSE 전체를 capture 에
+# 쌓는데, 장문 웹서치/사고 스트림이 동시에 많아지면 파드 메모리를 잡아먹는다.
+# 문자 수 기준이다 — 멀티바이트 문자는 바이트로 더 크므로 logger 측
+# max_record_bytes(900k)와 정확히 같지는 않고 대략 상응한다. 초과 레코드는
+# truncated 플래그로 적재되고 초과분 자체는 살리지 못해도 S3 큐가 흡수한다.
+# 클라이언트에게 가는 청크는 영향 없고 로그 레코드만 절단된다(R22 r1 S4,
+# 문자/바이트 구분은 R22 r3 N4).
+_MAX_ACCUMULATED_CHARS = 1_000_000
+
+
+class BoundedCapture:
+    """스트림 진단 텍스트의 상한 누적기 (R22 r2 S3).
+
+    ``_MAX_ACCUMULATED_CHARS`` 까지만 보관하고 초과분은 버린다. cap 이후에도
+    ``marker``(방언별 종결 프레임) 존재 여부는 조각 단위로 계속 스캔한다 —
+    정상 완료된 장문 스트림이 절단 때문에 ``partial`` 로 오기록되는 것을 막는다.
+    클라이언트에게 가는 바이트는 절대 건드리지 않는다 — 진단 버퍼만 상한이다.
+
+    ``feed(bytes)`` 는 멀티바이트 경계 안전한 incremental 디코더를 쓰고,
+    ``feed(str)`` 는 그대로 받는다(호출부가 이미 디코딩한 프레임).
+    """
+
+    def __init__(
+        self,
+        marker: str | None = None,
+        cap: int = _MAX_ACCUMULATED_CHARS,
+    ) -> None:
+        self._parts: list[str] = []
+        self._accumulated = 0
+        self._cap = cap
+        self._marker = marker
+        self._seen_marker = False
+        self._scan_tail = ""  # 표지가 조각 경계에 걸칠 때를 위한 꼬리
+        self.truncated = False
+        self.decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+    def feed(self, chunk: bytes | str) -> None:
+        piece = chunk if isinstance(chunk, str) else self.decoder.decode(chunk)
+        if self._marker and not self._seen_marker:
+            hay = self._scan_tail + piece
+            if self._marker in hay:
+                self._seen_marker = True
+            else:
+                self._scan_tail = hay[-len(self._marker):]
+        room = self._cap - self._accumulated
+        if room <= 0:
+            if piece:
+                self.truncated = True
+            return
+        if len(piece) > room:
+            self._parts.append(piece[:room])
+            self._accumulated += room
+            self.truncated = True
+        else:
+            self._parts.append(piece)
+            self._accumulated += len(piece)
+
+    def finish(self) -> None:
+        """디코더 잔여 바이트를 플러시해 마지막 조각을 붙인다."""
+        self.feed(self.decoder.decode(b"", final=True))
+
+    @property
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    @property
+    def seen_marker(self) -> bool:
+        return self._seen_marker
+
 
 def safe_json(raw: bytes) -> dict:
     """Parse for logging only — never raise.
@@ -91,11 +160,17 @@ def build_body_record_for_stream(
     status: str,  # "success" | "partial"
     request_body: bytes,
     sse_text: str,
+    truncated: bool = False,
     user_id: str | None = None,
     team_id: str | None = None,
     sso_subject: str | None = None,
     bedrock_request_id: str | None = None,
 ) -> BodyLogRecord:
+    response_body: dict = {"sse_text": sse_text}
+    if truncated:
+        # 누적 버퍼 상한으로 sse_text 가 절단됨 — 조사 시 "본문이 여기서
+        # 끝난 게 아니라 로그가 잘린 것" 을 구분할 수 있게 표지한다(R22 r2 S3).
+        response_body["truncated"] = True
     return BodyLogRecord.make(
         request_id=request_id,
         provider=provider,
@@ -104,7 +179,7 @@ def build_body_record_for_stream(
         status="success" if status == "success" else "partial",
         is_streaming=True,
         request_body=safe_json(request_body),
-        response_body={"sse_text": sse_text},
+        response_body=response_body,
         user_id=user_id,
         team_id=team_id,
         sso_subject=sso_subject,
@@ -166,7 +241,7 @@ def wrap_stream_for_body_log(
     gen: AsyncIterator[bytes],
     *,
     dialect: str,
-    on_complete: Callable[[str, str], Awaitable[None]],
+    on_complete: Callable[[str, str, bool], Awaitable[None]],
 ) -> AsyncIterator[bytes]:
     """SSE 제너레이터를 감싸 전문을 누적하고, 종료 시 ``on_complete`` 를 정확히 1회 부른다.
 
@@ -190,37 +265,27 @@ def wrap_stream_for_body_log(
     marker = _TERMINAL_MARKERS.get(dialect)
 
     async def _wrapped() -> AsyncIterator[bytes]:
-        frames: list[str] = []
+        capture = BoundedCapture(marker)
         fired = False
-        # 멀티바이트 문자가 청크 경계에 걸리면 bytes.decode 단독 호출은 U+FFFD 로
-        # 깬다 — 감사 원문이 실제 응답과 달라지므로 경계를 넘나드는 디코더를 쓴다.
-        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
 
         async def _fire() -> None:
             nonlocal fired
             if fired:
                 return
             fired = True
-            text = "".join(frames)
-            status = "success" if marker and marker in text else "partial"
+            # 채점은 누적 텍스트가 아니라 표지 스캔 결과로 — cap 을 넘긴
+            # 정상 스트림이 partial 로 오기록되지 않는다(R22 r2 S3).
+            status = "success" if marker and capture.seen_marker else "partial"
             try:
-                await on_complete(text, status)
+                await on_complete(capture.text, status, capture.truncated)
             except Exception:
                 # 감사 sink 문제로 사용자의 스트림을 깨뜨리지 않는다.
                 logger.exception("web_search_body_log_failed")
 
-        try:
-            async for chunk in gen:
-                frames.append(decoder.decode(chunk))
-                yield chunk
-            tail = decoder.decode(b"", final=True)
-            if tail:
-                frames.append(tail)
-        except GeneratorExit:
-            # ⚠️ yield 는 못 하지만 await 는 된다 — 그래도 정산 체인을 이 unwind 와
-            #    분리해 태스크로 떼어 보내는 편이 exit 경로의 재취소에서 안전하다.
-            #    enqueue 는 큐에 put 하므로 양보할 수 있다 → 태스크로 떼어 보낸다.
-            #    (`_fire` 는 로컬 frames 를 닫고 있으므로 제너레이터가 사라져도 안전하다.)
+        def _detach_close_and_fire() -> None:
+            # ⚠️ unwind 경로에서 yield 는 못 하고 await 도 재취소에 노출된다 —
+            #    정산 체인을 태스크로 떼어 보낸다(`_fire` 는 로컬 capture 를
+            #    닫고 있으므로 제너레이터가 사라져도 안전하다).
             # 내부 gen 도 명시적으로 닫는다 — 닫지 않으면 정산이 들어 있는 상류
             # 제너레이터의 finally 가 GC/asyncgen finalizer 시점까지 지연되고,
             # aclosing 의도("명시적으로 닫아 과금 누락 방지")가 로깅 경로에서만
@@ -236,6 +301,20 @@ def wrap_stream_for_body_log(
             # 그러면 이 레코드만 조용히 사라진다.
             _PENDING_FIRES.add(task)
             task.add_done_callback(_PENDING_FIRES.discard)
+
+        try:
+            async for chunk in gen:
+                capture.feed(chunk)
+                yield chunk
+            capture.finish()
+        except GeneratorExit:
+            _detach_close_and_fire()
+            raise
+        except asyncio.CancelledError:
+            # CancelledError 는 BaseException — 아래 Exception 분기를 지나친다.
+            # upstream 대기 중 취소되면 본문 레코드가 통째로 유실되므로 같은
+            # detach 경로로 발화한다(R22 r3 N5).
+            _detach_close_and_fire()
             raise
         except Exception:
             # 상류 실패로 스트림이 끊긴 경우. 이 경로를 빼면 실패한 요청의 본문이 사라지는데,

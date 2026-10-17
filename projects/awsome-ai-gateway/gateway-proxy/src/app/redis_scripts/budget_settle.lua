@@ -21,8 +21,10 @@
 -- KEYS[3] = budget:pending:{scope}:{<scope_id>}:<req_id> -- 예약 마커
 -- KEYS[4] = budget:resvsum:{scope}:{<scope_id>}:{period} -- 미정산 예약 합계
 --           (마커 TTL 로 settle 이 no-op 되면 잔류 — 표시가 과소로 기는 방향)
+-- KEYS[5] = budget:pendingidx:{scope}:{<scope_id>}       -- 마커 인덱스 해시(선택)
 -- ARGV[1] = actual cost (USD, string decimal)
 -- ARGV[2] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
+-- ARGV[3] = index field ('' = 인덱스 미사용 — 구버전 호출자)
 --
 -- Returns: JSON {settled, new_used, remaining, threshold_triggered, app_clients}
 
@@ -59,15 +61,35 @@ end
 
 local used = tonumber(redis.call('GET', usage_key) or '0')
 local delta = actual - reserved
+local usage_lost = false
+
+-- 카운터 유실 감지(R22 r1 M1): 예약 마커는 살아 있는데 usage 키가 없다는 건
+-- 카운터가 축출/failover 로 사라진 것 — 예약치도 그 키와 함께 사라졌으므로
+-- (실비 - 예약) 델타는 예약치만큼 과소 계상한다. 유실 상태에서는 실비 전액을
+-- 적용하고 센티넬(usage_key..':lost', 같은 hash tag)을 세워 다음 check 가
+-- rebuild 하게 한다. 센티넬이 없으면 양수 델타가 키를 재생성해 "키 있음"으로
+-- 보여 rebuild 트리거가 영구히 발화하지 않는다.
+if redis.call('EXISTS', usage_key) == 0 then
+    delta = actual
+    usage_lost = true
+    redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
+end
 
 redis.call('INCRBYFLOAT', usage_key, delta)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 redis.call('INCRBYFLOAT', KEYS[4], -reserved)
 redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('DEL', marker_key)
+if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
+    redis.call('HDEL', KEYS[5], ARGV[3])  -- 인덱스는 베스트에포트 — 마커가 진실
+end
 
 -- 논리적 이전값 = 현재 카운터에서 이 요청의 예약분을 뺀 값.
-local logical_old = used - reserved
+-- 단 유실 경로(usage_lost)에서는 예약치가 카운터와 함께 사라졌으므로
+-- used 에서 빼면 안 된다 — used=0 일 때 logical_old=-reserved 가 돼
+-- new_used 가 실비보다 예약치만큼 낮게 나오고 임계 교차 알림이 빠진다
+-- (R22 r5 N2). 유실 시 논리적 이전값은 0 이다.
+local logical_old = usage_lost and 0 or (used - reserved)
 local logical_new = logical_old + actual
 
 local triggered = cjson.null

@@ -138,7 +138,12 @@ class BodyLogger:
         while True:
             await asyncio.sleep(self._flush_interval)
             try:
-                await self._flush_once()
+                # 틱당 1배치(100건)는 20 req/s 지속 부하에서 큐가 불어나 drop-
+                # oldest 로 감사 레코드를 잃는다 — 비울 때까지 반복하되 틱을
+                # 독점하지 않게 배치 수 상한을 둔다(R22 r1 S3).
+                for _ in range(10):
+                    if await self._flush_once() == 0:
+                        break
             except Exception:
                 logger.exception("body_log_flush_loop_error")
 

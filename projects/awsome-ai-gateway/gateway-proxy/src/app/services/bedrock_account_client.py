@@ -22,6 +22,12 @@ from typing import Any, Callable, Optional
 import boto3
 import structlog
 
+from app.services.credential_backoff import (
+    failure_backoff_s,
+    reraise_fresh,
+)
+
+
 logger = structlog.get_logger(__name__)
 
 _ASSUME_DURATION = 3600          # 1h STS 세션 (Mantle 브로커와 동일)
@@ -43,26 +49,59 @@ class BedrockAccountClientProvider:
         self._now = now
         self._clients: dict[tuple[str, str, str], _CachedClient] = {}
         self._lock = asyncio.Lock()
+        # 키별 단일비행 — 한 프로세스 전역 락으로 직렬화된 AssumeRole 이, 실패
+        # 캐싱 부재와 맞물려 파드 처리율 상한(10~20 req/s)이 됐다. 락은 캐시
+        # 판정과 태스크 등록에만 쓰고 STS 호출은 락 밖에서 공유 await 한다.
+        self._inflight: dict[tuple[str, str, str], asyncio.Task] = {}
+        self._failures: dict[tuple[str, str, str], tuple[Exception, float]] = {}
 
     async def get_client(self, role_arn: str, region: str, external_id: Optional[str] = None):
         # 캐시 키에 external_id 포함: external_id 회전/수정 시 stale 클라이언트 재사용을 막는다
         # (external_id 는 assume 자격의 일부라 값이 바뀌면 다른 세션으로 취급해야 함).
         key = (role_arn, region, external_id or "")
+        # 락 없는 빠른 경로 — 캐시 적중/실패 백오프는 STS 호출 없이 결정된다.
+        now = self._now()
+        cached = self._clients.get(key)
+        if cached and cached.expires_at - _CLIENT_REFRESH_SKEW > now:
+            return cached.client
+        failure = self._failures.get(key)
+        if failure and failure[1] > now:
+            reraise_fresh(failure[0])
+
         async with self._lock:
             now = self._now()
             cached = self._clients.get(key)
             if cached and cached.expires_at - _CLIENT_REFRESH_SKEW > now:
                 return cached.client
+            failure = self._failures.get(key)
+            if failure and failure[1] > now:
+                reraise_fresh(failure[0])
+            task = self._inflight.get(key)
+            if task is None:
+                task = asyncio.get_running_loop().create_task(
+                    self._refresh(key, role_arn, region, external_id)
+                )
+                self._inflight[key] = task
+                task.add_done_callback(lambda _t, k=key: self._inflight.pop(k, None))
+        try:
+            # 락 밖에서 공유 await — 동시 호출자는 같은 AssumeRole 을 기다린다.
+            # 취소 전파 차단 — 대기자 취소가 공유 refresh task 를 취소하면
+            # 모든 대기 요청이 CancelledError 로 쓰러진다(R22 r2 S1).
+            return await asyncio.shield(task)
+        except Exception as exc:
+            self._failures[key] = (exc, self._now() + failure_backoff_s(exc))
+            raise
 
-            creds, expires_at = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: self._assume(role_arn, external_id)
-            )
-            client = await asyncio.get_running_loop().run_in_executor(
-                None, lambda: self._build_client(region, creds)
-            )
-            self._clients[key] = _CachedClient(client=client, expires_at=expires_at)
-            logger.info("bedrock_xacct_client_built", role_arn=role_arn, region=region)
-            return client
+    async def _refresh(self, key, role_arn: str, region: str, external_id):
+        creds, expires_at = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self._assume(role_arn, external_id)
+        )
+        client = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: self._build_client(region, creds)
+        )
+        self._clients[key] = _CachedClient(client=client, expires_at=expires_at)
+        logger.info("bedrock_xacct_client_built", role_arn=role_arn, region=region)
+        return client
 
     def _assume(self, role_arn: str, external_id: Optional[str]) -> tuple[dict, float]:
         kwargs: dict[str, Any] = {

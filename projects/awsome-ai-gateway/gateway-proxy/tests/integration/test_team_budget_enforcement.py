@@ -220,6 +220,23 @@ def _build_redis(budget_eval_resps) -> AsyncMock:
 
     redis.get = AsyncMock(side_effect=_redis_get_side_effect)
 
+    # budget_service 핫패스는 카운터+:lost 센티넬을 MGET 으로 읽는다(R22 r4 N3).
+    # 카운터 키는 값 존재(=exists==1 구 의미), :lost 센티넬은 부재로 응답해
+    # DB 복구 루프를 스킵한다.
+    def _redis_mget_side_effect(keys):
+        out = []
+        for key in keys:
+            k = key.decode() if isinstance(key, bytes) else key
+            if k.endswith(":lost"):
+                out.append(None)
+            elif k.startswith("budget:user:{") or k.startswith("budget:team:{"):
+                out.append(b"1.0")
+            else:
+                out.append(_redis_get_side_effect(k))
+        return out
+
+    redis.mget = AsyncMock(side_effect=_redis_mget_side_effect)
+
     # Redis eval: §6-1 단계 순서상 TEAM EVAL 이 먼저 — scope label(ARGV[1])로
     # 응답을 골라 호출 순서 변경에 무관하게 한다.
     user_resp, team_resp = budget_eval_resps

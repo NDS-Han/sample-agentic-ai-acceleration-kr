@@ -141,13 +141,13 @@ def _estimate_input_tokens(body: dict) -> int:
         if isinstance(_add, int) and _add > 0:
             fallback += _add
         return fallback
-    ascii_count = 0
-    non_ascii_count = 0
-    for ch in serialized:
-        if ord(ch) < 128:
-            ascii_count += 1
-        else:
-            non_ascii_count += 1
+    # C 수준 카운트 — 0.5~2MB 바디를 문자별 파이썬 루프로 순회하면 요청당
+    # 수십 ms 이벤트루프가 멈춰 같은 워커의 SSE 스트림 전부가 끊긴다(R22 r1 S2).
+    if serialized.isascii():
+        ascii_count, non_ascii_count = len(serialized), 0
+    else:
+        non_ascii_count = len(serialized) - len(serialized.encode("ascii", "ignore"))
+        ascii_count = len(serialized) - non_ascii_count
     estimate = ascii_count // _BYTES_PER_TOKEN + non_ascii_count + media_tokens[0]
     # 심사 전용 배수(웹서치 루프): 턴당 입력이 재청구되므로 입장 예약도 배수로.
     mult = body.get("_gw_admission_input_mult")
@@ -536,15 +536,34 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
         "team_budget_unset": "팀 예산이 설정되지 않았습니다. 관리자에게 문의하세요.",
         "budget_backend_unavailable": "Budget service temporarily unavailable. Please retry.",
     }
+    # 백엔드 장애는 월예산 고갈 429 가 아니라 503 — 클라이언트가 rate-limit
+    # 백오프를 타지 않게, 재시도 가능함을 Retry-After 로 알린다(R22 r1 N4).
+    if reason == "budget_backend_unavailable":
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "5"},
+            content=anthropic_error(
+                "service_unavailable", messages[reason], code=reason
+            ),
+        )
     record_rate_limit_hit(metrics, scope="budget", limit_type="monthly")
     # Retry-After 를 달지 않는다 — 월예산은 다음 달 롤오버까지 풀리지 않는데
     # 60초 재시도를 시사하면 클라이언트 재시도 폭풍을 부른다. 재시도 의미가
     # 있는 건 분/시간 창의 RPM/TPM/CPM/CPH 뿐이다.
+    # 예약 차단(잔량 있음)은 실고갈과 구분된 메시지 — 대시보드 잔량 아래에서
+    # "예산 초과" 오보를 막는다(R22 r1 S6).
+    if reason.endswith("_budget_reservation_exceeded"):
+        message = (
+            "Worst-case cost reservation exceeds the remaining monthly budget. "
+            "Reduce max_tokens or retry after in-flight requests settle."
+        )
+    else:
+        message = messages.get(reason, "Budget limit exceeded.")
     return JSONResponse(
         status_code=429,
         content=anthropic_error(
             "rate_limit_error",
-            messages.get(reason, "Budget limit exceeded."),
+            message,
             code=reason,
         ),
     )
