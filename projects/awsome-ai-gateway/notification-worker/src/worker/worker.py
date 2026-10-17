@@ -42,15 +42,23 @@ class TaskSupervisor:
 
         logger.info("supervisor_started", task_count=len(self._registry))
 
+    #: 이 시간 이상 안정적으로 돈 태스크가 죽으면 백오프를 초기화한다 — 파드
+    #: 수명 동안 일시 오류가 몇 번 누적되면 그 뒤엔 매 실패가 60s 씩 채널을
+    #: 구독 해제 상태로 두게 돼, 짧은 Redis blip 도 알림 유실 창을 누적시킨다.
+    _STABLE_RESET_SEC = 300.0
+
     async def _supervised_run(
         self,
         name: str,
         coro_fn: Callable[[], Awaitable[None]],
     ) -> None:
         """지수 백오프로 태스크를 감독·재시작한다."""
+        import time as _time
+
         backoff: float = 1.0
 
         while True:
+            started_at = _time.monotonic()
             try:
                 await coro_fn()
                 # 정상 종료 (일반적으로 발생하지 않음)
@@ -60,6 +68,8 @@ class TaskSupervisor:
                 logger.info("task_cancelled", name=name)
                 raise  # 취소는 전파
             except Exception as exc:
+                if _time.monotonic() - started_at > self._STABLE_RESET_SEC:
+                    backoff = 1.0  # 오래 살았던 실행의 실패 — 과거 누적과 무관하게 리셋
                 logger.error(
                     "task_failed_restarting",
                     name=name,

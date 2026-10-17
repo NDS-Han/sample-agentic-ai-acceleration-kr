@@ -71,10 +71,14 @@ def parse_pubsub_message(raw_data: str | bytes) -> NotificationEvent | None:
         #    기본 포매터는 extra 키를 출력하지 않으므로 로그에는 "pubsub_parse_failed"
         #    한 줄만 남았다. 실제로 봉투 불일치(payload 누락 / 대문자 type)로 전량이
         #    폐기되는 동안 원인이 로그에 전혀 드러나지 않았다.
+        #    페이로드에 수신자 주소가 들어있을 수 있어 이메일은 마스킹한다.
+        from worker.services.email_mask import mask_emails_in_text
+
+        raw_preview = mask_emails_in_text(str(raw_data)[:200])
         logger.error(
             "pubsub_parse_failed error=%s raw=%s",
             exc,
-            str(raw_data)[:200],
-            extra={"error": str(exc), "raw": str(raw_data)[:200]},
+            raw_preview,
+            extra={"error": str(exc), "raw": raw_preview},
         )
         return None

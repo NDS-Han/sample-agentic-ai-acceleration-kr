@@ -99,6 +99,10 @@ async def restore(
         # 마커분을 다시 얹지 않으면 settle 이 (실비-예약치) 델타로 과소 정산한다.
         pending = 0.0
         async for k in r.scan_iter(match=f"budget:pending:user:{{{uid}}}:*"):
+            # `:done` 툼스톤(값이 실비)은 라이브 예약이 아니다 — 재합산 금지.
+            kstr = k.decode() if isinstance(k, bytes) else k
+            if kstr.endswith(":done"):
+                continue
             v = await r.get(k)
             if v:
                 pending += float(v)

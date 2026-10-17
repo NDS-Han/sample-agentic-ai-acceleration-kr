@@ -82,15 +82,29 @@ class NotificationBufferQueue:
             if not batch:
                 break
 
-            for event in batch:
+            for i, event in enumerate(batch):
                 try:
                     await process_fn(event)
                     total += 1
                 except Exception:
                     logger.exception("drain_event_failed", event_id=event.event_id)
-                    await self.enqueue(event)
+                    # ⚠️ 실패한 이벤트 **뒤의 잔여도** 다시 큐에 넣는다 — 이미
+                    #    dequeue 된 batch[i+1:] 을 그냥 버리면 Pub/Sub 재생이
+                    #    없고 notification_logs 행도 없어 sweeper 도 복구하지
+                    #    못한다(영구 유실).
+                    for ev in batch[i:]:
+                        await self.enqueue(ev)
                     # 복구 불안정 상태일 수 있으므로 이번 drain은 여기서 중단
                     return total
+                except BaseException:
+                    # CancelledError 계열 — 잔여 dequeue 분이 증발하지 않게
+                    # 재큐한 뒤 재전파한다(enqueue 는 non-blocking put_nowait).
+                    for ev in batch[i:]:
+                        try:
+                            await self.enqueue(ev)
+                        except Exception:
+                            break  # 종료 중 재적재 실패는 삼킨다
+                    raise
 
         if total > 0:
             logger.info("buffer_drained", count=total)

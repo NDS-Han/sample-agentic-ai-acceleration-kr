@@ -195,15 +195,20 @@ async def test_redis_recovery_reconciles_stale_budget_counters():
     await asyncio.gather(*hc._bg_tasks, return_exceptions=True)
 
     # 마커 키 1건이 단일 스캔에서 수집돼 eval KEYS 로 넘어간다.
+    # KEYS = usage/resvsum/pendingidx/마커, ARGV = used/snap/마커 접두사
+    # (dead 인덱스 필드 스윕용 — R23 r3 S-1).
     assert len(redis.eval_calls) == 1
     numkeys, args = redis.eval_calls[0]
-    assert numkeys == 3
+    assert numkeys == 4
     assert args[0] == f"budget:user:{{u1}}:{period}"
     assert args[1] == f"budget:resvsum:user:{{u1}}:{period}"
-    assert args[2] == "budget:pending:user:{u1}:r1"
-    # ARGV = used_usd, resvsum 스냅샷 — orphan·플로어 산정은 Lua 가 한다.
-    assert float(args[3]) == pytest.approx(50.0)
-    assert float(args[4]) == pytest.approx(5.0)
+    assert args[2] == "budget:pendingidx:user:{u1}"
+    assert args[3] == "budget:pending:user:{u1}:r1"
+    # ARGV = used_usd, resvsum 스냅샷, 마커 접두사 — orphan·플로어 산정은
+    # Lua 가 한다.
+    assert float(args[4]) == pytest.approx(50.0)
+    assert float(args[5]) == pytest.approx(5.0)
+    assert args[6] == "budget:pending:user:{u1}:"
 
 
 @pytest.mark.asyncio
@@ -275,7 +280,7 @@ async def test_reconcile_never_lowers_usage_counter():
 
     assert len(redis.eval_calls) == 1
     _, args = redis.eval_calls[0]
-    # 마커 키가 KEYS 로 넘어가고 ARGV 는 used·resvsum 스냅샷 —
+    # 마커 키가 KEYS 로 넘어가고 ARGV 는 used·resvsum 스냅샷·마커 접두사 —
     # cur > db 일 때 카운터를 깎지 않는 플로어 판정은 Lua 안에서 이뤄진다.
-    assert float(args[3]) == pytest.approx(80.0)
-    assert float(args[4]) == pytest.approx(7.0)
+    assert float(args[4]) == pytest.approx(80.0)
+    assert float(args[5]) == pytest.approx(7.0)

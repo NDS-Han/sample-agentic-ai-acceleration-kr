@@ -380,6 +380,9 @@ class BatchFlusher:
             self._metrics.entries_flushed.add(
                 len(recorded), {"worker": "cost-recorder"}
             )
+            self._metrics.batch_size.record(
+                len(recorded), {"worker": "cost-recorder"}
+            )
 
         logger.info(
             "batch_flushed",
@@ -425,6 +428,10 @@ class BatchFlusher:
                     user_id=e.user_id,
                     reason=str(ie)[:120],
                 )
+                if self._metrics:
+                    self._metrics.entries_dropped.add(
+                        1, {"reason": "permanent_row_error"}
+                    )
             # ⚠️ 영구 오류 외(직렬화 실패·데드락·일시적 DB 끊김)는 전파한다.
             #    여기서 삼키고 호출자가 XACK 하면 그 비용은 **영구 유실**(미청구)이다.
             #    전파하면 배치가 unacked 로 남아 PEL reclaim 으로 재처리되고,
@@ -704,7 +711,26 @@ class BatchFlusher:
                         "target_type": e.threshold_scope or "user",
                     },
                 }
-                await self._redis.publish("notifications:budget", json.dumps(event))
+                # ⚠️ PUBLISH 반환값(구독자 수)을 반드시 본다 — notification-worker
+                #    전 replica 가 롤링/재연결 중이면 0 에 발행돼 hard_block 100%
+                #    알림이 기록 없이 유실된다. pub/sub 은 재생이 없고 이 이벤트는
+                #    notification_logs 행도 없어 sweeper 도 못 잡는다.
+                receivers = await self._redis.publish(
+                    "notifications:budget", json.dumps(event)
+                )
+                if not receivers:
+                    # ⚠️ Redis Cluster 모드에서 PUBLISH 반환값은 **발행 노드에
+                    #    붙은 구독자 수**만 센다 — notification-worker 가 다른
+                    #    노드에 붙어 있으면 정상 전달인데도 0 이 온다(R23 r2
+                    #    N-1). ERROR 가 아니라 WARN — cluster 배포에서는
+                    #    소프트 신호로만 읽는다.
+                    logger.warning(
+                        "threshold_publish_no_subscribers",
+                        user_id=e.user_id,
+                        threshold=e.threshold_triggered,
+                    )
+                    if self._metrics:
+                        self._metrics.threshold_publish_lost.add(1)
             except Exception:
                 logger.warning(
                     "threshold_publish_failed",

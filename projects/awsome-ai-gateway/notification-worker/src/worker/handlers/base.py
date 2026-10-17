@@ -19,7 +19,7 @@ from worker.schemas.events import EventType, NotificationEvent, ServiceSource
 from worker.schemas.recipients import Recipient, RecipientRole, RenderedEmail
 from worker.senders.base import EmailSendError, EmailSender
 from worker.services.config_cache import ConfigCache
-from worker.services.email_mask import mask_email
+from worker.services.email_mask import mask_email, mask_emails_in_text
 from worker.services.recipient_resolver import RecipientResolver
 from worker.services.retry_executor import RetryExecutor
 from worker.services.template_engine import TemplateEngine
@@ -127,35 +127,40 @@ class BaseHandler(ABC):
 
         # 1b. 쿨다운 dedup — auth_failure_spike 같은 카운터형 이벤트는 발행자가
         #     임계 도달마다 새 event_id 로 재발행하고 워커/pod × uvicorn 워커 수만큼
-        #     뻥튀기된다. Redis SETNX 로 같은 정체성 알림을 cooldown 창 안에서 1회만
-        #     발송한다. Pub/Sub 특성상 실제 재전송은 없으므로 이 dedup 은 "폭주 억제"
-        #     용도다 (notification_logs 의 (event_id, recipient) 유니크 dedup 과 별개).
+        #     뻥튀기된다. 같은 정체성 알림을 cooldown 창 안에서 1회만 발송한다.
+        # ⚠️ "읽기 확인 → 발송 후 기록" 은 발송 완료(SES 왕복·재시도 수 초)까지
+        #    창이 열려 동시 버스트가 전부 통과한다(R23 r2 S-4). 그래서 선점한다:
+        #    ``SET key <event_id> NX EX cooldown`` — 키가 이미 있으면 그 값이
+        #    같은 event_id(fan-out 복사본)일 때만 진행하고, 다른 event_id 는
+        #    억제한다. 죽은 claimer 의 고아 키는 TTL 로 자연 해소되고, 인프라
+        #    실패로 되돌리는 경우엔 compare-and-del 로 우리 키만 해제한다 —
+        #    행이 하나도 없는 이벤트의 키가 창 전체를 억제하는 기아를 막는다.
         cooldown_key = await self._claim_cooldown(event)
         if cooldown_key is False:
-            return  # 쿨다운 창 안 — 이미 발송된(또는 발송 중인) 알림
+            return  # 쿨다운 창 안 — 같은 정체성 알림이 이미 처리 중/완료
 
-        # 아래 블록이 어떤 이유로든(취소·버그·인프라) 예외로 빠져나가면 쿨다운
-        # 키를 해제한다 — 슬롯 INSERT 전에 멈춘 경우 행도 키만 남아 replica
-        # fan-out 재처리가 억제돼 이벤트가 유실된다. 정상 완료·스킵 경로는
-        # 키를 유지해 폭주 억제가 동작한다.
+        # 2. 수신자 결정 — DB 장애는 NotificationInfraError 로 전환해
+        #    리스너가 이벤트를 버퍼에 넣게 한다 (Pub/Sub 재전송 없음 →
+        #    삼키면 영구 유실).
         try:
-            # 2. 수신자 결정 — DB 장애는 NotificationInfraError 로 전환해
-            #    리스너가 이벤트를 버퍼에 넣게 한다 (Pub/Sub 재전송 없음 →
-            #    삼키면 영구 유실).
             try:
                 recipients = await self._recipient_resolver.resolve(
                     roles=config.recipient_roles,
                     payload=event.payload,
                 )
             except SQLAlchemyError as exc:
-                raise NotificationInfraError("recipient resolution failed") from exc
+                raise NotificationInfraError(
+                    "recipient resolution failed"
+                ) from exc
             if not recipients:
-                logger.warning("no_recipients_resolved", event_type=event.type.value)
+                logger.warning(
+                    "no_recipients_resolved", event_type=event.type.value
+                )
                 return
 
             # 3. 수신자별 처리 — 한 수신자의 렌더/DB/기타 실패가 나머지 수신자를
-            #    데려가지 않도록 수신자 단위로 격리한다(예외 전파 시 잔여 수신자 전부
-            #    미발송이 되던 결함).
+            #    데려가지 않도록 수신자 단위로 격리한다(예외 전파 시 잔여 수신자
+            #    전부 미발송이 되던 결함).
             infra_errors = 0
             for recipient in recipients:
                 try:
@@ -169,17 +174,21 @@ class BaseHandler(ABC):
                         recipient=mask_email(getattr(recipient, "email", "?")),
                     )
                     if self._metrics:
-                        self._metrics.errors_total.add(1, {"error_type": "recipient"})
+                        self._metrics.errors_total.add(
+                            1, {"error_type": "recipient"}
+                        )
 
             # 3-end. 전 수신자가 인프라 오류로 실패 = DB 다운 — 전체 이벤트를
-            #        버퍼로 돌려 복구 후 재처리한다. 일부만 실패면 성공분은 보내졌고
-            #        실패분의 pending 행은 sweeper 가 회수한다.
+            #        버퍼로 돌려 복구 후 재처리한다. 일부만 실패면 성공분은
+            #        보내졌고 실패분의 pending 행은 sweeper 가 회수한다.
             if infra_errors and infra_errors == len(recipients):
                 raise NotificationInfraError(
                     f"all {infra_errors} recipients failed on infra errors"
                 )
-        except BaseException:
-            await self._release_cooldown(cooldown_key)
+        except NotificationInfraError:
+            # 처리를 못 끝냈는데 선점 키가 남으면 재시도가 창 내내 억제된다 —
+            # 값이 우리 event_id 일 때만 해제한다(다른 claimer 의 키는 보호).
+            await self._release_cooldown(cooldown_key, event)
             raise
 
         # 4. 처리 완료 메트릭
@@ -192,13 +201,27 @@ class BaseHandler(ABC):
                 duration, {"event_type": event.type.value}
             )
 
-    async def _claim_cooldown(self, event: NotificationEvent) -> str | bool | None:
-        """쿨다운 키를 SETNX 한다.
+    #: 선점과 holder 판독을 한 eval 로 묶는다 — ``SET NX`` 실패 후 ``GET``
+    #: 까지 따로 가면 그 사이 키가 만료돼 holder=None 을 "다른 event_id" 로
+    #: 오판해 창 종료 직후 이벤트를 1회 억제한다(R23 r3 N-8).
+    #: 반환 1=우리가 점유, 2=같은 event_id 가 점유(fan-out 통과), 0=억제.
+    _CLAIM_COOLDOWN_LUA = (
+        "if redis.call('set', KEYS[1], ARGV[1], 'nx', 'ex', ARGV[2]) then "
+        "return 1 end "
+        "if redis.call('get', KEYS[1]) == ARGV[1] then return 2 end "
+        "return 0"
+    )
 
-        Returns:
-            str: 선점 성공 — 이어서 처리하고, 실패로 되돌릴 땐 이 키를 지운다.
-            False: 쿨다운 창 안 — 이벤트를 스킵한다.
-            None: dedup 불가(키 없음/미구성/Redis 오류) — 그냥 처리한다.
+    async def _claim_cooldown(
+        self, event: NotificationEvent
+    ) -> str | None | bool:
+        """쿨다운 키 선점 — 원자 eval 로 동시 버스트를 억제한다.
+
+        반환:
+          ``str``  — 우리가 잡은 키 (인프라 실패 시 ``_release_cooldown`` 대상)
+          ``None`` — 쿨다운 미적용(fail-open 포함) 또는 같은 event_id 의
+                     fan-out 복사본 — 진행하되 해제 대상 없음
+          ``False`` — 다른 event_id 가 창을 보유 — 억제
         """
         if self._redis is None or self._cooldown_seconds <= 0:
             return None
@@ -206,29 +229,51 @@ class BaseHandler(ABC):
         if key is None:
             return None
         try:
-            claimed = await self._redis.set(key, "1", nx=True, ex=self._cooldown_seconds)
-        except Exception:
-            # dedup 못 해도 발송 자체는 진행 — 중복 알림이 유실보다 낫다.
-            logger.warning("cooldown_claim_failed_fail_open", event_type=event.type.value)
-            return None
-        if not claimed:
+            verdict = await self._redis.eval(
+                self._CLAIM_COOLDOWN_LUA,
+                1,
+                key,
+                event.event_id,
+                self._cooldown_seconds,
+            )
+            if verdict == 1:
+                return key
+            if verdict == 2:
+                # 같은 event_id 의 fan-out 복사본 — 통과(해제 대상 없음)
+                return None
             logger.info(
                 "notification_cooldown_suppressed",
                 event_type=event.type.value,
                 event_id=event.event_id,
             )
             if self._metrics:
-                self._metrics.errors_total.add(1, {"error_type": "cooldown_suppressed"})
+                self._metrics.errors_total.add(
+                    1, {"error_type": "cooldown_suppressed"}
+                )
             return False
-        return key
+        except Exception:
+            logger.warning(
+                "cooldown_claim_failed_fail_open", event_type=event.type.value
+            )
+            return None
 
-    async def _release_cooldown(self, key: str | bool | None) -> None:
-        """인프라 실패로 이벤트를 되돌릴 때 쿨다운 키를 해제 — 안 지우면
-        버퍼 드레인/스위퍼의 재처리가 창 안에서 억제돼 이벤트가 유실된다."""
-        if not isinstance(key, str) or self._redis is None:
+    #: 선점한 쿨다운 키가 우리 event_id 의 것일 때만 지우는 CAS — 다른
+    #: claimer 가 이미 재점유한 키를 지우지 않게 한다.
+    _RELEASE_COOLDOWN_LUA = (
+        "if redis.call('get', KEYS[1]) == ARGV[1] then "
+        "return redis.call('del', KEYS[1]) end return 0"
+    )
+
+    async def _release_cooldown(
+        self, key: str | None | bool, event: NotificationEvent
+    ) -> None:
+        """인프라 실패 롤백 — 우리가 잡은 쿨다운 키만 해제한다."""
+        if self._redis is None or not isinstance(key, str):
             return
         try:
-            await self._redis.delete(key)
+            await self._redis.eval(
+                self._RELEASE_COOLDOWN_LUA, 1, key, event.event_id
+            )
         except Exception:
             logger.warning("cooldown_release_failed", key=key)
 
@@ -436,19 +481,27 @@ class BaseHandler(ABC):
                 return
 
             # 수신자 표시명 — 발송 시점 표시명 조회가 안 되면 이메일로 대체.
+            # 비활성화된 수신자에게는 재발송하지 않는다 — 행이 만들어진 뒤
+            # 비활성화된 계정(퇴사·잠금)에 최대 24h 동안 메일이 나가는 것을 막는다.
             name = log.recipient_email
             if log.recipient_user_id:
                 from worker.models.auth import User
 
-                display = (
+                row = (
                     await session.execute(
-                        select(User.display_name).where(
+                        select(User.display_name, User.is_active).where(
                             User.id == str(log.recipient_user_id)
                         )
                     )
-                ).scalar_one_or_none()
-                if display:
-                    name = display
+                ).one_or_none()
+                if row is not None and not row.is_active:
+                    log.status = "skipped"
+                    log.error_message = "resend_skipped_recipient_inactive"
+                    log.resolved_at = datetime.now(timezone.utc)
+                    await session.commit()
+                    return
+                if row is not None and row.display_name:
+                    name = row.display_name
 
             # 원본 발행자 source 는 로그에 보존되지 않는다 — 템플릿은
             # event.type/payload 만 쓰므로 복원용 고정값으로 충분하다.
@@ -503,11 +556,18 @@ class BaseHandler(ABC):
                 fn=lambda r=rendered: self._email_sender.send(r),
                 event_type=event.type.value,
             )
-            log.status = "sent"
+            # mock 센더는 실제 발송이 없다 — 'sent' 로 기록하면 감사 추적이
+            # "발송된 적 없는 메일을 발송함"으로 오염된다. `is True` 비교는
+            # 테스트 더블(MagicMock 의 자동 속성)의 truthy 를 걸러낸다.
+            log.status = (
+                "mocked"
+                if getattr(self._email_sender, "mocked", False) is True
+                else "sent"
+            )
             log.resolved_at = datetime.now(timezone.utc)
             if self._metrics:
                 self._metrics.emails_sent_total.add(
-                    1, {"event_type": event.type.value, "status": "sent"}
+                    1, {"event_type": event.type.value, "status": log.status}
                 )
         except Exception as exc:
             # 재시도 불가 오류(잘못된 주소 등)는 'rejected' — sweeper 클레임
@@ -517,7 +577,9 @@ class BaseHandler(ABC):
                 if not isinstance(exc, EmailSendError) or exc.retryable
                 else "rejected"
             )
-            log.error_message = str(exc)
+            # 오류 문자열에 수신자 주소가 평문으로 들어갈 수 있다 — 로그와
+            # DB 양쪽에 마스킹된 형태만 남긴다.
+            log.error_message = mask_emails_in_text(str(exc))
             log.resolved_at = datetime.now(timezone.utc)
             if self._metrics:
                 self._metrics.emails_sent_total.add(
@@ -527,7 +589,7 @@ class BaseHandler(ABC):
                 "email_send_failed",
                 event_type=event.type.value,
                 recipient=mask_email(recipient.email),
-                error=str(exc),
+                error=mask_emails_in_text(str(exc)),
             )
 
         log.last_attempt_at = datetime.now(timezone.utc)

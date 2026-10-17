@@ -203,15 +203,18 @@ async def release_reservations(
        되돌리지 않았다. 400 을 연속으로 받은 사용자는 **한 푼도 쓰지 않고** 자기 CPM/CPH
        한도를 소진해 그 분/시간이 끝날 때까지 스스로 429 를 맞는다.
 
-    ⚠️ 마지막에 ``state["rate_limit_state"]`` 를 지운다 — 이것이 멱등성의 근거다.
-       정산이 이미 됐으면 상태가 비어 있어 이 함수는 no-op 이고, 반대로 이 함수가 먼저
-       돌면 ``finalize`` 가 이중 정산하지 않는다. 그래서 "혹시 몰라 한 번 더" 부르는 것이
-       안전하다.
+    ⚠️ 정산 상태는 읽는 게 아니라 **처음에 pop** 한다 — 이것이 멱등성의 근거다.
+       예전엔 ``get`` 으로 읽고 환불 후 맨 끝에 pop 했는데, 그 창 사이에
+       ``unsettled_reservation_guard`` 의 데드라인이 끝나며 돌린 늦은 drain 의
+       ``finalize`` 가 같은 상태를 pop 해 둘 다 정산할 수 있었다 — TPM/CPM 은
+       이중 환불, 월예산은 release(0) 가 이기면 실비가 카운터에 반영 안 된다.
+       단일 이벤트 루프에서 pop 은 원자적 소유권 주장이다 — 먼저 pop 한 쪽만
+       정산한다.
     """
-    rls = state.get("rate_limit_state")
-    if not rls:
-        return
     if redis is None:
+        return  # Redis 없이는 예약도 못 잡았다 — pop 할 상태도 없다
+    rls = state.pop("rate_limit_state", None)
+    if not rls:
         return
 
     svc = RateLimitService()
@@ -257,9 +260,6 @@ async def release_reservations(
             await BudgetService().settle_budget(redis, budget_res, Decimal("0"))
         except Exception:
             logger.warning("fallback_unwind_budget_failed")
-
-    # Clear so finalize() does not double-settle
-    state.pop("rate_limit_state", None)
 
 
 def unsettled_reservation_guard(state: dict) -> "BackgroundTask":

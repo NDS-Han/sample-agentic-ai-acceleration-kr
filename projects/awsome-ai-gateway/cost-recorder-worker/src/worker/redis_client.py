@@ -46,8 +46,22 @@ _REDIS_MAX_CONNECTIONS = 20
 
 
 async def create_redis_client(settings: Settings) -> Redis | RedisCluster:
-    """standalone/cluster 자동 감지 Redis 클라이언트."""
-    kwargs: dict = {"max_connections": _REDIS_MAX_CONNECTIONS}
+    """standalone/cluster 자동 감지 Redis 클라이언트.
+
+    ⚠️ socket_timeout 은 반드시 XREADGROUP BLOCK 보다 길어야 한다 — 짧으면
+       정상 블로킹 대기가 매번 SocketTimeoutError 로 끊긴다. 반대로 None 이면
+       페일오버 후 half-open TCP 위의 XREADGROUP 이 영구 블록된다: 예외가
+       supervisor 에 도달하지 않고 liveness 는 kill -0 만 보니 소비가 영원히
+       멈춘 채로 파드가 살아있게 된다.
+    """
+    kwargs: dict = {
+        "max_connections": _REDIS_MAX_CONNECTIONS,
+        "socket_timeout": settings.xread_block_ms / 1000 + 5,
+        "socket_connect_timeout": 5,
+        # 풀 연결의 idle keepalive — 페일오버 후 half-open 소켓 재사용을 줄인다.
+        "socket_keepalive": True,
+        "health_check_interval": 30,
+    }
     if settings.redis_tls_enabled:
         kwargs["ssl"] = True
 

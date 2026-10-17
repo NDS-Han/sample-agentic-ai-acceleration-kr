@@ -226,6 +226,11 @@ class HealthChecker:
             ):
                 try:
                     kstr = key.decode() if isinstance(key, bytes) else key
+                    if kstr.endswith(":done"):
+                        # 이행기 잔재 — 배포/롤링 중 구현이 만든 툼스톤은
+                        # 값이 실비라 라이브 마커로 오인되면 정산분이
+                        # 재합산된다(R23 r5 N-1).
+                        continue
                     # "budget:pending:" 이후 — [0]=user|team|client,
                     # [1]={sid}, client 이면 [2]=client 이름, 마지막=req_id.
                     parts = kstr.split("budget:pending:", 1)[1].split(":")
@@ -263,10 +268,19 @@ class HealthChecker:
                     c = str(client)
                     usage_key = f"budget:user:{{{sid}}}:{c}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{c}:{period}"
+                    # client scope 인덱스는 유저당 하나 — 카운터는 앱별이라
+                    # 필드 접두사 "<client>:" 로 이 앱 필드만 live 에 합산한다
+                    # (다른 앱 예약이 이 카운터에 부풀지 않게 — R23 r5 M-1).
+                    idx_key = f"budget:pendingidx:client:{{{sid}}}"
+                    marker_prefix = f"budget:pending:client:{{{sid}}}:"
+                    field_prefix = f"{c}:"
                     markers = pending_markers.get(("USER", sid, c), [])
                 elif scope == "USER" and not client:
                     usage_key = f"budget:user:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:user:{{{sid}}}:{period}"
+                    idx_key = f"budget:pendingidx:user:{{{sid}}}"
+                    marker_prefix = f"budget:pending:user:{{{sid}}}:"
+                    field_prefix = ""
                     markers = pending_markers.get(("USER", sid, ""), [])
                 elif scope == "TEAM" and not client:
                     # ⚠️ TEAM+client 행은 스키마상 만들어지지 않는다 — 있으면
@@ -274,6 +288,9 @@ class HealthChecker:
                     #    명시적으로 걸러낸다.
                     usage_key = f"budget:team:{{{sid}}}:{period}"
                     resvsum_key = f"budget:resvsum:team:{{{sid}}}:{period}"
+                    idx_key = f"budget:pendingidx:team:{{{sid}}}"
+                    marker_prefix = f"budget:pending:team:{{{sid}}}:"
+                    field_prefix = ""
                     markers = pending_markers.get(("TEAM", sid, ""), [])
                 else:
                     continue
@@ -291,14 +308,21 @@ class HealthChecker:
                 #    · resvsum 양방향 보정 · usage 양수 플로어(db+live).
                 #    Python 단계에서 마커 값을 합산해 넘기지 않는 이유: 스캔과
                 #    eval 사이에 만료/settle 된 마커가 어긋나기 때문이다.
+                # KEYS[3] pendingidx + ARGV[3] 마커 접두사 — Lua 가 dead 인덱스
+                # 필드를 HDEL 해 settle 복구 분기의 HEXISTS 생존검증이 정합을
+                # 유지한다(R23 r3 S-1). ARGV[4] 필드 접두사는 client scope
+                # 행의 앱별 필터(R23 r5 M-1).
                 await self._redis.eval(
                     script,
-                    2 + len(markers),
+                    3 + len(markers),
                     usage_key,
                     resvsum_key,
+                    idx_key,
                     *markers,
                     str(used_usd),
                     cursum,
+                    marker_prefix,
+                    field_prefix,
                 )
                 reconciled += 1
             except Exception:

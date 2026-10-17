@@ -73,7 +73,15 @@ class SESEmailSender:
             )
         except Exception as exc:
             error_code = getattr(getattr(exc, "response", {}).get("Error", {}), "get", lambda k: None)("Code")
-            # 주소 오류 계열은 영구 실패
-            permanent_codes = {"MessageRejected", "InvalidParameterValue", "MailFromDomainNotVerified"}
+            # 주소 오류 계열은 영구 실패. 계정 발송 정지(AccountSendingPaused)는
+            # 지금 재시도해도 전부 실패하므로 즉시 터미널로 둔다 — 재개되면 다음
+            # 이벤트부터 정상 발송되고, 재시도 3+6회 소모만 줄인다.
+            permanent_codes = {
+                "MessageRejected",
+                "InvalidParameterValue",
+                "MailFromDomainNotVerified",
+                "AccountSendingPausedException",
+                "SendingPausedException",
+            }
             retryable = error_code not in permanent_codes
             raise EmailSendError(str(exc), retryable=retryable) from exc

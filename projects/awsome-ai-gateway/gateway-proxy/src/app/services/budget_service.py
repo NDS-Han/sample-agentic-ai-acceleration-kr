@@ -306,6 +306,11 @@ class BudgetService:
         total = Decimal("0")
         try:
             async for key in redis.scan_iter(match=pattern, count=200):
+                # 이행기 잔재 — 구현이 만든 `:done` 툼스톤은 값이 실비라
+                # 라이브 마커로 오인해 합산되면 안 된다(R23 r5 N-1).
+                kstr = key.decode() if isinstance(key, bytes) else key
+                if kstr.endswith(":done"):
+                    continue
                 val = await redis.get(key)
                 if val is None:
                     continue
@@ -931,6 +936,8 @@ class BudgetService:
                     "idx_key": idx_key,
                     "idx_field": idx_field,
                     "fallback": fallback,
+                    "reserved": est_str,
+                    "marker_ttl": marker_ttl,
                 })
                 await self._refund_reservations(redis, committed)
                 # rl_fail_mode=closed 정책을 존중한다 — 다른 한도 경로(RPM/TPM/
@@ -963,6 +970,9 @@ class BudgetService:
                 )
 
             if result.get("reserved"):
+                # "reserved" — settle 의 마커 만료 복구 경로(ARGV[4])에 넘기는
+                # 예약 당시 추정치. 마커가 살아있으면 마커 값이 우선이라 이 필드는
+                # 무시된다.
                 committed.append({
                     "scope": scope,
                     "usage_key": usage_key,
@@ -972,6 +982,11 @@ class BudgetService:
                     "idx_key": idx_key,
                     "idx_field": idx_field,
                     "fallback": fallback,
+                    "reserved": est_str,
+                    # settle 의 done 툼스톤 TTL(ARGV[5]) — 마커 수명과 같게 둬야
+                    # 툼스톤 소멸 뒤 늦은 중복 settle 이 실비를 재적용하지 않는다
+                    # (R23 r3 N-4).
+                    "marker_ttl": marker_ttl,
                 })
 
         return committed
@@ -999,6 +1014,8 @@ class BudgetService:
                     script, *settle_eval_args(s),
                     str(actual), s.get("fallback") or "",
                     s.get("idx_field") or "",
+                    s.get("reserved") or "",
+                    str(s.get("marker_ttl") or ""),
                 )
                 result = json.loads(raw)
             except Exception:
@@ -1006,6 +1023,21 @@ class BudgetService:
                 # 마커도 남아 재시도 수단은 있으나, 현재는 경고만 남긴다.
                 logger.exception("budget_settle_failed", scope=s.get("scope"))
                 continue
+            if result.get("settled") is False:
+                # 마커 부재 + done 툼스톤 존재(이미 정산) = 정상 멱등 경로.
+                # 툼스톤도 없고 예약치도 미상(구버전 스펙)이면 카운터에 예약치가
+                # 남은 채 no-op — 진단 신호로 남긴다(R23 S5).
+                logger.info(
+                    "budget_settle_noop",
+                    scope=s.get("scope"),
+                    request_id=(s.get("marker_key") or "").rsplit(":", 1)[-1],
+                )
+            elif result.get("recovered"):
+                logger.warning(
+                    "budget_settle_recovered",
+                    scope=s.get("scope"),
+                    request_id=(s.get("marker_key") or "").rsplit(":", 1)[-1],
+                )
             t = result.get("threshold_triggered")
             if triggered is None and t is not None:
                 triggered = t

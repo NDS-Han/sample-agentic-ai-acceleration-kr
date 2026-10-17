@@ -98,6 +98,9 @@ async def main() -> None:
     metrics.register_stream_lag_callback(
         lambda _opts: [Observation(consumer.last_lag)]
     )
+    metrics.register_stream_pending_callback(
+        lambda _opts: [Observation(consumer.last_pending)]
+    )
 
     # 7. APScheduler — daily aggregator cron + startup backfill
     scheduler = AsyncIOScheduler(timezone=settings.reporting_timezone)
@@ -107,6 +110,9 @@ async def main() -> None:
         id="daily_usage_aggregation",
         args=[session_factory],
         replace_existing=True,
+        # 기본 misfire grace 는 1s — 00:10 실행이 조금이라도 늦으면 그날 집계가
+        # 통째로 빠진다. 1시간 유예로 늦은 실행도 살린다(작업 자체는 멱등).
+        misfire_grace_time=3600,
     )
     scheduler.start()
     # Backfill은 비차단으로 이벤트 루프에 스케줄 — startup 블로킹 금지.
@@ -140,11 +146,21 @@ async def main() -> None:
     await stop_event.wait()
     logger.info("worker_shutting_down")
 
-    # 12. Graceful shutdown — pending batch flush 는 supervisor cancel 시점에
-    # asyncio.CancelledError 가 stream_consumer 의 await 지점에서 발생.
-    # 현재 배치가 flush 진행 중이면 try/finally 없이도 SQLAlchemy commit 이
-    # 원자적이므로 반 쓰다 만 상태는 없음.
-    await supervisor.stop_all(grace_period=settings.shutdown_grace_period_sec)
+    # 12. Graceful shutdown — 먼저 소비 루프에 협조 종료를 요청해 진행 중 배치의
+    # flush+XACK 를 끝낸다. 즉시 cancel 하면 커밋~XACK 사이에 잘린 배치가
+    # 재전달돼 전량 replay 스킵 → 그 배치의 일별 카운터와 임계 알림(비멱등)이
+    # 재시도 수단 없이 영구 생략된다(R23 S1). 루프가 안 멈추면 grace 만료 후
+    # supervisor 가 cancel 한다.
+    consumer.request_stop()
+    # 협조 창 = 배치 간격 + flush/XACK 여유 — 이 안에 멈추면 배치가 깨끗이
+    # 커밋·ACK 된다. 넘기면 supervisor 가 cancel 한다.
+    await supervisor.stop_all(
+        grace_period=settings.shutdown_grace_period_sec,
+        cooperative_window=min(
+            settings.batch_max_interval_sec + 15.0,
+            settings.shutdown_grace_period_sec,
+        ),
+    )
 
     scheduler.shutdown(wait=False)
     await redis.aclose()

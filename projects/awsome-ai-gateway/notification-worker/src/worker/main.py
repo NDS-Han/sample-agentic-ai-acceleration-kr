@@ -250,7 +250,11 @@ async def main() -> None:  # noqa: PLR0915  (복잡도 예외: lifespan 특성�
     logger.info("worker_shutting_down")
 
     # ── 17. Graceful shutdown ─────────────────────────────────────────────────
-    await supervisor.stop_all(grace_period=30)
+    # ⚠️ 예산은 terminationGracePeriod(30s) 안에 들어와야 한다 — stop_all(30)
+    #    + drain(10) 이면 SIGKILL 이 drain 도중에 와 버퍼 이벤트가 유실된다.
+    #    리스너의 _INFLIGHT_GRACE_SEC(15s)와 같은 값이면 경계에서 경합하므로
+    #    18s 로 둔다 — 18 + drain(10) = 28 < 30.
+    await supervisor.stop_all(grace_period=18)
 
     # DB 장애로 버퍼에 쌓인 알림은 종료 전 한 번 드레인 — 복구됐다면 유실 방지.
     # 실패 시 drain 이 재큐로 되돌리므로 아래 경고가 잔여를 정확히 보고한다.

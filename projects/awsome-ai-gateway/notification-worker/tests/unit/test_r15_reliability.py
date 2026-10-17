@@ -176,7 +176,9 @@ async def test_partial_non_infra_failure_does_not_raise():
 async def test_cooldown_suppresses_same_identity_burst():
     """같은 정체성(payload 필드 동일) 이벤트는 쿨다운 창 안에서 1회만 발송한다."""
     redis = MagicMock()
-    redis.set = AsyncMock(side_effect=[True, None])  # SETNX: 첫 획득 / 두 번째 거부
+    # 클레임 Lua: 1=점유, 0=억제 (R23 r3 N-8 — SET NX+GET 을 단일 eval 로
+    # 묶어 만료 마이크로 창을 닫았다).
+    redis.eval = AsyncMock(side_effect=[1, 0])
 
     handler, sender = _make_handler(
         redis_client=redis, cooldown_seconds=600
@@ -185,12 +187,27 @@ async def test_cooldown_suppresses_same_identity_burst():
     await handler.handle(_event(event_id="e2"))  # 새 event_id 지만 같은 정체성
 
     sender.send.assert_awaited_once()  # 두 번째는 쿨다운 스킵
+    assert redis.eval.await_count == 2  # 둘 다 선점을 시도했다
+
+
+async def test_cooldown_fanout_same_event_id_proceeds():
+    """같은 event_id 의 fan-out 복사본은 억제하지 않는다 — 슬롯 유니크가 막는다."""
+    redis = MagicMock()
+    redis.eval = AsyncMock(side_effect=[1, 2])  # 1=점유, 2=같은 event_id 통과
+
+    handler, sender = _make_handler(
+        redis_client=redis, cooldown_seconds=600
+    )
+    await handler.handle(_event(event_id="e1"))
+    await handler.handle(_event(event_id="e1"))  # fan-out 복사본
+
+    assert sender.send.await_count == 2  # 둘 다 진행 — dedup 은 슬롯의 몫
 
 
 async def test_cooldown_distinct_identity_not_suppressed():
     """threshold 가 다르면 다른 알림 — 각각 발송된다."""
     redis = MagicMock()
-    redis.set = AsyncMock(side_effect=[True, True])
+    redis.eval = AsyncMock(return_value=1)  # 둘 다 점유 성공
 
     handler, sender = _make_handler(
         redis_client=redis, cooldown_seconds=600
@@ -199,17 +216,16 @@ async def test_cooldown_distinct_identity_not_suppressed():
     await handler.handle(_event({"user_id": "u1", "threshold_pct": 90}, "e2"))
 
     assert sender.send.await_count == 2
-    # 서로 다른 dedup 키로 SETNX 됐는지 확인
-    keys = [c.args[0] for c in redis.set.await_args_list]
+    # 서로 다른 dedup 키로 선점됐는지 확인 — eval(script, nkeys, key, ...)
+    keys = [c.args[2] for c in redis.eval.await_args_list]
     assert keys[0] != keys[1]
 
 
 async def test_cooldown_key_released_on_infra_failure():
-    """인프라 실패로 이벤트를 되돌릴 때 쿨다운 키를 지운다 — 안 지우면
-    버퍼 드레인의 재처리가 쿨다운에 억제돼 유실된다."""
+    """인프라 실패 시 선점 키를 CAS 해제한다 — 안 놓으면 버퍼 드레인의 재처리가
+    창 내내 억제돼 유실된다."""
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=True)
-    redis.delete = AsyncMock()
+    redis.eval = AsyncMock(side_effect=[1, 1])  # 클레임=점유, 해제 CAS=삭제됨
 
     resolver = MagicMock()
     resolver.resolve = AsyncMock(
@@ -221,13 +237,16 @@ async def test_cooldown_key_released_on_infra_failure():
 
     with pytest.raises(NotificationInfraError):
         await handler.handle(_event())
-    redis.delete.assert_awaited_once()
+    # 두 eval — 첫째는 클레임(nx), 둘째는 compare-and-del(del)+event_id
+    assert redis.eval.await_count == 2
+    release = redis.eval.await_args_list[-1].args
+    assert "del" in release[0] and "e1" in release
 
 
 async def test_cooldown_redis_error_fails_open():
     """dedup 체크 자체가 실패해도 발송은 진행 — 중복 알림이 유실보다 낫다."""
     redis = MagicMock()
-    redis.set = AsyncMock(side_effect=ConnectionError("redis down"))
+    redis.eval = AsyncMock(side_effect=ConnectionError("redis down"))
 
     handler, sender = _make_handler(
         redis_client=redis, cooldown_seconds=600
@@ -239,7 +258,7 @@ async def test_cooldown_redis_error_fails_open():
 async def test_no_dedup_fields_means_no_cooldown():
     """정체성 필드가 하나도 없는 이벤트는 dedup 불가 — 억제하지 않는다."""
     redis = MagicMock()
-    redis.set = AsyncMock(return_value=True)
+    redis.eval = AsyncMock()
 
     handler, sender = _make_handler(
         redis_client=redis, cooldown_seconds=600
@@ -247,7 +266,7 @@ async def test_no_dedup_fields_means_no_cooldown():
     await handler.handle(_event({"note": "first"}, "e1"))
     await handler.handle(_event({"note": "second"}, "e2"))
 
-    redis.set.assert_not_called()
+    redis.eval.assert_not_called()
     assert sender.send.await_count == 2
 
 

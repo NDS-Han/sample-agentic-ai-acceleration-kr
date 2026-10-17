@@ -42,6 +42,7 @@ class RetryExecutor:
         모든 시도가 실패하면 마지막 예외를 re-raise한다.
         """
         from worker.senders.base import EmailSendError
+        from worker.services.email_mask import mask_emails_in_text
 
         last_exc: BaseException | None = None
 
@@ -58,7 +59,7 @@ class RetryExecutor:
                         "email_send_permanent_failure",
                         attempt=attempt + 1,
                         event_type=event_type,
-                        error=str(exc),
+                        error=mask_emails_in_text(str(exc)),
                     )
                     raise
 
@@ -68,7 +69,7 @@ class RetryExecutor:
                     attempt=attempt + 1,
                     max_attempts=_MAX_ATTEMPTS,
                     event_type=event_type,
-                    error=str(exc),
+                    error=mask_emails_in_text(str(exc)),
                 )
 
             except Exception as exc:
@@ -79,7 +80,7 @@ class RetryExecutor:
                     attempt=attempt + 1,
                     max_attempts=_MAX_ATTEMPTS,
                     event_type=event_type,
-                    error=str(exc),
+                    error=mask_emails_in_text(str(exc)),
                 )
 
             if self._retry_counter is not None:

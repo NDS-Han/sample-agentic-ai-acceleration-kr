@@ -76,7 +76,14 @@ SELECT
   SUM(cache_read_tokens),
   SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
   SUM(cost_usd),
-  COUNT(*)
+  -- 0 토큰·0 비용 모니터링 마커 행(ERROR/TIMEOUT)은 카운트에서 제외한다 —
+  -- Redis requests 카운터가 _has_metered_usage 로 같은 행을 건너뛰므로
+  -- 두 저장소의 request_count 가 여기서도 같은 정의를 써야 어긋나지 않는다.
+  COUNT(*) FILTER (
+      WHERE input_tokens + output_tokens
+            + cache_creation_tokens + cache_read_tokens > 0
+         OR cost_usd > 0
+  )
 FROM usage.usage_logs
 WHERE requested_at >= :start AND requested_at < :end
 GROUP BY
@@ -112,7 +119,13 @@ SELECT
   SUM(cache_read_tokens),
   SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
   SUM(cost_usd),
-  COUNT(*)
+  -- _AGG_SQL 과 같은 정의 — 백필만 COUNT(*) 면 최근 창 밖 날짜의
+  -- request_count 가 Redis requests 카운터 정의와 어긋난다(R23 r3 N-7).
+  COUNT(*) FILTER (
+      WHERE input_tokens + output_tokens
+            + cache_creation_tokens + cache_read_tokens > 0
+         OR cost_usd > 0
+  )
 FROM usage.usage_logs
 WHERE (requested_at AT TIME ZONE :tz)::date < :today_local
 GROUP BY
@@ -237,6 +250,12 @@ async def backfill_if_empty(session: AsyncSession) -> int:
     return count
 
 
+#: pg advisory lock 키 — replica 수만큼 크론이 동시에 도는 것을 막는다.
+#: UPSERT 는 멱등이라 동시 실행의 *결과*는 안전하지만, N×8일 재스캔의
+#: 중복 부하와 행 잠금 경합(교착)은 진짜 비용이다.
+_DAILY_AGG_LOCK_KEY = 727_001
+
+
 async def run_daily_aggregation(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -250,26 +269,62 @@ async def run_daily_aggregation(
       3. 통째로 누락된 과거 날짜 백필 — 크론 실패분 복구.
 
     한 단계가 실패해도 다음 스케줄 실행이 전체를 다시 시도한다(모두 멱등).
+    다중 replica 에서는 advisory lock 을 잡은 하나만 실행한다.
+
+    ⚠️ advisory lock 은 **커넥션** 레벨이다 — 집계 세션이 날짜마다 commit
+       하면 커넥션이 풀로 돌아가고, 같은 세션의 다음 execute / finally 의
+       unlock 은 *다른* 커넥션에서 실행될 수 있다(실측: unlock=false,
+       락은 풀 커넥션에 고착 → 전 replica 가 영구 스킵). 그래서 락은 집계
+       세션과 무관한 **전용 AUTOCOMMIT 커넥션**에서 잡는다 — 커넥션이
+       닫히면 락도 함께 풀려 고착 경로가 없다.
     """
     try:
-        async with session_factory() as session:
-            settings = get_settings()
-            tz_name = settings.reporting_timezone
-            tz = ZoneInfo(tz_name)
-            today_local = datetime.now(tz).date()
-            for offset in range(settings.daily_usage_agg_recent_days, 0, -1):
-                day = today_local - timedelta(days=offset)
-                start, end = _day_window(tz, day)
-                count = await _aggregate_window(session, start, end, tz_name)
-                logger.info(
-                    "daily_aggregator.ran",
-                    date=str(day),
-                    timezone=tz_name,
-                    inserted=count,
-                )
-            await backfill_missing_days(
-                session, settings.daily_usage_agg_backfill_lookback_days
+        engine = session_factory.kw["bind"]
+        async with engine.connect() as lock_conn:
+            lock_conn = await lock_conn.execution_options(
+                isolation_level="AUTOCOMMIT"
             )
+            got = (
+                await lock_conn.execute(
+                    text("SELECT pg_try_advisory_lock(:k)"),
+                    {"k": _DAILY_AGG_LOCK_KEY},
+                )
+            ).scalar()
+            if not got:
+                # 락 고착(M-1 재발)이면 이 로그가 매일 남는 유일한 신호다 —
+                # 정상 스킵(다른 replica 실행 중)과 구분이 안 되므로 WARN.
+                logger.warning("daily_aggregator.skipped_lock_held")
+                return
+            try:
+                async with session_factory() as session:
+                    settings = get_settings()
+                    tz_name = settings.reporting_timezone
+                    tz = ZoneInfo(tz_name)
+                    today_local = datetime.now(tz).date()
+                    for offset in range(settings.daily_usage_agg_recent_days, 0, -1):
+                        day = today_local - timedelta(days=offset)
+                        start, end = _day_window(tz, day)
+                        count = await _aggregate_window(session, start, end, tz_name)
+                        logger.info(
+                            "daily_aggregator.ran",
+                            date=str(day),
+                            timezone=tz_name,
+                            inserted=count,
+                        )
+                    await backfill_missing_days(
+                        session, settings.daily_usage_agg_backfill_lookback_days
+                    )
+            finally:
+                try:
+                    await lock_conn.execute(
+                        text("SELECT pg_advisory_unlock(:k)"),
+                        {"k": _DAILY_AGG_LOCK_KEY},
+                    )
+                except Exception:
+                    # 락 커넥션이 끊겼으면 락은 서버 측에서 이미 해제됐다 —
+                    # unlock 실패가 성공한 집계를 failed 로 기록하게 두지
+                    # 않는다(R23 r3 N-6).
+                    logger.warning("daily_aggregator.unlock_failed")
     except Exception:
         logger.exception("daily_aggregator.failed")
 

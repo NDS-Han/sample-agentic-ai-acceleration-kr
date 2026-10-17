@@ -49,6 +49,29 @@ class WorkerMetrics:
             description="Entries dropped by dead-letter handling after grace",
             unit="1",
         )
+        # 그 외 기록 없이 버려진 entry 수 — per-row 영구 오류 스킵, 디코드 불가,
+        # 본문 트림 ((id,None)/deleted_ids) 등 dead-letter 바깥의 유실 경로 전부.
+        # reason 라벨로 경로를 구분한다. 0 이어야 정상.
+        self.entries_dropped = self._meter.create_counter(
+            "cost_recorder_entries_dropped_total",
+            description="Cost entries dropped outside dead-letter path (labels: reason)",
+            unit="1",
+        )
+        # 소비 정지로 게이트웨이 MAXLEN~ 백스톱이 미배달 entry 를 잘라낸 흔적 —
+        # XINFO first-entry 가 그룹 last-delivered-id 를 앞설 때 발화. 이 카운터가
+        # 오르면 그 구간의 usage_logs/budget_usages 는 영구 유실(과소청구)이다.
+        self.stream_gap_detected = self._meter.create_counter(
+            "cost_recorder_stream_gap_total",
+            description="Times the stream head was found trimmed ahead of last-delivered-id",
+            unit="1",
+        )
+        # 임계 알림 PUBLISH 가 구독자 0에 발행돼 유실된 횟수 — pub/sub 은 재생이
+        # 없으므로 이 카운터가 오른 알림은 어디에도 기록되지 않는다.
+        self.threshold_publish_lost = self._meter.create_counter(
+            "cost_recorder_threshold_publish_lost_total",
+            description="Threshold alert publishes that reached zero subscribers",
+            unit="1",
+        )
 
         # Observable gauge — 콜백은 StreamConsumer 가 등록한다(주기 조회 결과를 들고 있음).
         self._stream_lag_callbacks: list[Callable] = []
@@ -58,6 +81,18 @@ class WorkerMetrics:
             description="Unprocessed entries in the cost stream consumer group (lag)",
             unit="1",
         )
+        # PEL(unacked·배달됐지만 미처리) 크기 — lag 은 미배달+pending 합산이라
+        # 미배달 백로그와 회수 대기를 구분하려면 별도 게이지가 필요하다.
+        self._stream_pending_callbacks: list[Callable] = []
+        self.stream_pending = self._meter.create_observable_gauge(
+            "cost_recorder_stream_pending",
+            callbacks=self._stream_pending_callbacks,
+            description="Pending (delivered but unacked) entries in the consumer group",
+            unit="1",
+        )
 
     def register_stream_lag_callback(self, callback: Callable) -> None:
         self._stream_lag_callbacks.append(callback)
+
+    def register_stream_pending_callback(self, callback: Callable) -> None:
+        self._stream_pending_callbacks.append(callback)

@@ -74,5 +74,11 @@ class SMTPEmailSender:
             raise EmailSendError(str(exc), retryable=False) from exc
         except aiosmtplib.SMTPAuthenticationError as exc:
             raise EmailSendError(str(exc), retryable=False) from exc
+        except aiosmtplib.SMTPResponseException as exc:
+            # 영구 응답(5xx)은 즉시 재시도해도 같은 결과 — 회색목록(4xx)만
+            # 재시도 가치가 있다.
+            raise EmailSendError(
+                str(exc), retryable=exc.code < 500
+            ) from exc
         except Exception as exc:
             raise EmailSendError(str(exc), retryable=True) from exc

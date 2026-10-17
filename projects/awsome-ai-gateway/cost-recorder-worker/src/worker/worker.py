@@ -62,22 +62,37 @@ class TaskSupervisor:
                 await asyncio.sleep(backoff)
                 backoff = min(backoff * 2, self.max_backoff)
 
-    async def stop_all(self, grace_period: float = 30.0) -> None:
-        for name, task in self._tasks.items():
-            if not task.done():
-                task.cancel()
-                logger.info("task_cancellation_requested", name=name)
+    async def stop_all(
+        self, grace_period: float = 30.0, cooperative_window: float = 0.0
+    ) -> None:
+        """종료 — (선택) 협조 종료 창 → cancel → 잔여 grace 대기.
 
-        if self._tasks:
-            done, pending = await asyncio.wait(
-                list(self._tasks.values()), timeout=grace_period
-            )
-            if pending:
-                logger.warning("tasks_not_cancelled_in_time", count=len(pending))
-            for task in done:
-                if not task.cancelled():
-                    exc = task.exception()
-                    if exc is not None:
-                        logger.error("task_exited_with_exception", error=str(exc))
+        ⚠️ cancel 을 먼저 보내면 ``request_stop()`` 같은 협조 플래그를 코루틴이
+           볼 기회가 없다 — 배치 경계의 정리 로직은 죽은 채로 다음 await 에서
+           잘린다. ``cooperative_window`` 만큼 자연 종료를 먼저 기다리고,
+           살아남은 태스크만 cancel 한다. 총 소요는 ``grace_period`` 를 넘지
+           않는다.
+        """
+        tasks = [t for t in self._tasks.values() if not t.done()]
+        done: set[asyncio.Task] = set()
+        pending = set(tasks)
+        if cooperative_window > 0 and tasks:
+            done, pending = await asyncio.wait(tasks, timeout=cooperative_window)
+
+        for task in pending:
+            task.cancel()
+            logger.info("task_cancellation_requested", name=task.get_name())
+
+        if pending:
+            remaining = max(grace_period - cooperative_window, 0.0)
+            done2, still = await asyncio.wait(pending, timeout=remaining)
+            done |= done2
+            if still:
+                logger.warning("tasks_not_cancelled_in_time", count=len(still))
+        for task in done:
+            if not task.cancelled():
+                exc = task.exception()
+                if exc is not None:
+                    logger.error("task_exited_with_exception", error=str(exc))
 
         logger.info("supervisor_stopped")

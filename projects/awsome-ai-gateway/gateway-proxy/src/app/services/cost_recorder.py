@@ -423,6 +423,8 @@ class CostRecorder:
                         *settle_eval_args(resv),
                         str(cost_usd), resv.get("fallback") or "",
                         resv.get("idx_field") or "",
+                        resv.get("reserved") or "",
+                        str(resv.get("marker_ttl") or ""),
                     )
                 else:
                     raw = await redis.eval(
@@ -435,6 +437,18 @@ class CostRecorder:
                     )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")
+                # 마커 부재 no-op / 만료 복구 — 둘 다 정상 settle 과 다른 경로라
+                # 신호를 남긴다(R23 S5). 툼스톤 있는 no-op 은 멱등 정상이다.
+                if result.get("settled") is False:
+                    logger.info(
+                        "budget_settle_noop",
+                        scope="user", request_id=request_id,
+                    )
+                elif result.get("recovered"):
+                    logger.warning(
+                        "budget_settle_recovered",
+                        scope="user", request_id=request_id,
+                    )
             except Exception:
                 logger.exception("budget_deduct_failed", user_id=auth_context.user_id)
 
@@ -455,6 +469,8 @@ class CostRecorder:
                             *settle_eval_args(resv),
                             str(cost_usd), resv.get("fallback") or "",
                             resv.get("idx_field") or "",
+                            resv.get("reserved") or "",
+                            str(resv.get("marker_ttl") or ""),
                         )
                     else:
                         team_raw = await redis.eval(
@@ -465,6 +481,16 @@ class CostRecorder:
                             str(cost_usd),
                         )
                     team_result = json.loads(team_raw)
+                    if team_result.get("settled") is False:
+                        logger.info(
+                            "budget_settle_noop",
+                            scope="team", request_id=request_id,
+                        )
+                    elif team_result.get("recovered"):
+                        logger.warning(
+                            "budget_settle_recovered",
+                            scope="team", request_id=request_id,
+                        )
                     if threshold_triggered is None:
                         threshold_triggered = team_result.get("threshold_triggered")
                         if threshold_triggered is not None:
@@ -506,12 +532,26 @@ class CostRecorder:
                 try:
                     resv = budget_reservation.get("client")
                     if resv:
-                        await redis.eval(
-                            settle_script,
-                            *settle_eval_args(resv),
-                            str(cost_usd), resv.get("fallback") or "",
-                            resv.get("idx_field") or "",
+                        client_settle = json.loads(
+                            await redis.eval(
+                                settle_script,
+                                *settle_eval_args(resv),
+                                str(cost_usd), resv.get("fallback") or "",
+                                resv.get("idx_field") or "",
+                                resv.get("reserved") or "",
+                                str(resv.get("marker_ttl") or ""),
+                            )
                         )
+                        if client_settle.get("settled") is False:
+                            logger.info(
+                                "budget_settle_noop",
+                                scope="client", request_id=request_id,
+                            )
+                        elif client_settle.get("recovered"):
+                            logger.warning(
+                                "budget_settle_recovered",
+                                scope="client", request_id=request_id,
+                            )
                     else:
                         await redis.eval(
                             LuaScriptLoader.get("budget_deduct"),

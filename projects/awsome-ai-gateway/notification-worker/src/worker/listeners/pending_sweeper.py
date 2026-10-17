@@ -89,16 +89,28 @@ class PendingSweepTask:
         async with self._session_factory() as session:
             # attempt 상한에 닿은 채 남은 'pending' 행을 터미널로 확정 — 이
             # UPDATE 가 없으면 상한 행이 'pending' 상태로 영원히 남는다.
-            await session.execute(
-                text(
-                    """
-                    UPDATE notification.notification_logs
-                    SET status = 'abandoned'
-                    WHERE status = 'pending' AND attempt_count >= :max_attempts
-                    """
-                ),
-                {"max_attempts": _MAX_ATTEMPTS},
-            )
+            abandoned = (
+                await session.execute(
+                    text(
+                        """
+                        UPDATE notification.notification_logs
+                        SET status = 'abandoned'
+                        WHERE status = 'pending' AND attempt_count >= :max_attempts
+                        """
+                    ),
+                    {"max_attempts": _MAX_ATTEMPTS},
+                )
+            ).rowcount
+            if abandoned:
+                # 재시도 상한에 닿아 최종 유실된 알림 — 그냥 지나가면 영구
+                # 미발송이 아무 신호 없이 일어난다.
+                logger.warning(
+                    "notification_abandoned_max_attempts", count=abandoned
+                )
+                if self._metrics:
+                    self._metrics.errors_total.add(
+                        abandoned, {"error_type": "abandoned"}
+                    )
             row = (
                 await session.execute(
                     text(

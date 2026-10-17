@@ -126,10 +126,13 @@ redis.call('INCRBYFLOAT', KEYS[4], estimate)
 redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('SET', marker_key, ARGV[2], 'EX', marker_ttl)
 if KEYS[5] and ARGV[5] and ARGV[5] ~= '' then
-    -- 마커와 같은 수명으로 인덱스 TTL 갱신 — 인덱스가 먼저 죽으면 읽기가
-    -- SCAN 폴백으로 돌아간다(정합은 유지, 비용만 커진다).
+    -- 인덱스 TTL 은 마커의 2배 — 마커 TTL 정상만료 직후의 늦은 settle 이
+    -- HEXISTS 생존검증을 통과해 예약치를 정확히 정산하게 한다. 필드가
+    -- 마커보다 먼저 죽으면 settle 은 복구 분기로 새어 resvsum 이 누수되고
+    -- 실비가 과대 계상된다(R23 r3 N-1). 고아 필드는 rebuild/reconcile 이
+    -- dead 스윕으로 청소한다.
     redis.call('HSET', KEYS[5], ARGV[5], ARGV[2])
-    redis.call('EXPIRE', KEYS[5], marker_ttl)
+    redis.call('EXPIRE', KEYS[5], marker_ttl * 2)
 end
 
 if usage_existed == 0 then

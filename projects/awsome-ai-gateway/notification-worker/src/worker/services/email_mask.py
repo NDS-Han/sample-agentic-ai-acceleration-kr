@@ -13,3 +13,21 @@ def mask_email(address: str) -> str:
     if not domain:
         return "***"
     return f"{local[:1]}***@{domain}"
+
+
+_EMAIL_RE = None
+
+
+def mask_emails_in_text(text: str) -> str:
+    """임의 문자열 안의 이메일 주소를 전부 mask_email 형태로 가린다.
+
+    SES/SMTP 오류 메시지는 수신자 주소를 평문으로 포함한다
+    (``SMTPRecipientsRefused``, "not verified" 등) — 로그와
+    ``error_message`` 컬럼에 그대로 저장하면 수신자 PII 가 남는다.
+    """
+    global _EMAIL_RE
+    if _EMAIL_RE is None:
+        import re
+
+        _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+    return _EMAIL_RE.sub(lambda m: mask_email(m.group(0)), text)

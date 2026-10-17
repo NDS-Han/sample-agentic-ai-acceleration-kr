@@ -25,17 +25,71 @@
 -- ARGV[1] = actual cost (USD, string decimal)
 -- ARGV[2] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
 -- ARGV[3] = index field ('' = 인덱스 미사용 — 구버전 호출자)
+-- ARGV[4] = 예약 당시 예상비용 ('' = 미상 — 구버전 호출자). 마커가 TTL 만료로
+--           사라진 뒤 호출됐을 때 이 값으로 델타를 복구한다.
 --
--- Returns: JSON {settled, new_used, remaining, threshold_triggered, app_clients}
+-- Returns: JSON {settled, recovered, new_used, remaining, threshold_triggered,
+--                app_clients}
+--
+-- 마커 부재의 두 경우를 'budget:settled:' 툼스톤으로 구별한다:
+--   · 툼스톤 있음 → 이미 정산됨(settle/환불 이겼음) → no-op 이 정답
+--   · 툼스톤 없음 → 마커 TTL 만료/축출 — 예약치는 카운터에 **남아 있다**.
+--     settled=false 로 그냥 끝내면 actual > reserved 인 요청(멀티턴 웹서치
+--     루프 등)이 그 달 내내 과소 계상된다. 호출자가 예약치를 알면(ARGV[4])
+--     정상 settle 과 같은 델타를 적용해 복구한다.
 
 local usage_key  = KEYS[1]
 local config_key = KEYS[2]
 local marker_key = KEYS[3]
 local actual = tonumber(ARGV[1])
+-- 정산 완료 툼스톤은 budget:pending: 네임스페이스 **밖**에 둔다 —
+-- "budget:pending:*" 를 스캔하는 경로(reconcile/웜업 pending 합산/복원
+-- 스크립트)가 값이 실비인 툼스톤을 라이브 마커로 오인해 정산분을 재합산
+-- 했다(R23 r4 M-1). 같은 해시태그를 유지하므로 슬롯은 동일.
+local settled_key = 'budget:settled:' .. string.sub(marker_key, 16)
 
 local reserved_raw = redis.call('GET', marker_key)
+local recovered = false
 if not reserved_raw then
-    return cjson.encode({settled = false})
+    if redis.call('GET', settled_key) then
+        -- 이미 정산된 요청 — 멱등성 보장의 정상 경로
+        return cjson.encode({settled = false})
+    end
+    -- 마커 소실(만료/축출) — 호출자가 예약치를 모르면 안전하게 no-op
+    local caller_reserved = tonumber(ARGV[4])
+    if not caller_reserved then
+        return cjson.encode({settled = false})
+    end
+    -- ⚠️ "우리 예약이 아직 카운터에 남아 있는가" 를 먼저 확인한다.
+    --   예약이 서버에서 실행된 적 없거나 reconcile/rebuild 가 이미 인덱스를
+    --   청소했으면 호출자 예약치를 그대로 빼는 것은 받지도 않은 예약의 차감
+    --   — 카운터가 과소로 간다(R23 r2 S-2/S-3).
+    --   인덱스 필드는 reserve 의 HSET 으로만 생기고 settle/rebuild/reconcile
+    --   의 HDEL 로만 지워지므로, 존재 자체가 "미정리 예약" 의 증거다. 생존이
+    --   확인된 경우에도 차감은 resvsum 잔량으로 상한을 둔다 — 부분 정리/손상
+    --   시 무제한 차감을 막는다.
+    --   ⚠️ 알려진 한계(보수 방향): rebuild/reconcile 은 resvsum·인덱스를
+    --   정리하지만 usage 카운터는 플로어 설계라 고아 예약치가 **남는다**.
+    --   그 뒤의 settle 은 reserved=0 → 실비만 적용하므로 usage 에 고아분이
+    --   과대 계상된 채 남을 수 있다(R23 r3 N-2). 과소(차단 우회)보다
+    --   과대(조기 차단)가 안전한 방향이다.
+    local resvsum = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
+    if resvsum < 0 then resvsum = 0 end
+    local live
+    if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
+        live = redis.call('HEXISTS', KEYS[5], ARGV[3]) == 1
+    else
+        -- 인덱스 미제공 호출자(구버전)는 resvsum 잔량을 생존 근거로 삼는다.
+        live = resvsum > 0
+    end
+    if live and resvsum > 0 then
+        reserved_raw = tostring(math.min(caller_reserved, resvsum))
+    else
+        reserved_raw = '0'  -- 이미 걷어졌거나 미실행 — 실비만 적용
+    end
+    -- 마커 부재 경로 자체가 진단 신호 — 예약치 복구든 실비만 적용이든
+    -- 호출자가 알아야 한다.
+    recovered = true
 end
 local reserved = tonumber(reserved_raw) or 0
 
@@ -78,8 +132,18 @@ end
 redis.call('INCRBYFLOAT', usage_key, delta)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 redis.call('INCRBYFLOAT', KEYS[4], -reserved)
+if tonumber(redis.call('GET', KEYS[4]) or '0') < 0 then
+    -- 웜업/구버전 경로의 bounded 오차로 음수가 될 수 있다 — 합계의 불변식은
+    -- >=0 이라 음수 잔량은 표시 실지출을 어긋나게 한다(R23 r3 N-3).
+    redis.call('SET', KEYS[4], '0')
+end
 redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('DEL', marker_key)
+-- 정산 완료 툼스톤 — 마커 부재 시 "정산됨"과 "만료됨"을 구별한다(상단 주석).
+-- TTL 은 마커 TTL(ARGV[5], 미지정 시 4h)과 같게 둔다 — 짧으면 툼스톤 소멸
+-- 뒤 늦은 중복 settle 이 복구 분기로 들어와 실비를 재적용한다(R23 r2 N-4).
+local tomb_ttl = tonumber(ARGV[5]) or 14400
+redis.call('SET', settled_key, ARGV[1], 'EX', tomb_ttl)
 if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
     redis.call('HDEL', KEYS[5], ARGV[3])  -- 인덱스는 베스트에포트 — 마커가 진실
 end
@@ -111,6 +175,7 @@ end
 
 return cjson.encode({
     settled = true,
+    recovered = recovered,
     new_used = logical_new,
     remaining = limit - logical_new,
     threshold_triggered = triggered,

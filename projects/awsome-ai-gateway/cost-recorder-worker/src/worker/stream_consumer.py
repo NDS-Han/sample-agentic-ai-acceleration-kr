@@ -86,6 +86,12 @@ class StreamConsumer:
         self._claim_task: asyncio.Task | None = None
         self._metrics = metrics
         self.last_lag = 0
+        self.last_pending = 0
+        # 협조적 종료 — stop_all 의 cancel 이 커밋~XACK 사이의 배치를 잘라
+        # 재전달 시 replay 필터가 전량 스킵하면 임계 알림/당일 카운터가
+        # 영구 생략된다. 배치 경계에서만 멈춰 현재 flush+XACK 를 끝낸다.
+        # Event 로 두어 reclaim 루프의 긴 sleep 도 즉시 깨운다.
+        self._stop_event = asyncio.Event()
         # dead-letter 추적 — 같은 배치 머리(첫 entry id)가 grace 기간을 넘어
         # 계속 flush 실패하면 결정적 오류로 보고 행 단위 소화로 넘긴다.
         # 그냥 재시도하면 스트림 전체 봉쇄 → MAXLEN 트림 전량 유실로 번진다.
@@ -117,6 +123,10 @@ class StreamConsumer:
 
     async def run(self) -> None:
         """메인 소비 루프. TaskSupervisor가 예외 시 재시작."""
+        # 종료 요청 후 supervisor 재시작(마지막 flush 예외 등)이면 즉시 빠진다 —
+        # 다시 돌면 shutdown 중에 reclaim/소비를 재개해 영원히 안 끝난다.
+        if self._stop_event.is_set():
+            return
         await self.ensure_group()
         logger.info(
             "stream_consumer_started",
@@ -136,15 +146,38 @@ class StreamConsumer:
         self._claim_task = asyncio.create_task(self._reclaim_loop())
 
         try:
-            # 정상 소비 루프
+            # 정상 소비 루프 — stop 요청 시 배치 경계에서 반환되어
+            # supervisor 의 cancel 대기 없이 깨끗하게 끝난다.
             await self._consume_live()
         finally:
-            if self._claim_task is not None:
-                self._claim_task.cancel()
+            if self._claim_task is not None and not self._claim_task.done():
+                if self._stop_event.is_set():
+                    # 종료 요청 경로 — 회수 태스크가 배치 경계에서 자연 종료할
+                    # 짧은 창을 준다. 즉시 cancel 은 reclaim 의 커밋~XACK 사이를
+                    # 자르는 S1 과 같은 결함이다.
+                    try:
+                        await asyncio.wait({self._claim_task}, timeout=15)
+                    finally:
+                        if not self._claim_task.done():
+                            self._claim_task.cancel()
+                else:
+                    # 크래시 경로(stop 미요청) — reclaim 은 멈출 신호가 없어
+                    # 창 전체를 기다리면 재시작이 15s+backoff 만큼 늦어진다
+                    # (R23 r3 N-5). 즉시 cancel.
+                    self._claim_task.cancel()
+
+    def request_stop(self) -> None:
+        """다음 배치 경계에서 소비 루프를 멈춘다 — SIGTERM 협조 종료용.
+
+        즉시 cancel 하면 ``session.commit() ~ XACK`` 사이의 배치가 재전달돼
+        전량 replay 로 스킵되고, 그 배치의 ``usage:daily:*`` 카운터와 임계
+        알림(비멱등)은 재시도 수단 없이 영구 생략된다.
+        """
+        self._stop_event.set()
 
     async def _drain_backlog(self) -> None:
         """이 consumer 이름으로 남아있는 unacked 메시지 재처리 (at-least-once)."""
-        while True:
+        while not self._stop_event.is_set():
             # ⚠️ crash-loop(DB 장애 등)에서 _claim_task 는 다시 만들어지기 전에
             #    여기서 죽으므로 lag 샘플링이 얼어붙는다 — 소비가 멈춘 바로 그
             #    상황에서 알람이 사라진다. drain 루프가 재시작마다 도는 곳이니
@@ -162,10 +195,16 @@ class StreamConsumer:
 
             entries, ids = self._decode(msgs)
             if not entries:
+                # ⚠️ XREADGROUP id='0' 은 빈 PEL 에서도 [[stream, []]] — truthy —
+                #    를 돌려준다. ids 도 비었으면 소진 신호라 반드시 끝내야 한다 —
+                #    continue 하면 빈 페이지에서 영원히 돌며 기동이 멈춘다.
+                if not ids:
+                    break
                 # 파싱 실패 메시지들도 ACK하여 무한 루프 방지.
-                if ids:
-                    await self._redis.xack(self._stream, self._group, *ids)
-                break
+                await self._redis.xack(self._stream, self._group, *ids)
+                # 디코드 불가 페이지만 소화했으면 계속 읽어 자기 PEL 을 비운다 —
+                # break 하면 뒤 페이지가 XAUTOCLAIM 주기(수 분)까지 방치된다.
+                continue
 
             await self._flush_or_dead_letter(entries, ids)
             await self._redis.xack(self._stream, self._group, *ids)
@@ -226,6 +265,8 @@ class StreamConsumer:
         """
         try:
             groups = await self._redis.xinfo_groups(self._stream)
+            last_delivered: str | None = None
+            entries_read: int | None = None
             for g in groups or []:
                 name = g.get("name")
                 if isinstance(name, bytes):
@@ -235,17 +276,76 @@ class StreamConsumer:
                     if lag is None:
                         lag = g.get("pending", 0)
                     self.last_lag = int(lag)
-                    return
-            # 그룹 행이 없다 = 아직 메시지를 읽은 적 없음 → backlog 0
-            self.last_lag = 0
+                    # lag(미배달+pending 합산)과 pending(PEL)을 분리해 보고한다 —
+                    # 구버전 폴백이 pending 만 쓰면 미배달 백로그가 게이지에 안 잡힌다.
+                    self.last_pending = int(g.get("pending", 0))
+                    ld = g.get("last-delivered-id")
+                    last_delivered = (
+                        ld.decode() if isinstance(ld, bytes) else ld
+                    )
+                    er = g.get("entries-read")
+                    if er is not None:
+                        entries_read = int(er)
+                    break
+            else:
+                # 그룹 행이 없다 = 아직 메시지를 읽은 적 없음 → backlog 0
+                self.last_lag = 0
+                self.last_pending = 0
+                return
+
+            # ⚠️ M1: 게이트웨이의 XADD MAXLEN~ 백스톱이 **미배달** entry 도
+            #    자른다 — 워커 정지(DB 장애·42xxx)가 cap 도달 시간(500 RPS ≈
+            #    17분)을 넘기면 그 구간의 usage_logs/budget_usages 는 영구
+            #    유실된다. XREADGROUP '>' 는 잘린 갭을 조용히 건너뛰므로 여기서
+            #    first-entry > last-delivered-id 를 감지해 알린다. 그룹이 한 번도
+            #    배달한 적 없는(0-0) 신생 그룹은 제외 — 전량 미배달이 정상이다.
+            if last_delivered and last_delivered != "0-0":
+                try:
+                    info = await self._redis.xinfo_stream(self._stream)
+                    first = info.get("first-entry")
+                    if isinstance(first, (list, tuple)):
+                        first = first[0] if first else None
+                    if isinstance(first, bytes):
+                        first = first.decode()
+                    if first and _stream_id_key(str(first)) > _stream_id_key(
+                        str(last_delivered)
+                    ):
+                        # 유실 건수 추정 — entries-added(전체 발행) −
+                        # entries-read(그룹이 배달받은 수) − lag(미처리 잔여).
+                        # 메트릭은 샘플 횟수만 세므로, 규모는 로그 필드로 남긴다.
+                        estimated_lost = None
+                        added_raw = info.get("entries-added")
+                        if added_raw is not None and entries_read is not None:
+                            estimated_lost = max(
+                                int(added_raw) - entries_read - self.last_lag, 0
+                            )
+                        logger.error(
+                            "cost_stream_delivery_gap",
+                            first_entry=str(first),
+                            last_delivered_id=str(last_delivered),
+                            estimated_lost=estimated_lost,
+                            consumer=self._consumer,
+                        )
+                        if self._metrics:
+                            self._metrics.stream_gap_detected.add(1)
+                except Exception as e:
+                    logger.debug("stream_gap_check_failed", error=str(e)[:160])
         except Exception as e:
             logger.debug("stream_lag_sample_failed", error=str(e)[:160])
 
     async def _reclaim_loop(self) -> None:
         """주기적으로 고아 PEL 을 회수한다. 예외로 소비 루프를 죽이지 않는다."""
-        while True:
+        while not self._stop_event.is_set():
+            # sleep 대신 stop 이벤트 대기 — 종료 요청이 오면 interval 를
+            # 기다리지 않고 즉시 빠진다.
             try:
-                await asyncio.sleep(self._claim_interval)
+                await asyncio.wait_for(
+                    self._stop_event.wait(), timeout=self._claim_interval
+                )
+                break
+            except asyncio.TimeoutError:
+                pass
+            try:
                 await self._sample_lag()
                 await self._reclaim_orphans()
             except asyncio.CancelledError:
@@ -270,7 +370,7 @@ class StreamConsumer:
         """
         cursor = "0-0"
         reclaimed = 0
-        while True:
+        while not self._stop_event.is_set():
             try:
                 res = await self._redis.xautoclaim(
                     name=self._stream,
@@ -296,6 +396,10 @@ class StreamConsumer:
                     count=len(deleted_ids),
                     consumer=self._consumer,
                 )
+                if self._metrics:
+                    self._metrics.entries_dropped.add(
+                        len(deleted_ids), {"reason": "pel_trimmed"}
+                    )
             if not msgs:
                 # cursor 가 0-0 이 아니면 스캔 페이지에 idle 미달만 있던 것 —
                 # 뒤쪽에 고아가 남았을 수 있으니 cursor 까지 간다.
@@ -320,15 +424,51 @@ class StreamConsumer:
                 consumer=self._consumer,
                 min_idle_ms=self._claim_min_idle_ms,
             )
+        await self._sweep_dead_consumers()
+
+    async def _sweep_dead_consumers(self) -> None:
+        """롤아웃마다 새 이름으로 뜨는 consumer 들의 잔여를 그룹에서 제거한다.
+
+        파드 이름이 consumer 이름이라 롤아웃 때마다 죽은 이름이 그룹에 쌓인다.
+        PEL 이 비어 있고 1시간 이상 idle 인 이름만 DELCONSUMER 한다 — 진행 중
+        메시지가 있는 consumer 는 건드리지 않는다(PEL 은 XAUTOCLAIM 담당).
+        """
+        try:
+            consumers = await self._redis.xinfo_consumers(
+                self._stream, self._group
+            )
+        except Exception:
+            return  # 구버전/권한 — 회수 기능보다 부차적이라 조용히 넘긴다
+        for c in consumers or []:
+            name = c.get("name")
+            if isinstance(name, bytes):
+                name = name.decode()
+            if not name or name == self._consumer:
+                continue
+            try:
+                pending = int(c.get("pending", 0))
+                idle_ms = int(c.get("idle", 0))
+            except (TypeError, ValueError):
+                continue
+            if pending == 0 and idle_ms > 3_600_000:
+                try:
+                    await self._redis.xgroup_delconsumer(
+                        self._stream, self._group, name
+                    )
+                    logger.info("dead_consumer_removed", consumer=name)
+                except Exception:
+                    logger.warning("dead_consumer_remove_failed", consumer=name)
 
     async def _consume_live(self) -> None:
         """신규 메시지 XREADGROUP(>) + batch 누적 + time/count 기준 flush."""
-        while True:
+        while not self._stop_event.is_set():
             batch_entries: list[CostStreamEntry] = []
             batch_ids: list[str] = []
             deadline = time.monotonic() + self._batch_interval
 
             while len(batch_entries) < self._batch_max:
+                if self._stop_event.is_set():
+                    break
                 remaining_ms = int((deadline - time.monotonic()) * 1000)
                 if remaining_ms <= 0:
                     break  # 배치 간격 상한 — 지연보다 flush 를 우선.
@@ -397,6 +537,8 @@ class StreamConsumer:
         except Exception:
             head = ids[0] if ids else None
             now = time.monotonic()
+            if self._metrics:
+                self._metrics.flush_errors.add(1)
             if head != getattr(self, fail_head_attr) or getattr(self, fail_at_attr) is None:
                 setattr(self, fail_head_attr, head)
                 setattr(self, fail_at_attr, now)
@@ -439,10 +581,14 @@ class StreamConsumer:
                 # 소비 루프를 죽이기 전에 여기서 ACK 대상으로 분류한다.
                 if fields is None:
                     logger.warning("cost_stream_entry_trimmed", msg_id=raw_id)
+                    if self._metrics:
+                        self._metrics.entries_dropped.add(1, {"reason": "trimmed_body"})
                     continue
                 payload = fields.get(b"payload") or fields.get("payload")
                 if payload is None:
                     logger.warning("cost_stream_entry_missing_payload", msg_id=raw_id)
+                    if self._metrics:
+                        self._metrics.entries_dropped.add(1, {"reason": "missing_payload"})
                     continue
                 try:
                     raw = (
@@ -457,6 +603,8 @@ class StreamConsumer:
                         msg_id=raw_id,
                         error=str(exc),
                     )
+                    if self._metrics:
+                        self._metrics.entries_dropped.add(1, {"reason": "parse_failed"})
                 else:
                     if entry.schema_version > _SUPPORTED_SCHEMA_VERSION:
                         # 게이트웨이가 워커보다 새 스키마 — additive(필드 추가)면
