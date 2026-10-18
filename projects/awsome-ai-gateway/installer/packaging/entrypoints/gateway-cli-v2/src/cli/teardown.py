@@ -174,6 +174,7 @@ def revert_user_settings(settings_path: Path | None = None) -> SettingsRevertRes
             prior = {}  # unusable snapshot → treat as no prior state
 
     top_keys, env_keys = owned_user_settings_keys()
+    from cli.reconcile import settings_env_keys, settings_top_keys  # noqa: PLC0415
 
     for key in sorted(top_keys):
         if key not in settings:
@@ -184,6 +185,16 @@ def revert_user_settings(settings_path: Path | None = None) -> SettingsRevertRes
         else:
             settings.pop(key)
             result.removed.append(key)
+
+    # Keys setup's reconcile STRIPPED (BYPASS: a stale ANTHROPIC_API_KEY,
+    # CLAUDE_CODE_USE_BEDROCK, modelOverrides, a user-tier statusLine, …) are
+    # not owned keys — but they were the user's pre-gateway config, so restore
+    # each one's prior value from the earliest snapshot when still absent. A
+    # key the user re-added since setup is left alone (present → skip).
+    for key in sorted(set(settings_top_keys()) - set(top_keys)):
+        if key not in settings and key in prior:
+            settings[key] = prior[key]
+            result.restored.append(key)
 
     env_block = settings.get("env")
     prior_env = prior.get("env") if isinstance(prior.get("env"), dict) else {}
@@ -199,10 +210,22 @@ def revert_user_settings(settings_path: Path | None = None) -> SettingsRevertRes
                 result.removed.append(f"env.{key}")
         if not env_block:
             settings.pop("env", None)
+            env_block = None
+    stripped_env_keys = set(settings_env_keys()) - set(env_keys)
+    if stripped_env_keys and any(k in prior_env for k in stripped_env_keys):
+        if not isinstance(env_block, dict):
+            env_block = {}
+            settings["env"] = env_block
+        for key in sorted(stripped_env_keys):
+            if key not in env_block and key in prior_env:
+                env_block[key] = prior_env[key]
+                result.restored.append(f"env.{key}")
 
     if result.changed:
-        path.write_text(
-            json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+        from cli.utils.files import atomic_write_text  # noqa: PLC0415
+
+        atomic_write_text(
+            path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
         )
         log.info(
             "user_settings_reverted",
@@ -275,25 +298,36 @@ def _restore_windows_env() -> OsEnvRevertResult:
 def _strip_posix_rc(rc_path: Path) -> bool:
     """Remove the persist marker block's lines from one rc file.
 
-    Deletes the marker comment and any ``export VAR="..."`` line for a var we
-    persist (the exact shape _persist_posix writes). Lines the user wrote for
-    other vars — or hand-written lines for our vars in a different shape — are
-    left alone. Returns True when the file was modified.
+    Deletes the marker comment and the contiguous ``export VAR="..."`` lines
+    that follow it — exactly the block _persist_posix appends. An export of one
+    of our vars ELSEWHERE in the file is left alone: _persist_posix skips a var
+    the rc already defines, so such a line is user-authored and deleting it
+    would erase the user's own environment. Returns True when the file was
+    modified.
     """
     if not rc_path.is_file():
         return False
     text = rc_path.read_text(encoding="utf-8")
     our_vars = set(manifest.os_persisted_keys())
+    # Value body tolerates backslash escapes — _persist_posix escapes
+    # `"`/`$`/backtick/`\`, so an escaped \" must not terminate the match.
     export_re = re.compile(
-        r"^export (" + "|".join(re.escape(v) for v in sorted(our_vars)) + r')="[^"]*"$'
+        r"^export (" + "|".join(re.escape(v) for v in sorted(our_vars)) + r')="(?:[^"\\]|\\.)*"$'
     )
 
     kept: list[str] = []
     changed = False
+    in_block = False
     for line in text.splitlines():
-        if line.strip() == _POSIX_MARKER or export_re.match(line.strip()):
+        stripped = line.strip()
+        if stripped == _POSIX_MARKER:
+            changed = True
+            in_block = True
+            continue
+        if in_block and export_re.match(stripped):
             changed = True
             continue
+        in_block = False
         kept.append(line)
     if changed:
         new_text = "\n".join(kept)

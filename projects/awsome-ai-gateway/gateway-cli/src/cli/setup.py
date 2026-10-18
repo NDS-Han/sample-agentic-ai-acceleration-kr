@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import os
+import shutil
+import sys
 from typing import Optional
 
 import click
@@ -150,6 +152,17 @@ def setup(
         otel_endpoint = f"http://{p.hostname}:4317"
     otel = otel_endpoint or config.otel_endpoint or None
     helper_path = api_key_helper or resolve_helper_path()
+    # Claude Code executes statusLine as a shell command — a bare "statusline"
+    # silently no-ops on boxes where the script dir isn't on its PATH. Resolve
+    # it on PATH first; failing that, fall back to the sibling of the resolved
+    # helper (wheel installs co-locate the console-scripts even when their dir
+    # isn't on PATH), then keep the bare name as before.
+    _sl_name = "statusline.exe" if sys.platform == "win32" else "statusline"
+    statusline_path = shutil.which(_sl_name) or _sl_name
+    if statusline_path == _sl_name:
+        _sibling = os.path.join(os.path.dirname(helper_path), _sl_name)
+        if os.path.isfile(_sibling):
+            statusline_path = _sibling
     oidc_issuer, oidc_client, oidc_src = _resolve_oidc(issuer_url, client_id)
 
     if is_gateway_enabled():
@@ -189,6 +202,7 @@ def setup(
             oidc_client_id=oidc_client or None,
             oidc_audience=audience or os.environ.get("OIDC_AUDIENCE") or None,
             tool_search=tool_search,
+            statusline_path=statusline_path,
         )
         click.secho(f"  Gateway enabled: {path}", fg="green")
         click.echo("")

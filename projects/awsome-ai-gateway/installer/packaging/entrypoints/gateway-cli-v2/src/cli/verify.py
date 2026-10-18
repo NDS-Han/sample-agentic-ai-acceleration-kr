@@ -121,6 +121,18 @@ def _check_url_health(name: str, url: str, outcome: VerifyOutcome) -> None:
         outcome.add(name, CheckStatus.FAIL, f"HTTP {resp.status_code} from {health_url}")
         return
 
+    if not (200 <= resp.status_code < 300):
+        # Reachable, but a 4xx from /health means the URL likely points at the
+        # wrong service/path (typo'd host, swapped gateway/admin ports, an ALB
+        # default route). Reporting OK here would false-green a broken config.
+        outcome.add(
+            name,
+            CheckStatus.WARN,
+            f"HTTP {resp.status_code} from {health_url} — endpoint reached but "
+            "did not answer healthy; check the configured URL",
+        )
+        return
+
     # Try to parse the status field from a JSON response.
     try:
         body = resp.json()
@@ -279,6 +291,7 @@ def _check_api_key_helper(outcome: VerifyOutcome) -> None:
     which may not be on PATH at the time setup runs.
     """
     import shutil  # noqa: PLC0415
+
     from cli.setup import _user_settings_path  # noqa: PLC0415
 
     override = os.environ.get("GATEWAY_CLI_SETTINGS_PATH")

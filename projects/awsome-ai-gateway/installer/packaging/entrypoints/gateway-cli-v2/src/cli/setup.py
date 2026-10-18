@@ -76,6 +76,7 @@ from cli.reconcile import reconcile_settings
 from cli.site_defaults import configured_ca_bundle
 from cli.site_extra import managed_extra, merge_into, user_extra
 from cli.utils.backup import backup_config
+from cli.utils.files import atomic_write_text
 from gateway_cli_oidc.tls import without_os_trust_store
 
 log = structlog.get_logger(component="cli-v2")
@@ -307,10 +308,10 @@ def _read_settings(path: Path) -> dict:
 
 
 def _write_settings(path: Path, settings: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
     content = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
     try:
-        path.write_text(content, encoding="utf-8")
+        # Atomic (temp + rename): a torn settings.json is not self-healing.
+        atomic_write_text(path, content)
     except OSError as e:
         raise SetupStepError(f"cannot write settings file '{path}': {e}") from e
 
@@ -551,7 +552,11 @@ def run_setup(
     # changes with NO CLI rebuild (guideline 1-2).
     if available_models:
         put_user("availableModels", list(available_models))
-    settings.setdefault("env", {})
+    if not isinstance(settings.get("env"), dict):
+        # A corrupt settings file ("env": "x" / a list) would crash every env
+        # write below *after* managed settings already succeeded — normalise to
+        # a fresh block instead of failing mid-setup.
+        settings["env"] = {}
     put_user("ANTHROPIC_BASE_URL", gateway_url)
     put_user("ADMIN_API_URL", admin_api_url)
     put_user("GATEWAY_CLI_GATEWAY_URL", admin_api_url)

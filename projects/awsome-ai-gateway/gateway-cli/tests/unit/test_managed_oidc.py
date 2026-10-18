@@ -187,6 +187,27 @@ class TestResolveOIDC:
         assert (client, src) == ("cached-client", "login cache")
 
 
+class TestStatusLine:
+    """statusLine 은 실행 파일 경로여야 한다 — bare 이름은 PATH 없는 환경에서 조용히 무효."""
+
+    def test_default_is_bare_name(self) -> None:
+        assert _base()["statusLine"] == {"type": "command", "command": "statusline"}
+
+    def test_resolved_path_written_through(self) -> None:
+        s = _base(statusline_path="/usr/local/bin/statusline")
+        assert s["statusLine"] == {"type": "command", "command": "/usr/local/bin/statusline"}
+
+    def test_space_path_quoted(self) -> None:
+        """Paths with spaces (C:\\Program Files\\…) split at the space when the
+        shell executes them — the settings value must carry its own quotes."""
+        s = _base(
+            api_key_helper_path="/Applications/My Apps/api-key-helper",
+            statusline_path="/Applications/My Apps/statusline",
+        )
+        assert s["apiKeyHelper"] == '"/Applications/My Apps/api-key-helper"'
+        assert s["statusLine"]["command"] == '"/Applications/My Apps/statusline"'
+
+
 class TestToolSearch:
     """ENABLE_TOOL_SEARCH — 게이트웨이(비-1P)에서 Claude Code 가 스스로 끄는 것을 되켠다."""
 

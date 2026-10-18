@@ -42,6 +42,7 @@ ones who created it).
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -267,6 +268,13 @@ def _shadowing_dropins() -> list[str]:
         return []  # dir absent/unreadable — nothing we can enumerate
     ours = {GATEWAY_DROPIN_FILENAME, LEGACY_GATEWAY_DROPIN_FILENAME}
     return [name for name in names if name not in ours and name > GATEWAY_DROPIN_FILENAME]
+
+
+def _earliest_managed_snapshot() -> Path | None:
+    """The oldest ``claude-code-managed`` snapshot — the true pre-gateway state."""
+    from cli.utils.backup import earliest_backup
+
+    return earliest_backup("claude-code-managed.managed-settings.json.*.bak")
 
 
 def is_gateway_enabled() -> bool:
@@ -773,15 +781,37 @@ def remove_gateway_settings() -> bool:
         # Not managed by us (or already removed) — do not touch the org's file.
         return removed_dropin
 
+    # Restore org-provided values our keys overwrote: the EARLIEST managed
+    # snapshot holds the true pre-gateway state (later snapshots already carry
+    # our values — same "earliest wins" rule as cli.teardown's settings revert).
+    # Without this, `disable` pops e.g. the org's own env.NO_PROXY/apiKeyHelper
+    # that gateway-cli clobbered at setup, silently losing org config.
+    prior: dict = {}
+    snapshot = _earliest_managed_snapshot()
+    if snapshot is not None:
+        try:
+            loaded = json.loads(snapshot.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict):
+                prior = loaded
+        except (json.JSONDecodeError, OSError):
+            prior = {}
+
     env = data.get("env")
+    prior_env = prior.get("env") if isinstance(prior.get("env"), dict) else {}
     if isinstance(env, dict):
         for key in marker.get("envKeys", []):
-            env.pop(key, None)
+            if key in prior_env:
+                env[key] = prior_env[key]  # restore the org's value we replaced
+            else:
+                env.pop(key, None)
         if not env:
             data.pop("env", None)
 
     for key in marker.get("topKeys", []):
-        data.pop(key, None)
+        if key in prior:
+            data[key] = prior[key]
+        else:
+            data.pop(key, None)
 
     data.pop(GATEWAY_MARKER_KEY, None)
 
@@ -842,24 +872,33 @@ def _backup_existing(target: Path, label: str = "claude-code-managed") -> None:
 
 
 def _write_unix(target: Path, content: str) -> None:
-    """Write via sudo tee (no temp file needed, atomic enough)."""
+    """Write via sudo tee to a sibling temp, then sudo mv over the target.
+
+    ``tee`` truncates the file it writes, so writing the target directly risks
+    a torn managed-settings.json on a mid-write failure (kill, disk full). A
+    same-directory rename is atomic, so the file is either the old or the new
+    version. The temp name does not end in ``.json`` so a leftover fragment can
+    never be picked up as a drop-in.
+    """
     parent = target.parent
+    tmp = parent / f"{target.name}.tmp-{os.getpid()}"
     # Ensure directory exists
     subprocess.run(
         ["sudo", "mkdir", "-p", str(parent)],
         check=True,
     )
-    # Write content via sudo tee
     subprocess.run(
-        ["sudo", "tee", str(target)],
+        ["sudo", "tee", str(tmp)],
         input=content.encode(),
         stdout=subprocess.DEVNULL,
         check=True,
     )
     # Set permissions: root-owned, world-readable
-    subprocess.run(["sudo", "chmod", "644", str(target)], check=True)
+    subprocess.run(["sudo", "chmod", "644", str(tmp)], check=True)
     group = "wheel" if sys.platform == "darwin" else "root"
-    subprocess.run(["sudo", "chown", f"root:{group}", str(target)], check=True)
+    subprocess.run(["sudo", "chown", f"root:{group}", str(tmp)], check=True)
+    # Same-dir rename → atomic swap over the real file.
+    subprocess.run(["sudo", "mv", "-f", str(tmp), str(target)], check=True)
 
 
 def _remove_unix(target: Path) -> None:
@@ -867,9 +906,13 @@ def _remove_unix(target: Path) -> None:
 
 
 def _write_windows(target: Path, content: str) -> None:
-    """Write directly — requires running as admin on Windows."""
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
+    """Write directly — requires running as admin on Windows.
+
+    Atomic (temp + replace): a torn managed-settings.json is not self-healing.
+    """
+    from cli.utils.files import atomic_write_text  # noqa: PLC0415
+
+    atomic_write_text(target, content)
 
 
 def _remove_windows(target: Path) -> None:

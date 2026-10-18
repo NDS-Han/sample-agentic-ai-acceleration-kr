@@ -511,6 +511,10 @@ def exchange_jwt_for_vk(
         expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         expires_at = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        # A server timestamp without an offset is UTC; normalise so callers can
+        # subtract datetime.now(timezone.utc) without a naive/aware TypeError.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     return VKResponse(
         virtual_key=data["virtual_key"],
         expires_at=expires_at,

@@ -46,15 +46,33 @@ def _collect_vars() -> dict[str, str | None]:
     return result
 
 
+def _escape_posix_value(val: str) -> str:
+    """Escape a value for embedding inside a double-quoted shell string.
+
+    Inside ``"..."`` POSIX shells still expand ``$`` and backticks and honour
+    ``\\``/``"`` — an unescaped ``$HOME`` in a CA path or a ``"`` in a URL would
+    corrupt the export line (or inject shell syntax). Escape all four specials.
+    """
+    return (
+        val.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("`", "\\`")
+    )
+
+
 def _persist_posix(rc_path: Path, vars_to_persist: dict[str, str]) -> list[str]:
     existing_text = rc_path.read_text(encoding="utf-8") if rc_path.exists() else ""
     appended: list[str] = []
     lines_to_add: list[str] = []
 
     for var, val in vars_to_persist.items():
-        if re.search(rf"(^|[^A-Za-z0-9_]){re.escape(var)}=", existing_text, re.M):
+        # Already defined → skip. Anchored to a line start so a mid-line mention
+        # (a comment, `echo VAR=…`, another var's value) can't suppress the
+        # persist while leaving the var actually undefined.
+        if re.search(rf"^\s*(?:export\s+)?{re.escape(var)}\s*=", existing_text, re.M):
             continue
-        lines_to_add.append(f'export {var}="{val}"')
+        lines_to_add.append(f'export {var}="{_escape_posix_value(val)}"')
         appended.append(var)
 
     if lines_to_add:
@@ -166,13 +184,15 @@ def env_cmd(ctx: click.Context, persist: bool) -> None:
     click.echo("--- bash / zsh ---")
     for var in list(current.keys()):
         val = current[var] or "<value-from-admin>"
-        click.echo(f'export {var}="{val}"')
+        click.echo(f'export {var}="{_escape_posix_value(val)}"')
     click.echo("")
 
     click.echo("--- PowerShell (User scope, permanent) ---")
     for var in list(current.keys()):
         val = current[var] or "<value-from-admin>"
-        click.echo(f'[Environment]::SetEnvironmentVariable("{var}", "{val}", "User")')
+        # PowerShell double-quoted string: ` is the escape char; " and $ are special.
+        ps_val = val.replace("`", "``").replace('"', '`"').replace("$", "`$")
+        click.echo(f'[Environment]::SetEnvironmentVariable("{var}", "{ps_val}", "User")')
     click.echo("")
 
     if persist:

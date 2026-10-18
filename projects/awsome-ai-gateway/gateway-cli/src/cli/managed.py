@@ -24,6 +24,19 @@ log = structlog.get_logger(component="cli")
 GATEWAY_SETTINGS_FILENAME = "50-gateway.json"
 
 
+def _quote_shell_path(path: str) -> str:
+    """Quote a helper path containing spaces.
+
+    Claude Code executes ``apiKeyHelper``/``statusLine`` values as a shell
+    string — an unquoted path with spaces (``C:\\Program Files\\…``) splits at
+    the space and misidentifies the executable. Wrap in double-quotes on both
+    cmd.exe and POSIX sh.
+    """
+    if " " in path and not path.startswith('"'):
+        return f'"{path}"'
+    return path
+
+
 def _is_wsl() -> bool:
     """Return True when running inside Windows Subsystem for Linux."""
     try:
@@ -87,6 +100,7 @@ def build_gateway_settings(
     oidc_client_id: str | None = None,
     oidc_audience: str | None = None,
     tool_search: str = "true",
+    statusline_path: str = "statusline",
 ) -> dict:
     """Assemble the managed-settings document (pure — no filesystem, no sudo).
 
@@ -143,8 +157,8 @@ def build_gateway_settings(
     return {
         "_comment": "LLM Gateway — managed by gateway-cli",
         "env": env,
-        "apiKeyHelper": api_key_helper_path,
-        "statusLine": {"type": "command", "command": "statusline"},
+        "apiKeyHelper": _quote_shell_path(api_key_helper_path),
+        "statusLine": {"type": "command", "command": _quote_shell_path(statusline_path)},
     }
 
 
@@ -158,6 +172,7 @@ def write_gateway_settings(
     oidc_client_id: str | None = None,
     oidc_audience: str | None = None,
     tool_search: str = "true",
+    statusline_path: str = "statusline",
 ) -> Path:
     """Write gateway managed settings file.
 
@@ -174,6 +189,7 @@ def write_gateway_settings(
         oidc_client_id=oidc_client_id,
         oidc_audience=oidc_audience,
         tool_search=tool_search,
+        statusline_path=statusline_path,
     )
 
     content = json.dumps(settings, indent=2, ensure_ascii=False) + "\n"
@@ -211,24 +227,32 @@ def remove_gateway_settings() -> bool:
 # ---------------------------------------------------------------------------
 
 def _write_unix(target: Path, content: str) -> None:
-    """Write via sudo tee (no temp file needed, atomic enough)."""
+    """Write via sudo tee to a sibling temp, then sudo mv over the target.
+
+    ``tee`` truncates the file it writes — writing the target directly risks a
+    torn managed settings file on a mid-write failure, which silently unenforces
+    the gateway. A same-directory rename is atomic; the temp name's non-.json
+    suffix means a leftover fragment is never picked up as a drop-in.
+    """
     parent = target.parent
+    tmp = parent / f"{target.name}.tmp-{os.getpid()}"
     # Ensure directory exists
     subprocess.run(
         ["sudo", "mkdir", "-p", str(parent)],
         check=True,
     )
-    # Write content via sudo tee
     subprocess.run(
-        ["sudo", "tee", str(target)],
+        ["sudo", "tee", str(tmp)],
         input=content.encode(),
         stdout=subprocess.DEVNULL,
         check=True,
     )
     # Set permissions: root-owned, world-readable
-    subprocess.run(["sudo", "chmod", "644", str(target)], check=True)
+    subprocess.run(["sudo", "chmod", "644", str(tmp)], check=True)
     group = "wheel" if sys.platform == "darwin" else "root"
-    subprocess.run(["sudo", "chown", f"root:{group}", str(target)], check=True)
+    subprocess.run(["sudo", "chown", f"root:{group}", str(tmp)], check=True)
+    # Same-dir rename → atomic swap over the real file.
+    subprocess.run(["sudo", "mv", "-f", str(tmp), str(target)], check=True)
 
 
 def _remove_unix(target: Path) -> None:

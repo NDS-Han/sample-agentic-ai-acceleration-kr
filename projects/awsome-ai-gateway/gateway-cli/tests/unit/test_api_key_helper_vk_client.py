@@ -41,6 +41,40 @@ def test_request_virtual_key_success() -> None:
 
 
 @responses.activate
+def test_request_virtual_key_naive_expiry_normalized() -> None:
+    """R26: a server timestamp without offset, or a missing expires_at, must
+    produce an AWARE datetime — the daemon subtracts now(timezone.utc) and a
+    naive value crashes it with TypeError (daemon dies after first VK)."""
+    from datetime import datetime, timezone
+
+    # Case 1: no offset in the timestamp
+    responses.add(
+        responses.POST,
+        "https://gw.example.com/cli/auth/virtual-key",
+        json={"virtual_key": "vk-1", "expires_at": "2026-04-10T18:00:00"},
+        status=200,
+    )
+    # Case 2: expires_at missing entirely
+    responses.add(
+        responses.POST,
+        "https://gw.example.com/cli/auth/virtual-key",
+        json={"virtual_key": "vk-2"},
+        status=200,
+    )
+
+    config = HelperConfig(gateway_url="https://gw.example.com")
+    sts_request = {"url": "https://sts.example.com/", "headers": {}}
+
+    r1 = request_virtual_key(config, sts_request, "d")
+    r2 = request_virtual_key(config, sts_request, "d")
+
+    for r in (r1, r2):
+        assert r.expires_at.tzinfo is not None
+        # The daemon's exact arithmetic must not raise.
+        (r.expires_at - datetime.now(timezone.utc)).total_seconds()
+
+
+@responses.activate
 def test_request_virtual_key_api_error() -> None:
     responses.add(
         responses.POST,

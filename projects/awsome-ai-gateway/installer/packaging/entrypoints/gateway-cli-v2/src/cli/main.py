@@ -54,9 +54,7 @@ from cli.managed import (
 from cli.models import (
     DEFAULT_MODEL,
     FALLBACK_MODELS,
-    is_allowed_model,
     parse_available_models,
-    resolve_model_roster,
 )
 from cli.paths import data_dir, oidc_tokens_path, vk_cache_path
 from cli.setup import SetupStepError, ensure_admin_for_setup, run_setup
@@ -602,6 +600,39 @@ def _validate_model_flag(flag: str, key: str, value: str | None) -> None:
         raise click.ClickException(f"{flag}: {e}")
 
 
+def _gate_model(model: str, available_models: str | None) -> list[str] | None:
+    """Shared ``--model``/``--available-models`` gating for setup and onboard.
+
+    Returns the picker roster to write into settings (``None`` when the flag
+    was omitted — the ``availableModels`` key then stays unset, matching the
+    documented optional behaviour). Semantics:
+
+    * every supplied roster alias must be a gateway alias (a ``us.anthropic.*``
+      Bedrock inference-profile id is rejected with a user-facing error, not a
+      traceback);
+    * ``--model`` must be a valid alias and, ONLY when a roster was supplied, a
+      member of it — with no roster any alias is accepted (site-specific
+      aliases need no CLI rebuild).
+    """
+    _validate_model_flag("--model", "model", model)
+    roster = parse_available_models(available_models)
+    if roster:
+        from cli import validators
+
+        for alias in roster:
+            try:
+                validators.validate_model_alias(alias)
+            except validators.ValidationError as e:
+                raise click.ClickException(f"--available-models: {e}")
+    if roster and model not in roster:
+        raise click.ClickException(
+            f"--model '{model}' is not in the available models. Choose one of: "
+            + ", ".join(roster)
+            + "."
+        )
+    return roster or None
+
+
 @cli.command("setup")
 @click.option(
     "--model",
@@ -751,20 +782,13 @@ def setup_cmd(
     # inference-profile id — the emit path encodes but does not validate, and the
     # roster gate below only fires when --available-models is supplied, so validate
     # each model flag here at the command boundary.
-    _validate_model_flag("--model", "model", model)
     _validate_model_flag("--default-sonnet-model", "ANTHROPIC_DEFAULT_SONNET_MODEL", default_sonnet_model)
     _validate_model_flag("--default-opus-model", "ANTHROPIC_DEFAULT_OPUS_MODEL", default_opus_model)
     _validate_model_flag("--default-haiku-model", "ANTHROPIC_DEFAULT_HAIKU_MODEL", default_haiku_model)
 
-    roster = parse_available_models(available_models)
-    # --available-models is optional. Only when the operator supplies it do we
-    # gate --model on membership; without a roster any alias is accepted as-is.
-    if roster and not is_allowed_model(model, roster):
-        raise click.ClickException(
-            f"--model '{model}' is not in the available models. Choose one of: "
-            + ", ".join(roster)
-            + "."
-        )
+    # --available-models is optional: membership gating fires only when the
+    # operator supplies a roster; without one any valid alias is accepted.
+    picker = _gate_model(model, available_models)
 
     flag_values = {
         "gatewayUrl": gateway_url,
@@ -795,7 +819,6 @@ def setup_cmd(
     click.echo(f"  Model:         {model}")
     # Only advertise a picker roster when the operator supplied one; otherwise
     # leave availableModels unset (optional) and let Claude Code use its own.
-    picker = roster or None
     click.echo(f"  Models:        {', '.join(picker) if picker else '(default)'}")
     click.echo("")
 
@@ -986,13 +1009,9 @@ def onboard_cmd(
     except SetupStepError as e:
         raise click.ClickException(str(e))
 
-    roster = parse_available_models(available_models)
-    if not is_allowed_model(model, roster or None):
-        raise click.ClickException(
-            f"--model '{model}' is not in the available models. Choose one of: "
-            + ", ".join(resolve_model_roster(roster or None))
-            + "."
-        )
+    # Same gating as `setup` (R26 drift fix): membership only fires when a
+    # roster is supplied; --model must always be a valid gateway alias.
+    picker = _gate_model(model, available_models)
 
     def step_header(n: int, title: str) -> None:
         click.echo("")
@@ -1048,7 +1067,7 @@ def onboard_cmd(
             api_key_helper=api_key_helper,
             statusline=statusline,
             model=model,
-            available_models=resolve_model_roster(roster or None),
+            available_models=picker,
         )
     except SetupStepError as e:
         raise click.ClickException(str(e))

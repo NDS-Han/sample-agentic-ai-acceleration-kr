@@ -4,7 +4,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import signal
 import sys
@@ -155,8 +154,8 @@ def _run_polling(config, virtual_key: str, log) -> int:
 @click.option("--verbose", "-v", is_flag=True, help="Enable debug logging")
 def main(interval: int | None, gateway_url: str | None, verbose: bool) -> None:
     """statusline — Display LLM Gateway usage in Claude Code status bar."""
-    from statusline.config import load_config
     from gateway_cli_oidc.tls import enable_os_trust_store
+    from statusline.config import load_config
 
     overrides: dict = {"verbose": verbose or None, "gateway_url": gateway_url}
     if interval is not None:
@@ -170,7 +169,6 @@ def main(interval: int | None, gateway_url: str | None, verbose: bool) -> None:
     # Claude Code statusLine integration relies on.
     config = load_config(cli_overrides=overrides)
     configure_logging(config.verbose)
-    log = structlog.get_logger(component="statusline")
 
     # Delegate TLS verification to the OS trust store so the corporate proxy CA
     # (Basic Constraints not marked critical) validates under OpenSSL 3.x. No-op
@@ -190,7 +188,7 @@ def main(interval: int | None, gateway_url: str | None, verbose: bool) -> None:
         sys.exit(1)
 
     # One-shot mode: fetch once, print, exit (Claude Code calls this periodically)
-    from statusline.formatter import StatuslineState, determine_severity, format_status, Severity
+    from statusline.formatter import Severity, StatuslineState, determine_severity, format_status
     from statusline.usage_client import fetch_usage
 
     state = StatuslineState()

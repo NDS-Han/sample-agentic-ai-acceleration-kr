@@ -49,7 +49,11 @@ def get_sso_session_expiry() -> datetime | None:
         for line in result.stdout.splitlines():
             if line.startswith("AWS_CREDENTIAL_EXPIRATION="):
                 expiration = line.split("=", 1)[1].strip()
-                return datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+                expires_at = datetime.fromisoformat(expiration.replace("Z", "+00:00"))
+                if expires_at.tzinfo is None:
+                    # Naive → treat as UTC so aware-datetime callers compare safely.
+                    expires_at = expires_at.replace(tzinfo=timezone.utc)
+                return expires_at
     except Exception:
         pass
     return None

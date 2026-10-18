@@ -96,6 +96,22 @@ def backup_config(tool_name: str, original_path: str | Path) -> BackupEntry | No
     )
 
 
+def earliest_backup(pattern: str) -> Path | None:
+    """Return the oldest snapshot matching ``pattern`` in the backups dir, or None.
+
+    Backup filenames embed a UTC ``YYYYMMDDTHHMMSS`` timestamp, so a plain
+    lexicographic sort is chronological — the earliest snapshot records the
+    pre-setup/pre-persist state that teardown and managed-disable restore from.
+    Pure: unlike :func:`_backup_dir` this never creates the directory.
+    """
+    override = os.environ.get("GATEWAY_CLI_BACKUP_DIR")
+    backup_dir = Path(override) if override else data_dir() / "backups"
+    if not backup_dir.is_dir():
+        return None
+    candidates = sorted(backup_dir.glob(pattern))
+    return candidates[0] if candidates else None
+
+
 def backup_values(tool_name: str, name: str, values: Mapping[str, str]) -> BackupEntry | None:
     """Snapshot an in-memory ``{name: value}`` map to disk before it is replaced.
 
