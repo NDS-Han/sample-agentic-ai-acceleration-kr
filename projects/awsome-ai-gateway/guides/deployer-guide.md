@@ -192,6 +192,7 @@ User HTTP → ALB → gateway-proxy Pod
 | `virtual_key_encryption_key` | VK AES-256-GCM 암호화 DEK | gateway-proxy, admin-api | 1년 |
 | `nextauth_secret` | Admin UI 세션 서명 | admin-ui | 6개월 |
 | `jwt_jwks_cache_key` | JWT 검증 캐시 | gateway-proxy, admin-api | 1년 |
+| `internal_api_token` | `/internal/*` 게이트 토큰 | admin-api | 수동 |
 | DB `password` | Aurora 접근 | 전체 서비스, migration | 90일 |
 | Redis `password` | ElastiCache AUTH | 전체 서비스 | 90일 |
 

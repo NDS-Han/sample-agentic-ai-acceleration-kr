@@ -77,6 +77,9 @@ module "irsa" {
   body_log_firehose_arn = module.body_logging.firehose_stream_arn
   body_log_bucket_arn   = module.body_logging.bucket_arn
 
+  # notification-worker SES 발신 (provider=ses 와 짝, R24-S7)
+  enable_notification_ses = var.enable_notification_ses
+
   tags = var.tags
 }
 

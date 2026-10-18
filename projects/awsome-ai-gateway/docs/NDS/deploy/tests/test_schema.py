@@ -246,3 +246,14 @@ def test_compose_full_image_pair_no_warn():
     cfg = schema.from_dict(minimal(
         images={"registry": "r.example.com", "tag": "1.0.0"}))
     assert not any("사전 빌드 이미지" in w for w in cfg.warnings())
+
+
+def test_allowed_roles_scalar_is_wrapped():
+    """R24-N9r2: 스칼라 문자열을 문자 단위로 쪼개지 않고 한 요소 리스트로."""
+    cfg = schema.from_dict(minimal(aws={"allowed_roles": "DevRole"}))
+    assert cfg.aws.allowed_roles == ["DevRole"]
+
+
+def test_allowed_roles_list_unchanged():
+    cfg = schema.from_dict(minimal(aws={"allowed_roles": ["A", "B"]}))
+    assert cfg.aws.allowed_roles == ["A", "B"]

@@ -42,16 +42,22 @@ helm upgrade llm-gateway ./deployment/charts/llm-gateway \
   --atomic --wait --timeout 15m
 ```
 
-방법 B — 특정 서비스만 업그레이드:
+방법 B — 특정 서비스만 업그레이드 (`rebuild-image.sh DEPLOY=1` 이 이 경로):
 ```bash
 helm upgrade llm-gateway ./deployment/charts/llm-gateway \
-  --reuse-values \
+  --reset-then-reuse-values \
   --set gatewayProxy.image.tag=$NEW_VERSION \
   --namespace llm-gateway \
-  --atomic --wait
+  --atomic --wait --timeout 15m
 ```
 
-⚠️ `--reuse-values` 주의: 이전 `--set` 값은 유지되지만 **values 파일 변경은 반영 안 됨**. values 파일 수정 시엔 `-f` 로 다시 줘야 함.
+⚠️ `--reuse-values` 는 쓰지 말 것: 이전 `--set` 값은 유지되지만
+① values 파일 변경이 반영 안 되고, ② **차트 values.yaml 에 새로 추가된 기본 키가
+통째로 빠진다**(이전 릴리스의 coalesced values 를 쓰기 때문 — 실측으로 신규 env
+기본값이 env 0개로 렌더됨, R24-M5). `--reset-then-reuse-values`(Helm ≥3.14)는
+저장 값을 우선하면서 새 차트 기본값도 병합한다. values 파일 수정 시엔 `-f` 로
+다시 주되, 그 경우 아래 install-eks.sh 주의사항(install 이 주입한 --set 값들이
+placeholder 로 남는다)을 함께 볼 것.
 
 ### 1.4 롤링 업데이트 진행 확인
 

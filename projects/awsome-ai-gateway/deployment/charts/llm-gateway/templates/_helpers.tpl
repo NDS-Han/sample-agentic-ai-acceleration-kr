@@ -326,6 +326,22 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* ------------------------------------------------------------------------
+  admin-ui Ingress 의 유효 HTTPS 여부 — SECURE_COOKIES 와 NEXTAUTH_URL scheme 이
+  공통으로 쓴다 (R24-S3r2). ingress.yaml 의 adminUi 블록과 **동일한 merge 순서**
+  (adminUi.annotations > healthcheck 기본값 > 공통 annotations) 를 유지해야 한다 —
+  어긋나면 HTTP 전용 override 인데 Secure 쿠키가 나가 로그인이 깨진다.
+-------------------------------------------------------------------------- */}}
+{{- define "llm-gateway.adminUiHttps" -}}
+{{- $defaults := dict "alb.ingress.kubernetes.io/healthcheck-path" "/api/health" "alb.ingress.kubernetes.io/success-codes" "200" -}}
+{{- $ann := merge (deepCopy (.Values.ingress.adminUi.annotations | default dict)) $defaults (.Values.ingress.annotations | default dict) -}}
+{{- if or .Values.ingress.adminUi.tls.enabled (contains "HTTPS" (index $ann "alb.ingress.kubernetes.io/listen-ports" | default "")) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+
+{{/* ------------------------------------------------------------------------
   보안 컨텍스트 — 서비스별 override 병합
   호출: {{ include "llm-gateway.containerSecurityContext" (dict "root" . "override" .Values.adminUi.securityContextOverride) }}
 -------------------------------------------------------------------------- */}}

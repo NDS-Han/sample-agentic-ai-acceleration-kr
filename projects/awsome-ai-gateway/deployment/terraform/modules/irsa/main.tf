@@ -369,3 +369,57 @@ module "external_secrets_irsa" {
 
   tags = var.tags
 }
+
+# ------------------------------------------------------------------------------
+# 5. Notification Worker — SES 발신 (R24-S7)
+# ------------------------------------------------------------------------------
+# ecs-gateway 모듈(task role)과 동일한 조건·권한을 EKS IRSA 에도 둔다 — 예전엔 이
+# role 이 IaC 밖에서 수동 생성돼 있어 새 계정에서 ses provider 전환 시 SA 에 role 이
+# 없어 발송이 전량 실패했다. enable_notification_ses = helm 의 EMAIL_SENDER_TYPE=ses
+# 와 짝이어야 한다(둘이 어긋나면 provider 는 ses 인데 권한이 없거나 그 반대).
+data "aws_iam_policy_document" "notification_worker_ses" {
+  count = var.enable_notification_ses ? 1 : 0
+
+  statement {
+    sid    = "SesSend"
+    effect = "Allow"
+    actions = [
+      "ses:SendEmail",
+      "ses:SendRawEmail",
+    ]
+    # SES 는 발신 identity ARN 지정도 가능하지만 verified domain 임의성을 위해 *
+    # (ecs-gateway 의 notification_worker 정책과 동일한 판단).
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_policy" "notification_worker_ses" {
+  count = var.enable_notification_ses ? 1 : 0
+
+  name        = "${var.project}-${var.environment}-notification-worker-ses"
+  description = "notification-worker - SES send (provider=ses 일 때만 생성)"
+  policy      = data.aws_iam_policy_document.notification_worker_ses[0].json
+  tags        = var.tags
+}
+
+module "notification_worker_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.48"
+  count   = var.enable_notification_ses ? 1 : 0
+
+  role_name        = "${var.project}-${var.environment}-notification-worker-ses"
+  role_description = "IRSA - notification-worker (SES send)"
+
+  oidc_providers = {
+    main = {
+      provider_arn               = var.oidc_provider_arn
+      namespace_service_accounts = ["${var.k8s_namespace}:notification-worker"]
+    }
+  }
+
+  role_policy_arns = {
+    ses = aws_iam_policy.notification_worker_ses[0].arn
+  }
+
+  tags = var.tags
+}

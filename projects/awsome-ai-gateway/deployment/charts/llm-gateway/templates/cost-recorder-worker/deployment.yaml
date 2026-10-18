@@ -81,10 +81,7 @@ spec:
             {{- toYaml .Values.costRecorderWorker.livenessProbe | nindent 12 }}
           readinessProbe:
             {{- toYaml .Values.costRecorderWorker.readinessProbe | nindent 12 }}
-          # 배치 flush 도중 kill 당하지 않게 preStop에서 short sleep
-          # (consumer group은 pending entries를 다음 consumer가 picking)
-          lifecycle:
-            preStop:
-              exec:
-                command: ["sh", "-c", "sleep 10"]
+          # preStop sleep 없음 (R24-N8): 이 Deployment 는 Service 가 없어 endpoint
+          # draining 대상이 아니다 — sleep 은 SIGTERM 도달만 10s 늦춰 협조 종료 예산을
+          # 잡아먹는다. 미플러시 배치는 PEL 에 남아 다음 consumer 가 reclaim 한다.
 {{- end }}

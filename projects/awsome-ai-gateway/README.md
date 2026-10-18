@@ -213,16 +213,17 @@ AWSome AI Gateway는 **re-origination(요청 재구성 발신)** 방식입니다
 > in-account 로, 게이트웨이는 859 에서 각 백엔드로 라우팅합니다.
 >
 > **다른 계정에 적용 시**: `terraform.tfvars` (gitignored), `backend.tf` 의
-> `-backend-config`, `values-eks-fargate-{dev,prod}.yaml` 안의 `# CHANGE_ME`
-> 마커 값(dev 8개 / prod 10개)을 본인 계정 값으로 교체. 자세한 절차는
+> `-backend-config`, `values-eks-fargate-{dev,prod}.yaml` 안의
+> `CHANGE_ME` 마커를 전부 검색해 본인 계정 값으로 교체. 자세한 절차는
 > deployer-guide §E.4 + §F (자사 계정 부트스트랩 체크리스트) 참조.
 >
-> ⚠️ **prod 배포 주의**: `install-eks.sh`는 서비스별 `image.tag`를 `--set`으로
-> 주입하지 않아 태그는 전적으로 values 파일 핀에 의존합니다. dev values는
-> 서비스별로 명시 핀돼 있으나 prod values는 어떤 `image.tag`도 핀하지 않아,
-> 그대로 배포 시 전 서비스가 `Chart.appVersion`으로 폴백됩니다(migration이
-> 현재 head 미지원 이미지로 실패할 수 있음). prod values에 서비스별 태그를
-> 반드시 명시하세요.
+> ⚠️ **prod 배포 주의**: 커밋된 values-*.yaml 의 `image.tag` 핀은 빌드 시점
+> 스냅샷이라 라이브(SHA 태그)보다 뒤처집니다. `install-eks.sh`는 기존 릴리스가
+> 있으면 저장 values 의 라이브 태그를 읽어 그대로 이어 씁니다(새 태그는
+> `rebuild-image.sh DEPLOY=1` 또는 `IMAGE_TAG=<sha>` env로 명시). 신규 환경 첫
+> install 에서는 values 핀이 그대로 쓰이므로 migration 이미지가 `db/versions`
+> head 를 지원하는지 확인하세요 — install-eks.sh 가 태그가 git SHA 일 때
+> `git diff <tag> HEAD -- db/` 게이트로 먼저 잡습니다.
 
 ---
 

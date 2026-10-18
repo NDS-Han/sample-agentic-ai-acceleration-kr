@@ -73,6 +73,14 @@
 {{- if and (eq .Values.global.deploymentMode "eks-fargate") (eq (len .Values.gatewayProxy.serviceAccount.annotations) 0) }}
    ⚠ EKS Fargate 모드인데 gatewayProxy.serviceAccount.annotations 에 IRSA role-arn 이 없습니다.
 {{- end }}
+{{- if and .Values.adminApi.oidc.enabled (eq (.Values.adminApi.oidc.audience | default "") "") }}
+   ⚠ adminApi.oidc.enabled 인데 audience 가 비어 있습니다 — aud 검증이 꺼져
+     같은 Cognito 풀의 다른 app client 토큰도 통과합니다 (R24-N4).
+{{- end }}
+{{- if and (eq .Values.global.deploymentMode "eks-fargate") .Values.networkPolicy.enabled }}
+   ℹ NetworkPolicy 가 렌더되지만 EKS Fargate 는 NetworkPolicy 를 집행하지 않습니다
+     (R24-N3) — 실제 격리는 Security Groups for Pods 로 하세요.
+{{- end }}
 {{- if and .Values.adminApi.env.DEV_LOGIN_ENABLED (eq .Values.adminApi.env.DEV_LOGIN_ENABLED "true") (eq .Values.global.environment "prod") }}
    🚨 adminApi.env.DEV_LOGIN_ENABLED=true 이지만 environment=prod 입니다. 즉시 false로 바꾸세요.
 {{- end }}

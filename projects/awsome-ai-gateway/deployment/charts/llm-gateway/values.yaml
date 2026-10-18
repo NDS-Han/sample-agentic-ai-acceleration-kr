@@ -366,7 +366,7 @@ migration:
   enabled: true
   image:
     repository: "llm-gateway/migration"
-    tag: "1.0.52-head0033"  # = 라이브(dev·prod). alembic head 0033
+    tag: "1.0.52-head0033"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
   resources:
     requests:
@@ -419,7 +419,7 @@ gatewayProxy:
 
   image:
     repository: "llm-gateway/gateway-proxy"
-    tag: "1.0.55-runtimeplane"  # = 라이브(dev·prod)
+    tag: "1.0.55-runtimeplane"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -471,8 +471,15 @@ gatewayProxy:
     enabled: true
     minAvailable: 1  # SSE 스트림 보호 — 최소 1개는 항상 가용
 
-  # SSE 스트림이 길어질 수 있으니 terminationGracePeriodSeconds 충분히
-  terminationGracePeriodSeconds: 60
+  # 종료 예산 산식 (R24-M1 — 이 값이 부족하면 SIGKILL 이 lifespan drain 보다 먼저 온다):
+  #   terminationGracePeriodSeconds = preStop(15) + UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT
+  #                                 + lifespan shutdown(~40, main.py 데드라인) + 여유(5)
+  # uvicorn --timeout-graceful-shutdown 이 지나면 열린 SSE 를 포기하고 lifespan
+  # (cost spool/body_log drain, ~40s)을 실행한다. 상한이 없으면 스트림이 끝날 때까지
+  # 무한 대기 → SIGKILL → 진행 중 요청의 부분 사용량·버퍼 유실.
+  # 이 값을 바꾸면 env.UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT 도 같은 산식으로 조정할 것.
+  # 기본: 15 + 240 + 40 + 5 = 300
+  terminationGracePeriodSeconds: 300
 
   livenessProbe:
     httpGet:
@@ -517,6 +524,10 @@ gatewayProxy:
     # Fargate cpu request 기준 워커당 CPU 기아를 피하도록 설정(0.5 vCPU=2, 0.25 vCPU=1~2).
     # ⚠️ 1.0.98 이전 이미지는 CMD 가 --workers 4 하드코딩이라 이 값이 무시됐음(죽은 설정).
     WORKERS: "2"
+    # uvicorn --timeout-graceful-shutdown — SIGTERM 후 열린 SSE 를 기다리는 상한.
+    # 위 terminationGracePeriodSeconds 산식과 짝(15 preStop + 이 값 + 40 lifespan + 5 여유).
+    # streaming.idleTimeout 보다 작으면 안 된다 — idle 상한 내의 정상 스트림도 조기 절단된다.
+    UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT: "240"
     OPENMODEL_BASE_URL: ""  # 사내 vLLM 엔드포인트. 미사용
     # Redis 스트림 / 예산 관련
     COST_STREAM_KEY: "cost:stream"
@@ -571,7 +582,7 @@ adminApi:
 
   image:
     repository: "llm-gateway/admin-api"
-    tag: "1.0.69-idpjwks"  # = 라이브(dev·prod)
+    tag: "1.0.69-idpjwks"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -719,7 +730,7 @@ adminUi:
 
   image:
     repository: "llm-gateway/admin-ui"
-    tag: "1.0.99-modelform"  # = 라이브(dev·prod)
+    tag: "1.0.99-modelform"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -856,7 +867,7 @@ scheduler:
   image:
     # admin-api 이미지 재사용 (command만 다름) — 태그도 admin-api 와 항상 같이 움직인다
     repository: "llm-gateway/admin-api"
-    tag: "1.0.69-idpjwks"  # = 라이브(dev·prod)
+    tag: "1.0.69-idpjwks"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   command: ["python", "-m", "app.scheduler.main"]
@@ -920,7 +931,7 @@ notificationWorker:
 
   image:
     repository: "llm-gateway/notification-worker"
-    tag: "1.0.45-ses"      # = 라이브(dev·prod) — SES extras 포함 이미지
+    tag: "1.0.45-ses"      # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   serviceAccount:
@@ -946,7 +957,9 @@ notificationWorker:
     enabled: true
     minAvailable: 1
 
-  terminationGracePeriodSeconds: 30
+  # 종료 예산 (R24-N8): stop_all(협조 18s) + in-flight drain(~10s) = ~28s. 여기에
+  # redis close · db dispose · OTel flush 가 붙으므로 30s 는 2s 여유뿐 — 40s 로 둔다.
+  terminationGracePeriodSeconds: 40
 
   # livenessProbe 는 외부 의존성 검사 금지 (Redis 장애로 pod restart 해도 해결 안 됨).
   # PID 1 alive 만 체크 — Python import/TLS 지연에 안 휘둘림.
@@ -1017,7 +1030,7 @@ costRecorderWorker:
 
   image:
     repository: "llm-gateway/cost-recorder-worker"
-    tag: "1.0.47-websearch"  # = 라이브(dev·prod)
+    tag: "1.0.47-websearch"  # 빌드 시점 스냅샷 — install-eks 가 라이브 태그를 보존하고 rebuild-image 가 새 SHA 를 주입
     pullPolicy: "IfNotPresent"
 
   serviceAccount:

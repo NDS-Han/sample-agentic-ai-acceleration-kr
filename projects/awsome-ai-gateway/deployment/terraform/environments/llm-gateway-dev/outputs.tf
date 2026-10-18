@@ -16,6 +16,11 @@ output "gateway_proxy_role_arn" {
 output "admin_api_role_arn" {
   value = module.irsa.admin_api_role_arn
 }
+output "notification_worker_ses_role_arn" {
+  description = "notification-worker SES IRSA role ARN (비어 있으면 ses 미사용)"
+  value       = module.irsa.notification_worker_ses_role_arn
+}
+
 output "all_role_arns" {
   value = module.irsa.all_role_arns
 }

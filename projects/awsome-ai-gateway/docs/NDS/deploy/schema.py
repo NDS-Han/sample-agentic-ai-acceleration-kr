@@ -31,6 +31,9 @@ class SchemaError(ValueError):
 class AwsConfig:
     region: str = "ap-northeast-2"
     account_id: str = ""
+    # CLI(STS 경로) VK 발급의 IAM role 허용 목록 — helm 의 aws.allowedIamRoles 와
+    # 같은 의미. 비어 있으면 compose 배포에서 CLI 로그인이 fail-closed 로 전량 403.
+    allowed_roles: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -334,7 +337,7 @@ _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
     "features", "images", "clients", "oidc",
 ))
-_AWS_KEYS = frozenset(("region", "account_id"))
+_AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
                           "tfstate_table", "release", "namespace", "tf_env_dir"))
 _NETWORK_KEYS = frozenset(("mode", "allowed_cidrs"))
@@ -383,6 +386,10 @@ def from_dict(raw: dict) -> GatewayConfig:
         aws=AwsConfig(
             region=str(aws.get("region", "ap-northeast-2")),
             account_id=str(aws.get("account_id", "")),
+            # 스칼라("DevRole")를 넣으면 문자 단위로 쪼개진다 — 리스트로 감싼다.
+            allowed_roles=[str(r) for r in
+                (([aws["allowed_roles"]] if isinstance(aws.get("allowed_roles"), str)
+                  else aws.get("allowed_roles")) or [])],
         ),
         deploy=DeployConfig(
             target=str(deploy.get("target", "compose")),

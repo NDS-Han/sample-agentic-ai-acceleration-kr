@@ -282,6 +282,14 @@ variable "mantle_regions" {
   default     = ["ap-northeast-1", "us-east-2"]
 }
 
+variable "enable_notification_ses" {
+  # notification-worker SES 발신용 IRSA role 생성 — helm 의 EMAIL_SENDER_TYPE=ses 와
+  # 짝이다 (둘이 어긋나면 provider 는 ses 인데 SA 권한이 없어 발송 전량 실패).
+  description = "notification-worker SES IRSA role 생성 여부 (EMAIL_SENDER_TYPE=ses 와 짝)"
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

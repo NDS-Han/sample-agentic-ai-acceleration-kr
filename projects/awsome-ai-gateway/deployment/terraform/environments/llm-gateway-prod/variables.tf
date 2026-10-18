@@ -284,6 +284,33 @@ variable "mantle_regions" {
   default     = ["ap-northeast-1", "us-east-2"]
 }
 
+variable "cowork_role_arn" {
+  # Cowork cross-account Mantle role. gateway-proxy AssumeRole into it.
+  # Must match model.routing_profiles.account_role_arn for client=cowork (migration 0009).
+  # The role's trust must allow this env's gateway-proxy IRSA + sts:ExternalId=cowork-bedrock.
+  # 비워 두면 cross-account statement 가 렌더되지 않고 cowork 요청이 전부 AccessDenied
+  # 가 된다 — 라우팅 프로필은 env 무관하게 role ARN 을 심어 두므로 prod 에서도 필수.
+  type    = string
+  default = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
+}
+
+variable "claude_code_374_role_arn" {
+  # Claude Code cross-account Bedrock NATIVE role. gateway-proxy AssumeRole into it,
+  # builds a bedrock-runtime client. Must match model.routing_profiles
+  # .account_role_arn for client=claude-code (migration 0022).
+  # 비워 두면 assume 이 실패하고 in-account 경로로 조용히 폴백해 계정 분리가 무력화된다.
+  type    = string
+  default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+}
+
+variable "enable_notification_ses" {
+  # notification-worker SES 발신용 IRSA role 생성 — helm 의 EMAIL_SENDER_TYPE=ses 와
+  # 짝이다 (둘이 어긋나면 provider 는 ses 인데 SA 권한이 없어 발송 전량 실패).
+  description = "notification-worker SES IRSA role 생성 여부 (EMAIL_SENDER_TYPE=ses 와 짝)"
+  type        = bool
+  default     = false
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

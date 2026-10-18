@@ -84,13 +84,52 @@ def build_tool_workflow(*, backend: BackendConfig,
 # orphaned ENI 없이 VPC가 삭제된다. cluster_name/region은 terraform output에서 조회.
 _HELM_UNINSTALL = """\
 set -e
+# 미초기화 디렉터리에서는 terraform output 이 원격 state 를 읽지 못해 항상 실패
+# — "클러스터 없음"으로 오인해 ALB 를 남긴 채 destroy 가 진행된다(R24-N8r2).
+# helm 단계가 tf-init 스텝보다 먼저 실행되므로 여기서 backend init 을 선행한다.
+# init 자체가 실패하면(자격증명/네트워크/백엔드 오류) state 유무를 알 수 없다 —
+# 조용히 스킵하면 클러스터가 남은 채 destroy 될 수 있으므로 fail-closed(R24-N8r4).
+if ! terraform init -input=false -reconfigure $TF_BACKEND_ARGS >/dev/null 2>&1; then
+  echo "ERROR: terraform init 실패 — backend state 존재 여부를 확인할 수 없다" >&2
+  exit 1
+fi
+if ! terraform output -json 2>/dev/null | jq -e . >/dev/null 2>&1; then
+  echo "terraform state/output 없음 — 클러스터 미배포로 간주, helm 단계 스킵"; exit 0;
+fi
 CL=$(terraform output -raw cluster_name 2>/dev/null) || {
   echo "cluster_name output 없음 — helm 단계 스킵 (이미 destroy됐거나 미배포)"; exit 0;
 }
 RG=$(terraform output -json | jq -r '.cluster_endpoint.value' | awk -F. '{print $3}')
 echo "cluster=$CL region=$RG"
 aws eks update-kubeconfig --region "$RG" --name "$CL"
-helm uninstall llm-gateway -n llm-gateway || echo "helm release 없음 — ok"
+# 클러스터 도달성을 먼저 확인 — kube API 자체가 안 되면(access entry 없음 등)
+# helm status/kubectl 실패를 "릴리스 없음"으로 오인해 ALB 를 남긴 채 destroy
+# 한다(R24-N8r2: fail-open 금지).
+kubectl get ns llm-gateway >/dev/null 2>&1 || {
+  if kubectl get ns llm-gateway 2>&1 | grep -qi "NotFound"; then
+    echo "namespace 없음 — helm 단계 스킵"; exit 0;
+  fi
+  echo "ERROR: kube API 도달 실패 — 릴리스 존재 여부를 확인할 수 없다. destroy 중단" >&2
+  exit 1;
+}
+# --wait 필수 (R24-S8): uninstall 은 Ingress 삭제를 요청만 하고 반환한다 — ALB
+# controller finalizer 가 비동기로 ALB/SG/ENI 를 지운다. 기다리지 않고 바로
+# terraform destroy 하면 ALB/SG/ENI 가 남아 VPC 삭제가 DependencyViolation 로 실패.
+helm_err=$(helm status llm-gateway -n llm-gateway 2>&1) && helm_ok=0 || helm_ok=1
+if [ "$helm_ok" = 0 ]; then
+  helm uninstall llm-gateway -n llm-gateway --wait --timeout 10m
+elif echo "$helm_err" | grep -qi "not found"; then
+  echo "helm release 없음 — ok"
+else
+  echo "ERROR: helm status 실패(권한/API 오류) — release 존재 불명, destroy 중단: $helm_err" >&2
+  exit 1
+fi
+# Ingress(ALB) 잔존도 확인 — uninstall 반환 후에도 finalizer 작업이 남을 수 있다.
+if kubectl get ingress -n llm-gateway --no-headers 2>/dev/null | grep -q .; then
+  echo "Ingress 삭제 대기 중 (ALB finalizer)..."
+  kubectl wait --for=delete ingress -n llm-gateway --all --timeout=10m
+fi
+echo "helm/ingress 정리 확인 완료 — destroy 진행 가능"
 """
 
 
@@ -99,11 +138,13 @@ def build_llm_teardown(*, env: str, backend: BackendConfig,
     """LLM Gateway 삭제: helm uninstall → terraform destroy (순서가 함정 회피)."""
     tf_dir = paths.llm_tf_dir(env)
     return [
-        # ★함정③: 격리 KUBECONFIG. best-effort이므로 skippable.
+        # ★함정③: 격리 KUBECONFIG. "클러스터/릴리스 없음"은 스크립트가 exit 0 으로
+        # 건너뛰므로 skippable 불필요 — 실패(ALB/Ingress 잔존)는 destroy 를 막아야 한다
+        # (R24-S8: VPC DependencyViolation 방지).
         Step("helm-uninstall", ["bash", "-c", _HELM_UNINSTALL],
              cwd=tf_dir,
-             env={"KUBECONFIG": f"/tmp/{cluster_name}.kubeconfig"},
-             skippable=True),
+             env={"KUBECONFIG": f"/tmp/{cluster_name}.kubeconfig",
+                  "TF_BACKEND_ARGS": " ".join(backend.backend_args())}),
         # ★함정⑤: destroy도 backend가 필요 → tf-init에 -backend-config 주입.
         Step("tf-init",
              ["terraform", "init", "-input=false", "-reconfigure", *backend.backend_args()],

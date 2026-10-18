@@ -32,19 +32,15 @@ cognito_domain_suffix = "vanilla-auth-CHANGE_ACCOUNT_ID"
 # 애플리케이션은 `global.anthropic.*` (cross-region inference profile) 로 호출하므로
 # inference-profile + 실제 추론이 실행되는 foundation-model 양쪽 모두 허용해야 한다.
 # Model Access 승인 받은 모델만 실제로 호출 가능하므로 ARN 허용해도 무방.
-bedrock_allowed_model_arns = [
-  # Foundation models (실제 추론 실행 리소스)
-  "arn:aws:bedrock:ap-northeast-2::foundation-model/anthropic.claude-opus-4-*",
-  "arn:aws:bedrock:ap-northeast-2::foundation-model/anthropic.claude-sonnet-4-*",
-  "arn:aws:bedrock:ap-northeast-2::foundation-model/anthropic.claude-haiku-4-*",
-  # Foundation models (리전 없는 ARN — cross-region inference profile 경유 시 필요)
-  "arn:aws:bedrock:::foundation-model/anthropic.*",
-  # Global cross-region inference profiles (application 이 실제로 호출)
-  "arn:aws:bedrock:*::inference-profile/global.anthropic.claude-*",
-  "arn:aws:bedrock:*:*:inference-profile/global.anthropic.claude-*",
-  # APAC cross-region inference profile (예비)
-  "arn:aws:bedrock:ap-northeast-2::inference-profile/apac.anthropic.claude-*",
-]
+# ⚠️ 아래 블록을 여기에 명시하면 variables.tf 의 최신 기본값(Claude 5 / Haiku 5 /
+#    GPT-5.6 포함)을 덮어쓴다 — 예전에는 이 example 의 낡은 목록을 복사해 쓰는 것이
+#    문서화된 Claude 5 AccessDenied 사고의 원인이었다(R24-S6). 기본값을 쓸 것이면
+#    이 블록은 주석 유지. 환경 특화 목록이 필요하면 variables.tf 기본값을 먼저 보고
+#    거기서 빼지 말고 더할 것.
+# bedrock_allowed_model_arns = [
+#   "arn:aws:bedrock:ap-northeast-2::foundation-model/anthropic.claude-opus-4-*",
+#   ...
+# ]
 
 # ------------------------------------------------------------------------------
 # EKS 관리자 접근 (본인 IAM 유저/역할)
@@ -116,3 +112,13 @@ enable_chat_db_tools = true
 #   (docs/us-llm-gateway/ops/8-V-body-logging.md, update-scripts/20-enable-body-logging.sh)
 # enable_body_logging = true
 # body_log_retention_days = 90
+
+# ------------------------------------------------------------------------------
+# notification-worker SES IRSA (R24-S7/N7r2)
+# ------------------------------------------------------------------------------
+# EMAIL_SENDER_TYPE=ses (helm values notificationWorker.email.provider="ses")를
+# 쓸 때만 true. ⚠️ 라이브 계정에 수동 생성된 동일 이름 role
+# (llm-gateway-<env>-notification-worker-ses)이 있으면 apply 시
+# EntityAlreadyExists 로 실패한다 — 먼저 import:
+#   terraform import 'module.irsa.module.notification_worker_irsa[0].aws_iam_role.this[0]' <role-name>
+# enable_notification_ses = true

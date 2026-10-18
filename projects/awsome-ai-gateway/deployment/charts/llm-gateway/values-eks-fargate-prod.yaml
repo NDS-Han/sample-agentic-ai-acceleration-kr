@@ -117,19 +117,33 @@ ingress:
   annotations:
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip  # Fargate 필수
-    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80}]'
+    # HTTPS 기본 (S10) — HTTP 평문 배포는 VK·OIDC id_token·세션 쿠키를 인터넷에
+    # 노출한다. certificate-arn 을 실제 ACM ARN 으로 교체할 것 — CHANGE_ME 그대로면
+    # ALB provisioning 이 실패해 빠르게 드러난다(조용한 평문 배포보다 낫다).
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP":80},{"HTTPS":443}]'
+    alb.ingress.kubernetes.io/ssl-redirect: "443"
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/certificate-arn: "arn:aws:acm:ap-northeast-2:ACCOUNT_ID:certificate/CHANGE_ME"
     alb.ingress.kubernetes.io/healthcheck-path: /health
     alb.ingress.kubernetes.io/healthcheck-protocol: HTTP
     alb.ingress.kubernetes.io/backend-protocol: HTTP
     # SSE 스트리밍을 위해 idle timeout 충분히 (dev 300s → prod 600s 유지)
     alb.ingress.kubernetes.io/load-balancer-attributes: idle_timeout.timeout_seconds=600
-  # host 를 비워두면 ALB 가 모든 Host 헤더를 수락 (ALB DNS 로 직접 접근 가능)
+  # host 는 실제 도메인을 넣는다. 빈 값은 ALB 가 모든 Host 를 수락해
+  # certificate-arn 의 ACM 도메인과 ALB DNS 가 어긋나도 조용히 지나간다 —
+  # CLI 클라이언트(Claude Code 등)는 TLS 검증에서 실패한다 (R24-S3r2).
+  # CHANGE_ME 그대로면 라우팅이 안 맞아 빠르게 드러난다.
   gateway:
-    host: ""
+    host: "gateway.CHANGE_ME.example.com"
     tls:
       enabled: false
+    annotations:
+      # SSE 스트림이 롤아웃 중 끊기지 않으려면 deregistration 지연이
+      # preStop(15s) + uvicorn graceful(570s) 이상이어야 한다 — 기본 300s 는
+      # 15+570=585 에 미치지 못해 T+300 에 스트림을 절단한다 (R24-S4r2).
+      alb.ingress.kubernetes.io/target-group-attributes: "deregistration_delay.timeout_seconds=600"
   adminUi:
-    host: ""
+    host: "admin.CHANGE_ME.example.com"
     tls:
       enabled: false
     # 최종형(고객 권장): admin 을 private 서브넷 internal ALB 로 — 아래 2줄 해제.
@@ -137,7 +151,7 @@ ingress:
     # annotations:
     #   alb.ingress.kubernetes.io/scheme: internal
   adminApi:
-    host: ""
+    host: "api.CHANGE_ME.example.com"
     tls:
       enabled: false
     # 최종형(고객 권장): 위 adminUi 와 동일 — 아래 2줄 해제 (gateway 는 public 유지)
@@ -224,6 +238,10 @@ gatewayProxy:
     WEB_SEARCH_MAX_RESULTS_DEFAULT: "5"
     WEB_SEARCH_MAX_SEARCHES_PER_TURN: "3"
     WEB_SEARCH_MAX_ITERATIONS: "2"
+    # uvicorn --timeout-graceful-shutdown — prod 산식: 15 preStop + 570 + 40 lifespan + 5
+    # = terminationGracePeriodSeconds 630. idleTimeout 540 아래로 내려가면 정상 스트림이
+    # 롤아웃마다 조기 절단되므로 540+30 으로 둔다(R24-M1).
+    UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT: "570"
   # SSE 스트리밍 타임아웃. prod ALB idle_timeout=600s(:114) 보다 60s 아래로 둔다 —
   # 같거나 크면 ALB 가 먼저 끊어 클라이언트가 깔끔한 SSE 에러 대신 truncated stream 을
   # 본다. prod 는 dev(300s) 보다 ALB 상한이 크므로 idleTimeout 도 그만큼 여유를 준다
@@ -246,6 +264,8 @@ gatewayProxy:
   podDisruptionBudget:
     enabled: true
     minAvailable: 2
+  # 종료 예산 = 15 preStop + 570 uvicorn graceful + 40 lifespan + 5 여유 (R24-M1)
+  terminationGracePeriodSeconds: 630
   affinity:
     podAntiAffinity:
       preferredDuringSchedulingIgnoredDuringExecution:

@@ -138,3 +138,14 @@ variable "tags" {
   type    = map(string)
   default = {}
 }
+
+variable "enable_notification_ses" {
+  description = <<-EOT
+    notification-worker SES 발신용 IRSA role 생성 여부 (R24-S7).
+    helm values 의 notificationWorker.email.provider = "ses" (EMAIL_SENDER_TYPE=ses) 와 짝이다.
+    false 면 role 을 만들지 않는다 — mock/smtp/internal_api provider 는 AWS 권한이
+    필요 없다. ecs-gateway 모듈의 email_sender_type == "ses" 분기와 같은 조건.
+  EOT
+  type        = bool
+  default     = false
+}

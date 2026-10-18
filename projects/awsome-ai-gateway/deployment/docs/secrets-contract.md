@@ -9,6 +9,7 @@
 | `virtual_key_encryption_key` | Virtual Key AES-256-GCM DEK (64-char hex) | admin-api, gateway-proxy | **필수** | `openssl rand -hex 32` |
 | `nextauth_secret` | NextAuth.js 세션 서명 | admin-ui | **필수** | `openssl rand -hex 32` |
 | `jwt_jwks_cache_key` | JWKS 캐시 HMAC (위변조 방지) | admin-api, gateway-proxy | **필수** | `openssl rand -hex 32` |
+| `internal_api_token` | `/internal/*` 게이트 토큰 (서비스 간 호출 인증) | admin-api | **필수** | `openssl rand -hex 32` |
 | DB `password` (gateway 유저) | Aurora/PostgreSQL 연결 비번 | admin-api, gateway-proxy, cost-recorder-worker, scheduler, migration | **필수** | Aurora `manage_master_user_password=true`가 Secrets Manager에 자동 저장 |
 | DB `notification_worker_password` | notification_worker_user 비번 (권한 분리) | notification-worker | **on-prem 선택** (EKS는 단일 gateway 유저 사용) | 운영자가 수동 생성 (마이그레이션 후) |
 | Redis `password` (AUTH 토큰) | ElastiCache / 사내 Redis 인증 | 전 서비스 (worker 포함) | **선택** | ElastiCache는 Terraform이 `random_password`로 자동 생성 |
@@ -113,7 +114,8 @@ auth:
     --secret-string "{
       \"virtual_key_encryption_key\": \"$(openssl rand -hex 32)\",
       \"nextauth_secret\": \"$(openssl rand -hex 32)\",
-      \"jwt_jwks_cache_key\": \"$(openssl rand -hex 32)\"
+      \"jwt_jwks_cache_key\": \"$(openssl rand -hex 32)\",
+      \"internal_api_token\": \"$(openssl rand -hex 32)\"
     }"
   ```
 - [ ] `/llm-gateway/{env}/db` Secret 생성 (Aurora 마스터 비번을 gateway 유저용으로 사용 or 별도 유저 생성 후 그 비번):
@@ -158,7 +160,8 @@ auth:
   kubectl create secret generic llm-gateway-app -n llm-gateway \
     --from-literal=virtual_key_encryption_key="$(openssl rand -hex 32)" \
     --from-literal=nextauth_secret="$(openssl rand -hex 32)" \
-    --from-literal=jwt_jwks_cache_key="$(openssl rand -hex 32)"
+    --from-literal=jwt_jwks_cache_key="$(openssl rand -hex 32)" \
+    --from-literal=internal_api_token="$(openssl rand -hex 32)"
 
   kubectl create secret generic llm-gateway-redis -n llm-gateway \
     --from-literal=password='<redis AUTH>'

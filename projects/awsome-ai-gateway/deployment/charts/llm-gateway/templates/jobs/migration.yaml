@@ -46,6 +46,10 @@ spec:
           #    로 함께 고정한다(두 곳이 어긋나면 재현성 구멍이 조용히 남는다).
           image: {{ .Values.migration.waitForSecret.image | default "bitnami/kubectl@sha256:b29d8c1665b70817259ceecaea16ab27aab6368b48daf485d19436c809067492" | quote }}
           imagePullPolicy: IfNotPresent
+          # R24-N1: pod securityContext 만으론 컨테이너 수준(privesc/capabilities)
+          # 제한이 안 걸린다 — 메인 컨테이너와 같은 컨테이너 수준 정책을 적용.
+          securityContext:
+            {{- include "llm-gateway.containerSecurityContext" (dict "root" . "override" (dict)) | nindent 12 }}
           command:
             - sh
             - -c

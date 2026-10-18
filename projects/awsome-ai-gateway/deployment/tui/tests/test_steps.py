@@ -88,17 +88,41 @@ def test_llm_teardown_order_helm_before_destroy():
     assert names.index("tf-init") < names.index("tf-destroy")
 
 
-def test_llm_teardown_isolates_kubeconfig_and_is_skippable():
+def test_llm_teardown_isolates_kubeconfig_and_not_skippable():
     wf = steps.build_llm_teardown(env="dev", backend=BE, cluster_name="my-cluster")
     helm = next(s for s in wf if s.name == "helm-uninstall")
     assert helm.env["KUBECONFIG"] == "/tmp/my-cluster.kubeconfig"
-    assert helm.skippable is True  # best-effort — 릴리스 없어도 destroy는 진행
+    # "클러스터/릴리스 없음"은 스크립트가 exit 0으로 스킵 — 실패(ALB/Ingress 잔존)는
+    # destroy를 막아야 한다 (R24-S8: ALB 고아 → VPC DependencyViolation).
+    assert helm.skippable is False
+
+
+def test_llm_teardown_waits_for_alb_delete():
+    """helm uninstall 이 반환돼도 ALB controller finalizer는 비동기 — destroy 전에
+    Ingress 삭제 완료까지 기다려야 orphan ENI/SG 없이 VPC가 지워진다 (R24-S8)."""
+    script = steps._HELM_UNINSTALL
+    assert "--wait" in script
+    assert "kubectl wait --for=delete ingress" in script
 
 
 def test_llm_teardown_destroy_injects_backend():
     wf = steps.build_llm_teardown(env="dev", backend=BE)
     tf_init = next(s for s in wf if s.name == "tf-init")
     assert "-backend-config=bucket=b" in tf_init.argv
+
+
+def test_llm_teardown_helm_step_gets_backend_args_and_fails_closed():
+    """helm-uninstall 은 tf-init 보다 먼저 도므로 backend init 용 인자가 env 로
+    전달돼야 한다(R24-N8r4). init 실패 시 스킵은 fail-open 이라 스크립트는
+    init 실패를 exit 1 로 보낸다."""
+    wf = steps.build_llm_teardown(env="dev", backend=BE)
+    helm = next(s for s in wf if s.name == "helm-uninstall")
+    assert "-backend-config=bucket=b" in helm.env["TF_BACKEND_ARGS"]
+    script = steps._HELM_UNINSTALL
+    assert "terraform init -input=false -reconfigure $TF_BACKEND_ARGS" in script
+    # init 실패를 스킵(exit 0)으로 삼키지 않는다 — state 존재 불명이면 중단.
+    # 주석에 "terraform output"이 먼저 나오므로 실제 명령 문자열로 위치 비교.
+    assert script.index("terraform init -input=false") < script.index("terraform output -json")
 
 
 def test_tool_teardown_calls_provision_script():

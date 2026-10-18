@@ -37,7 +37,7 @@ Claude Code처럼 **인라인 콘솔**로 동작한다 — 전체 화면을 점�
 ## 워크플로우
 
 - **LLM Gateway 배포** (region 선택, 기본 ap-northeast-2): 사전검증 → build-lambdas(조건부) → tf-init(backend 주입) → plan → apply → install-eks(KUBECONFIG 격리) → 검증
-- **Tool Gateway 배포** (us-east-1, 옵션): 사전검증 → 검색엔진 토글 + 키 → tfvars → tf-init → provision deploy
+- **Tool Gateway 배포** (us-east-1, 옵션): 사전검증 → 검색엔진 토글 + 키 → tfvars → tf-init → provision deploy. ⚠️ 별도 deliverable — provision 스크립트/terraform 자산이 리포에 없으면 메뉴에서 자동으로 숨겨진다(선택해도 preflight에서 막히므로 광고하지 않음).
 - **전체 배포 (LLM → Tool)**: 위 둘을 순차 실행. Tool GW의 dashboard-env 연동은 LLM GW의 admin-ui가 떠 있어야 하므로 순서는 LLM→Tool 고정이며, LLM 단계가 실패/취소되면 Tool 단계는 게이팅되어 실행하지 않는다. Tool은 non-fatal 애드온이라 실패해도 LLM 배포에는 영향 없음.
 - **스택 삭제 (Teardown)**: 배포된 스택 삭제 (파괴적). LLM GW는 **helm uninstall(ALB 먼저 제거) → terraform destroy** 순서로 orphaned ENI 없이 VPC까지 삭제. Tool GW는 `provision_tool_gateway.sh teardown` 후 **AgentCore api-key credential provider orphan 정리**(terraform destroy가 못 지우는 경우 대비 — 이 스택이 만드는 bare 엔진명만 정확 일치로 삭제, `-creds` 등 타 스택 리소스는 보존). 실행 전 삭제 대상 요약을 보여주고, `delete <stack>` 문구를 **정확히 타이핑**해야 진행된다(이중 확인).
 

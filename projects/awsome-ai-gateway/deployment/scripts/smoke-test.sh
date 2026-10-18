@@ -36,13 +36,19 @@ BEDROCK_EXEC_TIMEOUT="${BEDROCK_SMOKE_EXEC_TIMEOUT:-180s}"
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --namespace|-n) NAMESPACE="$2"; shift 2 ;;
-        --env)          shift 2 ;;  # 외부에서만 쓰는 인자
+        --env)          ENV_ARG="$2"; shift 2 ;;
         --context)      KUBE_CONTEXT="$2"; shift 2 ;;
         --model-id)     BEDROCK_MODEL_ID="$2"; shift 2 ;;
         --with-bedrock) WITH_BEDROCK=1; shift ;;
         *) echo "Unknown flag: $1"; exit 1 ;;
     esac
 done
+
+# --env 는 검사할 클러스터를 고른다 (R24-N10) — 예전엔 값을 버려서 `--env prod`
+# 여도 활성 context 를 검사했다. 명시 --context 가 이긴다.
+if [ -n "${ENV_ARG:-}" ] && [ -z "${KUBE_CONTEXT:-}" ]; then
+    KUBE_CONTEXT="llm-gateway-$ENV_ARG"
+fi
 
 # kubectl 래퍼. KUBE_CONTEXT 가 비어 있으면 그대로 `kubectl ...` = 기존 동작 그대로
 # (활성 컨텍스트 사용). --context 를 명시했을 때만 인자가 붙는다.

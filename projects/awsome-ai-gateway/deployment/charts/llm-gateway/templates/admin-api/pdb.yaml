@@ -1,6 +1,12 @@
 {{/* Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms. */}}
 
-{{- if and .Values.adminApi.enabled .Values.adminApi.podDisruptionBudget.enabled -}}
+{{- $minAvail := int (.Values.adminApi.podDisruptionBudget.minAvailable | default 1) -}}
+{{- if and .Values.adminApi.enabled .Values.adminApi.podDisruptionBudget.enabled
+      (ternary (gt (int .Values.adminApi.autoscaling.minReplicas) $minAvail)
+               (gt (int .Values.adminApi.replicaCount) $minAvail)
+               .Values.adminApi.autoscaling.enabled) -}}
+{{/* R24-S2: 정적 1레플리카(autoscaling.minReplicas<=1 포함)에 minAvailable PDB 를
+   렌더하면 허용 중단이 항상 0 이라 노드 패치/drain/eviction 이 영구 차단된다. */}}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:

@@ -23,12 +23,13 @@
 
 ### 1.1 키 생성
 
-세 가지 랜덤 값을 `openssl` 로 생성합니다.
+네 가지 랜덤 값을 `openssl` 로 생성합니다.
 
 ```bash
 VK_KEY=$(openssl rand -hex 32)
 NEXTAUTH_SECRET=$(openssl rand -hex 32)
 JWKS_CACHE_KEY=$(openssl rand -hex 32)
+INTERNAL_API_TOKEN=$(openssl rand -hex 32)
 ```
 
 각 용도:
@@ -38,6 +39,7 @@ JWKS_CACHE_KEY=$(openssl rand -hex 32)
 | `VK_KEY` | Virtual Key AES-256-GCM DEK. VK 암/복호화 전체 보안 기반 |
 | `NEXTAUTH_SECRET` | Admin UI (Next.js) 세션 토큰 서명 |
 | `JWKS_CACHE_KEY` | JWT JWKS 캐시 위변조 방지 HMAC |
+| `INTERNAL_API_TOKEN` | `/internal/*` 서비스 간 호출 게이트 토큰. ExternalSecret 이 이 속성까지 요구하므로 빠뜨리면 Secret 전체 sync 가 실패해 gateway/admin-api/admin-ui 가 전부 못 뜬다 |
 
 ⚠️ **이 값들을 로그/Slack에 남기지 마세요**. 터미널 스크롤 기록도 주의.
 
@@ -50,7 +52,8 @@ aws secretsmanager create-secret \
   --secret-string "{
     \"virtual_key_encryption_key\": \"$VK_KEY\",
     \"nextauth_secret\": \"$NEXTAUTH_SECRET\",
-    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\"
+    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\",
+    \"internal_api_token\": \"$INTERNAL_API_TOKEN\"
   }" \
   --region "$AWS_REGION"
 ```
@@ -66,7 +69,8 @@ aws secretsmanager put-secret-value \
   --secret-string "{
     \"virtual_key_encryption_key\": \"$VK_KEY\",
     \"nextauth_secret\": \"$NEXTAUTH_SECRET\",
-    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\"
+    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\",
+    \"internal_api_token\": \"$INTERNAL_API_TOKEN\"
   }" \
   --region "$AWS_REGION"
 ```
@@ -84,7 +88,8 @@ aws secretsmanager put-secret-value \
   --secret-string "{
     \"virtual_key_encryption_key\": \"$VK_KEY\",
     \"nextauth_secret\": \"$NEXTAUTH_SECRET\",
-    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\"
+    \"jwt_jwks_cache_key\": \"$JWKS_CACHE_KEY\",
+    \"internal_api_token\": \"$INTERNAL_API_TOKEN\"
   }" \
   --region "$AWS_REGION"
 ```
@@ -247,7 +252,7 @@ ESO가 AUTH 토큰을 읽을 때 KMS 복호화 권한이 필요합니다. Terraf
 
 ## 5. 체크리스트 (03 단계 완료 시점)
 
-- [ ] `/llm-gateway/$ENV/app` 생성 (operator, 3 key: `virtual_key_encryption_key`, `nextauth_secret`, `jwt_jwks_cache_key`)
+- [ ] `/llm-gateway/$ENV/app` 생성 (operator, 4 key: `virtual_key_encryption_key`, `nextauth_secret`, `jwt_jwks_cache_key`, `internal_api_token`)
 - [ ] `/llm-gateway/$ENV/db` 생성 (**Terraform 이 자동 생성** when `enable_rds_proxy=true`, 1 key: `password`)
 - [ ] `/llm-gateway/$ENV/db/gateway-user` 생성 (**Terraform 이 자동 생성** when `enable_rds_proxy=true`, RDS Proxy auth 전용)
 - [ ] `/llm-gateway/$ENV/redis` 생성 (operator, 1 key: `password`)

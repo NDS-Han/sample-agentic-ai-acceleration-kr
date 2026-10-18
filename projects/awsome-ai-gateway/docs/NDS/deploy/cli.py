@@ -867,9 +867,11 @@ def cmd_capture(args) -> int:
         out_path = Path(args.out) if args.out else \
             cfg_path.parent / f"gateway.captured-{doc.get('env', 'env')}.yaml"
         if out_path.exists():
-            # 생성물이라 덮어도 안전 — 대신 이전본을 백업해 둔다
+            # 생성물이라 덮어도 안전 — 대신 이전본을 백업해 둔다.
+            # 캡처본엔 계정 ID·호스트 등이 들어 있어 원본(0600)과 같은 권한을 유지한다.
             backup = out_path.with_suffix(out_path.suffix + ".bak")
             backup.write_text(out_path.read_text())
+            backup.chmod(0o600)
             console.print(f"[yellow]기존 캡처본을 {backup.name} 으로 백업하고 덮어씁니다")
         _captured_to_yaml(out_path, doc, notes)
         console.print(f"[green]캡처됨: {out_path}")

@@ -1020,10 +1020,10 @@ aws secretsmanager get-secret-value \
 
 출력:
 ```json
-["jwt_jwks_cache_key", "nextauth_secret", "virtual_key_encryption_key"]
+["internal_api_token", "jwt_jwks_cache_key", "nextauth_secret", "virtual_key_encryption_key"]
 ```
 
-이 3개 key가 `deployment/charts/llm-gateway/templates/common/secret.yaml` 의 ExternalSecret data 에 언급된 것과 일치해야 합니다.
+이 4개 key가 `deployment/charts/llm-gateway/templates/common/secret.yaml` 의 ExternalSecret data 에 언급된 것과 일치해야 합니다.
 
 ### 원인 3: ESO IRSA 권한 부족
 

@@ -67,11 +67,18 @@ module "irsa" {
   bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
   cognito_user_pool_arn      = module.cognito.user_pool_arn
   mantle_regions             = var.mantle_regions
+  # cross-account Bedrock/Mantle 분리 (R24-M4) — dev 와 동일하게 넘긴다.
+  # 비어 있으면 cowork 는 전부 AccessDenied, claude-code 는 in-account 로 폴백.
+  cowork_role_arn          = var.cowork_role_arn
+  claude_code_374_role_arn = var.claude_code_374_role_arn
 
   # 본문 로깅 sink 쓰기 권한(쓰기 전용). body_logging 이 꺼져 있으면 빈 문자열이 와서
   # statement 가 렌더되지 않는다.
   body_log_firehose_arn = module.body_logging.firehose_stream_arn
   body_log_bucket_arn   = module.body_logging.bucket_arn
+
+  # notification-worker SES 발신 (provider=ses 와 짝, R24-S7)
+  enable_notification_ses = var.enable_notification_ses
 
   tags = var.tags
 }

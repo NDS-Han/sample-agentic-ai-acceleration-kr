@@ -75,6 +75,12 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
         # ④ 배포용 재시작 정책 통일
         svc.setdefault("restart", "unless-stopped")
 
+        # ④-b gateway 는 종료 시 스트림 drain 시간이 필요 — compose 기본 10s 의
+        #     SIGKILL 은 과금 스풀/바디로그 drain 을 자른다. uvicorn graceful
+        #     상한(기본 240s, 스트림 없으면 즉시 종료)+lifespan drain(40s)을 커버.
+        if name == "gateway-proxy":
+            svc.setdefault("stop_grace_period", "300s")
+
         # ⑤ 호스트 포트 제거 — 인입점은 Caddy 뿐
         if name in APP_SERVICES or name in ("postgres", "redis"):
             svc.pop("ports", None)
@@ -186,6 +192,12 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
         "AWS_REGION": cfg.aws.region,
         "AWS_DEFAULT_REGION": cfg.aws.region,
         "ALLOWED_STS_REGIONS": cfg.aws.region,
+        # R24-S9: CLI(STS 경로) VK 발급의 fail-closed allowlist. 비어 있으면
+        # admin-api 가 로그인을 전량 403 거부한다 — EKS(install --set)·ECS(caller
+        # account 폴백)와 달리 compose 는 아무것도 주입하지 않던 구멍.
+        # aws.account_id 가 비어 있으면 키 자체를 두지 않고 노트로 경고한다.
+        **({"ALLOWED_AWS_ACCOUNTS": cfg.aws.account_id} if cfg.aws.account_id else {}),
+        **({"ALLOWED_IAM_ROLES": ",".join(cfg.aws.allowed_roles)} if cfg.aws.allowed_roles else {}),
         "DEV_LOGIN_ENABLED": "false" if cfg.oidc.enabled else "true",
         "EMAIL_SENDER_TYPE": n.provider,
         "EMAIL_SENDER_ADDRESS": n.ses_from or n.smtp_from or "noreply@llm-gateway.local",
@@ -221,6 +233,13 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
     render 출력에 그대로 표시한다. 'env 를 써 넣었지만 인프라가 필요' 와
     '이 backend 미지원' 을 구분해 알린다."""
     notes: list[str] = []
+    if not cfg.aws.account_id or not cfg.aws.allowed_roles:
+        notes.append(
+            "CLI 로그인(STS 경로): aws.account_id / aws.allowed_roles 가 비어 있어 "
+            "ALLOWED_AWS_ACCOUNTS/ALLOWED_IAM_ROLES 를 주입하지 않았습니다 — "
+            "gateway-cli 로그인이 fail-closed(403)로 전부 거부됩니다. "
+            "쓰려면 gateway.yaml 의 aws.account_id 와 aws.allowed_roles 를 채우거나 "
+            "gen/<env>/.env 에 두 env 를 직접 추가하세요.")
     if cfg.features.web_search:
         notes.append(
             "web_search: .env 에 WEB_SEARCH_ENABLED=true 를 썼습니다. 실제 동작에는 추가로 "

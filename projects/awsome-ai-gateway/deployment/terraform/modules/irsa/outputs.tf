@@ -23,3 +23,8 @@ output "all_role_arns" {
     external_secrets = module.external_secrets_irsa.iam_role_arn
   }
 }
+
+output "notification_worker_ses_role_arn" {
+  description = "notification-worker SES 발신용 role ARN. provider!=ses 면 빈 문자열 — helm SA annotation 주입 여부의 신호로 쓴다"
+  value       = try(module.notification_worker_irsa[0].iam_role_arn, "")
+}

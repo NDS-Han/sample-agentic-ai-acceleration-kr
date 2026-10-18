@@ -165,6 +165,13 @@ def run_preflight(tools) -> bool:
     return preflight_table(checks)
 
 
+def _tool_assets_present() -> bool:
+    """조용한 자산 존재 확인 — 메뉴 가시성 전용(출력 없음). tool-gateway 자산은
+    별도 PR/deliverable 이라 이 리포에 없을 수 있고, 없는 기능을 메뉴에 광고하면
+    preflight 에 매번 막히기만 한다(R24-N12)."""
+    return all(p.exists() for _label, p in preflight.TOOL_GW_PATHS)
+
+
 def tool_gateway_assets_ok() -> bool:
     """Tool Gateway 스크립트/terraform이 이 리포에 있는지 확인하고 표로 출력.
     없으면(별도 PR 미머지 등) 안내하고 False."""
@@ -580,6 +587,10 @@ def main_menu() -> None:
         # 화살표 단일선택 — 각 워크플로우 핸들러를 value로.
         # questionary.Choice는 value=None을 title로 대체하므로 종료는 센티널 문자열 사용.
         choices = [(label, handler) for label, handler in MENU]
+        # tool-gateway 자산이 리포에 없으면(별도 deliverable 미포함) 관련 메뉴를 숨긴다
+        # — 선택해도 preflight 에 막히기만 하므로 광고하지 않는다(R24-N12).
+        if not _tool_assets_present():
+            choices = [(l, h) for l, h in choices if h not in (flow_tool, flow_all)]
         choices.append(("종료", "__exit__"))
         handler = ask_select("워크플로우 선택 (↑↓ 이동, Enter 선택)", choices)
         if handler == "__exit__":

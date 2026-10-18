@@ -122,6 +122,11 @@ read_tf_outputs() {
     COGNITO_CLIENT_ID=$(echo "$outputs" | jq -r '.cognito_client_id.value // empty')
     COGNITO_HOSTED_UI=$(echo "$outputs" | jq -r '.cognito_hosted_ui_domain.value // empty')
 
+    # notification-worker SES IRSA (R24-S7) — enable_notification_ses=true 로 apply
+    # 된 스택에만 존재. EMAIL_SENDER_TYPE=ses 인데 이 값이 비어 있으면 SA 에 role 이
+    # 없어 발송이 전량 실패하므로 그 조합을 여기서 잡는다.
+    NOTIFICATION_SES_ROLE_ARN=$(echo "$outputs" | jq -r '.notification_worker_ses_role_arn.value // empty')
+
     popd >/dev/null
 
     # 필수 값 검증
@@ -244,33 +249,29 @@ preinstall_cleanup_es_artifacts() {
     # (a) ESO validating webhook 을 임시 삭제 — cert SAN race 회피.
     #     webhook 은 ExternalSecret/SecretStore CR 생성 시점 schema 검증 용도.
     #     런타임 sync 와 무관하므로 제거해도 안전. ESO cert-controller 가 몇 분 내 재생성.
-    for vwc in externalsecret-validate secretstore-validate; do
-        if kubectl get validatingwebhookconfiguration "$vwc" >/dev/null 2>&1; then
-            kubectl delete validatingwebhookconfiguration "$vwc" >/dev/null 2>&1 && \
-                ok "validating webhook '$vwc' 임시 삭제 (cert-controller 가 재생성 예정)"
-        fi
-    done
+    #     ⚠️ install 시에만 — upgrade 때마다 지우면 cert-controller 재생성 전까지
+    #        ES/SecretStore schema 검증이 꺼진다(R24-N13).
+    if [ "$HELM_ACTION" = "install" ]; then
+        for vwc in externalsecret-validate secretstore-validate; do
+            if kubectl get validatingwebhookconfiguration "$vwc" >/dev/null 2>&1; then
+                kubectl delete validatingwebhookconfiguration "$vwc" >/dev/null 2>&1 && \
+                    ok "validating webhook '$vwc' 임시 삭제 (cert-controller 가 재생성 예정)"
+            fi
+        done
+    fi
 
-    # (b) 이전 release 가 남긴 orphan K8s Secret 정리.
-    #     ExternalSecret 이 재생성되면 새 UID 로 owner 가 바뀌어야 하는데
-    #     stale Secret 의 ownerReferences 가 옛 UID 를 가리켜 "already exists" 에러.
-    #     삭제하면 새 ExternalSecret 이 다시 만듦.
+    # (b) Owner 시대(creationPolicy: Owner)에 만들어진 Secret 의 stale ownerReference
+    #     제거 — R24-S1 로 ES 가 Orphan 이 됐지만, 기존 Secret 은 여전히 삭제된 ES 의
+    #     UID 를 가리켜 GC 가 Secret 을 지운다(Orphan 전환 첫 upgrade 창).
+    #     Secret 자체는 ESO 가 갱신하므로 지우지 말고 ownerReferences 만 뗀다.
     for secret_name in llm-gateway-app llm-gateway-db llm-gateway-redis; do
-        # ownerReferences 에 ExternalSecret 이 있는 경우만 삭제 (우리가 만든 것)
         local owner_kind
         owner_kind=$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
             -o jsonpath='{.metadata.ownerReferences[0].kind}' 2>/dev/null || echo "")
         if [ "$owner_kind" = "ExternalSecret" ]; then
-            # 현재 ExternalSecret 이 있는지 확인 — 있다면 UID 비교해서 stale 인지 판단
-            local current_es_uid stale_owner_uid
-            current_es_uid=$(kubectl -n "$NAMESPACE" get externalsecret "$secret_name" \
-                -o jsonpath='{.metadata.uid}' 2>/dev/null || echo "")
-            stale_owner_uid=$(kubectl -n "$NAMESPACE" get secret "$secret_name" \
-                -o jsonpath='{.metadata.ownerReferences[0].uid}' 2>/dev/null || echo "")
-            if [ -z "$current_es_uid" ] || [ "$current_es_uid" != "$stale_owner_uid" ]; then
-                kubectl -n "$NAMESPACE" delete secret "$secret_name" >/dev/null 2>&1 && \
-                    ok "orphan K8s Secret '$secret_name' 삭제 (ExternalSecret 이 재생성)"
-            fi
+            kubectl -n "$NAMESPACE" patch secret "$secret_name" --type=json \
+                -p='[{"op":"remove","path":"/metadata/ownerReferences"}]' >/dev/null 2>&1 && \
+                ok "Secret '$secret_name' 의 stale ownerReference 제거 (Orphan 전환)"
         fi
     done
 }
@@ -302,7 +303,9 @@ check_secrets_manager() {
         echo ""
         echo "    3) App secrets (직접 생성):"
         echo "       aws secretsmanager create-secret --name /llm-gateway/${ENV}/app \\"
-        echo "         --secret-string '{\"virtual_key_encryption_key\":\"\$(openssl rand -hex 32)\",\"nextauth_secret\":\"\$(openssl rand -hex 32)\",\"jwt_jwks_cache_key\":\"\$(openssl rand -hex 32)\"}'"
+        echo "         --secret-string '{\"virtual_key_encryption_key\":\"\$(openssl rand -hex 32)\",\"nextauth_secret\":\"\$(openssl rand -hex 32)\",\"jwt_jwks_cache_key\":\"\$(openssl rand -hex 32)\",\"internal_api_token\":\"\$(openssl rand -hex 32)\"}'"
+        echo "       ⚠️ internal_api_token 필수(R24-M2): ExternalSecret 이 속성 하나라도"
+        echo "          없으면 Secret 전체 sync 가 실패해 gateway/admin-api/admin-ui 전부 못 뜬다."
         echo ""
         read -p "    계속 진행 (y) / 중단 (N)? " -n 1 -r
         echo
@@ -427,6 +430,15 @@ helm_install() {
         --set-string "adminApi.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${ADMIN_API_ROLE_ARN}"
     )
 
+    # notification-worker SES IRSA — terraform 에 role 이 만들어져 있을 때만 주입.
+    # provider=ses 인데 role 이 없는 조합은 발송 전량 실패라 미리 경고한다(R24-S7).
+    if [ -n "${NOTIFICATION_SES_ROLE_ARN:-}" ] && [ "$NOTIFICATION_SES_ROLE_ARN" != "null" ]; then
+        SET_ARGS+=(--set-string "notificationWorker.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${NOTIFICATION_SES_ROLE_ARN}")
+    elif grep -qE 'provider:\s*"ses"' "$VALUES_FILE" 2>/dev/null; then
+        warn "notificationWorker.email.provider=ses 인데 notification_worker_ses_role_arn output 이 없다 —"
+        warn "terraform tfvars 의 enable_notification_ses=true 로 apply 후 재실행할 것 (발송 전량 실패 예정)"
+    fi
+
     # OIDC (Cognito) — terraform 에서 만든 경우 자동 주입.
     # ⚠️ 우선순위: --set 은 어떤 -f values 파일보다 항상 이긴다. R16 게이트로
     #    OIDC_ISSUER_URL 이 설정된 환경에선 무서명 dev 토큰이 전부 거부되므로,
@@ -462,6 +474,109 @@ helm_install() {
     if [ "${MIGRATION_ENABLED:-true}" != "true" ]; then
         warn "Migration Job 비활성화 (MIGRATION_ENABLED=false). 별도 수동 실행 필요"
         SET_ARGS+=(--set "migration.enabled=false")
+    fi
+
+    # ---- 이미지 태그의 단일 소스: 라이브 릴리스 (R24-M3) ----
+    # 커밋된 values-eks-fargate-*.yaml 의 image.tag 핀은 빌드 시점 스냅샷이라 라이브
+    # (SHA 태그)보다 거의 항상 뒤처진다. -f values 그대로 upgrade 하면:
+    #   1) 전 서비스가 조용히 다운그레이드되고
+    #   2) 구 migration 이미지는 alembic head 가 DB 현재 리비전보다 낮아
+    #      pre-upgrade hook 이 "Can't locate revision" 으로 실패한다(실사고 기록).
+    # 릴리스가 이미 있으면 저장 values 의 서비스별 태그를 읽어 그대로 이어 쓴다.
+    # 새 태그로 올릴 때는 rebuild-image.sh(DEPLOY=1) 또는 IMAGE_TAG=<sha> env 사용.
+    IMAGE_KEYS=(gatewayProxy adminApi adminUi notificationWorker costRecorderWorker migration scheduler)
+    # 키 → ECR 리포지토리 이름 (llm-gateway/<repo>) — IMAGE_TAG preflight 에서 사용.
+    # 연관 배열(declare -A)은 macOS 기본 bash 3.2 에서 없다 — case 함수로 (R24-S6r3).
+    ecr_repo() {
+        case "$1" in
+            gatewayProxy)        echo gateway-proxy ;;
+            adminApi|scheduler)  echo admin-api ;;
+            adminUi)             echo admin-ui ;;
+            notificationWorker)  echo notification-worker ;;
+            costRecorderWorker)  echo cost-recorder-worker ;;
+            migration)           echo migration ;;
+            *) echo "BUG: ecr_repo 미등록 키 $1" >&2; return 1 ;;
+        esac
+    }
+    live_values='{}'
+    if [ "$HELM_ACTION" = "upgrade" ]; then
+        # helm get values 실패 시 '{}' 폴백은 전 서비스를 values 핀(구 태그)으로
+        # 조용히 다운그레이드시킨다(R24-S1r2) — 조용한 폴백 대신 중단.
+        if ! live_values="$(helm get values "$RELEASE_NAME" -n "$NAMESPACE" -o json 2>/dev/null)"; then
+            err "helm get values 실패 — 라이브 태그를 읽지 못하면 values 핀으로 다운그레이드된다."
+            err "RBAC/네트워크를 확인하고 재시도할 것. 의도적으로 핀을 쓰려면 IMAGE_TAG=<sha> 지정."
+            exit 1
+        fi
+        for key in "${IMAGE_KEYS[@]}"; do
+            live_tag="$(jq -r --arg k "$key" '.[$k].image.tag // empty' <<<"$live_values" 2>/dev/null || true)"
+            if [ -n "$live_tag" ]; then
+                SET_ARGS+=(--set "$key.image.tag=$live_tag")
+            else
+                warn "라이브 values 에 $key.image.tag 없음 — values 핀을 그대로 쓴다 (부분 다운그레이드 위험)"
+            fi
+        done
+    fi
+    # IMAGE_TAG 는 install/upgrade 모두에 적용한다 — upgrade 블록 안에 두면 첫
+    # install 에서 태그가 무시돼 values 의 stale 핀이 그대로 배포된다(R24-S1r2).
+    if [ -n "${IMAGE_TAG:-}" ]; then
+        warn "IMAGE_TAG=$IMAGE_TAG 지정 — 전 서비스를 이 태그로 올린다 (라이브 태그 무시)"
+        # ECR preflight (R24-N4r2): IMAGE_TAG 는 7개 리포지토리 전부에 그 태그가
+        # 있어야 한다. rebuild-image 는 서비스 단위 빌드라 보통 성립하지 않는다 —
+        # 없는 태그로 upgrade 하면 ImagePullBackOff 후 atomic 롤백만 된다.
+        # ImageNotFound 만 명확한 실패로 보고 중단, 나머지 에러(권한/네트워크)는 경고.
+        aws_account_id=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || true)
+        if [ -n "$aws_account_id" ]; then
+            missing=()
+            for key in "${IMAGE_KEYS[@]}"; do
+                repo="llm-gateway/$(ecr_repo "$key")"
+                out=$(aws ecr describe-images --repository-name "$repo" \
+                        --image-ids imageTag="$IMAGE_TAG" --query 'imageIds[0]' \
+                        --output text 2>&1) && continue
+                if grep -q "ImageNotFoundException\|RepositoryNotFoundException" <<<"$out"; then
+                    missing+=("$repo:$IMAGE_TAG")
+                else
+                    warn "ECR 조회 실패($repo) — 태그 존재 확인 건너뜀: ${out%%$'\n'*}"
+                fi
+            done
+            if [ ${#missing[@]} -gt 0 ]; then
+                err "IMAGE_TAG=$IMAGE_TAG 가 다음 리포지토리에 없다:"
+                printf '    %s\n' "${missing[@]}" >&2
+                err "서비스별로 태그가 다르면 rebuild-image.sh DEPLOY=1 경로를 쓸 것."
+                exit 1
+            fi
+        fi
+        for key in "${IMAGE_KEYS[@]}"; do
+            SET_ARGS+=(--set "$key.image.tag=$IMAGE_TAG")
+        done
+    fi
+
+    # ---- migration 이미지 head 게이트 (R24-M3/S5, 기준 수정 S2r2) ----
+    # 비교 기준은 HEAD 가 아니라 **이번에 배포될 앱 태그** 다. upgrade 는 앱 태그를
+    # 라이브 그대로 유지하고 IMAGE_TAG 는 mig/app 을 같은 태그로 올리므로,
+    # HEAD 와 비교하면 롤백·values-only upgrade 가 전부 오탐으로 막힌다.
+    # 진짜 위험은 "앱 태그가 기대하는 스키마가 migration 이미지에 없는" 조합 —
+    # mig_tag..app_tag 사이에 db/ 변경이 있을 때다.
+    values_tag() { # $1=values 키 → values 파일의 image.tag
+        awk -v k="^$1:" '$0~k{f=1;next} f&&/^[a-zA-Z]/{exit} f&&/tag:/{gsub(/["'\'' ]/,"",$2);print $2;exit}' \
+            "$VALUES_FILE" 2>/dev/null || true
+    }
+    mig_tag="${IMAGE_TAG:-$(jq -r '.migration.image.tag // empty' <<<"$live_values" 2>/dev/null || true)}"
+    mig_tag="${mig_tag:-$(values_tag migration)}"
+    app_tag="${IMAGE_TAG:-$(jq -r '.gatewayProxy.image.tag // empty' <<<"$live_values" 2>/dev/null || true)}"
+    app_tag="${app_tag:-$(values_tag gatewayProxy)}"
+    # mig→app 사이에 db/versions/ 에 *추가된* 파일이 있는지만 본다
+    # (--diff-filter=A). three-dot 은 merge-base 없는 shallow clone 이나,
+    # 같은 db 트리를 다른 이력으로 만든 squash-merge 에서 오탐을 낸다
+    # (R24-N1r5). 새 revision 파일 추가가 유일한 유해 신호다 — 기존 마이그레이션
+    # 파일은 불변.
+    if [ -n "$mig_tag" ] && [ -n "$app_tag" ] && [ "$mig_tag" != "$app_tag" ] \
+       && git -C "$DEPLOY_DIR/.." rev-parse --verify --quiet "${mig_tag}^{commit}" >/dev/null 2>&1 \
+       && git -C "$DEPLOY_DIR/.." rev-parse --verify --quiet "${app_tag}^{commit}" >/dev/null 2>&1 \
+       && ! git -C "$DEPLOY_DIR/.." diff --quiet --diff-filter=A "$mig_tag" "$app_tag" -- db/versions/ 2>/dev/null; then
+        err "migration 태그($mig_tag)와 앱 태그($app_tag) 사이에 db/ 변경이 있다 —"
+        err "구 migration 이미지로는 앱이 기대하는 revision 을 모른다."
+        err "먼저 DEPLOY=1 deployment/scripts/rebuild-image.sh migration $ENV 로 스키마 이미지부터 배포할 것."
+        exit 1
     fi
 
     # helm upgrade --install 로 통합: release 없으면 install, 있으면 upgrade.
@@ -547,7 +662,9 @@ patch_nextauth_url() {
         warn "admin-ui ALB DNS 를 3분 내 확보 실패 — NEXTAUTH_URL 수동 패치 필요"
         return
     fi
-    local nextauth_url="http://${alb_dns}"
+    # scheme 은 차트가 렌더한 값을 그대로 쓴다 — HTTPS 리스너(https://)인데
+    # http:// 를 넣으면 ssl-redirect + Secure 쿠키 조합에서 콜백이 깨진다.
+    local nextauth_url="${rendered%%://*}://${alb_dns}"
     info "NEXTAUTH_URL=${nextauth_url}"
     # 현재 deployment 의 NEXTAUTH_URL 과 비교해 필요할 때만 업데이트 (idempotent)
     local current
@@ -571,14 +688,28 @@ patch_nextauth_url() {
     #    0045 를 적용 못 함). 수동 upgrade 는 `--set migration.enabled=true` 를 함께
     #    주거나 install-eks.sh 를 다시 쓸 것(비-reuse 경로는 chart 기본값 true 로
     #    자동 복구된다).
-    helm upgrade "$RELEASE_NAME" "$CHART_DIR" \
-        --namespace "$NAMESPACE" \
-        --values "$VALUES_FILE" \
-        "${SET_ARGS[@]}" \
-        --set "adminUi.nextauthUrl=${nextauth_url}" \
-        --set "migration.enabled=false" \
-        --timeout 5m \
-        --wait
+    # DEBUG_MODE 계약("실패 시 rollback 하지 않고 리소스 유지")은 이 경로에도
+    # 적용한다 — 여기만 --atomic 을 붙이면 디버깅용 리소스가 롤백으로 사라진다.
+    if [ "${DEBUG_MODE:-false}" = "true" ]; then
+        helm upgrade "$RELEASE_NAME" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            --values "$VALUES_FILE" \
+            "${SET_ARGS[@]}" \
+            --set "adminUi.nextauthUrl=${nextauth_url}" \
+            --set "migration.enabled=false" \
+            --timeout 5m --wait
+    else
+        helm upgrade "$RELEASE_NAME" "$CHART_DIR" \
+            --namespace "$NAMESPACE" \
+            --values "$VALUES_FILE" \
+            "${SET_ARGS[@]}" \
+            --set "adminUi.nextauthUrl=${nextauth_url}" \
+            --set "migration.enabled=false" \
+            "${ROLLBACK_FLAG:---atomic}" \
+            --cleanup-on-fail \
+            --timeout 5m \
+            --wait
+    fi
     ok "admin-ui NEXTAUTH_URL 패치 완료"
 }
 
@@ -603,6 +734,11 @@ main() {
 
     check_prereqs
 
+    # kubeconfig 를 먼저 맞춘다 — 이전 context(dev/prod 혼동)로 helm status 를 조회하면
+    # 릴리스 유무를 잘못 판단한다(R24-N10).
+    read_tf_outputs
+    setup_kubeconfig
+
     # 이미 설치되어 있으면 upgrade, 없으면 install
     if helm status "$RELEASE_NAME" -n "$NAMESPACE" >/dev/null 2>&1; then
         HELM_ACTION="upgrade"
@@ -612,8 +748,6 @@ main() {
         info "신규 설치 모드"
     fi
 
-    read_tf_outputs
-    setup_kubeconfig
     ensure_namespace
     ensure_observability
     ensure_cluster_secret_store

@@ -30,17 +30,22 @@ locals {
   # DB_URL/REDIS_URL 을 secret env 로부터 조립한다 (k8s $(VAR) 치환의 ECS 판).
   services = {
     gateway-proxy = {
-      port    = 8000
-      image   = "gateway-proxy"
-      alb     = true
+      port  = 8000
+      image = "gateway-proxy"
+      alb   = true
       # ALB 헬스체크는 k8s readinessProbe 역할 — /health 는 liveness 라
       # 의존성 장애에도 200 이다(restart cascade 회피). 엄격한 /health/ready
       # 로 잡아야 DB_DEGRADED(fail-closed 계약) 태스크가 로테이션에서 빠진다.
       # Redis 단독 열화는 /health/ready 도 200 — 폴백 스택이 서빙을 유지한다.
-      health  = "/health/ready"
-      db      = true
-      redis   = true
-      command = "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${WORKERS:-4}"
+      health = "/health/ready"
+      db     = true
+      redis  = true
+      # command 오버라이드는 Dockerfile CMD(그 안의 --timeout-graceful-shutdown)를
+      # 덮어쓴다 — 여기에 상한을 명시하지 않으면 열린 스트림이 있을 때 uvicorn 이
+      # 무한 대기하고 stopTimeout(60s) SIGKILL 이 lifespan drain 보다 먼저 온다
+      # (R24-S5r2). 예산: 60 = 15 graceful + 40 lifespan drain + 5 버퍼.
+      # ECS 는 deregistration(기본 300s)이 SIGTERM 전에 스트림을 비우므로 15s 면 충분.
+      command = "exec uvicorn app.main:app --host 0.0.0.0 --port 8000 --workers $${WORKERS:-4} --timeout-graceful-shutdown $${UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT:-15}"
     }
     admin-api = {
       port    = 8080
