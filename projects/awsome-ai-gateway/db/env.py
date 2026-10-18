@@ -103,6 +103,25 @@ else:
 # enum split (0008 ALTER TYPE ADD VALUE must COMMIT before 0009 INSERTs use the
 # new value, else PostgreSQL raises "unsafe use of new value of enum type").
 # Safe here because every migration is idempotent (IF NOT EXISTS / ON CONFLICT).
+
+# Session-level timeouts (env-overridable). Three failure directions matter:
+#   * lock_timeout — a migration that cannot take its lock within the budget
+#     FAILS instead of queueing. Queued DDL is dangerous: while ALTER TABLE on
+#     usage_logs waits for a long analytics query, every subsequent gateway
+#     INSERT queues behind it and the write path stalls. Failing fast leaves
+#     alembic_version at the last committed migration, and every script is
+#     idempotent, so re-running the Job resumes cleanly.
+#   * statement_timeout — a runaway backfill on a big table fails instead of
+#     holding its transaction (and locks) open indefinitely. Generous default;
+#     real backfills are either metadata-only or small-table.
+#   * idle_in_transaction_session_timeout — a hung migration must not hold its
+#     locks forever; without this a stalled script pins the write path until a
+#     human kills the backend.
+MIGRATION_LOCK_TIMEOUT = os.getenv("DB_MIGRATION_LOCK_TIMEOUT", "60s")
+MIGRATION_STATEMENT_TIMEOUT = os.getenv("DB_MIGRATION_STATEMENT_TIMEOUT", "15min")
+MIGRATION_IDLE_TX_TIMEOUT = os.getenv("DB_MIGRATION_IDLE_TX_TIMEOUT", "10min")
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=db_url,
@@ -121,7 +140,16 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations() -> None:
-    engine = create_async_engine(db_url)
+    engine = create_async_engine(
+        db_url,
+        connect_args={
+            "server_settings": {
+                "lock_timeout": MIGRATION_LOCK_TIMEOUT,
+                "statement_timeout": MIGRATION_STATEMENT_TIMEOUT,
+                "idle_in_transaction_session_timeout": MIGRATION_IDLE_TX_TIMEOUT,
+            }
+        },
+    )
     async with engine.connect() as conn:
         await conn.run_sync(do_run_migrations)
     await engine.dispose()

@@ -38,8 +38,22 @@ SCHEMAS="auth model budget usage audit notification chat_agent public"
 if [ -n "${DB_MASTER_PASSWORD:-}" ]; then
     export PGPASSWORD="$DB_MASTER_PASSWORD"
 fi
-# password 없는 connection string (user@host:port/db?sslmode=require)
-MASTER_URL_NO_PASS=$(echo "$MASTER_URL" | sed 's|://[^:]*:[^@]*@|://'"${DB_MASTER_USER:-postgres_admin}"'@|')
+# password 없는 connection string — URL 의 user 를 **보존**한다. 예전엔
+# ${DB_MASTER_USER:-postgres_admin} 으로 덮어썼는데, Secret 의 user 와 URL 의
+# user 가 다르면(예: URL 은 postgres, env 는 미주입) 조용히 잘못된 계정으로
+# 접속을 시도해 인증 실패가 원인 불명으로 보인다. 비밀번호에 `:` 가 섞여도
+# [^@]* 가 흡수한다. (`@` 를 포함하는 비밀번호는 RDS 관리형 비밀번호 문자셋에서
+# 제외 — env.py 의 리댁션 주석과 같은 근거.)
+MASTER_URL_NO_PASS=$(echo "$MASTER_URL" | sed 's|://\([^:]*\):[^@]*@|://\1@|')
+
+# psql 공통 옵션:
+#   -X          — ~/.psqlrc 를 읽지 않는다. Job 의 appuser 홈은 깨끗하지만 운영자가
+#                 이 스크립트를 손으로 재실행할 때 개인 psqlrc 가 개입하는 것을 막는다.
+#   PGOPTIONS   — init SQL/GRANT 단계에도 lock_timeout 을 건다. 앱이 도는 중인 배포에서
+#                 DDL 이 락 큐에 서면 그 뒤의 앱 쿼리가 전부 대기한다 — 큐잉보다 빠른 실패가
+#                 낫다(모든 SQL 은 멱등이라 Job 재시도로 재개된다).
+PSQL_OPTS="-X -v ON_ERROR_STOP=1"
+export PGOPTIONS="-c lock_timeout=${DB_MIGRATION_LOCK_TIMEOUT:-60s}${PGOPTIONS:+ $PGOPTIONS}"
 
 if [ -n "$MASTER_URL" ]; then
     echo "[migration] cloud mode — DB_MASTER_URL detected, applying init SQL"
@@ -56,28 +70,46 @@ if [ -n "$MASTER_URL" ]; then
     for f in /app/init/*.sql; do
         [ -f "$f" ] || continue
         echo "[migration]   applying $(basename "$f")"
-        psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -f "$f"
+        # shellcheck disable=SC2086  # PSQL_OPTS 는 플래그 목록 — 단어분리가 의도
+        psql "$MASTER_URL_NO_PASS" $PSQL_OPTS -f "$f"
     done
 
     if [ -n "$APP_USER" ] && [ -n "$APP_PASSWORD" ]; then
         echo "[migration] creating/updating application user '$APP_USER'"
-        psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 <<EOSQL
-DO \$\$ BEGIN
-    IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = '${APP_USER}') THEN
-        CREATE ROLE "${APP_USER}" WITH LOGIN PASSWORD '${APP_PASSWORD}';
-    ELSE
-        ALTER ROLE "${APP_USER}" WITH LOGIN PASSWORD '${APP_PASSWORD}';
-    END IF;
-END \$\$;
+        # ⚠️ 비밀값 인용 규칙 — 아래 방법들이 전부 다른 이유로 실패한다:
+        #   * 셸 치환 그대로 SQL 에 박기(이전 코드): 비밀번호에 ' 가 있으면 DO 블록 파괴
+        #   * psql -v app_password=…: 비밀번호가 프로세스 argv 에 노출된다 (ps /proc/PID/cmdline)
+        #   * psql \set app_password …: 공백 포함 값이 분리 인자로 깨진다
+        #   * DO $$ 블록: 본문이 달러인용이라 내부에 psql 변수 치환 불가 + 비밀번호 속
+        #     '$$' 가 블록을 조기 종료시킨다
+        # 그래서 셸에서 SQL 리터럴/식별자 이스케이프를 직접 하고(표준 SQL 에는
+        # ' 와 " 각각의 두배화만이 유일한 이스케이프 규칙), 결과를 리터럴 SQL 로
+        # stdin 에 흘린다 — argv 노출 없음, 전 문자셋 지원, DO 블록 불요(\gexec 분기).
+        APP_USER_L="'$(printf '%s' "$APP_USER" | sed "s/'/''/g")'"
+        APP_PASSWORD_L="'$(printf '%s' "$APP_PASSWORD" | sed "s/'/''/g")'"
+        # shellcheck disable=SC2086  # PSQL_OPTS 단어분리 의도
+        psql "$MASTER_URL_NO_PASS" $PSQL_OPTS <<EOSQL
+SELECT format('CREATE ROLE %I WITH LOGIN PASSWORD %L', $APP_USER_L, $APP_PASSWORD_L)
+ WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = $APP_USER_L)
+\gexec
+SELECT format('ALTER ROLE %I WITH LOGIN PASSWORD %L', $APP_USER_L, $APP_PASSWORD_L)
+ WHERE EXISTS (SELECT FROM pg_roles WHERE rolname = $APP_USER_L)
+\gexec
 EOSQL
 
         echo "[migration] granting privileges on all schemas to '$APP_USER'"
+        # GRANT 도 같은 방식 — schema 는 고정 whitelist 라 리터럴 두배화 불필요,
+        # APP_USER 만 식별자 이스케이프 한다 (" 포함 사용자명 방어).
+        APP_USER_I="\"$(printf '%s' "$APP_USER" | sed 's/"/""/g')\""
         for schema in $SCHEMAS; do
-            psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -c "GRANT USAGE, CREATE ON SCHEMA \"$schema\" TO \"$APP_USER\";"
-            psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -c "GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA \"$schema\" TO \"$APP_USER\";"
-            psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -c "GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA \"$schema\" TO \"$APP_USER\";"
-            psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA \"$schema\" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO \"$APP_USER\";"
-            psql "$MASTER_URL_NO_PASS" -v ON_ERROR_STOP=1 -c "ALTER DEFAULT PRIVILEGES IN SCHEMA \"$schema\" GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO \"$APP_USER\";"
+            # shellcheck disable=SC2086  # PSQL_OPTS 단어분리 의도
+            psql "$MASTER_URL_NO_PASS" $PSQL_OPTS <<EOSQL
+GRANT USAGE, CREATE ON SCHEMA "$schema" TO $APP_USER_I;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "$schema" TO $APP_USER_I;
+GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "$schema" TO $APP_USER_I;
+ALTER DEFAULT PRIVILEGES IN SCHEMA "$schema" GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO $APP_USER_I;
+ALTER DEFAULT PRIVILEGES IN SCHEMA "$schema" GRANT USAGE, SELECT, UPDATE ON SEQUENCES TO $APP_USER_I;
+EOSQL
         done
         echo "[migration]   privileges granted on schemas: $SCHEMAS"
     else
