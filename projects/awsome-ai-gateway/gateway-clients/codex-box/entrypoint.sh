@@ -71,6 +71,16 @@ fi
 # 272000 = GPT-5.6 context_window(Codex 메타데이터 실측). 상한 872000 은 컨텍스트 밴드
 # 과금 구간이라 기본값으로 열지 않는다 — 272K 초과분은 별도 밴드 단가로 청구된다.
 CONTEXT_WINDOW="${GW_CONTEXT_WINDOW:-272000}"
+case "$CONTEXT_WINDOW" in
+  ''|*[!0-9]*) echo "codex-box: GW_CONTEXT_WINDOW='$CONTEXT_WINDOW' 은 숫자여야 합니다" >&2; exit 2 ;;
+esac
+
+# TOML 문자열에 직접 들어가는 값 — " 나 개행이 섞이면 config.toml 이 깨진다.
+for v in "$GW_URL" "$ALIAS" "$PROVIDER_NAME"; do
+  case "$v" in
+    *\"*|*$'\n'*) echo "codex-box: gateway 좌표/모델명에 '\"' 나 개행은 허용되지 않습니다" >&2; exit 2 ;;
+  esac
+done
 
 echo "codex-box: plane=${PLANE} model=${ALIAS} context_window=${CONTEXT_WINDOW}" >&2
 

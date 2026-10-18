@@ -25,7 +25,13 @@ import urllib.request
 
 BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://api.litellm.ai").rstrip("/")
 PROVIDER_FILTER = os.environ.get("LITELLM_PROVIDER_FILTER", "bedrock_converse")
-PAGE_SIZE = int(os.environ.get("LITELLM_PAGE_SIZE", "100"))
+try:
+    PAGE_SIZE = int(os.environ.get("LITELLM_PAGE_SIZE", "100"))
+    if not (1 <= PAGE_SIZE <= 1000):
+        raise ValueError
+except ValueError:
+    # 잘못된 env 하나로 Lambda cold start 가 죽지 않게 기본값으로 폴백.
+    PAGE_SIZE = 100
 MAX_PAGES = 50  # 방어적 상한 — has_more 가 끊기지 않는 비정상 응답 대비
 REQUEST_TIMEOUT = 20
 

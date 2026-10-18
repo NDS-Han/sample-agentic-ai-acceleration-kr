@@ -44,7 +44,8 @@ else
 fi
 
 # ── 2. 게이트웨이 헬스 확인 (비치명적) ──────────────────────────
-code="$(curl -s -o /dev/null -w '%{http_code}' "${ANTHROPIC_BASE_URL%/}/health" || echo 000)"
+# --max-time 없이 두면 블랙홀 엔드포인트에서 이 스크립트가 hang 한다.
+code="$(curl -s -o /dev/null -w '%{http_code}' --connect-timeout 5 --max-time 10 "${ANTHROPIC_BASE_URL%/}/health" || echo 000)"
 if [ "$code" = "200" ]; then log "게이트웨이 health: 200 OK"; else err "게이트웨이 health 응답: $code (계속 진행하나 확인 권장)"; fi
 
 # ── 3. OIDC 로그인 (브라우저 PKCE) ──────────────────────────────

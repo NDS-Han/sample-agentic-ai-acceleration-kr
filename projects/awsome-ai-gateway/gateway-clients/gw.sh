@@ -129,7 +129,9 @@ except urllib.error.HTTPError as e:
     sys.exit(f"exchange 실패 HTTP {e.code}: {e.read().decode('utf-8','replace')[:500]}")
 PY
 )"
-      printf '%s' "$VK" > "$VK_FILE"; chmod 600 "$VK_FILE"
+      # 0600 을 처음부터 적용한다 — `>` 로 만들고 chmod 하면 그 사이 창에
+      # VK 파일이 umask 기본(대부분 644)으로 읽힌다.
+      (umask 077; printf '%s' "$VK" > "$VK_FILE"); chmod 600 "$VK_FILE" 2>/dev/null || true
       echo "✅ VK 발급·저장 ($VK_FILE). 길이 ${#VK}. (1시간 만료 — 만료 시 './gw.sh vk' 재실행)"
     else
       echo "gateway-cli 가 호스트에 없습니다. 설치: uv tool install --from <repo>/gateway-cli gateway-cli" >&2
