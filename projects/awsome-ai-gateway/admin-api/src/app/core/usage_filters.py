@@ -67,7 +67,7 @@ def _reporting_tz() -> ZoneInfo:
 
 # period 의 **모양**을 고정한다 — 정확히 4자리 연 + 2자리 월. `int()` 는 숫자인지만
 # 보므로 '26-08'(연 26) 이나 '2026-8' 을 통과시킨다(아래 참조).
-_PERIOD_RE = re.compile(r"^(\d{4})-(\d{2})$")
+_PERIOD_RE = re.compile(r"([0-9]{4})-([0-9]{2})")
 
 # 운영상 의미 있는 연 범위. 이 자산의 데이터는 2026 년부터 존재하고, 상한은
 # `datetime(year + 1, ...)` 이 MAXYEAR(9999)를 넘지 않도록 하는 역할도 겸한다
@@ -146,7 +146,9 @@ def period_to_utc_range(period: str) -> tuple[datetime, datetime]:
     `datetime(10000, 1, 1)` 이 되어 `datetime` 이 맨 `ValueError` 를 던진다 —
     ValidationError 가 아니므로 핸들러를 못 타고 **500** 이 됐다(실측).
     """
-    m = _PERIOD_RE.match(period) if isinstance(period, str) else None
+    # fullmatch + [0-9]: `match`+`$` 는 끝 개행('2026-08\n')을 통과시키고,
+    # `\d` 는 아라비아 숫자('٢٠٢٦-٠٨', int() 가 파싱해버림)를 통과시킨다.
+    m = _PERIOD_RE.fullmatch(period) if isinstance(period, str) else None
     if m is None:
         raise ValidationError(f"period must be 'YYYY-MM' (got {period!r})")
     year, month = int(m.group(1)), int(m.group(2))
@@ -178,7 +180,7 @@ def kst_period_range_filter(column: ColumnElement, period: str) -> ColumnElement
     return and_(column >= start_utc, column < end_utc)
 
 
-_DAY_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
+_DAY_RE = re.compile(r"([0-9]{4})-([0-9]{2})-([0-9]{2})")
 
 
 def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
@@ -193,7 +195,7 @@ def day_range_to_utc(start_day: str, end_day: str) -> tuple[datetime, datetime]:
     유효성은 `date.fromisoformat` 으로 확인하고 어긋나면 ValidationError → **400**.
     """
     for label, value in (("start", start_day), ("end", end_day)):
-        if not (isinstance(value, str) and _DAY_RE.match(value)):
+        if not (isinstance(value, str) and _DAY_RE.fullmatch(value)):
             raise ValidationError(f"{label} day must be 'YYYY-MM-DD' (got {value!r})")
     try:
         start_date = date.fromisoformat(start_day)

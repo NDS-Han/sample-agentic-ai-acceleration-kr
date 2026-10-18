@@ -2,8 +2,7 @@
 
 import { getTranslations } from 'next-intl/server';
 import type { AnalyticsFilterForm } from '@/types/api';
-import { adminAPI } from '@/lib/api-client';
-import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { LazyTokenMixDonut } from './LazyCharts';
 import { ErrorState } from '@/components/common/ErrorState';
 import type { TokenBreakdownData } from './TokenMixDonutClient';
@@ -20,9 +19,9 @@ interface AnalyticsAPIResponse {
 export async function TokenAnalysisCard({ filter, latestMonth }: TokenAnalysisCardProps) {
   const t = await getTranslations('analytics');
   // ROIMetricsCards 등과 **동일** buildAnalyticsQuery → 요청 메모이제이션으로 dedup.
-  const data = await adminAPI
-    .get<AnalyticsAPIResponse>('/admin/analytics', buildAnalyticsQuery(filter, latestMonth))
-    .catch(() => null);
+  const data = await fetchAnalyticsOnce<AnalyticsAPIResponse>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
 
   const tb = data?.token_breakdown;
   return (

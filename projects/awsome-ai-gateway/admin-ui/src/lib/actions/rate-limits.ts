@@ -7,7 +7,6 @@ import { revalidatePath } from 'next/cache';
 import { z } from 'zod';
 import { adminAPI } from '@/lib/api-client';
 import { RateLimitSetSchema } from '@/types/api';
-import { withRetry } from '@/lib/utils/retry';
 import { APIError } from '@/lib/utils/retry';
 import type { ActionResult } from './types';
 
@@ -28,9 +27,7 @@ export async function setRateLimitAction(formData: unknown): Promise<ActionResul
   const { target_id, scope, ...limits } = parsed.data;
 
   try {
-    await withRetry(() =>
-      adminAPI.put(`/admin/rate-limits/${encodeURIComponent(String(scope.toLowerCase()))}/${encodeURIComponent(String(target_id))}`, limits)
-    );
+    await adminAPI.put(`/admin/rate-limits/${encodeURIComponent(String(scope.toLowerCase()))}/${encodeURIComponent(String(target_id))}`, limits);
     // 편집 지점은 /users 패널 — 옛 /rate-limits 페이지는 리다이렉트다.
     revalidatePath('/users');
     return { success: true, data: undefined };
@@ -67,6 +64,25 @@ export async function getRateLimitStatusAction(
     const data = await adminAPI.get<RateLimitScopeStatusData>(
       `/admin/rate-limits/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`
     );
+    // 백엔드가 Decimal 을 JSON 문자열("5.00")로 직렬화한다 — 타입은 number 를
+    // 주장하지만 wire 는 string 이라 차트에서 v.toFixed() 가 TypeError 로
+    // 터진다(R25-S8). 경계에서 한 번 숫자로 정규화한다.
+    if (data.own) {
+      data.own = {
+        rpm: numOrNull(data.own.rpm),
+        tpm: numOrNull(data.own.tpm),
+        cpm: numOrNull(data.own.cpm),
+        cph: numOrNull(data.own.cph),
+      };
+    }
+    if (data.inherited) {
+      data.inherited = {
+        rpm: numOrNull(data.inherited.rpm),
+        tpm: numOrNull(data.inherited.tpm),
+        cpm: numOrNull(data.inherited.cpm),
+        cph: numOrNull(data.inherited.cph),
+      };
+    }
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -79,7 +95,7 @@ export async function deleteRateLimitAction(
   scopeId: string
 ): Promise<ActionResult<void>> {
   try {
-    await withRetry(() => adminAPI.delete(`/admin/rate-limits/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`));
+    await adminAPI.delete(`/admin/rate-limits/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}`);
     revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
@@ -88,6 +104,15 @@ export async function deleteRateLimitAction(
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Decimal→JSON 문자열 등을 number|null 로. 파싱 불가는 null (0 으로 접지 않는다). */
+function numOrNull(v: unknown): number | null {
+  if (v == null) return null;
+  // Number("") === 0 — 빈 문자열을 0 으로 오인하면 "한도 미설정"이 "$0"으로 보인다.
+  if (typeof v === 'string' && v.trim() === '') return null;
+  const n = typeof v === 'number' ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
 
 function toErrorMessage(err: unknown): string {
   if (err instanceof APIError) {

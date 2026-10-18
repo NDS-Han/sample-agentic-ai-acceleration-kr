@@ -44,10 +44,10 @@ const NAV_ITEMS: NavItemDef[] = [
   {
     key: 'dashboard',
     href: '/',
-    // DEVELOPER 제외 — PAGE_PERMISSIONS['/'] 가 ADMIN/TEAM_LEADER 뿐이라, 예전엔
-    // DEVELOPER 가 /my 에서 이 메뉴를 보고 눌러도 미들웨어가 /403 으로 튕겼다
-    // (페이지 접근 권한은 그대로다. 못 여는 링크를 안 보여 주는 것뿐).
-    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
+    // ADMIN 전용 — 대시보드가 부르는 API 가 전부 require_admin 이라 TEAM_LEADER
+    // 에게는 전 카드 '—'/ErrorState 의 죽은 화면이 된다(PAGE_PERMISSIONS['/'] 와
+    // 동일하게 좁힘, R25-S9).
+    allowedRoles: [UserRoleConst.ADMIN],
     icon: <LayoutDashboard size={18} />,
   },
   {

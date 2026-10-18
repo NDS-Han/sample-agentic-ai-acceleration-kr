@@ -79,7 +79,10 @@ class AdminAPIClient {
         `admin-api path was normalized differently (traversal/truncation): ${normalized}`,
       );
     }
-    if (!normalized.startsWith('/admin/')) {
+    // /admin/ 접두 밖의 허용 경로 — CLI 다운로드 목록은 admin-api 의 /cli 라우터다.
+    //    정확히 이 경로만 예외로 둔다(와일드카드/접두 허용은 탈출 경로를 다시 연다).
+    const allowedOutsideAdmin = normalized === '/cli/downloads';
+    if (!normalized.startsWith('/admin/') && !allowedOutsideAdmin) {
       throw new APIError(
         400,
         'INVALID_PATH',
@@ -114,7 +117,10 @@ class AdminAPIClient {
         //    admin-api 는 이제 {"error": {...}} 로 정규화하지만, 게이트웨이/프록시
         //    계층이 원본 422 를 그대로 흘릴 수 있으니 클라이언트에서도 방어한다.
         detail?: unknown;
-        error?: { code?: string; message?: string };
+        // error.details — 409 confirmation_required 의 영향 목록(warnings) 등
+        //    구조화된 부가 정보. top-level detail 만 넘기면 이 정보가 유실돼
+        //    확인 다이얼로그가 영향받는 사용자/앱을 표시하지 못한다(R25-S7).
+        error?: { code?: string; message?: string; details?: unknown };
       } = {};
       try {
         errorBody = (await response.json()) as typeof errorBody;
@@ -142,7 +148,7 @@ class AdminAPIClient {
         response.status,
         errorBody.error_code ?? errorBody.error?.code ?? 'UNKNOWN_ERROR',
         message,
-        detailText,
+        errorBody.error?.details ?? detailText,
       );
     }
 

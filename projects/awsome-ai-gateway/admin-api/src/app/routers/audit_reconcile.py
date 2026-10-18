@@ -109,12 +109,26 @@ async def invocation_log_config(
         "query_timeout_s": settings.BEDROCK_INVOCATION_LOG_QUERY_TIMEOUT_S,
         "max_records": settings.BEDROCK_INVOCATION_LOG_MAX_RECORDS,
         # plane 별 캡처 여부 — UI 가 "Mantle 은 원래 없음" 을 설명할 수 있게 서버가 알려준다.
+        # R2-N6 — 예전엔 BEDROCK=True 하드코딩이라 BEDROCK_INVOCATION_LOG_PROVIDERS
+        # 설정과 모순됐다. 설정이 비면 필터 자체가 꺼져(=전부 캡처) reconcile 과
+        # 같은 규칙으로 계산한다.
         "capture_by_plane": {
-            "BEDROCK_RUNTIME_OPENAI": True,
-            "BEDROCK_MANTLE_OPENAI": False,
-            "BEDROCK_MANTLE": False,
-            "BEDROCK": True,
-            "OPENMODEL": False,
+            p: (
+                p in {
+                    s.strip().upper()
+                    for s in settings.BEDROCK_INVOCATION_LOG_PROVIDERS.split(",")
+                    if s.strip()
+                }
+                if settings.BEDROCK_INVOCATION_LOG_PROVIDERS.strip()
+                else True
+            )
+            for p in (
+                "BEDROCK_RUNTIME_OPENAI",
+                "BEDROCK_MANTLE_OPENAI",
+                "BEDROCK_MANTLE",
+                "BEDROCK",
+                "OPENMODEL",
+            )
         },
     }
 
@@ -150,7 +164,10 @@ async def invocation_log_reconcile(
             UsageLog.is_streaming,
         )
         .where(UsageLog.requested_at >= core_start, UsageLog.requested_at <= core_end)
-        .order_by(UsageLog.requested_at.asc())
+        # R2-N6 — 같은 requested_at 을 가진 행들의 절단 위치가 DB 가 정하는
+        # 임의 순서라, 잘린 행의 로그가 orphan 오탐으로 남을 수 있다. request_id
+        # 보조 정렬로 절단 경계를 결정적으로 만든다.
+        .order_by(UsageLog.requested_at.asc(), UsageLog.request_id.asc())
         .limit(row_limit + 1)  # +1 로 "잘렸는지" 를 감지한다
     )
     if model_alias:
@@ -185,6 +202,26 @@ async def invocation_log_reconcile(
     except InvocationLogQueryError as exc:
         raise HTTPException(502, str(exc)) from exc
 
+    settings = get_settings()
+
+    # row_limit 에서 잘렸다면 잘린 지점 이후의 로그는 orphan 판정에 쓰면 안 된다 —
+    # core 창을 마지막으로 읽은 행의 requested_at 까지로 당긴다(R25-S4).
+    # 단 같은 requested_at 을 공유하는 읽히지 않은 형제 행의 로그가 여전히 orphan
+    # 오탐이 되므로, 경계 타임스탬프 그룹 전체를 orphan 판정에서 제외한다(R2-N6).
+    effective_core_end = core_end
+    if rows_truncated and db_rows:
+        effective_core_end = db_rows[-1].requested_at - timedelta(microseconds=1)
+        if effective_core_end.tzinfo is None:
+            effective_core_end = effective_core_end.replace(tzinfo=timezone.utc)
+
+    # 설정된 log group 이 실제로 담는 provider 집합 — 다른 계정/리전에서 실행되는
+    # provider 행은 id 가 있어도 missing 이 아니라 other_region 으로 분류한다.
+    captured_providers = frozenset(
+        p.strip().upper()
+        for p in settings.BEDROCK_INVOCATION_LOG_PROVIDERS.split(",")
+        if p.strip()
+    ) or None
+
     report = reconcile(
         refs,
         window,
@@ -193,7 +230,10 @@ async def invocation_log_reconcile(
         log_group=svc.log_group,
         region=svc.region,
         core_start=core_start,
-        core_end=core_end,
+        core_end=effective_core_end,
+        captured_providers=captured_providers,
+        # alias/client 필터는 usage 측에만 걸려 로그 측이 전부 orphan 으로 오탐된다
+        suppress_orphans=bool(model_alias or client),
     )
     payload = report.as_dict()
     payload["core_start"] = core_start.isoformat()

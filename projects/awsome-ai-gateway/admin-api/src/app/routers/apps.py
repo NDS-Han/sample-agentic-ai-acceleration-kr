@@ -15,7 +15,14 @@ from app.core.auth import CurrentUser, require_admin
 from app.core.clients import VALID_CLIENTS as _VALID_CLIENTS
 from app.core.db import get_db_session
 from app.core.exceptions import NotFoundError, ValidationError
-from app.models.auth import User, UserAllowedClient
+from app.models.auth import (
+    Department,
+    OrgAllowedClient,
+    Team,
+    TeamAllowedClient,
+    User,
+    UserAllowedClient,
+)
 from app.models.model import ModelAlias, ModelStatus, Provider
 
 logger = structlog.get_logger()
@@ -222,20 +229,66 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
     default_model: str | None = rp_row[0] if rp_row else None
     web_search_enabled = bool(rp_row[1]) if rp_row else False
 
-    # allowed_users: effective policy 의미(fail-open)에 맞춘다.
-    #   명시 행이 없는 사용자 = 전체 앱 허용 → 이 client 도 허용에 포함해야 한다.
-    #   행이 있는 사용자 = 이 client 행이 있을 때만 허용.
+    # allowed_users: **effective policy 와 같은 우선순위**를 SQL 로 미러링한다
+    # (gateway auth_service / effective_policy_service.get_for_user):
+    #   user_allowed_clients 행이 있으면 그 집합이 전부(팀/조직 정책은 대체 아닌 치환)
+    #   → 없으면 team_allowed_clients → 없으면 org( team→dept→org 경유 )
+    #   → 어디에도 없으면 제한 없음(fail-open)으로 이 client 도 허용.
+    # 예전엔 user 행만 봐서, 팀이 {claude-code} 로 제한된 멤버가 "cowork 허용" 으로
+    # 표시됐다 — 게이트웨이는 거부하는데 화면은 허용이라는 거짓 표시(R25-S3).
+    has_uac = exists().where(UserAllowedClient.user_id == User.id)
     explicit_row = exists().where(
         and_(
             UserAllowedClient.user_id == User.id,
             UserAllowedClient.client == client,
         )
     )
-    no_restriction = ~exists().where(UserAllowedClient.user_id == User.id)
+    has_tac = exists().where(TeamAllowedClient.team_id == User.team_id)
+    tac_has_client = exists().where(
+        and_(
+            TeamAllowedClient.team_id == User.team_id,
+            TeamAllowedClient.client == client,
+        )
+    )
+    # 팀의 org 정책 — team→dept→org 경로. dept 없는 팀이면 NULL → 제한 없음.
+    # .correlate(User) 필수(R25-r2 M1): 이 서브쿼리가 exists() 안에 중첩되면
+    # 자동 상관이 바깥 EXISTS select 까지만 닿아서, 최종 SQL 이 `FROM teams JOIN
+    # departments, users` 로 users 를 다시 FROM 에 넣는다 → 같은 팀 사용자가
+    # 2명 이상이면 스칼라 서브쿼리가 다중 행을 반환해 CardinalityViolationError(500).
+    team_org_id = (
+        select(Department.org_id)
+        .select_from(Team)
+        .join(Department, Department.id == Team.dept_id)
+        .where(Team.id == User.team_id)
+        .correlate(User)
+        .scalar_subquery()
+    )
+    has_oac = exists().where(OrgAllowedClient.org_id == team_org_id)
+    oac_has_client = exists().where(
+        and_(
+            OrgAllowedClient.org_id == team_org_id,
+            OrgAllowedClient.client == client,
+        )
+    )
+    allowed_for_client = or_(
+        # 1) user 행이 있으면 이 client 행이 있을 때만 허용
+        and_(has_uac, explicit_row),
+        # 2) user 행 없음 + 팀 없음 → 제한 없음
+        and_(~has_uac, User.team_id.is_(None)),
+        # 3) user 행 없음 + 팀 정책 있음 → 팀 집합에 client 가 있을 때만
+        and_(~has_uac, User.team_id.isnot(None), has_tac, tac_has_client),
+        # 4) user·team 행 모두 없음 → org 집합(없으면 제한 없음)
+        and_(
+            ~has_uac,
+            User.team_id.isnot(None),
+            ~has_tac,
+            or_(~has_oac, oac_has_client),
+        ),
+    )
     uac_stmt = (
         select(User.id, User.email, explicit_row.label("explicit"))
         .where(User.is_active.is_(True))
-        .where(or_(no_restriction, explicit_row))
+        .where(allowed_for_client)
         .order_by(User.email)
     )
     uac_result = await session.execute(uac_stmt)

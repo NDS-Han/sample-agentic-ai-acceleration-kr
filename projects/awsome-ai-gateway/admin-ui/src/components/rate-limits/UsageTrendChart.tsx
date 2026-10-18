@@ -121,7 +121,10 @@ export function UsageTrendChart({ scope, scopeId, limits }: UsageTrendChartProps
     }));
   }, [trend]);
 
-  const limit = limits[metric] ?? null;
+  // 방어: 백엔드 Decimal 이 문자열로 올 수 있다 — 비교/포맷 전에 숫자로 강제
+  // ("5.00" > 0 은 true 인데 "5.00".toFixed 는 TypeError).
+  const rawLimit = limits[metric] ?? null;
+  const limit = typeof rawLimit === 'number' ? rawLimit : rawLimit != null ? Number(rawLimit) : null;
   const hasData = data.some((p) => p[metric] > 0);
 
   return (

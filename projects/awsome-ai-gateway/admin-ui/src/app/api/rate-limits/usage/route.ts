@@ -10,6 +10,12 @@ import { fetchUpstream } from '@/lib/utils/upstream';
 
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 
+// R25-N-C11 — scope/scope_id 는 URL 세그먼트로 합쳐진다. encodeURIComponent('..')
+// 는 '..' 그대로라 `/usage/../x` 가 경로 정규화로 탈출한다 — cli-download 와 같은
+// 문자셋 화이트리스트로 먼저 거른다(scope 는 user|team|global, id 는 UUID 라
+// 영숫자+`-`/`_` 면 충분하다).
+const SAFE_SEGMENT = /^[a-z0-9_-]+$/i;
+
 export async function GET(req: NextRequest) {
   const jwt = (await cookies()).get('admin_jwt')?.value;
   const sp = req.nextUrl.searchParams;
@@ -17,6 +23,9 @@ export async function GET(req: NextRequest) {
   const scopeId = sp.get('scope_id') ?? '';
   if (!scope || !scopeId) {
     return NextResponse.json({ available: false, reason: 'missing params' }, { status: 400 });
+  }
+  if (!SAFE_SEGMENT.test(scope) || !SAFE_SEGMENT.test(scopeId)) {
+    return NextResponse.json({ available: false, reason: 'invalid params' }, { status: 400 });
   }
 
   const upstream = `${ADMIN_API_URL}/admin/rate-limits/usage/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}`;

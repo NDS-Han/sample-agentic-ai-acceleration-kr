@@ -124,6 +124,51 @@ def test_gateway_graceful_timeout_not_below_stream_idle():
         assert graceful >= idle, f"{values}: graceful({graceful}) < idleTimeout({idle})"
 
 
+def _chat_drain_budget() -> int:
+    """admin-api main.py 의 drain_chat_bg_tasks timeout 을 소스에서 읽는다."""
+    import re
+    src = (CHART.parents[2] / "admin-api" / "src" / "app" / "main.py").read_text()
+    m = re.search(r"drain_chat_bg_tasks\(\s*timeout\s*=\s*([\d.]+)", src)
+    assert m, "main.py 에 drain_chat_bg_tasks timeout 을 찾지 못했다"
+    return int(float(m.group(1)))
+
+
+@pytest.mark.parametrize("values", [
+    "values.yaml", "values-eks-fargate-dev.yaml",
+    "values-eks-fargate-prod.yaml", "values-eks-fargate-prod-loadtest.yaml",
+])
+def test_admin_api_grace_covers_prestop_plus_uvicorn_plus_chat_drain(values: str):
+    """R2-S3 — uvicorn graceful 상한 없이 SSE 가 열려 있으면 lifespan(drain) 진입 전
+    SIGKILL 되어 채팅 부분 답변이 유실된다. grace 는 preStop + uvicorn 상한 +
+    drain timeout + 여유를 커버해야 한다."""
+    docs = _render(values)
+    dep = _deployment(docs, "admin-api")
+    spec = dep["spec"]["template"]["spec"]
+    grace = spec["terminationGracePeriodSeconds"]
+
+    prestop = 0
+    lifecycle = spec["containers"][0].get("lifecycle") or {}
+    cmd = (((lifecycle.get("preStop") or {}).get("exec") or {}).get("command")) or []
+    joined = " ".join(str(c) for c in cmd)
+    if "sleep" in joined:
+        prestop = int(joined.split("sleep")[-1].strip().strip("; "))
+    assert prestop == 10, f"admin-api preStop 이 {prestop}s — 산식 주석과 어긋남"
+
+    env = _container_env(dep)
+    graceful = int(env["UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT"])
+    assert graceful > 0, "graceful 상한이 없으면 lifespan 진입이 무한 대기된다"
+    drain = _chat_drain_budget()
+    # R3-N7 — 산식에 audit flush 예산(10s)이 빠져 있었다. values 주석의
+    # 산식(preStop+graceful+drain+audit+여유)과 테스트 산식을 일치시킨다.
+    audit_flush = 10
+    assert grace >= prestop + graceful + drain + audit_flush + 5, (
+        f"{values}: terminationGracePeriodSeconds({grace}) < "
+        f"preStop({prestop}) + graceful({graceful}) + drain({drain}) "
+        f"+ audit({audit_flush}) + 5 — "
+        "SIGKILL 이 채팅 drain 보다 먼저 와 부분 답변이 유실된다"
+    )
+
+
 # --------------------------------------------------------------------------
 # S1 — ExternalSecret 은 Orphan (upgrade 마다 Secret 삭제/재생성 금지)
 # --------------------------------------------------------------------------

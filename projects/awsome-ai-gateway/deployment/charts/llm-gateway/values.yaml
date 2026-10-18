@@ -616,7 +616,11 @@ adminApi:
     enabled: true
     minAvailable: 1
 
-  terminationGracePeriodSeconds: 30
+  # 종료 예산 산식(R2-S3): preStop(10) + uvicorn graceful-shutdown(10, env
+  # UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT) + drain_chat_bg_tasks(15) + audit flush(~10)
+  # + 여유(5) = 50. uvicorn 상한이 없으면 열린 SSE 가 lifespan 진입 자체를 막아
+  # 롤아웃 시 drain 이 돌기 전에 SIGKILL 된다(부분 답변 미영속화 회귀).
+  terminationGracePeriodSeconds: 50
 
   # liveness 는 /health (프로세스 alive 만 확인). readiness/startup 은 /health/ready
   # (DB+Redis 포함). DB 포화 시 pod kill 방지.
@@ -657,7 +661,13 @@ adminApi:
   # 새 설정을 넣을 때 차트에 구조를 추가할 필요가 없다.
   env:
     LOG_LEVEL: "INFO"
-    WORKERS: "2"
+    # 워커 수는 Dockerfile CMD 가 --workers 1 로 고정(_StreamRelay 가 프로세스
+    # 로컬). settings.WORKERS 는 앱이 읽지 않는다 — 오인 방지로 1로 맞춘다.
+    WORKERS: "1"
+    # uvicorn --timeout-graceful-shutdown — 위 terminationGracePeriodSeconds 산식
+    # 과 짝(10 preStop + 이 값 + 15 drain + 10 audit + 5 여유). 값을 바꾸면 grace 도
+    # 같은 산식으로 조정할 것.
+    UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT: "10"
     DEV_LOGIN_ENABLED: "false"  # production에선 반드시 false
     DEFAULT_USER_BUDGET_USD: "1000"
     # ── Bedrock invocation log 감사 대조 (기본 OFF) ──

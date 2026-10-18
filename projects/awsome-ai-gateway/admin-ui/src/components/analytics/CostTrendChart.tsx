@@ -1,8 +1,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import type { AnalyticsFilterForm } from '@/types/api';
-import { adminAPI } from '@/lib/api-client';
-import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { CostTrendCard } from '@/components/dashboard/CostTrendCard';
 import { ErrorState } from '@/components/common/ErrorState';
 
@@ -22,9 +21,9 @@ interface AnalyticsAPIResponse {
 }
 
 export async function CostTrendChart({ filter, latestMonth }: CostTrendChartProps) {
-  const data = await adminAPI
-    .get<AnalyticsAPIResponse>('/admin/analytics', buildAnalyticsQuery(filter, latestMonth))
-    .catch(() => null);
+  const data = await fetchAnalyticsOnce<AnalyticsAPIResponse>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
 
   const trends = (data?.trends ?? []).map((t) => ({
     date: t.date,

@@ -12,6 +12,9 @@ import { fetchUpstream } from '@/lib/utils/upstream';
 const ADMIN_API_URL = process.env.ADMIN_API_URL || 'http://admin-api:8080';
 const WINDOWS = new Set(['1h', '6h', '24h', '7d']);
 
+// R25-N-C11 — usage 라우트와 같은 이유로 세그먼트 문자셋을 먼저 거른다.
+const SAFE_SEGMENT = /^[a-z0-9_-]+$/i;
+
 export async function GET(req: NextRequest) {
   const jwt = (await cookies()).get('admin_jwt')?.value;
   const sp = req.nextUrl.searchParams;
@@ -20,6 +23,9 @@ export async function GET(req: NextRequest) {
   const window = WINDOWS.has(sp.get('window') ?? '') ? sp.get('window')! : '24h';
   if (!scope || !scopeId) {
     return NextResponse.json({ available: false, reason: 'missing params' }, { status: 400 });
+  }
+  if (!SAFE_SEGMENT.test(scope) || !SAFE_SEGMENT.test(scopeId)) {
+    return NextResponse.json({ available: false, reason: 'invalid params' }, { status: 400 });
   }
 
   const upstream = `${ADMIN_API_URL}/admin/rate-limits/usage-trend/${encodeURIComponent(scope)}/${encodeURIComponent(scopeId)}?window=${window}`;

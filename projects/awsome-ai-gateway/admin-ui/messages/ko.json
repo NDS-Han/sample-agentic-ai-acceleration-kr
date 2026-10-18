@@ -102,6 +102,7 @@
     "usageThisMonthDesc": "USD 기준 당월 누적 비용(전체 사용자)",
     "fetchFailed": "집계 실패",
     "budgetUtilizationDesc": "전체 예산 대비 사용 비율",
+    "budgetNotConfigured": "설정된 예산 없음",
     "avgCostPerUser": "사용자당 평균비용",
     "avgCostPerUserDesc": "이번달 활성 사용자 {count}명 기준",
     "dailyAvg": "일 평균 소비",
@@ -125,6 +126,7 @@
     "name": "이름",
     "cost": "비용",
     "budgetSpend": "예산 소진",
+    "budgetSpendHint": "예산 소진율은 전체 앱 기준입니다 — 앱 필터가 켜져 있어도 비용 컬럼만 필터됩니다",
     "noBudgetSet": "예산 미설정",
     "noPeriods": "표시할 기간이 없습니다",
     "periodSelect": "기간 선택",
@@ -852,7 +854,9 @@
     "costSeriesOther": "기타",
     "item": "항목",
     "date": "날짜",
-    "invalidDateRange": "시작일이 종료일보다 늦습니다. 날짜 범위를 확인해주세요."
+    "invalidDateRange": "시작일이 종료일보다 늦습니다. 날짜 범위를 확인해주세요.",
+    "clientFilterLabel": "앱 필터 적용 중:",
+    "clientFilterClear": "필터 해제"
   },
   "analyticsModels": {
     "summaryMeta": "모델 {count}개 · 총 {cost}",
@@ -956,7 +960,9 @@
       "THROTTLE": "쓰로틀링"
     },
     "pageTitle": "내 사용량",
-    "teamBudgetApplied": "팀 예산이 적용됩니다 — 개인 월 한도가 없습니다. 적용 상한은 팀 리더에게 확인하세요."
+    "teamBudgetApplied": "팀 예산이 적용됩니다 — 개인 월 한도가 없습니다. 적용 상한은 팀 리더에게 확인하세요.",
+    "zeroBudget": "개인 예산 $0 — 모든 요청이 차단됩니다",
+    "zeroBudgetHint": "한도가 $0으로 설정되어 있습니다. 필요하면 팀 리더에게 한도 조정을 요청하세요."
   },
   "chat": {
     "biInsight": "BI Insight",
@@ -968,6 +974,9 @@
     "newChat": "새 대화",
     "newChatTooltip": "새 대화 시작 (기존 대화는 보존됩니다)",
     "sessionCreateFailed": "세션 생성 실패: {error}",
+    "historyLoadFailed": "대화 기록을 불러오지 못했습니다. 세션은 보존되어 있으니 잠시 후 다시 시도해 주세요.",
+    "analysisInProgress": "이전 분석이 아직 실행 중입니다. 중지한 뒤 다시 시도해 주세요.",
+    "analysisTimeout": "분석이 너무 오래 걸려 대기를 중단했습니다. 완료되면 대화 기록에 결과가 남습니다.",
     "newChatFailed": "새 대화 생성 실패: {error}",
     "sessionResetNotice": "세션이 만료되어 새 대화로 이어집니다. 이전 대화 내용은 새 세션에 공유되지 않으니 필요한 맥락을 다시 알려 주세요.",
     "inputPlaceholder": "메시지를 입력하세요...",

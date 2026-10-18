@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 import ipaddress
 import socket
@@ -520,7 +521,10 @@ class PriceSyncApplyRequest(BaseModel):
     """승인 후 적용할 alias 목록(명시 선택 — 자동 전체적용 금지)."""
 
     aliases: list[str] = Field(min_length=1)
-    source: str = "aws"  # "aws" | "litellm"
+    # Literal: 임의 문자열은 아래 _build_pricing_sync_service 의 else 분기로
+    # 조용히 AWS 로 폴백해, 운영자가 litellm 을 택했다고 믿는 동안 AWS 가격이
+    # 적용된다(R25-N11). 잘못된 값은 422 로 명시 거절.
+    source: Literal["aws", "litellm"] = "aws"
     #: preview 승인값(**필수**) — 카탈로그가 preview↔apply 사이에 바뀌면 운영자가
     #: 승인하지 않은 단가가 감사에 박힌다. 생략/빈 맵은 fail-closed(적용 없음).
     expected: dict[str, PriceSyncExpected] = Field(min_length=1)

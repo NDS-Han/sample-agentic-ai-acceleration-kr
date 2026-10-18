@@ -80,11 +80,18 @@ async def count_keys(
     svc: KeyService = request.app.state.key_service
     email_q = email.strip() if email else None
 
-    scoped_team_id: uuid.UUID | None
+    scoped_team_id: uuid.UUID | None = None
+    scoped_team_ids: list[uuid.UUID] | None = None
     if actor.role == UserRole.TEAM_LEADER:
-        if actor.team_id is None:
+        # 리더가 볼 수 있는 팀 = 소속 팀 + leader_user_id 로 리드하는 팀들.
+        # actor.team_id 만 쓰면 리드하는 다른 팀의 키가 count 에서 빠진다
+        # (analytics 의 _leader_allowed_team_ids 와 같은 규칙, R25-N7).
+        from app.services.analytics_service import _leader_allowed_team_ids
+
+        allowed = await _leader_allowed_team_ids(actor, session)
+        if not allowed:
             return KeyCountResponse(count=0)
-        scoped_team_id = actor.team_id
+        scoped_team_ids = list(allowed)
     else:
         scoped_team_id = team_id if team_id else None
 
@@ -92,6 +99,7 @@ async def count_keys(
         session,
         user_id=user_id if user_id else None,
         team_id=scoped_team_id,
+        team_ids=scoped_team_ids,
         status=status,
         email=email_q or None,
     )

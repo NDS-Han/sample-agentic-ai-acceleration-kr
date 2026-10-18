@@ -165,7 +165,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   // 리다이렉트는 상대 경로라 host 가 필요 없다(lib/redirect.ts). proto 는 아래 쿠키의
   // Secure 판정에 쓴다.
   const proto = request.headers.get('x-forwarded-proto') || 'http';
-  const redirectResponse = redirectRelative('/');
+  // '/' 는 ADMIN 전용(R25-S9) — TEAM_LEADER dev-login 은 /my 로 랜딩시켜야
+  // 401/403 루프 없이 셀프 페이지에 도착한다(R2-N7).
+  const redirectResponse = redirectRelative(role === UserRole.ADMIN ? '/' : '/my');
   redirectResponse.cookies.set('admin_jwt', token, {
     httpOnly: true,
     sameSite: 'lax',

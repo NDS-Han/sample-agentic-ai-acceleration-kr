@@ -44,17 +44,40 @@ SOURCE_PATH = Path(m.__file__)
 
 
 class _FakeBody:
-    """botocore StreamingBody 대역. SSE 라인을 하나씩 흘린다."""
+    """botocore StreamingBody 대역. SSE 라인을 하나씩 흘린다.
 
-    def __init__(self, lines: list[bytes], raise_at: int | None = None) -> None:
+    ``use_chunks`` 가 True 이면 ``iter_chunks`` 도 제공해 주 경로(청크 단위 +
+    개행 분할)를 시험하고, False 면 ``iter_lines`` 폴백 경로(개행이 벗겨진
+    라인 단위)를 시험한다 — 두 경로는 의미론이 달라 둘 다 덮어야 한다.
+    """
+
+    def __init__(
+        self,
+        lines: list[bytes],
+        raise_at: int | None = None,
+        use_chunks: bool = True,
+    ) -> None:
         self._lines = list(lines)
         self._raise_at = raise_at
+        self.use_chunks = use_chunks
 
+    # iter_chunks 는 조건부로만 존재시킨다 — hasattr 분기를 시험하려면
+    # 아예 메서드가 없어야 하므로 _FakeLinesBody(하단)로 분리했다.
     def iter_lines(self, chunk_size: int = 1024):  # noqa: ARG002 - 시그니처 호환
         for i, line in enumerate(self._lines):
             if self._raise_at is not None and i == self._raise_at:
                 raise ConnectionResetError("peer가 스트림 중간에 끊었다")
             yield line
+
+
+class _FakeChunksBody(_FakeBody):
+    """iter_chunks 제공 버전 — 각 라인에 개행을 붙여 청크로 흘린다."""
+
+    def iter_chunks(self, chunk_size: int = 1024):  # noqa: ARG002
+        for i, line in enumerate(self._lines):
+            if self._raise_at is not None and i == self._raise_at:
+                raise ConnectionResetError("peer가 스트림 중간에 끊었다")
+            yield line + b"\n"
 
 
 class _FakeClient:
@@ -100,11 +123,17 @@ async def _run(
     invoke_exc: Exception | None = None,
     raise_at: int | None = None,
     db_fail: bool = False,
+    use_chunks: bool = True,
 ) -> tuple[m._StreamRelay, list]:
     """producer 를 한 번 돌리고 (relay, 영속화된 statement 목록) 을 돌려준다."""
     import boto3
 
-    body = None if invoke_exc is not None else _FakeBody(lines or [], raise_at=raise_at)
+    if invoke_exc is not None:
+        body = None
+    elif use_chunks:
+        body = _FakeChunksBody(lines or [], raise_at=raise_at)
+    else:
+        body = _FakeBody(lines or [], raise_at=raise_at)
     monkeypatch.setattr(
         boto3, "client", lambda *_a, **_k: _FakeClient(body=body, exc=invoke_exc)
     )
@@ -141,6 +170,12 @@ def _events(relay: m._StreamRelay) -> list[tuple[str, dict]]:
     return out
 
 
+def _inserts(stmts: list) -> list:
+    """``_persist`` 는 이제 INSERT + 세션 메타데이터 UPDATE 두 문장을 실행한다 —
+    메시지 영속화는 INSERT 만 세어야 한다(R25-N-C8: 메타데이터 UPDATE 추가됨)."""
+    return [s for s in stmts if "INSERT INTO chat_agent.messages" in str(s)]
+
+
 def _frame(payload: dict) -> bytes:
     """AgentCore 가 흘리는 ``data: <json>`` 라인 한 줄.
 
@@ -167,7 +202,9 @@ async def test_the_fake_harness_actually_streams_and_persists(monkeypatch):
         monkeypatch, lines=[_text_frame("안녕"), b"", DONE_FRAME]
     )
     assert relay.frames, "프레임이 하나도 발행되지 않았다 — 하네스가 동작하지 않는다"
-    assert len(inserted) == 1, f"영속화가 정확히 1회여야 한다: {len(inserted)}"
+    assert len(_inserts(inserted)) == 1, (
+        f"메시지 영속화가 정확히 1회여야 한다: {len(_inserts(inserted))}"
+    )
     assert relay.done is True, "finally 의 relay.finish() 가 호출되지 않았다"
 
 
@@ -280,7 +317,7 @@ async def test_truncated_stream_is_reported_as_error(monkeypatch):
     # 스피너 정리·[SUGGESTIONS] 추출을 위해 done 은 여전히 필요하다.
     assert "done" in names, f"클라이언트가 pending 을 정리할 done 이 없다: {names}"
     # 부분 답변은 남기고, 잘렸다는 사실을 본문에도 남긴다(복원 화면 = 라이브 화면).
-    content = _bound(inserted[0])["c"]
+    content = _bound(_inserts(inserted)[0])["c"]
     assert "절반만 온 답변" in content, f"부분 답변이 유실됐다: {content!r}"
     assert "[오류]" in content, f"복원 화면에 절단 사실이 남지 않는다: {content!r}"
 
@@ -293,7 +330,7 @@ async def test_complete_stream_is_not_flagged_as_truncated(monkeypatch):
     names = [n for n, _ in _events(relay)]
     assert "error" not in names, f"정상 완료인데 에러를 보고했다: {names}"
     assert "done" in names
-    content = _bound(inserted[0])["c"]
+    content = _bound(_inserts(inserted)[0])["c"]
     assert content == "완결된 답변"
     assert "[오류]" not in content
 
@@ -331,8 +368,8 @@ async def test_exception_before_the_stream_still_persists_the_turn(monkeypatch):
     다시 죽는다 — 그래서 선언이 try 밖에 있어야 한다.
     """
     relay, inserted = await _run(monkeypatch, invoke_exc=RuntimeError("자격증명 없음"))
-    assert len(inserted) == 1, "예외 경로에서 assistant 턴이 통째로 사라졌다"
-    content = _bound(inserted[0])["c"]
+    assert len(_inserts(inserted)) == 1, "예외 경로에서 assistant 턴이 통째로 사라졌다"
+    content = _bound(_inserts(inserted)[0])["c"]
     assert "RuntimeError" in content and "자격증명 없음" in content, (
         f"실패 사실이 본문에 남지 않았다: {content!r}"
     )
@@ -346,8 +383,8 @@ async def test_exception_midstream_keeps_the_partial_answer(monkeypatch):
         lines=[_text_frame("여기까지는 사용자가 봤다"), _text_frame("이건 못 봤다")],
         raise_at=1,
     )
-    assert len(inserted) == 1
-    content = _bound(inserted[0])["c"]
+    assert len(_inserts(inserted)) == 1
+    content = _bound(_inserts(inserted)[0])["c"]
     assert "여기까지는 사용자가 봤다" in content, (
         f"화면에 이미 흘러간 부분 답변이 DB 에 없다: {content!r}"
     )
@@ -364,7 +401,7 @@ async def test_running_tool_calls_are_marked_failed_on_the_error_path(monkeypatc
         ],
         raise_at=2,
     )
-    tool_calls = json.loads(_bound(inserted[0])["tc"])
+    tool_calls = json.loads(_bound(_inserts(inserted)[0])["tc"])
     assert tool_calls[0]["status"] == "failed", (
         f"실패 종료인데 도구가 {tool_calls[0]['status']} 로 저장됐다"
     )
@@ -385,7 +422,27 @@ async def test_persist_failure_does_not_swallow_the_error_report(monkeypatch):
 async def test_the_turn_is_persisted_exactly_once(monkeypatch):
     """절단 경로는 _persist 를 부르고 그 뒤 예외가 나도 중복 INSERT 하지 않는다."""
     relay, inserted = await _run(monkeypatch, lines=[_text_frame("한 번만")])
-    assert len(inserted) == 1, f"중복 영속화: {len(inserted)}"
+    assert len(_inserts(inserted)) == 1, f"중복 영속화: {len(_inserts(inserted))}"
+
+
+async def test_iter_lines_fallback_parses_frames_separately(monkeypatch):
+    """iter_lines 폴백 — 개행이 벗겨진 라인 단위 도착도 프레임별로 분리돼야 한다.
+
+    개행 복원이 없으면 모든 라인이 하나의 버퍼에 뭉개져 마지막 꼬리에서
+    json.loads 가 통째로 실패 → 전부 text 로 흘러 done/text 경계가 사라진다
+    (R25-N-C5 청크 루프 도입 때 생길 수 있는 회귀).
+    """
+    relay, inserted = await _run(
+        monkeypatch,
+        lines=[_text_frame("폴백 경로 답변"), DONE_FRAME],
+        use_chunks=False,
+    )
+    names = [n for n, _ in _events(relay)]
+    assert "error" not in names, f"폴백 경로가 프레임을 깎았다: {names}"
+    assert "done" in names, f"done 프레임이 사라졌다 — 프레임 뭉개짐 의심: {names}"
+    assert "text" in names
+    content = _bound(_inserts(inserted)[0])["c"]
+    assert content == "폴백 경로 답변", f"본문이 깨졌다: {content!r}"
 
 
 # ──────────────────────────────────────────────────────────────────────────────

@@ -7,7 +7,8 @@ import { useTranslations } from 'next-intl';
 import { Send, Loader2, StopCircle, MessageSquarePlus } from 'lucide-react';
 import { createSession, getHistory } from './api';
 import { MessageList } from './MessageList';
-import { useChatStream, SessionExpiredError } from './useChatStream';
+import { useChatStream, SessionExpiredError, AnalysisInProgressError } from './useChatStream';
+import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 import { useChatPanelOptional } from './ChatProvider';
 import type { ChatMessage, ChartSpec, ValidatorResult, VerificationResult, AuditResult } from './types';
 
@@ -30,10 +31,23 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
   // (/chat 풀페이지)이면 null → 컨텍스트 없이 기존 동작.
   const chatPanel = useChatPanelOptional();
   const [sessionId, setSessionId] = useState<string | null>(null);
+  // 폴링 tick 이 현재 세션과 비교할 수 있게 미러 — interval 콜백 안의 state 는
+  // 클로저 생성 시점 값이라 "새 대화" 후에도 옛 sid 를 본다(R2-N1 덮어쓰기 방지).
+  const sessionIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    sessionIdRef.current = sessionId;
+  }, [sessionId]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const initRef = useRef(false);
+  // 다른 pod 가 실행 중인 분석을 기다릴 때 쓰는 history 폴링 타이머.
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, []);
 
   // 첫 마운트(§56 핸드오프): deep(/chat 페이지)은 최근 세션을 복원해 다른 메뉴에
   // 다녀와도 대화·결과가 유지된다 — sessionStorage 의 세션ID 로 history 로드 후,
@@ -63,11 +77,33 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
       .then((msgs) => {
         setSessionId(saved);
         setMessages(msgs);
-        reattach(saved); // 진행 중 분석 있으면 이어서 수신(404 면 무시)
+        // 진행 중 분석이 있으면 이어서 수신. 'no-stream' 은 완료이거나 다른 pod 가
+        // 소유 중 — 후자라면 history 폴링으로 완료된 답변을 가져온다(R25-S10).
+        // R2-N1 — 이미 완료된 세션(마지막 메시지가 assistant)은 폴링하지 않는다.
+        void reattach(saved).then((r) => {
+          // 'no-stream' = 다른 pod 가 소유 중이거나 완료. 'failed'(5xx/네트워크)
+          // 도 폴링 폴백 — 일시 오류면 tick 이 복구한다(R2-N-l).
+          if (r !== 'no-stream' && r !== 'failed') return;
+          const lastMsg = msgs[msgs.length - 1];
+          if (lastMsg && lastMsg.role === 'user') pollForAnswer(saved);
+        });
       })
-      .catch(() => {
-        sessionStorage.removeItem(storeKey);
-        startFresh();
+      .catch((e) => {
+        // R25-N-C6 — 어느 오류든 세션 ID 를 지우면 실제 세션이 살아 있는데도
+        //    대화가 영구 유실된다. 404/410(세션 부재/만료)에서만 지우고 새로
+        //    시작한다. 403 은 소유권 문제 — 역시 재사용 불가이므로 지운다.
+        //    그 외(네트워크/5xx)는 ID 를 보존하고 다음 방문에서 재시도한다.
+        const status = parseInt(String(e?.message).slice(0, 3), 10);
+        if (redirectToLoginIfUnauthorized({ status })) return;
+        // 422 — 서버가 session_id 형식을 거부(형식 정책 변경·깨진 저장값). 역시
+        // 재사용 불가이므로 지우고 새로 시작한다(R2-N11a).
+        if (status === 404 || status === 410 || status === 403 || status === 422) {
+          sessionStorage.removeItem(storeKey);
+          startFresh();
+          return;
+        }
+        setSessionId(saved);
+        setError(t('historyLoadFailed'));
       });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
@@ -77,6 +113,17 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
       // 마지막 assistant 메시지를 in-place 갱신
       const last = prev[prev.length - 1];
       if (!last || last.role !== 'assistant' || !last.pending) {
+        // 백엔드는 error 프레임 뒤에 done 을 한 번 더 보낸다(계약). done/error 가
+        // non-pending assistant 뒤에 오면 새 버블을 만들면 안 된다 — 예전엔 빈
+        // 유령 버블 + pending 고착이 생겼다(R25-N-C2). 종결 이벤트는 마지막
+        // assistant 버블에 in-place 적용한다.
+        if (
+          (event.type === 'done' || event.type === 'error') &&
+          last &&
+          last.role === 'assistant'
+        ) {
+          return [...prev.slice(0, -1), applyEvent(last, event)];
+        }
         // 새 assistant 메시지 시작
         const next: ChatMessage = {
           id: `pending-${Date.now()}`,
@@ -101,9 +148,79 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
     onError: handleError,
   });
 
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+  }, []);
+
+  // R25-S10 — reattach 가 'no-stream' 일 때(분석이 다른 pod 에서 진행 중) history
+  // 를 주기적으로 폴링해 완료된 assistant 행을 가져온다. 완료·오류·만료면 스스로
+  // 멈춘다. 릴레이가 프로세스 로컬이라 pod 장벽이 있는 한 이 폴백이 유일한 복구
+  // 경로다. R2-N1 — 상한은 서버 read_timeout(900s)보다 긴 15분 + 진행 버블 표시.
+  const pollForAnswer = useCallback(
+    (sid: string) => {
+      stopPolling();
+      const startedAt = Date.now();
+      // 진행 표시 — 폴링 중 아무 표시가 없으면 사용자가 빈 화면으로 오인해
+      // 재질문/이탈한다(R2-N1).
+      setMessages((prev) => {
+        const last = prev[prev.length - 1];
+        if (last?.role === 'assistant' && last.pending) return prev;
+        return [
+          ...prev,
+          {
+            id: `pending-poll-${Date.now()}`,
+            role: 'assistant' as const,
+            content: '',
+            pending: true,
+            createdAt: new Date().toISOString(),
+          },
+        ];
+      });
+      pollRef.current = setInterval(() => {
+        if (Date.now() - startedAt > 15 * 60 * 1000) {
+          stopPolling();
+          setMessages((prev) =>
+            prev.map((m) => (m.pending ? { ...m, pending: false } : m))
+          );
+          setError(t('analysisTimeout'));
+          return;
+        }
+        getHistory(sid)
+          .then((msgs) => {
+            // "새 대화"/재전송으로 세션이 바뀐 뒤 도착한 옛 결과는 버린다 —
+            // 안 버리면 화면 라벨은 새 session 인데 내용이 옛 대화로 덮어씀
+            // (R2-N1 실측).
+            if (sessionIdRef.current !== sid) {
+              stopPolling();
+              return;
+            }
+            const lastMsg = msgs[msgs.length - 1];
+            // assistant 행이 추가됐다 = 다른 pod 에서 분석이 끝남 → 화면 갱신.
+            if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.pending) {
+              stopPolling();
+              setMessages(msgs);
+            }
+          })
+          .catch(() => {
+            /* 폴링 실패는 무시 — 다음 tick 에 재시도 */
+          });
+      }, 3000);
+    },
+    [stopPolling, t]
+  );
+
   const handleSubmit = useCallback(
     async (text: string) => {
       if (!text.trim() || !sessionId || isStreaming) return;
+      // 이전 세션의 크로스파드 폴링이 살아 있으면 결과 도착 시 방금 보낸 질문
+      // 버블을 덮어쓴다 — 새 질문 전에 반드시 끊는다(R2-N1).
+      // R3-S3 — 폴링 중 전송은 서버가 409 를 돌려주는 경로라, 폴링이었는지를
+      // 기억해 뒀다가 409 분기에서 재개한다(끊기만 하면 Q1 답이 영영 안 옴).
+      const wasPolling = pollRef.current !== null;
+      stopPolling();
       setError(null);
 
       const userMsg: ChatMessage = {
@@ -164,6 +281,21 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
               retryErr instanceof Error ? retryErr : new Error(String(retryErr))
             );
           }
+        } else if (e instanceof AnalysisInProgressError) {
+          // 409 — 진행 중 분석 있음(Stop 직후 재전송·크로스파드). 서버는 이
+          // 질문을 기록하지 않았으므로 방금 넣은 user+pending 쌍은 유령이다 —
+          // 제거하지 않으면 빈 버블이 남는다(R3-S3/N5).
+          setMessages((prev) => prev.slice(0, -2));
+          setError(t('analysisInProgress'));
+          // 폴링 중이던 분석은 아직 다른 파드에서 돌고 있다 — 폴링을 재개해
+          // 그 답변을 회수한다. 그냥 두면 새로고침 전까지 Q1 답이 안 보인다.
+          // R4-N1 — 재개 시에는 아래 공통 정리(pending 해제)를 건너뛴다.
+          // 진행 버블의 pending 이 꺼지면 답이 올 때까지 스피너 없는 빈 버블만
+          // 보인다.
+          if (wasPolling) {
+            pollForAnswer(sessionId);
+            return;
+          }
         } else {
           throw e;
         }
@@ -174,13 +306,14 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
         prev.map((m) => (m.pending ? { ...m, pending: false } : m))
       );
     },
-    [sessionId, isStreaming, send, messages, chatPanel, mode, handleError, t]
+    [sessionId, isStreaming, send, messages, chatPanel, mode, handleError, t, stopPolling, pollForAnswer]
   );
 
   // "새 대화" — 새 세션 생성 + sessionStorage 교체 + 화면 비우기. 기존 대화는
   // 서버(DB)에 남아 파괴되지 않음(목록에서 복원 가능). 스트리밍 중엔 막는다.
   const handleNewChat = useCallback(async () => {
     if (isStreaming) return;
+    stopPolling();
     setError(null);
     try {
       const s = await createSession();
@@ -193,7 +326,7 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
     } catch (e) {
       setError(t('newChatFailed', { error: e instanceof Error ? e.message : String(e) }));
     }
-  }, [isStreaming, mode]);
+  }, [isStreaming, mode, stopPolling, t]);
 
   const isDrawer = variant === 'drawer';
 
@@ -293,7 +426,7 @@ export function ChatLayout({ variant = 'page', mode = 'quick' }: ChatLayoutProps
           {isStreaming ? (
             <button
               type="button"
-              onClick={cancel}
+              onClick={() => cancel(sessionId ?? undefined)}
               className="flex h-10 w-10 items-center justify-center rounded-md border border-border bg-card hover:bg-accent transition-colors"
               aria-label={t('cancelButton')}
             >

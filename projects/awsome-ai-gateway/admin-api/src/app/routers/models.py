@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -38,6 +40,12 @@ def _build_pricing_sync_service(*, source: str = "aws"):
       - "litellm": LiteLLM Model Catalog — Lambda 프록시 경유(NDS-01)
     """
     settings = get_settings()
+    # 알 수 없는 source 는 else 로 흘러 AWS 로 조용히 폴백한다 — 운영자가 고른
+    # 소스와 다른 가격이 적용되는 무증상 오답. 422 로 명시 거절(R25-N11).
+    if source not in ("aws", "litellm"):
+        raise HTTPException(
+            status_code=422, detail=f"source must be 'aws' or 'litellm' (got {source!r})"
+        )
     if source == "litellm":
         # LiteLLM 카탈로그 조회는 Lambda 프록시만 허용 — admin-api 가 외부 인터넷을
         # 직접 호출하지 않는다. 미배포 시 503 으로 명시 (조용한 폴백 금지).
@@ -159,7 +167,7 @@ async def price_sync_sources(
 @router.get("/pricing/sync-preview", response_model=PriceSyncPreviewResponse)
 async def price_sync_preview(
     request: Request,
-    source: str = "aws",
+    source: Literal["aws", "litellm"] = "aws",
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):

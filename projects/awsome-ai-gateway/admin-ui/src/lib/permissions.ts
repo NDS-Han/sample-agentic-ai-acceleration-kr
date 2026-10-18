@@ -13,8 +13,11 @@ import { UserRole } from '@/types/enums';
  * redirected to a "no access" page by the middleware.
  */
 export const PAGE_PERMISSIONS: PagePermissionMap = {
-  // Dashboard
-  '/': [UserRole.ADMIN, UserRole.TEAM_LEADER],
+  // Dashboard — admin only. TEAM_LEADER 를 넣으면 페이지는 열리지만 이 페이지가
+  // 부르는 API(KPI/model-share/top-users/teams 등)가 전부 require_admin 이라
+  // 카드 전부 '—'/ErrorState 인 화면이 된다(R25-S9). TEAM_LEADER 는 콜백이
+  // /my 로 랜딩한다.
+  '/': [UserRole.ADMIN],
 
   // Virtual key management — admin only
   '/keys': [UserRole.ADMIN],

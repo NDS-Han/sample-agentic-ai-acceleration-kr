@@ -60,9 +60,8 @@ export async function setAppDefaultModelAction(
   if (!default_model) return { success: false, error: t('defaultModelRequired') };
 
   try {
-    await withRetry(() =>
-      adminAPI.patch(`/admin/apps/${encodeURIComponent(client)}/default-model`, { default_model })
-    );
+    // 쓰기는 재시도하지 않는다 — 응답 유실 후 재시도 시 감사 로그 중복(R25-N-UI5).
+    await adminAPI.patch(`/admin/apps/${encodeURIComponent(client)}/default-model`, { default_model });
     // revalidatePath('/apps') 는 의도적으로 하지 않는다 — /apps 페이지는 서버 fetch 데이터가
     // 없고(정책은 클라이언트가 action 으로 읽음), 현재 라우트 RSC 리페치만 일으켜
     // 패널 리마운트(선택 앱 유실)의 원인이 됐다.
@@ -82,11 +81,10 @@ export async function toggleAppModelAction(
   const t = await getTranslations('errors');
   if (!client) return { success: false, error: t('appRequired') };
   try {
-    const data = await withRetry(() =>
-      adminAPI.patch<AppPolicy>(
-        `/admin/apps/${encodeURIComponent(client)}/models`,
-        { alias, allowed }
-      )
+    // 쓰기는 재시도하지 않는다 — 응답 유실 후 재시도 시 감사 로그 중복(R25-N-UI5).
+    const data = await adminAPI.patch<AppPolicy>(
+      `/admin/apps/${encodeURIComponent(client)}/models`,
+      { alias, allowed }
     );
     // '/apps' 는 무효화하지 않는다(위 setAppDefaultModelAction 주석 참조 — 서버 데이터 없음,
     // 리페치→리마운트로 선택 앱이 날아가는 버그의 원인이었다).

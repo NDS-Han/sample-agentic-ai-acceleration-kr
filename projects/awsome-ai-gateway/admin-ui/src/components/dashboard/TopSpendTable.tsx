@@ -70,7 +70,10 @@ export function TopSpendTable({
             <Tr>
               <Th>{t('name')}</Th>
               <Th numeric>{t('cost')}</Th>
-              <Th>{t('budgetSpend')}</Th>
+              {/* 예산 소진율은 앱 필터와 무관한 전사/예산 원장 기준이다 — 앱 필터가
+                  켜져 있을 때 비용 컬럼(필터됨)과 나란히 놓이면 기준이 다른 걸
+                  알 수 없으므로 힌트를 둔다(R25-N-UI4). */}
+              <Th title={t('budgetSpendHint')}>{t('budgetSpend')}</Th>
             </Tr>
           </THead>
           <TBody>

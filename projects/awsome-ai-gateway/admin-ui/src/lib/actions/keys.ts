@@ -54,7 +54,8 @@ export async function revokeKeyAction(keyId: string): Promise<ActionResult<void>
   }
 
   try {
-    await withRetry(() => adminAPI.delete(`/admin/keys/${encodeURIComponent(String(keyId))}`));
+    // 쓰기는 재시도하지 않는다 — 응답 유실 후 재시도 시 중복 삭제/감사 행(R25-N-UI5).
+    await adminAPI.delete(`/admin/keys/${encodeURIComponent(String(keyId))}`);
     revalidatePath('/keys');
     return { success: true, data: undefined };
   } catch (err) {

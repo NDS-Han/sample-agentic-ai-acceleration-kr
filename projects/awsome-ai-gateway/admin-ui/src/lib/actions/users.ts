@@ -31,9 +31,7 @@ export async function setTeamLeaderAction(
   }
 
   try {
-    await withRetry(() =>
-      adminAPI.put(`/admin/teams/${encodeURIComponent(String(teamId))}/leader`, { user_id: userId })
-    );
+    await adminAPI.put(`/admin/teams/${encodeURIComponent(String(teamId))}/leader`, { user_id: userId });
     revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
@@ -58,9 +56,7 @@ export async function unsetTeamLeaderAction(
   }
 
   try {
-    await withRetry(() =>
-      adminAPI.delete(`/admin/teams/${encodeURIComponent(String(teamId))}/leaders/${encodeURIComponent(String(userId))}`)
-    );
+    await adminAPI.delete(`/admin/teams/${encodeURIComponent(String(teamId))}/leaders/${encodeURIComponent(String(userId))}`);
     revalidatePath('/users');
     return { success: true, data: undefined };
   } catch (err) {
@@ -79,12 +75,10 @@ export async function forceReauthTeamAction(
     return { success: false, error: 'Team ID is required' };
   }
   try {
-    const res = await withRetry(() =>
-      adminAPI.post<{ revoked_count: number }>(
+    const res = await adminAPI.post<{ revoked_count: number }>(
         `/admin/teams/${encodeURIComponent(String(teamId))}/force-reauth`,
         {}
-      )
-    );
+      );
     return { success: true, data: res };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -104,15 +98,13 @@ export async function syncCognitoAction(): Promise<
   }>
 > {
   try {
-    const res = await withRetry(() =>
-      adminAPI.post<{
+    const res = await adminAPI.post<{
         groups_synced: number;
         users_created: number;
         users_updated: number;
         users_deactivated: number;
         errors: string[];
-      }>('/admin/users/sync-cognito', {})
-    );
+      }>('/admin/users/sync-cognito', {});
     revalidatePath('/users');
     return { success: true, data: res };
   } catch (err) {
@@ -148,15 +140,13 @@ export async function setUserAllowedClientsAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     if (clients.length === 0) {
-      await withRetry(() => adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`));
+      await adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`);
       return { success: true, data: { clients: [] } };
     }
-    const res = await withRetry(() =>
-      adminAPI.put<{ user_id: string; clients: string[] }>(
+    const res = await adminAPI.put<{ user_id: string; clients: string[] }>(
         `/admin/users/${encodeURIComponent(String(userId))}/allowed-clients`,
         { clients },
-      ),
-    );
+      );
     return { success: true, data: { clients: res.clients ?? clients } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -201,15 +191,13 @@ export async function setScopeAllowedClientsAction(
   if (!scopeId) return { success: false, error: 'Scope ID is required' };
   try {
     if (clients.length === 0) {
-      await withRetry(() => adminAPI.delete(scopeClientsPath(scope, scopeId)));
+      await adminAPI.delete(scopeClientsPath(scope, scopeId));
       return { success: true, data: { clients: [] } };
     }
-    const res = await withRetry(() =>
-      adminAPI.put<{ scope_id: string; clients: string[] }>(
+    const res = await adminAPI.put<{ scope_id: string; clients: string[] }>(
         scopeClientsPath(scope, scopeId),
         { clients },
-      ),
-    );
+      );
     return { success: true, data: { clients: res.clients ?? clients } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -246,15 +234,13 @@ export async function setUserAllowedModelsAction(
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
     if (modelAliases.length === 0) {
-      await withRetry(() => adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-models`));
+      await adminAPI.delete(`/admin/users/${encodeURIComponent(String(userId))}/allowed-models`);
       return { success: true, data: { modelAliases: [] } };
     }
-    const res = await withRetry(() =>
-      adminAPI.put<{ user_id: string; model_aliases: string[] }>(
+    const res = await adminAPI.put<{ user_id: string; model_aliases: string[] }>(
         `/admin/users/${encodeURIComponent(String(userId))}/allowed-models`,
         { model_aliases: modelAliases },
-      ),
-    );
+      );
     return { success: true, data: { modelAliases: res.model_aliases ?? modelAliases } };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -294,7 +280,7 @@ export async function setUserClientBudgetAction(
 ): Promise<ActionResult<void>> {
   if (!userId) return { success: false, error: 'User ID is required' };
   try {
-    await withRetry(() => adminAPI.put(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`, body));
+    await adminAPI.put(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`, body);
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, ...toActionError(err) };
@@ -311,9 +297,7 @@ export async function clearUserClientBudgetAction(
   try {
     // 앱 예산 해제는 한도 완화라 409/confirm 흐름이 없다 — confirm 파라미터를
     // 보내지 않는다(엔드포인트가 받지 않는다).
-    await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`),
-    );
+    await adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}/app/${encodeURIComponent(String(client))}`);
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, ...toActionError(err) };

@@ -153,6 +153,7 @@ class KeyRepository:
         *,
         user_id: uuid.UUID | None = None,
         team_id: uuid.UUID | None = None,
+        team_ids: list[uuid.UUID] | None = None,
         status: KeyStatus | None = None,
         email: str | None = None,
     ) -> int:
@@ -163,9 +164,12 @@ class KeyRepository:
             stmt = stmt.where(VirtualKey.user_id == user_id)
         if status:
             stmt = stmt.where(VirtualKey.status == status)
-        if team_id or email:
+        # team_ids: TEAM_LEADER 의 "내가 볼 수 있는 팀들"(소속+리드) 복수 스코프.
+        if team_id or team_ids or email:
             stmt = stmt.join(User, VirtualKey.user_id == User.id)
-            if team_id:
+            if team_ids:
+                stmt = stmt.where(User.team_id.in_(team_ids))
+            elif team_id:
                 stmt = stmt.where(User.team_id == team_id)
             if email:
                 stmt = stmt.where(User.email.ilike(f"%{_escape_like(email)}%", escape="\\"))

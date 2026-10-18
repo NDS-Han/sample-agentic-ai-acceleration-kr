@@ -223,6 +223,18 @@ async def lifespan(app: FastAPI):
     # ── Cleanup ──
     if getattr(app.state, "oidc_http", None) is not None:
         await app.state.oidc_http.aclose()
+    # 진행 중 채팅 분석 태스크를 취소하고 부분 영속화까지 기다린다 — engine 보다
+    # 먼저(이 태스크들이 자체 AsyncSession 으로 DB 에 쓴다). 배포 예산 정합
+    # (R2-S3): values.yaml admin-api terminationGracePeriodSeconds=50 =
+    # preStop(10) + uvicorn graceful-shutdown 상한(UVICORN_GRACEFUL_SHUTDOWN_
+    # TIMEOUT=10) + 이 drain(15) + audit flush(10) + 여유(5). uvicorn 상한이
+    # 없으면 열린 SSE 가 lifespan 진입을 무한 지연시켜 drain 이 못 돈다.
+    try:
+        from app.routers.chat_agent import drain_chat_bg_tasks
+
+        await drain_chat_bg_tasks(timeout=15.0)
+    except Exception:  # noqa: BLE001 — 종료 경로에서 실패를 넓히지 않는다
+        logger.warning("app.shutdown.chat_drain_failed", exc_info=True)
     await redis.aclose()
     # Audit logger — graceful drain (max 10s)
     await audit_logger.shutdown(timeout=10.0)

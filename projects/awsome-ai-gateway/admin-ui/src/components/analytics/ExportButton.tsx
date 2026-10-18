@@ -53,6 +53,9 @@ export function ExportButton({ filter, latestMonth }: ExportButtonProps) {
         format,
       };
       if (filter.scope) exportParams.scope = filter.scope;
+      // R2-N-j — client 드릴다운 필터도 export 에 전달. 빠지면 화면(필터됨)과
+      // CSV(전체) 수치가 달라진다.
+      if (filter.client) exportParams.client = filter.client;
       if (filter.period === 'custom') {
         if (filter.start_date) exportParams.start_date = filter.start_date;
         if (filter.end_date) exportParams.end_date = filter.end_date;

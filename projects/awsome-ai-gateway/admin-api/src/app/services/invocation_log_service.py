@@ -61,6 +61,10 @@ REASON_MANTLE_PLANE = "mantle_plane"
 REASON_NOT_BEDROCK = "not_bedrock"
 REASON_WEB_SEARCH = "web_search_multi_turn"
 REASON_LEGACY = "legacy"
+# bedrock_request_id 는 있지만 그 호출이 실행된 계정/리전이 아닌 곳을 보는 그룹에는
+# 절대 나타나지 않는 행 — 예: BEDROCK native 가 cross-account 다른 리전에서 실행.
+# missing 으로 세면 모든 네이티브 호출이 거짓 알람이 된다(R25-S4).
+REASON_OTHER_REGION = "other_region"
 
 # Mantle plane provider 값(model.provider enum). 이 plane 은 invocation log 를 아예 남기지
 # 않는다(위 캡처 표) — 그래서 NULL 이 정상이다.
@@ -190,11 +194,22 @@ def reconcile(
     core_start: datetime | None = None,
     core_end: datetime | None = None,
     max_samples: int = 200,
+    captured_providers: frozenset[str] | None = None,
+    suppress_orphans: bool = False,
 ) -> ReconcileReport:
     """순수 함수: usage 행 목록과 로그 창을 교집합해 리포트를 만든다(AWS 접근 없음).
 
     `core_start/core_end` 는 패딩을 제외한 실제 대상 구간이다. orphan 은 이 안쪽 레코드만
     센다 — 패딩 구간의 레코드는 창 밖 usage 행의 것일 수 있어 orphan 으로 세면 거짓양성이다.
+
+    `captured_providers`: 설정된 log group 이 실제로 담는 provider 집합(정규화된 대문자).
+    이 집합 밖의 provider 행은 `bedrock_request_id` 를 갖고 있어도 그 호출이 다른
+    계정/리전에서 실행돼 이 그룹에 절대 없다 — `missing` 이 아니라
+    `skipped_null[other_region]` 로 분류한다(R25-S4). None 이면 이 보정 없음.
+
+    `suppress_orphans`: usage 측에 alias/client 필터가 걸렸을 때 True. 필터는
+    usage 측에만 적용되므로 로그 측의 다른 alias 레코드가 전부 orphan 으로 오탐된다
+    — 그 경우 orphan 집계를 끄고 노트로 명시한다.
     """
     report = ReconcileReport(
         window_start=window_start,
@@ -210,6 +225,10 @@ def reconcile(
     seen_bedrock_ids: set[str] = set()
     for row in rows:
         report.usage_rows += 1
+        # ⚠️ null-id 분류가 provider 필터보다 먼저다(R2-N6). Mantle/OPENMODEL 행은
+        # id 자체가 없는데 provider 필터가 먼저 돌면 "로그를 안 남기는 plane" 이라는
+        # 원래 사유 대신 전부 other_region 으로 오분류된다. provider 필터는 id 가
+        # **있는** 행에만 의미가 있다(id 가 있어도 다른 계정/리전 로그에만 있음).
         if not row.bedrock_request_id:
             reason = classify_null_request_id(
                 provider=row.provider,
@@ -217,6 +236,15 @@ def reconcile(
                 web_search_count=row.web_search_count,
             )
             report.skipped_null[reason] = report.skipped_null.get(reason, 0) + 1
+            continue
+        # 이 그룹이 담지 않는 plane 의 행은 대조 대상이 아니다 — id 가 있어도
+        # 다른 계정/리전의 로그에만 있어 matched/missing 어느 쪽도 유효하지 않다.
+        if captured_providers is not None and (
+            (row.provider or "").strip().upper() not in captured_providers
+        ):
+            report.skipped_null[REASON_OTHER_REGION] = (
+                report.skipped_null.get(REASON_OTHER_REGION, 0) + 1
+            )
             continue
         seen_bedrock_ids.add(row.bedrock_request_id)
         if row.bedrock_request_id in window.request_ids:
@@ -243,15 +271,24 @@ def reconcile(
             "구간을 좁혀 재조회하세요."
         )
 
-    for log_id in window.request_ids:
-        if log_id in seen_bedrock_ids:
-            continue
-        ts = window.timestamp_by_id.get(log_id)
-        if ts is not None and not (core_start_ms <= ts <= core_end_ms):
-            continue  # 패딩 구간 — 창 밖 usage 행의 레코드일 수 있다
-        report.orphan_count += 1
-        if len(report.orphan_log_ids) < max_samples:
-            report.orphan_log_ids.append(log_id)
+    if suppress_orphans:
+        # usage 측 필터(alias/client)는 로그 측에 적용되지 않는다 — 다른 alias 의
+        # 레코드가 전부 orphan 으로 오탐되므로, 필터 하에서는 orphan 을 산출하지
+        # 않는다(R25-S4).
+        report.notes.append(
+            "usage 측 필터(model_alias/client)가 적용되어 orphan 을 산출하지 않았습니다 — "
+            "필터 밖 호출의 로그가 전부 orphan 으로 오탐되기 때문입니다."
+        )
+    else:
+        for log_id in window.request_ids:
+            if log_id in seen_bedrock_ids:
+                continue
+            ts = window.timestamp_by_id.get(log_id)
+            if ts is not None and not (core_start_ms <= ts <= core_end_ms):
+                continue  # 패딩 구간 — 창 밖 usage 행의 레코드일 수 있다
+            report.orphan_count += 1
+            if len(report.orphan_log_ids) < max_samples:
+                report.orphan_log_ids.append(log_id)
 
     if report.orphan_count:
         report.notes.append(

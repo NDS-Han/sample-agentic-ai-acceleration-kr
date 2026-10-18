@@ -96,6 +96,10 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
     ? computeDailyAvg(period, kpi.total_cost_usd)
     : { dailyAvg: 0, projection: null };
 
+  // 앱 필터를 드릴다운 링크로 보존한다 — 없으면 KPI 카드를 눌러 이동한
+  // /analytics 가 전체 앱 데이터를 보여 화면 간 수치가 어긋난다(R25-N-UI4).
+  const clientSuffix = client !== 'all' ? `&client=${encodeURIComponent(client)}` : '';
+
   return (
     <div className="space-y-6">
       {/* KPI 단일 엔드포인트 실패 시 '—' 카드와 함께 재시도 수단을 제공한다. */}
@@ -111,7 +115,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? fmtUsd(kpi.total_cost_usd) : '—'}
             icon={<DollarSign size={18} aria-hidden="true" />}
             description={kpi ? t('usageThisMonthDesc') : t('fetchFailed')}
-            href={`/analytics?period=${period}`}
+            href={`/analytics?period=${period}${clientSuffix}`}
           />
           <KPICard
             title={t('budgetUtilization')}
@@ -119,7 +123,15 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             icon={<BarChart3 size={18} aria-hidden="true" />}
             alertLevel={alertLevel}
             alertLabel={alertLevel ? tb(`alertLevels.${alertLevel}`) : undefined}
-            description={budgetUtilization != null ? t('budgetUtilizationDesc') : t('fetchFailed')}
+            // R25-N-UI3 — kpi 는 왔는데 utilization 만 null 이면 "한도 미설정"
+            // (계약상 정상) 이다. fetchFailed 로 뭉개면 정상 상태가 장애처럼 보인다.
+            description={
+              !kpi
+                ? t('fetchFailed')
+                : budgetUtilization != null
+                  ? t('budgetUtilizationDesc')
+                  : t('budgetNotConfigured')
+            }
             href="/budgets"
           />
           <KPICard
@@ -127,7 +139,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? fmtUsd(kpi.cost_per_user_usd) : '—'}
             icon={<Users size={18} aria-hidden="true" />}
             description={kpi ? t('avgCostPerUserDesc', { count: kpi.active_users }) : t('fetchFailed')}
-            href={`/analytics?period=${period}&group_by=user`}
+            href={`/analytics?period=${period}&group_by=user${clientSuffix}`}
           />
           <KPICard
             title={t('dailyAvg')}
@@ -138,7 +150,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
                 ? t('dailyAvgProjection', { amount: fmtUsd(projection) })
                 : t('dailyAvgDesc')
             }
-            href={`/analytics?period=${period}`}
+            href={`/analytics?period=${period}${clientSuffix}`}
           />
         </div>
       </section>
@@ -154,14 +166,14 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
             value={kpi ? kpi.total_requests.toLocaleString() : '—'}
             icon={<Activity size={18} aria-hidden="true" />}
             description={t('totalRequestsDesc')}
-            href={`/analytics?period=${period}`}
+            href={`/analytics?period=${period}${clientSuffix}`}
           />
           <KPICard
             title={t('totalTokens')}
             value={kpi ? fmtTokensCompact(kpi.total_tokens) : '—'}
             icon={<Coins size={18} aria-hidden="true" />}
             description={t('totalTokensDesc')}
-            href={`/analytics?period=${period}`}
+            href={`/analytics?period=${period}${clientSuffix}`}
           />
           <KPICard
             title={t('activeKeys')}

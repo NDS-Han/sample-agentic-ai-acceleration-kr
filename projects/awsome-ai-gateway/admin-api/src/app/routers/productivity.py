@@ -275,12 +275,26 @@ async def get_productivity_analytics(
 
     total_gen = prod_row.generated_count or 0
     total_acc = prod_row.accepted_count or 0
-    acceptance_rate = (total_acc / total_gen * 100) if total_gen > 0 else 0
+    # R25-N13 — 이벤트 수 비율은 100줄 생성/1줄 수용도 100% 로 친다. 정확한 지표는
+    # 라인 단위다. 라인 컬럼이 전부 0 인(구형 이벤트만 있는) 월은 이벤트 수로 폴백.
+    lines_gen_for_rate = int(prod_row.total_lines_generated or 0)
+    lines_acc_for_rate = int(prod_row.total_lines_accepted or 0)
+    if lines_gen_for_rate > 0:
+        acceptance_rate = lines_acc_for_rate / lines_gen_for_rate * 100
+    elif total_gen > 0:
+        acceptance_rate = total_acc / total_gen * 100
+    else:
+        acceptance_rate = 0
 
-    # Git: commits and PRs
+    # Git: commits and PRs — 표시 카운트는 전사 전부(헤드라인 지표).
     commit_stmt = (
         select(
             func.coalesce(func.sum(GitEvent.commit_count), 0).label("total_commits"),
+            # R2-N8 — cost_per_commit 의 분모는 코호트와 같은 모집단이어야 한다.
+            # user_id NULL 커밋은 코호트 비용에 기여할 수 없어 분모에서도 제외.
+            func.coalesce(func.sum(GitEvent.commit_count), 0)
+            .filter(GitEvent.user_id.isnot(None))
+            .label("cohort_commits"),
         )
         .where(
             kst_period_range_filter(GitEvent.created_at, period),
@@ -288,7 +302,9 @@ async def get_productivity_analytics(
         )
     )
     commit_result = await session.execute(commit_stmt)
-    total_commits = commit_result.scalar_one() or 0
+    commit_row = commit_result.one()
+    total_commits = commit_row.total_commits or 0
+    cohort_commits = commit_row.cohort_commits or 0
 
     pr_opened_stmt = (
         select(func.count())
@@ -326,16 +342,45 @@ async def get_productivity_analytics(
     # Cost data for ROI calculation — §59 비용 집계 표준(SUCCESS + KST).
     from app.models.usage import UsageLog
     from app.core.usage_filters import cost_period_filter
-    cost_stmt = (
+    total_cost_stmt = (
         select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
         .where(cost_period_filter(period))
     )
-    total_cost = float((await session.execute(cost_stmt)).scalar_one() or 0)
+    total_cost = float((await session.execute(total_cost_stmt)).scalar_one() or 0)
+    # R25-N13/R2-N8 — "산출물당 비용" 의 분자가 전사 비용이고 분모는 계측 사용자의
+    # 산출물이면 비계측 비용이 얹혀 부풀려진다. 지표별로 분모와 같은 코호트의
+    # 비용을 분자로 쓴다(라인→productivity 이벤트 사용자, 커밋→git 이벤트 사용자).
+    prod_cohort_cost_stmt = (
+        select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
+        .where(
+            cost_period_filter(period),
+            UsageLog.user_id.in_(
+                select(ProductivityEvent.user_id).where(
+                    kst_period_range_filter(ProductivityEvent.created_at, period)
+                )
+            ),
+        )
+    )
+    git_cohort_cost_stmt = (
+        select(func.coalesce(func.sum(UsageLog.cost_usd), 0))
+        .where(
+            cost_period_filter(period),
+            UsageLog.user_id.in_(
+                select(GitEvent.user_id).where(
+                    kst_period_range_filter(GitEvent.created_at, period),
+                    GitEvent.user_id.isnot(None),
+                )
+            ),
+        )
+    )
+    prod_cohort_cost = float((await session.execute(prod_cohort_cost_stmt)).scalar_one() or 0)
+    git_cohort_cost = float((await session.execute(git_cohort_cost_stmt)).scalar_one() or 0)
 
     lines_gen = int(prod_row.total_lines_generated or 0)
     lines_acc = int(prod_row.total_lines_accepted or 0)
-    cost_per_line = (total_cost / lines_gen) if lines_gen > 0 else 0
-    cost_per_commit = (total_cost / total_commits) if total_commits > 0 else 0
+    # 분모(해당 이벤트 코호트의 산출물)와 같은 모집단의 비용으로 나눈다.
+    cost_per_line = (prod_cohort_cost / lines_gen) if lines_gen > 0 else 0
+    cost_per_commit = (git_cohort_cost / cohort_commits) if cohort_commits > 0 else 0
 
     return {
         "period": period,

@@ -705,7 +705,11 @@ class KeyService:
         decoded = decode_cursor(cursor) if cursor else None
         legacy_uuid = None
         if cursor and decoded is None:
-            legacy_uuid = uuid.UUID(cursor)
+            try:
+                legacy_uuid = uuid.UUID(cursor)
+            except ValueError:
+                # 형식이 안 맞는 cursor 는 입력 오류 — ValueError 가 터지면 500.
+                raise ValidationError(f"invalid cursor: {cursor!r}")
         keys = await repo.list_keys(
             user_id=user_id,
             team_id=team_id,
@@ -749,12 +753,14 @@ class KeyService:
         *,
         user_id: uuid.UUID | None = None,
         team_id: uuid.UUID | None = None,
+        team_ids: list[uuid.UUID] | None = None,
         status: KeyStatus | None = None,
         email: str | None = None,
     ) -> int:
         repo = KeyRepository(session)
         return await repo.count_keys(
-            user_id=user_id, team_id=team_id, status=status, email=email
+            user_id=user_id, team_id=team_id, team_ids=team_ids,
+            status=status, email=email,
         )
 
     async def force_reauth_team(

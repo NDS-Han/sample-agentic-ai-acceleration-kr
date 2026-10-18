@@ -71,6 +71,12 @@ def _admin(user_id):
     return SimpleNamespace(user_id=user_id)
 
 
+def _request():
+    # post_message 는 크로스파드 클레임을 위해 request.app.state.redis 를 읽는다
+    # (R2-S2). redis=None 이면 로컬 맵만으로 동작하는 degraded 경로를 탄다.
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(redis=None)))
+
+
 @pytest.fixture(autouse=True)
 def _runtime_arn(monkeypatch):
     # 모듈 상수 — 테스트 환경에는 설정이 없어 503 으로 먼저 죽으므로 패치.
@@ -83,6 +89,7 @@ async def test_expired_session_returns_410():
     sess = _Session(_Row(uid, datetime.now(timezone.utc) - timedelta(hours=1)))
     with pytest.raises(HTTPException) as ei:
         await post_message(
+            _request(),
             str(uuid.uuid4()),
             chat_agent.MessageCreate(content="hi"),
             admin=_admin(uid),
@@ -97,6 +104,7 @@ async def test_active_session_slides_expiry_and_runs_update():
     sess = _Session(_Row(uid, datetime.now(timezone.utc) + timedelta(hours=1)))
     with pytest.raises(RuntimeError, match="beyond expiry"):
         await post_message(
+            _request(),
             str(uuid.uuid4()),
             chat_agent.MessageCreate(content="hi"),
             admin=_admin(uid),

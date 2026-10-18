@@ -202,10 +202,14 @@ describe('middleware — admin_role 보조 쿠키', () => {
     return req;
   }
 
-  it('role 없는 IdP 토큰 + admin_role=TEAM_LEADER → / 통과', async () => {
-    const res = await middleware(requestWithRole('TEAM_LEADER', '/'));
-    expect(res.status).toBe(200);
-    expect(res.headers.get('location')).toBeNull();
+  it('role 없는 IdP 토큰 + admin_role=TEAM_LEADER → / 는 403, /budgets 는 통과', async () => {
+    // '/' 는 admin-only(R25-S9 — 대시보드 API 전부 require_admin).
+    const root = await middleware(requestWithRole('TEAM_LEADER', '/'));
+    expect(root.status).toBe(307);
+    expectSameOriginRedirect(root, '/403');
+    const budgets = await middleware(requestWithRole('TEAM_LEADER', '/budgets'));
+    expect(budgets.status).toBe(200);
+    expect(budgets.headers.get('location')).toBeNull();
   });
 
   it('admin_role=DEVELOPER → / 는 403, /my 는 통과', async () => {

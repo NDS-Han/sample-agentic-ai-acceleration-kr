@@ -597,7 +597,7 @@ describe('GET /api/auth/callback — happy path', () => {
     return jwtWithNonce(exp, { role: undefined });
   }
 
-  it('role 없는 IdP 토큰 + whoami TEAM_LEADER → admin_role 쿠키 + / 랜딩', async () => {
+  it('role 없는 IdP 토큰 + whoami TEAM_LEADER → admin_role 쿠키 + /my 랜딩', async () => {
     configureOidc();
     stubExchange(idTokenWithoutRole(), {
       status: 200,
@@ -607,7 +607,8 @@ describe('GET /api/auth/callback — happy path', () => {
     const res = await callbackGET(callbackReq());
 
     expect(res.status).toBe(303);
-    expectRelativeRedirect(res, '/');
+    // '/' 는 admin-only(R25-S9) — TEAM_LEADER 는 접근 가능한 /my 로 보낸다.
+    expectRelativeRedirect(res, '/my');
     const jar = setCookies(res);
     expect(cookieValue(jar['admin_role'])).toBe('TEAM_LEADER');
     expect(jar['admin_role']).toMatch(/HttpOnly/i);

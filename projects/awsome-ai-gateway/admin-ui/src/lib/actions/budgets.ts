@@ -48,7 +48,7 @@ export async function setBudgetAction(
     if (target_type === 'TEAM' && default_user_cap_usd !== undefined) {
       body.default_user_cap_usd = default_user_cap_usd;
     }
-    await withRetry(() => adminAPI.put(endpoint, body));
+    await adminAPI.put(endpoint, body);
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
@@ -82,9 +82,7 @@ export async function deleteUserBudgetAction(
   confirm = false
 ): Promise<ActionResult<void>> {
   try {
-    await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}${confirm ? '?confirm=true' : ''}`)
-    );
+    await adminAPI.delete(`/admin/budgets/user/${encodeURIComponent(String(userId))}${confirm ? '?confirm=true' : ''}`);
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
@@ -110,9 +108,7 @@ export async function allocateTeamBudgetAction(
     const items = allocations
       .filter((e) => e.target_type === 'USER')
       .map((e) => ({ user_id: e.target_id, allocated_usd: e.allocated_usd }));
-    await withRetry(() =>
-      adminAPI.put(`/admin/budgets/team/${encodeURIComponent(String(teamId))}/allocate`, { allocations: items, confirm })
-    );
+    await adminAPI.put(`/admin/budgets/team/${encodeURIComponent(String(teamId))}/allocate`, { allocations: items, confirm });
     revalidatePath('/budgets');
     return { success: true, data: undefined };
   } catch (err) {
@@ -149,12 +145,10 @@ export async function setTeamDefaultCapAction(
     return { success: false, error: 'Team ID is required' };
   }
   try {
-    const res = await withRetry(() =>
-      adminAPI.put<{ default_user_cap_usd: string | null }>(
+    const res = await adminAPI.put<{ default_user_cap_usd: string | null }>(
         `/admin/budgets/team/${encodeURIComponent(String(teamId))}/default-cap`,
         { value, confirm }
-      )
-    );
+      );
     revalidatePath('/budgets');
     return { success: true, data: res };
   } catch (err) {
@@ -173,12 +167,10 @@ export async function equalSplitTeamBudgetAction(
     return { success: false, error: 'Team ID is required' };
   }
   try {
-    const res = await withRetry(() =>
-      adminAPI.post<{ default_user_cap_usd?: string | null }>(
+    const res = await adminAPI.post<{ default_user_cap_usd?: string | null }>(
         `/admin/budgets/team/${encodeURIComponent(String(teamId))}/equal-split`,
         { clear_individual: clearIndividual, confirm }
-      )
-    );
+      );
     revalidatePath('/budgets');
     return { success: true, data: res };
   } catch (err) {
@@ -215,12 +207,10 @@ export async function setDowngradeConfigAction(
   }
 ): Promise<ActionResult<AutoDowngradeConfig>> {
   try {
-    const data = await withRetry(() =>
-      adminAPI.put<AutoDowngradeConfig>(
+    const data = await adminAPI.put<AutoDowngradeConfig>(
         `/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`,
         { enabled: config.enabled, rules: config.rules }
-      )
-    );
+      );
     // 다운그레이드 설정은 요약 테이블 데이터와 무관 — revalidatePath 하면
     // RSC 리페치가 테이블을 리마운트시켜 펼침/패널 상태가 날아간다.
     return { success: true, data };
@@ -234,9 +224,7 @@ export async function deleteDowngradeConfigAction(
   scopeId: string
 ): Promise<ActionResult<void>> {
   try {
-    await withRetry(() =>
-      adminAPI.delete(`/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`)
-    );
+    await adminAPI.delete(`/admin/budgets/${encodeURIComponent(String(scope))}/${encodeURIComponent(String(scopeId))}/downgrade`);
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };

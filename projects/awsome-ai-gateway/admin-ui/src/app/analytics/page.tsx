@@ -6,8 +6,7 @@ import type { AnalyticsFilterForm } from '@/types/api';
 import type { PeriodType, GroupByType } from '@/types/enums';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { ErrorState } from '@/components/common/ErrorState';
-import { adminAPI } from '@/lib/api-client';
-import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { RegisterScreenContext } from '@/components/chat/RegisterScreenContext';
 import { AnalyticsFilter } from '@/components/analytics/AnalyticsFilter';
 import { ROIMetricsCards } from '@/components/analytics/ROIMetricsCards';
@@ -31,6 +30,7 @@ interface AnalyticsSearchParams {
   end_date?: string;
   group_by?: string;
   scope?: string;
+  client?: string;
 }
 
 interface AnalyticsPageProps {
@@ -61,6 +61,11 @@ function parseFilter(
     start_date: searchParams.start_date ?? null,
     end_date: searchParams.end_date ?? null,
     scope: searchParams.scope ?? null,
+    // 대시보드 client 필터의 드릴다운 보존(R25-N-UI4). 유효 앱 값만 통과시킨다 —
+    // 임의 문자열이면 백엔드가 필터 값으로 그대로 쓸 수 있으므로 허용 집합으로 좁힌다.
+    client: ['claude-code', 'cowork', 'codex', 'other'].includes(searchParams.client ?? '')
+      ? searchParams.client
+      : null,
   };
 }
 
@@ -98,9 +103,9 @@ async function ContextSection({
   }
   // 표시 컴포넌트(ROIMetricsCards 등)와 **동일** buildAnalyticsQuery → 바이트 동일
   // 요청 → Next.js 요청 메모이제이션으로 1회 호출로 dedup(중복 네트워크 방지).
-  const data = await adminAPI
-    .get<CostSummaryResponse>('/admin/analytics', buildAnalyticsQuery(filter, latestMonth))
-    .catch(() => null);
+  const data = await fetchAnalyticsOnce<CostSummaryResponse>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
 
   const s = data?.cost_summary;
   return (
@@ -141,6 +146,7 @@ async function ModelCostSection({
     start_date: filter.period === 'custom' ? filter.start_date : null,
     end_date: filter.period === 'custom' ? filter.end_date : null,
     scope: filter.scope ?? 'all',
+    client: filter.client ?? undefined,
   }).catch(() => null);
   // 같은 섹션의 형제 카드들은 compact 에러 — 여기만 전체 크기면 섹션 높이가
   // 튄다.
@@ -193,6 +199,24 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
 
       {/* 필터 — 월 선택기 + custom + group_by */}
       <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
+
+      {/* R2-N-j — 대시보드에서 client 파라미터로 드릴다운해 온 상태를 표시.
+          없으면 필터가 걸린 줄 모르고 "전체 앱" 수치로 오인한다. */}
+      {filter.client && (
+        <div className="flex items-center gap-2 rounded-apple border border-primary/30 bg-primary/5 px-3 py-2 text-sm">
+          <span className="text-muted-foreground">{t('clientFilterLabel')}</span>
+          <span className="font-medium text-foreground">{filter.client}</span>
+          <a
+            href={`/analytics?period=${filter.period === 'custom' ? 'custom' : effectiveMonth}` +
+              (filter.period === 'custom' && filter.start_date ? `&start_date=${filter.start_date}` : '') +
+              (filter.period === 'custom' && filter.end_date ? `&end_date=${filter.end_date}` : '') +
+              `&group_by=${filter.group_by}${filter.scope ? `&scope=${filter.scope}` : ''}`}
+            className="ml-auto text-xs text-primary hover:underline"
+          >
+            {t('clientFilterClear')}
+          </a>
+        </div>
+      )}
 
       {/* 각 섹션은 개별 Suspense. key 에 적용 월/날짜 포함 — 변경 시 재요청 */}
       {customRangeInvalid ? (

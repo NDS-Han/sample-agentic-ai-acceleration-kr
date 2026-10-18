@@ -34,15 +34,17 @@ from app.schemas.analytics import (
 
 logger = structlog.get_logger()
 
-_PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
-_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+# fullmatch + [0-9]: `match`+`$` 는 끝 개행('2026-08\n')을 통과시키고,
+# `\d` 는 아라비아 숫자('٢٠٢٦-٠٨', int() 가 파싱해버림)를 통과시킨다(R25-N2).
+_PERIOD_RE = re.compile(r"[0-9]{4}-[0-9]{2}")
+_DATE_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
 
 def _validate_period_date(period: str, date: str) -> None:
     """period=YYYY-MM, date=YYYY-MM-DD, and date must be within period's month."""
-    if not _PERIOD_RE.match(period):
+    if not _PERIOD_RE.fullmatch(period):
         raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
-    if not _DATE_RE.match(date):
+    if not _DATE_RE.fullmatch(date):
         raise ValidationError(f"Invalid date format: {date}. Expected YYYY-MM-DD")
     # Calendar validity (Codex review): the regex accepts 2026-06-31 etc., which
     # then fails at the PostgreSQL date cast with an opaque 500. Reject up front.
@@ -250,7 +252,8 @@ class AnalyticsService:
             Department, Department.id == Team.dept_id
         ).where(
             *team_where,
-        ).group_by(UsageLog.team_id, Team.name, Department.name)
+        ).group_by(UsageLog.team_id, Team.name, Department.name
+        ).order_by(func.sum(UsageLog.cost_usd).desc(), UsageLog.team_id)  # R25-N6: 결정적 정렬
         result = await session.execute(stmt)
         for row in result:
             if row.team_id:
@@ -290,11 +293,11 @@ class AnalyticsService:
                 .join(User, User.id == UsageLog.user_id)
                 .where(*user_where)
                 .group_by(User.id, User.display_name, User.email)
-                .order_by(func.sum(UsageLog.cost_usd).desc())
-                # seed 병합이 LIMIT 뒤에 일어나므로 후보를 넓게 잡는다 —
-                # 실사용 51위 밑인데 시드 잔차가 있는 사용자는 "seed only" 로
-                # 끼어들어 실사용분이 빠진 틀린 합계로 재정렬된다.
-                .limit(500)
+                .order_by(func.sum(UsageLog.cost_usd).desc(), User.id)
+                # LIMIT 을 두지 않는다 — seed 병합이 이 집합에 대해 일어나는데,
+                # top-N 으로 자르면 N위 밑 사용자의 실사용이 seed 병합에서 빠져
+                # "seed only"(requests=0) 틀린 행이 된다. 사용자 수는 기관 규모로
+                # 상한이 잡혀 있어 전건 집계가 맞다(R25-S2).
             )
             # ── 마이그레이션 주입분(seed) 반영 ──
             #

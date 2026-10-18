@@ -7,8 +7,8 @@ import logging
 import uuid
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import and_, distinct, func, or_, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from sqlalchemy import and_, distinct, exists, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import CurrentUser, require_admin
@@ -66,13 +66,15 @@ async def _cache_get(request: Request, key: str):
         return None
 
 
-async def _cache_set(request: Request, key: str, value: object) -> None:
+async def _cache_set(
+    request: Request, key: str, value: object, *, ttl: int = _DASHBOARD_CACHE_TTL
+) -> None:
     """캐시 저장. 조회와 같은 이유로 실패를 삼킨다."""
     redis = getattr(request.app.state, "redis", None)
     if redis is None:
         return
     try:
-        await redis.setex(key, _DASHBOARD_CACHE_TTL, json.dumps(value, default=str))
+        await redis.setex(key, ttl, json.dumps(value, default=str))
     except Exception as exc:  # noqa: BLE001
         logger.debug("dashboard cache set failed key=%s err=%s", key, exc)
 
@@ -166,13 +168,7 @@ async def model_share(
         try:
             team_uuid = uuid.UUID(team_id)
         except ValueError:
-            return {
-                "period": period,
-                "team_id": team_id,
-                "total_cost_usd": 0.0,
-                "models": [],
-                "error": "invalid_team_id",
-            }
+            raise HTTPException(status_code=400, detail="invalid_team_id")
         where_clauses.append(UsageLog.team_id == team_uuid)
         team_filter = str(team_uuid)
 
@@ -304,7 +300,8 @@ async def top_users(
             User.id, User.display_name, User.email,
             User.team_id, Team.name, Department.name,
         )
-        .order_by(func.sum(UsageLog.cost_usd).desc())
+        # top-N 동률 시 비결정적 — id 보조 정렬 (R25-N6)
+        .order_by(func.sum(UsageLog.cost_usd).desc(), User.id)
         .limit(limit)
     )
     rows = (await session.execute(stmt)).all()
@@ -363,7 +360,7 @@ async def top_teams(
             *([cf] if (cf := client_filter(client)) is not None else []),
         )
         .group_by(Team.id, Team.name, Department.name)
-        .order_by(func.sum(UsageLog.cost_usd).desc())
+        .order_by(func.sum(UsageLog.cost_usd).desc(), Team.id)
         .limit(limit)
     )
     rows = (await session.execute(stmt)).all()
@@ -411,12 +408,13 @@ async def dashboard_kpi(
     멤버들을 포함한다). 이건 기존 화면이 프론트에서 하던 계산과 정확히 같은 의미다
     (admin-ui/src/app/page.tsx 의 teamItems + teamlessUsers) — 값이 움직이지 않는다.
 
-    ⚠️ 분자(사용액)는 `budget.budget_usages` 에서 읽지 **않는다.** 그 테이블은
-    cost-recorder-worker 가 플러시하는 모든 항목을 status 구분 없이 누적하는
-    monotonic accumulator 라(ERROR/TIMEOUT 비용 포함, 사후 정정 없음) §59 의
-    "SUCCESS 만" 기준과 어긋난다. 같은 화면의 다른 카드는 전부 usage_logs 의 SUCCESS
-    합계를 쓰므로, 여기서만 다른 소스를 쓰면 **같은 화면 안에서 숫자가 서로 안 맞는다.**
-    그래서 분자도 `cost_period_filter`(SUCCESS + KST 월) 로 usage_logs 에서 집계한다.
+    분자(사용액)는 `budget.budget_usages` 에서 읽는다 — 집행(enforcement)과 같은
+    계수다. cost-recorder-worker 가 status 구분 없이 누적하는 monotonic
+    accumulator 라 ERROR/TIMEOUT 비용과 시드 이관분이 들어 있지만, 그게 집행이
+    보는 숫자다 — usage_logs SUCCESS 합계를 쓰면 사용자가 "used $13" 을 보는
+    동안 enforcement 는 $963 에 하드블록하는 불일치가 생겼다(R13-M5 이후 설계).
+    대신 스코프는 분모와 맞춘다: 활성 총한도 config 가 있는 스코프의 사용액만
+    합산한다 — 한도 없는 스코프까지 합치면 사용률이 100% 를 넘는다(R25-S1).
 
     ## 실패 시 의미
 
@@ -497,6 +495,25 @@ async def dashboard_kpi(
     #    사용자가 "used $13" 을 보는 동안 enforcement 는 $963 에 하드블록하는
     #    불일치가 생겼다. 분모(한도)와 같은 스코프(TEAM + 팀없는 USER, 총합 행만)로
     #    합산한다. client 필터는 적용하지 않는다(예산은 client 축과 무관).
+    #    단, 워커는 config 유무와 무관하게 budget_usages 를 UPSERT 하므로 분모와
+    #    스코프를 맞추려면 "활성 총한도 config 가 있는 스코프" 로 한정해야 한다
+    #    — 안 하면 한도 없는 스코프의 사용액이 분자에만 들어가 사용률이 100% 를
+    #    넘는다 (R25-S1).
+    usage_scope_has_active_config = exists(
+        select(BudgetConfig.id).where(
+            and_(
+                BudgetConfig.scope == BudgetUsage.scope,
+                BudgetConfig.scope_id == BudgetUsage.scope_id,
+                BudgetConfig.client.is_(None),
+                BudgetConfig.is_active.is_(True),
+                # R25-r2 S1-잔여: D-cap(기본 예산 하향)만 저장된 config 는
+                # max_budget_usd=NULL 이라 분모 합산에서 0으로 빠지는데 분자에는
+                # 사용액이 들어가 사용률이 900%+ 로 부풀었다. 실제 한도가 있는
+                # config 만 "한도 있음" 으로 본다.
+                BudgetConfig.max_budget_usd.isnot(None),
+            )
+        ).correlate(BudgetUsage)
+    )
     budget_used_row = (
         await session.execute(
             select(func.coalesce(func.sum(BudgetUsage.used_usd), 0).label("used"))
@@ -518,6 +535,7 @@ async def dashboard_kpi(
                         User.team_id.is_(None),
                     ),
                 ),
+                usage_scope_has_active_config,
             )
         )
     ).one()
@@ -563,6 +581,7 @@ async def dashboard_kpi(
 
 @router.get("/periods")
 async def dashboard_periods(
+    request: Request,
     _admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -572,10 +591,18 @@ async def dashboard_periods(
     "데이터 있는 가장 최근 월"(periods[0])로 잡아 현재 달력월이 비어도
     빈 화면을 피한다. status 필터 안 함 — 에러만 있는 월도 노출.
     """
+    cache_key = _cache_key("periods")
+    if (cached := await _cache_get(request, cache_key)) is not None:
+        return cached
+
     # 월 binning 을 명시적 KST 로(§59) — requested_at 은 timestamptz 라 to_char 가
     # 세션 타임존을 타므로, timezone('Asia/Seoul', ...) 로 고정해 /summary·budget·
     # chat 과 동일 기준(KST) 보장. status 필터 안 함 — 에러만 있는 월도 옵션에 노출.
     period_expr = kst_month_expr()
     stmt = select(distinct(period_expr).label("period")).order_by(period_expr.desc())
     rows = (await session.execute(stmt)).scalars().all()
-    return {"periods": [p for p in rows if p]}
+    payload = {"periods": [p for p in rows if p]}
+    # DISTINCT over 전체 usage_logs 는 테이블이 커질수록 매 요청마다 무거워진다.
+    # 월 목록은 느리게 변하는 차원이라 10분 캐시가 정합성 비용 대비 맞다(R25-N10).
+    await _cache_set(request, cache_key, payload, ttl=600)
+    return payload

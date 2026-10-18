@@ -28,10 +28,10 @@ from app.core.exceptions import (
     NotFoundError,
     ValidationError,
 )
-from app.core.usage_filters import cost_period_filter, current_kst_period
+from app.core.usage_filters import current_kst_period
 from app.models.auth import Team, UserRole
-from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, DowngradePolicy, PeriodType
-from app.models.usage import UsageLog
+from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope, BudgetUsage, DowngradePolicy, PeriodType
+
 from app.repositories._locks import advisory_xact_lock
 from app.repositories.budget_repository import BudgetRepository, DowngradePolicyRepository
 from app.repositories.user_repository import UserRepository
@@ -94,7 +94,9 @@ def _confirmed_action(base: str, confirm: bool) -> str:
     """§3-0/G-8: confirm=true 재요청은 별도 audit action 으로 구분한다."""
     return f"{base}_CONFIRMED" if confirm else base
 
-_PERIOD_RE = re.compile(r"^\d{4}-\d{2}$")
+# fullmatch + [0-9]: `$`+match 는 끝 개행('2026-08\n')을, `\d` 는 아랍숫자를
+# 통과시켜 고아 period 키가 기록된다(R2-N9 — 읽기 경로와 같은 규칙).
+_PERIOD_RE = re.compile(r"[0-9]{4}-[0-9]{2}")
 #: 단일 출처는 core/clients.py 다 — 앱 추가 시 한 곳만 고치면 되도록.
 #: 튜플로 유지하는 이유: 기존 호출부가 순서를 가정한 곳이 있다.
 _ALLOWED_CLIENTS = CLIENT_ORDER
@@ -239,7 +241,7 @@ class BudgetService:
                     # --- validation ---
                     if scope not in ("USER", "TEAM"):
                         raise ValueError(f"invalid scope: {item.scope}")
-                    if not _PERIOD_RE.match(item.period):
+                    if not _PERIOD_RE.fullmatch(item.period):
                         raise ValueError(f"invalid period format: {item.period} (expected YYYY-MM)")
                     if client is not None:
                         if scope != "USER":
@@ -1610,7 +1612,8 @@ class BudgetService:
         #    필터를 건너뛰어 전사 예산·사용액을 그대로 돌려준다(fail-open).
         actor: CurrentUser,
     ) -> BudgetSummaryResponse:
-        if not re.match(r'^\d{4}-\d{2}$', period):
+        # fullmatch + [0-9]: `\d`+`$` 는 끝 개행·아라비아 숫자를 통과시킨다(R25-N2).
+        if not re.fullmatch(r'[0-9]{4}-[0-9]{2}', period):
             raise ValidationError(f"Invalid period format: {period}. Expected YYYY-MM")
 
         repo = BudgetRepository(session)
@@ -1633,10 +1636,14 @@ class BudgetService:
         users = await user_repo.iter_all_users()
         teams = await user_repo.list_all_teams()
 
-        # TEAM_LEADER 는 소속 팀만 — scope/target_id 쿼리 파라미터로 다른
-        # 팀을 넘겨도 무시한다(analytics_service.py 의 동일 정책과 일관). ADMIN 은 무제한.
+        # TEAM_LEADER 는 소속 팀 + 리드하는 팀(leader_user_id) — scope/target_id
+        # 쿼리 파라미터로 다른 팀을 넘겨도 무시한다(analytics 의
+        # _leader_allowed_team_ids 와 같은 규칙, keys/count 의 N7 과 일관).
+        # 소속 팀만 보면 "리드하는 다른 팀" 예산이 summary 에서 사라졌다(R2-N11).
         if actor.role == UserRole.TEAM_LEADER:
-            led = {actor.team_id} if actor.team_id else set()
+            from app.services.analytics_service import _leader_allowed_team_ids
+
+            led = await _leader_allowed_team_ids(actor, session)
             teams = [t for t in teams if t.id in led]
             users = [u for u in users if u.team_id in led]
 
@@ -1696,13 +1703,15 @@ class BudgetService:
             except Exception:
                 logger.warning(
                     "budget_summary.redis_read_failed", exc_info=True,
-                    hint="사용액을 usage_logs 집계로 대체합니다",
+                    hint="사용액을 budget_usages 집계로 대체합니다",
                 )
                 used_by_key = {}
 
-        # Redis 미스분만 usage_logs 에서 그룹집계(N+1·대상 단위 쿼리 방지).
-        # 비용 집계 표준(§59): SUCCESS 만 + KST 월 경계. 대시보드 Top 사용자/팀·
-        # chat 과 동일 기준으로 통일(실패 호출 비용 제외, UTC 9시간 오차 제거).
+        # Redis 미스분만 그룹집계로 채운다(N+1·대상 단위 쿼리 방지).
+        # ⚠️ 원장은 enforcement 와 같은 budget_usages 다 — usage_logs(SUCCESS-only)
+        #    로 대체하면 마이그레이션 seed·실패 정산분이 빠져 화면 사용률이 실제
+        #    차단 기준과 어긋난다(R13-M5 와 같은 불일치, R25-N14). client IS NULL
+        #    (총합 행)만 집계 — 앱별 행과 이중 계산 방지.
         # TEAM_LEADER 는 표시 대상이 소속 팀/멤버뿐이라 IN 으로 좁힌다. ADMIN 은
         # 표시 대상이 전사라 전체 집계가 기본이지만, target 지정 요청처럼 미스
         # 대상이 소수일 때는 IN 이 훨씬 싸다 — 그 경우에도 좁힌다.
@@ -1710,17 +1719,24 @@ class BudgetService:
         user_miss = [uuid.UUID(s) for s in user_sids if (BudgetScope.USER, s) not in used_by_key]
         team_miss = [uuid.UUID(s) for s in team_sids if (BudgetScope.TEAM, s) not in used_by_key]
 
-        async def _aggregate(scope_enum: BudgetScope, col, miss: list[uuid.UUID]) -> None:
+        async def _aggregate(scope_enum: BudgetScope, miss: list[uuid.UUID]) -> None:
             if not miss:
                 return  # Redis 가 표시 대상 전부 커버 — SQL 불필요
-            conds = [cost_period_filter(period)]
+            conds = [
+                BudgetUsage.scope == scope_enum,
+                BudgetUsage.period == period,
+                BudgetUsage.client.is_(None),
+            ]
             if narrow or len(miss) <= 500:
-                conds.append(col.in_(miss))
+                conds.append(BudgetUsage.scope_id.in_(miss))
             rows = (
                 await session.execute(
-                    sa_select(col, func.coalesce(func.sum(UsageLog.cost_usd), 0))
+                    sa_select(
+                        BudgetUsage.scope_id,
+                        func.coalesce(func.sum(BudgetUsage.used_usd), 0),
+                    )
                     .where(*conds)
-                    .group_by(col)
+                    .group_by(BudgetUsage.scope_id)
                 )
             ).all()
             used_by_key.update(
@@ -1731,8 +1747,8 @@ class BudgetService:
                 }
             )
 
-        await _aggregate(BudgetScope.USER, UsageLog.user_id, user_miss)
-        await _aggregate(BudgetScope.TEAM, UsageLog.team_id, team_miss)
+        await _aggregate(BudgetScope.USER, user_miss)
+        await _aggregate(BudgetScope.TEAM, team_miss)
 
         # TEAM 행의 다운그레이드 배지 — "최신 저장 배치" 규칙 수 + 활성 여부.
         # get_current_rules 와 같은 기준(max created_at 배치, is_active 무관)이라

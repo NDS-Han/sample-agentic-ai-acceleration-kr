@@ -140,6 +140,9 @@ export interface AnalyticsFilterForm {
   end_date?: string | null; // ISO 8601 date — required when period === 'custom'
   group_by: GroupByType;
   scope?: string | null;
+  // 앱(client) 필터 — 대시보드의 client 필터가 드릴다운 링크로 넘어올 때 보존
+  // 한다(R25-N-UI4). 'all'·미지정은 필터 없음.
+  client?: string | null;
 }
 
 // ─── Rate Limits ──────────────────────────────────────────────────────────────

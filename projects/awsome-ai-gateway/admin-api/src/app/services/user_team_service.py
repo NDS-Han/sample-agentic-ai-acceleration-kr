@@ -631,7 +631,10 @@ class UserTeamService:
         decoded = decode_cursor(cursor) if cursor else None
         legacy_uuid = None
         if cursor and decoded is None:
-            legacy_uuid = uuid.UUID(cursor)
+            try:
+                legacy_uuid = uuid.UUID(cursor)
+            except ValueError:
+                raise ValidationError(f"invalid cursor: {cursor!r}")
         users = await repo.list_users(
             team_id=team_id,
             department_id=department_id,

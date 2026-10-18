@@ -2,7 +2,7 @@
 
 'use client';
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { StreamEvent } from './types';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
 
@@ -29,6 +29,20 @@ export class SessionExpiredError extends Error {
   }
 }
 
+/** 이 세션에 분석이 진행 중(409) — Stop 후 재전송하라는 의미. 원문 `HTTP 409: {json}`
+ *  을 채팅 에러로 노출하지 않게 typed error 로 구분한다(R2-N2). */
+export class AnalysisInProgressError extends Error {
+  constructor() {
+    super('Analysis already in progress');
+    this.name = 'AnalysisInProgressError';
+  }
+}
+
+/** reattach 의 결과 — 'no-stream' 은 이 pod 에 릴레이가 없다는 뜻(멀티 레플리카
+ *  환경에서 다른 pod 가 소유 중이거나 분석 완료). 호출부는 history 폴링으로
+ *  폴백해야 한다(R25-S10 — 예전엔 조용히 무시해 진행 중 답변이 증발했다). */
+export type ReattachResult = 'attached' | 'no-stream' | 'unauthorized' | 'failed';
+
 /**
  * SSE 수신 hook. AgentCore 가 실제로 어떤 이벤트 형태를 보내는지에 따라 파싱
  * 룰이 달라질 수 있어 단순/관대하게 구현. event:/data: 표준 SSE 만 처리.
@@ -36,6 +50,16 @@ export class SessionExpiredError extends Error {
 export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+
+  // N-C3 — 언마운트(/chat 이탈) 시 진행 중 SSE fetch 를 반드시 끊는다.
+  // 안 끊으면 복귀할 때마다 reattach 연결이 누적되고, dev(HTTP/1.1) 에선
+  // 브라우저 per-host 6연결 고갈로 UI 가 정지할 수 있다.
+  useEffect(() => {
+    return () => {
+      abortRef.current?.abort();
+      abortRef.current = null;
+    };
+  }, []);
 
   const send = useCallback(
     async (
@@ -48,6 +72,13 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
       const controller = new AbortController();
       abortRef.current = controller;
       setIsStreaming(true);
+
+      // N-C7 — done 프레임 없이 EOF 가 오면 "완결" 로 보이는 함정을 막는다.
+      let sawDone = false;
+      const trackDone = (e: StreamEvent) => {
+        if (e.type === 'done') sawDone = true;
+        onEvent(e);
+      };
 
       try {
         const payload: Record<string, unknown> = { content, mode };
@@ -83,6 +114,12 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           throw new SessionExpiredError();
         }
 
+        // 409 — 진행 중 분석(Stop 직후 재전송·더블클릭·크로스파드 활성 클레임).
+        // 원문 노출 대신 typed error — 호출부가 i18n 메시지로 바꾼다(R2-N2).
+        if (response.status === 409) {
+          throw new AnalysisInProgressError();
+        }
+
         if (!response.ok || !response.body) {
           throw new Error(`HTTP ${response.status}: ${await response.text()}`);
         }
@@ -102,7 +139,7 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const block = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
-            parseSseBlock(block, onEvent);
+            parseSseBlock(block, trackDone);
           }
           if (buffer.length > MAX_SSE_BUFFER_CHARS) {
             // 잘린 프레임이 무한 누적 — 상류/메모리를 닫고 에러로 끝낸다.
@@ -112,31 +149,63 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
         }
         // tail flush — 스트림 종료 시 디코더에 남은 partial UTF-8 도 토해낸다.
         buffer += decoder.decode();
-        if (buffer.trim()) parseSseBlock(buffer, onEvent);
+        if (buffer.trim()) parseSseBlock(buffer, trackDone);
+        if (!sawDone) {
+          // done 없는 EOF — 프록시/pod 종료로 끊긴 미완성 종료. pending 버블을
+          // 조용히 '완료' 로 두면 잘린 답변이 정상 답변처럼 보인다(R25-N-C7).
+          onEvent({
+            type: 'error',
+            error: '스트림이 완료 신호 없이 끊겼습니다',
+            error_type: 'StreamTruncated',
+          } as StreamEvent);
+        }
       } catch (e) {
-        // SessionExpiredError 는 호출부가 재시도 판단해야 하므로 재전파 —
-        //        onError 로 뭉개면 새 세션 생성 경로가 안 탄다.
+        // SessionExpiredError/AnalysisInProgressError 는 호출부가 재시도·안내
+        // 판단해야 하므로 재전파 — onError 로 뭉개면 typed 처리가 안 탄다.
         if (e instanceof SessionExpiredError) throw e;
+        if (e instanceof AnalysisInProgressError) throw e;
         if ((e as Error).name !== 'AbortError') {
           onError?.(e as Error);
         }
       } finally {
-        setIsStreaming(false);
-        abortRef.current = null;
+        // N-C1 — stale cleanup 방어: 이 호출이 시작한 뒤 새 스트림(send/reattach)이
+        //    abortRef 를 교체했다면, 내 finally 가 새 스트림의 상태를 지우면 안 된다.
+        //    예전엔 무조건 덮어써서 reattach 대기 중 전송하면 Stop 버튼이 사라졌다.
+        if (abortRef.current === controller) {
+          setIsStreaming(false);
+          abortRef.current = null;
+        }
       }
     },
     [onEvent, onError]
   );
 
-  const cancel = useCallback(() => {
+  // S12 — Stop 은 서버 측 분석도 멈춰야 한다. 브라우저 스트림만 닫으면
+  //  AgentCore 가 토큰을 끝까지 소비하고 다음 질문이 그 뒤에 줄을 선다.
+  //  소유자 검증된 POST /cancel 로 producer 를 취소(부분 답변은 "[취소됨]"으로 영속화).
+  // R2-N2 — fire-and-forget 이면 Stop 직후 재전송이 취소 반영 전에 도착해 409 가
+  //  난다. 호출부가 await 할 수 있게 Promise 를 돌려준다(실패해도 로컬 abort 는
+  //  이미 됐으므로 에러는 삼키고 로그만 남긴다).
+  const cancel = useCallback(async (sessionId?: string) => {
     abortRef.current?.abort();
+    if (!sessionId) return;
+    try {
+      await fetch(`${API_BASE}/admin/chat/sessions/${sessionId}/cancel`, {
+        method: 'POST',
+        credentials: 'include',
+      });
+    } catch (e) {
+      console.warn('[chat] cancel request failed:', e);
+    }
   }, []);
 
   // 진행 중 분석 재구독(§56 핸드오프) — 다른 메뉴에 다녀온 뒤 서버가 background
   // 로 계속 돌리던 스트림을 GET /stream 으로 이어받는다(이미 발행분 재생+실시간).
-  // 404(활성 스트림 없음 — 완료/만료)는 정상: history 가 이미 결과를 보여줌.
+  // 404 는 **두 가지**다: (a) 분석 완료/없음 — history 가 결과를 보여줌,
+  // (b) 다른 pod 에서 실행 중(멀티 레플리카 — 릴레이는 프로세스 로컬). 호출부가
+  // 후자를 구분해 history 폴링으로 폴백할 수 있게 결과를 반환한다(R25-S10).
   const reattach = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string): Promise<ReattachResult> => {
       abortRef.current?.abort();
       const controller = new AbortController();
       abortRef.current = controller;
@@ -150,12 +219,19 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
             signal: controller.signal,
           }
         );
-        if (response.status === 404) return; // 진행 중 분석 없음 — 무시
+        if (response.status === 404) return 'no-stream'; // 이 pod 에 활성 스트림 없음
         // 401 — 세션 사망. send() 와 같이 로그인으로 보낸다(R17 — 과거엔 조용히
         // return 해서 스트림 부재 원인이 안 보였다).
-        if (redirectToLoginIfUnauthorized(response)) return;
-        if (!response.ok || !response.body) return;
+        if (redirectToLoginIfUnauthorized(response)) return 'unauthorized';
+        if (!response.ok || !response.body) return 'failed';
         setIsStreaming(true);
+
+        let sawDone = false;
+        const trackDone = (e: StreamEvent) => {
+          if (e.type === 'done') sawDone = true;
+          onEvent(e);
+        };
+
         const reader = response.body.getReader();
         const decoder = new TextDecoder();
         let buffer = '';
@@ -167,22 +243,36 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           while ((idx = buffer.indexOf('\n\n')) >= 0) {
             const block = buffer.slice(0, idx);
             buffer = buffer.slice(idx + 2);
-            parseSseBlock(block, onEvent);
+            parseSseBlock(block, trackDone);
           }
           if (buffer.length > MAX_SSE_BUFFER_CHARS) {
             // reattach 는 조용히 포기하되 상류 연결은 반드시 닫는다.
             await reader.cancel().catch(() => {});
-            return;
+            return 'failed';
           }
         }
         // tail flush — send() 와 동일하게 마지막 미완결 블록도 처리.
         buffer += decoder.decode();
-        if (buffer.trim()) parseSseBlock(buffer, onEvent);
+        if (buffer.trim()) parseSseBlock(buffer, trackDone);
+        if (!sawDone) {
+          // done 없는 EOF — 재구독 스트림도 중간 절단될 수 있다. 스피너가
+          // 영구 회전하지 않게 미완성 상태를 명시한다(R25-N-C7).
+          onEvent({
+            type: 'error',
+            error: '스트림이 완료 신호 없이 끊겼습니다',
+            error_type: 'StreamTruncated',
+          } as StreamEvent);
+        }
+        return 'attached';
       } catch {
         // 재구독 실패는 무해(완료분은 history 로 복원됨)
+        return 'failed';
       } finally {
-        setIsStreaming(false);
-        abortRef.current = null;
+        // N-C1 — stale cleanup 방어(send 와 같은 이유).
+        if (abortRef.current === controller) {
+          setIsStreaming(false);
+          abortRef.current = null;
+        }
       }
     },
     [onEvent]

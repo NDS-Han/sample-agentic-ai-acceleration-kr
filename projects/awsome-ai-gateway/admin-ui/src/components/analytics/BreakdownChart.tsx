@@ -2,8 +2,7 @@
 
 import { getTranslations } from 'next-intl/server';
 import type { AnalyticsFilterForm } from '@/types/api';
-import { adminAPI } from '@/lib/api-client';
-import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { LazyBreakdownChart } from './LazyCharts';
 import { ErrorState } from '@/components/common/ErrorState';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
@@ -28,9 +27,9 @@ interface AnalyticsAPIResponse {
 
 export async function BreakdownChart({ filter, latestMonth }: BreakdownChartProps) {
   const t = await getTranslations('analytics');
-  const data = await adminAPI
-    .get<AnalyticsAPIResponse>('/admin/analytics', buildAnalyticsQuery(filter, latestMonth))
-    .catch(() => null);
+  const data = await fetchAnalyticsOnce<AnalyticsAPIResponse>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
 
   let labels: string[] = [];
   let values: number[] = [];

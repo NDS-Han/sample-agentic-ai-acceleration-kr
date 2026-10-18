@@ -10,15 +10,21 @@ describe('checkPagePermission', () => {
   });
 
   it('allows TEAM_LEADER to access permitted pages', () => {
-    expect(checkPagePermission('/', 'TEAM_LEADER')).toBe(true);
     expect(checkPagePermission('/budgets', 'TEAM_LEADER')).toBe(true);
     expect(checkPagePermission('/analytics', 'TEAM_LEADER')).toBe(true);
+    expect(checkPagePermission('/cli', 'TEAM_LEADER')).toBe(true);
+    expect(checkPagePermission('/my', 'TEAM_LEADER')).toBe(true);
   });
 
   it('blocks TEAM_LEADER from admin-only pages', () => {
+    // '/' 도 admin-only — 대시보드 카드가 부르는 API 가 전부 require_admin 이라
+    // TEAM_LEADER 에 열어주면 전부 '—' 인 화면이 된다(R25-S9).
+    expect(checkPagePermission('/', 'TEAM_LEADER')).toBe(false);
     expect(checkPagePermission('/keys', 'TEAM_LEADER')).toBe(false);
     expect(checkPagePermission('/models', 'TEAM_LEADER')).toBe(false);
     expect(checkPagePermission('/monitoring', 'TEAM_LEADER')).toBe(false);
+    expect(checkPagePermission('/apps', 'TEAM_LEADER')).toBe(false);
+    expect(checkPagePermission('/chat', 'TEAM_LEADER')).toBe(false);
   });
 
   it('blocks DEVELOPER from all pages', () => {

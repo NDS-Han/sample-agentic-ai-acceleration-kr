@@ -2,7 +2,6 @@
 'use server';
 
 import { adminAPI } from '@/lib/api-client';
-import { withRetry } from '@/lib/utils/retry';
 import type { ActionResult } from './types';
 
 function toErrorMessage(err: unknown): string {
@@ -26,11 +25,10 @@ export async function setClientWebSearchAction(
 ): Promise<ActionResult<{ client: string; web_search_enabled: boolean }>> {
   if (!client) return { success: false, error: 'client is required' };
   try {
-    const res = await withRetry(() =>
-      adminAPI.put<{ client: string; web_search_enabled: boolean }>(
-        `/admin/routing-profiles/${encodeURIComponent(String(client))}/web-search`,
-        { enabled },
-      ),
+    // 쓰기는 재시도하지 않는다 — 응답 유실 후 재시도 시 감사 로그가 중복된다(R25-N-UI5).
+    const res = await adminAPI.put<{ client: string; web_search_enabled: boolean }>(
+      `/admin/routing-profiles/${encodeURIComponent(String(client))}/web-search`,
+      { enabled },
     );
     // revalidatePath('/apps') 금지 — /apps 는 서버 fetch 데이터가 없어 무효화할 것이 없고,
     // 현재 라우트 리페치가 패널 리마운트(선택 앱 유실)를 일으켰다.

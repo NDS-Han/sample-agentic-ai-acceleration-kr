@@ -3,8 +3,7 @@
 import { getTranslations } from 'next-intl/server';
 import { fmtUsd } from '@/lib/utils/format';
 import type { AnalyticsFilterForm } from '@/types/api';
-import { adminAPI } from '@/lib/api-client';
-import { buildAnalyticsQuery } from '@/lib/utils/analyticsQuery';
+import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { ErrorState } from '@/components/common/ErrorState';
 
 interface ROIMetricsCardsProps {
@@ -45,9 +44,9 @@ function MetricCard({ label, value, description }: MetricCardProps) {
 
 export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsProps) {
   const t = await getTranslations('analytics');
-  const data = await adminAPI
-    .get<AnalyticsAPIResponse>('/admin/analytics', buildAnalyticsQuery(filter, latestMonth))
-    .catch(() => null);
+  const data = await fetchAnalyticsOnce<AnalyticsAPIResponse>(
+    JSON.stringify(buildAnalyticsQuery(filter, latestMonth)),
+  ).catch(() => null);
 
   if (!data?.cost_summary) {
     // 조회 실패(네트워크/5xx) — 재시도 가능한 에러 상태로 구분한다.

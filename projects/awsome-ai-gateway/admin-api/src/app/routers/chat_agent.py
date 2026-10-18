@@ -19,10 +19,11 @@ import json
 import logging
 import os
 import re
+import time
 import uuid
 from typing import Any, AsyncIterator, Literal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
@@ -207,7 +208,7 @@ async def list_sessions(
 
 @router.get("/sessions/{session_id}/history")
 async def get_history(
-    session_id: str,
+    session_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
@@ -216,7 +217,7 @@ async def get_history(
         await session.execute(
             text(
                 "SELECT user_id FROM chat_agent.sessions WHERE id = CAST(:sid AS uuid)"
-            ).bindparams(sid=session_id)
+            ).bindparams(sid=str(session_id))
         )
     ).first()
     if not sess_row:
@@ -233,7 +234,7 @@ async def get_history(
             WHERE session_id = CAST(:sid AS uuid)
             ORDER BY created_at
             """
-        ).bindparams(sid=session_id)
+        ).bindparams(sid=str(session_id))
     )
     return {
         "messages": [
@@ -301,11 +302,25 @@ class _StreamRelay:
 
 # 세션별 활성 릴레이. 새 메시지가 오면 교체(세션당 동시 1개 분석 가정 — UI 가
 # isStreaming 중 전송을 막음). 페이지 복귀 시 진행 중 분석을 재구독할 수 있다.
+# ⚠️ 프로세스 로컬 — admin-api 가 멀티 replica 면 재구독이 다른 pod 으로 가서
+# 404 가 된다. UI 는 그 경우 history 폴링으로 폴백한다(useChatStream, R25-S10).
 _active_relays: dict[str, _StreamRelay] = {}
+
+# 세션별 실행 중인 producer task — POST /cancel 이 취소 대상을 찾는 맵.
+_active_tasks: dict[str, asyncio.Task] = {}
+
+# 사용자가 명시 취소한 세션 — producer 의 CancelledError 핸들러가 "서버 재시작"
+# (lifespan drain)과 "사용자 중단"(cancel endpoint)을 구분하는 플래그.
+_cancelled_sessions: set[str] = set()
 
 # fire-and-forget 태스크 강한 참조 — asyncio 는 create_task 결과를 약한 참조로만
 # 잡아 GC 되면 분석이 조용히 죽는다(결과 미저장).
 _bg_tasks: set[asyncio.Task] = set()
+
+# 영속화(_persist) 태스크 별도 추적 — drain 이 이 태스크들을 cancel 하면 shield
+# 보호가 무의미해져 부분/완결 답변이 유실된다(R3-S2: 진입 스냅샷에 이미 있던
+# persist 를 다시 cancel 해 실측으로 assistant 행이 사라졌다).
+_persist_tasks: set[asyncio.Task] = set()
 
 
 def _spawn(coro) -> asyncio.Task:
@@ -313,6 +328,75 @@ def _spawn(coro) -> asyncio.Task:
     _bg_tasks.add(t)
     t.add_done_callback(_bg_tasks.discard)
     return t
+
+
+def _spawn_persist(coro) -> asyncio.Task:
+    """persist 전용 spawn — drain 의 cancel 대상에서 제외되도록 별도 추적."""
+    t = _spawn(coro)
+    _persist_tasks.add(t)
+    t.add_done_callback(_persist_tasks.discard)
+    return t
+
+
+async def drain_chat_bg_tasks(timeout: float = 15.0) -> None:
+    """lifespan shutdown — 진행 중 분석 태스크를 취소하고 부분 영속화까지 기다린다.
+
+    pod 종료(롤아웃/스케일인) 시 이 드레인이 없으면 태스크는 루프와 함께 죽어
+    부분 답변이 DB 에 남지 않는다. cancel → producer 의 CancelledError 핸들러가
+    "서버 재시작" 노트로 영속화 — 그 DB 쓰기가 끝날 때까지 기다린다(배포의
+    termination grace 가 이 예산보다 커야 한다).
+
+    취소 대상은 **아직 취소되지 않은 비-persist 태스크뿐** 이다(R3-S2):
+    - persist 태스크(`_persist_tasks`)를 cancel 하면 shield 가 의미를 잃고
+      진행 중인 DB 쓰기가 롤백돼 완결 답변이 유실된다.
+    - 사용자 취소를 이미 처리 중인 producer(`cancelling() > 0`)를 다시
+      cancel 하면 핸들러의 `await shield(...)`/`to_thread(...)` 에서 두 번째
+      CancelledError 가 올라와(except Exception 에 안 잡힘) persist 없이 빠진다.
+    """
+    for t in list(_bg_tasks):
+        if (
+            t.done()
+            or t in _persist_tasks
+            or t.cancelling() > 0  # 이미 취소 처리 중 — 재취소 금지(py3.11+)
+        ):
+            continue
+        t.cancel()
+    deadline = asyncio.get_running_loop().time() + timeout
+    while _bg_tasks:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        _done, pending = await asyncio.wait(list(_bg_tasks), timeout=remaining)
+        if pending:
+            for t in pending:
+                # stdlib logger — structlog 식 kwargs(task=)를 넘기면 TypeError(R2-N4).
+                logger.warning("chat_bg_task_drain_timeout task=%s", t.get_name())
+            break
+
+
+# ─── 크로스파드 취소/활성 클레임 (R2-S2) ───
+# _active_tasks/_cancelled_sessions 는 프로세스 로컬이라, prod(3파드)에서 /cancel 이
+# 비소유 파드에 라우팅되면 취소가 무시되고 이중 실행이 열린다. Redis 키로 파드 간
+# 공유한다 — redis 가 없으면(dev/테스트) 로컬 맵만으로 동작(degraded).
+_ACTIVE_KEY = "chat:active:{}"
+_CANCEL_KEY = "chat:cancel:{}"
+# 클레임 TTL 은 짧게 + producer 가 주기 갱신(R3-N2). 긴 TTL(960s)이면 소유 파드가
+# SIGKILL/OOM 로 죽었을 때 세션이 16분 동안 409 로 잠긴다(취소 플래그를 읽을
+# 주체가 없음). producer 가 _CLAIM_REFRESH_SECS 마다 expire 한다 — 죽으면
+# TTL 만료로 자연 해제.
+_CLAIM_TTL = 120
+_CLAIM_REFRESH_SECS = 60
+_CANCEL_CHECK_SECS = 1.0
+
+
+async def _redis_flag(redis, key: str) -> bool:
+    """redis EXISTS — 장애 시 False(로컬 가드만으로 동작, 분석을 죽이지 않음)."""
+    if redis is None:
+        return False
+    try:
+        return bool(await redis.exists(key))
+    except Exception:  # noqa: BLE001
+        return False
 
 
 # ─── Messages (SSE stream proxy) ───
@@ -340,7 +424,8 @@ class MessageCreate(BaseModel):
 
 @router.post("/sessions/{session_id}/messages")
 async def post_message(
-    session_id: str,
+    request: Request,
+    session_id: uuid.UUID,
     req: MessageCreate,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
@@ -355,79 +440,151 @@ async def post_message(
     if not AGENTCORE_RUNTIME_ARN:
         raise HTTPException(503, "AgentCore runtime not configured")
 
-    # 세션 권한 + 만료 확인
-    sess_row = (
-        await session.execute(
-            text(
-                "SELECT user_id, expires_at FROM chat_agent.sessions "
-                "WHERE id = CAST(:sid AS uuid)"
-            ).bindparams(sid=session_id)
-        )
-    ).first()
-    if not sess_row:
-        raise HTTPException(404, "Session not found")
-    if str(sess_row.user_id) != str(admin.user_id):
-        raise HTTPException(403, "Forbidden")
-    # R17 — expires_at 를 조회만 하고 검증하지 않아 만료 세션이 계속 쓰였다.
-    # 만료 세션은 410: 프론트가 새 세션을 만들게 유도.
-    from datetime import datetime, timedelta, timezone as _tz
-
-    exp = sess_row.expires_at
-    if exp is not None:
-        if exp.tzinfo is None:
-            exp = exp.replace(tzinfo=_tz.utc)
-        if exp <= datetime.now(_tz.utc):
-            raise HTTPException(410, "Session expired")
-        # 슬라이딩 갱신 — 활동 중인 세션이 생성 TTL 에 걸려 대화 도중 죽지 않게
-        # 사용할 때마다 만료를 연장한다(kiro R17 #10 — 과거엔 생성 시 한 번만
-        # 설정돼 8시간 넘는 분석 세션이 도중에 410 으로 끊겼다).
-        await session.execute(
-            text(
-                "UPDATE chat_agent.sessions SET expires_at = :exp "
-                "WHERE id = CAST(:sid AS uuid)"
-            ).bindparams(
-                exp=datetime.now(_tz.utc) + timedelta(hours=SESSION_TTL_HOURS),
-                sid=session_id,
+    sid = str(session_id)
+    redis = getattr(request.app.state, "redis", None)
+    claim_token = uuid.uuid4().hex
+    redis_claimed = False
+    # 로컬 클레임 409(남의 진행 중 분석)는 이 relay 를 만든 적이 없으므로 해제하면
+    # 안 된다 — 무조건 pop 하면 진행 중인 첫 요청의 릴레이를 뜯어낸다.
+    relay: _StreamRelay | None = None
+    try:
+        # 세션 권한 + 만료 확인 — 클레임(409)보다 먼저 해야 타인 세션의 진행 여부가
+        # 409 vs 404/403 으로 새지 않는다(R2-N-k).
+        sess_row = (
+            await session.execute(
+                text(
+                    "SELECT user_id, expires_at FROM chat_agent.sessions "
+                    "WHERE id = CAST(:sid AS uuid)"
+                ).bindparams(sid=sid)
             )
+        ).first()
+        if not sess_row:
+            raise HTTPException(404, "Session not found")
+        if str(sess_row.user_id) != str(admin.user_id):
+            raise HTTPException(403, "Forbidden")
+        # R17 — expires_at 를 조회만 하고 검증하지 않아 만료 세션이 계속 쓰였다.
+        # 만료 세션은 410: 프론트가 새 세션을 만들게 유도.
+        from datetime import datetime, timedelta, timezone as _tz
+
+        exp = sess_row.expires_at
+        if exp is not None:
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=_tz.utc)
+            if exp <= datetime.now(_tz.utc):
+                raise HTTPException(410, "Session expired")
+            # 슬라이딩 갱신 — 활동 중인 세션이 생성 TTL 에 걸려 대화 도중 죽지 않게
+            # 사용할 때마다 만료를 연장한다(kiro R17 #10 — 과거엔 생성 시 한 번만
+            # 설정돼 8시간 넘는 분석 세션이 도중에 410 으로 끊겼다).
+            await session.execute(
+                text(
+                    "UPDATE chat_agent.sessions SET expires_at = :exp "
+                    "WHERE id = CAST(:sid AS uuid)"
+                ).bindparams(
+                    exp=datetime.now(_tz.utc) + timedelta(hours=SESSION_TTL_HOURS),
+                    sid=sid,
+                )
+            )
+
+        # 진행 중 분석이 있으면 새 질문 거절 — 그대로 받으면 Q2 가 Q1 뒤에 줄 서서
+        # 응답 순서가 뒤섞이고 이중 과금이 된다(R25-S12). Stop(=cancel) 후 재전송.
+        #
+        # ⚠️ 클레임은 여기서 **동기**로 잡는다 — 예전엔 체크와 등록 사이에 DB
+        #    await 가 6번 있어 더블클릭/두 탭 POST 가 둘 다 통과해 고아 producer 가
+        #    끝까지 과금됐다(R2-S2b). 이벤트 루프는 단일 스레드라 dict 삽입 자체가
+        #    원자다. Redis SET NX 로 파드 간 클레임도 겸한다(비소유 파드로의 409
+        #    우회 차단).
+        if sid in _active_relays:
+            raise HTTPException(
+                409, "analysis already running — cancel it first (POST .../cancel)"
+            )
+        relay = _StreamRelay()
+        _active_relays[sid] = relay
+
+        if redis is not None:
+            try:
+                redis_claimed = bool(
+                    await redis.set(
+                        _ACTIVE_KEY.format(sid), claim_token, nx=True, ex=_CLAIM_TTL
+                    )
+                )
+            except Exception:  # noqa: BLE001 — redis 장애 시 로컬 가드만(degraded)
+                logger.warning("chat active claim failed session_id=%s", sid)
+                redis_claimed = True  # 내가 안 잡았으니 finally 에서 지우지 않음
+            if not redis_claimed:
+                if _active_relays.get(sid) is relay:
+                    _active_relays.pop(sid, None)
+                raise HTTPException(
+                    409, "analysis already running — cancel it first (POST .../cancel)"
+                )
+            # 이전 런의 취소 플래그가 남아있으면 새 런이 즉시 취소된다 — 제거.
+            try:
+                await redis.delete(_CANCEL_KEY.format(sid))
+            except Exception:  # noqa: BLE001
+                pass
+
+        # kiro R17-6 S2 — microVM idle timeout(기본 900s)으로 에이전트 메모리가 죽어도
+        # 대화 맥락을 복원할 수 있게 직전 이력을 payload 에 실어 보낸다. 에이전트는
+        # messages 가 비어있을 때(새 microVM)만 시드한다. user INSERT **전에** 읽어
+        # 방금 보낸 메시지는 제외 — 본문은 invoke 의 content 로 전달되므로 중복 방지.
+        # kiro R17-7 N-3 — 원문을 통째로 읽어 Python 에서 자르면 요청마다 최대
+        # 12행의 전체 본문이 메모리를 오간다. DB 에서 잘라서 가져온다.
+        hist_rows = await session.execute(
+            text(
+                "SELECT role, left(content, 4000) AS content FROM chat_agent.messages "
+                "WHERE session_id = CAST(:sid AS uuid) ORDER BY created_at DESC LIMIT 12"
+            ).bindparams(sid=sid)
         )
+        history = [
+            {"role": r.role, "content": r.content}
+            for r in reversed(hist_rows.fetchall())
+            if r.role in ("user", "assistant") and r.content
+        ]
 
-    # kiro R17-6 S2 — microVM idle timeout(기본 900s)으로 에이전트 메모리가 죽어도
-    # 대화 맥락을 복원할 수 있게 직전 이력을 payload 에 실어 보낸다. 에이전트는
-    # messages 가 비어있을 때(새 microVM)만 시드한다. user INSERT **전에** 읽어
-    # 방금 보낸 메시지는 제외 — 본문은 invoke 의 content 로 전달되므로 중복 방지.
-    # kiro R17-7 N-3 — 원문을 통째로 읽어 Python 에서 자르면 요청마다 최대
-    # 12행의 전체 본문이 메모리를 오간다. DB 에서 잘라서 가져온다.
-    hist_rows = await session.execute(
-        text(
-            "SELECT role, left(content, 4000) AS content FROM chat_agent.messages "
-            "WHERE session_id = CAST(:sid AS uuid) ORDER BY created_at DESC LIMIT 12"
-        ).bindparams(sid=session_id)
-    )
-    history = [
-        {"role": r.role, "content": r.content}
-        for r in reversed(hist_rows.fetchall())
-        if r.role in ("user", "assistant") and r.content
-    ]
-
-    # user 메시지 저장
-    user_msg_id = str(uuid.uuid4())
-    await session.execute(
-        text(
-            "INSERT INTO chat_agent.messages (id, session_id, role, content) "
-            "VALUES (CAST(:id AS uuid), CAST(:sid AS uuid), 'user', :c)"
-        ).bindparams(id=user_msg_id, sid=session_id, c=req.content)
-    )
-    await session.commit()
+        # user 메시지 저장
+        user_msg_id = str(uuid.uuid4())
+        await session.execute(
+            text(
+                "INSERT INTO chat_agent.messages (id, session_id, role, content) "
+                "VALUES (CAST(:id AS uuid), CAST(:sid AS uuid), 'user', :c)"
+            ).bindparams(id=user_msg_id, sid=sid, c=req.content)
+        )
+        # 세션 목록 메타데이터 유지 — 미갱신이면 리스트의 title/카운트/정렬이 전부
+        # 생성 시점 상태로 얼어 있었다(R25-N-C8). title 은 첫 질문의 앞부분으로 한 번만.
+        await session.execute(
+            text(
+                "UPDATE chat_agent.sessions SET "
+                "updated_at = now(), "
+                "message_count = message_count + 1, "
+                "title = COALESCE(title, left(:c, 80)) "
+                "WHERE id = CAST(:sid AS uuid)"
+            ).bindparams(c=req.content, sid=sid)
+        )
+        await session.commit()
+    except BaseException:
+        # 권한/만료/기록 단계에서 실패하면 클레임 해제 — 안 풀면 세션이 클레임
+        # TTL 동안 409 로 잠긴다. 릴레이·redis 클레임은 **내 것일 때만** 지운다
+        # (남의 걸 지우면 그 진행 중 분석이 열린다).
+        if relay is not None and _active_relays.get(sid) is relay:
+            _active_relays.pop(sid, None)
+        if redis is not None and redis_claimed:
+            try:
+                if await redis.get(_ACTIVE_KEY.format(sid)) == claim_token:
+                    await redis.delete(_ACTIVE_KEY.format(sid))
+            except Exception:  # noqa: BLE001
+                pass
+        raise
 
     # 핸드오프(§56): AgentCore 소비+영속화는 독립 background task 로 — 클라가
     # 페이지를 떠나 SSE 가 끊겨도 분석은 끝까지 돌고 결과는 DB 에 저장된다.
     # SSE 응답은 릴레이 tail(구독)일 뿐. 복귀 시 GET /stream 으로 재구독 가능.
-    relay = _StreamRelay()
-    _active_relays[session_id] = relay
-    _spawn(
+    # relay 는 위에서 이미 클레임됨 — 여기서 다시 만들면 중간 구간의 409 가
+    # 다른 relay 를 본다(로컬 클레임 그림자). 여기까지 왔다면 로컬 클레임은 성공.
+    assert relay is not None
+    _active_tasks[sid] = _spawn(
         _agentcore_producer(
-            relay, session_id, req.content, req.screen_context, req.mode,
+            relay, sid, req.content, req.screen_context, req.mode,
             req.language, history,
+            redis=redis, claim_token=claim_token,
         )
     )
 
@@ -443,7 +600,7 @@ async def post_message(
 
 @router.get("/sessions/{session_id}/stream")
 async def reattach_stream(
-    session_id: str,
+    session_id: uuid.UUID,
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ) -> StreamingResponse:
@@ -452,11 +609,12 @@ async def reattach_stream(
     릴레이가 살아있으면(분석 진행/방금 완료) 처음부터 tail(이미 발행된 프레임
     재생 + 이후 실시간). 없으면 404 — 클라는 history 로 폴백(완료분은 DB 에 있음).
     """
+    sid = str(session_id)
     sess_row = (
         await session.execute(
             text(
                 "SELECT user_id FROM chat_agent.sessions WHERE id = CAST(:sid AS uuid)"
-            ).bindparams(sid=session_id)
+            ).bindparams(sid=sid)
         )
     ).first()
     if not sess_row:
@@ -464,14 +622,68 @@ async def reattach_stream(
     if str(sess_row.user_id) != str(admin.user_id):
         raise HTTPException(403, "Forbidden")
 
-    relay = _active_relays.get(session_id)
+    relay = _active_relays.get(sid)
     if relay is None:
         raise HTTPException(404, "No active stream")
+    # 스트리밍 응답은 요청 스코프 세션의 autobegin 트랜잭션을 스트림 종료까지
+    # 붙잡는다(CommittingRoute 는 StreamingResponse 커밋을 생략) — pool 슬롯이
+    # idle-in-transaction 으로 고정된다. SELECT 만 했으니 반환 전에 닫는다(R25-N-C4).
+    await session.rollback()
     return StreamingResponse(
         relay.tail(),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/sessions/{session_id}/cancel")
+async def cancel_message(
+    request: Request,
+    session_id: uuid.UUID,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """진행 중 분석 취소(소유자 전용).
+
+    UI 의 Stop 버튼이 호출한다 — 브라우저 SSE 만 끊으면 서버 측 분석이 끝까지
+    토큰을 소비하고 다음 질문이 그 뒤에 줄을 선다. producer task 를 취소하면
+    부분 답변은 "[취소됨]" 노트로 영속화된다(R25-S12).
+    """
+    sid = str(session_id)
+    sess_row = (
+        await session.execute(
+            text(
+                "SELECT user_id FROM chat_agent.sessions WHERE id = CAST(:sid AS uuid)"
+            ).bindparams(sid=sid)
+        )
+    ).first()
+    if not sess_row:
+        raise HTTPException(404, "Session not found")
+    if str(sess_row.user_id) != str(admin.user_id):
+        raise HTTPException(403, "Forbidden")
+
+    # 크로스파드(R2-S2a): Service affinity 가 없어 /cancel 이 비소유 파드로 가는
+    # 경우가 흔하다 — 로컬 맵만 보면 cancelled:false 가 되어 취소가 유실된다.
+    # redis 플래그는 어떤 파드가 받아도 세운다 — 소유 파드의 producer 가 청크
+    # 경계(최대 ~1s 지연)에서 읽고 멈춘다. 로컬 task.cancel 은 즉시 경로.
+    redis = getattr(request.app.state, "redis", None)
+    flag_set = False
+    if redis is not None:
+        try:
+            await redis.set(_CANCEL_KEY.format(sid), "1", ex=_CLAIM_TTL)
+            flag_set = True
+        except Exception:  # noqa: BLE001
+            logger.warning("chat cancel flag write failed session_id=%s", sid)
+
+    task = _active_tasks.get(sid)
+    local = task is not None and not task.done()
+    if local:
+        _cancelled_sessions.add(sid)
+        task.cancel()
+    # cancelled=true 의 의미는 "취소 신호가 기록됨" 이다 — 유휴 세션에서도
+    # redis 플래그만 세워지면 true 가 된다(R3-N4). 실제 취소 완료는 소유 파드의
+    # 청크 경계에서 일어나며 UI 는 이 값을 신뢰하지 않는다.
+    return {"cancelled": local or flag_set}
 
 
 # AgentCore runtimeSessionId 는 최소 33자 요구. 우리 세션 UUID(36자)는 충족하지만
@@ -535,6 +747,8 @@ async def _agentcore_producer(
     mode: str = "quick",
     language: str = "ko",
     history: list[dict] | None = None,
+    redis=None,
+    claim_token: str | None = None,
 ) -> None:
     """AgentCore InvokeAgentRuntime → 릴레이 발행 + DB 영속화 (background, §56).
 
@@ -580,8 +794,50 @@ async def _agentcore_producer(
     stream_error = False
     streamed = False
     persisted = False
+    # 사용자 취소 여부 — 로컬 task.cancel(_cancelled_sessions) 또는 크로스파드
+    # redis 플래그(_CANCEL_KEY) 경로 모두 여기로 모은다.
+    cancelled_by_user = False
+    # 상류 정리용 참조 — CancelledError/finally 에서 body.close() 와 prefetch
+    # future 정리에 쓴다(R2-S1: 안 닫으면 취소 후에도 AgentCore 가 과금 계속).
+    client = None
+    body = None
+    pending: asyncio.Task | None = None
+    # 정상 경로 persist 를 추적 — drain/취소가 이 write 도중에 오면 바깥 태스크만
+    # 끊기고 inner persist 가 고아가 되거나 핸들러가 중복 persist 를 시작한다
+    # (R2-N-a/b). 태스크를 잡아두고 핸들러가 같은 태스크를 await 한다.
+    persist_task: asyncio.Task | None = None
+    # stop_runtime_session 중복 호출 가드(R4-N4) — 크로스파드 취소 경로가 이미
+    # 호출한 뒤 drain cancel 이 오면 핸들러가 다시 호출했다(첫 호출은 to_thread
+    # 워커에 버려지고 두 번째가 또 RTT 를 탄다).
+    runtime_stopped = False
 
-    async def _persist(error_note: str | None = None) -> None:
+    # 클레임 heartbeat(R4-N3) — producer 수명 전체를 커버. 스트림 루프 안에서만
+    # 갱신하면 invoke(blocking 최대 900s)나 비스트리밍 fallback 구간에 TTL 120s
+    # 가 만료돼 같은 세션이 다른 파드에서 이중 실행된다. 내 토큰일 때만 연장.
+    claim_refresher: asyncio.Task | None = None
+    if redis is not None and claim_token:
+        async def _claim_heartbeat() -> None:
+            akey = _ACTIVE_KEY.format(session_id)
+            while True:
+                await asyncio.sleep(_CLAIM_REFRESH_SECS)
+                try:
+                    await redis.eval(
+                        "if redis.call('get', KEYS[1]) == ARGV[1] "
+                        "then return redis.call('expire', KEYS[1], ARGV[2]) "
+                        "else return 0 end",
+                        1,
+                        akey,
+                        claim_token,
+                        _CLAIM_TTL,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 — 최선노력 갱신
+                    pass
+
+        claim_refresher = _spawn(_claim_heartbeat())
+
+    async def _persist(error_note: str | None = None, *, label: str = "오류") -> None:
         """스트림 누적분을 chat_agent.messages 에 저장. 성공·실패 **양쪽**에서 호출.
 
         ⚠️ 예전엔 이 저장이 try 안, 스트림 루프 **뒤**에만 있었다 — AgentCore 예외가
@@ -589,13 +845,19 @@ async def _agentcore_producer(
         사라졌다(새로고침하면 질문만 남고 답이 없다). 부분 답변이라도 남긴다.
 
         ``error_note`` 가 주어지면 실패 종료로 취급 — 본문에 라이브 화면과 **같은**
-        ``[오류] …`` 문구를 덧붙이고(복원 화면이 라이브와 일치하도록) 미완 도구를
-        failed 로 정리한다.
+        ``[{label}] …`` 문구를 덧붙이고(복원 화면이 라이브와 일치하도록) 미완 도구를
+        failed 로 정리한다. ``label``: 사용자 취소는 '취소됨'(오류처럼 보이지 않게),
+        서버 중단은 '중단', 그 외 실패는 '오류'(R2-N5).
+
+        ⚠️ ``persisted`` 는 commit **뒤**에 세운다(R2-N3). 쓰기 전에 세우면 정상
+        경로의 persist 도중 cancel(drain/Stop)이 와도 CancelledError 핸들러의
+        재시도가 `persisted=True` 를 보고 조기 리턴 — 완결된 답변 행이 유실된다.
+        커밋과 플래그 사이엔 await 가 없어 이중 쓰기 창도 없다(취소가 쓰기
+        중간에 오면 트랜잭션은 롤백되고, 핸들러가 flag=False 인 채로 다시 쓴다).
         """
         nonlocal persisted
         if persisted:
             return
-        persisted = True
         # tool_result 없는 도구(render_chart 등)가 running 으로 영속화되면 복원
         # 시 "실행 중..." 고착(§57) — 정상 종료면 done, 실패 종료면 failed.
         for tc in acc_tool_calls:
@@ -608,7 +870,7 @@ async def _agentcore_producer(
             r"\s*\[SUGGESTIONS\][\s\S]*?\[/SUGGESTIONS\]\s*", "", full_reply
         ).rstrip()
         if error_note:
-            note = f"\n\n[오류] {error_note}"
+            note = f"\n\n[{label}] {error_note}"
             # content 저장 상한이 8000 자다. 그냥 이어붙이면 긴 답변에서 **오류 문구가
             # 먼저 잘려** 실패 사실이 사라지므로, 본문 쪽에서 자리를 비운다.
             full_reply = (full_reply[: 8000 - len(note)].rstrip() + note).lstrip()
@@ -629,7 +891,16 @@ async def _agentcore_producer(
                     vd=json.dumps(acc_validator) if acc_validator else None,
                 )
             )
+            # 세션 목록 메타데이터 — assistant 턴도 카운트/정렬에 반영(R25-N-C8).
+            await own_db.execute(
+                text(
+                    "UPDATE chat_agent.sessions SET "
+                    "updated_at = now(), message_count = message_count + 1 "
+                    "WHERE id = CAST(:sid AS uuid)"
+                ).bindparams(sid=session_id)
+            )
             await own_db.commit()
+            persisted = True
 
     try:
         # read_timeout 900s — boto3 기본(60s)이면 deep 분석의 AgentCore flush 간격
@@ -658,176 +929,225 @@ async def _agentcore_producer(
         # 점진적으로 흘린다. StreamingBody.iter_lines() 로 한 줄씩 읽어 admin-ui SSE 로
         # 재발행. 각 next() 는 blocking 이라 to_thread 로 감싸 이벤트 루프 양보(전체
         # 루프를 감싸면 재버퍼링되므로 next() 단위로만).
-        if hasattr(body, "iter_lines"):
+        if hasattr(body, "iter_chunks") or hasattr(body, "iter_lines"):
             streamed = True
-            # chunk_size=1— botocore 기본(1024)은 1KB 가 모일 때까지 read 가 블록돼
-            # 첫 thinking/heartbeat 프레임이 ~5초 묶여 도착(§52 실측: 기본 5.03s →
-            # 1바이트 0.51s). SSE 는 초당 수백 바이트 수준이라 1바이트 read 의
-            # syscall 비용은 무시 가능 — 체감 첫 프레임이 즉시 도달하는 게 압도적 이득.
-            line_iter = body.iter_lines(chunk_size=1)
+            # iter_lines(chunk_size=1) 은 라인 한 줄마다 bytes 재할당이 누적되어
+            # O(L²) 다 — 300KB 라인(대형 tool_result)에 ~10s, 그 사이 이 pod 의
+            # 다른 요청이 굶는다(R25-N-C5). iter_chunks 는 도착한 만큼 돌려주므로
+            # 첫 프레임 지연 없이(1바이트 시대의 목적 유지) 라인 분할은 우리가 한다.
+            # iter_lines 폴백은 개행을 **떼고** 라인을 돌려준다 — 아래 라인 분할은
+            # '\n' 기준이므로 폴백 경로에선 개행을 복원해 줘야 프레임이 뭉개지지
+            # 않는다(뭉개지면 마지막 꼬리에서 통째로 json.loads 실패 → 모두 text).
+            use_iter_lines = not hasattr(body, "iter_chunks")
+            chunk_iter = (
+                body.iter_lines(chunk_size=4096)
+                if use_iter_lines
+                else body.iter_chunks(4096)
+            )
 
-            def _next_line():
-                return next(line_iter, None)
+            def _next_chunk():
+                return next(chunk_iter, None)
 
-            # heartbeat: 다음 라인을 기다리는 동안 HEARTBEAT_SECS 마다 SSE 코멘트
+            # heartbeat: 다음 청크를 기다리는 동안 HEARTBEAT_SECS 마다 SSE 코멘트
             # (`: keepalive`)를 흘려 (1) 연결 idle drop 방지 (2) 클라가 살아있음 인지.
             # 5-agent 파이프라인의 긴 침묵(SQL/Validator 실행) 구간 대응.
             # next() 를 한 번만 to_thread 로 띄워두고, 완료될 때까지 timeout 으로 폴링.
             HEARTBEAT_SECS = 10.0
-            pending = asyncio.ensure_future(asyncio.to_thread(_next_line))
-            while True:
+            pending = asyncio.ensure_future(asyncio.to_thread(_next_chunk))
+            line_buf = b""
+            eof = False
+            stop_stream = False
+            last_cancel_check = 0.0
+            while not stop_stream:
+                # 크로스파드 취소(R2-S2a): /cancel 이 다른 파드로 라우팅돼도
+                # redis 플래그를 세우므로 여기서 읽는다. 청크마다 묻지 않고
+                # 1초에 한 번(heartbeat 경계 포함) — 라운드트립 비용 절감.
+                # R3-N3 — 이 체크가 청크 대기 상한(HEARTBEAT_SECS=10)과 묶여 있으면
+                # 취소 지연이 최대 ~10s 가 됐다. wait_for 상한을 취소 주기로 내린다.
+                if redis is not None and time.monotonic() - last_cancel_check >= _CANCEL_CHECK_SECS:
+                    last_cancel_check = time.monotonic()
+                    if await _redis_flag(redis, _CANCEL_KEY.format(session_id)):
+                        cancelled_by_user = True
+                        stop_stream = True
+                        break
                 try:
-                    line = await asyncio.wait_for(asyncio.shield(pending), HEARTBEAT_SECS)
+                    chunk = await asyncio.wait_for(
+                        asyncio.shield(pending), _CANCEL_CHECK_SECS
+                    )
                 except asyncio.TimeoutError:
-                    # 다음 라인 대기 — keepalive 는 relay.tail() 이 자체 발행
+                    # 다음 청크 대기 — keepalive 는 relay.tail() 이 자체 발행
                     continue
-                if line is None:
-                    break
-                # 다음 라인 prefetch 시작 (처리와 병행)
-                pending = asyncio.ensure_future(asyncio.to_thread(_next_line))
-                if not line:
-                    continue  # SSE 빈 줄 구분자
-                text_line = (
-                    line.decode() if isinstance(line, (bytes, bytearray)) else line
-                )
-                if not text_line.startswith("data:"):
-                    continue
-                data_str = text_line[len("data:"):].strip()
-                if data_str in ("", "[DONE]"):
-                    continue
-                try:
-                    evt = json.loads(data_str)
-                except (ValueError, TypeError):
-                    evt = {"type": "text", "chunk": data_str}
-
-                # AgentCore in-band 에러 프레임 (HTTP 는 200 유지)
-                if isinstance(evt, dict) and "error_type" in evt:
-                    await _publish_error(
-                        relay,
-                        evt.get("error", "stream error"),
-                        str(evt.get("error_type") or "StreamError"),
-                    )
-                    stream_error = True
-                    break
-
-                etype = evt.get("type") if isinstance(evt, dict) else None
-                if etype == "chart" and isinstance(evt.get("spec"), dict):
-                    # strip: 표시 텍스트에서 제거할 원문 JSON 블록(admin-ui 가 사용)
-                    payload_out = {"spec": evt["spec"]}
-                    if evt.get("strip"):
-                        payload_out["strip"] = evt["strip"]
-                    acc_charts.append(evt["spec"])  # 영속화: charts[]
-                    await relay.publish(_sse("chart", payload_out))
-                elif etype == "thinking":
-                    # "작업 중" 신호 — 본문에 누적하지 않고 그대로 전달
-                    await relay.publish(_sse("thinking", {"text": evt.get("text", "")}))
-                elif etype == "reasoning":
-                    # 추론 요약 델타(orchestrator display:summarized) — 침묵 구간을
-                    # 메우는 "사고 과정" 스트림. 본문(accumulated)에 누적하지 않고
-                    # 그대로 전달(답변과 분리, DB 영속화 대상 아님).
-                    await relay.publish(_sse("reasoning", {"chunk": evt.get("chunk", "")}))
-                elif etype == "tool_call":
-                    # 도구 호출 투명성 (어떤 specialist 를 부르는지)
-                    tool_name = evt.get("tool", "")
-                    # 영속화: UI applyEvent 와 동일하게 running 상태로 추가
-                    acc_tool_calls.append(
-                        {"tool": tool_name, "args": evt.get("args", {}), "status": "running"}
-                    )
-                    await relay.publish(
-                        _sse("tool_call", {"tool": tool_name, "args": evt.get("args", {})})
-                    )
-                elif etype == "tool_result":
-                    # 실행된 코드/구조화 결과 (Code Specialist 의 code 포함)
-                    tool_name = evt.get("tool", "")
-                    tool_result = evt.get("result", {})
-                    # 영속화: 같은 이름 중 **result 가 아직 없는 첫 항목**에 채움(§57 fix).
-                    # 끝에서 스캔하면 같은 이름 호출 N개가 모두 마지막 항목에 덮어써져
-                    # 앞 항목들이 영원히 running 으로 남는다(복원 시 "실행 중..." 고착).
-                    for i in range(len(acc_tool_calls)):
-                        if (
-                            acc_tool_calls[i]["tool"] == tool_name
-                            and "result" not in acc_tool_calls[i]
-                        ):
-                            acc_tool_calls[i]["result"] = tool_result
-                            acc_tool_calls[i]["status"] = "done"
-                            break
-                    else:
-                        acc_tool_calls.append(
-                            {"tool": tool_name, "result": tool_result, "status": "done"}
-                        )
-                    await relay.publish(
-                        _sse("tool_result", {"tool": tool_name, "result": tool_result})
-                    )
-                elif etype == "validator":
-                    # reconciliation gate WARN 등. 영속화: 마지막 verdict 단일 객체.
-                    acc_validator = evt.get("result", {})
-                    await relay.publish(_sse("validator", {"result": evt.get("result", {})}))
-                elif etype == "verification":
-                    # L3 실행기반 후보선택 검증 메타(§58, deep 모드만). agreement/k/
-                    # verdict 를 그대로 전달 — UI 가 "검증됨" 카드로 렌더(설명가능성).
-                    # 휘발성 진행표시라 DB 영속화 안 함(validator 와 동일 취급).
-                    await relay.publish(
-                        _sse("verification", {"result": evt.get("result", {})})
-                    )
-                elif etype == "audit":
-                    # L5 독립 답변 감사(§60, deep+고위험만). 최종 산문 수치 cite 무결성
-                    # verdict/defects 를 그대로 전달 — UI advisory 카드(비파괴). validator
-                    # 와 동일하게 휘발성 진행표시로 취급(DB 영속화 안 함).
-                    await relay.publish(_sse("audit", {"result": evt.get("result", {})}))
-                elif etype == "heartbeat":
-                    # 공백 없는 스트리밍 생존신호(진행 단계/경과시간). 본문(accumulated)에
-                    # 절대 누적하지 않고 그대로 전달 — DB 영속화 대상 아님(휘발성 진행표시).
-                    # ⚠️ 명시 elif 필수: 없으면 아래 else 가 'phase'/'label' 없는 dict 라
-                    # chunk 추출 실패로 무시되거나, 키가 겹치면 본문 오염. (transport-level
-                    # `: keepalive` SSE 코멘트와는 다른, 데이터 이벤트.)
-                    await relay.publish(
-                        _sse(
-                            "heartbeat",
-                            {
-                                "phase": evt.get("phase", ""),
-                                "label": evt.get("label", ""),
-                                "elapsed_ms": evt.get("elapsed_ms", 0),
-                            },
-                        )
-                    )
-                elif etype == "plan":
-                    # deep 모드 분석 계획(§57 PlanCard). strip 으로 본문에서 raw
-                    # JSON 펜스 제거(차트와 동일 패턴). 영속화는 본문 텍스트에
-                    # 펜스가 남으므로 별도 컬럼 불필요(복원 시 UI 가 재추출).
-                    payload_out = {"plan": evt.get("plan", {})}
-                    if evt.get("strip"):
-                        payload_out["strip"] = evt["strip"]
-                    await relay.publish(_sse("plan", payload_out))
-                elif etype == "report":
-                    # 다운로드 리포트 카드. s3_uri 는 그대로 전달(UI 가 다운로드 클릭 시
-                    # /reports/download 로 presign 요청 — URL 을 미리 굽지 않음, 만료·검증
-                    # 우회 방지). ⚠️ chat_agent.messages 에 reports 컬럼이 없어
-                    # acc_reports 는 **DB 에 저장되지 않는다** — 새로고침하면 카드가
-                    # 사라진다(세션 중에만 유효). 복원까지 원하면 컬럼 추가가 필요.
-                    rep = {
-                        "s3_uri": evt.get("s3_uri", ""),
-                        "file_name": evt.get("file_name", "report"),
-                        "format": evt.get("format", "pdf"),
-                        "summary": evt.get("summary", ""),
-                        "page_count": evt.get("page_count"),
-                    }
-                    acc_reports.append(rep)
-                    await relay.publish(_sse("report", rep))
-                elif etype == "done":
-                    # agent 가 보내는 **정상 완료 표식**. 이 프레임을 못 보고 스트림이
-                    # 끝나면 절단이다(아래 truncated 판정) — 여기서만 기록하고 발행은
-                    # 루프 종료 후 한 번에 한다.
-                    saw_done = True
-                    continue
+                if chunk is None:
+                    # 개행 없이 끝난 꼬리 조각도 한 번 처리하고 종료한다 —
+                    # 끊긴 스트림의 마지막 프레임이 여기 있을 수 있다.
+                    if not line_buf.strip():
+                        break
+                    lines = [line_buf]
+                    line_buf = b""
+                    eof = True
                 else:
-                    chunk = (
-                        (evt.get("chunk") or evt.get("delta") or evt.get("reply") or "")
-                        if isinstance(evt, dict)
-                        else str(evt)
+                    # 다음 청크 prefetch 시작 (처리와 병행)
+                    pending = asyncio.ensure_future(asyncio.to_thread(_next_chunk))
+                    piece = (
+                        chunk
+                        if isinstance(chunk, (bytes, bytearray))
+                        else str(chunk).encode()
                     )
-                    if chunk:
-                        accumulated.append(chunk)
-                        await relay.publish(_sse("text", {"chunk": chunk}))
+                    if use_iter_lines:
+                        piece += b"\n"  # iter_lines 가 떼어낸 개행 복원
+                    line_buf += piece
+                    # 완성된 라인만 떼어 처리 — 마지막 조각은 다음 청크와 합쳐진다.
+                    lines = line_buf.split(b"\n")
+                    line_buf = lines.pop()
+                for line in lines:
+                    text_line = line.decode("utf-8", errors="replace")
+                    if not text_line.startswith("data:"):
+                        continue
+                    data_str = text_line[len("data:"):].strip()
+                    if data_str in ("", "[DONE]"):
+                        continue
+                    try:
+                        evt = json.loads(data_str)
+                    except (ValueError, TypeError):
+                        evt = {"type": "text", "chunk": data_str}
+
+                    # AgentCore in-band 에러 프레임 (HTTP 는 200 유지)
+                    if isinstance(evt, dict) and "error_type" in evt:
+                        await _publish_error(
+                            relay,
+                            evt.get("error", "stream error"),
+                            str(evt.get("error_type") or "StreamError"),
+                        )
+                        stream_error = True
+                        stop_stream = True
+                        break
+
+                    etype = evt.get("type") if isinstance(evt, dict) else None
+                    if etype == "chart" and isinstance(evt.get("spec"), dict):
+                        # strip: 표시 텍스트에서 제거할 원문 JSON 블록(admin-ui 가 사용)
+                        payload_out = {"spec": evt["spec"]}
+                        if evt.get("strip"):
+                            payload_out["strip"] = evt["strip"]
+                        acc_charts.append(evt["spec"])  # 영속화: charts[]
+                        await relay.publish(_sse("chart", payload_out))
+                    elif etype == "thinking":
+                        # "작업 중" 신호 — 본문에 누적하지 않고 그대로 전달
+                        await relay.publish(_sse("thinking", {"text": evt.get("text", "")}))
+                    elif etype == "reasoning":
+                        # 추론 요약 델타(orchestrator display:summarized) — 침묵 구간을
+                        # 메우는 "사고 과정" 스트림. 본문(accumulated)에 누적하지 않고
+                        # 그대로 전달(답변과 분리, DB 영속화 대상 아님).
+                        await relay.publish(_sse("reasoning", {"chunk": evt.get("chunk", "")}))
+                    elif etype == "tool_call":
+                        # 도구 호출 투명성 (어떤 specialist 를 부르는지)
+                        tool_name = evt.get("tool", "")
+                        # 영속화: UI applyEvent 와 동일하게 running 상태로 추가
+                        acc_tool_calls.append(
+                            {"tool": tool_name, "args": evt.get("args", {}), "status": "running"}
+                        )
+                        await relay.publish(
+                            _sse("tool_call", {"tool": tool_name, "args": evt.get("args", {})})
+                        )
+                    elif etype == "tool_result":
+                        # 실행된 코드/구조화 결과 (Code Specialist 의 code 포함)
+                        tool_name = evt.get("tool", "")
+                        tool_result = evt.get("result", {})
+                        # 영속화: 같은 이름 중 **result 가 아직 없는 첫 항목**에 채움(§57 fix).
+                        # 끝에서 스캔하면 같은 이름 호출 N개가 모두 마지막 항목에 덮어써져
+                        # 앞 항목들이 영원히 running 으로 남는다(복원 시 "실행 중..." 고착).
+                        for i in range(len(acc_tool_calls)):
+                            if (
+                                acc_tool_calls[i]["tool"] == tool_name
+                                and "result" not in acc_tool_calls[i]
+                            ):
+                                acc_tool_calls[i]["result"] = tool_result
+                                acc_tool_calls[i]["status"] = "done"
+                                break
+                        else:
+                            acc_tool_calls.append(
+                                {"tool": tool_name, "result": tool_result, "status": "done"}
+                            )
+                        await relay.publish(
+                            _sse("tool_result", {"tool": tool_name, "result": tool_result})
+                        )
+                    elif etype == "validator":
+                        # reconciliation gate WARN 등. 영속화: 마지막 verdict 단일 객체.
+                        acc_validator = evt.get("result", {})
+                        await relay.publish(_sse("validator", {"result": evt.get("result", {})}))
+                    elif etype == "verification":
+                        # L3 실행기반 후보선택 검증 메타(§58, deep 모드만). agreement/k/
+                        # verdict 를 그대로 전달 — UI 가 "검증됨" 카드로 렌더(설명가능성).
+                        # 휘발성 진행표시라 DB 영속화 안 함(validator 와 동일 취급).
+                        await relay.publish(
+                            _sse("verification", {"result": evt.get("result", {})})
+                        )
+                    elif etype == "audit":
+                        # L5 독립 답변 감사(§60, deep+고위험만). 최종 산문 수치 cite 무결성
+                        # verdict/defects 를 그대로 전달 — UI advisory 카드(비파괴). validator
+                        # 와 동일하게 휘발성 진행표시로 취급(DB 영속화 안 함).
+                        await relay.publish(_sse("audit", {"result": evt.get("result", {})}))
+                    elif etype == "heartbeat":
+                        # 공백 없는 스트리밍 생존신호(진행 단계/경과시간). 본문(accumulated)에
+                        # 절대 누적하지 않고 그대로 전달 — DB 영속화 대상 아님(휘발성 진행표시).
+                        # ⚠️ 명시 elif 필수: 없으면 아래 else 가 'phase'/'label' 없는 dict 라
+                        # chunk 추출 실패로 무시되거나, 키가 겹치면 본문 오염. (transport-level
+                        # `: keepalive` SSE 코멘트와는 다른, 데이터 이벤트.)
+                        await relay.publish(
+                            _sse(
+                                "heartbeat",
+                                {
+                                    "phase": evt.get("phase", ""),
+                                    "label": evt.get("label", ""),
+                                    "elapsed_ms": evt.get("elapsed_ms", 0),
+                                },
+                            )
+                        )
+                    elif etype == "plan":
+                        # deep 모드 분석 계획(§57 PlanCard). strip 으로 본문에서 raw
+                        # JSON 펜스 제거(차트와 동일 패턴). 영속화는 본문 텍스트에
+                        # 펜스가 남으므로 별도 컬럼 불필요(복원 시 UI 가 재추출).
+                        payload_out = {"plan": evt.get("plan", {})}
+                        if evt.get("strip"):
+                            payload_out["strip"] = evt["strip"]
+                        await relay.publish(_sse("plan", payload_out))
+                    elif etype == "report":
+                        # 다운로드 리포트 카드. s3_uri 는 그대로 전달(UI 가 다운로드 클릭 시
+                        # /reports/download 로 presign 요청 — URL 을 미리 굽지 않음, 만료·검증
+                        # 우회 방지). ⚠️ chat_agent.messages 에 reports 컬럼이 없어
+                        # acc_reports 는 **DB 에 저장되지 않는다** — 새로고침하면 카드가
+                        # 사라진다(세션 중에만 유효). 복원까지 원하면 컬럼 추가가 필요.
+                        rep = {
+                            "s3_uri": evt.get("s3_uri", ""),
+                            "file_name": evt.get("file_name", "report"),
+                            "format": evt.get("format", "pdf"),
+                            "summary": evt.get("summary", ""),
+                            "page_count": evt.get("page_count"),
+                        }
+                        acc_reports.append(rep)
+                        await relay.publish(_sse("report", rep))
+                    elif etype == "done":
+                        # agent 가 보내는 **정상 완료 표식**. 이 프레임을 못 보고 스트림이
+                        # 끝나면 절단이다(아래 truncated 판정) — 여기서만 기록하고 발행은
+                        # 루프 종료 후 한 번에 한다.
+                        saw_done = True
+                        continue
+                    else:
+                        chunk = (
+                            (evt.get("chunk") or evt.get("delta") or evt.get("reply") or "")
+                            if isinstance(evt, dict)
+                            else str(evt)
+                        )
+                        if chunk:
+                            accumulated.append(chunk)
+                            await relay.publish(_sse("text", {"chunk": chunk}))
+                if eof or stop_stream:
+                    break
+            # 루프 탈출(EOF/in-band 에러/cancel) 시 prefetch 해 둔 _next_chunk future 가
+            # 남을 수 있다 — to_thread 의 워커 스레드는 취소로 멈추지 않지만 future 를
+            # cancel 해 두면 "Future exception was never retrieved" 경고와 참조 누수를
+            # 막는다(이미 끝난 future 에 대한 cancel 은 no-op).
+            if not pending.done():
+                pending.cancel()
         else:
             # Fallback: 비스트리밍 단일 JSON 응답
             raw = body.read().decode() if hasattr(body, "read") else json.dumps(response, default=str)
@@ -843,18 +1163,125 @@ async def _agentcore_producer(
         # 예전엔 이 경로에서도 `event: done` 만 발행해 **잘린 답변이 완결된 답변으로**
         # 표시됐다(사용자는 조용히 truncate 된 분석을 신뢰하게 된다).
         truncation_note: str | None = None
-        if streamed and not saw_done and not stream_error:
+        if cancelled_by_user:
+            # 크로스파드 취소(R2-S2a) — truncated 가 아니라 사용자 취소다.
+            # 상류도 끊는다: body.close(finally)+stop_runtime_session(R2-S1).
+            cancel_note = "사용자가 분석을 중단했습니다"
+            await _publish_error(relay, cancel_note, "Cancelled")
+            truncation_note = cancel_note
+            persist_label = "취소됨"
+            if client is not None:
+                # 호출 전에 세운다 — 이 await 도중 drain cancel 이 오면 핸들러가
+                # 다시 호출하는데, to_thread 요청은 워커에서 어차피 계속 돈다.
+                runtime_stopped = True
+                try:
+                    await asyncio.to_thread(
+                        client.stop_runtime_session,
+                        agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
+                        runtimeSessionId=_agentcore_session_id(session_id),
+                    )
+                except Exception:  # noqa: BLE001 — 최선노력
+                    logger.warning(
+                        "chat stop_runtime_session failed session_id=%s", session_id
+                    )
+        elif streamed and not saw_done and not stream_error:
             truncation_note = (
                 "스트림이 완료 신호 없이 끊겼습니다 — 답변이 중간에 잘렸을 수 있습니다."
             )
             await _publish_error(relay, truncation_note, "StreamTruncated")
+            persist_label = "오류"
+        else:
+            persist_label = "오류"
 
         # done 은 "성공"이 아니라 "스트림 종료" 신호다(실패 사실은 위 error 프레임이
         # 전달). 클라이언트가 pending 스피너를 정리하고 [SUGGESTIONS] 를 추출하려면
         # 절단·에러 종료에서도 필요하다.
         await relay.publish(_sse("done", {}))
 
-        await _persist(error_note=truncation_note)
+        # 정상 경로도 shield(R2-N-a): DB 쓰기 도중 drain/Stop cancel 이 오면
+        # 완결된 답변이 '중단' 노트로 재기록되거나 통째로 유실된다. _spawn 으로
+        # _bg_tasks 에 등록해야 drain 이 이 쓰기까지 기다린다(R2-N-b).
+        persist_task = _spawn_persist(
+            _persist(error_note=truncation_note, label=persist_label)
+        )
+        await asyncio.shield(persist_task)
+
+    except asyncio.CancelledError:
+        # ⚠️ CancelledError 는 BaseException 이라 위 except Exception 에 잡히지
+        # 않는다 — pod 종료(lifespan drain)·사용자 취소 모두 이 경로. 부분 답변을
+        # 영속화하지 않으면 화면에 흘러간 텍스트가 DB 에 하나도 남지 않는다.
+        # shield 로 감싼다: drain 이 태스크를 다시 cancel 해도 persist 는 완주.
+        # set.discard 는 항상 None 을 반환 — 멤버십을 먼저 본다.
+        user_cancelled = (
+            session_id in _cancelled_sessions
+            or await _redis_flag(redis, _CANCEL_KEY.format(session_id))
+        )
+        _cancelled_sessions.discard(session_id)
+        cancelled_by_user = cancelled_by_user or user_cancelled
+        if persist_task is not None:
+            # R3-N1 — 정상 경로 persist 가 이미 돌고 있다 = 답변은 완결.
+            # 취소 프레임을 보내거나 이미 끝난 런에 stop_runtime_session 을
+            # 호출하면 라이브 화면(취소됨)과 DB(정상 답변)가 어긋난다.
+            # 여기선 그 태스크의 완주만 기다리고 조용히 종료한다.
+            try:
+                await asyncio.shield(persist_task)
+            except Exception:  # noqa: BLE001 — 실패면 아래에서 재시도
+                pass
+            if persisted:
+                raise
+        cancel_note = (
+            "사용자가 분석을 중단했습니다"
+            if user_cancelled
+            else "서버 재시작으로 분석이 중단되었습니다"
+        )
+        # 상류 끊기(R2-S1): task.cancel 만으로는 to_thread 워커의 HTTP 연결이
+        # 살아있어 AgentCore 가 끊긴 줄 모르고 토큰을 계속 소비한다(_ORCH_LOCK
+        # 도 점유). body.close() 로 소켓을 끊고, 사용자 취소면 런타임 세션 자체를
+        # 멈춘다 — 없으면 취소한 질문이 끝까지 과금된다.
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if body is not None:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001
+                pass
+        # 크로스파드 취소 경로에서 이미 stop 을 호출했다면 건너뛴다(R4-N4 —
+        # 그 호출 도중 drain cancel 이 와도 두 번째 RTT 를 타지 않게).
+        if user_cancelled and client is not None and not runtime_stopped:
+            try:
+                await asyncio.to_thread(
+                    client.stop_runtime_session,
+                    agentRuntimeArn=AGENTCORE_RUNTIME_ARN,
+                    runtimeSessionId=_agentcore_session_id(session_id),
+                )
+            except Exception:  # noqa: BLE001 — 최선노력, 취소 전파를 막지 않는다
+                logger.warning(
+                    "chat stop_runtime_session failed session_id=%s", session_id
+                )
+        try:
+            # 구독자에게도 종료 사유를 알린다 — 그냥 EOF 면 UI 는 done 없는
+            # 스트림 종료를 "미완성" 으로 처리한다(R25-N-C7 과 정합).
+            await _publish_error(relay, cancel_note, "Cancelled")
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            # 정상 경로 persist 가 이미 돌고 있으면 새 persist 를 시작하지 않고
+            # 그 태스크 완주를 기다린다 — 새로 시작하면 flag=False 창에 이중 INSERT
+            # (R2-N-a/b). 진행 중인 게 없으면 취소 노트로 새로 쓴다.
+            if persist_task is not None and not persist_task.done():
+                await asyncio.shield(persist_task)
+            if not persisted:
+                await asyncio.shield(
+                    _spawn_persist(
+                        _persist(
+                            error_note=cancel_note,
+                            label="취소됨" if user_cancelled else "중단",
+                        )
+                    )
+                )
+        except Exception:  # noqa: BLE001 — 취소 전파를 막지 않는다
+            logger.exception("chat cancelled persist failed session_id=%s", session_id)
+        raise
 
     except Exception as exc:
         await _publish_error(relay, str(exc), type(exc).__name__)
@@ -863,15 +1290,50 @@ async def _agentcore_producer(
         # 사라진다(질문만 남는다). 저장 자체가 또 실패해도 원래 예외 보고를 덮지
         # 않도록 따로 감싼다.
         try:
-            await _persist(error_note=f"{type(exc).__name__}: {exc}")
+            # R4-N2 — 예외 경로 persist 도 shield+등록: 이 commit 도중
+            # SIGTERM(drain)/Stop 이 오면 CancelledError 가 rollback 을 일으켜
+            # 부분 답변이 유실된다(나머지 두 경로와 같은 패턴).
+            await asyncio.shield(
+                _spawn_persist(_persist(error_note=f"{type(exc).__name__}: {exc}"))
+            )
+        except asyncio.CancelledError:
+            # outer 가 취소된 것 — shield 된 persist 는 계속 돈다.
+            raise
         except Exception:  # noqa: BLE001 — 영속화 실패가 에러 보고를 가리지 않게
             # stdlib logging — structlog 식 kwargs 를 넘기면 TypeError 다(%s 포맷).
             logger.exception("chat partial persist failed session_id=%s", session_id)
     finally:
-        # tail 구독자 종료 신호 + 릴레이 정리(완료 후 재구독은 history 폴백).
+        # 상류·prefetch 정리(R2-S1): 정상/에러/취소 전 경로에서 소켓을 닫는다 —
+        # 안 닫으면 done 후에도 FIN_WAIT 로 소켓이 남고, 취소 경로에선 AgentCore 가
+        # 끝까지 과금된다.
+        if claim_refresher is not None:
+            claim_refresher.cancel()
+        if pending is not None and not pending.done():
+            pending.cancel()
+        if body is not None:
+            try:
+                body.close()
+            except Exception:  # noqa: BLE001
+                pass
+        # tail 구독자 종료 신호 + 릴레이·태스크 정리(완료 후 재구독은 history 폴백).
         await relay.finish()
         if _active_relays.get(session_id) is relay:
             _active_relays.pop(session_id, None)
+        # 자기 자신이 등록된 태스크면 해제 — finally 시점엔 아직 done()=False 다.
+        if _active_tasks.get(session_id) is asyncio.current_task():
+            _active_tasks.pop(session_id, None)
+        _cancelled_sessions.discard(session_id)
+        # 크로스파드 클레임 해제 — 내 토큰일 때만. 취소 플래그도 함께 지운다
+        # (다음 질문이 과거 취소로 즉시 멈추지 않게 — post_message 도 클레임
+        # 시 지우지만 레이스 여지가 남으므로 양쪽에서 정리).
+        if redis is not None:
+            try:
+                akey = _ACTIVE_KEY.format(session_id)
+                if claim_token is not None and await redis.get(akey) == claim_token:
+                    await redis.delete(akey)
+                await redis.delete(_CANCEL_KEY.format(session_id))
+            except Exception:  # noqa: BLE001
+                pass
 
 
 # ─── 인라인 SQL 재실행 (§57 Phase2-B — deep-insight 차용) ───
@@ -885,9 +1347,15 @@ async def _agentcore_producer(
 LAMBDA_QUERY_DB = os.environ.get("LAMBDA_QUERY_DB", "")
 
 
+class _LambdaFunctionError(RuntimeError):
+    """Lambda invoke 의 FunctionError(핸들러 예외/타임아웃) — HTTP 200 위장 방지."""
+
+
 class SqlExecuteRequest(BaseModel):
     sql: str
-    session_id: str
+    # uuid.UUID 타입으로 두면 비-UUID 입력은 FastAPI 가 422 로 거절한다 —
+    # str + CAST 는 SQL 에서 DataError → 500 이 됐다(R25-N-C9).
+    session_id: uuid.UUID
 
 
 @router.post("/sql/execute")
@@ -908,7 +1376,7 @@ async def execute_sql(
         await session.execute(
             text(
                 "SELECT user_id FROM chat_agent.sessions WHERE id = CAST(:sid AS uuid)"
-            ).bindparams(sid=req.session_id)
+            ).bindparams(sid=str(req.session_id))
         )
     ).first()
     if not sess_row:
@@ -925,17 +1393,31 @@ async def execute_sql(
             Payload=json.dumps(
                 {
                     "sql": req.sql,
-                    "session_id": req.session_id,
+                    "session_id": str(req.session_id),
                     "step_id": f"manual-{uuid.uuid4().hex[:8]}",
                 }
             ).encode(),
         )
+        # ⚠️ invoke 는 핸들러 오류도 HTTP 200 + FunctionError 헤더로 돌려준다 —
+        #    그대로 json 을 반환하면 Lambda 장애가 정상 응답으로 보인다(R25-N-C10).
+        if resp.get("FunctionError"):
+            payload_body = resp["Payload"].read()
+            logger.warning(
+                "chat sql lambda function_error fn=%s err=%s body=%s",
+                LAMBDA_QUERY_DB, resp.get("FunctionError"), payload_body[:500],
+            )
+            raise _LambdaFunctionError()
         return json.loads(resp["Payload"].read())
 
     try:
         result = await asyncio.to_thread(_invoke)
+    except _LambdaFunctionError:
+        raise HTTPException(502, "query_db Lambda returned an error") from None
     except Exception as exc:  # Lambda 호출 자체 실패(권한/네트워크)
-        raise HTTPException(502, f"query execution failed: {exc}") from exc
+        # boto 예외 메시지에는 ARN/리전 등 내부 식별자가 들어간다 — 원문을
+        # 클라이언트에 흘리지 않고 로그에만 남긴다.
+        logger.warning("chat sql lambda invoke failed: %s", exc)
+        raise HTTPException(502, "query execution failed") from exc
     # ok:false(검증 실패 등)도 200 으로 그대로 — 에디터가 에러 메시지 표시
     return result
 

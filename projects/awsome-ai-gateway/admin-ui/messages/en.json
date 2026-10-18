@@ -102,6 +102,7 @@
     "usageThisMonthDesc": "Monthly cumulative cost in USD (all users)",
     "fetchFailed": "Fetch failed",
     "budgetUtilizationDesc": "Usage ratio against total budget",
+    "budgetNotConfigured": "No budget configured",
     "avgCostPerUser": "Avg Cost Per User",
     "avgCostPerUserDesc": "Based on {count} active users this month",
     "dailyAvg": "Daily Average",
@@ -125,6 +126,7 @@
     "name": "Name",
     "cost": "Cost",
     "budgetSpend": "Budget Spend",
+    "budgetSpendHint": "Budget usage is across all apps — the app filter only applies to the cost column",
     "noBudgetSet": "No budget set",
     "noPeriods": "No periods to show",
     "periodSelect": "Select period",
@@ -852,7 +854,9 @@
     "costSeriesOther": "Other",
     "item": "Item",
     "date": "Date",
-    "invalidDateRange": "The start date must be before the end date. Please adjust the date range."
+    "invalidDateRange": "The start date must be before the end date. Please adjust the date range.",
+    "clientFilterLabel": "App filter applied:",
+    "clientFilterClear": "Clear filter"
   },
   "analyticsModels": {
     "summaryMeta": "{count} models · {cost} total",
@@ -956,7 +960,9 @@
       "THROTTLE": "Throttle"
     },
     "pageTitle": "My Usage",
-    "teamBudgetApplied": "Team budget applied — no personal monthly limit. Contact your team leader for your effective cap."
+    "teamBudgetApplied": "Team budget applied — no personal monthly limit. Contact your team leader for your effective cap.",
+    "zeroBudget": "Personal budget $0 — all requests are blocked",
+    "zeroBudgetHint": "Your limit is set to $0. Ask your team leader to raise it if needed."
   },
   "chat": {
     "biInsight": "BI Insight",
@@ -968,6 +974,9 @@
     "newChat": "New Chat",
     "newChatTooltip": "Start a new chat (previous chats are preserved)",
     "sessionCreateFailed": "Session creation failed: {error}",
+    "historyLoadFailed": "Failed to load conversation history. The session is preserved — please try again shortly.",
+    "analysisInProgress": "A previous analysis is still running. Stop it, then try again.",
+    "analysisTimeout": "The analysis is taking too long, so we stopped waiting. The result will remain in the conversation history when it finishes.",
     "newChatFailed": "Failed to create new chat: {error}",
     "sessionResetNotice": "Your session has expired, so this continues as a new conversation. The previous context is not shared with the new session - please restate anything needed.",
     "inputPlaceholder": "Type your message...",

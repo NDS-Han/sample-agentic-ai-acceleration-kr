@@ -106,7 +106,7 @@ export async function updateModelAction(
   try {
     const d = parsed.data;
     // Update model metadata
-    await withRetry(() => adminAPI.put(`/admin/models/${encodeURIComponent(String(alias))}`, {
+    await adminAPI.put(`/admin/models/${encodeURIComponent(String(alias))}`, {
       provider_model_id: d.model_id,
       endpoint_url: d.endpoint_url || null,
       description: d.description || null,
@@ -114,7 +114,7 @@ export async function updateModelAction(
       // 비워 보내면 명시적 null → 서버가 "미상으로 되돌림"(fields_set null=삭제 규칙).
       context_window: d.context_window ?? null,
       max_output_tokens: d.max_output_tokens ?? null,
-    }));
+    });
     // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
     // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
     // 비멱등 쓰기(effective_from 을 요청마다 새로 계산)라 withRetry 로 감싸지 않는다 —
@@ -162,11 +162,9 @@ export async function deactivateModelAction(formData: unknown): Promise<ActionRe
   }
 
   try {
-    await withRetry(() =>
-      adminAPI.patch(`/admin/models/${encodeURIComponent(String(parsed.data.alias))}/status`, {
+    await adminAPI.patch(`/admin/models/${encodeURIComponent(String(parsed.data.alias))}/status`, {
         active: false,
-      })
-    );
+      });
     revalidatePath('/models');
     return { success: true, data: undefined };
   } catch (err) {
@@ -182,9 +180,7 @@ export async function activateModelAction(alias: string): Promise<ActionResult<v
   }
 
   try {
-    await withRetry(() =>
-      adminAPI.patch(`/admin/models/${encodeURIComponent(String(alias))}/status`, { active: true })
-    );
+    await adminAPI.patch(`/admin/models/${encodeURIComponent(String(alias))}/status`, { active: true });
     revalidatePath('/models');
     return { success: true, data: undefined };
   } catch (err) {
@@ -397,11 +393,9 @@ export async function deleteModelAction(alias: string): Promise<ActionResult<Mod
     return { success: false, error: 'Model alias is required' };
   }
   try {
-    const data = await withRetry(() =>
-      adminAPI.delete<{ deleted: ModelDeletionImpact }>(
+    const data = await adminAPI.delete<{ deleted: ModelDeletionImpact }>(
         `/admin/models/${encodeURIComponent(alias)}`
-      )
-    );
+      );
     revalidatePath('/models');
     return { success: true, data: data.deleted };
   } catch (err) {
@@ -433,12 +427,10 @@ export async function setTeamAllowedModelsAction(
   modelAliases: string[]
 ): Promise<ActionResult<{ team_id: string; model_aliases: string[] }>> {
   try {
-    const data = await withRetry(() =>
-      adminAPI.put<{ team_id: string; model_aliases: string[] }>(
+    const data = await adminAPI.put<{ team_id: string; model_aliases: string[] }>(
         `/admin/teams/${encodeURIComponent(String(teamId))}/allowed-models`,
         { model_aliases: modelAliases }
-      )
-    );
+      );
     // 팀 모델 정책의 유일한 편집지는 /users 팀 패널이다 — /models 는
     // 카탈로그 전용으로 축소됐고 이 저장의 표시 영향은 /users 에만 있다.
     revalidatePath('/users');

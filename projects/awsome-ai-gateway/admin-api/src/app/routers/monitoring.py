@@ -30,7 +30,7 @@ async def monitoring_overview(
 
     stmt = select(
         func.count().label("total_requests"),
-        func.count().filter(UsageLog.status == UsageStatus.ERROR).label("error_count"),
+        func.count().filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT])).label("error_count"),
         func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
         func.percentile_cont(0.95).within_group(UsageLog.latency_ms).label("p95_latency_ms"),
         func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
@@ -71,13 +71,18 @@ async def monitoring_models(
     stmt = (
         select(
             UsageLog.model_alias,
+            ModelAlias.status.label("alias_status"),
             func.count().label("requests"),
             func.avg(UsageLog.latency_ms).label("avg_latency_ms"),
-            func.count().filter(UsageLog.status == UsageStatus.ERROR).label("error_count"),
+            func.count().filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT])).label("error_count"),
             func.max(UsageLog.requested_at).label("last_request_at"),
         )
+        # 실제 status 는 카탈로그에서 가져온다 — 하드코딩 "ACTIVE" 는 비활성
+        # 별칭도 활성으로 표시한다(모니터링의 존재 이유를 부정하는 거짓 표시).
+        # outerjoin: 카탈로그에서 지워진 별칭의 로그도 사라지지 않게.
+        .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
         .where(UsageLog.requested_at >= one_hour_ago)
-        .group_by(UsageLog.model_alias)
+        .group_by(UsageLog.model_alias, ModelAlias.status)
         .order_by(func.count().desc())
     )
     result = await session.execute(stmt)
@@ -89,7 +94,7 @@ async def monitoring_models(
         error_rate = (errors / total * 100) if total > 0 else 0
         models.append({
             "alias": row.model_alias,
-            "status": "ACTIVE",
+            "status": row.alias_status.value if row.alias_status is not None else "UNKNOWN",
             "last_1h_requests": total,
             "avg_latency_ms": round(float(row.avg_latency_ms or 0)),
             "error_rate_pct": round(error_rate, 2),
@@ -214,7 +219,7 @@ async def monitoring_users(
                 0,
             ).label("tokens"),
             func.coalesce(func.sum(UsageLog.cost_usd), 0).label("cost_usd"),
-            func.count().filter(UsageLog.status == UsageStatus.ERROR).label("error_count"),
+            func.count().filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT])).label("error_count"),
             func.max(UsageLog.requested_at).label("last_request_at"),
         )
         .join(User, User.id == UsageLog.user_id)

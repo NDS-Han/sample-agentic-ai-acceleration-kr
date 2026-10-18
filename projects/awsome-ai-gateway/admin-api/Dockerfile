@@ -59,4 +59,10 @@ EXPOSE 8080
 # workers 1 (§56): in-memory _StreamRelay(핸드오프 재구독)가 프로세스 로컬이라
 # 멀티워커면 POST(워커A)/재구독 GET(워커B)이 갈라져 404. 단일 워커로 일관성 보장.
 # (멀티 replica/워커 확장 시 relay 를 Redis pub/sub 로 교체 후 되돌릴 것.)
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+#
+# --timeout-graceful-shutdown (R2-S3): 없으면 uvicorn 이 진행 중인 SSE 응답이
+# 끝날 때까지 **무한정** 기다려서, deep 분석 스트림 중 롤아웃이 오면 lifespan
+# shutdown(drain_chat_bg_tasks 의 부분답변 영속화)에 도달하기 전에 SIGKILL 된다.
+# 상한을 두면 열린 SSE 를 포기하고 lifespan 진입 → drain 이 부분 답변을 저장한다.
+# sh -c 형태인 이유: exec-form CMD 는 env 확장이 안 된다(gateway-proxy 와 동일).
+CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port 8080 --workers 1 --timeout-graceful-shutdown ${UVICORN_GRACEFUL_SHUTDOWN_TIMEOUT:-10}"]

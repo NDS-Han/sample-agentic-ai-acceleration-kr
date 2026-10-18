@@ -22,7 +22,9 @@ export default async function ForbiddenPage() {
         // admin_role 쿠키(admin-api 판정)를 우선 병합한다.
         const role =
           roleFromCookie((await cookies()).get(ADMIN_ROLE_COOKIE)?.value) ?? session.role;
-        if (role === UserRole.DEVELOPER) {
+        // '/' 는 ADMIN 전용(R25-S9) — TEAM_LEADER 도 '/' 로 보내면 '홈으로' 가
+        // 다시 /403 으로 돌아오는 막다른 길이다(R2-N7). 홈은 ADMIN 만 '/'.
+        if (role !== UserRole.ADMIN) {
           home = '/my';
         }
         isAdmin = role === UserRole.ADMIN;

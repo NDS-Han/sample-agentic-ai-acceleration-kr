@@ -256,6 +256,13 @@ class Settings(BaseSettings):
     # Logs Insights 가 한 쿼리에서 돌려줄 수 있는 상한은 10 000 이다. 잘렸는지를
     # 응답에 명시하려고 우리도 같은 값을 들고 있는다(조용한 truncation 금지).
     BEDROCK_INVOCATION_LOG_MAX_RECORDS: int = 10_000
+    # 위 log group 이 **실제로 담는 provider 집합**(쉼표 구분). invocation log 는
+    # 호출이 실행된 계정·리전에 쌓이므로, 다른 계정/리전에서 도는 provider 행은
+    # bedrock_request_id 가 있어도 이 그룹에 영원히 없다 — reconcile 이 그 행을
+    # `missing` 으로 세면 전부 거짓양성이다(예: BEDROCK native 가 cross-account
+    # ap-northeast-2 로 실행되는데 group 은 us-east-2). 기본값은 이 자산이 실제로
+    # 프로비저닝한 runtime plane(us-east-2)만(R25-S4).
+    BEDROCK_INVOCATION_LOG_PROVIDERS: str = "BEDROCK_RUNTIME_OPENAI"
 
     # ── Server ──
     HOST: str = "0.0.0.0"
