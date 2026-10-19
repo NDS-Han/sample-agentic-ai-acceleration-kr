@@ -140,6 +140,8 @@ locals {
       var.email_sender_type == "ses" ? { AWS_SES_REGION = var.aws_ses_region != "" ? var.aws_ses_region : var.aws_region } : {},
       var.email_sender_type == "smtp" ? { SMTP_HOST = var.smtp_host, SMTP_PORT = tostring(var.smtp_port), SMTP_USERNAME = var.smtp_username } : {},
       var.email_sender_type == "internal_api" ? { EMAIL_API_URL = var.email_api_url } : {},
+      # ops/NDS-01 — 비면 litellm 소스는 503/graceful-off (폴백 직접호출 없음)
+      var.litellm_pricing_lambda != "" ? { LITELLM_PRICING_LAMBDA = var.litellm_pricing_lambda } : {},
     )
 
     admin-ui = merge(local.common_env, {

@@ -22,7 +22,7 @@ from pathlib import Path
 import yaml
 
 from .schema import GatewayConfig
-from . import websearch
+from . import pricinglambda, websearch
 
 
 def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
@@ -308,6 +308,13 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
             print("ⓘ web_search: AgentCore Gateway 가 없습니다 — apply 시 "
                   "프로비저닝(provision_agentcore_websearch.py deploy)합니다",
                   file=sys.stderr)
+    if cfg.features.pricing_lambda:
+        st = pricinglambda.status(
+            cfg.aws.region, cfg.env,
+            (outs.get("admin_api_role_arn") or "").rsplit("/", 1)[-1])
+        print(f"ⓘ pricing_lambda: function={st['function']} role={st['role']} "
+              f"invoke={st['invoke']} — apply 시 없는 것만 보장합니다",
+              file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
     _run(_helm_argv(meta, set_args, dry_run=True, context=context), cwd=repo_root)
 
@@ -337,6 +344,14 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         else:
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 만 "
                   "켜진 상태로 진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
+
+    # ops/NDS-01 자동화 — role+함수+invoke 정책을 보장하고(멱등) 함수 이름을
+    # adminApi.env 로 주입한다. 비면 litellm 소스는 비활성(graceful-off).
+    if cfg.features.pricing_lambda:
+        fn = pricinglambda.ensure(
+            cfg, repo_root, outs.get("admin_api_role_arn", ""))
+        if fn:
+            set_args += ["--set", f"adminApi.env.LITELLM_PRICING_LAMBDA={fn}"]
 
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 

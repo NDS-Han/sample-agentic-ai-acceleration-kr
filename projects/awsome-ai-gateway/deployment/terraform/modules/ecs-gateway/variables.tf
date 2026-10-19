@@ -436,6 +436,12 @@ variable "agentcore_gateway_url" {
   default     = ""
 }
 
+variable "litellm_pricing_lambda" {
+  description = "LiteLLM 단가 조회 Lambda 이름 — 비면 admin-api 의 litellm 소스 비활성 (ops/NDS-01)"
+  type        = string
+  default     = ""
+}
+
 variable "reporting_timezone" {
   type    = string
   default = "Asia/Seoul"

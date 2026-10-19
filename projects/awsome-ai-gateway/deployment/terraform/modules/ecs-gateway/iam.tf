@@ -218,6 +218,18 @@ data "aws_iam_policy_document" "admin_api" {
     ]
     resources = ["*"]
   }
+
+  # ops/NDS-01 — eks 는 IRSA role 에 인라인 정책으로 붙는 것과 같은 효과.
+  # task role 이라 env 주입과 함께 terraform 소유가 맞다.
+  dynamic "statement" {
+    for_each = var.litellm_pricing_lambda != "" ? [1] : []
+    content {
+      sid       = "InvokeLitellmPricing"
+      effect    = "Allow"
+      actions   = ["lambda:InvokeFunction"]
+      resources = ["arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.litellm_pricing_lambda}"]
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {

@@ -691,6 +691,9 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         "영구 삭제됩니다.[/red]"
         + ("\n+ AgentCore WebSearch Gateway(us-east-1) — terraform 관리 밖의 "
            "프로비저닝 리소스" if cfg.features.web_search else "")
+        + (f"\n+ LiteLLM pricing Lambda llm-gateway-{cfg.env}-litellm-pricing"
+           " (+role) — boto3 프로비저닝 리소스" if cfg.features.pricing_lambda
+           else "")
         + ("\n[yellow]db_safeguards(deletion protection)가 켜져 있어 먼저 해제 "
            "apply 후 destroy 합니다 — Aurora 최종 스냅샷 없이 완전 삭제됩니다. "
            "보존이 필요하면 지금 중단하고 `aws rds create-db-cluster-snapshot` "
@@ -713,6 +716,10 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         # terraform 관리 밖의 프로비저닝 리소스 — 마지막에 정리
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
+    if cfg.features.pricing_lambda:
+        # boto3 프로비저닝 리소스 — invoke 정책은 모듈 소유라 destroy 가 정리
+        from . import pricinglambda
+        pricinglambda.teardown(cfg, detach_invoke=False)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 
@@ -733,6 +740,9 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     if cfg.features.web_search:
         lines.append("+ AgentCore WebSearch Gateway(us-east-1) — helm/terraform "
                      "관리 밖의 프로비저닝 리소스")
+    if cfg.features.pricing_lambda:
+        lines.append(f"+ LiteLLM pricing Lambda llm-gateway-{cfg.env}-litellm-pricing"
+                     " (+role, admin-api invoke 정책) — boto3 프로비저닝 리소스")
     if infra:
         lines.append(
             f"[red]+ 인프라 — terraform destroy {meta['env_dir']}:\n"
@@ -797,6 +807,12 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
+    if cfg.features.pricing_lambda:
+        from . import pricinglambda
+        admin_arn = ""
+        if env_dir:
+            admin_arn = eks_apply.tf_outputs(env_dir).get("admin_api_role_arn", "")
+        pricinglambda.teardown(cfg, admin_role_arn=admin_arn)
     if not infra:
         if uninstalled:
             console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 "

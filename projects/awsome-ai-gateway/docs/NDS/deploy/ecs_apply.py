@@ -193,6 +193,13 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
         _save_extra_vars(gen_dir, existing)
 
+    # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
+    # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는
+    # litellm_pricing_lambda tfvars 가 모듈에서 연다 (attach_invoke=False).
+    if cfg.features.pricing_lambda:
+        from . import pricinglambda
+        pricinglambda.ensure(cfg, repo_root, attach_invoke=False)
+
     ecs_render.render(cfg, gen_dir, extra_vars=existing)
 
     terraform_apply(cfg, gen_dir, repo_root, bootstrap=True)

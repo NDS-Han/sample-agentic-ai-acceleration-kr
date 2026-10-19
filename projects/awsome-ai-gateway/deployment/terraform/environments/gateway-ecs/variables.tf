@@ -271,6 +271,12 @@ variable "agentcore_gateway_url" {
   default     = ""
 }
 
+variable "litellm_pricing_lambda" {
+  description = "LiteLLM 단가 조회 Lambda 이름 — 비면 litellm 소스 비활성 (ops/NDS-01)"
+  type        = string
+  default     = ""
+}
+
 # ------------------------------------------------------------------------------
 # 권한 범위
 # ------------------------------------------------------------------------------

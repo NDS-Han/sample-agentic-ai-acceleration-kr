@@ -255,8 +255,10 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "플래그는 기록됐지만 로깅은 동작하지 않습니다.")
     if cfg.features.pricing_lambda:
         notes.append(
-            "pricing_lambda: Lambda 배포는 이 렌더러 범위 밖입니다 — 배포 후 "
-            ".env 에 LITELLM_PRICING_LAMBDA=<arn> 을 추가하십시오.")
+            "pricing_lambda: compose 는 자동 프로비저닝 대상이 아닙니다 — "
+            "ops/NDS-01 절차로 Lambda 를 별도 생성 후 .env 에 "
+            "LITELLM_PRICING_LAMBDA=<함수이름> 을 추가하십시오 "
+            "(ecs/eks 는 apply 가 자동 보장).")
     if cfg.features.observability:
         notes.append("observability: OTel/Prometheus/Loki/Tempo/Grafana 스택을 포함해 렌더했습니다.")
     if cfg.oidc.enabled and cfg.domain.mode == "none":

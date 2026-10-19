@@ -208,6 +208,7 @@ module "gateway" {
   body_log_firehose_arn  = var.enable_body_logging ? module.body_logging.firehose_stream_arn : ""
   body_log_bucket_arn    = var.enable_body_logging ? module.body_logging.bucket_arn : ""
   agentcore_gateway_url  = var.agentcore_gateway_url
+  litellm_pricing_lambda = var.litellm_pricing_lambda
 
   tags = var.tags
 }

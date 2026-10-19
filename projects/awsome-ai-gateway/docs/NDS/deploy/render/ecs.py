@@ -156,6 +156,11 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
 
     # ── 기능 플래그
     vars_["enable_body_logging"] = cfg.features.body_logging
+    if cfg.features.pricing_lambda:
+        # 함수 자체는 ecs_apply 가 boto3 로 보장 — 여기선 task env + invoke
+        # 권한을 여는 이름만 모듈에 넘긴다 (ops/NDS-01 명명 규칙과 동일)
+        vars_["litellm_pricing_lambda"] = \
+            f"llm-gateway-{cfg.env}-litellm-pricing"
 
     # ── OIDC — ecs 경로는 Cognito 를 만들고 그 출력이 OIDC 소스가 된다.
     #    required_group 만 tfvars 로 간다 (나머지 필드는 module output).
@@ -241,8 +246,9 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "routing_profiles.web_search_enabled DB 행은 별도로 필요합니다(admin-ui /models).")
     if cfg.features.pricing_lambda:
         notes.append(
-            "pricing_lambda: LiteLLM pricing Lambda 배포는 이 모듈 범위 밖입니다 — "
-            "별도 배포 후 LITELLM_PRICING_LAMBDA 를 env 로 주입해야 합니다.")
+            "pricing_lambda: apply 가 role+함수를 boto3 로 멱등 보장하고 "
+            "litellm_pricing_lambda tfvars 로 task env·invoke 권한을 엽니다 — "
+            "함수 삭제만 terraform 범위 밖입니다 (teardown 이 별도 정리).")
     if cfg.features.bi_insight:
         notes.append(
             "bi_insight: agentcore_runtime 모듈 연결은 미구현입니다 — env main.tf 에 "
