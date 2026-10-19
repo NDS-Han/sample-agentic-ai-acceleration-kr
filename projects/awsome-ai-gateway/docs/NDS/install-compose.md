@@ -252,6 +252,19 @@ cp ~/awsome-ai-gateway/deployment/gen/<env>/.env ~/backups/env-$(date +%F).bak
 
 ---
 
+## 배포 삭제
+
+```bash
+./deploy teardown             # 컨테이너 + 네트워크 삭제 — 볼륨(DB)은 남음
+./deploy teardown --purge     # 볼륨까지 — postgres 데이터 영구 삭제
+```
+
+`deployment/gen/<env>/` 산출물(`.env` 시크릿 포함)과 빌드된 이미지는 남습니다.
+`web_search`를 켰다면 AgentCore Gateway(us-east-1)도 함께 정리됩니다.
+자세한 소유 범위·주의는 [update.md](update.md#배포-삭제-teardown) 참조.
+
+---
+
 ## 문제가 생기면
 
 | 증상 | 확인 |

@@ -176,7 +176,12 @@ private 에서도 NAT 는 유지됩니다(ECR pull·Bedrock 호출 경로).
 |---|---|---|
 | **compose** | 컨테이너 + 네트워크. `--purge` 시 볼륨까지 (**DB 데이터 영구 삭제**) | 볼륨(기본), `gen/<env>/` 산출물(.env 시크릿 포함), 빌드된 이미지 |
 | **ecs** | terraform이 만든 전부 — VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR(repo+이미지) | `deployment/gen/` 산출물, terraform state backend(수동 관리) |
-| **eks** | 기본: helm release(앱 전체)만. `--infra` 추가 시 terraform env 인프라(EKS·Aurora·VPC 등)까지 | 기본: 인프라 전부 보존. `--infra` 시: terraform state backend·Secrets 복구 유예기간·수동 생성 리소스 보존 |
+| **eks** | 기본: helm release(앱 전체)만. `--infra` 추가 시 terraform env 인프라(EKS·Aurora·VPC 등)까지 | 기본: 인프라 전부 보존 + ns 내 k8s secrets/pvc 잔여 가능. `--infra` 시: terraform state backend·Secrets 복구 유예기간·수동 생성 리소스 보존 |
+
+모든 backend 에서 `web_search`를 켰다면 AgentCore WebSearch Gateway
+(us-east-1), `pricing_lambda`를 켰다면 LiteLLM pricing Lambda(+role) 도 함께
+삭제됩니다 — terraform 관리 밖의 프로비저닝 리소스라 destroy 로는 지워지지
+않아 CLI 가 별도로 정리합니다.
 
 ```bash
 ./deploy teardown                    # 삭제 대상 미리보기 → 환경 이름 입력 → 삭제

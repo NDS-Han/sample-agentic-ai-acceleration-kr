@@ -225,7 +225,20 @@ domain:
 forward-only 라 이전 태그의 alembic head 가 현재보다 낮아도 스키마는 유지됩니다
 (코드-스키마 호환성은 릴리스 노트로 확인).
 
-## 8. 아직 안 되는 것 (솔직한 목록)
+## 8. 배포 삭제
+
+```bash
+./deploy teardown   # plan -destroy 미리보기 → 환경 이름 입력 → terraform destroy
+```
+
+VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR 이 전부 지워지고,
+`web_search`/`pricing_lambda`를 켰다면 AgentCore Gateway와 LiteLLM Lambda도
+함께 정리됩니다. t2 등 `db_safeguards`가 켜진 티어는 CLI가 deletion
+protection을 해제한 뒤 삭제하므로 **최종 스냅샷 없이 완전 삭제** — 보존이
+필요하면 먼저 `aws rds create-db-cluster-snapshot`을 실행하세요.
+상세는 [update.md](update.md#배포-삭제-teardown) 참조.
+
+## 9. 아직 안 되는 것 (솔직한 목록)
 
 | 기능 | 상태 |
 |---|---|
@@ -236,7 +249,7 @@ forward-only 라 이전 태그의 alembic head 가 현재보다 낮아도 스키
 | `cloudfront-temp` | ECS 경로에 CloudFront 없음 → `none` (HTTP) 또는 `route53-acm` |
 | 외부 OIDC | ECS 경로는 Cognito 생성이 기본 — 외부 IdP 는 모듈 변수 직접 주입으로만 가능 |
 
-## 9. public → private 전환
+## 10. public → private 전환
 
 ```yaml
 network:
