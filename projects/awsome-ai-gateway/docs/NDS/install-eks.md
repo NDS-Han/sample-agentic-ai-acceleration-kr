@@ -139,6 +139,38 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
                    # terraform plan drift
 ```
 
+## 4. 도메인을 나중에 붙이기
+
+eks 경로는 인증서·DNS가 사람 소유라 ecs 처럼 한 apply 로 끝나지 않습니다:
+
+```bash
+# 1. ACM 에서 인증서 발급 (gateway./admin./admin-api.<domain> 3개 SAN 또는 wildcard)
+#    + DNS 검증 — 사내 도메인이면 사내 DNS 에 검증 레코드를 등록
+# 2. env values 에 cert 추가
+vi deployment/charts/llm-gateway/values-eks-fargate-<env>.local.yaml
+#    ingress.annotations."alb.ingress.kubernetes.io/certificate-arn": arn:aws:acm:...
+```
+
+```yaml
+# 3. gateway.yaml — host 재작성은 여기서 일어난다
+domain:
+  mode: route53-acm
+  name: <domain>            # → gateway./admin./admin-api.<domain> 3개 host 생성
+                            # + adminUi.nextauthUrl 갱신 (Cognito callback 도 맞출 것)
+```
+
+```bash
+# 4. 적용 후 DNS — 레코드 생성은 수동 (레거시 11-route53-cname.sh 와 같은 일)
+./deploy apply
+kubectl get ingress -n llm-gateway -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.loadBalancer.ingress[0].hostname}{"\n"}{end}'
+#    → 각 host 를 해당 ALB DNS 로 가리키는 CNAME 을 Route53/사내 DNS 에 등록
+```
+
+주의: `domain.name`을 쓰면 host 이름이 **env 무관 규칙**(`gateway.`/`admin.`/
+`admin-api.`)으로 바뀝니다 — `gateway-dev.<domain>` 같은 기존 이름을 유지해야
+하면 `domain.name`을 비워두세요 (env values 의 host 가 그대로 쓰입니다).
+hosted zone/도메인 자체의 획득·NS 위임은 모든 backend 에서 이 도구의 범위 밖입니다.
+
 ## 이 경로가 관리하는 것 / 하지 않는 것
 
 | 관리함 (gateway.yaml → helm) | 관리하지 않음 (기존 terraform/스크립트 소유) |
