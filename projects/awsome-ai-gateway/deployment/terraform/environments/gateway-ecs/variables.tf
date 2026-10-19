@@ -221,6 +221,11 @@ variable "email_sender_address" {
   default = "noreply@llm-gateway.local"
 }
 
+variable "email_api_url" {
+  type    = string
+  default = ""
+}
+
 variable "aws_ses_region" {
   type    = string
   default = ""

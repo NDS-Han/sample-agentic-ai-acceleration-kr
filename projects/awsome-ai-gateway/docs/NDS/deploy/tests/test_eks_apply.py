@@ -116,3 +116,91 @@ def test_dry_run_flag_legacy_before_313(monkeypatch):
 def test_dry_run_flag_server_on_helm4(monkeypatch):
     monkeypatch.setattr(eks_apply, "_helm_version", lambda: (4, 0))
     assert eks_apply._dry_run_flag() == "--dry-run=server"
+
+
+# ==============================================================================
+# ensure_infra — 선언된 기능 인프라의 targeted terraform apply
+# ==============================================================================
+
+def _env_dir(tmp_path):
+    d = tmp_path / "env"
+    d.mkdir()
+    return d
+
+
+def test_ensure_infra_targeted_apply_when_body_log_missing(monkeypatch, tmp_path):
+    """body_logging=true 인데 output 이 없으면 ops 8-V 와 같은 targeted apply."""
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(eks_apply, "tf_outputs",
+                        lambda d: {"body_log_firehose_stream": "s",
+                                   "body_log_bucket": "b"})
+    (tmp_path / "terraform.tfvars").write_text("enable_body_logging = true\n")
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    outs = eks_apply.ensure_infra(cfg, tmp_path, _env_dir(tmp_path), {})
+    assert outs["body_log_bucket"] == "b"
+    assert calls[0][:2] == ["terraform", "init"]
+    apply_argv = calls[1]
+    assert apply_argv[:2] == ["terraform", "apply"]
+    assert "-target=module.body_logging" in apply_argv
+    assert "-target=module.irsa" in apply_argv
+    assert any(a.startswith("-var-file=") for a in apply_argv)
+
+
+def test_ensure_infra_skips_when_outputs_present(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    outs = {"body_log_firehose_stream": "s", "body_log_bucket": "b"}
+    assert eks_apply.ensure_infra(cfg, tmp_path, _env_dir(tmp_path), outs) is outs
+    assert calls == []
+
+
+def test_ensure_infra_ses_targets_irsa_only(monkeypatch, tmp_path):
+    """provider=ses 인데 worker IRSA output 이 없으면 module.irsa 만."""
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(eks_apply, "tf_outputs",
+                        lambda d: {"notification_worker_ses_role_arn": "arn:r"})
+    cfg = _cfg(features={"notifications": {"provider": "ses",
+                                           "ses_from": "a@b.c"}})
+    eks_apply.ensure_infra(cfg, tmp_path, _env_dir(tmp_path), {})
+    apply_argv = calls[1]
+    assert "-target=module.irsa" in apply_argv
+    assert not any("body_logging" in a for a in apply_argv)
+
+
+def test_ensure_infra_noop_when_features_off(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    assert eks_apply.ensure_infra(_cfg(), tmp_path, _env_dir(tmp_path), {}) == {}
+    assert calls == []
+
+
+def test_ensure_infra_missing_env_dir_warns(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    outs = eks_apply.ensure_infra(cfg, tmp_path, tmp_path / "nope", {})
+    assert outs == {} and calls == []
+    assert "terraform env" in capsys.readouterr().err
+
+
+def test_plan_never_runs_terraform_apply(monkeypatch, tmp_path, capsys):
+    """plan 은 읽기 전용 — 인프라가 비어 있어도 terraform apply 를 돌리지 않는다."""
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(eks_apply, "tf_outputs", lambda d: {})
+    monkeypatch.setattr(eks_apply, "load_meta", lambda g, r: {
+        "release": "r", "namespace": "n", "chart": "c",
+        "env_dir": "env", "values_layers": []})
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    eks_apply.plan(cfg, tmp_path, tmp_path)
+    assert calls and calls[0][0] == "helm"
+    assert "--dry-run" in calls[0] or "--dry-run=server" in calls[0]
+    assert not any("apply" in a for a in calls[0])
+    assert "targeted terraform apply" in capsys.readouterr().err

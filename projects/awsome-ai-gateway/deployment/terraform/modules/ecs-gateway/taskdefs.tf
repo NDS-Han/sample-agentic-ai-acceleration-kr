@@ -139,6 +139,7 @@ locals {
       },
       var.email_sender_type == "ses" ? { AWS_SES_REGION = var.aws_ses_region != "" ? var.aws_ses_region : var.aws_region } : {},
       var.email_sender_type == "smtp" ? { SMTP_HOST = var.smtp_host, SMTP_PORT = tostring(var.smtp_port), SMTP_USERNAME = var.smtp_username } : {},
+      var.email_sender_type == "internal_api" ? { EMAIL_API_URL = var.email_api_url } : {},
     )
 
     admin-ui = merge(local.common_env, {
@@ -189,6 +190,7 @@ locals {
         SMTP_USERNAME = var.smtp_username
         SMTP_STARTTLS = "true"
       } : {},
+      var.email_sender_type == "internal_api" ? { EMAIL_API_URL = var.email_api_url } : {},
     )
 
     migration = {

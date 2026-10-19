@@ -377,6 +377,12 @@ variable "email_sender_type" {
   default     = "mock"
 }
 
+variable "email_api_url" {
+  description = "internal_api provider 의 사내 메일 API URL — provider 가 internal_api 면 필수"
+  type        = string
+  default     = ""
+}
+
 variable "email_sender_address" {
   type    = string
   default = "noreply@llm-gateway.local"

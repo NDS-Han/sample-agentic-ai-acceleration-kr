@@ -16,7 +16,7 @@ IMPLEMENTED_TARGETS = ("compose", "ecs", "eks")   # 렌더러가 있는 backend
 SIZE_TIERS = ("t0", "t1", "t2", "t3")
 NETWORK_MODES = ("public", "private")
 DOMAIN_MODES = ("none", "cloudfront-temp", "route53-acm")
-NOTIFICATION_PROVIDERS = ("mock", "smtp", "ses")
+NOTIFICATION_PROVIDERS = ("mock", "smtp", "ses", "internal_api")
 MODEL_PROFILES = ("global", "regional")
 
 _ENV_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
@@ -56,6 +56,10 @@ class DeployConfig:
 class NetworkConfig:
     mode: str = "public"
     allowed_cidrs: list[str] = field(default_factory=list)
+    # eks 전용 — admin-ui/admin-api Ingress 만 scheme=internal 로 내린다
+    # (gateway 데이터플레인은 public 유지 — ops 8-I 목표형). mode=private 은
+    # 3개 Ingress 전부를 internal 로 만들어 게이트웨이까지 끊기므로 다른 의미다.
+    admin_internal: bool = False
 
 
 @dataclass
@@ -73,6 +77,9 @@ class NotificationConfig:
     smtp_from: str = ""
     ses_from: str = ""
     sender_name: str = ""          # 비우면 "LLM Gateway"
+    internal_api_url: str = ""     # provider=internal_api — 사내 메일 API URL (필수)
+    internal_api_from: str = ""    # 발신 주소 (비우면 차트 기본)
+    smtp_credentials_secret: str = ""  # eks: SMTP 인증 Secret 이름 (차트 credentialsSecretName)
 
 
 @dataclass
@@ -131,6 +138,8 @@ class OidcConfig:
     token_url: str = ""
     provider_name: str = "oidc:cognito"
     required_group: str = ""    # 비우면 인증된 모든 사용자 통과
+    vk_ttl_hours: int = 0       # VK 수명 — 0 이면 차트 기본(1시간). ops 8-Z 의
+                              # adminApi.oidc.vkTtlHours 와 같은 키로 렌더된다.
 
     @property
     def enabled(self) -> bool:
@@ -185,6 +194,17 @@ class GatewayConfig:
                 "Caddy 가 호스트 포트를 그대로 개방합니다. 호스트 방화벽/보안그룹으로 "
                 "막거나 allowed_cidrs 를 사용하십시오."
             )
+        if self.network.admin_internal:
+            if self.deploy.target == "eks" and self.network.mode == "private":
+                w.append(
+                    "network.mode=private 이면 admin 포함 3개 Ingress 전부 internal "
+                    "입니다 — admin_internal 은 중복 선언입니다."
+                )
+            elif self.deploy.target != "eks":
+                w.append(
+                    f"network.admin_internal 은 eks 전용입니다 — "
+                    f"deploy.target={self.deploy.target} 에서는 무시됩니다."
+                )
         if self.features.web_search and self.deploy.target == "compose":
             w.append("web_search 는 AgentCore(us-east-1) 의존 — compose 경로에서는 수동 프로비저닝이 필요합니다.")
         if self.deploy.target == "eks":
@@ -281,6 +301,11 @@ class GatewayConfig:
             e.append("notifications.provider=ses 이면 notifications.ses_from 이 필요합니다.")
         if self.features.notifications.provider == "smtp" and not self.features.notifications.smtp_host:
             e.append("notifications.provider=smtp 이면 notifications.smtp_host 가 필요합니다.")
+        if (self.features.notifications.provider == "internal_api"
+                and not self.features.notifications.internal_api_url):
+            e.append("notifications.provider=internal_api 이면 "
+                     "notifications.internal_api_url 이 필요합니다 — 비우면 worker 가 "
+                     "EMAIL_API_URL 부재로 기동 실패(crashloop)합니다.")
         if self.features.bi_insight and self.deploy.target == "compose":
             e.append("bi_insight(AgentCore Runtime)는 compose backend에서 지원하지 않습니다.")
         if self.domain.mode == "cloudfront-temp" and self.deploy.target == "compose":
@@ -301,6 +326,8 @@ class GatewayConfig:
                 e.append("oidc.issuer_url 을 채웠으면 admin-ui SSO 용 oidc.client_id 도 필요합니다.")
             if not (self.oidc.authorize_url and self.oidc.token_url):
                 e.append("oidc 를 쓰려면 authorize_url / token_url 도 필요합니다 (hosted-ui 엔드포인트).")
+        if self.oidc.vk_ttl_hours < 0:
+            e.append("oidc.vk_ttl_hours 는 0 이상이어야 합니다 (0=차트 기본).")
         return e
 
 
@@ -348,16 +375,19 @@ _TOP_LEVEL_KEYS = frozenset((
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
                           "tfstate_table", "release", "namespace", "tf_env_dir"))
-_NETWORK_KEYS = frozenset(("mode", "allowed_cidrs"))
+_NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
 _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id"))
 _FEATURE_KEYS = frozenset(("notifications", "bi_insight", "pricing_lambda",
                            "web_search", "body_logging", "observability"))
 _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
-                         "ses_from", "sender_name"))
+                         "ses_from", "sender_name",
+                         "internal_api_url", "internal_api_from",
+                         "smtp_credentials_secret"))
 _IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
 _CLIENT_KEYS = frozenset(("models_profile",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
-                        "authorize_url", "token_url", "provider_name", "required_group"))
+                        "authorize_url", "token_url", "provider_name", "required_group",
+                        "vk_ttl_hours"))
 
 
 def from_dict(raw: dict) -> GatewayConfig:
@@ -415,6 +445,8 @@ def from_dict(raw: dict) -> GatewayConfig:
             allowed_cidrs=([network["allowed_cidrs"]]
                            if isinstance(network.get("allowed_cidrs"), str)
                            else list(network.get("allowed_cidrs") or [])),
+            admin_internal=_safe_bool(network.get("admin_internal", False), errors,
+                                      "network.admin_internal"),
         ),
         domain=DomainConfig(
             mode=str(domain.get("mode", "none")),
@@ -430,6 +462,9 @@ def from_dict(raw: dict) -> GatewayConfig:
                 smtp_from=str(notif.get("smtp_from", "")),
                 ses_from=str(notif.get("ses_from", "")),
                 sender_name=str(notif.get("sender_name", "")),
+                internal_api_url=str(notif.get("internal_api_url", "")),
+                internal_api_from=str(notif.get("internal_api_from", "")),
+                smtp_credentials_secret=str(notif.get("smtp_credentials_secret", "")),
             ),
             bi_insight=_safe_bool(features.get("bi_insight", False), errors,
                                   "features.bi_insight"),
@@ -460,6 +495,8 @@ def from_dict(raw: dict) -> GatewayConfig:
             client_secret=str(oidc.get("client_secret", "")),
             provider_name=str(oidc.get("provider_name", "oidc:cognito")),
             required_group=str(oidc.get("required_group", "")),
+            vk_ttl_hours=_safe_int(oidc.get("vk_ttl_hours", 0), errors,
+                                   "oidc.vk_ttl_hours"),
         ),
     )
     errors.extend(cfg.validate())

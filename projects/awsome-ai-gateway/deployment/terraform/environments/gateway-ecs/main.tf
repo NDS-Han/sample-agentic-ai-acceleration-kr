@@ -202,6 +202,7 @@ module "gateway" {
   smtp_port            = var.smtp_port
   smtp_username        = var.smtp_username
   smtp_password        = var.smtp_password
+  email_api_url        = var.email_api_url
 
   body_log_firehose_name = var.enable_body_logging ? module.body_logging.firehose_stream_name : ""
   body_log_firehose_arn  = var.enable_body_logging ? module.body_logging.firehose_stream_arn : ""

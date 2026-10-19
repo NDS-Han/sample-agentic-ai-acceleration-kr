@@ -101,6 +101,9 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     aurora = outs.get("application_db_endpoint") or outs.get("aurora_endpoint")
     if aurora:
         args += ["--set", f"database.external.host={aurora}"]
+    # install-eks.sh 계약 — output 이 없으면 차트 기본 "gateway" 로 수렴한다
+    args += ["--set",
+             f"database.external.name={outs.get('aurora_database_name') or 'gateway'}"]
     if outs.get("elasticache_endpoint"):
         args += ["--set", f"redis.external.host={outs['elasticache_endpoint']}",
                  "--set", "redis.external.tls=true"]
@@ -232,6 +235,56 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
     return ""
 
 
+def _infra_targets(cfg: GatewayConfig) -> list[str]:
+    """gateway.yaml 이 소유하는 terraform 대상 — body_logging 모듈 + 그 IAM 배선.
+    ops 8-V 의 `terraform apply -target=module.body_logging -target=module.irsa`
+    와 같은 계약."""
+    modules = set()
+    if cfg.features.body_logging:
+        modules |= {"module.body_logging", "module.irsa"}
+    if cfg.features.notifications.provider == "ses":
+        modules.add("module.irsa")  # enable_notification_ses → worker IRSA
+    return sorted(f"-target={m}" for m in modules)
+
+
+def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
+    """선언은 됐는데 terraform output 이 비어 있는 기능."""
+    missing = []
+    if (cfg.features.body_logging
+            and not (outs.get("body_log_firehose_stream") and outs.get("body_log_bucket"))):
+        missing.append("body_logging(Firehose/S3/IRSA)")
+    if (cfg.features.notifications.provider == "ses"
+            and not outs.get("notification_worker_ses_role_arn")):
+        missing.append("notification-worker SES IRSA")
+    return missing
+
+
+def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path, outs: dict) -> dict:
+    """선언된 기능에 필요한 인프라가 terraform output 에 없으면 targeted apply.
+
+    관리 범위는 _infra_targets 이 정한 모듈뿐 — env 전체 apply 는 하지 않는다
+    (클러스터·VPC 등 사람 소유). gen/<env>/eks/terraform.tfvars 를 -var-file 로
+    뒤에 붙여 선언값을 주입한다. 반환은 최신 terraform outputs."""
+    targets = _infra_targets(cfg)
+    if not targets:
+        return outs
+    if not env_dir.is_dir():
+        print("⚠ 기능 인프라가 선언됐지만 terraform env 디렉토리가 없습니다 "
+              f"({env_dir}) — 인프라 없이 helm 만 진행합니다", file=sys.stderr)
+        return outs
+    missing = _infra_missing(cfg, outs)
+    if not missing:
+        return outs
+    managed_tfvars = gen_dir / "terraform.tfvars"
+    var_args = [f"-var-file={managed_tfvars}"] if managed_tfvars.exists() else []
+    print(f"{', '.join(missing)} 가 없습니다 — {env_dir} 에서 targeted "
+          "terraform apply 를 실행합니다", file=sys.stderr)
+    _run(["terraform", "init", "-input=false"], cwd=env_dir)
+    _run(["terraform", "apply", "-auto-approve", "-input=false",
+          *var_args, *targets], cwd=env_dir)
+    return tf_outputs(env_dir)
+
+
 def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
     """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다."""
     meta = load_meta(gen_dir, repo_root)
@@ -239,16 +292,24 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
     if meta.get("env_dir") and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — "
               "동적 --set 값(DB/Redis/IRSA/cognito) 없이 dry-run 합니다", file=sys.stderr)
+    missing = _infra_missing(cfg, outs)
+    if missing:
+        print(f"ⓘ {', '.join(missing)} 가 terraform output 에 없습니다 — apply 시 "
+              f"targeted terraform apply({' '.join(_infra_targets(cfg))})가 "
+              "먼저 실행됩니다", file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
     _run(_helm_argv(meta, set_args, dry_run=True, context=context), cwd=repo_root)
 
 
 def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
     meta = load_meta(gen_dir, repo_root)
-    outs = tf_outputs(repo_root / meta["env_dir"]) if meta.get("env_dir") else {}
-    if meta.get("env_dir") and not outs:
+    env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    outs = tf_outputs(env_dir) if env_dir else {}
+    if env_dir and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — helm 만 "
               "업데이트합니다 (인프라 동적값 주입 생략)", file=sys.stderr)
+    if env_dir:
+        outs = ensure_infra(cfg, gen_dir, env_dir, outs)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
 
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)

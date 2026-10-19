@@ -441,14 +441,35 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
 
     # 라이브 ingress 와 values 의 host 가 다른지 (kubectl 패치 드리프트)
     live_hosts = []
+    live_schemes: dict[str, str] = {}
     for item in live.get("items", []):
         anns = (item.get("metadata") or {}).get("annotations") or {}
         for rule in (item.get("spec") or {}).get("rules") or []:
             live_hosts.append((item["metadata"]["name"], rule.get("host", "")))
+        scheme = anns.get("alb.ingress.kubernetes.io/scheme")
+        if scheme:
+            live_schemes[item["metadata"]["name"]] = scheme
         live_cidrs = anns.get("alb.ingress.kubernetes.io/inbound-cidrs")
         if live_cidrs and live_cidrs != cidrs_raw:
             notes.append(f"⚠ ingress/{item['metadata']['name']} 의 live inbound-cidrs "
                          f"({live_cidrs})가 helm values 와 다릅니다 — kubectl 패치 드리프트")
+
+    def _scheme(suffix: str, values_sec: str) -> str:
+        for nm, sc in live_schemes.items():
+            if nm.endswith(f"-{suffix}"):
+                return sc
+        sec_anns = _val(ing, values_sec, "annotations", default={}) or {}
+        return str(sec_anns.get("alb.ingress.kubernetes.io/scheme", ""))
+
+    gw_scheme = _scheme("gateway", "gateway") or str(ann.get(
+        "alb.ingress.kubernetes.io/scheme", ""))
+    ui_scheme = _scheme("admin-ui", "adminUi") or gw_scheme
+    api_scheme = _scheme("admin-api", "adminApi") or gw_scheme
+    net_mode = "private" if gw_scheme == "internal" else "public"
+    admin_internal = (net_mode == "public"
+                      and (ui_scheme == "internal" or api_scheme == "internal"))
+    if admin_internal:
+        notes.append("admin Ingress 만 scheme=internal — network.admin_internal=true 로 캡처")
 
     # ── images — per-service 태그가 다르면 images.tags 맵으로 기록한다 ───────
     #    (US-19 같은 멀티태그 릴리스 — 단일 images.tag 로는 표현 불가)
@@ -487,8 +508,22 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     notif = {"provider": provider}
     if provider == "ses":
         notif["ses_from"] = str(_val(email, "ses", "fromAddress"))
-    elif provider not in ("mock", "ses", "smtp"):
-        notes.append(f"email.provider={provider} 는 스키마에 없는 값(internal_api 등) — "
+    elif provider == "smtp":
+        smtp = _val(email, "smtp", default={}) or {}
+        notif.update({
+            "smtp_host": str(smtp.get("host", "")),
+            "smtp_port": smtp.get("port", 587),
+            "smtp_from": str(smtp.get("fromAddress", "")),
+            "smtp_credentials_secret": str(smtp.get("credentialsSecretName", "")),
+        })
+    elif provider == "internal_api":
+        ia = _val(email, "internalApi", default={}) or {}
+        notif.update({
+            "internal_api_url": str(ia.get("url", "")),
+            "internal_api_from": str(ia.get("fromAddress", "")),
+        })
+    elif provider != "mock":
+        notes.append(f"email.provider={provider} 는 스키마에 없는 값 — "
                      "notifications.provider 를 직접 맞추세요")
 
     otel_mode = str(_val(v, "observability", "otel", "mode"))
@@ -513,6 +548,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             "required_group": str(_val(v, "adminApi", "oidc", "requiredGroup") or
                                   _val(v, "gatewayProxy", "oidc", "requiredGroup")),
         }
+        vk_ttl = _val(v, "adminApi", "oidc", "vkTtlHours")
+        if vk_ttl not in (None, ""):
+            oidc["vk_ttl_hours"] = vk_ttl
         if not ui_env.get("OIDC_CLIENT_ID"):
             notes.append("adminUi.env.OIDC_CLIENT_ID 를 못 읽었습니다 — 확인해 채우세요")
     else:
@@ -558,7 +596,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "deploy": {"target": "eks", "size_tier": "t3",
                    "release": release, "namespace": namespace,
                    "tf_env_dir": str(env_dir) if env_dir else ""},
-        "network": {"mode": "public", "allowed_cidrs": cidrs},
+        "network": {"mode": net_mode, "allowed_cidrs": cidrs,
+                    "admin_internal": admin_internal},
         "domain": domain,
         "features": features,
         "images": {"tag": tag},

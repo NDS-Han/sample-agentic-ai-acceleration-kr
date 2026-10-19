@@ -154,7 +154,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
         "알림 provider",
         choices=[Choice("mock — 발송 안 함(기본)", "mock"),
                  Choice("ses — Amazon SES", "ses"),
-                 Choice("smtp — 외부 SMTP", "smtp")],
+                 Choice("smtp — 외부 SMTP", "smtp"),
+                 Choice("internal_api — 사내 메일 API", "internal_api")],
         default=prev_notif.get("provider", "mock")).ask())
     notif_extra = {}
     if notif == "ses":
@@ -165,6 +166,16 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "SMTP 호스트", default=str(prev_notif.get("smtp_host", "")) or None).ask())
         notif_extra["smtp_from"] = _unwrap(questionary.text(
             "발신 주소", default=str(prev_notif.get("smtp_from", "")) or None).ask())
+        # 인증 Secret 은 백엔드별 취급이 달라(eks: k8s Secret 이름) 질문하지 않고 보존
+        if prev_notif.get("smtp_credentials_secret"):
+            notif_extra["smtp_credentials_secret"] = prev_notif["smtp_credentials_secret"]
+    elif notif == "internal_api":
+        notif_extra["internal_api_url"] = _unwrap(questionary.text(
+            "사내 메일 API URL",
+            default=str(prev_notif.get("internal_api_url", "")) or None).ask())
+        notif_extra["internal_api_from"] = _unwrap(questionary.text(
+            "발신 주소 (비우면 차트 기본)",
+            default=str(prev_notif.get("internal_api_from", "")) or None).ask())
 
     prev_feat = _g(ex, "features", default={}) or {}
     features = _unwrap(questionary.checkbox(
@@ -202,9 +213,18 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "token URL", default=str(prev_oidc.get("token_url", "")) or None).ask())
         # 질문하지 않는 OIDC 필드는 기존 값을 보존 — configure 한 번에
         # required_group/audience/client_secret 가 조용히 사라지는 걸 막는다
-        for k in ("audience", "client_secret", "required_group", "provider_name"):
+        for k in ("audience", "client_secret", "required_group", "provider_name",
+                  "vk_ttl_hours"):
             if prev_oidc.get(k) and k not in oidc:
                 oidc[k] = prev_oidc[k]
+        vk_ttl = _unwrap(questionary.text(
+            "VK 수명(시간) — 비우면 차트 기본(1시간)",
+            default=str(prev_oidc.get("vk_ttl_hours", "")) or None).ask())
+        if vk_ttl:
+            try:
+                oidc["vk_ttl_hours"] = int(vk_ttl)
+            except ValueError:
+                console.print("[yellow]vk_ttl_hours 가 숫자가 아닙니다 — 기존 값 유지")
 
     images = {}
     if target in ("ecs", "eks"):
@@ -241,6 +261,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
     allowed = _unwrap(questionary.text(
         "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)",
         default=",".join(str(c) for c in prev_cidrs)).ask())
+    admin_internal = bool(_g(ex, "network", "admin_internal"))
+    if target == "eks":
+        admin_internal = _unwrap(questionary.confirm(
+            "admin 콘솔(admin-ui/admin-api)만 internal ALB 로 내립니까? "
+            "(gateway 는 public 유지 — S2S VPN/사내망 전제)",
+            default=admin_internal).ask())
 
     doc = {
         "version": 1,
@@ -253,7 +279,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
                    if (_g(ex, "aws", "account_id") or target in ("ecs", "eks")) else {})},
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": _g(ex, "network", "mode") or "public",
-                    "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()]},
+                    "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()],
+                    "admin_internal": admin_internal},
         "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id},
         "features": {
             "notifications": {"provider": notif, **notif_extra},

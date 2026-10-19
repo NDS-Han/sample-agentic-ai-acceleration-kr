@@ -83,9 +83,17 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if cfg.network.allowed_cidrs:
         ann["alb.ingress.kubernetes.io/inbound-cidrs"] = ",".join(cfg.network.allowed_cidrs)
     if cfg.network.mode == "private":
+        # ⚠️ 공통 annotations — 3개 Ingress 전부 internal 로 내린다(gateway 포함).
+        # gateway public + admin internal 조합은 아래 admin_internal 이 담당.
         ann["alb.ingress.kubernetes.io/scheme"] = "internal"
-    if ann or cfg.domain.name:
+    if ann or cfg.domain.name or cfg.network.admin_internal:
         v["ingress"] = {"enabled": True, "className": "alb", "annotations": ann}
+    if cfg.network.admin_internal:
+        # ops 8-I — admin 콘솔만 internal ALB (S2S VPN 전제). per-ingress
+        # 어노테이션은 차트의 전용 맵이며 공통값을 덮어쓴다.
+        for key in ("adminUi", "adminApi"):
+            v["ingress"].setdefault(key, {}).setdefault("annotations", {})[
+                "alb.ingress.kubernetes.io/scheme"] = "internal"
     if cfg.domain.name:
         # TLS 는 ALB 의 certificate-arn 어노테이션이 담당 — tls.secretName 은
         # 비워두면 빈 문자열 블록이 생기므로 여기선 host 만 관리한다
@@ -93,6 +101,9 @@ def desired_values(cfg: GatewayConfig) -> dict:
                           ("adminUi", f"admin.{cfg.domain.name}"),
                           ("adminApi", f"admin-api.{cfg.domain.name}")):
             v["ingress"][key] = {"host": host, "path": "/", "pathType": "Prefix"}
+        # domain 도입 시 NEXTAUTH_URL 도 새 주소로 — 비워두면 이전 값(ALB DNS
+        # 등)이 남아 Cognito callback allowlist 와 어긋나 SSO 가 깨진다
+        v.setdefault("adminUi", {})["nextauthUrl"] = f"https://admin.{cfg.domain.name}"
 
     # ── features → gatewayProxy.env / notificationWorker.email ──────────────
     genv: dict = {}
@@ -106,13 +117,21 @@ def desired_values(cfg: GatewayConfig) -> dict:
     # output 값이라 apply 에서 --set — 플래그만 여기서 기록하지 않는다
 
     n = cfg.features.notifications
-    email: dict = {"provider": n.provider if n.provider in ("ses", "internal_api") else
-                   ("internal_api" if n.provider == "smtp" else n.provider)}
+    # 차트가 provider 별 블록을 네이티브 지원 — smtp 를 internal_api 로 매핑하면
+    # EMAIL_API_URL="" 로 crashloop 되므로 각각 자기 블록으로 보낸다.
+    email: dict = {"provider": n.provider}
     if n.provider == "ses":
         email["ses"] = {"region": cfg.aws.region, "fromAddress": n.ses_from,
                         "fromName": n.sender_name or "LLM Gateway"}
     elif n.provider == "smtp":
-        email["internalApi"] = {"url": "", "fromAddress": n.smtp_from,
+        email["smtp"] = {"host": n.smtp_host, "port": n.smtp_port,
+                         "fromAddress": n.smtp_from,
+                         **({"credentialsSecretName": n.smtp_credentials_secret}
+                            if n.smtp_credentials_secret else {})}
+    elif n.provider == "internal_api":
+        email["internalApi"] = {"url": n.internal_api_url,
+                                "fromAddress": n.internal_api_from
+                                or "no-reply@llm-gateway.local",
                                 "fromName": n.sender_name or "LLM Gateway"}
     v["notificationWorker"] = dict(v.get("notificationWorker", {}), email=email)
 
@@ -137,6 +156,12 @@ def desired_values(cfg: GatewayConfig) -> dict:
         v.setdefault("adminUi", {}).setdefault("env", {}).update(ui_env)
     else:
         v.setdefault("adminUi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
+
+    # VK TTL — adminApi.env:OIDC_VK_TTL_HOURS 로 넣으면 oidcEnv 뒤에 같은 이름의
+    # env 가 2개 생기는 함정이 있다(ops 8-Z) — 정식 키 adminApi.oidc.vkTtlHours.
+    if cfg.oidc.vk_ttl_hours:
+        v.setdefault("adminApi", {}).setdefault("oidc", {})[
+            "vkTtlHours"] = cfg.oidc.vk_ttl_hours
 
     return v
 
@@ -169,12 +194,12 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
                      "URL 이 바뀌므로 클라이언트 재안내가 필요합니다.")
     if not cfg.domain.name and cfg.domain.mode != "none":
         notes.append("domain.name 이 없어 ingress host 는 기존 values 를 유지합니다.")
-    if cfg.features.notifications.provider == "smtp":
-        notes.append("notifications.provider=smtp → chart 의 internal_api 로 매핑했습니다"
-                     " — internalApi.url 은 env values 파일에서 관리하세요.")
-    if cfg.features.body_logging:
-        notes.append("body_logging: FIREHOSE_STREAM_NAME/BODY_LOG_S3_BUCKET 은 "
-                     "terraform output 에서 apply 시 주입됩니다.")
+    if cfg.features.notifications.provider == "internal_api":
+        notes.append("notifications.provider=internal_api — internalApi.url 에 "
+                     f"{cfg.features.notifications.internal_api_url} 를 렌더했습니다.")
+    if cfg.network.admin_internal:
+        notes.append("admin_internal: admin-ui/admin-api Ingress 만 scheme=internal 로 "
+                     "내립니다 — S2S VPN 등 관리자망→VPC 경로가 선행돼야 합니다.")
     if cfg.features.web_search:
         notes.append("web_search: AGENTCORE_GATEWAY_URL 은 기존 env values 에 있어야 "
                      "합니다 — 없으면 플래그만 켜지고 라우터가 건너뜁니다.")
@@ -187,6 +212,17 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
     return notes
 
 
+def render_tfvars(cfg: GatewayConfig) -> str:
+    """eks env(terraform) 의 managed 오버레이 — gateway.yaml 이 소유하는 인프라
+    플래그만. eks env tfvars 는 사람이 소유하므로 이 파일을 -var-file 로 뒤에
+    붙인다 (나중 -var-file 가 이긴다)."""
+    return ("# generated by deploy — gateway.yaml 이 소유하는 terraform 키만.\n"
+            "# 적용: terraform -var-file=<이 파일> apply (env 디렉토리에서)\n"
+            f"enable_body_logging = {'true' if cfg.features.body_logging else 'false'}\n"
+            f"enable_notification_ses = "
+            f"{'true' if cfg.features.notifications.provider == 'ses' else 'false'}\n")
+
+
 def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     env_vals = env_values_file(cfg, repo_root)
@@ -197,12 +233,21 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         "# 레이어 순서: chart values.yaml → env overlay → 이 파일(마지막이 이긴다)\n"
         + yaml.safe_dump(desired_values(cfg), sort_keys=False, allow_unicode=True))
 
+    tfvars_path = out_dir / "terraform.tfvars"
+    tfvars_path.write_text(render_tfvars(cfg))
+
     meta = deploy_meta(cfg, env_vals, repo_root)
     meta["values_layers"].append(str(values_path))
     deploy_path = out_dir / "deploy.yaml"
     deploy_path.write_text(yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
 
     notes = feature_notes(cfg)
+    if cfg.features.body_logging:
+        notes.append(
+            "body_logging: 인프라(Firehose/S3/IRSA)는 terraform 소유입니다 — "
+            "`deploy apply` 가 output 누락을 감지하면 "
+            f"`terraform apply -var-file={tfvars_path} -target=module.body_logging "
+            "-target=module.irsa` 를 자동 실행하고 output 을 pod env 로 주입합니다.")
     if not env_vals:
         notes.append(f"env overlay(values-eks-fargate-{cfg.env}.yaml)를 못 찾았습니다 — "
                      "차트 기본값 + 이 오버레이만으로 배포됩니다. 기존 배포를 업데이트하는 "
@@ -210,5 +255,5 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
                      "이 오버레이가 공급하지 않습니다 — chart 는 externalSecrets.enabled(ESO) "
                      "또는 .Values.secrets 중 하나가 반드시 필요하며, 둘 다 없으면 "
                      "migration Job과 전 pod가 Secret 참조 실패로 뜨지 못합니다.")
-    return {"files": [values_path, deploy_path], "notes": notes,
+    return {"files": [values_path, deploy_path, tfvars_path], "notes": notes,
             "env_dir": meta["env_dir"]}

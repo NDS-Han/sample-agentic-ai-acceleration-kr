@@ -200,7 +200,8 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
         **({"ALLOWED_IAM_ROLES": ",".join(cfg.aws.allowed_roles)} if cfg.aws.allowed_roles else {}),
         "DEV_LOGIN_ENABLED": "false" if cfg.oidc.enabled else "true",
         "EMAIL_SENDER_TYPE": n.provider,
-        "EMAIL_SENDER_ADDRESS": n.ses_from or n.smtp_from or "noreply@llm-gateway.local",
+        "EMAIL_SENDER_ADDRESS": (n.ses_from or n.smtp_from or n.internal_api_from
+                                or "noreply@llm-gateway.local"),
         "LOG_LEVEL": "INFO",
     }
     if n.provider == "ses":
@@ -208,6 +209,8 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
     if n.provider == "smtp":
         env["SMTP_HOST"] = n.smtp_host
         env["SMTP_PORT"] = str(n.smtp_port)
+    if n.provider == "internal_api":
+        env["EMAIL_API_URL"] = n.internal_api_url
     if cfg.oidc.enabled:
         env.update({
             "OIDC_ISSUER_URL": cfg.oidc.issuer_url,

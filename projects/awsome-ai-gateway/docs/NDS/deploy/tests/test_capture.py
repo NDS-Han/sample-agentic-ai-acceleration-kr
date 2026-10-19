@@ -199,9 +199,14 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
                    "sizing": {"gateway-proxy": {"cpu": 2048}}},
         "oidc": {"issuer_url": "u", "client_id": "c", "authorize_url": "a",
                  "token_url": "t", "required_group": "grp",
-                 "client_secret": "sec", "provider_name": "oidc:custom"},
-        "network": {"mode": "public", "allowed_cidrs": ["1.2.3.4/32"]},
+                 "client_secret": "sec", "provider_name": "oidc:custom",
+                 "vk_ttl_hours": 4},
+        "network": {"mode": "public", "allowed_cidrs": ["1.2.3.4/32"],
+                    "admin_internal": True},
         "domain": {"mode": "none", "name": "", "zone_id": ""},
+        "features": {"notifications": {"provider": "smtp", "smtp_host": "h",
+                                       "smtp_from": "f@x",
+                                       "smtp_credentials_secret": "smtp-creds"}},
     }
     doc = cli._collect_doc(existing)
     assert doc["aws"]["account_id"] == "123456789012"
@@ -209,6 +214,81 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     assert doc["oidc"]["required_group"] == "grp"
     assert doc["oidc"]["client_secret"] == "sec"
     assert doc["oidc"]["provider_name"] == "oidc:custom"
+    # 새 필드 — 질문/보존 경로 모두 기존값을 잃으면 안 된다
+    assert doc["oidc"]["vk_ttl_hours"] == 4
+    assert doc["network"]["admin_internal"] is True
+    assert doc["features"]["notifications"]["smtp_credentials_secret"] == "smtp-creds"
+
+
+# ==============================================================================
+# eks capture — 신규 스키마 필드 역변환
+# ==============================================================================
+
+def _eks_values(**over):
+    vals = {
+        "global": {"environment": "dev"},
+        "aws": {"region": "ap-northeast-2"},
+        "gatewayProxy": {"image": {"tag": "1.0.0"}},
+        "ingress": {},
+    }
+    vals.update(over)
+    return vals
+
+
+def _capture_with(monkeypatch, vals, live=None):
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json",
+                        lambda *a, **kw: live or {})
+    return capture.capture_eks()
+
+
+def test_eks_capture_admin_internal_and_vk_ttl(monkeypatch):
+    """admin Ingress 만 internal 이면 admin_internal=true / mode=public."""
+    vals = _eks_values(
+        adminApi={"oidc": {"issuerUrl": "iss", "vkTtlHours": 4},
+                  "image": {"tag": "1.0.0"}},
+        adminUi={"env": {"OIDC_CLIENT_ID": "cid"}},
+        ingress={
+            "annotations": {"alb.ingress.kubernetes.io/scheme": "internet-facing"},
+            "adminUi": {"annotations": {
+                "alb.ingress.kubernetes.io/scheme": "internal"}},
+            "adminApi": {"annotations": {
+                "alb.ingress.kubernetes.io/scheme": "internal"}},
+        },
+        notificationWorker={"email": {"provider": "internal_api", "internalApi": {
+            "url": "https://mail.corp", "fromAddress": "gw@corp"}}},
+    )
+    doc, _ = _capture_with(monkeypatch, vals)
+    assert doc["network"]["mode"] == "public"
+    assert doc["network"]["admin_internal"] is True
+    assert doc["oidc"]["vk_ttl_hours"] == 4
+    n = doc["features"]["notifications"]
+    assert n["provider"] == "internal_api"
+    assert n["internal_api_url"] == "https://mail.corp"
+    assert n["internal_api_from"] == "gw@corp"
+
+
+def test_eks_capture_all_internal_is_private_not_admin_internal(monkeypatch):
+    """공통 scheme=internal 은 mode=private — admin_internal 과 구분한다."""
+    vals = _eks_values(ingress={
+        "annotations": {"alb.ingress.kubernetes.io/scheme": "internal"}})
+    doc, _ = _capture_with(monkeypatch, vals)
+    assert doc["network"]["mode"] == "private"
+    assert doc["network"]["admin_internal"] is False
+
+
+def test_eks_capture_smtp_fields(monkeypatch):
+    vals = _eks_values(notificationWorker={"email": {
+        "provider": "smtp",
+        "smtp": {"host": "mail.corp", "port": 465, "fromAddress": "gw@corp",
+                 "credentialsSecretName": "smtp-creds"}}})
+    doc, _ = _capture_with(monkeypatch, vals)
+    n = doc["features"]["notifications"]
+    assert n["provider"] == "smtp"
+    assert n["smtp_host"] == "mail.corp"
+    assert n["smtp_port"] == 465
+    assert n["smtp_from"] == "gw@corp"
+    assert n["smtp_credentials_secret"] == "smtp-creds"
 
 
 def test_doctor_ps_json_array():

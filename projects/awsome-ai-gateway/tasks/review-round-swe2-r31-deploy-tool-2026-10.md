@@ -40,3 +40,30 @@ init/configure/teardown 플로우, subprocess 경계, 시크릿 취급.
 - `capture_eks`의 ElastiCache members 매칭 방향(`redis_ep in members`)은 느슨한 폴백 — PrimaryEndpoint 매칭이 주 경로라 실해 영향 없음
 - eks의 `oidc.client_secret`은 렌더 안 됨(chart가 secretKeyRef 미지원) — notes로 안내됨
 - ECS `allowed_aws_accounts`는 모듈이 caller account로 폴백 — env에 변수가 없어 선언 통과 경로 없음(현재 계약상 동일 계정 전제)
+
+---
+
+## 후속 — NDS 배포 마법사 시나리오 커버리지 (같은 날 추가 작업)
+
+`docs/us-llm-gateway` ops 가이드의 운영 시나리오가 `deploy` 경로에서 재현 가능한지 대조해
+부족분을 채웠다. 목표: gateway.yaml + configure 만으로 아래 시나리오 전부 커버.
+
+| 시나리오 | 이전 상태 | 변경 |
+|---|---|---|
+| admin ALB 만 internal | `network.mode=private` 는 3 Ingress 전부 internal → gateway 까지 끊김 | `network.admin_internal` 추가 → `ingress.adminUi/adminApi.annotations` 에만 `scheme=internal` (차트 per-ingress 맵이 공통값을 덮어씀) |
+| 도메인 없이 배포 → 도메인 추가 | domain=none 2-phase 만 있고 도메인 도입 시 nextauthUrl 미갱신 → OIDC 콜백 어긋남 | `domain.name` 렌더 시 `adminUi.nextauthUrl=https://admin.<domain>` |
+| notification 채널 변경 | 스키마에 `internal_api` 없음, eks SES IRSA 는 수동 terraform | provider `internal_api` 추가(차트 `email.internalApi` 블록, compose `EMAIL_API_URL`, ecs `email_api_url` 변수+taskdefs 배선); `smtp_credentials_secret` 필드. SES 전환 시 `ensure_infra` 가 `module.irsa` targeted apply 로 worker IRSA 자동 생성 |
+| 토큰 TTL 변경 | `adminApi.oidc.vkTtlHours` 값 통로 없음 | `oidc.vk_ttl_hours` → `adminApi.oidc.vkTtlHours` (ops 8-Z 와 같은 키 — env 2중생성 함정 회피) |
+| 본문 로깅 활성화 | 플래그만 있고 인프라(Firehose/S3/IRSA)는 수동 apply | `eks_apply.ensure_infra`: output 누락 시 `terraform apply -var-file=<gen tfvars> -target=module.body_logging -target=module.irsa` 자동 실행 (ops 8-V 와 같은 계약). plan 은 적용 예고만 하고 실행 안 함 |
+| EKS 클러스터 업그레이드 | 범위 밖(설계상 terraform env 소유) | 변경 없음 — doctor 의 tfvars↔live skew 감지로 커버 |
+| capture 정합성 | provider=internal_api/smtp 필드·scheme·vkTtlHours 미수집 → 채택본이 실배포를 덜 표현 | live/values scheme 으로 `network.mode`/`admin_internal` 판별, smtp/internal_api 전체 필드, `oidc.vk_ttl_hours` 캡처 |
+| wizard(configure) | 신규 필드 미질문 + configure 재실행 시 침묵 삭제 위험 | internal_api 선택지+URL/발신 프롬프트, eks 시 admin_internal confirm, vk_ttl 프롬프트, smtp_credentials_secret/vk_ttl/admin_internal 보존 |
+| eks parity | install-eks.sh 는 `database.external.name` 을 --set 하는데 도구가 누락 | `aurora_database_name` output(없으면 차트 기본 'gateway')으로 주입 |
+
+### 검증
+
+- `pytest deploy/tests -q` — **129 passed** (+9: ensure_infra 5, plan 비변경성 1, capture 3; configure 보존 테스트 확장)
+- `terraform fmt -check -recursive` clean
+- 차트 계약 실 대조: `notificationWorker.email.internalApi.*`, `ingress.adminUi/adminApi.annotations`, `adminApi.oidc.vkTtlHours`, `email.smtp.credentialsSecretName` 전부 템플릿에 존재
+- eks env(llm-gateway-dev/prod) `module.body_logging`/`module.irsa`/`enable_notification_ses`·outputs(`body_log_*`, `notification_worker_ses_role_arn`) 일치 확인
+- ecs 모듈 `email_api_url` 변수 → notification-worker `EMAIL_API_URL` env merge 확인(worker config.py 계약과 동일)

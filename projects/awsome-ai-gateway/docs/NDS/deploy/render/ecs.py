@@ -133,6 +133,9 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         vars_["email_sender_address"] = n.smtp_from or "noreply@llm-gateway.local"
         vars_["smtp_host"] = n.smtp_host
         vars_["smtp_port"] = n.smtp_port
+    elif n.provider == "internal_api":
+        vars_["email_sender_address"] = n.internal_api_from or "noreply@llm-gateway.local"
+        vars_["email_api_url"] = n.internal_api_url
 
     # ── 기능 플래그
     vars_["enable_body_logging"] = cfg.features.body_logging
