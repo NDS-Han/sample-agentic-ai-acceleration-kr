@@ -163,6 +163,21 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
           "  terraform.tfvars 의 주석 표시된 항목(cluster 버전·cognito_groups·tags)을 "
           "검토하세요 — 계속 진행하려면 bootstrap 을 다시 실행합니다.",
           file=sys.stderr)
+
+    # env values 파일도 없으면 dev 를 복사 — 없으면 ESO·adminBootstrap·ALB
+    # 어노테이션이 차트 기본값이라 helm 이 시크릿 참조 실패로 뜨지 못하고
+    # ADMIN_GROUPS 도 비어 관리자가 아무도 못 된다.
+    chart_dir = repo_root / "deployment/charts/llm-gateway"
+    vals_dst = chart_dir / f"values-eks-fargate-{cfg.env}.yaml"
+    if not vals_dst.exists() and not (
+            chart_dir / f"values-eks-fargate-{cfg.env}.local.yaml").exists():
+        src = chart_dir / "values-eks-fargate-dev.yaml"
+        if src.exists():
+            vals_dst.write_text(src.read_text())
+            print(f"ⓘ env values 도 {src.name} 에서 복사했습니다: {vals_dst.name}\n"
+                  "  adminBootstrap.emails 를 실제 운영자 이메일로 바꾸세요 — "
+                  "그대로 두면 admin@example.com 사용자가 생성됩니다.",
+                  file=sys.stderr)
     raise SystemExit(f"{target} 생성 — tfvars 검토 후 bootstrap 재실행")
 
 

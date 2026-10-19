@@ -298,6 +298,11 @@ variable "oidc_required_group" {
   default = ""
 }
 
+variable "oidc_vk_ttl_hours" {
+  type    = number
+  default = 1
+}
+
 variable "dev_login_enabled" {
   description = "OIDC 없을 때 admin-api/admin-ui 의 dev login 허용 — oidc.enabled 면 반드시 false"
   type        = bool

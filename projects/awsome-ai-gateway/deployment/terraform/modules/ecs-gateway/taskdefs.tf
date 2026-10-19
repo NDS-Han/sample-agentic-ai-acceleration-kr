@@ -127,7 +127,7 @@ locals {
       OIDC_GROUP_PREFIX            = "Claude_"
       OIDC_REJECT_UNMATCHED_GROUPS = "true"
       OIDC_REQUIRED_GROUP          = var.oidc_required_group
-      OIDC_VK_TTL_HOURS            = "1"
+      OIDC_VK_TTL_HOURS            = tostring(var.oidc_vk_ttl_hours)
       ADMIN_GROUPS                 = join(",", var.admin_groups)
       ADMIN_EMAILS                 = join(",", var.admin_emails)
       DEFAULT_DEPT_ID              = "00000000-0000-4000-a000-000000000002"

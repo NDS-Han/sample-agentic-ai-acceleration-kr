@@ -103,6 +103,10 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     if inf.cognito_groups:
         vars_["cognito_groups"] = list(
             dict.fromkeys([*inf.cognito_groups, "ClaudeAdmin"]))
+    # admin_groups 를 안 내리면 env 가 cognito_groups 전체로 폴백해
+    # 팀 그룹 직원이 전부 ADMIN 이 된다 — eks 의 adminBootstrap.groups
+    # (고정 ClaudeAdmin)와 같은 계약으로 명시한다.
+    vars_["admin_groups"] = ["ClaudeAdmin"]
 
     # ── 도메인 — cloudfront-temp 는 EKS 경로의 개념이라 ecs 에선 none 으로 수렴
     if cfg.domain.mode == "route53-acm":
@@ -148,6 +152,8 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     #    required_group 만 tfvars 로 간다 (나머지 필드는 module output).
     if cfg.oidc.required_group:
         vars_["oidc_required_group"] = cfg.oidc.required_group
+    if cfg.oidc.vk_ttl_hours:
+        vars_["oidc_vk_ttl_hours"] = cfg.oidc.vk_ttl_hours
 
     # ── 모델 프로필 — global 기본 (리전 중립). regional 은 배포 리전 프리픽스.
     #    infra.bedrock_allowed_model_arns 가 있으면 이 매핑을 덮어쓴다.

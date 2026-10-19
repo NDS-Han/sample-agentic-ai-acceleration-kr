@@ -215,6 +215,11 @@ variable "oidc_required_group" {
   default = ""
 }
 
+variable "oidc_vk_ttl_hours" {
+  type    = number
+  default = 1
+}
+
 # ADMIN 부트스트랩 — admin-api/admin-ui 양쪽에 주입된다.
 # admin_groups 비우면 cognito_groups(기본 ["ClaudeAdmin"])가 ADMIN 이 된다.
 variable "admin_groups" {

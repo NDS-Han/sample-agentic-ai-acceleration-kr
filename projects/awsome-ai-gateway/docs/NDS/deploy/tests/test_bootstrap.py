@@ -54,6 +54,33 @@ def test_scaffold_tfvars_disables_chat_agent():
     assert "enable_chat_db_tools = false" in out
 
 
+def test_scaffold_eks_env_also_copies_env_values(monkeypatch, tmp_path):
+    """신규 env 는 values-eks-fargate-<env>.yaml 이 없으면 ESO·adminBootstrap·
+    ALB 어노테이션이 차트 기본값이라 파드가 안 뜨고 ADMIN 매핑도 없다 —
+    scaffold 가 dev 파일을 복사해야 한다."""
+    tmpl = tmp_path / "deployment/terraform/environments/llm-gateway-dev"
+    tmpl.mkdir(parents=True)
+    for f in bootstrap.TF_FILES:
+        (tmpl / f).write_text("# tf")
+    (tmpl / "terraform.tfvars.example").write_text('environment = "dev"\n')
+    chart = tmp_path / "deployment/charts/llm-gateway"
+    chart.mkdir(parents=True)
+    (chart / "values-eks-fargate-dev.yaml").write_text("adminApi: {}\n")
+    monkeypatch.setattr(bootstrap, "account_id", lambda r: "123456789012")
+    monkeypatch.setattr(bootstrap, "_aws", lambda *a, **k: _cp(0, '{"Arn":"arn:x"}'))
+    cfg = _cfg(env="stg")
+    with pytest.raises(SystemExit):
+        bootstrap.scaffold_eks_env(cfg, tmp_path, "ap-northeast-2")
+    assert (chart / "values-eks-fargate-stg.yaml").exists()
+    # 이미 있으면 덮어쓰지 않는다
+    (chart / "values-eks-fargate-stg.yaml").write_text("mine: true\n")
+    import shutil
+    shutil.rmtree(tmp_path / "deployment/terraform/environments/llm-gateway-stg")
+    with pytest.raises(SystemExit):
+        bootstrap.scaffold_eks_env(cfg, tmp_path, "ap-northeast-2")
+    assert (chart / "values-eks-fargate-stg.yaml").read_text() == "mine: true\n"
+
+
 # ── 리전 코드 / AZ / subnet cidr ──────────────────────────────────────────────
 
 def test_region_code():

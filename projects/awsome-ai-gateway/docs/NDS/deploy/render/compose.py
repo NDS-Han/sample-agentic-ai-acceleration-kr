@@ -222,6 +222,8 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
             "OIDC_TOKEN_URL": cfg.oidc.token_url,
             "OIDC_REQUIRED_GROUP": cfg.oidc.required_group,
         })
+        if cfg.oidc.vk_ttl_hours:
+            env["OIDC_VK_TTL_HOURS"] = str(cfg.oidc.vk_ttl_hours)
         if cfg.oidc.client_secret:
             env["OIDC_CLIENT_SECRET"] = cfg.oidc.client_secret
     if cfg.features.web_search:

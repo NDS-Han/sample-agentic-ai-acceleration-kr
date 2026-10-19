@@ -43,6 +43,17 @@ def test_t2_preset_maps_to_multi_az_and_replicated():
     assert v["service_sizing"]["gateway-proxy"]["desired_count"] == 4
 
 
+def test_admin_groups_always_claudeadmin_not_team_groups():
+    """admin_groups 미기재 시 env 가 cognito_groups 로 폴백해 팀 그룹 직원이
+    전부 ADMIN 이 되는 권한상승 버그 — 항상 ClaudeAdmin 만 내려야 한다."""
+    cfg = _cfg(infra={"cognito_groups": ["Claude_NDS_Developer", "Claude_SSIR_Developer"]})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["cognito_groups"] == ["Claude_NDS_Developer", "Claude_SSIR_Developer", "ClaudeAdmin"]
+    assert v["admin_groups"] == ["ClaudeAdmin"]
+    # cognito_groups 가 비어도 admin_groups 는 내려간다
+    assert ecs_render.desired_tfvars(_cfg())["admin_groups"] == ["ClaudeAdmin"]
+
+
 def test_t0_rejected_for_ecs():
     with pytest.raises(schema.SchemaError, match="size_tier"):
         _cfg(deploy={"target": "ecs", "size_tier": "t0"})
