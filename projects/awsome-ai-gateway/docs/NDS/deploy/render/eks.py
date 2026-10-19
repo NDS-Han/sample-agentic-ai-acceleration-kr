@@ -291,6 +291,11 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             "`deploy apply` 가 output 누락을 감지하면 "
             f"`terraform apply -var-file={tfvars_path} -target=module.body_logging "
             "-target=module.irsa` 를 자동 실행하고 output 을 pod env 로 주입합니다.")
+    if cfg.features.bi_insight:
+        notes.append(
+            "bi_insight: NDS 배포 대상이 아닙니다 — enable_chat_agent 는 env "
+            "tfvars(사람 소유)로 켭니다 (scaffold 는 false 로 생성). "
+            "ops/NDS-02-bi-insight.md 절차를 따르십시오.")
     if not env_vals:
         notes.append(f"env overlay(values-eks-fargate-{cfg.env}.yaml)를 못 찾았습니다 — "
                      "차트 기본값 + 이 오버레이만으로 배포됩니다. 기존 배포를 업데이트하는 "

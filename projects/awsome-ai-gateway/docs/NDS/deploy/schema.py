@@ -252,6 +252,19 @@ class GatewayConfig:
                     f"network.admin_internal 은 eks 전용입니다 — "
                     f"deploy.target={self.deploy.target} 에서는 무시됩니다."
                 )
+        if (self.features.observability and self.deploy.target != "compose"):
+            w.append(
+                f"features.observability 는 compose 전용입니다 — "
+                f"deploy.target={self.deploy.target} 에서는 무시됩니다."
+            )
+        if (self.clients.models_profile == "regional"
+                and self.deploy.target == "eks"):
+            w.append(
+                "clients.models_profile 은 eks 경로에서 무시됩니다 — eks 의 Bedrock "
+                "허용 ARN은 env tfvars 의 bedrock_allowed_model_arns + 차트 env "
+                "values 의 modelsProfile 이 소유합니다 (infra.bedrock_allowed_model_arns "
+                "로 managed overlay 를 쓸 수는 있습니다)."
+            )
         if self.features.web_search:
             w.append("web_search 는 AgentCore(us-east-1) 의존 — apply 가 자동 "
                      "프로비저닝합니다(boto3 + us-east-1 agentcore/IAM 권한 필요). "

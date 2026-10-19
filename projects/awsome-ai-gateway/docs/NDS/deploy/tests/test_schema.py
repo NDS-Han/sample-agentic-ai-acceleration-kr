@@ -268,3 +268,38 @@ def test_compose_private_mode_warns_not_applied():
         "network": {"mode": "private"},
     })
     assert any("private" in w and "compose" in w for w in cfg.warnings())
+
+
+def test_observability_warns_on_non_compose():
+    """observability 스택은 compose 전용 — ecs/eks 선언이 침묵 무시되면 안 된다."""
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "deploy": {"target": "ecs", "size_tier": "t1"},
+        "aws": {"region": "us-west-2", "account_id": "123456789012"},
+        "images": {"registry": "r.example.com", "tag": "1.0.0"},
+        "features": {"observability": True},
+    })
+    assert any("observability" in w and "compose" in w for w in cfg.warnings())
+
+
+def test_models_profile_regional_warns_on_eks():
+    """eks는 env tfvars/chart values가 모델 ARN을 소유 — regional 선언 무시 경고."""
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "deploy": {"target": "eks", "size_tier": "t2"},
+        "aws": {"region": "us-west-2", "account_id": "123456789012"},
+        "images": {"registry": "r.example.com", "tag": "1.0.0"},
+        "clients": {"models_profile": "regional"},
+    })
+    assert any("models_profile" in w and "eks" in w for w in cfg.warnings())
+
+
+def test_models_profile_global_no_warn_on_eks():
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "deploy": {"target": "eks", "size_tier": "t2"},
+        "aws": {"region": "us-west-2", "account_id": "123456789012"},
+        "images": {"registry": "r.example.com", "tag": "1.0.0"},
+        "clients": {"models_profile": "global"},
+    })
+    assert not any("models_profile" in w for w in cfg.warnings())

@@ -24,15 +24,20 @@
 | 3 | 시크릿 시드 | `/<project>/<env>/app`(랜덤 4키 생성) · `/redis`(auth_token 복사) · `/db`(terraform 소유 — 검증만, **절대 덮어쓰지 않음**) |
 | 4 | 이미지 | ECR repo 생성 + 서비스 6종 build/push (`images.tag`/`tags`로 핀 — scheduler는 admin-api 재사용) |
 | 5 | helm | `apply`와 동일한 helm upgrade — 동적 output 주입 + feature 인프라 보강 |
-| 6 | Cognito | `adminApi.adminBootstrap.emails[0]` 사용자 생성 + `ClaudeAdmin` 그룹 배정 (임시 비밀번호 1회 표시) |
+| 6 | Cognito | `adminApi.adminBootstrap.emails[0]` 사용자 생성 + `ClaudeAdmin` + 첫 `Claude_*` 팀 그룹 배정 (임시 비밀번호 1회 표시) |
 
-후속 수동 단계: `smoke-test.sh --env <env>` 앱 경로 스모크, admin UI에서 모델
-alias/라우팅 시드(install-guide §4 — 운영 데이터라 자동화 대상 아님).
+후속 수동 단계: `smoke-test.sh --env <env>` 앱 경로 스모크. 모델 alias·단가는
+init SQL + alembic + LiteLLM pricing Lambda가 자동 시드합니다. **routing
+profiles 는 SQL 로 확인·정규화**해야 합니다 — 시드의 크로스계정 ARN이 다른
+계정에서는 AssumeRole 실패를 유발합니다 → [operations.md](operations.md#3-routing-profiles--크로스계정) §3.
 
 - **env scaffold 주의**: 생성된 `terraform.tfvars`의 `eks_cluster_version`·
   `eks_addon_versions`·`tags`는 템플릿 기본값 — 조직에 맞게 검토한 뒤
   재실행해야 합니다 (bootstrap이 여기서 멈춥니다). bi 챗(`enable_chat_agent`)은
-  NDS 배포 대상이 아니라 scaffold 에서 자동으로 false 로 생성됩니다
+  NDS 배포 대상이 아니라 scaffold 에서 자동으로 false 로 생성됩니다.
+  또한 `values-eks-fargate-<env>[.local].yaml`이 없으면 dev 파일을 복사합니다 —
+  `adminBootstrap.emails`를 실제 운영자 이메일로 바꾸세요 (그대로 두면
+  `admin@example.com` 사용자가 생성됩니다)
 - **비대화형/CI**: `--yes` 는 wizard 없이 yaml 선언값만 씁니다 — `infra.*` 를
   미리 채워 두면 됩니다 ([gateway-yaml.md](gateway-yaml.md#infra--신규-설치-인프라-입력))
 - 신규 설치 후 업데이트는 경로 B/C와 같은 `apply` 흐름입니다

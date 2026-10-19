@@ -29,6 +29,7 @@ deploy:
 network:
   mode: public                # public | private
   allowed_cidrs: ["1.2.3.0/24"]
+  admin_internal: false       # eks 전용 — admin(admin-ui/api) Ingress만 internal ALB로
 
 domain:
   mode: none                  # none | cloudfront-temp | route53-acm
@@ -38,11 +39,15 @@ domain:
 
 features:
   notifications:
-    provider: mock            # mock | smtp | ses
+    provider: mock            # mock | smtp | ses | internal_api
     smtp_host: ""
     smtp_port: 587
     smtp_from: ""
     ses_from: ""
+    sender_name: ""           # 발신자 표시명 — 비우면 "LLM Gateway"
+    internal_api_url: ""      # provider=internal_api 일 때 필수 — 사내 메일 API URL
+    internal_api_from: ""     # internal_api 발신 주소 — 비우면 차트 기본
+    smtp_credentials_secret: ""  # eks 전용 — SMTP 인증 Secret 이름(credentialsSecretName)
   bi_insight: false
   pricing_lambda: false
   web_search: false
@@ -68,6 +73,8 @@ oidc:                          # 비워두면 OIDC 비활성(dev-login)
   token_url: ""
   provider_name: oidc:cognito
   required_group: ""
+  client_secret: ""           # Cognito confidential client — 있으면 HTTP Basic 토큰 교환
+  vk_ttl_hours: 0            # VK 수명(시간) — 0이면 기본 1시간
 
 infra:                         # 신규 설치 인프라 입력 — `deploy bootstrap` wizard 가 기록
                                # (ecs/eks 전용, compose 무시, 기존 배포 온보딩엔 미사용)
@@ -76,6 +83,8 @@ infra:                         # 신규 설치 인프라 입력 — `deploy boot
   cognito_domain_suffix: ""    # 비우면 <region-code>-auth-<account> (예: apne2-auth-123…)
   cognito_groups: []           # 'Claude_<team>' / 'Claude_<dept>_<team>' — ClaudeAdmin 자동 포함
   bedrock_allowed_model_arns: []  # 비우면 backend 기본 — 명시 시 models_profile 매핑을 덮어씀
+  db: {}                       # ecs 전용 — Aurora override (아래 'infra.*' 표)
+  cache: {}                    # ecs 전용 — ElastiCache override (아래 'infra.*' 표)
 ```
 
 ## 항목별 상세
@@ -145,6 +154,15 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 규칙으로 추론하고, account_id 도 없으면 placeholder 가 생성됩니다
 (그 경우 apply 전에 채워야 합니다).
 
+### `network`
+
+- `mode: private` — eks에서 3개 Ingress 전부 internal ALB로
+- `admin_internal` — eks 전용. `mode: public`을 유지하면서 **admin-ui·admin-api
+  Ingress만** internal ALB로 분리합니다. `mode: private`이면 이미 전부 internal이라
+  중복 선언입니다(스키마가 경고). compose/ecs에서는 무시됩니다(경고 출력)
+- `allowed_cidrs` — 인입 허용 CIDR. 비우면 전체 개방이 되므로 운영 환경에서는
+  반드시 채우세요 ([operations.md](operations.md#2-직원-오픈-전-하드닝-체크리스트) §2)
+
 ### `domain.mode`
 
 | 값 | 의미 | TLS |
@@ -163,12 +181,12 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 
 | 키 | 켜면 생기는 것 | 주의 |
 |---|---|---|
-| `notifications.provider` | mock=발송안함, ses=SES 발송, smtp=외부 SMTP | ses는 `ses_from` 필수, smtp는 `smtp_host` 필수 |
+| `notifications.provider` | mock=발송안함, ses=SES 발송, smtp=외부 SMTP, internal_api=사내 메일 API | ses는 `ses_from`, smtp는 `smtp_host`, internal_api는 `internal_api_url` 필수(없으면 worker crashloop). eks의 smtp 자격증명은 `smtp_credentials_secret` |
 | `bi_insight` | BI 어시스턴트 (AgentCore Runtime) | compose 미지원. 별도 이미지 배포 필요 |
 | `pricing_lambda` | LiteLLM 단가 조회 Lambda | **ecs/eks는 apply가 자동 보장** (role+함수+invoke 권한, 멱등) — compose는 ops/NDS-01 수동. 단가 데이터는 DB 시드가 따로 필요 |
 | `web_search` | AgentCore 기반 웹검색 | **us-east-1 전용 인프라**, apply가 자동 프로비저닝 (compose는 .env 주입) |
 | `body_logging` | 요청 본문 S3 로깅 | 인프라 + 관리자 런타임 토글 이중 게이트 |
-| `observability` | OTel/Prometheus/Loki/Tempo/Grafana | compose 경로에서 기본 off |
+| `observability` | OTel/Prometheus/Loki/Tempo/Grafana | **compose 전용** — ecs/eks에서는 무시(validate가 경고) |
 
 ### `oidc`
 
@@ -178,11 +196,19 @@ admin-api(JWT 검증)와 admin-ui(브라우저 SSO)가 공유하는 설정입니
 - 채우면: `DEV_LOGIN_ENABLED=false` 자동 적용
 - `authorize_url`/`token_url` 은 issuer가 **아닙니다** — Cognito hosted-ui 도메인
   (`https://<domain>.auth.<region>.amazoncognito.com/oauth2/...`)입니다
+- `client_secret` — Cognito **confidential** client를 쓸 때만. 있으면 토큰 교환을
+  HTTP Basic으로 합니다. public client면 비워두세요
+- `required_group` — 비우면 인증된 모든 사용자 통과. 특정 그룹 소속만 허용하려면 지정
+- `vk_ttl_hours` — 발급된 Virtual Key의 수명. 세 backend 모두 반영됩니다
+  (eks=차트 `adminApi.oidc.vkTtlHours`, ecs/compose=`OIDC_VK_TTL_HOURS`)
 
 ### `clients.models_profile`
 
 - `global` (기본·권장): `global.anthropic.*` inference profile — 어느 리전에서든 동작
 - `regional`: 리전별 프로필 — 특정 리전 정책이 필요한 경우만
+- **ecs/compose 에서만 적용** — ecs는 IRSA 허용 ARN 매핑에, compose는 시드 안내에
+  반영됩니다. eks는 env tfvars(`bedrock_allowed_model_arns`)와 차트 env values
+  (`modelsProfile`)가 소유하므로 이 키는 무시됩니다(validate 경고)
 
 ## 변경 후 절차
 

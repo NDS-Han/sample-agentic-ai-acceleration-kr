@@ -142,6 +142,8 @@ docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/dock
 
 마이그레이션은 `migration` 서비스가 기동 시 자동으로 `alembic upgrade head`
 까지 올립니다 — 앱보다 먼저 완료되도록 depends_on으로 순서가 보장됩니다.
+`db/init/*.sql`(기본 조직·팀·service-token 시드)도 멱등 재적용되므로, 기존
+볼륨에서도 업데이트에 추가된 시드가 반영됩니다.
 
 ## 롤백
 
