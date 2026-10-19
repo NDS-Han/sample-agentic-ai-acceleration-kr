@@ -86,6 +86,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — 기존 EKS 배포 온보딩·업데이트** |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
+| [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
