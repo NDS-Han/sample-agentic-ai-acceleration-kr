@@ -67,3 +67,26 @@ init/configure/teardown 플로우, subprocess 경계, 시크릿 취급.
 - 차트 계약 실 대조: `notificationWorker.email.internalApi.*`, `ingress.adminUi/adminApi.annotations`, `adminApi.oidc.vkTtlHours`, `email.smtp.credentialsSecretName` 전부 템플릿에 존재
 - eks env(llm-gateway-dev/prod) `module.body_logging`/`module.irsa`/`enable_notification_ses`·outputs(`body_log_*`, `notification_worker_ses_role_arn`) 일치 확인
 - ecs 모듈 `email_api_url` 변수 → notification-worker `EMAIL_API_URL` env merge 확인(worker config.py 계약과 동일)
+
+### 추가 — web_search 자동 배선 (install-guide §5-1/§5-2)
+
+`features.web_search=true` 만으로 `deploy apply` 가 AgentCore WebSearch
+Gateway 를 자동 프로비저닝하고 URL 을 배선한다 — 수동 두 단계
+(`provision_agentcore_websearch.py deploy` → `set-websearch-url.sh`) 제거.
+
+- 신규 `websearch.py`: status(읽기) → 없으면 deploy(멱등) → `/mcp` 정규화.
+  `GW_NAME=llm-gateway-websearch-<env>` 로 set-websearch-url.sh 와 같은
+  규칙 — 수동 배포가 만든 gateway 를 재사용(중복 생성 방지). 실패 시 배포를
+  중단하지 않고 graceful-off 경고(install-guide 와 같은 의미).
+- eks: `gatewayProxy.env.AGENTCORE_GATEWAY_URL/REGION/TARGET_ID` 를 --set.
+  `CALLER_ROLE_ARN` 은 terraform output 의 gateway_proxy_role_arn.
+- ecs: URL 을 `extra-vars.json` 에 기록 → `agentcore_gateway_url` tfvars
+  (taskdef 의 `url!=""→WEB_SEARCH_ENABLED` 계약). 선언을 끄면 잔여 URL 도 제거.
+- compose: gen `.env` 에 AGENTCORE_* upsert (merge_env 가 비관리 키를
+  보존하므로 다음 render 도 유지).
+- teardown: 3 backend 전부 `features.web_search` 선언 시 env 규칙명의
+  AgentCore Gateway 를 멱등 teardown (helm/terraform 관리 밖의 과금 리소스).
+- plan 은 status 만 조회(비변경) — gateway 부재 시 "apply 시 프로비저닝" 예고.
+- requirements.txt 에 boto3 추가 (프로비저너를 같은 인터프리터로 실행).
+
+검증: pytest **141 passed** (+12 — websearch 단위 7 + eks 배선 3 + ecs 배선 2).

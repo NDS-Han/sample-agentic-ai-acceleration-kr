@@ -216,9 +216,9 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "쓰려면 gateway.yaml 의 aws.allowed_roles 를 채우세요.")
     if cfg.features.web_search:
         notes.append(
-            "web_search: terraform 의 agentcore_gateway_url 변수가 필요합니다 — AgentCore "
-            "Gateway(us-east-1 구조적 제약)를 먼저 만들고 URL 을 tfvars/변수로 넣으십시오. "
-            "routing_profiles.web_search_enabled DB 행도 별도로 필요합니다.")
+            "web_search: apply 시 AgentCore Gateway(us-east-1)를 멱등 프로비저닝하고 "
+            "URL 을 agentcore_gateway_url 로 tfvars 에 기록합니다 — boto3 필요. "
+            "routing_profiles.web_search_enabled DB 행은 별도로 필요합니다(admin-ui /models).")
     if cfg.features.pricing_lambda:
         notes.append(
             "pricing_lambda: LiteLLM pricing Lambda 배포는 이 모듈 범위 밖입니다 — "

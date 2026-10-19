@@ -245,9 +245,10 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "gen/<env>/.env 에 두 env 를 직접 추가하세요.")
     if cfg.features.web_search:
         notes.append(
-            "web_search: .env 에 WEB_SEARCH_ENABLED=true 를 썼습니다. 실제 동작에는 추가로 "
-            "① AgentCore Gateway 프로비저닝(us-east-1) 후 .env 에 AGENTCORE_GATEWAY_URL 기입, "
-            "② routing_profiles.web_search_enabled DB 행이 필요합니다 — 없으면 조용히 off 입니다.")
+            "web_search: .env 에 WEB_SEARCH_ENABLED=true 를 썼습니다 — apply 가 "
+            "AgentCore Gateway(us-east-1)를 멱등 프로비저닝하고 AGENTCORE_GATEWAY_URL 을 "
+            ".env 에 주입합니다(boto3 필요). routing_profiles.web_search_enabled "
+            "DB 행도 필요합니다 — 없으면 조용히 off 입니다.")
     if cfg.features.body_logging:
         notes.append(
             "body_logging: compose 경로는 S3/Firehose 인프라를 만들지 않아 미지원입니다 — "

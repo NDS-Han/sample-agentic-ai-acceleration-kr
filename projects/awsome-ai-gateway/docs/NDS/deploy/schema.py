@@ -205,8 +205,10 @@ class GatewayConfig:
                     f"network.admin_internal 은 eks 전용입니다 — "
                     f"deploy.target={self.deploy.target} 에서는 무시됩니다."
                 )
-        if self.features.web_search and self.deploy.target == "compose":
-            w.append("web_search 는 AgentCore(us-east-1) 의존 — compose 경로에서는 수동 프로비저닝이 필요합니다.")
+        if self.features.web_search:
+            w.append("web_search 는 AgentCore(us-east-1) 의존 — apply 가 자동 "
+                     "프로비저닝합니다(boto3 + us-east-1 agentcore/IAM 권한 필요). "
+                     "과금은 ~$7/1,000 queries, idle ≈ $0 입니다.")
         if self.deploy.target == "eks":
             w.append("size_tier 는 eks 경로에서 실제 리소스를 바꾸지 않습니다 — "
                      "컴퓨트 크기는 차트 values/HPA/requests 가 결정합니다 (기존 인프라 이어받기 모델).")

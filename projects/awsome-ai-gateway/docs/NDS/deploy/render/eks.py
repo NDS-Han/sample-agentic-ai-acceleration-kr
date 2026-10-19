@@ -201,8 +201,9 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
         notes.append("admin_internal: admin-ui/admin-api Ingress 만 scheme=internal 로 "
                      "내립니다 — S2S VPN 등 관리자망→VPC 경로가 선행돼야 합니다.")
     if cfg.features.web_search:
-        notes.append("web_search: AGENTCORE_GATEWAY_URL 은 기존 env values 에 있어야 "
-                     "합니다 — 없으면 플래그만 켜지고 라우터가 건너뜁니다.")
+        notes.append("web_search: apply 시 AgentCore Gateway(us-east-1)를 멱등 "
+                     "프로비저닝하고 AGENTCORE_GATEWAY_URL 을 --set 합니다 — "
+                     "boto3 와 us-east-1 agentcore/IAM 권한이 필요합니다.")
     if cfg.oidc.enabled and cfg.oidc.client_secret:
         # 차트 adminUi env 범위는 value: 만 렌더하고 secretKeyRef 를 못 만든다 —
         # confidential client 는 템플릿 추가가 필요 (chart values.yaml 주석 §OIDC 참조)

@@ -181,7 +181,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
     features = _unwrap(questionary.checkbox(
         "추가 기능 (기본 전부 off)",
         choices=[
-            Choice("web_search — AgentCore 웹검색 (us-east-1, 별도 프로비저닝)", "web_search",
+            Choice("web_search — AgentCore 웹검색 (us-east-1, apply 시 자동 프로비저닝)", "web_search",
                    checked=bool(prev_feat.get("web_search"))),
             Choice("body_logging — 요청 본문 S3 로깅", "body_logging",
                    checked=bool(prev_feat.get("body_logging"))),
@@ -568,10 +568,28 @@ def cmd_apply(args) -> int:
         argv.append("--build")
     console.print(f"[cyan]$ {' '.join(argv)}")
     if args.plan:
+        if cfg.features.web_search:
+            from . import websearch
+            url = websearch.status_url(cfg.env, REPO_ROOT)
+            console.print("[cyan]web_search: AgentCore Gateway "
+                          f"{url or '없음 — apply 시 프로비저닝'}")
         console.print("[cyan]plan 전용 — 기동하지 않았습니다. 적용: ./deploy apply")
         return 0
     if not _confirm_apply(args):
         return 130
+    if cfg.features.web_search:
+        # install-guide §5-1/§5-2 자동화 — AgentCore Gateway(멱등) 생성 후 URL 을
+        # .env 에 주입. merge_env 가 비관리 키를 보존하므로 다음 render 도 유지된다.
+        from . import websearch
+        url = websearch.ensure_gateway_url(cfg.env, REPO_ROOT)
+        if url:
+            websearch.upsert_env_file(env_file, {
+                "AGENTCORE_GATEWAY_URL": url,
+                "AGENTCORE_REGION": websearch.AGENTCORE_REGION,
+                "AGENTCORE_TARGET_ID": websearch.TARGET_ID})
+        else:
+            console.print("[yellow]⚠ web_search URL 을 얻지 못했습니다 — "
+                          "플래그만 켜진 채로 기동합니다")
     try:
         r = subprocess.run(argv)
     except FileNotFoundError:
@@ -645,6 +663,10 @@ def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
     if r.returncode != 0:
         console.print("[red]compose down 실패 — 로그를 확인하십시오")
         return 1
+    if cfg.features.web_search:
+        # env 규칙명의 AgentCore Gateway — 우리가 만든 외부 리소스라 함께 정리
+        from . import websearch
+        websearch.teardown(cfg.env, REPO_ROOT)
     console.print(f"[green]삭제 완료 — 산출물 디렉토리는 남아 있습니다: {out}")
     return 0
 
@@ -666,6 +688,8 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         "삭제: 위 plan 의 모든 AWS 리소스 — VPC/Aurora/ElastiCache/ALB/ECS/"
         "Cognito/Secrets Manager/ECR(repo+이미지)\n[red]이 배포의 데이터는 "
         "영구 삭제됩니다.[/red]"
+        + ("\n+ AgentCore WebSearch Gateway(us-east-1) — terraform 관리 밖의 "
+           "프로비저닝 리소스" if cfg.features.web_search else "")
         + ("\n[yellow]db_safeguards(deletion protection)가 켜져 있어 먼저 해제 "
            "apply 후 destroy 합니다 — Aurora 최종 스냅샷 없이 완전 삭제됩니다. "
            "보존이 필요하면 지금 중단하고 `aws rds create-db-cluster-snapshot` "
@@ -684,6 +708,10 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     except SystemExit:
         raise SystemExit("teardown 중간 실패 — 일부 리소스가 남았을 수 있습니다. 잔여는 "
                          f"`terraform -chdir={env_dir} plan -destroy` 로 확인하십시오")
+    if cfg.features.web_search:
+        # terraform 관리 밖의 프로비저닝 리소스 — 마지막에 정리
+        from . import websearch
+        websearch.teardown(cfg.env, REPO_ROOT)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 
@@ -701,6 +729,9 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         return 1
 
     lines = [f"삭제: helm release '{meta['release']}' (ns={meta['namespace']}) — 게이트웨이 앱"]
+    if cfg.features.web_search:
+        lines.append("+ AgentCore WebSearch Gateway(us-east-1) — helm/terraform "
+                     "관리 밖의 프로비저닝 리소스")
     if infra:
         lines.append(
             f"[red]+ 인프라 — terraform destroy {meta['env_dir']}:\n"
@@ -761,6 +792,10 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                       "클러스터 접속·kubeconfig context(--context)를 확인하세요. "
                       "앱이 살아있는 상태로 인프라 삭제는 진행하지 않습니다.")
         return 1
+    if cfg.features.web_search:
+        # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown
+        from . import websearch
+        websearch.teardown(cfg.env, REPO_ROOT)
     if not infra:
         if uninstalled:
             console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 "

@@ -22,6 +22,7 @@ from pathlib import Path
 import yaml
 
 from .schema import GatewayConfig
+from . import websearch
 
 
 def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
@@ -297,6 +298,16 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         print(f"ⓘ {', '.join(missing)} 가 terraform output 에 없습니다 — apply 시 "
               f"targeted terraform apply({' '.join(_infra_targets(cfg))})가 "
               "먼저 실행됩니다", file=sys.stderr)
+    if cfg.features.web_search:
+        url = websearch.status_url(cfg.env, repo_root,
+                                   outs.get("gateway_proxy_role_arn", ""))
+        if url:
+            print(f"ⓘ web_search: AgentCore Gateway {url} 를 --set 합니다",
+                  file=sys.stderr)
+        else:
+            print("ⓘ web_search: AgentCore Gateway 가 없습니다 — apply 시 "
+                  "프로비저닝(provision_agentcore_websearch.py deploy)합니다",
+                  file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
     _run(_helm_argv(meta, set_args, dry_run=True, context=context), cwd=repo_root)
 
@@ -311,6 +322,21 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     if env_dir:
         outs = ensure_infra(cfg, gen_dir, env_dir, outs)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
+
+    # install-guide §5-1/§5-2 자동화 — AgentCore Gateway 를 만들고(멱등) URL 을
+    # pod env 로 주입한다. caller 는 gateway-proxy IRSA — InvokeGateway 스코프.
+    if cfg.features.web_search:
+        url = websearch.ensure_gateway_url(
+            cfg.env, repo_root,
+            caller_role_arn=outs.get("gateway_proxy_role_arn", ""))
+        if url:
+            set_args += [
+                "--set", f"gatewayProxy.env.AGENTCORE_GATEWAY_URL={url}",
+                "--set", f"gatewayProxy.env.AGENTCORE_REGION={websearch.AGENTCORE_REGION}",
+                "--set", f"gatewayProxy.env.AGENTCORE_TARGET_ID={websearch.TARGET_ID}"]
+        else:
+            print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 만 "
+                  "켜진 상태로 진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
 
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 

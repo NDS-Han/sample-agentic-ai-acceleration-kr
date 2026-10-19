@@ -172,9 +172,28 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     NEXTAUTH_URL 이 실제 접속 주소를 가리키게 한다 (helm 의
     install-eks.sh --set adminUi.nextauthUrl=http://<alb-dns> 와 같은 결)."""
     from .render import ecs as ecs_render
+    from . import websearch
 
     # 이전 apply 가 발견한 동적 값이 있으면 tfvars 에 반영한다
-    ecs_render.render(cfg, gen_dir, extra_vars=load_extra_vars(gen_dir))
+    existing = load_extra_vars(gen_dir)
+
+    # install-guide §5-1/§5-2 자동화 — AgentCore Gateway URL 은 프로비저닝
+    # 결과물이라 선언이 아니라 apply 산출물이다. extra-vars.json 에 기록해
+    # 다음 apply 도 같은 URL 로 렌더한다 (프로비저너는 멱등이라 재사용).
+    if cfg.features.web_search and not existing.get("agentcore_gateway_url"):
+        url = websearch.ensure_gateway_url(cfg.env, repo_root)
+        if url:
+            existing["agentcore_gateway_url"] = url
+            _save_extra_vars(gen_dir, existing)
+        else:
+            print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 없이 "
+                  "진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
+    elif not cfg.features.web_search and existing.pop("agentcore_gateway_url", None):
+        # 선언을 껐으면 잔여 URL 도 지운다 — taskdef 의
+        # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
+        _save_extra_vars(gen_dir, existing)
+
+    ecs_render.render(cfg, gen_dir, extra_vars=existing)
 
     terraform_apply(cfg, gen_dir, repo_root, bootstrap=True)
     partial = tf_outputs(repo_root / ENV_DIR)

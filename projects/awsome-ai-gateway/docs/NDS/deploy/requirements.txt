@@ -4,3 +4,6 @@
 PyYAML>=6.0
 rich>=13.0
 questionary>=2.0
+# features.web_search — AgentCore Gateway 프로비저너(provision_agentcore_websearch.py)
+# 를 같은 인터프리터로 실행한다. 배포 호스트에 미설치면 websearch 경고로 표면화.
+boto3>=1.34
