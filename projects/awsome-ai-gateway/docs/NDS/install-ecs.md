@@ -13,11 +13,15 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
 
 ## 0. 준비물
 
+> **배포 호스트가 없다면** [install-prereq.md](install-prereq.md) 먼저 — 배포 EC2
+> 생성·deployer IAM role·Bedrock 접근 확인·`bootstrap-ec2.sh`(아래 도구 전부 멱등
+> 설치)·세션 재시작(`pkill -f 'vscode-server|cursor-server'`)까지 다룹니다.
+
 | 항목 | 요구 |
 |---|---|
 | AWS 계정 | Bedrock Claude 모델 접근 + infra 생성 권한 (VPC/ECS/RDS/ElastiCache/Cognito/SM/ECR/ALB/ACM/Route53) |
 | 자격증명 | `aws sts get-caller-identity` 가 되는 IAM principal (deploy 머신) |
-| 도구 | terraform ≥ 1.9, awscli v2, docker (이미지 빌드/push), python 3.11+ (`deploy` CLI용) |
+| 도구 | terraform ≥ 1.9, awscli v2, docker (이미지 빌드/push), python 3.11+ (`deploy` CLI용) — `bootstrap-ec2.sh` 가 일괄 설치 |
 | Terraform state | S3 bucket (+ 권장: DynamoDB lock table). 없으면 §1.5 에서 생성 |
 | 리전 | `global.*` inference profile 이 라우팅되는 리전 아무거나 — ap-northeast-2 검증됨 |
 | Bedrock 모델 | 대상 리전에서 `global.anthropic.*` (또는 리전 프로필) 사용 허용 — 기본값은 global 프로필 |

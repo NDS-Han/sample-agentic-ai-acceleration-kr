@@ -1,5 +1,9 @@
 # EKS — 신규 설치(bootstrap) · 기존 배포 온보딩 · 업데이트
 
+> **배포 호스트**: 모든 명령은 배포 EC2(또는 동등한 deploy 머신)에서 실행합니다.
+> 호스트가 없으면 먼저 [install-prereq.md](install-prereq.md) — EC2 생성·deployer
+> IAM role·Bedrock 접근 확인·`bootstrap-ec2.sh` 도구 설치·세션 재시작까지 다룹니다.
+
 ## 경로 A — 신규 설치 (`bootstrap`)
 
 대상: 인프라가 아무것도 없는 계정/리전. 한 명령이 install-guide §3 전체를 실행합니다.

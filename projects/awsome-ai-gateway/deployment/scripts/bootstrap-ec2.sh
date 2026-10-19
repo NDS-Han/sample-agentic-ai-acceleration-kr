@@ -28,7 +28,8 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # 깔아야 `docker build` 가 BuildKit 백엔드를 쓴다(daemon.json 설정만으로는 부족).
 log "apt 패키지 (unzip jq git tmux docker.io docker-buildx) 설치"
 sudo apt-get update -y
-sudo apt-get install -y unzip jq git tmux docker.io docker-buildx ca-certificates gnupg lsb-release wget curl
+sudo apt-get install -y unzip jq git tmux docker.io docker-buildx ca-certificates gnupg lsb-release wget curl \
+  python3-venv python3-pip
 sudo usermod -aG docker "$USER" || true   # 재로그인 후 그룹 반영
 
 # BuildKit 을 데몬 기본으로도 명시(buildx 와 함께). (멱등)
@@ -140,14 +141,19 @@ mkdir -p "$HOME/.claude"
 if jq -e '.env.CLAUDE_CODE_USE_BEDROCK' "$CLAUDE_SETTINGS" >/dev/null 2>&1; then
   log "Claude Code Bedrock 설정 이미 있음 — 건너뜀"
 else
-  log "Claude Code Bedrock(US Geo) 설정 병합: $CLAUDE_SETTINGS"
+  # 리전 중립 — us-west-2 처럼 in-region 미지원 리전은 geo 프로파일(us.anthropic.*)
+  # 이 필요하고, in-region 지원 리전은 global.anthropic.* 또는 리전 프리픽스로
+  # 바꿀 수 있다. ANTHROPIC_MODEL_PREFIX env 로 override.
+  ANTHROPIC_MODEL_PREFIX="${ANTHROPIC_MODEL_PREFIX:-us.anthropic}"
+  log "Claude Code Bedrock(${ANTHROPIC_MODEL_PREFIX}) 설정 병합: $CLAUDE_SETTINGS"
   _tmp=$(mktemp)
-  jq --arg region "$AWS_REGION" '.env = (.env // {}) + {
+  jq --arg region "$AWS_REGION" --arg prefix "$ANTHROPIC_MODEL_PREFIX" \
+    '.env = (.env // {}) + {
     "CLAUDE_CODE_USE_BEDROCK": "1",
     "AWS_REGION": $region,
-    "ANTHROPIC_DEFAULT_OPUS_MODEL": "us.anthropic.claude-opus-5-5",
-    "ANTHROPIC_DEFAULT_SONNET_MODEL": "us.anthropic.claude-sonnet-5-5",
-    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "\($prefix).claude-opus-5-5",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "\($prefix).claude-sonnet-5-5",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "\($prefix).claude-haiku-4-5-20251001-v1:0"
   }' "$CLAUDE_SETTINGS" > "$_tmp" && mv "$_tmp" "$CLAUDE_SETTINGS"
 fi
 
@@ -198,7 +204,9 @@ if [ "$fail" -eq 0 ]; then
   echo
   log "다음: ⚠️ docker 그룹은 이 셸에 반영 안 됨 ('docker ps' → permission denied)."
   log "  그룹 자격은 세션 생성 시점에 박히므로 usermod 로는 지금 셸이 안 바뀐다."
-  log "  → SSH 연결을 끊고 재접속(권장). 지금 셸에서만 급히 쓰려면: newgrp docker"
+  log "  → 세션 재시작이 필요합니다 — VS Code/Cursor Remote 를 쓰고 있다면:"
+  log "       pkill -f 'vscode-server|cursor-server'   # 서버가 죽고 Reload 로 재접속"
+  log "    그게 아니면 SSH 연결을 끊고 재접속. 지금 셸에서만 급히 쓰려면: newgrp docker"
   log "  (claude 의 PATH 는 ~/.bashrc 에 넣었으니 새 셸이면 자동 해결된다.)"
   echo
   log "새 셸에서:"

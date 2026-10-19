@@ -72,6 +72,10 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 
 ## 시작 전에
 
+**배포 호스트가 없다면 먼저** [install-prereq.md](install-prereq.md) — Deployer
+IAM role → EC2 생성 → Bedrock 액세스 확인 → `bootstrap-ec2.sh`(도구 9종 멱등
+설치) → `pkill -f 'vscode-server|cursor-server'`로 세션 재시작까지의 전 과정입니다.
+
 이 디렉토리는 배포 도구도 함께 담고 있습니다 — `./deploy`가 진입점이고
 `deploy.sh`(실행) → `deploy/`(파이썬 패키지) 순입니다. 처음 쓰기 전에:
 
@@ -86,6 +90,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 
 | 문서 | 내용 |
 |---|---|
+| [install-prereq.md](install-prereq.md) | **0단계 — 배포 호스트 준비** (EC2·deployer role·Bedrock 확인·bootstrap-ec2·세션 재시작) |
 | [install-compose.md](install-compose.md) | **t0 — EC2 1대 설치** (EC2 생성·IAM·도구·배포 전 과정 런북) |
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
