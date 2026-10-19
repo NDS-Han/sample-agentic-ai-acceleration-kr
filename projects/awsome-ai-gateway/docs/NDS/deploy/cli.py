@@ -634,6 +634,7 @@ def cmd_apply(args) -> int:
                 console.print(f"  {k}: {outputs[k]}")
         rep = doc.check_ecs(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
         console.print(doc.format_report(cfg, rep))
+        _post_apply_notes(cfg)
         return 0 if rep.worst != "HIGH" else 1
 
     if cfg.deploy.target == "eks":
@@ -718,6 +719,7 @@ def cmd_apply(args) -> int:
     from . import doctor as doc
     rep = doc.check_compose(cfg, out)
     console.print(doc.format_report(cfg, rep))
+    _post_apply_notes(cfg)
     return 0 if rep.worst != "HIGH" else 1
 
 
@@ -740,6 +742,18 @@ def _confirm_destroy(env: str, args) -> bool:
         console.print("[yellow]입력이 환경 이름과 다릅니다 — 취소됨")
         return False
     return True
+
+
+def _post_apply_notes(cfg: schema.GatewayConfig) -> None:
+    """apply/bootstrap 직후 운영자가 손으로 마무리할 항목 — DB 라우팅 프로필은
+    배포 선언이 아니라 운영 데이터라 자동화하지 않는다."""
+    console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
+                  "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
+                  f" --env {cfg.env}\n"
+                  "  · 라우팅 프로필 확인: admin UI → models — 시드의 claude-code/cowork "
+                  "행은 샘플 크로스계정 ARN 이 들어 있습니다. 단일 계정 배포면 "
+                  "account_role_arn 을 비워(in-account) 두세요 — 안 하면 AssumeRole "
+                  "실패로 요청이 전부 에러납니다")
 
 
 def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
@@ -1081,11 +1095,7 @@ def cmd_bootstrap(args) -> int:
         console.print(f"  ⓘ {n}")
     rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
     console.print(doc.format_report(cfg, rep))
-    console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
-                  "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
-                  f" --env {cfg.env}\n"
-                  "  · 모델 alias/라우팅 프로필 시드: admin UI → models "
-                  "(§4 — 운영 데이터라 bootstrap 이 만들지 않음)")
+    _post_apply_notes(cfg)
     return 0 if rep.worst != "HIGH" else 1
 
 

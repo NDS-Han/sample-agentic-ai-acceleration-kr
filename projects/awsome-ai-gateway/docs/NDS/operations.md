@@ -1,4 +1,4 @@
-# 운영 런북 — 직원 등록 · 오픈 전 체크리스트 · 신형 모델 구독
+# 운영 런북 — 직원 등록 · 오픈 전 체크리스트 · 라우팅 프로필 · 신형 모델 구독
 
 배포가 끝난 뒤 **반복되는 운영 작업**을 모읍니다. 설치 자체는
 install-{compose,ecs,eks}.md, 변경은 [update.md](update.md) 참조.
@@ -67,7 +67,24 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
 - [ ] **`.env`/시크릿 보관** — `VIRTUAL_KEY_ENCRYPTION_KEY` 백업됐는지
   (유실 시 발급 VK 전부 무효).
 
-## 3. 신형 모델 — Bedrock Marketplace 구독
+## 3. 라우팅 프로필 — in-account vs 크로스계정
+
+모델 별칭(alias)은 DB 시드·migration이 자동으로 넣지만, `model.routing_profiles`
+(클라이언트별 호출 경로)는 **운영 데이터라 배포가 건드리지 않습니다**. 시드에
+들어 있는 `claude-code`/`cowork` 행은 개발 조직의 샘플 크로스계정 ARN
+(`arn:aws:iam::333…`/`2222…`)을 가리킵니다.
+
+- **단일 계정 배포** (대부분): admin UI → models → routing에서 해당 행의
+  `account_role_arn`/`external_id`를 비우세요(NULL = in-account, 파드 자신의
+  IRSA 자격증명으로 직접 호출). 그대로 두면 없는 계정으로 AssumeRole을 시도해
+  요청이 전부 실패합니다 — 배포 직후 첫 번째로 확인할 항목.
+- **다른 계정의 Bedrock으로 보내기** (계정 분리·비용 격리·규제): 대상 계정에
+  AssumeRole 가능한 역할을 만들고(`llm-gateway-<env>` IRSA 신뢰 + ExternalId),
+  `account_role_arn`·`external_id`·`region`을 그 값으로 설정하면 됩니다.
+- `codex` 행은 시드부터 in-account(`account_role_arn` NULL)라 별도 조치가
+  필요 없습니다.
+
+## 4. 신형 모델 — Bedrock Marketplace 구독
 
 신형 Anthropic 모델은 **Model access 신청이 아니라 AWS Marketplace 구독**입니다.
 모델을 게이트웨이에 등록해도 계정에 구독이 없으면 호출이

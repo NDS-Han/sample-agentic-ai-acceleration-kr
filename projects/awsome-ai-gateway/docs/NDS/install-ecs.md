@@ -177,6 +177,13 @@ terraform -chdir=deployment/terraform/environments/gateway-ecs apply \
 점검 항목: 산출물 존재 → AWS 자격 → `terraform plan` no-op(드리프트) →
 서비스 running/desired → migration task exitCode → ALB 엔드포인트 `/health` 응답.
 
+> ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
+> 라우팅 행에는 샘플 크로스계정 ARN(`arn:aws:iam::333…/2222…`)이 들어 있습니다.
+> 단일 계정 배포면 admin UI → models → routing 에서 `account_role_arn`을 비워
+> (in-account) 두세요 — 그대로 두면 없는 계정으로 AssumeRole을 시도해 요청이
+> 전부 실패합니다. 다른 계정 Bedrock으로 내려면 오히려 실제 역할 ARN으로
+> 바꾸면 됩니다 ([operations.md](operations.md) 참조).
+
 ## 5. Cognito 사용자 생성 + admin 로그인
 
 OIDC 는 Cognito 가 제공합니다(모듈이 user pool 생성). 첫 관리자:
