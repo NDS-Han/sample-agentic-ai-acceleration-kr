@@ -1,11 +1,12 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
-"""deploy CLI — init / configure / validate / render / apply / doctor / client-values / teardown.
+"""deploy CLI — init / configure / validate / render / bootstrap / apply / doctor / client-values / teardown.
 
   deploy init           대화형으로 gateway.yaml 생성
   deploy configure      기존 설정을 기본값으로 다시 물어보고 저장(+배포)
   deploy validate       gateway.yaml 스키마·조합 검증
   deploy render         산출물 생성 (gen/<env>/ 아래 backend 별 파일)
-  deploy apply          render → 확인 → 실제 배포 → doctor 한 단계로
+  deploy bootstrap      [최초 1회] 신규 설치 — 인프라·시크릿·이미지·Cognito 전체
+  deploy apply          업데이트/동기화 — render → 확인 → 실제 배포 → doctor
   deploy doctor         배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml 역생성)
   deploy client-values  직원에게 전달할 OIDC/URL env 4줄 출력
   deploy teardown       배포 삭제 — backend 별 소유 범위만
@@ -812,6 +813,99 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     return 0
 
 
+def cmd_bootstrap(args) -> int:
+    """신규 설치 — install-guide §3 전체를 한 명령으로.
+
+    backend 별 선행 단계(tfstate/env apply/시크릿/이미지/Cognito) 후
+    cmd_apply 와 같은 실행기로 마무리한다. 각 단계는 멱등 — 실패 시
+    고친 뒤 bootstrap 을 다시 실행하면 이어간다."""
+    try:
+        cfg = _load_config(args)
+    except schema.SchemaError as exc:
+        console.print(f"[red]gateway.yaml 오류:\n{exc}")
+        return 1
+    from . import bootstrap
+
+    if cfg.deploy.target == "compose":
+        console.print("[cyan]compose 는 신규=업데이트 동일 — apply 로 진행합니다")
+        args.build = getattr(args, "build", False)   # bootstrap 파서엔 --build 없음
+        return cmd_apply(args)
+
+    if cfg.deploy.target == "ecs":
+        if args.plan:
+            console.print("[cyan]ecs bootstrap 계획: ① tfstate bucket/table 보장 "
+                          "→ ② apply(terraform 이 전부 생성 + 이미지 push)")
+            return 0
+        console.print(Panel(
+            f"신규 설치 (ecs — {cfg.env}):\n"
+            "① tfstate bucket/lock table 보장 (bootstrap-tfstate.sh)\n"
+            "② apply — terraform 이 VPC/Aurora/ElastiCache/Cognito/Secrets/ECR "
+            "생성 + 이미지 build/push + services",
+            title=f"bootstrap — {cfg.env}", expand=False))
+        if not _confirm_apply(args):
+            return 130
+        bootstrap.ensure_tfstate(cfg, REPO_ROOT, eks=False)
+        return cmd_apply(args)
+
+    if cfg.deploy.target == "eks":
+        from .render import eks as eks_render
+        from . import eks_apply, doctor as doc
+        context = getattr(args, "context", "") or ""
+        out = GEN_ROOT / cfg.env / "eks"
+
+        # 로컬 파일만 생성 — tfvars 검토를 위해 여기서 멈춘다 (AWS 변경 전)
+        env_target = bootstrap.scaffold_eks_env(cfg, REPO_ROOT, cfg.aws.region)
+        res = eks_render.render(cfg, out)
+        for n in res.get("notes", []):
+            console.print(f"  [yellow]ⓘ {n}")
+        if args.plan:
+            console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
+                          f"terraform apply ({env_target}) → ③ SM 시크릿 시드 → "
+                          "④ ECR 이미지 build/push → ⑤ helm apply → "
+                          "⑥ Cognito admin 생성")
+            return 0
+        console.print(Panel(
+            f"신규 설치 (eks — {cfg.env}):\n"
+            "① tfstate bucket/lock table 보장\n"
+            f"② terraform env apply — {env_target}\n"
+            "   (EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA — 수십 분)\n"
+            "③ Secrets Manager 시드 (/app 랜덤 + /redis 복사 + /db 검증)\n"
+            "④ ECR repo 생성 + 이미지 build/push\n"
+            "⑤ helm apply (cmd_apply 와 동일)\n"
+            "⑥ Cognito 첫 admin 사용자 생성 (adminBootstrap.emails[0])",
+            title=f"bootstrap — {cfg.env} (eks)", expand=False))
+        if not _confirm_apply(args):
+            return 130
+
+        backend = bootstrap.ensure_tfstate(cfg, REPO_ROOT, eks=True)
+        outs = bootstrap.env_apply(env_target, out, backend)
+        for n in bootstrap.seed_secrets(cfg, REPO_ROOT, outs):
+            console.print(f"  ⓘ {n}")
+        bootstrap.push_images_eks(cfg, outs, REPO_ROOT, cfg.aws.region)
+        try:
+            result = eks_apply.apply(cfg, out, REPO_ROOT, context)
+        except SystemExit as exc:
+            console.print(f"[red]{exc}")
+            return 1
+        console.print(f"\n[green]helm upgrade 완료 — {result['release']} "
+                      f"@ ns={result['namespace']}")
+        # helm 까지 끝난 최신 output 으로 온보딩 (ensure_infra 가 추가했을 수 있음)
+        for n in bootstrap.onboard_admin(
+                cfg, REPO_ROOT, eks_apply.tf_outputs(env_target), cfg.aws.region):
+            console.print(f"  ⓘ {n}")
+        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+        console.print(doc.format_report(cfg, rep))
+        console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
+                      "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
+                      f" --env {cfg.env}\n"
+                      "  · 모델 alias/라우팅 프로필 시드: admin UI → models "
+                      "(§4 — 운영 데이터라 bootstrap 이 만들지 않음)")
+        return 0 if rep.worst != "HIGH" else 1
+
+    console.print(f"[red]deploy.target={cfg.deploy.target} 의 bootstrap 은 구현 전입니다.")
+    return 1
+
+
 def cmd_teardown(args) -> int:
     """배포 삭제 — 각 backend 가 소유하는 범위만 지운다 (apply 와 같은 경계)."""
     try:
@@ -1177,6 +1271,18 @@ def main(argv=None) -> int:
                     help="eks: kubeconfig context (미지정 시 현재 context — "
                          "여러 클러스터가 있으면 명시 권장)")
     sp.set_defaults(fn=cmd_apply)
+
+    sp = sub.add_parser("bootstrap",
+                        help="[최초 1회] 신규 설치 — 인프라·시크릿·이미지·"
+                             "Cognito 포함 전체 순서 (이후 업데이트는 apply)")
+    sp.add_argument("--config", default=str(DEFAULT_CONFIG))
+    sp.add_argument("--plan", action="store_true",
+                    help="단계 계획만 보여주고 실행하지 않음")
+    sp.add_argument("-y", "--yes", action="store_true",
+                    help="확인 프롬프트 생략 (CI/자동화)")
+    sp.add_argument("--context", default="",
+                    help="eks: kubeconfig context (미지정 시 현재 context)")
+    sp.set_defaults(fn=cmd_bootstrap)
 
     sp = sub.add_parser("doctor", help="[상태 확인] 배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml)")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))

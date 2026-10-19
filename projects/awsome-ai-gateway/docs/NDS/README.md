@@ -14,28 +14,32 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 |---|---|---|---|
 | 평가·POC·소규모(~50명) | `compose` (t0) | [install-compose.md](install-compose.md) | EC2 1대에 Docker Compose로 전체 스택 |
 | 소규모~표준(100~1000명) | `ecs` (t1/t2) | [install-ecs.md](install-ecs.md) | ECS Fargate + Aurora + ElastiCache — **인프라까지 전부 생성** |
-| 기존 EKS 배포 관리·대규모 | `eks` (t2/t3) | [install-eks.md](install-eks.md) | 기존 클러스터의 helm release를 이어받아 관리 |
+| EKS 신규 구축·대규모 | `eks` (t2/t3) | [install-eks.md](install-eks.md) | `bootstrap`이 인프라+앱 전체 생성 / `apply`로 업데이트 |
 
 > 기존에 이미 배포된 환경이 있다면 새로 만들지 말고
 > `./deploy doctor --capture`로 현재 상태를 gateway.yaml로 역생성하세요 —
 > [update.md](update.md)의 온보딩 절.
 
-## 명령 — 일상에서 쓰는 건 3개
+## 명령 — 일상에서 쓰는 건 4개
 
 ```bash
 ./deploy configure   # 설정 마법사 — 항목별 확인(Enter=유지) → 끝에서 "지금 배포?"
-./deploy apply       # yaml 그대로 배포 — 파일을 직접 고쳤거나 CI에서. render 내장
+./deploy bootstrap   # [최초 1회] 신규 설치 — 인프라·시크릿·이미지·Cognito 전체
+./deploy apply       # 업데이트/동기화 — yaml 그대로 배포 (render 내장)
 ./deploy doctor      # 상태·드리프트 점검  (--capture: 기존 배포 → yaml 역생성)
 ./deploy client-values  # 직원에게 전달할 env 4줄 출력 — client-setup.md §0 의 값
 ```
 
-최초 생성은 `./deploy init` (yaml이 없을 때의 configure). 아래는 고급 명령 —
-`configure`/`apply`가 내부에서 다 하므로 일상 경로에선 불필요합니다:
+생명주기는 **`bootstrap`(신규) → `apply`(업데이트 반복) → `teardown`(삭제)**입니다.
+기존 배포를 이어받는 경우는 bootstrap 대신 `doctor --capture`로 yaml을
+역생성한 뒤 `apply`로 들어옵니다. 최초 yaml 생성은 `./deploy init`.
+아래는 고급 명령 — `configure`/`apply`가 내부에서 다 하므로 일상 경로에선 불필요합니다:
 
 ```bash
 ./deploy init        # [최초 1회] 대화형으로 gateway.yaml 생성
 ./deploy validate    # [고급] yaml 검증만
 ./deploy render      # [고급] 산출물만 생성해서 확인
+./deploy bootstrap --plan  # 신규 설치 단계 미리보기 — 아무것도 안 바뀜
 ./deploy apply --plan   # 변경 계획만 보기 — 아무것도 안 바뀜
 ./deploy teardown    # [위험] 배포 삭제 — 소유 범위별 (환경 이름 입력으로 확인)
 ```
@@ -55,13 +59,13 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 |---|---|
 | compose | 앱 스택 전체(9개 서비스+Caddy) · 도메인 자동 TLS · IP allowlist · OIDC · 알림 · 이미지 핀 · 마이그레이션 자동 선행 |
 | ecs | **인프라까지 전부**: VPC/Aurora/ElastiCache/ALB/ECS/Cognito/Secrets/ECR · 이미지 build+push · 마이그레이션 task · private ALB |
-| eks | helm release 관리: 이미지 태그 · ingress host/CIDR · OIDC 계약 · 알림 · feature 플래그 · migration hook · 자동 롤백 |
+| eks | `bootstrap`: tfstate · env terraform(EKS/Aurora/ElastiCache/Cognito/Secrets/IRSA) · SM 시드 · 이미지 build+push · Cognito admin → 이후 helm release 관리(apply와 동일 범위) |
 
 **하지 않는 것:**
 
-- **eks 인프라 자체** — EKS 클러스터·Fargate·Aurora·VPC·IRSA·ESO는 기존 terraform env가 소유합니다(이 도구는 helm/앱 레이어만)
+- **eks의 인프라 갱신 자체** — `bootstrap`은 최초 생성까지 담당하지만, 이후 클러스터 버전·노드 변경 같은 인프라 변경은 terraform env가 소유합니다(`apply`는 helm/앱 레이어 + feature 인프라 보강만)
 - **ecs 기존 인프라 편입** — 모듈이 전부 새로 만듭니다(기존 VPC/RDS 재사용 불가)
-- **AgentCore 리소스** — `web_search`·`bi_insight`의 AgentCore Gateway/Runtime은 수동 프로비저닝 (us-east-1 구조적 제약)
+- **bi_insight AgentCore Runtime** — 수동 프로비저닝 (`web_search` Gateway는 `features.web_search`로 자동)
 - **외부 IdP on ecs** — ecs 경로는 Cognito를 직접 생성하므로 yaml의 oidc 값은 무시됩니다(`required_group`만 반영)
 - **DB 롤백** — 마이그레이션은 forward only
 - **유실된 시크릿 복구** — `.env`의 `VIRTUAL_KEY_ENCRYPTION_KEY`를 잃으면 발급된 Virtual Key 전부 재발급 필요
@@ -84,7 +88,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 |---|---|
 | [install-compose.md](install-compose.md) | **t0 — EC2 1대 설치** (EC2 생성·IAM·도구·배포 전 과정 런북) |
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
-| [install-eks.md](install-eks.md) | **t2/t3 — 기존 EKS 배포 온보딩·업데이트** |
+| [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
 | [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
