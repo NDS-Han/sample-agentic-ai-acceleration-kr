@@ -109,6 +109,9 @@ locals {
     cpu           = 512
     memory        = 1024
     desired_count = 1
+    # optional 키와 타입을 맞춰야 lookup() 의 default 로 쓸 수 있다
+    min_count = null
+    max_count = null
   }
 
   # var.service_sizing 의 객체는 cpu/memory/desired_count 를 모두 포함해야 하므로

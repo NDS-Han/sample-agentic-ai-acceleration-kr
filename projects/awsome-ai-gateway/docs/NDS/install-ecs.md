@@ -32,6 +32,21 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
 - t1: ~$200/월 — Fargate 6서비스 + ALB + NAT 1 + Aurora Serverless v2(1~4 ACU) + Valkey 단일노드
 - t2: ~$500/월 — NAT·캐시(replica)·task Multi-AZ, task 수 2배. **DB는 Aurora Serverless 단일 writer** — Multi-AZ 아님
 
+### 용량·오토스케일링
+
+- **gateway-proxy**(SSE 진입점): desired → `max_count`(기본 ×4)까지 CPU 60%·
+  Mem 70% target-tracking으로 자동 확장. t1은 2→8task, t2는 4→16task.
+  **admin-api**도 ×2까지 확장. scale-in은 ALB 드레인(300s) 후 종료라 진행 중
+  스트림이 보호됩니다.
+- **싱글톤 계약**: scheduler·cost-recorder·notification은 스트림 consumer/
+  cron 중복 방지로 1개 고정 — autoscaling도 min=max=1 핀입니다.
+- **DB 커넥션 예산**: task가 늘면 pool 수요(30conn/task worst, gw 60)도
+  비례해 늡니다. `validate`가 최악치가 Aurora `max_acu`(~225conn/ACU)의
+  80%를 넘지 않는지 검사하고, 정상 수요가 `min_acu` 바닥을 넘으면 경고합니다 —
+  `deploy.sizing`으로 task를 키우기 전에 `deploy validate`를 돌리세요.
+  그 이상의 탄력이 필요하면 eks prod가 쓰는 **RDS Proxy**가 구조적 해법입니다
+  (pool 다중화, 별도 비용).
+
 ## 1. 저장소와 gateway.yaml
 
 ```bash

@@ -324,13 +324,32 @@ class GatewayConfig:
                 if not isinstance(ov, dict):
                     e.append(f"deploy.sizing.{svc} 는 mapping 이어야 합니다: {ov!r}")
                     continue
-                bad = sorted(set(ov) - {"cpu", "memory", "desired_count"})
+                bad = sorted(set(ov) - {"cpu", "memory", "desired_count", "min_count", "max_count"})
                 if bad:
                     e.append(f"deploy.sizing.{svc} 에 알 수 없는 키: {bad} "
-                             f"(허용: cpu, memory, desired_count)")
+                             f"(허용: cpu, memory, desired_count, min_count, max_count)")
             if self.deploy.target != "ecs":
                 e.append(f"deploy.sizing 은 ecs 경로에서만 적용됩니다 "
                          f"(deploy.target={self.deploy.target}) — 지우거나 target 을 ecs 로.")
+        if self.deploy.target == "ecs":
+            # 오토스케일(max_count)을 포함한 worst-case pool 수요가 Aurora 천장을
+            # 넘으면 스케일아웃이 DB 를 고갈시킨다 — 선언 단계에서 막는다.
+            from .tiers import ACU_CONNECTIONS, ecs_db_budget
+            b = ecs_db_budget(self)
+            if b and b["worst"] > int(b["ceiling_capacity"] * 0.8):
+                e.append(
+                    f"DB 커넥션 예산 초과: worst-case 수요 {b['worst']}개 "
+                    f"(pool 10+overflow 20 × 프로세스 × desired/max_count 합산)가 "
+                    f"Aurora 최대 용량 {b['ceiling_capacity']}개의 80%를 넘습니다. "
+                    f"deploy.sizing 의 max_count/desired_count 를 낮추거나 "
+                    f"tier 의 serverless max_acu 를 올리세요.")
+            elif b and b["steady"] > b["floor_capacity"]:
+                e_or_w = w if b["floor_capacity"] < b["ceiling_capacity"] else e
+                e_or_w.append(
+                    f"정상 pool 수요 {b['steady']}개(pool_size 기준)가 Aurora 최소 용량"
+                    f"(min_acu ≈ {b['floor_capacity']}conn, {ACU_CONNECTIONS}/ACU)을 "
+                    f"넘습니다 — 저부하 구간에서 pool_timeout 큐잉이 생길 수 있습니다. "
+                    f"min_acu 를 올리거나 task 수를 줄이세요.")
         if self.features.notifications.provider not in NOTIFICATION_PROVIDERS:
             e.append(f"notifications.provider 는 {NOTIFICATION_PROVIDERS} 중 하나여야 합니다.")
         if self.features.notifications.provider == "ses" and not self.features.notifications.ses_from:

@@ -16,33 +16,9 @@ from pathlib import Path
 
 from .. import schema
 from ..schema import GatewayConfig
+from ..tiers import ecs_service_sizing as service_sizing
 from ..tiers import preset
 from . import common
-
-
-# tier 의 compute_spec → service_sizing map. cpu/memory 는 서비스 성격으로
-# 고정(I/O bound — SSE 스트림 수용량은 메모리·커넥션 풀이 결정), 개수만 티어가 바꾼다.
-def service_sizing(cfg: GatewayConfig) -> dict:
-    spec = preset(cfg.deploy.size_tier).compute_spec
-    n = int(spec.get("tasks_per_service", 1))
-    gw = int(spec.get("gateway_tasks", n))
-    sizing = {
-        # gateway-proxy 만 SSE 장시간 커넥션 — 1vCPU/2GB + 여유 task 수
-        "gateway-proxy":        {"cpu": 1024, "memory": 2048, "desired_count": gw},
-        "admin-api":            {"cpu": 512,  "memory": 1024, "desired_count": n},
-        "admin-ui":             {"cpu": 512,  "memory": 1024, "desired_count": n},
-        "scheduler":            {"cpu": 256,  "memory": 512,  "desired_count": 1},
-        # 스트림 소비자는 1개만 (COST_STREAM_CONSUMER 고정 — 늘리면 consumer name 충돌)
-        "cost-recorder-worker": {"cpu": 256,  "memory": 512,  "desired_count": 1},
-        "notification-worker":  {"cpu": 256,  "memory": 512,  "desired_count": 1},
-        # run-task 로만 실행 — desired_count 는 쓰이지 않지만 스키마상 필요
-        "migration":            {"cpu": 256,  "memory": 512,  "desired_count": 0},
-    }
-    # deploy.sizing 으로 서비스별 override 가능 (예: {"gateway-proxy": {"cpu": 2048}})
-    for name, ov in (cfg.deploy.sizing or {}).items():
-        if name in sizing and isinstance(ov, dict):
-            sizing[name].update(ov)
-    return sizing
 
 
 def _tf_value(v) -> str:
@@ -234,6 +210,14 @@ def render_backend_hcl(cfg: GatewayConfig) -> str:
 def feature_notes(cfg: GatewayConfig) -> list[str]:
     """ecs backend 의 기능 플래그 실효성 — 침묵 드롭 금지 (compose 와 같은 규약)."""
     notes: list[str] = []
+    sizing = service_sizing(cfg)
+    scaled = [s for s, v in sizing.items()
+              if v.get("max_count", v["desired_count"]) > v["desired_count"]]
+    if scaled:
+        notes.append(
+            f"service autoscaling: {', '.join(sorted(scaled))} 에 CPU 60%/Mem 70% "
+            f"target-tracking 정책이 붙습니다 (상한=max_count — deploy.sizing 으로 조정). "
+            f"싱글톤 워커·admin-ui·scheduler 는 min=max=desired 로 핀됩니다.")
     if not cfg.aws.allowed_roles:
         notes.append(
             "CLI 로그인(STS 경로): aws.allowed_roles 가 비어 있어 allowed_iam_roles=[] "

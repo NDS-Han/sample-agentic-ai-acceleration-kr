@@ -174,11 +174,13 @@ variable "create_ecr_repos" {
 # 서비스 사이징 — tier 프리셋이 이 map 으로 내려온다
 # ------------------------------------------------------------------------------
 variable "service_sizing" {
-  description = "서비스별 cpu(1024=1vCPU)/memory(MiB)/desired_count. 키는 locals.service_names 참조"
+  description = "서비스별 cpu(1024=1vCPU)/memory(MiB)/desired_count + 선택 min/max_count(오토스케일). 키는 locals.service_names 참조"
   type = map(object({
     cpu           = number
     memory        = number
     desired_count = number
+    min_count     = optional(number)
+    max_count     = optional(number)
   }))
   default = {}
 }

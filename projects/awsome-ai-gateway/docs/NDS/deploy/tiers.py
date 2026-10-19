@@ -92,3 +92,108 @@ def preset(name: str) -> TierPreset:
 def tier_choices_for_target(target: str) -> list[str]:
     """backend 가 받을 수 있는 티어 목록."""
     return [t.name for t in TIERS.values() if t.backend == target]
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# ECS 서비스 사이징 + DB 커넥션 예산
+#
+# service_sizing 은 terraform 모듈의 service_sizing map 으로 내려가는 정본.
+# schema.validate 와 render.ecs 가 같이 써야 하므로 여기 둔다(순환 import 방지 —
+# 이 모듈은 schema 를 import 하지 않고 duck typing 만 한다).
+# ──────────────────────────────────────────────────────────────────────────
+
+# taskdef env 계약 (modules/ecs-gateway): 모든 DB 서비스가
+# DB_POOL_SIZE=10 + DB_MAX_OVERFLOW=20 → 프로세스당 typical 10 / worst 30 conns.
+# gateway-proxy 는 WORKERS=2, 나머지는 1 프로세스, admin-ui 는 DB 없음.
+# migration 은 run-task 라 상주하지 않지만 배포 창에 겹치므로 worst 에 포함.
+DB_POOL_PER_TASK: dict[str, int] = {     # typical — pool_size 만 (steady 비교용)
+    "gateway-proxy":        20,   # 2 procs × 10
+    "admin-api":            10,   # 1 worker
+    "admin-ui":              0,   # DB 없음
+    "scheduler":            10,
+    "cost-recorder-worker": 10,
+    "notification-worker":  10,
+    "migration":            10,
+}
+DB_CONNS_PER_TASK: dict[str, int] = {    # worst — pool+overflow (ceiling 비교용)
+    "gateway-proxy":        60,   # 2 procs × 30
+    "admin-api":            30,
+    "admin-ui":              0,
+    "scheduler":            30,
+    "cost-recorder-worker": 30,
+    "notification-worker":  30,
+    "migration":            30,
+}
+
+# Aurora Serverless v2: max_connections ≈ ACU × (2GiB / 9.53MiB) ≈ 225/ACU.
+ACU_CONNECTIONS = 225
+# provisioned db.r6g/r7g.large (16GiB) 기준 보수치.
+PROVISIONED_CONNECTIONS = 1700
+
+# 오토스케일링 상한 배수 — 트래픽을 받는 서비스만. 워커·스케줄러는 싱글톤
+# 계약(스트림 consumer 이름, cron 중복 방지)이라 상한을 두지 않는다.
+AUTOSCALE_MAX_FACTOR: dict[str, int] = {
+    "gateway-proxy": 4,
+    "admin-api":     2,
+}
+
+
+def ecs_service_sizing(cfg) -> dict:
+    """tier preset + deploy.sizing override → module service_sizing map.
+
+    cpu/memory 는 서비스 성격으로 고정(I/O bound — SSE 스트림 수용량은
+    메모리·커넥션 풀이 결정), 개수와 오토스케일 상한만 티어가 바꾼다.
+    """
+    spec = preset(cfg.deploy.size_tier).compute_spec
+    n = int(spec.get("tasks_per_service", 1))
+    gw = int(spec.get("gateway_tasks", n))
+    sizing = {
+        "gateway-proxy":        {"cpu": 1024, "memory": 2048, "desired_count": gw},
+        "admin-api":            {"cpu": 512,  "memory": 1024, "desired_count": n},
+        "admin-ui":             {"cpu": 512,  "memory": 1024, "desired_count": n},
+        "scheduler":            {"cpu": 256,  "memory": 512,  "desired_count": 1},
+        # 스트림 소비자는 1개만 (COST_STREAM_CONSUMER 고정 — 늘리면 consumer name 충돌)
+        "cost-recorder-worker": {"cpu": 256,  "memory": 512,  "desired_count": 1},
+        "notification-worker":  {"cpu": 256,  "memory": 512,  "desired_count": 1},
+        # run-task 로만 실행 — desired_count 는 쓰이지 않지만 스키마상 필요
+        "migration":            {"cpu": 256,  "memory": 512,  "desired_count": 0},
+    }
+    for name, factor in AUTOSCALE_MAX_FACTOR.items():
+        sizing[name]["max_count"] = sizing[name]["desired_count"] * factor
+
+    # deploy.sizing 으로 서비스별 override 가능 (예: {"gateway-proxy": {"cpu": 2048}})
+    for name, ov in (cfg.deploy.sizing or {}).items():
+        if name in sizing and isinstance(ov, dict):
+            sizing[name].update(ov)
+    return sizing
+
+
+def ecs_db_budget(cfg) -> dict:
+    """ecs 경로의 worst-case DB 커넥션 수요 vs Aurora 한도.
+
+    반환: {steady, worst, floor_capacity, ceiling_capacity}.
+    - steady: pool_size(10/proc) × desired_count — 정상 수요, min ACU 바닥과 비교
+    - worst: (pool+overflow 30/proc) × max(desired,max_count) — 최악 수요,
+      max ACU 천장과 비교. 천장 초과 = 스케일아웃이 DB 를 고갈 → validation 에러.
+    """
+    if cfg.deploy.target != "ecs":
+        return {}
+    t = preset(cfg.deploy.size_tier)
+    sizing = ecs_service_sizing(cfg)
+    steady = worst = 0
+    for svc, s in sizing.items():
+        typical = DB_POOL_PER_TASK.get(svc, 10)
+        per = DB_CONNS_PER_TASK.get(svc, 30)
+        desired = int(s.get("desired_count", 0))
+        cap = max(desired, int(s.get("max_count", desired)))
+        steady += typical * desired
+        worst += per * cap
+    if t.db_mode == "rds-serverless":
+        floor_cap = int(t.db_spec.get("min_acu", 0.5) * ACU_CONNECTIONS)
+        ceil_cap = int(t.db_spec.get("max_acu", 4.0) * ACU_CONNECTIONS)
+    else:
+        floor_cap = ceil_cap = PROVISIONED_CONNECTIONS
+    return {
+        "steady": steady, "worst": worst,
+        "floor_capacity": floor_cap, "ceiling_capacity": ceil_cap,
+    }

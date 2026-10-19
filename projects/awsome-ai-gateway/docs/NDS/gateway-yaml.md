@@ -92,17 +92,30 @@ infra:                         # 신규 설치 인프라 입력 — `deploy boot
 
 ### `deploy.sizing`
 
-ecs 경로에서 서비스별 cpu/memory/desired_count 를 티어 기본값에서 override:
+ecs 경로에서 서비스별 cpu/memory/desired_count(+ 오토스케일 경계)를 티어
+기본값에서 override:
 
 ```yaml
 deploy:
   sizing:
-    gateway-proxy: { cpu: 2048, memory: 4096, desired_count: 4 }
+    gateway-proxy: { cpu: 2048, memory: 4096, desired_count: 4, max_count: 16 }
 ```
 
 지정한 키만 바뀌고 나머지는 티어 값이 유지됩니다.
-`cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를
-늘리면 안 됩니다 (렌더러가 항상 1 로 고정).
+
+- `max_count` — ECS service autoscaling 상한. 기본은 트래픽을 받는 두 서비스만:
+  `gateway-proxy` desired×4, `admin-api` desired×2 (CPU 60%·Mem 70%
+  target-tracking). 나머지 서비스는 min=max=desired 로 핀됩니다.
+- `min_count` — 오토스케일 하한(기본=desired_count). desired_count 변경은
+  target 의 min/max 경계로 전파됩니다.
+- `cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를
+  늘리면 안 됩니다 (렌더러가 항상 1 로 고정).
+- **DB 커넥션 예산**: `validate` 가 worst-case pool 수요
+  (pool 10+overflow 20 × 프로세스 × max_count)가 Aurora `max_acu`의
+  ~225conn/ACU 대비 80% 를 넘으면 에러로 막습니다 — 스케일아웃이 DB 를
+  고갈시키는 경로를 선언 단계에서 차단. 정상 수요(pool_size)가 `min_acu`
+  바닥을 넘으면 경고. 더 큰 탄력이 필요하면 RDS Proxy 도입을 검토하세요
+  (eks prod 가 이미 사용).
 
 ### `infra.*` — 신규 설치 인프라 입력
 

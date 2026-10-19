@@ -110,6 +110,38 @@ def test_cost_recorder_stays_single():
     assert v["service_sizing"]["cost-recorder-worker"]["desired_count"] == 1
 
 
+def test_autoscale_max_count_traffic_services_only():
+    """gateway-proxy ×4 / admin-api ×2 상한 — 싱글톤 워커·admin-ui는 상한 없음."""
+    v = ecs_render.desired_tfvars(_cfg())["service_sizing"]
+    assert v["gateway-proxy"]["max_count"] == 8   # desired 2 × 4 (t1)
+    assert v["admin-api"]["max_count"] == 2       # desired 1 × 2
+    for svc in ("scheduler", "cost-recorder-worker", "notification-worker",
+                "admin-ui", "migration"):
+        assert "max_count" not in v[svc]
+
+
+def test_sizing_override_max_count():
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1",
+                       "sizing": {"gateway-proxy": {"max_count": 6}}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["service_sizing"]["gateway-proxy"]["max_count"] == 6
+
+
+def test_db_budget_within_ceiling_by_default():
+    from deploy.tiers import ecs_db_budget
+    b = ecs_db_budget(_cfg())
+    assert b["steady"] == 80    # pool_size 10/proc — t1: gw2×20 + 4svc×10
+    assert b["worst"] == 630    # +overflow 30/proc — gw8×60 + api2×30 + 3×30
+    assert b["floor_capacity"] == 225 and b["ceiling_capacity"] == 900
+
+
+def test_db_budget_rejects_excessive_max_count():
+    """max_count 가 Aurora max_acu(4 ACU = 900conn) 80% 를 넘으면 스키마 에러."""
+    with pytest.raises(schema.SchemaError, match="예산 초과"):
+        _cfg(deploy={"target": "ecs", "size_tier": "t1",
+                     "sizing": {"gateway-proxy": {"max_count": 12}}})
+
+
 def test_backend_hcl_infers_from_account_id():
     cfg = _cfg()
     hcl = ecs_render.render_backend_hcl(cfg)
