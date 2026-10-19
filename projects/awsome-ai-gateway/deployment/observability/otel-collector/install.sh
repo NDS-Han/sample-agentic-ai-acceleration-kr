@@ -38,6 +38,12 @@ kubectl apply -f configmap.yaml
 kubectl apply -f deployment.yaml
 kubectl apply -f service.yaml
 
+# cluster 라벨 — 예전엔 configmap 에 "llm-gateway-prod" 하드코딩이라 dev 메트릭이
+# prod 로 오표기됐다. 명시 CLUSTER_NAME env 가 우선, 없으면 현재 context 이름.
+CLUSTER_NAME="${CLUSTER_NAME:-$(kubectl config current-context)}"
+kubectl -n "$NS" set env deployment/otel-collector "CLUSTER_NAME=$CLUSTER_NAME"
+ok "cluster 라벨: $CLUSTER_NAME"
+
 # Rollout 대기 (최대 2분)
 info "Deployment rollout 대기"
 if kubectl -n "$NS" rollout status deployment/otel-collector --timeout=120s >/dev/null 2>&1; then

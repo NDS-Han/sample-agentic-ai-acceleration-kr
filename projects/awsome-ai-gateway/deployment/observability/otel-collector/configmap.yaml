@@ -24,8 +24,11 @@ data:
         limit_mib: 1500
       resource:
         attributes:
+          # cluster 라벨은 Deployment env 주입 — 예전엔 "llm-gateway-prod" 하드코딩이라
+          # dev 의 모든 메트릭이 prod 로 오표기됐다(라이브 PromQL 실측). install.sh 가
+          # 현재 kube context 이름으로 CLUSTER_NAME 을 채운다.
           - key: cluster
-            value: llm-gateway-prod
+            value: "${env:CLUSTER_NAME}"
             action: insert
 
     exporters:

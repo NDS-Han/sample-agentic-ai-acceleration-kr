@@ -30,8 +30,10 @@ exporters:
     tls:
       insecure: true
 
+  # detailed 는 메트릭 배치 전량을 collector 로그에 덤프한다 — 라벨 값(모델/요청
+  # 메타데이터)이 컨테이너 로그에 축적된다. 진단용 기본은 basic.
   debug:
-    verbosity: detailed
+    verbosity: basic
 
 service:
   pipelines:

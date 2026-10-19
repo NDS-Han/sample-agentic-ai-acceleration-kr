@@ -61,6 +61,11 @@ spec:
             capabilities:
               drop: ["ALL"]
           args: ["--config=/etc/otel/config.yaml"]
+          env:
+            # cluster 라벨의 소스 — install.sh 가 `kubectl set env` 로 현재 context
+            # 이름을 채운다. set env 없이 apply 만 하면 빈 라벨(명시적 미설정)로 남는다.
+            - name: CLUSTER_NAME
+              value: ""
           ports:
             - { name: otlp-grpc,  containerPort: 4317 }
             - { name: otlp-http,  containerPort: 4318 }

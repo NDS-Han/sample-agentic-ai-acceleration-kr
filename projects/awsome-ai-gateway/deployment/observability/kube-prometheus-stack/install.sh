@@ -30,7 +30,7 @@ warn()  { echo -e "${Y}⚠${N}  $*"; }
 # ─── Grafana IRSA role ARN (terraform output 또는 env) ─────────────────
 if [ -z "${GRAFANA_ROLE_ARN:-}" ]; then
   info "GRAFANA_ROLE_ARN 미설정 → terraform output 에서 조회"
-  if GRAFANA_ROLE_ARN=$(terraform -chdir=../../terraform/environments/${ENV:-prod} output -raw grafana_role_arn 2>/dev/null); then
+  if GRAFANA_ROLE_ARN=$(terraform -chdir="../../terraform/environments/${ENV:-prod}" output -raw grafana_role_arn 2>/dev/null); then
     ok "GRAFANA_ROLE_ARN = $GRAFANA_ROLE_ARN"
   else
     warn "Grafana IRSA 미설정. CloudWatch 데이터소스를 사용할 수 없습니다 (Prometheus 메트릭은 정상)."
@@ -60,12 +60,37 @@ else
     info "신규 설치 모드"
 fi
 
+# ─── CloudWatch datasource defaultRegion — 리전은 --set 으로만 주입 ──────────
+# values.yaml 에 박아두면 다른 리전 배포에서 조용히 틀린 리전을 조회한다
+# (dev 는 ap-south-1 인데 values 기본값은 ap-northeast-2 — 실측 불일치).
+# 명시 GRAFANA_CW_REGION → 없으면 aws configure region → 그마저 없으면
+# 클러스터 ARN 의 리전 필드(현재 context)에서 추출.
+CW_REGION="${GRAFANA_CW_REGION:-}"
+if [ -z "$CW_REGION" ]; then
+  CW_REGION="$(aws configure get region 2>/dev/null || true)"
+fi
+if [ -z "$CW_REGION" ]; then
+  # 이 저장소의 context 이름 = 클러스터 이름 (install-eks.sh 규약). ARN 리전 필드 사용.
+  cur_ctx="$(kubectl config current-context 2>/dev/null || true)"
+  CW_REGION="$(aws eks describe-cluster --name "$cur_ctx" \
+    --query 'cluster.arn' --output text 2>/dev/null | cut -d: -f4 || true)"
+fi
+if [ -n "$CW_REGION" ]; then
+  info "CloudWatch defaultRegion = $CW_REGION"
+else
+  warn "리전 감지 실패 — values.yaml 폴백값이 쓰인다. GRAFANA_CW_REGION=<region> 으로 명시 권장"
+fi
+
+REGION_SET=()
+[ -n "$CW_REGION" ] && REGION_SET=(--set "grafana.additionalDataSources[0].jsonData.defaultRegion=${CW_REGION}")
+
 if [ -n "${GRAFANA_ROLE_ARN}" ]; then
   helm upgrade --install kps prometheus-community/kube-prometheus-stack \
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
     --set "grafana.serviceAccount.annotations.eks\.amazonaws\.com/role-arn=${GRAFANA_ROLE_ARN}" \
+    "${REGION_SET[@]}" \
     --timeout 10m \
     --wait
 else
@@ -73,6 +98,7 @@ else
     --namespace "$NS" \
     --version "$KPS_VERSION" \
     -f values.yaml \
+    "${REGION_SET[@]}" \
     --timeout 10m \
     --wait
 fi

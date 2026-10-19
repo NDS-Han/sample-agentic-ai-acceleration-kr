@@ -111,6 +111,9 @@ grafana:
       uid: cloudwatch
       jsonData:
         authType: default      # IRSA 사용 (default credential chain)
+        # defaultRegion 은 install.sh 가 --set 으로 주입한다 (values 파일에 리전을
+        # 박으면 다른 리전 배포에서 조용히 틀린 리전을 조회한다 — dev/ap-south-1 실측).
+        # 여기 남은 값은 apply 경로 없이 쓰인 경우의 폴백.
         defaultRegion: ap-northeast-2
         customMetricsNamespaces: "AWS/Bedrock,AWS/RDS,AWS/ApplicationELB"
 
