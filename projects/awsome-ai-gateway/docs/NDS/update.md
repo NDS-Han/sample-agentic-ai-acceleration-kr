@@ -76,6 +76,31 @@ feature 플래그(WEB_SEARCH/FIREHOSE/otel), OIDC 계약, 서비스별 이미지
 ESO/Fargate/RDS Proxy 등 eks 고유 구성도 notes 에 기록됩니다 — 캡처본은
 **온보딩용 후보**이지 eks 재배포 가능한 완전한 선언이 아닙니다.
 
+### us-llm-gateway(레거시 스크립트) 배포를 온보딩할 때
+
+레거시 배포도 EKS helm release 이므로 위 절차로 캡처됩니다 — 채택 후
+`apply`는 차트 base → `values-eks-fargate-<env>[.local].yaml` → gen overlay →
+`--set`(tf output) 순으로 쌓으므로 **env values 파일이 소유한 값(시크릿 경로,
+ESO, Fargate, HPA/requests)은 그대로 유지**되고, terraform 인프라도 env
+tfvars 소유로 남습니다. 다만 채택 전 두 가지를 결정하세요:
+
+1. **Ingress host 네이밍** — 레거시는 `gateway-dev.<domain>` 형태, NDS 는
+   `domain.name`이 있으면 `gateway./admin./admin-api.<domain>`으로 재작성합니다.
+   - 이름을 바꿔도 되면(dev 등): 그대로 채택 → apply 후 Route53 레코드와
+     클라이언트 URL, admin nextauth 를 새 host로 갱신. ACM 인증서가
+     `*.<domain>` 와일드카드면 같은 레벨 이름이라 별도 발급 불필요.
+   - 기존 이름을 유지해야 하면(prod 등): 채택본에서 `domain.mode: none`으로
+     두고 `domain.name`을 비우세요 — overlay 가 host 를 건드리지 않아 env
+     values 의 `gateway-dev.*` 와 인증서 어노테이션이 유지됩니다. yaml 상
+     mode=none 이 실제와 다른 표현이라는 점만 감안하세요.
+2. **첫 apply 는 차트 업그레이드를 겸합니다** — 로컬 repo 의 차트가 설치된
+   release 보다 새 버전일 수 있습니다. `./deploy apply --plan` 으로 helm
+   dry-run/차이를 먼저 보고, 가능하면 의도된 업그레이드 창에서 채택하세요.
+
+채택 후 `./deploy doctor` 로 live 와의 drift 를 확인하고, env terraform 을
+건드리는 경우 managed overlay(`gen/<env>/eks/terraform.tfvars`의
+`enable_*` 키가 live 기준으로 기록됨)를 `-var-file`로 함께 넘기세요.
+
 ## 일반 업데이트 (기능 on/off, 설정 변경)
 
 가장 쉬운 경로 — 현재 설정을 기본값으로 항목을 다시 물어보는 마법사:
