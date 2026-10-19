@@ -52,6 +52,12 @@ def test_images_pin_replaces_build(tmp_path):
     assert gw["image"].endswith("gateway-proxy:abc123")
     # scheduler 는 admin-api 이미지를 쓴다
     assert out["services"]["scheduler"]["image"].endswith("admin-api:abc123")
+    # migration 은 db/ 전용 이미지 — admin-api 로 바뀌면 psql/alembic 이 없어
+    # completed 게이트가 영구 대기한다 (회귀)
+    assert out["services"]["migration"]["image"].endswith("migration:abc123")
+    # migration 은 init SQL 도 재적용하도록 master 자격을 갖는다
+    env_map = out["services"]["migration"].get("environment", {})
+    assert "DB_MASTER_URL" in env_map
 
 
 def test_no_image_tag_keeps_build(tmp_path):

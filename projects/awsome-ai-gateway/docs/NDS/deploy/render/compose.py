@@ -36,7 +36,9 @@ IMAGE_NAMES = {
     "scheduler": "admin-api",
     "cost-recorder-worker": "cost-recorder-worker",
     "notification-worker": "notification-worker",
-    "migration": "admin-api",
+    # migration 은 db/ 전용 이미지 — admin-api 에는 run_migration.sh·psql·init SQL 이
+    # 없어 서버가 떠서 service_completed_successfully 게이트가 영원히 안 열린다.
+    "migration": "migration",
 }
 OTEL_ENV_RE = re.compile(r"^OTEL_")
 

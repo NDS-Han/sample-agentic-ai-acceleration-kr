@@ -67,6 +67,12 @@ services:
       context: ./db
     environment:
       DB_URL: postgresql+asyncpg://${POSTGRES_USER:-gateway}:${POSTGRES_PASSWORD:-gateway_dev_password}@postgres:5432/${POSTGRES_DB:-gateway}
+      # DB_MASTER_URL 이 있으면 run_migration.sh 가 init/*.sql 도 재적용한다 —
+      # 이걸 빼면 기존 볼륨 업그레이드에 새 시드(03_seed_data.sql 의 service-token
+      # 사용자 등)가 절대 들어가지 않는다 (initdb 는 새 볼륨에서만 실행).
+      # compose 의 POSTGRES_USER 는 initdb superuser 라 init SQL 을 직접 실행 가능.
+      DB_MASTER_URL: postgresql://${POSTGRES_USER:-gateway}@postgres:5432/${POSTGRES_DB:-gateway}
+      DB_MASTER_PASSWORD: ${POSTGRES_PASSWORD:-gateway_dev_password}
     networks: [shared]
     depends_on:
       postgres:
