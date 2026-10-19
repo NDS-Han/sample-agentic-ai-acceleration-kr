@@ -33,7 +33,9 @@ mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 
 > 캡처가 못 읽는 값: `.env` 의 시크릿, compose 의 `network.mode`, ecs 의
 > `zone_id`/`allowed_cidrs`/`tfstate_*` — 파일 끝의 `# capture notes` 를
-> 확인하고 직접 채우세요.
+> 확인하고 직접 채우세요. ecs 의 DB/캐시 실제 토폴로지(ACU·node_type·노드/샤드
+> 수)는 `infra.db`/`infra.cache` override 로 기록되므로 채택해도 apply 가
+> 실제 인프라를 tier 프리셋으로 되돌려 축소하지 않습니다.
 
 ### 수작업 compose 배포 온보딩 — 데이터 이관 주의
 

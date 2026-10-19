@@ -245,6 +245,7 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
     try:
         gws = _aws_json(["ecs", "describe-services", "--cluster", cluster,
                          "--services", *(service_names or ["gateway-proxy"])], region)["services"]
+        live_to_logical = {v: k for k, v in name_map.items()}
         for s in gws:
             td_arn = s.get("taskDefinition", "")
             td = _aws_json(["ecs", "describe-task-definition",
@@ -252,7 +253,9 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             img = td["containerDefinitions"][0].get("image", "")
             if ":" in img:
                 image_tag = img.rsplit(":", 1)[1]
-            sizing[s["serviceName"]] = {
+            # deploy.sizing 키는 논리 서비스명 — 라이브명이 커스텀이면 역매핑
+            logical = live_to_logical.get(s["serviceName"], s["serviceName"])
+            sizing[logical] = {
                 "cpu": _safe_int(td.get("cpu")),
                 "memory": _safe_int(td.get("memory")),
                 "desired_count": s.get("desiredCount", 0),
@@ -268,11 +271,12 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
                       "smtp_port": _safe_int(sizing_env.get("SMTP_PORT"), 587),
                       "smtp_from": sizing_env.get("EMAIL_SENDER_ADDRESS", "")})
 
-    # tier 추론 — 실제 DB/캐시 토폴로지를 읽어 task 수와 교차검증한다.
-    # task 수만 보면 운영 중 축소된 배포를 과소평가해 채택 후 apply 가
-    # ACU/캐시를 다운사이즈한다 — 실제 스펙을 우선으로 읽는다.
+    # tier 추론 + infra.db/infra.cache — 실제 DB/캐시 토폴로지를 읽어 기록한다.
+    # 읽은 값을 override 로 명시해야 채택 후 apply 가 tier 프리셋으로 되돌려
+    # 실제 인프라를 다운사이즈하지 않는다.
     tier_signals: list[str] = []
     db_acu_max, cache_nodes = 0.0, 0
+    infra_doc: dict = {}
     try:
         db_ep = outputs.get("db_endpoint") or ""
         clusters = _aws_json(
@@ -281,9 +285,22 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             ep = (c.get("Endpoint") or "")
             if db_ep and ep and ep in db_ep:
                 sc = c.get("ServerlessV2ScalingConfiguration") or {}
-                db_acu_max = float(sc.get("MaxCapacity") or 0)
-                tier_signals.append(f"Aurora max {db_acu_max}ACU"
-                                    + ("(serverless)" if sc else f"({c.get('DBClusterInstanceClass','?')})"))
+                if sc:
+                    db_acu_max = float(sc.get("MaxCapacity") or 0)
+                    infra_doc["db"] = {
+                        "mode": "serverless",
+                        "min_acu": float(sc.get("MinCapacity") or 0.5),
+                        "max_acu": db_acu_max,
+                    }
+                    tier_signals.append(f"Aurora {infra_doc['db']['min_acu']}"
+                                        f"~{db_acu_max}ACU(serverless)")
+                else:
+                    infra_doc["db"] = {
+                        "mode": "provisioned",
+                        "instance_class": c.get("DBClusterInstanceClass", ""),
+                    }
+                    tier_signals.append(
+                        f"Aurora provisioned {c.get('DBClusterInstanceClass','?')}")
                 break
     except (CaptureError, KeyError, ValueError):
         pass
@@ -293,16 +310,45 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             ["elasticache", "describe-replication-groups"], region
         ).get("ReplicationGroups", [])
         for rg in rgs:
+            node_groups = rg.get("NodeGroups", [{}])
             eps = [m.get("PrimaryEndpoint", {}).get("Address", "")
-                   for m in rg.get("NodeGroups", [{}])]
+                   for m in node_groups]
             members = rg.get("MemberClusters", [])
             if redis_ep and (redis_ep in eps or
                              any(redis_ep in (m or "") for m in members)):
-                cache_nodes = len(members)
-                tier_signals.append(f"cache {rg.get('CacheNodeType','?')}x{cache_nodes}")
+                node_type = rg.get("CacheNodeType", "")
+                if rg.get("ClusterEnabled"):
+                    # cluster mode — NodeGroups = 샤드, NodeGroupMembers-1 = 샤드당 replica
+                    ng = node_groups or [{}]
+                    replicas_live = max(
+                        len(ng[0].get("NodeGroupMembers", [])) - 1, 0)
+                    if replicas_live == 0:
+                        # 스키마/모듈 최소가 1 — 라이브 0 을 표현 못 하므로
+                        # 1 로 기록하되 upsize 임을 알린다
+                        notes.append("cache cluster 의 샤드당 replica 가 0 입니다 — "
+                                     "스키마 최소 1 로 기록했으니 채택 시 노드가 늘어납니다")
+                    infra_doc["cache"] = {
+                        "mode": "cluster", "node_type": node_type,
+                        "num_node_groups": len(node_groups) or 1,
+                        "replicas_per_node_group": replicas_live or 1,
+                    }
+                    cache_nodes = sum(
+                        len(g.get("NodeGroupMembers", [])) or 1 for g in node_groups)
+                    tier_signals.append(f"cache {node_type} {infra_doc['cache']['num_node_groups']}sh")
+                else:
+                    cache_nodes = len(members)
+                    infra_doc["cache"] = {
+                        "mode": "replicated" if cache_nodes > 1 else "single",
+                        "node_type": node_type,
+                        "num_clusters": cache_nodes or 1,
+                    }
+                    tier_signals.append(f"cache {node_type}x{cache_nodes}")
                 break
     except (CaptureError, KeyError, ValueError):
         pass
+    if infra_doc:
+        notes.append("infra.db/infra.cache 를 라이브 스펙으로 기록했습니다 — "
+                     "채택해도 apply 가 실제 인프라 크기를 유지합니다")
 
     gw_tasks = sizing.get("gateway-proxy", {}).get("desired_count", 1)
     # 신호 종합: task 4+/ACU>4/캐시 multi-node 중 하나라도 크면 t2
@@ -311,8 +357,8 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
     sig = ", ".join(tier_signals) or "읽지 못함"
     notes.append(
         f"size_tier={tier} 추론 근거: gateway task {gw_tasks}개, {sig}. "
-        f"⚠️ 실제보다 작게 추론되면 다음 apply 가 ACU/캐시/task를 축소합니다 — "
-        f"채택 전 실제 스펙과 대조하세요")
+        f"task 수/cpu/memory 는 deploy.sizing 에 라이브 값으로 기록했고 "
+        f"ACU/캐시는 infra.* 에 기록했습니다 — 채택 전 실제 스펙과 대조하세요")
 
     oidc = {}
     issuer = outputs.get("cognito_issuer_url") or sizing_env.get("OIDC_ISSUER_URL", "")
@@ -336,7 +382,9 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         "version": 1,
         "env": env_name,
         "aws": {"region": region},
-        "deploy": {"target": "ecs", "size_tier": tier, "sizing": {}},
+        # 라이브 desired/cpu/memory 를 그대로 기록 — 채택 후 apply 가 task 수를
+        # 프리셋으로 되돌리지 않고, DB 커넥션 예산 검증도 실제 수요로 계산된다
+        "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing},
         "network": {"mode": "public", "allowed_cidrs": []},
         "domain": domain,
         "features": {
@@ -347,6 +395,8 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         "images": {"tag": image_tag},
         "clients": {"models_profile": "global"},
     }
+    if infra_doc:
+        doc["infra"] = infra_doc
     if oidc:
         doc["oidc"] = oidc
     return doc, notes

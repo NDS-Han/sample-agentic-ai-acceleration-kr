@@ -106,6 +106,8 @@ deploy:
 - `max_count` — ECS service autoscaling 상한. 기본은 트래픽을 받는 두 서비스만:
   `gateway-proxy` desired×4, `admin-api` desired×2 (CPU 60%·Mem 70%
   target-tracking). 나머지 서비스는 min=max=desired 로 핀됩니다.
+  `desired_count` 만 override 하면 상한도 같은 배수로 재계산됩니다 —
+  프리셋 기준의 stale 상한이 남지 않습니다.
 - `min_count` — 오토스케일 하한(기본=desired_count). desired_count 변경은
   target 의 min/max 경계로 전파됩니다.
 - `cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를

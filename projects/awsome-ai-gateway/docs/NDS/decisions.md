@@ -107,6 +107,22 @@ DNS 를 발견하면 `extra-vars.json` 에 기록하고 tfvars 를 다시 렌더
 apply — 발견값이 gateway.yaml 을 오염시키지 않으면서 plan drift 에도
 잡히지 않는다 (helm 의 `--set adminUi.nextauthUrl=<alb-dns>` 와 같은 결).
 
+### 14. 인프라 크기는 tier 프리셋 + infra.* 명시 override 의 이층 구조
+
+tier 는 거친 기본값(t1/t2), `infra.db`/`infra.cache` 가 ACU·mode·node_type·
+노드/샤드 수의 실효값을 결정한다 — 실효값 계산(`tiers.effective_*_spec`)을
+schema 검증·render·validate 표시·DB 예산 검증이 공유해 경로마다 다른 값이
+되지 않는다. 이 override 는 tfvars 로 매 apply 마다 내려가므로 업데이트
+경로에서도 동작하지만, **ECS 전용** — eks 는 env tfvars 가 인프라 소유자라
+선언하면 schema 가 거부한다(두 소유자의 drift 방지).
+
+ECS 탄력은 `aws_appautoscaling` target-tracking(CPU/Memory)으로만 — 트래픽
+서비스(gateway-proxy×4, admin-api×2)만 열고 워커·스케줄러는 min=max 핀
+(싱글톤 계약). 탄력 상한이 Aurora 커넥션을 고갈시키는 경로는
+`ecs_db_budget` 가 validate 시점에 차단한다(worst-case 수요 > max_acu
+용량의 80% → 에러). 클러스터·애드온·DB 엔진 같은 인프라 업그레이드는
+deploy 범위 밖(env tfvars 수동 절차) — `upgrade-eks-cluster.md` 런북 참조.
+
 ## 의도적으로 하지 않은 것
 
 - **dual-render** (yaml → helm values): TF output `--set` 브릿지가 이미 단일

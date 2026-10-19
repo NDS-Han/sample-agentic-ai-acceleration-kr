@@ -572,7 +572,7 @@ def cmd_render(args) -> int:
         console.print("\n적용: [bold]./deploy apply[/bold] (helm upgrade --install, 확인 게이트 있음)")
         return 0
 
-    console.print(f"[red]deploy.target={cfg.deploy.target} 렌더러는 아직 구현 전입니다 (compose, ecs 지원).")
+    console.print(f"[red]deploy.target={cfg.deploy.target} 렌더러는 아직 구현 전입니다 (compose, ecs, eks 지원).")
     return 1
 
 
@@ -1196,7 +1196,7 @@ def cmd_capture(args) -> int:
                 context=args.context or "",
                 env_dir=env_dir)
         else:
-            console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs 또는 --gen-dir 지정")
+            console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs|eks 또는 --gen-dir 지정")
             return 1
 
         # 캡처 결과가 스키마를 통과하는지 — 안 되는 필드는 사람이 채워야 함

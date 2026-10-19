@@ -233,6 +233,12 @@ def ecs_service_sizing(cfg) -> dict:
     for name, ov in (cfg.deploy.sizing or {}).items():
         if name in sizing and isinstance(ov, dict):
             sizing[name].update(ov)
+            # desired 만 override 되면 상한도 같은 배수로 재계산 —
+            # 프리셋 desired 로 계산된 stale max_count 가 남으면 예산 검증과
+            # 실제 autoscaling 상한이 어긋난다 (max_count 명시 시에는 존중)
+            if name in AUTOSCALE_MAX_FACTOR and "max_count" not in ov:
+                sizing[name]["max_count"] = (sizing[name]["desired_count"]
+                                            * AUTOSCALE_MAX_FACTOR[name])
     return sizing
 
 

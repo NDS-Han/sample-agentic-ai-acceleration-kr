@@ -207,6 +207,8 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
         "features": {"notifications": {"provider": "smtp", "smtp_host": "h",
                                        "smtp_from": "f@x",
                                        "smtp_credentials_secret": "smtp-creds"}},
+        "infra": {"azs": ["ap-south-1a", "ap-south-1b"],
+                  "db": {"max_acu": 8}},
     }
     doc = cli._collect_doc(existing)
     assert doc["aws"]["account_id"] == "123456789012"
@@ -218,6 +220,9 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     assert doc["oidc"]["vk_ttl_hours"] == 4
     assert doc["network"]["admin_internal"] is True
     assert doc["features"]["notifications"]["smtp_credentials_secret"] == "smtp-creds"
+    # infra.* 는 wizard 가 통째로 덮어쓰면 bootstrap 기록(azs 등)이 소실된다
+    assert doc["infra"]["azs"] == ["ap-south-1a", "ap-south-1b"]
+    assert doc["infra"]["db"] == {"max_acu": 8}
 
 
 # ==============================================================================
@@ -300,3 +305,103 @@ def test_doctor_ps_json_array():
     # _run 을 직접 대체할 수 없으니 파싱 로직 단위로 — json array 브랜치 검증
     parsed = json.loads(monkey.stdout)
     assert isinstance(parsed, list) and parsed[0]["Service"] == "gateway-proxy"
+
+
+# ==============================================================================
+# ecs capture — infra.db/infra.cache 역변환
+# ==============================================================================
+
+def _fake_ecs_aws(monkeypatch, *, db_clusters, repl_groups):
+    """terraform output + aws 호출을 고정 응답으로 대체."""
+    outputs = {
+        "ecs_cluster_name": "llm-gateway-acme",
+        "admin_ui_url": "",
+        "https_enabled": False,
+        "service_names": {"admin-api": "admin-api", "gateway-proxy": "gw"},
+        "db_endpoint": "acme.cluster-xyz.rds.amazonaws.com",
+        "redis_endpoint": "acme.cache.amazonaws.com",
+    }
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+
+    def _aws(argv, region):
+        svc = argv[0]
+        if svc == "ecs" and argv[1] == "describe-services":
+            return {"services": [
+                {"serviceName": "admin-api", "taskDefinition": "td:1",
+                 "desiredCount": 1},
+                {"serviceName": "gw", "taskDefinition": "td:1",
+                 "desiredCount": 2}]}
+        if svc == "ecs" and argv[1] == "describe-task-definition":
+            return {"taskDefinition": {
+                "cpu": "1024", "memory": "2048",
+                "containerDefinitions": [
+                    {"image": "reg/gw:1.2.3", "environment": []}]}}
+        if svc == "rds":
+            return {"DBClusters": db_clusters}
+        if svc == "elasticache":
+            return {"ReplicationGroups": repl_groups}
+        return {}
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+
+
+def test_ecs_capture_infra_db_and_cache(monkeypatch, tmp_path):
+    """라이브 Aurora/ElastiCache 토폴로지가 infra.* override 로 기록된다 —
+    채택해도 apply 가 tier 프리셋으로 인프라를 축소하지 않는다."""
+    _fake_ecs_aws(
+        monkeypatch,
+        db_clusters=[{
+            "Endpoint": "acme.cluster-xyz.rds.amazonaws.com",
+            "ServerlessV2ScalingConfiguration":
+                {"MinCapacity": 1.0, "MaxCapacity": 8.0}}],
+        repl_groups=[{
+            "ClusterEnabled": False,
+            "CacheNodeType": "cache.t4g.medium",
+            "NodeGroups": [{"PrimaryEndpoint":
+                            {"Address": "acme.cache.amazonaws.com"}}],
+            "MemberClusters": ["n1", "n2"]}])
+    doc, notes = capture.capture_ecs(tmp_path, "ap-northeast-2")
+    assert doc["infra"]["db"] == {
+        "mode": "serverless", "min_acu": 1.0, "max_acu": 8.0}
+    assert doc["infra"]["cache"] == {
+        "mode": "replicated", "node_type": "cache.t4g.medium",
+        "num_clusters": 2}
+    assert any("infra.db/infra.cache" in n for n in notes)
+    schema.from_dict(doc)  # 캡처 산출물이 스키마를 통과해야 채택 가능
+
+
+def test_ecs_capture_cluster_mode_topology(monkeypatch, tmp_path):
+    """cluster mode 는 NodeGroups 수와 샤드당 replica 수로 역변환된다."""
+    _fake_ecs_aws(
+        monkeypatch,
+        db_clusters=[{
+            "Endpoint": "acme.cluster-xyz.rds.amazonaws.com",
+            "ServerlessV2ScalingConfiguration":
+                {"MinCapacity": 0.5, "MaxCapacity": 4.0}}],
+        repl_groups=[{
+            "ClusterEnabled": True,
+            "CacheNodeType": "cache.r7g.large",
+            "NodeGroups": [
+                {"PrimaryEndpoint": {"Address": "acme.cache.amazonaws.com"},
+                 "NodeGroupMembers": [{}, {}, {}]},   # primary + 2 replica
+                {"PrimaryEndpoint": {"Address": "other"},
+                 "NodeGroupMembers": [{}, {}, {}]}],
+            "MemberClusters": []}])
+    doc, _ = capture.capture_ecs(tmp_path, "ap-northeast-2")
+    assert doc["infra"]["cache"] == {
+        "mode": "cluster", "node_type": "cache.r7g.large",
+        "num_node_groups": 2, "replicas_per_node_group": 2}
+    schema.from_dict(doc)
+
+
+def test_ecs_capture_provisioned_db(monkeypatch, tmp_path):
+    """provisioned Aurora 는 instance_class 로 기록된다."""
+    _fake_ecs_aws(
+        monkeypatch,
+        db_clusters=[{
+            "Endpoint": "acme.cluster-xyz.rds.amazonaws.com",
+            "DBClusterInstanceClass": "db.r7g.large"}],
+        repl_groups=[])
+    doc, _ = capture.capture_ecs(tmp_path, "ap-northeast-2")
+    assert doc["infra"]["db"] == {
+        "mode": "provisioned", "instance_class": "db.r7g.large"}
+    schema.from_dict(doc)

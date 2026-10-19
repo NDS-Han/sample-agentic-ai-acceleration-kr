@@ -281,6 +281,18 @@ class GatewayConfig:
             w.append("deploy.tfstate_table 이 비어 있습니다 — terraform state 가 "
                      "locking 없이 저장됩니다 (동시 apply 가 state 를 깨뜨릴 수 있음). "
                      "DynamoDB lock table 을 지정하십시오.")
+        if self.deploy.target == "ecs":
+            # 정상 수요가 min_acu 바닥을 넘지만 스케일 헤드룸은 있는 경우 —
+            # 저부하/cold-start 큐잉 가능성이라 경고 (천장 초과는 validate 에러)
+            from .tiers import ecs_db_budget as _budget
+            _b = _budget(self)
+            if (_b and _b["floor_capacity"] < _b["ceiling_capacity"]
+                    and _b["steady"] > _b["floor_capacity"]):
+                w.append(
+                    f"정상 pool 수요 {_b['steady']}개가 Aurora 최소 용량"
+                    f"(min_acu ≈ {_b['floor_capacity']}conn)을 넘습니다 — "
+                    "저부하/cold-start 구간에서 pool_timeout 큐잉이 생길 수 "
+                    "있습니다. infra.db.min_acu 를 올리세요.")
         if self.deploy.target not in IMPLEMENTED_TARGETS:
             w.append(f"deploy.target={self.deploy.target} 의 렌더러는 아직 구현 전입니다 (validate 만 지원).")
         return w
@@ -403,7 +415,7 @@ class GatewayConfig:
         if self.deploy.target == "ecs":
             # 오토스케일(max_count)을 포함한 worst-case pool 수요가 Aurora 천장을
             # 넘으면 스케일아웃이 DB 를 고갈시킨다 — 선언 단계에서 막는다.
-            from .tiers import ACU_CONNECTIONS, ecs_db_budget
+            from .tiers import ecs_db_budget
             b = ecs_db_budget(self)
             if b and b["worst"] > int(b["ceiling_capacity"] * 0.8):
                 e.append(
@@ -411,14 +423,16 @@ class GatewayConfig:
                     f"(pool 10+overflow 20 × 프로세스 × desired/max_count 합산)가 "
                     f"Aurora 최대 용량 {b['ceiling_capacity']}개의 80%를 넘습니다. "
                     f"deploy.sizing 의 max_count/desired_count 를 낮추거나 "
-                    f"tier 의 serverless max_acu 를 올리세요.")
-            elif b and b["steady"] > b["floor_capacity"]:
-                e_or_w = w if b["floor_capacity"] < b["ceiling_capacity"] else e
-                e_or_w.append(
-                    f"정상 pool 수요 {b['steady']}개(pool_size 기준)가 Aurora 최소 용량"
-                    f"(min_acu ≈ {b['floor_capacity']}conn, {ACU_CONNECTIONS}/ACU)을 "
-                    f"넘습니다 — 저부하 구간에서 pool_timeout 큐잉이 생길 수 있습니다. "
-                    f"min_acu 를 올리거나 task 수를 줄이세요.")
+                    f"infra.db.max_acu(또는 tier) 를 올리세요.")
+            elif (b and b["steady"] > b["floor_capacity"]
+                    and b["floor_capacity"] >= b["ceiling_capacity"]):
+                # floor == ceiling(provisioned 또는 min_acu=max_acu)이면 바닥
+                # 초과가 곧 천장 초과 — 경고가 아니라 에러. 그 외의 바닥 초과는
+                # warnings() 에서 경고한다 (w 는 이 메서드에 없다).
+                e.append(
+                    f"정상 pool 수요 {b['steady']}개(pool_size 기준)가 Aurora 용량"
+                    f"(≈ {b['floor_capacity']}conn)을 넘습니다 — "
+                    f"min_acu/instance_class 를 올리거나 task 수를 줄이세요.")
         if self.features.notifications.provider not in NOTIFICATION_PROVIDERS:
             e.append(f"notifications.provider 는 {NOTIFICATION_PROVIDERS} 중 하나여야 합니다.")
         if self.features.notifications.provider == "ses" and not self.features.notifications.ses_from:
