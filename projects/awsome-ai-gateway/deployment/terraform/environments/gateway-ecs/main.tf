@@ -94,6 +94,12 @@ module "elasticache" {
 
   cache_mode    = var.cache_mode
   dev_node_type = var.cache_node_type
+  # node_type 은 cluster(prod) 경로에도 같은 값을 줘야 한다 — dev 만 넘기면
+  # cache_mode=cluster 선언이 조용히 prod 기본 노드로 떨어진다
+  prod_node_type               = var.cache_node_type
+  prod_num_node_groups         = var.cache_num_node_groups
+  prod_replicas_per_node_group = var.cache_replicas_per_node_group
+  dev_num_cache_clusters       = var.cache_num_clusters
 
   tags = var.tags
 }

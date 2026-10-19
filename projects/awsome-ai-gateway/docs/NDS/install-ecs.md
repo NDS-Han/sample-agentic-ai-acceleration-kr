@@ -42,8 +42,12 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
   cron 중복 방지로 1개 고정 — autoscaling도 min=max=1 핀입니다.
 - **DB/캐시 크기**: tier 프리셋이 기본 — `configure`의 "DB/캐시 크기를 직접
   정하시겠습니까?" 분기(또는 `infra.db`/`infra.cache` 직접 선언)로 min/max
-  ACU·instance_class·cache mode·node_type을 세부 조정합니다. 매 `apply`에
-  반영되므로 설치 후 변경도 같은 경로입니다.
+  ACU·instance_class·cache mode·node_type·노드/샤드 수를 세부 조정합니다.
+  매 `apply`에 반영되므로 설치 후 변경도 같은 경로입니다.
+- **캐시 비용 = 노드 수 × node_type**: Aurora ACU와 함께 최대 비용 손잡이입니다.
+  `num_clusters`(non-cluster), `num_node_groups`/`replicas_per_node_group`
+  (cluster)이 노드 수를, `node_type`이 단가를 결정합니다 — 토폴로지 키가
+  mode와 어긋나면 스키마가 거부합니다(terraform이 조용히 무시하는 걸 방지).
 - **DB 커넥션 예산**: task가 늘면 pool 수요(30conn/task worst, gw 60)도
   비례해 늡니다. `validate`가 최악치가 Aurora `max_acu`(~225conn/ACU)의
   80%를 넘지 않는지 검사하고, 정상 수요가 `min_acu` 바닥을 넘으면 경고합니다 —

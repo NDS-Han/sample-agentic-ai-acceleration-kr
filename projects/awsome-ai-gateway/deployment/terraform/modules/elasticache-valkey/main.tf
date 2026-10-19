@@ -178,7 +178,7 @@ resource "aws_elasticache_replication_group" "this" {
 
   # Cluster mode — prod만. 샤드당 replica 는 var.prod_replicas_per_node_group(기본1,
   # 2 권장: failover zero-redundancy 윈도우 제거 + read 스케일 — deepdive Q50 Phase4-f).
-  num_node_groups         = local.is_prod ? 3 : null
+  num_node_groups         = local.is_prod ? var.prod_num_node_groups : null
   replicas_per_node_group = local.is_prod ? var.prod_replicas_per_node_group : null
 
   # non-cluster mode — dev. 기본 1 = 단일 노드(replica·failover·Multi-AZ 없음).

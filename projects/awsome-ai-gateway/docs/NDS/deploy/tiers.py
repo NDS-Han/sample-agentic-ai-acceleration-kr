@@ -167,20 +167,42 @@ def effective_db_spec(cfg) -> dict:
 def effective_cache_spec(cfg) -> dict:
     """tier 프리셋 + infra.cache override → 실효 cache spec.
 
-    반환 키: mode(single|replicated|cluster), node_type."""
+    반환 키: mode(single|replicated|cluster), node_type, num_clusters,
+    num_node_groups, replicas_per_node_group. 토폴로지 기본값은 effective mode 가
+    결정한다 — mode 를 바꾸면 그 mode 의 기본 토폴로지로 리셋된 뒤 명시 override
+    만 얹는다(이전 mode 의 값이 새 mode 에 새어 들어가지 않게)."""
     t = preset(cfg.deploy.size_tier)
     if t.cache_mode == "elasticache-single":
         mode = "single"
     else:
         mode = "cluster" if t.cache_spec.get("cluster_mode") else "replicated"
-    spec = {"mode": mode, "node_type": t.cache_spec.get("node_type", "cache.t4g.small")}
+    node_type = t.cache_spec.get("node_type", "cache.t4g.small")
     c = getattr(cfg.infra, "cache", None)
-    if c is None:
-        return spec
-    if c.mode:
-        spec["mode"] = c.mode
-    if c.node_type:
-        spec["node_type"] = c.node_type
+    if c is not None:
+        if c.mode:
+            mode = c.mode
+        if c.node_type:
+            node_type = c.node_type
+    if mode == "cluster":
+        spec = {"mode": mode, "node_type": node_type,
+                "num_clusters": 0,
+                "num_node_groups": int(t.cache_spec.get("num_node_groups", 3)),
+                "replicas_per_node_group":
+                    int(t.cache_spec.get("replicas_per_node_group", 1))}
+    else:
+        # tier cache_spec.replicas = replica 수 → 총 노드 = 1 + replicas
+        spec = {"mode": mode, "node_type": node_type,
+                "num_clusters": int(t.cache_spec.get(
+                    "num_clusters", 1 + t.cache_spec.get("replicas", 0))),
+                "num_node_groups": 0,
+                "replicas_per_node_group": 0}
+    if c is not None:
+        if c.num_clusters is not None:
+            spec["num_clusters"] = c.num_clusters
+        if c.num_node_groups is not None:
+            spec["num_node_groups"] = c.num_node_groups
+        if c.replicas_per_node_group is not None:
+            spec["replicas_per_node_group"] = c.replicas_per_node_group
     return spec
 
 

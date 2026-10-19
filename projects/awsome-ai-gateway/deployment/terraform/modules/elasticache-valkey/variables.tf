@@ -48,6 +48,17 @@ variable "prod_replicas_per_node_group" {
   }
 }
 
+variable "prod_num_node_groups" {
+  description = "prod cluster 샤드(node group) 수. 기본 3 — 샤드 수가 곧 용량·비용 배수"
+  type        = number
+  default     = 3
+
+  validation {
+    condition     = var.prod_num_node_groups >= 1 && var.prod_num_node_groups <= 90
+    error_message = "prod_num_node_groups 는 1~90 사이여야 합니다."
+  }
+}
+
 # prod cluster 용 커스텀 파라미터(deepdive Q50 Phase4). 기본 비활성(AWS default
 # `default.valkey7.cluster.on` 사용). 활성 시 모듈이 cluster-enabled 커스텀
 # 파라미터그룹을 만들어 maxmemory-policy + reserved-memory-percent 를 박는다.

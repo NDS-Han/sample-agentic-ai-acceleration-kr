@@ -317,13 +317,44 @@ def _collect_doc(existing: dict | None = None) -> dict:
                          Choice("cluster — cluster mode", "cluster")],
                 default=prev_cache.get("mode")
                 or ("single" if t.cache_mode == "elasticache-single" else "replicated")).ask())
-            infra_doc["cache"] = {
+            cache_doc: dict = {
                 "mode": cache_mode,
                 "node_type": _unwrap(questionary.text(
                     "ElastiCache node type",
                     default=str(prev_cache.get("node_type")
                                 or t.cache_spec.get("node_type", "cache.t4g.small"))).ask()),
             }
+            # 토폴로지는 mode 와 맞는 키만 — mode 전환 시 이전 mode 의 값을
+            # 남기면 terraform 에서 조용히 무시되므로 다시 묻는다
+            if cache_mode == "cluster":
+                ng = _unwrap(questionary.text(
+                    "cluster 샤드 수 (num_node_groups, 1~90 — 용량·비용 배수)",
+                    default=str(prev_cache.get(
+                        "num_node_groups", 3))).ask())
+                rp = _unwrap(questionary.text(
+                    "샤드당 replica 수 (1~5, 2=zero-redundancy 제거)",
+                    default=str(prev_cache.get(
+                        "replicas_per_node_group", 1))).ask())
+                try:
+                    cache_doc["num_node_groups"] = int(ng)
+                    cache_doc["replicas_per_node_group"] = int(rp)
+                except ValueError:
+                    console.print("[yellow]정수가 아닙니다 — 기존 값 유지")
+                    for k in ("num_node_groups", "replicas_per_node_group"):
+                        if prev_cache.get(k) is not None:
+                            cache_doc[k] = prev_cache[k]
+            else:
+                nc = _unwrap(questionary.text(
+                    "노드 수 (single=1, replicated=2 이상 — primary+replica)",
+                    default=str(prev_cache.get(
+                        "num_clusters", 2 if cache_mode == "replicated" else 1))).ask())
+                try:
+                    cache_doc["num_clusters"] = int(nc)
+                except ValueError:
+                    console.print("[yellow]정수가 아닙니다 — 기존 값 유지")
+                    if prev_cache.get("num_clusters") is not None:
+                        cache_doc["num_clusters"] = prev_cache["num_clusters"]
+            infra_doc["cache"] = cache_doc
         else:
             # 고급 분기를 끈 경우에도 기존 선언은 지우지 않는다 — 명시적 제거만
             if (prev_db or prev_cache) and _unwrap(questionary.confirm(
@@ -472,7 +503,12 @@ def cmd_validate(args) -> int:
                    or db["instance_class"] != t.db_spec.get("instance_class", ""))
         table.add_row("db (실효)", f"{db['mode']} {db}"
                                   + ("  [infra.db override]" if db_over else ""))
-        table.add_row("cache (실효)", f"{cache['mode']} {cache['node_type']}")
+        _ctopo = (f"{cache['num_node_groups']}sh×"
+                  f"{1 + cache['replicas_per_node_group']}nodes"
+                  if cache["mode"] == "cluster"
+                  else f"{cache['num_clusters']}node")
+        table.add_row("cache (실효)",
+                      f"{cache['mode']} {cache['node_type']} {_ctopo}")
     else:
         table.add_row("db", f"{t.db_mode} {t.db_spec}")
         table.add_row("cache", f"{t.cache_mode} {t.cache_spec}")

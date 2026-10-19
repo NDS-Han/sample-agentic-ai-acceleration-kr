@@ -130,7 +130,7 @@ deploy:
 | `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
 | `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
 | `db.*` | **ecs 전용** — tier 프리셋 위에 얹는 DB 세부 override: `mode`(serverless\|provisioned), `min_acu`/`max_acu`(0.5 단위, 0=일시정지), `instance_class`(provisioned 시). 매 `apply`마다 tfvars로 내려가므로 **업데이트 경로에서도 동작** — `configure`의 고급 분기나 직접 편집 후 apply. mode 전환은 재생성급 변경(노트 출력) |
-| `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`. `db.*`와 같은 override 관계. node_type/mode 변경은 캐시 재기동·failover를 동반 |
+| `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`(non-cluster·cluster 모두에 적용), `num_clusters`(non-cluster 노드 수 1~6 — replicated면 ≥2: primary+replica로 failover/Multi-AZ 자동), `num_node_groups`(cluster 샤드 수 1~90), `replicas_per_node_group`(cluster 샤드당 replica 1~5). `db.*`와 같은 override 관계. 토폴로지 키는 effective mode와 맞아야 하며 어긋나면 스키마가 거부합니다(terraform 무시 방지). node_type/mode 변경은 캐시 재기동·failover를 동반 |
 
 `infra.*` 는 bootstrap 의 managed overlay/generated tfvars 로만 내려갑니다 —
 단 `infra.db`/`infra.cache`(ecs)는 `deploy.sizing`처럼 매 apply의 tfvars에

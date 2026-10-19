@@ -95,8 +95,27 @@ variable "cache_mode" {
 }
 
 variable "cache_node_type" {
-  type    = string
-  default = "cache.t4g.small"
+  description = "ElastiCache node type — non-cluster(dev)와 cluster(prod) 경로 모두에 적용"
+  type        = string
+  default     = "cache.t4g.small"
+}
+
+variable "cache_num_clusters" {
+  description = "non-cluster 노드 수. single=1(기본), replicated=2 이상(primary+replica — failover/Multi-AZ 자동). cluster mode 에서는 무시"
+  type        = number
+  default     = 1
+}
+
+variable "cache_num_node_groups" {
+  description = "cluster mode 샤드 수 (cache_mode=cluster 일 때만)"
+  type        = number
+  default     = 3
+}
+
+variable "cache_replicas_per_node_group" {
+  description = "cluster mode 샤드당 replica 수 (cache_mode=cluster 일 때만)"
+  type        = number
+  default     = 1
 }
 
 variable "nat_ha" {

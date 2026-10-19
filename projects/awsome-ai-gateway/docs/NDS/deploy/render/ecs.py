@@ -80,6 +80,12 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     cache = effective_cache_spec(cfg)
     vars_["cache_mode"] = cache["mode"]
     vars_["cache_node_type"] = cache["node_type"]
+    # 토폴로지 — 안 쓰이는 쪽(mode 불일치)은 0 으로 내려 모듈 기본값과 같은
+    # "무시됨" 의미로 만든다(env 변수 default 와 일치). 선언값은 항상 내려가서
+    # mode 전환 시 이전 값이 잔존하지 않는다.
+    vars_["cache_num_clusters"] = cache["num_clusters"] or 1
+    vars_["cache_num_node_groups"] = cache["num_node_groups"] or 3
+    vars_["cache_replicas_per_node_group"] = cache["replicas_per_node_group"] or 1
     vars_["nat_ha"] = t.ha == "multi-az"
 
     # ── 신규 설치 인프라 입력 (infra.*) — 비우면 모듈 기본값
@@ -226,13 +232,20 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             f"⚠ infra.db.mode={eff_db['mode']} — tier 기본({t_db_mode})과 다른 모드 "
             f"전환은 리소스 재생성급 변경입니다. 기존 배포면 데이터 이관 절차를 먼저 "
             f"확인하세요.")
+    ic = cfg.infra.cache
     if cfg.infra.db.min_acu is not None or cfg.infra.db.max_acu is not None or \
-            cfg.infra.db.instance_class or cfg.infra.cache.mode or cfg.infra.cache.node_type:
+            cfg.infra.db.instance_class or cfg.infra.db.mode or ic.mode or \
+            ic.node_type or ic.num_clusters is not None or \
+            ic.num_node_groups is not None or ic.replicas_per_node_group is not None:
+        _topo = (f"{eff_cache['num_node_groups']}sh×"
+                 f"{1 + eff_cache['replicas_per_node_group']}nodes"
+                 if eff_cache["mode"] == "cluster"
+                 else f"{eff_cache['num_clusters']}node")
         notes.append(
             f"infra.db/cache override 적용 — 실효: db={eff_db['mode']} "
             f"({eff_db.get('min_acu')}~{eff_db.get('max_acu')} ACU 또는 "
             f"{eff_db['instance_class']}), cache={eff_cache['mode']} "
-            f"{eff_cache['node_type']}")
+            f"{eff_cache['node_type']} {_topo}")
     if not cfg.aws.allowed_roles:
         notes.append(
             "CLI 로그인(STS 경로): aws.allowed_roles 가 비어 있어 allowed_iam_roles=[] "

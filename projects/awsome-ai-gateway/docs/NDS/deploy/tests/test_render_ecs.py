@@ -195,6 +195,58 @@ def test_db_budget_uses_effective_acu():
     assert b["worst"] <= int(b["ceiling_capacity"] * 0.8)
 
 
+def test_infra_cache_topology_defaults():
+    """tier 기본 토폴로지가 tfvars 로 내려간다 — t1 single 1node, t2 replicated 2node."""
+    v1 = ecs_render.desired_tfvars(_cfg())
+    assert v1["cache_mode"] == "single"
+    assert v1["cache_num_clusters"] == 1
+    assert v1["cache_num_node_groups"] == 3        # 무시되는 cluster 키는 기본값
+    assert v1["cache_replicas_per_node_group"] == 1
+    v2 = ecs_render.desired_tfvars(_cfg(
+        deploy={"target": "ecs", "size_tier": "t2"}))
+    assert v2["cache_mode"] == "replicated"
+    assert v2["cache_num_clusters"] == 2
+
+
+def test_infra_cache_topology_override():
+    cfg = _cfg(infra={"cache": {"mode": "replicated", "num_clusters": 3}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["cache_mode"] == "replicated"
+    assert v["cache_num_clusters"] == 3
+
+
+def test_infra_cache_cluster_mode_topology():
+    """cluster mode — 샤드/레플리카 키가 내려가고 node_type 도 prod 경로에 적용."""
+    cfg = _cfg(infra={"cache": {"mode": "cluster", "node_type": "cache.t4g.large",
+                                "num_node_groups": 5,
+                                "replicas_per_node_group": 2}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["cache_mode"] == "cluster"
+    assert v["cache_node_type"] == "cache.t4g.large"
+    assert v["cache_num_node_groups"] == 5
+    assert v["cache_replicas_per_node_group"] == 2
+
+
+def test_infra_cache_topology_mode_mismatch_rejected():
+    """mode 와 안 맞는 토폴로지 키는 terraform 무시 대상 — 선언 단계에서 에러."""
+    with pytest.raises(schema.SchemaError, match="cluster mode"):
+        _cfg(infra={"cache": {"mode": "replicated", "num_node_groups": 5}})
+    with pytest.raises(schema.SchemaError, match="num_clusters 는 cluster"):
+        _cfg(infra={"cache": {"mode": "cluster", "num_clusters": 4}})
+    with pytest.raises(schema.SchemaError, match="범위"):
+        _cfg(infra={"cache": {"mode": "replicated", "num_clusters": 9}})
+
+
+def test_infra_cache_mode_switch_resets_topology():
+    """t2 replicated → cluster 로 바꾸면 non-cluster num_clusters 값이 안 샌다."""
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t2"},
+               infra={"cache": {"mode": "cluster"}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["cache_mode"] == "cluster"
+    assert v["cache_num_node_groups"] == 3         # cluster 기본
+    assert v["cache_num_clusters"] == 1            # 무시되는 non-cluster 키는 기본값
+
+
 def test_backend_hcl_infers_from_account_id():
     cfg = _cfg()
     hcl = ecs_render.render_backend_hcl(cfg)

@@ -136,9 +136,14 @@ class InfraDbConfig:
 
 @dataclass
 class InfraCacheConfig:
-    """ecs 경로 ElastiCache 세부 override — 빈 값이면 size_tier 프리셋."""
-    mode: str = ""                  # single | replicated | cluster
+    """ecs 경로 ElastiCache 세부 override — 빈 값이면 size_tier 프리셋.
+    토폴로지 키는 mode 와 맞아야 한다: num_clusters 는 non-cluster 노드 수,
+    num_node_groups/replicas_per_node_group 은 cluster 전용 — 안 맞으면 무시된다."""
+    mode: str = ""                             # single | replicated | cluster
     node_type: str = ""
+    num_clusters: int | None = None            # non-cluster 노드 수 (1~6, replicated 면 >=2)
+    num_node_groups: int | None = None         # cluster 샤드 수 (1~90)
+    replicas_per_node_group: int | None = None # cluster 샤드당 replica (1~5)
 
 
 @dataclass
@@ -336,8 +341,35 @@ class GatewayConfig:
             e.append(f"infra.db.min_acu({db.min_acu}) > max_acu({db.max_acu}) 입니다.")
         if cache.mode and cache.mode not in ("single", "replicated", "cluster"):
             e.append(f"infra.cache.mode 는 single|replicated|cluster 여야 합니다: {cache.mode!r}")
+        if cache.num_clusters is not None and not (1 <= cache.num_clusters <= 6):
+            e.append(f"infra.cache.num_clusters 범위는 1~6: {cache.num_clusters}")
+        if cache.num_node_groups is not None and not (1 <= cache.num_node_groups <= 90):
+            e.append(f"infra.cache.num_node_groups 범위는 1~90: {cache.num_node_groups}")
+        if cache.replicas_per_node_group is not None and not (1 <= cache.replicas_per_node_group <= 5):
+            e.append(f"infra.cache.replicas_per_node_group 범위는 1~5: {cache.replicas_per_node_group}")
+        # 토폴로지 키가 mode 와 어긋나면 terraform 변수가 조용히 무시된다 — 경고로 노출
+        from .tiers import preset as _preset
+        _t = _preset(self.deploy.size_tier)
+        _tmode = ("single" if _t.cache_mode == "elasticache-single"
+                  else "cluster" if _t.cache_spec.get("cluster_mode")
+                  else "replicated")
+        _eff_mode = cache.mode or _tmode
+        if _eff_mode == "cluster":
+            if cache.num_clusters is not None:
+                e.append("infra.cache.num_clusters 는 cluster mode 에서 무시됩니다 "
+                         "— num_node_groups/replicas_per_node_group 을 쓰세요.")
+        elif cache.num_node_groups is not None or cache.replicas_per_node_group is not None:
+            e.append(f"infra.cache.num_node_groups/replicas_per_node_group 은 cluster "
+                     f"mode 전용입니다 (effective mode={_eff_mode!r}).")
+        # replicated 에서 num_clusters=1 은 모듈이 max(1,2) 로 조용히 올린다 —
+        # 선언과 실제가 갈리는 것을 차단
+        if _eff_mode == "replicated" and cache.num_clusters == 1:
+            e.append("infra.cache.num_clusters=1 은 replicated 와 맞지 않습니다 "
+                     "(모듈이 최소 2 로 강제합니다) — 2 이상이나 mode=single 을 쓰세요.")
         if (db.mode or db.min_acu is not None or db.max_acu is not None
-                or db.instance_class or cache.mode or cache.node_type):
+                or db.instance_class or cache.mode or cache.node_type
+                or cache.num_clusters is not None or cache.num_node_groups is not None
+                or cache.replicas_per_node_group is not None):
             if self.deploy.target != "ecs":
                 e.append(f"infra.db/infra.cache 는 ecs 경로에서만 적용됩니다 "
                          f"(deploy.target={self.deploy.target}) — eks 는 env tfvars 소유.")
@@ -429,6 +461,16 @@ def _safe_int(v: Any, errors: list[str], path: str) -> int:
     except (TypeError, ValueError):
         errors.append(f"{path} 는 정수여야 합니다: {v!r}")
         return 0
+
+
+def _safe_int_or_none(v: Any, errors: list[str], path: str) -> int | None:
+    if v in (None, ""):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        errors.append(f"{path} 는 정수여야 합니다: {v!r}")
+        return None
 
 
 def _safe_float_or_none(v: Any, errors: list[str], path: str) -> float | None:
@@ -532,7 +574,9 @@ def from_dict(raw: dict) -> GatewayConfig:
         errors.append("infra.cache 는 mapping 이어야 합니다")
     _check_unknown(_infra_db, ("mode", "min_acu", "max_acu",
                                "instance_class"), "infra.db", errors)
-    _check_unknown(_infra_cache, ("mode", "node_type"), "infra.cache", errors)
+    _check_unknown(_infra_cache, ("mode", "node_type", "num_clusters",
+                                  "num_node_groups",
+                                  "replicas_per_node_group"), "infra.cache", errors)
 
     cfg = GatewayConfig(
         env=str(raw.get("env", "")),
@@ -625,6 +669,13 @@ def from_dict(raw: dict) -> GatewayConfig:
             cache=InfraCacheConfig(
                 mode=str(_infra_cache.get("mode", "")),
                 node_type=str(_infra_cache.get("node_type", "")),
+                num_clusters=_safe_int_or_none(_infra_cache.get("num_clusters"),
+                                               errors, "infra.cache.num_clusters"),
+                num_node_groups=_safe_int_or_none(_infra_cache.get("num_node_groups"),
+                                                  errors, "infra.cache.num_node_groups"),
+                replicas_per_node_group=_safe_int_or_none(
+                    _infra_cache.get("replicas_per_node_group"),
+                    errors, "infra.cache.replicas_per_node_group"),
             ),
         ),
         oidc=OidcConfig(
