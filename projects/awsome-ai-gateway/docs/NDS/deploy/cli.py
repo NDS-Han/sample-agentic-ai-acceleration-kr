@@ -1,11 +1,14 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
-"""deploy CLI — init / validate / render / doctor.
+"""deploy CLI — init / configure / validate / render / apply / doctor / client-values / teardown.
 
-  deploy init      대화형으로 gateway.yaml 생성
-  deploy validate  gateway.yaml 스키마·조합 검증
-  deploy render    산출물 생성 (compose: gen/<env>/ 에 compose+.env+Caddyfile)
-  deploy doctor    배포 상태·드리프트 점검
-  deploy teardown  배포 삭제 — backend 별 소유 범위만
+  deploy init           대화형으로 gateway.yaml 생성
+  deploy configure      기존 설정을 기본값으로 다시 물어보고 저장(+배포)
+  deploy validate       gateway.yaml 스키마·조합 검증
+  deploy render         산출물 생성 (gen/<env>/ 아래 backend 별 파일)
+  deploy apply          render → 확인 → 실제 배포 → doctor 한 단계로
+  deploy doctor         배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml 역생성)
+  deploy client-values  직원에게 전달할 OIDC/URL env 4줄 출력
+  deploy teardown       배포 삭제 — backend 별 소유 범위만
 """
 from __future__ import annotations
 

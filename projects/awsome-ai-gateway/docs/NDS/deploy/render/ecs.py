@@ -79,6 +79,13 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         # docs/NDS 의 전환 런북이 강제한다
         "alb_internal": cfg.network.mode == "private",
         "allowed_cidrs": cfg.network.allowed_cidrs,
+
+        # CLI(STS 경로) VK 발급 권한 범위 — compose 의 ALLOWED_IAM_ROLES/
+        # ALLOWED_STS_REGIONS 와 같은 계약. env 는 allowed_sts_regions 를
+        # aws_region 으로 폴백하지만 roles 는 비어 있으면 fail-closed 라
+        # 선언을 그대로 넘겨야 한다.
+        "allowed_sts_regions": [cfg.aws.region],
+        "allowed_iam_roles": list(cfg.aws.allowed_roles),
     }
 
     # ── DB/캐시 토폴로지 — tier spec → 모듈의 명시 모드 변수
@@ -199,6 +206,11 @@ def render_backend_hcl(cfg: GatewayConfig) -> str:
 def feature_notes(cfg: GatewayConfig) -> list[str]:
     """ecs backend 의 기능 플래그 실효성 — 침묵 드롭 금지 (compose 와 같은 규약)."""
     notes: list[str] = []
+    if not cfg.aws.allowed_roles:
+        notes.append(
+            "CLI 로그인(STS 경로): aws.allowed_roles 가 비어 있어 allowed_iam_roles=[] "
+            "으로 렌더했습니다 — gateway-cli 로그인이 fail-closed(403)로 전부 거부됩니다. "
+            "쓰려면 gateway.yaml 의 aws.allowed_roles 를 채우세요.")
     if cfg.features.web_search:
         notes.append(
             "web_search: terraform 의 agentcore_gateway_url 변수가 필요합니다 — AgentCore "

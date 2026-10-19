@@ -177,6 +177,14 @@ class GatewayConfig:
                 "domain.mode=none 이면 TLS 없이 HTTP 로 시작합니다 — "
                 "Cowork 는 https 가 필수라 해당 클라이언트는 동작하지 않습니다."
             )
+        if self.network.mode == "private" and self.deploy.target == "compose":
+            # compose 렌더러는 mode 를 읽지 않는다 — caddy 가 호스트 포트를
+            # 그대로 연다. 선언과 다른 외부 노출이 되므로 경고한다.
+            w.append(
+                "network.mode=private 는 compose 에서 적용되지 않습니다 — "
+                "Caddy 가 호스트 포트를 그대로 개방합니다. 호스트 방화벽/보안그룹으로 "
+                "막거나 allowed_cidrs 를 사용하십시오."
+            )
         if self.features.web_search and self.deploy.target == "compose":
             w.append("web_search 는 AgentCore(us-east-1) 의존 — compose 경로에서는 수동 프로비저닝이 필요합니다.")
         if self.deploy.target == "eks":

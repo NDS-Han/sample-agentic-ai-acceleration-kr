@@ -112,6 +112,19 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
             args += ["--set-string",
                      f"{svc}.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn={arn}"]
 
+    # notification-worker SES IRSA (install-eks.sh R24-S7 와 동일) — provider=ses
+    # 인데 role 이 없으면 SA 에 자격이 없어 발송이 전량 실패한다.
+    if cfg.features.notifications.provider == "ses":
+        ses_arn = outs.get("notification_worker_ses_role_arn")
+        if ses_arn:
+            args += ["--set-string",
+                     f"notificationWorker.serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn={ses_arn}"]
+        else:
+            print("⚠ notifications.provider=ses 인데 terraform output 에 "
+                  "notification_worker_ses_role_arn 이 없습니다 — SES 발송이 실패합니다. "
+                  "enable_notification_ses=true 로 인프라를 apply 했는지 확인하세요",
+                  file=sys.stderr)
+
     issuer = outs.get("cognito_issuer_url")
     if issuer and not cfg.oidc.enabled:
         # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존
@@ -153,13 +166,22 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     return args
 
 
-def _rollback_flag() -> str:
+def _helm_version() -> tuple[int, int]:
     r = _run_quiet(["helm", "version", "--template", "{{.Version}}"], timeout=15)
-    major = 3
-    m = re.search(r"v(\d+)", r.stdout or "")
-    if m:
-        major = int(m.group(1))
+    m = re.search(r"v(\d+)(?:\.(\d+))?", r.stdout or "")
+    return (int(m.group(1)), int(m.group(2) or 0)) if m else (3, 0)
+
+
+def _rollback_flag() -> str:
+    major, _ = _helm_version()
     return "--rollback-on-failure" if major >= 4 else "--atomic"
+
+
+def _dry_run_flag() -> str:
+    # server dry-run (helm ≥3.13)은 라이브 release 와의 실제 diff/검증을 보여준다 —
+    # client dry-run 은 훅·기존 리소스·클러스터 접속 문제를 놓친다.
+    major, minor = _helm_version()
+    return "--dry-run=server" if (major, minor) >= (3, 13) else "--dry-run"
 
 
 def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
@@ -177,7 +199,7 @@ def _helm_argv(meta: dict, set_args: list[str], *, dry_run: bool = False,
     argv += set_args
     argv += extra_sets or []
     if dry_run:
-        argv.append("--dry-run")
+        argv.append(_dry_run_flag())
     return argv
 
 

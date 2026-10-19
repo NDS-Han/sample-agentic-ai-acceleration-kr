@@ -202,3 +202,19 @@ def test_registry_with_project_prefix_passes_through():
 def test_empty_registry_leaves_module_to_create_repos():
     v = ecs_render.desired_tfvars(_cfg())
     assert "image_registry" not in v
+
+
+def test_allowed_roles_reach_tfvars():
+    """aws.allowed_roles 선언이 ecs 경로에서 침묵 드롭되면 CLI(STS) 로그인이
+    fail-closed 로 죽는다 — compose 의 ALLOWED_IAM_ROLES 와 같은 계약."""
+    cfg = _cfg(aws={"region": "ap-northeast-2", "account_id": "111122223333",
+                    "allowed_roles": ["DevRole", "TeamLead*"]})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["allowed_iam_roles"] == ["DevRole", "TeamLead*"]
+    assert v["allowed_sts_regions"] == ["ap-northeast-2"]
+
+
+def test_empty_allowed_roles_warns_fail_closed():
+    cfg = _cfg()
+    assert ecs_render.desired_tfvars(cfg)["allowed_iam_roles"] == []
+    assert any("allowed_roles" in n for n in ecs_render.feature_notes(cfg))

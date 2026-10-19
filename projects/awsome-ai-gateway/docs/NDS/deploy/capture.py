@@ -8,7 +8,7 @@
 backend 별 정보원:
   compose — gen/<env>/ 의 docker-compose.yml + .env + Caddyfile (정적 산출물)
   ecs     — terraform output + aws ecs describe-task-definition / services
-  eks     — 미구현 (helm get values + terraform output 조합이 필요)
+  eks     — helm get values + kubectl 라이브 상태 + terraform output (env_dir)
 """
 from __future__ import annotations
 
@@ -225,13 +225,17 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         domain = {"mode": "none"}
 
     # task def 에서 env 계약 역추출
-    service_names = list((outputs.get("service_names") or {}).values())
+    name_map = outputs.get("service_names") or {}
+    service_names = list(name_map.values())
     image_tag, sizing, sender_type, sizing_env = "", {}, "mock", {}
     try:
-        # admin-api task def — env 계약의 진원지
+        # admin-api task def — env 계약의 진원지. 실제 서비스 이름은 output 의
+        # service_names 맵이 정본이다(고정 "admin-api" 가정은 다른 명명 배포에서
+        # 조용히 mock 으로 떨어지는 함정)
         api_arn = _aws_json(
             ["ecs", "describe-services", "--cluster", cluster,
-             "--services", "admin-api"], region)["services"][0]["taskDefinition"]
+             "--services", name_map.get("admin-api", "admin-api")],
+            region)["services"][0]["taskDefinition"]
         sizing_env = _taskdef_env(region, api_arn)
         sender_type = sizing_env.get("EMAIL_SENDER_TYPE", "mock")
     except (CaptureError, KeyError, IndexError) as e:

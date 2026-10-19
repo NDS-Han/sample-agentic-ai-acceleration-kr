@@ -486,7 +486,27 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         except (json.JSONDecodeError, ValueError, KeyError):
             job = None
         if job is None:
-            rep.add("WARN", "migration", "migration Job 을 못 찾았습니다")
+            # 차트 기본 hookDeletePolicy(before-hook-creation,hook-succeeded)는
+            # 성공한 Job 을 지운다 — Job 부재는 정상. 마지막 upgrade 결과를
+            # helm history 로 대체 확인한다 (Job 이 남는 실패는 위에서 잡힌다).
+            h = _run(["helm", "history", rel, "-n", ns, "-o", "json", *kctx])
+            last = ""
+            if h.returncode == 0:
+                try:
+                    hist = json.loads(h.stdout)
+                    last = (hist[-1].get("status") or "") if hist else ""
+                except (json.JSONDecodeError, IndexError, KeyError):
+                    last = ""
+            if last == "deployed":
+                rep.add("OK", "migration",
+                        "Job 정리됨(hook-succeeded) — 마지막 upgrade deployed")
+            elif last:
+                rep.add("HIGH", "migration",
+                        f"Job 없음 + 마지막 release status={last} — "
+                        "migration 실패가 롤백됐을 수 있습니다. "
+                        f"`helm history {rel} -n {ns}` 확인")
+            else:
+                rep.add("WARN", "migration", "migration Job 을 못 찾았습니다")
         else:
             conds = (job.get("status") or {}).get("conditions") or []
             done = any(c.get("type") == "Complete" and c.get("status") == "True" for c in conds)
@@ -533,8 +553,11 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         cidr = (((live.get("ingress") or {}).get("annotations") or {})
                 .get("alb.ingress.kubernetes.io/inbound-cidrs", ""))
         want_cidrs = ",".join(cfg.network.allowed_cidrs)
-        if cfg.network.allowed_cidrs and cidr and cidr != want_cidrs:
-            drifts.append(f"inbound-cidrs={cidr}≠{want_cidrs}")
+        # 선언된 제한이 live 에 없으면 ALB 가 사실상 전체 공개 — 어노테이션
+        # 부재(빈 문자열)도 drift 로 잡아야 침묵 개방을 놓치지 않는다
+        if cfg.network.allowed_cidrs and cidr != want_cidrs:
+            drifts.append(
+                f"inbound-cidrs={cidr or '(미설정 — 전체 개방)'}≠{want_cidrs}")
         live_region = (live.get("aws") or {}).get("region")
         if live_region and live_region != cfg.aws.region:
             drifts.append(f"aws.region={live_region}≠{cfg.aws.region}")

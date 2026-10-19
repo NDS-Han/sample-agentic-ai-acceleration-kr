@@ -257,3 +257,14 @@ def test_allowed_roles_scalar_is_wrapped():
 def test_allowed_roles_list_unchanged():
     cfg = schema.from_dict(minimal(aws={"allowed_roles": ["A", "B"]}))
     assert cfg.aws.allowed_roles == ["A", "B"]
+
+
+def test_compose_private_mode_warns_not_applied():
+    """compose 렌더러는 network.mode 를 읽지 않는다 — private 선언이 침묵 무시돼
+    호스트 포트가 그대로 열리므로 경고해야 한다."""
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "deploy": {"target": "compose", "size_tier": "t0"},
+        "network": {"mode": "private"},
+    })
+    assert any("private" in w and "compose" in w for w in cfg.warnings())

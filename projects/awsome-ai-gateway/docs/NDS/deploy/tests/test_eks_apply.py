@@ -62,3 +62,57 @@ def test_context_flag_propagates(monkeypatch):
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
     eks_apply.live_alb_hostname({"namespace": "ns"}, context="prod-ctx")
     assert "--context" in seen["argv"] and "prod-ctx" in seen["argv"]
+
+
+def _cfg(**over):
+    from deploy import schema
+    doc = {
+        "version": 1, "env": "dev",
+        "aws": {"region": "ap-northeast-2"},
+        "deploy": {"target": "eks", "size_tier": "t3"},
+        "features": {"notifications": {"provider": "mock"}},
+        "images": {"tag": "v1"},
+    }
+    doc.update(over)
+    return schema.from_dict(doc)
+
+
+def test_ses_notification_wires_worker_irsa(monkeypatch, capsys):
+    """install-eks.sh R24-S7 계약 — provider=ses 이면 notification-worker SA 에
+    SES IRSA 가 붙어야 한다. 없으면 발송이 전량 실패."""
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    cfg = _cfg(features={"notifications": {"provider": "ses", "ses_from": "a@b.c"}})
+    outs = {"notification_worker_ses_role_arn": "arn:aws:iam::1:role/ses"}
+    args = eks_apply.dynamic_set_args(cfg, outs, "ap-northeast-2")
+    joined = " ".join(args)
+    assert "notificationWorker.serviceAccount" in joined
+    assert "arn:aws:iam::1:role/ses" in joined
+
+
+def test_ses_notification_missing_role_warns(monkeypatch, capsys):
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    cfg = _cfg(features={"notifications": {"provider": "ses", "ses_from": "a@b.c"}})
+    args = eks_apply.dynamic_set_args(cfg, {}, "ap-northeast-2")
+    assert not any("notificationWorker" in a for a in args)
+    assert "notification_worker_ses_role_arn" in capsys.readouterr().err
+
+
+def test_mock_notification_skips_worker_irsa(monkeypatch):
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    args = eks_apply.dynamic_set_args(_cfg(), {}, "ap-northeast-2")
+    assert not any("notificationWorker" in a for a in args)
+
+
+def test_dry_run_flag_server_for_helm_313(monkeypatch):
+    monkeypatch.setattr(eks_apply, "_helm_version", lambda: (3, 14))
+    assert eks_apply._dry_run_flag() == "--dry-run=server"
+
+
+def test_dry_run_flag_legacy_before_313(monkeypatch):
+    monkeypatch.setattr(eks_apply, "_helm_version", lambda: (3, 10))
+    assert eks_apply._dry_run_flag() == "--dry-run"
+
+
+def test_dry_run_flag_server_on_helm4(monkeypatch):
+    monkeypatch.setattr(eks_apply, "_helm_version", lambda: (4, 0))
+    assert eks_apply._dry_run_flag() == "--dry-run=server"

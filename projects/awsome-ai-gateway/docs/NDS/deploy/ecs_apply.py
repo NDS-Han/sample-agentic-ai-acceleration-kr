@@ -90,12 +90,24 @@ def push_images(cfg: GatewayConfig, outputs: dict, repo_root: Path) -> None:
         return
 
     registry_host = next(iter(repos.values())).split("/")[0]
-    login = subprocess.run(
-        f"aws ecr get-login-password --region {cfg.aws.region} | "
-        f"docker login --username AWS --password-stdin {registry_host}",
-        shell=True, capture_output=True, text=True)
-    if login.returncode != 0:
-        raise SystemExit(f"ECR 로그인 실패: {login.stderr}")
+    # shell 파이프 대신 두 프로세스 — registry_host 는 terraform output 이라
+    # 셸 문자열에 넣으면 인젝션 표면이 된다 (비밀번호는 stdin 으로만)
+    try:
+        pw = subprocess.run(["aws", "ecr", "get-login-password",
+                             "--region", cfg.aws.region],
+                            capture_output=True, text=True, timeout=30)
+        if pw.returncode != 0:
+            raise SystemExit(f"ECR 로그인 실패: {pw.stderr.strip()[:200]}")
+        login = subprocess.run(["docker", "login", "--username", "AWS",
+                                "--password-stdin", registry_host],
+                               input=pw.stdout, capture_output=True,
+                               text=True, timeout=30)
+        if login.returncode != 0:
+            raise SystemExit(f"ECR 로그인 실패: {login.stderr.strip()[:200]}")
+    except subprocess.TimeoutExpired as exc:
+        raise SystemExit(f"ECR 로그인 타임아웃: {exc}")
+    except FileNotFoundError as exc:
+        raise SystemExit(f"{exc.filename} 명령을 못 찾았습니다 — aws/docker 설치 필요")
 
     for name, ctx in BUILD_CONTEXTS.items():
         url = repos.get(name)
