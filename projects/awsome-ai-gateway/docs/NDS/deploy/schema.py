@@ -125,6 +125,23 @@ class ClientsConfig:
 
 
 @dataclass
+class InfraDbConfig:
+    """ecs 경로 DB 세부 override — 빈 값이면 size_tier 프리셋을 쓴다.
+    mode 전환(serverless↔provisioned)은 리소스 재생성급 변경이다."""
+    mode: str = ""                  # serverless | provisioned
+    min_acu: float | None = None    # serverless 전용 — 0.5 단위
+    max_acu: float | None = None
+    instance_class: str = ""        # provisioned 전용 (비우면 db.r7g.large)
+
+
+@dataclass
+class InfraCacheConfig:
+    """ecs 경로 ElastiCache 세부 override — 빈 값이면 size_tier 프리셋."""
+    mode: str = ""                  # single | replicated | cluster
+    node_type: str = ""
+
+
+@dataclass
 class InfraConfig:
     """신규 설치 인프라 입력 (bootstrap — ecs/eks).
 
@@ -139,6 +156,8 @@ class InfraConfig:
     cognito_groups: list[str] = field(default_factory=list)
     # 비우면 backend 기본: eks=variables.tf 최신 목록, ecs=models_profile 매핑.
     bedrock_allowed_model_arns: list[str] = field(default_factory=list)
+    db: InfraDbConfig = field(default_factory=InfraDbConfig)       # ecs 전용
+    cache: InfraCacheConfig = field(default_factory=InfraCacheConfig)  # ecs 전용
 
 
 @dataclass
@@ -304,6 +323,24 @@ class GatewayConfig:
             if g != "ClaudeAdmin" and not g.startswith("Claude_"):
                 e.append(f"infra.cognito_groups '{g}' — 'Claude_' 접두가 필수입니다 "
                          "(접두 없는 그룹은 OIDC 로그인이 거부됩니다).")
+        # infra.db / infra.cache — ecs 전용 세부 override (tier 기본값 위에 얹는다)
+        db, cache = self.infra.db, self.infra.cache
+        if db.mode and db.mode not in ("serverless", "provisioned"):
+            e.append(f"infra.db.mode 는 serverless|provisioned 여야 합니다: {db.mode!r}")
+        if db.min_acu is not None and not (0 <= db.min_acu <= 256):
+            e.append(f"infra.db.min_acu 범위는 0~256: {db.min_acu}")
+        if db.max_acu is not None and not (0.5 <= db.max_acu <= 256):
+            e.append(f"infra.db.max_acu 범위는 0.5~256: {db.max_acu}")
+        if (db.min_acu is not None and db.max_acu is not None
+                and db.min_acu > db.max_acu):
+            e.append(f"infra.db.min_acu({db.min_acu}) > max_acu({db.max_acu}) 입니다.")
+        if cache.mode and cache.mode not in ("single", "replicated", "cluster"):
+            e.append(f"infra.cache.mode 는 single|replicated|cluster 여야 합니다: {cache.mode!r}")
+        if (db.mode or db.min_acu is not None or db.max_acu is not None
+                or db.instance_class or cache.mode or cache.node_type):
+            if self.deploy.target != "ecs":
+                e.append(f"infra.db/infra.cache 는 ecs 경로에서만 적용됩니다 "
+                         f"(deploy.target={self.deploy.target}) — eks 는 env tfvars 소유.")
         if self.network.mode not in NETWORK_MODES:
             e.append(f"network.mode 는 {NETWORK_MODES} 중 하나여야 합니다.")
         if self.domain.mode not in DOMAIN_MODES:
@@ -394,6 +431,16 @@ def _safe_int(v: Any, errors: list[str], path: str) -> int:
         return 0
 
 
+def _safe_float_or_none(v: Any, errors: list[str], path: str) -> float | None:
+    if v in (None, ""):
+        return None
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        errors.append(f"{path} 는 숫자여야 합니다: {v!r}")
+        return None
+
+
 def _safe_bool(v: Any, errors: list[str], path: str, default: bool = False) -> bool:
     """yaml 의 unquoted true/false/on/off 는 이미 bool 로 온다. 인용된 문자열
     ("false")은 bool() 이 True 로 평가해 플래그가 조용히 켜지므로 명시적으로 거절한다.
@@ -443,7 +490,7 @@ _CLIENT_KEYS = frozenset(("models_profile",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
                         "vk_ttl_hours"))
-_INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix",
+_INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
                         "cognito_groups", "bedrock_allowed_model_arns"))
 
 
@@ -477,6 +524,15 @@ def from_dict(raw: dict) -> GatewayConfig:
     _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
     _check_unknown(oidc, _OIDC_KEYS, "oidc", errors)
     _check_unknown(infra, _INFRA_KEYS, "infra", errors)
+    _infra_db = infra.get("db") if isinstance(infra.get("db"), dict) else {}
+    _infra_cache = infra.get("cache") if isinstance(infra.get("cache"), dict) else {}
+    if infra.get("db") is not None and not _infra_db:
+        errors.append("infra.db 는 mapping 이어야 합니다")
+    if infra.get("cache") is not None and not _infra_cache:
+        errors.append("infra.cache 는 mapping 이어야 합니다")
+    _check_unknown(_infra_db, ("mode", "min_acu", "max_acu",
+                               "instance_class"), "infra.db", errors)
+    _check_unknown(_infra_cache, ("mode", "node_type"), "infra.cache", errors)
 
     cfg = GatewayConfig(
         env=str(raw.get("env", "")),
@@ -558,6 +614,18 @@ def from_dict(raw: dict) -> GatewayConfig:
                 (([infra["bedrock_allowed_model_arns"]]
                   if isinstance(infra.get("bedrock_allowed_model_arns"), str)
                   else infra.get("bedrock_allowed_model_arns")) or [])],
+            db=InfraDbConfig(
+                mode=str(_infra_db.get("mode", "")),
+                min_acu=_safe_float_or_none(_infra_db.get("min_acu"), errors,
+                                            "infra.db.min_acu"),
+                max_acu=_safe_float_or_none(_infra_db.get("max_acu"), errors,
+                                            "infra.db.max_acu"),
+                instance_class=str(_infra_db.get("instance_class", "")),
+            ),
+            cache=InfraCacheConfig(
+                mode=str(_infra_cache.get("mode", "")),
+                node_type=str(_infra_cache.get("node_type", "")),
+            ),
         ),
         oidc=OidcConfig(
             issuer_url=str(oidc.get("issuer_url", "")),

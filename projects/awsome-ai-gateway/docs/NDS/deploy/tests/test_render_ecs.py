@@ -142,6 +142,59 @@ def test_db_budget_rejects_excessive_max_count():
                      "sizing": {"gateway-proxy": {"max_count": 12}}})
 
 
+def test_infra_db_override_maps_to_tfvars():
+    cfg = _cfg(infra={"db": {"mode": "serverless", "min_acu": 0.5, "max_acu": 8.0},
+                      "cache": {"mode": "replicated", "node_type": "cache.t4g.medium"}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["serverless_min_acu"] == 0.5
+    assert v["serverless_max_acu"] == 8.0
+    assert v["cache_mode"] == "replicated"
+    assert v["cache_node_type"] == "cache.t4g.medium"
+
+
+def test_infra_db_provisioned_override():
+    cfg = _cfg(infra={"db": {"mode": "provisioned",
+                            "instance_class": "db.r7g.xlarge"}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["db_mode"] == "provisioned"
+    assert v["db_instance_class"] == "db.r7g.xlarge"
+    assert "serverless_min_acu" not in v
+
+
+def test_infra_db_partial_override_keeps_tier_rest():
+    """min_acu 만 올려도 max_acu/cache 는 티어 값 유지."""
+    cfg = _cfg(infra={"db": {"min_acu": 2.0}})
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["serverless_min_acu"] == 2.0
+    assert v["serverless_max_acu"] == 4.0   # t1 tier 값
+    assert v["cache_mode"] == "single"      # t1 tier 값
+
+
+def test_infra_db_validation():
+    with pytest.raises(schema.SchemaError, match="infra.db.mode"):
+        _cfg(infra={"db": {"mode": "banana"}})
+    with pytest.raises(schema.SchemaError, match="min_acu"):
+        _cfg(infra={"db": {"min_acu": 8.0, "max_acu": 4.0}})
+    with pytest.raises(schema.SchemaError, match="infra.cache.mode"):
+        _cfg(infra={"cache": {"mode": "banana"}})
+    # eks 는 env tfvars 소유 — ecs 전용 강제
+    with pytest.raises(schema.SchemaError, match="ecs"):
+        _cfg(deploy={"target": "eks", "size_tier": "t2",
+                     "images": {"tag": "v1"}},
+             infra={"db": {"max_acu": 8.0}})
+
+
+def test_db_budget_uses_effective_acu():
+    """max_acu override 가 예산 천장에 반영된다 — 8 ACU 면 gw max 12 허용."""
+    from deploy.tiers import ecs_db_budget
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1",
+                       "sizing": {"gateway-proxy": {"max_count": 12}}},
+               infra={"db": {"max_acu": 8.0}})
+    b = ecs_db_budget(cfg)
+    assert b["ceiling_capacity"] == 1800
+    assert b["worst"] <= int(b["ceiling_capacity"] * 0.8)
+
+
 def test_backend_hcl_infers_from_account_id():
     cfg = _cfg()
     hcl = ecs_render.render_backend_hcl(cfg)

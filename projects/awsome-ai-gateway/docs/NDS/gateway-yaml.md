@@ -129,9 +129,13 @@ deploy:
 | `cognito_domain_suffix` | Hosted UI suffix. 비우면 `<region-code>-auth-<account>` 자동 (us-east-1→use1, ap-northeast-2→apne2) |
 | `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
 | `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
+| `db.*` | **ecs 전용** — tier 프리셋 위에 얹는 DB 세부 override: `mode`(serverless\|provisioned), `min_acu`/`max_acu`(0.5 단위, 0=일시정지), `instance_class`(provisioned 시). 매 `apply`마다 tfvars로 내려가므로 **업데이트 경로에서도 동작** — `configure`의 고급 분기나 직접 편집 후 apply. mode 전환은 재생성급 변경(노트 출력) |
+| `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`. `db.*`와 같은 override 관계. node_type/mode 변경은 캐시 재기동·failover를 동반 |
 
 `infra.*` 는 bootstrap 의 managed overlay/generated tfvars 로만 내려갑니다 —
-`apply`(업데이트) 경로가 인프라를 바꾸지는 않습니다.
+단 `infra.db`/`infra.cache`(ecs)는 `deploy.sizing`처럼 매 apply의 tfvars에
+포함되므로 설치 후 크기 변경에도 씁니다. `validate`가 worst-case DB 커넥션
+예산을 이 override를 반영한 실효값으로 계산합니다.
 
 ### `deploy.tfstate_bucket` / `deploy.tfstate_table`
 

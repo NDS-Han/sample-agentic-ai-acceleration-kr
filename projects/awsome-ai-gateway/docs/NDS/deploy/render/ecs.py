@@ -17,7 +17,7 @@ from pathlib import Path
 from .. import schema
 from ..schema import GatewayConfig
 from ..tiers import ecs_service_sizing as service_sizing
-from ..tiers import preset
+from ..tiers import effective_cache_spec, effective_db_spec, preset
 from . import common
 
 
@@ -65,21 +65,21 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         "allowed_iam_roles": list(cfg.aws.allowed_roles),
     }
 
-    # ── DB/캐시 토폴로지 — tier spec → 모듈의 명시 모드 변수
-    if t.db_mode == "rds-serverless":
+    # ── DB/캐시 토폴로지 — tier spec + infra.db/infra.cache override →
+    #    모듈의 명시 모드 변수 (실효값은 tiers.effective_*_spec 이 정본)
+    db = effective_db_spec(cfg)
+    if db["mode"] == "serverless":
         vars_["db_mode"] = "serverless"
-        vars_["serverless_min_acu"] = t.db_spec.get("min_acu", 0.5)
-        vars_["serverless_max_acu"] = t.db_spec.get("max_acu", 4.0)
-    elif t.db_mode == "rds-provisioned":
+        vars_["serverless_min_acu"] = db["min_acu"]
+        vars_["serverless_max_acu"] = db["max_acu"]
+    else:
         vars_["db_mode"] = "provisioned"
-        vars_["db_instance_class"] = t.db_spec.get("instance_class", "db.r7g.large")
+        vars_["db_instance_class"] = db["instance_class"]
     vars_["db_safeguards"] = t.ha != "none"
 
-    if t.cache_mode == "elasticache-single":
-        vars_["cache_mode"] = "single"
-    elif t.cache_mode == "elasticache-ha":
-        vars_["cache_mode"] = "cluster" if t.cache_spec.get("cluster_mode") else "replicated"
-    vars_["cache_node_type"] = t.cache_spec.get("node_type", "cache.t4g.small")
+    cache = effective_cache_spec(cfg)
+    vars_["cache_mode"] = cache["mode"]
+    vars_["cache_node_type"] = cache["node_type"]
     vars_["nat_ha"] = t.ha == "multi-az"
 
     # ── 신규 설치 인프라 입력 (infra.*) — 비우면 모듈 기본값
@@ -218,6 +218,21 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             f"service autoscaling: {', '.join(sorted(scaled))} 에 CPU 60%/Mem 70% "
             f"target-tracking 정책이 붙습니다 (상한=max_count — deploy.sizing 으로 조정). "
             f"싱글톤 워커·admin-ui·scheduler 는 min=max=desired 로 핀됩니다.")
+    t = preset(cfg.deploy.size_tier)
+    eff_db, eff_cache = effective_db_spec(cfg), effective_cache_spec(cfg)
+    t_db_mode = "serverless" if t.db_mode == "rds-serverless" else "provisioned"
+    if eff_db["mode"] != t_db_mode:
+        notes.append(
+            f"⚠ infra.db.mode={eff_db['mode']} — tier 기본({t_db_mode})과 다른 모드 "
+            f"전환은 리소스 재생성급 변경입니다. 기존 배포면 데이터 이관 절차를 먼저 "
+            f"확인하세요.")
+    if cfg.infra.db.min_acu is not None or cfg.infra.db.max_acu is not None or \
+            cfg.infra.db.instance_class or cfg.infra.cache.mode or cfg.infra.cache.node_type:
+        notes.append(
+            f"infra.db/cache override 적용 — 실효: db={eff_db['mode']} "
+            f"({eff_db.get('min_acu')}~{eff_db.get('max_acu')} ACU 또는 "
+            f"{eff_db['instance_class']}), cache={eff_cache['mode']} "
+            f"{eff_cache['node_type']}")
     if not cfg.aws.allowed_roles:
         notes.append(
             "CLI 로그인(STS 경로): aws.allowed_roles 가 비어 있어 allowed_iam_roles=[] "

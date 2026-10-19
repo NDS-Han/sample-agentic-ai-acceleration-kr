@@ -40,10 +40,14 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
   스트림이 보호됩니다.
 - **싱글톤 계약**: scheduler·cost-recorder·notification은 스트림 consumer/
   cron 중복 방지로 1개 고정 — autoscaling도 min=max=1 핀입니다.
+- **DB/캐시 크기**: tier 프리셋이 기본 — `configure`의 "DB/캐시 크기를 직접
+  정하시겠습니까?" 분기(또는 `infra.db`/`infra.cache` 직접 선언)로 min/max
+  ACU·instance_class·cache mode·node_type을 세부 조정합니다. 매 `apply`에
+  반영되므로 설치 후 변경도 같은 경로입니다.
 - **DB 커넥션 예산**: task가 늘면 pool 수요(30conn/task worst, gw 60)도
   비례해 늡니다. `validate`가 최악치가 Aurora `max_acu`(~225conn/ACU)의
   80%를 넘지 않는지 검사하고, 정상 수요가 `min_acu` 바닥을 넘으면 경고합니다 —
-  `deploy.sizing`으로 task를 키우기 전에 `deploy validate`를 돌리세요.
+  `deploy.sizing`/`infra.db`를 키우기 전에 `deploy validate`를 돌리세요.
   그 이상의 탄력이 필요하면 eks prod가 쓰는 **RDS Proxy**가 구조적 해법입니다
   (pool 다중화, 별도 비용).
 

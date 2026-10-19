@@ -269,6 +269,69 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "(gateway 는 public 유지 — S2S VPN/사내망 전제)",
             default=admin_internal).ask())
 
+    # infra.* 는 블록 통째 보존이 원칙 (bootstrap wizard 가 기록한 azs/cognito/
+    # bedrock 등). ecs 경로에만 DB/캐시 크기 고급 분기를 연다 — 나머지 target
+    # 에서는 기존 선언을 그대로 둔다(schema 가 ecs 전용을 강제).
+    infra_doc = dict(_g(ex, "infra", default={}) or {})
+    if target == "ecs":
+        prev_db = infra_doc.get("db") or {}
+        prev_cache = infra_doc.get("cache") or {}
+        t = tiers.preset(size_tier)
+        adv = _unwrap(questionary.confirm(
+            f"DB/캐시 크기를 직접 정하시겠습니까? (기본: 티어 {size_tier} 프리셋 — "
+            f"Aurora {t.db_mode} {t.db_spec}, cache {t.cache_mode})",
+            default=bool(prev_db or prev_cache)).ask())
+        if adv:
+            db_mode = _unwrap(questionary.select(
+                "DB 모드",
+                choices=[Choice("serverless — Aurora Serverless v2 (ACU 자동 스케일)",
+                                "serverless"),
+                         Choice("provisioned — 고정 인스턴스", "provisioned")],
+                default=prev_db.get("mode")
+                or ("serverless" if t.db_mode == "rds-serverless" else "provisioned")).ask())
+            db_doc: dict = {"mode": db_mode}
+            if db_mode == "serverless":
+                lo = _unwrap(questionary.text(
+                    "serverless min ACU (비용 하한 — 0.5 단위, 0=일시정지)",
+                    default=str(prev_db.get("min_acu", t.db_spec.get("min_acu", 0.5)))).ask())
+                hi = _unwrap(questionary.text(
+                    "serverless max ACU (스케일 천장 — DB 커넥션 한도와 연동)",
+                    default=str(prev_db.get("max_acu", t.db_spec.get("max_acu", 4.0)))).ask())
+                try:
+                    db_doc["min_acu"] = float(lo)
+                    db_doc["max_acu"] = float(hi)
+                except ValueError:
+                    console.print("[yellow]ACU 가 숫자가 아닙니다 — 기존 값 유지")
+                    db_doc.update({k: v for k, v in prev_db.items()
+                                   if k in ("min_acu", "max_acu")})
+            else:
+                db_doc["instance_class"] = _unwrap(questionary.text(
+                    "DB 인스턴스 클래스",
+                    default=str(prev_db.get("instance_class") or "db.r7g.large")).ask())
+            infra_doc["db"] = db_doc
+
+            cache_mode = _unwrap(questionary.select(
+                "ElastiCache 토폴로지",
+                choices=[Choice("single — 단일 노드 (최소 비용)", "single"),
+                         Choice("replicated — replica 1대 failover", "replicated"),
+                         Choice("cluster — cluster mode", "cluster")],
+                default=prev_cache.get("mode")
+                or ("single" if t.cache_mode == "elasticache-single" else "replicated")).ask())
+            infra_doc["cache"] = {
+                "mode": cache_mode,
+                "node_type": _unwrap(questionary.text(
+                    "ElastiCache node type",
+                    default=str(prev_cache.get("node_type")
+                                or t.cache_spec.get("node_type", "cache.t4g.small"))).ask()),
+            }
+        else:
+            # 고급 분기를 끈 경우에도 기존 선언은 지우지 않는다 — 명시적 제거만
+            if (prev_db or prev_cache) and _unwrap(questionary.confirm(
+                    "기존 infra.db/infra.cache 선언이 있습니다 — 제거합니까?",
+                    default=False).ask()):
+                infra_doc.pop("db", None)
+                infra_doc.pop("cache", None)
+
     doc = {
         "version": 1,
         "env": env,
@@ -293,6 +356,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
         },
         "clients": _g(ex, "clients", default={}) or {"models_profile": "global"},
     }
+    if infra_doc:
+        doc["infra"] = infra_doc
     if oidc:
         doc["oidc"] = oidc
     if images:
@@ -396,8 +461,21 @@ def cmd_validate(args) -> int:
     table.add_column("항목"); table.add_column("값")
     table.add_row("target / tier", f"{cfg.deploy.target} / {cfg.deploy.size_tier}")
     table.add_row("users", t.users)
-    table.add_row("db", f"{t.db_mode} {t.db_spec}")
-    table.add_row("cache", f"{t.cache_mode} {t.cache_spec}")
+    if cfg.deploy.target == "ecs":
+        # infra.db/infra.cache override 가 반영된 실효 spec — tier 기본과
+        # 다르면 그 사실을 표시한다
+        db, cache = tiers.effective_db_spec(cfg), tiers.effective_cache_spec(cfg)
+        db_over = (db["mode"] != ("serverless" if t.db_mode == "rds-serverless"
+                                  else "provisioned")
+                   or db["min_acu"] != t.db_spec.get("min_acu")
+                   or db["max_acu"] != t.db_spec.get("max_acu")
+                   or db["instance_class"] != t.db_spec.get("instance_class", ""))
+        table.add_row("db (실효)", f"{db['mode']} {db}"
+                                  + ("  [infra.db override]" if db_over else ""))
+        table.add_row("cache (실효)", f"{cache['mode']} {cache['node_type']}")
+    else:
+        table.add_row("db", f"{t.db_mode} {t.db_spec}")
+        table.add_row("cache", f"{t.cache_mode} {t.cache_spec}")
     table.add_row("ha", t.ha)
     table.add_row("monthly(est)", t.monthly_cost_usd)
     console.print(table)

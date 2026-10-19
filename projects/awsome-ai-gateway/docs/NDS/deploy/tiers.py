@@ -138,6 +138,52 @@ AUTOSCALE_MAX_FACTOR: dict[str, int] = {
 }
 
 
+def effective_db_spec(cfg) -> dict:
+    """tier 프리셋 + infra.db override → 실효 DB spec.
+
+    반환 키: mode(serverless|provisioned), min_acu, max_acu, instance_class.
+    schema.validate·render.ecs·ecs_db_budget 이 같은 값을 봐야 한다."""
+    t = preset(cfg.deploy.size_tier)
+    spec = {
+        "mode": "serverless" if t.db_mode == "rds-serverless" else "provisioned",
+        "min_acu": t.db_spec.get("min_acu", 0.5),
+        "max_acu": t.db_spec.get("max_acu", 4.0),
+        "instance_class": t.db_spec.get("instance_class", "db.r7g.large"),
+    }
+    db = getattr(cfg.infra, "db", None)
+    if db is None:
+        return spec
+    if db.mode:
+        spec["mode"] = db.mode
+    if db.min_acu is not None:
+        spec["min_acu"] = db.min_acu
+    if db.max_acu is not None:
+        spec["max_acu"] = db.max_acu
+    if db.instance_class:
+        spec["instance_class"] = db.instance_class
+    return spec
+
+
+def effective_cache_spec(cfg) -> dict:
+    """tier 프리셋 + infra.cache override → 실효 cache spec.
+
+    반환 키: mode(single|replicated|cluster), node_type."""
+    t = preset(cfg.deploy.size_tier)
+    if t.cache_mode == "elasticache-single":
+        mode = "single"
+    else:
+        mode = "cluster" if t.cache_spec.get("cluster_mode") else "replicated"
+    spec = {"mode": mode, "node_type": t.cache_spec.get("node_type", "cache.t4g.small")}
+    c = getattr(cfg.infra, "cache", None)
+    if c is None:
+        return spec
+    if c.mode:
+        spec["mode"] = c.mode
+    if c.node_type:
+        spec["node_type"] = c.node_type
+    return spec
+
+
 def ecs_service_sizing(cfg) -> dict:
     """tier preset + deploy.sizing override → module service_sizing map.
 
@@ -178,7 +224,7 @@ def ecs_db_budget(cfg) -> dict:
     """
     if cfg.deploy.target != "ecs":
         return {}
-    t = preset(cfg.deploy.size_tier)
+    db = effective_db_spec(cfg)
     sizing = ecs_service_sizing(cfg)
     steady = worst = 0
     for svc, s in sizing.items():
@@ -188,9 +234,9 @@ def ecs_db_budget(cfg) -> dict:
         cap = max(desired, int(s.get("max_count", desired)))
         steady += typical * desired
         worst += per * cap
-    if t.db_mode == "rds-serverless":
-        floor_cap = int(t.db_spec.get("min_acu", 0.5) * ACU_CONNECTIONS)
-        ceil_cap = int(t.db_spec.get("max_acu", 4.0) * ACU_CONNECTIONS)
+    if db["mode"] == "serverless":
+        floor_cap = int(db["min_acu"] * ACU_CONNECTIONS)
+        ceil_cap = int(db["max_acu"] * ACU_CONNECTIONS)
     else:
         floor_cap = ceil_cap = PROVISIONED_CONNECTIONS
     return {
