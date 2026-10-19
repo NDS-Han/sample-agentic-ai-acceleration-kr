@@ -117,9 +117,32 @@ else:
 #   * idle_in_transaction_session_timeout — a hung migration must not hold its
 #     locks forever; without this a stalled script pins the write path until a
 #     human kills the backend.
-MIGRATION_LOCK_TIMEOUT = os.getenv("DB_MIGRATION_LOCK_TIMEOUT", "60s")
-MIGRATION_STATEMENT_TIMEOUT = os.getenv("DB_MIGRATION_STATEMENT_TIMEOUT", "15min")
-MIGRATION_IDLE_TX_TIMEOUT = os.getenv("DB_MIGRATION_IDLE_TX_TIMEOUT", "10min")
+#
+# ⚠️ These MUST be applied with ordinary `SET` statements after connect, not
+# startup-packet options (libpq PGOPTIONS, asyncpg server_settings): RDS Proxy
+# rejects startup options with
+#   "Feature not supported: RDS Proxy currently doesn't support command-line
+#    options."  (dev 실측, migration-223, 2026-10-19)
+# A session SET is normal SQL, so it passes through the proxy.
+#
+# The values are interpolated into SQL below, so they are validated against a
+# strict duration whitelist — a malformed env value must fail loudly instead of
+# being spliced into a SET statement.
+_DURATION_RE = re.compile(r"^[0-9]+(ms|s|min|h|d)?$")
+
+
+def _pg_duration(env_name: str, default: str) -> str:
+    value = os.getenv(env_name, default)
+    if not _DURATION_RE.match(value):
+        raise ValueError(
+            f"{env_name}={value!r}: expected a PostgreSQL duration like '60s', '15min'"
+        )
+    return value
+
+
+MIGRATION_LOCK_TIMEOUT = _pg_duration("DB_MIGRATION_LOCK_TIMEOUT", "60s")
+MIGRATION_STATEMENT_TIMEOUT = _pg_duration("DB_MIGRATION_STATEMENT_TIMEOUT", "15min")
+MIGRATION_IDLE_TX_TIMEOUT = _pg_duration("DB_MIGRATION_IDLE_TX_TIMEOUT", "10min")
 
 
 def run_migrations_offline() -> None:
@@ -140,17 +163,21 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations() -> None:
-    engine = create_async_engine(
-        db_url,
-        connect_args={
-            "server_settings": {
-                "lock_timeout": MIGRATION_LOCK_TIMEOUT,
-                "statement_timeout": MIGRATION_STATEMENT_TIMEOUT,
-                "idle_in_transaction_session_timeout": MIGRATION_IDLE_TX_TIMEOUT,
-            }
-        },
-    )
+    engine = create_async_engine(db_url)
     async with engine.connect() as conn:
+        # Session SET under AUTOCOMMIT so each migration still commits at its
+        # own boundary (transaction_per_migration) while the SETs persist for
+        # the whole session — see the RDS Proxy note above.
+        conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+        # asyncpg prepares each exec_driver_sql call — multiple commands in one
+        # statement are rejected ("cannot insert multiple commands into a
+        # prepared statement"), so the SETs go one call each.
+        for guc, value in (
+            ("lock_timeout", MIGRATION_LOCK_TIMEOUT),
+            ("statement_timeout", MIGRATION_STATEMENT_TIMEOUT),
+            ("idle_in_transaction_session_timeout", MIGRATION_IDLE_TX_TIMEOUT),
+        ):
+            await conn.exec_driver_sql(f"SET {guc} = '{value}'")
         await conn.run_sync(do_run_migrations)
     await engine.dispose()
 

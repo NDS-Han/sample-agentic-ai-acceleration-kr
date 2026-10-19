@@ -49,11 +49,25 @@ MASTER_URL_NO_PASS=$(echo "$MASTER_URL" | sed 's|://\([^:]*\):[^@]*@|://\1@|')
 # psql 공통 옵션:
 #   -X          — ~/.psqlrc 를 읽지 않는다. Job 의 appuser 홈은 깨끗하지만 운영자가
 #                 이 스크립트를 손으로 재실행할 때 개인 psqlrc 가 개입하는 것을 막는다.
-#   PGOPTIONS   — init SQL/GRANT 단계에도 lock_timeout 을 건다. 앱이 도는 중인 배포에서
+#   SET         — init SQL/GRANT 단계에도 lock_timeout 을 건다. 앱이 도는 중인 배포에서
 #                 DDL 이 락 큐에 서면 그 뒤의 앱 쿼리가 전부 대기한다 — 큐잉보다 빠른 실패가
 #                 낫다(모든 SQL 은 멱등이라 Job 재시도로 재개된다).
+#
+# ⚠️ lock_timeout 을 PGOPTIONS(= startup packet 의 command-line options)로 넘기면
+#    안 된다 — RDS Proxy 가 startup options 를 거부한다:
+#      "Feature not supported: RDS Proxy currently doesn't support
+#       command-line options."  (dev 실측, migration-223, 2026-10-19)
+#    일반 SQL 인 SET 은 프록시를 통과하므로 각 psql 세션 첫 명령으로 내린다.
+#    asyncpg 쪽의 같은 함정(server_settings)은 env.py 주석 참조.
 PSQL_OPTS="-X -v ON_ERROR_STOP=1"
-export PGOPTIONS="-c lock_timeout=${DB_MIGRATION_LOCK_TIMEOUT:-60s}${PGOPTIONS:+ $PGOPTIONS}"
+MIG_LOCK="${DB_MIGRATION_LOCK_TIMEOUT:-60s}"
+# SET 문에 그대로 삽입되므로 PG duration 문자셋(숫자+단위)만 허용한다.
+case "$MIG_LOCK" in
+    ''|*[!0-9a-zA-Z]*)
+        echo "ERROR: DB_MIGRATION_LOCK_TIMEOUT='$MIG_LOCK' — '60s', '15min' 같은 형식만 허용" >&2
+        exit 1 ;;
+esac
+SET_LOCK_TIMEOUT_SQL="SET lock_timeout = '${MIG_LOCK}';"
 
 if [ -n "$MASTER_URL" ]; then
     echo "[migration] cloud mode — DB_MASTER_URL detected, applying init SQL"
@@ -70,8 +84,9 @@ if [ -n "$MASTER_URL" ]; then
     for f in /app/init/*.sql; do
         [ -f "$f" ] || continue
         echo "[migration]   applying $(basename "$f")"
+        # -c → -f 순서로 같은 세션에서 실행된다 — SET 이 init SQL 전체에 적용.
         # shellcheck disable=SC2086  # PSQL_OPTS 는 플래그 목록 — 단어분리가 의도
-        psql "$MASTER_URL_NO_PASS" $PSQL_OPTS -f "$f"
+        psql "$MASTER_URL_NO_PASS" $PSQL_OPTS -c "$SET_LOCK_TIMEOUT_SQL" -f "$f"
     done
 
     if [ -n "$APP_USER" ] && [ -n "$APP_PASSWORD" ]; then
@@ -89,6 +104,7 @@ if [ -n "$MASTER_URL" ]; then
         APP_PASSWORD_L="'$(printf '%s' "$APP_PASSWORD" | sed "s/'/''/g")'"
         # shellcheck disable=SC2086  # PSQL_OPTS 단어분리 의도
         psql "$MASTER_URL_NO_PASS" $PSQL_OPTS <<EOSQL
+$SET_LOCK_TIMEOUT_SQL
 SELECT format('CREATE ROLE %I WITH LOGIN PASSWORD %L', $APP_USER_L, $APP_PASSWORD_L)
  WHERE NOT EXISTS (SELECT FROM pg_roles WHERE rolname = $APP_USER_L)
 \gexec
@@ -104,6 +120,7 @@ EOSQL
         for schema in $SCHEMAS; do
             # shellcheck disable=SC2086  # PSQL_OPTS 단어분리 의도
             psql "$MASTER_URL_NO_PASS" $PSQL_OPTS <<EOSQL
+$SET_LOCK_TIMEOUT_SQL
 GRANT USAGE, CREATE ON SCHEMA "$schema" TO $APP_USER_I;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA "$schema" TO $APP_USER_I;
 GRANT USAGE, SELECT, UPDATE ON ALL SEQUENCES IN SCHEMA "$schema" TO $APP_USER_I;

@@ -27,16 +27,33 @@ RUN_SH = (DB / "run_migration.sh").read_text(encoding="utf-8")
 
 
 class TestEnvTimeouts:
-    """alembic must not hold-or-queue locks without bound."""
+    """alembic must not hold-or-queue locks without bound.
 
-    def test_server_settings_applied(self) -> None:
-        assert '"server_settings"' in ENV_PY
-        for key in (
+    RDS Proxy rejects startup-packet options (PGOPTIONS, asyncpg
+    server_settings) with "command-line options" unsupported — so timeouts
+    must be issued as ordinary session SET statements after connect.
+    """
+
+    def test_session_set_applied(self) -> None:
+        # One exec_driver_sql per GUC — asyncpg rejects multi-command statements.
+        assert 'SET {guc}' in ENV_PY
+        for guc in (
             '"lock_timeout"',
             '"statement_timeout"',
             '"idle_in_transaction_session_timeout"',
         ):
-            assert key in ENV_PY, f"env.py missing {key} in server_settings"
+            assert guc in ENV_PY, f"env.py missing session SET for {guc}"
+
+    def test_no_startup_packet_options(self) -> None:
+        # server_settings / PGOPTIONS travel in the startup packet → RDS Proxy
+        # rejects them (migration-223, 2026-10-19). Post-connect SET is the
+        # only proxy-safe path. Check code only — comments legitimately cite
+        # the rejected mechanisms.
+        code = "\n".join(
+            ln.split("#", 1)[0] for ln in ENV_PY.splitlines()
+        )
+        assert "server_settings" not in code
+        assert "PGOPTIONS" not in code
 
     def test_timeouts_env_overridable(self) -> None:
         # Operators must be able to relax the budgets without a code change
@@ -70,8 +87,18 @@ class TestPsqlHardening:
     def test_lock_timeout_set_for_psql_phase(self) -> None:
         # Init SQL / GRANTs also queue on locks while the app is live — they
         # must fail fast like the alembic phase, not stall the write path.
-        assert "PGOPTIONS" in RUN_SH
-        assert "lock_timeout" in RUN_SH
+        # It must arrive as a session SET (RDS Proxy rejects PGOPTIONS —
+        # checked on code lines only, comments cite the rejected mechanism).
+        code = "\n".join(
+            ln.split("#", 1)[0] for ln in RUN_SH.splitlines()
+        )
+        assert "PGOPTIONS" not in code
+        assert "SET_LOCK_TIMEOUT_SQL" in RUN_SH
+        # Every psql call site must apply it — via -c before -f, or as the
+        # first line inside the heredoc.
+        assert '-c "$SET_LOCK_TIMEOUT_SQL" -f "$f"' in RUN_SH
+        heredoc_calls = RUN_SH.count("$SET_LOCK_TIMEOUT_SQL")
+        assert heredoc_calls >= 3  # 1 definition + 3 consumption sites
 
 
 class TestCredentialQuoting:
