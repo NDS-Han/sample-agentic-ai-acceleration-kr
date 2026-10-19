@@ -179,10 +179,10 @@ terraform -chdir=deployment/terraform/environments/gateway-ecs apply \
 
 > ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
 > 라우팅 행에는 샘플 크로스계정 ARN(`arn:aws:iam::333…/2222…`)이 들어 있습니다.
-> 단일 계정 배포면 admin UI → models → routing 에서 `account_role_arn`을 비워
-> (in-account) 두세요 — 그대로 두면 없는 계정으로 AssumeRole을 시도해 요청이
-> 전부 실패합니다. 다른 계정 Bedrock으로 내려면 오히려 실제 역할 ARN으로
-> 바꾸면 됩니다 ([operations.md](operations.md) 참조).
+> 단일 계정 배포면 `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면
+> 없는 계정으로 AssumeRole을 시도해 요청이 전부 실패합니다. 이 값은 admin UI에서
+> 못 고치고 **SQL**로 바꿉니다 — 절차는 [operations.md](operations.md) §3
+> (backend별 실행법 포함).
 
 ## 5. Cognito 사용자 생성 + admin 로그인
 

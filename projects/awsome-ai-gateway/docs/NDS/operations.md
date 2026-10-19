@@ -74,15 +74,88 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
 들어 있는 `claude-code`/`cowork` 행은 개발 조직의 샘플 크로스계정 ARN
 (`arn:aws:iam::333…`/`2222…`)을 가리킵니다.
 
-- **단일 계정 배포** (대부분): admin UI → models → routing에서 해당 행의
-  `account_role_arn`/`external_id`를 비우세요(NULL = in-account, 파드 자신의
-  IRSA 자격증명으로 직접 호출). 그대로 두면 없는 계정으로 AssumeRole을 시도해
-  요청이 전부 실패합니다 — 배포 직후 첫 번째로 확인할 항목.
+> ⚠️ **admin UI/API로는 이 값을 못 고칩니다** — 라우팅 API는 목록 조회와
+> web-search 토글만 제공합니다. `account_role_arn`·`backend`·`default_model`
+> 변경은 **SQL**로 합니다.
+
+- **단일 계정 배포** (대부분): `account_role_arn`/`external_id`를 비우세요
+  (NULL = in-account, 태스크/파드 자신의 IAM 자격증명으로 직접 호출).
+  그대로 두면 없는 계정으로 AssumeRole을 시도해 요청이 전부 실패합니다 —
+  배포 직후 첫 번째로 확인할 항목. `cowork`의 `default_model`도 비워야
+  사용자 모델 선택이 살아납니다(시드가 `cowork-opus`로 고정).
 - **다른 계정의 Bedrock으로 보내기** (계정 분리·비용 격리·규제): 대상 계정에
-  AssumeRole 가능한 역할을 만들고(`llm-gateway-<env>` IRSA 신뢰 + ExternalId),
-  `account_role_arn`·`external_id`·`region`을 그 값으로 설정하면 됩니다.
+  AssumeRole 가능한 역할을 만들고(`llm-gateway-<env>` 서비스 자격증명 신뢰 +
+  ExternalId), `account_role_arn`·`external_id`·`region`을 그 값으로 UPDATE
+  하면 됩니다 — 아래 SQL에서 NULL 대신 실제 값을 넣으면 됩니다.
 - `codex` 행은 시드부터 in-account(`account_role_arn` NULL)라 별도 조치가
   필요 없습니다.
+
+**적용 SQL** (backend 공통):
+
+```sql
+UPDATE model.routing_profiles
+   SET backend          = 'invoke',
+       account_role_arn = NULL,
+       external_id      = NULL,
+       default_model    = NULL
+ WHERE client IN ('claude-code','cowork');
+-- 확인 — account_role_arn/external_id/default_model 이 비어있어야 합니다
+SELECT client, backend, account_role_arn, external_id, default_model
+  FROM model.routing_profiles WHERE client IN ('claude-code','cowork');
+```
+
+> 변경 후 **최대 5분** 기다리세요 — 게이트웨이가 라우팅을 Redis에 300초
+> 캐시합니다. 서비스 재시작은 의미 없습니다(캐시는 파드가 아니라 ElastiCache).
+
+### backend별 실행법
+
+**compose** — postgres 컨테이너에 직접:
+
+```bash
+docker compose -f deployment/gen/<env>/docker-compose.yml \
+  exec postgres psql -U gateway -d gateway -v ON_ERROR_STOP=1 \
+  -c "UPDATE model.routing_profiles SET backend='invoke', account_role_arn=NULL,
+      external_id=NULL, default_model=NULL
+      WHERE client IN ('claude-code','cowork');"
+```
+
+**eks** — 클러스터 안 임시 postgres 파드(배포 머신은 VPC 밖이라 직접 못 붙습니다):
+
+```bash
+PGHOST=$(terraform -chdir=deployment/terraform/environments/llm-gateway-<env> \
+  output -raw rds_proxy_endpoint)
+PGPASSWORD=$(aws secretsmanager get-secret-value --secret-id /llm-gateway/<env>/db \
+  --query SecretString --output text | jq -r .password)
+kubectl -n <namespace> run psql --rm -it --restart=Never --pod-running-timeout=5m \
+  --image=public.ecr.aws/docker/library/postgres:16 \
+  --env="PGHOST=$PGHOST" --env="PGUSER=gateway" --env="PGDATABASE=gateway" \
+  --env="PGPASSWORD=$PGPASSWORD" --command -- psql -v ON_ERROR_STOP=1 \
+  -c "UPDATE model.routing_profiles SET backend='invoke', account_role_arn=NULL,
+      external_id=NULL, default_model=NULL
+      WHERE client IN ('claude-code','cowork');"
+```
+
+**ecs** — migration 태스크를 일회성으로 실행(이미지에 psql + DB 자격증명 내장):
+
+```bash
+cd deployment/terraform/environments/gateway-ecs
+CLUSTER=$(terraform output -raw ecs_cluster_name)
+TASKDEF=$(terraform output -raw migration_task_definition_arn)
+SUBNETS=$(terraform output -json private_subnet_ids | jq -c .)
+SG=$(terraform output -raw task_security_group_id)
+aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+  --task-definition "$TASKDEF" \
+  --network-configuration "{\"awsvpcConfiguration\":{\"subnets\":$SUBNETS,\"securityGroups\":[\"$SG\"],\"assignPublicIp\":\"DISABLED\"}}" \
+  --overrides "$(cat <<'EOF'
+{"containerOverrides":[{"name":"migration",
+ "environment":[{"name":"FIX_SQL","value":"UPDATE model.routing_profiles SET backend='invoke', account_role_arn=NULL, external_id=NULL, default_model=NULL WHERE client IN ('claude-code','cowork');"}],
+ "command":["sh","-c","psql \"$DB_MASTER_URL\" -v ON_ERROR_STOP=1 --echo-all -c \"$FIX_SQL\""]}]}
+EOF
+)"
+# 결과 — 태스크 종료 후 migration 로그에서 UPDATE 2 확인
+# (로그 그룹 = /ecs/<project>-<env>/migration — project 기본값 llm-gateway)
+aws logs tail /ecs/llm-gateway-<env>/migration --since 10m
+```
 
 ## 4. 신형 모델 — Bedrock Marketplace 구독
 

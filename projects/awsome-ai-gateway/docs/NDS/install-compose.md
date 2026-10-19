@@ -231,9 +231,10 @@ OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-l
 
 > ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
 > 라우팅 행에는 샘플 크로스계정 ARN이 들어 있습니다. 단일 계정 배포면
-> admin UI → models → routing에서 `account_role_arn`을 비워(in-account)
-> 두세요 — 그대로 두면 없는 계정으로 AssumeRole을 시도해 요청이 전부
-> 실패합니다 ([operations.md](operations.md) 참조).
+> `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면 없는 계정으로
+> AssumeRole을 시도해 요청이 전부 실패합니다. 이 값은 admin UI에서 못 고치고
+> **SQL**로 바꿉니다 — 절차는 [operations.md](operations.md) §3
+> (backend별 실행법 포함).
 
 ## 5. 이후 운영
 

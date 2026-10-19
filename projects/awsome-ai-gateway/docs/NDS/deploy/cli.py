@@ -747,12 +747,12 @@ def _confirm_destroy(env: str, args) -> bool:
 def _post_apply_notes(cfg: schema.GatewayConfig) -> None:
     """apply/bootstrap 직후 운영자가 손으로 마무리할 항목 — DB 라우팅 프로필은
     배포 선언이 아니라 운영 데이터라 자동화하지 않는다."""
-    console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
+    console.print("\n[cyan]다음 단계 (수동):\n"
                   "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
                   f" --env {cfg.env}\n"
-                  "  · 라우팅 프로필 확인: admin UI → models — 시드의 claude-code/cowork "
-                  "행은 샘플 크로스계정 ARN 이 들어 있습니다. 단일 계정 배포면 "
-                  "account_role_arn 을 비워(in-account) 두세요 — 안 하면 AssumeRole "
+                  "  · 라우팅 프로필 확인 — 시드의 claude-code/cowork 행은 샘플 "
+                  "크로스계정 ARN 입니다. 단일 계정 배포면 account_role_arn 을 비워야"
+                  " 합니다 (SQL — docs/NDS/operations.md §3). 안 하면 AssumeRole "
                   "실패로 요청이 전부 에러납니다")
 
 
