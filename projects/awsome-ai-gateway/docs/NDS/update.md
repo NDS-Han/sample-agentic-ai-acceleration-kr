@@ -158,6 +158,9 @@ plane 별로 다릅니다 — "태그만 되돌리기"는 롤백이 아닙니다
 
 ## 도메인을 나중에 얻었을 때
 
+도메인 획득 절차(Route53 구매/NS 위임/사내 할당)와 backend 별 등록 순서의
+전체 정리는 [domain.md](domain.md) — 여기는 변경 명령만 요약합니다.
+
 ```bash
 # gateway.yaml
 domain:
@@ -176,6 +179,9 @@ ACM 인증서는 모듈이 만들고 DNS 검증 레코드도 자동 생성됩니
 다른 계정에 있으면 `terraform output cert_validation_records` 로 레코드를
 확인해 수동 등록 후 재적용하세요. 도메인 도입 시 NEXTAUTH_URL 도 새 도메인으로
 자동 갱신됩니다 — 세션 재로그인이 필요합니다.
+
+**eks** — cert 발급·`certificate-arn`·DNS CNAME 이 수동입니다. 절차는
+[install-eks.md](install-eks.md) §4.
 
 ## public → private 전환
 

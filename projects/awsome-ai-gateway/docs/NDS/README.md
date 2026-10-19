@@ -96,6 +96,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
+| [domain.md](domain.md) | **도메인 획득(Route53 구매/NS 위임/사내 할당) → 배포에 등록** — backend별 자동화 정도 |
 | [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | **EKS 컨트롤플레인/애드온/Aurora 엔진 업그레이드** (terraform env 소유 — 홉 순서·버전표·롤백 제한) |
 | [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
