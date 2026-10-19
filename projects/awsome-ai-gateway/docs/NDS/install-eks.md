@@ -90,6 +90,11 @@ capture notes 가 알려주는 주의점:
 
 ## 2. 업데이트 — 변경 반영
 
+> **여기는 앱(helm) 업데이트입니다.** EKS 컨트롤플레인/애드온/Aurora 엔진처럼
+> terraform env 소유 의존성의 버전 업그레이드는
+> [upgrade-eks-cluster.md](upgrade-eks-cluster.md)의 별도 런북을 따릅니다
+> (`./deploy doctor`가 tfvars↔라이브 버전 skew를 HIGH로 알려줍니다).
+
 ```bash
 ./deploy configure   # 현재 설정을 기본값으로 항목별 확인 → 끝에서 "지금 배포?" y
                      # → render → plan → 확인 → apply 까지 자동 연결
