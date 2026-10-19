@@ -342,6 +342,50 @@ def test_onboard_admin_creates_and_groups(monkeypatch, tmp_path):
     assert any("임시 비밀번호" in n for n in notes)
 
 
+def test_onboard_admin_assigned_to_team_group(monkeypatch, tmp_path):
+    """관리자는 ClaudeAdmin + 팀 그룹(Claude_*) 양쪽에 배정돼야 한다 —
+    팀 그룹이 없으면 VK 발급이 403."""
+    import json as _json
+    calls = []
+    def fake(cmd, **kw):
+        calls.append(cmd)
+        if "admin-get-user" in cmd:
+            return _cp(1)
+        if "list-groups" in cmd:
+            return _cp(0, _json.dumps({"Groups": [
+                {"GroupName": "ClaudeAdmin"},
+                {"GroupName": "Claude_SSIR_Developer"},
+                {"GroupName": "Claude_NDS_Developer"}]}))
+        return _cp(0)
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake)
+    vals = tmp_path / "deployment/charts/llm-gateway/values-eks-fargate-dev.yaml"
+    vals.parent.mkdir(parents=True)
+    vals.write_text("adminApi:\n  adminBootstrap:\n    emails: [admin@corp.com]\n")
+    notes = bootstrap.onboard_admin(
+        _cfg(), tmp_path, {"cognito_user_pool_id": "pool-1"}, "ap-northeast-2")
+    added = [c[c.index("--group-name") + 1] for c in calls
+             if "admin-add-user-to-group" in c]
+    assert added == ["ClaudeAdmin", "Claude_NDS_Developer"]  # 정렬 후 첫 팀 그룹
+
+
+def test_onboard_admin_warns_without_team_group(monkeypatch, tmp_path):
+    """팀 그룹이 하나도 없으면 VK 403 함정을 경고로 남긴다."""
+    import json as _json
+    def fake(cmd, **kw):
+        if "admin-get-user" in cmd:
+            return _cp(1)
+        if "list-groups" in cmd:
+            return _cp(0, _json.dumps({"Groups": [{"GroupName": "ClaudeAdmin"}]}))
+        return _cp(0)
+    monkeypatch.setattr(bootstrap.subprocess, "run", fake)
+    vals = tmp_path / "deployment/charts/llm-gateway/values-eks-fargate-dev.yaml"
+    vals.parent.mkdir(parents=True)
+    vals.write_text("adminApi:\n  adminBootstrap:\n    emails: [admin@corp.com]\n")
+    notes = bootstrap.onboard_admin(
+        _cfg(), tmp_path, {"cognito_user_pool_id": "pool-1"}, "ap-northeast-2")
+    assert any("팀 그룹" in n and "403" in n for n in notes)
+
+
 def test_onboard_admin_existing_user_skips_create(monkeypatch, tmp_path):
     created = []
     def fake(cmd, **kw):

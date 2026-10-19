@@ -398,16 +398,44 @@ def onboard_admin(cfg: GatewayConfig, repo_root: Path, outs: dict,
                      f"첫 로그인 시 변경 강제): {temp_pw}")
     else:
         notes.append(f"cognito 사용자 {email} — 이미 존재 (생성 생략)")
-    gr = subprocess.run(
-        ["aws", "cognito-idp", "admin-add-user-to-group", "--user-pool-id", pool,
-         "--username", email, "--group-name", "ClaudeAdmin", "--region", region],
-        capture_output=True, text=True)
-    if gr.returncode == 0:
-        notes.append(f"cognito 그룹 배정: {email} → ClaudeAdmin")
-    else:
-        notes.append(f"⚠ ClaudeAdmin 그룹 배정 실패 — env tfvars cognito_groups 에 "
-                     f"ClaudeAdmin 이 있는지 확인 ({(gr.stderr or '').strip()[:120]})")
+    teams = _cognito_team_groups(pool, region)
+    if not teams:
+        notes.append("⚠ 팀 그룹(Claude_*)이 풀에 없습니다 — 팀 그룹 소속이 없으면 "
+                     "이 관리자도 VK 발급 시 403 이 납니다. infra.cognito_groups/"
+                     "env tfvars 에 팀 그룹을 선언했는지 확인하세요")
+    for group in ("ClaudeAdmin", *teams):
+        gr = subprocess.run(
+            ["aws", "cognito-idp", "admin-add-user-to-group", "--user-pool-id",
+             pool, "--username", email, "--group-name", group,
+             "--region", region],
+            capture_output=True, text=True)
+        if gr.returncode == 0:
+            notes.append(f"cognito 그룹 배정: {email} → {group}")
+        else:
+            notes.append(f"⚠ {group} 그룹 배정 실패 — 그룹이 풀에 있는지 확인 "
+                         f"({(gr.stderr or '').strip()[:120]})")
     return notes
+
+
+def _cognito_team_groups(pool: str, region: str) -> list[str]:
+    """VK 발급은 팀 그룹(Claude_*) 멤버십을 요구한다 — 첫 관리자도 예외가 아니라
+    실제 풀의 Claude_* 그룹 중 ClaudeAdmin 을 뺀 첫 것에 배정한다.
+    라이브 풀을 읽으므로 ecs(infra.cognito_groups)든 eks(env tfvars)든
+    선언 출처와 무관하게 실제 그룹을 고른다."""
+    r = subprocess.run(
+        ["aws", "cognito-idp", "list-groups", "--user-pool-id", pool,
+         "--region", region, "--output", "json"],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        return []
+    try:
+        names = [g.get("GroupName", "")
+                 for g in json.loads(r.stdout).get("Groups", [])]
+    except json.JSONDecodeError:
+        return []
+    teams = sorted(n for n in names
+                   if n.startswith("Claude_") and n != "ClaudeAdmin")
+    return teams[:1]
 
 
 # ── 신규 설치 대화형 wizard ───────────────────────────────────────────────────

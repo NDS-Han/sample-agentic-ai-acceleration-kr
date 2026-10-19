@@ -187,9 +187,13 @@ aws cognito-idp admin-create-user --user-pool-id $POOL_ID \
   --username admin@example.com --user-attributes Name=email,Value=admin@example.com
 aws cognito-idp admin-add-user-to-group --user-pool-id $POOL_ID \
   --username admin@example.com --group-name ClaudeAdmin
+# ⚠️ 관리자도 팀 그룹에 넣으세요 — ClaudeAdmin 만 있으면 VK 발급이 403 입니다
+aws cognito-idp admin-add-user-to-group --user-pool-id $POOL_ID \
+  --username admin@example.com --group-name Claude_<dept>_<team>   # infra.cognito_groups 에 선언한 팀 그룹
 ```
 
 `admin_ui_url` 로 접속 → Cognito hosted UI 로 리다이렉트 → 로그인.
+직원을 계속 추가하는 절차는 [operations.md](operations.md) 참조.
 
 ## 6. 도메인을 나중에 붙이기
 
