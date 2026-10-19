@@ -204,9 +204,22 @@ if [ "$fail" -eq 0 ]; then
   echo
   log "다음: ⚠️ docker 그룹은 이 셸에 반영 안 됨 ('docker ps' → permission denied)."
   log "  그룹 자격은 세션 생성 시점에 박히므로 usermod 로는 지금 셸이 안 바뀐다."
-  log "  → 세션 재시작이 필요합니다 — VS Code/Cursor Remote 를 쓰고 있다면:"
-  log "       pkill -f 'vscode-server|cursor-server'   # 서버가 죽고 Reload 로 재접속"
-  log "    그게 아니면 SSH 연결을 끊고 재접속. 지금 셸에서만 급히 쓰려면: newgrp docker"
+  # 원격 IDE 서버 감지 — 개발자마다 IDE가 다르므로 떠 있는 것만 골라 안내한다.
+  _ide_found=""
+  for s in vscode-server cursor-server windsurf-server kiro-server vscodium-server code-server remote-dev; do
+    pgrep -f "$s" >/dev/null 2>&1 && _ide_found="$_ide_found $s"
+  done
+  if [ -n "$_ide_found" ]; then
+    _ide_pat=$(echo "$_ide_found" | xargs | tr ' ' '|')
+    log "  → 감지된 원격 IDE 서버:${_ide_found} — 세션 재시작:"
+    log "       pkill -f '$_ide_pat'   # 서버가 죽고 IDE 에서 Reload 로 재접속"
+  else
+    log "  → 원격 IDE 서버는 감지 안 됨 (순수 SSH? 접속 끊고 재접속 하세요)."
+    log "    IDE 를 쓰고 있다면 떠 있는 서버 확인:"
+    log "       pgrep -af 'vscode-server|cursor-server|windsurf-server|kiro-server|code-server|remote-dev'"
+    log "       pkill -f '<위에서 확인된 서버명>'"
+  fi
+  log "    지금 셸에서만 급히 쓰려면: newgrp docker"
   log "  (claude 의 PATH 는 ~/.bashrc 에 넣었으니 새 셸이면 자동 해결된다.)"
   echo
   log "새 셸에서:"

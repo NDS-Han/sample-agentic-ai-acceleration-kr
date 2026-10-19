@@ -148,14 +148,20 @@ bash deployment/scripts/bootstrap-ec2.sh
 bootstrap이 바꾼 것(docker 그룹·PATH)은 **지금 셸에 반영되지 않습니다** —
 그룹 자격은 세션 생성 시점에 박히므로 `usermod`만으론 떠 있는 셸이 안 바뀝니다.
 
-▶ **실행** · 배포 EC2
+▶ **실행** · 배포 EC2 — 어떤 IDE 서버가 떠 있는지 먼저 확인
 
 ```bash
-pkill -f 'vscode-server|cursor-server'
+pgrep -af 'vscode-server|cursor-server|windsurf-server|kiro-server|code-server|remote-dev'
 ```
 
-→ VS Code/Cursor의 EC2 쪽 서버가 죽고 "Reload"가 뜹니다 — Reload 하면 새
-세션으로 다시 붙습니다 (스크립트 종료 메시지에도 같은 안내가 출력됩니다).
+```bash
+pkill -f '<위에서 확인된 서버명>'    # 예: vscode-server, cursor-server, windsurf-server …
+```
+
+→ IDE별 원격 서버 디렉토리: VS Code `~/.vscode-server` · Cursor `~/.cursor-server` ·
+Windsurf `~/.windsurf-server` · Kiro `~/.kiro-server` · JetBrains `~/.cache/JetBrains`.
+서버가 죽으면 IDE에 "Reload"가 뜨고 새 세션으로 다시 붙습니다 — bootstrap 종료
+메시지가 **감지된 서버에 맞는 pkill을 자동으로 출력**하므로 그대로 따라 해도 됩니다.
 원격 IDE 없이 순수 SSH면 그냥 접속을 끊고 재접속하면 됩니다.
 
 ▶ **새 셸에서 확인**
