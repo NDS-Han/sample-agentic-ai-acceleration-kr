@@ -60,8 +60,19 @@ helm get values llm-gateway -n "$GW_NS" --kube-context "$GW_KCTX" -o yaml \
 ```
 
 > **target 버전의 애드온 버전 확인** — 아래 표는 실측 기록일 뿐, 신버전은 AWS가
-> 추가/만료합니다. 홉 전에 반드시 실측:
-> `aws eks describe-addon-versions --kubernetes-version <목표.minor> --addon-name <name>`
+> 추가/만료합니다. 홉 전에 반드시 실측 (`--kubernetes-version`은 **목표** 버전,
+> `compatibilities[0].defaultVersion=true`가 EKS 검증 기본값):
+>
+> ```bash
+> for a in coredns kube-proxy vpc-cni; do
+>   v=$(aws eks describe-addon-versions --kubernetes-version <목표.minor> \
+>     --region "$GW_REGION" --addon-name "$a" \
+>     --query 'addons[].addonVersions[?compatibilities[0].defaultVersion==`true`].addonVersion | [0][0]' \
+>     --output text)
+>   printf '  %-11s = "%s"\n' "${a//-/_}" "$v"
+> done
+> # → coredns/kube_proxy/vpc_cni = "vX.Y.Z-eksbuild.N" — tfvars에 그대로 붙인다
+> ```
 
 | cluster | coredns | kube-proxy | vpc-cni |
 |---|---|---|---|
