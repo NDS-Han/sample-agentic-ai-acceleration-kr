@@ -5,9 +5,8 @@
 대상: 인프라가 아무것도 없는 계정/리전. 한 명령이 install-guide §3 전체를 실행합니다.
 
 ```bash
-./deploy init          # gateway.yaml 생성 (deploy.target=eks)
+./deploy bootstrap          # yaml 없으면 init 마법사부터 — 배포 방식 선택
 ./deploy bootstrap --plan   # 단계 미리보기
-./deploy bootstrap          # 확인 프롬프트 후 전체 실행
 ```
 
 실행 순서 (각 단계 멱등 — 실패 시 고치고 `bootstrap` 재실행하면 이어감):
@@ -15,8 +14,9 @@
 | # | 단계 | 내용 |
 |---|---|---|
 | 0 | env scaffold | `deploy.tf_env_dir`(기본 `deployment/terraform/environments/llm-gateway-<env>`)이 없으면 `llm-gateway-dev` 템플릿에서 생성 → **tfvars 검토 후 재실행** |
+| ★ | 인프라 wizard | 대화형 질문 — 답은 `gateway.yaml` 의 `infra.*` 에 기록됩니다:<br>① tfstate bucket/table 이름(기본값 제공, 생성 실패 시 이름 재입력 루프)<br>② 배포할 AZ 복수 선택(live 목록, 최소 2 — 서브넷 CIDR 자동 생성)<br>③ Cognito domain suffix(기본 `<region>-auth-<account>`)+ `Claude_` 그룹<br>④ bedrock 허용 ARN(기본=variables.tf 최신 또는 직접 입력)+ web-search |
 | 1 | tfstate | `bootstrap-tfstate.sh`로 state bucket + lock table 보장 |
-| 2 | env apply | terraform apply — EKS·VPC·Aurora·ElastiCache·Cognito·Secrets·IRSA (수십 분) |
+| 2 | env apply | terraform apply — EKS·VPC·Aurora·ElastiCache·Cognito·Secrets·IRSA (수십 분). wizard 답변은 managed overlay `-var-file` 로 내려갑니다 |
 | 3 | 시크릿 시드 | `/<project>/<env>/app`(랜덤 4키 생성) · `/redis`(auth_token 복사) · `/db`(terraform 소유 — 검증만, **절대 덮어쓰지 않음**) |
 | 4 | 이미지 | ECR repo 생성 + 서비스 6종 build/push (`images.tag`/`tags`로 핀 — scheduler는 admin-api 재사용) |
 | 5 | helm | `apply`와 동일한 helm upgrade — 동적 output 주입 + feature 인프라 보강 |
@@ -26,8 +26,11 @@
 alias/라우팅 시드(install-guide §4 — 운영 데이터라 자동화 대상 아님).
 
 - **env scaffold 주의**: 생성된 `terraform.tfvars`의 `eks_cluster_version`·
-  `eks_addon_versions`·`cognito_groups`·`tags`는 템플릿 기본값 — 조직에 맞게
-  검토한 뒤 재실행해야 합니다 (bootstrap이 여기서 멈춥니다)
+  `eks_addon_versions`·`tags`는 템플릿 기본값 — 조직에 맞게 검토한 뒤
+  재실행해야 합니다 (bootstrap이 여기서 멈춥니다). bi 챗(`enable_chat_agent`)은
+  NDS 배포 대상이 아니라 scaffold 에서 자동으로 false 로 생성됩니다
+- **비대화형/CI**: `--yes` 는 wizard 없이 yaml 선언값만 씁니다 — `infra.*` 를
+  미리 채워 두면 됩니다 ([gateway-yaml.md](gateway-yaml.md#infra--신규-설치-인프라-입력))
 - 신규 설치 후 업데이트는 경로 B/C와 같은 `apply` 흐름입니다
 
 ## 경로 B — 기존 배포 온보딩

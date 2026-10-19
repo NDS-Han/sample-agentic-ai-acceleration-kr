@@ -68,6 +68,14 @@ oidc:                          # 비워두면 OIDC 비활성(dev-login)
   token_url: ""
   provider_name: oidc:cognito
   required_group: ""
+
+infra:                         # 신규 설치 인프라 입력 — `deploy bootstrap` wizard 가 기록
+                               # (ecs/eks 전용, compose 무시, 기존 배포 온보딩엔 미사용)
+  azs: []                      # 배포할 가용영역 — 2개 이상 (DB/Cache subnet group 요건)
+  vpc_cidr: ""                 # 비우면 backend 기본 (eks 10.30/16, ecs 10.40/16)
+  cognito_domain_suffix: ""    # 비우면 <region-code>-auth-<account> (예: apne2-auth-123…)
+  cognito_groups: []           # 'Claude_<team>' / 'Claude_<dept>_<team>' — ClaudeAdmin 자동 포함
+  bedrock_allowed_model_arns: []  # 비우면 backend 기본 — 명시 시 models_profile 매핑을 덮어씀
 ```
 
 ## 항목별 상세
@@ -95,6 +103,22 @@ deploy:
 지정한 키만 바뀌고 나머지는 티어 값이 유지됩니다.
 `cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를
 늘리면 안 됩니다 (렌더러가 항상 1 로 고정).
+
+### `infra.*` — 신규 설치 인프라 입력
+
+`deploy bootstrap` 실행 시 대화형 wizard 가 같은 질문을 묻고 답을 여기에 기록합니다
+(파일로 직접 써도 됩니다 — CI/`--yes` 경로는 이 파일 값만 읽습니다).
+
+| 키 | 의미 |
+|---|---|
+| `azs` | 배포할 가용영역 목록. **2개 이상 필수**(Aurora/ElastiCache subnet group 요건). 선언하면 private/public/database/elasticache 서브넷 CIDR 리스트가 개수에 맞춰 자동 생성됩니다 (`{a}.{b}.{i}/24`, `{100+i}`, `{200+i}`, `{210+i}` — 두 env 의 variables.tf 규약) |
+| `vpc_cidr` | VPC 대역. 바꾸면 위 서브넷 CIDR 도 이 대역에서 생성됩니다 |
+| `cognito_domain_suffix` | Hosted UI suffix. 비우면 `<region-code>-auth-<account>` 자동 (us-east-1→use1, ap-northeast-2→apne2) |
+| `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
+| `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
+
+`infra.*` 는 bootstrap 의 managed overlay/generated tfvars 로만 내려갑니다 —
+`apply`(업데이트) 경로가 인프라를 바꾸지는 않습니다.
 
 ### `deploy.tfstate_bucket` / `deploy.tfstate_table`
 

@@ -37,9 +37,130 @@ def test_scaffold_tfvars_substitution():
         principal_arn="arn:aws:iam::123456789012:role/deployer")
     assert 'environment = "stg"' in out
     assert 'aws_region  = "us-west-2"' in out
-    assert 'stg-auth-123456789012' in out
+    # cognito suffix 규약: <region-code>-auth-<account> (us-west-2 → usw2)
+    assert 'usw2-auth-123456789012' in out
     assert "role/deployer" in out
     assert "검토 필요" in out
+
+
+def test_scaffold_tfvars_disables_chat_agent():
+    """NDS 는 bi 챗을 배포하지 않는다 — example 의 true 는 본 deliverable 운영
+    환경 재현용이라 신규 scaffold 에선 false 여야 한다."""
+    example = ('enable_chat_agent    = true\n'
+               'enable_chat_db_tools = true\n')
+    out = bootstrap.scaffold_tfvars(
+        example, env="x", region="r", account="a", principal_arn="p")
+    assert "enable_chat_agent    = false" in out
+    assert "enable_chat_db_tools = false" in out
+
+
+# ── 리전 코드 / AZ / subnet cidr ──────────────────────────────────────────────
+
+def test_region_code():
+    assert bootstrap.region_code("us-east-1") == "use1"
+    assert bootstrap.region_code("ap-northeast-2") == "apne2"
+    assert bootstrap.region_code("eu-central-1") == "euc1"
+    assert bootstrap.region_code("ap-southeast-2") == "apse2"
+    assert bootstrap.region_code("ap-south-1") == "aps1"
+
+
+def test_default_cognito_suffix():
+    assert bootstrap.default_cognito_suffix(
+        "ap-northeast-2", "123456789012") == "apne2-auth-123456789012"
+
+
+def test_subnet_cidrs_pattern():
+    from deploy import schema
+    c = schema.subnet_cidrs("10.30.0.0/16", 3)
+    assert c["private_subnet_cidrs"] == [
+        "10.30.1.0/24", "10.30.2.0/24", "10.30.3.0/24"]
+    assert c["public_subnet_cidrs"][0] == "10.30.101.0/24"
+    assert c["database_subnet_cidrs"][0] == "10.30.201.0/24"
+    assert c["elasticache_subnet_cidrs"][0] == "10.30.211.0/24"
+    assert len(c["database_subnet_cidrs"]) == 3
+
+
+# ── infra 스키마 검증 ─────────────────────────────────────────────────────────
+
+def test_infra_azs_minimum_two():
+    from deploy import schema
+    with pytest.raises(schema.SchemaError, match="2개 이상"):
+        _cfg(infra={"azs": ["ap-northeast-2a"]})
+
+
+def test_infra_groups_require_claude_prefix():
+    from deploy import schema
+    with pytest.raises(schema.SchemaError, match="Claude_"):
+        _cfg(infra={"cognito_groups": ["DevOps"]})
+    # ClaudeAdmin + Claude_ 접두는 허용
+    _cfg(infra={"cognito_groups": ["ClaudeAdmin", "Claude_Dept_Team"]})
+
+
+def test_infra_azs_region_mismatch():
+    from deploy import schema
+    with pytest.raises(schema.SchemaError, match="AZ 가 아닙니다"):
+        _cfg(infra={"azs": ["us-east-1a", "us-east-1b"]})
+
+
+# ── infra → managed overlay (eks) / tfvars (ecs) ─────────────────────────────
+
+def test_eks_overlay_emits_infra(tmp_path):
+    from deploy.render import eks as eks_render
+    cfg = _cfg(infra={
+        "azs": ["ap-northeast-2a", "ap-northeast-2c", "ap-northeast-2d"],
+        "cognito_domain_suffix": "apn2-auth-123",
+        "cognito_groups": ["Claude_X_Y"],
+        "bedrock_allowed_model_arns": ["arn:aws:bedrock:*::foundation-model/x"],
+    })
+    t = eks_render.render_tfvars(cfg, env_dir=tmp_path)
+    assert 'azs = ["ap-northeast-2a", "ap-northeast-2c", "ap-northeast-2d"]' in t
+    # AZ 3개 → cidr 리스트도 3칸 생성
+    assert '"10.30.3.0/24"' in t
+    assert 'cognito_domain_suffix = "apn2-auth-123"' in t
+    # ClaudeAdmin 은 항상 포함
+    assert '"Claude_X_Y"' in t and '"ClaudeAdmin"' in t
+    assert "bedrock_allowed_model_arns" in t
+
+
+def test_eks_overlay_empty_infra_keeps_flags_only(tmp_path):
+    from deploy.render import eks as eks_render
+    t = eks_render.render_tfvars(_cfg(), env_dir=tmp_path)
+    assert "azs" not in t and "cognito" not in t and "bedrock" not in t
+    assert "enable_body_logging" in t
+
+
+def test_ecs_tfvars_infra_and_bedrock_override():
+    from deploy.render import ecs as ecs_render
+    cfg = _cfg(
+        deploy={"target": "ecs", "size_tier": "t1"},
+        infra={
+            "azs": ["ap-northeast-2a", "ap-northeast-2c"],
+            "cognito_groups": ["Claude_A_B"],
+            "bedrock_allowed_model_arns": ["arn:aws:bedrock:*::foundation-model/y"],
+        })
+    v = ecs_render.desired_tfvars(cfg)
+    assert v["azs"] == ["ap-northeast-2a", "ap-northeast-2c"]
+    assert v["private_subnet_cidrs"] == ["10.40.1.0/24", "10.40.2.0/24"]
+    assert v["cognito_groups"] == ["Claude_A_B", "ClaudeAdmin"]
+    # models_profile 매핑을 덮어쓴다
+    assert v["bedrock_allowed_model_arns"] == [
+        "arn:aws:bedrock:*::foundation-model/y"]
+
+
+def test_persist_bootstrap_answers(tmp_path):
+    cfg_path = tmp_path / "gateway.yaml"
+    cfg_path.write_text("version: 1\nenv: dev\n")
+    bootstrap.persist_bootstrap_answers(cfg_path, {
+        "tfstate": ("bkt", "tbl"),
+        "infra": {"azs": ["a", "b"], "cognito_groups": ["Claude_T"]},
+        "web_search": True,
+    })
+    import yaml as _y
+    doc = _y.safe_load(cfg_path.read_text())
+    assert doc["deploy"]["tfstate_bucket"] == "bkt"
+    assert doc["infra"]["azs"] == ["a", "b"]
+    assert doc["features"]["web_search"] is True
+    assert oct(cfg_path.stat().st_mode)[-3:] == "600"
 
 
 def test_scaffold_eks_env_existing_dir_is_noop(tmp_path):

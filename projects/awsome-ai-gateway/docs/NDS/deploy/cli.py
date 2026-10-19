@@ -816,26 +816,70 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
 def cmd_bootstrap(args) -> int:
     """신규 설치 — install-guide §3 전체를 한 명령으로.
 
-    backend 별 선행 단계(tfstate/env apply/시크릿/이미지/Cognito) 후
-    cmd_apply 와 같은 실행기로 마무리한다. 각 단계는 멱등 — 실패 시
-    고친 뒤 bootstrap 을 다시 실행하면 이어간다."""
+    흐름: (yaml 없으면 init 통합 — 배포 방식 선택) → 대화형 인프라 wizard
+    (tfstate 이름/AZ/Cognito suffix·groups/bedrock ARNs/web-search, 답변은
+    gateway.yaml 의 infra.* 에 영속화) → backend 별 실행. 각 단계는 멱등 —
+    실패 시 고친 뒤 bootstrap 을 다시 실행하면 이어간다."""
+    from . import bootstrap
+
+    # ① 초기 배포 상태 — gateway.yaml 이 없으면 배포 방식 선택부터 (init 통합)
+    cfg_path = Path(args.config)
+    if not cfg_path.exists():
+        if not sys.stdin.isatty() or getattr(args, "yes", False):
+            console.print(f"[red]{cfg_path} 가 없습니다 — "
+                          "./deploy init 또는 --config 를 지정하십시오")
+            return 1
+        console.print(Panel("초기 배포 상태입니다 — 배포 방식을 선택해 주세요"))
+        if _write_config(cfg_path, _collect_doc()):
+            return 1
     try:
         cfg = _load_config(args)
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
-    from . import bootstrap
 
     if cfg.deploy.target == "compose":
         console.print("[cyan]compose 는 신규=업데이트 동일 — apply 로 진행합니다")
         args.build = getattr(args, "build", False)   # bootstrap 파서엔 --build 없음
         return cmd_apply(args)
 
-    if cfg.deploy.target == "ecs":
+    if cfg.deploy.target not in ("ecs", "eks"):
+        console.print(f"[red]deploy.target={cfg.deploy.target} 의 bootstrap 은 구현 전입니다.")
+        return 1
+    eks = cfg.deploy.target == "eks"
+
+    # --plan 은 미리보기 — wizard(yaml 영속화 포함)와 AWS 변경 모두 생략
+    interactive = (sys.stdin.isatty()
+                   and not getattr(args, "yes", False) and not args.plan)
+
+    def _tfstate_with_retry(bucket: str, table: str) -> tuple[str, str]:
+        while True:
+            try:
+                return bootstrap.ensure_tfstate(
+                    cfg, REPO_ROOT, eks=eks, bucket=bucket, table=table)
+            except SystemExit as exc:
+                if not sys.stdin.isatty() or getattr(args, "yes", False):
+                    raise
+                console.print(f"[red]tfstate 생성 실패 — {exc}")
+                questionary = _questionary()
+                bucket = _unwrap(questionary.text(
+                    "TFSTATE_BUCKET (다른 이름으로 재시도)",
+                    default=bucket).ask())
+
+    if not eks:
         if args.plan:
             console.print("[cyan]ecs bootstrap 계획: ① tfstate bucket/table 보장 "
                           "→ ② apply(terraform 이 전부 생성 + 이미지 push)")
             return 0
+        bucket = table = ""
+        if interactive:
+            ans = bootstrap.wizard_infra(cfg, eks=False)
+            if ans is None:
+                return 130
+            bootstrap.persist_bootstrap_answers(cfg_path, ans)
+            console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
+            cfg = schema.load(cfg_path)
+            bucket, table = ans["tfstate"]
         console.print(Panel(
             f"신규 설치 (ecs — {cfg.env}):\n"
             "① tfstate bucket/lock table 보장 (bootstrap-tfstate.sh)\n"
@@ -844,66 +888,75 @@ def cmd_bootstrap(args) -> int:
             title=f"bootstrap — {cfg.env}", expand=False))
         if not _confirm_apply(args):
             return 130
-        bootstrap.ensure_tfstate(cfg, REPO_ROOT, eks=False)
+        _tfstate_with_retry(bucket, table)
         return cmd_apply(args)
 
-    if cfg.deploy.target == "eks":
-        from .render import eks as eks_render
-        from . import eks_apply, doctor as doc
-        context = getattr(args, "context", "") or ""
-        out = GEN_ROOT / cfg.env / "eks"
+    # ── eks ──
+    from .render import eks as eks_render
+    from . import eks_apply, doctor as doc
+    context = getattr(args, "context", "") or ""
+    out = GEN_ROOT / cfg.env / "eks"
 
-        # 로컬 파일만 생성 — tfvars 검토를 위해 여기서 멈춘다 (AWS 변경 전)
-        env_target = bootstrap.scaffold_eks_env(cfg, REPO_ROOT, cfg.aws.region)
-        res = eks_render.render(cfg, out)
-        for n in res.get("notes", []):
-            console.print(f"  [yellow]ⓘ {n}")
-        if args.plan:
-            console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
-                          f"terraform apply ({env_target}) → ③ SM 시크릿 시드 → "
-                          "④ ECR 이미지 build/push → ⑤ helm apply → "
-                          "⑥ Cognito admin 생성")
-            return 0
-        console.print(Panel(
-            f"신규 설치 (eks — {cfg.env}):\n"
-            "① tfstate bucket/lock table 보장\n"
-            f"② terraform env apply — {env_target}\n"
-            "   (EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA — 수십 분)\n"
-            "③ Secrets Manager 시드 (/app 랜덤 + /redis 복사 + /db 검증)\n"
-            "④ ECR repo 생성 + 이미지 build/push\n"
-            "⑤ helm apply (cmd_apply 와 동일)\n"
-            "⑥ Cognito 첫 admin 사용자 생성 (adminBootstrap.emails[0])",
-            title=f"bootstrap — {cfg.env} (eks)", expand=False))
-        if not _confirm_apply(args):
+    # 로컬 파일만 생성 — 신규 env 는 tfvars 검토를 위해 여기서 멈춘다 (AWS 변경 전)
+    env_target = bootstrap.scaffold_eks_env(cfg, REPO_ROOT, cfg.aws.region)
+
+    # wizard 는 render 전에 — infra.* 답변이 managed overlay tfvars 로 들어간다
+    bucket = table = ""
+    if interactive:
+        ans = bootstrap.wizard_infra(cfg, eks=True)
+        if ans is None:
             return 130
+        bootstrap.persist_bootstrap_answers(cfg_path, ans)
+        console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
+        cfg = schema.load(cfg_path)
+        bucket, table = ans["tfstate"]
 
-        backend = bootstrap.ensure_tfstate(cfg, REPO_ROOT, eks=True)
-        outs = bootstrap.env_apply(env_target, out, backend)
-        for n in bootstrap.seed_secrets(cfg, REPO_ROOT, outs):
-            console.print(f"  ⓘ {n}")
-        bootstrap.push_images_eks(cfg, outs, REPO_ROOT, cfg.aws.region)
-        try:
-            result = eks_apply.apply(cfg, out, REPO_ROOT, context)
-        except SystemExit as exc:
-            console.print(f"[red]{exc}")
-            return 1
-        console.print(f"\n[green]helm upgrade 완료 — {result['release']} "
-                      f"@ ns={result['namespace']}")
-        # helm 까지 끝난 최신 output 으로 온보딩 (ensure_infra 가 추가했을 수 있음)
-        for n in bootstrap.onboard_admin(
-                cfg, REPO_ROOT, eks_apply.tf_outputs(env_target), cfg.aws.region):
-            console.print(f"  ⓘ {n}")
-        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
-        console.print(doc.format_report(cfg, rep))
-        console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
-                      "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
-                      f" --env {cfg.env}\n"
-                      "  · 모델 alias/라우팅 프로필 시드: admin UI → models "
-                      "(§4 — 운영 데이터라 bootstrap 이 만들지 않음)")
-        return 0 if rep.worst != "HIGH" else 1
+    res = eks_render.render(cfg, out)
+    for n in res.get("notes", []):
+        console.print(f"  [yellow]ⓘ {n}")
+    if args.plan:
+        console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
+                      f"terraform apply ({env_target}) → ③ SM 시크릿 시드 → "
+                      "④ ECR 이미지 build/push → ⑤ helm apply → "
+                      "⑥ Cognito admin 생성")
+        return 0
+    console.print(Panel(
+        f"신규 설치 (eks — {cfg.env}):\n"
+        "① tfstate bucket/lock table 보장\n"
+        f"② terraform env apply — {env_target}\n"
+        "   (EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA — 수십 분)\n"
+        "③ Secrets Manager 시드 (/app 랜덤 + /redis 복사 + /db 검증)\n"
+        "④ ECR repo 생성 + 이미지 build/push\n"
+        "⑤ helm apply (cmd_apply 와 동일)\n"
+        "⑥ Cognito 첫 admin 사용자 생성 (adminBootstrap.emails[0])",
+        title=f"bootstrap — {cfg.env} (eks)", expand=False))
+    if not _confirm_apply(args):
+        return 130
 
-    console.print(f"[red]deploy.target={cfg.deploy.target} 의 bootstrap 은 구현 전입니다.")
-    return 1
+    backend = _tfstate_with_retry(bucket, table)
+    outs = bootstrap.env_apply(env_target, out, backend)
+    for n in bootstrap.seed_secrets(cfg, REPO_ROOT, outs):
+        console.print(f"  ⓘ {n}")
+    bootstrap.push_images_eks(cfg, outs, REPO_ROOT, cfg.aws.region)
+    try:
+        result = eks_apply.apply(cfg, out, REPO_ROOT, context)
+    except SystemExit as exc:
+        console.print(f"[red]{exc}")
+        return 1
+    console.print(f"\n[green]helm upgrade 완료 — {result['release']} "
+                  f"@ ns={result['namespace']}")
+    # helm 까지 끝난 최신 output 으로 온보딩 (ensure_infra 가 추가했을 수 있음)
+    for n in bootstrap.onboard_admin(
+            cfg, REPO_ROOT, eks_apply.tf_outputs(env_target), cfg.aws.region):
+        console.print(f"  ⓘ {n}")
+    rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+    console.print(doc.format_report(cfg, rep))
+    console.print("\n[cyan]다음 단계 (수동, install-guide §3-8/§4):\n"
+                  "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
+                  f" --env {cfg.env}\n"
+                  "  · 모델 alias/라우팅 프로필 시드: admin UI → models "
+                  "(§4 — 운영 데이터라 bootstrap 이 만들지 않음)")
+    return 0 if rep.worst != "HIGH" else 1
 
 
 def cmd_teardown(args) -> int:

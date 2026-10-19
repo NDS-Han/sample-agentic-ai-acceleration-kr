@@ -125,6 +125,23 @@ class ClientsConfig:
 
 
 @dataclass
+class InfraConfig:
+    """신규 설치 인프라 입력 (bootstrap — ecs/eks).
+
+    빈 값이면 backend 기본을 쓴다 (eks env 의 variables.tf 기본값 / ecs 모듈
+    기본값). 값을 넣으면 managed overlay/generated tfvars 로 내려간다 —
+    기존 배포 온보딩(capture) 경로에서는 채우지 않는다."""
+    azs: list[str] = field(default_factory=list)
+    vpc_cidr: str = ""
+    cognito_domain_suffix: str = ""   # 비우면 <region-code>-auth-<account>
+    # Claude_ 접두 필수 — 접두 없는 그룹은 OIDC 로그인 거부(REJECT_UNMATCHED_GROUPS).
+    # ClaudeAdmin 은 항상 자동 포함이라 목록에 쓰지 않아도 된다.
+    cognito_groups: list[str] = field(default_factory=list)
+    # 비우면 backend 기본: eks=variables.tf 최신 목록, ecs=models_profile 매핑.
+    bedrock_allowed_model_arns: list[str] = field(default_factory=list)
+
+
+@dataclass
 class OidcConfig:
     """admin-api(JWT 검증) + admin-ui(브라우저 SSO) 공용 OIDC 설정.
 
@@ -157,6 +174,7 @@ class GatewayConfig:
     images: ImagesConfig = field(default_factory=ImagesConfig)
     clients: ClientsConfig = field(default_factory=ClientsConfig)
     oidc: OidcConfig = field(default_factory=OidcConfig)
+    infra: InfraConfig = field(default_factory=InfraConfig)
 
     # ------------------------------------------------------------------ #
     def warnings(self) -> list[str]:
@@ -194,6 +212,11 @@ class GatewayConfig:
                 "Caddy 가 호스트 포트를 그대로 개방합니다. 호스트 방화벽/보안그룹으로 "
                 "막거나 allowed_cidrs 를 사용하십시오."
             )
+        if self.deploy.target == "compose" and (
+                self.infra.azs or self.infra.cognito_groups
+                or self.infra.bedrock_allowed_model_arns):
+            w.append("infra.* 는 ecs/eks 신규 설치용입니다 — "
+                     "deploy.target=compose 에서는 무시됩니다.")
         if self.network.admin_internal:
             if self.deploy.target == "eks" and self.network.mode == "private":
                 w.append(
@@ -270,6 +293,17 @@ class GatewayConfig:
                              f"(허용: {sorted(EKS_TAGGABLE_SERVICES)})")
         # registry 비우면 ecs 는 모듈이 ECR repo 를 만들고, eks 는 apply 가
         # <account>.dkr.ecr.<region> 으로 추론한다 (install-eks.sh 와 동일)
+        if self.infra.azs and len(self.infra.azs) < 2:
+            e.append("infra.azs 는 2개 이상이어야 합니다 — "
+                     "DB/ElastiCache subnet group 이 AZ 2개를 요구합니다.")
+        for az in self.infra.azs:
+            if not az.startswith(self.aws.region):
+                e.append(f"infra.azs '{az}' 가 aws.region '{self.aws.region}' 의 "
+                         "AZ 가 아닙니다 (로컬존은 지원하지 않습니다).")
+        for g in self.infra.cognito_groups:
+            if g != "ClaudeAdmin" and not g.startswith("Claude_"):
+                e.append(f"infra.cognito_groups '{g}' — 'Claude_' 접두가 필수입니다 "
+                         "(접두 없는 그룹은 OIDC 로그인이 거부됩니다).")
         if self.network.mode not in NETWORK_MODES:
             e.append(f"network.mode 는 {NETWORK_MODES} 중 하나여야 합니다.")
         if self.domain.mode not in DOMAIN_MODES:
@@ -372,7 +406,7 @@ def _check_unknown(node: dict, allowed: frozenset, path: str, errors: list[str])
 
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
-    "features", "images", "clients", "oidc",
+    "features", "images", "clients", "oidc", "infra",
 ))
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
@@ -390,6 +424,8 @@ _CLIENT_KEYS = frozenset(("models_profile",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
                         "vk_ttl_hours"))
+_INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix",
+                        "cognito_groups", "bedrock_allowed_model_arns"))
 
 
 def from_dict(raw: dict) -> GatewayConfig:
@@ -409,6 +445,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     images = _require_mapping(raw.get("images"), "images", errors)
     clients = _require_mapping(raw.get("clients"), "clients", errors)
     oidc = _require_mapping(raw.get("oidc"), "oidc", errors)
+    infra = _require_mapping(raw.get("infra"), "infra", errors)
 
     _check_unknown(raw, _TOP_LEVEL_KEYS, "gateway.yaml", errors)
     _check_unknown(aws, _AWS_KEYS, "aws", errors)
@@ -420,6 +457,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     _check_unknown(images, _IMAGE_KEYS, "images", errors)
     _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
     _check_unknown(oidc, _OIDC_KEYS, "oidc", errors)
+    _check_unknown(infra, _INFRA_KEYS, "infra", errors)
 
     cfg = GatewayConfig(
         env=str(raw.get("env", "")),
@@ -488,6 +526,20 @@ def from_dict(raw: dict) -> GatewayConfig:
         clients=ClientsConfig(
             models_profile=str(clients.get("models_profile", "global")),
         ),
+        infra=InfraConfig(
+            azs=[str(a) for a in
+                 (([infra["azs"]] if isinstance(infra.get("azs"), str)
+                   else infra.get("azs")) or [])],
+            vpc_cidr=str(infra.get("vpc_cidr", "")),
+            cognito_domain_suffix=str(infra.get("cognito_domain_suffix", "")),
+            cognito_groups=[str(g) for g in
+                (([infra["cognito_groups"]] if isinstance(infra.get("cognito_groups"), str)
+                  else infra.get("cognito_groups")) or [])],
+            bedrock_allowed_model_arns=[str(a) for a in
+                (([infra["bedrock_allowed_model_arns"]]
+                  if isinstance(infra.get("bedrock_allowed_model_arns"), str)
+                  else infra.get("bedrock_allowed_model_arns")) or [])],
+        ),
         oidc=OidcConfig(
             issuer_url=str(oidc.get("issuer_url", "")),
             audience=str(oidc.get("audience", "")),
@@ -505,6 +557,20 @@ def from_dict(raw: dict) -> GatewayConfig:
     if errors:
         raise SchemaError("\n".join(f"  - {m}" for m in errors))
     return cfg
+
+
+def subnet_cidrs(vpc_cidr: str, n: int) -> dict[str, list[str]]:
+    """infra.azs 개수에 맞춘 서브넷 CIDR 4종 — eks env(variables.tf)와
+    gateway-ecs 의 공통 규약: private {a}.{b}.{i}/24, public {100+i},
+    database {200+i}, elasticache {210+i}."""
+    octets = vpc_cidr.split(".")
+    base = ".".join(octets[:2]) if len(octets) >= 2 else "10.30"
+    return {
+        "private_subnet_cidrs": [f"{base}.{i + 1}.0/24" for i in range(n)],
+        "public_subnet_cidrs": [f"{base}.{101 + i}.0/24" for i in range(n)],
+        "database_subnet_cidrs": [f"{base}.{201 + i}.0/24" for i in range(n)],
+        "elasticache_subnet_cidrs": [f"{base}.{211 + i}.0/24" for i in range(n)],
+    }
 
 
 def load(path: Path) -> GatewayConfig:

@@ -45,7 +45,9 @@ git clone <이 저장소> && cd projects/awsome-ai-gateway
 
 ### 1.5 Terraform state backend (최초 1회)
 
-ECS 경로는 terraform remote state 를 씁니다. 아직 버킷이 없으면:
+ECS 경로는 terraform remote state 를 씁니다. **`./deploy bootstrap` 이 bucket/table
+이름을 묻고 `bootstrap-tfstate.sh` 로 자동 생성**합니다 — 아래 수동 절차는
+bootstrap 을 쓰지 않고 `apply` 로만 진행할 때 필요합니다:
 
 ```bash
 aws s3 mb s3://llm-gateway-tfstate-<account-id> --region <region>
@@ -64,6 +66,21 @@ deploy:
   tfstate_bucket: my-tfstate
   tfstate_table: my-tflock
 ```
+
+### 1.6 신규 설치 — `./deploy bootstrap` (권장)
+
+```bash
+./deploy bootstrap          # yaml 없으면 init 마법사부터
+./deploy bootstrap --plan   # 단계 미리보기
+```
+
+대화형으로 ① tfstate 이름 → ② AZ 복수 선택(최소 2, 서브넷 CIDR 자동 생성) →
+③ Cognito suffix(`<region>-auth-<account>`)+ `Claude_` 그룹 → ④ bedrock 허용
+ARN + web-search 를 묻고 `infra.*` 로 기록한 뒤, tfstate 생성 → apply 를
+연속 실행합니다. 비대화형은 `--yes` + yaml 의 `infra.*` 선언
+([gateway-yaml.md](gateway-yaml.md#infra--신규-설치-인프라-입력)).
+**이미 tfstate 가 있거나 단계별로 진행하려면** 아래 §2~§3 (`apply`) 경로로
+바로 가도 됩니다.
 
 ## 2. (선택) Render — tfvars 미리 확인
 

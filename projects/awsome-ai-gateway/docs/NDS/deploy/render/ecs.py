@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+from .. import schema
 from ..schema import GatewayConfig
 from ..tiers import preset
 from . import common
@@ -105,6 +106,22 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     vars_["cache_node_type"] = t.cache_spec.get("node_type", "cache.t4g.small")
     vars_["nat_ha"] = t.ha == "multi-az"
 
+    # ── 신규 설치 인프라 입력 (infra.*) — 비우면 모듈 기본값
+    inf = cfg.infra
+    if inf.vpc_cidr:
+        vars_["vpc_cidr"] = inf.vpc_cidr
+    if inf.azs:
+        vars_["azs"] = inf.azs
+    if inf.vpc_cidr or inf.azs:
+        # azs 개수 ↔ 서브넷 cidr 리스트 길이는 같아야 한다 — 둘 다 함께 생성
+        vars_.update(schema.subnet_cidrs(
+            inf.vpc_cidr or "10.40.0.0/16", len(inf.azs) or 2))
+    if inf.cognito_domain_suffix:
+        vars_["cognito_domain_suffix"] = inf.cognito_domain_suffix
+    if inf.cognito_groups:
+        vars_["cognito_groups"] = list(
+            dict.fromkeys([*inf.cognito_groups, "ClaudeAdmin"]))
+
     # ── 도메인 — cloudfront-temp 는 EKS 경로의 개념이라 ecs 에선 none 으로 수렴
     if cfg.domain.mode == "route53-acm":
         vars_["domain_name"] = cfg.domain.name
@@ -146,7 +163,10 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         vars_["oidc_required_group"] = cfg.oidc.required_group
 
     # ── 모델 프로필 — global 기본 (리전 중립). regional 은 배포 리전 프리픽스.
-    if cfg.clients.models_profile == "global":
+    #    infra.bedrock_allowed_model_arns 가 있으면 이 매핑을 덮어쓴다.
+    if cfg.infra.bedrock_allowed_model_arns:
+        vars_["bedrock_allowed_model_arns"] = cfg.infra.bedrock_allowed_model_arns
+    elif cfg.clients.models_profile == "global":
         vars_["bedrock_allowed_model_arns"] = [
             f"arn:aws:bedrock:{cfg.aws.region}::foundation-model/anthropic.*",
             "arn:aws:bedrock:::foundation-model/anthropic.*",
