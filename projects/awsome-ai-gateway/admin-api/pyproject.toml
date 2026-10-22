@@ -44,6 +44,10 @@ packages = ["src/app"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["src"]
+markers = [
+    "unit: 빠른 단위 테스트 (외부 의존 없음)",
+    "integration: 실제 라우터/DB 경로를 타는 통합 테스트",
+]
 
 [tool.ruff]
 target-version = "py311"

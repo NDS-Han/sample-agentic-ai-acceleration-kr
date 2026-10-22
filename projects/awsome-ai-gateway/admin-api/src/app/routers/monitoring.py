@@ -112,7 +112,7 @@ async def monitoring_events(
     limit: int = Query(default=50, ge=PAGE_LIMIT_MIN, le=PAGE_LIMIT_MAX),
     event_type: str = Query(
         default="all",
-        regex="^(all|success|error|timeout|slow|abnormal)$",
+        pattern="^(all|success|error|timeout|slow|abnormal)$",
         description="all=전체, success=정상, error=에러, timeout=타임아웃, slow=첫 응답(TTFT) 3s 초과, abnormal=error+timeout+slow",
     ),
     admin: CurrentUser = Depends(require_admin),
