@@ -49,6 +49,9 @@ agent = ["prompts/*.md", "*.json"]
 # 프로젝트 루트(=rootdir)를 path 에 둔다. src 는 agent 패키지용.
 testpaths = ["tests"]
 pythonpath = [".", "src"]
+markers = [
+  "unit: 단위 테스트 (외부 의존 없음)",
+]
 
 [tool.ruff]
 target-version = "py311"

@@ -466,11 +466,11 @@ jobs:
             exit 1
           fi
           if [ "$COUNT" -gt "$BASELINE" ]; then
-            echo "::error::lint 위반이 늘었다: ${COUNT} > ${BASELINE}. 새로 생긴 항목을 고치거나, 정당하게 줄인 경우 .github/workflows/ci.yml 의 baseline 을 낮춰 갱신하세요."
+            echo "::error::lint 위반이 늘었다: ${COUNT} > ${BASELINE}. 새로 생긴 항목을 고치거나, 정당하게 줄인 경우 .github/workflows/awsome-ai-gateway-ci.yml 의 baseline 을 낮춰 갱신하세요."
             # 무엇이 늘었는지 보이게 남긴다.
             sort /tmp/ruff.txt | uniq -c | sort -rn | head -30
             exit 1
           fi
           if [ "$COUNT" -lt "$BASELINE" ]; then
-            echo "::notice::lint 위반이 ${BASELINE} → ${COUNT} 로 줄었습니다. ci.yml 의 baseline 을 ${COUNT} 로 낮춰 주세요(ratchet)."
+            echo "::notice::lint 위반이 ${BASELINE} → ${COUNT} 로 줄었습니다. awsome-ai-gateway-ci.yml 의 baseline 을 ${COUNT} 로 낮춰 주세요(ratchet)."
           fi
