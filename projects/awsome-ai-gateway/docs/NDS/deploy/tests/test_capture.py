@@ -225,8 +225,10 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
                     "admin_internal": True},
         "domain": {"mode": "none", "name": "", "zone_id": ""},
         "features": {"notifications": {"provider": "smtp", "smtp_host": "h",
-                                       "smtp_from": "f@x",
-                                       "smtp_credentials_secret": "smtp-creds"}},
+                                       "smtp_from": "f@x", "smtp_port": 2525,
+                                       "sender_name": "GW Alerts",
+                                       "smtp_credentials_secret": "smtp-creds"},
+                     "dev_login": True},
         "infra": {"azs": ["ap-south-1a", "ap-south-1b"],
                   "db": {"max_acu": 8}},
     }
@@ -240,6 +242,11 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     assert doc["oidc"]["vk_ttl_hours"] == 4
     assert doc["network"]["admin_internal"] is True
     assert doc["features"]["notifications"]["smtp_credentials_secret"] == "smtp-creds"
+    # 묻지 않는 알림 필드·체크박스에 없는 플래그도 보존돼야 한다 —
+    # 없으면 configure 한 번에 dev_login/smtp_port/sender_name 이 조용히 삭제된다
+    assert doc["features"]["notifications"]["smtp_port"] == 2525
+    assert doc["features"]["notifications"]["sender_name"] == "GW Alerts"
+    assert doc["features"]["dev_login"] is True
     # infra.* 는 wizard 가 통째로 덮어쓰면 bootstrap 기록(azs 등)이 소실된다
     assert doc["infra"]["azs"] == ["ap-south-1a", "ap-south-1b"]
     assert doc["infra"]["db"] == {"max_acu": 8}

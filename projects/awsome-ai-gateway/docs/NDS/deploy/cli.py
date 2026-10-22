@@ -177,6 +177,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
         notif_extra["internal_api_from"] = _unwrap(questionary.text(
             "발신 주소 (비우면 차트 기본)",
             default=str(prev_notif.get("internal_api_from", "")) or None).ask())
+    # 질문하지 않는 알림 필드(smtp_port, sender_name 등)는 기존 값을 보존 —
+    # configure 한 번에 수동 편집값이 조용히 사라지는 걸 막는다 (oidc 와 같은 규칙)
+    for k, v in prev_notif.items():
+        if k != "provider" and k not in notif_extra:
+            notif_extra[k] = v
 
     prev_feat = _g(ex, "features", default={}) or {}
     features = _unwrap(questionary.checkbox(
@@ -384,6 +389,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "bi_insight": "bi_insight" in features,
             "pricing_lambda": "pricing_lambda" in features,
             "observability": "observability" in features,
+            # 체크박스가 다루지 않는 플래그(dev_login, 향후 추가 플래그)는 보존 —
+            # configure 가 수동 선언을 조용히 지우는 걸 막는다
+            **{k: v for k, v in prev_feat.items()
+               if k not in ("notifications", "web_search", "body_logging",
+                            "bi_insight", "pricing_lambda", "observability")},
         },
         "clients": _g(ex, "clients", default={}) or {"models_profile": "global"},
     }
@@ -664,6 +674,7 @@ def cmd_apply(args) -> int:
         console.print(f"\n[green]helm upgrade 완료 — {result['release']} @ ns={result['namespace']}")
         rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
         console.print(doc.format_report(cfg, rep))
+        _post_apply_notes(cfg)
         return 0 if rep.worst != "HIGH" else 1
 
     if cfg.deploy.target != "compose":
@@ -775,7 +786,11 @@ def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
         + ("[red]+ 볼륨 전부(--volumes) — postgres DB 데이터가 영구 삭제됩니다[/red]"
            if purge else
            "볼륨(pgdata 등)은 보존됩니다 — 함께 지우려면 --purge")
-        + f"\n남는 것: {out}/ 산출물(.env 시크릿 포함), 빌드된 이미지",
+        + f"\n남는 것: {out}/ 산출물(.env 시크릿 포함), 빌드된 이미지"
+        + ("\n+ LiteLLM pricing Lambda — compose 경로는 apply 가 만들지 않아 "
+           "teardown 도 건드리지 않습니다. ops/NDS-01 로 수동 생성했다면 "
+           "aws lambda delete-function 으로 직접 정리하세요"
+           if cfg.features.pricing_lambda else ""),
         title=f"teardown — {cfg.env} (compose)", expand=False))
     if not _confirm_destroy(cfg.env, args):
         return 130

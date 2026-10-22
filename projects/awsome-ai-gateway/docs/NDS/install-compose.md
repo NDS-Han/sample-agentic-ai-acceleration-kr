@@ -244,6 +244,11 @@ OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-l
 ./deploy apply --plan  # 변경 미리보기
 ```
 
+> `features.observability`를 켰다면 Grafana/Prometheus 등 관측 스택 포트는
+> 전부 **루프백에만** 바인드됩니다(외부 노출 방지). Grafana 접근은 SSH 터널로:
+> `ssh -L 3001:localhost:3001 <호스트>` → http://localhost:3001
+> (admin 비밀번호는 `deployment/gen/<env>/.env`의 `GF_SECURITY_ADMIN_PASSWORD`).
+
 ## 6. 백업 (중요 — 단일 노드라 백업이 전부입니다)
 
 ▶ **실행** · 배포 EC2 — cron 등록 예시

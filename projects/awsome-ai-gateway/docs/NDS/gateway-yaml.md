@@ -25,6 +25,11 @@ deploy:
   sizing: {}                  # 티어 기본값 세부 override (선택)
   tfstate_bucket: ""          # ecs/eks: terraform state S3 bucket
   tfstate_table: ""           # ecs/eks: lock DynamoDB table (권장)
+  release: llm-gateway        # eks 전용 — helm release 이름
+  namespace: llm-gateway      # eks 전용 — k8s namespace
+  tf_env_dir: ""              # eks 전용 — 이 배포의 인프라를 소유한 terraform env
+                              # 디렉토리 (비우면 deployment/terraform/environments/
+                              # llm-gateway-<env>)
 
 network:
   mode: public                # public | private
@@ -157,7 +162,9 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 
 ### `network`
 
-- `mode: private` — eks에서 3개 Ingress 전부 internal ALB로
+- `mode: private` — eks는 3개 Ingress 전부 internal ALB로, ecs는 ALB를
+  internal 로 전환합니다(전환 절차·사내망 전제는 [update.md](update.md)
+  'public → private 전환'). compose는 적용되지 않습니다(validate가 경고)
 - `admin_internal` — eks 전용. `mode: public`을 유지하면서 **admin-ui·admin-api
   Ingress만** internal ALB로 분리합니다. `mode: private`이면 이미 전부 internal이라
   중복 선언입니다(스키마가 경고). compose/ecs에서는 무시됩니다(경고 출력)
