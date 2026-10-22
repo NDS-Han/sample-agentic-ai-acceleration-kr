@@ -242,6 +242,30 @@ def test_apply_alb_2phase_on_fresh_install(monkeypatch, tmp_path):
     assert "adminUi.nextauthUrl=http://alb-123.elb.amazonaws.com" in calls[1]
 
 
+def test_strip_es_owned_secrets_removes_only_es_ownerrefs(monkeypatch):
+    """ES(Owner)가 만든 Secret 의 ownerRef 만 뗀다 — Orphan/무소유는 건드리지 않음.
+    이게 없으면 ES 교체 시 Secret 이 GC 로 삭제돼 전 pod 가 멈춘다(R24-N6r2)."""
+    calls = []
+    kinds = {"llm-gateway-app": "ExternalSecret",
+             "llm-gateway-db": "",
+             # llm-gateway-redis 는 없는 시크릿(rc!=0) — 건너뛴다
+             }
+    def fake(argv, **k):
+        calls.append(argv)
+        sec = argv[argv.index("secret") + 1] if "secret" in argv else ""
+        if "get" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0 if sec in kinds else 1, kinds.get(sec, ""), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    eks_apply.strip_es_owned_secrets(
+        {"namespace": "ns", "release": "llm-gateway"})
+    patches = [c for c in calls if "patch" in c]
+    assert len(patches) == 1
+    assert "llm-gateway-app" in patches[0]
+    assert "ownerReferences" in " ".join(patches[0])
+
+
 def test_plan_never_runs_terraform_apply(monkeypatch, tmp_path, capsys):
     """plan 은 읽기 전용 — 인프라가 비어 있어도 terraform apply 를 돌리지 않는다."""
     calls = []

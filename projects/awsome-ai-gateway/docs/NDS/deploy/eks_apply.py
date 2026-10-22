@@ -263,6 +263,33 @@ def live_ingress_rule_host(meta: dict, context: str = "") -> str:
     return ""
 
 
+def strip_es_owned_secrets(meta: dict, context: str = "") -> None:
+    """ES 교체 시 ownerRef 에 끌려 삭제되는 Secret 보존 (rebuild-image.sh R24-N6r2).
+
+    구 ES(creationPolicy: Owner)가 만든 Secret 은 metadata.ownerReferences 에
+    ExternalSecret 이 남는다 — helm upgrade 가 ES 를 지우면 GC 가 Secret 도
+    같이 삭제해 ESO 재생성까지 pod 가 전부 CreateContainerConfigError 로 멈춘다.
+    upgrade 전에 stale ownerRef 만 떼어둔다(데이터·키는 그대로). 멱등 — 이미
+    Orphan 이거나 ownerRef 가 없으면 아무것도 안 한다.
+    """
+    ns = meta["namespace"]
+    base = ["kubectl", "-n", ns]
+    if context:
+        base += ["--context", context]
+    for suffix in ("app", "db", "redis"):
+        sec = f"{meta['release']}-{suffix}"
+        r = _run_quiet([*base, "get", "secret", sec,
+                        "-o", "jsonpath={.metadata.ownerReferences[0].kind}"],
+                       timeout=30)
+        if r.returncode != 0 or (r.stdout or "").strip() != "ExternalSecret":
+            continue
+        p = _run_quiet([*base, "patch", "secret", sec, "--type=json",
+                        "-p", '[{"op":"remove","path":"/metadata/ownerReferences"}]'],
+                       timeout=30)
+        if p.returncode == 0:
+            print(f"  stale ownerRef 제거: secret/{sec}", file=sys.stderr)
+
+
 def _infra_targets(cfg: GatewayConfig) -> list[str]:
     """gateway.yaml 이 소유하는 terraform 대상 — body_logging 모듈 + 그 IAM 배선.
     ops 8-V 의 `terraform apply -target=module.body_logging -target=module.irsa`
@@ -380,6 +407,9 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         if fn:
             set_args += ["--set", f"adminApi.env.LITELLM_PRICING_LAMBDA={fn}"]
 
+    # helm upgrade 가 구 ES 를 지우는 순간 ownerRef 달린 Secret 이 GC 로 같이
+    # 지워지지 않게 미리 정리 (이거 없으면 전 pod CreateContainerConfigError)
+    strip_es_owned_secrets(meta, context)
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)
