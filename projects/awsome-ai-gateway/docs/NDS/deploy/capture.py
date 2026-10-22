@@ -615,6 +615,18 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
                 oidc["issuer_url"] = outs["cognito_issuer_url"]
                 notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")
+            # helm values(ESO/secretKeyRef 경로)에 리터럴이 없어 비워진 OIDC 필드는
+            # terraform output 으로 복원 — ecs capture 와 동일 규칙.
+            if oidc:
+                if not oidc.get("client_id") and outs.get("cognito_client_id"):
+                    oidc["client_id"] = outs["cognito_client_id"]
+                    notes.append("oidc.client_id 를 terraform output 에서 가져왔습니다")
+                hosted = outs.get("cognito_hosted_ui_domain")
+                if hosted:
+                    if not oidc.get("authorize_url"):
+                        oidc["authorize_url"] = f"https://{hosted}/oauth2/authorize"
+                    if not oidc.get("token_url"):
+                        oidc["token_url"] = f"https://{hosted}/oauth2/token"
         except CaptureError:
             notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
 

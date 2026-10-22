@@ -405,3 +405,43 @@ def test_ecs_capture_provisioned_db(monkeypatch, tmp_path):
     assert doc["infra"]["db"] == {
         "mode": "provisioned", "instance_class": "db.r7g.large"}
     schema.from_dict(doc)
+
+
+def test_eks_capture_oidc_falls_back_to_tf_outputs(monkeypatch, tmp_path):
+    """helm values 에 adminUi.env.OIDC_* 리터럴이 없을 때(ESO/secretKeyRef 공급)
+    terraform output 의 cognito_client_id / hosted_ui_domain 으로 복원한다 —
+    ecs capture 와 같은 규칙."""
+    vals = _eks_values(
+        adminApi={"oidc": {"issuerUrl": "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-1"}},
+        adminUi={"env": {}})
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: {
+        "cognito_issuer_url": "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-1",
+        "cognito_client_id": "abc123client",
+        "cognito_hosted_ui_domain": "x.auth.ap-northeast-2.amazoncognito.com",
+    })
+    doc, _ = capture.capture_eks(env_dir=tmp_path)
+    assert doc["oidc"]["client_id"] == "abc123client"
+    assert doc["oidc"]["authorize_url"] == \
+        "https://x.auth.ap-northeast-2.amazoncognito.com/oauth2/authorize"
+    assert doc["oidc"]["token_url"] == \
+        "https://x.auth.ap-northeast-2.amazoncognito.com/oauth2/token"
+
+
+def test_eks_capture_oidc_helm_values_win_over_tf_outputs(monkeypatch, tmp_path):
+    """values 에 리터럴이 있으면 terraform output 을 덮어쓰지 않는다."""
+    vals = _eks_values(
+        adminApi={"oidc": {"issuerUrl": "https://cognito-idp.ap-northeast-2.amazonaws.com/pool-1"}},
+        adminUi={"env": {"OIDC_CLIENT_ID": "from-helm",
+                         "OIDC_AUTHORIZE_URL": "https://helm.example/authorize",
+                         "OIDC_TOKEN_URL": "https://helm.example/token"}})
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: {
+        "cognito_client_id": "abc123client",
+        "cognito_hosted_ui_domain": "x.auth.ap-northeast-2.amazoncognito.com",
+    })
+    doc, _ = capture.capture_eks(env_dir=tmp_path)
+    assert doc["oidc"]["client_id"] == "from-helm"
+    assert doc["oidc"]["authorize_url"] == "https://helm.example/authorize"
