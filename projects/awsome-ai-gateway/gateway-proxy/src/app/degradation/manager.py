@@ -38,6 +38,9 @@ class DegradationManager:
         self._db_success_count: int = 0
         self._redis_success_count: int = 0
         self._metrics_degradation_level = None  # GatewayMetrics.degradation_level, 외부에서 주입
+        # 전이 알림 콜백 — DegradationNotifier.on_transition. 동기 컨텍스트라
+        # 콜백은 비동기 발행을 스스로 스케줄해야 한다.
+        self._transition_listener = None
 
     @property
     def current_state(self) -> DegradationState:
@@ -49,6 +52,10 @@ class DegradationManager:
 
     def set_metrics(self, degradation_level_counter) -> None:
         self._metrics_degradation_level = degradation_level_counter
+
+    def set_transition_listener(self, listener) -> None:
+        """실제 전이(old != new)마다 호출되는 동기 콜백 (old_level, new_level)."""
+        self._transition_listener = listener
 
     def report_db_health(self, healthy: bool) -> None:
         db_degraded = self.level in (DegradationLevel.DB_DEGRADED, DegradationLevel.BOTH_DEGRADED)
@@ -140,3 +147,10 @@ class DegradationManager:
             old_val = level_map.get(old_level, 0)
             new_val = level_map.get(new_level, 0)
             self._metrics_degradation_level.add(new_val - old_val)
+
+        # 알림 콜백 — 실패가 전이 상태머신을 해치면 안 된다.
+        if self._transition_listener is not None:
+            try:
+                self._transition_listener(old_level, new_level)
+            except Exception:
+                logger.warning("degradation_transition_listener_failed")

@@ -717,7 +717,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                         redis, _ws_cb_key, probe_token=_token
                     )
                 elif status in (502, 503) or conn_error:
-                    await cb.record_failure(redis, _ws_cb_key)
+                    _ws_opened = await cb.record_failure(redis, _ws_cb_key)
+                    if _ws_opened:
+                        _dn = getattr(
+                            request.app.state, "degradation_notifier", None
+                        )
+                        if _dn is not None:
+                            _dn.notify_provider_error(
+                                circuit_key=_ws_cb_key,
+                                pmid=_pmid_ws,
+                                status=status,
+                            )
             except Exception:
                 logger.warning("ws_cb_record_failed")
 
@@ -944,6 +954,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         rewrite_model_id=_rewrite,
         metrics=getattr(request.app.state, "metrics", None),
         circuit_scope=_circuit_scope,
+        degradation_notifier=getattr(
+            request.app.state, "degradation_notifier", None
+        ),
     )
 
     # --- Handle the result ---
@@ -1165,7 +1178,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                         if _circuit_scope
                         else effective_model_config.provider_model_id
                     )
-                    await cb.record_failure(redis, _cb_key_mid)
+                    _mid_opened = await cb.record_failure(redis, _cb_key_mid)
+                    if _mid_opened:
+                        _dn = getattr(
+                            request.app.state, "degradation_notifier", None
+                        )
+                        if _dn is not None:
+                            _dn.notify_provider_error(
+                                circuit_key=_cb_key_mid,
+                                pmid=effective_model_config.provider_model_id,
+                                status="midstream_error",
+                            )
                 except Exception:
                     logger.warning("midstream_cb_record_failed")
 

@@ -165,6 +165,13 @@ async def lifespan(app: FastAPI):
     health_checker = HealthChecker(
         redis, db_engine, degradation_manager, cost_stream_spool=cost_stream_spool
     )
+    # 열화 전이 → notifications:system 발행 (degradation_mode / service_health_change).
+    # 같은 인스턴스가 fallback_loop 의 provider_error 발행도 맡는다 — 워커
+    # 구독·템플릿·시드는 갖춰져 있었고 생산자만 없었다.
+    from app.services.degradation_notifier import DegradationNotifier
+
+    degradation_notifier = DegradationNotifier(redis)
+    degradation_manager.set_transition_listener(degradation_notifier.on_transition)
 
     # 11. GatewayMetrics
     gateway_metrics = GatewayMetrics()
@@ -383,6 +390,7 @@ async def lifespan(app: FastAPI):
     app.state.httpx_client = httpx_client
     app.state.bedrock_client = bedrock_client
     app.state.degradation_manager = degradation_manager
+    app.state.degradation_notifier = degradation_notifier
     app.state.cost_stream_spool = cost_stream_spool
     app.state.retry_worker = retry_worker
     app.state.health_checker = health_checker

@@ -358,6 +358,9 @@ async def run_fallback_loop(
     #    (모델 × 계정) 이다(E2E S3-L3). 호출자는 계정/엔드포인트를 식별하는
     #    문자열을 넘기고, 없으면 종전과 같은 pmid 단독 키다.
     circuit_scope: str = "",
+    # 회로 OPEN 전이 시 notifications:system 의 provider_error 발행자(선택).
+    # None 이면 알림만 생략한다 — 추론 경로에는 영향 없음.
+    degradation_notifier=None,
 ) -> FallbackResult:
     """Run the fallback loop over `try_order`.
 
@@ -567,7 +570,14 @@ async def run_fallback_loop(
                 record_provider_error(metrics, _pm_labels, status=status)
             # CB: record failure only for {502,503} and connection errors, NOT 504
             if status in _CB_FAILURE_STATUSES or caught_connection_error:
-                await cb.record_failure(redis, cb_key)
+                cb_opened = await cb.record_failure(redis, cb_key)
+                # 회로가 OPEN 상태(방금 열렸거나 프로브 실패로 재개방) — 관리자
+                # 알림의 신호다. 장애 지속 중 요청당 발행은 notifier 의 pod 로컬
+                # dedup + worker 쿨다운이 억제한다.
+                if cb_opened and degradation_notifier is not None:
+                    degradation_notifier.notify_provider_error(
+                        circuit_key=cb_key, pmid=pmid, status=status
+                    )
 
             error_bytes = response_body if not is_stream else json.dumps(
                 anthropic_error("provider_error", f"Backend returned {status}")
