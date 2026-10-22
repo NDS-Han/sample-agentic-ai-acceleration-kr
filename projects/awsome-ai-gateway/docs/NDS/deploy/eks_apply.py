@@ -236,6 +236,33 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
     return ""
 
 
+def live_ingress_rule_host(meta: dict, context: str = "") -> str:
+    """admin-ui Ingress 의 spec.rules[].host — 차트 NEXTAUTH_URL 파생 대상.
+
+    domain=none 인데 env values 가 실제 host 를 공급하는 채택 배포에서는 차트가
+    이미 https://<host> 를 NEXTAUTH_URL 로 파생한다 — 이 경우 아래 2-phase 의
+    ALB 주입이 오히려 정상 값을 raw ALB DNS 로 덮어 OIDC 콜백을 깨뜨린다.
+    host 가 비어 있는 fresh install 에서만 2-phase 가 필요하다.
+    """
+    argv = ["kubectl", "get", "ingress", "-n", meta["namespace"], "-o", "json"]
+    if context:
+        argv += ["--context", context]
+    r = _run_quiet(argv, timeout=60)
+    if r.returncode != 0:
+        return ""
+    try:
+        for item in json.loads(r.stdout).get("items", []):
+            name = (item.get("metadata") or {}).get("name") or ""
+            if not name.endswith("-admin-ui"):
+                continue
+            for rule in (item.get("spec") or {}).get("rules") or []:
+                if rule.get("host"):
+                    return rule["host"]
+    except (json.JSONDecodeError, KeyError, IndexError):
+        pass
+    return ""
+
+
 def _infra_targets(cfg: GatewayConfig) -> list[str]:
     """gateway.yaml 이 소유하는 terraform 대상 — body_logging 모듈 + 그 IAM 배선.
     ops 8-V 의 `terraform apply -target=module.body_logging -target=module.irsa`
@@ -356,8 +383,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)
+    # 단 env values 가 실제 host 를 공급하는 채택 배포는 차트가 이미
+    # https://<host> 를 파생하므로 ALB 주입을 하면 되려 콜백이 깨진다 —
+    # live ingress 에 rule host 가 있으면 생략한다.
     # 확인 게이트는 1차 upgrade 전에만 있다 — 2차는 같은 트랜잭션의 후속 조치
-    if not cfg.domain.name:
+    if not cfg.domain.name and not live_ingress_rule_host(meta, context):
         host = live_alb_hostname(meta, context)
         if host:
             print(f"adminUi.nextauthUrl 을 live ALB 주소({host})로 반영 — "

@@ -189,6 +189,59 @@ def test_ensure_infra_missing_env_dir_warns(monkeypatch, tmp_path, capsys):
     assert "terraform env" in capsys.readouterr().err
 
 
+def test_live_ingress_rule_host_reads_spec_rules(monkeypatch):
+    item = _ingress("llm-gateway-admin-ui")
+    item["spec"] = {"rules": [{"host": "admin-dev.example.com"}]}
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp([item]))
+    assert (eks_apply.live_ingress_rule_host({"namespace": "ns"})
+            == "admin-dev.example.com")
+
+
+def test_live_ingress_rule_host_empty_on_fresh_install(monkeypatch):
+    # domain=none 신규 설치 — rule host 없음 → ALB 2-phase 가 필요
+    item = _ingress("llm-gateway-admin-ui")
+    item["spec"] = {"rules": [{}]}
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp([item]))
+    assert eks_apply.live_ingress_rule_host({"namespace": "ns"}) == ""
+
+
+def _apply_harness(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(eks_apply, "tf_outputs", lambda d: {})
+    monkeypatch.setattr(eks_apply, "ensure_infra",
+                        lambda cfg, gen, env, outs: outs)
+    monkeypatch.setattr(eks_apply, "load_meta", lambda g, r: {
+        "release": "r", "namespace": "n", "chart": "c",
+        "env_dir": "env", "values_layers": []})
+    return calls
+
+
+def test_apply_skips_alb_2phase_when_ingress_host_exists(monkeypatch, tmp_path):
+    """채택 배포 — env values 가 admin-dev.example.com host 를 공급하면 차트가
+    https://<host> 를 파생한다. ALB 주입을 하면 콜백이 깨지므로 생략해야 한다."""
+    calls = _apply_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(eks_apply, "live_ingress_rule_host",
+                        lambda m, context="": "admin-dev.example.com")
+    monkeypatch.setattr(eks_apply, "live_alb_hostname",
+                        lambda m, context="": "alb-123.elb.amazonaws.com")
+    eks_apply.apply(_cfg(), tmp_path, tmp_path)
+    assert len(calls) == 1  # 2차 upgrade 없음
+    assert not any("nextauthUrl" in a for c in calls for a in c)
+
+
+def test_apply_alb_2phase_on_fresh_install(monkeypatch, tmp_path):
+    """domain=none 신규 설치 — rule host 가 없으면 ALB DNS 를 nextauthUrl 로 주입."""
+    calls = _apply_harness(monkeypatch, tmp_path)
+    monkeypatch.setattr(eks_apply, "live_ingress_rule_host",
+                        lambda m, context="": "")
+    monkeypatch.setattr(eks_apply, "live_alb_hostname",
+                        lambda m, context="": "alb-123.elb.amazonaws.com")
+    eks_apply.apply(_cfg(), tmp_path, tmp_path)
+    assert len(calls) == 2
+    assert "adminUi.nextauthUrl=http://alb-123.elb.amazonaws.com" in calls[1]
+
+
 def test_plan_never_runs_terraform_apply(monkeypatch, tmp_path, capsys):
     """plan 은 읽기 전용 — 인프라가 비어 있어도 terraform apply 를 돌리지 않는다."""
     calls = []
