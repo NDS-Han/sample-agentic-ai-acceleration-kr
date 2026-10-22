@@ -113,10 +113,11 @@ powershell -ExecutionPolicy Bypass -File packaging\build.ps1 `
 ```
 
 Notes:
-- `site-config.json` maps **5 keys only** (`oidcIssuerUrl`, `oidcClientId`,
-  `gatewayUrl`, `adminApiUrl`, `caBundle`). The three **proxy** values
-  (`-ExpectedProxyUrl`, `-NoProxyValue`, `-ForbiddenNoProxyToken`) can be set
-  **only** via `-Param` or `GATEWAY_CLI_DEFAULT_*` env vars.
+- `site-config.json` maps **8 keys**: `oidcIssuerUrl`, `oidcClientId`,
+  `gatewayUrl`, `adminApiUrl`, `caBundle`, and the three **proxy** values
+  `expectedProxyUrl`, `noProxyValue`, `forbiddenNoProxyToken` (which
+  `-ExpectedProxyUrl` / `-NoProxyValue` / `-ForbiddenNoProxyToken` params
+  still override). A ready-to-edit template: `site-config.json.example`.
 - Any value left blank stays blank — the corresponding Claude Code key is simply
   **not written** (blank ⇒ absent, not `KEY=""`).
 - `site-config.json` is `.gitignore`d — never commit environment identifiers.

@@ -1,0 +1,29 @@
+{
+  "__comment": [
+    "gateway-cli 빌드 고정값 (guideline 1-1). 이 파일을 복사해 packaging\\site-config.json 으로",
+    "이름을 바꾼 뒤 수정하면 build.ps1 이 읽어 .exe 에 내장합니다. 경로 백슬래시는 \\\\ 로",
+    "이스케이프하세요. 빈 문자열(\"\")은 site_defaults.py 기본값으로 폴백됩니다.",
+    "환경별 식별자(OIDC 등)를 담으므로 커밋 금지 — .gitignore 에 이미 제외되어 있습니다.",
+    "우선순위: build.ps1 -Param > 환경변수 GATEWAY_CLI_DEFAULT_* > 이 파일 > site_defaults.py"
+  ],
+
+  "oidcIssuerUrl": "",
+  "oidcClientId": "",
+
+  "gatewayUrl": "",
+  "adminApiUrl": "",
+
+  "caBundle": "",
+
+  "__proxy_comment": [
+    "사내 forward-proxy 검증 고정값 — cli/verify 의 프록시 체크가 사용합니다.",
+    "expectedProxyUrl: HTTP_PROXY/HTTPS_PROXY 가 반드시 가리켜야 할 프록시 주소.",
+    "noProxyValue: NO_PROXY 에 들어가야 할 우회 목록 (사내 도메인 접미사 + 직접 도달하는 내부 CIDR).",
+    "forbiddenNoProxyToken: NO_PROXY 에 들어가면 안 되는 사내 접미사",
+    "  (해당 도메인은 CIDR 경유 직접 도달이므로 프록시를 타야 정상).",
+    "전부 빈 값이면 site_defaults.py placeholder 가 유지되고 프록시 검증은 비활성 상태로 배포됩니다."
+  ],
+  "expectedProxyUrl": "",
+  "noProxyValue": "",
+  "forbiddenNoProxyToken": ""
+}

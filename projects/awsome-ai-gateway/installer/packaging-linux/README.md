@@ -216,9 +216,12 @@ once on Linux x86_64 and the same `.run` installs in both.
 
 ## Baked corporate defaults (`site-config.json`)
 
-Edit `site-config.json` (camelCase keys: `oidcIssuerUrl`, `oidcClientId`,
-`gatewayUrl`, `adminApiUrl`, `caBundle`). `build.sh` reads it and bakes the
-values into the binaries via a generated `cli/_site_config.py`. Precedence:
+Copy `site-config.json.example` to `site-config.json` and edit it (camelCase
+keys: `oidcIssuerUrl`, `oidcClientId`, `gatewayUrl`, `adminApiUrl`, `caBundle`,
+plus the proxy checks `expectedProxyUrl`, `noProxyValue`,
+`forbiddenNoProxyToken`). `build.sh` reads it and bakes the values into the
+binaries via a generated `cli/_site_config.py`. The same keys are also settable
+via `--flag`s and `GATEWAY_CLI_DEFAULT_*` env vars. Precedence:
 
 ```
 build.sh --flag  >  GATEWAY_CLI_DEFAULT_*  >  site-config.json  >  site_defaults.py literal

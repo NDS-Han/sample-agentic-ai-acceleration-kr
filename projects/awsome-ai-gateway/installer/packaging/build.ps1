@@ -232,11 +232,14 @@ if (Test-Path $SiteConfigInput) {
     # ConvertFrom-Json returns a PSCustomObject; map its camelCase keys to the
     # script params. A leading __comment (string or array) is simply ignored.
     foreach ($pair in @(
-        @{ Name = 'OidcIssuerUrl'; Key = 'oidcIssuerUrl' },
-        @{ Name = 'OidcClientId';  Key = 'oidcClientId'  },
-        @{ Name = 'GatewayUrl';    Key = 'gatewayUrl'    },
-        @{ Name = 'AdminApiUrl';   Key = 'adminApiUrl'   },
-        @{ Name = 'CaBundle';      Key = 'caBundle'      }
+        @{ Name = 'OidcIssuerUrl';         Key = 'oidcIssuerUrl'         },
+        @{ Name = 'OidcClientId';          Key = 'oidcClientId'          },
+        @{ Name = 'GatewayUrl';            Key = 'gatewayUrl'            },
+        @{ Name = 'AdminApiUrl';           Key = 'adminApiUrl'           },
+        @{ Name = 'CaBundle';              Key = 'caBundle'              },
+        @{ Name = 'ExpectedProxyUrl';      Key = 'expectedProxyUrl'      },
+        @{ Name = 'NoProxyValue';          Key = 'noProxyValue'          },
+        @{ Name = 'ForbiddenNoProxyToken'; Key = 'forbiddenNoProxyToken' }
     )) {
         # Only apply the file value when the caller left the param/env empty.
         $cur = (Get-Variable -Name $pair.Name -Scope Script -ErrorAction SilentlyContinue).Value
