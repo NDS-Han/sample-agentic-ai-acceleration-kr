@@ -76,6 +76,16 @@ def test_resolve_auth_strategy_health():
     assert strategy is None
 
 
+def test_resolve_auth_strategy_usage_team():
+    # 핸들러가 "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약 — TEAM_LEADER 는 VK 만
+    # 갖는다. `/v1/` fallthrough(JWT 전용)에 두면 VK 호출이 401 로 죽어 계약상
+    # 도달 불가. /v1/models/ 와 같은 prefix 방식으로 DUAL.
+    strategy = resolve_auth_strategy("/v1/usage/team/team-abc")
+    assert isinstance(strategy, DualAuthStrategy)
+    # /v1/usage/me 는 정확 매칭 그대로 DUAL (prefix 와 무관하게 회귀 없음)
+    assert isinstance(resolve_auth_strategy("/v1/usage/me"), DualAuthStrategy)
+
+
 @pytest.mark.asyncio
 async def test_vk_auth_cache_hit():
     redis = AsyncMock()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import json
 import time
 
@@ -908,7 +909,7 @@ async def _handle_responses(request: Request):
         # 열려 있으면(다른 표면의 트래픽이 같은 pmid 에서 연 경우 포함) 프로브를
         # 따낸 요청만 상류를 두드리고, 턴 결과를 회로에 반영한다.
         _cb = getattr(request.app.state, "circuit_breaker", None)
-        if not asyncio.iscoroutinefunction(getattr(_cb, "is_open", None)):
+        if not inspect.iscoroutinefunction(getattr(_cb, "is_open", None)):
             _cb = None  # 미배선(또는 테스트 MagicMock) — 게이트 생략
         _ws_cb_key: str | None = _pmid if _cb is not None else None
         _ws_probe_token: str | None = None

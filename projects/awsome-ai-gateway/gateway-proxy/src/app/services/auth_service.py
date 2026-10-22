@@ -608,6 +608,11 @@ def resolve_auth_strategy(path: str) -> AuthStrategy | None:
     # 정확 매칭에 없으면 아래 `/v1/` fallthrough 로 JWT 로 라우팅돼 VK 인증 실패.
     if path.startswith("/v1/models/"):
         return _DUAL_STRATEGY
+    # /v1/usage/team/{id} — 핸들러가 "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약을
+    # 집행하는데, TEAM_LEADER 는 VK 만 갖는다. `/v1/` fallthrough(JWT 전용)에 두면
+    # VK 호출이 401 로 죽어 계약상 도달 불가 — DUAL 여야 한다.
+    if path.startswith("/v1/usage/team/"):
+        return _DUAL_STRATEGY
     if path.startswith("/model/"):
         return _VK_STRATEGY
     if path.startswith("/v1/"):
