@@ -276,14 +276,31 @@ def load_tokens() -> Tokens | None:
         return None
 
 
-def save_tokens(tokens: Tokens) -> None:
-    path = _token_cache_path()
+def _secure_write(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` with 0600 permissions from creation.
+
+    os.open with mode 0o600 avoids the window a ``write_text()`` + later
+    ``chmod()`` leaves, during which a token/VK cache file is readable at the
+    umask default.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(tokens.to_dict()), encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with fh:
+        fh.write(content)
+    try:
+        # Pre-existing file keeps its old mode under O_CREAT — re-assert 0600.
         os.chmod(path, 0o600)
     except (OSError, NotImplementedError):
         pass
+
+
+def save_tokens(tokens: Tokens) -> None:
+    _secure_write(_token_cache_path(), json.dumps(tokens.to_dict()))
 
 
 def clear_tokens() -> None:
@@ -345,13 +362,7 @@ def load_vk_cache() -> CachedVK | None:
 
 
 def save_vk_cache(vk: CachedVK) -> None:
-    path = _vk_cache_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(vk.to_dict()), encoding="utf-8")
-    try:
-        os.chmod(path, 0o600)
-    except (OSError, NotImplementedError):
-        pass
+    _secure_write(_vk_cache_path(), json.dumps(vk.to_dict()))
 
 
 def clear_vk_cache() -> None:
@@ -650,6 +661,10 @@ def exchange_jwt_for_vk(
         expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
         expires_at = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        # A server timestamp without an offset is UTC; normalise so callers can
+        # subtract datetime.now(timezone.utc) without a naive/aware TypeError.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
     return VKResponse(
         virtual_key=data["virtual_key"],
         expires_at=expires_at,

@@ -5,7 +5,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 
 import requests
@@ -63,7 +63,11 @@ def request_virtual_key(
     try:
         expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
     except (ValueError, AttributeError):
-        expires_at = datetime.now()
+        expires_at = datetime.now(timezone.utc)
+    if expires_at.tzinfo is None:
+        # A server timestamp without an offset is UTC; normalise so callers can
+        # subtract datetime.now(timezone.utc) without a naive/aware TypeError.
+        expires_at = expires_at.replace(tzinfo=timezone.utc)
 
     return VirtualKeyResponse(
         virtual_key=data["virtual_key"],

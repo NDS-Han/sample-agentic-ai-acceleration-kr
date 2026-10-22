@@ -26,7 +26,7 @@ import socket
 import threading
 import time
 import urllib.parse
-from datetime import datetime
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -111,9 +111,24 @@ class CachedVK:
 
 
 def _secure_write(path: Path, content: str) -> None:
+    """Write ``content`` to ``path`` with 0600 permissions from creation.
+
+    Opening with mode 0o600 in the same os.open call avoids the window a
+    ``write_text()`` + later ``chmod()`` leaves, during which the file — which
+    holds OIDC refresh tokens / virtual keys — is readable at the umask default.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with fh:
+        fh.write(content)
+    try:
+        # Re-assert 0600 for the pre-existing-file case (os.open keeps the old
+        # mode when O_CREAT finds the file already there).
         os.chmod(path, 0o600)
     except (OSError, NotImplementedError):
         pass
@@ -347,7 +362,12 @@ def _exchange_jwt_for_vk(
     data = resp.json()
     expires_at_str = data.get("expires_at", "")
     try:
-        expires_at = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00")).timestamp()
+        parsed = datetime.fromisoformat(expires_at_str.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            # Naive server timestamps are UTC; .timestamp() on a naive datetime
+            # assumes LOCAL time, shifting expires_at by the host's UTC offset.
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        expires_at = parsed.timestamp()
     except (ValueError, AttributeError):
         expires_at = time.time() + 3600  # fallback: 1h
     return CachedVK(
