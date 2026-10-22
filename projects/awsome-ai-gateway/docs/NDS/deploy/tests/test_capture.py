@@ -63,6 +63,17 @@ def test_compose_captured_doc_is_schema_valid(tmp_path):
     schema.from_dict(cap)  # 예외 없어야 함 — 못 채운 필드는 notes 가 알린다
 
 
+def test_capture_emits_all_feature_keys(tmp_path):
+    """캡처는 스키마의 features 키를 전부 기록한다 — 생략된 키는 사용자에게
+    옵션 존재 자체를 숨기므로 라이브에 없는 기능도 false 로 명시돼야 한다."""
+    expected = set(schema._FEATURE_KEYS)
+    cap, _ = _roundtrip(tmp_path, BASE)
+    assert set(cap["features"]) == expected
+    assert cap["features"]["pricing_lambda"] is False
+    assert cap["features"]["bi_insight"] is False
+    assert cap["features"]["dev_login"] is False
+
+
 def test_compose_capture_missing_dir(tmp_path):
     with pytest.raises(capture.CaptureError):
         capture.capture_compose(tmp_path / "nope")
@@ -119,6 +130,15 @@ def test_eks_capture_from_real_dev_values(monkeypatch):
     tags = doc["images"]["tags"]
     assert tags.get("gatewayProxy") == doc["images"]["tag"]
     assert "migration" in tags or "adminApi" in tags  # 멀티태그 실측이 맵에 담김
+
+
+@pytest.mark.skipif(not DEV_VALUES.exists(), reason="dev values 파일 없음")
+def test_eks_capture_emits_all_feature_keys(monkeypatch):
+    _fake_eks(monkeypatch)
+    doc, _ = capture.capture_eks()
+    assert set(doc["features"]) == set(schema._FEATURE_KEYS)
+    # dev values 는 LITELLM_PRICING_LAMBDA 가 실제로 켜져 있다
+    assert doc["features"]["pricing_lambda"] is True
 
 
 def test_eks_capture_live_drift_custom_release_name(monkeypatch):

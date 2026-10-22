@@ -98,16 +98,30 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     elif provider not in ("mock", "ses", "smtp"):
         notes.append(f"EMAIL_SENDER_TYPE={provider} 는 스키마에 없는 값 — mock 으로 두고 확인하세요")
 
-    # features
+    # features — 스키마 키를 전부 기록한다. 라이브 신호를 못 읽은 기능은
+    # false 로 명시해야 캡처 결과가 "기능 목록" 역할을 한다(키가 아예
+    # 빠지면 사용자는 그 옵션이 존재하는지 알 수 없다).
+    api_env = (services.get("admin-api") or {}).get("environment") or {}
+    if isinstance(api_env, list):
+        api_env = dict(e.split("=", 1) for e in api_env if "=" in e)
+    ui_env = (services.get("admin-ui") or {}).get("environment") or {}
+    if isinstance(ui_env, list):
+        ui_env = dict(e.split("=", 1) for e in ui_env if "=" in e)
     features = {
         "notifications": notif,
-        "observability": any(s in services for s in OBSERVABILITY),
+        "bi_insight": bool(env.get("AGENTCORE_RUNTIME_ARN")
+                           or api_env.get("AGENTCORE_RUNTIME_ARN")),
+        "pricing_lambda": bool(env.get("LITELLM_PRICING_LAMBDA")
+                               or api_env.get("LITELLM_PRICING_LAMBDA")),
         "web_search": env.get("WEB_SEARCH_ENABLED") == "true",
         "body_logging": bool(env.get("FIREHOSE_STREAM_NAME")),
+        "observability": any(s in services for s in OBSERVABILITY),
+        "dev_login": (env.get("DEV_LOGIN_ENABLED") == "true"
+                      or api_env.get("DEV_LOGIN_ENABLED") == "true"
+                      or str(ui_env.get("DEV_LOGIN_ENABLED")) == "true"),
     }
 
     # oidc — admin-ui environment(직접 주입된 것) + .env
-    ui_env = (services.get("admin-ui") or {}).get("environment") or {}
     issuer = env.get("OIDC_ISSUER_URL") or ui_env.get("OIDC_ISSUER_URL", "")
     oidc: dict = {}
     if issuer:
@@ -387,10 +401,18 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing},
         "network": {"mode": "public", "allowed_cidrs": []},
         "domain": domain,
+        # features — 스키마 키를 전부 기록한다 (못 읽은 기능 = false 명시,
+        # 키 생략은 사용자에게 옵션 존재를 숨긴다).
         "features": {
             "notifications": notif,
-            "body_logging": bool(sizing_env.get("FIREHOSE_STREAM_NAME")),
+            "bi_insight": bool(sizing_env.get("AGENTCORE_RUNTIME_ARN")),
+            "pricing_lambda": bool(sizing_env.get("LITELLM_PRICING_LAMBDA")),
             "web_search": sizing_env.get("WEB_SEARCH_ENABLED") == "true",
+            "body_logging": bool(sizing_env.get("FIREHOSE_STREAM_NAME")),
+            # observability 는 compose 전용 — ecs 에서 true 를 기록하면
+            # 캡처 문서 자체가 스키마 위반이 된다.
+            "observability": False,
+            "dev_login": sizing_env.get("DEV_LOGIN_ENABLED") == "true",
         },
         "images": {"tag": image_tag},
         "clients": {"models_profile": "global"},
@@ -577,18 +599,24 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                      "notifications.provider 를 직접 맞추세요")
 
     otel_mode = str(_val(v, "observability", "otel", "mode"))
+    aenv = _val(v, "adminApi", "env", default={}) or {}
+    # 스키마 키를 전부 기록한다 — 못 읽은 기능은 false 로 명시. 키가 빠지면
+    # 캡처된 yaml 을 보는 사용자가 그 옵션의 존재 자체를 모른다.
     features = {
         "notifications": notif,
-        "observability": otel_mode not in ("", "disabled", "none"),
+        "bi_insight": bool(aenv.get("AGENTCORE_RUNTIME_ARN")),
+        "pricing_lambda": bool(aenv.get("LITELLM_PRICING_LAMBDA")),
         "web_search": str(genv.get("WEB_SEARCH_ENABLED")) == "true",
         "body_logging": bool(genv.get("FIREHOSE_STREAM_NAME")),
+        "observability": otel_mode not in ("", "disabled", "none"),
+        "dev_login": False,
     }
 
     # dev login — 라이브에 DEV_LOGIN_ENABLED=true 가 켜져 있으면 보존해야 한다.
     # 안 잡으면 채택 첫 apply 에 oidc 설정 경로가 adminUi 를 "false" 로 되돌려
     # 운영 중이던 개발자 로그인이 꺼진다.
     if (str(_val(v, "adminUi", "env", "DEV_LOGIN_ENABLED")) == "true"
-            or str(_val(v, "adminApi", "env", "DEV_LOGIN_ENABLED")) == "true"):
+            or str(aenv.get("DEV_LOGIN_ENABLED")) == "true"):
         features["dev_login"] = True
         notes.append("dev login(DEV_LOGIN_ENABLED=true)이 켜져 있습니다 — "
                      "features.dev_login: true 로 기록했습니다. 의도가 아니면 "
