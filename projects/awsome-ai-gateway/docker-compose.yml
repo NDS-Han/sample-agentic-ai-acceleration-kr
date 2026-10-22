@@ -33,9 +33,12 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init:/docker-entrypoint-initdb.d:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "5432:5432"
+      # 루프백 전용 — dev 비번이 커밋돼 있어 LAN 바인드는 DB 덤프를 허용한다.
+      # 배포 렌더(render/compose.py)는 어차피 이 ports 를 제거한다.
+      - "127.0.0.1:5432:5432"
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${POSTGRES_USER:-gateway}"]
       interval: 10s
@@ -50,9 +53,11 @@ services:
     command: redis-server /usr/local/etc/redis/redis.conf
     volumes:
       - ./config/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "6379:6379"
+      # 루프백 전용 — 인증 없는 redis 라 LAN 바인드는 스트림·세션 읽기/쓰기를 허용한다.
+      - "127.0.0.1:6379:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -85,6 +90,7 @@ services:
   mock-vllm:
     build:
       context: ./mock
+    restart: unless-stopped
     networks: [data-plane]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/v1/models')"]
@@ -109,6 +115,7 @@ services:
       AWS_DEFAULT_REGION: ${AWS_REGION:-ap-northeast-2}
     volumes:
       - ~/.aws:/home/appuser/.aws:ro
+    restart: unless-stopped
     networks: [data-plane, shared]
     ports:
       - "8000:8000"
@@ -140,6 +147,7 @@ services:
       DEV_LOGIN_ENABLED: ${DEV_LOGIN_ENABLED:-true}
     volumes:
       - ./gateway-cli/dist:/app/cli-dist:ro
+    restart: unless-stopped
     networks: [control-plane, shared]
     ports:
       - "8080:8080"
@@ -283,11 +291,14 @@ services:
     command: ["--config=/etc/otel-collector-config.yml"]
     volumes:
       - ./config/otel/otel-collector-config.yml:/etc/otel-collector-config.yml:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "4317:4317"
-      - "4318:4318"
-      - "8889:8889"
+      # 루프백 전용 — OTLP 는 인증 없는 쓰기 엔드포인트라 외부 바인드는 텔레메트리
+      # 주입을 허용한다(컨테이너 간 접근은 shared 네트워크로 해결, 호스트 포트 불요).
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+      - "127.0.0.1:8889:8889"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:13133/"]
       interval: 15s
@@ -301,40 +312,49 @@ services:
       - "--web.enable-remote-write-receiver"
     volumes:
       - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "9090:9090"
+      - "127.0.0.1:9090:9090"
 
   loki:
     image: grafana/loki:latest
     command: -config.file=/etc/loki/loki-config.yml
     volumes:
       - ./config/loki/loki-config.yml:/etc/loki/loki-config.yml:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "3100:3100"
+      - "127.0.0.1:3100:3100"
 
   tempo:
     image: grafana/tempo:latest
     command: ["-config.file=/etc/tempo/tempo-config.yml"]
     volumes:
       - ./config/tempo/tempo-config.yml:/etc/tempo/tempo-config.yml:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "3200:3200"
+      - "127.0.0.1:3200:3200"
 
   grafana:
     image: grafana/grafana:latest
     environment:
-      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:-admin}
+      # ? = unset/empty 이면 compose 가 즉시 에러 — 'admin' 리터럴 폴백 금지.
+      # dev 는 .env.example 의 admin 을 쓰고, t0 는 renderer 가 gen/.env 에 생성한다.
+      GF_SECURITY_ADMIN_PASSWORD: ${GF_SECURITY_ADMIN_PASSWORD:?set GF_SECURITY_ADMIN_PASSWORD in .env}
       GF_PATHS_PROVISIONING: /etc/grafana/provisioning
     volumes:
       - grafana-data:/var/lib/grafana
       - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./config/grafana/dashboards:/etc/grafana/dashboards:ro
+    restart: unless-stopped
     networks: [shared]
     ports:
-      - "3001:3000"
+      # 루프백 전용 — GF_SECURITY_ADMIN_PASSWORD 는 deploy 가 생성(.env)하지만,
+      # 외부 바인드는 포트를 여는 순간 브루트포스 표적이 된다.
+      # 접근: ssh -L 3001:localhost:3001 <호스트>  (비번은 gen/<env>/.env)
+      - "127.0.0.1:3001:3000"
     depends_on:
       - prometheus
       - loki

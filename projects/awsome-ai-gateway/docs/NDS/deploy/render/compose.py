@@ -69,6 +69,16 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
         if name == "gateway-proxy" and isinstance(svc.get("environment"), dict):
             svc["environment"].pop("OPENMODEL_BASE_URL", None)
 
+        # ②-b gateway 의 ~/.aws 바인드는 dev 전용(STS 로그인 경로). 배포 호스트에
+        #     ~/.aws/credentials 가 있으면 AWS SDK 체인에서 static creds 가
+        #     instance profile(IMDS)보다 우선해 llm-gateway-host 역할 의도가
+        #     조용히 무시된다 — t0 에서는 마운트를 제거해 IMDS 만 타게 한다.
+        if name == "gateway-proxy" and isinstance(svc.get("volumes"), list):
+            svc["volumes"] = [v for v in svc["volumes"]
+                              if not (isinstance(v, str) and v.startswith("~/.aws:"))]
+            if not svc["volumes"]:
+                svc.pop("volumes")
+
         # ③ 명시 이미지 태그가 있으면 build → image 로 교체(핀 배포)
         if cfg.images.tag and cfg.images.registry and name in IMAGE_NAMES:
             svc.pop("build", None)
@@ -264,7 +274,11 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "LITELLM_PRICING_LAMBDA=<함수이름> 을 추가하십시오 "
             "(ecs/eks 는 apply 가 자동 보장).")
     if cfg.features.observability:
-        notes.append("observability: OTel/Prometheus/Loki/Tempo/Grafana 스택을 포함해 렌더했습니다.")
+        notes.append(
+            "observability: OTel/Prometheus/Loki/Tempo/Grafana 스택을 포함해 렌더했습니다. "
+            "관측 스택 포트는 전부 127.0.0.1 바인드라 SG 와 무관하게 외부에서 닿지 않습니다 — "
+            "Grafana 접근은 `ssh -L 3001:localhost:3001 <호스트>` 터널로 하세요. "
+            "admin 비밀번호는 gen/<env>/.env 의 GF_SECURITY_ADMIN_PASSWORD 에 있습니다.")
     if cfg.oidc.enabled and cfg.domain.mode == "none":
         notes.append(
             "oidc + domain=none: admin-ui 가 NEXTAUTH_URL 없이 Host 헤더에 의존합니다 — "

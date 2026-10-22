@@ -41,7 +41,8 @@ services:
       # Realm seed (있으면 시작 시 자동 import)
       - ./config/keycloak:/opt/keycloak/data/import:ro
     ports:
-      - "8088:8080"
+      # 루프백 전용 — dev 크리덴셜(admin/admin)이라 LAN 바인드는 콘솔 탈취를 허용한다.
+      - "127.0.0.1:8088:8080"
     networks: [shared]
     healthcheck:
       # Keycloak 26 의 /health/ready 엔드포인트 (KC_HEALTH_ENABLED=true 필요)

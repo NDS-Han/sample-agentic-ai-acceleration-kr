@@ -31,6 +31,8 @@ GENERATED_KEYS = {
     "NEXTAUTH_SECRET": gen_secret,
     "INTERNAL_API_TOKEN": gen_secret,
     "VIRTUAL_KEY_ENCRYPTION_KEY": gen_hex32,
+    # observability=true 일 때 grafana admin 비번 — 없으면 compose 디폴트 "admin".
+    "GF_SECURITY_ADMIN_PASSWORD": gen_password,
 }
 
 

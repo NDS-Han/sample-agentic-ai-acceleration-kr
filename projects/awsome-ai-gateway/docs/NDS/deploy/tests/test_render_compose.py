@@ -186,3 +186,31 @@ def test_grafana_volume_dropped_when_no_observability(tmp_path):
 def test_grafana_volume_kept_with_observability(tmp_path):
     _, out = render_to(tmp_path, cfg(features={"observability": True}))
     assert "grafana-data" in out["volumes"]
+
+
+def test_gateway_aws_mount_stripped(tmp_path):
+    """t0 는 instance profile(IMDS)이 정답 — 호스트 ~/.aws 가 컨테이너에
+    마운트되면 SDK 체인상 static creds 가 IMDS 를 조용히 앞선다."""
+    _, out = render_to(tmp_path, cfg())
+    for v in out["services"]["gateway-proxy"].get("volumes") or []:
+        assert ".aws" not in str(v), v
+
+
+def test_observability_ports_loopback_only(tmp_path):
+    """observability=true 시 관측 스택이 호스트 포트를 열지만, 전부 127.0.0.1
+    이어야 한다 — Caddy allowlist 를 우회하는 외부 노출(OTLP 쓰기, admin/admin
+    grafana)을 차단."""
+    _, out = render_to(tmp_path, cfg(features={"observability": True}))
+    for name, s in out["services"].items():
+        if name == "caddy":
+            continue
+        for p in s.get("ports") or []:
+            assert str(p).startswith("127.0.0.1:"), f"{name}: {p}"
+
+
+def test_grafana_admin_password_generated(tmp_path):
+    """observability 켜도 GF_SECURITY_ADMIN_PASSWORD 가 비면 grafana 는
+    admin/admin — 생성 키로 채워져야 한다."""
+    render_to(tmp_path, cfg(features={"observability": True}))
+    env = common.parse_env_file(tmp_path / ".env")
+    assert env["GF_SECURITY_ADMIN_PASSWORD"] and env["GF_SECURITY_ADMIN_PASSWORD"] != "admin"
