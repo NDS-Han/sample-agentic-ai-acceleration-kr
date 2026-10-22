@@ -64,7 +64,7 @@ Helm 이 배포하는 워크로드는 **6 long-running Deployment + 1 migration 
 | **cost-recorder-worker** | data (async) | `XREADGROUP` `cost:stream` → bulk-INSERT `usage_logs` + UPSERT `budget_usages` + Redis daily counter + threshold pub/sub; daily roll-up → `daily_aggregates` |
 | **notification-worker** | control (async) | `notifications:*` pub/sub 구독 → email senders (SES/SMTP/internal-api/mock; dev·prod 기본 `mock` 미발송) |
 | **scheduler** | control (cron) | APScheduler singleton(`replicaCount:1` 고정). **admin-api 이미지 재사용**(command=`python -m app.scheduler.main`). 잡: ROI 집계(`aggregate_usage`) + VK 만료 정리(`expire_virtual_keys`). (daily_usage_aggregation 은 cost-recorder-worker 로 이관됨) |
-| **migration** (Job) | — | Alembic `upgrade head`(현재 head `0022`), Helm pre-install/pre-upgrade hook(weight -5), `transaction_per_migration=True` |
+| **migration** (Job) | — | Alembic `upgrade head`(현재 head `0048`), Helm pre-install/pre-upgrade hook(weight -5), `transaction_per_migration=True` |
 
 **Helm 워크로드가 아님:** `admin-chat-agent`(agents-as-tools Strands BI 어시스턴트)는 **Bedrock AgentCore Runtime**(arm64 microVM, container→ECR→`CreateAgentRuntime`)에 배포되고, admin-api 가 `boto3 bedrock-agentcore.invoke_agent_runtime`(SigV4/IAM)로 호출한다. 차트에는 `AGENTCORE_RUNTIME_ARN` env + chat staging S3 버킷으로만 연결된다. `query_db`/`get_schema` Lambda 는 read-only `gateway_chat_reader` DB role 로 실행된다.
 
@@ -86,7 +86,7 @@ Helm 이 배포하는 워크로드는 **6 long-running Deployment + 1 migration 
 | `notification` | `notification_configs`, `notification_logs` |
 | `chat_agent` | `sessions`, `messages`, `schema_embeddings`(pgvector 1024-dim HNSW), `golden_examples` |
 
-**마이그레이션 체인:** head 는 **`0022`** 이고 `0001→0022` 가 끊김 없이 연결된다. 라우팅 관련 순서:
+**마이그레이션 체인:** head 는 **`0048`** 이고 `0001→0048` 가 끊김 없이 연결된다. 라우팅 관련 순서(0022 까지):
 `0008`(Mantle enums) → `0009`(cowork routing/cowork-opus) → `0016`(codex enums) → `0017`(codex routing) → `0018`(client CHECK 확장 → `claude-code`/`cowork`/`codex`) → `0021`(web_search + claude-code invoke row 최초 생성, backend=invoke, default_model NULL) → `0022`(그 row 에 374 `account_role_arn`/`external_id`/`region` UPDATE).
 
 ### 3.2 Valkey/Redis — key namespaces
@@ -431,7 +431,7 @@ admin-ui(Next.js)는 server-only `adminAPI` 클라이언트(`src/lib/api-client.
 | Dashboards/analytics | `admin-api/src/app/routers/{dashboard,analytics,monitoring}.py`, `core/usage_filters.py`, `repositories/analytics_repository.py` |
 | Admin UI | `admin-ui/src/app/page.tsx`, `src/components/dashboard/*`(ClientShareDonutClient/ClientFilter), `src/app/api/dashboard/*` |
 | BI assistant | `admin-chat-agent/src/agent/main.py`, `admin-api/src/app/routers/chat_agent.py` |
-| Migrations | `db/versions/*`(head `0022`), `db/env.py`, `db/run_migration.sh` |
+| Migrations | `db/versions/*`(head `0048`), `db/env.py`, `db/run_migration.sh` |
 | Deployment | `deployment/charts/llm-gateway/` |
 
 ---
