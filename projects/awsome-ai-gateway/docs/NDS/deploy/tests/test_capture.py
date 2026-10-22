@@ -445,3 +445,21 @@ def test_eks_capture_oidc_helm_values_win_over_tf_outputs(monkeypatch, tmp_path)
     doc, _ = capture.capture_eks(env_dir=tmp_path)
     assert doc["oidc"]["client_id"] == "from-helm"
     assert doc["oidc"]["authorize_url"] == "https://helm.example/authorize"
+
+
+def test_eks_capture_dev_login_on_records_knob(monkeypatch):
+    """라이브 DEV_LOGIN_ENABLED=true 는 features.dev_login 으로 기록돼야 한다 —
+    안 잡으면 채택 첫 apply 에 oidc 경로가 admin-ui 를 false 로 되돌린다."""
+    vals = _eks_values(
+        adminUi={"env": {"DEV_LOGIN_ENABLED": "true"}},
+        adminApi={"env": {"DEV_LOGIN_ENABLED": "true"}},
+    )
+    doc, notes = _capture_with(monkeypatch, vals)
+    assert doc["features"]["dev_login"] is True
+    assert any("dev login" in n for n in notes)
+
+
+def test_eks_capture_dev_login_off_not_recorded(monkeypatch):
+    vals = _eks_values(adminUi={"env": {"DEV_LOGIN_ENABLED": "false"}})
+    doc, _ = _capture_with(monkeypatch, vals)
+    assert not doc["features"].get("dev_login")

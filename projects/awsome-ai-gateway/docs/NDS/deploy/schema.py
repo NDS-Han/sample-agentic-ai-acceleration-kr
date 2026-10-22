@@ -90,6 +90,10 @@ class FeaturesConfig:
     web_search: bool = False
     body_logging: bool = False
     observability: bool = False
+    # oidc 와 공존하는 개발자 로그인(DEV_LOGIN_ENABLED) — false 이면 oidc 설정 시
+    # render 가 adminUi DEV_LOGIN_ENABLED 를 강제로 끈다(기존 동작). true 이면
+    # adminUi/adminApi 양쪽에 true 를 박아 수동 --set 없이도 유지된다.
+    dev_login: bool = False
 
 
 # eks helm 오버레이에서 이미지 태그를 가질 수 있는 키. migration 도 태그가
@@ -256,6 +260,11 @@ class GatewayConfig:
             w.append(
                 f"features.observability 는 compose 전용입니다 — "
                 f"deploy.target={self.deploy.target} 에서는 무시됩니다."
+            )
+        if self.features.dev_login:
+            w.append(
+                "features.dev_login=true — 인증 없는 개발자 로그인 경로가 열립니다. "
+                "인터넷 노출 배포라면 network.allowed_cidrs 로 접근을 반드시 제한하십시오."
             )
         if (self.clients.models_profile == "regional"
                 and self.deploy.target == "eks"):
@@ -549,7 +558,8 @@ _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
 _NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
 _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id"))
 _FEATURE_KEYS = frozenset(("notifications", "bi_insight", "pricing_lambda",
-                           "web_search", "body_logging", "observability"))
+                           "web_search", "body_logging", "observability",
+                           "dev_login"))
 _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
                          "ses_from", "sender_name",
                          "internal_api_url", "internal_api_from",
@@ -662,6 +672,8 @@ def from_dict(raw: dict) -> GatewayConfig:
                                     "features.body_logging"),
             observability=_safe_bool(features.get("observability", False), errors,
                                      "features.observability"),
+            dev_login=_safe_bool(features.get("dev_login", False), errors,
+                                 "features.dev_login"),
         ),
         images=ImagesConfig(
             registry=str(images.get("registry", "")),

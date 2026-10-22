@@ -151,7 +151,7 @@ def desired_values(cfg: GatewayConfig) -> dict:
              "requiredGroup": cfg.oidc.required_group}
         v.setdefault("adminApi", {})["oidc"] = dict(o)
         v.setdefault("gatewayProxy", {})["oidc"] = dict(o)
-        ui_env = {"DEV_LOGIN_ENABLED": "false",
+        ui_env = {"DEV_LOGIN_ENABLED": "true" if cfg.features.dev_login else "false",
                   "OIDC_CLIENT_ID": cfg.oidc.client_id}
         if cfg.oidc.authorize_url:
             ui_env["OIDC_AUTHORIZE_URL"] = cfg.oidc.authorize_url
@@ -160,6 +160,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
         v.setdefault("adminUi", {}).setdefault("env", {}).update(ui_env)
     else:
         v.setdefault("adminUi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
+
+    # dev login 은 admin-api 가 dev. 토큰을 받아야 완결된다 — adminUi 만 켜면
+    # UI 로그인은 되는데 API 호출이 401 로 떨어진다. 명시적 opt-in 일 때만 양쪽 배선.
+    if cfg.features.dev_login:
+        v.setdefault("adminApi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
 
     # VK TTL — adminApi.env:OIDC_VK_TTL_HOURS 로 넣으면 oidcEnv 뒤에 같은 이름의
     # env 가 2개 생기는 함정이 있다(ops 8-Z) — 정식 키 adminApi.oidc.vkTtlHours.

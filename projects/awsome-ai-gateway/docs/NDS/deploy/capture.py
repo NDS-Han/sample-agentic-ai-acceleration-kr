@@ -584,6 +584,16 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "body_logging": bool(genv.get("FIREHOSE_STREAM_NAME")),
     }
 
+    # dev login — 라이브에 DEV_LOGIN_ENABLED=true 가 켜져 있으면 보존해야 한다.
+    # 안 잡으면 채택 첫 apply 에 oidc 설정 경로가 adminUi 를 "false" 로 되돌려
+    # 운영 중이던 개발자 로그인이 꺼진다.
+    if (str(_val(v, "adminUi", "env", "DEV_LOGIN_ENABLED")) == "true"
+            or str(_val(v, "adminApi", "env", "DEV_LOGIN_ENABLED")) == "true"):
+        features["dev_login"] = True
+        notes.append("dev login(DEV_LOGIN_ENABLED=true)이 켜져 있습니다 — "
+                     "features.dev_login: true 로 기록했습니다. 의도가 아니면 "
+                     "false 로 바꾸세요 (인증 없는 관리자 로그인)")
+
     # ── oidc — adminApi.oidc + adminUi.env (admin-ui 는 env 직접 주입) ───────
     oidc = {}
     issuer = str(_val(v, "adminApi", "oidc", "issuerUrl") or _val(v, "gatewayProxy", "oidc", "issuerUrl"))

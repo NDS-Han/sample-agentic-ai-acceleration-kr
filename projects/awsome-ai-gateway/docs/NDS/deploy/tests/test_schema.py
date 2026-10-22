@@ -303,3 +303,8 @@ def test_models_profile_global_no_warn_on_eks():
         "clients": {"models_profile": "global"},
     })
     assert not any("models_profile" in w for w in cfg.warnings())
+
+
+def test_dev_login_warns_open_admin_path():
+    cfg = schema.from_dict(minimal(features={"dev_login": True}))
+    assert any("dev_login" in w for w in cfg.warnings())

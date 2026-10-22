@@ -104,3 +104,22 @@ def test_domain_none_keeps_existing_hosts(tmp_path):
     v = yaml.safe_load((out / "values.yaml").read_text())
     # domain.name 없으면 host 를 건드리지 않는다 — 기존 values 승계
     assert "gateway" not in (v.get("ingress") or {})
+
+
+def test_dev_login_true_pins_both_services(tmp_path):
+    """features.dev_login=true — oidc 와 공존하는 개발자 로그인. adminUi 뿐 아니라
+    adminApi 에도 켜야 dev. 토큰이 검증을 통과한다(한쪽만 켜면 API 호출 401)."""
+    doc = dict(BASE, features={**BASE["features"], "dev_login": True})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "true"
+    assert v["adminApi"]["env"]["DEV_LOGIN_ENABLED"] == "true"
+
+
+def test_dev_login_default_off_with_oidc(tmp_path):
+    """기본값 — oidc 가 있고 dev_login 선언이 없으면 admin-ui 는 끄고 adminApi 는
+    env overlay 소유로 둔다(관여하지 않음)."""
+    _, out, _ = _render(tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
+    assert "DEV_LOGIN_ENABLED" not in v.get("adminApi", {}).get("env", {})
