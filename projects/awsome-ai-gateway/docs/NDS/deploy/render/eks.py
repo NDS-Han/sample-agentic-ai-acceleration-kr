@@ -190,8 +190,15 @@ def deploy_meta(cfg: GatewayConfig, env_values: Path | None,
 def feature_notes(cfg: GatewayConfig) -> list[str]:
     notes: list[str] = []
     if cfg.images.tag:
-        notes.append("images.tag 가 서비스 전체에 적용됩니다 — 기존 배포가 서비스별 "
-                     "태그를 달리 쓰고 있었다면 첫 apply 에서 전부 이 태그로 통일됩니다.")
+        if cfg.images.tags:
+            uncovered = sorted(set(TAGGED_SERVICES) - set(cfg.images.tags))
+            if uncovered:
+                notes.append(
+                    f"images.tags 에 없는 {uncovered} 는 images.tag"
+                    f"({cfg.images.tag})를 따릅니다 — 기존 태그와 다르면 바뀝니다.")
+        else:
+            notes.append("images.tag 가 서비스 전체에 적용됩니다 — 기존 배포가 서비스별 "
+                         "태그를 달리 쓰고 있었다면 첫 apply 에서 전부 이 태그로 통일됩니다.")
     if cfg.domain.name:
         notes.append(f"ingress host 를 gateway./admin./admin-api.{cfg.domain.name} "
                      "네이밍으로 씁니다 — 기존 host(gateway-dev.* 등)와 다르면 "
