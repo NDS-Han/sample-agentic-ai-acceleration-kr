@@ -8,7 +8,17 @@ LiteLLMPricingSyncService 가 그대로 수행한다.
 환경변수:
   LITELLM_BASE_URL        기본 https://api.litellm.ai
   LITELLM_PROVIDER_FILTER 기본 bedrock_converse (빈 문자열이면 전체)
+                          cost-map 모드에서는 litellm_provider 필드에 적용 — 쉼표로
+                          복수 지정 가능. cost map 의 global/CRIS 모델은
+                          "bedrock_converse" 값을 쓰므로 기본값 그대로면 충분
   LITELLM_PAGE_SIZE       기본 100
+  LITELLM_COST_MAP_URL    설정 시 cost-map 모드 — 이 URL 한 곳에서
+                          {"<model_id>": {entry}} 형태의 JSON 을 받아
+                          [{"id": model_id, **entry}] 로 변환한다.
+                          api.litellm.ai 의 model_catalog API 가 없을 때의 폴백 —
+                          canonical 소스는 GitHub 의
+                          model_prices_and_context_window.json (약 3MB, 동기
+                          invoke 제한 6MB 안).
 
 응답(JSON):
   성공: {"data": [<model_catalog row>, ...], "pages": <n>}
@@ -25,6 +35,7 @@ import urllib.request
 
 BASE_URL = os.environ.get("LITELLM_BASE_URL", "https://api.litellm.ai").rstrip("/")
 PROVIDER_FILTER = os.environ.get("LITELLM_PROVIDER_FILTER", "bedrock_converse")
+COST_MAP_URL = os.environ.get("LITELLM_COST_MAP_URL", "").strip()
 try:
     PAGE_SIZE = int(os.environ.get("LITELLM_PAGE_SIZE", "100"))
     if not (1 <= PAGE_SIZE <= 1000):
@@ -46,9 +57,38 @@ def _fetch_page(page: int) -> dict:
         return json.loads(resp.read())
 
 
+def _fetch_cost_map() -> list[dict]:
+    """cost-map 모드 — 단일 JSON 파일을 받아 model_catalog rows 형태로 변환.
+
+    파일은 {"<model_id>": {entry}} 형태이고 각 entry 에 litellm_provider 가
+    있다. PROVIDER_FILTER 를 쉼표 목록으로 해석해 그 필드에 적용한다.
+    cost map 의 bedrock 계열 값은 세 갈래다 — "bedrock_converse"(CRIS/global
+    모델, 기본값 그대로 사용), "bedrock"(구형 foundation-model 직접호출 ID),
+    "bedrock_mantle"("bedrock_mantle/..." 접두 키).
+    """
+    providers = {p.strip() for p in PROVIDER_FILTER.split(",") if p.strip()}
+    req = urllib.request.Request(COST_MAP_URL, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+        data = json.loads(resp.read())
+    if not isinstance(data, dict):
+        raise ValueError("cost map top-level is not an object")
+    rows = []
+    for model_id, entry in data.items():
+        if not isinstance(entry, dict):
+            continue
+        if providers and entry.get("litellm_provider") not in providers:
+            continue
+        row = dict(entry)
+        row.setdefault("id", model_id)
+        rows.append(row)
+    return rows
+
+
 def lambda_handler(event, context):
     models: list[dict] = []
     try:
+        if COST_MAP_URL:
+            return {"data": _fetch_cost_map(), "pages": 1}
         for page in range(1, MAX_PAGES + 1):
             body = _fetch_page(page)
             models.extend(body.get("data", []))
