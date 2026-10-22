@@ -7,6 +7,20 @@
 > OS는 **macOS · Linux · Windows · Windows WSL** 넷을 커버한다 — 각 절의 OS 표를
 > 보고 내 쪽 블록만 실행하면 된다. 상세·실측 노트는 `../us-llm-gateway/` 의
 > 클라이언트별 문서 참조.
+>
+> **운영자(배포·빌드·프로비저닝 담당)는 [client-admin.md](client-admin.md)** —
+> 이 문서는 앤드유저용이다.
+
+## 내 조합 바로가기
+
+모든 조합이 **[§1 공통](#1-공통--딱-한-번-어떤-클라이언트든)(로그인→VK) → 아래 해당 절** 순서다.
+
+| | Claude Code (CLI) | Cowork (Claude Desktop) | Codex (CLI+Desktop) |
+|---|---|---|---|
+| **macOS** | [§2-A](#a-claude-code-cli) | [§2-B-mac](#b-mac--helper-스크립트--프로필-macos) | [§2-C](#c-codex-cli--desktop--설정-공유) |
+| **Linux** | [§2-A](#a-claude-code-cli) | — (데스크톱 앱 없음) | [§2-C](#c-codex-cli--desktop--설정-공유) |
+| **Windows** | [§2-A](#a-claude-code-cli) | [§4 인스톨러](#4-windows--cowork--codex-desktop-상세) | [§2-C](#c-codex-cli--desktop--설정-공유) + [§4](#codex--windows) |
+| **WSL** | [§2-A](#a-claude-code-cli) (⚠️ Windows 경로) | Windows 절차 적용 | [§2-C](#c-codex-cli--desktop--설정-공유) (⚠️ 바이너리 위치 확인) |
 
 ---
 
@@ -201,7 +215,7 @@ open ~/Downloads/us-llm-gateway-cowork.mobileconfig   # 시스템 설정 → 설
 ```bash
 # macOS / Linux / WSL — ① helper 는 B-① 과 동일(공용), ② config.toml
 cat > ~/.codex/config.toml <<EOF
-model = "gpt-5.5"
+model = "gpt-6.1-sol"
 model_provider = "gateway"
 
 [model_providers.gateway]
@@ -209,6 +223,11 @@ name = "LLM Gateway"
 base_url = "$ANTHROPIC_BASE_URL/v1"
 wire_api = "responses"
 requires_openai_auth = false
+
+[model_providers.gateway.http_headers]
+# Codex Desktop 앱은 codex 계열 헤더를 안 보내 게이트웨이에서 client='other' 로
+# 분류돼 403 — codex prefix originator 를 명시해 라우팅/과금이 codex 로 잡히게 한다.
+originator = "codex_desktop"
 
 [model_providers.gateway.auth]
 command = "/usr/local/bin/llm-gateway-helper.sh"
@@ -218,32 +237,55 @@ EOF
 ```
 
 ```powershell
-# Windows — ① helper 래퍼 (api-key-helper 를 호출해 첫 vk- 줄만 출력)
-@"
-`$env:OIDC_ISSUER_URL="$env:OIDC_ISSUER_URL"
-`$env:OIDC_CLIENT_ID="$env:OIDC_CLIENT_ID"
-`$env:ADMIN_API_URL="$env:ADMIN_API_URL"
-api-key-helper | Select-String '^vk-' | Select-Object -First 1 | ForEach-Object { `$_.Line }
-"@ | Set-Content "$env:USERPROFILE\bin\llm-gateway-helper.cmd" -Encoding ascii
-#    (실제로는 .ps1 래퍼 + cmd shim 이 안전 — 상세는 us-llm-gateway codex 문서)
+# Windows — ① helper 는 두 경로 중 하나:
 
-# ② config.toml — 내용은 위와 동일, command 만 Windows 경로로
+#  [A] gateway-cli-cowork 인스톨러가 이미 깔려 있으면 (권장 — env 가 빌드에 베이크돼
+#      래퍼 없이 exe 단독으로 vk- 한 줄을 뱉는다). 검증 후 그대로 auth.command 에 지정:
+& 'C:\Gateway-CLI-Cowork\api-key-helper.exe'   # vk- 한 줄 확인
+
+#  [B] gateway-cli(pip/uv 설치본)만 있으면 — env 를 박은 .cmd 래퍼 필요.
+#      Desktop 앱은 쉘 환경변수를 상속 못 하므로 helper 안에서 env 를 세팅해야 한다.
+$dir = "$env:USERPROFILE\bin"; New-Item -ItemType Directory -Force $dir | Out-Null
+@"
+@echo off
+set OIDC_ISSUER_URL=$env:OIDC_ISSUER_URL
+set OIDC_CLIENT_ID=$env:OIDC_CLIENT_ID
+set ADMIN_API_URL=$env:ADMIN_API_URL
+api-key-helper 2>nul | findstr /b "vk-"
+"@ | Set-Content "$dir\llm-gateway-helper.cmd" -Encoding ascii
+& "$dir\llm-gateway-helper.cmd"   # vk- 한 줄 확인
+
+# ② config.toml — 내용은 macOS 와 동일, auth.command 만:
+#   [A] command = 'C:\Gateway-CLI-Cowork\api-key-helper.exe'
+#   [B] command = 'C:\Users\<나>\bin\llm-gateway-helper.cmd'
 ```
 
 `config.toml` 키 설명:
 
 - `wire_api = "responses"` — 필수. 게이트웨이의 codex 경로는 `/v1/responses` 만 받는다.
-- `model = "gpt-5.5"` — Codex 내장 메타데이터에 있는 실제 모델명(경고 없음). 게이트웨이는
-  routing_profile 의 `default_model`(`codex-gpt`)로 라우팅한다. 게이트웨이 alias
-  (예: `codex-gpt-5.6-*`)를 직접 지정도 가능 — ACTIVE + `allowed_models` 범위여야 함.
+- `model = "gpt-6.1-sol"` — 게이트웨이 카탈로그의 ACTIVE alias 를 직접 지정
+  (실측: `gpt-6.1-sol`). 등록 안 된 문자열은 서버가 routing_profile `default_model`로
+  조용히 폴백한다 — 의도한 모델인지 대시보드 `usage_logs`로 확인할 것.
+- `originator = "codex_desktop"` — Desktop 앱 필수(CLI 는 자동 전송). 없으면
+  `client='other'` 로 분류돼 라우팅 프로필에 따라 403.
 - ⚠️ **전제**: 운영자가 codex 라우팅을 켜둬야 한다 — admin-ui 의 routing profile 에
   `client='codex'` enabled + 해당 alias ACTIVE + 키 scope 포함.
+- **Codex Desktop (앱) 전용**: 26.1013+ 에서 "work browser access requires an
+  authenticated account" 에러가 나면 `[desktop]` 섹션에 추가 — work 모드(브라우저/
+  컴퓨터 제어)가 ChatGPT 계정 로그인을 요구하는데 커스텀 provider 로는 그 게이트를
+  못 통과한다:
+  ```toml
+  [desktop]
+  conversationDetailMode = "STEPS_COMMANDS"
+  ```
+  (최상단이 아니라 `[desktop]` 키임에 주의. work 모드 기능 자체가 필요하면 앱에
+  ChatGPT 계정 로그인이 필요 — 게이트웨이 추론은 로그인 없이 동작)
 
 ③ `codex` 실행 → 짧은 작업 → 대시보드 `client=codex` 확인.
 
-> ⚠️ Codex 절차는 **실기기 검증 전**(macOS 기준 구조만 확정) — Windows/WSL 은
-> `auth.command` 지원이 Codex 버전에 따른다. CLI 에서 먼저 검증하고 데스크톱에
-> 같은 설정을 적용하세요.
+> ✅ **실기기 검증 완료** — macOS(helper.sh + `gpt-6.1-sol`, originator 포함)와
+> Windows(`api-key-helper.exe` 직접 지정 + `.cmd` 래퍼 양쪽) 모두 Desktop 앱에서
+> 동작 확인됨(2026-10).
 
 ---
 
@@ -259,6 +301,9 @@ api-key-helper | Select-String '^vk-' | Select-Object -First 1 | ForEach-Object 
 | Cowork 가 helper 를 안 부름 | 프로필이 Local 레이어 → 관리형(.mobileconfig/HKLM)으로 재설치 |
 | Cowork 연결 자체가 안 됨 | `ANTHROPIC_BASE_URL` 이 `http://` → https 도메인 필요 |
 | Codex `401` | helper 경로 오타·실행권한 없음 → `chmod +x` + 직접 실행 확인 |
+| Codex `403` (`client='other'`) | `originator` 헤더 누락 → `[model_providers.gateway.http_headers]` 에 `codex_desktop` 추가 (주석과 같은 줄에 붙어 삼켜지는 실수 주의) |
+| Codex Desktop "work browser access requires an authenticated account" | 26.1013+ work 모드가 ChatGPT 로그인 요구 → `[desktop]` 에 `conversationDetailMode = "STEPS_COMMANDS"` 후 앱 완전 종료·재시작 |
+| Codex `provider auth command ... exited 1` / `지정된 경로를 찾을 수 없습니다` | `auth.command` 경로의 파일이 실제 없음 → `Test-Path` 로 확인 후 존재하는 경로로 교체 |
 
 **최종 확인 공통**: 아무 클라이언트에서 짧은 요청 한 번 → admin-ui 사용량에
 `client=` 값과 함께 잡히면 끝.
@@ -282,13 +327,19 @@ api-key-helper | Select-String '^vk-' | Select-Object -First 1 | ForEach-Object 
 `config.toml` 경로만 다르고 **내용은 macOS 와 동일**합니다:
 
 - 설정 파일: `%USERPROFILE%\.codex\config.toml`
-- helper: mac 의 `/usr/local/bin/llm-gateway-helper.sh` 대신 `api-key-helper` 를
-  직접 가리키는 `.ps1`/`.cmd` 래퍼를 `auth.command` 에 절대경로로 지정
+- helper `auth.command` — 두 경로 중 하나 (§2-C Windows 블록과 동일):
+  - `gateway-cli-cowork` 인스톨러가 있으면 `C:\Gateway-CLI-Cowork\api-key-helper.exe`
+    **직접 지정** (OIDC env 가 빌드에 베이크돼 래퍼 불요 — 실측 동작)
+  - 아니면 env 를 박은 `.cmd` 래퍼를 만들어 그 절대경로 지정 — **존재하지 않는
+    `C:\ProgramData\llm-gateway\helper.cmd` 같은 경로를 쓰면 `exited 1` 로 실패**
 - Codex Desktop 도 같은 파일을 읽으므로 한 번 설정으로 둘 다 됩니다
+- Desktop 앱은 `originator` 헤더가 필수(§2-C 키 설명 참조) — 없으면 `client='other'` 403
 
 ---
 
 ## 운영자 메모 — 직원에게 넘길 값은 어디서 나오나
+
+> 관리자용 전체 절차(빌드·배포·프로비저닝·서버측 진단)는 **[client-admin.md](client-admin.md)**.
 
 **한 번에 뽑기** (배포 머신에서):
 

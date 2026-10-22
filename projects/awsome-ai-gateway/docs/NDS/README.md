@@ -99,7 +99,8 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [domain.md](domain.md) | **도메인 획득(Route53 구매/NS 위임/사내 할당) → 배포에 등록** — backend별 자동화 정도 |
 | [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | **EKS 컨트롤플레인/애드온/Aurora 엔진 업그레이드** (terraform env 소유 — 홉 순서·버전표·롤백 제한) |
 | [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
-| [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지) |
+| [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스 진입) |
+| [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/서명/배포·프로비저닝·서버측 진단 |
 | [operations.md](operations.md) | **운영 런북** — 직원 등록(Cognito 그룹)·오픈 전 하드닝 체크리스트·Marketplace 구독 |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
