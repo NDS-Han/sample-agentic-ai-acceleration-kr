@@ -12,7 +12,9 @@ import { parseJWT, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
 import { checkPagePermission, isSessionExpired } from '@/lib/auth';
 
 export const config = {
-  matcher: ['/((?!_next/static|_next/image|favicon\\.ico).*)'],
+  // icon.svg 는 브라우저 탭 favicon — 비로그인 상태(로그인 페이지)에서도 fetch 되므로
+  // 인증 리다이렉트를 타면 307→HTML 응답이 "아이콘 없음"으로 브라우저 캐시에 박힌다.
+  matcher: ['/((?!_next/static|_next/image|favicon\\.ico|icon\\.svg).*)'],
 };
 
 // kiro R17-6 N2 — env 값은 admin 설정이지만 검증은 한다: `;` 로 다른 디렉티브

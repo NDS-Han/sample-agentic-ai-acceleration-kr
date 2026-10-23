@@ -10,7 +10,7 @@
 
 import { describe, it, expect } from 'vitest';
 import { NextRequest } from 'next/server';
-import { middleware } from '@/middleware';
+import { middleware, config } from '@/middleware';
 
 function b64url(obj: unknown): string {
   return Buffer.from(JSON.stringify(obj)).toString('base64url');
@@ -143,6 +143,26 @@ describe('middleware — session expiry', () => {
   it('403 stays public — an expired cookie must not bounce it into a redirect loop', async () => {
     const res = await middleware(requestWith(tokenWithExp(-3600), '/403'));
     expect(res.status).toBe(200);
+  });
+});
+
+describe('middleware — matcher excludes static public assets', () => {
+  // 회귀: matcher 가 favicon.ico 만 제외하고 icon.svg 를 인증 뒤에 뒀다 —
+  // 로그인 페이지 로드 시 브라우저의 favicon fetch 가 307→로그인 HTML 로 흘러
+  // "아이콘 없음"이 오리진 favicon 캐시에 박혀 탭에 지구본이 남았다.
+  // matcher 는 Next 라우팅 레이어에서 평가되므로 middleware() 직접 호출로는
+  // 검증이 안 된다 — 패턴 자체를 컴파일해 테스트한다.
+  const pattern = new RegExp(config.matcher[0]);
+
+  it('does not match /icon.svg or /favicon.ico', () => {
+    expect(pattern.test('/icon.svg')).toBe(false);
+    expect(pattern.test('/favicon.ico')).toBe(false);
+  });
+
+  it('still matches real pages and api paths', () => {
+    expect(pattern.test('/models')).toBe(true);
+    expect(pattern.test('/')).toBe(true);
+    expect(pattern.test('/api/rate-limits/usage')).toBe(true);
   });
 });
 
