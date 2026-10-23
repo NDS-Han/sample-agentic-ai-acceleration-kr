@@ -118,11 +118,11 @@ export function ClientShareDonutClient({ data }: Props) {
             key={c.client}
             // 이름 + 고정폭 우측정렬 수치 컬럼 — justify-between 은 이름과 수치가
             // 양끝으로 벌어지고 행마다 수치 위치가 들쭉날쭉해 산만해 보였다.
-            className={`grid grid-cols-[minmax(0,1fr)_5rem_6.5rem_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
+            className={`grid grid-cols-[minmax(0,1fr)_5rem_6.5rem_5rem_3.5rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hoverIndex ? 'bg-accent' : ''}`}
           >
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-start gap-2 min-w-0">
               <span
-                className="w-3 h-3 rounded-full flex-shrink-0"
+                className="w-3 h-3 rounded-full flex-shrink-0 mt-1"
                 style={{ backgroundColor: COLORS[i % COLORS.length] }}
               />
               <span className="font-medium break-words leading-snug" title={labelFor(c.client)}>{labelFor(c.client)}</span>

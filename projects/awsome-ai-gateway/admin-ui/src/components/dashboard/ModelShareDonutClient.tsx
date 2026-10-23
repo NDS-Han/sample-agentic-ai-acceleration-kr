@@ -248,11 +248,11 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               return (
               <li
                 key={m.model_alias}
-                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-center gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hi ? 'bg-accent' : ''}`}
+                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hi ? 'bg-accent' : ''}`}
               >
-                <div className="flex items-center gap-2 min-w-0">
+                <div className="flex items-start gap-2 min-w-0">
                   <span
-                    className={`w-3 h-3 rounded-full flex-shrink-0${isOther ? ' bg-muted-foreground' : ''}`}
+                    className={`w-3 h-3 rounded-full flex-shrink-0 mt-1${isOther ? ' bg-muted-foreground' : ''}`}
                     style={{ backgroundColor: isOther ? undefined : COLORS[i % COLORS.length] }}
                   />
                   {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용. */}

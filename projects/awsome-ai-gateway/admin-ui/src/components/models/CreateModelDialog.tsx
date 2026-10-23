@@ -175,7 +175,9 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       cache_creation_1h_price_per_1k: perMtoK(form.cache_creation_1h_price_per_1m || '0'),
       cache_read_price_per_1k: perMtoK(form.cache_read_price_per_1m || '0'),
       description: form.description || undefined,
-      display_name: form.display_name || undefined,
+      // required 는 빈 문자열만 막고 공백만의 값은 통과시키므로 trim 한다.
+      // 공백만 → undefined → 편집은 서버가 기존 값을 유지(덮어쓰기 없음).
+      display_name: form.display_name.trim() || undefined,
       // 빈 문자열 → 키 생략(생성: 서버 default null / 편집: action 이 null 로 바꿔
       // "미상으로 되돌림"). 숫자 아닌 값은 NaN 으로 보내 zod 가 필드 에러로 돌려준다.
       ...(form.context_window.trim() !== '' && { context_window: Number(form.context_window) }),
@@ -642,15 +644,20 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
             {fieldErrors.description && <FormError error={fieldErrors.description} />}
           </div>
 
-          {/* Display Name */}
+          {/* Display Name — 대시보드·분석 라벨이 이 값을 쓴다. 비우면 alias 가
+              raw 로 노출돼 같은 차트에 표기 규칙이 섞인다(실측: claude-sonnet-5-5
+              등 3개가 bare alias 로 표시됐다) — 생성 시 필수로 강제한다. */}
           <div className="space-y-1">
             <label htmlFor="display_name" className="text-sm font-medium">
-              {t('displayNameLabel')}
+              {t('displayNameLabel')} <span className="text-destructive">*</span>
             </label>
             <input
               id="display_name"
               name="display_name"
               type="text"
+              required
+              // required 는 빈 문자열만 막는다 — 공백-only 제출까지 차단한다.
+              pattern=".*\S.*"
               maxLength={128}
               value={form.display_name}
               onChange={handleChange}

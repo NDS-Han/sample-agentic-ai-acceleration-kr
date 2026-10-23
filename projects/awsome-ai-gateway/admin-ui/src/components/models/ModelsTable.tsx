@@ -225,7 +225,7 @@ export function ModelsTable({ models }: ModelsTableProps) {
                         <StatusBadge isActive={model.is_active} activeLabel={t('active')} inactiveLabel={t('inactive')} />
                       </Td>
                       <Td>
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 whitespace-nowrap">
                           <button
                             onClick={() => handleEdit(model)}
                             className="inline-flex items-center justify-center rounded-md border border-border bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
