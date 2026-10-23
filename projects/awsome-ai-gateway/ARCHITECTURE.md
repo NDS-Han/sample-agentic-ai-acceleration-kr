@@ -161,7 +161,7 @@ POST /v1/messages  (Bearer VK)
 
 `MantleCredentialBroker` / `mantle_http`(httpx.AsyncClient)는 cowork·codex 가 공유한다.
 
-**Region rewrite(`_rewrite_model_id_for_region`):** cross-region inference profile prefix(`us.`/`eu.`/`apac.`)를 타깃 region 에 맞게 재작성. `_REGION_PREFIX_MAP`: us-east-1/us-west-2→us, eu-*→eu, ap-northeast-1/ap-northeast-2/ap-southeast-*→apac. `global.` prefix 는 pass-through. **Mantle 경로는 rewrite 하지 않는다**(provider_model_id 그대로). region 소스는 cross-account(claude-code→374)일 때만 `profile.region`(ap-northeast-2)을 명시 전달하고, in-account 는 pod `AWS_REGION` env(기본 ap-northeast-2) 사용.
+**Region rewrite(`_rewrite_model_id_for_region`):** cross-region inference profile prefix(`us.`/`eu.`/`apac.`)를 타깃 region 에 맞게 재작성. `_REGION_PREFIX_MAP` 은 AWS 문서의 지리 패밀리 전체를 커버한다(us-*/eu-*/ap-* 각각 us/eu/apac — ap-south-1 포함). `global.` prefix 는 pass-through, 지도 밖 신규 region 도 보수적 pass-through. **Mantle 경로는 rewrite 하지 않는다**(provider_model_id 그대로). region 소스는 `candidate_route_region` 규칙 — 모델 레벨 ARN(§7.5) > invoke cross-account 프로필 > in-account(pod `AWS_REGION` env, 기본 ap-northeast-2). openai-compat(chat/responses)의 서명 본문 model id 도 라우팅 리전이 있으면 같은 규칙으로 재작성된다.
 
 ---
 
@@ -229,7 +229,8 @@ adapter:
 ```
 우선순위: model_aliases.account_role_arn (있으면) > routing_profiles[client] > in-account
 적용 지점: native Bedrock invoke · Mantle(Messages/Responses) · bedrock-runtime OpenAI
-           (chat + responses) · fallback 후보 · count_tokens — 전 디스패치 경로 동일
+           (chat + responses) · /model/{id}/invoke|converse 패스스루 · fallback 후보 ·
+           count_tokens — 전 디스패치 경로 동일
 ```
 
 - `router_service.model_account_route(model_config)` 가 `(arn, region, external_id)` 트리플을 반환하고 `apply_model_account_route` 가 프로필을 **복사**해 덮어쓴다(공유 캐시 객체 변이 없음). ARN 만 있고 region 이 없는 수동 SQL 상태는 `model_routing_incomplete_region` 로그 후 프로필 라우팅으로 폴백(읽기 경로 관대).
