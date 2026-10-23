@@ -115,6 +115,26 @@ def apply_model_account_route(profile, model_config, *, client: str | None = Non
     )
 
 
+def candidate_route_region(model_config, profile) -> str | None:
+    """한 모델(또는 폴백 후보)의 effective Bedrock 리전을 돌려준다.
+
+    해석 순서는 모든 경로에서 같아야 한다: **모델 레벨 > invoke 크로스계정
+    프로필 > in-account(None)**. ``_rewrite_model_id_for_region`` 의 region
+    인자와 회로 차원/어댑터 선택이 이 하나의 규칙을 공유해야, ARN 없는 폴백
+    후보가 원본 모델의 크로스계정 리전으로 재작성되는 스플릿이 생기지 않는다.
+    """
+    mrt = model_account_route(model_config)
+    if mrt is not None:
+        return mrt[1]
+    if (
+        profile is not None
+        and profile.backend == "invoke"
+        and profile.account_role_arn
+    ):
+        return profile.region
+    return None
+
+
 class ClientModelScopeError(PermissionError):
     """모델 × 앱 축의 거부(:func:`check_client_model_scope`).
 

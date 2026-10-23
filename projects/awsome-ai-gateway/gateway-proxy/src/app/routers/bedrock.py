@@ -26,11 +26,12 @@ from app.services.body_log_records import (
     provider_name,
     resolve_body_logger,
 )
+from app.providers.bedrock_adapter import BedrockAdapter
 from app.services.fallback_loop import (
     release_reservations,
     unsettled_reservation_guard,
 )
-from app.services.router_service import RouterService
+from app.services.router_service import RouterService, model_account_route
 
 logger = structlog.get_logger(__name__)
 
@@ -40,15 +41,37 @@ _router_service = RouterService()
 # Cross-region inference profile prefix mapping for Bedrock.
 # Bedrock groups regions into inference-profile families: us, eu, apac.
 # `global.` is a region-agnostic family (Opus 4.5/4.6, Sonnet 4.5/4.6) and is passed through unchanged.
+# 모델 레벨 라우팅(0049)으로 관리자가 임의 리전을 입력할 수 있게 되면서
+# 지도 밖 리전(ap-south-1 등)은 접두가 그대로 남아 cross-account 호출이
+# model-not-found 로 죽는 갭이 드러났다 — AWS 문서의 지리 패밀리대로 보강.
+# 목록에 없는 신규 리전은 종전처럼 접두 유지(보수적 통과)로 둔다.
 _REGION_PREFIX_MAP = {
+    # us family
     "us-east-1": "us",
+    "us-east-2": "us",
+    "us-west-1": "us",
     "us-west-2": "us",
+    # eu family
     "eu-west-1": "eu",
+    "eu-west-2": "eu",
+    "eu-west-3": "eu",
+    "eu-north-1": "eu",
+    "eu-south-1": "eu",
+    "eu-south-2": "eu",
     "eu-central-1": "eu",
+    "eu-central-2": "eu",
+    # apac family
     "ap-northeast-1": "apac",  # Tokyo
     "ap-northeast-2": "apac",  # Seoul
+    "ap-northeast-3": "apac",  # Osaka
     "ap-southeast-1": "apac",  # Singapore
     "ap-southeast-2": "apac",  # Sydney
+    "ap-southeast-3": "apac",  # Jakarta
+    "ap-southeast-4": "apac",  # Melbourne
+    "ap-southeast-5": "apac",  # Malaysia
+    "ap-south-1": "apac",      # Mumbai
+    "ap-south-2": "apac",      # Hyderabad
+    "ap-east-1": "apac",       # Hong Kong
 }
 
 # Known region prefixes that Bedrock actually uses on inference profile IDs.
@@ -249,9 +272,46 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         )
     state["model_config"] = model_config
 
+    # 모델 레벨 라우팅(0049) — /model/* 패스스루도 예외가 아니다. alias 행에
+    # ARN 이 명시된 모델이 여기서 in-account 로 나가면 messages invoke 와
+    # 다른 계정을 쓰는 무음 스플릿이다. 클라이언트 프로필 라우팅은 이 경로에
+    # 원래 없으므로(레거시 계약) 모델 레벨만 적용한다 — 명시 선언이라
+    # 브로커 부재/assume 실패 시 in-account 폴백 없이 fail-closed.
+    _mrt = model_account_route(model_config)
+    if _mrt is not None:
+        _provider = getattr(
+            request.app.state, "bedrock_account_client_provider", None
+        )
+        if _provider is None:
+            logger.error(
+                "bedrock_passthrough_model_route_no_provider",
+                model=model_id,
+                role_arn=_mrt[0],
+            )
+            return JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "type": "service_unavailable",
+                        "message": "Model-level account routing is not available on this gateway",
+                    }
+                },
+            )
+        _r, _g, _e = _mrt
+        adapter = BedrockAdapter(
+            bedrock_client=None,
+            client_resolver=lambda: _provider.get_client(_r, _g, _e),
+            fallback_client=None,
+        )
+    else:
+        adapter = registry.get(ProviderType.BEDROCK)
+
     # Use resolved model_id (may differ from URL model_id due to aliasing)
     # Also rewrite cross-region prefix if needed (e.g., us.→apac.)
-    bedrock_model_id = _rewrite_model_id_for_region(model_config.provider_model_id)
+    # 모델 라우팅 시 대상 계정의 리전이 접두 기준이다.
+    bedrock_model_id = _rewrite_model_id_for_region(
+        model_config.provider_model_id, region=(_mrt[1] if _mrt else None)
+    )
 
     # Key Scope 검사
     if auth_context:
@@ -348,8 +408,6 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
         )
         if rejected is not None:
             return rejected
-
-    adapter = registry.get(ProviderType.BEDROCK)
 
     # ── 프로바이더 호출 결과 지표 ──
     #

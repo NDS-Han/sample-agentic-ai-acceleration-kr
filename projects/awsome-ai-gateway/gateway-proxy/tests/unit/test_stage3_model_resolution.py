@@ -93,6 +93,76 @@ class TestBedrockPassthroughModelResolution404:
 
 
 # ---------------------------------------------------------------------------
+# 1.5 /model/* passthrough honors model-level account routing (0049)
+# ---------------------------------------------------------------------------
+
+class TestBedrockPassthroughModelRouting:
+    """회귀 방지: 패스스루도 ARN 명시 모델은 그 계정으로 — in-account 무음 폴백 금지."""
+
+    def _routed_config(self):
+        cfg = MagicMock()
+        cfg.alias = "routed-model"
+        cfg.provider_model_id = "us.anthropic.claude-sonnet-4-6"
+        cfg.provider = ProviderType.BEDROCK
+        cfg.account_role_arn = "arn:aws:iam::610156625835:role/gw-test"
+        cfg.region = "ap-south-1"
+        cfg.external_id = None
+        return cfg
+
+    @pytest.mark.asyncio
+    async def test_model_route_without_provider_fails_closed_503(self, monkeypatch):
+        """명시 모델 라우팅 + 브로커 부재 → 503 (in-account 무음 호출 금지)."""
+        monkeypatch.setattr(
+            "app.routers.bedrock._router_service.resolve_bedrock_model",
+            AsyncMock(return_value=self._routed_config()),
+        )
+        req = _FakeRequest({"_session_factory": None, "_redis": None})
+        req.app.state.bedrock_account_client_provider = None
+        resp = await _handle_bedrock(req, "routed-model", "invoke", stream=False)
+        assert resp.status_code == 503
+        assert "service_unavailable" in resp.body.decode()
+
+    @pytest.mark.asyncio
+    async def test_model_route_uses_cross_account_adapter_no_fallback(self, monkeypatch):
+        """모델 ARN → 크로스계정 어댑터 + fail-closed(fallback_client=None)."""
+        monkeypatch.setattr(
+            "app.routers.bedrock._router_service.resolve_bedrock_model",
+            AsyncMock(return_value=self._routed_config()),
+        )
+        captured = {}
+
+        class _FakeAdapter:
+            def __init__(self, **kw):
+                captured.update(kw)
+
+            async def invoke(self, body, model_id, **kw):
+                captured["model_id"] = model_id
+                return 200, b"{}", {}, None
+
+        provider = MagicMock()
+        provider.get_client.return_value = MagicMock(name="xacct-client")
+        req = _FakeRequest({"_session_factory": None, "_redis": None})
+        req.app.state.bedrock_account_client_provider = provider
+        monkeypatch.setattr("app.routers.bedrock.BedrockAdapter", _FakeAdapter)
+        # 본문 로거는 이 테스트의 대상이 아니다 — None 으로 꺼둔다.
+        monkeypatch.setattr(
+            "app.routers.bedrock.resolve_body_logger", AsyncMock(return_value=None)
+        )
+
+        resp = await _handle_bedrock(req, "routed-model", "invoke", stream=False)
+        # 크로스계정 어댑터가 만들어졌고 in-account 폴백을 붙이지 않았다.
+        assert captured.get("client_resolver") is not None
+        assert captured.get("fallback_client") is None
+        # 대상 리전으로 CRIS 접두가 재작성됐다(us. → apac.).
+        assert captured.get("model_id", "").startswith("apac.")
+        # provider resolver가 대상 ARN/리전으로 호출된다.
+        captured["client_resolver"]()
+        provider.get_client.assert_called_once_with(
+            "arn:aws:iam::610156625835:role/gw-test", "ap-south-1", None
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. Upstream 429 is fallback-eligible but NOT a CB failure
 # ---------------------------------------------------------------------------
 
@@ -155,6 +225,19 @@ class TestTeamScopedFallbackChain:
         src = inspect.getsource(m.messages)
         assert "model_config.alias or model_alias" in src
         assert "original=_chain_origin" in src
+
+    def test_prof_bound_before_provider_branch(self):
+        """``_rewrite(pmid, cfg=후보)`` 가 Mantle 분기에서도 ``_prof`` 를 읽는다 —
+        else(Bedrock) 안에만 두면 Mantle 폴백 후보 순회에서 NameError 가 난다.
+        분기 전 명시 초기화 계약."""
+        import inspect
+
+        import app.routers.messages as m
+
+        src = inspect.getsource(m.messages)
+        assert src.index("_prof = None") < src.index(
+            "if decision.provider == ProviderType.BEDROCK_MANTLE"
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -23,6 +23,7 @@ from app.schemas.domain import (
 from app.schemas.routing import RoutingProfileSchema
 from app.services.router_service import (
     apply_model_account_route,
+    candidate_route_region,
     model_account_route,
 )
 
@@ -45,12 +46,10 @@ def _cfg(**kw) -> ModelConfigSchema:
 
 
 def _profile(**kw) -> RoutingProfileSchema:
-    return RoutingProfileSchema(
-        client="claude-code",
-        backend="invoke",
-        region="ap-northeast-2",
-        **kw,
-    )
+    kw.setdefault("client", "claude-code")
+    kw.setdefault("backend", "invoke")
+    kw.setdefault("region", "ap-northeast-2")
+    return RoutingProfileSchema(**kw)
 
 
 # ── model_account_route ──
@@ -174,3 +173,46 @@ def test_apply_arn_without_region_leaves_profile_alone():
     profile = _profile(account_role_arn="arn:aws:iam::111:role/a")
     cfg = _cfg(account_role_arn=ARN, region=None)
     assert apply_model_account_route(profile, cfg) is profile
+
+
+class TestCandidateRouteRegion:
+    """후보별 리전 해석 — 모델 > invoke 프로필 > in-account(None).
+
+    회귀 방지: 원본 모델의 리전(_region_for_rewrite)을 ARN 없는 폴백 후보에
+    그대로 쓰면, in-account 로 나갈 후보가 원본의 크로스계정 리전 접두로
+    재작성되는 스플릿이 생겼다.
+    """
+
+    def test_model_route_wins_over_profile_region(self):
+        profile = _profile(
+            account_role_arn="arn:aws:iam::111:role/a", region="us-east-1"
+        )
+        cfg = _cfg(account_role_arn=ARN, region="ap-northeast-1")
+        assert candidate_route_region(cfg, profile) == "ap-northeast-1"
+
+    def test_no_model_route_falls_back_to_invoke_profile_region(self):
+        profile = _profile(
+            backend="invoke",
+            account_role_arn="arn:aws:iam::111:role/a",
+            region="ap-northeast-2",
+        )
+        cfg = _cfg()
+        assert candidate_route_region(cfg, profile) == "ap-northeast-2"
+
+    def test_unrouted_candidate_is_none_not_originals_region(self):
+        """ARN 없는 후보는 None — 원본 모델의 리전을 물려받지 않는다."""
+        cfg = _cfg()
+        assert candidate_route_region(cfg, None) is None
+        # in-account 프로필(backend 만 invoke, ARN 없음)이어도 None.
+        profile = _profile(backend="invoke")
+        assert candidate_route_region(cfg, profile) is None
+
+    def test_non_invoke_profile_does_not_route_region(self):
+        """mantle 백엔드 프로필은 bedrock invoke 리전 해석에 영향 없음."""
+        profile = _profile(
+            backend="mantle",
+            account_role_arn="arn:aws:iam::111:role/a",
+            region="ap-northeast-1",
+        )
+        cfg = _cfg()
+        assert candidate_route_region(cfg, profile) is None

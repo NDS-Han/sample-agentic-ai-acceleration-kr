@@ -49,6 +49,7 @@ from app.services.fallback_resolver import FallbackResolver, make_same_provider
 from app.services.router_service import (
     RouterService,
     apply_model_account_route,
+    candidate_route_region,
     model_account_route,
 )
 from app.services.streaming import bedrock_anthropic_sse_stream, usage_status_of
@@ -337,6 +338,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # cross-account(claude-code→374) 일 때만 Bedrock 분기에서 profile.region 으로 설정.
     # 분기 전 명시 초기화 → 아래 _rewrite 클로저가 locals() 리플렉션 없이 직접 참조(리팩터 안전).
     _region_for_rewrite = None
+    # 클라이언트 프로필 — Bedrock 분기에서만 바인딩된다. Mantle 분기에서도
+    # _rewrite(cfg=후보) 가 후보 해석에 _prof 를 읽으므로 미바인딩이면 NameError.
+    _prof = None
     # CB 키 차원 — 회로는 (모델 × 계정) 자원 단위다(E2E S3-L3). 빈 문자열이면
     # 종전과 같은 pmid 단독 키라 in-account 경로는 키가 그대로다.
     _circuit_scope = ""
@@ -692,16 +696,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             )
 
     # cross-account(333) 면 profile.region, 아니면 None (분기 전 초기화됨).
-    # cfg 가 주어지면 후보별 리전을 다시 계산한다 — 모델 레벨 라우팅(0049)으로
-    # 후보의 대상 계정 리전이 원본과 다를 수 있다(CRIS 접두는 리전 계약).
+    # cfg 가 주어지면 후보 자신의 라우팅으로 리전을 다시 계산한다 — 모델 레벨
+    # 라우팅(0049)으로 후보의 대상 계정 리전이 원본과 다를 수 있다(CRIS 접두는
+    # 리전 계약). _region_for_rewrite(원본의 리전)를 후보에 쓰면 안 된다 —
+    # ARN 없는 후보가 원본의 크로스계정 리전으로 재작성되면 in-account 호출에
+    # 도쿄 접두 모델 ID 같은 스플릿이 생긴다.
     def _rewrite(pmid: str, cfg=None) -> str:
         if is_mantle:
             return pmid
         _region = _region_for_rewrite
         if cfg is not None:
-            _mrt_c = model_account_route(cfg)
-            if _mrt_c is not None:
-                _region = _mrt_c[1]
+            _region = candidate_route_region(cfg, _prof)
         return _rewrite_model_id_for_region(pmid, region=_region)
 
     # --- Server-side web search (Architecture C) — opt-in per routing profile ---
@@ -1227,7 +1232,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 content=err_content,
                 headers=_advisory_headers(headers) or None,
             )
-        call_model_id_final = _rewrite(effective_model_config.provider_model_id)
+        call_model_id_final = _rewrite(
+            effective_model_config.provider_model_id, cfg=effective_model_config
+        )
 
         # 요청 종결 상태 — 스트림 헬퍼가 경로별로 채우고 _record 가 usage_logs.status
         # 로 옮긴다(E2E S5). 비-2xx 오류 제너레이터는 헬퍼에게 정상 종료로 보이므로

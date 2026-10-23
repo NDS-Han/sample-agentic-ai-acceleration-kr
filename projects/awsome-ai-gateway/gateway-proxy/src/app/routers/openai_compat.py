@@ -31,7 +31,9 @@ from app.services.router_service import (
     ModelInactiveError,
     RouterService,
     apply_model_account_route,
+    candidate_route_region,
 )
+from app.routers.bedrock import _rewrite_model_id_for_region
 from app.services.streaming import openai_sse_stream, usage_status_of
 
 logger = structlog.get_logger(__name__)
@@ -350,7 +352,18 @@ async def _handle_openai(request: Request, path: str):
         # verbatim — the SigV4 signature covers them — so the substitution happens here,
         # before signing. Bedrock rejects our aliases; it only knows us./global. ids.
         if isinstance(req_data, dict):
-            req_data["model"] = model_config.provider_model_id
+            # CRIS 접두는 대상 **리전** 계약이다 — 모델 레벨 라우팅(또는 invoke
+            # 프로필)이 pmid 와 다른 패밀리의 리전을 겨냥하면 서명된 본문의
+            # model id 도 그 패밀리로 재작성해야 한다. 라우팅 리전이 없으면
+            # 종전처럼 저장된 pmid 를 그대로 보낸다.
+            _route_region = candidate_route_region(model_config, profile)
+            req_data["model"] = (
+                _rewrite_model_id_for_region(
+                    model_config.provider_model_id, region=_route_region
+                )
+                if _route_region
+                else model_config.provider_model_id
+            )
             if is_stream:
                 # vLLM(openmodel_adapter._build_request_body)과 같은 강제 삽입 —
                 # OpenAI 스펙상 include_usage 미설정 스트림은 usage 프레임을 보내지
@@ -879,7 +892,17 @@ async def _handle_responses(request: Request):
     # our aliases; the runtime plane additionally requires the CRIS prefix, which is why it
     # is stored in provider_model_id rather than added here.
     if isinstance(req_data, dict):
-        req_data["model"] = model_config.provider_model_id
+        # runtime 평면의 CRIS 접두는 대상 리전 계약 — 모델 레벨 라우팅(0049)이
+        # 다른 패밀리의 리전을 겨냥하면 재작성. 라우팅 리전이 없으면 저장된
+        # pmid 그대로(종전 계약 유지).
+        _route_region = candidate_route_region(model_config, profile)
+        req_data["model"] = (
+            _rewrite_model_id_for_region(
+                model_config.provider_model_id, region=_route_region
+            )
+            if _route_region
+            else model_config.provider_model_id
+        )
         body = json.dumps(req_data).encode()
 
     # KI-08 역산용 토크나이저 훅. 이 방언은 usage 가 종결 이벤트(response.completed)
