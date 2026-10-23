@@ -1,4 +1,4 @@
-# 운영 런북 — 직원 등록 · 오픈 전 체크리스트 · 라우팅 프로필 · 신형 모델 구독
+# 운영 런북 — 직원 등록 · 오픈 전 체크리스트 · 라우팅 프로필 · 모델별 계정 라우팅 · 신형 모델 구독
 
 배포가 끝난 뒤 **반복되는 운영 작업**을 모읍니다. 설치 자체는
 install-{compose,ecs,eks}.md, 변경은 [update.md](update.md) 참조.
@@ -156,6 +156,106 @@ EOF
 # (로그 그룹 = /ecs/<project>-<env>/migration — project 기본값 llm-gateway)
 aws logs tail /ecs/llm-gateway-<env>/migration --since 10m
 ```
+
+## 3.5 모델별 계정 라우팅 — 모델 수정 화면에서 ARN 입력
+
+§3의 라우팅 프로필은 **클라이언트(앱) 축**입니다 — "claude-code는 이 계정"처럼
+앱 단위로 갈림길을 정합니다. 여기서 설명하는 것은 **모델 축** 오버라이드입니다 —
+"이 모델 alias로 들어온 요청은 이 계정으로"를 모델 행에 직접 적습니다.
+
+`model.model_aliases`의 `account_role_arn`/`external_id`/`region`(migration 0049,
+전부 NULL 허용)이 그 자리입니다. §3과 달리 **관리 UI에서 편집됩니다** — SQL이
+아니라 모델 관리 → 모델 수정 → 하단 **"라우팅 (선택)"** 섹션에서 입력합니다.
+
+```
+우선순위: model_aliases.account_role_arn (있으면) > routing_profiles[client] > in-account
+적용 범위: native Bedrock invoke · Mantle · OpenAI-compatible · fallback 후보 · count_tokens
+```
+
+### 대상 계정에 롤 만들기 — UI보다 먼저 할 일
+
+관리자가 ARN을 입력하는 것은 "화살표를 긋는 것"이고, 화살표 끝에 롤이 서
+있어야 합니다. 게이트웨이는 `sts:AssumeRole(ARN)`을 호출할 뿐이므로:
+
+- **같은 계정 롤**이면 운영자가 직접 만들면 됩니다 — 같은 계정 assume도
+  크로스계정과 코드 경로가 완전히 동일해서 테스트 용도로도 씁니다.
+- **외부 계정**이면 그 계정 관리자가 만들어야 합니다.
+
+롤에 필요한 두 가지(패턴은 `deployment/scripts/provision_cowork_cross_account_role.sh`
+참조 — cowork용이지만 trust/권한 구조가 그대로 범용입니다):
+
+```json
+// trust policy — 게이트웨이 실행 역할만 assume + ExternalId 조건
+{
+  "Effect": "Allow",
+  "Principal": { "AWS": "<gateway 실행 역할 ARN>" },
+  "Action": "sts:AssumeRole",
+  "Condition": { "StringEquals": { "sts:ExternalId": "<임의의 공유 문자열>" } }
+}
+```
+
+```json
+// permission — 호출하려는 서비스에 맞게
+bedrock:InvokeModel, bedrock:InvokeModelWithResponseStream, bedrock:CountTokens
+(+ Mantle 모델이면 bedrock-mantle:*)
+```
+
+`<gateway 실행 역할 ARN>` 찾기:
+
+```bash
+# eks — IRSA (service account의 annotation)
+kubectl -n llm-gateway get sa llm-gateway-gateway-proxy \
+  -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}'
+# ecs — task role
+terraform -chdir=deployment/terraform/environments/gateway-ecs \
+  output -raw task_role_arn
+# compose — EC2 인스턴스 프로필의 role
+```
+
+게이트웨이 쪽에도 `sts:AssumeRole` 권한이 대상 ARN에 걸려 있어야 합니다
+(eks는 terraform `modules/irsa`의 role_arn 변수들, ecs는 task role 정책 —
+배포 시 들어간 값이 우리 계정 롤이면 같은 계정 롤은 별도 조치 없이 됩니다).
+
+### 관리 UI에서 설정
+
+모델 관리 → 모델 수정 → "라우팅 (선택)":
+
+| 필드 | 규칙 |
+|---|---|
+| AWS 계정 Role ARN | `arn:aws:iam::<12자리>:role/...` 형식 검증 |
+| 리전 | **ARN을 넣으면 필수** — 대상 계정에서 호출할 리전 |
+| External ID | 선택. 롤 trust의 `sts:ExternalId` 조건과 같은 값 |
+
+- ARN을 지우고 저장하면 **트리플 전체 해제** — 다음 요청부터 클라이언트
+  프로필 라우팅으로 복귀합니다.
+- UI/API 경유 저장은 모델 캐시를 즉시 무효화합니다(§3 프로필의 5분 대기와
+  다름). **직접 SQL로 바꾼 경우만** Redis `model:<alias>` 키를 지워야 합니다.
+
+### 동작 특성 — §3 프로필 라우팅과 다른 점
+
+- **fail-closed:** 모델에 ARN이 명시됐는데 AssumeRole이 실패하면 **503 에러**로
+  끝납니다. 클라이언트 프로필 경로의 "조용히 in-account로 폴백"은 여기엔
+  없습니다 — 모델 단위로 명시한 라우팅이 다른 계정으로 새면 비용이 잘못된
+  계정에 청구되므로 차단합니다.
+- 대상 계정에 **모델 접근 권한/Marketplace 구독이 있어야** 합니다 — 롤은
+  있어도 그 계정이 모델을 못 쓰면 invoke 시 AccessDenied가 납니다(§4).
+- External ID는 감사 로그에 마스킹돼 저장됩니다.
+
+### 검증
+
+```bash
+# 1) 게이트웨이 파드에서 대상 롤이 실제로 assume 되는지 (EKS 예)
+kubectl -n llm-gateway exec deploy/llm-gateway-gateway-proxy -- python3 -c \
+  "import boto3;print(boto3.client('sts').assume_role(
+    RoleArn='<대상 롤 ARN>',RoleSessionName='t',ExternalId='<external_id>'
+  )['Credentials']['AccessKeyId'][:8])"
+
+# 2) 모델로 호출 → 실패 시 gateway 로그에서 model_account_routing 관련 확인
+kubectl -n llm-gateway logs deploy/llm-gateway-gateway-proxy --tail=200 \
+  | grep -iE "model.*rout|assume|503"
+```
+
+모델 테이블에서 ARN이 설정된 모델은 `→ <마스킹된 계정>` 배지로 표시됩니다.
 
 ## 4. 신형 모델 — Bedrock Marketplace 구독
 

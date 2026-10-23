@@ -101,7 +101,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스 진입) |
 | [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/서명/배포·프로비저닝·서버측 진단 |
-| [operations.md](operations.md) | **운영 런북** — 직원 등록(Cognito 그룹)·오픈 전 하드닝 체크리스트·Marketplace 구독 |
+| [operations.md](operations.md) | **운영 런북** — 직원 등록(Cognito 그룹)·오픈 전 하드닝 체크리스트·크로스계정 라우팅(클라이언트별·모델별)·Marketplace 구독 |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
 | [upstream-sync.md](upstream-sync.md) | **upstream PR 브랜치 → nds/dev 머지 절차** — 충돌 해결 원칙·자동머지 함정·rerere |
@@ -111,8 +111,10 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 - Claude Code, Cowork(Claude Desktop), Codex
 - 모델은 기본 **`global.*` inference profile** — 특정 리전에 고정되지 않아
   어느 리전에서 배포해도 동일하게 동작합니다
-- Codex/Cowork의 Mantle 크로스어카운트 라우팅은 배포 계정별 설정이 필요합니다
-  (`model.routing_profiles.account_role_arn` — 관리 UI 또는 DB 시드에서 설정)
+- 크로스계정 라우팅은 두 축이 있습니다 — **클라이언트별**
+  (`model.routing_profiles.account_role_arn`, SQL로 설정)과 **모델별**
+  (`model.model_aliases.account_role_arn`, 관리 UI의 모델 수정에서 설정).
+  절차는 [operations.md](operations.md) §3·§3.5
 - Cowork는 https가 필수 — `domain.mode: none`이면 동작하지 않습니다
 - 직원 PC 연결 절차는 [client-setup.md](client-setup.md) — 게이트웨이 배포가
   끝나면 이 문서 하나만 직원에게 전달하면 됩니다
