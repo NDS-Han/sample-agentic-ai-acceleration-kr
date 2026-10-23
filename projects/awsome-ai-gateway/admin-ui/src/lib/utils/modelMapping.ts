@@ -31,6 +31,9 @@ export interface APIModelItem {
   context_window: number | null;
   max_output_tokens: number | null;
   allowed_clients?: string[] | null;
+  account_role_arn?: string | null;
+  external_id?: string | null;
+  region?: string | null;
   created_at?: string | null;
 }
 
@@ -78,5 +81,8 @@ export function mapToModelListItem(item: APIModelItem): ModelListItem {
     description: item.description,
     display_name: item.display_name,
     allowed_clients: item.allowed_clients ?? null,
+    account_role_arn: item.account_role_arn ?? null,
+    external_id: item.external_id ?? null,
+    region: item.region ?? null,
   };
 }

@@ -56,6 +56,11 @@ export const ModelCreateSchema = z.object({
   // 편집 경로 전용 힌트: 가격 필드가 기존값과 동일하면 false — 불필요한 pricing
   // 버전 생성(effective_from=now)을 건너뛴다. 생성 경로는 항상 미설정(=가격 등록).
   pricing_changed: z.boolean().optional(),
+  // 모델 레벨 크로스계정 라우팅(0049) — 이 모델의 호출이 assume 할 대상 계정 role.
+  // 형식은 zod 에서 가볍게 거르고(상세 형식은 서버 검증), 교차 규칙은 아래 refine.
+  account_role_arn: z.string().max(512).optional(),
+  external_id: z.string().max(256).optional(),
+  region: z.string().max(64).optional(),
 })
   // BEDROCK_RUNTIME_OPENAI 은 endpoint_url 이 **필수**다. 게이트웨이 어댑터가 SigV4 서명
   // 리전을 endpoint 호스트(bedrock-runtime.{region}.amazonaws.com)에서 뽑아내므로, 비어
@@ -90,6 +95,25 @@ export const ModelCreateSchema = z.object({
     {
       path: ['model_id'],
       message: 'Must be a cross-region inference profile ID (e.g. us.openai.gpt-5.6-terra)',
+    },
+  )
+  // 라우팅 교차 규칙 — 백엔드 ModelCreateRequest._arn_needs_region 과 동일:
+  // ARN 있으면 region 필수(대상 리전을 모르면 호출 불가), ARN 없는
+  // region/external_id 는 게이트웨이가 읽지 않는 dead data 라 둘 다 거부.
+  .refine(
+    (d) => !d.account_role_arn?.trim() || !!d.region?.trim(),
+    {
+      path: ['region'],
+      message: 'Region is required when an account role ARN is set',
+    },
+  )
+  .refine(
+    (d) =>
+      !!d.account_role_arn?.trim() ||
+      (!d.region?.trim() && !d.external_id?.trim()),
+    {
+      path: ['account_role_arn'],
+      message: 'Region/External ID require an account role ARN',
     },
   )
   // 장문 티어 all-or-none — 백엔드 ModelCreateRequest._long_tier_is_one_unit

@@ -47,6 +47,15 @@ function StatusBadge({ isActive, activeLabel, inactiveLabel }: { isActive: boole
   return <Badge tone={isActive ? 'teal' : 'neutral'}>{isActive ? activeLabel : inactiveLabel}</Badge>;
 }
 
+/** arn:aws:iam::610156625835:role/x → 6101…5835 — 배지는 길이가 제한돼
+    계정 ID 의 앞뒤만 보인다(전체 ARN 은 title). 형식이 다르면 그대로 둔다. */
+function maskAccountId(arn: string): string {
+  const m = arn.match(/^arn:aws[a-zA-Z-]*:iam::(\d{12}):role\//);
+  if (!m) return arn.length > 16 ? `${arn.slice(0, 8)}…` : arn;
+  const acct = m[1];
+  return `${acct.slice(0, 4)}…${acct.slice(-4)}`;
+}
+
 /** 단가 셀 — 가격 행 없음(false)은 '—', 0은 실제 무료가 아니라 미등록의
     sanitize 결과일 수 있으나 1K 0 은 명시적 입력으로 취급해 '—' 로 병합. */
 function PriceCell({ hasPricing, per1k, muted }: { hasPricing: boolean; per1k: number; muted?: boolean }) {
@@ -184,6 +193,17 @@ export function ModelsTable({ models }: ModelsTableProps) {
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium">{displayName}</span>
                               <ProviderBadge provider={model.provider} />
+                              {model.account_role_arn && (
+                                // 모델 레벨 라우팅(0049) — 이 모델의 호출이 다른
+                                // 계정으로 나간다는 것을 한눈에. ARN 전체는 길어
+                                // 계정 ID 만 표시하고 전체는 title 로.
+                                <span
+                                  className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] font-medium text-muted-foreground"
+                                  title={t('routingBadgeTitle', { arn: model.account_role_arn, region: model.region ?? '-' })}
+                                >
+                                  →{maskAccountId(model.account_role_arn)}
+                                </span>
+                              )}
                               {model.long_context_threshold_tokens != null && (
                                 <span
                                   className="shrink-0 rounded border border-border px-1 py-0.5 text-[10px] font-medium text-muted-foreground"

@@ -60,6 +60,10 @@ export async function createModelAction(formData: unknown): Promise<ActionResult
       display_name: d.display_name || null,
       context_window: d.context_window ?? null,
       max_output_tokens: d.max_output_tokens ?? null,
+      // 모델 레벨 라우팅(0049) — 빈 문자열이면 미지정으로 보낸다.
+      account_role_arn: d.account_role_arn?.trim() || null,
+      external_id: d.external_id?.trim() || null,
+      region: d.region?.trim() || null,
       input_price_per_1k_tokens: d.input_price_per_1k,
       output_price_per_1k_tokens: d.output_price_per_1k,
       cache_creation_5m_price_per_1k_tokens: d.cache_creation_5m_price_per_1k,
@@ -114,6 +118,11 @@ export async function updateModelAction(
       // 비워 보내면 명시적 null → 서버가 "미상으로 되돌림"(fields_set null=삭제 규칙).
       context_window: d.context_window ?? null,
       max_output_tokens: d.max_output_tokens ?? null,
+      // 모델 레벨 라우팅(0049) — ARN 을 비우면 서버가 세 필드를 한 단위로 해제
+      // 한다(ARN 없는 region/external_id 는 게이트웨이가 읽지 않는 dead data).
+      account_role_arn: d.account_role_arn?.trim() || null,
+      external_id: d.external_id?.trim() || null,
+      region: d.region?.trim() || null,
     });
     // Update pricing — 가격이 실제로 바뀐 경우에만 새 버전을 만든다.
     // 메타데이터만 고쳐도 pricing 행이 쌓이면 이력과 비용 분석이 오염된다.
@@ -200,6 +209,9 @@ interface AdminModelItem {
   description: string | null;
   display_name: string | null;
   allowed_clients?: string[] | null;
+  account_role_arn?: string | null;
+  external_id?: string | null;
+  region?: string | null;
   context_window: number | null;
   max_output_tokens: number | null;
   created_at?: string | null;

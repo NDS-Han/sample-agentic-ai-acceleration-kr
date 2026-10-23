@@ -95,6 +95,11 @@ export interface ModelListItem {
   display_name: string | null;
   /** 모델×앱 허용 축. null=제한 없음, []=모든 앱 차단, 목록=그 앱만. 편집은 /apps. */
   allowed_clients: string[] | null;
+  /** 모델 레벨 크로스계정 라우팅(0049) — null=미지정(클라이언트 프로필 폴백).
+      ARN 이 있으면 이 모델의 호출은 그 계정의 Bedrock 으로 나간다. */
+  account_role_arn: string | null;
+  external_id: string | null;
+  region: string | null;
 }
 
 // ─── Team Model Access ───────────────────────────────────────────────────────

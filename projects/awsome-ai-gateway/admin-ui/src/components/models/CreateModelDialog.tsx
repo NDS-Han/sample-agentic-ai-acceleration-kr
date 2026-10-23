@@ -45,6 +45,11 @@ interface FormState {
   display_name: string;
   context_window: string;
   max_output_tokens: string;
+  // 모델 레벨 크로스계정 라우팅(0049) — 이 모델의 호출이 assume 할 계정.
+  // 세 칸 전부 비우면 미지정(클라이언트 프로필 폴백). ARN 이 있으면 region 필수.
+  account_role_arn: string;
+  external_id: string;
+  region: string;
 }
 
 /** 1K 단가 → 1M 표시값. DB 는 8자리 소수라 ×1000 은 5자리까지 의미가 있고,
@@ -100,6 +105,9 @@ function getInitialState(editModel?: ModelListItem): FormState {
       display_name: editModel.display_name ?? '',
       context_window: editModel.context_window != null ? String(editModel.context_window) : '',
       max_output_tokens: editModel.max_tokens != null ? String(editModel.max_tokens) : '',
+      account_role_arn: editModel.account_role_arn ?? '',
+      external_id: editModel.external_id ?? '',
+      region: editModel.region ?? '',
     };
   }
   return {
@@ -122,6 +130,9 @@ function getInitialState(editModel?: ModelListItem): FormState {
     display_name: '',
     context_window: '',
     max_output_tokens: '',
+    account_role_arn: '',
+    external_id: '',
+    region: '',
   };
 }
 
@@ -178,6 +189,12 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
       // required 는 빈 문자열만 막고 공백만의 값은 통과시키므로 trim 한다.
       // 공백만 → undefined → 편집은 서버가 기존 값을 유지(덮어쓰기 없음).
       display_name: form.display_name.trim() || undefined,
+      // 라우팅(0049) — 빈 칸은 undefined 가 아니라 그대로 보내 action 이 null 로
+      // 변환한다. 편집에서 ARN 을 비우면 서버가 세 필드를 한 단위로 해제하므로
+      // "지우고 싶다" 가 실제로 지워져야 한다(생략=유지와 구별).
+      account_role_arn: form.account_role_arn.trim() || undefined,
+      external_id: form.external_id.trim() || undefined,
+      region: form.region.trim() || undefined,
       // 빈 문자열 → 키 생략(생성: 서버 default null / 편집: action 이 null 로 바꿔
       // "미상으로 되돌림"). 숫자 아닌 값은 NaN 으로 보내 zod 가 필드 에러로 돌려준다.
       ...(form.context_window.trim() !== '' && { context_window: Number(form.context_window) }),
@@ -706,6 +723,65 @@ export function CreateModelDialog({ isOpen, onClose, editModel }: CreateModelDia
                 placeholder="e.g. 64000"
               />
               {fieldErrors.max_output_tokens && <FormError error={fieldErrors.max_output_tokens} />}
+            </div>
+          </div>
+
+          {/* 라우팅(0049) — 이 모델의 호출이 assume 할 AWS 계정. 전부 비우면
+              미지정(클라이언트 프로필/기본 계정). 편집에서 ARN 을 지우면
+              서버가 세 필드를 한 단위로 해제한다. 대상 계정에 role+trust 가
+              미리 만들어져 있어야 한다 — 여기서 만드는 게 아니다. */}
+          <div className="space-y-3 rounded-md border border-dashed border-border p-3">
+            <div>
+              <span className="text-sm font-medium">
+                {t('routingLabel')}{' '}
+                <span className="text-muted-foreground text-xs">({t('routingOptional')})</span>
+              </span>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('routingHint')}</p>
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="account_role_arn" className="text-xs text-muted-foreground">{t('routingRoleArn')}</label>
+              <input
+                id="account_role_arn"
+                name="account_role_arn"
+                type="text"
+                value={form.account_role_arn}
+                onChange={handleChange}
+                maxLength={512}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="arn:aws:iam::123456789012:role/name"
+              />
+              {fieldErrors.account_role_arn && <FormError error={fieldErrors.account_role_arn} />}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="region" className="text-xs text-muted-foreground">{t('routingRegion')}</label>
+              <input
+                id="region"
+                name="region"
+                type="text"
+                value={form.region}
+                onChange={handleChange}
+                maxLength={64}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder="e.g. ap-south-1"
+              />
+              {fieldErrors.region && <FormError error={fieldErrors.region} />}
+            </div>
+
+            <div className="space-y-1">
+              <label htmlFor="external_id" className="text-xs text-muted-foreground">{t('routingExternalId')}</label>
+              <input
+                id="external_id"
+                name="external_id"
+                type="text"
+                value={form.external_id}
+                onChange={handleChange}
+                maxLength={256}
+                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                placeholder={t('routingExternalIdPlaceholder')}
+              />
+              {fieldErrors.external_id && <FormError error={fieldErrors.external_id} />}
             </div>
           </div>
 

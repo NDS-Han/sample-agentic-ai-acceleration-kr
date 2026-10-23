@@ -61,6 +61,9 @@ const model: ModelListItem = {
   description: null,
   display_name: null,
   allowed_clients: null,
+  account_role_arn: null,
+  external_id: null,
+  region: null,
 };
 
 function renderPanel() {

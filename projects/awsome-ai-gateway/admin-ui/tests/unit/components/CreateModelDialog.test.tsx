@@ -232,6 +232,9 @@ const editModelFixture: ModelListItem = {
   description: 'Cowork Opus',
   display_name: 'Cowork Opus',
   allowed_clients: null,
+  account_role_arn: null,
+  external_id: null,
+  region: null,
 };
 
 describe('CreateModelDialog — provider 는 편집 불가 (조용한 유실 회귀)', () => {

@@ -50,6 +50,9 @@ function makeModel(overrides: Partial<ModelListItem>): ModelListItem {
     description: null,
     display_name: null,
     allowed_clients: null,
+    account_role_arn: null,
+    external_id: null,
+    region: null,
     ...overrides,
   };
 }
@@ -97,5 +100,24 @@ describe('ModelsTable — LiteLLM 스타일 확장 행', () => {
   it('alias === model_id 이면 접힌 행에서 중복 표시하지 않는다', () => {
     render(<ModelsTable models={[makeModel({ alias: 'same-id', model_id: 'same-id', display_name: 'Nice Name' })]} />);
     expect(screen.getAllByText('same-id').length).toBe(1);
+  });
+
+  it('account_role_arn 이 있으면 마스킹된 계정 배지를 보이고 없으면 숨긴다', () => {
+    render(
+      <ModelsTable
+        models={[
+          makeModel({
+            alias: 'routed',
+            display_name: 'Routed',
+            account_role_arn: 'arn:aws:iam::610156625835:role/gw-test',
+            region: 'ap-south-1',
+          }),
+          makeModel({ alias: 'plain', display_name: 'Plain' }),
+        ]}
+      />
+    );
+    // 12자리 계정 ID 가 아니라 앞뒤 마스킹 형태로 렌더된다.
+    expect(screen.getByText('→6101…5835')).toBeInTheDocument();
+    expect(screen.queryByText('610156625835')).not.toBeInTheDocument();
   });
 });
