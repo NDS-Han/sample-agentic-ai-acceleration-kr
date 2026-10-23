@@ -24,6 +24,9 @@ def _make_model(alias: str = "claude-sonnet") -> ModelAlias:
     m.status = ModelStatus.ACTIVE
     m.description = "Test model"
     m.display_name = "Claude Sonnet"  # ModelResponse.display_name (str | None)
+    m.account_role_arn = None  # ModelResponse routing fields (str | None)
+    m.external_id = None
+    m.region = None
     m.created_at = datetime.now(timezone.utc)
     m.updated_at = datetime.now(timezone.utc)
     return m

@@ -95,6 +95,13 @@ class ModelAlias(Base):
     #: 스펙 정보(옵션) — 모델 등록/수정 시 운영자가 입력한다(NULL = 미상).
     context_window: Mapped[int | None] = mapped_column(Integer, nullable=True)
     max_output_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    #: 모델 레벨 크로스계정 라우팅(migration 0049). routing_profiles 의 동명
+    #: 필드와 같은 의미 — 모델에 ARN 이 있으면 클라이언트 프로필보다 우선해서
+    #: 그 계정으로 호출한다. ARN 은 설정 시 region 이 반드시 필요하다
+    #: (스키마에서 강제). 전부 NULL = 라우팅 미지정(프로필 폴백).
+    account_role_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

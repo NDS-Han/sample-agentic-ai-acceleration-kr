@@ -7,6 +7,7 @@ from decimal import Decimal
 from typing import Literal
 
 import ipaddress
+import re
 import socket
 from urllib.parse import urlparse
 
@@ -164,6 +165,53 @@ def _validate_endpoint_url(v: str | None) -> str | None:
     return v
 
 
+# ── 모델 레벨 크로스계정 라우팅 검증 (migration 0049) ──
+#
+# IAM role ARN 의 문법(arn:파티션:iam::계정:role/경로). aws-cn/aws-us-gov 등
+# 파티션을 굳이 좁히지 않는다 — 게이트웨이가 호출할 수 있는 계정은 상대방 trust
+# 정책이 결정하므로, 여기서는 형식만 거른다.
+_ROLE_ARN_RE = re.compile(
+    r"^arn:aws[a-zA-Z-]*:iam::[0-9]{12}:role/[\w+=,.@/-]+$"
+)
+# AWS 리전 표기 — ap-south-1 / us-east-1 / us-gov-west-1 / il-central-1 등.
+# 소문자-세그먼트 둘 이상 뒤에 숫자 suffix.
+_REGION_RE = re.compile(r"^[a-z]{2}(-[a-z0-9]+)+-\d$")
+
+
+def _validate_account_role_arn(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    if not _ROLE_ARN_RE.match(v):
+        raise ValueError(
+            "account_role_arn은 IAM role ARN 형식이어야 합니다 "
+            "(arn:aws:iam::<12자리 계정>:role/<이름>)"
+        )
+    return v
+
+
+def _validate_routing_region(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    if not _REGION_RE.match(v):
+        raise ValueError("region은 AWS 리전 형식이어야 합니다 (예: ap-south-1)")
+    return v
+
+
+def _validate_routing_external_id(v: str | None) -> str | None:
+    if v is None:
+        return None
+    v = v.strip()
+    # AWS ExternalId 허용 문자셋(2~1224자). 게이트웨이는 이 값을 assume_role
+    # 파라미터로 그대로 넘기므로 형식만 제한한다.
+    if not re.match(r"^[\w+=,.@:/-]{2,1224}$", v):
+        raise ValueError(
+            "external_id는 2자 이상의 [\\w+=,.@:/-] 문자여야 합니다"
+        )
+    return v
+
+
 # ── Requests ──
 
 
@@ -227,6 +275,13 @@ class ModelCreateRequest(BaseModel):
     #:   목록           그 앱들만 허용
     allowed_clients: list[str] | None = None
 
+    #: 모델 레벨 크로스계정 라우팅(migration 0049) — 이 모델의 호출이 assume
+    #: 할 대상 계정 role. 세 필드 모두 선택이지만, ARN 을 지정하면 region 도
+    #: 반드시 필요하다(아래 validator). 전부 비우면 클라이언트 프로필 라우팅.
+    account_role_arn: str | None = Field(default=None, max_length=512)
+    external_id: str | None = Field(default=None, max_length=256)
+    region: str | None = Field(default=None, max_length=64)
+
     @field_validator("allowed_clients")
     @classmethod
     def _validate_clients(cls, v: list[str] | None) -> list[str] | None:
@@ -238,6 +293,34 @@ class ModelCreateRequest(BaseModel):
     @classmethod
     def _check_endpoint_url(cls, v: str | None) -> str | None:
         return _validate_endpoint_url(v)
+
+    @field_validator("account_role_arn")
+    @classmethod
+    def _check_role_arn(cls, v: str | None) -> str | None:
+        return _validate_account_role_arn(v)
+
+    @field_validator("region")
+    @classmethod
+    def _check_region(cls, v: str | None) -> str | None:
+        return _validate_routing_region(v)
+
+    @field_validator("external_id")
+    @classmethod
+    def _check_external_id(cls, v: str | None) -> str | None:
+        return _validate_routing_external_id(v)
+
+    @model_validator(mode="after")
+    def _arn_needs_region(self):
+        # ARN 없이 region/external_id 만 있으면 게이트웨이가 읽지 않는 dead
+        # data 가 되고, ARN 있는데 region 이 없으면 대상 리전을 알 수 없어
+        # 호출이 보장되지 않는다 — 둘 다 저장 시점에 거부한다.
+        if self.account_role_arn and not self.region:
+            raise ValueError("account_role_arn 설정 시 region이 필요합니다")
+        if not self.account_role_arn and (self.region or self.external_id):
+            raise ValueError(
+                "region/external_id는 account_role_arn과 함께 설정해야 합니다"
+            )
+        return self
 
     @model_validator(mode="after")
     def _long_tier_is_one_unit(self):
@@ -314,6 +397,13 @@ class ModelUpdateRequest(BaseModel):
     #: description/display_name 과 동일하게 서비스에서 처리한다.
     context_window: int | None = Field(default=None, ge=1)
     max_output_tokens: int | None = Field(default=None, ge=1)
+    #: 모델 레벨 크로스계정 라우팅 — 생략=유지, 명시적 null=해제(서비스 계층의
+    #: model_fields_set 규칙). ARN 을 지웠다가 다시 설정하면 region 도 필요 —
+    #: 필드 단위 형식만 여기서 검증하고, 병합 후 상태 검증(ARN 있는데 region
+    #: 없음)은 서비스가 기존 행과 합쳐 확인한다.
+    account_role_arn: str | None = Field(default=None, max_length=512)
+    external_id: str | None = Field(default=None, max_length=256)
+    region: str | None = Field(default=None, max_length=64)
 
     @field_validator("allowed_clients")
     @classmethod
@@ -324,6 +414,21 @@ class ModelUpdateRequest(BaseModel):
     @classmethod
     def _check_update_endpoint_url(cls, v: str | None) -> str | None:
         return _validate_endpoint_url(v)
+
+    @field_validator("account_role_arn")
+    @classmethod
+    def _check_update_role_arn(cls, v: str | None) -> str | None:
+        return _validate_account_role_arn(v)
+
+    @field_validator("region")
+    @classmethod
+    def _check_update_region(cls, v: str | None) -> str | None:
+        return _validate_routing_region(v)
+
+    @field_validator("external_id")
+    @classmethod
+    def _check_update_external_id(cls, v: str | None) -> str | None:
+        return _validate_routing_external_id(v)
 
 
 class PricingRequest(BaseModel):
@@ -445,6 +550,10 @@ class ModelResponse(BaseModel):
     #: 스펙 정보 — ``None`` = 미상(수동 커스텀 모델).
     context_window: int | None = None
     max_output_tokens: int | None = None
+    #: 모델 레벨 크로스계정 라우팅(0049) — None = 미지정(클라이언트 프로필 폴백).
+    account_role_arn: str | None = None
+    external_id: str | None = None
+    region: str | None = None
     current_pricing: ModelPricingResponse | None = None
     created_at: datetime
     updated_at: datetime

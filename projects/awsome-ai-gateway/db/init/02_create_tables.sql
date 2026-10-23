@@ -228,6 +228,14 @@ ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS display_name VARCHAR(12
 -- No DEFAULT. NULL means "unrestricted"; DEFAULT '{}' would mean "no app may use this
 -- model" and would deny every app on every existing alias the moment it applied.
 ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS allowed_clients TEXT[];
+
+-- Model-level cross-account routing added by migration 0049. Same load-bearing
+-- rule as allowed_clients above: both services' ORM declare these columns, so
+-- every model_aliases SELECT includes them — a DB built from init SQL alone
+-- would UndefinedColumn on the whole inference path without these ALTERs.
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS account_role_arn VARCHAR(512);
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS external_id VARCHAR(256);
+ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS region VARCHAR(64);
 CREATE TABLE IF NOT EXISTS model.model_pricings (
     id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),

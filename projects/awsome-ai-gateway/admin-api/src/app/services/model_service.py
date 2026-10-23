@@ -125,6 +125,10 @@ class ModelService:
             max_output_tokens=data.max_output_tokens,
             # None = 제한 없음(하위호환 기본값), [] = 허용 앱 없음, 목록 = 그 앱만.
             allowed_clients=data.allowed_clients,
+            # 모델 레벨 크로스계정 라우팅(0049) — 전부 NULL = 프로필 폴백.
+            account_role_arn=data.account_role_arn,
+            external_id=data.external_id,
+            region=data.region,
             created_by=actor.user_id,
         )
         await repo.create_model(model)
@@ -232,6 +236,14 @@ class ModelService:
                     if auto_tier
                     else None
                 ),
+                # 모델 레벨 라우팅(0049) — "이 모델이 어느 계정으로 가는지" 는
+                # 비용 귀속이 갈리는 설정이라 생성 시점 선언도 추적한다.
+                # external_id 는 trust 공유 비밀이라 길이만 남긴다.
+                "account_role_arn": model.account_role_arn,
+                "region": model.region,
+                "external_id": (
+                    f"***({len(model.external_id)}자)" if model.external_id else None
+                ),
             }},
             ip_address=ip_address,
             request_id=request_id,
@@ -302,6 +314,47 @@ class ModelService:
         if _cleared:
             await session.flush()
 
+        # ── 모델 레벨 라우팅(account_role_arn/external_id/region)의 병합 규칙 ──
+        #
+        # 세 필드는 한 단위다: ARN 을 명시적 null 로 지우면 region/external_id
+        # 도 함께 지운다 — ARN 없는 라우팅 필드는 게이트웨이가 읽지 않는 dead
+        # data 라 남기면 "라우팅이 설정된 것처럼" 보인다. 반대로 ARN 만 지우고
+        # region 을 남기고 싶은 용도는 없다(다시 ARN 을 쓸 때 어차피 같이 입력).
+        if "account_role_arn" in data.model_fields_set and data.account_role_arn is None:
+            for field in ("account_role_arn", "external_id", "region"):
+                setattr(model, field, None)
+                update_kwargs[field] = None
+            await session.flush()
+        else:
+            # 개별 해제 — external_id:null 은 ExternalId 만 지우고(선택 필드라
+            # 유효), region:null 은 ARN 이 남아 있으면 아래 병합 검증이 거부한다.
+            # 생략과의 구별은 위와 같은 model_fields_set 규칙.
+            _cleared_route = False
+            for field in ("external_id", "region"):
+                if field in data.model_fields_set and getattr(data, field) is None:
+                    setattr(model, field, None)
+                    update_kwargs[field] = None
+                    _cleared_route = True
+            if _cleared_route:
+                await session.flush()
+
+        # 병합 후 상태 검증 — update 는 부분 갱신이라 스키마 단독으로는
+        # "ARN 있는데 region 없음" 을 잡을 수 없다. 예: 기존 행에 region 이
+        # 없는 상태에서 ARN 만 추가하거나, ARN 을 유지한 채 region 만 null.
+        # getattr 방어는 _to_response 와 같은 이유(구 스키마/테스트 가짜).
+        _m_arn = getattr(model, "account_role_arn", None)
+        _m_ext = getattr(model, "external_id", None)
+        _m_reg = getattr(model, "region", None)
+        if _m_arn is not None and _m_reg is None:
+            raise ValidationError(
+                "account_role_arn 설정 시 region이 필요합니다 "
+                "(기존 행에 region이 없어 함께 보내야 합니다)"
+            )
+        if _m_arn is None and (_m_ext is not None or _m_reg is not None):
+            raise ValidationError(
+                "region/external_id는 account_role_arn과 함께 설정해야 합니다"
+            )
+
         pricing = await repo.get_current_pricing(alias)
 
         # pmid 가 구간요금 모델로 바뀌었는데 열린 가격 행이 무티어면 임계 초과
@@ -339,6 +392,13 @@ class ModelService:
             _keys,
         )
 
+        # external_id 는 대상 계정 trust 정책이 검증하는 공유 비밀 — 감사 로그는
+        # 조회면이 넓으므로 평문으로 남기지 않는다(길이만 남겨 설정 여부는 추적).
+        _audit_kwargs = dict(update_kwargs)
+        _eid = _audit_kwargs.get("external_id")
+        if isinstance(_eid, str) and _eid:
+            _audit_kwargs["external_id"] = f"***({len(_eid)}자)"
+
         await audit_logger.log(
             session,
             actor_user_id=actor.user_id,
@@ -347,7 +407,7 @@ class ModelService:
             action="UPDATE_MODEL",
             resource_type="ModelAlias",
             resource_id=alias,
-            changes={"after": update_kwargs},
+            changes={"after": _audit_kwargs},
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -988,6 +1048,11 @@ class ModelService:
             display_name=model.display_name or model.alias,
             context_window=model.context_window,
             max_output_tokens=model.max_output_tokens,
+            # getattr 방어 — 롤링 배포 창의 구 스키마 행이나 테스트 가짜 객체에
+            # 컬럼이 없어도 None(라우팅 미지정)으로 읽는다.
+            account_role_arn=getattr(model, "account_role_arn", None),
+            external_id=getattr(model, "external_id", None),
+            region=getattr(model, "region", None),
             current_pricing=pricing_resp,
             created_at=model.created_at,
             updated_at=model.updated_at,

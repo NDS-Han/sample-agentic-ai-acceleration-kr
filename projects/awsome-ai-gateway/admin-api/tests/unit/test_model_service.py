@@ -8,11 +8,11 @@ from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from pydantic import ValidationError
+from pydantic import ValidationError, ValidationError as PydanticValidationError
 
 from app.core.auth import CurrentUser
 from app.core.cache_invalidation import CacheInvalidationManager
-from app.core.exceptions import ConflictError, NotFoundError
+from app.core.exceptions import ConflictError, NotFoundError, ValidationError as AppValidationError
 from app.models.model import ApiFormat, ModelAlias, ModelPricing, ModelStatus, Provider
 from app.schemas.models import ModelCreateRequest, ModelUpdateRequest, PricingRequest, StatusPatchRequest
 from app.schemas.common import ApiFormatEnum, ProviderEnum
@@ -42,6 +42,11 @@ def _make_model(
     m.display_name = display_name  # _to_response reads display_name; MagicMock would yield a non-str → pydantic error
     m.context_window = context_window
     m.max_output_tokens = max_output_tokens
+    # 모델 레벨 라우팅(0049) — spec mock 은 미설정 속성을 Mock 으로 돌려주므로
+    # str|None 필드라도 명시하지 않으면 _to_response 의 pydantic 검증이 깨진다.
+    m.account_role_arn = None
+    m.external_id = None
+    m.region = None
     m.created_at = datetime.now(timezone.utc)
     m.updated_at = datetime.now(timezone.utc)
     return m
@@ -344,6 +349,253 @@ class TestSpecFields:
         assert "context_window" not in repo.update_model.call_args.kwargs
         assert "max_output_tokens" not in repo.update_model.call_args.kwargs
         assert model.context_window == 200000
+
+
+_TEST_ARN = "arn:aws:iam::123456789012:role/llm-gateway-test-bedrock"
+
+
+class TestModelLevelRouting:
+    """모델 레벨 크로스계정 라우팅 필드(migration 0049)의 스키마·병합 규칙."""
+
+    async def test_create_model_persists_routing_fields(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser, mock_redis: AsyncMock
+    ):
+        data = ModelCreateRequest(
+            alias="claude-sonnet",
+            provider=ProviderEnum.BEDROCK,
+            provider_model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+            api_format=ApiFormatEnum.BEDROCK_NATIVE,
+            input_price_per_1k_tokens=Decimal("0.003"),
+            output_price_per_1k_tokens=Decimal("0.015"),
+            account_role_arn=_TEST_ARN,
+            external_id="gw-external",
+            region="ap-south-1",
+        )
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.alias_exists_ci = AsyncMock(return_value=False)
+
+            async def _set_timestamps(model):
+                model.created_at = datetime.now(timezone.utc)
+                model.updated_at = datetime.now(timezone.utc)
+
+            repo.create_model = AsyncMock(side_effect=_set_timestamps)
+            repo.create_pricing = AsyncMock()
+            mock_audit.log = AsyncMock()
+
+            result = await model_service.create_model(mock_session, data=data, actor=admin_user)
+
+        created = repo.create_model.call_args.args[0]
+        assert created.account_role_arn == _TEST_ARN
+        assert created.external_id == "gw-external"
+        assert created.region == "ap-south-1"
+        assert result.account_role_arn == _TEST_ARN
+        assert result.region == "ap-south-1"
+
+    def test_create_schema_rejects_arn_without_region(self):
+        # ARN 을 지정하면 대상 리전이 없으면 호출 리전을 알 수 없다 — 저장 전 거부.
+        with pytest.raises(PydanticValidationError):
+            ModelCreateRequest(
+                alias="x",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="m",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.001"),
+                account_role_arn=_TEST_ARN,
+            )
+
+    def test_create_schema_rejects_region_without_arn(self):
+        # ARN 없는 region/external_id 는 게이트웨이가 읽지 않는 dead data — 거부.
+        with pytest.raises(PydanticValidationError):
+            ModelCreateRequest(
+                alias="x",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="m",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.001"),
+                region="ap-south-1",
+            )
+
+    def test_create_schema_rejects_malformed_arn(self):
+        with pytest.raises(PydanticValidationError):
+            ModelCreateRequest(
+                alias="x",
+                provider=ProviderEnum.BEDROCK,
+                provider_model_id="m",
+                api_format=ApiFormatEnum.BEDROCK_NATIVE,
+                input_price_per_1k_tokens=Decimal("0.001"),
+                output_price_per_1k_tokens=Decimal("0.001"),
+                account_role_arn="not-an-arn",
+                region="ap-south-1",
+            )
+
+    async def test_update_explicit_null_arn_clears_all_three(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # ARN 해제는 세 필드를 한 단위로 지운다 — ARN 없는 잔여 라우팅 필드는
+        # 게이트웨이가 읽지 않는 dead data 라 "설정된 것처럼" 보이게 남기면 안 된다.
+        data = ModelUpdateRequest(account_role_arn=None)
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN
+        model.external_id = "gw-external"
+        model.region = "ap-south-1"
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            result = await model_service.update_model(
+                mock_session, alias="claude-sonnet", data=data, actor=admin_user
+            )
+
+        assert model.account_role_arn is None
+        assert model.external_id is None
+        assert model.region is None
+        assert result.account_role_arn is None
+        mock_session.flush.assert_awaited()
+
+    async def test_update_arn_without_region_rejected_when_row_has_none(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # 기존 행에 region 이 없는데 ARN 만 추가 — 병합 후 불완전 상태이므로 거부.
+        data = ModelUpdateRequest(account_role_arn=_TEST_ARN)
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN  # repo 반영 후 상태를 흉내
+        model.region = None
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            mock_audit.log = AsyncMock()
+
+            with pytest.raises(AppValidationError):
+                await model_service.update_model(
+                    mock_session, alias="claude-sonnet", data=data, actor=admin_user
+                )
+
+    async def test_update_omitted_routing_fields_are_preserved(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        data = ModelUpdateRequest(provider_model_id="new-id")
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN
+        model.external_id = "gw-external"
+        model.region = "ap-south-1"
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_by_alias = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(mock_session, alias="claude-sonnet", data=data, actor=admin_user)
+
+        for field in ("account_role_arn", "external_id", "region"):
+            assert field not in repo.update_model.call_args.kwargs
+        assert model.account_role_arn == _TEST_ARN
+        assert model.region == "ap-south-1"
+
+    async def test_update_region_without_arn_rejected(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # ARN 없는 행에 region 만 추가 — dead data 가 되므로 거부.
+        data = ModelUpdateRequest(region="ap-south-1")
+        model = _make_model()
+        model.region = "ap-south-1"  # repo 반영 후 상태
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            mock_audit.log = AsyncMock()
+
+            with pytest.raises(AppValidationError):
+                await model_service.update_model(
+                    mock_session, alias="claude-sonnet", data=data, actor=admin_user
+                )
+
+    async def test_update_explicit_null_external_id_clears_only_it(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # ExternalId 는 선택 필드 — 단독 명시적 null 은 그 필드만 지운다.
+        # ARN+region 은 유지되고, 명시적 null 이 아니면(생략) 건드리지 않는다.
+        data = ModelUpdateRequest(external_id=None)
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN
+        model.external_id = "gw-external"
+        model.region = "ap-south-1"
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(
+                mock_session, alias="claude-sonnet", data=data, actor=admin_user
+            )
+
+        assert model.external_id is None
+        assert model.account_role_arn == _TEST_ARN
+        assert model.region == "ap-south-1"
+        mock_session.flush.assert_awaited()
+
+    async def test_update_explicit_null_region_with_arn_rejected(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # region 만 지우면 ARN 은 남는데 대상 리전을 모른다 — 병합 후 검증이 거부.
+        data = ModelUpdateRequest(region=None)
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN
+        model.external_id = "gw-external"
+        model.region = "ap-south-1"
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            mock_audit.log = AsyncMock()
+
+            with pytest.raises(AppValidationError):
+                await model_service.update_model(
+                    mock_session, alias="claude-sonnet", data=data, actor=admin_user
+                )
+
+    async def test_update_audit_masks_external_id(
+        self, model_service: ModelService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        # external_id 는 trust 정책의 공유 비밀 — 감사 로그에 평문으로 남기지 않는다.
+        data = ModelUpdateRequest(external_id="super-secret-ext")
+        model = _make_model()
+        model.account_role_arn = _TEST_ARN
+        model.external_id = "super-secret-ext"
+        model.region = "ap-south-1"
+
+        with patch("app.services.model_service.ModelRepository") as MockRepo, \
+             patch("app.services.model_service.audit_logger") as mock_audit:
+            repo = MockRepo.return_value
+            repo.update_model = AsyncMock(return_value=model)
+            repo.get_current_pricing = AsyncMock(return_value=_make_pricing())
+            mock_audit.log = AsyncMock()
+
+            await model_service.update_model(
+                mock_session, alias="claude-sonnet", data=data, actor=admin_user
+            )
+
+        changes = mock_audit.log.call_args.kwargs["changes"]["after"]
+        assert changes["external_id"] != "super-secret-ext"
+        assert changes["external_id"].startswith("***")
 
 
 class TestSetPricing:
