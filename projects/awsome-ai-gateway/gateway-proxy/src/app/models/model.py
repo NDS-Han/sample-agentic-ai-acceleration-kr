@@ -91,6 +91,13 @@ class ModelAlias(Base):
     allowed_clients: Mapped[list[str] | None] = mapped_column(
         ARRAY(String), nullable=True, default=None
     )
+    #: 모델 레벨 크로스계정 라우팅(migration 0049) — allowed_clients 와 같은
+    #: load-bearing 규칙: 이 선언이 들어가면 모든 SELECT 에 포함되므로
+    #: db/init/02_create_tables.sql 의 idempotent ALTER 도 필수다.
+    #: 세 필드 전부 NULL = 라우팅 미지정 → 클라이언트 프로필 폴백(무회귀).
+    account_role_arn: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    region: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str] = mapped_column(UUID(as_uuid=False), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(

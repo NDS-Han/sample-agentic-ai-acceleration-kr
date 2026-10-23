@@ -184,7 +184,7 @@ async def test_credentials_refresh_before_hard_expiry():
     await _sign(signer, role_arn=role)
     assert sts.assume_role.call_count == 1
 
-    expires_at = signer._creds[role].expires_at
+    expires_at = signer._creds[(role, "")].expires_at
     # Just inside the skew window: still cached.
     now = expires_at - 301
     await _sign(signer, role_arn=role)
@@ -203,6 +203,28 @@ async def test_concurrent_cross_account_signs_assume_once():
     role = "arn:aws:iam::333344445555:role/x"
     await asyncio.gather(*[_sign(signer, role_arn=role) for _ in range(8)])
     assert sts.assume_role.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_same_role_different_external_id_does_not_share_creds():
+    """모델 레벨 라우팅(0049)으로 같은 롤을 다른 ExternalId 로 참조할 수 있다.
+
+    캐시 키가 role_arn 단독이면 A의 ExternalId 로 딴 세션이 B 요청에 재사용되고,
+    한쪽의 assume 실패 백오프가 다른 쪽을 막는다 — (arn, ext) 키로 격리돼야 한다.
+    """
+    role = "arn:aws:iam::333344445555:role/x"
+    sts = _sts_returning()
+    signer = _signer(sts=sts)
+
+    await _sign(signer, role_arn=role, external_id="ext-a")
+    await _sign(signer, role_arn=role, external_id="ext-b")
+    await _sign(signer, role_arn=role, external_id="ext-a")  # cache hit
+
+    assert sts.assume_role.call_count == 2  # ext 별로 한 번씩, 세 번째는 캐시
+    ext_ids = [c.kwargs["ExternalId"] for c in sts.assume_role.call_args_list]
+    assert ext_ids == ["ext-a", "ext-b"]
+    assert (role, "ext-a") in signer._creds
+    assert (role, "ext-b") in signer._creds
 
 
 @pytest.mark.asyncio

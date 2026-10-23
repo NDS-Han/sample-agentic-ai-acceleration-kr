@@ -57,6 +57,64 @@ class ModelInactiveError(LookupError):
     """
 
 
+def model_account_route(model_config) -> tuple[str, str, str | None] | None:
+    """모델 레벨 크로스계정 라우팅(migration 0049) → (role_arn, region, external_id).
+
+    alias 행에 ``account_role_arn`` 이 있으면 **클라이언트 routing_profile 보다
+    우선**한다 — "이 모델은 어느 계정의 Bedrock 으로 갈지" 를 모델 관리에서
+    선언하는 기능이다. 모든 디스패치 경로(messages invoke·count_tokens·Mantle·
+    openai_compat signer)가 이 하나를 써야 한다 — 경로마다 병합 규칙이 갈리면
+    invoke=계정A / count_tokens=계정B 같은 무음 스플릿이 된다.
+
+    ARN 만 있고 region 이 NULL 인 행은 admin API 검증으로는 만들 수 없는
+    직접-SQL 상태다 — 대상 리전을 모른 채 계정 호출을 만들기보다 라우팅
+    미지정(프로필 폴백 = 0049 이전 동작)으로 읽고 loud 하게 남긴다.
+    """
+    if model_config is None:
+        return None
+    arn = getattr(model_config, "account_role_arn", None)
+    if not arn:
+        return None
+    region = getattr(model_config, "region", None)
+    if not region:
+        logger.error(
+            "model_routing_incomplete_region",
+            alias=getattr(model_config, "alias", None),
+            hint="account_role_arn 설정 행에 region 이 NULL — 프로필 라우팅으로 폴백",
+        )
+        return None
+    return (arn, region, getattr(model_config, "external_id", None))
+
+
+def apply_model_account_route(profile, model_config, *, client: str | None = None):
+    """프로필에 모델 레벨 계정 라우팅을 입힌 복사본을 돌려준다.
+
+    모델 ARN 이 없으면 profile 을 그대로 반환(무회귀). 있으면
+    ``model_copy(update=...)`` — 원본 프로필은 클라이언트 캐시 공유물이라
+    직접 변형하면 같은 클라이언트의 다른 모델 호출까지 오염된다.
+    프로필이 없는 경로(in-account 기본)에서는 최소 프로필을 합성한다 —
+    signer/브로커는 profile 객체에서 필드를 읽으므로 None 을 그대로 넘기면
+    모델 ARN 이 적용되지 않는다.
+    """
+    route = model_account_route(model_config)
+    if route is None:
+        return profile
+    arn, region, external_id = route
+    if profile is None:
+        from app.schemas.routing import RoutingProfileSchema
+
+        profile = RoutingProfileSchema(
+            client=client or "model", backend="invoke", region=region
+        )
+    return profile.model_copy(
+        update={
+            "account_role_arn": arn,
+            "region": region,
+            "external_id": external_id,
+        }
+    )
+
+
 class ClientModelScopeError(PermissionError):
     """모델 × 앱 축의 거부(:func:`check_client_model_scope`).
 
@@ -153,6 +211,12 @@ def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -
         # getattr 로 읽는다 — 0035 를 적용하지 않은 DB(구 배포와의 롤링 창)에서도
         # 부팅이 죽지 않아야 하고, 그때는 None(제한 없음) = 오늘 동작이다.
         allowed_clients=getattr(alias_row, "allowed_clients", None),
+        # 모델 레벨 크로스계정 라우팅(0049) — allowed_clients 와 같은 getattr
+        # 방어: 롤링 배포 창에 구 스키마 DB 가 서빙될 수 있어 컬럼 부재를
+        # None(라우팅 미지정 = 오늘 동작)으로 읽는다.
+        account_role_arn=getattr(alias_row, "account_role_arn", None),
+        external_id=getattr(alias_row, "external_id", None),
+        region=getattr(alias_row, "region", None),
     )
 
 

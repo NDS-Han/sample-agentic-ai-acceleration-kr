@@ -67,13 +67,17 @@ class SigV4Signer:
         self._sts = sts_client
         self._service = service_name
         self._now = now
-        self._creds: dict[str, _CachedCreds] = {}
+        # 키 = (role_arn, external_id) — 같은 롤을 다른 ExternalId 조건으로
+        # 참조하는 두 모델/프로필이 생기면(모델 레벨 라우팅 0049) 한쪽의 assume
+        # 실패 백오프가 다른 쪽 호출을 막고, 한쪽 ExternalId 로 딴 세션이 다른
+        # 쪽 요청에 재사용된다. 자격증명 자체는 리전 무관이라 키에 region 은 없다.
+        self._creds: dict[tuple[str, str], _CachedCreds] = {}
         self._lock = asyncio.Lock()
         # 키별 단일비행 + 실패 백오프 — 전역 락 안에서 AssumeRole 하던 구조는
         # trust/ExternalId 장애 시 큐잉된 요청 전체를 직렬 재시도로 묶었다
         # (R22 r1 M3). 락은 캐시 판정·태스크 등록에만 쓴다.
-        self._inflight: dict[str, asyncio.Task] = {}
-        self._failures: dict[str, tuple[Exception, float]] = {}
+        self._inflight: dict[tuple[str, str], asyncio.Task] = {}
+        self._failures: dict[tuple[str, str], tuple[Exception, float]] = {}
         # One long-lived botocore session for the in-account path. It owns the
         # refreshable credential object, so building it ONCE is what makes the IRSA
         # web-identity session reusable; a per-request boto3.Session() would re-run the
@@ -112,20 +116,21 @@ class SigV4Signer:
             return await asyncio.get_running_loop().run_in_executor(
                 None, self._in_account_creds
             )
+        key = (role_arn, external_id or "")
         now = self._now()
-        cached = self._creds.get(role_arn)
+        cached = self._creds.get(key)
         if cached and cached.expires_at - _CRED_REFRESH_SKEW > now:
             return cached.creds
-        failure = self._failures.get(role_arn)
+        failure = self._failures.get(key)
         if failure and failure[1] > now:
             reraise_fresh(failure[0])
 
         async with self._lock:
             now = self._now()
-            cached = self._creds.get(role_arn)
+            cached = self._creds.get(key)
             if cached and cached.expires_at - _CRED_REFRESH_SKEW > now:
                 return cached.creds
-            failure = self._failures.get(role_arn)
+            failure = self._failures.get(key)
             if failure and failure[1] > now:
                 reraise_fresh(failure[0])
             if self._sts is None:
@@ -133,21 +138,21 @@ class SigV4Signer:
                     "SigV4Signer has no STS client; cannot assume "
                     f"{role_arn} for the cross-account runtime path"
                 )
-            task = self._inflight.get(role_arn)
+            task = self._inflight.get(key)
             if task is None:
                 task = asyncio.get_running_loop().create_task(
                     self._refresh(role_arn, external_id)
                 )
-                self._inflight[role_arn] = task
+                self._inflight[key] = task
                 task.add_done_callback(
-                    lambda _t, k=role_arn: self._inflight.pop(k, None)
+                    lambda _t, k=key: self._inflight.pop(k, None)
                 )
         try:
             # 취소 전파 차단 — 대기자 취소가 공유 refresh task 를 취소하면
             # 모든 대기 요청이 CancelledError 로 쓰러진다(R22 r2 S1).
             return await asyncio.shield(task)
         except Exception as exc:
-            self._failures[role_arn] = (exc, self._now() + failure_backoff_s(exc))
+            self._failures[key] = (exc, self._now() + failure_backoff_s(exc))
             raise
 
     async def _refresh(
@@ -156,7 +161,9 @@ class SigV4Signer:
         creds, expires_at = await asyncio.get_running_loop().run_in_executor(
             None, lambda: self._assume(role_arn, external_id)
         )
-        self._creds[role_arn] = _CachedCreds(creds=creds, expires_at=expires_at)
+        self._creds[(role_arn, external_id or "")] = _CachedCreds(
+            creds=creds, expires_at=expires_at
+        )
         logger.info("sigv4_xacct_creds_assumed", role_arn=role_arn)
         return creds
 

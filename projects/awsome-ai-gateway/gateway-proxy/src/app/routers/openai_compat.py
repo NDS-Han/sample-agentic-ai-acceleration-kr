@@ -27,7 +27,11 @@ from app.services.fallback_loop import (
     release_reservations,
     unsettled_reservation_guard,
 )
-from app.services.router_service import ModelInactiveError, RouterService
+from app.services.router_service import (
+    ModelInactiveError,
+    RouterService,
+    apply_model_account_route,
+)
 from app.services.streaming import openai_sse_stream, usage_status_of
 
 logger = structlog.get_logger(__name__)
@@ -337,6 +341,9 @@ async def _handle_openai(request: Request, path: str):
                 # A profile is optional on this path; failing to load one must not turn a
                 # servable in-account request into a 500.
                 logger.warning("chat_routing_profile_load_failed", client=client)
+        # 모델 레벨 라우팅(0049) — alias 행의 ARN 이 프로필보다 우선한다.
+        # 프로필이 없는 경로에서도 모델 ARN 만으로 크로스계정이 성립한다.
+        profile = apply_model_account_route(profile, model_config, client=client)
         invoke_kwargs = {"profile": profile, "endpoint": model_config.endpoint, "wire": "chat"}
         # Rewrite the outgoing model id to the CRIS inference-profile id. Unlike the vLLM
         # adapter (which rewrites `model` itself), this adapter must send the body bytes
@@ -855,6 +862,10 @@ async def _handle_responses(request: Request):
     # /v1/responses and absorbs the kwarg. One dict therefore drives every call below,
     # including the web-search loop's per-turn invokes.
     adapter = registry.get(model_config.provider)
+    # 모델 레벨 라우팅(0049) — alias 행의 ARN 이 프로필보다 우선한다.
+    # Mantle plane 의 broker 도 profile.account_role_arn 을 읽으므로 두 평면
+    # 모두 이 한 줄로 커버된다.
+    profile = apply_model_account_route(profile, model_config, client=client)
     invoke_kwargs = {
         "profile": profile,
         "endpoint": model_config.endpoint,

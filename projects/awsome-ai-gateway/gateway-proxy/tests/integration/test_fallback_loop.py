@@ -185,7 +185,7 @@ def _common_kwargs(
         original_model_config=original_config,
         resolve_model_config=_resolve,
         build_candidate_body=_noop_build_body,
-        rewrite_model_id=lambda pmid: pmid,
+        rewrite_model_id=lambda pmid, cfg=None: pmid,
     )
 
 
@@ -807,3 +807,143 @@ class TestCircuitScopeKeysBreaker:
 
         assert result.status == 200
         cb.record_success.assert_awaited_with(None, original_config.provider_model_id, probe_token=None)
+
+
+# ===========================================================================
+# TC-11: 모델 레벨 라우팅(0049) — 후보별 어댑터/회로 차원/리전 재작성
+# ===========================================================================
+
+class TestPerCandidateModelRouting:
+    """모델 레벨 크로스계정 라우팅: alias 행의 ARN 이 후보마다 다를 수 있다.
+
+    폴백 루프가 단일 어댑터·단일 스코프를 재사용하면 후보 B 의 호출이 원본 A 의
+    계정으로 나간다(모델 미존재 에러 또는 다른 계정 과금). adapter_for /
+    circuit_scope_for / rewrite_model_id(cfg) 세 콜백이 후보별 해석을 보장한다.
+    """
+
+    @pytest.mark.asyncio
+    async def test_adapter_for_resolves_each_candidates_adapter(self):
+        """후보 B 는 B 전용 어댑터로 호출된다 — A 의 어댑터(계정)를 재사용하지 않는다."""
+        original_alias = "claude-sonnet-4-6"
+        fallback_alias = "claude-haiku-4-5"
+        original_config = _make_model_config(original_alias)
+        fallback_config = _make_model_config(fallback_alias)
+
+        adapter_a = _make_adapter([(502, _error_bytes(502), {}, TokenUsage())])
+        adapter_b = _make_adapter([
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)),
+        ])
+        cb = _make_cb()
+
+        def _adapter_for(cfg):
+            return adapter_a if cfg.alias == original_alias else adapter_b
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias, fallback_alias],
+            adapter=adapter_a,  # 기본 어댑터 — adapter_for 가 있으면 쓰이지 않아야 한다
+            cb=cb,
+            original_config=original_config,
+            resolve_map={fallback_alias: fallback_config},
+        )
+        kwargs["adapter_for"] = _adapter_for
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        # 원본은 A 어댑터로 1회, 후보는 B 어댑터로 1회 — B 호출이 A 어댑터로 나가지 않는다.
+        assert adapter_a.invoke.await_count == 1
+        assert adapter_b.invoke.await_count == 1
+
+    @pytest.mark.asyncio
+    async def test_circuit_scope_for_keys_per_candidate_account(self):
+        """후보별 계정이 다르면 CB 키도 달라야 한다 — B 계정 장애가 A 회로를 오염시키지 않는다."""
+        original_alias = "claude-sonnet-4-6"
+        fallback_alias = "claude-haiku-4-5"
+        original_config = _make_model_config(original_alias)
+        fallback_config = _make_model_config(fallback_alias)
+
+        adapter = _make_adapter([
+            (502, _error_bytes(502), {}, TokenUsage()),
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)),
+        ])
+        cb = _make_cb()
+
+        def _scope_for(cfg):
+            return f"acct:role-{cfg.alias}:ap-south-1"
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias, fallback_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            resolve_map={fallback_alias: fallback_config},
+        )
+        kwargs["circuit_scope"] = "acct:should-not-be-used:ignored"
+        kwargs["circuit_scope_for"] = _scope_for
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        scoped_orig = f"acct:role-{original_alias}:ap-south-1|{original_config.provider_model_id}"
+        scoped_fb = f"acct:role-{fallback_alias}:ap-south-1|{fallback_config.provider_model_id}"
+        cb.record_failure.assert_awaited_with(None, scoped_orig)
+        cb.record_success.assert_awaited_with(None, scoped_fb, probe_token=None)
+        # 원본의 단일 스코프("should-not-be-used")로 묶인 키는 어디에도 없어야 한다.
+        for call in cb.is_open.await_args_list:
+            assert "should-not-be-used" not in call.args[1]
+
+    @pytest.mark.asyncio
+    async def test_rewrite_model_id_receives_candidate_config(self):
+        """CRIS 접두는 리전 계약 — 후보의 대상 리전으로 재작성돼야 한다."""
+        original_alias = "claude-sonnet-4-6"
+        fallback_alias = "claude-haiku-4-5"
+        original_config = _make_model_config(original_alias, pmid="us.anthropic.claude-sonnet-4-6")
+        fallback_config = _make_model_config(fallback_alias, pmid="us.anthropic.claude-haiku-4-5")
+
+        adapter = _make_adapter([
+            (502, _error_bytes(502), {}, TokenUsage()),
+            (200, _ok_response_bytes(), {}, TokenUsage(input_tokens=1, output_tokens=1, total_tokens=2)),
+        ])
+        cb = _make_cb()
+        rewrite_cfgs = []
+
+        def _rewrite(pmid, cfg=None):
+            rewrite_cfgs.append(cfg)
+            # 후보별 리전 가정: 원본은 us., 후보는 apac. 접두.
+            if cfg is fallback_config:
+                return "apac." + pmid.removeprefix("us.")
+            return pmid
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
+            return None
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias, fallback_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            resolve_map={fallback_alias: fallback_config},
+        )
+        kwargs["rewrite_model_id"] = _rewrite
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 200
+        # 원본·후보 모두 rewrite 를 거치고, 후보 호출엔 후보 config 가 전달됐다.
+        assert len(rewrite_cfgs) == 2
+        assert rewrite_cfgs[1] is fallback_config
+        # 후보 호출의 model_id 가 후보 리전 접두로 재작성됐는지 확인.
+        invoked_model_ids = [c.args[1] for c in adapter.invoke.await_args_list]
+        assert "apac.anthropic.claude-haiku-4-5" in invoked_model_ids

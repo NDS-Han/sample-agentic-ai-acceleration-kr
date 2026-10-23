@@ -84,7 +84,7 @@ async def test_all_candidates_exhausted_returns_bytes_not_iterator():
             {},
             {},
         ),
-        rewrite_model_id=lambda x: x,
+        rewrite_model_id=lambda x, cfg=None: x,
     )
 
     # Must be a FallbackResult with status 503
@@ -125,7 +125,7 @@ async def test_all_candidates_circuit_open_returns_503():
         original_model_config=model_config,
         resolve_model_config=AsyncMock(),
         build_candidate_body=lambda req, cfg, s: (json.dumps(req).encode(), {}, {}),
-        rewrite_model_id=lambda x: x,
+        rewrite_model_id=lambda x, cfg=None: x,
     )
 
     assert result.status == 503

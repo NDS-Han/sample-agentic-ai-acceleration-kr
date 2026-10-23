@@ -30,6 +30,11 @@ def sample_alias_row():
     row.status = "ACTIVE"
     row.description = "Claude Sonnet 4.6"
     row.created_at = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    # 모델 레벨 라우팅(0049) — MagicMock 자동 속성은 None 대신 Mock 을 돌려
+    # _orm_to_schema 의 str|None 검증을 깨뜨리므로 명시적으로 둔다.
+    row.account_role_arn = None
+    row.external_id = None
+    row.region = None
     return row
 
 

@@ -93,7 +93,9 @@ async def test_bearer_expiry_never_outlives_assumed_creds():
         broker = MantleCredentialBroker(sts_client=sts, now=clock.now)
         await broker.bearer_token(_profile())
 
-    cached = broker._bearers[(_profile().account_role_arn, "ap-northeast-1")]
+    # cred 키 = (role_arn, external_id) — 0049에서 ExternalId 격리 추가.
+    p = _profile()
+    cached = broker._bearers[((p.account_role_arn, p.external_id), "ap-northeast-1")]
     # bearer expiry capped to creds_expiry - 60, which is < now+1800
     assert cached.expires_at == creds_expiry_epoch - 60
     assert cached.expires_at < clock.now() + 1800
@@ -177,3 +179,35 @@ async def test_cross_account_branch_still_assumes_role(monkeypatch):
     token = await broker.bearer_token(profile)
     assert token == "TOK"
     sts.assume_role.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_same_role_different_external_id_does_not_share_creds_or_bearer():
+    """모델 레벨 라우팅(0049)으로 같은 롤을 다른 ExternalId 조건으로 참조할 수 있다.
+
+    cred 캐시가 role_arn 단독이면 A 의 ExternalId 로 딴 세션이 B 요청에
+    재사용되고 bearer 까지 잘못 배급된다 — (arn, ext) 쌍으로 격리돼야 한다.
+    """
+    sts = MagicMock()
+    sts.assume_role.return_value = {
+        "Credentials": {
+            "AccessKeyId": "ASIA", "SecretAccessKey": "s", "SessionToken": "t",
+            "Expiration": _future(),
+        }
+    }
+    clock = _Clock(start=1000.0)
+    with patch("app.services.mantle_credentials.BedrockTokenGenerator") as GenCls:
+        GenCls.return_value.get_token.side_effect = ["tok-a", "tok-b"]
+        broker = MantleCredentialBroker(sts_client=sts, now=clock.now)
+        p_a = _profile()
+        p_b = _profile()
+        p_b.external_id = "ext-b"
+        t1 = await broker.bearer_token(p_a)
+        t2 = await broker.bearer_token(p_b)
+
+    assert t1 == "tok-a"
+    assert t2 == "tok-b"
+    # ExternalId 가 다르면 cred 도 별개 — assume_role 은 두 번.
+    assert sts.assume_role.call_count == 2
+    ext_ids = [c.kwargs["ExternalId"] for c in sts.assume_role.call_args_list]
+    assert ext_ids == ["cowork-bedrock", "ext-b"]

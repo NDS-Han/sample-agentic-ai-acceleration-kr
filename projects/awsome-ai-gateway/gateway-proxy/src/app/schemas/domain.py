@@ -137,6 +137,13 @@ class ModelConfigSchema(BaseModel):
     #:    옛 캐시 엔트리는 기본값을 받는다. 기본값을 ``[]`` 로 두면 배포 직후 캐시가
     #:    갈리기 전까지 **모든 모델이 전면 거부**된다.
     allowed_clients: list[str] | None = None
+    #: 모델 레벨 크로스계정 라우팅(migration 0049) — alias 행에 ARN 이 있으면
+    #: 클라이언트 routing_profile 보다 우선해서 그 계정으로 호출한다.
+    #: allowed_clients 와 같은 이유로 기본값 None 이어야 한다: Redis 캐시에서
+    #: 검증 없이 복원되는 필드라 required 이면 배포 직후 stale 엔트리가 500.
+    account_role_arn: str | None = None
+    external_id: str | None = None
+    region: str | None = None
 
 
 class BudgetStatus(BaseModel):

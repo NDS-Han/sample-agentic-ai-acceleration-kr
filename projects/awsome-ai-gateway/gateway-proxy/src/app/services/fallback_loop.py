@@ -350,7 +350,9 @@ async def run_fallback_loop(
     resolve_model_config,  # async callable(alias) -> ModelConfigSchema
     build_candidate_body,  # callable(req_data, model_config, is_stream) -> (bytes, dict, dict)
     # For Bedrock: _rewrite_model_id_for_region; for Mantle: identity
-    rewrite_model_id,  # callable(provider_model_id) -> str
+    # 두 번째 인자로 후보 config 가 온다 — 모델 레벨 라우팅(0049)으로 후보의
+    # 대상 리전이 원본과 다를 수 있어 CRIS 접두는 후보별로 계산해야 한다.
+    rewrite_model_id,  # callable(provider_model_id, candidate_config=None) -> str
     # 프로바이더 호출 결과 지표(선택). None 이면 아무것도 기록하지 않는다.
     metrics=None,
     # ⚠️ 회로 차원(선택). CB 키가 pmid 뿐이면 cross-account(333) 호출의 장애가
@@ -361,6 +363,13 @@ async def run_fallback_loop(
     # 회로 OPEN 전이 시 notifications:system 의 provider_error 발행자(선택).
     # None 이면 알림만 생략한다 — 추론 경로에는 영향 없음.
     degradation_notifier=None,
+    # 후보별 해석 콜백(모델 레벨 라우팅, migration 0049).
+    # adapter 가 하나로 고정이면 후보 B 의 호출이 후보 A 의 계정으로 나간다 —
+    # alias 행에 ARN 이 있으면 후보마다 계정이 다를 수 있으므로 config 로
+    # 어댑터·회로 차원·리전 재작성을 후보별로 계산한다. None = 종전과 같은
+    # 단일 어댑터·단일 스코프(프로필 라우팅만 있는 세계와 동일).
+    adapter_for=None,
+    circuit_scope_for=None,
 ) -> FallbackResult:
     """Run the fallback loop over `try_order`.
 
@@ -410,7 +419,15 @@ async def run_fallback_loop(
 
         pmid = candidate_config.provider_model_id
         # CB 키 = 회로 차원 + pmid — 같은 pmid 라도 계정이 다르면 회로가 다르다(E2E S3-L3).
-        cb_key = f"{circuit_scope}|{pmid}" if circuit_scope else pmid
+        # circuit_scope_for 가 있으면 후보별로 계산한다 — 모델 레벨 라우팅으로
+        # 후보마다 계정이 갈리는데 원본의 스코프로 묶으면 다른 계정의 장애가
+        # 이 계정 회로를 오염시킨다.
+        _cand_scope = (
+            circuit_scope_for(candidate_config)
+            if circuit_scope_for is not None
+            else circuit_scope
+        )
+        cb_key = f"{_cand_scope}|{pmid}" if _cand_scope else pmid
 
         # --- 2. Circuit-breaker gate ---
         probe_token: str | None = None
@@ -477,7 +494,9 @@ async def run_fallback_loop(
             #    사용자는 HTTP 200 을 받으면서 extended thinking 만 조용히 사라진다.
             #    변환은 본문을 만드는 단일 지점에서만 한다.
 
-            call_model_id = rewrite_model_id(pmid)
+            # 후보별 리전 재작성 — 모델 레벨 라우팅으로 후보의 대상 리전이
+            # 원본과 다를 수 있다(CRIS 접두는 리전 계약).
+            call_model_id = rewrite_model_id(pmid, candidate_config)
 
             any_invoked = True
 
@@ -502,14 +521,22 @@ async def run_fallback_loop(
             raise
 
         # --- 6. Invoke ---
+        # 후보별 어댑터 — 이 후보의 alias 에 모델 레벨 ARN 이 있으면 그 계정의
+        # 클라이언트로 나가야 한다. 단일 adapter 재사용이면 후보 B 가 A 의 계정으로
+        # 호출돼 모델 미존재/오과금이 된다.
+        _cand_adapter = (
+            adapter_for(candidate_config)
+            if adapter_for is not None
+            else adapter
+        )
         caught_connection_error = False
         try:
             if is_stream:
-                status, chunk_iter, headers, aws_request_id = await adapter.invoke_stream(
+                status, chunk_iter, headers, aws_request_id = await _cand_adapter.invoke_stream(
                     invoke_body, call_model_id, **cand_stream_kwargs
                 )
             else:
-                status, response_body, headers, usage = await adapter.invoke(
+                status, response_body, headers, usage = await _cand_adapter.invoke(
                     invoke_body, call_model_id, **cand_nonstream_kwargs
                 )
         except (TimeoutError, ConnectionError, OSError) as exc:

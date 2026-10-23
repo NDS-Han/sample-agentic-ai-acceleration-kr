@@ -46,7 +46,11 @@ from app.services.fallback_loop import (
 )
 from app.services.downgrade_loader import DowngradePolicyLoader
 from app.services.fallback_resolver import FallbackResolver, make_same_provider
-from app.services.router_service import RouterService
+from app.services.router_service import (
+    RouterService,
+    apply_model_account_route,
+    model_account_route,
+)
 from app.services.streaming import bedrock_anthropic_sse_stream, usage_status_of
 from app.services.thinking_normalizer import (
     normalize_thinking,
@@ -336,10 +340,35 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     # CB 키 차원 — 회로는 (모델 × 계정) 자원 단위다(E2E S3-L3). 빈 문자열이면
     # 종전과 같은 pmid 단독 키라 in-account 경로는 키가 그대로다.
     _circuit_scope = ""
+    # 후보별 해석 콜백 — Bedrock 분기에서만 정의된다. Mantle 은 단일 어댑터
+    # (계정 라우팅은 profile 에 실린다)이라 None = 기존 단일 어댑터 동작.
+    _adapter_for = None
+    _scope_for = None
     if decision.provider == ProviderType.BEDROCK_MANTLE:
         model_config = decision.model_config
+        # 오버라이드 전 원본을 보존한다 — 폴백 후보에는 각 후보의 모델 레벨
+        # 라우팅을 **원본 클라이언트 프로필** 위에 적용해야 한다. 덮어쓴
+        # decision.profile(원본 모델의 계정)을 후보에 재사용하면 ARN 없는
+        # 후보가 원본의 계정으로 나간다.
+        _client_profile = decision.profile
+        # 모델 레벨 라우팅(0049) — alias 행의 ARN 이 프로필보다 우선한다.
+        # decision.profile 을 덮어쓴 복사본으로 바꿔 두면 Mantle broker 등
+        # 이후 경로가 같은 계정을 본다(단, 폴백 후보는 _client_profile 기준으로
+        # 후보별로 다시 적용한다 — _build_candidate_body 참조).
+        decision.profile = apply_model_account_route(
+            decision.profile, model_config, client=client
+        )
         adapter = registry.get(ProviderType.BEDROCK_MANTLE)
-        _circuit_scope = f"mantle:{decision.endpoint or ''}"
+
+        def _scope_for(cfg) -> str:
+            """후보별 회로 차원 — (엔드포인트 × 계정) 자원 단위."""
+            ep = cfg.endpoint or decision.endpoint or ""
+            mrt = model_account_route(cfg)
+            if mrt is not None:
+                return f"mantle:{ep}:acct:{mrt[0]}:{mrt[1]}"
+            return f"mantle:{ep}"
+
+        _circuit_scope = _scope_for(model_config)
         call_model_id = decision.model_id
         stream_kwargs: dict = {"profile": decision.profile, "endpoint": decision.endpoint}
         nonstream_kwargs: dict = {"profile": decision.profile, "endpoint": decision.endpoint}
@@ -357,30 +386,92 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             mantle_body["stream"] = True
         body = json.dumps(mantle_body).encode()
     else:
-        # Bedrock native. cross-account(claude-code→374): backend=invoke AND account_role_arn
-        # 이면 대상 계정 role 을 assume 한 bedrock-runtime 클라이언트로 호출. account_role_arn
-        # NULL(codex/기본 in-account)이면 기존 in-account adapter 그대로(zero-regression).
+        # Bedrock native. cross-account 는 두 출처가 있다:
+        #   1) 모델 레벨(0049) — alias 행의 ARN. 프로필보다 우선하고 backend 와
+        #      무관하게 적용된다. 관리자가 "이 모델은 저 계정" 을 명시한 것이므로
+        #      assume 실패 시 in-account 로 조용히 나가면(비용이 다른 계정에 붙음)
+        #      선언을 배신한다 — fallback_client 를 주지 않아 fail-closed.
+        #   2) 클라이언트 프로필 — backend=invoke AND account_role_arn. 이쪽은
+        #      관대한 폴백(assume 실패 시 in-account)을 유지한다(기존 계약).
         _prof = decision.profile
-        _xacct = bool(_prof and _prof.backend == "invoke" and _prof.account_role_arn)
-        if _xacct:
-            _provider = getattr(request.app.state, "bedrock_account_client_provider", None)
-            _inacct_adapter = registry.get(ProviderType.BEDROCK)
-            if _provider is not None:
-                _role, _reg, _ext = _prof.account_role_arn, _prof.region, _prof.external_id
-                adapter = BedrockAdapter(
-                    bedrock_client=None,
-                    client_resolver=lambda: _provider.get_client(_role, _reg, _ext),
-                    fallback_client=getattr(_inacct_adapter, "_client", None),  # assume 실패 시 859 폴백
-                )
-                _region_for_rewrite = _prof.region
-                # 대상 계정+리전이 회로 단위다 — 이 계정의 장애가 in-account 회로를 오염시키지 않는다.
-                _circuit_scope = f"acct:{_role}:{_reg or ''}"
-            else:
-                adapter = _inacct_adapter
-                _region_for_rewrite = None
+        _acct_provider = getattr(
+            request.app.state, "bedrock_account_client_provider", None
+        )
+        _inacct_adapter = registry.get(ProviderType.BEDROCK)
+
+        def _adapter_for(cfg):
+            """후보별 어댑터 — 모델 레벨 ARN(0049)이 프로필보다 우선한다.
+
+            폴백 루프가 후보마다 호출한다 — 후보 B 의 호출이 원본 A 의 계정으로
+            나가는 것을 막는 장치. 모델 레벨은 명시 선언이라 assume 실패 시
+            in-account 로 조용히 나가면(비용이 다른 계정에 붙음) 선언을 배신하므로
+            fallback_client 를 주지 않아 fail-closed. 프로필 라우팅은 기존처럼
+            관대한 폴백을 유지한다.
+            """
+            mrt = model_account_route(cfg)
+            if _acct_provider is not None:
+                if mrt is not None:
+                    _r, _g, _e = mrt
+                    return BedrockAdapter(
+                        bedrock_client=None,
+                        client_resolver=lambda: _acct_provider.get_client(_r, _g, _e),
+                        fallback_client=None,
+                    )
+                if (
+                    _prof is not None
+                    and _prof.backend == "invoke"
+                    and _prof.account_role_arn
+                ):
+                    return BedrockAdapter(
+                        bedrock_client=None,
+                        client_resolver=lambda: _acct_provider.get_client(
+                            _prof.account_role_arn, _prof.region, _prof.external_id
+                        ),
+                        fallback_client=getattr(_inacct_adapter, "_client", None),
+                    )
+            return _inacct_adapter
+
+        def _scope_for(cfg) -> str:
+            """후보별 회로 차원 — (모델 × 계정) 자원 단위(E2E S3-L3)."""
+            mrt = model_account_route(cfg)
+            if mrt is not None:
+                return f"acct:{mrt[0]}:{mrt[1]}"
+            if (
+                _prof is not None
+                and _prof.backend == "invoke"
+                and _prof.account_role_arn
+            ):
+                return f"acct:{_prof.account_role_arn}:{_prof.region or ''}"
+            return ""
+
+        _mrt = model_account_route(model_config)
+        # 모델 레벨 라우팅은 명시 선언 — 브로커가 없는 환경(테스트 등)에서
+        # 조용히 in-account 로 나가면 선언을 배신하므로 fail-closed.
+        if _mrt is not None and _acct_provider is None:
+            logger.error(
+                "model_route_no_provider",
+                alias=model_alias,
+                role_arn=_mrt[0],
+                hint="bedrock_account_client_provider 미주입 상태에서 모델 라우팅 요청",
+            )
+            return JSONResponse(
+                status_code=503,
+                content=anthropic_error(
+                    "service_unavailable",
+                    "Model-level account routing is not available on this gateway",
+                ),
+            )
+        _xacct = _mrt is not None or bool(
+            _prof and _prof.backend == "invoke" and _prof.account_role_arn
+        )
+        if _xacct and _acct_provider is not None:
+            adapter = _adapter_for(model_config)
+            _region_for_rewrite = _mrt[1] if _mrt else _prof.region
+            _circuit_scope = _scope_for(model_config)
         else:
-            adapter = registry.get(ProviderType.BEDROCK)
+            adapter = _inacct_adapter
             _region_for_rewrite = None
+            _circuit_scope = ""
         call_model_id = _rewrite_model_id_for_region(
             model_config.provider_model_id, region=_region_for_rewrite
         )
@@ -544,12 +635,18 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             )
             # 후보 자신의 endpoint 를 쓴다 — 원본의 decision.endpoint 로 Mantle→Mantle
             # 후보를 호출하면 다른 리전/계정의 후보가 엉뚱한 엔드포인트로 나간다
-            # (E2E S3-L1). profile 은 클라이언트 축이라 후보에도 그대로다.
+            # (E2E S3-L1). profile 도 후보별로 다시 입힌다 — 후보 자신의 모델 레벨
+            # ARN 이 있으면 그쪽으로 가야 하고, 없으면 원본 클라이언트 프로필로
+            # 돌아가야 한다. decision.profile 은 이미 "원본 모델" 의 계정으로
+            # 덮어쓴 값이라 후보에 그대로 쓰면 원본 계정으로 오배정된다.
             _cand_ep = cand_config.endpoint or decision.endpoint
+            _cand_profile = apply_model_account_route(
+                _client_profile, cand_config, client=client
+            )
             return (
                 json.dumps(mantle_b).encode(),
-                {"profile": decision.profile, "endpoint": _cand_ep},
-                {"profile": decision.profile, "endpoint": _cand_ep},
+                {"profile": _cand_profile, "endpoint": _cand_ep},
+                {"profile": _cand_profile, "endpoint": _cand_ep},
             )
         else:
             bedrock_b = {k: v for k, v in req_d.items() if k in _BEDROCK_ALLOWED_FIELDS}
@@ -595,10 +692,17 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             )
 
     # cross-account(333) 면 profile.region, 아니면 None (분기 전 초기화됨).
-    def _rewrite(pmid: str) -> str:
+    # cfg 가 주어지면 후보별 리전을 다시 계산한다 — 모델 레벨 라우팅(0049)으로
+    # 후보의 대상 계정 리전이 원본과 다를 수 있다(CRIS 접두는 리전 계약).
+    def _rewrite(pmid: str, cfg=None) -> str:
         if is_mantle:
             return pmid
-        return _rewrite_model_id_for_region(pmid, region=_region_for_rewrite)
+        _region = _region_for_rewrite
+        if cfg is not None:
+            _mrt_c = model_account_route(cfg)
+            if _mrt_c is not None:
+                _region = _mrt_c[1]
+        return _rewrite_model_id_for_region(pmid, region=_region)
 
     # --- Server-side web search (Architecture C) — opt-in per routing profile ---
     # When the client's profile enables web search AND the AgentCore MCP client is
@@ -957,6 +1061,10 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         degradation_notifier=getattr(
             request.app.state, "degradation_notifier", None
         ),
+        # 모델 레벨 라우팅(0049) — 후보별 계정/리전/회로 차원. Bedrock 분기에서만
+        # 정의되고 Mantle 은 None(단일 어댑터·profile 실린 계정 그대로).
+        adapter_for=_adapter_for,
+        circuit_scope_for=_scope_for,
     )
 
     # --- Handle the result ---
@@ -1451,24 +1559,55 @@ async def count_tokens(request: Request) -> JSONResponse:
         normalize_thinking(bedrock_body, model_config.provider_model_id)
     ).encode()
 
-    # cross-account(claude-code→374): invoke 와 동일 계정에서 CountTokens 실행 → 계정 스플릿 방지.
-    # account_role_arn NULL(codex/기본)이면 in-account adapter 그대로(무회귀). assume 실패 시 859 폴백.
-    _ct_xacct = bool(
-        _ct_profile and _ct_profile.backend == "invoke" and _ct_profile.account_role_arn
-    )
-    if _ct_xacct:
-        _provider = getattr(request.app.state, "bedrock_account_client_provider", None)
-        _inacct_adapter = registry.get(ProviderType.BEDROCK)
-        if _provider is not None:
+    # cross-account: invoke 와 동일 계정에서 CountTokens 실행 → 계정 스플릿 방지.
+    # 모델 레벨(0049)이 invoke 와 같은 우선순위로 프로필을 덮는다 — 같은 모델이
+    # invoke=계정A / count_tokens=계정B 로 갈리는 무음 스플릿을 막기 위해서도
+    # 반드시 같은 해석 규칙을 써야 한다(어드버서리 리뷰 #4 와 같은 부류).
+    _ct_mrt = model_account_route(model_config)
+    _ct_model_level = _ct_mrt is not None
+    if _ct_model_level:
+        _role, _reg, _ext = _ct_mrt
+        _ct_xacct = True
+    else:
+        _ct_xacct = bool(
+            _ct_profile and _ct_profile.backend == "invoke" and _ct_profile.account_role_arn
+        )
+        if _ct_xacct:
             _role, _reg, _ext = (
                 _ct_profile.account_role_arn,
                 _ct_profile.region,
                 _ct_profile.external_id,
             )
+    # 모델 레벨 라우팅 + 브로커 부재 — invoke 와 같은 규약으로 fail-closed.
+    # 조용히 in-account CountTokens 를 치면 토크나이저가 다른 계정의 것으로
+    # 세질 수 있다(무음 스플릿과 같은 부류).
+    if _ct_model_level and getattr(
+        request.app.state, "bedrock_account_client_provider", None
+    ) is None:
+        logger.error(
+            "count_tokens_model_route_no_provider",
+            alias=model_alias,
+            role_arn=_role,
+        )
+        return JSONResponse(
+            status_code=503,
+            content=anthropic_error(
+                "service_unavailable",
+                "Model-level account routing is not available on this gateway",
+            ),
+        )
+    if _ct_xacct:
+        _provider = getattr(request.app.state, "bedrock_account_client_provider", None)
+        _inacct_adapter = registry.get(ProviderType.BEDROCK)
+        if _provider is not None:
             adapter = BedrockAdapter(
                 bedrock_client=None,
                 client_resolver=lambda: _provider.get_client(_role, _reg, _ext),
-                fallback_client=getattr(_inacct_adapter, "_client", None),
+                # 모델 레벨은 명시 선언이라 fail-closed(invoke 분기와 같은 규약).
+                fallback_client=(
+                    None if _ct_model_level
+                    else getattr(_inacct_adapter, "_client", None)
+                ),
             )
         else:
             adapter = _inacct_adapter

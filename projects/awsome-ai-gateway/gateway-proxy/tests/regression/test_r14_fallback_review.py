@@ -65,7 +65,7 @@ def _loop(adapter, *, resolver=None, original=None, try_order=None):
         original_model_config=original or _cfg("claude-sonnet"),
         resolve_model_config=resolver or AsyncMock(return_value=_cfg("claude-haiku")),
         build_candidate_body=lambda req, cfg, s: (json.dumps(req).encode(), {}, {}),
-        rewrite_model_id=lambda x: x,
+        rewrite_model_id=lambda x, cfg=None: x,
     )
 
 
@@ -166,7 +166,7 @@ async def test_skipped_candidate_errors_do_not_mask_all_unavailable():
         original_model_config=_cfg("claude-sonnet"),
         resolve_model_config=AsyncMock(return_value=_cfg("claude-haiku")),
         build_candidate_body=lambda req, cfg, s: (json.dumps(req).encode(), {}, {}),
-        rewrite_model_id=lambda x: x,
+        rewrite_model_id=lambda x, cfg=None: x,
     )
     assert result.status == 503
     assert b"temporarily unavailable" in result.payload[0]

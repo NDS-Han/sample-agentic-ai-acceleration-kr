@@ -67,14 +67,18 @@ class MantleCredentialBroker:
     def __init__(self, sts_client, now: Callable[[], float] = time.time) -> None:
         self._sts = sts_client
         self._now = now
-        self._creds: dict[str, _CachedCreds] = {}
+        # cred 키 = (role_arn, external_id) — 같은 롤을 다른 ExternalId 조건으로
+        # 참조하는 두 모델/프로필이 생기면(모델 레벨 라우팅 0049) 한쪽 ExternalId
+        # 로 딴 세션이 다른 쪽 요청에 재사용되고 실패 백오프도 서로 오염된다.
+        self._creds: dict[tuple[str, str], _CachedCreds] = {}
         # Bearer cache is keyed by (cred_key, region): a bearer is region-bound
         # (SigV4 binds to the regional endpoint), so two profiles sharing a role
-        # but differing region must not cross-serve tokens.
-        self._bearers: dict[tuple[str, str], _CachedBearer] = {}
+        # but differing region must not cross-serve tokens. cred_key 자체는
+        # (role_arn, external_id) 쌍 — 위와 같은 이유로 ExternalId 도 키다.
+        self._bearers: dict[tuple[tuple[str, str], str], _CachedBearer] = {}
         self._lock = asyncio.Lock()
-        self._inflight: dict[tuple[str, str], asyncio.Task] = {}
-        self._failures: dict[tuple[str, str], tuple[Exception, float]] = {}
+        self._inflight: dict[tuple[tuple[str, str], str], asyncio.Task] = {}
+        self._failures: dict[tuple[tuple[str, str], str], tuple[Exception, float]] = {}
 
     def _in_account_creds(self) -> Credentials:
         """Pod's own IRSA credentials (no AssumeRole) for in-account Mantle (333)."""
@@ -92,7 +96,7 @@ class MantleCredentialBroker:
         if BedrockTokenGenerator is None:
             raise RuntimeError("aws-bedrock-token-generator not installed")
 
-        cred_key = profile.account_role_arn or "in-account"
+        cred_key = (profile.account_role_arn or "in-account", profile.external_id or "")
         bearer_key = (cred_key, profile.region)
         # 락 없는 빠른 경로 — 캐시 적중/실패 백오프는 락/STS 없이 결정한다.
         now = self._now()
@@ -135,7 +139,9 @@ class MantleCredentialBroker:
         now = self._now()
         if profile.account_role_arn:
             creds = await self._get_creds(profile.account_role_arn, profile.external_id, now)
-            cred_expiry = self._creds[profile.account_role_arn].expires_at
+            cred_expiry = self._creds[
+                (profile.account_role_arn, profile.external_id or "")
+            ].expires_at
         else:
             creds = await asyncio.get_running_loop().run_in_executor(None, self._in_account_creds)
             cred_expiry = now + _ASSUME_DURATION
@@ -152,7 +158,8 @@ class MantleCredentialBroker:
     async def _get_creds(
         self, role_arn: str, external_id: Optional[str], now: float
     ) -> Credentials:
-        cached = self._creds.get(role_arn)
+        cred_key = (role_arn, external_id or "")
+        cached = self._creds.get(cred_key)
         if cached and cached.expires_at - _CRED_REFRESH_SKEW > now:
             return cached.creds
 
@@ -170,7 +177,7 @@ class MantleCredentialBroker:
         c = resp["Credentials"]
         creds = Credentials(c["AccessKeyId"], c["SecretAccessKey"], c["SessionToken"])
         expires_at = c["Expiration"].timestamp()
-        self._creds[role_arn] = _CachedCreds(creds=creds, expires_at=expires_at)
+        self._creds[cred_key] = _CachedCreds(creds=creds, expires_at=expires_at)
         # invalidate any stale bearer (all regions) minted from older creds
-        self._bearers = {k: v for k, v in self._bearers.items() if k[0] != role_arn}
+        self._bearers = {k: v for k, v in self._bearers.items() if k[0] != cred_key}
         return creds
