@@ -87,7 +87,7 @@ Helm 이 배포하는 워크로드는 **6 long-running Deployment + 1 migration 
 | `chat_agent` | `sessions`, `messages`, `schema_embeddings`(pgvector 1024-dim HNSW), `golden_examples` |
 
 **마이그레이션 체인:** head 는 **`0048`** 이고 `0001→0048` 가 끊김 없이 연결된다. 라우팅 관련 순서(0022 까지):
-`0008`(Mantle enums) → `0009`(cowork routing/cowork-opus) → `0016`(codex enums) → `0017`(codex routing) → `0018`(client CHECK 확장 → `claude-code`/`cowork`/`codex`) → `0021`(web_search + claude-code invoke row 최초 생성, backend=invoke, default_model NULL) → `0022`(그 row 에 374 `account_role_arn`/`external_id`/`region` UPDATE).
+`0008`(Mantle enums) → `0009`(cowork routing/cowork-opus) → `0016`(codex enums) → `0017`(codex routing) → `0018`(client CHECK 확장 → `claude-code`/`cowork`/`codex`) → `0021`(web_search + claude-code invoke row 최초 생성, backend=invoke, default_model NULL) → `0022`(그 row 에 374 `account_role_arn`/`external_id`/`region` UPDATE) → … → `0049`(model_aliases 에 모델 레벨 `account_role_arn`/`external_id`/`region` 추가 — §7.5).
 
 ### 3.2 Valkey/Redis — key namespaces
 
@@ -219,6 +219,25 @@ adapter:
 ```
 
 **Zero key storage** — 게이트웨이는 원격 계정 long-lived 키를 보관하지 않는다. 메모리에 short-lived STS temp creds + bearer 만 둔다. 905 IAM role `llm-gateway-cowork-bedrock` 은 `bedrock-mantle:*`(Mantle 서비스 네임스페이스, `bedrock:*` 와 별개)를 grant 하고 859 gateway IRSA 를 `cowork-bedrock` ExternalId 로 신뢰한다.
+
+---
+
+## 7.5 모델 레벨 계정 라우팅 (migration 0049)
+
+위 §6/§7 라우팅은 **client 축**(`routing_profiles[client]`)이다. 0049 부터는 **모델 축** 오버라이드가 있다: `model.model_aliases` 에 `account_role_arn`/`external_id`/`region`(전부 NULL 허용) 컬럼이 붙고, 모델 관리 UI·Admin API(`ModelCreateRequest`/`ModelUpdateRequest`)에서 편집한다.
+
+```
+우선순위: model_aliases.account_role_arn (있으면) > routing_profiles[client] > in-account
+적용 지점: native Bedrock invoke · Mantle(Messages/Responses) · bedrock-runtime OpenAI
+           (chat + responses) · fallback 후보 · count_tokens — 전 디스패치 경로 동일
+```
+
+- `router_service.model_account_route(model_config)` 가 `(arn, region, external_id)` 트리플을 반환하고 `apply_model_account_route` 가 프로필을 **복사**해 덮어쓴다(공유 캐시 객체 변이 없음). ARN 만 있고 region 이 없는 수동 SQL 상태는 `model_routing_incomplete_region` 로그 후 프로필 라우팅으로 폴백(읽기 경로 관대).
+- **fail-closed:** 모델 ARN 이 명시됐는데 `bedrock_account_client_provider` 가 없거나 AssumeRole 이 실패하면 503 — §6 의 "투명 폴백"은 client-프로필 라우팅의 레거시 계약이며 모델 명시 라우팅에는 적용하지 않는다(조용한 잘못된 계정 과금 방지).
+- **fallback 후보별 해석:** `run_fallback_loop` 가 후보마다 adapter/profile/region rewrite/circuit scope 를 재계산한다. 후보 B 가 다른 ARN 을 가지면 A 의 자격을 타지 않는다. circuit-breaker 스코프에 (role, region) 이 포함돼 계정이 다른 모델끼리 회로를 공유하지 않는다.
+- **자격 캐시 격리:** SigV4 signer 와 Mantle broker creds 는 `(role_arn, external_id)` 키 — 같은 롤에 ExternalId 가 다른 모델이 세션/백오프를 공유하지 않는다. bearer 토큰은 기존대로 region-aware.
+- **쓰기 측 검증(admin-api):** ARN 정규식 + region 형식 + `ARN 설정 시 region 필수` + `region/external_id 단독 금지`. `account_role_arn=null` PUT 은 트리플 전체 해제, `external_id`/`region` 개별 null 도 허용 후 병합 상태 재검증. 감사 로그에서 `external_id` 는 마스킹(`***` + 길이).
+- **캐시 무효화:** 모델 UPDATE 가 기존 `model:{alias}`/`model:list` 무효화 경로를 타므로 라우팅 변경도 즉시 반영된다.
 
 ---
 
