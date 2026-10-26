@@ -13,6 +13,7 @@ phase-2 와 동일 — --set 은 릴리스 values 에 누적되지 않으므로 
 """
 from __future__ import annotations
 
+import difflib
 import json
 import re
 import subprocess
@@ -340,8 +341,98 @@ def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path, outs: dict) -
     return tf_outputs(env_dir)
 
 
+def _manifest_docs(text: str) -> dict[str, dict]:
+    """helm 출력(훅 + 매니페스트 덤프, get manifest 결과)를 (Kind/name) → 리소스로."""
+    # dry-run 출력의 NOTES 섹션은 자유 텍스트라 마지막 매니페스트 청크를
+    # 오염시켜 파싱 실패 → 허위 삭제로 보인다. YAML 이 아닌 꼬리는 잘라낸다.
+    text = re.split(r"^NOTES:\s*$", text, flags=re.M)[0]
+    # HOOKS:/MANIFEST:/HOOKS SUCCEEDED: 같은 대문자 섹션 마커는 YAML 키로
+    # 흡수돼 허위 diff 를 만든다 — k8s 매니페스트에 all-caps 최상위 키는 없다.
+    marker = re.compile(r"^[A-Z][A-Z0-9 _-]+:\s*$")
+    docs: dict[str, dict] = {}
+    for chunk in re.split(r"^---\s*$", text, flags=re.M):
+        body = "\n".join(
+            l for l in chunk.splitlines()
+            if not l.lstrip().startswith("#") and not marker.match(l)
+        ).strip()
+        if not body:
+            continue
+        try:
+            obj = yaml.safe_load(body)
+        except yaml.YAMLError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        kind, name = obj.get("kind"), (obj.get("metadata") or {}).get("name")
+        if kind and name:
+            docs[f"{kind}/{name}"] = obj
+    return docs
+
+
+def _canon(obj: dict) -> str:
+    """정규화된 YAML — 맵 순서/공백 차이가 diff 로 잡히지 않게 한다."""
+    return yaml.dump(obj, sort_keys=True, allow_unicode=True)
+
+
+def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -> None:
+    """dry-run 렌더 결과를 live release 매니페스트와 비교해 변경분만 출력한다."""
+    print(f"$ {' '.join(argv_dry)}", file=sys.stderr)
+    r = _run_quiet(argv_dry, cwd=repo_root, timeout=300)
+    if r.returncode != 0:
+        print(r.stdout)
+        print(r.stderr, file=sys.stderr)
+        raise SystemExit(f"helm dry-run 실패 ({r.returncode})")
+
+    get_argv = ["helm", "get", "manifest", meta["release"],
+                "-n", meta["namespace"]]
+    if context:
+        get_argv += ["--kube-context", context]
+    g = _run_quiet(get_argv, timeout=60)
+    if g.returncode != 0:
+        # live release 를 못 읽으면 비교 불가 — 종전처럼 전체 덤프로 폴백.
+        print("ⓘ live release 매니페스트를 읽지 못해 전체 dry-run 출력을 보여줍니다",
+              file=sys.stderr)
+        print(r.stdout)
+        return
+
+    new_docs = _manifest_docs(r.stdout)
+    live_docs = _manifest_docs(g.stdout)
+    added = sorted(k for k in new_docs if k not in live_docs)
+    removed = sorted(k for k in live_docs if k not in new_docs)
+    changed = sorted(
+        k for k in new_docs
+        if k in live_docs and _canon(new_docs[k]) != _canon(live_docs[k])
+    )
+
+    if not added and not removed and not changed:
+        print("\n✓ 변경 없음 — live release 와 렌더 결과가 동일합니다")
+        return
+
+    if not live_docs:
+        print(f"\n신규 설치 — {len(added)} 개 리소스가 생성됩니다:")
+    else:
+        print(f"\n변경 요약: {len(changed)} 변경 / {len(added)} 추가 / {len(removed)} 삭제")
+    for k in added:
+        print(f"  + {k}")
+    for k in removed:
+        print(f"  - {k}")
+    for k in changed:
+        print(f"\n  ~ {k}")
+        diff = difflib.unified_diff(
+            _canon(live_docs[k]).splitlines(),
+            _canon(new_docs[k]).splitlines(),
+            fromfile="live", tofile="rendered", n=3, lineterm="",
+        )
+        for line in diff:
+            print(f"    {line}")
+
+
 def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
-    """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다."""
+    """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다.
+
+    dry-run 덤프는 전체 매니페스트라 읽기 어렵다 — 렌더 결과를 live release
+    매니페스트와 정규화 비교해 변경/추가/삭제된 리소스와 unified diff 만
+    보여준다. live 를 읽지 못하면 종전처럼 전체 덤프로 폴백한다."""
     meta = load_meta(gen_dir, repo_root)
     outs = tf_outputs(repo_root / meta["env_dir"]) if meta.get("env_dir") else {}
     if meta.get("env_dir") and not outs:
@@ -370,7 +461,8 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
               f"invoke={st['invoke']} — apply 시 없는 것만 보장합니다",
               file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
-    _run(_helm_argv(meta, set_args, dry_run=True, context=context), cwd=repo_root)
+    _plan_diff(_helm_argv(meta, set_args, dry_run=True, context=context),
+               meta, repo_root, context)
 
 
 def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
