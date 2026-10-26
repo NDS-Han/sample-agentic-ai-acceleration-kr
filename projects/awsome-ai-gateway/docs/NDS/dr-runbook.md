@@ -62,11 +62,17 @@ TF=deployment/terraform/environments/llm-gateway-$ENV   # ecs는 gateway-ecs
 
 # 1) 손상 시점 직전 시각을 UTC로 확정 (예: 2026-10-26T01:00:00Z)
 
-# 2) PITR — 새 클러스터 생성 (identifier 는 자유, 원본 클러스터 식별자는 terraform output)
+# 2) 원본 클러스터 식별자 확인 — env output 에는 aurora_endpoint 만 있고
+#    cluster id 는 없다. endpoint 의 앞부분이 곧 identifier 다.
+aws rds describe-db-clusters --region <region> \
+  --query 'DBClusters[?contains(Endpoint,`llm-gateway`)].DBClusterIdentifier' \
+  --output text
+
+# 3) PITR — 새 클러스터 생성 (identifier 는 자유)
 aws rds restore-db-cluster-to-point-in-time \
   --region <region> \
   --db-cluster-identifier llm-gateway-$ENV-restored \
-  --source-db-cluster-identifier $(terraform -chdir=$TF output -raw aurora_cluster_id) \
+  --source-db-cluster-identifier <위에서 확인한 cluster id> \
   --restore-to-time 2026-10-26T01:00:00Z \
   --restore-type copy-on-write
 
