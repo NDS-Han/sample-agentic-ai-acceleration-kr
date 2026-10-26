@@ -863,6 +863,7 @@
     "item": "항목",
     "date": "날짜",
     "invalidDateRange": "시작일이 종료일보다 늦습니다. 날짜 범위를 확인해주세요.",
+    "customSeedHint": "사용자 지정 기간에는 실제 기록된 사용량만 표시됩니다 — 이전 데이터에서 이관된 사용량은 포함되지 않습니다.",
     "clientFilterLabel": "앱 필터 적용 중:",
     "clientFilterClear": "필터 해제"
   },

@@ -160,7 +160,7 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
   const isEmpty = data.models.length === 0 || data.total_cost_usd === 0;
 
   return (
-    <div className="glass glass-hover rounded-apple p-5">
+    <div className="glass glass-hover rounded-apple p-5 h-full">
       <div className="flex items-start justify-between gap-3 mb-3">
         <div>
           <div className="text-sm font-semibold tracking-tight">{t('modelShareTitle')}</div>
@@ -248,16 +248,22 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               return (
               <li
                 key={m.model_alias}
-                className={`grid grid-cols-[minmax(0,1fr)_5rem_3.5rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hi ? 'bg-accent' : ''}`}
+                className={`grid grid-cols-[minmax(0,1fr)_4.25rem_2.75rem] items-baseline gap-2 text-sm rounded-apple-sm px-2 py-0.5 -mx-2 transition-colors ${i === hi ? 'bg-accent' : ''}`}
               >
                 <div className="flex items-start gap-2 min-w-0">
                   <span
                     className={`w-3 h-3 rounded-full flex-shrink-0 mt-1${isOther ? ' bg-muted-foreground' : ''}`}
                     style={{ backgroundColor: isOther ? undefined : COLORS[i % COLORS.length] }}
                   />
-                  {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용. */}
+                  {/* truncate 금지 — 모델명이 "Claude …" 로 잘려 구분이 안 된다. 줄바꿈 허용.
+                      하이픈 토큰(claude-haiku-5-5)은 nowrap — 토큰 중간에서 끊기며
+                      3줄이 되던 현상(L5) 방지. 공백에서만 줄바꿈된다. */}
                   <span className="font-medium break-words leading-snug" title={label}>
-                    {label}
+                    {label.split(' ').map((tok, ti) => (
+                      <span key={ti} className={tok.includes('-') ? 'whitespace-nowrap' : undefined}>
+                        {tok}{ti < label.split(' ').length - 1 ? ' ' : ''}
+                      </span>
+                    ))}
                   </span>
                 </div>
                 <span className="tabular-nums text-xs text-right">

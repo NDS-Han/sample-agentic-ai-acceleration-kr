@@ -11,7 +11,7 @@ import {
   type MonitoringEventsResponse,
   type MonitoringEventTypeFilter,
 } from '@/lib/actions/monitoring';
-import type { BadgeTone } from '@/components/common/Badge';
+import { Badge, type BadgeTone } from '@/components/common/Badge';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
@@ -147,9 +147,9 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
                   {fmtDateTime(ev.timestamp, locale, tz)}
                 </Td>
                 <Td>
-                  <span className={`badge badge-${eventTone(ev.event_type)}`}>
+                  <Badge tone={eventTone(ev.event_type)}>
                     {EVENT_LABELS[ev.event_type] ?? ev.event_type}
-                  </span>
+                  </Badge>
                 </Td>
                 <Td emphasis>
                   {ev.downgraded_from ? (

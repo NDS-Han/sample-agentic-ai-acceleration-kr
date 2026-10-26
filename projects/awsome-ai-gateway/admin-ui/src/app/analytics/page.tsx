@@ -200,6 +200,14 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
       {/* 필터 — 월 선택기 + custom + group_by */}
       <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
 
+      {/* custom 구간은 이관(seed) 사용량이 빠진다 — 월 버킷 개념이라 임의 일자에
+          사상 불가. 차트가 조용히 달라 보이는 것보다 이유를 표시하는 편이 낫다. */}
+      {filter.period === 'custom' && !customRangeInvalid && (
+        <div className="rounded-apple border border-border bg-muted/30 px-3 py-2 text-xs text-muted-foreground">
+          {t('customSeedHint')}
+        </div>
+      )}
+
       {/* R2-N-j — 대시보드에서 client 파라미터로 드릴다운해 온 상태를 표시.
           없으면 필터가 걸린 줄 모르고 "전체 앱" 수치로 오인한다. */}
       {filter.client && (

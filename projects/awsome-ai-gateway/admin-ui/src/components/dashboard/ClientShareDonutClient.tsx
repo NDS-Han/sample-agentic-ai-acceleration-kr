@@ -125,7 +125,14 @@ export function ClientShareDonutClient({ data }: Props) {
                 className="w-3 h-3 rounded-full flex-shrink-0 mt-1"
                 style={{ backgroundColor: COLORS[i % COLORS.length] }}
               />
-              <span className="font-medium break-words leading-snug" title={labelFor(c.client)}>{labelFor(c.client)}</span>
+              {/* ModelShareDonut 과 동일 — 하이픈 토큰 중간 줄바꿈 방지(L5). */}
+              <span className="font-medium break-words leading-snug" title={labelFor(c.client)}>
+                {labelFor(c.client).split(' ').map((tok, ti) => (
+                  <span key={ti} className={tok.includes('-') ? 'whitespace-nowrap' : undefined}>
+                    {tok}{ti < labelFor(c.client).split(' ').length - 1 ? ' ' : ''}
+                  </span>
+                ))}
+              </span>
             </div>
             <span className="text-muted-foreground tabular-nums text-xs text-right">
               {t('callCount', { count: c.call_count })}
