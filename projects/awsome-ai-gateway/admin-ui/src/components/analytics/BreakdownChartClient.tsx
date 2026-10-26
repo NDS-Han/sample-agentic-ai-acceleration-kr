@@ -67,12 +67,15 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
             cursor={{ fill: 'rgba(127,127,127,0.10)' }}
             formatter={(value) => [fmtUsd(Number(value)), t('costUsd')]}
             contentStyle={{
-              background: 'hsl(var(--card))',
+              background: theme.surface,
               border: '1px solid hsl(var(--border))',
               borderRadius: 8,
               fontSize: 12,
             }}
+            // 다크에서 기본 항목 텍스트가 검정으로 남아 배경과 충돌한다 —
+            // 라벨/값 모두 테마 해석값으로 명시한다.
             labelStyle={{ color: theme.text }}
+            itemStyle={{ color: theme.text }}
           />
           {/* 막대마다 카테고리 색 — 항목 구분 또렷. */}
           <Bar dataKey="value" radius={[6, 6, 0, 0]}>
