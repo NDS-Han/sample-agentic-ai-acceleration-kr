@@ -132,6 +132,16 @@ vi deployment/gateway.yaml        # 변경
 
 ## 코드 업데이트 (새 버전 배포)
 
+backend 마다 **이미지를 누가 빌드하는지**가 다릅니다 — 이 차이가 절차를 결정합니다:
+
+| backend | 이미지 빌드 | 태그 변경 위치 |
+|---|---|---|
+| compose | `docker compose up --build` 가 로컬 소스에서 빌드 | 불필요 (checkout된 소스가 곧 이미지) |
+| ecs | `./deploy apply` 가 build+push 까지 수행 | `gateway.yaml` 의 `images.tag` |
+| eks | **`./deploy apply` 는 빌드하지 않습니다** — helm 이 ECR 의 기존 태그를 참조할 뿐 | `gateway.yaml` 의 `images.tag`/`images.tags` + 사전에 `rebuild-image.sh` 로 push |
+
+### compose
+
 ```bash
 cd awsome-ai-gateway
 git fetch && git checkout <새 브랜치/태그>
@@ -144,6 +154,66 @@ docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/dock
 까지 올립니다 — 앱보다 먼저 완료되도록 depends_on으로 순서가 보장됩니다.
 `db/init/*.sql`(기본 조직·팀·service-token 시드)도 멱등 재적용되므로, 기존
 볼륨에서도 업데이트에 추가된 시드가 반영됩니다.
+
+### ecs
+
+`images.tag` 를 새 태그로 바꾼 뒤 `apply` — task def 가 참조할 이미지를
+apply 가 스스로 build/push 합니다:
+
+```bash
+git fetch && git checkout <새 브랜치/태그>
+vi deployment/gateway.yaml     # images.tag: "<새 태그>"  (관례: git short SHA)
+./deploy apply --plan
+./deploy apply
+./deploy doctor
+```
+
+### eks — 이미지 push → 태그 핀 → apply (3단계)
+
+`./deploy apply` 는 helm upgrade 만 합니다. **태그만 바꾸면 ECR 에 그
+이미지가 없어 새 파드가 ImagePullBackOff 로 멈춥니다** — 반드시 push 가
+먼저입니다:
+
+```bash
+git fetch && git checkout <새 브랜치/태그>
+TAG=$(git rev-parse --short HEAD)              # rebuild-image.sh 와 같은 태그 규약
+
+# 1. 대상 계정/리전 확인 — 스크립트는 현재 AWS 자격증명의 ECR 에 push 한다
+aws sts get-caller-identity --query Account
+
+# 2. 이미지 빌드 + ECR push (DEPLOY=1 없이 — push 만)
+export AWS_REGION=<대상 리전>
+for s in gateway-proxy admin-api admin-ui notification-worker cost-recorder-worker migration; do
+  bash deployment/scripts/rebuild-image.sh "$s" <env>
+done
+#   scheduler 는 admin-api 와 이미지를 공유 — 별도 빌드 없음
+#   이미 그 태그가 ECR 에 있으면 스크립트가 덮어쓰기를 거부 → 해당 서비스는 skip
+
+# 3. gateway.yaml 에 태그 핀
+vi deployment/gateway.yaml
+#   images:
+#     registry: <account>.dkr.ecr.<region>.amazonaws.com
+#     tag: "<새 SHA>"              # 전 서비스 동일 태그면 여기만
+#     tags:                        # 서비스별로 다르면 맵으로 (tag 를 개별 override)
+#       gatewayProxy: "<SHA>"
+#       migration: "<SHA>"         # migration 은 tags 맵에서만 핀 가능
+
+# 4. 적용
+./deploy validate
+./deploy apply --plan            # 변경 미리보기
+./deploy apply
+./deploy doctor
+```
+
+`rebuild-image.sh` 참고:
+
+- 태그는 **git HEAD short SHA** — 이미지 내용과 커밋이 1:1 로 대응하는
+  불변 태그 규약입니다. 같은 태그 덮어쓰기는 스크립트가 거부합니다.
+- `DEPLOY=1 bash rebuild-image.sh <svc> <env>` 는 push 후 helm upgrade 까지
+  한 번에 하는 **빠른 패치 경로**입니다 — `gateway.yaml` 을 거치지 않아
+  yaml↔live drift 가 생기므로, 정식 변경은 위 3단계 절차로 하고 DEPLOY=1 은
+  핫픽스/디버깅에만 쓰세요 (다음 `./deploy apply` 가 yaml 값으로 되돌립니다).
+- 서비스가 `migration` 이면 빌드 컨텍스트는 `db/` 입니다.
 
 ## 롤백
 
