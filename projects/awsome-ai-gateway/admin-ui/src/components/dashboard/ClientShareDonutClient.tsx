@@ -4,21 +4,11 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import {
-  Chart as ChartJS,
-  ArcElement,
-  Tooltip,
-  Legend,
-} from 'chart.js';
-import '@/lib/utils/chartDefaults';
+import { Cell, Pie, PieChart } from 'recharts';
 import { fmtUsd } from '@/lib/utils/format';
-import type { ActiveElement, ChartEvent } from 'chart.js';
-import { Doughnut } from 'react-chartjs-2';
 import type { ClientShareResponse } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE } from '@/lib/utils/chartTheme';
 import { labelFor } from '@/lib/utils/modelLabel';
-
-ChartJS.register(ArcElement, Tooltip, Legend);
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -30,39 +20,13 @@ interface Props {
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const chartData = useMemo(
-    () => ({
-      labels: data.clients.map((c) => labelFor(c.client)),
-      datasets: [
-        {
-          data: data.clients.map((c) => c.cost_usd),
-          backgroundColor: data.clients.map((_, i) => COLORS[i % COLORS.length]),
-          borderWidth: 0,
-          spacing: 0,
-          hoverOffset: 14,
-        },
-      ],
-    }),
-    [data],
-  );
-
-  const options = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '62%',
-      animation: { animateRotate: true, animateScale: false },
-      // 호버한 조각의 우측 목록 행도 함께 강조한다.
-      onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
-        setHoverIndex(elements.length ? elements[0].index : null);
-      },
-      plugins: {
-        legend: { display: false },
-        // 캔버스 툴팁은 어디에 놓아도 도넛 중앙 오버레이를 물리적으로 가린다.
-        // 호버 상세는 중앙 표시 자체가 담당(조각 호버 시 중앙 내용이 바뀐다).
-        tooltip: { enabled: false },
-      },
-    }),
+  const pieData = useMemo(
+    () =>
+      data.clients.map((c, i) => ({
+        name: labelFor(c.client),
+        value: c.cost_usd,
+        fill: COLORS[i % COLORS.length],
+      })),
     [data],
   );
 
@@ -79,7 +43,26 @@ export function ClientShareDonutClient({ data }: Props) {
     // 도넛 고정폭 + 목록 컴팩트 컬럼을 중앙 정렬로 묶는다.
     <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
       <div className="relative h-64 w-64 shrink-0">
-        <Doughnut data={chartData} options={options} />
+        <PieChart width={256} height={256}>
+          <Pie
+            data={pieData}
+            dataKey="value"
+            nameKey="name"
+            innerRadius="62%"
+            outerRadius="98%"
+            stroke="none"
+            paddingAngle={0}
+            startAngle={90}
+            endAngle={-270}
+            onMouseEnter={(_, i) => setHoverIndex(i)}
+            onMouseLeave={() => setHoverIndex(null)}
+            isAnimationActive
+          >
+            {pieData.map((p, i) => (
+              <Cell key={i} fill={p.fill} />
+            ))}
+          </Pie>
+        </PieChart>
         {/* 가운데: 기본은 점유율 1위(clients 는 비용 desc 정렬, [0]=1위),
             조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
         {(() => {

@@ -4,17 +4,7 @@
 
 import { useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import {
-  Chart as ChartJS,
-  ArcElement,
-  Tooltip,
-  Legend,
-} from 'chart.js';
-import '@/lib/utils/chartDefaults';
-import type { ActiveElement, ChartEvent } from 'chart.js';
-import { Doughnut } from 'react-chartjs-2';
-
-ChartJS.register(ArcElement, Tooltip, Legend);
+import { Cell, Pie, PieChart } from 'recharts';
 
 export interface TokenBreakdownData {
   input_tokens: number;
@@ -57,46 +47,31 @@ export function TokenMixDonutClient({ data }: Props) {
   // 기본 중앙 표시는 최대 버킷 — cost share 도넛들과 같은 규칙.
   const topIndex = items.reduce((top, it, i) => (it.tokens > items[top].tokens ? i : top), 0);
 
-  const chartData = useMemo(
-    () => ({
-      labels: items.map((it) => it.label),
-      datasets: [
-        {
-          data: items.map((it) => it.tokens),
-          backgroundColor: items.map((it) => it.color),
-          borderWidth: 0,
-          spacing: 0,
-          hoverOffset: 14,
-        },
-      ],
-    }),
-    [items],
-  );
-
-  const options = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '62%',
-      animation: { animateRotate: true, animateScale: false },
-      // 호버한 조각의 우측 목록 행도 함께 강조한다.
-      onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
-        setHoverIndex(elements.length ? elements[0].index : null);
-      },
-      plugins: {
-        legend: { display: false },
-        // 캔버스 툴팁은 어디에 놓아도 도넛 중앙 오버레이를 물리적으로 가린다.
-        // 호버 상세는 중앙 표시 자체가 담당(조각 호버 시 중앙 내용이 바뀐다).
-        tooltip: { enabled: false },
-      },
-    }),
-    [],
-  );
-
   return (
     <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
       <div className="relative h-64 w-64 shrink-0">
-        <Doughnut data={chartData} options={options} />
+        {/* 캔버스 툴팁은 도넛 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당.
+            activeShape 로 호버 조각이 바깥으로 튀어나온다(기존 hoverOffset 대응). */}
+        <PieChart width={256} height={256}>
+          <Pie
+            data={items}
+            dataKey="tokens"
+            nameKey="label"
+            innerRadius="62%"
+            outerRadius="98%"
+            stroke="none"
+            paddingAngle={0}
+            startAngle={90}
+            endAngle={-270}
+            onMouseEnter={(_, i) => setHoverIndex(i)}
+            onMouseLeave={() => setHoverIndex(null)}
+            isAnimationActive
+          >
+            {items.map((it) => (
+              <Cell key={it.key} fill={it.color} />
+            ))}
+          </Pie>
+        </PieChart>
         {/* 가운데: 기본은 최대 버킷, 조각 호버 시에는 그 버킷의 수치로 바뀐다 — 툴팁을 대체. */}
         {(() => {
           const centerItem = items[hoverIndex ?? topIndex];

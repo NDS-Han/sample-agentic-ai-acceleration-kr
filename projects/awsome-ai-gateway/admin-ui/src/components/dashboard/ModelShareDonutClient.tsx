@@ -5,23 +5,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
-import {
-  Chart as ChartJS,
-  ArcElement,
-  Tooltip,
-  Legend,
-} from 'chart.js';
-import '@/lib/utils/chartDefaults';
+import { Cell, Pie, PieChart } from 'recharts';
 import { fmtUsd } from '@/lib/utils/format';
-import type { ActiveElement, ChartEvent } from 'chart.js';
-import { Doughnut } from 'react-chartjs-2';
 import type { ModelShareResponse, TeamOption } from '@/lib/actions/dashboard';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { teamDisplayName } from '@/lib/utils/trendSeries';
 import { redirectToLoginIfUnauthorized } from '@/lib/utils/unauthorized';
-
-ChartJS.register(ArcElement, Tooltip, Legend);
 
 // 항목 구분용 다색 카테고리 팔레트 (색맹 안전, 라이트/다크 공통).
 const COLORS = CATEGORICAL_PALETTE;
@@ -112,50 +102,21 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
   const sliceColor = (i: number, isOther: boolean) =>
     isOther ? theme.textMuted : COLORS[i % COLORS.length];
 
-  const chartData = useMemo(() => {
-    return {
-      labels: displayModels.map((m) =>
-        m.model_alias === '__other__'
-          ? t('otherModels', { count: m.otherCount ?? 0 })
-          : modelDisplay(m.model_alias, m.display_name)
-      ),
-      datasets: [
-        {
-          data: displayModels.map((m) => m.cost_usd),
-          backgroundColor: displayModels.map((m, i) =>
-            sliceColor(i, m.model_alias === '__other__')
-          ),
-          // 세그먼트 주변에 선/테두리/gap 일절 없음 (사용자 지시). 조각 직접 맞닿음.
-          // 시인성은 (1) 색 자체 + (2) hover 강조 + (3) 가운데 1위 모델 표기로 확보.
-          borderWidth: 0,
-          spacing: 0,
-          // hover 시 해당 조각만 바깥으로 튀어나와 강조 (정적 선 아님).
-          hoverOffset: 14,
-        },
-      ],
-    };
-  }, [displayModels, theme, t]);
-
-  const options = useMemo(
-    () => ({
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '62%',
-      // hover 시 부드럽게 튀어나오는 애니메이션.
-      animation: { animateRotate: true, animateScale: false },
-      // 호버한 조각의 우측 목록 행도 함께 강조한다.
-      onHover: (_event: ChartEvent, elements: ActiveElement[]) => {
-        setHoverIndex(elements.length ? elements[0].index : null);
-      },
-      plugins: {
-        legend: { display: false },
-        // 캔버스 툴팁은 어디에 놓아도 도넛 중앙 오버레이를 물리적으로 가린다.
-        // 호버 상세는 중앙 표시 자체가 담당(조각 호버 시 중앙 내용이 바뀐다).
-        tooltip: { enabled: false },
-      },
-    }),
-    [data],
+  const pieData = useMemo(
+    () =>
+      displayModels.map((m, i) => ({
+        name:
+          m.model_alias === '__other__'
+            ? t('otherModels', { count: m.otherCount ?? 0 })
+            : modelDisplay(m.model_alias, m.display_name),
+        value: m.cost_usd,
+        fill: sliceColor(i, m.model_alias === '__other__'),
+      })),
+    // sliceColor 는 theme 에 닫혀 있다 — 테마 전환 시 재계산.
+    [displayModels, theme, t],
   );
+
+
 
   const isEmpty = data.models.length === 0 || data.total_cost_usd === 0;
 
@@ -201,7 +162,28 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               cap 하고 스크롤 — 범례가 아무리 길어도 카드 높이가 늘어나지 않아
               옆 비용 추이 카드와 균형이 유지된다. 모바일은 종전대로 세로 스택. */}
           <div className="relative h-56 w-56 shrink-0">
-            <Doughnut data={chartData} options={options} />
+            {/* 캔버스 툴팁은 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당.
+                activeShape 가 호버 조각을 바깥으로 튀어나오게 한다(hoverOffset 대응). */}
+            <PieChart width={224} height={224}>
+              <Pie
+                data={pieData}
+                dataKey="value"
+                nameKey="name"
+                innerRadius="62%"
+                outerRadius="98%"
+                stroke="none"
+                paddingAngle={0}
+                startAngle={90}
+                endAngle={-270}
+                onMouseEnter={(_, i) => setHoverIndex(i)}
+                onMouseLeave={() => setHoverIndex(null)}
+                isAnimationActive
+              >
+                {pieData.map((p, i) => (
+                  <Cell key={i} fill={p.fill} />
+                ))}
+              </Pie>
+            </PieChart>
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
             {(() => {

@@ -4,22 +4,19 @@
 
 
 import {
-  Chart as ChartJS,
-  CategoryScale,
-  LinearScale,
-  BarElement,
-  Title,
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  ResponsiveContainer,
   Tooltip,
-  Legend,
-} from 'chart.js';
-import '@/lib/utils/chartDefaults';
-import { Bar } from 'react-chartjs-2';
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { useTranslations } from 'next-intl';
 import { fmtUsd } from '@/lib/utils/format';
 import type { ModelBreakdown, TeamBreakdown } from '@/types/entities';
 import { CATEGORICAL_PALETTE, useChartTheme } from '@/lib/utils/chartTheme';
-
-ChartJS.register(CategoryScale, LinearScale, BarElement, Title, Tooltip, Legend);
 
 interface BreakdownChartClientProps {
   labels: string[];
@@ -30,50 +27,10 @@ interface BreakdownChartClientProps {
 export function BreakdownChartClient({ labels, values, title }: BreakdownChartClientProps) {
   const t = useTranslations('analytics');
   const theme = useChartTheme();
-  const data = {
-    labels,
-    datasets: [
-      {
-        label: t('costUsd'),
-        data: values,
-        // 막대마다 카테고리 색 — 항목 구분 또렷.
-        backgroundColor: values.map((_, i) => CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length]),
-        borderWidth: 0,
-        borderRadius: 6,
-      },
-    ],
-  };
 
-  const options = {
-    responsive: true,
-    plugins: {
-      legend: { display: false },
-      title: { display: true, text: title, color: theme.text },
-      tooltip: {
-        callbacks: {
-          label: (ctx: import('chart.js').TooltipItem<'bar'>) =>
-            `${fmtUsd(ctx.parsed.y ?? 0)}`,
-        },
-      },
-    },
-    scales: {
-      x: {
-        title: { display: true, text: t('item'), color: theme.textMuted },
-        ticks: { color: theme.textMuted },
-        grid: { color: theme.grid },
-      },
-      y: {
-        title: { display: true, text: 'USD', color: theme.textMuted },
-        ticks: {
-          color: theme.textMuted,
-          callback: (value: string | number) => `$${Number(value).toFixed(2)}`,
-        },
-        grid: { color: theme.grid },
-      },
-    },
-  };
+  const points = labels.map((label, i) => ({ label, value: values[i] ?? 0 }));
 
-  if (labels.length === 0) {
+  if (points.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
         {t('noData')}
@@ -81,7 +38,56 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
     );
   }
 
-  return <Bar data={data} options={options} />;
+  return (
+    <div>
+      <div className="mb-2 text-center text-sm font-medium">{title}</div>
+      <ResponsiveContainer width="100%" height={300}>
+        <BarChart data={points} margin={{ top: 8, right: 8, left: 0, bottom: 0 }}>
+          <CartesianGrid vertical={false} stroke={theme.grid} />
+          <XAxis
+            dataKey="label"
+            // 라벨이 많으면 겹치지 않게 건너뛰며 표시 — 상세는 툴팁이 담당.
+            interval="preserveStartEnd"
+            minTickGap={24}
+            angle={-45}
+            textAnchor="end"
+            height={70}
+            tick={{ fontSize: 11, fill: theme.textMuted }}
+            axisLine={{ stroke: theme.grid }}
+            tickLine={false}
+          />
+          <YAxis
+            tickFormatter={(v) => `$${Number(v).toFixed(2)}`}
+            tick={{ fontSize: 11, fill: theme.textMuted }}
+            axisLine={false}
+            tickLine={false}
+            width={64}
+          />
+          <Tooltip
+            cursor={{ fill: 'rgba(127,127,127,0.10)' }}
+            formatter={(value) => [fmtUsd(Number(value)), t('costUsd')]}
+            contentStyle={{
+              background: 'hsl(var(--card))',
+              border: '1px solid hsl(var(--border))',
+              borderRadius: 8,
+              fontSize: 12,
+            }}
+            labelStyle={{ color: theme.text }}
+          />
+          {/* 막대마다 카테고리 색 — 항목 구분 또렷. */}
+          <Bar dataKey="value" radius={[6, 6, 0, 0]}>
+            {points.map((_, i) => (
+              <Cell key={i} fill={CATEGORICAL_PALETTE[i % CATEGORICAL_PALETTE.length]} />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+      <div className="mt-1 flex justify-between text-[10px] text-muted-foreground">
+        <span>{t('item')}</span>
+        <span>USD</span>
+      </div>
+    </div>
+  );
 }
 
 // 모델별 breakdown용 타입 헬퍼
