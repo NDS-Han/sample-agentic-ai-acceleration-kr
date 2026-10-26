@@ -36,9 +36,56 @@ class RoutingProfileService:
                 "web_search_enabled": bool(r.web_search_enabled),
                 "backend": r.backend,
                 "enabled": bool(r.enabled),
+                "account_role_arn": r.account_role_arn,
+                "external_id": r.external_id,
+                "region": r.region,
             }
             for r in sorted(rows, key=lambda x: x.client)
         ]
+
+    async def set_routing(
+        self,
+        client: str,
+        account_role_arn: str | None,
+        external_id: str | None,
+        region: str,
+        admin_id,
+    ) -> dict:
+        """크로스계정 라우팅 트리플을 쓴다. ARN 을 비우면 in-account 로 되돌린다.
+
+        ``region`` 은 ``routing_profiles.region`` 이 NOT NULL 컬럼(ARN 없을 때
+        in-account 호출의 기본 서명 리전)이라 항상 필요하다 — 모델 라우팅
+        (model_aliases)의 "ARN 지우면 트리플 전체 해제"와 다른 규칙.
+        """
+        if client not in _VALID_CLIENTS:
+            raise ValueError(f"invalid client: {client}; allowed={sorted(_VALID_CLIENTS)}")
+        row = (
+            await self._session.execute(
+                select(RoutingProfile).where(RoutingProfile.client == client)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            raise LookupError(f"routing profile not found for client: {client}")
+        row.account_role_arn = account_role_arn
+        # ARN 이 없으면 external_id 는 게이트웨이가 읽지 않는 dead data — 같이 지운다.
+        row.external_id = external_id if account_role_arn else None
+        row.region = region
+        await self._session.flush()
+        # set_web_search 와 같은 규칙 — 캐시 무효화는 라우터가 commit 뒤에 한다.
+        logger.info(
+            "admin.set_client_routing",
+            client=client,
+            account_role_arn=account_role_arn,
+            region=region,
+            has_external_id=bool(external_id),
+            admin_id=str(admin_id),
+        )
+        return {
+            "client": client,
+            "account_role_arn": account_role_arn,
+            "external_id": external_id if account_role_arn else None,
+            "region": region,
+        }
 
     async def set_web_search(self, client: str, enabled: bool, admin_id) -> dict:
         if client not in _VALID_CLIENTS:

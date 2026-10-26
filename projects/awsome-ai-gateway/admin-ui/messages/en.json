@@ -1234,7 +1234,14 @@
     "webSearchOff": "Off",
     "webSearchOn": "On",
     "webSearchSaved": "{app} web search setting saved.",
-    "webSearchTitle": "Web search"
+    "webSearchTitle": "Web search",
+    "routingTitle": "Cross-account routing",
+    "routingHint": "Send this app's calls to another AWS account's Bedrock. Leave Role ARN empty to call in the gateway account. Model-level routing takes precedence.",
+    "routingArnLabel": "AWS account Role ARN",
+    "routingExternalIdLabel": "External ID (optional)",
+    "routingExternalIdPlaceholder": "Must match the sts:ExternalId in the role's trust policy",
+    "routingRegionLabel": "Region",
+    "routingSaved": "{app} routing saved."
   },
   "forbidden": {
     "title": "Access denied",

@@ -16,6 +16,36 @@ export interface RoutingProfileItem {
   web_search_enabled: boolean;
   backend: string;
   enabled: boolean;
+  account_role_arn: string | null;
+  external_id: string | null;
+  region: string;
+}
+
+// ─── per-client cross-account routing ────────────────────────────────────────
+export interface ClientRoutingInput {
+  account_role_arn: string;  // 비우면 in-account 복귀
+  external_id: string;       // 선택 — 롤 trust 의 sts:ExternalId
+  region: string;            // 필수 — 프로필 기본 리전 컬럼이 NOT NULL
+}
+
+export async function setClientRoutingAction(
+  client: string,
+  input: ClientRoutingInput,
+): Promise<ActionResult<ClientRoutingInput & { client: string }>> {
+  if (!client) return { success: false, error: 'client is required' };
+  try {
+    const res = await adminAPI.put<ClientRoutingInput & { client: string }>(
+      `/admin/routing-profiles/${encodeURIComponent(String(client))}/routing`,
+      {
+        account_role_arn: input.account_role_arn || null,
+        external_id: input.external_id || null,
+        region: input.region,
+      },
+    );
+    return { success: true, data: res };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
 }
 
 // ─── toggle per-client web search ────────────────────────────────────────────

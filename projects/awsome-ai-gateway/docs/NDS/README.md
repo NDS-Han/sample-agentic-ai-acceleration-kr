@@ -102,6 +102,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스 진입) |
 | [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/서명/배포·프로비저닝·서버측 진단 |
 | [operations.md](operations.md) | **운영 런북** — 직원 등록(Cognito 그룹)·오픈 전 하드닝 체크리스트·크로스계정 라우팅(클라이언트별·모델별)·Marketplace 구독 |
+| [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원(compose pg_dump·Aurora PITR)·시크릿 유실 시나리오·RTO/RPO·리허설 체크리스트 |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
 | [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
 | [upstream-sync.md](upstream-sync.md) | **upstream PR 브랜치 → nds/dev 머지 절차** — 충돌 해결 원칙·자동머지 함정·rerere |

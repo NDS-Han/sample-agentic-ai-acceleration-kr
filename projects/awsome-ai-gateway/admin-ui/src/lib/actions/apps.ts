@@ -34,6 +34,10 @@ export interface AppPolicy {
   allowed_users: AppUserRef[];
   all_models: AppModelRef[];
   web_search_enabled: boolean;
+  // 크로스계정 라우팅(routing_profiles 행) — ARN 비우면 in-account.
+  account_role_arn: string | null;
+  external_id: string | null;
+  region: string | null;
 }
 
 // ─── getAppPolicyAction ───────────────────────────────────────────────────────

@@ -1234,7 +1234,14 @@
     "webSearchOff": "꺼짐",
     "webSearchOn": "켜짐",
     "webSearchSaved": "{app} 웹서치 설정이 저장되었습니다.",
-    "webSearchTitle": "웹서치"
+    "webSearchTitle": "웹서치",
+    "routingTitle": "크로스 계정 라우팅",
+    "routingHint": "이 앱의 요청을 다른 AWS 계정의 Bedrock으로 보냅니다. Role ARN을 비우면 게이트웨이 계정으로 호출합니다. 모델별 라우팅이 이 설정보다 우선합니다.",
+    "routingArnLabel": "AWS 계정 Role ARN",
+    "routingExternalIdLabel": "External ID (선택)",
+    "routingExternalIdPlaceholder": "대상 롤 trust의 sts:ExternalId 조건과 같은 값",
+    "routingRegionLabel": "리전",
+    "routingSaved": "{app} 라우팅이 저장되었습니다."
   },
   "forbidden": {
     "title": "접근 권한 없음",

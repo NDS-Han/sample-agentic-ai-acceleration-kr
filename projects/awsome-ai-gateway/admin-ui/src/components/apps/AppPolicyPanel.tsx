@@ -6,7 +6,7 @@ import Link from 'next/link';
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 import { getAppPolicyAction, setAppDefaultModelAction, toggleAppModelAction } from '@/lib/actions/apps';
-import { setClientWebSearchAction } from '@/lib/actions/routing';
+import { setClientWebSearchAction, setClientRoutingAction } from '@/lib/actions/routing';
 import type { AppPolicy, AppModelRef } from '@/lib/actions/apps';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { InfoTooltip } from '@/components/common/InfoTooltip';
@@ -79,24 +79,34 @@ export function AppPolicyPanel() {
   // 막아야 한다). finally 로 잡아 reject 경로의 카운트 누수도 없앤다.
   const [savingByClient, setSavingByClient] = useState<Record<string, number>>({});
   const [wsSavingByClient, setWsSavingByClient] = useState<Record<string, number>>({});
+  const [routingSavingByClient, setRoutingSavingByClient] = useState<Record<string, number>>({});
+  const [routingForm, setRoutingForm] = useState({
+    client: '', arn: '', eid: '', region: '', dirty: false,
+  });
+  const [routingError, setRoutingError] = useState<string | null>(null);
   // 비동기 콜백이 읽는 최신 스냅샷 — state 클로저는 시작 시점 값이라 응답
   // 시점의 진행 수를 모른다. seq 는 저장이 끝날 때마다 오르며, 정책 로드
   // 응답이 저장 커밋과 경합해 구 값을 되살릴 수 있는지 판정하는 데 쓴다.
-  const opRef = useRef<Record<string, { save: number; ws: number; seq: number }>>({});
-  const bumpOp = (kind: 'save' | 'ws', c: string, d: number) => {
-    const cur = opRef.current[c] ?? { save: 0, ws: 0, seq: 0 };
+  const opRef = useRef<Record<string, { save: number; ws: number; routing: number; seq: number }>>({});
+  const bumpOp = (kind: 'save' | 'ws' | 'routing', c: string, d: number) => {
+    const cur = opRef.current[c] ?? { save: 0, ws: 0, routing: 0, seq: 0 };
     const next = {
       ...cur,
       [kind]: Math.max(0, cur[kind] + d),
       seq: d < 0 ? cur.seq + 1 : cur.seq,
     };
     opRef.current = { ...opRef.current, [c]: next };
-    (kind === 'save' ? setSavingByClient : setWsSavingByClient)(
+    (kind === 'save'
+      ? setSavingByClient
+      : kind === 'ws'
+        ? setWsSavingByClient
+        : setRoutingSavingByClient)(
       (p) => ({ ...p, [c]: next[kind] }),
     );
   };
   const isSaving = (savingByClient[selectedClient] ?? 0) > 0;
   const isWsSaving = (wsSavingByClient[selectedClient] ?? 0) > 0;
+  const isRoutingSaving = (routingSavingByClient[selectedClient] ?? 0) > 0;
   // kind 는 어느 확인 문구를 띄울지 고른다. 'all' = NULL(전체 허용) 을 명시 목록으로 굳히는
   // 전이, 'last' = 마지막 허용 앱을 빼서 `[]`(전면 거부) 로 가는 전이. 문구를 하나로 합치면
   // 둘 중 하나는 반드시 거짓말이 된다(전자는 "범위가 바뀔 수 있다", 후자는 "아무 앱도 못 쓴다").
@@ -143,7 +153,7 @@ export function AppPolicyPanel() {
         // cleanup 이 미뤄지는 동안(pending transition) 도착한 응답도 ref 가드로 걸러낸다.
         if (cancelled || clientRef.current !== clientAtCall) return;
         const op = opRef.current[clientAtCall];
-        const settled = !op || (op.save + op.ws === 0 && op.seq === seq0);
+        const settled = !op || (op.save + op.ws + op.routing === 0 && op.seq === seq0);
         const expired = Date.now() >= deadline;
         if (result === null) {
           if (expired) {
@@ -173,6 +183,69 @@ export function AppPolicyPanel() {
       cancelled = true;
     };
   }, [selectedClient, reloadNonce]);
+
+  // 라우팅 폼을 서버 값으로 맞춘다 — 사용자가 입력 중(dirty)이면 덮어쓰지 않는다.
+  useEffect(() => {
+    if (!shown) return;
+    setRoutingForm((prev) =>
+      prev.dirty && prev.client === shown.client
+        ? prev
+        : {
+            client: shown.client,
+            arn: shown.account_role_arn ?? '',
+            eid: shown.external_id ?? '',
+            region: shown.region ?? '',
+            dirty: false,
+          },
+    );
+    setRoutingError(null);
+  }, [shown]);
+
+  const handleSaveRouting = () => {
+    setRoutingError(null);
+    const clientAtCall = selectedClient;
+    const payload = {
+      account_role_arn: routingForm.arn.trim(),
+      external_id: routingForm.eid.trim(),
+      region: routingForm.region.trim(),
+    };
+    bumpOp('routing', clientAtCall, 1);
+    startWsTransition(async () => {
+      try {
+        const result = await setClientRoutingAction(clientAtCall, payload);
+        if (result.success) {
+          toast({
+            type: 'success',
+            message: t('routingSaved', { app: CLIENT_LABELS[clientAtCall] ?? clientAtCall }),
+            auto_dismiss_ms: 3000,
+          });
+          if (clientRef.current === clientAtCall) {
+            setPolicy((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    account_role_arn: payload.account_role_arn || null,
+                    // ARN 해제 시 서버가 external_id 도 함께 지운다 — 같은 값을 반영.
+                    external_id: payload.account_role_arn ? payload.external_id || null : null,
+                    region: payload.region || null,
+                  }
+                : prev,
+            );
+            setRoutingForm((prev) => ({ ...prev, dirty: false }));
+          }
+        } else if (clientRef.current === clientAtCall) {
+          setRoutingError(result.error);
+        } else {
+          toast({ type: 'error', message: result.error, auto_dismiss_ms: 4000 });
+        }
+      } catch {
+        toast({ type: 'error', message: t('saveUnconfirmed'), auto_dismiss_ms: 4000 });
+        if (clientRef.current === clientAtCall) setReloadNonce((n) => n + 1);
+      } finally {
+        bumpOp('routing', clientAtCall, -1);
+      }
+    });
+  };
 
   const handleClientChange = (client: string) => {
     if (client === selectedClient) return;
@@ -436,6 +509,76 @@ export function AppPolicyPanel() {
                 {shown.web_search_enabled ? t('webSearchOn') : t('webSearchOff')}
               </span>
             </label>
+          </div>
+
+          {/* 크로스계정 라우팅 — routing_profiles.account_role_arn/external_id/region.
+              모델별 라우팅(모델 수정 화면)보다 낮은 우선순위의 앱 단위 기본값. */}
+          <div className="glass rounded-apple p-4 space-y-3">
+            <div>
+              <h2 className="text-sm font-semibold">{t('routingTitle')}</h2>
+              <p className="text-xs text-muted-foreground mt-0.5">{t('routingHint')}</p>
+            </div>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div className="space-y-1 sm:col-span-2">
+                <label htmlFor="routing-arn" className="text-xs text-muted-foreground">
+                  {t('routingArnLabel')}
+                </label>
+                <input
+                  id="routing-arn"
+                  type="text"
+                  value={routingForm.arn}
+                  onChange={(e) =>
+                    setRoutingForm((p) => ({ ...p, arn: e.target.value, dirty: true }))
+                  }
+                  maxLength={512}
+                  placeholder="arn:aws:iam::123456789012:role/name"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="routing-external-id" className="text-xs text-muted-foreground">
+                  {t('routingExternalIdLabel')}
+                </label>
+                <input
+                  id="routing-external-id"
+                  type="text"
+                  value={routingForm.eid}
+                  onChange={(e) =>
+                    setRoutingForm((p) => ({ ...p, eid: e.target.value, dirty: true }))
+                  }
+                  maxLength={256}
+                  placeholder={t('routingExternalIdPlaceholder')}
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+              <div className="space-y-1">
+                <label htmlFor="routing-region" className="text-xs text-muted-foreground">
+                  {t('routingRegionLabel')}
+                </label>
+                <input
+                  id="routing-region"
+                  type="text"
+                  value={routingForm.region}
+                  onChange={(e) =>
+                    setRoutingForm((p) => ({ ...p, region: e.target.value, dirty: true }))
+                  }
+                  maxLength={64}
+                  placeholder="ap-south-1"
+                  className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                />
+              </div>
+            </div>
+            {routingError && <FormError error={routingError} />}
+            <div className="flex justify-end">
+              <SpinnerButton
+                type="button"
+                onClick={handleSaveRouting}
+                isLoading={isRoutingSaving}
+                disabled={!routingForm.region.trim()}
+              >
+                {tc('save')}
+              </SpinnerButton>
+            </div>
           </div>
 
           <div className="space-y-3">

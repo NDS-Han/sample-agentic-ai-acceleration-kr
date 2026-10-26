@@ -94,8 +94,9 @@ async def test_get_app_policy_returns_allowed_models(mock_session: AsyncMock):
             # all_models text query: fetchall returns (alias, allowed_clients) tuples
             result.fetchall.return_value = [("m1", ["cowork"]), ("m2", None)]
         elif call_count == 3:
-            # routing_profiles text query (default_model, web_search_enabled)
-            result.fetchone.return_value = ("claude-sonnet", True)
+            # routing_profiles text query (default_model, web_search_enabled,
+            # account_role_arn, external_id, region)
+            result.fetchone.return_value = ("claude-sonnet", True, None, None, "ap-northeast-2")
         else:
             # ORM select for allowed users: all() returns (uuid, email, explicit) rows.
             # explicit=False = 명시 행이 없는 사용자 — fail-open(전체 앱 허용)으로 포함.

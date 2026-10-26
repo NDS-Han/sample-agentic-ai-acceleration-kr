@@ -74,9 +74,12 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
 들어 있는 `claude-code`/`cowork` 행은 개발 조직의 샘플 크로스계정 ARN
 (`arn:aws:iam::333…`/`2222…`)을 가리킵니다.
 
-> ⚠️ **admin UI/API로는 이 값을 못 고칩니다** — 라우팅 API는 목록 조회와
-> web-search 토글만 제공합니다. `account_role_arn`·`backend`·`default_model`
-> 변경은 **SQL**로 합니다.
+> ✅ **관리 UI에서 고칠 수 있습니다** — `/apps` → 앱 선택 → **"크로스 계정
+> 라우팅"** 카드에서 `account_role_arn`·`external_id`·`region`을 읽고 씁니다
+> (`PUT /admin/routing-profiles/{client}/routing`, 저장 시 Redis 캐시 즉시
+> 무효화 + 감사 로그). `default_model`은 같은 화면의 기본 모델 선택으로 바뀝니다.
+> 아래 SQL은 UI를 쓸 수 없을 때의 폴백 절차입니다 — 직접 SQL로 바꾸면 캐시
+> 무효화가 없으니 **최대 5분**(300초 TTL) 후에 반영됩니다.
 
 - **단일 계정 배포** (대부분): `account_role_arn`/`external_id`를 비우세요
   (NULL = in-account, 태스크/파드 자신의 IAM 자격증명으로 직접 호출).
@@ -85,8 +88,10 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
   사용자 모델 선택이 살아납니다(시드가 `cowork-opus`로 고정).
 - **다른 계정의 Bedrock으로 보내기** (계정 분리·비용 격리·규제): 대상 계정에
   AssumeRole 가능한 역할을 만들고(`llm-gateway-<env>` 서비스 자격증명 신뢰 +
-  ExternalId), `account_role_arn`·`external_id`·`region`을 그 값으로 UPDATE
-  하면 됩니다 — 아래 SQL에서 NULL 대신 실제 값을 넣으면 됩니다.
+  ExternalId), `/apps` → 크로스 계정 라우팅 카드에 그 값을 넣어 저장하면 됩니다.
+  UI를 못 쓰는 상황이면 아래 SQL에서 NULL 대신 실제 값을 넣어 UPDATE 합니다.
+  `region`은 NOT NULL 컬럼이라 항상 값이 필요합니다 — ARN이 없으면 in-account
+  호출의 기본 서명 리전으로 쓰입니다.
 - `codex` 행은 시드부터 in-account(`account_role_arn` NULL)라 별도 조치가
   필요 없습니다.
 

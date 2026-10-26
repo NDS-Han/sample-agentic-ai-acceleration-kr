@@ -58,6 +58,9 @@ function policyFor(client: string, allowed: string[] = ['m1']): AppPolicy {
     default_model: allowed[0] ?? null,
     allowed_users: [],
     all_models: [{ alias: 'm1', allowed_clients: null }],
+    account_role_arn: null,
+    external_id: null,
+    region: 'ap-northeast-2',
     web_search_enabled: false,
   };
 }

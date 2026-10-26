@@ -64,6 +64,12 @@ class AppPolicyResponse(BaseModel):
     allowed_users: list[AppUserRef]
     # 같은 routing_profiles 행의 앱 정책 — 한 화면에서 같이 보고 바꾼다.
     web_search_enabled: bool = False
+    # 크로스계정 라우팅(routing_profiles.account_role_arn/external_id/region) —
+    # /apps 패널에서 읽고 쓴다. external_id 는 ADMIN 전용 응답에서만 나간다
+    # (모델 라우팅 응답과 동일 — 감사 로그만 마스킹).
+    account_role_arn: str | None = None
+    external_id: str | None = None
+    region: str | None = None
 
 
 class DefaultModelPatchRequest(BaseModel):
@@ -217,10 +223,12 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
         AppModelRef(alias=row[0], allowed_clients=row[1]) for row in all_result.fetchall()
     ]
 
-    # default_model + web_search_enabled: model.routing_profiles WHERE client = :client
+    # default_model + web_search_enabled + 라우팅 트리플: model.routing_profiles
+    # WHERE client = :client
     rp_result = await session.execute(
         text(
-            "SELECT default_model, web_search_enabled"
+            "SELECT default_model, web_search_enabled,"
+            " account_role_arn, external_id, region"
             " FROM model.routing_profiles WHERE client = :client"
         ),
         {"client": client},
@@ -228,6 +236,9 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
     rp_row = rp_result.fetchone()
     default_model: str | None = rp_row[0] if rp_row else None
     web_search_enabled = bool(rp_row[1]) if rp_row else False
+    account_role_arn: str | None = rp_row[2] if rp_row else None
+    external_id: str | None = rp_row[3] if rp_row else None
+    region: str | None = rp_row[4] if rp_row else None
 
     # allowed_users: **effective policy 와 같은 우선순위**를 SQL 로 미러링한다
     # (gateway auth_service / effective_policy_service.get_for_user):
@@ -304,6 +315,9 @@ async def _build_app_policy(session: AsyncSession, client: str) -> AppPolicyResp
         default_model=default_model,
         allowed_users=allowed_users,
         web_search_enabled=web_search_enabled,
+        account_role_arn=account_role_arn,
+        external_id=external_id,
+        region=region,
     )
 
 
