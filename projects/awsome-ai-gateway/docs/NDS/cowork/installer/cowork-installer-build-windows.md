@@ -1,5 +1,8 @@
 # Cowork 설치기 빌드 — Windows (빌드 담당 관리자)
 
+> **독자**: 인스톨러 exe를 빌드하는 BUILD PC 관리자 — site-config에 env를 박고 build.ps1을 돌립니다.
+
+
 ```
 clone → packaging\site-config.json 채우기 → build.ps1
       → dist\installer\gateway-cli-cowork-setup-<ver>.exe

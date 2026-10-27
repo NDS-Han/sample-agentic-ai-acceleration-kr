@@ -1,4 +1,8 @@
-# Cowork (Claude Desktop) 클라이언트 문서 — US 배포
+# Cowork (Claude Desktop) 클라이언트 문서
+
+> **독자**: Cowork를 게이트웨이에 붙이는 사람 — 설치는 아래 표에서 갈래를 고릅니다.
+> **전제**: 게이트웨이가 https 도메인으로 배포돼 있어야 합니다(없으면 ../domain.md).
+
 
 Cowork 를 게이트웨이에 붙이는 방법은 두 갈래다. **지금 새로 배포한다면 설치기(installer) 계열**을 읽는다.
 

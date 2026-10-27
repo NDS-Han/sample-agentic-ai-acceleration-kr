@@ -1,5 +1,8 @@
 # Cowork 설치기 — 사용자 가이드 (Windows)
 
+> **독자**: 배포된 인스톨러를 받아 실행하는 직원 — 관리자가 만든 exe만 있으면 됩니다.
+
+
 ```
 readiness check → Claude Desktop 설치 → login → 사용 → verify
 ```

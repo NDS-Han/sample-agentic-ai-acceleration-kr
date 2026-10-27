@@ -87,26 +87,39 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 
 (`deploy`는 venv가 없으면 시스템 python3로 폴백 — PyYAML과 `rich`가 있으면 동작)
 
-## 문서 목록
+## 문서 목록 — 나는 누구인가
+
+**🛠️ 나는 게이트웨이를 설치/업데이트하는 사람** (배포 담당·인프라)
 
 | 문서 | 내용 |
 |---|---|
-| [install-prereq.md](install-prereq.md) | **0단계 — 배포 호스트 준비** (EC2·deployer role·Bedrock 확인·bootstrap-ec2·세션 재시작) |
-| [install-compose.md](install-compose.md) | **t0 — EC2 1대 설치** (EC2 생성·IAM·도구·배포 전 과정 런북) |
+| [install-prereq.md](install-prereq.md) | **0단계 — 배포 호스트 준비** (EC2·deployer role·Bedrock 확인·bootstrap-ec2) |
+| [install-compose.md](install-compose.md) | **t0 — EC2 1대 설치** |
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
+| [domain.md](domain.md) | **도메인 획득 → 배포에 등록** — backend별 자동화 정도 |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
-| [domain.md](domain.md) | **도메인 획득(Route53 구매/NS 위임/사내 할당) → 배포에 등록** — backend별 자동화 정도 |
-| [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | **EKS 컨트롤플레인/애드온/Aurora 엔진 업그레이드** (terraform env 소유 — 홉 순서·버전표·롤백 제한) |
-| [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | **레거시 스크립트 배포 → 최신 커밋 수동 업그레이드** (gateway.yaml 온보딩 전 1회 경로, env 파라미터화) |
-| [client-setup.md](client-setup.md) | **직원 PC 클라이언트 연결** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스 진입) |
-| [cowork/](cowork/README.md) | **Cowork(Claude Desktop) 상세** — macOS 수동 설치·Windows 인스톨러 빌드/수동/제거 |
-| [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/서명/배포·프로비저닝·서버측 진단 |
-| [operations.md](operations.md) | **운영 런북** — 직원 등록(Cognito 그룹)·오픈 전 하드닝 체크리스트·크로스계정 라우팅(클라이언트별·모델별)·Marketplace 구독 |
-| [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원(compose pg_dump·Aurora PITR)·시크릿 유실 시나리오·RTO/RPO·리허설 체크리스트 |
+| [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | EKS 컨트롤플레인/애드온/Aurora 업그레이드 |
+| [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | 레거시 스크립트 배포 → 최신 커밋 업그레이드 |
 | [gateway-yaml.md](gateway-yaml.md) | 설정 파일 전체 항목 설명서 |
-| [decisions.md](decisions.md) | 이 구조를 선택한 이유 (설계 배경) |
-| [upstream-sync.md](upstream-sync.md) | **upstream PR 브랜치 → nds/dev 머지 절차** — 충돌 해결 원칙·자동머지 함정·rerere |
+
+**🧭 나는 게이트웨이를 운영하는 사람** (관리자)
+
+| 문서 | 내용 |
+|---|---|
+| [operations.md](operations.md) | **운영 런북** — 직원 등록·오픈 전 체크리스트·크로스계정 라우팅·Marketplace |
+| [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원·시크릿 유실·RTO/RPO·리허설 |
+| [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/배포·서버측 진단 |
+| [upstream-sync.md](upstream-sync.md) | upstream → nds/dev 머지 절차 |
+
+**💻 나는 이 게이트웨이에 내 PC를 연결하는 직원**
+
+| 문서 | 내용 |
+|---|---|
+| [client-setup.md](client-setup.md) | **시작은 여기** — Claude Code · Cowork · Codex (한 페이지, 3×3 매트릭스) |
+| [cowork/](cowork/README.md) | Cowork 상세 — macOS 수동·Windows 인스톨러/수동/제거 |
+
+**📐 설계 배경이 궁금하면**: [decisions.md](decisions.md)
 
 ## 지원 클라이언트와 모델
 
@@ -114,8 +127,8 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 - 모델은 기본 **`global.*` inference profile** — 특정 리전에 고정되지 않아
   어느 리전에서 배포해도 동일하게 동작합니다
 - 크로스계정 라우팅은 두 축이 있습니다 — **클라이언트별**
-  (`model.routing_profiles.account_role_arn`, SQL로 설정)과 **모델별**
-  (`model.model_aliases.account_role_arn`, 관리 UI의 모델 수정에서 설정).
+  (`model.routing_profiles.account_role_arn`, /apps → 크로스 계정 라우팅 카드)
+  과 **모델별** (`model.model_aliases.account_role_arn`, /models 수정).
   절차는 [operations.md](operations.md) §3·§3.5
 - Cowork는 https가 필수 — `domain.mode: none`이면 동작하지 않습니다
 - 직원 PC 연결 절차는 [client-setup.md](client-setup.md) — 게이트웨이 배포가

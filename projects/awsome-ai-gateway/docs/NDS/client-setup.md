@@ -152,6 +152,8 @@ gateway-cli setup `
 
 `inferenceCredentialHelper` 는 **관리형 키**라 앱 UI 에 넣으면 조용히 무시된다.
 
+> 상세 절차·트러블슈팅·제거는 [cowork/](cowork/README.md) — 아래는 빠른 경로.
+
 #### B-mac — helper 스크립트 + 프로필 (macOS)
 
 ```bash
