@@ -1443,16 +1443,28 @@ def cmd_client_values(args) -> int:
 
 
 def main(argv=None) -> int:
-    p = argparse.ArgumentParser(prog="deploy", description="gateway.yaml 기반 LLM Gateway 배포 도구")
+    p = argparse.ArgumentParser(
+        prog="deploy",
+        description="gateway.yaml 기반 LLM Gateway 배포 도구 — 설정 파일 하나로 compose/ecs/eks에 배포",
+        epilog=(
+            "사용 순서\n"
+            "  첫 설치:   init → bootstrap            (한 번만)\n"
+            "  변경:      configure                  (마법사)  또는  gateway.yaml 편집 → apply\n"
+            "  상태 확인: doctor\n"
+            "  삭제:      teardown\n"
+            "\n"
+            "상세: 각 명령 뒤에 --help (예: ./deploy apply --help)"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    sp = sub.add_parser("init", help="[최초 1회] 대화형으로 gateway.yaml 생성")
+    sp = sub.add_parser("init", help="[처음 한 번] 질문에 답해 gateway.yaml 생성")
     sp.add_argument("--out", default="")
     sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_init)
 
     sp = sub.add_parser("configure",
-                        help="[일상 경로] 설정 변경 마법사 — 항목별 확인 → 저장 → 배포까지")
+                        help="[일상 변경] 항목을 골라 값을 물어보고 저장·배포까지 해주는 마법사")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--no-apply", action="store_true",
                     help="설정만 저장하고 배포는 안 함")
@@ -1460,15 +1472,15 @@ def main(argv=None) -> int:
                     help="eks: apply 시 쓸 kubeconfig context")
     sp.set_defaults(fn=cmd_configure)
 
-    sp = sub.add_parser("validate", help="[고급] yaml 검증 — configure/apply 도 시작 시 검증하므로 생략 가능")
+    sp = sub.add_parser("validate", help="[고급] yaml 검증만 — configure/apply도 시작 시 자동 검증하므로 보통 생략")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_validate)
 
-    sp = sub.add_parser("render", help="[고급] 산출물만 생성 — apply 가 내부에서 render 하므로 생략 가능")
+    sp = sub.add_parser("render", help="[고급] 배포 산출물(helm values/compose/tfvars)만 생성 — apply가 내부에서 호출하므로 보통 생략")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_render)
 
-    sp = sub.add_parser("apply", help="[파일 편집/CI 경로] yaml 그대로 배포 — render 내장 + 확인 + doctor")
+    sp = sub.add_parser("apply", help="[변경 적용] gateway.yaml을 그대로 배포 — yaml을 직접 편집했거나 CI에서 쓰는 경로")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--build", action="store_true", help="이미지를 강제로 다시 빌드 (compose)")
     sp.add_argument("--plan", action="store_true",
@@ -1481,8 +1493,8 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_apply)
 
     sp = sub.add_parser("bootstrap",
-                        help="[최초 1회] 신규 설치 — 인프라·시크릿·이미지·"
-                             "Cognito 포함 전체 순서 (이후 업데이트는 apply)")
+                        help="[처음 한 번] 신규 설치 — 인프라·시크릿·이미지 빌드·Cognito까지 전체 순서 "
+                             "(이후 변경은 apply)")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--plan", action="store_true",
                     help="단계 계획만 보여주고 실행하지 않음")
@@ -1492,7 +1504,7 @@ def main(argv=None) -> int:
                     help="eks: kubeconfig context (미지정 시 현재 context)")
     sp.set_defaults(fn=cmd_bootstrap)
 
-    sp = sub.add_parser("doctor", help="[상태 확인] 배포 상태·드리프트 점검 (--capture: 기존 배포 → yaml)")
+    sp = sub.add_parser("doctor", help="[상태 확인] 배포가 살아있는지·yaml과 실제가 어긋났는지 점검 (--capture: 기존 배포를 읽어 yaml 역생성)")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("--capture", action="store_true",
                     help="기존 배포 상태를 읽어 gateway.yaml 후보를 역생성")
@@ -1512,13 +1524,12 @@ def main(argv=None) -> int:
     sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("client-values",
-                        help="[직원 온보딩] 직원에게 전달할 env 4줄 출력 "
-                             "(OIDC + 게이트웨이/admin-api URL)")
+                        help="[직원 온보딩] 직원 PC에 붙여넣을 env 4줄을 출력해 전달")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.set_defaults(fn=cmd_client_values)
 
     sp = sub.add_parser("teardown",
-                        help="[위험] 배포 삭제 — backend 별 소유 범위만 지움 (확인: 환경 이름 입력)")
+                        help="[위험] 배포 삭제 — 이 도구가 만든 범위만 지움 (실행 전 환경 이름을 직접 입력해야 함)")
     sp.add_argument("--config", default=str(DEFAULT_CONFIG))
     sp.add_argument("-y", "--yes", action="store_true",
                     help="확인 생략 (CI/스크립트용 — 주의)")
