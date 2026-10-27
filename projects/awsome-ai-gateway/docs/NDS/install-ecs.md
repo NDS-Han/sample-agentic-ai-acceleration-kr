@@ -253,8 +253,8 @@ protection을 해제한 뒤 삭제하므로 **최종 스냅샷 없이 완전 삭
 
 | 기능 | 상태 |
 |---|---|
-| `web_search` | AgentCore Gateway 를 먼저 만들고 `agentcore_gateway_url` 을 tfvars 에 추가 + `routing_profiles` DB 행 필요 |
-| `pricing_lambda` | LiteLLM Lambda 배포는 이 경로 범위 밖 |
+| `web_search` | ✅ 지원 — `apply`가 AgentCore Gateway를 자동 프로비저닝하고 URL을 tfvars/`extra-vars.json`에 기록 (재apply 시 재사용) |
+| `pricing_lambda` | ✅ 지원 — `apply`가 LiteLLM Lambda + invoke 정책을 자동 배포하고 task env에 `LITELLM_PRICING_LAMBDA` 주입 |
 | `bi_insight` | `agentcore_runtime` 모듈 배선 미구현 — env main.tf 에 추가 필요 |
 | `observability` | CloudWatch logs + container insights 는 기본. OTel/Grafana 스택은 미구현 |
 | `cloudfront-temp` | ECS 경로에 CloudFront 없음 → `none` (HTTP) 또는 `route53-acm` |
