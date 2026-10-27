@@ -53,7 +53,7 @@ Part B  최종 사용자  받아서 설치하고 쓴다  Readiness → 설치 �
 | Cognito pool  | `us-west-2_AbCdEfGhI` (`llm-gateway-dev-userpool`)                                    |
 | OIDC issuer   | `https://cognito-idp.us-west-2.amazonaws.com/us-west-2_AbCdEfGhI`                     |
 | OIDC client   | `<OIDC_CLIENT_ID>` (`llm-gateway-dev-cli`)                                  |
-| CloudFront    | `<CF_DIST_ID>` → `https://xxx.cloudfront.net` (origin = gateway ALB)      |
+|  게이트웨이 도메인 | `ANTHROPIC_BASE_URL` (게이트웨이 도메인)      |
 | gateway ALB   | `<GATEWAY_ALB_DNS>`             |
 | admin-api ALB | `<ADMIN_API_ALB_DNS>`             |
 | 모델 alias      | `claude-sonnet-5-5` · `claude-opus-5-5` · `claude-haiku-4-5-20251001` |
@@ -139,7 +139,7 @@ dist\gateway-cli-cowork-suite\gateway-cli-cowork.exe verify
 | ---------------------- | -------------- | ------------------------------------------------------------------- |
 | `cowork-config`        | ✗ fail         | `setup` 미실행 — 이 단계에선 정상                                             |
 | `cowork-hklm`          | ✓ ok           | HKLM 이 비어 있음 — 값이 있으면 앱이 HKCU 를 통째로 무시한다                            |
-| `cowork-inference-url` | ✓ **HTTP 401** | 주입된 CloudFront 주소가 게이트웨이에 닿았다. VK 가 없으니 401 이 정답 — 주소가 틀리면 타임아웃/404 |
+| `cowork-inference-url` | ✓ **HTTP 401** | 주입된 게이트웨이 도메인이 게이트웨이에 닿았다. VK 가 없으니 401 이 정답 — 주소가 틀리면 타임아웃/404 |
 | `cowork-egress`        | ✓ HTTP 403     | `downloads.claude.ai` 도달                                            |
 | `cowork-ca`            | ! warn         | `caBundle` 빈 값이라 CA PEM 없음 — 의도대로                                   |
 
@@ -349,7 +349,7 @@ Add-AppxPackage -Path "$env:USERPROFILE\Downloads\Claude-offline-win32-x64-1.240
 
 1. Claude Desktop 을 열고 **Cowork 탭** → 모델 선택기에 A-1 의 alias 3개가 보이는지 확인.
 2. 아무 모델이나 골라 `hi` 를 보낸다. 응답이 오면
-  **PC → CloudFront → gateway-proxy → Bedrock(US Geo)** 이 전부 통한 것이다.
+  **PC → 게이트웨이 → gateway-proxy → Bedrock(US Geo)** 이 전부 통한 것이다.
 
 
 

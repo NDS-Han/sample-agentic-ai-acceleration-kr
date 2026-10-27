@@ -78,7 +78,7 @@ cd $env:USERPROFILE
 ▶ **실행** · 🔵 일반 PowerShell
 
 ```powershell
-git clone --depth 1 -b feat/cowork-installer-import https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr.git
+git clone --depth 1 -b nds/dev https://github.com/NDS-Han/sample-agentic-ai-acceleration-kr.git
 ```
 
 ▶ **실행** · 🔵 일반 PowerShell

@@ -605,7 +605,7 @@ Get-Process -Name "*laude*" -ErrorAction SilentlyContinue | Stop-Process -Force 
 | 모델            | `claude-opus-5` 와 `claude-haiku-4-5-20251001` 이 함께 기록 — 앱이 보조 작업에 작은 모델을 씁니다 |
 | 서버측 웹서치       | 실시간 질문 행에 `web_search_count = 1`                                    |
 | 비용 기록         | 전 행 `cost_usd > 0`, `status = SUCCESS`                              |
-| CloudFront 경로 | `onboard-windows.ps1` 의 `gateway health: 200`                       |
+|  게이트웨이 경로| `onboard-windows.ps1` 의 `gateway health: 200`                       |
 
 
 ⚠️ **비용 검산 시 캐시 토큰을 빼먹지 마십시오.** `input_tokens`·`output_tokens` 만으로 계산하면 실제 `cost_usd` 보다 훨씬 작게 나옵니다. Cowork 는 큰 시스템 프롬프트를 캐시로 보내서, `cache_creation_tokens`·`cache_read_tokens` 가 비용의 대부분을 차지하는 행이 나옵니다. 단가 오류로 오해하기 쉽습니다.
