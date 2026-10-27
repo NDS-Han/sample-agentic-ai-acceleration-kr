@@ -30,7 +30,7 @@
 **창 표시**: ▶ 🔵 **Terminal**(직원 본인 계정) · ▶ 🔴 같은 창에서 **`sudo`** 를 붙인 명령 · ▶ 🟢 **운영자**가 배포 EC2 에서.
 ⚠️ `sudo` 없이 하라는 확인 명령에 `sudo` 를 붙이면 root 기준으로 돌아 토큰을 못 찾습니다.
 
-**운영자에게 미리 받을 것** — ① env 값 4개(`07-client-values.sh` 출력) ② 로그인 계정(이메일+임시 비밀번호) ③ 이 Mac 공인 IP 의 `inbound-cidrs` 등록(`05-allow-client-ip.sh`).
+**운영자에게 미리 받을 것** — ① env 값 4개(`./deploy client-values` 출력) ② 로그인 계정(이메일+임시 비밀번호) ③ 이 Mac 공인 IP 의 `inbound-cidrs` 등록(운영자가 gateway.yaml inbound-cidrs 에 추가 후 apply).
 
 ⚠️ **순서를 바꾸지 마십시오.** 설정(절차 4) 전에 앱을 켜면 claude.ai 로그인 화면에서 개인 계정으로 들어가 버릴 여지가 생깁니다. ⏱️ 앱 내려받기 제외 30분 안팎(Windows 실측 기준).
 
@@ -42,7 +42,7 @@
 
 **게이트웨이 쪽** — NDS 배포가 완료돼 있어야 합니다: `https://` 도메인(domain.md — Cowork 는 https 필수), Cowork 라우팅 프로필 행(operations.md §3 또는 /apps UI), 모델 alias 가 /models 에서 ACTIVE, **클라이언트 공인 IP 가 인그레스 허용 대역에 포함**(gateway.yaml 의 inbound-cidrs). IP 가 빠지면 로그인은 되는데 VK 인증만 실패합니다.
 
-**클라이언트 쪽** — `gateway-cli` 와 로그인 토큰뿐. 같은 Mac 에서 **Claude Code 를 이미 쓰면 로그인을 공유하므로 절차 1 생략.** ⚠️ `gateway-cli` 는 반드시 **fork** 에서 설치(upstream 은 벤더 버그 픽스 3건 부재).
+**클라이언트 쪽** — `gateway-cli` 와 로그인 토큰뿐. 같은 Mac 에서 **Claude Code 를 이미 쓰면 로그인을 공유하므로 절차 1 생략.** ⚠️ `gateway-cli` 는 반드시 **이 저장소(fork)** 에서 설치 — upstream은 managed-settings 경로 버그로 조용히 우회합니다.
 
 **기기** — **macOS 14 (Sonoma) 이상**, Apple Silicon·Intel 지원. ⚠️ **VM 위 macOS 는 대개 실패**합니다(가상화 기능 미노출) — 절차 0 으로 먼저 거르십시오.
 
@@ -86,12 +86,12 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 끝나면 **새 터미널**에서 `uv --version` 확인.
 
-**① 저장소** — ⚠️ 반드시 `gonsoomoon-ml` **fork**, 브랜치 `us/deploy-fixes`. ▶ 🔵
+**① 저장소** — ⚠️ 반드시 **이 저장소(fork)**, 브랜치 `nds/dev` — upstream은 managed-settings 경로 버그로 조용히 우회합니다. ▶ 🔵
 
 ```bash
 cd ~
-git clone -b us/deploy-fixes \
-  https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr.git
+git clone -b nds/dev \
+  https://github.com/NDS-Han/sample-agentic-ai-acceleration-kr.git
 cd ~/sample-agentic-ai-acceleration-kr/projects/awsome-ai-gateway
 ```
 
@@ -104,7 +104,7 @@ gateway-cli version
 
 `command not found` 면 `uv tool update-shell` 후 **새 터미널**에서 재확인 (⚠️ 실측 전).
 
-**③ 운영자에게 받은 값 4개** — 운영자가 배포 EC2 에서(🟢) `bash 07-client-values.sh` 를 돌려 준 **"macOS / Linux"** 절의 `export` 4줄을 붙여넣습니다. ▶ 🔵
+**③ 운영자에게 받은 값 4개** — 운영자가 배포 EC2 에서(🟢) `./deploy client-values` 를 돌려 준 **"macOS / Linux"** 절의 `export` 4줄을 붙여넣습니다. ▶ 🔵
 
 ```bash
 export OIDC_ISSUER_URL="<from operator>"
@@ -113,7 +113,7 @@ export ADMIN_API_URL="<from operator>"
 export ANTHROPIC_BASE_URL="<from operator - starts with https://>"
 ```
 
-⚠️ `ANTHROPIC_BASE_URL` 은 **`https://` 여야** 합니다(Cowork 가 평문 HTTP 거부 — CloudFront 주소).
+⚠️ `ANTHROPIC_BASE_URL` 은 **`https://` 여야** 합니다(Cowork 가 평문 HTTP 거부).
 
 **④ 로그인** — ⚠️ **③ 을 넣은 그 창에서** (export 값이 그 창에서만 유효). ▶ 🔵
 
@@ -227,7 +227,7 @@ cat > ~/Downloads/nds-llm-gateway-cowork.mobileconfig <<EOF
   <array>
     <dict>
       <key>PayloadDisplayName</key>
-      <string>US LLM Gateway - Cowork Inference</string>
+      <string>NDS LLM Gateway - Cowork Inference</string>
       <key>PayloadIdentifier</key>
       <string>com.anthropic.claudefordesktop.nds-llm-gateway</string>
       <key>PayloadType</key>
@@ -255,7 +255,7 @@ cat > ~/Downloads/nds-llm-gateway-cowork.mobileconfig <<EOF
     </dict>
   </array>
   <key>PayloadDisplayName</key>
-  <string>US LLM Gateway Cowork</string>
+  <string>NDS LLM Gateway Cowork</string>
   <key>PayloadIdentifier</key>
   <string>com.anthropic.claudefordesktop.nds-llm-gateway.profile</string>
   <key>PayloadType</key>
@@ -289,8 +289,8 @@ defaults read \
 
 1. **첫 화면**: claude.ai **로그인 화면이 뜨면 멈추고** §4 로 (관리형 설정을 못 읽은 것). 로그인 없이 바로 쓸 수 있어야 정상.
 2. **모델 목록**: `inferenceModels` 에 넣은 이름들이 보여야 함.
-3. **짧은 대화**: `hi` 응답이 오면 Mac→CloudFront→게이트웨이→Bedrock 통과. ⚠️ 게이트웨이 변경 직후엔 **캐시 5분** 대기(그 전엔 신규 모델 404).
-4. **게이트웨이 쪽**: 운영자가(🟢) `bash 04-verify.sh` → C 섹션 최근 행 `client=cowork`, `status=SUCCESS`. 상세 기준은 Windows 문서 절차 5-④ 와 동일.
+3. **짧은 대화**: `hi` 응답이 오면 Mac→게이트웨이→Bedrock 통과. ⚠️ 게이트웨이 변경 직후엔 **캐시 5분** 대기(그 전엔 신규 모델 404).
+4. **게이트웨이 쪽**: 운영자가(🟢) `./deploy doctor` → C 섹션 최근 행 `client=cowork`, `status=SUCCESS`. 상세 기준은 Windows 문서 절차 5-④ 와 동일.
 
 ---
 
@@ -302,12 +302,12 @@ defaults read \
 | 모델 목록이 비었거나 다른 이름                  | `inferenceModels` 형식 — plist **배열**이어야 함, JSON 문자열이면 무시됨 (절차 4)            |
 | helper 는 VK 를 뱉는데 앱은 인증 실패         | 값이 관리형 레이어에 없음(Local 에 넣음), 또는 출력이 개행으로 안 끝남                               |
 | 터미널에서는 helper 가 되는데 앱에서만 실패        | helper 절대경로 오타, 또는 실행권한 없음 → `sudo chmod +x`                               |
-| VK 발급 타임아웃 (로그인은 성공)               | 이 Mac 의 공인 IP 가 `inbound-cidrs` 에 없음 → `05-allow-client-ip.sh`             |
+| VK 발급 타임아웃 (로그인은 성공)               | 이 Mac 의 공인 IP 가 `inbound-cidrs` 에 없음 → 운영자가 gateway.yaml inbound-cidrs 에 추가 후 apply             |
 | `refresh failed: HTTP 400`         | refresh token 만료 → `gateway-cli login` 재실행                                |
 | `uv: command not found`            | PATH 미반영 → 새 터미널, 그래도 안 되면 설치 스크립트 재실행 (절차 1-⓪)                           |
 | PyPI 를 못 받음 (사내망)                  | 운영자에게 wheel 파일을 받아 `uv tool install <받은경로>/gateway_cli-*.whl`             |
 | 특정 모델만 404                         | alias 오타, 또는 등록 후 5분 미경과                                                  |
-| 전 요청 502                           | `01` 미적용 또는 CloudFront→ALB 경로 미개방(`03 --allow-cloudfront`)                |
+| 전 요청 502                           | 게이트웨이 라우팅 미적용 또는 ALB/Ingress 미개방 → `./deploy doctor`로 점검                |
 | 앱은 켜지고 대화도 되는데 **Cowork 세션만** 시작 안 됨 | `downloads.claude.ai` 가 막힘 → offline 설치판으로 다시 설치 (§2 「망」)                  |
 | 위와 같은데 방화벽은 열려 있음                  | 백신·EDR 이 Cowork 에이전트를 막음 → 아래                                              |
 | 원인이 안 보일 때                         | 앱 로그 — `~/Library/Logs/Claude-3p/main.log`                                 |
@@ -320,13 +320,13 @@ defaults read \
 
 **아직 실기기 검증 전입니다.** 절차 구성·좌표는 Windows 검증(2026-08-03)과, `.mobileconfig`·helper 패턴은 Seoul Mac 실측(2026-06)과 같습니다. macOS 실기기로 절차 0~5 를 완주할 때 채울 항목:
 
-**게이트웨이 쪽** (`04-verify.sh` C 섹션 — Windows §8 과 같은 기준):
+**게이트웨이 쪽** (`./deploy doctor` usage_logs 조회 — Windows §8 과 같은 기준):
 
 - [ ] `client` 분류가 5행 모두 `cowork`
 - [ ] 모델 alias 가 `inferenceModels` 에 넣은 이름으로 기록
 - [ ] 실시간 질문 행에 `web_search_count ≥ 1`
 - [ ] 전 행 `cost_usd > 0`, `status = SUCCESS`
-- [ ] 로그인 스크립트의 `gateway health: 200` (CloudFront 경로)
+- [ ] 로그인 스크립트의 `gateway health: 200` (게이트웨이 경로)
 
 **macOS 고유** (본문 ⚠️ 마커 대응):
 
