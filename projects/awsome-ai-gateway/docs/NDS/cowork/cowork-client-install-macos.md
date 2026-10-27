@@ -5,7 +5,7 @@
 > Seoul 배포의 Mac 실측 패턴(`.mobileconfig`·credential helper, 2026-06)을 바탕으로 작성했습니다.
 > macOS 실기기 종단 검증 전이며, 실측 필요 지점에 ⚠️(실측 전) 을 달았습니다.
 
-**Cowork(Claude Desktop 3P)** 를 게이트웨이에 붙이는 문서입니다. 게이트웨이 쪽 변경(`update-scripts/`)이 끝난 뒤에 하십시오. **Windows PC 는** 같은 폴더의 `cowork-client-install-windows.md` **를 보십시오.**
+**Cowork(Claude Desktop 3P)** 를 게이트웨이에 붙이는 문서입니다. 게이트웨이 쪽 준비(../README.md의 NDS 배포 절차)가 끝난 뒤에 하십시오. **Windows PC 는** 같은 폴더의 `cowork-client-install-windows.md` **를 보십시오.**
 
 ---
 
@@ -35,7 +35,7 @@
 
 ## 2. 전제
 
-**게이트웨이 쪽** — `update-scripts/README.md` 실행 순서 완료: `https://` base URL(`03-create-cloudfront.sh`), Cowork 라우팅(`01-fix-cowork-routing.sh`), 모델 alias 목록(`00-preflight-check.sh` ACTIVE), **클라이언트 공인 IP 등록(`05-allow-client-ip.sh`)**. IP 가 빠지면 로그인(공개)은 되는데 **VK 발급(IP 제한)만 타임아웃**납니다.
+**게이트웨이 쪽** — NDS 배포가 완료돼 있어야 합니다: `https://` 도메인(domain.md — Cowork 는 https 필수), Cowork 라우팅 프로필 행(operations.md §3 또는 /apps UI), 모델 alias 가 /models 에서 ACTIVE, **클라이언트 공인 IP 가 인그레스 허용 대역에 포함**(gateway.yaml 의 inbound-cidrs). IP 가 빠지면 로그인은 되는데 VK 인증만 실패합니다.
 
 **클라이언트 쪽** — `gateway-cli` 와 로그인 토큰뿐. 같은 Mac 에서 **Claude Code 를 이미 쓰면 로그인을 공유하므로 절차 1 생략.** ⚠️ `gateway-cli` 는 반드시 **fork** 에서 설치(upstream 은 벤더 버그 픽스 3건 부재).
 
@@ -212,7 +212,7 @@ BASE="$ANTHROPIC_BASE_URL"; echo "$BASE"
 **② 프로파일 생성** — ▶ 🔵 그대로 붙여넣으십시오 (`$BASE` 만 치환됨).
 
 ```bash
-cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
+cat > ~/Downloads/nds-llm-gateway-cowork.mobileconfig <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -224,7 +224,7 @@ cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
       <key>PayloadDisplayName</key>
       <string>US LLM Gateway - Cowork Inference</string>
       <key>PayloadIdentifier</key>
-      <string>com.anthropic.claudefordesktop.us-llm-gateway</string>
+      <string>com.anthropic.claudefordesktop.nds-llm-gateway</string>
       <key>PayloadType</key>
       <string>com.anthropic.claudefordesktop</string>
       <key>PayloadUUID</key>
@@ -252,7 +252,7 @@ cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
   <key>PayloadDisplayName</key>
   <string>US LLM Gateway Cowork</string>
   <key>PayloadIdentifier</key>
-  <string>com.anthropic.claudefordesktop.us-llm-gateway.profile</string>
+  <string>com.anthropic.claudefordesktop.nds-llm-gateway.profile</string>
   <key>PayloadType</key>
   <string>Configuration</string>
   <key>PayloadUUID</key>
@@ -262,12 +262,12 @@ cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
 </dict>
 </plist>
 EOF
-plutil -lint ~/Downloads/us-llm-gateway-cowork.mobileconfig
+plutil -lint ~/Downloads/nds-llm-gateway-cowork.mobileconfig
 ```
 
 마지막 줄이 `... OK` 여야 합니다(오류 = 대개 복사 잘림 → 재붙여넣기). `PayloadIdentifier`·`PayloadUUID` 가 고정이라 **다시 돌려 재설치하면 기존 프로파일이 교체**됩니다 — 모델·주소 변경 시 블록을 고쳐 반복하면 됩니다.
 
-**③ 프로파일 설치** — ▶ 🔵 `open ~/Downloads/us-llm-gateway-cowork.mobileconfig` → System Settings 에서 **설치** 승인 (「개인정보 보호 및 보안 → 프로파일」 또는 「일반 → 기기 관리」 — ⚠️ 실측 전).
+**③ 프로파일 설치** — ▶ 🔵 `open ~/Downloads/nds-llm-gateway-cowork.mobileconfig` → System Settings 에서 **설치** 승인 (「개인정보 보호 및 보안 → 프로파일」 또는 「일반 → 기기 관리」 — ⚠️ 실측 전).
 
 **④ 확인** — ▶ 🔵
 

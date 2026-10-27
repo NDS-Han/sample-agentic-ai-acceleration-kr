@@ -93,7 +93,7 @@ cd sample-agentic-ai-acceleration-kr\projects\awsome-ai-gateway\cowork-installer
 ▶ **실행** · 배포 EC2
 
 ```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash 07-client-values.sh
+cd ~/awsome-ai-gateway/docs/NDS && ./deploy client-values
 ```
 
 출력 4줄이 그대로 들어간다:
@@ -110,7 +110,7 @@ cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash 07-client-valu
 ▶ **실행** · 배포 EC2
 
 ```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts && bash 00-preflight-check.sh
+cd ~/awsome-ai-gateway/docs/NDS && ./deploy doctor
 ```
 
 출력 중 `--- model_aliases: ACTIVE ---` 절의 `alias` 열이 게이트웨이에 등록된 모델이다

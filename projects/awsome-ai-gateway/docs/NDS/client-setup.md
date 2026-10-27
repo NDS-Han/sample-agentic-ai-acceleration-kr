@@ -5,7 +5,7 @@
 > (`api-key-helper` → Virtual Key)를 공유한다.
 >
 > OS는 **macOS · Linux · Windows · Windows WSL** 넷을 커버한다 — 각 절의 OS 표를
-> 보고 내 쪽 블록만 실행하면 된다. 상세·실측 노트는 `../us-llm-gateway/` 의
+> 보고 내 쪽 블록만 실행하면 된다. 상세·실측 노트는 `cowork/` 의
 > 클라이언트별 문서 참조.
 >
 > **운영자(배포·빌드·프로비저닝 담당)는 [client-admin.md](client-admin.md)** —
@@ -172,14 +172,14 @@ sudo chmod +x /usr/local/bin/llm-gateway-helper.sh
 /usr/local/bin/llm-gateway-helper.sh   # vk- 한 줄 확인 (sudo 붙이지 말 것)
 
 # ② 프로필 생성 → 설치
-cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
+cat > ~/Downloads/nds-llm-gateway-cowork.mobileconfig <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
  <key>PayloadContent</key><array><dict>
   <key>PayloadType</key><string>com.anthropic.claudefordesktop</string>
-  <key>PayloadIdentifier</key><string>com.anthropic.claudefordesktop.us-llm-gateway</string>
+  <key>PayloadIdentifier</key><string>com.anthropic.claudefordesktop.nds-llm-gateway</string>
   <key>PayloadDisplayName</key><string>US LLM Gateway - Cowork</string>
   <key>PayloadUUID</key><string>c5aedb63-b1d3-4d7c-940c-713c7cb47e4d</string>
   <key>PayloadVersion</key><integer>1</integer>
@@ -193,13 +193,13 @@ cat > ~/Downloads/us-llm-gateway-cowork.mobileconfig <<EOF
    <string>claude-haiku-4-5-20251001</string></array>
  </dict></array>
  <key>PayloadDisplayName</key><string>US LLM Gateway Cowork</string>
- <key>PayloadIdentifier</key><string>com.anthropic.claudefordesktop.us-llm-gateway.profile</string>
+ <key>PayloadIdentifier</key><string>com.anthropic.claudefordesktop.nds-llm-gateway.profile</string>
  <key>PayloadType</key><string>Configuration</string>
  <key>PayloadUUID</key><string>bcee0872-d3bc-477c-a63e-3334114d5a04</string>
  <key>PayloadVersion</key><integer>1</integer>
 </dict></plist>
 EOF
-open ~/Downloads/us-llm-gateway-cowork.mobileconfig   # 시스템 설정 → 설치 승인
+open ~/Downloads/nds-llm-gateway-cowork.mobileconfig   # 시스템 설정 → 설치 승인
 ```
 
 ③ 앱 완전 종료 → 재실행. 검증: 짧은 대화 → 대시보드 `client=cowork`.
@@ -319,8 +319,8 @@ api-key-helper 2>nul | findstr /b "vk-"
 | **인스톨러 빌드** (권장, 직원 다수) | 조직 배포 | BUILD PC 에서 `installer/packaging/site-config.json` 에 env 값을 박고 `build.ps1` → **단일 .exe** 를 직원에게 배포. 직원 PC 에서는 `gateway-cli-cowork setup`(HKLM 정책 기록) → 사용자별 `login` 한 번 |
 | **수동** | 소수·검증 | `gateway-cli` 설치·로그인 → helper 스크립트 → Cowork `.msix` 설치 → 관리자 PowerShell 로 HKLM `inference*` 정책 6개 기록 |
 
-상세: `../us-llm-gateway/cowork/installer/cowork-installer-admin-e2e-windows.md`(인스톨러) ·
-`../us-llm-gateway/cowork/manual/cowork-client-install-windows.md`(수동, Windows Server 2025 실측 완료).
+상세: `cowork/installer/cowork-installer-admin-e2e-windows.md`(인스톨러) ·
+`cowork/manual/cowork-client-install-windows.md`(수동, Windows Server 2025 실측 완료).
 
 ### Codex — Windows
 

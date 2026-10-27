@@ -33,4 +33,4 @@ Cowork 를 게이트웨이에 붙이는 방법은 두 갈래다. **지금 새로
 ---
 
 - 설치기 소스는 upstream 머지 전까지 fork 브랜치 `feat/cowork-installer-import` 의 `cowork-installer/` 에 있다(벤더 원본 = CodeCommit phase-2 `1c11531`).
-- 게이트웨이 쪽 작업(모델 등록·클라이언트 값 조회·IP 허용)은 [`../update-scripts/`](../update-scripts/README.md).
+- 게이트웨이 쪽 작업(모델 등록·클라이언트 값 조회·IP 허용)은 [../client-admin.md](../client-admin.md) + `../operations.md`.

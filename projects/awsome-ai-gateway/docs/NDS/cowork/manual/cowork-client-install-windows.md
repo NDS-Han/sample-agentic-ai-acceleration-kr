@@ -3,7 +3,7 @@
 > **상태: 종단 검증 완료 — 2026-08-03, Windows Server 2025.**
 > 절차 1~5 를 처음부터 끝까지 실제로 돌려 응답과 웹서치까지 확인했고, 그 과정에서 드러난 문서 문제를 반영했습니다. 검증 내용은 맨 아래 「검증 기록」에 있습니다.
 
-Claude Code 가 아니라 **Cowork(Claude Desktop 3P)** 를 게이트웨이에 붙이는 문서입니다. 게이트웨이 쪽 변경(`update-scripts/`)이 끝난 뒤에 하는 작업입니다. **macOS 는** 같은 폴더의 `cowork-client-install-macos.md` **를 보십시오.**
+Claude Code 가 아니라 **Cowork(Claude Desktop 3P)** 를 게이트웨이에 붙이는 문서입니다. 게이트웨이 쪽 준비(../README.md의 NDS 배포 절차)가 끝난 뒤에 하는 작업입니다. **macOS 는** 같은 폴더의 `cowork-client-install-macos.md` **를 보십시오.**
 
 ---
 
@@ -51,7 +51,7 @@ Claude Code 가 아니라 **Cowork(Claude Desktop 3P)** 를 게이트웨이에 �
 
 ## 2. 전제
 
-**게이트웨이 쪽** — `update-scripts/README.md` 의 실행 순서가 끝나 있어야 합니다.
+**게이트웨이 쪽** — ../README.md의 NDS 배포 절차(설치→도메인→라우팅 프로필→IP 허용)가 끝나 있어야 합니다.
 
 
 | 필요한 것                                      | 어디서 나오나                                       |
@@ -343,8 +343,8 @@ gateway-cli version
 ▶ 🟢 **실행 · 배포 EC2** — 운영자
 
 ```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
-bash 07-client-values.sh
+cd ~/awsome-ai-gateway/docs/NDS
+./deploy client-values
 ```
 
 읽기 전용이고, PowerShell 문법 4줄과 macOS 용 4줄을 함께 출력합니다. 직원은 받은 4줄을 그대로 붙여넣습니다.
@@ -653,8 +653,8 @@ Get-ItemProperty $K | Format-List inference*
 ▶ 🟢 **실행 · 배포 EC2** — 운영자
 
 ```bash
-cd ~/awsome-ai-gateway/docs/us-llm-gateway/update-scripts
-bash 04-verify.sh
+cd ~/awsome-ai-gateway/docs/NDS
+./deploy doctor
 ```
 
 C 섹션의 최근 행에서 봅니다.
