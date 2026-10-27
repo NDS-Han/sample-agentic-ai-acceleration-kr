@@ -763,7 +763,7 @@ def _post_apply_notes(cfg: schema.GatewayConfig) -> None:
                   f" --env {cfg.env}\n"
                   "  · 라우팅 프로필 확인 — 시드의 claude-code/cowork 행은 샘플 "
                   "크로스계정 ARN 입니다. 단일 계정 배포면 account_role_arn 을 비워야"
-                  " 합니다 (SQL — docs/NDS/operations.md §3). 안 하면 AssumeRole "
+                  " 합니다 (/apps → 크로스 계정 라우팅 카드, 또는 SQL — docs/NDS/operations.md §3). 안 하면 AssumeRole "
                   "실패로 요청이 전부 에러납니다")
 
 
