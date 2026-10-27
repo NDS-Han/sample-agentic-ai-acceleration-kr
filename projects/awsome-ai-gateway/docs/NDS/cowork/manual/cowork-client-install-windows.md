@@ -23,107 +23,84 @@ Claude Code 가 아니라 **Cowork(Claude Desktop 3P)** 를 게이트웨이에 �
 
 ## 1. 한눈에
 
-직원 PC 의 **Cowork 를 회사 게이트웨이에 연결**하는 작업입니다. 연결되면 Cowork 는 claude.ai 대신 회사 게이트웨이로 요청을 보내고, 그때 필요한 열쇠는 매번 자동으로 발급받습니다. 직원이 따로 로그인하거나 키를 관리할 일은 없습니다.
+Cowork를 회사 게이트웨이에 연결합니다. 연결 후 앱은 claude.ai 대신 게이트웨이로 가고, 키는 헬퍼가 자동 발급합니다.
 
 ```
-실행 가능 확인 → gateway-cli 설치·로그인 → helper 작성 → Cowork 설치 → 관리형 설정 → 실행 확인
-    절차 0             절차 1              절차 2        절차 3        절차 4       절차 5
+실행 가능 확인 → gateway-cli 설치·로그인 → helper 작성 → 앱 설치 → 관리형 설정 → 실행 확인
+    절차 0             절차 1              절차 2       절차 3      절차 4       절차 5
 ```
 
+| 절차 | 내용 | 창 | 완료 신호 |
+|---|---|---|---|
+| 0 | Cowork 실행 가능 점검 (2MB 도구) | — | `ready for Cowork` |
+| 1 | gateway-cli 설치 + 회사 계정 로그인 | 🔵 | `api-key-helper`가 `vk-` 출력 |
+| 2 | helper 스크립트 작성 | 🔵→🔴→🔵 | 직접 실행 시 `vk-` 한 줄 |
+| 3 | Cowork `.msix` 설치 (전 사용자) | 🔴 | `Get-AppxPackage` 출력 |
+| 4 | 관리형 설정 기록 (HKLM `inference*` 6개) | 🔴 | `Get-ItemProperty` 출력 |
+| 5 | 앱 실행 → 짧은 대화 → 게이트웨이 기록 확인 | — | `usage_logs`에 `client=cowork` |
 
-| 절차    | 무엇을 하나                                       | 창            | 끝난 것을 아는 법                       |
-| ----- | -------------------------------------------- | ------------ | -------------------------------- |
-| **0** | 이 PC 가 Cowork 를 돌릴 수 있는지 점검 (2 MB 도구)         | —            | `ready for Cowork` 문장            |
-| **1** | Python·git 준비 → `gateway-cli` 설치 → 회사 계정 로그인 | 🔵           | `api-key-helper` 가 `vk-` 한 줄을 출력 |
-| **2** | helper 파일 작성 — 열쇠 한 줄만 내보내는 스크립트             | 🔵 → 🔴 → 🔵 | helper 를 직접 실행해 `vk-` 한 줄        |
-| **3** | Cowork 앱 설치 (`.msix`, 모든 사용자)                | 🔴           | `Get-AppxPackage` 가 이름·버전을 출력    |
-| **4** | 관리형 설정 기록 — 게이트웨이 주소·helper 경로·모델 목록         | 🔴           | `Get-ItemProperty` 가 여섯 값을 출력    |
-| **5** | 앱 실행 → 짧은 대화 → 운영자가 게이트웨이 기록 확인                | —            | 응답이 오고 `usage_logs` 에 `client=cowork` |
-
-
-🔵 일반 PowerShell · 🔴 관리자 PowerShell — 아래 「절차」 앞의 표에 설명이 있습니다.
+🔵 일반 PowerShell · 🔴 관리자 PowerShell — 창 구분 표는 §4 앞 표 참조.
 
 **운영자에게 미리 받을 것**
 
+| 받을 것 | 출처 |
+|---|---|
+| env 값 4개 | 운영자가 `./deploy client-values` 출력 |
+| 로그인 계정 | 이메일 + 임시 비밀번호 (첫 로그인 시 재설정) |
+| 이 PC 공인 IP 등록 | 운영자가 inbound-cidrs에 미리 등록 |
 
-| 받을 것            | 어디서 나오나                                  |
-| --------------- | ---------------------------------------- |
-| env 값 4개        | 운영자가 `07-client-values.sh` 를 돌린 출력       |
-| 로그인 계정          | 이메일 + 임시 비밀번호 (첫 로그인 때 새 비밀번호를 정하게 됩니다)  |
-| 이 PC 의 공인 IP 등록 | 운영자가 `05-allow-client-ip.sh` 로 미리 넣어 둡니다 |
+⚠️ **순서 고정** — 절차 4(설정) 전에 앱을 켜면 claude.ai 로그인 화면이 떠 개인 계정으로 들어갈 수 있습니다.
+⏱️ 소요: 다운로드(~1.8GB) 제외 약 30분 (실측).
 
-
-⚠️ **순서를 바꾸지 마십시오.** 특히 절차 4(설정)보다 앱을 먼저 켜면 claude.ai 로그인 화면이 뜨고, 거기서 개인 계정으로 들어가 버릴 여지가 생깁니다.
-
-⏱️ 앱 내려받기(약 1.8 GB)를 빼면 30분 안팎입니다(실측). 대부분은 `pip install` 과 앱 설치가 차지합니다.
-
-> **로그인 방식은 바뀔 수 있습니다.** 지금은 게이트웨이가 자체 계정 저장소(Amazon Cognito)를 쓰지만, 나중에 **회사가 이미 쓰는 로그인**(사내 계정 통합 로그인)으로 바꾸는 것이 예정돼 있습니다. 그때도 **직원이 하는 일은 이 문서 그대로**입니다 — 운영자가 주는 값 중 `OIDC_ISSUER_URL`·`OIDC_CLIENT_ID` 두 개만 달라지고, 브라우저에 뜨는 로그인 화면이 회사 화면으로 바뀝니다. 절차·명령은 동일합니다.
+> 로그인 방식이 사내 통합 로그인으로 바뀌어도 절차는 동일 — `OIDC_ISSUER_URL`/`OIDC_CLIENT_ID` 값만 달라집니다.
 
 ---
-
-
 
 ## 2. 전제
 
-**게이트웨이 쪽** — ../README.md의 NDS 배포 절차(설치→도메인→라우팅 프로필→IP 허용)가 끝나 있어야 합니다.
+**게이트웨이 쪽** — ../README.md의 NDS 배포 절차 완료:
 
+| 필요 | 확인 경로 |
+|---|---|
+| `https://` 도메인 | ../domain.md (Cowork는 https 필수) |
+| Cowork 라우팅 프로필 | ../operations.md §3 또는 /apps UI |
+| 모델 alias ACTIVE | 관리 UI /models |
+| 클라이언트 공인 IP ∈ inbound-cidrs | gateway.yaml → apply |
 
-| 필요한 것                                      | 어디서 나오나                                       |
-| ------------------------------------------ | --------------------------------------------- |
-| `https://` base URL                        | `03-create-cloudfront.sh --create` 출력         |
-| Cowork 라우팅 정상화                             | `01-fix-cowork-routing.sh --apply`            |
-| 쓸 모델 alias 목록                              | `00-preflight-check.sh` 의 ACTIVE 목록           |
-| **클라이언트 공인 IP 가** `inbound-cidrs` **에 등록** | `05-allow-client-ip.sh --add <IP>/32 --apply` |
+IP 등록이 빠지면 **로그인은 되는데 VK 발급만 타임아웃** — Cognito는 공개, admin-api는 IP 제한이라 증상이 갈립니다.
 
+**클라이언트 쪽** — `gateway-cli` + 로그인 토큰 (절차 1). Claude Code를 이미 쓰는 PC면 로그인 재사용 → 절차 1 생략.
 
-마지막 항목이 빠지면 **로그인은 되는데 VK 발급이 타임아웃**납니다. 로그인(Cognito)은 공개고 키 발급(admin-api)은 IP 제한이라 증상이 갈립니다.
+⚠️ `gateway-cli`는 **이 저장소(fork)에서** 설치 — upstream은 managed-settings 경로 버그가 남아 있어 조용히 게이트웨이를 우회합니다.
+⚠️ **하드웨어 가상화 필수** — 일반 EC2에서는 Cowork 미지원 (`windows-test-machine-setup.md`).
 
-**클라이언트 쪽** — 필요한 것은 `gateway-cli` 와 로그인 토큰뿐입니다(아래 절차 1). **Claude Code 는 필요 없습니다** — 같은 PC 에서 이미 쓰고 있다면 그 로그인을 그대로 재사용하므로 절차 1 을 건너뛰십시오.
+**방화벽** — 사내망이면 시작 전 네트워크 담당자와 조율:
 
-⚠️ `gateway-cli` 는 **fork 에서** 설치하십시오. upstream 에는 벤더 버그 픽스 3건이 빠져 있어, 설치는 성공한 것처럼 보이는데 인증이 조용히 개인 계정으로 새는 등의 문제가 있습니다.
+| 호스트 | 용도 | 막히면 |
+|---|---|---|
+| 게이트웨이 `https://` URL | 추론 전부 | 응답 없음 |
+| `OIDC_ISSUER_URL` | 로그인·VK 갱신 | 로그인 실패 |
+| `claude.ai` | 절차 0·3 파일 다운로드 | 다운로드 실패 (설치 후 불필요) |
+| `downloads.claude.ai` | **Cowork 세션 시작 시** 작업환경 번들 (offline판은 내장) | 앱은 뜨는데 **세션만 안 열림** — 가장 헷갈리는 실패 |
+| `releases.claude.com` | 자동 업데이트 | 업데이트 정지 (사용 무관) |
 
-⚠️ **Windows 는 하드웨어 가상화가 필요합니다.** 일반 EC2 인스턴스에서는 Cowork 가 실행되지 않습니다 — 상세는 `windows-test-machine-setup.md`.
-
-**망 쪽** — 회사 방화벽이 아래 호스트를 막고 있으면 안 됩니다. 사내망에서 하는 설치라면 **시작하기 전에** 네트워크 담당자와 맞춰 두십시오.
-
-
-| 호스트                             | 언제 쓰나                                                   | 막혀 있으면                              |
-| ------------------------------- | ------------------------------------------------------- | ----------------------------------- |
-| 게이트웨이 주소 (운영자가 준 `https://` URL) | 추론 요청 전부                                                 | 앱이 응답을 못 받습니다                        |
-| 로그인 주소 (운영자가 준 `OIDC_ISSUER_URL`) | 절차 1 의 로그인, VK 갱신                                        | 로그인이 안 됩니다                           |
-| `claude.ai`                     | 절차 0·3 에서 점검 도구와 설치 파일을 받을 때                             | 내려받기가 안 됩니다 (설치 후에는 불필요)            |
-| `downloads.claude.ai`           | 앱이 **작업 환경 번들과 Claude CLI 를 받을 때** — offline 설치판은 내장하고 있어 필요 없습니다 | **앱은 켜지는데 Cowork 세션만 안 열립니다**        |
-| `releases.claude.com`           | 자동 업데이트 확인                                               | 업데이트가 멈춥니다 (앱 사용에는 지장 없음)           |
-
-
-⚠️ **네 번째 줄이 가장 헷갈리는 실패입니다.** 이 호스트는 설치할 때가 아니라 **Cowork 를 켤 때마다** 쓰입니다. 그래서 설치도 성공하고 앱도 뜨고 관리형 설정도 읽히는데 **Cowork 세션만 시작되지 않습니다.** 폐쇄망이면 offline 설치판(절차 3)을 쓰고, 함께 자동 업데이트를 끄십시오(§7 「자동 업데이트 끄기」) — 업데이트 서버에 닿지 못하는 망에서 업데이트를 켜 둘 이유가 없습니다.
-
-> 조직 전체에 배포할 때는 **허용 목록을 직접 적지 말고 앱이 만들어 주는 것을 쓰십시오.** 앱의 설정 창에 **Egress Requirements** 항목이 있어, 지금 설정에 맞는 호스트 목록을 `.txt` 로 내보내고 연결 시험까지 해 줍니다 (§6).
-
-> 📖 [설정별 필요 호스트 전체 목록](https://claude.com/docs/third-party/claude-desktop/telemetry#required-egress-paths) — 텔레메트리를 켜면 호스트가 늘어납니다. `downloads.claude.ai` 가 실행에 필요하다는 근거는 [MDM — 네트워크 개방](https://claude.com/docs/third-party/claude-desktop/mdm#3-allow-required-network-egress).
+폐쇄망이면 절차 3의 offline 설치판 사용 + §7 자동 업데이트 끄기. 조직 배포는 앱 설정 창의 **Egress Requirements**로 호스트 목록을 `.txt`로 내보내 사용 (§6). 전체 목록: [required egress](https://claude.com/docs/third-party/claude-desktop/telemetry#required-egress-paths).
 
 ---
 
-
-
 ## 3. 먼저 정할 것 세 가지
 
-"설치 모드"라고 불리는 축이 세 개고, 서로 독립입니다.
+독립적인 설치 축 세 개 — 이 배포의 선택은:
 
+| 축 | 선택지 | 선택 |
+|---|---|---|
+| ① 앱 설치 범위 | per-user / **per-machine** | **per-machine** |
+| ② 설정 소스 | Local / **관리형** | **관리형** (아래 이유) |
+| ③ 관리형 전달 | 수동 / **MDM** / Bootstrap | 테스트=수동, 배포=MDM |
 
-| 축           | 선택지                                | 이 배포의 선택        |
-| ----------- | ---------------------------------- | --------------- |
-| ① 앱 설치 범위   | per-user / **per-machine**         | **per-machine** |
-| ② 설정 소스     | Local(앱 UI·configLibrary) / **관리형** | **관리형**         |
-| ③ 관리형 전달 방식 | 수동 / **MDM** / Bootstrap 서버        | 테스트=수동, 배포=MDM  |
-
-
-**② 의 "앱 UI"는 별도 소스가 아닙니다.** 앱의 설정 창(**Developer → Configure Third-Party Inference…**)은 값이 저장되는 곳이 아니라 **작성·내보내기 도구**입니다 — `Apply locally` 는 Local(`configLibrary`)에 쓰고, `Export` 는 관리형으로 배포할 `.reg`(Windows)·`.mobileconfig`(macOS) 파일을 만들어 냅니다. 그래서 실제로 고를 수 있는 소스는 **Local 과 관리형 둘뿐**이고, Windows 에서 관리형은 `HKLM\SOFTWARE\Policies\Claude` 입니다(절차 4).
-
-**그리고 ② 는 선택이 아닙니다.** credential helper(`inferenceCredentialHelper`)는 공식 문서의 **MDM-Only Keys** 목록에 있습니다 — *"can only be set via MDM (not available in bootstrap or local configuration)"*. Local 에 넣으면 조용히 무시됩니다. 실측 증상은 **helper 는 실행되는데 그 출력만 적용되지 않는** 형태라, helper 를 직접 돌려 확인하면 정상으로 보여 용의선상에서 빠집니다. helper 방식을 쓰는 이상 관리형이 필수입니다.
-→ [Configuration reference — `inferenceCredentialHelper`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencecredentialhelper)
-
-**③ Bootstrap 은 필요 없습니다.** Bootstrap 의 명분인 "사용자별 자격 증명"은 helper 가 이미 해결합니다. 그리고 애초에 **Bootstrap 은 helper 키를 실을 수 없습니다** — 바로 위 MDM-Only 조항이 bootstrap 도 함께 배제합니다. helper 방식에서 Bootstrap 은 취향 문제가 아니라 불가능입니다.
+- **②는 선택이 아님**: `inferenceCredentialHelper`는 공식 **MDM-Only 키** — Local에 넣으면 조용히 무시됩니다(helper는 실행되는데 출력만 안 먹히는 함정). 관리형 = `HKLM\SOFTWARE\Policies\Claude`. → [공식 문서](https://claude.com/docs/third-party/claude-desktop/configuration#inferencecredentialhelper)
+- 앱 설정창의 `Apply locally`는 Local에 쓰기, `Export`는 배포용 `.reg`/`.mobileconfig` 생성 — 소스는 둘뿐입니다.
+- **Bootstrap 불필요**: 사용자별 자격증명은 helper가 해결하고, helper 키는 bootstrap에 실을 수도 없습니다.
 
 ---
 
@@ -187,91 +164,36 @@ Virtual Machine Platform   Windows 기능이 안 켜져 있음
 
 ### 절차 1. `gateway-cli` 설치 + 로그인
 
-Cowork 는 VK 를 직접 만들지 못합니다. `api-key-helper` 가 대신 받아오므로 이것이 먼저입니다.
+Cowork는 VK를 직접 만들지 못하므로 `api-key-helper`가 대신 받아옵니다.
 
-> 이미 그 PC 에서 **Claude Code 를 쓰고 있다면 이 절을 건너뛰십시오.** 토큰(`%USERPROFILE%\.gateway-cli\`)을 그대로 공유합니다.
+> Claude Code를 이미 쓰는 PC면 **이 절 생략** — 토큰(`%USERPROFILE%\.gateway-cli\`)을 공유합니다.
 
-
-
-#### 시작 전 — 어떤 창에서 하나
-
-**시작 메뉴에서** `PowerShell` **을 찾아 그냥 여십시오.** "관리자 권한으로 실행" 할 필요 없습니다.
-
-이 절이 하는 일은 전부 **내 계정 폴더 안**에서 끝납니다 — 프로그램 설치도, 로그인 토큰 저장도.
-
-> 관리자 권한이 필요한 곳은 두 군데뿐입니다 — 아래 ⓪ 에서 Python·git 을 "모든 사용자용"으로 설치할 때, 그리고 **절차 3·4**(Cowork 설치와 관리형 설정). 해당 단계에 따로 적어 두었습니다.
-
-
+이 절은 **🔵 일반 PowerShell**에서 진행합니다 — 설치·토큰 모두 본인 계정 폴더에 들어가므로 관리자 창에서 하면 관리자 계정에 설치됩니다.
 
 #### ⓪ 사전 요구사항 — 없을 때만
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵
 
 ```powershell
 py --version     # 3.11+ 가 찍히면 건너뜀
 git --version
 ```
 
-둘 다 버전이 찍히면 ⓪ 은 건너뛰고 ① 로 가십시오.
+⚠️ Python은 **python.org/winget 판** — Microsoft Store 판은 `py` 런처·`--user` 설치가 꼬입니다.
+설치 방법은 `winget --version` 결과로 갈림 — 나오면 A, `인식할 수 없습니다`면 B.
 
-`python` 이 아니라 `py` 로 확인하는 이유는, 이 문서의 모든 명령이 `py` 를 쓰기 때문입니다. `py` 는 여러 Python 버전 중 맞는 것을 골라주는 별도 프로그램이고, 설치할 때 빠뜨리면 `python` 만 있고 `py` 는 없는 상태가 됩니다.
+##### A. `winget` — 대부분 이쪽
 
-⚠️ Python 은 **python.org / winget 판**을 쓰십시오. Microsoft Store 판은 경로 리다이렉션 때문에 `py` 런처와 `--user` 설치가 꼬입니다.
-
-설치하는 방법이 두 가지인데, **둘 중 하나만** 하면 됩니다. 어느 쪽인지는 이 명령으로 갈립니다.
-
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
-
-```powershell
-winget --version
-```
-
-버전이 나오면 **아래 A**, `인식할 수 없습니다` 가 나오면 **그 다음 B** 입니다.
-
----
-
-
-
-##### A. `winget` 으로 설치 — 대부분 이쪽입니다
-
-**두 개의 명령이니 한 줄씩** 실행하십시오.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+▶ 🔴
 
 ```powershell
 winget install --id Python.Python.3.12 -e --scope machine
 winget install --id Git.Git -e
 ```
 
-끝나면 **PowerShell 창을 닫고 새로 여십시오.** 새로 깐 프로그램의 위치는 그 뒤에 연 창부터 반영됩니다.
+##### B. `winget` 없음 — 설치 파일 직접
 
-▶ 🔵 **실행 · 일반 PowerShell (새 창)** — 직원 PC
-
-```powershell
-py --version
-git --version
-```
-
-```
-Python 3.12.10
-git version 2.55.0.windows.3
-```
-
-이렇게 둘 다 나오면 ⓪ 이 끝난 것입니다. 버전 숫자는 받은 시점에 따라 다릅니다. **B 는 하지 않습니다** — ① 로 가십시오.
-
-⚠️ **창을 새로 열지 않으면** `py` 는 되는데 `git` 만 `인식할 수 없습니다` 로 나옵니다. git 이 안 깔린 것이 아닙니다 — Python 런처는 `C:\Windows` 에 들어가는데 그 폴더는 원래 PATH 에 있고, git 은 `C:\Program Files\Git\cmd` 라는 **새로 추가된 자리**에 들어가기 때문입니다. 실측에서 이 순서로 겪었습니다.
-
----
-
-##### B. 설치 파일을 직접 받아 설치 — `winget` 이 없을 때만
-
-**A 를 했다면 여기는 하지 않습니다.**
-
-`winget` 은 App Installer 라는 구성요소가 있어야 동작합니다. 구형 Windows 10, 이미지에 따라 일부 Windows Server, 스토어 접근이 막힌 폐쇄망에서 없을 수 있습니다.
-
-브라우저로 python.org · git-scm.com 에서 받아 실행해도 되고, 아래처럼 받아도 됩니다.
-
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = "Tls12"
@@ -281,7 +203,7 @@ Invoke-WebRequest -Uri $py -OutFile "$env:TEMP\py.exe"  -UseBasicParsing
 Invoke-WebRequest -Uri $g  -OutFile "$env:TEMP\git.exe" -UseBasicParsing
 ```
 
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+▶ 🔴
 
 ```powershell
 Start-Process "$env:TEMP\py.exe" -Wait -ArgumentList `
@@ -289,98 +211,68 @@ Start-Process "$env:TEMP\py.exe" -Wait -ArgumentList `
 Start-Process "$env:TEMP\git.exe" -Wait -ArgumentList "/VERYSILENT /NORESTART"
 ```
 
-`Include_launcher=1` 은 빼지 마십시오 — 이것이 `py` 를 설치합니다. 두 명령 모두 조용히 돌고 끝날 때까지 프롬프트가 안 돌아옵니다(각 1~3분).
+`Include_launcher=1` 필수 — `py`를 설치합니다.
 
-끝나면 **PowerShell 창을 닫고 새로 여십시오.**
-
-▶ 🔵 **실행 · 일반 PowerShell (새 창)** — 직원 PC
-
-```powershell
-py --version
-git --version
-```
-
-둘 다 버전이 찍히면 ⓪ 이 끝난 것입니다.
-
-⚠️ **창을 새로 열지 않으면** `py` 는 되는데 `git` 만 `인식할 수 없습니다` 로 나옵니다. git 이 안 깔린 것이 아닙니다 — git 이 들어가는 `C:\Program Files\Git\cmd` 가 새로 추가된 자리라 그렇습니다.
-
----
+**A/B 공통**: 끝나면 **PowerShell 창을 닫고 새로 열어** `py --version`·`git --version` 확인.
+⚠️ 창을 새로 안 열면 `py`는 되는데 `git`만 `인식할 수 없습니다`로 나옵니다 — git은 새로 추가된 `C:\Program Files\Git\cmd`에 있어 PATH 반영이 새 창부터입니다(실측).
 
 #### ① 저장소 — fork 에서
 
-⚠️ **반드시** `gonsoomoon-ml` **fork 를 쓰십시오.** 원본인 `aws-samples` 저장소에는 벤더 버그 픽스가 빠져 있어, 설치는 성공한 것처럼 보이는데 인증이 조용히 개인 AWS 계정으로 새는 등의 문제가 있습니다.
+⚠️ **반드시 이 저장소(fork)** — upstream은 managed-settings 경로 버그로 조용히 게이트웨이를 우회합니다.
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵
 
 ```powershell
 cd ~
-git clone -b us/deploy-fixes `
-  https://github.com/gonsoomoon-ml/sample-agentic-ai-acceleration-kr.git
+git clone -b nds/dev `
+  https://github.com/NDS-Han/sample-agentic-ai-acceleration-kr.git
 cd ~\sample-agentic-ai-acceleration-kr\projects\awsome-ai-gateway
 ```
 
-`-b us/deploy-fixes` 가 브랜치 지정입니다. 빼면 다른 브랜치를 받게 되니 그대로 쓰십시오.
-
-저장소는 `gateway-cli` 를 설치하고 로그인 스크립트를 실행하는 데만 씁니다. 설치가 끝난 뒤에는 지워도 Cowork 동작에 지장이 없습니다.
+설치 후에는 지워도 됩니다 — 설치·로그인 스크립트 실행용입니다.
 
 #### ② `gateway-cli` 설치
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵
 
 ```powershell
 py -m pip install --user .\gateway-cli
-```
-
-`pip --user` 로 깔면 실행파일이 Windows 가 기본으로 찾지 않는 폴더에 들어갑니다. 그 폴더를 **PATH**(명령어를 어디서 찾을지 적어둔 목록)에 등록해야 `gateway-cli` 를 이름만으로 부를 수 있습니다.
-
-```powershell
 $s = py -c "import sysconfig; print(sysconfig.get_path('scripts','nt_user'))"
 $env:PATH = "$s;$env:PATH"
 [Environment]::SetEnvironmentVariable("PATH", "$s;" +
   [Environment]::GetEnvironmentVariable("PATH","User"), "User")
-```
-
-확인:
-
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
-
-```powershell
 gateway-cli version
 ```
+
+`pip --user`는 PATH에 없는 폴더에 설치하므로 위처럼 등록해야 이름으로 부릅니다.
 
 
 
 #### ③ 운영자에게 받은 값 4개
 
-직원은 이 값들을 직접 찾을 수 없습니다 — 두 개는 terraform 상태에, 두 개는 클러스터 안에 있습니다. **운영자가 배포 EC2 에서 아래를 돌려** 나온 4줄을 그대로 전달합니다.
+직원이 직접 찾을 수 없는 값이라 운영자가 배포 머신에서 출력해 전달합니다.
 
-▶ 🟢 **실행 · 배포 EC2** — 운영자
+▶ 🟢 **배포 머신** — 운영자
 
 ```bash
 cd ~/awsome-ai-gateway/docs/NDS
-./deploy client-values
+./deploy client-values     # PowerShell·macOS 양식을 함께 출력
 ```
 
-읽기 전용이고, PowerShell 문법 4줄과 macOS 용 4줄을 함께 출력합니다. 직원은 받은 4줄을 그대로 붙여넣습니다.
-
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵 — 받은 4줄을 그대로
 
 ```powershell
 $env:OIDC_ISSUER_URL="<from operator>"
 $env:OIDC_CLIENT_ID="<from operator>"
 $env:ADMIN_API_URL="<from operator>"
-$env:ANTHROPIC_BASE_URL="<from operator - starts with https://>"
+$env:ANTHROPIC_BASE_URL="<from operator - https:// 필수>"
 ```
 
-⚠️ `ANTHROPIC_BASE_URL` 은 `https://` **여야 합니다.** Cowork 가 평문 HTTP 주소를 거부합니다. `07-client-values.sh` 는 Cowork 기준이라 CloudFront 주소를 넣어 줍니다.
-
-> 다음 단계의 로그인 스크립트가 이 주소의 `/health` 를 먼저 칩니다(`onboard-windows.ps1:42`). 그래서 이 값이 CloudFront 면, **직원 PC → CloudFront → ALB 경로가 거기서 한 번에 검증됩니다.**
-
-
+⚠️ `ANTHROPIC_BASE_URL`은 반드시 `https://` — Cowork가 http를 거부합니다. 로그인 스크립트가 이 주소의 `/health`를 먼저 찌르므로 PC→게이트웨이 경로가 여기서 함께 검증됩니다.
 
 #### ④ 로그인
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵 — **③의 env를 넣은 같은 창에서** (env는 그 창에만 살아 있음 — 창을 새로 열면 ③부터 다시)
 
 ```powershell
 cd ~\sample-agentic-ai-acceleration-kr\projects\awsome-ai-gateway
@@ -388,82 +280,50 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
 .\scripts\onboard-windows.ps1
 ```
 
-첫 줄은 ① 에서 받은 폴더로 돌아가는 것입니다. 이미 거기에 계시면 아무 일도 일어나지 않습니다. `.\scripts\...` 가 "지금 폴더 기준"이라 다른 곳에 있으면 파일을 못 찾습니다.
+브라우저 로그인 화면에 운영자 발급 이메일+비밀번호 입력 (첫 로그인은 재설정 요구). 콜백은 `localhost:8090` — 점유돼 실패하면 등록된 콜백(`8090`/`8091`/`8092`) 중 골라 직접 지정:
 
-⚠️ **③ 을 넣은 그 창에서 실행하십시오.** `$env:` 로 넣은 값 4개는 그 창에서만 살아 있습니다. 창을 새로 열었다면 폴더가 맞아도 스크립트가 값이 없다며 멈춥니다 — ③ 부터 다시 하시면 됩니다.
-
-기본 브라우저에 로그인 화면이 뜹니다(현재는 Amazon Cognito 화면입니다 — 「한눈에」의 안내대로 나중에 회사 로그인 화면으로 바뀔 수 있습니다). 운영자가 발급한 이메일 + 비밀번호를 넣으십시오. **첫 로그인이면** 임시 비밀번호로 들어간 뒤 새 비밀번호를 설정하라고 요구합니다.
-
-> 콜백은 `localhost:8090` 이고 **같은 PC 안**이라 터널이 필요 없습니다. 8090 이 다른 도구에 점유돼 실패하면 스크립트 대신 손으로 포트를 바꿉니다 — 로그인 쪽에 등록된 콜백이 `8090`·`8091`·`8092` **3개뿐**이라 그중에서 골라야 합니다. (등록 목록은 운영자가 확인해 줍니다. 로그인 방식이 바뀌면 이 목록도 바뀝니다.)
->
-> ```powershell
-> gateway-cli login --issuer-url $env:OIDC_ISSUER_URL `
->   --client-id $env:OIDC_CLIENT_ID --redirect-port 8091
-> ```
-
-
+```powershell
+gateway-cli login --issuer-url $env:OIDC_ISSUER_URL `
+  --client-id $env:OIDC_CLIENT_ID --redirect-port 8091
+```
 
 #### ⑤ 확인
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵
 
 ```powershell
 api-key-helper 2>$null | Select-String "^vk-"
-```
-
-`vk-` 로 시작하는 한 줄이 나오면 완료입니다.
-
-⚠️ **로그인이 됐다고 안심하면 안 됩니다.** Cognito 는 공개라 ALB 와 무관하게 성공합니다. VK 발급은 admin-api 를 치고 그쪽은 IP 로 잠겨 있어, 그 PC 의 공인 IP 가 허용목록에 없으면 여기서 타임아웃납니다.
-
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
-
-```powershell
 (iwr "$env:ADMIN_API_URL/health" -TimeoutSec 10).StatusCode   # 200 이어야 함
-(irm https://checkip.amazonaws.com).Trim()                 # 막혔으면 이 IP 를 운영자에게
+(irm https://checkip.amazonaws.com).Trim()                   # 막혔으면 이 IP 를 운영자에게
 ```
+
+`vk-` 한 줄이 나오면 완료. ⚠️ **로그인 성공 ≠ VK 성공** — Cognito는 공개라 되지만 VK 발급(admin-api)은 IP 제한이라 이 PC의 공인 IP가 inbound-cidrs에 없으면 여기서 타임아웃납니다.
 
 
 
 ### 절차 2. credential helper 작성
 
-Cowork 는 요청할 때마다 이 스크립트를 실행해서 열쇠(VK)를 받아옵니다. `gateway-cli` 의 `api-key-helper` 를 감싸 `vk-` **로 시작하는 한 줄만** 내보내는 것이 전부입니다.
-
-만들 위치는 `C:\ProgramData\llm-gateway\helper.cmd` 입니다. 모든 사용자가 읽을 수 있고 관리자만 고칠 수 있는 자리라, 앱을 여러 사람이 쓰는 PC 에 맞습니다.
+앱이 요청마다 실행해 VK를 받아오는 스크립트 — `api-key-helper`를 감싸 `vk-` 한 줄만 출력. 위치는 `C:\ProgramData\llm-gateway\helper.cmd` (전 사용자 읽기 가능).
 
 #### ① helper 가 부를 실행파일의 경로 확인
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵 — **반드시 직원 본인의 일반 창에서** (관리자 창이면 관리자 경로가 나와 파일 없음)
 
 ```powershell
 py -c "import sysconfig,os; print(os.path.join(sysconfig.get_path('scripts','nt_user'),'api-key-helper.exe'))"
 ```
 
-출력된 경로를 **복사해 두십시오.** 다음 단계에서 붙여넣습니다.
-
-⚠️ **반드시 직원 본인 계정의 일반 PowerShell 에서** 확인하십시오. 관리자 창에서 하면 관리자 계정의 폴더가 나오고, 그 경로에는 파일이 없습니다.
-
-이름만(`api-key-helper`) 쓰지 않고 전체 경로를 쓰는 이유가 있습니다. helper 를 실행하는 것은 Cowork 인데, **Cowork 가 보는 PATH** 에 설치 위치가 들어 있어야 이름만으로 찾습니다. 절차 1 의 ② 에서 등록했지만 로그아웃 후 다시 로그인하기 전까지는 반영되지 않습니다. 전체 경로를 쓰면 이 문제가 아예 없습니다.
+출력 경로를 복사. **절대경로를 쓰는 이유**: Cowork가 보는 PATH엔 설치 위치가 없을 수 있어 이름만으론 못 찾습니다.
 
 #### ② helper 파일 만들기
 
-🔴 **여기는 관리자 권한이 필요합니다.** `C:\ProgramData` 아래에 파일을 쓰기 때문입니다. PowerShell 을 **"관리자 권한으로 실행"** 으로 여십시오.
-
-먼저 값 네 개를 넣습니다 — 위에서 복사한 경로와, 운영자에게 받은 값 세 개입니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+▶ 🔴 (`C:\ProgramData` 쓰기 — 관리자 권한)
 
 ```powershell
-$exe    = "<path printed by the command above>"
+$exe    = "<①에서 복사한 경로>"
 $issuer = "<from operator>"
 $client = "<from operator>"
 $admin  = "<from operator>"
-```
-
-이어서 폴더를 만들고 파일을 씁니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
 $dir = "C:\ProgramData\llm-gateway"
 New-Item -ItemType Directory -Force -Path $dir | Out-Null
 @"
@@ -475,132 +335,85 @@ set ADMIN_API_URL=$admin
 "@ | Set-Content -Path "$dir\helper.cmd" -Encoding ASCII
 ```
 
-`-Encoding ASCII` 는 빼지 마십시오. 다른 인코딩으로 저장하면 파일 앞에 눈에 안 보이는 표식이 붙어 `cmd` 가 첫 줄을 못 읽습니다.
+`-Encoding ASCII` 필수 — BOM이 붙으면 cmd가 첫 줄을 못 읽습니다.
 
 #### ③ 확인
 
-▶ 🔵 **실행 · 일반 PowerShell** — 직원 PC
+▶ 🔵 — **일반 창에서** (토큰은 본인 폴더에 있어 관리자 창에선 못 찾음)
 
 ```powershell
 & "C:\ProgramData\llm-gateway\helper.cmd"
 ```
 
-`vk-` 로 시작하는 한 줄이 나오면 완료입니다.
-
-⚠️ **관리자 창이 아니라 일반 창에서** 확인하십시오. 로그인 토큰은 직원 본인 폴더에 있어서, 관리자 창에서 돌리면 토큰을 못 찾습니다.
-
-⚠️ **출력은 개행으로 끝나야 합니다.** 개행 없이 끝나면 앱이 값을 못 읽습니다(Seoul 실측). `findstr` 이 개행을 붙이므로 위 형태를 그대로 두면 됩니다.
-
-⚠️ `api-key-helper` 출력 끝에 빈 줄이 붙는 경우가 있어 `findstr /b` 로 **첫 줄만** 뽑습니다.
+`vk-` 한 줄이 나오면 완료. ⚠️ 출력 끝이 개행이어야 앱이 읽습니다 — `findstr`이 개행을 붙이므로 위 형태 그대로 유지.
 
 ### 절차 3. Cowork 설치
 
-🔴 **여기부터는 관리자 권한이 필요합니다.** PowerShell 을 **"관리자 권한으로 실행"** 으로 여십시오(제목 표시줄에 `관리자:` 가 보입니다). 모든 사용자에게 앱을 깔고 시스템 설정을 쓰기 때문입니다. 절차 1 과 달리 여기서는 어느 관리자 계정으로 승격해도 상관없습니다 — 내 계정 폴더에 쓰는 것이 아니라 시스템 영역에 쓰기 때문입니다.
-
-**설정보다 앱을 먼저 켜지 마십시오.** 관리형 설정 없이 처음 실행하면 claude.ai 로그인 화면이 뜨고, 거기서 개인 계정으로 들어가 버릴 여지가 생깁니다. 벤더 문서도 "설정 먼저, 앱 나중"을 권합니다.
+🔴 **관리자 PowerShell** — 전 사용자 설치+시스템 설정이라 여기서부터 관리자 창. ⚠️ **설정보다 앱을 먼저 켜지 마십시오** — 관리형 설정 없이 켜면 claude.ai 로그인 화면이 뜹니다.
 
 #### ① 설치 파일 받기
 
-**브라우저**로 이 주소를 여십시오. 약 1.8 GB 파일이 내려받아집니다.
+**브라우저**로 주소를 열어 `.msix` 다운로드 (~1.8GB). **Invoke-WebRequest는 403**이라 브라우저 필수:
 
 ```
-https://claude.ai/api/desktop/win32/x64/offline/latest/redirect
+x64:  https://claude.ai/api/desktop/win32/x64/offline/latest/redirect
+arm64: https://claude.ai/api/desktop/win32/arm64/offline/latest/redirect
 ```
 
-**Arm 프로세서 PC** 라면 이 주소입니다(절차 0 에서 고른 것과 같은 쪽).
-
-```
-https://claude.ai/api/desktop/win32/arm64/offline/latest/redirect
-```
-
-⚠️ **반드시 이 주소의** `.msix` **를 받으십시오.** `claude.com/download` 는 `setup`(`.exe`) 을 주는데, **그것으로 깔면 Claude Desktop 은 설치되지만 Cowork 가 빠집니다.** 위 offline 판만 Cowork 가 들어 있고, 작업 환경 번들이 파일 안에 있어 설치 중 추가 다운로드도 없습니다.
-
-받은 파일이 **어느 폴더에 있는지 전체 경로를 확인해 두십시오.** 다음 단계는 🔴 관리자 창에서 도는데, 그 창은 관리자 계정을 기준으로 폴더를 찾기 때문에 `내 다운로드` 같은 줄임 표현이 통하지 않습니다.
-
-⚠️ **404 가 나면 잠시 뒤 다시 받으십시오.** 새 버전이 나온 직후에는 위 주소가 이미 새 버전을 가리키는데 그 버전의 offline 판이 아직 안 올라온 구간이 있습니다. 이때는 예전 버전으로 물러나지 않고 **404 로 실패**합니다 — 벤더가 문서에 명시한 동작이며, 고장이 아닙니다. 이전에 받아 둔 설치 파일이 있으면 버리지 마십시오.
-
-> 📖 [Offline installation](https://claude.com/docs/third-party/claude-desktop/installation#offline-installation) — 플랫폼별 offline 주소 전체(macOS 포함)와 404 동작의 근거.
+⚠️ 반드시 **offline 판** — `claude.com/download`의 `.exe`는 Cowork가 빠집니다.
+⚠️ **404면 잠시 후 재시도** — 새 버전 직후 offline판이 아직 안 올라간 구간이 있습니다(벤더 명시 동작, 고장 아님). 받은 파일의 **전체 경로**를 메모 — 다음 단계는 관리자 창이라 `내 다운로드`가 안 통합니다.
 
 #### ② 설치
 
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+▶ 🔴
 
 ```powershell
 Add-AppxProvisionedPackage -Online -SkipLicense `
-  -PackagePath "<full path to the .msix you downloaded>"
+  -PackagePath "<받은 .msix의 전체 경로>"
 Get-AppxPackage -AllUsers -Name "*laude*" | Select Name,Version
 ```
 
-📋 **예시** — 테스트 머신에서 실제로 쓴 명령입니다. 파일명 끝의 버전은 받은 시점에 따라 다르니, 앞 단계에서 확인한 경로로 바꿔 쓰십시오.
+이름·버전이 찍히면 설치 완료. `Add-AppxPackage`가 아닌 이유 — Provisioned는 **모든 사용자**에 등록, Add는 실행 계정만.
 
-```powershell
-Add-AppxProvisionedPackage -Online -SkipLicense `
-  -PackagePath "C:\Users\Administrator\Downloads\Claude-offline-win32-x64-1.24012.9.msix"
-```
+#### ③ 거부됐을 때만
 
-`Get-AppxPackage` 가 이름과 버전을 한 줄 찍으면 설치된 것입니다.
+"이 앱은 설치할 수 없습니다" 계열 거부(대부분 Windows Server 또는 정책 제한 PC)면:
 
-`Add-AppxPackage` 가 아니라 `Add-AppxProvisionedPackage` 를 쓰는 이유는, 앞의 것은 **명령을 돌린 계정에게만** 설치되기 때문입니다. 뒤의 것은 이 PC 에 로그인하는 모든 사용자에게 등록됩니다.
-
-#### ③ ② 가 거부됐을 때만
-
-②에서 설치가 **거부**되면(권한 문제가 아니라 "이 앱은 설치할 수 없습니다" 계열) 이 PC 가 외부 앱 설치를 막아 둔 것입니다. 아래를 실행한 뒤 ②를 다시 하십시오.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+▶ 🔴
 
 ```powershell
 New-ItemProperty -Path "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Appx" `
   -Name AllowAllTrustedApps -PropertyType DWord -Value 1 -Force
 ```
 
-**대부분의 직원 PC 에서는 필요 없습니다.** Windows 10·11 은 서명된 앱 설치를 기본 허용합니다. 걸리는 경우는 둘입니다 — **Windows Server** 는 기본값이 미설정이라 반드시 필요하고(우리 테스트 머신이 그랬습니다), 회사가 정책으로 막아 둔 PC 도 거부됩니다.
-
-⚠️ **회사가 중앙에서 관리하는 PC 라면 IT 담당자에게 문의하십시오.** 이 값은 회사 전체 정책이 쓰이는 자리라, 직접 바꿔도 다음 정책 적용 때 되돌아갑니다.
+대부분 PC는 불필요 — 회사 중앙 관리 PC면 IT에 문의(정책으로 되돌아감).
 
 ### 절차 4. 관리형 설정
 
-🔴 **관리자 PowerShell** 에서 진행합니다(절차 3 과 같은 창을 쓰면 됩니다).
+🔴 **관리자 PowerShell** (절차 3과 같은 창).
 
-설정을 **레지스트리**(Windows 가 프로그램 설정을 모아두는 시스템 저장소)의 `HKLM\SOFTWARE\Policies\Claude` 에 씁니다. 값은 전부 문자열(`REG_SZ`)입니다.
+`HKLM\SOFTWARE\Policies\Claude`에 씁니다 — `HKLM`에 값이 있으면 `HKCU`는 통째로 무시됩니다(앱 v1.19367.0 미만은 섞어 읽으므로 구버전이 있으면 한쪽으로 몰고 업그레이드).
 
-`HKLM` 은 컴퓨터 전체 설정, `HKCU` 는 사용자별 설정입니다. `HKLM` **에 값이 있으면** `HKCU` **는 통째로 무시됩니다** — 조직이 정한 설정을 사용자가 못 바꾸게 하는 구조입니다. (앱 v1.19367.0 미만은 두 곳을 섞어 읽었습니다. 그보다 낮은 버전이 남아 있는 조직이라면 설정을 한쪽에 몰아넣고 올리십시오.)
-
-##### 값을 쓰는 자리와 형식 — 여기서 조용히 실패합니다
-
-아래 명령을 그대로 쓰면 전부 맞게 들어가므로 읽고 넘어가셔도 됩니다. **직접 레지스트리 편집기나 MDM 콘솔로 넣을 때** 걸리는 함정입니다.
+##### 함정 — 직접 편집기/MDM 콘솔로 넣을 때 조용히 실패합니다
 
 | 이렇게 하면 | 무슨 일이 나나 |
 | --- | --- |
-| 값을 **하위 키 안에** 넣음 | 안 읽힙니다. 일부 ADMX·Intune 도구가 이렇게 쓰는데, 앱은 `...\Policies\Claude` **바로 아래** 값만 봅니다 |
-| `REG_EXPAND_SZ` 로 넣음 | **가장 나쁩니다.** 앱은 "머신 정책 있음"으로 세어 `HKCU` 를 죽이는데, 정작 내용은 못 읽습니다 → 설정이 하나도 없는 상태가 됩니다 |
-| `REG_QWORD`·`REG_MULTI_SZ`·`REG_BINARY` | 앱에 아예 안 보입니다 |
-| 키 이름에 오타, 또는 **빈 문자열** | 그래도 "머신 정책 있음"으로 셉니다 |
+| 값을 **하위 키**에 넣음 | 안 읽힘 — 앱은 `...\Policies\Claude` 바로 아래 값만 봅니다 |
+| `REG_EXPAND_SZ` | **최악** — "정책 있음"으로 세어 HKCU를 죽이면서 내용은 못 읽어 설정 0개 상태가 됩니다 |
+| `REG_QWORD`/`REG_MULTI_SZ`/`REG_BINARY` | 안 보입니다 |
+| 키 이름 오타·빈 문자열 | 그래도 "정책 있음"으로 셉니다 → 설정창 잠김이 제대로 읽혔다는 증거가 **아닙니다** |
 
-쓸 수 있는 형식은 **`REG_SZ`** 이고, 참/거짓·숫자 키는 `REG_DWORD` 도 됩니다. 위 명령의 `Set-ItemProperty` 는 문자열을 `REG_SZ` 로 넣으므로 안전합니다.
+아래 명령은 `REG_SZ`로 들어가 안전합니다. 참/거짓·숫자는 `REG_DWORD`도 가능.
 
-⚠️ 마지막 줄 때문에 **앱의 설정 창이 읽기 전용으로 잠긴 것은 설정이 제대로 읽혔다는 증거가 아닙니다.** 오타 난 키 하나만 있어도 잠깁니다. 실제로 무엇이 읽혔는지는 절차 5 의 확인으로만 알 수 있습니다.
-
-> 📖 [설정을 읽는 위치와 우선순위](https://claude.com/docs/third-party/claude-desktop/mdm#4-deploy-the-configuration) — 위 표의 근거. [배포 확인 방법](https://claude.com/docs/third-party/claude-desktop/installation#verifying-the-deployment) 도 함께.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-먼저 값 두 개를 변수에 넣습니다. **손으로 채우는 것은 첫 줄 하나뿐입니다.**
+▶ 🔴 — 손으로 채우는 건 `$BASE` 한 줄
 
 ```powershell
-$BASE   = "<from operator - the https:// URL>"
+$BASE   = "<from operator - 절차 1-③ 의 ANTHROPIC_BASE_URL 과 같은 https:// URL>"
 $MODELS = '["claude-sonnet-5-5","claude-opus-5-5","claude-haiku-4-5-20251001"]'
 $BASE
 ```
 
-`$BASE` 는 절차 1-③ 의 `ANTHROPIC_BASE_URL` **과 같은 값**입니다. 이미 넣었는데 또 넣는 이유는, **절차 4 가 관리자 창**이고 절차 1 은 일반 창이기 때문입니다. `$env:` 로 넣은 값은 **창마다 따로**라 여기서는 비어 있습니다.
-
-`$MODELS` 는 이 배포의 기본 목록이라 그대로 두시면 됩니다. 운영자가 다른 목록을 줬다면 그것으로 바꾸십시오 — 운영자는 `00-preflight-check.sh` 의 ACTIVE 목록에서 확인합니다.
-
-⚠️ alias 는 **DB 에 등록된 문자열 그대로** 여야 합니다. 예를 들어 Haiku 는 `claude-haiku-4-5` 가 아니라 `claude-haiku-4-5-20251001` 입니다. 한 글자만 달라도 그 모델만 404 가 납니다.
-
-마지막 줄이 `https://` 로 시작하는 주소를 찍는지 보고 넘어가십시오.
-
-이제 아래는 **그대로** 붙여넣으면 됩니다.
+`$BASE`가 `https://` 주소를 찍는지 확인 후 그대로 붙여넣기:
 
 ```powershell
 $K = "HKLM:\SOFTWARE\Policies\Claude"
@@ -611,82 +424,50 @@ Set-ItemProperty $K inferenceGatewayAuthScheme  "bearer"
 Set-ItemProperty $K inferenceCredentialHelper   "C:\ProgramData\llm-gateway\helper.cmd"
 Set-ItemProperty $K inferenceCredentialHelperTtlSec 1800
 Set-ItemProperty $K inferenceModels             $MODELS
-```
-
-확인합니다.
-
-```powershell
 Get-ItemProperty $K | Format-List inference*
 ```
 
-여섯 개가 다 보이고 `inferenceGatewayBaseUrl` 에 **실제 주소**가 들어 있어야 합니다. `<from operator...>` 가 보이거나 값이 비어 있으면 `$BASE` 가 안 잡힌 것입니다 — 위로 돌아가 채우고 다시 돌리면 덮어써집니다.
+6개가 다 보이고 `inferenceGatewayBaseUrl`에 실제 주소가 있으면 완료 — `<from operator>`가 보이면 `$BASE` 미설정이니 채우고 다시 실행.
 
-> ✅ `inferenceModels` 는 **JSON 문자열**(`REG_SZ`)이 맞습니다 — 위 형태로 넣고 나서 앱이 실제로 그 목록의 alias 로 요청을 보낸 것을 게이트웨이 기록에서 확인했습니다(Windows 1.24012.9). `REG_MULTI_SZ` 는 필요 없습니다.
+⚠️ alias는 **DB 등록 문자열 그대로** — Haiku는 `claude-haiku-4-5-20251001`처럼 접미 포함. 한 글자 틀리면 그 모델만 404. 현재 ACTIVE 목록은 관리 UI /models에서 확인.
+✅ `inferenceModels`는 JSON 문자열(`REG_SZ`)이 맞습니다 — `REG_MULTI_SZ` 불요(실측 확인).
 
+#### 설정 키 요약
 
+| 키 | 값 |
+|---|---|
+| `inferenceProvider` | `"gateway"` |
+| `inferenceGatewayBaseUrl` | 게이트웨이 `https://` 도메인 |
+| `inferenceGatewayAuthScheme` | `"bearer"` |
+| `inferenceCredentialHelper` | helper 절대경로 |
+| `inferenceCredentialHelperTtlSec` | `1800` |
+| `inferenceModels` | ACTIVE alias JSON 배열 문자열 |
 
-#### 설정 키
-
-
-| 키                                                                                                                       | 값                                                |
-| ------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
-| [`inferenceProvider`](https://claude.com/docs/third-party/claude-desktop/configuration#inferenceprovider)                 | `"gateway"`                                      |
-| [`inferenceGatewayBaseUrl`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencegatewaybaseurl)     | `https://<03 이 출력한 CloudFront 도메인>`              |
-| [`inferenceGatewayAuthScheme`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencegatewayauthscheme) | `"bearer"`                                       |
-| [`inferenceCredentialHelper`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencecredentialhelper) | helper **절대경로**                                  |
-| [`inferenceCredentialHelperTtlSec`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencecredentialhelperttlsec) | `1800`                                           |
-| [`inferenceModels`](https://claude.com/docs/third-party/claude-desktop/configuration#inferencemodels)                     | `config.env` 의 `MODEL_ALIAS` + 기존 ACTIVE alias 들 |
-
-
-⚠️ alias 는 **DB 에 등록된 문자열 그대로** 써야 합니다. 예를 들어 Haiku 는 `claude-haiku-4-5` 가 아니라 `claude-haiku-4-5-20251001` 입니다. 현재 목록은 `00-preflight-check.sh` 가 보여줍니다.
+전체 키 정의는 [공식 configuration reference](https://claude.com/docs/third-party/claude-desktop/configuration)가 정본입니다.
 
 ### 절차 5. 실행 및 검증
 
-시작 메뉴에서 **Claude** 를 실행합니다.
+시작 메뉴에서 **Claude** 실행.
 
-#### ① 첫 화면
+1. **첫 화면**: claude.ai 로그인 화면이 뜨면 **멈추고 §5로** — 관리형 설정 미인식. 바로 쓸 수 있는 상태면 읽힌 것입니다.
+2. **모델 선택기**: `inferenceModels`의 이름들이 보이는지 확인.
+3. **`hi` 전송**: 응답이 오면 PC→게이트웨이→Bedrock 전부 통과. (게이트웨이 변경 직후는 캐시 5분 — 신규 모델이 404로 보일 수 있음.)
+4. **게이트웨이 확인** — 운영자: `cowork`로 분류 안 되면 라우팅·예산이 섞입니다.
 
-**claude.ai 로그인 화면이 뜨면 거기서 멈추십시오.** 개인 계정으로 들어가지 마시고 「5. 문제 판별」로 가십시오 — 관리형 설정을 못 읽었다는 뜻입니다.
-
-**바로 쓸 수 있는 상태면 관리형 설정이 읽힌 것입니다.** 로그인을 요구하지 않는다는 것 자체가 증거입니다.
-
-#### ② 모델 목록
-
-모델 선택기를 열어 절차 4 의 `inferenceModels` 에 넣은 이름들이 보이는지 봅니다. 목록이 비어 있거나 다른 이름이면 그 값이 안 읽힌 것입니다.
-
-#### ③ 짧은 대화
-
-아무 모델이나 골라 `hi` 를 보냅니다. 응답이 오면 **직원 PC → CloudFront → 게이트웨이 → Bedrock** 이 전부 통한 것입니다.
-
-⚠️ 게이트웨이 쪽 변경 직후라면 **캐시 5분**이 지나야 합니다. 그 전에는 신규 모델이 404 로 보입니다.
-
-#### ④ 게이트웨이 쪽 확인 — 운영자
-
-앱 화면만으로는 **어느 client 로 기록됐는지** 알 수 없습니다. `cowork` 로 분류되지 않으면 라우팅·예산이 Claude Code 와 섞입니다.
-
-▶ 🟢 **실행 · 배포 EC2** — 운영자
+▶ 🟢 **배포 머신**
 
 ```bash
-cd ~/awsome-ai-gateway/docs/NDS
-./deploy doctor
+cd ~/awsome-ai-gateway/docs/NDS && ./deploy doctor
 ```
 
-C 섹션의 최근 행에서 봅니다.
+| 열 | 기대값 |
+|---|---|
+| `client` | `cowork` |
+| `status` | `SUCCESS` |
+| `cost_usd` | 0 아님 |
+| `ws` | 실시간 질문 시 1+ (서버측 웹서치) |
 
-
-| 열                 | 기대값                              |
-| ----------------- | -------------------------------- |
-| `client`          | `cowork`                         |
-| `status`          | `SUCCESS`                        |
-| `cost_usd`        | 0 이 아닐 것                         |
-| `ws`              | 실시간 질문을 했다면 1 이상 (서버측 웹서치가 붙은 것) |
-
-
-DB 조회라 임시 파드가 뜨는 데 1~2분 걸립니다. 화면이 멈춘 것처럼 보이는 게 정상입니다.
-
-⚠️ **비용을 검산할 때 캐시 토큰을 빼먹지 마십시오.** `input_tokens`·`output_tokens` 만으로 계산하면 `cost_usd` 보다 훨씬 작게 나옵니다. Cowork 가 큰 시스템 프롬프트를 캐시로 보내기 때문이며, 단가 오류가 아닙니다.
-
-> **벤더 문서의 `Help → Troubleshooting → Copy Managed Configuration Report` 는 이 빌드에 없습니다**(Windows 1.24012.9 실측). 좌측 하단 계정 메뉴에는 Settings·Language·View change log·Learn more·Sign out 만 있고, Settings 안에도 General·Privacy·Usage·Claude Code·Cowork 다섯 개뿐입니다. 그래서 위 ①~④ 로 갈음합니다 — ④ 는 리포트보다 강한 증거입니다. 리포트는 "앱이 설정을 어떻게 읽었나"를 보여주지만, ④ 는 **요청이 실제로 게이트웨이를 통과해 기록됐다**는 사실 자체입니다.
+⚠️ 비용 검산 시 **캐시 토큰 포함** — Cowork는 큰 시스템 프롬프트를 캐시로 보내 `input`/`output`만 보면 cost보다 훨씬 작게 나옵니다(단가 오류 아님).
 
 ---
 
@@ -701,12 +482,12 @@ DB 조회라 임시 파드가 뜨는 데 1~2분 걸립니다. 화면이 멈춘 �
 | 모델 목록이 비었거나 다른 이름              | `inferenceModels` 를 못 읽음 — JSON 형식·따옴표 확인 (절차 4)                                        |
 | helper 는 VK 를 뱉는데 앱은 인증 실패         | helper 를 관리형이 아닌 레이어에 넣었거나, 출력이 개행으로 안 끝남                                              |
 | 터미널에서는 helper 가 되는데 앱에서만 실패        | 앱이 보는 PATH 에 `api-key-helper` 가 없음 → 절대경로로                                             |
-| VK 발급 타임아웃 (로그인은 성공)               | 클라이언트 공인 IP 가 `inbound-cidrs` 에 없음 → `05-allow-client-ip.sh`                           |
+| VK 발급 타임아웃 (로그인은 성공)               | 클라이언트 공인 IP 가 `inbound-cidrs` 에 없음 → gateway.yaml 에 추가 후 apply           |
 | `refresh failed: HTTP 400`         | refresh token 만료 → `gateway-cli login` 재실행                                             |
 | `pip install` 이 `hatchling` 을 못 받음 | 사내망이 PyPI 를 막음 → 운영자에게 `.whl` 을 받아 `py -m pip install --user <받은경로>\gateway_cli-*.whl` |
 | `py` 를 인식할 수 없다고 나옴                | Python 런처 미설치 → python.org 설치 파일을 다시 실행해 `py launcher` 를 체크                            |
 | 특정 모델만 404                         | alias 오타, 또는 등록 후 5분 미경과                                                               |
-| 전 요청 502                           | `01` 미적용 또는 CloudFront→ALB 경로 미개방(`03 --allow-cloudfront`)                             |
+| 전 요청 502                           | 게이트웨이 라우팅 미적용 또는 ALB/Ingress 경로 미개방 → `./deploy doctor` 로 점검        |
 | 앱은 켜지고 대화도 되는데 **Cowork 세션만** 시작 안 됨 | `downloads.claude.ai` 가 막힘 → offline 설치판으로 다시 설치 (§2 「망 쪽」)                             |
 | 위와 같은데 방화벽은 열려 있음                   | 백신·EDR 이 Cowork 에이전트를 막음 → 아래 「EDR·백신에 막히는 경우」                                          |
 | 원인이 안 보일 때                          | 앱 로그를 봅니다 — `%LOCALAPPDATA%\Claude-3p\Logs\main.log`                                   |
@@ -733,16 +514,14 @@ DB 조회라 임시 파드가 뜨는 데 1~2분 걸립니다. 화면이 멈춘 �
 
 ## 6. 조직 배포
 
-테스트가 끝나면 관리형 설정을 MDM 으로 밀어넣습니다 — Windows 는 GPO 또는 Intune 으로 같은 레지스트리 값을 배포합니다. 설정 내용은 위와 동일하고, 전달 수단만 바뀝니다.
+테스트가 끝나면 같은 레지스트리 값을 MDM(GPO·Intune)으로 밀어넣습니다 — 내용은 동일하고 전달 수단만 바뀝니다. **수십 대 이상이면 손으로 쓰지 말고** 앱 안에서 설정을 만들어 배포 파일로 내보냅니다 — 오타·형식 사고가 사라집니다.
 
-**PC 수십 대 이상이면 레지스트리를 손으로 쓰지 마십시오.** 벤더가 권하는 절차는 **앱 안에서 설정을 만들고 배포 파일로 내보내는** 것입니다. 절차 4 에서 한 일을 화면으로 하는 것이고, 사람이 타이핑하지 않으니 오타·형식 사고가 사라집니다.
+1. **관리형 설정 없는 PC**에서 앱 실행 → 로그인하지 않은 채 `Help → Troubleshooting → Enable Developer Mode` → `Developer → Configure Third-Party Inference…`
+2. 좌측 항목을 위에서부터 채움 — `Connection`(게이트웨이 주소·모델 목록·helper 경로) → `Workspace restrictions` → `Telemetry & updates`
+3. `Apply locally`로 그 PC에서 먼저 확인 → 되면 `Export`
+4. 나온 파일을 MDM으로 배포 후 앱 배포 — **설정이 먼저**
 
-1. **관리형 설정이 없는 PC** 에서 앱을 켜고 **로그인하지 않은 채** `Help → Troubleshooting → Enable Developer Mode` → `Developer → Configure Third-Party Inference…`
-2. 좌측 항목을 위에서부터 채웁니다 — `Connection`(게이트웨이 주소·모델 목록·helper 경로) → `Workspace restrictions` → `Telemetry & updates`
-3. `Apply locally` 로 그 PC 에서 먼저 확인하고, 되면 `Export`
-4. 나온 파일을 MDM 으로 배포한 뒤 앱을 배포합니다 — **설정이 먼저입니다**
-
-⚠️ **관리형 설정이 이미 깔린 PC 에서는 이 창이 읽기 전용입니다.** 절차 4 를 마친 테스트 머신에서는 저작을 못 합니다 — 아직 설정하지 않은 PC 를 쓰십시오.
+⚠️ 관리형 설정이 이미 깔린 PC에서는 이 창이 읽기 전용 — 설정 안 된 PC에서 작업합니다.
 
 
 | 내보내기 형식             | 어디에 쓰나                                  |
@@ -766,169 +545,50 @@ DB 조회라 임시 파드가 뜨는 데 1~2분 걸립니다. 화면이 멈춘 �
 
 ## 7. 선택 토글 — 앱 기능 켜고 끄기
 
-여기까지 오면 게이트웨이 연결은 끝났습니다. 아래는 **연결과 무관한 앱 기능**들로, 조직이 켜고 끌 수 있습니다. 안 하셔도 됩니다.
+게이트웨이 연결과 무관한 앱 기능입니다 — 안 해도 됩니다. 모두 절차 4와 같은 `HKLM\SOFTWARE\Policies\Claude`에 넣고, **앱을 완전히 종료 후 재시작**해야 반영됩니다.
 
-값을 넣는 곳은 절차 4 와 같은 `HKLM\SOFTWARE\Policies\Claude` 이고, **바꾼 뒤에는 앱을 완전히 종료했다가 다시 켜야** 반영됩니다. 종료됐는지 확인하는 명령까지 아래 「Chat 탭 켜기」에 적어 뒀습니다 — 다른 토글도 절차는 같습니다.
-
-
-용어 하나만 먼저 — **내장 도구**는 Claude 가 답을 만들면서 스스로 쓰는 기능들입니다. 웹에서 검색하기, 웹 페이지 열어보기 같은 것으로, 사용자가 따로 시키지 않아도 필요하면 씁니다.
-
-
-| 키                      | 값을 넣으면 무엇이 바뀌나                       | 안 넣었을 때 (지금 상태)     |
-| ---------------------- | ------------------------------------ | ------------------- |
-| [`chatTabEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#chattabenabled) | **Chat 탭**이 화면에 생깁니다 | 탭이 안 보입니다 |
-| [`autoModeEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#automodeenabled) | **"Act without asking"** 가 승인 선택지에 생깁니다 | 선택지가 안 보입니다 |
-| [`disabledBuiltinTools`](https://claude.com/docs/third-party/claude-desktop/configuration#disabledbuiltintools) | 여기 적은 내장 도구를 앱에서 **뺍니다** | 내장 도구를 전부 쓸 수 있습니다 |
-| [`builtinToolPolicy`](https://claude.com/docs/third-party/claude-desktop/configuration#builtintoolpolicy) | 도구별로 **매번 물어보게** 만들 수 있습니다 | 대부분 안 묻고 바로 실행합니다 |
-| [`managedMcpServers`](https://claude.com/docs/third-party/claude-desktop/configuration#managedmcpservers) | 조직이 정한 **MCP 서버**가 앱에 나타납니다 | 없습니다 |
-| [`disableBundledSkills`](https://claude.com/docs/third-party/claude-desktop/configuration#disablebundledskills) | 앱에 딸린 **Skills**(deep-research 등)를 끕니다 | 그대로 쓸 수 있습니다 |
-| [`allowedWorkspaceFolders`](https://claude.com/docs/third-party/claude-desktop/configuration#allowedworkspacefolders) | Cowork 가 **열 수 있는 폴더를 정해진 곳으로 묶습니다** | 어느 폴더든 열 수 있습니다 |
-| [`isDesktopExtensionEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#isdesktopextensionenabled) | 직원이 **확장(`.mcpb`·`.dxt`)을 깔 수 있게 됩니다** | 못 깝니다 |
-| [`disableAutoUpdates`](https://claude.com/docs/third-party/claude-desktop/configuration#disableautoupdates) | 앱이 **스스로 업데이트하지 않습니다** | 자동으로 받아서 재시작합니다 |
-| [`autoUpdaterEnforcementHours`](https://claude.com/docs/third-party/claude-desktop/configuration#autoupdaterenforcementhours) | 업데이트 후 **강제 재시작까지의 시간**을 줄입니다(1~72) | 72시간 |
-
-
-**아래 세 개는 기본값이 「켜짐」이라 성격이 반대입니다** — **끌 때만** 넣습니다.
-
-
-| 키                                                                                                                      | `"false"` 를 넣으면              | 안 넣었을 때 (지금 상태) |
-| ---------------------------------------------------------------------------------------------------------------------- | ---------------------------- | -------------- |
-| [`coworkTabEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#coworktabenabled)                 | **Cowork 탭이 없어집니다**          | Cowork 를 씁니다   |
-| [`isClaudeCodeForDesktopEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#isclaudecodefordesktopenabled) | **Code 탭이 없어집니다**            | Code 탭을 씁니다    |
-| [`isLocalDevMcpEnabled`](https://claude.com/docs/third-party/claude-desktop/configuration#islocaldevmcpenabled)         | 직원이 **자기 MCP 서버를 못 붙입니다**     | 붙일 수 있습니다      |
-
-
-⚠️ **`coworkTabEnabled` 를 끄면 이 문서가 하려는 것 자체가 사라집니다.** 거꾸로 **Cowork 가 안 보인다면 회사 정책이 이 값을 이미 꺼 뒀는지 확인할 자리**입니다. 관리자용 지원 문서는 같은 목적의 키를 `secureVmFeaturesEnabled` 로 적고 있는데, **설정 레퍼런스에는 그 이름이 없습니다** — 둘 다 넣지 말고 위 이름을 쓰십시오.
-
-ℹ️ 지원 문서에만 있고 **설정 레퍼런스에는 없는** 키가 둘 있습니다 — `effortLevel`(기본 사고 강도 `low`~`max`, **앱 1.25927.0 이상**)과 `forceLoginOrgUUID`(지정 조직 계정으로만 로그인). 쓰기 전에 [Enterprise configuration](https://support.claude.com/en/articles/12622667-enterprise-configuration) 에서 현재 표기를 확인하십시오.
-
-> 📖 위 키 이름을 누르면 [Configuration reference](https://claude.com/docs/third-party/claude-desktop/configuration) 의 해당 항목으로 갑니다. 여기 없는 키들(텔레메트리·사용량 상한·배너·플러그인 마켓플레이스 등)도 그 문서에 있습니다.
-
-⚠️ **기본값이 off 인 것은 앱에 옵션 자체가 안 뜹니다.** Chat 탭이 안 보이거나 "Act without asking" 이 선택지에 없는 것은 고장이 아니라 이 상태입니다.
-
-### Chat 탭 켜기
-
-여기가 **다른 토글에도 그대로 쓰는 절차**입니다 — 값 넣기 → 값 확인 → 앱 완전 종료 → 재시작 → 화면 확인.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
+**공통 절차** (모든 토글 동일) — ▶ 🔴:
 
 ```powershell
 $K = "HKLM:\SOFTWARE\Policies\Claude"
-Set-ItemProperty $K chatTabEnabled "true"
-(Get-ItemProperty $K).chatTabEnabled
+Set-ItemProperty $K <키이름> "true"          # 값 넣기
+(Get-ItemProperty $K).<키이름>              # true 확인
+Get-Process -Name "*laude*" -ErrorAction SilentlyContinue | Stop-Process -Force   # 앱 완전 종료 (백그라운드 잔류 시 미반영)
 ```
 
-마지막 줄이 `true` 를 찍어야 합니다. 아무것도 안 찍히면 값이 안 들어간 것입니다.
+재시작 후 확인. 안 바뀌면 ① 값이 찍히는지, ② `"1"`로도 시도. 되돌릴 땐 `false`가 아니라 **키 삭제** — `Remove-ItemProperty $K <키이름>` (⚠️ 절차 4의 `inference*` 6개는 지우면 연결이 끊깁니다).
 
-이제 앱을 **완전히** 종료합니다. 창을 닫아도 백그라운드에 남아 있을 수 있는데, 그러면 설정을 다시 읽지 않습니다. 아래 한 줄이면 확실합니다 — 안 떠 있으면 아무 일도 일어나지 않습니다. **같은 관리자 창에서 이어서** 하시면 됩니다.
+**켤 때 넣는 키** (기본 off — 미설정이면 옵션 자체가 안 보입니다):
 
-```powershell
-Get-Process -Name "*laude*" -ErrorAction SilentlyContinue | Stop-Process -Force
-```
+| 키 | 넣으면 |
+|---|---|
+| `chatTabEnabled` | Chat 탭 표시 |
+| `autoModeEnabled` | "Act without asking" 승인 옵션 (모델이 Claude 4.6+여야 활성 — `claude-haiku-4-5-20251001`은 미달) |
+| `disabledBuiltinTools` | 적은 내장 도구를 제거 — JSON `'["WebSearch","WebFetch"]'` |
+| `builtinToolPolicy` | 도구별 승인 묻기 — JSON `'{"Bash":"ask"}'` |
+| `managedMcpServers` | 조직 지정 MCP 서버 노출 |
+| `disableBundledSkills` | 내장 Skills 끄기 |
+| `allowedWorkspaceFolders` | Cowork 폴더 제한 — `'[{"path":"C:\\Work"}]'` (객체 목록, 빈 `[]`이면 전부 차단) |
+| `isDesktopExtensionEnabled` | 직원이 확장 설치 가능 |
+| `disableAutoUpdates` | 자동 업데이트 끄기 (폐쇄망은 필수 — 새 버전은 IT가 offline판으로 배포) |
+| `autoUpdaterEnforcementHours` | 강제 재시작까지 시간 단축(1~72, 기본 72) |
 
-명령 대신 화면으로 하셔도 됩니다.
+**끌 때 넣는 키** (기본 on — `"false"`를 넣음):
 
-```
-Ctrl + Shift + Esc  →  Claude 찾기  →  우클릭  →  작업 끝내기
-```
+| 키 | `"false"`면 |
+|---|---|
+| `coworkTabEnabled` | **Cowork 탭 제거 — 이 문서의 목적 자체가 사라짐.** Cowork가 안 보이면 이 값을 회사 정책이 꺼둔 것일 수 있음 (구 지원 문서의 `secureVmFeaturesEnabled`는 구식 명칭 — 쓰지 말 것) |
+| `isClaudeCodeForDesktopEnabled` | Code 탭 제거 |
+| `isLocalDevMcpEnabled` | 직원 자체 MCP 서버 금지 |
 
-여러 개(`Claude`, `Claude Helper` 등)가 보이면 **전부** 끝내십시오. 하나라도 남으면 설정을 다시 읽지 않습니다.
+주의할 값 형식:
 
-다시 실행하면 탭이 **Cowork · Code · Chat** 세 개가 됩니다.
+- `disabledBuiltinTools`/`builtinToolPolicy`/`managedMcpServers`/`allowedWorkspaceFolders`/`inferenceModels`는 **JSON을 통째로 한 문자열**로 (`Set-ItemProperty $K x '["a"]'`). 도구 이름은 앱 표기 그대로 — 틀리면 오류 없이 무시됩니다.
+- `allowedWorkspaceFolders`는 `path`를 가진 객체 목록 + JSON 이스케이프(`C:\Work` → `C:\\Work`). **Claude가 지정 폴더 밖을 읽는 것만 막고, 직원이 📎로 파일을 올리는 건 못 막습니다** — 그런 키가 없습니다.
+- `disableAutoUpdates`+`autoUpdaterEnforcementHours`는 예외 취급 — 둘만 넣으면 나머지 설정은 관리형이 아니라 직원 설정이 남습니다. 다른 키를 같이 넣는 순간 전체가 관리형이 됩니다.
+- `disabledBuiltinTools`는 **앱 내장 도구** 얘기 — 게이트웨이 서버측 웹서치(`routing_profiles.web_search_enabled`, /apps 토글)와 무관합니다.
 
-안 늘어나면 ① 값이 `true` 로 찍히는지 다시 보고, ② 그래도 안 되면 값 형식 문제일 수 있으니 `"1"` 로 바꿔 같은 절차를 반복하십시오.
-
-### "Act without asking" 켜기
-
-Claude 가 위험하다고 판단한 작업만 승인을 묻고 나머지는 자율 실행합니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
-$K = "HKLM:\SOFTWARE\Policies\Claude"
-Set-ItemProperty $K autoModeEnabled "true"
-```
-
-⚠️ **모델이 Claude 4.6 이상**이어야 선택지가 활성화됩니다. 이 배포의 목록 중 `claude-sonnet-5-5`·`claude-opus-5-5` 는 충족하고, `claude-haiku-4-5-20251001` 은 미달이라 그 모델을 고르면 회색으로 보입니다.
-
-### 내장 도구 빼기
-
-앱에 딸린 웹 검색·웹 열기 같은 도구를 없앱니다. 회사가 외부 인터넷을 막아 둔 환경에서, 눌러도 실패하는 버튼을 아예 안 보이게 할 때 씁니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
-$K = "HKLM:\SOFTWARE\Policies\Claude"
-Set-ItemProperty $K disabledBuiltinTools '["WebSearch","WebFetch"]'
-```
-
-⚠️ 이 둘은 **앱에 딸린 도구**이지 게이트웨이의 서버측 웹서치가 아닙니다. 게이트웨이 웹서치는 여기서 끄지 못하고, 운영자가 `routing_profiles.web_search_enabled` 로 끕니다.
-
-### 자동 업데이트 끄기
-
-**폐쇄망에서 offline 설치판을 쓴다면 이걸 함께 넣으십시오.** 닿을 수 없는 업데이트 서버를 계속 두드리게 둘 이유가 없습니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
-$K = "HKLM:\SOFTWARE\Policies\Claude"
-Set-ItemProperty $K disableAutoUpdates "true"
-```
-
-끄면 **새 버전은 IT 가 직접 배포해야 합니다** — 새 offline 설치판을 받아 절차 3 을 다시 돌리는 방식입니다.
-
-**켜 둘 때 알아야 할 것.** 앱은 업데이트를 미리 받아 두고 다음 재시작 때 적용합니다. **72시간 안에 재시작하지 않으면 스스로 재시작합니다** — 사용자가 10분쯤 손을 놓기를 기다렸다가 실행하며, 「나중에」 버튼은 없습니다. 이 강제는 끌 수 없고, `autoUpdaterEnforcementHours` 는 72시간을 **줄이는** 용도입니다.
-
-⚠️ `autoUpdaterEnforcementHours` **를 넣으면 기다림이 없어집니다.** 시간이 되는 즉시 재시작하며, 사용자가 작업 중인지 보지 않습니다. 짧게 잡을수록 작업 중 재시작이 늘어납니다.
-
-ℹ️ **이 두 키만은 예외적으로 취급됩니다.** 둘만 배포하면 나머지 설정을 관리형이 가져가지 않아, 직원이 앱에서 만든 설정과 설정 창이 그대로 남습니다. 업데이트 정책만 따로 밀어넣고 싶을 때 쓰라는 장치입니다. 다른 키를 하나라도 함께 넣으면 그 순간 전체가 관리형이 됩니다.
-
-> 📖 [Updates](https://claude.com/docs/third-party/claude-desktop/installation#updates) · [`disableAutoUpdates`](https://claude.com/docs/third-party/claude-desktop/configuration#disableautoupdates) · [업데이트 키의 예외 규칙](https://claude.com/docs/third-party/claude-desktop/mdm#update-keys-and-managed-precedence)
-
-### Cowork 가 열 수 있는 폴더 제한
-
-Cowork 는 지정한 폴더를 작업 공간으로 열어 그 안의 파일을 다룹니다. 기본값은 **제한 없음** 이라 직원이 OS 권한이 닿는 아무 폴더나 붙일 수 있습니다. 사내 규정상 특정 폴더 밖은 못 열게 해야 한다면 여기서 묶습니다.
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
-$K = "HKLM:\SOFTWARE\Policies\Claude"
-Set-ItemProperty $K allowedWorkspaceFolders '[{"path":"C:\\Work"}]'
-```
-
-⚠️ **값의 형태에 주의하십시오.** 경로만 나열한 `["C:\\Work"]` 가 아니라 **`path` 를 가진 객체의 목록**입니다. 그리고 JSON 이라 역슬래시는 두 번 씁니다(`C:\Work` → `C:\\Work`). 형태가 틀린 값은 오류 없이 무시됩니다.
-
-빈 배열 `[]` 을 넣으면 **어떤 폴더도 못 붙입니다** — 에이전트는 자기 임시 공간만 쓰게 됩니다.
-
-⚠️ **이것으로 막히는 것은 Claude 쪽뿐입니다.** 에이전트가 스스로 지정 폴더 밖을 읽고 쓰는 것은 확실히 막히지만, **직원이 📎 로 바깥 파일을 직접 올리는 것은 막지 못합니다** — 그런 관리형 키가 없습니다. 거기까지 막으려면 OS·MDM 레이어가 필요합니다. 판정 근거와 실측은 `docs/deploy/cowork-workspace-folder-access-control.md` 에 있습니다.
-
-> 📖 [`allowedWorkspaceFolders`](https://claude.com/docs/third-party/claude-desktop/configuration#allowedworkspacefolders)
-
-### 값이 여러 개인 키의 형식
-
-`disabledBuiltinTools`·`builtinToolPolicy`·`managedMcpServers` 는 값이 목록이나 표 형태입니다. 레지스트리에는 **JSON 을 통째로 하나의 문자열**로 넣습니다 — 절차 4 의 `inferenceModels` 와 같은 방식입니다.
-
-```powershell
-Set-ItemProperty $K builtinToolPolicy '{"Bash":"ask"}'
-```
-
-⚠️ 도구 이름은 **앱이 쓰는 이름 그대로** 여야 합니다. **틀린 이름은 오류 없이 무시됩니다.** 확인 방법은 하나뿐입니다 — 값을 넣고 앱을 재시작한 뒤 그 도구가 실제로 사라졌는지 보는 것입니다. 남아 있으면 철자가 틀린 것입니다.
-
-### 확인과 되돌리기
-
-▶ 🔴 **실행 · 관리자 PowerShell** — 직원 PC
-
-```powershell
-Get-ItemProperty "HKLM:\SOFTWARE\Policies\Claude"
-```
-
-되돌릴 때는 값을 `false` 로 바꾸지 말고 **키를 지우십시오.** 기본값으로 돌아갑니다.
-
-```powershell
-Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Claude" chatTabEnabled
-```
-
-⚠️ 절차 4 에서 넣은 여섯 개(`inference*`)는 **지우면 안 됩니다.** 게이트웨이 연결이 끊어지고 앱이 claude.ai 로그인 화면으로 돌아갑니다.
+지원 문서에만 있는 키(레퍼런스에 없음): `effortLevel`, `forceLoginOrgUUID` — 쓰기 전 [Enterprise configuration](https://support.claude.com/en/articles/12622667-enterprise-configuration)에서 확인. 전체 키는 [Configuration reference](https://claude.com/docs/third-party/claude-desktop/configuration)가 정본입니다.
 
 
 
@@ -936,7 +596,7 @@ Remove-ItemProperty "HKLM:\SOFTWARE\Policies\Claude" chatTabEnabled
 
 **2026-08-03 · Windows Server 2025 (EC2 `m5zn.metal`) · Cowork 1.24012.9.0**
 
-절차 1~5 를 순서대로 실행해 앱 응답과 서버측 웹서치까지 확인했습니다. 게이트웨이 쪽 확인은 `04-verify.sh` 의 C 섹션(`usage.usage_logs`)으로 했습니다.
+절차 1~5 를 순서대로 실행해 앱 응답과 서버측 웹서치까지 확인했습니다. 게이트웨이 쪽 확인은 `./deploy doctor` 의 usage_logs 조회로 했습니다.
 
 
 | 확인한 것        | 결과                                                                 |
