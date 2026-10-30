@@ -110,3 +110,19 @@ RPM 기반 한도만 적용 중 — 토큰 단위 한도는 미구현 상태로 
 - `chat_agent` 라우터는 main.py:696에서 정상 마운트됨(Phase 2 BI assistant)
   — 1,509줄은 코드가 아니라 기능 자체. 범위 제외 결정과 무관하게 배선돼 있음.
 
+
+---
+
+## admin-ui — 3차 스윕 결과
+
+### 확인된 것 (문제 없음)
+
+- **고아 컴포넌트 없음** — src/components 전 파일이 참조됨
+- **console.log 0건** — 디버그 잔재 없음
+- "deprecated" 매칭은 모델 폐기(deprecated) 기능 정상 코드
+
+### 덩치 표시 (정보)
+
+- `OrgDetailPanel.tsx` 1,417줄 — useState/useEffect 39개, 조직·팀·정책을 한 패널에서 다루는 무거운 컴포넌트. 결함 아니지만 다음 수정 시 분할 후보
+- `chat/` (admin-chat-agent UI) — feature-flagged 기능, 데드코드 아님
+
