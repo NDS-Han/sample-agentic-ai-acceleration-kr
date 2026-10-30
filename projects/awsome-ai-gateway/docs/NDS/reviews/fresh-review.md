@@ -126,3 +126,11 @@ RPM 기반 한도만 적용 중 — 토큰 단위 한도는 미구현 상태로 
 - `OrgDetailPanel.tsx` 1,417줄 — useState/useEffect 39개, 조직·팀·정책을 한 패널에서 다루는 무거운 컴포넌트. 결함 아니지만 다음 수정 시 분할 후보
 - `chat/` (admin-chat-agent UI) — feature-flagged 기능, 데드코드 아님
 
+
+---
+
+## gateway-cli — 4차 스윕 결과
+
+**문제 없음** — 총 3,541줄 소스(테스트 제외), 최대 파일 523줄(`oidc_client.py`),
+TODO/FIXME 0건. 작고 깔끔한 CLI — 크기나 잔재 문제가 아닙니다.
+
