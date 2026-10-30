@@ -134,3 +134,40 @@ RPM 기반 한도만 적용 중 — 토큰 단위 한도는 미구현 상태로 
 **문제 없음** — 총 3,541줄 소스(테스트 제외), 최대 파일 523줄(`oidc_client.py`),
 TODO/FIXME 0건. 작고 깔끔한 CLI — 크기나 잔재 문제가 아닙니다.
 
+
+---
+
+## deploy 도구 + db — 최종 스윕
+
+- **마이그레이션 체인**: 0045→0049 연속, `down_revision` 일치 — 이상 없음
+- **deploy 0ref**: `__init__.py`/`__main__.py`/`cli.py`는 진입점이라 호출 참조가 없는 게 정상 — 데드코드 아님
+- `cli.py:1431`의 `"<TODO>"`는 placeholder 반환 문자열이지 미완 주석이 아님
+
+---
+
+## 종합 리포트
+
+### 실제 발견 (조치 필요 여부 판단 요망)
+
+| # | 파일 | 내용 | 성격 |
+|---|---|---|---|
+| 1 | `gateway-proxy/.../trace_extractor.py` | 209줄 완성 모듈, 호출처 0 + config 플래그까지 있음 | 배선 또는 삭제 결정 필요 |
+| 2 | `admin-api/.../repositories/audit_repository.py` | 36줄 repository 클래스, 호출처 0 | 삭제 또는 G3 audit 조회 API 때까지 보류 |
+| 3 | `gateway-proxy/.../web_search_loop.py` | 4,030줄 단일 파일 | 다음 수정 시 분리 후보로 표시 |
+| 4 | `routers/messages.py` vs `openai_compat.py` | fallback 관련 참조 56 vs 6 — 비대칭 | 의도된 설계인지 확인 (Codex 경로가 폴백을 안 타나?) |
+| 5 | `rate_limit_service.py:494` | TODO: rpm→tpm 한도 미구현 | 미구현 기능 표기 — 결함 아님 |
+| 6 | `admin-ui/OrgDetailPanel.tsx` | 1,417줄, useState 39개 | 다음 수정 시 분할 후보 |
+
+### 문제 없음 확인
+
+- `thinking_normalizer`/`tool_filter` 배선됨 (이전 "0caller" 기록 해소)
+- 두 `budget_service.py` — proxy hot-path vs admin 관리 레이어, **역할이 달라 중복 아님**
+- `chat_agent` 라우터 정상 마운트 (Phase 2)
+- admin-ui 고아 컴포넌트·console.log 0건
+- gateway-cli 전체 깨끗
+- 마이그레이션 체인 연속
+
+### 결론
+
+**발견은 데드코드 2건(작은 것) + 구조 메모 4건** — 리뷰 기준으로 코드베이스 상태는 건강합니다.
+치명적 결함은 없고, 발견 1·2는 "구현은 됐는데 안 쓰는 코드" — 삭제할지 살릴지 방향 결정만 필요합니다.
