@@ -109,6 +109,17 @@ def desired_values(cfg: GatewayConfig) -> dict:
         # 등)이 남아 Cognito callback allowlist 와 어긋나 SSO 가 깨진다
         v.setdefault("adminUi", {})["nextauthUrl"] = f"https://admin.{cfg.domain.name}"
 
+    # ── selfsigned-temp — 도메인 없이 admin-ui 만 임시 HTTPS (Cognito SSO 콜백이
+    #    https 를 요구하기 때문). 인증서는 apply 가 self-signed 로 만들어 ACM 에
+    #    올리고 certificate-arn 을 --set 으로 주입한다 (apply 시점에만 ALB 주소를
+    #    알 수 있어 render 에선 리스너·redirect 만 선언).
+    if cfg.domain.mode == "selfsigned-temp":
+        v.setdefault("ingress", {}).setdefault("adminUi", {}).setdefault(
+            "annotations", {}).update({
+                "alb.ingress.kubernetes.io/listen-ports": '[{"HTTP":80},{"HTTPS":443}]',
+                "alb.ingress.kubernetes.io/ssl-redirect": "443",
+            })
+
     # ── features → gatewayProxy.env / notificationWorker.email ──────────────
     genv: dict = {}
     if cfg.features.web_search:

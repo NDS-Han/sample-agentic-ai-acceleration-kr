@@ -37,7 +37,7 @@ network:
   admin_internal: false       # eks 전용 — admin(admin-ui/api) Ingress만 internal ALB로
 
 domain:
-  mode: none                  # none | cloudfront-temp | route53-acm
+  mode: none                  # none | cloudfront-temp | selfsigned-temp | route53-acm
   name: example.com           # route53-acm 일 때 필수
   zone_id: Z123...            # Route53 hosted zone — ecs+route53-acm 이면 필수
                               # (eks 는 env values 의 기존 인증서/레코드를 쓰므로 미사용)
@@ -177,6 +177,7 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 |---|---|---|
 | `none` | 도메인 없음 — 포트별 접속(8000/8080/3000) | HTTP 만 |
 | `cloudfront-temp` | CloudFront 기본 도메인으로 임시 https | 있음 (EKS 전용) |
+| `selfsigned-temp` | self-signed 인증서로 admin-ui만 임시 https — Cognito SSO용 (EKS 전용, 브라우저 경고) | 있음 |
 | `route53-acm` | 실제 도메인 + 인증서 | 있음 |
 
 도메인은 **나중에 바꿀 수 있습니다** — 다만 이미 설치된 클라이언트의 게이트웨이

@@ -139,6 +139,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
             Choice("none — 도메인 없이 시작 (HTTP, Cowork 불가)", "none"),
             Choice("route53-acm — 도메인 확정 (자동 TLS)", "route53-acm"),
             Choice("cloudfront-temp — 임시 https (EKS 전용)", "cloudfront-temp"),
+            Choice("selfsigned-temp — 도메인 없이 임시 https (EKS·self-signed, 브라우저 경고)", "selfsigned-temp"),
         ], default=_g(ex, "domain", "mode") or "none").ask())
     domain_name, zone_id = "", ""
     if domain_mode == "route53-acm":

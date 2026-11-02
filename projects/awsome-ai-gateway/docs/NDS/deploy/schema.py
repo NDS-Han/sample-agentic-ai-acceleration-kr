@@ -15,7 +15,7 @@ DEPLOY_TARGETS = ("compose", "ecs", "eks")
 IMPLEMENTED_TARGETS = ("compose", "ecs", "eks")   # 렌더러가 있는 backend
 SIZE_TIERS = ("t0", "t1", "t2", "t3")
 NETWORK_MODES = ("public", "private")
-DOMAIN_MODES = ("none", "cloudfront-temp", "route53-acm")
+DOMAIN_MODES = ("none", "cloudfront-temp", "selfsigned-temp", "route53-acm")
 NOTIFICATION_PROVIDERS = ("mock", "smtp", "ses", "internal_api")
 MODEL_PROFILES = ("global", "regional")
 
@@ -468,6 +468,9 @@ class GatewayConfig:
                      "EMAIL_API_URL 부재로 기동 실패(crashloop)합니다.")
         if self.features.bi_insight and self.deploy.target == "compose":
             e.append("bi_insight(AgentCore Runtime)는 compose backend에서 지원하지 않습니다.")
+        if self.domain.mode == "selfsigned-temp" and self.deploy.target != "eks":
+            e.append("domain.mode=selfsigned-temp 는 EKS(ALB ingress certificate-arn) "
+                     "전용입니다 — ecs/compose 에서는 지원하지 않습니다")
         if self.domain.mode == "cloudfront-temp" and self.deploy.target == "compose":
             e.append("domain.mode=cloudfront-temp 는 compose 에서 지원하지 않습니다 — "
                      "none 또는 route53-acm 을 쓰십시오 (ecs 는 none 으로 수렴).")

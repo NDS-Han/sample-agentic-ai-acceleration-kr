@@ -94,6 +94,41 @@ backend 별로 apply 안에서 일어나는 일이 다릅니다:
 tfvars/`infra` 대신 gen tfvars에 추가해 재apply하면 HTTPS가 열립니다.
 자세한 순서는 [install-ecs.md](install-ecs.md) §6.
 
+## 3. 도메인 없이 임시 HTTPS — `selfsigned-temp` (EKS)
+
+도메인이 없어도 **admin-ui Cognito SSO 로그인**이 필요하면(콜백 URL이 https
+강제) `domain.mode: selfsigned-temp`를 쓰세요. `configure` 마법사의 도메인
+질문에서도 고를 수 있습니다.
+
+apply가 하는 일(전부 자동·멱등):
+
+1. admin-ui ALB hostname을 읽어 그 DNS용 **self-signed 인증서 생성**
+   (openssl, CN=`llm-gateway-<env>-selfsigned` — 이미 있으면 재사용)
+2. **ACM에 import** 후 `certificate-arn`을 `--set`으로 주입
+3. ingress에 `listen-ports: HTTP:80+HTTPS:443` + `ssl-redirect` 선언
+4. `nextauthUrl`을 `https://<alb>`로 주입
+
+이후 사람이 하는 것 — **Cognito 콜백은 terraform env 소유**라 tfvars에
+등록 후 `terraform apply`합니다:
+
+```hcl
+cognito_callback_urls = [ ..., "https://<admin-ui ALB>/api/auth/callback" ]
+cognito_logout_urls   = [ ..., "https://<admin-ui ALB>/" ]
+```
+
+주의:
+
+- **브라우저 경고가 뜹니다** — self-signed라 신뢰 체인이 없습니다. Cognito는
+  스킴만 검사해 로그인은 정상 동작합니다. 사내 PKI가 있으면 그 CA로 서명해
+  ACM에 올리면 경고도 없어집니다.
+- **gateway(데이터 플레인)는 여전히 HTTP** — Cowork는 여전히 안 됩니다.
+  이 모드는 admin-ui SSO 전용 임시 장치입니다.
+- 첫 설치처럼 ALB가 아직 없으면 인증서 없이 1차 apply가 지나가고, ALB
+  생성 후 **다음 apply에** 자동으로 붙습니다.
+- 인증서는 수동 리소스 — 도메인 도입 시 ACM 정식 인증서로 교체 후
+  `mode: route53-acm`으로 옮기고 import한 것은 `aws acm delete-certificate`로
+  정리합니다.
+
 ### host 이름 규칙 — 레거시/사내 명명과 다를 수 있음
 
 `domain.name`을 쓰면 host는 **env 무관** `gateway./admin./admin-api.<domain>`

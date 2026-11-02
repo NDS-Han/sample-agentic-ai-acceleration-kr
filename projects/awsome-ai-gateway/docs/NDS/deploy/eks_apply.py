@@ -171,6 +171,37 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     return args
 
 
+def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
+    """domain=selfsigned-temp 용 self-signed 인증서를 ACM 에 보장하고 ARN 을
+    돌려준다. CN 에 env 를 넣어 재실행 때 기존 인증서를 찾아 재사용(멱등)한다.
+    ALB 가 요구하는 것은 리스너 인증서뿐이라 신뢰 체인은 무관 — 브라우저
+    경고는 사용자 수용 조건이다. 실패 시 빈 문자열."""
+    cn = f"llm-gateway-{env}-selfsigned"
+    r = _run_quiet(["aws", "acm", "list-certificates", "--region", region,
+                    "--query", f"CertificateSummaryList[?DomainName=='{cn}']"
+                               ".CertificateArn | [0]",
+                    "--output", "text"], timeout=30)
+    arn = (r.stdout or "").strip()
+    if r.returncode == 0 and arn and arn != "None":
+        return arn
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        key, crt = f"{td}/key.pem", f"{td}/cert.pem"
+        r = _run_quiet(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                        "-days", "3650", "-keyout", key, "-out", crt,
+                        "-subj", f"/CN={cn}",
+                        "-addext", f"subjectAltName=DNS:{alb_host}"], timeout=30)
+        if r.returncode != 0:
+            return ""
+        r = _run_quiet(["aws", "acm", "import-certificate",
+                        "--certificate", f"fileb://{crt}",
+                        "--private-key", f"fileb://{key}",
+                        "--region", region,
+                        "--query", "CertificateArn", "--output", "text"],
+                       timeout=30)
+        return r.stdout.strip() if r.returncode == 0 else ""
+
+
 def _helm_version() -> tuple[int, int]:
     r = _run_quiet(["helm", "version", "--template", "{{.Version}}"], timeout=15)
     m = re.search(r"v(\d+)(?:\.(\d+))?", r.stdout or "")
@@ -491,6 +522,25 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 만 "
                   "켜진 상태로 진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
 
+    # domain.selfsigned-temp — admin-ui 만 임시 HTTPS. ALB hostname 은 live
+    # ingress 에서 읽으므로 첫 설치(아직 ALB 없음)는 인증서 없이 지나가고 다음
+    # apply 에 붙는다. cert-arn 은 values 에 못 박는 런타임값이라 --set 주입.
+    if cfg.domain.mode == "selfsigned-temp":
+        ss_host = live_alb_hostname(meta, context)
+        if ss_host:
+            arn = ensure_selfsigned_cert(cfg.env, ss_host, cfg.aws.region)
+            if arn:
+                set_args += ["--set-string",
+                             "ingress.adminUi.annotations."
+                             "alb\\.ingress\\.kubernetes\\.io/"
+                             "certificate-arn=" + arn]
+            else:
+                print("⚠ self-signed 인증서 프로비저닝 실패 — 443 리스너 없이 "
+                      "진행합니다 (openssl/aws acm 권한 확인)", file=sys.stderr)
+        else:
+            print("ⓘ admin-ui ALB 가 아직 없습니다 — self-signed 인증서는 "
+                  "ALB 생성 후 다음 apply 에 붙습니다", file=sys.stderr)
+
     # ops/NDS-01 자동화 — role+함수+invoke 정책을 보장하고(멱등) 함수 이름을
     # adminApi.env 로 주입한다. 비면 litellm 소스는 비활성(graceful-off).
     if cfg.features.pricing_lambda:
@@ -512,10 +562,12 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     if not cfg.domain.name and not live_ingress_rule_host(meta, context):
         host = live_alb_hostname(meta, context)
         if host:
+            scheme = "https" if cfg.domain.mode == "selfsigned-temp" else "http"
             print(f"adminUi.nextauthUrl 을 live ALB 주소({host})로 반영 — "
                   "이 2차 upgrade 는 1차에서 확인된 계획의 후속입니다", file=sys.stderr)
             _run(_helm_argv(meta, set_args, context=context,
-                            extra_sets=["--set", f"adminUi.nextauthUrl=http://{host}"]),
+                            extra_sets=["--set",
+                                        f"adminUi.nextauthUrl={scheme}://{host}"]),
                  cwd=repo_root)
     return {"release": meta["release"], "namespace": meta["namespace"],
             "alb_hostname": live_alb_hostname(meta, context)}
