@@ -440,6 +440,25 @@ def _helm_values(release: str, namespace: str, context: str = "") -> dict:
     return yaml.safe_load(r.stdout) or {}
 
 
+def _helm_app_version(release: str, namespace: str, context: str = "") -> str:
+    """설치된 릴리스의 차트 appVersion — values 에 tag 가 없는 서비스의
+    폴백 이미지 태그 해석에 쓴다. 조회 실패는 best-effort 로 빈 문자열."""
+    argv = ["helm", "list", "-n", namespace, "-o", "json",
+            "--filter", f"^{re.escape(release)}$"]
+    if context:
+        argv += ["--kube-context", context]
+    r = _sp(argv, tool="helm")
+    if r.returncode != 0:
+        return ""
+    try:
+        for item in json.loads(r.stdout or "[]"):
+            if item.get("name") == release:
+                return str(item.get("app_version", ""))
+    except json.JSONDecodeError:
+        pass
+    return ""
+
+
 def _kubectl_json(resource: str, namespace: str, context: str = "") -> dict:
     argv = ["kubectl", "get", resource, "-n", namespace, "-o", "json"]
     if context:
@@ -545,34 +564,51 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
 
     # ── images — per-service 태그가 다르면 images.tags 맵으로 기록한다 ───────
     #    (US-19 같은 멀티태그 릴리스 — 단일 images.tag 로는 표현 불가)
-    tags = {}
-    helm_keys = {}
-    for svc, key in (("gateway-proxy", "gatewayProxy"), ("admin-api", "adminApi"),
-                     ("admin-ui", "adminUi"), ("scheduler", "scheduler"),
-                     ("notification-worker", "notificationWorker"),
-                     ("cost-recorder-worker", "costRecorderWorker"),
-                     ("migration", "migration")):
-        tags[svc] = str(_val(v, key, "image", "tag"))
-        helm_keys[svc] = key
-    unique = {t for t in tags.values() if t}
-    tag = tags.get("gateway-proxy", "")
-    per_service = ({helm_keys[s]: t for s, t in tags.items() if t}
-                   if len(unique) > 1 else {})
+    svc_keys = (("gateway-proxy", "gatewayProxy"), ("admin-api", "adminApi"),
+                ("admin-ui", "adminUi"), ("scheduler", "scheduler"),
+                ("notification-worker", "notificationWorker"),
+                ("cost-recorder-worker", "costRecorderWorker"),
+                ("migration", "migration"))
+    helm_keys = dict(svc_keys)
 
-    # 라이브 이미지 drift
+    # 라이브 deployment 의 실제 이미지 태그 수집 — deployment 명명 = <fullname>-<svc>.
+    # fullname 은 release/chart override 로 달라지므로 접미사로 svc 를 맞춘다
+    # (하드코딩 prefix 는 커스텀 release 에서 매칭이 침묵 누락된다).
+    # values 에 tag 가 없는 서비스는 차트 appVersion 폴백으로 이미지가 정해지므로
+    # 라이브 태그가 곧 유효 태그다 — 기록하지 않으면 채택본 apply 가 폴백 대상
+    # 서비스를 global images.tag 로 덮어쓴다.
+    live_tags: dict[str, str] = {}
     for item in deploys.get("items", []):
         name = item["metadata"]["name"]
+        svc_key = next((s for s in helm_keys if name.endswith(f"-{s}")), "")
+        if not svc_key:
+            continue
         containers = ((item.get("spec") or {}).get("template") or {}).get("spec", {}).get("containers") or []
         for c in containers:
             img = c.get("image", "")
             live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
-            # deployment 명명 = <fullname>-<svc>. fullname 은 release/chart override
-            # 로 달라지므로 접미사로 svc 를 맞춘다 (하드코딩 prefix 는 커스텀
-            # release 에서 drift 감지가 침묵 누락된다)
-            svc_key = next((s for s in tags if name.endswith(f"-{s}")), "")
-            if svc_key in tags and live_tag and live_tag != tags[svc_key]:
-                notes.append(f"⚠ {svc_key} 라이브 이미지 태그 {live_tag} ≠ helm values "
-                             f"{tags[svc_key]} — 수동 set image 또는 stale release")
+            if live_tag:
+                live_tags[svc_key] = live_tag
+
+    # values 미명시 + 라이브 없음(migration Job 등)의 최종 폴백 = 차트 appVersion
+    app_version = _helm_app_version(release, namespace, context)
+
+    tags = {}
+    for svc, key in svc_keys:
+        declared = str(_val(v, key, "image", "tag"))
+        live_tag = live_tags.get(svc, "")
+        if live_tag and declared and live_tag != declared:
+            notes.append(f"⚠ {svc} 라이브 이미지 태그 {live_tag} ≠ helm values "
+                         f"{declared} — 수동 set image 또는 stale release. 라이브 값으로 캡처")
+        elif live_tag and not declared and app_version and live_tag != app_version:
+            notes.append(f"⚠ {svc} 라이브 이미지 태그 {live_tag} ≠ 차트 appVersion "
+                         f"{app_version} 폴백 — 수동 set image 추정. 라이브 값으로 캡처")
+        # 캡처는 현재 상태 기준 — 라이브 > values 명시 > 차트 폴백 순
+        tags[svc] = live_tag or declared or app_version
+    unique = {t for t in tags.values() if t}
+    tag = tags.get("gateway-proxy", "")
+    per_service = ({helm_keys[s]: t for s, t in tags.items() if t}
+                   if len(unique) > 1 else {})
 
     # ── features ────────────────────────────────────────────────────────────
     email = _val(v, "notificationWorker", "email", default={}) or {}
