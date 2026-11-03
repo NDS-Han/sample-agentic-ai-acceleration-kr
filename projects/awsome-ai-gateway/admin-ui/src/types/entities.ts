@@ -58,6 +58,10 @@ export interface ServiceAccountItem {
   active_key_prefix: string | null;
   active_key_expires_at: string | null;
   last_request_at: string | null;
+  active_key_last_request_at: string | null;
+  month_requests: number;
+  month_tokens: number;
+  month_cost_usd: number;
 }
 
 export interface ServiceAccountListResponse {
@@ -372,4 +376,55 @@ export interface EffectivePolicy {
   budgets: EffectiveBudgetEntry[];
   rate_limits: EffectiveRateLimitEntry[];
   downgrade_rules: EffectiveDowngradeRule[];
+}
+
+// ── 서비스 계정 키 단위 사용량 (GET /admin/service-accounts/{id}/usage) ──
+
+export interface ServiceAccountKeyUsageItem {
+  key_id: string;
+  key_prefix: string;
+  status: string;
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  last_used_at: string | null;
+  requests: number;
+  cost_usd: number;
+  last_request_at: string | null;
+}
+
+export interface ServiceAccountUsageResponse {
+  user_id: string;
+  email: string;
+  display_name: string;
+  team_id: string | null;
+  team_name: string | null;
+  period: string;
+  attribution_since: string;
+  keys: ServiceAccountKeyUsageItem[];
+  summary: {
+    requests: number;
+    success: number;
+    error: number;
+    timeout: number;
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_tokens: number;
+    cache_read_tokens: number;
+    reasoning_tokens: number;
+    web_search_count: number;
+    cost_usd: number;
+    avg_latency_ms: number | null;
+    last_request_at: string | null;
+    unattributed_requests: number;
+    unattributed_cost_usd: number;
+  };
+  by_model: {
+    model_alias: string;
+    requests: number;
+    tokens: number;
+    cost_usd: number;
+    cost_share: number;
+  }[];
+  daily: { date: string; requests: number; tokens: number; cost_usd: number }[];
 }

@@ -4,12 +4,13 @@
 
 import { useState } from 'react';
 import { createPortal } from 'react-dom';
+import Link from 'next/link';
 import { useTranslations } from 'next-intl';
 import { Badge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDate } from '@/lib/utils/format';
+import { fmtDate, fmtUsd } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
   listIssueTargetsAction,
@@ -27,7 +28,7 @@ interface Props {
 }
 
 export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
-  const t = useTranslations('keys');
+  const t = useTranslations('serviceAccounts');
   const tz = useReportingTz();
   const { toast } = useToast();
 
@@ -177,13 +178,28 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
               <Th>{t('saKey')}</Th>
               <Th>{t('expiresAt')}</Th>
               <Th>{t('saLastUsed')}</Th>
+              <Th numeric>{t('saMonthRequests')}</Th>
+              <Th numeric>{t('saMonthTokens')}</Th>
+              <Th numeric>{t('saMonthCost')}</Th>
               <Th numeric>{t('actions')}</Th>
             </Tr>
           </THead>
           <TBody>
             {accounts.map((a) => (
               <Tr key={a.user_id}>
-                <Td className="text-foreground">{a.email}</Td>
+                <Td className="text-foreground">
+                  <Link
+                    href={`/service-accounts/${a.user_id}`}
+                    className="hover:text-primary hover:underline"
+                  >
+                    {a.email}
+                  </Link>
+                  {a.display_name && (
+                    <span className="ml-1.5 text-xs text-muted-foreground">
+                      {a.display_name}
+                    </span>
+                  )}
+                </Td>
                 <Td className="text-muted-foreground">{a.team_name ?? '—'}</Td>
                 <Td>
                   {a.active_key_prefix ? (
@@ -198,6 +214,15 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                 </Td>
                 <Td className="text-muted-foreground">
                   {a.last_request_at ? fmtDate(a.last_request_at, tz) : '—'}
+                </Td>
+                <Td numeric className="text-muted-foreground">
+                  {a.month_requests.toLocaleString()}
+                </Td>
+                <Td numeric className="text-muted-foreground">
+                  {a.month_tokens.toLocaleString()}
+                </Td>
+                <Td numeric className="text-muted-foreground">
+                  {fmtUsd(a.month_cost_usd)}
                 </Td>
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">

@@ -11,6 +11,7 @@ import {
   AppWindow,
   BarChart3,
   Blocks,
+  Bot,
   BrainCircuit,
   KeyRound,
   LayoutDashboard,
@@ -80,6 +81,12 @@ const NAV_ITEMS: NavItemDef[] = [
     key: 'keys',
     href: '/keys',
     icon: <KeyRound size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN],
+  },
+  {
+    key: 'serviceAccounts',
+    href: '/service-accounts',
+    icon: <Bot size={18} />,
     allowedRoles: [UserRoleConst.ADMIN],
   },
   {

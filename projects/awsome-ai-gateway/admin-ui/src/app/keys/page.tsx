@@ -4,10 +4,8 @@ import { adminAPI } from '@/lib/api-client';
 import { getTranslations } from 'next-intl/server';
 import Link from 'next/link';
 import { KeysListView } from '@/components/keys/KeysListView';
-import { ServiceAccountsPanel } from '@/components/keys/ServiceAccountsPanel';
 import { ErrorState } from '@/components/common/ErrorState';
 import type { KeyListResponse } from '@/lib/actions/keys';
-import type { ServiceAccountListResponse } from '@/types/entities';
 import { KeyStatus } from '@/types/enums';
 
 
@@ -36,12 +34,6 @@ export default async function KeysPage(props: KeysPageProps) {
     .then((v) => ({ ok: true as const, value: v }))
     .catch(() => ({ ok: false as const }));
 
-  // 서비스 계정 패널 — 목록 실패는 페이지 전체를 죽이지 않는다(키 목록은 정상 표시).
-  const saResult = await adminAPI
-    .get<ServiceAccountListResponse>('/admin/service-accounts')
-    .then((v) => ({ ok: true as const, value: v }))
-    .catch(() => ({ ok: false as const }));
-
   return (
     <div>
       <div className="mb-6">
@@ -51,12 +43,16 @@ export default async function KeysPage(props: KeysPageProps) {
         </p>
       </div>
 
-      {saResult.ok && (
-        <ServiceAccountsPanel
-          accounts={saResult.value.items}
-          maxTtlDays={saResult.value.max_ttl_days}
-        />
-      )}
+      {/* 앱용 장기 키 관리는 서비스 계정 페이지로 이동 — 여기는 사람 세션키만. */}
+      <div className="glass rounded-apple mb-6 flex items-center justify-between px-4 py-3">
+        <p className="text-sm text-muted-foreground">{t('saMovedBanner')}</p>
+        <Link
+          href="/service-accounts"
+          className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent"
+        >
+          {t('saMovedLink')}
+        </Link>
+      </div>
 
       <form method="GET" className="flex items-center gap-2">
         {/* status 를 hidden 으로 실어야 email 검색 submit 이 현재 상태 필터를
