@@ -53,6 +53,8 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [showInactive, setShowInactive] = useState(true);
+  // 팀/멤버 이름 검색 — 쿼리가 있으면 매칭 멤버가 있는 팀만 보이고 자동 펼침.
+  const [memberSearch, setMemberSearch] = useState('');
   // D-21: admin 이 펼친 팀 행에서 "팀원 일괄 편집" 모달을 여는 대상.
   const [memberEditTeam, setMemberEditTeam] = useState<{ id: string; name: string } | null>(null);
   // 다운그레이드 저장 후 배지 즉시 갱신 — 테이블 revalidate 가 없으므로
@@ -88,6 +90,29 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
     }
     return { teamRows: teams, usersByTeam: grouped, unassignedUsers: orphans };
   }, [filteredItems]);
+
+  const memberQuery = memberSearch.trim().toLowerCase();
+
+  // 검색 결과 뷰 — 팀 이름이 맞으면 멤버 전체, 아니면 이름이 맞는 멤버만 노출.
+  const visibleTeams = useMemo(() => {
+    const hit = (name: string) => name.toLowerCase().includes(memberQuery);
+    return teamRows
+      .map((team) => {
+        const all = usersByTeam[team.target_id] ?? [];
+        const nameHit = !memberQuery || hit(team.target_name);
+        const members = nameHit ? all : all.filter((m) => hit(m.target_name));
+        return { team, members, nameHit };
+      })
+      .filter((v) => v.nameHit || v.members.length > 0);
+  }, [teamRows, usersByTeam, memberQuery]);
+
+  const visibleUnassigned = useMemo(
+    () =>
+      unassignedUsers.filter(
+        (u) => !memberQuery || u.target_name.toLowerCase().includes(memberQuery)
+      ),
+    [unassignedUsers, memberQuery]
+  );
 
   // 딥링크 포커스 — 1회만 적용한다(Strict Mode 이중 실행 가드는 effect
   // 최상단에서 세워야 두 번째 호출이 통과하지 못한다). ref 가드가 재실행을
@@ -168,7 +193,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
   };
 
   const colCount = isAdmin ? 8 : 7;
-  const isEmpty = teamRows.length === 0 && unassignedUsers.length === 0;
+  const isEmpty = visibleTeams.length === 0 && visibleUnassigned.length === 0;
 
   const renderUserRow = (user: BudgetSummaryItem) => (
     <Tr key={user.target_id} className="bg-muted/10">
@@ -235,8 +260,16 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
 
   return (
     <>
-      {hasInactive && (
-        <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-3 mb-3 flex-wrap">
+        <input
+          type="search"
+          value={memberSearch}
+          onChange={(e) => setMemberSearch(e.target.value)}
+          placeholder={t('searchTeamsOrMembers')}
+          aria-label={t('searchTeamsOrMembers')}
+          className="w-64 rounded-md border border-input bg-background px-3 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+        />
+        {hasInactive && (
           <label className="flex items-center gap-1.5 cursor-pointer text-xs text-muted-foreground">
             <input
               type="checkbox"
@@ -246,8 +279,8 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
             />
             {t('includeInactive')}
           </label>
-        </div>
-      )}
+        )}
+      </div>
       <div className="w-full glass rounded-apple overflow-hidden">
         <Table>
           <THead>
@@ -264,12 +297,16 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
           </THead>
           <TBody>
             {isEmpty ? (
-              <TEmpty colSpan={colCount}>{t('noData')}</TEmpty>
+              <TEmpty colSpan={colCount}>
+                {memberQuery ? t('noSearchResults') : t('noData')}
+              </TEmpty>
             ) : (
               <>
-                {teamRows.map((team) => {
-                  const members = usersByTeam[team.target_id] ?? [];
-                  const isOpen = expanded[team.target_id] ?? false;
+                {visibleTeams.map(({ team, members }) => {
+                  // 검색 중에는 매칭 멤버가 있는 팀을 자동으로 펼친다.
+                  const isOpen =
+                    (expanded[team.target_id] ?? false) ||
+                    (memberQuery !== '' && members.length > 0);
                   const hasMembers = members.length > 0;
                   return (
                     <Fragment key={team.target_id}>
@@ -414,8 +451,8 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                   );
                 })}
 
-                {unassignedUsers.length > 0 && (() => {
-                  const isOpen = expanded[UNASSIGNED_KEY] ?? false;
+                {visibleUnassigned.length > 0 && (() => {
+                  const isOpen = (expanded[UNASSIGNED_KEY] ?? false) || memberQuery !== '';
                   return (
                     <Fragment key={UNASSIGNED_KEY}>
                       <Tr id={`budget-row-${UNASSIGNED_KEY}`}>
@@ -436,12 +473,12 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                             </button>
                             <span className="text-muted-foreground">{t('unassigned')}</span>
                             <span className="text-xs text-muted-foreground">
-                              ({unassignedUsers.length})
+                              ({visibleUnassigned.length})
                             </span>
                           </div>
                         </Td>
                       </Tr>
-                      {isOpen && unassignedUsers.map(renderUserRow)}
+                      {isOpen && visibleUnassigned.map(renderUserRow)}
                     </Fragment>
                   );
                 })()}
@@ -463,7 +500,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
         isOpen={memberEditTeam !== null}
         onClose={() => setMemberEditTeam(null)}
         title={memberEditTeam ? t('memberBulkEditTitle', { team: memberEditTeam.name }) : ''}
-        contentClassName="max-w-4xl"
+        contentClassName="max-w-5xl"
       >
         {memberEditTeam && (
           <TeamAllocationView
