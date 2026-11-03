@@ -1318,6 +1318,6 @@
     "appIntegNoteVk": "Store the VK in Secrets Manager and read it at app startup — never hardcode it in code or env files",
     "appIntegNoteAlias": "model must be a gateway-registered alias — full upstream IDs return 404",
     "appIntegNote401": "On 401, re-read the secret and retry once — picks up admin reissues and auth repairs automatically",
-    "appIntegNoteUa": "A User-Agent starting with {code} is misclassified as claude-code — use a neutral UA"
+    "appIntegNoteUa": "A User-Agent starting with <code>claude-cli/</code> is misclassified as claude-code — use a neutral UA"
   }
 }

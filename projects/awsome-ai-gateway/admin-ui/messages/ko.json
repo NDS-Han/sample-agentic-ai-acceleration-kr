@@ -1318,6 +1318,6 @@
     "appIntegNoteVk": "VK 는 Secrets Manager 에 저장하고 앱 시작 시 읽습니다 — 코드·환경 변수 하드코딩 금지",
     "appIntegNoteAlias": "model 은 게이트웨이에 등록된 alias 만 사용 — upstream 전체 이름이면 404",
     "appIntegNote401": "401 응답 시 Secret 을 다시 읽고 1회만 재시도 — 운영자 재발급/인증 복구를 자동 반영",
-    "appIntegNoteUa": "User-Agent 가 {code} 로 시작하면 claude-code 로 오분류됩니다 — 중립 UA 를 사용하세요"
+    "appIntegNoteUa": "User-Agent 가 <code>claude-cli/</code> 로 시작하면 claude-code 로 오분류됩니다 — 중립 UA 를 사용하세요"
   }
 }
