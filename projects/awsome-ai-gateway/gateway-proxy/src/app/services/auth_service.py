@@ -207,6 +207,8 @@ class VKAuthStrategy:
         key_hash = hashlib.sha256(token.encode()).hexdigest()
         # VK prefix (raw[:11], "vk-XXXXXXXX") — 키 단위 사용량 귀속용으로
         # AuthContext 에 실린다. 원문은 여기서만 존재하고 아래로 내려가지 않는다.
+        # admin-api key_service.issue_key 의 raw_key[:11] 과 같은 규칙 —
+        # VK 포맷("vk-" + 8hex)이 바뀌면 양쪽을 함께 고쳐야 한다.
         key_prefix = token[:11]
 
         # 1) AuthContext 캐시 조회
@@ -250,8 +252,8 @@ class VKAuthStrategy:
                             except Exception:
                                 logger.warning("vk_cache_cleanup_failed")
                             raise PermissionError("User account is deactivated")
-                    # prefix 는 캐시에 넣지 않고 매 요청의 raw token 에서 직접
-                    # 채운다 — 가변 캐시 데이터가 아니라 인증 입력의 결정적 함수다.
+                    # 캐시 JSON 안의 prefix 값과 무관하게 매 요청 raw token 에서
+                    # 덮어쓴다 — 가변 캐시 데이터가 아니라 인증 입력의 결정적 함수다.
                     cached_ctx.key_prefix = key_prefix
                     return cached_ctx
 

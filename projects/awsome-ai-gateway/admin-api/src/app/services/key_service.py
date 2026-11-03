@@ -469,6 +469,9 @@ class KeyService:
             "roles": ["USER"],
             "auth_type": "VIRTUAL_KEY",
             "key_id": None,
+            # gateway 는 캐시 히트든 미스든 매 요청 raw 토큰에서 덮어쓴다 — 스냅샷의
+            # 이 값은 스키마 계약(회귀 테스트) 용 placeholder 다.
+            "key_prefix": None,
             "allowed_models": allowed_models,
             "allowed_clients": allowed_clients,
             "sso_subject": user.sso_subject,

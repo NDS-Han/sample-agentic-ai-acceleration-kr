@@ -34,6 +34,22 @@ def upgrade() -> None:
             "ADD COLUMN IF NOT EXISTS key_prefix VARCHAR(16)"
         )
     )
+    # 서비스 계정 한정 결정적 백필 — 이 계정들은 exchange/sts 경로가 막혀 있어
+    # 모든 사용이 VK 인증이고, 발급 시 구 키가 즉시 만료돼 한 유저의 키 수명
+    # 구간이 겹치지 않는다. 따라서 requested_at 이 어느 키의 수명 안에 있는지로
+    # 귀속이 유일하게 결정된다. 일반 유저는 JWT 행과 섞일 수 있어 대상에서
+    # 제외한다. NULL 만 채우는 idempotent UPDATE 다.
+    bind.execute(
+        text(
+            "UPDATE usage.usage_logs u SET key_prefix = vk.key_prefix "
+            "FROM auth.virtual_keys vk "
+            "WHERE u.user_id = vk.user_id AND u.key_prefix IS NULL "
+            "AND vk.kind = 'service' "
+            "AND vk.user_id IN (SELECT id FROM auth.users WHERE is_service_account) "
+            "AND u.requested_at >= vk.issued_at "
+            "AND u.requested_at < COALESCE(vk.revoked_at, vk.expires_at)"
+        )
+    )
 
 
 def downgrade() -> None:

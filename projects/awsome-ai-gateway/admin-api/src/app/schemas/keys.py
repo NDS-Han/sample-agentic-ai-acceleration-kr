@@ -128,6 +128,9 @@ class ServiceAccountUsageSummary(BaseModel):
     cost_usd: float = 0.0
     avg_latency_ms: float | None = None
     last_request_at: datetime | None = None
+    # key_prefix=NULL 행(배포 공백/구 행) — 어떤 키에도 귀속되지 않은 이 계정의 사용.
+    unattributed_requests: int = 0
+    unattributed_cost_usd: float = 0.0
 
 
 class ServiceAccountUsageByModel(BaseModel):

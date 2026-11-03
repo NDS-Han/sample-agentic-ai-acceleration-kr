@@ -153,11 +153,15 @@ async def list_service_accounts(
         # 활성 서비스 키를 계정 전체에 대해 1쿼리로 — 계정당 N+1 이 아니다.
         vks = (
             await session.execute(
-                select(VirtualKey).where(
+                select(VirtualKey)
+                .where(
                     VirtualKey.user_id.in_(uids),
                     VirtualKey.status == KeyStatus.ACTIVE,
                     VirtualKey.kind == VK_KIND_SERVICE,
                 )
+                # 발급순 정렬 → dict 덮어쓰기로 최신 키가 남는다(활성 2개 이상인
+                # 비정상 상태에서 결정적).
+                .order_by(VirtualKey.issued_at)
             )
         ).scalars().all()
         vk_by_user = {v.user_id: v for v in vks}
@@ -458,11 +462,13 @@ async def service_account_usage(
     ).scalars().all()
     prefixes = [v.key_prefix for v in vks if v.key_prefix]
 
+    # 계정 총계는 user_id+기간 스코프 — key_prefix=NULL(배포 공백/구 행)도
+    # 포함해 목록 API 의 month_* 와 정합하게 만든다. prefix 조건은 키별 분할
+    # (per_key)에만 적용하고, NULL 버킷은 unattributed 필드로 드러낸다.
     usage_conds = [
         UsageLog.user_id == user_id,
         UsageLog.requested_at >= start_utc,
         UsageLog.requested_at < end_utc,
-        UsageLog.key_prefix.in_(prefixes),
     ]
     success = UsageLog.status == "SUCCESS"
     token_sum = (
@@ -472,71 +478,69 @@ async def service_account_usage(
         + UsageLog.cache_read_tokens
     )
 
-    if prefixes:
-        summary_row = (
-            await session.execute(
-                select(
-                    func.count(),
-                    func.count().filter(UsageLog.status == "SUCCESS"),
-                    func.count().filter(UsageLog.status == "ERROR"),
-                    func.count().filter(UsageLog.status == "TIMEOUT"),
-                    func.sum(UsageLog.input_tokens).filter(success),
-                    func.sum(UsageLog.output_tokens).filter(success),
-                    func.sum(UsageLog.cache_creation_tokens).filter(success),
-                    func.sum(UsageLog.cache_read_tokens).filter(success),
-                    func.sum(UsageLog.reasoning_tokens).filter(success),
-                    func.sum(UsageLog.web_search_count).filter(success),
-                    func.sum(UsageLog.cost_usd).filter(success),
-                    func.avg(UsageLog.latency_ms).filter(success),
-                    func.max(UsageLog.requested_at),
-                ).where(*usage_conds)
-            )
-        ).one()
+    summary_row = (
+        await session.execute(
+            select(
+                func.count(),
+                func.count().filter(UsageLog.status == "SUCCESS"),
+                func.count().filter(UsageLog.status == "ERROR"),
+                func.count().filter(UsageLog.status == "TIMEOUT"),
+                func.sum(UsageLog.input_tokens).filter(success),
+                func.sum(UsageLog.output_tokens).filter(success),
+                func.sum(UsageLog.cache_creation_tokens).filter(success),
+                func.sum(UsageLog.cache_read_tokens).filter(success),
+                func.sum(UsageLog.reasoning_tokens).filter(success),
+                func.sum(UsageLog.web_search_count).filter(success),
+                func.sum(UsageLog.cost_usd).filter(success),
+                func.avg(UsageLog.latency_ms).filter(success),
+                func.max(UsageLog.requested_at),
+            ).where(*usage_conds)
+        )
+    ).one()
 
-        per_key_rows = (
-            await session.execute(
-                select(
-                    UsageLog.key_prefix,
-                    func.count().filter(success),
-                    func.sum(UsageLog.cost_usd).filter(success),
-                    func.max(UsageLog.requested_at),
-                )
-                .where(*usage_conds)
-                .group_by(UsageLog.key_prefix)
+    per_key_rows = (
+        await session.execute(
+            select(
+                UsageLog.key_prefix,
+                func.count(),
+                func.sum(UsageLog.cost_usd).filter(success),
+                func.max(UsageLog.requested_at),
             )
-        ).all()
-        per_key = {p: (c, float(cost or 0), last) for p, c, cost, last in per_key_rows}
+            .where(*usage_conds)
+            .group_by(UsageLog.key_prefix)
+        )
+    ).all()
+    per_key = {p: (c, float(cost or 0), last) for p, c, cost, last in per_key_rows if p}
+    unattributed = next(
+        ((c, float(cost or 0)) for p, c, cost, _ in per_key_rows if p is None),
+        (0, 0.0),
+    )
 
-        by_model_rows = (
-            await session.execute(
-                select(
-                    UsageLog.model_alias,
-                    func.count().filter(success),
-                    func.sum(token_sum).filter(success),
-                    func.sum(UsageLog.cost_usd).filter(success),
-                )
-                .where(*usage_conds)
-                .group_by(UsageLog.model_alias)
+    by_model_rows = (
+        await session.execute(
+            select(
+                UsageLog.model_alias,
+                func.count(),
+                func.sum(token_sum).filter(success),
+                func.sum(UsageLog.cost_usd).filter(success),
             )
-        ).all()
-        daily_rows = (
-            await session.execute(
-                select(
-                    _kst_day_expr().label("d"),
-                    func.count(),
-                    func.sum(token_sum).filter(success),
-                    func.sum(UsageLog.cost_usd).filter(success),
-                )
-                .where(*usage_conds)
-                .group_by("d")
-                .order_by("d")
+            .where(*usage_conds)
+            .group_by(UsageLog.model_alias)
+        )
+    ).all()
+    daily_rows = (
+        await session.execute(
+            select(
+                _kst_day_expr().label("d"),
+                func.count(),
+                func.sum(token_sum).filter(success),
+                func.sum(UsageLog.cost_usd).filter(success),
             )
-        ).all()
-    else:
-        summary_row = None
-        per_key = {}
-        by_model_rows = []
-        daily_rows = []
+            .where(*usage_conds)
+            .group_by("d")
+            .order_by("d")
+        )
+    ).all()
 
     (
         total_req,
@@ -552,7 +556,7 @@ async def service_account_usage(
         cost_sum,
         avg_lat,
         last_req,
-    ) = summary_row if summary_row else (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None)
+    ) = summary_row
 
     total_cost = float(cost_sum or 0)
     by_model = [
@@ -612,9 +616,13 @@ async def service_account_usage(
             cost_usd=total_cost,
             avg_latency_ms=float(avg_lat) if avg_lat is not None else None,
             last_request_at=last_req,
+            unattributed_requests=unattributed[0],
+            unattributed_cost_usd=unattributed[1],
         ),
         by_model=by_model,
         daily=daily,
     )
-    await _cache_set(request, cache_key, payload.model_dump(mode="json"), ttl=30)
+    # 과거 월은 데이터가 불변이므로 더 길게 캐시한다.
+    ttl = 30 if period == current_kst_period() else 600
+    await _cache_set(request, cache_key, payload.model_dump(mode="json"), ttl=ttl)
     return payload
