@@ -88,6 +88,46 @@ export async function issueServiceKeyAction(params: {
   }
 }
 
+// ─── listIssueTargetsAction ───────────────────────────────────────────────────
+// 발급 모달 드롭다운용 — 활성 비ADMIN 유저 전체. 미플래그 선택지는 발급 시
+// 서비스 계정으로 자동 전환된다(플래그 경로가 모달에 통합).
+
+export interface IssueTargetUser {
+  id: string;
+  email: string;
+  display_name: string;
+  role: string;
+  team_name: string | null;
+  is_service_account: boolean;
+}
+
+export async function listIssueTargetsAction(): Promise<
+  ActionResult<{ items: IssueTargetUser[] }>
+> {
+  try {
+    const data = await adminAPI.get<{
+      items: Array<{
+        id: string;
+        email: string;
+        display_name: string;
+        role: string;
+        team_name: string | null;
+        is_service_account?: boolean;
+      }>;
+    }>('/admin/users', { is_active: 'true', limit: 200 });
+    return {
+      success: true,
+      data: {
+        items: (data.items ?? [])
+          .filter((u) => u.role !== 'ADMIN')
+          .map((u) => ({ ...u, is_service_account: u.is_service_account ?? false })),
+      },
+    };
+  } catch (err) {
+    return { success: false, error: toErrorMessage(err) };
+  }
+}
+
 // ─── repairServiceAccountAction ───────────────────────────────────────────────
 
 export async function repairServiceAccountAction(

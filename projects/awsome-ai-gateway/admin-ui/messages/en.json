@@ -248,7 +248,10 @@
     "saConfirmMismatch": "Does not match \"confirm\"",
     "saCopied": "Copied",
     "saCopyToast": "VK copied to clipboard",
-    "saCopyFailed": "Copy failed — select the key text manually"
+    "saCopyFailed": "Copy failed — select the key text manually",
+    "saAlreadyFlagged": "service account",
+    "saWillFlag": "This account is not a service account yet. Issuing will convert it to a service account — login and short-lived key issuance will be blocked.",
+    "saMarkFailed": "Failed to convert to service account"
   },
   "budgets": {
     "title": "Budget Management",

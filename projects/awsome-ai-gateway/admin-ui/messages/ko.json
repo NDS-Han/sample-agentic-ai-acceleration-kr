@@ -248,7 +248,10 @@
     "saConfirmMismatch": "\"confirm\" 과 일치하지 않습니다",
     "saCopied": "복사됨",
     "saCopyToast": "VK를 클립보드에 복사했습니다",
-    "saCopyFailed": "복사 실패 — 키를 직접 선택해 복사하세요"
+    "saCopyFailed": "복사 실패 — 키를 직접 선택해 복사하세요",
+    "saAlreadyFlagged": "서비스 계정",
+    "saWillFlag": "이 계정은 아직 서비스 계정이 아닙니다. 발급하면 서비스 계정으로 전환되고, 로그인과 단기키 발급이 차단됩니다.",
+    "saMarkFailed": "서비스 계정 전환 실패"
   },
   "budgets": {
     "title": "예산 관리",

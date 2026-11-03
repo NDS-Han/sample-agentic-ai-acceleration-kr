@@ -12,8 +12,11 @@ import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDate } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
+  listIssueTargetsAction,
+  markServiceAccountAction,
   repairServiceAccountAction,
   unmarkServiceAccountAction,
+  type IssueTargetUser,
 } from '@/lib/actions/service-accounts';
 import { revokeKeyAction } from '@/lib/actions/keys';
 import type { ServiceAccountItem } from '@/types/entities';
@@ -38,12 +41,17 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const [ttlDays, setTtlDays] = useState<number>(maxTtlDays);
   const [issuedKey, setIssuedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [allUsers, setAllUsers] = useState<IssueTargetUser[]>([]);
 
   const issueAccount = accounts.find((a) => a.user_id === issueUserId) ?? null;
+  const selectedUser = allUsers.find((u) => u.id === issueUserId) ?? null;
+  // 플래그 여부는 accounts prop(백엔드 서비스 계정 목록)으로 판별 — /admin/users
+  // 응답엔 is_service_account 가 없다.
+  const isFlagged = !!issueAccount;
   const activeAccounts = accounts.filter((a) => a.is_active);
   const confirmOk = confirmText.trim().toLowerCase() === 'confirm';
   const canIssue =
-    !!issueAccount && ttlDays >= 1 && ttlDays <= maxTtlDays && confirmOk && busy === null;
+    !!selectedUser && ttlDays >= 1 && ttlDays <= maxTtlDays && confirmOk && busy === null;
 
   // 모달은 body 포털로 — glass 패널의 backdrop-filter 가 containing block 을
   // 만들어 fixed 가 뷰포트가 아니라 패널 기준으로 잡히는 문제(모달이 패널
@@ -65,6 +73,12 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
     setTtlDays(maxTtlDays);
     setIssuedKey(null);
     setIssueOpen(true);
+    // 모달을 여는 시점에 최신 목록을 가져온다 — 플래그되지 않은 유저도
+    // 발급 대상이 될 수 있어(선택 시 자동 전환) 전체 활성 유저를 긁는다.
+    listIssueTargetsAction().then((r) => {
+      if (r.success) setAllUsers(r.data.items);
+      else toast({ type: 'error', message: r.error ?? t('saIssueFailed'), auto_dismiss_ms: 5000 });
+    });
   };
 
   const closeIssueModal = () => {
@@ -89,9 +103,17 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
 
   const handleIssue = () =>
     run('issue', async () => {
-      if (!issueAccount) return;
+      if (!selectedUser) return;
+      // 미플래그 유저 선택 → 발급과 함께 서비스 계정으로 전환 (경고는 모달에 표시됨)
+      if (!isFlagged) {
+        const m = await markServiceAccountAction(selectedUser.email);
+        if (!m.success) {
+          toast({ type: 'error', message: m.error ?? t('saMarkFailed'), auto_dismiss_ms: 5000 });
+          return;
+        }
+      }
       const r = await issueServiceKeyAction({
-        userId: issueAccount.user_id,
+        userId: selectedUser.id,
         ttlDays: ttlDays || undefined,
       });
       if (r.success) {
@@ -270,14 +292,19 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                   className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
                 >
                   <option value="">{t('saSelectPlaceholder')}</option>
-                  {activeAccounts.map((a) => (
-                    <option key={a.user_id} value={a.user_id}>
-                      {a.email}
-                      {a.team_name ? ` (${a.team_name})` : ''}
+                  {allUsers.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.email}
+                      {u.team_name ? ` (${u.team_name})` : ''}
+                      {accounts.some((a) => a.user_id === u.id) ? ' — ' + t('saAlreadyFlagged') : ''}
                     </option>
                   ))}
                 </select>
               </label>
+
+              {selectedUser && !isFlagged && (
+                <p className="text-sm text-amber-500 mb-2">{t('saWillFlag')}</p>
+              )}
 
               {issueAccount && (
                 <>
