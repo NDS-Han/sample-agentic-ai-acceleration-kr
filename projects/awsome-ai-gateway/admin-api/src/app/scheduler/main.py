@@ -142,7 +142,11 @@ async def run_service_key_repair() -> None:
                         ),
                         cache_mgr=CacheInvalidationManager(redis),
                     )
-                    repaired = await svc.repair_service_key_redis(session)
+                    # 세션을 넘기지 않는다 — repair 는 키마다 commit 하는
+                    # 전용 세션을 열고, 이 세션은 advisory lock(커넥션 귀속)
+                    # 만 유지한다. lock 세션에서 commit 하면 커넥션이 풀에
+                    # 반납돼 락이 새고 unlock 이 다른 커넥션에서 무효 실행된다.
+                    repaired = await svc.repair_service_key_redis()
                     if repaired:
                         logger.info(
                             "scheduler.service_key_repaired", count=repaired

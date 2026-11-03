@@ -205,7 +205,7 @@
     "loadMore": "Load more",
     "loadMoreFailed": "Failed to load more keys.",
     "loading": "Loading…",
-    "noKeysCliLink": "See the CLI download page for how keys are issued →",
+    "noKeysCliLink": "See the integration page for how keys are issued →",
     "saTitle": "Service Accounts (long-lived app keys)",
     "saDescription": "Manage long-lived VKs for server-side apps. Accounts are created in Cognito; register, issue and repair here. 'Repair auth' re-registers a key's lost auth mapping — use when the app gets 401 while the key is still valid.",
     "saEmail": "Account",

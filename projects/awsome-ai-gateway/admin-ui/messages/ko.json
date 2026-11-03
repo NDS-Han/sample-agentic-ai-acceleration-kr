@@ -205,7 +205,7 @@
     "loadMore": "더 보기",
     "loadMoreFailed": "키를 더 불러오지 못했습니다.",
     "loading": "불러오는 중…",
-    "noKeysCliLink": "VK 발급 방법은 CLI 다운로드 페이지에서 확인 →",
+    "noKeysCliLink": "VK 발급 방법은 연동 페이지에서 확인 →",
     "saTitle": "서비스 계정 (앱용 장기 키)",
     "saDescription": "서버사이드 앱이 쓰는 장기 VK를 관리합니다. 계정 생성은 Cognito에서 하고, 여기서는 등록·발급·복구만 합니다. '인증 복구'는 캐시에서 유실된 키 매핑을 재등록합니다 — 키가 유효한데 앱이 401을 받을 때 사용하세요.",
     "saEmail": "계정",

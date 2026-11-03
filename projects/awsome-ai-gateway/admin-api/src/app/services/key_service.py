@@ -20,7 +20,12 @@ from app.core.cache_invalidation import (
     CacheInvalidationManager,
     invalidate_after_commit,
 )
-from app.core.db import PENDING_REDIS_KEY, drain_pending_redis, enqueue_redis_publish
+from app.core.db import (
+    PENDING_REDIS_KEY,
+    AsyncSessionLocal,
+    drain_pending_redis,
+    enqueue_redis_publish,
+)
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import KeyStatus, User, VirtualKey
@@ -241,10 +246,18 @@ class KeyService:
         # 세션과 운명을 공유한다는 분리를 스키마 수준에서 못박는다).
         # user 로드는 dedup 이후로 미룬다 — dedup 패스트패스는 DB 조회 없이
         # 끝나야 한다(10k boot storm 최적화와 동일한 이유).
+        # FOR UPDATE — mark_service_account 가 같은 users 행을 잡고 플래그를
+        # 바꾸므로 잠금이 없으면: 발급이 flag=False 를 읽고 통과하는 사이 표지가
+        # commit 돼 서비스 계정에 새 exchange 키가 살아남는다(키 폐기 수집도
+        # 그 INSERT 전 스냅샷이라 놓친다). 호출자가 넘긴 user 객체도
+        # refresh(with_for_update) 로 잠금 아래 플래그를 재검증한다 — 잠금
+        # 자체가 직렬화 지점이라 읽기 최적화로 생략할 수 없다.
         if user is None:
-            user = await UserRepository(session).get_user(user_id)
+            user = await UserRepository(session).get_user(user_id, for_update=True)
             if user is None:
                 raise NotFoundError("User", str(user_id))
+        else:
+            await session.refresh(user, with_for_update=True)
         if kind == VK_KIND_SERVICE:
             if not user.is_service_account:
                 raise ValidationError(
@@ -525,7 +538,6 @@ class KeyService:
 
     async def repair_service_key_redis(
         self,
-        session: AsyncSession,
         *,
         user_id: uuid.UUID | None = None,
     ) -> int:
@@ -538,6 +550,12 @@ class KeyService:
 
         ``user_id`` 지정 시 그 계정만 — 없으면 활성 서비스 계정 전체.
         반환값: 재기록한 엔트리 수. redis 가 없으면 0.
+
+        ⚠️ 세션은 내부에서 전용으로 연다 — 호출자 세션을 받지 않는다. 이 루프는
+        행 잠금을 짧게 유지하려고 키마다 commit 하는데, 호출자가 스케줄러의
+        ``pg_advisory_lock``(세션 레벨 = 커넥션 귀속)을 쥔 세션이면 commit 이
+        커넥션을 풀에 돌려보내 락이 새고, 해제는 다른 커넥션에서 실행돼 무효가
+        된다 — 이후 잡이 영구 skip 되는 유령 락이 남는다.
         """
         redis = self._cache_mgr._redis
         if redis is None:
@@ -545,75 +563,77 @@ class KeyService:
 
         from sqlalchemy import and_
 
-        now = datetime.now(timezone.utc)
-        stmt = (
-            select(VirtualKey, User.team_id)
-            .join(User, VirtualKey.user_id == User.id)
-            .where(
-                and_(
-                    VirtualKey.kind == VK_KIND_SERVICE,
-                    VirtualKey.status == KeyStatus.ACTIVE,
-                    VirtualKey.expires_at > now,
-                    User.is_active.is_(True),
+        async with AsyncSessionLocal() as session:
+            now = datetime.now(timezone.utc)
+            stmt = (
+                select(VirtualKey, User.team_id)
+                .join(User, VirtualKey.user_id == User.id)
+                .where(
+                    and_(
+                        VirtualKey.kind == VK_KIND_SERVICE,
+                        VirtualKey.status == KeyStatus.ACTIVE,
+                        VirtualKey.expires_at > now,
+                        User.is_active.is_(True),
+                    )
                 )
             )
-        )
-        if user_id is not None:
-            stmt = stmt.where(VirtualKey.user_id == user_id)
-        rows = (await session.execute(stmt)).all()
+            if user_id is not None:
+                stmt = stmt.where(VirtualKey.user_id == user_id)
+            rows = (await session.execute(stmt)).all()
 
-        repaired = 0
-        key_repo = KeyRepository(session)
-        for vk, team_id in rows:
-            # ⚠️ 상태 재확인 — SELECT 와 쓰기 사이에 revoke 가 끼면 폐기된 키를
-            #    Redis 에 되살려 최대 TTL 동안 유령 인증된다. FOR UPDATE 로
-            #    revoke 와 직렬화한다: revoke 가 먼저면 REVOKED 가 보여 건너뛰고,
-            #    내가 먼저면 revoke 의 commit 후 DEL 이 내 setex 를 지운다.
-            locked = await key_repo.get_by_id(vk.id, for_update=True)
-            if (
-                locked is None
-                or locked.status != KeyStatus.ACTIVE
-                or locked.expires_at <= now
-            ):
-                await session.commit()  # 잠금만 풀고 다음으로
-                continue
-            try:
-                raw_key = self._encryption.decrypt(locked.key_value_encrypted)
-            except Exception:
-                logger.warning(
-                    "service_key_repair.decrypt_failed", key_id=str(vk.id)
-                )
-                await session.commit()
-                continue
-            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-            try:
-                if await redis.exists(f"key:vk:{key_hash}"):
+            repaired = 0
+            key_repo = KeyRepository(session)
+            for vk, team_id in rows:
+                # ⚠️ 상태 재확인 — SELECT 와 쓰기 사이에 revoke 가 끼면 폐기된
+                #    키를 Redis 에 되살려 최대 TTL 동안 유령 인증된다. FOR UPDATE
+                #    로 revoke 와 직렬화한다: revoke 가 먼저면 REVOKED 가 보여
+                #    건너뛰고, 내가 먼저면 revoke 의 commit 후 DEL 이 내 setex 를
+                #    지운다.
+                locked = await key_repo.get_by_id(vk.id, for_update=True)
+                if (
+                    locked is None
+                    or locked.status != KeyStatus.ACTIVE
+                    or locked.expires_at <= now
+                ):
+                    await session.commit()  # 잠금만 풀고 다음으로
+                    continue
+                try:
+                    raw_key = self._encryption.decrypt(locked.key_value_encrypted)
+                except Exception:
+                    logger.warning(
+                        "service_key_repair.decrypt_failed", key_id=str(vk.id)
+                    )
                     await session.commit()
                     continue
-                remaining = max(
-                    1, int((vk.expires_at - now).total_seconds())
-                )
-                pipe = redis.pipeline(transaction=False)
-                pipe.setex(f"key:vk:{key_hash}", remaining, str(vk.user_id))
-                if team_id is not None:
-                    pipe.sadd(f"team:vk_hashes:{team_id}", key_hash)
-                await pipe.execute()
-            except Exception:
-                logger.warning(
-                    "service_key_repair.redis_failed",
+                key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                try:
+                    if await redis.exists(f"key:vk:{key_hash}"):
+                        await session.commit()
+                        continue
+                    remaining = max(
+                        1, int((locked.expires_at - now).total_seconds())
+                    )
+                    pipe = redis.pipeline(transaction=False)
+                    pipe.setex(f"key:vk:{key_hash}", remaining, str(vk.user_id))
+                    if team_id is not None:
+                        pipe.sadd(f"team:vk_hashes:{team_id}", key_hash)
+                    await pipe.execute()
+                except Exception:
+                    logger.warning(
+                        "service_key_repair.redis_failed",
+                        key_id=str(vk.id),
+                        exc_info=True,
+                    )
+                    await session.commit()  # 행 잠금 해제
+                    continue
+                await session.commit()  # 잠금 해제 — revoke DEL 이 진행 가능
+                repaired += 1
+                logger.info(
+                    "service_key_repair.rewritten",
                     key_id=str(vk.id),
-                    exc_info=True,
+                    user_id=str(vk.user_id),
                 )
-                await session.commit()  # 행 잠금 해제
-                continue
-            await session.commit()  # 잠금 해제 — revoke 의 DEL 이 이제 진행 가능
-            repaired += 1
-            logger.info(
-                "service_key_repair.rewritten",
-                key_id=str(vk.id),
-                user_id=str(vk.user_id),
-            )
-        return repaired
+            return repaired
 
     async def _publish_key_revoked(
         self,

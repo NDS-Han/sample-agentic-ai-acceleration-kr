@@ -111,16 +111,29 @@ class UserRepository:
 
     # ── User ──
 
-    async def get_user(self, user_id: uuid.UUID) -> User | None:
-        return await self._session.get(User, user_id)
+    async def get_user(
+        self, user_id: uuid.UUID, *, for_update: bool = False
+    ) -> User | None:
+        if not for_update:
+            return await self._session.get(User, user_id)
+        # populate_existing — identity map 에 올라온 stale 인스턴스를 재사용하면
+        # for_update 의 재조회가 우회돼 is_service_account 같은 플래그가 낡은
+        # 값으로 읽힌다(mark↔issue 직렬화 경로).
+        return await self._session.get(
+            User, user_id, with_for_update=True, populate_existing=True
+        )
 
     async def get_by_sso_subject(self, sso_subject: str) -> User | None:
         stmt = select(User).where(User.sso_subject == sso_subject)
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 
-    async def get_by_email(self, email: str) -> User | None:
+    async def get_by_email(
+        self, email: str, *, for_update: bool = False
+    ) -> User | None:
         stmt = select(User).where(User.email == email)
+        if for_update:
+            stmt = stmt.with_for_update()
         result = await self._session.execute(stmt)
         return result.scalar_one_or_none()
 

@@ -187,7 +187,12 @@ async def mark_service_account(
     계정 자체는 Cognito/IdP 에서 생성·동기화된다(조직 규약). 이 엔드포인트는
     그 계정에 '서비스 계정' 표지만 단다. ADMIN 과 비활성 계정은 거부.
     """
-    user = await UserRepository(session).get_by_email(body.email.strip())
+    # FOR UPDATE — issue_key 도 같은 행을 잡고 플래그를 확인하므로, 잠금으로
+    # 표지↔발급이 직렬화된다: 표지가 먼저면 발급은 flag=True 를 보고 거부되고,
+    # 발급이 먼저면 표지의 폐기 수집이 그 신규 키를 본다.
+    user = await UserRepository(session).get_by_email(
+        body.email.strip(), for_update=True
+    )
     if user is None:
         raise NotFoundError("User", body.email)
     if user.is_service_account:
@@ -216,14 +221,24 @@ async def mark_service_account(
     for old_vk in revocable:
         if old_vk.kind == VK_KIND_SERVICE:
             continue
-        await svc.revoke_key(
-            session,
-            key_id=old_vk.id,
-            actor=admin,
-            ip_address=request.client.host if request.client else "0.0.0.0",
-            request_id=getattr(request.state, "request_id", "")
-            or request.headers.get("x-request-id", ""),
-        )
+        try:
+            await svc.revoke_key(
+                session,
+                key_id=old_vk.id,
+                actor=admin,
+                ip_address=request.client.host if request.client else "0.0.0.0",
+                request_id=getattr(request.state, "request_id", "")
+                or request.headers.get("x-request-id", ""),
+                # EXPIRED 행은 수신자에게 의미 없는 폐기 메일이 나간다 —
+                # force_reauth 와 같은 규칙으로 ACTIVE 만 통지, 표지 일괄
+                # 폐기는 bulk 로 표시해 admin 수신자 fan-out 을 막는다.
+                bulk=True,
+                notify=old_vk.status == KeyStatus.ACTIVE,
+            )
+        except (NotFoundError, ValidationError):
+            # 조회 후 잠금 전에 다른 요청이 같은 키를 폐기/삭제한 경우 —
+            # 이미 목표 상태이므로 건너뛰고 표지는 진행한다.
+            continue
 
     await audit_logger.log(
         session,
@@ -252,7 +267,9 @@ async def unmark_service_account(
     session: AsyncSession = Depends(get_db_session),
 ):
     """서비스 계정 표지 해제 — 활성 service 키가 남아 있으면 거부한다."""
-    user = await UserRepository(session).get_user(user_id)
+    # FOR UPDATE — issue_key 의 같은 잠금과 직렬화해 "활성 service 키 확인
+    # 후 해제" 와 "service 키 발급" 의 경합을 막는다.
+    user = await UserRepository(session).get_user(user_id, for_update=True)
     if user is None:
         raise NotFoundError("User", str(user_id))
     if not user.is_service_account:
@@ -309,5 +326,7 @@ async def repair_service_account_keys(
     if user is None:
         raise NotFoundError("User", str(user_id))
     svc: KeyService = request.app.state.key_service
-    repaired = await svc.repair_service_key_redis(session, user_id=user_id)
+    # 세션을 넘기지 않는다 — repair 는 키별 commit 의 전용 세션을 연다
+    # (요청 세션의 트랜잭션 경계와 분리).
+    repaired = await svc.repair_service_key_redis(user_id=user_id)
     return {"repaired": repaired}
