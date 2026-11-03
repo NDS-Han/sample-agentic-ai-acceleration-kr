@@ -18,6 +18,7 @@ import { Badge } from '@/components/common/Badge';
 import { KPICard } from '@/components/common/KPICard';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
+import { TokenMixDonutClient } from '@/components/analytics/TokenMixDonutClient';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDate, fmtUsd } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
@@ -34,16 +35,6 @@ export function ServiceAccountDetail({ data, period }: Props) {
   const tz = useReportingTz();
   const s = data.summary;
   const [trendMetric, setTrendMetric] = useState<'cost_usd' | 'tokens'>('cost_usd');
-
-  // 토큰 구성 — §59: 청구 토큰은 input+output+cache 쓰기/읽기. reasoning 은
-  // output 에 포함된 가시성 메타라 별도 청구 항이 아니다(표기만 한다).
-  const tokenBuckets = [
-    { key: 'input', label: t('tokInput'), value: s.input_tokens, color: 'hsl(var(--chart-1))' },
-    { key: 'output', label: t('tokOutput'), value: s.output_tokens, color: 'hsl(var(--chart-2))' },
-    { key: 'cc', label: t('tokCacheWrite'), value: s.cache_creation_tokens, color: 'hsl(var(--chart-3))' },
-    { key: 'cr', label: t('tokCacheRead'), value: s.cache_read_tokens, color: 'hsl(var(--chart-4))' },
-  ];
-  const tokenTotal = tokenBuckets.reduce((a, b) => a + b.value, 0);
 
   // PeriodSelector 용 최근 12개월 목록(최신순).
   const periods = useMemo(
@@ -128,46 +119,21 @@ export function ServiceAccountDetail({ data, period }: Props) {
 
       {/* 토큰 분석 — 버킷 구성 비율 + 비청구 reasoning. */}
       <div className="glass rounded-apple p-4">
-        <div className="mb-3 flex items-baseline justify-between">
-          <h3 className="text-sm font-semibold">{t('tokTitle')}</h3>
-          <span className="text-xs text-muted-foreground">
-            {tokenTotal.toLocaleString()} {t('tokUnit')}
-          </span>
-        </div>
-        {tokenTotal > 0 ? (
-          <>
-            <div className="mb-3 flex h-3 w-full overflow-hidden rounded-full">
-              {tokenBuckets.map((b) =>
-                b.value > 0 ? (
-                  <div
-                    key={b.key}
-                    style={{
-                      width: `${(b.value / tokenTotal) * 100}%`,
-                      backgroundColor: b.color,
-                    }}
-                    title={`${b.label} ${b.value.toLocaleString()}`}
-                  />
-                ) : null,
-              )}
-            </div>
-            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
-              {tokenBuckets.map((b) => (
-                <span key={b.key} className="flex items-center gap-1.5">
-                  <span
-                    className="inline-block h-2.5 w-2.5 rounded-sm"
-                    style={{ backgroundColor: b.color }}
-                  />
-                  <span className="text-muted-foreground">{b.label}</span>
-                  <span className="font-medium">
-                    {b.value.toLocaleString()}
-                  </span>
-                  <span className="text-muted-foreground">
-                    ({((b.value / tokenTotal) * 100).toFixed(1)}%)
-                  </span>
-                </span>
-              ))}
-            </div>
-          </>
+        <h3 className="mb-3 text-sm font-semibold">{t('tokTitle')}</h3>
+        {s.input_tokens + s.output_tokens + s.cache_creation_tokens + s.cache_read_tokens > 0 ? (
+          <TokenMixDonutClient
+            data={{
+              input_tokens: s.input_tokens,
+              output_tokens: s.output_tokens,
+              cache_read_tokens: s.cache_read_tokens,
+              cache_write_tokens: s.cache_creation_tokens,
+              total_tokens:
+                s.input_tokens +
+                s.output_tokens +
+                s.cache_creation_tokens +
+                s.cache_read_tokens,
+            }}
+          />
         ) : (
           <p className="py-4 text-center text-sm text-muted-foreground">
             {t('noUsage')}
