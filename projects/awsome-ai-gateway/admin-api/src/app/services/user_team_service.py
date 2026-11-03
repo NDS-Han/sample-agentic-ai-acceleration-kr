@@ -733,14 +733,17 @@ class UserTeamService:
         )
 
         dept_nodes: list[OrgTreeNode] = []
-        for dept in org.departments:
+        for dept in sorted(org.departments, key=lambda d: (d.name or "").lower()):
             team_nodes: list[OrgTreeNode] = []
-            for team in dept.teams:
+            for team in sorted(dept.teams, key=lambda t: (t.name or "").lower()):
                 leader = next(
                     (m for m in team.members if team.leader_user_id and m.id == team.leader_user_id),
                     None,
                 )
-                active_members = [m for m in team.members if m.is_active]
+                active_members = sorted(
+                    (m for m in team.members if m.is_active),
+                    key=lambda m: (m.display_name or m.email or "").lower(),
+                )
                 if not active_members and not include_empty:
                     continue
                 member_nodes: list[OrgTreeNode] = []

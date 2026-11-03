@@ -77,7 +77,11 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
   const filteredItems = showInactive ? items : items.filter(i => i.is_active !== false);
 
   const { teamRows, usersByTeam, unassignedUsers } = useMemo(() => {
-    const teams = filteredItems.filter((i) => i.target_type === BudgetScope.TEAM);
+    const byName = (a: BudgetSummaryItem, b: BudgetSummaryItem) =>
+      a.target_name.localeCompare(b.target_name);
+    const teams = filteredItems
+      .filter((i) => i.target_type === BudgetScope.TEAM)
+      .sort(byName);
     const users = filteredItems.filter((i) => i.target_type === BudgetScope.USER);
     const grouped: Record<string, BudgetSummaryItem[]> = {};
     const orphans: BudgetSummaryItem[] = [];
@@ -88,6 +92,8 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
         orphans.push(u);
       }
     }
+    for (const list of Object.values(grouped)) list.sort(byName);
+    orphans.sort(byName);
     return { teamRows: teams, usersByTeam: grouped, unassignedUsers: orphans };
   }, [filteredItems]);
 
