@@ -36,12 +36,22 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const [pendingUser, setPendingUser] = useState<UserSearchItem | null>(null);
 
   const [busy, setBusy] = useState<string | null>(null);
-  const [issueTarget, setIssueTarget] = useState<ServiceAccountItem | null>(null);
   const [unmarkTarget, setUnmarkTarget] = useState<ServiceAccountItem | null>(null);
+
+  // ── 장기 키 발급 모달 ──
+  const [issueOpen, setIssueOpen] = useState(false);
+  const [issueUserId, setIssueUserId] = useState('');
+  const [confirmText, setConfirmText] = useState('');
   const [ttlDays, setTtlDays] = useState<number>(maxTtlDays);
   const [issuedKey, setIssuedKey] = useState<string | null>(null);
-  const [storedConfirm, setStoredConfirm] = useState(false);
+
   const searchRef = useRef<HTMLDivElement>(null);
+
+  const issueAccount = accounts.find((a) => a.user_id === issueUserId) ?? null;
+  const activeAccounts = accounts.filter((a) => a.is_active);
+  const confirmOk = confirmText.trim().toLowerCase() === 'confirm';
+  const canIssue =
+    !!issueAccount && ttlDays >= 1 && ttlDays <= maxTtlDays && confirmOk && busy === null;
 
   // 입력 debounce — 이미 서비스 계정인 유저는 후보에서 제외.
   useEffect(() => {
@@ -81,6 +91,21 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
     }
   };
 
+  const openIssueModal = () => {
+    setIssueUserId('');
+    setConfirmText('');
+    setTtlDays(maxTtlDays);
+    setIssuedKey(null);
+    setIssueOpen(true);
+  };
+
+  const closeIssueModal = () => {
+    setIssueOpen(false);
+    setIssuedKey(null);
+    setIssueUserId('');
+    setConfirmText('');
+  };
+
   const handleMark = () =>
     run('mark', async () => {
       if (!pendingUser) return;
@@ -96,17 +121,15 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
 
   const handleIssue = () =>
     run('issue', async () => {
-      if (!issueTarget) return;
+      if (!issueAccount) return;
       const r = await issueServiceKeyAction({
-        userId: issueTarget.user_id,
+        userId: issueAccount.user_id,
         ttlDays: ttlDays || undefined,
       });
       if (r.success) {
         setIssuedKey(r.data.virtual_key ?? null);
-        setStoredConfirm(false);
       } else {
         toast({ type: 'error', message: r.error ?? t('saIssueFailed'), auto_dismiss_ms: 5000 });
-        setIssueTarget(null);
       }
     });
 
@@ -141,8 +164,19 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
 
   return (
     <div className="glass rounded-apple p-4 mb-8">
-      <h2 className="text-lg font-semibold mb-1">{t('saTitle')}</h2>
-      <p className="text-xs text-muted-foreground mb-4">{t('saDescription')}</p>
+      <div className="flex items-start justify-between gap-4 mb-4">
+        <div>
+          <h2 className="text-lg font-semibold mb-1">{t('saTitle')}</h2>
+          <p className="text-xs text-muted-foreground">{t('saDescription')}</p>
+        </div>
+        <button
+          onClick={openIssueModal}
+          disabled={activeAccounts.length === 0 || busy !== null}
+          className="shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+        >
+          {t('saIssueButton')}
+        </button>
+      </div>
 
       {/* 사용자 검색 → 서비스 계정 등록 */}
       <div ref={searchRef} className="relative mb-4 max-w-md">
@@ -237,17 +271,6 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">
                     <button
-                      onClick={() => {
-                        setIssueTarget(a);
-                        setTtlDays(maxTtlDays);
-                        setIssuedKey(null);
-                      }}
-                      disabled={busy !== null || !a.is_active}
-                      className="rounded-md border border-primary/50 px-3 py-1.5 text-xs text-primary hover:bg-primary hover:text-primary-foreground disabled:opacity-40"
-                    >
-                      {a.active_key_prefix ? t('saReissue') : t('saIssue')}
-                    </button>
-                    <button
                       onClick={() =>
                         run(`repair-${a.user_id}`, async () => {
                           const r = await repairServiceAccountAction(a.user_id);
@@ -314,37 +337,58 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
         </div>
       )}
 
-      {/* Issue dialog */}
-      {issueTarget && !issuedKey && (
+      {/* ── 장기 키 발급 모달: 안내 → 계정 선택 → confirm 입력 → 발급 ── */}
+      {issueOpen && !issuedKey && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
-            <h3 className="text-lg font-semibold mb-2">
-              {t('saIssueTitle', { email: issueTarget.email })}
-            </h3>
-            {issueTarget.active_key_prefix && (
-              <p className="text-sm text-destructive mb-2">
-                {t('saReplaceWarning', { prefix: issueTarget.active_key_prefix })}
-              </p>
+            <h3 className="text-lg font-semibold mb-3">{t('saIssueTitle')}</h3>
+            <div className="text-sm text-muted-foreground space-y-1 mb-4">
+              <p>{t('saGuide1')}</p>
+              <p>{t('saGuide2')}</p>
+            </div>
+
+            <label className="block text-sm mb-4">
+              {t('saSelectLabel')}
+              <select
+                value={issueUserId}
+                onChange={(e) => setIssueUserId(e.target.value)}
+                className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+              >
+                <option value="">{t('saSelectPlaceholder')}</option>
+                {activeAccounts.map((a) => (
+                  <option key={a.user_id} value={a.user_id}>
+                    {a.email}
+                    {a.team_name ? ` (${a.team_name})` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {issueAccount && (
+              <>
+                {issueAccount.active_key_prefix && (
+                  <p className="text-sm text-destructive mb-2">
+                    {t('saReplaceWarning', { prefix: issueAccount.active_key_prefix })}
+                  </p>
+                )}
+                <ul className="text-sm space-y-1 mb-4">
+                  <li>
+                    {issueAccount.readiness.team_budget_ok ? '✓' : '✗'} {t('saReadyBudget')}
+                  </li>
+                  <li>
+                    {issueAccount.readiness.allowed_clients_clear ? '✓' : '✗'} {t('saReadyClients')}
+                  </li>
+                  <li>
+                    {issueAccount.readiness.usable_models > 0 ? '✓' : '✗'}{' '}
+                    {t('saReadyModels', { count: issueAccount.readiness.usable_models })}
+                  </li>
+                </ul>
+                {readinessBad(issueAccount) && (
+                  <p className="text-xs text-muted-foreground mb-3">{t('saReadyHint')}</p>
+                )}
+              </>
             )}
-            <ul className="text-sm space-y-1 mb-4">
-              <li>
-                {issueTarget.readiness.team_budget_ok ? '✓' : '✗'}{' '}
-                {t('saReadyBudget')}
-              </li>
-              <li>
-                {issueTarget.readiness.allowed_clients_clear ? '✓' : '✗'}{' '}
-                {t('saReadyClients')}
-              </li>
-              <li>
-                {issueTarget.readiness.usable_models > 0 ? '✓' : '✗'}{' '}
-                {t('saReadyModels', { count: issueTarget.readiness.usable_models })}
-              </li>
-            </ul>
-            {readinessBad(issueTarget) && (
-              <p className="text-xs text-muted-foreground mb-3">
-                {t('saReadyHint')}
-              </p>
-            )}
+
             <label className="block text-sm mb-4">
               {t('saTtlLabel', { max: maxTtlDays })}
               <input
@@ -356,31 +400,43 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                 className="mt-1 w-32 rounded-md border border-border bg-background px-3 py-2 text-sm"
               />
             </label>
+
+            <label className="block text-sm mb-4">
+              {t('saTypeConfirm')}
+              <input
+                type="text"
+                value={confirmText}
+                onChange={(e) => setConfirmText(e.target.value)}
+                placeholder="confirm"
+                autoComplete="off"
+                className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono"
+              />
+            </label>
+
             <div className="flex justify-end gap-2">
               <button
-                onClick={() => setIssueTarget(null)}
+                onClick={closeIssueModal}
                 className="rounded-md border border-border px-3 py-2 text-sm"
               >
                 {t('saCancel')}
               </button>
               <button
                 onClick={handleIssue}
-                disabled={busy === 'issue' || ttlDays < 1 || ttlDays > maxTtlDays}
+                disabled={!canIssue}
                 className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-40"
               >
-                {t('saIssueConfirm')}
+                {busy === 'issue' ? t('loading') : t('saIssueConfirm')}
               </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Show-once key dialog */}
-      {issuedKey && (
+      {/* 발급 완료 — VK 1회 표시 + 복사 + 재확인 불가 경고 */}
+      {issueOpen && issuedKey && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
           <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
             <h3 className="text-lg font-semibold mb-2">{t('saKeyIssued')}</h3>
-            <p className="text-xs text-muted-foreground mb-3">{t('saKeyOnce')}</p>
             <div className="flex items-center gap-2 mb-4">
               <code className="flex-1 break-all rounded border border-border bg-muted p-2 text-xs">
                 {issuedKey}
@@ -392,22 +448,11 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                 {t('saCopy')}
               </button>
             </div>
-            <label className="flex items-center gap-2 text-sm mb-4">
-              <input
-                type="checkbox"
-                checked={storedConfirm}
-                onChange={(e) => setStoredConfirm(e.target.checked)}
-              />
-              {t('saStoredConfirm')}
-            </label>
+            <p className="text-sm text-destructive mb-4">{t('saKeyOnce')}</p>
             <div className="flex justify-end">
               <button
-                onClick={() => {
-                  setIssuedKey(null);
-                  setIssueTarget(null);
-                }}
-                disabled={!storedConfirm}
-                className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-40"
+                onClick={closeIssueModal}
+                className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground"
               >
                 {t('saClose')}
               </button>
