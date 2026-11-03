@@ -58,8 +58,10 @@ function buildAppSamples(): { curl: string; python: string } {
   const python = [
     `from anthropic import Anthropic`,
     ``,
+    `# SDK 는 base_url 뒤에 /v1/messages 를 스스로 붙인다 — /v1 을 넣으면`,
+    `# /v1/v1/messages 가 돼서 401 이 난다. 호스트만 넣는다.`,
     `client = Anthropic(`,
-    `    base_url="${g}/v1",`,
+    `    base_url="${g}",`,
     `    api_key=os.environ["SERVICE_VK"],  # Secrets Manager 에 저장된 서비스 VK`,
     `)`,
     `resp = client.messages.create(`,
