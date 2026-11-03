@@ -1363,6 +1363,16 @@
     "noUsage": "이 기간에 사용 기록이 없습니다",
     "attributionNote": "과거 사용은 키 수명 구간으로 귀속됐습니다. 라이브 귀속은 {since}부터 기록됩니다.",
     "loading": "불러오는 중…",
-    "keyLastRequest": "기간 내 마지막 요청"
+    "keyLastRequest": "기간 내 마지막 요청",
+    "tokTitle": "토큰 분석",
+    "tokUnit": "토큰",
+    "tokInput": "입력",
+    "tokOutput": "출력",
+    "tokCacheWrite": "캐시 쓰기",
+    "tokCacheRead": "캐시 읽기",
+    "tokReasoning": "reasoning {n} (출력에 포함, 별도 청구 없음)",
+    "tokWebSearch": "웹검색 {n}회",
+    "trendCost": "비용",
+    "trendTokens": "토큰"
   }
 }

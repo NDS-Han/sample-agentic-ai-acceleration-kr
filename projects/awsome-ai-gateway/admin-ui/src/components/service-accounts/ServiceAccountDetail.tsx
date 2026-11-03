@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Activity, Coins, DollarSign, Timer } from 'lucide-react';
 import {
@@ -33,6 +33,17 @@ export function ServiceAccountDetail({ data, period }: Props) {
   const t = useTranslations('serviceAccounts');
   const tz = useReportingTz();
   const s = data.summary;
+  const [trendMetric, setTrendMetric] = useState<'cost_usd' | 'tokens'>('cost_usd');
+
+  // 토큰 구성 — §59: 청구 토큰은 input+output+cache 쓰기/읽기. reasoning 은
+  // output 에 포함된 가시성 메타라 별도 청구 항이 아니다(표기만 한다).
+  const tokenBuckets = [
+    { key: 'input', label: t('tokInput'), value: s.input_tokens, color: 'hsl(var(--chart-1))' },
+    { key: 'output', label: t('tokOutput'), value: s.output_tokens, color: 'hsl(var(--chart-2))' },
+    { key: 'cc', label: t('tokCacheWrite'), value: s.cache_creation_tokens, color: 'hsl(var(--chart-3))' },
+    { key: 'cr', label: t('tokCacheRead'), value: s.cache_read_tokens, color: 'hsl(var(--chart-4))' },
+  ];
+  const tokenTotal = tokenBuckets.reduce((a, b) => a + b.value, 0);
 
   // PeriodSelector 용 최근 12개월 목록(최신순).
   const periods = useMemo(
@@ -114,6 +125,64 @@ export function ServiceAccountDetail({ data, period }: Props) {
           })}
         </div>
       )}
+
+      {/* 토큰 분석 — 버킷 구성 비율 + 비청구 reasoning. */}
+      <div className="glass rounded-apple p-4">
+        <div className="mb-3 flex items-baseline justify-between">
+          <h3 className="text-sm font-semibold">{t('tokTitle')}</h3>
+          <span className="text-xs text-muted-foreground">
+            {tokenTotal.toLocaleString()} {t('tokUnit')}
+          </span>
+        </div>
+        {tokenTotal > 0 ? (
+          <>
+            <div className="mb-3 flex h-3 w-full overflow-hidden rounded-full">
+              {tokenBuckets.map((b) =>
+                b.value > 0 ? (
+                  <div
+                    key={b.key}
+                    style={{
+                      width: `${(b.value / tokenTotal) * 100}%`,
+                      backgroundColor: b.color,
+                    }}
+                    title={`${b.label} ${b.value.toLocaleString()}`}
+                  />
+                ) : null,
+              )}
+            </div>
+            <div className="flex flex-wrap gap-x-5 gap-y-1 text-xs">
+              {tokenBuckets.map((b) => (
+                <span key={b.key} className="flex items-center gap-1.5">
+                  <span
+                    className="inline-block h-2.5 w-2.5 rounded-sm"
+                    style={{ backgroundColor: b.color }}
+                  />
+                  <span className="text-muted-foreground">{b.label}</span>
+                  <span className="font-medium">
+                    {b.value.toLocaleString()}
+                  </span>
+                  <span className="text-muted-foreground">
+                    ({((b.value / tokenTotal) * 100).toFixed(1)}%)
+                  </span>
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            {t('noUsage')}
+          </p>
+        )}
+        {(s.reasoning_tokens > 0 || s.web_search_count > 0) && (
+          <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
+            {s.reasoning_tokens > 0 &&
+              t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
+            {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
+            {s.web_search_count > 0 &&
+              t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
+          </p>
+        )}
+      </div>
 
       {/* 발급된 키들 — 재발급 이력 포함. 원문은 절대 표시하지 않는다. */}
       <div className="glass rounded-apple p-4">
@@ -208,9 +277,22 @@ export function ServiceAccountDetail({ data, period }: Props) {
           </Table>
         </div>
 
-        {/* 일별 추이 */}
+        {/* 일별 추이 — 비용/토큰 토글 */}
         <div className="glass rounded-apple p-4">
-          <h3 className="mb-3 text-sm font-semibold">{t('dailyTitle')}</h3>
+          <div className="mb-3 flex items-center justify-between">
+            <h3 className="text-sm font-semibold">{t('dailyTitle')}</h3>
+            <div className="flex rounded-md border border-border text-xs">
+              {(['cost_usd', 'tokens'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => setTrendMetric(m)}
+                  className={`px-3 py-1 ${m === trendMetric ? 'bg-accent font-medium' : 'text-muted-foreground'}`}
+                >
+                  {t(m === 'cost_usd' ? 'trendCost' : 'trendTokens')}
+                </button>
+              ))}
+            </div>
+          </div>
           {data.daily.length > 0 ? (
             <ResponsiveContainer width="100%" height={260}>
               <AreaChart data={data.daily}>
@@ -224,7 +306,9 @@ export function ServiceAccountDetail({ data, period }: Props) {
                 <YAxis
                   tick={{ fontSize: 11 }}
                   stroke="hsl(var(--muted-foreground))"
-                  tickFormatter={(v: number) => fmtUsd(v)}
+                  tickFormatter={(v: number) =>
+                    trendMetric === 'cost_usd' ? fmtUsd(v) : v.toLocaleString()
+                  }
                 />
                 <Tooltip
                   contentStyle={{
@@ -235,13 +319,15 @@ export function ServiceAccountDetail({ data, period }: Props) {
                   }}
                   labelStyle={{ color: 'hsl(var(--muted-foreground))' }}
                   formatter={((value: number) => [
-                    fmtUsd(value),
-                    t('keyCost'),
+                    trendMetric === 'cost_usd'
+                      ? fmtUsd(value)
+                      : `${value.toLocaleString()} ${t('tokUnit')}`,
+                    t(trendMetric === 'cost_usd' ? 'keyCost' : 'trendTokens'),
                   ]) as never}
                 />
                 <Area
                   type="monotone"
-                  dataKey="cost_usd"
+                  dataKey={trendMetric}
                   stroke="hsl(var(--chart-1))"
                   fill="hsl(var(--chart-1))"
                   fillOpacity={0.25}

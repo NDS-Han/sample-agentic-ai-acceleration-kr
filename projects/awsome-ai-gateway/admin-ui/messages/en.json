@@ -1363,6 +1363,16 @@
     "noUsage": "No usage in this period",
     "attributionNote": "Historical usage was backfilled by key lifetime. Live attribution records from {since}.",
     "loading": "Loading…",
-    "keyLastRequest": "Last request (period)"
+    "keyLastRequest": "Last request (period)",
+    "tokTitle": "Token analysis",
+    "tokUnit": "tokens",
+    "tokInput": "Input",
+    "tokOutput": "Output",
+    "tokCacheWrite": "Cache write",
+    "tokCacheRead": "Cache read",
+    "tokReasoning": "{n} reasoning (included in output, not billed separately)",
+    "tokWebSearch": "{n} web searches",
+    "trendCost": "Cost",
+    "trendTokens": "Tokens"
   }
 }
