@@ -208,9 +208,6 @@
     "noKeysCliLink": "See the CLI download page for how keys are issued →",
     "saTitle": "Service Accounts (long-lived app keys)",
     "saDescription": "Manage long-lived VKs for server-side apps. Accounts are created in Cognito; register, issue and repair here. 'Repair auth' re-registers a key's lost auth mapping — use when the app gets 401 while the key is still valid.",
-    "saMark": "Register service account",
-    "saMarkSuccess": "Registered as a service account",
-    "saMarkFailed": "Failed to register",
     "saEmail": "Account",
     "saTeam": "Team",
     "saNoKey": "No key",
@@ -234,8 +231,6 @@
     "saCancel": "Cancel",
     "saCopy": "Copy",
     "saClose": "Close",
-    "saSearchPlaceholder": "Search a user to register (email/name, 2+ chars)",
-    "saMarkConfirmHint": "This account becomes a service account. Login and short-lived key issuance will be blocked.",
     "saRepairHint": "Re-registers the key's auth mapping lost from cache. Use when the app gets 401 while the key is still valid.",
     "saUnmarkTitle": "Remove service account flag",
     "saUnmarkMessage": "Remove the service account flag from {email}.",
@@ -249,7 +244,11 @@
     "saSelectLabel": "Account to issue",
     "saSelectPlaceholder": "Select a service account…",
     "saTypeConfirm": "Type \"confirm\" below to issue",
-    "saReplaceWarning": "The active key {prefix} on this account expires the moment you issue. Calls fail until the app picks up the new key."
+    "saReplaceWarning": "The active key {prefix} on this account expires the moment you issue. Calls fail until the app picks up the new key.",
+    "saConfirmMismatch": "Does not match \"confirm\"",
+    "saCopied": "Copied",
+    "saCopyToast": "VK copied to clipboard",
+    "saCopyFailed": "Copy failed — select the key text manually"
   },
   "budgets": {
     "title": "Budget Management",

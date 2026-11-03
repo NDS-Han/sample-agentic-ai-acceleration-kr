@@ -2,7 +2,8 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useEffect, useRef, useState } from 'react';
+import { useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslations } from 'next-intl';
 import { Badge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
@@ -11,13 +12,11 @@ import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDate } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
-  markServiceAccountAction,
   repairServiceAccountAction,
   unmarkServiceAccountAction,
 } from '@/lib/actions/service-accounts';
-import { searchUsersAction } from '@/lib/actions/users';
 import { revokeKeyAction } from '@/lib/actions/keys';
-import type { ServiceAccountItem, UserSearchItem } from '@/types/entities';
+import type { ServiceAccountItem } from '@/types/entities';
 
 interface Props {
   accounts: ServiceAccountItem[];
@@ -29,12 +28,6 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const tz = useReportingTz();
   const { toast } = useToast();
 
-  // ── 사용자 검색 → 서비스 계정 등록 ──
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<UserSearchItem[]>([]);
-  const [searching, setSearching] = useState(false);
-  const [pendingUser, setPendingUser] = useState<UserSearchItem | null>(null);
-
   const [busy, setBusy] = useState<string | null>(null);
   const [unmarkTarget, setUnmarkTarget] = useState<ServiceAccountItem | null>(null);
 
@@ -44,8 +37,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const [confirmText, setConfirmText] = useState('');
   const [ttlDays, setTtlDays] = useState<number>(maxTtlDays);
   const [issuedKey, setIssuedKey] = useState<string | null>(null);
-
-  const searchRef = useRef<HTMLDivElement>(null);
+  const [copied, setCopied] = useState(false);
 
   const issueAccount = accounts.find((a) => a.user_id === issueUserId) ?? null;
   const activeAccounts = accounts.filter((a) => a.is_active);
@@ -53,34 +45,10 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const canIssue =
     !!issueAccount && ttlDays >= 1 && ttlDays <= maxTtlDays && confirmOk && busy === null;
 
-  // 입력 debounce — 이미 서비스 계정인 유저는 후보에서 제외.
-  useEffect(() => {
-    if (query.trim().length < 2) {
-      setResults([]);
-      return;
-    }
-    const timer = setTimeout(async () => {
-      setSearching(true);
-      const r = await searchUsersAction(query);
-      if (r.success) {
-        const known = new Set(accounts.map((a) => a.user_id));
-        setResults(r.data.items.filter((u) => !known.has(u.id)));
-      }
-      setSearching(false);
-    }, 300);
-    return () => clearTimeout(timer);
-  }, [query, accounts]);
-
-  // 바깥 클릭 시 드롭다운 닫기
-  useEffect(() => {
-    const onClick = (e: MouseEvent) => {
-      if (searchRef.current && !searchRef.current.contains(e.target as Node)) {
-        setResults([]);
-      }
-    };
-    document.addEventListener('mousedown', onClick);
-    return () => document.removeEventListener('mousedown', onClick);
-  }, []);
+  // 모달은 body 포털로 — glass 패널의 backdrop-filter 가 containing block 을
+  // 만들어 fixed 가 뷰포트가 아니라 패널 기준으로 잡히는 문제(모달이 패널
+  // 안쪽에 갇혀 위치가 이상해짐)를 피한다.
+  const modalRoot = typeof document !== 'undefined' ? document.body : null;
 
   const run = async (id: string, fn: () => Promise<void>) => {
     setBusy(id);
@@ -104,20 +72,20 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
     setIssuedKey(null);
     setIssueUserId('');
     setConfirmText('');
+    setCopied(false);
   };
 
-  const handleMark = () =>
-    run('mark', async () => {
-      if (!pendingUser) return;
-      const r = await markServiceAccountAction(pendingUser.email);
-      if (r.success) {
-        setPendingUser(null);
-        setQuery('');
-        toast({ type: 'success', message: t('saMarkSuccess'), auto_dismiss_ms: 4000 });
-      } else {
-        toast({ type: 'error', message: r.error ?? t('saMarkFailed'), auto_dismiss_ms: 5000 });
-      }
-    });
+  const handleCopy = (key: string) => {
+    navigator.clipboard.writeText(key).then(
+      () => {
+        setCopied(true);
+        toast({ type: 'success', message: t('saCopyToast'), auto_dismiss_ms: 2500 });
+      },
+      () => {
+        toast({ type: 'error', message: t('saCopyFailed'), auto_dismiss_ms: 4000 });
+      },
+    );
+  };
 
   const handleIssue = () =>
     run('issue', async () => {
@@ -177,65 +145,6 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
           {t('saIssueButton')}
         </button>
       </div>
-
-      {/* 사용자 검색 → 서비스 계정 등록 */}
-      <div ref={searchRef} className="relative mb-4 max-w-md">
-        <input
-          type="search"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={t('saSearchPlaceholder')}
-          className="w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-        />
-        {searching && (
-          <p className="absolute mt-1 text-xs text-muted-foreground">{t('loading')}</p>
-        )}
-        {results.length > 0 && (
-          <ul className="absolute z-10 mt-1 w-full rounded-md border border-border bg-background shadow-lg">
-            {results.map((u) => (
-              <li key={u.id}>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPendingUser(u);
-                    setResults([]);
-                  }}
-                  className="flex w-full flex-col px-3 py-2 text-left hover:bg-accent"
-                >
-                  <span className="text-sm text-foreground">{u.email}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {u.display_name}
-                    {u.team_name ? ` · ${u.team_name}` : ''}
-                  </span>
-                </button>
-              </li>
-            ))}
-          </ul>
-        )}
-      </div>
-
-      {/* 선택된 사용자 → 등록 확인 */}
-      {pendingUser && (
-        <div className="mb-4 flex items-center gap-3 rounded-md border border-border bg-muted/40 px-3 py-2">
-          <div className="flex-1">
-            <p className="text-sm font-medium">{pendingUser.email}</p>
-            <p className="text-xs text-muted-foreground">{t('saMarkConfirmHint')}</p>
-          </div>
-          <button
-            onClick={handleMark}
-            disabled={busy === 'mark'}
-            className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground disabled:opacity-40"
-          >
-            {t('saMark')}
-          </button>
-          <button
-            onClick={() => setPendingUser(null)}
-            className="rounded-md border border-border px-3 py-1.5 text-xs"
-          >
-            {t('saCancel')}
-          </button>
-        </div>
-      )}
 
       {accounts.length > 0 && (
         <Table>
@@ -305,161 +214,176 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
       )}
 
       {/* 해제 확인 다이얼로그 — 활성 키 있으면 폐기 경고 포함 */}
-      {unmarkTarget && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
-            <h3 className="text-lg font-semibold mb-2">{t('saUnmarkTitle')}</h3>
-            <p className="text-sm mb-2">
-              {t('saUnmarkMessage', { email: unmarkTarget.email })}
-            </p>
-            {unmarkTarget.active_key_prefix && (
-              <p className="text-sm text-destructive mb-2">
-                {t('saUnmarkRevokesKey', { prefix: unmarkTarget.active_key_prefix })}
+      {modalRoot &&
+        unmarkTarget &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
+              <h3 className="text-lg font-semibold mb-2">{t('saUnmarkTitle')}</h3>
+              <p className="text-sm mb-2">
+                {t('saUnmarkMessage', { email: unmarkTarget.email })}
               </p>
-            )}
-            <p className="text-xs text-muted-foreground mb-4">{t('saUnmarkHint')}</p>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setUnmarkTarget(null)}
-                className="rounded-md border border-border px-3 py-2 text-sm"
-              >
-                {t('saCancel')}
-              </button>
-              <button
-                onClick={handleUnmark}
-                disabled={busy === 'unmark'}
-                className="rounded-md bg-destructive px-3 py-2 text-sm text-destructive-foreground disabled:opacity-40"
-              >
-                {t('saUnmarkConfirm')}
-              </button>
+              {unmarkTarget.active_key_prefix && (
+                <p className="text-sm text-destructive mb-2">
+                  {t('saUnmarkRevokesKey', { prefix: unmarkTarget.active_key_prefix })}
+                </p>
+              )}
+              <p className="text-xs text-muted-foreground mb-4">{t('saUnmarkHint')}</p>
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setUnmarkTarget(null)}
+                  className="rounded-md border border-border px-3 py-2 text-sm"
+                >
+                  {t('saCancel')}
+                </button>
+                <button
+                  onClick={handleUnmark}
+                  disabled={busy === 'unmark'}
+                  className="rounded-md bg-destructive px-3 py-2 text-sm text-destructive-foreground disabled:opacity-40"
+                >
+                  {t('saUnmarkConfirm')}
+                </button>
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          modalRoot,
+        )}
 
       {/* ── 장기 키 발급 모달: 안내 → 계정 선택 → confirm 입력 → 발급 ── */}
-      {issueOpen && !issuedKey && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
-            <h3 className="text-lg font-semibold mb-3">{t('saIssueTitle')}</h3>
-            <div className="text-sm text-muted-foreground space-y-1 mb-4">
-              <p>{t('saGuide1')}</p>
-              <p>{t('saGuide2')}</p>
+      {modalRoot &&
+        issueOpen &&
+        !issuedKey &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
+              <h3 className="text-lg font-semibold mb-3">{t('saIssueTitle')}</h3>
+              <div className="text-sm text-muted-foreground space-y-1 mb-4">
+                <p>{t('saGuide1')}</p>
+                <p>{t('saGuide2')}</p>
+              </div>
+
+              <label className="block text-sm mb-4">
+                {t('saSelectLabel')}
+                <select
+                  value={issueUserId}
+                  onChange={(e) => setIssueUserId(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
+                >
+                  <option value="">{t('saSelectPlaceholder')}</option>
+                  {activeAccounts.map((a) => (
+                    <option key={a.user_id} value={a.user_id}>
+                      {a.email}
+                      {a.team_name ? ` (${a.team_name})` : ''}
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              {issueAccount && (
+                <>
+                  {issueAccount.active_key_prefix && (
+                    <p className="text-sm text-destructive mb-2">
+                      {t('saReplaceWarning', { prefix: issueAccount.active_key_prefix })}
+                    </p>
+                  )}
+                  <ul className="text-sm space-y-1 mb-4">
+                    <li>
+                      {issueAccount.readiness.team_budget_ok ? '✓' : '✗'} {t('saReadyBudget')}
+                    </li>
+                    <li>
+                      {issueAccount.readiness.allowed_clients_clear ? '✓' : '✗'} {t('saReadyClients')}
+                    </li>
+                    <li>
+                      {issueAccount.readiness.usable_models > 0 ? '✓' : '✗'}{' '}
+                      {t('saReadyModels', { count: issueAccount.readiness.usable_models })}
+                    </li>
+                  </ul>
+                  {readinessBad(issueAccount) && (
+                    <p className="text-xs text-muted-foreground mb-3">{t('saReadyHint')}</p>
+                  )}
+                </>
+              )}
+
+              <label className="block text-sm mb-4">
+                {t('saTtlLabel', { max: maxTtlDays })}
+                <input
+                  type="number"
+                  min={1}
+                  max={maxTtlDays}
+                  value={ttlDays}
+                  onChange={(e) => setTtlDays(Number(e.target.value))}
+                  className="mt-1 w-32 rounded-md border border-border bg-background px-3 py-2 text-sm"
+                />
+              </label>
+
+              <label className="block text-sm mb-1">
+                {t('saTypeConfirm')}
+                <input
+                  type="text"
+                  value={confirmText}
+                  onChange={(e) => setConfirmText(e.target.value)}
+                  placeholder="confirm"
+                  autoComplete="off"
+                  className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono"
+                />
+              </label>
+              {confirmText.length > 0 && !confirmOk && (
+                <p className="text-xs text-destructive mb-3">{t('saConfirmMismatch')}</p>
+              )}
+              {confirmText.length === 0 && <div className="mb-3" />}
+
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={closeIssueModal}
+                  className="rounded-md border border-border px-3 py-2 text-sm"
+                >
+                  {t('saCancel')}
+                </button>
+                <button
+                  onClick={handleIssue}
+                  disabled={!canIssue}
+                  className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-40"
+                >
+                  {busy === 'issue' ? t('loading') : t('saIssueConfirm')}
+                </button>
+              </div>
             </div>
-
-            <label className="block text-sm mb-4">
-              {t('saSelectLabel')}
-              <select
-                value={issueUserId}
-                onChange={(e) => setIssueUserId(e.target.value)}
-                className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm"
-              >
-                <option value="">{t('saSelectPlaceholder')}</option>
-                {activeAccounts.map((a) => (
-                  <option key={a.user_id} value={a.user_id}>
-                    {a.email}
-                    {a.team_name ? ` (${a.team_name})` : ''}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {issueAccount && (
-              <>
-                {issueAccount.active_key_prefix && (
-                  <p className="text-sm text-destructive mb-2">
-                    {t('saReplaceWarning', { prefix: issueAccount.active_key_prefix })}
-                  </p>
-                )}
-                <ul className="text-sm space-y-1 mb-4">
-                  <li>
-                    {issueAccount.readiness.team_budget_ok ? '✓' : '✗'} {t('saReadyBudget')}
-                  </li>
-                  <li>
-                    {issueAccount.readiness.allowed_clients_clear ? '✓' : '✗'} {t('saReadyClients')}
-                  </li>
-                  <li>
-                    {issueAccount.readiness.usable_models > 0 ? '✓' : '✗'}{' '}
-                    {t('saReadyModels', { count: issueAccount.readiness.usable_models })}
-                  </li>
-                </ul>
-                {readinessBad(issueAccount) && (
-                  <p className="text-xs text-muted-foreground mb-3">{t('saReadyHint')}</p>
-                )}
-              </>
-            )}
-
-            <label className="block text-sm mb-4">
-              {t('saTtlLabel', { max: maxTtlDays })}
-              <input
-                type="number"
-                min={1}
-                max={maxTtlDays}
-                value={ttlDays}
-                onChange={(e) => setTtlDays(Number(e.target.value))}
-                className="mt-1 w-32 rounded-md border border-border bg-background px-3 py-2 text-sm"
-              />
-            </label>
-
-            <label className="block text-sm mb-4">
-              {t('saTypeConfirm')}
-              <input
-                type="text"
-                value={confirmText}
-                onChange={(e) => setConfirmText(e.target.value)}
-                placeholder="confirm"
-                autoComplete="off"
-                className="mt-1 w-full rounded-md border border-border bg-background px-3 py-2 text-sm font-mono"
-              />
-            </label>
-
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={closeIssueModal}
-                className="rounded-md border border-border px-3 py-2 text-sm"
-              >
-                {t('saCancel')}
-              </button>
-              <button
-                onClick={handleIssue}
-                disabled={!canIssue}
-                className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground disabled:opacity-40"
-              >
-                {busy === 'issue' ? t('loading') : t('saIssueConfirm')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          modalRoot,
+        )}
 
       {/* 발급 완료 — VK 1회 표시 + 복사 + 재확인 불가 경고 */}
-      {issueOpen && issuedKey && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-          <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
-            <h3 className="text-lg font-semibold mb-2">{t('saKeyIssued')}</h3>
-            <div className="flex items-center gap-2 mb-4">
-              <code className="flex-1 break-all rounded border border-border bg-muted p-2 text-xs">
-                {issuedKey}
-              </code>
-              <button
-                onClick={() => navigator.clipboard.writeText(issuedKey)}
-                className="rounded-md border border-border px-3 py-2 text-sm"
-              >
-                {t('saCopy')}
-              </button>
+      {modalRoot &&
+        issueOpen &&
+        issuedKey &&
+        createPortal(
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
+            <div className="glass rounded-apple max-w-lg w-full p-6 bg-background">
+              <h3 className="text-lg font-semibold mb-2">{t('saKeyIssued')}</h3>
+              <div className="flex items-center gap-2 mb-4">
+                <code className="flex-1 break-all rounded border border-border bg-muted p-2 text-xs">
+                  {issuedKey}
+                </code>
+                <button
+                  onClick={() => handleCopy(issuedKey)}
+                  className="min-w-16 rounded-md border border-border px-3 py-2 text-sm"
+                >
+                  {copied ? t('saCopied') : t('saCopy')}
+                </button>
+              </div>
+              <p className="text-sm text-destructive mb-4">{t('saKeyOnce')}</p>
+              <div className="flex justify-end">
+                <button
+                  onClick={closeIssueModal}
+                  className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground"
+                >
+                  {t('saClose')}
+                </button>
+              </div>
             </div>
-            <p className="text-sm text-destructive mb-4">{t('saKeyOnce')}</p>
-            <div className="flex justify-end">
-              <button
-                onClick={closeIssueModal}
-                className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground"
-              >
-                {t('saClose')}
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
+          </div>,
+          modalRoot,
+        )}
     </div>
   );
 }
