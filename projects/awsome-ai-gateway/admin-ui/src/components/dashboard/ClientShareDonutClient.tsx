@@ -86,10 +86,7 @@ export function ClientShareDonutClient({ data }: Props) {
               <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
                 {hoverIndex != null && centerItem
                   ? fmtUsd(centerItem.cost_usd)
-                  : t('topShare', { total: data.total_cost_usd.toLocaleString('en-US', {
-                      minimumFractionDigits: 2,
-                      maximumFractionDigits: 2,
-                    }) })}
+                  : t('topShare', { total: fmtUsd(data.total_cost_usd) })}
               </p>
             </div>
           );

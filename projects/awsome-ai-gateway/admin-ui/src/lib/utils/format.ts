@@ -9,6 +9,9 @@
  */
 export function fmtUsd(n: number, precision = 2): string {
   if (!Number.isFinite(n)) return '$0.00';
+  // $0.01 미만 비0 소액은 6자리로 올린다 — 마이크로달러 단가 체계에서
+  // $0.000011 같은 실사용이 '$0.00'으로 표시되면 사용 자체가 없어 보인다.
+  if (precision <= 2 && n !== 0 && Math.abs(n) < 0.01) precision = 6;
   return `$${n.toLocaleString('en-US', {
     minimumFractionDigits: precision,
     maximumFractionDigits: precision,

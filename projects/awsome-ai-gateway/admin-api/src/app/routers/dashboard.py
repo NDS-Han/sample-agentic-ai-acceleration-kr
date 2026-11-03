@@ -248,7 +248,8 @@ async def client_share(
         share = (cost / total * 100) if total > 0 else 0.0
         clients.append({
             "client": r.client,
-            "cost_usd": round(cost, 4),
+            # 6자리 — 소액 호출이 4자리 반올림에서 0 으로 사라진다(model-share 와 동일).
+            "cost_usd": round(cost, 6),
             "share_pct": round(share, 2),
             "call_count": int(r.call_count or 0),
             "web_search_count": int(r.web_search_count or 0),
@@ -256,7 +257,7 @@ async def client_share(
 
     return {
         "period": period,
-        "total_cost_usd": round(total, 4),
+        "total_cost_usd": round(total, 6),
         "clients": clients,
     }
 
