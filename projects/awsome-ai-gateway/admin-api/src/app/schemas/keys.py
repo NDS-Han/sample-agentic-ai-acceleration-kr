@@ -76,6 +76,7 @@ class ServiceAccountItem(BaseModel):
     readiness: ServiceAccountReadiness
     active_key_id: str | None = None
     active_key_prefix: str | None = None
+    active_key_issued_at: datetime | None = None
     active_key_expires_at: datetime | None = None
     last_request_at: datetime | None = None
     # 활성 키(prefix 귀속)의 마지막 사용 — 유저 단위 last_request_at 과 달리

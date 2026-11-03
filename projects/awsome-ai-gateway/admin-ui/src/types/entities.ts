@@ -56,6 +56,7 @@ export interface ServiceAccountItem {
   readiness: ServiceAccountReadiness;
   active_key_id: string | null;
   active_key_prefix: string | null;
+  active_key_issued_at: string | null;
   active_key_expires_at: string | null;
   last_request_at: string | null;
   active_key_last_request_at: string | null;

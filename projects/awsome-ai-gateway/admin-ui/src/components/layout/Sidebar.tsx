@@ -85,7 +85,7 @@ const NAV_ITEMS: NavItemDef[] = [
   },
   {
     key: 'serviceAccounts',
-    href: '/service-accounts',
+    href: '/agents',
     icon: <Bot size={18} />,
     allowedRoles: [UserRoleConst.ADMIN],
   },

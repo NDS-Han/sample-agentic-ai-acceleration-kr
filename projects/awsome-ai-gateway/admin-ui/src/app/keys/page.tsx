@@ -47,7 +47,7 @@ export default async function KeysPage(props: KeysPageProps) {
       <div className="glass rounded-apple mb-6 flex items-center justify-between px-4 py-3">
         <p className="text-sm text-muted-foreground">{t('saMovedBanner')}</p>
         <Link
-          href="/service-accounts"
+          href="/agents"
           className="shrink-0 rounded-md border border-border px-3 py-1.5 text-xs hover:bg-accent"
         >
           {t('saMovedLink')}

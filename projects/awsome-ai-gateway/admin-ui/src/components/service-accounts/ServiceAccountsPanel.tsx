@@ -176,6 +176,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
               <Th>{t('saEmail')}</Th>
               <Th>{t('saTeam')}</Th>
               <Th>{t('saKey')}</Th>
+              <Th>{t('keyIssuedAt')}</Th>
               <Th>{t('expiresAt')}</Th>
               <Th>{t('saLastUsed')}</Th>
               <Th numeric>{t('saMonthRequests')}</Th>
@@ -189,16 +190,12 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
               <Tr key={a.user_id}>
                 <Td className="text-foreground">
                   <Link
-                    href={`/service-accounts/${a.user_id}`}
+                    href={`/agents/${a.user_id}`}
                     className="hover:text-primary hover:underline"
+                    title={a.display_name !== a.email ? a.email : undefined}
                   >
-                    {a.email}
+                    {a.display_name || a.email}
                   </Link>
-                  {a.display_name && (
-                    <span className="ml-1.5 text-xs text-muted-foreground">
-                      {a.display_name}
-                    </span>
-                  )}
                 </Td>
                 <Td className="text-muted-foreground">{a.team_name ?? '—'}</Td>
                 <Td>
@@ -208,6 +205,9 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                     <Badge tone="neutral">{t('saNoKey')}</Badge>
                   )}
                   {!a.is_active && <Badge tone="pink">{t('saInactive')}</Badge>}
+                </Td>
+                <Td className="text-muted-foreground">
+                  {a.active_key_issued_at ? fmtDate(a.active_key_issued_at, tz) : '—'}
                 </Td>
                 <Td className="text-muted-foreground">
                   {a.active_key_expires_at ? fmtDate(a.active_key_expires_at, tz) : '—'}

@@ -22,8 +22,9 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
   // Virtual key management — admin only
   '/keys': [UserRole.ADMIN],
 
-  // 서비스 계정(앱용 장기키) 관리 — 라우터 전부 require_admin.
-  '/service-accounts': [UserRole.ADMIN],
+  // 에이전트(앱용 장기키) 관리 — 라우터 전부 require_admin.
+  '/agents': [UserRole.ADMIN],
+  '/service-accounts': [UserRole.ADMIN], // 구 URL — /agents 로 redirect
 
   // Budget overview — admin + team leader
   '/budgets': [UserRole.ADMIN, UserRole.TEAM_LEADER],

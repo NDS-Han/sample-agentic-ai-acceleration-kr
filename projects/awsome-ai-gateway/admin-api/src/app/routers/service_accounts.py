@@ -223,6 +223,7 @@ async def list_service_accounts(
                 readiness=readiness,
                 active_key_id=str(vk.id) if vk else None,
                 active_key_prefix=vk.key_prefix if vk else None,
+                active_key_issued_at=vk.issued_at if vk else None,
                 active_key_expires_at=vk.expires_at if vk else None,
                 last_request_at=agg.get("last"),
                 active_key_last_request_at=(
