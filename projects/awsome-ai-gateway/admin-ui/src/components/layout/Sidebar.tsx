@@ -116,14 +116,16 @@ const NAV_ITEMS: NavItemDef[] = [
     icon: <UserCircle size={18} />,
     allowedRoles: [UserRoleConst.TEAM_LEADER, UserRoleConst.DEVELOPER],
   },
-  {
-    // 외부 앱 연동 샘플 + CLI 다운로드 — 사이드바 최하단
-    key: 'integration',
-    href: '/integration',
-    icon: <Blocks size={18} />,
-    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
-  },
 ];
+
+// 외부 앱 연동 샘플 + CLI 다운로드 — 스크롤 목록이 아니라 테마 토글 바로 위의
+// 사이드바 하단에 고정한다.
+const BOTTOM_NAV_ITEM: NavItemDef = {
+  key: 'integration',
+  href: '/integration',
+  icon: <Blocks size={18} />,
+  allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
+};
 
 export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
   const pathname = usePathname();
@@ -178,8 +180,25 @@ export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
         </ul>
       </nav>
 
-      {/* Footer */}
+      {/* Footer — integration 은 스크롤 목록이 아니라 테마 토글 위에 고정 */}
       <div className="flex flex-col gap-3 border-t border-sidebar-border px-4 py-3">
+        {role && BOTTOM_NAV_ITEM.allowedRoles.includes(role) && (
+          <Link
+            href={BOTTOM_NAV_ITEM.href}
+            className={[
+              'relative flex items-center gap-3 rounded-apple-sm px-3 py-2 text-sm font-medium pressable transition-[background,color,box-shadow] duration-150',
+              isActive(BOTTOM_NAV_ITEM.href)
+                ? 'bg-primary/10 text-primary font-semibold shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)] before:absolute before:left-0 before:top-[22%] before:bottom-[22%] before:w-[3px] before:rounded-full before:bg-primary before:content-[""] dark:before:shadow-[0_0_10px_hsl(var(--primary))]'
+                : 'text-sidebar-foreground hover:bg-primary/[0.06] hover:text-primary dark:hover:bg-white/[0.05] dark:hover:text-foreground',
+            ].join(' ')}
+            aria-current={isActive(BOTTOM_NAV_ITEM.href) ? 'page' : undefined}
+          >
+            <span className="flex-shrink-0" aria-hidden="true">
+              {BOTTOM_NAV_ITEM.icon}
+            </span>
+            {t(BOTTOM_NAV_ITEM.key)}
+          </Link>
+        )}
         <ThemeToggle />
         <p className="px-2 text-xs text-muted-foreground">AWSome AI Gateway Admin</p>
       </div>
