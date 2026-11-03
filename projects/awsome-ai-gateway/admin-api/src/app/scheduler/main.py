@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -63,6 +64,28 @@ async def _release_job_lock(session: AsyncSession, job_name: str) -> None:
         logger.warning("scheduler.job_lock_unlock_failed", job=job_name)
 
 
+@asynccontextmanager
+async def _job_locked(job_name: str):
+    """잡 락 + 작업 세션 분리 컨텍스트.
+
+    ``pg_advisory_lock`` 은 세션 레벨 = **커넥션 귀속**이다. 잡이 락을 잡은
+    세션에서 commit 하면 커넥션이 풀에 반납돼 락이 새고, 이후 unlock 은 다른
+    커넥션에서 실행돼 조용히(``false``) 실패한다 — 락을 든 커넥션이 풀에 남아
+    이후 모든 실행이 skip 되는 유령 락이 된다.
+
+    그래서 락 세션은 락/해제만 담당해 커넥션을 계속 점유하게 하고, 실제 DB
+    작업은 호출자가 여는 **별도 세션**에서 돌린다.
+    """
+    async with AsyncSessionLocal() as lock_session:
+        if not await _try_job_lock(lock_session, job_name):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            await _release_job_lock(lock_session, job_name)
+
+
 def _prev_period(period: str) -> str:
     """'YYYY-MM' 의 직전 달을 반환한다."""
     year, month = map(int, period.split("-"))
@@ -88,28 +111,24 @@ async def run_aggregation() -> None:
         periods.append(_prev_period(period))
     logger.info("scheduler.trigger", period=period, periods=periods)
 
-    async with AsyncSessionLocal() as session:
+    async with _job_locked("roi_aggregation") as acquired:
+        if not acquired:
+            return
         try:
-            if not await _try_job_lock(session, "roi_aggregation"):
-                return
-            try:
+            async with AsyncSessionLocal() as session:
                 for p in periods:
                     await aggregate_usage(session, p)
-            finally:
-                await _release_job_lock(session, "roi_aggregation")
         except Exception:
             logger.exception("scheduler.aggregation_failed", period=period)
 
 
 async def run_key_expiry() -> None:
-    async with AsyncSessionLocal() as session:
+    async with _job_locked("key_expiry") as acquired:
+        if not acquired:
+            return
         try:
-            if not await _try_job_lock(session, "key_expiry"):
-                return
-            try:
+            async with AsyncSessionLocal() as session:
                 await expire_virtual_keys(session)
-            finally:
-                await _release_job_lock(session, "key_expiry")
         except Exception:
             logger.exception("scheduler.key_expiry_failed")
 
@@ -124,55 +143,47 @@ async def run_service_key_repair() -> None:
     settings = get_settings()
     if not settings.SERVICE_KEY_REPAIR_ENABLED:
         return
-    async with AsyncSessionLocal() as session:
+    async with _job_locked("service_key_repair") as acquired:
+        if not acquired:
+            return
         try:
-            if not await _try_job_lock(session, "service_key_repair"):
-                return
-            try:
-                from app.core.cache_invalidation import CacheInvalidationManager
-                from app.core.encryption import AESEncryptionService
-                from app.core.redis_client import create_redis_client
-                from app.services.key_service import KeyService
+            from app.core.cache_invalidation import CacheInvalidationManager
+            from app.core.encryption import AESEncryptionService
+            from app.core.redis_client import create_redis_client
+            from app.services.key_service import KeyService
 
-                redis = await create_redis_client()
-                try:
-                    svc = KeyService(
-                        encryption=AESEncryptionService(
-                            settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value()
-                        ),
-                        cache_mgr=CacheInvalidationManager(redis),
+            redis = await create_redis_client()
+            try:
+                svc = KeyService(
+                    encryption=AESEncryptionService(
+                        settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value()
+                    ),
+                    cache_mgr=CacheInvalidationManager(redis),
+                )
+                # repair 는 키마다 commit 하는 전용 세션을 내부에서 연다.
+                repaired = await svc.repair_service_key_redis()
+                if repaired:
+                    logger.info(
+                        "scheduler.service_key_repaired", count=repaired
                     )
-                    # 세션을 넘기지 않는다 — repair 는 키마다 commit 하는
-                    # 전용 세션을 열고, 이 세션은 advisory lock(커넥션 귀속)
-                    # 만 유지한다. lock 세션에서 commit 하면 커넥션이 풀에
-                    # 반납돼 락이 새고 unlock 이 다른 커넥션에서 무효 실행된다.
-                    repaired = await svc.repair_service_key_redis()
-                    if repaired:
-                        logger.info(
-                            "scheduler.service_key_repaired", count=repaired
-                        )
-                finally:
-                    try:
-                        await redis.aclose()
-                    except Exception:
-                        pass
             finally:
-                await _release_job_lock(session, "service_key_repair")
+                try:
+                    await redis.aclose()
+                except Exception:
+                    pass
         except Exception:
             logger.exception("scheduler.service_key_repair_failed")
 
 
 async def run_key_purge() -> None:
-    async with AsyncSessionLocal() as session:
+    async with _job_locked("key_purge") as acquired:
+        if not acquired:
+            return
         try:
-            if not await _try_job_lock(session, "key_purge"):
-                return
-            try:
+            async with AsyncSessionLocal() as session:
                 await purge_expired_keys(
                     session, get_settings().KEY_PURGE_RETENTION_DAYS
                 )
-            finally:
-                await _release_job_lock(session, "key_purge")
         except Exception:
             logger.exception("scheduler.key_purge_failed")
 

@@ -23,6 +23,11 @@ async def create_redis_client() -> aioredis.Redis | RedisCluster:
         "decode_responses": True,
         "encoding": "utf-8",
         "max_connections": settings.REDIS_POOL_SIZE,
+        # Redis 무응답 시 요청/잡이 무한 대기하지 않게 상한을 둔다 — repair 는
+        # 행 FOR UPDATE 를 잡은 채 Redis I/O 를 하므로 무한 대기는 같은 키의
+        # revoke 까지 멈추게 한다.
+        "socket_timeout": 5.0,
+        "socket_connect_timeout": 3.0,
     }
 
     if settings.REDIS_CLUSTER_MODE is True:
