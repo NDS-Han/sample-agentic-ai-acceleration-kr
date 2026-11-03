@@ -5,6 +5,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslations } from 'next-intl';
 import { X } from 'lucide-react';
+import { cn } from '@/lib/utils/cn';
 
 interface AppDialogProps {
   isOpen: boolean;
@@ -41,11 +42,15 @@ export function AppDialog({
       <Dialog.Portal>
         <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 backdrop-blur-sm data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
         <Dialog.Content
-          className={[
+          // cn(tailwind-merge): 기본 max-w-* 와 contentClassName 의 max-w-* 가
+          // 충돌하면 뒤쪽이 살아남는다 — join(' ') 은 둘 다 남겨 CSS 소스 순서가
+          // 이기는 바람에(생성 CSS 에서 .max-w-md 가 .max-w-4xl 뒤에 위치)
+          // contentClassName 이 실제로는 적용되지 않았다.
+          className={cn(
             'fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-full rounded-lg bg-background border border-border shadow-xl p-6 focus:outline-none max-h-[90vh] overflow-y-auto data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95',
             wide ? 'max-w-3xl' : 'max-w-md',
-            contentClassName ?? '',
-          ].join(' ')}
+            contentClassName,
+          )}
         >
           <Dialog.Close
             className="absolute right-4 top-4 rounded-sm opacity-70 hover:opacity-100 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring transition-opacity"
