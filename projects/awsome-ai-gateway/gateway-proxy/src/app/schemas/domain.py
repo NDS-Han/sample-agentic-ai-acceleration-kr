@@ -89,6 +89,9 @@ class AuthContext(BaseModel):
     roles: list[Role]
     auth_type: AuthType
     key_id: str | None = None
+    # 인증에 쓰인 VK 의 prefix (raw[:11]) — usage_logs.key_prefix 귀속용.
+    # 원문/해시는 절대 AuthContext 에 올리지 않는다. JWT 경로는 None.
+    key_prefix: str | None = None
     allowed_models: list[str] | None = None  # None = 전체 허용
     allowed_clients: list[str] | None = None  # None/[] = both allowed; subset = whitelist
     sso_subject: str | None = None  # OIDC sub claim or stable user identifier

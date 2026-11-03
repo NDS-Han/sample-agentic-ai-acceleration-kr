@@ -78,6 +78,13 @@ class ServiceAccountItem(BaseModel):
     active_key_prefix: str | None = None
     active_key_expires_at: datetime | None = None
     last_request_at: datetime | None = None
+    # 활성 키(prefix 귀속)의 마지막 사용 — 유저 단위 last_request_at 과 달리
+    # 재발급된 새 키 기준으로만 잡힌다(구 attribution 이전 행은 NULL 이라 미포함).
+    active_key_last_request_at: datetime | None = None
+    # 현재 리포팅 월 집계 (§59: 비용·토큰은 SUCCESS 행만)
+    month_requests: int = 0
+    month_tokens: int = 0
+    month_cost_usd: float = 0.0
 
 
 class ServiceAccountListResponse(BaseModel):
@@ -87,3 +94,67 @@ class ServiceAccountListResponse(BaseModel):
 
 class ServiceAccountCreateRequest(BaseModel):
     email: str = Field(..., min_length=1, max_length=320)
+
+
+# ── 서비스 계정 키 단위 사용량 (migration 0051 key_prefix 귀속) ──
+
+
+class ServiceAccountKeyUsageItem(BaseModel):
+    """해당 계정에 발급된 키 한 개의 수명주기 + 귀속 사용량."""
+
+    key_id: str
+    key_prefix: str
+    status: KeyStatus
+    issued_at: datetime
+    expires_at: datetime
+    revoked_at: datetime | None = None
+    last_used_at: datetime | None = None
+    requests: int = 0
+    cost_usd: float = 0.0
+    last_request_at: datetime | None = None
+
+
+class ServiceAccountUsageSummary(BaseModel):
+    requests: int = 0
+    success: int = 0
+    error: int = 0
+    timeout: int = 0
+    input_tokens: int = 0
+    output_tokens: int = 0
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
+    reasoning_tokens: int = 0
+    web_search_count: int = 0
+    cost_usd: float = 0.0
+    avg_latency_ms: float | None = None
+    last_request_at: datetime | None = None
+
+
+class ServiceAccountUsageByModel(BaseModel):
+    model_alias: str
+    requests: int
+    tokens: int
+    cost_usd: float
+    cost_share: float
+
+
+class ServiceAccountUsageDaily(BaseModel):
+    date: str  # 리포팅 타임존 기준 YYYY-MM-DD
+    requests: int
+    tokens: int
+    cost_usd: float
+
+
+class ServiceAccountUsageResponse(BaseModel):
+    user_id: str
+    email: str
+    display_name: str
+    team_id: str | None = None
+    team_name: str | None = None
+    period: str  # YYYY-MM (리포팅 타임존)
+    # 키 단위 귀속이 시작된 시점 — 이보다 이전 행은 key_prefix=NULL 이라 제외된다.
+    attribution_since: datetime
+    keys: list[ServiceAccountKeyUsageItem]
+    summary: ServiceAccountUsageSummary
+    by_model: list[ServiceAccountUsageByModel]
+    daily: list[ServiceAccountUsageDaily]

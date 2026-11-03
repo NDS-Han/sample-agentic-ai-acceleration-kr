@@ -416,7 +416,9 @@ CREATE TABLE IF NOT EXISTS usage.usage_logs (
     downgraded_from        VARCHAR(128),
     availability_fallback_from VARCHAR(128),
     sso_subject            VARCHAR(512),
-    bedrock_request_id     VARCHAR(128)
+    bedrock_request_id     VARCHAR(128),
+    -- 요청을 인증한 VK 의 prefix (raw[:11]) — 키 단위 사용량 귀속 (migration 0051)
+    key_prefix             VARCHAR(16)
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_time   ON usage.usage_logs (user_id, requested_at DESC);

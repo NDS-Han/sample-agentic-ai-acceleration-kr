@@ -68,6 +68,9 @@ class CostStreamEntry(BaseModel):
     # budget_usages 집계를 건너뛴다 — team_id 가 default 센티널이라 팀 없는
     # 지출이 그 팀 한도를 잠식하는 것을 막는다.
     teamless: bool = False
+    # VK 단위 귀속 (migration 0051) — 요청을 인증한 키의 prefix (raw[:11]).
+    # JWT 경로는 NULL. 구 스트림 엔트리에는 필드 자체가 없어 기본값으로 흡수된다.
+    key_prefix: str | None = None
 
     # 게이트웨이 발행 스키마와 맞춘다(gateway cost_stream.py 는 3).
     # 소비자측 기본값이 낮으면 디코딩된 구버전 엔트리가 3 인 것처럼 보인다.

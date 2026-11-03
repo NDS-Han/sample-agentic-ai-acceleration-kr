@@ -924,19 +924,22 @@ class KeyService:
             )
             email_by_user = {uid: em for uid, em in rows.all()}
             # last_used_at 컬럼은 아무 경로도 쓰지 않는다 — 실사용 시각은
-            # usage_logs 에서 집계한다(키는 유저당 1개라 per-user 최댓값이 곧
-            # per-key 마지막 사용).
+            # usage_logs 에서 집계한다. (user_id, key_prefix) 그룹으로 키 단위를
+            # 잡는다 — 유저 단위 최댓값이면 재발급된 새 키의 사용이 만료된 구 키
+            # 행에도 표시됐다. key_prefix=NULL(구 attribution 이전 행)은 어떤
+            # 키에도 귀속되지 않아 매칭에서 제외된다.
             from sqlalchemy import func as sa_func
 
             last_rows = await session.execute(
                 select(
                     UsageLog.user_id,
+                    UsageLog.key_prefix,
                     sa_func.max(UsageLog.requested_at),
                 )
                 .where(UsageLog.user_id.in_(uids))
-                .group_by(UsageLog.user_id)
+                .group_by(UsageLog.user_id, UsageLog.key_prefix)
             )
-            last_req_by_user = dict(last_rows.all())
+            last_req_by_key = {(uid, p): t for uid, p, t in last_rows.all() if p}
 
         items = [
             KeyResponse(
@@ -951,7 +954,7 @@ class KeyService:
                 created_at=vk.created_at,
                 kind=vk.kind,
                 issued_by_email=email_by_user.get(vk.issued_by) if vk.issued_by else None,
-                last_request_at=last_req_by_user.get(vk.user_id),
+                last_request_at=last_req_by_key.get((vk.user_id, vk.key_prefix)),
             )
             for vk in keys
         ]

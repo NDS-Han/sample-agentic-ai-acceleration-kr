@@ -98,6 +98,9 @@ class UsageLog(Base):
     # simply never selects it — so admin-api could not read the join key at all while
     # every test passed. No migration needed; this is pure mirror drift.
     bedrock_request_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # 요청을 인증한 VK 의 prefix (raw[:11], migration 0051) — 키 단위 사용량
+    # 귀속. gateway-proxy 가 쓰고 여기선 읽기 전용. 배포 이전 행은 NULL.
+    key_prefix: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
 
 # ── ROIAggregation ──

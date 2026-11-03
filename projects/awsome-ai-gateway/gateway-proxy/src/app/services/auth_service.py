@@ -205,6 +205,9 @@ class VKAuthStrategy:
     ) -> AuthContext:
         token = _extract_bearer_token(authorization)
         key_hash = hashlib.sha256(token.encode()).hexdigest()
+        # VK prefix (raw[:11], "vk-XXXXXXXX") — 키 단위 사용량 귀속용으로
+        # AuthContext 에 실린다. 원문은 여기서만 존재하고 아래로 내려가지 않는다.
+        key_prefix = token[:11]
 
         # 1) AuthContext 캐시 조회
         if redis is not None:
@@ -247,6 +250,9 @@ class VKAuthStrategy:
                             except Exception:
                                 logger.warning("vk_cache_cleanup_failed")
                             raise PermissionError("User account is deactivated")
+                    # prefix 는 캐시에 넣지 않고 매 요청의 raw token 에서 직접
+                    # 채운다 — 가변 캐시 데이터가 아니라 인증 입력의 결정적 함수다.
+                    cached_ctx.key_prefix = key_prefix
                     return cached_ctx
 
         # 2) VK→user_id 매핑 조회 (Admin API가 발급 시 저장). Redis 가 유일한
@@ -283,6 +289,7 @@ class VKAuthStrategy:
             roles=[Role.USER],
             auth_type=AuthType.VIRTUAL_KEY,
             key_id=None,
+            key_prefix=key_prefix,
             allowed_models=allowed_models,
             allowed_clients=allowed_clients,
             sso_subject=user.sso_subject,

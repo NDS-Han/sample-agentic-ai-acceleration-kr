@@ -39,7 +39,7 @@ _INSERT_USAGE_LOGS = text(
         reasoning_tokens, web_search_count,
         cost_usd, latency_ms, ttft_ms, status, requested_at, completed_at,
         is_streaming, estimated_usage, downgraded_from, availability_fallback_from,
-        sso_subject, bedrock_request_id, client, context_tier
+        sso_subject, bedrock_request_id, client, context_tier, key_prefix
     ) VALUES (
         gen_random_uuid(),
         :request_id,
@@ -66,7 +66,7 @@ _INSERT_USAGE_LOGS = text(
         :availability_fallback_from,
         :sso_subject,
         :bedrock_request_id,
-        :client, :context_tier
+        :client, :context_tier, :key_prefix
     )
     ON CONFLICT (request_id) DO NOTHING
     -- ⚠️ RETURNING 이 없으면 "ON CONFLICT 로 건너뛴" 행과 "실제 삽입된" 행을
@@ -548,6 +548,7 @@ class BatchFlusher:
                 "bedrock_request_id": e.bedrock_request_id,
                 "client": e.client,
                 "context_tier": e.context_tier,
+                "key_prefix": e.key_prefix,
             }
             row_id = (
                 await session.execute(_INSERT_USAGE_LOGS, params)

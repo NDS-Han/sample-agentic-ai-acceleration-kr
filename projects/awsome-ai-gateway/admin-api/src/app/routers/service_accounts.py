@@ -5,8 +5,10 @@ from __future__ import annotations
 import uuid
 
 import structlog
-from fastapi import APIRouter, Depends, Request
-from sqlalchemy import func, select
+from datetime import UTC, datetime
+
+from fastapi import APIRouter, Depends, Query, Request
+from sqlalchemy import func, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -14,6 +16,11 @@ from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.core.exceptions import NotFoundError, ValidationError
+from app.core.usage_filters import (
+    current_kst_period,
+    period_to_utc_range,
+    reporting_tz_sql,
+)
 from app.models.auth import (
     Department,
     KeyStatus,
@@ -33,8 +40,13 @@ from app.repositories.user_repository import UserRepository
 from app.schemas.keys import (
     ServiceAccountCreateRequest,
     ServiceAccountItem,
+    ServiceAccountKeyUsageItem,
     ServiceAccountListResponse,
     ServiceAccountReadiness,
+    ServiceAccountUsageByModel,
+    ServiceAccountUsageDaily,
+    ServiceAccountUsageResponse,
+    ServiceAccountUsageSummary,
 )
 from app.services.key_service import VK_KIND_SERVICE
 
@@ -133,26 +145,68 @@ async def list_service_accounts(
         )
     ).all()
 
-    items: list[ServiceAccountItem] = []
-    for user, team_name in rows:
-        vk = (
+    uids = [u.id for u, _ in rows]
+    vk_by_user: dict = {}
+    usage_by_user: dict = {}
+    key_last_req: dict = {}
+    if uids:
+        # 활성 서비스 키를 계정 전체에 대해 1쿼리로 — 계정당 N+1 이 아니다.
+        vks = (
             await session.execute(
-                select(VirtualKey)
-                .where(
-                    VirtualKey.user_id == user.id,
+                select(VirtualKey).where(
+                    VirtualKey.user_id.in_(uids),
                     VirtualKey.status == KeyStatus.ACTIVE,
                     VirtualKey.kind == VK_KIND_SERVICE,
                 )
-                .limit(1)
             )
-        ).scalar_one_or_none()
-        last_req = (
+        ).scalars().all()
+        vk_by_user = {v.user_id: v for v in vks}
+
+        # 현재 리포팅 월 집계를 (user_id, key_prefix) 그룹 1쿼리로 — 비용·토큰은
+        # §59 규칙대로 SUCCESS 행만 합산한다. key_prefix=NULL(구 attribution
+        # 이전 행)도 유저 월간 총계에는 포함되고, 키별 last_request 에는 안 잡힌다.
+        start_utc, end_utc = period_to_utc_range(current_kst_period())
+        success = UsageLog.status == "SUCCESS"
+        token_sum = (
+            UsageLog.input_tokens
+            + UsageLog.output_tokens
+            + UsageLog.cache_creation_tokens
+            + UsageLog.cache_read_tokens
+        )
+        agg_rows = (
             await session.execute(
-                select(func.max(UsageLog.requested_at)).where(
-                    UsageLog.user_id == user.id
+                select(
+                    UsageLog.user_id,
+                    UsageLog.key_prefix,
+                    func.count(),
+                    func.sum(token_sum).filter(success),
+                    func.sum(UsageLog.cost_usd).filter(success),
+                    func.max(UsageLog.requested_at),
                 )
+                .where(
+                    UsageLog.user_id.in_(uids),
+                    UsageLog.requested_at >= start_utc,
+                    UsageLog.requested_at < end_utc,
+                )
+                .group_by(UsageLog.user_id, UsageLog.key_prefix)
             )
-        ).scalar_one()
+        ).all()
+        for uid, prefix, cnt, toks, cost, last_at in agg_rows:
+            agg = usage_by_user.setdefault(
+                uid, {"requests": 0, "tokens": 0, "cost": 0.0, "last": None}
+            )
+            agg["requests"] += cnt
+            agg["tokens"] += toks or 0
+            agg["cost"] += float(cost or 0)
+            if last_at and (agg["last"] is None or last_at > agg["last"]):
+                agg["last"] = last_at
+            if prefix:
+                key_last_req[(uid, prefix)] = last_at
+
+    items: list[ServiceAccountItem] = []
+    for user, team_name in rows:
+        vk = vk_by_user.get(user.id)
+        agg = usage_by_user.get(user.id, {})
         readiness = await _readiness(session, user)
         items.append(
             ServiceAccountItem(
@@ -166,7 +220,13 @@ async def list_service_accounts(
                 active_key_id=str(vk.id) if vk else None,
                 active_key_prefix=vk.key_prefix if vk else None,
                 active_key_expires_at=vk.expires_at if vk else None,
-                last_request_at=last_req,
+                last_request_at=agg.get("last"),
+                active_key_last_request_at=(
+                    key_last_req.get((user.id, vk.key_prefix)) if vk else None
+                ),
+                month_requests=agg.get("requests", 0),
+                month_tokens=agg.get("tokens", 0),
+                month_cost_usd=agg.get("cost", 0.0),
             )
         )
 
@@ -330,3 +390,231 @@ async def repair_service_account_keys(
     # (요청 세션의 트랜잭션 경계와 분리).
     repaired = await svc.repair_service_key_redis(user_id=user_id)
     return {"repaired": repaired}
+
+
+# 키 단위 귀속(usage_logs.key_prefix)이 켜진 시점 — 이보다 이전 행은
+# prefix=NULL 이라 키별 집계에서 제외된다. 배포 시점 상수로, UI 가
+# "집계 개시일" 안내에 쓴다.
+USAGE_ATTRIBUTION_SINCE = datetime(2026, 11, 4, tzinfo=UTC)
+
+
+def _kst_day_expr():
+    """usage_logs.requested_at → 리포팅 타임존 'YYYY-MM-DD' 문자열 식.
+
+    GROUP BY/SELECT 전용(WHERE 절은 period_to_utc_range 바인드를 쓴다 —
+    kst_month_expr 주석 참조).
+    """
+    return func.to_char(
+        func.timezone(reporting_tz_sql(), UsageLog.requested_at),
+        literal("YYYY-MM-DD", literal_execute=True),
+    )
+
+
+@router.get("/{user_id}/usage", response_model=ServiceAccountUsageResponse)
+async def service_account_usage(
+    user_id: uuid.UUID,
+    request: Request,
+    period: str | None = Query(
+        default=None, description="YYYY-MM (리포팅 타임존). 미지정 시 현재 월"
+    ),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """서비스 계정의 키 단위 사용량 — /apps 상세 페이지.
+
+    계정이 소유한 service 키들의 prefix 로 usage_logs 를 조인해 집계한다.
+    재발급으로 prefix 가 바뀌어도 계정의 전체 이력이 보이고, 키별 분할도
+    응답에 포함된다. key_prefix 귀속은 배포(USAGE_ATTRIBUTION_SINCE) 이후
+    행에만 존재하므로 이전 사용은 집계에 나타나지 않는다.
+    """
+    period = period or current_kst_period()
+    start_utc, end_utc = period_to_utc_range(period)
+
+    cache_key = f"sa-usage:{user_id}:{period}"
+    from app.routers.dashboard import _cache_get, _cache_set
+
+    cached = await _cache_get(request, cache_key)
+    if cached is not None:
+        return cached
+
+    row = (
+        await session.execute(
+            select(User, Team.name)
+            .outerjoin(Team, User.team_id == Team.id)
+            .where(User.id == user_id, User.is_service_account.is_(True))
+        )
+    ).one_or_none()
+    if row is None:
+        raise NotFoundError("ServiceAccount", str(user_id))
+    user, team_name = row
+
+    vks = (
+        await session.execute(
+            select(VirtualKey).where(
+                VirtualKey.user_id == user_id,
+                VirtualKey.kind == VK_KIND_SERVICE,
+            )
+        )
+    ).scalars().all()
+    prefixes = [v.key_prefix for v in vks if v.key_prefix]
+
+    usage_conds = [
+        UsageLog.user_id == user_id,
+        UsageLog.requested_at >= start_utc,
+        UsageLog.requested_at < end_utc,
+        UsageLog.key_prefix.in_(prefixes),
+    ]
+    success = UsageLog.status == "SUCCESS"
+    token_sum = (
+        UsageLog.input_tokens
+        + UsageLog.output_tokens
+        + UsageLog.cache_creation_tokens
+        + UsageLog.cache_read_tokens
+    )
+
+    if prefixes:
+        summary_row = (
+            await session.execute(
+                select(
+                    func.count(),
+                    func.count().filter(UsageLog.status == "SUCCESS"),
+                    func.count().filter(UsageLog.status == "ERROR"),
+                    func.count().filter(UsageLog.status == "TIMEOUT"),
+                    func.sum(UsageLog.input_tokens).filter(success),
+                    func.sum(UsageLog.output_tokens).filter(success),
+                    func.sum(UsageLog.cache_creation_tokens).filter(success),
+                    func.sum(UsageLog.cache_read_tokens).filter(success),
+                    func.sum(UsageLog.reasoning_tokens).filter(success),
+                    func.sum(UsageLog.web_search_count).filter(success),
+                    func.sum(UsageLog.cost_usd).filter(success),
+                    func.avg(UsageLog.latency_ms).filter(success),
+                    func.max(UsageLog.requested_at),
+                ).where(*usage_conds)
+            )
+        ).one()
+
+        per_key_rows = (
+            await session.execute(
+                select(
+                    UsageLog.key_prefix,
+                    func.count().filter(success),
+                    func.sum(UsageLog.cost_usd).filter(success),
+                    func.max(UsageLog.requested_at),
+                )
+                .where(*usage_conds)
+                .group_by(UsageLog.key_prefix)
+            )
+        ).all()
+        per_key = {p: (c, float(cost or 0), last) for p, c, cost, last in per_key_rows}
+
+        by_model_rows = (
+            await session.execute(
+                select(
+                    UsageLog.model_alias,
+                    func.count().filter(success),
+                    func.sum(token_sum).filter(success),
+                    func.sum(UsageLog.cost_usd).filter(success),
+                )
+                .where(*usage_conds)
+                .group_by(UsageLog.model_alias)
+            )
+        ).all()
+        daily_rows = (
+            await session.execute(
+                select(
+                    _kst_day_expr().label("d"),
+                    func.count(),
+                    func.sum(token_sum).filter(success),
+                    func.sum(UsageLog.cost_usd).filter(success),
+                )
+                .where(*usage_conds)
+                .group_by("d")
+                .order_by("d")
+            )
+        ).all()
+    else:
+        summary_row = None
+        per_key = {}
+        by_model_rows = []
+        daily_rows = []
+
+    (
+        total_req,
+        n_success,
+        n_error,
+        n_timeout,
+        in_tok,
+        out_tok,
+        cc_tok,
+        cr_tok,
+        rsn_tok,
+        ws_cnt,
+        cost_sum,
+        avg_lat,
+        last_req,
+    ) = summary_row if summary_row else (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, None, None)
+
+    total_cost = float(cost_sum or 0)
+    by_model = [
+        ServiceAccountUsageByModel(
+            model_alias=alias,
+            requests=cnt,
+            tokens=toks or 0,
+            cost_usd=float(cost or 0),
+            cost_share=(float(cost or 0) / total_cost if total_cost else 0.0),
+        )
+        for alias, cnt, toks, cost in sorted(
+            by_model_rows, key=lambda r: float(r[3] or 0), reverse=True
+        )
+    ]
+    daily = [
+        ServiceAccountUsageDaily(
+            date=d, requests=cnt, tokens=toks or 0, cost_usd=float(cost or 0)
+        )
+        for d, cnt, toks, cost in daily_rows
+    ]
+    keys = [
+        ServiceAccountKeyUsageItem(
+            key_id=str(vk.id),
+            key_prefix=vk.key_prefix,
+            status=vk.status,
+            issued_at=vk.issued_at,
+            expires_at=vk.expires_at,
+            revoked_at=vk.revoked_at,
+            last_used_at=vk.last_used_at,
+            requests=per_key.get(vk.key_prefix, (0, 0.0, None))[0],
+            cost_usd=per_key.get(vk.key_prefix, (0, 0.0, None))[1],
+            last_request_at=per_key.get(vk.key_prefix, (0, 0.0, None))[2],
+        )
+        for vk in vks
+    ]
+
+    payload = ServiceAccountUsageResponse(
+        user_id=str(user.id),
+        email=user.email,
+        display_name=user.display_name,
+        team_id=str(user.team_id) if user.team_id else None,
+        team_name=team_name,
+        period=period,
+        attribution_since=USAGE_ATTRIBUTION_SINCE,
+        keys=keys,
+        summary=ServiceAccountUsageSummary(
+            requests=total_req,
+            success=n_success,
+            error=n_error,
+            timeout=n_timeout,
+            input_tokens=in_tok or 0,
+            output_tokens=out_tok or 0,
+            cache_creation_tokens=cc_tok or 0,
+            cache_read_tokens=cr_tok or 0,
+            reasoning_tokens=rsn_tok or 0,
+            web_search_count=ws_cnt or 0,
+            cost_usd=total_cost,
+            avg_latency_ms=float(avg_lat) if avg_lat is not None else None,
+            last_request_at=last_req,
+        ),
+        by_model=by_model,
+        daily=daily,
+    )
+    await _cache_set(request, cache_key, payload.model_dump(mode="json"), ttl=30)
+    return payload
