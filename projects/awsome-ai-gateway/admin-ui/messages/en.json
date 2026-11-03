@@ -208,7 +208,8 @@
     "loading": "Loading…",
     "noKeysCliLink": "See the integration page for how keys are issued →",
     "saMovedBanner": "Long-lived app/agent keys are managed on the Service Accounts page.",
-    "saMovedLink": "Go to Service Accounts"
+    "saMovedLink": "Go to Service Accounts",
+    "kindService": "service"
   },
   "budgets": {
     "title": "Budget Management",
@@ -1283,7 +1284,7 @@
     "saTeam": "Team",
     "saNoKey": "No key",
     "saInactive": "Inactive",
-    "saLastUsed": "Last used",
+    "saLastUsed": "Last used (this month)",
     "saRepair": "Repair auth",
     "saRepairDone": "Repaired {count} key auth mappings",
     "saRepairFailed": "Repair failed",
@@ -1341,10 +1342,14 @@
     "kpiTokensDesc": "in {input} · out {output}",
     "kpiLatency": "Avg latency",
     "kpiLastRequest": "Last request {at}",
-    "unattributedNote": "{count} requests ({cost}) predate key attribution and are excluded from per-key splits.",
+    "unattributedNote": "{count} requests ({cost}) are not attributed to any of this account's keys — they predate attribution or used pre-flag keys.",
     "keysTitle": "Issued keys",
     "keyPrefix": "Prefix",
-    "keyStatus": "Status",
+    "keyStatus": {
+      "ACTIVE": "Active",
+      "EXPIRED": "Expired",
+      "REVOKED": "Revoked"
+    },
     "keyIssuedAt": "Issued",
     "keyExpiresAt": "Expires",
     "keyRequests": "Requests",
@@ -1356,6 +1361,8 @@
     "colShare": "Share",
     "dailyTitle": "Daily cost trend",
     "noUsage": "No usage in this period",
-    "attributionNote": "Per-key attribution is recorded from {since} — earlier rows are excluded from key splits."
+    "attributionNote": "Historical usage was backfilled by key lifetime. Live attribution records from {since}.",
+    "loading": "Loading…",
+    "keyLastRequest": "Last request (period)"
   }
 }

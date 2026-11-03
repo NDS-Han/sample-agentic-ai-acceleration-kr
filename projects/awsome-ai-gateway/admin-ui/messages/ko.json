@@ -208,7 +208,8 @@
     "loading": "불러오는 중…",
     "noKeysCliLink": "VK 발급 방법은 연동 페이지에서 확인 →",
     "saMovedBanner": "앱·에이전트용 장기 키는 서비스 계정 페이지에서 관리합니다.",
-    "saMovedLink": "서비스 계정으로 이동"
+    "saMovedLink": "서비스 계정으로 이동",
+    "kindService": "서비스"
   },
   "budgets": {
     "title": "예산 관리",
@@ -1283,7 +1284,7 @@
     "saTeam": "팀",
     "saNoKey": "키 없음",
     "saInactive": "비활성",
-    "saLastUsed": "마지막 사용",
+    "saLastUsed": "마지막 사용(이번 달)",
     "saRepair": "인증 복구",
     "saRepairDone": "{count}개 키 인증 매핑을 복구했습니다",
     "saRepairFailed": "복구 실패",
@@ -1341,10 +1342,14 @@
     "kpiTokensDesc": "입력 {input} · 출력 {output}",
     "kpiLatency": "평균 지연",
     "kpiLastRequest": "마지막 요청 {at}",
-    "unattributedNote": "키 귀속 이전 데이터 {count}건({cost})은 키별 집계에서 제외됩니다.",
+    "unattributedNote": "키에 귀속되지 않은 사용 {count}건({cost})이 있습니다 — 귀속 기록 이전이거나 표지 전 다른 키 사용분입니다.",
     "keysTitle": "발급된 키",
     "keyPrefix": "Prefix",
-    "keyStatus": "상태",
+    "keyStatus": {
+      "ACTIVE": "활성",
+      "EXPIRED": "만료됨",
+      "REVOKED": "폐기됨"
+    },
     "keyIssuedAt": "발급일",
     "keyExpiresAt": "만료일",
     "keyRequests": "요청",
@@ -1356,6 +1361,8 @@
     "colShare": "비중",
     "dailyTitle": "일별 비용 추이",
     "noUsage": "이 기간에 사용 기록이 없습니다",
-    "attributionNote": "키별 귀속은 {since}부터 기록됩니다 — 이전 행은 키 분할에서 제외됩니다."
+    "attributionNote": "과거 사용은 키 수명 구간으로 귀속됐습니다. 라이브 귀속은 {since}부터 기록됩니다.",
+    "loading": "불러오는 중…",
+    "keyLastRequest": "기간 내 마지막 요청"
   }
 }

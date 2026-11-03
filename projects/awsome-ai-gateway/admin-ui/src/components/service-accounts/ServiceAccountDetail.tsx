@@ -54,6 +54,12 @@ export function ServiceAccountDetail({ data, period }: Props) {
         <PeriodSelector periods={periods} current={period} />
       </div>
 
+      <p className="text-xs text-muted-foreground">
+        {t('attributionNote', {
+          since: fmtDate(data.attribution_since, tz),
+        })}
+      </p>
+
       {/* KPI 카드 — 비용·토큰은 SUCCESS 행만(§59), 요청 수는 전체 상태 포함. */}
       <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
         <KPICard
@@ -119,7 +125,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
               <Th>{t('keyStatus')}</Th>
               <Th>{t('keyIssuedAt')}</Th>
               <Th>{t('keyExpiresAt')}</Th>
-              <Th>{t('saLastUsed')}</Th>
+              <Th>{t('keyLastRequest')}</Th>
               <Th numeric>{t('keyRequests')}</Th>
               <Th numeric>{t('keyCost')}</Th>
             </Tr>
@@ -131,7 +137,9 @@ export function ServiceAccountDetail({ data, period }: Props) {
                   <Badge tone="teal">{k.key_prefix}</Badge>
                 </Td>
                 <Td>
-                  <Badge tone={statusTone(k.status)}>{k.status}</Badge>
+                  <Badge tone={statusTone(k.status)}>
+                    {t(`keyStatus.${k.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
+                  </Badge>
                 </Td>
                 <Td className="text-muted-foreground">{fmtDate(k.issued_at, tz)}</Td>
                 <Td className="text-muted-foreground">{fmtDate(k.expires_at, tz)}</Td>
@@ -216,7 +224,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
                 <YAxis
                   tick={{ fontSize: 11 }}
                   stroke="hsl(var(--muted-foreground))"
-                  tickFormatter={(v: number) => `$${v}`}
+                  tickFormatter={(v: number) => fmtUsd(v)}
                 />
                 <Tooltip
                   contentStyle={{

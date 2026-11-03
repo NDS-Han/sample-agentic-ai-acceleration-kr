@@ -9,7 +9,9 @@
   직접 계산 — Redis auth 계약 변경 0. `virtual_keys.key_prefix`로 조인.
   `key_id`/`key_hash` 대안은 auth-cache 작성자 3곳 일관 변경 + 신규 컬럼이
   필요해 기각.
-- **백필 없음** — 구 행은 NULL, API 응답에 `attribution_since` 명시.
+- **백필 = 0052** — 서비스 계정 한정. 키 수명 구간(LEAD 절단, 회전 겹침 해소)
+  으로 NULL 행을 귀속. 일반 유저는 JWT 혼재라 제외. idempotent — 롤링 공백의
+  NULL 행은 재실행으로 채움. `attribution_since` = 라이브 기록 개시일.
 - **인덱스 없이 시작** — 키별 조회는 `user_id+requested_at` 범위 인덱스 안에서
   prefix 필터. 필요해지면 별도 마이그레이션.
 - **배포 순서**: 마이그레이션 → 워커 → 게이트웨이 → admin-api → admin-ui.

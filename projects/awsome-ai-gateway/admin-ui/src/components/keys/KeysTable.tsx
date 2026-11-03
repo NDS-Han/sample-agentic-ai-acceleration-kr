@@ -125,6 +125,9 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
                   <Badge tone={STATUS_TONE[key.status] ?? 'neutral'}>
                     {t(`keyStatus.${key.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
                   </Badge>
+                  {key.kind === 'service' && (
+                    <Badge tone="teal">{t('kindService')}</Badge>
+                  )}
                 </Td>
                 <Td className="text-muted-foreground">{formatDate(key.created_at, t('noExpiry'), tz)}</Td>
                 <Td className="text-muted-foreground">{formatDate(key.expires_at, t('noExpiry'), tz)}</Td>

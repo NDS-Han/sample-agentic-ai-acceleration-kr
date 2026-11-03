@@ -46,6 +46,7 @@ export async function markServiceAccountAction(
       { email: trimmed },
     );
     revalidatePath('/keys');
+    revalidatePath('/service-accounts');
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -60,6 +61,7 @@ export async function unmarkServiceAccountAction(
   try {
     await adminAPI.delete(`/admin/service-accounts/${encodeURIComponent(userId)}`);
     revalidatePath('/keys');
+    revalidatePath('/service-accounts');
     return { success: true, data: undefined };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };
@@ -82,6 +84,7 @@ export async function issueServiceKeyAction(params: {
       body,
     );
     revalidatePath('/keys');
+    revalidatePath('/service-accounts');
     return { success: true, data };
   } catch (err) {
     return { success: false, error: toErrorMessage(err) };

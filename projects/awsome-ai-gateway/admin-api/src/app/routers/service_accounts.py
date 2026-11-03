@@ -135,7 +135,7 @@ async def list_service_accounts(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """서비스 계정 목록 + 발급 준비 상태 — /keys 페이지의 관리 패널."""
+    """서비스 계정 목록 + 발급 준비 상태 — /service-accounts 페이지의 관리 패널."""
     rows = (
         await session.execute(
             select(User, Team.name)
@@ -424,23 +424,19 @@ async def service_account_usage(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """서비스 계정의 키 단위 사용량 — /apps 상세 페이지.
+    """서비스 계정의 키 단위 사용량 — /service-accounts/{id} 상세 페이지.
 
-    계정이 소유한 service 키들의 prefix 로 usage_logs 를 조인해 집계한다.
-    재발급으로 prefix 가 바뀌어도 계정의 전체 이력이 보이고, 키별 분할도
-    응답에 포함된다. key_prefix 귀속은 배포(USAGE_ATTRIBUTION_SINCE) 이후
-    행에만 존재하므로 이전 사용은 집계에 나타나지 않는다.
+    계정 총계(summary/by_model/daily)는 user_id+기간 스코프라 목록의 month_*
+    와 정합하고, 키별 분할(per_key)은 이 계정이 소유한 service 키 prefix 로
+    집계한다. 0052 백필이 service 키 수명 구간으로 구 행을 귀속했으므로
+    재발급 이력도 표시된다. 어느 키에도 안 잡힌 행(귀속 이전/다른 키)은
+    unattributed_* 에 모인다.
     """
     period = period or current_kst_period()
     start_utc, end_utc = period_to_utc_range(period)
 
-    cache_key = f"sa-usage:{user_id}:{period}"
-    from app.routers.dashboard import _cache_get, _cache_set
-
-    cached = await _cache_get(request, cache_key)
-    if cached is not None:
-        return cached
-
+    # 검증이 캐시보다 먼저 — 언플래그된 계정의 캐시 잔재가 최대 TTL 동안
+    # 응답되는 것을 막는다.
     row = (
         await session.execute(
             select(User, Team.name)
@@ -451,6 +447,13 @@ async def service_account_usage(
     if row is None:
         raise NotFoundError("ServiceAccount", str(user_id))
     user, team_name = row
+
+    cache_key = f"sa-usage:{user_id}:{period}"
+    from app.routers.dashboard import _cache_get, _cache_set
+
+    cached = await _cache_get(request, cache_key)
+    if cached is not None:
+        return cached
 
     vks = (
         await session.execute(
@@ -511,10 +514,11 @@ async def service_account_usage(
         )
     ).all()
     per_key = {p: (c, float(cost or 0), last) for p, c, cost, last in per_key_rows if p}
-    unattributed = next(
-        ((c, float(cost or 0)) for p, c, cost, _ in per_key_rows if p is None),
-        (0, 0.0),
-    )
+    # unattributed = 계정 총계 − 이 계정의 service 키에 매칭된 분 — NULL 행
+    # (귀속 이전)뿐 아니라, 표지 전에 쓰던 exchange 키 등 "다른 키" 사용분도
+    # 전부 여기 잡힌다. 어느 쪽이든 키 표에 나타나지 않는 나머지다.
+    matched_req = sum(per_key.get(vk.key_prefix, (0, 0.0, None))[0] for vk in vks)
+    matched_cost = sum(per_key.get(vk.key_prefix, (0, 0.0, None))[1] for vk in vks)
 
     by_model_rows = (
         await session.execute(
@@ -616,8 +620,8 @@ async def service_account_usage(
             cost_usd=total_cost,
             avg_latency_ms=float(avg_lat) if avg_lat is not None else None,
             last_request_at=last_req,
-            unattributed_requests=unattributed[0],
-            unattributed_cost_usd=unattributed[1],
+            unattributed_requests=max(0, total_req - matched_req),
+            unattributed_cost_usd=max(0.0, total_cost - matched_cost),
         ),
         by_model=by_model,
         daily=daily,

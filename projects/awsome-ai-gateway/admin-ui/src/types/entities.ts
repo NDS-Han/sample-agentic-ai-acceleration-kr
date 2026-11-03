@@ -383,7 +383,7 @@ export interface EffectivePolicy {
 export interface ServiceAccountKeyUsageItem {
   key_id: string;
   key_prefix: string;
-  status: string;
+  status: 'ACTIVE' | 'EXPIRED' | 'REVOKED';
   issued_at: string;
   expires_at: string;
   revoked_at: string | null;
