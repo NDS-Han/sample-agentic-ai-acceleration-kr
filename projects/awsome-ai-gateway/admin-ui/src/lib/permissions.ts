@@ -57,6 +57,7 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
 
   // CLI downloads — admin + team leader
   '/integration': [UserRole.ADMIN, UserRole.TEAM_LEADER],
+  '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER], // 구 링크 — /integration 으로 redirect
 
   // BI assistant chat — ADMIN 전용.
   // ⚠️ 예전 주석은 "/analytics 와 동일 범위(admin + team leader)" 였지만 백엔드와 어긋난다:

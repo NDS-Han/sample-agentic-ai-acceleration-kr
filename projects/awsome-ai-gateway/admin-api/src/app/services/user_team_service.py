@@ -837,5 +837,6 @@ class UserTeamService:
             team_id=str(user.team_id) if user.team_id else None,
             team_name=user.team.name if user.team else None,
             is_active=user.is_active,
+            is_service_account=user.is_service_account,
             created_at=user.created_at,
         )

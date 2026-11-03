@@ -56,6 +56,7 @@ function buildAppSamples(): { curl: string; python: string } {
     `  }'`,
   ].join('\n');
   const python = [
+    `import os`,
     `from anthropic import Anthropic`,
     ``,
     `client = Anthropic(`,

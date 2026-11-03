@@ -126,7 +126,13 @@ class KeyService:
         if VK_DEDUP_SECONDS > 0:
             for existing in await repo.list_active_for_user(user_id):
                 age_s = (dedup_now - existing.issued_at).total_seconds()
-                if age_s <= VK_DEDUP_SECONDS and existing.expires_at <= expires_at:
+                # kind 일치 — 다른 kind(예: 방금 발급된 exchange)를 service
+                # 요청에 재사용하면 관리자가 수명 다른 키를 SM 에 저장하는 사고.
+                if (
+                    age_s <= VK_DEDUP_SECONDS
+                    and existing.expires_at <= expires_at
+                    and existing.kind == kind
+                ):
                     raw_key = self._encryption.decrypt(existing.key_value_encrypted)
                     # 커밋됐지만 Redis SET 이 실패/취소된 키를 재사용하면 클라이언트는
                     # 200 을 받고도 gateway 에서 401 — dead credential 을 다시
@@ -557,17 +563,32 @@ class KeyService:
         rows = (await session.execute(stmt)).all()
 
         repaired = 0
+        key_repo = KeyRepository(session)
         for vk, team_id in rows:
+            # ⚠️ 상태 재확인 — SELECT 와 쓰기 사이에 revoke 가 끼면 폐기된 키를
+            #    Redis 에 되살려 최대 TTL 동안 유령 인증된다. FOR UPDATE 로
+            #    revoke 와 직렬화한다: revoke 가 먼저면 REVOKED 가 보여 건너뛰고,
+            #    내가 먼저면 revoke 의 commit 후 DEL 이 내 setex 를 지운다.
+            locked = await key_repo.get_by_id(vk.id, for_update=True)
+            if (
+                locked is None
+                or locked.status != KeyStatus.ACTIVE
+                or locked.expires_at <= now
+            ):
+                await session.commit()  # 잠금만 풀고 다음으로
+                continue
             try:
-                raw_key = self._encryption.decrypt(vk.key_value_encrypted)
+                raw_key = self._encryption.decrypt(locked.key_value_encrypted)
             except Exception:
                 logger.warning(
                     "service_key_repair.decrypt_failed", key_id=str(vk.id)
                 )
+                await session.commit()
                 continue
             key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
             try:
                 if await redis.exists(f"key:vk:{key_hash}"):
+                    await session.commit()
                     continue
                 remaining = max(
                     1, int((vk.expires_at - now).total_seconds())
@@ -583,7 +604,9 @@ class KeyService:
                     key_id=str(vk.id),
                     exc_info=True,
                 )
+                await session.commit()  # 행 잠금 해제
                 continue
+            await session.commit()  # 잠금 해제 — revoke 의 DEL 이 이제 진행 가능
             repaired += 1
             logger.info(
                 "service_key_repair.rewritten",

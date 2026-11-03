@@ -739,6 +739,9 @@ class TestIssueKeyDedup:
         vk.status = KeyStatus.ACTIVE
         vk.issued_at = now - timedelta(seconds=age_s)
         vk.expires_at = now + timedelta(hours=ttl_h)
+        # spec'd MagicMock 의 kind 는 MagicMock 객체 — dedup 의 kind 일치 조건에
+        # 걸려 재사용이 안 되므로 사람용 기본값을 명시한다.
+        vk.kind = "exchange"
         return vk, raw_key
 
     async def test_dedup_returns_recent_key_within_effective_expiry(

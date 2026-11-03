@@ -195,14 +195,16 @@ async def model_share(
         models.append({
             "model_alias": r.model_alias,
             "display_name": r.display_name,
-            "cost_usd": round(cost, 4),
+            "cost_usd": round(cost, 6),
             "share_pct": round(share, 2),
         })
 
     payload = {
         "period": period,
         "team_id": team_filter,
-        "total_cost_usd": round(total, 4),
+        # 6자리 — 소액 호출($0.00001 규모)이 4자리 반올림에서 0 이 되면
+        # 프론트의 `total_cost_usd === 0` 공백 판정에 "사용 기록 없음"으로 뜬다.
+        "total_cost_usd": round(total, 6),
         "models": models,
     }
     await _cache_set(request, cache_key, payload)

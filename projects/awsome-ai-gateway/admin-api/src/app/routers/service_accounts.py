@@ -141,6 +141,7 @@ async def list_service_accounts(
                 .where(
                     VirtualKey.user_id == user.id,
                     VirtualKey.status == KeyStatus.ACTIVE,
+                    VirtualKey.kind == VK_KIND_SERVICE,
                 )
                 .limit(1)
             )
@@ -203,6 +204,27 @@ async def mark_service_account(
         raise ValidationError("cannot flag yourself as a service account")
 
     user.is_service_account = True
+
+    # 표지와 함께 기존 사람용 키(exchange/sts 등)를 폐기한다 — 남겨두면
+    # 서비스 계정이 된 계정의 단기키가 잔여 TTL 동안 계속 인증된다.
+    # revoke_key 가 FOR UPDATE 잠금 + commit 후 Redis DEL enqueue 를 처리한다.
+    from app.repositories.key_repository import KeyRepository
+    from app.services.key_service import KeyService
+
+    svc: KeyService = request.app.state.key_service
+    revocable = await KeyRepository(session).list_revocable_for_users([user.id])
+    for old_vk in revocable:
+        if old_vk.kind == VK_KIND_SERVICE:
+            continue
+        await svc.revoke_key(
+            session,
+            key_id=old_vk.id,
+            actor=admin,
+            ip_address=request.client.host if request.client else "0.0.0.0",
+            request_id=getattr(request.state, "request_id", "")
+            or request.headers.get("x-request-id", ""),
+        )
+
     await audit_logger.log(
         session,
         actor_user_id=admin.user_id,

@@ -93,7 +93,7 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
         <p>{t('noKeys')}</p>
         {/* 발급 동선 안내 — VK 는 gateway-cli 로만 발급되므로 빈 상태에서
             설정 페이지로 이어준다(리뷰: 빈 상태가 데드엔드) */}
-        <Link href="/cli" className="text-xs text-primary hover:underline">
+        <Link href="/integration" className="text-xs text-primary hover:underline">
           {t('noKeysCliLink')}
         </Link>
       </div>

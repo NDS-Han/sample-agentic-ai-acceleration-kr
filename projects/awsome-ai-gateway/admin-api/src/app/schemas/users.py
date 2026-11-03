@@ -63,6 +63,7 @@ class UserResponse(BaseModel):
     team_id: str | None = None
     team_name: str | None = None
     is_active: bool
+    is_service_account: bool = False
     created_at: datetime
 
 
