@@ -179,6 +179,17 @@ class Settings(BaseSettings):
     # _resolve_team 이 현재 그룹으로 transfer_user 트리거 → admin UI 자동 동기화.
     OIDC_VK_TTL_HOURS: int = 1
 
+    # 서비스 계정(앱) 장기 VK — POST /admin/keys 발급 TTL 상한(일).
+    # 로테이션 없는 장기키라 상한은 경제 경계 역할도 한다(migration 0050).
+    APP_KEY_MAX_TTL_DAYS: int = 365
+
+    # scheduler 의 service-account VK Redis 복구 잡 — key:vk:{hash} 는
+    # VK 인증의 유일한 소스라 volatile-lru 축출/failover 로 유실되면
+    # 유효한 장기키가 죽은 채가 된다. 주기적으로 ACTIVE service 키의
+    # 엔트리를 재기록한다.
+    SERVICE_KEY_REPAIR_CRON: str = "*/15 * * * *"
+    SERVICE_KEY_REPAIR_ENABLED: bool = True
+
     # IDP 별 claim 이름 차이 흡수 (Cognito 면 'cognito:groups')
     OIDC_USER_ID_CLAIM: str = "sub"
     OIDC_EMAIL_CLAIM: str = "email"

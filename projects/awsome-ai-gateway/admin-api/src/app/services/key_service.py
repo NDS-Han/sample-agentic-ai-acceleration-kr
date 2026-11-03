@@ -24,7 +24,12 @@ from app.core.db import PENDING_REDIS_KEY, drain_pending_redis, enqueue_redis_pu
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import NotFoundError, ValidationError
 from app.models.auth import KeyStatus, User, VirtualKey
+from app.models.usage import UsageLog
 from app.repositories._cursor import decode_cursor
+from app.repositories.allowed_client_repository import (
+    OrgAllowedClientRepository,
+    TeamAllowedClientRepository,
+)
 from app.repositories.key_repository import KeyRepository
 from app.repositories.model_repository import TeamAllowedModelRepository
 from app.repositories.user_allowed_client_repository import UserAllowedClientRepository
@@ -39,6 +44,12 @@ VK_RANDOM_BYTES = 32  # 32 bytes = 64 hex chars → total 67 chars with prefix
 VK_AUTH_CACHE_TTL = 300  # gateway-proxy auth_service.VK_CACHE_TTL와 일치
 VK_DEFAULT_TTL_HOURS = 24  # 호출자가 expires_at 을 지정하지 않은 경우의 기본값
 VK_DEDUP_SECONDS = 5  # 같은 사용자의 연속 issue_key 호출 중복 방지
+
+# virtual_keys.kind — 발급 경로 구분(migration 0050).
+VK_KIND_EXCHANGE = "exchange"
+VK_KIND_STS = "sts"
+VK_KIND_INTERNAL = "internal"
+VK_KIND_SERVICE = "service"
 
 
 class KeyService:
@@ -61,12 +72,18 @@ class KeyService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
         user: User | None = None,
+        kind: str = VK_KIND_EXCHANGE,
     ) -> KeyCreateResponse:
         """Issue a new Virtual Key for user_id.
 
         ``user`` optional: 호출자가 이미 같은 session 에서 조회한 User 객체를 전달하면
         내부 ``get_user(user_id)`` 재조회를 생략. 전달하지 않으면 기존과 동일 동작.
         10k boot storm 부하테스트에서 요청당 DB roundtrip 을 줄여 conn 점유 시간 감소.
+
+        ``kind`` — 발급 경로(migration 0050). ``"service"`` 는 is_service_account
+        인 계정에만 허용되고(장기키 경로), 그 계정들은 다른 kind 의 발급이 거부된다
+        — 사람 키는 SSO 세션과 운명을 공유하고 앱 키는 그렇지 않다는 분리를
+        스키마 수준에서 못박는다.
         """
         repo = KeyRepository(session)
 
@@ -212,6 +229,27 @@ class KeyService:
                         virtual_key=raw_key,
                     )
 
+        # kind 가드 — dedup 재사용(기존 키 반환)은 신규 발급이 아니라 통과시키고,
+        # 실제 INSERT 전에 검증한다. 서비스 계정은 exchange/sts 경로에서 단기키를
+        # 받을 수 없고, 일반 유저는 장기 service 키를 받을 수 없다(사람 키는 SSO
+        # 세션과 운명을 공유한다는 분리를 스키마 수준에서 못박는다).
+        # user 로드는 dedup 이후로 미룬다 — dedup 패스트패스는 DB 조회 없이
+        # 끝나야 한다(10k boot storm 최적화와 동일한 이유).
+        if user is None:
+            user = await UserRepository(session).get_user(user_id)
+            if user is None:
+                raise NotFoundError("User", str(user_id))
+        if kind == VK_KIND_SERVICE:
+            if not user.is_service_account:
+                raise ValidationError(
+                    "service-kind keys can only be issued to service accounts"
+                )
+        elif user.is_service_account:
+            raise ValidationError(
+                "service accounts cannot receive non-service keys "
+                "(exchange/sts paths are blocked for service accounts)"
+            )
+
         # Generate VK: vk- + 32-byte random hex (먼저 생성 — CTE 한 번에 expire+insert)
         raw_key = VK_PREFIX + secrets.token_hex(VK_RANDOM_BYTES)
         key_prefix = raw_key[:11]  # "vk-a3b9c1d2"
@@ -230,6 +268,9 @@ class KeyService:
             status=KeyStatus.ACTIVE,
             expires_at=expires_at,
             issued_at=now,
+            kind=kind,
+            issued_by=actor.user_id,
+            issued_via_service_token=actor.service_token_id,
         )
 
         # BR-KEY-01 + INSERT 를 단일 CTE 로 (B: round-trip 절감)
@@ -274,13 +315,7 @@ class KeyService:
         key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
         seconds_until_expiry = max(1, int((expires_at - now).total_seconds()))
 
-        # team_allowed_models 스냅샷을 AuthContext 캐시에 주입.
-        # 호출자가 user 를 전달했으면 재조회 skip (같은 session identity map 객체 재사용).
-        if user is None:
-            user_repo = UserRepository(session)
-            user = await user_repo.get_user(user_id)
-            if user is None:
-                raise NotFoundError("User", str(user_id))
+        # user 는 앞의 kind 가드에서 이미 로드됐다 (호출자 전달 또는 조회).
 
         # H2: 방금 EXPIRED 처리된 옛 키의 Redis 엔트리를 정리한다.
         # DB status 만 바꾸고 key:vk:{hash} 를 그대로 두면 게이트웨이가 옛 키를
@@ -368,7 +403,34 @@ class KeyService:
 
             uac_repo = UserAllowedClientRepository(session)
             client_rows = await uac_repo.list_by_user(user_id)
-            allowed_clients = client_rows if client_rows else None
+            if client_rows:
+                allowed_clients = client_rows
+            elif user.team_id is not None:
+                # ⚠️ gateway 의 해소 순서는 user → team → org 다
+                #    (auth_service._resolve_entitlements). 예전엔 user 행만 봐서
+                #    team/org 정책이 있는 계정의 스냅샷이 None(무제한)으로 심어졌고,
+                #    캐시 TTL(≤300s) 동안은 통과하다가 만료 뒤 첫 DB 해소에서
+                #    갑자기 400 이 됐다 — 발급 직후 스모크 테스트는 통과하고
+                #    몇 분 뒤에 깨지는 패턴.
+                team_clients = await TeamAllowedClientRepository(
+                    session
+                ).list_by_team(user.team_id)
+                if team_clients:
+                    allowed_clients = team_clients
+                else:
+                    # team→dept→org — ORM 관계로 읽는다(selectin 로드, 추가
+                    # 쿼리 없음). gateway apps.py 의 상관 서브쿼리와 같은 경로.
+                    org_id = None
+                    if (
+                        getattr(user, "team", None) is not None
+                        and getattr(user.team, "department", None) is not None
+                    ):
+                        org_id = user.team.department.org_id
+                    if org_id is not None:
+                        org_clients = await OrgAllowedClientRepository(
+                            session
+                        ).list_by_org(org_id)
+                        allowed_clients = org_clients if org_clients else None
         except Exception:
             # 스냅샷은 콜드캐시 DB 왕복을 아끼기 위한 **최적화**일 뿐이다. 정책을 못 읽었으면
             # 넓은 스냅샷을 심는 대신 아예 심지 않는다 — gateway 가 첫 요청에서 직접 조회하고
@@ -433,7 +495,14 @@ class KeyService:
             action="CREATE_KEY",
             resource_type="VirtualKey",
             resource_id=str(vk.id),
-            changes={"after": {"user_id": str(user_id), "key_prefix": key_prefix}},
+            changes={
+                "after": {
+                    "user_id": str(user_id),
+                    "key_prefix": key_prefix,
+                    "kind": kind,
+                    "expires_at": expires_at.isoformat(),
+                }
+            },
             ip_address=ip_address,
             request_id=request_id,
         )
@@ -447,6 +516,81 @@ class KeyService:
             expires_at=vk.expires_at,
             virtual_key=raw_key,
         )
+
+    async def repair_service_key_redis(
+        self,
+        session: AsyncSession,
+        *,
+        user_id: uuid.UUID | None = None,
+    ) -> int:
+        """ACTIVE ``kind='service'`` VK 의 ``key:vk:{hash}`` Redis 엔트리 재기록.
+
+        gateway 의 VK→user 매핑은 Redis 가 유일한 소스다 — 엔트리가 축출
+        (volatile-lru)되거나 failover 로 유실되면 DB 에 유효한 키가 있어도
+        앱은 401 을 받고, Secrets Manager 에 있는 같은 키를 다시 읽어도 죽은
+        채다. 이 복구 경로가 없으면 재발급+전달만이 유일한 회복이다.
+
+        ``user_id`` 지정 시 그 계정만 — 없으면 활성 서비스 계정 전체.
+        반환값: 재기록한 엔트리 수. redis 가 없으면 0.
+        """
+        redis = self._cache_mgr._redis
+        if redis is None:
+            return 0
+
+        from sqlalchemy import and_
+
+        now = datetime.now(timezone.utc)
+        stmt = (
+            select(VirtualKey, User.team_id)
+            .join(User, VirtualKey.user_id == User.id)
+            .where(
+                and_(
+                    VirtualKey.kind == VK_KIND_SERVICE,
+                    VirtualKey.status == KeyStatus.ACTIVE,
+                    VirtualKey.expires_at > now,
+                    User.is_active.is_(True),
+                )
+            )
+        )
+        if user_id is not None:
+            stmt = stmt.where(VirtualKey.user_id == user_id)
+        rows = (await session.execute(stmt)).all()
+
+        repaired = 0
+        for vk, team_id in rows:
+            try:
+                raw_key = self._encryption.decrypt(vk.key_value_encrypted)
+            except Exception:
+                logger.warning(
+                    "service_key_repair.decrypt_failed", key_id=str(vk.id)
+                )
+                continue
+            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+            try:
+                if await redis.exists(f"key:vk:{key_hash}"):
+                    continue
+                remaining = max(
+                    1, int((vk.expires_at - now).total_seconds())
+                )
+                pipe = redis.pipeline(transaction=False)
+                pipe.setex(f"key:vk:{key_hash}", remaining, str(vk.user_id))
+                if team_id is not None:
+                    pipe.sadd(f"team:vk_hashes:{team_id}", key_hash)
+                await pipe.execute()
+            except Exception:
+                logger.warning(
+                    "service_key_repair.redis_failed",
+                    key_id=str(vk.id),
+                    exc_info=True,
+                )
+                continue
+            repaired += 1
+            logger.info(
+                "service_key_repair.rewritten",
+                key_id=str(vk.id),
+                user_id=str(vk.user_id),
+            )
+        return repaired
 
     async def _publish_key_revoked(
         self,
@@ -698,6 +842,7 @@ class KeyService:
         team_id: uuid.UUID | None = None,
         status: KeyStatus | None = None,
         email: str | None = None,
+        kind: str | None = None,
         cursor: str | None = None,
         limit: int = 50,
     ) -> tuple[list[KeyResponse], bool]:
@@ -715,6 +860,7 @@ class KeyService:
             team_id=team_id,
             status=status,
             email=email,
+            kind=kind,
             cursor=decoded,
             legacy_id_cursor=legacy_uuid,
             limit=limit + 1,
@@ -724,12 +870,30 @@ class KeyService:
             keys = keys[:limit]
 
         email_by_user: dict[uuid.UUID, str] = {}
+        last_req_by_user: dict[uuid.UUID, datetime] = {}
         if keys:
             uids = {vk.user_id for vk in keys}
+            issuer_ids = {vk.issued_by for vk in keys if vk.issued_by}
             rows = await session.execute(
-                select(User.id, User.email).where(User.id.in_(uids))
+                select(User.id, User.email).where(
+                    User.id.in_(uids | issuer_ids)
+                )
             )
             email_by_user = {uid: em for uid, em in rows.all()}
+            # last_used_at 컬럼은 아무 경로도 쓰지 않는다 — 실사용 시각은
+            # usage_logs 에서 집계한다(키는 유저당 1개라 per-user 최댓값이 곧
+            # per-key 마지막 사용).
+            from sqlalchemy import func as sa_func
+
+            last_rows = await session.execute(
+                select(
+                    UsageLog.user_id,
+                    sa_func.max(UsageLog.requested_at),
+                )
+                .where(UsageLog.user_id.in_(uids))
+                .group_by(UsageLog.user_id)
+            )
+            last_req_by_user = dict(last_rows.all())
 
         items = [
             KeyResponse(
@@ -742,6 +906,9 @@ class KeyService:
                 expires_at=vk.expires_at,
                 last_used_at=vk.last_used_at,
                 created_at=vk.created_at,
+                kind=vk.kind,
+                issued_by_email=email_by_user.get(vk.issued_by) if vk.issued_by else None,
+                last_request_at=last_req_by_user.get(vk.user_id),
             )
             for vk in keys
         ]

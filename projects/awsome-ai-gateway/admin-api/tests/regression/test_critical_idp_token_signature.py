@@ -146,6 +146,7 @@ def _db_user() -> MagicMock:
     u.team_id = uuid.uuid4()
     u.role = UserRole.DEVELOPER
     u.is_active = True
+    u.is_service_account = False
     return u
 
 

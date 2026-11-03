@@ -114,6 +114,50 @@ async def run_key_expiry() -> None:
             logger.exception("scheduler.key_expiry_failed")
 
 
+async def run_service_key_repair() -> None:
+    """ACTIVE kind='service' VK 의 key:vk:{hash} Redis 엔트리 재기록.
+
+    key:vk 는 gateway VK 인증의 유일한 소스 — volatile-lru 축출/failover 로
+    유실되면 유효한 장기키가 401 이 된다. 서비스 계정은 재로그인으로
+    자가치유할 수 없으니 여기서 복구한다.
+    """
+    settings = get_settings()
+    if not settings.SERVICE_KEY_REPAIR_ENABLED:
+        return
+    async with AsyncSessionLocal() as session:
+        try:
+            if not await _try_job_lock(session, "service_key_repair"):
+                return
+            try:
+                from app.core.cache_invalidation import CacheInvalidationManager
+                from app.core.encryption import AESEncryptionService
+                from app.core.redis_client import create_redis_client
+                from app.services.key_service import KeyService
+
+                redis = await create_redis_client()
+                try:
+                    svc = KeyService(
+                        encryption=AESEncryptionService(
+                            settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value()
+                        ),
+                        cache_mgr=CacheInvalidationManager(redis),
+                    )
+                    repaired = await svc.repair_service_key_redis(session)
+                    if repaired:
+                        logger.info(
+                            "scheduler.service_key_repaired", count=repaired
+                        )
+                finally:
+                    try:
+                        await redis.aclose()
+                    except Exception:
+                        pass
+            finally:
+                await _release_job_lock(session, "service_key_repair")
+        except Exception:
+            logger.exception("scheduler.service_key_repair_failed")
+
+
 async def run_key_purge() -> None:
     async with AsyncSessionLocal() as session:
         try:
@@ -172,6 +216,13 @@ def main() -> None:
         run_key_expiry,
         CronTrigger.from_crontab(settings.KEY_EXPIRY_CRON, timezone=tz),
         id="key_expiry",
+        replace_existing=True,
+        **_JOB_DEFAULTS,
+    )
+    scheduler.add_job(
+        run_service_key_repair,
+        CronTrigger.from_crontab(settings.SERVICE_KEY_REPAIR_CRON, timezone=tz),
+        id="service_key_repair",
         replace_existing=True,
         **_JOB_DEFAULTS,
     )

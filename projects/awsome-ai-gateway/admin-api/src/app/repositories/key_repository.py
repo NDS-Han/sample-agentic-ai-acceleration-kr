@@ -68,11 +68,13 @@ class KeyRepository:
             inserted AS (
                 INSERT INTO auth.virtual_keys (
                     id, user_id, key_value_encrypted, key_prefix,
-                    status, expires_at, issued_at
+                    status, expires_at, issued_at,
+                    kind, issued_by, issued_via_service_token
                 )
                 VALUES (
                     :new_id, :user_id, :enc, :prefix,
-                    'ACTIVE', :expires_at, :issued_at
+                    'ACTIVE', :expires_at, :issued_at,
+                    :kind, :issued_by, :issued_via_service_token
                 )
                 RETURNING id
             )
@@ -92,6 +94,9 @@ class KeyRepository:
                 "prefix": new_vk.key_prefix,
                 "expires_at": new_vk.expires_at,
                 "issued_at": new_vk.issued_at,
+                "kind": new_vk.kind,
+                "issued_by": new_vk.issued_by,
+                "issued_via_service_token": new_vk.issued_via_service_token,
             },
         )
         row = result.one()
@@ -115,6 +120,7 @@ class KeyRepository:
         team_id: uuid.UUID | None = None,
         status: KeyStatus | None = None,
         email: str | None = None,
+        kind: str | None = None,
         cursor: tuple[datetime, uuid.UUID] | None = None,
         legacy_id_cursor: uuid.UUID | None = None,
         limit: int = 50,
@@ -127,6 +133,8 @@ class KeyRepository:
             stmt = stmt.where(VirtualKey.user_id == user_id)
         if status:
             stmt = stmt.where(VirtualKey.status == status)
+        if kind:
+            stmt = stmt.where(VirtualKey.kind == kind)
         if cursor is not None:
             c_ts, c_id = cursor
             stmt = stmt.where(

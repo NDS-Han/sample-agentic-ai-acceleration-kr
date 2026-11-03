@@ -161,6 +161,7 @@ def _existing_account(email: str):
     u.role = UserRole.DEVELOPER
     u.team_id = uuid.uuid4()
     u.is_active = True
+    u.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     return u
 
 

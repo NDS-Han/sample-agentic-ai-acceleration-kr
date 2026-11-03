@@ -400,6 +400,11 @@ async def _resolve_idp_identity(request: Request, claims: dict) -> CurrentUser:
     if not user.is_active:
         raise HTTPException(status_code=403, detail="user_deactivated")
 
+    # 서비스 계정은 대시보드 세션을 가질 수 없다 — 사람 전용 로그인과 분리
+    # (migration 0050). IdP 에 그 계정 로그인 경로가 열려도 여기서 끊는다.
+    if getattr(user, "is_service_account", False):
+        raise HTTPException(status_code=403, detail="service_account_login_forbidden")
+
     # ADMIN_EMAILS 매칭은 **이 토큰의 검증된 이메일 클레임**에만 허용한다 —
     # 미검증 클레임 이메일은 사용자가 쓸 수 있는 값이라 주장만으로 ADMIN 승격이
     # 된다. DB 이메일은 폴백으로 쓰지 않는다: 이 게이트 이전에 미검증으로 저장된

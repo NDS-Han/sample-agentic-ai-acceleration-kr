@@ -173,6 +173,7 @@ def _stub_user(user_id: uuid.UUID, team_id: uuid.UUID | None) -> MagicMock:
     u.id = user_id
     u.team_id = team_id
     u.sso_subject = None  # MagicMock 속성은 JSON 직렬화가 안 된다
+    u.is_service_account = False
     return u
 
 
@@ -197,6 +198,8 @@ async def _issue(
     user_aliases: list[str] | Exception,
     team_aliases: list[str],
     clients: list[str] | Exception,
+    team_clients: list[str] | None = None,
+    org_clients: list[str] | None = None,
 ):
     session = AsyncMock()
     wire_savepoint(session)  # begin_nested 는 sync 호출 → async CM (실물과 동일)
@@ -214,6 +217,8 @@ async def _issue(
          patch("app.services.key_service.TeamAllowedModelRepository") as MockTam, \
          patch("app.services.key_service.UserAllowedModelRepository") as MockUam, \
          patch("app.services.key_service.UserAllowedClientRepository") as MockUac, \
+         patch("app.services.key_service.TeamAllowedClientRepository") as MockTac, \
+         patch("app.services.key_service.OrgAllowedClientRepository") as MockOac, \
          patch("app.services.key_service.audit_logger") as mock_audit:
         MockRepo.return_value.expire_and_create = AsyncMock(return_value=(0, uuid.uuid4(), []))
         # VK dedup(VK_DEDUP_SECONDS)이 발급 전 최근 ACTIVE 키를 조회한다 — 빈 리스트면
@@ -225,6 +230,10 @@ async def _issue(
         MockTam.return_value.list_by_team = _mk(team_aliases)
         MockUam.return_value.list_by_user = _mk(user_aliases)
         MockUac.return_value.list_by_user = _mk(clients)
+        # allowed_clients 스냅샷은 user→team→org 순으로 해소한다(migration 0050
+        # 핫픽스 — 예전엔 user 행만 봤다). 기본은 '엔트리 없음'.
+        MockTac.return_value.list_by_team = _mk(team_clients or [])
+        MockOac.return_value.list_by_org = _mk(org_clients or [])
         mock_audit.log = AsyncMock()
 
         return await key_service.issue_key(session, user_id=user_id, actor=actor)

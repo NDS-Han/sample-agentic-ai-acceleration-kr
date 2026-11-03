@@ -188,6 +188,7 @@ class CLIService:
             ip_address=ip_address,
             request_id=request_id,
             user=user,  # STS 경로도 같은 session 의 user 객체 재사용 (issue_key 내부 재조회 skip)
+            kind="sts",
         )
 
         # Gather rate limit / budget info for response

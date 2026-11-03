@@ -218,6 +218,7 @@ async def test_issue_key(
         session,
         user_id=user.id,
         actor=actor,
+        kind="internal",
         expires_at=datetime.now(timezone.utc) + timedelta(seconds=expires_seconds) if expires_seconds else None,
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),

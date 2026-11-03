@@ -197,6 +197,12 @@ class OIDCService:
             email_verified=email_verified,
         )
 
+        # 서비스 계정은 사람 로그인 경로로 키를 받을 수 없다 — 로그인/exchange 가
+        # 발급하는 단기키는 유저당 ACTIVE 1개 규칙상 장기 service 키를 즉시
+        # 죽인다(migration 0050, issue_key kind 가드와 쌍).
+        if getattr(user, "is_service_account", False):
+            raise OIDCNotProvisionableError("service_account_login_forbidden")
+
         # 7. 기존 사용자의 팀 변경 → transfer_user (모든 cache/RL/budget hook)
         #    단 team_source='manual'(관리자가 admin-ui 로 배정)인 사용자는
         #    되돌리지 않는다 — 그룹-유도 팀으로의 자동 복귀가 수동 배정을
@@ -522,6 +528,13 @@ class OIDCService:
         if existing is None:
             by_email = await repo.get_by_email(email)
             if by_email is not None:
+                # 서비스 계정에는 IdP identity 를 이메일로 연결하지 않는다 —
+                # 누군가 그 주소를 IdP 에서 검증받아 로그인하면 앱 계정(예산·VK)
+                # 을 통째로 물려받는 탈취 경로가 된다(migration 0050).
+                if getattr(by_email, "is_service_account", False):
+                    raise OIDCNotProvisionableError(
+                        "service_account_email_link_refused"
+                    )
                 if not email_verified:
                     logger.warning(
                         "oidc.email_link_refused_unverified",

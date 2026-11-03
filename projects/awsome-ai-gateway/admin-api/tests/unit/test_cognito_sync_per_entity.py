@@ -134,6 +134,7 @@ async def test_sync_user_updates_existing(monkeypatch):
     existing.email = "old@x.com"; existing.display_name = "Old"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=existing)
     repo.create_user = AsyncMock()
@@ -166,6 +167,7 @@ async def test_sync_user_reconciles_recreated_sub(monkeypatch):
     existing.email = "a@x.com"; existing.display_name = "A"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=None)  # 새 sub miss
     repo.get_by_email = AsyncMock(return_value=existing)     # email hit
@@ -195,6 +197,7 @@ async def test_sync_user_refuses_email_link_when_unverified(monkeypatch):
     existing.email = "a@x.com"; existing.display_name = "A"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=None)
     repo.get_by_email = AsyncMock(return_value=existing)
@@ -228,6 +231,7 @@ async def test_sync_user_deactivates_oidc_user_when_missing_in_cognito(monkeypat
     existing.id = uuid.uuid4()
     existing.provider = s.OIDC_PROVIDER_NAME
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_email = AsyncMock(return_value=existing)
     repo.create_user = AsyncMock()
@@ -287,6 +291,7 @@ async def test_sync_user_deactivates_synthetic_email_user_by_sub_or_suffix(monke
     existing.id = uuid.uuid4()
     existing.provider = s.OIDC_PROVIDER_NAME
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     existing.role = UserRole.DEVELOPER
     existing.team_id = None
 
@@ -323,6 +328,7 @@ async def test_sync_user_fallback_hit_does_not_deactivate_live_federated_user(mo
     existing.id = uuid.uuid4()
     existing.provider = s.OIDC_PROVIDER_NAME
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
 
     repo = MagicMock()
     repo.get_by_email = AsyncMock(return_value=None)
@@ -386,6 +392,7 @@ async def test_sync_user_missing_in_cognito_skips_non_oidc(monkeypatch):
     existing.id = uuid.uuid4()
     existing.provider = "manual"  # 비-OIDC
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_email = AsyncMock(return_value=existing)
     _wire_team_cache(repo)
@@ -466,6 +473,7 @@ async def test_sync_user_returns_user_id_on_update(monkeypatch):
     existing.email = "old@x.com"; existing.display_name = "Old"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=existing)
     repo.create_user = AsyncMock()
@@ -698,6 +706,7 @@ async def test_upsert_one_user_releases_stale_pointer_with_session(monkeypatch):
     existing.email = "a@x.com"; existing.display_name = "A"
     existing.role = UserRole.TEAM_LEADER; existing.team_id = old_team
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=existing)
     repo.get_by_email = AsyncMock(return_value=None)
@@ -734,6 +743,7 @@ async def test_deactivate_missing_user_clears_leader_pointer(monkeypatch):
     existing.role = UserRole.TEAM_LEADER
     existing.team_id = uuid.uuid4()
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     existing.provider = s.OIDC_PROVIDER_NAME
     repo = MagicMock()
     repo.get_by_email = AsyncMock(return_value=existing)
@@ -768,6 +778,7 @@ async def test_sync_user_group_fetch_failure_preserves_admin(monkeypatch):
     existing.email = "admin@x.com"; existing.display_name = "A"
     existing.role = UserRole.ADMIN; existing.team_id = admin_team
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     snap = {
         "id": existing.id, "email": existing.email,
         "display_name": existing.display_name, "team_id": admin_team,
@@ -807,6 +818,7 @@ async def test_sync_group_preserves_admin_from_other_group(monkeypatch):
     existing.email = "boss@x.com"; existing.display_name = "Boss"
     existing.role = UserRole.ADMIN; existing.team_id = admin_team
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     snap = {
         "id": existing.id, "email": existing.email,
         "display_name": existing.display_name, "team_id": admin_team,
@@ -850,6 +862,7 @@ async def test_sync_user_revokes_vks_when_cognito_disables(monkeypatch):
     existing.email = "d@x.com"; existing.display_name = "D"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=existing)
     repo.get_by_email = AsyncMock(return_value=existing)
@@ -887,6 +900,7 @@ async def test_sync_user_active_stays_without_revoke(monkeypatch):
     existing.email = "a@x.com"; existing.display_name = "A"
     existing.role = UserRole.DEVELOPER; existing.team_id = uuid.UUID(s.DEFAULT_TEAM_ID)
     existing.is_active = True
+    existing.is_service_account = False  # bare MagicMock 은 truthy 라 email-link 가드에 걸린다
     repo = MagicMock()
     repo.get_by_sso_subject = AsyncMock(return_value=existing)
     repo.get_by_email = AsyncMock(return_value=existing)

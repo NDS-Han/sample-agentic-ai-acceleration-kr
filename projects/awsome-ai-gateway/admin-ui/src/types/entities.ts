@@ -33,6 +33,45 @@ export interface VirtualKeyListItem {
   created_at: string; // ISO 8601
   expires_at: string | null; // ISO 8601
   last_used_at: string | null; // ISO 8601
+  kind?: string; // 'exchange' | 'sts' | 'internal' | 'service'
+  issued_by_email?: string | null;
+  last_request_at?: string | null; // ISO 8601 — usage_logs 집계
+}
+
+// ─── Service accounts ─────────────────────────────────────────────────────────
+
+export interface ServiceAccountReadiness {
+  team_budget_ok: boolean;
+  allowed_clients_clear: boolean;
+  usable_models: number;
+}
+
+export interface ServiceAccountItem {
+  user_id: string;
+  email: string;
+  display_name: string;
+  team_id: string | null;
+  team_name: string | null;
+  is_active: boolean;
+  readiness: ServiceAccountReadiness;
+  active_key_id: string | null;
+  active_key_prefix: string | null;
+  active_key_expires_at: string | null;
+  last_request_at: string | null;
+}
+
+export interface ServiceAccountListResponse {
+  items: ServiceAccountItem[];
+  max_ttl_days: number;
+}
+
+export interface IssueServiceKeyResponse {
+  key_id: string;
+  key_prefix: string;
+  user_id: string;
+  status: string;
+  expires_at: string | null;
+  virtual_key: string | null;
 }
 
 // ─── Budgets ──────────────────────────────────────────────────────────────────

@@ -27,6 +27,9 @@ def _stub_user(user_id: uuid.UUID, team_id: uuid.UUID | None = None) -> MagicMoc
     u = MagicMock(spec=User)
     u.id = user_id
     u.team_id = team_id
+    # spec'd MagicMock 의 is_service_account 는 truthy 라 exchange 발급 가드에
+    # 걸린다 — 사람 유저 stub 은 명시적으로 False.
+    u.is_service_account = False
     # issue_key snapshots user.sso_subject into the JSON AuthContext cache payload
     # (key_service.py:133/145). A bare MagicMock attr is not JSON-serializable, so
     # pin it to the real-world value (None for non-SSO users).
@@ -49,9 +52,13 @@ class TestIssueKey:
            tests/regression/test_critical_vk_authcontext_acl_snapshot.py 가 못 박는다.
         """
         with patch("app.services.key_service.UserAllowedModelRepository") as MockUam, \
-             patch("app.services.key_service.UserAllowedClientRepository") as MockUac:
+             patch("app.services.key_service.UserAllowedClientRepository") as MockUac, \
+             patch("app.services.key_service.TeamAllowedClientRepository") as MockTac, \
+             patch("app.services.key_service.OrgAllowedClientRepository") as MockOac:
             MockUam.return_value.list_by_user = AsyncMock(return_value=[])
             MockUac.return_value.list_by_user = AsyncMock(return_value=[])
+            MockTac.return_value.list_by_team = AsyncMock(return_value=[])
+            MockOac.return_value.list_by_org = AsyncMock(return_value=[])
             yield
 
     def _mock_repo(self, MockRepo, *, expire_count=0):

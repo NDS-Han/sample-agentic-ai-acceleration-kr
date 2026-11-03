@@ -66,6 +66,7 @@ def _db_user(
     u.team_id = team_id
     u.role = role
     u.is_active = is_active
+    u.is_service_account = False
     return u
 
 

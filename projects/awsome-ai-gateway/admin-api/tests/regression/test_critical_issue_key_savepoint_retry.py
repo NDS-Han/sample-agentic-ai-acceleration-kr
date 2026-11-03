@@ -97,6 +97,7 @@ def _stub_user(user_id: uuid.UUID) -> MagicMock:
     u.id = user_id
     u.team_id = None
     u.sso_subject = None  # JSON 스냅샷에 들어가므로 직렬화 가능한 값이어야 한다
+    u.is_service_account = False  # spec'd MagicMock 은 truthy 라 발급 가드에 걸린다
     return u
 
 

@@ -126,6 +126,12 @@ class User(Base):
     team_source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="sync", server_default="sync"
     )
+    #: 서비스 계정 표지 — 관리자가 admin-ui 에서 설정(migration 0050).
+    #: True 인 계정에만 ``issue_key(kind="service")`` 로 장기 VK 를 발급할 수
+    #: 있고, 반대로 이 계정들은 exchange/sts 경로의 단기키 발급이 거부된다.
+    is_service_account: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default="false"
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -154,6 +160,18 @@ class VirtualKey(Base):
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    #: 발급 경로 구분 — 'exchange'(OIDC) | 'sts'(CLI) | 'internal'(dev test) |
+    #: 'service'(서비스 계정 장기키, /admin/keys). issue_key 가 kind ↔
+    #: is_service_account 조합을 강제한다(migration 0050).
+    kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="exchange", server_default="exchange"
+    )
+    issued_by: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("auth.users.id"), nullable=True
+    )
+    issued_via_service_token: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("auth.service_tokens.id"), nullable=True
+    )
     revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     revoked_by: Mapped[uuid.UUID | None] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

@@ -740,6 +740,12 @@ class CognitoSyncService:
         if existing is None and email:
             by_email = await repo.get_by_email(email)
             if by_email is not None:
+                # 서비스 계정에 IdP identity 를 이메일로 연결하지 않는다 —
+                # OIDC 경로(oidc_service._upsert_user)와 같은 탈취 차단.
+                if getattr(by_email, "is_service_account", False):
+                    raise ValueError(
+                        f"service_account_email_link_refused: {email}"
+                    )
                 if not email_verified:
                     logger.warning(
                         "cognito_sync.email_link_refused_unverified",
