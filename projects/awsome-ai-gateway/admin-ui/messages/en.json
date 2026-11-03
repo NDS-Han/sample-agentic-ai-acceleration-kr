@@ -251,7 +251,8 @@
     "saCopyFailed": "Copy failed — select the key text manually",
     "saAlreadyFlagged": "service account",
     "saWillFlag": "This account is not a service account yet. Issuing will convert it to a service account — login and short-lived key issuance will be blocked.",
-    "saMarkFailed": "Failed to convert to service account"
+    "saMarkFailed": "Failed to convert to service account",
+    "saKey": "Active key"
   },
   "budgets": {
     "title": "Budget Management",

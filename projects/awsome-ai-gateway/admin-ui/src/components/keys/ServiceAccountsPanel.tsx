@@ -174,7 +174,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
             <Tr>
               <Th>{t('saEmail')}</Th>
               <Th>{t('saTeam')}</Th>
-              <Th>{t('status')}</Th>
+              <Th>{t('saKey')}</Th>
               <Th>{t('expiresAt')}</Th>
               <Th>{t('saLastUsed')}</Th>
               <Th numeric>{t('actions')}</Th>
