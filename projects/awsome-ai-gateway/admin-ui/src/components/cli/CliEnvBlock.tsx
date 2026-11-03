@@ -11,7 +11,7 @@ import { Check, Copy } from 'lucide-react';
  * 복사 버튼은 클라이언트에서만 동작하므로 이 컴포넌트만 'use client'.
  */
 export function CliEnvBlock({ text }: { text: string }) {
-  const t = useTranslations('cli');
+  const t = useTranslations('integration');
   const [copied, setCopied] = useState(false);
 
   const handleCopy = async () => {

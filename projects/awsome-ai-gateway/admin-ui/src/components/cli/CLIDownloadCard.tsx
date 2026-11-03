@@ -41,7 +41,7 @@ function getCurlCommand(item: CLIDownloadItem): string | null {
 }
 
 export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
-  const t = useTranslations('cli');
+  const t = useTranslations('integration');
   const [copied, setCopied] = useState(false);
   const [cmdCopied, setCmdCopied] = useState(false);
 

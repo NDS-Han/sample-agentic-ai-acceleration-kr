@@ -10,8 +10,8 @@ import {
   Activity,
   AppWindow,
   BarChart3,
+  Blocks,
   BrainCircuit,
-  Download,
   KeyRound,
   LayoutDashboard,
   Sparkles,
@@ -111,16 +111,17 @@ const NAV_ITEMS: NavItemDef[] = [
     requiresChatDeploy: true,
   },
   {
-    key: 'cli',
-    href: '/cli',
-    icon: <Download size={18} />,
-    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
-  },
-  {
     key: 'my',
     href: '/my',
     icon: <UserCircle size={18} />,
     allowedRoles: [UserRoleConst.TEAM_LEADER, UserRoleConst.DEVELOPER],
+  },
+  {
+    // 외부 앱 연동 샘플 + CLI 다운로드 — 사이드바 최하단
+    key: 'integration',
+    href: '/integration',
+    icon: <Blocks size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
   },
 ];
 
