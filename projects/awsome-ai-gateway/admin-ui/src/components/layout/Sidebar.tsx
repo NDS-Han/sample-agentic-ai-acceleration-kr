@@ -96,13 +96,6 @@ const NAV_ITEMS: NavItemDef[] = [
     icon: <Activity size={18} />,
     allowedRoles: [UserRoleConst.ADMIN],
   },
-  {
-    // 감사 로그 — ADMIN 전용(require_admin). PAGE_PERMISSIONS['/audit'] 과 동일.
-    key: 'audit',
-    href: '/audit',
-    icon: <ScrollText size={18} />,
-    allowedRoles: [UserRoleConst.ADMIN],
-  },
   // ⚠️ analytics / cli 는 페이지·권한표(PAGE_PERMISSIONS)·번역키(nav.analytics, nav.cli)가
   //    모두 있는데 여기 항목만 없어서, URL 을 직접 입력하지 않으면 도달할 수 없는
   //    화면이었다(사이드바가 유일한 내비게이션이다). allowedRoles 는 PAGE_PERMISSIONS 와
@@ -133,14 +126,24 @@ const NAV_ITEMS: NavItemDef[] = [
   },
 ];
 
-// 외부 앱 연동 샘플 + CLI 다운로드 — 스크롤 목록이 아니라 테마 토글 바로 위의
-// 사이드바 하단에 고정한다.
-const BOTTOM_NAV_ITEM: NavItemDef = {
-  key: 'integration',
-  href: '/integration',
-  icon: <Blocks size={18} />,
-  allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
-};
+// 스크롤 목록이 아니라 테마 토글 바로 위의 사이드바 하단에 고정한다.
+// 감사 로그 → 연동 순.
+const BOTTOM_NAV_ITEMS: NavItemDef[] = [
+  {
+    // 감사 로그 — ADMIN 전용(require_admin). PAGE_PERMISSIONS['/audit'] 과 동일.
+    key: 'audit',
+    href: '/audit',
+    icon: <ScrollText size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN],
+  },
+  {
+    // 외부 앱 연동 샘플 + CLI 다운로드.
+    key: 'integration',
+    href: '/integration',
+    icon: <Blocks size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
+  },
+];
 
 export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
   const pathname = usePathname();
@@ -195,25 +198,28 @@ export function Sidebar({ role, chatEnabled = false }: SidebarProps) {
         </ul>
       </nav>
 
-      {/* Footer — integration 은 스크롤 목록이 아니라 테마 토글 위에 고정 */}
+      {/* Footer — audit/integration 은 스크롤 목록이 아니라 테마 토글 위에 고정 */}
       <div className="flex flex-col gap-3 border-t border-sidebar-border px-4 py-3">
-        {role && BOTTOM_NAV_ITEM.allowedRoles.includes(role) && (
+        {BOTTOM_NAV_ITEMS.filter(
+          (item) => role && item.allowedRoles.includes(role),
+        ).map((item) => (
           <Link
-            href={BOTTOM_NAV_ITEM.href}
+            key={item.href}
+            href={item.href}
             className={[
               'relative flex items-center gap-3 rounded-apple-sm px-3 py-2 text-sm font-medium pressable transition-[background,color,box-shadow] duration-150',
-              isActive(BOTTOM_NAV_ITEM.href)
+              isActive(item.href)
                 ? 'bg-primary/10 text-primary font-semibold shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)] before:absolute before:left-0 before:top-[22%] before:bottom-[22%] before:w-[3px] before:rounded-full before:bg-primary before:content-[""] dark:before:shadow-[0_0_10px_hsl(var(--primary))]'
                 : 'text-sidebar-foreground hover:bg-primary/[0.06] hover:text-primary dark:hover:bg-white/[0.05] dark:hover:text-foreground',
             ].join(' ')}
-            aria-current={isActive(BOTTOM_NAV_ITEM.href) ? 'page' : undefined}
+            aria-current={isActive(item.href) ? 'page' : undefined}
           >
             <span className="flex-shrink-0" aria-hidden="true">
-              {BOTTOM_NAV_ITEM.icon}
+              {item.icon}
             </span>
-            {t(BOTTOM_NAV_ITEM.key)}
+            {t(item.key)}
           </Link>
-        )}
+        ))}
         <ThemeToggle />
         <p className="px-2 text-xs text-muted-foreground">AWSome AI Gateway Admin</p>
       </div>

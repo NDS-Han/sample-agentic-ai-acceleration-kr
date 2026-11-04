@@ -104,7 +104,7 @@ export default async function AuditPage(props: AuditPageProps) {
       </div>
 
       {/* 기간 pill — 상대 구간(24h/7d/30d). 백엔드도 필수로 받아 스캔 범위를 묶는다. */}
-      <div className="mb-3 flex flex-wrap items-center gap-2">
+      <div className="mb-4 flex flex-wrap items-center gap-2">
         {RANGES.map((r) => (
           <Link
             key={r}
@@ -158,7 +158,7 @@ export default async function AuditPage(props: AuditPageProps) {
       </div>
 
       {/* 행위자 이메일 검색 + 대상 칩 */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
+      <div className="mb-6 flex flex-wrap items-center gap-2">
         <form method="GET" className="flex items-center gap-2">
           {/* 나머지 필터를 hidden 으로 실어 submit 이 리셋하지 않게 한다. */}
           <input type="hidden" name="range" value={range} />

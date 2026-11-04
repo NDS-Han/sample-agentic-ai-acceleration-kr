@@ -134,8 +134,8 @@ export function AuditLogListView({
   }
 
   return (
-    <div>
-      <Table density="compact">
+    <div className="glass rounded-apple p-4">
+      <Table>
         <THead>
           <Tr>
             <Th className="w-6"></Th>
