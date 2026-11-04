@@ -5,6 +5,7 @@ import { adminAPI } from '@/lib/api-client';
 import { CLIDownloadCard } from '@/components/cli/CLIDownloadCard';
 import { CliEnvBlock } from '@/components/cli/CliEnvBlock';
 import { SdkSamples } from '@/components/integration/SdkSamples';
+import { highlightCode } from '@/lib/highlight';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
@@ -44,7 +45,7 @@ function gatewayUrl(): string {
 }
 
 /** 외부 앱 연동 샘플 — 실제 배포 gateway URL 을 심어서 복사만으로 동작하게 한다. */
-function buildAppSamples() {
+async function buildAppSamples() {
   const g = gatewayUrl();
   const claude = {
     curl: [
@@ -128,7 +129,23 @@ function buildAppSamples() {
       `resp = gpt.invoke("Hello")`,
     ].join('\n'),
   };
-  return { claude, openai, langchain };
+  async function block(text: string, lang: 'bash' | 'python', filename: string) {
+    return { html: await highlightCode(text, lang), text, filename };
+  }
+  return {
+    claude: {
+      curl: await block(claude.curl, 'bash', 'request.sh'),
+      python: await block(claude.python, 'python', 'agent.py'),
+    },
+    openai: {
+      curl: await block(openai.curl, 'bash', 'request.sh'),
+      python: await block(openai.python, 'python', 'app.py'),
+    },
+    langchain: {
+      curl: await block(langchain.curl, 'bash', 'note.sh'),
+      python: await block(langchain.python, 'python', 'agent.py'),
+    },
+  };
 }
 
 export default async function CLIPage() {
@@ -169,7 +186,7 @@ export default async function CLIPage() {
       <section className="glass glass-hover rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('appIntegTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('appIntegDesc')}</p>
-        <SdkSamples samples={buildAppSamples()} />
+        <SdkSamples samples={await buildAppSamples()} />
         <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
           <li>{t('appIntegNoteVk')}</li>
           <li>{t('appIntegNoteAskAdmin')}</li>

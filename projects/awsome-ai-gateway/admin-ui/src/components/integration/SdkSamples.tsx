@@ -4,19 +4,26 @@
 
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
-import { CliEnvBlock } from '@/components/cli/CliEnvBlock';
+import { CodeBlock } from '@/components/common/CodeBlock';
 
 export type SdkId = 'claude' | 'openai' | 'langchain';
 
+/** 서버가 shiki 로 하이라이팅해 넘기는 샘플 — html 은 표시용, text 는 복사용. */
+export interface SdkSample {
+  curl: { html: string; text: string; filename: string };
+  python: { html: string; text: string; filename: string };
+}
+
 interface SdkSamplesProps {
-  samples: Record<SdkId, { curl: string; python: string }>;
+  samples: Record<SdkId, SdkSample>;
 }
 
 const SDKS: SdkId[] = ['claude', 'openai', 'langchain'];
 
 /**
  * 외부 앱 연동 SDK 선택 카드 — 클릭하면 해당 SDK 의 curl/Python 샘플을
- * 아래에 보여 준다. 샘플 문자열은 서버(gateway URL 실값)에서 만들어 넘긴다.
+ * 아래에 보여 준다. 샘플은 서버(gateway URL 실값 + shiki 하이라이트)에서
+ * 만들어 넘긴다.
  */
 export function SdkSamples({ samples }: SdkSamplesProps) {
   const t = useTranslations('integration');
@@ -50,13 +57,21 @@ export function SdkSamples({ samples }: SdkSamplesProps) {
           <p className="text-xs font-semibold text-muted-foreground">
             curl — {t(`sdk.${sdk}.endpoint`)}
           </p>
-          <CliEnvBlock text={samples[sdk].curl} />
+          <CodeBlock
+            html={samples[sdk].curl.html}
+            text={samples[sdk].curl.text}
+            filename={samples[sdk].curl.filename}
+          />
         </div>
         <div className="space-y-2">
           <p className="text-xs font-semibold text-muted-foreground">
             Python — {t(`sdk.${sdk}.lib`)}
           </p>
-          <CliEnvBlock text={samples[sdk].python} />
+          <CodeBlock
+            html={samples[sdk].python.html}
+            text={samples[sdk].python.text}
+            filename={samples[sdk].python.filename}
+          />
         </div>
       </div>
     </div>

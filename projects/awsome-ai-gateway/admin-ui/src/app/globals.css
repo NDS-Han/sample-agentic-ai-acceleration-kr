@@ -441,3 +441,22 @@
     font-variant-numeric: slashed-zero;
   }
 }
+
+/* CodeBlock — shiki dual theme(github-light/dark). defaultColor:false 로
+   생성되는 --shiki-light/--shiki-dark 변수를 .dark 셀렉터로 전환한다. */
+.codeblock-body .shiki {
+  padding: 0.75rem 1rem;
+  overflow-x: auto;
+  background-color: var(--shiki-light-bg);
+  color: var(--shiki-light);
+}
+.dark .codeblock-body .shiki {
+  background-color: var(--shiki-dark-bg);
+  color: var(--shiki-dark);
+}
+.codeblock-body .shiki span {
+  color: var(--shiki-light);
+}
+.dark .codeblock-body .shiki span {
+  color: var(--shiki-dark);
+}
