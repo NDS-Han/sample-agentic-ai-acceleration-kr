@@ -3,7 +3,8 @@
 import type { CLIDownloadItem } from '@/types/entities';
 import { adminAPI } from '@/lib/api-client';
 import { CLIDownloadCard } from '@/components/cli/CLIDownloadCard';
-import { CliEnvBlock } from '@/components/cli/CliEnvBlock';
+import { CodeBlock } from '@/components/common/CodeBlock';
+import { highlightCode } from '@/lib/highlight';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
@@ -61,6 +62,12 @@ export default async function CLIPage() {
     download_url: `/api/cli-download/${item.os}/${item.arch}`,
   }));
 
+  const envText = buildEnvText();
+  const [installLinuxHtml, installWindowsHtml] = await Promise.all([
+    highlightCode(t('installLinux'), 'bash'),
+    highlightCode(t('installWindows'), 'powershell'),
+  ]);
+
   const code = (chunks: React.ReactNode) => (
     <code className="bg-muted px-1 rounded">{chunks}</code>
   );
@@ -76,7 +83,11 @@ export default async function CLIPage() {
       <section className="glass glass-hover rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('prereqTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('prereqDesc')}</p>
-        <CliEnvBlock text={buildEnvText()} />
+        <CodeBlock
+          html={await highlightCode(envText, 'bash')}
+          text={envText}
+          filename="env.sh"
+        />
         <p className="text-xs text-muted-foreground">{t('prereqPsNote')}</p>
       </section>
 
@@ -86,15 +97,19 @@ export default async function CLIPage() {
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="glass glass-hover rounded-apple p-4 text-sm space-y-2">
             <p className="font-semibold">{t('installLinuxLabel')}</p>
-            <pre className="bg-background rounded p-3 overflow-x-auto text-xs">
-              {t('installLinux')}
-            </pre>
+            <CodeBlock
+              html={installLinuxHtml}
+              text={t('installLinux')}
+              filename="install.sh"
+            />
           </div>
           <div className="glass glass-hover rounded-apple p-4 text-sm space-y-2">
             <p className="font-semibold">{t('installWindowsLabel')}</p>
-            <pre className="bg-background rounded p-3 overflow-x-auto text-xs">
-              {t('installWindows')}
-            </pre>
+            <CodeBlock
+              html={installWindowsHtml}
+              text={t('installWindows')}
+              filename="install.ps1"
+            />
           </div>
         </div>
       </section>

@@ -7,7 +7,10 @@ import { codeToHtml } from 'shiki';
  * 생성 HTML 은 --shiki-light/--shiki-dark CSS 변수를 싣고, globals.css 의
  * .dark 셀렉터가 테마를 전환한다. 클라이언트 번들에 하이라이터를 싣지 않는다.
  */
-export async function highlightCode(code: string, lang: 'bash' | 'python'): Promise<string> {
+export async function highlightCode(
+  code: string,
+  lang: 'bash' | 'python' | 'powershell'
+): Promise<string> {
   return codeToHtml(code, {
     lang,
     themes: { light: 'github-light', dark: 'github-dark' },
