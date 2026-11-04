@@ -173,7 +173,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
                 value={kpi ? kpi.total_requests.toLocaleString() : '—'}
                 icon={<Activity size={18} aria-hidden="true" />}
                 alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
-                alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
+                alertLabel={err.warn ? t('errorRateLabel') : undefined}
                 description={
                   kpi
                     ? t('requestsSubline', {
