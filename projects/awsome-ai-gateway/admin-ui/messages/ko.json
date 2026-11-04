@@ -14,6 +14,7 @@
     "docker": "Docker 상태",
     "mainMenu": "주요 메뉴",
     "integration": "연동",
+    "cli": "CLI",
     "audit": "감사 로그"
   },
   "common": {
@@ -1264,7 +1265,9 @@
     "checksum": "SHA256 체크섬",
     "download": "다운로드",
     "copyChecksum": "체크섬 복사",
-    "subtitle": "외부 앱에서 gateway 를 호출하는 방법과 gateway-cli 설치 안내",
+    "subtitle": "외부 앱에서 gateway 를 호출하는 방법",
+    "cliTitle": "gateway-cli",
+    "cliSubtitle": "gateway-cli 설치 및 활성화 안내",
     "prereqTitle": "사전 준비",
     "prereqDesc": "아래 환경변수를 셸에 export 해두세요. OIDC 값은 Cognito User Pool, URL은 게이트웨이 배포값입니다. (배포 설정이 감지되면 실제 값이 채워집니다)",
     "prereqPsNote": "Windows PowerShell은 $env:NAME=\"값\" 형식으로 설정하세요.",

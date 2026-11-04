@@ -17,6 +17,7 @@ import {
   LayoutDashboard,
   ScrollText,
   Sparkles,
+  Terminal,
   UserCircle,
   Users,
   Wallet,
@@ -137,11 +138,18 @@ const BOTTOM_NAV_ITEMS: NavItemDef[] = [
     allowedRoles: [UserRoleConst.ADMIN],
   },
   {
-    // 외부 앱 연동 샘플 + CLI 다운로드. /cli/downloads 는 무인증이라 개발자도
-    // 페이지가 정상 동작한다 — DEVELOPER 의 두 화면(/my 와 여기) 중 하나.
+    // 외부 앱 연동 샘플(서비스 VK). DEVELOPER 도 볼 수 있는 몇 안 되는 화면 중 하나.
     key: 'integration',
     href: '/integration',
     icon: <Blocks size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER, UserRoleConst.DEVELOPER],
+  },
+  {
+    // gateway-cli 설치·활성화 + 바이너리 다운로드. /cli/downloads 는 무인증이라
+    // 개발자도 페이지가 정상 동작한다.
+    key: 'cli',
+    href: '/cli',
+    icon: <Terminal size={18} />,
     allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER, UserRoleConst.DEVELOPER],
   },
 ];

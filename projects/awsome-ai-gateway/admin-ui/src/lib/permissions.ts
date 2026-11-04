@@ -63,10 +63,10 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
   // 감사 로그 뷰어 — admin only. 백엔드 /admin/audit/* 전부 require_admin.
   '/audit': [UserRole.ADMIN],
 
-  // CLI downloads + 외부 앱 연동 문서 — admin + team leader + developer.
-  // 페이지가 부르는 API(/cli/downloads)는 무인증이라 개발자도 열린다.
+  // 외부 앱 연동 문서 + CLI 다운로드/설치 — admin + team leader + developer.
+  // /cli 가 부르는 API(/cli/downloads)는 무인증이라 개발자도 열린다.
   '/integration': [UserRole.ADMIN, UserRole.TEAM_LEADER, UserRole.DEVELOPER],
-  '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER, UserRole.DEVELOPER], // 구 링크 — /integration 으로 redirect
+  '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER, UserRole.DEVELOPER],
 
   // BI assistant chat — ADMIN 전용.
   // ⚠️ 예전 주석은 "/analytics 와 동일 범위(admin + team leader)" 였지만 백엔드와 어긋난다:

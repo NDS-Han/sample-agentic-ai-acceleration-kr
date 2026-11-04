@@ -14,6 +14,7 @@
     "docker": "Docker Status",
     "mainMenu": "Main menu",
     "integration": "Integration",
+    "cli": "CLI",
     "audit": "Audit Log"
   },
   "common": {
@@ -1264,7 +1265,9 @@
     "checksum": "SHA256 Checksum",
     "download": "Download",
     "copyChecksum": "Copy Checksum",
-    "subtitle": "How external apps call the gateway, plus gateway-cli installation",
+    "subtitle": "How external apps call the gateway",
+    "cliTitle": "gateway-cli",
+    "cliSubtitle": "Install and activate the gateway-cli",
     "prereqTitle": "Prerequisites",
     "prereqDesc": "Export the environment variables below in your shell. OIDC values come from the Cognito User Pool; URLs come from the gateway deployment. (Values are pre-filled when deployment settings are detected.)",
     "prereqPsNote": "On Windows PowerShell, use $env:NAME=\"value\" syntax.",
