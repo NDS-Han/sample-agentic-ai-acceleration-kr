@@ -18,7 +18,14 @@ const PCT_TONE: Record<string, string> = {
   [AlertLevel.CRITICAL]: 'text-destructive',
 };
 
-export function MyBudgetCard({ data }: { data: MyBudgetResponse }) {
+export function MyBudgetCard({
+  data,
+  basisMismatch = false,
+}: {
+  data: MyBudgetResponse;
+  /** 사용량 섹션이 과거 월을 보고 있을 때 — 이 카드는 항상 이번 달 기준이라 기준 월을 표시한다. */
+  basisMismatch?: boolean;
+}) {
   const t = useTranslations('my');
   const b = data.budget;
   const team = data.team;
@@ -56,8 +63,15 @@ export function MyBudgetCard({ data }: { data: MyBudgetResponse }) {
   const teamLevel = alertLevelOf(team?.usage_pct ?? null);
 
   return (
-    <div className="glass glass-hover rounded-apple p-6">
-      <h2 className="text-base font-semibold mb-4">{t('monthlyBudget')}</h2>
+    <div className="glass glass-hover rounded-apple p-6 h-full">
+      <div className="mb-4 flex items-baseline justify-between gap-2">
+        <h2 className="text-base font-semibold">{t('monthlyBudget')}</h2>
+        {basisMismatch && (
+          <span className="text-xs text-muted-foreground">
+            {t('budgetBasis', { period: data.period })}
+          </span>
+        )}
+      </div>
       <div className="space-y-3">
         <div className="flex items-end justify-between">
           <span className="text-sm text-muted-foreground">{t('spent')}</span>

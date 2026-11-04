@@ -4,20 +4,23 @@ import { Suspense } from 'react';
 import { getTranslations } from 'next-intl/server';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { fetchMyBudget, fetchMyPeriods, fetchMyUsage } from '@/lib/actions/my';
-import { MyBudgetCard } from '@/components/my/MyBudgetCard';
 import { MyUsageDashboard } from '@/components/my/MyUsageDashboard';
 import { PeriodSelector } from '@/components/dashboard/PeriodSelector';
 import { ErrorState } from '@/components/common/ErrorState';
 import { currentCalendarMonth, isMonth } from '@/lib/utils/period';
 
-async function BudgetSection() {
-  const data = await fetchMyBudget().catch(() => null);
-  return data ? <MyBudgetCard data={data} /> : <ErrorState compact />;
-}
-
 async function UsageSection({ period }: { period?: string }) {
-  const data = await fetchMyUsage(period).catch(() => null);
-  return data ? <MyUsageDashboard data={data} /> : <ErrorState />;
+  // 예산과 사용량을 병렬로 fetch — 직렬이면 사용량이 끝난 뒤에야 예산 요청이
+  // 시작되는 워터폴이 생긴다. 예산 실패만 카드 영역으로 격리한다.
+  const [usage, budget] = await Promise.all([
+    fetchMyUsage(period).catch(() => null),
+    fetchMyBudget().catch(() => null),
+  ]);
+  return usage ? (
+    <MyUsageDashboard data={usage} budget={budget} />
+  ) : (
+    <ErrorState />
+  );
 }
 
 interface MyPageProps {
@@ -50,18 +53,9 @@ export default async function MyPage(props: MyPageProps) {
         <PeriodSelector periods={selectorPeriods} current={effectiveMonth} />
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        <div className="lg:col-span-1">
-          <Suspense fallback={<SkeletonCard count={1} />}>
-            <BudgetSection />
-          </Suspense>
-        </div>
-        <div className="lg:col-span-2">
-          <Suspense key={effectiveMonth} fallback={<SkeletonCard count={3} />}>
-            <UsageSection period={effectiveMonth} />
-          </Suspense>
-        </div>
-      </div>
+      <Suspense key={effectiveMonth} fallback={<SkeletonCard count={4} />}>
+        <UsageSection period={effectiveMonth} />
+      </Suspense>
     </div>
   );
 }

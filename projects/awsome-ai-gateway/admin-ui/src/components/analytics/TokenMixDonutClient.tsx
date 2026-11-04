@@ -17,20 +17,25 @@ export interface TokenBreakdownData {
 // 버킷별 의미색 — 팔레트 순환색과 달리 어떤 차트에서도 같은 버킷=같은 색.
 // sky(#38bdf8)와 teal(#2dd4bf)은 색상축이 붙어 있어 구분이 안 된다 — 4개가
 // 전부 다른 색상축이 되게 input=sky / output=pink / read=green / write=amber.
-const BUCKETS = [
+export const TOKEN_BUCKETS = [
   { key: 'input_tokens', labelKey: 'tokenInput', color: '#38bdf8' },
   { key: 'output_tokens', labelKey: 'tokenOutput', color: '#f472b6' },
   { key: 'cache_read_tokens', labelKey: 'tokenCacheRead', color: '#4ade80' },
   { key: 'cache_write_tokens', labelKey: 'tokenCacheWrite', color: '#fbbf24' },
 ] as const;
 
+const BUCKETS = TOKEN_BUCKETS;
+
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
 
 interface Props {
   data: TokenBreakdownData;
+  /** 'stacked' 면 뷰포트가 넓어도 세로 배치 — 카드 폭이 좁을 때 범례를 아래로.
+   *  (md:flex-row 는 카드 폭이 아니라 화면 폭 기준이라 좁은 칸에서 범례가 찌그러졌다) */
+  layout?: 'auto' | 'stacked';
 }
 
-export function TokenMixDonutClient({ data }: Props) {
+export function TokenMixDonutClient({ data, layout = 'auto' }: Props) {
   const t = useTranslations('analytics');
   const [hoverIndex, setHoverIndex] = useState<number | null>(null);
 
@@ -48,7 +53,7 @@ export function TokenMixDonutClient({ data }: Props) {
   const topIndex = items.reduce((top, it, i) => (it.tokens > items[top].tokens ? i : top), 0);
 
   return (
-    <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
+    <div className={`flex items-center justify-center gap-6 ${layout === 'stacked' ? 'flex-col' : 'flex-col md:flex-row md:gap-10'}`}>
       <div className="relative h-64 w-64 shrink-0">
         {/* 캔버스 툴팁은 도넛 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당.
             activeShape 로 호버 조각이 바깥으로 튀어나온다(기존 hoverOffset 대응). */}
@@ -99,7 +104,7 @@ export function TokenMixDonutClient({ data }: Props) {
           );
         })()}
       </div>
-      <ul className="space-y-2 w-full md:w-[24rem]">
+      <ul className={`space-y-2 w-full ${layout === 'stacked' ? '' : 'md:w-[24rem]'}`}>
         {items.map((it, i) => (
           <li
             key={it.key}
