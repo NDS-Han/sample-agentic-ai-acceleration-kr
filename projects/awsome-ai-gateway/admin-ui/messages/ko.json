@@ -169,6 +169,13 @@
       "12": "12"
     },
     "teamBudgetApplied": "팀 예산 적용",
+    "limitTeamDefault": "한도: ${amount} (팀 기본)",
+    "noPersonalCapShared": "개인 한도가 없습니다 — 아래 팀 공용 한도만 적용됩니다",
+    "noCapNoTeam": "설정된 예산 한도가 없습니다",
+    "teamPool": "팀 예산{name}",
+    "teamRemaining": "팀 잔여",
+    "teamSharedNote": "팀 전원이 공유하는 한도입니다 — 소진되면 개인 한도와 무관하게 요청이 차단됩니다",
+    "teamUnset": "팀 예산이 설정되지 않았습니다 — 관리자가 설정할 때까지 요청이 차단될 수 있습니다",
     "costSeriesTotal": "합계",
     "costSeriesOther": "기타",
     "callCount": "호출 {count, number}회"

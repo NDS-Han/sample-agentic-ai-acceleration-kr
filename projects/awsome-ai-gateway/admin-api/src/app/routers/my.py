@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import CurrentUser, get_current_user
 from app.core.db import get_db_session
 from app.core.usage_filters import cost_period_filter, current_kst_period, kst_month_expr, reporting_tz_sql
+from app.models.auth import Team
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias
 from app.models.usage import UsageLog
@@ -86,9 +87,60 @@ async def get_my_budget(
     remaining = (limit_usd - used_usd) if limit_usd is not None else None
     usage_pct = (used_usd / limit_usd * 100) if limit_usd else None
 
+    # 팀 공용 풀 — 개인 한도(A_u 또는 팀 기본 D)와 무관하게 T 가 소진되면
+    # team_budget_unset/한도초과로 요청이 차단되므로 "내 실효 한도"의 절반이다.
+    # 사용액은 개인과 같은 enforcement 계수(budget_usages, TEAM scope).
+    # T 미설정(config 행 없음 또는 max NULL)은 limit=null 로 내려 프론트가
+    # "차단 가능" 상태로 표시한다 — 실제로 그 상태에서 게이트웨이는 429 를 돌린다.
+    team = None
+    if user.team_id is not None:
+        team_cfg_stmt = (
+            select(BudgetConfig)
+            .where(
+                BudgetConfig.scope == BudgetScope.TEAM,
+                BudgetConfig.scope_id == user.team_id,
+                BudgetConfig.is_active.is_(True),
+                BudgetConfig.client.is_(None),
+            )
+            .order_by(BudgetConfig.created_at.desc())
+            .limit(1)
+        )
+        team_cfg = (await session.execute(team_cfg_stmt)).scalar_one_or_none()
+        team_used_stmt = select(func.coalesce(func.sum(BudgetUsage.used_usd), 0)).where(
+            BudgetUsage.scope == BudgetScope.TEAM,
+            BudgetUsage.scope_id == user.team_id,
+            BudgetUsage.period == period,
+            BudgetUsage.client.is_(None),
+        )
+        team_used = float((await session.execute(team_used_stmt)).scalar_one())
+        team_name = (
+            await session.execute(select(Team.name).where(Team.id == user.team_id))
+        ).scalar_one_or_none()
+
+        t_limit = float(team_cfg.max_budget_usd) if team_cfg and team_cfg.max_budget_usd is not None else None
+        t_cap = (
+            float(team_cfg.default_user_cap_usd)
+            if team_cfg and team_cfg.default_user_cap_usd is not None
+            else None
+        )
+        t_remaining = (t_limit - team_used) if t_limit is not None else None
+        t_pct = (team_used / t_limit * 100) if t_limit else None
+        team = {
+            "team_id": str(user.team_id),
+            "team_name": team_name,
+            "limit_usd": round(t_limit, 2) if t_limit is not None else None,
+            "used_usd": round(team_used, 4),
+            "remaining_usd": round(t_remaining, 4) if t_remaining is not None else None,
+            "usage_pct": round(t_pct, 1) if t_pct is not None else None,
+            # 개인 A_u 가 없을 때 본인에게 적용되는 팀 기본 상한(D). 개인 한도가
+            # 있어도 내려준다 — 표시 판단은 프론트.
+            "default_cap_usd": round(t_cap, 2) if t_cap is not None else None,
+        }
+
     return {
         "user_id": str(user.user_id),
         "period": period,
+        "team": team,
         "budget": {
             "limit_usd": round(limit_usd, 2) if limit_usd is not None else None,
             "used_usd": round(used_usd, 4),

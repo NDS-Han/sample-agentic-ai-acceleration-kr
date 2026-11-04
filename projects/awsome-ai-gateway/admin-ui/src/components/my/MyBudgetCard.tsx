@@ -21,19 +21,39 @@ const PCT_TONE: Record<string, string> = {
 export function MyBudgetCard({ data }: { data: MyBudgetResponse }) {
   const t = useTranslations('my');
   const b = data.budget;
+  const team = data.team;
+
+  // 실효 개인 상한: 개인 A_u 우선, 없으면 팀 기본 cap(D) 이 본인에게 적용된다.
+  const personalCap = b.limit_usd;
+  const teamDefaultCap = team?.default_cap_usd ?? null;
+  const effectiveCap = personalCap ?? teamDefaultCap;
+  const capIsTeamDefault = personalCap == null && teamDefaultCap != null;
   // 개인 예산 없음 — 팀 예산/D-cap 적용. 한도·잔액·사용률은 백엔드가 null 로 내린다.
   const hasPersonalBudget = b.limit_usd != null;
   // limit=0 은 실제로 저장된 $0 예산 — 요청이 전부 차단되는 상태다. usage_pct 는
   // null 로 내려오는데 ?? 0 으로 뭉개면 차단된 사용자에게 "0.0% NORMAL" 게이지가
   // 보인다(R25-N-UI2). BudgetSummaryTable 의 limit===0 특수 처리와 같은 구분.
   const isZeroBudget = b.limit_usd === 0;
-  const pct = b.usage_pct ?? 0;
-  const level = alertLevelOf(b.usage_pct);
+  // D-cap 이 적용될 때 사용률은 백엔드 usage_pct 대신 로컬 계산 — budget.usage_pct
+  // 는 개인 config 기준이라 null 이다.
+  const capPct = hasPersonalBudget
+    ? (b.usage_pct ?? 0)
+    : effectiveCap
+      ? (b.used_usd / effectiveCap) * 100
+      : 0;
+  const capRemaining = hasPersonalBudget
+    ? (b.remaining_usd ?? 0)
+    : effectiveCap != null
+      ? effectiveCap - b.used_usd
+      : 0;
+  const level = alertLevelOf(hasPersonalBudget ? b.usage_pct : capPct);
 
   const policy =
     b.policy != null && KNOWN_POLICIES.includes(b.policy)
       ? t(`policyLabel.${b.policy}`)
       : b.policy;
+
+  const teamLevel = alertLevelOf(team?.usage_pct ?? null);
 
   return (
     <div className="glass glass-hover rounded-apple p-6">
@@ -53,26 +73,68 @@ export function MyBudgetCard({ data }: { data: MyBudgetResponse }) {
               {t('zeroBudgetHint')}
             </p>
           </div>
-        ) : hasPersonalBudget ? (
+        ) : effectiveCap != null ? (
           <>
-            <UsageBar pct={pct} level={level} />
+            <UsageBar pct={capPct} level={level} />
             <div className="flex items-center justify-between text-sm text-muted-foreground">
-              <span>{t('limit', { amount: fmtUsd(b.limit_usd ?? 0).slice(1) })}</span>
+              <span>
+                {capIsTeamDefault
+                  ? t('limitTeamDefault', { amount: fmtUsd(effectiveCap).slice(1) })
+                  : t('limit', { amount: fmtUsd(effectiveCap).slice(1) })}
+              </span>
               <span className={PCT_TONE[level] ?? 'text-muted-foreground'}>
-                {pct.toFixed(1)}%
+                {capPct.toFixed(1)}%
               </span>
             </div>
             <div className="flex items-center justify-between text-sm">
               <span className="text-muted-foreground">{t('remaining')}</span>
-              <span className="font-medium">{fmtUsd(b.remaining_usd ?? 0)}</span>
+              <span className="font-medium">{fmtUsd(capRemaining)}</span>
             </div>
-            <div className="flex items-center justify-between text-sm">
-              <span className="text-muted-foreground">{t('overagePolicy')}</span>
-              <span className="font-medium">{policy}</span>
-            </div>
+            {hasPersonalBudget && (
+              <div className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">{t('overagePolicy')}</span>
+                <span className="font-medium">{policy}</span>
+              </div>
+            )}
           </>
         ) : (
-          <p className="text-sm text-muted-foreground">{t('teamBudgetApplied')}</p>
+          <p className="text-sm text-muted-foreground">
+            {team ? t('noPersonalCapShared') : t('noCapNoTeam')}
+          </p>
+        )}
+
+        {team && (
+          <div className="border-t border-border/60 pt-3 space-y-2.5">
+            <div className="flex items-center justify-between text-sm">
+              <span className="font-medium">
+                {t('teamPool', { name: team.team_name ? ` (${team.team_name})` : '' })}
+              </span>
+              {team.limit_usd != null && (
+                <span className="text-muted-foreground">
+                  {fmtUsd(team.used_usd)} / {fmtUsd(team.limit_usd)}
+                </span>
+              )}
+            </div>
+            {team.limit_usd == null ? (
+              <p className="text-xs font-medium text-[hsl(38_92%_40%)]">
+                {t('teamUnset')}
+              </p>
+            ) : (
+              <>
+                <UsageBar pct={team.usage_pct ?? 0} level={teamLevel} />
+                <div className="flex items-center justify-between text-sm">
+                  <span className="text-muted-foreground">{t('teamRemaining')}</span>
+                  <span className={`font-medium ${PCT_TONE[teamLevel] ?? ''}`}>
+                    {fmtUsd(team.remaining_usd ?? 0)}
+                    <span className="ml-1 text-xs font-normal">
+                      ({(team.usage_pct ?? 0).toFixed(1)}%)
+                    </span>
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground">{t('teamSharedNote')}</p>
+              </>
+            )}
+          </div>
         )}
       </div>
     </div>

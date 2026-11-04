@@ -9,6 +9,19 @@ import { withRetry } from '@/lib/utils/retry';
 export interface MyBudgetResponse {
   user_id: string;
   period: string;
+  /** 팀 소속이면 팀 공용 풀 상태 — 개인 한도와 별개로 소진 시 요청이 차단된다.
+   *  팀이 없으면 null. */
+  team: {
+    team_id: string;
+    team_name: string | null;
+    /** T — 미설정(config 없음/NULL)이면 null, 그 상태는 차단(429)이다. */
+    limit_usd: number | null;
+    used_usd: number;
+    remaining_usd: number | null;
+    usage_pct: number | null;
+    /** 팀 기본 개인 상한(D) — 개인 A_u 가 없을 때 본인에게 적용되는 cap. */
+    default_cap_usd: number | null;
+  } | null;
   budget: {
     /** 개인 예산 config 없음(팀 예산/D-cap 적용)이면 null — $0 한도와 구분된다. */
     limit_usd: number | null;

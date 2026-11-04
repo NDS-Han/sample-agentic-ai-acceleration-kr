@@ -169,6 +169,13 @@
       "12": "December"
     },
     "teamBudgetApplied": "Team budget applied",
+    "limitTeamDefault": "Limit: ${amount} (team default)",
+    "noPersonalCapShared": "No personal cap — only the shared team limit below applies",
+    "noCapNoTeam": "No budget limit is set",
+    "teamPool": "Team budget{name}",
+    "teamRemaining": "Team remaining",
+    "teamSharedNote": "Shared by the whole team — requests are blocked when exhausted, regardless of your personal cap",
+    "teamUnset": "No team budget is set — requests may be blocked until an admin sets one",
     "costSeriesTotal": "Total",
     "costSeriesOther": "Other",
     "callCount": "{count, number} calls"
