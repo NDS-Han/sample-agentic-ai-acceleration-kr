@@ -40,25 +40,31 @@ export default async function AuditPage(props: AuditPageProps) {
   const resourceType = searchParams?.resource_type ?? '';
   const resourceId = searchParams?.resource_id ?? '';
 
-  // 카탈로그와 첫 페이지를 병렬로 — 둘 다 실패해도 ErrorState 하나로.
-  const [catalogResult, logsResult] = await Promise.all([
-    adminAPI
-      .get<AuditActionCatalogResponse>('/admin/audit/action-catalog')
-      .then((v) => ({ ok: true as const, value: v }))
-      .catch(() => ({ ok: false as const })),
+  const fetchLogs = (g: string, a: string) =>
     adminAPI
       .get<AuditLogListResponse>('/admin/audit/logs', {
         range,
         limit: PAGE_LIMIT,
-        ...(group ? { group } : {}),
-        ...(action ? { action } : {}),
+        ...(g ? { group: g } : {}),
+        ...(a ? { action: a } : {}),
         ...(actorEmail ? { actor_email: actorEmail } : {}),
         ...(resourceType ? { resource_type: resourceType } : {}),
         ...(resourceId ? { resource_id: resourceId } : {}),
       })
       .then((v) => ({ ok: true as const, value: v }))
+      .catch(() => ({ ok: false as const }));
+
+  // 카탈로그와 첫 페이지를 병렬로. URL 의 group 이 알 수 없는 값이면 백엔드 400 —
+  // 그때는 group/action 없이 한 번 더 가져와 페이지가 통째로 죽지 않게 한다.
+  const [catalogResult, firstLogs] = await Promise.all([
+    adminAPI
+      .get<AuditActionCatalogResponse>('/admin/audit/action-catalog')
+      .then((v) => ({ ok: true as const, value: v }))
       .catch(() => ({ ok: false as const })),
+    fetchLogs(group, action),
   ]);
+  const logsResult =
+    !firstLogs.ok && (group || action) ? await fetchLogs('', '') : firstLogs;
 
   if (!catalogResult.ok || !logsResult.ok) {
     return <ErrorState />;
@@ -187,9 +193,9 @@ export default async function AuditPage(props: AuditPageProps) {
           )}
         </form>
 
-        {resourceType && (
+        {(resourceType || resourceId) && (
           <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
-            {t('targetFilter', { type: resourceType })}
+            {t('targetFilter', { type: resourceType || resourceId })}
             <Link
               href={buildQuery({ resource_type: '', resource_id: '' })}
               aria-label={t('clearTarget')}

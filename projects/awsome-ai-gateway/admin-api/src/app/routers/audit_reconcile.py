@@ -20,7 +20,7 @@ from datetime import datetime, timedelta, timezone
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import and_, or_, select
+from sqlalchemy import select, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -29,6 +29,7 @@ from app.core.audit_catalog import (
     OTHER_GROUP,
     all_known_variants,
     group_for_action,
+    normalize_action,
     sql_variants,
 )
 from app.core.auth import CurrentUser, require_admin
@@ -372,8 +373,15 @@ async def invocation_log_record(
 # - 합성 행위자: …000010=dev 로그인, …000011=서비스 토큰 공용(core/auth.py).
 #   토큰 식별자는 changes._service_token_id 에 있어 페이지 단위 배치로 해소한다.
 # - keyset 커서는 (timestamp DESC, id DESC) — 0053 인덱스가 그대로 탄다.
+# 합성 행위자 — core/auth.py 의 dev 로그인(…010)과 서비스 토큰 공용 ID(…011).
+# 주의: …010 은 시드의 실제 users 행("System Admin")이기도 하다(03_seed_data.sql).
+#       users 에 해소되면 실사용자로 표시하고, 못 찾을 때만 "dev" 로 둔다.
 _DEV_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000010")
 _SERVICE_TOKEN_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000011")
+
+# actor_email 매칭 상한 — asyncpg 파라미터 한도(32767)는 아직 멀어도, 광범위 검색이
+# 만든 수만 개의 IN 파라미터는 계획을 망가뜨린다. 넘으면 400 으로 검색어를 좁히라고 알린다.
+_ACTOR_EMAIL_MATCH_LIMIT = 500
 
 _RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
 
@@ -410,7 +418,11 @@ async def list_audit_logs(
     conditions = [AuditLog.timestamp >= since]
 
     if action:
-        conditions.append(AuditLog.action == action)
+        # 정규화된 이름으로 물어보면 _CONFIRMED 변형 행도 같이 찾는다 —
+        # 카탈로그/프론트가 내려주는 이름은 접미사가 없는 원본이라 정확히 일치시키면
+        # DELETE_TEAM_BUDGET_CONFIRMED 같은 행이 영구히 빠진다.
+        base = normalize_action(action)
+        conditions.append(AuditLog.action.in_([base, base + "_CONFIRMED"]))
     elif group:
         if group == OTHER_GROUP:
             conditions.append(~AuditLog.action.in_(all_known_variants()))
@@ -425,11 +437,24 @@ async def list_audit_logs(
         conditions.append(AuditLog.resource_id == resource_id)
 
     if actor_email and actor_email.strip():
-        email_pattern = f"%{actor_email.strip()}%"
+        # ILIKE 와일드카드 이스케이프 — 검색어의 %/_ 가 패턴으로 동작하면 안 된다.
+        raw = (
+            actor_email.strip()
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        )
         uid_rows = await session.execute(
-            select(User.id).where(User.email.ilike(email_pattern))
+            select(User.id)
+            .where(User.email.ilike(f"%{raw}%", escape="\\"))
+            .limit(_ACTOR_EMAIL_MATCH_LIMIT + 1)
         )
         uids = [r[0] for r in uid_rows.all()]
+        if len(uids) > _ACTOR_EMAIL_MATCH_LIMIT:
+            raise HTTPException(
+                400,
+                f"이메일이 너무 넓게 맞습니다({_ACTOR_EMAIL_MATCH_LIMIT}명 초과) — 검색어를 구체화하세요",
+            )
         if not uids:
             # 이메일이 아무도 안 맞으면 결과는 공집합 — 스캔하지 않고 빈 페이지를 돌려준다.
             return AuditLogListResponse(
@@ -442,11 +467,10 @@ async def list_audit_logs(
         if decoded is None:
             raise HTTPException(400, "잘못된 커서입니다")
         cur_ts, cur_id = decoded
+        # 행 비교로 써야 (timestamp DESC, id DESC) 인덱스의 Index Cond 가 된다 —
+        # OR 형태는 Filter 처리라 깊은 페이지가 앞 행을 전부 읽고 버린다.
         conditions.append(
-            or_(
-                AuditLog.timestamp < cur_ts,
-                and_(AuditLog.timestamp == cur_ts, AuditLog.id < cur_id),
-            )
+            tuple_(AuditLog.timestamp, AuditLog.id) < tuple_(cur_ts, cur_id)
         )
 
     stmt = (
@@ -466,9 +490,9 @@ async def list_audit_logs(
     # join 하지 않는 이유: 인덱스를 타는 단일 테이블 스캔을 유지하기 위해.
     actor_ids = {r.actor_user_id for r in rows}
     user_map: dict[uuid.UUID, tuple[str, str]] = {}
-    real_actor_ids = [
-        a for a in actor_ids if a not in (_DEV_ACTOR_ID, _SERVICE_TOKEN_ACTOR_ID)
-    ]
+    # …011(서비스 토큰 공용)만 제외 — …010 은 시드된 실제 users 행이라 이메일 해소가
+    # 가능하고, 해소되면 dev 로그인이 아니라 그 계정의 작업으로 표시해야 정직하다.
+    real_actor_ids = [a for a in actor_ids if a != _SERVICE_TOKEN_ACTOR_ID]
     if real_actor_ids:
         ures = await session.execute(
             select(User.id, User.email, User.display_name).where(
@@ -503,12 +527,15 @@ async def list_audit_logs(
         changes = dict(r.changes or {})
         sid_raw = changes.pop("_service_token_id", None)
 
-        if r.actor_user_id == _DEV_ACTOR_ID:
-            actor_kind: str = "dev"
-        elif r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
-            actor_kind = "service_token"
+        if r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
+            # svc 토큰 호출은 항상 …011 행위자 + changes._service_token_id 조합.
+            # 실사용자 ID + sid 조합은 현재 auth 구조에서 생기지 않는다 — 생기면
+            # 토큰 표시가 이메일을 덮는다(의도된 표기).
+            actor_kind: str = "service_token"
         elif r.actor_user_id in user_map:
             actor_kind = "user"
+        elif r.actor_user_id == _DEV_ACTOR_ID:
+            actor_kind = "dev"
         else:
             actor_kind = "unknown"
 

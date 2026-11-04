@@ -1472,6 +1472,7 @@
       "DELETE_RATE_LIMIT": "레이트 리밋 삭제",
       "SET_BODY_LOGGING": "본문 로깅 설정",
       "VIEW_INVOCATION_LOG_BODY": "Invocation 본문 열람"
-    }
+    },
+    "confirmedBadge": "확인됨"
   }
 }

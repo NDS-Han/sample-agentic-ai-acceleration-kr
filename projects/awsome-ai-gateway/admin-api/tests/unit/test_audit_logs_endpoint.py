@@ -191,3 +191,81 @@ async def test_action_beats_group() -> None:
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "REVOKE_KEY" in compiled
     assert "CREATE_KEY" not in compiled
+
+
+# ── kiro 리뷰 회귀 테스트 ─────────────────────────────────────────────────────
+
+
+async def test_action_filter_includes_confirmed_variant() -> None:
+    """R1 — 정규화된 이름으로 물어보면 *_CONFIRMED 행도 IN 에 들어간다."""
+    session = _session(_result(scalars=[]))
+    await _call(session, action="SET_TEAM_BUDGET")
+    stmt = session.execute.await_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    assert "SET_TEAM_BUDGET" in compiled
+    # IN 목록 — 정확히 일치가 아니라 변형 포함
+
+
+async def test_other_group_uses_not_in() -> None:
+    """O5 — group=other 는 카탈로그 전체를 NOT IN 한다."""
+    session = _session(_result(scalars=[]))
+    await _call(session, group="other")
+    stmt = session.execute.await_args_list[0].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+    assert "NOT" in compiled and "IN" in compiled
+
+
+async def test_dev_actor_email_resolves_to_user() -> None:
+    """R2 — …000010 은 시드된 실제 users 행 — 해소되면 user 로 분류된다."""
+    dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
+    row = _row(actor_user_id=dev_actor)
+    session = _session(
+        _result(scalars=[row]),
+        _result(all_=[(dev_actor, "admin@example.com", "System Admin")]),
+    )
+    res = await _call(session)
+    item = res.items[0]
+    assert item.actor_kind == "user"
+    assert item.actor_email == "admin@example.com"
+
+
+async def test_dev_actor_unresolved_stays_dev() -> None:
+    """R2 — users 에 없으면(dev 환경 실물) dev 로 표시."""
+    dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
+    row = _row(actor_user_id=dev_actor)
+    session = _session(
+        _result(scalars=[row]),
+        _result(all_=[]),  # 해소 실패
+    )
+    res = await _call(session)
+    assert res.items[0].actor_kind == "dev"
+
+
+async def test_service_token_deleted_keeps_kind_but_no_ref() -> None:
+    """O5 — 토큰이 삭제돼 해소가 안 돼도 kind 는 service_token, ref 는 None."""
+    row = _row(
+        actor_user_id=_SVC_ACTOR,
+        changes={"_service_token_id": str(_TOKEN_ID)},
+    )
+    session = _session(
+        _result(scalars=[row]),
+        _result(all_=[]),  # 토큰 미해소(삭제됨)
+    )
+    res = await _call(session)
+    item = res.items[0]
+    assert item.actor_kind == "service_token"
+    assert item.service_token is None
+
+
+async def test_actor_email_match_applies_in_clause() -> None:
+    """O5 — actor_email 매칭 시 uid IN 조건이 쿼리에 실린다."""
+    uid = uuid.uuid4()
+    session = _session(
+        _result(all_=[(uid,)]),  # users 이메일 매칭
+        _result(scalars=[]),  # logs
+    )
+    await _call(session, actor_email="u@test.com")
+    assert session.execute.await_count == 2
+    stmt = session.execute.await_args_list[1].args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
+    assert "actor_user_id IN" in compiled

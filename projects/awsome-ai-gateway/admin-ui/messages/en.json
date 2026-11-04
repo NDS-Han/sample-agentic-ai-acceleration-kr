@@ -1472,6 +1472,7 @@
       "DELETE_RATE_LIMIT": "Delete rate limit",
       "SET_BODY_LOGGING": "Set body logging",
       "VIEW_INVOCATION_LOG_BODY": "View invocation body"
-    }
+    },
+    "confirmedBadge": "Confirmed"
   }
 }

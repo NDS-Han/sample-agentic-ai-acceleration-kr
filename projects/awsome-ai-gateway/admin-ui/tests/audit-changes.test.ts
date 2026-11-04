@@ -37,6 +37,7 @@ describe('classifyChanges', () => {
       added: ['c'],
       removed: ['a'],
       kept: ['b'],
+      extra: [],
     });
   });
 
@@ -48,7 +49,7 @@ describe('classifyChanges', () => {
 
   it('스칼라 before/after → scalar', () => {
     const s = classifyChanges({ before: '12.3', after: '15.0' });
-    expect(s).toEqual({ kind: 'scalar', before: '12.3', after: '15.0' });
+    expect(s).toEqual({ kind: 'scalar', before: '12.3', after: '15.0', extra: [] });
   });
 
   it('after 객체만 → afterOnly (이전 값 미기록)', () => {
@@ -59,17 +60,46 @@ describe('classifyChanges', () => {
 
   it('after 배열만 → 전부 추가 setDiff', () => {
     const s = classifyChanges({ after: ['a', 'b'] });
-    expect(s).toEqual({ kind: 'setDiff', added: ['a', 'b'], removed: [], kept: [] });
+    expect(s).toEqual({ kind: 'setDiff', added: ['a', 'b'], removed: [], kept: [], extra: [] });
   });
 
   it('before 배열만 → 전부 제거 setDiff', () => {
     const s = classifyChanges({ before: ['a'] });
-    expect(s).toEqual({ kind: 'setDiff', added: [], removed: ['a'], kept: [] });
+    expect(s).toEqual({ kind: 'setDiff', added: [], removed: ['a'], kept: [], extra: [] });
   });
 
   it('before/after 없는 평평한 dict → kv', () => {
     const s = classifyChanges({ log_group: 'g', found: true });
     expect(s.kind).toBe('kv');
     if (s.kind === 'kv') expect(s.entries).toHaveLength(2);
+  });
+});
+
+
+describe('classifyChanges — extra(형제 키) 보존', () => {
+  it('DELETE_MODEL 형태: before + deleted_children → kv 에 전부 보존', () => {
+    const s = classifyChanges({
+      before: { alias: 'x' },
+      deleted_children: { pricings: 3, team_allowed: 2 },
+    });
+    // before 만 있는 dict 는 kv 로 풀리되 형제 키도 함께 보존된다.
+    expect(s.kind).toBe('kv');
+    if (s.kind === 'kv') {
+      expect(s.entries).toContainEqual({
+        key: 'deleted_children',
+        value: { pricings: 3, team_allowed: 2 },
+      });
+      expect(s.entries).toContainEqual({ key: 'alias', value: 'x' });
+    }
+  });
+
+  it('스칼라 + 부가 키 → scalar + extra', () => {
+    const s = classifyChanges({ before: 'a', after: 'b', note: 'n' });
+    expect(s).toEqual({
+      kind: 'scalar',
+      before: 'a',
+      after: 'b',
+      extra: [{ key: 'note', value: 'n' }],
+    });
   });
 });

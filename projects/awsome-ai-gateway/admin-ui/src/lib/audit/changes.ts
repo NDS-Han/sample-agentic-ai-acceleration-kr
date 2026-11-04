@@ -14,13 +14,14 @@
  */
 
 export type FieldEntry = { key: string; before: unknown; after: unknown; changed: boolean };
+export type KvEntry = { key: string; value: unknown };
 
 export type ChangesShape =
-  | { kind: 'fieldDiff'; fields: FieldEntry[] }
-  | { kind: 'setDiff'; added: unknown[]; removed: unknown[]; kept: unknown[] }
-  | { kind: 'scalar'; before: unknown; after: unknown }
-  | { kind: 'afterOnly'; fields: { key: string; value: unknown }[] }
-  | { kind: 'kv'; entries: { key: string; value: unknown }[] }
+  | { kind: 'fieldDiff'; fields: FieldEntry[]; extra: KvEntry[] }
+  | { kind: 'setDiff'; added: unknown[]; removed: unknown[]; kept: unknown[]; extra: KvEntry[] }
+  | { kind: 'scalar'; before: unknown; after: unknown; extra: KvEntry[] }
+  | { kind: 'afterOnly'; fields: { key: string; value: unknown }[]; extra: KvEntry[] }
+  | { kind: 'kv'; entries: KvEntry[] }
   | { kind: 'unserializable' }
   | { kind: 'empty' };
 
@@ -36,6 +37,12 @@ export function classifyChanges(
   const hasBefore = 'before' in changes;
   const hasAfter = 'after' in changes;
 
+  // before/after 외의 형제 키 — DELETE_MODEL 의 deleted_children 같은 cascade
+  // 정보가 여기 든다. 구조화 뷰에서 버리지 말고 extra kv 로 함께 돌려준다.
+  const extra: KvEntry[] = Object.entries(changes)
+    .filter(([k]) => k !== 'before' && k !== 'after')
+    .map(([key, value]) => ({ key, value }));
+
   if (hasBefore || hasAfter) {
     const before = changes.before;
     const after = changes.after;
@@ -49,7 +56,7 @@ export function classifyChanges(
           after: after[key],
           changed: JSON.stringify(before[key]) !== JSON.stringify(after[key]),
         }));
-        return { kind: 'fieldDiff', fields };
+        return { kind: 'fieldDiff', fields, extra };
       }
       if (Array.isArray(before) && Array.isArray(after)) {
         const beforeSet = new Set(before.map((v) => JSON.stringify(v)));
@@ -59,9 +66,10 @@ export function classifyChanges(
           added: after.filter((v) => !beforeSet.has(JSON.stringify(v))),
           removed: before.filter((v) => !afterSet.has(JSON.stringify(v))),
           kept: after.filter((v) => beforeSet.has(JSON.stringify(v))),
+          extra,
         };
       }
-      return { kind: 'scalar', before, after };
+      return { kind: 'scalar', before, after, extra };
     }
 
     // after 만 — 이전 값이 '없음' 이 아니라 '미기록' 이다(설계 메모 참조).
@@ -70,24 +78,28 @@ export function classifyChanges(
         return {
           kind: 'afterOnly',
           fields: Object.entries(after).map(([key, value]) => ({ key, value })),
+          extra,
         };
       }
       if (Array.isArray(after)) {
-        return { kind: 'setDiff', added: after, removed: [], kept: [] };
+        return { kind: 'setDiff', added: after, removed: [], kept: [], extra };
       }
-      return { kind: 'scalar', before: undefined, after };
+      return { kind: 'scalar', before: undefined, after, extra };
     }
     // before 만 — CLEAR 가 아니라 드문 형태. 정직하게 제거 diff 로.
     if (Array.isArray(before)) {
-      return { kind: 'setDiff', added: [], removed: before, kept: [] };
+      return { kind: 'setDiff', added: [], removed: before, kept: [], extra };
     }
     if (isPlainObject(before)) {
       return {
         kind: 'kv',
-        entries: Object.entries(before).map(([key, value]) => ({ key, value })),
+        entries: [
+          ...Object.entries(before).map(([key, value]) => ({ key, value })),
+          ...extra,
+        ],
       };
     }
-    return { kind: 'scalar', before, after: undefined };
+    return { kind: 'scalar', before, after: undefined, extra };
   }
 
   return {

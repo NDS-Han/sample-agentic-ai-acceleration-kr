@@ -4,7 +4,7 @@
 
 import { Fragment, useState, useTransition } from 'react';
 import Link from 'next/link';
-import { useTranslations } from 'next-intl';
+import { useLocale, useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { listAuditLogsAction } from '@/lib/actions/audit';
 import { useToast } from '@/components/common/ToastProvider';
@@ -63,6 +63,7 @@ export function AuditLogListView({
   knownActions,
 }: Props) {
   const t = useTranslations('audit');
+  const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
   const [items, setItems] = useState(initialItems);
@@ -72,7 +73,13 @@ export function AuditLogListView({
   const [isPending, startTransition] = useTransition();
 
   const known = new Set(knownActions);
-  const actionLabel = (a: string) => (known.has(a) ? t(`actions.${a}` as const) : a);
+  // 라벨은 정규화된 이름으로 찾는다 — *_CONFIRMED 행은 원본 라벨 + 확인됨 배지.
+  const normalize = (a: string) =>
+    a.endsWith('_CONFIRMED') ? a.slice(0, -'_CONFIRMED'.length) : a;
+  const actionLabel = (a: string) => {
+    const base = normalize(a);
+    return known.has(base) ? t(`actions.${base}` as const) : base;
+  };
 
   function handleLoadMore() {
     startTransition(async () => {
@@ -154,7 +161,7 @@ export function AuditLogListView({
                   )}
                 </Td>
                 <Td className="whitespace-nowrap text-muted-foreground" title={it.timestamp}>
-                  {fmtDateTime(it.timestamp, 'ko-KR', tz)}
+                  {fmtDateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US', tz)}
                 </Td>
                 <Td>
                   <div className="flex items-center gap-2">
@@ -165,13 +172,19 @@ export function AuditLogListView({
                   </div>
                 </Td>
                 <Td>
-                  <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>{' '}
+                  <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>
+                  {it.action.endsWith('_CONFIRMED') && (
+                    <>
+                      {' '}
+                      <Badge tone="amber">{t('confirmedBadge')}</Badge>
+                    </>
+                  )}{' '}
                   <span className="font-mono text-[11px] text-muted-foreground">
                     {it.action}
                   </span>
                 </Td>
                 <Td>
-                  {/* 대상 클릭 → 그 리소스의 이력 필터(기존 쿼리 유지). */}
+                  {/* 대상 클릭 → 그 리소스의 이력 필터로 새 컨텍스트(range 만 유지). */}
                   <Link
                     href={`/audit?${new URLSearchParams({
                       range: filters.range,

@@ -142,6 +142,24 @@ export function ChangesPanel({ item }: Props) {
         </table>
       )}
 
+      {/* before/after 형제 키 — cascade 정보(deleted_children 등). */}
+      {'extra' in shape && shape.extra.length > 0 && (
+        <table className="w-full">
+          <tbody>
+            {shape.extra.map((e) => (
+              <tr key={e.key}>
+                <td className="w-48 py-1 pr-3 font-mono text-muted-foreground">
+                  {e.key}
+                </td>
+                <td className="max-w-96 truncate py-1" title={formatValue(e.value)}>
+                  {formatValue(e.value)}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
       {/* 요청 메타 — 조사 시 필요하지만 표 컬럼 폭을 쓸 값은 아님. */}
       <div className="flex flex-wrap items-center gap-x-5 gap-y-1 border-t border-border pt-2 text-muted-foreground">
         <span>
