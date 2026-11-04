@@ -218,7 +218,11 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               );
             })()}
           </div>
-          <ul className="w-full space-y-1 lg:max-h-56 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
+          {/* overflow-y-auto 는 overflow-x 도 auto 로 강제한다 — li 의 -mx-2
+              블리드(호버 배경을 가장자리까지 늘리는 기법)가 그대로 가로 스크롤을
+              만들었다. x 를 hidden 으로 클립하면 호버 배경이 목록 가장자리에
+              맞춰지고 스크롤바가 사라진다. */}
+          <ul className="w-full space-y-1 overflow-x-hidden lg:max-h-56 lg:min-w-0 lg:flex-1 lg:overflow-y-auto lg:pr-1">
             {displayModels.map((m, i) => {
               const isOther = m.model_alias === '__other__';
               const label = isOther
