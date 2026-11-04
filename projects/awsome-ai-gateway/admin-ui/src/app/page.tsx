@@ -4,6 +4,8 @@ import { KPICard } from '@/components/common/KPICard';
 import { ErrorState } from '@/components/common/ErrorState';
 import { SkeletonCard } from '@/components/common/SkeletonCard';
 import { alertLevelOf } from '@/lib/utils/alertLevel';
+import { errorRateInfo } from '@/lib/utils/errorRate';
+import { AlertLevel } from '@/types/enums';
 import {
   DollarSign,
   Key,
@@ -161,13 +163,30 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
           {t('usageAndSystem')}
         </h2>
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          <KPICard
-            title={t('totalRequests')}
-            value={kpi ? kpi.total_requests.toLocaleString() : '—'}
-            icon={<Activity size={18} aria-hidden="true" />}
-            description={t('totalRequestsDesc')}
-            href={`/analytics?period=${period}${clientSuffix}`}
-          />
+          {(() => {
+            // 요청 카드: 값은 성공 수(비용·토큰 KPI 와 같은 모집단), 서브라인에
+            // 전체·에러를 싣는다. 에러가 있으면 상세는 모니터링이 맞는 목적지다.
+            const err = errorRateInfo(kpi?.total_requests ?? 0, kpi?.error_requests ?? 0);
+            return (
+              <KPICard
+                title={t('totalRequests')}
+                value={kpi ? kpi.total_requests.toLocaleString() : '—'}
+                icon={<Activity size={18} aria-hidden="true" />}
+                alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
+                alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
+                description={
+                  kpi
+                    ? t('requestsSubline', {
+                        total: err.total.toLocaleString(),
+                        errors: err.errors.toLocaleString(),
+                        rate: err.rate.toFixed(1),
+                      })
+                    : t('fetchFailed')
+                }
+                href={err.errors > 0 ? '/monitoring' : `/analytics?period=${period}${clientSuffix}`}
+              />
+            );
+          })()}
           <KPICard
             title={t('totalTokens')}
             value={kpi ? fmtTokensCompact(kpi.total_tokens) : '—'}

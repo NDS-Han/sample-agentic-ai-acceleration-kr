@@ -166,6 +166,16 @@ class AnalyticsService:
         total_cost = sum(cost_by_model.values(), Decimal("0"))
         active_users_count = await repo.count_active_users(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
         total_requests_count = await repo.total_requests(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
+        # 에러 카운트는 SUCCESS 필터가 빠진 구간 조건이 필요 — range_where 는
+        # 성공 전용이라 그대로 넘기면 항상 0 이 나온다.
+        error_range_where = (
+            cost_date_range_filter(start_date, end_date, success_only=False)
+            if range_where is not None
+            else None
+        )
+        error_requests_count = await repo.error_requests(
+            period, query_scope, None, client, scope_ids=scope_ids, cost_where=error_range_where
+        )
         # 버킷별 합계 한 번의 질의로 총 토큰 + 토큰 분석 패널 데이터를 같이 채운다 —
         # total_tokens 를 따로 더하면 두 값의 근원 쿼리가 갈라진다.
         token_buckets = await repo.token_bucket_totals(period, query_scope, None, client, scope_ids=scope_ids, cost_where=range_where)
@@ -182,6 +192,7 @@ class AnalyticsService:
 
         cost_summary = CostSummary(
             total_requests=total_requests_count,
+            error_requests=error_requests_count,
             total_tokens=total_tokens_count,
             total_cost_usd=total_cost,
             active_users=active_users_count,

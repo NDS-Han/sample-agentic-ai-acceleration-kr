@@ -27,6 +27,9 @@ class ExportParams(BaseModel):
 
 class CostSummary(BaseModel):
     total_requests: int = 0
+    # 성공 외 상태(ERROR+TIMEOUT) 요청 수 — 정책 차단은 usage_logs 에 행이 없어
+    # 상류/게이트웨이 장애만 잡힌다. 전체 요청수 = total_requests + error_requests.
+    error_requests: int = 0
     total_tokens: int = 0
     total_cost_usd: Decimal = Decimal("0")
     active_users: int = 0

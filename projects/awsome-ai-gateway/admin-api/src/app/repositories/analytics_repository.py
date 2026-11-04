@@ -9,7 +9,7 @@ from sqlalchemy import ColumnElement, distinct, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.usage_filters import client_filter, cost_period_filter
-from app.models.usage import ROIAggregation, ROIScope, UsageLog
+from app.models.usage import ROIAggregation, ROIScope, UsageLog, UsageStatus
 
 
 class AnalyticsRepository:
@@ -149,6 +149,25 @@ class AnalyticsRepository:
     ) -> int:
         stmt = select(func.count(UsageLog.id)).where(
             cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
+        )
+        stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
+        stmt = self._apply_client_filter(stmt, client)
+        result = await self._session.execute(stmt)
+        return result.scalar_one() or 0
+
+    async def error_requests(
+        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
+        scope_ids: list[uuid.UUID] | None = None,
+        cost_where: ColumnElement | None = None,
+    ) -> int:
+        """ERROR+TIMEOUT 요청 수 — cost_where 는 SUCCESS 필터가 빠진 구간 조건이어야 한다.
+
+        정책 차단(429·예산 HARD_BLOCK·인증 실패)은 usage_logs 에 행 자체가 없어
+        자연 배제된다 — ERROR/TIMEOUT 은 상류·게이트웨이 장애만이다.
+        """
+        stmt = select(func.count(UsageLog.id)).where(
+            cost_where if cost_where is not None else cost_period_filter(period, success_only=False),
+            UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]),
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)

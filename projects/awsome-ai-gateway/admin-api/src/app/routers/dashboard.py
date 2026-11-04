@@ -23,7 +23,7 @@ from app.core.usage_filters import (
 from app.models.auth import Department, KeyStatus, Team, User, VirtualKey
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias, ModelStatus
-from app.models.usage import UsageLog
+from app.models.usage import UsageLog, UsageStatus
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +120,20 @@ async def dashboard_summary(
     ).where(*where_clauses)
     row = (await session.execute(stmt)).one()
 
+    # 에러 카운트는 별도의 작은 카운트 질의 — 기존 성공 전용 집계를 건드리지
+    # 않는다. 정책 차단(429·예산 차단·인증 실패)은 usage_logs 에 행이 없어
+    # 자연 배제되므로 ERROR/TIMEOUT 은 상류·게이트웨이 장애만이다.
+    error_where = [cost_period_filter(period, success_only=False)]
+    if (cf := client_filter(client)) is not None:
+        error_where.append(cf)
+    error_requests = (
+        await session.execute(
+            select(func.count())
+            .select_from(UsageLog)
+            .where(*error_where, UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+        )
+    ).scalar_one() or 0
+
     total_requests = row.total_requests or 0
     total_tokens = int(row.total_tokens or 0)
     total_cost = Decimal(row.total_cost_usd or 0)
@@ -129,6 +143,7 @@ async def dashboard_summary(
     payload = {
         "period": period,
         "total_requests": total_requests,
+        "error_requests": error_requests,
         "total_tokens": total_tokens,
         "total_cost_usd": round(float(total_cost), 4),
         "active_users": active_users,
@@ -563,9 +578,23 @@ async def dashboard_kpi(
         )
     ).scalar()
 
+    # ── 5) 에러 요청 수 — /summary 와 같은 정의(성공 집계와 같은 필터에서
+    #    SUCCESS 조건만 뺀 ERROR+TIMEOUT 카운트).
+    error_where = [cost_period_filter(period, success_only=False)]
+    if (cf := client_filter(client)) is not None:
+        error_where.append(cf)
+    error_requests = (
+        await session.execute(
+            select(func.count())
+            .select_from(UsageLog)
+            .where(*error_where, UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+        )
+    ).scalar_one() or 0
+
     payload = {
         "period": period,
         "total_requests": usage_row.total_requests or 0,
+        "error_requests": error_requests,
         "total_tokens": int(usage_row.total_tokens or 0),
         "total_cost_usd": round(float(total_cost), 4),
         "active_users": active_users,

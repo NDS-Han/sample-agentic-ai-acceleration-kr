@@ -2,6 +2,7 @@
 
 import { getTranslations } from 'next-intl/server';
 import { fmtUsd } from '@/lib/utils/format';
+import { errorRateInfo } from '@/lib/utils/errorRate';
 import type { AnalyticsFilterForm } from '@/types/api';
 import { buildAnalyticsQuery, fetchAnalyticsOnce } from '@/lib/utils/analyticsQuery';
 import { ErrorState } from '@/components/common/ErrorState';
@@ -16,6 +17,7 @@ interface AnalyticsAPIResponse {
   currency: string;
   cost_summary: {
     total_requests: number;
+    error_requests: number;
     total_tokens: number;
     total_cost_usd: number;
     active_users: number;
@@ -30,14 +32,24 @@ interface MetricCardProps {
   label: string;
   value: string;
   description?: string;
+  /** 임계 초과 경고 — 보더+설명 텍스트를 warning 색으로. */
+  warn?: boolean;
 }
 
-function MetricCard({ label, value, description }: MetricCardProps) {
+function MetricCard({ label, value, description, warn }: MetricCardProps) {
   return (
-    <div className="glass glass-hover rounded-apple p-4 flex flex-col gap-2">
+    <div
+      className={`glass glass-hover rounded-apple p-4 flex flex-col gap-2 ${
+        warn ? 'border-warning shadow-warning/20' : ''
+      }`}
+    >
       <p className="text-sm font-medium text-muted-foreground">{label}</p>
       <p className="text-2xl font-bold">{value}</p>
-      {description && <p className="text-xs text-muted-foreground">{description}</p>}
+      {description && (
+        <p className={`text-xs ${warn ? 'text-warning font-medium' : 'text-muted-foreground'}`}>
+          {description}
+        </p>
+      )}
     </div>
   );
 }
@@ -56,12 +68,19 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
   const summary = data.cost_summary;
   const totalCost = Number(summary.total_cost_usd ?? 0);
   const avgCostPerUser = Number(summary.avg_cost_per_user_usd ?? 0);
+  // 성공 카드와 같은 모집단 — 서브라인으로 전체·에러율을 얹는다(대시보드와 동일 임계값).
+  const err = errorRateInfo(summary.total_requests, summary.error_requests ?? 0);
 
   const metrics: MetricCardProps[] = [
     {
       label: t('totalRequests'),
       value: summary.total_requests.toLocaleString(),
-      description: t('totalRequestsDescription'),
+      description: t('requestsSubline', {
+        total: err.total.toLocaleString(),
+        errors: err.errors.toLocaleString(),
+        rate: err.rate.toFixed(1),
+      }),
+      warn: err.warn,
     },
     {
       label: t('totalTokens'),

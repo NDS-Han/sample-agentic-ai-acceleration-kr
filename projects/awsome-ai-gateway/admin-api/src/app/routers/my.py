@@ -12,7 +12,7 @@ from app.core.usage_filters import cost_period_filter, current_kst_period, kst_m
 from app.models.auth import Team
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
 from app.models.model import ModelAlias
-from app.models.usage import UsageLog
+from app.models.usage import UsageLog, UsageStatus
 
 router = APIRouter(prefix="/admin/my", tags=["My Usage"])
 
@@ -276,8 +276,23 @@ async def get_my_usage(
         cost_period_filter(period),
     )
     srow = (await session.execute(summary_stmt)).one()
+
+    # 에러 요청 수 — 같은 user+기간이되 SUCCESS 필터만 뺀 별도 카운트.
+    # 정책 차단은 usage_logs 에 행이 없어 ERROR/TIMEOUT 은 장애만 잡힌다.
+    error_requests = (
+        await session.execute(
+            select(func.count())
+            .select_from(UsageLog)
+            .where(
+                UsageLog.user_id == user.user_id,
+                cost_period_filter(period, success_only=False),
+                UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]),
+            )
+        )
+    ).scalar_one() or 0
     summary = {
         "requests": srow.requests or 0,
+        "error_requests": error_requests,
         "cost_usd": round(float(srow.cost_usd or 0), 4),
         "input_tokens": srow.input_tokens or 0,
         "output_tokens": srow.output_tokens or 0,

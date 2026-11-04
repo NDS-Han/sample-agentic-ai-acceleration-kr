@@ -189,16 +189,14 @@ export default async function AnalyticsPage(props: AnalyticsPageProps) {
         <ContextSection filter={filter} latestMonth={effectiveMonth} periodLabel={periodLabel} />
       </Suspense>
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
           <RefreshButton />
           <ExportButton filter={filter} latestMonth={effectiveMonth} />
         </div>
       </div>
-
-      {/* 필터 — 월 선택기 + custom + group_by */}
-      <AnalyticsFilter defaultValue={filter} periods={periods} currentMonth={effectiveMonth} />
 
       {/* custom 구간은 이관(seed) 사용량이 빠진다 — 월 버킷 개념이라 임의 일자에
           사상 불가. 차트가 조용히 달라 보이는 것보다 이유를 표시하는 편이 낫다. */}

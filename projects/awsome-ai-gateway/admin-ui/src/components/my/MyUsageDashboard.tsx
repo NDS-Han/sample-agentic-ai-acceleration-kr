@@ -21,6 +21,8 @@ import { modelDisplay } from '@/lib/utils/modelLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { TokenMixDonutClient, TOKEN_BUCKETS } from '@/components/analytics/TokenMixDonutClient';
 import { KPICard } from '@/components/common/KPICard';
+import { errorRateInfo } from '@/lib/utils/errorRate';
+import { AlertLevel } from '@/types/enums';
 import { MyBudgetCard } from '@/components/my/MyBudgetCard';
 import { ErrorState } from '@/components/common/ErrorState';
 
@@ -46,6 +48,8 @@ export function MyUsageDashboard({
   const totalCost = data.summary?.cost_usd ?? data.daily_usage.reduce((sum, d) => sum + d.cost_usd, 0);
   const totalRequests = data.summary?.requests ?? data.daily_usage.reduce((sum, d) => sum + d.requests, 0);
   const s = data.summary;
+  // 대시보드/분석과 같은 임계값 — 성공 KPI 와 같은 모집단 위에 에러율을 얹는다.
+  const err = errorRateInfo(totalRequests, s?.error_requests ?? 0);
   const totalTokens = s
     ? s.input_tokens + s.output_tokens + s.cache_creation_tokens + s.cache_read_tokens
     : data.daily_usage.reduce((sum, d) => sum + d.tokens, 0);
@@ -82,7 +86,13 @@ export function MyUsageDashboard({
               title={t('totalRequests')}
               value={totalRequests.toLocaleString()}
               icon={<Activity size={18} />}
-              description={t('kpiRequestsDesc', { count: data.by_model.length })}
+              alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
+              alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
+              description={t('requestsSubline', {
+                total: err.total.toLocaleString(),
+                errors: err.errors.toLocaleString(),
+                rate: err.rate.toFixed(1),
+              })}
             />
             <KPICard
               title={t('totalTokens')}

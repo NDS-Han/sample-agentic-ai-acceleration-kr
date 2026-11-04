@@ -56,6 +56,8 @@ export interface ModelUsage {
 
 export interface MyUsageSummary {
   requests: number;
+  /** ERROR+TIMEOUT — 전체 요청 = requests + error_requests */
+  error_requests: number;
   cost_usd: number;
   input_tokens: number;
   output_tokens: number;

@@ -10,6 +10,8 @@ import { currentCalendarMonth, monthsAgo } from '@/lib/utils/period';
 export interface DashboardSummary {
   period: string;
   total_requests: number;
+  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + error_requests */
+  error_requests: number;
   total_tokens: number;
   total_cost_usd: number;
   active_users: number;
@@ -99,6 +101,8 @@ export async function fetchAvailablePeriods(): Promise<AvailablePeriods> {
 export interface DashboardKPI {
   period: string;
   total_requests: number;
+  /** ERROR+TIMEOUT 요청 수 — 전체 요청 = total_requests + error_requests */
+  error_requests: number;
   total_tokens: number;
   total_cost_usd: number;
   active_users: number;
