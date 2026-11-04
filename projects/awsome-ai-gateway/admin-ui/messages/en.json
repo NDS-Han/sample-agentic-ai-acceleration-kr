@@ -1301,10 +1301,13 @@
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder.",
     "appIntegTitle": "External app integration (service-account VK)",
     "appIntegDesc": "Server-side apps call the gateway with a long-lived VK issued from the API Keys page, as a Bearer token.",
+    "appIntegAnthropic": "Claude (Bedrock) — Anthropic /v1/messages",
+    "appIntegOpenai": "GPT and others — OpenAI-compatible /v1/chat/completions",
     "appIntegNoteVk": "Store the VK in Secrets Manager and read it at app startup — never hardcode it in code or env files",
     "appIntegNoteAskAdmin": "Only admins can issue service VKs — ask an admin to register an agent and issue a key for your app",
     "appIntegNoteAlias": "model must be a gateway-registered alias — full upstream IDs return 404",
     "appIntegNote401": "On 401, re-read the secret and retry once — picks up admin reissues and auth repairs automatically",
+    "appIntegNoteEndpoint": "Use the endpoint matching the alias API family — Claude aliases use /v1/messages, GPT and other OpenAI-family aliases use /v1/chat/completions (GET /v1/models lists allowed models)",
     "appIntegNoteUa": "A User-Agent starting with <code>claude-cli/</code> is misclassified as claude-code — use a neutral UA"
   },
   "serviceAccounts": {

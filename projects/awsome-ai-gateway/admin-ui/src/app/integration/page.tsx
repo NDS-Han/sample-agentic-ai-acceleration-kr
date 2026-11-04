@@ -43,33 +43,61 @@ function gatewayUrl(): string {
 }
 
 /** 외부 앱 연동 샘플 — 실제 배포 gateway URL 을 심어서 복사만으로 동작하게 한다. */
-function buildAppSamples(): { curl: string; python: string } {
+function buildAppSamples() {
   const g = gatewayUrl();
-  const curl = [
-    `curl -s "${g}/v1/messages" \\`,
-    `  -H "Authorization: Bearer $SERVICE_VK" \\`,
-    `  -H "Content-Type: application/json" \\`,
-    `  -d '{`,
-    `    "model": "<model-alias>",`,
-    `    "max_tokens": 256,`,
-    `    "messages": [{"role": "user", "content": "Hello"}]`,
-    `  }'`,
-  ].join('\n');
-  const python = [
-    `import os`,
-    `from anthropic import Anthropic`,
-    ``,
-    `client = Anthropic(`,
-    `    base_url="${g}",`,
-    `    api_key=os.environ["SERVICE_VK"],`,
-    `)`,
-    `resp = client.messages.create(`,
-    `    model="<model-alias>",`,
-    `    max_tokens=256,`,
-    `    messages=[{"role": "user", "content": "Hello"}],`,
-    `)`,
-  ].join('\n');
-  return { curl, python };
+  const anthropic = {
+    curl: [
+      `curl -s "${g}/v1/messages" \\`,
+      `  -H "Authorization: Bearer $SERVICE_VK" \\`,
+      `  -H "Content-Type: application/json" \\`,
+      `  -d '{`,
+      `    "model": "<model-alias>",`,
+      `    "max_tokens": 256,`,
+      `    "messages": [{"role": "user", "content": "Hello"}]`,
+      `  }'`,
+    ].join('\n'),
+    python: [
+      `import os`,
+      `from anthropic import Anthropic`,
+      ``,
+      `client = Anthropic(`,
+      `    base_url="${g}",`,
+      `    api_key=os.environ["SERVICE_VK"],`,
+      `)`,
+      `resp = client.messages.create(`,
+      `    model="<model-alias>",`,
+      `    max_tokens=256,`,
+      `    messages=[{"role": "user", "content": "Hello"}],`,
+      `)`,
+    ].join('\n'),
+  };
+  const openai = {
+    curl: [
+      `curl -s "${g}/v1/chat/completions" \\`,
+      `  -H "Authorization: Bearer $SERVICE_VK" \\`,
+      `  -H "Content-Type: application/json" \\`,
+      `  -d '{`,
+      `    "model": "<model-alias>",`,
+      `    "max_tokens": 256,`,
+      `    "messages": [{"role": "user", "content": "Hello"}]`,
+      `  }'`,
+    ].join('\n'),
+    python: [
+      `import os`,
+      `from openai import OpenAI`,
+      ``,
+      `client = OpenAI(`,
+      `    base_url="${g}/v1",`,
+      `    api_key=os.environ["SERVICE_VK"],`,
+      `)`,
+      `resp = client.chat.completions.create(`,
+      `    model="<model-alias>",`,
+      `    max_tokens=256,`,
+      `    messages=[{"role": "user", "content": "Hello"}],`,
+      `)`,
+    ].join('\n'),
+  };
+  return { anthropic, openai };
 }
 
 export default async function CLIPage() {
@@ -110,14 +138,26 @@ export default async function CLIPage() {
       <section className="glass glass-hover rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('appIntegTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('appIntegDesc')}</p>
+        <p className="text-xs font-semibold text-muted-foreground">{t('appIntegAnthropic')}</p>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
           <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">curl</p>
-            <CliEnvBlock text={buildAppSamples().curl} />
+            <p className="text-xs font-semibold text-muted-foreground">curl — /v1/messages</p>
+            <CliEnvBlock text={buildAppSamples().anthropic.curl} />
           </div>
           <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">Python (Anthropic SDK)</p>
-            <CliEnvBlock text={buildAppSamples().python} />
+            <p className="text-xs font-semibold text-muted-foreground">Python — Anthropic SDK</p>
+            <CliEnvBlock text={buildAppSamples().anthropic.python} />
+          </div>
+        </div>
+        <p className="text-xs font-semibold text-muted-foreground pt-2">{t('appIntegOpenai')}</p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">curl — /v1/chat/completions</p>
+            <CliEnvBlock text={buildAppSamples().openai.curl} />
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs font-semibold text-muted-foreground">Python — OpenAI SDK</p>
+            <CliEnvBlock text={buildAppSamples().openai.python} />
           </div>
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
@@ -125,6 +165,7 @@ export default async function CLIPage() {
           <li>{t('appIntegNoteAskAdmin')}</li>
           <li>{t('appIntegNoteAlias')}</li>
           <li>{t('appIntegNote401')}</li>
+          <li>{t('appIntegNoteEndpoint')}</li>
           <li>{t.rich('appIntegNoteUa', { code })}</li>
         </ul>
       </section>
