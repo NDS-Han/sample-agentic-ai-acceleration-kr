@@ -228,6 +228,12 @@ async def get_my_usage(
                 + UsageLog.cache_creation_tokens
                 + UsageLog.cache_read_tokens
             ).label("tokens"),
+            # 모델별 토큰 버킷 — summary 와 같은 정의. 모델별 캐시 사용 패턴이
+            # 비용 차이를 설명하므로 분해해서 내린다.
+            func.sum(UsageLog.input_tokens).label("input_tokens"),
+            func.sum(UsageLog.output_tokens).label("output_tokens"),
+            func.sum(UsageLog.cache_creation_tokens).label("cache_creation_tokens"),
+            func.sum(UsageLog.cache_read_tokens).label("cache_read_tokens"),
         )
         .outerjoin(ModelAlias, ModelAlias.alias == UsageLog.model_alias)
         .where(
@@ -245,6 +251,10 @@ async def get_my_usage(
             "cost_usd": round(float(row.cost_usd), 4),
             "requests": row.requests,
             "tokens": row.tokens or 0,
+            "input_tokens": row.input_tokens or 0,
+            "output_tokens": row.output_tokens or 0,
+            "cache_creation_tokens": row.cache_creation_tokens or 0,
+            "cache_read_tokens": row.cache_read_tokens or 0,
         }
         for row in model_result.all()
     ]

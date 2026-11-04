@@ -47,6 +47,11 @@ export interface ModelUsage {
   cost_usd: number;
   requests: number;
   tokens: number;
+  /** 모델별 토큰 버킷 — summary 와 같은 정의(§59 SUCCESS + KST). */
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
 }
 
 export interface MyUsageSummary {

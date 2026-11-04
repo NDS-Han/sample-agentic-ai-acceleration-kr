@@ -84,6 +84,10 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
                 <Th numeric>{t('colCostUsd')}</Th>
                 <Th numeric>{t('colRequests')}</Th>
                 <Th numeric>{t('colTokens')}</Th>
+                <Th numeric>{t('colTokInput')}</Th>
+                <Th numeric>{t('colTokOutput')}</Th>
+                <Th numeric>{t('colTokCacheWrite')}</Th>
+                <Th numeric>{t('colTokCacheRead')}</Th>
               </Tr>
             </THead>
             <TBody>
@@ -95,6 +99,18 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
                   <Td numeric>{fmtUsd(row.cost_usd)}</Td>
                   <Td numeric>{row.requests.toLocaleString()}</Td>
                   <Td numeric>{row.tokens.toLocaleString()}</Td>
+                  <Td numeric className="text-muted-foreground">
+                    {row.input_tokens.toLocaleString()}
+                  </Td>
+                  <Td numeric className="text-muted-foreground">
+                    {row.output_tokens.toLocaleString()}
+                  </Td>
+                  <Td numeric className="text-muted-foreground">
+                    {row.cache_creation_tokens.toLocaleString()}
+                  </Td>
+                  <Td numeric className="text-muted-foreground">
+                    {row.cache_read_tokens.toLocaleString()}
+                  </Td>
                 </Tr>
               ))}
             </TBody>
