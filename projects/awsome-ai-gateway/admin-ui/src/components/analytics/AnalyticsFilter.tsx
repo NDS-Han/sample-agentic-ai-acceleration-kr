@@ -87,7 +87,7 @@ export function AnalyticsFilter({ defaultValue, periods, currentMonth }: Analyti
     ].join(' ');
 
   return (
-    <div className="flex flex-wrap items-end gap-4 glass rounded-apple p-4">
+    <div className="flex flex-wrap items-end justify-end gap-4 glass rounded-apple p-4">
       {/* 기간 선택 — [이번 달][지난 달][기간선택 ▾][직접 입력] */}
       <div className="flex flex-col gap-1.5">
         <label className="text-xs font-medium text-muted-foreground">{t('period')}</label>
