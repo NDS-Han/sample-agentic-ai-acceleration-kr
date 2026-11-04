@@ -173,14 +173,19 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
                 value={kpi ? kpi.total_requests.toLocaleString() : '—'}
                 icon={<Activity size={18} aria-hidden="true" />}
                 alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
-                alertLabel={err.warn ? t('errorRateLabel') : undefined}
+                alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
                 description={
                   kpi
-                    ? t('requestsSubline', {
-                        total: err.total.toLocaleString(),
-                        errors: err.errors.toLocaleString(),
-                        rate: err.rate.toFixed(1),
-                      })
+                    ? err.warn
+                      ? t('requestsSublineWarn', {
+                          total: err.total.toLocaleString(),
+                          errors: err.errors.toLocaleString(),
+                        })
+                      : t('requestsSubline', {
+                          total: err.total.toLocaleString(),
+                          errors: err.errors.toLocaleString(),
+                          rate: err.rate.toFixed(1),
+                        })
                     : t('fetchFailed')
                 }
                 href={err.errors > 0 ? '/monitoring' : `/analytics?period=${period}${clientSuffix}`}

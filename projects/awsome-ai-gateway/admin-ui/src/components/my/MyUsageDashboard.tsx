@@ -87,12 +87,19 @@ export function MyUsageDashboard({
               value={totalRequests.toLocaleString()}
               icon={<Activity size={18} />}
               alertLevel={err.warn ? AlertLevel.WARNING : AlertLevel.NORMAL}
-              alertLabel={err.warn ? t('errorRateLabel') : undefined}
-              description={t('requestsSubline', {
-                total: err.total.toLocaleString(),
-                errors: err.errors.toLocaleString(),
-                rate: err.rate.toFixed(1),
-              })}
+              alertLabel={err.warn ? t('errorRateLabel', { rate: err.rate.toFixed(1) }) : undefined}
+              description={
+                err.warn
+                  ? t('requestsSublineWarn', {
+                      total: err.total.toLocaleString(),
+                      errors: err.errors.toLocaleString(),
+                    })
+                  : t('requestsSubline', {
+                      total: err.total.toLocaleString(),
+                      errors: err.errors.toLocaleString(),
+                      rate: err.rate.toFixed(1),
+                    })
+              }
             />
             <KPICard
               title={t('totalTokens')}

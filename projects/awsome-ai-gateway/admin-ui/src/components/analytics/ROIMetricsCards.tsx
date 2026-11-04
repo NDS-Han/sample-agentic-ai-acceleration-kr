@@ -75,11 +75,17 @@ export async function ROIMetricsCards({ filter, latestMonth }: ROIMetricsCardsPr
     {
       label: t('totalRequests'),
       value: summary.total_requests.toLocaleString(),
-      description: t('requestsSubline', {
-        total: err.total.toLocaleString(),
-        errors: err.errors.toLocaleString(),
-        rate: err.rate.toFixed(1),
-      }),
+      // 경고 시 에러율을 설명 선두에 — 카드엔 별도 배지가 없어 한 줄로 합친다.
+      description: err.warn
+        ? `${t('errorRateLabel', { rate: err.rate.toFixed(1) })} · ${t('requestsSublineWarn', {
+            total: err.total.toLocaleString(),
+            errors: err.errors.toLocaleString(),
+          })}`
+        : t('requestsSubline', {
+            total: err.total.toLocaleString(),
+            errors: err.errors.toLocaleString(),
+            rate: err.rate.toFixed(1),
+          }),
       warn: err.warn,
     },
     {
