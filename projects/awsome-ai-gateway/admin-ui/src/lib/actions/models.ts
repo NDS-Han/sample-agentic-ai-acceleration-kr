@@ -281,6 +281,8 @@ export interface PriceSyncPreview {
   diffs: PriceSyncDiff[];
   matched_count: number;
   changed_count: number;
+  // 소스 조회 실패 — 전체 fetch 실패면 diffs 가 미발견만 되므로 명시 노출
+  errors?: string[];
 }
 
 /** AWS Price List 단가 vs 현재가 diff 미리보기(읽기 전용). */

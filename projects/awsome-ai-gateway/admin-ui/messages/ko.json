@@ -511,6 +511,7 @@
       "previewButton": "조회",
       "sourceInfo": "소스: {source} ({region}) · 매칭 {matched} · 변경 {changed} · 동일 {unchanged} · 미매칭 {unmatched}",
       "noChanges": "변경된 단가가 없습니다(현재 DB 단가가 선택한 소스와 일치).",
+      "fetchErrors": "단가 소스 조회 실패 — 아래 결과는 불완전할 수 있습니다",
       "unmatched": "미매칭(선택한 소스에 단가 없음, 적용 불가): {aliases}",
       "columns": {
         "apply": "적용",

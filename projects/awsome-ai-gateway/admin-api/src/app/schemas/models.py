@@ -601,6 +601,9 @@ class PriceSyncPreviewResponse(BaseModel):
     diffs: list[PriceSyncDiff]
     matched_count: int
     changed_count: int
+    # 소스 조회/정규화 실패 — 전체 fetch 실패면 diffs 가 전부 미발견으로만
+    # 보여 오류가 조용히 삼켜지므로 응답에 명시 노출한다.
+    errors: list[str] = Field(default_factory=list)
 
 
 class PriceSyncExpected(BaseModel):

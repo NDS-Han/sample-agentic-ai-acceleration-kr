@@ -511,6 +511,7 @@
       "previewButton": "Preview",
       "sourceInfo": "Source: {source} ({region}) · matched {matched} · changed {changed} · unchanged {unchanged} · unmatched {unmatched}",
       "noChanges": "No price changes (current DB prices match the selected source).",
+      "fetchErrors": "Failed to fetch the pricing source — results below may be incomplete",
       "unmatched": "Unmatched (price not found in selected source, cannot apply): {aliases}",
       "columns": {
         "apply": "Apply",

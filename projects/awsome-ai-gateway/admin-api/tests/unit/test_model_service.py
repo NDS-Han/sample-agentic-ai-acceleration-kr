@@ -1056,6 +1056,31 @@ class TestPriceSyncProviderGate:
         )
         assert out.diffs == []
 
+    @pytest.mark.asyncio
+    async def test_fetch_errors_surface_in_preview(self, monkeypatch):
+        """소스 fetch 실패는 errors 로 노출 — 전부 미발견이 돼도 조용히 삼키지 않는다."""
+        from app.services.pricing_sync_service import FetchResult
+
+        m = _make_model(alias="claude-sonnet")
+        m.provider = Provider.BEDROCK
+        m.provider_model_id = "anthropic.claude-sonnet-4-v1:0"
+        m.allowed_clients = []
+        repo = self._repo_with([m])
+        monkeypatch.setattr(
+            "app.services.model_service.ModelRepository", lambda sess: repo
+        )
+        src = MagicMock()
+        src.region = "ap-south-1"
+        fetched = FetchResult(errors=["LiteLLM API 호출 실패: boom"])
+        src.fetch_bedrock_prices = AsyncMock(return_value=fetched)
+
+        svc = ModelService(MagicMock())
+        out = await svc.preview_price_sync(
+            MagicMock(), pricing_sync_service=src
+        )
+        assert out.errors == ["LiteLLM API 호출 실패: boom"]
+        assert out.matched_count == 0
+
 
 class TestPriceSyncApply:
     """apply 안전 계약 — 미래 예약 행 보호(F3), 승인값 드리프트 거부(F4),

@@ -701,6 +701,7 @@ class ModelService:
             diffs=diffs,
             matched_count=matched,
             changed_count=changed,
+            errors=list(fetched.errors),
         )
 
     async def apply_price_sync(

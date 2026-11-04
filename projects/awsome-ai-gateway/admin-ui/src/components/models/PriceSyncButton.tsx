@@ -105,7 +105,11 @@ export function PriceSyncButton() {
         {t('button')}
       </button>
 
-      <AppDialog isOpen={open} onClose={() => setOpen(false)} title={t('dialogTitle')} wide>
+      <AppDialog isOpen={open} onClose={() => setOpen(false)} title={t('dialogTitle')} wide
+        // 9열 diff 표(장문 구간 보조행 포함)가 3xl 에서 가로 스크롤을 만든다 —
+        // 뷰포트 95% / 최대 6xl 로 넓혀 온전히 보이게 한다. 좁은 화면에서는
+        // Table 자체의 overflow-x-auto 가 폴백.
+        contentClassName="max-w-6xl w-[95vw]">
         <div className="mt-4">
               <div className="mb-3 flex items-end gap-2">
                 <div className="flex-1">
@@ -153,6 +157,15 @@ export function PriceSyncButton() {
                 </div>
               )}
 
+              {preview && (preview.errors?.length ?? 0) > 0 && (
+                <div className="mb-3 rounded-md border border-red-300 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-800 dark:bg-red-950/40 dark:text-red-300">
+                  <p className="font-medium">{t('fetchErrors')}</p>
+                  <ul className="mt-1 list-inside list-disc space-y-0.5">
+                    {preview.errors!.map((e, i) => <li key={i}>{e}</li>)}
+                  </ul>
+                </div>
+              )}
+
               {preview && (
                 <>
                   <p className="mb-3 text-xs text-muted-foreground">
@@ -167,9 +180,13 @@ export function PriceSyncButton() {
                   </p>
 
                   {changedDiffs.length === 0 ? (
-                    <p className="py-6 text-sm text-muted-foreground">
-                      {t('noChanges')}
-                    </p>
+                    // fetch 오류는 위 오류 박스가 설명 — "변경 없음"으로
+                    // 성공처럼 보이게 하지 않는다
+                    (preview.errors?.length ?? 0) === 0 && (
+                      <p className="py-6 text-sm text-muted-foreground">
+                        {t('noChanges')}
+                      </p>
+                    )
                   ) : (
                     <Table density="compact">
                       <THead>
@@ -248,7 +265,8 @@ export function PriceSyncButton() {
               </button>
               <button
                 onClick={apply}
-                disabled={applying || !preview || selected.size === 0}
+                disabled={applying || !preview || selected.size === 0 ||
+                  (preview.matched_count === 0 && (preview.errors?.length ?? 0) > 0)}
                 className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-50"
               >
                 {applying && <Loader2 size={14} className="animate-spin" />}
