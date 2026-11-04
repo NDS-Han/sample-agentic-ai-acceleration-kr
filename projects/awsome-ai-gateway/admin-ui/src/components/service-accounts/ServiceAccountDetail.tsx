@@ -117,39 +117,6 @@ export function ServiceAccountDetail({ data, period }: Props) {
         </div>
       )}
 
-      {/* 토큰 분석 — 버킷 구성 비율 + 비청구 reasoning. */}
-      <div className="glass rounded-apple p-4">
-        <h3 className="mb-3 text-sm font-semibold">{t('tokTitle')}</h3>
-        {s.input_tokens + s.output_tokens + s.cache_creation_tokens + s.cache_read_tokens > 0 ? (
-          <TokenMixDonutClient
-            data={{
-              input_tokens: s.input_tokens,
-              output_tokens: s.output_tokens,
-              cache_read_tokens: s.cache_read_tokens,
-              cache_write_tokens: s.cache_creation_tokens,
-              total_tokens:
-                s.input_tokens +
-                s.output_tokens +
-                s.cache_creation_tokens +
-                s.cache_read_tokens,
-            }}
-          />
-        ) : (
-          <p className="py-4 text-center text-sm text-muted-foreground">
-            {t('noUsage')}
-          </p>
-        )}
-        {(s.reasoning_tokens > 0 || s.web_search_count > 0) && (
-          <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
-            {s.reasoning_tokens > 0 &&
-              t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
-            {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
-            {s.web_search_count > 0 &&
-              t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
-          </p>
-        )}
-      </div>
-
       {/* 발급된 키들 — 재발급 이력 포함. 원문은 절대 표시하지 않는다. */}
       <div className="glass rounded-apple p-4">
         <h3 className="mb-3 text-sm font-semibold">{t('keysTitle')}</h3>
@@ -306,6 +273,39 @@ export function ServiceAccountDetail({ data, period }: Props) {
             </p>
           )}
         </div>
+      </div>
+
+      {/* 토큰 분석 — 버킷 구성 비율 + 비청구 reasoning. */}
+      <div className="glass rounded-apple p-4">
+        <h3 className="mb-3 text-sm font-semibold">{t('tokTitle')}</h3>
+        {s.input_tokens + s.output_tokens + s.cache_creation_tokens + s.cache_read_tokens > 0 ? (
+          <TokenMixDonutClient
+            data={{
+              input_tokens: s.input_tokens,
+              output_tokens: s.output_tokens,
+              cache_read_tokens: s.cache_read_tokens,
+              cache_write_tokens: s.cache_creation_tokens,
+              total_tokens:
+                s.input_tokens +
+                s.output_tokens +
+                s.cache_creation_tokens +
+                s.cache_read_tokens,
+            }}
+          />
+        ) : (
+          <p className="py-4 text-center text-sm text-muted-foreground">
+            {t('noUsage')}
+          </p>
+        )}
+        {(s.reasoning_tokens > 0 || s.web_search_count > 0) && (
+          <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
+            {s.reasoning_tokens > 0 &&
+              t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
+            {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
+            {s.web_search_count > 0 &&
+              t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
+          </p>
+        )}
       </div>
     </div>
   );
