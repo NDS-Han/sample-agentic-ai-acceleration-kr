@@ -43,7 +43,7 @@ export default async function KeysPage(props: KeysPageProps) {
         </p>
       </div>
 
-      {/* 앱용 장기 키 관리는 서비스 계정 페이지로 이동 — 여기는 사람 세션키만. */}
+      {/* 앱용 장기 키 관리는 에이전트 페이지로 이동 — 여기는 사람 세션키만. */}
       <div className="glass rounded-apple mb-6 flex items-center justify-between px-4 py-3">
         <p className="text-sm text-muted-foreground">{t('saMovedBanner')}</p>
         <Link
