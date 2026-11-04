@@ -429,3 +429,46 @@ export interface ServiceAccountUsageResponse {
   }[];
   daily: { date: string; requests: number; tokens: number; cost_usd: number }[];
 }
+
+// ── 감사 로그 (GET /admin/audit/logs) ──
+
+export type AuditActorKind = 'user' | 'service_token' | 'dev' | 'unknown';
+
+export interface AuditServiceTokenRef {
+  id: string;
+  name: string;
+  token_prefix: string;
+}
+
+export interface AuditLogItem {
+  id: string;
+  timestamp: string;
+  action: string;
+  group: string;
+  actor_user_id: string;
+  actor_role: string;
+  actor_email: string | null;
+  actor_display_name: string | null;
+  actor_kind: AuditActorKind;
+  service_token: AuditServiceTokenRef | null;
+  resource_type: string;
+  resource_id: string;
+  changes: Record<string, unknown>;
+  result: string;
+  ip_address: string;
+  request_id: string;
+}
+
+export interface AuditLogListResponse {
+  items: AuditLogItem[];
+  pagination: { cursor: string | null; limit: number; has_more: boolean };
+}
+
+export interface AuditActionGroup {
+  key: string;
+  actions: string[];
+}
+
+export interface AuditActionCatalogResponse {
+  groups: AuditActionGroup[];
+}

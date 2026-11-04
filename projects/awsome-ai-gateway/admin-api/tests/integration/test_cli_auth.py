@@ -80,6 +80,9 @@ class TestCLIVirtualKeyIssuance:
             user.team_id = uuid.UUID(default_team_id)
             user.is_active = True
             user.sso_subject = None  # serialized into auth-context cache JSON by KeyService
+            # MagicMock 기본값은 truthy — is_service_account 가드(비서비스 키 차단)가
+            # 명시적으로 False 여야 DEVELOPER 발급 경로를 탄다.
+            user.is_service_account = False
             MockUserRepo.return_value.get_by_sso_subject = AsyncMock(return_value=user)
             MockBudgetRepo.return_value.get_first_active_config = AsyncMock(return_value=None)
 

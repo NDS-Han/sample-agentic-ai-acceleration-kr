@@ -72,6 +72,8 @@ class TestKeyListFlow:
         vk1.expires_at = datetime.now(timezone.utc) + timedelta(days=90)
         vk1.last_used_at = None
         vk1.created_at = datetime.now(timezone.utc)
+        # KeyResponse.kind: str — MagicMock 기본값(MagicMock)은 pydantic 을 못 탄다.
+        vk1.kind = "exchange"
 
         with patch("app.services.key_service.KeyRepository") as MockRepo:
             MockRepo.return_value.list_keys = AsyncMock(return_value=[vk1])

@@ -15,6 +15,7 @@ import {
   BrainCircuit,
   KeyRound,
   LayoutDashboard,
+  ScrollText,
   Sparkles,
   UserCircle,
   Users,
@@ -93,6 +94,13 @@ const NAV_ITEMS: NavItemDef[] = [
     key: 'monitoring',
     href: '/monitoring',
     icon: <Activity size={18} />,
+    allowedRoles: [UserRoleConst.ADMIN],
+  },
+  {
+    // 감사 로그 — ADMIN 전용(require_admin). PAGE_PERMISSIONS['/audit'] 과 동일.
+    key: 'audit',
+    href: '/audit',
+    icon: <ScrollText size={18} />,
     allowedRoles: [UserRoleConst.ADMIN],
   },
   // ⚠️ analytics / cli 는 페이지·권한표(PAGE_PERMISSIONS)·번역키(nav.analytics, nav.cli)가

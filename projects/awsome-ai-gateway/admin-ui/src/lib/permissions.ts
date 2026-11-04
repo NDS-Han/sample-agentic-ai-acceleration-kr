@@ -59,6 +59,9 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
   // Real-time monitoring — admin only
   '/monitoring': [UserRole.ADMIN],
 
+  // 감사 로그 뷰어 — admin only. 백엔드 /admin/audit/* 전부 require_admin.
+  '/audit': [UserRole.ADMIN],
+
   // CLI downloads — admin + team leader
   '/integration': [UserRole.ADMIN, UserRole.TEAM_LEADER],
   '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER], // 구 링크 — /integration 으로 redirect

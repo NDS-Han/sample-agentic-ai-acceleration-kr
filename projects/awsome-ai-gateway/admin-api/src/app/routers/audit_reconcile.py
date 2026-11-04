@@ -17,15 +17,39 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import uuid
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
+from app.core.audit_catalog import (
+    ACTION_GROUPS,
+    OTHER_GROUP,
+    all_known_variants,
+    group_for_action,
+    sql_variants,
+)
 from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
+from app.models.audit import AuditLog
+from app.models.auth import ServiceToken, User
 from app.models.usage import UsageLog
+from app.repositories._cursor import decode_cursor, encode_cursor
+from app.schemas.audit import (
+    ActionCatalogResponse,
+    ActionGroupCatalog,
+    AuditLogItem,
+    AuditLogListResponse,
+    ServiceTokenRef,
+)
+from app.schemas.common import (
+    PAGE_LIMIT_DEFAULT,
+    PAGE_LIMIT_MAX,
+    PaginationMeta,
+)
 from app.services.invocation_log_service import (
     InvocationLogNotConfigured,
     InvocationLogQueryError,
@@ -334,3 +358,190 @@ async def invocation_log_record(
             "runtime plane 호출이면 구간을 넓히거나 Region 설정을 확인하세요",
         )
     return record
+
+
+# ── 감사 로그 뷰어 ────────────────────────────────────────────────────────────
+#
+# audit.audit_logs 를 조사하는 읽기 전용 표면. 기록은 AuditLogger 가 세션 바인딩/
+# 큐 배치로 쓰고(필요하면 app/core/audit.py 참조), 여기는 조회만 한다.
+#
+# 설계 메모:
+# - 결과(result) 필터는 의도적으로 없다. 실패한 변경은 비즈니스 트랜잭션 롤백과
+#   함께 감사 행도 사라지는(R21 S5) 설계라 FAILURE 는 VIEW_INVOCATION_LOG_BODY
+#   같은 열람 감사에만 남는다 — "실패만 보기"는 전체 실패 목록인 것처럼 오해를 만든다.
+# - 합성 행위자: …000010=dev 로그인, …000011=서비스 토큰 공용(core/auth.py).
+#   토큰 식별자는 changes._service_token_id 에 있어 페이지 단위 배치로 해소한다.
+# - keyset 커서는 (timestamp DESC, id DESC) — 0053 인덱스가 그대로 탄다.
+_DEV_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000010")
+_SERVICE_TOKEN_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000011")
+
+_RANGE_HOURS = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30}
+
+
+@router.get("/action-catalog", response_model=ActionCatalogResponse)
+async def audit_action_catalog(
+    admin: CurrentUser = Depends(require_admin),
+):
+    """필터 그룹 → 정규화된 액션 목록. 프론트는 이걸로 pill/select 를 만든다."""
+    return ActionCatalogResponse(
+        groups=[
+            *[ActionGroupCatalog(key=k, actions=list(v)) for k, v in ACTION_GROUPS.items()],
+            # 매핑 밖 액션을 담는 그룹 — 프론트에서 항상 존재하도록 포함한다.
+            ActionGroupCatalog(key=OTHER_GROUP, actions=[]),
+        ]
+    )
+
+
+@router.get("/logs", response_model=AuditLogListResponse)
+async def list_audit_logs(
+    range_: str = Query("7d", alias="range", pattern="^(24h|7d|30d)$"),
+    group: str | None = Query(None, description="액션 그룹 키 (action-catalog 참조)"),
+    action: str | None = Query(None, description="단일 액션 (group 보다 우선)"),
+    actor_email: str | None = Query(None, description="행위자 이메일 부분 일치"),
+    resource_type: str | None = Query(None),
+    resource_id: str | None = Query(None),
+    cursor: str | None = Query(None),
+    limit: int = Query(PAGE_LIMIT_DEFAULT, ge=1, le=PAGE_LIMIT_MAX),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    # 기간 필수 — 스캔 범위를 묶는다. 감사 조회는 "최근에 누가 바꿨나"가 대부분이다.
+    since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS[range_])
+    conditions = [AuditLog.timestamp >= since]
+
+    if action:
+        conditions.append(AuditLog.action == action)
+    elif group:
+        if group == OTHER_GROUP:
+            conditions.append(~AuditLog.action.in_(all_known_variants()))
+        elif group in ACTION_GROUPS:
+            conditions.append(AuditLog.action.in_(sql_variants(group)))
+        else:
+            raise HTTPException(400, f"알 수 없는 그룹: {group}")
+
+    if resource_type:
+        conditions.append(AuditLog.resource_type == resource_type)
+    if resource_id:
+        conditions.append(AuditLog.resource_id == resource_id)
+
+    if actor_email and actor_email.strip():
+        email_pattern = f"%{actor_email.strip()}%"
+        uid_rows = await session.execute(
+            select(User.id).where(User.email.ilike(email_pattern))
+        )
+        uids = [r[0] for r in uid_rows.all()]
+        if not uids:
+            # 이메일이 아무도 안 맞으면 결과는 공집합 — 스캔하지 않고 빈 페이지를 돌려준다.
+            return AuditLogListResponse(
+                items=[], pagination=PaginationMeta(cursor=None, limit=limit, has_more=False)
+            )
+        conditions.append(AuditLog.actor_user_id.in_(uids))
+
+    if cursor:
+        decoded = decode_cursor(cursor)
+        if decoded is None:
+            raise HTTPException(400, "잘못된 커서입니다")
+        cur_ts, cur_id = decoded
+        conditions.append(
+            or_(
+                AuditLog.timestamp < cur_ts,
+                and_(AuditLog.timestamp == cur_ts, AuditLog.id < cur_id),
+            )
+        )
+
+    stmt = (
+        select(AuditLog)
+        .where(*conditions)
+        .order_by(AuditLog.timestamp.desc(), AuditLog.id.desc())
+        .limit(limit + 1)
+    )
+    rows = list((await session.execute(stmt)).scalars().all())
+    has_more = len(rows) > limit
+    rows = rows[:limit]
+    next_cursor = (
+        encode_cursor(rows[-1].timestamp, rows[-1].id) if has_more and rows else None
+    )
+
+    # 행위자 해소 — 페이지(≤200)의 actor 집합으로 users 를 1회 조회.
+    # join 하지 않는 이유: 인덱스를 타는 단일 테이블 스캔을 유지하기 위해.
+    actor_ids = {r.actor_user_id for r in rows}
+    user_map: dict[uuid.UUID, tuple[str, str]] = {}
+    real_actor_ids = [
+        a for a in actor_ids if a not in (_DEV_ACTOR_ID, _SERVICE_TOKEN_ACTOR_ID)
+    ]
+    if real_actor_ids:
+        ures = await session.execute(
+            select(User.id, User.email, User.display_name).where(
+                User.id.in_(real_actor_ids)
+            )
+        )
+        user_map = {uid: (email, dn) for uid, email, dn in ures.all()}
+
+    # 서비스 토큰 해소 — changes._service_token_id 집합으로 1회 조회.
+    token_ids: set[uuid.UUID] = set()
+    for r in rows:
+        sid = (r.changes or {}).get("_service_token_id")
+        if sid:
+            try:
+                token_ids.add(uuid.UUID(str(sid)))
+            except ValueError:
+                pass
+    token_map: dict[uuid.UUID, ServiceTokenRef] = {}
+    if token_ids:
+        tres = await session.execute(
+            select(
+                ServiceToken.id, ServiceToken.name, ServiceToken.token_prefix
+            ).where(ServiceToken.id.in_(token_ids))
+        )
+        token_map = {
+            tid: ServiceTokenRef(id=tid, name=name, token_prefix=prefix)
+            for tid, name, prefix in tres.all()
+        }
+
+    items = []
+    for r in rows:
+        changes = dict(r.changes or {})
+        sid_raw = changes.pop("_service_token_id", None)
+
+        if r.actor_user_id == _DEV_ACTOR_ID:
+            actor_kind: str = "dev"
+        elif r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
+            actor_kind = "service_token"
+        elif r.actor_user_id in user_map:
+            actor_kind = "user"
+        else:
+            actor_kind = "unknown"
+
+        email, display_name = user_map.get(r.actor_user_id, (None, None))
+        token_ref = None
+        if sid_raw:
+            try:
+                token_ref = token_map.get(uuid.UUID(str(sid_raw)))
+            except ValueError:
+                token_ref = None
+
+        items.append(
+            AuditLogItem(
+                id=r.id,
+                timestamp=r.timestamp,
+                action=r.action,
+                group=group_for_action(r.action),
+                actor_user_id=r.actor_user_id,
+                actor_role=r.actor_role,
+                actor_email=email,
+                actor_display_name=display_name,
+                actor_kind=actor_kind,  # type: ignore[arg-type]
+                service_token=token_ref,
+                resource_type=r.resource_type,
+                resource_id=r.resource_id,
+                changes=changes,
+                result=r.result,
+                ip_address=r.ip_address,
+                request_id=r.request_id,
+            )
+        )
+
+    return AuditLogListResponse(
+        items=items,
+        pagination=PaginationMeta(cursor=next_cursor, limit=limit, has_more=has_more),
+    )
