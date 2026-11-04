@@ -48,6 +48,22 @@ def test_cursor_roundtrip():
     assert dec_id == rid
 
 
+def test_cursor_roundtrip_arbitrary_microseconds():
+    """float 곱셈은 µs 자리에서 1µs 어긋날 수 있다 — 임의 µs 값으로 검증.
+
+    구현: int(ts.timestamp() * 1e6) 대신 정수 나눗셈 (ts - EPOCH)//1µs.
+    """
+    import random
+
+    rng = random.Random(42)
+    for _ in range(500):
+        micros = rng.randint(0, 999_999)
+        ts = datetime(2026, 11, 5, 3, 14, 15, micros, tzinfo=timezone.utc)
+        rid = uuid.uuid4()
+        dec_ts, dec_id = decode_cursor(encode_cursor(ts, rid))
+        assert (dec_ts, dec_id) == (ts, rid), f"roundtrip drift at µs={micros}"
+
+
 def test_decode_rejects_legacy_and_garbage():
     assert decode_cursor(str(uuid.uuid4())) is None      # 구 형식 bare UUID
     assert decode_cursor("not-a-cursor") is None

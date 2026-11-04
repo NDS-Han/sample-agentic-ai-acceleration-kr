@@ -1434,6 +1434,7 @@
       "TRANSFER_USER": "사용자 팀 이동",
       "MARK_SERVICE_ACCOUNT": "에이전트 전환",
       "UNMARK_SERVICE_ACCOUNT": "에이전트 해제",
+      "REPAIR_SERVICE_ACCOUNT_KEYS": "에이전트 키 복구",
       "COGNITO_SYNC_ALL": "Cognito 전체 동기화",
       "COGNITO_SYNC_USER": "Cognito 사용자 동기화",
       "COGNITO_SYNC_GROUP": "Cognito 그룹 동기화",

@@ -71,16 +71,18 @@ export async function unmarkServiceAccountAction(
 // ─── issueServiceKeyAction ────────────────────────────────────────────────────
 // 쓰기는 재시도하지 않는다(revoke 와 같은 이유) — 유저당 ACTIVE 1개라
 // 재시도가 기존 키를 또 만료시킨다.
+// 표지+발급은 한 트랜잭션(POST /admin/service-accounts/{id}/issue) — 분리하면
+// 표지만 commit 되고 발급이 실패할 때 사람 계정이 로그인 불가 상태로 갇힌다.
 
 export async function issueServiceKeyAction(params: {
   userId: string;
   ttlDays?: number;
 }): Promise<ActionResult<IssueServiceKeyResponse>> {
-  const body: Record<string, unknown> = { user_id: params.userId };
+  const body: Record<string, unknown> = {};
   if (params.ttlDays !== undefined) body.ttl_days = params.ttlDays;
   try {
     const data = await adminAPI.post<IssueServiceKeyResponse>(
-      '/admin/keys',
+      `/admin/service-accounts/${encodeURIComponent(params.userId)}/issue`,
       body,
     );
     revalidatePath('/keys');

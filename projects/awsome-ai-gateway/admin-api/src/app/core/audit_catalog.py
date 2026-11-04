@@ -38,6 +38,7 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
         "TRANSFER_USER",
         "MARK_SERVICE_ACCOUNT",
         "UNMARK_SERVICE_ACCOUNT",
+        "REPAIR_SERVICE_ACCOUNT_KEYS",
         "COGNITO_SYNC_ALL",
         "COGNITO_SYNC_USER",
         "COGNITO_SYNC_GROUP",

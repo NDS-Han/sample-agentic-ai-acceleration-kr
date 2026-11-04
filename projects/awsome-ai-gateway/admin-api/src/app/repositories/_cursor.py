@@ -15,20 +15,27 @@ user_repository.iter_all_users 주석 참조).
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+
+
+_EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 
 
 def encode_cursor(created_at: datetime, row_id: uuid.UUID) -> str:
     ts = created_at
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return f"{int(ts.timestamp() * 1_000_000)}_{row_id}"
+    # float 곱셈(ts.timestamp() * 1e6)은 µs 자리에서 1µs 어긋날 수 있다 —
+    # 경계 행이 페이지 사이로 빠진다. 정수 나눗셈으로 정확히 내린다.
+    micros = (ts - _EPOCH) // timedelta(microseconds=1)
+    return f"{micros}_{row_id}"
 
 
 def decode_cursor(cursor: str) -> tuple[datetime, uuid.UUID] | None:
     try:
         ts_str, id_str = cursor.split("_", 1)
-        ts = datetime.fromtimestamp(int(ts_str) / 1_000_000, tz=timezone.utc)
+        # decode 도 float 나눗셈을 쓰면 encode 와 같은 1µs 드리프트가 생긴다.
+        ts = _EPOCH + timedelta(microseconds=int(ts_str))
         return ts, uuid.UUID(id_str)
     except (ValueError, AttributeError, OverflowError):
         return None

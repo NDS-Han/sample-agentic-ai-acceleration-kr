@@ -97,6 +97,12 @@ class ServiceAccountCreateRequest(BaseModel):
     email: str = Field(..., min_length=1, max_length=320)
 
 
+class IssueServiceAccountKeyRequest(BaseModel):
+    """표지+발급 결합 요청 — user_id 는 경로에, TTL 만 본문."""
+
+    ttl_days: int | None = None
+
+
 # ── 서비스 계정 키 단위 사용량 (migration 0051 key_prefix 귀속) ──
 
 

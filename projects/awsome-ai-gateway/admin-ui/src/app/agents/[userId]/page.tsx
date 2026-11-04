@@ -34,7 +34,7 @@ export default async function ServiceAccountDetailPage({
 
   const result = await adminAPI
     .get<ServiceAccountUsageResponse>(
-      `/admin/service-accounts/${userId}/usage`,
+      `/admin/service-accounts/${encodeURIComponent(userId)}/usage`,
       { period },
     )
     .then((v) => ({ ok: true as const, value: v }))

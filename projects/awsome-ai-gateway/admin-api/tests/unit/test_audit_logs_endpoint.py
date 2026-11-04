@@ -203,7 +203,9 @@ async def test_action_filter_includes_confirmed_variant() -> None:
     stmt = session.execute.await_args_list[0].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "SET_TEAM_BUDGET" in compiled
-    # IN 목록 — 정확히 일치가 아니라 변형 포함
+    # IN 목록에 _CONFIRMED 변형이 실제로 들어가야 한다 — equality 필터로
+    # 바뀌면 이 단언이 실패한다(kiro 테스트 공백 지적).
+    assert "SET_TEAM_BUDGET_CONFIRMED" in compiled
 
 
 async def test_other_group_uses_not_in() -> None:

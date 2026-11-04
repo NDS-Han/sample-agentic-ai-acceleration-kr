@@ -1434,6 +1434,7 @@
       "TRANSFER_USER": "Transfer user",
       "MARK_SERVICE_ACCOUNT": "Mark as agent",
       "UNMARK_SERVICE_ACCOUNT": "Unmark agent",
+      "REPAIR_SERVICE_ACCOUNT_KEYS": "Repair agent keys",
       "COGNITO_SYNC_ALL": "Sync all Cognito",
       "COGNITO_SYNC_USER": "Sync Cognito user",
       "COGNITO_SYNC_GROUP": "Sync Cognito group",

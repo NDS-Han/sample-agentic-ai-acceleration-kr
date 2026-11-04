@@ -76,7 +76,7 @@ def _patch_issue_repos():
 
 
 class TestDedupKindMatch:
-    async def _issue(self, key_service, mock_session, mock_redis, encryption, *, existing_kind):
+    async def _issue(self, key_service, mock_session, mock_redis, encryption, *, existing_kind, issue_kind=VK_KIND_SERVICE):
         user = _user(service=True)
         old_raw = "vk-" + "ab" * 32
         existing = _existing_key(
@@ -97,7 +97,7 @@ class TestDedupKindMatch:
                 user_id=user.id,
                 actor=_actor(),
                 user=user,
-                kind=VK_KIND_SERVICE,
+                kind=issue_kind,
             )
         return result, old_raw, repo
 
@@ -112,13 +112,26 @@ class TestDedupKindMatch:
         assert result.virtual_key.startswith("vk-")
         repo.expire_and_create.assert_awaited_once()
 
-    async def test_same_kind_is_reused_control(
+    async def test_service_kind_is_not_deduped(
         self, key_service, mock_session, mock_redis, encryption
     ):
-        """대조군: kind 가 같으면 같은 셋업에서 기존 키를 재반환한다."""
+        """service kind 재발급은 관리자의 회전 의도 — dedup 창 안에서도
+        같은 키를 돌려주지 않고 새 키를 발급한다."""
         result, old_raw, repo = await self._issue(
             key_service, mock_session, mock_redis, encryption,
             existing_kind=VK_KIND_SERVICE,
+        )
+        assert result.virtual_key != old_raw
+        repo.expire_and_create.assert_awaited_once()
+
+    async def test_exchange_kind_is_deduped_control(
+        self, key_service, mock_session, mock_redis, encryption
+    ):
+        """대조군: 사람 단기키는 여전히 dedup 된다."""
+        result, old_raw, repo = await self._issue(
+            key_service, mock_session, mock_redis, encryption,
+            existing_kind=VK_KIND_EXCHANGE,
+            issue_kind=VK_KIND_EXCHANGE,
         )
         assert result.virtual_key == old_raw
         repo.expire_and_create.assert_not_awaited()
@@ -275,3 +288,151 @@ class TestIssueKeyLocksUser:
             )
         mock_session.refresh.assert_awaited_once_with(user, with_for_update=True)
         MockUser.return_value.get_user.assert_not_called()
+
+
+# ── 5. svc 토큰은 에이전트 생명주기를 건드리지 못한다 ─────────────────────
+
+from app.core.exceptions import ForbiddenError, ValidationError
+from app.routers.service_accounts import (
+    mark_and_issue_service_key,
+    unmark_service_account,
+)
+from app.schemas.keys import IssueServiceAccountKeyRequest
+
+
+def _svc_actor() -> CurrentUser:
+    return CurrentUser(
+        user_id=uuid.uuid4(),
+        email="svc-token@internal",
+        role=UserRole.ADMIN,
+        team_id=None,
+        is_service_token=True,
+        service_token_id=uuid.uuid4(),
+    )
+
+
+def _request():
+    request = MagicMock()
+    request.client.host = "10.0.0.1"
+    request.state.request_id = "req-x"
+    return request
+
+
+class TestServiceTokenGuard:
+    async def test_mark_forbidden(self, mock_session):
+        with pytest.raises(ForbiddenError):
+            await mark_service_account(
+                body=ServiceAccountCreateRequest(email="a@b"),
+                request=_request(),
+                admin=_svc_actor(),
+                session=mock_session,
+            )
+
+    async def test_unmark_forbidden(self, mock_session):
+        with pytest.raises(ForbiddenError):
+            await unmark_service_account(
+                user_id=uuid.uuid4(),
+                request=_request(),
+                admin=_svc_actor(),
+                session=mock_session,
+            )
+
+    async def test_issue_forbidden(self, mock_session):
+        with pytest.raises(ForbiddenError):
+            await mark_and_issue_service_key(
+                user_id=uuid.uuid4(),
+                body=IssueServiceAccountKeyRequest(ttl_days=30),
+                request=_request(),
+                admin=_svc_actor(),
+                session=mock_session,
+            )
+
+
+# ── 6. 표지+발급 결합 엔드포인트 ─────────────────────────────────────────
+
+
+class TestMarkAndIssue:
+    async def _call(self, user, mock_session, admin, *, svc=None):
+        request = _request()
+        request.app.state.key_service = svc or MagicMock()
+        with patch("app.routers.service_accounts.UserRepository") as MockUser, \
+             patch("app.repositories.key_repository.KeyRepository") as MockKey, \
+             patch("app.routers.service_accounts.audit_logger") as mock_audit, \
+             patch("app.services.key_service.BudgetRepository") as MockBudget:
+            MockUser.return_value.get_user = AsyncMock(return_value=user)
+            MockKey.return_value.list_revocable_for_users = AsyncMock(
+                return_value=[]
+            )
+            MockBudget.return_value.get_active_config = AsyncMock(
+                return_value=None
+            )
+            mock_audit.log = AsyncMock()
+            return await mark_and_issue_service_key(
+                user_id=user.id,
+                body=IssueServiceAccountKeyRequest(ttl_days=30),
+                request=request,
+                admin=admin,
+                session=mock_session,
+            )
+
+    async def test_issue_failure_leaves_flag_uncommitted_path(
+        self, mock_session, admin_user
+    ):
+        """팀 미배정 유저 → 발급 검사가 raise — 같은 트랜잭션이라
+        표지도 commit 되지 않고 요청 전체가 거절된다."""
+        user = _user(service=False)
+        user.team_id = None
+        svc = MagicMock()
+        svc.revoke_key = AsyncMock()
+        svc.issue_key = AsyncMock()
+        with pytest.raises(ValidationError):
+            await self._call(user, mock_session, admin_user, svc=svc)
+        # 발급 전에 readiness 에서 실패 — issue_key 는 호출되지 않는다.
+        svc.issue_key.assert_not_awaited()
+        # 표지 세팅 자체는 같은 트랜잭션 안에서 일어났다(롤백 대상).
+        assert user.is_service_account is True
+
+    async def test_happy_path_marks_and_issues(
+        self, mock_session, admin_user
+    ):
+        user = _user(service=False)
+        user.team_id = uuid.uuid4()
+        svc = MagicMock()
+        svc.revoke_key = AsyncMock()
+        svc.issue_key = AsyncMock(
+            return_value=MagicMock(
+                key_id=str(uuid.uuid4()),
+                key_prefix="vk-test",
+                user_id=str(user.id),
+                status=KeyStatus.ACTIVE,
+                expires_at=datetime.now(timezone.utc),
+                virtual_key="vk-" + "ef" * 32,
+            )
+        )
+        request = _request()
+        request.app.state.key_service = svc
+        with patch("app.routers.service_accounts.UserRepository") as MockUser, \
+             patch("app.repositories.key_repository.KeyRepository") as MockKey, \
+             patch("app.routers.service_accounts.audit_logger") as mock_audit, \
+             patch("app.services.key_service.BudgetRepository") as MockBudget:
+            MockUser.return_value.get_user = AsyncMock(return_value=user)
+            MockKey.return_value.list_revocable_for_users = AsyncMock(
+                return_value=[]
+            )
+            cfg = MagicMock()
+            cfg.max_budget_usd = 100
+            MockBudget.return_value.get_active_config = AsyncMock(
+                return_value=cfg
+            )
+            mock_audit.log = AsyncMock()
+            resp = await mark_and_issue_service_key(
+                user_id=user.id,
+                body=IssueServiceAccountKeyRequest(ttl_days=30),
+                request=request,
+                admin=admin_user,
+                session=mock_session,
+            )
+        assert user.is_service_account is True
+        svc.issue_key.assert_awaited_once()
+        assert resp["virtual_key"].startswith("vk-")
+        assert resp["key_prefix"] == "vk-test"

@@ -60,8 +60,16 @@ async def _release_job_lock(session: AsyncSession, job_name: str) -> None:
             {"k": f"scheduler-job:{job_name}"},
         )
     except Exception:
-        # 해제 실패해도 세션 종료(커넥션 close)가 락을 풀어준다 — 경고만.
+        # 세션 close 는 커넥션을 풀에 **반납**할 뿐 실제로 닫지 않는다 —
+        # 락을 쥔 커넥션이 풀에 살아남아 유령 락이 된다. invalidate() 로
+        # 커넥션 자체를 폐기시켜 락을 확실히 푼다.
         logger.warning("scheduler.job_lock_unlock_failed", job=job_name)
+        try:
+            await session.invalidate()
+        except Exception:
+            logger.warning(
+                "scheduler.job_lock_invalidate_failed", job=job_name
+            )
 
 
 @asynccontextmanager

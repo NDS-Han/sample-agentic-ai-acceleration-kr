@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 
 import structlog
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func, literal, select
@@ -15,7 +15,7 @@ from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from app.core.usage_filters import (
     current_kst_period,
     period_to_utc_range,
@@ -38,6 +38,7 @@ from app.models.usage import UsageLog
 from app.repositories.budget_repository import BudgetRepository
 from app.repositories.user_repository import UserRepository
 from app.schemas.keys import (
+    IssueServiceAccountKeyRequest,
     ServiceAccountCreateRequest,
     ServiceAccountItem,
     ServiceAccountKeyUsageItem,
@@ -240,32 +241,31 @@ async def list_service_accounts(
     )
 
 
-@router.post("", status_code=201)
-async def mark_service_account(
-    body: ServiceAccountCreateRequest,
-    request: Request,
-    admin: CurrentUser = Depends(require_admin),
-    session: AsyncSession = Depends(get_db_session),
-):
-    """기존 사용자를 서비스 계정으로 표지 — 장기 VK 발급 대상이 된다.
+def _forbid_service_token_admin(admin: CurrentUser) -> None:
+    """svc 토큰은 에이전트 생명주기를 못 건드린다 — 사람 admin(JWT) 전용.
 
-    계정 자체는 Cognito/IdP 에서 생성·동기화된다(조직 규약). 이 엔드포인트는
-    그 계정에 '서비스 계정' 표지만 단다. ADMIN 과 비활성 계정은 거부.
+    서비스 토큰은 require_admin 을 통과하지만(service_tokens.py 같은 규칙),
+    장기 VK 발급/계정 표지는 또 다른 자격증명을 찍어내는 행위라 토큰이
+    자기 권한을 확장할 수 없게 막는다.
     """
-    # FOR UPDATE — issue_key 도 같은 행을 잡고 플래그를 확인하므로, 잠금으로
-    # 표지↔발급이 직렬화된다: 표지가 먼저면 발급은 flag=True 를 보고 거부되고,
-    # 발급이 먼저면 표지의 폐기 수집이 그 신규 키를 본다.
-    user = await UserRepository(session).get_by_email(
-        body.email.strip(), for_update=True
-    )
-    if user is None:
-        raise NotFoundError("User", body.email)
+    if admin.is_service_token:
+        raise ForbiddenError(
+            "Service tokens cannot manage service accounts"
+        )
+
+
+async def _mark_user_as_service_account(
+    session: AsyncSession,
+    request: Request,
+    user: User,
+    admin: CurrentUser,
+) -> bool:
+    """표지 공통 로직 — 호출자는 user 를 FOR UPDATE 로 이미 잡은 상태여야 한다.
+
+    Returns True if the flag was newly set (False when already flagged).
+    """
     if user.is_service_account:
-        return {
-            "user_id": str(user.id),
-            "email": user.email,
-            "is_service_account": True,
-        }
+        return False
     if user.role == UserRole.ADMIN:
         raise ValidationError("cannot flag ADMIN users as service accounts")
     if not user.is_active:
@@ -317,10 +317,95 @@ async def mark_service_account(
         ip_address=request.client.host if request.client else "0.0.0.0",
         request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
     )
+    return True
+
+
+@router.post("", status_code=201)
+async def mark_service_account(
+    body: ServiceAccountCreateRequest,
+    request: Request,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """기존 사용자를 서비스 계정으로 표지 — 장기 VK 발급 대상이 된다.
+
+    계정 자체는 Cognito/IdP 에서 생성·동기화된다(조직 규약). 이 엔드포인트는
+    그 계정에 '서비스 계정' 표지만 단다. ADMIN 과 비활성 계정은 거부.
+    """
+    _forbid_service_token_admin(admin)
+    # FOR UPDATE — issue_key 도 같은 행을 잡고 플래그를 확인하므로, 잠금으로
+    # 표지↔발급이 직렬화된다: 표지가 먼저면 발급은 flag=True 를 보고 거부되고,
+    # 발급이 먼저면 표지의 폐기 수집이 그 신규 키를 본다.
+    user = await UserRepository(session).get_by_email(
+        body.email.strip(), for_update=True
+    )
+    if user is None:
+        raise NotFoundError("User", body.email)
+    await _mark_user_as_service_account(session, request, user, admin)
     return {
         "user_id": str(user.id),
         "email": user.email,
         "is_service_account": True,
+    }
+
+
+@router.post("/{user_id}/issue", status_code=201)
+async def mark_and_issue_service_key(
+    user_id: uuid.UUID,
+    body: IssueServiceAccountKeyRequest,
+    request: Request,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """표지+발급을 한 트랜잭션으로 — 부분 실패로 사람 계정이 잠기지 않는다.
+
+    별도 요청으로 나뉘면 표지 commit 후 발급이 실패(팀/예산 미비)할 때
+    계정이 service_account 로 남아 사람 로그인·단기키가 모두 차단된 채
+    갇힌다. CommittingRoute 가 응답 뒤 한 번만 commit 하므로 어느 단계든
+    예외면 표지·폐기·발급이 함께 롤백된다.
+    """
+    from app.services.key_service import KeyService, assert_service_key_ready
+
+    _forbid_service_token_admin(admin)
+
+    settings = get_settings()
+    max_days = settings.APP_KEY_MAX_TTL_DAYS
+    ttl_days = body.ttl_days if body.ttl_days is not None else max_days
+    if not 1 <= ttl_days <= max_days:
+        raise ValidationError(
+            f"ttl_days must be between 1 and {max_days} (APP_KEY_MAX_TTL_DAYS)"
+        )
+
+    user = await UserRepository(session).get_user(user_id, for_update=True)
+    if user is None:
+        raise NotFoundError("User", str(user_id))
+
+    # 표지 먼저 — 실패하면 발급 없이 전체 롤백. 이미 표지면 no-op.
+    await _mark_user_as_service_account(session, request, user, admin)
+
+    # 발급 readiness — 실패해도 위 표지/폐기가 함께 롤백된다.
+    await assert_service_key_ready(session, user)
+
+    svc: KeyService = request.app.state.key_service
+    expires_at = datetime.now(UTC) + timedelta(days=ttl_days)
+    key_result = await svc.issue_key(
+        session,
+        user_id=user.id,
+        actor=admin,
+        expires_at=expires_at,
+        kind=VK_KIND_SERVICE,
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=getattr(request.state, "request_id", "")
+        or request.headers.get("x-request-id", ""),
+        user=user,
+    )
+    return {
+        "key_id": key_result.key_id,
+        "key_prefix": key_result.key_prefix,
+        "user_id": key_result.user_id,
+        "status": key_result.status,
+        "expires_at": key_result.expires_at.isoformat() if key_result.expires_at else None,
+        "virtual_key": key_result.virtual_key,
     }
 
 
@@ -332,6 +417,7 @@ async def unmark_service_account(
     session: AsyncSession = Depends(get_db_session),
 ):
     """서비스 계정 표지 해제 — 활성 service 키가 남아 있으면 거부한다."""
+    _forbid_service_token_admin(admin)
     # FOR UPDATE — issue_key 의 같은 잠금과 직렬화해 "활성 service 키 확인
     # 후 해제" 와 "service 키 발급" 의 경합을 막는다.
     user = await UserRepository(session).get_user(user_id, for_update=True)
@@ -387,6 +473,8 @@ async def repair_service_account_keys(
     """
     from app.services.key_service import KeyService
 
+    _forbid_service_token_admin(admin)
+
     user = await UserRepository(session).get_user(user_id)
     if user is None:
         raise NotFoundError("User", str(user_id))
@@ -394,6 +482,21 @@ async def repair_service_account_keys(
     # 세션을 넘기지 않는다 — repair 는 키별 commit 의 전용 세션을 연다
     # (요청 세션의 트랜잭션 경계와 분리).
     repaired = await svc.repair_service_key_redis(user_id=user_id)
+    # 자격증명 재기록은 인증 경로를 만지는 쓰기라 감사 대상 — 별도 세션의
+    # 키별 commit 과 무관하게 요청 트랜잭션의 한 행으로 남긴다.
+    await audit_logger.log(
+        session,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
+        action="REPAIR_SERVICE_ACCOUNT_KEYS",
+        resource_type="User",
+        resource_id=str(user.id),
+        changes={"after": {"email": user.email, "repaired": repaired}},
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=getattr(request.state, "request_id", "")
+        or request.headers.get("x-request-id", ""),
+    )
     return {"repaired": repaired}
 
 
@@ -622,7 +725,13 @@ async def service_account_usage(
             avg_latency_ms=float(avg_lat) if avg_lat is not None else None,
             last_request_at=last_req,
             unattributed_requests=max(0, total_req - matched_req),
-            unattributed_cost_usd=max(0.0, total_cost - matched_cost),
+            # float 합산 잔차로 요청 0건인데 $0.000001 미귀속이 뜨는 걸 막는다 —
+            # 0건이면 비용도 0으로 고정한다.
+            unattributed_cost_usd=(
+                max(0.0, total_cost - matched_cost)
+                if total_req - matched_req > 0
+                else 0.0
+            ),
         ),
         by_model=by_model,
         daily=daily,

@@ -93,6 +93,28 @@ describe('classifyChanges — extra(형제 키) 보존', () => {
     }
   });
 
+  it('before/after 키 집합이 불겹치면 kv 로 분리 (END_GRACE 형태)', () => {
+    const s = classifyChanges({
+      before: { revoked_at: '2026-11-01T00:00:00Z' },
+      after: { grace_ended: true },
+    });
+    expect(s.kind).toBe('kv');
+    if (s.kind === 'kv') {
+      expect(s.entries).toEqual([
+        { key: 'before', value: { revoked_at: '2026-11-01T00:00:00Z' } },
+        { key: 'after', value: { grace_ended: true } },
+      ]);
+    }
+  });
+
+  it('before/after 키 일부만 겹쳐도 fieldDiff', () => {
+    const s = classifyChanges({
+      before: { name: 'a', old_field: 1 },
+      after: { name: 'b', new_field: 2 },
+    });
+    expect(s.kind).toBe('fieldDiff');
+  });
+
   it('스칼라 + 부가 키 → scalar + extra', () => {
     const s = classifyChanges({ before: 'a', after: 'b', note: 'n' });
     expect(s).toEqual({

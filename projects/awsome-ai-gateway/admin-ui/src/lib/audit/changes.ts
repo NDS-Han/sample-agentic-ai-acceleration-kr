@@ -50,6 +50,20 @@ export function classifyChanges(
     if (hasBefore && hasAfter) {
       if (isPlainObject(before) && isPlainObject(after)) {
         const keys = new Set([...Object.keys(before), ...Object.keys(after)]);
+        // 키 집합이 완전히 불겹치면(SERVICE_TOKEN_END_GRACE: before={revoked_at},
+        // after={grace_ended}) 필드 diff 는 `revoked_at: X → —` 같은 가짜
+        // 전환을 만든다. 겹치는 키가 하나도 없으면 양쪽을 분리해 보여준다.
+        const overlap = Object.keys(before).some((k) => k in after);
+        if (!overlap && Object.keys(before).length > 0) {
+          return {
+            kind: 'kv',
+            entries: [
+              { key: 'before', value: before },
+              { key: 'after', value: after },
+              ...extra,
+            ],
+          };
+        }
         const fields: FieldEntry[] = [...keys].map((key) => ({
           key,
           before: before[key],

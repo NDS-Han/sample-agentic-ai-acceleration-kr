@@ -14,7 +14,6 @@ import { fmtDate, fmtUsd } from '@/lib/utils/format';
 import {
   issueServiceKeyAction,
   listIssueTargetsAction,
-  markServiceAccountAction,
   repairServiceAccountAction,
   unmarkServiceAccountAction,
   type IssueTargetUser,
@@ -49,7 +48,6 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   // 플래그 여부는 accounts prop(백엔드 서비스 계정 목록)으로 판별 — /admin/users
   // 응답엔 is_service_account 가 없다.
   const isFlagged = !!issueAccount;
-  const activeAccounts = accounts.filter((a) => a.is_active);
   const confirmOk = confirmText.trim().toLowerCase() === 'confirm';
   const canIssue =
     !!selectedUser && ttlDays >= 1 && ttlDays <= maxTtlDays && confirmOk && busy === null;
@@ -105,14 +103,8 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
   const handleIssue = () =>
     run('issue', async () => {
       if (!selectedUser) return;
-      // 미플래그 유저 선택 → 발급과 함께 서비스 계정으로 전환 (경고는 모달에 표시됨)
-      if (!isFlagged) {
-        const m = await markServiceAccountAction(selectedUser.email);
-        if (!m.success) {
-          toast({ type: 'error', message: m.error ?? t('saMarkFailed'), auto_dismiss_ms: 5000 });
-          return;
-        }
-      }
+      // 표지+발급은 한 트랜잭션 — 미플래그 유저도 백엔드가 표지부터 처리한다.
+      // 분리 호출하면 표지만 commit 되고 발급 실패 시 계정이 잠긴다.
       const r = await issueServiceKeyAction({
         userId: selectedUser.id,
         ttlDays: ttlDays || undefined,
@@ -162,7 +154,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
         </div>
         <button
           onClick={openIssueModal}
-          disabled={activeAccounts.length === 0 || busy !== null}
+          disabled={busy !== null}
           className="shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
         >
           {t('saIssueButton')}

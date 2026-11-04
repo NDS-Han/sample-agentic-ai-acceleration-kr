@@ -28,7 +28,9 @@ from app.core.db import (
 )
 from app.core.encryption import AESEncryptionService
 from app.core.exceptions import NotFoundError, ValidationError
-from app.models.auth import KeyStatus, User, VirtualKey
+from app.models.auth import KeyStatus, User, UserRole, VirtualKey
+from app.models.budget import BudgetScope
+from app.repositories.budget_repository import BudgetRepository
 from app.models.usage import UsageLog
 from app.repositories._cursor import decode_cursor
 from app.repositories.allowed_client_repository import (
@@ -55,6 +57,34 @@ VK_KIND_EXCHANGE = "exchange"
 VK_KIND_STS = "sts"
 VK_KIND_INTERNAL = "internal"
 VK_KIND_SERVICE = "service"
+
+
+async def assert_service_key_ready(
+    session: AsyncSession, user: User
+) -> None:
+    """service 키 발급 전 readiness 검사 — 팀+TEAM 예산 없으면 발급 거부.
+
+    팀/예산 미비 상태로 발급된 키는 gateway 가 매 호출 429(no_team_assigned /
+    team_budget_unset)를 돌리므로 죽은 자격증명을 건네지 않기 위해 발급
+    시점에 차단한다. keys.issue_service_key 와 service_accounts.issue 의
+    공용 검사 — 표지+발급을 한 트랜잭션으로 묶을 때도 같은 규칙이 적용된다.
+    """
+    if not user.is_active:
+        raise ValidationError("service account is deactivated")
+    if user.role == UserRole.ADMIN:
+        raise ValidationError("cannot issue keys for ADMIN users")
+    if user.team_id is None:
+        raise ValidationError(
+            "service account has no team — assign a team with a TEAM budget first"
+        )
+    team_budget = await BudgetRepository(session).get_active_config(
+        BudgetScope.TEAM, user.team_id
+    )
+    if team_budget is None or team_budget.max_budget_usd is None:
+        raise ValidationError(
+            "service account's team has no active TEAM budget "
+            "(gateway would return 429 team_budget_unset)"
+        )
 
 
 class KeyService:
@@ -128,7 +158,10 @@ class KeyService:
         # 끝난 뒤에도 키가 살아남는다(24h STS 키가 1h Cowork 세션에 재사용되는 사고).
         # 만료 계산보다 먼저 검사하면 dedup 창 안에서 요청한 expires_at 가 무시된다.
         dedup_now = datetime.now(timezone.utc)
-        if VK_DEDUP_SECONDS > 0:
+        # service kind 는 dedup 제외 — CLI 재시도 방어용인데, 장기키의 5초 내
+        # 재발급은 관리자의 명시적 회전 의도이므로 같은 키를 조용히 돌려주면
+        # 회전이 무시된다(R24 r3). 사람 단기키만 dedup 한다.
+        if VK_DEDUP_SECONDS > 0 and kind != VK_KIND_SERVICE:
             for existing in await repo.list_active_for_user(user_id):
                 age_s = (dedup_now - existing.issued_at).total_seconds()
                 # kind 일치 — 다른 kind(예: 방금 발급된 exchange)를 service
@@ -916,7 +949,6 @@ class KeyService:
             keys = keys[:limit]
 
         email_by_user: dict[uuid.UUID, str] = {}
-        last_req_by_user: dict[uuid.UUID, datetime] = {}
         if keys:
             uids = {vk.user_id for vk in keys}
             issuer_ids = {vk.issued_by for vk in keys if vk.issued_by}

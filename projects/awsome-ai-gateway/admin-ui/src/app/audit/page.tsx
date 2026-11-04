@@ -54,25 +54,26 @@ export default async function AuditPage(props: AuditPageProps) {
       .then((v) => ({ ok: true as const, value: v }))
       .catch(() => ({ ok: false as const }));
 
-  // 카탈로그와 첫 페이지를 병렬로. URL 의 group 이 알 수 없는 값이면 백엔드 400 —
-  // 그때는 group/action 없이 한 번 더 가져와 페이지가 통째로 죽지 않게 한다.
-  const [catalogResult, firstLogs] = await Promise.all([
-    adminAPI
-      .get<AuditActionCatalogResponse>('/admin/audit/action-catalog')
-      .then((v) => ({ ok: true as const, value: v }))
-      .catch(() => ({ ok: false as const })),
-    fetchLogs(group, action),
-  ]);
-  const logsResult =
-    !firstLogs.ok && (group || action) ? await fetchLogs('', '') : firstLogs;
+  // 카탈로그를 먼저 받아 group 을 검증한 뒤 로그는 한 번만 가져온다 —
+  // 잘못된 group 은 가져오기 전에 버려 pill/필터/더보기가 항상 같은
+  // 조건을 쓴다(임의 실패를 무필터 재조회로 숨기지 않는다).
+  const catalogResult = await adminAPI
+    .get<AuditActionCatalogResponse>('/admin/audit/action-catalog')
+    .then((v) => ({ ok: true as const, value: v }))
+    .catch(() => ({ ok: false as const }));
 
-  if (!catalogResult.ok || !logsResult.ok) {
+  if (!catalogResult.ok) {
     return <ErrorState />;
   }
 
   const groups = catalogResult.value.groups;
   const groupKeys = new Set(groups.map((g) => g.key));
   const activeGroup = groupKeys.has(group) ? group : '';
+  const logsResult = await fetchLogs(activeGroup, action);
+
+  if (!logsResult.ok) {
+    return <ErrorState />;
+  }
   const groupActions = activeGroup
     ? (groups.find((g) => g.key === activeGroup)?.actions ?? [])
     : [];

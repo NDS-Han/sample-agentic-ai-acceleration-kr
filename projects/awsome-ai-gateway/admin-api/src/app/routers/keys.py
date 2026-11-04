@@ -12,7 +12,7 @@ from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.config import get_settings
 from app.core.db import get_db_session
-from app.core.exceptions import NotFoundError, ValidationError
+from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from app.models.auth import KeyStatus, UserRole
 from app.repositories._cursor import encode_cursor
 from app.repositories.budget_repository import BudgetRepository
@@ -48,7 +48,12 @@ async def issue_service_key(
     차단한다. 재발급은 유저당 ACTIVE 1개 규칙상 기존 키를 즉시 만료시킨다 —
     UI 는 이를 발급 전 경고로 띄워야 한다.
     """
-    from app.services.key_service import KeyService
+    from app.services.key_service import KeyService, assert_service_key_ready
+
+    if admin.is_service_token:
+        raise ForbiddenError(
+            "Service tokens cannot issue long-lived service keys"
+        )
 
     settings = get_settings()
     max_days = settings.APP_KEY_MAX_TTL_DAYS
@@ -66,25 +71,7 @@ async def issue_service_key(
             "target user is not a service account — long-lived keys are only "
             "issuable to accounts flagged via /admin/service-accounts"
         )
-    if user.role == UserRole.ADMIN:
-        raise ValidationError("cannot issue keys for ADMIN users")
-    if not user.is_active:
-        raise ValidationError("service account is deactivated")
-
-    # 팀+TEAM 예산 없으면 발급해도 매 호출이 429(no_team_assigned /
-    # team_budget_unset) — 죽은 키를 건네지 말고 발급 시점에 차단한다.
-    if user.team_id is None:
-        raise ValidationError(
-            "service account has no team — assign a team with a TEAM budget first"
-        )
-    team_budget = await BudgetRepository(session).get_active_config(
-        BudgetScope.TEAM, user.team_id
-    )
-    if team_budget is None or team_budget.max_budget_usd is None:
-        raise ValidationError(
-            "service account's team has no active TEAM budget "
-            "(gateway would return 429 team_budget_unset)"
-        )
+    await assert_service_key_ready(session, user)
 
     key_service: KeyService = request.app.state.key_service
     expires_at = datetime.now(timezone.utc) + timedelta(days=ttl_days)
