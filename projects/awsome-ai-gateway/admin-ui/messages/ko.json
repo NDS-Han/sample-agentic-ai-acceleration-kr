@@ -1433,6 +1433,8 @@
     "colAction": "액션",
     "colTarget": "대상",
     "colResult": "결과",
+    "resultSuccess": "성공",
+    "resultFailure": "실패",
     "actorServiceToken": "서비스 토큰",
     "actorDev": "dev 로그인",
     "empty": "해당 조건의 감사 기록이 없습니다.",

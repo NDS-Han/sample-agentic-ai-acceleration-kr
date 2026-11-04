@@ -172,15 +172,11 @@ export function AuditLogListView({
                   </div>
                 </Td>
                 <Td>
-                  <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>
-                  {it.action.endsWith('_CONFIRMED') && (
-                    <>
-                      {' '}
+                  <span title={it.action} className="inline-flex items-center gap-1.5">
+                    <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>
+                    {it.action.endsWith('_CONFIRMED') && (
                       <Badge tone="amber">{t('confirmedBadge')}</Badge>
-                    </>
-                  )}{' '}
-                  <span className="font-mono text-[11px] text-muted-foreground">
-                    {it.action}
+                    )}
                   </span>
                 </Td>
                 <Td>
@@ -202,8 +198,12 @@ export function AuditLogListView({
                   </Link>
                 </Td>
                 <Td>
-                  {it.result !== 'SUCCESS' && (
-                    <Badge tone="pink">{it.result}</Badge>
+                  {it.result === 'SUCCESS' ? (
+                    <Badge tone="neutral">{t('resultSuccess')}</Badge>
+                  ) : (
+                    <span title={it.result}>
+                      <Badge tone="pink">{t('resultFailure')}</Badge>
+                    </span>
                   )}
                 </Td>
               </Tr>

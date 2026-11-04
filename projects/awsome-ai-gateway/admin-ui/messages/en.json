@@ -1433,6 +1433,8 @@
     "colAction": "Action",
     "colTarget": "Target",
     "colResult": "Result",
+    "resultSuccess": "Success",
+    "resultFailure": "Failed",
     "actorServiceToken": "Service token",
     "actorDev": "Dev login",
     "empty": "No audit entries match the filters.",
