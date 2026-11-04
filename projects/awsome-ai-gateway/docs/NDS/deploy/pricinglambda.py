@@ -26,6 +26,15 @@ from pathlib import Path
 LAMBDA_SRC = "litellm-pricing-lambda/lambda_function.py"
 RUNTIME = "python3.12"
 TIMEOUT, MEMORY = 60, 256
+# api.litellm.ai/model_catalog 는 종료됐다 — canonical cost map
+# (GitHub model_prices_and_context_window.json) cost-map 모드로 돌린다.
+# update_function_configuration 의 Environment 는 전체 교체라 이 맵이 곧
+# 함수 env 의 소스 오브 트루스다.
+FN_ENV = {
+    "LITELLM_COST_MAP_URL":
+        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+        "model_prices_and_context_window.json",
+}
 BASIC_EXEC = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 INVOKE_POLICY = "LitellmPricingInvoke"
 
@@ -118,13 +127,15 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
             lam.update_function_code(FunctionName=name, ZipFile=zipb)
             lam.get_waiter("function_updated").wait(FunctionName=name)
             lam.update_function_configuration(
-                FunctionName=name, Timeout=TIMEOUT, MemorySize=MEMORY)
+                FunctionName=name, Timeout=TIMEOUT, MemorySize=MEMORY,
+                Environment={"Variables": FN_ENV})
         except lam.exceptions.ResourceNotFoundException:
             lam.create_function(
                 FunctionName=name, Runtime=RUNTIME,
                 Handler="lambda_function.lambda_handler",
                 Role=role_arn, Code={"ZipFile": zipb},
                 Timeout=TIMEOUT, MemorySize=MEMORY,
+                Environment={"Variables": FN_ENV},
                 Description="LiteLLM model_catalog fetch proxy "
                             "for llm-gateway admin-api")
 

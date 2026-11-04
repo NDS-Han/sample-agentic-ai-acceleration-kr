@@ -49,6 +49,8 @@ VALUES="$REPO_ROOT/deployment/charts/llm-gateway/values-eks-fargate-${DEPLOY_ENV
 [ -f "$VALUES" ] || die "values 파일 없음: $VALUES"
 
 FN_NAME="llm-gateway-${DEPLOY_ENV}-litellm-pricing"
+# api.litellm.ai/model_catalog 종료 — canonical cost map 폴백 (deploy/pricinglambda.FN_ENV 와 동일)
+COST_MAP_URL="https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
 FN_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${FN_NAME}"
 ROLE_NAME="llm-gateway-${DEPLOY_ENV}-litellm-pricing"
 ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"
@@ -144,6 +146,7 @@ if [ "$fn_state" = "미배포" ]; then
     --runtime python3.12 --handler lambda_function.lambda_handler \
     --role "$ROLE_ARN" --zip-file "fileb://$ZIP" \
     --timeout 60 --memory-size 256 \
+    --environment "Variables={LITELLM_COST_MAP_URL=$COST_MAP_URL}" \
     --description "LiteLLM model_catalog fetch proxy for llm-gateway admin-api" \
     >/dev/null || die "Lambda 생성 실패: $FN_NAME"
   ok "Lambda 생성: $FN_NAME"
@@ -152,7 +155,9 @@ else
     --zip-file "fileb://$ZIP" >/dev/null || die "Lambda 코드 갱신 실패"
   aws lambda wait function-updated --function-name "$FN_NAME" || die "갱신 대기 실패"
   aws lambda update-function-configuration --function-name "$FN_NAME" \
-    --timeout 60 --memory-size 256 >/dev/null || die "Lambda 설정 갱신 실패"
+    --timeout 60 --memory-size 256 \
+    --environment "Variables={LITELLM_COST_MAP_URL=$COST_MAP_URL}" \
+    >/dev/null || die "Lambda 설정 갱신 실패"
   ok "Lambda 갱신: $FN_NAME"
 fi
 

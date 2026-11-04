@@ -80,6 +80,7 @@ class FakeLambda:
 
     def update_function_configuration(self, **kw):
         self.calls.append("update_config")
+        self.config_kw = kw
 
     def delete_function(self, FunctionName):
         self.functions.pop(FunctionName, None)
@@ -143,6 +144,20 @@ def test_ensure_existing_fn_updates_code_only(fakes, tmp_path):
     pricinglambda.ensure(_cfg(), tmp_path, attach_invoke=False)
     assert "create" not in lam.calls
     assert "update_code" in lam.calls
+    # api.litellm.ai 종료 — cost-map URL 이 env 로 관리된다 (전체 교체 의도)
+    env = lam.config_kw["Environment"]["Variables"]
+    assert env["LITELLM_COST_MAP_URL"].endswith(
+        "model_prices_and_context_window.json")
+
+
+def test_ensure_sets_cost_map_env_on_create(fakes, tmp_path):
+    lam, _ = fakes
+    (tmp_path / "litellm-pricing-lambda").mkdir()
+    (tmp_path / "litellm-pricing-lambda/lambda_function.py").write_text("x=1")
+    pricinglambda.ensure(_cfg(), tmp_path)
+    env = lam.functions["llm-gateway-dev-litellm-pricing"][
+        "Environment"]["Variables"]
+    assert "LITELLM_COST_MAP_URL" in env
 
 
 def test_ensure_failure_is_graceful_empty(fakes, tmp_path):
