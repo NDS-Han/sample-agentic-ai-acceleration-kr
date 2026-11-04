@@ -1299,7 +1299,7 @@
     "copy": "Copy",
     "copied": "Copied",
     "copyCommand": "Copy command",
-    "copyEnv": "Copy env vars",
+    "copy": "Copy",
     "copyFailed": "Copy failed — select the text and copy it manually.",
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder.",
     "appIntegTitle": "External app integration (agent VK)",

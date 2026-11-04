@@ -1299,7 +1299,7 @@
     "copy": "복사",
     "copied": "복사됨",
     "copyCommand": "명령어 복사",
-    "copyEnv": "환경변수 복사",
+    "copy": "복사",
     "copyFailed": "복사에 실패했습니다 — 텍스트를 직접 선택해 복사해주세요.",
     "windowsInstallHint": "압축 파일을 다운로드·해제한 후 폴더의 install.bat 또는 gateway-cli.exe 를 실행하세요.",
     "appIntegTitle": "외부 앱 연동 (에이전트 VK)",

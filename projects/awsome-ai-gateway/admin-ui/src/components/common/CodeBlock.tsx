@@ -40,11 +40,11 @@ export function CodeBlock({ html, text, filename }: CodeBlockProps) {
         <button
           type="button"
           onClick={handleCopy}
-          aria-label={t('copyEnv')}
+          aria-label={t('copy')}
           className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
         >
           {copied ? <Check size={12} /> : <Copy size={12} />}
-          {copied ? t('copied') : t('copyEnv')}
+          {copied ? t('copied') : t('copy')}
         </button>
       </div>
       <div
