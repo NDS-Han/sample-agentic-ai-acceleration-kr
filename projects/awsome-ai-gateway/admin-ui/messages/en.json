@@ -1309,7 +1309,7 @@
         "lib": "anthropic"
       },
       "openai": {
-        "name": "OpenAI-compatible",
+        "name": "OpenAI",
         "desc": "Chat Completions API — gpt-*/codex-* and other aliases",
         "endpoint": "/v1/chat/completions",
         "lib": "openai"

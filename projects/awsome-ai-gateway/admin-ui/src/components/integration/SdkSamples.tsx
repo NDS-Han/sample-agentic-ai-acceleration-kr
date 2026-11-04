@@ -5,6 +5,7 @@
 import { useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { CodeBlock } from '@/components/common/CodeBlock';
+import { SdkIcon, type SdkIconId } from '@/components/integration/SdkIcons';
 
 export type SdkId = 'claude' | 'openai' | 'langchain';
 
@@ -18,7 +19,11 @@ interface SdkSamplesProps {
   samples: Record<SdkId, SdkSample>;
 }
 
-const SDKS: SdkId[] = ['claude', 'openai', 'langchain'];
+const SDKS: { id: SdkId; icon: SdkIconId }[] = [
+  { id: 'claude', icon: 'anthropic' },
+  { id: 'openai', icon: 'openai' },
+  { id: 'langchain', icon: 'langchain' },
+];
 
 /**
  * 외부 앱 연동 SDK 선택 카드 — 클릭하면 해당 SDK 의 curl/Python 샘플을
@@ -32,7 +37,7 @@ export function SdkSamples({ samples }: SdkSamplesProps) {
   return (
     <div className="space-y-4">
       <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
-        {SDKS.map((id) => (
+        {SDKS.map(({ id, icon }) => (
           <button
             key={id}
             type="button"
@@ -44,7 +49,10 @@ export function SdkSamples({ samples }: SdkSamplesProps) {
                 : 'border-border hover:border-primary/50 hover:bg-accent/40'
             }`}
           >
-            <p className="text-sm font-semibold">{t(`sdk.${id}.name`)}</p>
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <SdkIcon id={icon} size={16} />
+              {t(`sdk.${id}.name`)}
+            </p>
             <p className="mt-0.5 text-xs text-muted-foreground">
               {t(`sdk.${id}.desc`)}
             </p>

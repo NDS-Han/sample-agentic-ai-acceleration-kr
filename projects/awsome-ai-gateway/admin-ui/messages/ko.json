@@ -1309,7 +1309,7 @@
         "lib": "anthropic"
       },
       "openai": {
-        "name": "OpenAI 호환",
+        "name": "OpenAI",
         "desc": "Chat Completions API — gpt-*/codex-* 등 alias",
         "endpoint": "/v1/chat/completions",
         "lib": "openai"
