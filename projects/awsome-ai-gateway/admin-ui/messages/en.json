@@ -1301,8 +1301,26 @@
     "windowsInstallHint": "Download and extract the archive, then run install.bat or gateway-cli.exe from the extracted folder.",
     "appIntegTitle": "External app integration (service-account VK)",
     "appIntegDesc": "Server-side apps call the gateway with a long-lived VK issued from the API Keys page, as a Bearer token.",
-    "appIntegAnthropic": "Claude (Bedrock) — Anthropic /v1/messages",
-    "appIntegOpenai": "GPT and others — OpenAI-compatible /v1/chat/completions",
+    "sdk": {
+      "claude": {
+        "name": "Claude",
+        "desc": "Anthropic Messages API — claude-* aliases",
+        "endpoint": "/v1/messages",
+        "lib": "anthropic"
+      },
+      "openai": {
+        "name": "OpenAI-compatible",
+        "desc": "Chat Completions API — gpt-*/codex-* and other aliases",
+        "endpoint": "/v1/chat/completions",
+        "lib": "openai"
+      },
+      "langchain": {
+        "name": "LangChain",
+        "desc": "Call both families via ChatOpenAI / ChatAnthropic wrappers",
+        "endpoint": "/v1/chat/completions or /v1/messages depending on the wrapper",
+        "lib": "langchain-openai·langchain-anthropic"
+      }
+    },
     "appIntegNoteVk": "Store the VK in Secrets Manager and read it at app startup — never hardcode it in code or env files",
     "appIntegNoteAskAdmin": "Only admins can issue service VKs — ask an admin to register an agent and issue a key for your app",
     "appIntegNoteAlias": "model must be a gateway-registered alias — full upstream IDs return 404",

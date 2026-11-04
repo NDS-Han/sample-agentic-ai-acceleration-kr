@@ -4,6 +4,7 @@ import type { CLIDownloadItem } from '@/types/entities';
 import { adminAPI } from '@/lib/api-client';
 import { CLIDownloadCard } from '@/components/cli/CLIDownloadCard';
 import { CliEnvBlock } from '@/components/cli/CliEnvBlock';
+import { SdkSamples } from '@/components/integration/SdkSamples';
 import { ErrorState } from '@/components/common/ErrorState';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { getTranslations } from 'next-intl/server';
@@ -45,7 +46,7 @@ function gatewayUrl(): string {
 /** 외부 앱 연동 샘플 — 실제 배포 gateway URL 을 심어서 복사만으로 동작하게 한다. */
 function buildAppSamples() {
   const g = gatewayUrl();
-  const anthropic = {
+  const claude = {
     curl: [
       `curl -s "${g}/v1/messages" \\`,
       `  -H "Authorization: Bearer $SERVICE_VK" \\`,
@@ -97,7 +98,37 @@ function buildAppSamples() {
       `)`,
     ].join('\n'),
   };
-  return { anthropic, openai };
+  const langchain = {
+    curl: [
+      `# LangChain 은 HTTP 직접 호출이 아니라 SDK 래퍼를 쓴다 —`,
+      `# OpenAI 계열 alias: ChatOpenAI + /v1/chat/completions`,
+      `# Claude 계열 alias:  ChatAnthropic + /v1/messages`,
+    ].join('\n'),
+    python: [
+      `import os`,
+      `from langchain_openai import ChatOpenAI`,
+      `from langchain_anthropic import ChatAnthropic`,
+      ``,
+      `# OpenAI 계열 alias (gpt-*, codex-* 등)`,
+      `gpt = ChatOpenAI(`,
+      `    model="<model-alias>",`,
+      `    api_key=os.environ["SERVICE_VK"],`,
+      `    base_url="${g}/v1",`,
+      `    max_tokens=256,`,
+      `)`,
+      ``,
+      `# Claude 계열 alias (claude-*)`,
+      `claude = ChatAnthropic(`,
+      `    model="<model-alias>",`,
+      `    api_key=os.environ["SERVICE_VK"],`,
+      `    base_url="${g}",`,
+      `    max_tokens=256,`,
+      `)`,
+      ``,
+      `resp = gpt.invoke("Hello")`,
+    ].join('\n'),
+  };
+  return { claude, openai, langchain };
 }
 
 export default async function CLIPage() {
@@ -138,28 +169,7 @@ export default async function CLIPage() {
       <section className="glass glass-hover rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('appIntegTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('appIntegDesc')}</p>
-        <p className="text-xs font-semibold text-muted-foreground">{t('appIntegAnthropic')}</p>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">curl — /v1/messages</p>
-            <CliEnvBlock text={buildAppSamples().anthropic.curl} />
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">Python — Anthropic SDK</p>
-            <CliEnvBlock text={buildAppSamples().anthropic.python} />
-          </div>
-        </div>
-        <p className="text-xs font-semibold text-muted-foreground pt-2">{t('appIntegOpenai')}</p>
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">curl — /v1/chat/completions</p>
-            <CliEnvBlock text={buildAppSamples().openai.curl} />
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-semibold text-muted-foreground">Python — OpenAI SDK</p>
-            <CliEnvBlock text={buildAppSamples().openai.python} />
-          </div>
-        </div>
+        <SdkSamples samples={buildAppSamples()} />
         <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
           <li>{t('appIntegNoteVk')}</li>
           <li>{t('appIntegNoteAskAdmin')}</li>

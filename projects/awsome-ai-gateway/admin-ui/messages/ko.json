@@ -1301,8 +1301,26 @@
     "windowsInstallHint": "압축 파일을 다운로드·해제한 후 폴더의 install.bat 또는 gateway-cli.exe 를 실행하세요.",
     "appIntegTitle": "외부 앱 연동 (서비스 계정 VK)",
     "appIntegDesc": "서버사이드 앱은 API Keys 페이지에서 발급한 장기 VK를 Bearer 토큰으로 사용해 gateway 를 호출합니다.",
-    "appIntegAnthropic": "Claude (Bedrock) — Anthropic /v1/messages",
-    "appIntegOpenai": "GPT 등 — OpenAI 호환 /v1/chat/completions",
+    "sdk": {
+      "claude": {
+        "name": "Claude",
+        "desc": "Anthropic Messages API — claude-* alias",
+        "endpoint": "/v1/messages",
+        "lib": "anthropic"
+      },
+      "openai": {
+        "name": "OpenAI 호환",
+        "desc": "Chat Completions API — gpt-*/codex-* 등 alias",
+        "endpoint": "/v1/chat/completions",
+        "lib": "openai"
+      },
+      "langchain": {
+        "name": "LangChain",
+        "desc": "ChatOpenAI·ChatAnthropic 래퍼로 두 계열 모두 호출",
+        "endpoint": "SDK 선택에 따라 /v1/chat/completions 또는 /v1/messages",
+        "lib": "langchain-openai·langchain-anthropic"
+      }
+    },
     "appIntegNoteVk": "VK 는 Secrets Manager 에 저장하고 앱 시작 시 읽습니다 — 코드·환경 변수 하드코딩 금지",
     "appIntegNoteAskAdmin": "서비스 VK 는 관리자만 발급할 수 있습니다 — 필요하면 관리자에게 에이전트 등록·키 발급을 요청하세요",
     "appIntegNoteAlias": "model 은 게이트웨이에 등록된 alias 만 사용 — upstream 전체 이름이면 404",
