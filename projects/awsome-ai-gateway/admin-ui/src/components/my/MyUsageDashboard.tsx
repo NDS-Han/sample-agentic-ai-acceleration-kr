@@ -263,25 +263,37 @@ export function MyUsageDashboard({
                     isOpen ? (
                       <Tr key={`${row.model_alias}-detail`} className="bg-muted/30">
                         <Td colSpan={5} className="text-xs text-muted-foreground">
+                          {/* 도넛 범례와 같은 표기 — compact + 점유율, 정확값은 title. */}
                           <span className="inline-flex flex-wrap gap-x-4 gap-y-1">
-                            {TOKEN_BUCKETS.map((b) => (
-                              <span key={b.key} className="inline-flex items-center gap-1.5">
+                            {TOKEN_BUCKETS.map((b) => {
+                              const v = rowBucket(row, b.key);
+                              const pct = row.tokens > 0 ? (v / row.tokens) * 100 : 0;
+                              return (
                                 <span
-                                  className="h-2 w-2 rounded-full"
-                                  style={{ backgroundColor: b.color }}
-                                />
-                                {t(
-                                  b.key === 'input_tokens'
-                                    ? 'colTokInput'
-                                    : b.key === 'output_tokens'
-                                      ? 'colTokOutput'
-                                      : b.key === 'cache_write_tokens'
-                                        ? 'colTokCacheWrite'
-                                        : 'colTokCacheRead'
-                                )}
-                                <span className="num">{rowBucket(row, b.key).toLocaleString()}</span>
-                              </span>
-                            ))}
+                                  key={b.key}
+                                  className="inline-flex items-center gap-1.5"
+                                  title={v.toLocaleString()}
+                                >
+                                  <span
+                                    className="h-2 w-2 rounded-full"
+                                    style={{ backgroundColor: b.color }}
+                                  />
+                                  {t(
+                                    b.key === 'input_tokens'
+                                      ? 'colTokInput'
+                                      : b.key === 'output_tokens'
+                                        ? 'colTokOutput'
+                                        : b.key === 'cache_write_tokens'
+                                          ? 'colTokCacheWrite'
+                                          : 'colTokCacheRead'
+                                  )}
+                                  <span className="num">{compact.format(v)}</span>
+                                  <span className="text-muted-foreground/70">
+                                    ({pct.toFixed(0)}%)
+                                  </span>
+                                </span>
+                              );
+                            })}
                           </span>
                         </Td>
                       </Tr>
