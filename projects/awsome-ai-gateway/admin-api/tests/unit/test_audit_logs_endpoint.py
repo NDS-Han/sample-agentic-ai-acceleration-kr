@@ -18,8 +18,9 @@ import pytest
 from fastapi import HTTPException
 
 from app.core.auth import CurrentUser
+from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
-from app.routers.audit_reconcile import list_audit_logs
+from app.routers.audit_reconcile import audit_action_catalog, list_audit_logs
 
 pytestmark = pytest.mark.asyncio
 
@@ -217,30 +218,24 @@ async def test_other_group_uses_not_in() -> None:
     assert "NOT" in compiled and "IN" in compiled
 
 
-async def test_dev_actor_email_resolves_to_user() -> None:
-    """R2 — …000010 은 시드된 실제 users 행 — 해소되면 user 로 분류된다."""
+async def test_dev_actor_stays_dev_even_when_seeded() -> None:
+    """…000010 은 시드 "System Admin" 행으로도 풀리지만, dev 로그인이 이메일과
+    무관하게 그 ID 를 하드코딩하므로 dev 로 분류하는 편이 정직하다.
+
+    users 해소 대상에서도 제외된다 — 페이지가 dev 행뿐이면 users 조회 자체가
+    없다(execute 1 회).
+    """
     dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
     row = _row(actor_user_id=dev_actor)
     session = _session(
         _result(scalars=[row]),
-        _result(all_=[(dev_actor, "admin@example.com", "System Admin")]),
+        # dev 가 real_actor_ids 에서 빠지므로 두 번째 조회는 오지 않는다.
     )
     res = await _call(session)
     item = res.items[0]
-    assert item.actor_kind == "user"
-    assert item.actor_email == "admin@example.com"
-
-
-async def test_dev_actor_unresolved_stays_dev() -> None:
-    """R2 — users 에 없으면(dev 환경 실물) dev 로 표시."""
-    dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
-    row = _row(actor_user_id=dev_actor)
-    session = _session(
-        _result(scalars=[row]),
-        _result(all_=[]),  # 해소 실패
-    )
-    res = await _call(session)
-    assert res.items[0].actor_kind == "dev"
+    assert item.actor_kind == "dev"
+    assert item.actor_email is None
+    assert session.execute.await_count == 1
 
 
 async def test_service_token_deleted_keeps_kind_but_no_ref() -> None:
@@ -271,3 +266,28 @@ async def test_actor_email_match_applies_in_clause() -> None:
     stmt = session.execute.await_args_list[1].args[0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": False}))
     assert "actor_user_id IN" in compiled
+
+
+# ── svc 토큰 읽기 차단 — 감사 로그는 사람 admin(JWT) 전용 ────────────────────
+
+_SVC_ADMIN = CurrentUser(
+    user_id=uuid.uuid4(),
+    email="svc-token@internal",
+    role=UserRole.ADMIN,
+    team_id=None,
+    is_service_token=True,
+    service_token_id=uuid.uuid4(),
+)
+
+
+async def test_service_token_cannot_read_logs() -> None:
+    """svc- 토큰의 합성 ADMIN 신원은 require_admin 을 통과하지만 감사 로그
+    (토큰 이름·접두·관리자 이메일·IP)는 읽지 못한다 — 탈취 토큰이 자기
+    탐지 여부를 감시하는 경로 차단."""
+    with pytest.raises(ForbiddenError):
+        await _call(_session(_result(scalars=[])), admin=_SVC_ADMIN)
+
+
+async def test_service_token_cannot_read_action_catalog() -> None:
+    with pytest.raises(ForbiddenError):
+        await audit_action_catalog(admin=_SVC_ADMIN)

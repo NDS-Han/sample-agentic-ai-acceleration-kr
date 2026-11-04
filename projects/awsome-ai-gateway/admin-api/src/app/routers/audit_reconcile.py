@@ -35,6 +35,7 @@ from app.core.audit_catalog import (
 from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
+from app.core.exceptions import ForbiddenError
 from app.models.audit import AuditLog
 from app.models.auth import ServiceToken, User
 from app.models.usage import UsageLog
@@ -375,9 +376,23 @@ async def invocation_log_record(
 # - keyset 커서는 (timestamp DESC, id DESC) — 0053 인덱스가 그대로 탄다.
 # 합성 행위자 — core/auth.py 의 dev 로그인(…010)과 서비스 토큰 공용 ID(…011).
 # 주의: …010 은 시드의 실제 users 행("System Admin")이기도 하다(03_seed_data.sql).
-#       users 에 해소되면 실사용자로 표시하고, 못 찾을 때만 "dev" 로 둔다.
+#       users 해소가 이기면 모든 dev 로그인 작업이 "System Admin" 개인 작업처럼
+#       보인다 — dev 로그인은 이메일과 무관하게 …010 을 하드코딩하므로, 정직한
+#       표기는 dev 로그인 세션으로 우선 분류하는 것이다.
 _DEV_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000010")
 _SERVICE_TOKEN_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000011")
+
+
+def _forbid_service_token_reader(admin: CurrentUser) -> None:
+    """svc 토큰은 감사 로그를 읽지 못한다 — 사람 admin(JWT) 전용.
+
+    svc- 토큰은 require_admin 의 합성 ADMIN 신원을 통과하지만, 감사 로그는
+    토큰 이름·접두·관리자 이메일·IP·request_id 전부를 보여준다. 유출된 토큰이
+    자기 탐지 여부를 감시하는 경로를 닫는다 — 키 수명주기와 같은 이유로
+    (service_accounts._forbid_service_token_admin) 읽기도 막는다.
+    """
+    if admin.is_service_token:
+        raise ForbiddenError("Service tokens cannot read audit logs")
 
 # actor_email 매칭 상한 — asyncpg 파라미터 한도(32767)는 아직 멀어도, 광범위 검색이
 # 만든 수만 개의 IN 파라미터는 계획을 망가뜨린다. 넘으면 400 으로 검색어를 좁히라고 알린다.
@@ -391,6 +406,7 @@ async def audit_action_catalog(
     admin: CurrentUser = Depends(require_admin),
 ):
     """필터 그룹 → 정규화된 액션 목록. 프론트는 이걸로 pill/select 를 만든다."""
+    _forbid_service_token_reader(admin)
     return ActionCatalogResponse(
         groups=[
             *[ActionGroupCatalog(key=k, actions=list(v)) for k, v in ACTION_GROUPS.items()],
@@ -413,6 +429,7 @@ async def list_audit_logs(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
+    _forbid_service_token_reader(admin)
     # 기간 필수 — 스캔 범위를 묶는다. 감사 조회는 "최근에 누가 바꿨나"가 대부분이다.
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS[range_])
     conditions = [AuditLog.timestamp >= since]
@@ -490,9 +507,14 @@ async def list_audit_logs(
     # join 하지 않는 이유: 인덱스를 타는 단일 테이블 스캔을 유지하기 위해.
     actor_ids = {r.actor_user_id for r in rows}
     user_map: dict[uuid.UUID, tuple[str, str]] = {}
-    # …011(서비스 토큰 공용)만 제외 — …010 은 시드된 실제 users 행이라 이메일 해소가
-    # 가능하고, 해소되면 dev 로그인이 아니라 그 계정의 작업으로 표시해야 정직하다.
-    real_actor_ids = [a for a in actor_ids if a != _SERVICE_TOKEN_ACTOR_ID]
+    # …011(svc 공용)·…010(dev 로그인) 제외 — 둘 다 합성 ID 라 users 해소가
+    # 행위자를 오인시킨다(…010 은 시드 "System Admin" 행으로 풀려 모든 dev
+    # 로그인 작업이 개인 작업처럼 보인다 — _DEV_ACTOR_ID 주석 참조).
+    real_actor_ids = [
+        a
+        for a in actor_ids
+        if a not in (_SERVICE_TOKEN_ACTOR_ID, _DEV_ACTOR_ID)
+    ]
     if real_actor_ids:
         ures = await session.execute(
             select(User.id, User.email, User.display_name).where(
@@ -527,15 +549,18 @@ async def list_audit_logs(
         changes = dict(r.changes or {})
         sid_raw = changes.pop("_service_token_id", None)
 
-        if r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
+        if r.actor_user_id == _DEV_ACTOR_ID:
+            # users 해소보다 먼저 — dev 로그인은 이메일과 무관하게 …010 을 쓰고
+            # 그 ID 는 시드 "System Admin" 행으로도 풀린다. user 로 분류하면
+            # 모든 dev 작업이 개인 작업처럼 보인다(_DEV_ACTOR_ID 주석).
+            actor_kind: str = "dev"
+        elif r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
             # svc 토큰 호출은 항상 …011 행위자 + changes._service_token_id 조합.
             # 실사용자 ID + sid 조합은 현재 auth 구조에서 생기지 않는다 — 생기면
             # 토큰 표시가 이메일을 덮는다(의도된 표기).
-            actor_kind: str = "service_token"
+            actor_kind = "service_token"
         elif r.actor_user_id in user_map:
             actor_kind = "user"
-        elif r.actor_user_id == _DEV_ACTOR_ID:
-            actor_kind = "dev"
         else:
             actor_kind = "unknown"
 

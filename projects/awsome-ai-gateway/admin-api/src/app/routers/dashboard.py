@@ -99,42 +99,36 @@ async def dashboard_summary(
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
-    # 선택적 앱(client) 필터 — 'all'/None 이면 전체.
-    where_clauses = [cost_period_filter(period)]
+    # 선택적 앱(client) 필터 — 'all'/None 이면 전체. WHERE 는 SUCCESS 필터가
+    # 빠진 구간이고 성공/에러 구분은 집계 FILTER 절이 한다 — 한 번의 스캔에
+    # 성공 집계와 에러 카운트를 같이 얻는다. 정책 차단(429·예산 차단·인증
+    # 실패)은 usage_logs 에 행이 없어 자연 배제 — ERROR/TIMEOUT 은 장애만.
+    where_clauses = [cost_period_filter(period, success_only=False)]
     if (cf := client_filter(client)) is not None:
         where_clauses.append(cf)
 
+    _success = UsageLog.status == UsageStatus.SUCCESS
     stmt = select(
-        func.count().label("total_requests"),
+        func.count().filter(_success).label("total_requests"),
+        func.count()
+        .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+        .label("error_requests"),
         func.coalesce(
             func.sum(
                 UsageLog.input_tokens
                 + UsageLog.output_tokens
                 + UsageLog.cache_creation_tokens
                 + UsageLog.cache_read_tokens
-            ),
+            ).filter(_success),
             0,
         ).label("total_tokens"),
-        func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost_usd"),
-        func.count(distinct(UsageLog.user_id)).label("active_users"),
+        func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("total_cost_usd"),
+        func.count(distinct(UsageLog.user_id)).filter(_success).label("active_users"),
     ).where(*where_clauses)
     row = (await session.execute(stmt)).one()
 
-    # 에러 카운트는 별도의 작은 카운트 질의 — 기존 성공 전용 집계를 건드리지
-    # 않는다. 정책 차단(429·예산 차단·인증 실패)은 usage_logs 에 행이 없어
-    # 자연 배제되므로 ERROR/TIMEOUT 은 상류·게이트웨이 장애만이다.
-    error_where = [cost_period_filter(period, success_only=False)]
-    if (cf := client_filter(client)) is not None:
-        error_where.append(cf)
-    error_requests = (
-        await session.execute(
-            select(func.count())
-            .select_from(UsageLog)
-            .where(*error_where, UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
-        )
-    ).scalar_one() or 0
-
     total_requests = row.total_requests or 0
+    error_requests = row.error_requests or 0
     total_tokens = int(row.total_tokens or 0)
     total_cost = Decimal(row.total_cost_usd or 0)
     active_users = row.active_users or 0
@@ -446,17 +440,22 @@ async def dashboard_kpi(
     if (cached := await _cache_get(request, cache_key)) is not None:
         return cached
 
-    # ── 1) 비용/요청/사용자: /summary 와 동일한 집계(같은 필터를 공유해 값이 갈리지 않게)
-    where_clauses = [cost_period_filter(period)]
+    # ── 1) 비용/요청/사용자: /summary 와 동일한 집계 — SUCCESS 필터가 빠진
+    #    구간 WHERE + 집계 FILTER 절로 성공/에러를 한 스캔에 센다.
+    where_clauses = [cost_period_filter(period, success_only=False)]
     if (cf := client_filter(client)) is not None:
         where_clauses.append(cf)
 
+    _success = UsageLog.status == UsageStatus.SUCCESS
     usage_row = (
         await session.execute(
             select(
-                func.count().label("total_requests"),
-                func.coalesce(func.sum(UsageLog.cost_usd), 0).label("total_cost"),
-                func.count(distinct(UsageLog.user_id)).label("active_users"),
+                func.count().filter(_success).label("total_requests"),
+                func.count()
+                .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+                .label("error_requests"),
+                func.coalesce(func.sum(UsageLog.cost_usd).filter(_success), 0).label("total_cost"),
+                func.count(distinct(UsageLog.user_id)).filter(_success).label("active_users"),
                 # /summary 와 **같은 식**을 쓴다 — 두 엔드포인트가 같은 화면에 쓰이므로
                 # 토큰 정의가 갈리면 같은 기간에 다른 숫자가 보인다.
                 func.coalesce(
@@ -465,7 +464,7 @@ async def dashboard_kpi(
                         + UsageLog.output_tokens
                         + UsageLog.cache_creation_tokens
                         + UsageLog.cache_read_tokens
-                    ),
+                    ).filter(_success),
                     0,
                 ).label("total_tokens"),
             ).where(*where_clauses)
@@ -578,23 +577,10 @@ async def dashboard_kpi(
         )
     ).scalar()
 
-    # ── 5) 에러 요청 수 — /summary 와 같은 정의(성공 집계와 같은 필터에서
-    #    SUCCESS 조건만 뺀 ERROR+TIMEOUT 카운트).
-    error_where = [cost_period_filter(period, success_only=False)]
-    if (cf := client_filter(client)) is not None:
-        error_where.append(cf)
-    error_requests = (
-        await session.execute(
-            select(func.count())
-            .select_from(UsageLog)
-            .where(*error_where, UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
-        )
-    ).scalar_one() or 0
-
     payload = {
         "period": period,
         "total_requests": usage_row.total_requests or 0,
-        "error_requests": error_requests,
+        "error_requests": usage_row.error_requests or 0,
         "total_tokens": int(usage_row.total_tokens or 0),
         "total_cost_usd": round(float(total_cost), 4),
         "active_users": active_users,

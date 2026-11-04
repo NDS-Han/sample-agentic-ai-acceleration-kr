@@ -173,7 +173,12 @@ export function ChangesPanel({ item }: Props) {
             </span>
             <button
               className="ml-1 underline underline-offset-2"
-              onClick={() => navigator.clipboard.writeText(item.request_id)}
+              // clipboard API 는 비보안 컨텍스트·권한 거부에서 throw — 조용히 무시.
+              onClick={() =>
+                void navigator.clipboard
+                  ?.writeText(item.request_id)
+                  .catch(() => {})
+              }
             >
               {t('copy')}
             </button>

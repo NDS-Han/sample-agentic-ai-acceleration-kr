@@ -227,7 +227,6 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> SeedSpentResponse:
-        _require_admin_actor(actor)
         """Inject absolute spent (USD) per item into DB + Redis via delta.
 
         Migration burn-rate continuation. 내부적으로는 델타 적용(행 잠금 하에 읽은
@@ -236,6 +235,7 @@ class BudgetService:
         델타가 0 이라 멱등. Per-item partial failure: failed items reported,
         others proceed.
         """
+        _require_admin_actor(actor)
         results: list[SeedSpentResult] = []
         user_repo = UserRepository(session)
         # 성공한 item 의 (redis_key, value) — outer commit 까지 지연한다.

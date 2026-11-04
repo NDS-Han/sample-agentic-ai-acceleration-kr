@@ -347,6 +347,20 @@ class TestServiceTokenGuard:
                 session=mock_session,
             )
 
+    async def test_keys_issue_service_key_forbidden(self, mock_session):
+        """keys.py 의 개별 발급 경로에도 같은 가드 — svc 토큰은 장기 VK 를
+        찍을 수 없다(자기 권한 확장 차단)."""
+        from app.routers.keys import issue_service_key
+        from app.schemas.keys import IssueServiceKeyRequest
+
+        with pytest.raises(ForbiddenError):
+            await issue_service_key(
+                request=_request(),
+                body=IssueServiceKeyRequest(ttl_days=30, user_id=uuid.uuid4()),
+                admin=_svc_actor(),
+                session=mock_session,
+            )
+
 
 # ── 6. 표지+발급 결합 엔드포인트 ─────────────────────────────────────────
 

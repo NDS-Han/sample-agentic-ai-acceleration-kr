@@ -152,6 +152,16 @@ export function AuditLogListView({
               <Tr
                 clickable
                 onClick={() => toggle(it.id)}
+                // 키보드 — 행 시맨틱(tr)을 유지한 채 Enter/Space 로 펼침.
+                tabIndex={0}
+                aria-expanded={expanded.has(it.id)}
+                className="focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    toggle(it.id);
+                  }
+                }}
               >
                 <Td className="w-6 text-muted-foreground">
                   {expanded.has(it.id) ? (

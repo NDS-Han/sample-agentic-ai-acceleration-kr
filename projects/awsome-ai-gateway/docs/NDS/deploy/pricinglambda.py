@@ -30,9 +30,11 @@ TIMEOUT, MEMORY = 60, 256
 # (GitHub model_prices_and_context_window.json) cost-map 모드로 돌린다.
 # update_function_configuration 의 Environment 는 전체 교체라 이 맵이 곧
 # 함수 env 의 소스 오브 트루스다.
+# main 이 아니라 릴리스 태그를 핀한다 — 상류 푸시가 단가 소스를 조용히
+# 바꾸지 않게(재현 가능). 새 모델 반영이 필요하면 태그를 올린다.
 FN_ENV = {
     "LITELLM_COST_MAP_URL":
-        "https://raw.githubusercontent.com/BerriAI/litellm/main/"
+        "https://raw.githubusercontent.com/BerriAI/litellm/v1.108.0/"
         "model_prices_and_context_window.json",
 }
 BASIC_EXEC = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"

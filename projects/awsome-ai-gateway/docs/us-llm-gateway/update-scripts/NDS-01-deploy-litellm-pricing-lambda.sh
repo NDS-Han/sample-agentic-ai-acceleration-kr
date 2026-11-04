@@ -50,7 +50,8 @@ VALUES="$REPO_ROOT/deployment/charts/llm-gateway/values-eks-fargate-${DEPLOY_ENV
 
 FN_NAME="llm-gateway-${DEPLOY_ENV}-litellm-pricing"
 # api.litellm.ai/model_catalog 종료 — canonical cost map 폴백 (deploy/pricinglambda.FN_ENV 와 동일)
-COST_MAP_URL="https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+# 릴리스 태그 핀 — 상류 main 푸시가 단가 소스를 조용히 바꾸지 않게.
+COST_MAP_URL="https://raw.githubusercontent.com/BerriAI/litellm/v1.108.0/model_prices_and_context_window.json"
 FN_ARN="arn:aws:lambda:${AWS_REGION}:${AWS_ACCOUNT_ID}:function:${FN_NAME}"
 ROLE_NAME="llm-gateway-${DEPLOY_ENV}-litellm-pricing"
 ROLE_ARN="arn:aws:iam::${AWS_ACCOUNT_ID}:role/${ROLE_NAME}"

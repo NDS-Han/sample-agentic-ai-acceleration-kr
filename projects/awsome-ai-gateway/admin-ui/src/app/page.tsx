@@ -188,7 +188,7 @@ async function DashboardKPIs({ period, client }: { period: string; client: strin
                         })
                     : t('fetchFailed')
                 }
-                href={err.errors > 0 ? '/monitoring' : `/analytics?period=${period}${clientSuffix}`}
+                href={err.warn ? '/monitoring' : `/analytics?period=${period}${clientSuffix}`}
               />
             );
           })()}

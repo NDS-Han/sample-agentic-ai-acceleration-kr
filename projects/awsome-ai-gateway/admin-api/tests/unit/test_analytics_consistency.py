@@ -59,8 +59,7 @@ def _empty_repo(cost_by_model: dict | None = None):
     repo.sum_usage_by_model = AsyncMock(return_value=cost_by_model or {})
     repo.count_requests_by_model = AsyncMock(return_value={})
     repo.count_active_users = AsyncMock(return_value=0)
-    repo.total_requests = AsyncMock(return_value=0)
-    repo.error_requests = AsyncMock(return_value=0)
+    repo.request_counts = AsyncMock(return_value=(0, 0))
     repo.token_bucket_totals = AsyncMock(return_value={
         "input_tokens": 0, "output_tokens": 0,
         "cache_read_tokens": 0, "cache_write_tokens": 0,

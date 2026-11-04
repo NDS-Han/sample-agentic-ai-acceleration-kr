@@ -488,7 +488,6 @@ async def repair_service_account_keys(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
-        service_token_id=getattr(admin, "service_token_id", None),
         action="REPAIR_SERVICE_ACCOUNT_KEYS",
         resource_type="User",
         resource_id=str(user.id),
@@ -567,7 +566,6 @@ async def service_account_usage(
             )
         )
     ).scalars().all()
-    prefixes = [v.key_prefix for v in vks if v.key_prefix]
 
     # 계정 총계는 user_id+기간 스코프 — key_prefix=NULL(배포 공백/구 행)도
     # 포함해 목록 API 의 month_* 와 정합하게 만든다. prefix 조건은 키별 분할

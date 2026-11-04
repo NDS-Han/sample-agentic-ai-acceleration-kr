@@ -142,37 +142,32 @@ class AnalyticsRepository:
         result = await self._session.execute(stmt)
         return result.scalar_one() or 0
 
-    async def total_requests(
+    async def request_counts(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
         scope_ids: list[uuid.UUID] | None = None,
         cost_where: ColumnElement | None = None,
-    ) -> int:
-        stmt = select(func.count(UsageLog.id)).where(
-            cost_where if cost_where is not None else cost_period_filter(period),  # §59 SUCCESS + KST
-        )
-        stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
-        stmt = self._apply_client_filter(stmt, client)
-        result = await self._session.execute(stmt)
-        return result.scalar_one() or 0
+    ) -> tuple[int, int]:
+        """(성공, 에러) 요청 수 — FILTER 절로 한 번의 스캔에 둘 다 집계한다.
 
-    async def error_requests(
-        self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,
-        scope_ids: list[uuid.UUID] | None = None,
-        cost_where: ColumnElement | None = None,
-    ) -> int:
-        """ERROR+TIMEOUT 요청 수 — cost_where 는 SUCCESS 필터가 빠진 구간 조건이어야 한다.
-
-        정책 차단(429·예산 HARD_BLOCK·인증 실패)은 usage_logs 에 행 자체가 없어
-        자연 배제된다 — ERROR/TIMEOUT 은 상류·게이트웨이 장애만이다.
+        cost_where 는 SUCCESS 필터가 **빠진** 구간 조건이어야 한다 — 성공/에러
+        구분은 집계 FILTER 가 한다. 성공 전용 조건을 넘기면 에러는 항상 0.
+        정책 차단(429·예산 HARD_BLOCK·인증 실패)은 usage_logs 에 행 자체가
+        없어 자연 배제된다 — ERROR/TIMEOUT 은 상류·게이트웨이 장애만이다.
         """
-        stmt = select(func.count(UsageLog.id)).where(
+        stmt = select(
+            func.count(UsageLog.id)
+            .filter(UsageLog.status == UsageStatus.SUCCESS)
+            .label("success"),
+            func.count(UsageLog.id)
+            .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+            .label("errors"),
+        ).where(
             cost_where if cost_where is not None else cost_period_filter(period, success_only=False),
-            UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]),
         )
         stmt = self._apply_scope_filter(stmt, scope, scope_id, scope_ids)
         stmt = self._apply_client_filter(stmt, client)
-        result = await self._session.execute(stmt)
-        return result.scalar_one() or 0
+        row = (await self._session.execute(stmt)).one()
+        return row.success or 0, row.errors or 0
 
     async def total_tokens(
         self, period: str, scope: ROIScope, scope_id: uuid.UUID | None, client: str | None = None,

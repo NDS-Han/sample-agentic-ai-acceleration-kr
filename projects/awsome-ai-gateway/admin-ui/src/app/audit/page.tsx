@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
+import { APIError } from '@/lib/utils/retry';
 import { ErrorState } from '@/components/common/ErrorState';
 import { AuditLogListView } from '@/components/audit/AuditLogListView';
 import { ActionSelect } from '@/components/audit/ActionSelect';
@@ -52,7 +53,12 @@ export default async function AuditPage(props: AuditPageProps) {
         ...(resourceId ? { resource_id: resourceId } : {}),
       })
       .then((v) => ({ ok: true as const, value: v }))
-      .catch(() => ({ ok: false as const }));
+      .catch((err) => ({
+        ok: false as const,
+        // 400(검색어 500명 초과·잘못된 커서) 같은 실천 가능한 사유는 살리고,
+        // 필터 UI 도 유지한다 — 통째 ErrorState 로 덮으면 원인이 안 보인다.
+        error: err instanceof APIError ? err.message : undefined,
+      }));
 
   // 카탈로그를 먼저 받아 group 을 검증한 뒤 로그는 한 번만 가져온다 —
   // 잘못된 group 은 가져오기 전에 버려 pill/필터/더보기가 항상 같은
@@ -71,9 +77,6 @@ export default async function AuditPage(props: AuditPageProps) {
   const activeGroup = groupKeys.has(group) ? group : '';
   const logsResult = await fetchLogs(activeGroup, action);
 
-  if (!logsResult.ok) {
-    return <ErrorState />;
-  }
   const groupActions = activeGroup
     ? (groups.find((g) => g.key === activeGroup)?.actions ?? [])
     : [];
@@ -194,6 +197,23 @@ export default async function AuditPage(props: AuditPageProps) {
           )}
         </form>
 
+        {/* 활성 액션 필터 — ?action=X 딥링크(group 없음)도 화면에 보이고 해제된다. */}
+        {action && (
+          <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
+            {t('actionChip', {
+              action: knownActions.includes(action.replace(/_CONFIRMED$/, ''))
+                ? t(`actions.${action.replace(/_CONFIRMED$/, '')}` as const)
+                : action,
+            })}
+            <Link
+              href={buildQuery({ action: '' })}
+              aria-label={t('clearAction')}
+              className="font-bold hover:text-amber-800"
+            >
+              ✕
+            </Link>
+          </span>
+        )}
         {(resourceType || resourceId) && (
           <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
             {t('targetFilter', { type: resourceType || resourceId })}
@@ -208,23 +228,32 @@ export default async function AuditPage(props: AuditPageProps) {
         )}
       </div>
 
-      {/* key=필터 조합 — 필터 변경 시 remount해 이전 목록이 남지 않는다(KeysListView 관례). */}
-      <AuditLogListView
-        key={`${range}:${activeGroup}:${action}:${actorEmail}:${resourceType}:${resourceId}`}
-        initialItems={logsResult.value.items}
-        initialCursor={logsResult.value.pagination.cursor}
-        hasMore={logsResult.value.pagination.has_more}
-        filters={{
-          range,
-          ...(activeGroup ? { group: activeGroup } : {}),
-          ...(action ? { action } : {}),
-          ...(actorEmail ? { actor_email: actorEmail } : {}),
-          ...(resourceType ? { resource_type: resourceType } : {}),
-          ...(resourceId ? { resource_id: resourceId } : {}),
-        }}
-        limit={PAGE_LIMIT}
-        knownActions={knownActions}
-      />
+      {!logsResult.ok ? (
+        <div className="glass rounded-apple p-6">
+          <p className="text-sm font-medium text-destructive">{t('listLoadFailed')}</p>
+          {logsResult.error && (
+            <p className="mt-1 text-xs text-muted-foreground">{logsResult.error}</p>
+          )}
+        </div>
+      ) : (
+        /* key=필터 조합 — 필터 변경 시 remount해 이전 목록이 남지 않는다(KeysListView 관례). */
+        <AuditLogListView
+          key={`${range}:${activeGroup}:${action}:${actorEmail}:${resourceType}:${resourceId}`}
+          initialItems={logsResult.value.items}
+          initialCursor={logsResult.value.pagination.cursor}
+          hasMore={logsResult.value.pagination.has_more}
+          filters={{
+            range,
+            ...(activeGroup ? { group: activeGroup } : {}),
+            ...(action ? { action } : {}),
+            ...(actorEmail ? { actor_email: actorEmail } : {}),
+            ...(resourceType ? { resource_type: resourceType } : {}),
+            ...(resourceId ? { resource_id: resourceId } : {}),
+          }}
+          limit={PAGE_LIMIT}
+          knownActions={knownActions}
+        />
+      )}
     </div>
   );
 }

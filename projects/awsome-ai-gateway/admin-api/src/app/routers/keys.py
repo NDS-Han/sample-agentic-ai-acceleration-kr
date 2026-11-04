@@ -8,16 +8,13 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.core.exceptions import ForbiddenError, NotFoundError, ValidationError
 from app.models.auth import KeyStatus, UserRole
 from app.repositories._cursor import encode_cursor
-from app.repositories.budget_repository import BudgetRepository
 from app.repositories.user_repository import UserRepository
-from app.models.budget import BudgetScope
 from app.schemas.common import (
     PAGE_LIMIT_DEFAULT,
     PAGE_LIMIT_MAX,

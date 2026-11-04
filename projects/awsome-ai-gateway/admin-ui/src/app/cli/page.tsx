@@ -29,7 +29,6 @@ function buildEnvText(): string {
   // (Helm 의 *_INGRESS_URL, 예전 이름 *_PUBLIC_URL 과 의미 동일).
   const gateway = env('GATEWAY_INGRESS_URL', "https://'<gateway-host>'");
   const adminApi = env('ADMIN_API_INGRESS_URL', "https://'<admin-api-host>'");
-  void adminApi;
   return [
     `export OIDC_ISSUER_URL="${issuer}"`,
     `export OIDC_CLIENT_ID="${clientId}"`,

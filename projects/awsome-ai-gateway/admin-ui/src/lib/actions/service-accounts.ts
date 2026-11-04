@@ -32,26 +32,6 @@ export async function listServiceAccountsAction(): Promise<
   }
 }
 
-// ─── markServiceAccountAction ─────────────────────────────────────────────────
-// 계정 생성은 Cognito/IdP 강제 — 여기서는 기존 사용자에 표지만 단다.
-
-export async function markServiceAccountAction(
-  email: string,
-): Promise<ActionResult<{ user_id: string }>> {
-  const trimmed = email.trim();
-  if (!trimmed) return { success: false, error: 'Email is required' };
-  try {
-    const data = await adminAPI.post<{ user_id: string }>(
-      '/admin/service-accounts',
-      { email: trimmed },
-    );
-    revalidatePath('/keys');
-    revalidatePath('/agents');
-    return { success: true, data };
-  } catch (err) {
-    return { success: false, error: toErrorMessage(err) };
-  }
-}
 
 // ─── unmarkServiceAccountAction ───────────────────────────────────────────────
 

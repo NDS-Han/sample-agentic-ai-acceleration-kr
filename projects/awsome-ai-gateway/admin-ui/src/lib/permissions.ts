@@ -9,9 +9,9 @@ import { UserRole } from '@/types/enums';
  * Keys are exact pathname prefixes (matched with startsWith in auth.ts).
  * Values list the UserRole values that are ALLOWED to visit that path.
  *
- * DEVELOPER 는 self-service 경로(/my, /integration)만 등재돼 있다 — 그 외
- * 경로는 미등재 default-deny 로 403. 예외 주석이 있던 시절과 달리 /my 는
- * 개발자의 기본 홈이다.
+ * DEVELOPER 는 self-service 경로(/my, /integration, /cli)만 등재돼 있다 —
+ * 그 외 경로는 미등재 default-deny 로 403. 예외 주석이 있던 시절과 달리
+ * /my 는 개발자의 기본 홈이다.
  */
 export const PAGE_PERMISSIONS: PagePermissionMap = {
   // Dashboard — admin only. TEAM_LEADER 를 넣으면 페이지는 열리지만 이 페이지가

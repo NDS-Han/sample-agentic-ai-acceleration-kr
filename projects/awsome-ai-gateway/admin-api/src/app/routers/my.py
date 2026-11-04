@@ -262,37 +262,30 @@ async def get_my_usage(
     # 토큰 버킷 요약 — agents 상세와 동일 정의(§59 SUCCESS + KST 기간).
     # reasoning_tokens 는 output 에 이미 포함(비청구 표시 지표)이므로
     # 프론트의 total 계산에서 제외 대상이다.
+    # WHERE 는 SUCCESS 필터가 빠진 구간, 성공/에러 구분은 FILTER 절 — 한 스캔.
+    # 정책 차단은 usage_logs 에 행이 없어 ERROR/TIMEOUT 은 장애만 잡힌다.
+    _success = UsageLog.status == UsageStatus.SUCCESS
     summary_stmt = select(
-        func.count().label("requests"),
-        func.sum(UsageLog.cost_usd).label("cost_usd"),
-        func.sum(UsageLog.input_tokens).label("input_tokens"),
-        func.sum(UsageLog.output_tokens).label("output_tokens"),
-        func.sum(UsageLog.cache_creation_tokens).label("cache_creation_tokens"),
-        func.sum(UsageLog.cache_read_tokens).label("cache_read_tokens"),
-        func.sum(UsageLog.reasoning_tokens).label("reasoning_tokens"),
-        func.sum(UsageLog.web_search_count).label("web_search_count"),
+        func.count().filter(_success).label("requests"),
+        func.count()
+        .filter(UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]))
+        .label("error_requests"),
+        func.sum(UsageLog.cost_usd).filter(_success).label("cost_usd"),
+        func.sum(UsageLog.input_tokens).filter(_success).label("input_tokens"),
+        func.sum(UsageLog.output_tokens).filter(_success).label("output_tokens"),
+        func.sum(UsageLog.cache_creation_tokens).filter(_success).label("cache_creation_tokens"),
+        func.sum(UsageLog.cache_read_tokens).filter(_success).label("cache_read_tokens"),
+        func.sum(UsageLog.reasoning_tokens).filter(_success).label("reasoning_tokens"),
+        func.sum(UsageLog.web_search_count).filter(_success).label("web_search_count"),
     ).where(
         UsageLog.user_id == user.user_id,
-        cost_period_filter(period),
+        cost_period_filter(period, success_only=False),
     )
     srow = (await session.execute(summary_stmt)).one()
 
-    # 에러 요청 수 — 같은 user+기간이되 SUCCESS 필터만 뺀 별도 카운트.
-    # 정책 차단은 usage_logs 에 행이 없어 ERROR/TIMEOUT 은 장애만 잡힌다.
-    error_requests = (
-        await session.execute(
-            select(func.count())
-            .select_from(UsageLog)
-            .where(
-                UsageLog.user_id == user.user_id,
-                cost_period_filter(period, success_only=False),
-                UsageLog.status.in_([UsageStatus.ERROR, UsageStatus.TIMEOUT]),
-            )
-        )
-    ).scalar_one() or 0
     summary = {
         "requests": srow.requests or 0,
-        "error_requests": error_requests,
+        "error_requests": srow.error_requests or 0,
         "cost_usd": round(float(srow.cost_usd or 0), 4),
         "input_tokens": srow.input_tokens or 0,
         "output_tokens": srow.output_tokens or 0,

@@ -65,16 +65,16 @@ async function buildAppSamples() {
   };
   const langchain = {
     curl: [
-      `# LangChain 은 HTTP 직접 호출이 아니라 SDK 래퍼를 쓴다 —`,
-      `# OpenAI 계열 alias: ChatOpenAI + /v1/chat/completions`,
-      `# Claude 계열 alias:  ChatAnthropic + /v1/messages`,
+      `# LangChain wraps the SDKs — no direct HTTP call needed.`,
+      `# OpenAI-family alias: ChatOpenAI + /v1/chat/completions`,
+      `# Claude-family alias:  ChatAnthropic + /v1/messages`,
     ].join('\n'),
     python: [
       `import os`,
       `from langchain_openai import ChatOpenAI`,
       `from langchain_anthropic import ChatAnthropic`,
       ``,
-      `# OpenAI 계열 alias (gpt-*, codex-* 등)`,
+      `# OpenAI-family alias (gpt-*, codex-* etc.)`,
       `gpt = ChatOpenAI(`,
       `    model="<model-alias>",`,
       `    api_key=os.environ["SERVICE_VK"],`,
@@ -82,7 +82,7 @@ async function buildAppSamples() {
       `    max_tokens=256,`,
       `)`,
       ``,
-      `# Claude 계열 alias (claude-*)`,
+      `# Claude-family alias (claude-*)`,
       `claude = ChatAnthropic(`,
       `    model="<model-alias>",`,
       `    api_key=os.environ["SERVICE_VK"],`,
