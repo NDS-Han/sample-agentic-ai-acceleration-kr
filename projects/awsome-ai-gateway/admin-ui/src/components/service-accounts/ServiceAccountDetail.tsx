@@ -3,8 +3,9 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useMemo, useState } from 'react';
-import { useTranslations } from 'next-intl';
-import { Activity, Coins, DollarSign, Timer } from 'lucide-react';
+import Link from 'next/link';
+import { useLocale, useTranslations } from 'next-intl';
+import { Activity, ArrowLeft, Coins, DollarSign, Timer } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -32,6 +33,7 @@ interface Props {
 
 export function ServiceAccountDetail({ data, period }: Props) {
   const t = useTranslations('serviceAccounts');
+  const locale = useLocale();
   const tz = useReportingTz();
   const s = data.summary;
   const [trendMetric, setTrendMetric] = useState<'cost_usd' | 'tokens'>('cost_usd');
@@ -42,6 +44,15 @@ export function ServiceAccountDetail({ data, period }: Props) {
     [tz],
   );
 
+  // 'YYYY-MM' 을 로케일 맞춤 "2026년 11월"/"November 2026" 형태로 표시.
+  const periodLabel = useMemo(() => {
+    const [y, m] = period.split('-').map(Number);
+    return new Intl.DateTimeFormat(locale === 'ko' ? 'ko-KR' : 'en-US', {
+      year: 'numeric',
+      month: 'long',
+    }).format(new Date(y, m - 1));
+  }, [period, locale]);
+
   const statusTone = (status: string) =>
     status === 'ACTIVE'
       ? ('teal' as const)
@@ -51,8 +62,17 @@ export function ServiceAccountDetail({ data, period }: Props) {
 
   return (
     <div className="space-y-6">
+      <Link
+        href="/agents"
+        className="inline-flex items-center gap-1 text-sm text-muted-foreground hover:text-foreground"
+      >
+        <ArrowLeft size={14} /> {t('backToList')}
+      </Link>
+
       <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">{t('usageTitle', { period })}</h2>
+        <h2 className="text-lg font-semibold">
+          {t('usageTitle', { period: periodLabel })}
+        </h2>
         <PeriodSelector periods={periods} current={period} />
       </div>
 
@@ -124,7 +144,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
           <THead>
             <Tr>
               <Th>{t('keyPrefix')}</Th>
-              <Th>{t('keyStatus')}</Th>
+              <Th>{t('keyStatusCol')}</Th>
               <Th>{t('keyIssuedAt')}</Th>
               <Th>{t('keyExpiresAt')}</Th>
               <Th>{t('keyLastRequest')}</Th>

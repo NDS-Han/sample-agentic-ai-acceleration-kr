@@ -1333,7 +1333,7 @@
     "saMonthRequests": "Requests (mo)",
     "saMonthTokens": "Tokens (mo)",
     "saMonthCost": "Cost (mo)",
-    "usageTitle": "Usage — {period}",
+    "usageTitle": "Usage in {period}",
     "kpiCost": "Cost",
     "kpiCostDesc": "{success}/{requests} succeeded",
     "kpiRequests": "Requests",
@@ -1369,6 +1369,8 @@
     "tokReasoning": "{n} reasoning (included in output, not billed separately)",
     "tokWebSearch": "{n} web searches",
     "trendCost": "Cost",
-    "trendTokens": "Tokens"
+    "trendTokens": "Tokens",
+    "backToList": "Agent list",
+    "keyStatusCol": "Status"
   }
 }

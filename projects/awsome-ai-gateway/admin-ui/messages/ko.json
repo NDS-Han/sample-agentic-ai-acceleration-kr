@@ -1333,7 +1333,7 @@
     "saMonthRequests": "이번 달 요청",
     "saMonthTokens": "이번 달 토큰",
     "saMonthCost": "이번 달 비용",
-    "usageTitle": "사용량 — {period}",
+    "usageTitle": "{period} 사용량",
     "kpiCost": "비용",
     "kpiCostDesc": "성공 {success}/{requests}건",
     "kpiRequests": "요청 수",
@@ -1369,6 +1369,8 @@
     "tokReasoning": "reasoning {n} (출력에 포함, 별도 청구 없음)",
     "tokWebSearch": "웹검색 {n}회",
     "trendCost": "비용",
-    "trendTokens": "토큰"
+    "trendTokens": "토큰",
+    "backToList": "에이전트 목록",
+    "keyStatusCol": "상태"
   }
 }
