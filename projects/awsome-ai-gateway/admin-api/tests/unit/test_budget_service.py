@@ -19,7 +19,12 @@ from app.core.exceptions import (
 )
 from app.models.auth import Team, User
 from app.models.budget import BudgetConfig, BudgetPolicy, BudgetScope
-from app.schemas.budgets import AllocateBudgetItem, AllocateBudgetRequest, SetBudgetRequest
+from app.schemas.budgets import (
+    AllocateBudgetItem,
+    AllocateBudgetRequest,
+    AutoDowngradeConfigRequest,
+    SetBudgetRequest,
+)
 from app.services.budget_service import BUDGET_CONFIG_CACHE_TTL, BudgetService
 
 
@@ -1709,3 +1714,47 @@ class TestGetBudgetSummaryUsage:
         redis.get.assert_not_called()
         row = next(i for i in result.summary if i.target_id == str(user_id))
         assert row.used_usd == Decimal("7.25")
+
+
+class TestTeamScopeAdminOnlyGuard:
+    """TEAM-scope 쓰기 7개 메서드의 서비스층 방어심층 — 라우터 require_admin 이
+    주 방어라 오늘은 도달 불가지만, 서비스층도 비-ADMIN actor 를
+    team_budget_admin_only(403) 로 거부해야 한다. 가드가 첫 줄이라 리포지토리
+    목 설정 없이 예외만 보면 된다."""
+
+    async def _calls(self, svc: BudgetService, session, actor):
+        team_id = uuid.uuid4()
+        return [
+            svc.seed_spent(session, items=[], actor=actor),
+            svc.set_team_budget(
+                session, team_id=team_id,
+                data=SetBudgetRequest(max_budget_usd=Decimal("10.00")),
+                actor=actor,
+            ),
+            svc.set_team_default_cap(session, team_id=team_id, value=Decimal("5.00"), actor=actor),
+            svc.delete_team_budget(session, team_id=team_id, actor=actor),
+            svc.equal_split_team_budget(session, team_id=team_id, clear_individual=False, actor=actor),
+            svc.set_downgrade_config(
+                session, scope=BudgetScope.TEAM, scope_id=team_id,
+                data=AutoDowngradeConfigRequest(enabled=False), actor=actor,
+            ),
+            svc.delete_downgrade_config(
+                session, scope=BudgetScope.TEAM, scope_id=team_id, actor=actor,
+            ),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_team_leader_rejected_on_all_team_scope_writes(
+        self, budget_service: BudgetService, mock_session: AsyncMock, team_leader_user: CurrentUser
+    ):
+        for coro in await self._calls(budget_service, mock_session, team_leader_user):
+            with pytest.raises(BudgetRuleError, match="team_budget_admin_only"):
+                await coro
+
+    @pytest.mark.asyncio
+    async def test_developer_rejected_on_all_team_scope_writes(
+        self, budget_service: BudgetService, mock_session: AsyncMock, developer_user: CurrentUser
+    ):
+        for coro in await self._calls(budget_service, mock_session, developer_user):
+            with pytest.raises(BudgetRuleError, match="team_budget_admin_only"):
+                await coro

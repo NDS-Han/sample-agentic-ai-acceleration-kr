@@ -197,9 +197,38 @@ async def get_my_usage(
         for row in model_result.all()
     ]
 
+    # 토큰 버킷 요약 — agents 상세와 동일 정의(§59 SUCCESS + KST 기간).
+    # reasoning_tokens 는 output 에 이미 포함(비청구 표시 지표)이므로
+    # 프론트의 total 계산에서 제외 대상이다.
+    summary_stmt = select(
+        func.count().label("requests"),
+        func.sum(UsageLog.cost_usd).label("cost_usd"),
+        func.sum(UsageLog.input_tokens).label("input_tokens"),
+        func.sum(UsageLog.output_tokens).label("output_tokens"),
+        func.sum(UsageLog.cache_creation_tokens).label("cache_creation_tokens"),
+        func.sum(UsageLog.cache_read_tokens).label("cache_read_tokens"),
+        func.sum(UsageLog.reasoning_tokens).label("reasoning_tokens"),
+        func.sum(UsageLog.web_search_count).label("web_search_count"),
+    ).where(
+        UsageLog.user_id == user.user_id,
+        cost_period_filter(period),
+    )
+    srow = (await session.execute(summary_stmt)).one()
+    summary = {
+        "requests": srow.requests or 0,
+        "cost_usd": round(float(srow.cost_usd or 0), 4),
+        "input_tokens": srow.input_tokens or 0,
+        "output_tokens": srow.output_tokens or 0,
+        "cache_creation_tokens": srow.cache_creation_tokens or 0,
+        "cache_read_tokens": srow.cache_read_tokens or 0,
+        "reasoning_tokens": srow.reasoning_tokens or 0,
+        "web_search_count": srow.web_search_count or 0,
+    }
+
     return {
         "user_id": str(user.user_id),
         "period": period,
+        "summary": summary,
         "daily_usage": daily_usage,
         "by_model": by_model,
     }

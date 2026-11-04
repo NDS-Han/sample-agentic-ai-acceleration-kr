@@ -9,8 +9,9 @@ import { UserRole } from '@/types/enums';
  * Keys are exact pathname prefixes (matched with startsWith in auth.ts).
  * Values list the UserRole values that are ALLOWED to visit that path.
  *
- * DEVELOPER role is intentionally absent from all entries — developers are
- * redirected to a "no access" page by the middleware.
+ * DEVELOPER 는 self-service 경로(/my, /integration)만 등재돼 있다 — 그 외
+ * 경로는 미등재 default-deny 로 403. 예외 주석이 있던 시절과 달리 /my 는
+ * 개발자의 기본 홈이다.
  */
 export const PAGE_PERMISSIONS: PagePermissionMap = {
   // Dashboard — admin only. TEAM_LEADER 를 넣으면 페이지는 열리지만 이 페이지가
@@ -62,9 +63,10 @@ export const PAGE_PERMISSIONS: PagePermissionMap = {
   // 감사 로그 뷰어 — admin only. 백엔드 /admin/audit/* 전부 require_admin.
   '/audit': [UserRole.ADMIN],
 
-  // CLI downloads — admin + team leader
-  '/integration': [UserRole.ADMIN, UserRole.TEAM_LEADER],
-  '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER], // 구 링크 — /integration 으로 redirect
+  // CLI downloads + 외부 앱 연동 문서 — admin + team leader + developer.
+  // 페이지가 부르는 API(/cli/downloads)는 무인증이라 개발자도 열린다.
+  '/integration': [UserRole.ADMIN, UserRole.TEAM_LEADER, UserRole.DEVELOPER],
+  '/cli': [UserRole.ADMIN, UserRole.TEAM_LEADER, UserRole.DEVELOPER], // 구 링크 — /integration 으로 redirect
 
   // BI assistant chat — ADMIN 전용.
   // ⚠️ 예전 주석은 "/analytics 와 동일 범위(admin + team leader)" 였지만 백엔드와 어긋난다:

@@ -25,6 +25,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from app.models.auth import UserRole
 from app.schemas.budgets import SeedSpentItem
 from app.services.budget_service import BudgetService
 
@@ -50,7 +51,9 @@ def _svc(redis=None):
 
 
 def _actor():
-    return MagicMock(user_id=uuid.uuid4(), role=MagicMock(value="ADMIN"))
+    # role 은 실제 enum 이어야 한다 — 서비스층 방어심층이 actor.role != ADMIN
+    # 비교를 하므로 MagicMock(value="ADMIN") 은 항상 "비-ADMIN" 으로 걸린다.
+    return MagicMock(user_id=uuid.uuid4(), role=UserRole.ADMIN)
 
 
 def _item(uid: uuid.UUID, spent: str = "1.5") -> SeedSpentItem:

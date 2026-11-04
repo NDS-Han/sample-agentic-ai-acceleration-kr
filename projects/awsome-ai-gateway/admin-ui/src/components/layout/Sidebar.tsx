@@ -137,11 +137,12 @@ const BOTTOM_NAV_ITEMS: NavItemDef[] = [
     allowedRoles: [UserRoleConst.ADMIN],
   },
   {
-    // 외부 앱 연동 샘플 + CLI 다운로드.
+    // 외부 앱 연동 샘플 + CLI 다운로드. /cli/downloads 는 무인증이라 개발자도
+    // 페이지가 정상 동작한다 — DEVELOPER 의 두 화면(/my 와 여기) 중 하나.
     key: 'integration',
     href: '/integration',
     icon: <Blocks size={18} />,
-    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER],
+    allowedRoles: [UserRoleConst.ADMIN, UserRoleConst.TEAM_LEADER, UserRoleConst.DEVELOPER],
   },
 ];
 

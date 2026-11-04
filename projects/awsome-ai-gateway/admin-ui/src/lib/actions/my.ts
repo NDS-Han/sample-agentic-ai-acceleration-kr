@@ -36,9 +36,22 @@ export interface ModelUsage {
   tokens: number;
 }
 
+export interface MyUsageSummary {
+  requests: number;
+  cost_usd: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  /** output 에 이미 포함된 비청구 표시 지표 — total 에 더하면 이중계산. */
+  reasoning_tokens: number;
+  web_search_count: number;
+}
+
 export interface MyUsageResponse {
   user_id: string;
   period: string;
+  summary: MyUsageSummary;
   daily_usage: DailyUsage[];
   by_model: ModelUsage[];
 }

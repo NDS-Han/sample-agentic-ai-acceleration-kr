@@ -28,6 +28,8 @@ from pathlib import Path
 
 import pytest
 
+from app.models.auth import UserRole
+
 _SRC = Path(__file__).resolve().parents[2] / "src" / "app"
 
 
@@ -54,6 +56,12 @@ def _rule(from_alias: str, to_alias: str, threshold: int = 80):
     return DowngradeRuleItem(
         from_model_alias=from_alias, to_model_alias=to_alias, threshold_pct=threshold
     )
+
+
+def _admin_role():
+    """실제 enum — 서비스층 방어심층이 actor.role != UserRole.ADMIN 비교를 하므로
+    duck-typed {"value": "ADMIN"} 객체는 "비-ADMIN" 으로 걸려 가드에서 멈춘다."""
+    return UserRole.ADMIN
 
 
 async def _save(rows: dict[str, str], rules, monkeypatch):
@@ -100,7 +108,7 @@ async def _save(rows: dict[str, str], rules, monkeypatch):
 
     svc = bs.BudgetService(cache_mgr=None)
     data = AutoDowngradeConfigRequest(rules=rules)
-    actor = type("A", (), {"user_id": uuid.uuid4(), "role": type("R", (), {"value": "ADMIN"})()})()
+    actor = type("A", (), {"user_id": uuid.uuid4(), "role": _admin_role()})()
     try:
         await svc.set_downgrade_config(
             None,
@@ -210,7 +218,7 @@ async def test_each_alias_is_looked_up_once(monkeypatch):
             return None
 
     monkeypatch.setattr(bs, "BudgetRepository", _BudgetRepo, raising=False)
-    actor = type("A", (), {"user_id": uuid.uuid4()})()
+    actor = type("A", (), {"user_id": uuid.uuid4(), "role": _admin_role()})()
     with pytest.raises(Exception):
         await bs.BudgetService(cache_mgr=None).set_downgrade_config(
             None,
@@ -253,7 +261,7 @@ async def test_downgrade_target_outside_team_allowed_models_is_refused(monkeypat
             return None
 
     monkeypatch.setattr(bs, "BudgetRepository", _BudgetRepo, raising=False)
-    actor = type("A", (), {"user_id": uuid.uuid4(), "role": type("R", (), {"value": "ADMIN"})()})
+    actor = type("A", (), {"user_id": uuid.uuid4(), "role": _admin_role()})
     with pytest.raises(ValidationError, match="allowed models"):
         await bs.BudgetService(cache_mgr=None).set_downgrade_config(
             None,

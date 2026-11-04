@@ -63,6 +63,25 @@ _CENT = Decimal("0.01")
 DEFAULT_ALERT_THRESHOLDS: tuple[int, ...] = (80, 90, 100)
 
 
+def _require_admin_actor(actor: CurrentUser) -> None:
+    """TEAM-scope 예산 쓰기는 ADMIN 전용 — 서비스층 방어심층.
+
+    라우터가 이미 Depends(require_admin) 이라 오늘은 도달 불가지만, Depends
+    가 느슨해지거나 내부 호출자가 생겨도 T/D/균등분배/해제/다운그레이드는
+    리더가 못 건드리게 한다 — 자기 팀 T 를 올리는 것은 D-13(자기 상한
+    자기배정 금지)의 근원적 우회이고, equal_split 의 clear_individual 은
+    팀 내 리더/어드민 개별 cap 을 지운다.
+    ``!= ADMIN`` 비교 — 미래 역할이 생겨도 닫힌 쪽이 안전하다.
+    """
+    if actor.role != UserRole.ADMIN:
+        raise BudgetRuleError(
+            "Team-scope budget writes are admin-only "
+            "(team_budget_admin_only).",
+            "team_budget_admin_only",
+            403,
+        )
+
+
 def _check_cent_precision(amount: Decimal) -> None:
     """D-17/§0-3: 예산 입력은 센트(2자리)까지. 초과 정밀도는 거부한다.
 
@@ -208,6 +227,7 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> SeedSpentResponse:
+        _require_admin_actor(actor)
         """Inject absolute spent (USD) per item into DB + Redis via delta.
 
         Migration burn-rate continuation. 내부적으로는 델타 적용(행 잠금 하에 읽은
@@ -431,6 +451,7 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
+        _require_admin_actor(actor)
         _check_cent_precision(data.max_budget_usd)
         if data.default_user_cap_usd is not None:
             _check_cent_precision(data.default_user_cap_usd)
@@ -556,6 +577,7 @@ class BudgetService:
         T 가 아직 없으면(팀 config 행 없음) T=NULL '사전 준비' 행을 만든다(G-6).
         반환값은 확정된 D 다.
         """
+        _require_admin_actor(actor)
         if value is not None:
             _check_cent_precision(value)
 
@@ -653,6 +675,7 @@ class BudgetService:
         A_u·app_c·D 는 보존된다 — 비활성 행에 남은 D 는 T 재설정 시
         get_latest_config 가 이어 받는다.
         """
+        _require_admin_actor(actor)
         repo = BudgetRepository(session)
         cfg = await repo.get_active_config(BudgetScope.TEAM, team_id)
         if cfg is None:
@@ -712,6 +735,7 @@ class BudgetService:
         clear_individual=True 면 모든 개별 A_u·app_c 를 같은 트랜잭션에서
         제거하고 전원 D 로 통일한다. 반환: 계산된 D 와 초기화된 멤버 수.
         """
+        _require_admin_actor(actor)
         user_repo = UserRepository(session)
         team = await user_repo.get_team(team_id)
         if team is None:
@@ -2140,6 +2164,7 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> AutoDowngradeConfigResponse:
+        _require_admin_actor(actor)
         from app.repositories.model_repository import ModelRepository
 
         # enabled=False 는 "끄기" 저장이다. 별도의 enabled 플래그 컬럼은 없고 활성
@@ -2299,6 +2324,7 @@ class BudgetService:
         ip_address: str = "0.0.0.0",
         request_id: str = "",
     ) -> None:
+        _require_admin_actor(actor)
         rule_repo = DowngradePolicyRepository(session)
         # Clear 는 삭제 — soft-delete 로 두면 최신 배치가 비활성 규칙으로 다시 보인다.
         await rule_repo.clear_rules(scope, scope_id)

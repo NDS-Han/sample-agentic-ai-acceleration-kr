@@ -8,12 +8,17 @@ import type { MyUsageResponse } from '@/lib/actions/my';
 import { fmtUsd } from '@/lib/utils/format';
 import { modelDisplay } from '@/lib/utils/modelLabel';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { TokenMixDonutClient } from '@/components/analytics/TokenMixDonutClient';
 
 export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
   const t = useTranslations('my');
-  const totalCost = data.daily_usage.reduce((sum, d) => sum + d.cost_usd, 0);
-  const totalRequests = data.daily_usage.reduce((sum, d) => sum + d.requests, 0);
-  const totalTokens = data.daily_usage.reduce((sum, d) => sum + d.tokens, 0);
+  // summary 는 서버 단일 집계 — 일별 합산과 같은 §59 스코프라 카드 값이 정확하다.
+  const totalCost = data.summary?.cost_usd ?? data.daily_usage.reduce((sum, d) => sum + d.cost_usd, 0);
+  const totalRequests = data.summary?.requests ?? data.daily_usage.reduce((sum, d) => sum + d.requests, 0);
+  const s = data.summary;
+  const totalTokens = s
+    ? s.input_tokens + s.output_tokens + s.cache_creation_tokens + s.cache_read_tokens
+    : data.daily_usage.reduce((sum, d) => sum + d.tokens, 0);
 
   return (
     <div className="space-y-6">
@@ -96,6 +101,37 @@ export function MyUsageDashboard({ data }: { data: MyUsageResponse }) {
           </Table>
         )}
       </div>
+
+      {/* 토큰 분석 — 버킷 구성 비율 + 비청구 reasoning. 에이전트 상세·analytics 와 동일 컴포넌트. */}
+      {s && (
+        <div className="glass rounded-apple p-4">
+          <h3 className="mb-3 text-sm font-semibold">{t('tokTitle')}</h3>
+          {totalTokens > 0 ? (
+            <TokenMixDonutClient
+              data={{
+                input_tokens: s.input_tokens,
+                output_tokens: s.output_tokens,
+                cache_read_tokens: s.cache_read_tokens,
+                cache_write_tokens: s.cache_creation_tokens,
+                total_tokens: totalTokens,
+              }}
+            />
+          ) : (
+            <p className="py-4 text-center text-sm text-muted-foreground">
+              {t('noDailyRecords')}
+            </p>
+          )}
+          {(s.reasoning_tokens > 0 || s.web_search_count > 0) && (
+            <p className="mt-3 border-t border-border pt-2 text-xs text-muted-foreground">
+              {s.reasoning_tokens > 0 &&
+                t('tokReasoning', { n: s.reasoning_tokens.toLocaleString() })}
+              {s.reasoning_tokens > 0 && s.web_search_count > 0 && ' · '}
+              {s.web_search_count > 0 &&
+                t('tokWebSearch', { n: s.web_search_count.toLocaleString() })}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 }

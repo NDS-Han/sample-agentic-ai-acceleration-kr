@@ -380,14 +380,21 @@ export function TeamAllocationView({
             ) : (
               filteredMembers.map((m) => {
                 const isSelf = currentUserId != null && m.target_id === currentUserId;
-                const lockRow = isSelf && !isAdmin;
+                // 리더는 리더/어드민 멤버의 cap 도 못 건드린다 — 백엔드
+                // leader_target_forbidden 과 같은 조건으로 UI 도 잠근다
+                // (편집 가능해 보이는 행이 제출 시 403 으로 실패하는 걸 방지).
+                const isPrivileged = m.target_role === 'TEAM_LEADER' || m.target_role === 'ADMIN';
+                const lockRow = !isAdmin && (isSelf || isPrivileged);
+                const lockLabel = !isAdmin && isPrivileged
+                  ? t('privilegedRowLocked')
+                  : t('selfRowLocked');
                 return (
                   <Tr key={m.target_id}>
                     <Td emphasis>
                       {m.target_name}
                       {lockRow && (
                         <span className="ml-1 text-[11px] text-muted-foreground">
-                          {t('selfRowLocked')}
+                          {lockLabel}
                         </span>
                       )}
                     </Td>

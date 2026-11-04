@@ -122,6 +122,7 @@ export default async function CLIPage() {
         </div>
         <ul className="list-disc list-inside space-y-1 text-xs text-muted-foreground">
           <li>{t('appIntegNoteVk')}</li>
+          <li>{t('appIntegNoteAskAdmin')}</li>
           <li>{t('appIntegNoteAlias')}</li>
           <li>{t('appIntegNote401')}</li>
           <li>{t.rich('appIntegNoteUa', { code })}</li>
