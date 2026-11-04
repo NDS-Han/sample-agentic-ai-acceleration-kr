@@ -192,7 +192,7 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 |---|---|---|
 | `notifications.provider` | mock=발송안함, ses=SES 발송, smtp=외부 SMTP, internal_api=사내 메일 API | ses는 `ses_from`, smtp는 `smtp_host`, internal_api는 `internal_api_url` 필수(없으면 worker crashloop). eks의 smtp 자격증명은 `smtp_credentials_secret` |
 | `bi_insight` | BI 어시스턴트 (AgentCore Runtime) | compose 미지원. 별도 이미지 배포 필요 |
-| `pricing_lambda` | LiteLLM 단가 조회 Lambda | **ecs/eks는 apply가 자동 보장** (role+함수+invoke 권한, 멱등) — compose는 ops/NDS-01 수동. 단가 데이터는 DB 시드가 따로 필요 |
+| `pricing_lambda` | LiteLLM 단가 조회 Lambda | **ecs/eks는 apply가 자동 보장** (role+함수+env+invoke 권한, 멱등 — 코드 수정 후 apply만 돌리면 됨) — compose는 ops/NDS-01 수동. api.litellm.ai 종료로 cost-map 모드(LITELLM_COST_MAP_URL 자동 주입)로 동작. 단가 데이터는 DB 시드가 따로 필요 |
 | `web_search` | AgentCore 기반 웹검색 | **us-east-1 전용 인프라**, apply가 자동 프로비저닝 (compose는 .env 주입) |
 | `body_logging` | 요청 본문 S3 로깅 | 인프라 + 관리자 런타임 토글 이중 게이트 |
 | `observability` | OTel/Prometheus/Loki/Tempo/Grafana | **compose 전용** — ecs/eks에서는 무시(validate가 경고) |
