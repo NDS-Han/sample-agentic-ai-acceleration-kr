@@ -61,6 +61,25 @@ def test_merge_adds_fragment_keys_and_merges_nested_objects():
     assert BASELINE["env"]["ENABLE_TOOL_SEARCH"] == "true"  # inputs untouched
 
 
+def test_merge_drops_a_baseline_key_the_fragment_sets_to_null():
+    # The strict baseline carries strictKnownMarketplaces: []; a team allowed to use any
+    # marketplace must be able to remove that key, and JSON has no other way to say so.
+    merged = merge({"strictKnownMarketplaces": [], "disableSideloadFlags": True},
+                   {"strictKnownMarketplaces": None, "disableSideloadFlags": False})
+
+    assert merged == {"disableSideloadFlags": False}
+
+
+def test_merge_drops_a_nested_key_set_to_null():
+    merged = merge({"env": {"A": "1", "B": "2"}}, {"env": {"B": None, "C": "3"}})
+
+    assert merged["env"] == {"A": "1", "C": "3"}
+
+
+def test_merge_ignores_null_for_a_key_the_baseline_lacks():
+    assert merge({"a": 1}, {"gone": None}) == {"a": 1}
+
+
 def test_fragment_is_fetched_with_the_vk_from_the_gateway(tmp_path):
     server = Server(body={"version": "v1", "managedSettings": FRAGMENT})
 

@@ -18,11 +18,29 @@ FETCH_TIMEOUT_SECONDS = 3.0  # well inside policyHelper.timeoutMs (10 s)
 
 
 def merge(baseline: dict, fragment: dict) -> dict:
-    """Fragment wins; nested objects (e.g. env) are merged one level deep."""
+    """조각이 이긴다. 중첩 객체(env 등)는 한 단계만 합치고, 조각의 null 은 그 키를 지운다.
+
+    null 이 필요한 이유: 엄격한 기본값(예: strictKnownMarketplaces: []) 을 서버 정책이
+    풀어 주려면 키 자체를 없애야 하는데, JSON 으로 "지워라" 를 말할 다른 방법이 없다.
+
+    Fragment wins; nested objects (e.g. env) are merged one level deep, and a null in
+    the fragment removes that key.
+
+    Why null: to lift a strict default (e.g. strictKnownMarketplaces: []) the server
+    policy must remove the key itself, and JSON has no other way to say "remove".
+    """
     merged = dict(baseline)
     for key, value in fragment.items():
-        if isinstance(value, dict) and isinstance(merged.get(key), dict):
-            merged[key] = {**merged[key], **value}
+        if value is None:
+            merged.pop(key, None)
+        elif isinstance(value, dict) and isinstance(merged.get(key), dict):
+            inner = dict(merged[key])
+            for inner_key, inner_value in value.items():
+                if inner_value is None:
+                    inner.pop(inner_key, None)
+                else:
+                    inner[inner_key] = inner_value
+            merged[key] = inner
         else:
             merged[key] = value
     return merged
