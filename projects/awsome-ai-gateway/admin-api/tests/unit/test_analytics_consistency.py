@@ -37,6 +37,38 @@ from app.services.analytics_service import AnalyticsService
 TEAM_A = uuid.UUID("00000000-0000-0000-0000-0000000000a1")
 
 
+async def test_request_counts_uses_single_scan_with_filter_clause() -> None:
+    """성공/에러 카운트는 한 번의 스캔 — WHERE 에 status 가 없고 집계 FILTER 가
+    둘을 나눈다(두 쿼리 스캔 시절의 회귀 가드)."""
+    from app.models.usage import ROIScope
+    from app.repositories.analytics_repository import AnalyticsRepository
+
+    session = AsyncMock()
+    row = MagicMock()
+    row.success, row.errors = 3, 1
+    result = MagicMock()
+    result.one.return_value = row
+    session.execute = AsyncMock(return_value=result)
+
+    repo = AnalyticsRepository(session)
+    ok, err = await repo.request_counts("2026-09", ROIScope.GLOBAL, None)
+    assert (ok, err) == (3, 1)
+    assert session.execute.await_count == 1
+
+    stmt = session.execute.await_args.args[0]
+    compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
+    # usage 스키마 한정자까지 붙은 컴파일 형태.
+    assert "FILTER (WHERE usage.usage_logs.status = 'SUCCESS')" in compiled
+    assert (
+        "FILTER (WHERE usage.usage_logs.status IN ('ERROR', 'TIMEOUT'))"
+        in compiled
+    )
+    # 성공 전용 조건이 바깥 WHERE 에 새면 에러는 항상 0 — 문서화만으론 부족해
+    # 단언(FROM 절 뒤가 진짜 WHERE — 앞쪽 WHERE 는 FILTER 의 것).
+    where_part = compiled.split("FROM usage.usage_logs", 1)[1]
+    assert "status" not in where_part
+
+
 @pytest.fixture(autouse=True)
 def _empty_results(mock_session):
     result = MagicMock()

@@ -1459,6 +1459,8 @@
     "clearTarget": "Clear target filter",
     "actionChip": "Action: {action}",
     "clearAction": "Clear action filter",
+    "expandDetails": "Show details",
+    "collapseDetails": "Hide details",
     "colTime": "Time",
     "colActor": "Actor",
     "colAction": "Action",

@@ -150,6 +150,13 @@ def test_ensure_existing_fn_updates_code_only(fakes, tmp_path):
         "model_prices_and_context_window.json")
 
 
+def test_cost_map_url_is_tag_pinned():
+    """상류 main 추적은 배포마다 단가 소스가 조용히 바뀐다 — 릴리스 태그 핀."""
+    url = pricinglambda.FN_ENV["LITELLM_COST_MAP_URL"]
+    assert "/main/" not in url
+    assert url.endswith("model_prices_and_context_window.json")
+
+
 def test_ensure_sets_cost_map_env_on_create(fakes, tmp_path):
     lam, _ = fakes
     (tmp_path / "litellm-pricing-lambda").mkdir()

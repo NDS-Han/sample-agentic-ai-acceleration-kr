@@ -7,6 +7,7 @@ import Link from 'next/link';
 import { useLocale, useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { listAuditLogsAction } from '@/lib/actions/audit';
+import { baseAction, isConfirmedAction } from '@/lib/audit/action';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { Badge } from '@/components/common/Badge';
@@ -47,7 +48,7 @@ function actionTone(action: string): 'pink' | 'amber' | 'neutral' {
   if (
     action === 'SET_BODY_LOGGING' ||
     action === 'VIEW_INVOCATION_LOG_BODY' ||
-    action.endsWith('_CONFIRMED')
+    isConfirmedAction(action)
   ) {
     return 'amber';
   }
@@ -74,10 +75,8 @@ export function AuditLogListView({
 
   const known = new Set(knownActions);
   // 라벨은 정규화된 이름으로 찾는다 — *_CONFIRMED 행은 원본 라벨 + 확인됨 배지.
-  const normalize = (a: string) =>
-    a.endsWith('_CONFIRMED') ? a.slice(0, -'_CONFIRMED'.length) : a;
   const actionLabel = (a: string) => {
-    const base = normalize(a);
+    const base = baseAction(a);
     return known.has(base) ? t(`actions.${base}` as const) : base;
   };
 
@@ -149,26 +148,31 @@ export function AuditLogListView({
         <TBody>
           {items.map((it) => (
             <Fragment key={it.id}>
-              <Tr
-                clickable
-                onClick={() => toggle(it.id)}
-                // 키보드 — 행 시맨틱(tr)을 유지한 채 Enter/Space 로 펼침.
-                tabIndex={0}
-                aria-expanded={expanded.has(it.id)}
-                className="focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring focus-visible:ring-inset"
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault();
-                    toggle(it.id);
-                  }
-                }}
-              >
+              <Tr clickable onClick={() => toggle(it.id)}>
                 <Td className="w-6 text-muted-foreground">
-                  {expanded.has(it.id) ? (
-                    <ChevronDown size={14} />
-                  ) : (
-                    <ChevronRight size={14} />
-                  )}
+                  {/* 펼침은 행이 아니라 이 버튼이 담당 — tr 에 keydown 을 달면
+                      내부 링크의 Enter 도 가로채 버린다(버블링). 버튼의 네이티브
+                      활성화는 자기 자신만 건드린다. */}
+                  <button
+                    type="button"
+                    aria-expanded={expanded.has(it.id)}
+                    aria-label={
+                      expanded.has(it.id)
+                        ? t('collapseDetails')
+                        : t('expandDetails')
+                    }
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggle(it.id);
+                    }}
+                    className="rounded p-0.5 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                  >
+                    {expanded.has(it.id) ? (
+                      <ChevronDown size={14} />
+                    ) : (
+                      <ChevronRight size={14} />
+                    )}
+                  </button>
                 </Td>
                 <Td className="whitespace-nowrap text-muted-foreground" title={it.timestamp}>
                   {fmtDateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US', tz)}
@@ -184,7 +188,7 @@ export function AuditLogListView({
                 <Td>
                   <span title={it.action} className="inline-flex items-center gap-1.5">
                     <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>
-                    {it.action.endsWith('_CONFIRMED') && (
+                    {isConfirmedAction(it.action) && (
                       <Badge tone="amber">{t('confirmedBadge')}</Badge>
                     )}
                   </span>

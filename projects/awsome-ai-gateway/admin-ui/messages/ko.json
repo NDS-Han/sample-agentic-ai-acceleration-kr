@@ -1459,6 +1459,8 @@
     "clearTarget": "대상 필터 해제",
     "actionChip": "액션: {action}",
     "clearAction": "액션 필터 해제",
+    "expandDetails": "상세 보기",
+    "collapseDetails": "상세 접기",
     "colTime": "시각",
     "colActor": "행위자",
     "colAction": "액션",

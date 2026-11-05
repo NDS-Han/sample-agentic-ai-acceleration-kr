@@ -20,7 +20,11 @@ from fastapi import HTTPException
 from app.core.auth import CurrentUser
 from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
-from app.routers.audit_reconcile import audit_action_catalog, list_audit_logs
+from app.routers.audit_reconcile import (
+    _forbid_service_token_reader,
+    list_audit_logs,
+    router,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -91,7 +95,7 @@ async def test_rows_are_mapped_and_actor_email_resolved() -> None:
     row = _row(changes={"after": {"alias": "claude-haiku-5-5"}})
     session = _session(
         _result(scalars=[row]),  # logs select
-        _result(all_=[(_USER_ID, "u@test.com", "User One")]),  # users select
+        _result(all_=[(_USER_ID, "u@test.com", "User One", "cognito-sub-1")]),
     )
     res = await _call(session)
     assert res.pagination.has_more is False
@@ -218,23 +222,58 @@ async def test_other_group_uses_not_in() -> None:
     assert "NOT" in compiled and "IN" in compiled
 
 
-async def test_dev_actor_stays_dev_even_when_seeded() -> None:
-    """…000010 은 시드 "System Admin" 행으로도 풀리지만, dev 로그인이 이메일과
-    무관하게 그 ID 를 하드코딩하므로 dev 로 분류하는 편이 정직하다.
-
-    users 해소 대상에서도 제외된다 — 페이지가 dev 행뿐이면 users 조회 자체가
-    없다(execute 1 회).
-    """
+async def test_dev_actor_unclaimed_bootstrap_stays_dev() -> None:
+    """미승계 bootstrap 행(sso_subject=placeholder)의 …000010 이벤트는 dev
+    로그인 세션 — placeholder 이메일/이름은 실제 사람이 아니라 숨긴다."""
     dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
     row = _row(actor_user_id=dev_actor)
     session = _session(
         _result(scalars=[row]),
-        # dev 가 real_actor_ids 에서 빠지므로 두 번째 조회는 오지 않는다.
+        _result(
+            all_=[
+                (dev_actor, "admin@example.com", "System Admin",
+                 "bootstrap-admin-placeholder")
+            ]
+        ),
     )
     res = await _call(session)
     item = res.items[0]
     assert item.actor_kind == "dev"
     assert item.actor_email is None
+    assert item.actor_display_name is None
+
+
+async def test_dev_actor_claimed_resolves_to_real_user() -> None:
+    """…000010 행이 실제 관리자에게 승계되면(sso_subject 가 실제 sub) 그 사람의
+    운영 작업을 익명 dev 로 가리면 안 된다 — user + 실제 이메일로 표시."""
+    dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
+    row = _row(actor_user_id=dev_actor)
+    session = _session(
+        _result(scalars=[row]),
+        _result(
+            all_=[
+                (dev_actor, "real.admin@corp.com", "Real Admin",
+                 "cognito:sub-real-1")
+            ]
+        ),
+    )
+    res = await _call(session)
+    item = res.items[0]
+    assert item.actor_kind == "user"
+    assert item.actor_email == "real.admin@corp.com"
+    assert item.actor_display_name == "Real Admin"
+
+
+async def test_actor_email_match_excludes_unclaimed_dev_actor() -> None:
+    """미승계 bootstrap 행의 placeholder 이메일은 매칭에서 제외 — dev 로그인
+    이벤트가 그 주소의 사람 작업처럼 검색되면 안 된다."""
+    dev_actor = uuid.UUID("00000000-0000-4000-a000-000000000010")
+    session = _session(
+        _result(all_=[(dev_actor, "bootstrap-admin-placeholder")]),
+    )
+    res = await _call(session, actor_email="admin@example.com")
+    # 매칭이 전부 제외돼 빈 페이지 — logs 스캔(두 번째 execute)도 없다.
+    assert res.items == []
     assert session.execute.await_count == 1
 
 
@@ -258,7 +297,7 @@ async def test_actor_email_match_applies_in_clause() -> None:
     """O5 — actor_email 매칭 시 uid IN 조건이 쿼리에 실린다."""
     uid = uuid.uuid4()
     session = _session(
-        _result(all_=[(uid,)]),  # users 이메일 매칭
+        _result(all_=[(uid, "cognito-sub-9")]),  # users 이메일 매칭(id, sso)
         _result(scalars=[]),  # logs
     )
     await _call(session, actor_email="u@test.com")
@@ -280,14 +319,21 @@ _SVC_ADMIN = CurrentUser(
 )
 
 
-async def test_service_token_cannot_read_logs() -> None:
-    """svc- 토큰의 합성 ADMIN 신원은 require_admin 을 통과하지만 감사 로그
-    (토큰 이름·접두·관리자 이메일·IP)는 읽지 못한다 — 탈취 토큰이 자기
-    탐지 여부를 감시하는 경로 차단."""
+async def test_service_token_guard_rejects_svc_admin() -> None:
+    """svc- 토큰의 합성 ADMIN 신원은 require_admin 을 통과하지만 감사 표면
+    (로그의 토큰 이름·관리자 이메일·IP, invocation-log 본문)은 읽지 못한다 —
+    탈취 토큰이 자기 탐지 여부를 감시하고 대화 원문을 읽는 경로 차단."""
     with pytest.raises(ForbiddenError):
-        await _call(_session(_result(scalars=[])), admin=_SVC_ADMIN)
+        await _forbid_service_token_reader(admin=_SVC_ADMIN)
 
 
-async def test_service_token_cannot_read_action_catalog() -> None:
-    with pytest.raises(ForbiddenError):
-        await audit_action_catalog(admin=_SVC_ADMIN)
+async def test_audit_router_applies_guard_to_every_endpoint() -> None:
+    """라우터 단위 dependencies 라 현재·미래의 모든 /admin/audit 엔드포인트가
+    같은 가드를 탄다 — 핸들러별 누락(invocation-log 3종, kiro R1)을 구조적으로
+    막는다. 핸들러 시그니처의 Depends(require_admin) 과는 같은 호출이 캐시돼
+    admin 해소는 한 번만 일어난다."""
+    deps = {d.dependency for d in router.dependencies}
+    assert _forbid_service_token_reader in deps
+    # 가드 없이 인간 admin 은 통과한다 — 의존성이 항상 403 을 던지는 게 아님을
+    # 잠근다(빈 의존성 목록에 대한 거짓 양성 방지).
+    assert len(router.routes) >= 5

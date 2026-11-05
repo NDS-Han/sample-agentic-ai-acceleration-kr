@@ -3,6 +3,7 @@
 import Link from 'next/link';
 import { getTranslations } from 'next-intl/server';
 import { adminAPI } from '@/lib/api-client';
+import { baseAction } from '@/lib/audit/action';
 import { APIError } from '@/lib/utils/retry';
 import { ErrorState } from '@/components/common/ErrorState';
 import { AuditLogListView } from '@/components/audit/AuditLogListView';
@@ -55,9 +56,13 @@ export default async function AuditPage(props: AuditPageProps) {
       .then((v) => ({ ok: true as const, value: v }))
       .catch((err) => ({
         ok: false as const,
-        // 400(검색어 500명 초과·잘못된 커서) 같은 실천 가능한 사유는 살리고,
-        // 필터 UI 도 유지한다 — 통째 ErrorState 로 덮으면 원인이 안 보인다.
-        error: err instanceof APIError ? err.message : undefined,
+        // 400(검색어 500명 초과·잘못된 커서) 같은 실천 가능한 사유만 살린다 —
+        // 5xx 서버 메시지는 내부 정보를 담을 수 있어 원문 노출하지 않는다.
+        // 필터 UI 는 유지한다 — 통째 ErrorState 로 덮으면 원인이 안 보인다.
+        error:
+          err instanceof APIError && err.status === 400
+            ? err.message
+            : undefined,
       }));
 
   // 카탈로그를 먼저 받아 group 을 검증한 뒤 로그는 한 번만 가져온다 —
@@ -201,8 +206,8 @@ export default async function AuditPage(props: AuditPageProps) {
         {action && (
           <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
             {t('actionChip', {
-              action: knownActions.includes(action.replace(/_CONFIRMED$/, ''))
-                ? t(`actions.${action.replace(/_CONFIRMED$/, '')}` as const)
+              action: knownActions.includes(baseAction(action))
+                ? t(`actions.${baseAction(action)}` as const)
                 : action,
             })}
             <Link

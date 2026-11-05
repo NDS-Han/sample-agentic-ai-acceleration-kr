@@ -15,9 +15,8 @@ GPT-5.6 을 표준 runtime plane 으로 호출하면 Bedrock 이 요청/응답 �
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
-
 import uuid
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select, tuple_
@@ -61,7 +60,29 @@ from app.services.invocation_log_service import (
     reconcile,
 )
 
-router = APIRouter(prefix="/admin/audit", tags=["Audit"])
+async def _forbid_service_token_reader(
+    admin: CurrentUser = Depends(require_admin),
+) -> None:
+    """svc 토큰은 감사 표면을 읽지 못한다 — 사람 admin(JWT) 전용.
+
+    svc- 토큰은 require_admin 의 합성 ADMIN 신원을 통과하지만, 이 라우터는 감사
+    로그의 토큰 이름·관리자 이메일·IP·request_id 와 invocation-log 의 프롬프트/
+    응답 원문까지 노출한다. 유출된 토큰이 자기 탐지 여부를 감시하고 사용자 대화
+    원문을 읽는 경로를 닫는다 — 키 수명주기 가드(service_accounts.
+    _forbid_service_token_admin)와 같은 이유로 읽기도 막는다.
+    """
+    if admin.is_service_token:
+        raise ForbiddenError("Service tokens cannot read audit logs")
+
+
+# 라우터 단위 가드 — 핸들러마다 호출하면 다음 엔드포인트에서 또 빠질 수 있다.
+# handlers 가 Depends(require_admin) 으로 주입하는 admin 은 FastAPI 의존성
+# 캐시로 한 번만 해소되므로 중복 호출 비용은 없다.
+router = APIRouter(
+    prefix="/admin/audit",
+    tags=["Audit"],
+    dependencies=[Depends(_forbid_service_token_reader)],
+)
 
 # 한 번의 대조에서 읽는 usage 행 상한. 넘으면 잘렸다고 **명시** 한다(조용한 축소 금지).
 _ROW_LIMIT_DEFAULT = 5_000
@@ -371,28 +392,21 @@ async def invocation_log_record(
 # - 결과(result) 필터는 의도적으로 없다. 실패한 변경은 비즈니스 트랜잭션 롤백과
 #   함께 감사 행도 사라지는(R21 S5) 설계라 FAILURE 는 VIEW_INVOCATION_LOG_BODY
 #   같은 열람 감사에만 남는다 — "실패만 보기"는 전체 실패 목록인 것처럼 오해를 만든다.
-# - 합성 행위자: …000010=dev 로그인, …000011=서비스 토큰 공용(core/auth.py).
-#   토큰 식별자는 changes._service_token_id 에 있어 페이지 단위 배치로 해소한다.
 # - keyset 커서는 (timestamp DESC, id DESC) — 0053 인덱스가 그대로 탄다.
+#
 # 합성 행위자 — core/auth.py 의 dev 로그인(…010)과 서비스 토큰 공용 ID(…011).
-# 주의: …010 은 시드의 실제 users 행("System Admin")이기도 하다(03_seed_data.sql).
-#       users 해소가 이기면 모든 dev 로그인 작업이 "System Admin" 개인 작업처럼
-#       보인다 — dev 로그인은 이메일과 무관하게 …010 을 하드코딩하므로, 정직한
-#       표기는 dev 로그인 세션으로 우선 분류하는 것이다.
+# 토큰 식별자는 changes._service_token_id 에 있어 페이지 단위 배치로 해소한다.
+# 주의: …010 은 시드의 bootstrap users 행("System Admin")이기도 하다
+#       (03_seed_data.sql — "update email/sso_subject after first login" 권고).
+#       OIDC 로그인은 sso_subject 또는 검증 이메일로 이 행을 실제 관리자에게
+#       넘긴다(oidc_service — by_email.sso_subject 갱신). 그래서 sso_subject 가
+#       placeholder 면 미승계 = dev 로그인 세션으로, 실제 sub 면 승계된 관리자
+#       = user 로 표시한다 — 무조건 dev 로 찍으면 승계된 관리자의 운영 작업이
+#       익명으로 가려지고, 무조건 user 로 찍으면 dev 작업이 개인 작업처럼 보인다.
 _DEV_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000010")
 _SERVICE_TOKEN_ACTOR_ID = uuid.UUID("00000000-0000-4000-a000-000000000011")
+_BOOTSTRAP_SSO_SUBJECT = "bootstrap-admin-placeholder"
 
-
-def _forbid_service_token_reader(admin: CurrentUser) -> None:
-    """svc 토큰은 감사 로그를 읽지 못한다 — 사람 admin(JWT) 전용.
-
-    svc- 토큰은 require_admin 의 합성 ADMIN 신원을 통과하지만, 감사 로그는
-    토큰 이름·접두·관리자 이메일·IP·request_id 전부를 보여준다. 유출된 토큰이
-    자기 탐지 여부를 감시하는 경로를 닫는다 — 키 수명주기와 같은 이유로
-    (service_accounts._forbid_service_token_admin) 읽기도 막는다.
-    """
-    if admin.is_service_token:
-        raise ForbiddenError("Service tokens cannot read audit logs")
 
 # actor_email 매칭 상한 — asyncpg 파라미터 한도(32767)는 아직 멀어도, 광범위 검색이
 # 만든 수만 개의 IN 파라미터는 계획을 망가뜨린다. 넘으면 400 으로 검색어를 좁히라고 알린다.
@@ -406,7 +420,6 @@ async def audit_action_catalog(
     admin: CurrentUser = Depends(require_admin),
 ):
     """필터 그룹 → 정규화된 액션 목록. 프론트는 이걸로 pill/select 를 만든다."""
-    _forbid_service_token_reader(admin)
     return ActionCatalogResponse(
         groups=[
             *[ActionGroupCatalog(key=k, actions=list(v)) for k, v in ACTION_GROUPS.items()],
@@ -429,7 +442,6 @@ async def list_audit_logs(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    _forbid_service_token_reader(admin)
     # 기간 필수 — 스캔 범위를 묶는다. 감사 조회는 "최근에 누가 바꿨나"가 대부분이다.
     since = datetime.now(timezone.utc) - timedelta(hours=_RANGE_HOURS[range_])
     conditions = [AuditLog.timestamp >= since]
@@ -462,16 +474,24 @@ async def list_audit_logs(
             .replace("_", "\\_")
         )
         uid_rows = await session.execute(
-            select(User.id)
+            select(User.id, User.sso_subject)
             .where(User.email.ilike(f"%{raw}%", escape="\\"))
             .limit(_ACTOR_EMAIL_MATCH_LIMIT + 1)
         )
-        uids = [r[0] for r in uid_rows.all()]
-        if len(uids) > _ACTOR_EMAIL_MATCH_LIMIT:
+        pairs = uid_rows.all()
+        if len(pairs) > _ACTOR_EMAIL_MATCH_LIMIT:
             raise HTTPException(
                 400,
                 f"이메일이 너무 넓게 맞습니다({_ACTOR_EMAIL_MATCH_LIMIT}명 초과) — 검색어를 구체화하세요",
             )
+        # 미승계 bootstrap 행(…010)의 placeholder 이메일에 검색이 걸려도 dev
+        # 로그인 이벤트를 그 주소의 사람 작업처럼 보여주면 안 된다 — 승계된
+        # (placeholder 가 아닌) 행만 매칭에 남긴다.
+        uids = [
+            uid
+            for uid, sso in pairs
+            if not (uid == _DEV_ACTOR_ID and sso == _BOOTSTRAP_SSO_SUBJECT)
+        ]
         if not uids:
             # 이메일이 아무도 안 맞으면 결과는 공집합 — 스캔하지 않고 빈 페이지를 돌려준다.
             return AuditLogListResponse(
@@ -506,22 +526,17 @@ async def list_audit_logs(
     # 행위자 해소 — 페이지(≤200)의 actor 집합으로 users 를 1회 조회.
     # join 하지 않는 이유: 인덱스를 타는 단일 테이블 스캔을 유지하기 위해.
     actor_ids = {r.actor_user_id for r in rows}
-    user_map: dict[uuid.UUID, tuple[str, str]] = {}
-    # …011(svc 공용)·…010(dev 로그인) 제외 — 둘 다 합성 ID 라 users 해소가
-    # 행위자를 오인시킨다(…010 은 시드 "System Admin" 행으로 풀려 모든 dev
-    # 로그인 작업이 개인 작업처럼 보인다 — _DEV_ACTOR_ID 주석 참조).
-    real_actor_ids = [
-        a
-        for a in actor_ids
-        if a not in (_SERVICE_TOKEN_ACTOR_ID, _DEV_ACTOR_ID)
-    ]
+    user_map: dict[uuid.UUID, tuple[str, str, str]] = {}
+    # …011(svc 공용)만 제외 — …010 은 승계 여부 판정에 sso_subject 가 필요해서
+    # 해소 대상에 남긴다(_DEV_ACTOR_ID 주석 참조).
+    real_actor_ids = [a for a in actor_ids if a != _SERVICE_TOKEN_ACTOR_ID]
     if real_actor_ids:
         ures = await session.execute(
-            select(User.id, User.email, User.display_name).where(
-                User.id.in_(real_actor_ids)
-            )
+            select(
+                User.id, User.email, User.display_name, User.sso_subject
+            ).where(User.id.in_(real_actor_ids))
         )
-        user_map = {uid: (email, dn) for uid, email, dn in ures.all()}
+        user_map = {uid: (email, dn, sso) for uid, email, dn, sso in ures.all()}
 
     # 서비스 토큰 해소 — changes._service_token_id 집합으로 1회 조회.
     token_ids: set[uuid.UUID] = set()
@@ -549,22 +564,27 @@ async def list_audit_logs(
         changes = dict(r.changes or {})
         sid_raw = changes.pop("_service_token_id", None)
 
-        if r.actor_user_id == _DEV_ACTOR_ID:
-            # users 해소보다 먼저 — dev 로그인은 이메일과 무관하게 …010 을 쓰고
-            # 그 ID 는 시드 "System Admin" 행으로도 풀린다. user 로 분류하면
-            # 모든 dev 작업이 개인 작업처럼 보인다(_DEV_ACTOR_ID 주석).
+        resolved = user_map.get(r.actor_user_id)
+
+        if r.actor_user_id == _DEV_ACTOR_ID and (
+            resolved is None or resolved[2] == _BOOTSTRAP_SSO_SUBJECT
+        ):
+            # 미승계 bootstrap 행(placeholder sso) — …010 이벤트는 dev 로그인
+            # 세션. placeholder 이메일/이름은 실제 사람이 아니라 표시하지 않는다.
+            # 승계됐으면 아래 user 분기로 떨어져 실제 관리자로 표시한다.
             actor_kind: str = "dev"
+            resolved = None
         elif r.actor_user_id == _SERVICE_TOKEN_ACTOR_ID or sid_raw:
             # svc 토큰 호출은 항상 …011 행위자 + changes._service_token_id 조합.
             # 실사용자 ID + sid 조합은 현재 auth 구조에서 생기지 않는다 — 생기면
             # 토큰 표시가 이메일을 덮는다(의도된 표기).
             actor_kind = "service_token"
-        elif r.actor_user_id in user_map:
+        elif resolved is not None:
             actor_kind = "user"
         else:
             actor_kind = "unknown"
 
-        email, display_name = user_map.get(r.actor_user_id, (None, None))
+        email, display_name = resolved[:2] if resolved else (None, None)
         token_ref = None
         if sid_raw:
             try:
