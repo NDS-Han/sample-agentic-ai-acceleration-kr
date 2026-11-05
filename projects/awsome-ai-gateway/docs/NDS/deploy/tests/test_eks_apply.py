@@ -103,6 +103,26 @@ def test_mock_notification_skips_worker_irsa(monkeypatch):
     assert not any("notificationWorker" in a for a in args)
 
 
+def test_body_logging_wires_admin_api_bucket_env(monkeypatch):
+    """본문 뷰어 — bucket output 은 gateway-proxy(쓰기)와 admin-api(읽기)
+    **양쪽** env 로 간다. admin 쪽이 빠지면 뷰어가 503 으로 죽는다."""
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    outs = {"body_log_firehose_stream": "s", "body_log_bucket": "bkt"}
+    args = eks_apply.dynamic_set_args(cfg, outs, "ap-northeast-2")
+    joined = " ".join(args)
+    assert "gatewayProxy.env.BODY_LOG_S3_BUCKET=bkt" in joined
+    assert "adminApi.env.BODY_LOG_S3_BUCKET=bkt" in joined
+
+
+def test_body_logging_off_no_bucket_env(monkeypatch):
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    args = eks_apply.dynamic_set_args(
+        _cfg(), {"body_log_bucket": "bkt"}, "ap-northeast-2")
+    assert not any("BODY_LOG_S3_BUCKET" in a for a in args)
+
+
 def test_dry_run_flag_server_for_helm_313(monkeypatch):
     monkeypatch.setattr(eks_apply, "_helm_version", lambda: (3, 14))
     assert eks_apply._dry_run_flag() == "--dry-run=server"

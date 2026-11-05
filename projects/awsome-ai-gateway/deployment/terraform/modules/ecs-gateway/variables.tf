@@ -437,6 +437,12 @@ variable "body_log_bucket_arn" {
   default = ""
 }
 
+variable "body_log_kms_key_arn" {
+  description = "본문 로깅 버킷의 SSE-KMS 키 ARN — SSE-S3/비활성이면 빈 문자열. admin-api task 의 GetObject 에 kms:Decrypt 도 함께 필요하다."
+  type        = string
+  default     = ""
+}
+
 variable "agentcore_gateway_url" {
   description = "Web Search AgentCore Gateway URL (us-east-1 전용 — 구조적 리전 제약)"
   type        = string

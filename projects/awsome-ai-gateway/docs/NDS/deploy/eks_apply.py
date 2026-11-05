@@ -168,7 +168,10 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
                      f"gatewayProxy.env.FIREHOSE_STREAM_NAME={outs['body_log_firehose_stream']}"]
         if outs.get("body_log_bucket"):
             args += ["--set",
-                     f"gatewayProxy.env.BODY_LOG_S3_BUCKET={outs['body_log_bucket']}"]
+                     f"gatewayProxy.env.BODY_LOG_S3_BUCKET={outs['body_log_bucket']}",
+                     # 본문 뷰어 — 읽기는 admin-api 가 수행하므로 버킷 이름을 같이 준다
+                     "--set",
+                     f"adminApi.env.BODY_LOG_S3_BUCKET={outs['body_log_bucket']}"]
     return args
 
 

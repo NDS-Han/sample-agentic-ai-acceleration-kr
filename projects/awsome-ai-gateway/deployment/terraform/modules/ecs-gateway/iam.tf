@@ -230,6 +230,47 @@ data "aws_iam_policy_document" "admin_api" {
       resources = ["arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.litellm_pricing_lambda}"]
     }
   }
+
+  # ⚠️ 명시적 보안 예외 — 본문 버킷은 gateway-proxy 측에서 write-only 원칙인데,
+  # 본문 뷰어는 admin-api 가 읽어줘야 하므로 **이 task role 에만** 읽기를 연다
+  # (irsa 모듈의 BodyLogObjectRead/BodyLogBucketList 와 동일한 이식). 열람은
+  # VIEW_BODY_LOG 감사 행으로 기록된다.
+  dynamic "statement" {
+    for_each = var.body_log_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogObjectRead"
+      effect    = "Allow"
+      actions   = ["s3:GetObject"]
+      resources = ["${var.body_log_bucket_arn}/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.body_log_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogBucketList"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = [var.body_log_bucket_arn]
+    }
+  }
+
+  # 버킷이 SSE-KMS 면 GetObject 에 kms:Decrypt 도 필요하다 — 없으면 조회가 전부
+  # AccessDenied 로 실패한다. S3 경유로 좁힌다(irsa 모듈과 동일).
+  dynamic "statement" {
+    for_each = var.body_log_kms_key_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogKmsDecrypt"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [var.body_log_kms_key_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${var.aws_region}.amazonaws.com"]
+      }
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {

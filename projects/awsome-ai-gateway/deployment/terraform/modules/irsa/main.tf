@@ -283,6 +283,48 @@ data "aws_iam_policy_document" "admin_api" {
       resources = ["*"]
     }
   }
+
+  # ⚠️ 명시적 보안 예외 — 본문 버킷은 gateway-proxy 측에서 write-only 로 두는
+  # 원칙(읽기 권한 = 누적 프롬프트 이력 유출 경로)이 있지만, 본문 뷰어는
+  # admin-api 가 관리자 대신 읽어줘야 하므로 **이 role 에만** 읽기를 연다.
+  # 열람 행위는 API 가 VIEW_BODY_LOG 감사 행으로 기록한다. 대상은 body-log
+  # 버킷 하나뿐 — 다른 버킷/전체 버킷 열람 권한은 없다.
+  dynamic "statement" {
+    for_each = var.body_log_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogObjectRead"
+      effect    = "Allow"
+      actions   = ["s3:GetObject"]
+      resources = ["${var.body_log_bucket_arn}/*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.body_log_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogBucketList"
+      effect    = "Allow"
+      actions   = ["s3:ListBucket"]
+      resources = [var.body_log_bucket_arn]
+    }
+  }
+
+  # 버킷이 SSE-KMS(prod 권장 구성)면 GetObject 성공에 kms:Decrypt 도 필요하다 —
+  # 없으면 admin-api 의 조회가 전부 AccessDenied 로 실패한다. S3 경유로 좁힌다.
+  dynamic "statement" {
+    for_each = var.body_log_kms_key_arn != "" ? [1] : []
+    content {
+      sid       = "BodyLogKmsDecrypt"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [var.body_log_kms_key_arn]
+      condition {
+        test     = "StringEquals"
+        variable = "kms:ViaService"
+        values   = ["s3.${data.aws_region.current.name}.amazonaws.com"]
+      }
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {

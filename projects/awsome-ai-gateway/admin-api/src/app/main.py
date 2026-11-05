@@ -672,7 +672,7 @@ def create_app() -> FastAPI:
     register_exception_handlers(app)
 
     # ── Register routers ──
-    from app.routers import analytics, apps, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users
+    from app.routers import analytics, apps, body_logs, budgets, cli, dashboard, internal, keys, models, monitoring, my, productivity, rate_limits, routing, service_accounts, service_tokens, settings as settings_router, users
 
     app.include_router(keys.router)
     app.include_router(budgets.router)
@@ -702,6 +702,7 @@ def create_app() -> FastAPI:
     # 404 와 미설정을 구분할 수 없다.
     from app.routers import audit_reconcile
     app.include_router(audit_reconcile.router)
+    app.include_router(body_logs.router)
 
     # ── 커밋 시점 교정 (반드시 모든 include_router 뒤) ──
     # 의존성 종료 블록의 커밋은 응답이 나간 **뒤에** 실행되므로, 커밋이 실패해도

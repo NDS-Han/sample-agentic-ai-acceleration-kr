@@ -25,3 +25,8 @@ output "bucket_arn" {
   description = "S3 버킷 ARN — irsa 모듈의 s3:PutObject fallback 정책용 (비활성 시 \"\")"
   value       = try(aws_s3_bucket.body_logs[0].arn, "")
 }
+
+output "kms_key_arn" {
+  description = "버킷 SSE-KMS 키 ARN — 본문 읽기 주체(admin-api)의 kms:Decrypt 정책용. SSE-S3/비활성 시 \"\""
+  value       = var.kms_key_arn
+}

@@ -273,6 +273,11 @@ class Settings(BaseSettings):
     # `missing` 으로 세면 전부 거짓양성이다(예: BEDROCK native 가 cross-account
     # ap-northeast-2 로 실행되는데 group 은 us-east-2). 기본값은 이 자산이 실제로
     # 프로비저닝한 runtime plane(us-east-2)만(R25-S4).
+    # ── Gateway body logging (S3 본문 뷰어) ──
+    # Firehose → S3 본문 버킷. 비어 있으면 본문 뷰어 엔드포인트가 503(미설정).
+    # NDS 경로는 terraform output 에서 자동 주입하고, install-eks.sh/values 직접
+    # 배포는 차트 values 의 adminApi.env.BODY_LOG_S3_BUCKET 에 수동으로 적는다.
+    BODY_LOG_S3_BUCKET: str = ""
     BEDROCK_INVOCATION_LOG_PROVIDERS: str = "BEDROCK_RUNTIME_OPENAI"
 
     # ── Server ──

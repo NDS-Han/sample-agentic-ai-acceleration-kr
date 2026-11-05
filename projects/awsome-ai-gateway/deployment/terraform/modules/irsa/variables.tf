@@ -134,6 +134,19 @@ variable "body_log_bucket_arn" {
   default     = ""
 }
 
+variable "body_log_kms_key_arn" {
+  description = <<-EOT
+    본문 로깅 버킷의 SSE-KMS 키 ARN (modules/body-logging 의 `kms_key_arn` output).
+    SSE-S3(AES256)이면 빈 문자열.
+
+    admin-api 가 본문 뷰어용으로 s3:GetObject 를 호출할 때 KMS 버킷이면
+    kms:Decrypt 도 필요하다 — 없으면 prod(SSE-KMS)에서만 조회가 전부 실패한다.
+    빈 값이면 statement 를 렌더하지 않는다.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   type    = map(string)
   default = {}

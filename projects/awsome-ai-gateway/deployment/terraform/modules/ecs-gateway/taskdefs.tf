@@ -142,6 +142,8 @@ locals {
       var.email_sender_type == "internal_api" ? { EMAIL_API_URL = var.email_api_url } : {},
       # ops/NDS-01 — 비면 litellm 소스는 503/graceful-off (폴백 직접호출 없음)
       var.litellm_pricing_lambda != "" ? { LITELLM_PRICING_LAMBDA = var.litellm_pricing_lambda } : {},
+      # 본문 뷰어용 버킷 이름 — 읽기는 admin-api 가 하므로 여기에도 주입한다
+      var.body_log_bucket_arn != "" ? { BODY_LOG_S3_BUCKET = local.body_log_bucket_name } : {},
     )
 
     admin-ui = merge(local.common_env, {

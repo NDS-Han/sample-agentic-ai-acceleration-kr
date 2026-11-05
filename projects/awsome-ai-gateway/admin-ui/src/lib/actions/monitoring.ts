@@ -41,6 +41,7 @@ export type MonitoringEventTypeFilter =
   | 'abnormal';
 
 export interface MonitoringEvent {
+  request_id: string;
   timestamp: string;
   user_id: string;
   model_alias: string;

@@ -129,6 +129,7 @@ async def monitoring_events(
 
     stmt = (
         select(
+            UsageLog.request_id,
             UsageLog.requested_at,
             UsageLog.user_id,
             UsageLog.model_alias,
@@ -180,6 +181,7 @@ async def monitoring_events(
 
         ttft_str = f"{row.ttft_ms}ms" if row.ttft_ms is not None else "-"
         events.append({
+            "request_id": row.request_id,
             "timestamp": row.requested_at.isoformat(),
             "user_id": str(row.user_id),
             "model_alias": row.model_alias,

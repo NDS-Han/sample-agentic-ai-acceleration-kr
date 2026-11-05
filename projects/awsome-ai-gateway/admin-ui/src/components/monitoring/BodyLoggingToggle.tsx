@@ -2,6 +2,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useTranslations } from 'next-intl';
+import Link from 'next/link';
 import { useState, useTransition } from 'react';
 
 import { Badge } from '@/components/common/Badge';
@@ -86,6 +87,16 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
         {enabled === true && (
           // 켜져 있는 동안 상시 보이는 경고. 배지만으로는 "무엇이" 수집되는지 알 수 없다.
           <p className="text-xs text-destructive">{t('activeWarning')}</p>
+        )}
+        {enabled === true && (
+          // 본문 로그 뷰어 진입점 — 수집이 켜져 있을 때만 노출한다(운영 결정:
+          // 수집을 끄면 과거 수집분의 열람 경로도 같이 닫는다).
+          <Link
+            href="/monitoring/body-logs"
+            className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
+          >
+            {t('viewBodyLogs')}
+          </Link>
         )}
       </div>
 

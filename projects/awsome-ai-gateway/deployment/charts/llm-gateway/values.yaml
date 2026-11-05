@@ -557,7 +557,8 @@ gatewayProxy:
     # 값은 terraform output body_log_firehose_stream / body_log_bucket 에서 가져온다
     # (module "body_logging", 그쪽 기본값도 enabled=false 다). install-eks.sh 는 이 두
     # 값을 자동 주입하지 않는다 — 마스킹되지 않은 본문을 저장하는 스위치라 운영자가
-    # 명시적으로 적어야 한다.
+    # 명시적으로 적어야 한다. 본문 뷰어를 쓰려면 adminApi.env.BODY_LOG_S3_BUCKET 에도
+    # 같은 버킷을 적어야 한다(읽기는 admin-api 가 한다).
     FIREHOSE_STREAM_NAME: ""
     # Firehose 레코드 상한(1MB)을 넘는 본문의 S3 직행 fallback 버킷. 비어 있으면 상한
     # 초과 레코드는 버려진다(요청은 영향 없음). 위 스트림과 같은 버킷이어야 조회 경로가
@@ -679,6 +680,12 @@ adminApi:
     # BEDROCK_INVOCATION_LOG_GROUP: ""
     # BEDROCK_INVOCATION_LOG_REGION: "us-east-2"
     # BEDROCK_INVOCATION_LOG_BODIES_ENABLED: "false"
+    # ── 본문 로그 뷰어 (기본 OFF) ──
+    # gatewayProxy.env.BODY_LOG_S3_BUCKET 와 **같은 버킷 이름**을 줘야 본문 뷰어
+    # (/monitoring/body-logs, GET /admin/body-logs/{id})가 동작한다. 비어 있으면
+    # 뷰어 API 는 503. install-eks.sh 경로는 두 곳 모두 수동 주입이 필요하고,
+    # NDS(./deploy) 경로는 terraform output body_log_bucket 에서 자동 주입된다.
+    BODY_LOG_S3_BUCKET: ""
     # REPORTING_TIMEZONE 은 공통 ConfigMap(global.reportingTimezone) 에서 주입됨.
     # 서비스별로 다르게 두지 말 것 — 여기 개별 override 하지 않는다.
 

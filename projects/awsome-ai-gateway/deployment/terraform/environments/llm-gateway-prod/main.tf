@@ -76,6 +76,8 @@ module "irsa" {
   # statement 가 렌더되지 않는다.
   body_log_firehose_arn = module.body_logging.firehose_stream_arn
   body_log_bucket_arn   = module.body_logging.bucket_arn
+  # 본문 뷰어 읽기(admin-api)가 SSE-KMS 버킷에서 AccessDenied 나지 않도록 키를 함께 넘긴다.
+  body_log_kms_key_arn  = module.body_logging.kms_key_arn
 
   # notification-worker SES 발신 (provider=ses 와 짝, R24-S7)
   enable_notification_ses = var.enable_notification_ses

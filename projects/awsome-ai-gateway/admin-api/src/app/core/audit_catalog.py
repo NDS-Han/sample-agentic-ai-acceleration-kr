@@ -85,6 +85,7 @@ ACTION_GROUPS: dict[str, tuple[str, ...]] = {
     "system": (
         "SET_BODY_LOGGING",
         "VIEW_INVOCATION_LOG_BODY",
+        "VIEW_BODY_LOG",
     ),
 }
 
