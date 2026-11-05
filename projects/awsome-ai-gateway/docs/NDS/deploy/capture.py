@@ -21,6 +21,7 @@ import yaml
 
 from .render.common import parse_env_file
 from .render.compose import OBSERVABILITY, WEB_PORTS
+from .schema import _HOSTNAME_RE
 
 
 class CaptureError(Exception):
@@ -484,6 +485,39 @@ def _val(d: dict, *path, default=""):
     return cur if cur is not None else default
 
 
+_HOST_KEY_MAP = {"gateway": "gateway", "admin_ui": "adminUi",
+                 "admin_api": "adminApi"}
+
+
+def _capture_hosts(domain: dict, ing: dict, notes: list[str]) -> None:
+    """values ingress 호스트를 domain.hosts 로 채운다 — 파생 규칙
+    (gateway./admin./admin-api.{name})과 다르게 쓰는 배포 채택 시 URL 보존.
+    스키마와 같은 hostname 형식을 통과한 값만 넣는다."""
+    base = domain.get("name", "")
+    if not base:
+        notes.append("ingress host 에서 도메인 베이스를 못 뽑았습니다 — "
+                     "domain.name 을 확인하고 hosts 를 수동 채우세요")
+        return
+    hosts = {k: str(_val(ing, chart_key, "host"))
+             for k, chart_key in _HOST_KEY_MAP.items()}
+    derived = {"gateway": f"gateway.{base}", "admin_ui": f"admin.{base}",
+               "admin_api": f"admin-api.{base}"}
+    overrides = {k: h for k, h in hosts.items()
+                 if h and h != derived[k] and _HOSTNAME_RE.match(h)}
+    if not overrides:
+        notes.append("ingress host 가 파생 규칙(gateway./admin./admin-api."
+                     f"{base})과 일치합니다 — domain.hosts 생략")
+        return
+    domain["hosts"] = overrides
+    notes.append(f"ingress hosts: gateway={hosts['gateway']} "
+                 f"admin={hosts['admin_ui']} admin-api={hosts['admin_api']} — "
+                 "파생 규칙과 달라 domain.hosts 로 캡처했습니다")
+    skipped = {k: h for k, h in hosts.items()
+               if h and h != derived[k] and k not in overrides}
+    if skipped:
+        notes.append(f"⚠ hostname 형식이 아닌 호스트는 제외했습니다: {skipped}")
+
+
 def _domain_base(host: str, env: str) -> str:
     """gateway.<base> / gateway-<env>.<base> 형태에서 베이스 도메인만 추출."""
     for prefix in ("gateway.", f"gateway-{env}.", "gateway-"):
@@ -519,12 +553,11 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     cert_arn = ann.get("alb.ingress.kubernetes.io/certificate-arn", "")
     if cert_arn or str(_val(ing, "gateway", "tls", "enabled")) == "True":
         domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
-        notes.append(f"ingress hosts: gateway={gw_host} admin={_val(ing,'adminUi','host')} "
-                     f"admin-api={_val(ing,'adminApi','host')} — 우리 네이밍 규칙"
-                     f"(gateway./admin./admin-api.{{domain}})과 다르면 직접 맞추세요")
+        _capture_hosts(domain, ing, notes)
         notes.append("zone_id 는 values 에 없어 비워둡니다 — Route53 에서 확인해 채우세요")
     elif gw_host:
         domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
+        _capture_hosts(domain, ing, notes)
         notes.append("ingress 에 인증서가 없어 HTTP 일 수 있습니다 — domain.mode 확인 필요")
     else:
         domain = {"mode": "none"}
@@ -643,10 +676,16 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "bi_insight": bool(aenv.get("AGENTCORE_RUNTIME_ARN")),
         "pricing_lambda": bool(aenv.get("LITELLM_PRICING_LAMBDA")),
         "web_search": str(genv.get("WEB_SEARCH_ENABLED")) == "true",
-        "body_logging": bool(genv.get("FIREHOSE_STREAM_NAME")),
         "observability": otel_mode not in ("", "disabled", "none"),
         "dev_login": False,
     }
+    # body_logging 은 eks managed overlay 가 "켜기"만 소유하므로 false 를
+    # 박지 않는다 — 박으면 validate 마다 수동 비활성화 경고가 난다.
+    if genv.get("FIREHOSE_STREAM_NAME"):
+        features["body_logging"] = True
+    else:
+        notes.append("body_logging 미감지(FIREHOSE_STREAM_NAME 없음) — "
+                     "키를 생략했습니다. 켜려면 features.body_logging: true")
 
     # dev login — 라이브에 DEV_LOGIN_ENABLED=true 가 켜져 있으면 보존해야 한다.
     # 안 잡으면 채택 첫 apply 에 oidc 설정 경로가 adminUi 를 "false" 로 되돌려

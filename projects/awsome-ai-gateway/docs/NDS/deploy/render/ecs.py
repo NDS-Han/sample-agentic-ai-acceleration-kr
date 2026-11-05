@@ -140,8 +140,9 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         vars_["email_sender_address"] = n.internal_api_from or "noreply@llm-gateway.local"
         vars_["email_api_url"] = n.internal_api_url
 
-    # ── 기능 플래그
-    vars_["enable_body_logging"] = cfg.features.body_logging
+    # ── 기능 플래그 — ecs 는 이 파일이 overlay 가 아닌 실제 tfvars 라
+    #    구체값이 필요하다 (미선언 None 은 off 와 같다)
+    vars_["enable_body_logging"] = bool(cfg.features.body_logging)
     if cfg.features.pricing_lambda:
         # 함수 자체는 ecs_apply 가 boto3 로 보장 — 여기선 task env + invoke
         # 권한을 여는 이름만 모듈에 넘긴다 (ops/NDS-01 명명 규칙과 동일)

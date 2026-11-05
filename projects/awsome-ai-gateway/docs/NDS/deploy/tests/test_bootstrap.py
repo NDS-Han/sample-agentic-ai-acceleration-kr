@@ -149,11 +149,18 @@ def test_eks_overlay_emits_infra(tmp_path):
     assert "bedrock_allowed_model_arns" in t
 
 
-def test_eks_overlay_empty_infra_keeps_flags_only(tmp_path):
+def test_eks_overlay_emits_feature_flags_only_when_on(tmp_path):
+    """eks overlay 는 기능 토글을 "켤 때만" 쓴다 — 미선언이면 키 자체가 없어
+    auto-load 되는 env tfvars(사람 소유) 값이 유지된다 (false 를 쓰면
+    기존 인프라 destroy 계획이 된다)."""
     from deploy.render import eks as eks_render
     t = eks_render.render_tfvars(_cfg(), env_dir=tmp_path)
     assert "azs" not in t and "cognito" not in t and "bedrock" not in t
-    assert "enable_body_logging" in t
+    assert "enable_" not in t
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "body_logging": True})
+    t = eks_render.render_tfvars(cfg, env_dir=tmp_path)
+    assert "enable_body_logging = true" in t
 
 
 def test_ecs_tfvars_infra_and_bedrock_override():

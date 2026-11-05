@@ -67,6 +67,10 @@ class DomainConfig:
     mode: str = "none"
     name: str = ""
     zone_id: str = ""
+    # 실제 호스트 오버라이드 (gateway/admin_ui/admin_api) — 비우면
+    # gateway./admin./admin-api.{name} 으로 파생한다. 기존 배포 채택(capture)처럼
+    # gateway-dev.* 같은 다른 규칙을 쓸 때 URL 보존용.
+    hosts: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -88,7 +92,11 @@ class FeaturesConfig:
     bi_insight: bool = False
     pricing_lambda: bool = False
     web_search: bool = False
-    body_logging: bool = False
+    # None = yaml 미선언 → managed overlay 가 enable_body_logging 키를 쓰지 않아
+    # env tfvars(사람 소유) 값이 유지된다. 명시 false 도 비활성화를 apply 하지
+    # 않는다 — overlay 가 false 를 쓰면 기존 Firehose/S3 가 destroy 계획에
+    # 들어가므로, 비활성화는 env terraform 수동 절차다 (warnings 도 참고).
+    body_logging: bool | None = None
     observability: bool = False
     # oidc 와 공존하는 개발자 로그인(DEV_LOGIN_ENABLED) — false 이면 oidc 설정 시
     # render 가 adminUi DEV_LOGIN_ENABLED 를 강제로 끈다(기존 동작). true 이면
@@ -165,6 +173,9 @@ class InfraConfig:
     cognito_groups: list[str] = field(default_factory=list)
     # 비우면 backend 기본: eks=variables.tf 최신 목록, ecs=models_profile 매핑.
     bedrock_allowed_model_arns: list[str] = field(default_factory=list)
+    # eks 전용 — in-account Bedrock Mantle 호출 허용 리전. 비우면 env
+    # variables.tf 기본값. 선언하면 managed overlay 가 module.irsa 정책을 소유.
+    mantle_regions: list[str] = field(default_factory=list)
     db: InfraDbConfig = field(default_factory=InfraDbConfig)       # ecs 전용
     cache: InfraCacheConfig = field(default_factory=InfraCacheConfig)  # ecs 전용
 
@@ -227,6 +238,29 @@ class GatewayConfig:
                 f"size_tier={self.deploy.size_tier} 는 단일 노드/백업-기반 구성입니다 — "
                 "HA·자동 장애조치가 없습니다(복원 = 스냅샷/백업)."
             )
+        if self.domain.hosts and not self.domain.name:
+            w.append("domain.hosts 를 선언했지만 domain.name 이 없어 render 가 "
+                     "무시합니다 — 파생 네이밍의 앵커가 되는 name 을 함께 채우세요.")
+        if self.domain.name and self.domain.hosts:
+            # 일부만 선언하면 나머지는 조용히 파생값으로 바뀐다 — admin 파생값이
+            # env 의 cognito_callback_urls 와 어긋나 SSO 가 깨질 수 있으니 명시.
+            derived = {"gateway": "gateway", "admin_ui": "admin",
+                       "admin_api": "admin-api"}
+            missing_hosts = [f"{k}({p}.{self.domain.name})"
+                             for k, p in derived.items()
+                             if k not in self.domain.hosts]
+            if missing_hosts:
+                w.append("domain.hosts 가 일부만 선언됐습니다 — 나머지는 파생 "
+                         f"호스트를 씁니다: {', '.join(missing_hosts)}. 의도가 "
+                         "아니면 세 키를 모두 명시하십시오.")
+            # 선언 호스트가 domain.name 범위를 벗어나면 route53-acm 경로의
+            # 와일드카드 인증서(*.{name})·레코드가 커버하지 못한다.
+            outside = [f"{k}={h}" for k, h in self.domain.hosts.items()
+                       if not h.endswith(f".{self.domain.name}")]
+            if outside and self.domain.mode == "route53-acm":
+                w.append("domain.hosts 가 domain.name 범위 밖입니다 — "
+                         f"{', '.join(outside)}. route53-acm 경로의 인증서·"
+                         "DNS 레코드가 이 호스트들을 커버하는지 확인하십시오.")
         if self.domain.mode == "none":
             w.append(
                 "domain.mode=none 이면 TLS 없이 HTTP 로 시작합니다 — "
@@ -242,9 +276,22 @@ class GatewayConfig:
             )
         if self.deploy.target == "compose" and (
                 self.infra.azs or self.infra.cognito_groups
-                or self.infra.bedrock_allowed_model_arns):
+                or self.infra.bedrock_allowed_model_arns
+                or self.infra.mantle_regions):
             w.append("infra.* 는 ecs/eks 신규 설치용입니다 — "
                      "deploy.target=compose 에서는 무시됩니다.")
+        if self.deploy.target == "ecs" and self.infra.mantle_regions:
+            w.append("infra.mantle_regions 는 eks 전용입니다 — "
+                     "deploy.target=ecs 에서는 무시됩니다.")
+        if self.deploy.target != "eks" and self.domain.hosts:
+            w.append("domain.hosts 는 eks render 전용입니다 — "
+                     f"deploy.target={self.deploy.target} 에서는 무시됩니다.")
+        # managed overlay 가 키를 발산하는 건 eks 뿐 — 그 경로에서만 "끄기는
+        # 수동" 안내가 의미가 있다 (ecs 는 tfvars 에 false 로 실제 적용된다).
+        if self.features.body_logging is False and self.deploy.target == "eks":
+            w.append("features.body_logging=false — managed overlay 는 비활성화를 "
+                     "적용하지 않습니다(기존 인프라 destroy 방지). env terraform "
+                     "으로 수동 비활성화하십시오.")
         if self.network.admin_internal:
             if self.deploy.target == "eks" and self.network.mode == "private":
                 w.append(
@@ -551,6 +598,34 @@ def _check_unknown(node: dict, allowed: frozenset, path: str, errors: list[str])
             errors.append(f"{path}.{k} 는 알 수 없는 키입니다 (허용: {sorted(allowed)})")
 
 
+_HOSTNAME_RE = re.compile(
+    r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
+    r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
+_REGION_RE = re.compile(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$")
+_BEDROCK_ARN_RE = re.compile(r"^arn:aws[a-z-]*:bedrock:.+")
+
+
+def _str_items(v: Any, path: str, errors: list[str],
+               item_re: re.Pattern | None = None,
+               item_desc: str = "문자열") -> list[str]:
+    """str 리스트 필드 — 스칼라 str 은 1-항목 리스트로 감싼다. list 가 아니거나
+    항목이 str/형식에 맞지 않으면 errors 적재 후 제외한다 (dict 순회가 키 목록을
+    만들거나 None 이 "None" 이 되는 침묵 오용 방지)."""
+    if v is None:
+        return []
+    items = [v] if isinstance(v, str) else v
+    if not isinstance(items, list):
+        errors.append(f"{path} 는 list 여야 합니다: {type(v).__name__}")
+        return []
+    out: list[str] = []
+    for x in items:
+        if not isinstance(x, str) or (item_re is not None and not item_re.match(x)):
+            errors.append(f"{path} 항목은 {item_desc} 이어야 합니다: {x!r}")
+        else:
+            out.append(x)
+    return out
+
+
 _TOP_LEVEL_KEYS = frozenset((
     "version", "env", "aws", "deploy", "network", "domain",
     "features", "images", "clients", "oidc", "infra",
@@ -559,7 +634,8 @@ _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
 _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
                           "tfstate_table", "release", "namespace", "tf_env_dir"))
 _NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
-_DOMAIN_KEYS = frozenset(("mode", "name", "zone_id"))
+_DOMAIN_KEYS = frozenset(("mode", "name", "zone_id", "hosts"))
+_DOMAIN_HOST_KEYS = frozenset(("gateway", "admin_ui", "admin_api"))
 _FEATURE_KEYS = frozenset(("notifications", "bi_insight", "pricing_lambda",
                            "web_search", "body_logging", "observability",
                            "dev_login"))
@@ -573,7 +649,8 @@ _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
                         "vk_ttl_hours"))
 _INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
-                        "cognito_groups", "bedrock_allowed_model_arns"))
+                        "cognito_groups", "bedrock_allowed_model_arns",
+                        "mantle_regions"))
 
 
 def from_dict(raw: dict) -> GatewayConfig:
@@ -600,6 +677,16 @@ def from_dict(raw: dict) -> GatewayConfig:
     _check_unknown(deploy, _DEPLOY_KEYS, "deploy", errors)
     _check_unknown(network, _NETWORK_KEYS, "network", errors)
     _check_unknown(domain, _DOMAIN_KEYS, "domain", errors)
+    _domain_hosts = domain.get("hosts") if isinstance(domain.get("hosts"), dict) else {}
+    if domain.get("hosts") is not None and not isinstance(domain.get("hosts"), dict):
+        errors.append("domain.hosts 는 mapping 이어야 합니다")
+    _check_unknown(_domain_hosts, _DOMAIN_HOST_KEYS, "domain.hosts", errors)
+    for _hk, _hv in _domain_hosts.items():
+        # null/str(None) 같은 값은 "None" 리터럴 호스트로 렌더돼 ingress 를
+        # 깨뜨리므로 형식 검증 — 소문자 RFC1123 hostname, 스킴/경로 불가.
+        if not isinstance(_hv, str) or not _HOSTNAME_RE.match(_hv):
+            errors.append(
+                f"domain.hosts.{_hk} 는 소문자 hostname 이어야 합니다: {_hv!r}")
     _check_unknown(features, _FEATURE_KEYS, "features", errors)
     _check_unknown(notif, _NOTIF_KEYS, "features.notifications", errors)
     _check_unknown(images, _IMAGE_KEYS, "images", errors)
@@ -651,6 +738,7 @@ def from_dict(raw: dict) -> GatewayConfig:
             mode=str(domain.get("mode", "none")),
             name=str(domain.get("name", "")),
             zone_id=str(domain.get("zone_id", "")),
+            hosts={str(k): str(v) for k, v in _domain_hosts.items()},
         ),
         features=FeaturesConfig(
             notifications=NotificationConfig(
@@ -671,8 +759,10 @@ def from_dict(raw: dict) -> GatewayConfig:
                                       "features.pricing_lambda"),
             web_search=_safe_bool(features.get("web_search", False), errors,
                                   "features.web_search"),
-            body_logging=_safe_bool(features.get("body_logging", False), errors,
-                                    "features.body_logging"),
+            # None/미선언 구분이 managed overlay 소유 경계라 삼치 유지
+            body_logging=(_safe_bool(features["body_logging"], errors,
+                                     "features.body_logging")
+                          if "body_logging" in features else None),
             observability=_safe_bool(features.get("observability", False), errors,
                                      "features.observability"),
             dev_login=_safe_bool(features.get("dev_login", False), errors,
@@ -696,10 +786,13 @@ def from_dict(raw: dict) -> GatewayConfig:
             cognito_groups=[str(g) for g in
                 (([infra["cognito_groups"]] if isinstance(infra.get("cognito_groups"), str)
                   else infra.get("cognito_groups")) or [])],
-            bedrock_allowed_model_arns=[str(a) for a in
-                (([infra["bedrock_allowed_model_arns"]]
-                  if isinstance(infra.get("bedrock_allowed_model_arns"), str)
-                  else infra.get("bedrock_allowed_model_arns")) or [])],
+            bedrock_allowed_model_arns=_str_items(
+                infra.get("bedrock_allowed_model_arns"),
+                "infra.bedrock_allowed_model_arns", errors,
+                item_re=_BEDROCK_ARN_RE, item_desc="bedrock ARN"),
+            mantle_regions=_str_items(
+                infra.get("mantle_regions"), "infra.mantle_regions", errors,
+                item_re=_REGION_RE, item_desc="리전 ID"),
             db=InfraDbConfig(
                 mode=str(_infra_db.get("mode", "")),
                 min_acu=_safe_float_or_none(_infra_db.get("min_acu"), errors,

@@ -34,3 +34,15 @@ def test_expected_tag_migration_not_a_deployment():
     # images.tags.migration 핀이 서비스 기대값으로 새어나가면 안 된다
     cfg = _cfg({"tag": "abc", "tags": {"migration": "mig-tag"}})
     assert doctor._expected_tag(cfg, "gateway-proxy") == "abc"
+
+
+def test_tf_drift_plan_uses_managed_overlay_when_present(tmp_path):
+    # overlay 가 있으면 apply 와 같은 -var-file 을 붙인다 — 없으면 env tfvars 만.
+    (tmp_path / "eks").mkdir()
+    argv = doctor._tf_drift_plan_argv(tmp_path)
+    assert not any(a.startswith("-var-file=") for a in argv)
+    (tmp_path / "eks" / "terraform.tfvars").write_text("x = 1\n")
+    argv = doctor._tf_drift_plan_argv(tmp_path)
+    assert any(a.endswith("eks/terraform.tfvars") for a in argv
+               if a.startswith("-var-file="))
+    assert "-no-color" in argv

@@ -123,3 +123,55 @@ def test_dev_login_default_off_with_oidc(tmp_path):
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
     assert "DEV_LOGIN_ENABLED" not in v.get("adminApi", {}).get("env", {})
+
+
+def test_domain_hosts_override_beats_derived(tmp_path):
+    """domain.hosts 가 있으면 gateway.{name} 파생 대신 선언 호스트를 쓴다 —
+    기존 배포(gateway-dev.* 규칙) 채택 시 URL 보존이 목적이다."""
+    doc = dict(BASE, domain={
+        "mode": "route53-acm", "name": "gw.example.com",
+        "hosts": {"gateway": "gateway-dev.gw.example.com",
+                  "admin_ui": "admin-dev.gw.example.com",
+                  "admin_api": "admin-api-dev.gw.example.com"}})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["ingress"]["gateway"]["host"] == "gateway-dev.gw.example.com"
+    assert v["ingress"]["adminUi"]["host"] == "admin-dev.gw.example.com"
+    assert v["ingress"]["adminApi"]["host"] == "admin-api-dev.gw.example.com"
+    # NEXTAUTH_URL 도 선언 호스트로 — admin.{name} 파생이면 Cognito 콜백이 깨진다
+    assert v["adminUi"]["nextauthUrl"] == "https://admin-dev.gw.example.com"
+
+
+def test_managed_tfvars_carries_model_and_mantle_keys(tmp_path):
+    doc = dict(BASE, infra={
+        "bedrock_allowed_model_arns": [
+            "arn:aws:bedrock:*::foundation-model/openai.*"],
+        "mantle_regions": ["ap-northeast-1", "us-east-1"]})
+    _, out, _ = _render(tmp_path, doc)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "foundation-model/openai.*" in tfvars
+    assert 'mantle_regions = ["ap-northeast-1", "us-east-1"]' in tfvars
+
+
+def test_managed_tfvars_only_emits_enable_keys_when_on(tmp_path):
+    """기능 토글은 "켜기"만 발산한다 — yaml 미선언/명시 false 이면 키 자체를
+    쓰지 않아 auto-load 되는 env tfvars(사람 소유)의 true 가 유지된다.
+    false 를 쓰면 기존 인프라 destroy 계획이 된다 (kiro R1)."""
+    # BASE: provider=ses → ses 키만, body_logging 미선언 → 키 없음
+    _, out, _ = _render(tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "enable_notification_ses = true" in tfvars
+    assert "enable_body_logging" not in tfvars
+    # 명시 false 도 쓰지 않는다
+    doc = dict(BASE, features={**BASE["features"], "body_logging": False})
+    _, out, _ = _render(tmp_path, doc)
+    assert "enable_body_logging" not in (out / "terraform.tfvars").read_text()
+    # 켜면 발산
+    doc = dict(BASE, features={**BASE["features"], "body_logging": True})
+    _, out, _ = _render(tmp_path, doc)
+    assert "enable_body_logging = true" in (out / "terraform.tfvars").read_text()
+    # provider != ses → ses 키 없음 (mock 은 명시/기본 구분 불가 — 켜기만 관리)
+    doc = dict(BASE, features={**BASE["features"],
+                               "notifications": {"provider": "mock"}})
+    _, out, _ = _render(tmp_path, doc)
+    assert "enable_notification_ses" not in (out / "terraform.tfvars").read_text()

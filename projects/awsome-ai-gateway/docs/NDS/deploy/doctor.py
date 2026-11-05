@@ -182,6 +182,17 @@ ECS_SERVICES = ("gateway-proxy", "admin-api", "admin-ui", "scheduler",
                 "cost-recorder-worker", "notification-worker")
 
 
+def _tf_drift_plan_argv(gen_dir: Path) -> list[str]:
+    """apply 와 동일하게 managed overlay(gen/<env>/eks/terraform.tfvars)를
+    -var-file 로 준다 — NDS 소유 키(enable_notification_ses 등)를 빠뜨리면
+    env tfvars 기본값으로 평가돼 선언된 모듈이 destroy 로 오진된다."""
+    argv = ["terraform", "plan", "-detailed-exitcode", "-input=false", "-no-color"]
+    var_file = gen_dir / "eks" / "terraform.tfvars"
+    if var_file.exists():
+        argv.append(f"-var-file={var_file}")
+    return argv
+
+
 def _tf_outputs(env_dir: Path) -> dict:
     r = _run(["terraform", "output", "-json"], cwd=env_dir, timeout=120)
     if r.returncode != 0:
@@ -564,11 +575,13 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         rep.add("WARN" if drifts else "OK", "drift",
                 "; ".join(drifts) if drifts else "관리 키가 release values 와 일치")
 
-    # 6. terraform plan drift — env_dir 이 있고 state 가 있으면
+    # 6. terraform plan drift — env_dir 이 있고 state 가 있으면.
+    #    apply 와 동일하게 managed overlay(gen terraform.tfvars)를 -var-file 로
+    #    준다 — NDS 소유 키(enable_notification_ses 등)를 빠뜨리면 선언이
+    #    destroy 로 오진된다.
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
     if env_dir and env_dir.exists():
-        r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false"],
-                 cwd=env_dir, timeout=300)
+        r = _run(_tf_drift_plan_argv(gen_dir), cwd=env_dir, timeout=300)
         if r.returncode == 0:
             rep.add("OK", "tf-drift", "terraform plan no-op")
         elif r.returncode == 2:

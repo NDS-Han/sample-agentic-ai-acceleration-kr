@@ -18,6 +18,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -323,14 +324,19 @@ def strip_es_owned_secrets(meta: dict, context: str = "") -> None:
 
 
 def _infra_targets(cfg: GatewayConfig) -> list[str]:
-    """gateway.yaml 이 소유하는 terraform 대상 — body_logging 모듈 + 그 IAM 배선.
+    """gateway.yaml 이 소유하는 terraform 대상 — 선언 키가 먹는 모듈로 좁힌다.
     ops 8-V 의 `terraform apply -target=module.body_logging -target=module.irsa`
-    와 같은 계약."""
+    와 같은 계약 — env 전체 apply 는 하지 않는다(클러스터·VPC 는 사람 소유)."""
     modules = set()
     if cfg.features.body_logging:
         modules |= {"module.body_logging", "module.irsa"}
     if cfg.features.notifications.provider == "ses":
         modules.add("module.irsa")  # enable_notification_ses → worker IRSA
+    if cfg.infra.bedrock_allowed_model_arns or cfg.infra.mantle_regions:
+        # managed overlay 소유 키가 IRSA 정책(bedrock/mantle statement)을 만든다.
+        # 같은 ARN 이 module.agentcore_runtime 입력에도 쓰이지만 그 모듈은
+        # web_search 프로비저닝 경로가 별도로 관리하므로 여기선 대상에 넣지 않는다.
+        modules.add("module.irsa")
     return sorted(f"-target={m}" for m in modules)
 
 
@@ -346,12 +352,131 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
     return missing
 
 
+def _managed_infra_plan(cfg: GatewayConfig, gen_dir: Path,
+                        env_dir: Path) -> subprocess.CompletedProcess | None:
+    """managed overlay 소유 모듈로 좁힌 terraform plan — rc 0=수렴, 2=drift.
+
+    env 전체 plan 은 사람 소유 리소스(EKS 자동 업그레이드 같은 외부 변경)의
+    잡음이 섞이므로 _infra_targets 가 정한 yaml 소유 모듈만 본다. 미리보기
+    전용이라 -lock=false (상태 잠금과 무관하게 읽기만 한다)다."""
+    managed_tfvars = gen_dir / "terraform.tfvars"
+    targets = _infra_targets(cfg)
+    if not targets or not managed_tfvars.exists() or not env_dir.is_dir():
+        return None
+    _run_quiet(["terraform", "init", "-input=false"], cwd=env_dir, timeout=300)
+    return _run_quiet(
+        ["terraform", "plan", "-detailed-exitcode", "-input=false", "-no-color",
+         "-lock=false", f"-var-file={managed_tfvars}", *targets],
+        cwd=env_dir, timeout=300)
+
+
+def _target_modules(targets: list[str]) -> list[str]:
+    return [t.removeprefix("-target=") for t in targets]
+
+
+def _inspect_managed_plan(env_dir: Path, plan_path: Path,
+                          modules: list[str]) -> tuple[list[str], list[str]]:
+    """저장된 plan 을 terraform show -json 으로 검사한다.
+
+    반환은 (거부 사유 목록, 허용된 변경 목록). -target 은 대상 모듈의 *의존성*
+    (module.eks·module.cognito 같은 사람 소유 리소스) 변경까지 plan 에
+    포함시키므로, 적용 전에 (a) 주소가 target 모듈 안이고 (b) destroy/replace
+    계열 액션이 없는지를 검증해 자동 수렴의 폭발 반경을 yaml 소유 모듈로
+    한정한다."""
+    r = _run_quiet(["terraform", "show", "-json", str(plan_path)],
+                   cwd=env_dir, timeout=120)
+    if r.returncode != 0:
+        return [f"terraform show -json 실패(rc={r.returncode}) — plan 검증 불가"], []
+    try:
+        data = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return ["terraform show -json 출력 파싱 실패 — plan 검증 불가"], []
+    bad: list[str] = []
+    changes: list[str] = []
+    for rc_ in data.get("resource_changes") or []:
+        if rc_.get("mode") != "managed":
+            continue
+        addr = str(rc_.get("address", ""))
+        acts = (rc_.get("change") or {}).get("actions") or []
+        # 의존성 리소스는 변경 없이 no-op/read 로 plan 에 나타난다 — 범위 검사
+        # 전에 걸러야 한다(걸리면 모든 수렴이 "범위 밖" 오진으로 중단된다).
+        if not acts or acts == ["no-op"] or acts == ["read"]:
+            continue
+        in_scope = any(addr == m or addr.startswith(m + ".")
+                       or addr.startswith(m + "[") for m in modules)
+        if not in_scope:
+            bad.append(f"{addr} — target 모듈({', '.join(modules)}) 밖")
+        elif any(a in ("delete", "replace", "forget") for a in acts):
+            bad.append(f"{addr} — {'+'.join(acts)} (파괴적 변경은 자동 적용 불가)")
+        else:
+            changes.append(f"{addr} ({'+'.join(acts)})")
+    return bad, changes
+
+
+def _apply_managed(env_dir: Path, targets: list[str], var_args: list[str],
+                   reason: str, required: bool) -> bool:
+    """plan -out → show -json 범위 검증 → 저장 plan apply.
+
+    재계획 없이 검증된 그 plan 파일을 그대로 적용해 preview↔apply 갭을 없앤다.
+    required(출력이 비어 필수)일 때 plan 자체가 실패하면 배포를 중단하고,
+    아니면 경고만 남기고 helm 을 계속 진행한다."""
+    init = _run_quiet(["terraform", "init", "-input=false"], cwd=env_dir,
+                      timeout=300)
+    if init.returncode != 0:
+        if required:
+            print((init.stdout or "") + (init.stderr or ""), file=sys.stderr)
+            raise SystemExit(
+                f"terraform init 실패(rc={init.returncode}) — {reason}")
+        print(f"⚠ terraform init 실패(rc={init.returncode}) — managed 수렴을 "
+              "건너뜁니다 (helm 은 계속 진행)", file=sys.stderr)
+        return False
+    with tempfile.TemporaryDirectory(prefix="nds-plan-") as td:
+        plan_path = Path(td) / "managed.tfplan"
+        argv = ["terraform", "plan", "-no-color", "-input=false",
+                "-out", str(plan_path), *var_args, *targets]
+        r = _run_quiet(argv, cwd=env_dir, timeout=600)
+        if r.returncode != 0:
+            if required:
+                print((r.stdout or "") + (r.stderr or ""), file=sys.stderr)
+                raise SystemExit(
+                    f"managed 인프라 plan 실패(rc={r.returncode}) — {reason} "
+                    "인프라 없이는 배포할 수 없습니다")
+            print(f"⚠ managed 인프라 plan 실패(rc={r.returncode}) — terraform "
+                  "수렴을 건너뜁니다 (helm 은 계속 진행)", file=sys.stderr)
+            return False
+        bad, changes = _inspect_managed_plan(
+            env_dir, plan_path, _target_modules(targets))
+        if bad:
+            raise SystemExit(
+                "managed plan 이 NDS 소유 범위를 벗어나거나 파괴적 변경을 "
+                "포함합니다 — 자동 apply 를 중단합니다:\n  - "
+                + "\n  - ".join(bad)
+                + "\n원인 후보: target 모듈 의존 리소스의 사람 소유 변경, "
+                "선언을 거둔 기능의 잔여 인프라(끄려면 env terraform 으로 수동)."
+                "\nenv terraform 을 사람이 검토/적용하십시오.")
+        if not changes:
+            return False
+        print(f"ⓘ {reason} — managed terraform 변경 {len(changes)}건을 "
+              "적용합니다 (target 모듈 안의 사람 변경이 섞여 있을 수 있습니다):",
+              file=sys.stderr)
+        for c in changes:
+            print(f"    {c}", file=sys.stderr)
+        _run(["terraform", "apply", "-input=false", str(plan_path)],
+             cwd=env_dir)
+        return True
+
+
 def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path, outs: dict) -> dict:
     """선언된 기능에 필요한 인프라가 terraform output 에 없으면 targeted apply.
 
     관리 범위는 _infra_targets 이 정한 모듈뿐 — env 전체 apply 는 하지 않는다
     (클러스터·VPC 등 사람 소유). gen/<env>/eks/terraform.tfvars 를 -var-file 로
-    뒤에 붙여 선언값을 주입한다. 반환은 최신 terraform outputs."""
+    뒤에 붙여 선언값을 주입한다. 반환은 최신 terraform outputs.
+
+    output 이 이미 있어도 managed overlay 선언 키(ARN·mantle·기능 플래그)는
+    live 와 어긋날 수 있다 — yaml 소유 모듈로 좁힌 plan 을 만들어 변경이
+    있으면 같은 저장 plan 으로 수렴한다. 이게 yaml → ./deploy apply 한 경로로
+    인프라 키를 관리하는 수렴 경로다."""
     targets = _infra_targets(cfg)
     if not targets:
         return outs
@@ -359,17 +484,42 @@ def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path, outs: dict) -
         print("⚠ 기능 인프라가 선언됐지만 terraform env 디렉토리가 없습니다 "
               f"({env_dir}) — 인프라 없이 helm 만 진행합니다", file=sys.stderr)
         return outs
-    missing = _infra_missing(cfg, outs)
-    if not missing:
-        return outs
     managed_tfvars = gen_dir / "terraform.tfvars"
     var_args = [f"-var-file={managed_tfvars}"] if managed_tfvars.exists() else []
-    print(f"{', '.join(missing)} 가 없습니다 — {env_dir} 에서 targeted "
-          "terraform apply 를 실행합니다", file=sys.stderr)
-    _run(["terraform", "init", "-input=false"], cwd=env_dir)
-    _run(["terraform", "apply", "-auto-approve", "-input=false",
-          *var_args, *targets], cwd=env_dir)
-    return tf_outputs(env_dir)
+    missing = _infra_missing(cfg, outs)
+    if missing:
+        print(f"ⓘ {', '.join(missing)} 가 terraform output 에 없습니다 — "
+              "targeted apply 로 프로비저닝합니다", file=sys.stderr)
+        _apply_managed(env_dir, targets, var_args,
+                       ", ".join(missing), required=True)
+        fresh = tf_outputs(env_dir)
+        # 적용 후에도 출력이 비면(overlay 미렌더·env tfvars false 등 no-op plan)
+        # helm 에 빈 env 가 들어간다 — 조용히 진행하지 않는다.
+        still = _infra_missing(cfg, fresh)
+        if still:
+            raise SystemExit(
+                f"{', '.join(still)} — terraform 적용 후에도 output 이 "
+                "비어 있습니다. managed overlay(render)와 env tfvars 선언을 "
+                "확인하십시오")
+        return fresh
+    if not var_args:
+        return outs
+    # 출력은 있지만 선언 키(ARN·mantle·기능 플래그)가 live 와 어긋날 수 있다 —
+    # 표시용 plan 이 수렴(rc=0)이면 여기서 끝, drift(rc=2)면 저장 plan 을 검증해
+    # 그대로 적용한다(재계획 갭 없이).
+    p = _managed_infra_plan(cfg, gen_dir, env_dir)
+    if p is None or p.returncode == 0:
+        return outs
+    if p.returncode != 2:
+        print(f"⚠ managed 인프라 plan 실패(rc={p.returncode}) — terraform "
+              "수렴을 건너뜁니다 (helm 은 계속 진행)", file=sys.stderr)
+        return outs
+    print("managed overlay 와 live 인프라가 어긋납니다 — 수렴할 diff:",
+          file=sys.stderr)
+    print(p.stdout)
+    applied = _apply_managed(env_dir, targets, var_args,
+                             "managed overlay 선언 수렴", required=False)
+    return tf_outputs(env_dir) if applied else outs
 
 
 def _manifest_docs(text: str) -> dict[str, dict]:
@@ -474,6 +624,18 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         print(f"ⓘ {', '.join(missing)} 가 terraform output 에 없습니다 — apply 시 "
               f"targeted terraform apply({' '.join(_infra_targets(cfg))})가 "
               "먼저 실행됩니다", file=sys.stderr)
+    elif meta.get("env_dir"):
+        # output 은 있지만 선언 키(ARN·mantle·기능 플래그)가 live 와 어긋난 경우 —
+        # 확인 게이트 전에 terraform diff 도 보여준다.
+        p = _managed_infra_plan(cfg, gen_dir, repo_root / meta["env_dir"])
+        if p is not None and p.returncode == 2:
+            print(f"ⓘ managed 인프라 overlay 와 live 가 어긋납니다 — apply 시 "
+                  f"검증된 plan 으로 수렴합니다({' '.join(_infra_targets(cfg))})",
+                  file=sys.stderr)
+            print(p.stdout)
+        elif p is not None and p.returncode != 0:
+            print(f"⚠ managed 인프라 plan 실패(rc={p.returncode}) — "
+                  f"{(p.stderr or '').strip()[:200]}", file=sys.stderr)
     if cfg.features.web_search:
         url = websearch.status_url(cfg.env, repo_root,
                                    outs.get("gateway_proxy_role_arn", ""))

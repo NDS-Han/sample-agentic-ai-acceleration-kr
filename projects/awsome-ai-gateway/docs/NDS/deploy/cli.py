@@ -382,11 +382,18 @@ def _collect_doc(existing: dict | None = None) -> dict:
         "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()],
                     "admin_internal": admin_internal},
-        "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id},
+        # hosts 는 질문이 다루지 않는 선언 키 — 보존 못하면 재 configure 가
+        # 파생 호스트로 되돌려 live URL 을 바꾼다 (이전 yaml 값 유지).
+        "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id,
+                   **({"hosts": dict(_g(ex, "domain", "hosts"))}
+                      if _g(ex, "domain", "hosts") else {})},
         "features": {
             "notifications": {"provider": notif, **notif_extra},
             "web_search": "web_search" in features,
-            "body_logging": "body_logging" in features,
+            # 체크 해제는 "관리 안 함"이지 "끄기"가 아니다 — eks managed overlay 는
+            # false 를 적용하지 않으므로 명시 false 를 쓰면 경고만 나고 아무것도
+            # 안 바뀐다. 선택됐을 때만 키를 쓴다 (tri-state 유지).
+            **({"body_logging": True} if "body_logging" in features else {}),
             "bi_insight": "bi_insight" in features,
             "pricing_lambda": "pricing_lambda" in features,
             "observability": "observability" in features,
@@ -1390,8 +1397,12 @@ def cmd_client_values(args) -> int:
     gw = adm = ""
     if target == "eks":
         hosts = _eks_ingress_hosts(cfg)
-        gw_h = hosts.get("gateway") or (f"gateway.{cfg.domain.name}" if cfg.domain.name else "")
-        adm_h = hosts.get("adminApi") or (f"admin-api.{cfg.domain.name}" if cfg.domain.name else "")
+        # env overlay 파일의 호스트는 사람 소유 값 — 선언된 domain.hosts 가
+        # 렌더에 이기므로 그쪽을 우선해야 안내 주소가 어긋나지 않는다.
+        gw_h = (cfg.domain.hosts.get("gateway") or hosts.get("gateway")
+                or (f"gateway.{cfg.domain.name}" if cfg.domain.name else ""))
+        adm_h = (cfg.domain.hosts.get("admin_api") or hosts.get("adminApi")
+                 or (f"admin-api.{cfg.domain.name}" if cfg.domain.name else ""))
         gw = f"https://{gw_h}" if gw_h else ""
         adm = f"https://{adm_h}" if adm_h else ""
         if not gw_h:

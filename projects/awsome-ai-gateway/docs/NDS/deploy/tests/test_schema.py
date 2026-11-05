@@ -308,3 +308,179 @@ def test_models_profile_global_no_warn_on_eks():
 def test_dev_login_warns_open_admin_path():
     cfg = schema.from_dict(minimal(features={"dev_login": True}))
     assert any("dev_login" in w for w in cfg.warnings())
+
+
+def test_domain_hosts_parsed():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        domain={"mode": "route53-acm", "name": "example.com",
+                "hosts": {"gateway": "gateway-dev.example.com",
+                          "admin_ui": "admin-dev.example.com"}}))
+    assert cfg.domain.hosts["gateway"] == "gateway-dev.example.com"
+    assert cfg.domain.hosts["admin_ui"] == "admin-dev.example.com"
+
+
+def test_domain_hosts_rejects_unknown_key():
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tag": "x"},
+            domain={"mode": "route53-acm", "name": "example.com",
+                    "hosts": {"bogus": "x.example.com"}}))
+
+
+def test_domain_hosts_without_name_warns():
+    # name 없는 hosts 는 render 가 무시한다 — 침묵 무시 대신 경고.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        domain={"hosts": {"gateway": "gateway.example.com"}}))
+    assert any("domain.hosts" in w for w in cfg.warnings())
+
+
+def test_infra_mantle_regions_parsed():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        infra={"mantle_regions": ["us-east-1"]}))
+    assert cfg.infra.mantle_regions == ["us-east-1"]
+
+
+def test_infra_mantle_regions_scalar_wrapped():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        infra={"mantle_regions": "us-east-1"}))
+    assert cfg.infra.mantle_regions == ["us-east-1"]
+
+
+def test_domain_hosts_empty_mapping_ok():
+    # {} 는 오버라이드 없음 — mapping 이 아니다 오류가 나면 안 된다.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        domain={"name": "example.com", "hosts": {}}))
+    assert cfg.domain.hosts == {}
+
+
+def test_domain_hosts_null_value_rejected():
+    # None 을 str() 하면 "None" 리터럴 호스트가 렌더된다 — 파싱에서 거절.
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tag": "x"},
+            domain={"name": "example.com",
+                    "hosts": {"gateway": None}}))
+
+
+def test_domain_hosts_rejects_non_hostname():
+    for bad in ("UPPER.example.com", "https://gw.example.com",
+                "gw.example.com/path", "", "gw_example.com"):
+        with pytest.raises(schema.SchemaError):
+            schema.from_dict(minimal(
+                deploy={"target": "eks", "size_tier": "t3"},
+                images={"tag": "x"},
+                domain={"name": "example.com",
+                        "hosts": {"gateway": bad}}))
+
+
+def test_domain_hosts_partial_warns_derived_fallback():
+    # 일부만 선언하면 나머지는 파생 호스트로 바뀐다 — 침묵 fallback 방지 경고.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        domain={"name": "example.com",
+                "hosts": {"gateway": "gateway-dev.example.com"}}))
+    assert any("admin.example.com" in w and "admin-api.example.com" in w
+               for w in cfg.warnings())
+
+
+def test_mantle_regions_rejects_non_list():
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tag": "x"},
+            infra={"mantle_regions": {"us-east-1": True}}))
+
+
+def test_mantle_regions_rejects_bad_items():
+    for bad in ([None], ["Not A Region"], ["us_east_1"]):
+        with pytest.raises(schema.SchemaError):
+            schema.from_dict(minimal(
+                deploy={"target": "eks", "size_tier": "t3"},
+                images={"tag": "x"},
+                infra={"mantle_regions": bad}))
+
+
+def test_bedrock_arns_rejects_non_arn_items():
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3"},
+            images={"tag": "x"},
+            infra={"bedrock_allowed_model_arns": ["claude-sonnet"]}))
+
+
+def test_body_logging_omitted_is_none():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"}))
+    assert cfg.features.body_logging is None
+
+
+def test_body_logging_explicit_false_warns_manual_disable():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        features={"body_logging": False}))
+    assert cfg.features.body_logging is False
+    assert any("비활성화" in w for w in cfg.warnings())
+
+
+def test_mantle_regions_warns_on_ecs():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t2"},
+        images={"tag": "x"},
+        infra={"mantle_regions": ["us-east-1"]}))
+    assert any("eks 전용" in w for w in cfg.warnings())
+
+
+def test_mantle_regions_partition_ids():
+    # gov/iso 파티션 리전 ID 도 리전 형식으로 인정한다.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        infra={"mantle_regions": ["us-gov-west-1", "us-iso-east-1",
+                                  "us-isob-east-1"]}))
+    assert len(cfg.infra.mantle_regions) == 3
+
+
+def test_body_logging_false_warns_only_on_eks():
+    # ecs 는 tfvars 에 false 가 실제 적용되므로 "수동 비활성화" 경고는 부정확 —
+    # eks managed overlay 경로에서만 울린다.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t2"},
+        images={"tag": "x"},
+        features={"body_logging": False}))
+    assert not any("비활성화" in w for w in cfg.warnings())
+
+
+def test_domain_hosts_warns_on_non_eks():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t2"},
+        images={"tag": "x"},
+        domain={"name": "example.com",
+                "hosts": {"gateway": "gw.example.com"}}))
+    assert any("domain.hosts" in w and "eks" in w for w in cfg.warnings())
+
+
+def test_domain_hosts_outside_domain_name_warns():
+    # *.{name} 인증서가 못 덮는 호스트 — route53-acm 경로에서 사전 경고.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "x"},
+        domain={"mode": "route53-acm", "name": "example.com",
+                "hosts": {"gateway": "gw.other.io",
+                          "admin_ui": "a.other.io",
+                          "admin_api": "api.other.io"}}))
+    assert any("범위 밖" in w for w in cfg.warnings())
