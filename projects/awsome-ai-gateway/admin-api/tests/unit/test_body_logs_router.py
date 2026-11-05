@@ -12,6 +12,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 
+from app.core.auth import CurrentUser
+from app.models.auth import UserRole
 from app.routers.body_logs import get_body_log
 from app.services.body_log_store import (
     BodyLogFetchResult,
@@ -223,3 +225,96 @@ async def test_oversized_counts_as_found(settings, audit, store_cls):
     )
     assert resp.status_code == 200
     assert audit.log.call_args.kwargs["changes"]["found"] is True
+
+
+# --- svc 토큰 차단 회귀 (Opus 리뷰 지적 — 원문 본문은 사람 admin 전용) ---
+
+
+def _svc_admin() -> CurrentUser:
+    """svc- 토큰의 합성 ADMIN 신원 — require_admin 은 통과한다."""
+    return CurrentUser(
+        user_id=uuid.uuid4(),
+        email="svc@machine",
+        role=UserRole.ADMIN,
+        team_id=None,
+        is_service_token=True,
+        service_token_id=uuid.uuid4(),
+    )
+
+
+def _human_admin() -> CurrentUser:
+    return CurrentUser(
+        user_id=uuid.uuid4(),
+        email="dev@example.com",
+        role=UserRole.ADMIN,
+        team_id=None,
+    )
+
+
+def _test_app() -> "tuple[TestClient, MagicMock, MagicMock]":
+    """실제 라우터 + 실제 예외 핸들러로 마운트한 최소 앱 — 의존성만 override."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.core.auth import get_current_user
+    from app.core.db import get_db_session
+    from app.main import register_exception_handlers
+    from app.routers.body_logs import router
+
+    app = FastAPI()
+    register_exception_handlers(app)
+    app.include_router(router)
+    session = MagicMock()
+    session.execute = AsyncMock()
+    app.dependency_overrides[get_db_session] = lambda: session
+    app.state.system_settings_service = MagicMock(
+        get_body_logging_enabled=AsyncMock(return_value=True)
+    )
+    return TestClient(app, raise_server_exceptions=False), session, app
+
+
+def test_router_level_guard_blocks_service_tokens():
+    """라우터 dependencies 에 가드 자체가 등록돼 있어야 svc 토큰이 핸들러까지
+    못 온다 — 이름 문자열이 아니라 함수 identity 로 확인한다."""
+    from app.core.auth import forbid_service_token_reader
+    from app.routers.body_logs import router
+
+    deps = {d.dependency for d in router.dependencies}
+    assert forbid_service_token_reader in deps
+
+
+def test_svc_token_http_403_store_never_called():
+    """HTTP 레벨 검증 — svc 토큰은 403, 설정 조회/DB/BodyLogStore 전부 미도달.
+
+    FastAPI 의존성 그래프를 실제로 타야 "가드가 핸들러보다 먼저"를 증명한다 —
+    가드 함수만 호출하는 테스트는 가드가 라우터에서 빠져도 통과한다.
+    """
+    from app.core.auth import get_current_user
+    from app.routers.body_logs import router  # noqa: F401 — 라우터 로드
+
+    client, session, app = _test_app()
+    app.dependency_overrides[get_current_user] = _svc_admin
+    with patch("app.routers.body_logs.BodyLogStore") as store:
+        resp = client.get(f"/admin/body-logs/{REQ}")
+    assert resp.status_code == 403
+    assert resp.json()["error"]["type"] == "forbidden"
+    assert not session.execute.called
+    assert not app.state.system_settings_service.get_body_logging_enabled.called
+    assert not store.called
+
+
+def test_human_admin_passes_guard_http():
+    """사람 admin 은 가드를 통과해 핸들러 로직까지 도달한다(401/403 아님)."""
+    from app.core.auth import get_current_user
+
+    client, session, app = _test_app()
+    app.dependency_overrides[get_current_user] = _human_admin
+    # AsyncMock 의 자식 mock 도 async 가 되므로 first 는 동기 MagicMock 으로 고정
+    session.execute.return_value.first = MagicMock(return_value=None)
+    with patch("app.routers.body_logs.get_settings") as gs:
+        gs.return_value.BODY_LOG_S3_BUCKET = "bucket"
+        resp = client.get(f"/admin/body-logs/{REQ}")
+    # usage row 없음 → 404 — 즉 가드를 지나 핸들러까지 도달했다는 증거
+    assert resp.status_code == 404
+    assert app.state.system_settings_service.get_body_logging_enabled.called
+    assert session.execute.called

@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, forbid_service_token_reader, require_admin
 from app.core.db import get_db_session
 from app.schemas.settings import BodyLoggingSetting, BodyLoggingUpdateRequest
 
@@ -31,7 +31,13 @@ async def get_body_logging(
     return BodyLoggingSetting(enabled=enabled)
 
 
-@router.put("/body-logging", response_model=BodyLoggingSetting)
+@router.put(
+    "/body-logging",
+    response_model=BodyLoggingSetting,
+    # svc 토큰은 못 켠다 — 탈취된 장수명 토큰이 전사 프롬프트/응답 원문 수집을
+    # 여는 것 자체가 권한 확장이라 사람 admin 만 허용(읽기 가드와 같은 경계).
+    dependencies=[Depends(forbid_service_token_reader)],
+)
 async def set_body_logging(
     request: Request,
     body: BodyLoggingUpdateRequest,

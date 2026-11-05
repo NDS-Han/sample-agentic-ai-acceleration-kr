@@ -31,10 +31,13 @@ from app.core.audit_catalog import (
     normalize_action,
     sql_variants,
 )
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import (
+    CurrentUser,
+    forbid_service_token_reader,
+    require_admin,
+)
 from app.core.config import get_settings
 from app.core.db import get_db_session
-from app.core.exceptions import ForbiddenError
 from app.models.audit import AuditLog
 from app.models.auth import ServiceToken, User
 from app.models.usage import UsageLog
@@ -60,28 +63,13 @@ from app.services.invocation_log_service import (
     reconcile,
 )
 
-async def _forbid_service_token_reader(
-    admin: CurrentUser = Depends(require_admin),
-) -> None:
-    """svc 토큰은 감사 표면을 읽지 못한다 — 사람 admin(JWT) 전용.
-
-    svc- 토큰은 require_admin 의 합성 ADMIN 신원을 통과하지만, 이 라우터는 감사
-    로그의 토큰 이름·관리자 이메일·IP·request_id 와 invocation-log 의 프롬프트/
-    응답 원문까지 노출한다. 유출된 토큰이 자기 탐지 여부를 감시하고 사용자 대화
-    원문을 읽는 경로를 닫는다 — 키 수명주기 가드(service_accounts.
-    _forbid_service_token_admin)와 같은 이유로 읽기도 막는다.
-    """
-    if admin.is_service_token:
-        raise ForbiddenError("Service tokens cannot read audit logs")
-
-
 # 라우터 단위 가드 — 핸들러마다 호출하면 다음 엔드포인트에서 또 빠질 수 있다.
 # handlers 가 Depends(require_admin) 으로 주입하는 admin 은 FastAPI 의존성
 # 캐시로 한 번만 해소되므로 중복 호출 비용은 없다.
 router = APIRouter(
     prefix="/admin/audit",
     tags=["Audit"],
-    dependencies=[Depends(_forbid_service_token_reader)],
+    dependencies=[Depends(forbid_service_token_reader)],
 )
 
 # 한 번의 대조에서 읽는 usage 행 상한. 넘으면 잘렸다고 **명시** 한다(조용한 축소 금지).

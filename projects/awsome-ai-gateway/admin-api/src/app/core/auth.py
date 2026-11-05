@@ -11,6 +11,7 @@ from jose import JWTError, jwt
 from jose.exceptions import JWKError
 
 from app.core.db import AsyncSessionLocal
+from app.core.exceptions import ForbiddenError
 from app.core.oidc_verifier import OIDCConfigError, OIDCVerifier, OIDCVerifyError
 from app.models.auth import UserRole
 from app.services.service_token_service import (
@@ -457,6 +458,23 @@ async def require_admin_or_team_leader(user: CurrentUser = Depends(get_current_u
     if user.role not in (UserRole.ADMIN, UserRole.TEAM_LEADER):
         raise HTTPException(status_code=403, detail="Admin or Team Leader role required")
     return user
+
+
+async def forbid_service_token_reader(
+    admin: CurrentUser = Depends(require_admin),
+) -> None:
+    """svc 토큰은 사람 대화 원문/감사 표면을 읽지 못한다 — 사람 admin(JWT) 전용.
+
+    svc- 토큰은 require_admin 의 합성 ADMIN 신원을 통과하지만, 감사 로그의 토큰
+    이름·관리자 이메일·IP·request_id 와 본문 로그의 프롬프트/응답 원문까지
+    노출하는 라우터는 읽기도 막아야 한다 — 유출된 토큰이 자기 탐지 여부를 감시
+    하고 사용자 대화 원문을 읽는 경로를 닫는다(키 수명주기 가드
+    service_accounts._forbid_service_token_admin 과 같은 이유).
+    라우터 단위 dependencies 로 붙인다 — 핸들러마다 달면 다음 엔드포인트에서
+    또 빠질 수 있다.
+    """
+    if admin.is_service_token:
+        raise ForbiddenError("Service tokens cannot read this resource")
 
 
 def require_team_leader_of(team_id: uuid.UUID):

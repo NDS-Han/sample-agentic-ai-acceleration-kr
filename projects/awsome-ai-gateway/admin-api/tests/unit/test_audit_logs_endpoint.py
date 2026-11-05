@@ -17,11 +17,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import HTTPException
 
-from app.core.auth import CurrentUser
+from app.core.auth import CurrentUser, forbid_service_token_reader
 from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
 from app.routers.audit_reconcile import (
-    _forbid_service_token_reader,
     list_audit_logs,
     router,
 )
@@ -324,7 +323,7 @@ async def test_service_token_guard_rejects_svc_admin() -> None:
     (로그의 토큰 이름·관리자 이메일·IP, invocation-log 본문)은 읽지 못한다 —
     탈취 토큰이 자기 탐지 여부를 감시하고 대화 원문을 읽는 경로 차단."""
     with pytest.raises(ForbiddenError):
-        await _forbid_service_token_reader(admin=_SVC_ADMIN)
+        await forbid_service_token_reader(admin=_SVC_ADMIN)
 
 
 async def test_audit_router_applies_guard_to_every_endpoint() -> None:
@@ -333,7 +332,7 @@ async def test_audit_router_applies_guard_to_every_endpoint() -> None:
     막는다. 핸들러 시그니처의 Depends(require_admin) 과는 같은 호출이 캐시돼
     admin 해소는 한 번만 일어난다."""
     deps = {d.dependency for d in router.dependencies}
-    assert _forbid_service_token_reader in deps
+    assert forbid_service_token_reader in deps
     # 가드 없이 인간 admin 은 통과한다 — 의존성이 항상 403 을 던지는 게 아님을
     # 잠근다(빈 의존성 목록에 대한 거짓 양성 방지).
     assert len(router.routes) >= 5

@@ -20,7 +20,11 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import (
+    CurrentUser,
+    forbid_service_token_reader,
+    require_admin,
+)
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.auth import User
@@ -33,7 +37,13 @@ from app.services.body_log_store import (
 
 logger = structlog.get_logger()
 
-router = APIRouter(prefix="/admin/body-logs", tags=["Body Logs"])
+# svc 토큰 차단 — 원문 본문(프롬프트/응답)은 사람 admin 만 읽는다.
+# 유출된 장수명 토큰이 사용자 대화를 긁어가는 경로를 닫는다(audit 라우터와 동일).
+router = APIRouter(
+    prefix="/admin/body-logs",
+    tags=["Body Logs"],
+    dependencies=[Depends(forbid_service_token_reader)],
+)
 
 #: request_id 는 S3 키 세그먼트로 들어간다 — ``/`` 와 ``..`` 를 허용하면
 #: prefix 탈출로 다른 파티션을 읽을 수 있으므로 문자셋을 좁힌다.
