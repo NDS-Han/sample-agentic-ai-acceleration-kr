@@ -44,6 +44,7 @@ export interface MonitoringEvent {
   request_id: string;
   timestamp: string;
   user_id: string;
+  user_email?: string;
   model_alias: string;
   downgraded_from?: string | null;
   event_type: string;
@@ -86,11 +87,14 @@ export async function fetchMonitoringModels(): Promise<MonitoringModelsResponse>
 export async function fetchMonitoringEvents(
   limit = 50,
   eventType: MonitoringEventTypeFilter = 'all',
+  /** 조회 창(일). 생략/1 = 최근 24h, 0 = 기간 제한 없음(본문 로그 뷰어용). */
+  days?: number,
 ): Promise<MonitoringEventsResponse> {
   return withRetry(() =>
     adminAPI.get<MonitoringEventsResponse>('/admin/monitoring/events', {
       limit,
       event_type: eventType,
+      ...(days !== undefined ? { days } : {}),
     })
   );
 }

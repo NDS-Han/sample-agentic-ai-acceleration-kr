@@ -52,6 +52,7 @@ def _session(row=None) -> MagicMock:
 def _usage_row(requested_at: datetime | None = None) -> SimpleNamespace:
     return SimpleNamespace(
         user_id=uuid.uuid4(),
+        user_email="dev@example.com",
         team_id=None,
         provider="BEDROCK",
         client="other",

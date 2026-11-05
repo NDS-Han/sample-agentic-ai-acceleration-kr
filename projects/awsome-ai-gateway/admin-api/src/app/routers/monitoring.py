@@ -115,6 +115,9 @@ async def monitoring_events(
         pattern="^(all|success|error|timeout|slow|abnormal)$",
         description="all=전체, success=정상, error=에러, timeout=타임아웃, slow=첫 응답(TTFT) 3s 초과, abnormal=error+timeout+slow",
     ),
+    # 조회 창(일). 0 = 기간 제한 없음 — 본문 로그 뷰어처럼 과거 요청을 찾는
+    # 화면용. 기본 24h 로 기존 모니터링 화면 동작은 그대로다.
+    days: int = Query(default=1, ge=0, le=365),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -122,7 +125,7 @@ async def monitoring_events(
     slow_ms = settings.TTFT_SLOW_MS
 
     now = datetime.now(timezone.utc)
-    one_day_ago = now - timedelta(days=1)
+    window_start = now - timedelta(days=days) if days > 0 else None
 
     # TTFT 우선, 없으면(구버전 데이터) latency_ms 로 폴백해 지연 판정.
     _effective = func.coalesce(UsageLog.ttft_ms, UsageLog.latency_ms)
@@ -132,6 +135,7 @@ async def monitoring_events(
             UsageLog.request_id,
             UsageLog.requested_at,
             UsageLog.user_id,
+            User.email.label("user_email"),
             UsageLog.model_alias,
             UsageLog.status,
             UsageLog.latency_ms,
@@ -139,8 +143,12 @@ async def monitoring_events(
             UsageLog.cost_usd,
             UsageLog.downgraded_from,
         )
-        .where(UsageLog.requested_at >= one_day_ago)
+        # user_email 은 auth.users 조인 — agent/service 토큰 요청은 user_id 가
+        # NULL 이라 outer join(없으면 그 행이 통째로 빠진다).
+        .outerjoin(User, User.id == UsageLog.user_id)
     )
+    if window_start is not None:
+        stmt = stmt.where(UsageLog.requested_at >= window_start)
 
     if event_type == "abnormal":
         stmt = stmt.where(
@@ -184,6 +192,7 @@ async def monitoring_events(
             "request_id": row.request_id,
             "timestamp": row.requested_at.isoformat(),
             "user_id": str(row.user_id),
+            "user_email": row.user_email,
             "model_alias": row.model_alias,
             "downgraded_from": row.downgraded_from,
             "event_type": ev_type,

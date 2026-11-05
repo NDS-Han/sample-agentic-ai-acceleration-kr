@@ -23,6 +23,7 @@ from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
+from app.models.auth import User
 from app.models.usage import UsageLog
 from app.services.body_log_store import (
     BodyLogLookupError,
@@ -65,17 +66,22 @@ async def get_body_log(
     if not _REQUEST_ID_RE.fullmatch(request_id) or ".." in request_id:
         raise HTTPException(400, "request_id 형식이 올바르지 않습니다")
 
+    # user_email 은 usage_logs 에 없고 auth.users 조인이 필요하다 — user_id 가
+    # NULL(agent/service 토큰)일 수 있어 outer join.
     row = (
         await session.execute(
             select(
                 UsageLog.user_id,
+                User.email.label("user_email"),
                 UsageLog.team_id,
                 UsageLog.provider,
                 UsageLog.client,
                 UsageLog.requested_at,
                 UsageLog.latency_ms,
                 UsageLog.model_alias,
-            ).where(UsageLog.request_id == request_id)
+            )
+            .outerjoin(User, User.id == UsageLog.user_id)
+            .where(UsageLog.request_id == request_id)
         )
     ).first()
 
@@ -163,6 +169,7 @@ async def get_body_log(
             "oversized": result.oversized,
             "incomplete": result.incomplete,
             "model_alias": row.model_alias,
+            "user_email": row.user_email,
             "requested_at": row.requested_at.isoformat(),
             "record": result.record,
         },

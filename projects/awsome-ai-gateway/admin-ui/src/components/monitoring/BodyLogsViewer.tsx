@@ -171,6 +171,12 @@ function BodyLogDialog({
         <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>
         <span>·</span>
         <span className="font-mono">{data.request_id}</span>
+        {(data.user_email ?? rec?.user_id) && (
+          <>
+            <span>·</span>
+            <span title={rec?.user_id ?? undefined}>{data.user_email ?? rec?.user_id}</span>
+          </>
+        )}
         {rec?.is_streaming && <Badge tone="neutral">stream</Badge>}
         {truncated && <Badge tone="amber">{t('truncated')}</Badge>}
         {data.oversized && <Badge tone="amber">{t('oversized')}</Badge>}
@@ -359,6 +365,7 @@ export function BodyLogsViewer({ events }: { events: MonitoringEventsResponse })
               <Tr>
                 <Th>{t('colTime')}</Th>
                 <Th>{t('colRequestId')}</Th>
+                <Th>{t('colUser')}</Th>
                 <Th>{t('colModel')}</Th>
                 <Th>{t('colType')}</Th>
                 <Th>{t('colAction')}</Th>
@@ -378,6 +385,9 @@ export function BodyLogsViewer({ events }: { events: MonitoringEventsResponse })
                       {ev.request_id.slice(0, 8)}…
                       <Copy size={12} aria-hidden="true" />
                     </button>
+                  </Td>
+                  <Td className="max-w-40 truncate text-sm" title={ev.user_email ?? ev.user_id}>
+                    {ev.user_email ?? ev.user_id}
                   </Td>
                   <Td className="text-sm">{ev.model_alias}</Td>
                   <Td>

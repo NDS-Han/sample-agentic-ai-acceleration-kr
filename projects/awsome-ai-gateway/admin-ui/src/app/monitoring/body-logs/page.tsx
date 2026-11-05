@@ -36,10 +36,17 @@ export default async function BodyLogsPage() {
     );
   }
 
-  const events = await fetchMonitoringEvents(50, 'all').catch(() => ({ events: [] }));
+  // 과거 요청도 찾아야 본문 조회가 유용하다 — 기간 제한 없이 최신 순 상한까지.
+  // (usage_logs 가 인덱스, S3 본문 보존은 90일이라 그 이전은 자연히 404 안내가 뜬다)
+  const events = await fetchMonitoringEvents(200, 'all', 0).catch(() => ({ events: [] }));
   return (
     <div className="space-y-4">
-      <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
+        <Link href="/monitoring" className="text-sm text-primary hover:underline">
+          {t('backToMonitoring')}
+        </Link>
+      </div>
       <BodyLogsViewer events={events} />
     </div>
   );

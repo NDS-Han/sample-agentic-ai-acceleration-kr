@@ -34,6 +34,8 @@ export interface BodyLogResponse {
   /** 스캔 상한/파손으로 일부 구간을 못 봤으면 true — 레코드는 정상 반환된다. */
   incomplete?: boolean;
   model_alias: string;
+  /** usage row 의 denormalized 이메일 — 레코드의 user_id 보다 읽기 쉬운 표시용. */
+  user_email?: string | null;
   /** usage row 의 요청 시각 — 레코드 자체 시각이 아니라 진짜 호출 시각. */
   requested_at: string;
   record: BodyLogRecord | null;
