@@ -16,7 +16,7 @@ import json
 import os
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
@@ -25,7 +25,7 @@ from policy_helper.policy import (
     http_fetch,
     merge,
     resolve_fragment,
-    vk_path_for,
+    vk_paths_for,
 )
 
 # Claude Code rejects helper stdout over 1 MiB (and then refuses to start).
@@ -78,7 +78,7 @@ def run(
     stdout: TextIO,
     stderr: TextIO,
     *,
-    vk_path: Path | None = None,
+    vk_path: Path | Sequence[Path] | None = None,
     cache_path: Path | None = None,
     fetch: Callable[[str, str, float], dict] | None = None,
     now: float | None = None,
@@ -135,7 +135,7 @@ def main() -> None:
     env, home = os.environ, Path.home()
     sys.exit(run(
         default_baseline_path(), sys.stdout, sys.stderr,
-        vk_path=vk_path_for(sys.platform, env, home),
+        vk_path=vk_paths_for(sys.platform, env, home),
         cache_path=cache_path_for(sys.platform, env, home),
         fetch=http_fetch,
     ))

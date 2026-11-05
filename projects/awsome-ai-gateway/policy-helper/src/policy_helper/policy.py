@@ -1,14 +1,15 @@
 """The server half of the policy: fetch this user's fragment from the gateway.
 
 The VK comes from api-key-helper's cache (`vk-cache.json`), read only — api-key-helper
-refreshes and rewrites that file, and two writers would race. The last good answer
-is cached so that a later failure still yields that policy.
+refreshes and rewrites that file, and two writers would race. Two gateway-cli generations
+keep it in different places (see vk_paths_for), so every candidate is tried in turn. The
+last good answer is cached so that a later failure still yields that policy.
 """
 from __future__ import annotations
 
 import json
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from policy_helper import __version__
@@ -30,7 +31,7 @@ def merge(baseline: dict, fragment: dict) -> dict:
 def resolve_fragment(
     baseline: dict,
     *,
-    vk_path: Path,
+    vk_path: Path | Sequence[Path],
     cache_path: Path,
     fetch: Callable[[str, str, float], dict],
     now: float,
@@ -62,29 +63,58 @@ def resolve_fragment(
     return _cached_fragment(cache_path, url, note)
 
 
-def _usable_vk(vk_path: Path, admin_api_url, now: float, note) -> str | None:
-    try:
-        vk = json.loads(vk_path.read_text(encoding="utf-8"))
-    except FileNotFoundError:
+def _usable_vk(vk_path: Path | Sequence[Path], admin_api_url, now: float, note) -> str | None:
+    """후보 파일을 순서대로 보아 처음 쓸 수 있는 VK 를 돌려준다.
+
+    없는 후보는 조용히 건너뛰고(전부 없을 때만 메모 한 줄), 쓸 수 없는 후보(만료·다른
+    배포·읽기 실패)는 기억해 두고 다음을 본다. 그 문제는 쓸 수 있는 후보가 하나도 없을
+    때만 메모로 남긴다.
+
+    The first usable VK among the candidate files, in order.
+
+    A missing candidate is skipped silently (one note if every one is missing); an unusable
+    one (expired, other deployment, unreadable) is remembered and the next tried, and its
+    problem is noted only when no candidate was usable.
+    """
+    paths = [vk_path] if isinstance(vk_path, Path) else list(vk_path)
+    problems: list[str] = []
+    missing = 0
+    for path in paths:
+        try:
+            vk = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            missing += 1
+            continue
+        except (OSError, ValueError) as exc:
+            problems.append(f"VK cache unreadable ({exc}); using cached policy")
+            continue
+        problem = _vk_problem(vk, admin_api_url, now)
+        if problem is None:
+            return vk["virtual_key"]
+        problems.append(problem)
+    if missing == len(paths):
         note("no VK cached yet (not logged in, or no request made); using cached policy")
-        return None
-    except (OSError, ValueError) as exc:
-        note(f"VK cache unreadable ({exc}); using cached policy")
-        return None
+    for problem in problems:
+        note(problem)
+    return None
+
+
+def _vk_problem(vk, admin_api_url, now: float) -> str | None:
+    """이 캐시된 VK 를 보낼 수 없는 이유. 보낼 수 있으면 None.
+
+    Why this cached VK cannot be sent, or None when it can.
+    """
     if not isinstance(vk, dict) or not isinstance(vk.get("virtual_key"), str):
-        note("VK cache has no virtual_key; using cached policy")
-        return None
+        return "VK cache has no virtual_key; using cached policy"
     if _same_url(vk.get("admin_api_url"), admin_api_url) is False:
-        note("VK belongs to another deployment; not sending it")
-        return None
+        return "VK belongs to another deployment; not sending it"
     try:
         expired = float(vk.get("expires_at", 0)) <= now
     except (TypeError, ValueError):
         expired = True
     if expired:
-        note("VK expired; using cached policy until api-key-helper renews it")
-        return None
-    return vk["virtual_key"]
+        return "VK expired; using cached policy until api-key-helper renews it"
+    return None
 
 
 def _same_url(a, b) -> bool | None:
@@ -154,12 +184,31 @@ def _data_dir(app: str, platform: str, env, home: Path) -> Path:
 
 
 def vk_path_for(platform: str, env, home: Path) -> Path:
-    """Where api-key-helper keeps the VK (same rules as gateway-cli's paths.py)."""
+    """Where gateway-cli-v2's api-key-helper keeps the VK (same rules as its paths.py)."""
     override = env.get("GATEWAY_CLI_VK_CACHE")
     if override:
         return Path(override)
     data_dir = env.get("GATEWAY_CLI_DATA_DIR")
     return (Path(data_dir) if data_dir else _data_dir("gateway-cli", platform, env, home)) / "vk-cache.json"
+
+
+def vk_paths_for(platform: str, env, home: Path) -> list[Path]:
+    """VK 가 캐시돼 있을 수 있는 모든 위치, 가능성 높은 순.
+
+    gateway-cli-v2(Windows 설치기, conda env) 는 플랫폼 데이터 폴더 아래에 쓰고, 옛
+    gateway-cli(Mac, pip install) 는 ~/.gateway-cli/vk-cache.json 에 쓴다. 둘 다
+    GATEWAY_CLI_VK_CACHE 를 따르므로 그 값이 있으면 후보는 정확히 하나다.
+
+    Every place a VK may be cached, most likely first.
+
+    gateway-cli-v2 (Windows installer, conda env) writes under the platform data dir;
+    the legacy gateway-cli (Mac, pip install) writes ~/.gateway-cli/vk-cache.json. Both
+    honour GATEWAY_CLI_VK_CACHE, so with it set there is exactly one candidate.
+    """
+    primary = vk_path_for(platform, env, home)
+    if env.get("GATEWAY_CLI_VK_CACHE"):
+        return [primary]
+    return [primary, home / ".gateway-cli" / "vk-cache.json"]
 
 
 def cache_path_for(platform: str, env, home: Path) -> Path:

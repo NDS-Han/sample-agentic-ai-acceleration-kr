@@ -158,3 +158,49 @@ def test_missing_cache_is_named_in_the_notes(tmp_path):
     resolve(tmp_path, Server(error=OSError("down")), notes=notes)
 
     assert any("no cached policy" in n for n in notes)
+
+
+def mkdir(path):
+    path.mkdir()
+    return path
+
+
+def test_vk_is_read_from_the_legacy_location_when_the_primary_is_absent(tmp_path):
+    legacy = write_vk(mkdir(tmp_path / "legacy"))
+    server = Server(body={"managedSettings": FRAGMENT})
+
+    fragment = resolve(tmp_path, server, vk_path=[tmp_path / "absent.json", legacy])
+
+    assert fragment == FRAGMENT
+    assert server.calls[0]["vk"] == "vk-abc"
+
+
+def test_the_first_location_that_holds_a_usable_vk_wins(tmp_path):
+    primary = write_vk(mkdir(tmp_path / "v2"), virtual_key="vk-v2")
+    legacy = write_vk(mkdir(tmp_path / "legacy"), virtual_key="vk-legacy")
+    server = Server(body={"managedSettings": FRAGMENT})
+
+    resolve(tmp_path, server, vk_path=[primary, legacy])
+
+    assert server.calls[0]["vk"] == "vk-v2"
+
+
+def test_an_expired_primary_vk_does_not_hide_a_valid_legacy_one(tmp_path):
+    primary = write_vk(mkdir(tmp_path / "v2"), expires_at=NOW - 1)
+    legacy = write_vk(mkdir(tmp_path / "legacy"), virtual_key="vk-legacy")
+    server = Server(body={"managedSettings": FRAGMENT})
+
+    resolve(tmp_path, server, vk_path=[primary, legacy])
+
+    assert server.calls[0]["vk"] == "vk-legacy"
+
+
+def test_no_vk_anywhere_is_one_note_not_one_per_location(tmp_path):
+    notes = []
+    server = Server(body={"managedSettings": FRAGMENT})
+
+    resolve(tmp_path, server, vk_path=[tmp_path / "a.json", tmp_path / "b.json"], notes=notes)
+
+    assert server.calls == []
+    assert [n for n in notes if "no VK cached" in n] == [
+        "no VK cached yet (not logged in, or no request made); using cached policy"]

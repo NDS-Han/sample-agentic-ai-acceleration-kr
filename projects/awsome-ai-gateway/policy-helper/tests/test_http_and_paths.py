@@ -81,3 +81,32 @@ def test_macos_and_linux_paths():
     assert cache_path_for("linux", {}, home) == (
         home / ".local" / "share" / "policy-helper" / "policy-cache.json"
     )
+
+
+# --- vk_paths_for: every place a VK may be cached, most likely first ---------------------
+# Two gateway-cli generations write the VK to different places: gateway-cli-v2 (Windows
+# installer, conda env) under the platform data dir, the legacy gateway-cli (Mac, pip) under
+# ~/.gateway-cli/. Both are read, never written, so looking in both is harmless.
+
+def test_vk_paths_try_the_v2_data_dir_first_then_the_legacy_dotdir():
+    from policy_helper.policy import vk_paths_for
+
+    home = Path("/home/u")
+
+    assert vk_paths_for("darwin", {}, home) == [
+        home / "Library" / "Application Support" / "gateway-cli" / "vk-cache.json",
+        home / ".gateway-cli" / "vk-cache.json",
+    ]
+    assert vk_paths_for("linux", {}, home) == [
+        home / ".local" / "share" / "gateway-cli" / "vk-cache.json",
+        home / ".gateway-cli" / "vk-cache.json",
+    ]
+
+
+def test_vk_paths_override_is_the_only_candidate():
+    from policy_helper.policy import vk_paths_for
+
+    # GATEWAY_CLI_VK_CACHE is honoured by both generations — when set, there is one truth.
+    env = {"GATEWAY_CLI_VK_CACHE": "/data/gw/vk.json"}
+
+    assert vk_paths_for("darwin", env, Path("/home/u")) == [Path("/data/gw/vk.json")]
