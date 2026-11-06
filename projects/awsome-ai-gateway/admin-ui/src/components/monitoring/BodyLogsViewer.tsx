@@ -314,7 +314,9 @@ export function BodyLogsViewer({
           onClose={() => {
             setResult(null);
             // 닫아도 ?request_id= 가 남으면 새로고침 때 다시 조회돼 감사가
-            // 한 번 더 생긴다 — 닫을 때 URL 도 정리한다.
+            // 한 번 더 생긴다 — 닫을 때 URL 도 정리한다. autoLookedUp 도
+            // 리셋해 같은 id 딥링크 재진입이 동작하게 한다.
+            autoLookedUp.current = null;
             onRequestLookup?.(null);
           }}
         />

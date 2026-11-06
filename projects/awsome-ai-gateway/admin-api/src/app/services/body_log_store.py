@@ -270,8 +270,11 @@ class BodyLogStore:
         for prefix, win_jobs in jobs.items():
             if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
                 break
+            # 이 prefix 의 타깃이 전부 fallback 등으로 해결됐으면 LIST 도 생략.
+            if not any(r in remaining for r, _, _ in win_jobs):
+                continue
             all_keys, capped = await asyncio.to_thread(
-                self._list_partition_keys, prefix
+                self._list_partition_keys, prefix, min(ws for _, ws, _ in win_jobs)
             )
             result.incomplete = result.incomplete or capped
             # 각 타깃 창은 자기 상한의 후보를 갖는다 — 창 순서는 요청 시각 순.
@@ -289,7 +292,13 @@ class BodyLogStore:
                     result.incomplete = True
                     candidates = candidates[:_MAX_OBJECTS_PER_PARTITION]
                 for key in candidates:
-                    if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
+                    # 타깃을 찾으면 그 창의 나머지 후보는 열지 않는다 —
+                    # 전역 객체 예산을 다른 타깃을 위해 남긴다.
+                    if (
+                        rid not in remaining
+                        or not remaining
+                        or len(opened) >= _MAX_TOTAL_OBJECTS
+                    ):
                         break
                     opened.add(key)
                     result.scanned_keys.append(key)
@@ -297,17 +306,17 @@ class BodyLogStore:
                         self._scan_gzip_object_multi, key, scan_ids
                     )
                     result.incomplete = result.incomplete or capped
-                    for rid, (rec, dupes) in found_map.items():
-                        if rid in result.records:
+                    for frid, (rec, dupes) in found_map.items():
+                        if frid in result.records:
                             # 다른 객체에 같은 id — at-least-once 중복
-                            result.duplicates[rid] = result.duplicates.get(rid, 0) + 1 + dupes
+                            result.duplicates[frid] = result.duplicates.get(frid, 0) + 1 + dupes
                         else:
-                            result.records[rid] = rec
-                            result.sources[rid] = "firehose"
-                            result.keys[rid] = key
+                            result.records[frid] = rec
+                            result.sources[frid] = "firehose"
+                            result.keys[frid] = key
                             if dupes:
-                                result.duplicates[rid] = dupes
-                        remaining.pop(rid, None)
+                                result.duplicates[frid] = dupes
+                        remaining.pop(frid, None)
 
         if len(opened) >= _MAX_TOTAL_OBJECTS and remaining:
             # 전역 객체 상한에 닿은 채 미해결 id 가 남았으면 미스캔 표시.
@@ -347,18 +356,52 @@ class BodyLogStore:
             raise BodyLogLookupError(f"fallback read {key}: {exc}") from exc
         return result
 
+    def _stream_key_prefix(self, prefix: str) -> str | None:
+        """파티션 첫 .gz 키에서 스트림 이름 접두를 추출한다.
+
+        Firehose 키는 ``{stream}-{ver}-{YYYY-MM-DD-HH-MM-SS}-{rand}.gz`` —
+        시각 패턴 앞부분이 스트림 접두다. StartAfter 계산용으로만 쓰이며
+        못 구하면(비표준 이름) None 을 돌려 전체 LIST 로 폴백한다.
+        """
+        try:
+            resp = self._s3.list_objects_v2(
+                Bucket=self.bucket, Prefix=prefix, MaxKeys=10
+            )
+            for obj in resp.get("Contents") or []:
+                key = obj.get("Key", "")
+                if not isinstance(key, str) or not key.endswith(".gz"):
+                    continue
+                base = key[len(prefix):] if key.startswith(prefix) else key
+                m = re.match(
+                    r"(.+)-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}-\d{2}-[^/]+\.gz$", base
+                )
+                if m:
+                    return m.group(1)
+        except Exception:
+            pass
+        return None
+
     def _list_partition_keys(
-        self, prefix: str
+        self, prefix: str, win_start: datetime | None = None
     ) -> tuple[list[tuple[datetime, str]], bool]:
         """(timestamp, key) 목록을 시간 오름차순으로 반환 + LIST 상한 도달 여부.
 
         fetch_many 는 prefix 당 LIST 를 한 번만 돌리고 창별로 후보를 골라
-        쓴다 — LIST 자체는 객체 열람보다 훨씬 싸므로 전체 목록을 가져온다.
+        쓴다. ``win_start`` 가 주어지면 스트림 접두를 추출해 StartAfter 부터
+        읽는다 — 하루 수천 개 객체가 쌓이는 혼잡 파티션에서 상한에 뒤쪽
+        키가 잘려 매번 incomplete 로 빠지는 것을 막는다.
         """
         try:
+            kwargs: dict[str, Any] = {"Bucket": self.bucket, "Prefix": prefix}
+            if win_start is not None:
+                stream = self._stream_key_prefix(prefix)
+                if stream is not None:
+                    kwargs["StartAfter"] = (
+                        f"{prefix}{stream}-{win_start:%Y-%m-%d-%H-%M-%S}"
+                    )
             paginator = self._s3.get_paginator("list_objects_v2")
             pairs: list[tuple[datetime, str]] = []
-            for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
+            for page in paginator.paginate(**kwargs):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     if not key.endswith(".gz"):
@@ -366,7 +409,7 @@ class BodyLogStore:
                     ts = _key_timestamp(key)
                     if ts is not None:
                         pairs.append((ts, key))
-                if len(pairs) >= _MAX_LIST_KEYS:
+                if len(pairs) > _MAX_LIST_KEYS:
                     return sorted(pairs)[:_MAX_LIST_KEYS], True
             return sorted(pairs), False
         except Exception as exc:
@@ -378,7 +421,7 @@ class BodyLogStore:
         self, prefix: str, win_start: datetime, win_end: datetime
     ) -> tuple[list[str], bool]:
         """(창 안 후보 키 목록, 상한으로 잘렸는가)."""
-        all_keys, capped = self._list_partition_keys(prefix)
+        all_keys, capped = self._list_partition_keys(prefix, win_start)
         keys = [key for ts, key in all_keys if win_start <= ts <= win_end]
         if len(keys) > _MAX_OBJECTS_PER_PARTITION:
             return keys[:_MAX_OBJECTS_PER_PARTITION], True

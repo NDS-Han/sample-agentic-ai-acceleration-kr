@@ -96,6 +96,8 @@ export function BodyLogSessions({
 
   const [selected, setSelected] = useState<BodyLogSession | null>(null);
   const [bodies, setBodies] = useState<Record<string, BodyLogResult>>({});
+  // 마지막 loadAll 배치가 incomplete 였는지 — 못 찾은 구간이 있음을 헤더에 표시.
+  const [batchIncomplete, setBatchIncomplete] = useState(false);
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [openCalls, setOpenCalls] = useState<Set<string>>(new Set());
   // ?session= 딥링크 자동 오픈은 마운트 후 목록 로드 완료 시 한 번만.
@@ -195,6 +197,7 @@ export function BodyLogSessions({
     setBodies({});
     setLoadingIds(new Set());
     setOpenCalls(new Set());
+    setBatchIncomplete(false);
     onSessionChange?.(s.key);
   };
 
@@ -224,7 +227,9 @@ export function BodyLogSessions({
       } else {
         const res = await fetchBodyLogSessions({
           days: appliedFilters.days,
-          user: appliedFilters.user || undefined,
+          // 세션 소유자로 좁혀 1페이지 결과로 찾는다 — "더 보기"로 연 세션도
+          // 사용자 필터가 걸리면 상위에 올라온다(user_id uuid 부분일치).
+          user: appliedFilters.user || selected.user_id || undefined,
           client: appliedFilters.client || undefined,
           hasError: appliedFilters.hasError || undefined,
         });
@@ -247,7 +252,8 @@ export function BodyLogSessions({
   };
 
   const ensureBody = (rid: string, force = false) => {
-    if (!force && (bodies[rid] || loadingIds.has(rid))) return;
+    // 진행 중이면 force 여도 중복 조회·감사가 생기므로 가드는 유지한다.
+    if (loadingIds.has(rid) || (!force && bodies[rid])) return;
     setLoadingIds((prev) => new Set(prev).add(rid));
     fetchBodyLog(rid)
       .then((res) => {
@@ -293,6 +299,7 @@ export function BodyLogSessions({
     setLoadingIds((prev) => new Set([...prev, ...pending]));
     fetchBodyLogBatch(pending)
       .then((res) => {
+        if (res.success) setBatchIncomplete(res.data?.incomplete ?? false);
         setBodies((prev) => {
           const next = { ...prev };
           for (const rid of pending) {
@@ -302,7 +309,23 @@ export function BodyLogSessions({
               // 찾은 항목에는 붙이지 않는다(오안내 방지).
               next[rid] = { success: true, data: toBodyLogResponse(rid, item, false) };
             } else if (res.success && res.data?.oversized.includes(rid)) {
-              next[rid] = { success: false, error: t('bodyOversized'), status: 200 };
+              // oversized — 재시도해도 같은 결과라 성공 경로 카드로 렌더한다.
+              next[rid] = {
+                success: true,
+                data: {
+                  found: false,
+                  request_id: rid,
+                  source: null,
+                  key: null,
+                  duplicates: 0,
+                  oversized: true,
+                  model_alias:
+                    selected.calls.find((c) => c.request_id === rid)?.model_alias ?? '',
+                  requested_at:
+                    selected.calls.find((c) => c.request_id === rid)?.requested_at ?? '',
+                  record: null,
+                },
+              };
             } else if (res.success) {
               // missing — "미수집"이 아니라 "못 찾음"(수집대기/미스캔 가능).
               next[rid] = { success: false, error: t('bodyMissing'), status: 404 };
@@ -347,10 +370,15 @@ export function BodyLogSessions({
       (c) => !bodies[c.request_id] && !loadingIds.has(c.request_id),
     ).length;
     const callsCut = selected.call_count > selected.calls.length;
-    // historyStart — 직전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
-    // 넘긴다(msgIndex 단위). 서브에이전트 호출이 끼거나 /compact 로 history 가
-    // 재작성되면 접두가 깨지는데, 그때 턴을 숨기면 새 대화가 가려진다.
-    let prevMsgs: unknown[] | null = null;
+    // historyStart — 이전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
+    // 넘긴다(msgIndex 단위). Claude Code 의 사이드 호출(haiku 판정/서브에이전트)이
+    // 끼면 바로 앞 호출과 접두가 어긋나므로, 접두가 맞는 가장 최근 호출을
+    // 뒤로 찾는다. /compact 로 history 가 재작성되면 어느 호출과도 접두가 안
+    // 맞아 0 — 그때 숨기면 새 대화가 가려지므로 안전한 기본값이다.
+    // cache_control 은 호출마다 위치가 바뀔 수 있어 비교에서 제외한다.
+    const prevCallsMsgs: (unknown[] | null)[] = [];
+    const normMsg = (m: unknown) =>
+      JSON.stringify(m, (k, v) => (k === 'cache_control' ? undefined : v));
     return (
       <div className="space-y-4">
         <button
@@ -384,6 +412,7 @@ export function BodyLogSessions({
                 {t('callsTruncated', { shown: selected.calls.length, total: selected.call_count })}
               </Badge>
             )}
+            {batchIncomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
             <button
               type="button"
               onClick={refreshTrace}
@@ -422,20 +451,27 @@ export function BodyLogSessions({
               : Array.isArray(rb?.input)
                 ? (rb.input as unknown[])
                 : null;
-            // 접두 검증: 직전 호출 msgs 가 이번 호출의 앞부분과 정확히 이어질
-            // 때만 그 길이를 숨긴다 — 경계 메시지 하나만 같으면 충분하다
-            // (전체 비교는 메시지 수백 개 × stringify 라 비싸다).
+            // 접두 검증: 앞쪽 호출 중 msgs 가 이번 호출의 접두인 가장 최근 것을
+            // 찾는다 — 경계 메시지 하나만 같으면 충분하다(전체 비교는 비싸다).
             let historyStart = 0;
-            if (
-              msgs != null &&
-              prevMsgs != null &&
-              prevMsgs.length < msgs.length &&
-              JSON.stringify(msgs[prevMsgs.length - 1]) ===
-                JSON.stringify(prevMsgs[prevMsgs.length - 1])
-            ) {
-              historyStart = prevMsgs.length;
+            if (msgs != null) {
+              for (
+                let j = prevCallsMsgs.length - 1;
+                j >= Math.max(0, prevCallsMsgs.length - 20);
+                j--
+              ) {
+                const pm = prevCallsMsgs[j];
+                if (
+                  pm != null &&
+                  pm.length < msgs.length &&
+                  normMsg(msgs[pm.length - 1]) === normMsg(pm[pm.length - 1])
+                ) {
+                  historyStart = pm.length;
+                  break;
+                }
+              }
             }
-            if (msgs != null) prevMsgs = msgs;
+            prevCallsMsgs.push(msgs);
             return (
               <div key={call.request_id} className="glass rounded-apple">
                 <button
@@ -481,7 +517,14 @@ export function BodyLogSessions({
                     {isLoading ? (
                       <p className="text-sm text-muted-foreground">{t('loadingBody')}</p>
                     ) : res?.success && res.data ? (
-                      <BodyRecordContent data={res.data} historyStart={historyStart} />
+                      res.data.oversized ? (
+                        // 대형 레코드 — 재시도해도 같으므로 안내만.
+                        <p className="text-xs text-amber-600 dark:text-amber-400">
+                          {t('bodyOversized')}
+                        </p>
+                      ) : (
+                        <BodyRecordContent data={res.data} historyStart={historyStart} />
+                      )
                     ) : (
                       // 404/스캔미스 — 백엔드 hint 가 수집대기/미수집/미스캔을
                       // 구분해 주므로 그대로 보여주고 재시도를 둔다.

@@ -267,6 +267,44 @@ export interface ResponseParts {
   toolCalls: ResponseToolCall[];
 }
 
+/** 이어 붙은 JSON 이벤트를 분리한다.
+ *
+ * /model/* passthrough 는 Converse/invoke 이벤트를 개행 없이 기록해
+ * sse_text 가 `{…}{…}{…}` 한 줄이 된다 — split('\n') 만으로는 프레임이
+ * 안 나뉜다. 문자열/이스케이프를 인식하며 중괄호 깊이를 세는 단일 패스로
+ * 최상위 객체를 잘라낸다(data: 접두·공백·기타 잡음은 depth 0에서 무시).
+ */
+function splitJsonFrames(sse: string): string[] {
+  const frames: string[] = [];
+  let depth = 0;
+  let start = -1;
+  let inStr = false;
+  let esc = false;
+  for (let i = 0; i < sse.length; i++) {
+    const c = sse[i];
+    if (depth === 0) {
+      if (c === '{') {
+        depth = 1;
+        start = i;
+      }
+      continue;
+    }
+    if (inStr) {
+      if (esc) esc = false;
+      else if (c === '\\') esc = true;
+      else if (c === '"') inStr = false;
+      continue;
+    }
+    if (c === '"') inStr = true;
+    else if (c === '{') depth++;
+    else if (c === '}') {
+      depth--;
+      if (depth === 0) frames.push(sse.slice(start, i + 1));
+    }
+  }
+  return frames;
+}
+
 /** SSE 프레임 원문에서 assistant 텍스트 + tool_use 블록을 재조립한다. */
 export function extractSseParts(sse: string): ResponseParts {
   const parts: ResponseParts = { text: '', toolCalls: [] };
@@ -288,10 +326,9 @@ export function extractSseParts(sse: string): ResponseParts {
     parts.toolCalls.push({ name: t.name, input });
   };
 
-  for (const line of sse.split('\n')) {
-    // /model/* passthrough 는 data: 접두 없이 이벤트 JSON 이 그냥 연결된다 —
-    // 접두가 있으면 벗기고, 없으면 줄 전체를 JSON 으로 시도한다.
-    const payload = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
+  // data: 프레임과 접두 없는 JSON 연결(/model/* passthrough)이 섞일 수 있으므로
+  // 깊이 분리기로 프레임을 나눈다 — 한 줄에 여러 이벤트가 붙어 있어도 정확하다.
+  for (const payload of splitJsonFrames(sse)) {
     if (!payload || payload === '[DONE]') continue;
     let ev: Record<string, unknown>;
     try {
@@ -302,12 +339,18 @@ export function extractSseParts(sse: string): ResponseParts {
     const type = ev.type as string | undefined;
 
     // Bedrock Converse 스트림(/model/* 경유) — contentBlock{Start,Delta,Stop}
-    // 이벤트는 type 필드가 없고 키가 다르다.
+    // 이벤트는 type 필드가 없고, contentBlockIndex 는 래퍼 안에 들어 있다.
+    const inner = (ev.contentBlockStart ??
+      ev.contentBlockDelta ??
+      ev.contentBlockStop) as Record<string, unknown> | undefined;
     const cbIdx =
-      typeof ev.contentBlockIndex === 'number' ? ev.contentBlockIndex : undefined;
+      typeof inner?.contentBlockIndex === 'number'
+        ? inner.contentBlockIndex
+        : typeof ev.contentBlockIndex === 'number'
+          ? ev.contentBlockIndex
+          : undefined;
     if (ev.contentBlockStart && cbIdx !== undefined) {
-      const start = ev.contentBlockStart as Record<string, unknown>;
-      const tu = (start?.start as Record<string, unknown> | undefined)?.toolUse as
+      const tu = (inner?.start as Record<string, unknown> | undefined)?.toolUse as
         | Record<string, unknown>
         | undefined;
       if (tu?.name) {
@@ -316,8 +359,7 @@ export function extractSseParts(sse: string): ResponseParts {
       continue;
     }
     if (ev.contentBlockDelta && cbIdx !== undefined) {
-      const delta = (ev.contentBlockDelta as Record<string, unknown>)
-        ?.delta as Record<string, unknown> | undefined;
+      const delta = inner?.delta as Record<string, unknown> | undefined;
       if (typeof delta?.text === 'string') parts.text += delta.text;
       const tu = delta?.toolUse as Record<string, unknown> | undefined;
       if (typeof tu?.input === 'string' && blocks[cbIdx]) {
