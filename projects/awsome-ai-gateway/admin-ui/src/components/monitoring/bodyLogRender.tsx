@@ -62,6 +62,75 @@ export function lastUserText(body: Record<string, unknown>): string {
   return '';
 }
 
+// ── 전체 대화 스레드 ──────────────────────────────────────────────────────────
+// conversation 뷰는 마지막 턴이 아니라 모든 턴을 보여준다 — 요청 messages 안의
+// 이전 어시스턴트/도구 호출까지 포함해서 에이전트 루프의 전체 맥락이 보인다.
+
+export interface ConversationTurn {
+  role: string;
+  text: string;
+  tools: string[]; // tool_use 이름들
+  results: string[]; // tool_result 미리보기 (절단)
+}
+
+function toolResultPreview(content: unknown): string {
+  const text =
+    typeof content === 'string'
+      ? content
+      : Array.isArray(content)
+        ? content
+            .map((p) =>
+              p && typeof p === 'object' && typeof (p as { text?: unknown }).text === 'string'
+                ? ((p as { text: string }).text)
+                : '',
+            )
+            .filter(Boolean)
+            .join('\n')
+        : '';
+  return text.length > 160 ? `${text.slice(0, 160)}…` : text;
+}
+
+export function conversationTurns(body: Record<string, unknown>): ConversationTurn[] {
+  const turns: ConversationTurn[] = [];
+  for (const m of requestMessages(body)) {
+    const text = textFromContent(m?.content);
+    const tools: string[] = [];
+    const results: string[] = [];
+    if (Array.isArray(m?.content)) {
+      for (const p of m.content) {
+        if (!p || typeof p !== 'object') continue;
+        const o = p as Record<string, unknown>;
+        if (o.type === 'tool_use' && typeof o.name === 'string') tools.push(o.name);
+        if (o.type === 'tool_result') {
+          const prev = toolResultPreview(o.content);
+          if (prev) results.push(prev);
+        }
+      }
+    }
+    if (text.trim() || tools.length || results.length) {
+      turns.push({ role: typeof m?.role === 'string' ? m.role : '?', text, tools, results });
+    }
+  }
+  return turns;
+}
+
+// ── 표시용 유니코드 이스케이프 디코드 ─────────────────────────────────────────
+// provider 와이어(Bedrock SSE 등)가 ensure_ascii 직렬화라 sse_text/raw JSON 안에
+// \uXXXX 리터럴이 남는다 — 표시 시점에만 디코드하고 저장 데이터는 건드리지 않는다.
+// (?<!\\) — 진짜 백슬래시-u 리터럴(이스케이프된 \\u)은 건드리지 않는다.
+const UNICODE_ESCAPE_RUN = /(?<!\\)((?:\\u[0-9a-fA-F]{4})+)/g;
+
+export function decodeUnicodeEscapes(s: string): string {
+  return s.replace(UNICODE_ESCAPE_RUN, (run) => {
+    try {
+      // 연속 시퀀스 통째로 JSON.parse — 서로게이트 쌍도 올바르게 합쳐진다.
+      return JSON.parse(`"${run}"`) as string;
+    } catch {
+      return run;
+    }
+  });
+}
+
 /** SSE 프레임 원문에서 assistant 텍스트 델타를 추출 — anthropic / openai / responses 방언. */
 export function extractSseText(sse: string): string {
   const parts: string[] = [];
@@ -118,7 +187,7 @@ export function statusTone(status: string): BadgeTone {
 export function JsonBlock({ value }: { value: unknown }) {
   return (
     <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-all">
-      {JSON.stringify(value, null, 2)}
+      {decodeUnicodeEscapes(JSON.stringify(value, null, 2))}
     </pre>
   );
 }
@@ -139,7 +208,6 @@ export function BodyRecordContent({ data }: { data: BodyLogResponse }) {
   const sseText = typeof resBody.sse_text === 'string' ? (resBody.sse_text as string) : '';
   const truncated = resBody.truncated === true;
 
-  const userText = lastUserText(reqBody);
   const resText = sseText ? extractSseText(sseText) : nonstreamResponseText(resBody);
   const unparseable = reqBody._unparseable === true;
   const rawWrapped = '_raw' in reqBody;
@@ -194,12 +262,36 @@ export function BodyRecordContent({ data }: { data: BodyLogResponse }) {
             <JsonBlock value={reqBody} />
           ) : (
             <>
-              {userText ? (
-                <div className="max-h-64 overflow-auto rounded-md border border-border p-3">
-                  <p className="mb-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
-                    {t('lastUserMessage')}
-                  </p>
-                  <pre className="whitespace-pre-wrap break-all text-sm">{userText}</pre>
+              {conversationTurns(reqBody).length ? (
+                <div className="max-h-96 space-y-3 overflow-auto rounded-md border border-border p-3">
+                  {conversationTurns(reqBody).map((turn, i) => (
+                    <div key={i}>
+                      <p
+                        className={`mb-0.5 text-[11px] font-medium uppercase tracking-wide ${
+                          turn.role === 'assistant'
+                            ? 'text-teal-600 dark:text-teal-400'
+                            : 'text-muted-foreground'
+                        }`}
+                      >
+                        {turn.role}
+                      </p>
+                      {turn.text ? (
+                        <pre className="whitespace-pre-wrap break-all text-sm">
+                          {decodeUnicodeEscapes(turn.text)}
+                        </pre>
+                      ) : null}
+                      {turn.tools.map((name, j) => (
+                        <p key={j} className="text-xs text-muted-foreground">
+                          ⚙ {t('toolCall', { name })}
+                        </p>
+                      ))}
+                      {turn.results.map((prev, j) => (
+                        <p key={j} className="text-xs italic text-muted-foreground">
+                          {t('toolResult')}: {decodeUnicodeEscapes(prev)}
+                        </p>
+                      ))}
+                    </div>
+                  ))}
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground">{t('noUserMessage')}</p>
@@ -249,9 +341,9 @@ export function BodyRecordContent({ data }: { data: BodyLogResponse }) {
               <pre className="whitespace-pre-wrap break-all text-sm">{resText}</pre>
             </div>
           ) : sseText ? (
-            // 델타 추출 실패 — SSE 원문 노출
+            // 델타 추출 실패 — SSE 원문 노출 (와이어의 \uXXXX 는 표시용 디코드)
             <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs whitespace-pre-wrap break-all">
-              {sseText}
+              {decodeUnicodeEscapes(sseText)}
             </pre>
           ) : (
             <JsonBlock value={resBody} />

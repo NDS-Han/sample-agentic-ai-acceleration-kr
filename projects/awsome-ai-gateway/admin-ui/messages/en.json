@@ -1222,7 +1222,9 @@
       "errorsCount": "{count} errors",
       "loadingTrace": "Loading…",
       "notCollected": "Not collected",
-      "refresh": "Refresh"
+      "refresh": "Refresh",
+      "toolCall": "tool call: {name}",
+      "toolResult": "tool result"
     }
   },
   "errors": {

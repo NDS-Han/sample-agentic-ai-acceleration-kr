@@ -1222,7 +1222,9 @@
       "errorsCount": "에러 {count}건",
       "loadingTrace": "불러오는 중…",
       "notCollected": "미수집",
-      "refresh": "새로고침"
+      "refresh": "새로고침",
+      "toolCall": "도구 호출: {name}",
+      "toolResult": "도구 결과"
     }
   },
   "errors": {
