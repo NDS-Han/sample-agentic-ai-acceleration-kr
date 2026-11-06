@@ -23,6 +23,7 @@ from app.services.body_log_records import (
     provider_name,
     resolve_body_logger,
 )
+from app.services.session_key import extract_session_id
 from app.services.fallback_loop import (
     release_reservations,
     unsettled_reservation_guard,
@@ -241,6 +242,7 @@ async def _handle_openai(request: Request, path: str):
     try:
         req_data = json.loads(body)
         alias = req_data.get("model", "")
+        state["session_id"] = extract_session_id(req_data)
         is_stream = req_data.get("stream", False)
     except Exception:
         return JSONResponse(
@@ -454,6 +456,7 @@ async def _handle_openai(request: Request, path: str):
                 bedrock_request_id=aws_request_id,
                 client=client,
                 status=usage_status_of(outcome, status),
+                session_id=state.get("session_id"),
             )
 
         # ⚠️ 상류가 비-2xx 면 스트림을 클라이언트에게 넘기기 **전에** 되돌린다.
@@ -544,6 +547,7 @@ async def _handle_openai(request: Request, path: str):
                 bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         elif auth_context and status >= 500:
             # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
@@ -556,6 +560,7 @@ async def _handle_openai(request: Request, path: str):
                 rate_limit_state=state.pop("rate_limit_state", None),
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         else:
             # ⚠️ finalize 를 타지 않는 경로다(상류 4xx, 또는 usage 가 비어 온 응답).
@@ -618,6 +623,7 @@ async def _handle_responses(request: Request):
     try:
         req_data = json.loads(body)
         requested_alias = req_data.get("model", "")
+        state["session_id"] = extract_session_id(req_data)
         is_stream = bool(req_data.get("stream", False))
     except Exception:
         return JSONResponse(
@@ -1045,6 +1051,7 @@ async def _handle_responses(request: Request):
                 rate_limit_state=state.pop("rate_limit_state", None),
                 downgraded_from=state.get("downgraded_from"), client=client,
                 status=usage_status_of(_ws_outcome),
+                session_id=state.get("session_id"),
             )
 
         # 본문 로깅 — 웹서치 경로 전용 훅. 이 경로는 아래 `if is_stream:` 블록보다 먼저
@@ -1218,6 +1225,7 @@ async def _handle_responses(request: Request):
                     bedrock_request_id=aws_request_id,
                     client=client,
                     status=usage_status_of(None, status),
+                    session_id=state.get("session_id"),
                 )
             # R16: early JSON 반환도 본문 레코드를 남긴다 — 이 경로가 body-log
             # 배선을 우회해 오류 요청이 감사 없이 지나갔다(messages.py 동일 수정).
@@ -1265,6 +1273,7 @@ async def _handle_responses(request: Request):
                 bedrock_request_id=aws_request_id,
                 client=client,
                 status=usage_status_of(outcome, status),
+                session_id=state.get("session_id"),
             )
 
         async def _log_body_stream(
@@ -1345,6 +1354,7 @@ async def _handle_responses(request: Request):
                 bedrock_request_id=(resp_headers or {}).get("x-amzn-requestid"),
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         elif auth_context and status >= 500:
             # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
@@ -1357,6 +1367,7 @@ async def _handle_responses(request: Request):
                 rate_limit_state=state.pop("rate_limit_state", None),
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         else:
             # 예약 되돌리기 — 근거는 _handle_openai 의 같은 블록 주석 참조.

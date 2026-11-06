@@ -229,6 +229,7 @@ async def test_finalize_records_the_tier_it_billed():
         team_id = "22222222-2222-2222-2222-222222222222"
         dept_id = "33333333-3333-3333-3333-333333333333"
         sso_subject = "s"
+        key_prefix = None
 
     r = _Cap()
     rec = CostRecorder()

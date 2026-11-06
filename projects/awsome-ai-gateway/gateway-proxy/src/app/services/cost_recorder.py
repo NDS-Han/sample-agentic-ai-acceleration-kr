@@ -195,6 +195,7 @@ class CostRecorder:
         bedrock_request_id: str | None = None,
         client: str | None = None,
         status: str = "SUCCESS",
+        session_id: str | None = None,
     ) -> Decimal:
         """요청 완료 후 critical path 전체를 동기 await으로 수행. 실제 cost_usd 반환.
 
@@ -327,6 +328,7 @@ class CostRecorder:
                     bedrock_request_id=bedrock_request_id,
                     client=client,
                     status=norm_status,
+                    session_id=session_id,
                 )
             return Decimal("0")
 
@@ -639,6 +641,7 @@ class CostRecorder:
             bedrock_request_id=bedrock_request_id,
             client=client,
             status=_normalize_usage_status(status),
+            session_id=session_id,
         )
 
         return cost_usd
@@ -662,6 +665,7 @@ class CostRecorder:
         bedrock_request_id: str | None = None,
         client: str | None = None,
         status: str = "SUCCESS",
+        session_id: str | None = None,
     ) -> None:
         """XADD cost:stream — worker가 배치 소비하여 DB 쓰기 + threshold pub/sub.
 
@@ -712,6 +716,7 @@ class CostRecorder:
             key_prefix=auth_context.key_prefix,
             client=client,
             context_tier=context_tier,
+            session_id=session_id,
             # 요청 시작 시각 — requested_at/period/date 가 여기서 파생돼, 위 Redis
             # 카운터의 request_period() 와 같은 버킷을 가리킨다.
             requested_at=request_started_at(),

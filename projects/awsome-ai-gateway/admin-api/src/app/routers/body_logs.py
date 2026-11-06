@@ -17,7 +17,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -29,7 +29,7 @@ from app.core.auth import (
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.models.auth import User
-from app.models.usage import UsageLog
+from app.models.usage import UsageLog, UsageStatus
 from app.services.body_log_store import (
     BodyLogBatchResult,
     BodyLogLookupError,
@@ -86,6 +86,14 @@ async def _require_body_logging(request: Request, session: AsyncSession) -> None
         )
 
 
+def _status_str(status) -> str | None:
+    """UsageStatus 같은 str-enum 은 ``str()`` 이 ``"UsageStatus.SUCCESS"`` 를
+    낸다 — wire 값은 ``.value`` 로 정규화한다(순수 문자열 행도 통과)."""
+    if status is None:
+        return None
+    return str(getattr(status, "value", status))
+
+
 def _usage_lookup_stmt():
     return select(
         UsageLog.request_id,
@@ -114,28 +122,105 @@ async def list_body_log_sessions(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """usage 행을 (user, client) 별 시간 인접성으로 세션화해 반환한다.
+    """세션 목록 — 명시적 session_id 그룹핑 + NULL 행은 시간 휴리스틱 폴백.
 
-    대화 식별자는 본문 안(metadata.user_id)에만 있어 인덱스에서 그룹핑할 수
-    없다 — 같은 사용자+클라이언트의 연속 호출을 gap_minutes 공백으로 끊는
-    휴리스틱. 본문은 하나도 반환하지 않으므로 감사하지 않는다(monitoring
-    events 와 같은 민감도 계급).
+    게이트웨이가 원본 본문 metadata 의 session_<id> 를 usage_logs.session_id 에
+    기록한다(migration 0054). 있는 행은 그 키로 정확히 묶고 — 같은 유저의 동시
+    대화도 갈라진다 — NULL 행(구 레코드·비 Anthropic 클라이언트)만 기존
+    (user, client, gap) 휴리스틱으로 묶는다. 본문은 반환하지 않으므로 감사하지
+    않는다(monitoring events 와 같은 민감도 계급).
     """
     await _require_body_logging(request, session)
 
+    cutoff = None
+    if days > 0:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+
+    # ── 1) 명시적 세션 — session_id GROUP BY + 호출은 IN 쿼리 1회 ─────────
+    agg = (
+        select(
+            UsageLog.session_id,
+            func.min(UsageLog.requested_at).label("started_at"),
+            func.max(UsageLog.requested_at).label("ended_at"),
+            func.count().label("call_count"),
+            func.count()
+            .filter(UsageLog.status != UsageStatus.SUCCESS)
+            .label("error_count"),
+            func.max(UsageLog.user_id).label("user_id"),
+            func.max(User.email).label("user_email"),
+            func.max(UsageLog.client).label("client"),
+            func.array_agg(UsageLog.model_alias.distinct()).label("models"),
+        )
+        .select_from(UsageLog)
+        .outerjoin(User, User.id == UsageLog.user_id)
+        .where(UsageLog.session_id.is_not(None))
+        .group_by(UsageLog.session_id)
+        .order_by(func.max(UsageLog.requested_at).desc())
+        .limit(limit)
+    )
+    if cutoff is not None:
+        agg = agg.where(UsageLog.requested_at >= cutoff)
+    exact_rows = (await session.execute(agg)).all()
+
+    calls_by_sid: dict[str, list] = {}
+    sids = [r.session_id for r in exact_rows]
+    if sids:
+        cstmt = (
+            select(
+                UsageLog.session_id,
+                UsageLog.request_id,
+                UsageLog.requested_at,
+                UsageLog.model_alias,
+                UsageLog.status,
+                UsageLog.latency_ms,
+                UsageLog.cost_usd,
+            )
+            .where(UsageLog.session_id.in_(sids))
+            .order_by(UsageLog.requested_at.asc())
+        )
+        if cutoff is not None:
+            cstmt = cstmt.where(UsageLog.requested_at >= cutoff)
+        for c in (await session.execute(cstmt)).all():
+            calls_by_sid.setdefault(c.session_id, []).append(
+                {
+                    "request_id": c.request_id,
+                    "requested_at": c.requested_at.isoformat(),
+                    "model_alias": c.model_alias,
+                    "status": _status_str(c.status),
+                    "latency_ms": c.latency_ms,
+                    "cost_usd": float(c.cost_usd) if c.cost_usd is not None else None,
+                }
+            )
+
+    sessions = [
+        {
+            "key": f"sid|{r.session_id}",
+            "session_id": r.session_id,
+            "user_id": str(r.user_id) if r.user_id else None,
+            "user_email": r.user_email,
+            "client": r.client,
+            "started_at": r.started_at.isoformat(),
+            "ended_at": r.ended_at.isoformat(),
+            "call_count": r.call_count,
+            "error_count": r.error_count,
+            "models": sorted(m for m in (r.models or []) if m),
+            "calls": calls_by_sid.get(r.session_id, []),
+        }
+        for r in exact_rows
+    ]
+
+    # ── 2) NULL session_id 행 — 구 레코드·미추출 클라이언트 폴백 (기존 휴리스틱) ──
     stmt = (
         _usage_lookup_stmt()
+        .where(UsageLog.session_id.is_(None))
         .order_by(UsageLog.requested_at.desc())
         .limit(_SESSION_SCAN_LIMIT)
     )
-    if days > 0:
-        stmt = stmt.where(
-            UsageLog.requested_at >= datetime.now(timezone.utc) - timedelta(days=days)
-        )
+    if cutoff is not None:
+        stmt = stmt.where(UsageLog.requested_at >= cutoff)
     rows = (await session.execute(stmt)).all()
     truncated = len(rows) >= _SESSION_SCAN_LIMIT
 
-    # (user_id, client) 별 asc 정렬 → gap 분할 → 세션은 마지막 호출 desc.
     by_key: dict[tuple, list] = {}
     for r in rows:
         by_key.setdefault((r.user_id, r.client), []).append(r)
@@ -155,17 +240,18 @@ async def list_body_log_sessions(
             groups.append(cur)
 
     groups.sort(key=lambda g: g[-1].requested_at, reverse=True)
-    sessions = []
-    for g in groups[:limit]:
+    for g in groups:
         first, last = g[0], g[-1]
         errors = sum(
             1
             for r in g
-            if r.status is not None and str(r.status) not in ("SUCCESS", "success")
+            if r.status is not None
+            and (_status_str(r.status) or "").upper() != "SUCCESS"
         )
         sessions.append(
             {
                 "key": f"{first.user_id or 'none'}|{first.client or 'other'}|{last.requested_at.isoformat()}",
+                "session_id": None,
                 "user_id": str(first.user_id) if first.user_id else None,
                 "user_email": first.user_email,
                 "client": first.client,
@@ -179,7 +265,7 @@ async def list_body_log_sessions(
                         "request_id": r.request_id,
                         "requested_at": r.requested_at.isoformat(),
                         "model_alias": r.model_alias,
-                        "status": str(r.status) if r.status is not None else None,
+                        "status": _status_str(r.status),
                         "latency_ms": r.latency_ms,
                         "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
                     }
@@ -188,8 +274,13 @@ async def list_body_log_sessions(
             }
         )
 
+    sessions.sort(key=lambda x: x["ended_at"], reverse=True)
     return JSONResponse(
-        {"sessions": sessions, "scanned_rows": len(rows), "truncated": truncated},
+        {
+            "sessions": sessions[:limit],
+            "scanned_rows": len(rows) + len(exact_rows),
+            "truncated": truncated,
+        },
         headers=_NO_STORE,
     )
 

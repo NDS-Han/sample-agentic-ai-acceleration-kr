@@ -333,8 +333,18 @@ from app.routers.body_logs import (  # noqa: E402
 
 
 def _sess_row(
-    rid: str, minutes_ago: float, user=None, client="claude-code", model="m"
+    rid: str,
+    minutes_ago: float,
+    user=None,
+    client="claude-code",
+    model="m",
+    status="SUCCESS",
+    session_id=None,
 ) -> SimpleNamespace:
+    """status 는 prod 와 같은 str-enum — 순수 문자열로 넣으면 직렬화 회귀를 못 잡는다."""
+    from app.models.usage import UsageStatus
+
+    st = UsageStatus[status] if isinstance(status, str) else status
     uid = uuid.uuid5(uuid.NAMESPACE_DNS, user or "u")
     return SimpleNamespace(
         request_id=rid,
@@ -346,17 +356,55 @@ def _sess_row(
         client=client,
         latency_ms=100,
         model_alias=model,
-        status="SUCCESS",
+        status=st,
         cost_usd=None,
         is_streaming=True,
+        session_id=session_id,
     )
 
 
-def _session_rows(rows) -> MagicMock:
+def _agg_row(
+    session_id: str,
+    minutes_ago: float,
+    user="u",
+    client="claude-code",
+    call_count=2,
+    error_count=0,
+    models=("m",),
+) -> SimpleNamespace:
+    """session_id GROUP BY 쿼리의 집계 행 — 컬럼명은 라우터의 label 과 동일."""
+    return SimpleNamespace(
+        session_id=session_id,
+        started_at=NOW - timedelta(minutes=minutes_ago + 1),
+        ended_at=NOW - timedelta(minutes=minutes_ago),
+        call_count=call_count,
+        error_count=error_count,
+        user_id=uuid.uuid5(uuid.NAMESPACE_DNS, user),
+        user_email=f"{user}@e",
+        client=client,
+        models=list(models),
+    )
+
+
+def _session_rows(rows, exact=None, call_rows=None) -> MagicMock:
+    """세 쿼리를 SQL 형태로 구분해 반환 — 집계(GROUP BY) / 호출(IN) / NULL 스캔."""
     session = MagicMock()
-    result = MagicMock()
-    result.all.return_value = rows
-    session.execute = AsyncMock(return_value=result)
+    r_exact = MagicMock()
+    r_exact.all.return_value = exact or []
+    r_calls = MagicMock()
+    r_calls.all.return_value = call_rows or []
+    r_null = MagicMock()
+    r_null.all.return_value = rows
+
+    async def _exec(stmt, *a, **k):
+        sql = str(stmt).upper()
+        if "GROUP BY" in sql:
+            return r_exact
+        if "IN (" in sql:
+            return r_calls
+        return r_null
+
+    session.execute = AsyncMock(side_effect=_exec)
     return session
 
 
@@ -399,6 +447,54 @@ async def test_sessions_user_boundary():
     payload = _json.loads(resp.body)
     assert len(payload["sessions"]) == 2
     assert {s["user_email"] for s in payload["sessions"]} == {"x@e", "y@e"}
+
+
+@pytest.mark.asyncio
+async def test_sessions_explicit_session_id_groups_exactly():
+    """session_id 가 있으면 같은 유저의 동시 대화도 세션별로 정확히 갈라진다."""
+    exact = [
+        _agg_row("sess-A", 3, user="x", call_count=2),
+        _agg_row("sess-B", 4, user="x", call_count=1, error_count=1),
+    ]
+    calls = [
+        _sess_row("c1", 4, user="x", session_id="sess-A"),
+        _sess_row("c2", 3, user="x", session_id="sess-A"),
+        _sess_row("d1", 4, user="x", status="ERROR", session_id="sess-B"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 2
+    sa, sb = payload["sessions"]
+    assert sa["session_id"] == "sess-A"
+    assert [c["request_id"] for c in sa["calls"]] == ["c1", "c2"]
+    assert sb["session_id"] == "sess-B"
+    assert sb["error_count"] == 1
+    assert [c["request_id"] for c in sb["calls"]] == ["d1"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_mixed_exact_and_heuristic():
+    """session_id 세션과 NULL 폴백 세션이 ended_at desc 로 병합된다."""
+    exact = [_agg_row("sess-A", 10, user="x", call_count=1)]
+    calls = [_sess_row("c1", 10, user="x", session_id="sess-A")]
+    null_rows = [_sess_row("h1", 2, user="y")]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(),
+        session=_session_rows(null_rows, exact=exact, call_rows=calls),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 2
+    # NULL 휴리스틱 세션(2분 전)이 명시적 세션(10분 전)보다 최신 — 정렬 병합 확인.
+    assert payload["sessions"][0]["session_id"] is None
+    assert payload["sessions"][1]["session_id"] == "sess-A"
 
 
 @pytest.mark.asyncio
@@ -504,3 +600,30 @@ async def test_sessions_route_and_batch_route_registered():
     assert paths.index("/admin/body-logs/sessions") < paths.index(
         "/admin/body-logs/{request_id}"
     )
+
+
+@pytest.mark.asyncio
+async def test_sessions_error_count_only_non_success():
+    """str-enum 행에서 SUCCESS 는 에러가 아니다 — error_count 와 calls[].status
+    둘 다 wire 값(SUCCESS/ERROR)으로 나가야 한다."""
+    rows = [
+        _sess_row("ok1", 5, user="x", status="SUCCESS"),
+        _sess_row("ok2", 4, user="x", status="SUCCESS"),
+        _sess_row("bad1", 3, user="x", status="ERROR"),
+        _sess_row("tmo1", 2, user="x", status="TIMEOUT"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    import json as _json
+
+    s = _json.loads(resp.body)["sessions"][0]
+    assert s["call_count"] == 4
+    assert s["error_count"] == 2
+    assert [c["status"] for c in s["calls"]] == [
+        "SUCCESS",
+        "SUCCESS",
+        "ERROR",
+        "TIMEOUT",
+    ]

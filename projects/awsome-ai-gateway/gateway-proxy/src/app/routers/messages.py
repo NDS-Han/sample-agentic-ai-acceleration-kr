@@ -45,6 +45,7 @@ from app.services.fallback_loop import (
     unsettled_reservation_guard,
 )
 from app.services.downgrade_loader import DowngradePolicyLoader
+from app.services.session_key import extract_session_id
 from app.services.fallback_resolver import FallbackResolver, make_same_provider
 from app.services.router_service import (
     RouterService,
@@ -229,6 +230,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
         # returned, so other requests are byte-identical.
         req_for_bedrock = (normalize_inbound_native_blocks(req_data)
                            if isinstance(req_data, dict) else req_data)
+        # 원본 클라이언트 본문의 대화 세션 키 — provider 로 보내는 본문의 metadata 는
+        # 아래서 sso_subject 로 덮어쓰므로 반드시 req_data(원본)에서만 추출한다.
+        state["session_id"] = extract_session_id(req_data)
         if not isinstance(req_data, dict):
             return JSONResponse(
                 status_code=400,
@@ -890,6 +894,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 downgraded_from=state.get("downgraded_from"),
                 client=client,
                 status=usage_status_of(_ws_outcome),
+                session_id=state.get("session_id"),
             )
 
         # Body logging — hooks for the web-search path only. This branch returns BEFORE the
@@ -1103,6 +1108,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 ttft_ms=duration_ms,
                 rate_limit_state=state.pop("rate_limit_state", None),
                 client=client, status="ERROR",
+                session_id=state.get("session_id"),
             )
         # 전회로개방 early return 도 본문 레코드를 남긴다(R16 — 요청=레코드 1건).
         _bl = await resolve_body_logger(request.app.state, redis, session_factory)
@@ -1189,6 +1195,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     availability_fallback_from=availability_fallback_from,
                     client=client,
                     status=usage_status_of(None, status),
+                    session_id=state.get("session_id"),
                 )
             await _log_stream_error(bytes(chunk_iter))
             return JSONResponse(
@@ -1225,6 +1232,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                     bedrock_request_id=aws_request_id,
                     client=client,
                     status=usage_status_of(None, status),
+                    session_id=state.get("session_id"),
                 )
             await _log_stream_error(bytes(err_payload))
             return JSONResponse(
@@ -1280,6 +1288,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 bedrock_request_id=aws_request_id,
                 client=client,
                 status=usage_status_of(outcome, status),
+                session_id=state.get("session_id"),
             )
             # 폴백 루프는 헤더 도착(2xx) 시점에 record_success 한다 — 스트림이
             # 헤더 뒤에 죽는(미드스트림 예외 이벤트/오류 청크) 모델은 회로가 닫힌
@@ -1392,6 +1401,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 bedrock_request_id=(headers or {}).get("x-amzn-requestid"),
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         elif auth_context and status >= 500:
             # 전 후보 실패 — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
@@ -1405,6 +1415,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 availability_fallback_from=availability_fallback_from,
                 client=client,
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         else:
             # ⚠️ 2xx 인데 usage 가 비어 온 경로(응답 파싱 실패 → TokenUsage()).

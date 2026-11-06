@@ -87,6 +87,8 @@ export interface BodyLogSessionCall {
 
 export interface BodyLogSession {
   key: string;
+  /** 명시적 세션 키 (usage_logs.session_id). NULL=시간 인접성 휴리스틱 그룹. */
+  session_id: string | null;
   user_id: string | null;
   user_email: string | null;
   client: string | null;

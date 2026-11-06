@@ -101,6 +101,9 @@ class UsageLog(Base):
     # 요청을 인증한 VK 의 prefix (raw[:11], migration 0051) — 키 단위 사용량
     # 귀속. gateway-proxy 가 쓰고 여기선 읽기 전용. 배포 이전 행은 NULL.
     key_prefix: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 명시적 대화 세션 키 (migration 0054) — 게이트웨이가 원본 본문 metadata 의
+    # session_<id> 에서 추출. NULL=구 행/미추출 → 세션 뷰어가 휴리스틱 폴백.
+    session_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
 
 # ── ROIAggregation ──

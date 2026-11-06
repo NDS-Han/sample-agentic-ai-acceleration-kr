@@ -77,6 +77,10 @@ class CostStreamEntry(BaseModel):
     # budget_usages 집계를 건너뛴다(팀 없는 사용자의 지출이 default team 한도를
     # 소진해 엉뚱한 팀이 차단되는 것을 막는다).
     teamless: bool = False
+    # 클라이언트 대화 세션 키 (migration 0054) — 원본 본문 metadata.user_id 의
+    # session_<id> 접미(Claude Code) 또는 metadata.session_id 에서 추출.
+    # NULL 이면 세션 뷰어가 시간 인접성 휴리스틱으로 폴백 그룹핑한다.
+    session_id: str | None = None
 
     schema_version: int = Field(default=3)
 
@@ -113,6 +117,7 @@ class CostStreamEntry(BaseModel):
         client: str | None = None,
         context_tier: str | None = None,
         teamless: bool = False,
+        session_id: str | None = None,
         requested_at: datetime | None = None,
     ) -> CostStreamEntry:
         now = datetime.now(tz=UTC)
@@ -165,4 +170,5 @@ class CostStreamEntry(BaseModel):
             client=client,
             context_tier=context_tier,
             teamless=teamless,
+            session_id=session_id,
         )

@@ -32,6 +32,7 @@ from app.services.fallback_loop import (
     unsettled_reservation_guard,
 )
 from app.services.router_service import RouterService, model_account_route
+from app.services.session_key import extract_session_id
 
 logger = structlog.get_logger(__name__)
 
@@ -386,6 +387,9 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
     except Exception:
         body_dict = {}
 
+    # 원본 클라이언트 본문의 대화 세션 키(Anthropic 와이어 통과 경로).
+    state["session_id"] = extract_session_id(body_dict)
+
     # invoke/* 경로는 Anthropic 와이어를 그대로 통과시키므로 cache_control ttl="1h"
     # 가 그대로 온다 — 응답이 분해를 보고하지 않을 때의 과금 폴백 신호.
     from app.routers.messages import _has_1h_cache_control
@@ -567,6 +571,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                     #    정산되지 않아 앱별 카운터만 부풀어 허위
                     #    client_budget_exceeded 가 난다(E2E S2).
                     client=state.get("client"),
+                    session_id=state.get("session_id"),
                 )
 
             async def _drain_remaining() -> None:
@@ -711,6 +716,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 # 영구 누적된다.
                 client=state.get("client"),
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         elif auth_context and status >= 500:
             # 상류 5xx — usage_logs ERROR/TIMEOUT 행으로 monitoring 에 남긴다.
@@ -724,6 +730,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
                 rate_limit_state=state.pop("rate_limit_state", None),
                 client=state.get("client"),
                 status=usage_status_of(None, status),
+                session_id=state.get("session_id"),
             )
         else:
             # ⚠️ finalize 를 타지 않는 경로다(상류 4xx/5xx, 또는 usage 가 비어 온 응답).
