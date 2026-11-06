@@ -35,8 +35,8 @@ class _HelmSafeDumper(yaml.SafeDumper):
 
 
 _AMBIGUOUS_SCALAR = re.compile(
-    r"^(?:[-+]?[0-9][0-9_.,eE+-]*|0[xX][0-9a-fA-F]+|"
-    r"true|false|yes|no|on|off|null|~|\.inf|\.nan)$",
+    r"^(?:[-+]?(?:\.inf|\.nan)|[-+]?[0-9][0-9_.,eE+-]*|0[xX][0-9a-fA-F]+|"
+    r"true|false|yes|no|y|n|on|off|null|~)$",
     re.IGNORECASE,
 )
 

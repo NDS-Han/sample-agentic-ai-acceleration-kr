@@ -438,7 +438,7 @@ async def test_sessions_groups_by_gap():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -460,7 +460,7 @@ async def test_sessions_user_boundary():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -484,7 +484,7 @@ async def test_sessions_explicit_session_id_groups_exactly():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
     )
     import json as _json
@@ -520,7 +520,7 @@ async def test_sessions_heuristic_before_cursor_no_split():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=before, user=None, client=None, has_error=False, sid=None,
+        before=before, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -540,7 +540,7 @@ async def test_sessions_mixed_exact_and_heuristic():
     null_rows = [_sess_row("h1", 2, user="y")]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(),
         session=_session_rows(null_rows, exact=exact, call_rows=calls),
     )
@@ -566,7 +566,7 @@ async def test_sessions_collision_splits_calls_by_owner():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
     )
     import json as _json
@@ -602,7 +602,7 @@ async def test_sessions_toggle_off_403():
     with pytest.raises(HTTPException) as ei:
         await list_body_log_sessions(
             req, days=1, gap_minutes=30, limit=20,
-            before=None, user=None, client=None, has_error=False, sid=None,
+            before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows([]),
         )
     assert ei.value.status_code == 403
@@ -711,7 +711,7 @@ async def test_sessions_error_count_only_non_success():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -743,7 +743,7 @@ async def test_sessions_sid_direct_skips_heuristic():
     null_rows = [_sess_row("z1", 1, user="x", session_id=None)]
     resp = await list_body_log_sessions(
         _request(), days=30, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid="sess-abc",
+        before=None, before_key=[], user=None, client=None, has_error=False, sid="sess-abc",
         admin=_admin(),
         session=_session_rows(null_rows, exact=exact, call_rows=calls),
     )
@@ -768,7 +768,7 @@ async def test_sessions_sid_charset_validated():
     with pytest.raises(HTTPException) as ei:
         await list_body_log_sessions(
             req, days=1, gap_minutes=30, limit=20,
-            before=None, user=None, client=None, has_error=False,
+            before=None, before_key=[], user=None, client=None, has_error=False,
             sid="bad session!",
             admin=_admin(), session=MagicMock(),
         )
@@ -781,7 +781,7 @@ async def test_sessions_user_filter_no_match_returns_empty():
     rows = [_sess_row("a1", 5, user="x")]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user="nobody@x", client=None, has_error=False, sid=None,
+        before=None, before_key=[], user="nobody@x", client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows, uid_rows=[]),
     )
     import json as _json
@@ -798,7 +798,7 @@ async def test_sessions_has_more_and_next_before():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=1,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(),
         session=_session_rows([], exact=exact, call_rows=[]),
     )
@@ -822,7 +822,7 @@ async def test_sessions_has_error_filters_heuristic_groups():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=True, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=True, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -877,10 +877,10 @@ async def test_sessions_truncated_scan_defers_boundary_group(monkeypatch):
     ]
     exact = [_agg_row("sess-old", 500, user="y", call_count=1)]
 
-    monkeypatch.setattr(bl, "_SESSION_SCAN_LIMIT", 4)
+    monkeypatch.setattr(bl, "_SESSION_SCAN_LIMIT", 3)
     resp = await list_body_log_sessions(
         _request(), days=0, gap_minutes=30, limit=20,
-        before=None, user=None, client=None, has_error=False, sid=None,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows_p1, exact=exact),
     )
     p1 = _json.loads(resp.body)
@@ -911,3 +911,70 @@ async def test_sessions_truncated_scan_defers_boundary_group(monkeypatch):
     assert [c["request_id"] for c in s2["calls"]] == ["o3", "o2", "o1"]
     # 지연됐던 명시 세션도 이 페이지에 나온다 — 두 페이지 합집합이 전체를 덮음
     assert any(s["session_id"] == "sess-old" for s in p2["sessions"])
+
+
+@pytest.mark.asyncio
+async def test_sessions_exact_tie_cursor_excludes_returned():
+    """같은 ended_at 의 명시 세션 — before_key 로 이미 반환된 것만 빠진다."""
+    import json as _json
+
+    t = NOW - timedelta(minutes=30)
+    a = _agg_row("sess-A", 30, user="x")
+    a.ended_at = t
+    b = _agg_row("sess-B", 30, user="y")
+    b.ended_at = t
+    key_b = f"sid|sess-B|{b.user_id}|claude-code"
+    key_a = f"sid|sess-A|{a.user_id}|claude-code"
+
+    resp = await list_body_log_sessions(
+        _request(), days=0, gap_minutes=30, limit=20,
+        before=t, before_key=[key_a],
+        user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows([], exact=[a, b]),
+    )
+    payload = _json.loads(resp.body)
+    keys = [s["key"] for s in payload["sessions"]]
+    assert key_b in keys
+    assert key_a not in keys
+
+
+@pytest.mark.asyncio
+async def test_sessions_all_boundary_groups_still_progresses(monkeypatch):
+    """스캔 구간 전체가 한 경계 그룹이면 지연하면 빈 페이지 무한 반복 — 그대로
+    반환해(truncated 표시) 다음 페이지가 종료되는지 확인한다 (kiro r2 Must-1)."""
+    import json as _json
+
+    import app.routers.body_logs as bl
+
+    # 전부 한 세션 — 스캔 상한 3 에서 잘리고 경계 그룹이라 지연 대상이었던 경우.
+    rows = [
+        _sess_row("c1", 5, user="x"),
+        _sess_row("c2", 10, user="x"),
+        _sess_row("c3", 15, user="x"),
+        _sess_row("c4", 20, user="x"),  # 상한+1 행 — fetch limit+1 판정용
+    ]
+    monkeypatch.setattr(bl, "_SESSION_SCAN_LIMIT", 3)
+    resp = await list_body_log_sessions(
+        _request(), days=0, gap_minutes=30, limit=20,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    p1 = _json.loads(resp.body)
+    # 지연하면 빈 페이지+같은 커서의 무한 반복 — 반쪽이라도 내야 진행된다.
+    assert len(p1["sessions"]) == 1
+    s = p1["sessions"][0]
+    assert s["call_count"] == 3  # rows[:3] 까지만 — 반쪽임은 truncated 로 표시
+    assert p1["truncated"] is True
+    assert p1["next_before"] == s["ended_at"]
+
+    # 다음 페이지: 같은 세션은 before_key 로 빠지고 남은 게 없으면 종료.
+    resp2 = await list_body_log_sessions(
+        _request(), days=0, gap_minutes=30, limit=20,
+        before=datetime.fromisoformat(p1["next_before"]),
+        before_key=[s["key"]],
+        user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    p2 = _json.loads(resp2.body)
+    assert p2["sessions"] == []
+    assert p2["next_before"] is None

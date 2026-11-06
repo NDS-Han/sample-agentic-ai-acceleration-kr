@@ -75,7 +75,8 @@ describe('extractSseParts', () => {
 describe('decodeUnicodeEscapes', () => {
   it('와이어 \\uXXXX 시퀀스를 디코드하고 리터럴 백슬래시-u 는 보존한다', () => {
     expect(decodeUnicodeEscapes('SK\\ud558\\uc774\\ub2c9\\uc2a4')).toBe('SK하이닉스');
-    // 진짜 역슬래시+u 문자열(\\u)은 디코드하지 않는다
-    expect(decodeUnicodeEscapes('C:\\\\users\\\\x')).toBe('C:\\\\users\\\\x');
+    // 진짜 역슬래시+u 문자열(\\u)은 디코드하지 않는다 — \\u0041 은 유효한
+    // 이스케이프처럼 보이지만 선행 역슬래시가 리터럴이므로 보존돼야 한다.
+    expect(decodeUnicodeEscapes('\\\\u0041')).toBe('\\\\u0041');
   });
 });

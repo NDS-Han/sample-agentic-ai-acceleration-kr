@@ -175,3 +175,15 @@ def test_managed_tfvars_only_emits_enable_keys_when_on(tmp_path):
                                "notifications": {"provider": "mock"}})
     _, out, _ = _render(tmp_path, doc)
     assert "enable_notification_ses" not in (out / "terraform.tfvars").read_text()
+
+
+def test_values_yaml_quotes_numeric_like_tags(tmp_path):
+    """전부 숫자인 sha 태그는 go-yaml 이 수로 파싱한다 — 반드시 인용돼야 한다."""
+    doc = dict(BASE, images={"tag": "00991142"})
+    _, out, _ = _render(tmp_path, doc)
+    text = (out / "values.yaml").read_text()
+    assert "'00991142'" in text or '"00991142"' in text
+    # 문자 포함 sha 는 평문 유지
+    doc = dict(BASE, images={"tag": "761a3e4b"})
+    _, out, _ = _render(tmp_path, doc)
+    assert "tag: 761a3e4b" in (out / "values.yaml").read_text()

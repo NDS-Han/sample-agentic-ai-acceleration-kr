@@ -62,7 +62,8 @@ _MAX_FALLBACK_BYTES = 8 * 1024 * 1024
 #: 멈춰 찾은 것까지만 돌려야 한다. 초과 시 incomplete=True 로 표시해 나머지는
 #: 건별 재시도로 넘긴다. 이대로라도 클라이언트가 끊으면 서버는 스캔을 끝내고
 #: "열람 성공" 감사를 남긴다 — 못 본 열람이 성공으로 기록되는 걸 막는 상한.
-_FETCH_TIME_BUDGET_S = 10.0
+#: 체크는 단계 사이에만 하므로 시작한 객체 하나(~64MB 해제)분의 여유를 뺀다.
+_FETCH_TIME_BUDGET_S = 8.0
 
 #: JSONL 한 줄에서 request_id 를 뽑는 다중타겟 스캔용 — 유효 문자셋만 허용해
 #: 다른 필드의 유사 문자열이 매칭되는 걸 막는다.
@@ -293,6 +294,11 @@ class BodyLogStore:
             # 이 prefix 의 타깃이 전부 fallback 등으로 해결됐으면 LIST 도 생략.
             if not any(r in remaining for r, _, _ in win_jobs):
                 continue
+            # LIST 자체도 수 초 걸릴 수 있으니 시작 전에 예산을 확인한다 —
+            # expired 는 안쪽 루프 walrus 에서만 갱신되므로 여기서 먼저 잡는다.
+            if time.monotonic() > deadline:
+                expired = True
+                break
             all_keys, capped = await asyncio.to_thread(
                 self._list_partition_keys, prefix, min(ws for _, ws, _ in win_jobs)
             )

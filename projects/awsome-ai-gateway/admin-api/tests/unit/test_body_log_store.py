@@ -630,3 +630,38 @@ async def test_fetch_many_time_budget_marks_incomplete() -> None:
         assert result.incomplete is True
     finally:
         mod._FETCH_TIME_BUDGET_S = orig
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_budget_expires_mid_scan(monkeypatch) -> None:
+    """객체 하나를 연 뒤 예산 초과 — walrus 경로로 멈추고 incomplete+missing."""
+    import types
+
+    import app.services.body_log_store as mod
+
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+
+    # 창이 30분 이상 떨어진 두 타깃 — 창은 오름차순 처리라 r-1 이 먼저다.
+    t1 = _target("req-a1b2c3d4", req_at=REQ_AT - timedelta(hours=2))
+    t2 = _target("req-e5f6g7h8", req_at=REQ_AT)
+    keys = [_fh_key(REQ_AT), _fh_key(REQ_AT - timedelta(hours=2))]
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {"Contents": [{"Key": k} for k in keys]}
+    ]
+    store._s3.get_paginator.return_value = paginator
+
+    # monotonic 호출 순서: deadline, fallback×2, prefix 체크, 첫 후보 walrus,
+    # 둘째 후보 walrus(만료). 첫 객체 스캔은 끝난 뒤 두 번째에서 끊겨야 한다.
+    calls = iter([0.0, 0.0, 0.0, 0.0, 0.0, 999.0])
+    monkeypatch.setattr(mod, "time", types.SimpleNamespace(
+        monotonic=lambda: next(calls, 999.0)))
+    store._s3.get_object.return_value = {
+        "Body": io.BytesIO(_gz([{"request_id": "req-a1b2c3d4"}]))
+    }
+
+    result = await store.fetch_many([t1, t2])
+    assert "req-a1b2c3d4" in result.records
+    assert result.missing == ["req-e5f6g7h8"]
+    assert result.incomplete is True

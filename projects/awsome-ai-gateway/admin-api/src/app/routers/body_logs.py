@@ -228,8 +228,7 @@ async def list_body_log_sessions(
         before = before.replace(tzinfo=timezone.utc)
     # before 와 같은 ended_at 을 가진 세션 중 이미 반환한 것 — 커서는 초 단위라
     # 동시 종료 세션이 있으면 `< before` 만으로는 다음 페이지에서 빠진다.
-    # (직접 호출 테스트에서는 Query 객체가 그대로 오므로 list 일 때만 받는다)
-    exclude_keys = set(before_key if isinstance(before_key, list) else [])
+    exclude_keys = set(before_key)
 
     # user 부분일치 → user_id 목록으로 해석 (email 또는 uuid 텍스트).
     # 와일드카드 이스케이프 후 ilike — NULL user_id(agent 토큰)는 자연 제외.
@@ -386,7 +385,7 @@ async def list_body_log_sessions(
         _usage_lookup_stmt()
         .where(UsageLog.session_id.is_(None))
         .order_by(UsageLog.requested_at.desc())
-        .limit(_SESSION_SCAN_LIMIT)
+        .limit(_SESSION_SCAN_LIMIT + 1)
     )
     if cutoff is not None:
         stmt = stmt.where(UsageLog.requested_at >= cutoff)
@@ -405,7 +404,10 @@ async def list_body_log_sessions(
     elif client is not None:
         stmt = stmt.where(UsageLog.client == client)
     rows = (await session.execute(stmt)).all()
-    truncated = len(rows) >= _SESSION_SCAN_LIMIT
+    # 정확히 상한 개수인 경우까지 잘림으로 보면 다음 페이지도 같은 판정이라
+    # 진행이 멈춘다 — limit+1 로 읽어 실제 초과 여부만 잘림으로 본다.
+    truncated = len(rows) > _SESSION_SCAN_LIMIT
+    rows = rows[:_SESSION_SCAN_LIMIT]
     # 스캔 하한 — 상한에 잘렸으면 가장 오래된 행 아래에 행이 더 있다. 그 경계에
     # 걸친 그룹은 반쪽 세션이므로 이번 페이지에서 버리고 커서를 그 앞에 둔다.
     scan_floor = rows[-1].requested_at if truncated and rows else None
@@ -430,6 +432,7 @@ async def list_body_log_sessions(
 
     groups.sort(key=lambda g: g[-1].requested_at, reverse=True)
     deferred_until: datetime | None = None
+    deferred_sessions: list[dict] = []
     for g in groups:
         first, last = g[0], g[-1]
         gkey = f"{first.user_id or 'none'}|{first.client or 'other'}|{last.requested_at.isoformat()}"
@@ -439,14 +442,6 @@ async def list_body_log_sessions(
         ):
             # 커서 이후이거나 이미 반환된 타이 세션 — 버린다.
             continue
-        if scan_floor is not None and (
-            first.requested_at - scan_floor
-        ) <= timedelta(minutes=gap_minutes):
-            # 스캔 하한에 걸친 그룹 — 아래에 행이 더 있을 수 있어 반쪽 세션.
-            # 다음 페이지(더 아래까지 스캔)에서 온전히 복원되도록 지연시킨다.
-            if deferred_until is None or last.requested_at > deferred_until:
-                deferred_until = last.requested_at
-            continue
         errors = sum(
             1
             for r in g
@@ -455,39 +450,49 @@ async def list_body_log_sessions(
         )
         if has_error and errors == 0:
             continue
-        sessions.append(
-            {
-                "key": gkey,
-                "session_id": None,
-                "user_id": str(first.user_id) if first.user_id else None,
-                "user_email": first.user_email,
-                "client": first.client,
-                "started_at": first.requested_at.isoformat(),
-                "ended_at": last.requested_at.isoformat(),
-                "call_count": len(g),
-                "error_count": errors,
-                # 전부 NULL 이면 None — exact 경로(func.sum → NULL)와 일치시킨다.
-                "total_cost_usd": (
-                    sum(float(r.cost_usd) for r in g if r.cost_usd is not None)
-                    if any(r.cost_usd is not None for r in g)
-                    else None
-                ),
-                "models": sorted({r.model_alias for r in g if r.model_alias}),
-                "calls": [
-                    {
-                        "request_id": r.request_id,
-                        "requested_at": r.requested_at.isoformat(),
-                        "model_alias": r.model_alias,
-                        "status": _status_str(r.status),
-                        "latency_ms": r.latency_ms,
-                        "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
-                        "input_tokens": r.input_tokens,
-                        "output_tokens": r.output_tokens,
-                    }
-                    for r in g
-                ],
-            }
-        )
+        sess = {
+            "key": gkey,
+            "session_id": None,
+            "user_id": str(first.user_id) if first.user_id else None,
+            "user_email": first.user_email,
+            "client": first.client,
+            "started_at": first.requested_at.isoformat(),
+            "ended_at": last.requested_at.isoformat(),
+            "call_count": len(g),
+            "error_count": errors,
+            # 전부 NULL 이면 None — exact 경로(func.sum → NULL)와 일치시킨다.
+            "total_cost_usd": (
+                sum(float(r.cost_usd) for r in g if r.cost_usd is not None)
+                if any(r.cost_usd is not None for r in g)
+                else None
+            ),
+            "models": sorted({r.model_alias for r in g if r.model_alias}),
+            "calls": [
+                {
+                    "request_id": r.request_id,
+                    "requested_at": r.requested_at.isoformat(),
+                    "model_alias": r.model_alias,
+                    "status": _status_str(r.status),
+                    "latency_ms": r.latency_ms,
+                    "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
+                    "input_tokens": r.input_tokens,
+                    "output_tokens": r.output_tokens,
+                }
+                for r in g
+            ],
+        }
+        if scan_floor is not None and (
+            first.requested_at - scan_floor
+        ) <= timedelta(minutes=gap_minutes):
+            # 스캔 하한에 걸친 그룹 — 아래에 행이 더 있을 수 있어 반쪽 세션.
+            # 다음 페이지(더 아래까지 스캔)에서 온전히 복원되도록 지연시키되,
+            # 남는 세션이 하나도 없으면 진행을 위해 그대로 낸다(무한 빈 페이지
+            # 방지 — kiro r2). 지연 보관은 따로 둔다.
+            if deferred_until is None or last.requested_at > deferred_until:
+                deferred_until = last.requested_at
+            deferred_sessions.append(sess)
+            continue
+        sessions.append(sess)
 
     sessions.sort(key=lambda x: x["ended_at"], reverse=True)
     deferred_iso = deferred_until.isoformat() if deferred_until is not None else None
@@ -495,7 +500,14 @@ async def list_body_log_sessions(
         # 스캔 하한에 걸친 그룹보다 이전에 끝나는 세션도 함께 미룬다 — 그대로
         # 반환하면 커서(returned[-1].ended_at)가 지연 구간 아래로 내려가 커버
         # 못 한 구간의 세션이 어느 페이지에도 빠진다.
-        sessions = [s for s in sessions if s["ended_at"] > deferred_iso]
+        covered = [s for s in sessions if s["ended_at"] > deferred_iso]
+        if covered:
+            sessions = covered
+        else:
+            # 전부 미루면 빈 페이지가 같은 커서로 무한 반복된다 — 진행을 위해
+            # 지연분까지 낸다(truncated 플래그로 반쪽임은 표시된다).
+            sessions = sessions + deferred_sessions
+            sessions.sort(key=lambda x: x["ended_at"], reverse=True)
     returned = sessions[:limit]
     has_more = (
         exact_overflow
@@ -503,16 +515,7 @@ async def list_body_log_sessions(
         or len(sessions) > limit
         or deferred_iso is not None
     )
-    next_before: str | None = None
-    if has_more:
-        if returned:
-            next_before = returned[-1]["ended_at"]
-        elif deferred_until is not None:
-            # 페이지가 비어도 지연 구간은 다음에 나와야 한다 — 커서를 타이
-            # 세션이 포함되도록 P 직후에 둔다(비교가 <= 라 +1µs).
-            next_before = (
-                deferred_until + timedelta(microseconds=1)
-            ).isoformat()
+    next_before = returned[-1]["ended_at"] if has_more and returned else None
     return JSONResponse(
         {
             "sessions": returned,
