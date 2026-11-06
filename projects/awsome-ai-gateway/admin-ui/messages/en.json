@@ -1065,7 +1065,7 @@
       "validate": "Validate",
       "viz": "Chart",
       "proceed": "Proceed with this plan",
-      "editHint": "To change it, describe the edit in the input box (e.g. &quot;skip step 2&quot;)"
+      "editHint": "To change it, describe the edit in the input box (e.g. \"skip step 2\")"
     },
     "report": {
       "notFound": "Report not found (it may have expired).",
@@ -1398,7 +1398,7 @@
     "autoProvTitle": "Automatic Provisioning",
     "autoProvDesc": "On the first successful <code>gateway-cli login</code>, admin-api automatically creates the user and team from Cognito claims.",
     "autoProvUser": "User: identified by the Cognito <code>sub</code> claim. Email and name are synced from ID token claims.",
-    "autoProvTeam": "Team: a Cognito group matching <code>Claude_&lt;TEAM&gt;</code> places the user in that team. New teams are auto-created with $0 budget + HARD_BLOCK — calls are blocked until an admin sets a budget.",
+    "autoProvTeam": "Team: a Cognito group matching <code>Claude_'<TEAM>'</code> places the user in that team. New teams are auto-created with $0 budget + HARD_BLOCK — calls are blocked until an admin sets a budget.",
     "autoProvRole": "Role: matching <code>ADMIN_EMAILS</code> or <code>ADMIN_GROUPS</code> grants ADMIN, otherwise DEVELOPER.",
     "legacySts": "<strong>STS-based auth (legacy)</strong>: the pre-Cognito path that issued Virtual Keys directly from AWS SSO credentials is kept for compatibility. New users should use <code>gateway-cli login</code> (OIDC).",
     "binaryTitle": "Binary Downloads",
