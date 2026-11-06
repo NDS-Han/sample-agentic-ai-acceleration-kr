@@ -79,7 +79,7 @@ export default async function CLIPage() {
       </header>
 
       {/* 사전 준비 */}
-      <section className="glass glass-hover rounded-apple p-6 space-y-3">
+      <section className="glass rounded-apple p-6 space-y-3">
         <h2 className="text-base font-semibold">{t('prereqTitle')}</h2>
         <p className="text-sm text-muted-foreground">{t('prereqDesc')}</p>
         <CodeBlock
@@ -90,11 +90,31 @@ export default async function CLIPage() {
         <p className="text-xs text-muted-foreground">{t('prereqPsNote')}</p>
       </section>
 
+      {/* 다운로드 카드 — 설치 절차 1단계가 다운로드라 가이드 앞에 둔다 */}
+      <section className="space-y-3">
+        <h2 className="text-base font-semibold">{t('binaryTitle')}</h2>
+        {!downloadsResult.ok ? (
+          <ErrorState compact />
+        ) : downloads.length === 0 ? (
+          // admin-api 는 CLI_DIST_DIR 에 실제로 있는 패키지만 광고한다(예전엔 없는 파일도
+          // 0.0 MB 카드로 광고해 누르면 404 였다). 비어 있으면 원인을 알려 준다.
+          <p className="text-muted-foreground text-sm">
+            {t.rich('emptyDownloads', { code })}
+          </p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+            {downloads.map((item) => (
+              <CLIDownloadCard key={`${item.os}-${item.arch}`} item={item} />
+            ))}
+          </div>
+        )}
+      </section>
+
       {/* 설치 가이드 — OS 병렬 */}
       <section className="space-y-3">
         <h2 className="text-base font-semibold">{t('installTitle')}</h2>
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="glass glass-hover rounded-apple p-4 text-sm space-y-2">
+          <div className="glass rounded-apple p-4 text-sm space-y-2">
             <p className="font-semibold">{t('installLinuxLabel')}</p>
             <CodeBlock
               html={installLinuxHtml}
@@ -102,7 +122,7 @@ export default async function CLIPage() {
               filename="install.sh"
             />
           </div>
-          <div className="glass glass-hover rounded-apple p-4 text-sm space-y-2">
+          <div className="glass rounded-apple p-4 text-sm space-y-2">
             <p className="font-semibold">{t('installWindowsLabel')}</p>
             <CodeBlock
               html={installWindowsHtml}
@@ -165,7 +185,7 @@ export default async function CLIPage() {
       </section>
 
       {/* 자동 프로비저닝 안내 */}
-      <section className="glass glass-hover rounded-apple p-6 space-y-2 text-sm">
+      <section className="glass rounded-apple p-6 space-y-2 text-sm">
         <h2 className="text-base font-semibold">{t('autoProvTitle')}</h2>
         <p className="text-muted-foreground">
           {t.rich('autoProvDesc', { code })}
@@ -187,26 +207,6 @@ export default async function CLIPage() {
             ),
           })}
         </p>
-      </section>
-
-      {/* 다운로드 카드 */}
-      <section className="space-y-3">
-        <h2 className="text-base font-semibold">{t('binaryTitle')}</h2>
-        {!downloadsResult.ok ? (
-          <ErrorState compact />
-        ) : downloads.length === 0 ? (
-          // admin-api 는 CLI_DIST_DIR 에 실제로 있는 패키지만 광고한다(예전엔 없는 파일도
-          // 0.0 MB 카드로 광고해 누르면 404 였다). 비어 있으면 원인을 알려 준다.
-          <p className="text-muted-foreground text-sm">
-            {t.rich('emptyDownloads', { code })}
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-            {downloads.map((item) => (
-              <CLIDownloadCard key={`${item.os}-${item.arch}`} item={item} />
-            ))}
-          </div>
-        )}
       </section>
     </div>
   );

@@ -14,18 +14,29 @@ import { AlertTriangle, RefreshCw } from 'lucide-react';
  * 구분이 안 되는 빈 테이블이 된다(운영 도구에서 최악의 거짓말). 실패 시엔 이
  * 컴포넌트를 렌더해 명시적으로 알리고 router.refresh() 재시도를 제공한다.
  */
-export function ErrorState({ compact = false }: { compact?: boolean }) {
+export function ErrorState({
+  compact = false,
+  message,
+  onRetry,
+}: {
+  compact?: boolean;
+  /** 데이터 별 실패 문구 — 없으면 공통 loadFailed. */
+  message?: string;
+  /** 클라이언트 fetch 데이터는 router.refresh() 가 재조회하지 못하므로 재시도를 직접 받는다. */
+  onRetry?: () => void;
+}) {
   const t = useTranslations('common');
   const router = useRouter();
+  const retry = onRetry ?? (() => router.refresh());
 
   if (compact) {
     return (
       <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
         <AlertTriangle size={14} className="text-amber-500" aria-hidden="true" />
-        <span>{t('loadFailed')}</span>
+        <span>{message ?? t('loadFailed')}</span>
         <button
           type="button"
-          onClick={() => router.refresh()}
+          onClick={retry}
           className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2"
         >
           <RefreshCw size={12} aria-hidden="true" />
@@ -40,11 +51,11 @@ export function ErrorState({ compact = false }: { compact?: boolean }) {
       <div className="flex h-12 w-12 items-center justify-center rounded-full bg-amber-500/10">
         <AlertTriangle size={22} className="text-amber-500" aria-hidden="true" />
       </div>
-      <p className="text-sm font-medium text-foreground">{t('loadFailed')}</p>
+      <p className="text-sm font-medium text-foreground">{message ?? t('loadFailed')}</p>
       <p className="text-xs text-muted-foreground max-w-sm">{t('loadFailedDesc')}</p>
       <button
         type="button"
-        onClick={() => router.refresh()}
+        onClick={retry}
         className="mt-1 inline-flex items-center gap-1.5 rounded-md border border-border bg-background px-3 py-2 text-sm font-medium hover:bg-muted transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       >
         <RefreshCw size={14} aria-hidden="true" />

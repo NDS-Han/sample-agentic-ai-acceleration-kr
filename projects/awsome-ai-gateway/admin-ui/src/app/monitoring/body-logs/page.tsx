@@ -47,8 +47,11 @@ export default async function BodyLogsPage() {
         </Link>
       </div>
       {/* 마스킹 없는 원문이고 열람이 감사된다는 건 화면 어디서든 보여야 한다 —
-          어느 탭에 들어가든 상시 고지. */}
-      <p className="text-xs text-muted-foreground">{t('auditNotice')}</p>
+          어느 탭에 들어가든 상시 고지. 고지는 이 한 곳에 두고(검색 힌트·버튼
+          라벨의 중복 문구는 지운다) 눈에 띄는 콜아웃으로 표시한다. */}
+      <div className="rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs text-amber-800 dark:border-amber-500/30 dark:bg-amber-500/10 dark:text-amber-300">
+        {t('auditNotice')}
+      </div>
       <BodyLogsTabs />
     </div>
   );

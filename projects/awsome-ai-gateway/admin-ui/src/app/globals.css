@@ -403,6 +403,13 @@
     box-shadow: inset 0 0 0 1px hsl(330 80% 60% / 0.28);
   }
   .dark .badge-pink { color: hsl(330 90% 78%); }
+  /* danger — 오류/실패 (--destructive 기반). pink 는 역할 강조와 분리한다. */
+  .badge-danger {
+    background: linear-gradient(135deg, hsl(var(--destructive) / 0.22), hsl(var(--destructive) / 0.08) 70%, transparent);
+    color: hsl(var(--destructive));
+    box-shadow: inset 0 0 0 1px hsl(var(--destructive) / 0.30);
+  }
+  .dark .badge-danger { color: hsl(0 90% 72%); }
   /* amber — 주의 (WARNING) */
   .badge-amber {
     background: linear-gradient(135deg, hsl(40 95% 58% / 0.24), hsl(28 90% 60% / 0.10) 70%, transparent);

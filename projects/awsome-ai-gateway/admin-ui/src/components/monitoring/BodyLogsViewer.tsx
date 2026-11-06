@@ -19,6 +19,7 @@ import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { ErrorState } from '@/components/common/ErrorState';
 import { BodyRecordContent } from './bodyLogRender';
 import { eventTone } from './EventLog';
 
@@ -283,20 +284,8 @@ export function BodyLogsViewer({
           </div>
         </div>
         {events === null ? (
-          // 이벤트는 클라이언트에서 가져오므로 ErrorState(router.refresh 재시도)를
-          // 쓰면 다시 조회되지 않는다 — 명시 재시도로 목록 fetch 를 다시 부른다.
-          <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
-            <span>{tev('fetchFailed')}</span>
-            <button
-              type="button"
-              onClick={() => refreshEvents()}
-              disabled={listPending}
-              className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2 disabled:opacity-50"
-            >
-              <RefreshCw size={12} aria-hidden="true" />
-              {t('retry')}
-            </button>
-          </div>
+          // 이벤트는 클라이언트 fetch 라 onRetry 로 목록을 다시 부른다.
+          <ErrorState compact message={tev('fetchFailed')} onRetry={() => refreshEvents()} />
         ) : shown.length === 0 ? (
           <p className="text-sm text-muted-foreground">
             {/* 사용자 필터는 가져온 200건 안에서만 거른다 — 피크 때는 몇 분치라

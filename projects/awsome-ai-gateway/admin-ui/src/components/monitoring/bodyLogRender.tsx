@@ -4,7 +4,7 @@
 
 import { useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
-import { Copy } from 'lucide-react';
+import { ChevronDown, ChevronRight, Copy, Wrench } from 'lucide-react';
 
 import type { BodyLogResponse } from '@/lib/actions/body-logs';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
@@ -544,7 +544,7 @@ export function nonstreamResponseParts(body: Record<string, unknown>): ResponseP
 }
 
 export function statusTone(status: string): BadgeTone {
-  if (status === 'ERROR' || status === 'error') return 'pink';
+  if (status === 'ERROR' || status === 'error') return 'danger';
   if (status === 'TIMEOUT' || status === 'partial') return 'amber';
   return 'teal';
 }
@@ -578,9 +578,13 @@ function Collapsible({
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
-        className="text-xs text-muted-foreground hover:text-foreground"
+        className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
       >
-        {open ? '▾ ' : '▸ '}
+        {open ? (
+          <ChevronDown size={12} aria-hidden="true" />
+        ) : (
+          <ChevronRight size={12} aria-hidden="true" />
+        )}
         {label}
       </button>
       {open ? children : null}
@@ -645,12 +649,12 @@ export function BodyRecordContent({
   usageStatus?: string | null;
 }) {
   const t = useTranslations('monitoring.bodyLogs');
+  const tev = useTranslations('monitoring.events');
   const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
   const [rawReq, setRawReq] = useState(false);
   const [rawRes, setRawRes] = useState(false);
-  const [rawReqFull, setRawReqFull] = useState(false);
   const [showAllTurns, setShowAllTurns] = useState(false);
   const rec = data.record;
 
@@ -685,50 +689,73 @@ export function BodyRecordContent({
   const sysText = systemTextOf(reqBody);
   const toolsDef = reqBody.tools;
 
+  const statusValue = usageStatus ?? rec?.status ?? '';
+  const STATUS_LABELS: Record<string, string> = {
+    ERROR: tev('types.ERROR'),
+    TIMEOUT: tev('types.TIMEOUT'),
+    SLOW_REQUEST: tev('types.SLOW_REQUEST'),
+    SUCCESS: tev('types.SUCCESS'),
+  };
+  const fmtSec = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  const TURN_LABELS: Record<string, string> = {
+    user: t('turnUser'),
+    assistant: t('turnAssistant'),
+    tool: t('turnTool'),
+    reasoning: t('turnReasoning'),
+  };
+
   return (
     <div>
-      {/* 메타 */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <Badge tone={statusTone(usageStatus ?? rec?.status ?? '')}>
-          {usageStatus ?? rec?.status ?? '-'}
-        </Badge>
-        <span>{rec?.model_alias ?? data.model_alias}</span>
-        <span>·</span>
-        <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>
-        <span>·</span>
-        <span className="font-mono">{data.request_id}</span>
-        {(data.user_email ?? rec?.user_id) && (
-          <>
-            <span>·</span>
+      {/* 메타 — 1행은 신원(상태·모델·시각·request_id·사용자·클라이언트·스트림),
+          2행은 수치 dl(지연·첫토큰·비용·토큰). 지연 단위는 호출 행과 같은 s. */}
+      <div className="mb-4 space-y-1.5 text-xs text-muted-foreground">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <Badge tone={statusTone(statusValue)}>
+            {STATUS_LABELS[statusValue] ?? statusValue ?? '-'}
+          </Badge>
+          <span className="text-foreground">{rec?.model_alias ?? data.model_alias}</span>
+          <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>
+          <span className="font-mono">{data.request_id}</span>
+          {(data.user_email ?? rec?.user_id) && (
             <span title={rec?.user_id ?? undefined}>{data.user_email ?? rec?.user_id}</span>
-          </>
-        )}
-        {data.client && (
-          <>
-            <span>·</span>
-            <Badge tone="neutral">{data.client}</Badge>
-          </>
-        )}
-        {rec?.is_streaming && <Badge tone="neutral">{t('streamTag')}</Badge>}
-        {data.latency_ms != null && (
-          <span>{t('latencyMs', { ms: data.latency_ms })}</span>
-        )}
-        {data.ttft_ms != null && <span>{t('ttftTag', { ms: data.ttft_ms })}</span>}
-        {data.cost_usd != null && <span>{fmtUsd(data.cost_usd)}</span>}
-        {data.input_tokens != null && (
-          <span>
-            {t('tokensIn', { n: fmtTokensCompact(data.input_tokens) })}
-            {data.output_tokens != null
-              ? ` / ${t('tokensOut', { n: fmtTokensCompact(data.output_tokens) })}`
-              : ''}
-          </span>
-        )}
-        {truncated && <Badge tone="amber">{t('truncated')}</Badge>}
-        {data.oversized && <Badge tone="amber">{t('oversized')}</Badge>}
-        {data.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
-        {data.duplicates > 0 && (
-          <Badge tone="neutral">{t('duplicates', { count: data.duplicates })}</Badge>
-        )}
+          )}
+          {data.client && <Badge tone="neutral">{data.client}</Badge>}
+          {rec?.is_streaming && <Badge tone="neutral">{t('streamTag')}</Badge>}
+          {truncated && <Badge tone="amber">{t('truncated')}</Badge>}
+          {data.oversized && <Badge tone="amber">{t('oversized')}</Badge>}
+          {data.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
+          {data.duplicates > 0 && (
+            <Badge tone="neutral">{t('duplicates', { count: data.duplicates })}</Badge>
+          )}
+        </div>
+        <dl className="flex flex-wrap gap-x-4 gap-y-0.5">
+          {data.latency_ms != null && (
+            <div>
+              <dt className="inline">{t('latencyLabel')}</dt>{' '}
+              <dd className="num inline">{fmtSec(data.latency_ms)}</dd>
+            </div>
+          )}
+          {data.ttft_ms != null && (
+            <div>
+              <dt className="inline">{t('ttftLabel')}</dt>{' '}
+              <dd className="num inline">{fmtSec(data.ttft_ms)}</dd>
+            </div>
+          )}
+          {data.cost_usd != null && (
+            <div>
+              <dt className="inline">{t('costLabel')}</dt>{' '}
+              <dd className="num inline">{fmtUsd(data.cost_usd)}</dd>
+            </div>
+          )}
+          {(data.input_tokens != null || data.output_tokens != null) && (
+            <div>
+              <dt className="inline">{t('tokensLabel')}</dt>{' '}
+              <dd className="num inline">
+                {fmtTokensCompact(data.input_tokens)}→{fmtTokensCompact(data.output_tokens)}
+              </dd>
+            </div>
+          )}
+        </dl>
       </div>
 
       {data.oversized && (
@@ -759,9 +786,11 @@ export function BodyRecordContent({
               </button>
             </div>
           </div>
-          {unparseable && <p className="mb-1 text-xs text-amber-600">{t('unparseable')}</p>}
+          {unparseable && (
+            <p className="mb-1 text-xs text-amber-600 dark:text-amber-400">{t('unparseable')}</p>
+          )}
           {rawWrapped && !unparseable && (
-            <p className="mb-1 text-xs text-amber-600">{t('rawWrapped')}</p>
+            <p className="mb-1 text-xs text-amber-600 dark:text-amber-400">{t('rawWrapped')}</p>
           )}
           {rawReq ? (
             <JsonBlock value={reqBody} />
@@ -783,7 +812,9 @@ export function BodyRecordContent({
                 </Collapsible>
               ) : null}
               {turns.length ? (
-                <div className="max-h-96 space-y-3 overflow-auto rounded-md border border-border p-3">
+                /* 목록 자체는 다이얼로그/페이지 스크롤에 맡긴다 — 안쪽에 또
+                   스크롤을 두면 휠이 내부에 갇혀 긴 프롬프트를 읽기 어렵다. */
+                <div className="space-y-3 rounded-md border border-border p-3">
                   {hiddenTurns > 0 && (
                     <button
                       type="button"
@@ -796,15 +827,17 @@ export function BodyRecordContent({
                   {turns.map((turn, i) => (
                     <div key={i}>
                       <p
-                        className={`mb-0.5 text-[11px] font-medium uppercase tracking-wide ${
+                        className={`mb-0.5 text-[11px] font-medium tracking-wide ${
                           turn.role === 'assistant'
                             ? 'text-teal-600 dark:text-teal-400'
                             : turn.role === 'reasoning' || turn.role === 'tool'
-                              ? 'text-violet-600 dark:text-violet-400'
-                              : 'text-muted-foreground'
+                              ? 'text-sky-600 dark:text-sky-400'
+                              : 'text-foreground'
                         }`}
                       >
-                        {turn.role}
+                        {/* 관리자가 찾는 건 사용자 턴 — 라벨을 한글로, 사용자를
+                            가장 선명하게(violet 은 배지 톤이 아니라 제외). */}
+                        {TURN_LABELS[turn.role] ?? turn.role}
                       </p>
                       {turn.text ? (
                         <pre className="whitespace-pre-wrap break-words text-sm">
@@ -814,7 +847,12 @@ export function BodyRecordContent({
                       {turn.tools.map((tu, j) => (
                         <Collapsible
                           key={j}
-                          label={`⚙ ${t('toolCall', { name: tu.name })}`}
+                          label={
+                            <span className="inline-flex items-center gap-1">
+                              <Wrench size={11} aria-hidden="true" />
+                              {t('toolCall', { name: tu.name })}
+                            </span>
+                          }
                         >
                           {tu.input != null ? (
                             <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 text-xs">
@@ -835,7 +873,9 @@ export function BodyRecordContent({
                             </>
                           }
                         >
-                          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-xs italic text-muted-foreground">
+                          {/* 한글은 진짜 이탤릭체가 없어 브라우저가 기울여
+                              렌더를 깎는다 — muted 만으로 구분한다. */}
+                          <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-words rounded-md bg-muted p-2 text-xs text-muted-foreground">
                             {r.text}
                           </pre>
                         </Collapsible>
@@ -845,28 +885,6 @@ export function BodyRecordContent({
                 </div>
               ) : (
                 <p className="text-xs text-muted-foreground">{t('noUserMessage')}</p>
-              )}
-              {/* <details> 는 접혀 있어도 children 이 렌더된다 — 수 MB 요청을
-                  매 렌더 stringify 하지 않도록 열렸을 때만 그린다. */}
-              {rawReqFull ? (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setRawReqFull(false)}
-                    className="mt-2 text-xs text-muted-foreground hover:text-foreground"
-                  >
-                    {t('hideFullJson')}
-                  </button>
-                  <JsonBlock value={reqBody} />
-                </>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => setRawReqFull(true)}
-                  className="mt-2 text-xs text-muted-foreground hover:text-foreground"
-                >
-                  {t('fullRequestJson')}
-                </button>
               )}
             </>
           )}
@@ -896,12 +914,20 @@ export function BodyRecordContent({
           {rawRes ? (
             <JsonBlock value={displayResBody} />
           ) : resParts.text || resParts.toolCalls.length ? (
-            <div className="max-h-80 space-y-2 overflow-auto rounded-md border border-border p-3">
+            <div className="space-y-2 rounded-md border border-border p-3">
               {resParts.text ? (
                 <pre className="whitespace-pre-wrap break-words text-sm">{resParts.text}</pre>
               ) : null}
               {resParts.toolCalls.map((tc, j) => (
-                <Collapsible key={j} label={`⚙ ${t('toolCall', { name: tc.name })}`}>
+                <Collapsible
+                  key={j}
+                  label={
+                    <span className="inline-flex items-center gap-1">
+                      <Wrench size={11} aria-hidden="true" />
+                      {t('toolCall', { name: tc.name })}
+                    </span>
+                  }
+                >
                   {tc.input != null ? (
                     <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 text-xs">
                       {toolInputJson(tc.input)}

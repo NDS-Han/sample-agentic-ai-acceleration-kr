@@ -111,7 +111,7 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
               aria-label={t('copyChecksum')}
             >
               {copied ? (
-                <Check size={12} className="text-green-600" aria-hidden="true" />
+                <Check size={12} className="text-success" aria-hidden="true" />
               ) : (
                 <Copy size={12} aria-hidden="true" />
               )}
@@ -157,7 +157,7 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
               aria-label={t('copyCommand')}
             >
               {cmdCopied ? (
-                <><Check size={12} className="text-green-600" /> {t('copied')}</>
+                <><Check size={12} className="text-success" /> {t('copied')}</>
               ) : (
                 <><Copy size={12} /> {t('copy')}</>
               )}

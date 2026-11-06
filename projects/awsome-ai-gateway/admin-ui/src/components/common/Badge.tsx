@@ -2,7 +2,7 @@
 
 import type { ReactNode } from 'react';
 
-export type BadgeTone = 'teal' | 'sky' | 'pink' | 'amber' | 'neutral';
+export type BadgeTone = 'teal' | 'sky' | 'pink' | 'amber' | 'neutral' | 'danger';
 
 interface BadgeProps {
   tone?: BadgeTone;
@@ -16,6 +16,7 @@ const TONE_CLASS: Record<BadgeTone, string> = {
   pink: 'badge-pink',
   amber: 'badge-amber',
   neutral: 'badge-neutral',
+  danger: 'badge-danger',
 };
 
 /**

@@ -20,6 +20,8 @@ import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
+import { SkeletonTable } from '@/components/common/SkeletonTable';
+import { ErrorState } from '@/components/common/ErrorState';
 import { BodyRecordContent, statusTone } from './bodyLogRender';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
@@ -78,9 +80,18 @@ export function BodyLogSessions({
   onFiltersApplied?: (_f: SessionFilters) => void;
 }) {
   const t = useTranslations('monitoring.bodyLogs');
+  const tev = useTranslations('monitoring.events');
   const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
+
+  // usage status → 번역 라벨. 모르는 값은 원문 폴백(EventLog/뷰어와 동일 규칙).
+  const STATUS_LABELS: Record<string, string> = {
+    ERROR: tev('types.ERROR'),
+    TIMEOUT: tev('types.TIMEOUT'),
+    SLOW_REQUEST: tev('types.SLOW_REQUEST'),
+    SUCCESS: tev('types.SUCCESS'),
+  };
 
   const [filters, setFilters] = useState<SessionFilters>(
     initialFilters ?? { days: 1, user: '', client: '', hasError: false },
@@ -512,42 +523,48 @@ export function BodyLogSessions({
           </button>
         </div>
 
-        {/* 세션 헤더 */}
+        {/* 세션 헤더 — 신원(1행)과 수치(배지 아닌 label:value)를 나누고 배지는
+            실제 경고/상태에만 둔다. 추정 표시는 경고가 아니라 묶음 방식 안내라
+            neutral — codex/cowork 는 항상 session_id 가 없어 amber 면 경고색이
+            무뎌진다. */}
         <div className="glass rounded-apple p-4">
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="font-medium">{selected.user_email ?? selected.user_id ?? '-'}</span>
             {selected.client && <Badge tone="neutral">{selected.client}</Badge>}
             {selected.session_id === null && (
               <span title={t('heuristicSessionTitle')}>
-                <Badge tone="amber">{t('heuristicSession')}</Badge>
+                <Badge tone="neutral">{t('heuristicSession')}</Badge>
               </span>
             )}
             <span className="text-muted-foreground">
               {fmtDateTime(selected.started_at, locale, tz)} → {fmtDateTime(selected.ended_at, locale, tz)}
             </span>
-            <Badge tone="neutral">{t('callsCount', { count: selected.call_count })}</Badge>
-            {selected.error_count > 0 && (
-              <button
-                type="button"
-                aria-pressed={errorsOnly}
-                title={t('errorsOnlyTitle')}
-                onClick={() => setErrorsOnly((v) => !v)}
-                className={errorsOnly ? 'rounded-full ring-1 ring-pink-500' : ''}
-              >
-                <Badge tone="pink">{t('errorsCount', { count: selected.error_count })}</Badge>
-              </button>
-            )}
-            {errorsOnly && (
-              <button
-                type="button"
-                onClick={() => setErrorsOnly(false)}
-                className="text-xs text-primary hover:underline"
-              >
-                {t('errorsOnlyOff')}
-              </button>
-            )}
+            <span className="text-muted-foreground">
+              {t('callsCount', { count: selected.call_count })}
+            </span>
             {selected.total_cost_usd != null && (
-              <Badge tone="neutral">{fmtUsd(selected.total_cost_usd)}</Badge>
+              <span className="text-muted-foreground">{fmtUsd(selected.total_cost_usd)}</span>
+            )}
+            {selected.error_count > 0 && (
+              /* 오류 필터 — 세그먼트 토글. 배지 클릭은 발견이 안 된다. */
+              <div className="inline-flex items-center gap-0.5 rounded-lg bg-muted p-0.5 text-xs" role="group" aria-label={t('errorsOnlyTitle')}>
+                <button
+                  type="button"
+                  aria-pressed={!errorsOnly}
+                  onClick={() => setErrorsOnly(false)}
+                  className={`rounded-md px-2 py-1 ${errorsOnly ? 'text-muted-foreground' : 'bg-card font-medium shadow-sm'}`}
+                >
+                  {t('errorsOnlyOff')}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={errorsOnly}
+                  onClick={() => setErrorsOnly(true)}
+                  className={`rounded-md px-2 py-1 ${errorsOnly ? 'bg-card font-medium text-destructive shadow-sm' : 'text-muted-foreground'}`}
+                >
+                  {t('errorsCount', { count: selected.error_count })}
+                </button>
+              </div>
             )}
             {callsCut && (
               <Badge tone="amber">
@@ -591,40 +608,46 @@ export function BodyLogSessions({
                   type="button"
                   aria-expanded={isOpen}
                   onClick={() => toggleCall(call.request_id)}
-                  className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-sm"
+                  className="grid w-full grid-cols-[14px_2.5rem_9rem_minmax(6rem,1fr)_5.5rem_3.5rem_5rem_6rem_auto] items-center gap-2 px-4 py-3 text-left text-sm"
                 >
                   {isOpen ? (
                     <ChevronDown size={14} aria-hidden="true" />
                   ) : (
                     <ChevronRight size={14} aria-hidden="true" />
                   )}
-                  <span className="w-8 text-xs text-muted-foreground">#{i + 1}</span>
+                  <span className="text-xs text-muted-foreground">#{i + 1}</span>
                   <span className="whitespace-nowrap">
                     {fmtDateTime(call.requested_at, locale, tz)}
                   </span>
-                  <span>{call.model_alias ?? '-'}</span>
-                  <Badge tone={statusTone(call.status ?? '')}>{call.status ?? '-'}</Badge>
-                  {call.latency_ms != null && (
-                    <span className="text-xs text-muted-foreground">
-                      {(call.latency_ms / 1000).toFixed(1)}s
-                    </span>
-                  )}
-                  {call.cost_usd != null && (
-                    <span className="text-xs text-muted-foreground">
-                      {fmtUsd(call.cost_usd)}
-                    </span>
-                  )}
-                  {(call.input_tokens != null || call.output_tokens != null) && (
-                    <span className="text-xs text-muted-foreground">
-                      {fmtTokensCompact(call.input_tokens)}→{fmtTokensCompact(call.output_tokens)}
-                    </span>
-                  )}
-                  {res?.data?.duplicates ? (
-                    <Badge tone="neutral">
-                      {t('duplicates', { count: res.data.duplicates })}
-                    </Badge>
-                  ) : null}
-                  {res?.data?.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
+                  <span className="truncate">{call.model_alias ?? '-'}</span>
+                  {/* 정상 호출에 매 행 색 배지를 달면 드문 오류가 색에 묻힌다 —
+                      SUCCESS 는 빈 셀, 이상 상태만 번역 라벨 배지로 표시한다. */}
+                  <span>
+                    {call.status && call.status !== 'SUCCESS' ? (
+                      <Badge tone={statusTone(call.status)}>
+                        {STATUS_LABELS[call.status] ?? call.status}
+                      </Badge>
+                    ) : null}
+                  </span>
+                  <span className="num text-right text-xs text-muted-foreground">
+                    {call.latency_ms != null ? `${(call.latency_ms / 1000).toFixed(1)}s` : ''}
+                  </span>
+                  <span className="num text-right text-xs text-muted-foreground">
+                    {call.cost_usd != null ? fmtUsd(call.cost_usd) : ''}
+                  </span>
+                  <span className="num text-right text-xs text-muted-foreground">
+                    {call.input_tokens != null || call.output_tokens != null
+                      ? `${fmtTokensCompact(call.input_tokens)}→${fmtTokensCompact(call.output_tokens)}`
+                      : ''}
+                  </span>
+                  <span className="flex justify-end gap-1">
+                    {res?.data?.duplicates ? (
+                      <Badge tone="neutral">
+                        {t('duplicates', { count: res.data.duplicates })}
+                      </Badge>
+                    ) : null}
+                    {res?.data?.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
+                  </span>
                 </button>
                 {isOpen && (
                   <div className="border-t border-border px-4 py-3">
@@ -759,25 +782,23 @@ export function BodyLogSessions({
       </form>
 
       {loadFailed ? (
-        <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
-          <span>{t('listLoadFailed')}</span>
-          <button
-            type="button"
-            onClick={() => {
-              setLoadFailed(false);
-              setSessions(null);
-              load(appliedFilters);
-            }}
-            className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2"
-          >
-            <RefreshCw size={12} aria-hidden="true" />
-            {t('retry')}
-          </button>
-        </div>
+        <ErrorState
+          compact
+          message={t('listLoadFailed')}
+          onRetry={() => {
+            setLoadFailed(false);
+            setSessions(null);
+            load(appliedFilters);
+          }}
+        />
       ) : sessions === null ? (
-        <p className="text-sm text-muted-foreground">{t('loadingTrace')}</p>
+        <SkeletonTable rows={4} columns={9} />
       ) : sessions.length === 0 ? (
-        <p className="text-sm text-muted-foreground">{t('sessionsEmpty')}</p>
+        /* 필터가 결과를 좁힐 수 있다는 힌트까지 — "세션이 없습니다" 단독은
+           로깅 장애처럼 보인다. */
+        <p className="text-sm text-muted-foreground">
+          {t('sessionsEmpty', { days: appliedFilters.days })}
+        </p>
       ) : (
         <>
           {truncated && (
@@ -803,17 +824,17 @@ export function BodyLogSessions({
                 <Th>{t('colStarted')}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colClient')}</Th>
-                <Th>{t('colCalls')}</Th>
+                <Th numeric>{t('colCalls')}</Th>
                 <Th>{t('colModels')}</Th>
-                <Th>{t('colCost')}</Th>
-                <Th>{t('colErrors')}</Th>
+                <Th numeric>{t('colCost')}</Th>
+                <Th numeric>{t('colErrors')}</Th>
               </Tr>
             </THead>
             <TBody>
               {sessions.map((s) => (
                 <Tr
                   key={s.key}
-                  className="cursor-pointer hover:bg-muted/50"
+                  clickable
                   onClick={() => openSession(s)}
                 >
                   {/* 행 클릭은 마우스 전용 편의 — 키보드·스크린리더는 이
@@ -843,22 +864,22 @@ export function BodyLogSessions({
                     {s.client ?? '-'}
                     {s.session_id === null && (
                       <span title={t('heuristicSessionTitle')}>
-                        <Badge tone="amber" className="ml-1">{t('heuristicShort')}</Badge>
+                        <Badge tone="neutral" className="ml-1">{t('heuristicShort')}</Badge>
                       </span>
                     )}
                   </Td>
-                  <Td className="text-sm">{s.call_count}</Td>
+                  <Td numeric className="text-sm">{s.call_count}</Td>
                   <Td className="max-w-48 truncate text-sm" title={s.models.join(', ')}>
                     {s.models.join(', ')}
                   </Td>
-                  <Td className="text-sm">
+                  <Td numeric className="text-sm">
                     {s.total_cost_usd != null ? fmtUsd(s.total_cost_usd) : '—'}
                   </Td>
-                  <Td>
+                  <Td numeric>
                     {s.error_count > 0 ? (
-                      <Badge tone="pink">{s.error_count}</Badge>
+                      <Badge tone="danger">{s.error_count}</Badge>
                     ) : (
-                      <span className="text-xs text-muted-foreground">0</span>
+                      <span className="text-xs text-muted-foreground">—</span>
                     )}
                   </Td>
                 </Tr>
