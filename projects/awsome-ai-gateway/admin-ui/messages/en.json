@@ -1197,7 +1197,6 @@
       "requestBody": "Request (prompt)",
       "responseBody": "Response",
       "errorSection": "Error",
-      "lastUserMessage": "Last user message",
       "noUserMessage": "No user message found — check the raw JSON.",
       "fullRequestJson": "Full request JSON (incl. system & tools)",
       "showRaw": "Raw JSON",
@@ -1224,7 +1223,6 @@
       "callsCount": "{count} calls",
       "errorsCount": "{count} errors",
       "loadingTrace": "Loading…",
-      "notCollected": "Not collected",
       "refresh": "Refresh",
       "toolCall": "tool call: {name}",
       "toolResult": "tool result",
@@ -1252,7 +1250,13 @@
       "filterErrorsOnly": "errors only",
       "applyFilters": "Apply",
       "collecting": "collecting",
-      "scanningHint": "Scanning the log store — large partitions can take a few seconds"
+      "scanningHint": "Scanning the log store — large partitions can take a few seconds",
+      "streamTag": "stream",
+      "ttftTag": "TTFT {ms}ms",
+      "toolResultError": " (error)",
+      "bodyMissing": "No body record found — it may still be collecting, or the bounded store scan may have missed it.",
+      "bodyOversized": "Record exceeds the viewer limit — inspect it in the S3 console.",
+      "sessionsUserTruncated": "User filter matched more than 100 users — the results below are partial. Narrow the filter."
     }
   },
   "errors": {

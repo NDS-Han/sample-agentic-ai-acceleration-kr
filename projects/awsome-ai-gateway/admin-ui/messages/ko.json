@@ -1197,7 +1197,6 @@
       "requestBody": "요청 (프롬프트)",
       "responseBody": "응답",
       "errorSection": "에러",
-      "lastUserMessage": "마지막 사용자 메시지",
       "noUserMessage": "사용자 메시지를 찾지 못했습니다 — 원본 JSON을 확인하세요.",
       "fullRequestJson": "전체 요청 JSON (system·tools 포함)",
       "showRaw": "원본 JSON",
@@ -1224,7 +1223,6 @@
       "callsCount": "호출 {count}건",
       "errorsCount": "에러 {count}건",
       "loadingTrace": "불러오는 중…",
-      "notCollected": "미수집",
       "refresh": "새로고침",
       "toolCall": "도구 호출: {name}",
       "toolResult": "도구 결과",
@@ -1252,7 +1250,13 @@
       "filterErrorsOnly": "에러만",
       "applyFilters": "적용",
       "collecting": "수집 대기",
-      "scanningHint": "저장소를 스캔하는 중입니다 — 대형 파티션은 수 초 걸릴 수 있습니다"
+      "scanningHint": "저장소를 스캔하는 중입니다 — 대형 파티션은 수 초 걸릴 수 있습니다",
+      "streamTag": "스트림",
+      "ttftTag": "TTFT {ms}ms",
+      "toolResultError": " (에러)",
+      "bodyMissing": "본문 레코드를 찾지 못했습니다 — 아직 수집 중이거나 상한 스캔이 놓쳤을 수 있습니다.",
+      "bodyOversized": "레코드가 뷰어 상한을 초과했습니다 — S3 콘솔에서 직접 확인하세요.",
+      "sessionsUserTruncated": "사용자 필터가 100명 이상과 일치해 결과가 일부만 표시됩니다 — 필터를 좁혀 주세요."
     }
   },
   "errors": {

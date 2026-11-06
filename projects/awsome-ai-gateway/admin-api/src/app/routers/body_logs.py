@@ -131,6 +131,7 @@ def _session_agg_stmt(
     client: str | None = None,
     has_error: bool = False,
     sid: str | None = None,
+    null_client: bool = False,
 ):
     """session_id 명시 세션 집계 — ⚠️ user_id 는 uuid 라 max()/min() 집계 불가.
 
@@ -175,7 +176,9 @@ def _session_agg_stmt(
         stmt = stmt.where(UsageLog.session_id == sid)
     if user_ids is not None:
         stmt = stmt.where(UsageLog.user_id.in_(user_ids))
-    if client is not None:
+    if null_client:
+        stmt = stmt.where(UsageLog.client.is_(None))
+    elif client is not None:
         stmt = stmt.where(UsageLog.client == client)
     if before is not None:
         stmt = stmt.having(func.max(UsageLog.requested_at) < before)
@@ -224,13 +227,16 @@ async def list_body_log_sessions(
     # user 부분일치 → user_id 목록으로 해석 (email 또는 uuid 텍스트).
     # 와일드카드 이스케이프 후 ilike — NULL user_id(agent 토큰)는 자연 제외.
     user_ids = None
+    user_filter_truncated = False
     if user:
         like = (
             "%"
             + user.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             + "%"
         )
-        user_ids = list(
+        # limit+1 로 가져와 잘림을 감지한다 — 짧은 부분문자열로 100명 넘게
+        # 매칭돼도 조용히 잘리면 관리자가 모르니 응답에 표시한다.
+        user_rows = list(
             (
                 await session.execute(
                     select(User.id)
@@ -238,10 +244,12 @@ async def list_body_log_sessions(
                         (User.email.ilike(like, escape="\\"))
                         | (cast(User.id, String).ilike(like, escape="\\"))
                     )
-                    .limit(100)
+                    .limit(101)
                 )
             ).scalars()
         )
+        user_filter_truncated = len(user_rows) > 100
+        user_ids = user_rows[:100]
 
     cutoff = None
     if days > 0:
@@ -257,9 +265,10 @@ async def list_body_log_sessions(
                     limit + 1,
                     before=before,
                     user_ids=user_ids,
-                    client=client,
+                    client=None if client == "other" else client,
                     has_error=has_error,
                     sid=sid,
+                    null_client=client == "other",
                 )
             )
         ).all()
@@ -346,6 +355,7 @@ async def list_body_log_sessions(
                 "explicit_sessions": len(exact_rows),
                 "truncated": False,
                 "calls_truncated": calls_truncated,
+                "user_filter_truncated": user_filter_truncated,
                 "has_more": False,
                 "next_before": None,
             },
@@ -362,10 +372,18 @@ async def list_body_log_sessions(
     if cutoff is not None:
         stmt = stmt.where(UsageLog.requested_at >= cutoff)
     if before is not None:
-        stmt = stmt.where(UsageLog.requested_at < before)
+        # 커서보다 gap 만큼 앞의 행까지 읽는다 — 커서를 걸친 세션은 커서 이전
+        # 행을 포함해 다시 그룹핑돼 조각/중복으로 재등장하므로(1페이지에 이미
+        # 나온 세션) 통째로 잡아 버린다. 그룹 단위로 ended_at < before 만 남김.
+        stmt = stmt.where(
+            UsageLog.requested_at < before + timedelta(minutes=gap_minutes)
+        )
     if user_ids is not None:
         stmt = stmt.where(UsageLog.user_id.in_(user_ids))
-    if client is not None:
+    if client == "other":
+        # 세션 키에서 NULL client 를 'other' 로 표기 — 필터도 같은 관례로.
+        stmt = stmt.where(UsageLog.client.is_(None))
+    elif client is not None:
         stmt = stmt.where(UsageLog.client == client)
     rows = (await session.execute(stmt)).all()
     truncated = len(rows) >= _SESSION_SCAN_LIMIT
@@ -391,6 +409,9 @@ async def list_body_log_sessions(
     groups.sort(key=lambda g: g[-1].requested_at, reverse=True)
     for g in groups:
         first, last = g[0], g[-1]
+        if before is not None and last.requested_at >= before:
+            # 커서를 걸치는 세션 — 1페이지의 그룹과 같은 세션이라 버린다.
+            continue
         errors = sum(
             1
             for r in g
@@ -410,7 +431,12 @@ async def list_body_log_sessions(
                 "ended_at": last.requested_at.isoformat(),
                 "call_count": len(g),
                 "error_count": errors,
-                "total_cost_usd": sum(float(r.cost_usd or 0) for r in g),
+                # 전부 NULL 이면 None — exact 경로(func.sum → NULL)와 일치시킨다.
+                "total_cost_usd": (
+                    sum(float(r.cost_usd) for r in g if r.cost_usd is not None)
+                    if any(r.cost_usd is not None for r in g)
+                    else None
+                ),
                 "models": sorted({r.model_alias for r in g if r.model_alias}),
                 "calls": [
                     {
@@ -440,6 +466,7 @@ async def list_body_log_sessions(
             "explicit_sessions": len(exact_rows),
             "truncated": truncated,
             "calls_truncated": calls_truncated,
+            "user_filter_truncated": user_filter_truncated,
             "has_more": has_more,
             "next_before": returned[-1]["ended_at"] if has_more and returned else None,
         },
@@ -519,6 +546,24 @@ async def get_body_logs_batch(
     except BodyLogNotConfigured as exc:
         raise HTTPException(503, str(exc)) from exc
     except BodyLogLookupError as exc:
+        await audit_logger.log(
+            session,
+            queue_only=True,
+            actor_user_id=admin.user_id,
+            actor_role=admin.role.value,
+            service_token_id=getattr(admin, "service_token_id", None),
+            action="VIEW_BODY_LOG",
+            resource_type="GatewayBodyLog",
+            resource_id=f"batch:{len(valid_ids)}",
+            changes={"request_ids": valid_ids[:60], "error": str(exc)[:200]},
+            result="FAILURE",
+            ip_address=request.client.host if request.client else "0.0.0.0",
+            request_id=getattr(request.state, "request_id", "")
+            or request.headers.get("x-request-id", ""),
+        )
+        raise HTTPException(502, f"본문 저장소 조회 실패: {exc}") from exc
+    except Exception as exc:
+        # 단건 엔드포인트와 같은 안전망 — 예외도 "열람 시도"이므로 감사에 남긴다.
         await audit_logger.log(
             session,
             queue_only=True,

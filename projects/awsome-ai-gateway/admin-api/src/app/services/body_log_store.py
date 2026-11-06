@@ -45,6 +45,12 @@ _LATE_SLACK_S = 300
 
 #: 한 파티션 스캔에서 여는 객체 상한 — 창을 좁혀도 이례적 버스트는 있을 수 있다.
 _MAX_OBJECTS_PER_PARTITION = 16
+# fetch_many 한 호출이 여는 객체 총량 상한 — 창별 16 상한만 두면 호출 수가
+# 많은 세션(수십 창)에서 열리는 객체가 무한정 늘 수 있어 전역 마감을 둔다.
+# 연속 세션은 창이 겹쳐 실제로는 창 수보다 훨씬 적게 연다.
+_MAX_TOTAL_OBJECTS = 96
+# 파티션 LIST 결과 상한 — 하루 Firehose 분할 주기(~1분)보다 넉넉하다.
+_MAX_LIST_KEYS = 4096
 #: gzip 을 풀며 읽는 총량 상한. Firehose 버퍼 기본 64MB 를 넉넉히 덮는다 — 줄 단위
 #: 스트리밍이라 메모리는 한 줄(≤~1MB)뿐이고 늘어나는 건 시간뿐이다. 이 상한에
 #: 걸리면 incomplete 로 표시해 "미수집" 오진을 막는다.
@@ -244,43 +250,49 @@ class BodyLogStore:
                 break
 
         # 2) Firehose — 남은 id 들을 (provider/client/dt) prefix 로 묶고,
-        #    prefix 별로 창을 모은 뒤 **겹치는 것만** 병합한다. 무조건 합집합하면
-        #    긴 세션(수십 분~)의 창 하나가 파티션당 16객체 상한을 다 써서 뒤쪽
-        #    호출이 스캔 대상에 못 들어간다 — 겹치지 않는 창은 별도 스캔으로
-        #    돌려 각자 상한을 가져가게 한다. 같은 키는 정확히 한 prefix 에
-        #    속하므로 버킷 사이의 객체 중복 스캔은 없다.
-        groups: dict[str, list[tuple[datetime, datetime]]] = {}
+        #    prefix 당 LIST 는 한 번만 돌린 뒤 **타깃별 창마다** 후보 키를
+        #    골라 각각 _MAX_OBJECTS_PER_PARTITION 상한을 준다. 창을 병합하면
+        #    호출이 연속된 세션(창 간격 < 창 길이)이 하나의 긴 창이 돼서
+        #    16객체 상한에 뒤쪽 호출이 통째로 걸린다 — 창별 상한 + 이미 연
+        #    객체는 opened 집합으로 건너뛰는 방식이 정확하고 중복 스캔도 없다.
+        jobs: dict[str, list[tuple[str, datetime, datetime]]] = {}
         for t in remaining.values():
             win_start, win_end = _lookup_window(t.requested_at, t.latency_ms)
             for d in _window_dates(win_start, win_end):
                 prefix = _partition_prefix(t.provider, t.client, d)
-                groups.setdefault(prefix, []).append((win_start, win_end))
+                jobs.setdefault(prefix, []).append((t.request_id, win_start, win_end))
 
         # 스캔 대상은 firehose 경로의 전체 id 로 고정 — 이미 찾은 id 도 매칭해
         # 뒤 객체의 at-least-once 중복을 센다. 조기 종료는 remaining 기준.
         scan_ids = set(remaining)
+        opened: set[str] = set()
 
-        for prefix, intervals in groups.items():
-            if not remaining:
+        for prefix, win_jobs in jobs.items():
+            if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
                 break
-            intervals.sort()
-            merged: list[list[datetime]] = []
-            for s, e in intervals:
-                if merged and s <= merged[-1][1]:
-                    merged[-1][1] = max(merged[-1][1], e)
-                else:
-                    merged.append([s, e])
-            for win_start, win_end in merged:
-                if not remaining:
+            all_keys, capped = await asyncio.to_thread(
+                self._list_partition_keys, prefix
+            )
+            result.incomplete = result.incomplete or capped
+            # 각 타깃 창은 자기 상한의 후보를 갖는다 — 창 순서는 요청 시각 순.
+            for rid, win_start, win_end in sorted(win_jobs, key=lambda j: j[1]):
+                if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
                     break
-                keys, capped = await asyncio.to_thread(
-                    self._candidate_keys, prefix, win_start, win_end
-                )
-                result.incomplete = result.incomplete or capped
-                result.scanned_keys.extend(keys)
-                for key in keys:
-                    if not remaining:
+                if rid not in remaining:
+                    continue
+                candidates = [
+                    key
+                    for ts, key in all_keys
+                    if win_start <= ts <= win_end and key not in opened
+                ]
+                if len(candidates) > _MAX_OBJECTS_PER_PARTITION:
+                    result.incomplete = True
+                    candidates = candidates[:_MAX_OBJECTS_PER_PARTITION]
+                for key in candidates:
+                    if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
                         break
+                    opened.add(key)
+                    result.scanned_keys.append(key)
                     found_map, capped = await asyncio.to_thread(
                         self._scan_gzip_object_multi, key, scan_ids
                     )
@@ -296,6 +308,10 @@ class BodyLogStore:
                             if dupes:
                                 result.duplicates[rid] = dupes
                         remaining.pop(rid, None)
+
+        if len(opened) >= _MAX_TOTAL_OBJECTS and remaining:
+            # 전역 객체 상한에 닿은 채 미해결 id 가 남았으면 미스캔 표시.
+            result.incomplete = True
 
         result.missing = sorted(remaining)
         return result
@@ -331,28 +347,42 @@ class BodyLogStore:
             raise BodyLogLookupError(f"fallback read {key}: {exc}") from exc
         return result
 
-    def _candidate_keys(
-        self, prefix: str, win_start: datetime, win_end: datetime
-    ) -> tuple[list[str], bool]:
-        """(창 안 후보 키 목록, 상한으로 잘렸는가)."""
+    def _list_partition_keys(
+        self, prefix: str
+    ) -> tuple[list[tuple[datetime, str]], bool]:
+        """(timestamp, key) 목록을 시간 오름차순으로 반환 + LIST 상한 도달 여부.
+
+        fetch_many 는 prefix 당 LIST 를 한 번만 돌리고 창별로 후보를 골라
+        쓴다 — LIST 자체는 객체 열람보다 훨씬 싸므로 전체 목록을 가져온다.
+        """
         try:
             paginator = self._s3.get_paginator("list_objects_v2")
-            keys: list[str] = []
+            pairs: list[tuple[datetime, str]] = []
             for page in paginator.paginate(Bucket=self.bucket, Prefix=prefix):
                 for obj in page.get("Contents", []):
                     key = obj["Key"]
                     if not key.endswith(".gz"):
                         continue
                     ts = _key_timestamp(key)
-                    if ts is not None and win_start <= ts <= win_end:
-                        keys.append(key)
-                    if len(keys) >= _MAX_OBJECTS_PER_PARTITION:
-                        return keys, True
-            return keys, False
+                    if ts is not None:
+                        pairs.append((ts, key))
+                if len(pairs) >= _MAX_LIST_KEYS:
+                    return sorted(pairs)[:_MAX_LIST_KEYS], True
+            return sorted(pairs), False
         except Exception as exc:
             raise BodyLogLookupError(
                 f"list {prefix}: {type(exc).__name__}: {exc}"
             ) from exc
+
+    def _candidate_keys(
+        self, prefix: str, win_start: datetime, win_end: datetime
+    ) -> tuple[list[str], bool]:
+        """(창 안 후보 키 목록, 상한으로 잘렸는가)."""
+        all_keys, capped = self._list_partition_keys(prefix)
+        keys = [key for ts, key in all_keys if win_start <= ts <= win_end]
+        if len(keys) > _MAX_OBJECTS_PER_PARTITION:
+            return keys[:_MAX_OBJECTS_PER_PARTITION], True
+        return keys, capped
 
     def _scan_gzip_object(
         self, key: str, request_id: str

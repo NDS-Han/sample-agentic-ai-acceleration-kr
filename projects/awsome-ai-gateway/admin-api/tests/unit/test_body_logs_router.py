@@ -500,6 +500,39 @@ async def test_sessions_explicit_session_id_groups_exactly():
 
 
 @pytest.mark.asyncio
+async def test_sessions_heuristic_before_cursor_no_split():
+    """휴리스틱 before 커서가 세션을 쪼개면 안 된다 (MAJOR-2 회귀).
+
+    커서를 걸치는 세션(커서 이전+이후 행)은 1페이지에 이미 나온 세션이라
+    통째로 버려야 하고, 커서보다 완전히 이전에 끝난 세션만 2페이지에 나온다.
+    라우터는 행 필터를 before+gap 으로 넓히고 그룹 단위로 ended_at < before
+    만 남긴다 — 쪼개진 조각이 재등장하면 안 된다.
+    """
+    before = NOW - timedelta(minutes=10)
+    rows = [
+        # 세션 A — 커서를 걸침(행 간격 10분 연속, 커서 이전·이후 행 모두 포함).
+        _sess_row("a1", 25, user="x"),
+        _sess_row("a2", 15, user="x"),
+        _sess_row("a3", 5, user="x"),  # 커서(-10분)보다 최신
+        # 세션 B — 커서보다 완전히 이전 + A 와 gap(30분) 초과로 분리 → 2페이지 대상.
+        _sess_row("b1", 80, user="x"),
+        _sess_row("b2", 70, user="x"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        before=before, user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 1
+    s = payload["sessions"][0]
+    # 세션 A 는 통째로 버려진다 — a1/a2 조각 세션이 재등장하면 안 된다.
+    assert [c["request_id"] for c in s["calls"]] == ["b1", "b2"]
+
+
+@pytest.mark.asyncio
 async def test_sessions_mixed_exact_and_heuristic():
     """session_id 세션과 NULL 폴백 세션이 ended_at desc 로 병합된다."""
     exact = [_agg_row("sess-A", 10, user="x", call_count=1)]

@@ -131,6 +131,8 @@ export interface BodyLogSessionsResponse {
   truncated: boolean;
   /** 어떤 세션이든 calls 가 세션당 상한에 잘렸다. */
   calls_truncated: boolean;
+  /** user 필터 부분일치가 100명 상한에 걸려 일부 사용자의 세션이 빠졌다. */
+  user_filter_truncated?: boolean;
   has_more: boolean;
   /** 다음 페이지 커서 — 직전 페이지 마지막 세션의 ended_at. */
   next_before: string | null;

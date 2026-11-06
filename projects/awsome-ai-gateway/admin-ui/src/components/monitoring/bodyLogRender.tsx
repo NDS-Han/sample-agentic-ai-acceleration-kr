@@ -57,18 +57,6 @@ function requestMessages(body: Record<string, unknown>): ChatMessage[] {
   return [];
 }
 
-export function lastUserText(body: Record<string, unknown>): string {
-  const msgs = requestMessages(body);
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    if (msgs[i]?.role !== 'user') continue;
-    // Claude Code 의 마지막 user 턴은 대부분 tool_result 블록 — 텍스트가 비면
-    // 건너뛰고 더 이전 user 메시지를 찾는다.
-    const text = textFromContent(msgs[i].content);
-    if (text.trim()) return text;
-  }
-  return '';
-}
-
 // ── 전체 대화 스레드 ──────────────────────────────────────────────────────────
 // conversation 뷰는 마지막 턴이 아니라 모든 턴을 보여준다 — 요청 messages 안의
 // 이전 어시스턴트/도구 호출까지 포함해서 에이전트 루프의 전체 맥락이 보인다.
@@ -89,6 +77,9 @@ export interface ConversationTurn {
   text: string;
   tools: ToolUse[];
   results: ToolResult[];
+  /** 원본 messages[]/input[] 의 인덱스 — historyStart 접기는 이 단위로 한다
+      (빈 메시지가 턴에서 빠져도 메시지 수와 턴 수가 어긋나지 않게). */
+  msgIndex: number;
 }
 
 function toolResultText(content: unknown): string {
@@ -133,7 +124,7 @@ function reasoningSummaryText(summary: unknown): string {
 
 export function conversationTurns(body: Record<string, unknown>): ConversationTurn[] {
   const turns: ConversationTurn[] = [];
-  for (const m of requestMessages(body)) {
+  requestMessages(body).forEach((m, msgIndex) => {
     // ── Responses API input[] 방언 — role/content 없는 타입 아이템을 정규화한다.
     // 이걸 걸러버리면 codex trace 에서 도구 호출이 통째로 안 보인다.
     const itemType = typeof m?.type === 'string' ? m.type : '';
@@ -141,10 +132,17 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
       turns.push({
         role: 'assistant',
         text: '',
-        tools: [{ name: typeof m.name === 'string' ? m.name : itemType, input: m.arguments }],
+        // custom_tool_call 은 인자가 arguments 가 아니라 input 에 든다.
+        tools: [
+          {
+            name: typeof m.name === 'string' ? m.name : itemType,
+            input: m.arguments ?? m.input,
+          },
+        ],
         results: [],
+        msgIndex,
       });
-      continue;
+      return;
     }
     if (itemType === 'function_call_output' || itemType === 'custom_tool_call_output') {
       const text = toolResultText(m.output);
@@ -155,18 +153,26 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
         results: text
           ? [{ text: text.length > TOOL_RESULT_DISPLAY_MAX ? `${text.slice(0, TOOL_RESULT_DISPLAY_MAX)}…` : text, isError: false }]
           : [],
+        msgIndex,
       });
-      continue;
+      return;
     }
     if (itemType === 'reasoning') {
       const text = reasoningSummaryText(m.summary);
-      if (text) turns.push({ role: 'reasoning', text, tools: [], results: [] });
-      continue;
+      if (text) turns.push({ role: 'reasoning', text, tools: [], results: [], msgIndex });
+      return;
     }
-    // web_search_call / file_search_call / computer_call 등 무명 타입 — 보이게 둔다.
+    // web_search_call / local_shell_call / computer_call 등 무명 타입 — 보이게 둔다.
+    // 인자 자리는 타입마다 다르다(arguments/input/action).
     if (itemType.endsWith('_call') && !m.role) {
-      turns.push({ role: 'tool', text: '', tools: [{ name: itemType }], results: [] });
-      continue;
+      turns.push({
+        role: 'tool',
+        text: '',
+        tools: [{ name: itemType, input: m.arguments ?? m.input ?? m.action }],
+        results: [],
+        msgIndex,
+      });
+      return;
     }
 
     // ── anthropic / openai chat 메시지 ────────────────────────────────────
@@ -195,9 +201,15 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
       }
     }
     if (text.trim() || tools.length || results.length) {
-      turns.push({ role: typeof m?.role === 'string' ? m.role : '?', text, tools, results });
+      turns.push({
+        role: typeof m?.role === 'string' ? m.role : '?',
+        text,
+        tools,
+        results,
+        msgIndex,
+      });
     }
-  }
+  });
   return turns;
 }
 
@@ -277,8 +289,9 @@ export function extractSseParts(sse: string): ResponseParts {
   };
 
   for (const line of sse.split('\n')) {
-    if (!line.startsWith('data:')) continue;
-    const payload = line.slice(5).trim();
+    // /model/* passthrough 는 data: 접두 없이 이벤트 JSON 이 그냥 연결된다 —
+    // 접두가 있으면 벗기고, 없으면 줄 전체를 JSON 으로 시도한다.
+    const payload = line.startsWith('data:') ? line.slice(5).trim() : line.trim();
     if (!payload || payload === '[DONE]') continue;
     let ev: Record<string, unknown>;
     try {
@@ -287,6 +300,39 @@ export function extractSseParts(sse: string): ResponseParts {
       continue; // 파싱 불가 프레임은 건너뛴다
     }
     const type = ev.type as string | undefined;
+
+    // Bedrock Converse 스트림(/model/* 경유) — contentBlock{Start,Delta,Stop}
+    // 이벤트는 type 필드가 없고 키가 다르다.
+    const cbIdx =
+      typeof ev.contentBlockIndex === 'number' ? ev.contentBlockIndex : undefined;
+    if (ev.contentBlockStart && cbIdx !== undefined) {
+      const start = ev.contentBlockStart as Record<string, unknown>;
+      const tu = (start?.start as Record<string, unknown> | undefined)?.toolUse as
+        | Record<string, unknown>
+        | undefined;
+      if (tu?.name) {
+        blocks[cbIdx] = { name: String(tu.name), inputJson: '' };
+      }
+      continue;
+    }
+    if (ev.contentBlockDelta && cbIdx !== undefined) {
+      const delta = (ev.contentBlockDelta as Record<string, unknown>)
+        ?.delta as Record<string, unknown> | undefined;
+      if (typeof delta?.text === 'string') parts.text += delta.text;
+      const tu = delta?.toolUse as Record<string, unknown> | undefined;
+      if (typeof tu?.input === 'string' && blocks[cbIdx]) {
+        blocks[cbIdx].inputJson += tu.input;
+      }
+      continue;
+    }
+    if (ev.contentBlockStop && cbIdx !== undefined) {
+      const b = blocks[cbIdx];
+      if (b) {
+        flush({ name: b.name, inputJson: b.inputJson });
+        delete blocks[cbIdx];
+      }
+      continue;
+    }
 
     // anthropic: content_block 생애주기
     if (type === 'content_block_start') {
@@ -314,29 +360,53 @@ export function extractSseParts(sse: string): ResponseParts {
       continue;
     }
 
-    // responses API
+    // responses API — function_call 은 arguments, custom_tool_call 은 input 에
+    // 인자가 든다. done 아이템은 누적 델타보다 완전한 최종본을 우선 쓴다.
     if (type === 'response.output_item.added') {
       const item = ev.item as Record<string, unknown> | undefined;
-      if (item?.type === 'function_call' && typeof ev.output_index === 'number') {
+      const it = item?.type;
+      if (
+        item != null &&
+        (it === 'function_call' || it === 'custom_tool_call') &&
+        typeof ev.output_index === 'number'
+      ) {
         respCalls[ev.output_index] = {
           name: String(item.name ?? ''),
-          args: typeof item.arguments === 'string' ? item.arguments : '',
+          args: typeof item.arguments === 'string'
+            ? item.arguments
+            : typeof item.input === 'string'
+              ? item.input
+              : '',
         };
       }
       continue;
     }
-    if (type === 'response.function_call_arguments.delta' && typeof ev.output_index === 'number') {
+    if (
+      (type === 'response.function_call_arguments.delta' ||
+        type === 'response.custom_tool_call_input.delta') &&
+      typeof ev.output_index === 'number'
+    ) {
       const rc = respCalls[ev.output_index] ?? (respCalls[ev.output_index] = { name: '', args: '' });
       rc.args += String(ev.delta ?? '');
       continue;
     }
     if (type === 'response.output_item.done') {
       const item = ev.item as Record<string, unknown> | undefined;
-      if (item?.type === 'function_call' && typeof ev.output_index === 'number') {
+      const it = item?.type;
+      if (
+        item != null &&
+        (it === 'function_call' || it === 'custom_tool_call') &&
+        typeof ev.output_index === 'number'
+      ) {
         const rc = respCalls[ev.output_index];
-        // done 아이템의 arguments 가 최종본 — 누적 delta 와 같거나 더 완전하다.
-        if (typeof item.arguments === 'string' && item.arguments) {
-          flush({ name: rc?.name || String(item.name ?? ''), args: item.arguments });
+        const finalArgs =
+          typeof item.arguments === 'string' && item.arguments
+            ? item.arguments
+            : typeof item.input === 'string' && item.input
+              ? item.input
+              : '';
+        if (finalArgs) {
+          flush({ name: rc?.name || String(item.name ?? ''), args: finalArgs });
         } else if (rc) {
           flush(rc);
         }
@@ -372,11 +442,6 @@ export function extractSseParts(sse: string): ResponseParts {
   for (const t of Object.values(oaToolCalls)) if (t.name || t.args) flush(t);
   for (const t of Object.values(respCalls)) if (t.name || t.args) flush(t);
   return parts;
-}
-
-/** SSE 프레임 원문에서 assistant 텍스트 델타만 추출 — anthropic / openai / responses 방언. */
-export function extractSseText(sse: string): string {
-  return extractSseParts(sse).text;
 }
 
 export function nonstreamResponseParts(body: Record<string, unknown>): ResponseParts {
@@ -423,6 +488,9 @@ export function nonstreamResponseParts(body: Record<string, unknown>): ResponseP
       if (o?.type === 'function_call' && typeof o.name === 'string') {
         parts.toolCalls.push({ name: o.name, input: o.arguments });
       }
+      if (o?.type === 'custom_tool_call' && typeof o.name === 'string') {
+        parts.toolCalls.push({ name: o.name, input: o.input });
+      }
     }
   }
   return parts;
@@ -435,9 +503,13 @@ export function statusTone(status: string): BadgeTone {
 }
 
 export function JsonBlock({ value }: { value: unknown }) {
+  // 디코드하지 않는다 — stringify 가 문자열 안의 \ 를 \\ 로 이스케이프해서
+  // \uXXXX 는 \\uXXXX 가 되고, lookbehind 를 우회해 디코드하면 사용자 원문이
+  // 바뀐다. 와이어 이스케이프가 실제로 있는 sse_text 는 호출부가 값만 디코드해
+  // 넣는다(displayResBody).
   return (
     <pre className="max-h-64 overflow-auto rounded-md bg-muted p-3 text-xs leading-relaxed whitespace-pre-wrap break-all">
-      {decodeUnicodeEscapes(JSON.stringify(value, null, 2))}
+      {JSON.stringify(value, null, 2)}
     </pre>
   );
 }
@@ -468,8 +540,11 @@ function Collapsible({
   );
 }
 
+// 와이어 인자(openai arguments, anthropic input_json_delta 누적)는 문자열 —
+// 그 안의 \uXXXX 는 provider 의 ensure_ascii 흔적이라 디코드한다. 이미 파싱된
+// 객체면 stringify 결과물이라 사용자 원문 보존을 위해 디코드하지 않는다.
 function toolInputJson(input: unknown): string {
-  if (typeof input === 'string') return input;
+  if (typeof input === 'string') return decodeUnicodeEscapes(input);
   try {
     return JSON.stringify(input, null, 2);
   } catch {
@@ -501,14 +576,24 @@ export function BodyRecordContent({
   const resBody = (rec?.response_body ?? {}) as Record<string, unknown>;
   const sseText = typeof resBody.sse_text === 'string' ? (resBody.sse_text as string) : '';
   const truncated = resBody.truncated === true;
+  // raw JSON 뷰에서 sse_text 의 와이어 이스케이프(\uXXXX)만 읽기 좋게 디코드 —
+  // 레코드의 다른 문자열은 이미 파싱된 원문이라 건드리면 사용자 입력이 바뀐다.
+  const displayResBody = sseText
+    ? { ...resBody, sse_text: decodeUnicodeEscapes(sseText) }
+    : resBody;
 
   const resParts = sseText ? extractSseParts(sseText) : nonstreamResponseParts(resBody);
   const unparseable = reqBody._unparseable === true;
   const rawWrapped = '_raw' in reqBody;
 
   const allTurns = conversationTurns(reqBody);
+  // historyStart 는 "직전 호출까지의 원본 메시지 수" — msgIndex 기준으로 접는다.
+  // 빈 메시지가 턴에서 빠져도 단위가 어긋나지 않고, 호출부는 접두가 실제로
+  // 이어지는지 검증한 값만 넘긴다(아니면 0).
   const hiddenTurns =
-    !showAllTurns && historyStart > 0 ? Math.min(historyStart, allTurns.length) : 0;
+    !showAllTurns && historyStart > 0
+      ? allTurns.filter((turn) => turn.msgIndex < historyStart).length
+      : 0;
   const turns = allTurns.slice(hiddenTurns);
 
   const sysText = systemTextOf(reqBody);
@@ -536,11 +621,11 @@ export function BodyRecordContent({
             <Badge tone="neutral">{data.client}</Badge>
           </>
         )}
-        {rec?.is_streaming && <Badge tone="neutral">stream</Badge>}
+        {rec?.is_streaming && <Badge tone="neutral">{t('streamTag')}</Badge>}
         {data.latency_ms != null && (
           <span>{t('latencyMs', { ms: data.latency_ms })}</span>
         )}
-        {data.ttft_ms != null && <span>TTFT {data.ttft_ms}ms</span>}
+        {data.ttft_ms != null && <span>{t('ttftTag', { ms: data.ttft_ms })}</span>}
         {data.cost_usd != null && <span>{fmtUsd(data.cost_usd)}</span>}
         {data.input_tokens != null && (
           <span>
@@ -634,7 +719,7 @@ export function BodyRecordContent({
                         >
                           {tu.input != null ? (
                             <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 text-xs">
-                              {decodeUnicodeEscapes(toolInputJson(tu.input))}
+                              {toolInputJson(tu.input)}
                             </pre>
                           ) : null}
                         </Collapsible>
@@ -646,7 +731,7 @@ export function BodyRecordContent({
                             <>
                               {t('toolResult')}
                               {r.isError ? (
-                                <span className="text-destructive"> (error)</span>
+                                <span className="text-destructive">{t('toolResultError')}</span>
                               ) : null}
                             </>
                           }
@@ -701,7 +786,7 @@ export function BodyRecordContent({
             </button>
           </div>
           {rawRes ? (
-            <JsonBlock value={resBody} />
+            <JsonBlock value={displayResBody} />
           ) : resParts.text || resParts.toolCalls.length ? (
             <div className="max-h-80 space-y-2 overflow-auto rounded-md border border-border p-3">
               {resParts.text ? (
@@ -711,7 +796,7 @@ export function BodyRecordContent({
                 <Collapsible key={j} label={`⚙ ${t('toolCall', { name: tc.name })}`}>
                   {tc.input != null ? (
                     <pre className="mt-1 max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md bg-muted p-2 text-xs">
-                      {decodeUnicodeEscapes(toolInputJson(tc.input))}
+                      {toolInputJson(tc.input)}
                     </pre>
                   ) : null}
                 </Collapsible>
@@ -723,7 +808,7 @@ export function BodyRecordContent({
               {decodeUnicodeEscapes(sseText)}
             </pre>
           ) : (
-            <JsonBlock value={resBody} />
+            <JsonBlock value={displayResBody} />
           )}
         </section>
 

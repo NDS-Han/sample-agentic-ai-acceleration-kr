@@ -505,6 +505,55 @@ async def test_fetch_many_far_apart_windows_not_starved() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_many_contiguous_session_not_starved() -> None:
+    """연속된 호출의 창이 전부 겹쳐도 뒤쪽 호출이 굶지 않는다 (MAJOR-1 회귀).
+
+    창(약 ±7분)이 3분 간격 호출들로 완전히 이어 붙는 세션 — 구 병합 구현은
+    이를 1개 창으로 합쳐 파티션당 16객체 상한에 걸려 뒤쪽 레코드를 missing
+    으로 냈다. 창별 상한 + 공유 opened 집합 방식은 각 호출이 자기 창의
+    객체만 고르므로 전부 찾는다.
+    """
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+
+    n_calls = 10
+    # 호출 간격 3분, 객체 간격 1.5분 — 40개 객체, 각 창엔 약 6개가 걸린다.
+    calls = [
+        (f"rid-{i:02d}", REQ_AT + timedelta(minutes=3 * i)) for i in range(n_calls)
+    ]
+    objects = [
+        _fh_key(REQ_AT + timedelta(minutes=1, seconds=90 * k)) for k in range(40)
+    ]
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {"Contents": [{"Key": k} for k in objects]}
+    ]
+    store._s3.get_paginator.return_value = paginator
+
+    # 실제 Firehose 동작: 객체 k(시각 T)에는 T 에 호출된 요청들의 레코드가
+    # 든다 — 창이 T 를 덮는 호출 전부를 넣으면 각 호출은 자기 창 안 객체에서 발견.
+    def _get(**kw):
+        key = kw["Key"]
+        ts = REQ_AT + timedelta(minutes=1, seconds=90 * objects.index(key))
+        lines = [
+            {"request_id": rid}
+            for rid, at in calls
+            if at - timedelta(seconds=120)
+            <= ts
+            <= at + timedelta(seconds=301)
+        ]
+        return {"Body": io.BytesIO(_gz(lines or [{"request_id": "other"}]))}
+
+    store._s3.get_object.side_effect = _get
+
+    result = await store.fetch_many(
+        [_target(rid, req_at=at) for rid, at in calls]
+    )
+    assert result.missing == []
+    assert set(result.records) == {rid for rid, _ in calls}
+
+
+@pytest.mark.asyncio
 async def test_fetch_many_multi_scan_space_separated_rid() -> None:
     """JSON 직렬화가 '"request_id": "x"' 공백 형태여도 잡는다(단건 needle 과 동치)."""
     store = _store()

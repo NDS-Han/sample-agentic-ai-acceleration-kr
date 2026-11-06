@@ -86,6 +86,8 @@ export function BodyLogsViewer({
   const [events, setEvents] = useState<MonitoringEventsResponse>(initialEvents);
   const [typeFilter, setTypeFilter] = useState<MonitoringEventTypeFilter>('all');
   const [userFilter, setUserFilter] = useState('');
+  // 페이지를 연 채 토글이 꺼지면 조회가 403 — 비활성 안내로 전환한다.
+  const [toggledOff, setToggledOff] = useState(false);
 
   const lookup = (requestId: string) => {
     const id = requestId.trim();
@@ -95,7 +97,12 @@ export function BodyLogsViewer({
       const res = await fetchBodyLog(id);
       if (res.success && res.data) {
         setResult(res.data);
+        // ⚠️ onRequestLookup → router.replace(?request_id=id) → effect 가 같은
+        // id 로 한 번 더 조회해 감사가 2행 생긴다 — URL 동기화 전에 처리됨 표시.
+        autoLookedUp.current = id;
         onRequestLookup?.(id);
+      } else if (res.status === 403) {
+        setToggledOff(true);
       } else {
         setLookupError({ id, message: res.error ?? t('fetchFailed') });
       }
@@ -112,10 +119,10 @@ export function BodyLogsViewer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRequestId]);
 
-  const refreshEvents = () => {
+  const refreshEvents = (filter: MonitoringEventTypeFilter = typeFilter) => {
     startTransition(async () => {
       try {
-        setEvents(await fetchMonitoringEvents(200, typeFilter, 0));
+        setEvents(await fetchMonitoringEvents(200, filter, 0));
       } catch {
         toast({ type: 'error', message: tev('fetchFailed'), auto_dismiss_ms: 4000 });
       }
@@ -141,6 +148,14 @@ export function BodyLogsViewer({
 
   const isCollecting = (ev: MonitoringEvent) =>
     Date.now() - new Date(ev.timestamp).getTime() < COLLECTING_WINDOW_MS;
+
+  if (toggledOff) {
+    return (
+      <div className="glass rounded-apple p-6">
+        <p className="text-sm text-muted-foreground">{t('disabledNotice')}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -201,7 +216,11 @@ export function BodyLogsViewer({
           <div className="ml-auto flex items-center gap-2">
             <select
               value={typeFilter}
-              onChange={(e) => setTypeFilter(e.target.value as MonitoringEventTypeFilter)}
+              onChange={(e) => {
+                const v = e.target.value as MonitoringEventTypeFilter;
+                setTypeFilter(v);
+                refreshEvents(v); // 선택 즉시 적용 — stale 목록이 다른 필터로 보이지 않게
+              }}
               className="rounded-md border border-border bg-background px-2 py-1.5 text-xs"
               aria-label={tev('typeLabel')}
             >
@@ -220,7 +239,7 @@ export function BodyLogsViewer({
             />
             <button
               type="button"
-              onClick={refreshEvents}
+              onClick={() => refreshEvents()}
               disabled={loading}
               className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
             >
@@ -289,7 +308,17 @@ export function BodyLogsViewer({
         )}
       </div>
 
-      {result && <BodyLogDialog data={result} onClose={() => setResult(null)} />}
+      {result && (
+        <BodyLogDialog
+          data={result}
+          onClose={() => {
+            setResult(null);
+            // 닫아도 ?request_id= 가 남으면 새로고침 때 다시 조회돼 감사가
+            // 한 번 더 생긴다 — 닫을 때 URL 도 정리한다.
+            onRequestLookup?.(null);
+          }}
+        />
+      )}
     </div>
   );
 }

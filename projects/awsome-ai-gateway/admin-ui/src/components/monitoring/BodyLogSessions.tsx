@@ -101,13 +101,31 @@ export function BodyLogSessions({
   // ?session= 딥링크 자동 오픈은 마운트 후 목록 로드 완료 시 한 번만.
   const deepLinkTried = useRef(false);
 
+  const [userTruncated, setUserTruncated] = useState(false);
+  // "더 보기"는 적용 시점의 필터로 가져와야 한다 — 입력창의 미적용 값과
+  // 섞이면 1페이지와 다른 조건으로 2페이지를 긁는다.
+  const [appliedFilters, setAppliedFilters] = useState<Filters>({
+    days: 1,
+    user: '',
+    client: '',
+    hasError: false,
+  });
+
   const applyResult = (
-    data: { sessions: BodyLogSession[]; truncated: boolean; calls_truncated: boolean; has_more: boolean; next_before: string | null },
+    data: {
+      sessions: BodyLogSession[];
+      truncated: boolean;
+      calls_truncated: boolean;
+      has_more: boolean;
+      next_before: string | null;
+      user_filter_truncated?: boolean;
+    },
     append: boolean,
   ) => {
     setSessions((prev) => (append && prev ? [...prev, ...data.sessions] : data.sessions));
     setTruncated(data.truncated);
     setCallsTruncated(data.calls_truncated);
+    setUserTruncated(data.user_filter_truncated ?? false);
     setHasMore(data.has_more);
     setNextBefore(data.next_before);
   };
@@ -151,6 +169,8 @@ export function BodyLogSessions({
       return;
     }
     // 목록 범위 밖이면 sid 직행 — key 형식은 sid|<session_id>|<user>|<client>.
+    // session_id 는 클라이언트 제어라 소유자가 갈라질 수 있으므로 첫 행이 아니라
+    // URL 의 복합키와 정확히 일치하는 세션만 연다 — 불일치는 링크가 낡은 것.
     const sid = initialSessionKey.startsWith('sid|')
       ? initialSessionKey.split('|')[1]
       : null;
@@ -159,8 +179,11 @@ export function BodyLogSessions({
       return;
     }
     startTransition(async () => {
-      const res = await fetchBodyLogSessions({ sid, days: 90 });
-      const s = res.success ? res.data?.sessions[0] : undefined;
+      // days=0 — 기간 제한 없음(딥링크는 필터 창과 무관하게 찾아야 한다).
+      const res = await fetchBodyLogSessions({ sid, days: 0 });
+      const s = res.success
+        ? res.data?.sessions.find((x) => x.key === initialSessionKey)
+        : undefined;
       if (s) openSession(s);
       else toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
     });
@@ -180,32 +203,39 @@ export function BodyLogSessions({
     onSessionChange?.(null);
   };
 
-  // trace 새로고침 — 명시 세션은 sid 직행, 휴리스틱은 목록 재조회 후 key 재매칭.
-  // 방금 끝난 세션의 후속 호출·늦게 도착한 본문을 다시 볼 수 있다.
+  // trace 새로고침 — 명시 세션은 sid 직행(복합키 재매칭), 휴리스틱은
+  // (user, client, started_at) 재매칭 — ended_at 기반 key 는 세션이 자라면
+  // 바뀌어 정작 새 호출이 생겼을 때 찾지 못한다.
   const refreshTrace = () => {
     if (!selected) return;
-    const key = selected.key;
     startTransition(async () => {
       if (selected.session_id) {
-        // 필터 창(days)에 관계없이 찾아야 하므로 넓은 창으로 조회한다.
         const res = await fetchBodyLogSessions({
           sid: selected.session_id,
-          days: 90,
+          days: 0,
         });
-        const s = res.success ? res.data?.sessions[0] : undefined;
+        const s = res.success
+          ? res.data?.sessions.find((x) => x.key === selected.key)
+          : undefined;
         if (s) {
           setSelected(s);
           return;
         }
       } else {
         const res = await fetchBodyLogSessions({
-          days: filters.days,
-          user: filters.user || undefined,
-          client: filters.client || undefined,
-          hasError: filters.hasError || undefined,
+          days: appliedFilters.days,
+          user: appliedFilters.user || undefined,
+          client: appliedFilters.client || undefined,
+          hasError: appliedFilters.hasError || undefined,
         });
         const s = res.success
-          ? res.data?.sessions.find((x) => x.key === key)
+          ? res.data?.sessions.find(
+              (x) =>
+                x.session_id === null &&
+                x.user_id === selected.user_id &&
+                x.client === selected.client &&
+                x.started_at === selected.started_at,
+            )
           : undefined;
         if (s) {
           setSelected(s);
@@ -216,17 +246,28 @@ export function BodyLogSessions({
     });
   };
 
-  const ensureBody = (rid: string) => {
-    if (bodies[rid] || loadingIds.has(rid)) return;
+  const ensureBody = (rid: string, force = false) => {
+    if (!force && (bodies[rid] || loadingIds.has(rid))) return;
     setLoadingIds((prev) => new Set(prev).add(rid));
-    fetchBodyLog(rid).then((res) => {
-      setBodies((prev) => ({ ...prev, [rid]: res }));
-      setLoadingIds((prev) => {
-        const n = new Set(prev);
-        n.delete(rid);
-        return n;
+    fetchBodyLog(rid)
+      .then((res) => {
+        setBodies((prev) => ({ ...prev, [rid]: res }));
+      })
+      .catch((err) => {
+        // server action 자체가 reject 되면 실패 카드로 남긴다 — 아니면
+        // loadingIds 에 영구히 남아 스피너가 멈추지 않는다.
+        setBodies((prev) => ({
+          ...prev,
+          [rid]: { success: false, error: err instanceof Error ? err.message : String(err) },
+        }));
+      })
+      .finally(() => {
+        setLoadingIds((prev) => {
+          const n = new Set(prev);
+          n.delete(rid);
+          return n;
+        });
       });
-    });
   };
 
   const toggleCall = (rid: string) => {
@@ -250,26 +291,51 @@ export function BodyLogSessions({
       .slice(0, LOAD_ALL_CHUNK);
     if (!pending.length) return;
     setLoadingIds((prev) => new Set([...prev, ...pending]));
-    fetchBodyLogBatch(pending).then((res) => {
-      setBodies((prev) => {
-        const next = { ...prev };
-        for (const rid of pending) {
-          const item = res.success ? res.data?.records[rid] : undefined;
-          next[rid] = item
-            ? { success: true, data: toBodyLogResponse(rid, item, res.data?.incomplete ?? false) }
-            : { success: false, error: res.error ?? t('fetchFailed'), status: res.status };
-        }
-        return next;
+    fetchBodyLogBatch(pending)
+      .then((res) => {
+        setBodies((prev) => {
+          const next = { ...prev };
+          for (const rid of pending) {
+            const item = res.success ? res.data?.records[rid] : undefined;
+            if (item) {
+              // found — batch incomplete 은 "못 찾은 구간" 얘기이므로
+              // 찾은 항목에는 붙이지 않는다(오안내 방지).
+              next[rid] = { success: true, data: toBodyLogResponse(rid, item, false) };
+            } else if (res.success && res.data?.oversized.includes(rid)) {
+              next[rid] = { success: false, error: t('bodyOversized'), status: 200 };
+            } else if (res.success) {
+              // missing — "미수집"이 아니라 "못 찾음"(수집대기/미스캔 가능).
+              next[rid] = { success: false, error: t('bodyMissing'), status: 404 };
+            } else {
+              next[rid] = { success: false, error: res.error ?? t('fetchFailed'), status: res.status };
+            }
+          }
+          return next;
+        });
+      })
+      .catch((err) => {
+        setBodies((prev) => {
+          const next = { ...prev };
+          for (const rid of pending) {
+            next[rid] = {
+              success: false,
+              error: err instanceof Error ? err.message : String(err),
+            };
+          }
+          return next;
+        });
+      })
+      .finally(() => {
+        setLoadingIds((prev) => {
+          const n = new Set(prev);
+          for (const rid of pending) n.delete(rid);
+          return n;
+        });
       });
-      setLoadingIds((prev) => {
-        const n = new Set(prev);
-        for (const rid of pending) n.delete(rid);
-        return n;
-      });
-    });
   };
 
   const applyFilters = () => {
+    setAppliedFilters(filters);
     setSessions(null);
     setNextBefore(null);
     load(filters);
@@ -281,8 +347,10 @@ export function BodyLogSessions({
       (c) => !bodies[c.request_id] && !loadingIds.has(c.request_id),
     ).length;
     const callsCut = selected.call_count > selected.calls.length;
-    // historyStart — 직전 호출의 요청 턴 수를 넘겨 누적 맥락을 접는다.
-    let prevTurns = 0;
+    // historyStart — 직전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
+    // 넘긴다(msgIndex 단위). 서브에이전트 호출이 끼거나 /compact 로 history 가
+    // 재작성되면 접두가 깨지는데, 그때 턴을 숨기면 새 대화가 가려진다.
+    let prevMsgs: unknown[] | null = null;
     return (
       <div className="space-y-4">
         <button
@@ -354,8 +422,20 @@ export function BodyLogSessions({
               : Array.isArray(rb?.input)
                 ? (rb.input as unknown[])
                 : null;
-            const historyStart = prevTurns;
-            if (msgs != null) prevTurns = msgs.length;
+            // 접두 검증: 직전 호출 msgs 가 이번 호출의 앞부분과 정확히 이어질
+            // 때만 그 길이를 숨긴다 — 경계 메시지 하나만 같으면 충분하다
+            // (전체 비교는 메시지 수백 개 × stringify 라 비싸다).
+            let historyStart = 0;
+            if (
+              msgs != null &&
+              prevMsgs != null &&
+              prevMsgs.length < msgs.length &&
+              JSON.stringify(msgs[prevMsgs.length - 1]) ===
+                JSON.stringify(prevMsgs[prevMsgs.length - 1])
+            ) {
+              historyStart = prevMsgs.length;
+            }
+            if (msgs != null) prevMsgs = msgs;
             return (
               <div key={call.request_id} className="glass rounded-apple">
                 <button
@@ -411,14 +491,7 @@ export function BodyLogSessions({
                         </p>
                         <button
                           type="button"
-                          onClick={() => {
-                            setBodies((prev) => {
-                              const n = { ...prev };
-                              delete n[call.request_id];
-                              return n;
-                            });
-                            ensureBody(call.request_id);
-                          }}
+                          onClick={() => ensureBody(call.request_id, true)}
                           className="text-primary hover:underline"
                         >
                           {t('retry')}
@@ -450,7 +523,7 @@ export function BodyLogSessions({
         <div className="ml-auto flex items-center gap-1">
           <button
             type="button"
-            onClick={() => load(filters)}
+            onClick={() => load(appliedFilters)}
             disabled={loading}
             className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
           >
@@ -529,6 +602,11 @@ export function BodyLogSessions({
               {t('sessionsCallsTruncated')}
             </p>
           )}
+          {userTruncated && (
+            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
+              {t('sessionsUserTruncated')}
+            </p>
+          )}
           <Table>
             <THead>
               <Tr>
@@ -579,7 +657,7 @@ export function BodyLogSessions({
           {hasMore && nextBefore && (
             <button
               type="button"
-              onClick={() => load(filters, nextBefore)}
+              onClick={() => load(appliedFilters, nextBefore)}
               disabled={loadingMore}
               className="mt-3 text-sm text-primary hover:underline disabled:opacity-50"
             >
