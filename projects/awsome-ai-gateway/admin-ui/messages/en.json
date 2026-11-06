@@ -1150,7 +1150,10 @@
         "abnormal": "Abnormal (error/timeout/slow)"
       },
       "copyUserId": "copy user ID",
-      "fetchFailed": "Failed to refresh events — please try again."
+      "fetchFailed": "Failed to refresh events — please try again.",
+      "colBody": "Body",
+      "viewBody": "view",
+      "agentUser": "agent/token call"
     },
     "bodyLogging": {
       "label": "Body logging (Invocation Body Logging)",
@@ -1209,7 +1212,7 @@
       "scanIncomplete": "Partial scan",
       "tabSessions": "Sessions",
       "tabLookup": "By request",
-      "sessionsTitle": "Recent sessions (24h)",
+      "sessionsTitle": "Sessions",
       "sessionsEmpty": "No sessions.",
       "sessionsTruncated": "Scan limit hit — some sessions may be missing",
       "colEnded": "Last call",
@@ -1224,7 +1227,32 @@
       "notCollected": "Not collected",
       "refresh": "Refresh",
       "toolCall": "tool call: {name}",
-      "toolResult": "tool result"
+      "toolResult": "tool result",
+      "auditNotice": "Request/response bodies are stored unmasked — viewing them is recorded in the audit log.",
+      "latencyMs": "{ms}ms",
+      "tokensIn": "in {n}",
+      "tokensOut": "out {n}",
+      "systemPrompt": "System prompt",
+      "toolsDefined": "Tools ({count})",
+      "showEarlierTurns": "Show {count} earlier turns",
+      "heuristicSession": "Estimated session (time-proximity)",
+      "heuristicShort": "est.",
+      "callsTruncated": "Showing {shown} of {total} calls",
+      "sessionsCallsTruncated": "Some sessions' call lists are truncated (500-call cap per session)",
+      "loadAllBodies": "Load all bodies (up to {count} — views are audited)",
+      "loadingBody": "Loading body…",
+      "retry": "Retry",
+      "sessionNotFound": "Session not found — it may be outside the queried range",
+      "colCost": "Cost",
+      "loadMore": "Load more",
+      "filterDays": "Period",
+      "filterDaysValue": "Last {days}d",
+      "filterUserPlaceholder": "user email/ID",
+      "filterClientPlaceholder": "client",
+      "filterErrorsOnly": "errors only",
+      "applyFilters": "Apply",
+      "collecting": "collecting",
+      "scanningHint": "Scanning the log store — large partitions can take a few seconds"
     }
   },
   "errors": {

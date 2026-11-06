@@ -2,38 +2,34 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useEffect, useState, useTransition } from 'react';
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
 import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
 
 import {
+  fetchBodyLog,
   fetchBodyLogSessions,
   fetchBodyLogBatch,
-  type BodyLogBatchResponse,
-  type BodyLogRecord,
+  type BodyLogBatchItem,
   type BodyLogResponse,
+  type BodyLogResult,
   type BodyLogSession,
 } from '@/lib/actions/body-logs';
 import { Badge } from '@/components/common/Badge';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { fmtDateTime } from '@/lib/utils/format';
+import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { BodyRecordContent, statusTone } from './bodyLogRender';
 
-// 배치 응답 아이템 → 단건 뷰가 기대하는 BodyLogResponse 형태로 맞춘다.
+// 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
+// 구조(eager batch)를 피하기 위해서다. 실제로 읽은 것만 감사된다.
+const LOAD_ALL_CHUNK = 50;
+
+/** 배치 아이템 → 단건 뷰가 기대하는 BodyLogResponse 형태. */
 function toBodyLogResponse(
   requestId: string,
-  item: {
-    source: 'firehose' | 'fallback' | null;
-    key: string | null;
-    duplicates: number;
-    record: BodyLogRecord | null;
-    model_alias?: string;
-    user_email?: string | null;
-    requested_at?: string;
-  },
-  oversized: boolean,
+  item: BodyLogBatchItem,
   incomplete: boolean,
 ): BodyLogResponse {
   return {
@@ -42,63 +38,201 @@ function toBodyLogResponse(
     source: item.source,
     key: item.key,
     duplicates: item.duplicates,
-    oversized,
+    oversized: false,
     incomplete,
     model_alias: item.model_alias ?? '',
     user_email: item.user_email,
     requested_at: item.requested_at ?? '',
     record: item.record,
+    cost_usd: item.cost_usd,
+    latency_ms: item.latency_ms,
+    ttft_ms: item.ttft_ms,
+    client: item.client,
+    input_tokens: item.input_tokens,
+    output_tokens: item.output_tokens,
+    cache_read_tokens: item.cache_read_tokens,
+    reasoning_tokens: item.reasoning_tokens,
   };
 }
 
-export function BodyLogSessions() {
+interface Filters {
+  days: number;
+  user: string;
+  client: string;
+  hasError: boolean;
+}
+
+export function BodyLogSessions({
+  initialSessionKey,
+  onSessionChange,
+}: {
+  /** ?session= 딥링크 — 로드 후 자동 오픈 대상 세션 key. */
+  initialSessionKey?: string | null;
+  /** 세션 오픈/닫힘을 부모(URL)에 알린다. */
+  onSessionChange?: (_key: string | null) => void;
+}) {
   const t = useTranslations('monitoring.bodyLogs');
   const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
 
+  const [filters, setFilters] = useState<Filters>({
+    days: 1,
+    user: '',
+    client: '',
+    hasError: false,
+  });
   const [sessions, setSessions] = useState<BodyLogSession[] | null>(null);
   const [truncated, setTruncated] = useState(false);
+  const [callsTruncated, setCallsTruncated] = useState(false);
+  const [nextBefore, setNextBefore] = useState<string | null>(null);
+  const [hasMore, setHasMore] = useState(false);
   const [loading, startTransition] = useTransition();
+  const [loadingMore, startLoadMore] = useTransition();
+
+  // 페이지를 연 채 토글이 꺼지면 백엔드가 403 을 준다 — 토스트만으로 넘기면
+  // 화면은 살아있는 것처럼 보이므로 비활성 안내로 전환한다.
+  const [toggledOff, setToggledOff] = useState(false);
 
   const [selected, setSelected] = useState<BodyLogSession | null>(null);
-  const [batch, setBatch] = useState<BodyLogBatchResponse | null>(null);
-  const [traceLoading, startTraceTransition] = useTransition();
+  const [bodies, setBodies] = useState<Record<string, BodyLogResult>>({});
+  const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [openCalls, setOpenCalls] = useState<Set<string>>(new Set());
+  // ?session= 딥링크 자동 오픈은 마운트 후 목록 로드 완료 시 한 번만.
+  const deepLinkTried = useRef(false);
 
-  const load = () => {
-    startTransition(async () => {
-      const res = await fetchBodyLogSessions(1);
-      if (res.success && res.data) {
-        setSessions(res.data.sessions);
-        setTruncated(res.data.truncated);
-      } else {
-        toast({ type: 'error', message: res.error ?? t('fetchFailed'), auto_dismiss_ms: 6000 });
-      }
-    });
+  const applyResult = (
+    data: { sessions: BodyLogSession[]; truncated: boolean; calls_truncated: boolean; has_more: boolean; next_before: string | null },
+    append: boolean,
+  ) => {
+    setSessions((prev) => (append && prev ? [...prev, ...data.sessions] : data.sessions));
+    setTruncated(data.truncated);
+    setCallsTruncated(data.calls_truncated);
+    setHasMore(data.has_more);
+    setNextBefore(data.next_before);
   };
 
+  const load = useCallback(
+    (f: Filters, before?: string) => {
+      const run = before ? startLoadMore : startTransition;
+      run(async () => {
+        const res = await fetchBodyLogSessions({
+          days: f.days,
+          user: f.user || undefined,
+          client: f.client || undefined,
+          hasError: f.hasError || undefined,
+          before,
+        });
+        if (res.success && res.data) {
+          applyResult(res.data, Boolean(before));
+        } else if (res.status === 403) {
+          setToggledOff(true);
+        } else {
+          toast({ type: 'error', message: res.error ?? t('fetchFailed'), auto_dismiss_ms: 6000 });
+        }
+      });
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [t],
+  );
+
   useEffect(() => {
-    load();
+    load(filters);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ── 딥링크 자동 오픈 — 목록 로드 후 key 매칭, 없으면 sid 직행 재조회 ──
+  useEffect(() => {
+    if (!initialSessionKey || deepLinkTried.current || sessions === null) return;
+    deepLinkTried.current = true;
+    const found = sessions.find((s) => s.key === initialSessionKey);
+    if (found) {
+      openSession(found);
+      return;
+    }
+    // 목록 범위 밖이면 sid 직행 — key 형식은 sid|<session_id>|<user>|<client>.
+    const sid = initialSessionKey.startsWith('sid|')
+      ? initialSessionKey.split('|')[1]
+      : null;
+    if (!sid) {
+      toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
+      return;
+    }
+    startTransition(async () => {
+      const res = await fetchBodyLogSessions({ sid, days: 90 });
+      const s = res.success ? res.data?.sessions[0] : undefined;
+      if (s) openSession(s);
+      else toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessions, initialSessionKey]);
+
   const openSession = (s: BodyLogSession) => {
     setSelected(s);
-    setBatch(null);
+    setBodies({});
+    setLoadingIds(new Set());
     setOpenCalls(new Set());
-    startTraceTransition(async () => {
-      const res = await fetchBodyLogBatch(s.calls.map((c) => c.request_id));
-      if (res.success && res.data) {
-        setBatch(res.data);
+    onSessionChange?.(s.key);
+  };
+
+  const closeSession = () => {
+    setSelected(null);
+    onSessionChange?.(null);
+  };
+
+  // trace 새로고침 — 명시 세션은 sid 직행, 휴리스틱은 목록 재조회 후 key 재매칭.
+  // 방금 끝난 세션의 후속 호출·늦게 도착한 본문을 다시 볼 수 있다.
+  const refreshTrace = () => {
+    if (!selected) return;
+    const key = selected.key;
+    startTransition(async () => {
+      if (selected.session_id) {
+        // 필터 창(days)에 관계없이 찾아야 하므로 넓은 창으로 조회한다.
+        const res = await fetchBodyLogSessions({
+          sid: selected.session_id,
+          days: 90,
+        });
+        const s = res.success ? res.data?.sessions[0] : undefined;
+        if (s) {
+          setSelected(s);
+          return;
+        }
       } else {
-        toast({ type: 'error', message: res.error ?? t('fetchFailed'), auto_dismiss_ms: 6000 });
-        setSelected(null);
+        const res = await fetchBodyLogSessions({
+          days: filters.days,
+          user: filters.user || undefined,
+          client: filters.client || undefined,
+          hasError: filters.hasError || undefined,
+        });
+        const s = res.success
+          ? res.data?.sessions.find((x) => x.key === key)
+          : undefined;
+        if (s) {
+          setSelected(s);
+          return;
+        }
       }
+      toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 4000 });
+    });
+  };
+
+  const ensureBody = (rid: string) => {
+    if (bodies[rid] || loadingIds.has(rid)) return;
+    setLoadingIds((prev) => new Set(prev).add(rid));
+    fetchBodyLog(rid).then((res) => {
+      setBodies((prev) => ({ ...prev, [rid]: res }));
+      setLoadingIds((prev) => {
+        const n = new Set(prev);
+        n.delete(rid);
+        return n;
+      });
     });
   };
 
   const toggleCall = (rid: string) => {
+    // updater 안에서 fetch 를 부르면 StrictMode 이중 호출로 열람·감사가 두 번
+    // 생긴다 — 펼치는 경우에만 updater 밖에서 조회한다.
+    if (!openCalls.has(rid)) ensureBody(rid);
     setOpenCalls((prev) => {
       const next = new Set(prev);
       if (next.has(rid)) next.delete(rid);
@@ -107,15 +241,53 @@ export function BodyLogSessions() {
     });
   };
 
+  // 명시적 일괄 열람 — 클릭 = 50건 열람 의사로 감사된다(정직한 감사).
+  const loadAll = () => {
+    if (!selected) return;
+    const pending = selected.calls
+      .map((c) => c.request_id)
+      .filter((rid) => !bodies[rid] && !loadingIds.has(rid))
+      .slice(0, LOAD_ALL_CHUNK);
+    if (!pending.length) return;
+    setLoadingIds((prev) => new Set([...prev, ...pending]));
+    fetchBodyLogBatch(pending).then((res) => {
+      setBodies((prev) => {
+        const next = { ...prev };
+        for (const rid of pending) {
+          const item = res.success ? res.data?.records[rid] : undefined;
+          next[rid] = item
+            ? { success: true, data: toBodyLogResponse(rid, item, res.data?.incomplete ?? false) }
+            : { success: false, error: res.error ?? t('fetchFailed'), status: res.status };
+        }
+        return next;
+      });
+      setLoadingIds((prev) => {
+        const n = new Set(prev);
+        for (const rid of pending) n.delete(rid);
+        return n;
+      });
+    });
+  };
+
+  const applyFilters = () => {
+    setSessions(null);
+    setNextBefore(null);
+    load(filters);
+  };
+
   // ── 세션 trace 뷰 ────────────────────────────────────────────────────────────
   if (selected) {
-    const missing = new Set(batch?.missing ?? []);
-    const oversized = new Set(batch?.oversized ?? []);
+    const remaining = selected.calls.filter(
+      (c) => !bodies[c.request_id] && !loadingIds.has(c.request_id),
+    ).length;
+    const callsCut = selected.call_count > selected.calls.length;
+    // historyStart — 직전 호출의 요청 턴 수를 넘겨 누적 맥락을 접는다.
+    let prevTurns = 0;
     return (
       <div className="space-y-4">
         <button
           type="button"
-          onClick={() => setSelected(null)}
+          onClick={closeSession}
           className="text-sm text-primary hover:underline"
         >
           {t('backToSessions')}
@@ -126,6 +298,9 @@ export function BodyLogSessions() {
           <div className="flex flex-wrap items-center gap-2 text-sm">
             <span className="font-medium">{selected.user_email ?? selected.user_id ?? '-'}</span>
             {selected.client && <Badge tone="neutral">{selected.client}</Badge>}
+            {selected.session_id === null && (
+              <Badge tone="amber">{t('heuristicSession')}</Badge>
+            )}
             <span className="text-muted-foreground">
               {fmtDateTime(selected.started_at, locale, tz)} → {fmtDateTime(selected.ended_at, locale, tz)}
             </span>
@@ -133,95 +308,211 @@ export function BodyLogSessions() {
             {selected.error_count > 0 && (
               <Badge tone="pink">{t('errorsCount', { count: selected.error_count })}</Badge>
             )}
-            {batch?.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
+            {selected.total_cost_usd != null && (
+              <Badge tone="neutral">{fmtUsd(selected.total_cost_usd)}</Badge>
+            )}
+            {callsCut && (
+              <Badge tone="amber">
+                {t('callsTruncated', { shown: selected.calls.length, total: selected.call_count })}
+              </Badge>
+            )}
+            <button
+              type="button"
+              onClick={refreshTrace}
+              disabled={loading}
+              className="ml-auto inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
+            >
+              <RefreshCw size={12} aria-hidden="true" />
+              {t('refresh')}
+            </button>
           </div>
+          {remaining > 0 && (
+            <button
+              type="button"
+              onClick={loadAll}
+              className="mt-2 text-xs text-primary hover:underline"
+            >
+              {t('loadAllBodies', { count: Math.min(remaining, LOAD_ALL_CHUNK) })}
+            </button>
+          )}
         </div>
 
         {/* 호출 타임라인 */}
-        {traceLoading ? (
-          <p className="text-sm text-muted-foreground">{t('loadingTrace')}</p>
-        ) : (
-          <div className="space-y-2">
-            {selected.calls.map((call, i) => {
-              const item = batch?.records[call.request_id];
-              const isMissing = missing.has(call.request_id);
-              const isOpen = openCalls.has(call.request_id);
-              return (
-                <div key={call.request_id} className="glass rounded-apple">
-                  <button
-                    type="button"
-                    onClick={() => item && toggleCall(call.request_id)}
-                    disabled={!item}
-                    className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-sm disabled:cursor-default"
-                  >
-                    {item ? (
-                      isOpen ? (
-                        <ChevronDown size={14} aria-hidden="true" />
-                      ) : (
-                        <ChevronRight size={14} aria-hidden="true" />
-                      )
-                    ) : (
-                      <ChevronRight size={14} className="text-muted-foreground" aria-hidden="true" />
-                    )}
-                    <span className="w-8 text-xs text-muted-foreground">#{i + 1}</span>
-                    <span className="whitespace-nowrap">
-                      {fmtDateTime(call.requested_at, locale, tz)}
-                    </span>
-                    <span>{call.model_alias ?? '-'}</span>
-                    <Badge tone={statusTone(call.status === 'SUCCESS' ? 'success' : 'error')}>
-                      {call.status ?? '-'}
-                    </Badge>
-                    {call.latency_ms != null && (
-                      <span className="text-xs text-muted-foreground">
-                        {(call.latency_ms / 1000).toFixed(1)}s
-                      </span>
-                    )}
-                    {isMissing && <Badge tone="neutral">{t('notCollected')}</Badge>}
-                    {oversized.has(call.request_id) && (
-                      <Badge tone="amber">{t('oversized')}</Badge>
-                    )}
-                    {item?.duplicates ? (
-                      <Badge tone="neutral">
-                        {t('duplicates', { count: item.duplicates })}
-                      </Badge>
-                    ) : null}
-                  </button>
-                  {isOpen && item && (
-                    <div className="border-t border-border px-4 py-3">
-                      <BodyRecordContent
-                        data={toBodyLogResponse(
-                          call.request_id,
-                          item,
-                          oversized.has(call.request_id),
-                          batch?.incomplete ?? false,
-                        )}
-                      />
-                    </div>
+        <div className="space-y-2">
+          {selected.calls.map((call, i) => {
+            const res = bodies[call.request_id];
+            const isLoading = loadingIds.has(call.request_id);
+            const isOpen = openCalls.has(call.request_id);
+            // 요청 messages 는 호출마다 전체 history 를 싣는다 — 직전 호출의 턴
+            // 수를 historyStart 로 넘겨 이번 호출의 새 턴만 기본으로 보인다.
+            // (messages[] 와 responses API input[] 두 방언 모두 센다)
+            const rb = res?.data?.record?.request_body as
+              | { messages?: unknown[]; input?: unknown }
+              | undefined;
+            const msgs = Array.isArray(rb?.messages)
+              ? rb.messages
+              : Array.isArray(rb?.input)
+                ? (rb.input as unknown[])
+                : null;
+            const historyStart = prevTurns;
+            if (msgs != null) prevTurns = msgs.length;
+            return (
+              <div key={call.request_id} className="glass rounded-apple">
+                <button
+                  type="button"
+                  onClick={() => toggleCall(call.request_id)}
+                  className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-sm"
+                >
+                  {isOpen ? (
+                    <ChevronDown size={14} aria-hidden="true" />
+                  ) : (
+                    <ChevronRight size={14} aria-hidden="true" />
                   )}
-                </div>
-              );
-            })}
-          </div>
-        )}
+                  <span className="w-8 text-xs text-muted-foreground">#{i + 1}</span>
+                  <span className="whitespace-nowrap">
+                    {fmtDateTime(call.requested_at, locale, tz)}
+                  </span>
+                  <span>{call.model_alias ?? '-'}</span>
+                  <Badge tone={statusTone(call.status ?? '')}>{call.status ?? '-'}</Badge>
+                  {call.latency_ms != null && (
+                    <span className="text-xs text-muted-foreground">
+                      {(call.latency_ms / 1000).toFixed(1)}s
+                    </span>
+                  )}
+                  {call.cost_usd != null && (
+                    <span className="text-xs text-muted-foreground">
+                      {fmtUsd(call.cost_usd)}
+                    </span>
+                  )}
+                  {(call.input_tokens != null || call.output_tokens != null) && (
+                    <span className="text-xs text-muted-foreground">
+                      {fmtTokensCompact(call.input_tokens)}→{fmtTokensCompact(call.output_tokens)}
+                    </span>
+                  )}
+                  {res?.data?.duplicates ? (
+                    <Badge tone="neutral">
+                      {t('duplicates', { count: res.data.duplicates })}
+                    </Badge>
+                  ) : null}
+                  {res?.data?.incomplete && <Badge tone="amber">{t('scanIncomplete')}</Badge>}
+                </button>
+                {isOpen && (
+                  <div className="border-t border-border px-4 py-3">
+                    {isLoading ? (
+                      <p className="text-sm text-muted-foreground">{t('loadingBody')}</p>
+                    ) : res?.success && res.data ? (
+                      <BodyRecordContent data={res.data} historyStart={historyStart} />
+                    ) : (
+                      // 404/스캔미스 — 백엔드 hint 가 수집대기/미수집/미스캔을
+                      // 구분해 주므로 그대로 보여주고 재시도를 둔다.
+                      <div className="flex items-center gap-3 text-xs">
+                        <p className="text-muted-foreground">
+                          {res?.error ?? t('fetchFailed')}
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setBodies((prev) => {
+                              const n = { ...prev };
+                              delete n[call.request_id];
+                              return n;
+                            });
+                            ensureBody(call.request_id);
+                          }}
+                          className="text-primary hover:underline"
+                        >
+                          {t('retry')}
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
       </div>
     );
   }
 
   // ── 세션 목록 ────────────────────────────────────────────────────────────────
+  if (toggledOff) {
+    return (
+      <div className="glass rounded-apple p-6">
+        <p className="text-sm text-muted-foreground">{t('disabledNotice')}</p>
+      </div>
+    );
+  }
   return (
     <div className="glass rounded-apple p-4">
-      <div className="mb-3 flex items-center justify-between">
+      <div className="mb-3 flex flex-wrap items-center gap-2">
         <h2 className="text-base font-semibold">{t('sessionsTitle')}</h2>
-        <button
-          type="button"
-          onClick={load}
-          disabled={loading}
-          className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
-        >
-          <RefreshCw size={12} aria-hidden="true" />
-          {t('refresh')}
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            type="button"
+            onClick={() => load(filters)}
+            disabled={loading}
+            className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
+          >
+            <RefreshCw size={12} aria-hidden="true" />
+            {t('refresh')}
+          </button>
+        </div>
       </div>
+
+      {/* 필터 바 — 1000명 규모에서 목적 세션을 찾는 유일한 경로 */}
+      <form
+        className="mb-3 flex flex-wrap items-center gap-2 text-sm"
+        onSubmit={(e) => {
+          e.preventDefault();
+          applyFilters();
+        }}
+      >
+        <select
+          value={filters.days}
+          onChange={(e) =>
+            setFilters((f) => ({ ...f, days: Number(e.target.value) }))
+          }
+          className="rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+          aria-label={t('filterDays')}
+        >
+          {[1, 7, 30, 90].map((d) => (
+            <option key={d} value={d}>
+              {t('filterDaysValue', { days: d })}
+            </option>
+          ))}
+        </select>
+        <input
+          type="text"
+          value={filters.user}
+          onChange={(e) => setFilters((f) => ({ ...f, user: e.target.value }))}
+          placeholder={t('filterUserPlaceholder')}
+          className="w-44 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+        />
+        <input
+          type="text"
+          value={filters.client}
+          onChange={(e) => setFilters((f) => ({ ...f, client: e.target.value }))}
+          placeholder={t('filterClientPlaceholder')}
+          className="w-32 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+        />
+        <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+          <input
+            type="checkbox"
+            checked={filters.hasError}
+            onChange={(e) => setFilters((f) => ({ ...f, hasError: e.target.checked }))}
+          />
+          {t('filterErrorsOnly')}
+        </label>
+        <button
+          type="submit"
+          disabled={loading}
+          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
+        >
+          {t('applyFilters')}
+        </button>
+      </form>
+
       {sessions === null ? (
         <p className="text-sm text-muted-foreground">{t('loadingTrace')}</p>
       ) : sessions.length === 0 ? (
@@ -233,6 +524,11 @@ export function BodyLogSessions() {
               {t('sessionsTruncated')}
             </p>
           )}
+          {callsTruncated && (
+            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
+              {t('sessionsCallsTruncated')}
+            </p>
+          )}
           <Table>
             <THead>
               <Tr>
@@ -241,6 +537,7 @@ export function BodyLogSessions() {
                 <Th>{t('colClient')}</Th>
                 <Th>{t('colCalls')}</Th>
                 <Th>{t('colModels')}</Th>
+                <Th>{t('colCost')}</Th>
                 <Th>{t('colErrors')}</Th>
               </Tr>
             </THead>
@@ -255,10 +552,18 @@ export function BodyLogSessions() {
                   <Td className="max-w-40 truncate text-sm" title={s.user_email ?? s.user_id ?? ''}>
                     {s.user_email ?? s.user_id ?? '-'}
                   </Td>
-                  <Td className="text-sm">{s.client ?? '-'}</Td>
+                  <Td className="text-sm">
+                    {s.client ?? '-'}
+                    {s.session_id === null && (
+                      <Badge tone="amber" className="ml-1">{t('heuristicShort')}</Badge>
+                    )}
+                  </Td>
                   <Td className="text-sm">{s.call_count}</Td>
                   <Td className="max-w-48 truncate text-sm" title={s.models.join(', ')}>
                     {s.models.join(', ')}
+                  </Td>
+                  <Td className="text-sm">
+                    {s.total_cost_usd != null ? fmtUsd(s.total_cost_usd) : '—'}
                   </Td>
                   <Td>
                     {s.error_count > 0 ? (
@@ -271,6 +576,16 @@ export function BodyLogSessions() {
               ))}
             </TBody>
           </Table>
+          {hasMore && nextBefore && (
+            <button
+              type="button"
+              onClick={() => load(filters, nextBefore)}
+              disabled={loadingMore}
+              className="mt-3 text-sm text-primary hover:underline disabled:opacity-50"
+            >
+              {loadingMore ? t('loadingTrace') : t('loadMore')}
+            </button>
+          )}
         </>
       )}
     </div>

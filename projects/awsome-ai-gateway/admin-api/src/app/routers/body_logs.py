@@ -17,7 +17,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import String, cast, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -51,6 +51,10 @@ router = APIRouter(
 #: request_id 는 S3 키 세그먼트로 들어간다 — ``/`` 와 ``..`` 를 허용하면
 #: prefix 탈출로 다른 파티션을 읽을 수 있으므로 문자셋을 좁힌다.
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{4,128}$")
+
+#: session_id 는 클라이언트 제어 문자열 — ``sid`` 필터로 들어올 때 같은
+#: 화이트리스트를 적용한다(gateway 추출기와 동일 문자셋).
+_SESSION_ID_RE = re.compile(r"^[0-9A-Za-z._:-]{1,128}$")
 
 #: 수집 지연 안내 임계 — Firehose 버퍼(60s)+전파 여유로, 이 안의 404는
 #: "아직 안 온 것"이지 "없는 것"이 아니다.
@@ -110,16 +114,33 @@ def _usage_lookup_stmt():
         UsageLog.status,
         UsageLog.cost_usd,
         UsageLog.is_streaming,
+        UsageLog.input_tokens,
+        UsageLog.output_tokens,
+        UsageLog.cache_read_tokens,
+        UsageLog.reasoning_tokens,
+        UsageLog.ttft_ms,
     ).outerjoin(User, User.id == UsageLog.user_id)
 
 
-def _session_agg_stmt(cutoff: datetime | None, limit: int):
+def _session_agg_stmt(
+    cutoff: datetime | None,
+    limit: int,
+    *,
+    before: datetime | None = None,
+    user_ids: list | None = None,
+    client: str | None = None,
+    has_error: bool = False,
+    sid: str | None = None,
+):
     """session_id 명시 세션 집계 — ⚠️ user_id 는 uuid 라 max()/min() 집계 불가.
 
     Postgres 는 uuid 에 순서 연산이 없어 ``max(uuid)`` 가 UndefinedFunctionError
     다 — user_id/client/email 은 집계 대신 GROUP BY 키에 넣는다(세션은 단일
     소유자라 결과 행은 같고, 만에 하나 키가 갈라지면 방어적으로 두 세션으로
-    보이는 게 합쳐지는 것보다 낫다). 집계가 필요한 건 시각/건수/모델뿐.
+    보이는 게 합쳐지는 것보다 낫다). 집계가 필요한 건 시각/건수/모델/비용뿐.
+
+    ``before``(페이지네이션 커서)·``has_error`` 는 그룹 수준 조건이라 HAVING —
+    WHERE 에 넣으면 세션 경계가 아니라 개별 행이 잘린다.
     """
     stmt = (
         select(
@@ -130,6 +151,7 @@ def _session_agg_stmt(cutoff: datetime | None, limit: int):
             func.count()
             .filter(UsageLog.status != UsageStatus.SUCCESS)
             .label("error_count"),
+            func.sum(UsageLog.cost_usd).label("total_cost"),
             UsageLog.user_id,
             User.email.label("user_email"),
             UsageLog.client,
@@ -149,6 +171,18 @@ def _session_agg_stmt(cutoff: datetime | None, limit: int):
     )
     if cutoff is not None:
         stmt = stmt.where(UsageLog.requested_at >= cutoff)
+    if sid is not None:
+        stmt = stmt.where(UsageLog.session_id == sid)
+    if user_ids is not None:
+        stmt = stmt.where(UsageLog.user_id.in_(user_ids))
+    if client is not None:
+        stmt = stmt.where(UsageLog.client == client)
+    if before is not None:
+        stmt = stmt.having(func.max(UsageLog.requested_at) < before)
+    if has_error:
+        stmt = stmt.having(
+            func.count().filter(UsageLog.status != UsageStatus.SUCCESS) > 0
+        )
     return stmt
 
 
@@ -160,6 +194,11 @@ async def list_body_log_sessions(
     days: int = Query(default=1, ge=0, le=365),
     gap_minutes: int = Query(default=_SESSION_GAP_MINUTES, ge=1, le=1440),
     limit: int = Query(default=20, ge=1, le=50),
+    before: datetime | None = Query(default=None),
+    user: str | None = Query(default=None, max_length=200),
+    client: str | None = Query(default=None, max_length=128),
+    has_error: bool = Query(default=False),
+    sid: str | None = Query(default=None),
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
@@ -170,15 +209,63 @@ async def list_body_log_sessions(
     대화도 갈라진다 — NULL 행(구 레코드·비 Anthropic 클라이언트)만 기존
     (user, client, gap) 휴리스틱으로 묶는다. 본문은 반환하지 않으므로 감사하지
     않는다(monitoring events 와 같은 민감도 계급).
+
+    필터는 그룹핑 전에 WHERE 로 건다 — 1000명 규모에서 "어제 A씨 세션"을 찾는
+    경로가 이 엔드포인트뿐이다. ``before`` 는 커서(직전 페이지 마지막 세션의
+    ended_at), ``sid`` 는 딥링크용 직행 조회(휴리스틱 스캔 생략).
     """
     await _require_body_logging(request, session)
+
+    if sid is not None and not _SESSION_ID_RE.fullmatch(sid):
+        raise HTTPException(400, "sid 형식이 올바르지 않습니다")
+    if before is not None and before.tzinfo is None:
+        before = before.replace(tzinfo=timezone.utc)
+
+    # user 부분일치 → user_id 목록으로 해석 (email 또는 uuid 텍스트).
+    # 와일드카드 이스케이프 후 ilike — NULL user_id(agent 토큰)는 자연 제외.
+    user_ids = None
+    if user:
+        like = (
+            "%"
+            + user.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            + "%"
+        )
+        user_ids = list(
+            (
+                await session.execute(
+                    select(User.id)
+                    .where(
+                        (User.email.ilike(like, escape="\\"))
+                        | (cast(User.id, String).ilike(like, escape="\\"))
+                    )
+                    .limit(100)
+                )
+            ).scalars()
+        )
 
     cutoff = None
     if days > 0:
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # ── 1) 명시적 세션 — session_id GROUP BY + 호출은 IN 쿼리 1회 ─────────
-    exact_rows = (await session.execute(_session_agg_stmt(cutoff, limit))).all()
+    # limit+1 로 가져와 has_more 를 판별한다.
+    exact_rows = list(
+        (
+            await session.execute(
+                _session_agg_stmt(
+                    cutoff,
+                    limit + 1,
+                    before=before,
+                    user_ids=user_ids,
+                    client=client,
+                    has_error=has_error,
+                    sid=sid,
+                )
+            )
+        ).all()
+    )
+    exact_overflow = len(exact_rows) > limit
+    exact_rows = exact_rows[:limit]
 
     calls_by_sid: dict[tuple, list] = {}
     calls_truncated = False
@@ -195,6 +282,8 @@ async def list_body_log_sessions(
                 UsageLog.status,
                 UsageLog.latency_ms,
                 UsageLog.cost_usd,
+                UsageLog.input_tokens,
+                UsageLog.output_tokens,
             )
             .where(UsageLog.session_id.in_(sids))
             .order_by(UsageLog.requested_at.asc())
@@ -217,6 +306,8 @@ async def list_body_log_sessions(
                     "status": _status_str(c.status),
                     "latency_ms": c.latency_ms,
                     "cost_usd": float(c.cost_usd) if c.cost_usd is not None else None,
+                    "input_tokens": c.input_tokens,
+                    "output_tokens": c.output_tokens,
                 }
             )
 
@@ -232,6 +323,7 @@ async def list_body_log_sessions(
             "ended_at": r.ended_at.isoformat(),
             "call_count": r.call_count,
             "error_count": r.error_count,
+            "total_cost_usd": float(r.total_cost) if r.total_cost is not None else None,
             "models": sorted(m for m in (r.models or []) if m),
             "calls": calls_by_sid.get(
                 (
@@ -245,6 +337,21 @@ async def list_body_log_sessions(
         for r in exact_rows
     ]
 
+    # sid 직행은 딥링크 조회다 — 휴리스틱 목록 스캔을 생략하고 바로 반환한다.
+    if sid is not None:
+        return JSONResponse(
+            {
+                "sessions": sessions,
+                "scanned_rows": 0,
+                "explicit_sessions": len(exact_rows),
+                "truncated": False,
+                "calls_truncated": calls_truncated,
+                "has_more": False,
+                "next_before": None,
+            },
+            headers=_NO_STORE,
+        )
+
     # ── 2) NULL session_id 행 — 구 레코드·미추출 클라이언트 폴백 (기존 휴리스틱) ──
     stmt = (
         _usage_lookup_stmt()
@@ -254,6 +361,12 @@ async def list_body_log_sessions(
     )
     if cutoff is not None:
         stmt = stmt.where(UsageLog.requested_at >= cutoff)
+    if before is not None:
+        stmt = stmt.where(UsageLog.requested_at < before)
+    if user_ids is not None:
+        stmt = stmt.where(UsageLog.user_id.in_(user_ids))
+    if client is not None:
+        stmt = stmt.where(UsageLog.client == client)
     rows = (await session.execute(stmt)).all()
     truncated = len(rows) >= _SESSION_SCAN_LIMIT
 
@@ -284,6 +397,8 @@ async def list_body_log_sessions(
             if r.status is not None
             and (_status_str(r.status) or "").upper() != "SUCCESS"
         )
+        if has_error and errors == 0:
+            continue
         sessions.append(
             {
                 "key": f"{first.user_id or 'none'}|{first.client or 'other'}|{last.requested_at.isoformat()}",
@@ -295,6 +410,7 @@ async def list_body_log_sessions(
                 "ended_at": last.requested_at.isoformat(),
                 "call_count": len(g),
                 "error_count": errors,
+                "total_cost_usd": sum(float(r.cost_usd or 0) for r in g),
                 "models": sorted({r.model_alias for r in g if r.model_alias}),
                 "calls": [
                     {
@@ -304,6 +420,8 @@ async def list_body_log_sessions(
                         "status": _status_str(r.status),
                         "latency_ms": r.latency_ms,
                         "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
+                        "input_tokens": r.input_tokens,
+                        "output_tokens": r.output_tokens,
                     }
                     for r in g
                 ],
@@ -311,12 +429,19 @@ async def list_body_log_sessions(
         )
 
     sessions.sort(key=lambda x: x["ended_at"], reverse=True)
+    returned = sessions[:limit]
+    has_more = exact_overflow or truncated or len(sessions) > limit
     return JSONResponse(
         {
-            "sessions": sessions[:limit],
-            "scanned_rows": len(rows) + len(exact_rows),
+            "sessions": returned,
+            # 단위가 섞이지 않게 둘로 나눈다 — 스캔한 NULL 행 수와 집계된
+            # 명시 세션 수는 다른 것이다.
+            "scanned_rows": len(rows),
+            "explicit_sessions": len(exact_rows),
             "truncated": truncated,
             "calls_truncated": calls_truncated,
+            "has_more": has_more,
+            "next_before": returned[-1]["ended_at"] if has_more and returned else None,
         },
         headers=_NO_STORE,
     )
@@ -376,6 +501,14 @@ async def get_body_logs_batch(
                 "model_alias": r.model_alias,
                 "user_email": r.user_email,
                 "requested_at": r.requested_at.isoformat(),
+                "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
+                "latency_ms": r.latency_ms,
+                "ttft_ms": r.ttft_ms,
+                "client": r.client,
+                "input_tokens": r.input_tokens,
+                "output_tokens": r.output_tokens,
+                "cache_read_tokens": r.cache_read_tokens,
+                "reasoning_tokens": r.reasoning_tokens,
             }
 
     result = BodyLogBatchResult()
@@ -497,12 +630,14 @@ async def get_body_log(
 
     if row is None:
         await _audit(found=False)
-        # usage 행이 없으면 partition 정보를 유도할 수 없어 S3 를 열지도 못한다 —
-        # 단 비용 기록 실패로 행 자체가 없는 경우 본문은 S3 에 있을 수 있다.
+        # usage 행은 cost-recorder-worker 가 비동기로 쓴다 — 방금 보낸 요청은
+        # 아직 행이 없는 게 정상이고, 그때는 파티션 정보를 유도할 수 없어 S3 를
+        # 열지도 못한다. 오래된 요청인데 행이 없으면 비용 기록 실패다.
         raise HTTPException(
             404,
-            "해당 request_id 의 사용 기록이 없습니다 — 비용 기록이 실패한 요청이면 "
-            "본문은 저장돼 있어도 이 화면에서는 찾을 수 없습니다",
+            "해당 request_id 의 사용 기록이 아직 없습니다 — 방금 보낸 요청이면 "
+            "비용 기록이 도착하지 않은 것일 수 있으니 수 분 후 다시 시도하세요. "
+            "오래된 요청이면 비용 기록 실패로 이 화면에서는 찾을 수 없습니다",
         )
 
     try:
@@ -534,8 +669,9 @@ async def get_body_log(
             datetime.now(timezone.utc) - row.requested_at.astimezone(timezone.utc)
         ).total_seconds()
         if result.incomplete:
-            # 스캔 상한/파손으로 못 다 본 구간이 있다 — "없다"가 아니라 "못 찾았다".
-            hint = "저장소 스캔이 상한에 걸려 전부 확인하지 못했습니다 — 본문이 있을 수 있습니다. 잠시 후 다시 시도하세요."
+            # 스캔 상한은 결정적 — 같은 조건으로 재시도해도 결과가 같다.
+            # "없다"가 아니라 "못 찾았다"이고, 대안 경로를 안내한다.
+            hint = "저장소 스캔이 상한에 걸려 전부 확인하지 못했습니다 — 본문이 있을 수 있습니다. 재시도해도 같으면 S3 콘솔에서 직접 확인하세요."
         else:
             hint = (
                 "수집 대기 중일 수 있습니다 — Firehose 버퍼링으로 수 분 후 도착합니다. 잠시 후 다시 시도하세요."
@@ -556,6 +692,14 @@ async def get_body_log(
             "model_alias": row.model_alias,
             "user_email": row.user_email,
             "requested_at": row.requested_at.isoformat(),
+            "cost_usd": float(row.cost_usd) if row.cost_usd is not None else None,
+            "latency_ms": row.latency_ms,
+            "ttft_ms": row.ttft_ms,
+            "client": row.client,
+            "input_tokens": row.input_tokens,
+            "output_tokens": row.output_tokens,
+            "cache_read_tokens": row.cache_read_tokens,
+            "reasoning_tokens": row.reasoning_tokens,
             "record": result.record,
         },
         headers={"Cache-Control": "no-store"},

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -61,6 +62,13 @@ def _usage_row(requested_at: datetime | None = None) -> SimpleNamespace:
         requested_at=requested_at or NOW - timedelta(minutes=10),
         latency_ms=1200,
         model_alias="claude-sonnet",
+        cost_usd=None,
+        is_streaming=True,
+        input_tokens=100,
+        output_tokens=50,
+        cache_read_tokens=0,
+        reasoning_tokens=0,
+        ttft_ms=200,
     )
 
 
@@ -360,6 +368,11 @@ def _sess_row(
         cost_usd=None,
         is_streaming=True,
         session_id=session_id,
+        input_tokens=10,
+        output_tokens=5,
+        cache_read_tokens=0,
+        reasoning_tokens=0,
+        ttft_ms=50,
     )
 
 
@@ -383,10 +396,11 @@ def _agg_row(
         user_email=f"{user}@e",
         client=client,
         models=list(models),
+        total_cost=None,
     )
 
 
-def _session_rows(rows, exact=None, call_rows=None) -> MagicMock:
+def _session_rows(rows, exact=None, call_rows=None, uid_rows=None) -> MagicMock:
     """세 쿼리를 SQL 형태로 구분해 반환 — 집계(GROUP BY) / 호출(IN) / NULL 스캔."""
     session = MagicMock()
     r_exact = MagicMock()
@@ -395,9 +409,14 @@ def _session_rows(rows, exact=None, call_rows=None) -> MagicMock:
     r_calls.all.return_value = call_rows or []
     r_null = MagicMock()
     r_null.all.return_value = rows
+    r_uids = MagicMock()
+    r_uids.scalars.return_value = uid_rows or []
 
     async def _exec(stmt, *a, **k):
         sql = str(stmt).upper()
+        # user 부분일치 → user_id 해석 쿼리 (ILIKE)를 먼저 구분한다.
+        if "ILIKE" in sql:
+            return r_uids
         if "GROUP BY" in sql:
             return r_exact
         if "IN (" in sql:
@@ -419,6 +438,7 @@ async def test_sessions_groups_by_gap():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -440,6 +460,7 @@ async def test_sessions_user_boundary():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -463,6 +484,7 @@ async def test_sessions_explicit_session_id_groups_exactly():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
     )
     import json as _json
@@ -485,6 +507,7 @@ async def test_sessions_mixed_exact_and_heuristic():
     null_rows = [_sess_row("h1", 2, user="y")]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(),
         session=_session_rows(null_rows, exact=exact, call_rows=calls),
     )
@@ -510,6 +533,7 @@ async def test_sessions_collision_splits_calls_by_owner():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
     )
     import json as _json
@@ -545,7 +569,8 @@ async def test_sessions_toggle_off_403():
     with pytest.raises(HTTPException) as ei:
         await list_body_log_sessions(
             req, days=1, gap_minutes=30, limit=20,
-            admin=_admin(), session=_session_rows([]),
+            before=None, user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows([]),
         )
     assert ei.value.status_code == 403
 
@@ -653,6 +678,7 @@ async def test_sessions_error_count_only_non_success():
     ]
     resp = await list_body_log_sessions(
         _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
         admin=_admin(), session=_session_rows(rows),
     )
     import json as _json
@@ -666,3 +692,133 @@ async def test_sessions_error_count_only_non_success():
         "ERROR",
         "TIMEOUT",
     ]
+
+
+@pytest.mark.asyncio
+async def test_sessions_sid_direct_skips_heuristic():
+    """sid 직행 — 명시 세션만 반환하고 NULL 스캔 경로는 결과에 안 섞는다.
+
+    딥링크 용도라 목록 스캔을 생략한다 — scanned_rows 가 0 이고 같은 유저의
+    다른 휴리스틱 세션이 있어도 나오지 않아야 한다.
+    """
+    exact = [_agg_row("sess-abc", 5, user="x", call_count=2)]
+    calls = [
+        _sess_row("a1", 6, user="x", session_id="sess-abc"),
+        _sess_row("a2", 5, user="x", session_id="sess-abc"),
+    ]
+    # NULL 행도 흘려보낸다 — sid 모드에서는 읽히면 안 된다.
+    null_rows = [_sess_row("z1", 1, user="x", session_id=None)]
+    resp = await list_body_log_sessions(
+        _request(), days=30, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid="sess-abc",
+        admin=_admin(),
+        session=_session_rows(null_rows, exact=exact, call_rows=calls),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["scanned_rows"] == 0
+    assert payload["has_more"] is False
+    assert len(payload["sessions"]) == 1
+    s = payload["sessions"][0]
+    assert s["session_id"] == "sess-abc"
+    assert [c["request_id"] for c in s["calls"]] == ["a1", "a2"]
+
+
+@pytest.mark.asyncio
+async def test_sessions_sid_charset_validated():
+    """sid 는 클라이언트 제어 — 세션키 문자셋 밖이면 400."""
+    req = _request()
+    req.app.state.system_settings_service.get_body_logging_enabled = AsyncMock(
+        return_value=True
+    )
+    with pytest.raises(HTTPException) as ei:
+        await list_body_log_sessions(
+            req, days=1, gap_minutes=30, limit=20,
+            before=None, user=None, client=None, has_error=False,
+            sid="bad session!",
+            admin=_admin(), session=MagicMock(),
+        )
+    assert ei.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_sessions_user_filter_no_match_returns_empty():
+    """user 부분일치가 user_id 를 못 찾으면 스캔 없이 빈 목록."""
+    rows = [_sess_row("a1", 5, user="x")]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user="nobody@x", client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows, uid_rows=[]),
+    )
+    import json as _json
+
+    assert _json.loads(resp.body)["sessions"] == []
+
+
+@pytest.mark.asyncio
+async def test_sessions_has_more_and_next_before():
+    """limit+1 조회로 has_more 판별 — next_before 는 마지막 반환 세션의 ended_at."""
+    exact = [
+        _agg_row("s1", 5, user="x"),
+        _agg_row("s2", 10, user="x"),  # limit 초과분 — 잘리고 has_more 표시
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=1,
+        before=None, user=None, client=None, has_error=False, sid=None,
+        admin=_admin(),
+        session=_session_rows([], exact=exact, call_rows=[]),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["has_more"] is True
+    assert len(payload["sessions"]) == 1
+    assert payload["next_before"] == payload["sessions"][0]["ended_at"]
+    assert payload["sessions"][0]["session_id"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_sessions_has_error_filters_heuristic_groups():
+    """has_error 는 휴리스틱 그룹을 사후 필터 — 에러 없는 세션은 빠진다."""
+    rows = [
+        _sess_row("ok1", 3, user="x", status="SUCCESS"),
+        _sess_row("ok2", 2, user="x", status="SUCCESS"),
+        # 다른 유저의 에러 세션 (같은 시각대)
+        _sess_row("bad1", 3, user="y", status="ERROR"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=True, sid=None,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    import json as _json
+
+    sessions = _json.loads(resp.body)["sessions"]
+    assert len(sessions) == 1
+    assert sessions[0]["error_count"] == 1
+    assert sessions[0]["user_email"] == "y@e"
+
+
+@pytest.mark.asyncio
+async def test_single_response_includes_cost_token_meta(settings, audit, store_cls):
+    """단건 응답에 usage 행의 비용/토큰/지연 메타가 실린다."""
+    store_cls.return_value.fetch = AsyncMock(
+        return_value=BodyLogFetchResult(
+            record={"request_id": REQ}, source="firehose", key="k"
+        )
+    )
+    row = _usage_row()
+    row.cost_usd = Decimal("0.012345")
+    resp = await get_body_log(
+        _request(), REQ, _admin(), _session(row)
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["cost_usd"] == 0.012345
+    assert payload["input_tokens"] == 100
+    assert payload["output_tokens"] == 50
+    assert payload["ttft_ms"] == 200
+    assert payload["client"] == "other"
+    assert payload["latency_ms"] == 1200

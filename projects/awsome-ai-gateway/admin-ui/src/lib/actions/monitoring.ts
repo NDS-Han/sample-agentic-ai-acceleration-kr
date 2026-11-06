@@ -43,7 +43,8 @@ export type MonitoringEventTypeFilter =
 export interface MonitoringEvent {
   request_id: string;
   timestamp: string;
-  user_id: string;
+  /** agent/service 토큰 호출은 NULL. */
+  user_id: string | null;
   user_email?: string;
   model_alias: string;
   downgraded_from?: string | null;

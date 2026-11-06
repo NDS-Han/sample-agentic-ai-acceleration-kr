@@ -244,49 +244,58 @@ class BodyLogStore:
                 break
 
         # 2) Firehose — 남은 id 들을 (provider/client/dt) prefix 로 묶고,
-        #    prefix 별로 창을 합집합한다. 같은 키는 정확히 한 prefix 에 속하므로
-        #    객체 중복 스캔은 없다.
-        groups: dict[str, tuple[datetime, datetime]] = {}
+        #    prefix 별로 창을 모은 뒤 **겹치는 것만** 병합한다. 무조건 합집합하면
+        #    긴 세션(수십 분~)의 창 하나가 파티션당 16객체 상한을 다 써서 뒤쪽
+        #    호출이 스캔 대상에 못 들어간다 — 겹치지 않는 창은 별도 스캔으로
+        #    돌려 각자 상한을 가져가게 한다. 같은 키는 정확히 한 prefix 에
+        #    속하므로 버킷 사이의 객체 중복 스캔은 없다.
+        groups: dict[str, list[tuple[datetime, datetime]]] = {}
         for t in remaining.values():
             win_start, win_end = _lookup_window(t.requested_at, t.latency_ms)
             for d in _window_dates(win_start, win_end):
                 prefix = _partition_prefix(t.provider, t.client, d)
-                if prefix in groups:
-                    lo, hi = groups[prefix]
-                    groups[prefix] = (min(lo, win_start), max(hi, win_end))
-                else:
-                    groups[prefix] = (win_start, win_end)
+                groups.setdefault(prefix, []).append((win_start, win_end))
 
         # 스캔 대상은 firehose 경로의 전체 id 로 고정 — 이미 찾은 id 도 매칭해
         # 뒤 객체의 at-least-once 중복을 센다. 조기 종료는 remaining 기준.
         scan_ids = set(remaining)
 
-        for prefix, (win_start, win_end) in groups.items():
+        for prefix, intervals in groups.items():
             if not remaining:
                 break
-            keys, capped = await asyncio.to_thread(
-                self._candidate_keys, prefix, win_start, win_end
-            )
-            result.incomplete = result.incomplete or capped
-            result.scanned_keys.extend(keys)
-            for key in keys:
+            intervals.sort()
+            merged: list[list[datetime]] = []
+            for s, e in intervals:
+                if merged and s <= merged[-1][1]:
+                    merged[-1][1] = max(merged[-1][1], e)
+                else:
+                    merged.append([s, e])
+            for win_start, win_end in merged:
                 if not remaining:
                     break
-                found_map, capped = await asyncio.to_thread(
-                    self._scan_gzip_object_multi, key, scan_ids
+                keys, capped = await asyncio.to_thread(
+                    self._candidate_keys, prefix, win_start, win_end
                 )
                 result.incomplete = result.incomplete or capped
-                for rid, (rec, dupes) in found_map.items():
-                    if rid in result.records:
-                        # 다른 객체에 같은 id — at-least-once 중복
-                        result.duplicates[rid] = result.duplicates.get(rid, 0) + 1 + dupes
-                    else:
-                        result.records[rid] = rec
-                        result.sources[rid] = "firehose"
-                        result.keys[rid] = key
-                        if dupes:
-                            result.duplicates[rid] = dupes
-                    remaining.pop(rid, None)
+                result.scanned_keys.extend(keys)
+                for key in keys:
+                    if not remaining:
+                        break
+                    found_map, capped = await asyncio.to_thread(
+                        self._scan_gzip_object_multi, key, scan_ids
+                    )
+                    result.incomplete = result.incomplete or capped
+                    for rid, (rec, dupes) in found_map.items():
+                        if rid in result.records:
+                            # 다른 객체에 같은 id — at-least-once 중복
+                            result.duplicates[rid] = result.duplicates.get(rid, 0) + 1 + dupes
+                        else:
+                            result.records[rid] = rec
+                            result.sources[rid] = "firehose"
+                            result.keys[rid] = key
+                            if dupes:
+                                result.duplicates[rid] = dupes
+                        remaining.pop(rid, None)
 
         result.missing = sorted(remaining)
         return result

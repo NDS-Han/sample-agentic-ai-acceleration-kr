@@ -24,7 +24,19 @@ export interface BodyLogRecord {
   schema_version?: number;
 }
 
-export interface BodyLogResponse {
+/** usage 행에서 가져오는 호출 메타 — 본문 레코드에 없는 과금 정보. */
+export interface BodyLogUsageMeta {
+  cost_usd?: number | null;
+  latency_ms?: number | null;
+  ttft_ms?: number | null;
+  client?: string | null;
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_read_tokens?: number | null;
+  reasoning_tokens?: number | null;
+}
+
+export interface BodyLogResponse extends BodyLogUsageMeta {
   found: boolean;
   request_id: string;
   source: 'firehose' | 'fallback' | null;
@@ -56,12 +68,18 @@ export interface BodyLogResultT<T> {
   status?: number;
 }
 
+// 503 은 "버킷 미설정" 같은 결정적 실패고, 어떤 재시도든 VIEW_BODY_LOG 감사
+// 행과 S3 스캔을 한 번 더 만든다 — 네트워크 오류만 재시도한다.
+const NO_HTTP_RETRY = { retryOn: [] as number[] };
+
 export async function fetchBodyLog(requestId: string): Promise<BodyLogResult> {
   try {
-    const data = await withRetry(() =>
-      adminAPI.get<BodyLogResponse>(
-        `/admin/body-logs/${encodeURIComponent(requestId)}`,
-      ),
+    const data = await withRetry(
+      () =>
+        adminAPI.get<BodyLogResponse>(
+          `/admin/body-logs/${encodeURIComponent(requestId)}`,
+        ),
+      NO_HTTP_RETRY,
     );
     return { success: true, data };
   } catch (err) {
@@ -83,6 +101,8 @@ export interface BodyLogSessionCall {
   status: string | null;
   latency_ms: number | null;
   cost_usd: number | null;
+  input_tokens: number | null;
+  output_tokens: number | null;
 }
 
 export interface BodyLogSession {
@@ -96,27 +116,54 @@ export interface BodyLogSession {
   ended_at: string;
   call_count: number;
   error_count: number;
+  total_cost_usd: number | null;
   models: string[];
   calls: BodyLogSessionCall[];
 }
 
 export interface BodyLogSessionsResponse {
   sessions: BodyLogSession[];
+  /** 휴리스틱 경로에서 스캔한 NULL session_id 행 수. */
   scanned_rows: number;
-  /** 스캔 상한에 걸림 — 더 오래된 세션이 있을 수 있다. */
+  /** 집계된 명시 세션 수 (limit+1 조회라 limit 까지 잘린 값). */
+  explicit_sessions: number;
+  /** NULL 행 스캔 상한에 걸림 — 더 오래된 세션이 있을 수 있다. */
   truncated: boolean;
   /** 어떤 세션이든 calls 가 세션당 상한에 잘렸다. */
   calls_truncated: boolean;
+  has_more: boolean;
+  /** 다음 페이지 커서 — 직전 페이지 마지막 세션의 ended_at. */
+  next_before: string | null;
+}
+
+export interface BodyLogSessionFilters {
+  days?: number;
+  /** 커서 — 이 시각 이전에 끝난 세션만. */
+  before?: string;
+  /** 이메일/user_id 부분일치. */
+  user?: string;
+  client?: string;
+  hasError?: boolean;
+  /** 명시 session_id 직행 조회 (딥링크) — 목록 스캔 생략. */
+  sid?: string;
+  limit?: number;
 }
 
 export async function fetchBodyLogSessions(
-  days = 1,
+  f: BodyLogSessionFilters = {},
 ): Promise<BodyLogResultT<BodyLogSessionsResponse>> {
   try {
-    const data = await withRetry(() =>
-      adminAPI.get<BodyLogSessionsResponse>(
-        `/admin/body-logs/sessions?days=${days}`,
-      ),
+    const qs = new URLSearchParams();
+    qs.set('days', String(f.days ?? 1));
+    if (f.before) qs.set('before', f.before);
+    if (f.user) qs.set('user', f.user);
+    if (f.client) qs.set('client', f.client);
+    if (f.hasError) qs.set('has_error', 'true');
+    if (f.sid) qs.set('sid', f.sid);
+    if (f.limit) qs.set('limit', String(f.limit));
+    const data = await withRetry(
+      () => adminAPI.get<BodyLogSessionsResponse>(`/admin/body-logs/sessions?${qs}`),
+      NO_HTTP_RETRY,
     );
     return { success: true, data };
   } catch (err) {
@@ -128,7 +175,7 @@ export async function fetchBodyLogSessions(
   }
 }
 
-export interface BodyLogBatchItem {
+export interface BodyLogBatchItem extends BodyLogUsageMeta {
   found: boolean;
   source: 'firehose' | 'fallback' | null;
   key: string | null;
@@ -150,10 +197,12 @@ export async function fetchBodyLogBatch(
   requestIds: string[],
 ): Promise<BodyLogResultT<BodyLogBatchResponse>> {
   try {
-    const data = await withRetry(() =>
-      adminAPI.post<BodyLogBatchResponse>('/admin/body-logs/batch', {
-        request_ids: requestIds,
-      }),
+    const data = await withRetry(
+      () =>
+        adminAPI.post<BodyLogBatchResponse>('/admin/body-logs/batch', {
+          request_ids: requestIds,
+        }),
+      NO_HTTP_RETRY,
     );
     return { success: true, data };
   } catch (err) {

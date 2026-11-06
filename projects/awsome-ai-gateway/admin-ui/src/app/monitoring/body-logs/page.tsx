@@ -47,6 +47,9 @@ export default async function BodyLogsPage() {
           {t('backToMonitoring')}
         </Link>
       </div>
+      {/* 마스킹 없는 원문이고 열람이 감사된다는 건 화면 어디서든 보여야 한다 —
+          어느 탭에 들어가든 상시 고지. */}
+      <p className="text-xs text-muted-foreground">{t('auditNotice')}</p>
       <BodyLogsTabs events={events} />
     </div>
   );

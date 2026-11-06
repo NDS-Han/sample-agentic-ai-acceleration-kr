@@ -457,6 +457,54 @@ async def test_fetch_many_early_exit_when_all_found() -> None:
 
 
 @pytest.mark.asyncio
+async def test_fetch_many_far_apart_windows_not_starved() -> None:
+    """창이 안 겹치는 두 호출 — union 창의 16객체 상한이 뒤쪽을 굶기지 않는다.
+
+    회귀: 창을 무조건 합집합하면 긴 세션(수십 분)에서 앞쪽 16개 객체가
+    상한을 다 써 뒤쪽 호출이 스캔 대상에 못 들어가 '미수집' 으로 잘못 나온다.
+    겹치지 않는 창은 별도 스캔 패스로 돌아가 각자 상한을 가져야 한다.
+    """
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+
+    t1 = REQ_AT                      # 07:39
+    t2 = REQ_AT + timedelta(minutes=30)  # 08:09 — win1/win2 비겹침
+    k_early = _fh_key(t1 + timedelta(seconds=2))
+    k_late = _fh_key(t2 + timedelta(seconds=2))
+    # 두 창 사이(어느 창에도 속하지 않음)에 16개 객체 — union 이면 상한 소진.
+    middle = [
+        _fh_key(t1 + timedelta(minutes=7, seconds=30 * i)) for i in range(16)
+    ]
+    paginator = MagicMock()
+    paginator.paginate.return_value = [
+        {"Contents": [{"Key": k} for k in [k_early, *middle, k_late]]}
+    ]
+    store._s3.get_paginator.return_value = paginator
+
+    rec1 = {"request_id": REQ}
+    rec2 = {"request_id": REQ2}
+
+    def _get(**kw):
+        key = kw["Key"]
+        if key == k_early:
+            return {"Body": io.BytesIO(_gz([rec1]))}
+        if key == k_late:
+            return {"Body": io.BytesIO(_gz([rec2]))}
+        return {"Body": io.BytesIO(_gz([{"request_id": "other"}]))}
+
+    store._s3.get_object.side_effect = _get
+
+    result = await store.fetch_many(
+        [_target(REQ, req_at=t1), _target(REQ2, req_at=t2)]
+    )
+    assert result.records[REQ] == rec1
+    assert result.records[REQ2] == rec2
+    assert result.missing == []
+    # 창 사이 객체는 어느 창에도 속하지 않으므로 열지 않는다 — 정확히 2개만.
+    assert store._s3.get_object.call_count == 2
+
+
+@pytest.mark.asyncio
 async def test_fetch_many_multi_scan_space_separated_rid() -> None:
     """JSON 직렬화가 '"request_id": "x"' 공백 형태여도 잡는다(단건 needle 과 동치)."""
     store = _store()

@@ -31,7 +31,14 @@ function eventTone(type: string): BadgeTone {
   }
 }
 
-export function EventLog({ data: initialData }: { data: MonitoringEventsResponse }) {
+export function EventLog({
+  data: initialData,
+  bodyLoggingEnabled = false,
+}: {
+  data: MonitoringEventsResponse;
+  /** 본문 로깅 ON 일 때만 행별 본문 링크를 단다 — OFF 면 뷰어도 403 이라 사잇길. */
+  bodyLoggingEnabled?: boolean;
+}) {
   const t = useTranslations('monitoring');
   const locale = useLocale();
   const tz = useReportingTz();
@@ -138,6 +145,7 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
               <Th>{t('events.colModel')}</Th>
               <Th>{t('events.colUser')}</Th>
               <Th>{t('events.colDetail')}</Th>
+              {bodyLoggingEnabled && <Th>{t('events.colBody')}</Th>}
             </Tr>
           </THead>
           <TBody>
@@ -165,17 +173,32 @@ export function EventLog({ data: initialData }: { data: MonitoringEventsResponse
                   )}
                 </Td>
                 <Td className="text-muted-foreground font-mono mono-id text-xs">
-                  <button
-                    type="button"
-                    title={ev.user_id}
-                    onClick={() => copyUserId(ev.user_id)}
-                    className="hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
-                    aria-label={`${ev.user_id} — ${t('events.copyUserId')}`}
-                  >
-                    {ev.user_id.slice(0, 8)}…
-                  </button>
+                  {/* agent/service 토큰 호출은 user_id NULL */}
+                  {ev.user_id ? (
+                    <button
+                      type="button"
+                      title={ev.user_id}
+                      onClick={() => copyUserId(ev.user_id!)}
+                      className="hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
+                      aria-label={`${ev.user_id} — ${t('events.copyUserId')}`}
+                    >
+                      {ev.user_id.slice(0, 8)}…
+                    </button>
+                  ) : (
+                    <span title={t('events.agentUser')}>—</span>
+                  )}
                 </Td>
                 <Td className="text-muted-foreground">{ev.detail}</Td>
+                {bodyLoggingEnabled && (
+                  <Td>
+                    <Link
+                      href={`/monitoring/body-logs?tab=lookup&request_id=${encodeURIComponent(ev.request_id)}`}
+                      className="text-xs font-medium text-primary hover:underline"
+                    >
+                      {t('events.viewBody')}
+                    </Link>
+                  </Td>
+                )}
               </Tr>
             ))}
           </TBody>

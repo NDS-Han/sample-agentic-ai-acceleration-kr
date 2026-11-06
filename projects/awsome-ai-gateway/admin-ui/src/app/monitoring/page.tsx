@@ -49,8 +49,15 @@ async function UsersSection() {
 }
 
 async function EventsSection() {
-  const data = await fetchMonitoringEvents().catch(() => null);
-  return data ? <EventLog data={data} /> : <ErrorState />;
+  // 본문 링크는 수집이 켜져 있을 때만 단다 — 상태를 못 읽으면 링크도 숨긴다
+  // (뷰어가 403 인데 사잇길만 보이면 안 된다).
+  const [data, bl] = await Promise.all([
+    fetchMonitoringEvents().catch(() => null),
+    getBodyLoggingAction().catch(() => null),
+  ]);
+  if (!data) return <ErrorState />;
+  const enabled = bl?.success ? bl.data.enabled === true : false;
+  return <EventLog data={data} bodyLoggingEnabled={enabled} />;
 }
 
 async function BodyLoggingSection() {

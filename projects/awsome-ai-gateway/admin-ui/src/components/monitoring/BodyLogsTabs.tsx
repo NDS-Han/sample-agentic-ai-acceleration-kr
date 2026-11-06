@@ -2,7 +2,8 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useState } from 'react';
+import { useCallback } from 'react';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 
 import type { MonitoringEventsResponse } from '@/lib/actions/monitoring';
@@ -13,7 +14,44 @@ type Mode = 'lookup' | 'sessions';
 
 export function BodyLogsTabs({ events }: { events: MonitoringEventsResponse }) {
   const t = useTranslations('monitoring.bodyLogs');
-  const [mode, setMode] = useState<Mode>('sessions');
+  const router = useRouter();
+  const pathname = usePathname();
+  const sp = useSearchParams();
+
+  // 탭/조회 대상은 URL 이 진실 소스 — 새로고침·공유 링크가 같은 화면을 연다.
+  // 자동 오픈도 실제 열람이라 감사 행이 생기는 게 맞다.
+  const mode: Mode = sp.get('tab') === 'lookup' ? 'lookup' : 'sessions';
+  const requestId = sp.get('request_id');
+  const sessionKey = sp.get('session');
+
+  const setParams = useCallback(
+    (next: Record<string, string | null>) => {
+      const params = new URLSearchParams(sp.toString());
+      for (const [k, v] of Object.entries(next)) {
+        if (v === null) params.delete(k);
+        else params.set(k, v);
+      }
+      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [router, pathname, sp],
+  );
+
+  const setMode = (m: Mode) =>
+    setParams({
+      tab: m,
+      // 탭을 바꾸면 다른 탭의 딥링크 대상은 버린다 — 양쪽 state 를 섞지 않는다.
+      session: null,
+      request_id: null,
+    });
+
+  const onSessionChange = useCallback(
+    (key: string | null) => setParams({ session: key }),
+    [setParams],
+  );
+  const onRequestLookup = useCallback(
+    (id: string | null) => setParams({ request_id: id }),
+    [setParams],
+  );
 
   return (
     <div className="space-y-4">
@@ -33,7 +71,18 @@ export function BodyLogsTabs({ events }: { events: MonitoringEventsResponse }) {
           </button>
         ))}
       </div>
-      {mode === 'sessions' ? <BodyLogSessions /> : <BodyLogsViewer events={events} />}
+      {mode === 'sessions' ? (
+        <BodyLogSessions
+          initialSessionKey={sessionKey}
+          onSessionChange={onSessionChange}
+        />
+      ) : (
+        <BodyLogsViewer
+          events={events}
+          initialRequestId={requestId}
+          onRequestLookup={onRequestLookup}
+        />
+      )}
     </div>
   );
 }

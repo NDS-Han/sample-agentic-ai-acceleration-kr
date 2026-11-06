@@ -191,7 +191,9 @@ async def monitoring_events(
         events.append({
             "request_id": row.request_id,
             "timestamp": row.requested_at.isoformat(),
-            "user_id": str(row.user_id),
+            # agent/service 토큰 호출은 user_id NULL — str(None) 을 보내면
+            # UI 에 "None" 이 사용자로 보인다.
+            "user_id": str(row.user_id) if row.user_id else None,
             "user_email": row.user_email,
             "model_alias": row.model_alias,
             "downgraded_from": row.downgraded_from,
