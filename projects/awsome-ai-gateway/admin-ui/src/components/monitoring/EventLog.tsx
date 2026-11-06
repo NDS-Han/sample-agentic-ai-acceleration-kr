@@ -17,7 +17,7 @@ import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 
-function eventTone(type: string): BadgeTone {
+export function eventTone(type: string): BadgeTone {
   switch (type) {
     case 'ERROR':
       return 'pink';

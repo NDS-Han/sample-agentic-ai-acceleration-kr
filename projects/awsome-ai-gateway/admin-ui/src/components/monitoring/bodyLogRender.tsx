@@ -571,6 +571,7 @@ function Collapsible({
     <div>
       <button
         type="button"
+        aria-expanded={open}
         onClick={() => setOpen((v) => !v)}
         className="text-xs text-muted-foreground hover:text-foreground"
       >
@@ -599,11 +600,15 @@ function toolInputJson(input: unknown): string {
 export function BodyRecordContent({
   data,
   historyStart = 0,
+  usageStatus,
 }: {
   data: BodyLogResponse;
   /** 세션 trace 에서 직전 호출까지의 턴 수 — 앞의 N턴은 접어 둔다(에이전트 루프는
       요청마다 전체 history 를 싣기 때문에 누적 맥락이 반복된다). */
   historyStart?: number;
+  /** 호출 행의 usage status — 레코드 자체 status 보다 정확하므로 우선한다
+      (TIMEOUT 인데 record.status='error' 처럼 어긋나는 경우를 막는다). */
+  usageStatus?: string | null;
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const locale = useLocale();
@@ -631,11 +636,15 @@ export function BodyRecordContent({
   const allTurns = conversationTurns(reqBody);
   // historyStart 는 "직전 호출까지의 원본 메시지 수" — msgIndex 기준으로 접는다.
   // 빈 메시지가 턴에서 빠져도 단위가 어긋나지 않고, 호출부는 접두가 실제로
-  // 이어지는지 검증한 값만 넘긴다(아니면 0).
-  const hiddenTurns =
-    !showAllTurns && historyStart > 0
+  // 이어지는지 검증한 값만 넘긴다(아니면 0). 접두를 검증할 앞 호출을 못 읽은
+  // 경우(0)에도 긴 누적 history 를 통째로 펼치면 호출 하나 보는 데 스크롤이
+  // 깊어지므로 마지막 10턴만 기본으로 보인다 — 이전 턴은 버튼으로 펼친다.
+  const LAST_TURNS_DEFAULT = 10;
+  const hiddenTurns = !showAllTurns
+    ? historyStart > 0
       ? allTurns.filter((turn) => turn.msgIndex < historyStart).length
-      : 0;
+      : Math.max(0, allTurns.length - LAST_TURNS_DEFAULT)
+    : 0;
   const turns = allTurns.slice(hiddenTurns);
 
   const sysText = systemTextOf(reqBody);
@@ -645,7 +654,9 @@ export function BodyRecordContent({
     <div>
       {/* 메타 */}
       <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <Badge tone={statusTone(rec?.status ?? data.record?.status ?? '')}>{rec?.status ?? '-'}</Badge>
+        <Badge tone={statusTone(usageStatus ?? rec?.status ?? data.record?.status ?? '')}>
+          {usageStatus ?? rec?.status ?? '-'}
+        </Badge>
         <span>{rec?.model_alias ?? data.model_alias}</span>
         <span>·</span>
         <span>{data.requested_at ? fmtDateTime(data.requested_at, locale, tz) : '-'}</span>

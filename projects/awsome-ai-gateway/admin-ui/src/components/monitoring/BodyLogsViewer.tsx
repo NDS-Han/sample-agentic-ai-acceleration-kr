@@ -19,7 +19,8 @@ import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
-import { BodyRecordContent, statusTone } from './bodyLogRender';
+import { BodyRecordContent } from './bodyLogRender';
+import { eventTone } from './EventLog';
 
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
 // response_body: 비스트림은 JSON, 스트림은 {sse_text, truncated?} (SSE 프레임 원문).
@@ -61,11 +62,9 @@ const TYPE_FILTERS: MonitoringEventTypeFilter[] = [
 ];
 
 export function BodyLogsViewer({
-  events: initialEvents,
   initialRequestId,
   onRequestLookup,
 }: {
-  events: MonitoringEventsResponse;
   /** ?request_id= 딥링크 — 진입 시 자동 조회(실제 열람이라 감사된다). */
   initialRequestId?: string | null;
   /** 조회 성공/실패 시 부모(URL)에 request_id 를 동기화. */
@@ -78,33 +77,43 @@ export function BodyLogsViewer({
   const { toast } = useToast();
   const [query, setQuery] = useState(initialRequestId ?? '');
   const [loading, startTransition] = useTransition();
+  const [listPending, startListTransition] = useTransition();
   const [result, setResult] = useState<BodyLogResponse | null>(null);
   /** 조회 실패는 토스트로 흘리지 않고 고정 카드에 남긴다 — 재시도가 다음 행동. */
   const [lookupError, setLookupError] = useState<{ id: string; message: string } | null>(null);
   const autoLookedUp = useRef<string | null>(null);
 
-  const [events, setEvents] = useState<MonitoringEventsResponse>(initialEvents);
+  // 최근 이벤트는 이 탭이 마운트될 때 가져온다 — 기본 탭(세션)이 쓰지 않는
+  // 200건 조회로 페이지 첫 페인트를 막지 않기 위해. undefined=로딩,
+  // null=실패(빈 목록과 구분한다 — 5xx 를 "요청 없음"으로 위장하지 않게).
+  const [events, setEvents] = useState<MonitoringEventsResponse | null | undefined>();
   const [typeFilter, setTypeFilter] = useState<MonitoringEventTypeFilter>('all');
   const [userFilter, setUserFilter] = useState('');
   // 페이지를 연 채 토글이 꺼지면 조회가 403 — 비활성 안내로 전환한다.
   const [toggledOff, setToggledOff] = useState(false);
 
-  const lookup = (requestId: string) => {
+  const lookup = (requestId: string, opts?: { showToastOnError?: boolean }) => {
     const id = requestId.trim();
     if (!id) return;
+    setQuery(id); // 행에서 연 조회도 검색창에 대상이 보이게 한다.
     setLookupError(null);
     startTransition(async () => {
       const res = await fetchBodyLog(id);
       if (res.success && res.data) {
         setResult(res.data);
-        // ⚠️ onRequestLookup → router.replace(?request_id=id) → effect 가 같은
-        // id 로 한 번 더 조회해 감사가 2행 생긴다 — URL 동기화 전에 처리됨 표시.
+        // ⚠️ onRequestLookup → ?request_id=id → effect 가 같은 id 로 한 번 더
+        // 조회해 감사가 2행 생긴다 — URL 동기화 전에 처리됨 표시.
         autoLookedUp.current = id;
         onRequestLookup?.(id);
       } else if (res.status === 403) {
         setToggledOff(true);
       } else {
         setLookupError({ id, message: res.error ?? t('fetchFailed') });
+        // 하단 행의 "보기" 실패는 오류 카드가 스크롤 밖에 생겨 사용자가
+        // 알아채지 못한다 — 토스트도 함께 띄운다.
+        if (opts?.showToastOnError) {
+          toast({ type: 'error', message: res.error ?? t('fetchFailed'), auto_dismiss_ms: 5000 });
+        }
       }
     });
   };
@@ -114,18 +123,31 @@ export function BodyLogsViewer({
     const id = initialRequestId?.trim();
     if (!id || autoLookedUp.current === id) return;
     autoLookedUp.current = id;
-    setQuery(id);
     lookup(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialRequestId]);
 
+  // 첫 로드 — 목록 조회는 조회 transition 과 분리해 "저장소 스캔 중" 힌트가
+  // DB 목록 조회에도 뜨지 않게 한다.
+  useEffect(() => {
+    startListTransition(async () => {
+      setEvents(await fetchMonitoringEvents(200, 'all', 0).catch(() => null));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const refreshEvents = (filter: MonitoringEventTypeFilter = typeFilter) => {
-    startTransition(async () => {
-      try {
-        setEvents(await fetchMonitoringEvents(200, filter, 0));
-      } catch {
-        toast({ type: 'error', message: tev('fetchFailed'), auto_dismiss_ms: 4000 });
+    startListTransition(async () => {
+      const fresh = await fetchMonitoringEvents(200, filter, 0).catch(() => null);
+      if (fresh === null) {
+        // EventLog 와 같은 규칙 — 실패 시 셀렉트도 되돌려 "보이는 목록 ≠
+        // 표시된 필터" 상태를 남기지 않는다. 기존 목록이 없으면 명시 실패 상태.
+        if (filter !== typeFilter) setTypeFilter(typeFilter);
+        if (events === undefined) setEvents(null);
+        else toast({ type: 'error', message: tev('fetchFailed'), auto_dismiss_ms: 4000 });
+        return;
       }
+      setEvents(fresh);
     });
   };
 
@@ -139,7 +161,7 @@ export function BodyLogsViewer({
   };
 
   const uf = userFilter.trim().toLowerCase();
-  const shown = events.events.filter(
+  const shown = (events?.events ?? []).filter(
     (ev) =>
       !uf ||
       (ev.user_email ?? '').toLowerCase().includes(uf) ||
@@ -148,6 +170,15 @@ export function BodyLogsViewer({
 
   const isCollecting = (ev: MonitoringEvent) =>
     Date.now() - new Date(ev.timestamp).getTime() < COLLECTING_WINDOW_MS;
+
+  // EventLog 의 EVENT_LABELS 와 동일 — 알려진 타입은 번역 라벨, 모르는
+  // 타입은 원문으로 폴백(missing-key 방지).
+  const TYPE_LABELS: Record<string, string> = {
+    ERROR: tev('types.ERROR'),
+    TIMEOUT: tev('types.TIMEOUT'),
+    SLOW_REQUEST: tev('types.SLOW_REQUEST'),
+    SUCCESS: tev('types.SUCCESS'),
+  };
 
   if (toggledOff) {
     return (
@@ -194,7 +225,9 @@ export function BodyLogsViewer({
         {lookupError && (
           <div className="mt-3 flex items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2">
             <p className="text-xs text-amber-700 dark:text-amber-400">
-              <span className="font-mono">{lookupError.id.slice(0, 18)}…</span>{' '}
+              <span className="font-mono">
+                {lookupError.id.length > 18 ? `${lookupError.id.slice(0, 18)}…` : lookupError.id}
+              </span>{' '}
               {lookupError.message}
             </p>
             <button
@@ -235,12 +268,13 @@ export function BodyLogsViewer({
               value={userFilter}
               onChange={(e) => setUserFilter(e.target.value)}
               placeholder={t('filterUserPlaceholder')}
+              aria-label={t('filterUserPlaceholder')}
               className="w-40 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
             />
             <button
               type="button"
               onClick={() => refreshEvents()}
-              disabled={loading}
+              disabled={listPending}
               className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
             >
               <RefreshCw size={12} aria-hidden="true" />
@@ -248,8 +282,31 @@ export function BodyLogsViewer({
             </button>
           </div>
         </div>
-        {shown.length === 0 ? (
-          <p className="text-sm text-muted-foreground">{t('recentEmpty')}</p>
+        {events === null ? (
+          // 이벤트는 클라이언트에서 가져오므로 ErrorState(router.refresh 재시도)를
+          // 쓰면 다시 조회되지 않는다 — 명시 재시도로 목록 fetch 를 다시 부른다.
+          <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
+            <span>{tev('fetchFailed')}</span>
+            <button
+              type="button"
+              onClick={() => refreshEvents()}
+              disabled={listPending}
+              className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2 disabled:opacity-50"
+            >
+              <RefreshCw size={12} aria-hidden="true" />
+              {t('retry')}
+            </button>
+          </div>
+        ) : shown.length === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            {/* 사용자 필터는 가져온 200건 안에서만 거른다 — 피크 때는 몇 분치라
+                "일치 없음"을 "요청 없음"과 구분해 안내한다. */}
+            {events === undefined
+              ? t('loadingTrace')
+              : uf && events.events.length > 0
+                ? t('recentFilterEmpty')
+                : t('recentEmpty')}
+          </p>
         ) : (
           <Table>
             <THead>
@@ -282,15 +339,17 @@ export function BodyLogsViewer({
                   </Td>
                   <Td className="text-sm">{ev.model_alias}</Td>
                   <Td>
-                    <Badge tone={statusTone(ev.event_type === 'SUCCESS' ? 'success' : ev.event_type === 'SLOW_REQUEST' ? 'partial' : 'error')}>
-                      {ev.event_type}
+                    {/* EventLog 와 같은 톤·번역 라벨 — 같은 이벤트가 화면마다
+                        다른 색/문구로 보이지 않게 공유한다. */}
+                    <Badge tone={eventTone(ev.event_type)}>
+                      {TYPE_LABELS[ev.event_type] ?? ev.event_type}
                     </Badge>
                   </Td>
                   <Td>
                     <div className="flex items-center gap-2">
                       <button
                         type="button"
-                        onClick={() => lookup(ev.request_id)}
+                        onClick={() => lookup(ev.request_id, { showToastOnError: true })}
                         disabled={loading}
                         className="text-xs font-medium text-primary hover:underline disabled:opacity-50"
                       >

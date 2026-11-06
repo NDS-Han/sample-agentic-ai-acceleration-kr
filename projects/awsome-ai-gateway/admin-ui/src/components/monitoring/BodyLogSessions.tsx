@@ -4,7 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState, useTransition } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
-import { ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, Link2, RefreshCw } from 'lucide-react';
 
 import {
   fetchBodyLog,
@@ -55,7 +55,7 @@ function toBodyLogResponse(
   };
 }
 
-interface Filters {
+export interface SessionFilters {
   days: number;
   user: string;
   client: string;
@@ -64,25 +64,31 @@ interface Filters {
 
 export function BodyLogSessions({
   initialSessionKey,
+  initialFilters,
   onSessionChange,
+  onFiltersApplied,
 }: {
   /** ?session= 딥링크 — 로드 후 자동 오픈 대상 세션 key. */
   initialSessionKey?: string | null;
+  /** URL 에 실려 온 적용 필터 초기값 — 공유 링크가 같은 목록을 연다. */
+  initialFilters?: SessionFilters;
   /** 세션 오픈/닫힘을 부모(URL)에 알린다. */
   onSessionChange?: (_key: string | null) => void;
+  /** 적용된 필터를 부모(URL)에 동기화 — 공유 가능한 목록 링크. */
+  onFiltersApplied?: (_f: SessionFilters) => void;
 }) {
   const t = useTranslations('monitoring.bodyLogs');
   const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
 
-  const [filters, setFilters] = useState<Filters>({
-    days: 1,
-    user: '',
-    client: '',
-    hasError: false,
-  });
+  const [filters, setFilters] = useState<SessionFilters>(
+    initialFilters ?? { days: 1, user: '', client: '', hasError: false },
+  );
   const [sessions, setSessions] = useState<BodyLogSession[] | null>(null);
+  // 목록 조회 실패 — sessions=null(로딩)과 구분해야 실패 시 "불러오는 중…"이
+  // 무한히 뜨지 않는다.
+  const [loadFailed, setLoadFailed] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [callsTruncated, setCallsTruncated] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
@@ -101,17 +107,14 @@ export function BodyLogSessions({
   const [loadingIds, setLoadingIds] = useState<Set<string>>(new Set());
   const [openCalls, setOpenCalls] = useState<Set<string>>(new Set());
   // ?session= 딥링크 자동 오픈은 마운트 후 목록 로드 완료 시 한 번만.
-  const deepLinkTried = useRef(false);
+
 
   const [userTruncated, setUserTruncated] = useState(false);
   // "더 보기"는 적용 시점의 필터로 가져와야 한다 — 입력창의 미적용 값과
   // 섞이면 1페이지와 다른 조건으로 2페이지를 긁는다.
-  const [appliedFilters, setAppliedFilters] = useState<Filters>({
-    days: 1,
-    user: '',
-    client: '',
-    hasError: false,
-  });
+  const [appliedFilters, setAppliedFilters] = useState<SessionFilters>(
+    initialFilters ?? { days: 1, user: '', client: '', hasError: false },
+  );
 
   const applyResult = (
     data: {
@@ -137,7 +140,7 @@ export function BodyLogSessions({
   };
 
   const load = useCallback(
-    (f: Filters, before?: string, beforeKeys?: string[]) => {
+    (f: SessionFilters, before?: string, beforeKeys?: string[]) => {
       const run = before ? startLoadMore : startTransition;
       run(async () => {
         const res = await fetchBodyLogSessions({
@@ -149,10 +152,15 @@ export function BodyLogSessions({
           beforeKeys,
         });
         if (res.success && res.data) {
+          setLoadFailed(false);
           applyResult(res.data, Boolean(before));
         } else if (res.status === 403) {
           setToggledOff(true);
         } else {
+          // 실패를 토스트만으로 넘기면 sessions=null 이 유지돼 "불러오는 중"이
+          // 영구 표시된다 — 명시 실패 상태로 전환해 재시도를 제공한다.
+          // 단 더보기(before) 실패는 기존 목록을 유지한 채 토스트만 띄운다.
+          if (!before) setLoadFailed(true);
           toast({ type: 'error', message: res.error ?? t('fetchFailed'), auto_dismiss_ms: 6000 });
         }
       });
@@ -166,44 +174,80 @@ export function BodyLogSessions({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // ── 딥링크 자동 오픈 — 목록 로드 후 key 매칭, 없으면 sid 직행 재조회 ──
+  // 뒤로가기로 ?session= 이 사라지면 trace 도 닫는다 — 세션 오픈은 pushState
+  // 라 뒤로가기가 "목록으로"로 읽혀야 일관된다.
+  const deepLinkKey = useRef<string | null>(null);
+  const prevSessionKey = useRef(initialSessionKey);
   useEffect(() => {
-    if (!initialSessionKey || deepLinkTried.current || sessions === null) return;
-    deepLinkTried.current = true;
-    const found = sessions.find((s) => s.key === initialSessionKey);
-    if (found) {
-      openSession(found);
+    if (prevSessionKey.current && !initialSessionKey && selected) {
+      setSelected(null);
+      deepLinkKey.current = null;
+    }
+    prevSessionKey.current = initialSessionKey;
+  }, [initialSessionKey, selected]);
+
+  // ── 딥링크 자동 오픈 — 목록 로드 후 key 매칭, 없으면 재조회 ──
+  // 뒤로가기/앞으로가기로 같은 key 가 나갔다 들어와도 다시 시도하게,
+  // "시도한 key"를 추적한다(한 번만이 아니라 key 당 한 번).
+  useEffect(() => {
+    if (!initialSessionKey) {
+      deepLinkKey.current = null;
       return;
     }
-    // 목록 범위 밖이면 sid 직행 — key 형식은 sid|<session_id>|<user>|<client>.
-    // session_id 는 클라이언트 제어라 소유자가 갈라질 수 있으므로 첫 행이 아니라
-    // URL 의 복합키와 정확히 일치하는 세션만 연다 — 불일치는 링크가 낡은 것.
-    const sid = initialSessionKey.startsWith('sid|')
-      ? initialSessionKey.split('|')[1]
-      : null;
-    if (!sid) {
-      toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
+    if (deepLinkKey.current === initialSessionKey || sessions === null) return;
+    deepLinkKey.current = initialSessionKey;
+    const found = sessions.find((s) => s.key === initialSessionKey);
+    if (found) {
+      openSession(found, false);
       return;
     }
     startTransition(async () => {
+      // key 형식: 명시 세션은 sid|<session_id>|<user>|<client>,
+      // 휴리스틱은 <user>|<client>|<ended_at iso>. 둘 다 소유자 검증을 위해
+      // 복합키 정확 일치만 연다 — 부분 일치는 링크가 낡은 것.
       // days=0 — 기간 제한 없음(딥링크는 필터 창과 무관하게 찾아야 한다).
-      const res = await fetchBodyLogSessions({ sid, days: 0 });
+      if (initialSessionKey.startsWith('sid|')) {
+        const sid = initialSessionKey.split('|')[1];
+        const res = await fetchBodyLogSessions({ sid, days: 0 });
+        const s = res.success
+          ? res.data?.sessions.find((x) => x.key === initialSessionKey)
+          : undefined;
+        if (s) openSession(s, false);
+        else toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
+        return;
+      }
+      // 휴리스틱 key — codex/cowork 는 session_id 가 NULL 이라 전부 이 경로.
+      // 소유자(user, client)로 좁혀 재조회 — 기본 1일·20건 목록 밖이어도 찾는다.
+      const parts = initialSessionKey.split('|');
+      if (parts.length !== 3) {
+        toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
+        return;
+      }
+      const [u, c] = parts;
+      const res = await fetchBodyLogSessions({
+        days: 0,
+        user: u === 'none' ? undefined : u,
+        client: c || undefined,
+      });
       const s = res.success
         ? res.data?.sessions.find((x) => x.key === initialSessionKey)
         : undefined;
-      if (s) openSession(s);
+      if (s) openSession(s, false);
       else toast({ type: 'info', message: t('sessionNotFound'), auto_dismiss_ms: 5000 });
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, initialSessionKey]);
 
-  const openSession = (s: BodyLogSession) => {
+  const openSession = (s: BodyLogSession, syncUrl = true) => {
     setSelected(s);
     setBodies({});
     setLoadingIds(new Set());
     setOpenCalls(new Set());
     setBatchIncomplete(false);
-    onSessionChange?.(s.key);
+    setErrorsOnly(false);
+    // 딥링크 effect 가 여는 경우 URL 에 이미 ?session= 이 있다 — pushState 가
+    // 한 번 더 돌면 같은 주소가 히스토리에 중복으로 쌓인다.
+    if (syncUrl) onSessionChange?.(s.key);
   };
 
   const closeSession = () => {
@@ -301,6 +345,9 @@ export function BodyLogSessions({
       .filter((rid) => !bodies[rid] && !loadingIds.has(rid))
       .slice(0, LOAD_ALL_CHUNK);
     if (!pending.length) return;
+    // 클릭 결과가 화면에 보이게 불러오는 호출을 전부 펼친다 — 그냥 두면
+    // 50건 열람 감사가 나가는 클릭인데 아무 변화가 없어 재클릭을 유도한다.
+    setOpenCalls((prev) => new Set([...prev, ...pending]));
     setLoadingIds((prev) => new Set([...prev, ...pending]));
     fetchBodyLogBatch(pending)
       .then((res) => {
@@ -364,10 +411,17 @@ export function BodyLogSessions({
 
   const applyFilters = () => {
     setAppliedFilters(filters);
+    onFiltersApplied?.(filters);
     setSessions(null);
+    setLoadFailed(false);
     setNextBefore(null);
     load(filters);
   };
+
+  // trace 헤더의 에러 배지를 누르면 에러 호출만 — 500행을 스크롤하지 않고
+  // 실패 지점으로 바로 간다. 이미 로드된 목록의 클라이언트 필터라 추가
+  // 열람·감사가 생기지 않는다(에러 판정은 백엔드와 같이 status != SUCCESS).
+  const [errorsOnly, setErrorsOnly] = useState(false);
 
   // ── 세션 trace 뷰 ────────────────────────────────────────────────────────────
   if (selected) {
@@ -375,6 +429,11 @@ export function BodyLogSessions({
       (c) => !bodies[c.request_id] && !loadingIds.has(c.request_id),
     ).length;
     const callsCut = selected.call_count > selected.calls.length;
+    // 원본 호출 번호(#n)를 유지한 채 필터한다 — 에러만 보여도 번호가 세션
+    // 타임라인 위치를 가리키게.
+    const shownCalls = selected.calls
+      .map((call, idx) => ({ call, idx }))
+      .filter(({ call }) => !errorsOnly || (call.status && call.status !== 'SUCCESS'));
     // historyStart — 이전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
     // 넘긴다(msgIndex 단위). Claude Code 의 사이드 호출(haiku 판정/서브에이전트)이
     // 끼면 바로 앞 호출과 접두가 어긋나므로, 접두가 맞는 가장 최근 호출을
@@ -386,13 +445,32 @@ export function BodyLogSessions({
       JSON.stringify(m, (k, v) => (k === 'cache_control' ? undefined : v));
     return (
       <div className="space-y-4">
-        <button
-          type="button"
-          onClick={closeSession}
-          className="text-sm text-primary hover:underline"
-        >
-          {t('backToSessions')}
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={closeSession}
+            className="text-sm text-primary hover:underline"
+          >
+            {t('backToSessions')}
+          </button>
+          {/* 이 trace 는 ?session= 딥링크로 열린 상태라 현재 URL 이 그대로
+              공유 링크다 — 수동으로 주소창을 복사할 필요가 없게 버튼을 둔다. */}
+          <button
+            type="button"
+            onClick={() => {
+              navigator.clipboard
+                .writeText(window.location.href)
+                .then(() =>
+                  toast({ type: 'success', message: t('linkCopied'), auto_dismiss_ms: 2500 }),
+                )
+                .catch(() => {});
+            }}
+            className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+          >
+            <Link2 size={12} aria-hidden="true" />
+            {t('copyLink')}
+          </button>
+        </div>
 
         {/* 세션 헤더 */}
         <div className="glass rounded-apple p-4">
@@ -400,14 +478,33 @@ export function BodyLogSessions({
             <span className="font-medium">{selected.user_email ?? selected.user_id ?? '-'}</span>
             {selected.client && <Badge tone="neutral">{selected.client}</Badge>}
             {selected.session_id === null && (
-              <Badge tone="amber">{t('heuristicSession')}</Badge>
+              <span title={t('heuristicSessionTitle')}>
+                <Badge tone="amber">{t('heuristicSession')}</Badge>
+              </span>
             )}
             <span className="text-muted-foreground">
               {fmtDateTime(selected.started_at, locale, tz)} → {fmtDateTime(selected.ended_at, locale, tz)}
             </span>
             <Badge tone="neutral">{t('callsCount', { count: selected.call_count })}</Badge>
             {selected.error_count > 0 && (
-              <Badge tone="pink">{t('errorsCount', { count: selected.error_count })}</Badge>
+              <button
+                type="button"
+                aria-pressed={errorsOnly}
+                title={t('errorsOnlyTitle')}
+                onClick={() => setErrorsOnly((v) => !v)}
+                className={errorsOnly ? 'rounded-full ring-1 ring-pink-500' : ''}
+              >
+                <Badge tone="pink">{t('errorsCount', { count: selected.error_count })}</Badge>
+              </button>
+            )}
+            {errorsOnly && (
+              <button
+                type="button"
+                onClick={() => setErrorsOnly(false)}
+                className="text-xs text-primary hover:underline"
+              >
+                {t('errorsOnlyOff')}
+              </button>
             )}
             {selected.total_cost_usd != null && (
               <Badge tone="neutral">{fmtUsd(selected.total_cost_usd)}</Badge>
@@ -441,7 +538,7 @@ export function BodyLogSessions({
 
         {/* 호출 타임라인 */}
         <div className="space-y-2">
-          {selected.calls.map((call, i) => {
+          {shownCalls.map(({ call, idx: i }) => {
             const res = bodies[call.request_id];
             const isLoading = loadingIds.has(call.request_id);
             const isOpen = openCalls.has(call.request_id);
@@ -481,6 +578,7 @@ export function BodyLogSessions({
               <div key={call.request_id} className="glass rounded-apple">
                 <button
                   type="button"
+                  aria-expanded={isOpen}
                   onClick={() => toggleCall(call.request_id)}
                   className="flex w-full flex-wrap items-center gap-2 px-4 py-3 text-left text-sm"
                 >
@@ -528,7 +626,11 @@ export function BodyLogSessions({
                           {t('bodyOversized')}
                         </p>
                       ) : (
-                        <BodyRecordContent data={res.data} historyStart={historyStart} />
+                        <BodyRecordContent
+                          data={res.data}
+                          historyStart={historyStart}
+                          usageStatus={call.status}
+                        />
                       )
                     ) : (
                       // 404/스캔미스 — 백엔드 hint 가 수집대기/미수집/미스캔을
@@ -608,15 +710,26 @@ export function BodyLogSessions({
           value={filters.user}
           onChange={(e) => setFilters((f) => ({ ...f, user: e.target.value }))}
           placeholder={t('filterUserPlaceholder')}
+          aria-label={t('filterUserPlaceholder')}
           className="w-44 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
         />
-        <input
-          type="text"
+        {/* 백엔드는 client 를 정확 일치로 거른다 — 자유 입력은 맞춰지지 않고
+            조용히 0건이 되므로 실제 값 도메인을 select 로 고정한다.
+            'other' 는 client 가 NULL 인 요청을 가리키는 백엔드 규칙이다. */}
+        <select
           value={filters.client}
           onChange={(e) => setFilters((f) => ({ ...f, client: e.target.value }))}
-          placeholder={t('filterClientPlaceholder')}
-          className="w-32 rounded-md border border-border bg-background px-2 py-1.5 text-xs"
-        />
+          aria-label={t('filterClientPlaceholder')}
+          className="rounded-md border border-border bg-background px-2 py-1.5 text-xs"
+        >
+          <option value="">{t('filterClientAll')}</option>
+          {['claude-code', 'cowork', 'codex'].map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+          <option value="other">{t('filterClientOther')}</option>
+        </select>
         <label className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
           <input
             type="checkbox"
@@ -634,7 +747,23 @@ export function BodyLogSessions({
         </button>
       </form>
 
-      {sessions === null ? (
+      {loadFailed ? (
+        <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
+          <span>{t('listLoadFailed')}</span>
+          <button
+            type="button"
+            onClick={() => {
+              setLoadFailed(false);
+              setSessions(null);
+              load(appliedFilters);
+            }}
+            className="inline-flex items-center gap-1 text-primary hover:underline underline-offset-2"
+          >
+            <RefreshCw size={12} aria-hidden="true" />
+            {t('retry')}
+          </button>
+        </div>
+      ) : sessions === null ? (
         <p className="text-sm text-muted-foreground">{t('loadingTrace')}</p>
       ) : sessions.length === 0 ? (
         <p className="text-sm text-muted-foreground">{t('sessionsEmpty')}</p>
@@ -658,7 +787,9 @@ export function BodyLogSessions({
           <Table>
             <THead>
               <Tr>
+                <Th className="w-6"></Th>
                 <Th>{t('colEnded')}</Th>
+                <Th>{t('colStarted')}</Th>
                 <Th>{t('colUser')}</Th>
                 <Th>{t('colClient')}</Th>
                 <Th>{t('colCalls')}</Th>
@@ -674,14 +805,35 @@ export function BodyLogSessions({
                   className="cursor-pointer hover:bg-muted/50"
                   onClick={() => openSession(s)}
                 >
+                  {/* 행 클릭은 마우스 전용 편의 — 키보드·스크린리더는 이
+                      버튼으로 연다(tr 에 keydown 을 달면 내부 요소의
+                      Enter 까지 가로챈다 — AuditLogListView 와 같은 패턴). */}
+                  <Td className="w-6 text-muted-foreground">
+                    <button
+                      type="button"
+                      aria-label={t('openSession')}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        openSession(s);
+                      }}
+                      className="rounded p-0.5 hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <ChevronRight size={14} aria-hidden="true" />
+                    </button>
+                  </Td>
                   <Td className="whitespace-nowrap">{fmtDateTime(s.ended_at, locale, tz)}</Td>
+                  <Td className="whitespace-nowrap text-muted-foreground">
+                    {fmtDateTime(s.started_at, locale, tz)}
+                  </Td>
                   <Td className="max-w-40 truncate text-sm" title={s.user_email ?? s.user_id ?? ''}>
                     {s.user_email ?? s.user_id ?? '-'}
                   </Td>
                   <Td className="text-sm">
                     {s.client ?? '-'}
                     {s.session_id === null && (
-                      <Badge tone="amber" className="ml-1">{t('heuristicShort')}</Badge>
+                      <span title={t('heuristicSessionTitle')}>
+                        <Badge tone="amber" className="ml-1">{t('heuristicShort')}</Badge>
+                      </span>
                     )}
                   </Td>
                   <Td className="text-sm">{s.call_count}</Td>
