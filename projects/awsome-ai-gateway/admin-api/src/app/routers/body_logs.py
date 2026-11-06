@@ -111,6 +111,45 @@ def _usage_lookup_stmt():
     ).outerjoin(User, User.id == UsageLog.user_id)
 
 
+def _session_agg_stmt(cutoff: datetime | None, limit: int):
+    """session_id 명시 세션 집계 — ⚠️ user_id 는 uuid 라 max()/min() 집계 불가.
+
+    Postgres 는 uuid 에 순서 연산이 없어 ``max(uuid)`` 가 UndefinedFunctionError
+    다 — user_id/client/email 은 집계 대신 GROUP BY 키에 넣는다(세션은 단일
+    소유자라 결과 행은 같고, 만에 하나 키가 갈라지면 방어적으로 두 세션으로
+    보이는 게 합쳐지는 것보다 낫다). 집계가 필요한 건 시각/건수/모델뿐.
+    """
+    stmt = (
+        select(
+            UsageLog.session_id,
+            func.min(UsageLog.requested_at).label("started_at"),
+            func.max(UsageLog.requested_at).label("ended_at"),
+            func.count().label("call_count"),
+            func.count()
+            .filter(UsageLog.status != UsageStatus.SUCCESS)
+            .label("error_count"),
+            UsageLog.user_id,
+            User.email.label("user_email"),
+            UsageLog.client,
+            func.array_agg(UsageLog.model_alias.distinct()).label("models"),
+        )
+        .select_from(UsageLog)
+        .outerjoin(User, User.id == UsageLog.user_id)
+        .where(UsageLog.session_id.is_not(None))
+        .group_by(
+            UsageLog.session_id,
+            UsageLog.user_id,
+            User.email,
+            UsageLog.client,
+        )
+        .order_by(func.max(UsageLog.requested_at).desc())
+        .limit(limit)
+    )
+    if cutoff is not None:
+        stmt = stmt.where(UsageLog.requested_at >= cutoff)
+    return stmt
+
+
 # ── 세션 목록 (메타데이터만 — 본문 아님, 감사 불요) ────────────────────────────
 # `/{request_id}` 보다 먼저 선언해야 경로 파라미터에 삼켜지지 않는다.
 @router.get("/sessions")
@@ -137,30 +176,7 @@ async def list_body_log_sessions(
         cutoff = datetime.now(timezone.utc) - timedelta(days=days)
 
     # ── 1) 명시적 세션 — session_id GROUP BY + 호출은 IN 쿼리 1회 ─────────
-    agg = (
-        select(
-            UsageLog.session_id,
-            func.min(UsageLog.requested_at).label("started_at"),
-            func.max(UsageLog.requested_at).label("ended_at"),
-            func.count().label("call_count"),
-            func.count()
-            .filter(UsageLog.status != UsageStatus.SUCCESS)
-            .label("error_count"),
-            func.max(UsageLog.user_id).label("user_id"),
-            func.max(User.email).label("user_email"),
-            func.max(UsageLog.client).label("client"),
-            func.array_agg(UsageLog.model_alias.distinct()).label("models"),
-        )
-        .select_from(UsageLog)
-        .outerjoin(User, User.id == UsageLog.user_id)
-        .where(UsageLog.session_id.is_not(None))
-        .group_by(UsageLog.session_id)
-        .order_by(func.max(UsageLog.requested_at).desc())
-        .limit(limit)
-    )
-    if cutoff is not None:
-        agg = agg.where(UsageLog.requested_at >= cutoff)
-    exact_rows = (await session.execute(agg)).all()
+    exact_rows = (await session.execute(_session_agg_stmt(cutoff, limit))).all()
 
     calls_by_sid: dict[str, list] = {}
     sids = [r.session_id for r in exact_rows]

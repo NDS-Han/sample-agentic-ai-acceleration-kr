@@ -497,6 +497,20 @@ async def test_sessions_mixed_exact_and_heuristic():
     assert payload["sessions"][1]["session_id"] == "sess-A"
 
 
+def test_session_agg_stmt_no_uuid_aggregate():
+    """session_id 집계 SQL 에 max(uuid) 계열이 없어야 한다 — Postgres 는 uuid 에
+    순서 연산이 없어 UndefinedFunctionError 로 500 이 난다(라이브 회귀)."""
+    from app.routers.body_logs import _session_agg_stmt
+
+    sql = str(_session_agg_stmt(None, 20)).lower()
+    assert "group by" in sql
+    assert "usage_logs.user_id" in sql  # group 키로는 쓴다
+    # 집계 위치에 uuid 가 오면 안 된다 — max(…user_id…)/min(…user_id…) 패턴 검출.
+    import re as _re
+
+    assert not _re.search(r"(max|min)\s*\([^)]*user_id", sql)
+
+
 @pytest.mark.asyncio
 async def test_sessions_toggle_off_403():
     req = _request()
