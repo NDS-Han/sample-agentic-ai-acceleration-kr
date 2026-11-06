@@ -30,6 +30,17 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
 
   const points = labels.map((label, i) => ({ label, value: values[i] ?? 0 }));
 
+  // 축 라벨은 -45° 회전 — 회전 텍스트의 수직 확장(≈길이·0.7)이 XAxis height 를
+  // 넘으면 svg 경계에서 라벨 앞부분이 잘린다("Claude Sonnet 5.5" → "~laude …").
+  // 표시는 20자로 자르고(전체 이름은 툴팁이 담당), 축 높이는 최대 표시 길이에
+  // 맞춰 회전 라벨이 온전히 들어가게 한다.
+  const TICK_MAX_CHARS = 20;
+  const maxTickChars = Math.min(
+    TICK_MAX_CHARS,
+    points.reduce((m, p) => Math.max(m, p.label.length), 0),
+  );
+  const xAxisHeight = Math.max(70, 24 + maxTickChars * 4.2);
+
   if (points.length === 0) {
     return (
       <div className="flex items-center justify-center h-48 text-sm text-muted-foreground">
@@ -37,6 +48,9 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
       </div>
     );
   }
+
+  const formatTick = (label: string) =>
+    label.length > TICK_MAX_CHARS ? `${label.slice(0, TICK_MAX_CHARS - 1)}…` : label;
 
   return (
     <div>
@@ -51,7 +65,8 @@ export function BreakdownChartClient({ labels, values, title }: BreakdownChartCl
             minTickGap={24}
             angle={-45}
             textAnchor="end"
-            height={70}
+            height={xAxisHeight}
+            tickFormatter={formatTick}
             tick={{ fontSize: 11, fill: theme.textMuted }}
             axisLine={{ stroke: theme.grid }}
             tickLine={false}
