@@ -570,3 +570,63 @@ async def test_fetch_many_multi_scan_space_separated_rid() -> None:
 
     result = await store.fetch_many([_target(REQ)])
     assert REQ in result.records
+
+
+@pytest.mark.asyncio
+async def test_list_partition_keys_start_after() -> None:
+    """LIST 는 스트림 접두+win_start 부터 — 대형 파티션의 앞쪽 절단을 막는다."""
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    # _stream_key_prefix 가 잡을 첫 .gz 키
+    store._s3.list_objects_v2.return_value = {
+        "Contents": [{"Key": _fh_key(REQ_AT)}]
+    }
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": _fh_key(REQ_AT)}]}]
+    store._s3.get_paginator.return_value = paginator
+
+    await store.fetch(
+        REQ, provider="BEDROCK", client="other", requested_at=REQ_AT, latency_ms=1000
+    )
+    prefix = _partition_prefix("BEDROCK", "other", f"{REQ_AT:%Y-%m-%d}")
+    win_start = REQ_AT - timedelta(seconds=120)
+    assert paginator.paginate.call_args.kwargs["StartAfter"] == (
+        f"{prefix}llm-gateway-dev-body-logs-2-{win_start:%Y-%m-%d-%H-%M-%S}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_time_budget_returns_incomplete() -> None:
+    """시간 예산 초과는 미수집이 아니라 incomplete 로 찾은 것까지만 반환."""
+    import app.services.body_log_store as mod
+
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    orig, mod._FETCH_TIME_BUDGET_S = mod._FETCH_TIME_BUDGET_S, -1.0
+    try:
+        result = await store.fetch(
+            REQ, provider="BEDROCK", client="other",
+            requested_at=REQ_AT, latency_ms=1000,
+        )
+        assert result.record is None
+        assert result.incomplete is True
+        # 첫 fallback HEAD 시도 전에 이미 예산 초과 — S3 접근 없음
+        store._s3.head_object.assert_not_called()
+    finally:
+        mod._FETCH_TIME_BUDGET_S = orig
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_time_budget_marks_incomplete() -> None:
+    import app.services.body_log_store as mod
+
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    orig, mod._FETCH_TIME_BUDGET_S = mod._FETCH_TIME_BUDGET_S, -1.0
+    try:
+        result = await store.fetch_many([_target(REQ)])
+        assert result.records == {}
+        assert result.missing == [REQ]
+        assert result.incomplete is True
+    finally:
+        mod._FETCH_TIME_BUDGET_S = orig

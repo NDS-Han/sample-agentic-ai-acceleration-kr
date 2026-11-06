@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import { useCallback } from 'react';
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
 
 import type { MonitoringEventsResponse } from '@/lib/actions/monitoring';
@@ -14,7 +14,6 @@ type Mode = 'lookup' | 'sessions';
 
 export function BodyLogsTabs({ events }: { events: MonitoringEventsResponse }) {
   const t = useTranslations('monitoring.bodyLogs');
-  const router = useRouter();
   const pathname = usePathname();
   const sp = useSearchParams();
 
@@ -31,9 +30,12 @@ export function BodyLogsTabs({ events }: { events: MonitoringEventsResponse }) {
         if (v === null) params.delete(k);
         else params.set(k, v);
       }
-      router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+      // router.replace 는 서버 컴포넌트 재실행(토글 조회+이벤트 200건 재조회)을
+      // 유발한다 — 세션 열고 닫을 때마다 재렌더되는 건 낭비라 네이티브 history
+      // 로만 바꾼다. Next 15는 replaceState를 useSearchParams와 연동한다.
+      window.history.replaceState(null, '', `${pathname}?${params.toString()}`);
     },
-    [router, pathname, sp],
+    [pathname, sp],
   );
 
   const setMode = (m: Mode) =>

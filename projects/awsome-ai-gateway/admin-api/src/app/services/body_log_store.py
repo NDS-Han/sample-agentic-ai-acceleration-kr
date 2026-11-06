@@ -25,6 +25,7 @@ import asyncio
 import gzip
 import json
 import re
+import time
 import zlib
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -57,6 +58,11 @@ _MAX_LIST_KEYS = 4096
 _MAX_DECOMPRESSED_BYTES = 96 * 1024 * 1024
 #: fallback 단일 .json 객체 상한 — 초과면 본문 파싱 대신 oversized 로 답한다.
 _MAX_FALLBACK_BYTES = 8 * 1024 * 1024
+#: 한 조회 호출의 시간 예산. admin-ui 업스트림 타임아웃은 15s — 그보다 먼저
+#: 멈춰 찾은 것까지만 돌려야 한다. 초과 시 incomplete=True 로 표시해 나머지는
+#: 건별 재시도로 넘긴다. 이대로라도 클라이언트가 끊으면 서버는 스캔을 끝내고
+#: "열람 성공" 감사를 남긴다 — 못 본 열람이 성공으로 기록되는 걸 막는 상한.
+_FETCH_TIME_BUDGET_S = 10.0
 
 #: JSONL 한 줄에서 request_id 를 뽑는 다중타겟 스캔용 — 유효 문자셋만 허용해
 #: 다른 필드의 유사 문자열이 매칭되는 걸 막는다.
@@ -190,9 +196,12 @@ class BodyLogStore:
         """request_id 에 대응하는 BodyLogRecord 를 찾는다. 없으면 record=None."""
         win_start, win_end = _lookup_window(requested_at, latency_ms)
         dates = _window_dates(win_start, win_end)
+        deadline = time.monotonic() + _FETCH_TIME_BUDGET_S
 
         # 1) proxy S3 fallback — 결정적 키라 List 없이 GetObject 두 방이면 끝난다.
         for d in dates:
+            if time.monotonic() > deadline:
+                return BodyLogFetchResult(incomplete=True)
             key = f"{_partition_prefix(provider, client, d)}{request_id}.json"
             hit = await asyncio.to_thread(self._try_fallback_key, key)
             if hit is not None:
@@ -200,6 +209,9 @@ class BodyLogStore:
 
         result = BodyLogFetchResult()
         for d in dates:
+            if time.monotonic() > deadline:
+                result.incomplete = True
+                return result
             prefix = _partition_prefix(provider, client, d)
             keys, capped = await asyncio.to_thread(
                 self._candidate_keys, prefix, win_start, win_end
@@ -207,6 +219,9 @@ class BodyLogStore:
             result.incomplete = result.incomplete or capped
             result.scanned_keys.extend(keys)
             for key in keys:
+                if time.monotonic() > deadline:
+                    result.incomplete = True
+                    return result
                 found, dupes, capped = await asyncio.to_thread(
                     self._scan_gzip_object, key, request_id
                 )
@@ -229,9 +244,14 @@ class BodyLogStore:
         """
         result = BodyLogBatchResult()
         remaining: dict[str, BodyLogTarget] = {t.request_id: t for t in targets}
+        deadline = time.monotonic() + _FETCH_TIME_BUDGET_S
+        expired = False
 
         # 1) fallback — id 별 결정적 키라 개별 GetObject 가 유일한 경로다.
         for rid, t in list(remaining.items()):
+            if time.monotonic() > deadline:
+                expired = True
+                break
             win_start, win_end = _lookup_window(t.requested_at, t.latency_ms)
             for d in _window_dates(win_start, win_end):
                 key = f"{_partition_prefix(t.provider, t.client, d)}{rid}.json"
@@ -268,7 +288,7 @@ class BodyLogStore:
         opened: set[str] = set()
 
         for prefix, win_jobs in jobs.items():
-            if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
+            if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS or expired:
                 break
             # 이 prefix 의 타깃이 전부 fallback 등으로 해결됐으면 LIST 도 생략.
             if not any(r in remaining for r, _, _ in win_jobs):
@@ -279,7 +299,7 @@ class BodyLogStore:
             result.incomplete = result.incomplete or capped
             # 각 타깃 창은 자기 상한의 후보를 갖는다 — 창 순서는 요청 시각 순.
             for rid, win_start, win_end in sorted(win_jobs, key=lambda j: j[1]):
-                if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS:
+                if not remaining or len(opened) >= _MAX_TOTAL_OBJECTS or expired:
                     break
                 if rid not in remaining:
                     continue
@@ -293,11 +313,13 @@ class BodyLogStore:
                     candidates = candidates[:_MAX_OBJECTS_PER_PARTITION]
                 for key in candidates:
                     # 타깃을 찾으면 그 창의 나머지 후보는 열지 않는다 —
-                    # 전역 객체 예산을 다른 타깃을 위해 남긴다.
+                    # 전역 객체 예산을 다른 타깃을 위해 남긴다. 시간 예산을
+                    # 넘기면 incomplete 로 찾은 것까지만 돌린다.
                     if (
                         rid not in remaining
                         or not remaining
                         or len(opened) >= _MAX_TOTAL_OBJECTS
+                        or (expired := time.monotonic() > deadline)
                     ):
                         break
                     opened.add(key)
@@ -318,8 +340,8 @@ class BodyLogStore:
                                 result.duplicates[frid] = dupes
                         remaining.pop(frid, None)
 
-        if len(opened) >= _MAX_TOTAL_OBJECTS and remaining:
-            # 전역 객체 상한에 닿은 채 미해결 id 가 남았으면 미스캔 표시.
+        if (len(opened) >= _MAX_TOTAL_OBJECTS or expired) and remaining:
+            # 전역 객체 상한이나 시간 예산에 닿은 채 미해결 id 가 남았으면 미스캔 표시.
             result.incomplete = True
 
         result.missing = sorted(remaining)

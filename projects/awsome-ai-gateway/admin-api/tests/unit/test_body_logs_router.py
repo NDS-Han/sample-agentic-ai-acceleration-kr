@@ -855,3 +855,59 @@ async def test_single_response_includes_cost_token_meta(settings, audit, store_c
     assert payload["ttft_ms"] == 200
     assert payload["client"] == "other"
     assert payload["latency_ms"] == 1200
+
+
+@pytest.mark.asyncio
+async def test_sessions_truncated_scan_defers_boundary_group(monkeypatch):
+    """스캔 상한 경계 그룹은 지연 — 커서가 커버리지 아래로 점프해 세션을 잃지 않는다.
+
+    페이지1: 스캔 상한(4행)에 걸려 경계 그룹 S2와 그 아래 명시 세션은 지연된다.
+    페이지2: 더 깊은 스캔으로 S2가 완전한 행 수로 복원되고 지연됐던 세션도 나온다.
+    """
+    import json as _json
+
+    import app.routers.body_logs as bl
+
+    # 페이지 1 — 스캔 상한 4행에 딱 걸리는 데이터 (o3 는 상한 아래라 못 읽음)
+    rows_p1 = [
+        _sess_row("n1", 5, user="x"),   # S1 (07:55)
+        _sess_row("n2", 10, user="x"),  # S1
+        _sess_row("o1", 300, user="x"), # S2 (03:00) — 경계 그룹
+        _sess_row("o2", 310, user="x"), # S2 — 스캔 하한 행 (02:50)
+    ]
+    exact = [_agg_row("sess-old", 500, user="y", call_count=1)]
+
+    monkeypatch.setattr(bl, "_SESSION_SCAN_LIMIT", 4)
+    resp = await list_body_log_sessions(
+        _request(), days=0, gap_minutes=30, limit=20,
+        before=None, user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows_p1, exact=exact),
+    )
+    p1 = _json.loads(resp.body)
+    # 경계 그룹 S2(02:50 지연)와 그보다 이전 sess-old 는 이번 페이지에서 빠진다
+    assert len(p1["sessions"]) == 1
+    s1 = p1["sessions"][0]
+    assert s1["call_count"] == 2
+    assert p1["has_more"] is True
+    assert p1["next_before"] == s1["ended_at"]
+
+    # 페이지 2 — 스캔이 더 깊어 o3 까지 읽음(상한 해제). before_key 로 S1 을
+    # 타이 배제해 같은 ended_at 이어도 중복 반환되지 않아야 한다.
+    rows_p2 = rows_p1 + [_sess_row("o3", 315, user="x")]  # o2 와 5분 — 같은 세션
+    monkeypatch.setattr(bl, "_SESSION_SCAN_LIMIT", 10)
+    resp2 = await list_body_log_sessions(
+        _request(), days=0, gap_minutes=30, limit=20,
+        before=datetime.fromisoformat(p1["next_before"]),
+        before_key=[s1["key"]],
+        user=None, client=None, has_error=False, sid=None,
+        admin=_admin(), session=_session_rows(rows_p2, exact=exact),
+    )
+    p2 = _json.loads(resp2.body)
+    keys = [s["key"] for s in p2["sessions"]]
+    # S1 재등장 없음 (타이 배제) — S2 는 하한 아래 행까지 합쳐 3콜로 복원
+    assert s1["key"] not in keys
+    s2 = next(s for s in p2["sessions"] if s["session_id"] is None)
+    assert s2["call_count"] == 3
+    assert [c["request_id"] for c in s2["calls"]] == ["o3", "o2", "o1"]
+    # 지연됐던 명시 세션도 이 페이지에 나온다 — 두 페이지 합집합이 전체를 덮음
+    assert any(s["session_id"] == "sess-old" for s in p2["sessions"])

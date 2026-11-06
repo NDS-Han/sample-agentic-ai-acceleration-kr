@@ -124,7 +124,11 @@ export function BodyLogSessions({
     },
     append: boolean,
   ) => {
-    setSessions((prev) => (append && prev ? [...prev, ...data.sessions] : data.sessions));
+    setSessions((prev) => {
+      if (!append || !prev) return data.sessions;
+      const seen = new Set(prev.map((s) => s.key));
+      return [...prev, ...data.sessions.filter((s) => !seen.has(s.key))];
+    });
     setTruncated(data.truncated);
     setCallsTruncated(data.calls_truncated);
     setUserTruncated(data.user_filter_truncated ?? false);
@@ -133,7 +137,7 @@ export function BodyLogSessions({
   };
 
   const load = useCallback(
-    (f: Filters, before?: string) => {
+    (f: Filters, before?: string, beforeKeys?: string[]) => {
       const run = before ? startLoadMore : startTransition;
       run(async () => {
         const res = await fetchBodyLogSessions({
@@ -142,6 +146,7 @@ export function BodyLogSessions({
           client: f.client || undefined,
           hasError: f.hasError || undefined,
           before,
+          beforeKeys,
         });
         if (res.success && res.data) {
           applyResult(res.data, Boolean(before));
@@ -700,7 +705,16 @@ export function BodyLogSessions({
           {hasMore && nextBefore && (
             <button
               type="button"
-              onClick={() => load(appliedFilters, nextBefore)}
+              onClick={() =>
+                load(
+                  appliedFilters,
+                  nextBefore,
+                  // 커서 시각에 끝난 세션은 이미 보유 — 서버가 타이로 다시 주지 않게 key를 보낸다.
+                  (sessions ?? [])
+                    .filter((s) => s.ended_at === nextBefore)
+                    .map((s) => s.key),
+                )
+              }
               disabled={loadingMore}
               className="mt-3 text-sm text-primary hover:underline disabled:opacity-50"
             >

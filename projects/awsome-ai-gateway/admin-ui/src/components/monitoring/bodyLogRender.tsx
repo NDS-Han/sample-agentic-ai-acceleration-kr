@@ -274,7 +274,7 @@ export interface ResponseParts {
  * 안 나뉜다. 문자열/이스케이프를 인식하며 중괄호 깊이를 세는 단일 패스로
  * 최상위 객체를 잘라낸다(data: 접두·공백·기타 잡음은 depth 0에서 무시).
  */
-function splitJsonFrames(sse: string): string[] {
+export function splitJsonFrames(sse: string): string[] {
   const frames: string[] = [];
   let depth = 0;
   let start = -1;

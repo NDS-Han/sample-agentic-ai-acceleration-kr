@@ -142,6 +142,8 @@ export interface BodyLogSessionFilters {
   days?: number;
   /** 커서 — 이 시각 이전에 끝난 세션만. */
   before?: string;
+  /** before 와 같은 ended_at 으로 이미 받은 세션 key — 타이 배제용. */
+  beforeKeys?: string[];
   /** 이메일/user_id 부분일치. */
   user?: string;
   client?: string;
@@ -158,6 +160,7 @@ export async function fetchBodyLogSessions(
     const qs = new URLSearchParams();
     qs.set('days', String(f.days ?? 1));
     if (f.before) qs.set('before', f.before);
+    for (const k of f.beforeKeys ?? []) qs.append('before_key', k);
     if (f.user) qs.set('user', f.user);
     if (f.client) qs.set('client', f.client);
     if (f.hasError) qs.set('has_error', 'true');
