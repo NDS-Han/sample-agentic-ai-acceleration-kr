@@ -94,6 +94,8 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
 
     const [status, setStatus] = useState<RateLimitScopeStatusData | null>(null);
     const [loaded, setLoaded] = useState(false);
+    // 로딩과 실패를 구분해 부모가 헤더 스켈레톤을 실패 상태에 무한히 돌리지 않게 한다.
+    const [loadFailed, setLoadFailed] = useState(false);
     const [fields, setFields] = useState<Fields>(EMPTY_FIELDS);
     // 저장된 own 값이 기준선 — 상속값은 placeholder 라 baseline 에 들어가지 않는다.
     const [baseline, setBaseline] = useState<Fields>(EMPTY_FIELDS);
@@ -109,6 +111,7 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
     useEffect(() => {
       let cancelled = false;
       setLoaded(false);
+      setLoadFailed(false);
       setStatus(null);
       setPendingDelete(false);
       setError(null);
@@ -116,6 +119,7 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
         const r = await getRateLimitStatusAction(scope, scopeId);
         if (cancelled) return;
         if (!r.success) {
+          setLoadFailed(true);
           toast({ type: 'error', message: t('loadError'), auto_dismiss_ms: 5000 });
           return;
         }
@@ -169,11 +173,12 @@ export const ScopeRateLimitPanel = forwardRef<ScopeRateLimitHandle, ScopeRateLim
         : 0;
       onSummaryChange?.({
         loaded,
+        failed: loadFailed,
         restricted: count > 0,
         count,
         source: status?.own ? 'own' : status?.inherited ? 'team' : 'none',
       });
-    }, [status, loaded, onSummaryChange]);
+    }, [status, loaded, loadFailed, onSummaryChange]);
 
     const reload = async (): Promise<RateLimitScopeStatusData | null> => {
       const r = await getRateLimitStatusAction(scope, scopeId);

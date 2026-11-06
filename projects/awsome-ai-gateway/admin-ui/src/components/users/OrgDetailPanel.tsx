@@ -52,6 +52,12 @@ const ROLE_TONE: Record<string, BadgeTone> = {
   DEVELOPER: 'teal',
 };
 
+/** 헤더 배지 자리표시 — 비동기 정책 로드 중 "빈 헤더에 늦게 배지가 튀어나오는"
+    대신 로딩 중임을 표시한다. 실패 시엔 숨겨야 하므로 failed 조건과 함께 쓴다. */
+const BadgeSkeleton = () => (
+  <span className="inline-block h-5 w-12 animate-pulse rounded-full bg-muted" aria-hidden="true" />
+);
+
 export function OrgDetailPanel({ node, onDirtyChange, orgId, onSaved }: OrgDetailPanelProps) {
   const t = useTranslations('users');
 
@@ -575,6 +581,7 @@ function UserPanel({
         autoOpen={accessDirty || sectionFailed('apps')}
         badges={
           <>
+            {!(clientsLoaded || policy) && isLoadPending && <BadgeSkeleton />}
             {(clientsLoaded || policy) &&
               (appBadgeInherit ? (
                 <span className="badge badge-neutral whitespace-nowrap">{tp('inherit')}</span>
@@ -662,6 +669,9 @@ function UserPanel({
         autoOpen={modelsDirty || sectionFailed('models')}
         badges={
           <>
+            {!(modelsLoaded || loadedModelAliases.length > 0 || policy) && isLoadPending && (
+              <BadgeSkeleton />
+            )}
             {(modelsLoaded || loadedModelAliases.length > 0 || policy) &&
               (modelBadgeInherit ? (
                 <span className="badge badge-neutral whitespace-nowrap">{tp('inherit')}</span>
@@ -746,6 +756,7 @@ function UserPanel({
         autoOpen={rlDirty || sectionFailed('ratelimit')}
         badges={
           <>
+            {!rlSummary.loaded && !rlSummary.failed && <BadgeSkeleton />}
             {rlSummary.loaded &&
               (rlSummary.restricted ? (
                 <span className="badge badge-amber whitespace-nowrap">
@@ -1204,6 +1215,7 @@ function TeamPanel({
         autoOpen={appDirty || sectionFailed('apps')}
         badges={
           <>
+            {!appSummary.loaded && !appSummary.failed && <BadgeSkeleton />}
             {appSummary.loaded &&
               (appSummary.restricted ? (
                 <span className="badge badge-amber whitespace-nowrap">
@@ -1240,6 +1252,9 @@ function TeamPanel({
         autoOpen={modelDirty || sectionFailed('models')}
         badges={
           <>
+            {!modelSummary.loaded && !modelSummary.failed && catalogStatus !== 'failed' && (
+              <BadgeSkeleton />
+            )}
             {modelSummary.loaded &&
               (modelSummary.restricted ? (
                 <span className="badge badge-amber whitespace-nowrap">
@@ -1281,6 +1296,7 @@ function TeamPanel({
         autoOpen={rlDirty || sectionFailed('ratelimit')}
         badges={
           <>
+            {!rlSummary.loaded && !rlSummary.failed && <BadgeSkeleton />}
             {rlSummary.loaded &&
               (rlSummary.restricted ? (
                 <span className="badge badge-amber whitespace-nowrap">

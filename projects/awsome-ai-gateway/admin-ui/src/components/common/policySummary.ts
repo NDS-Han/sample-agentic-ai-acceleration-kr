@@ -7,6 +7,9 @@
 export interface PolicySummary {
   /** 정책 데이터 로드 완료 여부 — false 면 헤더 배지를 숨긴다. */
   loaded: boolean;
+  /** 로드 실패 — loaded=false 와 구분해야 부모가 "아직 로딩 중" 스켈레톤을
+      실패 상태에 무한히 돌리지 않는다. */
+  failed?: boolean;
   /** 저장된 정책이 제한 목록인지 (false = 제한 없음/전체 허용). */
   restricted: boolean;
   /** 제한 목록 길이 — restricted 일 때만 의미 있다. */

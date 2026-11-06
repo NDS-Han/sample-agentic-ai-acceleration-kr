@@ -76,6 +76,8 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
     // 정책이 정상 로드됐는지 추적 — 로드 실패 상태에서 저장하면 stale 전체허용이
     // 기존 제한을 덮어쓸 수 있으므로 저장·편집을 차단한다(UserPanel 과 같은 규칙).
     const [loaded, setLoaded] = useState(false);
+    // 로딩과 실패를 구분해 부모가 헤더 스켈레톤을 실패 상태에 무한히 돌리지 않게 한다.
+    const [loadFailed, setLoadFailed] = useState(false);
     // 언마운트 후 setState 방지 — 저장 후 재조회는 로드 effect의 cancelled 가드 밖이다.
     const mountedRef = useRef(true);
     useEffect(() => () => {
@@ -93,6 +95,7 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
     useEffect(() => {
       let cancelled = false;
       setLoaded(false);
+      setLoadFailed(false);
       setOwnClients([]);
       setOrgClients(null);
       startLoadTransition(async () => {
@@ -100,6 +103,7 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
         // 빠른 scope 전환에서 늦게 돌아온 응답이 새 상태를 덮지 않게 한다.
         if (cancelled) return;
         if (!r.success) {
+          setLoadFailed(true);
           toast({ type: 'error', message: t('loadError'), auto_dismiss_ms: 5000 });
           return;
         }
@@ -162,10 +166,13 @@ export const ScopeAppAccessPanel = forwardRef<ScopeAppAccessHandle, ScopeAppAcce
         loaded && (effective !== null || ownClients.length > 0);
       onSummaryChange?.({
         loaded: summaryReady,
+        // own 로드는 됐지만 유효 상태를 못 정하는 경우(조직 조회 실패)도
+        // 실패로 보고해야 부모 스켈레톤이 무한히 돌지 않는다.
+        failed: loadFailed || (loaded && !summaryReady),
         restricted: effective !== null && effective.length > 0 && effective.length < ALL_CLIENTS.length,
         count: effective?.length ?? 0,
       });
-    }, [loaded, ownClients, orgClients, scope, onSummaryChange]);
+    }, [loaded, loadFailed, ownClients, orgClients, scope, onSummaryChange]);
 
     const save = async (): Promise<boolean> => {
       // 로드 실패 상태의 저장은 무음 false 가 아니라 명시적 차단이어야 한다 —

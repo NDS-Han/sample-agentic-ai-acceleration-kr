@@ -139,10 +139,11 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
   useEffect(() => {
     onSummaryChange?.({
       loaded,
+      failed: loadFailed,
       restricted: loadedAliases.length > 0,
       count: loadedAliases.length,
     });
-  }, [loaded, loadedAliases, onSummaryChange]);
+  }, [loaded, loadFailed, loadedAliases, onSummaryChange]);
 
   const save = async (): Promise<boolean> => {
     if (!selectedTeamId) return false;
