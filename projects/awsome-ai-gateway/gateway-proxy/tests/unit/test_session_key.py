@@ -16,10 +16,26 @@ def test_claude_code_session_suffix():
 
 
 def test_explicit_metadata_session_id():
-    body = {"metadata": {"session_id"}}
-    # dict 래퍼 없이 직접 문자열 필드 — 호출부에서 문자열이 들어온다.
     body = {"metadata": {"session_id": "conv-42"}}
     assert extract_session_id(body) == "conv-42"
+
+
+def test_explicit_session_id_rejects_nul_and_surrogate():
+    """NUL → asyncpg 22021 로 usage 행 유실, lone surrogate → dump 실패 — 전부 None."""
+    assert extract_session_id({"metadata": {"session_id": "a\x00b"}}) is None
+    assert extract_session_id({"metadata": {"session_id": "a\ud800b"}}) is None
+    assert extract_session_id({"metadata": {"session_id": "  "}}) is None
+    assert extract_session_id({"metadata": {"session_id": "한글세션"}}) is None
+
+
+def test_empty_session_id_falls_back_to_user_id():
+    body = {
+        "metadata": {
+            "session_id": "",
+            "user_id": "user_x_account_y_session_abcdef01-2345-6789-abcd-ef0123456789",
+        }
+    }
+    assert extract_session_id(body) == "abcdef01-2345-6789-abcd-ef0123456789"
 
 
 def test_no_metadata_returns_none():
@@ -39,7 +55,9 @@ def test_non_string_values():
     assert extract_session_id({"metadata": {"user_id": {"a": 1}}}) is None
 
 
-def test_session_id_truncated_to_128():
+def test_session_id_over_128_rejected():
+    """128자 초과는 접두 절단하면 서로 다른 세션이 충돌할 수 있어 통째로 거부."""
     body = {"metadata": {"session_id": "x" * 300}}
-    got = extract_session_id(body)
-    assert got is not None and len(got) == 128
+    assert extract_session_id(body) is None
+    body = {"metadata": {"session_id": "x" * 128}}
+    assert extract_session_id(body) == "x" * 128

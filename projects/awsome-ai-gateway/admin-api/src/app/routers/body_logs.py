@@ -63,6 +63,8 @@ _SESSION_GAP_MINUTES = 30
 #: 세션 목록이 한 번에 훑는 usage 행 상한 — 인덱스 스캔이라 저렴하지만
 #: 그룹핑은 메모리에서 하므로 상한을 둔다. 넘으면 truncated 로 표시한다.
 _SESSION_SCAN_LIMIT = 2000
+# 세션당 반환 호출 상한 — 긴 에이전트 세션(수백~수천 호출)도 응답을 바운딩한다.
+_SESSION_CALLS_MAX = 500
 #: 배치 조회 상한 — 응답 크기·감사 행 크기·S3 스캔 시간을 묶는 상한.
 _BATCH_MAX_IDS = 50
 
@@ -178,12 +180,15 @@ async def list_body_log_sessions(
     # ── 1) 명시적 세션 — session_id GROUP BY + 호출은 IN 쿼리 1회 ─────────
     exact_rows = (await session.execute(_session_agg_stmt(cutoff, limit))).all()
 
-    calls_by_sid: dict[str, list] = {}
+    calls_by_sid: dict[tuple, list] = {}
+    calls_truncated = False
     sids = [r.session_id for r in exact_rows]
     if sids:
         cstmt = (
             select(
                 UsageLog.session_id,
+                UsageLog.user_id,
+                UsageLog.client,
                 UsageLog.request_id,
                 UsageLog.requested_at,
                 UsageLog.model_alias,
@@ -196,8 +201,15 @@ async def list_body_log_sessions(
         )
         if cutoff is not None:
             cstmt = cstmt.where(UsageLog.requested_at >= cutoff)
+        # session_id 는 클라이언트 제어 문자열 — 다른 user/client 가 같은 값을
+        # 쓰면 충돌하므로 호출 매칭도 (session_id, user_id, client) 복합키로.
         for c in (await session.execute(cstmt)).all():
-            calls_by_sid.setdefault(c.session_id, []).append(
+            skey = (c.session_id, str(c.user_id) if c.user_id else None, c.client)
+            bucket = calls_by_sid.setdefault(skey, [])
+            if len(bucket) >= _SESSION_CALLS_MAX:
+                calls_truncated = True
+                continue
+            bucket.append(
                 {
                     "request_id": c.request_id,
                     "requested_at": c.requested_at.isoformat(),
@@ -210,7 +222,8 @@ async def list_body_log_sessions(
 
     sessions = [
         {
-            "key": f"sid|{r.session_id}",
+            # session_id 만으로는 다른 유저/클라이언트와 충돌할 수 있어 복합키.
+            "key": f"sid|{r.session_id}|{r.user_id or 'none'}|{r.client or 'other'}",
             "session_id": r.session_id,
             "user_id": str(r.user_id) if r.user_id else None,
             "user_email": r.user_email,
@@ -220,7 +233,14 @@ async def list_body_log_sessions(
             "call_count": r.call_count,
             "error_count": r.error_count,
             "models": sorted(m for m in (r.models or []) if m),
-            "calls": calls_by_sid.get(r.session_id, []),
+            "calls": calls_by_sid.get(
+                (
+                    r.session_id,
+                    str(r.user_id) if r.user_id else None,
+                    r.client,
+                ),
+                [],
+            ),
         }
         for r in exact_rows
     ]
@@ -296,6 +316,7 @@ async def list_body_log_sessions(
             "sessions": sessions[:limit],
             "scanned_rows": len(rows) + len(exact_rows),
             "truncated": truncated,
+            "calls_truncated": calls_truncated,
         },
         headers=_NO_STORE,
     )

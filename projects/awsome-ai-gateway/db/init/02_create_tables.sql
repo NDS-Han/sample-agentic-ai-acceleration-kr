@@ -418,11 +418,15 @@ CREATE TABLE IF NOT EXISTS usage.usage_logs (
     sso_subject            VARCHAR(512),
     bedrock_request_id     VARCHAR(128),
     -- 요청을 인증한 VK 의 prefix (raw[:11]) — 키 단위 사용량 귀속 (migration 0051)
-    key_prefix             VARCHAR(16)
+    key_prefix             VARCHAR(16),
+    -- 클라이언트 대화 세션 키 — 본문-로그 세션 뷰어의 정확한 그룹핑 (migration 0054)
+    session_id             VARCHAR(128)
 );
 
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_time   ON usage.usage_logs (user_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_team_time   ON usage.usage_logs (team_id, requested_at DESC);
+-- 명시적 세션 키 조회 (migration 0054) — 부분 인덱스라 NULL 구 행은 인덱스 밖.
+CREATE INDEX IF NOT EXISTS idx_usage_logs_session     ON usage.usage_logs (session_id, requested_at) WHERE session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_usage_logs_model_time  ON usage.usage_logs (model_alias, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req ON usage.usage_logs (bedrock_request_id);
 

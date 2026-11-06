@@ -497,6 +497,31 @@ async def test_sessions_mixed_exact_and_heuristic():
     assert payload["sessions"][1]["session_id"] == "sess-A"
 
 
+@pytest.mark.asyncio
+async def test_sessions_collision_splits_calls_by_owner():
+    """같은 session_id 를 쓰는 다른 유저 — 세션은 갈라지고 호출도 섞이지 않는다."""
+    exact = [
+        _agg_row("dup", 3, user="x", call_count=1),
+        _agg_row("dup", 4, user="y", call_count=1),
+    ]
+    calls = [
+        _sess_row("cx", 3, user="x", session_id="dup"),
+        _sess_row("cy", 4, user="y", session_id="dup"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(), session=_session_rows([], exact=exact, call_rows=calls),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 2
+    assert payload["sessions"][0]["key"] != payload["sessions"][1]["key"]
+    by_user = {s["user_email"]: s for s in payload["sessions"]}
+    assert [c["request_id"] for c in by_user["x@e"]["calls"]] == ["cx"]
+    assert [c["request_id"] for c in by_user["y@e"]["calls"]] == ["cy"]
+
+
 def test_session_agg_stmt_no_uuid_aggregate():
     """session_id 집계 SQL 에 max(uuid) 계열이 없어야 한다 — Postgres 는 uuid 에
     순서 연산이 없어 UndefinedFunctionError 로 500 이 난다(라이브 회귀)."""

@@ -105,6 +105,8 @@ export interface BodyLogSessionsResponse {
   scanned_rows: number;
   /** 스캔 상한에 걸림 — 더 오래된 세션이 있을 수 있다. */
   truncated: boolean;
+  /** 어떤 세션이든 calls 가 세션당 상한에 잘렸다. */
+  calls_truncated: boolean;
 }
 
 export async function fetchBodyLogSessions(

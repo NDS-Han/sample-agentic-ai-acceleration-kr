@@ -13,7 +13,12 @@ import re
 
 # ``session_`` 접미 — Claude Code 형식 외에도 "…_session_<id>" 패턴은 전부 인식.
 _SESSION_SUFFIX = re.compile(r"(?:^|_)session_([0-9A-Za-z-]{8,128})")
-_MAX_LEN = 128  # usage_logs.session_id VARCHAR(128)
+# 반환값은 클라이언트 제어 문자열이므로 asyncpg/JSON 안전 문자만 허용한다 —
+# NUL 이면 INSERT 가 CharacterNotInRepertoireError 로 행 전체가 유실되고
+# (워커가 영구오류로 스킵 → usage_logs·budget_usages 둘 다 누락),
+# lone surrogate 는 model_dump_json 이 PydanticSerializationError 로 죽어
+# XADD/스풀 전에 종결된다. 화이트리스트가 아니면 None 으로 버린다.
+_ALLOWED = re.compile(r"[0-9A-Za-z._:-]{1,128}")
 
 
 def extract_session_id(body: dict | None) -> str | None:
@@ -24,10 +29,10 @@ def extract_session_id(body: dict | None) -> str | None:
     if not isinstance(md, dict):
         return None
     sid = md.get("session_id")
-    if isinstance(sid, str) and sid:
-        return sid[:_MAX_LEN]
+    if isinstance(sid, str) and _ALLOWED.fullmatch(sid):
+        return sid
     uid = md.get("user_id")
     if not isinstance(uid, str):
         return None
     m = _SESSION_SUFFIX.search(uid)
-    return m.group(1)[:_MAX_LEN] if m else None
+    return m.group(1) if m else None

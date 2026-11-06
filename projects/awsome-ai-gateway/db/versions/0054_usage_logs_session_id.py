@@ -13,15 +13,17 @@ metadata.user_id "…_session_<id>" 접미(Claude Code) 또는 metadata.session_
 동시 대화가 합쳐지는 오류 방지).
 
 ## 인덱스
-세션 요약은 ``session_id IS NOT NULL AND requested_at >= window`` 를 GROUP BY
-하고, 세션 상세는 ``session_id IN (...)`` 으로 호출을 읽는다 — 두 패턴 모두
-``(session_id, requested_at)`` 복합 인덱스로 커버된다. 부분 인덱스(NULL 제외)로
-대부분이 NULL 인 테이블에서 인덱스 부피를 줄인다.
+세션 상세의 ``session_id IN (...) ORDER BY requested_at`` 호출 조회를
+``(session_id, requested_at)`` 복합으로 커버한다. 부분 인덱스(NULL 제외)라
+대부분이 NULL 인 테이블에서 인덱스 부피를 줄인다. 요약 쿼리는
+``requested_at >= window`` 필터라 기존 ``idx_usage_logs_requested_at`` 을
+타는 게 정상 — 이 인덱스는 요약용이 아니다.
 
-## CONCURRENTLY 를 쓰지 않는 이유
-db/env.py 가 transaction_per_migration=True 라 각 마이그레이션이 트랜잭션에
-감싸인다(0053 과 같은 제약). ADD COLUMN 은 메타데이터-only 라 즉시고,
-인덱스 생성은 짧은 SHARE 락 — dev/초기 운영 규모에서 허용.
+## 락
+db/env.py 가 transaction_per_migration=True 라 ALTER 의 ACCESS EXCLUSIVE 락이
+커밋까지 유지되고 같은 트랜잭션의 인덱스 빌드도 그 락 안에서 돈다 — 짧지만
+읽기도 막는다(0026 실측 600k 행 기준 ~139ms 수준, dev/초기 운영 규모 허용).
+테이블이 커지면 컬럼/인덱스를 분리하거나 수동 CONCURRENTLY 로 처리한다.
 """
 from alembic import op
 from sqlalchemy import text

@@ -38,6 +38,7 @@ def _make_entry(
     threshold: int | None = None,
     threshold_scope: str | None = None,
     teamless: bool = False,
+    session_id: str | None = None,
 ) -> CostStreamEntry:
     return CostStreamEntry(
         request_id=request_id,
@@ -61,6 +62,7 @@ def _make_entry(
         threshold_triggered=threshold,
         threshold_scope=threshold_scope,
         teamless=teamless,
+        session_id=session_id,
     )
 
 
@@ -811,3 +813,47 @@ async def test_teamless_entry_skips_team_budget_upsert():
     ]
     assert "USER" in upsert_scopes
     assert "TEAM" not in upsert_scopes
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_flush_carries_session_id_to_insert_params():
+    """session_id 가 INSERT 파라미터에 실린다 — 구 엔트리(필드 부재)는 None."""
+    session = AsyncMock()
+    session.__aenter__ = AsyncMock(return_value=session)
+    session.__aexit__ = AsyncMock(return_value=None)
+    session.execute = AsyncMock(side_effect=_insert_returning_exec)
+    session.commit = AsyncMock()
+    session_factory = MagicMock(return_value=session)
+
+    pipe = MagicMock()
+    pipe.execute = AsyncMock()
+    redis = MagicMock()
+    redis.pipeline = MagicMock(return_value=pipe)
+    redis.publish = AsyncMock()
+
+    entries = [
+        _make_entry(request_id="req-s", session_id="sess-1"),
+        _make_entry(request_id="req-n"),
+    ]
+    flusher = BatchFlusher(session_factory=session_factory, redis=redis)
+    await flusher.flush(entries)
+
+    insert_params = [
+        c.args[1]
+        for c in session.execute.await_args_list
+        if isinstance(c.args[1], dict) and "request_id" in c.args[1]
+    ]
+    by_rid = {p["request_id"]: p for p in insert_params}
+    assert by_rid["req-s"]["session_id"] == "sess-1"
+    assert by_rid["req-n"]["session_id"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.unit
+async def test_entry_without_session_id_decodes_to_none():
+    """필드 자체가 없는 구 스트림 페이로드 → session_id=None (extra-ignore 호환)."""
+    entry = CostStreamEntry.model_validate_json(
+        _make_entry().model_dump_json(exclude={"session_id"})
+    )
+    assert entry.session_id is None
