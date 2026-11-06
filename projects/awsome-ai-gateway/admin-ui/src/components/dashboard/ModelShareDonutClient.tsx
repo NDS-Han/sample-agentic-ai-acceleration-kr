@@ -3,7 +3,7 @@
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
 import { fmtUsd } from '@/lib/utils/format';
@@ -22,6 +22,41 @@ interface Props {
   period: string;
   client?: string;  // 대시보드 앱 필터(?client=) — team 변경 재조회 시에도 유지.
 }
+
+// 호버는 부모 state 라 조각 위에 올라갈 때마다 이 컴포넌트가 리렌더된다 —
+// Pie props 가 새 참조로 보이면 recharts 애니메이션이 도중에 멈춰 도넛이
+// 반만 채워진 채 얼어붙는다. data/onHover 가 안정적이면 memo 가 호버
+// 리렌더에서 이 서브트리를 건너뛰어 애니메이션이 끝까지 돈다.
+const Donut = memo(function Donut({
+  data,
+  onHover,
+}: {
+  data: { name: string; value: number; fill: string }[];
+  onHover: (_index: number | null) => void;
+}) {
+  return (
+    <PieChart width={224} height={224}>
+      <Pie
+        data={data}
+        dataKey="value"
+        nameKey="name"
+        innerRadius="62%"
+        outerRadius="98%"
+        stroke="none"
+        paddingAngle={0}
+        startAngle={90}
+        endAngle={-270}
+        onMouseEnter={(_, i) => onHover(i)}
+        onMouseLeave={() => onHover(null)}
+        isAnimationActive
+      >
+        {data.map((p, i) => (
+          <Cell key={i} fill={p.fill} />
+        ))}
+      </Pie>
+    </PieChart>
+  );
+});
 
 export function ModelShareDonutClient({ initialData, teams, period, client }: Props) {
   const t = useTranslations('dashboard');
@@ -162,28 +197,8 @@ export function ModelShareDonutClient({ initialData, teams, period, client }: Pr
               cap 하고 스크롤 — 범례가 아무리 길어도 카드 높이가 늘어나지 않아
               옆 비용 추이 카드와 균형이 유지된다. 모바일은 종전대로 세로 스택. */}
           <div className="relative h-56 w-56 shrink-0">
-            {/* 캔버스 툴팁은 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당.
-                activeShape 가 호버 조각을 바깥으로 튀어나오게 한다(hoverOffset 대응). */}
-            <PieChart width={224} height={224}>
-              <Pie
-                data={pieData}
-                dataKey="value"
-                nameKey="name"
-                innerRadius="62%"
-                outerRadius="98%"
-                stroke="none"
-                paddingAngle={0}
-                startAngle={90}
-                endAngle={-270}
-                onMouseEnter={(_, i) => setHoverIndex(i)}
-                onMouseLeave={() => setHoverIndex(null)}
-                isAnimationActive
-              >
-                {pieData.map((p, i) => (
-                  <Cell key={i} fill={p.fill} />
-                ))}
-              </Pie>
-            </PieChart>
+            {/* 캔버스 툴팁은 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당. */}
+            <Donut data={pieData} onHover={setHoverIndex} />
             {/* 가운데: 기본은 점유율 1위(models 는 비용 desc 정렬, [0]=1위),
                 조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
             {(() => {

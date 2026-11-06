@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
 
@@ -27,6 +27,41 @@ export const TOKEN_BUCKETS = [
 const BUCKETS = TOKEN_BUCKETS;
 
 const compact = new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 });
+
+// 호버는 부모 state 라 조각 위에 올라갈 때마다 이 컴포넌트가 리렌더된다 —
+// Pie props 가 새 참조로 보이면 recharts 애니메이션이 도중에 멈춰 도넛이
+// 반만 채워진 채 얼어붙는다. data/onHover 가 안정적이면 memo 가 호버
+// 리렌더에서 이 서브트리를 건너뛰어 애니메이션이 끝까지 돈다.
+const Donut = memo(function Donut({
+  items,
+  onHover,
+}: {
+  items: { key: string; label: string; tokens: number; color: string }[];
+  onHover: (_index: number | null) => void;
+}) {
+  return (
+    <PieChart width={256} height={256}>
+      <Pie
+        data={items}
+        dataKey="tokens"
+        nameKey="label"
+        innerRadius="62%"
+        outerRadius="98%"
+        stroke="none"
+        paddingAngle={0}
+        startAngle={90}
+        endAngle={-270}
+        onMouseEnter={(_, i) => onHover(i)}
+        onMouseLeave={() => onHover(null)}
+        isAnimationActive
+      >
+        {items.map((it) => (
+          <Cell key={it.key} fill={it.color} />
+        ))}
+      </Pie>
+    </PieChart>
+  );
+});
 
 interface Props {
   data: TokenBreakdownData;
@@ -55,28 +90,8 @@ export function TokenMixDonutClient({ data, layout = 'auto' }: Props) {
   return (
     <div className={`flex items-center justify-center gap-6 ${layout === 'stacked' ? 'flex-col' : 'flex-col md:flex-row md:gap-10'}`}>
       <div className="relative h-64 w-64 shrink-0">
-        {/* 캔버스 툴팁은 도넛 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당.
-            activeShape 로 호버 조각이 바깥으로 튀어나온다(기존 hoverOffset 대응). */}
-        <PieChart width={256} height={256}>
-          <Pie
-            data={items}
-            dataKey="tokens"
-            nameKey="label"
-            innerRadius="62%"
-            outerRadius="98%"
-            stroke="none"
-            paddingAngle={0}
-            startAngle={90}
-            endAngle={-270}
-            onMouseEnter={(_, i) => setHoverIndex(i)}
-            onMouseLeave={() => setHoverIndex(null)}
-            isAnimationActive
-          >
-            {items.map((it) => (
-              <Cell key={it.key} fill={it.color} />
-            ))}
-          </Pie>
-        </PieChart>
+        {/* 캔버스 툴팁은 도넛 중앙 오버레이를 가린다 — 호버 상세는 중앙 표시가 담당. */}
+        <Donut items={items} onHover={setHoverIndex} />
         {/* 가운데: 기본은 최대 버킷, 조각 호버 시에는 그 버킷의 수치로 바뀐다 — 툴팁을 대체. */}
         {(() => {
           const centerItem = items[hoverIndex ?? topIndex];

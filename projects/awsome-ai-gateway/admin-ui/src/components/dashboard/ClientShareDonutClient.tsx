@@ -2,7 +2,7 @@
 
 // Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
-import { useMemo, useState } from 'react';
+import { memo, useMemo, useState } from 'react';
 import { useTranslations } from 'next-intl';
 import { Cell, Pie, PieChart } from 'recharts';
 import { fmtUsd } from '@/lib/utils/format';
@@ -16,6 +16,41 @@ const COLORS = CATEGORICAL_PALETTE;
 interface Props {
   data: ClientShareResponse;
 }
+
+// 호버는 부모 state 라 조각 위에 올라갈 때마다 이 컴포넌트가 리렌더된다 —
+// Pie props 가 새 참조로 보이면 recharts 애니메이션이 도중에 멈춰 도넛이
+// 반만 채워진 채 얼어붙는다. data/onHover 가 안정적이면 memo 가 호버
+// 리렌더에서 이 서브트리를 건너뛰어 애니메이션이 끝까지 돈다.
+const Donut = memo(function Donut({
+  data,
+  onHover,
+}: {
+  data: { name: string; value: number; fill: string }[];
+  onHover: (_index: number | null) => void;
+}) {
+  return (
+    <PieChart width={256} height={256}>
+      <Pie
+        data={data}
+        dataKey="value"
+        nameKey="name"
+        innerRadius="62%"
+        outerRadius="98%"
+        stroke="none"
+        paddingAngle={0}
+        startAngle={90}
+        endAngle={-270}
+        onMouseEnter={(_, i) => onHover(i)}
+        onMouseLeave={() => onHover(null)}
+        isAnimationActive
+      >
+        {data.map((p, i) => (
+          <Cell key={i} fill={p.fill} />
+        ))}
+      </Pie>
+    </PieChart>
+  );
+});
 
 export function ClientShareDonutClient({ data }: Props) {
   const t = useTranslations('dashboard');
@@ -43,26 +78,7 @@ export function ClientShareDonutClient({ data }: Props) {
     // 도넛 고정폭 + 목록 컴팩트 컬럼을 중앙 정렬로 묶는다.
     <div className="flex flex-col md:flex-row items-center justify-center gap-6 md:gap-10">
       <div className="relative h-64 w-64 shrink-0">
-        <PieChart width={256} height={256}>
-          <Pie
-            data={pieData}
-            dataKey="value"
-            nameKey="name"
-            innerRadius="62%"
-            outerRadius="98%"
-            stroke="none"
-            paddingAngle={0}
-            startAngle={90}
-            endAngle={-270}
-            onMouseEnter={(_, i) => setHoverIndex(i)}
-            onMouseLeave={() => setHoverIndex(null)}
-            isAnimationActive
-          >
-            {pieData.map((p, i) => (
-              <Cell key={i} fill={p.fill} />
-            ))}
-          </Pie>
-        </PieChart>
+        <Donut data={pieData} onHover={setHoverIndex} />
         {/* 가운데: 기본은 점유율 1위(clients 는 비용 desc 정렬, [0]=1위),
             조각 호버 시에는 그 조각의 수치로 바뀐다 — 툴팁을 대체. */}
         {(() => {
