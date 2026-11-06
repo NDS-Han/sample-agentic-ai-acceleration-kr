@@ -298,7 +298,12 @@ async def list_body_log_sessions(
     calls_truncated = False
     sids = [r.session_id for r in exact_rows]
     if sids:
-        cstmt = (
+        # session_id 는 클라이언트 제어 문자열 — 같은 sid 로 수천 행을 쌓은
+        # 세션이 있으면 파이썬 상한에 도달하기 전에 DB 가 전체를 스캔한다.
+        # 파티션별 row_number 로 DB 측 상한을 두고, 잘림 여부는 count(*) over 로
+        # 판별한다(500번째까지만 읽으면 초과 행 도착 여부를 알 수 없기 때문).
+        partition = (UsageLog.session_id, UsageLog.user_id, UsageLog.client)
+        inner = (
             select(
                 UsageLog.session_id,
                 UsageLog.user_id,
@@ -311,21 +316,33 @@ async def list_body_log_sessions(
                 UsageLog.cost_usd,
                 UsageLog.input_tokens,
                 UsageLog.output_tokens,
+                func.row_number()
+                .over(
+                    partition_by=partition,
+                    order_by=(UsageLog.requested_at.asc(), UsageLog.request_id.asc()),
+                )
+                .label("rn"),
+                func.count().over(partition_by=partition).label("cnt"),
             )
             .where(UsageLog.session_id.in_(sids))
-            .order_by(UsageLog.requested_at.asc())
         )
+        # cutoff 는 윈도우 함수 계산 *전에* 걸러야 한다 — 밖에서 거르면
+        # rn/cnt 가 전체 행 기준이 되어 창 안쪽 호출이 밀려난다.
         if cutoff is not None:
-            cstmt = cstmt.where(UsageLog.requested_at >= cutoff)
-        # session_id 는 클라이언트 제어 문자열 — 다른 user/client 가 같은 값을
-        # 쓰면 충돌하므로 호출 매칭도 (session_id, user_id, client) 복합키로.
+            inner = inner.where(UsageLog.requested_at >= cutoff)
+        inner = inner.subquery()
+        cstmt = (
+            select(inner)
+            .where(inner.c.rn <= _SESSION_CALLS_MAX)
+            .order_by(inner.c.requested_at.asc())
+        )
+        # 다른 user/client 가 같은 값을 쓰면 충돌하므로 호출 매칭도
+        # (session_id, user_id, client) 복합키로.
         for c in (await session.execute(cstmt)).all():
             skey = (c.session_id, str(c.user_id) if c.user_id else None, c.client)
-            bucket = calls_by_sid.setdefault(skey, [])
-            if len(bucket) >= _SESSION_CALLS_MAX:
+            if c.cnt > _SESSION_CALLS_MAX:
                 calls_truncated = True
-                continue
-            bucket.append(
+            calls_by_sid.setdefault(skey, []).append(
                 {
                     "request_id": c.request_id,
                     "requested_at": c.requested_at.isoformat(),

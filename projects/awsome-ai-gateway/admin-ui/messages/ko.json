@@ -1267,7 +1267,9 @@
       "linkCopied": "링크를 복사했습니다",
       "heuristicSessionTitle": "시간 근접성으로 묶은 추정 세션 — 클라이언트가 session_id 를 기록하지 않았습니다",
       "errorsOnlyTitle": "에러 호출만 보기",
-      "errorsOnlyOff": "전체 보기"
+      "errorsOnlyOff": "전체 보기",
+      "copyJson": "JSON 복사",
+      "jsonCopied": "JSON을 복사했습니다"
     }
   },
   "errors": {

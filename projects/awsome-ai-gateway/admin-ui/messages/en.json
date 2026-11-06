@@ -1267,7 +1267,9 @@
       "linkCopied": "Link copied",
       "heuristicSessionTitle": "Grouped by time proximity — no session_id was recorded by the client",
       "errorsOnlyTitle": "Show error calls only",
-      "errorsOnlyOff": "Show all"
+      "errorsOnlyOff": "Show all",
+      "copyJson": "Copy JSON",
+      "jsonCopied": "JSON copied"
     }
   },
   "errors": {

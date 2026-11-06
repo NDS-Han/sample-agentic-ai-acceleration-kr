@@ -4,9 +4,11 @@
 
 import { useState } from 'react';
 import { useLocale, useTranslations } from 'next-intl';
+import { Copy } from 'lucide-react';
 
 import type { BodyLogResponse } from '@/lib/actions/body-logs';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 
@@ -100,11 +102,14 @@ function toolResultText(content: unknown): string {
 /** tool_result 전문은 수십 KB 나온다 — 표시용은 잘라두고 전문은 원본 JSON 에 맡긴다. */
 const TOOL_RESULT_DISPLAY_MAX = 4000;
 
-function clippedToolResult(content: unknown): string {
-  const text = toolResultText(content);
+function clipText(text: string): string {
   return text.length > TOOL_RESULT_DISPLAY_MAX
     ? `${text.slice(0, TOOL_RESULT_DISPLAY_MAX)}…`
     : text;
+}
+
+function clippedToolResult(content: unknown): string {
+  return clipText(toolResultText(content));
 }
 
 function reasoningSummaryText(summary: unknown): string {
@@ -151,7 +156,7 @@ export function conversationTurns(body: Record<string, unknown>): ConversationTu
         text: '',
         tools: [],
         results: text
-          ? [{ text: text.length > TOOL_RESULT_DISPLAY_MAX ? `${text.slice(0, TOOL_RESULT_DISPLAY_MAX)}…` : text, isError: false }]
+          ? [{ text: clipText(text), isError: false }]
           : [],
         msgIndex,
       });
@@ -583,6 +588,35 @@ function Collapsible({
   );
 }
 
+// 원문 JSON 복사 — 조사 리포트에 붙이는 주된 경로라 본문 섹션마다 둔다.
+function CopyButton({
+  label,
+  getText,
+  onCopied,
+}: {
+  label: string;
+  getText: () => string;
+  onCopied: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      title={label}
+      onClick={() => {
+        navigator.clipboard
+          .writeText(getText())
+          .then(onCopied)
+          .catch(() => {});
+      }}
+      className="inline-flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground"
+    >
+      <Copy size={12} aria-hidden="true" />
+      {label}
+    </button>
+  );
+}
+
 // 와이어 인자(openai arguments, anthropic input_json_delta 누적)는 문자열 —
 // 그 안의 \uXXXX 는 provider 의 ensure_ascii 흔적이라 디코드한다. 이미 파싱된
 // 객체면 stringify 결과물이라 사용자 원문 보존을 위해 디코드하지 않는다.
@@ -613,6 +647,7 @@ export function BodyRecordContent({
   const t = useTranslations('monitoring.bodyLogs');
   const locale = useLocale();
   const tz = useReportingTz();
+  const { toast } = useToast();
   const [rawReq, setRawReq] = useState(false);
   const [rawRes, setRawRes] = useState(false);
   const [rawReqFull, setRawReqFull] = useState(false);
@@ -654,7 +689,7 @@ export function BodyRecordContent({
     <div>
       {/* 메타 */}
       <div className="mb-4 flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-        <Badge tone={statusTone(usageStatus ?? rec?.status ?? data.record?.status ?? '')}>
+        <Badge tone={statusTone(usageStatus ?? rec?.status ?? '')}>
           {usageStatus ?? rec?.status ?? '-'}
         </Badge>
         <span>{rec?.model_alias ?? data.model_alias}</span>
@@ -705,13 +740,24 @@ export function BodyRecordContent({
         <section>
           <div className="mb-1 flex items-center justify-between">
             <h3 className="text-sm font-semibold">{t('requestBody')}</h3>
-            <button
-              type="button"
-              onClick={() => setRawReq((v) => !v)}
-              className="text-xs text-primary hover:underline"
-            >
-              {rawReq ? t('showConversation') : t('showRaw')}
-            </button>
+            <div className="flex items-center gap-3">
+              {/* 전문을 티켓/리포트에 붙이는 주된 동작 — 화면에 보이는 것만
+                  복사되게 시각 상태와 무관하게 원본 JSON 을 복사한다. */}
+              <CopyButton
+                label={t('copyJson')}
+                getText={() => JSON.stringify(reqBody, null, 2)}
+                onCopied={() =>
+                  toast({ type: 'success', message: t('jsonCopied'), auto_dismiss_ms: 1500 })
+                }
+              />
+              <button
+                type="button"
+                onClick={() => setRawReq((v) => !v)}
+                className="text-xs text-primary hover:underline"
+              >
+                {rawReq ? t('showConversation') : t('showRaw')}
+              </button>
+            </div>
           </div>
           {unparseable && <p className="mb-1 text-xs text-amber-600">{t('unparseable')}</p>}
           {rawWrapped && !unparseable && (
@@ -830,13 +876,22 @@ export function BodyRecordContent({
         <section>
           <div className="mb-1 flex items-center justify-between">
             <h3 className="text-sm font-semibold">{t('responseBody')}</h3>
-            <button
-              type="button"
-              onClick={() => setRawRes((v) => !v)}
-              className="text-xs text-primary hover:underline"
-            >
-              {rawRes ? t('showConversation') : t('showRaw')}
-            </button>
+            <div className="flex items-center gap-3">
+              <CopyButton
+                label={t('copyJson')}
+                getText={() => JSON.stringify(displayResBody, null, 2)}
+                onCopied={() =>
+                  toast({ type: 'success', message: t('jsonCopied'), auto_dismiss_ms: 1500 })
+                }
+              />
+              <button
+                type="button"
+                onClick={() => setRawRes((v) => !v)}
+                className="text-xs text-primary hover:underline"
+              >
+                {rawRes ? t('showConversation') : t('showRaw')}
+              </button>
+            </div>
           </div>
           {rawRes ? (
             <JsonBlock value={displayResBody} />

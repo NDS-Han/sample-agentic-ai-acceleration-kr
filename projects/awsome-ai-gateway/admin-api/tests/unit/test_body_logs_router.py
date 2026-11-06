@@ -348,8 +348,10 @@ def _sess_row(
     model="m",
     status="SUCCESS",
     session_id=None,
+    cnt=1,
 ) -> SimpleNamespace:
-    """status 는 prod 와 같은 str-enum — 순수 문자열로 넣으면 직렬화 회귀를 못 잡는다."""
+    """status 는 prod 와 같은 str-enum — 순수 문자열로 넣으면 직렬화 회귀를 못 잡는다.
+    cnt 는 호출 쿼리의 count(*) over partition — 세션 총 호출 수(>500이면 잘림)."""
     from app.models.usage import UsageStatus
 
     st = UsageStatus[status] if isinstance(status, str) else status
@@ -373,6 +375,7 @@ def _sess_row(
         cache_read_tokens=0,
         reasoning_tokens=0,
         ttft_ms=50,
+        cnt=cnt,
     )
 
 
@@ -809,6 +812,24 @@ async def test_sessions_has_more_and_next_before():
     assert len(payload["sessions"]) == 1
     assert payload["next_before"] == payload["sessions"][0]["ended_at"]
     assert payload["sessions"][0]["session_id"] == "s1"
+
+
+@pytest.mark.asyncio
+async def test_sessions_calls_truncated_from_partition_count():
+    """cnt > _SESSION_CALLS_MAX 이면 calls_truncated — rn 상한으로 501번째 행은
+    도착하지 않으므로 잘림 판별은 count(*) over 에만 의존한다."""
+    exact = [_agg_row("s1", 5, user="x", call_count=600)]
+    calls = [_sess_row(f"r{i}", i, user="x", session_id="s1", cnt=600) for i in range(3)]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        before=None, before_key=[], user=None, client=None, has_error=False, sid=None,
+        admin=_admin(),
+        session=_session_rows([], exact=exact, call_rows=calls),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["calls_truncated"] is True
 
 
 @pytest.mark.asyncio
