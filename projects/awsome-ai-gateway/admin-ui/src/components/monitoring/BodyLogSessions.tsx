@@ -430,19 +430,59 @@ export function BodyLogSessions({
     ).length;
     const callsCut = selected.call_count > selected.calls.length;
     // 원본 호출 번호(#n)를 유지한 채 필터한다 — 에러만 보여도 번호가 세션
-    // 타임라인 위치를 가리키게.
+    // 타임라인 위치를 가리키게. 표시는 최신 호출이 위로 오게 뒤집는다 —
+    // 조사는 보통 최근 실패/응답부터 시작하기 때문(번호는 원본 위치 유지).
     const shownCalls = selected.calls
       .map((call, idx) => ({ call, idx }))
-      .filter(({ call }) => !errorsOnly || (call.status && call.status !== 'SUCCESS'));
+      .filter(({ call }) => !errorsOnly || (call.status && call.status !== 'SUCCESS'))
+      .reverse();
     // historyStart — 이전 호출의 요청 메시지가 이번 호출의 접두일 때만 그 길이를
     // 넘긴다(msgIndex 단위). Claude Code 의 사이드 호출(haiku 판정/서브에이전트)이
     // 끼면 바로 앞 호출과 접두가 어긋나므로, 접두가 맞는 가장 최근 호출을
     // 뒤로 찾는다. /compact 로 history 가 재작성되면 어느 호출과도 접두가 안
     // 맞아 0 — 그때 숨기면 새 대화가 가려지므로 안전한 기본값이다.
     // cache_control 은 호출마다 위치가 바뀔 수 있어 비교에서 제외한다.
-    const prevCallsMsgs: (unknown[] | null)[] = [];
-    const normMsg = (m: unknown) =>
-      JSON.stringify(m, (k, v) => (k === 'cache_control' ? undefined : v));
+    // 표시는 최신순으로 뒤집지만 접두 검증은 시간 오름차순으로만 성립하므로
+    // 오름차순 선행 패스로 계산해 request_id 별로 저장한다.
+    const historyStartByRid = new Map<string, number>();
+    {
+      const prevCallsMsgs: (unknown[] | null)[] = [];
+      const normMsg = (m: unknown) =>
+        JSON.stringify(m, (k, v) => (k === 'cache_control' ? undefined : v));
+      for (const call of selected.calls) {
+        const rb = bodies[call.request_id]?.data?.record?.request_body as
+          | { messages?: unknown[]; input?: unknown }
+          | undefined;
+        // (messages[] 와 responses API input[] 두 방언 모두 센다)
+        const msgs = Array.isArray(rb?.messages)
+          ? rb.messages
+          : Array.isArray(rb?.input)
+            ? (rb.input as unknown[])
+            : null;
+        // 접두 검증: 앞쪽 호출 중 msgs 가 이번 호출의 접두인 가장 최근 것을
+        // 찾는다 — 경계 메시지 하나만 같으면 충분하다(전체 비교는 비싸다).
+        let historyStart = 0;
+        if (msgs != null) {
+          for (
+            let j = prevCallsMsgs.length - 1;
+            j >= Math.max(0, prevCallsMsgs.length - 20);
+            j--
+          ) {
+            const pm = prevCallsMsgs[j];
+            if (
+              pm != null &&
+              pm.length < msgs.length &&
+              normMsg(msgs[pm.length - 1]) === normMsg(pm[pm.length - 1])
+            ) {
+              historyStart = pm.length;
+              break;
+            }
+          }
+        }
+        prevCallsMsgs.push(msgs);
+        historyStartByRid.set(call.request_id, historyStart);
+      }
+    }
     return (
       <div className="space-y-4">
         <div className="flex items-center gap-3">
@@ -542,38 +582,9 @@ export function BodyLogSessions({
             const res = bodies[call.request_id];
             const isLoading = loadingIds.has(call.request_id);
             const isOpen = openCalls.has(call.request_id);
-            // 요청 messages 는 호출마다 전체 history 를 싣는다 — 직전 호출의 턴
-            // 수를 historyStart 로 넘겨 이번 호출의 새 턴만 기본으로 보인다.
-            // (messages[] 와 responses API input[] 두 방언 모두 센다)
-            const rb = res?.data?.record?.request_body as
-              | { messages?: unknown[]; input?: unknown }
-              | undefined;
-            const msgs = Array.isArray(rb?.messages)
-              ? rb.messages
-              : Array.isArray(rb?.input)
-                ? (rb.input as unknown[])
-                : null;
-            // 접두 검증: 앞쪽 호출 중 msgs 가 이번 호출의 접두인 가장 최근 것을
-            // 찾는다 — 경계 메시지 하나만 같으면 충분하다(전체 비교는 비싸다).
-            let historyStart = 0;
-            if (msgs != null) {
-              for (
-                let j = prevCallsMsgs.length - 1;
-                j >= Math.max(0, prevCallsMsgs.length - 20);
-                j--
-              ) {
-                const pm = prevCallsMsgs[j];
-                if (
-                  pm != null &&
-                  pm.length < msgs.length &&
-                  normMsg(msgs[pm.length - 1]) === normMsg(pm[pm.length - 1])
-                ) {
-                  historyStart = pm.length;
-                  break;
-                }
-              }
-            }
-            prevCallsMsgs.push(msgs);
+            // 요청 messages 는 호출마다 전체 history 를 싣는다 — 선행 패스에서
+            // 계산한 직전 호출까지의 턴 수를 넘겨 이번 호출의 새 턴만 보인다.
+            const historyStart = historyStartByRid.get(call.request_id) ?? 0;
             return (
               <div key={call.request_id} className="glass rounded-apple">
                 <button
