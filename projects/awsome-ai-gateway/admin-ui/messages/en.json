@@ -1206,7 +1206,23 @@
       "duplicates": "{count} duplicates",
       "rawWrapped": "Non-object JSON request — stored under a _raw wrapper.",
       "hideFullJson": "Collapse full JSON",
-      "scanIncomplete": "Partial scan"
+      "scanIncomplete": "Partial scan",
+      "tabSessions": "Sessions",
+      "tabLookup": "By request",
+      "sessionsTitle": "Recent sessions (24h)",
+      "sessionsEmpty": "No sessions.",
+      "sessionsTruncated": "Scan limit hit — some sessions may be missing",
+      "colEnded": "Last call",
+      "colClient": "Client",
+      "colCalls": "Calls",
+      "colModels": "Models",
+      "colErrors": "Errors",
+      "backToSessions": "← Back to sessions",
+      "callsCount": "{count} calls",
+      "errorsCount": "{count} errors",
+      "loadingTrace": "Loading…",
+      "notCollected": "Not collected",
+      "refresh": "Refresh"
     }
   },
   "errors": {

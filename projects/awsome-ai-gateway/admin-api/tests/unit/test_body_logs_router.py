@@ -318,3 +318,189 @@ def test_human_admin_passes_guard_http():
     assert resp.status_code == 404
     assert app.state.system_settings_service.get_body_logging_enabled.called
     assert session.execute.called
+
+
+# ── sessions 목록 + batch 다중 조회 ───────────────────────────────────────────
+
+REQ2 = "4781da38-8565-4b37-a725-60475392f9f6"
+REQ3 = "ecf65b98-faff-4dfd-abdb-8e730b64afc9"
+
+from app.routers.body_logs import (  # noqa: E402
+    _BatchRequest,
+    get_body_logs_batch,
+    list_body_log_sessions,
+)
+
+
+def _sess_row(
+    rid: str, minutes_ago: float, user=None, client="claude-code", model="m"
+) -> SimpleNamespace:
+    uid = uuid.uuid5(uuid.NAMESPACE_DNS, user or "u")
+    return SimpleNamespace(
+        request_id=rid,
+        requested_at=NOW - timedelta(minutes=minutes_ago),
+        user_id=uid,
+        user_email=f"{user or 'u'}@e",
+        team_id=None,
+        provider="BEDROCK",
+        client=client,
+        latency_ms=100,
+        model_alias=model,
+        status="SUCCESS",
+        cost_usd=None,
+        is_streaming=True,
+    )
+
+
+def _session_rows(rows) -> MagicMock:
+    session = MagicMock()
+    result = MagicMock()
+    result.all.return_value = rows
+    session.execute = AsyncMock(return_value=result)
+    return session
+
+
+@pytest.mark.asyncio
+async def test_sessions_groups_by_gap():
+    """같은 (user, client) 연속 호출이 gap 을 넘으면 두 세션으로 나뉜다."""
+    rows = [
+        _sess_row("a1", 5, user="x"),
+        _sess_row("a2", 4, user="x"),
+        _sess_row("a3", 3, user="x"),
+        _sess_row("b1", 200, user="x"),  # 30분+ 전 — 다른 세션
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 2
+    s_new, s_old = payload["sessions"]
+    assert s_new["call_count"] == 3
+    assert [c["request_id"] for c in s_new["calls"]] == ["a1", "a2", "a3"]  # 시간순(asc)
+    assert s_old["call_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_sessions_user_boundary():
+    """다른 사용자의 동시간대 호출은 다른 세션."""
+    rows = [
+        _sess_row("a1", 5, user="x"),
+        _sess_row("b1", 4, user="y"),
+    ]
+    resp = await list_body_log_sessions(
+        _request(), days=1, gap_minutes=30, limit=20,
+        admin=_admin(), session=_session_rows(rows),
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert len(payload["sessions"]) == 2
+    assert {s["user_email"] for s in payload["sessions"]} == {"x@e", "y@e"}
+
+
+@pytest.mark.asyncio
+async def test_sessions_toggle_off_403():
+    req = _request()
+    req.app.state.system_settings_service.get_body_logging_enabled = AsyncMock(
+        return_value=False
+    )
+    with pytest.raises(HTTPException) as ei:
+        await list_body_log_sessions(
+            req, days=1, gap_minutes=30, limit=20,
+            admin=_admin(), session=_session_rows([]),
+        )
+    assert ei.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_batch_mixed_found_missing(settings, audit, store_cls):
+    """found + firehose-missing + usage-row-missing 혼합 응답과 단일 감사 행."""
+    from app.services.body_log_store import BodyLogBatchResult
+
+    rec = {"request_id": REQ}
+    batch = BodyLogBatchResult(
+        records={REQ: rec},
+        sources={REQ: "firehose"},
+        keys={REQ: "k"},
+        missing=[REQ2],
+    )
+    store_cls.return_value.fetch_many = AsyncMock(return_value=batch)
+
+    # REQ, REQ2 는 usage row 있음 / GONE 은 없음
+    session = MagicMock()
+    rows = [_sess_row(REQ, 5), _sess_row(REQ2, 6)]
+    result = MagicMock()
+    result.all.return_value = rows
+    session.execute = AsyncMock(return_value=result)
+
+    resp = await get_body_logs_batch(
+        _request(),
+        _BatchRequest(request_ids=[REQ, REQ2, REQ3, "bad/../id", REQ]),
+        _admin(),
+        session,
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["records"][REQ]["record"] == rec
+    assert payload["records"][REQ]["found"] is True
+    # REQ2(firehose 스캔 미스) + REQ3(usage row 없음) — 둘 다 missing 에 합산
+    assert set(payload["missing"]) == {REQ2, REQ3}
+    # 감사 한 번, found 목록에 REQ
+    assert audit.log.call_count == 1
+    changes = audit.log.call_args.kwargs["changes"]
+    assert changes["found"] == [REQ]
+    # 무효 id + 중복 제거돼 4개만 요청된 것으로 기록
+    assert sorted(changes["request_ids"]) == sorted([REQ, REQ2, REQ3])
+    # 스토어는 usage row 있는 id 만 타겟
+    sent = store_cls.return_value.fetch_many.call_args.args[0]
+    assert {t.request_id for t in sent} == {REQ, REQ2}
+
+
+@pytest.mark.asyncio
+async def test_batch_empty_ids_no_store_call(settings, audit, store_cls):
+    """id 가 전부 무효/없으면 스토어를 열지 않고 감사만 남긴다."""
+    session = MagicMock()
+    result = MagicMock()
+    result.all.return_value = []
+    session.execute = AsyncMock(return_value=result)
+
+    resp = await get_body_logs_batch(
+        _request(),
+        _BatchRequest(request_ids=["../x", ""]),
+        _admin(),
+        session,
+    )
+    import json as _json
+
+    payload = _json.loads(resp.body)
+    assert payload["records"] == {}
+    store_cls.return_value.fetch_many.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_batch_toggle_off_403(settings, audit):
+    req = _request()
+    req.app.state.system_settings_service.get_body_logging_enabled = AsyncMock(
+        return_value=False
+    )
+    with pytest.raises(HTTPException) as ei:
+        await get_body_logs_batch(
+            req, _BatchRequest(request_ids=[REQ]), _admin(), MagicMock()
+        )
+    assert ei.value.status_code == 403
+    audit.log.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_sessions_route_and_batch_route_registered():
+    """경로 파라미터 라우트보다 literal 라우트가 먼저 등록됐는지 — 순서 회귀."""
+    from app.routers.body_logs import router
+
+    paths = [r.path for r in router.routes]
+    assert paths.index("/admin/body-logs/sessions") < paths.index(
+        "/admin/body-logs/{request_id}"
+    )

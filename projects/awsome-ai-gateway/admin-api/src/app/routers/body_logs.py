@@ -11,11 +11,12 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,9 +31,11 @@ from app.core.db import get_db_session
 from app.models.auth import User
 from app.models.usage import UsageLog
 from app.services.body_log_store import (
+    BodyLogBatchResult,
     BodyLogLookupError,
     BodyLogNotConfigured,
     BodyLogStore,
+    BodyLogTarget,
 )
 
 logger = structlog.get_logger()
@@ -53,6 +56,267 @@ _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9._-]{4,128}$")
 #: "아직 안 온 것"이지 "없는 것"이 아니다.
 _COLLECTING_WINDOW_S = 180
 
+#: 세션 그룹핑 — 같은 (user, client) 의 연속 호출이 이 간격을 넘으면 새 세션.
+#: 사용자가 읽고 생각하는 공백까지 끊지 않도록 넉넉하게 잡는다(휴리스틱 —
+#: 대화 식별자를 본문에서만 알 수 있으므로 시간 인접성으로 묶는다).
+_SESSION_GAP_MINUTES = 30
+#: 세션 목록이 한 번에 훑는 usage 행 상한 — 인덱스 스캔이라 저렴하지만
+#: 그룹핑은 메모리에서 하므로 상한을 둔다. 넘으면 truncated 로 표시한다.
+_SESSION_SCAN_LIMIT = 2000
+#: 배치 조회 상한 — 응답 크기·감사 행 크기·S3 스캔 시간을 묶는 상한.
+_BATCH_MAX_IDS = 50
+
+_NO_STORE = {"Cache-Control": "no-store"}
+
+
+class _BatchRequest(BaseModel):
+    request_ids: list[str] = Field(default_factory=list, max_length=_BATCH_MAX_IDS)
+
+
+async def _require_body_logging(request: Request, session: AsyncSession) -> None:
+    """런타임 토글 게이트 — OFF 면 열람·목록 모두 403.
+
+    403 초기 거절은 감사하지 않는다 — "열람 시도"가 성립하기 전의 게이트
+    거절로, invocation-log 엔드포인트와 같은 계약이다.
+    """
+    svc = request.app.state.system_settings_service
+    if not await svc.get_body_logging_enabled(session):
+        raise HTTPException(
+            403, "본문 로깅이 비활성 상태입니다 — Monitoring 토글을 먼저 켜세요"
+        )
+
+
+def _usage_lookup_stmt():
+    return select(
+        UsageLog.request_id,
+        UsageLog.user_id,
+        User.email.label("user_email"),
+        UsageLog.team_id,
+        UsageLog.provider,
+        UsageLog.client,
+        UsageLog.requested_at,
+        UsageLog.latency_ms,
+        UsageLog.model_alias,
+        UsageLog.status,
+        UsageLog.cost_usd,
+        UsageLog.is_streaming,
+    ).outerjoin(User, User.id == UsageLog.user_id)
+
+
+# ── 세션 목록 (메타데이터만 — 본문 아님, 감사 불요) ────────────────────────────
+# `/{request_id}` 보다 먼저 선언해야 경로 파라미터에 삼켜지지 않는다.
+@router.get("/sessions")
+async def list_body_log_sessions(
+    request: Request,
+    days: int = Query(default=1, ge=0, le=365),
+    gap_minutes: int = Query(default=_SESSION_GAP_MINUTES, ge=1, le=1440),
+    limit: int = Query(default=20, ge=1, le=50),
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """usage 행을 (user, client) 별 시간 인접성으로 세션화해 반환한다.
+
+    대화 식별자는 본문 안(metadata.user_id)에만 있어 인덱스에서 그룹핑할 수
+    없다 — 같은 사용자+클라이언트의 연속 호출을 gap_minutes 공백으로 끊는
+    휴리스틱. 본문은 하나도 반환하지 않으므로 감사하지 않는다(monitoring
+    events 와 같은 민감도 계급).
+    """
+    await _require_body_logging(request, session)
+
+    stmt = (
+        _usage_lookup_stmt()
+        .order_by(UsageLog.requested_at.desc())
+        .limit(_SESSION_SCAN_LIMIT)
+    )
+    if days > 0:
+        stmt = stmt.where(
+            UsageLog.requested_at >= datetime.now(timezone.utc) - timedelta(days=days)
+        )
+    rows = (await session.execute(stmt)).all()
+    truncated = len(rows) >= _SESSION_SCAN_LIMIT
+
+    # (user_id, client) 별 asc 정렬 → gap 분할 → 세션은 마지막 호출 desc.
+    by_key: dict[tuple, list] = {}
+    for r in rows:
+        by_key.setdefault((r.user_id, r.client), []).append(r)
+
+    groups: list[list] = []
+    for items in by_key.values():
+        items.sort(key=lambda r: r.requested_at)
+        cur: list = []
+        for r in items:
+            if cur and (
+                r.requested_at - cur[-1].requested_at
+            ) > timedelta(minutes=gap_minutes):
+                groups.append(cur)
+                cur = []
+            cur.append(r)
+        if cur:
+            groups.append(cur)
+
+    groups.sort(key=lambda g: g[-1].requested_at, reverse=True)
+    sessions = []
+    for g in groups[:limit]:
+        first, last = g[0], g[-1]
+        errors = sum(
+            1
+            for r in g
+            if r.status is not None and str(r.status) not in ("SUCCESS", "success")
+        )
+        sessions.append(
+            {
+                "key": f"{first.user_id or 'none'}|{first.client or 'other'}|{last.requested_at.isoformat()}",
+                "user_id": str(first.user_id) if first.user_id else None,
+                "user_email": first.user_email,
+                "client": first.client,
+                "started_at": first.requested_at.isoformat(),
+                "ended_at": last.requested_at.isoformat(),
+                "call_count": len(g),
+                "error_count": errors,
+                "models": sorted({r.model_alias for r in g if r.model_alias}),
+                "calls": [
+                    {
+                        "request_id": r.request_id,
+                        "requested_at": r.requested_at.isoformat(),
+                        "model_alias": r.model_alias,
+                        "status": str(r.status) if r.status is not None else None,
+                        "latency_ms": r.latency_ms,
+                        "cost_usd": float(r.cost_usd) if r.cost_usd is not None else None,
+                    }
+                    for r in g
+                ],
+            }
+        )
+
+    return JSONResponse(
+        {"sessions": sessions, "scanned_rows": len(rows), "truncated": truncated},
+        headers=_NO_STORE,
+    )
+
+
+# ── 세션 trace 배치 조회 ──────────────────────────────────────────────────────
+@router.post("/batch")
+async def get_body_logs_batch(
+    request: Request,
+    body: _BatchRequest,
+    admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """여러 request_id 의 본문을 한 번의 S3 스캔으로 가져온다.
+
+    단건 엔드포인트와 같은 감사 계약 — 호출 한 번 = VIEW_BODY_LOG 한 행에
+    요청/발견/미발견 id 목록을 남긴다.
+    """
+    await _require_body_logging(request, session)
+
+    settings = get_settings()
+    if not settings.BODY_LOG_S3_BUCKET:
+        raise HTTPException(503, "BODY_LOG_S3_BUCKET 미설정 — body_logging 인프라 없음")
+
+    # 문자셋 검증 — 개별 id 와 같은 규칙. 무효 id 는 조회 대상에서만 제외한다.
+    valid_ids = [
+        rid
+        for rid in dict.fromkeys(body.request_ids)
+        if _REQUEST_ID_RE.fullmatch(rid) and ".." not in rid
+    ]
+
+    targets: list[BodyLogTarget] = []
+    meta: dict[str, dict] = {}
+    no_row: list[str] = []
+    if valid_ids:
+        rows = (
+            await session.execute(
+                _usage_lookup_stmt().where(UsageLog.request_id.in_(valid_ids))
+            )
+        ).all()
+        by_id = {r.request_id: r for r in rows}
+        for rid in valid_ids:
+            r = by_id.get(rid)
+            if r is None:
+                no_row.append(rid)
+                continue
+            targets.append(
+                BodyLogTarget(
+                    request_id=rid,
+                    provider=r.provider,
+                    client=r.client,
+                    requested_at=r.requested_at,
+                    latency_ms=r.latency_ms,
+                )
+            )
+            meta[rid] = {
+                "model_alias": r.model_alias,
+                "user_email": r.user_email,
+                "requested_at": r.requested_at.isoformat(),
+            }
+
+    result = BodyLogBatchResult()
+    try:
+        if targets:
+            store = BodyLogStore(settings.BODY_LOG_S3_BUCKET)
+            result = await store.fetch_many(targets)
+    except BodyLogNotConfigured as exc:
+        raise HTTPException(503, str(exc)) from exc
+    except BodyLogLookupError as exc:
+        await audit_logger.log(
+            session,
+            queue_only=True,
+            actor_user_id=admin.user_id,
+            actor_role=admin.role.value,
+            service_token_id=getattr(admin, "service_token_id", None),
+            action="VIEW_BODY_LOG",
+            resource_type="GatewayBodyLog",
+            resource_id=f"batch:{len(valid_ids)}",
+            changes={"request_ids": valid_ids[:60], "error": str(exc)[:200]},
+            result="FAILURE",
+            ip_address=request.client.host if request.client else "0.0.0.0",
+            request_id=getattr(request.state, "request_id", "")
+            or request.headers.get("x-request-id", ""),
+        )
+        raise HTTPException(502, f"본문 저장소 조회 실패: {exc}") from exc
+
+    found_ids = sorted(result.records) + sorted(result.oversized)
+    missing = sorted(set(result.missing) | set(no_row))
+    await audit_logger.log(
+        session,
+        queue_only=not found_ids,
+        actor_user_id=admin.user_id,
+        actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
+        action="VIEW_BODY_LOG",
+        resource_type="GatewayBodyLog",
+        resource_id=f"batch:{len(valid_ids)}",
+        changes={
+            "request_ids": valid_ids[:60],
+            "found": found_ids[:60],
+            "missing": missing[:60],
+        },
+        result="SUCCESS" if found_ids else "FAILURE",
+        ip_address=request.client.host if request.client else "0.0.0.0",
+        request_id=getattr(request.state, "request_id", "")
+        or request.headers.get("x-request-id", ""),
+    )
+
+    return JSONResponse(
+        {
+            "records": {
+                rid: {
+                    "found": True,
+                    "source": result.sources.get(rid),
+                    "key": result.keys.get(rid),
+                    "duplicates": result.duplicates.get(rid, 0),
+                    "record": result.records[rid],
+                    **(meta.get(rid) or {}),
+                }
+                for rid in sorted(result.records)
+            },
+            "oversized": sorted(result.oversized),
+            "missing": missing,
+            "incomplete": result.incomplete,
+        },
+        headers=_NO_STORE,
+    )
+
 
 @router.get("/{request_id}")
 async def get_body_log(
@@ -61,13 +325,7 @@ async def get_body_log(
     admin: CurrentUser = Depends(require_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
-    svc = request.app.state.system_settings_service
-    if not await svc.get_body_logging_enabled(session):
-        # 403/400 초기 거절은 감사하지 않는다 — "열람 시도"가 성립하기 전의 게이트
-        # 거절로, invocation-log 엔드포인트와 같은 계약이다.
-        raise HTTPException(
-            403, "본문 로깅이 비활성 상태입니다 — Monitoring 토글을 먼저 켜세요"
-        )
+    await _require_body_logging(request, session)
 
     settings = get_settings()
     if not settings.BODY_LOG_S3_BUCKET:
@@ -80,18 +338,7 @@ async def get_body_log(
     # NULL(agent/service 토큰)일 수 있어 outer join.
     row = (
         await session.execute(
-            select(
-                UsageLog.user_id,
-                User.email.label("user_email"),
-                UsageLog.team_id,
-                UsageLog.provider,
-                UsageLog.client,
-                UsageLog.requested_at,
-                UsageLog.latency_ms,
-                UsageLog.model_alias,
-            )
-            .outerjoin(User, User.id == UsageLog.user_id)
-            .where(UsageLog.request_id == request_id)
+            _usage_lookup_stmt().where(UsageLog.request_id == request_id)
         )
     ).first()
 

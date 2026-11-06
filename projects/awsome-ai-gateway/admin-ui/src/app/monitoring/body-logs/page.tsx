@@ -5,7 +5,7 @@ import Link from 'next/link';
 
 import { getBodyLoggingAction } from '@/lib/actions/settings';
 import { fetchMonitoringEvents } from '@/lib/actions/monitoring';
-import { BodyLogsViewer } from '@/components/monitoring/BodyLogsViewer';
+import { BodyLogsTabs } from '@/components/monitoring/BodyLogsTabs';
 
 /**
  * 본문 로그 뷰어 — 요청/응답 본문을 request_id 로 조회한다.
@@ -47,7 +47,7 @@ export default async function BodyLogsPage() {
           {t('backToMonitoring')}
         </Link>
       </div>
-      <BodyLogsViewer events={events} />
+      <BodyLogsTabs events={events} />
     </div>
   );
 }

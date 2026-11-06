@@ -332,3 +332,144 @@ async def test_not_found_clean() -> None:
     assert result.record is None
     assert result.incomplete is False
     assert result.source is None
+
+
+# ── fetch_many — 세션 trace 다중 조회 ─────────────────────────────────────────
+
+from app.services.body_log_store import BodyLogTarget  # noqa: E402
+
+REQ2 = "4781da38-8565-4b37-a725-60475392f9f6"
+REQ3 = "ecf65b98-faff-4dfd-abdb-8e730b64afc9"
+
+
+def _target(rid: str, req_at: datetime = REQ_AT, lat: int = 1000) -> BodyLogTarget:
+    return BodyLogTarget(
+        request_id=rid,
+        provider="BEDROCK",
+        client="other",
+        requested_at=req_at,
+        latency_ms=lat,
+    )
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_same_object_one_open() -> None:
+    """같은 .gz 에 있는 두 id — 객체를 한 번만 열어 둘 다 반환한다."""
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+
+    in_win = _fh_key(REQ_AT + timedelta(seconds=2))
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": in_win}]}]
+    store._s3.get_paginator.return_value = paginator
+
+    rec1 = {"request_id": REQ, "v": 1}
+    rec2 = {"request_id": REQ2, "v": 2}
+    store._s3.get_object.return_value = {
+        "Body": io.BytesIO(_gz([rec1, {"request_id": "other"}, rec2]))
+    }
+
+    result = await store.fetch_many([_target(REQ), _target(REQ2)])
+    assert result.records[REQ] == rec1
+    assert result.records[REQ2] == rec2
+    assert result.missing == []
+    # 다중 스캔의 핵심 — get_object 는 객체당 한 번
+    assert store._s3.get_object.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_mixed_paths() -> None:
+    """fallback + firehose + 미발견 혼합."""
+    store = _store()
+    rec_fallback = {"request_id": REQ3}
+
+    def _head(Bucket, Key):
+        if Key.endswith(f"{REQ3}.json"):
+            return {"ContentLength": 50}
+        raise _nf()
+
+    store._s3.head_object.side_effect = _head
+    in_win = _fh_key(REQ_AT + timedelta(seconds=2))
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": in_win}]}]
+    store._s3.get_paginator.return_value = paginator
+    rec1 = {"request_id": REQ}
+    store._s3.get_object.side_effect = lambda Bucket, Key: {
+        "Body": io.BytesIO(
+            json.dumps(rec_fallback).encode()
+            if Key.endswith(".json")
+            else _gz([rec1])
+        )
+    }
+
+    result = await store.fetch_many(
+        [_target(REQ), _target(REQ2), _target(REQ3)]
+    )
+    assert result.records[REQ] == rec1
+    assert result.sources[REQ] == "firehose"
+    assert result.records[REQ3] == rec_fallback
+    assert result.sources[REQ3] == "fallback"
+    assert result.missing == [REQ2]
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_dup_across_objects() -> None:
+    """다른 타겟이 아직 미발견이면 스캔이 계속되고, 뒤 객체의 같은 id 는
+    at-least-once 중복으로 센다(모두 찾으면 조기 종료라 그 뒤는 안 연다)."""
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    k1 = _fh_key(REQ_AT + timedelta(seconds=2))
+    k2 = _fh_key(REQ_AT + timedelta(seconds=3))
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": k1}, {"Key": k2}]}]
+    store._s3.get_paginator.return_value = paginator
+    rec = {"request_id": REQ}
+    # 호출마다 새 버퍼 — 첫 스캔이 Body 를 close 하므로 재사용하면 깨진다
+    store._s3.get_object.side_effect = lambda **kw: {
+        "Body": io.BytesIO(_gz([rec]))
+    }
+
+    result = await store.fetch_many([_target(REQ), _target(REQ2)])
+    assert result.records[REQ] == rec
+    assert result.duplicates[REQ] == 1
+    assert result.missing == [REQ2]
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_early_exit_when_all_found() -> None:
+    """모든 id 를 찾으면 남은 후보 객체는 열지 않는다 — 비용 상한."""
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    k1 = _fh_key(REQ_AT + timedelta(seconds=2))
+    k2 = _fh_key(REQ_AT + timedelta(seconds=3))
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": k1}, {"Key": k2}]}]
+    store._s3.get_paginator.return_value = paginator
+    rec = {"request_id": REQ}
+    store._s3.get_object.side_effect = lambda **kw: {
+        "Body": io.BytesIO(_gz([rec]))
+    }
+
+    result = await store.fetch_many([_target(REQ)])
+    assert result.records[REQ] == rec
+    # 두 번째 객체는 열지 않는다 — get_object 1회뿐
+    assert store._s3.get_object.call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fetch_many_multi_scan_space_separated_rid() -> None:
+    """JSON 직렬화가 '"request_id": "x"' 공백 형태여도 잡는다(단건 needle 과 동치)."""
+    store = _store()
+    store._s3.head_object.side_effect = _nf()
+    in_win = _fh_key(REQ_AT + timedelta(seconds=2))
+    paginator = MagicMock()
+    paginator.paginate.return_value = [{"Contents": [{"Key": in_win}]}]
+    store._s3.get_paginator.return_value = paginator
+
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb") as g:
+        g.write(f'{{"request_id": "{REQ}", "v": 1}}\n'.encode())
+    store._s3.get_object.return_value = {"Body": io.BytesIO(buf.getvalue())}
+
+    result = await store.fetch_many([_target(REQ)])
+    assert REQ in result.records

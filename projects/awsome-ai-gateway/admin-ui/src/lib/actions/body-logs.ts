@@ -48,6 +48,14 @@ export interface BodyLogResult {
   status?: number;
 }
 
+/** data 페이로드만 다른 동일 계약 — sessions/batch 응답용. */
+export interface BodyLogResultT<T> {
+  success: boolean;
+  data?: T;
+  error?: string;
+  status?: number;
+}
+
 export async function fetchBodyLog(requestId: string): Promise<BodyLogResult> {
   try {
     const data = await withRetry(() =>
@@ -58,6 +66,93 @@ export async function fetchBodyLog(requestId: string): Promise<BodyLogResult> {
     return { success: true, data };
   } catch (err) {
     // APIError.message 에 FastAPI detail 이 이미 포맷돼 들어있다 — status 만 따로 넘긴다.
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+      status: err instanceof APIError ? err.status : undefined,
+    };
+  }
+}
+
+// ── 세션 trace (Langfuse 스타일 — 대화 단위 묶음) ─────────────────────────────
+
+export interface BodyLogSessionCall {
+  request_id: string;
+  requested_at: string;
+  model_alias: string | null;
+  status: string | null;
+  latency_ms: number | null;
+  cost_usd: number | null;
+}
+
+export interface BodyLogSession {
+  key: string;
+  user_id: string | null;
+  user_email: string | null;
+  client: string | null;
+  started_at: string;
+  ended_at: string;
+  call_count: number;
+  error_count: number;
+  models: string[];
+  calls: BodyLogSessionCall[];
+}
+
+export interface BodyLogSessionsResponse {
+  sessions: BodyLogSession[];
+  scanned_rows: number;
+  /** 스캔 상한에 걸림 — 더 오래된 세션이 있을 수 있다. */
+  truncated: boolean;
+}
+
+export async function fetchBodyLogSessions(
+  days = 1,
+): Promise<BodyLogResultT<BodyLogSessionsResponse>> {
+  try {
+    const data = await withRetry(() =>
+      adminAPI.get<BodyLogSessionsResponse>(
+        `/admin/body-logs/sessions?days=${days}`,
+      ),
+    );
+    return { success: true, data };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : String(err),
+      status: err instanceof APIError ? err.status : undefined,
+    };
+  }
+}
+
+export interface BodyLogBatchItem {
+  found: boolean;
+  source: 'firehose' | 'fallback' | null;
+  key: string | null;
+  duplicates: number;
+  record: BodyLogRecord | null;
+  model_alias?: string;
+  user_email?: string | null;
+  requested_at?: string;
+}
+
+export interface BodyLogBatchResponse {
+  records: Record<string, BodyLogBatchItem>;
+  oversized: string[];
+  missing: string[];
+  incomplete: boolean;
+}
+
+export async function fetchBodyLogBatch(
+  requestIds: string[],
+): Promise<BodyLogResultT<BodyLogBatchResponse>> {
+  try {
+    const data = await withRetry(() =>
+      adminAPI.post<BodyLogBatchResponse>('/admin/body-logs/batch', {
+        request_ids: requestIds,
+      }),
+    );
+    return { success: true, data };
+  } catch (err) {
     return {
       success: false,
       error: err instanceof Error ? err.message : String(err),

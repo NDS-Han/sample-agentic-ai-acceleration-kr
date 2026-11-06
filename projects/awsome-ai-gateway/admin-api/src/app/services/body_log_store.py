@@ -52,6 +52,10 @@ _MAX_DECOMPRESSED_BYTES = 96 * 1024 * 1024
 #: fallback 단일 .json 객체 상한 — 초과면 본문 파싱 대신 oversized 로 답한다.
 _MAX_FALLBACK_BYTES = 8 * 1024 * 1024
 
+#: JSONL 한 줄에서 request_id 를 뽑는 다중타겟 스캔용 — 유효 문자셋만 허용해
+#: 다른 필드의 유사 문자열이 매칭되는 걸 막는다.
+_RID_LINE_RE = re.compile(rb'"request_id"\s*:\s*"([A-Za-z0-9._-]{4,128})"')
+
 
 class BodyLogNotConfigured(RuntimeError):
     """BODY_LOG_S3_BUCKET 미설정 — 엔드포인트는 503으로 번역한다."""
@@ -87,6 +91,59 @@ class BodyLogFetchResult:
     #: record=None + incomplete=True 는 "미수집"이 아니라 "못 찾았을 수 있음".
     incomplete: bool = False
     scanned_keys: list[str] = field(default_factory=list)
+
+
+@dataclass
+class BodyLogTarget:
+    """``fetch_many`` 의 조회 대상 하나 — usage 행에서 유도하는 조회 인자."""
+
+    request_id: str
+    provider: str
+    client: str | None
+    requested_at: datetime
+    latency_ms: int | None
+
+
+@dataclass
+class BodyLogBatchResult:
+    """다중 조회 결과 — id 별 record/source/key 와 못 찾은 id 목록."""
+
+    records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    sources: dict[str, str] = field(default_factory=dict)
+    keys: dict[str, str] = field(default_factory=dict)
+    duplicates: dict[str, int] = field(default_factory=dict)
+    oversized: set[str] = field(default_factory=set)
+    missing: list[str] = field(default_factory=list)
+    incomplete: bool = False
+    scanned_keys: list[str] = field(default_factory=list)
+
+
+def _lookup_window(
+    requested_at: datetime, latency_ms: int | None
+) -> tuple[datetime, datetime]:
+    """요청 창: [requested_at - skew, requested_at + latency + slack].
+
+    키 타임스탬프가 이 창 밖인 객체는 열지 않는다 — 요청 전에 쓰인 객체는
+    불가능하고, 요청 뒤로는 latency + Firehose buffer(60s) + 재시도/스큐
+    여유면 충분하다.
+    """
+    req_utc = requested_at.astimezone(timezone.utc)
+    return (
+        req_utc - timedelta(seconds=_EARLY_SKEW_S),
+        req_utc + timedelta(milliseconds=(latency_ms or 0), seconds=_LATE_SLACK_S),
+    )
+
+
+def _window_dates(win_start: datetime, win_end: datetime) -> list[str]:
+    """창이 걸치는 UTC 날짜 목록 — dt= 파티션은 Firehose 수신 시각이라 proxy
+    시계 스큐로 요청 당일 레코드가 전날 파티션에 들어갈 수 있고, 자정+버퍼
+    지연이면 다음 날로 간다. {d-1 .. d+1} 이 자연히 커버된다."""
+    dates: list[str] = []
+    d = win_start.date()
+    while d <= win_end.date():
+        dates.append(d.isoformat())
+        d += timedelta(days=1)
+    return dates
 
 
 def _partition_prefix(provider: str, client: str | None, date_str: str) -> str:
@@ -125,21 +182,8 @@ class BodyLogStore:
         latency_ms: int | None,
     ) -> BodyLogFetchResult:
         """request_id 에 대응하는 BodyLogRecord 를 찾는다. 없으면 record=None."""
-        req_utc = requested_at.astimezone(timezone.utc)
-
-        # 2) Firehose 파티션 스캔 — 키 타임스탬프가 요청 창 안인 객체만 연다.
-        win_start = req_utc - timedelta(seconds=_EARLY_SKEW_S)
-        win_end = req_utc + timedelta(
-            milliseconds=(latency_ms or 0), seconds=_LATE_SLACK_S
-        )
-        # 파티션 날짜는 창에서 유도한다: dt= 는 Firehose 수신 시각이라 proxy
-        # 시계 스큐(_EARLY_SKEW_S 안)로 요청 당일 레코드가 전날 파티션에 들어갈
-        # 수 있고, 자정+버퍼 지연이면 다음 날로 간다. {d-1 .. d+1} 이 자연히 커버된다.
-        dates: list[str] = []
-        d = win_start.date()
-        while d <= win_end.date():
-            dates.append(d.isoformat())
-            d += timedelta(days=1)
+        win_start, win_end = _lookup_window(requested_at, latency_ms)
+        dates = _window_dates(win_start, win_end)
 
         # 1) proxy S3 fallback — 결정적 키라 List 없이 GetObject 두 방이면 끝난다.
         for d in dates:
@@ -167,6 +211,84 @@ class BodyLogStore:
                     result.key = key
                     result.duplicates += dupes
                     return result
+        return result
+
+    async def fetch_many(self, targets: list[BodyLogTarget]) -> BodyLogBatchResult:
+        """여러 request_id 를 한 번의 파티션 스캔으로 찾는다 — 세션 trace 용.
+
+        같은 대화의 호출들은 시간적으로 붙어 있어 같은 몇 개의 Firehose 객체에
+        들어가는 경우가 대부분이다 — 단건 ``fetch`` 를 N 번 돌리면 같은 .gz 를
+        N 번 연다. 여기서는 fallback 을 id 별로 시도한 뒤, Firehose 스캔은
+        (prefix → union 창) 으로 묶어 객체마다 **한 번만** 연다.
+        """
+        result = BodyLogBatchResult()
+        remaining: dict[str, BodyLogTarget] = {t.request_id: t for t in targets}
+
+        # 1) fallback — id 별 결정적 키라 개별 GetObject 가 유일한 경로다.
+        for rid, t in list(remaining.items()):
+            win_start, win_end = _lookup_window(t.requested_at, t.latency_ms)
+            for d in _window_dates(win_start, win_end):
+                key = f"{_partition_prefix(t.provider, t.client, d)}{rid}.json"
+                hit = await asyncio.to_thread(self._try_fallback_key, key)
+                if hit is None:
+                    continue
+                if hit.record is not None:
+                    result.records[rid] = hit.record
+                elif hit.oversized:
+                    result.oversized.add(rid)
+                else:
+                    continue
+                result.sources[rid] = "fallback"
+                result.keys[rid] = key
+                del remaining[rid]
+                break
+
+        # 2) Firehose — 남은 id 들을 (provider/client/dt) prefix 로 묶고,
+        #    prefix 별로 창을 합집합한다. 같은 키는 정확히 한 prefix 에 속하므로
+        #    객체 중복 스캔은 없다.
+        groups: dict[str, tuple[datetime, datetime]] = {}
+        for t in remaining.values():
+            win_start, win_end = _lookup_window(t.requested_at, t.latency_ms)
+            for d in _window_dates(win_start, win_end):
+                prefix = _partition_prefix(t.provider, t.client, d)
+                if prefix in groups:
+                    lo, hi = groups[prefix]
+                    groups[prefix] = (min(lo, win_start), max(hi, win_end))
+                else:
+                    groups[prefix] = (win_start, win_end)
+
+        # 스캔 대상은 firehose 경로의 전체 id 로 고정 — 이미 찾은 id 도 매칭해
+        # 뒤 객체의 at-least-once 중복을 센다. 조기 종료는 remaining 기준.
+        scan_ids = set(remaining)
+
+        for prefix, (win_start, win_end) in groups.items():
+            if not remaining:
+                break
+            keys, capped = await asyncio.to_thread(
+                self._candidate_keys, prefix, win_start, win_end
+            )
+            result.incomplete = result.incomplete or capped
+            result.scanned_keys.extend(keys)
+            for key in keys:
+                if not remaining:
+                    break
+                found_map, capped = await asyncio.to_thread(
+                    self._scan_gzip_object_multi, key, scan_ids
+                )
+                result.incomplete = result.incomplete or capped
+                for rid, (rec, dupes) in found_map.items():
+                    if rid in result.records:
+                        # 다른 객체에 같은 id — at-least-once 중복
+                        result.duplicates[rid] = result.duplicates.get(rid, 0) + 1 + dupes
+                    else:
+                        result.records[rid] = rec
+                        result.sources[rid] = "firehose"
+                        result.keys[rid] = key
+                        if dupes:
+                            result.duplicates[rid] = dupes
+                    remaining.pop(rid, None)
+
+        result.missing = sorted(remaining)
         return result
 
     # ── sync helpers (run via to_thread) ──────────────────────────────────────
@@ -285,3 +407,66 @@ class BodyLogStore:
                 except Exception:
                     pass
         return found, dupes, capped
+
+    def _scan_gzip_object_multi(
+        self, key: str, request_ids: set[str]
+    ) -> tuple[dict[str, tuple[dict[str, Any], int]], bool]:
+        """객체 한 번 열기로 여러 request_id 를 찾는다 — 세션 trace 용.
+
+        반환은 (id → (첫 매칭 레코드, 같은 id 의 추가 레코드 수), 상한/파손으로
+        잘렸는가). 단건 ``_scan_gzip_object`` 와 달리 히트해도 객체 끝까지 읽는다
+        — 같은 객체에 세션의 다음 호출이 이어서 들어있는 게 흔하다.
+        """
+        found: dict[str, tuple[dict[str, Any], int]] = {}
+        total = 0
+        capped = False
+        resp = None
+        try:
+            resp = self._s3.get_object(Bucket=self.bucket, Key=key)
+            with gzip.GzipFile(fileobj=resp["Body"]) as gz:
+                for line in gz:
+                    total += len(line)
+                    if total > _MAX_DECOMPRESSED_BYTES:
+                        logger.warning("body_log batch scan cap hit", key=key)
+                        capped = True
+                        break
+                    if b'"request_id"' not in line:
+                        continue
+                    m = _RID_LINE_RE.search(line)
+                    if not m:
+                        continue
+                    rid = m.group(1).decode()
+                    if rid not in request_ids:
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except ValueError:
+                        continue
+                    if rec.get("request_id") != rid:
+                        continue
+                    if rid in found:
+                        rec0, dupes = found[rid]
+                        found[rid] = (rec0, dupes + 1)
+                    else:
+                        found[rid] = (rec, 0)
+        except self._s3.exceptions.ClientError as exc:
+            raise BodyLogLookupError(f"get {key}: {exc}") from exc
+        except BotoCoreError as exc:
+            # 단건 스캔과 같은 이유 — OSError 계열과 순서를 바꾸면 안 된다.
+            raise BodyLogLookupError(
+                f"get {key}: {type(exc).__name__}: {exc}"
+            ) from exc
+        except (OSError, EOFError, zlib.error) as exc:
+            logger.warning("body_log gzip unreadable", key=key, error=str(exc))
+            capped = True
+        except Exception as exc:
+            raise BodyLogLookupError(
+                f"get {key}: {type(exc).__name__}: {exc}"
+            ) from exc
+        finally:
+            if resp is not None:
+                try:
+                    resp["Body"].close()
+                except Exception:
+                    pass
+        return found, capped

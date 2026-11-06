@@ -1206,7 +1206,23 @@
       "duplicates": "중복 {count}건",
       "rawWrapped": "비객체 JSON 요청이라 _raw 래퍼로 저장되었습니다.",
       "hideFullJson": "전체 JSON 접기",
-      "scanIncomplete": "일부 구간 미스캔"
+      "scanIncomplete": "일부 구간 미스캔",
+      "tabSessions": "세션별",
+      "tabLookup": "요청별",
+      "sessionsTitle": "최근 세션 (24h)",
+      "sessionsEmpty": "세션이 없습니다.",
+      "sessionsTruncated": "조회 상한에 걸려 일부 세션이 빠졌을 수 있습니다",
+      "colEnded": "마지막 호출",
+      "colClient": "클라이언트",
+      "colCalls": "호출 수",
+      "colModels": "모델",
+      "colErrors": "에러",
+      "backToSessions": "← 세션 목록으로",
+      "callsCount": "호출 {count}건",
+      "errorsCount": "에러 {count}건",
+      "loadingTrace": "불러오는 중…",
+      "notCollected": "미수집",
+      "refresh": "새로고침"
     }
   },
   "errors": {
