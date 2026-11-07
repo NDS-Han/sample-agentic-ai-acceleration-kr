@@ -10,8 +10,10 @@ stop Claude Code from starting.
 
 Two slices make the fragment: models (computed here from the tables the proxy enforces)
 laid OVER the AI Governance Hub's slice (plugins, MCP servers, lock keys — asked with the
-VK's user and team, see services/policy_hub.py). The hub never decides models, and a hub
-failure only costs its slice for one refresh (models-only 200, not a 503).
+VK's user and team, see services/policy_hub.py). The hub never decides models. A hub
+failure is a 503: the helper keeps its last good policy whole. A models-only 200 would
+replace the cached team policy with a reduced one — plugins, MCP servers and locks gone
+from every PC until the hub is back — while models are enforced server-side anyway.
 """
 from __future__ import annotations
 
@@ -22,7 +24,7 @@ import structlog
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from app.services.policy_hub import MODEL_KEYS, hub_fragment
+from app.services.policy_hub import MODEL_KEYS, HubUnavailable, hub_fragment
 from app.services.policy_service import load_models_inputs, models_fragment
 
 logger = structlog.get_logger(__name__)
@@ -56,7 +58,17 @@ async def get_policy(request: Request) -> JSONResponse:
     if inputs is None:  # unknown or inactive user: nothing, and no hub round-trip
         return JSONResponse(content={"version": _version({}), "managedSettings": {}})
     models = models_fragment(**inputs)
-    hub = await hub_fragment(auth_context.user_id, getattr(auth_context, "team_id", "") or "")
+    team_id = getattr(auth_context, "team_id", "") or ""
+    try:
+        hub = await hub_fragment(auth_context.user_id, team_id)
+    except HubUnavailable as exc:
+        # 503, not a models-only 200: the helper must keep its whole cached policy (see module doc).
+        logger.warning(
+            "policy_hub_unavailable", user_id=auth_context.user_id, team_id=team_id, error=str(exc),
+        )
+        return JSONResponse(status_code=503, content={
+            "type": "error", "error": {"type": "api_error", "message": "policy hub unavailable"},
+        })
     # models wins: the hub's model keys are dropped even if policy_hub let one through.
     fragment = {**{k: v for k, v in hub.items() if k not in MODEL_KEYS}, **models}
     return JSONResponse(content={"version": _version(fragment), "managedSettings": fragment})

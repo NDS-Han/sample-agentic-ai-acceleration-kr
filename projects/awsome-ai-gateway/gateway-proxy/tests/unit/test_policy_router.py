@@ -111,6 +111,26 @@ async def test_db_failure_is_503_so_the_helper_keeps_its_cache(monkeypatch):
     assert resp.status_code == 503
 
 
+async def test_hub_unavailable_is_503_so_the_helper_keeps_its_whole_cached_policy(monkeypatch):
+    """A hub failure is a 503, not a models-only 200: a reduced 200 would replace the helper's
+    cached team policy (plugins, MCP servers, locks) with the models slice alone."""
+    from app.services.policy_hub import HubUnavailable
+
+    async def loader(db, user_id, client):
+        return inputs()
+
+    async def hub(user_id, team_id):
+        raise HubUnavailable("hub answered 503")
+
+    monkeypatch.setattr(policy_router, "load_models_inputs", loader)
+    monkeypatch.setattr(policy_router, "hub_fragment", hub)
+
+    resp = await get({"auth_context": Ctx(), "_session_factory": fake_session})
+
+    assert resp.status_code == 503
+    assert resp.json()["error"]["message"] == "policy hub unavailable"
+
+
 async def test_version_changes_only_when_the_fragment_changes(monkeypatch):
     current = {"value": inputs()}
 
