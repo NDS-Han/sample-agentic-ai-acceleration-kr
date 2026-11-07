@@ -73,7 +73,7 @@ def resolve_fragment(
         except Exception as exc:  # noqa: BLE001 — any network/HTTP failure -> cache
             note(f"policy fetch failed ({type(exc).__name__}: {exc}); using cached policy")
         else:
-            fragment = _valid_fragment(body)
+            fragment = _valid_fragment(body, note)
             if fragment is not None:
                 _save_cache(cache_path, url, body, note)
                 return fragment
@@ -142,13 +142,42 @@ def _same_url(a, b) -> bool | None:
     return a.rstrip("/").lower() == b.rstrip("/").lower()
 
 
-def _valid_fragment(body) -> dict | None:
+#: Keys a server fragment may set: the gateway's model keys and the hub's policy keys. Everything
+#: else (apiKeyHelper, env, statusLine, hooks, policyHelper ...) belongs to the admin-installed
+#: baseline only — a compromised server must not be able to change it on every PC.
+FRAGMENT_KEYS = frozenset({
+    "availableModels", "enforceAvailableModels", "model",
+    "strictKnownMarketplaces", "extraKnownMarketplaces", "enabledPlugins",
+    "disableSideloadFlags", "strictPluginOnlyCustomization",
+    "managedMcpServers", "allowManagedMcpServersOnly", "permissions",
+})
+#: Inside `permissions` a fragment may only deny.
+PERMISSION_KEYS = frozenset({"deny"})
+
+
+def _valid_fragment(body, note=None) -> dict | None:
+    """The usable fragment of a server answer, restricted to FRAGMENT_KEYS; None if unusable."""
     fragment = body.get("managedSettings") if isinstance(body, dict) else None
     if not isinstance(fragment, dict):
         return None
     if any(not isinstance(k, str) or k.startswith("_") for k in fragment):
         return None
-    return fragment
+    unknown = sorted(k for k in fragment if k not in FRAGMENT_KEYS)
+    if unknown and note:
+        note(f"ignoring keys a policy fragment may not set: {', '.join(unknown)}")
+    out = {k: v for k, v in fragment.items() if k in FRAGMENT_KEYS}
+    perms = out.get("permissions")
+    if perms is not None:
+        if not isinstance(perms, dict):
+            out.pop("permissions")
+            if note:
+                note("ignoring permissions: not an object")
+        else:
+            extra = sorted(k for k in perms if k not in PERMISSION_KEYS)
+            if extra and note:
+                note(f"ignoring permissions keys a fragment may not set: {', '.join(extra)}")
+            out["permissions"] = {k: v for k, v in perms.items() if k in PERMISSION_KEYS}
+    return out
 
 
 def _save_cache(cache_path: Path, url: str, body: dict, note) -> None:
@@ -173,7 +202,7 @@ def _cached_fragment(cache_path: Path, url: str, note) -> dict:
     if not isinstance(cached, dict) or cached.get("source") != url:
         note("policy cache is from another gateway; ignoring it")
         return {}
-    fragment = _valid_fragment(cached.get("response"))
+    fragment = _valid_fragment(cached.get("response"), note)
     return fragment if fragment is not None else {}
 
 

@@ -117,12 +117,13 @@ def test_run_explains_a_server_fallback_on_stderr(tmp_path):
 
 
 def test_run_drops_a_fragment_that_would_overflow_stdout_but_keeps_the_baseline(tmp_path):
-    huge = {"env": {"PADDING": "x" * (1024 * 1024)}}
+    # an allowed key (env would be dropped by the allow-list before it could overflow)
+    huge = {"strictKnownMarketplaces": [{"source": "github", "repo": "x" * (1024 * 1024)}]}
     kwargs, baseline = server_setup(tmp_path, lambda url, vk, t: {"managedSettings": huge})
     out, err = io.StringIO(), io.StringIO()
 
     assert run(baseline, out, err, **kwargs) == 0
     settings = json.loads(out.getvalue())["managedSettings"]
     assert settings["apiKeyHelper"] == "helper.exe"
-    assert "PADDING" not in settings["env"]
+    assert "strictKnownMarketplaces" not in settings
     assert "1 MiB" in err.getvalue()
