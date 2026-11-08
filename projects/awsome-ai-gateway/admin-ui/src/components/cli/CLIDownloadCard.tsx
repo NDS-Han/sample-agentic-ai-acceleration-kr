@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { Monitor, Laptop, Terminal, Download, Copy, Check } from 'lucide-react';
 import { useTranslations } from 'next-intl';
 import type { CLIDownloadItem } from '@/types/entities';
+import { buttonClass } from '@/components/common/Button';
 
 interface CLIDownloadCardProps {
   item: CLIDownloadItem;
@@ -124,11 +125,7 @@ export function CLIDownloadCard({ item }: CLIDownloadCardProps) {
       <a
         href={item.download_url}
         download={item.filename}
-        className={[
-          'inline-flex items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors',
-          'bg-primary text-primary-foreground shadow hover:bg-primary/90',
-          'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-        ].join(' ')}
+        className={buttonClass({ size: 'md' })}
       >
         <Download size={14} aria-hidden="true" />
         {t('download')}

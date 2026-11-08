@@ -11,25 +11,12 @@ import {
   type MonitoringEventsResponse,
   type MonitoringEventTypeFilter,
 } from '@/lib/actions/monitoring';
-import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { Badge } from '@/components/common/Badge';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
-
-export function eventTone(type: string): BadgeTone {
-  switch (type) {
-    case 'ERROR':
-      return 'pink';
-    case 'TIMEOUT':
-    case 'SLOW_REQUEST':
-      return 'amber';
-    case 'SUCCESS':
-      return 'teal';
-    default:
-      return 'neutral';
-  }
-}
+import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
 
 export function EventLog({
   data: initialData,
@@ -47,21 +34,10 @@ export function EventLog({
   const [data, setData] = useState<MonitoringEventsResponse>(initialData);
   const [isPending, startTransition] = useTransition();
 
-  const EVENT_LABELS: Record<string, string> = {
-    ERROR: t('events.types.ERROR'),
-    TIMEOUT: t('events.types.TIMEOUT'),
-    SLOW_REQUEST: t('events.types.SLOW_REQUEST'),
-    SUCCESS: t('events.types.SUCCESS'),
-  };
+  const EVENT_LABELS = eventTypeLabels((k) => t(`events.${k}`));
 
-  const FILTER_OPTIONS: { value: MonitoringEventTypeFilter; label: string }[] = [
-    { value: 'all', label: t('events.filters.all') },
-    { value: 'success', label: t('events.filters.success') },
-    { value: 'error', label: t('events.filters.error') },
-    { value: 'timeout', label: t('events.filters.timeout') },
-    { value: 'slow', label: t('events.filters.slow') },
-    { value: 'abnormal', label: t('events.filters.abnormal') },
-  ];
+  const FILTER_OPTIONS: { value: MonitoringEventTypeFilter; label: string }[] =
+    EVENT_TYPE_FILTERS.map((f) => ({ value: f, label: t(`events.filters.${f}`) }));
 
   const handleFilterChange = (next: MonitoringEventTypeFilter) => {
     const prev = filter;
@@ -172,17 +148,18 @@ export function EventLog({
                     <span className="font-mono mono-id text-xs">{ev.model_alias}</span>
                   )}
                 </Td>
-                <Td className="text-muted-foreground font-mono mono-id text-xs">
-                  {/* agent/service 토큰 호출은 user_id NULL */}
-                  {ev.user_id ? (
+                <Td className="text-muted-foreground text-xs max-w-40 truncate">
+                  {/* 이메일이 읽기 쉬우니 표시는 이메일, 클릭은 여전히 user_id 복사
+                      (필터 검색은 id 기준). agent/service 토큰 호출은 둘 다 NULL. */}
+                  {ev.user_id || ev.user_email ? (
                     <button
                       type="button"
-                      title={ev.user_id}
-                      onClick={() => copyUserId(ev.user_id!)}
+                      title={ev.user_id ?? ''}
+                      onClick={() => ev.user_id && copyUserId(ev.user_id)}
                       className="hover:underline underline-offset-2 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring rounded-sm"
-                      aria-label={`${ev.user_id} — ${t('events.copyUserId')}`}
+                      aria-label={`${ev.user_email ?? ev.user_id} — ${t('events.copyUserId')}`}
                     >
-                      {ev.user_id.slice(0, 8)}…
+                      {ev.user_email ?? `${ev.user_id!.slice(0, 8)}…`}
                     </button>
                   ) : (
                     <span title={t('events.agentUser')}>—</span>

@@ -20,8 +20,9 @@ import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDateTime } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { ErrorState } from '@/components/common/ErrorState';
+import { Button } from '@/components/common/Button';
 import { BodyRecordContent } from './bodyLogRender';
-import { eventTone } from './EventLog';
+import { eventTone, eventTypeLabels, EVENT_TYPE_FILTERS } from './eventMeta';
 
 // request_body 방언: anthropic/openai chat = messages[], responses API = input.
 // response_body: 비스트림은 JSON, 스트림은 {sse_text, truncated?} (SSE 프레임 원문).
@@ -53,14 +54,7 @@ function BodyLogDialog({
 
 // ── 페이지 본체 ───────────────────────────────────────────────────────────────
 
-const TYPE_FILTERS: MonitoringEventTypeFilter[] = [
-  'all',
-  'error',
-  'timeout',
-  'slow',
-  'abnormal',
-  'success',
-];
+const TYPE_FILTERS = EVENT_TYPE_FILTERS;
 
 export function BodyLogsViewer({
   initialRequestId,
@@ -172,14 +166,7 @@ export function BodyLogsViewer({
   const isCollecting = (ev: MonitoringEvent) =>
     Date.now() - new Date(ev.timestamp).getTime() < COLLECTING_WINDOW_MS;
 
-  // EventLog 의 EVENT_LABELS 와 동일 — 알려진 타입은 번역 라벨, 모르는
-  // 타입은 원문으로 폴백(missing-key 방지).
-  const TYPE_LABELS: Record<string, string> = {
-    ERROR: tev('types.ERROR'),
-    TIMEOUT: tev('types.TIMEOUT'),
-    SLOW_REQUEST: tev('types.SLOW_REQUEST'),
-    SUCCESS: tev('types.SUCCESS'),
-  };
+  const TYPE_LABELS = eventTypeLabels(tev);
 
   if (toggledOff) {
     return (
@@ -208,14 +195,10 @@ export function BodyLogsViewer({
             placeholder={t('searchPlaceholder')}
             className="flex-1 rounded-md border border-border bg-background px-3 py-2 font-mono text-sm focus:outline-none focus-visible:ring-2 focus-visible:ring-primary"
           />
-          <button
-            type="submit"
-            disabled={loading || !query.trim()}
-            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
-          >
+          <Button type="submit" disabled={loading || !query.trim()}>
             <Search size={14} aria-hidden="true" />
             {t('searchButton')}
-          </button>
+          </Button>
         </form>
         <p className="mt-2 text-xs text-muted-foreground">{t('searchHint')}</p>
 

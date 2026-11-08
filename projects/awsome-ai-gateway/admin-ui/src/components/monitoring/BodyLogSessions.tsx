@@ -22,6 +22,7 @@ import { fmtDateTime, fmtTokensCompact, fmtUsd } from '@/lib/utils/format';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { SkeletonTable } from '@/components/common/SkeletonTable';
 import { ErrorState } from '@/components/common/ErrorState';
+import { Button } from '@/components/common/Button';
 import { BodyRecordContent, statusTone } from './bodyLogRender';
 
 // 한 호출을 펼치면 그 호출만 단건 조회한다 — 클릭 한 번으로 50건 열람이 감사되는
@@ -772,13 +773,9 @@ export function BodyLogSessions({
           />
           {t('filterErrorsOnly')}
         </label>
-        <button
-          type="submit"
-          disabled={loading}
-          className="rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-50"
-        >
+        <Button type="submit" size="sm" disabled={loading}>
           {t('applyFilters')}
-        </button>
+        </Button>
       </form>
 
       {loadFailed ? (
@@ -801,21 +798,21 @@ export function BodyLogSessions({
         </p>
       ) : (
         <>
-          {truncated && (
-            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
-              {t('sessionsTruncated')}
-            </p>
-          )}
-          {callsTruncated && (
-            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
-              {t('sessionsCallsTruncated')}
-            </p>
-          )}
-          {userTruncated && (
-            <p className="mb-2 text-xs text-amber-600 dark:text-amber-400">
-              {t('sessionsUserTruncated')}
-            </p>
-          )}
+          {/* 경고 표기는 뷰어와 같은 보더 박스 — plain 텍스트 나열은 무시되기 쉽다. */}
+          {[
+            truncated && t('sessionsTruncated'),
+            callsTruncated && t('sessionsCallsTruncated'),
+            userTruncated && t('sessionsUserTruncated'),
+          ]
+            .filter(Boolean)
+            .map((msg) => (
+              <p
+                key={msg as string}
+                className="mb-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400"
+              >
+                {msg}
+              </p>
+            ))}
           <Table>
             <THead>
               <Tr>
