@@ -8,7 +8,11 @@
 # PolicyHelper 에 policy-helper·_internal/·baseline.json, root:wheel → ④ 설치본을 일반 사용자로 세 번 실행해
 # 시간을 재고 managedSettings 를 확인(실패하거나 마지막 실행이 5초를 넘으면 여기서 멈춤 — 연결 전이라
 # Claude Code 는 그대로) → ⑤ managed-settings.json 에 policyHelper 블록(path·timeoutMs 10000·
-# refreshIntervalMs 300000) 추가. 다음 Claude Code 실행부터 적용.
+# refreshIntervalMs 300000) + disableSideloadFlags: true 추가. 다음 Claude Code 실행부터 적용.
+# disableSideloadFlags 를 파일에도 두는 이유: Claude Desktop 은 헬퍼 출력을 읽지 못하고 파일·MDM 의 이 키만 보고
+# Cowork 세션에 --plugin-dir 를 넘길지 정한다. 파일에 없으면 계속 넘기고, 헬퍼 출력의 true 때문에 Claude Code 가
+# 그 옵션을 거부해 Cowork 가 "Claude Code crashed" 로 멈춘다(2026-11-08 실측). Claude Code 자신은 헬퍼 출력만 쓰므로
+# 파일의 이 줄은 무시한다.
 # 이미 연결된 상태에서 다시 설치하려면 먼저 되돌린다: sudo bash rollback-mac.sh ~/ph-backup-<시각>
 #
 # Install the onedir policy-helper into an admin-only folder and wire Claude Code to it.
@@ -99,11 +103,14 @@ if os.path.isfile(path):
     if not isinstance(doc, dict):
         sys.exit(f"{path}: top level is not a JSON object")
 doc["policyHelper"] = {"path": exe, "timeoutMs": timeout_ms, "refreshIntervalMs": refresh_ms}
+# For Claude Desktop only: it cannot read helper output, and decides from this file whether
+# to pass --plugin-dir to Cowork sessions. Claude Code ignores the file once the helper answers.
+doc["disableSideloadFlags"] = True
 tmp = path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(doc, f, indent=2, ensure_ascii=False); f.write("\n")
 os.replace(tmp, path)
-print(json.dumps(doc["policyHelper"], indent=2))
+print(json.dumps(doc, indent=2))
 PY
 chown root:wheel "$CC/managed-settings.json"; chmod 644 "$CC/managed-settings.json"
 python3 -c 'import json,sys; json.load(open(sys.argv[1]))' "$CC/managed-settings.json"
