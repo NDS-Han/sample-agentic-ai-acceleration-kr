@@ -92,7 +92,8 @@ ls -la "$HOME/.local/bin/api-key-helper" 2>&1
 
 say "related environment variables in this shell (names only, except URLs)"
 env | grep -E '^(GATEWAY_CLI_|OIDC_|ADMIN_API_URL|ANTHROPIC_)' \
-  | sed -E 's/^(ANTHROPIC_BASE_URL|ADMIN_API_URL|GATEWAY_CLI_GATEWAY_URL|OIDC_ISSUER_URL)=(.*)$/\1=\2/; t; s/=.*/=<set>/' \
+  | sed -E -e 's/^(ANTHROPIC_BASE_URL|ADMIN_API_URL|GATEWAY_CLI_GATEWAY_URL|OIDC_ISSUER_URL)=(.*)$/\1=\2/' \
+           -e t -e 's/=.*/=<set>/' \
   || echo "(none)"
 
 say "build tools — build.sh needs Python 3.11+ (PYTHON=... to choose)"
