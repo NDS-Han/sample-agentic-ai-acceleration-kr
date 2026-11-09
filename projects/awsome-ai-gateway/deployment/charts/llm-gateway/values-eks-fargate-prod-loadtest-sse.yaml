@@ -1,0 +1,39 @@
+# Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+
+# values-eks-fargate-prod-loadtest-sse.yaml
+# ─────────────────────────────────────────────────────────────────────
+# Bedrock-native SSE 동시성 부하테스트 전용 OVERRIDE values.
+# (VK 발급 부하테스트는 values-eks-fargate-prod-loadtest.yaml — 별개)
+#
+# 목적: claude-code → Bedrock invoke-with-response-stream 경로의
+#   - executor 스레드 포화 지점 (128/proc)
+#   - CPU-HPA 사각지대 실증 (블로킹 스레드 = CPU 안 오름)
+#   - DB/Redis 핫패스·HPA 스케일동작 관측
+#
+# 핵심: boto3 클라이언트를 실 AWS 가 아닌 mock-bedrock 으로 향하게 해
+# **비용 $0** 로 실제 바이너리 eventstream 경로를 재현한다.
+#
+# 사용법 (prod values 위에 오버레이):
+#   helm upgrade llm-gateway deployment/charts/llm-gateway \
+#     -n default \
+#     -f deployment/charts/llm-gateway/values-eks-fargate-prod.yaml \
+#     -f deployment/charts/llm-gateway/values-eks-fargate-prod-loadtest-sse.yaml
+#
+# 전제:
+#   1) kubectl apply -f loadtest/k8s/mock-bedrock.yaml (이미지는 ECR 빌드)
+#   2) 시나리오별 모델 별칭 시드 — admin-api 에서 provider_model_id 가
+#      mock-normal / mock-think-120 / mock-hold-300 / mock-error / mock-429
+#      인 BEDROCK 별칭 생성 (mock 이 URL 의 model_id 로 시나리오를 고른다)
+#   3) 부하 클라이언트용 VK 사전 발급 (service_keys 활성 env 필요)
+#
+# ⚠ 이 env 를 켠 동안 해당 배포의 **모든** Bedrock 호출이 mock 으로 간다
+#   (in-account + cross-account 양쪽 — env 는 프로세스 전역). 실제 추론이
+#   필요한 사용자와 같은 배포에서 켜면 안 된다.
+# 롤백: 오버레이 없이 helm upgrade 재실행.
+# ─────────────────────────────────────────────────────────────────────
+
+gatewayProxy:
+  env:
+    # botocore 네이티브 엔드포인트 오버라이드 (≥1.28). 서명은 그대로 수행되고
+    # mock 이 무시한다 — TLS 만 빠진다 (측정 오차는 미미).
+    AWS_ENDPOINT_URL_BEDROCK_RUNTIME: "http://mock-bedrock.loadtest-mock.svc.cluster.local:8080"
