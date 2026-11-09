@@ -109,6 +109,17 @@ def desired_values(cfg: GatewayConfig) -> dict:
         # 등)이 남아 Cognito callback allowlist 와 어긋나 SSO 가 깨진다
         v.setdefault("adminUi", {})["nextauthUrl"] = f"https://admin.{cfg.domain.name}"
 
+    # ── route53-acm — 정식 도메인: 443 리스너 + redirect 는 render 가 선언하고,
+    #    certificate-arn 은 apply 가 ACM 인증서를 보장한 뒤 --set 으로 주입한다.
+    if cfg.domain.mode == "route53-acm" and cfg.domain.name:
+        for key in ("gateway", "adminUi", "adminApi"):
+            v.setdefault("ingress", {}).setdefault(key, {}).setdefault(
+                "annotations", {}).update({
+                    "alb.ingress.kubernetes.io/listen-ports":
+                        '[{"HTTP":80},{"HTTPS":443}]',
+                    "alb.ingress.kubernetes.io/ssl-redirect": "443",
+                })
+
     # ── selfsigned-temp — 도메인 없이 admin-ui 만 임시 HTTPS (Cognito SSO 콜백이
     #    https 를 요구하기 때문). 인증서는 apply 가 self-signed 로 만들어 ACM 에
     #    올리고 certificate-arn 을 --set 으로 주입한다 (apply 시점에만 ALB 주소를
@@ -286,7 +297,30 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append(
             f"bedrock_allowed_model_arns = "
             f"{json.dumps(inf.bedrock_allowed_model_arns, indent=2)}")
+    if cfg.domain.name:
+        # domain 도입 시 Cognito 콜백·로그아웃을 도메인으로 — env tfvars 의 기존
+        # 수동 목록과 합집합(-var-file 은 리스트를 통째로 교체하므로 병합 필요)
+        for var, derived in (
+            ("cognito_callback_urls",
+             [f"https://admin.{cfg.domain.name}/api/auth/callback"]),
+            ("cognito_logout_urls",
+             [f"https://admin.{cfg.domain.name}/"]),
+        ):
+            merged = list(dict.fromkeys(
+                [*_tfvars_list(env_dir, var), *derived]))
+            lines.append(f"{var} = {json.dumps(merged, indent=2)}")
     return "\n".join(lines) + "\n"
+
+
+def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
+    """env terraform.tfvars 에 선언된 리스트 변수의 문자열 원소 — gen 오버레이가
+    리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도."""
+    import re
+    tf = env_dir / "terraform.tfvars" if env_dir else None
+    if not tf or not tf.exists():
+        return []
+    m = re.search(rf"{name}\s*=\s*\[(.*?)\]", tf.read_text(), re.S)
+    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
 
 
 def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> dict:
