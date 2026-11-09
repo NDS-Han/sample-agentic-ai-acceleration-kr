@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -299,8 +300,11 @@ class OIDCService:
         if not raw:
             return []
         items = raw if isinstance(raw, list) else [raw]
+        # custom attribute 는 단일 문자열 — ADFS 는 그룹을 복수 claim 값으로
+        # 보내고 Cognito 가 저장 시 하나로 이어 붙인다. 이어붙이는 구분자가
+        # 구현별로 ';'/',' 로 달라 둘 다 푼다 (우리 그룹명 규약엔 둘 다 불포함).
         return [g.strip() for x in items
-                for g in str(x).split(";") if g.strip()]
+                for g in re.split(r"[;,]", str(x)) if g.strip()]
 
     @staticmethod
     def _parse_group(group_name: str) -> tuple[str | None, str] | None:

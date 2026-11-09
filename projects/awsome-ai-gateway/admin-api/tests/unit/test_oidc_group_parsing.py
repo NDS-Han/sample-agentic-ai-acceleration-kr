@@ -407,6 +407,8 @@ async def test_first_login_race_reraises_when_winner_absent():
         ("SSIR_NDS_Users", ["SSIR_NDS_Users"]),
         ("SSIR_NDS_Admin;SSIR_NDS_Users",
          ["SSIR_NDS_Admin", "SSIR_NDS_Users"]),
+        ("SSIR_NDS_Admin,SSIR_NDS_Users",  # Cognito 콤마 join 형태
+         ["SSIR_NDS_Admin", "SSIR_NDS_Users"]),
         ("SSIR_NDS_Admin ; SSIR_NDS_Users;",  # 공백·후행 구분자
          ["SSIR_NDS_Admin", "SSIR_NDS_Users"]),
         (["Claude_NDS_Developers", "Claude_NDS_Users"],  # 배열 클레임은 그대로
