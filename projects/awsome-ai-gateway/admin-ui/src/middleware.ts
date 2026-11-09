@@ -9,7 +9,7 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { parseJWT, roleFromCookie, ADMIN_ROLE_COOKIE } from '@/lib/auth';
-import { checkPagePermission, isSessionExpired } from '@/lib/auth';
+import { checkPagePermission, hasPagePermissionEntry, isSessionExpired } from '@/lib/auth';
 
 export const config = {
   // icon.svg 는 브라우저 탭 favicon — 비로그인 상태(로그인 페이지)에서도 fetch 되므로
@@ -223,6 +223,14 @@ export async function middleware(request: NextRequest): Promise<NextResponse> {
     const hasPermission = checkPagePermission(pathname, role);
 
     if (!hasPermission) {
+      // 미등록 경로(오타·제거된 페이지)는 권한 문제가 아니다 — '팀 리더·개발자
+      // 전용' 403 으로 보내면 경로가 틀렸다는 걸 알 수 없다. fail-closed 는
+      // 유지하면서 not-found 를 보여준다(URL 은 원래대로 남겨 오타가 보이게).
+      if (!hasPagePermissionEntry(pathname)) {
+        const nf = NextResponse.rewrite(new URL('/__not-found', request.url));
+        applySecurityHeaders(nf);
+        return nf;
+      }
       const redirectResponse = redirectSameOrigin(request, '/403', 307);
       applySecurityHeaders(redirectResponse);
       return redirectResponse;
