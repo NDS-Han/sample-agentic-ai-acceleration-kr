@@ -53,6 +53,11 @@ async def issue_service_key(
         )
 
     settings = get_settings()
+    if not settings.SERVICE_KEYS_ENABLED:
+        raise ForbiddenError(
+            "service account keys are disabled for this deployment "
+            "(SERVICE_KEYS_ENABLED)"
+        )
     max_days = settings.APP_KEY_MAX_TTL_DAYS
     ttl_days = body.ttl_days if body.ttl_days is not None else max_days
     if not 1 <= ttl_days <= max_days:

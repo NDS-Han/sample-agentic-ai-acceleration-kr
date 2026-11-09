@@ -91,6 +91,8 @@ class ServiceAccountItem(BaseModel):
 class ServiceAccountListResponse(BaseModel):
     items: list[ServiceAccountItem]
     max_ttl_days: int
+    # features.service_keys=false 배포면 false — UI 가 발급 버튼을 숨긴다
+    service_keys_enabled: bool = True
 
 
 class ServiceAccountCreateRequest(BaseModel):

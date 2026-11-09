@@ -24,9 +24,10 @@ import type { ServiceAccountItem } from '@/types/entities';
 interface Props {
   accounts: ServiceAccountItem[];
   maxTtlDays: number;
+  serviceKeysEnabled?: boolean;
 }
 
-export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
+export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled = true }: Props) {
   const t = useTranslations('serviceAccounts');
   const tz = useReportingTz();
   const { toast } = useToast();
@@ -152,13 +153,15 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
           <h2 className="text-lg font-semibold mb-1">{t('saTitle')}</h2>
           <p className="text-xs text-muted-foreground">{t('saDescription')}</p>
         </div>
-        <button
-          onClick={openIssueModal}
-          disabled={busy !== null}
-          className="shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
-        >
-          {t('saIssueButton')}
-        </button>
+        {serviceKeysEnabled && (
+          <button
+            onClick={openIssueModal}
+            disabled={busy !== null}
+            className="shrink-0 rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            {t('saIssueButton')}
+          </button>
+        )}
       </div>
 
       {accounts.length > 0 && (

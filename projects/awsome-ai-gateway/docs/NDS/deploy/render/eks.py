@@ -234,6 +234,13 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if cfg.features.dev_login:
         v.setdefault("adminApi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
 
+    # features.service_keys=false — 비기본값일 때만 내보내 env overlay 의 다른
+    # 용도와 충돌하지 않는다. admin-api 가 표지·발급을 403 거부하고 UI 버튼은
+    # GET /admin/service-accounts 응답 필드로 숨긴다.
+    if not cfg.features.service_keys:
+        v.setdefault("adminApi", {}).setdefault("env", {})[
+            "SERVICE_KEYS_ENABLED"] = "false"
+
     # VK TTL — adminApi.env:OIDC_VK_TTL_HOURS 로 넣으면 oidcEnv 뒤에 같은 이름의
     # env 가 2개 생기는 함정이 있다(ops 8-Z) — 정식 키 adminApi.oidc.vkTtlHours.
     if cfg.oidc.vk_ttl_hours:

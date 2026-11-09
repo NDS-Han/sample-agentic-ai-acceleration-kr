@@ -28,6 +28,7 @@ export default async function ServiceAccountsPage() {
         <ServiceAccountsPanel
           accounts={saResult.value.items}
           maxTtlDays={saResult.value.max_ttl_days}
+          serviceKeysEnabled={saResult.value.service_keys_enabled !== false}
         />
       ) : (
         <div className="glass rounded-apple p-8 text-center text-sm text-muted-foreground">

@@ -190,6 +190,11 @@ class Settings(BaseSettings):
     SERVICE_KEY_REPAIR_CRON: str = "*/15 * * * *"
     SERVICE_KEY_REPAIR_ENABLED: bool = True
 
+    # 배포 플래그(gateway.yaml features.service_keys) — false 면 서비스 계정
+    # 표지·장기키 발급 엔드포인트를 전부 403 거부한다. 기존 ACTIVE 키는
+    # 폐기/만료 전까지 유효하므로 repair 잡은 계속 돌린다.
+    SERVICE_KEYS_ENABLED: bool = True
+
     # IDP 별 claim 이름 차이 흡수 (Cognito 면 'cognito:groups')
     OIDC_USER_ID_CLAIM: str = "sub"
     OIDC_EMAIL_CLAIM: str = "email"

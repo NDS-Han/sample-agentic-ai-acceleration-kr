@@ -220,6 +220,12 @@ variable "oidc_vk_ttl_hours" {
   default = 1
 }
 
+# features.service_keys — false 면 서비스 계정 장기키 발급 엔드포인트를 잠근다
+variable "service_keys_enabled" {
+  type    = bool
+  default = true
+}
+
 # ADMIN 부트스트랩 — admin-api/admin-ui 양쪽에 주입된다.
 # admin_groups 비우면 cognito_groups(기본 ["ClaudeAdmin"])가 ADMIN 이 된다.
 variable "admin_groups" {

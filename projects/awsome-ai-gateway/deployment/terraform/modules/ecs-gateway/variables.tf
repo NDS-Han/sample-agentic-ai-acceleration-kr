@@ -303,6 +303,12 @@ variable "oidc_vk_ttl_hours" {
   default = 1
 }
 
+variable "service_keys_enabled" {
+  description = "서비스 계정 장기키 발급 허용 — false 면 admin-api 가 표지·발급을 403 거부"
+  type        = bool
+  default     = true
+}
+
 variable "dev_login_enabled" {
   description = "OIDC 없을 때 admin-api/admin-ui 의 dev login 허용 — oidc.enabled 면 반드시 false"
   type        = bool

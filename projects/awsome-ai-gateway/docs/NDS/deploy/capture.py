@@ -120,6 +120,7 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
         "dev_login": (env.get("DEV_LOGIN_ENABLED") == "true"
                       or api_env.get("DEV_LOGIN_ENABLED") == "true"
                       or str(ui_env.get("DEV_LOGIN_ENABLED")) == "true"),
+        "service_keys": api_env.get("SERVICE_KEYS_ENABLED") != "false",
     }
 
     # oidc — admin-ui environment(직접 주입된 것) + .env
@@ -414,6 +415,7 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             # 캡처 문서 자체가 스키마 위반이 된다.
             "observability": False,
             "dev_login": sizing_env.get("DEV_LOGIN_ENABLED") == "true",
+            "service_keys": sizing_env.get("SERVICE_KEYS_ENABLED") != "false",
         },
         "images": {"tag": image_tag},
         "clients": {"models_profile": "global"},
@@ -678,6 +680,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "web_search": str(genv.get("WEB_SEARCH_ENABLED")) == "true",
         "observability": otel_mode not in ("", "disabled", "none"),
         "dev_login": False,
+        "service_keys": str(aenv.get("SERVICE_KEYS_ENABLED")) != "false",
     }
     # body_logging 은 eks managed overlay 가 "켜기"만 소유하므로 false 를
     # 박지 않는다 — 박으면 validate 마다 수동 비활성화 경고가 난다.

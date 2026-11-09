@@ -236,9 +236,27 @@ async def list_service_accounts(
             )
         )
 
+    settings = get_settings()
     return ServiceAccountListResponse(
-        items=items, max_ttl_days=get_settings().APP_KEY_MAX_TTL_DAYS
+        items=items,
+        max_ttl_days=settings.APP_KEY_MAX_TTL_DAYS,
+        service_keys_enabled=settings.SERVICE_KEYS_ENABLED,
     )
+
+
+def _require_service_keys_enabled() -> None:
+    """features.service_keys=false 배포는 표지·발급을 전부 403 거부.
+
+    발급이 막힌 상태에서 표지만 허용하면 사람 계정이 service_account 로 잠기고
+    (SSO·단기키 차단) 키는 못 받는 사고만 남는다. 해지(DELETE)는 복구 경로라
+    열어둔다. GET 목록은 열려 있고 응답의 service_keys_enabled 로 UI 가 버튼을
+    숨긴다.
+    """
+    if not get_settings().SERVICE_KEYS_ENABLED:
+        raise ForbiddenError(
+            "service account keys are disabled for this deployment "
+            "(SERVICE_KEYS_ENABLED)"
+        )
 
 
 def _forbid_service_token_admin(admin: CurrentUser) -> None:
@@ -333,6 +351,7 @@ async def mark_service_account(
     그 계정에 '서비스 계정' 표지만 단다. ADMIN 과 비활성 계정은 거부.
     """
     _forbid_service_token_admin(admin)
+    _require_service_keys_enabled()
     # FOR UPDATE — issue_key 도 같은 행을 잡고 플래그를 확인하므로, 잠금으로
     # 표지↔발급이 직렬화된다: 표지가 먼저면 발급은 flag=True 를 보고 거부되고,
     # 발급이 먼저면 표지의 폐기 수집이 그 신규 키를 본다.
@@ -367,6 +386,7 @@ async def mark_and_issue_service_key(
     from app.services.key_service import KeyService, assert_service_key_ready
 
     _forbid_service_token_admin(admin)
+    _require_service_keys_enabled()
 
     settings = get_settings()
     max_days = settings.APP_KEY_MAX_TTL_DAYS

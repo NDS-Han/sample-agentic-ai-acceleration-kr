@@ -366,3 +366,9 @@ def test_empty_allowed_roles_warns_fail_closed():
     cfg = _cfg()
     assert ecs_render.desired_tfvars(cfg)["allowed_iam_roles"] == []
     assert any("allowed_roles" in n for n in ecs_render.feature_notes(cfg))
+
+
+def test_service_keys_tfvars():
+    assert ecs_render.desired_tfvars(_cfg())["service_keys_enabled"] is True
+    assert ecs_render.desired_tfvars(
+        _cfg(features={"service_keys": False}))["service_keys_enabled"] is False

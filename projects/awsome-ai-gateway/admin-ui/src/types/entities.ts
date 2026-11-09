@@ -68,6 +68,8 @@ export interface ServiceAccountItem {
 export interface ServiceAccountListResponse {
   items: ServiceAccountItem[];
   max_ttl_days: number;
+  /** features.service_keys=false 배포면 false — 발급 버튼을 숨긴다 */
+  service_keys_enabled?: boolean;
 }
 
 export interface IssueServiceKeyResponse {
