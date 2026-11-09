@@ -292,7 +292,7 @@ export function TeamAllocationView({
               type="button"
               onClick={() => runCapSave(false)}
               isLoading={isPending}
-              className="px-3 py-1.5 text-xs"
+              size="sm"
             >
               {t('defaultCapSave')}
             </SpinnerButton>
@@ -301,7 +301,7 @@ export function TeamAllocationView({
                 type="button"
                 onClick={() => runEqualSplit(false)}
                 isLoading={isPending}
-                className="px-3 py-1.5 text-xs bg-secondary text-secondary-foreground hover:bg-secondary/80"
+                size="sm" variant="secondary"
               >
                 {t('equalSplit')}
               </SpinnerButton>

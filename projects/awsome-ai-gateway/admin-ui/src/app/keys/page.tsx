@@ -5,6 +5,7 @@ import { getTranslations } from 'next-intl/server';
 import Link from 'next/link';
 import { KeysListView } from '@/components/keys/KeysListView';
 import { ErrorState } from '@/components/common/ErrorState';
+import { SegmentedLinks } from '@/components/common/Segmented';
 import type { KeyListResponse } from '@/lib/actions/keys';
 import { KeyStatus } from '@/types/enums';
 
@@ -81,27 +82,21 @@ export default async function KeysPage(props: KeysPageProps) {
         )}
       </form>
 
-      <div className="flex flex-wrap items-center gap-2 mt-4">
-        {Object.values(KeyStatus).map((status) => {
-          const isActive = status === currentStatus;
-          const params = new URLSearchParams();
-          params.set('status', status);
-          if (email) params.set('email', email);
-          return (
-            <Link
-              key={status}
-              href={`/keys?${params.toString()}`}
-              aria-current={isActive ? 'page' : undefined}
-              className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-                isActive
-                  ? 'bg-primary text-primary-foreground border-primary'
-                  : 'bg-background text-foreground border-border hover:bg-accent'
-              }`}
-            >
-              {t(`keyStatus.${status}` as const)}
-            </Link>
-          );
-        })}
+      <div className="mt-4">
+        <SegmentedLinks
+          label={t('statusFilterLabel')}
+          items={Object.values(KeyStatus).map((status) => {
+            const params = new URLSearchParams();
+            params.set('status', status);
+            if (email) params.set('email', email);
+            return {
+              value: status,
+              label: t(`keyStatus.${status}` as const),
+              href: `/keys?${params.toString()}`,
+              current: status === currentStatus,
+            };
+          })}
+        />
       </div>
 
       <div className="mt-4">

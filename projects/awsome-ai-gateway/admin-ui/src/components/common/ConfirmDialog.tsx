@@ -6,6 +6,7 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import { useTranslations } from 'next-intl';
 import { X } from 'lucide-react';
+import { Button } from '@/components/common/Button';
 
 interface ConfirmDialogProps {
   isOpen: boolean;
@@ -68,23 +69,12 @@ export function ConfirmDialog({
 
           {/* Actions */}
           <div className="mt-6 flex items-center justify-end gap-3">
-            <button
-              onClick={onClose}
-              className="inline-flex items-center justify-center rounded-md border border-border bg-background px-4 py-2 text-sm font-medium text-foreground shadow-sm hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-            >
+            <Button variant="ghost" onClick={onClose}>
               {t('cancel')}
-            </button>
-            <button
-              onClick={handleConfirm}
-              className={[
-                'inline-flex items-center justify-center rounded-md px-4 py-2 text-sm font-medium shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring',
-                isDestructive
-                  ? 'bg-destructive text-destructive-foreground hover:bg-destructive/90'
-                  : 'bg-primary text-primary-foreground hover:bg-primary/90',
-              ].join(' ')}
-            >
+            </Button>
+            <Button variant={isDestructive ? 'danger' : 'primary'} onClick={handleConfirm}>
               {resolvedConfirmLabel}
-            </button>
+            </Button>
           </div>
         </Dialog.Content>
       </Dialog.Portal>

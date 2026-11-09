@@ -5,7 +5,7 @@
 import type { ButtonHTMLAttributes } from 'react';
 
 export type ButtonSize = 'sm' | 'md';
-export type ButtonVariant = 'primary' | 'ghost' | 'link';
+export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'link' | 'danger' | 'dangerOutline';
 
 const SIZES: Record<ButtonSize, string> = {
   sm: 'px-3 py-1.5 text-xs',
@@ -15,9 +15,17 @@ const SIZES: Record<ButtonSize, string> = {
 const VARIANTS: Record<ButtonVariant, string> = {
   primary:
     'rounded-md bg-primary font-medium text-primary-foreground shadow hover:bg-primary/90 disabled:opacity-50',
+  secondary:
+    'rounded-md bg-secondary font-medium text-secondary-foreground hover:bg-secondary/80 disabled:opacity-50',
   ghost:
     'rounded-md border border-border bg-background font-medium hover:bg-muted disabled:opacity-50',
   link: 'text-primary hover:underline underline-offset-2 disabled:opacity-50',
+  // 파괴적 확인(다이얼로그의 삭제/폐기 확정) — solid.
+  danger:
+    'rounded-md bg-destructive font-medium text-destructive-foreground shadow hover:bg-destructive/90 disabled:opacity-50',
+  // 파괴적 액션 진입(행 버튼) — 농도 3종(/30+/10, /40+/5+/15, /50+solid hover)이 갈렸던 것을 한 스펙으로.
+  dangerOutline:
+    'rounded-md border border-destructive/40 bg-background font-medium text-destructive hover:bg-destructive/10 disabled:opacity-50',
 };
 
 /** <button> 못 쓰는 <a> 다운로드 버튼 등은 클래스만 가져다 쓴다. */

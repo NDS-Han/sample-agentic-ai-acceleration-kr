@@ -20,7 +20,8 @@ import { ChevronRight, Check, Copy } from 'lucide-react';
 import type { ModelListItem } from '@/types/entities';
 import { activateModelAction } from '@/lib/actions/models';
 import { useToast } from '@/components/common/ToastProvider';
-import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { Badge } from '@/components/common/Badge';
+import { Button } from '@/components/common/Button';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
 import { fmtPricePerM } from '@/lib/utils/pricing';
 import { fmtDate, fmtTokensCompact } from '@/lib/utils/format';
@@ -33,14 +34,23 @@ interface ModelsTableProps {
   models: ModelListItem[];
 }
 
+/** 프로바이더는 상태가 아니라 속성 — 상태 팔레트(amber/pink)를 빌리지 않고
+    전부 neutral. enum 원문(BEDROCK_RUNTIME_OPENAI) 대신 사람이 읽는 라벨을 표시. */
+const PROVIDER_LABELS: Record<string, string> = {
+  bedrock: 'Bedrock',
+  'on-prem': 'On-prem',
+  bedrock_mantle: 'Bedrock Mantle',          // Cowork → Mantle Opus (Tokyo)
+  bedrock_mantle_openai: 'Mantle · OpenAI',  // Codex → Mantle GPT-5.5 (Ohio)
+  bedrock_runtime_openai: 'Bedrock · OpenAI',
+};
+
 function ProviderBadge({ provider }: { provider: string }) {
-  const toneMap: Record<string, BadgeTone> = {
-    bedrock: 'sky',
-    'on-prem': 'pink',
-    bedrock_mantle: 'amber',       // Cowork → Mantle Opus (Tokyo)
-    bedrock_mantle_openai: 'teal', // Codex → Mantle GPT-5.5 (Ohio)
-  };
-  return <Badge tone={toneMap[provider.toLowerCase()] ?? 'neutral'}>{provider}</Badge>;
+  const label = PROVIDER_LABELS[provider.toLowerCase()] ?? provider;
+  return (
+    <span title={provider}>
+      <Badge tone="neutral">{label}</Badge>
+    </span>
+  );
 }
 
 function StatusBadge({ isActive, activeLabel, inactiveLabel }: { isActive: boolean; activeLabel: string; inactiveLabel: string }) {
@@ -192,7 +202,6 @@ export function ModelsTable({ models }: ModelsTableProps) {
                           <div className="min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="truncate font-medium">{displayName}</span>
-                              <ProviderBadge provider={model.provider} />
                               {model.account_role_arn && (
                                 // 모델 레벨 라우팅(0049) — 이 모델의 호출이 다른
                                 // 계정으로 나간다는 것을 한눈에. ARN 전체는 길어
@@ -218,8 +227,11 @@ export function ModelsTable({ models }: ModelsTableProps) {
                             {/* 라우팅 키(alias)와 실제 호출되는 model_id 는 역할이 다른
                                 식별자라 같은 줄에 두면 구분이 안 된다 — 두 줄로 분리.
                                 완전히 같을 때는 중복 표시하지 않는다. */}
-                            <div className="mt-0.5 font-mono mono-id text-xs text-foreground/80">
-                              {model.alias}
+                            <div className="mt-0.5 flex items-center gap-1.5">
+                              <span className="font-mono mono-id text-xs text-foreground/80">
+                                {model.alias}
+                              </span>
+                              <ProviderBadge provider={model.provider} />
                             </div>
                             {model.model_id !== model.alias && (
                               <div
@@ -252,14 +264,7 @@ export function ModelsTable({ models }: ModelsTableProps) {
                           >
                             {t('edit')}
                           </button>
-                          {model.is_active ? (
-                            <button
-                              onClick={() => handleDeactivate(model)}
-                              className="inline-flex items-center justify-center rounded-md border border-destructive/30 bg-background px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/10 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                            >
-                              {t('deactivate')}
-                            </button>
-                          ) : (
+                          {!model.is_active && (
                             // 비활성 모델의 활성화는 1클릭 유지 — 패널을 열어야
                             // 하면 운영 동선이 한 단계 길어진다.
                             <button
@@ -270,15 +275,9 @@ export function ModelsTable({ models }: ModelsTableProps) {
                               {t('activate')}
                             </button>
                           )}
-                          {/* 삭제는 비활성화와 다른 동작 — 카탈로그에서 완전히
-                              지우는 deprecated 정리용. 다이얼로그에서 영향도 +
-                              alias 재입력을 거친다. */}
-                          <button
-                            onClick={() => handleDelete(model)}
-                            className="inline-flex items-center justify-center rounded-md border border-destructive/40 bg-destructive/5 px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive/15 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                          >
-                            {t('deleteButton')}
-                          </button>
+                          {/* 비활성화·삭제는 확장 행으로 이동 — 행이 1440px 에서
+                              잘려 파괴적 액션이 가장 먼저 가려지는 문제 방지.
+                              둘 다 어차피 확인 다이얼로그를 거친다. */}
                         </div>
                       </Td>
                     </Tr>
@@ -400,6 +399,19 @@ export function ModelsTable({ models }: ModelsTableProps) {
                               {model.description}
                             </p>
                           )}
+                          <div className="mt-3 flex items-center justify-end gap-2 border-t border-border pt-3">
+                            {model.is_active ? (
+                              <Button variant="dangerOutline" size="sm" onClick={() => handleDeactivate(model)}>
+                                {t('deactivate')}
+                              </Button>
+                            ) : null}
+                            {/* 삭제는 비활성화와 다른 동작 — 카탈로그에서 완전히
+                                지우는 deprecated 정리용. 다이얼로그에서 영향도 +
+                                alias 재입력을 거친다. */}
+                            <Button variant="dangerOutline" size="sm" onClick={() => handleDelete(model)}>
+                              {t('deleteButton')}
+                            </Button>
+                          </div>
                         </Td>
                       </Tr>
                     )}

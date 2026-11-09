@@ -77,7 +77,7 @@ export function ChangesPanel({ item }: Props) {
           {shape.removed.map((v, i) => (
             <span
               key={`r-${i}`}
-              className="rounded border border-pink-500/40 bg-pink-500/10 px-1.5 py-0.5 font-mono text-pink-600 dark:text-pink-400"
+              className="rounded border border-destructive/40 bg-destructive/10 px-1.5 py-0.5 font-mono text-destructive"
             >
               −{formatValue(v)}
             </span>

@@ -7,7 +7,7 @@
  * 같은 행 구성(타입 뱃지·사용률 게이지·경보 뱃지)을 쓰도록 추출했다.
  */
 
-import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { Badge, RoleBadge as CommonRoleBadge, type BadgeTone } from '@/components/common/Badge';
 import { AlertLevel, BudgetScope } from '@/types/enums';
 import { fmtUsd } from '@/lib/utils/format';
 import { useTranslations } from 'next-intl';
@@ -21,7 +21,7 @@ export function AlertBadge({ level, labels }: { level: AlertLevelValue | string;
   const tones: Record<string, BadgeTone> = {
     [AlertLevel.NORMAL]: 'teal',
     [AlertLevel.WARNING]: 'amber',
-    [AlertLevel.CRITICAL]: 'pink',
+    [AlertLevel.CRITICAL]: 'danger',
   };
   return <Badge tone={tones[level] ?? 'neutral'}>{labels[level] ?? level}</Badge>;
 }
@@ -30,15 +30,10 @@ export function TypeBadge({ type, labels }: { type: BudgetScopeValue | string; l
   return <Badge tone={type === BudgetScope.TEAM ? 'sky' : 'neutral'}>{labels[type] ?? type}</Badge>;
 }
 
-/** 멤버 행의 계정 역할 뱃지 — ADMIN/TEAM_LEADER/DEVELOPER 를 색으로 구분한다. */
+/** 멤버 행의 계정 역할 뱃지 — 톤은 common/Badge 의 ROLE_TONE 단일 정의를 쓴다. */
 export function RoleBadge({ role, labels }: { role: string | null | undefined; labels: Record<string, string> }) {
-  const tones: Record<string, BadgeTone> = {
-    ADMIN: 'pink',
-    TEAM_LEADER: 'sky',
-    DEVELOPER: 'neutral',
-  };
   const key = role ?? 'DEVELOPER';
-  return <Badge tone={tones[key] ?? 'neutral'}>{labels[key] ?? key}</Badge>;
+  return <CommonRoleBadge role={key} label={labels[key] ?? key} />;
 }
 
 export function UsageBar({ pct, level, label }: { pct: number; level: AlertLevelValue | string; label?: string }) {

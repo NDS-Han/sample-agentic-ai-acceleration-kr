@@ -76,7 +76,7 @@ export function DeactivateModelDialog({ isOpen, onClose, model }: DeactivateMode
               <SpinnerButton
                 type="submit"
                 isLoading={isPending}
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                variant="danger"
               >
                 {t('deactivate')}
               </SpinnerButton>

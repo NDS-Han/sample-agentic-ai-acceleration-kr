@@ -90,7 +90,8 @@
     "forbiddenTitle": "Access denied",
     "forbiddenDesc": "This page requires administrator privileges (the ClaudeAdmin group).",
     "forbiddenHint": "If you need access, contact an administrator or sign in with another account.",
-    "backToDashboard": "Back to dashboard"
+    "backToDashboard": "Back to dashboard",
+    "notAuthenticated": "Not authenticated"
   },
   "dashboard": {
     "title": "Dashboard",
@@ -213,7 +214,8 @@
     "noKeysCliLink": "See the integration page for how keys are issued →",
     "saMovedBanner": "Long-lived app/agent keys are managed on the Agents page.",
     "saMovedLink": "Go to Agents",
-    "kindService": "agent"
+    "kindService": "agent",
+    "statusFilterLabel": "Status"
   },
   "budgets": {
     "title": "Budget Management",
@@ -1544,7 +1546,7 @@
       "7d": "7 days",
       "30d": "30 days"
     },
-    "groupAll": "All",
+    "groupAll": "All categories",
     "groups": {
       "keys_tokens": "Keys & tokens",
       "users_org": "Users & org",
@@ -1641,9 +1643,36 @@
       "SET_RATE_LIMIT": "Set rate limit",
       "DELETE_RATE_LIMIT": "Delete rate limit",
       "SET_BODY_LOGGING": "Set body logging",
-      "VIEW_INVOCATION_LOG_BODY": "View invocation body"
+      "VIEW_INVOCATION_LOG_BODY": "View invocation body",
+      "VIEW_BODY_LOG": "View body log"
     },
-    "confirmedBadge": "Confirmed"
+    "confirmedBadge": "Confirmed",
+    "resourceTypes": {
+      "BedrockInvocationLog": "Invocation log",
+      "BudgetConfig": "Budget config",
+      "BudgetUsage": "Budget usage",
+      "CognitoSync": "Cognito sync",
+      "Department": "Department",
+      "DowngradePolicy": "Downgrade policy",
+      "GatewayBodyLog": "Body log",
+      "ModelAlias": "Model",
+      "ModelPricing": "Model pricing",
+      "OrgAllowedClients": "Org app policy",
+      "RateLimitConfig": "Rate limit",
+      "RoutingProfile": "Routing profile",
+      "ServiceToken": "Service token",
+      "SystemSetting": "System setting",
+      "Team": "Team",
+      "TeamAllowedClients": "Team app policy",
+      "TeamAllowedModels": "Team model policy",
+      "User": "User",
+      "UserAllowedClients": "User app policy",
+      "UserAllowedModels": "User model policy",
+      "VirtualKey": "API key"
+    },
+    "unknownUser": "Unknown user",
+    "groupFilterLabel": "Category",
+    "rangeFilterLabel": "Range"
   },
   "windowsInstallHint": "Follow the Windows steps in the install guide above.",
   "emptyDownloads": "No downloadable packages. An administrator must build with <code>gateway-cli/package.sh</code> and mount it into admin-api's <code>CLI_DIST_DIR</code>. Until then, use the manual steps in the install guide below."

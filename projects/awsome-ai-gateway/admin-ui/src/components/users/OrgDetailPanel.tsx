@@ -27,7 +27,7 @@ import { EMPTY_POLICY_SUMMARY, type PolicySummary } from '@/components/common/po
 import { UnsavedApplyBar } from '@/components/common/UnsavedApplyBar';
 import { SpinnerButton } from '@/components/common/SpinnerButton';
 import { useToast } from '@/components/common/ToastProvider';
-import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { RoleBadge } from '@/components/common/Badge';
 import { TeamModelPermissionPanel, type TeamModelPermissionHandle } from '@/components/models/TeamModelPermissionPanel';
 import { ScopeRateLimitPanel, type ScopeRateLimitHandle } from '@/components/users/ScopeRateLimitPanel';
 import { ScopeAppAccessPanel, type ScopeAppAccessHandle } from '@/components/users/ScopeAppAccessPanel';
@@ -43,14 +43,6 @@ interface OrgDetailPanelProps {
   /** 저장 성공 후 트리 재조회 콜백 — 개별설정 점이 stale 해지지 않게 한다. */
   onSaved?: () => void;
 }
-
-// Role labels are now i18n-driven — see t('roleLabel.ADMIN') etc.
-
-const ROLE_TONE: Record<string, BadgeTone> = {
-  ADMIN: 'pink',
-  TEAM_LEADER: 'sky',
-  DEVELOPER: 'teal',
-};
 
 /** 헤더 배지 자리표시 — 비동기 정책 로드 중 "빈 헤더에 늦게 배지가 튀어나오는"
     대신 로딩 중임을 표시한다. 실패 시엔 숨겨야 하므로 failed 조건과 함께 쓴다. */
@@ -545,7 +537,7 @@ function UserPanel({
       <div className="flex items-center gap-2 text-sm mb-2">
         <span className="text-muted-foreground">{t('role')}</span>
         {role ? (
-          <Badge tone={ROLE_TONE[role] ?? 'neutral'}>{t(`roleLabel.${role}` as 'roleLabel.ADMIN' | 'roleLabel.TEAM_LEADER' | 'roleLabel.DEVELOPER')}</Badge>
+          <RoleBadge role={role} label={t(`roleLabel.${role}` as 'roleLabel.ADMIN' | 'roleLabel.TEAM_LEADER' | 'roleLabel.DEVELOPER')} />
         ) : (
           <span className="font-medium">-</span>
         )}
@@ -568,7 +560,7 @@ function UserPanel({
           {applyResults?.map((r) => (
             <span
               key={r.key}
-              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-pink'}`}
+              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-danger'}`}
             >
               {r.status === 'saved' ? tp('saved') : tp('failed')}: {sectionLabel(r.key)}
             </span>
@@ -599,7 +591,7 @@ function UserPanel({
             )}
             {accessDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('apps') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -689,7 +681,7 @@ function UserPanel({
             )}
             {modelsDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('models') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -773,7 +765,7 @@ function UserPanel({
             )}
             {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('ratelimit') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -1114,7 +1106,7 @@ function TeamPanel({
           {applyResults?.map((r) => (
             <span
               key={r.key}
-              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-pink'}`}
+              className={`badge whitespace-nowrap ${r.status === 'saved' ? 'badge-teal' : 'badge-danger'}`}
             >
               {r.status === 'saved' ? tp('saved') : tp('failed')}: {sectionLabel(r.key)}
             </span>
@@ -1199,7 +1191,7 @@ function TeamPanel({
               </button>
               <SpinnerButton
                 type="button"
-                className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+                variant="danger"
                 isLoading={isLeaderPending}
                 onClick={handleConfirmRemoveLeader}
               >
@@ -1226,7 +1218,7 @@ function TeamPanel({
               ))}
             {appDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('apps') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -1265,7 +1257,7 @@ function TeamPanel({
               ))}
             {modelDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('models') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -1310,7 +1302,7 @@ function TeamPanel({
             )}
             {rlDirty && <span className="badge badge-sky whitespace-nowrap">{tp('modified')}</span>}
             {sectionFailed('ratelimit') && (
-              <span className="badge badge-pink whitespace-nowrap">{tp('failed')}</span>
+              <span className="badge badge-danger whitespace-nowrap">{tp('failed')}</span>
             )}
           </>
         }
@@ -1391,7 +1383,7 @@ function TeamPanel({
 
       <SpinnerButton
         type="button"
-        className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+        variant="danger"
         onClick={() => setConfirmOpen(true)}
         disabled={memberCount === 0}
       >
@@ -1421,7 +1413,7 @@ function TeamPanel({
           </button>
           <SpinnerButton
             type="button"
-            className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+            variant="danger"
             isLoading={isPending}
             onClick={handleForceReauth}
           >

@@ -180,9 +180,9 @@ export function isSessionExpired(session: AdminSession, nowMs: number = Date.now
  * Uses prefix matching: `/budgets/123` is covered by the `/budgets` entry.
  * Falls back to `false` (deny) for paths not listed in PAGE_PERMISSIONS.
  */
-export function checkPagePermission(pathname: string, role: UserRole): boolean {
-  // Find the most specific (longest) matching prefix
-  const matchingEntry = Object.entries(PAGE_PERMISSIONS)
+/** 가장 구체적인(가장 긴) 매칭 permission 항목을 찾는다. 없으면 undefined. */
+function pagePermissionEntry(pathname: string): readonly [string, readonly UserRole[]] | undefined {
+  return (Object.entries(PAGE_PERMISSIONS) as [string, readonly UserRole[]][])
     .filter(([prefix]) => {
       if (prefix === '/') {
         // Root matches only the exact path '/' to avoid swallowing everything
@@ -191,7 +191,18 @@ export function checkPagePermission(pathname: string, role: UserRole): boolean {
       return pathname === prefix || pathname.startsWith(`${prefix}/`);
     })
     .sort(([a], [b]) => b.length - a.length)[0];
+}
 
+/**
+ * 경로가 PAGE_PERMISSIONS 에 등재돼 있는지 — middleware 가 '권한 없음'(403)과
+ * '없는 경로'(404)를 구분해 다른 안내를 보여주기 위해 쓴다.
+ */
+export function hasPagePermissionEntry(pathname: string): boolean {
+  return pagePermissionEntry(pathname) !== undefined;
+}
+
+export function checkPagePermission(pathname: string, role: UserRole): boolean {
+  const matchingEntry = pagePermissionEntry(pathname);
   if (!matchingEntry) {
     return false; // No permission entry found — deny by default
   }

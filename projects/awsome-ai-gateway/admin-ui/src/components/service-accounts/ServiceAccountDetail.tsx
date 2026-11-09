@@ -58,7 +58,7 @@ export function ServiceAccountDetail({ data, period }: Props) {
       ? ('teal' as const)
       : status === 'EXPIRED'
         ? ('neutral' as const)
-        : ('pink' as const);
+        : ('neutral' as const);
 
   return (
     <div className="space-y-6">

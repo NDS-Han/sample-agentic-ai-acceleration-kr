@@ -9,6 +9,7 @@ import {
   monthsAgo,
 } from '@/lib/utils/period';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
+import { SegmentedGroup, segmentedItemClass } from '@/components/common/Segmented';
 
 interface PeriodSelectorProps {
   periods: string[]; // 선택 가능한 월 (YYYY-MM), 최신순
@@ -59,20 +60,10 @@ export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
   // current 가 이번/지난 달 중 어느 것도 아니면 드롭다운이 활성(특정 과거 월 선택 상태).
   const dropdownActive = current !== thisMonth && current !== lastMonth;
 
-  const btn = (active: boolean) =>
-    [
-      'pressable rounded-apple-sm px-3 py-1.5 text-sm font-medium transition-[background,color,box-shadow] duration-150',
-      active
-        ? 'bg-primary/10 text-primary font-semibold shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)]'
-        : 'text-muted-foreground interactive',
-    ].join(' ');
+  const btn = segmentedItemClass;
 
   return (
-    <div
-      role="group"
-      aria-label={t('periodSelect')}
-      className="glass inline-flex items-center gap-0.5 rounded-apple-md p-1"
-    >
+    <SegmentedGroup label={t('periodSelect')}>
       <button
         type="button"
         onClick={() => go(thisMonth)}
@@ -123,6 +114,6 @@ export function PeriodSelector({ periods, current }: PeriodSelectorProps) {
           </svg>
         </div>
       )}
-    </div>
+    </SegmentedGroup>
   );
 }

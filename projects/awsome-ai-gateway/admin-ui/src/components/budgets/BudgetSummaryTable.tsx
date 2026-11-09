@@ -244,7 +244,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
       <Td>
         {/* limit=0 은 실제로 저장된 $0 예산 — "정상"과 구분해 요청 차단 상태로 표시 */}
         {user.limit === 0 ? (
-          <span className="badge badge-amber" title={t('zeroBudgetHint')}>
+          <span className="badge badge-danger" title={t('zeroBudgetHint')}>
             {t('zeroBudgetBadge')}
           </span>
         ) : (
@@ -394,7 +394,7 @@ export function BudgetSummaryTable({ items, isAdmin, models, modelsLoadFailed, c
                         </Td>
                         <Td>
                           {team.limit === 0 ? (
-                            <span className="badge badge-amber" title={t('zeroBudgetHint')}>
+                            <span className="badge badge-danger" title={t('zeroBudgetHint')}>
                               {t('zeroBudgetBadge')}
                             </span>
                           ) : (

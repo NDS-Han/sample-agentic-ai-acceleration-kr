@@ -6,8 +6,10 @@ import { adminAPI } from '@/lib/api-client';
 import { baseAction } from '@/lib/audit/action';
 import { APIError } from '@/lib/utils/retry';
 import { ErrorState } from '@/components/common/ErrorState';
+import { SegmentedLinks } from '@/components/common/Segmented';
 import { AuditLogListView } from '@/components/audit/AuditLogListView';
 import { ActionSelect } from '@/components/audit/ActionSelect';
+import { GroupSelect } from '@/components/audit/GroupSelect';
 import type {
   AuditActionCatalogResponse,
   AuditLogListResponse,
@@ -112,50 +114,27 @@ export default async function AuditPage(props: AuditPageProps) {
         </p>
       </div>
 
-      {/* 기간 pill — 상대 구간(24h/7d/30d). 백엔드도 필수로 받아 스캔 범위를 묶는다. */}
+      {/* 기간 pill(필수 상대구간) + 분류 select — '전체' pill 이 '전체 기간'으로
+          오독되지 않게 라벨을 달고 컨트롤을 분리한다. */}
       <div className="mb-4 flex flex-wrap items-center gap-2">
-        {RANGES.map((r) => (
-          <Link
-            key={r}
-            href={buildQuery({ range: r })}
-            aria-current={r === range ? 'page' : undefined}
-            className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-              r === range
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'bg-background text-foreground border-border hover:bg-accent'
-            }`}
-          >
-            {t(`range.${r}` as const)}
-          </Link>
-        ))}
+        <span className="text-xs font-medium text-muted-foreground">{t('rangeFilterLabel')}</span>
+        <SegmentedLinks
+          label={t('rangeFilterLabel')}
+          items={RANGES.map((r) => ({
+            value: r,
+            label: t(`range.${r}` as const),
+            href: buildQuery({ range: r }),
+            current: r === range,
+          }))}
+        />
 
         <span className="mx-1 h-5 w-px bg-border" />
 
-        {/* 액션 그룹 pill — 그룹 변경 시 세부 action 은 리셋(다른 그룹 액션이 남지 않게). */}
-        <Link
-          href={buildQuery({ group: '', action: '' })}
-          className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-            !activeGroup
-              ? 'bg-primary text-primary-foreground border-primary'
-              : 'bg-background text-foreground border-border hover:bg-accent'
-          }`}
-        >
-          {t('groupAll')}
-        </Link>
-        {groups.map((g) => (
-          <Link
-            key={g.key}
-            href={buildQuery({ group: g.key, action: '' })}
-            aria-current={g.key === activeGroup ? 'page' : undefined}
-            className={`inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium transition-colors ${
-              g.key === activeGroup
-                ? 'bg-primary text-primary-foreground border-primary'
-                : 'bg-background text-foreground border-border hover:bg-accent'
-            }`}
-          >
-            {t(`groups.${g.key}` as const)}
-          </Link>
-        ))}
+        <span className="text-xs font-medium text-muted-foreground">{t('groupFilterLabel')}</span>
+        <GroupSelect
+          groups={groups.map((g) => g.key)}
+          currentGroup={activeGroup}
+        />
 
         {groupActions.length > 0 && (
           <ActionSelect
@@ -206,9 +185,11 @@ export default async function AuditPage(props: AuditPageProps) {
         {action && (
           <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
             {t('actionChip', {
-              action: knownActions.includes(baseAction(action))
-                ? t(`actions.${baseAction(action)}` as const)
-                : action,
+              action:
+                knownActions.includes(baseAction(action)) &&
+                t.has(`actions.${baseAction(action)}` as const)
+                  ? t(`actions.${baseAction(action)}` as const)
+                  : action,
             })}
             <Link
               href={buildQuery({ action: '' })}
@@ -221,7 +202,12 @@ export default async function AuditPage(props: AuditPageProps) {
         )}
         {(resourceType || resourceId) && (
           <span className="inline-flex items-center gap-1.5 rounded-md border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-xs text-amber-600 dark:text-amber-400">
-            {t('targetFilter', { type: resourceType || resourceId })}
+            {t('targetFilter', {
+              type:
+                resourceType && t.has(`resourceTypes.${resourceType}` as const)
+                  ? t(`resourceTypes.${resourceType}` as const)
+                  : resourceType || resourceId,
+            })}
             <Link
               href={buildQuery({ resource_type: '', resource_id: '' })}
               aria-label={t('clearTarget')}
@@ -234,12 +220,9 @@ export default async function AuditPage(props: AuditPageProps) {
       </div>
 
       {!logsResult.ok ? (
-        <div className="glass rounded-apple p-6">
-          <p className="text-sm font-medium text-destructive">{t('listLoadFailed')}</p>
-          {logsResult.error && (
-            <p className="mt-1 text-xs text-muted-foreground">{logsResult.error}</p>
-          )}
-        </div>
+        <ErrorState
+          message={logsResult.error ? `${t('listLoadFailed')} — ${logsResult.error}` : t('listLoadFailed')}
+        />
       ) : (
         /* key=필터 조합 — 필터 변경 시 remount해 이전 목록이 남지 않는다(KeysListView 관례). */
         <AuditLogListView

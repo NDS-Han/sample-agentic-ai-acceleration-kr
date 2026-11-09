@@ -469,7 +469,7 @@ export function SetBudgetDialog({ isOpen, onClose, target }: SetBudgetDialogProp
               type="button"
               onClick={() => handleUseTeamBudget(false)}
               isLoading={isPending}
-              className="bg-secondary text-secondary-foreground hover:bg-secondary/80 px-3 py-1.5 rounded-md text-xs font-medium"
+              variant="secondary" size="sm"
             >
               {t('switchToTeamBudget')}
             </SpinnerButton>

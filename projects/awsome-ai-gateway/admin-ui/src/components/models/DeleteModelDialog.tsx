@@ -188,7 +188,7 @@ export function DeleteModelDialog({ isOpen, onClose, model }: DeleteModelDialogP
               type="submit"
               isLoading={isPending}
               disabled={!canDelete}
-              className="bg-destructive text-destructive-foreground hover:bg-destructive/90 disabled:opacity-50"
+              variant="danger"
             >
               {t('deleteButton')}
             </SpinnerButton>

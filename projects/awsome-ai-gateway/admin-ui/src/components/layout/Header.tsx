@@ -7,28 +7,16 @@ import { useLocale, useTranslations } from 'next-intl';
 import { useRouter } from 'next/navigation';
 import { useTransition } from 'react';
 import type { AdminSession } from '@/types/entities';
-import { UserRole } from '@/types/enums';
 import { LogOut, User, Globe } from 'lucide-react';
 import { setLocale } from '@/lib/actions/locale';
+import { RoleBadge } from '@/components/common/Badge';
 
 interface HeaderProps {
   session: AdminSession | null;
 }
 
-const ROLE_LABELS: Record<string, Record<string, string>> = {
-  ko: { [UserRole.ADMIN]: '관리자', [UserRole.TEAM_LEADER]: '팀 리더', [UserRole.DEVELOPER]: '개발자' },
-  en: { [UserRole.ADMIN]: 'Admin', [UserRole.TEAM_LEADER]: 'Team Leader', [UserRole.DEVELOPER]: 'Developer' },
-};
-
-// 디자인 시스템 badge 톤 재사용(globals.css 그라데이션). 관리자는 파스텔 핑크
-// (destructive 빨강은 '위험'으로 오인 — 권한 표시엔 부적합). 팀리더=amber, 개발자=neutral.
-const ROLE_BADGE_CLASSES: Record<string, string> = {
-  [UserRole.ADMIN]: 'badge badge-pink',
-  [UserRole.TEAM_LEADER]: 'badge badge-amber',
-  [UserRole.DEVELOPER]: 'badge badge-neutral',
-};
-
 export function Header({ session }: HeaderProps) {
+  const t = useTranslations('auth');
   const locale = useLocale();
   const router = useRouter();
   const [isPending, startTransition] = useTransition();
@@ -72,9 +60,10 @@ export function Header({ session }: HeaderProps) {
                 <span className="text-xs text-muted-foreground mt-0.5">{session.email}</span>
               </div>
               {session.role && (
-                <span className={ROLE_BADGE_CLASSES[session.role] ?? 'badge badge-neutral'}>
-                  {ROLE_LABELS[locale]?.[session.role] ?? session.role}
-                </span>
+                <RoleBadge
+                  role={session.role}
+                  label={t.has(`role.${session.role}`) ? t(`role.${session.role}`) : session.role}
+                />
               )}
             </div>
             {/* Form POST (not fetch / not GET): browser submits POST and
@@ -84,17 +73,15 @@ export function Header({ session }: HeaderProps) {
               <button
                 type="submit"
                 className="inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-sm text-muted-foreground hover:bg-accent hover:text-accent-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                aria-label={locale === 'ko' ? '로그아웃' : 'Logout'}
+                aria-label={t('logout')}
               >
                 <LogOut size={15} aria-hidden="true" />
-                <span>{locale === 'ko' ? '로그아웃' : 'Logout'}</span>
+                <span>{t('logout')}</span>
               </button>
             </form>
           </>
         ) : (
-          <span className="text-sm text-muted-foreground">
-            {locale === 'ko' ? '비인증 상태' : 'Not authenticated'}
-          </span>
+          <span className="text-sm text-muted-foreground">{t('notAuthenticated')}</span>
         )}
       </div>
     </header>

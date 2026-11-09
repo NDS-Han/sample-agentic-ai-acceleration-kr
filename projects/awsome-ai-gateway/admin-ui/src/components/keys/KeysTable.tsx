@@ -10,6 +10,7 @@ import { revokeKeyAction } from '@/lib/actions/keys';
 import { ConfirmDialog } from '@/components/common/ConfirmDialog';
 import { useToast } from '@/components/common/ToastProvider';
 import { Badge, type BadgeTone } from '@/components/common/Badge';
+import { Button } from '@/components/common/Button';
 import { Table, THead, TBody, Tr, Th, Td } from '@/components/common/Table';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
 import { fmtDate } from '@/lib/utils/format';
@@ -27,7 +28,7 @@ interface KeysTableProps {
 const STATUS_TONE: Record<string, BadgeTone> = {
   [KeyStatus.ACTIVE]: 'teal',
   [KeyStatus.EXPIRED]: 'neutral',
-  [KeyStatus.REVOKED]: 'pink',
+  [KeyStatus.REVOKED]: 'neutral',
 };
 
 function formatDate(iso: string | null, noExpiry: string, timeZone: string): string {
@@ -122,18 +123,23 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
                   {key.user_email ?? <span className="text-muted-foreground">—</span>}
                 </Td>
                 <Td>
-                  <Badge tone={STATUS_TONE[key.status] ?? 'neutral'}>
-                    {t(`keyStatus.${key.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
-                  </Badge>
-                  {key.kind === 'service' && (
-                    <Badge tone="teal">{t('kindService')}</Badge>
-                  )}
+                  <div className="flex items-center gap-1.5">
+                    <Badge tone={STATUS_TONE[key.status] ?? 'neutral'}>
+                      {t(`keyStatus.${key.status}` as 'keyStatus.ACTIVE' | 'keyStatus.EXPIRED' | 'keyStatus.REVOKED')}
+                    </Badge>
+                    {key.kind === 'service' && (
+                      // 종류(상태 아님)는 neutral — 상태 teal 과 같은 색이면 '활성에이전트'로 읽힌다.
+                      <Badge tone="neutral">{t('kindService')}</Badge>
+                    )}
+                  </div>
                 </Td>
                 <Td className="text-muted-foreground">{formatDate(key.created_at, t('noExpiry'), tz)}</Td>
                 <Td className="text-muted-foreground">{formatDate(key.expires_at, t('noExpiry'), tz)}</Td>
                 <Td numeric>
                   <div className="flex items-center justify-end gap-2">
-                    <button
+                    <Button
+                      variant="dangerOutline"
+                      size="sm"
                       onClick={() =>
                         setRevokeState({
                           isOpen: true,
@@ -144,10 +150,9 @@ export function KeysTable({ keys, onRevoked }: KeysTableProps) {
                       disabled={
                         key.status !== KeyStatus.ACTIVE || revokingIds.has(key.key_id)
                       }
-                      className="inline-flex items-center rounded-md border border-destructive/50 bg-background px-3 py-1.5 text-xs font-medium text-destructive hover:bg-destructive hover:text-destructive-foreground transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-40"
                     >
                       {revokingIds.has(key.key_id) ? t('revoking') : t('revoke')}
-                    </button>
+                    </Button>
                   </div>
                 </Td>
               </Tr>

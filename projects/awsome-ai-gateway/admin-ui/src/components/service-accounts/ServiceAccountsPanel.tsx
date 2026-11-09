@@ -196,7 +196,7 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays }: Props) {
                   ) : (
                     <Badge tone="neutral">{t('saNoKey')}</Badge>
                   )}
-                  {!a.is_active && <Badge tone="pink">{t('saInactive')}</Badge>}
+                  {!a.is_active && <Badge tone="neutral">{t('saInactive')}</Badge>}
                 </Td>
                 <Td className="text-muted-foreground">
                   {a.active_key_issued_at ? fmtDate(a.active_key_issued_at, tz) : '—'}

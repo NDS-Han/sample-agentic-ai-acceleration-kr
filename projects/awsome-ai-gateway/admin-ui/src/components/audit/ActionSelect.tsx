@@ -43,7 +43,7 @@ export function ActionSelect({ actions, currentAction, knownActions }: Props) {
       <option value="">{t('actionAllInGroup')}</option>
       {actions.map((a) => (
         <option key={a} value={a}>
-          {known.has(a) ? t(`actions.${a}` as const) : a}
+          {known.has(a) && t.has(`actions.${a}` as const) ? t(`actions.${a}` as const) : a}
         </option>
       ))}
     </select>

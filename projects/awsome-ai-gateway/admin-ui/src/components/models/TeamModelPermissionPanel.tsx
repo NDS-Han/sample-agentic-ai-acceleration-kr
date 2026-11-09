@@ -290,7 +290,7 @@ export const TeamModelPermissionPanel = forwardRef<TeamModelPermissionHandle, Te
               <SpinnerButton
                 onClick={handleSave}
                 isLoading={isPending}
-                className="bg-primary text-primary-foreground hover:bg-primary/90 px-4 py-2 rounded-md text-sm font-medium"
+                variant="primary"
               >
                 {t('savePermission')}
               </SpinnerButton>

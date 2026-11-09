@@ -4,6 +4,7 @@
 
 import { useRouter, usePathname, useSearchParams } from 'next/navigation';
 import { useTranslations } from 'next-intl';
+import { Segmented } from '@/components/common/Segmented';
 
 interface ClientFilterProps {
   current: string; // 'all' | 'claude-code' | 'cowork' | 'codex' | 'other'
@@ -35,31 +36,15 @@ export function ClientFilter({ current }: ClientFilterProps) {
     router.push(`${pathname}?${sp.toString()}`);
   }
 
-  const btn = (active: boolean) =>
-    [
-      'pressable rounded-apple-sm px-3 py-1.5 text-sm font-medium transition-[background,color,box-shadow] duration-150',
-      active
-        ? 'bg-primary/10 text-primary font-semibold shadow-[inset_0_0_0_1px_hsl(var(--primary)/0.18)]'
-        : 'text-muted-foreground interactive',
-    ].join(' ');
-
   return (
-    <div
-      role="group"
-      aria-label={t('appFilter')}
-      className="glass inline-flex items-center gap-0.5 rounded-apple-md p-1"
-    >
-      {OPTIONS.map((o) => (
-        <button
-          key={o.value}
-          type="button"
-          onClick={() => go(o.value)}
-          aria-pressed={current === o.value}
-          className={btn(current === o.value)}
-        >
-          {o.labelKey ? t(o.labelKey) : o.value === 'claude-code' ? 'Claude Code' : o.value === 'cowork' ? 'Cowork' : 'Codex'}
-        </button>
-      ))}
-    </div>
+    <Segmented
+      label={t('appFilter')}
+      value={current}
+      onSelect={go}
+      items={OPTIONS.map((o) => ({
+        value: o.value,
+        label: o.labelKey ? t(o.labelKey) : o.value === 'claude-code' ? 'Claude Code' : o.value === 'cowork' ? 'Cowork' : 'Codex',
+      }))}
+    />
   );
 }

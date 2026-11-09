@@ -10,8 +10,9 @@ import { listAuditLogsAction } from '@/lib/actions/audit';
 import { baseAction, isConfirmedAction } from '@/lib/audit/action';
 import { useToast } from '@/components/common/ToastProvider';
 import { useReportingTz } from '@/components/common/ReportingTimezoneProvider';
-import { Badge } from '@/components/common/Badge';
+import { Badge, RoleBadge } from '@/components/common/Badge';
 import { Table, THead, TBody, Tr, Th, Td, TEmpty } from '@/components/common/Table';
+import { Button } from '@/components/common/Button';
 import { fmtDateTime } from '@/lib/utils/format';
 import { ChangesPanel } from './ChangesPanel';
 import type { AuditLogItem } from '@/types/entities';
@@ -34,8 +35,8 @@ interface Props {
   knownActions: string[];
 }
 
-/** 액션 표시 색 — 삭제/폐기/해제 계열과 민감 열람·확인됨을 시각적으로 구분. */
-function actionTone(action: string): 'pink' | 'amber' | 'neutral' {
+/** 액션 표시 색 — 파괴 계열(danger)과 민감 열람·확인됨(amber)을 시각적으로 구분. */
+function actionTone(action: string): 'danger' | 'amber' | 'neutral' {
   if (
     action.startsWith('DELETE_') ||
     action.startsWith('REVOKE') ||
@@ -43,10 +44,11 @@ function actionTone(action: string): 'pink' | 'amber' | 'neutral' {
     action.startsWith('UNMARK_') ||
     action.startsWith('UNSET_')
   ) {
-    return 'pink';
+    return 'danger';
   }
   if (
     action === 'SET_BODY_LOGGING' ||
+    action === 'VIEW_BODY_LOG' ||
     action === 'VIEW_INVOCATION_LOG_BODY' ||
     isConfirmedAction(action)
   ) {
@@ -54,6 +56,13 @@ function actionTone(action: string): 'pink' | 'amber' | 'neutral' {
   }
   return 'neutral';
 }
+
+/** 액션을 배지가 아닌 텍스트 색으로 — 50행 pill 나열에서 실패·파괴만 눈에 띄게. */
+const ACTION_TEXT_CLASS: Record<string, string> = {
+  danger: 'text-destructive',
+  amber: 'text-amber-700 dark:text-amber-400',
+  neutral: '',
+};
 
 export function AuditLogListView({
   initialItems,
@@ -64,6 +73,7 @@ export function AuditLogListView({
   knownActions,
 }: Props) {
   const t = useTranslations('audit');
+  const tAuth = useTranslations('auth');
   const locale = useLocale();
   const tz = useReportingTz();
   const { toast } = useToast();
@@ -75,9 +85,19 @@ export function AuditLogListView({
 
   const known = new Set(knownActions);
   // 라벨은 정규화된 이름으로 찾는다 — *_CONFIRMED 행은 원본 라벨 + 확인됨 배지.
+  // t.has 가드: 카탈로그에만 있고 번역이 빠진 액션은 키 경로가 아니라 enum 원문을 둔다.
   const actionLabel = (a: string) => {
     const base = baseAction(a);
-    return known.has(base) ? t(`actions.${base}` as const) : base;
+    const key = `actions.${base}` as const;
+    return known.has(base) && t.has(key) ? t(key) : base;
+  };
+  const resourceLabel = (rt: string) => {
+    const key = `resourceTypes.${rt}` as const;
+    return t.has(key) ? t(key) : rt;
+  };
+  const roleLabel = (role: string) => {
+    const key = `role.${role}` as const;
+    return tAuth.has(key) ? tAuth(key) : role;
   };
 
   function handleLoadMore() {
@@ -122,19 +142,23 @@ export function AuditLogListView({
     if (it.actor_kind === 'dev') {
       return <span className="text-muted-foreground">{t('actorDev')}</span>;
     }
-    if (it.actor_email) {
+    // '<uuid>@unknown' 는 이메일 해석 실패 sentinel — 이메일처럼 보이지만 식별자다.
+    if (it.actor_email && !it.actor_email.endsWith('@unknown')) {
       return it.actor_email;
     }
     return (
-      <span className="font-mono text-muted-foreground">
-        {it.actor_user_id.slice(0, 8)}…
+      <span title={it.actor_user_id}>
+        <span className="text-muted-foreground">{t('unknownUser')}</span>{' '}
+        <span className="font-mono text-muted-foreground">
+          {it.actor_user_id.slice(0, 8)}…
+        </span>
       </span>
     );
   }
 
   return (
     <div className="glass rounded-apple p-4">
-      <Table>
+      <Table density="compact">
         <THead>
           <Tr>
             <Th className="w-6"></Th>
@@ -174,20 +198,22 @@ export function AuditLogListView({
                     )}
                   </button>
                 </Td>
-                <Td className="whitespace-nowrap text-muted-foreground" title={it.timestamp}>
+                <Td className="num whitespace-nowrap text-muted-foreground" title={it.timestamp}>
                   {fmtDateTime(it.timestamp, locale === 'ko' ? 'ko-KR' : 'en-US', tz)}
                 </Td>
                 <Td>
                   <div className="flex items-center gap-2">
                     <span className="truncate">{actorCell(it)}</span>
-                    <Badge tone={it.actor_role === 'ADMIN' ? 'teal' : 'sky'}>
-                      {it.actor_role}
-                    </Badge>
+                    <RoleBadge role={it.actor_role} label={roleLabel(it.actor_role)} />
                   </div>
                 </Td>
                 <Td>
+                  {/* 액션은 텍스트 색으로만 구분 — 배지 3~4개 나열에서 실패가
+                      묻히는 걸 막는다(확인됨만 배지 유지). */}
                   <span title={it.action} className="inline-flex items-center gap-1.5">
-                    <Badge tone={actionTone(it.action)}>{actionLabel(it.action)}</Badge>
+                    <span className={`font-medium ${ACTION_TEXT_CLASS[actionTone(it.action)]}`}>
+                      {actionLabel(it.action)}
+                    </span>
                     {isConfirmedAction(it.action) && (
                       <Badge tone="amber">{t('confirmedBadge')}</Badge>
                     )}
@@ -204,7 +230,9 @@ export function AuditLogListView({
                     onClick={(e) => e.stopPropagation()}
                     className="hover:underline"
                   >
-                    <span className="text-muted-foreground">{it.resource_type}</span>{' '}
+                    <span className="text-muted-foreground" title={it.resource_type}>
+                      {resourceLabel(it.resource_type)}
+                    </span>{' '}
                     <span className="font-mono" title={it.resource_id}>
                       {it.resource_id.slice(0, 12)}
                       {it.resource_id.length > 12 ? '…' : ''}
@@ -212,11 +240,12 @@ export function AuditLogListView({
                   </Link>
                 </Td>
                 <Td>
+                  {/* 성공은 감사의 기본값 — 매 행 배지를 달면 실패가 안 보인다. */}
                   {it.result === 'SUCCESS' ? (
-                    <Badge tone="neutral">{t('resultSuccess')}</Badge>
+                    <span className="text-muted-foreground">—</span>
                   ) : (
                     <span title={it.result}>
-                      <Badge tone="pink">{t('resultFailure')}</Badge>
+                      <Badge tone="danger">{t('resultFailure')}</Badge>
                     </span>
                   )}
                 </Td>
@@ -236,13 +265,9 @@ export function AuditLogListView({
 
       {hasMore && (
         <div className="mt-4 flex justify-center">
-          <button
-            onClick={handleLoadMore}
-            disabled={isPending}
-            className="rounded-md border border-border bg-background px-4 py-2 text-sm hover:bg-accent disabled:opacity-50"
-          >
+          <Button variant="ghost" onClick={handleLoadMore} disabled={isPending}>
             {isPending ? t('loading') : t('loadMore')}
-          </button>
+          </Button>
         </div>
       )}
     </div>
