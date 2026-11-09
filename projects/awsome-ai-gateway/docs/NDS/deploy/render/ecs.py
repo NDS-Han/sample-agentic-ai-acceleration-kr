@@ -106,7 +106,16 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     # admin_groups 를 안 내리면 env 가 cognito_groups 전체로 폴백해
     # 팀 그룹 직원이 전부 ADMIN 이 된다 — eks 의 adminBootstrap.groups
     # (고정 ClaudeAdmin)와 같은 계약으로 명시한다.
-    vars_["admin_groups"] = ["ClaudeAdmin"]
+    vars_["admin_groups"] = cfg.oidc.admin_groups or ["ClaudeAdmin"]
+    if cfg.oidc.admin_emails:
+        vars_["admin_emails"] = cfg.oidc.admin_emails
+    if cfg.oidc.group_prefix:
+        vars_["oidc_group_prefix"] = cfg.oidc.group_prefix
+    if cfg.oidc.groups_claim:
+        vars_["oidc_groups_claim"] = cfg.oidc.groups_claim
+    if cfg.oidc.reject_unmatched_groups is not None:
+        vars_["oidc_reject_unmatched_groups"] = \
+            cfg.oidc.reject_unmatched_groups
 
     # ── 도메인 — cloudfront-temp 는 EKS 경로의 개념이라 ecs 에선 none 으로 수렴
     if cfg.domain.mode == "route53-acm":

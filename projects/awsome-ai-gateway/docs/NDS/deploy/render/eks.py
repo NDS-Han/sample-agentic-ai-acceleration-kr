@@ -160,6 +160,16 @@ def desired_values(cfg: GatewayConfig) -> dict:
              "audience": cfg.oidc.audience or cfg.oidc.client_id,
              "providerName": cfg.oidc.provider_name, "groupsClaim": claim,
              "requiredGroup": cfg.oidc.required_group}
+        if cfg.oidc.groups_claim:
+            o["groupsClaim"] = cfg.oidc.groups_claim
+        if cfg.oidc.group_prefix:
+            o["groupPrefix"] = cfg.oidc.group_prefix
+        if cfg.oidc.reject_unmatched_groups is not None:
+            o["rejectUnmatchedGroups"] = cfg.oidc.reject_unmatched_groups
+        if cfg.oidc.admin_groups or cfg.oidc.admin_emails:
+            v.setdefault("adminApi", {})["adminBootstrap"] = {
+                "groups": cfg.oidc.admin_groups,
+                "emails": cfg.oidc.admin_emails}
         v.setdefault("adminApi", {})["oidc"] = dict(o)
         v.setdefault("gatewayProxy", {})["oidc"] = dict(o)
         ui_env = {"DEV_LOGIN_ENABLED": "true" if cfg.features.dev_login else "false",

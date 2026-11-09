@@ -234,6 +234,17 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
             "OIDC_TOKEN_URL": cfg.oidc.token_url,
             "OIDC_REQUIRED_GROUP": cfg.oidc.required_group,
         })
+        if cfg.oidc.groups_claim:
+            env["OIDC_GROUPS_CLAIM"] = cfg.oidc.groups_claim
+        if cfg.oidc.group_prefix:
+            env["OIDC_GROUP_PREFIX"] = cfg.oidc.group_prefix
+        if cfg.oidc.reject_unmatched_groups is not None:
+            env["OIDC_REJECT_UNMATCHED_GROUPS"] = \
+                "true" if cfg.oidc.reject_unmatched_groups else "false"
+        if cfg.oidc.admin_groups:
+            env["ADMIN_GROUPS"] = ",".join(cfg.oidc.admin_groups)
+        if cfg.oidc.admin_emails:
+            env["ADMIN_EMAILS"] = ",".join(cfg.oidc.admin_emails)
         if cfg.oidc.vk_ttl_hours:
             env["OIDC_VK_TTL_HOURS"] = str(cfg.oidc.vk_ttl_hours)
         if cfg.oidc.client_secret:

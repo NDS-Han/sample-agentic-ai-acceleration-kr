@@ -183,6 +183,11 @@ class OidcConfig:
     token_url: str = ""
     provider_name: str = "oidc:cognito"
     required_group: str = ""    # 비우면 인증된 모든 사용자 통과
+    groups_claim: str = ""      # 비우면 provider_name 에서 유추 (cognito → cognito:groups)
+    group_prefix: str = ""      # 그룹→부서/팀 파싱 prefix — 비우면 차트 기본 "Claude_"
+    reject_unmatched_groups: bool | None = None  # None 이면 차트 기본 true
+    admin_groups: list[str] = field(default_factory=list)  # ADMIN_GROUPS 정확일치
+    admin_emails: list[str] = field(default_factory=list)  # ADMIN_EMAILS
     vk_ttl_hours: int = 0       # VK 수명 — 0 이면 차트 기본(1시간). ops 8-Z 의
                               # adminApi.oidc.vkTtlHours 와 같은 키로 렌더된다.
 
