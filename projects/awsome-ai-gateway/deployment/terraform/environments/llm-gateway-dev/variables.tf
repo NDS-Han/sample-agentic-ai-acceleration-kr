@@ -130,10 +130,12 @@ variable "eks_addon_versions" {
 }
 
 variable "aurora_engine_version" {
-  # null 이면 AWS 기본 버전의 메이저로 family 를 맞춘다(fresh-create 정합).
-  # 기존 클러스터가 있으면 tfvars 에 실측 메이저를 핀할 것(dev 는 "16.13").
+  # dev 클러스터의 실측 메이저로 핀한다(family=aurora-postgresql16). null 이면
+  # 모듈이 AWS 기본 버전(신규 생성용)의 메이저로 family 를 맞춰 기존 클러스터와
+  # 어긋난다 — 기존 env 에서 null 은 "다음 plan 부터 family drift" 다.
+  # gitignore 된 로컬 tfvars 도 같은 값을 핀한다(양쪽 일치).
   type    = string
-  default = null
+  default = "16.13"
 }
 
 variable "aurora_prod_instance_class" {

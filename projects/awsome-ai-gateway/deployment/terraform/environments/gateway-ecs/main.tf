@@ -79,6 +79,10 @@ module "aurora" {
   serverless_max_acu  = var.serverless_max_acu
   safeguards          = var.db_safeguards
   prod_instance_class = var.db_instance_class
+  # 기존 클러스터의 실측 메이저로 핀 — 미선언이면 모듈이 AWS 기본 버전(신규
+  # 생성용)의 메이저로 family 를 맞춰 기존 PG16 클러스터와 어긋난다.
+  # 메이저 업그레이드 시 이 핀을 함께 올린다.
+  engine_version      = "16"
 
   tags = var.tags
 }

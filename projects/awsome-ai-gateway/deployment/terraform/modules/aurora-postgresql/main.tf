@@ -47,8 +47,7 @@ locals {
 }
 
 # AWS 가 지금 생성하는 aurora-postgresql 기본 버전 — family 를 그쪽에 맞춘다.
-# coalesce 의 var.engine_version=null 처리는 terraform 의 ""==null 동치 덕에
-# 빈 문자열 선언도 같은 경로로 흡수된다.
+# coalesce 는 null 과 빈 문자열을 모두 건너뛰므로 "" 선언도 같은 경로로 흡수된다.
 data "aws_rds_engine_version" "default" {
   engine       = "aurora-postgresql"
   default_only = true

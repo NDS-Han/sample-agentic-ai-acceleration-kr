@@ -12,7 +12,7 @@ variable "engine_version" {
   # 기존 클러스터를 관리할 땐 실측 메이저로 핀한다(예: "16.13" → aurora-postgresql16).
   # null(미선언)이면 AWS 기본 버전 data source 의 메이저를 쓴다 — fresh-create
   # 시 엔진과 family 가 자동 일치한다. 엔진 자체는 AWS 관리(main.tf null 전달).
-  description = "Parameter group family 메이버 핀 — null 이면 AWS 기본 버전의 메이저"
+  description = "Parameter group family 메이저 핀 — null 이면 AWS 기본 버전의 메이저"
   type        = string
   default     = null
 }
