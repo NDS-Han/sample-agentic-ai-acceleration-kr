@@ -324,17 +324,23 @@ Bedrock/Mantle 은 Anthropic native server-side `web_search` 를 노출하지 �
 
 ## 10. 부하 / 스케일링 (고동시성 SSE)
 
-**병목(claude-code, Bedrock native 한정):** claude-code 경로는 boto3 동기 스트림을 async 이벤트루프에서 소비하려고 매 청크마다 `run_in_executor` 로 스레드풀에 offload 한다. 청크 수신이 blocking 이라 활성 SSE 하나가 스트림 수명 내내 스레드 슬롯 하나를 점유한다. prod 동시성 산수: HPA 최대 30 pod × uvicorn `--workers 4` = 120 프로세스, 프로세스당 기본 스레드풀 ~6 → ~720 slot << 5000 SSE. 스레드가 네트워크 대기 중이라 CPU 가 한가해 CPU 기준 HPA(targetCPU 65%)가 스케일아웃하지 않는 사각지대가 있다.
+**병목(claude-code, Bedrock native 한정):** claude-code 경로는 boto3 동기 스트림을 async 이벤트루프에서 소비하려고 매 청크마다 `run_in_executor` 로 스레드풀에 offload 한다. 청크 수신이 blocking 이라 활성 SSE 하나가 스트림 수명 내내 스레드 슬롯 하나를 점유한다. 현재 구현은 **전용 executor 를 항상 쓴다**: 모듈 수준 `ThreadPoolExecutor`, `BEDROCK_THREAD_POOL_SIZE` 기본 **128**/프로세스(`bedrock_adapter.py`). prod 산수: HPA 최대 30 pod × `WORKERS=2` = 60 프로세스 × 128 = **7,680 slot** — 스레드 총량은 넉넉해 보이지만, (a) thinking 공백 스트림이 바이트 없이 슬롯을 장기 점유해 신규 스트림·non-stream invoke 를 같은 unbounded FIFO 큐에 밀어넣는 starvation 이 가능하고, (b) 큐잉은 타임아웃/메트릭 없이 TTFB·청크 지연으로만 나타난다(실패는 `stream_idle_timeout`/`read_timeout` 의 SSE 에러 프레임).
 
-**codex/cowork(Mantle)은 이 병목에서 자유** — Mantle 경로는 `httpx.AsyncClient` + `aiter_lines()` 로 완전 async 라 스레드풀을 안 쓰고 이벤트루프만으로 수천 스트림을 처리할 수 있다.
+**HPA 사각지대는 "측정 필요"로 완화 표기:** 블로킹 스레드 자체는 CPU 를 안 쓰지만, 청크마다 executor hop + SSE 재프레이밍 + 사용량 집계가 단일 이벤트루프에서 CPU 를 소비한다 — 250m/500m request 기준 **CPU 가 스레드보다 먼저 한계에 닿을 수도 있다**. 어느 쪽이 먼저 묶이는지는 부하테스트로만 판별된다.
+
+**계측(2026-11 추가):** `gateway_bedrock_executor_inflight`(submit~완료 미완료 작업 수) + `gateway_bedrock_executor_queue_depth`(큐 대기 수) OTel 지표 — 풀 포화가 직접 보이고 custom-metric HPA 신호로 재사용 가능.
+
+**codex/cowork(Mantle)은 이 병목에서 자유** — Mantle 경로는 `httpx.AsyncClient` + `aiter_lines()` 로 완전 async 라 스레드풀을 안 쓰고 이벤트루프만으로 수천 스트림을 처리할 수 있다(단 httpx `max_connections=100`/프로세스 hard cap 있음).
 
 **완화책(효과 큰 순):**
-1. **스트리밍 전용 ThreadPoolExecutor** — `BEDROCK_STREAM_EXECUTOR_WORKERS` env 가 `>0` 이면 전용 executor(`thread_name_prefix='bedrock-sse'`), `0`/미설정이면 기본 공유 executor(무회귀·안전 롤백). **PoC 로 코드에는 shipped 됐으나(`bedrock_adapter.py:19-30`) 어떤 chart values 에도 배선돼 있지 않아 배포상 기본 비활성** — 활성화하려면 prod values gateway-proxy env 에 명시 필요(soap: max_pool_connections·memory 2Gi OOM 여유 고려).
-2. **async httpx + 자체 SigV4 전환**(정석, HIGH 난이도) — LiteLLM 방식(boto3 스트리밍 버리고 async HTTP, botocore 는 파싱만; 파싱 동기 OK, aioboto3 불필요). 단 로컬 실측(972/s·6.5x)은 루프백·파싱0·소켓무제한 환경이라 실환경 미검증이고 적대검증상 async 순증분은 (전용풀+소켓상향) 대비 +6%. **착수 전 승인 게이트(골든 바이트캡처 테스트 + 실 Bedrock A/B 카나리) 통과가 조건.**
-3. uvicorn `--limit-concurrency` 백프레셔.
-4. 커스텀 메트릭(활성 SSE/동시성 기준) HPA.
+1. **minReplicas 를 예상 동시 스트림으로 선배치** — 스케일 신호 문제를 우회하는 가역·저비용 1순위(loadtest 오버레이의 min80 선례와 같은 논리).
+2. **동시성 기준 커스텀 메트릭 HPA** — 활성 SSE 개수보다 **executor 점유율/큐 깊이** 기준(`gateway_bedrock_executor_*` 지표). scale-down 이 라이브 스트림을 자르는 문제는 minReplicas 하한 + graceful 종료(570s prod)로 감쇠.
+3. **async httpx + 자체 SigV4 전환**(정석, HIGH 난이도) — LiteLLM 방식(boto3 스트리밍 버리고 async HTTP, botocore 는 파싱만). 로컬 실측(972/s·6.5x)은 루프백 환경이라 실환경 미검증이고 적대검증상 순증분 +6% — **착수 전 승인 게이트(골든 바이트캡처 테스트 + 실 Bedrock A/B 카나리) 통과가 조건.**
+4. uvicorn `--limit-concurrency` 백프레셔.
 
-**관련 함정:** boto3 소켓 풀 하드캡 `max_pool_connections=50`(in-account/cross-account 동일, 5000 SSE 규모엔 상향 검토 — 200~500). uvicorn `--workers 4` 는 Dockerfile CMD 하드코딩이라 env override 불가. DB 커넥션 풀은 이 병목의 직접 원인이 **아니다**(인증 short-lived, `pool_timeout=10s` fast-fail). 상향은 부하 시험 결과에 따른 승인 게이트 대상이다.
+**관련 함정:** boto3 `max_pool_connections=50` 은 **hard cap 이 아니다** — botocore urllib3 풀은 non-blocking 이라 초과 시 새 커넥션을 열고 반납 시 폐기한다(`Connection pool is full` 경고만). 진짜 캡은 128 스레드. uvicorn `--workers ${WORKERS:-4}` 는 shell-form CMD 라 env override 가능(prod/dev values 는 `WORKERS=2`). `read_timeout=stream_timeout=300s` — prod `idleTimeout: 540` 아래 thinking 공백 300s+ 는 게이트웨이 아닌 boto3 에서 먼저 끊긴다(SSE 에러 프레임으로 표면). DB 커넥션 풀은 이 병목의 직접 원인이 아니지만 **pod 수 × workers × (pool+overflow) 산수는 별도 검증 필요** — prod worst 는 30×2×50 = 3,000 으로 provisioned 한도(~1,700)를 넘는다(RDS Proxy 가 실한도를 결정). Bedrock 계정/리전 모델 쿼터가 최종 천장일 가능성이 높다 — throttling 은 429 로 표면하며 cross-account 폴백은 assume 실패만 타므로 쿼터 증설이 선행.
+
+**부하테스트(비용 $0):** `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` env 오버라이드로 boto3 를 in-cluster mock(`loadtest/mock-bedrock`, 실제 eventstream 바이너리 emit)에 향하게 해 스레드/소켓/파싱 경로를 그대로 재현 — `loadtest/k6/sse-hold.js` + `values-eks-fargate-prod-loadtest-sse.yaml` 참조.
 
 ---
 

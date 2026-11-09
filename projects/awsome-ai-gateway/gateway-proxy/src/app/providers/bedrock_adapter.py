@@ -26,6 +26,57 @@ from app.schemas.domain import TokenUsage
 _BEDROCK_POOL_SIZE = int(os.environ.get("BEDROCK_THREAD_POOL_SIZE", "128"))
 _bedrock_executor = ThreadPoolExecutor(max_workers=_BEDROCK_POOL_SIZE, thread_name_prefix="bedrock")
 
+# ── executor 계측 ─────────────────────────────────────────────────────────────
+# claude-code SSE 1개 = 스레드 슬롯 1개(스트림 수명 내내). 풀 고갈은 CPU 를
+# 올리지 않아 HPA/알람이 못 보는 사각지대라, in-flight(실행+큐잉)과 큐 깊이를
+# 직접 노출한다 — custom-metric HPA 신호로도 재사용할 지표.
+# meter 는 lifespan init_otel 이후 실구현이 되므로 첫 요청 시점에 지연 생성한다
+# (미초기화면 NoOp 계측기 — 유닛테스트/스크립트 경로도 안전).
+_bedrock_inflight_counter = None
+
+
+def _executor_metrics():
+    global _bedrock_inflight_counter
+    if _bedrock_inflight_counter is None:
+        from opentelemetry.metrics import Observation
+
+        from app.observability._setup import get_meter
+
+        meter = get_meter("gateway-proxy")
+        _bedrock_inflight_counter = meter.create_up_down_counter(
+            "gateway_bedrock_executor_inflight",
+            description="bedrock executor에 submit된 미완료 작업 수 (running+queued)",
+            unit="1",
+        )
+        meter.create_observable_gauge(
+            "gateway_bedrock_executor_queue_depth",
+            callbacks=[
+                lambda _opts: [
+                    Observation(_bedrock_executor._work_queue.qsize())
+                ]
+            ],
+            description="bedrock executor 큐 대기 작업 수 — 스레드 고갈의 직접 신호",
+            unit="1",
+        )
+    return _bedrock_inflight_counter
+
+
+async def _run_in_bedrock_executor(fn):
+    """`run_in_executor(_bedrock_executor, fn)` + in-flight 계측.
+
+    큐 대기 시간을 포함해 submit~완료 전 구간을 잰다 — 스레드가 가득 차면
+    inflight 가 pool size 를 초과해 자라므로 queue depth 와 함께 본다.
+    """
+    import asyncio
+
+    counter = _executor_metrics()
+    counter.add(1)
+    try:
+        return await asyncio.get_event_loop().run_in_executor(_bedrock_executor, fn)
+    finally:
+        counter.add(-1)
+
+
 logger = structlog.get_logger(__name__)
 
 # 상류 오류 본문에서 인프라 식별자를 지우는 패턴 — cross-account assume role ARN,
@@ -153,6 +204,8 @@ class BedrockAdapter(ProviderAdapter):
         loop = asyncio.get_event_loop()
         for attempt in (1, 2):
             try:
+                if executor is _bedrock_executor:
+                    return await _run_in_bedrock_executor(fn)
                 return await loop.run_in_executor(executor, fn)
             except (ConnectionClosedError, EndpointConnectionError) as exc:
                 if attempt == 2:
@@ -424,9 +477,6 @@ class BedrockAdapter(ProviderAdapter):
         them as SSE `event: error` to the client rather than silently cutting
         the connection.
         """
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         it = iter(stream)
         sentinel = object()
 
@@ -443,7 +493,7 @@ class BedrockAdapter(ProviderAdapter):
                 #    을 EventStreamError(=ClientError) 로 *raise* 한다 — dict 멤버로
                 #    넘겨주지 않는다. catch 없이 두면 스트림이 에러 신호 없이 잘긴다.
                 try:
-                    event = await loop.run_in_executor(_bedrock_executor, _next)
+                    event = await _run_in_bedrock_executor(_next)
                 except (
                     ClientError,
                     ConnectionClosedError,
@@ -502,9 +552,6 @@ class BedrockAdapter(ProviderAdapter):
                 pass
 
     async def _converse_stream_gen(self, stream) -> AsyncIterator[bytes]:
-        import asyncio
-
-        loop = asyncio.get_event_loop()
         it = iter(stream)
         sentinel = object()
 
@@ -520,7 +567,7 @@ class BedrockAdapter(ProviderAdapter):
                 # dict 로 오지만, 모델링되지 않은 예외 프레임은 EventStreamError 로
                 # raise 된다 — 유니온 모양 그대로 합성해 클라이언트에 흘려보낸다.
                 try:
-                    event = await loop.run_in_executor(_bedrock_executor, _next)
+                    event = await _run_in_bedrock_executor(_next)
                 except (
                     ClientError,
                     ConnectionClosedError,
