@@ -19,6 +19,8 @@ import type { ActionResult } from './types';
 
 export interface BodyLoggingSetting {
   enabled: boolean;
+  /** 인프라 배선(BODY_LOG_S3_BUCKET) 존재 — false 면 켜기가 403 거부되고 스위치를 잠근다 */
+  provisioned?: boolean;
 }
 
 // ⚠️ 서버 액션은 브라우저 입장에서 하나의 HTTP 엔드포인트다 — 타입 시그니처는 런타임

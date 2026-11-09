@@ -8,6 +8,9 @@ class BodyLoggingSetting(BaseModel):
     """Current state of the global body-logging toggle."""
 
     enabled: bool
+    # 인프라 배선(BODY_LOG_S3_BUCKET env) 존재 여부 — false 면 런타임 토글을
+    # 켜도 수집 경로가 없어 PUT 이 거부되고 UI 가 스위치를 잠근다.
+    provisioned: bool = True
 
 
 class BodyLoggingUpdateRequest(BaseModel):

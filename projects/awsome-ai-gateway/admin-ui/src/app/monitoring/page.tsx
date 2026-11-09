@@ -57,7 +57,8 @@ async function EventsSection() {
   ]);
   if (!data) return <ErrorState />;
   const enabled = bl?.success ? bl.data.enabled === true : false;
-  return <EventLog data={data} bodyLoggingEnabled={enabled} />;
+  const provisioned = bl?.success ? bl.data.provisioned !== false : true;
+  return <EventLog data={data} bodyLoggingEnabled={enabled && provisioned} />;
 }
 
 async function BodyLoggingSection() {
@@ -65,7 +66,8 @@ async function BodyLoggingSection() {
   // 읽기 실패는 null(상태 불명)로 넘긴다 — OFF 로 렌더하면 실제로 수집 중인데
   // "꺼짐"으로 보여 프롬프트 캡처가 숨겨진다(프라이버시상 최악 방향).
   const enabled = result.success ? result.data.enabled : null;
-  return <BodyLoggingToggle initialEnabled={enabled} />;
+  const provisioned = result.success ? result.data.provisioned !== false : true;
+  return <BodyLoggingToggle initialEnabled={enabled} provisioned={provisioned} />;
 }
 
 export default async function MonitoringPage() {

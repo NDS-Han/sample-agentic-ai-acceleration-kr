@@ -13,7 +13,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, forbid_service_token_reader, require_admin
+from app.core.config import get_settings
 from app.core.db import get_db_session
+from app.core.exceptions import ForbiddenError
 from app.schemas.settings import BodyLoggingSetting, BodyLoggingUpdateRequest
 
 router = APIRouter(prefix="/admin/settings", tags=["System Settings"])
@@ -28,7 +30,10 @@ async def get_body_logging(
     """현재 전역 body-logging on/off. 행이 없으면 OFF."""
     svc = request.app.state.system_settings_service
     enabled = await svc.get_body_logging_enabled(session)
-    return BodyLoggingSetting(enabled=enabled)
+    return BodyLoggingSetting(
+        enabled=enabled,
+        provisioned=bool(get_settings().BODY_LOG_S3_BUCKET),
+    )
 
 
 @router.put(
@@ -54,6 +59,15 @@ async def set_body_logging(
     ⚠️ Redis 미러링은 커밋 **뒤**다. 커밋 전에 쓰면 트랜잭션이 롤백될 때 DB 는 OFF 인데
        Redis 는 ON 이 되어, 아무도 켜지 않은 본문 수집이 돌아간다.
     """
+    # 인프라 미프로비저닝(features.body_logging=false 또는 수동 env 부재)이면
+    # 켜기를 거부한다 — 런타임 플래그만 켜도 Firehose/버킷이 없어 수집 경로가
+    # 없다. 끄기는 항상 허용한다(안전한 방향 + 꼬인 ON 상태 정리 경로).
+    if body.enabled and not get_settings().BODY_LOG_S3_BUCKET:
+        raise ForbiddenError(
+            "body logging infrastructure is not provisioned for this "
+            "deployment (BODY_LOG_S3_BUCKET unset — features.body_logging)"
+        )
+
     svc = request.app.state.system_settings_service
     enabled = await svc.set_body_logging_enabled(
         session, enabled=body.enabled, actor_id=admin.user_id
@@ -74,4 +88,7 @@ async def set_body_logging(
 
     await session.commit()
     await svc.mirror_body_logging_to_cache(enabled)
-    return BodyLoggingSetting(enabled=enabled)
+    return BodyLoggingSetting(
+        enabled=enabled,
+        provisioned=bool(get_settings().BODY_LOG_S3_BUCKET),
+    )

@@ -13,6 +13,8 @@ import { setBodyLoggingAction } from '@/lib/actions/settings';
 interface Props {
   /** 서버에서 읽어 온 현재 저장 상태. null = 읽기 실패(상태 불명) — 스위치 비활성화. */
   initialEnabled: boolean | null;
+  /** 인프라 배선 존재 여부 — false 면 켜기가 API 에서 거부되므로 스위치를 잠근다. */
+  provisioned?: boolean;
 }
 
 /**
@@ -32,7 +34,7 @@ interface Props {
  * 반영은 수 초 내(게이트웨이가 플래그를 짧게 캐시한다). 켜는 조작은 백엔드가
  * `audit.audit_logs` 에 불변 행으로 남긴다.
  */
-export function BodyLoggingToggle({ initialEnabled }: Props) {
+export function BodyLoggingToggle({ initialEnabled, provisioned = true }: Props) {
   const t = useTranslations('monitoring.bodyLogging');
   const { toast } = useToast();
   const [enabled, setEnabled] = useState(initialEnabled);
@@ -81,6 +83,9 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
           )}
         </div>
         <p className="text-xs text-muted-foreground">{t('description')}</p>
+        {!provisioned && (
+          <p className="text-xs text-muted-foreground">{t('notProvisionedHint')}</p>
+        )}
         {enabled === null && (
           <p className="text-xs text-destructive">{t('statusUnknownWarning')}</p>
         )}
@@ -105,13 +110,13 @@ export function BodyLoggingToggle({ initialEnabled }: Props) {
         role="switch"
         aria-checked={enabled === true}
         aria-label={t('toggleLabel')}
-        disabled={isPending || enabled === null}
+        disabled={isPending || enabled === null || !provisioned}
         onClick={handleClick}
         className={[
           'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
           'focus:outline-none focus-visible:ring-2 focus-visible:ring-primary',
           enabled ? 'bg-primary' : 'bg-muted-foreground/40',
-          isPending || enabled === null ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
+          isPending || enabled === null || !provisioned ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
         ].join(' ')}
       >
         <span
