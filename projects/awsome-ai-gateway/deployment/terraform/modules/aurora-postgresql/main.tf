@@ -35,6 +35,23 @@ locals {
   final_snapshot_suffix = join("", [
     for t in time_static.final_snapshot : formatdate("YYYYMMDDhhmmss", t.rfc3339)
   ])
+
+  # Parameter group family 의 메이저 — var.engine_version 을 선언하면 그
+  # 메이저(기존 클러스터를 관리할 땐 실측 메이저로 핀), 미선언(null)이면
+  # AWS 가 지금 생성할 기본 버전의 메이저를 data source 로 읽는다.
+  # engine_version=null(AWS 관리) + 고정 family 는 fresh-create 에서 엔진과
+  # family 가 어긋난다 — AWS 기본값이 메이저를 넘기면 (예: 16.x → 17.9)
+  # 생성 시 family mismatch 로 실패한다.
+  pg_major = split(".", coalesce(
+    var.engine_version, data.aws_rds_engine_version.default.version))[0]
+}
+
+# AWS 가 지금 생성하는 aurora-postgresql 기본 버전 — family 를 그쪽에 맞춘다.
+# coalesce 의 var.engine_version=null 처리는 terraform 의 ""==null 동치 덕에
+# 빈 문자열 선언도 같은 경로로 흡수된다.
+data "aws_rds_engine_version" "default" {
+  engine       = "aurora-postgresql"
+  default_only = true
 }
 
 # ------------------------------------------------------------------------------
@@ -67,8 +84,10 @@ module "aurora" {
   # engine_version 을 관리하지 않는다 — auto_minor_version_upgrade=true 라 AWS 가
   # 마이너를 자동 패치하고, 선언하면 매번 "실측 > 선언" 의 in-place 다운그레이드
   # plan 이 뜬다(RDS 는 마이너 다운그레이드 불가 → apply 실패). null 은
-  # Optional+Computed 라 terraform 이 추적 자체를 멈춘다. 메이저 버전은
-  # parameter group family 가 계속 핀한다 (var.engine_version — "16.x").
+  # Optional+Computed 라 terraform 이 추적 자체를 멈춘다.
+  # ⚠️ 생성 시점에는 AWS 기본 버전이 선택된다 — family 는 local.pg_major(변수 핀
+  #   또는 AWS 기본값 data source)로 그쪽에 맞춘다. parameter group family 가
+  #   엔진 메이저를 강제하지는 않으므로 둘을 맞추는 책임은 여기 있다.
   engine_version = null
   engine_mode    = "provisioned" # Serverless v2도 engine_mode=provisioned
   database_name  = var.database_name
@@ -130,7 +149,7 @@ module "aurora" {
 
   # Parameter Group — 커스텀 파라미터 (pgaudit 등)
   create_db_cluster_parameter_group      = true
-  db_cluster_parameter_group_family      = "aurora-postgresql${split(".", var.engine_version)[0]}"
+  db_cluster_parameter_group_family      = "aurora-postgresql${local.pg_major}"
   db_cluster_parameter_group_name        = "${var.project}-${var.environment}-cluster-pg"
   db_cluster_parameter_group_description = "Cluster PG for ${var.project}-${var.environment}"
   db_cluster_parameter_group_parameters = [
@@ -152,7 +171,7 @@ module "aurora" {
   ]
 
   create_db_parameter_group      = true
-  db_parameter_group_family      = "aurora-postgresql${split(".", var.engine_version)[0]}"
+  db_parameter_group_family      = "aurora-postgresql${local.pg_major}"
   db_parameter_group_name        = "${var.project}-${var.environment}-instance-pg"
   db_parameter_group_description = "Instance PG for ${var.project}-${var.environment}"
 

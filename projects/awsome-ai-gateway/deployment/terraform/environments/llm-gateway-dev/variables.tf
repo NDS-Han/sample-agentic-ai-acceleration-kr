@@ -130,8 +130,10 @@ variable "eks_addon_versions" {
 }
 
 variable "aurora_engine_version" {
+  # null 이면 AWS 기본 버전의 메이저로 family 를 맞춘다(fresh-create 정합).
+  # 기존 클러스터가 있으면 tfvars 에 실측 메이저를 핀할 것(dev 는 "16.13").
   type    = string
-  default = "16.13"
+  default = null
 }
 
 variable "aurora_prod_instance_class" {
