@@ -8,9 +8,10 @@
 #         tfvars     append enable_body_logging = true to terraform.tfvars
 #                    (terraform plan/apply stays a manual step)
 #         env        put FIREHOSE_STREAM_NAME + BODY_LOG_S3_BUCKET under
-#                    gatewayProxy.env in the helm values file
+#                    gatewayProxy.env, and BODY_LOG_S3_BUCKET under adminApi.env
+#                    (the admin-api key drives the viewer + provisioned gate)
 #         verify     read-only: bucket exists / stream ACTIVE / pod env set
-#         disable    remove the two env keys (collection stops; infra stays)
+#         disable    remove the env keys (collection stops; infra stays)
 # WHY:  body logging is gated twice — the admin /monitoring toggle only works
 #       when the proxy pod actually has the sink env vars. The values file is
 #       the source of truth because deploys go through install-eks.sh, which
@@ -67,6 +68,7 @@ TFVARS="$TF_DIR/terraform.tfvars"
 [ -d "$TF_DIR" ] || die "terraform env dir not found: $TF_DIR"
 [ -f "$TFVARS" ] || die "terraform.tfvars not found: $TFVARS"
 DEP_PROXY="${HELM_RELEASE}-gateway-proxy"
+DEP_ADMIN="${HELM_RELEASE}-admin-api"
 
 BODY_KEYS=(FIREHOSE_STREAM_NAME BODY_LOG_S3_BUCKET)
 
@@ -89,41 +91,46 @@ tf_attr_files() {
 
 tf_output() { terraform -chdir="$TF_DIR" output -raw "$1" 2>/dev/null || true; }
 
-# "KEY<TAB>value" for the gateway-proxy container env, from the chart rendered
-# with <values>. Reading the render (not the file) is what makes inherited
-# values from a parent values file visible — same rule as 15·17·19.
-render_proxy_env() {
+# "KEY<TAB>value" for a deployment's container env, from the chart rendered
+# with <values>. $2 = deployment name suffix (gateway-proxy | admin-api).
+# Reading the render (not the file) is what makes inherited values from a
+# parent values file visible — same rule as 15·17·19.
+render_deploy_env() {
   local out
   out=$(helm template "$HELM_RELEASE" "$CHART" -f "$1" 2>&1) \
     || { printf 'helm template failed for %s:\n%s\n' "$1" "$(tail -5 <<<"$out")" >&2; return 1; }
-  python3 -c '
+  python3 - "$2" <<'PY' <<<"$out"
 import sys, yaml
+suffix = sys.argv[1]
 for d in yaml.safe_load_all(sys.stdin):
-    if d and d.get("kind") == "Deployment" and d["metadata"]["name"].endswith("-gateway-proxy"):
+    if d and d.get("kind") == "Deployment" and d["metadata"]["name"].endswith(suffix):
         for e in d["spec"]["template"]["spec"]["containers"][0].get("env") or []:
             if "value" in e:
                 print(e["name"] + "\t" + str(e["value"]))
         break
-' <<<"$out"
+PY
 }
 
 declare -A RV   # rendered: RV[FIREHOSE_STREAM_NAME]=...
-# load_rendered <map> <values-file> — nameref 로 채운다. 전역 RV 대신 지역
-# 맵을 받을 수 있어야 apply_values_edit 의 NV 체크가 실제로 동작한다
-# (NV 없이 RV 만 채우면 비교가 항상 빈 값과 한다 — env --apply 가 매번 die).
+# load_rendered <map> <values-file> [deploy-suffix] [key-prefix] — nameref 로
+# 채운다. prefix 를 주면 키가 "<prefix>.KEY" 로 저장돼 여러 deployment 의 env 를
+# 한 맵에 담을 수 있다 (apply_values_edit 의 섹션별 대조). 전역 RV 대신 지역
+# 맵을 받을 수 있어야 NV 체크가 실제로 동작한다.
 load_rendered() {
   local -n _m="$1"; shift
-  local out k v
-  out=$(render_proxy_env "$1") || die "could not render env — see the message above"
-  while IFS=$'\t' read -r k v; do [ -n "$k" ] && _m["$k"]="$v"; done <<<"$out"
+  local out k v suffix="${2:-gateway-proxy}" prefix="${3:-}"
+  out=$(render_deploy_env "$1" "$suffix") || die "could not render env — see the message above"
+  while IFS=$'\t' read -r k v; do [ -n "$k" ] && _m["${prefix:+$prefix.}$k"]="$v"; done <<<"$out"
 }
 
-# KEY=value lines of the two body-logging keys as the running pod has them —
+# KEY=value lines of the given body-logging keys as a running pod has them —
 # empty values included so a key that is present-but-empty stays visible.
+# $1 = deployment name; $2 = egrep key pattern (default: both proxy keys).
 pod_env() {
-  kubectl get deploy "$DEP_PROXY" -n "$NS" \
+  local dep="$1" pat="${2:-^(FIREHOSE_STREAM_NAME|BODY_LOG_S3_BUCKET)=}"
+  kubectl get deploy "$dep" -n "$NS" \
     -o jsonpath='{range .spec.template.spec.containers[0].env[*]}{.name}{"="}{.value}{"\n"}{end}' \
-    2>/dev/null | grep -E '^(FIREHOSE_STREAM_NAME|BODY_LOG_S3_BUCKET)=' || true
+    2>/dev/null | grep -E "$pat" || true
 }
 
 # Both keys set to non-empty values in the rendered chart → the infra gate
@@ -133,9 +140,11 @@ rendered_gate_open() {
 }
 
 # ── Values edit (text edit, never a YAML round-trip — comments are docs) ─────
-# <src> <dst> then triples <op> <KEY> <value>; op is set|del, value is "" on del.
-# Keys live at indent 4 under gatewayProxy: -> env: (indent 2). 'del' touches
-# only lines inside that env block — a same-named key anywhere else survives.
+# <src> <dst> then quadruples <SECTION> <op> <KEY> <value>; SECTION is a
+# top-level service key (gatewayProxy|adminApi), op is set|del, value is ""
+# on del. Keys live at indent 4 under <SECTION>: -> env: (indent 2). 'del'
+# touches only lines inside that env block — a same-named key in another
+# section survives.
 edit_values() {
   python3 - "$@" <<'PY'
 import json, re, sys
@@ -162,14 +171,14 @@ def env_block(sec):
         j += 1
     return i, j
 
-for n in range(0, len(ops), 3):
-    op, key, val = ops[n:n + 3]
+for n in range(0, len(ops), 4):
+    sec, op, key, val = ops[n:n + 4]
     if op not in ("set", "del"):
         sys.exit(f"edit_values: unknown op '{op}'")
-    i, j = env_block("gatewayProxy")
+    i, j = env_block(sec)
     hits = [k for k in range(i + 1, j) if code(L[k]) and ind(L[k]) == 4 and re.match(rf"^\s*{key}:", L[k])]
     if len(hits) > 1:
-        sys.exit(f"values: gatewayProxy.env.{key} appears {len(hits)} times — fix the file first")
+        sys.exit(f"values: {sec}.env.{key} appears {len(hits)} times — fix the file first")
     if hits:
         # 다음 코드 라인이 이 키보다 깊게 들어가 있으면 다중행 값 — 첫 줄만
         # 바꾸면 나머지가 고아가 되므로 수동 편집을 요구한다.
@@ -177,7 +186,7 @@ for n in range(0, len(ops), 3):
         while nxt < j and not code(L[nxt]):
             nxt += 1
         if nxt < j and ind(L[nxt]) > 4:
-            sys.exit(f"values: gatewayProxy.env.{key} is a multi-line value — edit by hand")
+            sys.exit(f"values: {sec}.env.{key} is a multi-line value — edit by hand")
     if op == "del":
         if hits:
             del L[hits[0]]
@@ -194,9 +203,10 @@ PY
 }
 
 # Edit → render → compare with the wanted values → (apply). $1 = label,
-# rest = triples for edit_values. The render check compares what the chart
-# would produce against the wanted strings — a key name alone proves nothing
-# (the chart ships FIREHOSE_STREAM_NAME: "" by default).
+# rest = quadruples <SECTION> <op> <KEY> <value> for edit_values. The render
+# check compares what the chart would produce against the wanted strings —
+# a key name alone proves nothing (the chart ships FIREHOSE_STREAM_NAME: ""
+# by default).
 apply_values_edit() {
   local label="$1"; shift
   local tmp; tmp=$(mktemp)
@@ -204,17 +214,28 @@ apply_values_edit() {
   if cmp -s "$V" "$tmp"; then rm -f "$tmp"; ok "values already carries these — nothing to write"; return 1; fi
 
   declare -A NV=()
-  load_rendered NV "$tmp" # dies with the helm error if the edited file cannot render
-  local n=0 op key val bad_n=0
+  # 관련 deployment 만 렌더 검증 — op 목록에서 섹션을 모아 suffix 로 변환한다.
+  local n=0 sec op key val bad_n=0 want
   local -a args=("$@")
-  for ((n = 0; n < ${#args[@]}; n += 3)); do
-    op=${args[n]}; key=${args[n+1]}; val=${args[n+2]}
+  local -A seen_secs=() sec2suffix=([gatewayProxy]=gateway-proxy [adminApi]=admin-api)
+  for ((n = 0; n < ${#args[@]}; n += 4)); do
+    sec=${args[n]}
+    [ "${sec2suffix[$sec]:-}" ] || { rm -f "$tmp"; die "apply_values_edit: unknown section '$sec'"; }
+    if [ -z "${seen_secs[$sec]:-}" ]; then
+      seen_secs[$sec]=1
+      load_rendered NV "$tmp" "${sec2suffix[$sec]}" "$sec" \
+        || { rm -f "$tmp"; die "could not render $sec env — see above"; }
+    fi
+  done
+  for ((n = 0; n < ${#args[@]}; n += 4)); do
+    sec=${args[n]}; op=${args[n+1]}; key=${args[n+2]}; val=${args[n+3]}
+    want="${NV[$sec.$key]:-}"
     if [ "$op" = del ]; then
-      if [ -n "${NV[$key]:-}" ]; then
-        bad "$key still renders '${NV[$key]}' — expected removed/empty"; bad_n=$((bad_n + 1))
+      if [ -n "$want" ]; then
+        bad "$sec.$key still renders '$want' — expected removed/empty"; bad_n=$((bad_n + 1))
       fi
-    elif [ "${NV[$key]:-}" != "$val" ]; then
-      bad "$key renders '${NV[$key]:-(unset)}', expected '$val'"; bad_n=$((bad_n + 1))
+    elif [ "$want" != "$val" ]; then
+      bad "$sec.$key renders '${want:-(unset)}', expected '$val'"; bad_n=$((bad_n + 1))
     fi
   done
   [ "$bad_n" -eq 0 ] || { rm -f "$tmp"; die "edited values do not render the target — $V untouched"; }
@@ -249,25 +270,38 @@ print_status() {
   [ -n "${STREAM:-}" ] && ok "terraform output stream: $STREAM" || warn "terraform output body_log_firehose_stream: none"
   [ -n "${BUCKET:-}" ] && ok "terraform output bucket: $BUCKET" || warn "terraform output body_log_bucket: none"
 
-  PENV="$(pod_env)"
+  PENV="$(pod_env "$DEP_PROXY")"
   if [ -n "$PENV" ]; then
     sed 's/^/       /' <<<"$PENV"
     if grep -q '^FIREHOSE_STREAM_NAME=.' <<<"$PENV" && grep -q '^BODY_LOG_S3_BUCKET=.' <<<"$PENV"; then
-      ok "pod env: both keys set — infra gate open"
+      ok "proxy pod env: both keys set — infra gate open"
     else
-      warn "pod env: key(s) present but empty — infra gate closed (a present-but-empty key is OFF)"
+      warn "proxy pod env: key(s) present but empty — infra gate closed (a present-but-empty key is OFF)"
     fi
   else
-    warn "pod env: FIREHOSE_STREAM_NAME / BODY_LOG_S3_BUCKET not set (infra gate closed)"
+    warn "proxy pod env: FIREHOSE_STREAM_NAME / BODY_LOG_S3_BUCKET not set (infra gate closed)"
+  fi
+  AENV="$(pod_env "$DEP_ADMIN" '^BODY_LOG_S3_BUCKET=')"
+  if grep -q '^BODY_LOG_S3_BUCKET=.' <<<"${AENV:-}"; then
+    ok "admin-api pod env: BODY_LOG_S3_BUCKET set — viewer/provisioned gate open"
+  else
+    warn "admin-api pod env: BODY_LOG_S3_BUCKET unset — admin UI shows provisioned=false (viewer locked)"
   fi
 
   load_rendered RV "$V"
   if rendered_gate_open; then
-    ok "values render: FIREHOSE_STREAM_NAME=${RV[FIREHOSE_STREAM_NAME]} BODY_LOG_S3_BUCKET=${RV[BODY_LOG_S3_BUCKET]}"
+    ok "values render (proxy): FIREHOSE_STREAM_NAME=${RV[FIREHOSE_STREAM_NAME]} BODY_LOG_S3_BUCKET=${RV[BODY_LOG_S3_BUCKET]}"
   elif [ -n "${RV[FIREHOSE_STREAM_NAME]+x}" ] || [ -n "${RV[BODY_LOG_S3_BUCKET]+x}" ]; then
-    warn "values render: key(s) render but empty — infra gate closed: $V"
+    warn "values render (proxy): key(s) render but empty — infra gate closed: $V"
   else
-    warn "values render: no body-logging keys: $V"
+    warn "values render (proxy): no body-logging keys: $V"
+  fi
+  declare -A AV=()
+  load_rendered AV "$V" admin-api
+  if [ -n "${AV[BODY_LOG_S3_BUCKET]:-}" ]; then
+    ok "values render (admin-api): BODY_LOG_S3_BUCKET=${AV[BODY_LOG_S3_BUCKET]}"
+  else
+    warn "values render (admin-api): BODY_LOG_S3_BUCKET empty/absent — viewer locked: $V"
   fi
   note "collection on/off itself is the admin /monitoring body logging toggle"
 }
@@ -302,11 +336,19 @@ verify)
   else
     bad "stream: none"; rc=1
   fi
-  PENV="$(pod_env)"
+  PENV="$(pod_env "$DEP_PROXY")"
   if grep -q '^FIREHOSE_STREAM_NAME=.' <<<"$PENV" && grep -q '^BODY_LOG_S3_BUCKET=.' <<<"$PENV"; then
-    ok "pod env set — infra gate open"
+    ok "proxy pod env set — infra gate open"
   else
-    bad "pod env missing — infra gate closed"; rc=1
+    bad "proxy pod env missing — infra gate closed"; rc=1
+  fi
+  # 뷰어 측 배선 — 없으면 수집은 되는데 admin UI가 provisioned=false로 잠겨
+  # body-logs 페이지/토글이 사용불가. 수집 조건이 아니라 viewer 조건.
+  AENV="$(pod_env "$DEP_ADMIN" '^BODY_LOG_S3_BUCKET=')"
+  if grep -q '^BODY_LOG_S3_BUCKET=.' <<<"${AENV:-}"; then
+    ok "admin-api pod env set — viewer/provisioned gate open"
+  else
+    bad "admin-api BODY_LOG_S3_BUCKET missing — collection works but the viewer stays locked"; rc=1
   fi
   echo
   if [ $rc -eq 0 ]; then
@@ -375,13 +417,21 @@ env)
      module.body_logging not applied yet? run: bash $(basename "$0") tfvars --apply, then terraform plan/apply"
 
   load_rendered RV "$V"
-  if [ "${RV[FIREHOSE_STREAM_NAME]:-}" = "$STREAM" ] && [ "${RV[BODY_LOG_S3_BUCKET]:-}" = "$BUCKET" ]; then
+  declare -A AV=()
+  load_rendered AV "$V" admin-api
+  if [ "${RV[FIREHOSE_STREAM_NAME]:-}" = "$STREAM" ] && [ "${RV[BODY_LOG_S3_BUCKET]:-}" = "$BUCKET" ] \
+     && [ "${AV[BODY_LOG_S3_BUCKET]:-}" = "$BUCKET" ]; then
     ok "values already renders the terraform outputs — nothing to write"
     note "next: cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV"
     exit 0
   fi
-  apply_values_edit "Writing body-logging env under gatewayProxy.env in $V (backup kept in $SNAP_DIR)." \
-    set FIREHOSE_STREAM_NAME "$STREAM" set BODY_LOG_S3_BUCKET "$BUCKET" || { echo; exit 0; }
+  # adminApi.env.BODY_LOG_S3_BUCKET — 수집(proxy)과 무관하지만 admin API의
+  # provisioned 신호 + body-logs 뷰어가 이 버킷을 본다. NDS 경로는 eks_apply가
+  # 양쪽을 함께 넣어주고, 이 스크립트는 install-eks.sh 경로의 그 역할.
+  apply_values_edit "Writing body-logging env under gatewayProxy.env + adminApi.env in $V (backup kept in $SNAP_DIR)." \
+    gatewayProxy set FIREHOSE_STREAM_NAME "$STREAM" \
+    gatewayProxy set BODY_LOG_S3_BUCKET "$BUCKET" \
+    adminApi set BODY_LOG_S3_BUCKET "$BUCKET" || { echo; exit 0; }
   hdr "Next — deploy (you run it)"
   cat <<EOT
   cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV
@@ -393,15 +443,20 @@ EOT
 
 disable)
   load_rendered RV "$V"
+  declare -A AV=()
+  load_rendered AV "$V" admin-api
   # 렌더가 비어도 파일에 키 라인이 남아 있을 수 있다(KEY: "" 잔류) — 그 경우에도
   # 실제로 지워야 하므로 파일 자체에서 키 존재를 확인한다.
   if [ -z "${RV[FIREHOSE_STREAM_NAME]:-}" ] && [ -z "${RV[BODY_LOG_S3_BUCKET]:-}" ] \
+     && [ -z "${AV[BODY_LOG_S3_BUCKET]:-}" ] \
      && ! grep -qE '^[[:space:]]+(FIREHOSE_STREAM_NAME|BODY_LOG_S3_BUCKET):' "$V"; then
     ok "values has no body-logging keys (or empty) — nothing to write"
     exit 0
   fi
-  apply_values_edit "Removing body-logging env from gatewayProxy.env in $V (backup kept in $SNAP_DIR)." \
-    del FIREHOSE_STREAM_NAME "" del BODY_LOG_S3_BUCKET "" || { echo; exit 0; }
+  apply_values_edit "Removing body-logging env from gatewayProxy.env + adminApi.env in $V (backup kept in $SNAP_DIR)." \
+    gatewayProxy del FIREHOSE_STREAM_NAME "" \
+    gatewayProxy del BODY_LOG_S3_BUCKET "" \
+    adminApi del BODY_LOG_S3_BUCKET "" || { echo; exit 0; }
   cat <<EOT
 
   Next: cd $ROOT && ./deployment/scripts/install-eks.sh $DEPLOY_ENV   — proxy env 제거로 수집 중지.

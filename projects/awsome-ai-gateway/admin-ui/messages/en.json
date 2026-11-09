@@ -1180,6 +1180,7 @@
     "bodyLogs": {
       "pageTitle": "Body Logs",
       "disabledNotice": "Body logging is off. Enable the toggle on the Monitoring page to use this screen.",
+      "staleOnNotice": "The flag is still ON but the infrastructure was removed — nothing is captured and this viewer cannot work. Switch it OFF on the Monitoring page to clean up.",
       "statusUnknown": "Could not read body-logging status — refresh and try again.",
       "backToMonitoring": "← Back to Monitoring",
       "searchLabel": "Look up bodies by Request ID",

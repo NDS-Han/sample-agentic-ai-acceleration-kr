@@ -18,14 +18,22 @@ export default async function BodyLogsPage() {
 
   const result = await getBodyLoggingAction();
   const enabled = result.success ? result.data.enabled : null;
+  // 읽기 실패(null)면 프로비저닝 여부도 모른다 — 뷰어를 잠그는 방향이 안전.
+  const provisioned = result.success ? result.data.provisioned !== false : true;
 
-  if (enabled !== true) {
+  // stale ON + 미프로비저닝이면 뷰어 API 도 버킷 미설정으로 503 — 화면 자체를
+  // 뷰어가 아닌 안내 상태로 둔다(토글·EventLog 링크와 같은 잠금 방향).
+  if (enabled !== true || !provisioned) {
     return (
       <div className="space-y-4">
         <h1 className="text-2xl font-bold">{t('pageTitle')}</h1>
         <div className="glass rounded-apple p-6">
           <p className="text-sm text-muted-foreground">
-            {enabled === null ? t('statusUnknown') : t('disabledNotice')}
+            {enabled === null
+              ? t('statusUnknown')
+              : !provisioned
+                ? t('staleOnNotice')
+                : t('disabledNotice')}
           </p>
           <Link href="/monitoring" className="mt-3 inline-block text-sm text-primary hover:underline">
             {t('backToMonitoring')}

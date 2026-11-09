@@ -1180,6 +1180,7 @@
     "bodyLogs": {
       "pageTitle": "본문 로그",
       "disabledNotice": "본문 로깅이 꺼져 있습니다. 모니터링 페이지에서 토글을 켜면 이 화면을 사용할 수 있습니다.",
+      "staleOnNotice": "인프라는 제거됐지만 플래그가 ON으로 남아 있습니다 — 실제 수집은 없고 뷰어도 동작하지 않습니다. 모니터링 페이지에서 OFF로 정리하세요.",
       "statusUnknown": "본문 로깅 상태를 확인하지 못했습니다 — 새로고침해서 확인하세요.",
       "backToMonitoring": "← 모니터링으로 돌아가기",
       "searchLabel": "Request ID로 본문 조회",
