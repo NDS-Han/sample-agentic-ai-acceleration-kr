@@ -220,10 +220,10 @@ variable "oidc_vk_ttl_hours" {
   default = 1
 }
 
-# features.service_keys — false 면 서비스 계정 장기키 발급 엔드포인트를 잠근다
+# features.service_keys — 기본 꺼짐. true 면 서비스 계정 장기키 발급을 허용한다
 variable "service_keys_enabled" {
   type    = bool
-  default = true
+  default = false
 }
 
 # ADMIN 부트스트랩 — admin-api/admin-ui 양쪽에 주입된다.

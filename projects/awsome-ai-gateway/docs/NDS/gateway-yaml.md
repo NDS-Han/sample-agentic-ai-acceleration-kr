@@ -60,7 +60,7 @@ features:
   body_logging: false
   observability: false        # OTel/Prometheus/Grafana (compose 전용 스위치)
   dev_login: false            # oidc 와 공존하는 개발자 로그인 — true 면 adminUi/adminApi 양쪽에 DEV_LOGIN_ENABLED=true 유지
-  service_keys: true          # 서비스 계정(에이전트) 장기키 발급 — false 면 표지·발급 403 + UI 버튼 숨김
+  service_keys: false         # 서비스 계정(에이전트) 장기키 발급 — 기본 꺼짐. true 로 켜야 표지·발급 허용
 
 images:
   registry: ""                # 외부 레지스트리 — 비우면 ecs 가 ECR repo 자동 생성 (eks 는 필수)
@@ -205,7 +205,7 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 | `body_logging` | 요청 본문 S3 로깅 | 인프라 + 관리자 런타임 토글 이중 게이트 |
 | `observability` | OTel/Prometheus/Loki/Tempo/Grafana | **compose 전용** — ecs/eks에서는 무시(validate가 경고) |
 | `dev_login` | 인증 없는 개발자 로그인 (oidc 와 공존) | 기본 false: oidc 설정 시 admin-ui `DEV_LOGIN_ENABLED` 를 끈다. true: adminUi+adminApi 양쪽에 켠다 — 인터넷 노출 시 `allowed_cidrs` 제한 필수 |
-| `service_keys` | 서비스 계정(에이전트) 장기 VK 발급 | 기본 true. false: `POST /admin/keys`·서비스 계정 표지·발급 엔드포인트를 403 거부, UI 발급 버튼 숨김(목록 응답 `service_keys_enabled`). **기존 키는 폐기·만료 전까지 유효** — 발급만 차단 (세 backend 공통) |
+| `service_keys` | 서비스 계정(에이전트) 장기 VK 발급 | **기본 false(opt-in)**. 미선언·false: `POST /admin/keys`·서비스 계정 표지·발급 엔드포인트를 403 거부, UI 발급 버튼 숨김(목록 응답 `service_keys_enabled`). true 로 명시해야 발급이 열린다. **기존 키는 폐기·만료 전까지 유효** — 발급만 차단 (세 backend 공통) |
 
 ### `oidc`
 

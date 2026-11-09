@@ -304,9 +304,9 @@ variable "oidc_vk_ttl_hours" {
 }
 
 variable "service_keys_enabled" {
-  description = "서비스 계정 장기키 발급 허용 — false 면 admin-api 가 표지·발급을 403 거부"
+  description = "서비스 계정 장기키 발급 허용 — false 면 admin-api 가 표지·발급을 403 거부 (기본 꺼짐)"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "dev_login_enabled" {

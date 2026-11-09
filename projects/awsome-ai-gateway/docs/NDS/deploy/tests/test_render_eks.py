@@ -234,17 +234,17 @@ def test_oidc_group_keys_render_and_default_claim_inference(tmp_path):
     assert "groupPrefix" not in o2 and "rejectUnmatchedGroups" not in o2
 
 
-def test_service_keys_disabled_emits_admin_api_env(tmp_path):
-    """features.service_keys=false — 장기키 발급 기능 끄기. admin-api env 로만
-    내려가며(env 는 비기본값일 때만 방출) UI 는 목록 응답 필드로 버튼을 숨긴다."""
-    doc = dict(BASE, features={**BASE["features"], "service_keys": False})
-    _, out, _ = _render(tmp_path, doc)
+def test_service_keys_disabled_by_default(tmp_path):
+    """features.service_keys 기본 꺼짐 — 미선언이면 admin-api env 에 false 를
+    명시해 앱 기본(true)을 덮는다. UI 버튼은 목록 응답 필드로 숨긴다."""
+    _, out, _ = _render(tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminApi"]["env"]["SERVICE_KEYS_ENABLED"] == "false"
 
 
-def test_service_keys_default_emits_nothing(tmp_path):
-    """미선언/true 는 기본 동작 — env 키를 쓰지 않아 env overlay 소유를 지킨다."""
-    _, out, _ = _render(tmp_path)
+def test_service_keys_enabled_emits_true(tmp_path):
+    """opt-in — true 선언이 env overlay 의 임의 값도 이긴다(yaml 이 진실 소스)."""
+    doc = dict(BASE, features={**BASE["features"], "service_keys": True})
+    _, out, _ = _render(tmp_path, doc)
     v = yaml.safe_load((out / "values.yaml").read_text())
-    assert "SERVICE_KEYS_ENABLED" not in v.get("adminApi", {}).get("env", {})
+    assert v["adminApi"]["env"]["SERVICE_KEYS_ENABLED"] == "true"

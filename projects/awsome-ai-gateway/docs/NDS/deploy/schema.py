@@ -102,10 +102,12 @@ class FeaturesConfig:
     # render 가 adminUi DEV_LOGIN_ENABLED 를 강제로 끈다(기존 동작). true 이면
     # adminUi/adminApi 양쪽에 true 를 박아 수동 --set 없이도 유지된다.
     dev_login: bool = False
-    # 서비스 계정 장기 VK 발급 — false 면 admin-api 가 표지·발급 엔드포인트를
-    # 403 거부하고 GET /admin/service-accounts 가 service_keys_enabled=false 를
-    # 내려 UI 가 발급 버튼을 숨긴다. 기존 키는 폐기 전까지 유효하다(발급만 차단).
-    service_keys: bool = True
+    # 서비스 계정 장기 VK 발급 — 기본 꺼짐(opt-in). true 면 발급 허용, false/미선언
+    # 면 admin-api 가 표지·발급 엔드포인트를 403 거부하고 GET /admin/service-accounts
+    # 가 service_keys_enabled=false 를 내려 UI 가 발급 버튼을 숨긴다.
+    # 기존 키는 폐기 전까지 유효하다(발급만 차단). admin-api 앱 기본은 true 라
+    # 렌더러는 이 값을 항상 명시적으로 내려보낸다.
+    service_keys: bool = False
 
 
 # eks helm 오버레이에서 이미지 태그를 가질 수 있는 키. migration 도 태그가
@@ -777,7 +779,7 @@ def from_dict(raw: dict) -> GatewayConfig:
                                      "features.observability"),
             dev_login=_safe_bool(features.get("dev_login", False), errors,
                                  "features.dev_login"),
-            service_keys=_safe_bool(features.get("service_keys", True), errors,
+            service_keys=_safe_bool(features.get("service_keys", False), errors,
                                     "features.service_keys"),
         ),
         images=ImagesConfig(

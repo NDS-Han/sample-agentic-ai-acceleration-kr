@@ -252,9 +252,8 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
     if cfg.features.web_search:
         # URL 은 AgentCore Gateway 수동 프로비저닝 결과물 — .env 에 추가하면 활성화됨
         env["WEB_SEARCH_ENABLED"] = "true"
-    if not cfg.features.service_keys:
-        # 표지·발급 엔드포인트 전부 403 — UI 버튼은 목록 응답 필드로 숨긴다
-        env["SERVICE_KEYS_ENABLED"] = "false"
+    # 기본 꺼짐이라 항상 명시 — 미방출이면 admin-api 앱 기본 true 가 산다
+    env["SERVICE_KEYS_ENABLED"] = "true" if cfg.features.service_keys else "false"
     return env
 
 

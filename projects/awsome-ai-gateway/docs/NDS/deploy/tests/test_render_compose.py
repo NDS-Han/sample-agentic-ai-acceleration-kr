@@ -216,14 +216,15 @@ def test_grafana_admin_password_generated(tmp_path):
     assert env["GF_SECURITY_ADMIN_PASSWORD"] and env["GF_SECURITY_ADMIN_PASSWORD"] != "admin"
 
 
-def test_service_keys_disabled_env(tmp_path):
-    """features.service_keys=false → .env 에 SERVICE_KEYS_ENABLED=false."""
-    render_to(tmp_path, cfg(features={"service_keys": False}))
+def test_service_keys_disabled_by_default(tmp_path):
+    """기본 꺼짐 — 미선언이면 .env 에 SERVICE_KEYS_ENABLED=false 를 명시한다
+    (미방출이면 admin-api 앱 기본 true 가 산다)."""
+    render_to(tmp_path, cfg())
     env = common.parse_env_file(tmp_path / ".env")
     assert env["SERVICE_KEYS_ENABLED"] == "false"
 
 
-def test_service_keys_default_absent(tmp_path):
-    render_to(tmp_path, cfg())
+def test_service_keys_enabled_env(tmp_path):
+    render_to(tmp_path, cfg(features={"service_keys": True}))
     env = common.parse_env_file(tmp_path / ".env")
-    assert "SERVICE_KEYS_ENABLED" not in env
+    assert env["SERVICE_KEYS_ENABLED"] == "true"
