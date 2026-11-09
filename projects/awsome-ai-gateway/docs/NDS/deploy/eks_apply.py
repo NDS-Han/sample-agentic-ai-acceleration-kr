@@ -19,6 +19,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 import yaml
@@ -206,6 +207,139 @@ def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
         return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _alb_hostname_by_suffix(meta: dict, suffix: str, context: str = "") -> str:
+    """인그레스 이름 끝이 suffix 인 항목의 ALB hostname (예: -gateway/-admin-ui)."""
+    argv = ["kubectl", "get", "ingress", "-n", meta["namespace"], "-o", "json"]
+    if context:
+        argv += ["--context", context]
+    r = _run_quiet(argv, timeout=60)
+    if r.returncode != 0:
+        return ""
+    try:
+        for item in json.loads(r.stdout).get("items", []):
+            name = (item.get("metadata") or {}).get("name") or ""
+            if name.endswith(suffix):
+                lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+                if lb and lb[0].get("hostname"):
+                    return lb[0]["hostname"]
+    except (json.JSONDecodeError, KeyError, IndexError):
+        pass
+    return ""
+
+
+def _find_domain_cert(domain: str, region: str) -> tuple[str, str]:
+    """*.<domain>/<domain> 을 커버하는 ACM 인증서 → (arn, status). 없으면 ("","")."""
+    r = _run_quiet(["aws", "acm", "list-certificates", "--region", region,
+                    "--query", "CertificateSummaryList[].CertificateArn",
+                    "--output", "text"], timeout=60)
+    for arn in (r.stdout or "").split() if r.returncode == 0 else []:
+        d = _run_quiet(["aws", "acm", "describe-certificate",
+                        "--certificate-arn", arn, "--region", region,
+                        "--query", "Certificate.{S:Status,SAN:SubjectAlternativeNames}",
+                        "--output", "json"], timeout=30)
+        try:
+            c = json.loads(d.stdout or "{}")
+        except json.JSONDecodeError:
+            continue
+        if {f"*.{domain}", domain} & set(c.get("SAN") or []):
+            return arn, c.get("S", "")
+    return "", ""
+
+
+def ensure_domain_cert(domain: str, zone_id: str, region: str) -> str:
+    """route53-acm: *.<domain> ACM 인증서를 보장하고 ARN 을 돌려준다.
+    zone_id 가 있으면 DNS 검증 레코드도 자동 등록하고 발급을 기다린다.
+    미발급이면 "" — 이번 apply 는 cert-arn 주입 없이 지나가고 다음에 재시도."""
+    arn, status = _find_domain_cert(domain, region)
+    if status == "ISSUED":
+        return arn
+    if not arn:
+        r = _run_quiet(["aws", "acm", "request-certificate",
+                        "--domain-name", f"*.{domain}",
+                        "--subject-alternative-names", domain,
+                        "--validation-method", "DNS", "--region", region,
+                        "--query", "CertificateArn", "--output", "text"],
+                       timeout=60)
+        arn = (r.stdout or "").strip()
+        if r.returncode != 0 or not arn:
+            print(f"⚠ ACM request-certificate 실패: {r.stderr[:200]}",
+                  file=sys.stderr)
+            return ""
+        time.sleep(3)
+    if not zone_id:
+        print("ⓘ domain.zone_id 가 없어 인증서 검증 CNAME 을 수동 등록해야 "
+              "합니다 (등록 후 다음 apply 에 자동 부착)", file=sys.stderr)
+        return ""
+    d = _run_quiet(["aws", "acm", "describe-certificate",
+                    "--certificate-arn", arn, "--region", region,
+                    "--query", "Certificate.DomainValidationOptions[].ResourceRecord",
+                    "--output", "json"], timeout=30)
+    try:
+        recs = [x for x in json.loads(d.stdout or "[]") if x]
+    except json.JSONDecodeError:
+        recs = []
+    changes = [{"Action": "UPSERT",
+                "ResourceRecordSet": {"Name": rec["Name"], "Type": rec["Type"],
+                                      "TTL": 300,
+                                      "ResourceRecords": [{"Value": rec["Value"]}]}}
+               for rec in recs if rec.get("Name")]
+    if changes:
+        _run_quiet(["aws", "route53", "change-resource-record-sets",
+                    "--hosted-zone-id", zone_id,
+                    "--change-batch", json.dumps({"Changes": changes})], timeout=60)
+    for _ in range(18):  # 최대 ~3분
+        time.sleep(10)
+        s = _run_quiet(["aws", "acm", "describe-certificate",
+                        "--certificate-arn", arn, "--region", region,
+                        "--query", "Certificate.Status", "--output", "text"],
+                       timeout=30)
+        if (s.stdout or "").strip() == "ISSUED":
+            return arn
+    print("ⓘ 인증서 검증이 진행 중입니다 — 다음 apply 에 자동 부착됩니다",
+          file=sys.stderr)
+    return ""
+
+
+def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> None:
+    """route53-acm: gateway./admin./admin-api.<domain> A alias 를 live ALB 로
+    upsert 한다. zone_id 없으면 수동 등록 안내만."""
+    if not cfg.domain.zone_id:
+        print("ⓘ domain.zone_id 없음 — host 3개의 DNS 레코드는 수동 등록입니다",
+              file=sys.stderr)
+        return
+    suffix_to_host = {"-gateway": f"gateway.{cfg.domain.name}",
+                      "-admin-ui": f"admin.{cfg.domain.name}",
+                      "-admin-api": f"admin-api.{cfg.domain.name}"}
+    changes = []
+    for suffix, host in suffix_to_host.items():
+        alb = _alb_hostname_by_suffix(meta, suffix, context)
+        if not alb:
+            continue
+        z = _run_quiet(
+            ["aws", "elbv2", "describe-load-balancers", "--region", cfg.aws.region,
+             "--query", f"LoadBalancers[?DNSName=='{alb}']"
+                        ".CanonicalHostedZoneId | [0]",
+             "--output", "text"], timeout=30)
+        zone = (z.stdout or "").strip()
+        if not zone or zone == "None":
+            continue
+        changes.append({"Action": "UPSERT", "ResourceRecordSet": {
+            "Name": host, "Type": "A",
+            "AliasTarget": {"HostedZoneId": zone, "DNSName": f"dualstack.{alb}",
+                            "EvaluateTargetHealth": False}}})
+    if not changes:
+        return
+    r = _run_quiet(["aws", "route53", "change-resource-record-sets",
+                    "--hosted-zone-id", cfg.domain.zone_id,
+                    "--change-batch", json.dumps({"Changes": changes})],
+                   timeout=60)
+    if r.returncode == 0:
+        print(f"  route53: {len(changes)}개 도메인 레코드 등록 "
+              f"(zone {cfg.domain.zone_id})", file=sys.stderr)
+    else:
+        print(f"⚠ route53 레코드 등록 실패: {r.stderr[:200]}", file=sys.stderr)
+
+
 def _helm_version() -> tuple[int, int]:
     r = _run_quiet(["helm", "version", "--template", "{{.Version}}"], timeout=15)
     m = re.search(r"v(\d+)(?:\.(\d+))?", r.stdout or "")
@@ -340,6 +474,8 @@ def _infra_targets(cfg: GatewayConfig) -> list[str]:
         # 같은 ARN 이 module.agentcore_runtime 입력에도 쓰이지만 그 모듈은
         # web_search 프로비저닝 경로가 별도로 관리하므로 여기선 대상에 넣지 않는다.
         modules.add("module.irsa")
+    if cfg.domain.name:
+        modules.add("module.cognito")  # gen tfvars 의 콜백/로그아웃 URL 반영
     return sorted(f"-target={m}" for m in modules)
 
 
@@ -352,6 +488,22 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
     if (cfg.features.notifications.provider == "ses"
             and not outs.get("notification_worker_ses_role_arn")):
         missing.append("notification-worker SES IRSA")
+    if (cfg.domain.name and outs.get("cognito_client_id")
+            and outs.get("cognito_user_pool_id")):
+        want = f"https://admin.{cfg.domain.name}/api/auth/callback"
+        r = _run_quiet(
+            ["aws", "cognito-idp", "describe-user-pool-client",
+             "--user-pool-id", outs["cognito_user_pool_id"],
+             "--client-id", outs["cognito_client_id"],
+             "--region", cfg.aws.region,
+             "--query", "UserPoolClient.CallbackURLs",
+             "--output", "json"], timeout=30)
+        try:
+            have = json.loads(r.stdout or "[]")
+        except json.JSONDecodeError:
+            have = []
+        if want not in have:
+            missing.append(f"cognito(admin.{cfg.domain.name} 콜백 등록)")
     return missing
 
 
@@ -687,6 +839,22 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 만 "
                   "켜진 상태로 진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
 
+    # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
+    # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).
+    if cfg.domain.mode == "route53-acm" and cfg.domain.name:
+        arn = ensure_domain_cert(cfg.domain.name, cfg.domain.zone_id,
+                                 cfg.aws.region)
+        if arn:
+            for key in ("gateway", "adminUi", "adminApi"):
+                set_args += ["--set-string",
+                             f"ingress.{key}.annotations."
+                             "alb\\.ingress\\.kubernetes\\.io/"
+                             "certificate-arn=" + arn]
+        else:
+            print("ⓘ ACM 인증서가 아직 ISSUED 가 아닙니다 — 이번 apply 는 "
+                  "cert 없이 진행하고 다음 apply 에 자동 부착합니다",
+                  file=sys.stderr)
+
     # domain.selfsigned-temp — admin-ui 만 임시 HTTPS. ALB hostname 은 live
     # ingress 에서 읽으므로 첫 설치(아직 ALB 없음)는 인증서 없이 지나가고 다음
     # apply 에 붙는다. cert-arn 은 values 에 못 박는 런타임값이라 --set 주입.
@@ -734,5 +902,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                             extra_sets=["--set",
                                         f"adminUi.nextauthUrl={scheme}://{host}"]),
                  cwd=repo_root)
+    # domain.route53-acm — ALB 가 생긴 뒤 host 3개의 A alias 를 upsert 한다
+    if cfg.domain.mode == "route53-acm" and cfg.domain.name:
+        ensure_domain_records(cfg, meta, context)
     return {"release": meta["release"], "namespace": meta["namespace"],
             "alb_hostname": live_alb_hostname(meta, context)}
