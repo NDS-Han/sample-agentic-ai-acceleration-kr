@@ -99,7 +99,9 @@ render_deploy_env() {
   local out
   out=$(helm template "$HELM_RELEASE" "$CHART" -f "$1" 2>&1) \
     || { printf 'helm template failed for %s:\n%s\n' "$1" "$(tail -5 <<<"$out")" >&2; return 1; }
-  python3 - "$2" <<'PY' <<<"$out"
+  # ⚠️ heredoc(<<'PY') 으로 스크립트를 넘기면 안 된다 — <<<"$out" 가 stdin 을
+  # 덮어 helm 출력을 스크립트로 실행해 SyntaxError 난다. -c 형태 유지.
+  python3 -c '
 import sys, yaml
 suffix = sys.argv[1]
 for d in yaml.safe_load_all(sys.stdin):
@@ -108,7 +110,7 @@ for d in yaml.safe_load_all(sys.stdin):
             if "value" in e:
                 print(e["name"] + "\t" + str(e["value"]))
         break
-PY
+' "$2" <<<"$out"
 }
 
 declare -A RV   # rendered: RV[FIREHOSE_STREAM_NAME]=...
@@ -155,16 +157,23 @@ def ind(l): return len(l) - len(l.lstrip(" "))
 def code(l): return l.strip() != "" and not l.lstrip().startswith("#")
 
 def env_block(sec):
+    """<sec>.env 블록의 (env: 라인, 블록 끝) — 섹션/env 부재면 None. del op 는
+    부재 섹션에서 no-op 이어야 disable 이 블록 없는 파일도 정리할 수 있다."""
     hits = [i for i, l in enumerate(L) if re.match(rf"^{sec}:\s*(#.*)?$", l)]
-    if len(hits) != 1:
+    if len(hits) > 1:
         sys.exit(f"values: top-level '{sec}:' found {len(hits)} times (need exactly 1)")
+    if not hits:
+        return None
     s = hits[0]
     e = next((i for i in range(s + 1, len(L)) if code(L[i]) and ind(L[i]) == 0), len(L))
     envs = [i for i in range(s + 1, e) if code(L[i]) and ind(L[i]) == 2 and re.match(r"^\s*env:", L[i])]
-    if len(envs) != 1:
+    if len(envs) > 1:
         sys.exit(f"values: '{sec}.env:' found {len(envs)} times (need exactly 1)")
+    if not envs:
+        return None  # env 블록 부재 — del 은 no-op, set 은 호출부가 에러 처리
     i = envs[0]
     if not re.match(r"^\s*env:\s*(#.*)?$", L[i]):
+        # inline env({...}) 는 키가 들어있을 수 있어 del 도 억지로 넘기면 안 된다
         sys.exit(f"values: '{sec}.env:' is inline ({L[i].strip()}) — make it a block map first")
     j = i + 1
     while j < e and (not code(L[j]) or ind(L[j]) > 2):
@@ -175,7 +184,12 @@ for n in range(0, len(ops), 4):
     sec, op, key, val = ops[n:n + 4]
     if op not in ("set", "del"):
         sys.exit(f"edit_values: unknown op '{op}'")
-    i, j = env_block(sec)
+    blk = env_block(sec)
+    if blk is None:
+        if op == "del":
+            continue  # 섹션/env 블록이 없으면 지울 것도 없다 — no-op
+        sys.exit(f"values: '{sec}:' section or env block not found — add the key by hand")
+    i, j = blk
     hits = [k for k in range(i + 1, j) if code(L[k]) and ind(L[k]) == 4 and re.match(rf"^\s*{key}:", L[k])]
     if len(hits) > 1:
         sys.exit(f"values: {sec}.env.{key} appears {len(hits)} times — fix the file first")
