@@ -103,7 +103,11 @@ def test_service_keys_env_case_and_bool_forms():
     assert capture._is_false_env("0") is True
     assert capture._is_false_env("no") is True
     assert capture._is_false_env("true") is False
-    assert capture._is_false_env(None) is False  # 부재 = 앱 기본값이 진리
+    assert capture._is_false_env(None) is False  # 부재 ≠ 명시적 off — "못 읽음" 구분용
+    # 부재 → service_keys 는 _is_true_env(None)=False — 앱 기본 false(fail-closed)
+    assert capture._is_true_env(None) is False
+    assert capture._is_true_env(True) is True
+    assert capture._is_true_env("True") is True
 
 
 def test_diff_docs_finds_changes():

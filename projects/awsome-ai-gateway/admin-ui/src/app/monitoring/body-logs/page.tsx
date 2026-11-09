@@ -18,11 +18,12 @@ export default async function BodyLogsPage() {
 
   const result = await getBodyLoggingAction();
   const enabled = result.success ? result.data.enabled : null;
-  // 읽기 실패(null)면 프로비저닝 여부도 모른다 — 뷰어를 잠그는 방향이 안전.
   const provisioned = result.success ? result.data.provisioned !== false : true;
 
   // stale ON + 미프로비저닝이면 뷰어 API 도 버킷 미설정으로 503 — 화면 자체를
   // 뷰어가 아닌 안내 상태로 둔다(토글·EventLog 링크와 같은 잠금 방향).
+  // enabled=false & 미프로비저닝(정상 OFF)은 일반 disabled 안내로 둔다 —
+  // "플래그가 ON으로 남아 있다"는 안내를 꺼진 운영자에게 띄우면 안 된다.
   if (enabled !== true || !provisioned) {
     return (
       <div className="space-y-4">
@@ -31,7 +32,7 @@ export default async function BodyLogsPage() {
           <p className="text-sm text-muted-foreground">
             {enabled === null
               ? t('statusUnknown')
-              : !provisioned
+              : enabled === true && !provisioned
                 ? t('staleOnNotice')
                 : t('disabledNotice')}
           </p>

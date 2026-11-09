@@ -40,8 +40,8 @@ def _is_true_env(v) -> bool:
 def _is_false_env(v) -> bool:
     """env/values 의 명시적 off 판정 — yaml `false`(비인용 bool), "0", "no" 포함.
 
-    부재(None)는 false 가 아니다 — 앱 기본값이 진리라 "읽지 못함 = false"로
-    오인하면 켜진 배포를 꺼진 것으로 캡처한다(보안 플래그의 fail-open).
+    부재(None)는 false 가 아니다 — "읽지 못함" 과 "명시적 off" 를 구분해
+    캡처가 무엇을 모르는지 표현할 수 있게 한다.
     """
     return str(v if v is not None else "").strip().lower() in ("false", "0", "no", "off")
 
@@ -123,12 +123,16 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     if isinstance(ui_env, list):
         ui_env = dict(e.split("=", 1) for e in ui_env if "=" in e)
     # SERVICE_KEYS_ENABLED — 렌더러는 .env(env_file)에만 쓰고 environment: 블록은
-    # override 라 api_env 우선. 둘 다 부재면 앱 기본 true 가 진리다. 옆의
-    # dev_login 처럼 두 소스를 봐야 한다 — api_env 만 보면 .env 에 false 로
-    # 배포된 것도 true 로 캡처돼 채택 시 발급이 켜진다.
+    # override 라 api_env 우선. 둘 다 부재면 앱 기본 false(fail-closed)가
+    # 진리다 — 보안 플래그는 "못 읽으면 꺼짐" 쪽으로 기록해야 채택이 안전하다.
     sk_env = api_env.get("SERVICE_KEYS_ENABLED")
     if sk_env is None:
         sk_env = env.get("SERVICE_KEYS_ENABLED")
+    if sk_env is None:
+        notes.append(
+            "SERVICE_KEYS_ENABLED 를 못 읽었습니다 — false 기록. 앱 기본은 "
+            "false(구 이미지에서 env 없이 켜져 있던 배포라면 true 로 바로잡고 "
+            "환경에 env 를 명시하세요)")
     features = {
         "notifications": notif,
         "bi_insight": bool(env.get("AGENTCORE_RUNTIME_ARN")
@@ -141,7 +145,7 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
         "dev_login": (_is_true_env(env.get("DEV_LOGIN_ENABLED"))
                       or _is_true_env(api_env.get("DEV_LOGIN_ENABLED"))
                       or _is_true_env(ui_env.get("DEV_LOGIN_ENABLED"))),
-        "service_keys": not _is_false_env(sk_env),
+        "service_keys": _is_true_env(sk_env),
     }
 
     # oidc — admin-ui environment(직접 주입된 것) + .env
@@ -440,11 +444,11 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             # 캡처 문서 자체가 스키마 위반이 된다.
             "observability": False,
             "dev_login": _is_true_env(sizing_env.get("DEV_LOGIN_ENABLED")),
-            # task def 읽기 실패(sizing_env={})면 앱 기본 true 로 추정해
-            # service_keys=true 를 기록하게 된다 — 보안 플래그의 fail-open 이라
-            # 읽기 실패는 false 로 두고 notes 로 실제 값 확인을 요구한다.
+            # task def 읽기 실패(sizing_env={}) 또는 env 부재 — 앱 기본은
+            # false(fail-closed)라 "못 읽으면 꺼짐"으로 기록한다. 보안 플래그를
+            # true 로 추정해 채택 시 발급이 열리는 fail-open 방지.
             "service_keys": (api_env_ok
-                             and not _is_false_env(
+                             and _is_true_env(
                                  sizing_env.get("SERVICE_KEYS_ENABLED"))),
         },
         "images": {"tag": image_tag},
@@ -710,9 +714,10 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "web_search": _is_true_env(genv.get("WEB_SEARCH_ENABLED")),
         "observability": otel_mode not in ("", "disabled", "none"),
         "dev_login": False,
-        # values 에 손으로 false(비인용 bool)를 박으면 str(False)="False" 가
-        # 되어 true 로 오인한다 — _is_false_env 로 정규화.
-        "service_keys": not _is_false_env(aenv.get("SERVICE_KEYS_ENABLED")),
+        # env 부재는 앱 기본 false(fail-closed) — 명시 truthy 일 때만 켠다.
+        # values 에 손으로 false(비인용 bool)를 박아도 yaml 파서가 False 로
+        # 넘기니 _is_true_env 의 문자열 정규화로 안전하다.
+        "service_keys": _is_true_env(aenv.get("SERVICE_KEYS_ENABLED")),
     }
     # body_logging 은 eks managed overlay 가 "켜기"만 소유하므로 false 를
     # 박지 않는다 — 박으면 validate 마다 수동 비활성화 경고가 난다.
