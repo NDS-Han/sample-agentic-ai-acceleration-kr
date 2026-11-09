@@ -62,14 +62,13 @@ SSIR_Platform_Engineers → tail "Platform_Engineers"→ 부서 Platform, 팀 En
 
 ## ② AWS 측 작업 (우리)
 
-prod 풀 기준 값: user-pool `ap-south-1_htFYPGP0m`, client
-`48v3da1a6fqdjkqi24te26f4n6`, region `ap-south-1`.
+아래 값은 예시입니다 — 실제 풀 ID·클라이언트 ID·리전으로 바꿔 실행하세요.
 
 ### 1. custom attribute 생성 + ReadAttributes 추가
 
 ```bash
 aws cognito-idp add-custom-attributes \
-  --user-pool-id ap-south-1_htFYPGP0m \
+  --user-pool-id <user-pool-id> \
   --custom-attributes Name=groups,AttributeDataType=String,Mutable=true \
   --region ap-south-1
 ```
@@ -85,7 +84,7 @@ aws cognito-idp add-custom-attributes \
 
 ```bash
 aws cognito-idp create-identity-provider \
-  --user-pool-id ap-south-1_htFYPGP0m \
+  --user-pool-id <user-pool-id> \
   --provider-name ADFS --provider-type SAML \
   --provider-details MetadataFile=file://FederationMetadata.xml \
   --attribute-mapping '{"email":"email","name":"name","custom:groups":"groups"}' \
@@ -121,7 +120,7 @@ eks는 `adminApi.oidc.*`/`adminBootstrap` 키로, compose는 env로, ecs는 tfva
 ### 5. 검증
 
 hosted UI에 `ADFS` 버튼 표시 → 로그인 →
-`aws cognito-idp admin-get-user --user-pool-id ap-south-1_htFYPGP0m
+`aws cognito-idp admin-get-user --user-pool-id <user-pool-id>
 --username ADFS_<id>`로 `custom:groups` 확인 → 대시보드에서 부서/팀·역할 확인.
 
 ## ③ AD 없이 미리 테스트
@@ -133,13 +132,13 @@ hosted UI에 `ADFS` 버튼 표시 → 로그인 →
 # ① custom attribute 생성 (위와 동일 — 한 번이면 됨)
 # ② 테스트 사용자에 속성 부여
 aws cognito-idp admin-update-user-attributes \
-  --user-pool-id ap-south-1_htFYPGP0m --username <test-user> \
+  --user-pool-id <user-pool-id> --username <test-user> \
   --user-attributes "Name=custom:groups,Value=SSIR_Claude_Developers" \
   --region ap-south-1
 
 # ③ 기존 관리자에도 — groups_claim 전환 후 네이티브 계정이 잠기지 않게
 aws cognito-idp admin-update-user-attributes \
-  --user-pool-id ap-south-1_htFYPGP0m --username <admin-user> \
+  --user-pool-id <user-pool-id> --username <admin-user> \
   --user-attributes "Name=custom:groups,Value=SSIR_Claude_Admin" \
   --region ap-south-1
 ```
@@ -155,7 +154,7 @@ Developers 생성·배정 확인 → 관리자는 ADMIN 유지 확인.
 
 ```bash
 aws cognito-idp admin-update-user-attributes \
-  --user-pool-id ap-south-1_htFYPGP0m --username <기존관리자> \
+  --user-pool-id <user-pool-id> --username <기존관리자> \
   --user-attributes "Name=custom:groups,Value=SSIR_NDS_Admin" \
   --region ap-south-1
 ```
@@ -198,7 +197,7 @@ admin-ui 로그인 전에 프로비저닝이 필요**합니다. 운영 선택지
 
   ```bash
   aws cognito-idp admin-user-global-sign-out \
-    --user-pool-id ap-south-1_htFYPGP0m --username ADFS_<id>
+    --user-pool-id <user-pool-id> --username ADFS_<id>
   ```
 
   풀의 `ADFS_<id>` 레코드는 자동 정리되지 않습니다 — 정리하려면
