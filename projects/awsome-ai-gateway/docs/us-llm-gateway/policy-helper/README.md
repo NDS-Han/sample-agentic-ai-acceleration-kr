@@ -1,9 +1,10 @@
-# policyHelper — 사용자별 Claude Code 정책 (PoC)
+# policyHelper — 사용자별 Claude Code 정책
 
 Claude Code 가 시작할 때 `policy-helper.exe` 가 사용자의 VK 로 게이트웨이에 정책을 물어, 관리형 설정을
-사용자·팀별로 계산하는 구조입니다. 지금은 모델 선택 목록을 대상으로 PoC 를 했습니다.
+사용자·팀별로 계산하는 구조입니다. 게이트웨이만으로는 모델 선택 목록을, AI Governance Hub 를 연결하면
+플러그인·MCP 서버·잠금까지 팀별로 정합니다.
 
-- 상태: **PoC 1~3단계 완료**(2026-09-26, US dev) · 4단계(설치기 경로) 남음 · **지금은 배포되어 있지 않음**(아래 「코드와 배포 위치」)
+- 상태: **`US-21` 로 편입**(2026-11, 선택) — 적용 절차는 [ops/8-G-policy-helper.md](../ops/8-G-policy-helper.md) · PoC 1~3단계 완료(2026-09-26, US dev) · 4단계(설치기 경로) 남음
 
 ```
 Claude Code --(start, every 5 min)--> policy-helper.exe --(VK)--> gateway GET /v1/policy
@@ -33,12 +34,13 @@ Claude Code --(start, every 5 min)--> policy-helper.exe --(VK)--> gateway GET /v
 
 ## 코드와 배포 위치
 
-- 코드: 이 repo 의 브랜치 `feat/policy-helper-poc` (`us/deploy-fixes` 에는 없음)
-  - helper: `projects/awsome-ai-gateway/policy-helper/`
-  - 게이트웨이: `projects/awsome-ai-gateway/gateway-proxy/` 의 `GET /v1/policy`
-- 배포: 지금은 어디에도 배포되어 있지 않습니다. PoC 때 US dev 에 올린 gateway-proxy
-  `1.0.83-policyhelper` 는 2026-10-06 다음 업데이트(`1.0.84-safeguards`)로 바뀌면서 `/v1/policy` 가 빠졌습니다.
-- 다시 쓸 때: 옛 이미지로 되돌리지 말고, 브랜치를 최신 `us/deploy-fixes` 위로 리베이스한 뒤 새 태그로 빌드합니다.
+- 코드: 이 repo 의 브랜치 `us/deploy-fixes`
+  - helper: `projects/awsome-ai-gateway/policy-helper/` (0.2.1 · Windows `build.ps1` · Mac `build.sh` + 설치 스크립트 4종)
+  - 게이트웨이: `projects/awsome-ai-gateway/gateway-proxy/` 의 `GET /v1/policy` (이미지 `1.0.91-us21` 부터)
+- 적용 절차: [ops/8-G-policy-helper.md](../ops/8-G-policy-helper.md) — 21-A 헬퍼만 · 21-B 허브 연결
+- 팀별 정책(플러그인·MCP 서버·잠금·승인 흐름): 별도 저장소 https://github.com/gonsoomoon-ml/ai-governance-hub
+- PoC 기록: 9월 PoC 는 gateway-proxy `1.0.83-policyhelper` 로 했고, 그 이미지는 2026-10-06 다음 업데이트에서
+  빠졌다가 `US-21` 로 다시 들어왔습니다. 아래 단계별 가이드의 이미지 이름·브랜치는 그때 기록입니다.
 - dev Windows: `C:\Program Files\PolicyHelper\`, 관리형 설정에 `policyHelper` 블록
 
 ## 남은 일

@@ -57,6 +57,8 @@
   - **`US-15`(VK 수명 24시간, 선택)** — 설치 절차의 기본은 1시간이다. 처음부터 24시간으로 하려면 §3-6 에서 values 에 `adminApi.oidc.vkTtlHours: 24` 한 줄을 넣고, 나중에 바꾸려면 [ops/8-Z-token-ttl.md](ops/8-Z-token-ttl.md).
   - **`US-20` 의 선택 기능 2개** — 본문 로깅([ops/8-V](ops/8-V-body-logging.md), 개인정보 검토 필수)과
     알림 메일 발송([ops/8-W](ops/8-W-notifications.md), 기본은 발송 안 함). 필요할 때 켭니다.
+  - **`US-21`(policy-helper, 선택)** — 코드는 설치에 들어 있고 켜지 않으면 달라지는 것이 없습니다. 허용 모델을 PC 의
+    `/model` 목록에 맞추거나 팀별 정책을 쓰려면 [ops/8-G](ops/8-G-policy-helper.md) 로 직원 PC 에 헬퍼를 설치합니다.
 - **직원 PC 설치 방식은 둘 중 하나만 고른다** — Windows 는 `US-01` §6-3 의 수동 절차(Python·저장소·PATH)로 붙이거나, 설치 파일 하나로 끝내는 **`US-14`** 으로 한다. Cowork 도 같은 선택이 수동 가이드 ↔ **`US-09`** 로 있다. 어느 쪽이든 게이트웨이는 바뀌지 않는다.
 - **POC(`US-01`)** 에만 해당:
   - **`US-06`(ALB HTTPS)** — Cowork 는 https 필수. 도메인 없으면 CloudFront(`03`), 있으면 US-06 — 둘 다는 불필요. 나중에 도메인이 생기면 [전환 절차](ops/8-H-alb-https.md).

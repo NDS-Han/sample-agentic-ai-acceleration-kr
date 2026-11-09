@@ -2,7 +2,7 @@
 # ---------------------------------------------------------------------------
 # status.sh — which updates this gateway has applied
 #
-# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15, US-16 and US-18 … US-20 as
+# WHAT: probe the live system and report US-02 … US-07, US-12, US-13, US-15, US-16 and US-18 … US-21 as
 #       applied, partially applied, or not applied, and print the next command
 #       for each. Every other US-NN gets a `--` line that says where it is
 #       checked instead (another account, the employee PC, 14-postdeploy-check.sh),
@@ -772,6 +772,36 @@ probe_us20() {
   fi
 }
 
+# ── US-21 — policy-helper path, optional hub (optional) ────────────────────
+# Evidence is the running gateway-proxy image: 1.0.90 is the first build that
+# carries GET /v1/policy with the hub allow-list. The route does nothing until
+# a PC runs policy-helper, so "not applied" is skip, not warn. Whether the hub
+# is connected is read from the Deployment env (ops/8-G-policy-helper.md).
+probe_us21() {
+  local gp img tag hub
+  gp=$(kubectl get deploy "${HELM_RELEASE}-gateway-proxy" -n "$NS" -o json 2>/dev/null)
+  img=$(jq -r '.spec.template.spec.containers[0].image // ""' <<<"$gp" 2>/dev/null)
+  tag=${img##*:}
+  if [[ ! "$tag" =~ ^1\.0\.([0-9]+)(-|$) ]]; then
+    row warn "US-21" "policy-helper 경로(/v1/policy) — 판정 불가"
+    detail "gateway-proxy 이미지 태그를 읽지 못했습니다 (${img:-kubectl get deploy 실패})"
+    return
+  fi
+  if [ "${BASH_REMATCH[1]}" -lt 90 ]; then
+    row skip "US-21" "policy-helper 경로(/v1/policy) — 미적용 (선택)"
+    detail "gateway-proxy:$tag — ops/8-G-policy-helper.md"
+    return
+  fi
+  hub=$(jq -r '[.spec.template.spec.containers[0].env[]? | select(.name == "POLICY_HUB_URL") | .value] | last // ""' <<<"$gp")
+  if [ -n "$hub" ]; then
+    row ok "US-21" "policy-helper 경로(/v1/policy) — 있음 · 허브 연결함"
+    detail "POLICY_HUB_URL=$hub — 직원 PC 의 헬퍼 설치 여부는 PC 에서 (/status 의 helper)"
+  else
+    row ok "US-21" "policy-helper 경로(/v1/policy) — 있음 · 허브 연결 안 함"
+    detail "모델 목록만 내려 줍니다 — 직원 PC 의 헬퍼 설치 여부는 PC 에서 (/status 의 helper)"
+  fi
+}
+
 # ── Items this script does not judge — listed so nothing reads as "applied" by
 #    omission. Each line says where the real check is.
 info_us08() {
@@ -819,6 +849,7 @@ probe_us17
 probe_us18
 probe_us19
 probe_us20
+probe_us21
 probe_notif_ses
 
 echo
