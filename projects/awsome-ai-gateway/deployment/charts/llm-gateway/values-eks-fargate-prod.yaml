@@ -342,6 +342,10 @@ adminApi:
     # 관리자 로그인은 아래 oidc(Cognito) 경로를 쓴다 — 이미 enabled=true 이고
     # adminBootstrap.emails 가 첫 운영자를 ClaudeAdmin 으로 승격한다.
     DEV_LOGIN_ENABLED: "false"
+    # 서비스 계정(에이전트) 장기키 발급 게이트 — 기본 꺼짐(앱+차트+NDS 렌더 모두
+    # fail-closed). /agents 발급·서비스 계정 표지를 쓰는 환경이면 "true" 명시.
+    # 기존 발급 키는 false 여도 폐기·만료 전까지 유효 — 발급만 차단된다.
+    SERVICE_KEYS_ENABLED: "false"
     # CHANGE_ME (terraform output): Cognito User Pool ID. terraform output -raw cognito_user_pool_id
     COGNITO_USER_POOL_ID: "ap-northeast-2_oofmkaz81"
     COGNITO_REGION: "ap-northeast-2"
