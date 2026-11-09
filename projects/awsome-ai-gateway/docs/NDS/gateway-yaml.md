@@ -205,7 +205,7 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 | `body_logging` | 요청 본문 S3 로깅 | 인프라 + 관리자 런타임 토글 이중 게이트. eks: `false`/미선언은 인프라를 부수지 않지만 apply 시 `BODY_LOG_*` env 주입이 멈춰 파드 배선이 끊기고, **env 가 없으면 런타임 토글도 켜기 403·UI 스위치 잠김** (GET 응답 `provisioned`) — 수동으로 env values 에 배선을 적은 경우는 토글 유지 |
 | `observability` | OTel/Prometheus/Loki/Tempo/Grafana | **compose 전용** — ecs/eks에서는 무시(validate가 경고) |
 | `dev_login` | 인증 없는 개발자 로그인 (oidc 와 공존) | 기본 false: oidc 설정 시 admin-ui `DEV_LOGIN_ENABLED` 를 끈다. true: adminUi+adminApi 양쪽에 켠다 — 인터넷 노출 시 `allowed_cidrs` 제한 필수 |
-| `service_keys` | 서비스 계정(에이전트) 장기 VK 발급 | **기본 false(opt-in)**. 미선언·false: `POST /admin/keys`·서비스 계정 표지·발급 엔드포인트를 403 거부, UI 발급 버튼 숨김(목록 응답 `service_keys_enabled`). true 로 명시해야 발급이 열린다. **기존 키는 폐기·만료 전까지 유효** — 발급만 차단 (세 backend 공통) |
+| `service_keys` | 서비스 계정(에이전트) 장기 VK 발급 | **기본 false(opt-in)**. 미선언·false: `POST /admin/keys`·서비스 계정 표지·발급 엔드포인트를 403 거부, UI 발급 버튼 숨김(목록 응답 `service_keys_enabled`). true 로 명시해야 발급이 열린다. **기존 키는 폐기·만료 전까지 유효** — 발급만 차단. 기본 꺼짐은 세 backend 렌더 + 헬름 차트 기본값(`adminApi.env.SERVICE_KEYS_ENABLED: "false"`)이 함께 보장; admin-api 앱 기본값은 true(후방호환)라 **env 가 비어 있으면 열린다** — 차트/렌더 외 수동 배포는 env 를 명시해야 한다 |
 
 ### `oidc`
 

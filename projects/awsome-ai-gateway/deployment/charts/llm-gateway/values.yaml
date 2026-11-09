@@ -686,6 +686,11 @@ adminApi:
     # 뷰어 API 는 503. install-eks.sh 경로는 두 곳 모두 수동 주입이 필요하고,
     # NDS(./deploy) 경로는 terraform output body_log_bucket 에서 자동 주입된다.
     BODY_LOG_S3_BUCKET: ""
+    # 서비스 계정 장기키 발급 — 기본 꺼짐(opt-in, fail-closed). admin-api 앱
+    # 기본은 true 라 여기서 명시하지 않으면 install-eks.sh/수동 helm 경로가
+    # 열린다. NDS(./deploy)는 gateway.yaml 의 features.service_keys 값을 항상
+    # 내려 이 키를 덮는다.
+    SERVICE_KEYS_ENABLED: "false"
     # REPORTING_TIMEZONE 은 공통 ConfigMap(global.reportingTimezone) 에서 주입됨.
     # 서비스별로 다르게 두지 말 것 — 여기 개별 override 하지 않는다.
 

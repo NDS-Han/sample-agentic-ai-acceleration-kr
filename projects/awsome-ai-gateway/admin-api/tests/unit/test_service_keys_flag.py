@@ -78,3 +78,46 @@ class TestIssueGates:
                 await mark_and_issue_service_key(
                     uuid.uuid4(), MagicMock(), MagicMock(), _admin(),
                     mock_session)
+
+
+class TestRecoveryStaysOpen:
+    """발급/표지를 막아도 해지 경로는 열어둔다 — 꺼진 배포에서 기존 키·표지를
+    정리할 수 있어야 한다. 두 함수 모두 _require_service_keys_enabled 를
+    호출하지 않는다는 회귀 보장."""
+
+    async def test_unmark_not_flag_gated(self, mock_session):
+        """서비스 계정이 아닌 유저는 표지 해제가 no-op — flag 가 막았다면
+        ForbiddenError 가 먼저 난다."""
+        from app.routers.service_accounts import unmark_service_account
+
+        user = MagicMock()
+        user.id = uuid.uuid4()
+        user.is_service_account = False
+        with patch(
+            "app.routers.service_accounts.get_settings",
+            return_value=_settings(False),
+        ), patch(
+            "app.routers.service_accounts.UserRepository"
+        ) as repo_cls:
+            repo_cls.return_value.get_user = AsyncMock(return_value=user)
+            req = MagicMock()
+            req.client.host = "127.0.0.1"
+            req.state.request_id = "r1"
+            out = await unmark_service_account(
+                user.id, req, _admin(), mock_session)
+        assert out["is_service_account"] is False
+
+    async def test_revoke_not_flag_gated(self, mock_session):
+        """revoke 는 KeyService 에 위임 — flag 게이트가 없어 서비스까지 도달."""
+        from app.routers.keys import revoke_key
+
+        svc = MagicMock()
+        svc.revoke_key = AsyncMock()
+        req = MagicMock()
+        req.app.state.key_service = svc
+        req.client.host = "127.0.0.1"
+        req.state.request_id = "r1"
+        with patch("app.routers.keys.get_settings",
+                   return_value=_settings(False)):
+            await revoke_key(req, uuid.uuid4(), _admin(), mock_session)
+        svc.revoke_key.assert_awaited_once()
