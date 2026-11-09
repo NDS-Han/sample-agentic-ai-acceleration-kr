@@ -27,6 +27,19 @@ def key_service(encryption, cache_mgr) -> KeyService:
     return KeyService(encryption=encryption, cache_mgr=cache_mgr)
 
 
+@pytest.fixture(autouse=True)
+def _service_keys_on():
+    """이 파일은 발급·표지 흐름 자체를 검증한다 — 배포 플래그 기본은
+    false(fail-closed)라 실제 settings 에 플래그만 켜서 패치한다.
+    (라우터가 APP_KEY_MAX_TTL_DAYS 도 읽으므로 bare mock 은 안 됨)
+    게이트 동작 자체는 test_service_keys_flag.py 가 커버."""
+    from app.core.config import get_settings
+
+    s = get_settings()
+    with patch.object(s, "SERVICE_KEYS_ENABLED", True):
+        yield
+
+
 def _user(*, service: bool, role: UserRole = UserRole.DEVELOPER) -> MagicMock:
     u = MagicMock(spec=User)
     u.id = uuid.uuid4()

@@ -193,7 +193,9 @@ class Settings(BaseSettings):
     # 배포 플래그(gateway.yaml features.service_keys) — false 면 서비스 계정
     # 표지·장기키 발급 엔드포인트를 전부 403 거부한다. 기존 ACTIVE 키는
     # 폐기/만료 전까지 유효하므로 repair 잡은 계속 돌린다.
-    SERVICE_KEYS_ENABLED: bool = True
+    # 기본 false(fail-closed): 켜는 배포는 env 로 명시한다 — NDS 렌더·차트
+    # 기본값 모두 이 키를 항상 내린다.
+    SERVICE_KEYS_ENABLED: bool = False
 
     # IDP 별 claim 이름 차이 흡수 (Cognito 면 'cognito:groups')
     OIDC_USER_ID_CLAIM: str = "sub"
