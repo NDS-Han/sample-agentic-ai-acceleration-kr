@@ -1258,6 +1258,27 @@ def cmd_capture(args) -> int:
         except schema.SchemaError as exc:
             console.print(f"[yellow]캡처 결과에 미완성 필드가 있습니다:\n{exc}")
 
+        # 기존 config 와 diff — 파일을 쓰기 전에 계산해야 "채택하면 삭제되는 키"
+        # 를 notes/패널에 심을 수 있다. 캡처본을 통째로 cp 하면 캡처가 라이브에서
+        # 못 읽는 yaml 전용 선언(infra.* 정책, images.tags.migration 등)이
+        # 침묵 삭제된다 — 비교표엔 나오지만 채택 경로가 막지 않았다.
+        diffs: list = []
+        dropped: list = []
+        if existing and cfg_path.exists():
+            # 스키마로 정규화해 비교 — 미기재 키 vs 기본값 캡처는 차이가 아니다
+            try:
+                from dataclasses import asdict
+                diffs = capture.diff_docs(
+                    asdict(schema.from_dict(existing)), asdict(schema.from_dict(doc)))
+            except schema.SchemaError:
+                diffs = capture.diff_docs(existing, doc)
+            dropped = capture.dropped_keys(diffs)
+            if dropped:
+                notes.append(
+                    "⚠ 채택(cp)하면 삭제되는 yaml 전용 키 — 캡처가 라이브에서 못 "
+                    "읽습니다. cp 전 이 파일에 복원하거나 --interactive 로 병합 "
+                    "채택하세요: " + ", ".join(k for k, _ in dropped))
+
         out_path = Path(args.out) if args.out else \
             cfg_path.parent / f"gateway.captured-{doc.get('env', 'env')}.yaml"
         if out_path.exists():
@@ -1273,12 +1294,18 @@ def cmd_capture(args) -> int:
             console.print(f"  [yellow]ⓘ {n}")
 
         rel = out_path.relative_to(REPO_ROOT) if out_path.is_relative_to(REPO_ROOT) else out_path
+        adopt_step = (
+            f"  2. 채택 — ⚠ 캡처본에 없는 yaml 전용 키가 {len(dropped)}개 있습니다 (위 notes).\n"
+            f"       cp 전 복원하거나 --interactive 로 병합 채택하세요\n"
+            f"       cp {rel} deployment/gateway.yaml\n"
+            if dropped else
+            f"  2. 채택 — gateway.yaml 로 승격하거나 --config 로 바로 사용\n"
+            f"       cp {rel} deployment/gateway.yaml\n")
         console.print(Panel(
             f"[bold]다음 단계[/bold]\n"
             f"  1. 검토 — 위 notes 의 빈칸/주의사항을 채우세요\n"
             f"       vi {rel}\n"
-            f"  2. 채택 — gateway.yaml 로 승격하거나 --config 로 바로 사용\n"
-            f"       cp {rel} deployment/gateway.yaml\n"
+            + adopt_step +
             f"  3. 검증 + 산출물 생성\n"
             f"       ./deploy render --config {rel}\n"
             f"  4. 변경 미리보기 (아무것도 안 바뀜)\n"
@@ -1288,15 +1315,8 @@ def cmd_capture(args) -> int:
             f"       ./deploy doctor --config {rel}",
             title="capture 완료", expand=False))
 
-        # 기존 config 와 diff → interactive 흡수
-        if existing and cfg_path.exists():
-            # 스키마로 정규화해 비교 — 미기재 키 vs 기본값 캡처는 차이가 아니다
-            try:
-                from dataclasses import asdict
-                diffs = capture.diff_docs(
-                    asdict(schema.from_dict(existing)), asdict(schema.from_dict(doc)))
-            except schema.SchemaError:
-                diffs = capture.diff_docs(existing, doc)
+        # 기존 config 와 diff → interactive 흡수 (diffs 는 위에서 계산됨)
+        if diffs or (existing and cfg_path.exists()):
             if not diffs:
                 console.print("\n[green]기존 gateway.yaml 과 일치 — 드리프트 없음")
                 return 0
@@ -1305,11 +1325,25 @@ def cmd_capture(args) -> int:
             for k, dv, cv in diffs:
                 table.add_row(k, str(dv), str(cv))
             console.print(table)
+            unreadable = {k for k, _ in dropped}
+            if unreadable:
+                console.print(
+                    f"[yellow]⚠ {len(unreadable)}개 키는 캡처가 못 읽습니다 — "
+                    f"캡처본을 cp 로 덮으면 삭제됩니다: "
+                    + ", ".join(sorted(unreadable)))
             if args.interactive:
                 questionary = _questionary()
                 from questionary import Choice
                 adopted = 0
                 for k, dv, cv in diffs:
+                    if k in unreadable:
+                        # 캡처 불가 키 — absorb 는 no-op 이므로 제시하지 않는다
+                        c = _unwrap(questionary.select(
+                            f"{k}: yaml={dv} / 캡처 불가 — yaml 유지 권장", choices=[
+                                Choice("keep — yaml 유지 (권장)", "keep"),
+                                Choice("skip — 지금은 건너뜀", "skip"),
+                            ]).ask())
+                        continue
                     c = _unwrap(questionary.select(f"{k}: yaml={dv} / 실제={cv}", choices=[
                         Choice("absorb — 실제 값을 yaml 에 채택", "absorb"),
                         Choice("keep — yaml 유지 (나중에 apply 로 되돌림)", "keep"),

@@ -88,6 +88,34 @@ def test_diff_docs_finds_changes():
     assert diffs["a.d"] == (None, "new")
 
 
+def test_dropped_keys_marks_only_yaml_only_declarations():
+    # 캡처본을 통째로 채택하면 캡처가 못 읽는 yaml 전용 선언이 지워진다 —
+    # infra.* 정책, images.tags.migration 같은 키가 여기 해당.
+    declared = {
+        "infra": {"bedrock_allowed_model_arns": ["arn:a"], "mantle_regions": ["r1"]},
+        "images": {"tag": "abc", "tags": {"migration": "abc"}},
+        "oidc": {"vk_ttl_hours": 0},
+        "empty": {"note": ""},
+    }
+    captured = {
+        "infra": {},                          # 캡처 불가 — 삭제 위험
+        "images": {"tag": "abc"},             # tags 자체가 빠짐 — 삭제 위험
+        "oidc": {"vk_ttl_hours": 1},          # 양쪽 다 값 있음 — 실제 diff
+        "empty": {},                          # 빈 선언 — 지워져도 무의미
+        "new": {"key": "v"},                  # 캡처에만 있음 — 삭제 아님
+    }
+    diffs = capture.diff_docs(declared, captured)
+    dropped = dict(capture.dropped_keys(diffs))
+    assert set(dropped) == {
+        "infra.bedrock_allowed_model_arns",
+        "infra.mantle_regions",
+        "images.tags.migration",
+    }
+    # falsy 하지만 유효한 선언값(0/False)도 yaml 전용 키로 잡힌다
+    diffs2 = capture.diff_docs({"f": {"off": False}}, {})
+    assert dict(capture.dropped_keys(diffs2)) == {"f.off": False}
+
+
 # ==============================================================================
 # eks — 실제 dev values 파일로 helm 출력을 흉내내어 역변환 검증
 # ==============================================================================

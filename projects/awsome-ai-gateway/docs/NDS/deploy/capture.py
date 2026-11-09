@@ -814,3 +814,14 @@ def diff_docs(declared: dict, captured: dict) -> list[tuple[str, object, object]
         if dv != cv:
             diffs.append((key, dv, cv))
     return diffs
+
+
+def dropped_keys(diffs: list[tuple[str, object, object]]) -> list[tuple[str, object]]:
+    """캡처본을 통째로 채택(cp)하면 삭제되는 yaml 전용 키 — (path, declared_value).
+
+    캡처가 라이브에서 못 읽는 선언은 captured 쪽이 비어(None/[]/{}) 나온다 —
+    infra.* 정책, images.tags.migration 같은 항목이 여기 해당한다. 비어있는
+    선언값(""/None/[]/{})은 삭제돼도 무의미하므로 제외한다.
+    """
+    return [(k, dv) for k, dv, cv in diffs
+            if cv in (None, [], {}) and dv not in (None, [], {}, "")]
