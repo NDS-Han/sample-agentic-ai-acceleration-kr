@@ -131,7 +131,7 @@ variable "eks_addon_versions" {
 
 variable "aurora_engine_version" {
   type    = string
-  default = "16.11"
+  default = "16.13"
 }
 
 variable "aurora_prod_instance_class" {

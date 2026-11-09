@@ -64,7 +64,12 @@ module "aurora" {
 
   name           = "${var.project}-${var.environment}"
   engine         = "aurora-postgresql"
-  engine_version = var.engine_version
+  # engine_version 을 관리하지 않는다 — auto_minor_version_upgrade=true 라 AWS 가
+  # 마이너를 자동 패치하고, 선언하면 매번 "실측 > 선언" 의 in-place 다운그레이드
+  # plan 이 뜬다(RDS 는 마이너 다운그레이드 불가 → apply 실패). null 은
+  # Optional+Computed 라 terraform 이 추적 자체를 멈춘다. 메이저 버전은
+  # parameter group family 가 계속 핀한다 (var.engine_version — "16.x").
+  engine_version = null
   engine_mode    = "provisioned" # Serverless v2도 engine_mode=provisioned
   database_name  = var.database_name
 

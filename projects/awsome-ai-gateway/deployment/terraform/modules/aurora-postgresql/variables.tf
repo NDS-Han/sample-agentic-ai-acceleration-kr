@@ -9,9 +9,12 @@ variable "environment" {
 }
 
 variable "engine_version" {
-  description = "Aurora PostgreSQL 엔진 버전. 참고: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Updates.html"
+  # 엔진 자체는 AWS 관리(main.tf 에서 null 전달) — 이 값은 parameter group
+  # family 의 메이저 버전("16.x" → aurora-postgresql16) 선별에만 쓰인다.
+  # 참고: https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/AuroraPostgreSQL.Updates.html
+  description = "Aurora PostgreSQL 메이저 버전 힌트 (parameter group family 전용)"
   type        = string
-  default     = "16.11"
+  default     = "16.13"
 }
 
 variable "database_name" {
