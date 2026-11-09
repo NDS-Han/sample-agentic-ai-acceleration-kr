@@ -1233,20 +1233,21 @@ def cmd_capture(args) -> int:
             target = args.target or existing_target or (
                 "compose" if (gen_dir / "docker-compose.yml").exists()
                 else "ecs" if (gen_dir / "ecs").is_dir() else "")
+        unknown: set[str] = set()
         if target == "compose":
-            doc, notes = capture.capture_compose(gen_dir)
+            doc, notes = capture.capture_compose(gen_dir, unknown)
         elif target == "ecs":
             region = args.region or (existing.get("aws") or {}).get("region", "ap-northeast-2")
             env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
                 REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
-            doc, notes = capture.capture_ecs(env_dir, region)
+            doc, notes = capture.capture_ecs(env_dir, region, unknown)
         elif target == "eks":
             env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else None
             doc, notes = capture.capture_eks(
                 namespace=args.namespace or "llm-gateway",
                 release=args.release or "llm-gateway",
                 context=args.context or "",
-                env_dir=env_dir)
+                env_dir=env_dir, unknown=unknown)
         else:
             console.print(f"[red]캡처 대상을 판별 못 했습니다 — --target compose|ecs|eks 또는 --gen-dir 지정")
             return 1
@@ -1272,7 +1273,7 @@ def cmd_capture(args) -> int:
                     asdict(schema.from_dict(existing)), asdict(schema.from_dict(doc)))
             except schema.SchemaError:
                 diffs = capture.diff_docs(existing, doc)
-            dropped = capture.dropped_keys(diffs, doc)
+            dropped = capture.dropped_keys(diffs, doc, unknown)
             if dropped:
                 notes.append(
                     "⚠ 채택(cp)하면 삭제되는 yaml 전용 키 — 캡처가 라이브에서 못 "

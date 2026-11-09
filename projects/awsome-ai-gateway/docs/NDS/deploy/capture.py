@@ -50,7 +50,8 @@ def _is_false_env(v) -> bool:
 # compose — 정적 산출물 역분석 (라이브 상태와 다를 수 있음 — doctor 가 별도 확인)
 # ==============================================================================
 
-def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
+def capture_compose(out_dir: Path, unknown: set[str] | None = None
+                    ) -> tuple[dict, list[str]]:
     notes: list[str] = []
     compose_path = out_dir / "docker-compose.yml"
     if not compose_path.exists():
@@ -129,6 +130,8 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     if sk_env is None:
         sk_env = env.get("SERVICE_KEYS_ENABLED")
     if sk_env is None:
+        if unknown is not None:
+            unknown.add("features.service_keys")
         notes.append(
             "SERVICE_KEYS_ENABLED 를 못 읽었습니다 — false 기록. 앱 기본은 "
             "false(구 이미지에서 env 없이 켜져 있던 배포라면 true 로 바로잡고 "
@@ -248,7 +251,8 @@ def _taskdef_env(region: str, task_arn: str) -> dict[str, str]:
         return {}
 
 
-def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
+def capture_ecs(env_dir: Path, region: str,
+                unknown: set[str] | None = None) -> tuple[dict, list[str]]:
     notes: list[str] = []
     outputs = _tf_outputs(env_dir)
 
@@ -285,6 +289,8 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         notes.append(f"admin-api task def 조회 실패 — env 기반 항목은 추정입니다: {e}")
         notes.append("service_keys 는 읽기 실패로 false 기록 — 실제 값은 "
                      "ECS 콘솔/task def 에서 확인하세요")
+        if unknown is not None:
+            unknown.add("features.service_keys")
 
     # 이미지 태그 + 레지스트리
     try:
@@ -455,6 +461,8 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         "clients": {"models_profile": "global"},
     }
     if api_env_ok and sizing_env.get("SERVICE_KEYS_ENABLED") is None:
+        if unknown is not None:
+            unknown.add("features.service_keys")
         notes.append(
             "SERVICE_KEYS_ENABLED 를 못 읽었습니다 — false 기록. 앱 기본은 "
             "false(구 task def/이미지에서 env 없이 켜져 있던 배포라면 true 로 "
@@ -572,7 +580,8 @@ def _domain_base(host: str, env: str) -> str:
 
 
 def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
-                context: str = "", env_dir: Path | None = None) -> tuple[dict, list[str]]:
+                context: str = "", env_dir: Path | None = None,
+                unknown: set[str] | None = None) -> tuple[dict, list[str]]:
     notes: list[str] = []
     v = _helm_values(release, namespace, context)
 
@@ -724,6 +733,10 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         # 넘기니 _is_true_env 의 문자열 정규화로 안전하다.
         "service_keys": _is_true_env(aenv.get("SERVICE_KEYS_ENABLED")),
     }
+    # env 부재 — 차트 기본이 --all 에 합류하므로 부재는 구 차트/구 이미지 배포.
+    # false 를 기록하되 실측이 아님을 unknown 에 표시해 absorb 오덮어쓰기 방지.
+    if aenv.get("SERVICE_KEYS_ENABLED") is None and unknown is not None:
+        unknown.add("features.service_keys")
     # body_logging 은 eks managed overlay 가 "켜기"만 소유하므로 false 를
     # 박지 않는다 — 박으면 validate 마다 수동 비활성화 경고가 난다.
     if genv.get("FIREHOSE_STREAM_NAME"):
@@ -872,7 +885,8 @@ def _lookup(doc: dict, dotted: str):
 
 
 def dropped_keys(diffs: list[tuple[str, object, object]],
-                 captured_raw: dict) -> list[tuple[str, object]]:
+                 captured_raw: dict,
+                 unknown_keys: set[str] | None = None) -> list[tuple[str, object]]:
     """캡처본을 통째로 채택(cp)하면 삭제되는 yaml 전용 키 — (path, declared_value).
 
     "못 읽은 키" 판정은 **원본** 캡처 doc 으로 한다. 정규화본(`asdict(from_dict)`)
@@ -883,10 +897,18 @@ def dropped_keys(diffs: list[tuple[str, object, object]],
     []/{} 는 캡처가 명시적으로 방출하는 "읽은 빈 값"이라 absorb 대상으로 둔다
     (예: ecs allowed_cidrs — 라이브가 실제로 비어 있으면 채택 가능해야 한다).
     비어있는 선언값 자체는 지워져도 무의미하므로 제외한다.
+
+    unknown_keys: 캡처가 "읽지 못해 기본값을 넣은" 키(예: env 부재로 false 를
+    기록한 features.service_keys). 값이 들어있어도 실측이 아니라 unknown 으로
+    취급 — 없으면 absorb 가 기본값으로 선언값을 조용히 덮는다.
     """
+    unknown = unknown_keys or set()
     out = []
     for k, dv, _cv in diffs:
         if dv in (None, [], {}, ""):
+            continue
+        if k in unknown:
+            out.append((k, dv))
             continue
         rv = _lookup(captured_raw, k)
         if rv is _MISSING or rv is None or rv == "":

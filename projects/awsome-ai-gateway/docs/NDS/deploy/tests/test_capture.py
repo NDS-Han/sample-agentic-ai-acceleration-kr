@@ -110,6 +110,20 @@ def test_service_keys_env_case_and_bool_forms():
     assert capture._is_true_env("True") is True
 
 
+def test_dropped_keys_marks_unknown_capture():
+    """읽기 실패로 기본값을 넣은 키(unknown)는 값이 있어도 삭제 위험 대상 —
+    absorb/cp 가 기본값으로 선언값을 조용히 덮는 것을 막는다."""
+    declared = {"features": {"service_keys": True}}
+    captured = {"features": {"service_keys": False}}  # env 부재로 false 기록
+    diffs = list(capture.diff_docs(declared, captured))
+    # unknown 없으면: False 는 "읽은 값"으로 간주돼 dropped 에 안 잡힘
+    assert capture.dropped_keys(diffs, captured) == []
+    # unknown 에 있으면: 실측이 아니므로 삭제 위험으로 경고 대상
+    dropped = capture.dropped_keys(
+        diffs, captured, {"features.service_keys"})
+    assert dropped == [("features.service_keys", True)]
+
+
 def test_diff_docs_finds_changes():
     declared = {"a": {"b": 1, "c": "x"}}
     captured = {"a": {"b": 2, "d": "new"}}
