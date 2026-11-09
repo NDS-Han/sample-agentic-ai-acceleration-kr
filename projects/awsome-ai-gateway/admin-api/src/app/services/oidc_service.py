@@ -135,9 +135,7 @@ class OIDCService:
         sub = claims.get(settings.OIDC_USER_ID_CLAIM)
         email = claims.get(settings.OIDC_EMAIL_CLAIM, "")
         name = claims.get(settings.OIDC_NAME_CLAIM) or email or sub
-        groups = claims.get(settings.OIDC_GROUPS_CLAIM, []) or []
-        if not isinstance(groups, list):
-            groups = [groups]
+        groups = self._flatten_groups(claims.get(settings.OIDC_GROUPS_CLAIM))
 
         if not sub:
             raise OIDCAuthError(f"missing claim: {settings.OIDC_USER_ID_CLAIM}")
@@ -290,6 +288,21 @@ class OIDCService:
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _flatten_groups(raw) -> list[str]:
+        """그룹 클레임 → 그룹명 리스트.
+
+        - 배열 클레임(cognito:groups): ["a","b"] → 그대로
+        - 문자열 클레임(custom:groups 등): custom attribute 는 단일 문자열만
+          저장되므로 ADFS 는 다중 그룹을 "a;b" 로 join 해 보낸다 — ';' 로 푼다.
+          단일 값이면 split 이 1-요소를 만들어 자연히 호환된다.
+        """
+        if not raw:
+            return []
+        items = raw if isinstance(raw, list) else [raw]
+        return [g.strip() for x in items
+                for g in str(x).split(";") if g.strip()]
+
+    @staticmethod
     def _parse_group(group_name: str) -> tuple[str | None, str] | None:
         """Cognito 그룹명 → (department_name | None, team_name) 또는 None.
 
@@ -319,11 +332,20 @@ class OIDCService:
     async def _resolve_team(
         self, session: AsyncSession, groups: list[str]
     ) -> uuid.UUID:
-        """그룹 리스트 → team_id. 매칭 안 되면 DEFAULT_TEAM_ID 또는 거부."""
+        """그룹 리스트 → team_id. 매칭 안 되면 DEFAULT_TEAM_ID 또는 거부.
+
+        ADMIN_GROUPS 멤버는 맨 뒤로 — "SSIR_Claude_Admin;SSIR_Claude_Users"
+        처럼 관리자+팀 그룹을 같이 들고 온 사용자의 팀이 claim 순서가 아니라
+        팀 그룹으로 결정되게 한다. 순수 관리자(관리 그룹만 보유)는 뒤로
+        밀려도 여전히 자기 그룹으로 파싱되므로 거부되지 않는다.
+        """
         settings = get_settings()
         repo = UserRepository(session)
 
-        for group_name in groups:
+        admin = set(settings.ADMIN_GROUPS)
+        ordered = ([g for g in groups if g not in admin]
+                   + [g for g in groups if g in admin])
+        for group_name in ordered:
             parsed = self._parse_group(group_name)
             if parsed is None:
                 continue

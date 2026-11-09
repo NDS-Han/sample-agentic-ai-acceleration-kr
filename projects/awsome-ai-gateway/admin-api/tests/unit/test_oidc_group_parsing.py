@@ -392,3 +392,27 @@ async def test_first_login_race_reraises_when_winner_absent():
                 role=UserRole.DEVELOPER,
                 email_verified=True,
             )
+
+
+# ── _flatten_groups: custom attribute 의 ';'-join 문자열 풀기 ────────────────
+# custom:groups 는 문자열 하나만 저장되므로 ADFS 다중 그룹은 "a;b" 로 도착한다.
+# 풀어주지 않으면 admin_groups 정확일치·_parse_group 둘 다 실패해
+# reject_unmatched_groups=true 환경에서 사용자가 통째로 거부된다.
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (None, []),
+        ("", []),
+        ("SSIR_NDS_Users", ["SSIR_NDS_Users"]),
+        ("SSIR_NDS_Admin;SSIR_NDS_Users",
+         ["SSIR_NDS_Admin", "SSIR_NDS_Users"]),
+        ("SSIR_NDS_Admin ; SSIR_NDS_Users;",  # 공백·후행 구분자
+         ["SSIR_NDS_Admin", "SSIR_NDS_Users"]),
+        (["Claude_NDS_Developers", "Claude_NDS_Users"],  # 배열 클레임은 그대로
+         ["Claude_NDS_Developers", "Claude_NDS_Users"]),
+        ([], []),
+    ],
+)
+def test_flatten_groups(raw, expected):
+    assert OIDCService._flatten_groups(raw) == expected
