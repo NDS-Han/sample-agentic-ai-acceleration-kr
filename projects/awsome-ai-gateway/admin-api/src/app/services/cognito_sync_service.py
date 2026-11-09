@@ -45,6 +45,29 @@ def admin_mapping_configured() -> bool:
     from app.core.oidc_identity import admin_mapping_configured as _impl
     return _impl()
 
+
+def _flatten_groups(raw) -> list[str]:
+    """그룹 클레임/속성 문자열 → 그룹명 리스트 — 본체는 ``core.oidc_identity``."""
+    from app.core.oidc_identity import flatten_groups
+    return flatten_groups(raw)
+
+
+def _team_resolution_groups(groups: list[str]) -> list[str]:
+    """팀 해석 정렬(admin 그룹 맨 뒤) — 본체는 ``core.oidc_identity``."""
+    from app.core.oidc_identity import team_resolution_groups
+    return team_resolution_groups(groups)
+
+
+def _attr_groups_of(settings, get_attr, user: dict) -> list[str]:
+    """Cognito user 레코드의 OIDC_GROUPS_CLAIM 속성 → 그룹명 리스트.
+
+    SAML/ADFS 사용자는 풀 그룹 멤버십이 없고 그룹이 custom:groups 같은
+    **속성**으로 저장된다. claims 클레임명이 곧 풀 속성명이라 같은 값을 읽는다
+    — `cognito:groups` 같은 내장 클레임명은 속성에 존재하지 않아 자연스럽게
+    빈 리스트가 된다(네이티브 경로 영향 없음).
+    """
+    return _flatten_groups(get_attr(user, settings.OIDC_GROUPS_CLAIM))
+
 BATCH_SIZE = 500  # 유저 upsert 배치 commit 단위. 초과 시 commit + expunge_all 로
                   # identity map 을 비워 sync_all 메모리 상한을 확보한다.
 
@@ -423,8 +446,13 @@ class CognitoSyncService:
                         "enabled": member.get("Enabled", True),
                         "email_verified": _attr_truthy(self._get_attr(member, "email_verified")),
                         "groups": [],
+                        "attr_groups": [],
                     }
                 user_map[sub]["groups"].append(group_name)
+                user_map[sub]["attr_groups"] = (
+                    user_map[sub]["attr_groups"]
+                    or _attr_groups_of(settings, self._get_attr, member)
+                )
 
         # 2b. 전체 유저 목록으로 보완 (그룹 삭제 시 누락 방지)
         try:
@@ -442,7 +470,12 @@ class CognitoSyncService:
                         "enabled": cu.get("Enabled", True),
                         "email_verified": _attr_truthy(self._get_attr(cu, "email_verified")),
                         "groups": [],
+                        "attr_groups": [],
                     }
+                user_map[sub]["attr_groups"] = (
+                    user_map[sub]["attr_groups"]
+                    or _attr_groups_of(settings, self._get_attr, cu)
+                )
         except Exception as e:
             result.errors.append(f"Failed to list all users: {e}")
             reconcile_incomplete = True
@@ -453,6 +486,11 @@ class CognitoSyncService:
 
         seen_sso_subjects: set[str] = set()
         default_team_id = uuid.UUID(settings.DEFAULT_TEAM_ID)
+        # 속성 그룹(custom:groups)이 만든 팀도 stale-team 정리(5단계)에서 살려야
+        # 한다 — synced 는 group_team_id(풀 그룹)만 담았는데, SAML 사용자의 팀은
+        # 풀 그룹에 대응 그룹이 없어 "Cognito 에 없는 팀"으로 오판되면 활성 멤버가
+        # default 로 이관된다.
+        attr_resolved_team_ids: set[uuid.UUID] = set()
         processed = 0
 
         for sub, info in user_map.items():
@@ -462,18 +500,22 @@ class CognitoSyncService:
             email_verified = info.get("email_verified", False)
             user_groups: list[str] = info["groups"]
 
-            team_id: uuid.UUID | None = None
-            for g in user_groups:
-                if g in group_team_id:
-                    team_id = group_team_id[g]
-                    break
-            if team_id is None:
-                team_id = default_team_id
+            # 속성 그룹을 앞에 — 로그인 경로는 그룹 클레임(custom:groups)만 보고
+            # 팀을 정하므로, sync 가 같은 사용자에게 같은 팀을 골라야 양 경로가
+            # 충돌하지 않는다. admin 그룹은 맨 뒤(팀 결정이 클레임 순서 무관).
+            effective_groups = _team_resolution_groups(
+                info.get("attr_groups", []) + user_groups
+            )
+            team_id = await self._resolve_team_id_from_groups(
+                repo, session, effective_groups, result, cache=cache
+            )
+            if team_id != default_team_id:
+                attr_resolved_team_ids.add(team_id)
 
             # skip 여부와 무관하게 항상 seen 에 추가 — reconcile(4단계)이 skip 된
             # 유저를 잘못 비활성화하지 않도록 (불변식).
             seen_sso_subjects.add(sub)
-            role = self._derive_role(email, user_groups, email_verified=email_verified)
+            role = self._derive_role(email, effective_groups, email_verified=email_verified)
 
             # gate: 확실히 안 바뀐 기존 유저는 upsert 를 건너뜀 (DB 왕복 0).
             # snap None(신규/재생성 새 sub)은 절대 skip 하지 않는다 — email reconcile
@@ -580,7 +622,7 @@ class CognitoSyncService:
         #    _ensure_team_id 가 하나라도 실패하면 synced 집합이 불완전하다 — 실패한
         #    그룹의 팀을 "Cognito 에 없는 팀"으로 오판해 활성 멤버 전원을 default
         #    로 옮기고 리더를 강등시킨다. 불완전하면 이 단계는 통째로 건너뛴다.
-        synced_team_ids = set(group_team_id.values())
+        synced_team_ids = set(group_team_id.values()) | attr_resolved_team_ids
         # stale-team 클린업은 활성 멤버를 default 팀으로 옮기는 파괴 재동기화 —
         # 수동 생성 팀(POST /admin/teams)도 Cognito 에 없다는 이유로 해체됐다.
         # DEACTIVATE_MISSING 과 같은 opt-in 플래그 뒤에 둔다(R21 S7).
@@ -979,13 +1021,19 @@ class CognitoSyncService:
             groups_fetch_failed = True
             user_groups = []
 
+        # SAML 사용자는 풀 그룹이 아니라 속성(custom:groups)에 그룹이 있다 —
+        # 속성 그룹을 앞에 두어 로그인 경로와 같은 팀/역할이 나오게 한다.
+        effective_groups = _team_resolution_groups(
+            _attr_groups_of(settings, self._get_attr_admin, cu) + user_groups
+        )
+
         # 팀/부서 캐시를 한 번 만들어 그룹 해석에 넘긴다. 없으면 그룹 하나당 팀·부서를
         # DB 에서 다시 찾는다(그룹이 많은 사용자에서 라운드트립이 그룹 수만큼 쌓인다).
         cache = await self._build_team_cache(repo)
         team_id = await self._resolve_team_id_from_groups(
-            repo, session, user_groups, result, cache=cache
+            repo, session, effective_groups, result, cache=cache
         )
-        role = self._derive_role(email, user_groups, email_verified=email_verified)
+        role = self._derive_role(email, effective_groups, email_verified=email_verified)
 
         if groups_fetch_failed:
             # 그룹 목록 실패를 빈 리스트로 취급하면 ADMIN 유저가 DEVELOPER 로
@@ -1184,7 +1232,14 @@ class CognitoSyncService:
             name = self._get_attr(m, "name") or email or m.get("Username", "")
             enabled = m.get("Enabled", True)
             email_verified = _attr_truthy(self._get_attr(m, "email_verified"))
-            derived_role = self._derive_role(email, [group_name], email_verified=email_verified)
+            # 멤버 레코드의 속성 그룹까지 합쳐 역할 판정 — custom:groups 관리자가
+            # 이 그룹에 없는 권한 출처로 강등되지 않게 한다(팀은 여전히 단일 그룹
+            # 시야: preserve_existing_team).
+            derived_role = self._derive_role(
+                email,
+                _attr_groups_of(settings, self._get_attr, m) + [group_name],
+                email_verified=email_verified,
+            )
             snap = existing_snaps.get(sub)
             if snap is not None and snap["role"] == UserRole.ADMIN:
                 # 이 그룹에 없는 ADMIN 권한 출처를 단일 그룹 기준으로 박탈하지 않는다.

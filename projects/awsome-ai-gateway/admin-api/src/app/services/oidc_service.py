@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -290,21 +289,9 @@ class OIDCService:
 
     @staticmethod
     def _flatten_groups(raw) -> list[str]:
-        """그룹 클레임 → 그룹명 리스트.
-
-        - 배열 클레임(cognito:groups): ["a","b"] → 그대로
-        - 문자열 클레임(custom:groups 등): custom attribute 는 단일 문자열만
-          저장되므로 ADFS 는 다중 그룹을 "a;b" 로 join 해 보낸다 — ';' 로 푼다.
-          단일 값이면 split 이 1-요소를 만들어 자연히 호환된다.
-        """
-        if not raw:
-            return []
-        items = raw if isinstance(raw, list) else [raw]
-        # custom attribute 는 단일 문자열 — ADFS 는 그룹을 복수 claim 값으로
-        # 보내고 Cognito 가 저장 시 하나로 이어 붙인다. 이어붙이는 구분자가
-        # 구현별로 ';'/',' 로 달라 둘 다 푼다 (우리 그룹명 규약엔 둘 다 불포함).
-        return [g.strip() for x in items
-                for g in re.split(r"[;,]", str(x)) if g.strip()]
+        """그룹 클레임 → 그룹명 리스트 — 정책 본체는 ``core.oidc_identity``."""
+        from app.core.oidc_identity import flatten_groups
+        return flatten_groups(raw)
 
     @staticmethod
     def _parse_group(group_name: str) -> tuple[str | None, str] | None:
@@ -346,10 +333,8 @@ class OIDCService:
         settings = get_settings()
         repo = UserRepository(session)
 
-        admin = set(settings.ADMIN_GROUPS)
-        ordered = ([g for g in groups if g not in admin]
-                   + [g for g in groups if g in admin])
-        for group_name in ordered:
+        from app.core.oidc_identity import team_resolution_groups
+        for group_name in team_resolution_groups(groups):
             parsed = self._parse_group(group_name)
             if parsed is None:
                 continue
