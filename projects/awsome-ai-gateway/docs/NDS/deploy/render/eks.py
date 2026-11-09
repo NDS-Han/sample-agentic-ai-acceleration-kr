@@ -209,10 +209,14 @@ def desired_values(cfg: GatewayConfig) -> dict:
             o["groupPrefix"] = cfg.oidc.group_prefix
         if cfg.oidc.reject_unmatched_groups is not None:
             o["rejectUnmatchedGroups"] = cfg.oidc.reject_unmatched_groups
-        if cfg.oidc.admin_groups or cfg.oidc.admin_emails:
-            v.setdefault("adminApi", {})["adminBootstrap"] = {
-                "groups": cfg.oidc.admin_groups,
-                "emails": cfg.oidc.admin_emails}
+        # adminBootstrap — 선언된 키만 덮어쓴다. 둘 다 세팅하면
+        # admin_emails 만 선언해도 groups 가 [] 로 env 의 ClaudeAdmin
+        # 부트스트랩을 지워 관리자 잠김이 난다 (values merge 는 리스트 통째 교체).
+        ab = v.setdefault("adminApi", {}).setdefault("adminBootstrap", {})
+        if cfg.oidc.admin_groups:
+            ab["groups"] = cfg.oidc.admin_groups
+        if cfg.oidc.admin_emails:
+            ab["emails"] = cfg.oidc.admin_emails
         v.setdefault("adminApi", {})["oidc"] = dict(o)
         v.setdefault("gatewayProxy", {})["oidc"] = dict(o)
         ui_env = {"DEV_LOGIN_ENABLED": "true" if cfg.features.dev_login else "false",

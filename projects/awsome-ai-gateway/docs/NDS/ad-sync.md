@@ -66,6 +66,21 @@ SSIR_Platform_Engineers → tail "Platform_Engineers"→ 부서 Platform, 팀 En
 
 ### 1. custom attribute 생성 + ReadAttributes 추가
 
+terraform 모듈(`deployment/terraform/modules/cognito`)은 `custom:groups`
+schema와 클라이언트 `read_attributes`를 **이미 선언**하고 있습니다 — 정석
+경로는 targeted apply입니다:
+
+```bash
+cd deployment/terraform/environments/<env명>
+terraform apply -target=module.cognito
+# → aws_cognito_user_pool.this(schema) + user_pool_client.cli(read_attributes)
+#   두 건 update만 나와야 정상
+```
+
+`domain.name`을 쓰는 배포는 `./deploy apply`가 `module.cognito` 타깃 apply를
+자동 실행합니다(`deploy.tf_env_dir`이 가리키는 env — Cognito 풀 소유 env와
+일치하는지 확인). 수동으로 만들 수도 있습니다:
+
 ```bash
 aws cognito-idp add-custom-attributes \
   --user-pool-id <user-pool-id> \
@@ -75,10 +90,9 @@ aws cognito-idp add-custom-attributes \
 
 > ⚠️ **클라이언트 ReadAttributes에 `custom:groups`가 없으면 토큰에 실리지
 > 않습니다** — app client가 속성 allowlist를 쓰면(`["email","email_verified",
-> "name"]` 등) 여기에 `custom:groups`를 추가해야 합니다. terraform 모듈은
-> `read_attributes`에 이미 반영돼 있습니다 (schema 블록 + read_attributes
-> — 콘솔로만 만들면 terraform plan이 되돌리려다 `cannot modify or remove
-> schema items` 에러를 냅니다).
+> "name"]` 등) 여기에 `custom:groups`를 추가해야 합니다. 콘솔로만 만들면
+> terraform plan이 되돌리려다 `cannot modify or remove schema items`
+> 에러를 냅니다 — 위 targeted apply가 선언·상태를 정합으로 맞춥니다.
 
 ### 2. SAML IdP 등록
 
@@ -162,6 +176,11 @@ aws cognito-idp admin-update-user-attributes \
 `admin_groups`에 `SSIR_NDS_Admin`을 선언했으면 정확일치로 ADMIN이 유지됩니다 —
 관리자가 곧 AD 계정으로 옮길 예정이라 이메일 경로(`admin_emails`)보다 그룹
 경로가 일관됩니다. (`admin_emails`를 쓰면 역할만 부여되고 팀 배정은 안 바뀜.)
+
+> eks 참고: `adminBootstrap`은 **선언한 키만** env overlay를 덮습니다 —
+> `admin_emails`만 쓰면 env의 `adminBootstrap.groups`(기존 `ClaudeAdmin`
+> 부트스트랩)가 그대로 유지되고, `admin_groups`만 쓰면 env의 `emails`가
+> 유지됩니다.
 
 ## 프로비저닝 경로 주의 — admin-ui는 사용자를 만들지 않습니다
 

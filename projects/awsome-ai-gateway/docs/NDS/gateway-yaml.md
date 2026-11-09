@@ -39,8 +39,9 @@ network:
 domain:
   mode: none                  # none | cloudfront-temp | selfsigned-temp | route53-acm
   name: example.com           # route53-acm 일 때 필수
-  zone_id: Z123...            # Route53 hosted zone — ecs+route53-acm 이면 필수
-                              # (eks 는 env values 의 기존 인증서/레코드를 쓰므로 미사용)
+  zone_id: Z123...            # Route53 hosted zone — 있으면 인증서 발급·DNS 검증·
+                              # host 레코드·Cognito 콜백까지 자동 (eks/ecs 공통).
+                              # 비우면 인증서·레코드는 수동 ([domain.md](domain.md) §2-1)
 
 features:
   notifications:
@@ -81,6 +82,12 @@ oidc:                          # 비워두면 OIDC 비활성(dev-login)
   required_group: ""
   client_secret: ""           # Cognito confidential client — 있으면 HTTP Basic 토큰 교환
   vk_ttl_hours: 0            # VK 수명(시간) — 0이면 기본 1시간
+  # ── AD/SAML 연동 시에만 쓰는 키 — 상세는 [ad-sync.md](ad-sync.md)
+  # groups_claim: custom:groups      # 그룹을 담은 JWT 클레임 — 비우면 provider_name 에서 유추
+  # group_prefix: SSIR_              # '<prefix><dept>_<team>' 파싱 — 비우면 차트 기본 Claude_
+  # reject_unmatched_groups: true    # prefix 매칭 실패 시 로그인 거부 (false면 기본 팀)
+  # admin_groups: [SSIR_Admins]      # ADMIN 역할 정확일치 그룹
+  # admin_emails: [boss@corp.com]    # ADMIN 역할 이메일 경로
 
 infra:                         # 신규 설치 인프라 입력 — `deploy bootstrap` wizard 가 기록
                                # (ecs/eks 전용, compose 무시, 기존 배포 온보딩엔 미사용)
@@ -211,6 +218,24 @@ admin-api(JWT 검증)와 admin-ui(브라우저 SSO)가 공유하는 설정입니
 - `required_group` — 비우면 인증된 모든 사용자 통과. 특정 그룹 소속만 허용하려면 지정
 - `vk_ttl_hours` — 발급된 Virtual Key의 수명. 세 backend 모두 반영됩니다
   (eks=차트 `adminApi.oidc.vkTtlHours`, ecs/compose=`OIDC_VK_TTL_HOURS`)
+
+아래 키들은 **AD/SAML 페더레이션 등 사내 그룹 체계 연동**용입니다 — 전체 절차는
+[ad-sync.md](ad-sync.md)를 보세요. 세 backend 모두 렌더됩니다
+(eks=차트 `adminApi.oidc.*` + `adminApi.adminBootstrap`, ecs=tfvars,
+compose=env):
+
+| 키 | 의미 |
+|---|---|
+| `groups_claim` | 그룹을 담은 JWT 클레임 이름. 비우면 `provider_name`에서 유추(cognito면 `cognito:groups`). SAML IdP는 보통 속성 매핑이 필요 — Cognito 경로라면 `custom:groups` (풀 그룹이 아니라 **속성**으로 오기 때문) |
+| `group_prefix` | `<prefix><dept>_<team>` 파싱 접두사 — 그룹→부서/팀 자동 배정. 비우면 차트 기본 `Claude_`. AD 그룹명이 다르면 여기서 맞춥니다 |
+| `reject_unmatched_groups` | prefix에 매칭되는 그룹이 없을 때. `true`(기본): 로그인 거부. `false`: 기본 팀으로 배정 |
+| `admin_groups` | ADMIN 역할 부여 그룹(정확일치). eks는 `adminApi.adminBootstrap.groups`로 렌더 — **선언하면 env overlay의 그룹 목록을 교체**합니다(미선언 시 env 값 유지) |
+| `admin_emails` | ADMIN 역할 부여 이메일 — `admin_groups`와 독립적으로 동작하며 둘 다 쓸 수 있습니다. eks는 `adminBootstrap.emails`로 렌더(미선언 시 env 값 유지) |
+
+> ⚠️ `groups_claim`을 `custom:groups`로 전환하면 **풀 그룹(`ClaudeAdmin` 등)
+> 멤버십을 더 이상 보지 않습니다** — 기존 네이티브 관리자는 전환 전에
+> `custom:groups` 속성을 부여하거나 `admin_emails`에 넣어 잠김을 막으세요
+> ([ad-sync.md](ad-sync.md) '기존 관리자 계정 보존').
 
 ### `clients.models_profile`
 

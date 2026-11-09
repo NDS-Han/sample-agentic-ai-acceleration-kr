@@ -146,35 +146,36 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
 
 ## 4. 도메인을 나중에 붙이기
 
-eks 경로는 인증서·DNS가 사람 소유라 ecs 처럼 한 apply 로 끝나지 않습니다:
-
-```bash
-# 1. ACM 에서 인증서 발급 (gateway./admin./admin-api.<domain> 3개 SAN 또는 wildcard)
-#    + DNS 검증 — 사내 도메인이면 사내 DNS 에 검증 레코드를 등록
-# 2. env values 에 cert 추가
-vi deployment/charts/llm-gateway/values-eks-fargate-<env>.local.yaml
-#    ingress.annotations."alb.ingress.kubernetes.io/certificate-arn": arn:aws:acm:...
-```
+`zone_id`가 있으면 인증서·DNS·Cognito 콜백·`nextauthUrl`까지 apply 한 번으로
+끝납니다 — 전부 멱등이라 이미 있으면 찾아 씁니다:
 
 ```yaml
-# 3. gateway.yaml — host 재작성은 여기서 일어난다
+# gateway.yaml
 domain:
   mode: route53-acm
-  name: <domain>            # → gateway./admin./admin-api.<domain> 3개 host 생성
-                            # + adminUi.nextauthUrl 갱신 (Cognito callback 도 맞출 것)
+  name: <domain>
+  zone_id: <Route53 hosted zone id>   # 없으면 인증서·레코드만 수동 (아래 참조)
 ```
 
 ```bash
-# 4. 적용 후 DNS — 레코드 생성은 수동 (레거시 11-route53-cname.sh 와 같은 일)
 ./deploy apply
-kubectl get ingress -n llm-gateway -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.status.loadBalancer.ingress[0].hostname}{"\n"}{end}'
-#    → 각 host 를 해당 ALB DNS 로 가리키는 CNAME 을 Route53/사내 DNS 에 등록
+# 자동: *.<domain> ACM 인증서 요청 → zone 에 검증 CNAME → ISSUED 후 443 리스너
+#       → gateway./admin./admin-api.<domain> A alias upsert
+#       → gen tfvars 의 콜백/로그아웃 URL 반영(terraform apply -target=module.cognito)
+#       → adminUi.nextauthUrl = https://admin.<domain>
 ```
 
-주의: `domain.name`을 쓰면 host 이름이 **env 무관 규칙**(`gateway.`/`admin.`/
-`admin-api.`)으로 바뀝니다 — `gateway-dev.<domain>` 같은 기존 이름을 유지해야
-하면 `domain.name`을 비워두세요 (env values 의 host 가 그대로 쓰입니다).
-hosted zone/도메인 자체의 획득·NS 위임은 모든 backend 에서 이 도구의 범위 밖입니다.
+주의:
+
+- `domain.name`을 쓰면 host 이름이 **env 무관 규칙**(`gateway.`/`admin.`/
+  `admin-api.`)으로 바뀝니다 — `gateway-dev.<domain>` 같은 기존 이름을 유지해야
+  하면 `domain.name`을 비워두세요 (env values 의 host 가 그대로 쓰입니다).
+- `zone_id`가 없으면(사내 DNS 경로) 인증서 발급·검증과 host 레코드만 수동입니다 —
+  절차는 [domain.md](domain.md) §2-1.
+- 콜백 반영의 `module.cognito` 타깃 apply는 `deploy.tf_env_dir`이 가리키는
+  terraform env에서 실행됩니다 — Cognito 풀 소유 env와 일치하는지 확인하세요
+  (기본 `deployment/terraform/environments/llm-gateway-<env>`).
+- hosted zone/도메인 자체의 획득·NS 위임은 모든 backend 에서 이 도구의 범위 밖입니다.
 
 ## 이 경로가 관리하는 것 / 하지 않는 것
 

@@ -98,6 +98,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 | [install-ecs.md](install-ecs.md) | **t1/t2 — ECS Fargate 신규 구축** |
 | [install-eks.md](install-eks.md) | **t2/t3 — EKS 신규 구축(bootstrap)·기존 배포 온보딩·업데이트** |
 | [domain.md](domain.md) | **도메인 획득 → 배포에 등록** — backend별 자동화 정도 |
+| [ad-sync.md](ad-sync.md) | **AD 연동** — ADFS↔Cognito SAML, `custom:groups`로 그룹→역할/팀 매핑 |
 | [update.md](update.md) | 업데이트·롤백·기존 배포 온보딩(capture) |
 | [upgrade-eks-cluster.md](upgrade-eks-cluster.md) | EKS 컨트롤플레인/애드온/Aurora 업그레이드 |
 | [upgrade-eks-legacy.md](upgrade-eks-legacy.md) | 레거시 스크립트 배포 → 최신 커밋 업그레이드 |

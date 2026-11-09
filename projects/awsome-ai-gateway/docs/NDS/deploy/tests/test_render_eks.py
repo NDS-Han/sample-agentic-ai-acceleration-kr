@@ -187,3 +187,48 @@ def test_values_yaml_quotes_numeric_like_tags(tmp_path):
     doc = dict(BASE, images={"tag": "761a3e4b"})
     _, out, _ = _render(tmp_path, doc)
     assert "tag: 761a3e4b" in (out / "values.yaml").read_text()
+
+def test_oidc_admin_bootstrap_overrides_only_declared_keys(tmp_path):
+    """회귀: admin_emails 만 선언해도 adminBootstrap 가 통째 교체돼 env 의
+    groups(ClaudeAdmin) 가 [] 로 지워졌다 — 관리자 잠김 경로. 선언 키만 쓴다."""
+    doc = dict(BASE, oidc={**BASE["oidc"], "admin_emails": ["boss@x.io"]})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    ab = v["adminApi"]["adminBootstrap"]
+    assert ab["emails"] == ["boss@x.io"]
+    assert "groups" not in ab          # env overlay 의 groups 보존
+
+    doc2 = dict(BASE, oidc={**BASE["oidc"], "admin_groups": ["SSIR_Admin"]})
+    _, out2, _ = _render(tmp_path / "b", doc2)
+    v2 = yaml.safe_load((out2 / "values.yaml").read_text())
+    ab2 = v2["adminApi"]["adminBootstrap"]
+    assert ab2["groups"] == ["SSIR_Admin"]
+    assert "emails" not in ab2         # env overlay 의 emails 보존
+
+    # 둘 다 선언하면 둘 다 오버라이드
+    doc3 = dict(BASE, oidc={**BASE["oidc"],
+                            "admin_groups": ["SSIR_Admin"],
+                            "admin_emails": ["a@x.io"]})
+    _, out3, _ = _render(tmp_path / "c", doc3)
+    ab3 = yaml.safe_load((out3 / "values.yaml").read_text())["adminApi"]["adminBootstrap"]
+    assert ab3 == {"groups": ["SSIR_Admin"], "emails": ["a@x.io"]}
+
+
+def test_oidc_group_keys_render_and_default_claim_inference(tmp_path):
+    """groups_claim/group_prefix/reject_unmatched_groups → adminApi.oidc.* —
+    선언 없으면 provider_name 에서 claim 유추(기존 동작)."""
+    doc = dict(BASE, oidc={**BASE["oidc"],
+                           "groups_claim": "custom:groups",
+                           "group_prefix": "SSIR_",
+                           "reject_unmatched_groups": False})
+    _, out, _ = _render(tmp_path, doc)
+    o = yaml.safe_load((out / "values.yaml").read_text())["adminApi"]["oidc"]
+    assert o["groupsClaim"] == "custom:groups"
+    assert o["groupPrefix"] == "SSIR_"
+    assert o["rejectUnmatchedGroups"] is False
+
+    # 미선언 — provider_name(oidc:cognito)에서 cognito:groups 유추, 나머지 키 부재
+    _, out2, _ = _render(tmp_path / "d", BASE)
+    o2 = yaml.safe_load((out2 / "values.yaml").read_text())["adminApi"]["oidc"]
+    assert o2["groupsClaim"] == "cognito:groups"
+    assert "groupPrefix" not in o2 and "rejectUnmatchedGroups" not in o2
