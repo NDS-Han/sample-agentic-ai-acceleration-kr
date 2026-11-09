@@ -1173,7 +1173,8 @@
       "statusUnknown": "Unknown",
       "statusUnknownWarning": "Could not read the current setting — it may actually be on. Refresh to check again.",
       "viewBodyLogs": "View body logs →",
-      "notProvisionedHint": "Body-logging infrastructure is not provisioned in this deployment — enable it via the features.body_logging deploy setting."
+      "notProvisionedHint": "Body-logging infrastructure is not provisioned in this deployment — enable it via the features.body_logging deploy setting.",
+      "staleOnHint": "The flag is still ON but infrastructure was removed — nothing is being captured; switch OFF to clean up."
     },
     "emptyAnalyticsLink": "View longer-term stats in Analytics →",
     "bodyLogs": {

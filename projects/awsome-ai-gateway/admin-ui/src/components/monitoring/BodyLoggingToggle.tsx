@@ -68,6 +68,10 @@ export function BodyLoggingToggle({ initialEnabled, provisioned = true }: Props)
 
   // 켜는 확인은 파괴적 스타일(빨강)로 띄운다 — 프라이버시에 영향을 주는 방향이다.
   const turningOn = pendingNext === true;
+  // 미프로비저닝이면 **켜기만** 잠근다 — 끄기는 API 도 항상 허용하므로 stale ON
+  // 플래그를 여기서 지울 수 있어야 한다 (인프라 제거 후 ON 잔류 정리 경로).
+  const switchDisabled =
+    isPending || enabled === null || (!provisioned && enabled !== true);
 
   return (
     <div className="glass rounded-apple p-4 flex items-center justify-between gap-4">
@@ -89,13 +93,18 @@ export function BodyLoggingToggle({ initialEnabled, provisioned = true }: Props)
         {enabled === null && (
           <p className="text-xs text-destructive">{t('statusUnknownWarning')}</p>
         )}
-        {enabled === true && (
+        {enabled === true && !provisioned && (
+          // 인프라는 없는데 플래그만 ON — 실제 수집은 안 된다. OFF 정리를 안내.
+          <p className="text-xs text-destructive">{t('staleOnHint')}</p>
+        )}
+        {enabled === true && provisioned && (
           // 켜져 있는 동안 상시 보이는 경고. 배지만으로는 "무엇이" 수집되는지 알 수 없다.
           <p className="text-xs text-destructive">{t('activeWarning')}</p>
         )}
-        {enabled === true && (
+        {enabled === true && provisioned && (
           // 본문 로그 뷰어 진입점 — 수집이 켜져 있을 때만 노출한다(운영 결정:
-          // 수집을 끄면 과거 수집분의 열람 경로도 같이 닫는다).
+          // 수집을 끄면 과거 수집분의 열람 경로도 같이 닫는다). 미프로비저닝이면
+          // 뷰어 API 도 버킷 미설정이라 링크를 숨긴다.
           <Link
             href="/monitoring/body-logs"
             className="mt-1 inline-flex items-center gap-1 text-xs font-medium text-primary hover:underline"
@@ -110,13 +119,13 @@ export function BodyLoggingToggle({ initialEnabled, provisioned = true }: Props)
         role="switch"
         aria-checked={enabled === true}
         aria-label={t('toggleLabel')}
-        disabled={isPending || enabled === null || !provisioned}
+        disabled={switchDisabled}
         onClick={handleClick}
         className={[
           'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors',
           'focus:outline-none focus-visible:ring-2 focus-visible:ring-primary',
           enabled ? 'bg-primary' : 'bg-muted-foreground/40',
-          isPending || enabled === null || !provisioned ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
+          switchDisabled ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer',
         ].join(' ')}
       >
         <span
