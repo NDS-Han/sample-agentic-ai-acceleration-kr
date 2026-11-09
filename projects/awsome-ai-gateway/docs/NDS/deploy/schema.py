@@ -194,6 +194,11 @@ class OidcConfig:
     token_url: str = ""
     provider_name: str = "oidc:cognito"
     required_group: str = ""    # 비우면 인증된 모든 사용자 통과
+    groups_claim: str = ""      # 비우면 provider_name 에서 유추 (cognito → cognito:groups)
+    group_prefix: str = ""      # 그룹→부서/팀 파싱 prefix — 비우면 차트 기본 "Claude_"
+    reject_unmatched_groups: bool | None = None  # None 이면 차트 기본 true
+    admin_groups: list[str] = field(default_factory=list)  # ADMIN_GROUPS 정확일치
+    admin_emails: list[str] = field(default_factory=list)  # ADMIN_EMAILS
     vk_ttl_hours: int = 0       # VK 수명 — 0 이면 차트 기본(1시간). ops 8-Z 의
                               # adminApi.oidc.vkTtlHours 와 같은 키로 렌더된다.
 
@@ -647,7 +652,8 @@ _IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
 _CLIENT_KEYS = frozenset(("models_profile",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
-                        "vk_ttl_hours"))
+                        "vk_ttl_hours", "groups_claim", "group_prefix",
+                        "reject_unmatched_groups", "admin_groups", "admin_emails"))
 _INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
                         "cognito_groups", "bedrock_allowed_model_arns",
                         "mantle_regions"))
@@ -822,6 +828,14 @@ def from_dict(raw: dict) -> GatewayConfig:
             client_secret=str(oidc.get("client_secret", "")),
             provider_name=str(oidc.get("provider_name", "oidc:cognito")),
             required_group=str(oidc.get("required_group", "")),
+            groups_claim=str(oidc.get("groups_claim", "")),
+            group_prefix=str(oidc.get("group_prefix", "")),
+            reject_unmatched_groups=(
+                oidc.get("reject_unmatched_groups")
+                if oidc.get("reject_unmatched_groups") is None
+                else bool(oidc.get("reject_unmatched_groups"))),
+            admin_groups=[str(g) for g in (oidc.get("admin_groups") or [])],
+            admin_emails=[str(g) for g in (oidc.get("admin_emails") or [])],
             vk_ttl_hours=_safe_int(oidc.get("vk_ttl_hours", 0), errors,
                                    "oidc.vk_ttl_hours"),
         ),

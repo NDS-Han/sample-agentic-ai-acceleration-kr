@@ -221,7 +221,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
         # 질문하지 않는 OIDC 필드는 기존 값을 보존 — configure 한 번에
         # required_group/audience/client_secret 가 조용히 사라지는 걸 막는다
         for k in ("audience", "client_secret", "required_group", "provider_name",
-                  "vk_ttl_hours"):
+                  "vk_ttl_hours", "groups_claim", "group_prefix",
+                  "reject_unmatched_groups", "admin_groups", "admin_emails"):
             if prev_oidc.get(k) and k not in oidc:
                 oidc[k] = prev_oidc[k]
         vk_ttl = _unwrap(questionary.text(
@@ -232,6 +233,24 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 oidc["vk_ttl_hours"] = int(vk_ttl)
             except ValueError:
                 console.print("[yellow]vk_ttl_hours 가 숫자가 아닙니다 — 기존 값 유지")
+        grp_prefix = _unwrap(questionary.text(
+            "그룹 prefix — <prefix><dept>_<team> 으로 부서/팀 파싱 "
+            "(비우면 차트 기본 Claude_)",
+            default=str(prev_oidc.get("group_prefix", "")) or None).ask())
+        if grp_prefix:
+            oidc["group_prefix"] = grp_prefix
+        admin_groups = _unwrap(questionary.text(
+            "ADMIN 역할 부여 그룹 (쉼표 구분, 예: ClaudeAdmin — 비우면 없음)",
+            default=",".join(prev_oidc.get("admin_groups") or []) or None).ask())
+        if admin_groups:
+            oidc["admin_groups"] = [g.strip()
+                                    for g in admin_groups.split(",") if g.strip()]
+        admin_emails = _unwrap(questionary.text(
+            "ADMIN 이메일 (쉼표 구분 — 비우면 없음)",
+            default=",".join(prev_oidc.get("admin_emails") or []) or None).ask())
+        if admin_emails:
+            oidc["admin_emails"] = [e.strip()
+                                    for e in admin_emails.split(",") if e.strip()]
 
     images = {}
     if target in ("ecs", "eks"):

@@ -108,12 +108,22 @@ apply가 하는 일(전부 자동·멱등):
 3. ingress에 `listen-ports: HTTP:80+HTTPS:443` + `ssl-redirect` 선언
 4. `nextauthUrl`을 `https://<alb>`로 주입
 
-이후 사람이 하는 것 — **Cognito 콜백은 terraform env 소유**라 tfvars에
+이후 사람이 하는 것 — **Cognito 콜백은 terraform env 소유**라 아래 파일에
 등록 후 `terraform apply`합니다:
+
+```
+deployment/terraform/environments/<env명>/terraform.tfvars
+# 예: deployment/terraform/environments/llm-gateway-prod/terraform.tfvars
+```
 
 ```hcl
 cognito_callback_urls = [ ..., "https://<admin-ui ALB>/api/auth/callback" ]
 cognito_logout_urls   = [ ..., "https://<admin-ui ALB>/" ]
+```
+
+```bash
+cd deployment/terraform/environments/<env명>
+terraform apply    # aws_cognito_user_pool_client.cli 1건 update 만 나와야 정상
 ```
 
 주의:
