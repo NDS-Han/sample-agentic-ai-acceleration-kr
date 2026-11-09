@@ -46,6 +46,7 @@ export function fmtDateTime(iso: string, locale: string, timeZone?: string): str
     hour: '2-digit',
     minute: '2-digit',
     second: '2-digit',
+    hour12: false,
   });
 }
 
@@ -74,5 +75,5 @@ export function fmtTokensCompact(n: number | null | undefined): string {
 export function fmtTime(iso: string, locale: string, timeZone?: string): string {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return iso;
-  return d.toLocaleTimeString(locale, { timeZone });
+  return d.toLocaleTimeString(locale, { timeZone, hour12: false });
 }
