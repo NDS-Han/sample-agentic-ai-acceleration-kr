@@ -576,7 +576,8 @@ _IMAGE_KEYS = frozenset(("registry", "tag", "tags"))
 _CLIENT_KEYS = frozenset(("models_profile",))
 _OIDC_KEYS = frozenset(("issuer_url", "audience", "client_id", "client_secret",
                         "authorize_url", "token_url", "provider_name", "required_group",
-                        "vk_ttl_hours"))
+                        "vk_ttl_hours", "groups_claim", "group_prefix",
+                        "reject_unmatched_groups", "admin_groups", "admin_emails"))
 _INFRA_KEYS = frozenset(("azs", "vpc_cidr", "cognito_domain_suffix", "db", "cache",
                         "cognito_groups", "bedrock_allowed_model_arns"))
 
@@ -734,6 +735,14 @@ def from_dict(raw: dict) -> GatewayConfig:
             client_secret=str(oidc.get("client_secret", "")),
             provider_name=str(oidc.get("provider_name", "oidc:cognito")),
             required_group=str(oidc.get("required_group", "")),
+            groups_claim=str(oidc.get("groups_claim", "")),
+            group_prefix=str(oidc.get("group_prefix", "")),
+            reject_unmatched_groups=(
+                oidc.get("reject_unmatched_groups")
+                if oidc.get("reject_unmatched_groups") is None
+                else bool(oidc.get("reject_unmatched_groups"))),
+            admin_groups=[str(g) for g in (oidc.get("admin_groups") or [])],
+            admin_emails=[str(g) for g in (oidc.get("admin_emails") or [])],
             vk_ttl_hours=_safe_int(oidc.get("vk_ttl_hours", 0), errors,
                                    "oidc.vk_ttl_hours"),
         ),

@@ -79,6 +79,15 @@ resource "aws_cognito_user_pool" "this" {
     }
   }
 
+  # SAML IdP 의 groups 속성을 받는 custom:groups — AD 그룹 → 역할/팀 매핑 소스
+  schema {
+    name                = "groups"
+    attribute_data_type = "String"
+    required            = false
+    mutable             = true
+    string_attribute_constraints {}
+  }
+
   account_recovery_setting {
     recovery_mechanism {
       name     = "verified_email"
@@ -156,7 +165,7 @@ resource "aws_cognito_user_pool_client" "cli" {
     "ALLOW_USER_PASSWORD_AUTH", # admin 이 직접 사용자 생성 후 임시 PW 사용
   ]
 
-  read_attributes  = ["email", "email_verified", "name"]
+  read_attributes  = ["email", "email_verified", "name", "custom:groups"]
   write_attributes = ["email", "name"]
 }
 
