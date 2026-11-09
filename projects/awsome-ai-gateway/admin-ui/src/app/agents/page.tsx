@@ -28,6 +28,8 @@ export default async function ServiceAccountsPage() {
         <ServiceAccountsPanel
           accounts={saResult.value.items}
           maxTtlDays={saResult.value.max_ttl_days}
+          // 필드 부재(=구버전 API)는 발급이 켜져 있던 시절 — !== false 유지.
+          // 신버전 API 는 항상 명시값을 주므로 fail-closed 해석은 백엔드가 담당.
           serviceKeysEnabled={saResult.value.service_keys_enabled !== false}
         />
       ) : (

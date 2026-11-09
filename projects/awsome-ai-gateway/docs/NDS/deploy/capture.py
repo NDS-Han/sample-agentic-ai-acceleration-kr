@@ -454,6 +454,11 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         "images": {"tag": image_tag},
         "clients": {"models_profile": "global"},
     }
+    if api_env_ok and sizing_env.get("SERVICE_KEYS_ENABLED") is None:
+        notes.append(
+            "SERVICE_KEYS_ENABLED 를 못 읽었습니다 — false 기록. 앱 기본은 "
+            "false(구 task def/이미지에서 env 없이 켜져 있던 배포라면 true 로 "
+            "바로잡고 env 를 명시하세요)")
     if infra_doc:
         doc["infra"] = infra_doc
     if oidc:

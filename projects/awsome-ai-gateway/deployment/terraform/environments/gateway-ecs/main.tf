@@ -79,10 +79,10 @@ module "aurora" {
   serverless_max_acu  = var.serverless_max_acu
   safeguards          = var.db_safeguards
   prod_instance_class = var.db_instance_class
-  # 기존 클러스터의 실측 메이저로 핀 — 미선언이면 모듈이 AWS 기본 버전(신규
-  # 생성용)의 메이저로 family 를 맞춰 기존 PG16 클러스터와 어긋난다.
-  # 메이저 업그레이드 시 이 핀을 함께 올린다.
-  engine_version      = "16"
+  # 기존 클러스터 env 는 tfvars(NDS: infra.db.engine_version)로 실측 메이저를
+  # 핀한다 — 이 디렉터리는 모든 ECS env 공유 템플릿이라 상수 핀은 금지
+  # (신규 env 가 AWS 기본 메이저와 어긋난다). null → 모듈이 AWS 기본의 메이저.
+  engine_version = var.aurora_engine_version
 
   tags = var.tags
 }

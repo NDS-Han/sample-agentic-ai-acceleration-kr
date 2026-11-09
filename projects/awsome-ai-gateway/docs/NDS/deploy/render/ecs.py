@@ -76,6 +76,11 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         vars_["db_mode"] = "provisioned"
         vars_["db_instance_class"] = db["instance_class"]
     vars_["db_safeguards"] = t.ha != "none"
+    # parameter group family 핀 — 기존 클러스터 env 만 선언(미선언=AWS 기본
+    # 메이저로 자동 맞춤 → 신규 env 는 비운다). env tfvars 를 전량 재생성하는
+    # 경로라 수동 tfvars 핀은 다음 render 에 지워진다 — 반드시 이 키로.
+    if cfg.infra.db.engine_version:
+        vars_["aurora_engine_version"] = cfg.infra.db.engine_version
 
     cache = effective_cache_spec(cfg)
     vars_["cache_mode"] = cache["mode"]

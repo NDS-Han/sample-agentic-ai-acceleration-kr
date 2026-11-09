@@ -66,6 +66,14 @@ variable "db_mode" {
   default     = "serverless"
 }
 
+variable "aurora_engine_version" {
+  # 기존 클러스터 env 의 실측 메이저 핀 (NDS: infra.db.engine_version → tfvars).
+  # null 이면 모듈이 AWS 기본 버전의 메이저로 family 를 맞춘다(신규 env 용).
+  description = "Parameter group family 메이저 핀 — null 이면 AWS 기본 버전의 메이저"
+  type        = string
+  default     = null
+}
+
 variable "serverless_min_acu" {
   type    = number
   default = 0.5

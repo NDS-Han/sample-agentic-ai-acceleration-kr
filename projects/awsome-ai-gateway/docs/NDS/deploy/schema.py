@@ -150,6 +150,10 @@ class InfraDbConfig:
     min_acu: float | None = None    # serverless 전용 — 0.5 단위
     max_acu: float | None = None
     instance_class: str = ""        # provisioned 전용 (비우면 db.r7g.large)
+    # 기존 클러스터의 실측 메이저 핀(예 "16", "16.13") — parameter group
+    # family 를 그쪽에 맞춘다. 비우면 AWS 기본 버전의 메이저(신규 생성용).
+    # 기존 env 는 미선언 시 다음 plan 부터 family drift 가 뜨니 반드시 핀.
+    engine_version: str = ""
 
 
 @dataclass
@@ -459,7 +463,8 @@ class GatewayConfig:
             e.append("infra.cache.num_clusters=1 은 replicated 와 맞지 않습니다 "
                      "(모듈이 최소 2 로 강제합니다) — 2 이상이나 mode=single 을 쓰세요.")
         if (db.mode or db.min_acu is not None or db.max_acu is not None
-                or db.instance_class or cache.mode or cache.node_type
+                or db.instance_class or db.engine_version
+                or cache.mode or cache.node_type
                 or cache.num_clusters is not None or cache.num_node_groups is not None
                 or cache.replicas_per_node_group is not None):
             if self.deploy.target != "ecs":
@@ -814,6 +819,7 @@ def from_dict(raw: dict) -> GatewayConfig:
                 max_acu=_safe_float_or_none(_infra_db.get("max_acu"), errors,
                                             "infra.db.max_acu"),
                 instance_class=str(_infra_db.get("instance_class", "")),
+                engine_version=str(_infra_db.get("engine_version", "")),
             ),
             cache=InfraCacheConfig(
                 mode=str(_infra_cache.get("mode", "")),

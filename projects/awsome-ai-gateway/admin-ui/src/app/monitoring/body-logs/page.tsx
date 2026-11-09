@@ -18,6 +18,7 @@ export default async function BodyLogsPage() {
 
   const result = await getBodyLoggingAction();
   const enabled = result.success ? result.data.enabled : null;
+  // 읽기 실패(enabled=null)면 statusUnknown 잠금이 먼저 나가니 여기선 true 로 둔다.
   const provisioned = result.success ? result.data.provisioned !== false : true;
 
   // stale ON + 미프로비저닝이면 뷰어 API 도 버킷 미설정으로 503 — 화면 자체를
@@ -34,7 +35,9 @@ export default async function BodyLogsPage() {
               ? t('statusUnknown')
               : enabled === true && !provisioned
                 ? t('staleOnNotice')
-                : t('disabledNotice')}
+                : !provisioned
+                  ? t('notProvisionedNotice')
+                  : t('disabledNotice')}
           </p>
           <Link href="/monitoring" className="mt-3 inline-block text-sm text-primary hover:underline">
             {t('backToMonitoring')}
