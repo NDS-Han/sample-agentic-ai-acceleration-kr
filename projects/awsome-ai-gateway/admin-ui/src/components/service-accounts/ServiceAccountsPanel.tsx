@@ -152,6 +152,10 @@ export function ServiceAccountsPanel({ accounts, maxTtlDays, serviceKeysEnabled 
         <div>
           <h2 className="text-lg font-semibold mb-1">{t('saTitle')}</h2>
           <p className="text-xs text-muted-foreground">{t('saDescription')}</p>
+          {!serviceKeysEnabled && (
+            // 발급 버튼만 숨기면 왜 없는지 알 수 없다 — 배포 플래그 위치를 안내.
+            <p className="mt-1 text-xs text-muted-foreground">{t('saDisabledHint')}</p>
+          )}
         </div>
         {serviceKeysEnabled && (
           <button

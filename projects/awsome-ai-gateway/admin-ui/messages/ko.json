@@ -1478,6 +1478,7 @@
     "saUnmarkConfirm": "해제",
     "saUnmarkDone": "에이전트를 해제했습니다",
     "saIssueButton": "장기 키 발급",
+    "saDisabledHint": "이 배포는 장기키 발급이 비활성화되어 있습니다 — 켜려면 features.service_keys 배포 설정이 필요합니다.",
     "saGuide1": "에이전트 계정에 장기 가상키를 발급합니다. 이 키로 외부 앱이 gateway를 통해 모델을 호출합니다.",
     "saGuide2": "선택한 계정에 활성 키가 있으면 발급 즉시 만료됩니다. 발급된 가상키는 이 창에서 한 번만 표시됩니다.",
     "saSelectLabel": "발급 대상 계정",

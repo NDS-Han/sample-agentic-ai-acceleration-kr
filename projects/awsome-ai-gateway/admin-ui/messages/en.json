@@ -1478,6 +1478,7 @@
     "saUnmarkConfirm": "Unflag",
     "saUnmarkDone": "Agent unflagged",
     "saIssueButton": "Issue long-lived key",
+    "saDisabledHint": "Long-lived key issuance is disabled in this deployment — enable it via the features.service_keys deploy setting.",
     "saGuide1": "Issue a long-lived Virtual Key (VK) for an agent account. External apps call models through the gateway with it.",
     "saGuide2": "If the selected account has an active key, it expires the moment you issue. The VK is shown only once in this window.",
     "saSelectLabel": "Account to issue",
