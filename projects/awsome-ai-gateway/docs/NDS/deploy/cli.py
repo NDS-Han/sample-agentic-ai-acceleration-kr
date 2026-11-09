@@ -1272,7 +1272,7 @@ def cmd_capture(args) -> int:
                     asdict(schema.from_dict(existing)), asdict(schema.from_dict(doc)))
             except schema.SchemaError:
                 diffs = capture.diff_docs(existing, doc)
-            dropped = capture.dropped_keys(diffs)
+            dropped = capture.dropped_keys(diffs, doc)
             if dropped:
                 notes.append(
                     "⚠ 채택(cp)하면 삭제되는 yaml 전용 키 — 캡처가 라이브에서 못 "

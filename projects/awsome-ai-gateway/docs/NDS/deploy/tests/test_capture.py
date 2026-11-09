@@ -79,6 +79,33 @@ def test_compose_capture_missing_dir(tmp_path):
         capture.capture_compose(tmp_path / "nope")
 
 
+def test_compose_roundtrip_service_keys(tmp_path):
+    """렌더러는 SERVICE_KEYS_ENABLED 를 .env(env_file)에만 쓴다 — api_env 만
+    보면 false 배포가 true 로 캡처돼 채택 시 발급이 켜지는 회귀."""
+    # ⚠️ 같은 out_dir 재렌더는 merge_env 규칙상 기존 .env 가 이긴다 — 케이스별로
+    #    별도 디렉터리를 써야 한다.
+    doc = dict(BASE)
+    doc["features"] = {"notifications": {"provider": "mock"},
+                       "service_keys": False}
+    cap, _ = _roundtrip(tmp_path / "off", doc)
+    assert cap["features"]["service_keys"] is False
+
+    doc["features"] = {"notifications": {"provider": "mock"},
+                       "service_keys": True}
+    cap, _ = _roundtrip(tmp_path / "on", doc)
+    assert cap["features"]["service_keys"] is True
+
+
+def test_service_keys_env_case_and_bool_forms():
+    """yaml bool false / 대문자 / "0" 같은 값도 off 로 읽는다."""
+    assert capture._is_false_env(False) is True
+    assert capture._is_false_env("False") is True
+    assert capture._is_false_env("0") is True
+    assert capture._is_false_env("no") is True
+    assert capture._is_false_env("true") is False
+    assert capture._is_false_env(None) is False  # 부재 = 앱 기본값이 진리
+
+
 def test_diff_docs_finds_changes():
     declared = {"a": {"b": 1, "c": "x"}}
     captured = {"a": {"b": 2, "d": "new"}}
@@ -105,7 +132,7 @@ def test_dropped_keys_marks_only_yaml_only_declarations():
         "new": {"key": "v"},                  # 캡처에만 있음 — 삭제 아님
     }
     diffs = capture.diff_docs(declared, captured)
-    dropped = dict(capture.dropped_keys(diffs))
+    dropped = dict(capture.dropped_keys(diffs, captured))
     assert set(dropped) == {
         "infra.bedrock_allowed_model_arns",
         "infra.mantle_regions",
@@ -113,7 +140,32 @@ def test_dropped_keys_marks_only_yaml_only_declarations():
     }
     # falsy 하지만 유효한 선언값(0/False)도 yaml 전용 키로 잡힌다
     diffs2 = capture.diff_docs({"f": {"off": False}}, {})
-    assert dict(capture.dropped_keys(diffs2)) == {"f.off": False}
+    assert dict(capture.dropped_keys(diffs2, {})) == {"f.off": False}
+
+
+def test_dropped_keys_catches_schema_default_blanks():
+    """정규화본은 못 읽은 문자열 키를 스키마 기본값 "" 으로 채운다 — 원본 doc
+    에 경로가 없거나 "" 이면 cp/absorb 가 선언값을 지우므로 경고 대상이다.
+    tfstate.bucket, oidc.client_secret 처럼 캡처가 아예 방출하지 않는 키가 해당."""
+    declared = {
+        "tfstate": {"bucket": "llm-tfstate-acct", "table": "locks"},
+        "oidc": {"client_secret": "super-secret"},
+        "network": {"allowed_cidrs": ["10.0.0.0/8"]},
+    }
+    captured = {
+        "oidc": {"issuer_url": "https://x", "client_id": "c"},  # secret 부재
+        "network": {"allowed_cidrs": []},  # 캡처가 실제로 빈 값을 읽음
+        # tfstate 섹션 자체 부재 (notes 로 채우라는 안내만 존재)
+    }
+    diffs = capture.diff_docs(declared, captured)
+    dropped = dict(capture.dropped_keys(diffs, captured))
+    assert dropped == {
+        "tfstate.bucket": "llm-tfstate-acct",
+        "tfstate.table": "locks",
+        "oidc.client_secret": "super-secret",
+    }
+    # 읽은 빈 리스트는 삭제 경고가 아니라 absorb 가능한 실제 diff 다
+    assert "network.allowed_cidrs" not in dropped
 
 
 # ==============================================================================
@@ -148,7 +200,9 @@ def test_eks_capture_from_real_dev_values(monkeypatch):
     assert "65.2.11.169/32" in doc["network"]["allowed_cidrs"]
     # features
     assert doc["features"]["web_search"] is True       # WEB_SEARCH_ENABLED=true
-    assert doc["features"]["body_logging"] is True     # FIREHOSE_STREAM_NAME 있음
+    # 현재 dev 는 features.body_logging=false — FIREHOSE_STREAM_NAME 미배선이라
+    # 캡처는 키를 생략한다(false 박지 않는 규약 — 박으면 validate 가 경고).
+    assert "body_logging" not in doc["features"]
     assert doc["features"]["notifications"]["provider"] == "ses"
     # oidc — adminApi.oidc.issuerUrl
     assert "cognito-idp" in doc["oidc"]["issuer_url"]
@@ -164,9 +218,25 @@ def test_eks_capture_from_real_dev_values(monkeypatch):
 def test_eks_capture_emits_all_feature_keys(monkeypatch):
     _fake_eks(monkeypatch)
     doc, _ = capture.capture_eks()
-    assert set(doc["features"]) == set(schema._FEATURE_KEYS)
+    # body_logging 만 예외 — eks managed overlay 가 "켜기"만 소유해서 FIREHOSE
+    # 미감지 시 false 를 박지 않고 키를 생략한다(capture.py 주석 참조).
+    assert set(doc["features"]) == set(schema._FEATURE_KEYS) - {"body_logging"}
     # dev values 는 LITELLM_PRICING_LAMBDA 가 실제로 켜져 있다
     assert doc["features"]["pricing_lambda"] is True
+
+
+@pytest.mark.skipif(not DEV_VALUES.exists(), reason="dev values 파일 없음")
+def test_eks_capture_body_logging_on(monkeypatch):
+    """FIREHOSE_STREAM_NAME env 가 있으면 body_logging=True 를 기록한다
+    (없으면 위 테스트처럼 키 생략)."""
+    import yaml as _yaml
+    vals = _yaml.safe_load(DEV_VALUES.read_text())
+    vals.setdefault("gatewayProxy", {}).setdefault("env", {})[
+        "FIREHOSE_STREAM_NAME"] = "stream-x"
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    doc, _ = capture.capture_eks()
+    assert doc["features"]["body_logging"] is True
 
 
 def test_eks_capture_live_drift_custom_release_name(monkeypatch):

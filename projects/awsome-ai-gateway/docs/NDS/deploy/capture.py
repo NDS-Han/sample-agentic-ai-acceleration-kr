@@ -32,6 +32,20 @@ def _strip(s: str, prefix: str) -> str:
     return s[len(prefix):] if s.startswith(prefix) else s
 
 
+def _is_true_env(v) -> bool:
+    """env/values 의 명시적 on 판정 — 대소문자·yaml boolean·숫자 모두 흡수."""
+    return str(v if v is not None else "").strip().lower() in ("true", "1", "yes", "on")
+
+
+def _is_false_env(v) -> bool:
+    """env/values 의 명시적 off 판정 — yaml `false`(비인용 bool), "0", "no" 포함.
+
+    부재(None)는 false 가 아니다 — 앱 기본값이 진리라 "읽지 못함 = false"로
+    오인하면 켜진 배포를 꺼진 것으로 캡처한다(보안 플래그의 fail-open).
+    """
+    return str(v if v is not None else "").strip().lower() in ("false", "0", "no", "off")
+
+
 # ==============================================================================
 # compose — 정적 산출물 역분석 (라이브 상태와 다를 수 있음 — doctor 가 별도 확인)
 # ==============================================================================
@@ -108,19 +122,26 @@ def capture_compose(out_dir: Path) -> tuple[dict, list[str]]:
     ui_env = (services.get("admin-ui") or {}).get("environment") or {}
     if isinstance(ui_env, list):
         ui_env = dict(e.split("=", 1) for e in ui_env if "=" in e)
+    # SERVICE_KEYS_ENABLED — 렌더러는 .env(env_file)에만 쓰고 environment: 블록은
+    # override 라 api_env 우선. 둘 다 부재면 앱 기본 true 가 진리다. 옆의
+    # dev_login 처럼 두 소스를 봐야 한다 — api_env 만 보면 .env 에 false 로
+    # 배포된 것도 true 로 캡처돼 채택 시 발급이 켜진다.
+    sk_env = api_env.get("SERVICE_KEYS_ENABLED")
+    if sk_env is None:
+        sk_env = env.get("SERVICE_KEYS_ENABLED")
     features = {
         "notifications": notif,
         "bi_insight": bool(env.get("AGENTCORE_RUNTIME_ARN")
                            or api_env.get("AGENTCORE_RUNTIME_ARN")),
         "pricing_lambda": bool(env.get("LITELLM_PRICING_LAMBDA")
                                or api_env.get("LITELLM_PRICING_LAMBDA")),
-        "web_search": env.get("WEB_SEARCH_ENABLED") == "true",
+        "web_search": _is_true_env(env.get("WEB_SEARCH_ENABLED")),
         "body_logging": bool(env.get("FIREHOSE_STREAM_NAME")),
         "observability": any(s in services for s in OBSERVABILITY),
-        "dev_login": (env.get("DEV_LOGIN_ENABLED") == "true"
-                      or api_env.get("DEV_LOGIN_ENABLED") == "true"
-                      or str(ui_env.get("DEV_LOGIN_ENABLED")) == "true"),
-        "service_keys": api_env.get("SERVICE_KEYS_ENABLED") != "false",
+        "dev_login": (_is_true_env(env.get("DEV_LOGIN_ENABLED"))
+                      or _is_true_env(api_env.get("DEV_LOGIN_ENABLED"))
+                      or _is_true_env(ui_env.get("DEV_LOGIN_ENABLED"))),
+        "service_keys": not _is_false_env(sk_env),
     }
 
     # oidc — admin-ui environment(직접 주입된 것) + .env
@@ -244,6 +265,7 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
     name_map = outputs.get("service_names") or {}
     service_names = list(name_map.values())
     image_tag, sizing, sender_type, sizing_env = "", {}, "mock", {}
+    api_env_ok = True
     try:
         # admin-api task def — env 계약의 진원지. 실제 서비스 이름은 output 의
         # service_names 맵이 정본이다(고정 "admin-api" 가정은 다른 명명 배포에서
@@ -255,7 +277,10 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
         sizing_env = _taskdef_env(region, api_arn)
         sender_type = sizing_env.get("EMAIL_SENDER_TYPE", "mock")
     except (CaptureError, KeyError, IndexError) as e:
+        api_env_ok = False
         notes.append(f"admin-api task def 조회 실패 — env 기반 항목은 추정입니다: {e}")
+        notes.append("service_keys 는 읽기 실패로 false 기록 — 실제 값은 "
+                     "ECS 콘솔/task def 에서 확인하세요")
 
     # 이미지 태그 + 레지스트리
     try:
@@ -409,13 +434,18 @@ def capture_ecs(env_dir: Path, region: str) -> tuple[dict, list[str]]:
             "notifications": notif,
             "bi_insight": bool(sizing_env.get("AGENTCORE_RUNTIME_ARN")),
             "pricing_lambda": bool(sizing_env.get("LITELLM_PRICING_LAMBDA")),
-            "web_search": sizing_env.get("WEB_SEARCH_ENABLED") == "true",
+            "web_search": _is_true_env(sizing_env.get("WEB_SEARCH_ENABLED")),
             "body_logging": bool(sizing_env.get("FIREHOSE_STREAM_NAME")),
             # observability 는 compose 전용 — ecs 에서 true 를 기록하면
             # 캡처 문서 자체가 스키마 위반이 된다.
             "observability": False,
-            "dev_login": sizing_env.get("DEV_LOGIN_ENABLED") == "true",
-            "service_keys": sizing_env.get("SERVICE_KEYS_ENABLED") != "false",
+            "dev_login": _is_true_env(sizing_env.get("DEV_LOGIN_ENABLED")),
+            # task def 읽기 실패(sizing_env={})면 앱 기본 true 로 추정해
+            # service_keys=true 를 기록하게 된다 — 보안 플래그의 fail-open 이라
+            # 읽기 실패는 false 로 두고 notes 로 실제 값 확인을 요구한다.
+            "service_keys": (api_env_ok
+                             and not _is_false_env(
+                                 sizing_env.get("SERVICE_KEYS_ENABLED"))),
         },
         "images": {"tag": image_tag},
         "clients": {"models_profile": "global"},
@@ -677,10 +707,12 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         "notifications": notif,
         "bi_insight": bool(aenv.get("AGENTCORE_RUNTIME_ARN")),
         "pricing_lambda": bool(aenv.get("LITELLM_PRICING_LAMBDA")),
-        "web_search": str(genv.get("WEB_SEARCH_ENABLED")) == "true",
+        "web_search": _is_true_env(genv.get("WEB_SEARCH_ENABLED")),
         "observability": otel_mode not in ("", "disabled", "none"),
         "dev_login": False,
-        "service_keys": str(aenv.get("SERVICE_KEYS_ENABLED")) != "false",
+        # values 에 손으로 false(비인용 bool)를 박으면 str(False)="False" 가
+        # 되어 true 로 오인한다 — _is_false_env 로 정규화.
+        "service_keys": not _is_false_env(aenv.get("SERVICE_KEYS_ENABLED")),
     }
     # body_logging 은 eks managed overlay 가 "켜기"만 소유하므로 false 를
     # 박지 않는다 — 박으면 validate 마다 수동 비활성화 경고가 난다.
@@ -693,8 +725,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # dev login — 라이브에 DEV_LOGIN_ENABLED=true 가 켜져 있으면 보존해야 한다.
     # 안 잡으면 채택 첫 apply 에 oidc 설정 경로가 adminUi 를 "false" 로 되돌려
     # 운영 중이던 개발자 로그인이 꺼진다.
-    if (str(_val(v, "adminUi", "env", "DEV_LOGIN_ENABLED")) == "true"
-            or str(aenv.get("DEV_LOGIN_ENABLED")) == "true"):
+    if (_is_true_env(_val(v, "adminUi", "env", "DEV_LOGIN_ENABLED"))
+            or _is_true_env(aenv.get("DEV_LOGIN_ENABLED"))):
         features["dev_login"] = True
         notes.append("dev login(DEV_LOGIN_ENABLED=true)이 켜져 있습니다 — "
                      "features.dev_login: true 로 기록했습니다. 의도가 아니면 "
@@ -816,12 +848,37 @@ def diff_docs(declared: dict, captured: dict) -> list[tuple[str, object, object]
     return diffs
 
 
-def dropped_keys(diffs: list[tuple[str, object, object]]) -> list[tuple[str, object]]:
+_MISSING = object()
+
+
+def _lookup(doc: dict, dotted: str):
+    """점 경로로 중첩 dict 를 내려간다 — 경로가 없으면 _MISSING."""
+    cur = doc
+    for part in dotted.split("."):
+        if not isinstance(cur, dict) or part not in cur:
+            return _MISSING
+        cur = cur[part]
+    return cur
+
+
+def dropped_keys(diffs: list[tuple[str, object, object]],
+                 captured_raw: dict) -> list[tuple[str, object]]:
     """캡처본을 통째로 채택(cp)하면 삭제되는 yaml 전용 키 — (path, declared_value).
 
-    캡처가 라이브에서 못 읽는 선언은 captured 쪽이 비어(None/[]/{}) 나온다 —
-    infra.* 정책, images.tags.migration 같은 항목이 여기 해당한다. 비어있는
-    선언값(""/None/[]/{})은 삭제돼도 무의미하므로 제외한다.
+    "못 읽은 키" 판정은 **원본** 캡처 doc 으로 한다. 정규화본(`asdict(from_dict)`)
+    은 스키마 기본값("", False, 0)으로 빈칸을 채워, 캡처가 못 읽은 문자열 키
+    (tfstate, oidc.client_secret — 캡처 자체가 방출하지 않음)와 "실제로 빈
+    값이었던 키"를 구별하지 못한다. 원본 기준: 경로 부재 또는 ""/None 이면
+    읽기 불가 — cp 는 물론 interactive 의 absorb 도 선언값을 지운다.
+    []/{} 는 캡처가 명시적으로 방출하는 "읽은 빈 값"이라 absorb 대상으로 둔다
+    (예: ecs allowed_cidrs — 라이브가 실제로 비어 있으면 채택 가능해야 한다).
+    비어있는 선언값 자체는 지워져도 무의미하므로 제외한다.
     """
-    return [(k, dv) for k, dv, cv in diffs
-            if cv in (None, [], {}) and dv not in (None, [], {}, "")]
+    out = []
+    for k, dv, _cv in diffs:
+        if dv in (None, [], {}, ""):
+            continue
+        rv = _lookup(captured_raw, k)
+        if rv is _MISSING or rv is None or rv == "":
+            out.append((k, dv))
+    return out
