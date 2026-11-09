@@ -20,6 +20,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from app.core.config import get_settings
@@ -46,11 +47,6 @@ def extract_claims(claims: dict) -> OIDCClaims:
        그룹이 ADMIN 으로 승격된다. 리스트로 감싸면 원소 동등 비교가 된다.
     """
     settings = get_settings()
-    raw_groups = claims.get(settings.OIDC_GROUPS_CLAIM) or []
-    if isinstance(raw_groups, str):
-        raw_groups = [raw_groups]
-    elif not isinstance(raw_groups, list):
-        raw_groups = [raw_groups]
 
     subject = claims.get(settings.OIDC_USER_ID_CLAIM) or ""
     email = claims.get(settings.OIDC_EMAIL_CLAIM) or ""
@@ -60,8 +56,36 @@ def extract_claims(claims: dict) -> OIDCClaims:
         subject=str(subject),
         email=str(email),
         name=str(name),
-        groups=[str(g) for g in raw_groups],
+        groups=flatten_groups(claims.get(settings.OIDC_GROUPS_CLAIM)),
     )
+
+
+def flatten_groups(raw) -> list[str]:
+    """그룹 클레임/속성 값 → 그룹명 리스트.
+
+    - 배열 클레임(cognito:groups): ["a","b"] → 그대로
+    - 문자열(custom:groups 등 custom attribute): 단일 문자열만 저장되므로
+      IdP 는 그룹 여러 개를 하나로 이어 보낸다 — 이어붙이는 구분자가 구현별로
+      ';'/',' 로 갈려 둘 다 푼다. 단일 값은 split 이 1-요소를 만들어 호환된다.
+    - 그 외(숫자·dict 등): 문자열화해 같은 규칙 적용.
+    """
+    if not raw:
+        return []
+    items = raw if isinstance(raw, list) else [raw]
+    return [g.strip() for x in items
+            for g in re.split(r"[;,]", str(x)) if g.strip()]
+
+
+def team_resolution_groups(groups: list[str]) -> list[str]:
+    """팀 해석용 정렬 — ADMIN_GROUPS 멤버를 맨 뒤로.
+
+    "SSIR_Claude_Admin;SSIR_Claude_Users" 처럼 관리자+팀 그룹을 같이 들고 온
+    사용자의 팀이 클레임 순서가 아니라 팀 그룹으로 결정되게 한다. 순수
+    관리자(관리 그룹만 보유)는 뒤로 밀려도 자기 그룹으로 파싱되므로 영향 없다.
+    """
+    admin = set(get_settings().ADMIN_GROUPS)
+    return ([g for g in groups if g not in admin]
+            + [g for g in groups if g in admin])
 
 
 def claims_truthy(v) -> bool:

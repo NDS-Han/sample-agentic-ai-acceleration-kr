@@ -977,3 +977,87 @@ async def test_sync_user_stores_email_when_verified(monkeypatch):
 
     created = repo.create_user.await_args[0][0]
     assert created.email == "v@x.com"
+
+
+def _admin_get_user_with_custom_groups(sub, email, groups_value, name="N"):
+    """custom:groups 속성을 가진 admin_get_user 응답 (SAML/ADFS 사용자 형태)."""
+    u = _admin_get_user(sub, email, name)
+    u["UserAttributes"].append({"Name": "custom:groups", "Value": groups_value})
+    return u
+
+
+@pytest.mark.asyncio
+async def test_sync_user_attr_groups_drive_team_and_role(monkeypatch):
+    """풀 그룹 없이 custom:groups 속성만 있는 사용자 — 속성으로 팀/역할 매핑.
+
+    SAML 사용자는 Cognito 풀 그룹에 속하지 않으므로, sync 가 속성을 읽지 않으면
+    Default Team + DEVELOPER 로 되돌린다 (로그인 경로의 배정과 충돌).
+    """
+    s = _settings(monkeypatch)
+    s.OIDC_GROUPS_CLAIM = "custom:groups"
+    s.OIDC_GROUP_PREFIX = "SSIR_"
+    s.ADMIN_GROUPS = ["SSIR_Claude_Admin"]
+    # derive_role/team_resolution_groups 는 oidc_identity 내부 get_settings 를 탄다
+    import app.core.oidc_identity as oi
+    monkeypatch.setattr(oi, "get_settings", lambda: s)
+
+    session = _session()
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock()
+    repo.list_users = AsyncMock(return_value=[])
+    repo.list_all_teams = AsyncMock(return_value=[])
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user_with_custom_groups(
+            "SAML-SUB", "u@x.com", "SSIR_Claude_Admin;SSIR_Claude_Users")
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])  # 풀 그룹 없음
+
+    result = await svc.sync_user(session, "u@x.com")
+
+    assert result.users_created == 1
+    created = repo.create_user.await_args[0][0]
+    assert created.role == UserRole.ADMIN          # attr 그룹 정확일치
+    # admin-last 정렬 → 팀은 "Claude_Users" 의 신규 팀 (default 아님)
+    assert created.team_id != uuid.UUID(s.DEFAULT_TEAM_ID)
+    assert created.team_id is not None
+
+
+@pytest.mark.asyncio
+async def test_sync_user_attr_groups_only_no_admin(monkeypatch):
+    """custom:groups 에 팀 그룹만 있는 일반 사용자 — DEVELOPER + 매핑 팀."""
+    s = _settings(monkeypatch)
+    s.OIDC_GROUPS_CLAIM = "custom:groups"
+    s.OIDC_GROUP_PREFIX = "SSIR_"
+    s.ADMIN_GROUPS = ["SSIR_Claude_Admin"]
+    import app.core.oidc_identity as oi
+    monkeypatch.setattr(oi, "get_settings", lambda: s)
+
+    session = _session()
+    repo = MagicMock()
+    repo.get_by_sso_subject = AsyncMock(return_value=None)
+    repo.get_by_email = AsyncMock(return_value=None)
+    repo.create_user = AsyncMock()
+    repo.list_users = AsyncMock(return_value=[])
+    _wire_team_cache(repo)
+    import app.services.cognito_sync_service as mod
+    monkeypatch.setattr(mod, "UserRepository", lambda sess: repo)
+
+    svc = CognitoSyncService(MagicMock())
+    svc._admin_get_user = MagicMock(
+        return_value=_admin_get_user_with_custom_groups(
+            "SAML-SUB2", "u2@x.com", "SSIR_Claude_Users")
+    )
+    svc._list_groups_for_user = MagicMock(return_value=[])
+
+    result = await svc.sync_user(session, "u2@x.com")
+
+    created = repo.create_user.await_args[0][0]
+    assert created.role == UserRole.DEVELOPER
+    assert created.team_id != uuid.UUID(s.DEFAULT_TEAM_ID)
