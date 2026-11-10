@@ -219,11 +219,30 @@ def test_sizing_unknown_service_rejected():
             images={"tag": "abc"}))
 
 
-def test_sizing_on_eks_rejected():
-    with pytest.raises(schema.SchemaError, match="ecs 경로"):
+def test_sizing_eks_rejects_ecs_style_keys():
+    """eks 도 sizing 을 소비한다 — 다만 키 어휘가 다르다. ecs 키(cpu)를 쓰면
+    eks 허용 키 목록을 보여주며 거부한다."""
+    with pytest.raises(schema.SchemaError, match="bedrock_thread_pool_size"):
         schema.from_dict(minimal(
             deploy={"target": "eks", "size_tier": "t3",
                     "sizing": {"gateway-proxy": {"cpu": 2048}}},
+            images={"tag": "abc"}))
+
+
+def test_sizing_valid_on_eks():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3",
+                "sizing": {"gateway-proxy": {"min_replicas": 3, "max_replicas": 30},
+                           "redis": {"pool_size": 150}}},
+        images={"tag": "abc"}))
+    assert cfg.deploy.sizing["redis"]["pool_size"] == 150
+
+
+def test_sizing_eks_unknown_service_rejected():
+    with pytest.raises(schema.SchemaError, match="알 수 없는 서비스"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3",
+                    "sizing": {"admin-api": {"min_replicas": 2}}},
             images={"tag": "abc"}))
 
 

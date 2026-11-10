@@ -248,3 +248,30 @@ def test_service_keys_enabled_emits_true(tmp_path):
     _, out, _ = _render(tmp_path, doc)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminApi"]["env"]["SERVICE_KEYS_ENABLED"] == "true"
+
+
+def test_eks_sizing_renders_hpa_executor_and_redis_pool(tmp_path):
+    """deploy.sizing 의 eks 소비 — HPA·executor env·redis.poolSize 를
+    gateway.yaml 이 소유해 env overlay 의 stale 값(구 poolSize=40 사고)을
+    침묵 되돌리지 않게 한다."""
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"min_replicas": 3, "max_replicas": 30,
+                          "bedrock_thread_pool_size": 128},
+        "redis": {"pool_size": 150},
+    }})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    asg = v["gatewayProxy"]["autoscaling"]
+    assert asg["enabled"] is True
+    assert asg["minReplicas"] == 3 and asg["maxReplicas"] == 30
+    assert v["gatewayProxy"]["env"]["BEDROCK_THREAD_POOL_SIZE"] == "128"
+    assert v["redis"]["poolSize"] == 150
+
+
+def test_eks_sizing_absent_emits_nothing(tmp_path):
+    """미선언이면 sizing 관련 키를 만들지 않는다 — env overlay 값이 그대로 승계."""
+    _, out, _ = _render(tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert "autoscaling" not in v.get("gatewayProxy", {})
+    assert "redis" not in v
+    assert "BEDROCK_THREAD_POOL_SIZE" not in v["gatewayProxy"]["env"]

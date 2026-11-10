@@ -124,6 +124,18 @@ ECS_SERVICES = frozenset((
     "notification-worker", "cost-recorder-worker", "migration",
 ))
 
+# deploy.sizing 의 eks 소비 키 (render/eks.py desired_values 와 동일).
+# size_tier 는 eks 에서 문서용이라 실제 크기는 여기서 정한다.
+EKS_SIZING = {
+    "gateway-proxy": frozenset((
+        "min_replicas", "max_replicas", "bedrock_thread_pool_size",
+    )),
+    "redis": frozenset(("pool_size",)),
+}
+_ECS_SIZING_KEYS = frozenset((
+    "cpu", "memory", "desired_count", "min_count", "max_count",
+))
+
 
 @dataclass
 class ImagesConfig:
@@ -482,21 +494,39 @@ class GatewayConfig:
             e.append("ecs 의 route53-acm 은 domain.zone_id(hosted zone)가 필수입니다 — "
                      "ACM 검증·레코드 생성에 필요. eks 는 env values 의 기존 인증서를 씁니다.")
         if self.deploy.sizing:
-            unknown = sorted(set(self.deploy.sizing) - ECS_SERVICES)
+            is_eks = self.deploy.target == "eks"
+            allowed_svc = EKS_SIZING if is_eks else {s: _ECS_SIZING_KEYS for s in ECS_SERVICES}
+            unknown = sorted(set(self.deploy.sizing) - set(allowed_svc))
             if unknown:
                 e.append(f"deploy.sizing 에 알 수 없는 서비스: {unknown} "
-                         f"(허용: {sorted(ECS_SERVICES)})")
+                         f"(허용: {sorted(allowed_svc)})")
             for svc, ov in self.deploy.sizing.items():
                 if not isinstance(ov, dict):
                     e.append(f"deploy.sizing.{svc} 는 mapping 이어야 합니다: {ov!r}")
                     continue
-                bad = sorted(set(ov) - {"cpu", "memory", "desired_count", "min_count", "max_count"})
+                keys = allowed_svc.get(svc, frozenset())
+                bad = sorted(set(ov) - keys)
                 if bad:
                     e.append(f"deploy.sizing.{svc} 에 알 수 없는 키: {bad} "
-                             f"(허용: cpu, memory, desired_count, min_count, max_count)")
-            if self.deploy.target != "ecs":
-                e.append(f"deploy.sizing 은 ecs 경로에서만 적용됩니다 "
-                         f"(deploy.target={self.deploy.target}) — 지우거나 target 을 ecs 로.")
+                             f"(허용: {sorted(keys)})")
+                    continue
+                for k, val in ov.items():
+                    if not isinstance(val, int) or isinstance(val, bool) or val <= 0:
+                        e.append(f"deploy.sizing.{svc}.{k} 는 양의 정수여야 합니다: {val!r}")
+            if self.deploy.target not in ("ecs", "eks"):
+                e.append(f"deploy.sizing 은 ecs/eks 경로에서만 적용됩니다 "
+                         f"(deploy.target={self.deploy.target}).")
+            elif is_eks:
+                # Redis 커넥션 예산 — pool_size 는 워커 프로세스당이다. WORKERS
+                # 기본 2. 노드 maxclients 는 스키마가 모르므로 산식만 경고한다.
+                gp = self.deploy.sizing.get("gateway-proxy") or {}
+                rd = self.deploy.sizing.get("redis") or {}
+                pool = rd.get("pool_size")
+                mx = gp.get("max_replicas")
+                if pool and mx and pool * 2 * mx > 30_000:
+                    e.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
+                             f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
+                             f"예산을 확인하세요.")
         if self.deploy.target == "ecs":
             # 오토스케일(max_count)을 포함한 worst-case pool 수요가 Aurora 천장을
             # 넘으면 스케일아웃이 DB 를 고갈시킨다 — 선언 단계에서 막는다.

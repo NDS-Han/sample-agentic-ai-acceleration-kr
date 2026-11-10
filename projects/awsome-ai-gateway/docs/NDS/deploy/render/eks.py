@@ -247,6 +247,31 @@ def desired_values(cfg: GatewayConfig) -> dict:
         v.setdefault("adminApi", {}).setdefault("oidc", {})[
             "vkTtlHours"] = cfg.oidc.vk_ttl_hours
 
+    # ── deploy.sizing (eks) — 용량 노브를 gateway.yaml 이 소유하게 한다.
+    #    ecs 와 같은 논리 키지만 eks 렌더는 차트 키로만 내린다. size_tier 는
+    #    eks 에서 문서용이라 여기서 실제 크기를 정한다:
+    #      sizing.gateway-proxy.min_replicas/max_replicas → autoscaling
+    #      sizing.gateway-proxy.bedrock_thread_pool_size  → env (동시 스트림
+    #        슬롯/워커 — 기본 128, 스트림 hold 는 스레드 블록이라 CPU 가 안 잡힘)
+    #      sizing.redis.pool_size → redis.poolSize (**워커 프로세스당** —
+    #        노드측 최대 = poolSize × WORKERS × maxReplica ≤ maxclients.
+    #        40 은 finalize 폭풍에 MaxConnectionsError/예산 유실을 냈다 — 실측)
+    sz = cfg.deploy.sizing or {}
+    gp = sz.get("gateway-proxy") or {}
+    if gp.get("min_replicas") or gp.get("max_replicas"):
+        asg = v.setdefault("gatewayProxy", {}).setdefault("autoscaling", {})
+        asg["enabled"] = True
+        if gp.get("min_replicas"):
+            asg["minReplicas"] = int(gp["min_replicas"])
+        if gp.get("max_replicas"):
+            asg["maxReplicas"] = int(gp["max_replicas"])
+    if gp.get("bedrock_thread_pool_size"):
+        v.setdefault("gatewayProxy", {}).setdefault("env", {})[
+            "BEDROCK_THREAD_POOL_SIZE"] = str(gp["bedrock_thread_pool_size"])
+    rd = sz.get("redis") or {}
+    if rd.get("pool_size"):
+        v.setdefault("redis", {})["poolSize"] = int(rd["pool_size"])
+
     return v
 
 
