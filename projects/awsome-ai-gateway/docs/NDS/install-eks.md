@@ -101,8 +101,16 @@ capture 가 기록하는 것과 notes 가 알려주는 주의점:
 - `domain.name` 은 `gateway.<base>`/`gateway-dev.<base>` 에서 base 만 추출합니다 —
   hosts 가 기록되면 네이밍은 유지되고, hosts 가 없으면 다음 render 가
   `gateway./admin./admin-api.<name>` 규칙을 씁니다.
-- `zone_id`·ESO/Fargate/RDS Proxy 같은 eks 고유 구성은 캡처되지 않습니다 —
-  notes 의 빈칸을 채우세요.
+- **역산으로 복원되는 항목** — `domain.zone_id`(Route53 최장 접미사 매칭),
+  `deploy.tfstate_bucket/table`(init 된 env 의 `.terraform/terraform.tfstate`),
+  `infra.bedrock_allowed_model_arns`/`mantle_regions`/`cognito_domain_suffix`
+  (`terraform.tfvars`). `tf_env_dir` 은 `--env-dir` → 기존 yaml →
+  `llm-gateway-<env>` 표준 명명 순으로 자동 탐지합니다.
+- **notes 로만 기록되는 것**(스키마에 표현 없음) — ESO ExternalSecret 이름
+  (kubectl 로 실제 감지), Fargate profile 이름(terraform output 의
+  cluster_name 으로 조회), RDS Proxy 사용 여부.
+- **여전히 수동** — 시크릿 본체(의도적), eks `size_tier`(실측 신호가 없어
+  t3 플레이스홀더 — 라이브 HPA/requests 와 대조해 조정하세요).
 
 ## 2. 업데이트 — 변경 반영
 

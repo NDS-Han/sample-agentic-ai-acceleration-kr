@@ -644,3 +644,87 @@ def test_eks_capture_sizing_off_band(monkeypatch):
     assert s["gateway-proxy"] == {"min_replicas": 2, "max_replicas": 7,
                                   "bedrock_thread_pool_size": 192}
     assert s["redis"]["pool_size"] == 200
+
+
+def test_tfvars_parser_scalars_and_lists(tmp_path):
+    """tfvars 부분집합 파서 — 캡처 스키마 키(str|list[str]) 역산."""
+    (tmp_path / "terraform.tfvars").write_text('''
+# 주석
+project = "llm-gateway"
+mantle_regions = ["ap-northeast-1", "us-east-1", "us-east-2"]
+bedrock_allowed_model_arns = [
+  "arn:aws:bedrock:*::foundation-model/anthropic.*",   # 인라인 주석
+  "arn:aws:bedrock:*:*:project/*",
+]
+cognito_domain_suffix = "ssir-auth-123"
+tags = { Owner = "x" }          # map 은 건너뜀
+eks_cluster_version = "1.34"
+''')
+    tv = capture._tfvars(tmp_path)
+    assert tv["project"] == "llm-gateway"
+    assert tv["mantle_regions"] == ["ap-northeast-1", "us-east-1", "us-east-2"]
+    assert len(tv["bedrock_allowed_model_arns"]) == 2
+    assert tv["cognito_domain_suffix"] == "ssir-auth-123"
+    assert "tags" not in tv                       # map 은 부분집합 밖
+    assert tv["eks_cluster_version"] == "1.34"
+
+
+def test_tf_backend_reads_local_state(tmp_path):
+    """init 된 env 의 backend.config → tfstate_bucket/table 역산."""
+    tdir = tmp_path / ".terraform"
+    tdir.mkdir()
+    (tdir / "terraform.tfstate").write_text(
+        '{"backend": {"type": "s3", "config": {'
+        '"bucket": "llm-gateway-tfstate-123", '
+        '"dynamodb_table": "llm-gateway-tflock-123"}}}')
+    bc = capture._tf_backend(tmp_path)
+    assert bc["bucket"] == "llm-gateway-tfstate-123"
+    assert bc["dynamodb_table"] == "llm-gateway-tflock-123"
+    # init 안 된 env → 빈 dict (예외 아님)
+    assert capture._tf_backend(tmp_path / "nowhere") == {}
+
+
+def test_eks_capture_restores_tfvars_and_tfstate(tmp_path, monkeypatch):
+    """env_dir 있으면 tfvars→infra, backend→tfstate 를 캡처본에 기록."""
+    vals = {
+        "global": {"environment": "dev"}, "aws": {"region": "ap-south-1"},
+        "ingress": {"annotations": {}},
+        "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    monkeypatch.setattr(capture, "_aws_json",
+                        lambda *a, **kw: {"HostedZones": []})
+    (tmp_path / ".terraform").mkdir()
+    (tmp_path / ".terraform" / "terraform.tfstate").write_text(
+        '{"backend": {"config": {"bucket": "bkt", "dynamodb_table": "tbl"}}}')
+    (tmp_path / "terraform.tfvars").write_text(
+        'mantle_regions = ["us-east-1"]\ncognito_domain_suffix = "suf-1"\n')
+    doc, notes = capture.capture_eks(env_dir=tmp_path)
+    assert doc["deploy"]["tfstate_bucket"] == "bkt"
+    assert doc["deploy"]["tfstate_table"] == "tbl"
+    assert doc["infra"]["mantle_regions"] == ["us-east-1"]
+    assert doc["infra"]["cognito_domain_suffix"] == "suf-1"
+
+
+def test_r53_zone_id_picks_longest_suffix(monkeypatch):
+    """zone 매칭 — 가장 구체적인 public zone, private zone 제외."""
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {
+        "HostedZones": [
+            {"Name": "remu.one.", "Id": "/hostedzone/SHORT",
+             "Config": {"PrivateZone": False}},
+            {"Name": "ssir-dev.nds.remu.one.", "Id": "/hostedzone/LONG",
+             "Config": {"PrivateZone": False}},
+            {"Name": "internal.remu.one.", "Id": "/hostedzone/PRIV",
+             "Config": {"PrivateZone": True}},
+        ]})
+    assert capture._r53_zone_id("ssir-dev.nds.remu.one", "r") == "LONG"
+    assert capture._r53_zone_id("nomatch.example.com", "r") == ""
+
+
+@pytest.fixture(autouse=True)
+def _no_auto_env_dir(monkeypatch):
+    """단위 테스트는 자동탐지로 실제 terraform env 를 읽지 않는다 —
+    env_dir 를 명시한 테스트만 파일시스템 경로를 탄다."""
+    monkeypatch.setattr(capture, "_auto_env_dir", lambda *a, **kw: None)

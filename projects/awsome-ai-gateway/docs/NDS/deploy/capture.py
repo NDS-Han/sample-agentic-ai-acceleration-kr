@@ -265,7 +265,12 @@ def capture_ecs(env_dir: Path, region: str,
     m = re.match(r"https://admin\.([^/]+)", admin_ui_url)
     if m and https:
         domain = {"mode": "route53-acm", "name": m.group(1)}
-        notes.append("zone_id 는 출력에 없어 비워둡니다 — Route53 콘솔에서 확인해 채우세요")
+        zid = _r53_zone_id(domain["name"], region)
+        if zid:
+            domain["zone_id"] = zid
+            notes.append(f"domain.zone_id={zid} 를 Route53 에서 매칭했습니다")
+        else:
+            notes.append("zone_id 매칭 실패 — Route53 콘솔에서 확인해 채우세요")
     else:
         domain = {"mode": "none"}
 
@@ -425,9 +430,33 @@ def capture_ecs(env_dir: Path, region: str,
             oidc["authorize_url"] = f"https://{hosted}/oauth2/authorize"
             oidc["token_url"] = f"https://{hosted}/oauth2/token"
 
-    notes.append("allowed_cidrs 는 SG 를 읽지 않고 비워둡니다 — 실제 인입 대역을 "
-                 "확인해 채우세요 (ALB SG 인그레스)")
-    notes.append("tfstate_bucket/table 은 backend.hcl/backend.tf 를 보고 채우세요")
+    # ALB SG 인바운드 → allowed_cidrs 역산: Route53 alias → ALB → SG 규칙
+    allowed_cidrs: list[str] = []
+    if domain.get("zone_id") and domain.get("name"):
+        alb_dns = _r53_alias_target(domain["zone_id"],
+                                    f"admin.{domain['name']}", region)
+        if alb_dns:
+            allowed_cidrs = _alb_ingress_cidrs(alb_dns, region)
+            if allowed_cidrs:
+                notes.append(f"allowed_cidrs={allowed_cidrs} 를 ALB SG 에서 역산했습니다")
+    if not allowed_cidrs:
+        notes.append("allowed_cidrs 를 ALB SG 에서 못 읽었습니다 — "
+                     "0.0.0.0/0 외 제한이 있으면 수동 확인하세요")
+
+    tfstate: dict = {}
+    bc = _tf_backend(env_dir)
+    if bc.get("bucket"):
+        tfstate["tfstate_bucket"] = bc["bucket"]
+    if bc.get("dynamodb_table"):
+        tfstate["tfstate_table"] = bc["dynamodb_table"]
+    if not tfstate:
+        notes.append("tfstate_bucket/table — .terraform/terraform.tfstate 가 없어 "
+                     "못 읽었습니다 (terraform init 후 재캡처하거나 수동 입력)")
+
+    tv = _tfvars(env_dir)
+    if tv.get("bedrock_allowed_model_arns"):
+        infra_doc["bedrock_allowed_model_arns"] = tv["bedrock_allowed_model_arns"]
+    models_profile = str(tv.get("models_profile") or "global")
 
     doc = {
         "version": 1,
@@ -435,8 +464,9 @@ def capture_ecs(env_dir: Path, region: str,
         "aws": {"region": region},
         # 라이브 desired/cpu/memory 를 그대로 기록 — 채택 후 apply 가 task 수를
         # 프리셋으로 되돌리지 않고, DB 커넥션 예산 검증도 실제 수요로 계산된다
-        "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing},
-        "network": {"mode": "public", "allowed_cidrs": []},
+        "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing,
+                   **tfstate},
+        "network": {"mode": "public", "allowed_cidrs": allowed_cidrs},
         "domain": domain,
         # features — 스키마 키를 전부 기록한다 (못 읽은 기능 = false 명시,
         # 키 생략은 사용자에게 옵션 존재를 숨긴다).
@@ -458,7 +488,7 @@ def capture_ecs(env_dir: Path, region: str,
                                  sizing_env.get("SERVICE_KEYS_ENABLED"))),
         },
         "images": {"tag": image_tag},
-        "clients": {"models_profile": "global"},
+        "clients": {"models_profile": models_profile},
     }
     if api_env_ok and sizing_env.get("SERVICE_KEYS_ENABLED") is None:
         if unknown is not None:
@@ -579,6 +609,130 @@ def _domain_base(host: str, env: str) -> str:
     return ""
 
 
+def _relpath(p: Path) -> str:
+    """repo 루트 기준 상대경로 — 밖이면 원래 값 유지."""
+    root = Path(__file__).resolve().parents[3]
+    try:
+        return str(p.resolve().relative_to(root))
+    except ValueError:
+        return str(p)
+
+
+def _auto_env_dir(env: str) -> Path | None:
+    """표준 명명(llm-gateway-<env> / <env>)으로 terraform env 디렉토리를 탐지."""
+    envs = Path(__file__).resolve().parents[3] / "deployment" / \
+        "terraform" / "environments"
+    for cand in (f"llm-gateway-{env}", env):
+        if (envs / cand).is_dir():
+            return envs / cand
+    return None
+
+
+def _tf_backend(env_dir: Path) -> dict:
+    """init 된 env 의 backend.config — .terraform/terraform.tfstate 로컬 복사본.
+    backend.tf 가 partial config 라 bucket/table 은 init 시 주입값이 여기만 남는다."""
+    try:
+        state = json.loads(
+            (env_dir / ".terraform" / "terraform.tfstate").read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return dict((state.get("backend") or {}).get("config") or {})
+
+
+def _tfvars(env_dir: Path) -> dict[str, object]:
+    """terraform.tfvars 의 스칼라/문자열 리스트 — 캡처 스키마 키용 부분집합 파서.
+    map/object 값은 건너뛴다 (우리가 읽는 키는 전부 str|list[str])."""
+    try:
+        text = (env_dir / "terraform.tfvars").read_text()
+    except OSError:
+        return {}
+    out: dict[str, object] = {}
+    for m in re.finditer(
+            r'(?ms)^([A-Za-z_]\w*)\s*=\s*(\[.*?\]|"(?:[^"\\]|\\.)*"|[^\s#{]+)',
+            text):
+        key, raw = m.group(1), m.group(2).strip()
+        if raw.startswith("["):
+            raw = re.sub(r'#.*', '', raw)                    # HCL 주석 제거
+            raw = re.sub(r',\s*([\]])', r'\1', raw)          # trailing comma
+            try:
+                v = json.loads(raw)
+                if isinstance(v, list):
+                    out[key] = v
+            except json.JSONDecodeError:
+                pass
+        elif raw.startswith('"'):
+            try:
+                out[key] = json.loads(raw)
+            except json.JSONDecodeError:
+                out[key] = raw.strip('"')
+        elif re.fullmatch(r'-?\d+(\.\d+)?', raw):
+            out[key] = float(raw) if '.' in raw else int(raw)
+    return out
+
+
+def _r53_zone_id(domain: str, region: str) -> str:
+    """domain.name 의 가장 긴 접미사 일치 public hosted zone id."""
+    try:
+        r = _aws_json(["route53", "list-hosted-zones-by-name",
+                       "--dns-name", domain], region)
+    except CaptureError:
+        return ""
+    best, best_len = "", -1
+    for z in r.get("HostedZones", []):
+        zname = (z.get("Name") or "").rstrip(".")
+        if (z.get("Config") or {}).get("PrivateZone"):
+            continue
+        if (domain == zname or domain.endswith("." + zname)) \
+                and len(zname) > best_len:
+            best = (z.get("Id") or "").rsplit("/", 1)[-1]
+            best_len = len(zname)
+    return best
+
+
+def _r53_alias_target(zone_id: str, host: str, region: str) -> str:
+    """hosted zone 에서 host 의 A/AAAA alias 대상 DNS (예 dualstack.<alb>.elb...)."""
+    try:
+        r = _aws_json(
+            ["route53", "list-resource-record-sets",
+             "--hosted-zone-id", zone_id,
+             "--query", f"ResourceRecordSets[?Name=='{host}.']"],
+            region)
+    except CaptureError:
+        return ""
+    for rec in r if isinstance(r, list) else []:
+        tgt = ((rec.get("AliasTarget") or {}).get("DNSName") or "")
+        if tgt:
+            return tgt.lstrip("dualstack.").rstrip(".")
+    return ""
+
+
+def _alb_ingress_cidrs(alb_dns: str, region: str) -> list[str]:
+    """ALB DNS 이름으로 LB 를 찾아 SG 인바운드 CIDR(80/443)을 모은다."""
+    try:
+        lbs = _aws_json(["elbv2", "describe-load-balancers"], region)
+        sg_ids: list[str] = []
+        for lb in lbs.get("LoadBalancers", []):
+            if (lb.get("DNSName") or "") == alb_dns:
+                sg_ids = lb.get("SecurityGroups") or []
+                break
+        if not sg_ids:
+            return []
+        sgs = _aws_json(["ec2", "describe-security-groups",
+                         "--group-ids", *sg_ids], region)
+    except CaptureError:
+        return []
+    cidrs: list[str] = []
+    for sg in sgs.get("SecurityGroups", []):
+        for p in sg.get("IpPermissions", []):
+            if p.get("FromPort") not in (80, 443):
+                continue
+            for rng in p.get("IpRanges", []):
+                c = rng.get("CidrIp")
+                if c and c not in cidrs:
+                    cidrs.append(c)
+    return cidrs
+
+
 def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 context: str = "", env_dir: Path | None = None,
                 unknown: set[str] | None = None) -> tuple[dict, list[str]]:
@@ -587,6 +741,11 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
 
     env = str(_val(v, "global", "environment") or release)
     region = str(_val(v, "aws", "region"))
+    if env_dir is None:
+        found = _auto_env_dir(env)
+        if found:
+            env_dir = found
+            notes.append(f"tf_env_dir 을 자동 탐지했습니다: {found.name}")
     genv = _val(v, "gatewayProxy", "env", default={}) or {}
 
     # ── 라이브 대조용 수집 ─────────────────────────────────────────────────
@@ -604,7 +763,6 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     if cert_arn or str(_val(ing, "gateway", "tls", "enabled")) == "True":
         domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
         _capture_hosts(domain, ing, notes)
-        notes.append("zone_id 는 values 에 없어 비워둡니다 — Route53 에서 확인해 채우세요")
     elif gw_host:
         domain = {"mode": "route53-acm", "name": _domain_base(gw_host, env)}
         _capture_hosts(domain, ing, notes)
@@ -778,6 +936,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         notes.append("OIDC issuer 없음 — admin-ui 는 dev-login 모드일 수 있습니다")
 
     # ── terraform outputs (env_dir 있으면) — region/cognito 보강 ─────────────
+    outs: dict = {}
     if env_dir and env_dir.exists():
         try:
             outs = _tf_outputs(env_dir)
@@ -800,6 +959,57 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                         oidc["token_url"] = f"https://{hosted}/oauth2/token"
         except CaptureError:
             notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
+
+    # ── 역산 가능 항목 복원 — zone_id / tfstate / infra / eks 고유 자원 ──────
+    tfstate: dict = {}
+    infra: dict = {}
+    if env_dir and env_dir.exists():
+        bc = _tf_backend(env_dir)
+        if bc.get("bucket"):
+            tfstate["tfstate_bucket"] = bc["bucket"]
+        if bc.get("dynamodb_table"):
+            tfstate["tfstate_table"] = bc["dynamodb_table"]
+        tv = _tfvars(env_dir)
+        for tfkey, dockey in (("bedrock_allowed_model_arns",
+                               "bedrock_allowed_model_arns"),
+                              ("mantle_regions", "mantle_regions"),
+                              ("cognito_domain_suffix", "cognito_domain_suffix")):
+            if tv.get(tfkey):
+                infra[dockey] = tv[tfkey]
+        if infra:
+            notes.append(f"infra.{', '.join(infra)} 를 terraform.tfvars 에서 복원했습니다")
+
+    if domain.get("name") and domain.get("mode") == "route53-acm":
+        zid = _r53_zone_id(domain["name"], region)
+        if zid:
+            domain["zone_id"] = zid
+            notes.append(f"domain.zone_id={zid} 를 Route53 에서 매칭했습니다")
+        else:
+            notes.append("zone_id 매칭 실패 — hosted zone 을 Route53 에서 확인해 채우세요")
+
+    # eks 고유 자원 — 스키마에 표현이 없어도 실체를 notes 로 기록해 수동 채택을 돕는다
+    try:
+        es_items = _kubectl_json("externalsecrets", namespace, context).get("items", [])
+        if es_items:
+            names = sorted(i["metadata"]["name"] for i in es_items)
+            notes.append(f"ESO ExternalSecret 감지: {', '.join(names)} — "
+                         "시크릿 백엔드(SM) 값은 의도적으로 캡처하지 않습니다")
+    except CaptureError:
+        pass  # CRD 없음 = ESO 미사용
+    cluster = str(outs.get("cluster_name") or "")
+    if cluster:
+        try:
+            profs = _aws_json(["eks", "list-fargate-profiles",
+                               "--cluster-name", cluster],
+                              region).get("fargateProfileNames") or []
+            if profs:
+                notes.append(f"Fargate profile({cluster}): {', '.join(sorted(profs))} — "
+                             "terraform env 가 소유, gateway.yaml 표현 없음")
+        except CaptureError:
+            pass
+    if outs.get("rds_proxy_enabled"):
+        notes.append("RDS Proxy 사용 중 — module.aurora 소유라 캡처본에 기록하지 않습니다 "
+                     "(application_db_endpoint 는 proxy 경유)")
 
     # 시크릿 공급 경로 — chart 는 externalSecrets(ESO) 또는 .Values.secrets 중
     # 하나가 없으면 pod 가 기동하지 못한다. 캡처본엔 이 설정이 없으니 상태를 기록한다.
@@ -857,8 +1067,6 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         notes.append("⚠ autoscaling/redis.poolSize 를 helm values 에서 못 읽었습니다")
 
     notes.append("size_tier 는 eks=t3 으로 둡니다 — 실제 리소스 스펙은 HPA/requests 참조")
-    notes.append("externalSecrets/ESO, Fargate profile, RDS Proxy 등 eks 고유 구성은 "
-                 "gateway.yaml 에 표현이 없습니다 — 캡처본만으로 eks 재배포는 아직 불가")
 
     doc = {
         "version": 1,
@@ -868,7 +1076,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         # 채택 후 apply 가 같은 대상을 가리키도록
         "deploy": {"target": "eks", "size_tier": "t3",
                    "release": release, "namespace": namespace,
-                   "tf_env_dir": str(env_dir) if env_dir else "",
+                   # repo 상대경로로 기록 — 절대경로는 다른 개발자 환경에서 깨진다
+                   "tf_env_dir": _relpath(env_dir) if env_dir else "",
+                   **tfstate,
                    **({"capacity_tier": capacity_tier} if capacity_tier
                       else {"sizing": sizing} if sizing else {})},
         "network": {"mode": net_mode, "allowed_cidrs": cidrs,
@@ -884,6 +1094,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         doc["images"]["registry"] = str(v["global"]["imageRegistry"])
     if oidc:
         doc["oidc"] = oidc
+    if infra:
+        doc["infra"] = infra
     return doc, notes
 
 

@@ -1245,7 +1245,10 @@ def cmd_capture(args) -> int:
                 REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
             doc, notes = capture.capture_ecs(env_dir, region, unknown)
         elif target == "eks":
-            env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else None
+            # --env-dir > 기존 yaml 의 deploy.tf_env_dir > capture 내부 env명 탐지
+            env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
+                (REPO_ROOT / (existing.get("deploy") or {}).get("tf_env_dir", "")
+                 if (existing.get("deploy") or {}).get("tf_env_dir") else None)
             doc, notes = capture.capture_eks(
                 namespace=args.namespace or "llm-gateway",
                 release=args.release or "llm-gateway",
