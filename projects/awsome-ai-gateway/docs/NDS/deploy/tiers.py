@@ -245,8 +245,13 @@ def ecs_service_sizing(cfg) -> dict:
             sizing[name].update(ov)
             # desired 만 override 되면 상한도 같은 배수로 재계산 —
             # 프리셋 desired 로 계산된 stale max_count 가 남으면 예산 검증과
-            # 실제 autoscaling 상한이 어긋난다 (max_count 명시 시에는 존중)
-            if name in AUTOSCALE_MAX_FACTOR and "max_count" not in ov:
+            # 실제 autoscaling 상한이 어긋난다 (max_count 명시 시에는 존중).
+            # 단 capacity_tier 가 둔 max 는 의도 선언이라 덮지 않는다 —
+            # 밴드 max 를 desired×factor 로 깎으면 사용자가 모르게 상한이 내려간다.
+            band_max = cap and cfg.deploy.target == "ecs" \
+                and name == "gateway-proxy" and "max_count" not in ov
+            if (name in AUTOSCALE_MAX_FACTOR and "max_count" not in ov
+                    and not band_max):
                 sizing[name]["max_count"] = (sizing[name]["desired_count"]
                                             * AUTOSCALE_MAX_FACTOR[name])
     return sizing

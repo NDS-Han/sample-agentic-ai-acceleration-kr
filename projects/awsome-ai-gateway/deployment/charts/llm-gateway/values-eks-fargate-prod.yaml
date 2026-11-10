@@ -64,7 +64,8 @@ database:
 redis:
   enabled: false
   # 명시(상속 아님): **워커 프로세스당** pool × WORKERS(2) × HPA maxReplicas(30) ≤ 노드 maxclients 합.
-  # 150 × 2 × 30 = 9,000 (3-shard 기준 primary 당 ~3,000). deepdive Q50 Phase4.
+  # 150 × 2 × 30 = 9,000. cluster 모드 RedisCluster 는 노드마다 풀을 따로 가지므로
+  # primary 한 노드 기준으로도 최대 9,000 까지 갈 수 있다(65k 한도 대비 여유). deepdive Q50 Phase4.
   # ⚠️ loadtest(80~100 pod)는 values-*-prod-loadtest.yaml 에서 더 낮게 override.
   poolSize: 150
   external:

@@ -88,12 +88,26 @@ async def test_attempts_exhausted_raises_last_error():
     """버스트가 재시도 창을 넘으면 마지막 오류를 올린다 — 호출부의
     except → 센티넬 경로로 넘어간다."""
     redis = AsyncMock()
-    redis.eval = AsyncMock(side_effect=RedisConnectionError("down"))
+    redis.eval = AsyncMock(side_effect=MaxConnectionsError("down"))
+
+    with pytest.raises(MaxConnectionsError):
+        await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=False)
+
+    assert redis.eval.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_no_retry_generic_connection_error_for_non_idempotent():
+    """일반 ConnectionError("Connection closed by server" 등)는 커맨드가
+    소켓에 나간 뒤 응답만 끊겼을 수 있다 — 비멱등 재시도는 이중 적용이라
+    즉시 올린다. 커맨드 미전송이 확실한 MaxConnectionsError 만 재시도된다."""
+    redis = AsyncMock()
+    redis.eval = AsyncMock(side_effect=RedisConnectionError("closed"))
 
     with pytest.raises(RedisConnectionError):
         await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=False)
 
-    assert redis.eval.await_count == 3
+    assert redis.eval.await_count == 1
 
 
 # ── _mark_budget_lost ───────────────────────────────────────────────────────
@@ -113,6 +127,26 @@ async def test_mark_lost_sets_sentinel_directly():
         "budget:user:{u1}:2026-11:lost", "1", ex=SENTINEL_TTL_SECONDS
     )
     assert suspects.size == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_lost_with_amount_accumulates_lost_amt():
+    """차감 실패 금액은 :lost_amt 에 누적된다 — 원장 기록이 늦는 창에
+    rebuild 가 센티넬만 지우고 cur+lost_amt 플로어를 적용한다."""
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+    )
+
+    redis.incrbyfloat.assert_awaited_once_with(
+        "budget:user:{u1}:2026-11:lost_amt", 0.0234
+    )
+    redis.expire.assert_awaited_once_with(
+        "budget:user:{u1}:2026-11:lost_amt", SENTINEL_TTL_SECONDS
+    )
 
 
 @pytest.mark.asyncio

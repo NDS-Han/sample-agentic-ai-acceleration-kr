@@ -23,7 +23,8 @@
 -- KEYS[3] = pendingidx 해시 (budget:pendingidx:...)  — 마커와 같은 hash tag
 --
 -- ⚠️ 이 스크립트는 선언되지 않은 키도 접근한다 — ``KEYS[1]..':lost'`` 와
---    ``marker_prefix..<field>`` 마커들. Redis Cluster 의 스크립팅 계약상
+--    ``KEYS[1]..':lost_amt'`` (차감 실패분 누적), ``marker_prefix..<field>``
+--    마커들. Redis Cluster 의 스크립팅 계약상
 --    KEYS 에 없는 키 접근은 허용되지 않지만, 마커 수는 가변이라 선언이
 --    불가능하다. 모든 파생 키가 선언 키와 같은 {<id>} hash tag 를 공유해
 --    같은 슬롯에 놓이도록 호출자가 보장한다(R22 r3 N9 — 태그 어긋나면
@@ -70,6 +71,16 @@ else
 end
 
 local target = tonumber(ARGV[1]) + live
+
+-- 차감 실패분 누적 — 원장(budget_usages)은 워커 배치라 rebuild 시점에 실패분이
+-- 아직 미반영일 수 있다. 그 상태로 센티넬만 지우면 유실분이 기간 내내 남으므로
+-- cur+lost_amt 도 플로어 후보로 올린다 — 이후 deduct 가 계속 cur 에 누적되므로
+-- cur+lost_amt 가 정확한 복원값이다 (db+live 가 작게 읽힐 창을 덮는다).
+local lost_amt = tonumber(redis.call('GET', KEYS[1] .. ':lost_amt')) or 0
+if lost_amt > 0 then
+    target = math.max(target, (cur or 0) + lost_amt)
+end
+
 if (not cur) or cur < target then
     redis.call('SET', KEYS[1], target)
     redis.call('EXPIRE', KEYS[1], 3888000)  -- 45d (deduct/reserve 와 동일)
@@ -79,6 +90,9 @@ end
 redis.call('SET', KEYS[2], tostring(live))
 redis.call('EXPIRE', KEYS[2], 3888000)
 
--- 센티넬 해제 — 다음 check 가 다시 트리거하지 않게.
-redis.call('DEL', KEYS[1] .. ':lost')
+-- 센티넬 해제 — 다음 check 가 다시 트리거하지 않게. ⚠️ 롤링 배포 중 구버전
+-- 스크립트는 ':lost' 만 지우므로 lost_amt 잔여가 남을 수 있다 — 다음 rebuild
+-- 가 cur+lost_amt 로 한 번 더 얹어 일시 과대 계상될 수 있으나, 최초 신버전
+-- rebuild 때 함께 정리돼 자기수정된다(폭은 실패분 누적치, 기간은 배포 창).
+redis.call('DEL', KEYS[1] .. ':lost', KEYS[1] .. ':lost_amt')
 return 1

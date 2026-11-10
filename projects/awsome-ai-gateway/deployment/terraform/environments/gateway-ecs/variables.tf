@@ -143,7 +143,9 @@ variable "alb_internal" {
 
 variable "allowed_cidrs" {
   type    = list(string)
-  default = [] # 비우면 ecs 모듈 기본 0.0.0.0/0 — schema 가 이미 경고
+  # null = 미지정 → 모듈 기본 0.0.0.0/0. default=[] 로 두면 main.tf 가 [] 를
+  # 명시 전달해 모듈 기본값이 적용되지 않고 인그레스 규칙이 0개가 된다.
+  default = null
 }
 
 variable "domain_name" {
@@ -176,11 +178,13 @@ variable "image_tag" {
 }
 
 variable "service_sizing" {
-  description = "서비스별 cpu/memory/desired_count — tier 프리셋 또는 override"
+  description = "서비스별 cpu/memory/desired_count + 선택 min/max_count(오토스케일) — tier 프리셋 또는 override"
   type = map(object({
     cpu           = number
     memory        = number
     desired_count = number
+    min_count     = optional(number)
+    max_count     = optional(number)
   }))
   default = {}
 }

@@ -262,7 +262,9 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 - `admin_internal` — eks 전용. `mode: public`을 유지하면서 **admin-ui·admin-api
   Ingress만** internal ALB로 분리합니다. `mode: private`이면 이미 전부 internal이라
   중복 선언입니다(스키마가 경고). compose/ecs에서는 무시됩니다(경고 출력)
-- `allowed_cidrs` — 인입 허용 CIDR. 비우면 전체 개방이 되므로 운영 환경에서는
+- `allowed_cidrs` — 인입 허용 CIDR. **빈 리스트 `[]` 는 "차단"이 아니라
+  미설정**입니다 — ecs 는 모듈 기본 `0.0.0.0/0`(전체 개방)이 적용되고,
+  "아예 닫기" 는 `network.mode: private` 로 표현합니다. 운영 환경에서는
   반드시 채우세요 ([operations.md](operations.md#2-직원-오픈-전-하드닝-체크리스트) §2)
 
 ### `domain.mode`

@@ -534,9 +534,38 @@ class GatewayConfig:
                 pool = rd.get("pool_size")
                 mx = gp.get("max_replicas")
                 if pool and mx and pool * 2 * mx > 30_000:
-                    e.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
+                    w.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
                              f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
                              f"예산을 확인하세요.")
+        # 병합 결과의 min ≤ max — sizing 에 min 만 있고 max 는 env overlay 값을
+        # 물려받는 조합도 잡는다 (render/eks.py 도 최종 병합 후 한 번 더 검사).
+        from .tiers import EKS_CAPACITY_TIERS as _BANDS
+        _bad_tier = (self.deploy.capacity_tier
+                     and self.deploy.capacity_tier not in _BANDS)
+        if (self.deploy.target == "eks" and not _bad_tier
+                and (self.deploy.sizing or self.deploy.capacity_tier)):
+            from .tiers import eks_capacity_sizing
+            _gp = eks_capacity_sizing(self).get("gateway-proxy") or {}
+            _mn, _mx = _gp.get("min_replicas"), _gp.get("max_replicas")
+            if _mn is not None and _mx is not None and _mn > _mx:
+                e.append(f"deploy.sizing/capacity_tier 병합 결과 "
+                         f"min_replicas({_mn}) > max_replicas({_mx}) — "
+                         f"함께 선언하세요 (env overlay 기본값과의 합성은 "
+                         f"render 에서 최종 검증됩니다)")
+        if (self.deploy.target == "ecs" and not _bad_tier
+                and (self.deploy.sizing or self.deploy.capacity_tier)):
+            from .tiers import ecs_service_sizing
+            for _svc, _s in ecs_service_sizing(self).items():
+                _mn = int(_s.get("min_count") or 0)
+                _mx = int(_s.get("max_count") or 0)
+                _d = int(_s.get("desired_count") or 0)
+                if _mx and _mn > _mx:
+                    e.append(f"deploy.sizing.{_svc}: min_count({_mn}) > "
+                             f"max_count({_mx})")
+                elif _mx and _d > _mx:
+                    e.append(f"deploy.sizing.{_svc}: desired_count({_d}) > "
+                             f"max_count({_mx}) — 오토스케일 상한 밖의 desired "
+                             f"는 스케일링이 되돌립니다")
         if self.deploy.capacity_tier:
             # 밴드 전개는 target 마다: eks → pod min/max, ecs → task desired/max.
             # compose 는 단일호스트 — 밴드를 적용할 복제본 축이 없어 거부한다.

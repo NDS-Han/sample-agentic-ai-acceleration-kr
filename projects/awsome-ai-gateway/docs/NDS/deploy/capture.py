@@ -440,8 +440,9 @@ def capture_ecs(env_dir: Path, region: str,
             if allowed_cidrs:
                 notes.append(f"allowed_cidrs={allowed_cidrs} 를 ALB SG 에서 역산했습니다")
     if not allowed_cidrs:
-        notes.append("allowed_cidrs 를 ALB SG 에서 못 읽었습니다 — "
-                     "0.0.0.0/0 외 제한이 있으면 수동 확인하세요")
+        notes.append("allowed_cidrs 를 ALB SG 에서 못 읽었습니다 — 키를 생략합니다 "
+                     "(빈 리스트로 쓰면 apply 가 ALB 인그레스 규칙을 전부 지웁니다). "
+                     "0.0.0.0/0 외 제한이 있거나 IPv6/PrefixList 규칙이면 수동 입력")
 
     tfstate: dict = {}
     bc = _tf_backend(env_dir)
@@ -457,6 +458,9 @@ def capture_ecs(env_dir: Path, region: str,
     if tv.get("bedrock_allowed_model_arns"):
         infra_doc["bedrock_allowed_model_arns"] = tv["bedrock_allowed_model_arns"]
     models_profile = str(tv.get("models_profile") or "global")
+    if not tv.get("models_profile"):
+        notes.append("clients.models_profile 을 tfvars 에서 못 읽어 'global' 로 "
+                     "둡니다 — regional/다른 프로필이면 채택 전 수정하세요")
 
     doc = {
         "version": 1,
@@ -466,7 +470,10 @@ def capture_ecs(env_dir: Path, region: str,
         # 프리셋으로 되돌리지 않고, DB 커넥션 예산 검증도 실제 수요로 계산된다
         "deploy": {"target": "ecs", "size_tier": tier, "sizing": sizing,
                    **tfstate},
-        "network": {"mode": "public", "allowed_cidrs": allowed_cidrs},
+        # allowed_cidrs 는 읽은 값이 있을 때만 쓴다 — 빈 리스트를 기록하면 채택
+        # 후 apply 가 모듈 기본(0.0.0.0/0) 대신 ALB 인그레스 0개를 만든다
+        "network": {"mode": "public",
+                    **({"allowed_cidrs": allowed_cidrs} if allowed_cidrs else {})},
         "domain": domain,
         # features — 스키마 키를 전부 기록한다 (못 읽은 기능 = false 명시,
         # 키 생략은 사용자에게 옵션 존재를 숨긴다).
@@ -564,6 +571,24 @@ def _val(d: dict, *path, default=""):
     return cur if cur is not None else default
 
 
+def _kube_context_cluster(context: str = "") -> str:
+    """현재 kube context 가 가리키는 클러스터명.
+
+    EKS kubeconfig 의 context.cluster 는 보통 arn:aws:eks:…:cluster/NAME 이라
+    마지막 슬래시 뒤만 취한다 (평문 이름이면 그대로). 못 읽으면 ""."""
+    argv = ["kubectl", "config", "view", "--minify",
+            "-o", "jsonpath={.contexts[0].context.cluster}"]
+    if context:
+        argv += ["--context", context]
+    try:
+        r = _sp(argv, tool="kubectl", timeout=15)
+    except CaptureError:
+        return ""
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip().rsplit("/", 1)[-1]
+
+
 _HOST_KEY_MAP = {"gateway": "gateway", "admin_ui": "adminUi",
                  "admin_api": "adminApi"}
 
@@ -639,20 +664,88 @@ def _tf_backend(env_dir: Path) -> dict:
     return dict((state.get("backend") or {}).get("config") or {})
 
 
+def _tfvars_clean(text: str) -> str:
+    """tfvars 텍스트에서 주석·heredoc 본문·{} 맵 본문을 제거한 depth-0 잔여분.
+
+    단일 패스 스캐너 — regex 만으로는 "문자열 안의 # / 들여쓰기 없는 map 본문
+    안의 key=" 처럼 상태가 필요한 경우를 못 걸러 오파싱한다:
+      - ``#``, ``//`` 라인 주석과 ``/* */`` 블록 주석 (문자열 밖일 때만)
+      - ``<<TAG``/``<<-TAG`` heredoc — 종결 ``^TAG$`` 까지 통째로 제거
+      - ``{ ... }`` 본문 — map 값 안의 key=val 은 최상위 할당이 아니다
+    문자열 내용("a#b", "a]b")은 보존된다 — 스캐너가 문자열 상태를 추적하므로.
+    """
+    buf: list[str] = []
+    i, n, depth = 0, len(text), 0
+    in_str = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            # 문자열 상태는 추적해 "} 안의 }" 가 depth 를 깎지 않게 한다 —
+            # 다만 map 본문(depth>0) 안의 문자열은 버퍼에 넣지 않는다
+            if depth == 0:
+                buf.append(c)
+                if c == "\\" and i + 1 < n:      # 이스케이프 쌍은 통째로 통과
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+            elif c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            if depth == 0:
+                buf.append(c)
+            i += 1
+            continue
+        if c == "#" or text[i:i + 2] == "//":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if text[i:i + 2] == "/*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if text[i:i + 2] == "<<":
+            m = re.match(r"<<-?(\w+)", text[i:])
+            if m:
+                end = re.search(rf"(?m)^{re.escape(m.group(1))}\s*$", text[i:])
+                i = n if not end else i + end.end()
+                continue
+        if c == "{":
+            depth += 1
+            i += 1
+            continue
+        if c == "}":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0:
+            buf.append(c)
+        i += 1
+    return "".join(buf)
+
+
 def _tfvars(env_dir: Path) -> dict[str, object]:
     """terraform.tfvars 의 스칼라/문자열 리스트 — 캡처 스키마 키용 부분집합 파서.
-    map/object 값은 건너뛴다 (우리가 읽는 키는 전부 str|list[str])."""
+    map/object 값은 _tfvars_clean 이 본문째 제거해 스킵된다
+    (우리가 읽는 키는 전부 str|list[str]|number|bool)."""
     try:
         text = (env_dir / "terraform.tfvars").read_text()
     except OSError:
         return {}
+    clean = _tfvars_clean(text)
     out: dict[str, object] = {}
     for m in re.finditer(
-            r'(?ms)^([A-Za-z_]\w*)\s*=\s*(\[.*?\]|"(?:[^"\\]|\\.)*"|[^\s#{]+)',
-            text):
+            # \s 는 개행도 매칭해 "key =\nother_key" 가 other_key 를 삼킨다 —
+            # = 주변은 같은 줄 공백만 (s 플래그는 멀티라인 리스트용)
+            r'(?ms)^([A-Za-z_]\w*)[ \t]*=[ \t]*(\[.*?\]|"(?:[^"\\]|\\.)*"|[^\s#{]+)',
+            clean):
         key, raw = m.group(1), m.group(2).strip()
         if raw.startswith("["):
-            raw = re.sub(r'#.*', '', raw)                    # HCL 주석 제거
             raw = re.sub(r',\s*([\]])', r'\1', raw)          # trailing comma
             try:
                 v = json.loads(raw)
@@ -667,26 +760,34 @@ def _tfvars(env_dir: Path) -> dict[str, object]:
                 out[key] = raw.strip('"')
         elif re.fullmatch(r'-?\d+(\.\d+)?', raw):
             out[key] = float(raw) if '.' in raw else int(raw)
+        elif raw in ("true", "false"):
+            out[key] = raw == "true"
     return out
 
 
 def _r53_zone_id(domain: str, region: str) -> str:
-    """domain.name 의 가장 긴 접미사 일치 public hosted zone id."""
-    try:
-        r = _aws_json(["route53", "list-hosted-zones-by-name",
-                       "--dns-name", domain], region)
-    except CaptureError:
-        return ""
-    best, best_len = "", -1
-    for z in r.get("HostedZones", []):
-        zname = (z.get("Name") or "").rstrip(".")
-        if (z.get("Config") or {}).get("PrivateZone"):
-            continue
-        if (domain == zname or domain.endswith("." + zname)) \
-                and len(zname) > best_len:
-            best = (z.get("Id") or "").rsplit("/", 1)[-1]
-            best_len = len(zname)
-    return best
+    """domain.name 의 가장 긴 접미사 일치 public hosted zone id.
+
+    list-hosted-zones-by-name --dns-name X 는 정렬 순서상 X 위치부터 반환한다 —
+    같은 이름보다 짧은 부모 zone(nds.remu.one, remu.one)은 결과에 없다.
+    라벨을 하나씩 떼며 각 접미사로 조회해, 처음 매칭된(=가장 긴) zone 을 쓴다."""
+    labels = domain.split(".")
+    suffixes = [".".join(labels[k:]) for k in range(len(labels) - 1)]
+    for suffix in suffixes:
+        try:
+            r = _aws_json(["route53", "list-hosted-zones-by-name",
+                           "--dns-name", suffix], region)
+        except CaptureError:
+            return ""
+        for z in r.get("HostedZones", []):
+            zname = (z.get("Name") or "").rstrip(".")
+            if (z.get("Config") or {}).get("PrivateZone"):
+                continue
+            # 이 접미사를 이름으로 쓰는 zone 자체가 있을 때만 — 반환은
+            # suffix "이후" 위치라 다음 알파벳 zone 이 섞일 수 있다
+            if zname == suffix:
+                return (z.get("Id") or "").rsplit("/", 1)[-1]
+    return ""
 
 
 def _r53_alias_target(zone_id: str, host: str, region: str) -> str:
@@ -702,12 +803,19 @@ def _r53_alias_target(zone_id: str, host: str, region: str) -> str:
     for rec in r if isinstance(r, list) else []:
         tgt = ((rec.get("AliasTarget") or {}).get("DNSName") or "")
         if tgt:
-            return tgt.lstrip("dualstack.").rstrip(".")
+            # lstrip("dualstack.") 은 문자셋 스트립이라 "dualstack.llm-…" 가
+            # "m-…" 로 망가진다 — 접두어만 제거한다
+            return tgt.removeprefix("dualstack.").rstrip(".")
     return ""
 
 
 def _alb_ingress_cidrs(alb_dns: str, region: str) -> list[str]:
-    """ALB DNS 이름으로 LB 를 찾아 SG 인바운드 CIDR(80/443)을 모은다."""
+    """ALB DNS 이름으로 LB 를 찾아 SG 인바운드 CIDR 을 모은다.
+
+    모듈이 여는 포트는 모드마다 다르다 — https_ready=[80,443], http_mode=
+    [8000,8080,3000], http=[80] (ecs-gateway/main.tf alb_ingress_ports). 세
+    모드 포트를 전부 보며, IpProtocol -1(all traffic) 규칙의 IpRanges 도
+    인입 허용으로 간주한다."""
     try:
         lbs = _aws_json(["elbv2", "describe-load-balancers"], region)
         sg_ids: list[str] = []
@@ -724,12 +832,15 @@ def _alb_ingress_cidrs(alb_dns: str, region: str) -> list[str]:
     cidrs: list[str] = []
     for sg in sgs.get("SecurityGroups", []):
         for p in sg.get("IpPermissions", []):
-            if p.get("FromPort") not in (80, 443):
+            if (p.get("IpProtocol") != "-1"
+                    and p.get("FromPort") not in (80, 443, 8000, 8080, 3000)):
                 continue
             for rng in p.get("IpRanges", []):
                 c = rng.get("CidrIp")
                 if c and c not in cidrs:
                     cidrs.append(c)
+    # 미커버 규칙: Ipv6Ranges/PrefixListIds 는 읽지 않는다 — 호출부가 cidrs
+    # 비어 있을 때 수동 확인 notes 를 낸다.
     return cidrs
 
 
@@ -940,6 +1051,23 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     if env_dir and env_dir.exists():
         try:
             outs = _tf_outputs(env_dir)
+            # env_dir 이 정말 이 클러스터의 env 인지 — 같은 env 이름(dev)으로
+            # 다른 계정/리전의 디렉토리를 고르면 tfstate·tfvars·outputs 전부
+            # 다른 환경 값이 섞인다. 둘 다 읽혔는데 다르면 채택을 거부한다.
+            live_cluster = _kube_context_cluster(context)
+            tf_cluster = str(outs.get("cluster_name") or "")
+            if live_cluster and tf_cluster and live_cluster != tf_cluster:
+                notes.append(f"⚠ tf_env_dir 의 cluster_name={tf_cluster} 가 kube "
+                             f"context 클러스터({live_cluster})와 다릅니다 — 다른 "
+                             "환경의 env 디렉토리라 terraform 유래 값을 채택하지 "
+                             "않습니다")
+                env_dir, outs = None, {}
+            elif live_cluster and tf_cluster:
+                notes.append(f"tf_env_dir={env_dir.name} 이 라이브 클러스터"
+                             f"({live_cluster})와 일치합니다")
+            else:
+                notes.append("kube context 클러스터명을 못 읽어 tf_env_dir 검증은 "
+                             "건너뛰었습니다 — 채택 전 terraform 값을 대조하세요")
             if not region:
                 region = str(outs.get("aws_region", "") or outs.get("region", ""))
             if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
@@ -1031,15 +1159,24 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     sizing: dict = {}
     asc = _val(v, "gatewayProxy", "autoscaling", default={}) or {}
     gp: dict = {}
-    for src, dst in (("minReplicas", "min_replicas"),
-                     ("maxReplicas", "max_replicas")):
-        if str(asc.get(src, "")).isdigit():
-            gp[dst] = int(asc[src])
-    btp = str(genv.get("BEDROCK_THREAD_POOL_SIZE", ""))
-    if btp.isdigit():
-        gp["bedrock_thread_pool_size"] = int(btp)
-    if gp:
-        sizing["gateway-proxy"] = gp
+    # enabled=false + replicaCount 고정 운영(loadtest 등)도 helm values 에는
+    # 차트 기본 min/max(2/20)가 남아 있다 — 그대로 역산하면 채택 후 apply 가
+    # 꺼둔 HPA 를 다시 켠다. 고정 replica 는 스키마가 표현 못 하므로 notes 만.
+    asg_enabled = asc.get("enabled")
+    if asg_enabled is False:
+        notes.append("gatewayProxy.autoscaling.enabled=false — 고정 replica "
+                     "운영으로 간주하고 sizing 을 기록하지 않습니다 (스키마에 "
+                     "HPA off 표현이 없습니다 — env values 가 소유)")
+    else:
+        for src, dst in (("minReplicas", "min_replicas"),
+                         ("maxReplicas", "max_replicas")):
+            if str(asc.get(src, "")).isdigit():
+                gp[dst] = int(asc[src])
+        btp = str(genv.get("BEDROCK_THREAD_POOL_SIZE", ""))
+        if btp.isdigit():
+            gp["bedrock_thread_pool_size"] = int(btp)
+        if gp:
+            sizing["gateway-proxy"] = gp
     pool = str(_val(v, "redis", "poolSize"))
     if pool.isdigit():
         sizing["redis"] = {"pool_size": int(pool)}

@@ -857,36 +857,47 @@ class BudgetService:
         # 읽기는 멱등이라 일시 오류 전부 재시도 — 이 블록은 per-scope try 밖이라
         # 여기서 나는 MaxConnectionsError 가 곧바로 reserve 전체 실패(=예약 없이
         # fail-open, check-then-act 창 회귀)로 번졌다(라이브 버스트 관측 35건).
+        # ⚠️ 재시도가 겹치면(exists 3회 × 클라이언트 2회 × socket_timeout 2s ≈
+        #    12s, get 까지 ≈ 24s) fail-open 이 너무 늦다 — 두 읽기 합산에 총
+        #    deadline 을 두고, 넘으면 빈 fallback 으로 진행해 eval 이 config 키를
+        #    직접 읽게 한다(fallback 부재는 eval 의 정상 경로).
         user_fallback = ""
-        if not await call_with_transient_retry(
-            redis.exists, user_config_key, idempotent=True
-        ):
-            team_cfg_raw = await call_with_transient_retry(
-                redis.get, team_config_key, idempotent=True
-            )
-            if team_cfg_raw:
-                team_cfg = json.loads(
-                    team_cfg_raw.decode()
-                    if isinstance(team_cfg_raw, bytes)
-                    else team_cfg_raw
+        try:
+            async with asyncio.timeout(3.0):
+                cfg_exists = await call_with_transient_retry(
+                    redis.exists, user_config_key, idempotent=True
                 )
-                d_cap = team_cfg.get("default_user_cap_usd")
-                if d_cap is not None:
-                    # check_budget 의 D-3 합성과 같은 규칙 — 캐시된 팀 config 에
-                    # thresholds 가 없는 구버전 엔트리 대비 폴백(변수 추출은
-                    # 재수화 기본값 주입 가드 테스트의 AST 패턴과 맞추기 위함).
-                    d_thresholds = (
-                        team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                team_cfg_raw = None
+                if not cfg_exists:
+                    team_cfg_raw = await call_with_transient_retry(
+                        redis.get, team_config_key, idempotent=True
                     )
-                    user_fallback = json.dumps({
-                        "limit_usd": str(d_cap),
-                        "policy": team_cfg.get("policy", "hard_block"),
-                        "soft_limit_pct": team_cfg.get("soft_limit_pct")
-                        or DEFAULT_SOFT_LIMIT_PCT,
-                        "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
-                        or DEFAULT_THROTTLE_RPM_PCT,
-                        "thresholds": d_thresholds,
-                    })
+        except TimeoutError:
+            cfg_exists, team_cfg_raw = True, None
+            logger.warning("budget_reserve_config_read_deadline")
+        if not cfg_exists and team_cfg_raw:
+            team_cfg = json.loads(
+                team_cfg_raw.decode()
+                if isinstance(team_cfg_raw, bytes)
+                else team_cfg_raw
+            )
+            d_cap = team_cfg.get("default_user_cap_usd")
+            if d_cap is not None:
+                # check_budget 의 D-3 합성과 같은 규칙 — 캐시된 팀 config 에
+                # thresholds 가 없는 구버전 엔트리 대비 폴백(변수 추출은
+                # 재수화 기본값 주입 가드 테스트의 AST 패턴과 맞추기 위함).
+                d_thresholds = (
+                    team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                )
+                user_fallback = json.dumps({
+                    "limit_usd": str(d_cap),
+                    "policy": team_cfg.get("policy", "hard_block"),
+                    "soft_limit_pct": team_cfg.get("soft_limit_pct")
+                    or DEFAULT_SOFT_LIMIT_PCT,
+                    "throttle_rpm_pct": team_cfg.get("throttle_rpm_pct")
+                    or DEFAULT_THROTTLE_RPM_PCT,
+                    "thresholds": d_thresholds,
+                })
 
         # 평가 순서는 §6-1 과 같다: 1) team 2) user 3) client.
         # resvsum 키는 usage 키와 같은 hash tag — 미정산 예약 합계를 따로 유지해
@@ -920,7 +931,7 @@ class BudgetService:
         for scope, usage_key, config_key, marker_key, resvsum_key, idx_key, idx_field in scope_specs:
             fallback = user_fallback if scope == "user" else ""
             try:
-                # 비멱등(INCRBYFLOAT) — 커맨드가 안 나간 ConnectionError 계열만
+                # 비멱등(INCRBYFLOAT) — 커맨드 미전송이 확실한 MaxConnectionsError 만
                 # 재시도. TimeoutError 는 서버 실행 여부가 모호해 재시도하면
                 # 예약치 이중 적용이라 제외한다(deduct 와 같은 분류).
                 raw = await call_with_transient_retry(

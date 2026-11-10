@@ -532,3 +532,43 @@ def test_capacity_tier_on_compose_rejected():
             deploy={"target": "compose", "size_tier": "t0",
                     "capacity_tier": "3000"},
             images={"tag": "abc"}))
+
+
+def test_eks_sizing_min_gt_max_rejected():
+    """병합 결과 min > max 는 HPA 가 API 서버에 거부된다 — 스키마에서 잡는다."""
+    with pytest.raises(schema.SchemaError, match="min_replicas"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3",
+                    "sizing": {"gateway-proxy": {"min_replicas": 4,
+                                                 "max_replicas": 3}}},
+            images={"tag": "abc"}))
+
+
+def test_eks_capacity_tier_plus_sizing_min_overflow_rejected():
+    """밴드(500 → max3) 위에 min 만 크게 올리면 병합 min > max."""
+    with pytest.raises(schema.SchemaError, match="min_replicas"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3",
+                    "capacity_tier": "500",
+                    "sizing": {"gateway-proxy": {"min_replicas": 9}}},
+            images={"tag": "abc"}))
+
+
+def test_eks_sizing_min_only_passes_schema():
+    """min 만 선언은 스키마 통과 — env overlay 와의 최종 합성은 render 가 검증."""
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3",
+                "sizing": {"gateway-proxy": {"min_replicas": 2}}},
+        images={"tag": "abc"}))
+    assert cfg.deploy.sizing["gateway-proxy"]["min_replicas"] == 2
+
+
+def test_ecs_sizing_desired_gt_max_rejected():
+    """밴드(3000 → desired3/max6) 위에 desired 20 — 상한 밖 desired 는
+    스케일링이 되돌리므로 선언 자체가 모순."""
+    with pytest.raises(schema.SchemaError, match="desired_count"):
+        schema.from_dict(minimal(
+            deploy={"target": "ecs", "size_tier": "t2",
+                    "capacity_tier": "3000",
+                    "sizing": {"gateway-proxy": {"desired_count": 20}}},
+            images={"tag": "abc"}))

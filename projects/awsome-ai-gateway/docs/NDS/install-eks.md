@@ -98,14 +98,22 @@ capture 가 기록하는 것과 notes 가 알려주는 주의점:
 - **용량 역산** — 라이브 HPA min/max·`BEDROCK_THREAD_POOL_SIZE`·
   `redis.poolSize` 를 읽어 밴드와 정확히 일치하면 `capacity_tier` 로,
   아니면 `deploy.sizing` 실측으로 기록합니다.
+  `autoscaling.enabled: false`(고정 replica 운영)이면 sizing 을 기록하지
+  않습니다 — 차트 기본 min/max 를 역산해 채택하면 apply 가 꺼둔 HPA 를
+  다시 켜기 때문입니다(스키마에 HPA-off 표현이 없어 env values 소유).
 - `domain.name` 은 `gateway.<base>`/`gateway-dev.<base>` 에서 base 만 추출합니다 —
   hosts 가 기록되면 네이밍은 유지되고, hosts 가 없으면 다음 render 가
   `gateway./admin./admin-api.<name>` 규칙을 씁니다.
-- **역산으로 복원되는 항목** — `domain.zone_id`(Route53 최장 접미사 매칭),
-  `deploy.tfstate_bucket/table`(init 된 env 의 `.terraform/terraform.tfstate`),
+- **역산으로 복원되는 항목** — `domain.zone_id`(Route53 최장 접미사 매칭 —
+  도메인 자체 zone 이 없으면 `nds.remu.one` 같은 부모 zone 까지 접미사별로
+  조회합니다), `deploy.tfstate_bucket/table`(init 된 env 의
+  `.terraform/terraform.tfstate`),
   `infra.bedrock_allowed_model_arns`/`mantle_regions`/`cognito_domain_suffix`
-  (`terraform.tfvars`). `tf_env_dir` 은 `--env-dir` → 기존 yaml →
-  `llm-gateway-<env>` 표준 명명 순으로 자동 탐지합니다.
+  (`terraform.tfvars` — 라인 파서가 주석·heredoc·map 본문을 걸러냅니다).
+  `tf_env_dir` 은 `--env-dir` → 기존 yaml → `llm-gateway-<env>` 표준 명명
+  순으로 자동 탐지하며, terraform output 의 `cluster_name` 이 현재 kube
+  context 클러스터와 **다르면** 다른 환경의 env 디렉토리로 보고 terraform
+  유래 값 전부를 채택하지 않습니다( notes 로 알림).
 - **notes 로만 기록되는 것**(스키마에 표현 없음) — ESO ExternalSecret 이름
   (kubectl 로 실제 감지), Fargate profile 이름(terraform output 의
   cluster_name 으로 조회), RDS Proxy 사용 여부.

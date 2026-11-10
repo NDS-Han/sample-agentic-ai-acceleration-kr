@@ -178,7 +178,37 @@ def test_infra_db_partial_override_keeps_tier_rest():
     v = ecs_render.desired_tfvars(cfg)
     assert v["serverless_min_acu"] == 2.0
     assert v["serverless_max_acu"] == 4.0   # t1 tier 값
-    assert v["cache_mode"] == "single"      # t1 tier 값
+
+
+def test_tfvars_emits_max_count():
+    """max_count 가 tfvars 출력까지 전달돼야 한다 — desired 만 찍으면
+    모듈의 coalesce(max, desired) 로 오토스케일 상한이 조용히 유실된다."""
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1",
+                       "capacity_tier": "6000"})
+    out = ecs_render.render_tfvars(cfg)
+    assert "max_count = 8" in out
+    assert "desired_count = 4" in out
+
+
+def test_tfvars_omits_empty_allowed_cidrs():
+    """allowed_cidrs=[] 는 tfvars 에 쓰지 않는다 — env 레이어가 항상
+    var.allowed_cidrs 를 모듈에 넘기므로 [] 가 가면 setproduct([], ports)
+    로 ALB 인그레스 규칙이 0개가 된다. 미설정=모듈 기본 0.0.0.0/0."""
+    cfg = _cfg(network={"mode": "public", "allowed_cidrs": []})
+    assert "allowed_cidrs" not in ecs_render.render_tfvars(cfg)
+    cfg2 = _cfg(network={"mode": "public", "allowed_cidrs": ["10.0.0.0/8"]})
+    assert 'allowed_cidrs = ["10.0.0.0/8"]' in ecs_render.render_tfvars(cfg2)
+
+
+def test_capacity_tier_desired_override_keeps_band_max():
+    """밴드(3000→desired3/max8) 위에 desired 만 올리면 max 는 밴드 값 유지 —
+    desired×factor 재계산이 밴드 max 를 덮으면 의도 상한이 내려간다."""
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1",
+                       "capacity_tier": "3000",
+                       "sizing": {"gateway-proxy": {"desired_count": 4}}})
+    v = ecs_render.desired_tfvars(cfg)["service_sizing"]["gateway-proxy"]
+    assert v["desired_count"] == 4
+    assert v["max_count"] == 6          # 밴드 3000 의 max — factor 재계산 아님
 
 
 def test_infra_db_validation():

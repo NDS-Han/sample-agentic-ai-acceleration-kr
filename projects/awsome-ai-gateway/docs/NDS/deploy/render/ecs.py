@@ -55,7 +55,12 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         # 네트워크 — private 전환의 선행조건(VPN 경로)은 스키마가 아니라
         # docs/NDS 의 전환 런북이 강제한다
         "alb_internal": cfg.network.mode == "private",
-        "allowed_cidrs": cfg.network.allowed_cidrs,
+        # 빈 리스트는 var 에 넣지 않는다 — env/main.tf 가 var.allowed_cidrs 를
+        # 항상 모듈에 넘기므로 [] 가 그대로 가면 setproduct([], ports) 로 ALB
+        # 인그레스 규칙이 0개가 된다. 미설정 = var=null = 모듈 기본 0.0.0.0/0.
+        # "아예 닫기" 는 빈 리스트가 아니라 network.mode=private 로 표현한다.
+        **({"allowed_cidrs": cfg.network.allowed_cidrs}
+           if cfg.network.allowed_cidrs else {}),
 
         # CLI(STS 경로) VK 발급 권한 범위 — compose 의 ALLOWED_IAM_ROLES/
         # ALLOWED_STS_REGIONS 와 같은 계약. env 는 allowed_sts_regions 를
@@ -203,8 +208,14 @@ def render_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> str:
         if isinstance(v, dict) and k == "service_sizing":
             lines.append("service_sizing = {")
             for svc, s in v.items():
+                # min/max_count 는 있을 때만 출력 — 모듈은 optional 이라 생략 시
+                # desired 로 폴백한다. desired 만 찍으면 capacity_tier/sizing 의
+                # 오토스케일 상한이 조용히 유실된다.
+                extras = "".join(
+                    f', {k} = {s[k]}' for k in ("min_count", "max_count") if s.get(k))
                 lines.append(
-                    f'  {svc:<22} = {{ cpu = {s["cpu"]}, memory = {s["memory"]}, desired_count = {s["desired_count"]} }}')
+                    f'  {svc:<22} = {{ cpu = {s["cpu"]}, memory = {s["memory"]}, '
+                    f'desired_count = {s["desired_count"]}{extras} }}')
             lines.append("}")
             lines.append("")
             continue

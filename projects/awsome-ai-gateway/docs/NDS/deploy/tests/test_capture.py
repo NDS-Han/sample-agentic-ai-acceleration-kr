@@ -726,5 +726,150 @@ def test_r53_zone_id_picks_longest_suffix(monkeypatch):
 @pytest.fixture(autouse=True)
 def _no_auto_env_dir(monkeypatch):
     """단위 테스트는 자동탐지로 실제 terraform env 를 읽지 않는다 —
-    env_dir 를 명시한 테스트만 파일시스템 경로를 탄다."""
+    env_dir 를 명시한 테스트만 파일시스템 경로를 탄다.
+    _kube_context_cluster 도 환경 의존 — 기본 ""(검증 스킵)으로 스텁하고
+    불일치 경로를 보는 테스트만 개별 스텁한다."""
     monkeypatch.setattr(capture, "_auto_env_dir", lambda *a, **kw: None)
+    monkeypatch.setattr(capture, "_kube_context_cluster", lambda *a, **kw: "")
+
+
+def test_r53_alias_target_strips_prefix_only(monkeypatch):
+    """lstrip 은 문자셋 스트립이라 dualstack.llm-* 가 m-* 로 망가졌다 —
+    접두어만 제거하는지 회귀 잠금."""
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: [
+        {"Name": "admin.acme.io.", "Type": "A",
+         "AliasTarget": {"DNSName": "dualstack.llm-gw-123.ap-south-1.elb.amazonaws.com."}},
+    ])
+    assert capture._r53_alias_target("Z1", "admin.acme.io", "r") == \
+        "llm-gw-123.ap-south-1.elb.amazonaws.com"
+
+
+def test_tfvars_skips_block_comments_and_map_bodies(tmp_path):
+    """리뷰 지적 오파싱 3종 — /* */ 주석, 들여쓰기 없는 map 본문,
+    문자열 안의 # (라인 주석으로 오인해 값을 잘라 키가 통째로 누락됐다)."""
+    (tmp_path / "terraform.tfvars").write_text('''
+/*
+mantle_regions = ["evil"]
+*/
+tags = {
+mantle_regions = ["evil2"]
+}
+suffix = "auth#a1"          # 문자열 안 # — 잘리면 안 됨
+region  = "ap-south-1"      // slash 주석
+''')
+    tv = capture._tfvars(tmp_path)
+    assert tv["suffix"] == "auth#a1"
+    assert tv["region"] == "ap-south-1"
+    assert "mantle_regions" not in tv   # 주석/map 본문 안 값만 있었다
+
+
+def test_r53_zone_id_finds_parent_zone_via_suffix(monkeypatch):
+    """list-hosted-zones-by-name 은 정렬상 dns-name 이후만 반환해 부모 zone
+    이 빠진다 — 접미사별 조회로 부모를 찾는지 회귀 잠금."""
+    zones_by_name = {
+        "nds.remu.one": [{"Name": "nds.remu.one.", "Id": "/hostedzone/PARENT",
+                          "Config": {"PrivateZone": False}}],
+    }
+
+    def fake(argv, region):
+        dns = argv[argv.index("--dns-name") + 1]
+        return {"HostedZones": zones_by_name.get(dns, [])}
+
+    monkeypatch.setattr(capture, "_aws_json", fake)
+    # zone 은 부모 nds.remu.one 뿐 — ssir-dev.nds.remu.one 자체 zone 없음
+    assert capture._r53_zone_id("ssir-dev.nds.remu.one", "r") == "PARENT"
+
+
+def test_alb_ingress_cidrs_all_traffic_and_httpmode_ports(monkeypatch):
+    """IpProtocol -1(all traffic) 규칙과 http_mode 포트(8000/8080/3000)도
+    인입 허용으로 인정 — 80/443 만 보면 실제 제한을 [] 로 놓친다."""
+    calls = iter([
+        {"LoadBalancers": [{"DNSName": "alb-1.elb.amazonaws.com",
+                            "SecurityGroups": ["sg-1"]}]},
+        {"SecurityGroups": [{"IpPermissions": [
+            {"IpProtocol": "-1", "IpRanges": [{"CidrIp": "10.0.0.0/8"}]},
+            {"IpProtocol": "tcp", "FromPort": 8000, "ToPort": 8000,
+             "IpRanges": [{"CidrIp": "172.16.0.0/12"}]},
+            {"IpProtocol": "tcp", "FromPort": 22, "ToPort": 22,
+             "IpRanges": [{"CidrIp": "1.2.3.4/32"}]},  # 관리용 — ALB 아님
+        ]}]},
+    ])
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: next(calls))
+    cidrs = capture._alb_ingress_cidrs("alb-1.elb.amazonaws.com", "r")
+    assert cidrs == ["10.0.0.0/8", "172.16.0.0/12"]
+
+
+def test_eks_capture_skips_sizing_when_autoscaling_disabled(monkeypatch):
+    """autoscaling.enabled=false + 고정 replica 운영 — 차트 기본 min/max(2/20)
+    를 역산해 기록하면 채택 후 apply 가 꺼둔 HPA 를 다시 켠다."""
+    vals = {
+        "global": {"environment": "loadtest"}, "aws": {"region": "r"},
+        "ingress": {"annotations": {}},
+        "gatewayProxy": {"env": {},
+                         "replicaCount": 4,
+                         "autoscaling": {"enabled": False,
+                                         "minReplicas": 2, "maxReplicas": 20}},
+        "redis": {"poolSize": 40}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    doc, notes = capture.capture_eks()
+    assert "gateway-proxy" not in (doc["deploy"].get("sizing") or {})
+    # redis.poolSize 는 autoscaling 과 무관 — 여전히 기록한다
+    assert doc["deploy"].get("sizing", {}).get("redis") == {"pool_size": 40}
+    assert any("enabled=false" in n for n in notes)
+
+
+def test_eks_capture_rejects_env_dir_of_other_cluster(monkeypatch, tmp_path):
+    """같은 env 이름으로 다른 계정의 terraform env 를 고르면 tfstate/tfvars
+    까지 다른 환경 값이 섞인다 — kube context 클러스터와 대조해 배제."""
+    vals = {
+        "global": {"environment": "dev"}, "aws": {"region": "r"},
+        "ingress": {"annotations": {}},
+        "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_tf_outputs",
+                        lambda *a, **kw: {"cluster_name": "llm-gateway-dev-OTHER"})
+    monkeypatch.setattr(capture, "_kube_context_cluster",
+                        lambda *a, **kw: "llm-gateway-dev")
+    (tmp_path / "terraform.tfvars").write_text('cognito_domain_suffix = "WRONG"\n')
+    doc, notes = capture.capture_eks(env_dir=tmp_path)
+    assert doc["deploy"]["tf_env_dir"] == ""
+    assert "infra" not in doc or "cognito_domain_suffix" not in doc.get("infra", {})
+    assert any("다릅니다" in n for n in notes)
+
+
+def test_ecs_capture_omits_allowed_cidrs_when_unread(monkeypatch, tmp_path):
+    """SG 를 못 읽으면 allowed_cidrs 키를 쓰지 않는다 — 빈 리스트를 기록하면
+    채택 후 apply 가 ALB 인그레스 규칙을 전부 지운다."""
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: {
+        "ecs_cluster_name": "llm-gateway-dev",
+        "admin_ui_url": "https://admin.acme.io",
+        "https_enabled": True,
+        "service_names": {"admin-api": "admin-api"},
+    })
+    # Route53/ECS 조회는 전부 빈 응답 — zone 없음 → alias/SG 미조회 → cidrs 빈
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+    doc, notes = capture.capture_ecs(env_dir=tmp_path, region="r")
+    assert "allowed_cidrs" not in doc["network"]
+    assert any("못 읽었습니다" in n for n in notes)
+
+
+def test_tfvars_skips_heredoc_and_crossline_keys(tmp_path):
+    """heredoc 본문의 key=value 는 오파싱하면 안 되고, '=' 다음 개행이
+    다음 키 이름을 삼키면 안 된다 (리뷰 반영 2건)."""
+    (tmp_path / "terraform.tfvars").write_text(
+        'desc = <<EOT\n'
+        'inner = "fake"\n'
+        'EOT\n'
+        'mantle_regions = ["us-east-1"]\n'
+        'desc2 = <<-EOF\n'
+        'mantle_regions = ["fake"]\n'
+        'EOF\n'
+        'num = 3\n')
+    tv = capture._tfvars(tmp_path)
+    assert "inner" not in tv and "desc" not in tv
+    assert tv["mantle_regions"] == ["us-east-1"]
+    assert tv["num"] == 3

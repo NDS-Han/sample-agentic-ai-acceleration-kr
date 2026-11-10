@@ -165,6 +165,8 @@ async def lifespan(app: FastAPI):
     # 센티넬 SET 이 실패할 때만 채워지고, health checker 가 복구 틱에 다시 심는다.
     from app.resilience.budget_suspect import BudgetSuspectSet
 
+    # maxlen 은 usage_buffer_max 를 재사용한다 — "버스트당 살릴 수 있는 최대치"
+    # 라는 같은 의미의 상한이라 별도 노브를 두지 않는다(의미가 다르면 분리).
     budget_suspects = BudgetSuspectSet(maxlen=settings.usage_buffer_max)
 
     # 10. Health Checker — drains the cost-stream spool on each healthy Redis check.

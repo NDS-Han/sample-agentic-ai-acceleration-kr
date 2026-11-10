@@ -44,9 +44,11 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
   Mem 70% target-tracking으로 자동 확장.
   **admin-api**도 ×2까지 확장. scale-in은 ALB 드레인(300s) 후 종료라 진행 중
   스트림이 보호됩니다.
-- **함정**: `capacity_tier` 와 함께 `sizing.gateway-proxy.desired_count` 만
-  명시하면 `max_count` 가 desired×배수로 **재계산**되어 밴드 상한이 사라집니다 —
-  상한 유지가 필요하면 `max_count` 도 함께 명시하세요.
+- **함정(부분 해소)**: `capacity_tier` 가 둔 `max_count` 는 의도 선언으로
+  보존됩니다 — `desired_count` 만 올려도 밴드 상한이 유지됩니다(상한 밖의
+  desired 는 `validate`가 거부). 단 capacity_tier **없이** `desired_count` 만
+  명시하면 `max_count` 가 desired×배수로 재계산됩니다 — 프리셋 stale max 가
+  남는 것보다 낫지만, 의도 상한이 있으면 `max_count` 도 함께 명시하세요.
 - **싱글톤 계약**: scheduler·cost-recorder·notification은 스트림 consumer/
   cron 중복 방지로 1개 고정 — autoscaling도 min=max=1 핀입니다.
 - **DB/캐시 크기**: tier 프리셋이 기본 — `configure`의 "DB/캐시 크기를 직접

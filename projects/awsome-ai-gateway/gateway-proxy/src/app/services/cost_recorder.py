@@ -37,21 +37,35 @@ _VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
 #      (resilience/redis_retry.py — admission 예약 경로와 공용).
 #      클라이언트 Retry(retries=1, ~50ms)는 blip 용이고, 관측된 풀고갈
 #      버스트(~수 초, MaxConnectionsError)는 못 견딘다.
-#   2) 실패 시 {usage_key}:lost 센티넬 — 다음 admission 의 MGET 프로브가
-#      트리거로 잡아 budget_usages 플로어 rebuild 를 발화한다(rebuild.lua 는
-#      절대 내리지 않고 resvsum 도 양방향 보정). 센티넬 SET 마저 실패하면
+#   2) 실패 시 {usage_key}:lost 센티넬 + :lost_amt 금액 누적 — 다음 admission 의
+#      MGET 프로브가 트리거로 잡아 rebuild 를 발화한다(rebuild.lua 는 절대
+#      내리지 않고 resvsum 도 양방향 보정). 원장 행이 워커 배치로 늦는 창에는
+#      cur+lost_amt 플로어가 유실분을 메운다. 센티넬 SET 마저 실패하면
 #      BudgetSuspectSet 큐로 넘겨 헬스체커가 복구 틱에 다시 심는다.
 
 
-async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str) -> None:
+async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
+                            amount=None) -> None:
     """차감 실패 카운터에 :lost 센티넬을 심어 다음 admission rebuild 를 트리거한다.
 
-    Lua eval 보다 훨씬 가벼운 단일 SET 이라 풀고갈 버스트에서도 통과할 가능성이
-    높다. 그마저 실패하면(실제 Redis 장애) suspect 큐로 — 헬스체커가 복구 틱에
-    다시 심는다. 어느 경로든 "얇아진 카운터"는 다음 enforce 전에 원장 기준으로
-    복원된다 — enforce 가 문제되는 유일한 시점이 다음 admission 이기 때문이다.
+    마지막 수단의 단일 SET 이다 — 여기까지 온 것은 eval 재시도가 전부 실패한
+    뒤라 이 SET 도 실패할 수 있고, 그때는 suspect 큐로 넘겨 헬스체커가 복구
+    틱에 다시 심는다. 어느 경로든 "얇아진 카운터"는 다음 enforce 전에 원장
+    기준으로 복원된다 — enforce 가 문제되는 유일한 시점이 다음 admission 이기
+    때문이다.
+
+    amount(차감에 실패한 금액)를 주면 ``{key}:lost_amt`` 에 INCRBYFLOAT 로
+    누적한다 — 원장(budget_usages) 기록은 워커 배치라 rebuild 시점에 실패분이
+    아직 반영 안 됐을 수 있고, 그때 rebuild 가 센티넬을 지우면 유실분이 기간
+    내내 남는다. rebuild 는 ``max(db+live, cur+lost_amt)`` 플로어로 그 창을
+    메운다. settle 실패(예약만 지저분)는 금액 없이 트리거만 심는다.
     """
     try:
+        # 금액을 먼저 쓴다 — SET 이 실패해 suspect 로 가도 drain 의 :lost 재전달이
+        # 이미 심어진 lost_amt 와 합쳐져 완전한 복원이 된다 (drain 은 키만 재심음).
+        if amount is not None:
+            await redis.incrbyfloat(f"{usage_key}:lost_amt", float(amount))
+            await redis.expire(f"{usage_key}:lost_amt", SENTINEL_TTL_SECONDS)
         await redis.set(f"{usage_key}:lost", "1", ex=SENTINEL_TTL_SECONDS)
         logger.warning("budget_counter_marked_lost", scope=scope)
     except Exception:
@@ -400,6 +414,9 @@ class CostRecorder:
             self._metrics.cost_usd_total.add(float(cost_usd), attrs)
 
         # 1. Redis 예산 차감 + 임계값 체크
+        #    redis=None(degraded)이면 이 블록 전체가 스킵된다 — 센티넬/suspect
+        #    도 남기지 않는다. 그때의 카운터 어긋남은 reconcile(주기 대조)이
+        #    메우는 설계 — 원장 행은 아래 XADD/spool 경로로 반드시 남는다.
         threshold_triggered = None
         threshold_scope = "user"
         if redis is not None:
@@ -494,7 +511,8 @@ class CostRecorder:
             except Exception:
                 logger.exception("budget_deduct_failed", user_id=auth_context.user_id)
                 await _mark_budget_lost(
-                    redis, user_usage_key, suspects=self._suspects, scope="user"
+                    redis, user_usage_key, suspects=self._suspects, scope="user",
+                    amount=cost_usd,
                 )
 
             # 팀 예산 차감. ⚠️ 이 결과의 threshold_triggered 를 이전엔 버렸다 —
@@ -547,7 +565,8 @@ class CostRecorder:
                 except Exception:
                     logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
                     await _mark_budget_lost(
-                        redis, team_usage_key, suspects=self._suspects, scope="team"
+                        redis, team_usage_key, suspects=self._suspects, scope="team",
+                        amount=cost_usd,
                     )
 
             # 앱(client) 예산 차감.
@@ -616,7 +635,8 @@ class CostRecorder:
                 except Exception:
                     logger.warning("client_budget_deduct_failed", client=client)
                     await _mark_budget_lost(
-                        redis, client_usage_key, suspects=self._suspects, scope="client"
+                        redis, client_usage_key, suspects=self._suspects, scope="client",
+                        amount=cost_usd,
                     )
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)
@@ -688,11 +708,10 @@ class CostRecorder:
                 )
             except Exception:
                 logger.warning("tpm_settle_failed", user_id=auth_context.user_id)
-                # TPM 윈도우 잔여는 budget_rebuild 대상이 아니지만, 같은 버스트에서
-                # 얇아졌을 수 있는 usage 카운터는 센티넬 경로로 교정된다.
-                await _mark_budget_lost(
-                    redis, user_usage_key, suspects=self._suspects, scope="user"
-                )
+                # TPM 윈도우 잔여는 budget_rebuild 대상이 아니라 센티넬을 심어도
+                # 교정될 것이 없다 — 버스트마다 쓸데없는 rebuild(DB 읽기)만 유발한다.
+                # usage 카운터가 실제로 얇아진 경우는 그 deduct 실패 지점이 이미
+                # 자기 센티넬을 심는다.
 
         # 3. XADD cost:stream — cost-recorder-worker가 DB INSERT / daily counter /
         #    threshold pub/sub 배치 처리. 실패는 경고만 (gateway response는 영향 없음).
