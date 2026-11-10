@@ -62,7 +62,12 @@ redis:
   enabled: false  # ElastiCache 사용
   # dev 는 단일 노드(cache.t4g.small)·HPA 1~3 pod → 풀을 작게(노드 커넥션 보호).
   # deepdive Q50 Phase4: pod 당 pool × maxReplica ≤ 노드 maxclients.
-  poolSize: 40
+  # ⚠️ poolSize 는 "pod 당"이 아니라 **uvicorn 워커 프로세스당**이다 — 노드측 최대는
+  #    poolSize × WORKERS(2) × maxReplica. t4g.small maxclients(~65k) 기준으로는
+  #    150×2×3=900 으로도 넉넉하다. 반대로 요청측 수요는 워커당 동시 Redis 명령
+  #    수 — 40 은 스트림 finalize 폭증 시 MaxConnectionsError 로 예산 차감을
+  #    유실시킨다(2026-11-10 dev 실측: 300 동시 SSE 종결 폭풍에서 ~23% 유실).
+  poolSize: 150
   external:
     # CHANGE_ME (terraform output): ElastiCache primary endpoint. terraform output -raw elasticache_primary_endpoint.
     host: "master.llm-gateway-dev.xxx.apn2.cache.amazonaws.com"
