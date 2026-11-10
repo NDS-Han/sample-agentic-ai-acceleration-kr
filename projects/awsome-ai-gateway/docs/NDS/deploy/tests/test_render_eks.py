@@ -275,3 +275,25 @@ def test_eks_sizing_absent_emits_nothing(tmp_path):
     assert "autoscaling" not in v.get("gatewayProxy", {})
     assert "redis" not in v
     assert "BEDROCK_THREAD_POOL_SIZE" not in v["gatewayProxy"]["env"]
+
+
+def test_eks_capacity_tier_expands_preset(tmp_path):
+    """capacity_tier 한 줄이 프리셋을 전개한다 — sizing 명시 없이도 HPA+pool."""
+    doc = dict(BASE, deploy={**BASE["deploy"], "capacity_tier": "6000"})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    asg = v["gatewayProxy"]["autoscaling"]
+    assert asg["minReplicas"] == 4 and asg["maxReplicas"] == 8
+    assert v["redis"]["poolSize"] == 150
+
+
+def test_eks_capacity_tier_sizing_overrides_single_key(tmp_path):
+    """프리셋이 바닥이고 sizing 의 명시 키만 오버라이드한다."""
+    doc = dict(BASE, deploy={**BASE["deploy"],
+                             "capacity_tier": "3000",
+                             "sizing": {"redis": {"pool_size": 200}}})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    asg = v["gatewayProxy"]["autoscaling"]
+    assert asg["minReplicas"] == 3 and asg["maxReplicas"] == 6
+    assert v["redis"]["poolSize"] == 200

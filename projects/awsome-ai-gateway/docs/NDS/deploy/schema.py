@@ -41,6 +41,9 @@ class DeployConfig:
     target: str = "compose"
     size_tier: str = "t1"
     sizing: dict[str, Any] = field(default_factory=dict)
+    # eks 전용 용량 밴드 — tiers.EKS_CAPACITY_TIERS 키("500"~"6000+").
+    # 프리셋이 바닥이고 sizing 의 명시 키가 개별 오버라이드.
+    capacity_tier: str = ""
     # terraform state backend (ecs/eks 경로). 비우면 account_id 규칙으로 추론하거나
     # render 가 placeholder 를 둔다.
     tfstate_bucket: str = ""
@@ -527,6 +530,16 @@ class GatewayConfig:
                     e.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
                              f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
                              f"예산을 확인하세요.")
+        if self.deploy.capacity_tier:
+            if self.deploy.target != "eks":
+                e.append("deploy.capacity_tier 는 eks 경로 전용입니다 "
+                         "(ecs 는 size_tier+sizing 으로 크기를 정합니다).")
+            else:
+                from .tiers import EKS_CAPACITY_TIERS
+                if self.deploy.capacity_tier not in EKS_CAPACITY_TIERS:
+                    e.append(f"deploy.capacity_tier 가 목록에 없습니다: "
+                             f"{self.deploy.capacity_tier!r} "
+                             f"(허용: {sorted(EKS_CAPACITY_TIERS)})")
         if self.deploy.target == "ecs":
             # 오토스케일(max_count)을 포함한 worst-case pool 수요가 Aurora 천장을
             # 넘으면 스케일아웃이 DB 를 고갈시킨다 — 선언 단계에서 막는다.
@@ -677,8 +690,9 @@ _TOP_LEVEL_KEYS = frozenset((
     "features", "images", "clients", "oidc", "infra",
 ))
 _AWS_KEYS = frozenset(("region", "account_id", "allowed_roles"))
-_DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "tfstate_bucket",
-                          "tfstate_table", "release", "namespace", "tf_env_dir"))
+_DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
+                          "tfstate_bucket", "tfstate_table", "release",
+                          "namespace", "tf_env_dir"))
 _NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
 _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id", "hosts"))
 _DOMAIN_HOST_KEYS = frozenset(("gateway", "admin_ui", "admin_api"))
@@ -766,6 +780,7 @@ def from_dict(raw: dict) -> GatewayConfig:
             target=str(deploy.get("target", "compose")),
             size_tier=str(deploy.get("size_tier", "t1")),
             sizing=dict(deploy.get("sizing") or {}),
+            capacity_tier=str(deploy.get("capacity_tier", "")),
             tfstate_bucket=str(deploy.get("tfstate_bucket", "")),
             tfstate_table=str(deploy.get("tfstate_table", "")),
             release=str(deploy.get("release", "llm-gateway")),

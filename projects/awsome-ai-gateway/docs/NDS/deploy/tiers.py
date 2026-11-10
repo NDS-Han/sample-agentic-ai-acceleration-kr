@@ -271,3 +271,61 @@ def ecs_db_budget(cfg) -> dict:
         "steady": steady, "worst": worst,
         "floor_capacity": floor_cap, "ceiling_capacity": ceil_cap,
     }
+
+
+# ── eks 용량 밴드 (Claude Code형 인터랙티브 프로파일 기준) ─────────────────────
+# size_tier 는 eks 에서 문서용이라 실제 pods/pool 은 여기서 정한다.
+# 산식: 동시 스트림 ≈ 사용자 × 활성률 0.25 × 밀도 0.3 ≈ N×0.075
+#       pods = 동시 스트림 ÷ 180 (256슬롯/pod × 안전율 0.7)
+# 자동화/배치 비중이 크면 밀도가 ~3배 — 한 단계 위 밴드로 잡는다.
+# pool_size 는 워커 프로세스당 — 노드 최대 = pool × WORKERS(2) × max_replicas.
+EKS_CAPACITY_TIERS: dict[str, dict] = {
+    "500": {
+        "users": "~500명",
+        "gateway-proxy": {"min_replicas": 1, "max_replicas": 3},
+        "redis": {"pool_size": 150},
+        "note": "슬롯 점유 ~15% — replicas 는 용량이 아니라 HA 용도",
+    },
+    "1000": {
+        "users": "~1,000명",
+        "gateway-proxy": {"min_replicas": 2, "max_replicas": 5},
+        "redis": {"pool_size": 150},
+        "note": "1pod 슬롯 ~30% — min2 는 HA+롤아웃 버스트 여유",
+    },
+    "3000": {
+        "users": "~3,000명",
+        "gateway-proxy": {"min_replicas": 3, "max_replicas": 6},
+        "redis": {"pool_size": 150},
+        "note": "정상 2pod 가동(슬롯 44%) — min3 는 배포 중 1pod 결손 수용",
+    },
+    "6000": {
+        "users": "~6,000명",
+        "gateway-proxy": {"min_replicas": 4, "max_replicas": 8},
+        "redis": {"pool_size": 150},
+        "note": "정상 3pod(슬롯 59%) — Redis 커넥션 150×2×8=2,400",
+    },
+    "6000+": {
+        "users": "~10,000명 이상",
+        "gateway-proxy": {"min_replicas": 6, "max_replicas": 15},
+        "redis": {"pool_size": 150},
+        "note": "정상 5pod — 이 밴드부터 ElastiCache 노드는 t4g.medium+ 검토",
+    },
+}
+
+
+def eks_capacity_sizing(cfg) -> dict:
+    """deploy.capacity_tier 프리셋 + deploy.sizing 개별 오버라이드 병합.
+
+    반환 shape 은 render/eks.py 의 sizing 소비와 동일:
+    {"gateway-proxy": {min_replicas, max_replicas, bedrock_thread_pool_size?},
+     "redis": {pool_size}}. 프리셋이 바닥, sizing 의 명시 키가 이긴다."""
+    merged: dict[str, dict] = {}
+    tier = getattr(cfg.deploy, "capacity_tier", "") or ""
+    if tier:
+        for svc, kv in EKS_CAPACITY_TIERS[tier].items():
+            if svc in ("users", "note"):
+                continue
+            merged[svc] = dict(kv)
+    for svc, kv in (cfg.deploy.sizing or {}).items():
+        merged.setdefault(svc, {}).update(kv)
+    return merged

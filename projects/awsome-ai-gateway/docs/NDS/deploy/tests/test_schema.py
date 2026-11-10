@@ -503,3 +503,24 @@ def test_domain_hosts_outside_domain_name_warns():
                           "admin_ui": "a.other.io",
                           "admin_api": "api.other.io"}}))
     assert any("범위 밖" in w for w in cfg.warnings())
+
+
+def test_capacity_tier_valid_on_eks():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3", "capacity_tier": "6000"},
+        images={"tag": "abc"}))
+    assert cfg.deploy.capacity_tier == "6000"
+
+
+def test_capacity_tier_unknown_rejected():
+    with pytest.raises(schema.SchemaError, match="capacity_tier"):
+        schema.from_dict(minimal(
+            deploy={"target": "eks", "size_tier": "t3", "capacity_tier": "777"},
+            images={"tag": "abc"}))
+
+
+def test_capacity_tier_on_ecs_rejected():
+    with pytest.raises(schema.SchemaError, match="eks 경로 전용"):
+        schema.from_dict(minimal(
+            deploy={"target": "ecs", "size_tier": "t1", "capacity_tier": "3000"},
+            images={"tag": "abc"}))
