@@ -1,0 +1,612 @@
+diff --git a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/templates/gateway-proxy/hpa.yaml b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/templates/gateway-proxy/hpa.yaml
+index 1d1dc37c..81676bcc 100644
+--- a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/templates/gateway-proxy/hpa.yaml
++++ b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/templates/gateway-proxy/hpa.yaml
+@@ -32,6 +32,23 @@ spec:
+           type: Utilization
+           averageUtilization: {{ .Values.gatewayProxy.autoscaling.targetMemoryUtilizationPercentage }}
+     {{- end }}
++    {{- if .Values.gatewayProxy.autoscaling.executorInflightTarget }}
++    # claude-code SSE 1개 = bedrock 스레드 슬롯 1개 — 블로킹 대기라 CPU 가
++    # 안 올라 Resource 메트릭이 포화를 못 본다. prometheus-adapter 의
++    # custom 규칙이 서빙하는 per-pod inflight 합계로 직접 스케일한다.
++    # type: Pods — pod 리소스 연동 메트릭(custom.metrics.k8s.io)으로
++    # 파드당 평균값. External 은 external.metrics.k8s.io 라 별도 API 를
++    # 요구해 adapter rules.external 을 또 만들어야 한다 — Pods 가 같은
++    # 의미론(파드 평균)에 배선이 절반이다.
++    # 전제: observability/prometheus-adapter values.yaml 의 rules.custom.
++    - type: Pods
++      pods:
++        metric:
++          name: gateway_bedrock_executor_inflight
++        target:
++          type: AverageValue
++          averageValue: {{ .Values.gatewayProxy.autoscaling.executorInflightTarget }}
++    {{- end }}
+   # SSE 스트림 연결이 붙어 있어서 스케일 다운을 보수적으로
+   behavior:
+     scaleDown:
+diff --git a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/tests/test_deployment_safety.py b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/tests/test_deployment_safety.py
+index ce880060..e031399d 100644
+--- a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/tests/test_deployment_safety.py
++++ b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/tests/test_deployment_safety.py
+@@ -316,6 +316,61 @@ def test_nextauth_url_scheme_follows_admin_ui_https():
+     )
+ 
+ 
++# --------------------------------------------------------------------------
++# executor-inflight 커스텀 메트릭 → HPA type: Pods
++# --------------------------------------------------------------------------
++
++def _hpa(docs: list[dict], fragment: str) -> dict:
++    for d in docs:
++        if d.get("kind") == "HorizontalPodAutoscaler" and fragment in d["metadata"]["name"]:
++            return d
++    raise AssertionError(f"{fragment} HPA 없음")
++
++
++def _pod_metrics(hpa: dict) -> list[dict]:
++    return [m for m in hpa["spec"]["metrics"] if m["type"] == "Pods"]
++
++
++@pytest.mark.parametrize("values", [
++    "values-eks-fargate-dev.yaml", "values-eks-fargate-prod.yaml",
++])
++def test_hpa_executor_inflight_is_pods_metric(values: str):
++    """CPU 는 SSE 블로킹 슬롯 점유를 못 보니 executor inflight 파드 평균으로
++    스케일한다. type 은 반드시 Pods — External 은 external.metrics.k8s.io
++    별도 API 라 adapter 규칙이 서빙하는 custom.metrics.k8s.io 에서
++    <unknown> 으로 영구 멈춘다 (dev 실측으로 잡은 회귀)."""
++    hpa = _hpa(_render(values), "gateway-proxy")
++    pods = _pod_metrics(hpa)
++    assert len(pods) == 1, f"Pods 메트릭 {len(pods)}개: {hpa['spec']['metrics']}"
++    m = pods[0]["pods"]
++    assert m["metric"]["name"] == "gateway_bedrock_executor_inflight"
++    assert m["target"]["type"] == "AverageValue"
++    assert str(m["target"]["averageValue"]) == "180", (
++        f"averageValue={m['target']['averageValue']} — 풀 256 의 ~70% 가정과 어긋남"
++    )
++    assert not any(me["type"] == "External" for me in hpa["spec"]["metrics"]), (
++        "External 타입 잔존 — adapter 는 custom.metrics.k8s.io 를 서빙한다"
++    )
++
++
++def test_hpa_executor_inflight_absent_when_unset():
++    """기본 values 에는 키가 주석처리 — 렌더되지 않아야 observability 스택이
++    없는 클러스터에서 <unknown> 타깃으로 남지 않는다."""
++    hpa = _hpa(_render("values.yaml"), "gateway-proxy")
++    assert _pod_metrics(hpa) == [], (
++        f"executorInflightTarget 미설정인데 Pods 메트릭 렌더: {hpa['spec']['metrics']}"
++    )
++
++
++def test_hpa_executor_inflight_target_override():
++    docs = _render(
++        "values-eks-fargate-prod.yaml",
++        "gatewayProxy.autoscaling.executorInflightTarget=100",
++    )
++    m = _pod_metrics(_hpa(docs, "gateway-proxy"))[0]["pods"]
++    assert str(m["target"]["averageValue"]) == "100"
++
++
+ # --------------------------------------------------------------------------
+ # S4r2 — prod ALB deregistration 지연 ≥ preStop + uvicorn graceful
+ # --------------------------------------------------------------------------
+diff --git a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-dev.yaml b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-dev.yaml
+index 570fb152..00d4335d 100644
+--- a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-dev.yaml
++++ b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-dev.yaml
+@@ -312,6 +312,9 @@ gatewayProxy:
+     enabled: true
+     minReplicas: 1
+     maxReplicas: 3
++    # bedrock executor in-flight 파드당 평균 타깃 (풀 2×128=256 의 70%).
++    # prometheus-adapter rules.custom + otel-collector k8sattributes 전제.
++    executorInflightTarget: 180
+   podDisruptionBudget:
+     enabled: false
+ 
+diff --git a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-prod.yaml b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-prod.yaml
+index ccf67ba4..c3094817 100644
+--- a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-prod.yaml
++++ b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values-eks-fargate-prod.yaml
+@@ -263,6 +263,10 @@ gatewayProxy:
+     minReplicas: 3
+     maxReplicas: 30
+     targetCPUUtilizationPercentage: 65
++    # bedrock executor in-flight 파드당 평균 타깃 (풀 2×128=256 의 70%).
++    # CPU 는 SSE 블로킹 대기를 못 잰다 — 포화의 직접 신호로 스케일.
++    # 전제: prometheus-adapter rules.custom + otel-collector k8sattributes.
++    executorInflightTarget: 180
+   podDisruptionBudget:
+     enabled: true
+     minAvailable: 2
+diff --git a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values.yaml b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values.yaml
+index e0cc260c..c4abd85b 100644
+--- a/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values.yaml
++++ b/projects/awsome-ai-gateway/deployment/charts/llm-gateway/values.yaml
+@@ -466,6 +466,11 @@ gatewayProxy:
+     minReplicas: 2
+     maxReplicas: 20
+     targetCPUUtilizationPercentage: 70
++    # executorInflightTarget — bedrock executor in-flight(running+queued)의
++    # 파드당 평균 타깃. 풀 크기 = WORKERS × BEDROCK_THREAD_POOL_SIZE(기본 2×128=256).
++    # 타깃 ≈ 풀의 70% 전후가 스케일아웃 여유를 남긴다. 비우면 CPU 전용.
++    # 전제: prometheus-adapter rules.custom + otel-collector k8sattributes.
++    # executorInflightTarget: 180
+ 
+   podDisruptionBudget:
+     enabled: true
+diff --git a/projects/awsome-ai-gateway/deployment/observability/README.md b/projects/awsome-ai-gateway/deployment/observability/README.md
+index 7a543dc2..00d58c8a 100644
+--- a/projects/awsome-ai-gateway/deployment/observability/README.md
++++ b/projects/awsome-ai-gateway/deployment/observability/README.md
+@@ -37,6 +37,49 @@ AWS Containers 블로그 ["Autoscaling EKS on Fargate with custom metrics"](http
+ - Fargate cAdvisor 는 **container 레벨 메트릭이 없고 pod 단위만** emit. `values.yaml` 의 resource 규칙은 `container!=""` filter 를 제거해야 함.
+ - metrics-server 가 동시 설치돼 있으면 APIService 소유권 충돌 → prometheus-adapter 설치 전에 `helm uninstall metrics-server -n kube-system`.
+ 
++## executor 포화 메트릭 → HPA (custom.metrics.k8s.io)
++
++CPU-HPA 의 사각지대: claude-code SSE 1개는 bedrock 스레드 슬롯 1개를 스트림
++수명 내내 점유하는데, 스레드는 블로킹 대기라 **CPU 를 올리지 않는다**.
++풀(WORKERS × BEDROCK_THREAD_POOL_SIZE, 기본 2×128=256/pod)이 고갈돼도
++CPU-HPA 는 정상으로 읽어 정확히 포화 순간에 스케일이 안 된다.
++그래서 포화의 직접 신호를 앱 메트릭으로 스케일링한다:
++
++```
++gateway (uvicorn 워커×2, OTel SDK push, 60s)
++  └─ gateway_bedrock_executor_inflight   (running+queued 합 — 포화 선행 신호)
++  └─ gateway_bedrock_executor_queue_depth (→ _ratio suffix)
++  └─ gateway_active_connections
++       │ OTLP :4317
++       ▼
++otel-collector  ── k8sattributes: 송신 podIP → k8s.pod.name/k8s.namespace.name 부착
++       │          (필수 — pod 레이블 없으면 메트릭을 파드에 매핑 못 함)
++       │          + ClusterRole otel-collector-k8sattributes (pods get/list/watch)
++       │ prometheusremotewrite → kps-prometheus
++       ▼
++prometheus-adapter ── rules.custom: seriesQuery + sum by (pod)
++       │             (워커 2개는 service.instance.id=pod-pid 로 구분돼
++       │               합산하면 파드 총량 — 구버전 이미지는 붕괴되어 과소집계 주의)
++       ▼
++custom.metrics.k8s.io/v1beta1  →  HPA `type: Pods` averageValue
++  (External 이 아니라 Pods — External 은 external.metrics.k8s.io 별도 API+규칙이
++   필요하고, 파드 평균이라는 의미론도 Pods 가 정확하다)
++```
++
++- HPA 쪽 선언: `gatewayProxy.autoscaling.executorInflightTarget` (기본 주석처리,
++  풀의 ~70% 권장 → 256 풀이면 180). values-eks-fargate-{dev,prod}.yaml 에 180 설정.
++- 스케일 판정: `avg(inflight) > target → desired = ceil(replicas × avg/target)`.
++  dev 에서 inflight=250 유지 시 1→2 스케일아웃 실측 확인.
++- 전체 파이프라인 중 어디가 끊겼는지 볼 때: `kubectl get --raw
++  /apis/custom.metrics.k8s.io/v1beta1` 에 메트릭이 있으면 adapter 까지는 정상,
++  없으면 collector(k8sattributes)/remote-write/규칙 순으로 본다.
++- ⚠️ 멀티워커 충돌: 같은 파드의 워커 2개가 동일 레이블셋으로 remote_write 하면
++  시리즈가 붕괴해 과소집계된다 — `service.instance.id={hostname}-{pid}`
++  (gateway ≥이번 변경 태그) 가 각 워커 시리즈를 갈라 sum 이 정확해진다.
++  구버전 이미지에선 inflight 가 ~절반으로 읽혀 스케일이 늦을 수 있다.
++- ⚠️ lazy 생성: executor 메트릭은 첫 bedrock 호출 시점에 만들어진다 —
++  유휴 dev 에서 HPA 가 `<unknown>` 으로 보이는 건 결함이 아니라 데이터 부재.
++
+ ## 설치
+ 
+ `install-eks.sh` 가 아래 순서로 자동 호출 (helm install/upgrade 이전):
+diff --git a/projects/awsome-ai-gateway/deployment/observability/otel-collector/configmap.yaml b/projects/awsome-ai-gateway/deployment/observability/otel-collector/configmap.yaml
+index 16e8bd66..eb4458af 100644
+--- a/projects/awsome-ai-gateway/deployment/observability/otel-collector/configmap.yaml
++++ b/projects/awsome-ai-gateway/deployment/observability/otel-collector/configmap.yaml
+@@ -22,6 +22,18 @@ data:
+       memory_limiter:
+         check_interval: 1s
+         limit_mib: 1500
++      # pod 식별 부착 — prometheus-adapter 의 custom-metric HPA 가 메트릭을
++      # pod 리소스에 매핑하려면 k8s_pod_name 레이블이 필요하다. 송신 IP(podIP)
++      # 로 파드를 역조회한다(SA 에 pods get/list/watch ClusterRole 필요 —
++      # serviceaccount.yaml 의 rbac 블록).
++      k8sattributes:
++        extract:
++          metadata:
++            - k8s.pod.name
++            - k8s.namespace.name
++        pod_association:
++          - sources:
++              - from: connection
+       resource:
+         attributes:
+           # cluster 라벨은 Deployment env 주입 — 예전엔 "llm-gateway-prod" 하드코딩이라
+@@ -55,7 +67,7 @@ data:
+       pipelines:
+         metrics:
+           receivers: [otlp]
+-          processors: [memory_limiter, resource, batch]
++          processors: [memory_limiter, k8sattributes, resource, batch]
+           exporters: [prometheusremotewrite]
+         logs:
+           receivers: [otlp]
+diff --git a/projects/awsome-ai-gateway/deployment/observability/otel-collector/serviceaccount.yaml b/projects/awsome-ai-gateway/deployment/observability/otel-collector/serviceaccount.yaml
+index 3481bad1..36e24470 100644
+--- a/projects/awsome-ai-gateway/deployment/observability/otel-collector/serviceaccount.yaml
++++ b/projects/awsome-ai-gateway/deployment/observability/otel-collector/serviceaccount.yaml
+@@ -6,3 +6,27 @@ metadata:
+   name: otel-collector
+   namespace: observability
+   # IRSA 필요 없음 — OTel Collector 는 클러스터 내부 Prometheus 로 remote_write
++---
++# k8sattributes 프로세서가 송신 podIP 로 파드 메타데이터를 역조회하는 데 필요.
++# 읽기 전용 pod 메타데이터 — 시크릿/스펙 쓰기 권한 없음.
++apiVersion: rbac.authorization.k8s.io/v1
++kind: ClusterRole
++metadata:
++  name: otel-collector-k8sattributes
++rules:
++  - apiGroups: [""]
++    resources: ["pods"]
++    verbs: ["get", "list", "watch"]
++---
++apiVersion: rbac.authorization.k8s.io/v1
++kind: ClusterRoleBinding
++metadata:
++  name: otel-collector-k8sattributes
++roleRef:
++  apiGroup: rbac.authorization.k8s.io
++  kind: ClusterRole
++  name: otel-collector-k8sattributes
++subjects:
++  - kind: ServiceAccount
++    name: otel-collector
++    namespace: observability
+diff --git a/projects/awsome-ai-gateway/deployment/observability/prometheus-adapter/values.yaml b/projects/awsome-ai-gateway/deployment/observability/prometheus-adapter/values.yaml
+index c2dd3da0..197bed34 100644
+--- a/projects/awsome-ai-gateway/deployment/observability/prometheus-adapter/values.yaml
++++ b/projects/awsome-ai-gateway/deployment/observability/prometheus-adapter/values.yaml
+@@ -67,6 +67,40 @@ rules:
+             resource: node
+       containerLabel: container
+     window: 3m
++  # ── custom.metrics.k8s.io — 게이트웨이 앱 메트릭 → pod 리소스 매핑 ──────
++  # CPU-HPA 의 사각지대: claude-code SSE 1개 = bedrock 스레드 슬롯 1개인데
++  # 스레드는 블로킹 대기라 CPU 를 안 올린다. 포화의 직접 신호(executor
++  # in-flight = running+queued)를 HPA 가 보게 한다.
++  # 레이블 소스: otel-collector k8sattributes(k8s_pod_name/pod 역조회) +
++  # gateway service.instance.id(워커 구분 — sum by pod 시 파드 총량).
++  custom:
++    - seriesQuery: 'gateway_bedrock_executor_inflight{k8s_pod_name!=""}'
++      resources:
++        overrides:
++          k8s_pod_name: {resource: pod}
++          k8s_namespace_name: {resource: namespace}
++      name:
++        matches: "^(.*)$"
++        as: "${1}"
++      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
++    - seriesQuery: 'gateway_bedrock_executor_queue_depth_ratio{k8s_pod_name!=""}'
++      resources:
++        overrides:
++          k8s_pod_name: {resource: pod}
++          k8s_namespace_name: {resource: namespace}
++      name:
++        matches: "^(.*)$"
++        as: "${1}"
++      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
++    - seriesQuery: 'gateway_active_connections{k8s_pod_name!=""}'
++      resources:
++        overrides:
++          k8s_pod_name: {resource: pod}
++          k8s_namespace_name: {resource: namespace}
++      name:
++        matches: "^(.*)$"
++        as: "${1}"
++      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
+ 
+ # 적당한 replica / 리소스. HPA 쿼리 실패 지점이라 여유를 둠.
+ replicas: 2
+diff --git a/projects/awsome-ai-gateway/deployment/scripts/rebuild-image.sh b/projects/awsome-ai-gateway/deployment/scripts/rebuild-image.sh
+index 2d883016..3d6424bb 100755
+--- a/projects/awsome-ai-gateway/deployment/scripts/rebuild-image.sh
++++ b/projects/awsome-ai-gateway/deployment/scripts/rebuild-image.sh
+@@ -78,14 +78,6 @@ if [ -n "$(git -C "$ROOT" status --porcelain -- "${CTX#$ROOT/}" 2>/dev/null || t
+   echo "    커밋 후 다시 실행하는 것을 권장한다." >&2
+ fi
+ 
+-# ---- 동일 태그 덮어쓰기 방지 ----
+-if aws ecr describe-images --repository-name "llm-gateway/$SVC" \
+-     --image-ids imageTag="$TAG" --query 'imageIds[0]' --output text 2>/dev/null | grep -q .; then
+-  echo "❌ $ECR_BASE/$SVC:$TAG 는 이미 ECR 에 있다." >&2
+-  echo "   같은 태그 덮어쓰기는 변경을 구별할 수 없게 만든다 — 커밋으로 새 SHA 를 만들거나 TAG=<명시값> 을 지정하라." >&2
+-  exit 1
+-fi
+-
+ SET_ARGS=(--set "$KEY.image.tag=$TAG")
+ [ "$SVC" = "admin-api" ] && SET_ARGS+=(--set "scheduler.image.tag=$TAG")
+ 
+@@ -156,7 +148,7 @@ if [ "$FORCE" -eq 0 ]; then
+              --query 'imageDetails[0].imagePushedAt' --output text 2>&1); then
+     echo "⏭️  건너뜀 — ECR 에 이미 있음: $SVC:$TAG (push $out)"
+     echo "    태그가 그대로라 다시 빌드하지 않는다(옛 이미지를 덮어쓰지 않음)."
+-    echo "    코드가 바뀌었으면 13-bump-image-tags.sh 로 태그부터 올린다. 꼭 덮어써야 하면 --force."
++    echo "    태그는 git HEAD SHA — 코드가 바뀌었으면 커밋해 새 SHA 를 만들거나 TAG=<명시값> 을 지정한다. 꼭 덮어써야 하면 --force."
+     exit 0
+   elif [[ "$out" != *ImageNotFoundException* ]]; then
+     echo "❌ ECR 조회 실패 — 이 태그가 이미 있는지 알 수 없어 멈춘다(덮어쓰기 방지):"
+diff --git a/projects/awsome-ai-gateway/deployment/terraform/modules/ecs-gateway/variables.tf b/projects/awsome-ai-gateway/deployment/terraform/modules/ecs-gateway/variables.tf
+index 617bb41f..f52f0955 100644
+--- a/projects/awsome-ai-gateway/deployment/terraform/modules/ecs-gateway/variables.tf
++++ b/projects/awsome-ai-gateway/deployment/terraform/modules/ecs-gateway/variables.tf
+@@ -52,6 +52,9 @@ variable "allowed_cidrs" {
+   description = "ALB security group ingress 허용 대역. 비우면 0.0.0.0/0 — schema 경고와 같은 의미"
+   type        = list(string)
+   default     = ["0.0.0.0/0"]
++  # env 가 null 을 전달하면(미설정) 기본값이 적용되도록 — nullable 이면 null 이
++  # 그대로 들어와 setproduct(var.allowed_cidrs, …) 가 크래시한다.
++  nullable    = false
+ }
+ 
+ variable "alb_idle_timeout" {
+diff --git a/projects/awsome-ai-gateway/docs/NDS/install-eks.md b/projects/awsome-ai-gateway/docs/NDS/install-eks.md
+index fdada2ad..d2e1d348 100644
+--- a/projects/awsome-ai-gateway/docs/NDS/install-eks.md
++++ b/projects/awsome-ai-gateway/docs/NDS/install-eks.md
+@@ -195,6 +195,18 @@ bedrock_thread_pool_size}`, `redis.pool_size` — 지정한 키만 밴드 위에
+   maxclients 예산을 validate 가 검사합니다.
+ - 변경 적용: `./deploy apply --plan`(HPA diff 확인) → `./deploy apply`.
+ 
++> **CPU-HPA 만으로는 포화를 못 봅니다.** claude-code SSE 는 스트림 수명 내내
++> bedrock 스레드 슬롯을 블로킹 점유해 CPU 가 오르지 않습니다 — 슬롯이 고갈돼도
++> HPA 는 "정상"으로 읽습니다. 그래서 env values 에
++> `gatewayProxy.autoscaling.executorInflightTarget: 180`(풀 256 의 ~70%)이
++> 선언돼 있고, HPA 가 `type: Pods` 로 `gateway_bedrock_executor_inflight`
++> 파드 평균을 읽습니다(gateway → OTLP → otel-collector `k8sattributes` →
++> Prometheus → prometheus-adapter `rules.custom` → `custom.metrics.k8s.io`).
++> 체인 상세와 문제 진단 순서는
++> [observability/README.md](../../deployment/observability/README.md#executor-포화-메트릭--hpa-custommetricsk8sio) 참조.
++> 관측 스택을 배포하지 않은 클러스터에서는 이 타깃이 `<unknown>` 으로 남아
++> 사실상 CPU-HPA 만 동작합니다 — 스케일 다운 방향은 minReplicas 가 막습니다.
++
+ > **`gen/<env>/eks/values.yaml` 은 생성물입니다 — 직접 고치지 마세요.**
+ > 기존 `values-eks-fargate-<env>.yaml` 도 그대로 둡니다 — 우리 오버레이가
+ > 마지막 레이어라서 필요한 키만 덮어씁니다.
+diff --git a/projects/awsome-ai-gateway/docs/us-llm-gateway/README.md b/projects/awsome-ai-gateway/docs/us-llm-gateway/README.md
+index e2adfb5a..adc7a5e3 100644
+--- a/projects/awsome-ai-gateway/docs/us-llm-gateway/README.md
++++ b/projects/awsome-ai-gateway/docs/us-llm-gateway/README.md
+@@ -37,7 +37,7 @@
+ **신규 설치에서 각 `US-NN` 은** — 자세한 설명은 [install-overview.md §1](install-overview.md#1-신규-설치와-us-nn)
+ 
+ - **이미 포함 (따로 안 함)**: `US-03`·`04`·`05`·`10`·`11`·`13`·`16`·`17`·`18`
+-- **설치 뒤 따로**: `US-12`(관리 화면 Cognito 로그인) — 운영(`US-08`)은 사실상 필수 · `US-20` 의 선택 기능 2개(본문 로깅 · 알림 메일) · `US-21`(policy-helper, 선택)
++- **설치 뒤 따로**: `US-12`(관리 화면 Cognito 로그인) — 운영(`US-08`)은 사실상 필수 · `US-15`(VK 수명 24시간, 선택) · `US-20` 의 선택 기능 2개(본문 로깅 · 알림 메일) · `US-21`(policy-helper, 선택)
+ - **둘 중 하나 고르기**: 직원 PC 를 수동 설치 ↔ 설치 파일(`US-14` Claude Code · `US-09` Cowork)
+ - **POC 에서 선택**: `US-06`(https) · `US-07`(admin internal) · `US-02` 는 기존 배포 전용
+ 
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/src/app/observability/_setup.py b/projects/awsome-ai-gateway/gateway-proxy/src/app/observability/_setup.py
+index 98388e7d..1f0052e8 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/src/app/observability/_setup.py
++++ b/projects/awsome-ai-gateway/gateway-proxy/src/app/observability/_setup.py
+@@ -1,5 +1,7 @@
+ # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
+ 
++import os
++
+ from opentelemetry import metrics, trace
+ from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
+ from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
+@@ -22,6 +24,15 @@ def init_otel(settings: Settings) -> None:
+         {
+             "service.name": settings.otel_service_name,
+             "service.version": settings.app_version,
++            # uvicorn 멀티워커: 워커 2개가 동일 레이블셋으로 remote_write 하면
++            # 시리즈가 1개로 붕괴해 마지막 writer 값만 남는다(실측:
++            # gateway_active_connections count=1). pod-pid 조합으로 워커별
++            # 시리즈를 갈라 sum by (pod) 가 파드 총량을 맞게 한다 —
++            # executor inflight 가 custom-metric HPA 신호로 쓰이므로 정확도가
++            # 곧 스케일링 정확도다. HOSTNAME 은 k8s 가 파드명으로 채운다.
++            "service.instance.id": (
++                f"{os.environ.get('HOSTNAME', 'local')}-{os.getpid()}"
++            ),
+         }
+     )
+ 
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_deduct.lua b/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_deduct.lua
+index 6afc009d..6c588d94 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_deduct.lua
++++ b/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_deduct.lua
+@@ -13,6 +13,7 @@
+ 
+ local usage_key = KEYS[1]
+ local config_key = KEYS[2]
++local dedup_key = KEYS[3]  -- <usage_key>:ded:{request_id} — 재실행 감지용 (선택)
+ local cost = tonumber(ARGV[1])
+ 
+ local config_raw = redis.call('GET', config_key)
+@@ -33,6 +34,23 @@ if config_raw then
+     end
+ end
+ 
++-- request_id 멱등 재생 가드: 같은 요청의 차감이 이미 적용돼 있으면
++-- (클라이언트 레벨 재시도가 응답 단절 뒤 eval 을 재전송한 경우) 이중 차감
++-- 없이 현재 상태만 반환한다. threshold_triggered 는 재생하지 않는다 —
++-- 첫 실행에서 이미 교차 이벤트가 발행됐으므로 재발행은 중복 알림이다.
++if dedup_key and dedup_key ~= '' then
++    if redis.call('EXISTS', dedup_key) == 1 then
++        local used_now = tonumber(redis.call('GET', usage_key) or '0')
++        return cjson.encode({
++            new_used = used_now,
++            remaining = limit - used_now,
++            threshold_triggered = cjson.null,
++            app_clients = app_clients,
++            dedup_hit = true,
++        })
++    end
++end
++
+ local used = tonumber(redis.call('GET', usage_key) or '0')
+ local new_used = used + cost
+ 
+@@ -50,6 +68,14 @@ if usage_existed == 0 then
+     redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
+ end
+ 
++-- dedup 마커는 차감 쓰기가 끝난 뒤에 세운다 — 스크립트 중간 크래시가
++-- "마커만 있고 차감은 없는" 상태를 만들면 재실행이 조용히 스킵해 영구
++-- 과소계상이 되기 때문이다. TTL 4h: 재시도/재전송 창보다 충분히 길고
++-- 키 수명은 요청 주기로 한정된다.
++if dedup_key and dedup_key ~= '' then
++    redis.call('SET', dedup_key, '1', 'EX', 14400)
++end
++
+ -- 임계값 교차 체크 — **가장 높은** 교차값을 반환한다.
+ -- 옛 코드는 첫 교차에서 break 했는데, 한 요청이 75%→105% 처럼 여러 임계값을
+ -- 건너면 80 만 보고되고 90/100 은 이후 요청에서도 교차로 인식되지 않아
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_reserve.lua b/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_reserve.lua
+index 2f3c65cf..449f3d9d 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_reserve.lua
++++ b/projects/awsome-ai-gateway/gateway-proxy/src/app/redis_scripts/budget_reserve.lua
+@@ -54,6 +54,28 @@ local function reply(allowed, reserved, reason, used, limit, config_present)
+     })
+ end
+ 
++-- request_id 멱등 재생 가드: 이 요청의 마커가 이미 있으면 예약은 커밋된
++-- 상태다 — 클라이언트 레벨 재시도(응답 단절 후 eval 재전송, retry_on_error)
++-- 가 같은 request_id 를 다시 보내도 카운터를 이중으로 올리지 않는다.
++-- 응답은 커밋 시점과 같은 allowed/reserved=true 로 재생해 호출자의
++-- 롤백 계약(committed 디스크립터 등록)을 유지한다. limit 은 재계산하지
++-- 않는다 — 호출자의 분기는 allowed/reserved/config_present 만 본다.
++-- 마커 부재시에만 아래로 진행해 실제 쓰기를 하므로, 중간 크래시로 마커가
++-- 없이 끝난 재실행은 예외 경로(환불/lost 센티넬)로 흘러 조용한 과소계상
++-- 방향이 아니라 복구 가능한 방향으로 어긋난다.
++if redis.call('EXISTS', marker_key) == 1 then
++    return cjson.encode({
++        allowed = true,
++        reserved = true,
++        reason = cjson.null,
++        used_usd = tonumber(redis.call('GET', usage_key) or '0'),
++        limit_usd = 0,
++        scope = scope_label,
++        config_present = true,
++        dedup_hit = true,
++    })
++end
++
+ local cfg_raw = redis.call('GET', config_key)
+ if not cfg_raw and ARGV[3] and ARGV[3] ~= '' then
+     cfg_raw = ARGV[3]
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/src/app/services/cost_recorder.py b/projects/awsome-ai-gateway/gateway-proxy/src/app/services/cost_recorder.py
+index 82a05265..227c5c1b 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/src/app/services/cost_recorder.py
++++ b/projects/awsome-ai-gateway/gateway-proxy/src/app/services/cost_recorder.py
+@@ -487,9 +487,12 @@ class CostRecorder:
+                     raw = await call_with_transient_retry(
+                         redis.eval,
+                         LuaScriptLoader.get("budget_deduct"),
+-                        2,
++                        3,
+                         user_usage_key,
+                         user_config_key,
++                        # request_id dedup 키 — 같은 요청의 재전송된 eval 이
++                        # 서버 실행 후에 도착해도 이중 차감하지 않는다.
++                        f"{user_usage_key}:ded:{request_id}",
+                         str(cost_usd),
+                         user_fallback,
+                         idempotent=False,
+@@ -541,9 +544,10 @@ class CostRecorder:
+                         team_raw = await call_with_transient_retry(
+                             redis.eval,
+                             LuaScriptLoader.get("budget_deduct"),
+-                            2,
++                            3,
+                             team_usage_key,
+                             team_config_key,
++                            f"{team_usage_key}:ded:{request_id}",
+                             str(cost_usd),
+                             idempotent=False,
+                         )
+@@ -629,7 +633,9 @@ class CostRecorder:
+                         await call_with_transient_retry(
+                             redis.eval,
+                             LuaScriptLoader.get("budget_deduct"),
+-                            2, client_usage_key, client_config_key, str(cost_usd),
++                            3, client_usage_key, client_config_key,
++                            f"{client_usage_key}:ded:{request_id}",
++                            str(cost_usd),
+                             idempotent=False,
+                         )
+                 except Exception:
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_cost_recorder.py b/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_cost_recorder.py
+index 69103edb..729fb284 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_cost_recorder.py
++++ b/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_cost_recorder.py
+@@ -501,3 +501,46 @@ def test_calculate_cost_5m_default(model_config_bedrock):
+     )
+     cost = calculate_cost(usage, model_config_bedrock)
+     assert cost == Decimal("0.003750")
++
++
++@pytest.mark.asyncio
++async def test_finalize_passes_request_id_dedup_key(
++    mock_redis, auth_context_vk, model_config_bedrock
++):
++    """budget_deduct eval이 request_id dedup 키를 3번째 KEYS로 받는다 —
++    클라이언트 레벨 재시도가 응답 단절 뒤 같은 eval을 재전송해도 서버 측이
++    이중 차감하지 않는다."""
++    from app.services.lua_loader import LuaScriptLoader
++
++    LuaScriptLoader._scripts["budget_deduct"] = "-- mock"
++
++    mock_redis.eval = AsyncMock(
++        return_value=b'{"new_used":1.0,"remaining":99.0,"threshold_triggered":null}'
++    )
++    mock_redis.xadd = AsyncMock()
++
++    recorder = CostRecorder()
++    usage = TokenUsage(input_tokens=500, output_tokens=300, total_tokens=800)
++
++    await recorder.finalize(
++        redis=mock_redis,
++        auth_context=auth_context_vk,
++        model_config=model_config_bedrock,
++        usage=usage,
++        request_id="req-dedup",
++        is_stream=False,
++        duration_ms=100,
++    )
++
++    deduct_calls = [
++        c for c in mock_redis.eval.call_args_list if c.args[0] == "-- mock"
++    ]
++    assert deduct_calls, "budget_deduct eval 호출 없음"
++    for c in deduct_calls:
++        assert c.args[1] == 3                       # numkeys
++        usage_key = c.args[2]
++        dedup_key = c.args[4]
++        assert dedup_key == f"{usage_key}:ded:req-dedup"
++        # 같은 {} hash tag — Redis Cluster에서 같은 슬롯 (eval 제약)
++        tag = lambda k: k.split("{")[1].split("}")[0]
++        assert tag(dedup_key) == tag(usage_key)
+diff --git a/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_lua_scripts.py b/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_lua_scripts.py
+index 11aceb34..2998e580 100644
+--- a/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_lua_scripts.py
++++ b/projects/awsome-ai-gateway/gateway-proxy/tests/unit/test_lua_scripts.py
+@@ -40,3 +40,23 @@ def test_scripts_contain_keys_argv():
+         script = LuaScriptLoader.get(name)
+         assert "KEYS" in script
+         assert "ARGV" in script
++
++
++def test_request_id_dedup_guards_present():
++    """비멱등 eval의 서버측 멱등 보호 — 클라이언트 레벨 재시도 잔여 노출(M1) 차단."""
++    script_dir = Path(__file__).parent.parent.parent / "src" / "app" / "redis_scripts"
++    if not script_dir.exists():
++        pytest.skip("redis_scripts directory not found")
++
++    deduct = (script_dir / "budget_deduct.lua").read_text()
++    reserve = (script_dir / "budget_reserve.lua").read_text()
++
++    # deduct: 선택적 dedup 키(KEYS[3]) — 구버전 호출(2키)과 롤링배포 양방향 호환
++    assert "KEYS[3]" in deduct
++    assert "dedup_hit" in deduct
++    # 마커는 쓰기 완료 후에 세운다 — 중간 크래시가 '마커만 있는' 상태를 만들지 않게
++    assert deduct.index("EXISTS', dedup_key") < deduct.index("INCRBYFLOAT")
++
++    # reserve: request_id 마커가 곧 멱등 키 — 재실행은 EXISTS 가드로 no-op 재생
++    assert "EXISTS', marker_key" in reserve
++    assert "dedup_hit" in reserve

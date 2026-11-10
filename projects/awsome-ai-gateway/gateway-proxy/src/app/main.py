@@ -24,7 +24,7 @@ from app.middleware.max_body_size import MaxBodySizeMiddleware
 from app.middleware.otel import HeaderInjectorMiddleware, OTelMiddleware
 from app.middleware.rate_limit import RateLimitMiddleware
 from app.observability import GatewayMetrics, init_otel, shutdown_otel
-from app.providers.bedrock_adapter import BedrockAdapter
+from app.providers.bedrock_adapter import BedrockAdapter, init_executor_metrics
 from app.providers.bedrock_openai_adapter import BedrockOpenAIAdapter
 from app.providers.mantle_adapter import MantleAdapter
 from app.providers.mantle_openai_adapter import MantleOpenAIAdapter
@@ -109,6 +109,12 @@ async def lifespan(app: FastAPI):
     # 1. OTel 초기화
     init_otel(settings)
     logger.info("otel_initialized", service=settings.otel_service_name)
+
+    # executor 계측 시리즈를 부팅 시점에 존재시킨다 — UpDownCounter 는 최초
+    # add() 전엔 export 되지 않아, 첫 Bedrock 호출 전엔 파드가 메트릭을 미보고.
+    # custom-metric HPA 에서 미보고 파드는 스케일 결정 전체(특히 스케일다운)를
+    # 멈추게 하므로, 시작 시 0 보고로 그 블록을 제거한다.
+    init_executor_metrics()
 
     # 2. Redis 클라이언트
     redis = await create_redis_client(settings)

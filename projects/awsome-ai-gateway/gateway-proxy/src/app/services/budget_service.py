@@ -931,15 +931,15 @@ class BudgetService:
         for scope, usage_key, config_key, marker_key, resvsum_key, idx_key, idx_field in scope_specs:
             fallback = user_fallback if scope == "user" else ""
             try:
-                # 비멱등(INCRBYFLOAT) — 커맨드 미전송이 확실한 MaxConnectionsError 만
-                # 재시도. TimeoutError 는 서버 실행 여부가 모호해 재시도하면
-                # 예약치 이중 적용이라 제외한다(deduct 와 같은 분류).
+                # request_id 마커 멱등 — 재실행은 EXISTS 가드가 dedup_hit 재생으로
+                # 바꾸므로 TimeoutError/ConnectionError 재시도도 안전하다.
+                # (서버 실행 후 응답만 유실된 경우도 이중 적용 없음)
                 raw = await call_with_transient_retry(
                     redis.eval,
                     script, 5,
                     usage_key, config_key, marker_key, resvsum_key, idx_key,
                     scope, est_str, fallback, marker_ttl, idx_field,
-                    idempotent=False,
+                    idempotent=True,
                 )
                 result = json.loads(raw)
             except Exception:

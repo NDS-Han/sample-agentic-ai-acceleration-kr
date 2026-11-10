@@ -5,9 +5,13 @@
 --
 -- KEYS[1] = budget:user:{<user_id>}:<period>   -- hash tag on user_id
 -- KEYS[2] = budget:config:user:{<user_id>}     -- same hash tag → same slot
+-- KEYS[3] = <usage_key>:ded:<request_id>       -- 재실행 감지 마커 (선택)
 -- ARGV[1] = cost (USD, string decimal)
 -- ARGV[2] = fallback config JSON ('' = 없음). user 키가 없을 때 팀 기본 cap D
 --           로 threshold 교차를 평가한다 (D-10: D 적용 유저도 임계값 알림).
+-- ARGV[3] = dedup 마커 TTL 초 (선택, 기본 600). 재시도 창은 클라이언트 1회 +
+--           앱 레벨 재시도로 수 초 — 600s 는 넉넉한 마진. 요청당 최대 3개 키
+--           (user/team/client)라 긴 TTL 은 요청률 곱으로 메모리를 먹는다.
 --
 -- Returns: JSON {new_used, remaining, threshold_triggered}
 
@@ -15,6 +19,7 @@ local usage_key = KEYS[1]
 local config_key = KEYS[2]
 local dedup_key = KEYS[3]  -- <usage_key>:ded:{request_id} — 재실행 감지용 (선택)
 local cost = tonumber(ARGV[1])
+local dedup_ttl = tonumber(ARGV[3]) or 600
 
 local config_raw = redis.call('GET', config_key)
 if not config_raw and ARGV[2] and ARGV[2] ~= '' then
@@ -36,15 +41,20 @@ end
 
 -- request_id 멱등 재생 가드: 같은 요청의 차감이 이미 적용돼 있으면
 -- (클라이언트 레벨 재시도가 응답 단절 뒤 eval 을 재전송한 경우) 이중 차감
--- 없이 현재 상태만 반환한다. threshold_triggered 는 재생하지 않는다 —
--- 첫 실행에서 이미 교차 이벤트가 발행됐으므로 재발행은 중복 알림이다.
+-- 없이 저장된 첫 실행의 결과를 재생한다. threshold_triggered 도 마커에 담긴
+-- 값을 돌려준다 — 알림은 Python 이 eval 응답을 보고 발행하므로, 첫 응답이
+-- 유실돼 재실행된 거라면 교차 이벤트는 아직 발행되지 않았다. 재생은 중복이
+-- 아니라 영구 누락 방지다(재전송은 응답 유실에서만 발생).
+-- 구버전 마커('1')에는 교차 결과가 없어 null 을 유지한다(기존 동작).
 if dedup_key and dedup_key ~= '' then
-    if redis.call('EXISTS', dedup_key) == 1 then
+    local replay = redis.call('GET', dedup_key)
+    if replay then
         local used_now = tonumber(redis.call('GET', usage_key) or '0')
+        local tv = tonumber(string.match(replay, '^t:([%d.]+)$') or '') or 0
         return cjson.encode({
             new_used = used_now,
             remaining = limit - used_now,
-            threshold_triggered = cjson.null,
+            threshold_triggered = (tv > 0) and tv or cjson.null,
             app_clients = app_clients,
             dedup_hit = true,
         })
@@ -68,23 +78,15 @@ if usage_existed == 0 then
     redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
 end
 
--- dedup 마커는 차감 쓰기가 끝난 뒤에 세운다 — 스크립트 중간 크래시가
--- "마커만 있고 차감은 없는" 상태를 만들면 재실행이 조용히 스킵해 영구
--- 과소계상이 되기 때문이다. TTL 4h: 재시도/재전송 창보다 충분히 길고
--- 키 수명은 요청 주기로 한정된다.
-if dedup_key and dedup_key ~= '' then
-    redis.call('SET', dedup_key, '1', 'EX', 14400)
-end
-
 -- 임계값 교차 체크 — **가장 높은** 교차값을 반환한다.
 -- 옛 코드는 첫 교차에서 break 했는데, 한 요청이 75%→105% 처럼 여러 임계값을
 -- 건너면 80 만 보고되고 90/100 은 이후 요청에서도 교차로 인식되지 않아
 -- "예산 100% 도달" 알림이 영구 누락됐다(알림은 교차 이벤트당 1회 발송).
 local triggered = cjson.null
+local highest = nil
 if limit > 0 then
     local old_pct = (used / limit) * 100
     local new_pct = (new_used / limit) * 100
-    local highest = nil
     for _, t in ipairs(thresholds) do
         if old_pct < t and new_pct >= t then
             if highest == nil or t > highest then
@@ -95,6 +97,16 @@ if limit > 0 then
     if highest ~= nil then
         triggered = highest
     end
+end
+
+-- dedup 마커는 차감 + 교차 계산이 끝난 뒤에 세운다. Redis 7 에서 스크립트
+-- 효과는 MULTI/EXEC 처럼 원자 복제돼 서버 크래시가 반쪽 적용을 남기지는
+-- 않지만, 스크립트 중간의 런타임 오류(OOM 등)는 그 전까지의 쓰기를 남긴다 —
+-- 마커를 마지막에 세우면 그 경우 '차감은 됐는데 마커 없음' 상태가 돼 예외
+-- 경로(lost_amt/suspect 복구)로 올바르게 흐른다. 값은 't:<highest>' —
+-- 재생 시 교차 알림을 재발행하기 위함(없으면 't:0').
+if dedup_key and dedup_key ~= '' then
+    redis.call('SET', dedup_key, 't:' .. tostring(highest or 0), 'EX', dedup_ttl)
 end
 
 return cjson.encode({

@@ -57,9 +57,11 @@ otel-collector  ── k8sattributes: 송신 podIP → k8s.pod.name/k8s.namespac
        │          + ClusterRole otel-collector-k8sattributes (pods get/list/watch)
        │ prometheusremotewrite → kps-prometheus
        ▼
-prometheus-adapter ── rules.custom: seriesQuery + sum by (pod)
-       │             (워커 2개는 service.instance.id=pod-pid 로 구분돼
-       │               합산하면 파드 총량 — 구버전 이미지는 붕괴되어 과소집계 주의)
+prometheus-adapter ── rules.custom: seriesQuery + 집계
+       │             inflight/queue_depth: **max by (pod)** — 워커별 시리즈
+       │               (service.instance.id=pod-pid) 중 가장 뜨거운 워커.
+       │               워커별 풀(128)이 진짜 한계라 파드 합계는 불균등 분배의
+       │               큐잉을 숨긴다. active_connections: sum by (pod).
        ▼
 custom.metrics.k8s.io/v1beta1  →  HPA `type: Pods` averageValue
   (External 이 아니라 Pods — External 은 external.metrics.k8s.io 별도 API+규칙이
@@ -67,18 +69,28 @@ custom.metrics.k8s.io/v1beta1  →  HPA `type: Pods` averageValue
 ```
 
 - HPA 쪽 선언: `gatewayProxy.autoscaling.executorInflightTarget` (기본 주석처리,
-  풀의 ~70% 권장 → 256 풀이면 180). values-eks-fargate-{dev,prod}.yaml 에 180 설정.
+  **워커당 풀** BEDROCK_THREAD_POOL_SIZE 의 ~70% 권장 → 128 이면 90).
+  values-eks-fargate-{dev,prod}.yaml 에 90 설정. 0 이하/빈 값은 렌더 실패,
+  sidecar otel 모드와의 조합도 렌더 실패(pod 레이블 미보장).
 - 스케일 판정: `avg(inflight) > target → desired = ceil(replicas × avg/target)`.
   dev 에서 inflight=250 유지 시 1→2 스케일아웃 실측 확인.
 - 전체 파이프라인 중 어디가 끊겼는지 볼 때: `kubectl get --raw
   /apis/custom.metrics.k8s.io/v1beta1` 에 메트릭이 있으면 adapter 까지는 정상,
   없으면 collector(k8sattributes)/remote-write/규칙 순으로 본다.
 - ⚠️ 멀티워커 충돌: 같은 파드의 워커 2개가 동일 레이블셋으로 remote_write 하면
-  시리즈가 붕괴해 과소집계된다 — `service.instance.id={hostname}-{pid}`
-  (gateway ≥이번 변경 태그) 가 각 워커 시리즈를 갈라 sum 이 정확해진다.
-  구버전 이미지에선 inflight 가 ~절반으로 읽혀 스케일이 늦을 수 있다.
-- ⚠️ lazy 생성: executor 메트릭은 첫 bedrock 호출 시점에 만들어진다 —
-  유휴 dev 에서 HPA 가 `<unknown>` 으로 보이는 건 결함이 아니라 데이터 부재.
+  Prometheus 가 out-of-order/중복 샘플을 거부해 **어느 워커 값이 남을지 불규칙**
+  하다(과소집계는 랜덤하게 절반~전량 사이). `service.instance.id={hostname}-{pid}`
+  (gateway ≥이번 변경 태그) 가 워커별 시리즈를 갈라 정확해진다.
+  구버전 이미지에선 inflight 가 노이즈를 포함해 과소집계돼 스케일이 늦는다.
+- ⚠️ stale 시리즈: 워커 재시작(pid 변경)으로 죽은 워커의 마지막 샘플이
+  remote write 의 staleness 마커 부재로 최대 5분 살아있을 수 있다 —
+  adapter metricsQuery 의 `last_over_time(…[2m])` 이 ~2분으로 줄여
+  허위 스케일아웃을 막는다.
+- ✅ lazy 생성 해소: `init_executor_metrics()` 가 lifespan 에서 계측기를
+  생성하고 `add(0)` 으로 시리즈를 부팅 시점에 보고한다 — **미보고 파드가
+  있으면 HPA 가 스케일 결정 전체(특히 스케일다운)를 건너뛰므로** 단순
+  "데이터 부재" 가 아니라 배포 구성의 필수 조건이다. 관측 스택 미배포
+  클러스터에선 타깃이 `<unknown>` 으로 남고 CPU-HPA 만 동작한다.
 
 ## 설치
 

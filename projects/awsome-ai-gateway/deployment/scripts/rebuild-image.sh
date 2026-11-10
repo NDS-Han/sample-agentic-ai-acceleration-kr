@@ -114,7 +114,7 @@ if [ "${DEPLOY:-0}" = "1" ]; then
 
   # ---- helm 버전 preflight (R24-N13r2) ----
   # --reset-then-reuse-values 는 Helm ≥3.14 전용. push 후에야 flag 에러로 죽으면
-  # 재실행이 "동일 태그 존재" 가드에 막히고 수동 명령도 안 나온다 — 미리 검사.
+  # DEPLOY=0 재실행이 '동일 태그 존재' 스킵으로 명령 출력 없이 끝난다 — 미리 검사.
   HELM_MAJOR=$(helm version --template '{{.Version}}' 2>/dev/null \
     | sed -E 's/^v([0-9]+)\.([0-9]+).*/\1 \2/' || true)
   set -- $HELM_MAJOR
@@ -142,14 +142,23 @@ echo "  helm set: ${SET_ARGS[*]}"
 echo
 
 # ---- ECR 에 이미 있는 태그는 건너뛴다 (태그가 그대로 = 코드가 그대로) ----
+# DEPLOY=1 이면 빌드만 스킵하고 helm 은 진행한다 — dev→prod 승격처럼 이미지는
+# 있는데 이 클러스터에 아직 배포되지 않은 경우가 정상 흐름이라, 스킵에서
+# 종료하면 "성공했는데 배포는 안 된" 상태가 된다.
+SKIP_BUILD=0
 if [ "$FORCE" -eq 0 ]; then
   if out=$(aws ecr describe-images --repository-name "llm-gateway/$SVC" \
              --image-ids imageTag="$TAG" \
              --query 'imageDetails[0].imagePushedAt' --output text 2>&1); then
-    echo "⏭️  건너뜀 — ECR 에 이미 있음: $SVC:$TAG (push $out)"
-    echo "    태그가 그대로라 다시 빌드하지 않는다(옛 이미지를 덮어쓰지 않음)."
-    echo "    태그는 git HEAD SHA — 코드가 바뀌었으면 커밋해 새 SHA 를 만들거나 TAG=<명시값> 을 지정한다. 꼭 덮어써야 하면 --force."
-    exit 0
+    echo "⏭️  빌드 건너뜀 — ECR 에 이미 있음: $SVC:$TAG (push $out)"
+    if [ "${DEPLOY:-0}" = "1" ]; then
+      echo "    DEPLOY=1 — push 없이 이미지 지정만 하고 helm 업그레이드로 진행한다."
+      SKIP_BUILD=1
+    else
+      echo "    태그가 그대로라 다시 빌드하지 않는다(옛 이미지를 덮어쓰지 않음)."
+      echo "    태그는 git HEAD SHA — 코드가 바뀌었으면 커밋해 새 SHA 를 만들거나 TAG=<명시값> 을 지정한다. 꼭 덮어써야 하면 --force."
+      exit 0
+    fi
   elif [[ "$out" != *ImageNotFoundException* ]]; then
     echo "❌ ECR 조회 실패 — 이 태그가 이미 있는지 알 수 없어 멈춘다(덮어쓰기 방지):"
     echo "$out"
@@ -157,10 +166,12 @@ if [ "$FORCE" -eq 0 ]; then
   fi
 fi
 
-aws ecr get-login-password | docker login --username AWS --password-stdin \
-  "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com" >/dev/null
-docker build --platform linux/amd64 -t "$ECR_BASE/$SVC:$TAG" "$CTX"
-docker push "$ECR_BASE/$SVC:$TAG"
+if [ "$SKIP_BUILD" -eq 0 ]; then
+  aws ecr get-login-password | docker login --username AWS --password-stdin \
+    "$ACCOUNT.dkr.ecr.$AWS_REGION.amazonaws.com" >/dev/null
+  docker build --platform linux/amd64 -t "$ECR_BASE/$SVC:$TAG" "$CTX"
+  docker push "$ECR_BASE/$SVC:$TAG"
+fi
 
 # --reuse-values 는 저장 values 를 그대로 쓴다 — 두 가지 함정이 있다.
 #   1) install-eks.sh 의 NEXTAUTH 패치가 남긴 `migration.enabled=false` 도 그대로라,

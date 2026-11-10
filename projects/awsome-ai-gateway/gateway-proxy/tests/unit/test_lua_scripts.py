@@ -54,9 +54,16 @@ def test_request_id_dedup_guards_present():
     # deduct: 선택적 dedup 키(KEYS[3]) — 구버전 호출(2키)과 롤링배포 양방향 호환
     assert "KEYS[3]" in deduct
     assert "dedup_hit" in deduct
-    # 마커는 쓰기 완료 후에 세운다 — 중간 크래시가 '마커만 있는' 상태를 만들지 않게
-    assert deduct.index("EXISTS', dedup_key") < deduct.index("INCRBYFLOAT")
+    # 재생 가드(GET)는 차감 쓰기 전에, 마커 SET은 차감 쓰기 후에 와야 한다 —
+    # 순서가 뒤집히면 스크립트 중간 런타임 오류가 '마커만 있고 차감 없는'
+    # 상태를 만들어 재실행이 조용히 스킵된다(영구 과소계상).
+    assert deduct.index("GET', dedup_key") < deduct.index("INCRBYFLOAT")
+    assert deduct.index("SET', dedup_key") > deduct.index("INCRBYFLOAT")
+    # 마커 값에 첫 실행의 threshold 교차 결과를 담는다 — 알림은 eval 응답에서
+    # Python 이 발행하므로 응답 유실 재실행에서도 교차 이벤트가 살아있어야 한다.
+    assert "'t:'" in deduct and "^t:" in deduct
 
-    # reserve: request_id 마커가 곧 멱등 키 — 재실행은 EXISTS 가드로 no-op 재생
+    # reserve: request_id 마커가 곧 멱등 키 — 재실행 가드가 쓰기 전에 와야 한다
     assert "EXISTS', marker_key" in reserve
     assert "dedup_hit" in reserve
+    assert reserve.index("EXISTS', marker_key") < reserve.index("INCRBYFLOAT")

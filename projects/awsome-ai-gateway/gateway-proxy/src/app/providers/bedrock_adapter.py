@@ -61,6 +61,19 @@ def _executor_metrics():
     return _bedrock_inflight_counter
 
 
+def init_executor_metrics() -> None:
+    """시작 시점에 계측기를 생성하고 inflight 시리즈를 0 으로 보고한다.
+
+    UpDownCounter 는 최초 ``add()`` 전까지 데이터 포인트를 export 하지 않아
+    첫 Bedrock 호출 전엔 시리즈 자체가 없다. custom-metric HPA 에선 미보고
+    파드가 있으면 유효한 메트릭이 스케일다운을 지시해도 실패 메트릭 하나가
+    스케일 결정 전체를 건너뛰게 한다(autoscaling/v2) — 부팅 시점에 시리즈를
+    존재시켜 0 을 보고하게 해 그 블록을 없앤다. lifespan 에서 init_otel 직후
+    호출한다(meter 가 실구현이 된 뒤여야 한다).
+    """
+    _executor_metrics().add(0)
+
+
 async def _run_in_bedrock_executor(fn):
     """`run_in_executor(_bedrock_executor, fn)` + in-flight 계측.
 

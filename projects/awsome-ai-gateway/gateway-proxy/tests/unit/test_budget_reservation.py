@@ -96,9 +96,10 @@ async def test_reserve_retries_max_connections_burst(mock_redis):
 
 
 @pytest.mark.asyncio
-async def test_reserve_no_retry_on_ambiguous_timeout(mock_redis):
-    """reserve 는 INCRBYFLOAT 비멱등 — TimeoutError 는 서버 실행 여부가 모호해
-    재시도하면 예약치 이중 적용. 한 번만 호출하고 fail-open 으로 둔다."""
+async def test_reserve_timeout_retries_then_fail_open(mock_redis):
+    """reserve eval 은 request_id 마커로 서버측 멱등 — TimeoutError(서버 실행
+    모호)도 재시도한다. 재전송은 Lua 의 EXISTS 가드가 dedup_hit 재생으로
+    바꾸므로 이중 적용이 없다. 전부 실패하면 여전히 fail-open."""
     from redis.exceptions import TimeoutError as RedisTimeoutError
 
     calls = []
@@ -117,7 +118,34 @@ async def test_reserve_no_retry_on_ambiguous_timeout(mock_redis):
 
     assert committed == []
     reserve_calls = [c for c in calls if c[0] == "-- reserve"]
-    assert len(reserve_calls) == 1
+    # 모호한 타임아웃도 재시도한다 — 첫 스코프(team)가 3회 시도 후 실패하면
+    # 루프가 중단돼 user 는 호출조차 안 한다(fail-open 유지).
+    assert len(reserve_calls) == 3
+    assert all(c[7] == "team" for c in reserve_calls)
+
+
+@pytest.mark.asyncio
+async def test_reserve_timeout_retry_succeeds_and_reuses_marker(mock_redis):
+    """타임아웃 뒤 재시도 성공 시 예약은 커밋된다 — 서버에서 이미 실행됐던
+    재전송은 Lua 가 dedup_hit 재생으로 돌려주므로 커밋 디스크립터 계약 유지."""
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    calls = []
+
+    async def _side(*args, **_kw):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RedisTimeoutError("ambiguous timeout")
+        return _resv_resp(scope=args[7])
+
+    mock_redis.eval = AsyncMock(side_effect=_side)
+    mock_redis.exists = AsyncMock(return_value=True)
+
+    svc = BudgetService()
+    committed = await svc.reserve_budget(
+        mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "req-1",
+    )
+    assert [s["scope"] for s in committed] == ["team", "user"]
 
 
 @pytest.mark.asyncio

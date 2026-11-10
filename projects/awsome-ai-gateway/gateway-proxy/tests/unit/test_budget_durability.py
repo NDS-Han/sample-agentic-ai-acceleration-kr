@@ -47,9 +47,11 @@ async def test_retry_recovers_max_connections_burst():
 
 
 @pytest.mark.asyncio
-async def test_no_retry_timeout_for_non_idempotent_deduct():
-    """deduct(INCRBYFLOAT)는 비멱등 — TimeoutError 는 실행 여부가 모호해
-    재시도하면 이중차감. 한 번만 호출하고 바로 올린다."""
+async def test_no_retry_timeout_for_non_idempotent():
+    """idempotent=False 분류(마커 없는 쓰기)는 TimeoutError 를 재시도하지
+    않는다 — 서버 실행 여부가 모호해 재시도하면 이중 적용. 한 번만 호출하고
+    바로 올린다. (reserve/deduct 호출부는 마커 멱등이라 idempotent=True 로
+    옮겨졌다 — 이 분기는 남은 비멱등 호출을 위한 계약이다.)"""
     redis = AsyncMock()
     redis.eval = AsyncMock(side_effect=RedisTimeoutError("timeout"))
 

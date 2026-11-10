@@ -198,14 +198,17 @@ bedrock_thread_pool_size}`, `redis.pool_size` — 지정한 키만 밴드 위에
 > **CPU-HPA 만으로는 포화를 못 봅니다.** claude-code SSE 는 스트림 수명 내내
 > bedrock 스레드 슬롯을 블로킹 점유해 CPU 가 오르지 않습니다 — 슬롯이 고갈돼도
 > HPA 는 "정상"으로 읽습니다. 그래서 env values 에
-> `gatewayProxy.autoscaling.executorInflightTarget: 180`(풀 256 의 ~70%)이
-> 선언돼 있고, HPA 가 `type: Pods` 로 `gateway_bedrock_executor_inflight`
-> 파드 평균을 읽습니다(gateway → OTLP → otel-collector `k8sattributes` →
-> Prometheus → prometheus-adapter `rules.custom` → `custom.metrics.k8s.io`).
+> `gatewayProxy.autoscaling.executorInflightTarget: 90`(워커당 풀 128 의 ~70%)이
+> 선언돼 있고, HPA 가 `type: Pods` 로 `gateway_bedrock_executor_inflight`의
+> **최대 워커값** 평균을 읽습니다(워커별 풀이 한계라 합계 평균은 불균등 분배의
+> 큐잉을 숨깁니다). 체인: gateway → OTLP → otel-collector `k8sattributes` →
+> Prometheus → prometheus-adapter `rules.custom` → `custom.metrics.k8s.io`.
 > 체인 상세와 문제 진단 순서는
 > [observability/README.md](../../deployment/observability/README.md#executor-포화-메트릭--hpa-custommetricsk8sio) 참조.
 > 관측 스택을 배포하지 않은 클러스터에서는 이 타깃이 `<unknown>` 으로 남아
-> 사실상 CPU-HPA 만 동작합니다 — 스케일 다운 방향은 minReplicas 가 막습니다.
+> 사실상 CPU-HPA 만 동작합니다. ※ 메트릭 미보고 파드가 있으면 HPA 가
+> 스케일 결정 전체를 멈추므로(스케일다운 포함), gateway 이미지는
+> `init_executor_metrics()` 가 부팅 시 시리즈를 보고하는 버전이어야 합니다.
 
 > **`gen/<env>/eks/values.yaml` 은 생성물입니다 — 직접 고치지 마세요.**
 > 기존 `values-eks-fargate-<env>.yaml` 도 그대로 둡니다 — 우리 오버레이가

@@ -28,5 +28,7 @@ output "bucket_arn" {
 
 output "kms_key_arn" {
   description = "버킷 SSE-KMS 키 ARN — 본문 읽기 주체(admin-api)의 kms:Decrypt 정책용. SSE-S3/비활성 시 \"\""
-  value       = var.kms_key_arn
+  # 변수 패스스루지만 나머지 output 과 같은 ""-폴백 계약을 유지한다 —
+  # 호출자가 null 을 넘겨도 "" 로 수렴시킨다(위 주석: null 은 경로마다 다르게 다뤄진다).
+  value       = try(coalesce(var.kms_key_arn, ""), "")
 }

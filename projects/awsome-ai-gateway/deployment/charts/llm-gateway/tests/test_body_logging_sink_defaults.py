@@ -100,7 +100,10 @@ def test_every_resource_is_gated_on_enabled():
 def test_outputs_do_not_error_when_disabled():
     """비활성 시 output 이 인덱스 참조로 죽으면 스택 전체 plan 이 실패한다."""
     outputs = _blocks(_read(MODULE / "outputs.tf"), "output")
-    assert len(outputs) == 4, f"output 이 {len(outputs)}개 — 4 를 기대"
+    # 5: stream_name/arn + bucket_name/arn + kms_key_arn (bucket_arn 은
+    # 본문 뷰어의 IRSA s3:PutObject fallback 용으로 추가됨 — 신규 output 을
+    # 넣을 때도 try() + "" 폴백 계약이 깨지면 안 되므로 개수를 단정한다)
+    assert len(outputs) == 5, f"output 이 {len(outputs)}개 — 5 를 기대"
     for name, body in outputs.items():
         assert "try(" in body, f"output {name} 이 try() 로 감싸이지 않았다"
         assert re.search(r',\s*""\s*\)', body), (

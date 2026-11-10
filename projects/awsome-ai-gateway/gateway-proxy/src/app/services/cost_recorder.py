@@ -495,7 +495,7 @@ class CostRecorder:
                         f"{user_usage_key}:ded:{request_id}",
                         str(cost_usd),
                         user_fallback,
-                        idempotent=False,
+                        idempotent=True,
                     )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")
@@ -549,7 +549,7 @@ class CostRecorder:
                             team_config_key,
                             f"{team_usage_key}:ded:{request_id}",
                             str(cost_usd),
-                            idempotent=False,
+                            idempotent=True,
                         )
                     team_result = json.loads(team_raw)
                     if team_result.get("settled") is False:
@@ -636,7 +636,7 @@ class CostRecorder:
                             3, client_usage_key, client_config_key,
                             f"{client_usage_key}:ded:{request_id}",
                             str(cost_usd),
-                            idempotent=False,
+                            idempotent=True,
                         )
                 except Exception:
                     logger.warning("client_budget_deduct_failed", client=client)

@@ -530,12 +530,22 @@ async def test_finalize_passes_request_id_dedup_key(
         request_id="req-dedup",
         is_stream=False,
         duration_ms=100,
+        client="claude-code",
     )
 
     deduct_calls = [
         c for c in mock_redis.eval.call_args_list if c.args[0] == "-- mock"
     ]
-    assert deduct_calls, "budget_deduct eval 호출 없음"
+    # user/team/client 3개 스코프 전부 dedup 키를 받아야 한다 — 예약이 없으면
+    # 각 스코프가 별도 deduct 경로를 타므로 어느 하나라도 빠지면 그 스코프는
+    # 재전송 이중 차감에 노출된다.
+    usage_keys = {c.args[2] for c in deduct_calls}
+    assert len(deduct_calls) == 3, (
+        f"deduct eval {len(deduct_calls)}회 — user/team/client 중 누락 있음"
+    )
+    assert any(":claude-code:" in k for k in usage_keys), (
+        f"client 스코프 deduct 없음: {usage_keys}"
+    )
     for c in deduct_calls:
         assert c.args[1] == 3                       # numkeys
         usage_key = c.args[2]

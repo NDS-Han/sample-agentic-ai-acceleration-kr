@@ -335,18 +335,21 @@ def _pod_metrics(hpa: dict) -> list[dict]:
     "values-eks-fargate-dev.yaml", "values-eks-fargate-prod.yaml",
 ])
 def test_hpa_executor_inflight_is_pods_metric(values: str):
-    """CPU 는 SSE 블로킹 슬롯 점유를 못 보니 executor inflight 파드 평균으로
-    스케일한다. type 은 반드시 Pods — External 은 external.metrics.k8s.io
-    별도 API 라 adapter 규칙이 서빙하는 custom.metrics.k8s.io 에서
-    <unknown> 으로 영구 멈춘다 (dev 실측으로 잡은 회귀)."""
+    """CPU 는 SSE 블로킹 슬롯 점유를 못 보니 executor inflight 로 스케일한다.
+    type 은 반드시 Pods — External 은 external.metrics.k8s.io 별도 API 라
+    adapter 규칙이 서빙하는 custom.metrics.k8s.io 에서 <unknown> 으로 영구
+    멈춘다 (dev 실측으로 잡은 회귀). 타깃은 **최대 워커** 기준 — adapter 가
+    워커별 시리즈의 pod 최대값을 서빙해 불균등 분배의 큐잉도 잡는다."""
     hpa = _hpa(_render(values), "gateway-proxy")
     pods = _pod_metrics(hpa)
     assert len(pods) == 1, f"Pods 메트릭 {len(pods)}개: {hpa['spec']['metrics']}"
     m = pods[0]["pods"]
     assert m["metric"]["name"] == "gateway_bedrock_executor_inflight"
     assert m["target"]["type"] == "AverageValue"
-    assert str(m["target"]["averageValue"]) == "180", (
-        f"averageValue={m['target']['averageValue']} — 풀 256 의 ~70% 가정과 어긋남"
+    assert str(m["target"]["averageValue"]) == "90", (
+        f"averageValue={m['target']['averageValue']} — "
+        "워커당 풀(BEDROCK_THREAD_POOL_SIZE=128)의 ~70% 가정과 어긋남. "
+        "풀을 바꿨으면 타깃도 같이 바꿔야 한다"
     )
     assert not any(me["type"] == "External" for me in hpa["spec"]["metrics"]), (
         "External 타입 잔존 — adapter 는 custom.metrics.k8s.io 를 서빙한다"
@@ -369,6 +372,31 @@ def test_hpa_executor_inflight_target_override():
     )
     m = _pod_metrics(_hpa(docs, "gateway-proxy"))[0]["pods"]
     assert str(m["target"]["averageValue"]) == "100"
+
+
+@pytest.mark.parametrize("bad", ["0", "-5"])
+def test_hpa_executor_inflight_nonpositive_fails(bad: str):
+    """0/음수 타깃은 유효하지 않은 HPA(averageValue>0 필수) — 조용히 스킵하면
+    '설정했는데 안 먹는' 함정이라 렌더 실패로 만든다."""
+    proc = subprocess.run(
+        [_helm(), "template", "safety-test", str(CHART),
+         "-f", str(CHART / "values-eks-fargate-prod.yaml"),
+         "--set", f"gatewayProxy.autoscaling.executorInflightTarget={bad}"],
+        capture_output=True, text=True)
+    assert proc.returncode != 0, f"executorInflightTarget={bad} 가 렌더를 통과했다"
+    assert "executorInflightTarget" in proc.stderr
+
+
+def test_hpa_executor_inflight_sidecar_mode_fails():
+    """sidecar otel 모드는 -otel-sidecar-config ConfigMap 이 차트에 없어
+    k8sattributes(pod 레이블)를 보장할 수 없다 — 타깃과 조합되면 렌더 실패."""
+    proc = subprocess.run(
+        [_helm(), "template", "safety-test", str(CHART),
+         "-f", str(CHART / "values-eks-fargate-prod.yaml"),
+         "--set", "observability.otel.mode=sidecar"],
+        capture_output=True, text=True)
+    assert proc.returncode != 0, "sidecar + executorInflightTarget 이 렌더를 통과했다"
+    assert "sidecar" in proc.stderr
 
 
 # --------------------------------------------------------------------------

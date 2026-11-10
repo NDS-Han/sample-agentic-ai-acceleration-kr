@@ -297,3 +297,42 @@ def test_eks_capacity_tier_sizing_overrides_single_key(tmp_path):
     asg = v["gatewayProxy"]["autoscaling"]
     assert asg["minReplicas"] == 3 and asg["maxReplicas"] == 6
     assert v["redis"]["poolSize"] == 200
+
+
+def _fake_chart_env(tmp_path, env_yaml: str):
+    """env_values_file 은 repo_root 기준으로 찾는다 — 가짜 루트에 env 파일."""
+    chart = tmp_path / "deployment" / "charts" / "llm-gateway"
+    chart.mkdir(parents=True)
+    (chart / "values-eks-fargate-dev.yaml").write_text(env_yaml)
+
+
+def test_executor_inflight_target_derived_from_sizing_pool(tmp_path):
+    """sizing 이 bedrock_thread_pool_size 를 바꾸면 HPA executor 타깃도
+    풀의 ~70% 로 파생한다 — env 의 낡은 타깃(128 풀용 90)이 pool 256 에
+    남으면 스케일 기준점이 어긋난다. env 명시값이 없을 때만."""
+    _fake_chart_env(tmp_path, (
+        "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
+        "    minReplicas: 1\n    maxReplicas: 3\n"))
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / cfg.env / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
+
+
+def test_executor_inflight_target_env_explicit_preserved(tmp_path):
+    """env values 의 명시 타깃은 운영자 소유 — sizing pool 이 바뀌어도
+    오버레이가 파생값을 얹지 않는다(helm 합성에서 env 값이 살아남는다)."""
+    _fake_chart_env(tmp_path, (
+        "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
+        "    minReplicas: 1\n    maxReplicas: 3\n"
+        "    executorInflightTarget: 42\n"))
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / cfg.env / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert "executorInflightTarget" not in v["gatewayProxy"].get("autoscaling", {})

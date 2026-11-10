@@ -34,14 +34,17 @@ async def call_with_transient_retry(
     그 외 ``ConnectionError``("Connection closed by server", reset 등)는
     서버가 커맨드를 이미 실행한 뒤 응답만 유실됐을 수 있어 비멱등 재시도는
     이중 적용이다 — 제외한다. ``TimeoutError`` 도 같은 이유로 제외한다.
-    idempotent=True(마커 멱등 eval·읽기 전용 명령): ``TimeoutError``·
-    ``ConnectionError`` 도 재시도한다 — 멱등성/무상태성이 이중 적용을 차단한다.
+    idempotent=True(request_id 마커 멱등 eval·읽기 전용 명령):
+    ``TimeoutError``·``ConnectionError`` 도 재시도한다 — 서버측 멱등
+    마커(budget_reserve 의 pending marker, budget_deduct 의 ``:ded:``
+    키)나 무상태성이 이중 적용을 차단한다. reserve/deduct eval 호출부는
+    이제 이 분류다 — 응답 유실 재시도는 Lua 가 ``dedup_hit`` 재생으로
+    변환하므로 lost_amt 복구 경로로 빠지지 않는다.
 
-    ⚠️ 잔여 노출: 클라이언트 레벨 ``retry_on_error=[TimeoutError,
-    ConnectionError]``(redis_client.py, retries=1)가 eval 을 포함한 모든
-    명령을 1회 재실행하므로, 비멱등 연산의 이중 적용 창은 여기서 좁혀도
-    클라이언트 재시도 1회분은 남는다. 완전 제거는 Lua 에 request_id 멱등
-    마커를 두는 쪽(후속 과제)이다.
+    클라이언트 레벨 ``retry_on_error=[TimeoutError, ConnectionError]``
+    (redis_client.py, retries=1)의 1회 재실행도 reserve/deduct 에
+    대해서는 같은 Lua 멱등 마커가 흡수한다 — 비멱등 호출부만 이 분류를
+    유지하면 된다.
     """
     retryable = (
         (RedisConnectionError, RedisTimeoutError)

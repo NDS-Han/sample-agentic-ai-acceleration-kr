@@ -141,3 +141,24 @@ async def test_bedrock_stream_gen_propagates_iteration_error():
             collected.append(c)
 
     assert collected == [b'{"type":"message_start"}']
+
+
+def test_init_executor_metrics_records_zero():
+    """UpDownCounter 는 최초 add() 전까지 데이터 포인트를 export 하지 않는다 —
+    부팅 시 add(0)으로 시리즈를 존재시켜야 custom-metric HPA 가 미보고 파드
+    때문에 스케일 결정(특히 스케일다운)을 건너뛰지 않는다."""
+    import app.providers.bedrock_adapter as ba
+
+    counter = MagicMock()
+    with patch.object(ba, "_executor_metrics", return_value=counter):
+        ba.init_executor_metrics()
+    counter.add.assert_called_once_with(0)
+
+
+def test_init_executor_metrics_populates_instruments():
+    """init_executor_metrics 가 inflight 카운터 + queue gauge 를 실제로 생성."""
+    import app.providers.bedrock_adapter as ba
+
+    ba._bedrock_inflight_counter = None
+    ba.init_executor_metrics()
+    assert ba._bedrock_inflight_counter is not None

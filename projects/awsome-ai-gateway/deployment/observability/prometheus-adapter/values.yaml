@@ -72,7 +72,18 @@ rules:
   # 스레드는 블로킹 대기라 CPU 를 안 올린다. 포화의 직접 신호(executor
   # in-flight = running+queued)를 HPA 가 보게 한다.
   # 레이블 소스: otel-collector k8sattributes(k8s_pod_name/pod 역조회) +
-  # gateway service.instance.id(워커 구분 — sum by pod 시 파드 총량).
+  # gateway service.instance.id(워커 구분).
+  #
+  # 집계 설계:
+  # - max by (pod): uvicorn 워커별 시리즈 중 **가장 뜨거운 워커** — 워커별
+  #   풀(BEDROCK_THREAD_POOL_SIZE, 기본 128)이 진짜 한계라서 파드 합계는
+  #   워커간 불균등 분배를 평균으로 숨긴다(한 워커가 큐를 쌓아도 합계가
+  #   타깃 미만이면 HPA 가 못 본다). HPA 타깃도 워커당 풀 기준(~70%→90).
+  # - last_over_time(2m): 워커 재시작(pid 변경)으로 죽은 시리즈가 remote
+  #   write 의 staleness 마커 부재로 최대 5분(lookback) 살아있는 것을
+  #   ~2분으로 줄인다 — 죽은 워커의 마지막 값이 sum/max 를 부풀려 허위
+  #   스케일아웃을 내는 것 방지. export 주기 60s 라 정상 시리즈는 유지.
+  # - active_connections 만 sum(파드 총량이 의미있는 총계라서).
   custom:
     - seriesQuery: 'gateway_bedrock_executor_inflight{k8s_pod_name!=""}'
       resources:
@@ -82,7 +93,7 @@ rules:
       name:
         matches: "^(.*)$"
         as: "${1}"
-      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
+      metricsQuery: 'max by (<<.GroupBy>>) (last_over_time(<<.Series>>{<<.LabelMatchers>>}[2m]))'
     - seriesQuery: 'gateway_bedrock_executor_queue_depth_ratio{k8s_pod_name!=""}'
       resources:
         overrides:
@@ -91,7 +102,7 @@ rules:
       name:
         matches: "^(.*)$"
         as: "${1}"
-      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
+      metricsQuery: 'max by (<<.GroupBy>>) (last_over_time(<<.Series>>{<<.LabelMatchers>>}[2m]))'
     - seriesQuery: 'gateway_active_connections{k8s_pod_name!=""}'
       resources:
         overrides:
@@ -100,7 +111,7 @@ rules:
       name:
         matches: "^(.*)$"
         as: "${1}"
-      metricsQuery: 'sum by (<<.GroupBy>>) (<<.Series>>{<<.LabelMatchers>>})'
+      metricsQuery: 'sum by (<<.GroupBy>>) (last_over_time(<<.Series>>{<<.LabelMatchers>>}[2m]))'
 
 # 적당한 replica / 리소스. HPA 쿼리 실패 지점이라 여유를 둠.
 replicas: 2

@@ -467,10 +467,13 @@ gatewayProxy:
     maxReplicas: 20
     targetCPUUtilizationPercentage: 70
     # executorInflightTarget — bedrock executor in-flight(running+queued)의
-    # 파드당 평균 타깃. 풀 크기 = WORKERS × BEDROCK_THREAD_POOL_SIZE(기본 2×128=256).
-    # 타깃 ≈ 풀의 70% 전후가 스케일아웃 여유를 남긴다. 비우면 CPU 전용.
-    # 전제: prometheus-adapter rules.custom + otel-collector k8sattributes.
-    # executorInflightTarget: 180
+    # **최대 워커** 타깃 (adapter metricsQuery 가 워커별 시리즈의 pod 최대값).
+    # 풀 크기 = BEDROCK_THREAD_POOL_SIZE/워커(기본 128) — 타깃 ≈ 그 70% 전후.
+    # 파드 합계가 아니라 최대 워커로 보는 이유: 워커별 풀이 한계라 합계 평균은
+    # 불균등 분배의 큐잉을 숨긴다. 비우면 CPU 전용.
+    # 전제: prometheus-adapter rules.custom + otel-collector k8sattributes
+    # (in-cluster mode — sidecar/managed 모드는 pod 레이블 미보장).
+    # executorInflightTarget: 90
 
   podDisruptionBudget:
     enabled: true
