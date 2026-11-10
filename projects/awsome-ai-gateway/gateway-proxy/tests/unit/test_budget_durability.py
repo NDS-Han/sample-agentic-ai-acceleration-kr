@@ -19,7 +19,8 @@ from app.resilience.budget_suspect import (
     SENTINEL_TTL_SECONDS,
     BudgetSuspectSet,
 )
-from app.services.cost_recorder import _eval_budget_op, _mark_budget_lost
+from app.resilience.redis_retry import call_with_transient_retry
+from app.services.cost_recorder import _mark_budget_lost
 
 
 @pytest.fixture(autouse=True)
@@ -39,7 +40,7 @@ async def test_retry_recovers_max_connections_burst():
         side_effect=[MaxConnectionsError("Too many connections"), b"ok"]
     )
 
-    result = await _eval_budget_op(redis, "script", 1, "k", idempotent=False)
+    result = await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=False)
 
     assert result == b"ok"
     assert redis.eval.await_count == 2
@@ -53,7 +54,7 @@ async def test_no_retry_timeout_for_non_idempotent_deduct():
     redis.eval = AsyncMock(side_effect=RedisTimeoutError("timeout"))
 
     with pytest.raises(RedisTimeoutError):
-        await _eval_budget_op(redis, "script", 1, "k", idempotent=False)
+        await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=False)
 
     assert redis.eval.await_count == 1
 
@@ -64,7 +65,7 @@ async def test_retry_timeout_for_idempotent_settle():
     redis = AsyncMock()
     redis.eval = AsyncMock(side_effect=[RedisTimeoutError("timeout"), b"ok"])
 
-    result = await _eval_budget_op(redis, "script", 1, "k", idempotent=True)
+    result = await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=True)
 
     assert result == b"ok"
     assert redis.eval.await_count == 2
@@ -77,7 +78,7 @@ async def test_non_retryable_error_propagates_immediately():
     redis.eval = AsyncMock(side_effect=ValueError("bad lua"))
 
     with pytest.raises(ValueError):
-        await _eval_budget_op(redis, "script", 1, "k", idempotent=True)
+        await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=True)
 
     assert redis.eval.await_count == 1
 
@@ -90,7 +91,7 @@ async def test_attempts_exhausted_raises_last_error():
     redis.eval = AsyncMock(side_effect=RedisConnectionError("down"))
 
     with pytest.raises(RedisConnectionError):
-        await _eval_budget_op(redis, "script", 1, "k", idempotent=False)
+        await call_with_transient_retry(redis.eval, "script", 1, "k", idempotent=False)
 
     assert redis.eval.await_count == 3
 

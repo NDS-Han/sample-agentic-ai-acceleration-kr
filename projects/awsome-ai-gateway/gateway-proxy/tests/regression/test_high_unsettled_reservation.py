@@ -197,7 +197,10 @@ async def test_reserve_budget_refunds_scope_on_eval_timeout():
 
     src = inspect.getsource(BudgetService.reserve_budget)
     # eval+loads 가 같은 try 안 + except 에서 committed.append 후 refund.
-    eval_idx = src.index("await redis.eval")
+    # eval 은 call_with_transient_retry(redis.eval, …) 로 감싸져 있다 —
+    # 비멱등 reserve 라 ConnectionError 만 재시도되고 TimeoutError 는 그대로
+    # except 로 온다(모호 실행 → 환불 대상 포함 불변).
+    eval_idx = src.index("redis.eval")
     loads_idx = src.index("result = json.loads(raw)")
     except_idx = src.index("except Exception", eval_idx)
     assert loads_idx < except_idx, "json.loads 가 try 밖이면 eval 성공분이 고아"

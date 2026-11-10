@@ -60,6 +60,89 @@ def _lua_stub():
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_sleep(monkeypatch):
+    """재시도 백오프를 0 으로 — 테스트는 즉시."""
+    import asyncio
+
+    monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_reserve_retries_max_connections_burst(mock_redis):
+    """관측된 풀고갈 형태 — MaxConnectionsError 는 커맨드가 안 나간 상태라
+    재시도가 안전하고 버스트를 흡수한다."""
+    from redis.exceptions import MaxConnectionsError
+
+    calls = []
+
+    async def _side(*args, **_kw):
+        calls.append(args)
+        if len(calls) == 1:
+            raise MaxConnectionsError("Too many connections")
+        return _resv_resp(scope=args[7])
+
+    mock_redis.eval = AsyncMock(side_effect=_side)
+    mock_redis.exists = AsyncMock(return_value=True)
+
+    svc = BudgetService()
+    committed = await svc.reserve_budget(
+        mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "req-1",
+    )
+
+    assert [s["scope"] for s in committed] == ["team", "user"]
+    # 첫 시도 실패 → 재시도 성공 → 총 3회 eval(team 실패+재시도, user).
+    assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_reserve_no_retry_on_ambiguous_timeout(mock_redis):
+    """reserve 는 INCRBYFLOAT 비멱등 — TimeoutError 는 서버 실행 여부가 모호해
+    재시도하면 예약치 이중 적용. 한 번만 호출하고 fail-open 으로 둔다."""
+    from redis.exceptions import TimeoutError as RedisTimeoutError
+
+    calls = []
+
+    async def _side(*args, **_kw):
+        calls.append(args)
+        raise RedisTimeoutError("timeout")
+
+    mock_redis.eval = AsyncMock(side_effect=_side)
+    mock_redis.exists = AsyncMock(return_value=True)
+
+    svc = BudgetService()
+    committed = await svc.reserve_budget(
+        mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "req-1",
+    )
+
+    assert committed == []
+    reserve_calls = [c for c in calls if c[0] == "-- reserve"]
+    assert len(reserve_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reserve_top_level_reads_retry(mock_redis):
+    """reserve 본문 진입 전의 config 읽기(exists/get)는 멱등이라 일시 오류를
+    전부 재시도한다 — 여기서 나는 풀고갈이 reserve 전체 실패로 번지던 결함."""
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    mock_redis.exists = AsyncMock(
+        side_effect=[RedisConnectionError("pool burst"), True]
+    )
+    mock_redis.eval = AsyncMock(side_effect=_dispatch_by_scope({
+        "team": _resv_resp(scope="team"),
+        "user": _resv_resp(scope="user"),
+    }))
+
+    svc = BudgetService()
+    committed = await svc.reserve_budget(
+        mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "req-1",
+    )
+
+    assert [s["scope"] for s in committed] == ["team", "user"]
+    assert mock_redis.exists.await_count == 2
+
+
 @pytest.mark.asyncio
 async def test_reserve_commits_team_then_user(mock_redis):
     """정상 경로: team → user 순으로 커밋되고 디스크립터가 반환된다."""

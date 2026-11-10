@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.budget import BudgetConfig, BudgetScope, BudgetUsage
+from app.resilience.redis_retry import call_with_transient_retry
 from app.schemas.domain import BudgetPolicy, BudgetStatus
 from app.services.lua_loader import LuaScriptLoader
 
@@ -853,9 +854,16 @@ class BudgetService:
         team_config_key = f"budget:config:team:{{{team_id}}}"
 
         # D-3 와 동일: 개인 config 없음 + 팀 기본 cap D → 합성 config 를 ARGV 로.
+        # 읽기는 멱등이라 일시 오류 전부 재시도 — 이 블록은 per-scope try 밖이라
+        # 여기서 나는 MaxConnectionsError 가 곧바로 reserve 전체 실패(=예약 없이
+        # fail-open, check-then-act 창 회귀)로 번졌다(라이브 버스트 관측 35건).
         user_fallback = ""
-        if not await redis.exists(user_config_key):
-            team_cfg_raw = await redis.get(team_config_key)
+        if not await call_with_transient_retry(
+            redis.exists, user_config_key, idempotent=True
+        ):
+            team_cfg_raw = await call_with_transient_retry(
+                redis.get, team_config_key, idempotent=True
+            )
             if team_cfg_raw:
                 team_cfg = json.loads(
                     team_cfg_raw.decode()
@@ -912,10 +920,15 @@ class BudgetService:
         for scope, usage_key, config_key, marker_key, resvsum_key, idx_key, idx_field in scope_specs:
             fallback = user_fallback if scope == "user" else ""
             try:
-                raw = await redis.eval(
+                # 비멱등(INCRBYFLOAT) — 커맨드가 안 나간 ConnectionError 계열만
+                # 재시도. TimeoutError 는 서버 실행 여부가 모호해 재시도하면
+                # 예약치 이중 적용이라 제외한다(deduct 와 같은 분류).
+                raw = await call_with_transient_retry(
+                    redis.eval,
                     script, 5,
                     usage_key, config_key, marker_key, resvsum_key, idx_key,
                     scope, est_str, fallback, marker_ttl, idx_field,
+                    idempotent=False,
                 )
                 result = json.loads(raw)
             except Exception:
@@ -1010,12 +1023,16 @@ class BudgetService:
                 # 롤링 배포 중 구버전 파드가 만든 스펙에는 idx 키가 없다 —
                 # settle_eval_args 가 4키 호출로 미뤄 settle 은 그대로 동작하고
                 # 인덱스만 건너뛴다(인덱스 없는 마커는 rebuild SCAN 폴백이 잡는다).
-                raw = await redis.eval(
+                # 마커 멱등 — 모호한 TimeoutError 도 재시도 안전(마커가 이중
+                # 적용 차단). 고아 마커 잔존을 줄인다.
+                raw = await call_with_transient_retry(
+                    redis.eval,
                     script, *settle_eval_args(s),
                     str(actual), s.get("fallback") or "",
                     s.get("idx_field") or "",
                     s.get("reserved") or "",
                     str(s.get("marker_ttl") or ""),
+                    idempotent=True,
                 )
                 result = json.loads(raw)
             except Exception:
