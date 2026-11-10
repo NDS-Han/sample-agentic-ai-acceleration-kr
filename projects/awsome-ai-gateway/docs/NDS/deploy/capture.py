@@ -816,6 +816,46 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                      "externalSecrets/.Values.secrets 둘 다 비어 있으면 채택 후 "
                      "apply 시 migration Job과 pod 가 기동하지 못합니다")
 
+    # ── deploy 용량 — 라이브 HPA/pool 역산. 실측이 밴드와 정확히 일치하면
+    #    capacity_tier(의도 선언)로, 아니면 명시 sizing 으로 기록한다 ────────
+    sizing: dict = {}
+    asc = _val(v, "gatewayProxy", "autoscaling", default={}) or {}
+    gp: dict = {}
+    for src, dst in (("minReplicas", "min_replicas"),
+                     ("maxReplicas", "max_replicas")):
+        if str(asc.get(src, "")).isdigit():
+            gp[dst] = int(asc[src])
+    btp = str(genv.get("BEDROCK_THREAD_POOL_SIZE", ""))
+    if btp.isdigit():
+        gp["bedrock_thread_pool_size"] = int(btp)
+    if gp:
+        sizing["gateway-proxy"] = gp
+    pool = str(_val(v, "redis", "poolSize"))
+    if pool.isdigit():
+        sizing["redis"] = {"pool_size": int(pool)}
+
+    capacity_tier = ""
+    if sizing:
+        from .tiers import EKS_CAPACITY_TIERS
+        for name, band in EKS_CAPACITY_TIERS.items():
+            b = band["gateway-proxy"]
+            if (gp.get("min_replicas") == b["min_replicas"]
+                    and gp.get("max_replicas") == b["max_replicas"]
+                    and gp.get("bedrock_thread_pool_size", 128)
+                    == b.get("bedrock_thread_pool_size", 128)
+                    and sizing.get("redis", {}).get("pool_size", 150)
+                    == band["redis"]["pool_size"]):
+                capacity_tier = name
+                break
+        if capacity_tier:
+            notes.append(f"라이브 용량이 capacity_tier={capacity_tier!r} 밴드와 "
+                         "일치합니다 — 밴드 키로 기록했습니다")
+        else:
+            notes.append("라이브 HPA/redis pool 을 deploy.sizing 으로 기록했습니다 — "
+                         "밴드와 일치하면 capacity_tier 로 바꿔도 됩니다")
+    else:
+        notes.append("⚠ autoscaling/redis.poolSize 를 helm values 에서 못 읽었습니다")
+
     notes.append("size_tier 는 eks=t3 으로 둡니다 — 실제 리소스 스펙은 HPA/requests 참조")
     notes.append("externalSecrets/ESO, Fargate profile, RDS Proxy 등 eks 고유 구성은 "
                  "gateway.yaml 에 표현이 없습니다 — 캡처본만으로 eks 재배포는 아직 불가")
@@ -828,7 +868,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         # 채택 후 apply 가 같은 대상을 가리키도록
         "deploy": {"target": "eks", "size_tier": "t3",
                    "release": release, "namespace": namespace,
-                   "tf_env_dir": str(env_dir) if env_dir else ""},
+                   "tf_env_dir": str(env_dir) if env_dir else "",
+                   **({"capacity_tier": capacity_tier} if capacity_tier
+                      else {"sizing": sizing} if sizing else {})},
         "network": {"mode": net_mode, "allowed_cidrs": cidrs,
                     "admin_internal": admin_internal},
         "domain": domain,

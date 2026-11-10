@@ -606,3 +606,41 @@ def test_eks_capture_dev_login_off_not_recorded(monkeypatch):
     vals = _eks_values(adminUi={"env": {"DEV_LOGIN_ENABLED": "false"}})
     doc, _ = _capture_with(monkeypatch, vals)
     assert not doc["features"].get("dev_login")
+
+
+def test_eks_capture_sizing_band_match(monkeypatch):
+    """라이브 HPA/pool 이 밴드와 정확히 일치 → capacity_tier 키로 기록."""
+    vals = {
+        "global": {"environment": "t", "imageRegistry": "r"},
+        "aws": {"region": "r"}, "ingress": {},
+        "gatewayProxy": {"autoscaling": {"minReplicas": 4, "maxReplicas": 8},
+                         "env": {}},
+        "redis": {"poolSize": 150},
+        "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    doc, _ = capture.capture_eks()
+    assert doc["deploy"]["capacity_tier"] == "6000"
+    assert "sizing" not in doc["deploy"]
+
+
+def test_eks_capture_sizing_off_band(monkeypatch):
+    """밴드 불일치 → 명시 deploy.sizing 으로 실측 기록."""
+    vals = {
+        "global": {"environment": "t"}, "aws": {"region": "r"}, "ingress": {},
+        "gatewayProxy": {"autoscaling": {"minReplicas": 2, "maxReplicas": 7},
+                         "env": {"BEDROCK_THREAD_POOL_SIZE": "192"}},
+        "redis": {"poolSize": 200},
+        "adminApi": {"env": {}},
+    }
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    doc, _ = capture.capture_eks()
+    assert "capacity_tier" not in doc["deploy"]
+    s = doc["deploy"]["sizing"]
+    assert s["gateway-proxy"] == {"min_replicas": 2, "max_replicas": 7,
+                                  "bedrock_thread_pool_size": 192}
+    assert s["redis"]["pool_size"] == 200
