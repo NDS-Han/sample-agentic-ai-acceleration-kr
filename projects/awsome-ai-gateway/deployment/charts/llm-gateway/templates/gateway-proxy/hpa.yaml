@@ -32,6 +32,23 @@ spec:
           type: Utilization
           averageUtilization: {{ .Values.gatewayProxy.autoscaling.targetMemoryUtilizationPercentage }}
     {{- end }}
+    {{- if .Values.gatewayProxy.autoscaling.executorInflightTarget }}
+    # claude-code SSE 1개 = bedrock 스레드 슬롯 1개 — 블로킹 대기라 CPU 가
+    # 안 올라 Resource 메트릭이 포화를 못 본다. prometheus-adapter 의
+    # custom 규칙이 서빙하는 per-pod inflight 합계로 직접 스케일한다.
+    # type: Pods — pod 리소스 연동 메트릭(custom.metrics.k8s.io)으로
+    # 파드당 평균값. External 은 external.metrics.k8s.io 라 별도 API 를
+    # 요구해 adapter rules.external 을 또 만들어야 한다 — Pods 가 같은
+    # 의미론(파드 평균)에 배선이 절반이다.
+    # 전제: observability/prometheus-adapter values.yaml 의 rules.custom.
+    - type: Pods
+      pods:
+        metric:
+          name: gateway_bedrock_executor_inflight
+        target:
+          type: AverageValue
+          averageValue: {{ .Values.gatewayProxy.autoscaling.executorInflightTarget }}
+    {{- end }}
   # SSE 스트림 연결이 붙어 있어서 스케일 다운을 보수적으로
   behavior:
     scaleDown:

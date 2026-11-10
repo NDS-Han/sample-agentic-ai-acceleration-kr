@@ -22,6 +22,18 @@ data:
       memory_limiter:
         check_interval: 1s
         limit_mib: 1500
+      # pod 식별 부착 — prometheus-adapter 의 custom-metric HPA 가 메트릭을
+      # pod 리소스에 매핑하려면 k8s_pod_name 레이블이 필요하다. 송신 IP(podIP)
+      # 로 파드를 역조회한다(SA 에 pods get/list/watch ClusterRole 필요 —
+      # serviceaccount.yaml 의 rbac 블록).
+      k8sattributes:
+        extract:
+          metadata:
+            - k8s.pod.name
+            - k8s.namespace.name
+        pod_association:
+          - sources:
+              - from: connection
       resource:
         attributes:
           # cluster 라벨은 Deployment env 주입 — 예전엔 "llm-gateway-prod" 하드코딩이라
@@ -55,7 +67,7 @@ data:
       pipelines:
         metrics:
           receivers: [otlp]
-          processors: [memory_limiter, resource, batch]
+          processors: [memory_limiter, k8sattributes, resource, batch]
           exporters: [prometheusremotewrite]
         logs:
           receivers: [otlp]

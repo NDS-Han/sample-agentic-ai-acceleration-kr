@@ -1,5 +1,7 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
+import os
+
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -22,6 +24,15 @@ def init_otel(settings: Settings) -> None:
         {
             "service.name": settings.otel_service_name,
             "service.version": settings.app_version,
+            # uvicorn 멀티워커: 워커 2개가 동일 레이블셋으로 remote_write 하면
+            # 시리즈가 1개로 붕괴해 마지막 writer 값만 남는다(실측:
+            # gateway_active_connections count=1). pod-pid 조합으로 워커별
+            # 시리즈를 갈라 sum by (pod) 가 파드 총량을 맞게 한다 —
+            # executor inflight 가 custom-metric HPA 신호로 쓰이므로 정확도가
+            # 곧 스케일링 정확도다. HOSTNAME 은 k8s 가 파드명으로 채운다.
+            "service.instance.id": (
+                f"{os.environ.get('HOSTNAME', 'local')}-{os.getpid()}"
+            ),
         }
     )
 

@@ -263,6 +263,10 @@ gatewayProxy:
     minReplicas: 3
     maxReplicas: 30
     targetCPUUtilizationPercentage: 65
+    # bedrock executor in-flight 파드당 평균 타깃 (풀 2×128=256 의 70%).
+    # CPU 는 SSE 블로킹 대기를 못 잰다 — 포화의 직접 신호로 스케일.
+    # 전제: prometheus-adapter rules.custom + otel-collector k8sattributes.
+    executorInflightTarget: 180
   podDisruptionBudget:
     enabled: true
     minAvailable: 2

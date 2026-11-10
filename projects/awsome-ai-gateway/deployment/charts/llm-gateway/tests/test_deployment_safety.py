@@ -317,6 +317,61 @@ def test_nextauth_url_scheme_follows_admin_ui_https():
 
 
 # --------------------------------------------------------------------------
+# executor-inflight 커스텀 메트릭 → HPA type: Pods
+# --------------------------------------------------------------------------
+
+def _hpa(docs: list[dict], fragment: str) -> dict:
+    for d in docs:
+        if d.get("kind") == "HorizontalPodAutoscaler" and fragment in d["metadata"]["name"]:
+            return d
+    raise AssertionError(f"{fragment} HPA 없음")
+
+
+def _pod_metrics(hpa: dict) -> list[dict]:
+    return [m for m in hpa["spec"]["metrics"] if m["type"] == "Pods"]
+
+
+@pytest.mark.parametrize("values", [
+    "values-eks-fargate-dev.yaml", "values-eks-fargate-prod.yaml",
+])
+def test_hpa_executor_inflight_is_pods_metric(values: str):
+    """CPU 는 SSE 블로킹 슬롯 점유를 못 보니 executor inflight 파드 평균으로
+    스케일한다. type 은 반드시 Pods — External 은 external.metrics.k8s.io
+    별도 API 라 adapter 규칙이 서빙하는 custom.metrics.k8s.io 에서
+    <unknown> 으로 영구 멈춘다 (dev 실측으로 잡은 회귀)."""
+    hpa = _hpa(_render(values), "gateway-proxy")
+    pods = _pod_metrics(hpa)
+    assert len(pods) == 1, f"Pods 메트릭 {len(pods)}개: {hpa['spec']['metrics']}"
+    m = pods[0]["pods"]
+    assert m["metric"]["name"] == "gateway_bedrock_executor_inflight"
+    assert m["target"]["type"] == "AverageValue"
+    assert str(m["target"]["averageValue"]) == "180", (
+        f"averageValue={m['target']['averageValue']} — 풀 256 의 ~70% 가정과 어긋남"
+    )
+    assert not any(me["type"] == "External" for me in hpa["spec"]["metrics"]), (
+        "External 타입 잔존 — adapter 는 custom.metrics.k8s.io 를 서빙한다"
+    )
+
+
+def test_hpa_executor_inflight_absent_when_unset():
+    """기본 values 에는 키가 주석처리 — 렌더되지 않아야 observability 스택이
+    없는 클러스터에서 <unknown> 타깃으로 남지 않는다."""
+    hpa = _hpa(_render("values.yaml"), "gateway-proxy")
+    assert _pod_metrics(hpa) == [], (
+        f"executorInflightTarget 미설정인데 Pods 메트릭 렌더: {hpa['spec']['metrics']}"
+    )
+
+
+def test_hpa_executor_inflight_target_override():
+    docs = _render(
+        "values-eks-fargate-prod.yaml",
+        "gatewayProxy.autoscaling.executorInflightTarget=100",
+    )
+    m = _pod_metrics(_hpa(docs, "gateway-proxy"))[0]["pods"]
+    assert str(m["target"]["averageValue"]) == "100"
+
+
+# --------------------------------------------------------------------------
 # S4r2 — prod ALB deregistration 지연 ≥ preStop + uvicorn graceful
 # --------------------------------------------------------------------------
 

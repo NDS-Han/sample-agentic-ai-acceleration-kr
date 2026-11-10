@@ -312,6 +312,9 @@ gatewayProxy:
     enabled: true
     minReplicas: 1
     maxReplicas: 3
+    # bedrock executor in-flight 파드당 평균 타깃 (풀 2×128=256 의 70%).
+    # prometheus-adapter rules.custom + otel-collector k8sattributes 전제.
+    executorInflightTarget: 180
   podDisruptionBudget:
     enabled: false
 
