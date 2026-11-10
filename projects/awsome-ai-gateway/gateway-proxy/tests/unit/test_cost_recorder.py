@@ -501,3 +501,46 @@ def test_calculate_cost_5m_default(model_config_bedrock):
     )
     cost = calculate_cost(usage, model_config_bedrock)
     assert cost == Decimal("0.003750")
+
+
+@pytest.mark.asyncio
+async def test_finalize_passes_request_id_dedup_key(
+    mock_redis, auth_context_vk, model_config_bedrock
+):
+    """budget_deduct eval이 request_id dedup 키를 3번째 KEYS로 받는다 —
+    클라이언트 레벨 재시도가 응답 단절 뒤 같은 eval을 재전송해도 서버 측이
+    이중 차감하지 않는다."""
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_deduct"] = "-- mock"
+
+    mock_redis.eval = AsyncMock(
+        return_value=b'{"new_used":1.0,"remaining":99.0,"threshold_triggered":null}'
+    )
+    mock_redis.xadd = AsyncMock()
+
+    recorder = CostRecorder()
+    usage = TokenUsage(input_tokens=500, output_tokens=300, total_tokens=800)
+
+    await recorder.finalize(
+        redis=mock_redis,
+        auth_context=auth_context_vk,
+        model_config=model_config_bedrock,
+        usage=usage,
+        request_id="req-dedup",
+        is_stream=False,
+        duration_ms=100,
+    )
+
+    deduct_calls = [
+        c for c in mock_redis.eval.call_args_list if c.args[0] == "-- mock"
+    ]
+    assert deduct_calls, "budget_deduct eval 호출 없음"
+    for c in deduct_calls:
+        assert c.args[1] == 3                       # numkeys
+        usage_key = c.args[2]
+        dedup_key = c.args[4]
+        assert dedup_key == f"{usage_key}:ded:req-dedup"
+        # 같은 {} hash tag — Redis Cluster에서 같은 슬롯 (eval 제약)
+        tag = lambda k: k.split("{")[1].split("}")[0]
+        assert tag(dedup_key) == tag(usage_key)

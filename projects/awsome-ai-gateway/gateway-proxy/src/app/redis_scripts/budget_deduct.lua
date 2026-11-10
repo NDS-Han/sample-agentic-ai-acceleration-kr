@@ -13,6 +13,7 @@
 
 local usage_key = KEYS[1]
 local config_key = KEYS[2]
+local dedup_key = KEYS[3]  -- <usage_key>:ded:{request_id} — 재실행 감지용 (선택)
 local cost = tonumber(ARGV[1])
 
 local config_raw = redis.call('GET', config_key)
@@ -33,6 +34,23 @@ if config_raw then
     end
 end
 
+-- request_id 멱등 재생 가드: 같은 요청의 차감이 이미 적용돼 있으면
+-- (클라이언트 레벨 재시도가 응답 단절 뒤 eval 을 재전송한 경우) 이중 차감
+-- 없이 현재 상태만 반환한다. threshold_triggered 는 재생하지 않는다 —
+-- 첫 실행에서 이미 교차 이벤트가 발행됐으므로 재발행은 중복 알림이다.
+if dedup_key and dedup_key ~= '' then
+    if redis.call('EXISTS', dedup_key) == 1 then
+        local used_now = tonumber(redis.call('GET', usage_key) or '0')
+        return cjson.encode({
+            new_used = used_now,
+            remaining = limit - used_now,
+            threshold_triggered = cjson.null,
+            app_clients = app_clients,
+            dedup_hit = true,
+        })
+    end
+end
+
 local used = tonumber(redis.call('GET', usage_key) or '0')
 local new_used = used + cost
 
@@ -48,6 +66,14 @@ redis.call('INCRBYFLOAT', usage_key, cost)
 redis.call('EXPIRE', usage_key, 3888000)
 if usage_existed == 0 then
     redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
+end
+
+-- dedup 마커는 차감 쓰기가 끝난 뒤에 세운다 — 스크립트 중간 크래시가
+-- "마커만 있고 차감은 없는" 상태를 만들면 재실행이 조용히 스킵해 영구
+-- 과소계상이 되기 때문이다. TTL 4h: 재시도/재전송 창보다 충분히 길고
+-- 키 수명은 요청 주기로 한정된다.
+if dedup_key and dedup_key ~= '' then
+    redis.call('SET', dedup_key, '1', 'EX', 14400)
 end
 
 -- 임계값 교차 체크 — **가장 높은** 교차값을 반환한다.

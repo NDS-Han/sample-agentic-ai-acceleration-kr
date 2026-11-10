@@ -487,9 +487,12 @@ class CostRecorder:
                     raw = await call_with_transient_retry(
                         redis.eval,
                         LuaScriptLoader.get("budget_deduct"),
-                        2,
+                        3,
                         user_usage_key,
                         user_config_key,
+                        # request_id dedup 키 — 같은 요청의 재전송된 eval 이
+                        # 서버 실행 후에 도착해도 이중 차감하지 않는다.
+                        f"{user_usage_key}:ded:{request_id}",
                         str(cost_usd),
                         user_fallback,
                         idempotent=False,
@@ -541,9 +544,10 @@ class CostRecorder:
                         team_raw = await call_with_transient_retry(
                             redis.eval,
                             LuaScriptLoader.get("budget_deduct"),
-                            2,
+                            3,
                             team_usage_key,
                             team_config_key,
+                            f"{team_usage_key}:ded:{request_id}",
                             str(cost_usd),
                             idempotent=False,
                         )
@@ -629,7 +633,9 @@ class CostRecorder:
                         await call_with_transient_retry(
                             redis.eval,
                             LuaScriptLoader.get("budget_deduct"),
-                            2, client_usage_key, client_config_key, str(cost_usd),
+                            3, client_usage_key, client_config_key,
+                            f"{client_usage_key}:ded:{request_id}",
+                            str(cost_usd),
                             idempotent=False,
                         )
                 except Exception:

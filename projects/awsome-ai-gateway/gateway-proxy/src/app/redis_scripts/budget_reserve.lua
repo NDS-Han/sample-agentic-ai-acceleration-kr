@@ -54,6 +54,28 @@ local function reply(allowed, reserved, reason, used, limit, config_present)
     })
 end
 
+-- request_id 멱등 재생 가드: 이 요청의 마커가 이미 있으면 예약은 커밋된
+-- 상태다 — 클라이언트 레벨 재시도(응답 단절 후 eval 재전송, retry_on_error)
+-- 가 같은 request_id 를 다시 보내도 카운터를 이중으로 올리지 않는다.
+-- 응답은 커밋 시점과 같은 allowed/reserved=true 로 재생해 호출자의
+-- 롤백 계약(committed 디스크립터 등록)을 유지한다. limit 은 재계산하지
+-- 않는다 — 호출자의 분기는 allowed/reserved/config_present 만 본다.
+-- 마커 부재시에만 아래로 진행해 실제 쓰기를 하므로, 중간 크래시로 마커가
+-- 없이 끝난 재실행은 예외 경로(환불/lost 센티넬)로 흘러 조용한 과소계상
+-- 방향이 아니라 복구 가능한 방향으로 어긋난다.
+if redis.call('EXISTS', marker_key) == 1 then
+    return cjson.encode({
+        allowed = true,
+        reserved = true,
+        reason = cjson.null,
+        used_usd = tonumber(redis.call('GET', usage_key) or '0'),
+        limit_usd = 0,
+        scope = scope_label,
+        config_present = true,
+        dedup_hit = true,
+    })
+end
+
 local cfg_raw = redis.call('GET', config_key)
 if not cfg_raw and ARGV[3] and ARGV[3] ~= '' then
     cfg_raw = ARGV[3]

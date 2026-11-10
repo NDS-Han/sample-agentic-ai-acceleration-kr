@@ -52,6 +52,9 @@ variable "allowed_cidrs" {
   description = "ALB security group ingress 허용 대역. 비우면 0.0.0.0/0 — schema 경고와 같은 의미"
   type        = list(string)
   default     = ["0.0.0.0/0"]
+  # env 가 null 을 전달하면(미설정) 기본값이 적용되도록 — nullable 이면 null 이
+  # 그대로 들어와 setproduct(var.allowed_cidrs, …) 가 크래시한다.
+  nullable    = false
 }
 
 variable "alb_idle_timeout" {
