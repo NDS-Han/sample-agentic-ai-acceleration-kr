@@ -172,23 +172,23 @@ class CommittingRoute(APIRoute):
             response = await original(request)
 
             session: AsyncSession | None = getattr(request.state, SESSION_STATE_ATTR, None)
-            if session is not None:
+            if session is not None and not session.in_transaction():
                 # 핸들러가 내부적으로 commit 한 경우라도 그 커밋으로 발사된 지연
                 # Redis 쓰기는 응답 전에 완료를 보장한다 — issue_key 의
                 # key:vk:{hash} SET 이 응답 뒤에 끝나면 클라이언트의 첫 호출이
                 # 401 로 떨어지고, 실패는 24h 짜리 dead credential 이 된다
                 # (R21 r3 S1). surface_failure=True 쓰기의 예외는 여기서
                 # 올라가 응답을 500 으로 바꾼다 — 클라이언트가 재시도할 수 있다.
+                #
+                # ⚠️ in_transaction() 이면 절대 drain 하지 않는다 — 아직 커밋이
+                #    안 끝난 대기열을 비우면 커밋 실패(롤백) 시 "취소된 쓰기의
+                #    알림"이 나간다(key_revoked 메일). 미커밋 항목은 아래
+                #    커밋 성공 직후의 drain 으로 미룬다.
                 from app.core.budget_cache import drain_deferred_redis_writes
 
                 try:
                     await drain_deferred_redis_writes(session)
                 finally:
-                    # surfaced 실패가 500 으로 올라가도 이미 커밋된 데이터의
-                    # publish 는 발송한다 — 큐에는 after_commit 이벤트로만
-                    # enqueue 되므로 미커밋 트랜잭션의 알림은 절대 못 들어온다.
-                    # ⚠️ enqueue_redis_publish 를 커밋 전에 직접 부르는 신규
-                    #    호출자를 두면 그 불변이 깨진다(R21 r6 N2).
                     await drain_pending_redis(session, request)
                 # session.add() 로만 pending 인 객체가 남았다면 flush 로 트랜잭션을
                 # 연다(autobegin) — autobegin semantics 에 의존하지 않는다.

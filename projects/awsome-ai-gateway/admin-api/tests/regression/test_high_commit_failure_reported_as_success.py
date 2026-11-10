@@ -29,9 +29,20 @@ from httpx import ASGITransport, AsyncClient
 from app.core.db import (
     SESSION_STATE_ATTR,
     CommittingRoute,
+    enqueue_redis_publish,
     install_commit_before_response,
 )
 from app.main import create_app, register_exception_handlers
+
+
+class FakeRedis:
+    """publish 호출을 기록하는 최소 스텁 — drain_pending_redis 가 쓰는 유일한 멤버."""
+
+    def __init__(self) -> None:
+        self.published: list[tuple[str, str]] = []
+
+    async def publish(self, channel: str, payload: str) -> None:
+        self.published.append((channel, payload))
 
 
 class FakeSession:
@@ -59,7 +70,9 @@ class FakeSession:
         self._in_transaction = False
 
 
-def build_app(*, fail: bool, streaming: bool = False) -> tuple[FastAPI, dict[str, Any]]:
+def build_app(
+    *, fail: bool, streaming: bool = False, enqueue: bool = False
+) -> tuple[FastAPI, dict[str, Any]]:
     """실제 앱과 같은 배선(에러 봉투 + 커밋 승격)으로 최소 앱을 만든다."""
     captured: dict[str, Any] = {}
 
@@ -79,9 +92,16 @@ def build_app(*, fail: bool, streaming: bool = False) -> tuple[FastAPI, dict[str
 
     app = FastAPI()
     register_exception_handlers(app)
+    if enqueue:
+        # drain_pending_redis 는 request.app.state.redis 로 발송기를 찾는다.
+        captured["redis"] = FakeRedis()
+        app.state.redis = captured["redis"]
 
     @app.post("/write")
     async def write(session: FakeSession = Depends(dep)) -> dict[str, Any]:
+        if enqueue:
+            # revoke_key 처럼 트랜잭션 안에서 커밋 후 발행 이벤트를 대기열에 넣는다.
+            enqueue_redis_publish(session, "key_events", '{"event":"key_revoked"}')
         return {"success": True, "id": "created-123"}
 
     @app.get("/stream")
@@ -148,6 +168,38 @@ async def test_successful_path_still_commits_once_and_returns_200():
     session = captured["session"]
     assert session.commits == 1, f"커밋이 {session.commits}회 — 중복 커밋/미커밋"
     assert session.rollbacks == 0
+
+
+@pytest.mark.asyncio
+async def test_commit_failure_does_not_publish_pending_redis_events():
+    """커밋이 실패한 트랜잭션의 publish 는 절대 나가면 안 된다.
+
+    회귀(merge 리뷰 H3): CommittingRoute 의 pre-commit drain 이 트랜잭션이 열린
+    채로 pending 큐를 비우면, 커밋 실패(롤백) 후에도 key_revoked 같은 "취소된
+    쓰기의 알림"이 이미 발송된 상태가 된다. 미커밋 대기열은 커밋 성공 뒤의
+    drain 으로만 나가야 한다.
+    """
+    app, captured = build_app(fail=True, enqueue=True)
+    async with await _client(app) as ac:
+        res = await ac.post("/write")
+
+    assert res.status_code == 500
+    assert captured["redis"].published == [], (
+        f"롤백된 트랜잭션의 publish 가 발송됐다: {captured['redis'].published}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_successful_commit_publishes_pending_redis_events():
+    """대조군 — 커밋 성공 시 대기열의 publish 는 응답 전에 발송된다."""
+    app, captured = build_app(fail=False, enqueue=True)
+    async with await _client(app) as ac:
+        res = await ac.post("/write")
+
+    assert res.status_code == 200
+    assert captured["redis"].published == [("key_events", '{"event":"key_revoked"}')], (
+        f"커밋 후 publish 가 안 나갔다: {captured['redis'].published}"
+    )
 
 
 @pytest.mark.asyncio
