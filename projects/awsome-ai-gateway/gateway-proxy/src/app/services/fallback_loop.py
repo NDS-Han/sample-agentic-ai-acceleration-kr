@@ -471,7 +471,11 @@ async def run_fallback_loop(
                 # 우회하는 것이 곧 한도 우회다.
                 return FallbackResult(
                     status=rejection.status,
-                    payload=(rejection.body, rejection.headers, TokenUsage()),
+                    payload=(
+                        rejection.body,
+                        rejection.headers,
+                        TokenUsage() if not is_stream else None,
+                    ),
                     model_config=candidate_config,
                 )
             # 폴백 후보의 거절은 그 슬롯만 건너뛴다 — 원본의 오류가 클라이언트가 볼 것이다.
@@ -678,7 +682,7 @@ async def run_fallback_loop(
                     )
                 ).encode(),
                 {},
-                TokenUsage(),
+                TokenUsage() if not is_stream else None,
             ),
             model_config=original_model_config,
             all_open=not any_invoked,

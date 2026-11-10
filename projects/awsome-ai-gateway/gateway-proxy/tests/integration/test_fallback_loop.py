@@ -947,3 +947,108 @@ class TestPerCandidateModelRouting:
         # 후보 호출의 model_id 가 후보 리전 접두로 재작성됐는지 확인.
         invoked_model_ids = [c.args[1] for c in adapter.invoke.await_args_list]
         assert "apac.anthropic.claude-haiku-4-5" in invoked_model_ids
+
+
+# ===========================================================================
+# TC-12: Streaming failure payloads keep the third slot a request-id (str|None)
+# ===========================================================================
+
+class TestStreamFailurePayloadContract:
+    """payload[2] contract: stream → str|None request-id, non-stream → TokenUsage.
+
+    Regression for the live 500s found under load (mock-think-30 burst): the
+    router unpacks ``chunk_iter, headers, aws_request_id = result.payload`` and
+    passes ``aws_request_id`` as ``bedrock_request_id`` to
+    ``build_body_record_for_nonstream``. When a failure path packed
+    ``TokenUsage()`` into that slot regardless of ``is_stream``, pydantic
+    rejected the record and the intended 429/503 was masked as a 500.
+    """
+
+    @pytest.mark.asyncio
+    async def test_stream_rejection_third_slot_is_none(self):
+        from fastapi.responses import JSONResponse
+
+        original_alias = "claude-sonnet-4-6"
+        original_config = _make_model_config(original_alias)
+
+        adapter = _make_adapter([])  # rejection happens before invoke
+        cb = _make_cb()
+
+        rl_429 = JSONResponse(
+            status_code=429,
+            content={"error": {"type": "rate_limit_error", "code": "user_rpm_exceeded", "message": "limit hit"}},
+            headers={"Retry-After": "60"},
+        )
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            return rl_429
+
+        kwargs = _common_kwargs(
+            try_order=[original_alias],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            is_stream=True,
+        )
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 429
+        # Streaming payload third slot must be str|None — never TokenUsage.
+        assert result.payload[2] is None
+        chunk_iter, headers, aws_request_id = result.payload
+        assert isinstance(chunk_iter, (bytes, bytearray))
+        assert aws_request_id is None
+
+    @pytest.mark.asyncio
+    async def test_stream_all_open_third_slot_is_none(self):
+        original_config = _make_model_config(
+            "claude-sonnet-4-6", pmid="us.anthropic.claude-sonnet-4-6"
+        )
+        adapter = _make_adapter([])
+        cb = _make_cb(open_pmids={original_config.provider_model_id}, probe_wins=False)
+
+        kwargs = _common_kwargs(
+            try_order=["claude-sonnet-4-6"],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            is_stream=True,
+        )
+
+        result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 503
+        assert result.payload[2] is None
+
+    @pytest.mark.asyncio
+    async def test_nonstream_failure_third_slot_stays_tokenusage(self):
+        """Non-stream consumers unpack the third slot as ``usage`` — keep it."""
+        from fastapi.responses import JSONResponse
+
+        original_config = _make_model_config("claude-sonnet-4-6")
+        adapter = _make_adapter([])
+        cb = _make_cb()
+
+        rl_429 = JSONResponse(
+            status_code=429,
+            content={"error": {"type": "rate_limit_error", "code": "user_rpm_exceeded", "message": "limit hit"}},
+        )
+
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+            return rl_429
+
+        kwargs = _common_kwargs(
+            try_order=["claude-sonnet-4-6"],
+            adapter=adapter,
+            cb=cb,
+            original_config=original_config,
+            is_stream=False,
+        )
+
+        with patch("app.services.fallback_loop.enforce_rate_limits", side_effect=_fake_enforce):
+            result = await run_fallback_loop(**kwargs)
+
+        assert result.status == 429
+        assert isinstance(result.payload[2], TokenUsage)
