@@ -36,4 +36,6 @@ gatewayProxy:
   env:
     # botocore 네이티브 엔드포인트 오버라이드 (≥1.28). 서명은 그대로 수행되고
     # mock 이 무시한다 — TLS 만 빠진다 (측정 오차는 미미).
-    AWS_ENDPOINT_URL_BEDROCK_RUNTIME: "http://mock-bedrock.loadtest-mock.svc.cluster.local:8080"
+    # short-form DNS — mock 을 게이트웨이와 **같은 namespace** 에 둔다
+    # (Fargate profile 커버리지 때문에 별도 loadtest-mock ns 는 스케줄 불가).
+    AWS_ENDPOINT_URL_BEDROCK_RUNTIME: "http://mock-bedrock:8080"
