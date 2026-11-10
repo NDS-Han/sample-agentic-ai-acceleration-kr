@@ -409,7 +409,9 @@ class GatewayConfig:
         if self.deploy.size_tier not in SIZE_TIERS:
             e.append(f"deploy.size_tier 는 {SIZE_TIERS} 중 하나여야 합니다: {self.deploy.size_tier}")
         if self.deploy.target == "compose" and self.deploy.size_tier != "t0":
-            e.append("compose backend 는 size_tier=t0 만 지원합니다 (단일 노드).")
+            e.append(f"compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
+                     f"테스트·평가용 단일 호스트입니다 "
+                     f"(size_tier={self.deploy.size_tier!r} 지정됨).")
         if self.deploy.target == "ecs" and self.deploy.size_tier not in ("t1", "t2"):
             e.append("ecs backend 는 size_tier=t1|t2 를 지원합니다 (t3 는 eks 경로).")
         if self.deploy.target == "eks" and self.deploy.size_tier not in ("t2", "t3"):
@@ -534,9 +536,9 @@ class GatewayConfig:
             # 밴드 전개는 target 마다: eks → pod min/max, ecs → task desired/max.
             # compose 는 단일호스트 — 밴드를 적용할 복제본 축이 없어 거부한다.
             if self.deploy.target not in ("eks", "ecs"):
-                e.append(f"deploy.capacity_tier 는 compose(단일호스트)에서 "
-                         f"적용 불가입니다 (target={self.deploy.target!r}) — "
-                         f"size_tier 로 인스턴스 크기를 정하세요.")
+                e.append(f"deploy.capacity_tier 는 적용되지 않습니다 — "
+                         f"compose 형태는 최저 티어(t0)로만 배포 가능합니다 "
+                         f"(테스트·평가용 단일 호스트).")
             else:
                 from .tiers import EKS_CAPACITY_TIERS
                 if self.deploy.capacity_tier not in EKS_CAPACITY_TIERS:

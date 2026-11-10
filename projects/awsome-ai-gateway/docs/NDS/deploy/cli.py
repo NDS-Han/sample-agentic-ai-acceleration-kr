@@ -116,11 +116,14 @@ def _collect_doc(existing: dict | None = None) -> dict:
     target = _unwrap(questionary.select(
         "배포 대상",
         choices=[
-            Choice("compose — 단일 호스트 Docker (평가·최소비용)", "compose"),
+            Choice("compose — 단일 호스트 Docker (평가·테스트용, 최저 티어로만 배포)", "compose"),
             Choice("ecs — ECS Fargate (소규모~표준 권장)", "ecs"),
             Choice("eks — EKS Fargate (대규모·기존 프로덕션)", "eks"),
         ],
         default=target_default or "compose").ask())
+    if target == "compose":
+        console.print("[dim]compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
+                      "테스트·평가용 단일 호스트입니다.[/dim]")
 
     tier_choices = [
         Choice(f"{t.name}: {t.label}  [{t.users}, {t.monthly_cost_usd}]", t.name)
