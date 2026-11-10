@@ -81,6 +81,10 @@ class GatewayMetrics:
             "gateway_usage_records_dropped_total",
             description="Total usage records dropped from buffer",
         )
+        self.budget_suspects_dropped_total: Counter = meter.create_counter(
+            "gateway_budget_suspects_dropped_total",
+            description="Budget suspect scopes dropped from the sentinel re-delivery queue",
+        )
 
         # Downgrade (FR-3.6)
         self.downgrade_applied_total: Counter = meter.create_counter(

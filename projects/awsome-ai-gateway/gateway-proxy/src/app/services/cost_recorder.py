@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import random
 from decimal import ROUND_HALF_UP, Decimal
 
 import structlog
+from redis.exceptions import ConnectionError as RedisConnectionError
+from redis.exceptions import TimeoutError as RedisTimeoutError
 
 from app.periods import request_period, request_started_at
+from app.resilience.budget_suspect import SENTINEL_TTL_SECONDS
 from app.schemas.cost_stream import CostStreamEntry
 from app.schemas.domain import AuthContext, ModelConfigSchema, TokenUsage
 
@@ -25,6 +30,68 @@ COST_STREAM_MAXLEN = 500_000
 # usage.usage_status enum 값 — 이 집합 밖의 값은 DB INSERT 시 enum 캐스트 오류로
 # 배치 전체가 poison retry 루프에 빠지므로, 발행 전에 여기서 정규화한다.
 _VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
+
+
+# ── 예산 차감 내구성 ──────────────────────────────────────────────────────────
+# finalize 의 budget Lua 호출은 실패하면 지금까지 로그만 남고 영구 유실됐다 —
+# Redis 카운터가 budget.budget_usages(집행 원천 원장)보다 얇아져 그 기간 동안
+# 하드 한도가 헐거워진다(과소차단). 두 겹으로 보강한다:
+#   1) _eval_budget_op — 일시 연결 오류만 호출부에서 재시도한다.
+#      클라이언트 Retry(retries=1, ~50ms)는 blip 용이고, 관측된 풀고갈
+#      버스트(~수 초, MaxConnectionsError)는 못 견딘다.
+#   2) 실패 시 {usage_key}:lost 센티넬 — 다음 admission 의 MGET 프로브가
+#      트리거로 잡아 budget_usages 플로어 rebuild 를 발화한다(rebuild.lua 는
+#      절대 내리지 않고 resvsum 도 양방향 보정). 센티넬 SET 마저 실패하면
+#      BudgetSuspectSet 큐로 넘겨 헬스체커가 복구 틱에 다시 심는다.
+_BUDGET_OP_ATTEMPTS = 3
+_BUDGET_OP_BACKOFF_S = (0.05, 0.15)  # 재시도 1·2차 지연(초) — 지터 곱해 사용
+
+
+async def _eval_budget_op(redis, *args, idempotent: bool):
+    """redis.eval 에 일시 오류 한정 재시도를 얹는다.
+
+    idempotent=False(budget_deduct / INCRBYFLOAT): ConnectionError 계열만
+    재시도 — MaxConnectionsError 는 풀이 커넥션을 못 내줘 커맨드가 소켓에
+    한 번도 안 나간 상태라 재실행이 안전하다. TimeoutError 는 서버 실행 후
+    응답만 유실됐을 수 있어 재시도하면 이중차감 — 제외한다.
+    idempotent=True(budget_settle 등 마커 멱등): TimeoutError 도 재시도 —
+    마커가 이중 적용을 차단한다.
+    """
+    retryable = (
+        (RedisConnectionError, RedisTimeoutError)
+        if idempotent
+        else (RedisConnectionError,)
+    )
+    last: Exception | None = None
+    for attempt in range(_BUDGET_OP_ATTEMPTS):
+        try:
+            return await redis.eval(*args)
+        except retryable as e:
+            last = e
+            if attempt < _BUDGET_OP_ATTEMPTS - 1:
+                delay = _BUDGET_OP_BACKOFF_S[
+                    min(attempt, len(_BUDGET_OP_BACKOFF_S) - 1)
+                ]
+                await asyncio.sleep(delay * (0.5 + random.random()))
+    assert last is not None  # for loop 가 빈손으로 끝날 수 없다
+    raise last
+
+
+async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str) -> None:
+    """차감 실패 카운터에 :lost 센티넬을 심어 다음 admission rebuild 를 트리거한다.
+
+    Lua eval 보다 훨씬 가벼운 단일 SET 이라 풀고갈 버스트에서도 통과할 가능성이
+    높다. 그마저 실패하면(실제 Redis 장애) suspect 큐로 — 헬스체커가 복구 틱에
+    다시 심는다. 어느 경로든 "얇아진 카운터"는 다음 enforce 전에 원장 기준으로
+    복원된다 — enforce 가 문제되는 유일한 시점이 다음 admission 이기 때문이다.
+    """
+    try:
+        await redis.set(f"{usage_key}:lost", "1", ex=SENTINEL_TTL_SECONDS)
+        logger.warning("budget_counter_marked_lost", scope=scope)
+    except Exception:
+        if suspects is not None:
+            suspects.enqueue(usage_key)
+        logger.warning("budget_lost_sentinel_failed", scope=scope)
 
 
 def _normalize_usage_status(status: str | None) -> str:
@@ -171,12 +238,15 @@ class CostRecorder:
     - ``daily_aggregates`` cron (KST 00:10)
     """
 
-    def __init__(self, metrics=None, spool=None) -> None:
+    def __init__(self, metrics=None, spool=None, suspects=None) -> None:
         self._metrics = metrics
         # P0-②: dead-letter spool for cost:stream XADD failures (Redis down at
         # finalize). When set, a failed XADD buffers the payload for re-publish on
         # Redis recovery instead of being lost forever.
         self._spool = spool
+        # 예산 차감 실패 카운터의 :lost 센티넬 재배달 큐 — 인라인 SET 이
+        # 실패할 때만 채워진다(헬스체커가 복구 틱에 drain).
+        self._suspects = suspects
 
     async def finalize(
         self,
@@ -420,22 +490,26 @@ class CostRecorder:
 
                 resv = budget_reservation.get("user")
                 if resv:
-                    raw = await redis.eval(
+                    raw = await _eval_budget_op(
+                        redis,
                         settle_script,
                         *settle_eval_args(resv),
                         str(cost_usd), resv.get("fallback") or "",
                         resv.get("idx_field") or "",
                         resv.get("reserved") or "",
                         str(resv.get("marker_ttl") or ""),
+                        idempotent=True,
                     )
                 else:
-                    raw = await redis.eval(
+                    raw = await _eval_budget_op(
+                        redis,
                         LuaScriptLoader.get("budget_deduct"),
                         2,
                         user_usage_key,
                         user_config_key,
                         str(cost_usd),
                         user_fallback,
+                        idempotent=False,
                     )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")
@@ -453,6 +527,9 @@ class CostRecorder:
                     )
             except Exception:
                 logger.exception("budget_deduct_failed", user_id=auth_context.user_id)
+                await _mark_budget_lost(
+                    redis, user_usage_key, suspects=self._suspects, scope="user"
+                )
 
             # 팀 예산 차감. ⚠️ 이 결과의 threshold_triggered 를 이전엔 버렸다 —
             # 대부분의 팀은 개인(USER) 예산 없이 팀(TEAM) 예산만 설정하므로, 그 경우
@@ -466,21 +543,25 @@ class CostRecorder:
                 try:
                     resv = budget_reservation.get("team")
                     if resv:
-                        team_raw = await redis.eval(
+                        team_raw = await _eval_budget_op(
+                            redis,
                             settle_script,
                             *settle_eval_args(resv),
                             str(cost_usd), resv.get("fallback") or "",
                             resv.get("idx_field") or "",
                             resv.get("reserved") or "",
                             str(resv.get("marker_ttl") or ""),
+                            idempotent=True,
                         )
                     else:
-                        team_raw = await redis.eval(
+                        team_raw = await _eval_budget_op(
+                            redis,
                             LuaScriptLoader.get("budget_deduct"),
                             2,
                             team_usage_key,
                             team_config_key,
                             str(cost_usd),
+                            idempotent=False,
                         )
                     team_result = json.loads(team_raw)
                     if team_result.get("settled") is False:
@@ -499,6 +580,9 @@ class CostRecorder:
                             threshold_scope = "team"
                 except Exception:
                     logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
+                    await _mark_budget_lost(
+                        redis, team_usage_key, suspects=self._suspects, scope="team"
+                    )
 
             # 앱(client) 예산 차감.
             #
@@ -535,13 +619,15 @@ class CostRecorder:
                     resv = budget_reservation.get("client")
                     if resv:
                         client_settle = json.loads(
-                            await redis.eval(
+                            await _eval_budget_op(
+                                redis,
                                 settle_script,
                                 *settle_eval_args(resv),
                                 str(cost_usd), resv.get("fallback") or "",
                                 resv.get("idx_field") or "",
                                 resv.get("reserved") or "",
                                 str(resv.get("marker_ttl") or ""),
+                                idempotent=True,
                             )
                         )
                         if client_settle.get("settled") is False:
@@ -555,12 +641,17 @@ class CostRecorder:
                                 scope="client", request_id=request_id,
                             )
                     else:
-                        await redis.eval(
+                        await _eval_budget_op(
+                            redis,
                             LuaScriptLoader.get("budget_deduct"),
                             2, client_usage_key, client_config_key, str(cost_usd),
+                            idempotent=False,
                         )
                 except Exception:
                     logger.warning("client_budget_deduct_failed", client=client)
+                    await _mark_budget_lost(
+                        redis, client_usage_key, suspects=self._suspects, scope="client"
+                    )
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)
         # reserved_cost는 rate_limit_state['cost_reserved'] (enforcement 주입) 우선,
@@ -601,6 +692,17 @@ class CostRecorder:
                 )
             except Exception:
                 logger.warning("cost_settle_failed", user_id=auth_context.user_id)
+                # 미정산 예약은 resvsum 팽창(과다차단) 쪽이라 deduct 유실보다
+                # 안전하지만, orphan 정리·usage 플로어 교정을 위해 양 스코프의
+                # 센티넬을 심는다 — 라이브 마커가 남은 예약은 marker_ttl 로
+                # 자연 회수되고, rebuild 는 죽은 마커 필드를 청소한다.
+                await _mark_budget_lost(
+                    redis, user_usage_key, suspects=self._suspects, scope="user"
+                )
+                if auth_context.team_id:
+                    await _mark_budget_lost(
+                        redis, team_usage_key, suspects=self._suspects, scope="team"
+                    )
 
         # 2b. TPM 정산 (FR-4.1 §D2, settle_tpm) — reserve_tpm 상태가 state에 있을 때만
         tpm_descriptors = rate_limit_state.get("tpm_descriptors") if rate_limit_state else None
@@ -620,6 +722,11 @@ class CostRecorder:
                 )
             except Exception:
                 logger.warning("tpm_settle_failed", user_id=auth_context.user_id)
+                # TPM 윈도우 잔여는 budget_rebuild 대상이 아니지만, 같은 버스트에서
+                # 얇아졌을 수 있는 usage 카운터는 센티넬 경로로 교정된다.
+                await _mark_budget_lost(
+                    redis, user_usage_key, suspects=self._suspects, scope="user"
+                )
 
         # 3. XADD cost:stream — cost-recorder-worker가 DB INSERT / daily counter /
         #    threshold pub/sub 배치 처리. 실패는 경고만 (gateway response는 영향 없음).

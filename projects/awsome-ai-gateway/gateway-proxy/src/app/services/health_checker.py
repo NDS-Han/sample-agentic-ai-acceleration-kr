@@ -30,6 +30,7 @@ class HealthChecker:
         degradation_manager: DegradationManager,
         interval: int = 15,
         cost_stream_spool=None,
+        budget_suspects=None,
     ) -> None:
         self._redis = redis
         self._db_engine = db_engine
@@ -47,6 +48,9 @@ class HealthChecker:
         # P0-②: drained on each healthy Redis check to re-publish cost:stream
         # payloads that failed XADD while Redis was down.
         self._cost_stream_spool = cost_stream_spool
+        # 예산 차감 실패 카운터의 :lost 센티넬 재배달 — 인라인 SET 이 실패한
+        # 것만 쌓여 있고, 매 healthy 틱에 다시 심는다.
+        self._budget_suspects = budget_suspects
 
     async def start(self) -> None:
         self._task = asyncio.create_task(self._run_loop())
@@ -147,6 +151,21 @@ class HealthChecker:
                     )
                 except Exception:
                     logger.warning("cost_stream_spool_drain_failed")
+            # 예산 suspect 의 :lost 센티넬 재배달 — spool 과 같은 이유로 상한.
+            # 개별 SET 은 XADD 보다 가볍지만 flapping 창에는 같이 막힌다.
+            if self._budget_suspects is not None and self._budget_suspects.size:
+                try:
+                    await asyncio.wait_for(
+                        self._budget_suspects.drain(self._redis),
+                        timeout=10.0,
+                    )
+                except TimeoutError:
+                    logger.warning(
+                        "budget_suspects_drain_timed_out",
+                        remaining=self._budget_suspects.size,
+                    )
+                except Exception:
+                    logger.warning("budget_suspects_drain_failed")
         except Exception:
             logger.warning("redis_health_check_failed")
             self._degradation.report_redis_health(healthy=False)

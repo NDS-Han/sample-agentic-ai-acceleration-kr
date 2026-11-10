@@ -161,9 +161,16 @@ async def lifespan(app: FastAPI):
         maxlen_field=COST_STREAM_MAXLEN,
     )
 
+    # 예산 차감 실패 카운터의 :lost 센티넬 재배달 큐 — cost_recorder 의 인라인
+    # 센티넬 SET 이 실패할 때만 채워지고, health checker 가 복구 틱에 다시 심는다.
+    from app.resilience.budget_suspect import BudgetSuspectSet
+
+    budget_suspects = BudgetSuspectSet(maxlen=settings.usage_buffer_max)
+
     # 10. Health Checker — drains the cost-stream spool on each healthy Redis check.
     health_checker = HealthChecker(
-        redis, db_engine, degradation_manager, cost_stream_spool=cost_stream_spool
+        redis, db_engine, degradation_manager, cost_stream_spool=cost_stream_spool,
+        budget_suspects=budget_suspects,
     )
     # 열화 전이 → notifications:system 발행 (degradation_mode / service_health_change).
     # 같은 인스턴스가 fallback_loop 의 provider_error 발행도 맡는다 — 워커
@@ -178,6 +185,7 @@ async def lifespan(app: FastAPI):
     degradation_manager.set_metrics(gateway_metrics.degradation_level)
     retry_worker.set_metrics(gateway_metrics.background_task_errors_total)
     cost_stream_spool.set_metrics(gateway_metrics.usage_records_dropped_total)
+    budget_suspects.set_metrics(gateway_metrics.budget_suspects_dropped_total)
     # rate-limit fail-open 관측성(deepdive Q50 Phase 3) — eval 예외로 집행 못한 횟수.
     set_fail_open_metric(gateway_metrics.rl_fail_open_total)
 
@@ -271,7 +279,9 @@ async def lifespan(app: FastAPI):
 
     # 13. Cost Recorder (2026-04-20 리팩터: DB I/O → cost-recorder-worker로 이관,
     # critical path에 inline rate limit/budget enforcement + XADD cost:stream만 남김)
-    cost_recorder = CostRecorder(metrics=gateway_metrics, spool=cost_stream_spool)
+    cost_recorder = CostRecorder(
+        metrics=gateway_metrics, spool=cost_stream_spool, suspects=budget_suspects
+    )
 
     # 13b. Tokenizer (KI-08: 스트리밍 disconnect 시 누적 텍스트로 output 토큰 역산)
     tokenizer_service = TokenizerService(bedrock_client=bedrock_client)
@@ -392,6 +402,7 @@ async def lifespan(app: FastAPI):
     app.state.degradation_manager = degradation_manager
     app.state.degradation_notifier = degradation_notifier
     app.state.cost_stream_spool = cost_stream_spool
+    app.state.budget_suspects = budget_suspects
     app.state.retry_worker = retry_worker
     app.state.health_checker = health_checker
     app.state.metrics = gateway_metrics
@@ -454,6 +465,28 @@ async def lifespan(app: FastAPI):
         )
     except Exception:
         logger.warning("cost_stream_spool_shutdown_drain_failed")
+
+    # 예산 suspect 의 :lost 센티넬도 같은 규칙으로 한 번 더 심어 본다 —
+    # 인메모리 큐라 파드 종료와 함께 사라지므로 남은 양은 경고로 가시화한다.
+    if budget_suspects.size:
+        try:
+            delivered = await asyncio.wait_for(
+                budget_suspects.drain(redis), timeout=min(10.0, _remaining())
+            )
+            if delivered:
+                logger.info(
+                    "budget_suspects_marked_lost_on_shutdown", count=delivered
+                )
+        except TimeoutError:
+            logger.warning(
+                "budget_suspects_shutdown_drain_timed_out",
+                remaining=budget_suspects.size,
+            )
+        except Exception:
+            logger.warning(
+                "budget_suspects_shutdown_drain_failed",
+                remaining=budget_suspects.size,
+            )
     if cost_stream_spool.size:
         logger.warning(
             "cost_stream_spool_lost_on_shutdown", remaining=cost_stream_spool.size
