@@ -168,3 +168,6 @@ Screen Shot*.png
 #    그래서 슬래시 없는 형태도 같이 막는다.
 node_modules
 .venv
+
+# 로컬 리뷰 산출물 (kiro/opus diff·로그)
+.review-tmp/
