@@ -193,15 +193,15 @@ describe('middleware — /cli is not public', () => {
     expect(res.status).toBe(200);
   });
 
-  it('redirects a DEVELOPER token to /403 — PAGE_PERMISSIONS 는 ADMIN+TEAM_LEADER', async () => {
+  it('lets a DEVELOPER token through to /cli — self-service 경로라 DEVELOPER 도 등재', async () => {
     const devJwt = `header.${b64url({
       sub: '22222222-2222-2222-2222-222222222222',
       role: 'DEVELOPER',
       exp: Math.floor(Date.now() / 1000) + 3600,
     })}.sig`;
     const res = await middleware(requestWith(devJwt, '/cli'));
-    expect(res.status).toBe(307);
-    expectSameOriginRedirect(res, '/403');
+    expect(res.status).toBe(200);
+    expect(res.headers.get('location')).toBeNull();
   });
 });
 

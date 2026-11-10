@@ -264,6 +264,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
                 content=anthropic_error("invalid_request_error", "Invalid 'model' value"),
             )
 
+
         # ⚠️ 정규화는 여기서 하지 않는다 — 모델 해석(아래 resolve_*) 전이라 alias
         #    밖에 모르는데, alias 추정이 실제 모델을 오판하면 필드를 잘못 지운다.
         #    이 본문은 body-logging 의 request_body 용이라 해석된 pmid 로 아래서

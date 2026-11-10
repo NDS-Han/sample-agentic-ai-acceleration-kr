@@ -258,6 +258,7 @@ def normalize_thinking(
                     budget_tokens=budget,
                 )
                 return body
+
             if (
                 isinstance(budget, int)
                 and isinstance(max_tokens, int)

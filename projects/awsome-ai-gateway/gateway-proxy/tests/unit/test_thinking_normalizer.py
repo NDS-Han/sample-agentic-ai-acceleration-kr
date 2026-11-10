@@ -557,3 +557,4 @@ def test_legacy_enabled_no_budget_room_drops_thinking():
     }
     out = normalize_thinking(body, "anthropic.claude-haiku-4-5")
     assert "thinking" not in out
+

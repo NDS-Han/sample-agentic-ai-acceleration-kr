@@ -23,6 +23,7 @@
 | §8-Y | 직원 온보딩 — Cognito 사용자 추가 | 직원 추가 시 | [ops/8-Y-onboarding.md](ops/8-Y-onboarding.md) |
 | §8-S | 배포 후 보안 하드닝 (직원 오픈 전 필수) | 직원 오픈 전 1회 | [ops/8-S-hardening.md](ops/8-S-hardening.md) |
 | §8-L | admin 콘솔 Cognito 로그인 | admin 콘솔을 계정으로 막을 때 (US-12, 선택 · 권장) | [ops/8-L-admin-login.md](ops/8-L-admin-login.md) |
+| §8-G | policy-helper — 직원 PC 의 Claude Code 설정을 게이트웨이가 정함 | 허용 모델을 PC 목록에 맞추거나 팀별 정책을 쓸 때 (US-21, 선택) | [ops/8-G-policy-helper.md](ops/8-G-policy-helper.md) |
 | §8-A | Claude Code Auto mode 서버 분류기 | Auto mode 를 쓸 때 (US-17, 권장) | [ops/8-A-automode-server.md](ops/8-A-automode-server.md) |
 | §8-N | Bedrock 을 NAT 대신 VPC Endpoint(PrivateLink)로 | 기존 VPC 1회 (US-04) | [ops/8-N-vpc-endpoint.md](ops/8-N-vpc-endpoint.md) |
 | §8-E | EKS 버전 업그레이드 (1.31 → 1.34) | EKS 버전 올릴 때 (US-05) | [ops/8-E-eks-upgrade.md](ops/8-E-eks-upgrade.md) |
@@ -172,6 +173,13 @@ cd ~/awsome-ai-gateway/deployment/terraform/environments/llm-gateway-dev && terr
 #   AgentCore WebSearch gateway(provision_agentcore_websearch.py teardown), tfstate(S3/DynamoDB)
 python3 ~/awsome-ai-gateway/deployment/scripts/provision_agentcore_websearch.py teardown  # (REGION/GW_NAME env 동일)
 ```
+
+---
+
+### 8-G. policy-helper — 직원 PC 의 Claude Code 설정을 게이트웨이가 정함
+
+직원 PC 의 policy-helper 가 VK 로 `GET /v1/policy` 를 불러 허용 모델을 `/model` 목록에 반영합니다(21-A). 팀별 플러그인·MCP·잠금은 AI Governance Hub 연결(21-B, values 두 줄, US-21).
+→ **[ops/8-G-policy-helper.md](ops/8-G-policy-helper.md)**
 
 ---
 

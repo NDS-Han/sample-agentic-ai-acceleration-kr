@@ -349,6 +349,19 @@ class Settings(BaseSettings):
     #: here, not a release. Blank = pass everything through. See services/upstream_compat.py.
     bedrock_unsupported_tool_type_prefixes: str = "advisor_"
 
+    # --- AI Governance Hub (2026-11): the non-model part of GET /v1/policy ---
+    # policy-helper lays the gateway's answer over its baseline. The MODELS slice is computed
+    # here (policy_service, same tables the proxy enforces); plugins / MCP servers / lock keys
+    # belong to the hub, asked per request with the VK's user_id + team_id (services/policy_hub.py).
+    #: In-cluster URL, e.g. http://governance-hub.llm-gateway.svc:8080. Blank = models only
+    #: (the PoC behaviour) — also what every hub failure degrades to.
+    policy_hub_url: str = ""
+    #: Static bearer the hub expects (a k8s Secret in the chart). Never defaulted here.
+    policy_hub_token: str = ""
+    #: Budget for the hub call. policy-helper gives the whole GET 3 s, so DB + hub must stay
+    #: inside that: a slow hub costs the plugin/MCP slice for one refresh, never the helper.
+    policy_hub_timeout: float = 2.0
+
     # ── Reporting timezone (§59) ──
     # 비용/사용량 집계의 "월/일 경계" 기준 타임존. admin-api·cost-recorder-worker·
     # notification-worker 와 같은 env(REPORTING_TIMEZONE)를 읽는다 — 네 서비스가

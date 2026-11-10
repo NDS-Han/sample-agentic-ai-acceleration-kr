@@ -33,7 +33,7 @@ from app.providers.registry import ProviderRegistry
 from app.redis_client import create_redis_client
 from app.resilience.cost_stream_spool import CostStreamSpool
 from app.resilience.retry_worker import RetryWorker
-from app.routers import bedrock, health, messages, openai_compat, usage
+from app.routers import bedrock, health, messages, openai_compat, policy, usage
 from app.schemas.domain import DegradationLevel, ProviderType
 from app.security.event_detector import SecurityEventDetector
 from app.services.agentcore_mcp_client import AgentCoreMcpClient
@@ -521,6 +521,7 @@ def create_app() -> FastAPI:
     app.include_router(messages.router)
     app.include_router(openai_compat.router)
     app.include_router(usage.router)
+    app.include_router(policy.router)
 
     # 미들웨어에서 app.state 접근을 위한 scope["state"] 주입 미들웨어 (pure ASGI).
     # BaseHTTPMiddleware (@app.middleware("http")) 는 StreamingResponse 와
