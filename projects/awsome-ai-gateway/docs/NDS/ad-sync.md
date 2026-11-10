@@ -85,7 +85,7 @@ terraform apply -target=module.cognito
 aws cognito-idp add-custom-attributes \
   --user-pool-id <user-pool-id> \
   --custom-attributes Name=groups,AttributeDataType=String,Mutable=true \
-  --region ap-south-1
+  --region <region>
 ```
 
 > ⚠️ **클라이언트 ReadAttributes에 `custom:groups`가 없으면 토큰에 실리지
@@ -102,7 +102,7 @@ aws cognito-idp create-identity-provider \
   --provider-name ADFS --provider-type SAML \
   --provider-details MetadataFile=file://FederationMetadata.xml \
   --attribute-mapping '{"email":"email","name":"name","custom:groups":"groups"}' \
-  --region ap-south-1
+  --region <region>
 ```
 
 | SAML attribute | User pool attribute |
@@ -148,13 +148,13 @@ hosted UI에 `ADFS` 버튼 표시 → 로그인 →
 aws cognito-idp admin-update-user-attributes \
   --user-pool-id <user-pool-id> --username <test-user> \
   --user-attributes "Name=custom:groups,Value=SSIR_Claude_Developers" \
-  --region ap-south-1
+  --region <region>
 
 # ③ 기존 관리자에도 — groups_claim 전환 후 네이티브 계정이 잠기지 않게
 aws cognito-idp admin-update-user-attributes \
   --user-pool-id <user-pool-id> --username <admin-user> \
   --user-attributes "Name=custom:groups,Value=SSIR_Claude_Admin" \
-  --region ap-south-1
+  --region <region>
 ```
 
 → `gateway.yaml` 반영·apply 후 테스트 계정으로 로그인 → 부서 Claude/팀
@@ -170,7 +170,7 @@ Developers 생성·배정 확인 → 관리자는 ADMIN 유지 확인.
 aws cognito-idp admin-update-user-attributes \
   --user-pool-id <user-pool-id> --username <기존관리자> \
   --user-attributes "Name=custom:groups,Value=SSIR_NDS_Admin" \
-  --region ap-south-1
+  --region <region>
 ```
 
 `admin_groups`에 `SSIR_NDS_Admin`을 선언했으면 정확일치로 ADMIN이 유지됩니다 —

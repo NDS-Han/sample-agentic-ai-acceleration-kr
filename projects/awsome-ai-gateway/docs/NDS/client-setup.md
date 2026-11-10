@@ -37,7 +37,7 @@
 | `domain.mode` | `ANTHROPIC_BASE_URL` | `ADMIN_API_URL` |
 |---|---|---|
 | `route53-acm` (`name: example.com`) | `https://gateway.example.com` | `https://admin-api.example.com` |
-| `cloudfront-temp` (EKS) | `https://<배포된 CloudFront 도메인>` | `https://admin-<도메인>` |
+| `selfsigned-temp` (EKS, admin-ui만) | `http://<ALB host>` (gateway 는 HTTP 유지) | `https://<admin-ui ALB host>` |
 | `none` (compose/평가) | `http://<호스트>:8000` | `http://<호스트>:8080` |
 
 > 🔴 **Cowork(Claude Desktop)는 `https://` 필수** — `domain.mode: none` 이면

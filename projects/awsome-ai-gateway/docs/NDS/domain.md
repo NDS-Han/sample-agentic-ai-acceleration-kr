@@ -14,7 +14,7 @@ domain:
 | `none` | HTTP만 — host 없이 ALB/IP 직접 접근 | 로컬·테스트. **Cowork 불가**(https만 받음), Cognito SSO 불가 |
 | `selfsigned-temp` | self-signed 인증서로 **admin-ui만** 임시 https (EKS) | 도메인 없이 Cognito SSO가 필요할 때 — 브라우저 경고 있음, gateway는 HTTP 유지 |
 | `route53-acm` | 정식 도메인 + ACM 인증서 + DNS | 정식 배포 — 3개 호스트 전부 https |
-| `cloudfront-temp` | CloudFront 기본 도메인 임시 https | EKS 전용 (미구현 스텁) |
+| `cloudfront-temp` | CloudFront 기본 도메인 임시 https | **미구현** — 스키마에만 존재(compose 거부, eks/ecs 도 렌더하지 않음) |
 
 ## 1. 도메인 획득 — 사람 절차 (NDS 범위 밖)
 
@@ -83,12 +83,29 @@ domain:
 2. `gateway./admin./admin-api.<domain>` 각각 → 대응 ALB로 CNAME (또는 alias)
 3. `./deploy apply` 재실행 → 발급된 cert를 찾아 부착 + 콜백·nextauthUrl 반영
 
-### host 이름 규칙
+### host 이름 규칙 — `domain.hosts` (eks)
 
 `domain.name`을 쓰면 host는 **env 무관** `gateway./admin./admin-api.<domain>`으로
-고정됩니다. `gateway-dev.<domain>` 같은 기존 명명을 유지해야 하면 `domain.name`을
-비워두세요 — overlay가 host를 건드리지 않아 env values(eks)/Caddyfile(compose)의
-이름이 유지됩니다 (채택 배포 판단은 [update.md](update.md) 온보딩 절 참조).
+고정됩니다. `gateway-dev.<domain>` 같은 **기존 명명을 유지해야 하면**
+`domain.hosts` 에 실제 호스트를 명시하세요 — `doctor --capture` 가 기존
+호스트를 이 키로 자동 기록합니다:
+
+```yaml
+domain:
+  mode: route53-acm
+  name: example.com
+  hosts:
+    gateway: gateway-dev.example.com
+    admin_ui: admin-dev.example.com
+    admin_api: admin-api-dev.example.com
+```
+
+- 일부만 선언하면 **나머지는 파생값으로 바뀝니다** — admin 파생 호스트가 env 의
+  Cognito 콜백 목록과 어긋나 SSO 가 깨질 수 있으니 세 키를 모두 명시하세요.
+- `route53-acm` 에서 `name` 범위 밖의 호스트는 `*.<name>` 와일드카드
+  인증서·레코드가 커버하지 못합니다 — validate 가 경고합니다.
+- `domain.name` 없이 hosts 만 있으면 무시됩니다 — name 이 파생 네이밍의
+  앵커입니다. compose 에서는 미적용(Caddyfile 의 host 가 env values 소유).
 
 ## 3. 도메인 없이 임시 HTTPS — `selfsigned-temp` (EKS 전용)
 

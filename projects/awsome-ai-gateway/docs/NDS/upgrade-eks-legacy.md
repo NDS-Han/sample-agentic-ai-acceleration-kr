@@ -172,3 +172,19 @@ bash deployment/scripts/smoke-test.sh --env prod --with-bedrock
 | 0045 unique team/dept | 기존 중복 데이터가 있으면 migration 실패 | 사전 중복 확인/정리 |
 | 구 ExternalSecret ownerRef | upgrade 시 Secret GC 창 | 1-3 선제거 |
 | `DB_MIGRATION_*` env | chart 에 미배선 — 기본값(60s/15min/10min)만 동작 | 필요하면 Job 템플릿에 env 추가 |
+
+---
+
+## 다음 단계 — 선언적 관리로 온보딩
+
+이 런북은 1회성 수동 경로입니다. 업그레이드가 끝난 배포를 NDS 방식(`gateway.yaml`
+정본 + `./deploy apply`)으로 이어받으려면:
+
+```bash
+./deploy doctor --capture --target eks --namespace "$GW_NS" --release "$GW_REL" \
+  --env-dir deployment/terraform/environments/<env 디렉토리>
+```
+
+capture 가 라이브 이미지 태그·호스트(`domain.hosts`)·HPA/pool(`capacity_tier`
+또는 `deploy.sizing`)까지 역생성합니다 — 절차는 [install-eks.md](install-eks.md)
+경로 B.

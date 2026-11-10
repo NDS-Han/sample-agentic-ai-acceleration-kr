@@ -48,7 +48,7 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
   없는 관리자 토큰)이 켜진 상태입니다 — **절대 오픈 금지**. eks에서
   `DEV_LOGIN_ENABLED`가 false인지도 확인.
 - [ ] **`network.allowed_cidrs` 확정** — 설치용 관리자 `/32`를 지우고 직원
-  출구 대역으로 교체 → `apply`. eks/eks·ecs 에서 이 값이 곧 ALB SG 인그레스로
+  출구 대역으로 교체 → `apply`. eks·ecs 에서 이 값이 곧 ALB SG 인그레스로
   reconcile됩니다(**SG를 직접 편집하지 마세요 — 컨트롤러가 지웁니다**).
   "대역이 없다(재택·동적 IP)"면 `0.0.0.0/0`으로 열지 말고 NAT/프록시로
   출구를 고정한 뒤 그 대역을 넣으세요.
@@ -282,3 +282,23 @@ aws bedrock get-foundation-model-availability --region <리전> \
 
 상세 실측(US dev 계정 재현 기록)은 레거시
 `docs/us-llm-gateway/ops/8-Q-marketplace.md` 참조.
+
+## 5. 용량 운영 — 언제 밴드를 올릴까
+
+`capacity_tier` 변경은 `gateway.yaml` 한 줄 + `./deploy apply`입니다
+([gateway-yaml.md](gateway-yaml.md#deploycapacity_tier--사용자-수-밴드-ecseks)).
+문제는 "언제 올리냐" — 판단 지표:
+
+| 신호 | 의미 | 조치 |
+|---|---|---|
+| `gateway_bedrock_executor_queue_depth > 0` 지속 | pod 당 256 슬롯(BEDROCK_THREAD_POOL 128×WORKERS 2)이 포화되어 대기열이 쌓임 — CPU-HPA는 이 상태를 못 봅니다(스트림 hold는 스레드 블록이라 CPU가 안 오름) | **한 밴드 위로** 또는 `min_replicas` 상향 |
+| `MaxConnectionsError` 로그 | Redis pool 고갈 — `redis.pool_size` 검토 (총량 = pool×2×max_replicas) | `deploy.sizing.redis.pool_size` 상향 |
+| `budget_deduct_failed`/`budget_lost_sentinel_failed` | 예산 회계의 Redis 실패 — 재시도·센티넬이 자가치유하지만 빈번하면 pool 압력 신호 | pool_size·노드 타입 검토 |
+| TTFB 상승 + 503 | 슬롯 부족의 직접 증상 | 밴드 상향 |
+
+역방향(과잉 프로비저닝) 판단: `gateway_bedrock_executor_inflight` 의 피크가
+슬롯 총량의 30%도 안 되면 한 밴드 아래로 내릴 수 있습니다 — min_replicas 가
+HA(배포·장애 시 수용) 역할도 하니 2 이하로는 내리지 마세요.
+
+실측 경로로 잡는 법: `loadtest/sse_loadgen.py` 로 목표 동시성 부하를 걸어
+queue_depth·503 비율을 확인하는 게 가장 정확합니다.

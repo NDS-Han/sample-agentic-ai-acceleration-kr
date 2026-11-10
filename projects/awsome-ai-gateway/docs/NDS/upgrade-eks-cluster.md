@@ -50,9 +50,10 @@ for a in coredns kube-proxy vpc-cni; do
     --output text
 done
 
-# 업그레이드 적합성 검사 (deprecated API·호환성 문제)
+# 업그레이드 적합성 검사 (deprecated API·호환성 문제) — 통과 못한 항목만
 aws eks list-insights --cluster-name "$GW_CLUSTER" --region "$GW_REGION" \
-  --query 'insights[?status==`PASSING`].name' --output table
+  --query 'insights[?status!=`PASSING`].{name:name,status:status,category:category}' \
+  --output table
 
 # 롤백 보험
 helm get values llm-gateway -n "$GW_NS" --kube-context "$GW_KCTX" -o yaml \
@@ -104,7 +105,9 @@ terraform apply -var-file=terraform.tfvars $VARGEN
 ```
 
 ③ **Fargate 파드 전량 재생성** — kubelet은 파드가 재생성될 때만 새 버전을
-얻습니다. 게이트웨이 포함 네임스페이스 전체를 굴립니다:
+얻습니다. 게이트웨이 포함 네임스페이스 전체를 굴립니다.
+전량 재생성 중 가용성은 `capacity_tier`/`sizing` 의 minReplicas 에 좌우됩니다 —
+`"500"` 밴드(min=1)면 순간 결손이 생기니 유지보수 창에서 하세요:
 
 ```bash
 kubectl --context "$GW_KCTX" -n "$GW_NS" rollout restart deploy --all

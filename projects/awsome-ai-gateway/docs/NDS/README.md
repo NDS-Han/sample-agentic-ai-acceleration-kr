@@ -10,22 +10,30 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 
 ## 어떤 경로로 배포할까
 
-| 상황 | 배포 대상 | 문서 | 뭐가 생기나 |
-|---|---|---|---|
-| 평가·POC·소규모(~50명) | `compose` (t0) | [install-compose.md](install-compose.md) | EC2 1대에 Docker Compose로 전체 스택 |
-| 소규모~표준(100~1000명) | `ecs` (t1/t2) | [install-ecs.md](install-ecs.md) | ECS Fargate + Aurora + ElastiCache — **인프라까지 전부 생성** |
-| EKS 신규 구축·대규모 | `eks` (t2/t3) | [install-eks.md](install-eks.md) | `bootstrap`이 인프라+앱 전체 생성 / `apply`로 업데이트 |
+| 상황 | 배포 대상 | 용량 선언 | 문서 | 뭐가 생기나 |
+|---|---|---|---|---|
+| 평가·POC·테스트 | `compose` | **t0 고정** (테스트·평가용 최저 티어만) | [install-compose.md](install-compose.md) | EC2 1대에 Docker Compose로 전체 스택 |
+| 소규모~표준 운영 | `ecs` (t1/t2) | `capacity_tier` 밴드 → task 수 | [install-ecs.md](install-ecs.md) | ECS Fargate + Aurora + ElastiCache — **인프라까지 전부 생성** |
+| EKS 신규 구축·대규모 | `eks` (t2/t3) | `capacity_tier` 밴드 → pod 수 | [install-eks.md](install-eks.md) | `bootstrap`이 인프라+앱 전체 생성 / `apply`로 업데이트 |
+
+> **용량은 사용자 수로 선언합니다** — `deploy.capacity_tier: "500" | "1000" |
+> "3000" | "6000" | "6000+"` 한 줄이 eks pod min/max 와 ecs task 수를
+> 밴드로 전개합니다 (세부: [gateway-yaml.md](gateway-yaml.md#deploycapacity_tier--사용자-수-밴드-ecseks)).
+> 개별 키는 `deploy.sizing` 으로 덮습니다. compose 는 복제본이 없어
+> 용량 선언 대신 인스턴스 크기가 전부입니다.
 
 > 기존에 이미 배포된 환경이 있다면 새로 만들지 말고
 > `./deploy doctor --capture`로 현재 상태를 gateway.yaml로 역생성하세요 —
 > [update.md](update.md)의 온보딩 절.
 
-## 명령 — 일상에서 쓰는 건 4개
+## 명령 — 일상에서 쓰는 것들
 
 ```bash
 ./deploy configure   # 설정 마법사 — 항목별 확인(Enter=유지) → 끝에서 "지금 배포?"
 ./deploy bootstrap   # [최초 1회] 신규 설치 — 인프라·시크릿·이미지·Cognito 전체
 ./deploy apply       # 업데이트/동기화 — yaml 그대로 배포 (render 내장)
+                     #   --plan: 변경 미리보기 (eks=helm server dry-run+
+                     #   라이브 diff, ecs=terraform plan, compose=산출물 diff)
 ./deploy doctor      # 상태·드리프트 점검  (--capture: 기존 배포 → yaml 역생성)
 ./deploy client-values  # 직원에게 전달할 env 4줄 출력 — client-setup.md §0 의 값
 ```

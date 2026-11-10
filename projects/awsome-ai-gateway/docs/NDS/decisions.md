@@ -33,17 +33,23 @@ drift로 보고한다.
 무효화된다. `common.merge_env`는 기존 값을 보존하고 비어 있는 키만 채운다 —
 다른 값이면 덮지 않고 보고한다.
 
-### 4. size_tier = deploy_target과 독립된 축
+### 4. 용량은 세 축 — target / size_tier / capacity_tier
 
 | | 결정 |
 |---|---|
 | deploy.target | 컴퓨트 기판 (compose/ecs/eks) — 서로 다른 제품 경로 |
-| size_tier | DB/캐시 토폴로지+HA (t0~t3) — `is_prod` 이진값 대체 |
+| size_tier | DB/캐시 토폴로지+HA (t0~t3) — `is_prod` 이진값 대체. eks 에서는 문서용 라벨 |
+| capacity_tier | **사용자 수 밴드 → 게이트웨이 복제본** — 5밴드("500"~"6000+") |
 
 `deploy_target`을 하나의 플래그로 통합된 파이프라인에 넣지 않는 이유: IRSA·
 ESO·ALB annotation 등이 EKS에 load-bearing이라 같은 키가 세 backend에서
 완전히 다른 구현으로 컴파일된다 — leaky abstraction. 대신 **공통 스키마 +
 backend별 렌더러**.
+
+같은 이유로 `size_tier` 하나에 "사용자 수 → replicas"를 넣지 않는다 — tier 는
+DB/캐시 토폴로지(돈이 드는 인프라)의 축이고 복제본 수는 컴퓨트 탄성의 축이라
+독립으로 움직여야 한다. 우선순위는 `size_tier < capacity_tier < deploy.sizing`
+— 가장 구체적인 선언이 이긴다.
 
 ### 5. 기능 플래그는 3버킷
 
@@ -123,10 +129,49 @@ ECS 탄력은 `aws_appautoscaling` target-tracking(CPU/Memory)으로만 — 트�
 용량의 80% → 에러). 클러스터·애드온·DB 엔진 같은 인프라 업그레이드는
 deploy 범위 밖(env tfvars 수동 절차) — `upgrade-eks-cluster.md` 런북 참조.
 
+### 15. capacity_tier — 사용자 수 밴드로 replica 산수를 캡슐화
+
+예상 사용자 수 → 동시 스트림 → 필요 pods/tasks 의 산식을 배포자마다
+재계산하게 하지 않고 5개 밴드로 고정한다 ("500"/"1000"/"3000"/"6000"/"6000+"):
+
+- 산식(Claude Code형 인터랙티브): 동시 스트림 ≈ 사용자×0.075,
+  pods ≈ 스트림 ÷ 180 (256슬롯/pod × 안전율 0.7)
+- **같은 밴드가 eks(pod min/max)와 ecs(task desired/max)에 같은 수로 전개** —
+  슬롯 단위가 같다 (2워커×128스레드=256/pod=task, ecs taskdef 가 같은
+  이미지·env 를 씀)
+- 명시 `deploy.sizing` 키는 밴드 위에 덮어씀 — 밴드는 기본값의 캡슐화이지
+  선언 우위가 아니다
+- 커넥션 예산 검사(eks redis, ecs Aurora)는 **밴드 병합 실효값**으로 수행 —
+  밴드가 검증을 우회하는 경로를 막는다
+
+### 16. compose 는 최저 티어(t0)로만 — 용량 선언 거부
+
+compose 는 테스트·평가용 단일 호스트라 복제본 축 자체가 없다.
+`capacity_tier`/`deploy.sizing` 을 선언하면 validate 에러 — "적용된 척"
+하는 사일런트 무시보다 명확한 실패. 용량은 인스턴스 크기가 전부이고,
+규모 필요 시 ecs/eks 로 가는 게 설계된 경로다.
+
+### 17. eks values 3레이어 — 정본은 yaml, 동적값은 --set
+
+```
+chart values.yaml(기본) → env overlay(values-eks-fargate-<env>[.local].yaml)
+  → gen/<env>/eks/values.yaml(yaml 소유 키만, 마지막이 이김)
+  + --set (terraform output 기반 동적값 — release values 에 누적되지 않아 매번 주입)
+```
+
+- env overlay 탐색 4단계: `…-fargate-<env>.local.yaml` → `…-<env>.local.yaml`
+  → `…-fargate-<env>.yaml` → `…-<env>.yaml` — `.local` 이 추적본보다 우선
+- gen overlay 는 **yaml 이 선언한 키만** 방출 — 미선언 키는 env values 가
+  유지돼 채택 배포에서 기존 HPA/pool 등을 덮지 않는다
+- `.local.yaml` 은 gitignore — 실 계정값·이미지 태그를 담아도 커밋 안 되는
+  머신별 레이어
+
 ## 의도적으로 하지 않은 것
 
-- **dual-render** (yaml → helm values): TF output `--set` 브릿지가 이미 단일
-  사슬로 존재 — 두 시스템이 같은 키를 쓰면 drift 재발
+- **dual-render** (yaml → 모든 helm values): gen overlay 는 yaml 선언 키만
+  담은 마지막 레이어이고, 동적값(TF output·라이브 발견)은 `--set` 브릿지가
+  별도 사슬로 주입한다 — yaml 이 모르는 값까지 yaml 로 만들어 두 시스템이
+  같은 키를 쓰면 drift 재발
 - **`deploy_target` 플래그식 통합**: 위 4번 참조
 - **site-config를 별도 레포/SM으로 분리**: tfvars가 이미 gitignore라 시급하지 않음 — 나중에
 - **terragrunt/cdktf**: 기존 손글씨 HCL과 코멘트 자산을 버리는 비용 대비 이득 없음

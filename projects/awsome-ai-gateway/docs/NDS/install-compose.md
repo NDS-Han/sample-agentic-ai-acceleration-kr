@@ -6,6 +6,11 @@
 **완성되면**: PostgreSQL + Redis + 마이그레이션 + 앱 6개(gateway-proxy·admin-api·admin-ui·scheduler·cost-recorder-worker·notification-worker) + Caddy(유일한 인입점)
 
 > ⚠️ **알고 시작하세요** — t0는 단일 노드입니다. 서버가 죽으면 서비스가 멈추고 복구는 백업에서 합니다(§6). 100명 이상·운영 중요도가 있으면 [install-ecs.md](install-ecs.md)(t1)를 선택하세요.
+>
+> **compose 형태는 최저 티어(t0)로만 배포 가능합니다** — `size_tier: t0` 외의
+> 선언이나 `capacity_tier`/`deploy.sizing` 사용은 validate 에러입니다.
+> 단일 호스트라 복제본·오토스케일이 없고, 용량은 인스턴스 크기(t3.xlarge 권장)가
+> 전부입니다. 규모가 필요하면 ecs/eks 경로로 가세요.
 
 ---
 
@@ -190,6 +195,11 @@ OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-l
 
 > ⚠️ `allowed_cidrs`를 비우면 **인터넷 전체에 게이트웨이가 열립니다** — 반드시 대역을 넣으세요.
 
+> ⚠️ **CLI 로그인을 쓰려면 `aws.allowed_roles` 를 채우세요** — gateway-cli 가
+> VK 를 발급받을 때 AssumeRole 할 수 있는 IAM role 목록입니다. compose 에서
+> **비우면 CLI 로그인이 fail-closed 로 전량 403** 입니다. admin-ui 브라우저
+> 로그인은 영향 없습니다.
+
 ## 3. 배포 — `./deploy apply`
 
 > **한 줄**: render(산출물 생성) → 확인 → `docker compose up -d` 까지 한 명령입니다.
@@ -232,9 +242,9 @@ OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-l
 > ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
 > 라우팅 행에는 샘플 크로스계정 ARN이 들어 있습니다. 단일 계정 배포면
 > `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면 없는 계정으로
-> AssumeRole을 시도해 요청이 전부 실패합니다. 이 값은 admin UI에서 못 고치고
-> **SQL**로 바꿉니다 — 절차는 [operations.md](operations.md) §3
-> (backend별 실행법 포함).
+> AssumeRole을 시도해 요청이 전부 실패합니다. admin UI `/apps` →
+> **"크로스 계정 라우팅"** 카드에서 비울 수 있습니다(캐시 즉시 무효화) —
+> UI를 못 쓸 때의 SQL 폴백까지 [operations.md](operations.md) §3 참조.
 
 ## 5. 이후 운영
 

@@ -18,11 +18,17 @@ env: my-gw                    # 환경 이름 (소문자·숫자·하이픈)
 aws:
   region: ap-northeast-2      # Bedrock·배포 리전
   account_id: "123456789012"  # ecs/eks 에서 필요할 수 있음
+  # allowed_roles: []         # CLI(STS 경로) VK 발급의 IAM role 허용 목록 —
+                              # helm 의 aws.allowedIamRoles 와 같은 의미.
+                              # 비우면 compose 에서 CLI 로그인이 전량 403.
 
 deploy:
   target: compose             # compose | ecs | eks
-  size_tier: t0               # t0 | t1 | t2 | t3
-  sizing: {}                  # 티어 기본값 세부 override (선택)
+  size_tier: t0               # t0 | t1 | t2 | t3 — compose 는 t0 고정
+  capacity_tier: ""           # ecs/eks 전용 — 사용자 수 밴드:
+                              # "500" | "1000" | "3000" | "6000" | "6000+"
+                              # (문자열 — 따옴표 필수)
+  sizing: {}                  # 밴드/프리셋 위의 개별 키 override (선택)
   tfstate_bucket: ""          # ecs/eks: terraform state S3 bucket
   tfstate_table: ""           # ecs/eks: lock DynamoDB table (권장)
   release: llm-gateway        # eks 전용 — helm release 이름
@@ -37,11 +43,15 @@ network:
   admin_internal: false       # eks 전용 — admin(admin-ui/api) Ingress만 internal ALB로
 
 domain:
-  mode: none                  # none | cloudfront-temp | selfsigned-temp | route53-acm
+  mode: none                  # none | route53-acm | selfsigned-temp(eks) | cloudfront-temp(미구현)
   name: example.com           # route53-acm 일 때 필수
   zone_id: Z123...            # Route53 hosted zone — 있으면 인증서 발급·DNS 검증·
                               # host 레코드·Cognito 콜백까지 자동 (eks/ecs 공통).
                               # 비우면 인증서·레코드는 수동 ([domain.md](domain.md) §2-1)
+  # hosts:                    # eks 전용 — 파생 네이밍 대신 쓸 실제 호스트.
+  #   gateway: gateway-dev.example.com   # capture 가 기존 호스트 보존용으로 기록.
+  #   admin_ui: admin-dev.example.com    # 일부만 선언하면 나머지는 파생값 —
+  #   admin_api: admin-api-dev.example.com  # 의도가 아니면 세 키 모두 명시.
 
 features:
   notifications:
@@ -103,34 +113,108 @@ infra:                         # 신규 설치 인프라 입력 — `deploy boot
 
 ## 항목별 상세
 
+### `aws`
+
+| 키 | 의미 |
+|---|---|
+| `region` | Bedrock·배포 리전 |
+| `account_id` | tfstate 추론·ECR 레지스트리 추론에 사용 |
+| `allowed_roles` | CLI(STS 경로) Virtual Key 발급의 **IAM role 허용 목록** — helm 의 `aws.allowedIamRoles`와 같은 의미. gateway-cli 가 자격증명으로 AssumeRole 할 수 있는 role ARN 리스트. **비우면 compose 배포에서 CLI 로그인이 fail-closed 로 전량 403** — compose 에서는 명시하세요. eks/ecs 는 env values·task role 이 공급 |
+
 ### `deploy.target` / `deploy.size_tier`
 
 허용 조합만 됩니다:
 
-| target | 가능한 tier |
-|---|---|
-| compose | t0 만 (단일 호스트) |
-| ecs | t1, t2 |
-| eks | t2, t3 |
+| target | 가능한 tier | 비고 |
+|---|---|---|
+| compose | t0 만 (단일 호스트) | **최저 티어로만 배포 가능** — 테스트·평가용. `capacity_tier`/`sizing` 선언 시 에러 |
+| ecs | t1, t2 | |
+| eks | t2, t3 | size_tier 는 eks 에서 **문서용** — 실제 크기는 아래 capacity_tier/sizing |
 
-### `deploy.sizing`
+### 용량 결정 — 세 층 우선순위
 
-ecs 경로에서 서비스별 cpu/memory/desired_count(+ 오토스케일 경계)를 티어
-기본값에서 override:
+```
+size_tier 프리셋  <  deploy.capacity_tier(사용자 수 밴드)  <  deploy.sizing(개별 키)
+        가장 구체적인 선언이 이깁니다 — sizing 의 명시 키가 항상 최종 승자
+```
+
+### `deploy.capacity_tier` — 사용자 수 밴드 (ecs·eks)
+
+예상 사용자 수 하나로 게이트웨이 복제본 수를 정합니다 — 직접 replica 수를
+계산할 필요가 없습니다:
 
 ```yaml
+deploy:
+  target: eks
+  size_tier: t3
+  capacity_tier: "3000"     # 문자열 — 따옴표 필수
+```
+
+| 밴드 | 대상 사용자 | eks → pod min/max | ecs → task desired/max | redis.poolSize(eks) |
+|---|---|---|---|---|
+| `"500"` | ~500명 | 1 / 3 | 1 / 3 | 150 |
+| `"1000"` | ~1,000명 | 2 / 5 | 2 / 5 | 150 |
+| `"3000"` | ~3,000명 | 3 / 6 | 3 / 6 | 150 |
+| `"6000"` | ~6,000명 | 4 / 8 | 4 / 8 | 150 |
+| `"6000+"` | ~10,000명+ | 6 / 15 | 6 / 15 | 150 |
+
+**밴드 산식** (Claude Code형 인터랙티브 기준 — `tiers.py` 주석 참조):
+
+- 동시 스트림 ≈ 사용자 × 0.075 (활성률 25% × 스트림밀도 0.3/활성자)
+- 필요 pods/tasks ≈ 스트림 ÷ 180 (256 슬롯/pod × 안전율 0.7 — 슬롯은
+  `BEDROCK_THREAD_POOL_SIZE` 128 × WORKERS 2)
+- RAG·배치 자동화 비중이 크면 밀도가 ~3배 → **한 밴드 위**로 잡으세요
+- `"6000+"`부터는 ElastiCache 노드 타입도 함께 검토 (ops/CPU 한계)
+
+주의:
+
+- **eks**: 밴드가 `gatewayProxy.autoscaling.enabled=true`를 강제하고
+  min/max 를 렌더합니다. 미선언 + sizing 도 없으면 autoscaling 키를 방출하지
+  않아 env values 의 HPA 가 그대로 유지됩니다.
+- **ecs**: 밴드는 gateway-proxy 의 `desired_count`/`max_count` 에만 전개됩니다
+  (admin-api·워커는 tier 프리셋 유지). redis.pool_size 는 ecs 에 적용되지
+  않습니다 — taskdef 가 module 기본값 150을 고정 사용.
+- **compose**: 선언 자체가 에러 — 단일 호스트라 전사할 복제본 축이 없습니다.
+- eks 의 Redis 커넥션 예산 검사(`pool_size × WORKERS 2 × max_replicas` >
+  30,000 → 에러)와 ecs 의 Aurora 예산 검사 모두 **밴드 병합 실효값**으로
+  계산됩니다.
+
+### `deploy.sizing` — 개별 키 override
+
+밴드/프리셋 위에 명시한 키만 덮어씁니다:
+
+```yaml
+# eks
+deploy:
+  sizing:
+    gateway-proxy:
+      min_replicas: 4          # → gatewayProxy.autoscaling.minReplicas
+      max_replicas: 10         # → gatewayProxy.autoscaling.maxReplicas
+      bedrock_thread_pool_size: 192   # → gatewayProxy.env.BEDROCK_THREAD_POOL_SIZE
+    redis:
+      pool_size: 200           # → redis.poolSize (워커 프로세스당)
+```
+
+```yaml
+# ecs
 deploy:
   sizing:
     gateway-proxy: { cpu: 2048, memory: 4096, desired_count: 4, max_count: 16 }
 ```
 
-지정한 키만 바뀌고 나머지는 티어 값이 유지됩니다.
+지정한 키만 바뀌고 나머지는 밴드/티어 값이 유지됩니다.
 
-- `max_count` — ECS service autoscaling 상한. 기본은 트래픽을 받는 두 서비스만:
-  `gateway-proxy` desired×4, `admin-api` desired×2 (CPU 60%·Mem 70%
+- eks 의 `redis.pool_size` — **워커 프로세스당** 커넥션 수. 노드 총량 ≈
+  pool × WORKERS(2) × max_replicas. `bedrock_thread_pool_size` 를 올리면
+  pod 당 슬롯·메모리(conn당 ~3MB)도 함께 잡으세요.
+- ecs `max_count` — service autoscaling 상한. 기본은 트래픽을 받는 두
+  서비스만: `gateway-proxy` desired×4, `admin-api` desired×2 (CPU 60%·Mem 70%
   target-tracking). 나머지 서비스는 min=max=desired 로 핀됩니다.
   `desired_count` 만 override 하면 상한도 같은 배수로 재계산됩니다 —
   프리셋 기준의 stale 상한이 남지 않습니다.
+- **ecs 함정**: `capacity_tier` 와 함께 `desired_count` 만 명시하면
+  `max_count` 가 desired×배수로 **재계산**되어 밴드 상한이 사라집니다 —
+  밴드 상한을 유지하려면 `max_count` 도 명시하세요.
 - `min_count` — 오토스케일 하한(기본=desired_count). desired_count 변경은
   target 의 min/max 경계로 전파됩니다.
 - `cost-recorder-worker` 는 스트림 consumer 이름 고정이라 desired_count 를
@@ -139,8 +223,8 @@ deploy:
   (pool 10+overflow 20 × 프로세스 × max_count)가 Aurora `max_acu`의
   ~225conn/ACU 대비 80% 를 넘으면 에러로 막습니다 — 스케일아웃이 DB 를
   고갈시키는 경로를 선언 단계에서 차단. 정상 수요(pool_size)가 `min_acu`
-  바닥을 넘으면 경고. 더 큰 탄력이 필요하면 RDS Proxy 도입을 검토하세요
-  (eks prod 가 이미 사용).
+  바닥을 넘으면 경고(단 min=max 동률의 provisioned 는 에러). 더 큰 탄력이
+  필요하면 RDS Proxy 도입을 검토하세요 (eks prod 가 이미 사용).
 
 ### `infra.*` — 신규 설치 인프라 입력
 
@@ -154,6 +238,8 @@ deploy:
 | `cognito_domain_suffix` | Hosted UI suffix. 비우면 `<region-code>-auth-<account>` 자동 (us-east-1→use1, ap-northeast-2→apne2) |
 | `cognito_groups` | OIDC 팀 그룹. `Claude_` 접두 필수(없는 그룹은 로그인 거부 — 스키마 검증). `ClaudeAdmin`은 자동 포함 |
 | `bedrock_allowed_model_arns` | IRSA 정책 허용 ARN 패턴. 비우면 backend 기본(eks=variables.tf 최신 목록, ecs=`clients.models_profile` 매핑) — 명시 시 그 목록을 덮어씁니다 |
+| `mantle_regions` | **eks 전용** — in-account Bedrock Mantle 호출 허용 리전. 비우면 env variables.tf 기본값. 선언하면 managed overlay 가 module.irsa 정책을 소유합니다 |
+| `db.engine_version` | **ecs 전용** — 기존 Aurora 클러스터의 실측 메이저 핀(예 `"16"`, `"16.13"`). parameter group family 를 그쪽에 맞춥니다. **기존 env 는 미선언 시 다음 plan 부터 family drift 가 뜨니 반드시 핀** — 신규 생성이면 비워 AWS 기본 버전을 씁니다 |
 | `db.*` | **ecs 전용** — tier 프리셋 위에 얹는 DB 세부 override: `mode`(serverless\|provisioned), `min_acu`/`max_acu`(0.5 단위, 0=일시정지), `instance_class`(provisioned 시). 매 `apply`마다 tfvars로 내려가므로 **업데이트 경로에서도 동작** — `configure`의 고급 분기나 직접 편집 후 apply. mode 전환은 재생성급 변경(노트 출력) |
 | `cache.*` | **ecs 전용** — ElastiCache override: `mode`(single\|replicated\|cluster), `node_type`(non-cluster·cluster 모두에 적용), `num_clusters`(non-cluster 노드 수 1~6 — replicated면 ≥2: primary+replica로 failover/Multi-AZ 자동), `num_node_groups`(cluster 샤드 수 1~90), `replicas_per_node_group`(cluster 샤드당 replica 1~5). `db.*`와 같은 override 관계. 토폴로지 키는 effective mode와 맞아야 하며 어긋나면 스키마가 거부합니다(terraform 무시 방지). node_type/mode 변경은 캐시 재기동·failover를 동반 |
 
@@ -184,7 +270,7 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 | 값 | 의미 | TLS |
 |---|---|---|
 | `none` | 도메인 없음 — 포트별 접속(8000/8080/3000) | HTTP 만 |
-| `cloudfront-temp` | CloudFront 기본 도메인으로 임시 https | 있음 (EKS 전용) |
+| `cloudfront-temp` | CloudFront 기본 도메인 임시 https — **미구현 스텁** (스키마에만 존재, compose 거부) | — |
 | `selfsigned-temp` | self-signed 인증서로 admin-ui만 임시 https — Cognito SSO용 (EKS 전용, 브라우저 경고) | 있음 |
 | `route53-acm` | 실제 도메인 + 인증서 | 있음 |
 
@@ -193,6 +279,30 @@ ecs/eks 경로의 terraform state 위치. 비우면 `llm-gateway-tfstate-<accoun
 
 `route53-acm` + `name: example.com` 이면 `gateway.` `admin-api.` `admin.` 세
 서브도메인이 자동으로 쓰입니다.
+
+### `domain.hosts` — eks 전용 호스트 오버라이드
+
+파생 네이밍(`gateway./admin./admin-api.<name>`) 대신 **실제 호스트를 명시**합니다 —
+기존 배포 채택(`doctor --capture`)이 `gateway-dev.*` 같은 다른 규칙의 호스트를
+보존할 때 기록하는 키입니다:
+
+```yaml
+domain:
+  mode: route53-acm
+  name: example.com
+  hosts:
+    gateway: gateway-dev.example.com
+    admin_ui: admin-dev.example.com
+    admin_api: admin-api-dev.example.com
+```
+
+- `domain.name` 없이 `hosts`만 선언하면 무시됩니다(validate 경고) — name 이
+  파생 네이밍의 앵커입니다.
+- **일부만 선언하면 나머지는 조용히 파생값으로 바뀝니다** — admin 파생 호스트가
+  env 의 Cognito 콜백 목록과 어긋나 SSO 가 깨질 수 있으니, 의도가 아니면 세 키를
+  모두 명시하세요.
+- `route53-acm` 에서 `name` 범위를 벗어나는 호스트는 `*.<name>` 와일드카드
+  인증서·레코드가 커버하지 못합니다 — validate 경고.
 
 ### `features`
 
@@ -247,15 +357,22 @@ compose=env):
   반영됩니다. eks는 env tfvars(`bedrock_allowed_model_arns`)와 차트 env values
   (`modelsProfile`)가 소유하므로 이 키는 무시됩니다(validate 경고)
 
-## 변경 후 절차
+## 변경 후 절차 — `./deploy apply` 가 표준 경로
 
 ```bash
 vi deployment/gateway.yaml
 ./deploy validate          # 스키마 검증 (실수 조기 발견)
-./deploy render            # compose 산출물 재생성 (시크릿 보존)
-docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/docker-compose.yml up -d
+./deploy apply --plan      # 변경 미리보기 — 아무것도 안 바뀜
+                           # (eks: helm server dry-run + 라이브 diff,
+                           #  ecs: terraform plan, compose: 산출물 diff)
+./deploy apply             # 확인 → 실제 적용
 ./deploy doctor            # 결과 확인
 ```
+
+compose 는 apply 가 `docker compose up -d` 까지 수행합니다 —
+`./deploy apply --build` 로 이미지 재빌드를 강제할 수 있습니다.
+수동 `render` + `docker compose up` 경로도 여전히 동작하지만 apply 가
+render 를 내장하므로 일상 경로에서는 불필요합니다.
 
 ## 수동으로 바꾸면 안 되는 것
 

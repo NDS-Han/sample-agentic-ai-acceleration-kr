@@ -34,10 +34,19 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
 
 ### 용량·오토스케일링
 
-- **gateway-proxy**(SSE 진입점): desired → `max_count`(기본 ×4)까지 CPU 60%·
-  Mem 70% target-tracking으로 자동 확장. t1은 2→8task, t2는 4→16task.
+- **용량 선언**: `deploy.capacity_tier`(사용자 수 밴드)가 gateway-proxy 의
+  `desired_count`/`max_count` 를 정합니다 — `"500"`→1/3, `"1000"`→2/5,
+  `"3000"`→3/6, `"6000"`→4/8, `"6000+"`→6/15. 산식·지침은
+  [gateway-yaml.md](gateway-yaml.md#deploycapacity_tier--사용자-수-밴드-ecseks).
+  미선언 시 tier 프리셋(t1 2→8task, t2 4→16task)이 적용됩니다.
+  개별 키는 `deploy.sizing` 으로 덮습니다.
+- **gateway-proxy**(SSE 진입점): desired → `max_count`까지 CPU 60%·
+  Mem 70% target-tracking으로 자동 확장.
   **admin-api**도 ×2까지 확장. scale-in은 ALB 드레인(300s) 후 종료라 진행 중
   스트림이 보호됩니다.
+- **함정**: `capacity_tier` 와 함께 `sizing.gateway-proxy.desired_count` 만
+  명시하면 `max_count` 가 desired×배수로 **재계산**되어 밴드 상한이 사라집니다 —
+  상한 유지가 필요하면 `max_count` 도 함께 명시하세요.
 - **싱글톤 계약**: scheduler·cost-recorder·notification은 스트림 consumer/
   cron 중복 방지로 1개 고정 — autoscaling도 min=max=1 핀입니다.
 - **DB/캐시 크기**: tier 프리셋이 기본 — `configure`의 "DB/캐시 크기를 직접
@@ -49,9 +58,10 @@ Cognito(SSO) + Secrets Manager — 전부 Terraform 선언형.
   (cluster)이 노드 수를, `node_type`이 단가를 결정합니다 — 토폴로지 키가
   mode와 어긋나면 스키마가 거부합니다(terraform이 조용히 무시하는 걸 방지).
 - **DB 커넥션 예산**: task가 늘면 pool 수요(30conn/task worst, gw 60)도
-  비례해 늡니다. `validate`가 최악치가 Aurora `max_acu`(~225conn/ACU)의
-  80%를 넘지 않는지 검사하고, 정상 수요가 `min_acu` 바닥을 넘으면 경고합니다 —
-  `deploy.sizing`/`infra.db`를 키우기 전에 `deploy validate`를 돌리세요.
+  비례해 늡니다. `validate`가 **capacity_tier 실효값 포함** 최악치가 Aurora
+  `max_acu`(~225conn/ACU)의 80%를 넘지 않는지 검사하고, 정상 수요가 `min_acu`
+  바닥을 넘으면 경고합니다 — `capacity_tier`/`deploy.sizing`/`infra.db`를
+  키우기 전에 `deploy validate`를 돌리세요.
   그 이상의 탄력이 필요하면 eks prod가 쓰는 **RDS Proxy**가 구조적 해법입니다
   (pool 다중화, 별도 비용).
 
@@ -180,9 +190,9 @@ terraform -chdir=deployment/terraform/environments/gateway-ecs apply \
 > ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
 > 라우팅 행에는 샘플 크로스계정 ARN(`arn:aws:iam::333…/2222…`)이 들어 있습니다.
 > 단일 계정 배포면 `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면
-> 없는 계정으로 AssumeRole을 시도해 요청이 전부 실패합니다. 이 값은 admin UI에서
-> 못 고치고 **SQL**로 바꿉니다 — 절차는 [operations.md](operations.md) §3
-> (backend별 실행법 포함).
+> 없는 계정으로 AssumeRole을 시도해 요청이 전부 실패합니다. admin UI `/apps` →
+> **"크로스 계정 라우팅"** 카드에서 비울 수 있습니다(캐시 즉시 무효화) —
+> UI를 못 쓸 때의 SQL 폴백까지 [operations.md](operations.md) §3 참조.
 
 ## 5. Cognito 사용자 생성 + admin 로그인
 

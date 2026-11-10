@@ -133,7 +133,7 @@ bash deployment/scripts/bootstrap-ec2.sh
 | aws-cli | v2 | |
 | terraform | ≥ 1.9 | |
 | kubectl | EKS ±1 minor (`KUBECTL_VERSION`으로 pin) | eks 경로 |
-| helm | 3.x (≥ 3.14 권장) | eks 경로 |
+| helm | 3.x — `apply --plan`의 server dry-run 은 ≥ 3.13 필요 (미만은 client dry-run 폴백). ≥ 3.14 권장 | eks 경로 |
 | docker + buildx | ≥ 24 | §ECR 이미지 빌드 — buildx 필수(optional-glob COPY) |
 | jq / yq / psql 16 / git / tmux | — | psql은 `PG_MAJOR`로 pin |
 | python3-venv/pip | — | `docs/NDS/deploy` 도구 venv 용 |

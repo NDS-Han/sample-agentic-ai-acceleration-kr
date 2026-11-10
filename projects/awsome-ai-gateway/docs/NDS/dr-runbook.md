@@ -35,7 +35,7 @@
 
 ```bash
 # 1) 새 EC2에 스택 재설치 — install-compose.md 절차를 gateway.yaml 기준으로 그대로
-./deploy install   # 또는 bootstrap — 환경에 맞는 NDS 명령
+./deploy apply     # render + 기동 (인프라까지 새로면 ./deploy bootstrap)
 
 # 2) 백업 .env 복원 — 최소한 이 두 줄이 맞아야 나머지가 말이 된다
 #    VIRTUAL_KEY_ENCRYPTION_KEY / DATABASE_URL / OIDC_* — 없으면 §4

@@ -70,11 +70,14 @@ docker run --rm -v <old-project>_pgdata:/from -v llm-gateway-<env>_pgdata:/to \
 ```
 
 읽는 것: 리전, 도메인/CIDR(ingress 어노테이션), notification provider,
-feature 플래그(WEB_SEARCH/FIREHOSE/otel), OIDC 계약, 서비스별 이미지 태그.
+feature 플래그(WEB_SEARCH/FIREHOSE/otel), OIDC 계약, **서비스별 이미지 태그**
+(다르면 `images.tags` 맵으로), **기존 호스트**(파생 규칙과 다르면 `domain.hosts`
+로 보존), **용량**(HPA min/max·`BEDROCK_THREAD_POOL_SIZE`·`redis.poolSize` —
+밴드와 정확히 일치하면 `capacity_tier`, 아니면 `deploy.sizing` 실측).
 라이브 ingress/deployment 와 values 가 다르면(kubectl 패치·set image) notes 로
-드리프트를 알립니다. 서비스별로 태그가 다른 것(단일 `images.tag`로 표현 불가),
-ESO/Fargate/RDS Proxy 등 eks 고유 구성도 notes 에 기록됩니다 — 캡처본은
-**온보딩용 후보**이지 eks 재배포 가능한 완전한 선언이 아닙니다.
+드리프트를 알립니다. `zone_id`·ESO/Fargate/RDS Proxy 등 eks 고유 구성은
+notes 에 기록됩니다 — 캡처본은 **온보딩용 후보**이지 eks 재배포 가능한
+완전한 선언이 아닙니다.
 
 ### us-llm-gateway(레거시 스크립트) 배포를 온보딩할 때
 
@@ -84,15 +87,14 @@ ESO/Fargate/RDS Proxy 등 eks 고유 구성도 notes 에 기록됩니다 — 캡
 ESO, Fargate, HPA/requests)은 그대로 유지**되고, terraform 인프라도 env
 tfvars 소유로 남습니다. 다만 채택 전 두 가지를 결정하세요:
 
-1. **Ingress host 네이밍** — 레거시는 `gateway-dev.<domain>` 형태, NDS 는
-   `domain.name`이 있으면 `gateway./admin./admin-api.<domain>`으로 재작성합니다.
-   - 이름을 바꿔도 되면(dev 등): 그대로 채택 → apply 후 Route53 레코드와
-     클라이언트 URL, admin nextauth 를 새 host로 갱신. ACM 인증서가
-     `*.<domain>` 와일드카드면 같은 레벨 이름이라 별도 발급 불필요.
-   - 기존 이름을 유지해야 하면(prod 등): 채택본에서 `domain.mode: none`으로
-     두고 `domain.name`을 비우세요 — overlay 가 host 를 건드리지 않아 env
-     values 의 `gateway-dev.*` 와 인증서 어노테이션이 유지됩니다. yaml 상
-     mode=none 이 실제와 다른 표현이라는 점만 감안하세요.
+1. **Ingress host 네이밍** — 레거시는 `gateway-dev.<domain>` 형태, NDS 파생
+   규칙은 `gateway./admin./admin-api.<domain>`입니다. capture 가 기존 호스트를
+   `domain.hosts` 에 기록하므로 **이름은 그대로 보존됩니다** — 일부만
+   선언되면 나머지가 파생값으로 바뀌니 세 키를 확인하세요
+   ([gateway-yaml.md](gateway-yaml.md#domainhosts--eks-전용-호스트-오버라이드)).
+   파생 네이밍으로 옮기고 싶을 때만 `domain.hosts` 를 지우세요 — 그러면
+   apply 후 Route53 레코드와 클라이언트 URL, admin nextauth 를 새 host로
+   갱신해야 합니다(ACM `*.<domain>` 와일드카드는 같은 레벨이라 별도 발급 불필요).
 2. **첫 apply 는 차트 업그레이드를 겸합니다** — 로컬 repo 의 차트가 설치된
    release 보다 새 버전일 수 있습니다. `./deploy apply --plan` 으로 helm
    dry-run/차이를 먼저 보고, 가능하면 의도된 업그레이드 창에서 채택하세요.
@@ -145,8 +147,7 @@ backend 마다 **이미지를 누가 빌드하는지**가 다릅니다 — 이 �
 ```bash
 cd awsome-ai-gateway
 git fetch && git checkout <새 브랜치/태그>
-./deploy render
-docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/docker-compose.yml up -d --build
+./deploy apply --build      # render + 재빌드 + up -d 까지
 ./deploy doctor
 ```
 
@@ -224,7 +225,7 @@ plane 별로 다릅니다 — "태그만 되돌리기"는 롤백이 아닙니다
 | 앱 코드/이미지 (compose) | 이전 커밋/태그로 `render` + `up -d` |
 | 앱 코드/이미지 (eks) | `images.tag`/`images.tags` 를 이전 값으로 되돌려 `./deploy apply`. 실패한 upgrade 는 helm 이 자동 롤백(`--atomic`/`--rollback-on-failure`). 수동 리비전 복귀는 `helm rollback <release> -n <ns>` — 단 **migration hook 은 rollback 시 재실행되지 않는다** |
 | 앱 코드/이미지 (ecs) | `images.tag` 를 이전 값으로 되돌려 `./deploy apply`. 배포 실패는 circuit breaker 가 서비스를 자동으로 이전 task def 로 되돌린다 |
-| 설정(gateway.yaml) | 이전 값으로 되돌려 `render` + 재기동 |
+| 설정(gateway.yaml) | 이전 값으로 되돌려 `./deploy apply` |
 | **DB 마이그레이션** | 다운그레이드 없음 — forward-fix (새 마이그레이션으로 수복) |
 | `.env` 삭제/유실 | **백업에서 복원** — VIRTUAL_KEY_ENCRYPTION_KEY를 잃으면 발급된 Virtual Key 전부 재발급 필요 |
 
@@ -239,7 +240,7 @@ domain:
   mode: route53-acm       # compose는 caddy 가 자동 TLS
   name: example.com
 
-./deploy render && docker compose --env-file deployment/gen/<env>/.env -f deployment/gen/<env>/docker-compose.yml up -d
+./deploy apply             # compose는 render+up 내장 — caddy 자동 TLS
 ```
 
 DNS에 `gateway.`/`admin-api.`/`admin.` `example.com` A레코드(서버 IP)가 먼저
@@ -252,8 +253,10 @@ ACM 인증서는 모듈이 만들고 DNS 검증 레코드도 자동 생성됩니
 확인해 수동 등록 후 재적용하세요. 도메인 도입 시 NEXTAUTH_URL 도 새 도메인으로
 자동 갱신됩니다 — 세션 재로그인이 필요합니다.
 
-**eks** — cert 발급·`certificate-arn`·DNS CNAME 이 수동입니다. 절차는
-[install-eks.md](install-eks.md) §4.
+**eks** — `domain.zone_id` 가 있으면 cert 발급·검증·레코드·콜백까지
+`./deploy apply` 가 자동 처리합니다 (install-eks.md §4). `zone_id` 없는
+사내 DNS 경로만 인증서 발급·CNAME·host 레코드가 수동입니다 —
+[domain.md](domain.md) §2-1.
 
 ## public → private 전환
 

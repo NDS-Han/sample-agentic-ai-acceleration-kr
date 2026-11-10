@@ -48,19 +48,23 @@ profiles 는 SQL 로 확인·정규화**해야 합니다 — 시드의 크로스
 이 경로는 **기존 배포를 이어받아** helm 릴리스만 관리합니다 — EKS 클러스터·Aurora·
 ElastiCache·Cognito·IRSA·ESO 같은 인프라는 기존 terraform env 가 계속 소유합니다.
 
-## 개념 정리 — `env` 이름 vs `size_tier`
+## 개념 정리 — `env` 이름 vs 용량 선언
 
 이 둘은 직교하는 별개 개념입니다:
 
 | 개념 | 의미 | 예 |
 |---|---|---|
 | `env` / `tf_env_dir` | **어느 인프라 스택인가** — DB·Redis·IRSA·Cognito·시크릿 경로(`/llm-gateway/<env>/*`)를 만든 terraform env | `llm-gateway-dev`, `llm-gateway-prod` |
-| `size_tier` | **그 스택의 크기** — 우리가 옵션으로 선택 | `t2`, `t3` |
+| 용량 | **그 스택의 크기** — `size_tier`(문서용 라벨) + `capacity_tier`(사용자 수 밴드 → pod min/max) + `deploy.sizing`(개별 키) | `"3000"`, `min_replicas: 4` |
 
 `dev`는 크기가 아니라 스택 식별자입니다 — 같은 t3로 dev/prod 두 스택을 띄울
 수 있습니다. `--env-dir`에는 **실제로 그 인프라를 만든 디렉토리**를 지정하면
 되고 이름이 꼭 `*-dev`일 필요는 없습니다. 아래 예의 `llm-gateway-dev`는
 기존 배포가 그 이름으로 만들어졌기 때문에 쓰는 것입니다.
+
+> **eks 에서 `size_tier` 는 문서용 라벨입니다** — eks 의 컴퓨트 크기는
+> `capacity_tier`/`deploy.sizing`(또는 env values 의 기존 HPA)이 정합니다.
+> `size_tier` 는 "이 환경이 어느 규모로 의도됐는지" 기록하는 값입니다.
 
 ## 사전 조건
 
@@ -84,14 +88,21 @@ vi deployment/gateway.captured-<env>.yaml   # notes 의 빈칸 채우기
 mv deployment/gateway.captured-<env>.yaml deployment/gateway.yaml
 ```
 
-capture notes 가 알려주는 주의점:
+capture 가 기록하는 것과 notes 가 알려주는 주의점:
 
-- **서비스별 이미지 태그가 다른 경우**(예: proxy 1.0.86 / api 1.0.89 / ui 1.0.168) —
-  `images.tag` 는 하나뿐이라, 첫 `apply` 에서 **전 서비스가 같은 태그로 통일**됩니다.
-  의도된 통일이면 그대로, 아니면 태그를 먼저 정리하세요.
-- `domain.name` 은 `gateway.<base>`/`gateway-dev.<base>` 에서 base 만 추출합니다.
-  다음 `render` 가 `gateway./admin./admin-api.<name>` 네이밍을 씁니다 — 기존
-  `gateway-dev.*` 패턴과 다르면 URL 이 바뀌니 확인하세요.
+- **서비스별 이미지 태그가 다른 경우** — 태그가 다르면 `images.tags` 맵에
+  서비스별 핀으로 기록됩니다 (라이브 > values 명시 > 차트 appVersion 순).
+  라이브가 values 와 다르면(수동 `set image`) 드리프트를 notes 로 알립니다.
+- **기존 호스트 보존** — `gateway-dev.*` 처럼 파생 규칙과 다른 host 는
+  `domain.hosts` 에 기록돼 다음 apply 에도 그대로 유지됩니다.
+- **용량 역산** — 라이브 HPA min/max·`BEDROCK_THREAD_POOL_SIZE`·
+  `redis.poolSize` 를 읽어 밴드와 정확히 일치하면 `capacity_tier` 로,
+  아니면 `deploy.sizing` 실측으로 기록합니다.
+- `domain.name` 은 `gateway.<base>`/`gateway-dev.<base>` 에서 base 만 추출합니다 —
+  hosts 가 기록되면 네이밍은 유지되고, hosts 가 없으면 다음 render 가
+  `gateway./admin./admin-api.<name>` 규칙을 씁니다.
+- `zone_id`·ESO/Fargate/RDS Proxy 같은 eks 고유 구성은 캡처되지 않습니다 —
+  notes 의 빈칸을 채우세요.
 
 ## 2. 업데이트 — 변경 반영
 
@@ -109,17 +120,28 @@ capture notes 가 알려주는 주의점:
 
 ```bash
 vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
-./deploy apply --plan          # helm upgrade --dry-run (변경 없음, render 내장)
+./deploy apply --plan          # 변경 미리보기 — 아무것도 안 바뀜 (render 내장)
 ./deploy apply                 # plan 출력 → 확인(y) → helm upgrade --install
 ```
 
 > 다른 클러스터 context가 잡혀 있을 수 있으면 `--context <ctx>`를 붙여
 > 대상을 명시하세요 — apply가 helm/kubectl 전부에 그 context를 전달합니다.
 
+`--plan` 이 보여주는 것 (helm ≥ 3.13, 미만이면 client dry-run 폴백):
+
+- **server dry-run** — apiserver 가 라이브 release 와 실제로 검증한 결과를
+  라이브 매니페스트와 정규화 비교해 **변경/추가/삭제 리소스 + unified diff**
+- managed 인프라 terraform plan(yaml 소유 모듈만 — body_logging/IRSA/cognito 등)
+- web_search·pricing_lambda 프로비저닝 상태
+- 라이브를 못 읽으면 전체 덤프로 폴백합니다
+
 ### 내부 동작
 
-1. values 레이어 = `values.yaml`(차트 기본) → `values-eks-fargate-<env>[.local].yaml`
-   → `gen/<env>/eks/values.yaml`(우리 오버레이, 마지막이 이긴다)
+1. values 레이어 = `values.yaml`(차트 기본) → env overlay →
+   `gen/<env>/eks/values.yaml`(우리 오버레이, 마지막이 이긴다)
+   - env overlay 탐색 순서(첫 발견이 이김):
+     `values-eks-fargate-<env>.local.yaml` → `values-eks-<env>.local.yaml`
+     → `values-eks-fargate-<env>.yaml` → `values-eks-<env>.yaml`
    - **라이브 값은 `values-eks-fargate-<env>.local.yaml`에 두세요** — git이
      무시하는(gitignore) 머신별 파일이라 실 계정·엔드포인트·이미지 태그를
      담아도 커밋되지 않고, 추적된 템플릿이 깨끗해 브랜치 전환을 막지 않습니다.
@@ -131,6 +153,30 @@ vi deployment/gateway.yaml     # 예: images.tag 를 새 버전으로
 3. migration = 차트의 pre-upgrade hook Job — 자동 실행, 실패 시 upgrade 실패
 4. helm3 `--atomic` / helm4 `--rollback-on-failure` + `--cleanup-on-fail` 자동 선택
 5. domain=none 이면 live ingress 의 ALB hostname 을 `adminUi.nextauthUrl` 로 2차 주입
+
+## 2.5 용량 조정 — `capacity_tier` / `deploy.sizing`
+
+게이트웨이 복제본 수는 `gateway.yaml` 한 줄로 정합니다 — helm values 나
+`.local.yaml` 을 직접 고칠 필요가 없습니다:
+
+```yaml
+deploy:
+  capacity_tier: "3000"    # ~3,000명 밴드 → pod min 3 / max 6
+  # sizing:                # 밴드 위 개별 키 override (선택)
+  #   redis: { pool_size: 200 }
+```
+
+밴드 표와 산식(동시 스트림 ≈ 사용자×0.075, pod 당 ~180 슬롯)은
+[gateway-yaml.md](gateway-yaml.md#deploycapacity_tier--사용자-수-밴드-ecseks)
+참조. 개별 키: `gateway-proxy.{min_replicas,max_replicas,
+bedrock_thread_pool_size}`, `redis.pool_size` — 지정한 키만 밴드 위에 덮습니다.
+
+- 밴드를 바꾸면 `gatewayProxy.autoscaling.enabled=true` + min/max 가 렌더됩니다.
+- **밴드도 sizing 도 없으면** autoscaling·poolSize 키를 방출하지 않아 env
+  values 의 기존 HPA/pool 이 그대로 유지됩니다(채택 배포의 기본 동작).
+- Redis 총 커넥션 ≈ `pool_size × WORKERS(2) × max_replicas` — 노드
+  maxclients 예산을 validate 가 검사합니다.
+- 변경 적용: `./deploy apply --plan`(HPA diff 확인) → `./deploy apply`.
 
 > **`gen/<env>/eks/values.yaml` 은 생성물입니다 — 직접 고치지 마세요.**
 > 기존 `values-eks-fargate-<env>.yaml` 도 그대로 둡니다 — 우리 오버레이가
@@ -169,7 +215,7 @@ domain:
 
 - `domain.name`을 쓰면 host 이름이 **env 무관 규칙**(`gateway.`/`admin.`/
   `admin-api.`)으로 바뀝니다 — `gateway-dev.<domain>` 같은 기존 이름을 유지해야
-  하면 `domain.name`을 비워두세요 (env values 의 host 가 그대로 쓰입니다).
+  하면 `domain.hosts` 에 실제 호스트를 명시하세요 (capture 가 자동 기록).
 - `zone_id`가 없으면(사내 DNS 경로) 인증서 발급·검증과 host 레코드만 수동입니다 —
   절차는 [domain.md](domain.md) §2-1.
 - 콜백 반영의 `module.cognito` 타깃 apply는 `deploy.tf_env_dir`이 가리키는
@@ -181,12 +227,13 @@ domain:
 
 | 관리함 (gateway.yaml → helm) | 관리하지 않음 (기존 terraform/스크립트 소유) |
 |---|---|
-| 이미지 태그(전 서비스 통일) | EKS 클러스터·Fargate profile |
-| ingress host·inbound-cidrs·scheme | Aurora·ElastiCache·VPC |
-| OIDC 계약(3개 서비스 동일) | Cognito user pool 자체 |
-| notification provider·발신자 | IRSA role 생성(ARN 주입만) |
-| WEB_SEARCH/body_logging 플래그 | AgentCore Gateway·Firehose 생성 |
-| migration hook 실행 | ESO·SecretStore |
+| 이미지 태그(`images.tag` + 서비스별 `images.tags` 핀) | EKS 클러스터·Fargate profile |
+| **용량 — HPA min/max·`BEDROCK_THREAD_POOL_SIZE`·`redis.poolSize`** (capacity_tier/sizing 선언 시) | Aurora·ElastiCache·VPC |
+| ingress host·inbound-cidrs·scheme | Cognito user pool 자체 |
+| OIDC 계약(3개 서비스 동일) | IRSA role 생성(ARN 주입만) |
+| notification provider·발신자 | AgentCore Gateway·Firehose 생성 |
+| WEB_SEARCH/body_logging 플래그 | ESO·SecretStore |
+| migration hook 실행 | |
 
 인프라 변경이 필요하면 해당 terraform env(`environments/llm-gateway-<env>`)에서
 `terraform plan/apply` — doctor 가 그쪽 drift 도 같이 봅니다.

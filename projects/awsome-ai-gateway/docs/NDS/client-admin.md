@@ -65,7 +65,7 @@ powershell -File installer\packaging\build.ps1 -SignThumbprint <인증서>   # W
   (Windows: `-SignThumbprint` 또는 `-SignPfxFile`, Linux: `--sign-gpg-key` + 자동 `.sha256`).
 - **cowork 인스톨러**는 별도 빌드 — `cowork-installer/installer/packaging/build.ps1`,
   site-config 에 cowork 전용 키(`coworkGatewayHttpsUrl`, `orgUuid`, `expectedCaSha256`,
-  `coworkModels`) 추가. 상세는 `us-llm-gateway/cowork/installer/cowork-installer-build-windows.md`.
+  `coworkModels`) 추가. 상세는 [cowork/installer/cowork-installer-build-windows.md](cowork/installer/cowork-installer-build-windows.md).
 - site-config 없이 빌드하면 OIDC 값이 비어 직원이 `--issuer-url` 등을 손으로 넘겨야 합니다.
 - 오프라인 빌드: `download_wheels.ps1`/`.sh`로 wheel 캐시를 먼저 만들고 `-WheelDir`/`--wheel-dir`.
 
@@ -106,7 +106,7 @@ powershell -File installer\packaging\build.ps1 -SignThumbprint <인증서>   # W
 
 ## 5. 버전업 · 재배포
 
-1. `gateway-cli-v2/pyproject.toml` 버전 bump → 재빌드(§2) → 새 exe/.run/.deb 배포.
+1. `installer/packaging/entrypoints/gateway-cli-v2/pyproject.toml` 버전 bump → 재빌드(§2) → 새 exe/.run/.deb 배포.
 2. 직원 쪽은 재설치 — Windows는 같은 AppId 라 인스톨러가 업그레이드로 처리,
    Linux는 `.run` 재실행(덮어쓰기) 또는 `apt`/`dpkg`가 버전 비교.
 3. 토큰 캐시·설정은 설치물 교체와 무관하게 `~/.gateway-cli`/`~/.codex` 등에 남습니다.
@@ -127,4 +127,4 @@ powershell -File installer\packaging\build.ps1 -SignThumbprint <인증서>   # W
 | [operations.md](operations.md) | Cognito 사용자·그룹, 오픈 전 하드닝 체크리스트, 라우팅 프로필 SQL |
 | `installer/packaging/README.md` | Windows 빌드 상세 (서명·site-config·site-extra·오프라인) |
 | `installer/packaging-linux/README.md` | Linux 빌드 상세 (.run/.deb·GPG·wheel 캐시) |
-| `us-llm-gateway/cowork/installer/` | cowork 인스톨러 빌드·사용·제거 상세 |
+| `cowork/installer/` (docs/NDS) | cowork 인스톨러 빌드·사용·제거 상세 |

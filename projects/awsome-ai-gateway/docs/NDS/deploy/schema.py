@@ -108,8 +108,9 @@ class FeaturesConfig:
     # 서비스 계정 장기 VK 발급 — 기본 꺼짐(opt-in). true 면 발급 허용, false/미선언
     # 면 admin-api 가 표지·발급 엔드포인트를 403 거부하고 GET /admin/service-accounts
     # 가 service_keys_enabled=false 를 내려 UI 가 발급 버튼을 숨긴다.
-    # 기존 키는 폐기 전까지 유효하다(발급만 차단). admin-api 앱 기본은 true 라
-    # 렌더러는 이 값을 항상 명시적으로 내려보낸다.
+    # 기존 키는 폐기 전까지 유효하다(발급만 차단). admin-api 앱 기본도 false 라
+    # fail-closed 가 이중으로 보장되지만, 렌더러는 값을 항상 명시적으로
+    # 내려보내 env 오버레이의 stale true 를 덮는다.
     service_keys: bool = False
 
 
@@ -356,8 +357,9 @@ class GatewayConfig:
                      "프로비저닝합니다(boto3 + us-east-1 agentcore/IAM 권한 필요). "
                      "과금은 ~$7/1,000 queries, idle ≈ $0 입니다.")
         if self.deploy.target == "eks":
-            w.append("size_tier 는 eks 경로에서 실제 리소스를 바꾸지 않습니다 — "
-                     "컴퓨트 크기는 차트 values/HPA/requests 가 결정합니다 (기존 인프라 이어받기 모델).")
+            w.append("size_tier 는 eks 경로에서 문서용입니다 — 컴퓨트 크기는 "
+                     "deploy.capacity_tier(밴드)와 deploy.sizing(개별 키)이 "
+                     "정하고, 미선언 시 env values 가 그대로 유지됩니다.")
         if self.deploy.target == "eks" and not self.images.registry:
             w.append("images.registry 비어 있음 — apply 시 계정 기본 ECR 로 추론합니다.")
         if self.deploy.target == "eks":
@@ -524,8 +526,11 @@ class GatewayConfig:
             elif is_eks:
                 # Redis 커넥션 예산 — pool_size 는 워커 프로세스당이다. WORKERS
                 # 기본 2. 노드 maxclients 는 스키마가 모르므로 산식만 경고한다.
-                gp = self.deploy.sizing.get("gateway-proxy") or {}
-                rd = self.deploy.sizing.get("redis") or {}
+                # 실효값 = capacity_tier 밴드 + sizing 명시 키 병합 (render 와 동일).
+                from .tiers import eks_capacity_sizing
+                eff = eks_capacity_sizing(self)
+                gp = eff.get("gateway-proxy") or {}
+                rd = eff.get("redis") or {}
                 pool = rd.get("pool_size")
                 mx = gp.get("max_replicas")
                 if pool and mx and pool * 2 * mx > 30_000:
