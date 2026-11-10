@@ -78,14 +78,6 @@ if [ -n "$(git -C "$ROOT" status --porcelain -- "${CTX#$ROOT/}" 2>/dev/null || t
   echo "    커밋 후 다시 실행하는 것을 권장한다." >&2
 fi
 
-# ---- 동일 태그 덮어쓰기 방지 ----
-if aws ecr describe-images --repository-name "llm-gateway/$SVC" \
-     --image-ids imageTag="$TAG" --query 'imageIds[0]' --output text 2>/dev/null | grep -q .; then
-  echo "❌ $ECR_BASE/$SVC:$TAG 는 이미 ECR 에 있다." >&2
-  echo "   같은 태그 덮어쓰기는 변경을 구별할 수 없게 만든다 — 커밋으로 새 SHA 를 만들거나 TAG=<명시값> 을 지정하라." >&2
-  exit 1
-fi
-
 SET_ARGS=(--set "$KEY.image.tag=$TAG")
 [ "$SVC" = "admin-api" ] && SET_ARGS+=(--set "scheduler.image.tag=$TAG")
 
@@ -156,7 +148,7 @@ if [ "$FORCE" -eq 0 ]; then
              --query 'imageDetails[0].imagePushedAt' --output text 2>&1); then
     echo "⏭️  건너뜀 — ECR 에 이미 있음: $SVC:$TAG (push $out)"
     echo "    태그가 그대로라 다시 빌드하지 않는다(옛 이미지를 덮어쓰지 않음)."
-    echo "    코드가 바뀌었으면 13-bump-image-tags.sh 로 태그부터 올린다. 꼭 덮어써야 하면 --force."
+    echo "    태그는 git HEAD SHA — 코드가 바뀌었으면 커밋해 새 SHA 를 만들거나 TAG=<명시값> 을 지정한다. 꼭 덮어써야 하면 --force."
     exit 0
   elif [[ "$out" != *ImageNotFoundException* ]]; then
     echo "❌ ECR 조회 실패 — 이 태그가 이미 있는지 알 수 없어 멈춘다(덮어쓰기 방지):"
