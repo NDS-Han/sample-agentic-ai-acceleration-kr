@@ -519,8 +519,16 @@ def test_capacity_tier_unknown_rejected():
             images={"tag": "abc"}))
 
 
-def test_capacity_tier_on_ecs_rejected():
-    with pytest.raises(schema.SchemaError, match="eks 경로 전용"):
+def test_capacity_tier_valid_on_ecs():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "ecs", "size_tier": "t2", "capacity_tier": "3000"},
+        images={"tag": "abc"}))
+    assert cfg.deploy.capacity_tier == "3000"
+
+
+def test_capacity_tier_on_compose_rejected():
+    with pytest.raises(schema.SchemaError, match="compose"):
         schema.from_dict(minimal(
-            deploy={"target": "ecs", "size_tier": "t1", "capacity_tier": "3000"},
+            deploy={"target": "compose", "size_tier": "t0",
+                    "capacity_tier": "3000"},
             images={"tag": "abc"}))

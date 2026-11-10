@@ -229,6 +229,16 @@ def ecs_service_sizing(cfg) -> dict:
     for name, factor in AUTOSCALE_MAX_FACTOR.items():
         sizing[name]["max_count"] = sizing[name]["desired_count"] * factor
 
+    # deploy.capacity_tier (사용자 수 밴드) — gateway-proxy 태스크 수를 밴드로.
+    # task 도 pod 와 같은 슬롯 단위(WORKERS=2 × 128 스레드 = 256/task — ecs
+    # taskdefs.tf 가 같은 이미지/env 를 쓴다)라 밴드가 그대로 전사된다.
+    # size_tier 의 gateway_tasks 보다 정확한 선언 — sizing 명시 키는 아래서 최종 승자.
+    cap = getattr(cfg.deploy, "capacity_tier", "") or ""
+    if cap and cfg.deploy.target == "ecs":
+        band = EKS_CAPACITY_TIERS[cap]["gateway-proxy"]
+        sizing["gateway-proxy"]["desired_count"] = band["min_replicas"]
+        sizing["gateway-proxy"]["max_count"] = band["max_replicas"]
+
     # deploy.sizing 으로 서비스별 override 가능 (예: {"gateway-proxy": {"cpu": 2048}})
     for name, ov in (cfg.deploy.sizing or {}).items():
         if name in sizing and isinstance(ov, dict):

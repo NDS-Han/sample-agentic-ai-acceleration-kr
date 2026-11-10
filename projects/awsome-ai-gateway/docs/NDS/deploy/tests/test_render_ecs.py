@@ -373,3 +373,29 @@ def test_service_keys_tfvars():
     assert ecs_render.desired_tfvars(_cfg())["service_keys_enabled"] is False
     assert ecs_render.desired_tfvars(
         _cfg(features={"service_keys": True}))["service_keys_enabled"] is True
+
+
+def test_capacity_tier_maps_to_gateway_task_counts():
+    """capacity_tier 밴드가 gateway-proxy desired/max 태스크 수로 전개."""
+    v = ecs_render.desired_tfvars(_cfg(
+        deploy={"target": "ecs", "size_tier": "t2", "capacity_tier": "6000"}))
+    gw = v["service_sizing"]["gateway-proxy"]
+    assert gw["desired_count"] == 4 and gw["max_count"] == 8
+
+
+def test_capacity_tier_sizing_override_wins():
+    """명시 sizing 키는 밴드 위에 오버라이드 — 나머지 밴드값은 유지."""
+    v = ecs_render.desired_tfvars(_cfg(
+        deploy={"target": "ecs", "size_tier": "t2", "capacity_tier": "3000",
+                "sizing": {"gateway-proxy": {"max_count": 10}}}))
+    gw = v["service_sizing"]["gateway-proxy"]
+    assert gw["desired_count"] == 3 and gw["max_count"] == 10
+
+
+def test_capacity_tier_only_touches_gateway_proxy():
+    """다른 서비스 수는 밴드가 건드리지 않는다 — tier 프리셋 유지."""
+    v = ecs_render.desired_tfvars(_cfg(
+        deploy={"target": "ecs", "size_tier": "t2", "capacity_tier": "6000"}))
+    s = v["service_sizing"]
+    assert s["cost-recorder-worker"]["desired_count"] == 1
+    assert s["admin-api"]["desired_count"] == 2   # t2 tasks_per_service

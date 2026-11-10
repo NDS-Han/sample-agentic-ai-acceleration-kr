@@ -531,9 +531,12 @@ class GatewayConfig:
                              f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
                              f"예산을 확인하세요.")
         if self.deploy.capacity_tier:
-            if self.deploy.target != "eks":
-                e.append("deploy.capacity_tier 는 eks 경로 전용입니다 "
-                         "(ecs 는 size_tier+sizing 으로 크기를 정합니다).")
+            # 밴드 전개는 target 마다: eks → pod min/max, ecs → task desired/max.
+            # compose 는 단일호스트 — 밴드를 적용할 복제본 축이 없어 거부한다.
+            if self.deploy.target not in ("eks", "ecs"):
+                e.append(f"deploy.capacity_tier 는 compose(단일호스트)에서 "
+                         f"적용 불가입니다 (target={self.deploy.target!r}) — "
+                         f"size_tier 로 인스턴스 크기를 정하세요.")
             else:
                 from .tiers import EKS_CAPACITY_TIERS
                 if self.deploy.capacity_tier not in EKS_CAPACITY_TIERS:
