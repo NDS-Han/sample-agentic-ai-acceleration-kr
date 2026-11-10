@@ -109,8 +109,9 @@ capture 가 기록하는 것과 notes 가 알려주는 주의점:
 - **notes 로만 기록되는 것**(스키마에 표현 없음) — ESO ExternalSecret 이름
   (kubectl 로 실제 감지), Fargate profile 이름(terraform output 의
   cluster_name 으로 조회), RDS Proxy 사용 여부.
-- **여전히 수동** — 시크릿 본체(의도적), eks `size_tier`(실측 신호가 없어
-  t3 플레이스홀더 — 라이브 HPA/requests 와 대조해 조정하세요).
+- **의도적으로 캡처하지 않는 것** — 시크릿 본체(SM 값은 절대 읽지 않음,
+  ESO Secret 이름만 기록), eks `size_tier`(문서용 키라 라이브 신호가 없어
+  t3 고정 — 스펙은 `capacity_tier`/`sizing` 이 실측으로 커버합니다).
 
 ## 2. 업데이트 — 변경 반영
 

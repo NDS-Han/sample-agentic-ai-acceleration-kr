@@ -1066,7 +1066,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     else:
         notes.append("⚠ autoscaling/redis.poolSize 를 helm values 에서 못 읽었습니다")
 
-    notes.append("size_tier 는 eks=t3 으로 둡니다 — 실제 리소스 스펙은 HPA/requests 참조")
+    notes.append("size_tier 는 eks=t3 으로 둡니다 — eks 에서는 문서용 키라 라이브 "
+                 "신호가 없어 의도적으로 역산하지 않습니다 (스펙은 HPA/requests 참조)")
 
     doc = {
         "version": 1,
