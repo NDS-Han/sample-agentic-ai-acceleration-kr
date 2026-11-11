@@ -544,6 +544,33 @@ describe('GET /api/auth/callback — happy path', () => {
     expect(jar['oidc_verifier']).toMatch(/Max-Age=0/i);
   });
 
+  it('웹 로그인은 사용자 등록 후 역할을 조회하고 키 교환은 하지 않는다', async () => {
+    configureOidc();
+    const token = jwtWithNonce(Math.floor(Date.now() / 1000) + 3600);
+    const calls = stubTokenEndpoint({ id_token: token });
+    const res = await callbackGET(callbackReq());
+    expect(res.status).toBe(303);
+    const urls = calls.map(c => c.url);
+    const index = urls.findIndex(u => u.endsWith('/v1/auth/provision'));
+    expect(index).toBeGreaterThan(0);
+    expect(urls.findIndex(u => u.endsWith('/admin/my/profile'))).toBeGreaterThan(index);
+    expect(urls.some(u => u.endsWith('/v1/auth/exchange'))).toBe(false);
+  });
+
+  it('사용자 등록 실패 시 로그인 쿠키를 발급하지 않는다', async () => {
+    configureOidc();
+    const token = jwtWithNonce(Math.floor(Date.now() / 1000) + 3600);
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL) => {
+      if (String(url).endsWith('/v1/auth/provision')) {
+        return { ok: false, status: 403 } as Response;
+      }
+      return { ok: true, json: async () => ({ id_token: token }) } as Response;
+    }));
+    const res = await callbackGET(callbackReq());
+    expect(res.status).toBe(403);
+    expect(setCookies(res)['admin_jwt']).toBeUndefined();
+  });
+
   it('DEVELOPER 는 / 가 403 이라 /my 로 보낸다 — 로그인 직후 403 첫 화면 방지', async () => {
     configureOidc();
     const idToken = jwtWithNonce(Math.floor(Date.now() / 1000) + 3600, {
