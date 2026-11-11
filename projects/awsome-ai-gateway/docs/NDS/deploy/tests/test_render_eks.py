@@ -308,11 +308,13 @@ def _fake_chart_env(tmp_path, env_yaml: str):
 
 def test_executor_inflight_target_derived_from_sizing_pool(tmp_path):
     """sizing 이 bedrock_thread_pool_size 를 바꾸면 HPA executor 타깃도
-    풀의 ~70% 로 파생해 gen 오버레이에 실린다 — env 의 낡은 타깃(128 풀용
-    90)이 pool 256 에 남으면 스케일 기준점이 어긋난다."""
+    풀의 ~70% 로 파생해 gen 오버레이에 실린다 — env 에 선언된 낡은 타깃
+    (128 풀용 90)이 pool 256 에 남으면 스케일 기준점이 어긋난다.
+    파생은 '선언된 타깃을 정정'하는 역할이라 env 선언이 전제다."""
     _fake_chart_env(tmp_path, (
         "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
-        "    minReplicas: 1\n    maxReplicas: 3\n"))
+        "    minReplicas: 1\n    maxReplicas: 3\n"
+        "    executorInflightTarget: 90\n"))
     doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
         "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
     cfg = schema.from_dict(doc)
@@ -357,16 +359,18 @@ def test_executor_inflight_target_env_matching_no_warning(tmp_path, capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_executor_inflight_target_derived_without_env_overlay(tmp_path):
-    """env overlay(values-eks-fargate-{env}.yaml)가 아예 없는 신규 env 에서도
-    sizing 파생은 적용돼야 한다 — 파생이 if env_vals 안에 중첩돼 있으면
-    기본 풀용 차트 타깃이 변경된 풀에 어긋난 채로 간다(4차 리뷰 SWE-2 m1).
-    env_values_file 이 None 이면 비교 경고만 생략된다."""
-    # _fake_chart_env 를 부르지 않는다 — overlay 부재 케이스.
+def test_executor_inflight_target_not_derived_without_declaration(tmp_path, capsys):
+    """executor-inflight HPA 는 옵트인 — 아무 데도 타깃 선언이 없으면
+    sizing 풀만으로 파생값을 방출하지 않는다(5차 리뷰 m3). 차트 기본은
+    키가 주석 처리된 리소스 HPA 라, 방출이 곧 기능 활성화가 돼버린다.
+    파생은 '선언된 값을 고치는' 역할에 한정 — overlay 부재 케이스."""
+    # _fake_chart_env 를 부르지 않는다 — overlay 부재 + 미선언.
     doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
         "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
     cfg = schema.from_dict(doc)
     out = tmp_path / "gen" / cfg.env / "eks"
     eks_render.render(cfg, out, repo_root=tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
-    assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
+    assert "executorInflightTarget" not in (
+        v["gatewayProxy"].get("autoscaling") or {})
+    assert "executorInflightTarget" in capsys.readouterr().err

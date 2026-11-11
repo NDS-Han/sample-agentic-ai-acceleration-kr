@@ -1136,7 +1136,12 @@ async def _handle_responses(request: Request):
                 on_nonstream_complete=_ws_log_nonstream if _ws_logging else None,
                 outcome=_ws_outcome,
             )
-        except Exception:
+        except BaseException:
+            # 입장 심사가 잡은 예약도 돌려준다 — 루프 glue 예외(본문 구성,
+            # 취소)는 on_usage 를 타지 않아 rate_limit_state 가 남는다
+            # (messages.py 웹서치 경로와 같은 계약, 5차 리뷰 SWE-2 m5).
+            await release_reservations(
+                redis=redis, state=state, auth_context=auth_context)
             if _ws_probe_token is not None and not _ws_probe_used:
                 await _cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
             raise

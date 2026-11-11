@@ -265,11 +265,12 @@ async def test_reserve_tombstone_guard_execution():
         {"limit_usd": "10", "policy": "hard_block"}))
 
     # 예약이 한 번도 착륙하지 않은 채 환불 settle(0) 이 먼저 도착 —
-    # recovered 경로가 툼스톤 "0" 을 쓴다.
+    # recovered 경로가 툼스톤 "0" 을 쓴다. ARGV 순서는 호출부와 같다:
+    # (actual, fallback, idx_field, caller_reserved, marker_ttl).
     s = json.loads(await r.eval(
         settle, 5, usage, config, marker, resvsum, idx,
-        "0", "", "req-x", "14400"))
-    assert s["settled"] in (True, False)  # 형태만 — 마커 없으면 recovered 분기
+        "0", "", "req-x", "0.4", "14400"))
+    assert s["settled"] is True and s["recovered"] is True
     assert await r.get("budget:settled:team:{t9}:req-x") == "0"
 
     # 늦은 reserve eval — 툼스톤 가드가 예약 커밋을 막아야 한다.

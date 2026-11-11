@@ -456,12 +456,26 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     # sizing 은 gateway.yaml 의 명시 의도라, 풀을 바꿨으면 파생 타깃을
     # gen 에 실어 보낸다(gen 은 마지막 레이어라 env 를 이긴다). env 에
     # 다른 명시값이 있으면 덮어쓰기 전에 경고한다 — 의도된 수동 타깃이면
-    # env 를 고치거나 sizing 선언을 지워 합치시킨다. env overlay 자체가
-    # 없는 신규 env 에서도 파생은 적용돼야 한다 — 차트 기본 타깃은 기본
-    # 풀 크기에 맞춰져 있어 sizing 변경과 어긋난다(4차 리뷰 SWE-2 m1).
+    # env 를 고치거나 sizing 선언을 지워 합치시킨다.
+    # ⚠️ 파생은 "선언된 타깃을 고치는" 역할에 한정한다 — 차트 기본은 이 키가
+    #    주석 처리된 옵트인 기능이라, 아무 데도 선언이 없는데 방출하면
+    #    리소스 HPA 만 쓰던 env 가 Pods-메트릭 HPA(전제: in-cluster otel +
+    #    prometheus-adapter)로 바뀐다(5차 리뷰 m3).
     gen_pool = ((gen.get("gatewayProxy") or {}).get("env") or {}).get(
         "BEDROCK_THREAD_POOL_SIZE")
-    if gen_pool:
+    target_declared = (
+        env_asg.get("executorInflightTarget") is not None
+        or ((gen.get("gatewayProxy") or {}).get("autoscaling") or {})
+        .get("executorInflightTarget") is not None
+    )
+    if gen_pool and not target_declared:
+        print(
+            f"ⓘ sizing.bedrock_thread_pool_size={gen_pool} 인데 "
+            "executorInflightTarget 선언이 없습니다 — executor-inflight "
+            "HPA 는 옵트인이라 파생하지 않습니다. 켜려면 env overlay 에 "
+            "executorInflightTarget 을 선언하세요(파생값이 정정합니다)",
+            file=sys.stderr)
+    if gen_pool and target_declared:
         try:
             derived = max(1, round(int(gen_pool) * 0.7))
         except (TypeError, ValueError) as e:

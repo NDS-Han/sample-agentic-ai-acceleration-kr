@@ -220,7 +220,7 @@ class TestFallsBackOn502ThenSucceeds:
         settle_tpm_calls = []
         settle_cost_calls = []
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {
                 "tpm_descriptors": ["desc1"],
                 "tpm_reserved": 500,
@@ -363,7 +363,7 @@ class TestFourTwoNineDoesNotFallBack:
             headers={"Retry-After": "60"},
         )
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             return rl_429
 
         kwargs = _common_kwargs(
@@ -406,7 +406,7 @@ class TestCircuitOpenSkipsOriginal:
         original_pmid = original_config.provider_model_id
         cb = _make_cb(open_pmids={original_pmid}, probe_wins=False)
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {
                 "tpm_descriptors": [],
                 "tpm_reserved": 0,
@@ -494,7 +494,7 @@ class TestFiveOhFourDoesNotTripCircuitBreaker:
         ])
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {
                 "tpm_descriptors": [],
                 "tpm_reserved": 0,
@@ -557,7 +557,7 @@ class TestHaikuThinkingStrip:
 
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -663,7 +663,7 @@ class TestMantleOriginalNoBedrockCandidate:
         adapter.invoke = AsyncMock(side_effect=_invoke)
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -712,7 +712,7 @@ class TestUpstreamFourTwoNineFallsBack:
         ])
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -756,7 +756,7 @@ class TestCircuitScopeKeysBreaker:
         ])
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -791,7 +791,7 @@ class TestCircuitScopeKeysBreaker:
         ])
         cb = _make_cb()
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -838,7 +838,7 @@ class TestPerCandidateModelRouting:
         def _adapter_for(cfg):
             return adapter_a if cfg.alias == original_alias else adapter_b
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -876,7 +876,7 @@ class TestPerCandidateModelRouting:
         def _scope_for(cfg):
             return f"acct:role-{cfg.alias}:ap-south-1"
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -924,7 +924,7 @@ class TestPerCandidateModelRouting:
                 return "apac." + pmid.removeprefix("us.")
             return pmid
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             state["rate_limit_state"] = {"tpm_descriptors": [], "tpm_reserved": 0, "cost_reserved": Decimal("0")}
             return None
 
@@ -980,7 +980,7 @@ class TestStreamFailurePayloadContract:
             headers={"Retry-After": "60"},
         )
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             return rl_429
 
         kwargs = _common_kwargs(
@@ -1036,7 +1036,7 @@ class TestStreamFailurePayloadContract:
             content={"error": {"type": "rate_limit_error", "code": "user_rpm_exceeded", "message": "limit hit"}},
         )
 
-        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status):
+        async def _fake_enforce(*, redis, auth_context, model_config, body, state, request_id, budget_status, reservation_id=None):
             return rl_429
 
         kwargs = _common_kwargs(

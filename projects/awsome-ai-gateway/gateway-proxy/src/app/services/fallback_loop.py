@@ -144,14 +144,17 @@ async def enforce_candidate_admission(
 
     # 이전 후보의 예약 상태를 지운다 — enforce 가 새로 쓰도록.
     state.pop("rate_limit_state", None)
-    # 후보마다 예약 식별자를 분리한다. 같은 request_id 로 재입장하면 앞 후보의
-    # settle(0) 이 남긴 툼스톤(budget:settled:*="0")이 reserve 의 툼스톤 가드를
-    # 통과시켜 두 번째 후보부터 월예산 한도 검사 자체를 건너뛴다. RPM undo·
-    # dedup 키도 시도별로 나뉘어야 A 실패 뒤 B 의 입장이 독립적으로 세어진다.
+    # 후보마다 "예약" 식별자를 분리한다. 같은 request_id 로 재입장하면 앞
+    # 후보의 settle(0) 이 남긴 툼스톤(budget:settled:*="0")이 reserve 의
+    # 툼스톤 가드를 통과시켜 두 번째 후보부터 월예산 한도 검사 자체를
+    # 건너뛴다. 단 예약 마커에만 접미사를 쓴다 — RPM ZADD 멤버·undo 는
+    # 클라이언트 요청 단위라, 상류 재시도가 RPM 슬롯을 추가로 소비하면
+    # 안 된다(5차 리뷰 M1). 빈 request_id 도 접미사 없이 둔다 — "#1" 은
+    # 서로 다른 요청끼리 같은 마커로 붕괴한다(5차 리뷰 m1).
     attempt = int(state.get("_rl_attempt", 0))
     state["_rl_attempt"] = attempt + 1
-    attempt_request_id = (
-        request_id if attempt == 0 else f"{request_id}#{attempt}"
+    attempt_reservation_id = (
+        f"{request_id}#{attempt}" if (attempt and request_id) else request_id
     )
     rejected = await enforce_rate_limits(
         redis=redis,
@@ -159,7 +162,8 @@ async def enforce_candidate_admission(
         model_config=candidate_config,
         body=req_data,
         state=state,
-        request_id=attempt_request_id,
+        request_id=request_id,
+        reservation_id=attempt_reservation_id,
         budget_status=budget_status,
     )
     if rejected is None:

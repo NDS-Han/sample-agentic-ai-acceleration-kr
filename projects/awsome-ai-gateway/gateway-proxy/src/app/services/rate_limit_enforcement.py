@@ -189,8 +189,15 @@ async def enforce_rate_limits(
     request_id: str,
     budget_status: BudgetStatus | None = None,
     metrics=None,
+    reservation_id: str | None = None,
 ) -> JSONResponse | None:
     """라우터용 Pre-reserve RPM + TPM 체크 진입점.
+
+    ``reservation_id`` 는 월예산 예약 마커에만 쓰는 별도 식별자다 — 폴백
+    루프가 후보마다 ``request_id#N`` 을 넘겨 앞 후보의 settle 툼스톤과
+    충돌하지 않게 한다. RPM ZADD 멤버·undo·dedup 은 계속 ``request_id``
+    를 쓴다 — 클라이언트 요청 1건의 상류 재시도가 RPM 슬롯을 추가로
+    소비하면 안 된다(5차 리뷰 M1).
 
     Returns:
         거부 시 ``JSONResponse(status_code=429)``, 통과 시 ``None``.
@@ -367,7 +374,7 @@ async def enforce_rate_limits(
             str(auth_context.team_id) if auth_context.team_id else None,
             request_period(),
             worst_cost,
-            request_id,
+            reservation_id or request_id,
             client=state.get("client"),
             marker_ttl=get_settings().budget_reservation_ttl_seconds,
         )

@@ -124,10 +124,10 @@ async def test_fallback_candidates_get_distinct_reservation_ids(monkeypatch):
     경로에서 정확히 발생했다. 시도별 접미사는 enforce_rate_limits 안의 RPM
     undo·dedup 키도 분리하므로 각 시도의 입장이 독립적으로 세어진다.
     """
-    seen: list[str | None] = []
+    seen: list[tuple[str | None, str | None]] = []
 
     async def _fake_rl(**kwargs):
-        seen.append(kwargs.get("request_id"))
+        seen.append((kwargs.get("request_id"), kwargs.get("reservation_id")))
         return None
 
     monkeypatch.setattr(
@@ -147,7 +147,14 @@ async def test_fallback_candidates_get_distinct_reservation_ids(monkeypatch):
             request_id="req-1",
         )
         assert r is None
-    assert seen == ["req-1", "req-1#1", "req-1#2"]
+    # request_id 는 모든 시도에서 그대로다 — RPM 멤버·undo·dedup 은 클라이언트
+    # 요청 단위로 세어야 상류 재시도가 슬롯을 추가로 소비하지 않는다(5차 M1).
+    # 예약 마커에만 접미사가 붙어 툼스톤 충돌을 피한다.
+    assert seen == [
+        ("req-1", "req-1"),
+        ("req-1", "req-1#1"),
+        ("req-1", "req-1#2"),
+    ]
 
 
 async def test_key_scope_denial_is_a_400(monkeypatch):

@@ -53,11 +53,13 @@ async def drain_pending_tasks(timeout: float) -> int:
     pending = [t for t in _PENDING_TASKS if not t.done()]
     if not pending:
         return 0
-    try:
-        await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout)
-    except asyncio.TimeoutError:
-        logger.warning("drain_pending_tasks_timeout", remaining=len(pending))
-    return len(pending)
+    # wait_for 는 타임아웃 시 gather 를 취소해 드레인 태스크(과금 finalize
+    # 포함)까지 죽인다 — drain 의 목적을 허무는 함정이라 취소가 없는
+    # asyncio.wait 를 쓴다(5차 리뷰 m5). 남은 태스크는 경고로 가시화.
+    done, still = await asyncio.wait(pending, timeout=timeout)
+    if still:
+        logger.warning("drain_pending_tasks_timeout", remaining=len(still))
+    return len(done)
 
 
 def usage_status_of(outcome: dict | None, http_status: int | None = None) -> str:

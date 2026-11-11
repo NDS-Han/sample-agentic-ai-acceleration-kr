@@ -249,13 +249,16 @@ async def test_mark_lost_slow_probe_still_writes_amount():
     """hung 소켓의 probe 가 4s 쓰기 예산을 다 먹으면 lost_amt 가 영구
     누락된다(4차 리뷰 M1). probe 는 별도 짧은 deadline — 지연되면
     '미착륙'으로 간주하고 금액 쓰기로 진행해야 한다."""
-    import asyncio as _a
-
     suspects = BudgetSuspectSet()
     redis = AsyncMock()
 
     async def _slow_get(_key):
-        await _a.sleep(3.0)  # probe 자체 deadline(1.5s) 초과
+        # ⚠️ asyncio.sleep 이 아니라 Event.wait — 이 파일의 _no_sleep autouse
+        # fixture 가 asyncio.sleep 을 AsyncMock 으로 패치해 sleep(3) 이 즉시
+        # 반환되면 deadline 자체를 검증하지 못한다(이전 버전에서도 통과하는
+        # 빈 테스트가 됐다 — 5차 리뷰 m2). call_later 기반 timeout 은
+        # 패치되지 않으므로 영원히 대기하는 Event 가 진짜 hang 을 만든다.
+        await asyncio.Event().wait()
         return None
 
     redis.get = AsyncMock(side_effect=_slow_get)

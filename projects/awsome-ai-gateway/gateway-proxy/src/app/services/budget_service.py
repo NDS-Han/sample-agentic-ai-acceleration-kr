@@ -911,6 +911,10 @@ class BudgetService:
                 # Lua 의 decode 실패는 team scope deny 방향으로 수렴한다.
                 logger.warning("budget_reserve_team_cfg_corrupt")
                 team_cfg = None
+            if team_cfg is not None and not isinstance(team_cfg, dict):
+                # 파싱은 됐지만 객체가 아님('"5"' 등) — 같은 이유로 비워둔다.
+                logger.warning("budget_reserve_team_cfg_nonobject")
+                team_cfg = None
             d_cap = (
                 team_cfg.get("default_user_cap_usd") if team_cfg else None
             )
@@ -1160,9 +1164,17 @@ class BudgetService:
         취소가 그대로 전파되지만 환불 태스크는 _BACKGROUND_TASKS 에 살아
         계속 돈다 — 취소는 삼키지 않으면서 롤백은 완료된다.
         """
-        t = asyncio.ensure_future(self._refund_reservations(redis, scopes))
-        _BACKGROUND_TASKS.add(t)
-        t.add_done_callback(_BACKGROUND_TASKS.discard)
+        try:
+            t = asyncio.ensure_future(
+                self._refund_reservations(redis, scopes))
+            _BACKGROUND_TASKS.add(t)
+            t.add_done_callback(_BACKGROUND_TASKS.discard)
+        except RuntimeError:
+            # 루프 종료 중에는 태스크를 심을 수 없다 — 예외가 거절 경로의
+            # PermissionError 를 대체해 fail-open 되는 것을 막고, 환불은
+            # 마커 TTL 복구 경로에 맡긴다(:1006 과 같은 판단).
+            logger.warning("budget_refund_spawn_loop_closed")
+            return
         await asyncio.shield(t)
 
     @classmethod
@@ -1180,7 +1192,10 @@ class BudgetService:
         # drain 의 목적 자체를 허무니 타임아웃에 취소가 없는 asyncio.wait 를 쓴다.
         done, still = await asyncio.wait(pending, timeout=timeout)
         for t in done:
-            if t.exception():
+            # t.exception() 은 취소된 태스크에 CancelledError(BaseException)를
+            # 던진다 — 그대로 두면 lifespan 의 except Exception 을 뚫고
+            # 나머지 종료 절차(stream drain·redis close)를 건너뛴다.
+            if not t.cancelled() and t.exception():
                 logger.warning(
                     "budget_refund_task_failed", error=repr(t.exception())
                 )
