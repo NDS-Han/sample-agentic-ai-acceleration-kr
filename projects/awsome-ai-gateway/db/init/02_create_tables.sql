@@ -426,7 +426,21 @@ CREATE TABLE IF NOT EXISTS usage.usage_logs (
 CREATE INDEX IF NOT EXISTS idx_usage_logs_user_time   ON usage.usage_logs (user_id, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_team_time   ON usage.usage_logs (team_id, requested_at DESC);
 -- 명시적 세션 키 조회 (migration 0054) — 부분 인덱스라 NULL 구 행은 인덱스 밖.
-CREATE INDEX IF NOT EXISTS idx_usage_logs_session     ON usage.usage_logs (session_id, requested_at) WHERE session_id IS NOT NULL;
+-- ⚠️ 기존 설치본은 usage_logs 가 CREATE IF NOT EXISTS 로 건너뛰어져 session_id 가
+--    없다 — 컬럼은 alembic 0054 가 ALTER 로 넣는다. init 이 alembic 보다 먼저
+--    도므로(run_migration.sh 순서) 컬럼 존재 가드 없이 인덱스를 만들면
+--    기존 설치본에서 ERROR 로 migration Job 전체가 죽는다 (prod 2026-11-11 실측).
+--    컬럼이 없으면 건너뛰고, 뒤의 0054 가 같은 이름으로 인덱스를 만든다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                 AND column_name = 'session_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_session
+            ON usage.usage_logs (session_id, requested_at)
+            WHERE session_id IS NOT NULL;
+    END IF;
+END $$;
 CREATE INDEX IF NOT EXISTS idx_usage_logs_model_time  ON usage.usage_logs (model_alias, requested_at DESC);
 CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req ON usage.usage_logs (bedrock_request_id);
 
