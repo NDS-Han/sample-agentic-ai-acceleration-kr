@@ -29,7 +29,16 @@
 # ⚠ 이 env 를 켠 동안 해당 배포의 **모든** Bedrock 호출이 mock 으로 간다
 #   (in-account + cross-account 양쪽 — env 는 프로세스 전역). 실제 추론이
 #   필요한 사용자와 같은 배포에서 켜면 안 된다.
-# 롤백: 오버레이 없이 helm upgrade 재실행.
+#
+# ⚠ 롤백 함정: 이 키는 한 번 적용되면 **release stored values 에 남는다** —
+#   오버레이 없이 재실행하거나 --reuse-values / --reset-then-reuse-values
+#   계열 upgrade 로는 제거되지 않는다 (2026-11 dev 실증). 제거하려면:
+#     helm get values llm-gateway -n <ns> -a -o yaml > /tmp/v.yaml
+#     # gatewayProxy.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME 키를 삭제한 뒤
+#     helm upgrade llm-gateway <chart> -n <ns> -f /tmp/v.yaml
+#
+# 유휴 시 mock 절전: kubectl -n <ns> scale deploy/mock-bedrock --replicas=0
+#   (deploy/svc 는 유지 — 다음 테스트 때 --replicas=2 + 위 upgrade 절차로 재사용)
 # ─────────────────────────────────────────────────────────────────────
 
 gatewayProxy:
