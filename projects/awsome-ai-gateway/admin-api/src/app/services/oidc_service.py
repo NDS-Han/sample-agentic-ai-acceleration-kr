@@ -108,18 +108,15 @@ class OIDCService:
     # Public API
     # ------------------------------------------------------------------
 
-    async def exchange_jwt_for_vk(
+    async def provision_user(
         self,
         session: AsyncSession,
         *,
-        redis,
         token: str,
-        device_name: str | None,
-        sso_session_expires_at=None,
         ip_address: str = "0.0.0.0",
         request_id: str = "",
-    ) -> VirtualKeyIssueResponse:
-        """OIDC access JWT 를 VK 로 교환."""
+    ) -> User:
+        """검증된 OIDC 토큰으로 사용자/팀을 등록한다. Virtual Key는 발급하지 않는다."""
         settings = get_settings()
 
         # 1. JWT 검증
@@ -243,6 +240,25 @@ class OIDCService:
 
         if not user.is_active:
             raise OIDCNotProvisionableError("user_deactivated")
+
+        return user
+
+    async def exchange_jwt_for_vk(
+        self,
+        session: AsyncSession,
+        *,
+        redis,
+        token: str,
+        device_name: str | None,
+        sso_session_expires_at=None,
+        ip_address: str = "0.0.0.0",
+        request_id: str = "",
+    ) -> VirtualKeyIssueResponse:
+        """OIDC access JWT 를 VK 로 교환."""
+        user = await self.provision_user(
+            session, token=token, ip_address=ip_address, request_id=request_id,
+        )
+        settings = get_settings()
 
         # 8. VK 발급 — OIDC 흐름은 spec 에 따라 짧은 TTL (default 24h) 명시.
         actor = CurrentUser(
