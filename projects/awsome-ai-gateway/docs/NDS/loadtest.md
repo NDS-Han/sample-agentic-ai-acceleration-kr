@@ -131,14 +131,19 @@ kubectl get --raw \
 > mock이 계속 살아있어 실 추론이 조용히 mock으로 가는 상태가 된다.
 
 ```bash
-# 1) stored values export → 해당 키만 삭제 → -f 로 재적용
-helm -n <ns> get values llm-gateway -a -o yaml > /tmp/v.yaml
+# 1) user-supplied values 만 export (반드시 -a 없이 — -a 는 차트 기본값
+#    전체를 고정해 이후 차트 기본값 변경이 영원히 무력화된다, R24-M5 사고 동형)
+helm -n <ns> get values llm-gateway -o yaml > /tmp/v.yaml
 #   gatewayProxy.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME 라인을 삭제
 helm upgrade llm-gateway deployment/charts/llm-gateway -n <ns> -f /tmp/v.yaml
 
 # 2) mock 절전 — deploy/svc·모델 별칭은 다음 테스트를 위해 유지
 kubectl -n <ns> scale deploy/mock-bedrock --replicas=0
 ```
+
+> NDS 관리 릴리스에서는 더 간단하다 — `./deploy apply` 는 저장 values 를
+> 렌더 레이어로 교체하므로, 레이어에 없는 override 는 apply 한 번으로
+> 자연 제거된다(위 수동 절차 불필요).
 
 검증: 파드 env에 `AWS_ENDPOINT_URL_BEDROCK_RUNTIME`이 없고
 `helm get values -a`에도 없어야 한다(`grep -c` 0).
@@ -191,7 +196,7 @@ mock 경유 실호출 대신 **executor 게이지 직접 주입**(파드 내 `_r
 |---|---|---|
 | `type: External` 오선정 | adapter는 `custom.metrics.k8s.io`를 서빙 — External은 별도 API라 `<unknown>` 영구 정지 | `type: Pods` + `AverageValue`로 교정 |
 | 워커 시리즈 축락 | 워커 2개가 동일 레이블셋 푸시 → 시리즈 1개로 붕괴, 총량 과소집계 | `service.instance.id={pod}-{pid}` |
-| lazy 메트릭 | 미보고 파드가 있으면 HPA가 **스케일 결정 전체를 건너뜀** | `init_executor_metrics()`로 시작 시 시리즈 생성 |
+| lazy 메트릭 | **전 파드 미보고** 시 HPA가 스케일 결정을 건너뜀(유휴 단일 파드 미계측이 곧 전부 미보고) | `init_executor_metrics()`로 시작 시 시리즈 생성 |
 | stale 시리즈 | 워커 재시작 잔여 시리즈 5분간 부풀림 | adapter 쿼리에 `last_over_time[2m]` |
 | 합계·평균 의미론 | 한 워커 포화가 다른 워커 평균에 묻힘 | `max by (k8s_pod_name)`, 타깃 180→**90** |
 | 롤아웃 중 메트릭 갭 | 파드 교체 시 `FailedGetPodsMetric` 경고 ~수십 초 | 정상 과도기 — 자연 해소 확인 |

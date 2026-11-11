@@ -6,6 +6,7 @@ import asyncio
 import json
 import time
 from decimal import Decimal, InvalidOperation
+from uuid import uuid4
 
 import structlog
 from sqlalchemy import select
@@ -845,6 +846,15 @@ class BudgetService:
         if not team_id:
             raise PermissionError("no_team_assigned")
 
+        # 빈 request_id 는 pending 마커를 "…:{tid}:" 하나로 붕괴시켜 서로 다른
+        # 요청이 EXISTS 가드에 걸려 dedup_hit 으로 예약을 건너뛴다(과소 예약 =
+        # 하드캡 창). dedup 불가능한 호출엔 호출별 고유 마커를 부여한다 —
+        # settle 은 디스크립터의 marker_key 를 그대로 쓰므로 정산은 그대로고,
+        # 마커는 marker_ttl 로 정리된다. 재전송 dedup 을 포기하는 대신
+        # 과예약(환불 가능) 쪽으로만 어긋난다.
+        if not request_id:
+            request_id = str(uuid4())
+
         script = LuaScriptLoader.get("budget_reserve")
         est_str = str(estimate)
 
@@ -934,13 +944,18 @@ class BudgetService:
                 # request_id 마커 멱등 — 재실행은 EXISTS 가드가 dedup_hit 재생으로
                 # 바꾸므로 TimeoutError/ConnectionError 재시도도 안전하다.
                 # (서버 실행 후 응답만 유실된 경우도 이중 적용 없음)
-                raw = await call_with_transient_retry(
-                    redis.eval,
-                    script, 5,
-                    usage_key, config_key, marker_key, resvsum_key, idx_key,
-                    scope, est_str, fallback, marker_ttl, idx_field,
-                    idempotent=True,
-                )
+                # ⚠️ idempotent 재시도가 열린 뒤 스코프당 최악 대기는 ~12s+
+                #    백오프 — config 읽기(:866)와 같은 이유로 스코프별 deadline 을
+                #    둔다. deadline 으로 끊겨도 서버 실행분은 마커가 흡수하고
+                #    아래 except 의 환불 경로(settle(0) no-op 안전)가 정리한다.
+                async with asyncio.timeout(4.0):
+                    raw = await call_with_transient_retry(
+                        redis.eval,
+                        script, 5,
+                        usage_key, config_key, marker_key, resvsum_key, idx_key,
+                        scope, est_str, fallback, marker_ttl, idx_field,
+                        idempotent=True,
+                    )
                 result = json.loads(raw)
             except Exception:
                 # Redis 일시 장애 — fail-open 방향으로 둔다. 예약 없이 진행하면

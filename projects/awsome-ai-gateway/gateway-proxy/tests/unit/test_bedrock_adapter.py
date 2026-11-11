@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
@@ -162,3 +162,27 @@ def test_init_executor_metrics_populates_instruments():
     ba._bedrock_inflight_counter = None
     ba.init_executor_metrics()
     assert ba._bedrock_inflight_counter is not None
+
+
+def test_executor_metric_names_are_pinned():
+    """메트릭명은 prometheus-adapter seriesQuery · HPA 정의와 문자열 계약이다 —
+    이름을 바꾸면 시리즈는 새 이름으로 export 되지만 adapter 는 구 이름을
+    찾아 custom 메트릭이 <unknown> 이 된다. 이 테스트가 그 drift 를 막는다."""
+    import app.providers.bedrock_adapter as ba
+
+    meter = MagicMock()
+    ba._bedrock_inflight_counter = None
+    with patch(
+        "app.observability._setup.get_meter", return_value=meter
+    ):
+        ba._executor_metrics()
+    meter.create_up_down_counter.assert_called_once_with(
+        "gateway_bedrock_executor_inflight",
+        description=ANY,
+        unit="1",
+    )
+    meter.create_observable_gauge.assert_called_once()
+    assert (
+        meter.create_observable_gauge.call_args[0][0]
+        == "gateway_bedrock_executor_queue_depth"
+    )

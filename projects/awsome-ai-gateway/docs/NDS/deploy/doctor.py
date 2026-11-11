@@ -575,6 +575,38 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         rep.add("WARN" if drifts else "OK", "drift",
                 "; ".join(drifts) if drifts else "관리 키가 release values 와 일치")
 
+        # 5b. executor-inflight HPA 전제 — Pods 메트릭이 렌더됐는데 adapter 가
+        #     서빙하지 못하면 <unknown> 이 된다. 부분 미보고는 HPA 가 감쇠
+        #     계산하지만 전 파드 미보고면 스케일 결정(다운 포함)이 정지한다 —
+        #     관측 스택(rules.custom + k8sattributes)이 차트보다 먼저여야 한다.
+        if (((live.get("gatewayProxy") or {}).get("autoscaling") or {})
+                .get("executorInflightTarget") is not None):
+            m = _run(["kubectl", "get", "--raw",
+                      f"/apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}"
+                      "/pods/*/gateway_bedrock_executor_inflight",
+                      *ctx], timeout=30)
+            if m.returncode != 0:
+                rep.add("WARN", "hpa-metrics",
+                        "executorInflightTarget 선언됐으나 custom.metrics API "
+                        "조회 실패 — prometheus-adapter rules.custom + "
+                        "otel-collector k8sattributes 배포가 차트보다 먼저 "
+                        "필요합니다(전 파드 미보고 시 스케일다운 정지)")
+            else:
+                try:
+                    items = json.loads(m.stdout).get("items", [])
+                except json.JSONDecodeError:
+                    items = None
+                if items is None:
+                    rep.add("WARN", "hpa-metrics",
+                            "custom.metrics 응답 파싱 실패")
+                elif items:
+                    rep.add("OK", "hpa-metrics",
+                            f"pods 메트릭 {len(items)} 시리즈 서빙 중")
+                else:
+                    rep.add("WARN", "hpa-metrics",
+                            "메트릭 API는 있으나 시리즈 0 — collector "
+                            "k8sattributes/워커 시리즈 미도착")
+
     # 6. terraform plan drift — env_dir 이 있고 state 가 있으면.
     #    apply 와 동일하게 managed overlay(gen terraform.tfvars)를 -var-file 로
     #    준다 — NDS 소유 키(enable_notification_ses 등)를 빠뜨리면 선언이

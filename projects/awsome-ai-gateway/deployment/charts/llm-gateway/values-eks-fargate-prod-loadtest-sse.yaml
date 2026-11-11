@@ -33,9 +33,12 @@
 # ⚠ 롤백 함정: 이 키는 한 번 적용되면 **release stored values 에 남는다** —
 #   오버레이 없이 재실행하거나 --reuse-values / --reset-then-reuse-values
 #   계열 upgrade 로는 제거되지 않는다 (2026-11 dev 실증). 제거하려면:
-#     helm get values llm-gateway -n <ns> -a -o yaml > /tmp/v.yaml
+#     helm get values llm-gateway -n <ns> -o yaml > /tmp/v.yaml   # -a 금지 —
+#     # -a 는 차트 기본값까지 고정한다. user-supplied 만 꺼낼 것
 #     # gatewayProxy.env.AWS_ENDPOINT_URL_BEDROCK_RUNTIME 키를 삭제한 뒤
 #     helm upgrade llm-gateway <chart> -n <ns> -f /tmp/v.yaml
+#   NDS 관리 릴리스라면 `./deploy apply` 한 번이 레이어 기준으로 교체해
+#   같은 효과다.
 #
 # 유휴 시 mock 절전: kubectl -n <ns> scale deploy/mock-bedrock --replicas=0
 #   (deploy/svc 는 유지 — 다음 테스트 때 --replicas=2 + 위 upgrade 절차로 재사용)

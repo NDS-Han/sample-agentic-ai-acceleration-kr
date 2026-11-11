@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -66,6 +66,42 @@ def _no_sleep(monkeypatch):
     import asyncio
 
     monkeypatch.setattr(asyncio, "sleep", AsyncMock())
+
+
+@pytest.mark.asyncio
+async def test_reserve_empty_request_id_gets_unique_marker(mock_redis):
+    """빈 request_id 는 pending 마커를 '…:{tid}:' 하나로 붕괴시켜 서로 다른
+    요청이 EXISTS 가드에 걸려 dedup_hit 으로 예약을 건너뛴다 — 호출별
+    고유 마커로 대체해 과소 예약(하드캡 창)을 막는다."""
+    from app.services import budget_service as bs
+
+    markers = []
+    calls = []
+
+    async def _side(*args, **_kw):
+        calls.append(args)
+        markers.append(args[4])  # marker_key
+        return _resv_resp(scope=args[7])
+
+    mock_redis.eval = AsyncMock(side_effect=_side)
+    mock_redis.exists = AsyncMock(return_value=True)
+
+    svc = BudgetService()
+    with patch.object(bs, "uuid4", side_effect=["uuid-a", "uuid-b"]):
+        await svc.reserve_budget(
+            mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "",
+        )
+        await svc.reserve_budget(
+            mock_redis, "u1", "t1", "2026-05", Decimal("4.5"), "",
+        )
+
+    team_markers = [m for m in markers if m.startswith("budget:pending:team:")]
+    assert team_markers == [
+        "budget:pending:team:{t1}:uuid-a",
+        "budget:pending:team:{t1}:uuid-b",
+    ]
+    # 두 호출이 공유 마커 '…:{t1}:' 로 붕괴하지 않는다
+    assert "budget:pending:team:{t1}:" not in team_markers
 
 
 @pytest.mark.asyncio

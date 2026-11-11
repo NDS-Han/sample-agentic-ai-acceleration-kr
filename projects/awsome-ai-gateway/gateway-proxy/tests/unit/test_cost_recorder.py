@@ -554,3 +554,42 @@ async def test_finalize_passes_request_id_dedup_key(
         # 같은 {} hash tag — Redis Cluster에서 같은 슬롯 (eval 제약)
         tag = lambda k: k.split("{")[1].split("}")[0]
         assert tag(dedup_key) == tag(usage_key)
+
+
+@pytest.mark.asyncio
+async def test_finalize_empty_request_id_uses_two_key_deduct(
+    mock_redis, auth_context_vk, model_config_bedrock
+):
+    """빈 request_id 는 모든 요청이 ':ded:' 하나로 붕괴해 후속 차감이
+    dedup_hit 으로 조용히 스킵된다 — dedup 없이 2키 레거시 호출로 보낸다
+    (빈 키 '' 는 Cluster 해시태그 부재로 CROSSSLOT)."""
+    from app.services.lua_loader import LuaScriptLoader
+
+    LuaScriptLoader._scripts["budget_deduct"] = "-- mock"
+
+    mock_redis.eval = AsyncMock(
+        return_value=b'{"new_used":1.0,"remaining":99.0,"threshold_triggered":null}'
+    )
+    mock_redis.xadd = AsyncMock()
+
+    recorder = CostRecorder()
+    usage = TokenUsage(input_tokens=500, output_tokens=300, total_tokens=800)
+
+    await recorder.finalize(
+        redis=mock_redis,
+        auth_context=auth_context_vk,
+        model_config=model_config_bedrock,
+        usage=usage,
+        request_id="",
+        is_stream=False,
+        duration_ms=100,
+        client="claude-code",
+    )
+
+    deduct_calls = [
+        c for c in mock_redis.eval.call_args_list if c.args[0] == "-- mock"
+    ]
+    assert len(deduct_calls) == 3
+    for c in deduct_calls:
+        assert c.args[1] == 2  # numkeys — dedup 키 없이 레거시
+        assert not any(":ded:" in str(a) for a in c.args)

@@ -1,6 +1,7 @@
 # Copyright 2026 © Amazon.com and Affiliates: This deliverable is considered Developed Content as defined in the AWS Service Terms.
 
 import os
+import socket
 
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
@@ -31,7 +32,7 @@ def init_otel(settings: Settings) -> None:
             # executor inflight 가 custom-metric HPA 신호로 쓰이므로 정확도가
             # 곧 스케일링 정확도다. HOSTNAME 은 k8s 가 파드명으로 채운다.
             "service.instance.id": (
-                f"{os.environ.get('HOSTNAME', 'local')}-{os.getpid()}"
+                f"{os.environ.get('HOSTNAME') or socket.gethostname()}-{os.getpid()}"
             ),
         }
     )

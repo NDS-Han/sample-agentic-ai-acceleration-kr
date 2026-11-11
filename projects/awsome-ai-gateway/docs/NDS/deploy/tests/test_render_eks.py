@@ -308,8 +308,8 @@ def _fake_chart_env(tmp_path, env_yaml: str):
 
 def test_executor_inflight_target_derived_from_sizing_pool(tmp_path):
     """sizing 이 bedrock_thread_pool_size 를 바꾸면 HPA executor 타깃도
-    풀의 ~70% 로 파생한다 — env 의 낡은 타깃(128 풀용 90)이 pool 256 에
-    남으면 스케일 기준점이 어긋난다. env 명시값이 없을 때만."""
+    풀의 ~70% 로 파생해 gen 오버레이에 실린다 — env 의 낡은 타깃(128 풀용
+    90)이 pool 256 에 남으면 스케일 기준점이 어긋난다."""
     _fake_chart_env(tmp_path, (
         "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
         "    minReplicas: 1\n    maxReplicas: 3\n"))
@@ -322,17 +322,36 @@ def test_executor_inflight_target_derived_from_sizing_pool(tmp_path):
     assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
 
 
-def test_executor_inflight_target_env_explicit_preserved(tmp_path):
-    """env values 의 명시 타깃은 운영자 소유 — sizing pool 이 바뀌어도
-    오버레이가 파생값을 얹지 않는다(helm 합성에서 env 값이 살아남는다)."""
+def test_executor_inflight_target_env_mismatch_overrides_and_warns(tmp_path, capsys):
+    """sizing 으로 풀을 바꿨는데 env 타깃이 파생값과 다르면 gen(마지막
+    레이어)이 파생값을 방출해 이기고 경고를 낸다 — "env 명시가 있으면
+    파생 불발"이었던 구 의미론은 env 파일 전부에 키가 박혀 파생이 dead
+    code 였다."""
     _fake_chart_env(tmp_path, (
         "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
         "    minReplicas: 1\n    maxReplicas: 3\n"
-        "    executorInflightTarget: 42\n"))
+        "    executorInflightTarget: 90\n"))
     doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
         "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
     cfg = schema.from_dict(doc)
     out = tmp_path / "gen" / cfg.env / "eks"
     eks_render.render(cfg, out, repo_root=tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
-    assert "executorInflightTarget" not in v["gatewayProxy"].get("autoscaling", {})
+    assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
+    assert "executorInflightTarget" in capsys.readouterr().err
+
+
+def test_executor_inflight_target_env_matching_no_warning(tmp_path, capsys):
+    """env 타깃이 파생값과 같으면 경고 없이 방출한다."""
+    _fake_chart_env(tmp_path, (
+        "gatewayProxy:\n  autoscaling:\n    enabled: true\n"
+        "    minReplicas: 1\n    maxReplicas: 3\n"
+        "    executorInflightTarget: 140\n"))
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / cfg.env / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
+    assert capsys.readouterr().err == ""

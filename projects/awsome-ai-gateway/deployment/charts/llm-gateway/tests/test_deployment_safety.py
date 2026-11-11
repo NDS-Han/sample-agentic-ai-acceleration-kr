@@ -387,16 +387,19 @@ def test_hpa_executor_inflight_nonpositive_fails(bad: str):
     assert "executorInflightTarget" in proc.stderr
 
 
-def test_hpa_executor_inflight_sidecar_mode_fails():
-    """sidecar otel 모드는 -otel-sidecar-config ConfigMap 이 차트에 없어
-    k8sattributes(pod 레이블)를 보장할 수 없다 — 타깃과 조합되면 렌더 실패."""
+@pytest.mark.parametrize("mode", ["sidecar", "managed", "disabled", ""])
+def test_hpa_executor_inflight_non_incluster_mode_fails(mode: str):
+    """Pods 메트릭은 in-cluster otel-collector 의 k8sattributes 가 파드 레이블을
+    붙인다는 전제 — 다른 모드는 pod 귀속을 보장할 수 없어 조합 시 렌더 실패."""
     proc = subprocess.run(
         [_helm(), "template", "safety-test", str(CHART),
          "-f", str(CHART / "values-eks-fargate-prod.yaml"),
-         "--set", "observability.otel.mode=sidecar"],
+         "--set", f"observability.otel.mode={mode}"],
         capture_output=True, text=True)
-    assert proc.returncode != 0, "sidecar + executorInflightTarget 이 렌더를 통과했다"
-    assert "sidecar" in proc.stderr
+    assert proc.returncode != 0, (
+        f"otel.mode={mode!r} + executorInflightTarget 이 렌더를 통과했다"
+    )
+    assert "in-cluster" in proc.stderr
 
 
 # --------------------------------------------------------------------------

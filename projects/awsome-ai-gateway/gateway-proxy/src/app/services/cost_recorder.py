@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -44,8 +45,18 @@ _VALID_USAGE_STATUSES = frozenset({"SUCCESS", "ERROR", "TIMEOUT"})
 #      BudgetSuspectSet 큐로 넘겨 헬스체커가 복구 틱에 다시 심는다.
 
 
+def _settled_tombstone(marker_key: str) -> str | None:
+    """budget_settle.lua 의 정산 완료 툼스톤 — 스크립트의
+    ``'budget:settled:' .. string.sub(marker_key, 16)`` 의 Python 판.
+    pending 마커가 DEL 되고 이 키가 SET 되면 settle 은 서버에서 끝난 것이다."""
+    prefix = "budget:pending:"
+    if marker_key.startswith(prefix):
+        return "budget:settled:" + marker_key[len(prefix):]
+    return None
+
+
 async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
-                            amount=None) -> None:
+                            amount=None, dedup_key: str | None = None) -> None:
     """차감 실패 카운터에 :lost 센티넬을 심어 다음 admission rebuild 를 트리거한다.
 
     마지막 수단의 단일 SET 이다 — 여기까지 온 것은 eval 재시도가 전부 실패한
@@ -59,8 +70,22 @@ async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
     아직 반영 안 됐을 수 있고, 그때 rebuild 가 센티넬을 지우면 유실분이 기간
     내내 남는다. rebuild 는 ``max(db+live, cur+lost_amt)`` 플로어로 그 창을
     메운다. settle 실패(예약만 지저분)는 금액 없이 트리거만 심는다.
+
+    dedup_key 를 주면 쓰기 전에 request_id 마커를 조회한다 — eval 이 서버에서는
+    실행됐는데 응답만 유실돼 재시도가 전부 실패한 경우, 마커가 살아 있으면
+    차감은 실제로 일어난 것이다. 그때 lost_amt 를 쌓으면 rebuild 의
+    ``cur+lost_amt`` 플로어가 그 금액을 이중 계상한다.
     """
     try:
+        if dedup_key:
+            try:
+                if await redis.get(dedup_key):
+                    logger.warning(
+                        "budget_deduct_landed_response_lost", scope=scope)
+                    return
+            except Exception:
+                # 마커 조회도 실패(redis 전체 장애 등) — 보수적으로 lost 경로 유지
+                pass
         # 금액을 먼저 쓴다 — SET 이 실패해 suspect 로 가도 drain 의 :lost 재전달이
         # 이미 심어진 lost_amt 와 합쳐져 완전한 복원이 된다 (drain 은 키만 재심음).
         if amount is not None:
@@ -389,14 +414,13 @@ class CostRecorder:
         # 넘긴 스트리밍 요청이 다음 달 카운터에 든다.
         period = request_period()
 
-        # OTEL metrics
+        # OTEL metrics — user_id/team_id 를 레이블에 넣지 않는다
+        # (provider_metrics.py 계약). 이 Prometheus 는 prometheus-adapter 도
+        # 서빙해서 유저 카디널리티×파드×워커 곱이 스케일링 장애로 이어진다.
+        # 유저·팀별 사용량은 usage_logs(DB)에 원장으로 남는다.
         if self._metrics:
             model_name = model_config.alias or model_config.provider_model_id
-            attrs = {
-                "model": model_name,
-                "user_id": auth_context.user_id,
-                "team_id": auth_context.team_id or "",
-            }
+            attrs = {"model": model_name}
             self._metrics.token_usage_total.add(
                 usage.input_tokens, {**attrs, "token_type": "input"}
             )
@@ -473,30 +497,42 @@ class CostRecorder:
 
                 resv = budget_reservation.get("user")
                 if resv:
-                    raw = await call_with_transient_retry(
-                        redis.eval,
-                        settle_script,
-                        *settle_eval_args(resv),
-                        str(cost_usd), resv.get("fallback") or "",
-                        resv.get("idx_field") or "",
-                        resv.get("reserved") or "",
-                        str(resv.get("marker_ttl") or ""),
-                        idempotent=True,
-                    )
+                    # 스코프별 deadline — idempotent 재시도 개방으로 eval 최악
+                    # 대기가 ~12s+백오프 라 3스코프 순차 실행이 비스트림 응답을
+                    # ~36s 붙잡을 수 있다(아래 deduct 들도 동일). deadline 으로
+                    # 끊겨도 서버 실행분은 dedup 마커가 흡수한다.
+                    async with asyncio.timeout(4.0):
+                        raw = await call_with_transient_retry(
+                            redis.eval,
+                            settle_script,
+                            *settle_eval_args(resv),
+                            str(cost_usd), resv.get("fallback") or "",
+                            resv.get("idx_field") or "",
+                            resv.get("reserved") or "",
+                            str(resv.get("marker_ttl") or ""),
+                            idempotent=True,
+                        )
                 else:
-                    raw = await call_with_transient_retry(
-                        redis.eval,
-                        LuaScriptLoader.get("budget_deduct"),
-                        3,
-                        user_usage_key,
-                        user_config_key,
-                        # request_id dedup 키 — 같은 요청의 재전송된 eval 이
-                        # 서버 실행 후에 도착해도 이중 차감하지 않는다.
-                        f"{user_usage_key}:ded:{request_id}",
-                        str(cost_usd),
-                        user_fallback,
-                        idempotent=True,
-                    )
+                    # request_id dedup 키 — 같은 요청의 재전송된 eval 이
+                    # 서버 실행 후에 도착해도 이중 차감하지 않는다.
+                    # 빈 request_id 는 모든 요청이 `:ded:` 하나로 붕괴해 후속
+                    # 차감이 dedup_hit 으로 조용히 스킵된다 — 그 경우엔
+                    # dedup 없이 2키 레거시 형태로 호출한다(빈 키 '' 는
+                    # Cluster 에서 해시태그 부재로 CROSSSLOT 이다).
+                    async with asyncio.timeout(4.0):
+                        raw = await call_with_transient_retry(
+                            redis.eval,
+                            LuaScriptLoader.get("budget_deduct"),
+                            *(
+                                [3, user_usage_key, user_config_key,
+                                 f"{user_usage_key}:ded:{request_id}"]
+                                if request_id else
+                                [2, user_usage_key, user_config_key]
+                            ),
+                            str(cost_usd),
+                            user_fallback,
+                            idempotent=True,
+                        )
                 result = json.loads(raw)
                 threshold_triggered = result.get("threshold_triggered")
                 # 마커 부재 no-op / 만료 복구 — 둘 다 정상 settle 과 다른 경로라
@@ -513,9 +549,18 @@ class CostRecorder:
                     )
             except Exception:
                 logger.exception("budget_deduct_failed", user_id=auth_context.user_id)
+                # settle 경로의 착륙 증거는 :ded: 가 아니라 budget:settled:*
+                # 툼스톤이다 — 어느 eval 을 보냈는지에 따라 확인 키가 다르다.
+                resv = budget_reservation.get("user")
                 await _mark_budget_lost(
                     redis, user_usage_key, suspects=self._suspects, scope="user",
                     amount=cost_usd,
+                    dedup_key=(
+                        _settled_tombstone((resv or {}).get("marker_key") or "")
+                        if resv else
+                        (f"{user_usage_key}:ded:{request_id}"
+                         if request_id else None)
+                    ),
                 )
 
             # 팀 예산 차감. ⚠️ 이 결과의 threshold_triggered 를 이전엔 버렸다 —
@@ -530,27 +575,31 @@ class CostRecorder:
                 try:
                     resv = budget_reservation.get("team")
                     if resv:
-                        team_raw = await call_with_transient_retry(
-                            redis.eval,
-                            settle_script,
-                            *settle_eval_args(resv),
-                            str(cost_usd), resv.get("fallback") or "",
-                            resv.get("idx_field") or "",
-                            resv.get("reserved") or "",
-                            str(resv.get("marker_ttl") or ""),
-                            idempotent=True,
-                        )
+                        async with asyncio.timeout(4.0):
+                            team_raw = await call_with_transient_retry(
+                                redis.eval,
+                                settle_script,
+                                *settle_eval_args(resv),
+                                str(cost_usd), resv.get("fallback") or "",
+                                resv.get("idx_field") or "",
+                                resv.get("reserved") or "",
+                                str(resv.get("marker_ttl") or ""),
+                                idempotent=True,
+                            )
                     else:
-                        team_raw = await call_with_transient_retry(
-                            redis.eval,
-                            LuaScriptLoader.get("budget_deduct"),
-                            3,
-                            team_usage_key,
-                            team_config_key,
-                            f"{team_usage_key}:ded:{request_id}",
-                            str(cost_usd),
-                            idempotent=True,
-                        )
+                        async with asyncio.timeout(4.0):
+                            team_raw = await call_with_transient_retry(
+                                redis.eval,
+                                LuaScriptLoader.get("budget_deduct"),
+                                *(
+                                    [3, team_usage_key, team_config_key,
+                                     f"{team_usage_key}:ded:{request_id}"]
+                                    if request_id else
+                                    [2, team_usage_key, team_config_key]
+                                ),
+                                str(cost_usd),
+                                idempotent=True,
+                            )
                     team_result = json.loads(team_raw)
                     if team_result.get("settled") is False:
                         logger.info(
@@ -568,9 +617,16 @@ class CostRecorder:
                             threshold_scope = "team"
                 except Exception:
                     logger.warning("team_budget_deduct_failed", team_id=auth_context.team_id)
+                    resv = budget_reservation.get("team")
                     await _mark_budget_lost(
                         redis, team_usage_key, suspects=self._suspects, scope="team",
                         amount=cost_usd,
+                        dedup_key=(
+                            _settled_tombstone((resv or {}).get("marker_key") or "")
+                            if resv else
+                            (f"{team_usage_key}:ded:{request_id}"
+                             if request_id else None)
+                        ),
                     )
 
             # 앱(client) 예산 차감.
@@ -607,18 +663,19 @@ class CostRecorder:
                 try:
                     resv = budget_reservation.get("client")
                     if resv:
-                        client_settle = json.loads(
-                            await call_with_transient_retry(
-                                redis.eval,
-                                settle_script,
-                                *settle_eval_args(resv),
-                                str(cost_usd), resv.get("fallback") or "",
-                                resv.get("idx_field") or "",
-                                resv.get("reserved") or "",
-                                str(resv.get("marker_ttl") or ""),
-                                idempotent=True,
+                        async with asyncio.timeout(4.0):
+                            client_settle = json.loads(
+                                await call_with_transient_retry(
+                                    redis.eval,
+                                    settle_script,
+                                    *settle_eval_args(resv),
+                                    str(cost_usd), resv.get("fallback") or "",
+                                    resv.get("idx_field") or "",
+                                    resv.get("reserved") or "",
+                                    str(resv.get("marker_ttl") or ""),
+                                    idempotent=True,
+                                )
                             )
-                        )
                         if client_settle.get("settled") is False:
                             logger.info(
                                 "budget_settle_noop",
@@ -630,19 +687,31 @@ class CostRecorder:
                                 scope="client", request_id=request_id,
                             )
                     else:
-                        await call_with_transient_retry(
-                            redis.eval,
-                            LuaScriptLoader.get("budget_deduct"),
-                            3, client_usage_key, client_config_key,
-                            f"{client_usage_key}:ded:{request_id}",
-                            str(cost_usd),
-                            idempotent=True,
-                        )
+                        async with asyncio.timeout(4.0):
+                            await call_with_transient_retry(
+                                redis.eval,
+                                LuaScriptLoader.get("budget_deduct"),
+                                *(
+                                    [3, client_usage_key, client_config_key,
+                                     f"{client_usage_key}:ded:{request_id}"]
+                                    if request_id else
+                                    [2, client_usage_key, client_config_key]
+                                ),
+                                str(cost_usd),
+                                idempotent=True,
+                            )
                 except Exception:
                     logger.warning("client_budget_deduct_failed", client=client)
+                    resv = budget_reservation.get("client")
                     await _mark_budget_lost(
                         redis, client_usage_key, suspects=self._suspects, scope="client",
                         amount=cost_usd,
+                        dedup_key=(
+                            _settled_tombstone((resv or {}).get("marker_key") or "")
+                            if resv else
+                            (f"{client_usage_key}:ded:{request_id}"
+                             if request_id else None)
+                        ),
                     )
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)

@@ -166,6 +166,59 @@ async def test_mark_lost_enqueues_when_sentinel_write_fails():
 
 
 @pytest.mark.asyncio
+async def test_mark_lost_skips_when_dedup_marker_landed():
+    """eval 응답만 유실돼 재시도가 전부 실패한 경우 — 서버에서는 차감이
+    끝난 상태라 dedup 마커가 살아 있다. 그때 lost_amt 를 쌓으면 rebuild
+    플로어가 이중 계상하므로 센티넬을 심지 않는다."""
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=b"t:80")
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+        dedup_key="budget:user:{u1}:2026-11:ded:req-1",
+    )
+
+    redis.get.assert_awaited_once_with("budget:user:{u1}:2026-11:ded:req-1")
+    redis.incrbyfloat.assert_not_awaited()
+    redis.set.assert_not_awaited()
+    assert suspects.size == 0
+
+
+@pytest.mark.asyncio
+async def test_mark_lost_proceeds_when_dedup_probe_fails():
+    """마커 조회 자체가 실패하면(Redis 전체 장애) 보수적으로 lost 경로를
+    유지한다 — 착륙 여부를 모르는데 조용히 넘기면 유실분이 영구 누락된다."""
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+    redis.get = AsyncMock(side_effect=RedisConnectionError("down"))
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+        dedup_key="budget:user:{u1}:2026-11:ded:req-1",
+    )
+
+    redis.incrbyfloat.assert_awaited_once_with(
+        "budget:user:{u1}:2026-11:lost_amt", 0.0234
+    )
+
+
+@pytest.mark.asyncio
+async def test_settled_tombstone_key_derivation():
+    """budget_settle.lua 의 'budget:settled:' .. string.sub(marker_key,16)
+    와 동일한 키를 만들어야 한다 — 접두 길이가 어긋나면 착륙 확인이
+    영구 miss 로 죽는다."""
+    from app.services.cost_recorder import _settled_tombstone
+
+    assert _settled_tombstone(
+        "budget:pending:user:{u1}:req-9"
+    ) == "budget:settled:user:{u1}:req-9"
+    assert _settled_tombstone("other:prefix:x") is None
+
+
+@pytest.mark.asyncio
 async def test_mark_lost_without_suspects_still_safe():
     """suspects 미연결(테스트/조기 경로)이어도 예외를 올리지 않는다."""
     redis = AsyncMock()

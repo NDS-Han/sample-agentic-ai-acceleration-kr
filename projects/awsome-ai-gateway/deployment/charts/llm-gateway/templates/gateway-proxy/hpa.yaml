@@ -38,8 +38,8 @@ spec:
     {{- fail (printf "gatewayProxy.autoscaling.executorInflightTarget=%v — 양수여야 한다 (비어있거나 0 이하이면 HPA API 가 거절한다. 끄려면 키 자체를 지운다)" $raw) }}
     {{- end }}
     {{- $t := float64 $raw }}
-    {{- if eq .Values.observability.otel.mode "sidecar" }}
-    {{- fail "executorInflightTarget 은 in-cluster otel-collector 의 k8sattributes 전제 — sidecar 모드는 -otel-sidecar-config ConfigMap 이 차트에 없어 pod 레이블이 안 붙는다" }}
+    {{- if ne (.Values.observability.otel.mode | default "") "in-cluster" }}
+    {{- fail "executorInflightTarget 은 in-cluster otel-collector 의 k8sattributes 전제 — sidecar 는 -otel-sidecar-config ConfigMap 이 차트에 없고, managed/비활성 조합도 pod 레이블(k8s.pod.name)을 보장하지 않아 메트릭이 파드에 귀속되지 않는다" }}
     {{- end }}
     # claude-code SSE 1개 = bedrock 스레드 슬롯 1개 — 블로킹 대기라 CPU 가
     # 안 올라 Resource 메트릭이 포화를 못 본다. prometheus-adapter 의

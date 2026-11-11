@@ -65,11 +65,12 @@ def init_executor_metrics() -> None:
     """시작 시점에 계측기를 생성하고 inflight 시리즈를 0 으로 보고한다.
 
     UpDownCounter 는 최초 ``add()`` 전까지 데이터 포인트를 export 하지 않아
-    첫 Bedrock 호출 전엔 시리즈 자체가 없다. custom-metric HPA 에선 미보고
-    파드가 있으면 유효한 메트릭이 스케일다운을 지시해도 실패 메트릭 하나가
-    스케일 결정 전체를 건너뛰게 한다(autoscaling/v2) — 부팅 시점에 시리즈를
-    존재시켜 0 을 보고하게 해 그 블록을 없앤다. lifespan 에서 init_otel 직후
-    호출한다(meter 가 실구현이 된 뒤여야 한다).
+    첫 Bedrock 호출 전엔 시리즈 자체가 없다. custom-metric HPA(autoscaling/v2)
+    는 **전 파드가 메트릭을 보고하지 못하면** 스케일 결정을 건너뛴다 —
+    일부 파드만 미보고여도 응답이 있다면 감쇠 계산으로 처리되지만, 유휴
+    단일 파드가 아직 계측기를 만들지 않은 상태가 곧 "전부 미보고"다. 부팅
+    시점에 시리즈를 존재시켜 0 을 보고하게 해 그 블록을 없앤다. lifespan
+    에서 init_otel 직후 호출한다(meter 가 실구현이 된 뒤여야 한다).
     """
     _executor_metrics().add(0)
 

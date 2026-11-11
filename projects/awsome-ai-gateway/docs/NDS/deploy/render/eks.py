@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 
 import yaml
 from pathlib import Path
@@ -450,14 +451,27 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
 
         # executorInflightTarget 은 워커당 풀(BEDROCK_THREAD_POOL_SIZE)의
         # ~70% 가정값 — sizing 으로 풀을 바꾸는데 env values 의 타깃이 낡은
-        # 채(예: pool 256 인데 128 용 90)면 스케일 기준점이 어긋난다. env 에
-        # 명시 타깃이 없을 때만 풀에 맞춰 파생한다 — env 의 명시값은 운영자
-        # 소유라 건드리지 않는다.
+        # 채(예: pool 256 인데 128 용 90)면 스케일 기준점이 어긋난다.
+        # sizing 은 gateway.yaml 의 명시 의도라, 풀을 바꿨으면 파생 타깃을
+        # gen 에 실어 보낸다(gen 은 마지막 레이어라 env 를 이긴다). env 에
+        # 다른 명시값이 있으면 덮어쓰기 전에 경고한다 — 의도된 수동 타깃이면
+        # env 를 고치거나 sizing 선언을 지워 합치시킨다.
         gen_pool = ((gen.get("gatewayProxy") or {}).get("env") or {}).get(
             "BEDROCK_THREAD_POOL_SIZE")
-        if gen_pool and "executorInflightTarget" not in env_asg:
+        if gen_pool:
+            derived = max(1, round(int(gen_pool) * 0.7))
+            env_target = env_asg.get("executorInflightTarget")
+            if env_target is not None \
+                    and int(float(env_target)) != derived:
+                print(
+                    f"⚠ sizing.bedrock_thread_pool_size={gen_pool} → "
+                    f"파생 executorInflightTarget={derived} 인데 "
+                    f"{env_vals.name} 에 {env_target} 선언 — gen 값이 이긴다. "
+                    "의도된 수동 타깃이면 env 값을 파생값과 맞추거나 sizing "
+                    "선언을 지우세요",
+                    file=sys.stderr)
             gen["gatewayProxy"].setdefault("autoscaling", {})[
-                "executorInflightTarget"] = max(1, int(int(gen_pool) * 0.7))
+                "executorInflightTarget"] = derived
 
     values_path = out_dir / "values.yaml"
     values_path.write_text(
