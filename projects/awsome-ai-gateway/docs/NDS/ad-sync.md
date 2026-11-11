@@ -182,23 +182,23 @@ aws cognito-idp admin-update-user-attributes \
 > 부트스트랩)가 그대로 유지되고, `admin_groups`만 쓰면 env의 `emails`가
 > 유지됩니다.
 
-## 프로비저닝 경로 주의 — admin-ui는 사용자를 만들지 않습니다
+## 웹 로그인 사용자 등록
 
-admin-ui 로그인은 `GET /admin/my/profile`로 역할만 조회합니다 — **DB에
-없는 사용자는 `user_not_provisioned`(403)가 됩니다.** 사용자 생성 경로:
+admin-ui 로그인 콜백은 토큰 검증 후 `POST /v1/auth/provision`으로
+사용자·팀을 등록하고 `GET /admin/my/profile`로 유효 역할을 조회합니다.
+등록 경로는 기존 OIDC JWT 검증·그룹 매핑·비활성 사용자 거부 규칙을 공유하며,
+Virtual Key를 발급하지 않으므로 웹 로그인으로 CLI 키가 교체되지 않습니다.
+사용자는 팀 매핑용 그룹과 필요한 관리자 그룹에 가입되어 있어야 합니다.
 
-| 경로 | 프로비저닝 | SAML 사용자 커버 |
+| 경로 | 사용자 등록 | 키 발급 |
 |---|---|---|
-| `POST /admin/users/sync-cognito` | 풀 그룹 순회 | ❌ 풀 그룹에 없어 못 봄 |
-| `POST /v1/auth/exchange` | 자동 생성 (VK 발급) | ✅ |
-| admin-ui 로그인 | 없음 | ❌ |
+| `POST /admin/users/sync-cognito` | 풀 그룹 순회 | 없음 |
+| `POST /v1/auth/provision` | 검증된 토큰의 그룹 기반 | 없음 |
+| `POST /v1/auth/exchange` | 검증된 토큰의 그룹 기반 | 있음 |
 
-SAML 사용자는 풀 그룹이 없으므로 `sync-cognito`가 잡지 못합니다 — **첫
-admin-ui 로그인 전에 프로비저닝이 필요**합니다. 운영 선택지:
-
-- sync가 사용자의 `custom:groups` 속성도 읽도록 확장 (정석 — 미구현)
-- admin-ui 첫 로그인 시 provisioning 호출 (미구현)
-- 임시: 사용자에게 `/v1/auth/exchange` 호출 한 번 시키거나 관리자가 수동 생성
+기존 버전에서 로그인한 사용자가 `user_not_provisioned`(403)를 받으면
+로그아웃 후 다시 로그인해 등록 단계를 실행하세요. 등록이 실패하면
+콜백에서 오류를 표시하며 새 로그인 세션을 발급하지 않습니다.
 
 ## 검증된 테스트 결과 (prod, AD 없이)
 
