@@ -163,3 +163,71 @@ mock 종료 후 소량 실호출로 마무리:
   env values에 명시하면 그 값이 우선.
 - 변경 전 확인: `./deploy apply --plan`으로 HPA/env diff → `./deploy apply`,
   `./deploy doctor`로 사후 검증.
+
+---
+
+## 부록 A. dev 클러스터 검증 결과 (2026-11-10/11, EKS Fargate)
+
+mock 경유 실호출 대신 **executor 게이지 직접 주입**(파드 내 `_run_in_bedrock_executor`
+태스크로 inflight 값 유지)으로 스케일 루프를 실측했다 — 병목 시그널 자체는
+동일 경로를 타므로 스케일 동작 검증에는 충분하다. 전체 k6 수치는 다음 본
+테스트의 산출물.
+
+### A-1. 커스텀 메트릭 스케일 루프 — 전 구간 실증
+
+| 단계 | 주입 | HPA 표시 | 결과 |
+|---|---|---|---|
+| 스케일아웃 (타깃 180 시절) | inflight=250 지속 | `250/180` | replicas 1→**2** |
+| 스케일다운 | 주입 해제 | `0/180` | 300s 안정화 창 후 **1로 복귀** |
+| 스케일아웃 (max-워커·타깃 90) | inflight=140 | `140/90` | 이벤트 `New size: 2; reason: pods metric gateway_bedrock_executor_inflight above target` → 1→2 |
+
+**동시 CPU 관측: 2~4% 대 유지** — inflight 250(워커 풀 128×2 기준 거의
+포화)에서도 CPU 70% 타깃은 원거리. **CPU-HPA 사각지대 실증 완료** — 이
+테스트가 executor-inflight 메트릭 도입의 근거이다.
+
+### A-2. 검증 과정에서 발견·수정된 실버그
+
+| 발견 | 증상 | 수정 |
+|---|---|---|
+| `type: External` 오선정 | adapter는 `custom.metrics.k8s.io`를 서빙 — External은 별도 API라 `<unknown>` 영구 정지 | `type: Pods` + `AverageValue`로 교정 |
+| 워커 시리즈 축락 | 워커 2개가 동일 레이블셋 푸시 → 시리즈 1개로 붕괴, 총량 과소집계 | `service.instance.id={pod}-{pid}` |
+| lazy 메트릭 | 미보고 파드가 있으면 HPA가 **스케일 결정 전체를 건너뜀** | `init_executor_metrics()`로 시작 시 시리즈 생성 |
+| stale 시리즈 | 워커 재시작 잔여 시리즈 5분간 부풀림 | adapter 쿼리에 `last_over_time[2m]` |
+| 합계·평균 의미론 | 한 워커 포화가 다른 워커 평균에 묻힘 | `max by (k8s_pod_name)`, 타깃 180→**90** |
+| 롤아웃 중 메트릭 갭 | 파드 교체 시 `FailedGetPodsMetric` 경고 ~수십 초 | 정상 과도기 — 자연 해소 확인 |
+
+### A-3. 신규 이미지(`29ab1a44`) 라이브 검증
+
+```
+gateway_bedrock_executor_inflight 시리즈 (bedrock 호출 0건인 상태):
+  pod-…-njkwd | service_instance_id=…-8 | val: 0   ← 워커 A
+  pod-…-njkwd | service_instance_id=…-9 | val: 0   ← 워커 B
+  pod-…-l2pjm | (no inst-id)            | val: 0   ← 구 파드 잔여(2분 내 소실)
+```
+
+- 워커별 시리즈 분리 확인 — 축락/과소집계 해소
+- **시작 시점 `add(0)`** 으로 유휴 상태에서도 HPA가 `0/90`을 읽음
+  (`<unknown>` 아님) — M3 스케일다운 블록 시나리오 소멸
+- 구버전 이미지 시절은 inst-id 부재로 합성 프로듀서↔워커 시리즈가 충돌해
+  값이 `140↔0`으로 요동했음 — **inst-id 없는 이미지에서는 inflight 값이
+  노이즈를 동반한 과소집계**가 된다는 caveat 의 실증
+
+### A-4. 운영 발견 — stored-values 잔존 함정
+
+검증 중 부수 발견: 39h 전 부하테스트의 mock endpoint override가 release
+stored values에 남아 **이후 모든 helm upgrade가 그것을 승계** — 게이트웨이가
+실제로 계속 mock을 바라보는 상태였다. §6 절차로 제거 + 저장 values 정화,
+재발 방지를 본 문서와 values 파일 헤더에 문서화.
+
+**동형 함정**: `rebuild-image.sh`(`--reset-then-reuse-values`)는 저장 values
+에 없는 신규 키를 렌더에서 빠뜨린다 — `executorInflightTarget`도 한 번
+사라졌다가 `--set`으로 저장 values에 등록해 해소. 신규 values 키를 쓰는
+기능을 라이브에 켤 때는 **저장 values에 등록됐는지**(`helm get values -a`)
+확인이 필요하다.
+
+### A-5. 다음 본 테스트에서 채울 것
+
+- k6 `sse-hold.js` 실 VU 곡선: VU×HOLD 스윕 → inflight/queue_depth/TTFB·
+  스케일아웃 시점·최종 레플리카 수치
+- `bedrock_thread_pool_size` 조정 시 HPA 타깃 파생(`pool×0.7`) 검증
+- 2차 병목 수치: RDS Proxy 커넥션·Redis EngineCPU·`SLOWLOG`
