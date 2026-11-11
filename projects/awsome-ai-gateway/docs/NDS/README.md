@@ -118,6 +118,7 @@ docs/NDS/.venv/bin/pip install -r docs/NDS/deploy/requirements.txt
 |---|---|
 | [operations.md](operations.md) | **운영 런북** — 직원 등록·오픈 전 체크리스트·크로스계정 라우팅·Marketplace |
 | [dr-runbook.md](dr-runbook.md) | **재해 복구** — 백업 복원·시크릿 유실·RTO/RPO·리허설 |
+| [loadtest.md](loadtest.md) | **부하테스트** — mock-bedrock SSE 동시성·executor-HPA 검증·원복 절차 |
 | [client-admin.md](client-admin.md) | **클라이언트 관리자용** — env 4줄 산출·인스톨러 빌드/배포·서버측 진단 |
 | [upstream-sync.md](upstream-sync.md) | upstream → nds/dev 머지 절차 |
 

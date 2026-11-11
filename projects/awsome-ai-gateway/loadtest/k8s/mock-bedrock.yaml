@@ -8,7 +8,9 @@
 #   sed 's|MOCK_BEDROCK_IMAGE|<ecr-uri>|' loadtest/k8s/mock-bedrock.yaml \
 #     | kubectl -n <ns> apply -f -
 # 서비스 DNS: mock-bedrock.<ns>.svc.cluster.local:8080 — endpoint env 도 맞출 것.
-# 제거:
+# 유휴 시 절전(재사용 권장 — 삭제 불필요):
+#   kubectl -n <ns> scale deploy/mock-bedrock --replicas=0
+# 완전 제거:
 #   kubectl -n <ns> delete -f loadtest/k8s/mock-bedrock.yaml
 apiVersion: apps/v1
 kind: Deployment

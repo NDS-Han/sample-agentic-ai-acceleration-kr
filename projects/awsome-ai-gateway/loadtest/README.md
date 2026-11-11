@@ -8,7 +8,7 @@ claude-code(Bedrock invoke-with-response-stream) 경로의 동시성 한도를
 | 경로 | 역할 |
 |---|---|
 | `mock-bedrock/` | Bedrock Runtime mock — 실제 eventstream 바이너리 emit, 시나리오는 URL 의 model_id 로 선택 |
-| `k8s/mock-bedrock.yaml` | `loadtest-mock` ns 에 Deployment+Service |
+| `k8s/mock-bedrock.yaml` | Deployment+Service — **게이트웨이와 같은 ns** 에 둔다(Fargate profile 커버리지. dev: `llm-gateway`) |
 | `../deployment/charts/llm-gateway/values-eks-fargate-prod-loadtest-sse.yaml` | `AWS_ENDPOINT_URL_BEDROCK_RUNTIME` 오버레이 — boto3 를 mock 으로 리다이렉트 |
 | `k6/sse-hold.js` | VU=SSE 연결 1개 hold 시나리오 |
 
@@ -60,11 +60,13 @@ k6 run -e BASE_URL=https://<gateway> -e K6_API_KEY=<vk> \
 
 ## 롤백
 
-```bash
-helm upgrade llm-gateway deployment/charts/llm-gateway -n <ns> \
-  -f deployment/charts/llm-gateway/values-eks-fargate-prod.yaml   # 오버레이 제거
-kubectl delete -f loadtest/k8s/mock-bedrock.yaml
-```
+⚠ override 키는 release stored values 에 남아 오버레이 없이 재실행하거나
+`--reuse-values` 계열로는 **제거되지 않는다**(2026-11 dev 실증). 정확한
+원복 절차와 절전/재사용 경로는 NDS 문서를 따른다:
+[docs/NDS/loadtest.md](../docs/NDS/loadtest.md#6-끄기--원복의-정확한-절차).
+
+요약: `helm get values -a` export → 해당 키 삭제 → `helm upgrade -f` 재적용,
+mock은 `scale --replicas=0` 절전(삭제 불필요).
 
 ⚠ 오버레이 적용 중에는 해당 배포의 **모든** Bedrock 호출이 mock 으로 간다.
 실 추론 사용자와 같은 배포에서 켜지 말 것.
