@@ -888,20 +888,32 @@ class BudgetService:
                     team_cfg_raw = await call_with_transient_retry(
                         redis.get, team_config_key, idempotent=True
                     )
-        except (TimeoutError, RedisError):
+        except (TimeoutError, RedisError) as exc:
             # deadline 이든 Redis 자체 오류(재시도 소진)든 — 빈 fallback 으로
             # 진행해 eval 이 config 키를 직접 읽게 한다. 이 경로만 closed
-            # 모드를 우회하면 안 되는데, 이어지는 eval 실패 경로(:987)가
-            # rl_fail_mode 를 존중하므로 일관된다.
+            # 모드를 우회하면 안 되는데, 이어지는 eval 실패 경로가
+            # rl_fail_mode 를 존중하므로 일관된다. 잔여 갭: 팀 cfg 를 못 읽은
+            # 채 eval 이 성공하면 개인 config 없는 유저의 D-cap 합성이 생략된다
+            # (user 미설정 pass 방향 — 일관된 쪽이다).
             cfg_exists, team_cfg_raw = True, None
-            logger.warning("budget_reserve_config_read_deadline")
-        if not cfg_exists and team_cfg_raw:
-            team_cfg = json.loads(
-                team_cfg_raw.decode()
-                if isinstance(team_cfg_raw, bytes)
-                else team_cfg_raw
+            logger.warning(
+                "budget_reserve_config_read_deadline", error=type(exc).__name__
             )
-            d_cap = team_cfg.get("default_user_cap_usd")
+        if not cfg_exists and team_cfg_raw:
+            try:
+                team_cfg = json.loads(
+                    team_cfg_raw.decode()
+                    if isinstance(team_cfg_raw, bytes)
+                    else team_cfg_raw
+                )
+            except (ValueError, TypeError):
+                # 손상된 팀 config — fallback 을 비워 eval 이 직접 읽게 한다.
+                # Lua 의 decode 실패는 team scope deny 방향으로 수렴한다.
+                logger.warning("budget_reserve_team_cfg_corrupt")
+                team_cfg = None
+            d_cap = (
+                team_cfg.get("default_user_cap_usd") if team_cfg else None
+            )
             if d_cap is not None:
                 # check_budget 의 D-3 합성과 같은 규칙 — 캐시된 팀 config 에
                 # thresholds 가 없는 구버전 엔트리 대비 폴백(변수 추출은
@@ -986,10 +998,15 @@ class BudgetService:
                     "reserved": est_str,
                     "marker_ttl": marker_ttl,
                 })
-                _t = asyncio.ensure_future(
-                    self._refund_reservations(redis, committed))
-                _BACKGROUND_TASKS.add(_t)
-                _t.add_done_callback(_BACKGROUND_TASKS.discard)
+                try:
+                    _t = asyncio.ensure_future(
+                        self._refund_reservations(redis, committed))
+                    _BACKGROUND_TASKS.add(_t)
+                    _t.add_done_callback(_BACKGROUND_TASKS.discard)
+                except RuntimeError:
+                    # 루프 종료 중이면 ensure_future 가 RuntimeError 를 던진다 —
+                    # 취소 전파를 가리지 말고 마커 TTL 복구 경로에 맡긴다.
+                    logger.warning("budget_refund_spawn_loop_closed")
                 raise
             except Exception:
                 # Redis 일시 장애 — fail-open 방향으로 둔다. 예약 없이 진행하면
@@ -1012,7 +1029,7 @@ class BudgetService:
                     "reserved": est_str,
                     "marker_ttl": marker_ttl,
                 })
-                await self._refund_reservations(redis, committed)
+                await self._refund_guarded(redis, committed)
                 # rl_fail_mode=closed 정책을 존중한다 — 다른 한도 경로(RPM/TPM/
                 # 비용)는 eval 실패를 차단으로 번역하는데 예약만 항상 fail-open
                 # 하면 모드 설정이 예산 예약에만 무의미해진다.
@@ -1025,7 +1042,7 @@ class BudgetService:
             if result.get("config_present") is False:
                 if scope == "team":
                     # C-1: 팀 예산 미설정은 deny (check_budget 과 동일).
-                    await self._refund_reservations(redis, committed)
+                    await self._refund_guarded(redis, committed)
                     raise PermissionError("team_budget_unset")
                 # user(Q)/client 미설정 → 예약 대상 자체가 없으므로 pass.
                 continue
@@ -1037,7 +1054,7 @@ class BudgetService:
                 continue
 
             if not result.get("allowed"):
-                await self._refund_reservations(redis, committed)
+                await self._refund_guarded(redis, committed)
                 raise PermissionError(
                     result.get("reason") or f"{scope}_budget_exceeded"
                 )
@@ -1133,6 +1150,44 @@ class BudgetService:
             await self.settle_budget(redis, scopes, Decimal("0"))
         except Exception:
             logger.warning("budget_reservation_refund_failed")
+
+    async def _refund_guarded(self, redis, scopes: list[dict]) -> None:
+        """환불을 추적 태스크로 기다린다 — 대기 중 취소돼도 환불 자체는 계속된다.
+
+        거절 경로의 ``await _refund_reservations`` 를 직접 기다리면, 요청
+        태스크가 취소될 때 CancelledError 가 환불 루프를 중간에 끊어 나머지
+        스코프가 마커 만료까지 고아로 남는다. shield 로 감싸면 우리 쪽엔
+        취소가 그대로 전파되지만 환불 태스크는 _BACKGROUND_TASKS 에 살아
+        계속 돈다 — 취소는 삼키지 않으면서 롤백은 완료된다.
+        """
+        t = asyncio.ensure_future(self._refund_reservations(redis, scopes))
+        _BACKGROUND_TASKS.add(t)
+        t.add_done_callback(_BACKGROUND_TASKS.discard)
+        await asyncio.shield(t)
+
+    @classmethod
+    async def drain_background_tasks(cls, timeout: float = 5.0) -> None:
+        """종료 시점에 진행 중인 환불 태스크를 기다린다.
+
+        SIGTERM 창에 날아간 _BACKGROUND_TASKS 환불이 완료 안 되면 예약이
+        마커 TTL(최대 4h) 동안 고아로 남는다. 짧게 기다려 주고 남은 것은
+        TTL 복구 경로에 맡긴다.
+        """
+        pending = [t for t in _BACKGROUND_TASKS if not t.done()]
+        if not pending:
+            return
+        # wait_for 는 타임아웃 시 내부 gather 를 취소해 환불 태스크까지 죽인다 —
+        # drain 의 목적 자체를 허무니 타임아웃에 취소가 없는 asyncio.wait 를 쓴다.
+        done, still = await asyncio.wait(pending, timeout=timeout)
+        for t in done:
+            if t.exception():
+                logger.warning(
+                    "budget_refund_task_failed", error=repr(t.exception())
+                )
+        if still:
+            logger.warning(
+                "budget_background_drain_incomplete", remaining=len(still)
+            )
 
     async def _check_budget_db(
         self,

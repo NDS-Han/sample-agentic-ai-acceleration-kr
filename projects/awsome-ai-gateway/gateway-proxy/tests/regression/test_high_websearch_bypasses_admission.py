@@ -114,6 +114,42 @@ async def _admit(*, auth, config, client, rl_reject=None, monkeypatch=None):
     )
 
 
+async def test_fallback_candidates_get_distinct_reservation_ids(monkeypatch):
+    """두 번째 후보부터는 request_id#N — 앞 후보의 settle(0) 툼스톤이 뒤 후보의
+    월예산 한도 검사를 통과시키는 회귀(4차 리뷰 B1)를 막는다.
+
+    같은 request_id 로 reserve 를 다시 부르면 budget_reserve.lua 의 툼스톤
+    가드가 `allowed=true, reserved=false` 를 반환해 한도 검사 자체가
+    건너뛰어진다 — A 가 5xx 로 죽고 release(0) 를 남긴 뒤 B 로 넘어가는 폴백
+    경로에서 정확히 발생했다. 시도별 접미사는 enforce_rate_limits 안의 RPM
+    undo·dedup 키도 분리하므로 각 시도의 입장이 독립적으로 세어진다.
+    """
+    seen: list[str | None] = []
+
+    async def _fake_rl(**kwargs):
+        seen.append(kwargs.get("request_id"))
+        return None
+
+    monkeypatch.setattr(
+        "app.services.fallback_loop.enforce_rate_limits", _fake_rl, raising=True
+    )
+    state: dict = {"client": "claude-code"}
+    config = _config()
+    auth = _auth(allowed_models=[config.alias])
+    for _ in range(3):
+        r = await enforce_candidate_admission(
+            router_service=RouterService(),
+            auth_context=auth,
+            candidate_config=config,
+            redis=None,
+            req_data={"model": config.alias, "messages": []},
+            state=state,
+            request_id="req-1",
+        )
+        assert r is None
+    assert seen == ["req-1", "req-1#1", "req-1#2"]
+
+
 async def test_key_scope_denial_is_a_400(monkeypatch):
     """계정에 없는 모델 → 400.
 

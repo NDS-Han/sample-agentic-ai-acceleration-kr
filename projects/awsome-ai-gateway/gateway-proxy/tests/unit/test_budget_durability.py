@@ -245,6 +245,35 @@ async def test_mark_lost_tombstone_value_match_skips():
 
 
 @pytest.mark.asyncio
+async def test_mark_lost_slow_probe_still_writes_amount():
+    """hung 소켓의 probe 가 4s 쓰기 예산을 다 먹으면 lost_amt 가 영구
+    누락된다(4차 리뷰 M1). probe 는 별도 짧은 deadline — 지연되면
+    '미착륙'으로 간주하고 금액 쓰기로 진행해야 한다."""
+    import asyncio as _a
+
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+
+    async def _slow_get(_key):
+        await _a.sleep(3.0)  # probe 자체 deadline(1.5s) 초과
+        return None
+
+    redis.get = AsyncMock(side_effect=_slow_get)
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+        dedup_key="budget:settled:user:{u1}:req-1",
+        expect_value="0.0234",
+    )
+
+    redis.incrbyfloat.assert_awaited_once_with(
+        "budget:user:{u1}:2026-11:lost_amt", 0.0234
+    )
+    assert suspects.size == 0
+
+
+@pytest.mark.asyncio
 async def test_settled_tombstone_key_derivation():
     """budget_settle.lua 의 'budget:settled:' .. string.sub(marker_key,16)
     와 동일한 키를 만들어야 한다 — 접두 길이가 어긋나면 착륙 확인이

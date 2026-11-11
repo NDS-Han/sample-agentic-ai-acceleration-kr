@@ -204,9 +204,87 @@ async def test_reserve_budget_refunds_scope_on_eval_timeout():
     loads_idx = src.index("result = json.loads(raw)")
     except_idx = src.index("except Exception", eval_idx)
     assert loads_idx < except_idx, "json.loads 가 try 밖이면 eval 성공분이 고아"
-    refund_idx = src.index("_refund_reservations", except_idx)
+    # 환불은 _refund_guarded(shield+백그라운드 추적 — 대기 중 취소돼도
+    # 환불 자체는 완주)를 거쳐 _refund_reservations 에 도달한다.
+    refund_idx = src.index("_refund_guarded", except_idx)
     append_idx = src.index("committed.append", except_idx)
     assert append_idx < refund_idx, "타임아웃 scope 가 환불 대상에서 빠졌다"
+
+
+async def test_cancelled_path_appends_scope_before_spawn():
+    """except asyncio.CancelledError 도 방금 scope 를 committed 에 넣은 뒤
+    백그라운드 환불을 발사해야 한다 — append 가 없으면 취소 시점의 eval 이
+    서버에 착륙한 예약이 마커 TTL 동안 고아가 된다."""
+    import inspect
+
+    from app.services.budget_service import BudgetService
+
+    src = inspect.getsource(BudgetService.reserve_budget)
+    cancel_idx = src.index("except asyncio.CancelledError")
+    append_idx = src.index("committed.append", cancel_idx)
+    spawn_idx = src.index("ensure_future", cancel_idx)
+    assert cancel_idx < append_idx < spawn_idx, (
+        "취소 경로에서 scope append → 백그라운드 환불 순서가 깨졌다"
+    )
+    # 백그라운드 태스크는 GC 에 잃어버리지 않도록 추적 set 에 들어간다
+    # (asyncio 문서 패턴) — done_callback discard 로 누수도 안 생긴다.
+    assert "_BACKGROUND_TASKS.add" in src
+    assert "add_done_callback" in src
+
+
+@pytest.mark.asyncio
+async def test_reserve_tombstone_guard_execution():
+    """환불 settle(0) 툼스톤 뒤 도착한 reserve eval 을 **실제 스크립트로** 실행해
+    reserved=false + 키 무결성을 본다 — 소스 순서 핀만으로는 응답 필드
+    이름·sub 접두 오류 같은 형태 버그를 못 잡는다(4차 리뷰 SWE-2 m2).
+
+    시나리오: 클라이언트 타임아웃 → 호출부가 settle(0) 환불 → 늦게 도착한
+    reserve eval. 툼스톤 가드가 없으면 아무도 정산하지 않는 고아 예약이
+    resvsum/usage 를 marker_ttl 동안 부풀린다."""
+    import json
+    from pathlib import Path
+
+    import fakeredis.aioredis as far
+
+    from app.services.lua_loader import LuaScriptLoader
+
+    r = far.FakeRedis(decode_responses=True)
+    script_dir = (
+        Path(__file__).resolve().parents[2] / "src" / "app" / "redis_scripts"
+    )
+    LuaScriptLoader.load_all(script_dir)
+    reserve = LuaScriptLoader.get("budget_reserve")
+    settle = LuaScriptLoader.get("budget_settle")
+
+    usage = "budget:team:{t9}:2026-11"
+    config = "budget:config:team:{t9}"
+    marker = "budget:pending:team:{t9}:req-x"
+    resvsum = "budget:resvsum:team:{t9}:2026-11"
+    idx = "budget:pendingidx:team:{t9}"
+    await r.set(config, json.dumps(
+        {"limit_usd": "10", "policy": "hard_block"}))
+
+    # 예약이 한 번도 착륙하지 않은 채 환불 settle(0) 이 먼저 도착 —
+    # recovered 경로가 툼스톤 "0" 을 쓴다.
+    s = json.loads(await r.eval(
+        settle, 5, usage, config, marker, resvsum, idx,
+        "0", "", "req-x", "14400"))
+    assert s["settled"] in (True, False)  # 형태만 — 마커 없으면 recovered 분기
+    assert await r.get("budget:settled:team:{t9}:req-x") == "0"
+
+    # 늦은 reserve eval — 툼스톤 가드가 예약 커밋을 막아야 한다.
+    res = json.loads(await r.eval(
+        reserve, 5, usage, config, marker, resvsum, idx,
+        "team", "4.0", "", "14400", "req-x"))
+    assert res["allowed"] is True and res["reserved"] is False
+    assert res.get("settled_before") is True
+    # 고아 예약 흔적이 없어야 한다 — 마커 미생성, resvsum/usage 는 환불이
+    # 남긴 "0" 그대로(늦은 reserve 의 추정치 4.0 이 더해지지 않는다).
+    # 인덱스에도 필드가 실리면 안 된다.
+    assert not await r.exists(marker)
+    assert (await r.get(resvsum) or "0") == "0"
+    assert (await r.get(usage) or "0") == "0"
+    assert not await r.exists(idx)
 
 
 async def test_error_chunk_closes_partial_sse_frame():

@@ -89,31 +89,34 @@ async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
     ``:ded:`` 마커(값은 't:<임계값>')는 존재 자체가 착륙 증거라 None 을 둔다.
     """
     try:
-        # 이 경로 자체의 최악 대기도 제한한다 — probe+3 쓰기가 각각
-        # socket_timeout×재시도를 타면 ~16s 로 finalize 를 붙잡는다. 끊기면
-        # 아래 except 가 suspect 큐로 넘겨 헬스체커가 재심는다.
-        async with asyncio.timeout(4.0):
-            if dedup_key:
-                try:
+        if dedup_key:
+            # probe 는 쓰기 deadline 밖의 별도 짧은 deadline — hung 소켓의 get
+            # (socket_timeout×재시도 ≈4s)이 전체 예산을 먹어 lost_amt 쓰기까지
+            # 못 가는 회귀를 막는다. probe 지연/실패는 '미착륙'으로 간주해
+            # 보수적 over-count 방향으로 진행한다.
+            try:
+                async with asyncio.timeout(1.5):
                     probe = await redis.get(dedup_key)
-                    if probe is not None:
-                        val = (probe.decode() if isinstance(probe, bytes)
-                               else str(probe))
-                        landed = expect_value is None
-                        if not landed:
-                            try:
-                                landed = Decimal(val) == Decimal(expect_value)
-                            except (InvalidOperation, TypeError):
-                                landed = val == expect_value
-                        if landed:
-                            logger.warning(
-                                "budget_deduct_landed_response_lost",
-                                scope=scope)
-                            return
-                except Exception:
-                    # 마커 조회도 실패(redis 전체 장애 등) — 보수적으로
-                    # lost 경로 유지
-                    pass
+            except Exception:
+                probe = None
+            if probe is not None:
+                val = (probe.decode() if isinstance(probe, bytes)
+                       else str(probe))
+                landed = expect_value is None
+                if not landed:
+                    try:
+                        landed = Decimal(val) == Decimal(expect_value)
+                    except (InvalidOperation, TypeError):
+                        landed = val == expect_value
+                if landed:
+                    logger.warning(
+                        "budget_deduct_landed_response_lost",
+                        scope=scope)
+                    return
+        # probe+3 쓰기가 각각 socket_timeout×재시도를 타면 ~16s 로 finalize 를
+        # 붙잡는다 — 쓰기 묶음에도 deadline 을 둔다. 끊기면 아래 except 가
+        # suspect 큐로 넘겨 헬스체커가 재심는다.
+        async with asyncio.timeout(4.0):
             # 금액을 먼저 쓴다 — SET 이 실패해 suspect 로 가도 drain 의
             # :lost 재전달이 이미 심어진 lost_amt 와 합쳐져 완전한 복원이
             # 된다 (drain 은 키만 재심음).

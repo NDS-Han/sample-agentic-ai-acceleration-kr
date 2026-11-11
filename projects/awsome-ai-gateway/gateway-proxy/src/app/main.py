@@ -499,6 +499,17 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "cost_stream_spool_lost_on_shutdown", remaining=cost_stream_spool.size
         )
+    # 취소 경로에서 발사된 예약 환불 태스크가 Redis 가 닫히기 전에 settle 을
+    # 마치도록 기다린다 — 날아간 환불은 예약이 마커 TTL(최대 4h) 동안 고아로
+    # 남아 resvsum 을 부풀린다. 스트림 drain 과 같은 규칙으로 짧게만 기다린다.
+    from app.services.budget_service import BudgetService
+
+    try:
+        await BudgetService.drain_background_tasks(
+            timeout=min(5.0, _remaining())
+        )
+    except Exception:
+        logger.warning("budget_refund_tasks_shutdown_drain_failed")
     # 클라이언트 disconnect 로 떠 있는 스트림 드레인 태스크가 Redis/httpx 가
     # 닫히기 전에 finalize(과금)를 마치도록 기다린다. 드레인 자체는
     # stream_disconnect_drain_timeout 으로 상한이 있으므로 추가 grace 는

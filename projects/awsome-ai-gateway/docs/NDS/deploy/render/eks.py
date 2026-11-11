@@ -434,6 +434,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     # 거부한다. helm 레이어링(chart → env overlay → generated, 마지막이 이김)과
     # 같은 순서로 합성해 render 시점에 잡는다.
     gen = desired_values(cfg)
+    env_asg: dict = {}
     if env_vals:
         env_asg = ((yaml.safe_load(env_vals.read_text()) or {})
                    .get("gatewayProxy", {}).get("autoscaling") or {})
@@ -449,23 +450,26 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
                 f"{env_vals.name} 기본값의 합성 결과입니다. "
                 "min 과 max 를 함께 선언하세요")
 
-        # executorInflightTarget 은 워커당 풀(BEDROCK_THREAD_POOL_SIZE)의
-        # ~70% 가정값 — sizing 으로 풀을 바꾸는데 env values 의 타깃이 낡은
-        # 채(예: pool 256 인데 128 용 90)면 스케일 기준점이 어긋난다.
-        # sizing 은 gateway.yaml 의 명시 의도라, 풀을 바꿨으면 파생 타깃을
-        # gen 에 실어 보낸다(gen 은 마지막 레이어라 env 를 이긴다). env 에
-        # 다른 명시값이 있으면 덮어쓰기 전에 경고한다 — 의도된 수동 타깃이면
-        # env 를 고치거나 sizing 선언을 지워 합치시킨다.
-        gen_pool = ((gen.get("gatewayProxy") or {}).get("env") or {}).get(
-            "BEDROCK_THREAD_POOL_SIZE")
-        if gen_pool:
-            try:
-                derived = max(1, round(int(gen_pool) * 0.7))
-            except (TypeError, ValueError):
-                raise ValueError(
-                    f"sizing.gateway-proxy.bedrock_thread_pool_size="
-                    f"{gen_pool!r} — 정수여야 executorInflightTarget 을 "
-                    "파생할 수 있습니다")
+    # executorInflightTarget 은 워커당 풀(BEDROCK_THREAD_POOL_SIZE)의
+    # ~70% 가정값 — sizing 으로 풀을 바꾸는데 env values 의 타깃이 낡은
+    # 채(예: pool 256 인데 128 용 90)면 스케일 기준점이 어긋난다.
+    # sizing 은 gateway.yaml 의 명시 의도라, 풀을 바꿨으면 파생 타깃을
+    # gen 에 실어 보낸다(gen 은 마지막 레이어라 env 를 이긴다). env 에
+    # 다른 명시값이 있으면 덮어쓰기 전에 경고한다 — 의도된 수동 타깃이면
+    # env 를 고치거나 sizing 선언을 지워 합치시킨다. env overlay 자체가
+    # 없는 신규 env 에서도 파생은 적용돼야 한다 — 차트 기본 타깃은 기본
+    # 풀 크기에 맞춰져 있어 sizing 변경과 어긋난다(4차 리뷰 SWE-2 m1).
+    gen_pool = ((gen.get("gatewayProxy") or {}).get("env") or {}).get(
+        "BEDROCK_THREAD_POOL_SIZE")
+    if gen_pool:
+        try:
+            derived = max(1, round(int(gen_pool) * 0.7))
+        except (TypeError, ValueError) as e:
+            raise ValueError(
+                f"sizing.gateway-proxy.bedrock_thread_pool_size="
+                f"{gen_pool!r} — 정수여야 executorInflightTarget 을 "
+                "파생할 수 있습니다") from e
+        if env_vals:
             env_target = env_asg.get("executorInflightTarget")
             try:
                 env_target_num = (None if env_target is None
@@ -485,8 +489,8 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
                     "의도된 수동 타깃이면 env 값을 파생값과 맞추거나 sizing "
                     "선언을 지우세요",
                     file=sys.stderr)
-            gen["gatewayProxy"].setdefault("autoscaling", {})[
-                "executorInflightTarget"] = derived
+        gen["gatewayProxy"].setdefault("autoscaling", {})[
+            "executorInflightTarget"] = derived
 
     values_path = out_dir / "values.yaml"
     values_path.write_text(

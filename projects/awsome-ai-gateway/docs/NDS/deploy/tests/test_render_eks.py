@@ -355,3 +355,18 @@ def test_executor_inflight_target_env_matching_no_warning(tmp_path, capsys):
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
     assert capsys.readouterr().err == ""
+
+
+def test_executor_inflight_target_derived_without_env_overlay(tmp_path):
+    """env overlay(values-eks-fargate-{env}.yaml)가 아예 없는 신규 env 에서도
+    sizing 파생은 적용돼야 한다 — 파생이 if env_vals 안에 중첩돼 있으면
+    기본 풀용 차트 타깃이 변경된 풀에 어긋난 채로 간다(4차 리뷰 SWE-2 m1).
+    env_values_file 이 None 이면 비교 경고만 생략된다."""
+    # _fake_chart_env 를 부르지 않는다 — overlay 부재 케이스.
+    doc = dict(BASE, deploy={**BASE["deploy"], "sizing": {
+        "gateway-proxy": {"bedrock_thread_pool_size": 200}}})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / cfg.env / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["gatewayProxy"]["autoscaling"]["executorInflightTarget"] == 140
