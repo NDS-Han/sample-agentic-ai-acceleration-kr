@@ -8,6 +8,8 @@ import time
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
 
+from redis.exceptions import RedisError
+
 import structlog
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -45,6 +47,10 @@ async def _safe_rollback(db) -> None:
 
 
 BUDGET_CONFIG_TTL = None  # 무기한 (Admin 변경 시 DEL로 무효화)
+
+# 취소된 호출이 뒤에 남긴 백그라운드 정리 태스크 — GC 방지 참조 보관소
+# (asyncio 문서의 documented 패턴; done_callback 으로 스스로 제거한다).
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
 
 # per-app(client) 예산 대상 클라이언트. client_identifier 토큰과 동일 집합
 # (claude-code / cowork / codex). 새 앱 추가 시 여기 + DB CHECK 제약 + admin-api 동기화.
@@ -882,7 +888,11 @@ class BudgetService:
                     team_cfg_raw = await call_with_transient_retry(
                         redis.get, team_config_key, idempotent=True
                     )
-        except TimeoutError:
+        except (TimeoutError, RedisError):
+            # deadline 이든 Redis 자체 오류(재시도 소진)든 — 빈 fallback 으로
+            # 진행해 eval 이 config 키를 직접 읽게 한다. 이 경로만 closed
+            # 모드를 우회하면 안 되는데, 이어지는 eval 실패 경로(:987)가
+            # rl_fail_mode 를 존중하므로 일관된다.
             cfg_exists, team_cfg_raw = True, None
             logger.warning("budget_reserve_config_read_deadline")
         if not cfg_exists and team_cfg_raw:
@@ -957,6 +967,30 @@ class BudgetService:
                         idempotent=True,
                     )
                 result = json.loads(raw)
+            except asyncio.CancelledError:
+                # 하드 취소(클라이언트 단절·외부 deadline)는 아래 Exception
+                # 경로를 안 탄다 — 커밋된 스코프가 마커/resvsum/usage 에
+                # 최대 marker_ttl 동안 고아로 남아 조기 차단을 만든다.
+                # 방금 scope 도 환불 대상에 넣고, 이 태스크가 죽어도 계속
+                # 도는 백그라운드 태스크로 환불을 발사한 뒤 재전파한다 —
+                # 취소는 삼키지 않는다.
+                committed.append({
+                    "scope": scope,
+                    "usage_key": usage_key,
+                    "config_key": config_key,
+                    "marker_key": marker_key,
+                    "resvsum_key": resvsum_key,
+                    "idx_key": idx_key,
+                    "idx_field": idx_field,
+                    "fallback": fallback,
+                    "reserved": est_str,
+                    "marker_ttl": marker_ttl,
+                })
+                _t = asyncio.ensure_future(
+                    self._refund_reservations(redis, committed))
+                _BACKGROUND_TASKS.add(_t)
+                _t.add_done_callback(_BACKGROUND_TASKS.discard)
+                raise
             except Exception:
                 # Redis 일시 장애 — fail-open 방향으로 둔다. 예약 없이 진행하면
                 # 기존(체크만 하는) 동작과 같아지므로 안전하다. 커밋분은 되돌린다.
@@ -1051,15 +1085,19 @@ class BudgetService:
                 # 인덱스만 건너뛴다(인덱스 없는 마커는 rebuild SCAN 폴백이 잡는다).
                 # 마커 멱등 — 모호한 TimeoutError 도 재시도 안전(마커가 이중
                 # 적용 차단). 고아 마커 잔존을 줄인다.
-                raw = await call_with_transient_retry(
-                    redis.eval,
-                    script, *settle_eval_args(s),
-                    str(actual), s.get("fallback") or "",
-                    s.get("idx_field") or "",
-                    s.get("reserved") or "",
-                    str(s.get("marker_ttl") or ""),
-                    idempotent=True,
-                )
+                # 스코프별 deadline — 재시도 최악 대기가 스코프 수만큼 직렬로
+                # 쌓이는 것을 막는다(cost_recorder 의 settle/deduct 와 같은
+                # 이유). 끊겨도 마커 멱등이라 서버 실행분은 이중 적용 없다.
+                async with asyncio.timeout(4.0):
+                    raw = await call_with_transient_retry(
+                        redis.eval,
+                        script, *settle_eval_args(s),
+                        str(actual), s.get("fallback") or "",
+                        s.get("idx_field") or "",
+                        s.get("reserved") or "",
+                        str(s.get("marker_ttl") or ""),
+                        idempotent=True,
+                    )
                 result = json.loads(raw)
             except Exception:
                 # 정산 실패 = 카운터에 예약치 잔류(과대 계상, 보수적 방향).

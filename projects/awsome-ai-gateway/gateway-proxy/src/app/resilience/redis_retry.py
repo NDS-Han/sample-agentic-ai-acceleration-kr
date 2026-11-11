@@ -28,12 +28,14 @@ async def call_with_transient_retry(
 ) -> Any:
     """Redis awaitable(exists/get/eval …)에 일시 오류 한정 재시도를 얹는다.
 
-    idempotent=False(비멱등 변경 — INCRBYFLOAT 계열: budget_deduct·
-    budget_reserve): ``MaxConnectionsError`` 만 재시도한다. 풀이 커넥션을
+    idempotent=False(비멱등 변경 — 마커 없는 INCRBYFLOAT 계열):
+    ``MaxConnectionsError`` 만 재시도한다. 풀이 커넥션을
     못 내줘 커맨드가 소켓에 한 번도 안 나간 상태라 재실행이 안전하다.
     그 외 ``ConnectionError``("Connection closed by server", reset 등)는
     서버가 커맨드를 이미 실행한 뒤 응답만 유실됐을 수 있어 비멱등 재시도는
     이중 적용이다 — 제외한다. ``TimeoutError`` 도 같은 이유로 제외한다.
+    (budget_deduct/reserve 는 request_id 마커를 얻은 뒤 idempotent=True
+    분류로 옮겼다 — 아래)
     idempotent=True(request_id 마커 멱등 eval·읽기 전용 명령):
     ``TimeoutError``·``ConnectionError`` 도 재시도한다 — 서버측 멱등
     마커(budget_reserve 의 pending marker, budget_deduct 의 ``:ded:``

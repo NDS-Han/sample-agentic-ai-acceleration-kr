@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from uuid import uuid4
 
 import structlog
 
@@ -56,7 +57,8 @@ def _settled_tombstone(marker_key: str) -> str | None:
 
 
 async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
-                            amount=None, dedup_key: str | None = None) -> None:
+                            amount=None, dedup_key: str | None = None,
+                            expect_value: str | None = None) -> None:
     """차감 실패 카운터에 :lost 센티넬을 심어 다음 admission rebuild 를 트리거한다.
 
     마지막 수단의 단일 SET 이다 — 여기까지 온 것은 eval 재시도가 전부 실패한
@@ -69,30 +71,58 @@ async def _mark_budget_lost(redis, usage_key: str, *, suspects, scope: str,
     누적한다 — 원장(budget_usages) 기록은 워커 배치라 rebuild 시점에 실패분이
     아직 반영 안 됐을 수 있고, 그때 rebuild 가 센티넬을 지우면 유실분이 기간
     내내 남는다. rebuild 는 ``max(db+live, cur+lost_amt)`` 플로어로 그 창을
-    메운다. settle 실패(예약만 지저분)는 금액 없이 트리거만 심는다.
+    메운다. CPM/CPH 정산 실패(윈도우 잔여만 지저분)는 금액 없이 트리거만
+    심는다 — 월예산 settle 실패는 환불 settle(0) 경합 시 실비 유실을
+    막기 위해 amount 를 넘긴다.
 
     dedup_key 를 주면 쓰기 전에 request_id 마커를 조회한다 — eval 이 서버에서는
     실행됐는데 응답만 유실돼 재시도가 전부 실패한 경우, 마커가 살아 있으면
     차감은 실제로 일어난 것이다. 그때 lost_amt 를 쌓으면 rebuild 의
-    ``cur+lost_amt`` 플로어가 그 금액을 이중 계상한다.
+    ``cur+lost_amt`` 플로어가 그 금액을 이중 계상한다. 알려진 잔여 창:
+    probe→쓰기 사이에 eval 이 착륙하면(probe miss→lost 기록→eval 완료)
+    같은 이중 계상이 남는다 — ~1 RTT 창이고 과대 계상(조기 차단) 방향이라
+    원자 Lua 합성보다 문서화된 잔여로 둔다.
+
+    expect_value 를 주면 마커 값과 비교한다 — ``budget:settled:*`` 툼스톤은
+    ARGV[1]=실비를 저장하는데, 경쟁 환불 settle(0) 은 ``"0"`` 을 쓴다.
+    그 흔적을 우리 settle 의 착륙으로 오인하면 실비 차감이 영구 누락된다.
+    ``:ded:`` 마커(값은 't:<임계값>')는 존재 자체가 착륙 증거라 None 을 둔다.
     """
     try:
-        if dedup_key:
-            try:
-                if await redis.get(dedup_key):
-                    logger.warning(
-                        "budget_deduct_landed_response_lost", scope=scope)
-                    return
-            except Exception:
-                # 마커 조회도 실패(redis 전체 장애 등) — 보수적으로 lost 경로 유지
-                pass
-        # 금액을 먼저 쓴다 — SET 이 실패해 suspect 로 가도 drain 의 :lost 재전달이
-        # 이미 심어진 lost_amt 와 합쳐져 완전한 복원이 된다 (drain 은 키만 재심음).
-        if amount is not None:
-            await redis.incrbyfloat(f"{usage_key}:lost_amt", float(amount))
-            await redis.expire(f"{usage_key}:lost_amt", SENTINEL_TTL_SECONDS)
-        await redis.set(f"{usage_key}:lost", "1", ex=SENTINEL_TTL_SECONDS)
-        logger.warning("budget_counter_marked_lost", scope=scope)
+        # 이 경로 자체의 최악 대기도 제한한다 — probe+3 쓰기가 각각
+        # socket_timeout×재시도를 타면 ~16s 로 finalize 를 붙잡는다. 끊기면
+        # 아래 except 가 suspect 큐로 넘겨 헬스체커가 재심는다.
+        async with asyncio.timeout(4.0):
+            if dedup_key:
+                try:
+                    probe = await redis.get(dedup_key)
+                    if probe is not None:
+                        val = (probe.decode() if isinstance(probe, bytes)
+                               else str(probe))
+                        landed = expect_value is None
+                        if not landed:
+                            try:
+                                landed = Decimal(val) == Decimal(expect_value)
+                            except (InvalidOperation, TypeError):
+                                landed = val == expect_value
+                        if landed:
+                            logger.warning(
+                                "budget_deduct_landed_response_lost",
+                                scope=scope)
+                            return
+                except Exception:
+                    # 마커 조회도 실패(redis 전체 장애 등) — 보수적으로
+                    # lost 경로 유지
+                    pass
+            # 금액을 먼저 쓴다 — SET 이 실패해 suspect 로 가도 drain 의
+            # :lost 재전달이 이미 심어진 lost_amt 와 합쳐져 완전한 복원이
+            # 된다 (drain 은 키만 재심음).
+            if amount is not None:
+                await redis.incrbyfloat(f"{usage_key}:lost_amt", float(amount))
+                await redis.expire(f"{usage_key}:lost_amt",
+                                   SENTINEL_TTL_SECONDS)
+            await redis.set(f"{usage_key}:lost", "1", ex=SENTINEL_TTL_SECONDS)
+            logger.warning("budget_counter_marked_lost", scope=scope)
     except Exception:
         if suspects is not None:
             suspects.enqueue(usage_key)
@@ -283,6 +313,13 @@ class CostRecorder:
         monitoring 이 진실을 볼 수 있게 0 비용의 usage_logs 행도 남긴다 —
         성공 요청의 0 토큰 행만 예전처럼 쓰지 않는다(E2E S5).
         """
+        # 빈 request_id(otel 미들웨어 외 경로 — state.get 기본 "")는 그대로 두면
+        # dedup 키가 모든 요청에 ':ded:' 하나로 붕괴하고, 2키 폴백으로 보내면
+        # idempotent 재시도가 서버 착륙+응답 유실 시 이중 차감한다 — 호출별
+        # 고유 접미사를 대신 부여한다. 이 호출 안의 재전송은 같은 접미사를
+        # 재사용하므로 dedup 보호는 그대로고, 로그/원장도 빈 값보다 낫다.
+        request_id = request_id or f"noid-{uuid4().hex}"
+
         # 종결 usage 미수신(중간 disconnect/idle timeout — Responses 방언은 usage 를
         # response.completed 에만 싣는다): provider 는 프롬프트를 이미 청구했으므로
         # admission 의 입력 추정치로 과금한다 — 전량 $0 처리는 과소청구다.
@@ -515,20 +552,15 @@ class CostRecorder:
                 else:
                     # request_id dedup 키 — 같은 요청의 재전송된 eval 이
                     # 서버 실행 후에 도착해도 이중 차감하지 않는다.
-                    # 빈 request_id 는 모든 요청이 `:ded:` 하나로 붕괴해 후속
-                    # 차감이 dedup_hit 으로 조용히 스킵된다 — 그 경우엔
-                    # dedup 없이 2키 레거시 형태로 호출한다(빈 키 '' 는
-                    # Cluster 에서 해시태그 부재로 CROSSSLOT 이다).
+                    # 빈 request_id 는 위에서 noid-<uuid> 로 대체됐다.
                     async with asyncio.timeout(4.0):
                         raw = await call_with_transient_retry(
                             redis.eval,
                             LuaScriptLoader.get("budget_deduct"),
-                            *(
-                                [3, user_usage_key, user_config_key,
-                                 f"{user_usage_key}:ded:{request_id}"]
-                                if request_id else
-                                [2, user_usage_key, user_config_key]
-                            ),
+                            3,
+                            user_usage_key,
+                            user_config_key,
+                            f"{user_usage_key}:ded:{request_id}",
                             str(cost_usd),
                             user_fallback,
                             idempotent=True,
@@ -557,10 +589,11 @@ class CostRecorder:
                     amount=cost_usd,
                     dedup_key=(
                         _settled_tombstone((resv or {}).get("marker_key") or "")
-                        if resv else
-                        (f"{user_usage_key}:ded:{request_id}"
-                         if request_id else None)
+                        if resv else f"{user_usage_key}:ded:{request_id}"
                     ),
+                    # settle 경로: 툼스톤 값이 우리 실비와 같아야 착륙 —
+                    # 경쟁 환불 settle(0) 의 "0" 은 착륙이 아니다.
+                    expect_value=str(cost_usd) if resv else None,
                 )
 
             # 팀 예산 차감. ⚠️ 이 결과의 threshold_triggered 를 이전엔 버렸다 —
@@ -591,12 +624,10 @@ class CostRecorder:
                             team_raw = await call_with_transient_retry(
                                 redis.eval,
                                 LuaScriptLoader.get("budget_deduct"),
-                                *(
-                                    [3, team_usage_key, team_config_key,
-                                     f"{team_usage_key}:ded:{request_id}"]
-                                    if request_id else
-                                    [2, team_usage_key, team_config_key]
-                                ),
+                                3,
+                                team_usage_key,
+                                team_config_key,
+                                f"{team_usage_key}:ded:{request_id}",
                                 str(cost_usd),
                                 idempotent=True,
                             )
@@ -624,9 +655,9 @@ class CostRecorder:
                         dedup_key=(
                             _settled_tombstone((resv or {}).get("marker_key") or "")
                             if resv else
-                            (f"{team_usage_key}:ded:{request_id}"
-                             if request_id else None)
+                            f"{team_usage_key}:ded:{request_id}"
                         ),
+                        expect_value=str(cost_usd) if resv else None,
                     )
 
             # 앱(client) 예산 차감.
@@ -691,12 +722,8 @@ class CostRecorder:
                             await call_with_transient_retry(
                                 redis.eval,
                                 LuaScriptLoader.get("budget_deduct"),
-                                *(
-                                    [3, client_usage_key, client_config_key,
-                                     f"{client_usage_key}:ded:{request_id}"]
-                                    if request_id else
-                                    [2, client_usage_key, client_config_key]
-                                ),
+                                3, client_usage_key, client_config_key,
+                                f"{client_usage_key}:ded:{request_id}",
                                 str(cost_usd),
                                 idempotent=True,
                             )
@@ -709,9 +736,9 @@ class CostRecorder:
                         dedup_key=(
                             _settled_tombstone((resv or {}).get("marker_key") or "")
                             if resv else
-                            (f"{client_usage_key}:ded:{request_id}"
-                             if request_id else None)
+                            f"{client_usage_key}:ded:{request_id}"
                         ),
+                        expect_value=str(cost_usd) if resv else None,
                     )
 
         # 2. CPM/CPH 정산 (USER+TEAM 2 스코프, FR-4.6)

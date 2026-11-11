@@ -76,6 +76,26 @@ if redis.call('EXISTS', marker_key) == 1 then
     })
 end
 
+-- 늦은 도착 가드: 클라이언트가 타임아웃으로 이 eval 을 포기하면 호출부는
+-- 환불 settle(0) 을 보낸다. 그 settle 이 먼저 실행돼 settled 툼스톤을
+-- 쓴 뒤 이 reserve 가 도착하면, 커밋되는 예약은 아무도 정산하지 않는
+-- 고아가 돼 marker_ttl 동안 resvsum 을 부풀린다. 툼스톤이 있으면
+-- "예약 없이 통과"로 응답한다 — 이 응답은 대부분 버려지지만, 재시도가
+-- 툼스톤을 만난 경우에도 호출부는 reserved=false 로 디스크립터를
+-- 등록하지 않아 일관된다.
+if redis.call('GET', 'budget:settled:' .. string.sub(marker_key, 16)) then
+    return cjson.encode({
+        allowed = true,
+        reserved = false,
+        reason = cjson.null,
+        used_usd = tonumber(redis.call('GET', usage_key) or '0'),
+        limit_usd = 0,
+        scope = scope_label,
+        config_present = true,
+        settled_before = true,
+    })
+end
+
 local cfg_raw = redis.call('GET', config_key)
 if not cfg_raw and ARGV[3] and ARGV[3] ~= '' then
     cfg_raw = ARGV[3]

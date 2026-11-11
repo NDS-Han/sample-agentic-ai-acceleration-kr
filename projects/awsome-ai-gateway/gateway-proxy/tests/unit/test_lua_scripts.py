@@ -67,3 +67,8 @@ def test_request_id_dedup_guards_present():
     assert "EXISTS', marker_key" in reserve
     assert "dedup_hit" in reserve
     assert reserve.index("EXISTS', marker_key") < reserve.index("INCRBYFLOAT")
+    # 늦은 도착 가드: 환불 settle(0) 이 쓴 settled 툼스톤이 있으면 예약을
+    # 커밋하지 않는다 — 없으면 타임아웃 뒤 도착한 reserve 가 아무도 정산
+    # 하지 않는 고아 예약을 marker_ttl 동안 남긴다. 가드는 쓰기 전에.
+    assert "budget:settled:" in reserve
+    assert reserve.index("budget:settled:") < reserve.index("INCRBYFLOAT")

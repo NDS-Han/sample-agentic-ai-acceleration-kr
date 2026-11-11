@@ -459,10 +459,25 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         gen_pool = ((gen.get("gatewayProxy") or {}).get("env") or {}).get(
             "BEDROCK_THREAD_POOL_SIZE")
         if gen_pool:
-            derived = max(1, round(int(gen_pool) * 0.7))
+            try:
+                derived = max(1, round(int(gen_pool) * 0.7))
+            except (TypeError, ValueError):
+                raise ValueError(
+                    f"sizing.gateway-proxy.bedrock_thread_pool_size="
+                    f"{gen_pool!r} — 정수여야 executorInflightTarget 을 "
+                    "파생할 수 있습니다")
             env_target = env_asg.get("executorInflightTarget")
-            if env_target is not None \
-                    and int(float(env_target)) != derived:
+            try:
+                env_target_num = (None if env_target is None
+                                  else float(env_target))
+            except (TypeError, ValueError):
+                env_target_num = None
+                print(
+                    f"⚠ {env_vals.name} 의 executorInflightTarget="
+                    f"{env_target!r} 는 수치가 아닙니다 — gen 파생값이 "
+                    "이깁니다",
+                    file=sys.stderr)
+            if env_target_num is not None and env_target_num != derived:
                 print(
                     f"⚠ sizing.bedrock_thread_pool_size={gen_pool} → "
                     f"파생 executorInflightTarget={derived} 인데 "

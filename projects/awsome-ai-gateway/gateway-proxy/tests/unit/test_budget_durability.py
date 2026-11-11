@@ -206,6 +206,45 @@ async def test_mark_lost_proceeds_when_dedup_probe_fails():
 
 
 @pytest.mark.asyncio
+async def test_mark_lost_tombstone_value_mismatch_marks_lost():
+    """budget:settled:* 툼스톤은 ARGV[1]=실비를 저장한다 — 경쟁 환불
+    settle(0) 이 먼저 쓴 "0" 을 우리 settle 착륙으로 오인하면 실비 차감이
+    영구 누락된다. 값이 다르면 lost 경로로 간다."""
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=b"0")
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+        dedup_key="budget:settled:user:{u1}:req-1",
+        expect_value="0.0234",
+    )
+
+    redis.incrbyfloat.assert_awaited_once_with(
+        "budget:user:{u1}:2026-11:lost_amt", 0.0234
+    )
+
+
+@pytest.mark.asyncio
+async def test_mark_lost_tombstone_value_match_skips():
+    """툼스톤 값이 우리 실비와 같으면 그 settle 이 착륙한 것 — lost 생략."""
+    suspects = BudgetSuspectSet()
+    redis = AsyncMock()
+    redis.get = AsyncMock(return_value=b"0.0234")
+
+    await _mark_budget_lost(
+        redis, "budget:user:{u1}:2026-11", suspects=suspects, scope="user",
+        amount="0.0234",
+        dedup_key="budget:settled:user:{u1}:req-1",
+        expect_value="0.0234",
+    )
+
+    redis.incrbyfloat.assert_not_awaited()
+    redis.set.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_settled_tombstone_key_derivation():
     """budget_settle.lua 의 'budget:settled:' .. string.sub(marker_key,16)
     와 동일한 키를 만들어야 한다 — 접두 길이가 어긋나면 착륙 확인이
