@@ -363,8 +363,14 @@ async def enforce_rate_limits(
     from app.periods import request_period
     from app.services.budget_service import BudgetService
 
+    # 예약 추정의 출력 상한은 별도 클램프 — 클라이언트 max_tokens 가 매우 크면
+    # 비싼 모델에서 worst-case 선예약이 소액 예산을 통째로 잠가 호출이 막힌다.
+    # 실비 정산은 실제 사용량을 쓰므로, 초과분은 settle 이 카운터를 cap 위로
+    # 올려 다음 요청 차단 방향으로 수렴한다(잔여 클램프와 같은 정책).
+    _res_out_cap = get_settings().budget_reservation_max_output_tokens
     worst_cost = _estimate_worst_cost(
-        model_config, estimated_input, max_output,
+        model_config, estimated_input,
+        min(max_output, _res_out_cap) if _res_out_cap else max_output,
         tier_input=estimated_input_billing,
     )
     try:

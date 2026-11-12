@@ -47,15 +47,18 @@ def test_estimate_cost_uses_input_and_max_output():
 @pytest.mark.asyncio
 async def test_enforce_cpm_exceeded_returns_429(monkeypatch, mock_redis):
     """CPM 초과 시 429 JSONResponse (RPM/TPM은 통과 가정)."""
-    # RPM/TPM 통과 mock
-    async def _rpm_ok(*args, **kwargs):
-        from app.schemas.domain import RateLimitResult
+    from app.schemas.domain import RateLimitResult
 
-        return RateLimitResult(allowed=True, remaining=-1, limit=-1)
+    # RPM 통과 mock — committed_keys 를 실제 값으로 넣어야 뒤 스코프 거절 시
+    # undo_rpm 에 그 키가 전달되는지 검증할 수 있다(기본 [] 는 early-return 이라
+    # 되돌리기 계약 회귀를 못 잡는다 — SWE-2 7차 #6).
+    rpm_committed = ["rl:rpm:u:u-1:{k1}:m:1"]
+    async def _rpm_ok(*args, **kwargs):
+        return RateLimitResult(
+            allowed=True, remaining=-1, limit=-1, committed_keys=rpm_committed
+        )
 
     async def _tpm_ok(*args, **kwargs):
-        from app.schemas.domain import RateLimitResult
-
         return RateLimitResult(allowed=True, remaining=-1, limit=-1)
 
     # CPM 거부 mock
@@ -74,9 +77,15 @@ async def test_enforce_cpm_exceeded_returns_429(monkeypatch, mock_redis):
 
     from app.services import rate_limit_enforcement as enf
 
+    undo_calls: list[list[str]] = []
+
+    async def _undo_spy(_self, _redis, _descriptors, _req_id, *, committed_keys=None):
+        undo_calls.append(list(committed_keys or []))
+
     monkeypatch.setattr(enf.RateLimitService, "check_multi_scope_rpm", _rpm_ok)
     monkeypatch.setattr(enf.RateLimitService, "check_multi_scope_tpm", _tpm_ok)
     monkeypatch.setattr(enf.RateLimitService, "reserve_cost", _cost_fail)
+    monkeypatch.setattr(enf.RateLimitService, "undo_rpm", _undo_spy)
 
     # config loader — USER CPM=0.5 설정
     async def _load_limits(**_kwargs):
@@ -118,6 +127,8 @@ async def test_enforce_cpm_exceeded_returns_429(monkeypatch, mock_redis):
     assert resp.headers["Retry-After"] == "60"
     # state에 cost_reserved 주입되지 않음 (거부됨)
     assert "rate_limit_state" not in state
+    # 되돌리기 계약 — CPM 거절 시 RPM 은 이번 호출이 커밋한 키만 되돌린다.
+    assert undo_calls == [rpm_committed]
 
 
 @pytest.mark.asyncio

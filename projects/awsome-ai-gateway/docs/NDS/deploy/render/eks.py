@@ -438,21 +438,31 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     if env_vals:
         env_asg = ((yaml.safe_load(env_vals.read_text()) or {})
                    .get("gatewayProxy", {}).get("autoscaling") or {})
-        gen_asg = ((gen.get("gatewayProxy") or {}).get("autoscaling") or {})
-        merged = {**{k: v for k, v in env_asg.items()},
-                  **{k: v for k, v in gen_asg.items()}}
-        mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
-        if merged.get("enabled") and mn is not None and mx is not None:
-            try:
-                mn_i, mx_i = int(mn), int(mx)
-            except (TypeError, ValueError):
-                mn_i = mx_i = 0  # 비수치는 차트 측 유효성에서 잡히게 통과
-            if mn_i > mx_i:
-                raise ValueError(
-                    f"gatewayProxy.autoscaling: minReplicas({mn}) > "
-                    f"maxReplicas({mx}) — deploy.sizing/capacity_tier 와 "
-                    f"{env_vals.name} 기본값의 합성 결과입니다. "
-                    "min 과 max 를 함께 선언하세요")
+    gen_asg = ((gen.get("gatewayProxy") or {}).get("autoscaling") or {})
+    # helm 레이어링과 같은 순서: chart 기본 → env overlay → gen(최종). 차트
+    # 기본을 깔지 않으면 env 가 min 만 선언한 경우(min:25 > 차트 기본 max:20)
+    # 같은 한쪽 선언이 검증을 빠져나간다(7차 리뷰 #1).
+    chart_vals = yaml.safe_load(
+        (REPO_ROOT / "deployment" / "charts" / "llm-gateway" / "values.yaml")
+        .read_text()) or {}
+    chart_asg = ((chart_vals.get("gatewayProxy") or {}).get("autoscaling") or {})
+    merged = {**chart_asg, **env_asg, **gen_asg}
+    mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
+    if merged.get("enabled") and mn is not None and mx is not None:
+        try:
+            mn_i, mx_i = int(mn), int(mx)
+        except (TypeError, ValueError):
+            # 차트 측 유효성은 없다(values.schema.json 부재) — 비수치는 그대로
+            # 렌더돼 kubectl apply 에서야 터지므로 render 시점에 잡는다.
+            raise ValueError(
+                f"gatewayProxy.autoscaling: minReplicas/maxReplicas 는 "
+                f"정수여야 합니다 (min={mn!r}, max={mx!r})")
+        if mn_i > mx_i:
+            raise ValueError(
+                f"gatewayProxy.autoscaling: minReplicas({mn}) > "
+                f"maxReplicas({mx}) — deploy.sizing/capacity_tier 와 "
+                f"{env_vals.name if env_vals else 'chart 기본값'} 기본값의 "
+                "합성 결과입니다. min 과 max 를 함께 선언하세요")
 
     # executorInflightTarget 은 워커당 풀(BEDROCK_THREAD_POOL_SIZE)의
     # ~70% 가정값 — sizing 으로 풀을 바꾸는데 env values 의 타깃이 낡은

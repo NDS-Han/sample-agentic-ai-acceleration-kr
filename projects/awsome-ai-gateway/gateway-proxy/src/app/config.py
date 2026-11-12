@@ -140,6 +140,14 @@ class Settings(BaseSettings):
     # 월 롤오버까지 남으므로, 이 값은 "누수 마커의 추적 가능 기간"이다.
     budget_reservation_ttl_seconds: int = 14400  # 4h
 
+    # 월예산 선예약의 worst-case 추정에 쓰는 출력 상한(토큰). 클라이언트의
+    # max_tokens 를 그대로 쓰면 비싼 모델(Opus 출력 $75/MTok)에서 한 번의
+    # 선예약이 소액 예산을 통째로 잠가 호출 자체가 막힌다 — 예약 추정만
+    # 이 상한으로 클램프하고, 실비 정산은 실제 사용량을 쓴다(초과분은
+    # 정산 시 카운터가 cap 위로 기록돼 다음 요청이 차단되는 방향으로
+    # 수렴). 응답 자체는 잘리지 않는다 — 실제 max_tokens 로 나간다.
+    budget_reservation_max_output_tokens: int = 16384
+
     # pendingidx 인덱스 롤아웃 웜업 — 인덱스 미포함 마커를 쓰는 구버전 파드가
     # 남아 있을 수 있는 창(배포 시각 + marker TTL) 동안 rebuild 가 인덱스 대신
     # 키스페이스 SCAN 을 쓴다. 전 파드가 인덱스 버전으로 올라간 뒤에는 False 로

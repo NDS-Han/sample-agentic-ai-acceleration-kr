@@ -66,9 +66,15 @@ def upgrade() -> None:
             ALTER COLUMN max_budget_usd DROP NOT NULL
         """
     )
+    # init SQL 이 이미 같은 CHECK 를 만들어 둔 설치본(init 이 alembic 보다
+    # 먼저 도는 run_migration.sh 순서)에서 plain ADD CONSTRAINT 는
+    # duplicate_object 로 migration Job 전체를 죽인다(6차 리뷰 B1, 실PG 재현).
+    # DROP IF EXISTS + ADD 단일 문장으로 멱등하게 — 같은 CHECK 텍스트라
+    # 재생성해도 스키마는 동일하다.
     op.execute(
         """
         ALTER TABLE budget.budget_configs
+            DROP CONSTRAINT IF EXISTS ck_budget_configs_max_required,
             ADD CONSTRAINT ck_budget_configs_max_required
             CHECK (
                 max_budget_usd IS NOT NULL

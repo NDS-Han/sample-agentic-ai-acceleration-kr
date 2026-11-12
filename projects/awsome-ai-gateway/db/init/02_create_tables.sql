@@ -792,12 +792,24 @@ WHERE a.alias = p.model_alias
 ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS context_tier VARCHAR(8);
 
 -- migration 0039: TEAM scope + client IS NULL 행의 기본 유저 cap D.
-ALTER TABLE budget.budget_configs ADD COLUMN IF NOT EXISTS default_user_cap_usd NUMERIC(12,4);
-COMMENT ON COLUMN budget.budget_configs.default_user_cap_usd IS
-    'TEAM scope 행의 기본 유저 cap D — 개인 예산 미설정 멤버에 적용. NULL=팀 한도만, 0=차단';
--- 0039 가 max_budget_usd 의 NOT NULL 을 TEAM+client NULL 한정으로 푼다 —
--- 기존 설치본(인라인 NOT NULL)과 init-only 를 같은 스키마로 수렴시킨다.
-ALTER TABLE budget.budget_configs ALTER COLUMN max_budget_usd DROP NOT NULL;
+-- 컬럼-존재 가드 — no-op ALTER 도 ACCESS EXCLUSIVE 를 잡는다(위 usage_logs 주석).
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'budget' AND table_name = 'budget_configs'
+                     AND column_name = 'default_user_cap_usd') THEN
+        ALTER TABLE budget.budget_configs ADD COLUMN default_user_cap_usd NUMERIC(12,4);
+        COMMENT ON COLUMN budget.budget_configs.default_user_cap_usd IS
+            'TEAM scope 행의 기본 유저 cap D — 개인 예산 미설정 멤버에 적용. NULL=팀 한도만, 0=차단';
+    END IF;
+    -- 0039 가 max_budget_usd 의 NOT NULL 을 TEAM+client NULL 한정으로 푼다 —
+    -- 기존 설치본(인라인 NOT NULL)과 init-only 를 같은 스키마로 수렴시킨다.
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'budget' AND table_name = 'budget_configs'
+                 AND column_name = 'max_budget_usd' AND is_nullable = 'NO') THEN
+        ALTER TABLE budget.budget_configs ALTER COLUMN max_budget_usd DROP NOT NULL;
+    END IF;
+END $$;
 DO $$ BEGIN
     ALTER TABLE budget.budget_configs
         ADD CONSTRAINT ck_budget_configs_max_required
@@ -805,32 +817,70 @@ DO $$ BEGIN
 EXCEPTION WHEN duplicate_object THEN null; END $$;
 
 -- migration 0048: 수동 배정('manual')과 sync 유래 팀 소속을 구분하는 표지.
-ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS team_source VARCHAR(16) NOT NULL DEFAULT 'sync';
-
--- migration 0050: 서비스 계정 키 발급 지원.
-ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS kind VARCHAR(32) NOT NULL DEFAULT 'exchange';
-ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS issued_by UUID REFERENCES auth.users(id);
-ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS issued_via_service_token UUID REFERENCES auth.service_tokens(id);
+-- migration 0050: 서비스 계정 키 발급 지원 — 컬럼-존재 가드(위와 같은 잠금 이유).
+DO $$
+DECLARE
+    c record;
+BEGIN
+    FOR c IN
+        SELECT * FROM (VALUES
+            ('auth', 'users',        'team_source',                 'VARCHAR(16) NOT NULL DEFAULT ''sync'''),
+            ('auth', 'users',        'is_service_account',          'BOOLEAN NOT NULL DEFAULT false'),
+            ('auth', 'virtual_keys', 'kind',                        'VARCHAR(32) NOT NULL DEFAULT ''exchange'''),
+            ('auth', 'virtual_keys', 'issued_by',                   'UUID REFERENCES auth.users(id)'),
+            ('auth', 'virtual_keys', 'issued_via_service_token',    'UUID REFERENCES auth.service_tokens(id)')
+        ) AS v(sch, tbl, name, def)
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = c.sch AND table_name = c.tbl
+                         AND column_name = c.name) THEN
+            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN %I %s',
+                           c.sch, c.tbl, c.name, c.def);
+            RAISE NOTICE 'backfilled %.%', c.tbl, c.name;
+        END IF;
+    END LOOP;
+END $$;
 
 -- usage_logs 인라인 컬럼 백필 — CREATE TABLE IF NOT EXISTS 는 기존 설치본에서
--- 통째로 no-op 이라, 인라인에만 선언된 컬럼은 alembic 도 추가하지 않는 한
+-- 통째로 no-op 이라, 인라인에만 선언된 컬럼은 alembic 이 닿기 전/미도달 환경에서
 -- 영구 결손이다(ORM 은 매 SELECT 에 전 컬럼을 넣으므로 그 테이블 경로 전체가
 -- UndefinedColumn 으로 죽는다 — 위 블록 도입 사유와 동일 사고 클래스).
--- session_id 는 alembic 0054 가, 나머지는 어느 마이그레이션도 추가하지 않는다.
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS web_search_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS ttft_ms INTEGER;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS is_streaming BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS estimated_usage BOOLEAN NOT NULL DEFAULT false;
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS downgraded_from VARCHAR(128);
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS availability_fallback_from VARCHAR(128);
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS sso_subject VARCHAR(512);
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS bedrock_request_id VARCHAR(128);
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS key_prefix VARCHAR(16);
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS session_id VARCHAR(128);
+-- session_id 는 alembic 0054 가, 일부는 0013/0019/0020/0023/0051 이, 나머지는
+-- 어느 마이그레이션도 추가하지 않는다 — 모든 경로에서 여기가 수렴점이다.
+-- ⚠️ bare ADD COLUMN IF NOT EXISTS 는 **no-op 일 때도 ACCESS EXCLUSIVE** 를
+--    잡는다 — usage_logs 는 핫 테이블이라 배포마다 잠금 대기→ON_ERROR_STOP
+--    실패가 된다(6차 리뷰 m2, 실PG 재현). information_schema 가드로 진짜
+--    결손일 때만 ALTER 한다.
+DO $$
+DECLARE
+    c record;
+BEGIN
+    FOR c IN
+        SELECT * FROM (VALUES
+            ('cache_creation_tokens',       'INTEGER NOT NULL DEFAULT 0'),
+            ('cache_read_tokens',           'INTEGER NOT NULL DEFAULT 0'),
+            ('reasoning_tokens',            'INTEGER NOT NULL DEFAULT 0'),
+            ('web_search_count',            'INTEGER NOT NULL DEFAULT 0'),
+            ('ttft_ms',                     'INTEGER'),
+            ('is_streaming',                'BOOLEAN NOT NULL DEFAULT false'),
+            ('estimated_usage',             'BOOLEAN NOT NULL DEFAULT false'),
+            ('downgraded_from',             'VARCHAR(128)'),
+            ('availability_fallback_from',  'VARCHAR(128)'),
+            ('sso_subject',                 'VARCHAR(512)'),
+            ('bedrock_request_id',          'VARCHAR(128)'),
+            ('key_prefix',                  'VARCHAR(16)'),
+            ('session_id',                  'VARCHAR(128)')
+        ) AS v(name, def)
+    LOOP
+        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                       WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                         AND column_name = c.name) THEN
+            EXECUTE format('ALTER TABLE usage.usage_logs ADD COLUMN %I %s',
+                           c.name, c.def);
+            RAISE NOTICE 'backfilled usage.usage_logs.%', c.name;
+        END IF;
+    END LOOP;
+END $$;
 
 -- 위 백필이 컬럼을 놓은 뒤 재시도 — 중간 CREATE INDEX 의 컬럼-존재 가드가 건너뛴
 -- 설치본(컬럼 부재로 스킵됨)과 어느 경로로도 같은 스키마로 수렴한다.
@@ -841,8 +891,22 @@ CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req
 
 -- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
 -- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_dept_name ON auth.teams (dept_id, name);
-CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_org_name ON auth.departments (org_id, name);
+-- ⚠️ 중복이 이미 있는 설치본에서 여기서 unique_violation 으로 죽으면 alembic
+--    0045 의 _assert_no_duplicates 안내 메시지(해결 절차)까지 못 간다 —
+--    경고로 바꿔 Job 은 살리고, 뒤의 0045 가 동일 검사로 명확한 메시지를 낸다
+--    (init-only 환경은 어차피 인덱스 없이 진행 — 메시지가 없는 것보다 낫다).
+DO $$
+BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_dept_name ON auth.teams (dept_id, name);
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'uq_teams_dept_name skipped — (dept_id,name) 중복이 있습니다. alembic 0045 의 안내를 따르세요';
+END $$;
+DO $$
+BEGIN
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_org_name ON auth.departments (org_id, name);
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'uq_departments_org_name skipped — (org_id,name) 중복이 있습니다. alembic 0045 의 안내를 따르세요';
+END $$;
 
 -- migration 0053: audit_logs 시간순 조회 인덱스.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_ts_id ON audit.audit_logs (timestamp DESC, id DESC);

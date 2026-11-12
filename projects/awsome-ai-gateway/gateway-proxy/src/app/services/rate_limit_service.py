@@ -175,6 +175,8 @@ class RateLimitService:
             try:
                 raw = await _guarded_eval(redis, script, 1, key, *argv)
                 result = json.loads(raw)
+                if "allowed" not in result:
+                    raise ValueError("rpm result missing 'allowed'")
             except Exception:
                 # eval 실패 — 정책(rl_fail_mode)에 따라 통과/차단. open(기본): 이 scope
                 # 만 통과하고 다음 scope 계속(한 샤드 장애가 전체 집행을 끄지 않게).
@@ -202,6 +204,9 @@ class RateLimitService:
             # 멤버를 재사용한 스코프는 되돌리기 대상이 아니다(재사용 멤버를 지우면
             # 앞 시도의 슬롯이 사라진다 — 6차 리뷰 M1). 필드가 없는 구버전
             # 스크립트는 전부 새로 넣은 것으로 본다(보수적 — 되돌리기 유지).
+            # 빈 배열 형태는 구현체마다 다르다 — 실 Redis cjson 은 {}, fakeredis
+            # 는 [] 를 돌려준다. `1 in _added` 는 dict {} 도 False 라 양쪽 모두
+            # 안전하지만 isinstance(list) 같은 형태 검사는 하지 않는다.
             _added = result.get("added")
             if _added is None or 1 in _added:
                 committed_keys.append(key)
@@ -323,6 +328,8 @@ class RateLimitService:
             try:
                 raw = await _guarded_eval(redis, script, 3, cur, prev, win, *argv)
                 result = json.loads(raw)
+                if "allowed" not in result:
+                    raise ValueError("tpm result missing 'allowed'")
             except Exception:
                 # eval 실패 — 정책(rl_fail_mode)에 따라 통과(open)/차단(closed). 카운트.
                 logger.exception("rate_limit_tpm_scope_failed", scope=d.scope.value)
@@ -604,6 +611,8 @@ class RateLimitService:
                     label,
                 )
                 result = json.loads(raw)
+                if "allowed" not in result:
+                    raise ValueError("cost result missing 'allowed'")
             except Exception:
                 # eval 실패 — 정책(rl_fail_mode)에 따라 통과(open)/차단(closed). 카운트.
                 logger.exception("cost_reserve_scope_failed", scope=label, user_id=user_id)

@@ -1066,7 +1066,8 @@ class BudgetService:
             if result.get("reserved"):
                 # "reserved" — settle 의 마커 만료 복구 경로(ARGV[4])에 넘기는
                 # 예약 당시 추정치. 마커가 살아있으면 마커 값이 우선이라 이 필드는
-                # 무시된다.
+                # 무시된다. 잔여 클램프로 부분 예약된 경우 스크립트가 실제
+                # 예약액(reserved_usd)을 돌려주므로 그걸 쓴다 — 없으면 추정치.
                 committed.append({
                     "scope": scope,
                     "usage_key": usage_key,
@@ -1076,7 +1077,7 @@ class BudgetService:
                     "idx_key": idx_key,
                     "idx_field": idx_field,
                     "fallback": fallback,
-                    "reserved": est_str,
+                    "reserved": str(result.get("reserved_usd") or est_str),
                     # settle 의 done 툼스톤 TTL(ARGV[5]) — 마커 수명과 같게 둬야
                     # 툼스톤 소멸 뒤 늦은 중복 settle 이 실비를 재적용하지 않는다
                     # (R23 r3 N-4).

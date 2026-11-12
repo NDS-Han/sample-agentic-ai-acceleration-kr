@@ -146,8 +146,14 @@ async def enforce_candidate_admission(
     # 오늘날 모든 continue/return 경로가 release_reservations 를 먼저 await
     # 하기 때문이다 — 비어 있지 않은 상태를 pop 한다는 것은 정산 주체를
     # 잃은 미해제 예약이라는 뜻이니 신호로 남긴다(6차 리뷰 n5).
-    if state.pop("rate_limit_state", None):
+    if state.get("rate_limit_state"):
         logger.warning("rate_limit_state_popped_unreleased")
+        # 미래 경로가 라이브 rls 를 새어 놓으면 pop-드롭이 아니라 실제 환불로
+        # 보낸다 — 디스크립터가 살아 있으면 정산 가능한 양만큼은 되돌아간다
+        # (spawn 은 rls 가 이미 state 에 있으므로 자체 pop 으로 주장한다).
+        spawn_release_reservations(
+            redis=redis, state=state, auth_context=auth_context
+        )
     # 후보마다 "예약" 식별자를 분리한다. 같은 request_id 로 재입장하면 앞
     # 후보의 settle(0) 이 남긴 툼스톤(budget:settled:*="0")이 reserve 의
     # 툼스톤 가드를 통과시켜 두 번째 후보부터 월예산 한도 검사 자체를
@@ -291,7 +297,7 @@ def spawn_release_reservations(*, redis, state: dict, auth_context) -> None:
     에 강참조로 추적되는 태스크가 완주한다 — 종료 시 ``drain_background_tasks``
     가 기다린다.
     """
-    rls = state.pop("rate_limit_state", None)
+    rls = state.get("rate_limit_state")
     if not rls:
         return
 
@@ -304,12 +310,19 @@ def spawn_release_reservations(*, redis, state: dict, auth_context) -> None:
 
     from app.services.budget_service import _BACKGROUND_TASKS
 
+    coro = _refund()
     try:
-        t = asyncio.ensure_future(_refund())
+        t = asyncio.ensure_future(coro)
     except RuntimeError:
         # 이벤트 루프 종료 중 — 환불은 마커 TTL 복구 경로에 맡긴다.
+        # 생성된 코루틴은 닫아야 "never awaited" 경고가 안 남는다.
+        # rls 는 아직 state 에 남겨 둔다 — 이어지는 경로가 다시 주장할 수 있다.
+        coro.close()
         logger.warning("release_reservations_spawn_loop_closed")
         return
+    # 태스크 생성 성공 후에만 소유권을 옮긴다 — 지금부터 state.pop 사이엔
+    # await 가 없어 인터리빙 안전.
+    state.pop("rate_limit_state", None)
     _BACKGROUND_TASKS.add(t)
     t.add_done_callback(_BACKGROUND_TASKS.discard)
 
@@ -634,6 +647,11 @@ async def run_fallback_loop(
         # 클라이언트측 타임아웃(어댑터가 ATTEMPT_UNSETTLED 를 단다)은 상류가 요청을
         # 이미 처리·과금했을 수 있다 — 다음 후보로 재시도하면 같은 추론을 두 모델에
         # 이중 청구할 수 있으므로 폴백하지 않고 이 오류를 그대로 돌려준다.
+        # ⚠️ 과금 정확성 트레이드오프(7차 리뷰 #4): 위 비-2xx 경로가 이미 예약을 전액
+        #    환불했다. 상류가 실제로 처리·과금했다면 usage 행은 없고 예약도 풀렸으니
+        #    해당 호출분만큼 예산/한도가 실비보다 덜 잡힌다. 대안(추정액 정산)은
+        #    상류 미처리 시 과납을 만들어 양방향 오차라, 현재는 "폴백 금지로 이중
+        #    청구 방지 + 예약 환불" 을 택한다 — 실제 상류 과금 여부는 알 수 없다.
         if headers.get(ATTEMPT_UNSETTLED_HEADER):
             if not caught_connection_error:
                 record_provider_error(metrics, _pm_labels, status=status)

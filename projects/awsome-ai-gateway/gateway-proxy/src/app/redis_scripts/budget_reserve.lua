@@ -127,28 +127,31 @@ if limit == 0 then
     return reply(false, false, scope_label .. '_budget_exceeded', used, limit, true)
 end
 
-local function exceeds()
-    if policy == 'hard_block' then
-        -- 엄격 하드캡: 예약을 포함한 worst-case 가 한도를 넘으면 거절.
-        return used + estimate > limit
-    elseif policy == 'soft_warning' then
-        -- 체크와 같은 경계식(×100, IEEE754 표현오차 회피 — budget_check.lua 주석 참조).
-        -- 예약 포함값이 소프트 상한에 닿으면 거절.
-        return (used + estimate) * 100 >= limit * soft_limit_pct
-    end
-    -- throttle: 차단 없음 — 예약은 그대로 둔다(정산 정확도 목적).
-    return false
+-- 정책별 상한 cap 을 먼저 정한다 — hard_block=limit, soft_warning=limit×pct,
+-- throttle=무차단(cap 없음).
+local cap = nil
+if policy == 'hard_block' then
+    cap = limit
+elseif policy == 'soft_warning' then
+    -- 체크와 같은 경계식(×100, IEEE754 표현오차 회피 — budget_check.lua 주석 참조).
+    cap = (limit * soft_limit_pct) / 100
 end
 
-if exceeds() then
-    -- 잔량(used<limit)이 있는데 최악비용 예약으로 막힌 경우와 실제 소진을
-    -- 구분한다 — 잔량 아래 차단을 "예산 초과"로 보고하면 클라이언트 오보.
-    -- 코드는 동일하게 429 지만 reason suffix 로 구분한다(R22 r1 S6).
-    local reason = scope_label .. '_budget_exceeded'
-    if used < limit then
-        reason = scope_label .. '_budget_reservation_exceeded'
+local reserved_amt = estimate
+if cap then
+    -- 잔여 소진 = 실제로 상한을 다 쓴 상태 — 이 경우만 차단한다.
+    -- worst-case 추정이 잔여보다 커서 막히던 구조(비싼 모델+작은 예산에서
+    -- 실비 $0.5 호출이 worst $7 평가로 거절되던 것)를 잔여 클램프로 완화:
+    -- 예약은 잔여만큼만 잡고 입장시키며, 초과분은 settle 실비가 캡 위로
+    -- 기록해 다음 요청이 차단된다 — "마지막 요청 완주" 의미론이다.
+    -- 초과량 상한은 worst-case 가 아니라 그 요청의 실비다.
+    if used >= cap then
+        return reply(false, false, scope_label .. '_budget_exceeded',
+                     used, limit, true)
     end
-    return reply(false, false, reason, used, limit, true)
+    if estimate > cap - used then
+        reserved_amt = cap - used
+    end
 end
 
 -- 카운터 유실 감지(R22 r1 M1 / r2 S7): 이 reserve 가 usage 키를 **생성**하면
@@ -159,21 +162,23 @@ end
 -- 1회분 DB 조회만 든다.
 local usage_existed = redis.call('EXISTS', usage_key)
 
--- 예약 커밋: 카운터에 추정치를 올리고 마커를 남긴다. 마커가 settle 의
--- 멱등성 근거 — settle 은 마커가 있을 때만 델타를 적용하므로 이중 정산
--- (finalize 와 release_reservations 의 경쟁 호출, 혹은 재시도)이 안전하다.
-redis.call('INCRBYFLOAT', usage_key, estimate)
+-- 예약 커밋: 카운터에 **실제 예약액**(잔여 클램프 반영분)을 올리고 마커를
+-- 남긴다. 마커가 settle 의 멱등성 근거 — settle 은 마커가 있을 때만 델타를
+-- 적용하므로 이중 정산(finalize 와 release_reservations 의 경쟁 호출, 혹은
+-- 재시도)이 안전하다. 마커 값은 반드시 reserved_amt — settle 이 읽어
+-- (실비 - 예약액) 델타를 빼는데, 추정치를 쓰면 클램프분이 정산에서 샌다.
+redis.call('INCRBYFLOAT', usage_key, reserved_amt)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
-redis.call('INCRBYFLOAT', KEYS[4], estimate)
+redis.call('INCRBYFLOAT', KEYS[4], reserved_amt)
 redis.call('EXPIRE', KEYS[4], 3888000)
-redis.call('SET', marker_key, ARGV[2], 'EX', marker_ttl)
+redis.call('SET', marker_key, tostring(reserved_amt), 'EX', marker_ttl)
 if KEYS[5] and ARGV[5] and ARGV[5] ~= '' then
     -- 인덱스 TTL 은 마커의 2배 — 마커 TTL 정상만료 직후의 늦은 settle 이
     -- HEXISTS 생존검증을 통과해 예약치를 정확히 정산하게 한다. 필드가
     -- 마커보다 먼저 죽으면 settle 은 복구 분기로 새어 resvsum 이 누수되고
     -- 실비가 과대 계상된다(R23 r3 N-1). 고아 필드는 rebuild/reconcile 이
     -- dead 스윕으로 청소한다.
-    redis.call('HSET', KEYS[5], ARGV[5], ARGV[2])
+    redis.call('HSET', KEYS[5], ARGV[5], tostring(reserved_amt))
     redis.call('EXPIRE', KEYS[5], marker_ttl * 2)
 end
 
@@ -181,4 +186,16 @@ if usage_existed == 0 then
     redis.call('SET', usage_key .. ':lost', '1', 'EX', 3888000)
 end
 
-return reply(true, true, nil, used + estimate, limit, true)
+-- 부분 예약(잔여 클램프)은 호출자가 디스크립터의 "reserved" 로 써야 한다 —
+-- settle 복구 경로(ARGV[4])가 원래 추정치를 받으면 클램프분만큼 차감이 샌다.
+return cjson.encode({
+    allowed = true,
+    reserved = true,
+    reason = cjson.null,
+    used_usd = used + reserved_amt,
+    limit_usd = limit,
+    scope = scope_label,
+    config_present = true,
+    reserved_usd = reserved_amt,
+    partial = reserved_amt ~= estimate,
+})
