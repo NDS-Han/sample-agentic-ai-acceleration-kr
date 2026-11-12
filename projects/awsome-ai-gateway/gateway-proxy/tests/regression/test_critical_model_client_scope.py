@@ -274,8 +274,13 @@ def test_init_sql_adds_the_column_idempotently():
     if not init_sql.exists():
         pytest.skip("db/init 이 이 체크아웃에 없다")
     text = init_sql.read_text(encoding="utf-8")
+    # 멱등 추가는 두 형태를 인정한다 — bare IF NOT EXISTS, 또는 information_schema
+    # 가드 DO 블록(bare 형태는 no-op 시에도 ACCESS EXCLUSIVE 를 잡아 8차 리뷰에서
+    # 전부 가드로 감쌌다 — 잠금 사고 클래스 회귀).
     stmt = re.search(
-        r"ALTER TABLE model\.model_aliases\s+ADD COLUMN IF NOT EXISTS\s+allowed_clients\s+TEXT\[\]",
+        r"(ALTER TABLE model\.model_aliases\s+ADD COLUMN IF NOT EXISTS\s+allowed_clients\s+TEXT\[\]"
+        r"|column_name = 'allowed_clients'\) THEN\s+"
+        r"ALTER TABLE model\.model_aliases ADD COLUMN allowed_clients TEXT\[\])",
         text,
         re.I,
     )

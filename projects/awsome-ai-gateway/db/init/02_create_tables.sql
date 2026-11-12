@@ -143,7 +143,15 @@ CREATE TABLE IF NOT EXISTS budget.budget_configs (
 -- 실제로 prod(revision 0004, client 컬럼 도입 전) 배포에서 이 순서 때문에 실패했다.
 -- fresh DB 에서는 컬럼이 이미 인라인으로 있어 no-op 이므로 양쪽 모두 안전(멱등).
 -- 기존 테이블의 인덱스 교체 + CHECK 제약 추가는 alembic 0011 이 담당한다(init SQL 이후 실행).
-ALTER TABLE budget.budget_configs ADD COLUMN IF NOT EXISTS client VARCHAR(32);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'budget' AND table_name = 'budget_configs'
+                     AND column_name = 'client') THEN
+        ALTER TABLE budget.budget_configs ADD COLUMN client VARCHAR(32);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 CREATE INDEX IF NOT EXISTS idx_budget_configs_scope ON budget.budget_configs (scope, scope_id) WHERE is_active = true;
 
@@ -168,7 +176,15 @@ CREATE TABLE IF NOT EXISTS budget.budget_usages (
 );
 
 -- budget_usages 쪽 backfill 도 아래 COALESCE 인덱스보다 먼저 와야 한다(위 budget_configs 와 동일 이유).
-ALTER TABLE budget.budget_usages ADD COLUMN IF NOT EXISTS client VARCHAR(32);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'budget' AND table_name = 'budget_usages'
+                     AND column_name = 'client') THEN
+        ALTER TABLE budget.budget_usages ADD COLUMN client VARCHAR(32);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usages (scope, scope_id, period, COALESCE(client,''));
 
@@ -214,7 +230,15 @@ CREATE TABLE IF NOT EXISTS model.model_aliases (
 
 -- display_name added by migration 0012; ADD COLUMN IF NOT EXISTS keeps init SQL idempotent
 -- on pre-existing tables (CREATE TABLE IF NOT EXISTS above is a no-op there).
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS display_name VARCHAR(128);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'display_name') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN display_name VARCHAR(128);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 -- allowed_clients added by migration 0035 (model × app allow-list).
 --
@@ -227,15 +251,47 @@ ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS display_name VARCHAR(12
 --
 -- No DEFAULT. NULL means "unrestricted"; DEFAULT '{}' would mean "no app may use this
 -- model" and would deny every app on every existing alias the moment it applied.
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS allowed_clients TEXT[];
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'allowed_clients') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN allowed_clients TEXT[];
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 -- Model-level cross-account routing added by migration 0049. Same load-bearing
 -- rule as allowed_clients above: both services' ORM declare these columns, so
 -- every model_aliases SELECT includes them — a DB built from init SQL alone
 -- would UndefinedColumn on the whole inference path without these ALTERs.
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS account_role_arn VARCHAR(512);
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS external_id VARCHAR(256);
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS region VARCHAR(64);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'account_role_arn') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN account_role_arn VARCHAR(512);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'external_id') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN external_id VARCHAR(256);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'region') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN region VARCHAR(64);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 CREATE TABLE IF NOT EXISTS model.model_pricings (
     id                                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     model_alias                         VARCHAR(128)  NOT NULL REFERENCES model.model_aliases(alias),
@@ -659,12 +715,28 @@ CREATE INDEX IF NOT EXISTS idx_service_tokens_hash ON auth.service_tokens (token
 -- 새 마이그레이션을 넣고 여기를 빠뜨리면 그 테스트가 잡는다.
 
 -- migration 0007: 요청을 발생시킨 앱 태그(claude-code | cowork | codex | other | NULL).
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS client TEXT;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                     AND column_name = 'client') THEN
+        ALTER TABLE usage.usage_logs ADD COLUMN client TEXT;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 CREATE INDEX IF NOT EXISTS ix_usage_logs_client ON usage.usage_logs (client);
 
 -- migration 0034: 생산성 이벤트 멱등키. 부분 유니크 인덱스라 NULL 은 중복을 허용한다
 -- (멱등키를 보내지 않는 옛 클라이언트를 막지 않기 위해서다).
-ALTER TABLE usage.productivity_events ADD COLUMN IF NOT EXISTS idempotency_key VARCHAR(256);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'usage' AND table_name = 'productivity_events'
+                     AND column_name = 'idempotency_key') THEN
+        ALTER TABLE usage.productivity_events ADD COLUMN idempotency_key VARCHAR(256);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_events_idempotency
     ON usage.productivity_events (idempotency_key)
     WHERE idempotency_key IS NOT NULL;
@@ -687,8 +759,16 @@ CREATE TABLE IF NOT EXISTS model.routing_profiles (
         CHECK (backend IN ('invoke','mantle','bedrock_openai'))
 );
 -- 이미 존재하는 테이블(0009~0021 사이에서 만들어진 DB)에도 컬럼이 있도록.
-ALTER TABLE model.routing_profiles
-    ADD COLUMN IF NOT EXISTS web_search_enabled BOOLEAN NOT NULL DEFAULT false;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'routing_profiles'
+                     AND column_name = 'web_search_enabled') THEN
+        ALTER TABLE model.routing_profiles
+            ADD COLUMN web_search_enabled BOOLEAN NOT NULL DEFAULT false;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 -- migration 0036: 런타임에 바꿀 수 있는 전역 설정. 행이 없으면 "미설정" 이고 소비자가
 -- 자기 기본값을 쓴다(body logging 은 OFF).
@@ -701,8 +781,24 @@ CREATE TABLE IF NOT EXISTS public.system_settings (
 
 -- migration 0037: 모델 스펙(context_window / max_output_tokens).
 -- ORM 이 매 SELECT 에 포함하므로 init SQL 로만 세운 DB 에도 있어야 한다.
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS context_window INTEGER;
-ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS max_output_tokens INTEGER;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'context_window') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN context_window INTEGER;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_aliases'
+                     AND column_name = 'max_output_tokens') THEN
+        ALTER TABLE model.model_aliases ADD COLUMN max_output_tokens INTEGER;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 -- migration 0037: 운영자가 설정한 예산 알림 임계값. UI/API/Lua 는 이미 이 값을 다루는데
 -- 저장할 컬럼이 없어서, Redis 설정 키(ex=300)가 만료되면 gateway-proxy 의 재수화가
@@ -721,21 +817,77 @@ ALTER TABLE model.model_aliases ADD COLUMN IF NOT EXISTS max_output_tokens INTEG
 DO $$ BEGIN
     CREATE DOMAIN budget.alert_pct AS INTEGER CHECK (VALUE BETWEEN 1 AND 100);
 EXCEPTION WHEN duplicate_object THEN null; END $$;
-ALTER TABLE budget.budget_configs
-    ADD COLUMN IF NOT EXISTS alert_thresholds budget.alert_pct[]
-    NOT NULL DEFAULT '{80,90,100}';
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'budget' AND table_name = 'budget_configs'
+                     AND column_name = 'alert_thresholds') THEN
+        ALTER TABLE budget.budget_configs
+            ADD COLUMN alert_thresholds budget.alert_pct[]
+            NOT NULL DEFAULT '{80,90,100}';
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;
+END $$;
 
 
 -- migration 0038: context 크기축 요금제(272K long-context). GPT-5.6 은 프롬프트가 임계를
 -- 넘으면 요청 전체를 long 요율로 청구한다. threshold NULL = 티어 없음(오늘 동작·Claude).
 -- 배수(long=short×2)가 아니라 명시 요율 컬럼을 두는 이유는 AWS Price List 자동연동 때문이다
 -- (Price List 는 달러 요율을 준다). 컬럼은 전부 NULLABLE(NULL='이 버킷 long 미설정').
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_threshold_tokens INTEGER;
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_input_price_per_1k_tokens NUMERIC(12,8);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_output_price_per_1k_tokens NUMERIC(12,8);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_5m_price_per_1k_tokens NUMERIC(12,8);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_creation_1h_price_per_1k_tokens NUMERIC(12,8);
-ALTER TABLE model.model_pricings ADD COLUMN IF NOT EXISTS long_context_cache_read_price_per_1k_tokens NUMERIC(12,8);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_threshold_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_threshold_tokens INTEGER;
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_input_price_per_1k_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_input_price_per_1k_tokens NUMERIC(12,8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_output_price_per_1k_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_output_price_per_1k_tokens NUMERIC(12,8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_cache_creation_5m_price_per_1k_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_cache_creation_5m_price_per_1k_tokens NUMERIC(12,8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_cache_creation_1h_price_per_1k_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_cache_creation_1h_price_per_1k_tokens NUMERIC(12,8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'model' AND table_name = 'model_pricings'
+                     AND column_name = 'long_context_cache_read_price_per_1k_tokens') THEN
+        ALTER TABLE model.model_pricings ADD COLUMN long_context_cache_read_price_per_1k_tokens NUMERIC(12,8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 -- 요금 컬럼 정밀도 NUMERIC(10,6) -> NUMERIC(12,8) (정본 phase-2 마이그레이션 0043 미러).
 -- fork(US-19)는 alembic 파일 없이 이 블록만 둔다 — migration Job 이 배포마다 init SQL 을
@@ -789,7 +941,15 @@ WHERE a.alias = p.model_alias
 
 -- migration 0039: 요청별 청구 티어 감사. 게이트웨이 resolve_context_tier 가 청구와 이 값을
 -- 같은 판정으로 채운다(청구=long/기록=short 불일치 방지). 'short'|'long'|NULL(티어없는 모델).
-ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS context_tier VARCHAR(8);
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                   WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                     AND column_name = 'context_tier') THEN
+        ALTER TABLE usage.usage_logs ADD COLUMN context_tier VARCHAR(8);
+    END IF;
+EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+END $$;
 
 -- migration 0039: TEAM scope + client IS NULL 행의 기본 유저 cap D.
 -- 컬럼-존재 가드 — no-op ALTER 도 ACCESS EXCLUSIVE 를 잡는다(위 usage_logs 주석).
@@ -831,13 +991,16 @@ BEGIN
             ('auth', 'virtual_keys', 'issued_via_service_token',    'UUID REFERENCES auth.service_tokens(id)')
         ) AS v(sch, tbl, name, def)
     LOOP
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_schema = c.sch AND table_name = c.tbl
-                         AND column_name = c.name) THEN
-            EXECUTE format('ALTER TABLE %I.%I ADD COLUMN %I %s',
-                           c.sch, c.tbl, c.name, c.def);
-            RAISE NOTICE 'backfilled %.%', c.tbl, c.name;
-        END IF;
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = c.sch AND table_name = c.tbl
+                             AND column_name = c.name) THEN
+                EXECUTE format('ALTER TABLE %I.%I ADD COLUMN %I %s',
+                               c.sch, c.tbl, c.name, c.def);
+                RAISE NOTICE 'backfilled %.%', c.tbl, c.name;
+            END IF;
+        EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
+        END;
     END LOOP;
 END $$;
 
@@ -872,13 +1035,16 @@ BEGIN
             ('session_id',                  'VARCHAR(128)')
         ) AS v(name, def)
     LOOP
-        IF NOT EXISTS (SELECT 1 FROM information_schema.columns
-                       WHERE table_schema = 'usage' AND table_name = 'usage_logs'
-                         AND column_name = c.name) THEN
-            EXECUTE format('ALTER TABLE usage.usage_logs ADD COLUMN %I %s',
-                           c.name, c.def);
-            RAISE NOTICE 'backfilled usage.usage_logs.%', c.name;
-        END IF;
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM information_schema.columns
+                           WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                             AND column_name = c.name) THEN
+                EXECUTE format('ALTER TABLE usage.usage_logs ADD COLUMN %I %s',
+                               c.name, c.def);
+                RAISE NOTICE 'backfilled usage.usage_logs.%', c.name;
+            END IF;
+        EXCEPTION WHEN duplicate_column THEN NULL;
+        END;
     END LOOP;
 END $$;
 

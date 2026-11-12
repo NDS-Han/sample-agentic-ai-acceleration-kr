@@ -33,6 +33,7 @@ local config_key = KEYS[2]
 local marker_key = KEYS[3]
 local scope_label = ARGV[1]
 local estimate = tonumber(ARGV[2]) or 0
+if estimate < 0 then estimate = 0 end  -- 음수 추정치가 usage 를 내리는 것 방어
 local marker_ttl = tonumber(ARGV[4]) or 14400
 
 local function decode_or_nil(s)
@@ -64,6 +65,10 @@ end
 -- 없이 끝난 재실행은 예외 경로(환불/lost 센티넬)로 흘러 조용한 과소계상
 -- 방향이 아니라 복구 가능한 방향으로 어긋난다.
 if redis.call('EXISTS', marker_key) == 1 then
+    -- ⚠️ reserved_usd 를 빼면 안 된다: 디스크립터는 이 값(실제 예약액)을
+    -- settle 복구 ARGV[4] 로 들고 있는데, 부분 예약 요청의 재전송이 dedup 으로
+    -- 오면 폴백 추정치(>클램프값)가 저장돼, 마커 소실 뒤 settle 복구가
+    -- resvsum 에서 타 요청 예약까지 과차감한다(8차 리뷰 M1, 실Redis 재현).
     return cjson.encode({
         allowed = true,
         reserved = true,
@@ -73,6 +78,8 @@ if redis.call('EXISTS', marker_key) == 1 then
         scope = scope_label,
         config_present = true,
         dedup_hit = true,
+        reserved_usd = tonumber(redis.call('GET', marker_key)),
+        partial = cjson.null,
     })
 end
 
@@ -128,13 +135,21 @@ if limit == 0 then
 end
 
 -- 정책별 상한 cap 을 먼저 정한다 — hard_block=limit, soft_warning=limit×pct,
--- throttle=무차단(cap 없음).
+-- throttle=무차단(cap 없음). 소진 판정은 정책마다 형태가 다르다:
+--   hard_block: INCRBYFLOAT 표현오차(9.9+0.1=9.999…64)로 used 가 cap 바로
+--     아래 착지하면 다음 요청이 ε 예약으로 입장한다 — ε 이하 잔차는 소진으로
+--     본다(8차 리뷰 m2).
+--   soft_warning: check 와 같은 곱셈 경계식(×100) — 나눗셈 cap 비교는
+--     1-ULP 발산으로 check 가 막는 경계에서 reserve 가 통과시킨다(8차 리뷰
+--     m1, 브루트포스 35/2808 발산).
 local cap = nil
+local at_cap = false
 if policy == 'hard_block' then
     cap = limit
+    at_cap = used >= cap - 1e-9
 elseif policy == 'soft_warning' then
-    -- 체크와 같은 경계식(×100, IEEE754 표현오차 회피 — budget_check.lua 주석 참조).
     cap = (limit * soft_limit_pct) / 100
+    at_cap = used * 100 >= limit * soft_limit_pct
 end
 
 local reserved_amt = estimate
@@ -145,12 +160,12 @@ if cap then
     -- 예약은 잔여만큼만 잡고 입장시키며, 초과분은 settle 실비가 캡 위로
     -- 기록해 다음 요청이 차단된다 — "마지막 요청 완주" 의미론이다.
     -- 초과량 상한은 worst-case 가 아니라 그 요청의 실비다.
-    if used >= cap then
+    if at_cap then
         return reply(false, false, scope_label .. '_budget_exceeded',
                      used, limit, true)
     end
     if estimate > cap - used then
-        reserved_amt = cap - used
+        reserved_amt = math.max(cap - used, 0)
     end
 end
 

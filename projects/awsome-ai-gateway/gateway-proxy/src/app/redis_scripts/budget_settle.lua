@@ -75,15 +75,22 @@ if not reserved_raw then
     --   과대(조기 차단)가 안전한 방향이다.
     local resvsum = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
     if resvsum < 0 then resvsum = 0 end
-    local live
+    local live, idx_reserved
     if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
-        live = redis.call('HEXISTS', KEYS[5], ARGV[3]) == 1
+        local idx_val = redis.call('HGET', KEYS[5], ARGV[3])
+        live = idx_val ~= false
+        idx_reserved = tonumber(idx_val or 'x')  -- 숫자 아닌 값은 nil → 폴백
     else
         -- 인덱스 미제공 호출자(구버전)는 resvsum 잔량을 생존 근거로 삼는다.
         live = resvsum > 0
     end
     if live and resvsum > 0 then
-        reserved_raw = tostring(math.min(caller_reserved, resvsum))
+        -- 예약치의 진실 계층: 인덱스 필드값(reserve 가 쓴 실제 예약액 —
+        -- 클램프 후, TTL 이 마커의 2배라 더 오래 산다) > caller 의 추정치
+        -- (부분 예약이면 클램프 전 값이라 과대 — resvsum 은 스코프 전체
+        -- 합계라 min 적용 시 타 요청 예약까지 끌어다 뺀다. 8차 리뷰 M1).
+        local basis = idx_reserved or caller_reserved
+        reserved_raw = tostring(math.min(basis, resvsum))
     else
         reserved_raw = '0'  -- 이미 걷어졌거나 미실행 — 실비만 적용
     end

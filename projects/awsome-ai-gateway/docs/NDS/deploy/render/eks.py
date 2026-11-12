@@ -442,21 +442,30 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     # helm 레이어링과 같은 순서: chart 기본 → env overlay → gen(최종). 차트
     # 기본을 깔지 않으면 env 가 min 만 선언한 경우(min:25 > 차트 기본 max:20)
     # 같은 한쪽 선언이 검증을 빠져나간다(7차 리뷰 #1).
-    chart_vals = yaml.safe_load(
-        (REPO_ROOT / "deployment" / "charts" / "llm-gateway" / "values.yaml")
-        .read_text()) or {}
+    # 차트 기본값 레이어 — 파일이 없으면(테스트의 스켈레톤 repo_root 등)
+    # 기본 없이 env+gen 만으로 합성한다. 실제 리포지터리에서는 항상 존재하며,
+    # 주입된 repo_root 를 따라야 다른 체크아웃 대상 렌더에서도 올바른 기본을
+    # 읽는다(8차 리뷰 — 전역 REPO_ROOT 혼용 결함).
+    _chart_path = repo_root / "deployment" / "charts" / "llm-gateway" / "values.yaml"
+    chart_vals = (yaml.safe_load(_chart_path.read_text()) or {}) if _chart_path.exists() else {}
     chart_asg = ((chart_vals.get("gatewayProxy") or {}).get("autoscaling") or {})
     merged = {**chart_asg, **env_asg, **gen_asg}
     mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
     if merged.get("enabled") and mn is not None and mx is not None:
-        try:
-            mn_i, mx_i = int(mn), int(mx)
-        except (TypeError, ValueError):
+        def _is_int(v) -> bool:
+            # int() 절삭을 걸러야 한다 — minReplicas: 2.9 는 int(2.9)=2 로
+            # 검증을 통과하지만 k8s API(HPA integer)에서 거절된다(8차 리뷰).
+            try:
+                return int(v) == v
+            except (TypeError, ValueError):
+                return False
+        if not (_is_int(mn) and _is_int(mx)):
             # 차트 측 유효성은 없다(values.schema.json 부재) — 비수치는 그대로
             # 렌더돼 kubectl apply 에서야 터지므로 render 시점에 잡는다.
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas/maxReplicas 는 "
                 f"정수여야 합니다 (min={mn!r}, max={mx!r})")
+        mn_i, mx_i = int(mn), int(mx)
         if mn_i > mx_i:
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas({mn}) > "

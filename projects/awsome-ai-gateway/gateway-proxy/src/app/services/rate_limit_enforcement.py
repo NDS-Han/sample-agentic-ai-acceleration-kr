@@ -312,13 +312,34 @@ async def enforce_rate_limits(
     # now_sec 를 체크에 주입하고 그대로 reserved_at 으로 쓴다 — 따로 찍으면
     # 분 경계에서 예약 버킷(Lua 의 now)과 환불 버킷이 어긋난다.
     tpm_now_sec = int(time.time())
-    tpm_result = await svc.check_multi_scope_tpm(
-        redis,
-        descriptors,
-        reserved_tokens=reserved,
-        committed_out=tpm_committed,
-        now_sec=tpm_now_sec,
-    )
+    try:
+        tpm_result = await svc.check_multi_scope_tpm(
+            redis,
+            descriptors,
+            reserved_tokens=reserved,
+            committed_out=tpm_committed,
+            now_sec=tpm_now_sec,
+        )
+    except Exception:
+        # 내부 eval 실패는 함수가 rl_fail_mode 로 처리한다 — 여기까지 오는
+        # 예외는 루프 외부 결함(디스크립터 조립·스크립트 미로드 등). 이미
+        # 커밋된 TPM(committed_out 누적)과 RPM 슬롯이 창 TTL 까지 고아가
+        # 되지 않게 되돌린다(8차 리뷰 n9).
+        try:
+            if tpm_committed:
+                await svc.settle_tpm(
+                    redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec
+                )
+        except Exception:
+            logger.warning("tpm_unwind_on_tpm_error_failed")
+        try:
+            await svc.undo_rpm(
+                redis, descriptors, request_id,
+                committed_keys=rpm_result.committed_keys,
+            )
+        except Exception:
+            logger.warning("rpm_unwind_on_tpm_error_failed")
+        raise
     if not tpm_result.allowed:
         await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
         return _build_429(tpm_result, metrics)
@@ -330,19 +351,37 @@ async def enforce_rate_limits(
         model_config, estimated_input, max_output,
         tier_input=estimated_input_billing,
     )
-    cost_result = await svc.reserve_cost(
-        redis,
-        user_id=auth_context.user_id,
-        estimated_cost=estimated_cost,
-        user_cpm_limit=limits.user.cpm,
-        user_cph_limit=limits.user.cph,
-        team_id=auth_context.team_id,
-        team_cpm_limit=limits.team.cpm,
-        team_cph_limit=limits.team.cph,
-        # RPM/TPM 의 _key_alias 와 동일 규칙 — 모델별 한도는 모델별 카운터에.
-        user_key_alias=_scope_alias[RateLimitScope.USER],
-        team_key_alias=_scope_alias[RateLimitScope.TEAM],
-    )
+    try:
+        cost_result = await svc.reserve_cost(
+            redis,
+            user_id=auth_context.user_id,
+            estimated_cost=estimated_cost,
+            user_cpm_limit=limits.user.cpm,
+            user_cph_limit=limits.user.cph,
+            team_id=auth_context.team_id,
+            team_cpm_limit=limits.team.cpm,
+            team_cph_limit=limits.team.cph,
+            # RPM/TPM 의 _key_alias 와 동일 규칙 — 모델별 한도는 모델별 카운터에.
+            user_key_alias=_scope_alias[RateLimitScope.USER],
+            team_key_alias=_scope_alias[RateLimitScope.TEAM],
+        )
+    except Exception:
+        # TPM 과 같은 이유 — 루프 외부 결함이 탈출하면 커밋분을 되돌린다.
+        # cost 의 부분 커밋은 함수 내부 스코프 루프가 이미 정리한다.
+        try:
+            await svc.settle_tpm(
+                redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec
+            )
+        except Exception:
+            logger.warning("tpm_unwind_on_cost_error_failed")
+        try:
+            await svc.undo_rpm(
+                redis, descriptors, request_id,
+                committed_keys=rpm_result.committed_keys,
+            )
+        except Exception:
+            logger.warning("rpm_unwind_on_cost_error_failed")
+        raise
     if not cost_result.allowed:
         # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
         #    수만 토큰의 예약이 버킷 만료까지 남아, 거절당한 재시도가 TEAM TPM
@@ -565,6 +604,8 @@ def _build_budget_429(reason: str, metrics=None) -> JSONResponse:
     # 있는 건 분/시간 창의 RPM/TPM/CPM/CPH 뿐이다.
     # 예약 차단(잔량 있음)은 실고갈과 구분된 메시지 — 대시보드 잔량 아래에서
     # "예산 초과" 오보를 막는다(R22 r1 S6).
+    # ⚠️ 잔여-클램프 도입(A 정책)으로 신버전 Lua 는 이 사유를 방출하지 않는다 —
+    #    롤링 배포 창의 구버전 스크립트 응답을 위해 분기 유지.
     if reason.endswith("_budget_reservation_exceeded"):
         message = (
             "Worst-case cost reservation exceeds the remaining monthly budget. "

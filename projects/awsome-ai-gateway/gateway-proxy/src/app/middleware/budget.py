@@ -180,6 +180,8 @@ class BudgetMiddleware:
         elif reason.endswith("_budget_reservation_exceeded"):
             # 잔량은 있는데 최악비용 예약이 한도를 넘은 차단 — 실고갈과 구분
             # (대시보드 잔량과의 불일치 오보 방지, R22 r1 S6).
+            # ⚠️ 잔여-클램프 도입(A 정책)으로 신버전 Lua 는 이 사유를 방출하지
+            #    않는다 — 롤링 배포 창의 구버전 스크립트 응답을 위해 분기 유지.
             message = (
                 "Budget reservation exceeded — worst-case estimate over remaining "
                 "budget. Reduce max_tokens or retry after in-flight requests settle."
