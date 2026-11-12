@@ -178,6 +178,10 @@ class RateLimitResult(BaseModel):
     # 멀티 스코프: 거부 시 어느 스코프에서 걸렸는지 표시
     scope: str | None = None              # 'USER' | 'TEAM' | 'GLOBAL'
     limit_type: str | None = None         # 'rpm' | 'tpm' | 'parallel'
+    # RPM 전용 — 이번 호출이 **새로** ZADD 한 스코프 키. 폴백 재입장처럼 멤버를
+    # 재사용한 스코프는 빠지므로, 되돌리기(undo_rpm)는 이 목록만 건드려야 한다
+    # (재사용 멤버를 지우면 앞 시도의 슬롯이 사라진다 — 6차 리뷰 M1).
+    committed_keys: list[str] = Field(default_factory=list)
 
 
 class CostLimitResult(BaseModel):

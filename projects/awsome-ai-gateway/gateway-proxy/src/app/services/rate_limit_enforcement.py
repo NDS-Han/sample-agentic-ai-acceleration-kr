@@ -320,7 +320,7 @@ async def enforce_rate_limits(
         now_sec=tpm_now_sec,
     )
     if not tpm_result.allowed:
-        await svc.undo_rpm(redis, descriptors, request_id)
+        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
         return _build_429(tpm_result, metrics)
 
     # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
@@ -353,7 +353,7 @@ async def enforce_rate_limits(
             await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
         except Exception:
             logger.warning("tpm_unwind_on_cost_reject_failed")
-        await svc.undo_rpm(redis, descriptors, request_id)
+        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
         return _build_cost_429(cost_result, metrics)
 
     # 월예산 admission 예약 — budget_check(middleware)는 읽기 전용이라
@@ -400,7 +400,7 @@ async def enforce_rate_limits(
                 )
             except Exception:
                 logger.warning("cost_unwind_on_budget_reject_failed")
-        await svc.undo_rpm(redis, descriptors, request_id)
+        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
         return _build_budget_429(str(exc), metrics)
     except Exception:
         # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지

@@ -41,6 +41,7 @@ from app.services.fallback_loop import (
     FallbackResult,
     enforce_candidate_admission,
     release_reservations,
+    spawn_release_reservations,
     run_fallback_loop,
     unsettled_reservation_guard,
 )
@@ -999,7 +1000,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             # 취소)는 on_usage 를 타지 않아 rate_limit_state 가 남고 마커
             # TTL 동안 resvsum/usage 를 부풀린다(5차 리뷰 SWE-2 m5).
             # BaseException 으로 잡아 취소 경로도 커버 — 곧바로 재전파한다.
-            await release_reservations(
+            spawn_release_reservations(
                 redis=redis, state=state, auth_context=auth_context)
             if _ws_probe_token is not None and not _ws_probe_used:
                 await cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)

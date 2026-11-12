@@ -29,6 +29,7 @@ from app.services.body_log_records import (
 from app.providers.bedrock_adapter import BedrockAdapter
 from app.services.fallback_loop import (
     release_reservations,
+    spawn_release_reservations,
     unsettled_reservation_guard,
 )
 from app.services.router_service import RouterService, model_account_route
@@ -447,7 +448,7 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
             )
             # 예약을 되돌린 뒤 재던진다 — 스트림이 시작되지 못했으므로 정산할 usage 가
             # 영원히 오지 않는다.
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            spawn_release_reservations(redis=redis, state=state, auth_context=auth_context)
             # 디스패치 자체가 실패해도 요청 본문은 남긴다(감사 계약: 1요청=1레코드).
             await _enqueue_body_log("error")
             raise

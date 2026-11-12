@@ -1185,24 +1185,31 @@ class BudgetService:
         마커 TTL(최대 4h) 동안 고아로 남는다. 짧게 기다려 주고 남은 것은
         TTL 복구 경로에 맡긴다.
         """
-        pending = [t for t in _BACKGROUND_TASKS if not t.done()]
-        if not pending:
-            return
-        # wait_for 는 타임아웃 시 내부 gather 를 취소해 환불 태스크까지 죽인다 —
-        # drain 의 목적 자체를 허무니 타임아웃에 취소가 없는 asyncio.wait 를 쓴다.
-        done, still = await asyncio.wait(pending, timeout=timeout)
-        for t in done:
-            # t.exception() 은 취소된 태스크에 CancelledError(BaseException)를
-            # 던진다 — 그대로 두면 lifespan 의 except Exception 을 뚫고
-            # 나머지 종료 절차(stream drain·redis close)를 건너뛴다.
-            if not t.cancelled() and t.exception():
+        # 스냅샷 한 번만 보면 drain 중에 _refund_guarded 가 새로 spawn 한
+        # 환불을 놓친다 — redis.aclose() 뒤에 eval 하면 환불이 날아간다
+        # (6차 리뷰 m3). 공집합이 되거나 총 deadline 이 끝날 때까지 반복.
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            pending = [t for t in _BACKGROUND_TASKS if not t.done()]
+            if not pending:
+                return
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
                 logger.warning(
-                    "budget_refund_task_failed", error=repr(t.exception())
+                    "budget_background_drain_incomplete", remaining=len(pending)
                 )
-        if still:
-            logger.warning(
-                "budget_background_drain_incomplete", remaining=len(still)
-            )
+                return
+            # wait_for 는 타임아웃 시 내부 gather 를 취소해 환불 태스크까지 죽인다 —
+            # drain 의 목적 자체를 허무니 타임아웃에 취소가 없는 asyncio.wait 를 쓴다.
+            done, _still = await asyncio.wait(pending, timeout=remaining)
+            for t in done:
+                # t.exception() 은 취소된 태스크에 CancelledError(BaseException)를
+                # 던진다 — 그대로 두면 lifespan 의 except Exception 을 뚫고
+                # 나머지 종료 절차(stream drain·redis close)를 건너뛴다.
+                if not t.cancelled() and t.exception():
+                    logger.warning(
+                        "budget_refund_task_failed", error=repr(t.exception())
+                    )
 
     async def _check_budget_db(
         self,

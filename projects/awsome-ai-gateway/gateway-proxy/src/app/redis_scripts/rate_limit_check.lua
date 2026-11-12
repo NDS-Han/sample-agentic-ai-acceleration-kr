@@ -36,6 +36,12 @@ for i = 1, num_scopes do
         redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
 
         local current = redis.call('ZCARD', key)
+        -- 같은 request_id 의 재입장(폴백 후보)은 기존 멤버를 재사용한다 —
+        -- 자기 슬롯이 카운트에 들어 있으면 한도 비교에서 제외해야, 한도 꽉 찬
+        -- 상태에서의 폴백이 "자기 자신 때문에" 거절되지 않는다(6차 리뷰 m2).
+        if redis.call('ZSCORE', key, request_id .. ':' .. tostring(i)) then
+            current = current - 1
+        end
         if current >= limit then
             local scope_name = ARGV[4 + num_scopes + i]
 
@@ -62,18 +68,26 @@ for i = 1, num_scopes do
 end
 
 -- Phase 2: 모든 스코프 통과 — 카운터 증가 (atomic)
+-- 이미 있는 멤버(폴백 재입장)는 ZADD 를 건너뛰고 added 에 담지 않는다 —
+-- 호출자가 "이번 호출이 새로 넣은 스코프"만 되돌리도록 계약을 좁힌다.
+-- 멤버를 공유하는 후보의 undo 가 원래 시도의 슬롯까지 지우던 결함 수정(6차 리뷰 M1).
+local added = {}
 for i = 1, num_scopes do
     local key   = KEYS[i]
     local limit = tonumber(ARGV[4 + i])
 
     if limit and limit > 0 then
-        redis.call('ZADD', key, now_ms, request_id .. ':' .. tostring(i))
-        -- 하드 상한(deepdive Q50): score 트림(Phase1)에 더해 멤버 수를 limit 으로 캡.
-        -- 정상 흐름(Phase2 는 ZCARD<limit 일 때만 실행)에선 트리거 안 되나, 시계
-        -- 스큐·동시성 레이스·stale 멤버로 인한 비정상 증가를 막아 ZCARD/ZRANGE 비용을
-        -- limit 에 독립적으로 bound. 가장 오래된(낮은 rank) 초과분 제거, 최신 limit 유지.
-        redis.call('ZREMRANGEBYRANK', key, 0, -(limit + 1))
-        -- TTL: window + 60초 버퍼
+        local member = request_id .. ':' .. tostring(i)
+        if not redis.call('ZSCORE', key, member) then
+            redis.call('ZADD', key, now_ms, member)
+            table.insert(added, i)
+            -- 하드 상한(deepdive Q50): score 트림(Phase1)에 더해 멤버 수를 limit 으로 캡.
+            -- 정상 흐름(Phase2 는 ZCARD<limit 일 때만 실행)에선 트리거 안 되나, 시계
+            -- 스큐·동시성 레이스·stale 멤버로 인한 비정상 증가를 막아 ZCARD/ZRANGE 비용을
+            -- limit 에 독립적으로 bound. 가장 오래된(낮은 rank) 초과분 제거, 최신 limit 유지.
+            redis.call('ZREMRANGEBYRANK', key, 0, -(limit + 1))
+        end
+        -- TTL: window + 60초 버퍼 — 재입장이어도 갱신해 활성 윈도우를 유지.
         redis.call('EXPIRE', key, math.ceil(window_ms / 1000) + 60)
     end
 end
@@ -85,5 +99,8 @@ return cjson.encode({
     limit        = -1,
     remaining    = -1,
     retry_after  = cjson.null,
-    window_reset = cjson.null
+    window_reset = cjson.null,
+    -- 이번 호출이 **새로** ZADD 한 스코프 인덱스 — 호출자의 되돌리기(ZREM)는
+    -- 이 스코프들에만 적용해야 한다(재사용 멤버를 지우면 원래 시도의 슬롯이 사라짐).
+    added        = added
 })

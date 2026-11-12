@@ -26,6 +26,7 @@ from app.services.body_log_records import (
 from app.services.session_key import extract_session_id
 from app.services.fallback_loop import (
     release_reservations,
+    spawn_release_reservations,
     unsettled_reservation_guard,
 )
 from app.services.router_service import (
@@ -402,7 +403,7 @@ async def _handle_openai(request: Request, path: str):
         except Exception:
             # 어댑터 계약 밖 예외 — 폴백 루프의 catch-all unwind 와 같은 이유로
             # 해제 후 재전파(E2E S4 — 누수만 막고 에러 의미론 500 은 유지).
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            spawn_release_reservations(redis=redis, state=state, auth_context=auth_context)
             await _log_dispatch_error(
                 request, redis, session_factory,
                 request_id=request_id, model_config=model_config, client=client,
@@ -519,7 +520,7 @@ async def _handle_openai(request: Request, path: str):
             )
         except Exception:
             # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            spawn_release_reservations(redis=redis, state=state, auth_context=auth_context)
             await _log_dispatch_error(
                 request, redis, session_factory,
                 request_id=request_id, model_config=model_config, client=client,
@@ -1140,7 +1141,7 @@ async def _handle_responses(request: Request):
             # 입장 심사가 잡은 예약도 돌려준다 — 루프 glue 예외(본문 구성,
             # 취소)는 on_usage 를 타지 않아 rate_limit_state 가 남는다
             # (messages.py 웹서치 경로와 같은 계약, 5차 리뷰 SWE-2 m5).
-            await release_reservations(
+            spawn_release_reservations(
                 redis=redis, state=state, auth_context=auth_context)
             if _ws_probe_token is not None and not _ws_probe_used:
                 await _cb.release_halfopen_probe(redis, _ws_cb_key, _ws_probe_token)
@@ -1189,7 +1190,7 @@ async def _handle_responses(request: Request):
             )
         except Exception:
             # 계약 밖 예외 — 해제 후 재전파(E2E S4).
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            spawn_release_reservations(redis=redis, state=state, auth_context=auth_context)
             await _log_dispatch_error(
                 request, redis, session_factory,
                 request_id=request_id, model_config=model_config, client=client,
@@ -1341,7 +1342,7 @@ async def _handle_responses(request: Request):
             )
         except Exception:
             # 스트림 분기와 같은 이유 — 계약 밖 예외는 해제 후 재전파(E2E S4).
-            await release_reservations(redis=redis, state=state, auth_context=auth_context)
+            spawn_release_reservations(redis=redis, state=state, auth_context=auth_context)
             await _log_dispatch_error(
                 request, redis, session_factory,
                 request_id=request_id, model_config=model_config, client=client,

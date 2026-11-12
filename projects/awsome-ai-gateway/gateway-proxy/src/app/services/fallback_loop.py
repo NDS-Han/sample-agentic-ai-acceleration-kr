@@ -142,8 +142,12 @@ async def enforce_candidate_admission(
             headers={},
         )
 
-    # 이전 후보의 예약 상태를 지운다 — enforce 가 새로 쓰도록.
-    state.pop("rate_limit_state", None)
+    # 이전 후보의 예약 상태를 지운다 — enforce 가 새로 쓰도록. 안전한 것은
+    # 오늘날 모든 continue/return 경로가 release_reservations 를 먼저 await
+    # 하기 때문이다 — 비어 있지 않은 상태를 pop 한다는 것은 정산 주체를
+    # 잃은 미해제 예약이라는 뜻이니 신호로 남긴다(6차 리뷰 n5).
+    if state.pop("rate_limit_state", None):
+        logger.warning("rate_limit_state_popped_unreleased")
     # 후보마다 "예약" 식별자를 분리한다. 같은 request_id 로 재입장하면 앞
     # 후보의 settle(0) 이 남긴 툼스톤(budget:settled:*="0")이 reserve 의
     # 툼스톤 가드를 통과시켜 두 번째 후보부터 월예산 한도 검사 자체를
@@ -273,6 +277,41 @@ async def release_reservations(
             await BudgetService().settle_budget(redis, budget_res, Decimal("0"))
         except Exception:
             logger.warning("fallback_unwind_budget_failed")
+
+
+def spawn_release_reservations(*, redis, state: dict, auth_context) -> None:
+    """``except BaseException``/취소 경로용 해제 — 소유권은 지금 주장하고
+    환불 작업은 추적 태스크로 넘긴다.
+
+    예외 핸들러 안에서 ``await release_reservations(...)`` 하면 두 번째
+    ``CancelledError``(BaseException 이라 내부의 except Exception 가드를
+    뚫는다)가 스코프 중간에서 환불을 자른다 — 나머지 예약이 마커 TTL 까지
+    고아가 된다(6차 리뷰 m4). ``state.pop`` 을 동기적으로 먼저 해 이후의
+    정산 주체와 소유권 경쟁이 없게 하고, 실제 환불은 ``_BACKGROUND_TASKS``
+    에 강참조로 추적되는 태스크가 완주한다 — 종료 시 ``drain_background_tasks``
+    가 기다린다.
+    """
+    rls = state.pop("rate_limit_state", None)
+    if not rls:
+        return
+
+    async def _refund() -> None:
+        await release_reservations(
+            redis=redis,
+            state={"rate_limit_state": rls},
+            auth_context=auth_context,
+        )
+
+    from app.services.budget_service import _BACKGROUND_TASKS
+
+    try:
+        t = asyncio.ensure_future(_refund())
+    except RuntimeError:
+        # 이벤트 루프 종료 중 — 환불은 마커 TTL 복구 경로에 맡긴다.
+        logger.warning("release_reservations_spawn_loop_closed")
+        return
+    _BACKGROUND_TASKS.add(t)
+    t.add_done_callback(_BACKGROUND_TASKS.discard)
 
 
 def unsettled_reservation_guard(state: dict) -> "BackgroundTask":

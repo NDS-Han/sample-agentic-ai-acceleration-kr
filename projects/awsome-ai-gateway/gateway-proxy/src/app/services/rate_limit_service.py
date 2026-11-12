@@ -198,7 +198,13 @@ class RateLimitService:
                     scope=result.get("scope"),
                     limit_type=result.get("limit_type"),
                 )
-            committed_keys.append(key)
+            # added 는 이번 호출이 **새로** ZADD 한 스코프 인덱스 — 폴백 재입장처럼
+            # 멤버를 재사용한 스코프는 되돌리기 대상이 아니다(재사용 멤버를 지우면
+            # 앞 시도의 슬롯이 사라진다 — 6차 리뷰 M1). 필드가 없는 구버전
+            # 스크립트는 전부 새로 넣은 것으로 본다(보수적 — 되돌리기 유지).
+            _added = result.get("added")
+            if _added is None or 1 in _added:
+                committed_keys.append(key)
             last = result
 
         # 전 scope 통과 — 마지막(가장 광역) scope 결과의 remaining/limit 노출.
@@ -208,6 +214,7 @@ class RateLimitService:
                 remaining=last.get("remaining", -1),
                 limit=last.get("limit", -1),
                 window_reset=last.get("window_reset") or 0,
+                committed_keys=committed_keys,
             )
         return RateLimitResult(allowed=True, remaining=-1, limit=-1)
 
@@ -232,6 +239,7 @@ class RateLimitService:
         redis,
         descriptors: list[ScopeDescriptor],
         request_id: str,
+        committed_keys: list[str] | None = None,
     ) -> None:
         """RPM 슬롯 해제 — 통과 후 뒤 단계(TPM/비용/예산)가 거절한 요청의
         ZSET 엔트리를 제거한다.
@@ -240,12 +248,20 @@ class RateLimitService:
         않으면 비용/예산으로 거절당한 요청이 요청-수 한도를 계속 물고 있어
         반복 거절이 사용자의 RPM 을 소진한다. 실패해도 무시(윈도우 만료로
         자연 회수).
+
+        ``committed_keys`` 는 check_multi_scope_rpm 이 이번 호출에 **새로**
+        추가한 스코프 키 — 폴백 재입장 등으로 멤버를 재사용한 스코프는
+        되돌리면 앞 시도의 슬롯을 지워버린다(6차 리뷰 M1). 미제공 시
+        descriptors 전체(구버전 호출자 계약).
         """
-        keys = [
-            build_rl_key(d.scope, d.scope_id, d.model_alias, "rpm")
-            for d in descriptors
-            if d.rpm_limit and d.rpm_limit > 0
-        ]
+        if committed_keys is None:
+            keys = [
+                build_rl_key(d.scope, d.scope_id, d.model_alias, "rpm")
+                for d in descriptors
+                if d.rpm_limit and d.rpm_limit > 0
+            ]
+        else:
+            keys = committed_keys
         await self._zrem_committed(redis, keys, request_id)
 
     async def check_multi_scope_tpm(

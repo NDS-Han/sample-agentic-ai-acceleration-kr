@@ -442,13 +442,17 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         merged = {**{k: v for k, v in env_asg.items()},
                   **{k: v for k, v in gen_asg.items()}}
         mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
-        if merged.get("enabled") and mn is not None and mx is not None \
-                and int(mn) > int(mx):
-            raise ValueError(
-                f"gatewayProxy.autoscaling: minReplicas({mn}) > "
-                f"maxReplicas({mx}) — deploy.sizing/capacity_tier 와 "
-                f"{env_vals.name} 기본값의 합성 결과입니다. "
-                "min 과 max 를 함께 선언하세요")
+        if merged.get("enabled") and mn is not None and mx is not None:
+            try:
+                mn_i, mx_i = int(mn), int(mx)
+            except (TypeError, ValueError):
+                mn_i = mx_i = 0  # 비수치는 차트 측 유효성에서 잡히게 통과
+            if mn_i > mx_i:
+                raise ValueError(
+                    f"gatewayProxy.autoscaling: minReplicas({mn}) > "
+                    f"maxReplicas({mx}) — deploy.sizing/capacity_tier 와 "
+                    f"{env_vals.name} 기본값의 합성 결과입니다. "
+                    "min 과 max 를 함께 선언하세요")
 
     # executorInflightTarget 은 워커당 풀(BEDROCK_THREAD_POOL_SIZE)의
     # ~70% 가정값 — sizing 으로 풀을 바꾸는데 env values 의 타깃이 낡은

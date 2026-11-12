@@ -442,7 +442,20 @@ BEGIN
     END IF;
 END $$;
 CREATE INDEX IF NOT EXISTS idx_usage_logs_model_time  ON usage.usage_logs (model_alias, requested_at DESC);
-CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req ON usage.usage_logs (bedrock_request_id);
+-- bedrock_request_id 도 인라인 전용 컬럼 — 어느 alembic 도 추가하지 않아
+-- 컬럼 결손 설치본은 **파일 끝의 백필 이전**에 이 인덱스에서 ERROR 로 죽는다
+-- (session_id 와 같은 2026-11-11 prod 사고 클래스인데, 그 쪽은 alembic 가
+-- 치유해주는 반면 이건 영구 실패다 — 6차 리뷰 m2). 컬럼이 없으면 건너뛰고
+-- 파일 끝의 백필+재시도가 수렴시킨다.
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns
+               WHERE table_schema = 'usage' AND table_name = 'usage_logs'
+                 AND column_name = 'bedrock_request_id') THEN
+        CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req
+            ON usage.usage_logs (bedrock_request_id);
+    END IF;
+END $$;
 
 -- 일별 사용량 집계 (FR-4a.2, /v1/usage/me 의 과거 일자 breakdown 데이터 소스).
 -- Granularity: (date, user_id, model_alias). 매일 KST 00:10 scheduler 잡으로 전일
@@ -777,3 +790,59 @@ WHERE a.alias = p.model_alias
 -- migration 0039: 요청별 청구 티어 감사. 게이트웨이 resolve_context_tier 가 청구와 이 값을
 -- 같은 판정으로 채운다(청구=long/기록=short 불일치 방지). 'short'|'long'|NULL(티어없는 모델).
 ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS context_tier VARCHAR(8);
+
+-- migration 0039: TEAM scope + client IS NULL 행의 기본 유저 cap D.
+ALTER TABLE budget.budget_configs ADD COLUMN IF NOT EXISTS default_user_cap_usd NUMERIC(12,4);
+COMMENT ON COLUMN budget.budget_configs.default_user_cap_usd IS
+    'TEAM scope 행의 기본 유저 cap D — 개인 예산 미설정 멤버에 적용. NULL=팀 한도만, 0=차단';
+-- 0039 가 max_budget_usd 의 NOT NULL 을 TEAM+client NULL 한정으로 푼다 —
+-- 기존 설치본(인라인 NOT NULL)과 init-only 를 같은 스키마로 수렴시킨다.
+ALTER TABLE budget.budget_configs ALTER COLUMN max_budget_usd DROP NOT NULL;
+DO $$ BEGIN
+    ALTER TABLE budget.budget_configs
+        ADD CONSTRAINT ck_budget_configs_max_required
+        CHECK (max_budget_usd IS NOT NULL OR (scope::text = 'TEAM' AND client IS NULL));
+EXCEPTION WHEN duplicate_object THEN null; END $$;
+
+-- migration 0048: 수동 배정('manual')과 sync 유래 팀 소속을 구분하는 표지.
+ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS team_source VARCHAR(16) NOT NULL DEFAULT 'sync';
+
+-- migration 0050: 서비스 계정 키 발급 지원.
+ALTER TABLE auth.users ADD COLUMN IF NOT EXISTS is_service_account BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS kind VARCHAR(32) NOT NULL DEFAULT 'exchange';
+ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS issued_by UUID REFERENCES auth.users(id);
+ALTER TABLE auth.virtual_keys ADD COLUMN IF NOT EXISTS issued_via_service_token UUID REFERENCES auth.service_tokens(id);
+
+-- usage_logs 인라인 컬럼 백필 — CREATE TABLE IF NOT EXISTS 는 기존 설치본에서
+-- 통째로 no-op 이라, 인라인에만 선언된 컬럼은 alembic 도 추가하지 않는 한
+-- 영구 결손이다(ORM 은 매 SELECT 에 전 컬럼을 넣으므로 그 테이블 경로 전체가
+-- UndefinedColumn 으로 죽는다 — 위 블록 도입 사유와 동일 사고 클래스).
+-- session_id 는 alembic 0054 가, 나머지는 어느 마이그레이션도 추가하지 않는다.
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS reasoning_tokens INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS web_search_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS ttft_ms INTEGER;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS is_streaming BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS estimated_usage BOOLEAN NOT NULL DEFAULT false;
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS downgraded_from VARCHAR(128);
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS availability_fallback_from VARCHAR(128);
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS sso_subject VARCHAR(512);
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS bedrock_request_id VARCHAR(128);
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS key_prefix VARCHAR(16);
+ALTER TABLE usage.usage_logs ADD COLUMN IF NOT EXISTS session_id VARCHAR(128);
+
+-- 위 백필이 컬럼을 놓은 뒤 재시도 — 중간 CREATE INDEX 의 컬럼-존재 가드가 건너뛴
+-- 설치본(컬럼 부재로 스킵됨)과 어느 경로로도 같은 스키마로 수렴한다.
+CREATE INDEX IF NOT EXISTS idx_usage_logs_session
+    ON usage.usage_logs (session_id, requested_at) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_usage_logs_bedrock_req
+    ON usage.usage_logs (bedrock_request_id);
+
+-- migration 0045: (dept_id,name)/(org_id,name) 유니크 — check-then-act 경합으로
+-- 중복 행이 생기면 get_team_by_dept_and_name LIMIT 1 이 비결정이 된다.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_teams_dept_name ON auth.teams (dept_id, name);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_departments_org_name ON auth.departments (org_id, name);
+
+-- migration 0053: audit_logs 시간순 조회 인덱스.
+CREATE INDEX IF NOT EXISTS idx_audit_logs_ts_id ON audit.audit_logs (timestamp DESC, id DESC);
