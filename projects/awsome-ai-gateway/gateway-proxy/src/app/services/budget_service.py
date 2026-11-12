@@ -712,10 +712,14 @@ class BudgetService:
                         )
                         d_cap = team_cfg.get("default_user_cap_usd")
                         if d_cap is not None:
-                            # 캐시된 팀 config 에 thresholds 가 없는 구버전 엔트리 대비
-                            # 폴백 — 재수화는 _row_thresholds 가 DB 행에서 쓴다.
+                            # 캐시된 팀 config 에 thresholds 키가 없는 구버전 엔트리
+                            # 대비 폴백 — 키가 있으면 [](의도된 알림 끔)도 유효한
+                            # 설정이라 or 로 기본값을 쓰면 되살아난다
+                            # (_row_thresholds 주석, 8차 리뷰).
                             d_thresholds = (
-                                team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                                team_cfg["thresholds"]
+                                if "thresholds" in team_cfg
+                                else list(DEFAULT_THRESHOLDS)
                             )
                             user_fallback = json.dumps({
                                 "limit_usd": str(d_cap),
@@ -920,10 +924,13 @@ class BudgetService:
             )
             if d_cap is not None:
                 # check_budget 의 D-3 합성과 같은 규칙 — 캐시된 팀 config 에
-                # thresholds 가 없는 구버전 엔트리 대비 폴백(변수 추출은
+                # thresholds 키가 없는 구버전 엔트리 대비 폴백(변수 추출은
                 # 재수화 기본값 주입 가드 테스트의 AST 패턴과 맞추기 위함).
+                # or 가 아닌 키 존재 검사 — [](알림 끔)은 유효한 설정이다.
                 d_thresholds = (
-                    team_cfg.get("thresholds") or list(DEFAULT_THRESHOLDS)
+                    team_cfg["thresholds"]
+                    if "thresholds" in team_cfg
+                    else list(DEFAULT_THRESHOLDS)
                 )
                 user_fallback = json.dumps({
                     "limit_usd": str(d_cap),

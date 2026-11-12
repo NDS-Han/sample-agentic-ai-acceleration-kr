@@ -75,6 +75,11 @@ end
 
 local limit = tonumber(config.limit_usd) or 0
 local policy = config.policy or 'hard_block'
+if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' then
+    -- 미지 정책은 어느 차단 분기도 안 타 통과(fail-open)가 되므로 보수적으로
+    -- 하드캡 취급(8차 리뷰 — reserve 와 같은 클래스).
+    policy = 'hard_block'
+end
 local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 local throttle_rpm_pct = tonumber(config.throttle_rpm_pct) or 50
 local thresholds = config.thresholds or {80, 90, 100}
@@ -132,7 +137,6 @@ if policy == 'soft_warning' then
     --    soft_limit_pct=110 이라는 **정확히 경계인** 상태를 통과시킨다. DB 폴백은 Decimal
     --    로 정확히 110 을 계산해 차단하므로, Redis 가 살아 있는지에 따라 판정이 갈렸다
     --    (실측으로 잡은 불일치). 양변에 100 을 곱해 비교하면 표현 오차가 사라진다.
-    local effective_limit = limit * soft_limit_pct / 100
     if used * 100 >= limit * soft_limit_pct then
         return cjson.encode({
             allowed = false,

@@ -145,3 +145,57 @@ async def test_throttle_unaffected_by_clamp(redis):
     res, _ = await _reserve(redis, script, estimate="7")
     assert res["allowed"] and res["partial"] is False
     assert float(await redis.get(KEYS[0])) == 57.0
+
+
+@pytest.mark.asyncio
+async def test_dedup_resend_returns_clamped_reserved_usd(redis):
+    """dedup 재전송도 클램프된 예약액을 돌려준다 — 8차 리뷰 M1 회귀.
+
+    부분 예약 직후 같은 request_id 재전송은 dedup_hit 응답인데, reserved_usd
+    가 없으면 디스크립터가 폴백 추정치(7)를 저장한다. 그 뒤 마커 소실 시
+    settle 복구가 resvsum(스코프 전체 합계)에서 타 요청 예약까지 과차감한다.
+    """
+    script = LuaScriptLoader.get("budget_reserve")
+    await redis.set(KEYS[1], json.dumps(CFG))
+    await redis.set(KEYS[0], "9.0")
+
+    res, _ = await _reserve(redis, script, estimate="7.0")
+    assert float(res["reserved_usd"]) == pytest.approx(1.0)
+
+    dedup, _ = await _reserve(redis, script, estimate="7.0")
+    assert dedup["dedup_hit"] is True
+    assert dedup["reserved"] is True
+    assert float(dedup["reserved_usd"]) == pytest.approx(1.0), (
+        "dedup 응답이 클램프 전 추정치로 떨어지면 settle 복구가 회계를 깬다"
+    )
+    # 카운터는 재차 증가하지 않는다
+    assert float(await redis.get(KEYS[0])) == pytest.approx(10.0)
+
+
+@pytest.mark.asyncio
+async def test_settle_recovery_uses_index_field_not_caller_estimate(redis):
+    """마커 소실 복구는 인덱스 필드값(실제 예약액)을 진실로 쓴다 — 8차 리뷰 M1.
+
+    reqX(5 라이브) + reqY(0.1 부분, 마커 소실·인덱스 생존) 상태에서
+    settle(actual=0.8, caller_reserved=7) 이 reqX 의 예약을 갉아먹으면 안 된다.
+    """
+    script = LuaScriptLoader.get("budget_reserve")
+    settle = LuaScriptLoader.get("budget_settle")
+    await redis.set(KEYS[1], json.dumps({"limit_usd": "30", "policy": "hard_block"}))
+    await redis.set(KEYS[0], "20")
+    await redis.set(KEYS[3], "5.1")
+    # reqX: 라이브 예약 5 — 마커+인덱스 모두 생존
+    await redis.set("budget:pending:team:{t1}:reqX", "5", ex=14400)
+    await redis.hset(KEYS[4], "reqX", "5")
+    # reqY: 부분 예약 0.1 — 마커 소실, 인덱스만 생존(TTL 2×마커)
+    await redis.hset(KEYS[4], "reqY", "0.1")
+
+    s = json.loads(await redis.eval(
+        settle, 5, KEYS[0], KEYS[1], "budget:pending:team:{t1}:reqY",
+        KEYS[3], KEYS[4], "0.8", "", "reqY", "7.0", "14400"))
+    assert s["recovered"] is True
+    # 인덱스값 0.1 기준: delta = 0.8-0.1 = +0.7 → usage 20.7, resvsum 5.1-0.1=5.0
+    assert float(await redis.get(KEYS[0])) == pytest.approx(20.7)
+    assert float(await redis.get(KEYS[3])) == pytest.approx(5.0), (
+        "caller 추정치(7)로 차감하면 reqX 의 예약(resvsum 5)까지 파괴된다"
+    )

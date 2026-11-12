@@ -800,7 +800,7 @@ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
 END $$;
 
--- migration 0037: 운영자가 설정한 예산 알림 임계값. UI/API/Lua 는 이미 이 값을 다루는데
+-- migration 0041: 운영자가 설정한 예산 알림 임계값. UI/API/Lua 는 이미 이 값을 다루는데
 -- 저장할 컬럼이 없어서, Redis 설정 키(ex=300)가 만료되면 gateway-proxy 의 재수화가
 -- 기본값으로 되돌려 놓았다 — 운영자 설정이 5분만 살아 있었다.
 --
@@ -830,7 +830,7 @@ EXCEPTION WHEN duplicate_column THEN NULL;
 END $$;
 
 
--- migration 0038: context 크기축 요금제(272K long-context). GPT-5.6 은 프롬프트가 임계를
+-- migration 0042: context 크기축 요금제(272K long-context). GPT-5.6 은 프롬프트가 임계를
 -- 넘으면 요청 전체를 long 요율로 청구한다. threshold NULL = 티어 없음(오늘 동작·Claude).
 -- 배수(long=short×2)가 아니라 명시 요율 컬럼을 두는 이유는 AWS Price List 자동연동 때문이다
 -- (Price List 는 달러 요율을 준다). 컬럼은 전부 NULLABLE(NULL='이 버킷 long 미설정').
@@ -939,7 +939,7 @@ WHERE a.alias = p.model_alias
   AND p.long_context_threshold_tokens IS NULL
   AND a.provider_model_id LIKE '%openai.gpt-5.6-%';
 
--- migration 0039: 요청별 청구 티어 감사. 게이트웨이 resolve_context_tier 가 청구와 이 값을
+-- migration 0043: 요청별 청구 티어 감사. 게이트웨이 resolve_context_tier 가 청구와 이 값을
 -- 같은 판정으로 채운다(청구=long/기록=short 불일치 방지). 'short'|'long'|NULL(티어없는 모델).
 DO $$
 BEGIN

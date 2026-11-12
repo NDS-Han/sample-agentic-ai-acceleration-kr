@@ -25,6 +25,9 @@
 --
 -- Returns: JSON {allowed, reserved, reason, used_usd, limit_usd,
 --               config_present, scope}
+--   reserved=true 경로에만: reserved_usd(실제 예약액 — 잔여 클램프 반영),
+--     partial(클램프 발생 여부), dedup_hit(멱등 재생), settled_before
+--     (툼스톤 통과) 가 경로에 따라 실린다.
 --   config_present=false → 호출자가 scope 별 미설정 정책 적용
 --     (user/client: pass-through, team: deny — budget_check.lua 와 동일)
 
@@ -125,6 +128,11 @@ end
 
 local limit = tonumber(config.limit_usd) or 0
 local policy = config.policy or 'hard_block'
+if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' then
+    -- 미지 정책(admin enum 이 Lua 지원보다 먼저 나가는 롤아웃 창, 오타)은
+    -- cap=nil 무차단이 되므로 보수적으로 하드캡 취급(8차 리뷰).
+    policy = 'hard_block'
+end
 local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 
 local used = tonumber(redis.call('GET', usage_key) or '0')
