@@ -105,6 +105,11 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
                 "OIDC_TOKEN_URL": cfg.oidc.token_url,
                 # confidential client(Cognito secret) — .env 에 보관하고 interpolate 만
                 "OIDC_CLIENT_SECRET": "${OIDC_CLIENT_SECRET:-}",
+                "OIDC_REDIRECT_URI": "${OIDC_REDIRECT_URI:-}",
+                "SECURE_COOKIES": "${SECURE_COOKIES:-}",
+                "ADMIN_GROUPS": "${ADMIN_GROUPS:-}",
+                "ADMIN_EMAILS": "${ADMIN_EMAILS:-}",
+                "OIDC_GROUPS_CLAIM": "${OIDC_GROUPS_CLAIM:-}",
             })
         if name == "admin-ui" and cfg.domain.name:
             # 도메인이 없으면 NEXTAUTH_URL 을 비워 Host 헤더로 유도 — 원격 호스트에서
@@ -294,9 +299,9 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "admin 비밀번호는 gen/<env>/.env 의 GF_SECURITY_ADMIN_PASSWORD 에 있습니다.")
     if cfg.oidc.enabled and cfg.domain.mode == "none":
         notes.append(
-            "oidc + domain=none: admin-ui 가 NEXTAUTH_URL 없이 Host 헤더에 의존합니다 — "
+            "oidc + domain=none: OIDC_REDIRECT_URI 가 비어 있으면 Host/프록시 헤더로 콜백을 구성합니다 — "
             "리버스 프록시/포트포워딩 뒤에서 접속하면 SSO 콜백 origin 이 어긋날 수 있습니다. "
-            "문제가 되면 gen/<env>/.env 에 NEXTAUTH_URL=http://<호스트>:3000 을 추가하세요.")
+            "외부 HTTPS 프록시 사용 시 gen/<env>/.env 에 OIDC_REDIRECT_URI=https://<외부주소>/api/auth/callback 과 SECURE_COOKIES=true 를 설정하세요.")
     if cfg.clients.models_profile == "regional":
         notes.append("models_profile=regional: 시드 alias 는 마이그레이션 관리 — "
                      "리전별 프로필 추가는 마이그레이션/관리 UI 에서 진행하십시오.")

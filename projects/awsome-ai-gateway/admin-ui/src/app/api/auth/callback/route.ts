@@ -413,6 +413,27 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     );
   }
 
+  // Register the verified identity before querying its role. This path deliberately
+  // does not issue a Virtual Key, so web login cannot revoke an active CLI key.
+  try {
+    const provision = await fetch(`${ADMIN_API_URL}/v1/auth/provision`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${cookieToken}` },
+      cache: 'no-store',
+      signal: AbortSignal.timeout(10000),
+    });
+    if (!provision.ok) {
+      return failure(
+        provision.status >= 500 ? 503 : 403,
+        'User registration failed',
+        'Gateway 사용자 등록에 실패했습니다. 팀 그룹 가입 여부와 관리자 API 로그를 확인하세요.',
+        secure,
+      );
+    }
+  } catch {
+    return failure(503, 'User registration unavailable', '관리자 API에 연결하지 못했습니다. 잠시 후 다시 로그인하세요.', secure);
+  }
+
   const maxAge = cookieMaxAge(cookieToken, tokens.expires_in);
 
   // 유효 역할 조회. IdP 토큰에 role 클레임이 없어서(보통 groups 만 온다) 이 호출이

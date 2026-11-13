@@ -101,6 +101,28 @@ async def exchange_oidc_jwt(
     token = _extract_bearer(request)
     redis = request.app.state.redis
 
+    ip = await _enforce_auth_rate_limit(request)
+
+    try:
+        return await svc.exchange_jwt_for_vk(
+            session,
+            redis=redis,
+            token=token,
+            device_name=body.device_name,
+            sso_session_expires_at=body.sso_session_expires_at,
+            ip_address=ip,
+            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+        )
+    except OIDCAuthError as e:
+        raise _oidc_error(401, "invalid_token", str(e))
+    except OIDCNotProvisionableError as e:
+        raise _oidc_error(403, "not_provisionable", str(e))
+    except OIDCConfigError as e:
+        raise _oidc_error(503, "idp_unavailable", str(e))
+
+
+async def _enforce_auth_rate_limit(request: Request) -> str:
+    redis = request.app.state.redis
     # 비용 상한: 고정창 레이트리밋. INCR+EXPIRE 는 비원자적이지만 창 첫 요청에만
     # EXPIRE 가 붙어 최악의 경우 창이 늘어날 뿐 제한이 풀리지는 않는다.
     # redis 장애 시엔 VK 매핑 저장 자체가 불가라 리밋 skip 여부는 무의미(fail-open).
@@ -122,16 +144,26 @@ async def exchange_oidc_jwt(
         except Exception:
             pass  # 리밋 카운터 자체의 장애는 요청을 막지 않는다
 
+    return ip
+
+
+@router.post("/provision")
+async def provision_oidc_user(
+    request: Request,
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Web SSO bootstrap: verify token and provision identity without issuing a key."""
+    svc = request.app.state.oidc_service
+    if svc is None:
+        raise _oidc_error(503, "oidc_disabled", "OIDC is not configured.")
+    token = _extract_bearer(request)
+    ip = await _enforce_auth_rate_limit(request)
     try:
-        return await svc.exchange_jwt_for_vk(
-            session,
-            redis=redis,
-            token=token,
-            device_name=body.device_name,
-            sso_session_expires_at=body.sso_session_expires_at,
-            ip_address=ip,
-            request_id=getattr(request.state, "request_id", "") or request.headers.get("x-request-id", ""),
+        user = await svc.provision_user(
+            session, token=token, ip_address=ip,
+            request_id=getattr(request.state, "request_id", "") or "",
         )
+        return {"user_id": str(user.id), "role": user.role}
     except OIDCAuthError as e:
         raise _oidc_error(401, "invalid_token", str(e))
     except OIDCNotProvisionableError as e:

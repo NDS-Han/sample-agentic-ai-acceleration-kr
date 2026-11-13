@@ -108,7 +108,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     env = _unwrap(questionary.text(
         "환경 이름 (소문자·숫자·하이픈, 예: acme-small)",
-        default=str(_g(ex, "env")) or None).ask())
+        default=str(_g(ex, "env"))).ask())
     region = _unwrap(questionary.text(
         "AWS 리전", default=str(_g(ex, "aws", "region")) or "ap-northeast-2").ask())
 
@@ -148,11 +148,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
     if domain_mode == "route53-acm":
         domain_name = _unwrap(questionary.text(
             "베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)",
-            default=str(_g(ex, "domain", "name")) or None).ask())
+            default=str(_g(ex, "domain", "name"))).ask())
         if target == "ecs":  # eks 는 env values 의 기존 인증서를 씀
             zone_id = _unwrap(questionary.text(
                 "Route53 hosted zone ID (예: Z0123456ABCD)",
-                default=str(_g(ex, "domain", "zone_id")) or None).ask())
+                default=str(_g(ex, "domain", "zone_id"))).ask())
 
     prev_notif = _g(ex, "features", "notifications", default={}) or {}
     notif = _unwrap(questionary.select(
@@ -165,22 +165,22 @@ def _collect_doc(existing: dict | None = None) -> dict:
     notif_extra = {}
     if notif == "ses":
         notif_extra["ses_from"] = _unwrap(questionary.text(
-            "SES 발신 주소", default=str(prev_notif.get("ses_from", "")) or None).ask())
+            "SES 발신 주소", default=str(prev_notif.get("ses_from", ""))).ask())
     elif notif == "smtp":
         notif_extra["smtp_host"] = _unwrap(questionary.text(
-            "SMTP 호스트", default=str(prev_notif.get("smtp_host", "")) or None).ask())
+            "SMTP 호스트", default=str(prev_notif.get("smtp_host", ""))).ask())
         notif_extra["smtp_from"] = _unwrap(questionary.text(
-            "발신 주소", default=str(prev_notif.get("smtp_from", "")) or None).ask())
+            "발신 주소", default=str(prev_notif.get("smtp_from", ""))).ask())
         # 인증 Secret 은 백엔드별 취급이 달라(eks: k8s Secret 이름) 질문하지 않고 보존
         if prev_notif.get("smtp_credentials_secret"):
             notif_extra["smtp_credentials_secret"] = prev_notif["smtp_credentials_secret"]
     elif notif == "internal_api":
         notif_extra["internal_api_url"] = _unwrap(questionary.text(
             "사내 메일 API URL",
-            default=str(prev_notif.get("internal_api_url", "")) or None).ask())
+            default=str(prev_notif.get("internal_api_url", ""))).ask())
         notif_extra["internal_api_from"] = _unwrap(questionary.text(
             "발신 주소 (비우면 차트 기본)",
-            default=str(prev_notif.get("internal_api_from", "")) or None).ask())
+            default=str(prev_notif.get("internal_api_from", ""))).ask())
     # 질문하지 않는 알림 필드(smtp_port, sender_name 등)는 기존 값을 보존 —
     # configure 한 번에 수동 편집값이 조용히 사라지는 걸 막는다 (oidc 와 같은 규칙)
     for k, v in prev_notif.items():
@@ -214,13 +214,13 @@ def _collect_doc(existing: dict | None = None) -> dict:
             oidc = dict(prev_oidc)
     if oidc_on and not oidc:
         oidc["issuer_url"] = _unwrap(questionary.text(
-            "OIDC issuer URL", default=str(prev_oidc.get("issuer_url", "")) or None).ask())
+            "OIDC issuer URL", default=str(prev_oidc.get("issuer_url", ""))).ask())
         oidc["client_id"] = _unwrap(questionary.text(
-            "OIDC client id (admin-ui SSO)", default=str(prev_oidc.get("client_id", "")) or None).ask())
+            "OIDC client id (admin-ui SSO)", default=str(prev_oidc.get("client_id", ""))).ask())
         oidc["authorize_url"] = _unwrap(questionary.text(
-            "authorize URL", default=str(prev_oidc.get("authorize_url", "")) or None).ask())
+            "authorize URL", default=str(prev_oidc.get("authorize_url", ""))).ask())
         oidc["token_url"] = _unwrap(questionary.text(
-            "token URL", default=str(prev_oidc.get("token_url", "")) or None).ask())
+            "token URL", default=str(prev_oidc.get("token_url", ""))).ask())
         # 질문하지 않는 OIDC 필드는 기존 값을 보존 — configure 한 번에
         # required_group/audience/client_secret 가 조용히 사라지는 걸 막는다
         for k in ("audience", "client_secret", "required_group", "provider_name",
@@ -230,7 +230,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 oidc[k] = prev_oidc[k]
         vk_ttl = _unwrap(questionary.text(
             "VK 수명(시간) — 비우면 차트 기본(1시간)",
-            default=str(prev_oidc.get("vk_ttl_hours", "")) or None).ask())
+            default=str(prev_oidc.get("vk_ttl_hours", ""))).ask())
         if vk_ttl:
             try:
                 oidc["vk_ttl_hours"] = int(vk_ttl)
@@ -239,18 +239,18 @@ def _collect_doc(existing: dict | None = None) -> dict:
         grp_prefix = _unwrap(questionary.text(
             "그룹 prefix — <prefix><dept>_<team> 으로 부서/팀 파싱 "
             "(비우면 차트 기본 Claude_)",
-            default=str(prev_oidc.get("group_prefix", "")) or None).ask())
+            default=str(prev_oidc.get("group_prefix", ""))).ask())
         if grp_prefix:
             oidc["group_prefix"] = grp_prefix
         admin_groups = _unwrap(questionary.text(
             "ADMIN 역할 부여 그룹 (쉼표 구분, 예: ClaudeAdmin — 비우면 없음)",
-            default=",".join(prev_oidc.get("admin_groups") or []) or None).ask())
+            default=",".join(prev_oidc.get("admin_groups") or [])).ask())
         if admin_groups:
             oidc["admin_groups"] = [g.strip()
                                     for g in admin_groups.split(",") if g.strip()]
         admin_emails = _unwrap(questionary.text(
             "ADMIN 이메일 (쉼표 구분 — 비우면 없음)",
-            default=",".join(prev_oidc.get("admin_emails") or []) or None).ask())
+            default=",".join(prev_oidc.get("admin_emails") or [])).ask())
         if admin_emails:
             oidc["admin_emails"] = [e.strip()
                                     for e in admin_emails.split(",") if e.strip()]
@@ -261,10 +261,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
         prev_img = (_g(ex, "images", default={}) or {}) if same_target else {}
         images["registry"] = _unwrap(questionary.text(
             "외부 이미지 registry (비우면 ECR 자동 추론)",
-            default=str(prev_img.get("registry", "")) or None).ask())
+            default=str(prev_img.get("registry", ""))).ask())
         images["tag"] = _unwrap(questionary.text(
             "이미지 태그 (명시적 핀 필수)",
-            default=str(prev_img.get("tag", "")) or None).ask())
+            default=str(prev_img.get("tag", ""))).ask())
         # 서비스별 tags 맵은 질문으로 다루지 않는다 — configure 재실행 시
         # 이전 값을 보존한다 (US-19 같은 멀티태그 릴리스가 지워지지 않게)
         if prev_img.get("tags"):
@@ -275,10 +275,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
         prev_dep = (_g(ex, "deploy", default={}) or {}) if same_target else {}
         deploy_extra["tfstate_bucket"] = _unwrap(questionary.text(
             "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)",
-            default=str(prev_dep.get("tfstate_bucket", "")) or None).ask())
+            default=str(prev_dep.get("tfstate_bucket", ""))).ask())
         deploy_extra["tfstate_table"] = _unwrap(questionary.text(
             "Terraform lock DynamoDB table (없으면 비움)",
-            default=str(prev_dep.get("tfstate_table", "")) or None).ask())
+            default=str(prev_dep.get("tfstate_table", ""))).ask())
         deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
         deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
         deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
