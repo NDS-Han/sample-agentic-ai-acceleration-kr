@@ -62,9 +62,10 @@ set_codex_env_args() {
 print_budget() {
   local VK; VK="$(cat "$VK_FILE" 2>/dev/null)"; [ -z "$VK" ] && return 0
   # 예산 한 줄을 stderr 로 출력(claude/codex 출력과 안 섞이게). 내부 트레이스만 버린다.
-  python3 - "$GW_URL" "$VK" <<'PY' || true
-import sys, json, urllib.request
-gw, vk = sys.argv[1], sys.argv[2]
+  # VK 는 argv 가 아니라 env 로 넘긴다 — argv 는 ps 로 다른 로컬 유저에게 보인다.
+  VK="$VK" python3 - "$GW_URL" <<'PY' || true
+import sys, os, json, urllib.request
+gw, vk = sys.argv[1], os.environ["VK"]
 try:
     req = urllib.request.Request(gw.rstrip('/')+"/v1/usage/me", headers={"Authorization":"Bearer "+vk})
     d = json.load(urllib.request.urlopen(req, timeout=4))
@@ -144,9 +145,12 @@ PY
     shift
     VK="$(read_vk)"
     print_budget   # 실행 전 예산 한 줄 + claude-box 자체 statusline 도 표시됨
-    exec "$ENGINE" run -it --rm \
+    # `-e KEY` (값 없음) 패스스루: docker CLI 의 env 에서 상속. `-e KEY=val` 로
+    # 박으면 VK 가 프로세스 argv 에 노출돼 ps 로 다른 로컬 유저에게 읽힌다.
+    # (docker inspect 에는 여전히 보이지만 docker 소켓 접근은 이미 특권이다.)
+    ANTHROPIC_AUTH_TOKEN="$VK" exec "$ENGINE" run -it --rm \
       -e ANTHROPIC_BASE_URL="$GW_URL" \
-      -e ANTHROPIC_AUTH_TOKEN="$VK" \
+      -e ANTHROPIC_AUTH_TOKEN \
       -v "$PWD":/work \
       claude-box "$@"
     ;;
@@ -156,9 +160,9 @@ PY
     VK="$(read_vk)"
     print_budget   # Codex 는 statusline 훅이 없어 실행 전 예산을 여기서 표시
     set_codex_env_args
-    exec "$ENGINE" run -it --rm \
+    GATEWAY_VK="$VK" exec "$ENGINE" run -it --rm \
       -e GW_URL="$GW_URL" \
-      -e GATEWAY_VK="$VK" \
+      -e GATEWAY_VK \
       ${CODEX_ENV_ARGS[@]+"${CODEX_ENV_ARGS[@]}"} \
       -v "$PWD":/work \
       codex-box "$@"
@@ -171,10 +175,10 @@ PY
       # 디버그 셸에서도 같은 knob 을 넘긴다 — 셸 안에서 entrypoint.sh 를 직접 실행해
       # 생성되는 config.toml 을 확인하는 것이 이 서브커맨드의 용도라서.
       set_codex_env_args
-      exec "$ENGINE" run -it --rm --entrypoint /bin/sh -e GW_URL="$GW_URL" -e GATEWAY_VK="$VK" \
+      GATEWAY_VK="$VK" exec "$ENGINE" run -it --rm --entrypoint /bin/sh -e GW_URL="$GW_URL" -e GATEWAY_VK \
         ${CODEX_ENV_ARGS[@]+"${CODEX_ENV_ARGS[@]}"} -v "$PWD":/work codex-box
     else
-      exec "$ENGINE" run -it --rm --entrypoint /bin/bash -e ANTHROPIC_BASE_URL="$GW_URL" -e ANTHROPIC_AUTH_TOKEN="$VK" -v "$PWD":/work claude-box
+      ANTHROPIC_AUTH_TOKEN="$VK" exec "$ENGINE" run -it --rm --entrypoint /bin/bash -e ANTHROPIC_BASE_URL="$GW_URL" -e ANTHROPIC_AUTH_TOKEN -v "$PWD":/work claude-box
     fi
     ;;
 

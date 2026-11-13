@@ -85,3 +85,68 @@ class TestSetupJwt:
         result = setup_jwt(tool, config)
         assert result.status == ComponentStatus.SKIPPED
         assert "missing" in result.message.lower()
+
+
+class TestRunOauthFlowPkce:
+    """R28 F3/F4 — 인가 URL 은 PKCE + 퍼센트 인코딩을 갖춰야 하고, 토큰 교환은
+    code_verifier 를 보내야 한다."""
+
+    def test_pkce_and_urlencode(self, monkeypatch) -> None:
+        import base64
+        import hashlib
+        from urllib.parse import parse_qs, urlparse
+
+        from cli.tools import openai_config as oc
+
+        captured: dict = {}
+        fake_result = {"code": None, "error": None}
+
+        class FakeServer:
+            def __init__(self, addr, handler):
+                self.server_address = (addr[0], 42424)
+                self.timeout = None
+
+            def handle_request(self):
+                fake_result["code"] = "authcode123"
+
+            def server_close(self):
+                pass
+
+        monkeypatch.setattr(oc, "HTTPServer", FakeServer)
+        monkeypatch.setattr(
+            oc, "create_oauth_handler", lambda state: (None, fake_result)
+        )
+        monkeypatch.setattr(
+            oc.webbrowser, "open", lambda url: captured.setdefault("url", url)
+        )
+
+        resp = MagicMock()
+        resp.json.return_value = {"access_token": "jwt-xyz"}
+        post = MagicMock(return_value=resp)
+        monkeypatch.setattr(oc.requests, "post", post)
+
+        cfg = GatewayConfig(
+            jwt_auth={
+                "sso_auth_url": "https://sso.example.com/authorize",
+                "sso_token_url": "https://sso.example.com/token",
+                "client_id": "gw-cli",
+                "scope": "openid profile",  # 공백 포함 — 인코딩되어야 함
+            }
+        )
+        token = oc._run_oauth_flow(cfg)
+        assert token == "jwt-xyz"
+
+        url = captured["url"]
+        qs = parse_qs(urlparse(url).query)
+        assert qs["scope"] == ["openid profile"]  # 인코딩 후에도 파싱 시 원래 값
+        assert "openid+profile" in url or "openid%20profile" in url
+        assert " " not in url  # 인가 URL 에 리터럴 공백이 없어야 함
+        assert qs["code_challenge_method"] == ["S256"]
+
+        data = post.call_args.kwargs["data"]
+        assert data["code"] == "authcode123"
+        verifier = data["code_verifier"]
+        expected = base64.urlsafe_b64encode(
+            hashlib.sha256(verifier.encode("ascii")).digest()
+        ).rstrip(b"=").decode("ascii")
+        assert qs["code_challenge"] == [expected]

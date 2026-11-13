@@ -4,10 +4,11 @@
 
 from __future__ import annotations
 
+import os
 import secrets
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, urlencode, urlparse
 
 import requests
 import structlog
@@ -85,6 +86,11 @@ def _run_oauth_flow(config: GatewayConfig) -> str:
         raise RuntimeError("JWT SSO configuration missing (sso_auth_url, sso_token_url)")
 
     state = secrets.token_urlsafe(32)
+    # PKCE — authorization code 가 누출돼도 verifier 없이는 교환 불가.
+    # 공유 헬퍼 재사용(gateway_cli_oidc 와 동일 구현을 중복하지 않는다).
+    from gateway_cli_oidc.oidc_client import _gen_code_challenge, _gen_code_verifier
+
+    code_verifier = _gen_code_verifier()
     handler_cls, result = create_oauth_handler(state)
 
     server = HTTPServer(("127.0.0.1", 0), handler_cls)
@@ -92,14 +98,17 @@ def _run_oauth_flow(config: GatewayConfig) -> str:
     redirect_uri = f"http://localhost:{port}/callback"
     server.timeout = OAUTH_TIMEOUT
 
-    auth_url = (
-        f"{sso_auth_url}"
-        f"?response_type=code"
-        f"&client_id={client_id}"
-        f"&redirect_uri={redirect_uri}"
-        f"&state={state}"
-        f"&scope={scope}"
-    )
+    # urlencode — scope 의 공백/예약문자를 안전하게 인코딩한다. 수동 연결은
+    # config.yaml 의 값에 '&' 가 섞이면 파라미터 오염이 된다.
+    auth_url = f"{sso_auth_url}?{urlencode({
+        'response_type': 'code',
+        'client_id': client_id,
+        'redirect_uri': redirect_uri,
+        'state': state,
+        'scope': scope,
+        'code_challenge': _gen_code_challenge(code_verifier),
+        'code_challenge_method': 'S256',
+    })}"
 
     log.info("oauth_browser_open", auth_url=sso_auth_url)
     webbrowser.open(auth_url)
@@ -122,6 +131,7 @@ def _run_oauth_flow(config: GatewayConfig) -> str:
             "code": result["code"],
             "redirect_uri": redirect_uri,
             "client_id": client_id,
+            "code_verifier": code_verifier,
         },
         timeout=(config.connect_timeout, config.read_timeout),
     )
@@ -206,6 +216,12 @@ def setup_jwt(tool: DetectedTool, config: GatewayConfig) -> ComponentResult:
 
     updated = apply_fn(original, config.gateway_url, jwt_token)
     atomic_write_json(tool.config_path, updated)
+    try:
+        # atomic_write_json 은 기존 파일의 권한을 보존한다 — 자격증명이 들어간
+        # 파일이 이전에 0644 였다면 계속 0644 로 남는다. 쓰기 후 0600 재보장.
+        os.chmod(tool.config_path, 0o600)
+    except OSError:
+        pass  # Windows 등 chmod 미지원 — 토큰 자체는 이미 기록됨
 
     log.info("jwt_configured", tool=tool.name)
     return ComponentResult(

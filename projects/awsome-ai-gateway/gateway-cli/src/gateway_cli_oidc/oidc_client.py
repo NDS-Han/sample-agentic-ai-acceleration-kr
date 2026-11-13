@@ -223,10 +223,20 @@ def _secure_write(path: Path, text: str) -> None:
     """토큰/VK 캐시를 0600 으로 원자 생성한다.
 
     write_text()+os.chmod 는 파일이 잠깐 umask 권한(0644)으로 존재하는
-    TOCTOU 창이 있어, 처음부터 0600 으로 연다."""
+    TOCTOU 창이 있어, 처음부터 0600 으로 연다. 기존 파일은 O_CREAT 가
+    모드를 유지하므로 쓰기 후 0600 을 재보장한다."""
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
+    try:
+        fh = os.fdopen(fd, "w", encoding="utf-8")
+    except Exception:
+        os.close(fd)
+        raise
+    with fh:
+        fh.write(text)
+    try:
+        os.chmod(path, 0o600)
+    except (OSError, NotImplementedError):
+        pass
 
 
 def save_tokens(tokens: Tokens) -> None:

@@ -113,6 +113,15 @@ Name: "scopeuser"; \
 ; PATH automatically (both the system and per-user environments) at post-install.
 ; See AddDirToPath in [Code].
 
+[Dirs]
+; C:\ root children inherit an "Authenticated Users: create files/folders" ACE —
+; left in place, a standard user could plant a DLL next to exes that get invoked
+; elevated (setup self-elevates via UAC) or by other users' sessions (the
+; machine-wide HKLM policy points every user's api-key-helper here). Grant
+; read+execute only; write stays admin/system. Runtime writes go to %TEMP% /
+; per-user dirs, not {app}.
+Name: "{app}"; Permissions: admins-full system-full users-readexec
+
 [Files]
 ; Ship the entire PyInstaller onedir output: the two exes (gateway-cli-cowork,
 ; api-key-helper) plus the shared _internal runtime folder. (statusline.exe

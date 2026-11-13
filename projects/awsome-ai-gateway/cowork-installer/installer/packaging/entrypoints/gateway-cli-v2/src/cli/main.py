@@ -218,7 +218,11 @@ def _print_cowork_config() -> None:
         return
     for name in sorted(current):
         value = current[name]
-        if name == "inferenceGatewayApiKey" and value:
+        # 키 이름에 ApiKey/Token/Headers 가 들어가는 값은 시크릿 취급 —
+        # inferenceCustomHeaders/otlpHeaders 는 {"Authorization": "Bearer …"} 를
+        # 담을 수 있어 setup/verify 출력에 평문으로 새면 안 된다.
+        lowered = name.lower()
+        if value and any(t in lowered for t in ("apikey", "token", "header")):
             value = f"{str(value)[:12]}…(len {len(str(value))})"
         click.echo(f"    {name:<28} = {value}")
     if current.get("inferenceProvider") == "gateway":
@@ -305,7 +309,8 @@ def _install_corporate_ca(rb: Rollback, *, force: bool) -> None:
     "api_key",
     default=None,
     envvar="GATEWAY_CLI_VK",
-    help="Virtual Key to write (static kind).",
+    help="Virtual Key to write (static kind). Prefer the GATEWAY_CLI_VK env var "
+    "or stdin — the argv form is visible in `ps` to other local users.",
 )
 @click.option(
     "--force",
@@ -444,6 +449,14 @@ def setup_cmd(
             # per-user default. Inert on macOS (the configLibrary writer ignores it).
             resolved_scope = cowork_config.resolve_registry_scope(scope)
 
+            # argv 로 넘긴 VK 는 ps/셸 히스토리에 남는다 — env(GATEWAY_CLI_VK)
+            # 경유분은 argv 에 없으므로 argv 형태일 때만 경고한다.
+            if api_key and any(a == "--api-key" or a.startswith("--api-key=") for a in sys.argv[1:]):
+                click.secho(
+                    "  WARNING: --api-key on the command line is visible in `ps` "
+                    "and shell history — prefer GATEWAY_CLI_VK.",
+                    fg="yellow",
+                )
             try:
                 config = cowork_config.build_config(
                     base_url=base_url,

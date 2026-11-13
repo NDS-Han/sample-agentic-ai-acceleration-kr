@@ -123,11 +123,14 @@ def open_browser(url: str) -> None:
             return
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
-        # powershell.exe Start-Process quotes the URL properly — cmd.exe /c start
-        # splits on & in query strings without quoting.
+        # powershell.exe Start-Process — pass the URL as an argument rather than
+        # interpolating it into the command string: a '"' in a hostile/compromised
+        # IdP discovery endpoint would otherwise break out of the quoted string
+        # into PowerShell code. $args is passed literally, never re-parsed.
+        # (cmd.exe /c start is still unusable — it splits on & in query strings.)
         try:
             subprocess.run(
-                ["powershell.exe", "-NoProfile", "-Command", f'Start-Process "{url}"'],
+                ["powershell.exe", "-NoProfile", "-Command", "Start-Process $args[0]", url],
                 check=False, timeout=5,
             )
             return
