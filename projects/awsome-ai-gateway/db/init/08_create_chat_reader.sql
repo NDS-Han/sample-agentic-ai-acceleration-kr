@@ -93,6 +93,11 @@ BEGIN
     END IF;
 END $$;
 
+-- PG15+ 는 신규 DB 의 public CREATE 를 기본 회수하지만, ≤14 에서
+-- 업그레이드/복원된 DB 는 PUBLIC 에 CREATE 가 남아 reader 가 public 에
+-- 객체를 만들어(owner 권한으로) 쓸 수 있다. 멱등 — 명시 회수로 닫는다.
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
 -- audit schema 는 super-admin 만. gateway_chat_reader 는 미부여.
 
 -- statement_timeout 강제 — 무한 query 방지 (spec §3.1.6)

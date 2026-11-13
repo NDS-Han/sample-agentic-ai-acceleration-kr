@@ -800,7 +800,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     if infra.get("cache") is not None and not _infra_cache:
         errors.append("infra.cache 는 mapping 이어야 합니다")
     _check_unknown(_infra_db, ("mode", "min_acu", "max_acu",
-                               "instance_class"), "infra.db", errors)
+                               "instance_class", "engine_version"), "infra.db", errors)
     _check_unknown(_infra_cache, ("mode", "node_type", "num_clusters",
                                   "num_node_groups",
                                   "replicas_per_node_group"), "infra.cache", errors)

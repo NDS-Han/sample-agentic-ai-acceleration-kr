@@ -194,7 +194,9 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         r".*to_xml.*|xpath|"                            # 문자열 SQL 실행(XML 계열)
         r"ts_(?:stat|rewrite)|"                         # 문자열 SQL 실행(tsquery 계열)
         r"(?:next|set|curr)val|txid_.*|"                # 시퀀스/트랜잭션 부수효과
-        r"http_.*|curl.*"                               # 네트워크 egress 확장
+        r"http_.*|curl.*|"                              # 네트워크 egress 확장
+        r"aws_(?:lambda|s3|kms|sepm|cfn|ddb|sns|sqs).*|"
+        r"cron\..*"                                     # Aurora 확장(설치 시 부수효과)
         r")$",
         re.IGNORECASE,
     )

@@ -308,6 +308,9 @@ data "aws_iam_policy_document" "notification_worker" {
 }
 
 resource "aws_iam_policy" "notification_worker" {
+  # ses 외 sender 면 statement 가 0개 — 빈 policy document 는 IAM 이
+  # MalformedPolicyDocument 로 거부해 apply 전체가 죽는다(R24-H4).
+  count  = var.email_sender_type == "ses" ? 1 : 0
   name   = "${local.name_prefix}-notification-worker"
   policy = data.aws_iam_policy_document.notification_worker.json
 }
@@ -319,8 +322,9 @@ resource "aws_iam_role" "notification_worker" {
 }
 
 resource "aws_iam_role_policy_attachment" "notification_worker" {
+  count      = var.email_sender_type == "ses" ? 1 : 0
   role       = aws_iam_role.notification_worker.name
-  policy_arn = aws_iam_policy.notification_worker.arn
+  policy_arn = aws_iam_policy.notification_worker[0].arn
 }
 
 # ------------------------------------------------------------------------------

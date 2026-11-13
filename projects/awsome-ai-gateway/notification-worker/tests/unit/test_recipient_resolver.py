@@ -19,10 +19,10 @@ from worker.services.recipient_resolver import RecipientResolver
 # Recipient() rejected it, RecipientResolver swallowed the exception, and the tests asserted
 # on an empty list. spec_set turns that silent drift into an immediate failure.
 def _make_user(
-    user_id: str = "u1",
+    user_id: str = "11111111-1111-1111-1111-111111111111",
     email: str = "user@example.com",
     display_name: str = "Alice",
-    team_id: str = "t1",
+    team_id: str = "33333333-3333-3333-3333-333333333333",
     role: str = "DEVELOPER",
     is_active: bool = True,
 ) -> User:
@@ -36,7 +36,7 @@ def _make_user(
     return u
 
 
-def _make_team(team_id: str = "t1", leader_user_id: str | None = "u2") -> Team:
+def _make_team(team_id: str = "33333333-3333-3333-3333-333333333333", leader_user_id: str | None = "22222222-2222-2222-2222-222222222222") -> Team:
     t = MagicMock(spec_set=Team)
     t.id = team_id
     t.leader_user_id = leader_user_id
@@ -51,7 +51,7 @@ def _make_factory(session: AsyncMock) -> MagicMock:
 
 
 async def test_resolve_affected_user() -> None:
-    user = _make_user("u1", "alice@example.com", "Alice")
+    user = _make_user("11111111-1111-1111-1111-111111111111", "alice@example.com", "Alice")
     session = AsyncMock()
     result = MagicMock()
     result.scalar_one_or_none.return_value = user
@@ -60,7 +60,7 @@ async def test_resolve_affected_user() -> None:
     resolver = RecipientResolver(_make_factory(session))
     recipients = await resolver.resolve(
         roles=[RecipientRole.AFFECTED_USER],
-        payload={"user_id": "u1"},
+        payload={"user_id": "11111111-1111-1111-1111-111111111111"},
     )
 
     assert len(recipients) == 1
@@ -77,7 +77,7 @@ async def test_resolve_affected_user_not_found_returns_empty() -> None:
     resolver = RecipientResolver(_make_factory(session))
     recipients = await resolver.resolve(
         roles=[RecipientRole.AFFECTED_USER],
-        payload={"user_id": "nonexistent"},
+        payload={"user_id": "99999999-9999-9999-9999-999999999999"},
     )
     assert recipients == []
 
@@ -93,8 +93,8 @@ async def test_resolve_affected_user_no_user_id_returns_empty() -> None:
 
 
 async def test_resolve_admin_returns_all_admins() -> None:
-    admin1 = _make_user("u1", "admin1@example.com", "Admin1", role="ADMIN")
-    admin2 = _make_user("u2", "admin2@example.com", "Admin2", role="ADMIN")
+    admin1 = _make_user("11111111-1111-1111-1111-111111111111", "admin1@example.com", "Admin1", role="ADMIN")
+    admin2 = _make_user("22222222-2222-2222-2222-222222222222", "admin2@example.com", "Admin2", role="ADMIN")
 
     session = AsyncMock()
     result = MagicMock()
@@ -115,7 +115,7 @@ async def test_resolve_admin_returns_all_admins() -> None:
 
 async def test_resolve_deduplicates_emails() -> None:
     """동일 이메일이 여러 역할로 해소되면 중복 제거."""
-    user = _make_user("u1", "alice@example.com", "Alice")
+    user = _make_user("11111111-1111-1111-1111-111111111111", "alice@example.com", "Alice")
 
     session = AsyncMock()
     result = MagicMock()
@@ -126,7 +126,7 @@ async def test_resolve_deduplicates_emails() -> None:
     resolver = RecipientResolver(_make_factory(session))
     recipients = await resolver.resolve(
         roles=[RecipientRole.AFFECTED_USER, RecipientRole.ADMIN],
-        payload={"user_id": "u1"},
+        payload={"user_id": "11111111-1111-1111-1111-111111111111"},
     )
 
     emails = [r.email for r in recipients]
@@ -147,8 +147,8 @@ async def test_resolve_team_leader_returns_all_leaders() -> None:
     """리더가 여러 명이면 전원에게 간다 — Team.leader_user_id 는 가장 최근 지정을
     가리키는 표시용 포인터라 그걸 따라가면 나머지 리더는 메일을 못 받는다."""
     session = AsyncMock()
-    team = _make_team("t1")
-    leader1 = _make_user("u2", "leader1@example.com", role="TEAM_LEADER")
+    team = _make_team("33333333-3333-3333-3333-333333333333")
+    leader1 = _make_user("22222222-2222-2222-2222-222222222222", "leader1@example.com", role="TEAM_LEADER")
     leader2 = _make_user("u3", "leader2@example.com", role="TEAM_LEADER")
 
     team_res = MagicMock()
@@ -159,7 +159,7 @@ async def test_resolve_team_leader_returns_all_leaders() -> None:
 
     resolver = RecipientResolver(_make_factory(session))
     recipients = await resolver.resolve(
-        roles=[RecipientRole.TEAM_LEADER], payload={"team_id": "t1"}
+        roles=[RecipientRole.TEAM_LEADER], payload={"team_id": "33333333-3333-3333-3333-333333333333"}
     )
 
     assert sorted(r.email for r in recipients) == [
@@ -173,14 +173,14 @@ async def test_resolve_team_leader_no_leaders_returns_empty() -> None:
     """리더 미지정 팀은 오류가 아니라 빈 목록 (BR-RCP-04)."""
     session = AsyncMock()
     team_res = MagicMock()
-    team_res.scalar_one_or_none.return_value = _make_team("t1", leader_user_id=None)
+    team_res.scalar_one_or_none.return_value = _make_team("33333333-3333-3333-3333-333333333333", leader_user_id=None)
     leaders_res = MagicMock()
     leaders_res.scalars.return_value.all.return_value = []
     session.execute = AsyncMock(side_effect=[team_res, leaders_res])
 
     resolver = RecipientResolver(_make_factory(session))
     recipients = await resolver.resolve(
-        roles=[RecipientRole.TEAM_LEADER], payload={"team_id": "t1"}
+        roles=[RecipientRole.TEAM_LEADER], payload={"team_id": "33333333-3333-3333-3333-333333333333"}
     )
     assert recipients == []
 

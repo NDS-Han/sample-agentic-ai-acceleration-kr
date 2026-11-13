@@ -623,6 +623,33 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         else:
             rep.add("WARN", "tf-drift", "terraform plan 불가(init/state 없음?) — 인프라는 별도 확인")
 
+        # 6b. plain-view 위험 경고 — managed overlay 없이(사람 소유 env tfvars 만)
+        #     plan 하면 NDS 소유 토글(SES IRSA/body_logging)이 destroy 로 뜬다.
+        #     doctor 가 managed view 만 OK 라고 보여주는 동안 운영자의 plain
+        #     terraform apply 가 모듈을 지울 수 있어 별도로 감시한다(R24-H2).
+        try:
+            from .eks_apply import _infra_targets
+        except ImportError:  # pragma: no cover - 패키지/스크립트 호출 양용
+            from eks_apply import _infra_targets  # type: ignore
+        managed = [t[len("-target="):] for t in _infra_targets(cfg)]
+        if managed:
+            plain = _run(
+                ["terraform", "plan", "-input=false", "-no-color",
+                 "-detailed-exitcode"], cwd=env_dir, timeout=300)
+            if plain.returncode == 2:
+                # plain plan 의 삭제 대상 중 NDS 소유 모듈이 있으면 경고.
+                hits = [m for m in managed
+                        if re.search(rf"module\.{re.escape(m.split('.', 2)[-1])}\S* "
+                                     r"(will be destroyed|must be replaced)",
+                                     plain.stdout)]
+                if hits:
+                    rep.add(
+                        "WARN", "tf-drift-plain",
+                        "plain terraform apply(사람 경로)가 NDS 소유 모듈을 "
+                        f"삭제합니다: {', '.join(hits)} — managed overlay 없는 "
+                        "apply 는 실행하지 마세요")
+        return rep
+
     return rep
 
 

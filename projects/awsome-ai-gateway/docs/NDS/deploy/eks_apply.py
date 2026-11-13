@@ -108,6 +108,25 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     # install-eks.sh 계약 — output 이 없으면 차트 기본 "gateway" 로 수렴한다
     args += ["--set",
              f"database.external.name={outs.get('aurora_database_name') or 'gateway'}"]
+
+    # RDS 관리형 master 시크릿(rds!cluster-<uuid>) — ESO 가 직접 읽게 해
+    # 로테이션 드리프트를 원천 차단한다(fill-org-values.sh 와 같은 계약).
+    # 비어 두면 ExternalSecret 이 /db 의 없는 master_password 를 조회해
+    # SecretSyncedError → 시크릿 전체 미생성 → 신규 설치가 기동 불가(R24-H1).
+    master_arn = outs.get("aurora_master_user_secret_arn")
+    if master_arn:
+        m = re.search(r":secret:(rds!cluster-[0-9a-f-]+)-[A-Za-z0-9]{6}$",
+                      master_arn)
+        if m:
+            args += ["--set",
+                     f"database.external.masterPasswordRemoteKey={m.group(1)}",
+                     "--set",
+                     "database.external.masterPasswordRemoteProperty=password"]
+        else:
+            print(f"⚠ aurora_master_user_secret_arn 의 형식이 예상과 다릅니다 "
+                  f"({master_arn}) — masterPasswordRemoteKey 미주입, "
+                  "ExternalSecret 이 /db:master_password fallback 으로 실패할 수 "
+                  "있습니다", file=sys.stderr)
     if outs.get("elasticache_endpoint"):
         args += ["--set", f"redis.external.host={outs['elasticache_endpoint']}",
                  "--set", "redis.external.tls=true"]

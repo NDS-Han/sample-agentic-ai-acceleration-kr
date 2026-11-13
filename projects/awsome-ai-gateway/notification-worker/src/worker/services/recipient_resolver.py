@@ -13,6 +13,18 @@ from worker.schemas.recipients import Recipient, RecipientRole
 logger = structlog.get_logger(__name__)
 
 
+def _is_uuid(value: object) -> bool:
+    """payload 의 id 필드가 UUID 형식인지 — 아니면 asyncpg DataError 가
+    infra 오류로 분류돼 drain 버퍼에서 head-of-line 기아를 만든다(R24-F1)."""
+    import uuid as _uuid
+
+    try:
+        _uuid.UUID(str(value))
+        return True
+    except (ValueError, TypeError, AttributeError):
+        return False
+
+
 class RecipientResolver:
     """이벤트 수신자를 역할 기반으로 결정한다 (BR-RCP).
 
@@ -92,6 +104,12 @@ class RecipientResolver:
         user_id = payload.get("user_id")
         if not user_id:
             return []
+        if not _is_uuid(user_id):
+            # 결정적 실패 — asyncpg DataError 가 infra 오류로 분류돼 drain
+            # 버퍼에 들어가면 이 이벤트가 FIFO 선두를 영구 점유해 뒤의 정상
+            # 이벤트가 전부 기아한다(R24-F1). 잘못된 수신자는 drop 이 정답.
+            logger.warning("affected_user_invalid_uuid", user_id=str(user_id)[:64])
+            return []
 
         result = await session.execute(
             select(User).where(User.id == str(user_id), User.is_active.is_(True))
@@ -114,11 +132,17 @@ class RecipientResolver:
             user_id = payload.get("user_id")
             if not user_id:
                 return []
+            if not _is_uuid(user_id):
+                logger.warning("team_leader_invalid_user_uuid", user_id=str(user_id)[:64])
+                return []
             result = await session.execute(select(User.team_id).where(User.id == str(user_id)))
             row = result.scalar_one_or_none()
             if row is None:
                 return []
             team_id = row
+        elif not _is_uuid(team_id):
+            logger.warning("team_leader_invalid_team_uuid", team_id=str(team_id)[:64])
+            return []
 
         result = await session.execute(select(Team).where(Team.id == str(team_id)))
         team = result.scalar_one_or_none()
