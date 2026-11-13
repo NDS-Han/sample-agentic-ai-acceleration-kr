@@ -310,7 +310,11 @@ class Settings(BaseSettings):
     #: (3×12000×7/4) that alone is ~63k tokens, so any TPM budget below ~80k
     #: rejects web-search requests before they start (permanent 429, not
     #: degradation). Reserving is still conservative up to this cap; settle
-    #: refunds the excess either way. 0 = uncapped (old behaviour).
+    #: refunds the excess either way. Note the cap can also UNDER-reserve:
+    #: a request whose real growth exceeds the cap is admitted while its
+    #: minute bucket overshoots the TPM limit by the uncapped remainder —
+    #: self-correcting at the next admission check in the same window
+    #: (10th review). 0 = uncapped (old behaviour).
     web_search_admission_input_add_cap: int = Field(default=16384, ge=0)
     #: Put a cache_control marker on the search results (tool_result) the loop injects so later
     #: turns of the same request read them at the cached price (10% of list). 2026-09-16: most

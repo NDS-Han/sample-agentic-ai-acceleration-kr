@@ -107,9 +107,9 @@ async def test_tpm_committed_out_reports_committed_scopes(mock_redis):
         mock_redis, descriptors, reserved_tokens=1000, committed_out=committed
     )
     assert result.allowed is False
-    # eval 2회만 실행(USER, TEAM) — USER 만 커밋됐다.
-    assert len(committed) == 1
-    assert committed[0].scope.value == "USER"
+    # USER 는 커밋됐다가 거절 경로에서 내부 환불됐다 — committed_out 은 환불 후
+    # 비워야 호출자 catch-all 이 비멱등 settle 을 재적용하지 않는다(10차 리뷰).
+    assert committed == []
 
 
 @pytest.mark.asyncio

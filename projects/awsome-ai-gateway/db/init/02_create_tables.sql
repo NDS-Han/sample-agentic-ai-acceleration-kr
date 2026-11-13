@@ -1114,3 +1114,32 @@ END $$;
 
 -- migration 0053: audit_logs 시간순 조회 인덱스.
 CREATE INDEX IF NOT EXISTS idx_audit_logs_ts_id ON audit.audit_logs (timestamp DESC, id DESC);
+
+-- 가드로 건너뛴 유니크 인덱스 감지 — 위 DO 블록들은 중복 데이터가 있으면
+-- WARNING 만 내고 인덱스 없이 넘어간다. 그 상태는 Job 로그 한 줄에 묻히므로,
+-- init 적용 직후 누락 목록을 한 번 더 경고해 매 배포에서 보이게 한다(10차
+-- 리뷰). 인덱스가 모두 있으면 아무 출력도 내지 않는다.
+DO $$
+DECLARE
+    expected text[] := ARRAY[
+        'idx_rotation_policies_scope',
+        'uq_budget_configs_active',
+        'idx_budget_usages_unique',
+        'uq_rate_limit_configs_active',
+        'idx_downgrade_policies_unique_active',
+        'idx_roi_aggregations_unique',
+        'idx_productivity_events_idempotency',
+        'uq_teams_dept_name',
+        'uq_departments_org_name'
+    ];
+    missing text[];
+BEGIN
+    SELECT array_agg(n) INTO missing
+    FROM unnest(expected) AS n
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pg_indexes WHERE indexname = n
+    );
+    IF missing IS NOT NULL THEN
+        RAISE WARNING 'unique indexes missing (중복 데이터로 가드 스킵 가능): % — 중복 정리 후 재배포하면 인덱스가 생성됩니다', missing;
+    END IF;
+END $$;

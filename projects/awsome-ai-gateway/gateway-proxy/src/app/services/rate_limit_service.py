@@ -344,12 +344,19 @@ class RateLimitService:
                     await self._refund_committed_tpm(
                         redis, committed, reserved_tokens, reserved_at=now_sec
                     )
+                    # 내부 환불 완료 — 호출자 committed_out 에 stale descriptor
+                    # 가 남으면 catch-all 이 비멱등 settle 을 재적용한다
+                    # (reserve_cost 와 같은 계약, 10차 리뷰).
+                    if committed_out is not None:
+                        committed_out.clear()
                     return blocked
                 continue
             if not result["allowed"]:
                 await self._refund_committed_tpm(
                     redis, committed, reserved_tokens, reserved_at=now_sec
                 )
+                if committed_out is not None:
+                    committed_out.clear()
                 return RateLimitResult(
                     allowed=False,
                     remaining=result.get("remaining", -1),

@@ -1195,6 +1195,30 @@ def test_conservative_admission_body_covers_real_worst_case():
     assert body1["_gw_admission_input_mult"] == 4
 
 
+def test_conservative_admission_body_input_add_cap():
+    """admission_add_cap 은 raw worst-case 가산을 클램프한다 — cap 이 없으면
+    기본 파라미터의 raw add(~47k)가 그대로 예약된다(10차 리뷰 #2)."""
+    uncapped = wsl.conservative_admission_body(
+        {"max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        2, max_result_chars=12000, max_searches_per_turn=3,
+        default_max_results=5)
+    raw_add = uncapped["_gw_admission_input_add"]
+    assert raw_add > 1000  # cap 없이는 큰 worst-case 가산
+
+    capped = wsl.conservative_admission_body(
+        {"max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        2, max_result_chars=12000, max_searches_per_turn=3,
+        default_max_results=5, admission_add_cap=16384)
+    assert capped["_gw_admission_input_add"] == min(raw_add, 16384)
+
+    # cap 아래의 작은 add 는 그대로 — 클램프가 작은 예약을 부풀리지 않는다
+    small = wsl.conservative_admission_body(
+        {"max_tokens": 100, "messages": [{"role": "user", "content": "hi"}]},
+        1, max_result_chars=100, max_searches_per_turn=1,
+        default_max_results=1, admission_add_cap=16384)
+    assert small["_gw_admission_input_add"] <= 16384
+
+
 @pytest.mark.asyncio
 async def test_anthropic_unopened_block_delta_suppressed():
     """R20 N3: a non-text_delta on a never-opened block must not leak a local
