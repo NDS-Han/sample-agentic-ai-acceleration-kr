@@ -69,6 +69,8 @@ def _client() -> httpx.AsyncClient:
     if _shared_client is None:
         _shared_client = httpx.AsyncClient(
             limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
+            # Authorization 헤더가 리다이렉트 대상으로 새지 않게 — 기본값 의존 대신 명시.
+            follow_redirects=False,
         )
     return _shared_client
 

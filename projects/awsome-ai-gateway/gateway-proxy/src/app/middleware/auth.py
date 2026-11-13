@@ -46,11 +46,11 @@ class AuthMiddleware:
 
         # request 객체에서 Authorization 헤더 추출
         headers = dict(scope.get("headers", []))
-        authorization = headers.get(b"authorization", b"").decode()
+        authorization = headers.get(b"authorization", b"").decode("utf-8", errors="replace")
         if not authorization:
             # Claude Code 는 ANTHROPIC_API_KEY 경로로 x-api-key 헤더를 보낸다 —
             # VK 를 그 헤더로 제시하는 클라이언트도 Bearer 와 동등하게 취급한다.
-            api_key = headers.get(b"x-api-key", b"").decode()
+            api_key = headers.get(b"x-api-key", b"").decode("utf-8", errors="replace")
             if api_key:
                 authorization = f"Bearer {api_key}"
 
@@ -160,7 +160,7 @@ class AuthMiddleware:
             # XFF 의 가장 오른쪽 홉 = 직접 프록시(ALB)가 기록한 진짜 클라이언트 IP.
             # 왼쪽 홉은 클라이언트가 임의로 위조할 수 있어 브루트포스 감지에 쓰면
             # 위조 IP 로 회피/오남용이 가능하다. XFF 없으면 직접 피어를 쓴다.
-            xff = dict(scope.get("headers", [])).get(b"x-forwarded-for", b"").decode()
+            xff = dict(scope.get("headers", [])).get(b"x-forwarded-for", b"").decode("utf-8", errors="replace")
             if xff:
                 source_ip = xff.split(",")[-1].strip() or "unknown"
             else:

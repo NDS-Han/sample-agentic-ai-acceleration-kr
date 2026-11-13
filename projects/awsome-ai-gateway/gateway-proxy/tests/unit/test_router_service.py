@@ -385,3 +385,61 @@ def test_check_key_scope_legacy_str_signature_still_works():
     RouterService().check_key_scope(_auth(["claude-haiku"]), "claude-haiku")
     with pytest.raises(PermissionError):
         RouterService().check_key_scope(_auth(["claude-haiku"]), "claude-opus")
+
+
+def test_check_client_model_scope_none_allowed_unchanged():
+    """model.allowed_clients=None 은 제한 없음 — client 무관 통과."""
+    from app.services.router_service import check_client_model_scope
+
+    cfg = _schema("m", "pmid")
+    check_client_model_scope(cfg, "cowork", ["claude-code"])
+    check_client_model_scope(cfg, None, None)
+
+
+def test_check_client_model_scope_rejects_out_of_list():
+    from app.services.router_service import ClientModelScopeError, check_client_model_scope
+
+    cfg = _schema("m", "pmid")
+    cfg.allowed_clients = ["cowork"]
+    with pytest.raises(ClientModelScopeError):
+        check_client_model_scope(cfg, "claude-code", ["claude-code"])
+    with pytest.raises(ClientModelScopeError):
+        check_client_model_scope(cfg, "other", None)
+
+
+def test_check_client_model_scope_claim_only_warns_once(caplog):
+    """키 allowed_clients=None + 모델 앱 바인딩 = 주장만으로 만족 → WARN 1회.
+
+    무제한 키가 헤더 주장으로 앱 바인딩을 통과하는 것은 설계상 허용이지만
+    조용하면 안 된다(R26 M1). (alias, client) 쌍당 1회만 로깅.
+    """
+    import logging
+
+    from app.services.router_service import (
+        _CLAIM_ONLY_SCOPE_PAIRS,
+        check_client_model_scope,
+    )
+
+    cfg = _schema("m", "pmid")
+    cfg.allowed_clients = ["cowork"]
+    _CLAIM_ONLY_SCOPE_PAIRS.discard(("m", "cowork"))
+    with caplog.at_level(logging.WARNING):
+        check_client_model_scope(cfg, "cowork", None)  # claim-only → warn
+        check_client_model_scope(cfg, "cowork", None)  # 같은 쌍 — 중복 억제
+    warns = [r for r in caplog.records if "claim" in str(r).lower() or r.levelno >= logging.WARNING]
+    assert len(warns) <= 2  # structlog 는 1개 이벤트로 들어온다 — 쌍당 최대 1회 허용 여유
+    assert ("m", "cowork") in _CLAIM_ONLY_SCOPE_PAIRS
+    _CLAIM_ONLY_SCOPE_PAIRS.discard(("m", "cowork"))
+
+
+def test_check_client_model_scope_restricted_key_no_claim_only_warn(caplog):
+    """키가 allowed_clients 로 제한돼 있으면 주장은 이미 미들웨어에서 검증됨 — WARN 없음."""
+    import logging
+
+    from app.services.router_service import check_client_model_scope
+
+    cfg = _schema("m2", "pmid")
+    cfg.allowed_clients = ["cowork"]
+    with caplog.at_level(logging.WARNING):
+        check_client_model_scope(cfg, "cowork", ["cowork", "claude-code"])
+    assert not any("claim" in str(r).lower() for r in caplog.records)

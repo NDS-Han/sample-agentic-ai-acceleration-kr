@@ -127,6 +127,9 @@ async def lifespan(app: FastAPI):
     httpx_client = httpx.AsyncClient(
         limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         timeout=httpx.Timeout(connect=10, read=settings.stream_timeout, write=10, pool=30),
+        # 서명/베어러 헤더를 실은 요청이 리다이렉트 대상으로 새는 것을 차단 —
+        # httpx 기본값이 False 지만 의존하지 않고 명시한다(sigv4_signer 불변).
+        follow_redirects=False,
     )
 
     # 5. boto3 Bedrock Client
@@ -221,7 +224,8 @@ async def lifespan(app: FastAPI):
     mantle_http = httpx.AsyncClient(
         timeout=httpx.Timeout(
             connect=5, read=settings.mantle_http_timeout, write=10, pool=30
-        )
+        ),
+        follow_redirects=False,
     )
     mantle_adapter = MantleAdapter(http_client=mantle_http, broker=mantle_broker)
     provider_registry.register(ProviderType.BEDROCK_MANTLE, mantle_adapter)

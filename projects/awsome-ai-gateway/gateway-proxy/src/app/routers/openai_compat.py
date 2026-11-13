@@ -224,6 +224,41 @@ async def responses(request: Request) -> StreamingResponse | JSONResponse:
     return await _handle_responses(request)
 
 
+def _is_usable_model_ref(value) -> bool:
+    """True only for a value we can safely hand to the resolver.
+
+    "model" comes straight from untrusted client JSON, so it is not necessarily a
+    usable string, and an unusable one must not reach the resolver: the resolver's
+    failures below are caught as LookupError, but these two failure modes are NOT
+    LookupError, so they would escape the fallback and 500 a request that returned
+    200 before this feature existed.
+
+      * non-str (number/list/dict/bool) → asyncpg gets a non-text bind for a VARCHAR
+        comparison and raises DBAPIError. Verified against real Postgres with
+        123 / ["a"] / {"x":1} / True.
+      * lone UTF-16 surrogate (e.g. {"model": "\\ud800"}) → valid JSON and a real str,
+        but redis-py encodes cache keys with encoding_errors="strict", so
+        redis.get(f"model:{ref}") raises UnicodeEncodeError before any DB call.
+        Verified directly against redis-py's Encoder.
+      * NUL byte (e.g. {"model": "codex\\u0000gpt"}) → valid JSON, a real str, and
+        encodes to UTF-8 cleanly, so neither check above catches it. Postgres has no
+        NUL in text: asyncpg raises CharacterNotInRepertoireError ("invalid byte
+        sequence for encoding UTF8: 0x00"). Verified against real Postgres.
+
+    Deliberately NOT rejected: an over-long value. Postgres compares
+    `alias = $1` by VALUE, not by the column's declared width, so a 100 000-char ref
+    simply matches nothing and falls back (verified: HTTP 200). Length is bounded
+    for LOGGING only, at the log call below.
+    """
+    if not isinstance(value, str) or not value or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 async def _handle_openai(request: Request, path: str):
     state = request.scope.get("state", {})
     auth_context = state.get("auth_context")
@@ -257,6 +292,15 @@ async def _handle_openai(request: Request, path: str):
 
     from app.schemas.domain import DegradationLevel
 
+    # /v1/responses·/v1/messages 와 같은 가드 — NUL/서로게이트/비문자열 ref 는
+    # resolver 까지 가면 LookupError 가 아닌 예외(asyncpg/redis 인코딩)로 500 이
+    # 났다. 이 레거시 와이어에는 프로파일 폴백이 없으니 400 으로 닫는다.
+    if not _is_usable_model_ref(alias):
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"type": "invalid_request", "message": "Invalid 'model' value"}},
+        )
+
     dm = state.get("_degradation_manager")
     is_db_degraded = dm and dm.level in (
         DegradationLevel.DB_DEGRADED,
@@ -282,7 +326,7 @@ async def _handle_openai(request: Request, path: str):
             _router_service.check_key_scope(auth_context, model_config)
             # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
             # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
-            _router_service.check_client_model_scope(model_config, state.get("client"))
+            _router_service.check_client_model_scope(model_config, state.get("client"), getattr(auth_context, "allowed_clients", None))
         except PermissionError:
             return JSONResponse(
                 status_code=400,
@@ -684,43 +728,6 @@ async def _handle_responses(request: Request):
     # model expects it to work immediately. If this ever shows up in DB load, negatively
     # cache the miss with a TTL well under MODEL_CACHE_TTL rather than reordering these
     # lookups -- and note the cost lands only on clients sending unregistered names.
-    def _is_usable_model_ref(value) -> bool:
-        """True only for a value we can safely hand to the resolver.
-
-        "model" comes straight from untrusted client JSON, so it is not necessarily a
-        usable string, and an unusable one must not reach the resolver: the resolver's
-        failures below are caught as LookupError, but these two failure modes are NOT
-        LookupError, so they would escape the fallback and 500 a request that returned
-        200 before this feature existed.
-
-          * non-str (number/list/dict/bool) → asyncpg gets a non-text bind for a VARCHAR
-            comparison and raises DBAPIError. Verified against real Postgres with
-            123 / ["a"] / {"x":1} / True.
-          * lone UTF-16 surrogate (e.g. {"model": "\\ud800"}) → valid JSON and a real str,
-            but redis-py encodes cache keys with encoding_errors="strict", so
-            redis.get(f"model:{ref}") raises UnicodeEncodeError before any DB call.
-            Verified directly against redis-py's Encoder.
-          * NUL byte (e.g. {"model": "codex\\u0000gpt"}) → valid JSON, a real str, and
-            encodes to UTF-8 cleanly, so neither check above catches it. Postgres has no
-            NUL in text: asyncpg raises CharacterNotInRepertoireError ("invalid byte
-            sequence for encoding UTF8: 0x00"). Verified against real Postgres.
-
-        All are rejected here rather than caught below, so the profile default serves
-        them exactly as it did before per-request selection.
-
-        Deliberately NOT rejected: an over-long value. Postgres compares
-        `alias = $1` by VALUE, not by the column's declared width, so a 100 000-char ref
-        simply matches nothing and falls back (verified: HTTP 200). Length is bounded
-        for LOGGING only, at the log call below.
-        """
-        if not isinstance(value, str) or not value or "\x00" in value:
-            return False
-        try:
-            value.encode("utf-8")
-        except UnicodeEncodeError:
-            return False
-        return True
-
     async def _resolve_model(db, profile):
         """Resolve the client-sent model, falling back to the profile default."""
         if _is_usable_model_ref(requested_alias) and requested_alias != profile.default_model:
@@ -831,7 +838,7 @@ async def _handle_responses(request: Request):
             _router_service.check_key_scope(auth_context, model_config)
             # 모델 × 앱 축(migration 0035). 위 게이트(사용자 × 모델)와 AND 로 걸린다.
             # allowed_clients: None=제한 없음 / []=어떤 앱도 불가 / 목록=그 앱만.
-            _router_service.check_client_model_scope(model_config, state.get("client"))
+            _router_service.check_client_model_scope(model_config, state.get("client"), getattr(auth_context, "allowed_clients", None))
         except PermissionError:
             return JSONResponse(
                 status_code=400,

@@ -159,7 +159,16 @@ def check_client_scope(allowed_clients: list[str] | None, client: str | None) ->
         raise PermissionError(f"Client '{client}' not allowed for this key")
 
 
-def check_client_model_scope(model_config, client: str | None) -> None:
+# (alias, client) — claim-only 통과 WARN 의 중복 억제 집합. 크기는 등록된
+# alias 수 × client 이름 4종으로 유한하다.
+_CLAIM_ONLY_SCOPE_PAIRS: set[tuple[str, str | None]] = set()
+
+
+def check_client_model_scope(
+    model_config,
+    client: str | None,
+    key_allowed_clients: list[str] | None = None,
+) -> None:
     """앱(client)이 이 **모델**을 쓸 수 없으면 PermissionError.
 
     ``model_aliases.allowed_clients`` 의 canonical 의미(전 계층 동일, migration 0035):
@@ -180,6 +189,14 @@ def check_client_model_scope(model_config, client: str | None) -> None:
        구별하는 유일한 축이다 — 그래서 falsiness 가 아니라 ``is None`` 으로 판정한다.
 
     :func:`check_key_scope`(allowed_models 게이트)와 AND 로 걸린다.
+
+    ⚠️ client 는 헤더(User-Agent/originator/anthropic-client-platform)에서 유도한
+    **주장값**이다(client_identifier.py 위협 모델 메모). 자격증명 자체의
+    ``allowed_clients`` 가 비어 있지 않으면 미들웨어가 이미 목록 밖 주장을
+    거절했으므로 이 검사는 실질적이다 — 그러나 ``key_allowed_clients=None``
+    (무제한 키 — 발급 기본값)이면 호출자는 임의 앱을 가장할 수 있어 이 바인딩은
+    주장에 의해서만 만족된다. 그 조합을 조용히 통과시키지 않고 WARN 로 남긴다 —
+    앱 바인딩을 실제 경계로 쓰려면 VK 발급 시 allowed_clients 를 제한해야 한다.
     """
     allowed = getattr(model_config, "allowed_clients", None)
     if allowed is None:
@@ -188,6 +205,18 @@ def check_client_model_scope(model_config, client: str | None) -> None:
         raise ClientModelScopeError(
             f"Model '{getattr(model_config, 'alias', '?')}' not allowed for client '{client}'"
         )
+    if key_allowed_clients is None:
+        pair = (getattr(model_config, "alias", "?"), client)
+        if pair not in _CLAIM_ONLY_SCOPE_PAIRS:
+            _CLAIM_ONLY_SCOPE_PAIRS.add(pair)
+            logger.warning(
+                "model_app_binding_claim_only",
+                alias=pair[0],
+                client=pair[1],
+                allowed_clients=list(allowed),
+                detail="model.allowed_clients satisfied by caller-claimed headers only "
+                "(key has unrestricted allowed_clients) — binding is advisory, not a boundary",
+            )
 
 
 def _orm_to_schema(alias_row: ModelAlias, pricing_row: Optional[ModelPricing]) -> ModelConfigSchema:
@@ -542,12 +571,17 @@ class RouterService:
         """
         return await self._resolve_by_providers(redis, db, alias, OPENAI_CHAT_PROVIDERS)
 
-    def check_client_model_scope(self, model_config, client: str | None) -> None:
+    def check_client_model_scope(
+        self,
+        model_config,
+        client: str | None,
+        key_allowed_clients: list[str] | None = None,
+    ) -> None:
         """모듈 레벨 :func:`check_client_model_scope` 로 위임.
 
         ``allowed_clients`` 가 ``None`` 이면 제한 없음, ``[]`` 면 어떤 앱도 허용되지 않음.
         """
-        check_client_model_scope(model_config, client)
+        check_client_model_scope(model_config, client, key_allowed_clients)
 
     def check_key_scope(
         self,
