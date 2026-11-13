@@ -143,6 +143,7 @@ class RateLimitService:
         descriptors: list[ScopeDescriptor],
         request_id: str | None = None,
         window_ms: int = _DEFAULT_WINDOW_MS,
+        committed_out: list[str] | None = None,
     ) -> RateLimitResult:
         """여러 스코프의 RPM을 **스코프별 1회 Lua 호출**로 체크.
 
@@ -210,6 +211,10 @@ class RateLimitService:
             _added = result.get("added")
             if _added is None or 1 in _added:
                 committed_keys.append(key)
+                # 취소/예외가 eval 도중 나면 결과 반환 전에 탈출하므로 호출자가
+                # 부분 커밋을 볼 수 있게 진행 중에도 채운다(10차 리뷰).
+                if committed_out is not None:
+                    committed_out.append(key)
             last = result
 
         # 전 scope 통과 — 마지막(가장 광역) scope 결과의 remaining/limit 노출.
@@ -549,6 +554,7 @@ class RateLimitService:
         team_cph_limit: Decimal | None = None,
         user_key_alias: str | None = None,
         team_key_alias: str | None = None,
+        committed_out: list[tuple[str, str, str]] | None = None,
     ) -> CostLimitResult:
         """CPM/CPH 사전 예약 (USER + TEAM) — **스코프별 1회 Lua 호출**.
 
@@ -649,6 +655,11 @@ class RateLimitService:
                     reserved_cost=Decimal("0"),
                 )
             committed.append((label, cpm_key, cph_key))
+            # 취소/예외가 eval 도중 나면 호출자가 부분 커밋을 볼 수 있게
+            # 진행 중에도 채운다 — committed_out 항목은 _refund_committed_cost
+            # 에 그대로 넘길 수 있는 3-튜플이다(10차 리뷰).
+            if committed_out is not None:
+                committed_out.append((label, cpm_key, cph_key))
 
         # 전 scope 통과 — 예약 커밋됨(각 scope eval 이 INCRBYFLOAT 수행).
         # settle 이 같은 윈도우·같은 스코프 키를 치게 커밋 정보를 돌려준다.

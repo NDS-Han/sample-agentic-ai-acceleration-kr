@@ -116,7 +116,9 @@ if not cfg_raw then
 end
 
 local config = decode_or_nil(cfg_raw)
-if not config then
+if type(config) ~= 'table' then
+    -- 스칼라/깨진 캐시도 config 부재와 동일 취급 — 비테이블이면 아래
+    -- config.limit_usd 인덱싱에서 eval 이 죽는다(10차 리뷰).
     return reply(true, false, nil, 0, 0, false)
 end
 
@@ -138,7 +140,7 @@ local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 local used = tonumber(redis.call('GET', usage_key) or '0')
 
 -- D-8: limit = 0 은 정책과 무관하게 항상 차단.
-if limit == 0 then
+if limit <= 0 then
     return reply(false, false, scope_label .. '_budget_exceeded', used, limit, true)
 end
 

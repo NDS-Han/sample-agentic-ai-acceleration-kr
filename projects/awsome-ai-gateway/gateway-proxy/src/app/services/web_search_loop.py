@@ -191,7 +191,13 @@ def conservative_admission_body(
     body["max_tokens"] = single * turns
     # _estimate_input_tokens 가 읽는 심사 전용 배수/가산 — 상류 바디와 무관하다.
     body["_gw_admission_input_mult"] = turns
-    per_turn_results = max_searches_per_turn or default_max_results
+    # max_searches_per_turn=0 은 루프에서 "무제한"(허용 요청 전부 실행)인데
+    # 여기서 default_max_results 로 대체하면 보수 상한을 재는 이 함수의 목적이
+    # 뒤집힌다 — 무제한 운영 시엔 관측 상한(스키마 max 25)으로 둔다(10차 리뷰).
+    if max_searches_per_turn > 0:
+        per_turn_results = max_searches_per_turn
+    else:
+        per_turn_results = max(default_max_results, 25)
     per_result_cap = max_result_chars if max_result_chars > 0 else 24_000
     if per_turn_results > 0:
         # 턴 t 가 재전송하는 결과 라운드 수 = 완료된 검색 턴 수 min(t, iters).

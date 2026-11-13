@@ -198,6 +198,10 @@ async def test_enforce_cost_eval_exception_spawns_unwind(monkeypatch, mock_redis
     rpm_committed = ["rl:rpm:u:u-1:{k1}:m:1"]
 
     async def _rpm_ok(*args, **kwargs):
+        # 실서비스 계약 — 결과의 committed_keys 와 committed_out 양쪽을 채운다
+        # (committed_out 은 예외 경로의 부분 커밋 노출용, 10차 리뷰).
+        if kwargs.get("committed_out") is not None:
+            kwargs["committed_out"].extend(rpm_committed)
         return RateLimitResult(
             allowed=True, remaining=-1, limit=-1, committed_keys=rpm_committed
         )
@@ -269,3 +273,96 @@ async def test_enforce_cost_eval_exception_spawns_unwind(monkeypatch, mock_redis
     # TPM 커밋분(reserved→0)과 RPM 슬롯이 되돌려졌어야 한다.
     assert len(settle_calls) == 1 and settle_calls[0][2] == 0
     assert undo_calls == [rpm_committed]
+
+
+@pytest.mark.asyncio
+async def test_rpm_committed_out_exposes_partial_commit(monkeypatch, mock_redis):
+    """check_multi_scope_rpm 이 eval 도중 취소돼도 committed_out 에는
+    그 시점까지 커밋된 키가 남아 catch-all 이 되돌릴 수 있다(10차 리뷰 —
+    예전엔 try 밖이라 부분 커밋이 고아였다).
+    """
+    from app.services.rate_limit_service import RateLimitService
+
+    committed: list[str] = []
+    svc = RateLimitService()
+    # descriptors 는 enforce 내부에서 만드는 ScopeDescriptor — 서비스 단위로
+    # committed_out 계약만 검증한다(실패 주입은 _guarded_eval 몽키패치로).
+    from app.services.rate_limit_scope import ScopeDescriptor, RateLimitScope
+
+    desc = [
+        ScopeDescriptor(scope=RateLimitScope.USER, scope_id="u-1",
+                        model_alias="m", rpm_limit=10, tpm_limit=None),
+        ScopeDescriptor(scope=RateLimitScope.TEAM, scope_id="t-1",
+                        model_alias="m", rpm_limit=10, tpm_limit=None),
+    ]
+
+    calls = 0
+
+    async def _boom_eval(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            # eval 도중 취소 — except Exception(fail-mode 정책)은 통과 못 하고
+            # 전파되는 BaseException 경로가 committed_out 노출이 필요한 실제
+            # 시나리오다(10차 리뷰).
+            raise asyncio.CancelledError()
+        # eval 성공 형태 — added=[1] 로 이번 호출이 새로 커밋한 것으로 표시.
+        return json.dumps({"allowed": True, "remaining": 9, "limit": 10,
+                           "added": [1]})
+
+    import app.services.rate_limit_service as svc_mod
+    monkeypatch.setattr(svc_mod, "_guarded_eval", _boom_eval)
+    # 스크립트 로더는 이 단위 테스트에 미로드 — eval 자체는 위 mock 이 흉내낸다.
+    monkeypatch.setattr(
+        svc_mod.LuaScriptLoader, "get", staticmethod(lambda _name: "fake-script")
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.check_multi_scope_rpm(
+            mock_redis, desc, request_id="req-x", committed_out=committed
+        )
+    # 첫 스코프는 eval 성공(ZADD) 후 두 번째에서 죽었다 — 커밋분이 노출돼야 한다.
+    assert len(committed) == 1
+    assert committed[0] == "{USER:u-1:m}:rpm"
+
+
+@pytest.mark.asyncio
+async def test_cost_committed_out_exposes_partial_commit(monkeypatch, mock_redis):
+    """reserve_cost 도 같은 계약 — eval 도중 취소 시 부분 커밋 튜플 노출."""
+    from app.services.rate_limit_service import RateLimitService
+    import app.services.rate_limit_service as svc_mod
+
+    committed: list = []
+    svc = RateLimitService()
+
+    calls = 0
+
+    async def _boom_eval(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            # eval 도중 취소 — except Exception(fail-mode 정책)은 통과 못 하고
+            # 전파되는 BaseException 경로가 committed_out 노출이 필요한 실제
+            # 시나리오다(10차 리뷰).
+            raise asyncio.CancelledError()
+        return json.dumps({"allowed": True})
+
+    monkeypatch.setattr(svc_mod, "_guarded_eval", _boom_eval)
+    monkeypatch.setattr(
+        svc_mod.LuaScriptLoader, "get", staticmethod(lambda _name: "fake-script")
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await svc.reserve_cost(
+            mock_redis,
+            user_id="u-1",
+            estimated_cost=Decimal("0.5"),
+            user_cpm_limit=Decimal("1.0"),
+            user_cph_limit=None,
+            team_id="t-1",
+            team_cpm_limit=Decimal("1.0"),
+            team_cph_limit=None,
+            committed_out=committed,
+        )
+    assert len(committed) == 1
+    assert committed[0][0] == "USER"

@@ -477,6 +477,12 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
                 f"gatewayProxy.autoscaling: minReplicas/maxReplicas 는 "
                 f"정수여야 합니다 (min={mn!r}, max={mx!r})")
         mn_i, mx_i = int(mn), int(mx)
+        if mn_i < 1:
+            # CPU 기반 HPA 의 최솟값 — scale-to-zero 는 이 HPA 가 아니므로
+            # 0/음수는 apply 단계 거절이다(10차 리뷰).
+            raise ValueError(
+                f"gatewayProxy.autoscaling: minReplicas 는 1 이상이어야 합니다 "
+                f"(min={mn})")
         if mn_i > mx_i:
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas({mn}) > "

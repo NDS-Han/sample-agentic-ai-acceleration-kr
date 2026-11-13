@@ -527,7 +527,15 @@ class CostRecorder:
                             if isinstance(team_cfg_raw, bytes)
                             else team_cfg_raw
                         )
-                        d_cap = team_cfg.get("default_user_cap_usd")
+                        if not isinstance(team_cfg, dict):
+                            # 형제 사이트(check_budget/reserve_budget)와 같은
+                            # 가드 — 비객체 캐시('"5"' 등)는 .get 이 AttributeError
+                            # 로 죽어 user deduct 전체가 lost 경로로 간다(10차).
+                            team_cfg = None
+                        d_cap = (
+                            team_cfg.get("default_user_cap_usd")
+                            if team_cfg else None
+                        )
                         if d_cap is not None:
                             user_fallback = json.dumps({
                                 "limit_usd": str(d_cap),

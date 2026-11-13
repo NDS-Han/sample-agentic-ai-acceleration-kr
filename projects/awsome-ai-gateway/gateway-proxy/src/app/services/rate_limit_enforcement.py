@@ -192,6 +192,9 @@ def _spawn_admission_unwind(
     tpm_reserved: int,
     tpm_reserved_at: float,
     cost_result,
+    cost_committed,
+    estimated_cost: Decimal,
+    budget_reservation,
     released: dict,
     user_id: str,
     team_id: str | None,
@@ -202,7 +205,11 @@ def _spawn_admission_unwind(
     취소 중엔 ``await`` 가 재취소로 잘리므로 ``_BACKGROUND_TASKS`` 에
     강참조로 추적되는 태스크가 완주한다 — ``fallback_loop.spawn_release_
     reservations`` 와 같은 패턴(6차 리뷰 m4). ``released`` 플래그는 내부
-    경로가 이미 되돌린 단계를 건너뛴다 — settle 은 멱등이 아니다(9차 리뷰).
+    경로가 되돌리기를 **시도 완료한** 단계를 건너뛴다 — settle_* 은 내부
+    예외를 삼키고 정상 반환하므로 플래그는 "성공"이 아니라 "시도됨"이다.
+    반대로 await 중간의 취소는 서버 적용 여부가 모호한 채 플래그 미설정으로
+    재시도가 비멱등 settle 을 이중 적용할 수 있다 — 좁은 창의 허용된
+    트레이드오프(10차 리뷰).
     """
 
     async def _run() -> None:
@@ -232,8 +239,26 @@ def _spawn_admission_unwind(
                     cph_window_ts=cost_result.cph_window_ts or None,
                     committed_keys=cost_result.committed_keys or None,
                 )
+            elif cost_committed and not released["cost"]:
+                # reserve_cost 가 eval 도중 취소돼 결과 객체조차 없는 경우 —
+                # 부분 커밋만 노출된 튜플 목록으로 되돌린다.
+                await svc._refund_committed_cost(
+                    redis, cost_committed, estimated_cost
+                )
         except Exception:
             logger.warning("cost_unwind_on_admission_abort_failed")
+        try:
+            if budget_reservation:
+                # reserve_budget 반환~state 주입 사이는 await 가 없어 사실상
+                # 도달 불가하지만, 예약 스펙이 있으면 settle(0) 마커 멱등으로
+                # 되돌려 창을 완전히 닫는다(10차 리뷰).
+                from app.services.budget_service import BudgetService
+
+                await BudgetService().settle_budget(
+                    redis, budget_reservation, Decimal("0")
+                )
+        except Exception:
+            logger.warning("budget_unwind_on_admission_abort_failed")
         try:
             if not released["rpm"]:
                 await svc.undo_rpm(
@@ -355,13 +380,6 @@ async def enforce_rate_limits(
 
     svc = RateLimitService()
 
-    # RPM 체크 (요청 수)
-    rpm_result = await svc.check_multi_scope_rpm(
-        redis, descriptors, request_id=request_id
-    )
-    if not rpm_result.allowed:
-        return _build_429(rpm_result, metrics)
-
     # 이후 구간에서 커밋되는 예약들 — 추정 계산·역직렬화·취소 등 어느 지점에서
     # 탈출해도(try 밖이던 _estimate_*/request_period/get_settings 포함) 커밋분이
     # 창 TTL 까지 고아가 되지 않게, 바깥 catch-all 이 아직 반납 안 한 것만
@@ -369,10 +387,25 @@ async def enforce_rate_limits(
     # 되돌린 것은 _released 플래그로 표시해 이중 환불을 막는다(9차 리뷰).
     _released = {"rpm": False, "tpm": False, "cost": False}
     cost_result = None
+    budget_reservation = None
     tpm_committed: list[ScopeDescriptor] = []
     reserved = 0
     tpm_now_sec = 0
+    estimated_cost = Decimal("0")
+    # 부분 커밋 노출 — eval 도중 취소/예외로 결과 반환 전에 탈출해도 이 목록엔
+    # 그 시점까지 커밋된 키가 남아 catch-all 이 되돌릴 수 있다(10차 리뷰 —
+    # RPM 은 ZSET 멤버, cost 는 (label,cpm_key,cph_key) 튜플).
+    rpm_committed_out: list[str] = []
+    cost_committed: list = []
     try:
+        # RPM 체크 (요청 수)
+        rpm_result = await svc.check_multi_scope_rpm(
+            redis, descriptors, request_id=request_id,
+            committed_out=rpm_committed_out,
+        )
+        if not rpm_result.allowed:
+            return _build_429(rpm_result, metrics)
+
         # TPM 체크 (Pre-reserve)
         max_output = _extract_max_output(body)
         estimated_input = _estimate_input_tokens(body)
@@ -434,6 +467,7 @@ async def enforce_rate_limits(
             # RPM/TPM 의 _key_alias 와 동일 규칙 — 모델별 한도는 모델별 카운터에.
             user_key_alias=_scope_alias[RateLimitScope.USER],
             team_key_alias=_scope_alias[RateLimitScope.TEAM],
+            committed_out=cost_committed,
         )
         if not cost_result.allowed:
             # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
@@ -543,11 +577,14 @@ async def enforce_rate_limits(
                 svc=svc,
                 descriptors=descriptors,
                 request_id=request_id,
-                rpm_committed_keys=rpm_result.committed_keys,
+                rpm_committed_keys=rpm_committed_out,
                 tpm_committed=tpm_committed,
                 tpm_reserved=reserved,
                 tpm_reserved_at=tpm_now_sec,
                 cost_result=cost_result,
+                cost_committed=cost_committed,
+                estimated_cost=estimated_cost,
+                budget_reservation=budget_reservation,
                 released=_released,
                 user_id=str(auth_context.user_id),
                 team_id=str(auth_context.team_id) if auth_context.team_id else None,

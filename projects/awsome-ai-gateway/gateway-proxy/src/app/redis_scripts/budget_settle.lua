@@ -26,6 +26,7 @@
 -- ARGV[2] = fallback config JSON ('' = 없음)              -- user D-cap 합성용
 -- ARGV[3] = index field ('' = 인덱스 미사용 — 구버전 호출자)
 -- ARGV[4] = 예약 당시 예상비용 ('' = 미상 — 구버전 호출자). 마커가 TTL 만료로
+-- ARGV[5] = done 툼스톤 TTL 초 (미지정 14400)
 --           사라진 뒤 호출됐을 때 이 값으로 델타를 복구한다.
 --
 -- Returns: JSON {settled, recovered, new_used, remaining, threshold_triggered,
@@ -109,7 +110,7 @@ local thresholds = {80, 90, 100}
 local app_clients = {}
 if config_raw then
     local ok, config = pcall(cjson.decode, config_raw)
-    if ok then
+    if ok and type(config) == 'table' then
         limit = tonumber(config.limit_usd) or 0
         if type(config.thresholds) == 'table' then
             thresholds = config.thresholds
@@ -169,7 +170,7 @@ if limit > 0 then
     local new_pct = (logical_new / limit) * 100
     local highest = nil
     for _, t in ipairs(thresholds) do
-        if old_pct < t and new_pct >= t then
+        if type(t) == 'number' and old_pct < t and new_pct >= t then
             if highest == nil or t > highest then
                 highest = t
             end

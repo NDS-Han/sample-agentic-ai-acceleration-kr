@@ -29,13 +29,17 @@ local limit = 0
 local thresholds = {80, 90, 100}
 local app_clients = {}
 if config_raw then
-    local config = cjson.decode(config_raw)
-    limit = tonumber(config.limit_usd) or 0
-    if type(config.thresholds) == 'table' then
-        thresholds = config.thresholds
-    end
-    if config.app_clients then
-        app_clients = config.app_clients
+    -- pcall + 테이블 가드 — malformed JSON·스칼라('5' 등)는 차감 전 크래시라
+    -- 방향은 안전이었으나 조용한 로그만 남긴다(10차 리뷰).
+    local ok, config = pcall(cjson.decode, config_raw)
+    if ok and type(config) == 'table' then
+        limit = tonumber(config.limit_usd) or 0
+        if type(config.thresholds) == 'table' then
+            thresholds = config.thresholds
+        end
+        if config.app_clients then
+            app_clients = config.app_clients
+        end
     end
 end
 
@@ -88,7 +92,7 @@ if limit > 0 then
     local old_pct = (used / limit) * 100
     local new_pct = (new_used / limit) * 100
     for _, t in ipairs(thresholds) do
-        if old_pct < t and new_pct >= t then
+        if type(t) == 'number' and old_pct < t and new_pct >= t then
             if highest == nil or t > highest then
                 highest = t
             end

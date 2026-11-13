@@ -9,7 +9,7 @@
 --
 -- KEYS[1] = budget:{scope}:{<scope_id>}:<period>   -- usage counter
 -- KEYS[2] = budget:config:{scope}:{<scope_id>}     -- config (same hash tag)
--- ARGV[1] = 'user' | 'team'                         -- scope label (미설정 처리 분기)
+-- ARGV[1] = 'user' | 'team' | 'client'                         -- scope label (미설정 처리 분기)
 -- ARGV[2] = fallback config JSON ('' = 없음). user scope 에서 키가 없을 때
 --           팀 기본 cap D 를 합성 config 로 주입하는 데 쓴다 (cap_u = A_u ?? D).
 --
@@ -60,8 +60,10 @@ if not cfg_raw then
 end
 
 local config = decode_or_nil(cfg_raw)
-if not config then
-    -- 잘못된 cache 는 "미설정" 과 동일 취급
+if type(config) ~= 'table' then
+    -- 디코드 실패(nil) 뿐 아니라 스칼라('5','"x"')·null 도 "미설정" 과
+    -- 동일 취급 — 비테이블 config 는 아래 config.limit_usd 인덱싱에서
+    -- eval 이 죽는다(10차 리뷰).
     return absent_config()
 end
 
@@ -94,12 +96,12 @@ local used = tonumber(redis.call('GET', usage_key) or '0')
 local remaining = limit - used
 local usage_pct = 0
 if limit > 0 then
-    usage_pct = math.floor((used / limit) * 100)
+    usage_pct = math.floor((used * 100) / limit)
 end
 
 -- D-8: limit = 0 은 정책과 무관하게 항상 차단 (A_u=0 / D=0 / app_c=0 = 명시적 차단).
 -- 예전엔 hard_block/soft_warning 분기만 걸려 throttle 정책에서 0 이 통과됐다.
-if limit == 0 then
+if limit <= 0 then
     return cjson.encode({
         allowed = false,
         reason = scope_label .. '_budget_exceeded',
@@ -167,7 +169,10 @@ end
 local throttle_active = false
 if policy == 'throttle' then
     for _, t in ipairs(thresholds) do
-        if usage_pct >= t then throttle_active = true; break end
+        if type(t) == 'number' and usage_pct >= t then
+            throttle_active = true
+            break
+        end
     end
 end
 

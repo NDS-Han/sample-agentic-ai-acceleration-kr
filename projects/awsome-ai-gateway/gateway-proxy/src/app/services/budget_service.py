@@ -118,8 +118,10 @@ def _db_policy_to_domain(db_policy) -> BudgetPolicy:
     try:
         return BudgetPolicy(raw.lower())
     except ValueError:
-        # enum 선행 롤아웃/손상 행의 미지 값 — Lua 가 미지 정책을 hard_block
-        # 으로 정규화하는 것과 같은 보수적 수렴(9차 리뷰).
+        # Lua 가 미지 정책을 hard_block 으로 정규화하는 것과 같은 보수적
+        # 수렴(9차 리뷰). PG 네이티브 ENUM 행은 ORM 하이드레이션에서 먼저
+        # StatementError 로 죽으므로 실도달은 비-enum 입력(다른 enum 클래스/
+        # 장래 str 컬럼) 한정이다(10차 리뷰).
         logger.warning("budget_unknown_policy_normalized", raw=raw)
         return BudgetPolicy.HARD_BLOCK
 

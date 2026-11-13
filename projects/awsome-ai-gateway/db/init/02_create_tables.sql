@@ -98,7 +98,10 @@ CREATE TABLE IF NOT EXISTS auth.rotation_policies (
 
 DO $$
 BEGIN
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_rotation_policies_scope ON auth.rotation_policies (scope, scope_id) WHERE is_active = true;
+        -- COALESCE 필수 — scope_id IS NULL(GLOBAL 정책)은 유니크 인덱스에서
+        -- 서로 다른 값으로 취급돼 NULL 행 중복을 못 잡는다(uq_rate_limit_configs_active
+        -- 와 같은 규칙, 10차 리뷰).
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rotation_policies_scope ON auth.rotation_policies (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE is_active = true;
 EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_rotation_policies_scope: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
 END $$;
