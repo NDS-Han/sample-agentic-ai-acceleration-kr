@@ -153,3 +153,31 @@ class TestVersioning:
     def test_extra_keys_validate_hex_length(self):
         with pytest.raises(ValueError, match="extra key 'v0'"):
             AESEncryptionService(TEST_KEY, extra_keys={"v0": "tooshort"})
+
+    @pytest.mark.parametrize("bad", ["v1:foo", "x1", "v", "v-1", "v1a", "v.1", "V1"])
+    def test_current_version_rejects_malformed(self, bad):
+        """R22-D2: 'v1:foo' 같은 ':'-포함 버전이 통과하면 암호문이 스스로
+        깨진다 — _split_version 이 첫 콜론에서 자르니 태그에 ':' 가 있으면
+        decrypt 파싱과 영영 어긋난다."""
+        with pytest.raises(ValueError, match="current_version"):
+            AESEncryptionService(TEST_KEY, current_version=bad)
+
+    @pytest.mark.parametrize("ok", ["v1", "v2", "v0", "v999"])
+    def test_current_version_accepts_valid(self, ok):
+        svc = AESEncryptionService(TEST_KEY, current_version=ok)
+        assert svc.decrypt(svc.encrypt("x")) == "x"
+        if ok != "v1":
+            assert svc.encrypt("x").startswith(ok.encode() + b":")
+
+    def test_extra_keys_version_tag_validated(self):
+        with pytest.raises(ValueError, match="extra_keys version"):
+            AESEncryptionService(
+                TEST_KEY, extra_keys={"v1:evil": OTHER_KEY}
+            )
+
+    def test_extra_keys_reject_current_version(self):
+        """같은 버전 태그에 두 키가 매핑되면 한쪽 암호문이 전부 복호화 불가."""
+        with pytest.raises(ValueError, match="must not contain the current"):
+            AESEncryptionService(
+                TEST_KEY, extra_keys={"v1": OTHER_KEY}
+            )

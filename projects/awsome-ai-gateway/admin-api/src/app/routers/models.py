@@ -7,7 +7,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.config import get_settings
 from app.core.db import get_db_session
 from app.schemas.models import (
@@ -95,7 +95,7 @@ async def list_models(
     return ModelListResponse(items=items)
 
 
-@router.post("", response_model=ModelResponse, status_code=201)
+@router.post("", response_model=ModelResponse, status_code=201, dependencies=[Depends(require_human_admin)])
 async def create_model(
     request: Request,
     body: ModelCreateRequest,
@@ -112,7 +112,7 @@ async def create_model(
     )
 
 
-@router.put("/{alias}", response_model=ModelResponse)
+@router.put("/{alias}", response_model=ModelResponse, dependencies=[Depends(require_human_admin)])
 async def update_model(
     request: Request,
     alias: str,
@@ -131,7 +131,7 @@ async def update_model(
     )
 
 
-@router.put("/{alias}/pricing", response_model=ModelResponse)
+@router.put("/{alias}/pricing", response_model=ModelResponse, dependencies=[Depends(require_human_admin)])
 async def set_pricing(
     request: Request,
     alias: str,
@@ -183,7 +183,7 @@ async def price_sync_preview(
     return await svc.preview_price_sync(session, pricing_sync_service=pricing_sync)
 
 
-@router.post("/pricing/sync-apply", response_model=PriceSyncApplyResponse)
+@router.post("/pricing/sync-apply", response_model=PriceSyncApplyResponse, dependencies=[Depends(require_human_admin)])
 async def price_sync_apply(
     request: Request,
     body: PriceSyncApplyRequest,
@@ -206,7 +206,7 @@ async def price_sync_apply(
     )
 
 
-@router.patch("/{alias}/status", response_model=ModelResponse)
+@router.patch("/{alias}/status", response_model=ModelResponse, dependencies=[Depends(require_human_admin)])
 async def patch_status(
     request: Request,
     alias: str,
@@ -237,7 +237,7 @@ async def deletion_impact(
     return await svc.deletion_impact(session, alias=alias)
 
 
-@router.delete("/{alias}", response_model=ModelDeleteResponse)
+@router.delete("/{alias}", response_model=ModelDeleteResponse, dependencies=[Depends(require_human_admin)])
 async def delete_model(
     request: Request,
     alias: str,

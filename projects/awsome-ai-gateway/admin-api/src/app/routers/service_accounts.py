@@ -517,6 +517,7 @@ async def repair_service_account_keys(
         session,
         actor_user_id=admin.user_id,
         actor_role=admin.role.value,
+        service_token_id=getattr(admin, "service_token_id", None),
         action="REPAIR_SERVICE_ACCOUNT_KEYS",
         resource_type="User",
         resource_id=str(user.id),

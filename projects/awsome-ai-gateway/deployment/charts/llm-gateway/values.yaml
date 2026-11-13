@@ -255,6 +255,10 @@ auth:
     # `virtual_key_encryption_extra_keys` 속성을 먼저 추가할 것 — 없으면
     # ExternalSecret remoteRef 실패로 app 시크릿 sync 전체가 깨진다.
     extraKeysEnabled: false
+    # 발급 암호문에 붙는 버전 태그. 로테이션은 "신키 + 신버전 + extra_keys 에
+    # 구버전 키" — 신규 키를 넣으면 버전을 v2 처럼 올리고 구키를 extra_keys
+    # {"v1": ...} 로 넘긴다. 기존 암호문이 v1: 태그면 구키는 반드시 v1 태그로.
+    keyVersion: "v1"
 
 # ----------------------------------------------------------------------------
 # Ingress (ALB on EKS)

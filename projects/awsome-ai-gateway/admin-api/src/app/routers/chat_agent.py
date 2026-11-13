@@ -29,10 +29,16 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.db import AsyncSessionLocal, get_db_session
 
-router = APIRouter(prefix="/admin/chat", tags=["AdminChat"])
+# svc 토큰 차단 — 사람 대화형 표면(세션/SQL 실행/대화 이력)은 사람 admin 전용.
+# 유출된 토큰이 /sql/execute 로 사용자 테이블을 읽는 경로를 닫는다.
+router = APIRouter(
+    prefix="/admin/chat",
+    tags=["AdminChat"],
+    dependencies=[Depends(require_human_admin)],
+)
 
 
 logger = logging.getLogger(__name__)

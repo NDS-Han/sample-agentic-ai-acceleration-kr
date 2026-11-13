@@ -204,6 +204,8 @@ imagePullSecrets:
     secretKeyRef:
       name: {{ $secretName | quote }}
       key: {{ .Values.auth.virtualKey.encryptionKeySecretKey | quote }}
+- name: VIRTUAL_KEY_ENCRYPTION_KEY_VERSION
+  value: {{ .Values.auth.virtualKey.keyVersion | quote }}
 {{- if .Values.auth.virtualKey.extraKeysEnabled }}
 - name: VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS
   valueFrom:

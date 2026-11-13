@@ -11,7 +11,7 @@ from sqlalchemy import and_, exists, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.clients import VALID_CLIENTS as _VALID_CLIENTS
 from app.core.db import get_db_session
 from app.core.exceptions import NotFoundError, ValidationError
@@ -347,7 +347,7 @@ async def get_app_policy(
     return await _build_app_policy(session, client)
 
 
-@router.patch("/{client}/default-model", response_model=AppPolicyResponse)
+@router.patch("/{client}/default-model", response_model=AppPolicyResponse, dependencies=[Depends(require_human_admin)])
 async def set_default_model(
     client: str,
     body: DefaultModelPatchRequest,
@@ -462,7 +462,7 @@ async def set_default_model(
     return await _build_app_policy(session, client)
 
 
-@router.patch("/{client}/models", response_model=AppPolicyResponse)
+@router.patch("/{client}/models", response_model=AppPolicyResponse, dependencies=[Depends(require_human_admin)])
 async def toggle_app_model(
     client: str,
     body: ModelToggleRequest,

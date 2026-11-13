@@ -317,6 +317,10 @@ class KeyService:
                 raise NotFoundError("User", str(user_id))
         else:
             await session.refresh(user, with_for_update=True)
+        if not user.is_active:
+            # 언락된 스냅샷 기준 활성→Cognito sync 등이 중간에 비활성화했을 때
+            # 죽은 자격증명을 발급하지 않도록 잠금 아래서도 재검증한다.
+            raise ValidationError("user is deactivated")
         if kind == VK_KIND_SERVICE:
             if not user.is_service_account:
                 raise ValidationError(
@@ -436,6 +440,9 @@ class KeyService:
                                 "source": "admin-api",
                                 "key_id": str(expired_id),
                                 "enc_hex": enc.hex(),
+                                "team_id": str(user.team_id)
+                                if user.team_id
+                                else None,
                             },
                         )
                     )
@@ -1006,6 +1013,9 @@ class KeyService:
                         "source": "admin-api",
                         "key_id": str(key_id),
                         "enc_hex": vk.key_value_encrypted.hex(),
+                        "team_id": str(team_id_for_index)
+                        if team_id_for_index
+                        else None,
                     },
                 )
             )

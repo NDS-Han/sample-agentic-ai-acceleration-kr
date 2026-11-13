@@ -184,7 +184,7 @@ auth:
 
 | Secret | 로테이션 권장 주기 | 방법 |
 |-------|-----------------|-----|
-| `virtual_key_encryption_key` | 1년 1회 | `extraKeys={v0: ...}` 다버전 복호화 지원 — 이전 키를 v0에 남기고 v1으로 교체. 자세히: [deployment-secrets.md](../../requirements-document/deployment-secrets.md) |
+| `virtual_key_encryption_key` | 1년 1회 | **버전 태그 정확히**: 기존 암호문은 `v1:` 태그 → 구키를 `extraKeys={"v1":"<구키 hex>"}` 에 남기고 신키+`auth.virtualKey.keyVersion=v2` 로 교체. ⚠️ 구키를 다른 태그(v0 등)에 넣으면 v1: 암호문 전부 복호화 불가 → 발급키 유령 인증. prefix 없는 레거시 암호문은 항상 현재 키로 복호화 — 구키로 암호화된 prefix-없는 행은 extra_keys 로도 못 살리니 로테이션 전 백필 고려 |
 | `nextauth_secret` | 6개월 1회 | 교체 시 모든 관리자 재로그인 필요 |
 | `jwt_jwks_cache_key` | 1년 1회 | 교체 시 서비스 재시작으로 캐시 초기화 |
 | DB `password` | 90일 1회 | Aurora `manage_master_user_password` 자동 로테이션 활용 or 수동 |

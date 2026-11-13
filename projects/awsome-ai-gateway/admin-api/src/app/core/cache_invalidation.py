@@ -138,7 +138,13 @@ class CacheInvalidationManager:
 
             raw = vk_decrypt(bytes.fromhex(enc_hex))
             h = _hl.sha256(raw.encode()).hexdigest()
-            await self._redis.delete(f"key:vk:{h}", f"key:cache:vk:{h}")
+            keys = [f"key:vk:{h}", f"key:cache:vk:{h}"]
+            team_id = (failure.context or {}).get("team_id")
+            if team_id:
+                # 역인덱스의 유령 멤버도 정리 — 읽기 경로의 EXISTS 필터가
+                # 방어하지만 셋이 불필요하게 커지는 걸 막는다.
+                await self._redis.srem(f"team:vk_hashes:{team_id}", h)
+            await self._redis.delete(*keys)
             return
         if key.startswith("pattern:"):
             await self._scan_delete(key[len("pattern:"):])

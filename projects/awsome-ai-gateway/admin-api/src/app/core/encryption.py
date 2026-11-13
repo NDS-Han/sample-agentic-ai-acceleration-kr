@@ -43,7 +43,7 @@ class AESEncryptionService:
                 코드 상수를 바꾸지 않고 env 만으로 회전할 수 있다.
         """
         self._validate_key_hex(key_hex, label="VIRTUAL_KEY_ENCRYPTION_KEY")
-        if not _VERSION_PREFIX_RE.match(f"{current_version}:".encode("ascii")):
+        if not re.fullmatch(r"v\d+", current_version):
             raise ValueError(
                 f"current_version must match 'v<N>' format: {current_version!r}"
             )
@@ -57,6 +57,10 @@ class AESEncryptionService:
         }
         if extra_keys:
             for ver, hex_val in extra_keys.items():
+                if not re.fullmatch(r"v\d+", ver):
+                    raise ValueError(
+                        f"extra_keys version must match 'v<N>' format: {ver!r}"
+                    )
                 if ver == self._current_version:
                     raise ValueError(
                         f"extra_keys must not contain the current version "

@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.db import get_db_session
 from app.schemas.rate_limits import (
     RateLimitResponse,
@@ -71,7 +71,7 @@ async def get_rate_limit_usage_trend(
     return await svc.get_usage_trend(session, scope, str(scope_id), window)
 
 
-@router.put("/user/{user_id}", response_model=RateLimitResponse)
+@router.put("/user/{user_id}", response_model=RateLimitResponse, dependencies=[Depends(require_human_admin)])
 async def set_user_rate_limit(
     request: Request,
     user_id: uuid.UUID,
@@ -92,7 +92,7 @@ async def set_user_rate_limit(
     )
 
 
-@router.put("/team/{team_id}", response_model=RateLimitResponse)
+@router.put("/team/{team_id}", response_model=RateLimitResponse, dependencies=[Depends(require_human_admin)])
 async def set_team_rate_limit(
     request: Request,
     team_id: uuid.UUID,
@@ -142,7 +142,7 @@ async def get_team_rate_limit(
     )
 
 
-@router.delete("/user/{user_id}", status_code=204)
+@router.delete("/user/{user_id}", status_code=204, dependencies=[Depends(require_human_admin)])
 async def delete_user_rate_limit(
     request: Request,
     user_id: uuid.UUID,
@@ -163,7 +163,7 @@ async def delete_user_rate_limit(
     )
 
 
-@router.delete("/team/{team_id}", status_code=204)
+@router.delete("/team/{team_id}", status_code=204, dependencies=[Depends(require_human_admin)])
 async def delete_team_rate_limit(
     request: Request,
     team_id: uuid.UUID,
@@ -184,7 +184,7 @@ async def delete_team_rate_limit(
     )
 
 
-@router.put("/global/{model_alias}", response_model=RateLimitResponse)
+@router.put("/global/{model_alias}", response_model=RateLimitResponse, dependencies=[Depends(require_human_admin)])
 async def set_global_rate_limit(
     request: Request,
     model_alias: str,

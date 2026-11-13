@@ -165,6 +165,7 @@ async def run_service_key_repair() -> None:
                 # vkrev: 실패행 재시도에 필요한 복호화 callable — VKEK 미주입/
                 # 무효 환경에선 None 으로 두고, vkrev 행은 retry_count 만 늘며
                 # extra_keys 설정 후 드레인된다.
+                _enc: AESEncryptionService | None = None
                 try:
                     _enc = AESEncryptionService(
                         settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value(),

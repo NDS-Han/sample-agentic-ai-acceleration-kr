@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.db import get_db_session
 from app.services.routing_profile_service import RoutingProfileService
 # 형식 검증은 모델 라우팅(schemas/models.py)의 검증기와 같은 규칙을 공유한다 —
@@ -65,7 +65,7 @@ async def list_routing_profiles(
     return RoutingProfileListResponse(items=[RoutingProfileItem(**i) for i in items])
 
 
-@router.put("/{client}/web-search")
+@router.put("/{client}/web-search", dependencies=[Depends(require_human_admin)])
 async def set_web_search(
     request: Request,
     client: str,
@@ -102,7 +102,7 @@ async def set_web_search(
     return result
 
 
-@router.put("/{client}/routing")
+@router.put("/{client}/routing", dependencies=[Depends(require_human_admin)])
 async def set_client_routing(
     request: Request,
     client: str,

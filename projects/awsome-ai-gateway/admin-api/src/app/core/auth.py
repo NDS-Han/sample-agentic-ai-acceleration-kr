@@ -460,6 +460,22 @@ async def require_admin_or_team_leader(user: CurrentUser = Depends(get_current_u
     return user
 
 
+async def require_human_admin(
+    admin: CurrentUser = Depends(require_admin),
+) -> CurrentUser:
+    """사람 admin(JWT) 전용 — svc 토큰 차단.
+
+    svc- 토큰은 외부 시스템의 VK 수명주기 자동화 자격증명이다. 라우팅 ARN 재기록
+    (프롬프트/응답 리디렉션 = 데이터 유출 원시 프리미티브), 예산 spent 리셋,
+    레이트리밋 해제, 전량 sync 등 자동화 용도가 없는 파괴/우회 표면에는 쓸 수
+    없다. 읽기(GET)는 열어두고 mutation 엔드포인트에 이 의존성을 쓴다 —
+    audit/settings 의 forbid_service_token_reader 와 같은 이유.
+    """
+    if admin.is_service_token:
+        raise ForbiddenError("Service tokens cannot perform this action")
+    return admin
+
+
 async def forbid_service_token_reader(
     admin: CurrentUser = Depends(require_admin),
 ) -> None:

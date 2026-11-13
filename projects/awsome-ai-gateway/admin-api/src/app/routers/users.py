@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.db import get_db_session
 from app.core.exceptions import ForbiddenError
 from app.repositories._cursor import encode_cursor
@@ -40,7 +40,7 @@ from app.schemas.users import (
 router = APIRouter(prefix="/admin", tags=["User & Team Management"])
 
 
-@router.post("/departments", response_model=DepartmentResponse, status_code=201)
+@router.post("/departments", response_model=DepartmentResponse, status_code=201, dependencies=[Depends(require_human_admin)])
 async def create_department(
     request: Request,
     body: DepartmentCreateRequest,
@@ -60,7 +60,7 @@ async def create_department(
     )
 
 
-@router.post("/teams", response_model=TeamResponse, status_code=201)
+@router.post("/teams", response_model=TeamResponse, status_code=201, dependencies=[Depends(require_human_admin)])
 async def create_team(
     request: Request,
     body: TeamCreateRequest,
@@ -78,7 +78,7 @@ async def create_team(
     )
 
 
-@router.put("/teams/{team_id}/leader", response_model=TeamResponse)
+@router.put("/teams/{team_id}/leader", response_model=TeamResponse, dependencies=[Depends(require_human_admin)])
 async def set_team_leader(
     request: Request,
     team_id: uuid.UUID,
@@ -97,7 +97,7 @@ async def set_team_leader(
     )
 
 
-@router.delete("/teams/{team_id}/leaders/{user_id}", response_model=TeamResponse)
+@router.delete("/teams/{team_id}/leaders/{user_id}", response_model=TeamResponse, dependencies=[Depends(require_human_admin)])
 async def unset_team_leader(
     request: Request,
     team_id: uuid.UUID,
@@ -119,7 +119,7 @@ async def unset_team_leader(
     )
 
 
-@router.post("/teams/{team_id}/force-reauth")
+@router.post("/teams/{team_id}/force-reauth", dependencies=[Depends(require_human_admin)])
 async def force_reauth_team(
     request: Request,
     team_id: uuid.UUID,
@@ -148,7 +148,7 @@ async def force_reauth_team(
     return {"revoked_count": revoked_count}
 
 
-@router.put("/users/{user_id}/team", response_model=UserResponse)
+@router.put("/users/{user_id}/team", response_model=UserResponse, dependencies=[Depends(require_human_admin)])
 async def transfer_user(
     request: Request,
     user_id: uuid.UUID,
@@ -232,7 +232,7 @@ async def list_team_allowed_models(
     return await svc.list_for_team(session, team_id=team_id)
 
 
-@router.put("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
+@router.put("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse, dependencies=[Depends(require_human_admin)])
 async def set_team_allowed_models(
     request: Request,
     team_id: uuid.UUID,
@@ -258,7 +258,7 @@ async def set_team_allowed_models(
     return res
 
 
-@router.delete("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse)
+@router.delete("/teams/{team_id}/allowed-models", response_model=AllowedModelsResponse, dependencies=[Depends(require_human_admin)])
 async def clear_team_allowed_models(
     request: Request,
     team_id: uuid.UUID,
@@ -303,7 +303,7 @@ async def list_team_allowed_clients(
     )
 
 
-@router.put("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+@router.put("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse, dependencies=[Depends(require_human_admin)])
 async def set_team_allowed_clients(
     request: Request,
     team_id: uuid.UUID,
@@ -326,7 +326,7 @@ async def set_team_allowed_clients(
     return res
 
 
-@router.delete("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+@router.delete("/teams/{team_id}/allowed-clients", response_model=ScopedAllowedClientsResponse, dependencies=[Depends(require_human_admin)])
 async def clear_team_allowed_clients(
     request: Request,
     team_id: uuid.UUID,
@@ -359,7 +359,7 @@ async def list_org_allowed_clients(
     )
 
 
-@router.put("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+@router.put("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse, dependencies=[Depends(require_human_admin)])
 async def set_org_allowed_clients(
     request: Request,
     org_id: uuid.UUID,
@@ -382,7 +382,7 @@ async def set_org_allowed_clients(
     return res
 
 
-@router.delete("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse)
+@router.delete("/organizations/{org_id}/allowed-clients", response_model=ScopedAllowedClientsResponse, dependencies=[Depends(require_human_admin)])
 async def clear_org_allowed_clients(
     request: Request,
     org_id: uuid.UUID,
@@ -403,7 +403,7 @@ async def clear_org_allowed_clients(
     return res
 
 
-@router.post("/users/sync-cognito")
+@router.post("/users/sync-cognito", dependencies=[Depends(require_human_admin)])
 async def sync_cognito(
     request: Request,
     admin: CurrentUser = Depends(require_admin),
@@ -495,7 +495,7 @@ def _build_cognito_sync_service(key_service=None, cache_mgr=None):
     return CognitoSyncService(client, key_service=key_service, cache_mgr=cache_mgr)
 
 
-@router.post("/users/sync-cognito/user/{username}")
+@router.post("/users/sync-cognito/user/{username}", dependencies=[Depends(require_human_admin)])
 async def sync_cognito_user(
     username: str,
     request: Request,
@@ -542,7 +542,7 @@ async def sync_cognito_user(
     }
 
 
-@router.post("/users/sync-cognito/group/{groupname:path}")
+@router.post("/users/sync-cognito/group/{groupname:path}", dependencies=[Depends(require_human_admin)])
 async def sync_cognito_group(
     groupname: str,
     request: Request,
@@ -636,7 +636,7 @@ async def get_allowed_clients(
     return AllowedClientsResponse(user_id=str(user_id), clients=await svc.get(user_id))
 
 
-@router.put("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse)
+@router.put("/users/{user_id}/allowed-clients", response_model=AllowedClientsResponse, dependencies=[Depends(require_human_admin)])
 async def set_allowed_clients(
     request: Request,
     user_id: uuid.UUID,
@@ -677,7 +677,7 @@ async def set_allowed_clients(
     return AllowedClientsResponse(user_id=str(user_id), clients=clients)
 
 
-@router.delete("/users/{user_id}/allowed-clients", status_code=204)
+@router.delete("/users/{user_id}/allowed-clients", status_code=204, dependencies=[Depends(require_human_admin)])
 async def clear_allowed_clients(
     request: Request,
     user_id: uuid.UUID,
@@ -728,7 +728,7 @@ async def get_user_allowed_models(
     )
 
 
-@router.put("/users/{user_id}/allowed-models", response_model=UserAllowedModelsResponse)
+@router.put("/users/{user_id}/allowed-models", response_model=UserAllowedModelsResponse, dependencies=[Depends(require_human_admin)])
 async def set_user_allowed_models(
     request: Request,
     user_id: uuid.UUID,
@@ -759,7 +759,7 @@ async def set_user_allowed_models(
     return UserAllowedModelsResponse(user_id=str(user_id), model_aliases=aliases)
 
 
-@router.delete("/users/{user_id}/allowed-models", status_code=204)
+@router.delete("/users/{user_id}/allowed-models", status_code=204, dependencies=[Depends(require_human_admin)])
 async def clear_user_allowed_models(
     request: Request,
     user_id: uuid.UUID,

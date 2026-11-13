@@ -93,6 +93,27 @@ class TestIssueKey:
         assert result.key_prefix == result.virtual_key[:11]
         assert result.status == KeyStatus.ACTIVE
 
+    async def test_issue_key_rejects_deactivated_user_post_lock(
+        self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
+    ):
+        """R22: 언락된 스냅샷 기준 활성 → Cognito sync 가 중간에 비활성화해도
+        잠금 아래 재검증으로 죽은 자격증명 발급을 차단한다."""
+        user_id = uuid.uuid4()
+        dead = _stub_user(user_id)
+        dead.is_active = False
+
+        with patch("app.services.key_service.KeyRepository") as MockRepo, \
+             patch("app.services.key_service.UserRepository") as MockUserRepo:
+            self._mock_repo(MockRepo)
+            MockUserRepo.return_value.get_user = AsyncMock(return_value=dead)
+
+            from app.core.exceptions import ValidationError
+
+            with pytest.raises(ValidationError, match="deactivated"):
+                await key_service.issue_key(
+                    mock_session, user_id=user_id, actor=admin_user
+                )
+
     async def test_issue_key_expires_existing_active_keys(
         self, key_service: KeyService, mock_session: AsyncMock, admin_user: CurrentUser
     ):
