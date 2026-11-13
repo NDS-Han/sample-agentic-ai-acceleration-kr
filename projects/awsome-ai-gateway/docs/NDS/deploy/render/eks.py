@@ -461,7 +461,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     chart_asg = ((chart_vals.get("gatewayProxy") or {}).get("autoscaling") or {})
     merged = {**chart_asg, **env_asg, **gen_asg}
     mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
-    if merged.get("enabled") and mn is not None and mx is not None:
+    if merged.get("enabled") and (mn is not None or mx is not None):
         def _is_int(v) -> bool:
             # int() 절삭을 걸러야 한다 — minReplicas: 2.9 는 int(2.9)=2 로
             # 검증을 통과하지만 k8s API(HPA integer)에서 거절된다(8차 리뷰).
@@ -470,20 +470,22 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             if isinstance(v, bool) or not isinstance(v, int):
                 return False
             return True
-        if not (_is_int(mn) and _is_int(mx)):
-            # 차트 측 유효성은 없다(values.schema.json 부재) — 비수치는 그대로
-            # 렌더돼 kubectl apply 에서야 터지므로 render 시점에 잡는다.
-            raise ValueError(
-                f"gatewayProxy.autoscaling: minReplicas/maxReplicas 는 "
-                f"정수여야 합니다 (min={mn!r}, max={mx!r})")
-        mn_i, mx_i = int(mn), int(mx)
-        if mn_i < 1:
+        # 각 필드는 단독 선언돼도 검증한다 — 어느 쪽이든 비수치/범위 밖이면
+        # 렌더는 통과하고 kubectl apply 에서야 터진다(11차 리뷰).
+        for name, v in (("minReplicas", mn), ("maxReplicas", mx)):
+            if v is None:
+                continue
+            if not _is_int(v):
+                raise ValueError(
+                    f"gatewayProxy.autoscaling: {name} 는 "
+                    f"정수여야 합니다 ({name}={v!r})")
+        if mn is not None and int(mn) < 1:
             # CPU 기반 HPA 의 최솟값 — scale-to-zero 는 이 HPA 가 아니므로
             # 0/음수는 apply 단계 거절이다(10차 리뷰).
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas 는 1 이상이어야 합니다 "
                 f"(min={mn})")
-        if mn_i > mx_i:
+        if mn is not None and mx is not None and int(mn) > int(mx):
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas({mn}) > "
                 f"maxReplicas({mx}) — deploy.sizing/capacity_tier 와 "

@@ -138,7 +138,9 @@ class Settings(BaseSettings):
     # (보수적 방향 — 실비 미반영이 아니라 과대 계상). 파드 크래시로 정산 없이
     # 사라진 예약의 정리 시한이기도 하다 — 마커가 지워져도 카운터의 누수분은
     # 월 롤오버까지 남으므로, 이 값은 "누수 마커의 추적 가능 기간"이다.
-    budget_reservation_ttl_seconds: int = 14400  # 4h
+    # ge=1 — 0/음수 TTL 은 예약 마커·settle 툼스톤의 SET ... EX 에서 Lua 가
+    # 커밋 후 크래시해 예약 누수/이중정산 부분쓰기가 된다(11차 리뷰).
+    budget_reservation_ttl_seconds: int = Field(default=14400, ge=1)  # 4h
 
     # 월예산 선예약의 worst-case 추정에 쓰는 출력 상한(토큰). 클라이언트의
     # max_tokens 를 그대로 쓰면 비싼 모델(Opus 출력 $75/MTok)에서 한 번의

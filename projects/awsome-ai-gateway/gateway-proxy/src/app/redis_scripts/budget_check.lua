@@ -76,6 +76,11 @@ if scope_label == 'team'
 end
 
 local limit = tonumber(config.limit_usd) or 0
+-- NaN/±Inf 는 아래 비교를 모두 거짓으로 통과해 cjson.encode 직전까지
+-- 도달한다 — 비유한 limit 는 0(차단)으로 수렴(11차 리뷰).
+if limit ~= limit or limit == math.huge or limit == -math.huge then
+    limit = 0
+end
 local policy = config.policy or 'hard_block'
 if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' then
     -- 미지 정책은 어느 차단 분기도 안 타 통과(fail-open)가 되므로 보수적으로
@@ -96,7 +101,10 @@ local used = tonumber(redis.call('GET', usage_key) or '0')
 local remaining = limit - used
 local usage_pct = 0
 if limit > 0 then
-    usage_pct = math.floor((used * 100) / limit)
+    -- Python DB 폴백(_evaluate_layer)과 같은 divide-first 순서 —
+    -- int(used/limit*100). 곱셈-먼저는 정수 경계에서 1-ULP 차이로
+    -- Redis/DB 판정이 갈린다(11차 리뷰 — 곱셈-먼저 변경은 회귀였다).
+    usage_pct = math.floor((used / limit) * 100)
 end
 
 -- D-8: limit = 0 은 정책과 무관하게 항상 차단 (A_u=0 / D=0 / app_c=0 = 명시적 차단).

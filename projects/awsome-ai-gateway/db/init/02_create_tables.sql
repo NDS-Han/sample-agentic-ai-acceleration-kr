@@ -101,6 +101,21 @@ BEGIN
         -- COALESCE 필수 — scope_id IS NULL(GLOBAL 정책)은 유니크 인덱스에서
         -- 서로 다른 값으로 취급돼 NULL 행 중복을 못 잡는다(uq_rate_limit_configs_active
         -- 와 같은 규칙, 10차 리뷰).
+        -- ⚠️ 업그레이드 경로: 같은 이름의 구 정의((scope, scope_id) — COALESCE 없음)가
+        --    있으면 IF NOT EXISTS 가 조용히 스킵해 새 정의가 영구 미적용된다.
+        --    indexdef 를 비교해 stale 하면 drop 후 재생성한다(11차 리뷰 MAJOR).
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'auth' AND indexname = 'idx_rotation_policies_scope'
+              -- to_regclass 는 부재 시 NULL — regclass 캐스트는 평가 순서에
+              -- 관계없이 인덱스가 없으면 여기서 죽는다(11차 리뷰).
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('auth.idx_rotation_policies_scope')),
+                  ''
+              ) NOT LIKE '%COALESCE%'
+        ) THEN
+            DROP INDEX auth.idx_rotation_policies_scope;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_rotation_policies_scope ON auth.rotation_policies (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid)) WHERE is_active = true;
 EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_rotation_policies_scope: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
@@ -1121,25 +1136,38 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_ts_id ON audit.audit_logs (timestamp D
 -- 리뷰). 인덱스가 모두 있으면 아무 출력도 내지 않는다.
 DO $$
 DECLARE
-    expected text[] := ARRAY[
-        'idx_rotation_policies_scope',
-        'uq_budget_configs_active',
-        'idx_budget_usages_unique',
-        'uq_rate_limit_configs_active',
-        'idx_downgrade_policies_unique_active',
-        'idx_roi_aggregations_unique',
-        'idx_productivity_events_idempotency',
-        'uq_teams_dept_name',
-        'uq_departments_org_name'
-    ];
     missing text[];
 BEGIN
-    SELECT array_agg(n) INTO missing
-    FROM unnest(expected) AS n
+    -- (스키마, 인덱스) 쌍 — indexname 만 보면 다른 스키마의 동명 인덱스가
+    -- 진짜 누락을 가린다(11차 리뷰).
+    SELECT array_agg(s || '.' || n) INTO missing
+    FROM (VALUES
+        ('auth',  'idx_rotation_policies_scope'),
+        ('budget','uq_budget_configs_active'),
+        ('budget','idx_budget_usages_unique'),
+        ('model', 'uq_rate_limit_configs_active'),
+        ('budget','idx_downgrade_policies_unique_active'),
+        ('usage', 'idx_roi_aggregations_unique'),
+        ('usage', 'idx_productivity_events_idempotency'),
+        ('auth',  'uq_teams_dept_name'),
+        ('auth',  'uq_departments_org_name')
+    ) AS pair(s, n)
     WHERE NOT EXISTS (
-        SELECT 1 FROM pg_indexes WHERE indexname = n
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = pair.s AND indexname = pair.n
     );
     IF missing IS NOT NULL THEN
         RAISE WARNING 'unique indexes missing (중복 데이터로 가드 스킵 가능): % — 중복 정리 후 재배포하면 인덱스가 생성됩니다', missing;
+    END IF;
+    -- 이름은 있어도 정의가 낡은 경우도 감지한다 — idx_rotation_policies_scope
+    -- 는 COALESCE 없는 구 정의가 업그레이드 경로에서 IF NOT EXISTS 에 걸려
+    -- 잔존할 수 있다(11차 리뷰 MAJOR). 이 경우도 "생성 안 됨" 과 동일하게
+    -- remediation(중복 정리 후 재배포)이 필요하다.
+    IF EXISTS (
+        SELECT 1 FROM pg_indexes
+        WHERE schemaname = 'auth' AND indexname = 'idx_rotation_policies_scope'
+          AND indexdef NOT LIKE '%COALESCE%'
+    ) THEN
+        RAISE WARNING 'auth.idx_rotation_policies_scope: stale definition (COALESCE 없는 구 정의 — 중복 정리 후 재배포하면 새 정의로 재생성됩니다)';
     END IF;
 END $$;

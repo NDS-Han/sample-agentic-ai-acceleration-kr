@@ -145,6 +145,11 @@ class RateLimitService:
         window_ms: int = _DEFAULT_WINDOW_MS,
         committed_out: list[str] | None = None,
     ) -> RateLimitResult:
+        # committed_out 계약 — 이 호출 전용의 비어있는 리스트여야 한다.
+        # 거절 경로가 내부 환불 후 clear() 하므로 다른 호출의 항목이 섞여 있으면
+        # 그쪽 되돌리기 대상까지 지워진다. RPM 의 ZREM 되돌리기는 멱등이라
+        # 내부 환불 후에도 일부러 비우지 않는다 — 되돌리기 실패분을 catch-all 이
+        # 재시도할 수 있게 키를 남겨둔다(11차 리뷰 — TPM/cost 와 의도적 비대칭).
         """여러 스코프의 RPM을 **스코프별 1회 Lua 호출**로 체크.
 
         디스크립터 순서 = fast-fail 순서 (USER → TEAM → GLOBAL).
@@ -303,7 +308,8 @@ class RateLimitService:
            eval 이 예외로 죽은 스코프는 커밋 여부를 모르므로 되돌리지 않는다
            (루아 스크립트가 Phase2 INCRBY 까지 간 뒤 실패할 경로가 없음).
 
-        ``committed_out`` 이 주어지면 통과해 커밋된 descriptor 를 append 한다 —
+        ``committed_out`` 은 이 호출 전용의 비어있는 리스트여야 한다 — 거절
+        경로는 내부 환불 후 clear() 한다. 통과해 커밋된 descriptor 를 append —
            호출자가 *다음* 단계(비용 예약) 거절 시 이 목록으로 TPM 을 되돌린다.
         """
         effective = [d for d in descriptors if d.tpm_limit and d.tpm_limit > 0]
@@ -562,6 +568,8 @@ class RateLimitService:
         user_key_alias: str | None = None,
         team_key_alias: str | None = None,
         committed_out: list[tuple[str, str, str]] | None = None,
+        # committed_out 은 이 호출 전용의 비어있는 리스트 — 거절/fail-closed
+        # 경로가 내부 환불 후 clear() 한다(계약은 TPM 과 동일, 11차 리뷰).
     ) -> CostLimitResult:
         """CPM/CPH 사전 예약 (USER + TEAM) — **스코프별 1회 Lua 호출**.
 
@@ -701,8 +709,13 @@ class RateLimitService:
 
         Lua 예약 경로가 EXPIRE(cpm 120s / cph 7200s)를 걸었으므로 여기서는
         INCRBYFLOAT 만 — TTL 을 다시 쓰면 남은 창보다 늘어날 수 있다.
+
+        ``reserved_cost <= 0`` 이면 조기 반환 — 0/음수 예약은 Lua 쪽
+        ``cost > 0`` 게이트에서 아무것도 커밋하지 않는데, -0 INCRBYFLOAT 는
+        존재하지 않던 키를 TTL 없는 "0" 으로 만들고, 음수(손상된 음의 단가)
+        는 카운터를 부풀려 한도가 늘어나는 방향으로 산다(11차 리뷰).
         """
-        if not committed:
+        if not committed or reserved_cost <= 0:
             return
         try:
             pipe = redis.pipeline(transaction=False)

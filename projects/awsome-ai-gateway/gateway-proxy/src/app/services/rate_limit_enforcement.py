@@ -209,7 +209,9 @@ def _spawn_admission_unwind(
     예외를 삼키고 정상 반환하므로 플래그는 "성공"이 아니라 "시도됨"이다.
     반대로 await 중간의 취소는 서버 적용 여부가 모호한 채 플래그 미설정으로
     재시도가 비멱등 settle 을 이중 적용할 수 있다 — 좁은 창의 허용된
-    트레이드오프(10차 리뷰).
+    트레이드오프(10차 리뷰). ``_run`` 의 카테고리별 except 는 BaseException
+    — 이 태스크 자체가 취소돼도 한 카테고리 실패가 나머지 환불을 중단시키지
+    않게 한다(11차 리뷰).
     """
 
     async def _run() -> None:
@@ -219,7 +221,7 @@ def _spawn_admission_unwind(
                     redis, tpm_committed, tpm_reserved, 0,
                     reserved_at=tpm_reserved_at,
                 )
-        except Exception:
+        except BaseException:
             logger.warning("tpm_unwind_on_admission_abort_failed")
         try:
             if (
@@ -245,7 +247,7 @@ def _spawn_admission_unwind(
                 await svc._refund_committed_cost(
                     redis, cost_committed, estimated_cost
                 )
-        except Exception:
+        except BaseException:
             logger.warning("cost_unwind_on_admission_abort_failed")
         try:
             if budget_reservation:
@@ -257,7 +259,7 @@ def _spawn_admission_unwind(
                 await BudgetService().settle_budget(
                     redis, budget_reservation, Decimal("0")
                 )
-        except Exception:
+        except BaseException:
             logger.warning("budget_unwind_on_admission_abort_failed")
         try:
             if not released["rpm"]:
@@ -265,7 +267,7 @@ def _spawn_admission_unwind(
                     redis, descriptors, request_id,
                     committed_keys=rpm_committed_keys,
                 )
-        except Exception:
+        except BaseException:
             logger.warning("rpm_unwind_on_admission_abort_failed")
 
     from app.services.budget_service import _BACKGROUND_TASKS

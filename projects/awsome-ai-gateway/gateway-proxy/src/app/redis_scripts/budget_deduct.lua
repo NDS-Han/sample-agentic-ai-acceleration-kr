@@ -34,6 +34,11 @@ if config_raw then
     local ok, config = pcall(cjson.decode, config_raw)
     if ok and type(config) == 'table' then
         limit = tonumber(config.limit_usd) or 0
+        -- NaN/±Inf 는 아래 비교를 모두 거짓으로 통과해 cjson.encode 직전까지
+        -- 도달한다 — 비유한 limit 는 0(차단)으로 수렴(11차 리뷰).
+        if limit ~= limit or limit == math.huge or limit == -math.huge then
+            limit = 0
+        end
         if type(config.thresholds) == 'table' then
             thresholds = config.thresholds
         end
@@ -89,10 +94,13 @@ end
 local triggered = cjson.null
 local highest = nil
 if limit > 0 then
-    local old_pct = (used / limit) * 100
-    local new_pct = (new_used / limit) * 100
+    -- 교차 비교는 곱셈 형태로 — check.lua 의 prior*100 < limit*t 와 같은
+    -- 식이다. 나눗셈-먼저 형태는 정확한 경계값에서 1-ULP 차이로 판정이
+    -- 갈린다(11차 리뷰).
     for _, t in ipairs(thresholds) do
-        if type(t) == 'number' and old_pct < t and new_pct >= t then
+        if type(t) == 'number'
+            and used * 100 < limit * t
+            and new_used * 100 >= limit * t then
             if highest == nil or t > highest then
                 highest = t
             end

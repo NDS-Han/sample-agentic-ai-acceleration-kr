@@ -112,6 +112,11 @@ if config_raw then
     local ok, config = pcall(cjson.decode, config_raw)
     if ok and type(config) == 'table' then
         limit = tonumber(config.limit_usd) or 0
+        -- NaN/±Inf 는 아래 비교를 모두 거짓으로 통과해 cjson.encode 직전까지
+        -- 도달한다 — 비유한 limit 는 0(차단)으로 수렴(11차 리뷰).
+        if limit ~= limit or limit == math.huge or limit == -math.huge then
+            limit = 0
+        end
         if type(config.thresholds) == 'table' then
             thresholds = config.thresholds
         end
@@ -151,6 +156,9 @@ redis.call('DEL', marker_key)
 -- TTL 은 마커 TTL(ARGV[5], 미지정 시 4h)과 같게 둔다 — 짧으면 툼스톤 소멸
 -- 뒤 늦은 중복 settle 이 복구 분기로 들어와 실비를 재적용한다(R23 r2 N-4).
 local tomb_ttl = tonumber(ARGV[5]) or 14400
+-- ttl <= 0 은 SET ... EX 에서 델타 적용·마커 삭제 후에 크래시해 경합 settle 이
+-- 복구 경로로 재적용(이중정산)된다 — 설정 오류는 큰 TTL 로 수렴(11차 리뷰).
+if tomb_ttl <= 0 then tomb_ttl = 14400 end
 redis.call('SET', settled_key, ARGV[1], 'EX', tomb_ttl)
 if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
     redis.call('HDEL', KEYS[5], ARGV[3])  -- 인덱스는 베스트에포트 — 마커가 진실
@@ -166,11 +174,14 @@ local logical_new = logical_old + actual
 
 local triggered = cjson.null
 if limit > 0 then
-    local old_pct = (logical_old / limit) * 100
-    local new_pct = (logical_new / limit) * 100
+    -- 교차 비교는 곱셈 형태로 — check.lua 의 prior*100 < limit*t 와 같은
+    -- 식이다. (old/limit)*100 처럼 나눗셈을 먼저 하면 정확한 경계값에서
+    -- 1-ULP 차이로 check 경로와 판정이 갈린다(11차 리뷰).
     local highest = nil
     for _, t in ipairs(thresholds) do
-        if type(t) == 'number' and old_pct < t and new_pct >= t then
+        if type(t) == 'number'
+            and logical_old * 100 < limit * t
+            and logical_new * 100 >= limit * t then
             if highest == nil or t > highest then
                 highest = t
             end

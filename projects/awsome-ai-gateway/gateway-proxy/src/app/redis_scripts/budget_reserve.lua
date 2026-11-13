@@ -38,6 +38,9 @@ local scope_label = ARGV[1]
 local estimate = tonumber(ARGV[2]) or 0
 if estimate < 0 then estimate = 0 end  -- 음수 추정치가 usage 를 내리는 것 방어
 local marker_ttl = tonumber(ARGV[4]) or 14400
+-- ttl <= 0 은 아래 SET/EXPIRE 가 커밋 후에 크래시해 마커·인덱스 없는 고아
+-- 예약(영구 resvsum 부풀림)을 남긴다 — 설정 오류는 큰 TTL 로 수렴시킨다.
+if marker_ttl <= 0 then marker_ttl = 14400 end
 
 local function decode_or_nil(s)
     if not s then return nil end
@@ -129,6 +132,11 @@ if scope_label == 'team'
 end
 
 local limit = tonumber(config.limit_usd) or 0
+-- NaN/±Inf 는 아래 비교를 모두 거짓으로 통과해 cjson.encode 직전까지
+-- 도달한다 — 비유한 limit 는 0(차단)으로 수렴(11차 리뷰).
+if limit ~= limit or limit == math.huge or limit == -math.huge then
+    limit = 0
+end
 local policy = config.policy or 'hard_block'
 if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' then
     -- 미지 정책(admin enum 이 Lua 지원보다 먼저 나가는 롤아웃 창, 오타)은

@@ -522,11 +522,16 @@ class CostRecorder:
                 if not await redis.exists(user_config_key):
                     team_cfg_raw = await redis.get(team_config_key)
                     if team_cfg_raw:
-                        team_cfg = json.loads(
-                            team_cfg_raw.decode()
-                            if isinstance(team_cfg_raw, bytes)
-                            else team_cfg_raw
-                        )
+                        try:
+                            team_cfg = json.loads(
+                                team_cfg_raw.decode()
+                                if isinstance(team_cfg_raw, bytes)
+                                else team_cfg_raw
+                            )
+                        except ValueError:
+                            # 깨진 JSON 도 lost 경로로 보내면 rebuild 가 일시
+                            # 과대계상한다 — 형제 사이트와 같은 정규화(11차).
+                            team_cfg = None
                         if not isinstance(team_cfg, dict):
                             # 형제 사이트(check_budget/reserve_budget)와 같은
                             # 가드 — 비객체 캐시('"5"' 등)는 .get 이 AttributeError
