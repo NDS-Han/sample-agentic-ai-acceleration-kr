@@ -235,8 +235,13 @@ Step "Installing project and build tools into the venv"
 if ($LASTEXITCODE -ne 0) { throw "pip upgrade failed" }
 # pip builds the poetry-core project directly; no Poetry install needed.
 # Install the project from its nested directory (pyproject.toml lives there).
-& $Py -m pip install @PipArgs $ProjectDir "pyinstaller>=6.11"
+# 의존성은 requirements.lock.txt(버전+sha256 핀)로 설치하고, 프로젝트 자체는
+# --no-deps 로 넣는다 — $ProjectDir 직접 설치는 pyproject 의 >= 스펙을 재해석해
+# 빌드마다 다른 버전이 들어간다(공급망·재현성, R33).
+& $Py -m pip install @PipArgs --require-hashes -r "$ProjectDir\requirements.lock.txt"
 if ($LASTEXITCODE -ne 0) { throw "dependency install failed" }
+& $Py -m pip install @PipArgs --no-deps $ProjectDir
+if ($LASTEXITCODE -ne 0) { throw "project install failed" }
 
 # ---------------------------------------------------------------------------
 # Load packaging\site-config.json (guideline 1-1), if present. This is the single
