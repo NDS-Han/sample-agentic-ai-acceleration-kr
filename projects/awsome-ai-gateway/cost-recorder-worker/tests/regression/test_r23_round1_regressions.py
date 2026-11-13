@@ -198,12 +198,12 @@ def test_aggregation_sql_has_only_declared_bind_params():
 
     expected = {
         "AGG": {"tz", "start", "end"},
-        "BACKFILL": {"tz", "today_local"},
+        "EARLIEST": {"tz"},
         "MISSING": {"tz", "lookback_start", "lookback_start_date", "today_start"},
     }
     for name, sql in [
         ("AGG", da._AGG_SQL),
-        ("BACKFILL", da._BACKFILL_SQL),
+        ("EARLIEST", da._EARLIEST_DAY_SQL),
         ("MISSING", da._MISSING_DATES_SQL),
     ]:
         assert set(text(sql)._bindparams.keys()) == expected[name]

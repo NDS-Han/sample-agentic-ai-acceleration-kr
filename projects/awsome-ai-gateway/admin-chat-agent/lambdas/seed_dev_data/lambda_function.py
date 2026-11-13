@@ -39,6 +39,10 @@ import psycopg2.extras
 DB_HOST = os.environ["DB_HOST"]
 DB_NAME = os.environ.get("DB_NAME", "gateway")
 DB_SECRET_ARN = os.environ["DB_SECRET_ARN"]  # gateway-user (쓰기)
+# 쓰기 롤로 합성 usage 를 실테이블에 넣는 함수 — prod 배포/호출을 방지하기 위해
+# ENVIRONMENT 가 명시적으로 dev 가 아니면 모든 action 을 거부한다.
+if os.environ.get("ENVIRONMENT") != "dev":
+    raise RuntimeError("seed_dev_data is dev-only (ENVIRONMENT != 'dev')")
 SYNTH_PREFIX = "synthetic-"
 
 MODELS = [

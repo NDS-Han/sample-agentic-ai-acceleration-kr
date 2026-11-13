@@ -337,6 +337,11 @@ class BatchFlusher:
                 # ⚠️ budget_usages 는 **가산** UPSERT 다. 재처리된 entry 를 걸러내지 않으면
                 #    사용자의 기록 사용액이 영구히 두 배가 된다(_filter_replays 주석 참조).
                 fresh = await _filter_replays(session, entries)
+                filtered = len(entries) - len(fresh)
+                if filtered and self._metrics:
+                    # replay 스톰(dup XADD·이중 배달 버그)은 로그 한 줄로만 보이던
+                    # 영역 — 카운터로 올려 대시보드에서 감지 가능하게 한다.
+                    self._metrics.replays_filtered.add(filtered)
                 if not fresh:
                     # 전량 replay — usage_logs 는 이미 커밋됐다. 여기서 조기 반환하면
                     # 전 트랜잭션 커밋 후 카운터/알림 단계에서 죽었던 배치의 daily

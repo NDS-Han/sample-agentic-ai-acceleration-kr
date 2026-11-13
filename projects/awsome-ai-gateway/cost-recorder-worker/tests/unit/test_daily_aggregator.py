@@ -26,7 +26,6 @@ import pytest
 
 from worker.daily_aggregator import (
     _AGG_SQL,
-    _BACKFILL_SQL,
     aggregate_yesterday,
 )
 
@@ -87,11 +86,69 @@ def test_agg_sql_updates_all_non_key_columns():
         assert re.search(rf"{col}\s*=\s*EXCLUDED\.{col}", conflict), col
 
 
-def test_backfill_still_conflict_safe_and_same_grain():
-    """첫 기동 백필은 빈 테이블에만 도는 경로 — DO NOTHING 유지 + 같은 입도."""
-    assert "ON CONFLICT" in _BACKFILL_SQL
-    group_by = _BACKFILL_SQL.split("GROUP BY")[-1]
-    assert "team_id" not in group_by and "dept_id" not in group_by
+@pytest.mark.asyncio
+async def test_startup_backfill_chunks_per_day_and_commits(monkeypatch):
+    """기동 백필은 단일 거대 INSERT 가 아니라 누락 날짜별 UPSERT+commit —
+    어느 날짜에서 죽어도 진행분이 남아 다음 기동이 이어간다(R30 F3)."""
+    from datetime import date
+
+    from worker.daily_aggregator import backfill_if_empty
+
+    s = MagicMock()
+    s.reporting_timezone = "Asia/Seoul"
+    import worker.daily_aggregator as mod
+    monkeypatch.setattr(mod, "get_settings", lambda: s)
+
+    session = AsyncMock()
+    calls: list[str] = []
+
+    async def _execute(stmt, params=None):
+        sql = str(stmt)
+        r = MagicMock()
+        if "MIN(" in sql:
+            r.scalar_one_or_none = lambda: date(2026, 3, 1)
+        elif "NOT IN" in sql:
+            r.__iter__ = lambda self=None: iter(
+                [(date(2026, 3, 1),), (date(2026, 3, 3),)]
+            )
+        else:
+            r.rowcount = 5
+        calls.append(sql)
+        return r
+
+    session.execute = AsyncMock(side_effect=_execute)
+    total = await backfill_if_empty(session)
+
+    assert total == 10
+    agg_calls = [c for c in calls if "INSERT INTO usage.daily_aggregates" in c]
+    assert len(agg_calls) == 2  # 누락 2일 각각 — 거대 단일 INSERT 아님
+    assert "DO UPDATE" in agg_calls[0]
+    assert session.commit.await_count == 2  # 날짜당 commit — 재개 안전
+
+
+@pytest.mark.asyncio
+async def test_startup_backfill_empty_history_is_noop(monkeypatch):
+    """usage_logs 가 비어 있으면 아무 INSERT 도 하지 않는다."""
+    s = MagicMock()
+    s.reporting_timezone = "Asia/Seoul"
+    import worker.daily_aggregator as mod
+    monkeypatch.setattr(mod, "get_settings", lambda: s)
+
+    from worker.daily_aggregator import backfill_if_empty
+
+    session = AsyncMock()
+    calls: list[str] = []
+
+    async def _execute(stmt, params=None):
+        calls.append(str(stmt))
+        r = MagicMock()
+        r.scalar_one_or_none = lambda: None
+        return r
+
+    session.execute = AsyncMock(side_effect=_execute)
+    total = await backfill_if_empty(session)
+    assert total == 0
+    assert not any("INSERT INTO usage.daily_aggregates" in c for c in calls)
 
 
 @pytest.mark.asyncio

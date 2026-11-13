@@ -65,6 +65,13 @@ class WorkerMetrics:
             description="Times the stream head was found trimmed ahead of last-delivered-id",
             unit="1",
         )
+        # 커밋/XACK 경합 재배달로 걸러진 entry 수 — replay 스톰(dup XADD·이중
+        # 배달 버그)은 로그만 남고 대시보드에선 보이지 않았다. 0 이어야 정상.
+        self.replays_filtered = self._meter.create_counter(
+            "cost_recorder_replays_filtered_total",
+            description="Entries filtered as already-recorded replays",
+            unit="1",
+        )
         # 임계 알림 PUBLISH 가 구독자 0에 발행돼 유실된 횟수 — pub/sub 은 재생이
         # 없으므로 이 카운터가 오른 알림은 어디에도 기록되지 않는다.
         self.threshold_publish_lost = self._meter.create_counter(

@@ -196,7 +196,9 @@ def validate_sql(sql: str) -> sqlglot.Expression:
         r"(?:next|set|curr)val|txid_.*|"                # 시퀀스/트랜잭션 부수효과
         r"http_.*|curl.*|"                              # 네트워크 egress 확장
         r"aws_(?:lambda|s3|kms|sepm|cfn|ddb|sns|sqs).*|"
-        r"cron\..*"                                     # Aurora 확장(설치 시 부수효과)
+        r"cron\..*|"                                    # Aurora 확장(설치 시 부수효과)
+        r"inet_server.*|version|current_query|"         # 서버 내부정보/실행쿼리 에코
+        r"to_reg(?:class|namespace|role|type|proc)"     # 카탈로그 존재 탐색
         r")$",
         re.IGNORECASE,
     )

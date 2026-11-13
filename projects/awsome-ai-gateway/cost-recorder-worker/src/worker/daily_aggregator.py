@@ -102,42 +102,10 @@ ON CONFLICT (date, user_id, model_alias) DO UPDATE SET
 """
 
 
-_BACKFILL_SQL = """
-INSERT INTO usage.daily_aggregates
-  (date, user_id, team_id, dept_id, model_alias,
-   input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens,
-   total_tokens, total_cost_usd, request_count)
-SELECT
-  DATE((requested_at AT TIME ZONE :tz)::timestamp) AS date,
-  user_id,
-  (array_agg(team_id ORDER BY requested_at DESC))[1],
-  (array_agg(dept_id ORDER BY requested_at DESC))[1],
-  model_alias,
-  SUM(input_tokens),
-  SUM(output_tokens),
-  SUM(cache_creation_tokens),
-  SUM(cache_read_tokens),
-  SUM(input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens),
-  SUM(cost_usd),
-  -- _AGG_SQL 과 같은 정의 — 백필만 COUNT(*) 면 최근 창 밖 날짜의
-  -- request_count 가 Redis requests 카운터 정의와 어긋난다(R23 r3 N-7).
-  COUNT(*) FILTER (
-      WHERE input_tokens + output_tokens
-            + cache_creation_tokens + cache_read_tokens > 0
-         OR cost_usd > 0
-  )
-FROM usage.usage_logs
-WHERE (requested_at AT TIME ZONE :tz)::date < :today_local
-GROUP BY
-  DATE((requested_at AT TIME ZONE :tz)::timestamp),
-  user_id, model_alias
-ON CONFLICT (date, user_id, model_alias) DO NOTHING;
+#: 기동 백필의 시작점 — usage_logs 의 가장 오래된 날짜(로컬 타임존 기준).
+_EARLIEST_DAY_SQL = """
+SELECT MIN((requested_at AT TIME ZONE :tz)::date) FROM usage.usage_logs
 """
-
-
-async def _is_empty(session: AsyncSession) -> bool:
-    result = await session.execute(text("SELECT 1 FROM usage.daily_aggregates LIMIT 1"))
-    return result.scalar_one_or_none() is None
 
 
 async def _aggregate_window(
@@ -231,23 +199,55 @@ async def backfill_missing_days(
 
 
 async def backfill_if_empty(session: AsyncSession) -> int:
-    """첫 기동 시 daily_aggregates 비어있으면 전체 과거 집계. 이미 값 있으면 -1."""
-    if not await _is_empty(session):
-        return -1
+    """기동 시 전체 이력에서 집계 누락 날짜를 날짜 단위로 재집계한다.
+
+    ⚠️ 과거 구현은 빈 테이블일 때 전체 이력을 단일 INSERT..SELECT(_BACKFILL_SQL)로
+       채웠다 — db_command_timeout(60s)을 넘는 대형 DB 에선 스테이트먼트가
+       취소되고 부분 진행이 없어 다음 기동에도 같은 실패를 반복했다. 더 나쁜 건
+       sticky skip: 한 행이라도 생기면 _is_empty 가 False 가 돼 30일 lookback
+       밖의 구멍은 영구 미집계로 남았다.
+       날짜 단위 청크면 각 UPSERT(_aggregate_window, 날짜당 commit)가 타임아웃
+       안에 끝나고, 중간에 죽어도 다음 기동이 남은 날짜만 이어간다(멱등 UPSERT).
+    """
     tz_name = get_settings().reporting_timezone
-    now_local_date: date = datetime.now(ZoneInfo(tz_name)).date()
-    result = await session.execute(
-        text(_BACKFILL_SQL), {"today_local": now_local_date, "tz": tz_name}
+    tz = ZoneInfo(tz_name)
+    today_local = datetime.now(tz).date()
+    earliest_local = (
+        await session.execute(text(_EARLIEST_DAY_SQL), {"tz": tz_name})
+    ).scalar_one_or_none()
+    if earliest_local is None:
+        return 0
+    lookback_start, today_start = (
+        datetime.combine(d, datetime.min.time(), tzinfo=tz).astimezone(timezone.utc)
+        for d in (earliest_local, today_local)
     )
-    count: int = result.rowcount
-    await session.commit()
-    logger.info(
-        "daily_aggregator.backfilled",
-        inserted=count,
-        cutoff=now_local_date.isoformat(),
-        timezone=tz_name,
+    rows = await session.execute(
+        text(_MISSING_DATES_SQL),
+        {
+            "tz": tz_name,
+            "lookback_start": lookback_start,
+            "today_start": today_start,
+            "lookback_start_date": earliest_local,
+        },
     )
-    return count
+    missing = [r[0] for r in rows]
+    total = 0
+    for d in missing:
+        start, end = _day_window(tz, d)
+        count = await _aggregate_window(session, start, end, tz_name)
+        total += count
+        logger.info(
+            "daily_aggregator.backfilled_missing_day",
+            date=str(d),
+            inserted=count,
+        )
+    if missing:
+        logger.warning(
+            "daily_aggregator.startup_backfill_recovered",
+            days=[str(d) for d in missing],
+            inserted=total,
+        )
+    return total
 
 
 #: pg advisory lock 키 — replica 수만큼 크론이 동시에 도는 것을 막는다.
@@ -332,13 +332,10 @@ async def run_daily_aggregation(
 async def run_startup_backfill(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """기동 시 1회 backfill. 이미 데이터 있으면 no-op."""
+    """기동 시 1회 backfill — 전체 이력의 누락 날짜를 날짜 단위로 재집계(멱등)."""
     try:
         async with session_factory() as session:
             count = await backfill_if_empty(session)
-            if count >= 0:
-                logger.info("daily_aggregator.startup_backfill_done", count=count)
-            else:
-                logger.info("daily_aggregator.startup_backfill_skipped")
+            logger.info("daily_aggregator.startup_backfill_done", count=count)
     except Exception:
         logger.exception("daily_aggregator.startup_backfill_failed")
