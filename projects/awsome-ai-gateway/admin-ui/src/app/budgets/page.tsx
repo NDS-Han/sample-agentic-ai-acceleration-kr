@@ -123,10 +123,15 @@ export default async function BudgetsPage(props: BudgetsPageProps) {
   // 다이얼로그용 모델 목록 — 매핑은 lib/utils/modelMapping 의 단일 출처를 쓴다.
   // 실패는 빈 배열이 아니라 별도 플래그로 구분해 다이얼로그가 "모델 없음"과
   // "로드 실패"를 다르게 보여줄 수 있게 한다.
-  const modelsResult = await adminAPI
-    .get<{ items: APIModelItem[] }>('/admin/models')
-    .then((v) => ({ ok: true as const, value: v }))
-    .catch(() => ({ ok: false as const }));
+  // /admin/models 는 require_admin — TEAM_LEADER 렌더는 BudgetSummaryTable 을
+  // 그리지 않아 models 를 소비하지 않으므로 호출 자체를 건너뛴다(리더 페이지뷰
+  // 마다 무의미한 403 이 로그에 쌓이는 것을 막는다).
+  const modelsResult = isAdmin
+    ? await adminAPI
+        .get<{ items: APIModelItem[] }>('/admin/models')
+        .then((v) => ({ ok: true as const, value: v }))
+        .catch(() => ({ ok: false as const }))
+    : ({ ok: true as const, value: { items: [] as APIModelItem[] } });
   const models: ModelListItem[] = modelsResult.ok
     ? (modelsResult.value.items ?? []).map(mapToModelListItem)
     : [];
