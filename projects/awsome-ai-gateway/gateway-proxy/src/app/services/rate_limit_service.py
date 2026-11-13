@@ -625,6 +625,11 @@ class RateLimitService:
                 _record_fail_open(label, "cost")
                 if _fail_closed():
                     await self._refund_committed_cost(redis, committed, estimated_cost)
+                    # 내부 환불 완료 — 호출자 committed_out 에 stale 튜플이 남으면
+                    # catch-all 이 같은 예약을 재환불해 카운터가 음수로 부푼다
+                    # (tpm_committed.clear() 와 같은 계약, 10차 리뷰).
+                    if committed_out is not None:
+                        committed_out.clear()
                     return CostLimitResult(
                         allowed=False,
                         scope=label,
@@ -641,6 +646,10 @@ class RateLimitService:
                 #    조정하고, 거절된 요청은 rate_limit_state 가 채워지지 않아
                 #    어느 정산 경로도 타지 않는다).
                 await self._refund_committed_cost(redis, committed, estimated_cost)
+                # 내부 환불 완료 — stale 튜플이 호출자 catch-all 에 재환불되지
+                # 않게 비운다 (위 fail-closed 분기와 같은 계약).
+                if committed_out is not None:
+                    committed_out.clear()
                 return CostLimitResult(
                     allowed=False,
                     scope=result.get("scope"),

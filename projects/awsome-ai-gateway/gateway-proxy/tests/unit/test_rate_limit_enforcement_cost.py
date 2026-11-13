@@ -366,3 +366,48 @@ async def test_cost_committed_out_exposes_partial_commit(monkeypatch, mock_redis
         )
     assert len(committed) == 1
     assert committed[0][0] == "USER"
+
+
+@pytest.mark.asyncio
+async def test_cost_committed_out_cleared_on_internal_refund(
+    monkeypatch, mock_redis
+):
+    """reserve_cost 거절/fail-closed는 내부에서 이미 커밋분을 환불한다.
+    committed_out 에 stale 튜플이 남으면 호출자 catch-all 이 같은 예약을
+    재환불해 카운터가 음수로 부푼다 — 환불 후 반드시 비워야 한다(10차)."""
+    from app.services.rate_limit_service import RateLimitService
+    import app.services.rate_limit_service as svc_mod
+
+    committed: list = []
+    svc = RateLimitService()
+
+    calls = 0
+
+    async def _second_scope_rejects(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return json.dumps({"allowed": True})
+        return json.dumps({
+            "allowed": False, "scope": "TEAM", "limit_type": "cpm",
+            "limit": "1.0", "remaining": "-0.5", "retry_after": 30,
+        })
+
+    monkeypatch.setattr(svc_mod, "_guarded_eval", _second_scope_rejects)
+    monkeypatch.setattr(
+        svc_mod.LuaScriptLoader, "get", staticmethod(lambda _name: "fake-script")
+    )
+
+    result = await svc.reserve_cost(
+        mock_redis,
+        user_id="u-1",
+        estimated_cost=Decimal("0.5"),
+        user_cpm_limit=Decimal("1.0"),
+        user_cph_limit=None,
+        team_id="t-1",
+        team_cpm_limit=Decimal("1.0"),
+        team_cph_limit=None,
+        committed_out=committed,
+    )
+    assert result.allowed is False
+    assert committed == []
