@@ -169,6 +169,14 @@ module "aurora" {
       value        = "pg_stat_statements"
       apply_method = "pending-reboot"
     },
+    {
+      name = "rds.force_ssl"
+      # 전부 ssl=require 로 접속하지만, 설정을 빠뜨린 클라이언트가 평문을
+      # 협상할 수도 있다 — 서버측 강제가 방어심층 (R32). pending-reboot 라
+      # log_statement 변경과 같은 재시작 창에 들어간다.
+      value        = "1"
+      apply_method = "pending-reboot"
+    },
   ]
 
   create_db_parameter_group      = true

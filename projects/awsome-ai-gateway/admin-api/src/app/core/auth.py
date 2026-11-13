@@ -476,6 +476,22 @@ async def require_human_admin(
     return admin
 
 
+async def require_human_admin_or_team_leader(
+    user: CurrentUser = Depends(require_admin_or_team_leader),
+) -> CurrentUser:
+    """사람 admin 또는 team leader(JWT) 전용 — svc 토큰 차단.
+
+    팀 스코프 경계는 이 의존성이 아니라 서비스 계층이 검사한다
+    (budget_service 의 actor.team_id/self/leader-target 검사) — 여기서는
+    사람 신원 + 역할 존재만 보장하고 스코프 위반은 서비스가 403 으로 돌린다.
+    svc 토큰은 합성 ADMIN 으로 require_admin_or_team_leader 를 통과하지만
+    팀 스코프 예산 변경은 자동화 용도가 없는 표면이라 차단한다.
+    """
+    if user.is_service_token:
+        raise ForbiddenError("Service tokens cannot perform this action")
+    return user
+
+
 async def forbid_service_token_reader(
     admin: CurrentUser = Depends(require_admin),
 ) -> None:

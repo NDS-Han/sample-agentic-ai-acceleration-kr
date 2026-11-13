@@ -8,9 +8,10 @@ GW="${ANTHROPIC_BASE_URL:-}"
 VK="${ANTHROPIC_AUTH_TOKEN:-}"
 [ -z "$GW" ] || [ -z "$VK" ] && { printf 'gateway: (env 없음)'; exit 0; }
 
-python3 - "$GW" "$VK" <<'PY' 2>/dev/null || printf 'gateway: usage 조회 실패'
-import sys, json, urllib.request
-gw, vk = sys.argv[1], sys.argv[2]
+GW="$GW" VK="$VK" python3 - <<'PY' 2>/dev/null || printf 'gateway: usage 조회 실패'
+# VK 는 argv 가 아니라 env 로 — argv 는 같은 컨테이너/호스트의 ps 에 보인다.
+import os, sys, json, urllib.request
+gw, vk = os.environ["GW"], os.environ["VK"]
 try:
     req = urllib.request.Request(gw.rstrip('/') + "/v1/usage/me",
                                  headers={"Authorization": "Bearer " + vk})

@@ -56,8 +56,12 @@ module "vpc" {
   create_database_internet_gateway_route = false # DB는 외부 접근 불가
   create_database_nat_gateway_route      = false
 
-  # ElastiCache subnet group
-  create_elasticache_subnet_group = true
+  # ElastiCache subnet group — route table 을 만들지 않으면 upstream vpc
+  # 모듈이 private route table 에 묶어 NAT 아웃바운드 경로가 생긴다
+  # ("인터넷 접근 불필요 격리" 주석과 불일치, R32). DB 서브넷과 동일하게
+  # 전용 라우트 테이블(= IGW/NAT 경로 없음)로 격리한다.
+  create_elasticache_subnet_group       = true
+  create_elasticache_subnet_route_table = true
 
   tags = merge(var.tags, {
     Project     = var.project

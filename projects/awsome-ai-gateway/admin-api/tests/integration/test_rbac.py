@@ -65,6 +65,40 @@ class TestAdminOrTeamLeaderEndpoints:
         assert resp.status_code == 403
 
 
+class TestLeaderBudgetMutations:
+    """R32-M1 — 팀 스코프 예산 mutation 은 라우터에서 leader 를 통과시킨다.
+
+    과거엔 require_human_admin 으로 라우터에서 403 이었고, 서비스의 리더
+    스코핑(own-team/self/leader-target 검사)에 도달조차 못 했다. 게이트를
+    지난 뒤의 팀 경계는 서비스가 403 으로 돌린다 — 여기선 라우터 통과만 본다.
+    """
+
+    async def test_leader_reaches_user_budget_mutation(self, client: AsyncClient, leader_headers: dict):
+        resp = await client.put(
+            "/admin/budgets/user/00000000-0000-0000-0000-000000000001",
+            json={"max_budget_usd": 10},
+            headers=leader_headers,
+        )
+        # 서비스/DB 계층 실패는 허용 — 라우터 게이트의 403 만 아니면 된다
+        assert resp.status_code != 403
+
+    async def test_leader_reaches_allocate(self, client: AsyncClient, leader_headers: dict):
+        resp = await client.put(
+            "/admin/budgets/team/00000000-0000-0000-0000-000000000001/allocate",
+            json={"allocations": []},
+            headers=leader_headers,
+        )
+        assert resp.status_code != 403
+
+    async def test_developer_still_rejected_from_mutation(self, client: AsyncClient, dev_headers: dict):
+        resp = await client.put(
+            "/admin/budgets/user/00000000-0000-0000-0000-000000000001",
+            json={"max_budget_usd": 10},
+            headers=dev_headers,
+        )
+        assert resp.status_code == 403
+
+
 class TestCLIEndpointsNoAuth:
     """CLI endpoints do not require JWT auth."""
 

@@ -80,6 +80,40 @@ def test_merge_ignores_null_for_a_key_the_baseline_lacks():
     assert merge({"a": 1}, {"gone": None}) == {"a": 1}
 
 
+def test_merge_unions_permissions_deny_instead_of_replacing():
+    # deny-only 계약: fragment 는 deny 를 "추가"만 할 수 있다. 치환이면
+    # {"permissions": {"deny": []}} 하나로 baseline 의 금지 규칙이 전부 지워진다.
+    baseline = {"permissions": {"deny": ["Bash(rm -rf *)", "Write(/etc/*)"], "allow": ["Bash"]}}
+    merged = merge(baseline, {"permissions": {"deny": ["mcp__evil__*"]}})
+
+    assert merged["permissions"]["deny"] == ["Bash(rm -rf *)", "Write(/etc/*)", "mcp__evil__*"]
+    assert merged["permissions"]["allow"] == ["Bash"]
+
+
+def test_merge_deny_union_survives_empty_fragment_deny():
+    baseline = {"permissions": {"deny": ["Bash(rm -rf *)"]}}
+    merged = merge(baseline, {"permissions": {"deny": []}})
+
+    assert merged["permissions"]["deny"] == ["Bash(rm -rf *)"]
+
+
+def test_merge_deny_union_survives_permissions_null():
+    # permissions: null 이 baseline permissions 를 pop 해도 deny 는 복원된다.
+    baseline = {"permissions": {"deny": ["Bash(rm -rf *)"], "allow": ["Bash"]}}
+    merged = merge(baseline, {"permissions": None})
+
+    assert merged["permissions"]["deny"] == ["Bash(rm -rf *)"]
+
+
+def test_merge_deny_union_dedupes_and_handles_missing():
+    merged = merge({"permissions": {"deny": ["a", "b"]}},
+                   {"permissions": {"deny": ["b", "c"]}})
+    assert merged["permissions"]["deny"] == ["a", "b", "c"]
+    # baseline 에 deny 가 없고 fragment 에만 있으면 fragment 것이 그대로.
+    merged = merge({}, {"permissions": {"deny": ["x"]}})
+    assert merged["permissions"]["deny"] == ["x"]
+
+
 def test_fragment_is_fetched_with_the_vk_from_the_gateway(tmp_path):
     server = Server(body={"version": "v1", "managedSettings": FRAGMENT})
 

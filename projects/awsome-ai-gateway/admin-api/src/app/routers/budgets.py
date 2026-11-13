@@ -7,7 +7,7 @@ import uuid
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader, require_human_admin
+from app.core.auth import CurrentUser, require_admin, require_admin_or_team_leader, require_human_admin, require_human_admin_or_team_leader
 from app.core.db import get_db_session
 from app.models.budget import BudgetScope
 from app.services.budget_service import BudgetService
@@ -117,7 +117,7 @@ async def equal_split_team_budget(
     )
 
 
-@router.put("/user/{user_id}", dependencies=[Depends(require_human_admin)])
+@router.put("/user/{user_id}", dependencies=[Depends(require_human_admin_or_team_leader)])
 async def set_user_budget(
     request: Request,
     user_id: uuid.UUID,
@@ -160,7 +160,7 @@ async def seed_budget_spent(
     )
 
 
-@router.delete("/user/{user_id}", status_code=204, dependencies=[Depends(require_human_admin)])
+@router.delete("/user/{user_id}", status_code=204, dependencies=[Depends(require_human_admin_or_team_leader)])
 async def delete_user_budget(
     request: Request,
     user_id: uuid.UUID,
@@ -182,7 +182,7 @@ async def delete_user_budget(
     )
 
 
-@router.put("/user/{user_id}/app/{client}", dependencies=[Depends(require_human_admin)])
+@router.put("/user/{user_id}/app/{client}", dependencies=[Depends(require_human_admin_or_team_leader)])
 async def set_user_client_budget(
     request: Request,
     user_id: uuid.UUID,
@@ -211,7 +211,7 @@ async def set_user_client_budget(
     return {"status": "ok"}
 
 
-@router.delete("/user/{user_id}/app/{client}", status_code=204, dependencies=[Depends(require_human_admin)])
+@router.delete("/user/{user_id}/app/{client}", status_code=204, dependencies=[Depends(require_human_admin_or_team_leader)])
 async def clear_user_client_budget(
     request: Request,
     user_id: uuid.UUID,
@@ -271,7 +271,7 @@ async def get_team_allocation(
     )
 
 
-@router.put("/team/{team_id}/allocate", dependencies=[Depends(require_human_admin)])
+@router.put("/team/{team_id}/allocate", dependencies=[Depends(require_human_admin_or_team_leader)])
 async def allocate_team_budget(
     request: Request,
     team_id: uuid.UUID,

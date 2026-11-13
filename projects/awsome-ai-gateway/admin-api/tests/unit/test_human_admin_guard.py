@@ -13,13 +13,26 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.routing import APIRoute
 
-from app.core.auth import require_human_admin
+from app.core.auth import require_human_admin, require_human_admin_or_team_leader
 from app.core.exceptions import ForbiddenError
 from app.models.auth import UserRole
 
+# mutation 에 허용되는 "사람 전용" 의존성 — 둘 다 svc 토큰을 차단한다.
+# require_human_admin_or_team_leader 는 리더 스코프 엔드포인트용
+# (팀 경계 검사는 서비스 계층) — svc 차단 의미론은 동일 (R32).
+HUMAN_GATES = {require_human_admin, require_human_admin_or_team_leader}
+
 
 def _dep_fns(route: APIRoute):
-    return {d.dependency for d in route.dependencies}
+    """라우트 레벨 dependencies + 핸들러 파라미터 Depends 전부.
+
+    budgets 라우터는 decorator 의 dependencies= 에, service_tokens 는
+    핸들러 파라미터 Depends(...) 에 게이트를 둔다 — 파라미터 의존성은
+    route.dependant 트리에만 나타나므로 둘 다 본다 (R32).
+    """
+    fns = {d.dependency for d in route.dependencies}
+    fns |= {d.call for d in route.dependant.dependencies}
+    return fns
 
 
 def _routes(router):
@@ -36,6 +49,7 @@ def _routes(router):
         "app.routers.apps",
         "app.routers.users",
         "app.routers.chat_agent",
+        "app.routers.service_tokens",
     ],
 )
 def test_every_mutation_route_requires_human_admin(router_path):
@@ -50,9 +64,9 @@ def test_every_mutation_route_requires_human_admin(router_path):
     ]
     assert mutations, f"{router_path}: expected mutation routes"
     for route in mutations:
-        assert require_human_admin in _dep_fns(route), (
+        assert _dep_fns(route) & HUMAN_GATES, (
             f"{router_path} {route.path} {route.methods} missing "
-            "require_human_admin"
+            "human-admin gate"
         )
 
 
@@ -84,3 +98,23 @@ async def test_require_human_admin_rejects_svc_and_passes_human():
     human.is_service_token = False
     human.service_token_id = None
     assert await require_human_admin(admin=human) is human
+
+
+@pytest.mark.asyncio
+async def test_require_human_admin_or_team_leader():
+    """리더 스코프 mutation 의 사람 게이트 — svc 는 차단, admin/leader 는 통과."""
+    svc = _svc_admin()
+    with pytest.raises(ForbiddenError):
+        await require_human_admin_or_team_leader(user=svc)
+
+    leader = _svc_admin()
+    leader.is_service_token = False
+    leader.service_token_id = None
+    leader.role = UserRole.TEAM_LEADER
+    leader.team_id = uuid.uuid4()
+    assert await require_human_admin_or_team_leader(user=leader) is leader
+
+    admin = _svc_admin()
+    admin.is_service_token = False
+    admin.service_token_id = None
+    assert await require_human_admin_or_team_leader(user=admin) is admin

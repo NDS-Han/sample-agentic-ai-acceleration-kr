@@ -59,9 +59,12 @@ variable "mantle_regions" {
 }
 
 variable "secrets_manager_kms_key_arns" {
-  description = "Secrets Manager가 쓰는 KMS 키 ARN (기본 AWS 관리 키 + 사용자 키)"
+  # 비어 있으면 KmsDecrypt statement 자체가 생성되지 않는다 — AWS 관리키
+  # (aws/secretsmanager) 경유 시크릿에는 불필요. CMK 시크릿 도입 시 그 키 ARN
+  # 만 나열한다. ["*"] 는 계정 내 임의 CMK 복호화라 절대 쓰지 않는다.
+  description = "Secrets Manager 시크릿이 CMK 로 암호화될 때만 필요한 키 ARN 목록"
   type        = list(string)
-  default     = ["*"]
+  default     = []
 }
 
 variable "cognito_user_pool_arn" {

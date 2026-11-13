@@ -189,8 +189,10 @@ module "gateway" {
   cognito_user_pool_arn = module.cognito.user_pool_arn
   cognito_user_pool_id  = module.cognito.user_pool_id
   # admin-api/admin-ui 의 ADMIN 부트스트랩 — 비우면 아무도 관리자가 못 된다.
-  # 기본은 생성하는 Cognito 그룹(ClaudeAdmin) 전체를 ADMIN 으로.
-  admin_groups = length(var.admin_groups) > 0 ? var.admin_groups : var.cognito_groups
+  # ⚠️ 폴백을 var.cognito_groups 로 두면 운영자가 팀 그룹(Claude_<team>)을
+  #    추가하는 순간 그 그룹 전원이 ADMIN 이 된다 — 조용한 권한 상승이라
+  #    폴백은 생성되는 admin 그룹 이름 리터럴로 고정한다 (R32-M2).
+  admin_groups = length(var.admin_groups) > 0 ? var.admin_groups : ["ClaudeAdmin"]
   admin_emails = var.admin_emails
 
   # 권한 범위

@@ -187,8 +187,10 @@ resource "aws_cloudwatch_log_group" "svc" {
 resource "aws_ecr_repository" "svc" {
   for_each = var.create_ecr_repos && var.image_registry == "" ? toset(["gateway-proxy", "admin-api", "admin-ui", "cost-recorder-worker", "notification-worker", "migration"]) : toset([])
 
-  name                 = "${var.project}/${each.key}"
-  image_tag_mutability = "MUTABLE" # 태그는 deploy 가 핀으로 관리 — mutability 는 push 편의용
+  name = "${var.project}/${each.key}"
+  # IMMUTABLE — push 권한자가 핀 태그를 오염 이미지로 덮어써 다음 pull 이
+  # poisoned image 를 받는 경로 차단 (R32). 재배포는 새 태그로.
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true

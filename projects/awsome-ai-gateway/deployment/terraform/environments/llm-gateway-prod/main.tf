@@ -77,7 +77,7 @@ module "irsa" {
   body_log_firehose_arn = module.body_logging.firehose_stream_arn
   body_log_bucket_arn   = module.body_logging.bucket_arn
   # 본문 뷰어 읽기(admin-api)가 SSE-KMS 버킷에서 AccessDenied 나지 않도록 키를 함께 넘긴다.
-  body_log_kms_key_arn  = module.body_logging.kms_key_arn
+  body_log_kms_key_arn = module.body_logging.kms_key_arn
 
   # notification-worker SES 발신 (provider=ses 와 짝, R24-S7)
   enable_notification_ses = var.enable_notification_ses
@@ -198,6 +198,8 @@ module "cognito" {
   callback_urls = var.cognito_callback_urls
   logout_urls   = var.cognito_logout_urls
   groups        = var.cognito_groups
+  # prod 풀 삭제 = admin 전원 영구 유실 — destroy/-target 방지 (R32-M6).
+  deletion_protection = "ACTIVE"
 
   tags = var.tags
 }

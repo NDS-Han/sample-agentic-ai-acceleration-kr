@@ -52,3 +52,11 @@ variable "tags" {
   description = "Common tags"
   default     = {}
 }
+
+variable "deletion_protection" {
+  # prod 는 ACTIVE — terraform destroy/-target 한 방에 admin 사용자 풀이
+  # 영구 삭제되는 사고 방지. dev 는 재구축 편의로 INACTIVE.
+  description = "User Pool 삭제 보호 (prod=ACTIVE 권장)"
+  type        = string
+  default     = "INACTIVE"
+}

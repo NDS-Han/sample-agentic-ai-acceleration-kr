@@ -26,10 +26,13 @@ resource "aws_lb" "this" {
 
   lifecycle {
     precondition {
-      # 평문 HTTP(http_mode) + 공개 ALB + 월드오픈 CIDR = bearer 토큰이 인터넷에
-      # 평문으로 흐르는 조합. alb_internal 이나 대역 제한 없이는 거부한다.
-      condition     = !(local.http_mode && !var.alb_internal && (contains(var.allowed_cidrs, "0.0.0.0/0") || contains(var.allowed_cidrs, "::/0")))
-      error_message = "http_mode(도메인/인증서 없음)에서 공개 ALB + 0.0.0.0/0 인그레스는 금지 — alb_internal=true 로 두거나 allowed_cidrs 를 제한하세요."
+      # 평문 리스너 + 공개 ALB + 월드오픈 CIDR = bearer 토큰이 인터넷에 평문으로
+      # 흐르는 조합. http_mode 뿐 아니라 pending(domain 있으나 cert 미발급 →
+      # 80 host 기반 리스너)도 같은 평문이라 !https_ready 전체로 막는다 —
+      # pending 중에도 ACM 검증은 DNS 라 HTTP 리스너 없이 진행할 수 있고,
+      # 운영자는 대역 제한으로 pending 을 열 수 있다 (R32-M4).
+      condition     = !(!local.https_ready && !var.alb_internal && (contains(var.allowed_cidrs, "0.0.0.0/0") || contains(var.allowed_cidrs, "::/0")))
+      error_message = "평문 리스너(http/pending 모드)에서 공개 ALB + 0.0.0.0/0 인그레스는 금지 — alb_internal=true 로 두거나 allowed_cidrs 를 제한하세요."
     }
   }
 }

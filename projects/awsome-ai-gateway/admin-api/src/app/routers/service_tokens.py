@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
-from app.core.auth import CurrentUser, require_admin
+from app.core.auth import CurrentUser, require_admin, require_human_admin
 from app.core.db import get_db_session
 from app.core.exceptions import ForbiddenError, ValidationError
 from app.schemas.service_tokens import (
@@ -23,7 +23,7 @@ router = APIRouter(prefix="/admin/service-tokens", tags=["Service Token Manageme
 async def issue_service_token(
     request: Request,
     body: ServiceTokenCreateRequest,
-    admin: CurrentUser = Depends(require_admin),
+    admin: CurrentUser = Depends(require_human_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """발급 — 사람 admin(JWT)만. 원문은 응답에서 1회만 반환."""
@@ -64,7 +64,7 @@ async def list_service_tokens(
 @router.post("/rotate", response_model=ServiceTokenCreateResponse)
 async def rotate_service_token(
     request: Request,
-    admin: CurrentUser = Depends(require_admin),
+    admin: CurrentUser = Depends(require_human_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """self-rotate — service token 호출자만. 자기 자신을 교체, 구 토큰 24h grace."""
@@ -94,7 +94,7 @@ async def rotate_service_token(
 async def end_service_token_grace(
     request: Request,
     token_id: uuid.UUID,
-    admin: CurrentUser = Depends(require_admin),
+    admin: CurrentUser = Depends(require_human_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """rotate grace 만 조기 종료 — 후속 토큰은 건드리지 않는다.
@@ -129,7 +129,7 @@ async def end_service_token_grace(
 async def revoke_service_token(
     request: Request,
     token_id: uuid.UUID,
-    admin: CurrentUser = Depends(require_admin),
+    admin: CurrentUser = Depends(require_human_admin),
     session: AsyncSession = Depends(get_db_session),
 ):
     """폐기 — 사람 admin(JWT)만. 즉시 무효화.

@@ -43,6 +43,19 @@ def merge(baseline: dict, fragment: dict) -> dict:
             merged[key] = inner
         else:
             merged[key] = value
+    # permissions.deny 는 치환이 아니라 합집합 — PERMISSION_KEYS 가 fragment 에
+    # "deny 만" 허용하는 이유가 "추가 제한만 가능"이기 때문인데, 치환이면
+    # {"deny": []} 한 줄로 baseline 의 deny 규칙이 통째로 지워져 deny-only
+    # 계약이 깨진다(손상된 게이트웨이가 모든 PC 의 금지 목록을 무력화).
+    base_deny = (baseline.get("permissions") or {}).get("deny")
+    frag_deny = (fragment.get("permissions") or {}).get("deny")
+    if isinstance(base_deny, list) or isinstance(frag_deny, list):
+        union = list(dict.fromkeys(
+            (base_deny if isinstance(base_deny, list) else [])
+            + (frag_deny if isinstance(frag_deny, list) else [])))
+        perms = dict(merged.get("permissions") or {})
+        perms["deny"] = union
+        merged["permissions"] = perms
     return merged
 
 

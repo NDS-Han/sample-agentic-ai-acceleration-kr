@@ -35,6 +35,10 @@ resource "aws_cognito_user_pool" "this" {
   username_attributes      = ["email"]
   auto_verified_attributes = ["email"]
 
+  # 풀 삭제는 admin 사용자 전부의 영구 유실 — prod 에서는 ACTIVE (R32-M6).
+  # dev 재구축 편의로 env 별 변수로 둔다.
+  deletion_protection = var.deletion_protection
+
   password_policy {
     minimum_length                   = 12
     require_lowercase                = true

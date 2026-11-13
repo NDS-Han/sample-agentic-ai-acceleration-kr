@@ -376,11 +376,19 @@ data "aws_iam_policy_document" "external_secrets" {
       "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:rds!cluster-*",
     ]
   }
-  statement {
-    sid       = "KmsDecrypt"
-    effect    = "Allow"
-    actions   = ["kms:Decrypt"]
-    resources = var.secrets_manager_kms_key_arns
+  # KmsDecrypt 는 시크릿이 CMK 로 암호화될 때만 필요하다 — 이 배포의 시크릿은
+  # 전부 AWS 관리키(aws/secretsmanager)라 statement 자체가 필요 없다. CMK 를
+  # 도입하면 그 키 ARN 을 secrets_manager_kms_key_arns 에 명시해 scope 한다
+  # (R32-M3: 기본 ["*"] 는 계정 내 모든 CMK 복호화를 허용했다 — ESO pod 침해 시
+  # 키 정책이 허용하는 임의 암호문 복호화로 확대).
+  dynamic "statement" {
+    for_each = length(var.secrets_manager_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid       = "KmsDecrypt"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = var.secrets_manager_kms_key_arns
+    }
   }
 }
 
