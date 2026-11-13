@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from uuid import uuid4
 
@@ -455,7 +456,11 @@ class CostRecorder:
         # rebuild 가 fin()→db=0 으로 읽어 기간 내내 과소 복원(16차 리뷰
         # F-5). 유실 방향보다 $0 기록+경고가 낫다 — 요청은 이미 서빙됐고
         # 감사 행은 남겨야 한다.
-        if not cost_usd.is_finite():
+        # Decimal.is_finite() 는 1e400 도 통과한다(Decimal 세계에선 유한) —
+        # float()→inf→INCRBYFLOAT 거부·Lua tonumber→Inf 인 float64 경계도
+        # 함께 잡는다(17차 리뷰). float() 는 finite 입력에 대해선 예외 없이
+        # inf 를 돌려주므로 순서가 is_finite 먼저여야 sNaN 이 안전하다.
+        if not cost_usd.is_finite() or not math.isfinite(float(cost_usd)):
             logger.warning(
                 "cost_usd_non_finite",
                 user_id=auth_context.user_id,

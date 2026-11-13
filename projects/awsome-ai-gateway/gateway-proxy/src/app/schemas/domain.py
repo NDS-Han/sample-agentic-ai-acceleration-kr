@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from decimal import Decimal
 from enum import Enum
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+logger = structlog.get_logger(__name__)
 
 
 class AuthType(str, Enum):
@@ -103,6 +107,33 @@ class ModelPricingSchema(BaseModel):
     cache_write_per_1k: Decimal = Decimal("0")       # 5-min TTL (default)
     cache_write_1h_per_1k: Decimal = Decimal("0")    # 1-hour TTL
     cache_read_per_1k: Decimal = Decimal("0")
+
+    @field_validator(
+        "input_per_1k", "output_per_1k",
+        "cache_write_per_1k", "cache_write_1h_per_1k", "cache_read_per_1k",
+        "long_input_per_1k", "long_output_per_1k",
+        "long_cache_write_per_1k", "long_cache_write_1h_per_1k",
+        "long_cache_read_per_1k",
+        mode="before",
+    )
+    @classmethod
+    def _finite_rate(cls, v):
+        # Postgres NUMERIC 은 'NaN'/'Infinity' 를 저장할 수 있고 Decimal 은
+        # 1e400 도 is_finite 로 통과한다. 이 단가가 calculate_cost 에 들어가면
+        # 곱셈/quantize 가 InvalidOperation 을 던져 스트리밍은 무음 미기록,
+        # 비스트리밍은 **업스트림 과금 후** 500 이 된다(17차 리뷰 F-2).
+        # 오염 단가는 $0+경고로 수렴 — 행 하나를 고치는 동안 그 모델만
+        # 무과금으로 서빙하고 나머지 모델/목록은 죽지 않는다.
+        if v is None:
+            return v
+        try:
+            d = Decimal(str(v))
+        except Exception:
+            return v  # 파싱 불가는 표준 검증이 잡는다
+        if not d.is_finite() or not math.isfinite(float(d)) or d < 0:
+            logger.warning("pricing_rate_non_finite_coerced", raw=str(v))
+            return Decimal("0")
+        return v
 
     # ── long-context(임계 토큰 초과 — 모델별 상이: GPT-5.6 272K·Haiku 5.5 100K) ──
     # 전부 Optional/None 기본값이어야 한다: 이 필드를 모르는 구버전 Redis 캐시 항목
@@ -327,6 +358,27 @@ class TokenUsage(BaseModel):
     # calculate_cost 는 이 목록이 있으면 턴별 비용 합산으로 대체한다.
     # 프로세스 내 전달 전용 — cost:stream 엔트리 필드가 아니므로 dump 에서 제외.
     turn_usages: list["TokenUsage"] | None = Field(default=None, exclude=True)
+
+    @field_validator(
+        "input_tokens", "output_tokens", "total_tokens",
+        "cache_creation_input_tokens", "cache_read_input_tokens",
+        "cache_creation_1h_input_tokens",
+        "reasoning_tokens", "web_search_count",
+        mode="before",
+    )
+    @classmethod
+    def _bounded_tokens(cls, v):
+        # 프로바이더가 보고하는 초대형·음수 카운트는 TPM 합산(오버플로)과
+        # 스트림→DB int64 쓰기를 죽인다(17차 리뷰 F13) — [0, 1e12] 클램프.
+        if v is None:
+            return v
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return v
+        if iv < 0 or iv > 10**12:
+            return min(max(iv, 0), 10**12)
+        return v
 
 
 class BudgetThresholdEvent(BaseModel):

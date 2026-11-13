@@ -35,9 +35,21 @@ end
 -- Window is [now_sec-(window_sec-1), now_sec] inclusive; bucket keys are second-scoped so EXPIRE resets are safe (bucket T only ever written during second T).
 local total_key = KEYS[2] .. ':' .. now_sec
 local fail_key  = KEYS[1] .. ':' .. now_sec
+-- 오염 버킷('abc'/'nan')은 INCR 이 거부해 eval 이 죽는다 — is_failure=1
+-- 이면 total 커밋 후 fail 에서 죽는 부분커밋으로 오차가 남고, 성공이면
+-- 그 초 동안 fail-open 이 된다(17차 리뷰 F11). 비유한/비수치는 0 으로
+-- 치유한다(초 버킷이라 재기록 폭은 작다).
+local function _bkt(key)
+  local v = tonumber(redis.call('GET', key) or '0')
+  if not v or v ~= v or v == math.huge or v == -math.huge then
+    redis.call('SET', key, '0', 'KEEPTTL')
+  end
+end
+_bkt(total_key)
 redis.call('INCR', total_key)
 redis.call('EXPIRE', total_key, window_sec)
 if is_failure == 1 then
+  _bkt(fail_key)
   redis.call('INCR', fail_key)
   redis.call('EXPIRE', fail_key, window_sec)
 end

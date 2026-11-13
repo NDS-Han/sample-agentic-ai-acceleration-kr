@@ -266,19 +266,32 @@ class HealthChecker:
                         # 재합산된다(R23 r5 N-1).
                         continue
                     # "budget:pending:" 이후 — [0]=user|team|client,
-                    # [1]={sid}, client 이면 [2]=client 이름, 마지막=req_id.
+                    # [1..-1]={sid}:req_id, client 이면 [1..-2]={sid}:client:req.
+                    # 앞에서 쪼개면 ':'/'{}' 를 포함한 sid(URN 형태의 SSO
+                    # subject 등)가 깨져 그룹 미스매치 → KEYS[4..] 에 못 실려
+                    # live 에서 빠지고 orphan drain 이 실예약을 지운다(17차
+                    # 리뷰 F-3). 뒤(req/client)에서 기준을 잡고 sid 는 정확히
+                    # 바깥 중괄호 한 쌍만 벗긴다.
                     parts = kstr.split("budget:pending:", 1)[1].split(":")
+
+                    def _sid(raw: str) -> str:
+                        return (
+                            raw[1:-1]
+                            if raw.startswith("{") and raw.endswith("}")
+                            else raw.strip("{}")
+                        )
+
                     if parts[0] in ("user", "team") and len(parts) >= 3:
-                        sid = parts[1].strip("{}")
+                        sid = _sid(":".join(parts[1:-1]))
                         if sid:
                             pending_markers.setdefault(
                                 (parts[0].upper(), sid, ""), []
                             ).append(kstr)
                     elif parts[0] == "client" and len(parts) >= 4:
-                        sid = parts[1].strip("{}")
+                        sid = _sid(":".join(parts[1:-2]))
                         if sid:
                             pending_markers.setdefault(
-                                ("USER", sid, parts[2]), []
+                                ("USER", sid, parts[-2]), []
                             ).append(kstr)
                 except Exception:
                     continue

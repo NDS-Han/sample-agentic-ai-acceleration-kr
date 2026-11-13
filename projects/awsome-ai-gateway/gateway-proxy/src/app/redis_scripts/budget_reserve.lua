@@ -165,7 +165,22 @@ local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 if soft_limit_pct ~= soft_limit_pct or soft_limit_pct == math.huge
     or soft_limit_pct == -math.huge then soft_limit_pct = 110 end
 
-local used = tonumber(redis.call('GET', usage_key) or '0')
+local used_raw = redis.call('GET', usage_key) or '0'
+local used = tonumber(used_raw)
+-- 비수치('abc'→nil)/비유한('nan'/'inf') 카운터: 아래 at_cap 비교를 거짓으로
+-- 통과한 뒤 INCRBYFLOAT 가 **저장값**을 거부해 eval 이 죽는다 — 호출자는
+-- eval 예외를 fail-open(무예약 진행)으로 처리하므로 limit=0 명시 차단도
+-- 우회된다. 첫 쓰기 전에 차단으로 수렴(17차 리뷰). 사용량은 센티넬/
+-- 프로브가 플로어 복원한다.
+if type(used) ~= 'number' or used ~= used or used == math.huge
+    or used == -math.huge then
+    return reply(false, false, scope_label .. '_budget_exceeded', 0, limit, true)
+end
+if used_raw ~= tostring(used) then
+    -- '0x10'/' 5' 등 Lua 파서는 받지만 INCRBYFLOAT 가 거부하는 비표준
+    -- 형식 — 표준형으로 재기록해 아래 커밋을 지킨다(값 보존, 17차 F-1).
+    redis.call('SET', usage_key, tostring(used), 'KEEPTTL')
+end
 
 -- D-8: limit = 0 은 정책과 무관하게 항상 차단.
 if limit <= 0 then
@@ -207,6 +222,15 @@ if cap then
     end
 end
 
+-- 예약액을 카운터가 표현 가능한 범위로 클램프 — used + reserved_amt 가
+-- float64 를 넘으면 INCRBYFLOAT 가 거부해 eval 이 죽고 호출자는
+-- fail-open 으로 진행한다. estimate=Inf/NaN 이나 cap-used 오버플로는
+-- 여기서 "잔여 전량"으로 수렴(17차 리뷰 — 마지막 요청 완주 의미론과 일치,
+-- 차단 방향이 안전하다).
+local MAXD = 1.7976931348623157e308
+local head = MAXD - math.max(used, 0)
+if not (reserved_amt <= head) then reserved_amt = head end
+
 -- 카운터 유실 감지(R22 r1 M1 / r2 S7): 이 reserve 가 usage 키를 **생성**하면
 -- (체크 통과 시점엔 있었거나, 이번 달 첫 쓰기거나, 축출/failover 로 사라졌거나)
 -- 센티넬을 세운다. resvsum 동시 유실로 pre>0 조건이 못 잡던 케이스까지
@@ -225,13 +249,20 @@ redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 -- 'nan'/'inf'/비수치 resvsum 은 INCRBYFLOAT 가 거부해 usage 커밋 후 여기서
 -- 죽는다 — 마커/인덱스 없는 영구 팬텀 예약이 usage 에 남는다(15차 리뷰).
 -- 오염 저장값은 0 으로 덮어써 치유한다(settle 과 같은 규약).
-local rs_stored = tonumber(redis.call('GET', KEYS[4]) or '0')
+local rs_raw = redis.call('GET', KEYS[4]) or '0'
+local rs_stored = tonumber(rs_raw)
 -- tonumber('abc') 는 nil — `nil ~= nil` 은 false 라 비수치 문자열은
 -- 비유한 가드를 그대로 통과해 INCRBYFLOAT 가 거부되고, usage 커밋 후
 -- 여기서 죽으면 매 시도마다 무표지 팬텀이 쌓인다(16차 리뷰).
 if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
+elseif rs_raw ~= tostring(rs_stored) then
+    -- '0x10'/' 5'/'5.' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가
+    -- 거부하는 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
+    -- (값 보존, 다음 명령이 바로 INCRBYFLOAT 라 크래시 경로가 닫힌다 —
+    --  17차 리뷰 F-1).
+    redis.call('SET', KEYS[4], tostring(rs_stored), 'KEEPTTL')
 end
 redis.call('INCRBYFLOAT', KEYS[4], reserved_amt)
 redis.call('EXPIRE', KEYS[4], 3888000)

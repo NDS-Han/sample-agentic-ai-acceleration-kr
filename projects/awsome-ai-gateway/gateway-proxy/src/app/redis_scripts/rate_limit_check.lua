@@ -37,6 +37,11 @@ for i = 1, num_scopes do
     if limit and limit > 0 then
         -- 윈도우 밖 항목 제거 (모든 스코프 공통 cleanup)
         redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
+        -- 미래 스코어 멤버는 윈도우 이동으로도 제거되지 않아 카운트를 영구
+        -- 부풀리고, 최소 스코어로 선택되면 retry_after 가 수십억 초가 된다
+        -- (클라이언트 백오프 중독, 17차 리뷰 F6). 스코어는 이 스크립트의
+        -- 호출 시각으로만 쓰이므로 now 초과분은 오염이다.
+        redis.call('ZREMRANGEBYSCORE', key, '(' .. tostring(now_ms), '+inf')
 
         local current = redis.call('ZCARD', key)
         -- 같은 request_id 의 재입장(폴백 후보)은 기존 멤버를 재사용한다 —
@@ -61,6 +66,9 @@ for i = 1, num_scopes do
                     window_reset_ms = os_ + window_ms
                 end
             end
+            -- 미래 스코어가 남아 있어도 retry_after 는 윈도우 폭을 넘지
+            -- 않는다(17차 리뷰 F6 — Retry-After 중독 방지).
+            window_reset_ms = math.min(window_reset_ms, now_ms + window_ms)
             local retry_after = math.ceil((window_reset_ms - now_ms) / 1000)
             if retry_after < 1 then retry_after = 1 end
 

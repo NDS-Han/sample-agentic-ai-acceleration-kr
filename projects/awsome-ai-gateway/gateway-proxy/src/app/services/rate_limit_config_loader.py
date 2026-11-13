@@ -74,11 +74,24 @@ async def _load_scope_from_cache(
         if raw is None:
             return None
         data = json.loads(raw)
+        # rpm/tpm 은 bool 이 아닌 int 여야 한다 — 'abc' 는 소비부
+        # `'abc' > 0` TypeError → 매 요청 500(TTL 300s), true 는
+        # Lua tonumber('True')→nil 로 한도가 조용히 스킵돼 무제한
+        # fail-open(17차 리뷰 F7). 오염 항목은 캐시미스 → DB 폴백.
+        rpm, tpm = data.get("rpm"), data.get("tpm")
+        for v in (rpm, tpm):
+            if v is not None and (
+                isinstance(v, bool) or not isinstance(v, int) or v < 0
+            ):
+                logger.warning(
+                    "rl_config_cache_type_corrupt", scope=scope, scope_id=scope_id
+                )
+                return None
         cpm_raw = data.get("cpm")
         cph_raw = data.get("cph")
         return ScopeLimits(
-            rpm=data.get("rpm"),
-            tpm=data.get("tpm"),
+            rpm=rpm,
+            tpm=tpm,
             cpm=Decimal(str(cpm_raw)) if cpm_raw is not None else None,
             cph=Decimal(str(cph_raw)) if cph_raw is not None else None,
             model_agnostic=bool(data.get("agg")),

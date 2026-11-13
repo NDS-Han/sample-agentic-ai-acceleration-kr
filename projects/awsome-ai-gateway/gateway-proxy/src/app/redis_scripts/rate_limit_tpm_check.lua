@@ -48,7 +48,14 @@ for i = 1, num_scopes do
         -- 버킷 회전: 저장된 마커가 오래됐으면 cur → prev 이동
         local stored_bucket = tonumber(redis.call('GET', win_key) or '0')
         if stored_bucket ~= current_bucket then
+            -- 'abc' → nil 은 SET 인자 오류로 eval 이 죽고, 'nan' 은 저장값이
+            -- 그대로 prev 로 복사돼 오염이 번진다(17차 리뷰 F10) — 비유한/
+            -- 비수치는 0 으로 수렴.
             local cur_val = tonumber(redis.call('GET', cur_key) or '0')
+            if not cur_val or cur_val ~= cur_val
+                or cur_val == math.huge or cur_val == -math.huge then
+                cur_val = 0
+            end
             if stored_bucket == current_bucket - 1 then
                 redis.call('SET', prev_key, cur_val)
             else
@@ -64,8 +71,28 @@ for i = 1, num_scopes do
             redis.call('EXPIRE', win_key, ttl_sec)
         end
 
-        local cur_tokens  = tonumber(redis.call('GET', cur_key) or '0')
-        local prev_tokens = tonumber(redis.call('GET', prev_key) or '0')
+        local cur_raw  = redis.call('GET', cur_key) or '0'
+        local prev_raw = redis.call('GET', prev_key) or '0'
+        local cur_tokens  = tonumber(cur_raw)
+        local prev_tokens = tonumber(prev_raw)
+        -- 오염 버킷 치유 — NaN 추정치는 `> limit` 비교를 거짓으로 통과해
+        -- 조용히 무제한 fail-open 이 되고, Phase 2 의 INCRBY 는 저장값을
+        -- 거부해 eval 이 죽는다(17차 리뷰 F10). 비유한/비수치는 0 으로,
+        -- '0x10' 같은 비표준 형식은 표준형으로 재기록해 값을 보존한다.
+        if not cur_tokens or cur_tokens ~= cur_tokens
+            or cur_tokens == math.huge or cur_tokens == -math.huge then
+            redis.call('SET', cur_key, '0', 'KEEPTTL')
+            cur_tokens = 0
+        elseif cur_raw ~= tostring(cur_tokens) then
+            redis.call('SET', cur_key, tostring(cur_tokens), 'KEEPTTL')
+        end
+        if not prev_tokens or prev_tokens ~= prev_tokens
+            or prev_tokens == math.huge or prev_tokens == -math.huge then
+            redis.call('SET', prev_key, '0', 'KEEPTTL')
+            prev_tokens = 0
+        elseif prev_raw ~= tostring(prev_tokens) then
+            redis.call('SET', prev_key, tostring(prev_tokens), 'KEEPTTL')
+        end
 
         -- 가중 추정: prev × (1 - elapsed) + cur + reserved
         local estimated = prev_tokens * (1.0 - elapsed_ratio) + cur_tokens + reserved

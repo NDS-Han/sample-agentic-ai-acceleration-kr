@@ -157,7 +157,14 @@ if config_raw then
     end
 end
 
-local used = tonumber(redis.call('GET', usage_key) or '0')
+local used_raw = redis.call('GET', usage_key) or '0'
+local used = tonumber(used_raw)
+-- '0x10'/' 5' 등 Lua 파서는 받지만 INCRBYFLOAT 가 거부하는 비표준 형식 —
+-- 아래 INCRBYFLOAT 가 저장값 파싱에서 죽어 델타가 영구 미적용된다.
+-- 표준형으로 재기록해 치유한다(값 보존, 17차 리뷰 F-1).
+if used and used_raw ~= tostring(used) then
+    redis.call('SET', usage_key, tostring(used), 'KEEPTTL')
+end
 local delta = actual - reserved
 local usage_lost = false
 
@@ -179,13 +186,19 @@ redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 -- 죽는다 — 마커 DEL·툼스톤에 못 닿아 재시도마다 delta 가 이중 적용된다
 -- (15차 리뷰). 오염 저장값은 0 으로 덮어써 치유하고 차감은 아래 음수
 -- 플로어가 정리한다.
-local rs_stored = tonumber(redis.call('GET', KEYS[4]) or '0')
+local rs_raw = redis.call('GET', KEYS[4]) or '0'
+local rs_stored = tonumber(rs_raw)
 -- tonumber('abc') 는 nil — `nil ~= nil` 은 false 라 비수치 문자열은
 -- 비유한 가드를 그대로 통과해 INCRBYFLOAT 가 거부되고, usage 커밋 후
 -- 여기서 죽으면 재시도마다 delta 가 이중 적용된다(16차 리뷰).
 if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
+elseif rs_raw ~= tostring(rs_stored) then
+    -- '0x10'/' 5'/'5.' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가
+    -- 거부하는 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
+    -- (값 보존, 17차 리뷰 F-1).
+    redis.call('SET', KEYS[4], tostring(rs_stored), 'KEEPTTL')
 end
 redis.call('INCRBYFLOAT', KEYS[4], -reserved)
 local rs_after = tonumber(redis.call('GET', KEYS[4]) or '0')
@@ -215,8 +228,19 @@ end
 -- used 에서 빼면 안 된다 — used=0 일 때 logical_old=-reserved 가 돼
 -- new_used 가 실비보다 예약치만큼 낮게 나오고 임계 교차 알림이 빠진다
 -- (R22 r5 N2). 유실 시 논리적 이전값은 0 이다.
-local logical_old = usage_lost and 0 or (used - reserved)
-local logical_new = logical_old + actual
+local MAXD = 1.7976931348623157e308
+local function sat(v)
+    -- 유한 저장값끼리의 ± 도 float64 를 넘을 수 있다(-1e308 - 1e308 = -Inf).
+    -- NaN/±Inf 는 cjson.encode 가 거부해 — 커밋된 정산(INCRBYFLOAT·마커
+    -- DEL·툼스톤은 이미 반영)의 응답 직렬화가 죽고 호출자가 실패로 오인해
+    -- lost 센티넬을 오발한다(17차 리뷰). 부호를 보존하는 포화로 수렴.
+    if v ~= v then return 0 end
+    if v == math.huge then return MAXD end
+    if v == -math.huge then return -MAXD end
+    return v
+end
+local logical_old = sat(usage_lost and 0 or (used - reserved))
+local logical_new = sat(logical_old + actual)
 
 local triggered = cjson.null
 if limit > 0 then
@@ -225,11 +249,15 @@ if limit > 0 then
     -- 1-ULP 차이로 check 경로와 판정이 갈린다(11차 리뷰).
     local highest = nil
     for _, t in ipairs(thresholds) do
-        if type(t) == 'number'
-            and logical_old * 100 < limit * t
-            and logical_new * 100 >= limit * t then
-            if highest == nil or t > highest then
-                highest = t
+        -- 소수점 임계값은 교차 후 threshold_triggered int 스키마 거부로
+        -- finalize 가 커밋 후 크래시 → 원장 누락(17차 리뷰 F2). 정수 수렴.
+        if type(t) == 'number' then
+            local ti = math.floor(t)
+            if logical_old * 100 < limit * ti
+                and logical_new * 100 >= limit * ti then
+                if highest == nil or ti > highest then
+                    highest = ti
+                end
             end
         end
     end
@@ -242,7 +270,8 @@ return cjson.encode({
     settled = true,
     recovered = recovered,
     new_used = logical_new,
-    remaining = limit - logical_new,
+    -- limit - (-MAXD) 도 +Inf 로 넘친다 — 같은 sat 으로 응답을 지킨다.
+    remaining = sat(limit - logical_new),
     threshold_triggered = triggered,
     app_clients = app_clients
 })

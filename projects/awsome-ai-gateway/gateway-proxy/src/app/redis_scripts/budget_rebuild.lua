@@ -70,6 +70,15 @@ else
     local marker_prefix = ARGV[2]
     local field_prefix  = ARGV[3] or ''
     local dead = {}
+    -- WRONGTYPE 인덱스는 HKEYS eval 실패 → 매 트리거마다 같은 키에서 죽어
+    -- rebuild 가 영구 미실행된다(17차 리뷰 F12) — 지워 재생을 연다.
+    -- Lua TYPE 은 {ok='hash'} 테이블 — `~='hash'` 비교는 항상 참이라
+    -- 정상 인덱스까지 지워지므로 ['ok'] 언랩이 필수.
+    local _t3 = redis.call('TYPE', KEYS[3])
+    if type(_t3) == 'table' then _t3 = _t3['ok'] end
+    if _t3 ~= 'hash' then
+        redis.call('DEL', KEYS[3])
+    end
     for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
         local v = redis.call('GET', marker_prefix .. f)
         local n = v and fin(tonumber(v))
@@ -107,7 +116,11 @@ else
     if live < 0 then live = 0 end  -- 오염 합산 방어(보수적 하한)
 end
 
-local db = fin(tonumber(ARGV[1])) or 0
+-- 비유한/비수치 원장('NaN'/'1e400'/'abc')은 0 으로 수렴하면 스코프가 이번
+-- 달 예산 전액을 새로 받는 **fail-open** 이 된다(17차 리뷰 F3). 실사용치를
+-- 모르는 오염은 소진으로 간주해 max-double 로 포화 — 행 수정까지 차단되고
+-- target 클램프가 그대로 받는다. 행 부재는 호출자가 '0' 을 넘겨 정상 통과.
+local db = fin(tonumber(ARGV[1])) or 1.7976931348623157e308
 if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 음수화 방지
 local target = db + live
 -- db+live 오버플로는 +Inf — 'inf' 카운터는 영구 fail-closed + 매 요청

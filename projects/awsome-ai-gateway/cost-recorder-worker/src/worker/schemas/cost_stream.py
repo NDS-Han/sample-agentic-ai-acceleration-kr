@@ -8,6 +8,7 @@ DB writer 로 넘기는 흐름. 양쪽 파일을 동기화 상태로 유지 (지
 """
 from __future__ import annotations
 
+import math
 from decimal import Decimal
 
 import structlog
@@ -36,6 +37,24 @@ class CostStreamEntry(BaseModel):
     web_search_count: int = 0
     cost_usd: Decimal
 
+    @field_validator(
+        "input_tokens", "output_tokens",
+        "cache_creation_tokens", "cache_read_tokens",
+        "reasoning_tokens", "web_search_count",
+        mode="before",
+    )
+    @classmethod
+    def _bounded_tokens(cls, v):
+        # 초대형·음수 카운트는 아래 incrby/INSERT 의 int64 오버플로로 감사 행
+        # 유실(17차 리뷰 F13) — [0, 1e12] 클램프(gateway 미러와 같은 규약).
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return v
+        if iv < 0 or iv > 10**12:
+            return min(max(iv, 0), 10**12)
+        return v
+
     @field_validator("cost_usd", mode="before")
     @classmethod
     def _finite_cost(cls, v):
@@ -43,11 +62,14 @@ class CostStreamEntry(BaseModel):
         # 저장 가능하다 — 그대로 INSERT/UPSERT 되면 budget_usages.used_usd
         # 행이 영구 NaN 이 돼 이후의 rebuild 가 전부 db=0 으로 읽는다
         # (16차 리뷰 F-5). 오염 한 건의 $0 기록이 원장 전체 오염보다 낫다.
+        # Decimal 유한이어도 float64 경계를 넘으면(1e400) 아래 daily 롤업의
+        # float()→inf→INCRBYFLOAT 거부로 배치가 dead-letter 까지 멈추고,
+        # 음수 비용은 일일 카운터를 감소시키는 정의상 오염 — 셋 다 0 수렴(17차).
         try:
             d = Decimal(str(v))
         except Exception:
             return v  # 파싱 불가는 Pydantic 표준 검증이 잡는다
-        if not d.is_finite():
+        if not d.is_finite() or not math.isfinite(float(d)) or d < 0:
             logger.warning("cost_usd_non_finite_coerced", raw=str(v))
             return Decimal("0")
         return v

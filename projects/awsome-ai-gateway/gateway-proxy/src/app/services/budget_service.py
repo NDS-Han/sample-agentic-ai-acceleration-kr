@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+import re
 import time
 from decimal import Decimal, InvalidOperation, Overflow
 from uuid import uuid4
@@ -58,6 +59,13 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 PER_APP_BUDGET_CLIENTS = ("claude-code", "cowork", "codex")
 
 
+# Redis INCRBYFLOAT 파서가 받는 형식 — Python float() 는 '1_000'(PEP-515
+# 언더스코어)·' 5' 처럼 Lua tonumber/Redis 가 거부하는 값을 받는다.
+# 프로브가 건강으로 오진하면 Lua 는 nil/거부로 읽어 reserve 가 영구 deny
+# 인데 자치 경로가 없다(17차 리뷰 F4) — 형식 불일치도 오염으로 본다.
+_COUNTER_VALUE_RE = re.compile(r"^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$")
+
+
 def _counter_unhealthy(v) -> bool:
     """Redis 사용량 카운터의 비정상 판정 — rebuild 트리거용.
 
@@ -68,6 +76,13 @@ def _counter_unhealthy(v) -> bool:
     probe 를 죽이지 않고 rebuild 의 fin() 으로 치유된다(14차 리뷰).
     """
     if v is None:
+        return True
+    if isinstance(v, bytes):
+        try:
+            v = v.decode("ascii")
+        except UnicodeDecodeError:
+            return True
+    if not isinstance(v, str) or not _COUNTER_VALUE_RE.match(v):
         return True
     try:
         f = float(v)
@@ -1357,9 +1372,12 @@ class BudgetService:
             # 경로가 500 을 낸다(16차 리뷰 F-7). 판정 불가는 차단으로 수렴 —
             # limit 은 0(명시적 차단), used 는 포화 취급해 정책 무관하게
             # 차단/스로틀 방향이다.
-            if not limit.is_finite():
+            # 음수도 같은 오염 클래스다 — used<0 이면 잔여가 limit+|x| 로
+            # 부풀어 fail-open 방향이고(Lua 측은 전 경로 음수→0 클램프),
+            # limit<0 은 0 이하 한도=차단이다(17차 리뷰).
+            if not limit.is_finite() or limit < 0:
                 limit = Decimal("0")
-            if not used.is_finite():
+            if not used.is_finite() or used < 0:
                 used = limit
             block, sw, ta = _evaluate_layer(used, limit, policy, thresholds)
             return block, {

@@ -25,13 +25,33 @@ local cost        = tonumber(ARGV[1])
 -- 음수 추정치는 아래 cost>0 게이트가 커밋을 건너뛰는데 reserved_cost=음수 가
 -- 반환돼 settle 의 (actual-reserved) 델타가 실비보다 크게 적용된다 — 0 으로
 -- 수렴시키면 예약도 반환값도 일관된다(12차 리뷰).
-if cost and cost < 0 then cost = 0 end
+-- NaN/Inf 도 같은 경로다 — NaN 은 cost>0 게이트를 빠져 커밋 없이
+-- reserved_cost=NaN 이 encode 를 죽이고, Inf 는 INCRBYFLOAT 가 거부해
+-- eval 이 죽는다(17차 리뷰).
+if cost and (cost < 0 or cost ~= cost
+    or cost == math.huge or cost == -math.huge) then cost = 0 end
 local cpm_limit   = tonumber(ARGV[2])
 local cph_limit   = tonumber(ARGV[3])
 local scope_label = ARGV[4]
 
-local cpm_used = tonumber(redis.call('GET', KEYS[1]) or '0')
-local cph_used = tonumber(redis.call('GET', KEYS[2]) or '0')
+-- 오염 버킷('nan'/'inf'/'abc'/'0x10') 치유 — 그대로 두면 INCRBYFLOAT 가
+-- 거부해 (a) KEYS[2] 오염 시 KEYS[1] 커밋 후 죽는 부분커밋 팬텀,
+-- (b) KEYS[1] 오염 시 eval 실패로 윈도우 내내 fail-open 이 된다(17차 F5).
+-- 비유한/비수치는 0 으로, 비표준 형식은 표준형으로 재기록해 값을 보존한다.
+local function _bkt(key)
+    local raw = redis.call('GET', key) or '0'
+    local v = tonumber(raw)
+    if not v or v ~= v or v == math.huge or v == -math.huge then
+        redis.call('SET', key, '0', 'KEEPTTL')
+        return 0
+    end
+    if raw ~= tostring(v) then
+        redis.call('SET', key, tostring(v), 'KEEPTTL')
+    end
+    return v
+end
+local cpm_used = _bkt(KEYS[1])
+local cph_used = _bkt(KEYS[2])
 
 local cpm_after = cpm_used + cost
 local cph_after = cph_used + cost
@@ -42,7 +62,9 @@ if cpm_limit and cpm_limit > 0 and cpm_after > cpm_limit then
         scope = scope_label,
         limit_type = "cpm",
         limit = cpm_limit,
-        remaining = math.max(0, cpm_limit - cpm_used),
+        -- limit - (-1e308) 같은 뺄셈이 +Inf 로 넘쳐 encode 를 죽이지
+        -- 않게 상한을 limit 으로 둔다 — 잔여는 어차피 limit 이 최대(17차).
+        remaining = math.max(0, math.min(cpm_limit, cpm_limit - cpm_used)),
         retry_after = 60,
         reserved_cost = 0,
     })
@@ -53,7 +75,7 @@ if cph_limit and cph_limit > 0 and cph_after > cph_limit then
         scope = scope_label,
         limit_type = "cph",
         limit = cph_limit,
-        remaining = math.max(0, cph_limit - cph_used),
+        remaining = math.max(0, math.min(cph_limit, cph_limit - cph_used)),
         retry_after = 3600,
         reserved_cost = 0,
     })

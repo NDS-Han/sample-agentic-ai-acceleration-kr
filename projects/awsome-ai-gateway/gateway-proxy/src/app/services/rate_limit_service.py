@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from decimal import Decimal
 from uuid import uuid4
@@ -597,10 +598,13 @@ class RateLimitService:
             # 비유한 한도(NUMERIC NaN/Inf 오염)는 아래 `> 0` 비교가
             # InvalidOperation 으로 죽어 요청이 500 이 된다 — 미설정과 같은
             # 0(unlimited) 수렴으로 막고 경고를 남긴다(16차 리뷰 F-7).
+            # Decimal 유한이어도 float64 경계를 넘으면(1e400) Lua tonumber→Inf
+            # →INCRBYFLOAT 거부로 eval 이 죽어 fail 모드에 진입한다 — 같은
+            # 0 수렴으로 정규화(17차 리뷰).
             if not v:
                 return Decimal("0")
             d = Decimal(str(v))
-            if not d.is_finite():
+            if not d.is_finite() or not math.isfinite(float(d)):
                 logger.warning("cost_limit_non_finite", raw=str(v))
                 return Decimal("0")
             return d

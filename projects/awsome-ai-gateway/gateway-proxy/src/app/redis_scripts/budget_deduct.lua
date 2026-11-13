@@ -74,6 +74,9 @@ if dedup_key and dedup_key ~= '' then
         -- 패턴이 자릿수를 제한하지 않아 400자리 숫자 → tonumber→inf →
         -- encode 크래시 — 비유한은 교차 없음으로 수렴.
         if tv ~= tv or tv == math.huge or tv == -math.huge then tv = 0 end
+        -- 't:80.5' 마커는 패턴을 통과하지만 int 스키마가 소수를 거부해
+        -- 재생 응답이 ValidationError 를 일으킨다(17차 리뷰 F2) — 정수 수렴.
+        tv = math.floor(tv)
         return cjson.encode({
             new_used = used_now,
             remaining = limit - used_now,
@@ -112,11 +115,16 @@ if limit > 0 then
     -- 식이다. 나눗셈-먼저 형태는 정확한 경계값에서 1-ULP 차이로 판정이
     -- 갈린다(11차 리뷰).
     for _, t in ipairs(thresholds) do
-        if type(t) == 'number'
-            and used * 100 < limit * t
-            and new_used * 100 >= limit * t then
-            if highest == nil or t > highest then
-                highest = t
+        -- 소수점 임계값('80.5')은 교차는 하지만 threshold_triggered int
+        -- 스키마가 거부해 finalize 가 커밋 후 ValidationError 로 죽는다 —
+        -- 원장 기록이 영구 누락된다(17차 리뷰 F2). 정수로 수렴한다.
+        if type(t) == 'number' then
+            local ti = math.floor(t)
+            if used * 100 < limit * ti
+                and new_used * 100 >= limit * ti then
+                if highest == nil or ti > highest then
+                    highest = ti
+                end
             end
         end
     end
@@ -135,9 +143,20 @@ if dedup_key and dedup_key ~= '' then
     redis.call('SET', dedup_key, 't:' .. tostring(highest or 0), 'EX', dedup_ttl)
 end
 
+local function sat(v)
+    -- INCRBYFLOAT 는 long double 이라 1e308+1e308 도 커밋되는데, Lua 의
+    -- used+cost 는 double 이라 Inf 가 된다 — 응답 필드의 비유한 값은
+    -- cjson.encode 를 죽여 커밋된 차감이 실패로 오인된다(17차 리뷰,
+    -- 실Redis 재현). 부호 보존 포화로 수렴.
+    if v ~= v then return 0 end
+    if v == math.huge then return 1.7976931348623157e308 end
+    if v == -math.huge then return -1.7976931348623157e308 end
+    return v
+end
+
 return cjson.encode({
-    new_used = new_used,
-    remaining = limit - new_used,
+    new_used = sat(new_used),
+    remaining = sat(limit - new_used),
     threshold_triggered = triggered,
     app_clients = app_clients
 })

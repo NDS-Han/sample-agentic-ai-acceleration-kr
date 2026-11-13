@@ -54,6 +54,17 @@ local live = 0
 local covered = {}
 local dead = {}
 local field_prefix = ARGV[4] or ''
+-- WRONGTYPE 인덱스(문자열/리스트가 같은 경로에 심어진 경우)는 HKEYS 가
+-- eval 실패로 죽어 호출측이 그 행을 매 틱 스킵한다 — resvsum 드리프트가
+-- 영구 미청소(17차 리뷰 F12). hash 가 아니면 재생 불가 데이터이므로 지워
+-- 다음 reserve 의 HSET 이 정상 해시를 다시 만들게 한다.
+-- ⚠️ Lua 의 TYPE 은 문자열이 아니라 {ok='hash'} 테이블을 반환한다 —
+--    `~= 'hash'` 비교는 항상 참이라 정상 인덱스까지 지워진다(실Redis 검증).
+local _t3 = redis.call('TYPE', KEYS[3])
+if type(_t3) == 'table' then _t3 = _t3['ok'] end
+if _t3 ~= 'hash' then
+    redis.call('DEL', KEYS[3])
+end
 for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
     local v = redis.call('GET', ARGV[3] .. f)
     local n = v and fin(tonumber(v))
@@ -137,7 +148,9 @@ if resvsum == snap then
     end
 end
 
-local db     = fin(tonumber(ARGV[1])) or 0
+-- 비유한/비수치 원장은 0 수렴 시 스코프가 예산 전액을 새로 받는 fail-open
+-- (17차 리뷰 F3). 소진으로 간주해 max-double 포화 — 행 수정까지 차단.
+local db     = fin(tonumber(ARGV[1])) or 1.7976931348623157e308
 if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 이 음수가
                            -- 되면 플로어가 아무것도 복구하지 못한다.
 local target = db + live

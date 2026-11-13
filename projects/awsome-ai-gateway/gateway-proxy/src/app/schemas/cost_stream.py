@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from decimal import Decimal
 
@@ -38,17 +39,42 @@ class CostStreamEntry(BaseModel):
     web_search_count: int = 0
     cost_usd: Decimal
 
+    @field_validator(
+        "input_tokens", "output_tokens",
+        "cache_creation_tokens", "cache_read_tokens",
+        "reasoning_tokens", "web_search_count",
+        mode="before",
+    )
+    @classmethod
+    def _bounded_tokens(cls, v):
+        # 프로바이더/오염 리포트의 초대형·음수 카운트는 워커의 incrby/INSERT 가
+        # int64/INTEGER 오버플로로 죽어 감사 행이 유실된다(17차 리뷰 F13).
+        # 거부하면 make() 가 커밋 후 ValidationError 를 던져 같은 유실이
+        # 나므로 [0, 1e12] 로 클램프한다 — 예산 한도가 실제 상한 역할.
+        try:
+            iv = int(v)
+        except (TypeError, ValueError):
+            return v
+        if iv < 0 or iv > 10**12:
+            return min(max(iv, 0), 10**12)
+        return v
+
     @field_validator("cost_usd", mode="before")
     @classmethod
     def _finite_cost(cls, v):
         # 'NaN'/'Infinity' 는 Decimal 파싱을 통과하고 Postgres NUMERIC 에도
         # 저장 가능하다 — 그대로 흘러가면 원장(usage_logs/budget_usages)이
         # 영구 오염된다(16차 리뷰 F-5, worker 측 미러와 같은 규약).
+        # Decimal 유한이어도 float64 경계를 넘으면(1e400) 워커의
+        # float()→inf→INCRBYFLOAT 가 배치를 죽이고, 음수 비용은
+        # 집계/일일 카운터를 감소시키는 정의상 오염 — 셋 다 0 수렴(17차).
         try:
             d = Decimal(str(v))
         except Exception:
             return v
-        return v if d.is_finite() else Decimal("0")
+        if not d.is_finite() or not math.isfinite(float(d)) or d < 0:
+            return Decimal("0")
+        return v
 
     latency_ms: int
     # TTFT(time to first token) in ms. 스트리밍 첫 콘텐츠 델타까지의 시간.
