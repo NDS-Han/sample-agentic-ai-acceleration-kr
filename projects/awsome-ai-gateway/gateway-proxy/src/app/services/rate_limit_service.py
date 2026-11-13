@@ -593,10 +593,26 @@ class RateLimitService:
         실제 비용과 차액 정산(요청 자체가 거부되니 실제 비용 0 → 다음 settle 로 환불).
         budget_service.check 와 동형 패턴.
         """
-        user_cpm = Decimal(str(user_cpm_limit)) if user_cpm_limit else Decimal("0")
-        user_cph = Decimal(str(user_cph_limit)) if user_cph_limit else Decimal("0")
-        team_cpm = Decimal(str(team_cpm_limit)) if team_cpm_limit else Decimal("0")
-        team_cph = Decimal(str(team_cph_limit)) if team_cph_limit else Decimal("0")
+        def _lim(v) -> Decimal:
+            # 비유한 한도(NUMERIC NaN/Inf 오염)는 아래 `> 0` 비교가
+            # InvalidOperation 으로 죽어 요청이 500 이 된다 — 미설정과 같은
+            # 0(unlimited) 수렴으로 막고 경고를 남긴다(16차 리뷰 F-7).
+            if not v:
+                return Decimal("0")
+            d = Decimal(str(v))
+            if not d.is_finite():
+                logger.warning("cost_limit_non_finite", raw=str(v))
+                return Decimal("0")
+            return d
+
+        user_cpm = _lim(user_cpm_limit)
+        user_cph = _lim(user_cph_limit)
+        team_cpm = _lim(team_cpm_limit)
+        team_cph = _lim(team_cph_limit)
+        # 비유한 추정치는 Lua 의 cpm_after=used+NaN 가 allowed 로 통과한 뒤
+        # 응답의 reserved_cost=NaN 이 cjson.encode 를 죽이고, Python 측
+        # max() 도 InvalidOperation 이다 — 한도와 같은 0 수렴(16차 리뷰 F-7).
+        estimated_cost = _lim(estimated_cost)
 
         has_user_limit = user_cpm > 0 or user_cph > 0
         has_team_limit = bool(team_id) and (team_cpm > 0 or team_cph > 0)

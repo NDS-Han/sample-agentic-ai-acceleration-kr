@@ -51,6 +51,17 @@ local function decode_or_nil(s)
     return v
 end
 
+-- 응답 필드용 유한성 정규화 — 오염 마커/카운터('nan'/'inf')가 그대로
+-- cjson.encode 에 실리면 직렬화 거부로 eval 이 죽고, 커밋된 예약의
+-- dedup 재생이 marker_ttl 동안 매 재시도마다 실패한다(16차 리뷰).
+local function fin(v)
+    if type(v) == 'number' and v == v
+        and v ~= math.huge and v ~= -math.huge then
+        return v
+    end
+    return nil
+end
+
 local function reply(allowed, reserved, reason, used, limit, config_present)
     return cjson.encode({
         allowed = allowed,
@@ -81,12 +92,15 @@ if redis.call('EXISTS', marker_key) == 1 then
         allowed = true,
         reserved = true,
         reason = cjson.null,
-        used_usd = tonumber(redis.call('GET', usage_key) or '0'),
+        used_usd = fin(tonumber(redis.call('GET', usage_key))) or 0,
         limit_usd = 0,
         scope = scope_label,
         config_present = true,
         dedup_hit = true,
-        reserved_usd = tonumber(redis.call('GET', marker_key)),
+        -- 비유한 마커는 nil → 호출자가 추정치 폴백 — settle 은 어차피
+        -- 마커 fin() 판독이 복구 분기로 보내므로 이 값은 보조다.
+        reserved_usd = fin(tonumber(redis.call('GET', marker_key)))
+            or cjson.null,
         partial = cjson.null,
     })
 end
@@ -103,7 +117,7 @@ if redis.call('GET', 'budget:settled:' .. string.sub(marker_key, 16)) then
         allowed = true,
         reserved = false,
         reason = cjson.null,
-        used_usd = tonumber(redis.call('GET', usage_key) or '0'),
+        used_usd = fin(tonumber(redis.call('GET', usage_key))) or 0,
         limit_usd = 0,
         scope = scope_label,
         config_present = true,
@@ -212,7 +226,10 @@ redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 -- 죽는다 — 마커/인덱스 없는 영구 팬텀 예약이 usage 에 남는다(15차 리뷰).
 -- 오염 저장값은 0 으로 덮어써 치유한다(settle 과 같은 규약).
 local rs_stored = tonumber(redis.call('GET', KEYS[4]) or '0')
-if rs_stored ~= rs_stored or rs_stored == math.huge
+-- tonumber('abc') 는 nil — `nil ~= nil` 은 false 라 비수치 문자열은
+-- 비유한 가드를 그대로 통과해 INCRBYFLOAT 가 거부되고, usage 커밋 후
+-- 여기서 죽으면 매 시도마다 무표지 팬텀이 쌓인다(16차 리뷰).
+if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
 end

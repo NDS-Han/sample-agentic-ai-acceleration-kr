@@ -45,6 +45,12 @@ class HealthChecker:
         # 있어 단발 교정은 열화 중 사용분을 놓칠 수 있다(워커 지연).
         self._budget_reconcile_until: float = 0.0
         self._budget_reconcile_running = False
+        # 부팅 시 1회 무장 — 열화 전이는 in-memory level 비교라, Redis 장애
+        # 창에 파드가 재시작되면 level=HEALTHY 부터 시작해 전이를 영구 놓치고
+        # 열화 중 스킵된 deduct 분량이 카운터에 얇게 남는다(키는 존재·양수라
+        # _counter_unhealthy 도 못 잡는다, 16차 리뷰 F-6). 비용은 리더 락과
+        # 퀴에센스 게이트가 상한을 둔다 — 정상 부팅이면 스냅샷만 읽고 no-op.
+        self._startup_reconcile_armed = True
         # P0-②: drained on each healthy Redis check to re-publish cost:stream
         # payloads that failed XADD while Redis was down.
         self._cost_stream_spool = cost_stream_spool
@@ -112,6 +118,15 @@ class HealthChecker:
                 # exists() 기반 재수화가 절대 안 돌고, 누락분만큼 월예산이 헐거워진다.
                 # 복구 전이에 교정 창을 열고, 창이 닫힐 때까지 매 틱 재교정한다.
                 self._budget_reconcile_until = time.monotonic() + 600.0
+            if self._startup_reconcile_armed:
+                # 부팅 후 첫 healthy 틱 — 재시작이 장애 창과 겹쳐 전이 신호를
+                # 놓친 경우를 덮는다. 창은 짧게(전이 창과 달리 재발행 지연을
+                # 기다릴 필요가 없고, 필요하면 후속 틱이 전이 규칙으로 다시 연다).
+                # 동일 틱에 복구 전이 창(600s)이 열렸으면 줄이지 않는다.
+                self._startup_reconcile_armed = False
+                self._budget_reconcile_until = max(
+                    self._budget_reconcile_until, time.monotonic() + 120.0
+                )
             # 창이 열려 있는 동안 매 healthy 틱 재교정 — 단발은 워커 지연(스풀
             # 재발행→budget_usages 반영)을 놓친다. 교정 자체는 멱등.
             if (

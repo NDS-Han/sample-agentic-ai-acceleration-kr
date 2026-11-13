@@ -52,7 +52,14 @@ for i = 1, num_scopes do
             local oldest = redis.call('ZRANGE', key, 0, 0, 'WITHSCORES')
             local window_reset_ms = now_ms + window_ms
             if #oldest > 0 then
-                window_reset_ms = tonumber(oldest[2]) + window_ms
+                -- 오염 스코어('nan'/'inf')는 truthy 라 그대로 더하면
+                -- retry_after 가 NaN 이 돼 cjson.encode 가 죽는다
+                -- (16차 리뷰). 비유한은 호출 시각 기본값으로 둔다.
+                local os_ = tonumber(oldest[2])
+                if os_ and os_ == os_ and os_ ~= math.huge
+                    and os_ ~= -math.huge then
+                    window_reset_ms = os_ + window_ms
+                end
             end
             local retry_after = math.ceil((window_reset_ms - now_ms) / 1000)
             if retry_after < 1 then retry_after = 1 end

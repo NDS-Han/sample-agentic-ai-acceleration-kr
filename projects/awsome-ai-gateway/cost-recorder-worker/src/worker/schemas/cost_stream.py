@@ -10,7 +10,10 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+import structlog
+from pydantic import BaseModel, Field, field_validator
+
+logger = structlog.get_logger(__name__)
 
 
 class CostStreamEntry(BaseModel):
@@ -32,6 +35,22 @@ class CostStreamEntry(BaseModel):
     # Persisted to usage_logs.web_search_count for per-client AgentCore search analytics.
     web_search_count: int = 0
     cost_usd: Decimal
+
+    @field_validator("cost_usd", mode="before")
+    @classmethod
+    def _finite_cost(cls, v):
+        # 'NaN'/'Infinity' 는 Decimal 파싱을 통과하고 Postgres NUMERIC 에도
+        # 저장 가능하다 — 그대로 INSERT/UPSERT 되면 budget_usages.used_usd
+        # 행이 영구 NaN 이 돼 이후의 rebuild 가 전부 db=0 으로 읽는다
+        # (16차 리뷰 F-5). 오염 한 건의 $0 기록이 원장 전체 오염보다 낫다.
+        try:
+            d = Decimal(str(v))
+        except Exception:
+            return v  # 파싱 불가는 Pydantic 표준 검증이 잡는다
+        if not d.is_finite():
+            logger.warning("cost_usd_non_finite_coerced", raw=str(v))
+            return Decimal("0")
+        return v
 
     latency_ms: int
     # TTFT(time to first token) in ms. 스트리밍 첫 콘텐츠 델타까지의 시간.

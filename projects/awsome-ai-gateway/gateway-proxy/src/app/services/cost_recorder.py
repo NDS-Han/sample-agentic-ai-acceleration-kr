@@ -448,6 +448,20 @@ class CostRecorder:
             return Decimal("0")
 
         cost_usd = calculate_cost(usage, model_config)
+        # 비유한 비용 방어 — 오염 단가(NaN/Infinity 는 Postgres NUMERIC 에
+        # 저장 가능)가 계산을 통과하면, str()='NaN' 이 INCRBYFLOAT 를 거부해
+        # 카운터는 보존되지만 **스트림 페이로드는 그대로** usage_logs 와
+        # budget_usages.used_usd 를 NaN 으로 영구 오염시킨다 — 이후 모든
+        # rebuild 가 fin()→db=0 으로 읽어 기간 내내 과소 복원(16차 리뷰
+        # F-5). 유실 방향보다 $0 기록+경고가 낫다 — 요청은 이미 서빙됐고
+        # 감사 행은 남겨야 한다.
+        if not cost_usd.is_finite():
+            logger.warning(
+                "cost_usd_non_finite",
+                user_id=auth_context.user_id,
+                model=model_config.alias,
+            )
+            cost_usd = Decimal("0")
         # KST 월 — 아래 budget:*:{period} 키를 **쓰는** 쪽이다. 읽는 쪽
         # (middleware/budget.py, routers/usage.py)과 반드시 같은 경계여야 한다.
         # D-20/§6-4: **요청 시작 시각**의 월 — 완료 시각으로 잡으면 월 경계를

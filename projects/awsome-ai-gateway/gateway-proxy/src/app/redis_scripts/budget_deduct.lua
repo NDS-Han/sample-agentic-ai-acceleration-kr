@@ -63,8 +63,17 @@ end
 if dedup_key and dedup_key ~= '' then
     local replay = redis.call('GET', dedup_key)
     if replay then
-        local used_now = tonumber(redis.call('GET', usage_key) or '0')
+        -- 표시값의 비유한 정규화 — 'nan' 카운터/마커가 cjson.encode 를 죽이면
+        -- 커밋된 차감의 재생이 dedup_ttl 동안 매 재시도 실패한다(16차 리뷰).
+        local used_now = tonumber(redis.call('GET', usage_key))
+        if not used_now or used_now ~= used_now
+            or used_now == math.huge or used_now == -math.huge then
+            used_now = 0
+        end
         local tv = tonumber(string.match(replay, '^t:([%d.]+)$') or '') or 0
+        -- 패턴이 자릿수를 제한하지 않아 400자리 숫자 → tonumber→inf →
+        -- encode 크래시 — 비유한은 교차 없음으로 수렴.
+        if tv ~= tv or tv == math.huge or tv == -math.huge then tv = 0 end
         return cjson.encode({
             new_used = used_now,
             remaining = limit - used_now,

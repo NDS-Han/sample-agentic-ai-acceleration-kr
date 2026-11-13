@@ -1352,6 +1352,15 @@ class BudgetService:
             기본값을 여기서 구우면 degrade 동안만 알림 기준이 달라진다(0037).
             판정(_evaluate_layer)과 표시 dict 양쪽에 같은 값이 간다.
             """
+            # 비유한 행값(Postgres NUMERIC 은 'NaN'/'Infinity' 저장 가능)은
+            # 아래 비교·나눗셈이 InvalidOperation/ValueError 로 죽어 폴백
+            # 경로가 500 을 낸다(16차 리뷰 F-7). 판정 불가는 차단으로 수렴 —
+            # limit 은 0(명시적 차단), used 는 포화 취급해 정책 무관하게
+            # 차단/스로틀 방향이다.
+            if not limit.is_finite():
+                limit = Decimal("0")
+            if not used.is_finite():
+                used = limit
             block, sw, ta = _evaluate_layer(used, limit, policy, thresholds)
             return block, {
                 "limit_usd": limit,

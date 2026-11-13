@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from app.periods import date_at, period_at
 
@@ -37,6 +37,18 @@ class CostStreamEntry(BaseModel):
     # Server-side web search calls for this request — attribution metric, NOT billing.
     web_search_count: int = 0
     cost_usd: Decimal
+
+    @field_validator("cost_usd", mode="before")
+    @classmethod
+    def _finite_cost(cls, v):
+        # 'NaN'/'Infinity' 는 Decimal 파싱을 통과하고 Postgres NUMERIC 에도
+        # 저장 가능하다 — 그대로 흘러가면 원장(usage_logs/budget_usages)이
+        # 영구 오염된다(16차 리뷰 F-5, worker 측 미러와 같은 규약).
+        try:
+            d = Decimal(str(v))
+        except Exception:
+            return v
+        return v if d.is_finite() else Decimal("0")
 
     latency_ms: int
     # TTFT(time to first token) in ms. 스트리밍 첫 콘텐츠 델타까지의 시간.

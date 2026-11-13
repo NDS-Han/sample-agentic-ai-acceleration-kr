@@ -180,12 +180,16 @@ redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
 -- (15차 리뷰). 오염 저장값은 0 으로 덮어써 치유하고 차감은 아래 음수
 -- 플로어가 정리한다.
 local rs_stored = tonumber(redis.call('GET', KEYS[4]) or '0')
-if rs_stored ~= rs_stored or rs_stored == math.huge
+-- tonumber('abc') 는 nil — `nil ~= nil` 은 false 라 비수치 문자열은
+-- 비유한 가드를 그대로 통과해 INCRBYFLOAT 가 거부되고, usage 커밋 후
+-- 여기서 죽으면 재시도마다 delta 가 이중 적용된다(16차 리뷰).
+if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
 end
 redis.call('INCRBYFLOAT', KEYS[4], -reserved)
-if tonumber(redis.call('GET', KEYS[4]) or '0') < 0 then
+local rs_after = tonumber(redis.call('GET', KEYS[4]) or '0')
+if rs_after and rs_after < 0 then
     -- 웜업/구버전 경로의 bounded 오차로 음수가 될 수 있다 — 합계의 불변식은
     -- >=0 이라 음수 잔량은 표시 실지출을 어긋나게 한다(R23 r3 N-3).
     redis.call('SET', KEYS[4], '0')

@@ -57,10 +57,18 @@ for i = 0, window_sec - 1 do
   local b = now_sec - i
   local t = redis.call('GET', KEYS[2] .. ':' .. b)
   local f = redis.call('GET', KEYS[1] .. ':' .. b)
-  -- 오염 버킷('abc')은 tonumber→nil 이라 합산 중 런타임 에러로 eval 이
-  -- 죽는다 — 비수치는 0 으로 세지 않는다(15차 리뷰).
-  if t then total = total + (tonumber(t) or 0) end
-  if f then fails = fails + (tonumber(f) or 0) end
+  -- 오염 버킷은 합산에서 제외 — 'abc' 는 tonumber→nil 이라 eval 이 죽고,
+  -- 'nan'/'inf' 는 진성 비유한값이라 `or 0` 을 truthy 로 통과해 total 이
+  -- NaN 이 되면(모든 비교 거짓) 회로가 버킷 TTL 동안 절대 열리지 않는다
+  -- (15차 가드의 미커버 클래스, 16차 리뷰). 음수 버킷도 합계를 깎으므로 제외.
+  local tv = tonumber(t)
+  if tv and tv == tv and tv ~= math.huge and tv ~= -math.huge and tv >= 0 then
+    total = total + tv
+  end
+  local fv = tonumber(f)
+  if fv and fv == fv and fv ~= math.huge and fv ~= -math.huge and fv >= 0 then
+    fails = fails + fv
+  end
 end
 
 -- 실패 기록일 때만 열기 판정을 한다 — 프로브 close 는 :open 만 지우고 초당
