@@ -155,6 +155,7 @@ def conservative_admission_body(
     max_searches_per_turn: int = 0,
     default_max_results: int = 0,
     bound_turns: int = 0,
+    admission_add_cap: int = 0,
 ) -> dict:
     """웹서치 루프 입장 심사용 보수 예약 바디 (R2-9 / R3-5 / R20-S1).
 
@@ -197,7 +198,14 @@ def conservative_admission_body(
         growth_rounds = sum(min(t, iters) for t in range(turns))
         growth_chars = per_turn_results * per_result_cap * growth_rounds
         # 결과 텍스트는 대부분 ASCII — ~4자/토큰.
-        body["_gw_admission_input_add"] = growth_chars // 4
+        add = growth_chars // 4
+        # 최악치 가산을 상한으로 클램프 — TPM 한도가 바닥(기본값 기준 ~63k+
+        # 가산)보다 낮은 유저는 웹서치 요청이 사실상 영구 429 가 되므로,
+        # settle 이 실비로 환불하는 점을 감안해 예약만 상한으로 묶는다
+        # (9차 ponytail #3). 0 = 무제한(구 동작).
+        if admission_add_cap > 0:
+            add = min(add, admission_add_cap)
+        body["_gw_admission_input_add"] = add
     return body
 
 

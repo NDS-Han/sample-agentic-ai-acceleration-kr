@@ -858,6 +858,7 @@ async def _handle_responses(request: Request):
                 # Responses 스티처는 soft/nudge 턴이 없다 — 검색 턴 + hard final 이
                 # 실제 상한이다(Anthropic 의 iters+3 과 구분, R20 S-b).
                 bound_turns=_s.web_search_max_iterations + 1,
+                admission_add_cap=_s.web_search_admission_input_add_cap,
             )
 
         rejected = await enforce_rate_limits(

@@ -828,3 +828,53 @@ async def test_rebuild_counter_scans_during_index_warmup():
     assert applied is True
     args = mock_redis.eval.await_args.args
     assert args[8] == "3.75"  # 스캔 합이 ARGV 로 전달됨
+
+
+def test_build_status_all_throttle_tiers_no_assert():
+    """전 계층이 THROTTLE 이면 assert 없이 표시용 상태를 돌려준다.
+
+    9차 ponytail #1 회귀 — throttle-only 팀은 best=None → AssertionError
+    → Redis 경로 except → DB 폴백 → 같은 assert 재전파로 그 팀의 모든
+    요청이 500 이었다.
+    """
+    from app.services.budget_service import _build_status
+
+    team = {"limit_usd": 100, "used_usd": 95, "policy": "throttle",
+            "threshold_pct": 95, "soft_warning": False,
+            "throttle_active": True, "throttle_rpm_pct": 30}
+    s = _build_status([("team", team)], team)
+    assert s.tier == "team"
+    assert s.remaining_usd == Decimal("5")        # 표시용 limit-used
+    assert s.throttle_active is True
+    assert s.throttle_rpm_pct == 30
+
+    # used>limit 의 초과 상태도 음수 그대로 — throttle 은 차단하지 않는다.
+    team2 = dict(team, used_usd=110)
+    s2 = _build_status([("team", team2)], team2)
+    assert s2.remaining_usd == Decimal("-10")
+
+
+def test_evaluate_layer_uses_row_thresholds():
+    """DB 폴백의 throttle 발화는 행의 alert_thresholds 를 따른다.
+
+    9차 ponytail #2 회귀 — 하드코딩된 기본값으로 판정하면 Redis 경로
+    (config.thresholds 순회)와 degrade 방향에 따라 발화가 갈렸다.
+    """
+    from app.schemas.domain import BudgetPolicy
+    from app.services.budget_service import _evaluate_layer
+
+    # 60% 사용 — 기본 [80,90,100] 은 미발화, 행의 [50] 은 발화.
+    _, _, ta = _evaluate_layer(
+        Decimal("60"), Decimal("100"), BudgetPolicy.THROTTLE, [50]
+    )
+    assert ta is True
+    # 의도된 [](알림/발화 끔)은 어떤 사용률에서도 발화하지 않는다.
+    _, _, ta = _evaluate_layer(
+        Decimal("99"), Decimal("100"), BudgetPolicy.THROTTLE, []
+    )
+    assert ta is False
+    # thresholds=None 은 기본값 — 85% 면 [80] 경계 넘어 발화.
+    _, _, ta = _evaluate_layer(
+        Decimal("85"), Decimal("100"), BudgetPolicy.THROTTLE, None
+    )
+    assert ta is True

@@ -304,6 +304,14 @@ class Settings(BaseSettings):
     #: 400s the continuation turn and loses everything billed so far. Observed: the model
     #: never asked for more than 3 in one turn.
     web_search_max_searches_per_turn: int = 3
+    #: Cap on the ADMISSION-only input-token add for web-search requests (see
+    #: ``conservative_admission_body``). The raw worst-case growth add is
+    #: per_turn_results × max_result_chars × growth_rounds/4 — with defaults
+    #: (3×12000×7/4) that alone is ~63k tokens, so any TPM budget below ~80k
+    #: rejects web-search requests before they start (permanent 429, not
+    #: degradation). Reserving is still conservative up to this cap; settle
+    #: refunds the excess either way. 0 = uncapped (old behaviour).
+    web_search_admission_input_add_cap: int = Field(default=16384, ge=0)
     #: Put a cache_control marker on the search results (tool_result) the loop injects so later
     #: turns of the same request read them at the cached price (10% of list). 2026-09-16: most
     #: of a multi-search request's input cost was results re-sent every turn (3 searches: 6R

@@ -144,7 +144,8 @@ def _as_client_list(value) -> list[str]:
     return []
 
 def _evaluate_layer(
-    used: Decimal, limit: Decimal, policy: BudgetPolicy
+    used: Decimal, limit: Decimal, policy: BudgetPolicy,
+    thresholds: list[int] | None = None,
 ) -> tuple[str | None, bool, bool]:
     """한 예산 계층의 판정. ``(block_reason_suffix, soft_warning, throttle_active)``.
 
@@ -191,7 +192,12 @@ def _evaluate_layer(
     throttle_active = False
     if policy == BudgetPolicy.THROTTLE:
         usage_pct = int(used / limit * 100) if limit > 0 else 0
-        for threshold in sorted(DEFAULT_THRESHOLDS, reverse=True):
+        # 호출자가 넘긴 행의 alert_thresholds — 하드코딩된 기본값으로 판정하면
+        # Redis 경로(Lua 는 config.thresholds 를 순회)와 degrade 방향에 따라
+        # 발화가 갈린다(9차 ponytail #2). [] 는 유효한 설정(발화 끔)이라
+        # or 폴백 없이 None 만 기본값으로 본다.
+        _ts = DEFAULT_THRESHOLDS if thresholds is None else thresholds
+        for threshold in sorted(_ts, reverse=True):
             if usage_pct >= threshold:
                 throttle_active = True
                 break
@@ -242,8 +248,20 @@ def _build_status(tiers: list[tuple[str, dict]], team_result: dict) -> BudgetSta
         if best is None or remaining < best[0]:
             best = (remaining, name, r)
 
-    # team 계층은 도달 시 항상 config_present — best 는 비어 있을 수 없다.
-    assert best is not None
+    if best is None:
+        # 전 계층이 THROTTLE — 금액 차단이 없는 팀의 정규 형태다(§6-5 에서
+        # throttle 은 잔여 후보가 아니다). 마지막 계층을 표시용으로 쓰고
+        # 잔여는 limit-used 그대로 보인다 — throttle 은 초과해도 차단하지
+        # 않으므로 음수도 정직한 표시다. assert 로 터뜨리면 Redis 경로의
+        # generic catch → DB 폴백 → 같은 assert 재전파로 그 팀 전체가
+        # 500 이 된다(9차 ponytail #1).
+        _name, _r = tiers[-1]
+        best = (
+            Decimal(str(_r.get("limit_usd", 0)))
+            - Decimal(str(_r.get("used_usd", 0))),
+            _name,
+            _r,
+        )
     remaining, tier, decisive = best
     # 임계값은 팀 계층 dict 에 실린 값을 쓴다 — Redis 경로의 lua 결과는 이 키를
     # 싣지 않으므로(None → 기본값) 예전 동작과 같고, DB degrade 경로는 호출자가
@@ -1286,8 +1304,9 @@ class BudgetService:
             Redis 경로와 이 경로를 같은 코드로 조합할 수 있게 한다. ``thresholds``
             는 호출자가 해당 BudgetConfig 행의 ``_row_thresholds`` 값을 넘긴다 —
             기본값을 여기서 구우면 degrade 동안만 알림 기준이 달라진다(0037).
+            판정(_evaluate_layer)과 표시 dict 양쪽에 같은 값이 간다.
             """
-            block, sw, ta = _evaluate_layer(used, limit, policy)
+            block, sw, ta = _evaluate_layer(used, limit, policy, thresholds)
             return block, {
                 "limit_usd": limit,
                 "used_usd": used,

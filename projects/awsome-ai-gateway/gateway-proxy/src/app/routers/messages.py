@@ -782,6 +782,7 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
             max_result_chars=_settings_ws.web_search_max_result_chars,
             max_searches_per_turn=_settings_ws.web_search_max_searches_per_turn,
             default_max_results=_settings_ws.web_search_max_results_default,
+            admission_add_cap=_settings_ws.web_search_admission_input_add_cap,
         )
         try:
             _admission = await enforce_candidate_admission(
