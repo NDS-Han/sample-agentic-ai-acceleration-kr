@@ -43,7 +43,7 @@ locals {
   # family 가 어긋난다 — AWS 기본값이 메이저를 넘기면 (예: 16.x → 17.9)
   # 생성 시 family mismatch 로 실패한다.
   pg_major = split(".", coalesce(
-    var.engine_version, data.aws_rds_engine_version.default.version))[0]
+  var.engine_version, data.aws_rds_engine_version.default.version))[0]
 }
 
 # AWS 가 지금 생성하는 aurora-postgresql 기본 버전 — family 를 그쪽에 맞춘다.
@@ -78,8 +78,8 @@ module "aurora" {
   source  = "terraform-aws-modules/rds-aurora/aws"
   version = "~> 9.10"
 
-  name           = "${var.project}-${var.environment}"
-  engine         = "aurora-postgresql"
+  name   = "${var.project}-${var.environment}"
+  engine = "aurora-postgresql"
   # engine_version 을 관리하지 않는다 — auto_minor_version_upgrade=true 라 AWS 가
   # 마이너를 자동 패치하고, 선언하면 매번 "실측 > 선언" 의 in-place 다운그레이드
   # plan 이 뜬다(RDS 는 마이너 다운그레이드 불가 → apply 실패). null 은
@@ -153,8 +153,10 @@ module "aurora" {
   db_cluster_parameter_group_description = "Cluster PG for ${var.project}-${var.environment}"
   db_cluster_parameter_group_parameters = [
     {
-      name         = "log_statement"
-      value        = local.safeguards ? "ddl" : "all"
+      name = "log_statement"
+      # "all" 은 리터럴까지 CloudWatch 에 남긴다 — 프롬프트/PII 가 실릴 수 있어
+      # 디버그 명시 옵트인(var.log_all_statements)일 때만 연다.
+      value        = var.log_all_statements ? "all" : "ddl"
       apply_method = "pending-reboot"
     },
     {

@@ -93,6 +93,12 @@ variable "safeguards" {
   default     = null
 }
 
+variable "log_all_statements" {
+  description = "true 면 log_statement=all(리터럴 포함 전체 SQL 로그). 디버그 전용 — 기본 ddl"
+  type        = bool
+  default     = false
+}
+
 variable "kms_key_id" {
   description = "스토리지 암호화용 KMS key ID"
   type        = string

@@ -83,7 +83,7 @@ resource "aws_ecr_lifecycle_policy" "chat_agent" {
 # ------------------------------------------------------------------------------
 resource "aws_s3_bucket" "staging" {
   bucket        = "${local.name_prefix}-staging-${data.aws_caller_identity.current.account_id}"
-  force_destroy = true # dev 만. prod 는 false 로 override 권장
+  force_destroy = var.environment == "dev" # dev 만 — prod/기타 env 는 destroy 가 데이터를 날리지 않도록 false
 
   tags = merge(var.tags, { Name = "${local.name_prefix}-staging" })
 }

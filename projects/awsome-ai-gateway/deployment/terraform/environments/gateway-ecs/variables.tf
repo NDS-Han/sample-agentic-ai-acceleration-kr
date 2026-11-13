@@ -142,10 +142,10 @@ variable "alb_internal" {
 }
 
 variable "allowed_cidrs" {
-  type    = list(string)
-  # null = 미지정 → 모듈 기본 0.0.0.0/0. default=[] 로 두면 main.tf 가 [] 를
-  # 명시 전달해 모듈 기본값이 적용되지 않고 인그레스 규칙이 0개가 된다.
-  default = null
+  type = list(string)
+  # 미지정 시 [] — 인그레스 규칙 0개로 fail-closed. ALB 를 실제로 열려면 운영
+  # 대역을 명시한다(평문 http_mode + 0.0.0.0/0 조합은 precondition 이 거부).
+  default = []
 }
 
 variable "domain_name" {
@@ -323,8 +323,9 @@ variable "litellm_pricing_lambda" {
 # 권한 범위
 # ------------------------------------------------------------------------------
 variable "bedrock_allowed_model_arns" {
-  type    = list(string)
-  default = ["*"]
+  type = list(string)
+  # 기본값 없음 — ["*"] 는 계정 내 모든 foundation model/프로파일 호출을 허용해
+  # 스코핑 변수의 존재 의의를 무력화한다. dev/prod 의 명시 ARN 목록 참조.
 }
 
 variable "allowed_sts_regions" {

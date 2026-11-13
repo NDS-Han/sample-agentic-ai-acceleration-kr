@@ -42,6 +42,10 @@ def request_virtual_key(
     """
     url = f"{config.gateway_url}/cli/auth/virtual-key"
 
+    from gateway_cli_oidc.oidc_client import require_tls_or_localhost
+
+    require_tls_or_localhost(url)
+
     log.info("requesting_virtual_key", url=url, device_name=device_name)
 
     body: dict = {

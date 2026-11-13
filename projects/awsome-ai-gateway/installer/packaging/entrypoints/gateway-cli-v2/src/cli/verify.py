@@ -48,7 +48,7 @@ from pathlib import Path
 import requests
 import structlog
 
-from cli.manifest import ResolvedConfig
+from cli.manifest import ResolvedConfig, sensitive_keys as _manifest_sensitive_keys
 from cli.paths import oidc_tokens_path, vk_cache_path
 from cli.reconcile import env_conflicts
 
@@ -707,13 +707,21 @@ def _read_windows_reg_env(var: str) -> list[str]:
 
 
 # Env vars whose value is a secret and must never be printed verbatim.
-_SECRET_ENV_VARS = {"ANTHROPIC_API_KEY"}
+# manifest.sensitive_keys() 를 union 해 선언된 sensitive 필드가 누락 없이
+# 커버되도록 한다(OTEL 헤더·커스텀 헤더 등 Bearer 를 담을 수 있는 키).
+_SECRET_ENV_VARS = {"ANTHROPIC_API_KEY", *_manifest_sensitive_keys()}
+
+# 프록시 URL 은 자격증명을 내장할 수 있다 — http://user:pass@host:port 의
+# pass 부분만 마스킹(호스트/포트는 진단 가치가 있다).
+_PROXY_CRED_RE = re.compile(r"(://[^:/@\s]+:)[^@\s]+(@)")
 
 
 def _display_env_value(var: str, value) -> str:
     """repr() a value for display, masking secrets so verify output is safe to paste."""
     if var in _SECRET_ENV_VARS:
         return "'***MASKED***'"
+    if var in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+        return repr(_PROXY_CRED_RE.sub(r"\1***\2", str(value)))
     return repr(value)
 
 

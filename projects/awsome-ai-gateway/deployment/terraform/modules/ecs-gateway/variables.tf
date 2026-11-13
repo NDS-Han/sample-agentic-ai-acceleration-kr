@@ -49,12 +49,18 @@ variable "alb_internal" {
 }
 
 variable "allowed_cidrs" {
-  description = "ALB security group ingress 허용 대역. 비우면 0.0.0.0/0 — schema 경고와 같은 의미"
+  description = "ALB security group ingress 허용 대역. 비우면 인그레스 규칙 0개(fail-closed) — 공개하려면 대역을 명시한다"
   type        = list(string)
-  default     = ["0.0.0.0/0"]
+  default     = []
   # env 가 null 을 전달하면(미설정) 기본값이 적용되도록 — nullable 이면 null 이
   # 그대로 들어와 setproduct(var.allowed_cidrs, …) 가 크래시한다.
-  nullable    = false
+  nullable = false
+}
+
+variable "alb_deletion_protection" {
+  description = "ALB 삭제 보호 — prod 계열은 true 권장 (terraform destroy 대상 보호)"
+  type        = bool
+  default     = false
 }
 
 variable "alb_idle_timeout" {

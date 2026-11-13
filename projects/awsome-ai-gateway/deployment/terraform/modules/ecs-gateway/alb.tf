@@ -18,9 +18,20 @@ resource "aws_lb" "this" {
   security_groups    = [aws_security_group.alb.id]
   subnets            = var.alb_internal ? var.private_subnet_ids : var.public_subnet_ids
 
-  idle_timeout = var.alb_idle_timeout
+  idle_timeout               = var.alb_idle_timeout
+  drop_invalid_header_fields = true
+  enable_deletion_protection = var.alb_deletion_protection
 
   tags = var.tags
+
+  lifecycle {
+    precondition {
+      # 평문 HTTP(http_mode) + 공개 ALB + 월드오픈 CIDR = bearer 토큰이 인터넷에
+      # 평문으로 흐르는 조합. alb_internal 이나 대역 제한 없이는 거부한다.
+      condition     = !(local.http_mode && !var.alb_internal && (contains(var.allowed_cidrs, "0.0.0.0/0") || contains(var.allowed_cidrs, "::/0")))
+      error_message = "http_mode(도메인/인증서 없음)에서 공개 ALB + 0.0.0.0/0 인그레스는 금지 — alb_internal=true 로 두거나 allowed_cidrs 를 제한하세요."
+    }
+  }
 }
 
 # ------------------------------------------------------------------------------

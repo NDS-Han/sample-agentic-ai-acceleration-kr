@@ -626,6 +626,24 @@ class OIDCExchangeError(RuntimeError):
     pass
 
 
+def require_tls_or_localhost(url: str) -> None:
+    """Refuse to send credentials to a plaintext non-localhost URL.
+
+    ``gateway_url``/``admin_api_url``/issuer endpoints come from operator config;
+    an ``http://`` value would put the bearer credential on the wire unencrypted.
+    Loopback stays allowed for local dev.
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme == "https":
+        return
+    host = (parsed.hostname or "").lower()
+    if parsed.scheme == "http" and host in ("localhost", "127.0.0.1", "::1"):
+        return
+    raise OIDCExchangeError(
+        f"Credential endpoint must be https:// (got {parsed.scheme or 'none'}://{host})"
+    )
+
+
 def exchange_jwt_for_vk(
     admin_api_url: str,
     access_token: str,
@@ -635,6 +653,7 @@ def exchange_jwt_for_vk(
     if not admin_api_url:
         raise OIDCExchangeError("ADMIN_API_URL not set")
     url = f"{admin_api_url.rstrip('/')}/v1/auth/exchange"
+    require_tls_or_localhost(url)
     resp = requests.post(
         url,
         headers={

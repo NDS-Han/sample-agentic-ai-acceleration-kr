@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import platform
+import re
 import socket
 import subprocess
 from datetime import datetime, timezone
@@ -93,6 +94,10 @@ def create_presigned_sts_request(region: str | None = None) -> dict:
         ) from exc
 
     resolved_region = region or session.get_config_variable("region") or "ap-northeast-2"
+    # region 은 URL 호스트에 직접 들어간다 — 설정 파일/호출자 값이 이상하면
+    # sts.<region>.amazonaws.com 이 아닌 호스트로 presigned 요청이 새 나간다.
+    if not re.fullmatch(r"[a-z0-9-]+", resolved_region):
+        raise RuntimeError(f"Invalid AWS region for STS presign: {resolved_region!r}")
 
     request = AWSRequest(
         method="GET",

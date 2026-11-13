@@ -731,7 +731,8 @@ def _gate_model(model: str, available_models: str | None) -> list[str] | None:
     default=None,
     envvar="GATEWAY_CLI_OTEL_AUTH_TOKEN",
     help="Bearer token for the OTLP collector. Written as the "
-    "OTEL_EXPORTER_OTLP_HEADERS Authorization header when supplied.",
+    "OTEL_EXPORTER_OTLP_HEADERS Authorization header when supplied. "
+    "Prefer the env var — the argv form is visible in `ps`.",
 )
 @click.option(
     "--persist-env/--no-persist-env",
@@ -771,6 +772,17 @@ def setup_cmd(
     Merges gateway configuration into managed settings (highest priority, admin)
     and ~/.claude/settings.json.
     """
+    # argv 로 넘긴 토큰은 ps/셸 히스토리에 남는다 — env(GATEWAY_CLI_OTEL_AUTH_TOKEN)
+    # 경유분은 argv 에 없으므로 argv 형태일 때만 경고한다.
+    if otel_auth_token and any(
+        a == "--otel-auth-token" or a.startswith("--otel-auth-token=")
+        for a in sys.argv[1:]
+    ):
+        click.secho(
+            "  WARNING: --otel-auth-token on the command line is visible in `ps` "
+            "and shell history — prefer GATEWAY_CLI_OTEL_AUTH_TOKEN.",
+            fg="yellow",
+        )
     # Elevation preflight FIRST — before any file/registry write happens below —
     # so a non-elevated Windows shell is told to re-run as administrator up front.
     try:

@@ -23,6 +23,7 @@ import json
 import os
 import secrets
 import socket
+import re
 import threading
 import time
 import urllib.parse
@@ -334,6 +335,15 @@ def _run_callback_server(
 # Admin-API VK exchange (inline — avoids importing gateway_cli_oidc)
 # ---------------------------------------------------------------------------
 
+# 토큰 엔드포인트의 에러 본문을 로그에 넣을 때 — 비준수 서버가 요청을 에코하면
+# id_token/Bearer 가 그대로 남으므로 JWT 형태 문자열은 마스킹한다.
+_JWTISH_RE = re.compile(r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*|[Bb]earer\s+\S+")
+
+
+def _err_body(resp, limit: int = 200) -> str:
+    return _JWTISH_RE.sub("***", resp.text[:limit])
+
+
 class _VKExchangeError(RuntimeError):
     pass
 
@@ -348,6 +358,12 @@ def _exchange_jwt_for_vk(
     from datetime import datetime, timezone
 
     url = f"{admin_api_url.rstrip('/')}/v1/auth/exchange"
+    from gateway_cli_oidc.oidc_client import require_tls_or_localhost
+
+    try:
+        require_tls_or_localhost(url)
+    except Exception as e:
+        raise _VKExchangeError(str(e)) from e
     try:
         resp = requests.post(
             url,
@@ -358,7 +374,7 @@ def _exchange_jwt_for_vk(
     except requests.RequestException as e:
         raise _VKExchangeError(str(e)) from e
     if resp.status_code != 200:
-        raise _VKExchangeError(f"HTTP {resp.status_code} {resp.text[:300]}")
+        raise _VKExchangeError(f"HTTP {resp.status_code} {_err_body(resp, 300)}")
 
     data = resp.json()
     expires_at_str = data.get("expires_at", "")
@@ -486,7 +502,7 @@ def _cognito_call(region: str, target: str, payload: dict, timeout: int = 15) ->
     if resp.status_code != 200:
         # Cognito error envelope: {"__type": "...Exception", "message": "..."}
         etype = (body.get("__type") or "").split("#")[-1]
-        message = body.get("message", resp.text[:200])
+        message = body.get("message", _err_body(resp))
         if etype == "NotAuthorizedException":
             raise LoginStepError("Incorrect email or password.")
         if etype == "UserNotFoundException":
@@ -669,6 +685,12 @@ def run_login(
 
     assert cb_result.code is not None
 
+    from gateway_cli_oidc.oidc_client import require_tls_or_localhost
+
+    try:
+        require_tls_or_localhost(token_endpoint)
+    except Exception as e:
+        raise LoginStepError(str(e)) from e
     try:
         resp = requests.post(
             token_endpoint,
@@ -692,7 +714,7 @@ def run_login(
         outcome_holder[0] = msg
         outcome_event.set()
         server_thread.join(5)
-        raise LoginStepError(f"{msg}: {resp.text[:200]}")
+        raise LoginStepError(f"{msg}: {_err_body(resp)}")
 
     body = resp.json()
     tokens = Tokens(
