@@ -97,7 +97,7 @@ redis:
 
 auth:
   virtualKey:
-    encryptionKeySecretName: "llm-gateway-app"
+    encryptionKeySecretName: ""                        # 비우면 {{ release }}-app 자동
     encryptionKeySecretKey: "virtual_key_encryption_key"
 ```
 

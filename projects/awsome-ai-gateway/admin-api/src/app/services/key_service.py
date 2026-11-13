@@ -124,6 +124,17 @@ class KeyService:
 
         if expires_at is None:
             expires_at = datetime.now(timezone.utc) + timedelta(hours=VK_DEFAULT_TTL_HOURS)
+        elif expires_at.tzinfo is None:
+            # 호출자가 naive datetime 을 넘기면 aware 비교가 TypeError → 500 —
+            # sso_session_expires_at 과 같은 규약(UTC 간주)으로 정규화.
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+
+        if expires_at <= datetime.now(timezone.utc):
+            # 과거 만료 → SETEX 1s 로 200 인데 즉시 죽은 크리덴셜이 건네진다.
+            # 만료된 SSO 세션 경계 등에서 발생 — 4xx 로 조용한 장애를 드러낸다.
+            raise ValidationError(
+                "expires_at is in the past — nothing to issue"
+            )
 
         # FR-2.2: cap VK expiry to SSO session expiry if provided
         # R16: 클라이언트가 tz-naive ISO 문자열을 보내면 pydantic 은 naive datetime
@@ -141,6 +152,12 @@ class KeyService:
                 sso_session_expires_at=sso_session_expires_at.isoformat(),
             )
             expires_at = sso_session_expires_at
+            # SSO 세션 경계로 내려간 expires_at 도 과거가 될 수 있다 —
+            # 위의 past-check 와 같은 이유로 거부한다.
+            if expires_at <= datetime.now(timezone.utc):
+                raise ValidationError(
+                    "SSO session expiry is in the past — nothing to issue"
+                )
         else:
             logger.info(
                 "key.expiry_set",
@@ -391,7 +408,7 @@ class KeyService:
         # DEL→commit 창 재캐시 경합은 key:vk 를 게이트웨이가 쓰지 않아 없다.
         if expired_encs:
             old_hashes: list[str] = []
-            for enc, stored_hash in expired_encs:
+            for enc, stored_hash, expired_id in expired_encs:
                 if isinstance(stored_hash, str) and stored_hash:
                     # 0056 저장 해시 — 복호화 없이 Redis 정리(암호키 로테이션 후에도 동작)
                     old_hashes.append(stored_hash)
@@ -403,6 +420,24 @@ class KeyService:
                         "key.expired_decrypt_failed",
                         user_id=str(user_id),
                         exc_info=True,
+                    )
+                    # 해시를 못 구하면 DEL 불가 — vkrev 실패행을 같은 커밋에
+                    # 남겨 retry_failed 가(extra_keys 배선 후)정리한다.
+                    # 안 남기면 EXPIRED 행의 key:vk 엔트리가 TTL 까지 유령 인증.
+                    from app.models.audit import CacheInvalidationFailure
+
+                    session.add(
+                        CacheInvalidationFailure(
+                            id=uuid.uuid4(),
+                            cache_key=f"vkrev:{expired_id}",
+                            failed_at=datetime.now(timezone.utc),
+                            retry_count=0,
+                            context={
+                                "source": "admin-api",
+                                "key_id": str(expired_id),
+                                "enc_hex": enc.hex(),
+                            },
+                        )
                     )
                     continue
                 old_hashes.append(hashlib.sha256(old_raw.encode()).hexdigest())
@@ -542,6 +577,33 @@ class KeyService:
 
         async def _write_key_caches() -> None:
             if redis is None:
+                return
+            # 동시 발급 경합(M5): 다른 요청/파드의 expire_and_create 가 이 행을
+            # EXPIRED 로 바꾼 뒤 그 DEL 콜백이 먼저 실행됐으면, 이 SET 이 마지막에
+            # 떨어져 죽은 키의 key:vk 엔트리를 되살린다. 쓰기 전에 상태를 다시
+            # 읽어 차단한다 — 재확인↔SET 사이의 잔여 창(ms) 은 Redis 에
+            # 조건부 삭제가 없어 남지만, 창은 '커밋 직후' 수준으로 좁혀진다.
+            # 재확인 자체가 실패하면(DB blip)쓰기 진행 — 행은 커밋 시점에
+            # ACTIVE 였고, 쓰기를 막으면 유효 키가 401 이 되는 더 큰 사고다.
+            st = None
+            try:
+                async with AsyncSessionLocal() as s:
+                    cur = await s.execute(
+                        select(VirtualKey.status).where(VirtualKey.id == vk.id)
+                    )
+                    st = cur.scalar_one_or_none()
+            except Exception:
+                logger.warning(
+                    "key.write_caches_status_check_failed",
+                    key_id=str(vk.id),
+                    exc_info=True,
+                )
+            if st is not None and st != KeyStatus.ACTIVE:
+                logger.warning(
+                    "key.write_caches_skipped_stale",
+                    key_id=str(vk.id),
+                    request_id=request_id,
+                )
                 return
             pipe = redis.pipeline(transaction=False)
             pipe.setex(f"key:vk:{key_hash}", seconds_until_expiry, f"{user_id}")
@@ -778,6 +840,23 @@ class KeyService:
                 logger.warning(
                     "vk_offboard.decrypt_failed", key_id=str(vk.id), exc_info=True
                 )
+                # 행은 이미 REVOKED 지만 해시를 못 구해 DEL 불가 — vkrev 실패행을
+                # 남겨 retry_failed 가(extra_keys 배선 후)유령 엔트리를 정리한다.
+                from app.models.audit import CacheInvalidationFailure
+
+                session.add(
+                    CacheInvalidationFailure(
+                        id=uuid.uuid4(),
+                        cache_key=f"vkrev:{vk.id}",
+                        failed_at=datetime.now(timezone.utc),
+                        retry_count=0,
+                        context={
+                            "source": "admin-api",
+                            "key_id": str(vk.id),
+                            "enc_hex": vk.key_value_encrypted.hex(),
+                        },
+                    )
+                )
                 continue
             h = hashlib.sha256(raw_key.encode()).hexdigest()
             vk.key_hash = h
@@ -875,12 +954,30 @@ class KeyService:
 
         # Invalidate Redis cache — 저장 해시(0056) 우선: 복호화 없이 DEL 가능해
         # 암호키 로테이션 후에도 폐기가 동작한다. 구 키는 복호화 폴백 + 지연 백필.
+        #
+        # 복호화 실패(extra_keys 미설정 로테이션·손상)해도 REVOKED 는 커밋한다 —
+        # 예외로 잡아두면 UPDATE 까지 롤백돼 키가 ACTIVE 로 남고, repair 잡이
+        # 그 Redis 엔트리를 계속 되살린다: "폐기 불가능한 유효 키" 가 된다.
+        # 해시를 모르면 DEL 할 Redis 키명도 모르므로 vkrev:<key_id> 실패행에
+        # 암호문을 담아 두면 retry_failed 가(extra_keys 배선 후)해시를 재계산해
+        # 정리한다.
         if isinstance(vk.key_hash, str) and vk.key_hash:
             key_hash = vk.key_hash
         else:
-            raw_key = self._encryption.decrypt(vk.key_value_encrypted)
-            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
-            vk.key_hash = key_hash  # 지연 백필 — 다음 수명주기부터 복호화 불필요
+            try:
+                raw_key = self._encryption.decrypt(vk.key_value_encrypted)
+            except Exception:
+                raw_key = None
+            if raw_key is None:
+                key_hash = None
+                logger.error(
+                    "key.revoke_hash_unavailable",
+                    key_id=str(key_id),
+                    user_id=str(vk.user_id),
+                )
+            else:
+                key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                vk.key_hash = key_hash  # 지연 백필 — 다음 수명주기부터 복호화 불필요
 
         # Remove from team VK hash reverse index (FR-2.6) — commit 후로 지연.
         user_repo = UserRepository(session)
@@ -892,30 +989,51 @@ class KeyService:
         # 아직 ACTIVE 인 행을 재캐시한다. publish 도 rollback 시 거짓 알림이 된다.
         # DEL 실패는 invalidate_after_commit 이 별도 세션으로
         # cache_invalidation_failures 에 기록한다(기존 durability 유지).
-        extras = []
-        if team_id_for_index is not None:
+        if key_hash is None:
+            # 해시를 못 구해 DEL 을 못 한다 — vkrev:<key_id> 실패행을 같은
+            # 커밋에 남긴다. retry_failed 가 enc_hex 복호화 → sha256 → DEL 하고,
+            # 암호키가 배선될 때까지 행은 미해소로 남는다. repair 는 REVOKED 행을
+            # 건드리지 않으니 유령 갱신은 멈춘다(잔여: Redis TTL 만료 또는 드레인).
+            from app.models.audit import CacheInvalidationFailure
 
-            async def _srem(
-                tid: uuid.UUID = team_id_for_index,
-                uid: uuid.UUID = vk.user_id,
-            ) -> None:
-                try:
-                    await self._cache_mgr._redis.srem(
-                        f"team:vk_hashes:{tid}", key_hash
-                    )
-                except Exception:
-                    logger.warning(
-                        "vk_reverse_index.srem_failed",
-                        user_id=str(uid), exc_info=True,
-                    )
+            session.add(
+                CacheInvalidationFailure(
+                    id=uuid.uuid4(),
+                    cache_key=f"vkrev:{key_id}",
+                    failed_at=datetime.now(timezone.utc),
+                    retry_count=0,
+                    context={
+                        "source": "admin-api",
+                        "key_id": str(key_id),
+                        "enc_hex": vk.key_value_encrypted.hex(),
+                    },
+                )
+            )
+        else:
+            extras = []
+            if team_id_for_index is not None:
 
-            extras.append(_srem)
-        await invalidate_after_commit(
-            session,
-            self._cache_mgr,
-            [f"key:vk:{key_hash}", f"key:cache:vk:{key_hash}"],
-            extra=extras,
-        )
+                async def _srem(
+                    tid: uuid.UUID = team_id_for_index,
+                    uid: uuid.UUID = vk.user_id,
+                ) -> None:
+                    try:
+                        await self._cache_mgr._redis.srem(
+                            f"team:vk_hashes:{tid}", key_hash
+                        )
+                    except Exception:
+                        logger.warning(
+                            "vk_reverse_index.srem_failed",
+                            user_id=str(uid), exc_info=True,
+                        )
+
+                extras.append(_srem)
+            await invalidate_after_commit(
+                session,
+                self._cache_mgr,
+                [f"key:vk:{key_hash}", f"key:cache:vk:{key_hash}"],
+                extra=extras,
+            )
 
         # BR-KEY-04: Audit log for revocation
         await audit_logger.log(
@@ -1072,8 +1190,15 @@ class KeyService:
         page_size = 500
         revoked = 0
         while True:
+            # kind='service' 제외 — force-reauth 는 "재로그인" 이라 서비스
+            # 계정엔 의미가 없다: 로그인 경로가 없어 폐기된 키는 그대로 죽고,
+            # 재발급은 관리자 수작업이다. DELETE /admin/keys/{id} 만이 서비스키의
+            # 폐기 경로다(svc 토큰 차단 가드 포함).
             keys = await repo.list_revocable_for_team(
-                team_id, cursor=cursor, limit=page_size
+                team_id,
+                cursor=cursor,
+                limit=page_size,
+                exclude_kinds=frozenset({VK_KIND_SERVICE}),
             )
             if not keys:
                 break

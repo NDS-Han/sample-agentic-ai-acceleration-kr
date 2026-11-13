@@ -134,7 +134,7 @@ class TestIssueKey:
              patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
             repo = MockRepo.return_value
             repo.expire_and_create = AsyncMock(
-                return_value=(1, uuid.uuid4(), [(old_enc, None)])
+                return_value=(1, uuid.uuid4(), [(old_enc, None, uuid.uuid4())])
             )
             repo.list_active_for_user = AsyncMock(return_value=[])
             MockUserRepo.return_value.get_user = AsyncMock(
@@ -177,7 +177,7 @@ class TestIssueKey:
              patch("app.services.key_service.TeamAllowedModelRepository") as MockTam:
             repo = MockRepo.return_value
             repo.expire_and_create = AsyncMock(
-                return_value=(1, uuid.uuid4(), [(b"not-a-valid-ciphertext", None)])
+                return_value=(1, uuid.uuid4(), [(b"not-a-valid-ciphertext", None, uuid.uuid4())])
             )
             repo.list_active_for_user = AsyncMock(return_value=[])
             MockUserRepo.return_value.get_user = AsyncMock(

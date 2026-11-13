@@ -64,6 +64,7 @@ async def lifespan(app: FastAPI):
         encryption = AESEncryptionService(
             settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value(),
             extra_keys=settings.vk_extra_keys or None,
+            current_version=settings.VIRTUAL_KEY_ENCRYPTION_KEY_VERSION,
         )
     except ValueError as exc:
         logger.error(

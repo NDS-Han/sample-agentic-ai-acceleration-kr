@@ -198,25 +198,30 @@ imagePullSecrets:
   없으면 remoteRef 실패로 ExternalSecret sync 전체가 깨진다(secret.yaml 주석 참조).
 -------------------------------------------------------------------------- */}}
 {{- define "llm-gateway.vkEncryptionEnv" -}}
+{{- $secretName := default (printf "%s-app" (include "llm-gateway.fullname" .)) .Values.auth.virtualKey.encryptionKeySecretName -}}
 - name: VIRTUAL_KEY_ENCRYPTION_KEY
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.auth.virtualKey.encryptionKeySecretName | quote }}
+      name: {{ $secretName | quote }}
       key: {{ .Values.auth.virtualKey.encryptionKeySecretKey | quote }}
 {{- if .Values.auth.virtualKey.extraKeysEnabled }}
 - name: VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS
   valueFrom:
     secretKeyRef:
-      name: {{ .Values.auth.virtualKey.encryptionKeySecretName | quote }}
+      name: {{ $secretName | quote }}
       key: virtual_key_encryption_extra_keys
 {{- end }}
 {{- end -}}
 
 {{/* ------------------------------------------------------------------------
-  Admin-api/Gateway-proxy 전용 env: JWT / VK 암호화 키 / STS 등
+  Admin-api/Gateway-proxy 전용 env: JWT / STS 등.
+  ⚠️ VIRTUAL_KEY_ENCRYPTION_KEY 는 여기 넣지 않는다 — DEK 를 쓰는 컴포넌트는
+  admin-api(발급/폐기/복호화)와 scheduler(repair) 뿐이고, gateway-proxy 는
+  sha256→Redis 조회만 한다. 인터넷-facing 데이터평면 파드에 DEK 를 심어두면
+  침해/env-read 한 번으로 모든 VK 평문 복호화 키가 유출된다 (vkEncryptionEnv 를
+  각 Deployment 에 개별 주입).
 -------------------------------------------------------------------------- */}}
 {{- define "llm-gateway.authEnv" -}}
-{{ include "llm-gateway.vkEncryptionEnv" . }}
 - name: JWT_ALGORITHM
   value: {{ .Values.auth.jwt.algorithm | quote }}
 - name: JWT_ISSUER

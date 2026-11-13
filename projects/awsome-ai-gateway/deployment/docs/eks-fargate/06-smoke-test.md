@@ -101,8 +101,8 @@ echo "VK: ${VK:0:30}...    length: ${#VK}"
 ✅ 응답 예시:
 ```json
 {
-  "virtual_key": "vk-5960e241fe068a7a9a16c66a0d8c9fb954c509bd7b120ee04621f0c83a44e50e",
-  "key_id": "fa52714c-b127-4153-bada-3da6cd0b06bc",
+  "virtual_key": "vk-<64-hex>",      # 1회만 표시 — 실제 값은 문서에 남기지 않는다
+  "key_id": "<uuid>",
   "user_id": "1b440179-...",
   "team_id": "00000000-0000-4000-a000-000000000003",
   "email": "test@example.com",

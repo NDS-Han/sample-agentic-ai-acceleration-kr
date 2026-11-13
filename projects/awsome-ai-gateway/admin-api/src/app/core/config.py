@@ -146,17 +146,32 @@ class Settings(BaseSettings):
     # 구 암호문 복호화가 계속 동작해야 폐기/repair 가 깨지지 않는다(0056 대비책;
     # 저장 해시가 주 방어선이고 이건 구 키 폴백용).
     VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS: str = ""
+    # encrypt() 가 붙이는 버전 태그 — 로테이션은 "새 키 + 새 버전 + 구버전을
+    # EXTRA_KEYS 에" 로 env 만으로 표현한다. v<N> 형식.
+    VIRTUAL_KEY_ENCRYPTION_KEY_VERSION: str = "v1"
 
     @property
     def vk_extra_keys(self) -> dict[str, str]:
-        """VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS(JSON {"ver":"hex"}) → 복호화용 키맵."""
+        """VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS(JSON {"ver":"hex"}) → 복호화용 키맵.
+
+        형식 오류는 {} 로 삼키지 않고 raise 한다 — 무음 {} 는 로테이션 폴백이
+        조용히 사라져 구 암호문 행의 폐기/수리가 전부 불가능해진다.
+        """
         import json
         if not self.VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS.strip():
             return {}
         try:
             data = json.loads(self.VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS)
-        except json.JSONDecodeError:
-            return {}
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                "VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS must be a JSON object "
+                '{"v1":"<64-hex>",...}'
+            ) from exc
+        if not isinstance(data, dict):
+            raise ValueError(
+                "VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS must be a JSON object "
+                '{"v1":"<64-hex>",...}'
+            )
         return {str(k): str(v) for k, v in data.items()}
 
     # ── JWT Verification ──

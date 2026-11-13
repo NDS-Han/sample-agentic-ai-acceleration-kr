@@ -70,8 +70,18 @@ class CacheInvalidationManager:
             deleted += 1
         return deleted
 
-    async def retry_failed(self, session: AsyncSession) -> int:
-        """Retry all unresolved cache invalidation failures. Returns count of resolved."""
+    async def retry_failed(
+        self,
+        session: AsyncSession,
+        *,
+        vk_decrypt=None,
+    ) -> int:
+        """Retry all unresolved cache invalidation failures. Returns count of resolved.
+
+        ``vk_decrypt``: ``vkrev:<key_id>`` 실패행의 해시 재계산용 복호화 callable
+        (``bytes -> str``). None 이면 그 유형은 매번 실패로 retry_count 만 늘고
+        암호키(extra_keys)가 배선된 프로세스가 드레인할 때까지 대기한다.
+        """
         from sqlalchemy import select
 
         # LIMIT + 재시도 횟수 상한 — 무제한 조회는 한 요청이 모든 미해소
@@ -95,7 +105,7 @@ class CacheInvalidationManager:
             try:
                 # cache_key 에는 실패 유형이 접두어로 박혀 있다 — 리터럴 DEL 로
                 # "해소" 처리하면 진짜 대상 키들은 stale 한 채로 남는다(R16-V8).
-                await self._retry_one(failure)
+                await self._retry_one(failure, session=session, vk_decrypt=vk_decrypt)
                 failure.resolved_at = datetime.now(timezone.utc)
                 resolved_count += 1
                 logger.info("cache.retry_resolved", key=failure.cache_key)
@@ -106,9 +116,30 @@ class CacheInvalidationManager:
 
         return resolved_count
 
-    async def _retry_one(self, failure: CacheInvalidationFailure) -> None:
-        """실패 유형별 재시도 — pattern:/swap: 접두어를 복원해 실행한다."""
+    async def _retry_one(
+        self,
+        failure: CacheInvalidationFailure,
+        *,
+        session: AsyncSession | None = None,
+        vk_decrypt=None,
+    ) -> None:
+        """실패 유형별 재시도 — pattern:/swap:/vkrev: 접두어를 복원해 실행한다."""
         key = failure.cache_key
+        if key.startswith("vkrev:"):
+            # 폐기는 커밋됐지만 해시를 못 구해 key:vk DEL 을 못 한 행 —
+            # context.enc_hex 를 복호화해 sha256 → 두 캐시키 DEL.
+            # 행이 purge 돼도 enc 가 context 에 있으므로 재시도 가능하다.
+            if vk_decrypt is None:
+                raise RuntimeError("vkrev retry needs vk_decrypt")
+            enc_hex = (failure.context or {}).get("enc_hex")
+            if not enc_hex:
+                raise RuntimeError(f"vkrev retry missing enc_hex: {key}")
+            import hashlib as _hl
+
+            raw = vk_decrypt(bytes.fromhex(enc_hex))
+            h = _hl.sha256(raw.encode()).hexdigest()
+            await self._redis.delete(f"key:vk:{h}", f"key:cache:vk:{h}")
+            return
         if key.startswith("pattern:"):
             await self._scan_delete(key[len("pattern:"):])
             return

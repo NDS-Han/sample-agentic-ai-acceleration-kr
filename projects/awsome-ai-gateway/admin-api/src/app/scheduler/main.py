@@ -162,21 +162,46 @@ async def run_service_key_repair() -> None:
 
             redis = await create_redis_client()
             try:
+                # vkrev: 실패행 재시도에 필요한 복호화 callable — VKEK 미주입/
+                # 무효 환경에선 None 으로 두고, vkrev 행은 retry_count 만 늘며
+                # extra_keys 설정 후 드레인된다.
+                try:
+                    _enc = AESEncryptionService(
+                        settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value(),
+                        extra_keys=settings.vk_extra_keys or None,
+                        current_version=settings.VIRTUAL_KEY_ENCRYPTION_KEY_VERSION,
+                    )
+                    svc_decrypt = _enc.decrypt
+                except Exception:
+                    svc_decrypt = None
+                    logger.warning("scheduler.vk_decrypt_unavailable")
                 # 실패 DEL 재시도 — revoke DEL 이 빗나가면 cache_invalidation_failures
                 # 에만 남고 자동 재시도가 없어 폐기 키가 TTL(최대 365d) 동안 유령
                 # 인증된다. repair 주기에 맞춰 드레인한다. 복호화가 필요 없는
-                # 경로라 VKEK 미주입 환경에서도 먼저 실행한다.
-                async with AsyncSessionLocal() as session:
-                    retried = await CacheInvalidationManager(redis).retry_failed(session)
-                    if retried:
-                        logger.info(
-                            "scheduler.cache_invalidation_retried", count=retried
-                        )
+                # 경로라 VKEK 미주입 환경에서도 먼저 실행한다. 별도 try — 이 단계가
+                # 죽어도 repair 는 돌아야 한다(한 쪽 영구 실패가 다른 쪽을 기아시킴).
+                try:
+                    async with AsyncSessionLocal() as session:
+                        retried = await CacheInvalidationManager(
+                            redis
+                        ).retry_failed(session, vk_decrypt=svc_decrypt)
+                        # resolved_at/retry_count 는 commit 해야 남는다 — 빠뜨리면
+                        # close→rollback 으로 미해소 행이 매 틱 재시도되고
+                        # retry_count<100 dead-letter 도 절대 도달 못 한다.
+                        await session.commit()
+                        if retried:
+                            logger.info(
+                                "scheduler.cache_invalidation_retried",
+                                count=retried,
+                            )
+                except Exception:
+                    logger.exception("scheduler.cache_invalidation_retry_failed")
+                if _enc is None:
+                    raise ValueError(
+                        "VIRTUAL_KEY_ENCRYPTION_KEY unavailable — repair skipped"
+                    )
                 svc = KeyService(
-                    encryption=AESEncryptionService(
-                        settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value(),
-                        extra_keys=settings.vk_extra_keys or None,
-                    ),
+                    encryption=_enc,
                     cache_mgr=CacheInvalidationManager(redis),
                 )
                 # repair 는 키마다 commit 하는 전용 세션을 내부에서 연다.
@@ -296,7 +321,12 @@ def main() -> None:
         pass
     finally:
         logger.info("scheduler.shutdown")
-        scheduler.shutdown()
+        try:
+            scheduler.shutdown()
+        except Exception:
+            # _on_signal 이 이미 shutdown 했으면 두 번째 호출은
+            # SchedulerNotRunningError — 매 SIGTERM rollout 마다 traceback.
+            pass
         loop.close()
 
 

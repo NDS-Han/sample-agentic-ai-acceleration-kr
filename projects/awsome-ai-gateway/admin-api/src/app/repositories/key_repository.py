@@ -50,10 +50,11 @@ class KeyRepository:
         호출자가 commit 책임을 가짐.
 
         Returns:
-            (expired_count, new_id, expired_encs) — expired_encs 는 방금
-            EXPIRED 로 바뀐 행들의 key_value_encrypted 목록. 호출자가 복호화해
-            sha256 으로 key:vk:{hash} Redis 엔트리를 정리하는 데 쓴다
-            (DB 만 EXPIRED 여도 Redis 는 TTL 까지 살아 있어 옛 키가 계속 인증됨).
+            (expired_count, new_id, pairs) — pairs 는 방금 EXPIRED 로 바뀐
+            행들의 (key_value_encrypted, key_hash, id) 3튜플 목록. 호출자가
+            저장 해시(또는 복호화 폴백)로 key:vk:{hash} Redis 엔트리를 정리하는
+            데 쓴다(DB 만 EXPIRED 여도 Redis 는 TTL 까지 살아 있어 옛 키가
+            계속 인증됨). id 는 복호화 실패 시 vkrev 실패행 기록용.
         """
         from sqlalchemy import text
 
@@ -63,7 +64,7 @@ class KeyRepository:
                 UPDATE auth.virtual_keys
                 SET status = 'EXPIRED'
                 WHERE user_id = :user_id AND status = 'ACTIVE'
-                RETURNING key_value_encrypted, key_hash
+                RETURNING id, key_value_encrypted, key_hash
             ),
             inserted AS (
                 INSERT INTO auth.virtual_keys (
@@ -81,10 +82,15 @@ class KeyRepository:
             SELECT
                 (SELECT COUNT(*) FROM expired) AS expired_count,
                 (SELECT id FROM inserted) AS new_id,
-                (SELECT COALESCE(array_agg(key_value_encrypted), '{}'::bytea[])
+                -- 세 array_agg 를 같은 키로 정렬 — ORDER BY 없으면 집계 간 순서
+                -- 계약이 없어 enc↔hash 쌍이 어긋날 수 있다(zip 으로 엮이므로
+                -- 틀린 쌍은 다른 키의 key:vk 엔트리를 지우는 사고가 된다).
+                (SELECT COALESCE(array_agg(key_value_encrypted ORDER BY key_value_encrypted), '{}'::bytea[])
                  FROM expired) AS expired_encs,
-                (SELECT COALESCE(array_agg(key_hash), '{}'::varchar[])
-                 FROM expired) AS expired_hashes
+                (SELECT COALESCE(array_agg(key_hash ORDER BY key_value_encrypted), '{}'::varchar[])
+                 FROM expired) AS expired_hashes,
+                (SELECT COALESCE(array_agg(id::text ORDER BY key_value_encrypted), '{}'::text[])
+                 FROM expired) AS expired_ids
             """
         )
         result = await self._session.execute(
@@ -104,8 +110,15 @@ class KeyRepository:
         )
         row = result.one()
         # 저장 해시(0056)가 있으면 복호화 없이 Redis 정리 가능 — 없는 행만
-        # enc 로 폴백한다. 두 배열은 expired 순서대로 정렬된다.
-        pairs = list(zip(row.expired_encs or [], row.expired_hashes or []))
+        # enc 로 폴백한다. 세 배열은 같은 ORDER BY 로 정렬돼 zip 이 안전하며,
+        # id 는 복호화 실패 행의 vkrev 실패 기록에 쓴다.
+        pairs = list(
+            zip(
+                row.expired_encs or [],
+                row.expired_hashes or [],
+                (uuid.UUID(i) for i in (row.expired_ids or [])),
+            )
+        )
         return int(row.expired_count), row.new_id, pairs
 
     async def revoke(self, key_id: uuid.UUID, revoked_by: uuid.UUID) -> VirtualKey | None:
@@ -230,12 +243,17 @@ class KeyRepository:
         *,
         cursor: tuple[datetime, uuid.UUID] | None = None,
         limit: int = 500,
+        exclude_kinds: frozenset[str] | None = None,
     ) -> list[VirtualKey]:
         """팀 멤버의 폐기 대상 VK — ACTIVE + 아직 유효한 EXPIRED.
 
         ``list_revocable_for_users`` 와 같은 판정을 팀 축으로. EXPIRED 행의
         Redis key:vk 엔트리는 expires_at 까지 살아 있어 게이트웨이가 계속
         인증하므로 force-reauth 경로에서 빠뜨리면 안 된다.
+
+        ``exclude_kinds``: 제외할 kind 집합 — force-reauth 는 "재로그인" 이라
+        서비스 계정에는 의미가 없고(로그인 경로가 없어 키만 죽는다) 그 폐기가
+        곧 앱 장애라 호출자가 kind='service' 를 제외한다.
         """
         from app.models.auth import User
 
@@ -255,6 +273,8 @@ class KeyRepository:
             )
             .order_by(VirtualKey.created_at.desc(), VirtualKey.id.desc())
         )
+        if exclude_kinds:
+            stmt = stmt.where(VirtualKey.kind.not_in(exclude_kinds))
         if cursor is not None:
             c_ts, c_id = cursor
             stmt = stmt.where(

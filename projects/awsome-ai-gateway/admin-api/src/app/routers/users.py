@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.audit import audit_logger
 from app.core.auth import CurrentUser, require_admin
 from app.core.db import get_db_session
+from app.core.exceptions import ForbiddenError
 from app.repositories._cursor import encode_cursor
 from app.services.user_allowed_client_service import UserAllowedClientService
 from app.services.user_allowed_model_service import UserAllowedModelService
@@ -130,6 +131,10 @@ async def force_reauth_team(
     오프보딩/보안 사고/즉시 정책 반영 용도. 사용자는 다음 호출 시 401 을
     받으며 Claude Code 재실행 시 새 VK 가 자동 발급됨 (Cognito 그룹 재평가).
     """
+    # svc 토큰 차단 — 유출된 svc 토큰 한 발로 팀 전체 VK 대량폐기가 되던
+    # 경로. DELETE /admin/keys 의 kind 가드와 같은 위협모델을 일괄 경로에도.
+    if admin.service_token_id is not None:
+        raise ForbiddenError("Service tokens cannot force-reauth teams")
     from app.services.key_service import KeyService
 
     svc: KeyService = request.app.state.key_service

@@ -42,6 +42,7 @@ def _mock_session_returning(
     row.new_id = new_id
     row.expired_encs = expired_encs or []
     row.expired_hashes = expired_hashes if expired_hashes is not None else [None] * len(expired_encs or [])
+    row.expired_ids = [str(uuid.uuid4()) for _ in (expired_encs or [])]
     result = MagicMock()
     result.one = MagicMock(return_value=row)
     session = AsyncMock()
@@ -107,7 +108,7 @@ async def test_expire_and_create_uses_single_sql_call_with_correct_params():
     assert "update auth.virtual_keys" in sql_text
     assert "status = 'expired'" in sql_text
     assert "insert into auth.virtual_keys" in sql_text
-    assert "returning key_value_encrypted" in sql_text  # expired CTE — H2 Redis 정리용
+    assert "returning id, key_value_encrypted, key_hash" in sql_text  # expired CTE — H2 Redis 정리용
     assert "returning id" in sql_text  # inserted CTE
 
     # Second arg: params dict with correct bindings
@@ -135,4 +136,4 @@ async def test_expire_and_create_returns_expired_encs():
     expired_count, _, expired_encs = await repo.expire_and_create(user_id, new_vk)
     assert expired_count == 1
     # 0056 — (enc, 저장해시) 쌍 반환; 해시 없는 구 행은 None 으로 복호화 폴백 표시
-    assert expired_encs == [(old_enc, None)]
+    assert expired_encs[0][:2] == (old_enc, None)  # (enc, hash, id) 3튜플

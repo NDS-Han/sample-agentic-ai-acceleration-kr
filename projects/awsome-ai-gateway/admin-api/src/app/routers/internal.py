@@ -74,7 +74,13 @@ async def retry_cache_invalidation(
     from app.core.cache_invalidation import CacheInvalidationManager
 
     cache_mgr: CacheInvalidationManager = request.app.state.cache_mgr
-    resolved = await cache_mgr.retry_failed(session)
+    # vkrev: 행은 key_hash 를 못 구한 폐기 — 복호화 callable 이 있어야
+    # sha256 재계산→DEL 이 된다. key_service 는 항상 app.state 에 있다.
+    key_service = getattr(request.app.state, "key_service", None)
+    vk_decrypt = getattr(key_service, "_encryption", None)
+    resolved = await cache_mgr.retry_failed(
+        session, vk_decrypt=getattr(vk_decrypt, "decrypt", None)
+    )
     return {"resolved": resolved}
 
 

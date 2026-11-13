@@ -65,6 +65,7 @@ spec:
           env:
             {{- include "llm-gateway.commonEnv" . | nindent 12 }}
             {{- include "llm-gateway.authEnv" . | nindent 12 }}
+            {{- include "llm-gateway.vkEncryptionEnv" . | nindent 12 }}
             {{- include "llm-gateway.oidcEnv" . | nindent 12 }}
             {{- include "llm-gateway.downwardApiEnv" . | nindent 12 }}
             # /internal/* 공유 시크릿 게이트(R3-1). app Secret 의 internal_api_token

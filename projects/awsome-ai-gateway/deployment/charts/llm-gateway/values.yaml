@@ -245,8 +245,10 @@ auth:
     # JWKS 캐시 TTL (초)
     jwksCacheTtl: 3600
   virtualKey:
-    # AES-256-GCM DEK (64-char hex) — Secret에서 주입
-    encryptionKeySecretName: "llm-gateway-app"
+    # AES-256-GCM DEK (64-char hex) — Secret에서 주입.
+    # 비우면 {{ release }}-app (chart 가 만드는 app Secret) — 릴리스명이
+    # 달라도 맞게 따라간다. 커스텀 Secret 을 쓸 때만 명시.
+    encryptionKeySecretName: ""
     encryptionKeySecretKey: "virtual_key_encryption_key"
     # 로테이션 준비: 이전 버전 키 (복호화 전용, JSON {"ver":"hex"}).
     # true 로 켜기 전에 SM `<prefix>/<env>/app` JSON 에
