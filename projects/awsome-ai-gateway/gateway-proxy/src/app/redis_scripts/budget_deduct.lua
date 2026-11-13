@@ -19,7 +19,12 @@ local usage_key = KEYS[1]
 local config_key = KEYS[2]
 local dedup_key = KEYS[3]  -- <usage_key>:ded:{request_id} — 재실행 감지용 (선택)
 local cost = tonumber(ARGV[1])
+if cost and cost < 0 then cost = 0 end  -- 음수 차감은 usage 를 부풀려 한도를 늘린다(reserve 의 estimate 가드와 대칭, 12차)
 local dedup_ttl = tonumber(ARGV[3]) or 600
+-- ttl 가드 — 하단의 SET ... EX dedup_key 가 차감 커밋 후에 실행되므로,
+-- ttl <= 0/NaN/int64 초과면 마커 미작성으로 죽어 재시도가 이중 차감한다
+-- (12차 리뷰 — 현재 호출자는 ARGV[3] 를 보내지 않지만 계약상 방어).
+if not (dedup_ttl > 0 and dedup_ttl <= 2147483647) then dedup_ttl = 600 end
 
 local config_raw = redis.call('GET', config_key)
 if not config_raw and ARGV[2] and ARGV[2] ~= '' then

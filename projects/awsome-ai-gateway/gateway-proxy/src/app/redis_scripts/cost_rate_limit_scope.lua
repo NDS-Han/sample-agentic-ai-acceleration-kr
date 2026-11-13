@@ -22,6 +22,10 @@
 --   통과 시 카운터(INCRBYFLOAT)까지 커밋하고 reserved_cost 반환.
 
 local cost        = tonumber(ARGV[1])
+-- 음수 추정치는 아래 cost>0 게이트가 커밋을 건너뛰는데 reserved_cost=음수 가
+-- 반환돼 settle 의 (actual-reserved) 델타가 실비보다 크게 적용된다 — 0 으로
+-- 수렴시키면 예약도 반환값도 일관된다(12차 리뷰).
+if cost and cost < 0 then cost = 0 end
 local cpm_limit   = tonumber(ARGV[2])
 local cph_limit   = tonumber(ARGV[3])
 local scope_label = ARGV[4]

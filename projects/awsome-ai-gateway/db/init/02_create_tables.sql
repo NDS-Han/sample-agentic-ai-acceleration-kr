@@ -183,6 +183,20 @@ CREATE INDEX IF NOT EXISTS idx_budget_configs_scope ON budget.budget_configs (sc
 -- client IS NULL 인 조직 전체 예산 행은 그냥 (scope, scope_id, client) 로는 보호되지 않는다.
 DO $$
 BEGIN
+        -- 업그레이드 경로: client 컬럼 도입(0011) 전의 구 정의((scope, scope_id)
+        -- WHERE is_active)가 같은 이름으로 남아 있으면 IF NOT EXISTS 가 조용히
+        -- 스킵한다 — idx_rotation_policies_scope 와 같은 패턴으로 indexdef
+        -- 를 비교해 stale 하면 drop 후 재생성(12차 리뷰).
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'budget' AND indexname = 'uq_budget_configs_active'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('budget.uq_budget_configs_active')),
+                  ''
+              ) NOT LIKE '%COALESCE%'
+        ) THEN
+            DROP INDEX budget.uq_budget_configs_active;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_configs_active
         ON budget.budget_configs (scope, scope_id, COALESCE(client, ''))
         WHERE is_active = true;
@@ -216,6 +230,20 @@ END $$;
 
 DO $$
 BEGIN
+        -- 업그레이드 경로: 0011 이 전의 구 정의((scope, scope_id, period) —
+        -- client COALESCE 없음)가 같은 이름으로 남아 있으면 IF NOT EXISTS 가
+        -- 조용히 스킵한다. 구 정의는 per-app 행과 total 행이 (scope, scope_id,
+        -- period) 에서 충돌해 INSERT unique_violation → 500 을 낸다(0011 주석).
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'budget' AND indexname = 'idx_budget_usages_unique'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('budget.idx_budget_usages_unique')),
+                  ''
+              ) NOT LIKE '%COALESCE%'
+        ) THEN
+            DROP INDEX budget.idx_budget_usages_unique;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usages (scope, scope_id, period, COALESCE(client,''));
 EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_budget_usages_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
@@ -363,6 +391,19 @@ CREATE INDEX IF NOT EXISTS idx_rate_limit_configs_scope ON model.rate_limit_conf
 -- unique index 에서 NULL 은 서로 구별되므로 그냥 (scope, scope_id) 로는 보호되지 않는다.
 DO $$
 BEGIN
+        -- 업그레이드 경로: COALESCE 도입 전의 구 정의((scope, scope_id) —
+        -- 10차 리뷰에서 추가됨)가 같은 이름으로 남아 있으면 IF NOT EXISTS 가
+        -- 조용히 스킵하고 GLOBAL(scope_id NULL) 중복이 계속 허용된다.
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'model' AND indexname = 'uq_rate_limit_configs_active'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('model.uq_rate_limit_configs_active')),
+                  ''
+              ) NOT LIKE '%COALESCE%'
+        ) THEN
+            DROP INDEX model.uq_rate_limit_configs_active;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_limit_configs_active
         ON model.rate_limit_configs (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid))
         WHERE is_active = true;
@@ -459,6 +500,18 @@ CREATE INDEX IF NOT EXISTS idx_downgrade_policies_scope
 
 DO $$
 BEGIN
+        -- 업그레이드 경로: from_model_alias 도입 전의 구 정의((scope, scope_id))
+        -- 가 같은 이름으로 남아 있으면 IF NOT EXISTS 가 조용히 스킵한다.
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'budget' AND indexname = 'idx_downgrade_policies_unique_active'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('budget.idx_downgrade_policies_unique_active')),
+                  ''
+              ) NOT LIKE '%from_model_alias%'
+        ) THEN
+            DROP INDEX budget.idx_downgrade_policies_unique_active;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_downgrade_policies_unique_active
         ON budget.downgrade_policies (scope, scope_id, from_model_alias)
         WHERE is_active;
@@ -645,6 +698,18 @@ CREATE TABLE IF NOT EXISTS usage.roi_aggregations (
 
 DO $$
 BEGIN
+        -- 업그레이드 경로: scope_id 도입 전의 구 정의((period, scope))가 같은
+        -- 이름으로 남아 있으면 IF NOT EXISTS 가 조용히 스킵한다.
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'usage' AND indexname = 'idx_roi_aggregations_unique'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('usage.idx_roi_aggregations_unique')),
+                  ''
+              ) NOT LIKE '%scope_id%'
+        ) THEN
+            DROP INDEX usage.idx_roi_aggregations_unique;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_roi_aggregations_unique ON usage.roi_aggregations (period, scope, scope_id);
 EXCEPTION WHEN unique_violation THEN
     RAISE WARNING 'idx_roi_aggregations_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
@@ -787,6 +852,19 @@ EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
 END $$;
 DO $$
 BEGIN
+        -- 업그레이드 경로: 부분 유니크(WHERE idempotency_key IS NOT NULL) 전의
+        -- 구 정의(전체 유니크)가 같은 이름으로 남아 있으면 IF NOT EXISTS 가
+        -- 조용히 스킵하고 NULL 키 행을 계속 막는다.
+        IF EXISTS (
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'usage' AND indexname = 'idx_productivity_events_idempotency'
+              AND COALESCE(
+                  pg_get_indexdef(to_regclass('usage.idx_productivity_events_idempotency')),
+                  ''
+              ) NOT LIKE '%WHERE%'
+        ) THEN
+            DROP INDEX usage.idx_productivity_events_idempotency;
+        END IF;
         CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_events_idempotency
         ON usage.productivity_events (idempotency_key)
         WHERE idempotency_key IS NOT NULL;
@@ -1137,6 +1215,7 @@ CREATE INDEX IF NOT EXISTS idx_audit_logs_ts_id ON audit.audit_logs (timestamp D
 DO $$
 DECLARE
     missing text[];
+    stale   text[];
 BEGIN
     -- (스키마, 인덱스) 쌍 — indexname 만 보면 다른 스키마의 동명 인덱스가
     -- 진짜 누락을 가린다(11차 리뷰).
@@ -1159,15 +1238,27 @@ BEGIN
     IF missing IS NOT NULL THEN
         RAISE WARNING 'unique indexes missing (중복 데이터로 가드 스킵 가능): % — 중복 정리 후 재배포하면 인덱스가 생성됩니다', missing;
     END IF;
-    -- 이름은 있어도 정의가 낡은 경우도 감지한다 — idx_rotation_policies_scope
-    -- 는 COALESCE 없는 구 정의가 업그레이드 경로에서 IF NOT EXISTS 에 걸려
-    -- 잔존할 수 있다(11차 리뷰 MAJOR). 이 경우도 "생성 안 됨" 과 동일하게
-    -- remediation(중복 정리 후 재배포)이 필요하다.
-    IF EXISTS (
-        SELECT 1 FROM pg_indexes
-        WHERE schemaname = 'auth' AND indexname = 'idx_rotation_policies_scope'
-          AND indexdef NOT LIKE '%COALESCE%'
-    ) THEN
-        RAISE WARNING 'auth.idx_rotation_policies_scope: stale definition (COALESCE 없는 구 정의 — 중복 정리 후 재배포하면 새 정의로 재생성됩니다)';
+    -- 이름은 있어도 정의가 낡은 경우도 감지한다 — COALESCE 없는 구 정의가
+    -- 업그레이드 경로에서 IF NOT EXISTS 에 걸려 잔존할 수 있다(11차 리뷰
+    -- MAJOR). drop+recreate 는 중복 데이터로 실패하면 롤백되므로 stale 이
+    -- 남을 수 있다 — 이 경우도 "생성 안 됨" 과 동일하게 remediation(중복
+    -- 정리 후 재배포)이 필요하다.
+    -- (스키마, 인덱스, 새 정의 식별 substring) — COALESCE 인덱스는 'COALESCE',
+    -- 부분 유니크는 'WHERE', 컬럼 확장은 신규 컬럼명으로 판별한다(12차 리뷰).
+    SELECT array_agg(pair.s || '.' || pair.n) INTO stale
+    FROM (VALUES
+        ('auth',  'idx_rotation_policies_scope',           '%COALESCE%'),
+        ('budget','uq_budget_configs_active',              '%COALESCE%'),
+        ('budget','idx_budget_usages_unique',              '%COALESCE%'),
+        ('model', 'uq_rate_limit_configs_active',          '%COALESCE%'),
+        ('budget','idx_downgrade_policies_unique_active',  '%from_model_alias%'),
+        ('usage', 'idx_roi_aggregations_unique',           '%scope_id%'),
+        ('usage', 'idx_productivity_events_idempotency',   '%WHERE%')
+    ) AS pair(s, n, marker)
+    JOIN pg_indexes pi
+      ON pi.schemaname = pair.s AND pi.indexname = pair.n
+     AND pi.indexdef NOT LIKE pair.marker;
+    IF stale IS NOT NULL THEN
+        RAISE WARNING 'stale index definitions (구 정의 잔존 — 중복 정리 후 재배포하면 새 정의로 재생성됩니다): %', stale;
     END IF;
 END $$;

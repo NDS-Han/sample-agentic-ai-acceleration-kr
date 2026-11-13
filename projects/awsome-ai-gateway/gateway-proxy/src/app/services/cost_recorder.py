@@ -770,7 +770,10 @@ class CostRecorder:
         cost_reserved = reserved_cost
         if rate_limit_state and "cost_reserved" in rate_limit_state:
             cost_reserved = rate_limit_state["cost_reserved"]
-        if redis is not None and cost_reserved != Decimal("0"):
+        # None 가드 — 구버전 rate_limit_state 는 cost_reserved=None 을 담을
+        # 수 있고, settle_cost(reserved_cost=None) 은 TypeError 로 죽는다
+        # (형제 사이트 :407 · enforcement :525 와 같은 형태, 12차 리뷰).
+        if redis is not None and cost_reserved is not None and cost_reserved != Decimal("0"):
             try:
                 from app.services.rate_limit_service import RateLimitService
 

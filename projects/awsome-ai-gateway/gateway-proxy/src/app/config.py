@@ -140,7 +140,9 @@ class Settings(BaseSettings):
     # 월 롤오버까지 남으므로, 이 값은 "누수 마커의 추적 가능 기간"이다.
     # ge=1 — 0/음수 TTL 은 예약 마커·settle 툼스톤의 SET ... EX 에서 Lua 가
     # 커밋 후 크래시해 예약 누수/이중정산 부분쓰기가 된다(11차 리뷰).
-    budget_reservation_ttl_seconds: int = Field(default=14400, ge=1)  # 4h
+    # 상한 = Lua SET ... EX 가 int64 초를 받는 한계보다 훨씬 아래 — 무제한이면
+    # 10**19 같은 값이 EX 파싱 실패로 커밋 후 크래시를 낸다(12차 리뷰).
+    budget_reservation_ttl_seconds: int = Field(default=14400, ge=1, le=31_536_000)  # 4h, 상한 1y
 
     # 월예산 선예약의 worst-case 추정에 쓰는 출력 상한(토큰). 클라이언트의
     # max_tokens 를 그대로 쓰면 비싼 모델(Opus 출력 $75/MTok)에서 한 번의
@@ -204,12 +206,14 @@ class Settings(BaseSettings):
     openmodel_base_url: str = "http://mock-vllm:8080"
 
     # --- Model availability fallback / circuit breaker (2026-06-22) ---
-    cb_window_sec: int = 30
-    cb_min_calls: int = 5
-    cb_error_rate: float = 0.5
-    cb_open_sec: int = 30
-    cb_halfopen_probe_ttl_ms: int = 8000
-    cb_open_jitter_sec: int = 5
+    # cb_* 는 Lua EXPIRE/PX 인자로 직결 — <=0 이면 breaker eval 이 매번
+    # 크래시해 회로 차단기가 죽는다(12차 리뷰). jitter 는 0 허용(끔).
+    cb_window_sec: int = Field(default=30, ge=1)
+    cb_min_calls: int = Field(default=5, ge=1)
+    cb_error_rate: float = Field(default=0.5, gt=0, le=1)
+    cb_open_sec: int = Field(default=30, ge=1)
+    cb_halfopen_probe_ttl_ms: int = Field(default=8000, ge=1)
+    cb_open_jitter_sec: int = Field(default=5, ge=0)
     bedrock_inference_read_timeout: int = 60
     bedrock_max_attempts: int = 1
     # 가용성 폴백 **총** 시간 예산 — 후보(원본+체인 최대 5)마다 상류 타임아웃이

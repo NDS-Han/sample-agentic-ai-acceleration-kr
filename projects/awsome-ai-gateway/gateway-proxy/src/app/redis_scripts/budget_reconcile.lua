@@ -39,13 +39,24 @@
 --    (실측: 라이브 예약이 usage 에서 빠져 HARD_BLOCK 우회, R23 r4 S-1).
 --    인덱스 필드(post-warmup 진실)를 먼저 보고, 스캔이 넘긴 키 중 인덱스
 --    미커버분(구버전 파드의 비인덱스 마커)만 추가한다.
+-- NaN/±Inf 정규화 — 'nan' 마커·카운터는 tonumber 가 truthy NaN 을 반환해
+-- `or` 폴백이 못 잡고, live/resvsum 에 섞이면 `SET tostring(live)` 가 'nan'
+-- 을 카운터에 다시 쓴다(12차 리뷰 F1). 비유한 값은 nil(마커는 dead, 카운터는
+-- `or 0` 폴백)으로 수렴시킨다.
+local function fin(v)
+    if type(v) ~= 'number' or v ~= v or v == math.huge or v == -math.huge then
+        return nil
+    end
+    return v
+end
+
 local live = 0
 local covered = {}
 local dead = {}
 local field_prefix = ARGV[4] or ''
 for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
     local v = redis.call('GET', ARGV[3] .. f)
-    local n = v and tonumber(v)
+    local n = v and fin(tonumber(v))
     if n then
         covered[f] = true
         if field_prefix == '' or string.sub(f, 1, #field_prefix) == field_prefix then
@@ -65,13 +76,13 @@ for i = 4, #KEYS do
     local f = string.sub(KEYS[i], #ARGV[3] + 1)
     if not covered[f] then
         local v = redis.call('GET', KEYS[i])
-        local n = v and tonumber(v)
+        local n = v and fin(tonumber(v))
         if n then live = live + n end
     end
 end
 
-local resvsum = tonumber(redis.call('GET', KEYS[2])) or 0
-local snap    = tonumber(ARGV[2]) or 0
+local resvsum = fin(tonumber(redis.call('GET', KEYS[2]))) or 0
+local snap    = fin(tonumber(ARGV[2])) or 0
 local orphan  = "raced"
 
 if resvsum == snap then
@@ -93,11 +104,11 @@ if resvsum == snap then
     end
 end
 
-local db     = tonumber(ARGV[1]) or 0
+local db     = fin(tonumber(ARGV[1])) or 0
 local target = db + live
-local cur    = tonumber(redis.call('GET', KEYS[1])) or 0
+local cur    = fin(tonumber(redis.call('GET', KEYS[1]))) or 0
 if cur < target then
     redis.call('INCRBYFLOAT', KEYS[1], target - cur)
 end
 
-return {tostring(live), tostring(orphan), tostring(tonumber(redis.call('GET', KEYS[1])) or 0)}
+return {tostring(live), tostring(orphan), tostring(fin(tonumber(redis.call('GET', KEYS[1]))) or 0)}

@@ -240,11 +240,15 @@ class RateLimitService:
         try:
             pipe = redis.pipeline(transaction=False)
             for k in keys:
-                # rate_limit_check.lua 가 멤버를 `request_id:1`(스코프 인덱스
-                # 접미사)로 ZADD 한다 — bare request_id 는 절대 매칭되지 않아
-                # 롤백이 no-op 이 되던 결함이 있었다. 두 형태를 모두 지운다
-                # (단일/다중 스코프 eval 양쪽 대비).
-                pipe.zrem(k, request_id, f"{request_id}:1")
+                # rate_limit_check.lua 가 멤버를 `request_id:<스코프인덱스>`
+                # 로 ZADD 한다 — bare request_id 는 절대 매칭되지 않는다.
+                # 현재 호출은 전부 num_scopes=1 이라 :1 만 실존하지만,
+                # 다중 스코프 eval 이 도입돼도 최대 스코프 수(3: USER/TEAM/
+                # GLOBAL)까지 지워 롤백 누수를 막는다(12차 리뷰 N2).
+                pipe.zrem(
+                    k, request_id,
+                    f"{request_id}:1", f"{request_id}:2", f"{request_id}:3",
+                )
             await pipe.execute()
         except Exception:
             logger.warning("rpm_undo_failed")
@@ -431,6 +435,10 @@ class RateLimitService:
         ``prev`` 로 이동한 상태라 환불이 새 ``cur`` 을 음수로 만들어 그 창의
         한도를 부풀렸다 — Opus thinking 같은 >60s 스트림에서 매번 발생.
         마커가 두 칸 이상 밀렸으면 예약 버킷은 이미 사라진 것이므로 건너뛴다.
+
+        ⚠️ ``reserved_at // 60`` 은 check 의 ``window_sec=60`` 기본값과 짝이다 —
+        비기본 window_sec 호출자가 생기면 버킷 계산도 그 값을 따라야 한다
+        (12차 리뷰 N3 — 현재 호출자는 전부 기본값).
         """
         adjustment = int(actual_tokens) - int(reserved_tokens)
         if adjustment == 0:

@@ -35,9 +35,21 @@
 -- ARGV[4] = 호출자가 스캔한 pending 합 ('' = 인덱스 신뢰, Lua 내부 계산)
 -- Returns 1 = rebuild 적용(센티넬 정리), 0 = 트리거 이미 해소됨
 
+-- NaN/±Inf 정규화 — tonumber('nan'/'inf') 는 truthy 라 `or` 폴백이 못 잡는다.
+-- 카운터에 'nan' 이 들어가면 모든 비교가 false 가 돼 트리거는 서는데
+-- `cur < target` 도 false 라 복구가 영구 불발하고, lost_amt 가 DEL 로
+-- 조용히 버려진다(12차 리뷰 F1). NaN 은 "값 없음", Inf 는 0 으로 수렴시켜
+-- 플로어 쓰기가 스스로 치유하게 한다.
+local function fin(v)
+    if type(v) ~= 'number' or v ~= v or v == math.huge or v == -math.huge then
+        return nil
+    end
+    return v
+end
+
 local lost    = redis.call('EXISTS', KEYS[1] .. ':lost')
 local cur_raw = redis.call('GET', KEYS[1])
-local cur     = tonumber(cur_raw)
+local cur     = fin(tonumber(cur_raw))
 
 -- 트리거: 센티넬 존재 OR 카운터 부재 OR 음수. 모두 아니면 이미 복원된 상태 —
 -- 다른 파드가 먼저 적용한 것이라 no-op (S-5: 락 대신 조건부로 중복 차단).
@@ -48,7 +60,7 @@ end
 local live
 if ARGV[4] ~= '' then
     -- 인덱스 웜업 창 — 구버전 마커가 인덱스에 없으므로 Python 스캔값을 신뢰.
-    live = tonumber(ARGV[4]) or 0
+    live = fin(tonumber(ARGV[4])) or 0
 else
     live = 0
     local marker_prefix = ARGV[2]
@@ -56,7 +68,7 @@ else
     local dead = {}
     for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
         local v = redis.call('GET', marker_prefix .. f)
-        local n = v and tonumber(v)
+        local n = v and fin(tonumber(v))
         if n then
             if field_prefix == '' or string.sub(f, 1, #field_prefix) == field_prefix then
                 live = live + n
@@ -70,13 +82,13 @@ else
     end
 end
 
-local target = tonumber(ARGV[1]) + live
+local target = (fin(tonumber(ARGV[1])) or 0) + live
 
 -- 차감 실패분 누적 — 원장(budget_usages)은 워커 배치라 rebuild 시점에 실패분이
 -- 아직 미반영일 수 있다. 그 상태로 센티넬만 지우면 유실분이 기간 내내 남으므로
 -- cur+lost_amt 도 플로어 후보로 올린다 — 이후 deduct 가 계속 cur 에 누적되므로
 -- cur+lost_amt 가 정확한 복원값이다 (db+live 가 작게 읽힐 창을 덮는다).
-local lost_amt = tonumber(redis.call('GET', KEYS[1] .. ':lost_amt')) or 0
+local lost_amt = fin(tonumber(redis.call('GET', KEYS[1] .. ':lost_amt'))) or 0
 if lost_amt > 0 then
     target = math.max(target, (cur or 0) + lost_amt)
 end

@@ -485,6 +485,12 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas 는 1 이상이어야 합니다 "
                 f"(min={mn})")
+        if mx is not None and int(mx) < 1:
+            # max 단독 선언(minReplicas: null 오버레이로 chart 기본 min 삭제)도
+            # 렌더에서 잡는다 — apply 단계의 HPA 거절과 같은 구멍(12차 리뷰).
+            raise ValueError(
+                f"gatewayProxy.autoscaling: maxReplicas 는 1 이상이어야 합니다 "
+                f"(max={mx})")
         if mn is not None and mx is not None and int(mn) > int(mx):
             raise ValueError(
                 f"gatewayProxy.autoscaling: minReplicas({mn}) > "

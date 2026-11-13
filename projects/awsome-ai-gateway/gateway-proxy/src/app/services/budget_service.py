@@ -732,11 +732,17 @@ class BudgetService:
                 if not user_config_present:
                     team_cfg_raw = await redis.get(team_config_key)
                     if team_cfg_raw:
-                        team_cfg = json.loads(
-                            team_cfg_raw.decode()
-                            if isinstance(team_cfg_raw, bytes)
-                            else team_cfg_raw
-                        )
+                        try:
+                            team_cfg = json.loads(
+                                team_cfg_raw.decode()
+                                if isinstance(team_cfg_raw, bytes)
+                                else team_cfg_raw
+                            )
+                        except ValueError:
+                            # 형제 사이트(cost_recorder/reserve)와 같은 가드 —
+                            # 깨진 JSON 은 D-3 합성 없이 진행하는 게 폴백 전체보다
+                            # 낫다(12차 리뷰).
+                            team_cfg = None
                         if not isinstance(team_cfg, dict):
                             # reserve 경로(:918)와 같은 가드 — 비객체 캐시
                             # ('"5"' 등)는 .get 이 AttributeError 로 죽는다.

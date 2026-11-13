@@ -43,6 +43,9 @@ local usage_key  = KEYS[1]
 local config_key = KEYS[2]
 local marker_key = KEYS[3]
 local actual = tonumber(ARGV[1])
+-- 음수 실비는 usage 를 내려 한도를 부푼다 — 환불 경로는 actual=0 이므로
+-- 음수 입력은 설계 밖이다(deduct 의 cost 가드와 대칭, 12차 리뷰).
+if actual and actual < 0 then actual = 0 end
 -- 정산 완료 툼스톤은 budget:pending: 네임스페이스 **밖**에 둔다 —
 -- "budget:pending:*" 를 스캔하는 경로(reconcile/웜업 pending 합산/복원
 -- 스크립트)가 값이 실비인 툼스톤을 라이브 마커로 오인해 정산분을 재합산
@@ -58,6 +61,12 @@ if not reserved_raw then
     end
     -- 마커 소실(만료/축출) — 호출자가 예약치를 모르면 안전하게 no-op
     local caller_reserved = tonumber(ARGV[4])
+    -- 비유한 호출자 예약치는 복구 근거로 쓸 수 없다 — min(NaN, resvsum) 이
+    -- NaN 을 예약치로 삼아 INCRBYFLOAT 가 거부된다(12차 리뷰).
+    if caller_reserved and (caller_reserved ~= caller_reserved
+        or caller_reserved == math.huge or caller_reserved == -math.huge) then
+        caller_reserved = nil
+    end
     if not caller_reserved then
         return cjson.encode({settled = false})
     end
@@ -74,13 +83,24 @@ if not reserved_raw then
     --   그 뒤의 settle 은 reserved=0 → 실비만 적용하므로 usage 에 고아분이
     --   과대 계상된 채 남을 수 있다(R23 r3 N-2). 과소(차단 우회)보다
     --   과대(조기 차단)가 안전한 방향이다.
-    local resvsum = tonumber(redis.call('GET', KEYS[4]) or '0') or 0
-    if resvsum < 0 then resvsum = 0 end
+    -- NaN/±Inf 정규화 — 'nan' resvsum 은 `or 0` 을 truthy 로 통과하고
+    -- min(basis, nan) 이 NaN 을 예약치로 삼아 delta=NaN → INCRBYFLOAT 거부로
+    -- 마커는 남은 채 매 settle 이 실패한다(12차 리뷰 F1). 비유한 값은
+    -- nil/0(복구 불가 판정 → 실비만 적용)으로 수렴.
+    local resvsum = tonumber(redis.call('GET', KEYS[4]) or '0')
+    if type(resvsum) ~= 'number' or resvsum ~= resvsum or resvsum == math.huge
+        or resvsum == -math.huge or resvsum < 0 then
+        resvsum = 0
+    end
     local live, idx_reserved
     if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
         local idx_val = redis.call('HGET', KEYS[5], ARGV[3])
         live = idx_val ~= false
         idx_reserved = tonumber(idx_val or 'x')  -- 숫자 아닌 값은 nil → 폴백
+        if idx_reserved and (idx_reserved ~= idx_reserved
+            or idx_reserved == math.huge or idx_reserved == -math.huge) then
+            idx_reserved = nil
+        end
     else
         -- 인덱스 미제공 호출자(구버전)는 resvsum 잔량을 생존 근거로 삼는다.
         live = resvsum > 0
@@ -100,6 +120,9 @@ if not reserved_raw then
     recovered = true
 end
 local reserved = tonumber(reserved_raw) or 0
+if reserved ~= reserved or reserved == math.huge or reserved == -math.huge then
+    reserved = 0  -- 'nan' 마커/인덱스 — 델타를 실비 전액으로(실비만 적용)
+end
 
 local config_raw = redis.call('GET', config_key)
 if not config_raw and ARGV[2] and ARGV[2] ~= '' then
@@ -157,8 +180,10 @@ redis.call('DEL', marker_key)
 -- 뒤 늦은 중복 settle 이 복구 분기로 들어와 실비를 재적용한다(R23 r2 N-4).
 local tomb_ttl = tonumber(ARGV[5]) or 14400
 -- ttl <= 0 은 SET ... EX 에서 델타 적용·마커 삭제 후에 크래시해 경합 settle 이
--- 복구 경로로 재적용(이중정산)된다 — 설정 오류는 큰 TTL 로 수렴(11차 리뷰).
-if tomb_ttl <= 0 then tomb_ttl = 14400 end
+-- 복구 경로로 재적용(이중정산)된다. 상한도 필요하다 — EX 는 int64 초라
+-- >9.2e18(또는 NaN/inf)은 같은 지점에서 크래시한다(12차 리뷰). 설정 오류는
+-- 큰 TTL 로 수렴.
+if not (tomb_ttl > 0 and tomb_ttl <= 2147483647) then tomb_ttl = 14400 end
 redis.call('SET', settled_key, ARGV[1], 'EX', tomb_ttl)
 if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
     redis.call('HDEL', KEYS[5], ARGV[3])  -- 인덱스는 베스트에포트 — 마커가 진실

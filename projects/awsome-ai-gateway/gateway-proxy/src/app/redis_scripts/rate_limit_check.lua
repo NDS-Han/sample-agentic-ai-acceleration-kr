@@ -22,6 +22,9 @@
 local now_ms     = tonumber(ARGV[1])
 local request_id = ARGV[2]
 local window_ms  = tonumber(ARGV[3]) or 60000
+-- window_ms <= 0 이면 window_start > now 가 돼 ZREMRANGEBYSCORE 가 미래
+-- 멤버를 남기고 과거를 지우는 역전 정리(한도 우회)가 된다(12차 리뷰 N4).
+if not (window_ms > 0) then window_ms = 60000 end
 local num_scopes = tonumber(ARGV[4])
 
 local window_start = now_ms - window_ms

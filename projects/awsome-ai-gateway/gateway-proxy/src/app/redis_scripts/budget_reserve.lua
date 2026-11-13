@@ -39,8 +39,10 @@ local estimate = tonumber(ARGV[2]) or 0
 if estimate < 0 then estimate = 0 end  -- 음수 추정치가 usage 를 내리는 것 방어
 local marker_ttl = tonumber(ARGV[4]) or 14400
 -- ttl <= 0 은 아래 SET/EXPIRE 가 커밋 후에 크래시해 마커·인덱스 없는 고아
--- 예약(영구 resvsum 부풀림)을 남긴다 — 설정 오류는 큰 TTL 로 수렴시킨다.
-if marker_ttl <= 0 then marker_ttl = 14400 end
+-- 예약(영구 resvsum 부풀림)을 남긴다. 상한도 필요하다 — EX 는 int64 초라
+-- >9.2e18(또는 NaN/inf)은 SET 이 usage/resvsum 커밋 후에 크래시해 같은
+-- 고아가 된다(12차 리뷰). 설정 오류는 큰 TTL 로 수렴시킨다.
+if not (marker_ttl > 0 and marker_ttl <= 2147483647) then marker_ttl = 14400 end
 
 local function decode_or_nil(s)
     if not s then return nil end
