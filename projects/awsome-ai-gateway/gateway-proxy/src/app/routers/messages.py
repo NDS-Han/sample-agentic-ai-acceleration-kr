@@ -69,6 +69,7 @@ from app.services.upstream_compat import (
     unsupported_tool_prefixes,
 )
 from app.services.web_search_loop import normalize_inbound_native_blocks
+from app.services.rate_limit_enforcement import strip_internal_body_fields
 
 logger = structlog.get_logger(__name__)
 
@@ -216,7 +217,9 @@ async def messages(request: Request) -> StreamingResponse | JSONResponse:
     body = await request.body()
 
     try:
-        req_data = json.loads(body)
+        # `_gw_*` 내부 심사 필드는 클라이언트가 심을 수 없다 — 폴백 과금
+        # 디플레이트 차단(18차 리뷰 F-1). web-search/fallback/상류 공용 원본.
+        req_data = strip_internal_body_fields(json.loads(body))
         # Anthropic-only server tools (Claude Code's advisor …) are a Bedrock 400 for the whole
         # request. Removed HERE, before both consumers of req_data — the web-search loop and
         # the direct/fallback/Mantle bodies. Same object when there is nothing to remove.
@@ -1492,7 +1495,8 @@ async def count_tokens(request: Request) -> JSONResponse:
     body = await request.body()
 
     try:
-        req_data = json.loads(body)
+        # `_gw_*` 내부 필드 스트립 — /v1/messages 와 동일(18차 리뷰 F-1).
+        req_data = strip_internal_body_fields(json.loads(body))
         # Same bridge as /v1/messages: CountTokens rejects Anthropic-only server tools too.
         req_data, _ = strip_unsupported_server_tools(
             req_data,

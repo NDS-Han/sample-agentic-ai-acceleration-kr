@@ -143,6 +143,28 @@ class ModelPricingSchema(BaseModel):
     # threshold 가 None 이면 티어 없음 → calculate_cost 가 아래 5개를 읽지 않는다(단일 요율).
     # long 단가가 None 이면 그 항은 short 로 폴백(fail-safe, 크래시 없음).
     long_context_threshold_tokens: int | None = None
+
+    @field_validator("long_context_threshold_tokens", mode="before")
+    @classmethod
+    def _positive_long_threshold(cls, v):
+        # threshold ≤ 0 이면 `prompt_total > 0` 이 항상 참 → 모든 요청이 long
+        # 요율(예: Haiku 5.5 = 5배)로 과금되는 무음 과다청구(18차 리뷰 F2).
+        # 오염 값은 티어 비활성(None)으로 수렴 — 모델 로드 실패보다 폭발반경이
+        # 작고 운영자에게 보인다. bool 은 int(True)=1 이라 같은 이유로 무효.
+        if v is None:
+            return v
+        if isinstance(v, bool):
+            logger.warning("long_ctx_threshold_invalid_coerced", raw=str(v))
+            return None
+        try:
+            t = int(v)
+        except (TypeError, ValueError):
+            logger.warning("long_ctx_threshold_invalid_coerced", raw=str(v))
+            return None
+        if t <= 0:
+            logger.warning("long_ctx_threshold_nonpositive_coerced", raw=str(v))
+            return None
+        return t
     long_input_per_1k: Decimal | None = None
     long_output_per_1k: Decimal | None = None
     long_cache_write_per_1k: Decimal | None = None      # 5-min TTL

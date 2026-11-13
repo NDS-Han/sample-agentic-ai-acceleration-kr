@@ -463,6 +463,9 @@ class RateLimitService:
                         d.scope, d.scope_id, d.model_alias
                     )
                     pipe.incrby(cur, adjustment)
+                    # incrby 는 부재 키를 TTL 없이 생성한다 — win 마커만 남고
+                    # 버킷이 축출된 경합이면 영구 팬텀 버킷이 된다(18차 F-3).
+                    pipe.expire(cur, 180)  # check 의 ttl_sec=60*2+60 과 동일
                 await pipe.execute()
                 return
 
@@ -501,6 +504,7 @@ class RateLimitService:
                 pipe = redis.pipeline(transaction=False)
                 for key, _label in targets:
                     pipe.incrby(key, adjustment)
+                    pipe.expire(key, 180)  # TTL-less 생성 방지(위와 동일)
                 await pipe.execute()
         except Exception:
             logger.warning(

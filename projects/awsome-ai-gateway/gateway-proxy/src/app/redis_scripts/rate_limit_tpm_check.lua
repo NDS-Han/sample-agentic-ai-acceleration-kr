@@ -45,6 +45,13 @@ for i = 1, num_scopes do
     local limit    = tonumber(ARGV[4 + i])
 
     if limit and limit > 0 then
+        -- WRONGTYPE 버킷은 GET 이 죽어 eval 실패로 윈도우 내내 fail-open —
+        -- 지운다(18차 F-2, pendingidx 와 같은 규약 — TYPE 은 {ok=} 테이블).
+        for _, _k in ipairs({cur_key, prev_key, win_key}) do
+            local t = redis.call('TYPE', _k)
+            if type(t) == 'table' then t = t['ok'] end
+            if t ~= 'string' and t ~= 'none' then redis.call('DEL', _k) end
+        end
         -- 버킷 회전: 저장된 마커가 오래됐으면 cur → prev 이동
         local stored_bucket = tonumber(redis.call('GET', win_key) or '0')
         if stored_bucket ~= current_bucket then
@@ -52,7 +59,9 @@ for i = 1, num_scopes do
             -- 그대로 prev 로 복사돼 오염이 번진다(17차 리뷰 F10) — 비유한/
             -- 비수치는 0 으로 수렴.
             local cur_val = tonumber(redis.call('GET', cur_key) or '0')
-            if not cur_val or cur_val ~= cur_val
+            -- 음수도 오염 — 그대로 prev 로 복사되면 추정치가 음으로 빠져
+            -- 윈도우 한도가 무제한처럼 동작한다(18차 리뷰 F1).
+            if not cur_val or cur_val ~= cur_val or cur_val < 0
                 or cur_val == math.huge or cur_val == -math.huge then
                 cur_val = 0
             end
@@ -79,14 +88,16 @@ for i = 1, num_scopes do
         -- 조용히 무제한 fail-open 이 되고, Phase 2 의 INCRBY 는 저장값을
         -- 거부해 eval 이 죽는다(17차 리뷰 F10). 비유한/비수치는 0 으로,
         -- '0x10' 같은 비표준 형식은 표준형으로 재기록해 값을 보존한다.
-        if not cur_tokens or cur_tokens ~= cur_tokens
+        if not cur_tokens or cur_tokens ~= cur_tokens or cur_tokens < 0
             or cur_tokens == math.huge or cur_tokens == -math.huge then
+            -- 음수 버킷은 추정치를 아래로 당겨 윈도우 한도를 부푸는 fail-open —
+            -- 0 클램프는 budget 평면(resvsum<0→0)과 같은 방향(18차 F1).
             redis.call('SET', cur_key, '0', 'KEEPTTL')
             cur_tokens = 0
         elseif cur_raw ~= tostring(cur_tokens) then
             redis.call('SET', cur_key, tostring(cur_tokens), 'KEEPTTL')
         end
-        if not prev_tokens or prev_tokens ~= prev_tokens
+        if not prev_tokens or prev_tokens ~= prev_tokens or prev_tokens < 0
             or prev_tokens == math.huge or prev_tokens == -math.huge then
             redis.call('SET', prev_key, '0', 'KEEPTTL')
             prev_tokens = 0

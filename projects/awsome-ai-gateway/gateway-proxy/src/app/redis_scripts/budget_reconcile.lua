@@ -54,19 +54,26 @@ local live = 0
 local covered = {}
 local dead = {}
 local field_prefix = ARGV[4] or ''
+-- WRONGTYPE 카운터는 GET 이 eval 을 죽여 치유 SET 까지 못 가고 매 틱 같은
+-- 키에서 죽는다(18차 F-2). 문자열이 아니면 지워 아래 플로어/보정이 정상
+-- 경로로 수렴하게 한다(pendingidx 와 같은 규약 — Lua TYPE 은
+-- {ok='string'} 테이블이라 언랩 필수).
+local function _fix_type(key, want)
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= want and t ~= 'none' then redis.call('DEL', key) end
+end
+_fix_type(KEYS[1], 'string')
+_fix_type(KEYS[2], 'string')
 -- WRONGTYPE 인덱스(문자열/리스트가 같은 경로에 심어진 경우)는 HKEYS 가
 -- eval 실패로 죽어 호출측이 그 행을 매 틱 스킵한다 — resvsum 드리프트가
 -- 영구 미청소(17차 리뷰 F12). hash 가 아니면 재생 불가 데이터이므로 지워
 -- 다음 reserve 의 HSET 이 정상 해시를 다시 만들게 한다.
--- ⚠️ Lua 의 TYPE 은 문자열이 아니라 {ok='hash'} 테이블을 반환한다 —
---    `~= 'hash'` 비교는 항상 참이라 정상 인덱스까지 지워진다(실Redis 검증).
-local _t3 = redis.call('TYPE', KEYS[3])
-if type(_t3) == 'table' then _t3 = _t3['ok'] end
-if _t3 ~= 'hash' then
-    redis.call('DEL', KEYS[3])
-end
+_fix_type(KEYS[3], 'hash')
 for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
-    local v = redis.call('GET', ARGV[3] .. f)
+    -- WRONGTYPE 마커는 GET 이 죽는다 — 부재와 동치로(dead) 수렴(18차 F-2).
+    local ok_g, v = pcall(redis.call, 'GET', ARGV[3] .. f)
+    if not ok_g then v = nil end
     local n = v and fin(tonumber(v))
     if v and (not n or n < 0) then
         -- 마커는 살아 있는데 값이 오염('nan'/'abc'/음수)된 경우 — 인덱스
@@ -97,7 +104,8 @@ for i = 4, #KEYS do
     -- 스캔 시점 이후 만료된 마커는 GET nil 로 자연 제외.
     local f = string.sub(KEYS[i], #ARGV[3] + 1)
     if not covered[f] then
-        local v = redis.call('GET', KEYS[i])
+        local ok_g, v = pcall(redis.call, 'GET', KEYS[i])
+        if not ok_g then v = nil end
         local n = v and fin(tonumber(v))
         if n and n < 0 then n = nil end  -- 음수 마커 오염 방어(위와 동일)
         if n then live = live + n end
@@ -105,7 +113,10 @@ for i = 4, #KEYS do
 end
 -- 합계 자체의 오버플로/음수 방어 — ≥1e308 항들의 합은 +Inf 가 돼
 -- `live < 0` 를 빠져나가 'inf' 를 resvsum/usage 에 쓴다(14차 리뷰).
-live = fin(live) or 0
+-- 0 수렴은 orphan=resvsum-0=resvsum 으로 실사용을 그만큼 배수 배출해
+-- 영구 과소 계상이 된다(18차 리뷰) — MAXD 포화면 resvsum=MAXD 로 남고
+-- 다음 틱의 orphan 드레인→음수 카운터→프로브 rebuild 로 수렴한다.
+live = fin(live) or 1.7976931348623157e308
 if live < 0 then live = 0 end
 
 local resvraw = fin(tonumber(redis.call('GET', KEYS[2])))
@@ -160,7 +171,8 @@ local target = db + live
 target = math.min(target, 1.7976931348623157e308)
 -- (not cur) 도 써야 'nan'/'abc' 카운터가 target=0 일 때도 덮어써 치유된다
 -- — cur=0 폴백은 0<0 이라 쓰기를 건너뛰고 오염 값이 남는다(14차 리뷰).
-local cur    = fin(tonumber(redis.call('GET', KEYS[1])))
+local cur_raw = redis.call('GET', KEYS[1])
+local cur     = fin(tonumber(cur_raw))
 if (not cur) or cur < target then
     -- INCRBYFLOAT(target-cur) 와 동치(같은 스크립트 원자 실행)이면서 'nan'
     -- 같은 비수치 카운터도 덮어써 치유된다 — INCRBYFLOAT 는 그 키에서
@@ -168,6 +180,13 @@ if (not cur) or cur < target then
     -- 같은 45d.
     redis.call('SET', KEYS[1], tostring(target))
     redis.call('EXPIRE', KEYS[1], 3888000)
+elseif cur_raw ~= tostring(cur) then
+    -- ' 5' 등은 fin()은 읽지만 INCRBYFLOAT 가 거부 — 플로어가 안 올려도
+    -- 형식은 표준형으로 재기록해 다음 deduct 를 지킨다(18차 F5).
+    redis.call('SET', KEYS[1], tostring(cur), 'KEEPTTL')
+    if redis.call('TTL', KEYS[1]) < 0 then
+        redis.call('EXPIRE', KEYS[1], 3888000)
+    end
 end
 
 return {tostring(live), tostring(orphan), tostring(fin(tonumber(redis.call('GET', KEYS[1]))) or 0)}

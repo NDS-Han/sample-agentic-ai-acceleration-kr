@@ -34,6 +34,23 @@
 local usage_key  = KEYS[1]
 local config_key = KEYS[2]
 local marker_key = KEYS[3]
+-- WRONGTYPE 키는 GET/HSET 이 eval 을 죽인다 — resvsum GET 은 usage 커밋
+-- 뒤라 무표지 팬텀 예약을 남기고(18차 F-2), 나머지 키의 크래시는 호출측이
+-- fail-open(무예약 진행)으로 처리해 한도 우회가 된다. 기대 타입이 아니면
+-- 지워 정상 경로로 수렴(settle 의 _fix_type 과 같은 규약 — Lua TYPE 은
+-- {ok='string'} 테이블이라 언랩 필수).
+local function _fix_type(key, want)
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= want and t ~= 'none' then redis.call('DEL', key) end
+end
+_fix_type(usage_key, 'string')
+_fix_type(config_key, 'string')
+_fix_type(marker_key, 'string')
+_fix_type('budget:settled:' .. string.sub(marker_key, 16), 'string')
+_fix_type(KEYS[4], 'string')
+if KEYS[5] then _fix_type(KEYS[5], 'hash') end
+
 local scope_label = ARGV[1]
 local estimate = tonumber(ARGV[2]) or 0
 if estimate < 0 then estimate = 0 end  -- 음수 추정치가 usage 를 내리는 것 방어
@@ -177,8 +194,10 @@ if type(used) ~= 'number' or used ~= used or used == math.huge
     return reply(false, false, scope_label .. '_budget_exceeded', 0, limit, true)
 end
 if used_raw ~= tostring(used) then
-    -- '0x10'/' 5' 등 Lua 파서는 받지만 INCRBYFLOAT 가 거부하는 비표준
-    -- 형식 — 표준형으로 재기록해 아래 커밋을 지킨다(값 보존, 17차 F-1).
+    -- ' 5' 처럼 Lua tonumber 는 받지만 Redis INCRBYFLOAT 가 거부하는
+    -- 형식이 있다(공백 패딩 등 — '0x10'·'5.'·'.5'·'1e999'는 실측 수용,
+    -- 18차). 비표준은 전부 표준형으로 재기록해 두 파서 결과를 일치시킨다
+    -- (값 보존, 17차 F-1).
     redis.call('SET', usage_key, tostring(used), 'KEEPTTL')
 end
 
@@ -258,8 +277,8 @@ if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
 elseif rs_raw ~= tostring(rs_stored) then
-    -- '0x10'/' 5'/'5.' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가
-    -- 거부하는 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
+    -- ' 5' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가 거부하는
+    -- 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
     -- (값 보존, 다음 명령이 바로 INCRBYFLOAT 라 크래시 경로가 닫힌다 —
     --  17차 리뷰 F-1).
     redis.call('SET', KEYS[4], tostring(rs_stored), 'KEEPTTL')

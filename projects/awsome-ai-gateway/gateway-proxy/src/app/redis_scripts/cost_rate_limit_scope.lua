@@ -39,9 +39,16 @@ local scope_label = ARGV[4]
 -- (b) KEYS[1] 오염 시 eval 실패로 윈도우 내내 fail-open 이 된다(17차 F5).
 -- 비유한/비수치는 0 으로, 비표준 형식은 표준형으로 재기록해 값을 보존한다.
 local function _bkt(key)
+    -- WRONGTYPE 은 GET 이 죽어 eval 실패로 윈도우 내내 fail-open — 지운다
+    -- (18차 F-2, pendingidx 와 같은 규약 — TYPE 은 {ok=} 테이블).
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= 'string' and t ~= 'none' then redis.call('DEL', key) end
     local raw = redis.call('GET', key) or '0'
     local v = tonumber(raw)
-    if not v or v ~= v or v == math.huge or v == -math.huge then
+    -- 음수 버킷도 오염 — settle 이중환불/수동 SET 이 윈도우 카운트를 음으로
+    -- 만들면 한도가 부풀어 fail-open 된다(18차 리뷰 F1) — 0 수렴.
+    if not v or v ~= v or v < 0 or v == math.huge or v == -math.huge then
         redis.call('SET', key, '0', 'KEEPTTL')
         return 0
     end

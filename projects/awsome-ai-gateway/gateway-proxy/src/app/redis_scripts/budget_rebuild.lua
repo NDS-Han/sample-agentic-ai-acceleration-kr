@@ -47,13 +47,27 @@ local function fin(v)
     return v
 end
 
+-- WRONGTYPE 카운터는 GET 이 eval 을 죽여 아래 치유 SET 까지 못 간다 —
+-- 문자열이 아니면 지워 정상 경로로 수렴(18차 F-2, pendingidx 와 같은 규약).
+local function _fix_type(key, want)
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= want and t ~= 'none' then redis.call('DEL', key) end
+end
+_fix_type(KEYS[1], 'string')
+_fix_type(KEYS[2], 'string')
+_fix_type(KEYS[1] .. ':lost_amt', 'string')
+
 local lost    = redis.call('EXISTS', KEYS[1] .. ':lost')
 local cur_raw = redis.call('GET', KEYS[1])
 local cur     = fin(tonumber(cur_raw))
 
 -- 트리거: 센티넬 존재 OR 카운터 부재 OR 음수. 모두 아니면 이미 복원된 상태 —
 -- 다른 파드가 먼저 적용한 것이라 no-op (S-5: 락 대신 조건부로 중복 차단).
-if lost == 0 and cur_raw and cur and cur >= 0 then
+-- 비표준 형식(' 5' 등)도 트리거다 — fin()은 값으로 읽어 건강으로 보이지만
+-- INCRBYFLOAT 가 거부해 매 deduct 가 커밋 전 크래시한다(18차 F5).
+if lost == 0 and cur_raw and cur and cur >= 0
+    and cur_raw == tostring(cur) then
     return 0
 end
 
@@ -80,7 +94,9 @@ else
         redis.call('DEL', KEYS[3])
     end
     for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
-        local v = redis.call('GET', marker_prefix .. f)
+        -- WRONGTYPE 마커는 GET 이 죽는다 — 부재(dead)와 동치 수렴(18차 F-2).
+        local ok_g, v = pcall(redis.call, 'GET', marker_prefix .. f)
+        if not ok_g then v = nil end
         local n = v and fin(tonumber(v))
         if v and (not n or n < 0) then
             -- 마커는 살아 있는데 값이 오염('nan'/'abc'/음수)된 경우 — 인덱스
@@ -112,7 +128,9 @@ else
                        unpack(dead, i, math.min(i + 499, #dead)))
         end
     end
-    live = fin(live) or 0        -- 합계 오버플로 방어(위 웜업 경로와 동일)
+    -- 합계 오버플로는 0 수렴이면 target=db 만으로 과소 복원(스코프가 예산
+    -- 전액 재취득, fail-open)이 된다 — MAXD 포화로 차단 방향 수렴(18차).
+    live = fin(live) or 1.7976931348623157e308
     if live < 0 then live = 0 end  -- 오염 합산 방어(보수적 하한)
 end
 
@@ -141,6 +159,14 @@ end
 if (not cur) or cur < target then
     redis.call('SET', KEYS[1], target)
     redis.call('EXPIRE', KEYS[1], 3888000)  -- 45d (deduct/reserve 와 동일)
+elseif cur_raw ~= tostring(cur) then
+    -- 플로어는 안 올려도 되지만 형식이 비표준이면 INCRBYFLOAT 가 거부해
+    -- 매 deduct 가 크래시→센티넬→no-op rebuild 루프로 영구 과소(18차 F5).
+    -- 값 보존 표준형 재기록 + TTL-less 키에는 TTL 부여.
+    redis.call('SET', KEYS[1], tostring(cur), 'KEEPTTL')
+    if redis.call('TTL', KEYS[1]) < 0 then
+        redis.call('EXPIRE', KEYS[1], 3888000)
+    end
 end
 
 -- resvsum 은 라이브 마커 합이 진실 — 양방향 보정 (reconcile 과 같은 규약).

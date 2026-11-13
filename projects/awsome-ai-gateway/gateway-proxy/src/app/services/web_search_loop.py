@@ -176,7 +176,11 @@ def conservative_admission_body(
     무캡이므로 실측 상한(24k, 2026-09-16)으로 예상한다. 한도 근처 유저가 조금
     더 빨리 429 를 맞는 대가로 한도를 넘는 다중 턴 지출을 막는다.
     """
-    body = dict(req_data)
+    # 방어적 스트립 — 호출측은 라우터에서 이미 지웠지만(18차 F-1), 이 함수가
+    # 받는 바디에 클라이언트 소유 `_gw_*` 가 남아 있으면 아래서 심는 값과
+    # 다른 내부 키가 추정 직렬화에 섞인다. 네임스페이스는 전부 내부 소유다.
+    body = {k: v for k, v in req_data.items()
+            if not (isinstance(k, str) and k.startswith("_gw_"))}
     iters = max(1, int(max_iterations))
     # 방언별 상한 — Anthropic iters+3(검색+soft+hard+nudge), Responses iters+1.
     turns = bound_turns if bound_turns > 0 else iters + 3

@@ -134,7 +134,10 @@ def _row_thresholds(config) -> list[int]:
     raw = getattr(config, "alert_thresholds", None)
     if raw is None:
         return list(DEFAULT_THRESHOLDS)
-    return sorted({int(v) for v in raw})
+    # Postgres 배열은 NULL 원소를 담을 수 있다 — int(None) TypeError 가
+    # _check_budget_db 까지 올라가면 인프라 오류가 아니라 재전파돼 그 스코프의
+    # 모든 요청이 500 이 된다(18차 리뷰 F3). NULL 은 무시하고 나머지로 판정.
+    return sorted({int(v) for v in raw if v is not None})
 
 
 def _policy_to_lua_value(policy: BudgetPolicy | str) -> str:
@@ -1375,7 +1378,10 @@ class BudgetService:
             # 음수도 같은 오염 클래스다 — used<0 이면 잔여가 limit+|x| 로
             # 부풀어 fail-open 방향이고(Lua 측은 전 경로 음수→0 클램프),
             # limit<0 은 0 이하 한도=차단이다(17차 리뷰).
-            if not limit.is_finite() or limit < 0:
+            # NULL-cap 행(오염된 user/client config)은 None.is_finite() 에서
+            # AttributeError→500 — Redis 경로는 캐시의 'None' 문자열이 Lua
+            # tonumber→nil→0→deny 라 같은 차단으로 맞춘다(18차 리뷰 F4).
+            if limit is None or not limit.is_finite() or limit < 0:
                 limit = Decimal("0")
             if not used.is_finite() or used < 0:
                 used = limit

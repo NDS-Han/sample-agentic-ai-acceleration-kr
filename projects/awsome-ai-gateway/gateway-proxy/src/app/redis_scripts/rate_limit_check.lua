@@ -35,6 +35,12 @@ for i = 1, num_scopes do
     local limit = tonumber(ARGV[4 + i])
 
     if limit and limit > 0 then
+        -- WRONGTYPE 키는 ZREMRANGEBYSCORE 가 죽어 eval 실패 → 호출측
+        -- fail-open — 지워 정상 수렴(18차 F-2, pendingidx 규약 — TYPE 은
+        -- {ok='zset'} 테이블).
+        local _t = redis.call('TYPE', key)
+        if type(_t) == 'table' then _t = _t['ok'] end
+        if _t ~= 'zset' and _t ~= 'none' then redis.call('DEL', key) end
         -- 윈도우 밖 항목 제거 (모든 스코프 공통 cleanup)
         redis.call('ZREMRANGEBYSCORE', key, 0, window_start)
         -- 미래 스코어 멤버는 윈도우 이동으로도 제거되지 않아 카운트를 영구

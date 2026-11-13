@@ -40,6 +40,10 @@ local fail_key  = KEYS[1] .. ':' .. now_sec
 -- 그 초 동안 fail-open 이 된다(17차 리뷰 F11). 비유한/비수치는 0 으로
 -- 치유한다(초 버킷이라 재기록 폭은 작다).
 local function _bkt(key)
+  -- WRONGTYPE 은 GET 이 죽는다 — 지워 정상 수렴(18차 F-2, TYPE 은 {ok=} 테이블).
+  local t = redis.call('TYPE', key)
+  if type(t) == 'table' then t = t['ok'] end
+  if t ~= 'string' and t ~= 'none' then redis.call('DEL', key) end
   local v = tonumber(redis.call('GET', key) or '0')
   if not v or v ~= v or v == math.huge or v == -math.huge then
     redis.call('SET', key, '0', 'KEEPTTL')
@@ -67,8 +71,11 @@ local total = 0
 local fails = 0
 for i = 0, window_sec - 1 do
   local b = now_sec - i
-  local t = redis.call('GET', KEYS[2] .. ':' .. b)
-  local f = redis.call('GET', KEYS[1] .. ':' .. b)
+  -- WRONGTYPE 과거 버킷은 GET 이 죽는다 — 합산 제외로 수렴(18차 F-2).
+  local ok_t, t = pcall(redis.call, 'GET', KEYS[2] .. ':' .. b)
+  if not ok_t then t = nil end
+  local ok_f, f = pcall(redis.call, 'GET', KEYS[1] .. ':' .. b)
+  if not ok_f then f = nil end
   -- 오염 버킷은 합산에서 제외 — 'abc' 는 tonumber→nil 이라 eval 이 죽고,
   -- 'nan'/'inf' 는 진성 비유한값이라 `or 0` 을 truthy 로 통과해 total 이
   -- NaN 이 되면(모든 비교 거짓) 회로가 버킷 TTL 동안 절대 열리지 않는다

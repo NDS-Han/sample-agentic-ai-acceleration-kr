@@ -43,14 +43,43 @@ local usage_key  = KEYS[1]
 local config_key = KEYS[2]
 local marker_key = KEYS[3]
 local actual = tonumber(ARGV[1])
+-- 툼스톤은 원시 문자열을 유지 — 착륙 비교는 Decimal 동치라 '15.00'/'15'
+-- 모두 인식된다(18차 리뷰).
+local tomb_val = ARGV[1]
 -- 음수 실비는 usage 를 내려 한도를 부푼다 — 환불 경로는 actual=0 이므로
 -- 음수 입력은 설계 밖이다(deduct 의 cost 가드와 대칭, 12차 리뷰).
-if actual and actual < 0 then actual = 0 end
+-- nil/NaN/Inf 실비는 delta=NaN/nil-산술로 INCRBYFLOAT 에서 죽어 마커가
+-- 남고 재시도마다 같은 크래시 — orphan drain 까지 카운터 과대 잔존.
+-- 전액 환불(0) 수렴이 수렴성과 방향 모두 낫다(18차 리뷰).
+-- 'NaN'/'-5' 원시값을 툼스톤에 쓰면 착륙 비교(Decimal 동치)가 적용값과
+-- 어긋난다 — 툼스톤도 적용된 0 과 일치시킨다.
+if not actual or actual ~= actual or actual == math.huge
+    or actual == -math.huge or actual < 0 then
+    actual = 0
+    tomb_val = '0'
+end
 -- 정산 완료 툼스톤은 budget:pending: 네임스페이스 **밖**에 둔다 —
 -- "budget:pending:*" 를 스캔하는 경로(reconcile/웜업 pending 합산/복원
 -- 스크립트)가 값이 실비인 툼스톤을 라이브 마커로 오인해 정산분을 재합산
 -- 했다(R23 r4 M-1). 같은 해시태그를 유지하므로 슬롯은 동일.
 local settled_key = 'budget:settled:' .. string.sub(marker_key, 16)
+
+-- WRONGTYPE 키는 GET/HGET 이 eval 을 즉시 죽여 아래 치유 지점까지 못 간다
+-- — usage INCRBYFLOAT 커밋 **뒤** 의 resvsum GET 크래시는 재시도마다 델타를
+-- 이중 적용하고(18차 F-2), reserve 의 WRONGTYPE 은 호출측 fail-open 을 낸다.
+-- 기대 타입이 아니면 지워 정상 경로로 수렴(pendingidx TYPE 가드와 동일 규약,
+-- Lua TYPE 은 {ok='string'} 테이블이라 언랩 필수).
+local function _fix_type(key, want)
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= want and t ~= 'none' then redis.call('DEL', key) end
+end
+_fix_type(usage_key, 'string')
+_fix_type(config_key, 'string')
+_fix_type(marker_key, 'string')
+_fix_type(settled_key, 'string')
+_fix_type(KEYS[4], 'string')
+if KEYS[5] then _fix_type(KEYS[5], 'hash') end
 
 local reserved_raw = redis.call('GET', marker_key)
 local recovered = false
@@ -159,10 +188,15 @@ end
 
 local used_raw = redis.call('GET', usage_key) or '0'
 local used = tonumber(used_raw)
--- '0x10'/' 5' 등 Lua 파서는 받지만 INCRBYFLOAT 가 거부하는 비표준 형식 —
--- 아래 INCRBYFLOAT 가 저장값 파싱에서 죽어 델타가 영구 미적용된다.
--- 표준형으로 재기록해 치유한다(값 보존, 17차 리뷰 F-1).
-if used and used_raw ~= tostring(used) then
+-- ' 5' 등 Lua tonumber 는 받지만 INCRBYFLOAT 가 거부하는 비표준 형식 —
+-- 아래 INCRBYFLOAT 가 저장값 파싱에서 죽어 델타가 영구 미적용된다
+-- ('0x10'·'5.'·'.5'는 실측 수용 — 표준형 재기록은 형식 일치 정규화다,
+-- 값 보존, 17차 리뷰 F-1 + 18차 실측).
+-- 비유한('nan'/'inf')은 tostring 이 '-nan'/'inf' 를 그대로 되쓰므로 재기록을
+-- 건너뛴다 — INCRBYFLOAT 거부로, 프로브(_counter_unhealthy)가 rebuild 로
+-- 치유한다.
+if used and used == used and used ~= math.huge and used ~= -math.huge
+    and used_raw ~= tostring(used) then
     redis.call('SET', usage_key, tostring(used), 'KEEPTTL')
 end
 local delta = actual - reserved
@@ -195,8 +229,8 @@ if not rs_stored or rs_stored ~= rs_stored or rs_stored == math.huge
     or rs_stored == -math.huge then
     redis.call('SET', KEYS[4], '0')
 elseif rs_raw ~= tostring(rs_stored) then
-    -- '0x10'/' 5'/'5.' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가
-    -- 거부하는 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
+    -- ' 5' 등 Lua 파서는 받지만 Redis INCRBYFLOAT 파서가 거부하는
+    -- 비표준 형식 — 같은 값의 표준형으로 재기록해 치유한다
     -- (값 보존, 17차 리뷰 F-1).
     redis.call('SET', KEYS[4], tostring(rs_stored), 'KEEPTTL')
 end
@@ -218,7 +252,7 @@ local tomb_ttl = tonumber(ARGV[5]) or 14400
 -- >9.2e18(또는 NaN/inf)은 같은 지점에서 크래시한다(12차 리뷰). 설정 오류는
 -- 큰 TTL 로 수렴.
 if not (tomb_ttl > 0 and tomb_ttl <= 2147483647) then tomb_ttl = 14400 end
-redis.call('SET', settled_key, ARGV[1], 'EX', tomb_ttl)
+redis.call('SET', settled_key, tomb_val, 'EX', tomb_ttl)
 if KEYS[5] and ARGV[3] and ARGV[3] ~= '' then
     redis.call('HDEL', KEYS[5], ARGV[3])  -- 인덱스는 베스트에포트 — 마커가 진실
 end

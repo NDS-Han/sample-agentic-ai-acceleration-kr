@@ -240,8 +240,12 @@ async def _handle_openai(request: Request, path: str):
     # 모델 alias 추출
     import json
 
+    from app.services.rate_limit_enforcement import strip_internal_body_fields
+
     try:
-        req_data = json.loads(body)
+        # 클라이언트가 보낸 `_gw_*` 내부 필드는 제거 — 심사 배수/가산 주입으로
+        # 폴백 과금을 디플레이트하는 경로를 차단한다(18차 리뷰 F-1).
+        req_data = strip_internal_body_fields(json.loads(body))
         alias = req_data.get("model", "")
         state["session_id"] = extract_session_id(req_data)
         is_stream = req_data.get("stream", False)
@@ -620,9 +624,12 @@ async def _handle_responses(request: Request):
     start_time = state.get("request_start_time", time.monotonic())
     routing_loader = getattr(request.app.state, "routing_profile_loader", None)
 
+    from app.services.rate_limit_enforcement import strip_internal_body_fields
+
     body = await request.body()
     try:
-        req_data = json.loads(body)
+        # `_gw_*` 내부 필드는 클라이언트가 심을 수 없다(18차 리뷰 F-1).
+        req_data = strip_internal_body_fields(json.loads(body))
         requested_alias = req_data.get("model", "")
         state["session_id"] = extract_session_id(req_data)
         is_stream = bool(req_data.get("stream", False))

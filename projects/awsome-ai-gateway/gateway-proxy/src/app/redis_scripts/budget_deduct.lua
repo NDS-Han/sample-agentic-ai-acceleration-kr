@@ -18,6 +18,17 @@
 local usage_key = KEYS[1]
 local config_key = KEYS[2]
 local dedup_key = KEYS[3]  -- <usage_key>:ded:{request_id} — 재실행 감지용 (선택)
+-- WRONGTYPE 키는 GET 이 eval 을 죽인다 — 치유 지점까지 못 가고 호출측은
+-- 매 재시도를 lost 로 마킹한다(18차 F-2). 문자열이 아니면 지워 정상 수렴.
+local function _fix_type(key, want)
+    local t = redis.call('TYPE', key)
+    if type(t) == 'table' then t = t['ok'] end
+    if t ~= want and t ~= 'none' then redis.call('DEL', key) end
+end
+_fix_type(usage_key, 'string')
+_fix_type(config_key, 'string')
+if dedup_key and dedup_key ~= '' then _fix_type(dedup_key, 'string') end
+
 local cost = tonumber(ARGV[1])
 if cost and cost < 0 then cost = 0 end  -- 음수 차감은 usage 를 부풀려 한도를 늘린다(reserve 의 estimate 가드와 대칭, 12차)
 local dedup_ttl = tonumber(ARGV[3]) or 600

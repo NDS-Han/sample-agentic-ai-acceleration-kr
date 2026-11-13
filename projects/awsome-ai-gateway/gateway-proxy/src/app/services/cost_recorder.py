@@ -936,8 +936,14 @@ class CostRecorder:
         )
 
         # 청구와 **같은 입력**으로 티어를 판정해 감사 기록에 싣는다(불일치 방지).
-        context_tier = resolve_context_tier(usage, model_config)
-        entry = CostStreamEntry.make(
+        # 이 호출도 post-commit 경계 — 티어 판정 실패로 500/원장 유실보다
+        # tier=None 기록이 낫다(18차 리뷰 F6).
+        try:
+            context_tier = resolve_context_tier(usage, model_config)
+        except Exception:
+            logger.exception("resolve_context_tier_failed", request_id=request_id)
+            context_tier = None
+        entry_kwargs = dict(
             request_id=request_id,
             user_id=auth_context.user_id,
             team_id=auth_context.team_id or _DEFAULT_TEAM_ID,
@@ -974,8 +980,31 @@ class CostRecorder:
             # 카운터의 request_period() 와 같은 버킷을 가리킨다.
             requested_at=request_started_at(),
         )
-
-        payload_json = entry.model_dump_json()
+        try:
+            entry = CostStreamEntry.make(**entry_kwargs)
+            payload_json = entry.model_dump_json()
+        except Exception:
+            # ⚠️ 커밋 후 경계 — 여기서 ValidationError 가 나면 업스트림 과금과
+            #    예산 카운터 커밋은 끝났는데 usage_logs 행만 영구 유실되고 요청은
+            #    500 이다(18차 리뷰 F6). 수치 필드를 0/None 으로 축퇴한 최소
+            #    페이로드라도 남겨 감사 행의 존재를 지킨다 — 정확한 값을 잃는
+            #    것보다 0 기록+경고 로그가 낫다.
+            logger.exception(
+                "cost_stream_entry_invalid",
+                user_id=auth_context.user_id,
+                request_id=request_id,
+            )
+            degraded = dict(entry_kwargs)
+            for k in (
+                "input_tokens", "output_tokens", "cache_creation_tokens",
+                "cache_read_tokens", "reasoning_tokens", "web_search_count",
+                "cost_usd", "latency_ms", "ttft_ms",
+            ):
+                degraded[k] = 0
+            degraded["threshold_triggered"] = None
+            degraded["context_tier"] = None
+            entry = CostStreamEntry.make(**degraded)
+            payload_json = entry.model_dump_json()
         published = False
         if redis is not None:
             try:

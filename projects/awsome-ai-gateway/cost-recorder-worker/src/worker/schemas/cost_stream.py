@@ -41,12 +41,16 @@ class CostStreamEntry(BaseModel):
         "input_tokens", "output_tokens",
         "cache_creation_tokens", "cache_read_tokens",
         "reasoning_tokens", "web_search_count",
+        "latency_ms", "ttft_ms",
         mode="before",
     )
     @classmethod
     def _bounded_tokens(cls, v):
         # 초대형·음수 카운트는 아래 incrby/INSERT 의 int64 오버플로로 감사 행
         # 유실(17차 리뷰 F13) — [0, 1e12] 클램프(gateway 미러와 같은 규약).
+        # latency/ttft 도 주입값이면 같은 컬럼 오버플로다.
+        if v is None:
+            return v
         try:
             iv = int(v)
         except (TypeError, ValueError):

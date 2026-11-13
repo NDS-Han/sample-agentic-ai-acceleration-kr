@@ -117,6 +117,25 @@ def _sanitize_media_blocks(node, media_tokens: list[int]):
     return node
 
 
+_INTERNAL_BODY_PREFIX = "_gw_"
+
+
+def strip_internal_body_fields(body):
+    """클라이언트 바디에서 게이트웨이 내부 필드(``_gw_*``)를 제거한다.
+
+    ``_gw_admission_input_mult``/``_add`` 는 웹서치 루프가 입장심사용 복사본에만
+    심는 내부 배수·가산이다 — 스트립 없이는 클라이언트가 같은 키를 보내
+    ``estimated_input_billing = (est - add) // mult`` 를 수축시켜 연결 끊김/
+    무usage 폴백 과금을 0 으로 디플레이트할 수 있다(18차 리뷰 F-1).
+    라우터의 ``json.loads`` 직후에 적용하고, ``conservative_admission_body`` 는
+    입력에서 한 번 스트립한 뒤 자기 값을 심는다.
+    """
+    if not isinstance(body, dict):
+        return body
+    return {k: v for k, v in body.items()
+            if not (isinstance(k, str) and k.startswith(_INTERNAL_BODY_PREFIX))}
+
+
 def _estimate_input_tokens(body: dict) -> int:
     """body 전체 문자열 길이 기반 보수적 추정.
 

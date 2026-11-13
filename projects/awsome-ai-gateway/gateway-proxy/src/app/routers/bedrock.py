@@ -382,9 +382,14 @@ async def _handle_bedrock(request: Request, model_id: str, path_suffix: str, str
     import json as _json
 
     try:
+        from app.services.rate_limit_enforcement import (
+            strip_internal_body_fields,
+        )
         body_dict = _json.loads(body) if body else {}
         if not isinstance(body_dict, dict):
             body_dict = {}
+        # `_gw_*` 내부 심사 필드는 와이어에서 올 수 없다(18차 리뷰 F-1).
+        body_dict = strip_internal_body_fields(body_dict)
     except Exception:
         body_dict = {}
 
