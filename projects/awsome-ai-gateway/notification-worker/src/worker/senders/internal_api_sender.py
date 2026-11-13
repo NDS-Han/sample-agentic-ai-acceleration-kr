@@ -44,7 +44,11 @@ class InternalAPIEmailSender:
                 response = await client.post(self._api_url, json=payload)
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:
-            retryable = exc.response.status_code >= 500
+            # 5xx 외에 408(타임아웃)·429(레이트리밋)도 재시도 대상 — 두 코드를
+            # terminal 로 분류하면 임계치 알림 팬아웃 버스트에서 알림이 재시도
+            # 없이 영구 rejected 가 된다(R27). Retry-After 는 sweeper 의 다음
+            # 주기가 자연 지연 역할을 한다.
+            retryable = exc.response.status_code >= 500 or exc.response.status_code in (408, 429)
             raise EmailSendError(
                 f"HTTP {exc.response.status_code}: {exc.response.text[:200]}",
                 retryable=retryable,

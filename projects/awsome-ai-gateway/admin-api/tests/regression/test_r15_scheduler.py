@@ -241,3 +241,44 @@ async def test_upsert_update_branch_copies_productivity_metrics():
     assert existing.cost_per_accepted_code_usd == new.cost_per_accepted_code_usd
     assert existing.generated_lines_per_session == new.generated_lines_per_session
     assert existing.roi_index == new.roi_index
+
+
+async def test_day8_still_aggregates_previous_month():
+    """R27 F2 — 보수창이 워커의 8일 lookback 과 같은 폭인지: 8일차엔 아직
+    전월 재집계 대상이다(월경계 넘는 >1일 수집 공백의 실제 복구 경로)."""
+    calls: list[str] = []
+
+    async def fake_aggregate(session, period):
+        calls.append(period)
+
+    _FixedDateTime._fixed = datetime(2026, 10, 8, 3, 0)
+    with (
+        patch.object(sched, "AsyncSessionLocal", return_value=_agg_ctx()),
+        patch.object(sched, "aggregate_usage", side_effect=fake_aggregate),
+        patch.object(sched, "_try_job_lock", AsyncMock(return_value=True)),
+        patch.object(sched, "current_kst_period", return_value="2026-10"),
+        patch.object(sched, "datetime", _FixedDateTime),
+    ):
+        await sched.run_aggregation()
+
+    assert calls == ["2026-10", "2026-09"]
+
+
+async def test_day9_aggregates_current_only():
+    """9일차부턴 전월을 더 이상 재집계하지 않는다 — 월 스캔 비용 상한."""
+    calls: list[str] = []
+
+    async def fake_aggregate(session, period):
+        calls.append(period)
+
+    _FixedDateTime._fixed = datetime(2026, 10, 9, 3, 0)
+    with (
+        patch.object(sched, "AsyncSessionLocal", return_value=_agg_ctx()),
+        patch.object(sched, "aggregate_usage", side_effect=fake_aggregate),
+        patch.object(sched, "_try_job_lock", AsyncMock(return_value=True)),
+        patch.object(sched, "current_kst_period", return_value="2026-10"),
+        patch.object(sched, "datetime", _FixedDateTime),
+    ):
+        await sched.run_aggregation()
+
+    assert calls == ["2026-10"]

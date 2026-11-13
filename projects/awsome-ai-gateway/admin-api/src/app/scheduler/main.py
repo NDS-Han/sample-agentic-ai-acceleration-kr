@@ -112,10 +112,14 @@ async def run_aggregation() -> None:
     now_local = datetime.now(tz)
 
     # 매월 마지막 실행(~23:45) 이후의 말일 뒷부분 사용량과 스트림 지연분은
-    # 지난달 행에 반영될 기회가 없다 — 새 달 1일 동안은 전월도 함께 재집계한다
-    # (upsert 라 멱등). 2일 이후엔 current 만 집계해 월 스캔 비용을 1회로 유지.
+    # 지난달 행에 반영될 기회가 없다 — 새 달 초반엔 전월도 함께 재집계한다
+    # (upsert 라 멱등). 창은 워커의 daily_usage_agg_recent_days(8일)에 맞춘다 —
+    # 1일만 재집계하면 월 경계를 넘는 >1일 수집 공백(RDS 페일오버+스트림 백로그
+    # 등) 뒤에 도착한 전월분이 roi_aggregations 에 영영 반영되지 않고, prod 에는
+    # /internal/scheduler/run 수동 경로도 403 이라 복구 길이 없다(R27). 9일차
+    # 이후엔 current 만 집계해 월 스캔 비용을 유지.
     periods = [period]
-    if now_local.day == 1:
+    if now_local.day <= 8:
         periods.append(_prev_period(period))
     logger.info("scheduler.trigger", period=period, periods=periods)
 
