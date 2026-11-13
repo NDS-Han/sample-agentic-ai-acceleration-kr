@@ -208,10 +208,13 @@ class Settings(BaseSettings):
     # --- Model availability fallback / circuit breaker (2026-06-22) ---
     # cb_* 는 Lua EXPIRE/PX 인자로 직결 — <=0 이면 breaker eval 이 매번
     # 크래시해 회로 차단기가 죽는다(12차 리뷰). jitter 는 0 허용(끔).
-    cb_window_sec: int = Field(default=30, ge=1)
+    # 상한은 Lua 클램프와 정합 — window>3600 은 합산 루프가 Redis 를 블록,
+    # open>86400s 는 사실상 영구 개방(무소리 모델 장애)이라 기동 시 거부한다
+    # (14차 리뷰).
+    cb_window_sec: int = Field(default=30, ge=1, le=3600)
     cb_min_calls: int = Field(default=5, ge=1)
     cb_error_rate: float = Field(default=0.5, gt=0, le=1)
-    cb_open_sec: int = Field(default=30, ge=1)
+    cb_open_sec: int = Field(default=30, ge=1, le=86400)
     cb_halfopen_probe_ttl_ms: int = Field(default=8000, ge=1)
     cb_open_jitter_sec: int = Field(default=5, ge=0)
     bedrock_inference_read_timeout: int = 60

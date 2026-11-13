@@ -18,6 +18,11 @@ local now_sec    = math.floor(now_ms / 1000)
 if not (window_sec and window_sec > 0 and window_sec <= 3600) then
   window_sec = 60
 end
+-- open_ms 도 같은 클래스 — cb_open_sec 에 상한이 없어 PX 1e12 가 회로를
+-- 사실상 영구 개방(무소리 모델 장애)한다(13차 후속). 상한은 1일.
+if not (open_ms and open_ms > 0 and open_ms <= 86400000) then
+  open_ms = 60000
+end
 
 if redis.call('EXISTS', KEYS[3]) == 1 then
   return 1

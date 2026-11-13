@@ -61,7 +61,10 @@ local live
 if ARGV[4] ~= '' then
     -- 인덱스 웜업 창 — 구버전 마커가 인덱스에 없으므로 Python 스캔값을 신뢰.
     live = fin(tonumber(ARGV[4])) or 0
-    if live < 0 then live = 0 end  -- 오염 스캔합 방어(아래 인덱스 경로와 동일)
+    -- 합계 오버플로 방어 — 거대 오염 항의 합이 +Inf 가 되면 'inf' 를 쓴다
+    -- (14차 리뷰). 음수는 오염 — 0 수렴.
+    live = fin(live) or 0
+    if live < 0 then live = 0 end
 else
     live = 0
     local marker_prefix = ARGV[2]
@@ -100,6 +103,7 @@ else
                        unpack(dead, i, math.min(i + 499, #dead)))
         end
     end
+    live = fin(live) or 0        -- 합계 오버플로 방어(위 웜업 경로와 동일)
     if live < 0 then live = 0 end  -- 오염 합산 방어(보수적 하한)
 end
 

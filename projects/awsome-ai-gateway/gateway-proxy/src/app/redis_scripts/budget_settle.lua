@@ -61,10 +61,12 @@ if not reserved_raw then
     end
     -- 마커 소실(만료/축출) — 호출자가 예약치를 모르면 안전하게 no-op
     local caller_reserved = tonumber(ARGV[4])
-    -- 비유한 호출자 예약치는 복구 근거로 쓸 수 없다 — min(NaN, resvsum) 이
-    -- NaN 을 예약치로 삼아 INCRBYFLOAT 가 거부된다(12차 리뷰).
+    -- 비유한/음수 호출자 예약치는 복구 근거로 쓸 수 없다 — min(NaN, resvsum)
+    -- 은 NaN 을, min(-5, resvsum) 은 -5 를 예약치로 삼아 delta=actual+5 로
+    -- 과차감하고 resvsum 에 +5 를 더한다(12차 리뷰 + 13차 후속).
     if caller_reserved and (caller_reserved ~= caller_reserved
-        or caller_reserved == math.huge or caller_reserved == -math.huge) then
+        or caller_reserved == math.huge or caller_reserved == -math.huge
+        or caller_reserved < 0) then
         caller_reserved = nil
     end
     if not caller_reserved then
@@ -97,8 +99,11 @@ if not reserved_raw then
         local idx_val = redis.call('HGET', KEYS[5], ARGV[3])
         live = idx_val ~= false
         idx_reserved = tonumber(idx_val or 'x')  -- 숫자 아닌 값은 nil → 폴백
+        -- 음수도 폴백 — min(음수, resvsum) 이 음수 예약치를 만들어
+        -- delta=actual+5 과차감 + resvsum +5 부풀림(13차 후속).
         if idx_reserved and (idx_reserved ~= idx_reserved
-            or idx_reserved == math.huge or idx_reserved == -math.huge) then
+            or idx_reserved == math.huge or idx_reserved == -math.huge
+            or idx_reserved < 0) then
             idx_reserved = nil
         end
     else
@@ -120,8 +125,11 @@ if not reserved_raw then
     recovered = true
 end
 local reserved = tonumber(reserved_raw) or 0
-if reserved ~= reserved or reserved == math.huge or reserved == -math.huge then
-    reserved = 0  -- 'nan' 마커/인덱스 — 델타를 실비 전액으로(실비만 적용)
+if reserved ~= reserved or reserved == math.huge or reserved == -math.huge
+    or reserved < 0 then
+    -- 'nan'/음수 마커·인덱스 — 델타를 실비 전액으로(실비만 적용). 음수는
+    -- delta=actual+5 과차감 + resvsum 부풀림이라 같은 0 수렴(13차 후속).
+    reserved = 0
 end
 
 local config_raw = redis.call('GET', config_key)

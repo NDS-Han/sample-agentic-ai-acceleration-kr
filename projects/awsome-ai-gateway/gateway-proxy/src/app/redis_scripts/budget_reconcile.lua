@@ -92,6 +92,9 @@ for i = 4, #KEYS do
         if n then live = live + n end
     end
 end
+-- 합계 자체의 오버플로/음수 방어 — ≥1e308 항들의 합은 +Inf 가 돼
+-- `live < 0` 를 빠져나가 'inf' 를 resvsum/usage 에 쓴다(14차 리뷰).
+live = fin(live) or 0
 if live < 0 then live = 0 end
 
 local resvsum = fin(tonumber(redis.call('GET', KEYS[2]))) or 0
@@ -104,7 +107,9 @@ if resvsum == snap then
     orphan = resvsum - live
     if orphan ~= 0 then
         -- resvsum 은 라이브 마커 합이 진실 — 양방향 보정.
+        -- SET 은 TTL 을 지우므로 다른 쓰기와 같은 45d 를 다시 건다(14차 리뷰).
         redis.call('SET', KEYS[2], tostring(live))
+        redis.call('EXPIRE', KEYS[2], 3888000)
     end
     if orphan > 0 then
         -- 만료/고아 예약 추정치 되돌림 — usage 에만 남은 부분.
@@ -132,8 +137,10 @@ local db     = fin(tonumber(ARGV[1])) or 0
 if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 이 음수가
                            -- 되면 플로어가 아무것도 복구하지 못한다.
 local target = db + live
-local cur    = fin(tonumber(redis.call('GET', KEYS[1]))) or 0
-if cur < target then
+-- (not cur) 도 써야 'nan'/'abc' 카운터가 target=0 일 때도 덮어써 치유된다
+-- — cur=0 폴백은 0<0 이라 쓰기를 건너뛰고 오염 값이 남는다(14차 리뷰).
+local cur    = fin(tonumber(redis.call('GET', KEYS[1])))
+if (not cur) or cur < target then
     -- INCRBYFLOAT(target-cur) 와 동치(같은 스크립트 원자 실행)이면서 'nan'
     -- 같은 비수치 카운터도 덮어써 치유된다 — INCRBYFLOAT 는 그 키에서
     -- 매 틱 오류를 낸다(12차 리뷰 F1 후속, 13차). TTL 은 다른 쓰기와

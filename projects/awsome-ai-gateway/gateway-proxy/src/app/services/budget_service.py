@@ -58,6 +58,24 @@ _BACKGROUND_TASKS: set[asyncio.Task] = set()
 PER_APP_BUDGET_CLIENTS = ("claude-code", "cowork", "codex")
 
 
+def _counter_unhealthy(v) -> bool:
+    """Redis 사용량 카운터의 비정상 판정 — rebuild 트리거용.
+
+    부재(None)·비수치('abc')·비유한('nan'/'inf')·음수를 전부 오염으로 본다.
+    isfinite 필수 — 'nan' 은 nan<0 가 False 라 음수 검사가 트리거를 놓치고
+    check 의 비교는 전부 false 라 allowed:true 로 조용히 fail-open 된다
+    (13차 리뷰). float() ValueError('abc' 등)도 오염으로 간주해야 그 키가
+    probe 를 죽이지 않고 rebuild 의 fin() 으로 치유된다(14차 리뷰).
+    """
+    if v is None:
+        return True
+    try:
+        f = float(v)
+    except (ValueError, TypeError):
+        return True
+    return not math.isfinite(f) or f < 0
+
+
 def settle_eval_args(resv: dict) -> tuple:
     """budget_settle eval 의 키 목록 — 예약 스펙에 인덱스 키가 있으면 5키.
 
@@ -325,6 +343,10 @@ class BudgetService:
                 )
                 return True
             first = float(raw.decode() if isinstance(raw, bytes) else raw)
+            # 'nan' 시각은 nan<ttl 이 False 라 웜업이 즉시 끝나 인덱스만
+            # 믿고 비인덱스 마커를 놓친다(과소 복구, 14차 리뷰).
+            if not math.isfinite(first):
+                return True
             return (time.time() - first) < ttl
         except Exception:
             return True  # 불확실하면 보수적으로 SCAN
@@ -496,20 +518,14 @@ class BudgetService:
                         _probe += [_app_key, f"{_app_key}:lost"]
                     _vals = await redis.mget(_probe)
                     _uk = _vals[0]
-                    # isfinite 필수 — 'nan' 카운터는 nan<0 가 False 라 음수
-                    # 검사가 트리거를 놓치고, check 의 비교는 전부 false 라
-                    # allowed:true 로 조용히 fail-open 된다(13차 리뷰).
                     _rebuild_needed = (
-                        _uk is None
-                        or not math.isfinite(float(_uk))
-                        or float(_uk) < 0
+                        _counter_unhealthy(_uk)
                         or _vals[1] is not None
                     )
                     if not _rebuild_needed and _app_key:
                         _cv = _vals[2]
                         _rebuild_needed = (
-                            _cv is None
-                            or float(_cv) < 0
+                            _counter_unhealthy(_cv)
                             or _vals[3] is not None
                         )
                 if _rebuild_needed:
@@ -605,9 +621,12 @@ class BudgetService:
                                 app_key = f"budget:user:{{{user_id}}}:{client_name}:{period}"
                                 _ak = await redis.get(app_key)
                                 if (
-                                    _ak is not None
-                                    and math.isfinite(float(_ak))
-                                    and float(_ak) >= 0
+                                    # 비수치 카운터('abc')도 rebuild 대상 —
+                                    # float() ValueError 로 루프가 죽으면
+                                    # 뒤 정렬 앱들이 매 요청 rebuild 에서
+                                    # 굶는다(14차 리뷰). Lua 가 fin() 으로
+                                    # 치유한다.
+                                    not _counter_unhealthy(_ak)
                                     # :lost 센티넬 — 양수 첫 쓰기로 위장된
                                     # 유실도 복원한다(R22 r1 M1).
                                     and not await redis.exists(f"{app_key}:lost")
@@ -650,9 +669,7 @@ class BudgetService:
                 # 규칙: 이미 있는 키는 건드리지 않고, in-flight 예약 마커 합을 얹는다.
                 _tk, _tk_lost = await redis.mget([team_key, f"{team_key}:lost"])
                 if db is not None and (
-                    _tk is None
-                    or not math.isfinite(float(_tk))
-                    or float(_tk) < 0
+                    _counter_unhealthy(_tk)
                     or _tk_lost is not None
                 ):
                     # user 경로와 같은 inflight 플래그 — 정합은 rebuild.lua 의
