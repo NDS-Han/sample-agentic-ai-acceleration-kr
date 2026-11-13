@@ -47,6 +47,9 @@ _PROJECT = Path(__file__).resolve().parents[3]
 _INIT_DIR = _PROJECT / "db" / "init"
 _DB_DIR = _PROJECT / "db"
 
+asyncpg = pytest.importorskip("asyncpg", reason="asyncpg 미설치 — 실 PG 적용이 필요하다")
+pytest.importorskip("alembic", reason="alembic 미설치 — 실 리비전 실행이 필요하다")
+
 pytestmark = pytest.mark.skipif(
     not PROOF_DSN,
     reason=(
@@ -66,8 +69,13 @@ def _asyncpg(dsn: str) -> str:
 
 
 async def _apply_init(url: str) -> list[str]:
-    """init/*.sql 전체를 ``ON_ERROR_STOP`` 과 같은 의미론으로 적용 — 첫 실패를 기록."""
-    asyncpg = pytest.importorskip("asyncpg")
+    """init/*.sql 전체 적용 — 실패를 수집해 계속 진행(한 번에 전체 실패 목록).
+
+    실 runner(run_migration.sh)는 ``ON_ERROR_STOP=1`` 로 첫 실패에서 멈춘다.
+    여기선 모든 실패를 모아 보고하되, 어떤 파일이라도 실패하면 테스트가
+    어서 fail-fast 의미론보다 넓은 커버리지다 — 이 검사가 통과하면 runner
+    순서대로도 통과한다는 뜻이 된다(실패가 없으니 멈출 지점이 없다).
+    """
     failures: list[str] = []
     conn = await asyncpg.connect(_asyncpg(url))
     try:
@@ -86,7 +94,12 @@ async def _apply_init(url: str) -> list[str]:
 
 @pytest.fixture(scope="module")
 async def converged_db():
-    """init 만 적용한 스크래치 DB → 테스트가 alembic upgrade + 재적용을 수행."""
+    """스크래치 DB 생성 → 테스트 본문이 init 적용 → alembic → 재적용 수행.
+
+    ⚠️ 부작용: ``04_create_users.sql`` 은 클러스터 전역 ``CREATE/ALTER ROLE``
+    을 실행한다 — 공유 테스트 인스턴스에선 기존 롤의 NOLOGIN/PASSWORD NULL
+    설정이 덮어질 수 있으니 전용 인스턴스에서만 돌린다.
+    """
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -127,7 +140,6 @@ async def test_alembic_reaches_head_after_init(converged_db):
     7차 리뷰 BLOCKER 의 회귀 단정: init 의 ``ck_budget_configs_max_required`` 백필 +
     0039 의 plain ``ADD CONSTRAINT`` → ``duplicate_object`` 로 Job 전체 실패.
     """
-    pytest.importorskip("alembic", reason="alembic 미설치 — 이 검사는 실 리비전 실행이 필요하다")
     dsn = _asyncpg(converged_db)
     env = {**os.environ, "DB_MASTER_URL": dsn, "DB_URL": dsn}
     proc = subprocess.run(
@@ -146,7 +158,6 @@ async def test_alembic_reaches_head_after_init(converged_db):
 
 async def test_init_reapply_after_head_is_idempotent(converged_db):
     """alembic head 위 init 재적용 — 배포 스크립트는 재실행되므로 멱등이어야 한다."""
-    pytest.importorskip("alembic", reason="alembic 미설치")
     dsn = _asyncpg(converged_db)
     env = {**os.environ, "DB_MASTER_URL": dsn, "DB_URL": dsn}
     proc = subprocess.run(

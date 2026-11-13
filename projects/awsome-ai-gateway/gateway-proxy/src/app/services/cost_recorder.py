@@ -532,7 +532,14 @@ class CostRecorder:
                             user_fallback = json.dumps({
                                 "limit_usd": str(d_cap),
                                 "policy": team_cfg.get("policy", "hard_block"),
-                                "thresholds": team_cfg.get("thresholds") or [80, 90, 100],
+                                # or 가 아닌 키 존재 검사 — [](의도된 알림 끔)은
+                                # 유효한 설정이라 되살리면 안 된다(budget_service.py
+                                # 의 _row_thresholds 규칙, 9차 리뷰).
+                                "thresholds": (
+                                    team_cfg["thresholds"]
+                                    if team_cfg.get("thresholds") is not None
+                                    else [80, 90, 100]
+                                ),
                             })
 
                 resv = budget_reservation.get("user")

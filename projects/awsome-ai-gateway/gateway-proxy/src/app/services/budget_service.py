@@ -63,7 +63,8 @@ def settle_eval_args(resv: dict) -> tuple:
     롤링 배포 창에 구버전 파드가 만든 스펙에는 idx_key/idx_field 가 없다 —
     그 경우 4키 호출로 settle 은 그대로 동작하고 인덱스 HDEL 만 건너뛴다
     (인덱스에 안 실린 마커는 rebuild 의 SCAN 폴백이 잡는다, R22 r1 S1).
-    호출자는 ARGV 로 ``(actual, fallback, idx_field or "")`` 를 이어 붙인다 —
+    호출자는 ARGV 로 ``(actual, fallback, idx_field or "", reserved,
+    marker_ttl)`` 를 이어 붙인다 —
     4키 경로의 빈 idx_field 는 Lua 가 무시한다. 이 분기를 여기 한 군데에만
     둔다 — cost_recorder 와 settle_budget 이 따로 들고 있으면 계약 변경 시
     한쪽만 갱신돼 인덱스 HDEL 이 조용히 빠진다(R22 r4 S2).
@@ -114,7 +115,13 @@ def _db_policy_to_domain(db_policy) -> BudgetPolicy:
     value 표기가 다름(UPPERCASE vs lowercase). 변환 계층.
     """
     raw = db_policy.value if hasattr(db_policy, "value") else str(db_policy)
-    return BudgetPolicy(raw.lower())
+    try:
+        return BudgetPolicy(raw.lower())
+    except ValueError:
+        # enum 선행 롤아웃/손상 행의 미지 값 — Lua 가 미지 정책을 hard_block
+        # 으로 정규화하는 것과 같은 보수적 수렴(9차 리뷰).
+        logger.warning("budget_unknown_policy_normalized", raw=raw)
+        return BudgetPolicy.HARD_BLOCK
 
 
 
@@ -710,15 +717,24 @@ class BudgetService:
                             if isinstance(team_cfg_raw, bytes)
                             else team_cfg_raw
                         )
-                        d_cap = team_cfg.get("default_user_cap_usd")
+                        if not isinstance(team_cfg, dict):
+                            # reserve 경로(:918)와 같은 가드 — 비객체 캐시
+                            # ('"5"' 등)는 .get 이 AttributeError 로 죽는다.
+                            team_cfg = None
+                        d_cap = (
+                            team_cfg.get("default_user_cap_usd")
+                            if team_cfg else None
+                        )
                         if d_cap is not None:
                             # 캐시된 팀 config 에 thresholds 키가 없는 구버전 엔트리
                             # 대비 폴백 — 키가 있으면 [](의도된 알림 끔)도 유효한
                             # 설정이라 or 로 기본값을 쓰면 되살아난다
-                            # (_row_thresholds 주석, 8차 리뷰).
+                            # (_row_thresholds 주석, 8차 리뷰). null 도 기본값으로
+                            # — JSON null 은 Lua 에서 cjson.null(truthy)이라
+                            # ipairs(thresholds) 가 eval 실패한다(9차 리뷰).
                             d_thresholds = (
                                 team_cfg["thresholds"]
-                                if "thresholds" in team_cfg
+                                if team_cfg.get("thresholds") is not None
                                 else list(DEFAULT_THRESHOLDS)
                             )
                             user_fallback = json.dumps({
@@ -929,7 +945,7 @@ class BudgetService:
                 # or 가 아닌 키 존재 검사 — [](알림 끔)은 유효한 설정이다.
                 d_thresholds = (
                     team_cfg["thresholds"]
-                    if "thresholds" in team_cfg
+                    if team_cfg.get("thresholds") is not None
                     else list(DEFAULT_THRESHOLDS)
                 )
                 user_fallback = json.dumps({
@@ -1084,7 +1100,12 @@ class BudgetService:
                     "idx_key": idx_key,
                     "idx_field": idx_field,
                     "fallback": fallback,
-                    "reserved": str(result.get("reserved_usd") or est_str),
+                    # or 가 아닌 is-not-None — reserved_usd 가 falsy 값(0 등)
+                    # 을 가지게 되는 미래 변경에서 조용히 est 로 폴백되는 회귀 방지.
+                    "reserved": str(
+                        r if (r := result.get("reserved_usd")) is not None
+                        else est_str
+                    ),
                     # settle 의 done 툼스톤 TTL(ARGV[5]) — 마커 수명과 같게 둬야
                     # 툼스톤 소멸 뒤 늦은 중복 settle 이 실비를 재적용하지 않는다
                     # (R23 r3 N-4).

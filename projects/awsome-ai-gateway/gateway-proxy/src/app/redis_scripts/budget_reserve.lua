@@ -26,8 +26,8 @@
 -- Returns: JSON {allowed, reserved, reason, used_usd, limit_usd,
 --               config_present, scope}
 --   reserved=true 경로에만: reserved_usd(실제 예약액 — 잔여 클램프 반영),
---     partial(클램프 발생 여부), dedup_hit(멱등 재생), settled_before
---     (툼스톤 통과) 가 경로에 따라 실린다.
+--     partial(클램프 발생 여부), dedup_hit(멱등 재생) 이 실린다.
+--   settled_before 는 reserved=false 툼스톤 통과 경로에서만 실린다.
 --   config_present=false → 호출자가 scope 별 미설정 정책 적용
 --     (user/client: pass-through, team: deny — budget_check.lua 와 동일)
 

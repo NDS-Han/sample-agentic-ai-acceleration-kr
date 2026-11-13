@@ -16,6 +16,7 @@ Step 5에서 `_load_scope_limits()`를 `model.rate_limit_configs` DB 조회로 �
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import json
 import time
@@ -179,6 +180,82 @@ def _apply_budget_throttle(
     return limits
 
 
+
+def _spawn_admission_unwind(
+    *,
+    redis,
+    svc: "RateLimitService",
+    descriptors,
+    request_id: str,
+    rpm_committed_keys,
+    tpm_committed,
+    tpm_reserved: int,
+    tpm_reserved_at: float,
+    cost_result,
+    released: dict,
+    user_id: str,
+    team_id: str | None,
+) -> None:
+    """``enforce_rate_limits`` 의 catch-all 환불 — 커밋 후 state 주입 전에
+    탈출하는 예외/취소 경로에서, 아직 반납 안 한 예약만 되돌린다.
+
+    취소 중엔 ``await`` 가 재취소로 잘리므로 ``_BACKGROUND_TASKS`` 에
+    강참조로 추적되는 태스크가 완주한다 — ``fallback_loop.spawn_release_
+    reservations`` 와 같은 패턴(6차 리뷰 m4). ``released`` 플래그는 내부
+    경로가 이미 되돌린 단계를 건너뛴다 — settle 은 멱등이 아니다(9차 리뷰).
+    """
+
+    async def _run() -> None:
+        try:
+            if tpm_committed and not released["tpm"]:
+                await svc.settle_tpm(
+                    redis, tpm_committed, tpm_reserved, 0,
+                    reserved_at=tpm_reserved_at,
+                )
+        except Exception:
+            logger.warning("tpm_unwind_on_admission_abort_failed")
+        try:
+            if (
+                cost_result is not None
+                and not released["cost"]
+                and cost_result.reserved_cost is not None
+                and cost_result.reserved_cost != Decimal("0")
+            ):
+                await svc.settle_cost(
+                    redis,
+                    user_id=user_id,
+                    actual_cost=Decimal("0"),
+                    reserved_cost=cost_result.reserved_cost,
+                    team_id=team_id,
+                    committed_scopes=cost_result.committed_scopes,
+                    cpm_window_ts=cost_result.cpm_window_ts or None,
+                    cph_window_ts=cost_result.cph_window_ts or None,
+                    committed_keys=cost_result.committed_keys or None,
+                )
+        except Exception:
+            logger.warning("cost_unwind_on_admission_abort_failed")
+        try:
+            if not released["rpm"]:
+                await svc.undo_rpm(
+                    redis, descriptors, request_id,
+                    committed_keys=rpm_committed_keys,
+                )
+        except Exception:
+            logger.warning("rpm_unwind_on_admission_abort_failed")
+
+    from app.services.budget_service import _BACKGROUND_TASKS
+
+    coro = _run()
+    try:
+        t = asyncio.ensure_future(coro)
+    except RuntimeError:
+        # 이벤트 루프 종료 중 — 예약은 창 TTL(60s~7200s)로 자연 회수된다.
+        coro.close()
+        logger.warning("admission_unwind_spawn_loop_closed")
+        return
+    _BACKGROUND_TASKS.add(t)
+    t.add_done_callback(_BACKGROUND_TASKS.discard)
+
 async def enforce_rate_limits(
     *,
     redis,
@@ -285,34 +362,44 @@ async def enforce_rate_limits(
     if not rpm_result.allowed:
         return _build_429(rpm_result, metrics)
 
-    # TPM 체크 (Pre-reserve)
-    max_output = _extract_max_output(body)
-    estimated_input = _estimate_input_tokens(body)
-    # 청구 폴백용 추정치 — _gw_admission_input_mult/_add 는 입장 심사 전용
-    # 배수·가산(웹서치 루프가 턴당 입력을 재청구하므로 예약도 늘린다). 종결
-    # usage 미수신 시 과금에 쓰는 추정치는 단일 턴 기준이어야 한다 — 그대로면
-    # 끊긴 웹서치 요청이 iters 배로 과대청구된다.
-    _mult = body.get("_gw_admission_input_mult")
-    _add = body.get("_gw_admission_input_add")
-    # 추정치가 폴백값(4096)인데 가산분이 크면 음수가 된다 — 티어 판정 입력과
-    # 로그에 음수가 새지 않게 클램프한다(R20 round-2).
-    estimated_input_billing = max(0, estimated_input - (
-        _add if isinstance(_add, int) and _add > 0 else 0
-    ))
-    if isinstance(_mult, int) and _mult > 1:
-        estimated_input_billing //= _mult
-    reserved = estimate_reserved_tokens(
-        estimated_input_tokens=estimated_input,
-        max_output_tokens=max_output,
-    )
-
-    # TPM 커밋 목록 — 비용 단계가 거절하면 이 목록으로 예약을 되돌린다.
-    # (check_multi_scope_tpm 내부에서 스코프 간 거절은 이미 해제한다.)
+    # 이후 구간에서 커밋되는 예약들 — 추정 계산·역직렬화·취소 등 어느 지점에서
+    # 탈출해도(try 밖이던 _estimate_*/request_period/get_settings 포함) 커밋분이
+    # 창 TTL 까지 고아가 되지 않게, 바깥 catch-all 이 아직 반납 안 한 것만
+    # 되돌린다. settle 은 멱등이 아니라(두 번 부르면 두 번 차감) 내부 경로가
+    # 되돌린 것은 _released 플래그로 표시해 이중 환불을 막는다(9차 리뷰).
+    _released = {"rpm": False, "tpm": False, "cost": False}
+    cost_result = None
     tpm_committed: list[ScopeDescriptor] = []
-    # now_sec 를 체크에 주입하고 그대로 reserved_at 으로 쓴다 — 따로 찍으면
-    # 분 경계에서 예약 버킷(Lua 의 now)과 환불 버킷이 어긋난다.
-    tpm_now_sec = int(time.time())
+    reserved = 0
+    tpm_now_sec = 0
     try:
+        # TPM 체크 (Pre-reserve)
+        max_output = _extract_max_output(body)
+        estimated_input = _estimate_input_tokens(body)
+        # 청구 폴백용 추정치 — _gw_admission_input_mult/_add 는 입장 심사 전용
+        # 배수·가산(웹서치 루프가 턴당 입력을 재청구하므로 예약도 늘린다). 종결
+        # usage 미수신 시 과금에 쓰는 추정치는 단일 턴 기준이어야 한다 — 그대로면
+        # 끊긴 웹서치 요청이 iters 배로 과대청구된다.
+        _mult = body.get("_gw_admission_input_mult")
+        _add = body.get("_gw_admission_input_add")
+        # 추정치가 폴백값(4096)인데 가산분이 크면 음수가 된다 — 티어 판정 입력과
+        # 로그에 음수가 새지 않게 클램프한다(R20 round-2).
+        estimated_input_billing = max(0, estimated_input - (
+            _add if isinstance(_add, int) and _add > 0 else 0
+        ))
+        if isinstance(_mult, int) and _mult > 1:
+            estimated_input_billing //= _mult
+        reserved = estimate_reserved_tokens(
+            estimated_input_tokens=estimated_input,
+            max_output_tokens=max_output,
+        )
+
+        # TPM 커밋 목록 — 비용 단계가 거절하면 이 목록으로 예약을 되돌린다.
+        # (check_multi_scope_tpm 내부에서 스코프 간 거절은 이미 해제한다.)
+        tpm_committed: list[ScopeDescriptor] = []
+        # now_sec 를 체크에 주입하고 그대로 reserved_at 으로 쓴다 — 따로 찍으면
+        # 분 경계에서 예약 버킷(Lua 의 now)과 환불 버킷이 어긋난다.
+        tpm_now_sec = int(time.time())
         tpm_result = await svc.check_multi_scope_tpm(
             redis,
             descriptors,
@@ -320,38 +407,21 @@ async def enforce_rate_limits(
             committed_out=tpm_committed,
             now_sec=tpm_now_sec,
         )
-    except Exception:
-        # 내부 eval 실패는 함수가 rl_fail_mode 로 처리한다 — 여기까지 오는
-        # 예외는 루프 외부 결함(디스크립터 조립·스크립트 미로드 등). 이미
-        # 커밋된 TPM(committed_out 누적)과 RPM 슬롯이 창 TTL 까지 고아가
-        # 되지 않게 되돌린다(8차 리뷰 n9).
-        try:
-            if tpm_committed:
-                await svc.settle_tpm(
-                    redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec
-                )
-        except Exception:
-            logger.warning("tpm_unwind_on_tpm_error_failed")
-        try:
-            await svc.undo_rpm(
-                redis, descriptors, request_id,
-                committed_keys=rpm_result.committed_keys,
-            )
-        except Exception:
-            logger.warning("rpm_unwind_on_tpm_error_failed")
-        raise
-    if not tpm_result.allowed:
-        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
-        return _build_429(tpm_result, metrics)
+        if not tpm_result.allowed:
+            # 거절된 스코프 예약은 check 내부가 이미 환불했다 — committed_out 은
+            # stale 환불분을 담으므로 비워 둬야 바깥 catch-all 이 이중 환불하지 않는다.
+            tpm_committed.clear()
+            await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
+            _released["rpm"] = True
+            return _build_429(tpm_result, metrics)
 
-    # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
-    # 티어 판정은 턴 단위 추정치 — 배수가 섞인 estimated_input 으로 판정하면
-    # 웹서치 요청이 iters×구간배수(5×) 과대예약된다.
-    estimated_cost = _estimate_cost(
-        model_config, estimated_input, max_output,
-        tier_input=estimated_input_billing,
-    )
-    try:
+        # CPM/CPH 체크 (Pre-reserve, FR-4.6 — USER+TEAM 2 스코프)
+        # 티어 판정은 턴 단위 추정치 — 배수가 섞인 estimated_input 으로 판정하면
+        # 웹서치 요청이 iters×구간배수(5×) 과대예약된다.
+        estimated_cost = _estimate_cost(
+            model_config, estimated_input, max_output,
+            tier_input=estimated_input_billing,
+        )
         cost_result = await svc.reserve_cost(
             redis,
             user_id=auth_context.user_id,
@@ -365,117 +435,124 @@ async def enforce_rate_limits(
             user_key_alias=_scope_alias[RateLimitScope.USER],
             team_key_alias=_scope_alias[RateLimitScope.TEAM],
         )
-    except Exception:
-        # TPM 과 같은 이유 — 루프 외부 결함이 탈출하면 커밋분을 되돌린다.
-        # cost 의 부분 커밋은 함수 내부 스코프 루프가 이미 정리한다.
-        try:
-            await svc.settle_tpm(
-                redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec
-            )
-        except Exception:
-            logger.warning("tpm_unwind_on_cost_error_failed")
-        try:
-            await svc.undo_rpm(
-                redis, descriptors, request_id,
-                committed_keys=rpm_result.committed_keys,
-            )
-        except Exception:
-            logger.warning("rpm_unwind_on_cost_error_failed")
-        raise
-    if not cost_result.allowed:
-        # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
-        #    수만 토큰의 예약이 버킷 만료까지 남아, 거절당한 재시도가 TEAM TPM
-        #    카운터를 부풀려 팀 전체를 기아시키는 양의 피드백이 됐다.
-        #    rate_limit_state 는 전 단계 통과 후에만 채워지므로 여기서 직접
-        #    해제해야 한다. 실패해도 거절은 진행(누수분은 버킷 TTL 이 회수).
-        try:
-            await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
-        except Exception:
-            logger.warning("tpm_unwind_on_cost_reject_failed")
-        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
-        return _build_cost_429(cost_result, metrics)
-
-    # 월예산 admission 예약 — budget_check(middleware)는 읽기 전용이라
-    # 동시 요청이 같은 used 를 보고 전부 통과해 하드캡을 넘길 수 있었다.
-    # 여기서 최악비용을 원자적으로 선예약하고, finalize 의 settle 이 실비로
-    # 정산한다(실패/거절 경로는 release_reservations 가 환불).
-    from app.periods import request_period
-    from app.services.budget_service import BudgetService
-
-    # 예약 추정의 출력 상한은 별도 클램프 — 클라이언트 max_tokens 가 매우 크면
-    # 비싼 모델에서 worst-case 선예약이 소액 예산을 통째로 잠가 호출이 막힌다.
-    # 실비 정산은 실제 사용량을 쓰므로, 초과분은 settle 이 카운터를 cap 위로
-    # 올려 다음 요청 차단 방향으로 수렴한다(잔여 클램프와 같은 정책).
-    _res_out_cap = get_settings().budget_reservation_max_output_tokens
-    worst_cost = _estimate_worst_cost(
-        model_config, estimated_input,
-        min(max_output, _res_out_cap) if _res_out_cap else max_output,
-        tier_input=estimated_input_billing,
-    )
-    try:
-        budget_reservation = await BudgetService().reserve_budget(
-            redis,
-            str(auth_context.user_id),
-            str(auth_context.team_id) if auth_context.team_id else None,
-            request_period(),
-            worst_cost,
-            reservation_id or request_id,
-            client=state.get("client"),
-            marker_ttl=get_settings().budget_reservation_ttl_seconds,
-        )
-    except PermissionError as exc:
-        # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
-        # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
-        try:
-            await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
-        except Exception:
-            logger.warning("tpm_unwind_on_budget_reject_failed")
-        if cost_result.reserved_cost is not None and cost_result.reserved_cost != Decimal("0"):
+        if not cost_result.allowed:
+            # ⚠️ TPM 예약은 이미 전 스코프에 커밋됐다 — 비용 거절로 요청이 나가면
+            #    수만 토큰의 예약이 버킷 만료까지 남아, 거절당한 재시도가 TEAM TPM
+            #    카운터를 부풀려 팀 전체를 기아시키는 양의 피드백이 됐다.
+            #    rate_limit_state 는 전 단계 통과 후에만 채워지므로 여기서 직접
+            #    해제해야 한다. 실패해도 거절은 진행(누수분은 버킷 TTL 이 회수).
             try:
-                await svc.settle_cost(
-                    redis,
-                    user_id=str(auth_context.user_id),
-                    actual_cost=Decimal("0"),
-                    reserved_cost=cost_result.reserved_cost,
-                    team_id=str(auth_context.team_id) if auth_context.team_id else None,
-                    committed_scopes=cost_result.committed_scopes,
-                    cpm_window_ts=cost_result.cpm_window_ts or None,
-                    cph_window_ts=cost_result.cph_window_ts or None,
-                    committed_keys=cost_result.committed_keys or None,
-                )
+                await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
+                _released["tpm"] = True
             except Exception:
-                logger.warning("cost_unwind_on_budget_reject_failed")
-        await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
-        return _build_budget_429(str(exc), metrics)
-    except Exception:
-        # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
-        # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.
-        logger.exception("budget_reserve_unexpected_failure")
-        budget_reservation = []
+                logger.warning("tpm_unwind_on_cost_reject_failed")
+            await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
+            _released["rpm"] = True
+            return _build_cost_429(cost_result, metrics)
 
-    # 통과 — settle용 정보 주입. 윈도우/커밋 스코프도 싣는다 — settle 이
-    # **예약이 실제로 들어간** 버킷/스코프 키를 치게 하는 근거이다(윈도우 경계를
-    # 넘은 스트리밍 요청의 환불이 다음 버킷에 새는 결함 + 무한도 스코프에 TTL
-    # 없는 음수 팬텀 키가 생기던 결함).
-    state["rate_limit_state"] = {
-        # tpm_committed — 실제로 예약이 들어간 스코프만. fail-open 으로 통과된
-        # 스코프(committed_out 미포함)에 환불/정산을 적용하면 예약하지 않은
-        # 버킷이 부풀어 그 분 창의 한도가 늘어난다.
-        "tpm_descriptors": _only_tpm(tpm_committed),
-        "tpm_reserved": reserved,
-        "tpm_reserved_at": float(tpm_now_sec),
-        "cost_reserved": cost_result.reserved_cost,
-        "cost_committed_scopes": cost_result.committed_scopes,
-        "cost_committed_keys": cost_result.committed_keys,
-        "cost_cpm_window_ts": cost_result.cpm_window_ts,
-        "cost_cph_window_ts": cost_result.cph_window_ts,
-        "budget_reservation": budget_reservation,
-        # admission 시 계산한 입력 추정치(배수 제외) — 종결 usage 를 못 받은 채
-        # 끊긴 스트림(response.completed 미수신 disconnect/idle timeout)은
-        # finalize 가 0 토큰으로 보고 기록을 생략한다. provider 는 프롬프트를
-        # 이미 청구했으므로 이 추정치로 과금한다(cost_recorder 가 읽는다).
-        "estimated_input": estimated_input_billing,
-    }
+        # 월예산 admission 예약 — budget_check(middleware)는 읽기 전용이라
+        # 동시 요청이 같은 used 를 보고 전부 통과해 하드캡을 넘길 수 있었다.
+        # 여기서 최악비용을 원자적으로 선예약하고, finalize 의 settle 이 실비로
+        # 정산한다(실패/거절 경로는 release_reservations 가 환불).
+        from app.periods import request_period
+        from app.services.budget_service import BudgetService
+
+        # 예약 추정의 출력 상한은 별도 클램프 — 클라이언트 max_tokens 가 매우 크면
+        # 비싼 모델에서 worst-case 선예약이 소액 예산을 통째로 잠가 호출이 막힌다.
+        # 실비 정산은 실제 사용량을 쓰므로, 초과분은 settle 이 카운터를 cap 위로
+        # 올려 다음 요청 차단 방향으로 수렴한다(잔여 클램프와 같은 정책).
+        _res_out_cap = get_settings().budget_reservation_max_output_tokens
+        worst_cost = _estimate_worst_cost(
+            model_config, estimated_input,
+            min(max_output, _res_out_cap) if _res_out_cap else max_output,
+            tier_input=estimated_input_billing,
+        )
+        try:
+            budget_reservation = await BudgetService().reserve_budget(
+                redis,
+                str(auth_context.user_id),
+                str(auth_context.team_id) if auth_context.team_id else None,
+                request_period(),
+                worst_cost,
+                reservation_id or request_id,
+                client=state.get("client"),
+                marker_ttl=get_settings().budget_reservation_ttl_seconds,
+            )
+        except PermissionError as exc:
+            # 앞서 커밋된 TPM + 비용 예약을 되돌린다 — 월예산 거절로 요청이 나가도
+            # 분/시간 한도를 실비 없이 물고 있으면 같은 기아 피드백이 생긴다.
+            try:
+                await svc.settle_tpm(redis, tpm_committed, reserved, 0, reserved_at=tpm_now_sec)
+                _released["tpm"] = True
+            except Exception:
+                logger.warning("tpm_unwind_on_budget_reject_failed")
+            if cost_result.reserved_cost is not None and cost_result.reserved_cost != Decimal("0"):
+                try:
+                    await svc.settle_cost(
+                        redis,
+                        user_id=str(auth_context.user_id),
+                        actual_cost=Decimal("0"),
+                        reserved_cost=cost_result.reserved_cost,
+                        team_id=str(auth_context.team_id) if auth_context.team_id else None,
+                        committed_scopes=cost_result.committed_scopes,
+                        cpm_window_ts=cost_result.cpm_window_ts or None,
+                        cph_window_ts=cost_result.cph_window_ts or None,
+                        committed_keys=cost_result.committed_keys or None,
+                    )
+                    _released["cost"] = True
+                except Exception:
+                    logger.warning("cost_unwind_on_budget_reject_failed")
+            await svc.undo_rpm(redis, descriptors, request_id, committed_keys=rpm_result.committed_keys)
+            _released["rpm"] = True
+            return _build_budget_429(str(exc), metrics)
+        except Exception:
+            # 예약 경로 자체의 장애(스크립트 미로드·직렬화 오류 등)는 요청을 막지
+            # 않는다 — 예약 없이 진행하면 기존 체크 전용 동작으로 회귀할 뿐이다.
+            logger.exception("budget_reserve_unexpected_failure")
+            budget_reservation = []
+
+        # 통과 — settle용 정보 주입. 윈도우/커밋 스코프도 싣는다 — settle 이
+        # **예약이 실제로 들어간** 버킷/스코프 키를 치게 하는 근거이다(윈도우 경계를
+        # 넘은 스트리밍 요청의 환불이 다음 버킷에 새는 결함 + 무한도 스코프에 TTL
+        # 없는 음수 팬텀 키가 생기던 결함).
+        state["rate_limit_state"] = {
+            # tpm_committed — 실제로 예약이 들어간 스코프만. fail-open 으로 통과된
+            # 스코프(committed_out 미포함)에 환불/정산을 적용하면 예약하지 않은
+            # 버킷이 부풀어 그 분 창의 한도가 늘어난다.
+            "tpm_descriptors": _only_tpm(tpm_committed),
+            "tpm_reserved": reserved,
+            "tpm_reserved_at": float(tpm_now_sec),
+            "cost_reserved": cost_result.reserved_cost,
+            "cost_committed_scopes": cost_result.committed_scopes,
+            "cost_committed_keys": cost_result.committed_keys,
+            "cost_cpm_window_ts": cost_result.cpm_window_ts,
+            "cost_cph_window_ts": cost_result.cph_window_ts,
+            "budget_reservation": budget_reservation,
+            # admission 시 계산한 입력 추정치(배수 제외) — 종결 usage 를 못 받은 채
+            # 끊긴 스트림(response.completed 미수신 disconnect/idle timeout)은
+            # finalize 가 0 토큰으로 보고 기록을 생략한다. provider 는 프롬프트를
+            # 이미 청구했으므로 이 추정치로 과금한다(cost_recorder 가 읽는다).
+            "estimated_input": estimated_input_billing,
+        }
+    except BaseException:
+        # state 주입 전에 탈출 — 커밋분의 소유권은 아직 여기 있으니 되돌린다.
+        # state 주입 후면 rate_limit_state 경로가 소유하니 건드리지 않는다.
+        if "rate_limit_state" not in state:
+            _spawn_admission_unwind(
+                redis=redis,
+                svc=svc,
+                descriptors=descriptors,
+                request_id=request_id,
+                rpm_committed_keys=rpm_result.committed_keys,
+                tpm_committed=tpm_committed,
+                tpm_reserved=reserved,
+                tpm_reserved_at=tpm_now_sec,
+                cost_result=cost_result,
+                released=_released,
+                user_id=str(auth_context.user_id),
+                team_id=str(auth_context.team_id) if auth_context.team_id else None,
+            )
+        raise
     return None
 
 

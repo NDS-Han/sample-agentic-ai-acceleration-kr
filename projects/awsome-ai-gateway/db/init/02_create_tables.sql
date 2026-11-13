@@ -96,7 +96,12 @@ CREATE TABLE IF NOT EXISTS auth.rotation_policies (
     created_at          TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_rotation_policies_scope ON auth.rotation_policies (scope, scope_id) WHERE is_active = true;
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_rotation_policies_scope ON auth.rotation_policies (scope, scope_id) WHERE is_active = true;
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'idx_rotation_policies_scope: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 CREATE TABLE IF NOT EXISTS auth.admin_jwt_configs (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -158,9 +163,14 @@ CREATE INDEX IF NOT EXISTS idx_budget_configs_scope ON budget.budget_configs (sc
 -- 같은 키에 is_active=true 행이 2개 생기면 이후 모든 조회가 scalar_one_or_none() 에서
 -- MultipleResultsFound → 500 이 된다 (migration 0024 참조). COALESCE 는 필수 —
 -- client IS NULL 인 조직 전체 예산 행은 그냥 (scope, scope_id, client) 로는 보호되지 않는다.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_configs_active
-    ON budget.budget_configs (scope, scope_id, COALESCE(client, ''))
-    WHERE is_active = true;
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_budget_configs_active
+        ON budget.budget_configs (scope, scope_id, COALESCE(client, ''))
+        WHERE is_active = true;
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'uq_budget_configs_active: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 CREATE TABLE IF NOT EXISTS budget.budget_usages (
     id                      UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -186,7 +196,12 @@ BEGIN
 EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
 END $$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usages (scope, scope_id, period, COALESCE(client,''));
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_budget_usages_unique ON budget.budget_usages (scope, scope_id, period, COALESCE(client,''));
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'idx_budget_usages_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 -- NOTE: budget.downgrade_policies는 model.model_aliases FK를 참조하므로
 --       model 스키마 블록 이후에 정의됨 (파일 하단 참조).
@@ -328,9 +343,14 @@ CREATE INDEX IF NOT EXISTS idx_rate_limit_configs_scope ON model.rate_limit_conf
 -- 해당 scope 의 활성 행 전부를 비활성화하므로, alias 를 넣으면 실제 중복 창이 열린다.
 -- COALESCE(scope_id, ...) 는 필수 — GLOBAL scope 는 scope_id IS NULL 이고,
 -- unique index 에서 NULL 은 서로 구별되므로 그냥 (scope, scope_id) 로는 보호되지 않는다.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_limit_configs_active
-    ON model.rate_limit_configs (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid))
-    WHERE is_active = true;
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_rate_limit_configs_active
+        ON model.rate_limit_configs (scope, COALESCE(scope_id, '00000000-0000-0000-0000-000000000000'::uuid))
+        WHERE is_active = true;
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'uq_rate_limit_configs_active: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 -- ------------------------------------------------------------
 -- 팀별 모델 접근 제어
@@ -419,9 +439,14 @@ CREATE INDEX IF NOT EXISTS idx_downgrade_policies_scope
     ON budget.downgrade_policies (scope, scope_id)
     WHERE is_active;
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_downgrade_policies_unique_active
-    ON budget.downgrade_policies (scope, scope_id, from_model_alias)
-    WHERE is_active;
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_downgrade_policies_unique_active
+        ON budget.downgrade_policies (scope, scope_id, from_model_alias)
+        WHERE is_active;
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'idx_downgrade_policies_unique_active: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 -- ============================================================
 -- usage schema — Enums
@@ -600,7 +625,12 @@ CREATE TABLE IF NOT EXISTS usage.roi_aggregations (
     aggregated_by                VARCHAR(64)   NOT NULL
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS idx_roi_aggregations_unique ON usage.roi_aggregations (period, scope, scope_id);
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_roi_aggregations_unique ON usage.roi_aggregations (period, scope, scope_id);
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'idx_roi_aggregations_unique: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 -- ============================================================
 -- usage schema — Productivity & Git Events (ROI 생산성 추적)
@@ -737,9 +767,14 @@ BEGIN
     END IF;
 EXCEPTION WHEN duplicate_column THEN NULL;  -- 동시 init 경합 수렴
 END $$;
-CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_events_idempotency
-    ON usage.productivity_events (idempotency_key)
-    WHERE idempotency_key IS NOT NULL;
+DO $$
+BEGIN
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_productivity_events_idempotency
+        ON usage.productivity_events (idempotency_key)
+        WHERE idempotency_key IS NOT NULL;
+EXCEPTION WHEN unique_violation THEN
+    RAISE WARNING 'idx_productivity_events_idempotency: 기존 중복 데이터로 유니크 인덱스 생성 건너뜀 — 운영 remediation 필요';
+END $$;
 
 -- migration 0009(+0021 web_search_enabled, +0032 backend CHECK 확장): 앱별 라우팅 프로파일.
 -- ⚠️ CHECK 값은 **0032 적용 후의 최종 상태**로 만든다. 0009 시점의 ('invoke','mantle') 로

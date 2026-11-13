@@ -428,6 +428,7 @@ def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
 def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
     env_vals = env_values_file(cfg, repo_root)
+    extra_notes: list[str] = []
 
     # env overlay 기본값까지 반영된 최종 min/max — min 만 sizing 에 있고 max 는
     # overlay 값을 물려받는 조합(min4 + overlay max3 등)은 API 서버가 HPA 를
@@ -447,7 +448,16 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     # 주입된 repo_root 를 따라야 다른 체크아웃 대상 렌더에서도 올바른 기본을
     # 읽는다(8차 리뷰 — 전역 REPO_ROOT 혼용 결함).
     _chart_path = repo_root / "deployment" / "charts" / "llm-gateway" / "values.yaml"
-    chart_vals = (yaml.safe_load(_chart_path.read_text()) or {}) if _chart_path.exists() else {}
+    if _chart_path.exists():
+        chart_vals = yaml.safe_load(_chart_path.read_text()) or {}
+    else:
+        # 잘못 주입된 repo_root 는 차트 기본 레이어 누락을 조용히 숨긴다 —
+        # 실 리포지터리엔 항상 있어야 하므로 노트로 표면화한다(9차 리뷰).
+        chart_vals = {}
+        extra_notes.append(
+            f"chart values({_chart_path})를 찾지 못했습니다 — autoscaling 기본값 "
+            "레이어 없이 env+gen 합성만 검증했습니다. repo_root 주입을 확인하세요.")
+
     chart_asg = ((chart_vals.get("gatewayProxy") or {}).get("autoscaling") or {})
     merged = {**chart_asg, **env_asg, **gen_asg}
     mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
@@ -455,10 +465,11 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         def _is_int(v) -> bool:
             # int() 절삭을 걸러야 한다 — minReplicas: 2.9 는 int(2.9)=2 로
             # 검증을 통과하지만 k8s API(HPA integer)에서 거절된다(8차 리뷰).
-            try:
-                return int(v) == v
-            except (TypeError, ValueError):
+            # bool(True→1)·정수 float(3.0 → '3.0' 렌더 → k8s 거절)·inf/nan
+            # (int() 가 OverflowError 로 캐시 범위를 빠져나감)도 같은 구멍이다.
+            if isinstance(v, bool) or not isinstance(v, int):
                 return False
+            return True
         if not (_is_int(mn) and _is_int(mx)):
             # 차트 측 유효성은 없다(values.schema.json 부재) — 비수치는 그대로
             # 렌더돼 kubectl apply 에서야 터지므로 render 시점에 잡는다.
@@ -548,7 +559,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     deploy_path = out_dir / "deploy.yaml"
     deploy_path.write_text(yaml.safe_dump(meta, sort_keys=False, allow_unicode=True))
 
-    notes = feature_notes(cfg)
+    notes = feature_notes(cfg) + extra_notes
     if cfg.features.body_logging:
         notes.append(
             "body_logging: 인프라(Firehose/S3/IRSA)는 terraform 소유입니다 — "

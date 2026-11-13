@@ -111,7 +111,7 @@ if config_raw then
     local ok, config = pcall(cjson.decode, config_raw)
     if ok then
         limit = tonumber(config.limit_usd) or 0
-        if config.thresholds then
+        if type(config.thresholds) == 'table' then
             thresholds = config.thresholds
         end
         if config.app_clients then

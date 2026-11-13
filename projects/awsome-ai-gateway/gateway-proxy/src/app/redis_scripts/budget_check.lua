@@ -82,7 +82,12 @@ if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' 
 end
 local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 local throttle_rpm_pct = tonumber(config.throttle_rpm_pct) or 50
-local thresholds = config.thresholds or {80, 90, 100}
+-- cjson.null 은 truthy userdata 라 or 로 못 걸러진다 — 비테이블
+-- (오염 캐시의 null/숫자 등)이 오면 아래 ipairs 가 eval 실패한다(9차 리뷰).
+local thresholds = {80, 90, 100}
+if type(config.thresholds) == 'table' then
+    thresholds = config.thresholds
+end
 local app_clients = config.app_clients or {}
 
 local used = tonumber(redis.call('GET', usage_key) or '0')
@@ -112,7 +117,9 @@ if limit == 0 then
     })
 end
 
-if policy == 'hard_block' and used >= limit then
+-- reserve 와 같은 ε 경계 — 잔차(5e-10 같은 부동소수 찌꺼기)를 '가용'으로
+-- 보여주지 않게 둘을 맞춘다(9차 리뷰). 종국 판정은 어차피 reserve 가 내린다.
+if policy == 'hard_block' and used >= limit - 1e-9 then
     return cjson.encode({
         allowed = false,
         reason = scope_label .. '_budget_exceeded',
