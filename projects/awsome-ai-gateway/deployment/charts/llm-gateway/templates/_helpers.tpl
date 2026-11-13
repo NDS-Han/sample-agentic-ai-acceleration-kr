@@ -192,14 +192,31 @@ imagePullSecrets:
 {{- end -}}
 
 {{/* ------------------------------------------------------------------------
-  Admin-api/Gateway-proxy 전용 env: JWT / VK 암호화 키 / STS 등
+  VK 복호화가 필요한 컴포넌트 전용: DEK + (로테이션 시) 구버전 키맵.
+  extraKeysEnabled=true 면 SM `/app` JSON 의 virtual_key_encryption_extra_keys
+  속성이 ExternalSecret 을 통해 같은 Secret 에 동기화돼 있어야 한다 —
+  없으면 remoteRef 실패로 ExternalSecret sync 전체가 깨진다(secret.yaml 주석 참조).
 -------------------------------------------------------------------------- */}}
-{{- define "llm-gateway.authEnv" -}}
+{{- define "llm-gateway.vkEncryptionEnv" -}}
 - name: VIRTUAL_KEY_ENCRYPTION_KEY
   valueFrom:
     secretKeyRef:
       name: {{ .Values.auth.virtualKey.encryptionKeySecretName | quote }}
       key: {{ .Values.auth.virtualKey.encryptionKeySecretKey | quote }}
+{{- if .Values.auth.virtualKey.extraKeysEnabled }}
+- name: VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS
+  valueFrom:
+    secretKeyRef:
+      name: {{ .Values.auth.virtualKey.encryptionKeySecretName | quote }}
+      key: virtual_key_encryption_extra_keys
+{{- end }}
+{{- end -}}
+
+{{/* ------------------------------------------------------------------------
+  Admin-api/Gateway-proxy 전용 env: JWT / VK 암호화 키 / STS 등
+-------------------------------------------------------------------------- */}}
+{{- define "llm-gateway.authEnv" -}}
+{{ include "llm-gateway.vkEncryptionEnv" . }}
 - name: JWT_ALGORITHM
   value: {{ .Values.auth.jwt.algorithm | quote }}
 - name: JWT_ISSUER

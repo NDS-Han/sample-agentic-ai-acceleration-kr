@@ -248,7 +248,10 @@ auth:
     # AES-256-GCM DEK (64-char hex) — Secret에서 주입
     encryptionKeySecretName: "llm-gateway-app"
     encryptionKeySecretKey: "virtual_key_encryption_key"
-    # 로테이션 준비: 이전 버전 키 (복호화 전용)
+    # 로테이션 준비: 이전 버전 키 (복호화 전용, JSON {"ver":"hex"}).
+    # true 로 켜기 전에 SM `<prefix>/<env>/app` JSON 에
+    # `virtual_key_encryption_extra_keys` 속성을 먼저 추가할 것 — 없으면
+    # ExternalSecret remoteRef 실패로 app 시크릿 sync 전체가 깨진다.
     extraKeysEnabled: false
 
 # ----------------------------------------------------------------------------
