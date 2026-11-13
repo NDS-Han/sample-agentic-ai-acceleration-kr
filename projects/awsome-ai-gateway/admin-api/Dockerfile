@@ -5,7 +5,7 @@ FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
 WORKDIR /build
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 
 COPY ca-certificates.cr[t] /etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt

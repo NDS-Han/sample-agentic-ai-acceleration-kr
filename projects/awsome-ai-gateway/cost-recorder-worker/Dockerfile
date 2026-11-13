@@ -3,7 +3,7 @@
 # Build stage
 FROM public.ecr.aws/docker/library/python:3.11-slim AS builder
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 WORKDIR /app
 
 COPY pyproject.toml uv.lock* ./

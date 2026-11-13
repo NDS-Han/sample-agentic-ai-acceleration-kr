@@ -1,11 +1,11 @@
 FROM python:3.11-slim
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY ca-certificates.cr[t] /etc/ssl/certs/ca-certificates.crt
 ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 COPY pyproject.toml ./
-RUN uv pip install --system fastapi uvicorn
+RUN uv pip install --system "fastapi==0.162.0" "uvicorn==0.54.0"
 COPY main.py ./
 
 # Run as a non-root user.

@@ -23,13 +23,25 @@ RUN apt-get update \
         build-essential \
  && rm -rf /var/lib/apt/lists/*
 
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
+
 WORKDIR /app
 
-COPY pyproject.toml ./
+# uv.lock* 가 있으면 사용, 없어도 동작 (glob)
+COPY pyproject.toml uv.lock* ./
 COPY src ./src
 
-RUN pip install --upgrade pip \
- && pip install -e .
+# admin-api 와 동일 규약: lock 을 requirements 로 변환해 설치하고,
+# 프로젝트는 pip install 이 아니라 PYTHONPATH 로 — `pip install -e .` 는
+# pyproject 의 >= 스펙을 빌드마다 재해석해 lock 을 무시한다 (R36).
+RUN if [ -f uv.lock ]; then \
+      uv export --frozen --no-dev --format requirements-txt -o /tmp/requirements.txt; \
+    else \
+      cp pyproject.toml /tmp/requirements.txt; \
+    fi \
+ && uv pip install --system --no-cache -r /tmp/requirements.txt
+
+ENV PYTHONPATH=/app/src
 
 # AgentCore HTTP contract
 EXPOSE 8080

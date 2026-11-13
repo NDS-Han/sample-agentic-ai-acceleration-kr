@@ -1,8 +1,8 @@
 FROM python:3.11-slim
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml ./
-RUN uv pip install --system fastapi uvicorn
+RUN uv pip install --system "fastapi==0.162.0" "uvicorn==0.54.0"
 COPY main.py eventstream.py ./
 
 # 부하테스트 전용 mock — 클러스터 배포 시 PodSecurity restricted 와 호환되도록

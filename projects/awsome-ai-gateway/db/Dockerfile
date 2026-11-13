@@ -2,7 +2,7 @@
 
 FROM public.ecr.aws/docker/library/python:3.11-slim
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.13.7 /uv /usr/local/bin/uv
 WORKDIR /app
 
 # psql-client 필요 — 클라우드 모드에서 run_migration.sh 가 init/*.sql 을 직접 실행할 때 사용.
@@ -20,7 +20,7 @@ ENV REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
 # env.py 가 create_async_engine 을 쓰므로 greenlet 이 필요하다.
 # SQLAlchemy 2.1 부터 greenlet 은 [asyncio] extra 로만 설치된다
 # (2.0.x 는 x86_64 에서 자동 설치됐다). extra 를 빼면 alembic 이 import 에서 죽는다.
-RUN uv pip install --system alembic asyncpg "sqlalchemy[asyncio]"
+RUN uv pip install --system "alembic==1.20.1" "asyncpg==0.32.0" "sqlalchemy[asyncio]==2.1.8"
 
 COPY alembic.ini env.py ./
 COPY versions/ ./versions/
