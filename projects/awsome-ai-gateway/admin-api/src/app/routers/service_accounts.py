@@ -8,7 +8,7 @@ import structlog
 from datetime import UTC, datetime, timedelta
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import func, literal, select
+from sqlalchemy import and_, func, literal, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.audit import audit_logger
@@ -446,20 +446,29 @@ async def unmark_service_account(
     if not user.is_service_account:
         return {"user_id": str(user.id), "is_service_account": False}
 
-    active = (
+    # ACTIVE 외에 status=EXPIRED·expires_at>now 도 게이트웨이가 여전히 인증한다
+    # (Redis key:vk TTL = expires_at) — list_revocable_for_users 와 같은 술어.
+    now = datetime.now(UTC)
+    live = (
         await session.execute(
             select(func.count())
             .select_from(VirtualKey)
             .where(
                 VirtualKey.user_id == user.id,
                 VirtualKey.kind == VK_KIND_SERVICE,
-                VirtualKey.status == KeyStatus.ACTIVE,
+                or_(
+                    VirtualKey.status == KeyStatus.ACTIVE,
+                    and_(
+                        VirtualKey.status == KeyStatus.EXPIRED,
+                        VirtualKey.expires_at > now,
+                    ),
+                ),
             )
         )
     ).scalar_one()
-    if active:
+    if live:
         raise ValidationError(
-            "revoke the active service key before unflagging this account"
+            "revoke the live service key before unflagging this account"
         )
 
     user.is_service_account = False

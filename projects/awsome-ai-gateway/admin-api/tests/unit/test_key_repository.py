@@ -33,13 +33,15 @@ def _vk(user_id: uuid.UUID) -> VirtualKey:
 
 
 def _mock_session_returning(
-    expired_count: int, new_id: uuid.UUID, expired_encs: list | None = None
+    expired_count: int, new_id: uuid.UUID, expired_encs: list | None = None,
+    expired_hashes: list | None = None,
 ) -> AsyncMock:
     """Build a mock AsyncSession whose execute() returns a row with given fields."""
     row = MagicMock()
     row.expired_count = expired_count
     row.new_id = new_id
     row.expired_encs = expired_encs or []
+    row.expired_hashes = expired_hashes if expired_hashes is not None else [None] * len(expired_encs or [])
     result = MagicMock()
     result.one = MagicMock(return_value=row)
     session = AsyncMock()
@@ -126,9 +128,11 @@ async def test_expire_and_create_returns_expired_encs():
     new_vk = _vk(user_id)
     old_enc = b"v1:oldkey-encrypted-blob"
     session = _mock_session_returning(
-        expired_count=1, new_id=new_vk.id, expired_encs=[old_enc]
+        expired_count=1, new_id=new_vk.id,
+        expired_encs=[old_enc], expired_hashes=[None],
     )
     repo = KeyRepository(session)
     expired_count, _, expired_encs = await repo.expire_and_create(user_id, new_vk)
     assert expired_count == 1
-    assert expired_encs == [old_enc]
+    # 0056 — (enc, 저장해시) 쌍 반환; 해시 없는 구 행은 None 으로 복호화 폴백 표시
+    assert expired_encs == [(old_enc, None)]

@@ -171,7 +171,16 @@ class KeyService:
                     and existing.expires_at <= expires_at
                     and existing.kind == kind
                 ):
-                    raw_key = self._encryption.decrypt(existing.key_value_encrypted)
+                    try:
+                        raw_key = self._encryption.decrypt(existing.key_value_encrypted)
+                    except Exception:
+                        # 복호화 실패(암호키 로테이션) — dedup 재표시 불가. 신규 발급으로
+                        # 넘어간다(구 키는 Redis TTL 만료까지 유령일 수 있으나 발급 500
+                        # 보다는 발급 성공이 낫다 — 0056).
+                        logger.warning(
+                            "key.dedup_decrypt_failed", key_id=str(existing.id)
+                        )
+                        continue
                     # 커밋됐지만 Redis SET 이 실패/취소된 키를 재사용하면 클라이언트는
                     # 200 을 받고도 gateway 에서 401 — dead credential 을 다시
                     # 건네지 않도록 key:vk:{hash} 생존을 확인한다(R21 r4 M2).
@@ -308,6 +317,9 @@ class KeyService:
 
         # AES-256-GCM encrypt
         encrypted = self._encryption.encrypt(raw_key)
+        # sha256(raw) 함께 저장 — 폐기/로테이션/repair 가 복호화 없이 key:vk:{hash}
+        # 를 구할 수 있게(0056). 저장 해시는 오프라인 역해 불가(256bit)라 안전.
+        new_key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
 
         # issued_at: CTE path uses raw SQL (no ORM refresh), so set explicitly.
         # ORM `repo.create()` path would auto-fill from server_default; here we don't.
@@ -316,6 +328,7 @@ class KeyService:
             id=uuid.uuid4(),
             user_id=user_id,
             key_value_encrypted=encrypted,
+            key_hash=new_key_hash,
             key_prefix=key_prefix,
             status=KeyStatus.ACTIVE,
             expires_at=expires_at,
@@ -364,7 +377,7 @@ class KeyService:
         if expired_count > 0:
             logger.info("key.expired_existing", user_id=str(user_id), count=expired_count)
 
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        key_hash = new_key_hash
         seconds_until_expiry = max(1, int((expires_at - now).total_seconds()))
 
         # user 는 앞의 kind 가드에서 이미 로드됐다 (호출자 전달 또는 조회).
@@ -378,7 +391,11 @@ class KeyService:
         # DEL→commit 창 재캐시 경합은 key:vk 를 게이트웨이가 쓰지 않아 없다.
         if expired_encs:
             old_hashes: list[str] = []
-            for enc in expired_encs:
+            for enc, stored_hash in expired_encs:
+                if isinstance(stored_hash, str) and stored_hash:
+                    # 0056 저장 해시 — 복호화 없이 Redis 정리(암호키 로테이션 후에도 동작)
+                    old_hashes.append(stored_hash)
+                    continue
                 try:
                     old_raw = self._encryption.decrypt(enc)
                 except Exception:
@@ -633,15 +650,20 @@ class KeyService:
                 ):
                     await session.commit()  # 잠금만 풀고 다음으로
                     continue
-                try:
-                    raw_key = self._encryption.decrypt(locked.key_value_encrypted)
-                except Exception:
-                    logger.warning(
-                        "service_key_repair.decrypt_failed", key_id=str(vk.id)
-                    )
-                    await session.commit()
-                    continue
-                key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                if isinstance(locked.key_hash, str) and locked.key_hash:
+                    # 저장 해시(0056) — 복호화 없이 repair 가능(로테이션 내성)
+                    key_hash = locked.key_hash
+                else:
+                    try:
+                        raw_key = self._encryption.decrypt(locked.key_value_encrypted)
+                    except Exception:
+                        logger.warning(
+                            "service_key_repair.decrypt_failed", key_id=str(vk.id)
+                        )
+                        await session.commit()
+                        continue
+                    key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+                    locked.key_hash = key_hash  # 지연 백필
                 try:
                     if await redis.exists(f"key:vk:{key_hash}"):
                         await session.commit()
@@ -743,10 +765,13 @@ class KeyService:
         now = datetime.now(timezone.utc)
         await repo.revoke_many([vk.id for vk in vks], now)
 
-        # Redis 무효화용 해시 — revoke_key 와 동일하게 raw key 를 복호화해 sha256.
+        # Redis 무효화용 해시 — 저장 해시(0056) 우선, 복호화는 구 키 폴백 + 지연 백필.
         # (vk, hash) 쌍으로 유지한다 — 복호화 실패분을 건너뛰면 평행 리스트는 어긋난다.
         hashed: list[tuple[VirtualKey, str]] = []
         for vk in vks:
+            if isinstance(vk.key_hash, str) and vk.key_hash:
+                hashed.append((vk, vk.key_hash))
+                continue
             try:
                 raw_key = self._encryption.decrypt(vk.key_value_encrypted)
             except Exception:
@@ -754,7 +779,9 @@ class KeyService:
                     "vk_offboard.decrypt_failed", key_id=str(vk.id), exc_info=True
                 )
                 continue
-            hashed.append((vk, hashlib.sha256(raw_key.encode()).hexdigest()))
+            h = hashlib.sha256(raw_key.encode()).hexdigest()
+            vk.key_hash = h
+            hashed.append((vk, h))
         return hashed
 
     async def finalize_revoked_keys(
@@ -846,11 +873,14 @@ class KeyService:
         original_status = vk.status
         await repo.revoke(key_id, actor.user_id)
 
-        # Invalidate Redis cache
-        # We need the hash of the raw key, but we only have encrypted.
-        # Decrypt to get raw key, then hash it.
-        raw_key = self._encryption.decrypt(vk.key_value_encrypted)
-        key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+        # Invalidate Redis cache — 저장 해시(0056) 우선: 복호화 없이 DEL 가능해
+        # 암호키 로테이션 후에도 폐기가 동작한다. 구 키는 복호화 폴백 + 지연 백필.
+        if isinstance(vk.key_hash, str) and vk.key_hash:
+            key_hash = vk.key_hash
+        else:
+            raw_key = self._encryption.decrypt(vk.key_value_encrypted)
+            key_hash = hashlib.sha256(raw_key.encode()).hexdigest()
+            vk.key_hash = key_hash  # 지연 백필 — 다음 수명주기부터 복호화 불필요
 
         # Remove from team VK hash reverse index (FR-2.6) — commit 후로 지연.
         user_repo = UserRepository(session)

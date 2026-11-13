@@ -164,7 +164,8 @@ async def run_service_key_repair() -> None:
             try:
                 svc = KeyService(
                     encryption=AESEncryptionService(
-                        settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value()
+                        settings.VIRTUAL_KEY_ENCRYPTION_KEY.get_secret_value(),
+                        extra_keys=settings.vk_extra_keys or None,
                     ),
                     cache_mgr=CacheInvalidationManager(redis),
                 )
@@ -174,6 +175,15 @@ async def run_service_key_repair() -> None:
                     logger.info(
                         "scheduler.service_key_repaired", count=repaired
                     )
+                # 실패 DEL 재시도 — revoke DEL 이 빗나가면 cache_invalidation_failures
+                # 에만 남고 자동 재시도가 없어 폐기 키가 TTL(최대 365d) 동안 유령
+                # 인증된다. repair 주기에 맞춰 드레인한다.
+                async with AsyncSessionLocal() as session:
+                    retried = await CacheInvalidationManager(redis).retry_failed(session)
+                    if retried:
+                        logger.info(
+                            "scheduler.cache_invalidation_retried", count=retried
+                        )
             finally:
                 try:
                     await redis.aclose()

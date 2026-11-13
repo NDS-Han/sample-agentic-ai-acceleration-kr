@@ -193,6 +193,13 @@ async def revoke_key(
     from app.services.key_service import KeyService
 
     svc: KeyService = request.app.state.key_service
+    # svc 토큰은 서비스 계정 키의 생명주기를 건드리지 못한다 — 발급(50-53행)과
+    # 같은 정책을 폐기에도 적용. 유출된 svc 토큰으로 서비스 계정 DoS 를 막는다.
+    if admin.service_token_id is not None:
+        from app.repositories.key_repository import KeyRepository
+        target = await KeyRepository(session).get_by_id(key_id)
+        if target is not None and target.kind == "service":
+            raise ForbiddenError("Service tokens cannot revoke service-account keys")
     await svc.revoke_key(
         session,
         key_id=key_id,

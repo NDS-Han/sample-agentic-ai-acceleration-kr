@@ -142,6 +142,22 @@ class Settings(BaseSettings):
     # SecretStr wrapping prevents accidental exposure via repr/__str__/logs.
     # Always unwrap via .get_secret_value() at the single boundary (main.py lifespan).
     VIRTUAL_KEY_ENCRYPTION_KEY: SecretStr = SecretStr("")  # 64-char hex for AES-256-GCM DEK
+    # 로테이션용 이전 키들 — JSON {"v0":"<64hex>",...} 형태. 현재 키를 바꾼 뒤
+    # 구 암호문 복호화가 계속 동작해야 폐기/repair 가 깨지지 않는다(0056 대비책;
+    # 저장 해시가 주 방어선이고 이건 구 키 폴백용).
+    VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS: str = ""
+
+    @property
+    def vk_extra_keys(self) -> dict[str, str]:
+        """VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS(JSON {"ver":"hex"}) → 복호화용 키맵."""
+        import json
+        if not self.VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS.strip():
+            return {}
+        try:
+            data = json.loads(self.VIRTUAL_KEY_ENCRYPTION_EXTRA_KEYS)
+        except json.JSONDecodeError:
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
 
     # ── JWT Verification ──
     JWT_ALGORITHM: str = "RS256"

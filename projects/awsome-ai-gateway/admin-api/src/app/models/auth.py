@@ -153,6 +153,9 @@ class VirtualKey(Base):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     user_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("auth.users.id"), nullable=False)
     key_value_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    #: sha256(raw_key) — 폐기/로테이션/repair 가 복호화 없이 Redis 키를 구하도록
+    #: 발급 시 함께 저장(0056). 구 키는 라이프사이클 터치 시 지연 백필.
+    key_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     key_prefix: Mapped[str] = mapped_column(String(16), nullable=False)
     status: Mapped[KeyStatus] = mapped_column(
         Enum(KeyStatus, name="key_status", schema="auth", create_type=False), nullable=False, default=KeyStatus.ACTIVE

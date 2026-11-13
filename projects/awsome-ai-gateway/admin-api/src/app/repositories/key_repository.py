@@ -63,16 +63,16 @@ class KeyRepository:
                 UPDATE auth.virtual_keys
                 SET status = 'EXPIRED'
                 WHERE user_id = :user_id AND status = 'ACTIVE'
-                RETURNING key_value_encrypted
+                RETURNING key_value_encrypted, key_hash
             ),
             inserted AS (
                 INSERT INTO auth.virtual_keys (
-                    id, user_id, key_value_encrypted, key_prefix,
+                    id, user_id, key_value_encrypted, key_hash, key_prefix,
                     status, expires_at, issued_at,
                     kind, issued_by, issued_via_service_token
                 )
                 VALUES (
-                    :new_id, :user_id, :enc, :prefix,
+                    :new_id, :user_id, :enc, :key_hash, :prefix,
                     'ACTIVE', :expires_at, :issued_at,
                     :kind, :issued_by, :issued_via_service_token
                 )
@@ -82,7 +82,9 @@ class KeyRepository:
                 (SELECT COUNT(*) FROM expired) AS expired_count,
                 (SELECT id FROM inserted) AS new_id,
                 (SELECT COALESCE(array_agg(key_value_encrypted), '{}'::bytea[])
-                 FROM expired) AS expired_encs
+                 FROM expired) AS expired_encs,
+                (SELECT COALESCE(array_agg(key_hash), '{}'::varchar[])
+                 FROM expired) AS expired_hashes
             """
         )
         result = await self._session.execute(
@@ -91,6 +93,7 @@ class KeyRepository:
                 "user_id": user_id,
                 "new_id": new_vk.id,
                 "enc": new_vk.key_value_encrypted,
+                "key_hash": new_vk.key_hash,
                 "prefix": new_vk.key_prefix,
                 "expires_at": new_vk.expires_at,
                 "issued_at": new_vk.issued_at,
@@ -100,7 +103,10 @@ class KeyRepository:
             },
         )
         row = result.one()
-        return int(row.expired_count), row.new_id, list(row.expired_encs or [])
+        # 저장 해시(0056)가 있으면 복호화 없이 Redis 정리 가능 — 없는 행만
+        # enc 로 폴백한다. 두 배열은 expired 순서대로 정렬된다.
+        pairs = list(zip(row.expired_encs or [], row.expired_hashes or []))
+        return int(row.expired_count), row.new_id, pairs
 
     async def revoke(self, key_id: uuid.UUID, revoked_by: uuid.UUID) -> VirtualKey | None:
         from datetime import datetime, timezone
