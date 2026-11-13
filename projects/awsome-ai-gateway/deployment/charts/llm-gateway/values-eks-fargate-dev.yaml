@@ -51,7 +51,7 @@ database:
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언됨 — 라이브 정책 v2 로 반영).
     masterPasswordRemoteKey: ""  # rds!cluster-<uuid> — fill-org-values.sh 가 배포 시 실제값 주입
-    masterPasswordRemoteProperty: "password"
+    masterPasswordRemoteProperty: ""
     poolSize: 5
     maxOverflow: 10
     # dev 도 enable_rds_proxy=true 기본값이라 Proxy 경유 → pinning 회피 위해 0.

@@ -478,7 +478,7 @@ terraform apply         # 마지막에 yes
 
 > ⚠️ 경로 앞부분은 §3-2 의 `project` 와 **반드시 같아야 한다** — external-secrets IAM 정책이 `secret:/${project}/${environment}/`* 로만 허용한다.
 >
-> 🔴 `/db` **시크릿은 §3-3 terraform 이 이미 만들었다. 덮어쓰지 말 것.** `create-secret` 하면 `ResourceExistsException` 이 나는데, 거기서 `put-secret-value` 로 "고치면" `master_password` **가 사라져 §3-7 migration 이 깨진다**(차트가 `/db` 에서 `password`·`master_password` 두 값을 읽는다). 아래처럼 **확인만** 한다.
+> 🔴 `/db` **시크릿은 §3-3 terraform 이 이미 만들었다. 덮어쓰지 말 것.** `create-secret` 하면 `ResourceExistsException` 이 난다. 아래처럼 **확인만** 한다 — master 비번은 `/db` 안에 없고, 차트는 `masterPasswordRemoteKey`(RDS 관리형 시크릿 `rds!cluster-<uuid>`)로 직접 읽는다.
 
 ▶ **실행** · 배포 EC2
 
@@ -503,7 +503,7 @@ aws secretsmanager create-secret --name /llm-gateway/dev/redis \
 # (3) db — 만들지 않는다. terraform 이 만든 것이 있는지 확인만 한다.
 aws secretsmanager get-secret-value --secret-id /llm-gateway/dev/db \
   --query SecretString --output text | jq -r 'keys|@csv'
-# → "master_password","password" 두 키가 나오면 정상
+# → "password" 한 키가 나오면 정상 (master_password 는 RDS 관리형 시크릿에 있다)
 ```
 
 확인(값 노출 없이 키·길이만):
@@ -517,7 +517,7 @@ for s in app db redis; do printf '%-6s ' "$s"
 done
 ```
 
-> 세 줄 모두 `len>0` 이면 OK. `db` **에** `master_password` **가 보여야 한다** — 없으면 누군가 덮어쓴 것이니 `terraform apply` 로 복구한다(`put-secret-value` 로 손대지 말 것).
+> 세 줄 모두 `len>0` 이면 OK. `db` **에** `password` **가 보여야 한다** — `master_password` 는 이 계약에서 빠졌다(migration 은 values 의 `masterPasswordRemoteKey` 로 RDS 관리형 시크릿에서 직접 읽음).
 >
 > `app`·`redis` 갱신은 `put-secret-value` 로 해도 된다(terraform 관리 대상이 아님).
 

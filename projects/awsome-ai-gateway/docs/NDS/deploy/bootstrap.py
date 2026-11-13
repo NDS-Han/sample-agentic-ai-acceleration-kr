@@ -311,12 +311,13 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
             "시크릿입니다. env apply 결과를 확인하십시오 (절대 수동 create 하지 말 "
             "것 — master_password 를 잃는다)")
     keys = set(json.loads(r.stdout).keys())
-    if not {"password", "master_password"} <= keys:
+    if "password" not in keys:
         raise SystemExit(
-            f"secrets {db} 의 키가 불완전합니다({sorted(keys)}) — password 와 "
-            "master_password 둘 다 필요합니다. terraform apply 로 복구하십시오 "
-            "(put-secret-value 로 손대지 말 것)")
-    notes.append(f"secrets {db} — terraform 관리본 확인 (password+master_password)")
+            f"secrets {db} 에 password 키가 없습니다({sorted(keys)}) — "
+            "terraform apply 로 복구하십시오 (put-secret-value 로 손대지 말 것)")
+    # master_password 는 더 이상 /db 안에 들어있지 않다 — migration 은 values 의
+    # masterPasswordRemoteKey(RDS 관리형 시크릿 rds!cluster-<uuid>)로 직접 읽는다.
+    notes.append(f"secrets {db} — terraform 관리본 확인 (password)")
     return notes
 
 

@@ -269,7 +269,7 @@ def test_seed_secrets_creates_app_and_redis_copies_db_verified(
     assert set(app) == {"virtual_key_encryption_key", "nextauth_secret",
                         "jwt_jwks_cache_key", "internal_api_token"}
     assert secrets_map["/llm-gateway/dev/redis"] == {"password": "redis-auth-token"}
-    assert any("master_password" in n for n in notes)
+    assert any("password" in n for n in notes)
 
 
 def test_seed_secrets_preserves_existing(monkeypatch, tmp_path):
@@ -303,10 +303,10 @@ def test_seed_secrets_db_incomplete_fails(monkeypatch, tmp_path):
     fake, _ = _aws_router({
         "/llm-gateway/dev/app": {"x": 1},          # 이미 존재 → 생성 생략
         "/llm-gateway/dev/redis": {"password": "x"},
-        "/llm-gateway/dev/db": {"password": "p"},  # master_password 누락
+        "/llm-gateway/dev/db": {"master_password": "m"},  # password 누락
     })
     monkeypatch.setattr(bootstrap.subprocess, "run", fake)
-    with pytest.raises(SystemExit, match="master_password"):
+    with pytest.raises(SystemExit, match="password"):
         bootstrap.seed_secrets(cfg, tmp_path, {})
 
 

@@ -50,7 +50,7 @@ database:
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언 — 라이브 정책 v2 로 반영).
     masterPasswordRemoteKey: ""  # rds!cluster-<uuid> — fill-org-values.sh 가 배포 시 실제값 주입
-    masterPasswordRemoteProperty: "password"
+    masterPasswordRemoteProperty: ""
     # pod 당 pool 50 (base 20 + burst 30). Aurora r7g.large max_connections ≈ 1800.
     # HPA max 30 × 50 = 1,500 → 한도의 83% 안전. RDS Proxy multiplex 로 실제는 더 여유.
     # VK 조회는 Redis cache hit 가 주경로라 실제 사용량은 100 내외.

@@ -113,7 +113,7 @@ cat <<SUMMARY
   adminBootstrap email : $EMAIL
   inbound-cidrs        : $CIDRS   (EC2 $EC2_IP + PC $PC_IP)
   reportingTimezone    : $REPORTING_TZ   (global.reportingTimezone — 대시보드/집계 달력 경계, 예산 월은 UTC)
-  masterPasswordRemoteKey : ${RDS_SECRET:-(없음 — /db:master_password 유지)}
+  masterPasswordRemoteKey : ${RDS_SECRET:-(없음 — /db 에 master_password 없어 ESO 가 시끄럽게 실패 — master 시크릿 ARN 을 직접 넣어야 함)}
   + placeholder 정리   : 123456789012 → $ACCOUNT, ap-northeast-2 → $REGION
                          chat-agent(미사용) ARN/버킷 → 빈 값
 SUMMARY
