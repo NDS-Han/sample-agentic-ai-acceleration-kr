@@ -110,6 +110,9 @@ end
 local db = fin(tonumber(ARGV[1])) or 0
 if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 음수화 방지
 local target = db + live
+-- db+live 오버플로는 +Inf — 'inf' 카운터는 영구 fail-closed + 매 요청
+-- rebuild 폭풍이므로 max-double 로 클램프(차단 유지·프로브 건강, 15차).
+target = math.min(target, 1.7976931348623157e308)
 
 -- 차감 실패분 누적 — 원장(budget_usages)은 워커 배치라 rebuild 시점에 실패분이
 -- 아직 미반영일 수 있다. 그 상태로 센티넬만 지우면 유실분이 기간 내내 남으므로
@@ -117,7 +120,9 @@ local target = db + live
 -- cur+lost_amt 가 정확한 복원값이다 (db+live 가 작게 읽힐 창을 덮는다).
 local lost_amt = fin(tonumber(redis.call('GET', KEYS[1] .. ':lost_amt'))) or 0
 if lost_amt > 0 then
-    target = math.max(target, (cur or 0) + lost_amt)
+    -- (cur or 0)+lost_amt 도 오버플로 가능 — 같은 클램프를 max 이후에도.
+    target = math.min(math.max(target, (cur or 0) + lost_amt),
+                      1.7976931348623157e308)
 end
 
 if (not cur) or cur < target then

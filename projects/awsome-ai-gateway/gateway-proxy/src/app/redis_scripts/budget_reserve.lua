@@ -208,6 +208,14 @@ local usage_existed = redis.call('EXISTS', usage_key)
 -- (실비 - 예약액) 델타를 빼는데, 추정치를 쓰면 클램프분이 정산에서 샌다.
 redis.call('INCRBYFLOAT', usage_key, reserved_amt)
 redis.call('EXPIRE', usage_key, 3888000)  -- 45d (budget_deduct.lua 와 동일)
+-- 'nan'/'inf'/비수치 resvsum 은 INCRBYFLOAT 가 거부해 usage 커밋 후 여기서
+-- 죽는다 — 마커/인덱스 없는 영구 팬텀 예약이 usage 에 남는다(15차 리뷰).
+-- 오염 저장값은 0 으로 덮어써 치유한다(settle 과 같은 규약).
+local rs_stored = tonumber(redis.call('GET', KEYS[4]) or '0')
+if rs_stored ~= rs_stored or rs_stored == math.huge
+    or rs_stored == -math.huge then
+    redis.call('SET', KEYS[4], '0')
+end
 redis.call('INCRBYFLOAT', KEYS[4], reserved_amt)
 redis.call('EXPIRE', KEYS[4], 3888000)
 redis.call('SET', marker_key, tostring(reserved_amt), 'EX', marker_ttl)

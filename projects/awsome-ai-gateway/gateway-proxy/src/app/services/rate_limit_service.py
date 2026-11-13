@@ -696,9 +696,12 @@ class RateLimitService:
 
         # 전 scope 통과 — 예약 커밋됨(각 scope eval 이 INCRBYFLOAT 수행).
         # settle 이 같은 윈도우·같은 스코프 키를 치게 커밋 정보를 돌려준다.
+        # 음수 추정치는 Lua 가 0 으로 클램프해 아무것도 커밋하지 않는데
+        # 원시 음수값을 돌려주면 settle 의 (actual-reserved) 델타가 커밋
+        # 없이 양의 조정을 더한다(15차 리뷰) — 클램프와 같은 수렴.
         return CostLimitResult(
             allowed=True,
-            reserved_cost=estimated_cost,
+            reserved_cost=max(Decimal("0"), estimated_cost),
             committed_scopes=[label for label, *_ in committed],
             cpm_window_ts=cpm_window_ts,
             cph_window_ts=cph_window_ts,

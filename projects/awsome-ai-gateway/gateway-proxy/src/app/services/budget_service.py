@@ -6,7 +6,7 @@ import asyncio
 import json
 import math
 import time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, Overflow
 from uuid import uuid4
 
 from redis.exceptions import RedisError
@@ -343,9 +343,9 @@ class BudgetService:
                 )
                 return True
             first = float(raw.decode() if isinstance(raw, bytes) else raw)
-            # 'nan' 시각은 nan<ttl 이 False 라 웜업이 즉시 끝나 인덱스만
-            # 믿고 비인덱스 마커를 놓친다(과소 복구, 14차 리뷰).
-            if not math.isfinite(first):
+            # 'nan'/음수 시각은 <ttl 비교가 False 라 웜업이 즉시 끝나
+            # 인덱스만 믿고 비인덱스 마커를 놓친다(과소 복구, 14차 리뷰).
+            if not math.isfinite(first) or first < 0:
                 return True
             return (time.time() - first) < ttl
         except Exception:
@@ -383,11 +383,18 @@ class BudgetService:
                     # Decimal('nan'/'Infinity') 는 InvalidOperation 을 던지지
                     # 않고 합계를 NaN/Inf 로 오염시킨다 → 웜업 스캔값이
                     # 비유한이 되면 rebuild 의 live 가 0 으로 떨어져 라이브
-                    # 예약 전부를 놓친다(13차 리뷰).
-                    if not d.is_finite() or d < 0:
+                    # 예약 전부를 놓친다(13차 리뷰). 1e15 를 넘는 유한값은
+                    # Decimal 컨텍스트 Emax 를 터뜨려 합계 전체를 0 으로
+                    # 날리는 Overflow 경로라 같은 클래스로 스킵(15차 리뷰 —
+                    # 합법 예약은 $1e15 를 절대 넘지 않는다).
+                    if (
+                        not d.is_finite()
+                        or d < 0
+                        or d.adjusted() > 15
+                    ):
                         continue
                     total += d
-                except InvalidOperation:
+                except (InvalidOperation, Overflow):
                     continue
         except Exception:
             logger.exception("pending_reservation_scan_failed", pattern=pattern)

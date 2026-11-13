@@ -216,7 +216,9 @@ class Settings(BaseSettings):
     cb_error_rate: float = Field(default=0.5, gt=0, le=1)
     cb_open_sec: int = Field(default=30, ge=1, le=86400)
     cb_halfopen_probe_ttl_ms: int = Field(default=8000, ge=1)
-    cb_open_jitter_sec: int = Field(default=5, ge=0)
+    # jitter>86s 면 open_ms 가 항상 Lua 상한을 넘어 결정적 1일 개방이 돼
+    # herd 방지 목적이 무소리 소실된다 — 1h 상한(15차 리뷰).
+    cb_open_jitter_sec: int = Field(default=5, ge=0, le=3600)
     bedrock_inference_read_timeout: int = 60
     bedrock_max_attempts: int = 1
     # 가용성 폴백 **총** 시간 예산 — 후보(원본+체인 최대 5)마다 상류 타임아웃이

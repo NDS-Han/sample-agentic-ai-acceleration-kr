@@ -97,7 +97,8 @@ end
 live = fin(live) or 0
 if live < 0 then live = 0 end
 
-local resvsum = fin(tonumber(redis.call('GET', KEYS[2]))) or 0
+local resvraw = fin(tonumber(redis.call('GET', KEYS[2])))
+local resvsum = resvraw or 0
 local snap    = fin(tonumber(ARGV[2])) or 0
 if resvsum < 0 then resvsum = 0 end
 if snap    < 0 then snap    = 0 end
@@ -105,7 +106,10 @@ local orphan  = "raced"
 
 if resvsum == snap then
     orphan = resvsum - live
-    if orphan ~= 0 then
+    -- resvraw=nil(저장값 오염/부재)도 치유 — orphan=0 이면 기존 게이트가
+    -- 쓰기를 건너뛰어 'nan' resvsum 이 영구 잔존하고, 그 키에서 settle /
+    -- reserve 의 INCRBYFLOAT 가 매번 죽는다(15차 리뷰).
+    if orphan ~= 0 or not resvraw then
         -- resvsum 은 라이브 마커 합이 진실 — 양방향 보정.
         -- SET 은 TTL 을 지우므로 다른 쓰기와 같은 45d 를 다시 건다(14차 리뷰).
         redis.call('SET', KEYS[2], tostring(live))
@@ -137,6 +141,10 @@ local db     = fin(tonumber(ARGV[1])) or 0
 if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 이 음수가
                            -- 되면 플로어가 아무것도 복구하지 못한다.
 local target = db + live
+-- db+live 오버플로는 +Inf — 'inf' 를 쓰면 카운터가 영구 fail-closed 되고
+-- isfinite 프로브가 rebuild 를 매 요청 다시 태워 폭풍이 된다(15차 리뷰).
+-- max-double 로 클램프하면 차단은 유지하되 프로브는 건강으로 본다.
+target = math.min(target, 1.7976931348623157e308)
 -- (not cur) 도 써야 'nan'/'abc' 카운터가 target=0 일 때도 덮어써 치유된다
 -- — cur=0 폴백은 0<0 이라 쓰기를 건너뛰고 오염 값이 남는다(14차 리뷰).
 local cur    = fin(tonumber(redis.call('GET', KEYS[1])))

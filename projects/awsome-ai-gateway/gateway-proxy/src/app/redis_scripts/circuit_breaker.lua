@@ -18,10 +18,14 @@ local now_sec    = math.floor(now_ms / 1000)
 if not (window_sec and window_sec > 0 and window_sec <= 3600) then
   window_sec = 60
 end
--- open_ms 도 같은 클래스 — cb_open_sec 에 상한이 없어 PX 1e12 가 회로를
--- 사실상 영구 개방(무소리 모델 장애)한다(13차 후속). 상한은 1일.
-if not (open_ms and open_ms > 0 and open_ms <= 86400000) then
+-- open_ms 도 같은 클래스 — PX 1e12 가 회로를 사실상 영구 개방(무소리 모델
+-- 장애)한다(13차 후속). 상한은 클램프다 — cb_open_sec=86400 합법값에
+-- jitter 를 더하면 경계를 살짝 넘는데, 리셋하면 1일짜리 설정이 60s 로
+-- 떨어진다(14차 후속).
+if not (open_ms and open_ms > 0) then
   open_ms = 60000
+elseif open_ms > 86400000 then
+  open_ms = 86400000
 end
 
 if redis.call('EXISTS', KEYS[3]) == 1 then
@@ -53,8 +57,10 @@ for i = 0, window_sec - 1 do
   local b = now_sec - i
   local t = redis.call('GET', KEYS[2] .. ':' .. b)
   local f = redis.call('GET', KEYS[1] .. ':' .. b)
-  if t then total = total + tonumber(t) end
-  if f then fails = fails + tonumber(f) end
+  -- 오염 버킷('abc')은 tonumber→nil 이라 합산 중 런타임 에러로 eval 이
+  -- 죽는다 — 비수치는 0 으로 세지 않는다(15차 리뷰).
+  if t then total = total + (tonumber(t) or 0) end
+  if f then fails = fails + (tonumber(f) or 0) end
 end
 
 -- 실패 기록일 때만 열기 판정을 한다 — 프로브 close 는 :open 만 지우고 초당
