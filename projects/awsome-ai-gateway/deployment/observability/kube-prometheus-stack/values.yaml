@@ -124,4 +124,9 @@ grafana:
       label: grafana_dashboard
       labelValue: "1"
       searchNamespace: observability
-      folder: "Load Test"
+      # pod 내 파일시스템 경로 — grafana 차트가 이 값을 volumeMount mountPath 와
+      # sidecar FOLDER, provider options.path 세 곳에 그대로 쓴다. "Load Test"
+      # 같은 이름을 두면 상대경로 mountPath 가 되어 sidecar 가 파일을 쓸 곳이
+      # 없어 "insufficient privileges to create" 로 전부 skip 된다 (R31 실측).
+      # UI 폴더명은 provider folder 필드가 결정 — 파일 경로와 무관하다.
+      folder: "/tmp/dashboards"

@@ -1,0 +1,356 @@
+{
+ "title": "Cost Recorder — Data Loss & Pipeline Health",
+ "uid": "cost-recorder-pipeline",
+ "editable": true,
+ "time": {
+  "from": "now-6h",
+  "to": "now"
+ },
+ "refresh": "30s",
+ "schemaVersion": 39,
+ "description": "cost-recorder-worker 손실 카운터 감시. 아래 5개 카운터는 정상 운영에서 전부 0 이어야 한다 — 0 이 아니면 usage 기록 유실(청구 미반영) 신호다.",
+ "panels": [
+  {
+   "id": 0,
+   "title": "Gateway Spool Dropped",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 0,
+    "y": 0
+   },
+   "description": "gateway-proxy 인메모리 스풀에서 evict/유실된 레코드 — 스트림 장애+크래시 겹침 시 최대 10k 유실 (설계상 한계)",
+   "targets": [
+    {
+     "expr": "sum(increase(gateway_usage_records_dropped_total[$__rate_interval]))",
+     "legendFormat": "dropped"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 1,
+   "title": "Stream Gap (head trimmed)",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 4,
+    "y": 0
+   },
+   "description": "스트림 헤드가 last-delivered 보다 앞서 잘림 — 미배달 레코드 영구 유실",
+   "targets": [
+    {
+     "expr": "sum(increase(cost_recorder_stream_gap_total[$__rate_interval]))",
+     "legendFormat": "gaps"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 2,
+   "title": "Dead-Letter Dropped",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 8,
+    "y": 0
+   },
+   "description": "재시도 한도 초과로 dead-letter 돼 기록되지 않은 entry",
+   "targets": [
+    {
+     "expr": "sum(increase(cost_recorder_dead_letter_dropped_total[$__rate_interval]))",
+     "legendFormat": "dropped"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 3,
+   "title": "Entries Dropped",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 12,
+    "y": 0
+   },
+   "description": "DLQ 외 경로에서 드롭된 entry (스키마 불일치 등, reason 라벨 참조)",
+   "targets": [
+    {
+     "expr": "sum by (reason) (increase(cost_recorder_entries_dropped_total[$__rate_interval]))",
+     "legendFormat": "{{reason}}"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 4,
+   "title": "Threshold Publish Lost",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 16,
+    "y": 0
+   },
+   "description": "구독자 0인 pub/sub 채널에 발행돼 유실된 예산 임계 알림 — 재생 불가",
+   "targets": [
+    {
+     "expr": "sum(increase(cost_recorder_threshold_publish_lost_total[$__rate_interval]))",
+     "legendFormat": "lost"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "red",
+        "value": 1
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 5,
+   "title": "Replays Filtered",
+   "type": "stat",
+   "gridPos": {
+    "h": 4,
+    "w": 4,
+    "x": 20,
+    "y": 0
+   },
+   "description": "이미 기록된 entry 의 재배달을 걸러낸 수 — dup XADD/이중 배달 버그 신호. 크면 소스 조사",
+   "targets": [
+    {
+     "expr": "sum(increase(cost_recorder_replays_filtered_total[$__rate_interval]))",
+     "legendFormat": "filtered"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "thresholds": {
+      "mode": "absolute",
+      "steps": [
+       {
+        "color": "green",
+        "value": null
+       },
+       {
+        "color": "yellow",
+        "value": 100
+       },
+       {
+        "color": "red",
+        "value": 1000
+       }
+      ]
+     }
+    }
+   }
+  },
+  {
+   "id": 10,
+   "title": "Loss Counters Over Time (all should be 0)",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 4
+   },
+   "targets": [
+    {
+     "expr": "sum(increase(cost_recorder_stream_gap_total[5m]))",
+     "legendFormat": "stream_gap"
+    },
+    {
+     "expr": "sum(increase(cost_recorder_dead_letter_dropped_total[5m]))",
+     "legendFormat": "dead_letter"
+    },
+    {
+     "expr": "sum(increase(cost_recorder_entries_dropped_total[5m]))",
+     "legendFormat": "entries_dropped"
+    },
+    {
+     "expr": "sum(increase(cost_recorder_threshold_publish_lost_total[5m]))",
+     "legendFormat": "publish_lost"
+    },
+    {
+     "expr": "sum(increase(cost_recorder_replays_filtered_total[5m]))",
+     "legendFormat": "replays_filtered"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "fillOpacity": 10
+     }
+    }
+   }
+  },
+  {
+   "id": 11,
+   "title": "Flush Throughput",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 4
+   },
+   "targets": [
+    {
+     "expr": "sum(rate(cost_recorder_entries_flushed_total[5m]))",
+     "legendFormat": "flushed/s"
+    },
+    {
+     "expr": "sum(rate(cost_recorder_flush_errors_total[5m]))",
+     "legendFormat": "errors/s"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "fillOpacity": 10
+     }
+    }
+   }
+  },
+  {
+   "id": 12,
+   "title": "Stream Health",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 0,
+    "y": 12
+   },
+   "targets": [
+    {
+     "expr": "sum(cost_recorder_stream_lag)",
+     "legendFormat": "lag (undelivered)"
+    },
+    {
+     "expr": "sum(cost_recorder_stream_pending)",
+     "legendFormat": "pending (claimed, unacked)"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "fillOpacity": 10
+     }
+    }
+   }
+  },
+  {
+   "id": 13,
+   "title": "Batch Size",
+   "type": "timeseries",
+   "gridPos": {
+    "h": 8,
+    "w": 12,
+    "x": 12,
+    "y": 12
+   },
+   "targets": [
+    {
+     "expr": "histogram_quantile(0.95, sum(rate(cost_recorder_batch_size_bucket[5m])) by (le))",
+     "legendFormat": "p95"
+    },
+    {
+     "expr": "histogram_quantile(0.50, sum(rate(cost_recorder_batch_size_bucket[5m])) by (le))",
+     "legendFormat": "p50"
+    }
+   ],
+   "fieldConfig": {
+    "defaults": {
+     "custom": {
+      "drawStyle": "line",
+      "fillOpacity": 10
+     }
+    }
+   }
+  }
+ ]
+}
