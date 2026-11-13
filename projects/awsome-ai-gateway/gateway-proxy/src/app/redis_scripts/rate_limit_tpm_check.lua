@@ -31,7 +31,7 @@ local window_sec     = tonumber(ARGV[3]) or 60
 -- window_sec <= 0 이면 아래 % 가 즉시 오류(0)거나 음수 버킷 회전으로
 -- 한도 산정이 뒤집힌다(12차 리뷰 N4 — rate_limit_check 의 window_ms 와
 -- 같은 가드).
-if not (window_sec > 0) then window_sec = 60 end
+if not (window_sec > 0 and window_sec <= 2147483647) then window_sec = 60 end
 local num_scopes     = tonumber(ARGV[4])
 local current_bucket = math.floor(now / window_sec)
 local elapsed_ratio  = (now % window_sec) / window_sec

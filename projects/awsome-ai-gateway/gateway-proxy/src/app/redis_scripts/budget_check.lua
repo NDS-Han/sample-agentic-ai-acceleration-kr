@@ -89,6 +89,13 @@ if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' 
 end
 local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
 local throttle_rpm_pct = tonumber(config.throttle_rpm_pct) or 50
+-- tonumber('nan') 는 truthy NaN 이라 or 폴백이 못 잡는다 — NaN pct 는
+-- 모든 비교를 거짓으로 만들어 soft cap/스로틀이 조용히 무력화된다
+-- (limit_usd 의 11차 가드와 같은 클래스, 13차 리뷰).
+if soft_limit_pct ~= soft_limit_pct or soft_limit_pct == math.huge
+    or soft_limit_pct == -math.huge then soft_limit_pct = 110 end
+if throttle_rpm_pct ~= throttle_rpm_pct or throttle_rpm_pct == math.huge
+    or throttle_rpm_pct == -math.huge then throttle_rpm_pct = 50 end
 -- cjson.null 은 truthy userdata 라 or 로 못 걸러진다 — 비테이블
 -- (오염 캐시의 null/숫자 등)이 오면 아래 ipairs 가 eval 실패한다(9차 리뷰).
 local thresholds = {80, 90, 100}

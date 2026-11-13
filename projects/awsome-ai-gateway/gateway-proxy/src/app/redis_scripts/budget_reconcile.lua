@@ -57,6 +57,17 @@ local field_prefix = ARGV[4] or ''
 for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
     local v = redis.call('GET', ARGV[3] .. f)
     local n = v and fin(tonumber(v))
+    if v and (not n or n < 0) then
+        -- 마커는 살아 있는데 값이 오염('nan'/'abc'/음수)된 경우 — 인덱스
+        -- 필드의 예약액 사본으로 복구를 시도한다. 그냥 dead 처리하면
+        -- 마커 만료 뒤 settle 복구의 생존 증거·예약액이 같이 지워진다
+        -- (13차 리뷰).
+        n = fin(tonumber(redis.call('HGET', KEYS[3], f)))
+    end
+    -- 음수 값은 오염(마커든 인덱스 사본이든) — live 에 섞이면
+    -- orphan=resvsum-live 가 부풀어 usage 를 무한정 배수 배출한다
+    -- (13차 리뷰 MAJOR).
+    if n and n < 0 then n = nil end
     if n then
         covered[f] = true
         if field_prefix == '' or string.sub(f, 1, #field_prefix) == field_prefix then
@@ -77,12 +88,16 @@ for i = 4, #KEYS do
     if not covered[f] then
         local v = redis.call('GET', KEYS[i])
         local n = v and fin(tonumber(v))
+        if n and n < 0 then n = nil end  -- 음수 마커 오염 방어(위와 동일)
         if n then live = live + n end
     end
 end
+if live < 0 then live = 0 end
 
 local resvsum = fin(tonumber(redis.call('GET', KEYS[2]))) or 0
 local snap    = fin(tonumber(ARGV[2])) or 0
+if resvsum < 0 then resvsum = 0 end
+if snap    < 0 then snap    = 0 end
 local orphan  = "raced"
 
 if resvsum == snap then
@@ -93,22 +108,38 @@ if resvsum == snap then
     end
     if orphan > 0 then
         -- 만료/고아 예약 추정치 되돌림 — usage 에만 남은 부분.
-        redis.call('INCRBYFLOAT', KEYS[1], -orphan)
+        -- INCRBYFLOAT 대신 SET: 카운터가 'nan' 등 비수치면 INCRBYFLOAT 가
+        -- 매 틱 오류를 내 그 스코프의 교정 루프가 영구 정지한다(13차 리뷰).
+        -- 같은 스크립트 원자 실행이라 의미는 동치.
+        local cur0 = fin(tonumber(redis.call('GET', KEYS[1]))) or 0
+        redis.call('SET', KEYS[1], tostring(cur0 - orphan))
+        redis.call('EXPIRE', KEYS[1], 3888000)
     end
     if #dead > 0 then
         -- dead 인덱스 필드 정리 — 남아 있으면 settle 복구 분기의 HEXISTS
         -- 생존검증이 정리된 예약을 라이브로 오판해 다른 요청의 resvsum 을
         -- 차감한다(R23 r3 S-1). 고아 처리와 같은 틱에 묶어 스냅샷 어긋난
         -- 틱의 부분 정리를 막는다(R23 r4).
-        redis.call('HDEL', KEYS[3], unpack(dead))
+        -- unpack 은 ~8000 인자 상한 — 대량 dead 스윕은 청크로 나눈다.
+        for i = 1, #dead, 500 do
+            redis.call('HDEL', KEYS[3],
+                       unpack(dead, i, math.min(i + 499, #dead)))
+        end
     end
 end
 
 local db     = fin(tonumber(ARGV[1])) or 0
+if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 이 음수가
+                           -- 되면 플로어가 아무것도 복구하지 못한다.
 local target = db + live
 local cur    = fin(tonumber(redis.call('GET', KEYS[1]))) or 0
 if cur < target then
-    redis.call('INCRBYFLOAT', KEYS[1], target - cur)
+    -- INCRBYFLOAT(target-cur) 와 동치(같은 스크립트 원자 실행)이면서 'nan'
+    -- 같은 비수치 카운터도 덮어써 치유된다 — INCRBYFLOAT 는 그 키에서
+    -- 매 틱 오류를 낸다(12차 리뷰 F1 후속, 13차). TTL 은 다른 쓰기와
+    -- 같은 45d.
+    redis.call('SET', KEYS[1], tostring(target))
+    redis.call('EXPIRE', KEYS[1], 3888000)
 end
 
 return {tostring(live), tostring(orphan), tostring(fin(tonumber(redis.call('GET', KEYS[1]))) or 0)}

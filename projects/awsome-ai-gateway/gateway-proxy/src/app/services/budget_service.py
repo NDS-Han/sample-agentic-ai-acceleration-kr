@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 from decimal import Decimal, InvalidOperation
 from uuid import uuid4
@@ -354,9 +355,16 @@ class BudgetService:
                     #    get() 이 bytes 를 돌려주고, str(b'1.5')="b'1.5'" 는
                     #    InvalidOperation 으로 조용히 0 합산이 됐다(진행 중
                     #    예약이 재수화/교정에서 전부 누락 → 카운터 얇아짐).
-                    total += Decimal(
+                    d = Decimal(
                         val.decode() if isinstance(val, bytes) else str(val)
                     )
+                    # Decimal('nan'/'Infinity') 는 InvalidOperation 을 던지지
+                    # 않고 합계를 NaN/Inf 로 오염시킨다 → 웜업 스캔값이
+                    # 비유한이 되면 rebuild 의 live 가 0 으로 떨어져 라이브
+                    # 예약 전부를 놓친다(13차 리뷰).
+                    if not d.is_finite() or d < 0:
+                        continue
+                    total += d
                 except InvalidOperation:
                     continue
         except Exception:
@@ -488,8 +496,12 @@ class BudgetService:
                         _probe += [_app_key, f"{_app_key}:lost"]
                     _vals = await redis.mget(_probe)
                     _uk = _vals[0]
+                    # isfinite 필수 — 'nan' 카운터는 nan<0 가 False 라 음수
+                    # 검사가 트리거를 놓치고, check 의 비교는 전부 false 라
+                    # allowed:true 로 조용히 fail-open 된다(13차 리뷰).
                     _rebuild_needed = (
                         _uk is None
+                        or not math.isfinite(float(_uk))
                         or float(_uk) < 0
                         or _vals[1] is not None
                     )
@@ -594,6 +606,7 @@ class BudgetService:
                                 _ak = await redis.get(app_key)
                                 if (
                                     _ak is not None
+                                    and math.isfinite(float(_ak))
                                     and float(_ak) >= 0
                                     # :lost 센티넬 — 양수 첫 쓰기로 위장된
                                     # 유실도 복원한다(R22 r1 M1).
@@ -638,6 +651,7 @@ class BudgetService:
                 _tk, _tk_lost = await redis.mget([team_key, f"{team_key}:lost"])
                 if db is not None and (
                     _tk is None
+                    or not math.isfinite(float(_tk))
                     or float(_tk) < 0
                     or _tk_lost is not None
                 ):

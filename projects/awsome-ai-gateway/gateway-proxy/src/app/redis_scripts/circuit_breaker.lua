@@ -12,6 +12,13 @@ local is_failure = tonumber(ARGV[5])
 local now_ms     = tonumber(ARGV[6])
 local now_sec    = math.floor(now_ms / 1000)
 
+-- window_sec 가드 — ≤0/비유한이면 아래 EXPIRE 가 INCR 커밋 후 크래시하고,
+-- 거대값이면 `for i=0,window_sec-1` 합산 루프가 eval 을 무한정 잡아 Redis
+-- 전체를 블록한다(13차 리뷰). 호출부 상한과 같은 3600s.
+if not (window_sec and window_sec > 0 and window_sec <= 3600) then
+  window_sec = 60
+end
+
 if redis.call('EXISTS', KEYS[3]) == 1 then
   return 1
 end

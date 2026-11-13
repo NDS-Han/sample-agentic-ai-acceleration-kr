@@ -13,6 +13,7 @@ from app.schemas.domain import CostLimitResult, RateLimitResult
 from app.services.lua_loader import LuaScriptLoader
 from app.services.rate_limit_scope import (
     RateLimitScope,
+    SCOPE_ORDER,
     ScopeDescriptor,
     build_rl_key,
     build_tpm_key_group,
@@ -243,11 +244,11 @@ class RateLimitService:
                 # rate_limit_check.lua 가 멤버를 `request_id:<스코프인덱스>`
                 # 로 ZADD 한다 — bare request_id 는 절대 매칭되지 않는다.
                 # 현재 호출은 전부 num_scopes=1 이라 :1 만 실존하지만,
-                # 다중 스코프 eval 이 도입돼도 최대 스코프 수(3: USER/TEAM/
-                # GLOBAL)까지 지워 롤백 누수를 막는다(12차 리뷰 N2).
+                # 다중 스코프 eval 이 도입돼도 스코프 enum 확장까지 커버되게
+                # 상한을 SCOPE_ORDER 에서 파생한다(12차 리뷰 N2, 13차 후속).
                 pipe.zrem(
                     k, request_id,
-                    f"{request_id}:1", f"{request_id}:2", f"{request_id}:3",
+                    *(f"{request_id}:{i}" for i in range(1, len(SCOPE_ORDER) + 1)),
                 )
             await pipe.execute()
         except Exception:

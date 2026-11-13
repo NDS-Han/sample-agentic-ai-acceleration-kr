@@ -61,6 +61,7 @@ local live
 if ARGV[4] ~= '' then
     -- 인덱스 웜업 창 — 구버전 마커가 인덱스에 없으므로 Python 스캔값을 신뢰.
     live = fin(tonumber(ARGV[4])) or 0
+    if live < 0 then live = 0 end  -- 오염 스캔합 방어(아래 인덱스 경로와 동일)
 else
     live = 0
     local marker_prefix = ARGV[2]
@@ -69,20 +70,42 @@ else
     for _, f in ipairs(redis.call('HKEYS', KEYS[3])) do
         local v = redis.call('GET', marker_prefix .. f)
         local n = v and fin(tonumber(v))
+        if v and (not n or n < 0) then
+            -- 마커는 살아 있는데 값이 오염('nan'/'abc'/음수)된 경우 — 인덱스
+            -- 필드의 예약액 사본으로 복구를 시도한다. 그냥 dead 처리하면
+            -- 마커 만료 뒤 settle 복구의 생존 증거·예약액이 같이 지워진다
+            -- (13차 리뷰).
+            n = fin(tonumber(redis.call('HGET', KEYS[3], f)))
+        end
+        -- 음수 값은 오염(마커든 인덱스 사본이든) — live 에 섞이면
+        -- orphan=resvsum-live 가 부풀어 usage 를 무한정 배수 배출한다
+        -- (13차 리뷰 MAJOR).
+        if n and n < 0 then n = nil end
         if n then
             if field_prefix == '' or string.sub(f, 1, #field_prefix) == field_prefix then
                 live = live + n
             end
-        else
+        elseif field_prefix == '' or string.sub(f, 1, #field_prefix) == field_prefix then
+            -- 접두사 필터는 reconcile 과 같은 규약 — client 인덱스는 앱 공용
+            -- 해시라 다른 앱의 dead 필드를 지우면 그 앱 행의 reconcile 전에
+            -- 도착한 settle 이 생존 증거를 잃는다(R23 r6 N-1, 13차 리뷰).
             dead[#dead + 1] = f  -- 마커 TTL 만료 고아 필드 — 자기 청소
         end
     end
     if #dead > 0 then
-        redis.call('HDEL', KEYS[3], unpack(dead))
+        -- unpack 은 ~8000 인자 상한 — 대량 dead 스윕이 스크립트를 죽이지
+        -- 않게 청크로 나눈다(13차 리뷰).
+        for i = 1, #dead, 500 do
+            redis.call('HDEL', KEYS[3],
+                       unpack(dead, i, math.min(i + 499, #dead)))
+        end
     end
+    if live < 0 then live = 0 end  -- 오염 합산 방어(보수적 하한)
 end
 
-local target = (fin(tonumber(ARGV[1])) or 0) + live
+local db = fin(tonumber(ARGV[1])) or 0
+if db < 0 then db = 0 end  -- DB used_usd 음수 = 오염 — target 음수화 방지
+local target = db + live
 
 -- 차감 실패분 누적 — 원장(budget_usages)은 워커 배치라 rebuild 시점에 실패분이
 -- 아직 미반영일 수 있다. 그 상태로 센티넬만 지우면 유실분이 기간 내내 남으므로

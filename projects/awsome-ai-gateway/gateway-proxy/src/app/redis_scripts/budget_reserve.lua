@@ -146,6 +146,10 @@ if policy ~= 'hard_block' and policy ~= 'soft_warning' and policy ~= 'throttle' 
     policy = 'hard_block'
 end
 local soft_limit_pct = tonumber(config.soft_limit_pct) or 110
+-- NaN pct 는 or 폴백을 truthy 로 통과해 cap=NaN → soft cap 무력화
+-- (check.lua 와 같은 가드, 13차 리뷰).
+if soft_limit_pct ~= soft_limit_pct or soft_limit_pct == math.huge
+    or soft_limit_pct == -math.huge then soft_limit_pct = 110 end
 
 local used = tonumber(redis.call('GET', usage_key) or '0')
 

@@ -777,6 +777,7 @@ class CostRecorder:
             try:
                 from app.services.rate_limit_service import RateLimitService
 
+
                 await RateLimitService().settle_cost(
                     redis,
                     user_id=auth_context.user_id,
@@ -817,6 +818,19 @@ class CostRecorder:
                     await _mark_budget_lost(
                         redis, team_usage_key, suspects=self._suspects, scope="team"
                     )
+        elif (
+            redis is not None
+            and rate_limit_state
+            and rate_limit_state.get("cost_committed_keys")
+            and cost_reserved is None
+        ):
+            # 커밋된 예약 키가 있는데 예약액이 없으면 정산을 건너뛰고 그
+            # 예약은 버킷 TTL(120s/7200s)까지 누수 — 자기치유되지만 불일치는
+            # 관측 가능해야 한다(13차 리뷰).
+            logger.warning(
+                "cost_settle_skipped_missing_reserved",
+                user_id=auth_context.user_id,
+            )
 
         # 2b. TPM 정산 (FR-4.1 §D2, settle_tpm) — reserve_tpm 상태가 state에 있을 때만
         tpm_descriptors = rate_limit_state.get("tpm_descriptors") if rate_limit_state else None

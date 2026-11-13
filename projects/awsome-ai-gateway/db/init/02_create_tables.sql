@@ -109,10 +109,10 @@ BEGIN
             WHERE schemaname = 'auth' AND indexname = 'idx_rotation_policies_scope'
               -- to_regclass 는 부재 시 NULL — regclass 캐스트는 평가 순서에
               -- 관계없이 인덱스가 없으면 여기서 죽는다(11차 리뷰).
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('auth.idx_rotation_policies_scope')),
                   ''
-              ) NOT LIKE '%COALESCE%'
+              ), 'COALESCE') = 0
         ) THEN
             DROP INDEX auth.idx_rotation_policies_scope;
         END IF;
@@ -190,10 +190,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'budget' AND indexname = 'uq_budget_configs_active'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('budget.uq_budget_configs_active')),
                   ''
-              ) NOT LIKE '%COALESCE%'
+              ), 'COALESCE') = 0
         ) THEN
             DROP INDEX budget.uq_budget_configs_active;
         END IF;
@@ -237,10 +237,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'budget' AND indexname = 'idx_budget_usages_unique'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('budget.idx_budget_usages_unique')),
                   ''
-              ) NOT LIKE '%COALESCE%'
+              ), 'COALESCE') = 0
         ) THEN
             DROP INDEX budget.idx_budget_usages_unique;
         END IF;
@@ -397,10 +397,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'model' AND indexname = 'uq_rate_limit_configs_active'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('model.uq_rate_limit_configs_active')),
                   ''
-              ) NOT LIKE '%COALESCE%'
+              ), 'COALESCE') = 0
         ) THEN
             DROP INDEX model.uq_rate_limit_configs_active;
         END IF;
@@ -505,10 +505,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'budget' AND indexname = 'idx_downgrade_policies_unique_active'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('budget.idx_downgrade_policies_unique_active')),
                   ''
-              ) NOT LIKE '%from_model_alias%'
+              ), 'from_model_alias') = 0
         ) THEN
             DROP INDEX budget.idx_downgrade_policies_unique_active;
         END IF;
@@ -703,10 +703,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'usage' AND indexname = 'idx_roi_aggregations_unique'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('usage.idx_roi_aggregations_unique')),
                   ''
-              ) NOT LIKE '%scope_id%'
+              ), 'scope_id') = 0
         ) THEN
             DROP INDEX usage.idx_roi_aggregations_unique;
         END IF;
@@ -858,10 +858,10 @@ BEGIN
         IF EXISTS (
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'usage' AND indexname = 'idx_productivity_events_idempotency'
-              AND COALESCE(
+              AND strpos(COALESCE(
                   pg_get_indexdef(to_regclass('usage.idx_productivity_events_idempotency')),
                   ''
-              ) NOT LIKE '%WHERE%'
+              ), 'WHERE') = 0
         ) THEN
             DROP INDEX usage.idx_productivity_events_idempotency;
         END IF;
@@ -1247,17 +1247,17 @@ BEGIN
     -- 부분 유니크는 'WHERE', 컬럼 확장은 신규 컬럼명으로 판별한다(12차 리뷰).
     SELECT array_agg(pair.s || '.' || pair.n) INTO stale
     FROM (VALUES
-        ('auth',  'idx_rotation_policies_scope',           '%COALESCE%'),
-        ('budget','uq_budget_configs_active',              '%COALESCE%'),
-        ('budget','idx_budget_usages_unique',              '%COALESCE%'),
-        ('model', 'uq_rate_limit_configs_active',          '%COALESCE%'),
-        ('budget','idx_downgrade_policies_unique_active',  '%from_model_alias%'),
-        ('usage', 'idx_roi_aggregations_unique',           '%scope_id%'),
-        ('usage', 'idx_productivity_events_idempotency',   '%WHERE%')
+        ('auth',  'idx_rotation_policies_scope',           'COALESCE'),
+        ('budget','uq_budget_configs_active',              'COALESCE'),
+        ('budget','idx_budget_usages_unique',              'COALESCE'),
+        ('model', 'uq_rate_limit_configs_active',          'COALESCE'),
+        ('budget','idx_downgrade_policies_unique_active',  'from_model_alias'),
+        ('usage', 'idx_roi_aggregations_unique',           'scope_id'),
+        ('usage', 'idx_productivity_events_idempotency',   'WHERE')
     ) AS pair(s, n, marker)
     JOIN pg_indexes pi
       ON pi.schemaname = pair.s AND pi.indexname = pair.n
-     AND pi.indexdef NOT LIKE pair.marker;
+     AND strpos(pi.indexdef, pair.marker) = 0;
     IF stale IS NOT NULL THEN
         RAISE WARNING 'stale index definitions (구 정의 잔존 — 중복 정리 후 재배포하면 새 정의로 재생성됩니다): %', stale;
     END IF;
