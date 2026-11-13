@@ -13,8 +13,8 @@ Codex client -> Bedrock Mantle GPT-5.5 via the OpenAI Responses API.
   endpoint:  https://bedrock-mantle.us-east-2.api.aws/openai  (adapter appends /v1/responses)
   model:     openai.gpt-5.5
   account:   123456789012 (SAME as gateway-proxy IRSA account) -> in-account,
-             so routing_profiles.account_role_arn IS NULL (no cross-account assume,
-             unlike cowork which assumes into 905). external_id NULL for the same reason.
+             so routing_profiles.account_role_arn IS NULL (no cross-account assume).
+             external_id NULL for the same reason.
   region:    us-east-2 (Ohio); verified live: GPT-5.5/5.4 both 200 OK in us-east-2 & us-east-1.
 
 Pricing is a PLACEHOLDER seeded here for cost-recording wiring; refresh with the

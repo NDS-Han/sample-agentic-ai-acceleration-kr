@@ -189,12 +189,12 @@ terraform -chdir=deployment/terraform/environments/gateway-ecs apply \
 점검 항목: 산출물 존재 → AWS 자격 → `terraform plan` no-op(드리프트) →
 서비스 running/desired → migration task exitCode → ALB 엔드포인트 `/health` 응답.
 
-> ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
-> 라우팅 행에는 샘플 크로스계정 ARN(`arn:aws:iam::333…/2222…`)이 들어 있습니다.
-> 단일 계정 배포면 `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면
-> 없는 계정으로 AssumeRole을 시도해 요청이 전부 실패합니다. admin UI `/apps` →
-> **"크로스 계정 라우팅"** 카드에서 비울 수 있습니다(캐시 즉시 무효화) —
-> UI를 못 쓸 때의 SQL 폴백까지 [operations.md](operations.md) §3 참조.
+> ⚠️ **첫 요청 전 — 크로스계정 라우팅 확인**: DB 시드의 `claude-code`/`cowork`
+> 라우팅 행은 `account_role_arn`이 비어 있어(placeholder) 기본은 in-account로
+> 동작합니다. 크로스계정 라우팅을 쓰려면 admin UI `/apps` →
+> **"크로스 계정 라우팅"** 카드에서 실제 역할 ARN·External ID·리전을 입력하세요
+> (캐시 즉시 무효화) — UI를 못 쓸 때의 SQL 폴백까지
+> [operations.md](operations.md) §3 참조.
 
 ## 5. Cognito 사용자 생성 + admin 로그인
 

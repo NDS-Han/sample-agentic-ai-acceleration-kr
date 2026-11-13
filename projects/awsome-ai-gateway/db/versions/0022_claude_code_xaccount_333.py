@@ -9,8 +9,12 @@ Create Date: 2026-07-05
 원래 멀티계정 설계: claude-code→333, codex→123, cowork→222 (각기 다른 계정). clean 배포에서
 claude-code 가 123 in-account 로 남아 있던 것을 설계대로 333 로 분리.
 
+⚠️ **예시 ARN 은 더 이상 기본 시드하지 않는다** — admin UI 에 샘플 ARN/External ID 가 실제 값처럼
+채워져 보이는 문제 때문에 account_role_arn/external_id 는 NULL 로 둔다(0055 참조). 크로스계정
+라우팅이 필요하면 운영자가 실제 역할 ARN 을 입력해 활성화한다.
+
 claude-code 는 Bedrock **native**(bedrock-runtime, boto3 invoke_model). gateway-proxy 가 이 row 의
-account_role_arn 을 보고 333 role 을 AssumeRole → 333 bedrock-runtime 클라이언트로 호출
+account_role_arn 을 보고 설정된 role 을 AssumeRole → 크로스계정 bedrock-runtime 클라이언트로 호출
 (BedrockAccountClientProvider + BedrockAdapter client_resolver). backend='invoke' 유지(Mantle 아님).
 region 은 클라이언트 엔드포인트용; claude-code alias 가 global.anthropic.* 면 model-id rewrite 는 no-op.
 
@@ -25,19 +29,15 @@ down_revision = "0021"
 branch_labels = None
 depends_on = None
 
-# 333 계정의 cross-account-assumable 역할 (trust=123 gateway-proxy IRSA + ExternalId).
-# terraform var.claude_code_333_role_arn 및 실제 생성 역할과 일치해야 함.
-_ROLE_333 = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
-_EXTERNAL_ID = "claude-code-bedrock"
-
-
 def upgrade() -> None:
+    # 샘플 ARN 을 시드하지 않는다 — 기본은 in-account(NULL). 크로스계정은 운영자가
+    # admin UI/API 에서 실제 ARN+External ID 를 입력해 활성화한다 (0055 참조).
     op.execute(
-        f"""
+        """
         UPDATE model.routing_profiles
-           SET account_role_arn = '{_ROLE_333}',
+           SET account_role_arn = NULL,
                region           = 'ap-northeast-2',
-               external_id      = '{_EXTERNAL_ID}'
+               external_id      = NULL
          WHERE client = 'claude-code'
         """
     )

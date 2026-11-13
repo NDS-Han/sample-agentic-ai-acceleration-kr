@@ -67,15 +67,15 @@ def upgrade() -> None:
         """
     )
 
-    # 4) cowork routing_profiles row (905 Mantle, Tokyo)
+    # 4) cowork routing_profiles row (905 Mantle, Tokyo). 샘플 크로스계정 ARN/External ID
+    #    는 시드하지 않는다 — 기본은 in-account(NULL), 실제 값은 운영자가 입력 (0055 참조).
     op.execute(
         """
         INSERT INTO model.routing_profiles
             (client, backend, account_role_arn, region, default_model, external_id, enabled)
         VALUES
-            ('cowork', 'mantle',
-             'arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock',
-             'ap-northeast-1', 'cowork-opus', 'cowork-bedrock', true)
+            ('cowork', 'mantle', NULL,
+             'ap-northeast-1', 'cowork-opus', NULL, true)
         ON CONFLICT (client) DO NOTHING
         """
     )

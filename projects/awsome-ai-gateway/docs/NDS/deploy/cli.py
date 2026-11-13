@@ -791,10 +791,9 @@ def _post_apply_notes(cfg: schema.GatewayConfig) -> None:
     console.print("\n[cyan]다음 단계 (수동):\n"
                   "  · 앱 경로 스모크: bash deployment/scripts/smoke-test.sh"
                   f" --env {cfg.env}\n"
-                  "  · 라우팅 프로필 확인 — 시드의 claude-code/cowork 행은 샘플 "
-                  "크로스계정 ARN 입니다. 단일 계정 배포면 account_role_arn 을 비워야"
-                  " 합니다 (/apps → 크로스 계정 라우팅 카드, 또는 SQL — docs/NDS/operations.md §3). 안 하면 AssumeRole "
-                  "실패로 요청이 전부 에러납니다")
+                  "  · 크로스계정 라우팅 — 시드의 claude-code/cowork 행은 account_role_arn 이 "
+                  "비어 있어 기본 in-account 입니다. 크로스계정이 필요하면 실제 ARN 을 입력하세요"
+                  " (/apps → 크로스 계정 라우팅 카드, 또는 SQL — docs/NDS/operations.md §3)")
 
 
 def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:

@@ -239,12 +239,12 @@ OIDC 로그인: n                ← 다른 계정에 Cognito 없으면 n (dev-l
 > Cowork는 동작하지 않습니다(Claude Code·Codex는 됨). 도메인을 나중에 얻으면
 > [update.md](update.md)의 도메인 추가 절로 전환하세요.
 
-> ⚠️ **첫 요청 전 — 라우팅 프로필 확인 (필수)**: DB 시드의 `claude-code`/`cowork`
-> 라우팅 행에는 샘플 크로스계정 ARN이 들어 있습니다. 단일 계정 배포면
-> `account_role_arn`을 비워(in-account) 두세요 — 그대로 두면 없는 계정으로
-> AssumeRole을 시도해 요청이 전부 실패합니다. admin UI `/apps` →
-> **"크로스 계정 라우팅"** 카드에서 비울 수 있습니다(캐시 즉시 무효화) —
-> UI를 못 쓸 때의 SQL 폴백까지 [operations.md](operations.md) §3 참조.
+> ⚠️ **첫 요청 전 — 크로스계정 라우팅 확인**: DB 시드의 `claude-code`/`cowork`
+> 라우팅 행은 `account_role_arn`이 비어 있어(placeholder) 기본은 in-account로
+> 동작합니다. 크로스계정 라우팅을 쓰려면 admin UI `/apps` →
+> **"크로스 계정 라우팅"** 카드에서 실제 역할 ARN·External ID·리전을 입력하세요
+> (캐시 즉시 무효화) — UI를 못 쓸 때의 SQL 폴백까지
+> [operations.md](operations.md) §3 참조.
 
 ## 5. 이후 운영
 

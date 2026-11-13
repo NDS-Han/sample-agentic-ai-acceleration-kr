@@ -70,9 +70,10 @@ Cognito 사용자·그룹이 게이트웨이 조직 트리로 반영됩니다(�
 ## 3. 라우팅 프로필 — in-account vs 크로스계정
 
 모델 별칭(alias)은 DB 시드·migration이 자동으로 넣지만, `model.routing_profiles`
-(클라이언트별 호출 경로)는 **운영 데이터라 배포가 건드리지 않습니다**. 시드에
-들어 있는 `claude-code`/`cowork` 행은 개발 조직의 샘플 크로스계정 ARN
-(`arn:aws:iam::333…`/`2222…`)을 가리킵니다.
+(클라이언트별 호출 경로)는 **운영 데이터라 배포가 건드리지 않습니다**. 시드의
+`claude-code`/`cowork` 행은 `account_role_arn`/`external_id`가 비어 있어
+기본은 in-account로 동작합니다 — 크로스계정 라우팅은 운영자가 실제 역할 ARN을
+입력할 때만 활성화됩니다.
 
 > ✅ **관리 UI에서 고칠 수 있습니다** — `/apps` → 앱 선택 → **"크로스 계정
 > 라우팅"** 카드에서 `account_role_arn`·`external_id`·`region`을 읽고 씁니다
