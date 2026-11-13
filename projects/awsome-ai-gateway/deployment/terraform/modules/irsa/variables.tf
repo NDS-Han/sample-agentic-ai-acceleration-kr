@@ -165,3 +165,24 @@ variable "enable_notification_ses" {
   type        = bool
   default     = false
 }
+
+# ── admin-chat-agent (bi_insight) — admin-api IRSA 권한 게이트 ─────────────
+# Runtime 은 terraform 밖(provisioner)에서 만들어지므로 ARN 대신 region+계정의
+# runtime/* 로 스코프한다. 셋 다 비어 있으면 statement 자체가 렌더되지 않는다.
+variable "chat_agent_region" {
+  type        = string
+  default     = ""
+  description = "AgentCore Runtime 리전 (provisioner 와 동일해야 함)"
+}
+
+variable "chat_agent_lambda_function_names" {
+  type        = list(string)
+  default     = []
+  description = "admin-api 가 직접 invoke 하는 BI tool Lambda 이름 목록"
+}
+
+variable "chat_agent_staging_bucket_arn" {
+  type        = string
+  default     = ""
+  description = "리포트 presign 대상 staging 버킷 ARN (reports/* 로 스코프)"
+}

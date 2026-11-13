@@ -355,3 +355,11 @@ variable "enable_chat_db_tools" {
   type        = bool
   default     = false
 }
+
+# AgentCore Runtime 리전 — provisioner(provision_agentcore_chatagent.py REGION)
+# 와 반드시 같아야 한다. admin-api 코드 기본값(ap-northeast-2)과 일치시켰다.
+variable "chat_agent_region" {
+  description = "admin-chat-agent AgentCore Runtime 을 만들 리전 (IRSA statement 스코프용)"
+  type        = string
+  default     = "ap-northeast-2"
+}

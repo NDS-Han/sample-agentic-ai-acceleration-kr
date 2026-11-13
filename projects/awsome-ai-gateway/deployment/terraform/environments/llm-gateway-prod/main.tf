@@ -82,6 +82,15 @@ module "irsa" {
   # notification-worker SES 발신 (provider=ses 와 짝, R24-S7)
   enable_notification_ses = var.enable_notification_ses
 
+  # admin-chat-agent (bi_insight) — runtime 은 terraform 밖에서 만들어지므로
+  # region+계정 스코프 statement 만 미리 연다. enable_chat_agent=false 면 빈 값.
+  chat_agent_region = var.enable_chat_agent ? var.chat_agent_region : ""
+  chat_agent_lambda_function_names = var.enable_chat_agent ? compact([
+    try(module.agentcore_runtime[0].query_db_function_name, ""),
+    try(module.agentcore_runtime[0].get_schema_function_name, ""),
+  ]) : []
+  chat_agent_staging_bucket_arn = var.enable_chat_agent ? try(module.agentcore_runtime[0].staging_bucket_arn, "") : ""
+
   tags = var.tags
 }
 

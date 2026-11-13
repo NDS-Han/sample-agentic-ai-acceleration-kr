@@ -378,6 +378,12 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append("enable_body_logging = true")
     if cfg.features.notifications.provider == "ses":
         lines.append("enable_notification_ses = true")
+    if cfg.features.bi_insight:
+        # admin-chat-agent 인프라(ECR·role·staging·tool Lambdas) — managed
+        # overlay 가 module.agentcore_runtime + module.irsa 를 -target 적용한다.
+        # db_tools 없이는 agent 가 쓸 수 없으므로 함께 켠다 (끄기는 env tfvars).
+        lines.append("enable_chat_agent = true")
+        lines.append("enable_chat_db_tools = true")
     inf = cfg.infra
     if inf.vpc_cidr:
         lines.append(f'vpc_cidr = "{inf.vpc_cidr}"')
@@ -582,9 +588,11 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             "module.irsa 변경만 적용하고 output 을 pod env 로 주입합니다.")
     if cfg.features.bi_insight:
         notes.append(
-            "bi_insight: NDS 배포 대상이 아닙니다 — enable_chat_agent 는 env "
-            "tfvars(사람 소유)로 켭니다 (scaffold 는 false 로 생성). "
-            "ops/NDS-02-bi-insight.md 절차를 따르십시오.")
+            "bi_insight: managed overlay 가 module.agentcore_runtime 을 "
+            "프로비저닝하고, apply 가 AgentCore Runtime 을 멱등 생성해 ARN 을 "
+            "admin-api env 로 주입합니다 (provision_agentcore_chatagent.py — "
+            "web_search 와 동일 패턴). chat_reader DB 비밀번호는 terraform "
+            "밖이므로 docs/NDS/chat-agent.md §2 절차로 별도 설정하십시오.")
     if not env_vals:
         notes.append(f"env overlay(values-eks-fargate-{cfg.env}.yaml)를 못 찾았습니다 — "
                      "차트 기본값 + 이 오버레이만으로 배포됩니다. 기존 배포를 업데이트하는 "

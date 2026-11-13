@@ -313,6 +313,14 @@ variable "enable_chat_db_tools" {
   default     = false
 }
 
+# AgentCore Runtime 리전 — provisioner(provision_agentcore_chatagent.py REGION)
+# 와 반드시 같아야 한다. admin-api 코드 기본값(ap-northeast-2)과 일치시켰다.
+variable "chat_agent_region" {
+  description = "admin-chat-agent AgentCore Runtime 을 만들 리전 (IRSA statement 스코프용)"
+  type        = string
+  default     = "ap-northeast-2"
+}
+
 # ─── Bedrock model-invocation logging (GPT-5.6 runtime plane 본문 감사) ───
 # ⚠️ 이 스위치를 켜면 `bedrock_invocation_log_region` 에서 일어나는 **계정 전체의**
 #    Bedrock 호출 요청/응답 본문이 수집된다(모델별/주체별 스코프는 존재하지 않는다).

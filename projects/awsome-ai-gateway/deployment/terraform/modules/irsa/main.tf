@@ -325,6 +325,55 @@ data "aws_iam_policy_document" "admin_api" {
       }
     }
   }
+
+  # admin-chat-agent — admin-api 가 AgentCore Runtime 을 SigV4(IRSA)로 호출한다.
+  # Runtime ARN 에는 생성 시 붙는 id 가 들어가 terraform 시점에 특정할 수
+  # 없어서 region+계정의 runtime/* 로 스코프한다 (InvokeGateway 의 gateway/*
+  # 패턴과 동일). enable_chat_agent=false 면 statement 자체가 렌더되지 않는다.
+  dynamic "statement" {
+    for_each = var.chat_agent_region != "" ? [1] : []
+    content {
+      sid    = "ChatAgentRuntimeInvoke"
+      effect = "Allow"
+      actions = [
+        "bedrock-agentcore:InvokeAgentRuntime",
+      ]
+      resources = [
+        "arn:aws:bedrock-agentcore:${var.chat_agent_region}:${data.aws_caller_identity.current.account_id}:runtime/*",
+      ]
+    }
+  }
+
+  # /query 재실행 경로가 query_db Lambda 를 admin-api pod 에서 직접 invoke 한다
+  # (chat_agent.py LAMBDA_QUERY_DB). 함수 이름은 env output 에서 넘어온다.
+  dynamic "statement" {
+    for_each = length(var.chat_agent_lambda_function_names) > 0 ? [1] : []
+    content {
+      sid    = "ChatAgentToolLambdaInvoke"
+      effect = "Allow"
+      actions = [
+        "lambda:InvokeFunction",
+      ]
+      resources = [
+        for name in var.chat_agent_lambda_function_names :
+        "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${name}"
+      ]
+    }
+  }
+
+  # 리포트 다운로드 presigned URL — staging 버킷의 reports/ prefix 만.
+  # 라우터가 버킷/prefix 화이트리스트로 이미 이중 검증한다.
+  dynamic "statement" {
+    for_each = var.chat_agent_staging_bucket_arn != "" ? [1] : []
+    content {
+      sid    = "ChatAgentReportPresign"
+      effect = "Allow"
+      actions = [
+        "s3:GetObject",
+      ]
+      resources = ["${var.chat_agent_staging_bucket_arn}/reports/*"]
+    }
+  }
 }
 
 resource "aws_iam_policy" "admin_api" {

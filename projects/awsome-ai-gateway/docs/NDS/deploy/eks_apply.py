@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from .schema import GatewayConfig
-from . import pricinglambda, websearch
+from . import chatagent, pricinglambda, websearch
 
 
 def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> subprocess.CompletedProcess:
@@ -495,6 +495,10 @@ def _infra_targets(cfg: GatewayConfig) -> list[str]:
         modules.add("module.irsa")
     if cfg.domain.name:
         modules.add("module.cognito")  # gen tfvars 의 콜백/로그아웃 URL 반영
+    if cfg.features.bi_insight:
+        # admin-chat-agent 인프라(ECR·exec role·staging·tool Lambdas·secret 셸)
+        # + admin-api IRSA 의 InvokeAgentRuntime/lambda:InvokeFunction statement.
+        modules |= {"module.agentcore_runtime", "module.irsa"}
     return sorted(f"-target={m}" for m in modules)
 
 
@@ -523,6 +527,10 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
             have = []
         if want not in have:
             missing.append(f"cognito(admin.{cfg.domain.name} 콜백 등록)")
+    if (cfg.features.bi_insight
+            and not (outs.get("chat_agent_ecr_url")
+                     and outs.get("chat_agent_execution_role_arn"))):
+        missing.append("bi_insight(agentcore_runtime ECR/role)")
     return missing
 
 
@@ -820,6 +828,15 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
             print("ⓘ web_search: AgentCore Gateway 가 없습니다 — apply 시 "
                   "프로비저닝(provision_agentcore_websearch.py deploy)합니다",
                   file=sys.stderr)
+    if cfg.features.bi_insight:
+        arn = chatagent.status_arn(repo_root, outs)
+        if arn:
+            print(f"ⓘ bi_insight: AgentCore Runtime {arn} 을 --set 합니다",
+                  file=sys.stderr)
+        else:
+            print("ⓘ bi_insight: AgentCore Runtime 이 없습니다 — apply 시 "
+                  "프로비저닝(provision_agentcore_chatagent.py deploy)합니다",
+                  file=sys.stderr)
     if cfg.features.pricing_lambda:
         st = pricinglambda.status(
             cfg.aws.region, cfg.env,
@@ -857,6 +874,26 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         else:
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 만 "
                   "켜진 상태로 진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
+
+    # bi_insight — AgentCore Runtime 을 만들고(멱등) ARN/연결 env 를 admin-api
+    # pod env 로 주입한다. 인프라(ECR·role·staging·Lambdas)는 managed overlay
+    # (module.agentcore_runtime)가 먼저 보장한다 — outputs 가 없으면
+    # _infra_missing 이 먼저 targeted apply 를 돌렸다.
+    # 실패해도 배포를 중단하지 않는다 — env 미주입으로 라우터가 503 graceful-off.
+    if cfg.features.bi_insight:
+        arn = chatagent.ensure_runtime_arn(repo_root, outs)
+        if arn:
+            set_args += [
+                "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",
+                "--set", f"adminApi.env.AGENTCORE_REGION={chatagent.AGENTCORE_REGION}"]
+            for key, out_key in (
+                    ("LAMBDA_QUERY_DB", "chat_agent_query_db_function"),
+                    ("CHAT_STAGING_BUCKET", "chat_agent_staging_bucket")):
+                if outs.get(out_key):
+                    set_args += ["--set", f"adminApi.env.{key}={outs[out_key]}"]
+        else:
+            print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
+                  "503 (미구성) 상태로 진행합니다", file=sys.stderr)
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).
