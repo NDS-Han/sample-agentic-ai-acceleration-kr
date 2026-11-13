@@ -112,12 +112,11 @@ enable_chat_db_tools = true
 # ------------------------------------------------------------------------------
 # Cross-account Bedrock/Mantle roles (cowork / claude-code) — R24-M4
 # ------------------------------------------------------------------------------
-# routing_profiles.account_role_arn 은 migration(0009/0022)이 env 무관하게 심는다.
-# 비워 두면 cowork 는 전부 AccessDenied, claude-code 는 in-account 로 조용히 폴백해
-# 계정 분리·과금 분리가 무력화된다. dev 기본값과 동일하게 둠 — 실제 role 이름이
-# 다르면 여기서 덮어쓴다.
-# cowork_role_arn          = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
-# claude_code_374_role_arn = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+# 크로스계정 라우팅은 opt-in — routing_profiles.account_role_arn 기본값은 NULL(0055)로
+# in-account 동작한다. 크로스계정을 쓰려면 실제 role ARN 을 아래에 넣고, admin UI 의
+# routing profile 에도 같은 ARN+External ID 를 입력한다.
+# cowork_role_arn          = "arn:aws:iam::<account>:role/llm-gateway-cowork-bedrock"
+# claude_code_374_role_arn = "arn:aws:iam::<account>:role/llm-gateway-claude-code-bedrock"
 
 # ------------------------------------------------------------------------------
 # notification-worker SES IRSA (R24-S7/N7r2)

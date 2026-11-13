@@ -285,22 +285,19 @@ variable "mantle_regions" {
 }
 
 variable "cowork_role_arn" {
-  # Cowork cross-account Mantle role. gateway-proxy AssumeRole into it.
-  # Must match model.routing_profiles.account_role_arn for client=cowork (migration 0009).
-  # The role's trust must allow this env's gateway-proxy IRSA + sts:ExternalId=cowork-bedrock.
-  # 비워 두면 cross-account statement 가 렌더되지 않고 cowork 요청이 전부 AccessDenied
-  # 가 된다 — 라우팅 프로필은 env 무관하게 role ARN 을 심어 두므로 prod 에서도 필수.
+  # Cowork cross-account Mantle role. 비어 있으면(기본) AssumeRole grant 를 렌더하지 않는다 —
+  # 크로스계정 라우팅은 운영자가 tfvars 에 실제 ARN 을 넣을 때만 활성화된다
+  # (routing_profiles.account_role_arn 기본 NULL, 0055 참조 — 비면 in-account 로 수렴).
+  # 대상 role 의 trust 는 이 env 의 gateway-proxy IRSA + sts:ExternalId 를 허용해야 한다.
   type    = string
-  default = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
+  default = ""
 }
 
 variable "claude_code_374_role_arn" {
-  # Claude Code cross-account Bedrock NATIVE role. gateway-proxy AssumeRole into it,
-  # builds a bedrock-runtime client. Must match model.routing_profiles
-  # .account_role_arn for client=claude-code (migration 0022).
-  # 비워 두면 assume 이 실패하고 in-account 경로로 조용히 폴백해 계정 분리가 무력화된다.
+  # Claude Code cross-account Bedrock NATIVE role. 비어 있으면(기본) grant 없음 —
+  # 크로스계정은 운영자 opt-in (routing_profiles.account_role_arn 과 짝).
   type    = string
-  default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+  default = ""
 }
 
 variable "enable_notification_ses" {

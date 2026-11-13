@@ -50,7 +50,7 @@ database:
     # 이름은 aws rds describe-db-clusters --query 'DBClusters[].MasterUserSecret.SecretArn'.
     # ⚠️ external-secrets IRSA 정책에 secret:rds!cluster-* 읽기 권한이 필요
     #    (terraform modules/irsa/main.tf 에 이미 선언됨 — 라이브 정책 v2 로 반영).
-    masterPasswordRemoteKey: "rds!cluster-91c56396-2163-4d82-af13-b569d4ea5c0e"
+    masterPasswordRemoteKey: ""  # rds!cluster-<uuid> — fill-org-values.sh 가 배포 시 실제값 주입
     masterPasswordRemoteProperty: "password"
     poolSize: 5
     maxOverflow: 10

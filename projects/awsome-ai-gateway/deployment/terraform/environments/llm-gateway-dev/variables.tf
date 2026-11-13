@@ -258,20 +258,19 @@ variable "eks_access_entries" {
 }
 
 variable "cowork_role_arn" {
-  # Cowork cross-account Mantle role (905, Tokyo Opus 4.8). gateway-proxy AssumeRole into it.
-  # Must match model.routing_profiles.account_role_arn for client=cowork (migration 0009).
-  # The 905 role's trust must allow this env's gateway-proxy IRSA + sts:ExternalId=cowork-bedrock.
+  # Cowork cross-account Mantle role. 비어 있으면(기본) AssumeRole grant 를 렌더하지 않는다 —
+  # 크로스계정 라우팅은 운영자가 tfvars 에 실제 ARN 을 넣을 때만 활성화된다
+  # (routing_profiles.account_role_arn 과 짝, 0055 기본값 NULL 참조).
+  # 대상 role 의 trust 는 이 env 의 gateway-proxy IRSA + sts:ExternalId 를 허용해야 한다.
   type    = string
-  default = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
+  default = ""
 }
 
 variable "claude_code_374_role_arn" {
-  # Claude Code cross-account Bedrock NATIVE role (333). gateway-proxy AssumeRole into it,
-  # builds a 374 bedrock-runtime client (boto3 invoke_model). Must match
-  # model.routing_profiles.account_role_arn for client=claude-code (migration 0022).
-  # The 374 role trust must allow this env's gateway-proxy IRSA + sts:ExternalId=claude-code-bedrock.
+  # Claude Code cross-account Bedrock NATIVE role. 비어 있으면(기본) grant 없음 —
+  # 크로스계정은 운영자 opt-in (routing_profiles.account_role_arn 과 짝).
   type    = string
-  default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+  default = ""
 }
 
 variable "mantle_regions" {

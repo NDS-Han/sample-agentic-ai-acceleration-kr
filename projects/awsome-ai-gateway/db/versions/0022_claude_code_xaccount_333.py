@@ -18,9 +18,11 @@ account_role_arn 을 보고 설정된 role 을 AssumeRole → 크로스계정 be
 (BedrockAccountClientProvider + BedrockAdapter client_resolver). backend='invoke' 유지(Mantle 아님).
 region 은 클라이언트 엔드포인트용; claude-code alias 가 global.anthropic.* 면 model-id rewrite 는 no-op.
 
-**즉시 롤백**: downgrade = account_role_arn/external_id NULL → 다음 요청부터 123 in-account 복귀
+**즉시 롤백**: downgrade = account_role_arn/external_id NULL → in-account 복귀
 (gateway 코드가 account_role_arn NULL 이면 in-account adapter 사용). 무배포 롤백.
-적용 후 Redis 캐시 키 `routing_profile:claude-code` 플러시(TTL 5분).
+적용 후 Redis 캐시 `routing_profile:claude-code` 플러시 — 핫키 TTL 5분 외에
+`:stale` 키(TTL 24h, DB 저하 폴백 경로로 서빙)도 있으므로 즉시 수렴은
+`routing_profile:*` 패턴 삭제가 안전.
 """
 from alembic import op
 
@@ -32,6 +34,7 @@ depends_on = None
 def upgrade() -> None:
     # 샘플 ARN 을 시드하지 않는다 — 기본은 in-account(NULL). 크로스계정은 운영자가
     # admin UI/API 에서 실제 ARN+External ID 를 입력해 활성화한다 (0055 참조).
+    # ARN 이 이미 설정된 행(운영자 입력)은 건드리지 않는다.
     op.execute(
         """
         UPDATE model.routing_profiles
@@ -39,6 +42,7 @@ def upgrade() -> None:
                region           = 'ap-northeast-2',
                external_id      = NULL
          WHERE client = 'claude-code'
+           AND account_role_arn IS NULL
         """
     )
 

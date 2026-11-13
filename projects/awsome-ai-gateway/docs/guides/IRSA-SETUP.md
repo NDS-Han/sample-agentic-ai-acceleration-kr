@@ -354,11 +354,11 @@ kubectl exec -n "$NS" deploy/"$DEPLOY" -- \
 
 ```hcl
 # deployment/terraform/environments/<env>/terraform.tfvars
-cowork_role_arn          = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock"
-claude_code_374_role_arn = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock"
+cowork_role_arn          = "arn:aws:iam::<account>:role/llm-gateway-cowork-bedrock"
+claude_code_374_role_arn = "arn:aws:iam::<account>:role/llm-gateway-claude-code-bedrock"
 ```
 
-**빈 문자열이면 `sts:AssumeRole` statement 가 아예 렌더되지 않습니다** — terraform 오류 없이 cross-account 기능이 조용히 사라집니다([modules/irsa/main.tf:103-129](../../deployment/terraform/modules/irsa/main.tf#L103-L129)).
+**빈 문자열이면(기본) `sts:AssumeRole` statement 가 아예 렌더되지 않습니다** — terraform 오류 없이 cross-account 기능이 조용히 사라집니다([modules/irsa/main.tf:103-129](../../deployment/terraform/modules/irsa/main.tf#L103-L129)). 크로스계정은 opt-in — `routing_profiles.account_role_arn` 도 기본 NULL 이라 admin UI 가 placeholder 를 보입니다. 두 곳에 같은 실제 ARN 을 넣을 때만 활성화됩니다.
 
 이 값은 **DB 컬럼과 바이트 단위로 같아야** 합니다:
 ```sql
@@ -444,8 +444,8 @@ except Exception:
 # ① 파드 안에서 타깃 역할 assume — 신뢰 + 호출자 정책 + ExternalId 를 한 번에 증명
 kubectl exec -n llm-gateway "$POD" -c gateway-proxy -- python -c \
  "import boto3;print(boto3.client('sts').assume_role(
-    RoleArn='arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock',
-    RoleSessionName='t',ExternalId='claude-code-bedrock')['Credentials']['AccessKeyId'])"
+    RoleArn='arn:aws:iam::<account>:role/<your-role>',  # routing profile 과 동일 ARN
+    RoleSessionName='t',ExternalId='<your-external-id>')['Credentials']['AccessKeyId'])"
 # ASIA... 로 시작하면 임시 자격증명 발급 성공
 # 반드시 파드 안에서 실행 — 신뢰정책이 IRSA 역할을 지목하므로 로컬 IAM 사용자로는 실패합니다.
 
@@ -478,42 +478,26 @@ UPDATE model.routing_profiles SET account_role_arn=NULL WHERE client='claude-cod
 
 ---
 
-## 7. prod 드리프트 — 가장 큰 지뢰
+## 7. 크로스계정 활성화 — 양쪽을 맞춰야 동작
 
-**prod 는 두 cross-account 변수를 IRSA 모듈에 전달하지 않습니다. 선언조차 되어 있지 않습니다.**
+두 env(dev/prod) 모두 `cowork_role_arn`·`claude_code_374_role_arn` 변수가 선언돼 있고
+기본값은 `""`입니다 — 비어 있으면 `sts:AssumeRole` statement 가 렌더되지 않습니다.
+`routing_profiles.account_role_arn` 의 기본값도 NULL 이라(0055) 배포 직후엔 전부
+in-account 로 동작합니다. **크로스계정 라우팅은 opt-in** 입니다.
 
-| | dev | prod |
-|---|---|---|
-| `module "irsa"` 인자 수 | **9** | **7** |
-| `cowork_role_arn` | 전달 | ❌ 없음 |
-| `claude_code_374_role_arn` | 전달 | ❌ 없음 |
-| 렌더되는 statement 수 | **7** | **5** |
-
-([llm-gateway-dev/main.tf:55-68](../../deployment/terraform/environments/llm-gateway-dev/main.tf#L55-L68) vs [llm-gateway-prod/main.tf:51-62](../../deployment/terraform/environments/llm-gateway-prod/main.tf#L51-L62) — prod 의 `main.tf`/`variables.tf` 에서 두 변수 grep 결과 **0건**)
-
-**결과가 비대칭입니다.**
-- `cowork` → AssumeRole 실패 → **모든 요청 502** (즉시 발견됨)
-- `claude-code` → **조용히 in-account 로 폴백 → 200** ([§6-4](#6-4-claude-code-는-실패해도-200-을-반환한다)). 계정 귀속이 잘못되지만 **정상으로 보입니다.**
-
-**게다가 DB 마이그레이션은 모든 환경에 cross-account ARN 을 무조건 시드합니다.** 즉 prod DB 는 prod IAM 이 assume 할 수 없는 역할을 가리키게 되며, 이 불일치는 **트래픽이 올 때까지 보이지 않습니다.**
-
-**prod 에서 cross-account 를 쓰려면 tfvars 수정만으로는 불가능합니다**(미선언 변수). 코드 변경 + 리뷰가 필요합니다:
+활성화는 세 곳을 함께 맞춰야 합니다:
 
 ```hcl
-# 1) llm-gateway-prod/variables.tf — 변수 선언 추가
-variable "cowork_role_arn"          { type = string; default = "arn:aws:iam::222233334444:role/llm-gateway-cowork-bedrock" }
-variable "claude_code_374_role_arn" { type = string; default = "arn:aws:iam::333344445555:role/llm-gateway-claude-code-bedrock" }
-
-# 2) llm-gateway-prod/main.tf — module "irsa" 에 추가
-  cowork_role_arn          = var.cowork_role_arn
-  claude_code_374_role_arn = var.claude_code_374_role_arn
+# 1) environments/<env>/terraform.tfvars — 실제 role ARN
+cowork_role_arn          = "arn:aws:iam::<account>:role/llm-gateway-cowork-bedrock"
+claude_code_374_role_arn = "arn:aws:iam::<account>:role/llm-gateway-claude-code-bedrock"
 ```
 ```
-# 3) 905 / 374 자격증명으로 타깃 역할 신뢰정책에 prod IRSA 역할 ARN 추가
+# 2) 타깃 계정 자격증명으로 해당 역할 신뢰정책에 이 env 의 gateway-proxy IRSA 역할 ARN 추가
 #    arn:aws:iam::<ACCT>:role/llm-gateway-prod-gateway-proxy-bedrock
 ```
 
-> prod 정책에 statement 가 5개뿐인 것은 **설계상 정상**입니다. dev 와 비교해 "누락"으로 보고 dev 값을 그대로 prod 에 적용하지 마십시오.
+> cross-account statement 는 ARN 을 입력한 환경에서만 렌더됩니다 — env 간 statement 수 차이는 "누락"이 아니라 opt-in 의 결과입니다. 다른 env 의 ARN 을 그대로 복사하지 마십시오(계정·ExternalId·신뢰정책이 env 마다 다릅니다).
 
 ---
 
@@ -525,7 +509,7 @@ variable "claude_code_374_role_arn" { type = string; default = "arn:aws:iam::333
 | **403** `bedrock-mantle:CreateInference` 거부 | Mantle Sid 누락/리전 | [§1](#gateway-proxy-정책의-sid-인벤토리) + (B) 배포 정책 확인 |
 | **401** `Mantle (OpenAI) stream HTTP 401` | 서명 리전 불일치 또는 파드 신원 | bearer 는 발급됐고(아니면 502) 업스트림이 거부한 상태 → ① 서명 리전이 호출 리전과 같은지 ② 파드가 기대한 역할로 붙었는지([§5](#5-step-3--검증-전부-읽기-전용)) ③ 애노테이션 변경 후 재기동했는지([§4-3](#4-3-애노테이션-변경은-파드를-재기동하지-않으면-반영되지-않는다)) |
 | **502** `Mantle (OpenAI) auth failed` | 자격증명 획득 실패 (assume/신뢰/OIDC) | (A)(B)(D) |
-| **502** cowork 전 요청 | `AssumeCoworkMantle` 누락 또는 타깃 신뢰/ExternalId | [§6](#6-cross-account-확장-cowork--905-claude-code--374), [§7](#7-prod-드리프트--가장-큰-지뢰) |
+| **502** cowork 전 요청 | `AssumeCoworkMantle` 누락 또는 타깃 신뢰/ExternalId | [§6](#6-cross-account-확장-cowork--905-claude-code--374), [§7](#7-크로스계정-활성화--양쪽을-맞춰야-동작) |
 | **200 인데 계정이 틀림** | claude-code 조용한 폴백 | [§6-4](#6-4-claude-code-는-실패해도-200-을-반환한다), [§6-5 ②](#6-5-검증) |
 | `Not authorized to perform sts:AssumeRoleWithWebIdentity` | 신뢰 subject 불일치 (네임스페이스/SA 이름) | [§4-4](#4-4-네임스페이스), (A) |
 | ExternalSecret 이 계속 실패 | ESO 역할/시크릿 경로 | [§9](#9-함정-모음) 선행 슬래시 항목 |
