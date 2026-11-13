@@ -504,7 +504,14 @@ async def toggle_app_model(
 
     cache_mgr = request.app.state.cache_mgr
     await cache_mgr.invalidate(
-        [f"model:{body.alias}", f"model:{model.provider_model_id}", "model:list"],
+        # 게이트웨이는 alias 와 pmid 두 키로 캐시한다(model:{alias},
+        # model:pmid:{pmid} — router_service.py). `model:{pmid}` 는 dead-key DEL
+        # 이라 pmid 경로의 allowed_clients 가 MODEL_CACHE_TTL 까지 stale 했다(R23).
+        [
+            f"model:{body.alias}",
+            f"model:pmid:{model.provider_model_id}",
+            "model:list",
+        ],
         session=session,
     )
     logger.info(

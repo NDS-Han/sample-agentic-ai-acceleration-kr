@@ -284,11 +284,22 @@ class VKAuthStrategy:
             db, str(user.id), str(user.team_id) if user.team_id else None
         )
 
+        # roles: TEAM_LEADER 만 DB 역할을 실어준다 — /v1/usage/team/{id} 가
+        # "TEAM_LEADER(본인 팀) 또는 ADMIN" 계약인데 TEAM_LEADER 는 VK 만 가지므로
+        # USER 합성이면 자기 팀 usage 조차 403 이다. ADMIN 의 VK 는 USER 유지 —
+        # 유출된 admin 소유 VK 가 프록시 관리 표면까지 통과하지 않도록
+        # 최소권한을 유지한다(JWT 경로만 관리 역할을 준다).
+        vk_roles = (
+            [Role.TEAM_LEADER]
+            if user.role == Role.TEAM_LEADER.value
+            else [Role.USER]
+        )
+
         auth_context = AuthContext(
             user_id=str(user.id),
             team_id=str(user.team_id) if user.team_id else "",
             dept_id="",
-            roles=[Role.USER],
+            roles=vk_roles,
             auth_type=AuthType.VIRTUAL_KEY,
             key_id=None,
             key_prefix=key_prefix,

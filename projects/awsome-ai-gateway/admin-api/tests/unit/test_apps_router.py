@@ -340,8 +340,14 @@ async def test_toggle_app_model_null_materialization(mock_session: AsyncMock):
         "concurrent gateway-proxy read, so the revoke silently does not take effect."
     )
 
-    # cache_mgr.invalidate must have been called with the 3 model keys
-    expected_keys = [f"model:{alias}", f"model:{provider_model_id}", "model:list"]
+    # cache_mgr.invalidate must have been called with the 3 model keys.
+    # R23-F2: pmid 경로는 `model:pmid:{pmid}` — `model:{pmid}` 는 게이트웨이가
+    # 안 쓰는 dead-key DEL 이라 stale allowed_clients 가 TTL 까지 남았었다.
+    expected_keys = [
+        f"model:{alias}",
+        f"model:pmid:{provider_model_id}",
+        "model:list",
+    ]
     req.app.state.cache_mgr.invalidate.assert_awaited_once_with(
         expected_keys, session=mock_session
     )

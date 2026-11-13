@@ -1119,7 +1119,11 @@ BEGIN
             ('auth', 'users',        'is_service_account',          'BOOLEAN NOT NULL DEFAULT false'),
             ('auth', 'virtual_keys', 'kind',                        'VARCHAR(32) NOT NULL DEFAULT ''exchange'''),
             ('auth', 'virtual_keys', 'issued_by',                   'UUID REFERENCES auth.users(id)'),
-            ('auth', 'virtual_keys', 'issued_via_service_token',    'UUID REFERENCES auth.service_tokens(id)')
+            ('auth', 'virtual_keys', 'issued_via_service_token',    'UUID REFERENCES auth.service_tokens(id)'),
+            -- migration 0056: sha256(raw) 저장 해시 — 폐기/로테이션이 복호화 없이
+            -- Redis 키를 구한다. alembic 미도달 환경에서 ORM SELECT 가 UndefinedColumn
+            -- 으로 전 경로 500 이 되는 것을 이 블록이 수렴한다.
+            ('auth', 'virtual_keys', 'key_hash',                    'VARCHAR(64)')
         ) AS v(sch, tbl, name, def)
     LOOP
         BEGIN

@@ -224,6 +224,49 @@ async def test_vk_auth_db_fallback_empty_team_means_allow_all():
     assert auth.allowed_clients is None
 
 
+@pytest.mark.asyncio
+async def test_vk_auth_team_leader_gets_leader_role():
+    """R23-F1: DB 역할 TEAM_LEADER 의 VK 는 Role.TEAM_LEADER 를 얻는다 —
+    /v1/usage/team/{id} 가 자기 팀에서 403 이 나지 않도록. ADMIN 의 VK 는
+    USER 유지(유출 VK 의 관리 표면 확대 차단)."""
+    from app.schemas.domain import Role
+    from app.services import auth_service as auth_mod
+
+    for db_role, expected in (
+        ("TEAM_LEADER", Role.TEAM_LEADER),
+        ("DEVELOPER", Role.USER),
+        ("ADMIN", Role.USER),
+    ):
+        redis = AsyncMock()
+        redis.get = AsyncMock(side_effect=[None, b"user-123"])
+        redis.setex = AsyncMock()
+
+        user = MagicMock()
+        user.id = "user-123"
+        user.team_id = "team-abc"
+        user.is_active = True
+        user.sso_subject = f"sub-{db_role}"
+        user.role = db_role
+
+        user_result = MagicMock()
+        user_result.scalar_one_or_none.return_value = user
+
+        empty = MagicMock()
+        empty_scalars = MagicMock()
+        empty_scalars.all.return_value = []
+        empty.scalars.return_value = empty_scalars
+
+        db = AsyncMock()
+        db.execute = AsyncMock(
+            side_effect=[user_result, empty, empty, empty, empty]
+        )
+
+        auth = await auth_mod.VKAuthStrategy().authenticate(
+            "Bearer vk-xyz", redis, db
+        )
+        assert auth.roles == [expected], f"{db_role} → {auth.roles}"
+
+
 # ── allowed_clients user > team > org 폴백 (alembic 0038) ─────────────────────
 
 

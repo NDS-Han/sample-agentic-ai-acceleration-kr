@@ -618,14 +618,16 @@ def cmd_render(args) -> int:
 
 def _confirm_apply(args, preview=None) -> bool:
     """실제 변경 전 확인 게이트. --yes/-y 또는 CI 가 아니면 preview 출력 후 y 확인."""
-    if getattr(args, "yes", False):
-        return True
     if preview:
+        # --yes 여도 dry-run diff 는 항상 실행한다 — 스킵하면 스테일 이미지 핀이
+        # 조용히 live 를 다운그레이드할 수 있다(로그에 diff 가 남아야 추적 가능).
         try:
             preview()
         except SystemExit as exc:
             console.print(f"[red]plan 실패 — 적용하지 않습니다: {exc}")
             return False
+    if getattr(args, "yes", False):
+        return True
     if not sys.stdin.isatty():
         console.print("[red]대화형이 아닙니다 — 확인 없이 적용하려면 --yes 를 쓰십시오")
         return False
