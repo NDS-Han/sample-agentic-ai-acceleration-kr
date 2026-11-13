@@ -303,3 +303,18 @@ HA(배포·장애 시 수용) 역할도 하니 2 이하로는 내리지 마세�
 
 실측 경로로 잡는 법: `loadtest/sse_loadgen.py` 로 목표 동시성 부하를 걸어
 queue_depth·503 비율을 확인하는 게 가장 정확합니다.
+
+## 6. 인프라 코드 변경 — 어느 경로로 수렴하나
+
+terraform 모듈은 두 갈래로 apply 됩니다 — 어디서 고쳤느냐에 따라 수렴
+경로가 다릅니다.
+
+| 모듈 | 수렴 경로 |
+|---|---|
+| `module.body_logging` · `module.irsa` · `module.cognito` | `./deploy apply` 의 managed overlay 가 `-target` 으로 자동 반영 |
+| 그 외 전부 (`module.vpc` `module.eks` `module.aurora` `module.elasticache` …) | **사람 소유** — `deploy apply` 가 손대지 않습니다. 운영자가 env 디렉터리에서 직접 apply: `terraform apply -var-file=<env>-generated.tfvars -target=module.<이름>` |
+
+즉 `deploy apply`가 green이어도 aurora/vpc 쪽 코드 변경은 라이브에 아직
+미반영일 수 있습니다 — `terraform plan -target=module.<이름>`으로 드리프트를
+확인하고, 사람 소유 모듈의 보안 경화(파라미터 그룹·서브넷·삭제보호 등)는
+변경 시점에 운영자 apply를 따로 실행하세요.
