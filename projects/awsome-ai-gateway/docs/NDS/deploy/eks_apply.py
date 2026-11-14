@@ -543,6 +543,10 @@ def _infra_targets(cfg: GatewayConfig) -> list[str]:
         modules.add("module.irsa")
     if cfg.domain.name:
         modules.add("module.cognito")  # gen tfvars 의 콜백/로그아웃 URL 반영
+    if cfg.features.alerting.enabled:
+        # SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event sub.
+        # email 구독 확인은 사람 절차라 overlay 가 소유하지 않는다.
+        modules.add("module.alerting")
     if cfg.features.bi_insight:
         # admin-chat-agent 인프라(ECR·exec role·staging·tool Lambdas·secret 셸)
         # + admin-api IRSA 의 InvokeAgentRuntime/lambda:InvokeFunction statement.
@@ -579,6 +583,8 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
             and not (outs.get("chat_agent_ecr_url")
                      and outs.get("chat_agent_execution_role_arn"))):
         missing.append("bi_insight(agentcore_runtime ECR/role)")
+    if cfg.features.alerting.enabled and not outs.get("alerting_sns_topic_arn"):
+        missing.append("alerting(SNS topic/alarms)")
     return missing
 
 

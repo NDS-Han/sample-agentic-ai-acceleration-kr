@@ -505,10 +505,12 @@ Lifecycle: **Deactivate** preserves history (preferred for retiring);
 - **Monitoring**: live 1h window + 24h event log. **Body logging** stores
   full request/response bodies **unmasked** in S3 — a debugging tool,
   not an always-on feature; every view is audited.
-- **Dashboards, not alerts** — nothing pages you today. The Prometheus/
-  Grafana stack collects metrics and feeds the HPA, but Alertmanager is
-  disabled (§14 Operations ownership) — detection is pull-only unless
-  SSIR wires receivers.
+- **Dashboards + opt-in alerts** — the Prometheus/Grafana stack collects
+  metrics and feeds the HPA (Alertmanager still disabled — §14), and
+  `features.alerting` adds SNS + CloudWatch alarms for Aurora/
+  ElastiCache plus optional Fargate→CloudWatch log shipping through the
+  managed overlay. See [observability.md](../observability.md) — until
+  it is enabled and subscriptions confirmed, detection is pull-only.
 - **Audit Log**: every mutation, atomically committed — first stop for
   "who changed X". Body-log views are themselves logged.
 - **Analytics**: aggregated reporting (KPIs, cost trend, per-model,
@@ -731,14 +733,16 @@ received — an unchecked row here is a future incident.
       via `install.sh` — **not** part of the managed overlay. The
       executor-saturation metric feeding HPA depends on it. Confirm it
       is deployed and who owns/watches Grafana
-- [ ] **Alerting is not wired — for us either.** The stack was built for
-      loadtest observability: `alertmanager: enabled: false`, Prometheus
-      retention 24h, emptyDir storage (metrics lost on pod restart), no
-      PrometheusRules/receivers. Pod crashes, ALB 5xx, Redis OOM, and
-      Aurora events produce **no** notification — detection today is
-      pull-only (dashboards + `./deploy doctor`). Decide: enable
-      Alertmanager + rules + a receiver (and persistent storage), or
-      formally accept pull monitoring
+- [ ] **Alerting** — `features.alerting` (managed overlay) creates the
+      SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event
+      subscription, and `log_shipping` routes container logs to
+      CloudWatch (eks). Email subscriptions need a manual confirm —
+      verify they are ACTIVE, not PendingConfirmation
+      ([observability.md](../observability.md) §3). Pod/app-level and
+      ALB alerts are still unwired: in-cluster Alertmanager is
+      `enabled: false`, Prometheus retention 24h on emptyDir — enable
+      rules + receivers + persistent storage, or formally accept pull
+      monitoring
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
       budget-alert emails
@@ -784,6 +788,9 @@ received — an unchecked row here is a future incident.
 - [ ] One Aurora PITR rehearsal to a throwaway cluster (§12.3)
 - [ ] One test user onboarded end-to-end: Cognito group → sync → CLI
       login → VK → a live request
+- [ ] If `features.alerting` enabled: SNS subscriptions all ACTIVE,
+      one `set-alarm-state` test delivered
+      ([observability.md](../observability.md) §4, §7)
 
 ---
 
@@ -800,6 +807,7 @@ received — an unchecked row here is a future incident.
 | Update/rollback/teardown | [update.md](../update.md) |
 | Cluster/engine upgrades | [upgrade-eks-cluster.md](../upgrade-eks-cluster.md), [upgrade-eks-legacy.md](../upgrade-eks-legacy.md) |
 | DR | [dr-runbook.md](../dr-runbook.md) |
+| Observability & alerting | [observability.md](../observability.md) |
 | Load testing | [loadtest.md](../loadtest.md) |
 | BI chat agent | [chat-agent.md](../chat-agent.md) |
 | Per-page console guide (screenshots) | [guides/](../guides/README.md) |

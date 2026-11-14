@@ -1,0 +1,33 @@
+{{/*
+  Fargate 로그 라우터 — EKS Fargate 내장 fluent-bit 설정.
+
+  AWS 가 Fargate 에서 제공하는 유일한 로그 경로: aws-observability
+  네임스페이스(aws-observability: enabled 라벨 필수) + aws-logging
+  ConfigMap. ConfigMap 이 있으면 Fargate 가 각 파드에 fluent-bit 를 띄워
+  stdout/stderr 를 CloudWatch Logs 로 보낸다. 사이드카 방식이 아니므로
+  파드 스펙 변화 없이 동작하며, ConfigMap 생성 후 뜨는 파드부터 로그가
+  수집된다 (기존 파드는 재시작 시 적용).
+*/}}
+{{- if .Values.observability.fargateLogging.enabled }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aws-observability
+  labels:
+    aws-observability: enabled
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-logging
+  namespace: aws-observability
+data:
+  output.conf: |
+    [OUTPUT]
+        Name cloudwatch_logs
+        Match *
+        region {{ .Values.observability.fargateLogging.region | default .Values.aws.region }}
+        log_group_name {{ required "observability.fargateLogging.logGroupName 이 필요합니다 (eks render 가 채웁니다)" .Values.observability.fargateLogging.logGroupName }}
+        log_stream_prefix fargate-
+        auto_create_group On
+{{- end }}

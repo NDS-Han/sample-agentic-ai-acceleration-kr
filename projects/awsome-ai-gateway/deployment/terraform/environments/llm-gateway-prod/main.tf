@@ -246,3 +246,21 @@ module "agentcore_runtime" {
 
   tags = var.tags
 }
+
+# ------------------------------------------------------------------------------
+# Alerting — SNS topic + CloudWatch alarms (managed overlay: enable_alerting)
+# ------------------------------------------------------------------------------
+module "alerting" {
+  count  = var.enable_alerting ? 1 : 0
+  source = "../../modules/alerting"
+
+  project     = var.project
+  environment = var.environment
+  aws_region  = var.aws_region
+
+  aurora_cluster_id                = module.aurora.cluster_identifier
+  elasticache_replication_group_id = "${var.project}-${var.environment}"
+  alert_emails                     = var.alert_emails
+
+  tags = var.tags
+}

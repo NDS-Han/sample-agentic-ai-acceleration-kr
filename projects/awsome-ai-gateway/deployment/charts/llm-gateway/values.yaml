@@ -352,6 +352,16 @@ observability:
       tag: "0.113.0"
       pullPolicy: "IfNotPresent"
 
+  # Fargate 로그 라우터 — eks 전용. managed overlay(features.alerting.log_shipping)
+  # 가 켠다. aws-observability 네임스페이스 + aws-logging ConfigMap 이 생기면
+  # Fargate 내장 fluent-bit (인프라 레벨, 파드 스펙과 무관)가 클러스터 전체
+  # stdout/stderr 를 CloudWatch Logs 로 보낸다. 별도 Fargate 프로필 selector
+  # 추가는 필요 없다 — 라벨 + ConfigMap 존재가 스위치다.
+  fargateLogging:
+    enabled: false
+    region: ""          # 비우면 aws.region
+    logGroupName: ""    # eks render 가 /aws/eks/<cluster>/fargate-logs 로 채움
+
 # ============================================================================
 # 서비스별 설정
 # ============================================================================

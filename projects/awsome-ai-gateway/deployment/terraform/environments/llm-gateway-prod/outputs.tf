@@ -153,3 +153,7 @@ output "body_log_bucket" {
   value       = module.body_logging.bucket_name
   description = "gateway-proxy BODY_LOG_S3_BUCKET 값 (Firehose 레코드 상한 초과분 직행 fallback)"
 }
+
+output "alerting_sns_topic_arn" {
+  value = try(module.alerting[0].sns_topic_arn, "")
+}

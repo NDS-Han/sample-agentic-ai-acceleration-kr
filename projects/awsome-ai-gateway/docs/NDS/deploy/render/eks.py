@@ -277,6 +277,17 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if rd.get("pool_size"):
         v.setdefault("redis", {})["poolSize"] = int(rd["pool_size"])
 
+    if cfg.features.alerting.log_shipping:
+        # Fargate 로그 라우터 — 클러스터명 추론은 env 디렉토리명
+        # (module eks-fargate 가 <project>-<env> 로 짓고 env 디렉토리도 같은
+        # 규칙). 커스텀 tf_env_dir 이면 차트 values 로 logGroupName 을 직접 준다.
+        env_dir = cfg.deploy.tf_env_dir or \
+            f"deployment/terraform/environments/llm-gateway-{cfg.env}"
+        fl = v.setdefault("observability", {}).setdefault("fargateLogging", {})
+        fl["enabled"] = True
+        fl["region"] = cfg.aws.region
+        fl["logGroupName"] = f"/aws/eks/{Path(env_dir).name}/fargate-logs"
+
     return v
 
 
@@ -379,6 +390,12 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append("enable_body_logging = true")
     if cfg.features.notifications.provider == "ses":
         lines.append("enable_notification_ses = true")
+    if cfg.features.alerting.enabled:
+        lines.append("enable_alerting = true")
+        # emails 는 enabled 게이트 안에서만 — schema 가 미리 잡지만 이중 방어.
+        if cfg.features.alerting.emails:
+            lines.append("alert_emails = "
+                         + json.dumps(cfg.features.alerting.emails))
     if cfg.features.bi_insight:
         # admin-chat-agent 인프라(ECR·role·staging·tool Lambdas) — managed
         # overlay 가 module.agentcore_runtime + module.irsa 를 -target 적용한다.

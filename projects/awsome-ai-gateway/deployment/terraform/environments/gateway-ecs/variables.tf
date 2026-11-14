@@ -402,3 +402,18 @@ variable "email_sender_name" {
   type    = string
   default = "LLM Gateway"
 }
+
+# ------------------------------------------------------------------------------
+# Alerting — managed overlay (features.alerting)
+# ------------------------------------------------------------------------------
+variable "enable_alerting" {
+  type        = bool
+  default     = false
+  description = "managed overlay: SNS topic + Aurora/ElastiCache CloudWatch alarms"
+}
+
+variable "alert_emails" {
+  type        = list(string)
+  default     = []
+  description = "managed overlay: SNS email subscriptions — pending until recipient confirms"
+}

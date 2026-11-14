@@ -64,6 +64,10 @@ features:
     internal_api_url: ""      # provider=internal_api 일 때 필수 — 사내 메일 API URL
     internal_api_from: ""     # internal_api 발신 주소 — 비우면 차트 기본
     smtp_credentials_secret: ""  # eks 전용 — SMTP 인증 Secret 이름(credentialsSecretName)
+  alerting:                 # 인프라 헬스 알림 — eks/ecs 전용 (상세: observability.md)
+    enabled: false          # SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event sub
+    emails: []              # SNS email 구독 — apply 후 수신자 confirm 필요(자동화 불가). enabled 필수
+    log_shipping: false     # eks 전용 — Fargate stdout/stderr → CloudWatch Logs 라우터
   bi_insight: false
   pricing_lambda: false
   web_search: false
@@ -311,6 +315,7 @@ domain:
 | 키 | 켜면 생기는 것 | 주의 |
 |---|---|---|
 | `notifications.provider` | mock=발송안함, ses=SES 발송, smtp=외부 SMTP, internal_api=사내 메일 API | ses는 `ses_from`, smtp는 `smtp_host`, internal_api는 `internal_api_url` 필수(없으면 worker crashloop). eks의 smtp 자격증명은 `smtp_credentials_secret` |
+| `alerting` | 인프라 헬스 알림 (SNS + CW alarms + Fargate 로그) | **eks/ecs 전용**. `enabled` 가 `module.alerting`(SNS topic + Aurora/ElastiCache alarms + RDS event subscription)을 managed overlay 로 만든다. `emails` 는 `enabled` 필요 — 구독은 수신자 confirm 전 pending. `log_shipping` 은 eks 전용(Fargate→CloudWatch, eks 단독 토글 가능). 상세: [observability.md](observability.md) |
 | `bi_insight` | BI 어시스턴트 (AgentCore Runtime) | compose 미지원. 별도 이미지 배포 필요 |
 | `pricing_lambda` | LiteLLM 단가 조회 Lambda | **ecs/eks는 apply가 자동 보장** (role+함수+env+invoke 권한, 멱등 — 코드 수정 후 apply만 돌리면 됨) — compose는 ops/NDS-01 수동. api.litellm.ai 종료로 cost-map 모드(LITELLM_COST_MAP_URL 자동 주입)로 동작. 단가 데이터는 DB 시드가 따로 필요 |
 | `web_search` | AgentCore 기반 웹검색 | **us-east-1 전용 인프라**, apply가 자동 프로비저닝 (compose는 .env 주입) |

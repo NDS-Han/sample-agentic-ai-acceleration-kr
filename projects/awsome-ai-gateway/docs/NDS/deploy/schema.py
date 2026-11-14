@@ -90,8 +90,27 @@ class NotificationConfig:
 
 
 @dataclass
+class AlertingConfig:
+    """인프라 헬스 알림 — eks/ecs 전용. managed overlay(module.alerting)가
+    SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event subscription
+    을 만든다. email 구독은 SNS 특성상 수신자가 메일로 confirm 해야 발송
+    시작된다 — 콘솔/CLI 확인 절차는 docs/NDS/observability.md.
+
+    enabled 는 topic·alarm·emails 게이트다 — emails 는 enabled 필요(검증 에러).
+    log_shipping 은 독립 축이라 enabled 없이 단독으로도 켤 수 있다."""
+    enabled: bool = False
+    # SNS email 구독 — apply 후 각 주소로 confirmation 메일이 간다.
+    emails: list[str] = field(default_factory=list)
+    # eks 전용 — Fargate 컨테이너 stdout/stderr → CloudWatch Logs 라우터
+    # (aws-observability namespace + aws-logging ConfigMap, helm 템플릿).
+    # 비용·보관 기준은 docs/NDS/observability.md.
+    log_shipping: bool = False
+
+
+@dataclass
 class FeaturesConfig:
     notifications: NotificationConfig = field(default_factory=NotificationConfig)
+    alerting: AlertingConfig = field(default_factory=AlertingConfig)
     bi_insight: bool = False
     pricing_lambda: bool = False
     web_search: bool = False
@@ -339,6 +358,14 @@ class GatewayConfig:
                 f"features.observability 는 compose 전용입니다 — "
                 f"deploy.target={self.deploy.target} 에서는 무시됩니다."
             )
+        al = self.features.alerting
+        if al.enabled and not al.emails:
+            w.append("features.alerting.enabled=true 이지만 emails 가 비어 있습니다 — "
+                     "topic·alarm 은 생기지만 수신자가 없어 콘솔에서만 보입니다. "
+                     "구독은 콘솔/CLI 로 언제든 추가 가능합니다.")
+        if al.emails:
+            w.append("SNS email 구독은 apply 후 각 주소로 confirmation 메일이 가며, "
+                     "수신자가 confirm 해야 발송이 시작됩니다 (자동화 불가).")
         if self.features.dev_login:
             w.append(
                 "features.dev_login=true — 인증 없는 개발자 로그인 경로가 열립니다. "
@@ -423,6 +450,16 @@ class GatewayConfig:
             e.append(f"compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
                      f"테스트·평가용 단일 호스트입니다 "
                      f"(size_tier={self.deploy.size_tier!r} 지정됨).")
+        al = self.features.alerting
+        if self.deploy.target == "compose" and (al.enabled or al.emails or al.log_shipping):
+            e.append("features.alerting 은 compose 전용이 아닙니다 — CloudWatch/SNS 는 "
+                     "ecs|eks 배포에서만 생성됩니다.")
+        if al.emails and not al.enabled:
+            e.append("features.alerting.emails 는 enabled=true 일 때만 유효합니다 — "
+                     "email 구독은 SNS topic 이 있어야 붙습니다.")
+        if al.log_shipping and self.deploy.target != "eks":
+            e.append("features.alerting.log_shipping 은 eks(Fargate) 전용입니다 — "
+                     "ecs 는 task definition 의 awslogs 드라이버 경로를 씁니다.")
         if self.deploy.target == "ecs" and self.deploy.size_tier not in ("t1", "t2"):
             e.append("ecs backend 는 size_tier=t1|t2 를 지원합니다 (t3 는 eks 경로).")
         if self.deploy.target == "eks" and self.deploy.size_tier not in ("t2", "t3"):
@@ -744,9 +781,10 @@ _DEPLOY_KEYS = frozenset(("target", "size_tier", "sizing", "capacity_tier",
 _NETWORK_KEYS = frozenset(("mode", "allowed_cidrs", "admin_internal"))
 _DOMAIN_KEYS = frozenset(("mode", "name", "zone_id", "hosts"))
 _DOMAIN_HOST_KEYS = frozenset(("gateway", "admin_ui", "admin_api"))
-_FEATURE_KEYS = frozenset(("notifications", "bi_insight", "pricing_lambda",
+_FEATURE_KEYS = frozenset(("notifications", "alerting", "bi_insight", "pricing_lambda",
                            "web_search", "body_logging", "observability",
                            "dev_login", "service_keys"))
+_ALERTING_KEYS = frozenset(("enabled", "emails", "log_shipping"))
 _NOTIF_KEYS = frozenset(("provider", "smtp_host", "smtp_port", "smtp_from",
                          "ses_from", "sender_name",
                          "internal_api_url", "internal_api_from",
@@ -776,6 +814,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     domain = _require_mapping(raw.get("domain"), "domain", errors)
     features = _require_mapping(raw.get("features"), "features", errors)
     notif = _require_mapping(features.get("notifications"), "features.notifications", errors)
+    alerting = _require_mapping(features.get("alerting"), "features.alerting", errors)
     images = _require_mapping(raw.get("images"), "images", errors)
     clients = _require_mapping(raw.get("clients"), "clients", errors)
     oidc = _require_mapping(raw.get("oidc"), "oidc", errors)
@@ -798,6 +837,7 @@ def from_dict(raw: dict) -> GatewayConfig:
                 f"domain.hosts.{_hk} 는 소문자 hostname 이어야 합니다: {_hv!r}")
     _check_unknown(features, _FEATURE_KEYS, "features", errors)
     _check_unknown(notif, _NOTIF_KEYS, "features.notifications", errors)
+    _check_unknown(alerting, _ALERTING_KEYS, "features.alerting", errors)
     _check_unknown(images, _IMAGE_KEYS, "images", errors)
     _check_unknown(clients, _CLIENT_KEYS, "clients", errors)
     _check_unknown(oidc, _OIDC_KEYS, "oidc", errors)
@@ -862,6 +902,14 @@ def from_dict(raw: dict) -> GatewayConfig:
                 internal_api_url=str(notif.get("internal_api_url", "")),
                 internal_api_from=str(notif.get("internal_api_from", "")),
                 smtp_credentials_secret=str(notif.get("smtp_credentials_secret", "")),
+            ),
+            alerting=AlertingConfig(
+                enabled=_safe_bool(alerting.get("enabled", False), errors,
+                                   "features.alerting.enabled"),
+                emails=_str_items(alerting.get("emails"),
+                                  "features.alerting.emails", errors),
+                log_shipping=_safe_bool(alerting.get("log_shipping", False), errors,
+                                        "features.alerting.log_shipping"),
             ),
             bi_insight=_safe_bool(features.get("bi_insight", False), errors,
                                   "features.bi_insight"),

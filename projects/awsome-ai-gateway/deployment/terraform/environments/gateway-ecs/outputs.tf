@@ -122,3 +122,7 @@ output "chat_reader_pw_log_group_name" {
   description = "chat_reader 비밀번호 동기화 task 로그 그룹 — provisioner 실패 힌트용"
   value       = try(module.gateway.chat_reader_pw_log_group_name, null)
 }
+
+output "alerting_sns_topic_arn" {
+  value = try(module.alerting[0].sns_topic_arn, "")
+}
