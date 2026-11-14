@@ -474,14 +474,15 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
         if r.returncode != 0:
             return False
         # 삭제 예약(pending deletion) 시크릿도 describe 는 된다 — "존재"로
-        # 처리하면 create 도 못 하고 ESO sync 도 실패한다 → 명시적 경고.
+        # 처리하면 create 도 못 하고 ESO sync 도 실패해 helm 이 롤백된다.
+        # 진행해봤자 어차피 깨지는 경로라 여기서 멈춘다.
         try:
             if json.loads(r.stdout or "{}").get("DeletedDate"):
-                notes.append(
-                    f"⚠ secrets {name} — 삭제 예약 상태입니다. "
-                    "`aws secretsmanager restore-secret` 로 복구하거나 "
-                    "삭제 완료 후 재실행하세요")
-                return True
+                raise SystemExit(
+                    f"secrets {name} — 삭제 예약 상태입니다. "
+                    "`aws secretsmanager restore-secret --secret-id "
+                    f"{name}` 로 복구하거나, 삭제 완료(기본 7일, "
+                    "--force-delete-without-recovery 즉시) 후 재실행하세요")
         except json.JSONDecodeError:
             pass
         return True
@@ -518,6 +519,17 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
         notes.append(f"secrets {redis} — auth_token 복사 완료")
 
     db = f"{prefix}{cfg.env}/db"
+    # pending-deletion 도 describe 는 된다 — 없는 것과 구분해야 안내가 맞다
+    d = _quiet(["aws", "secretsmanager", "describe-secret", "--secret-id", db,
+                "--region", region, "--output", "json"])
+    if d.returncode == 0:
+        try:
+            if json.loads(d.stdout or "{}").get("DeletedDate"):
+                raise SystemExit(
+                    f"secrets {db} — 삭제 예약 상태입니다. restore-secret 으로 "
+                    "복구하거나 삭제 완료 후 재실행하세요")
+        except json.JSONDecodeError:
+            pass
     r = _quiet(
         ["aws", "secretsmanager", "get-secret-value", "--secret-id", db,
          "--query", "SecretString", "--region", region, "--output", "text"])
