@@ -927,7 +927,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         if arn:
             set_args += [
                 "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",
-                "--set", f"adminApi.env.AGENTCORE_REGION={chatagent.AGENTCORE_REGION}"]
+                "--set", f"adminApi.env.AGENTCORE_REGION={chatagent.AGENTCORE_REGION}",
+                # admin-ui 서버사이드 게이트 — /chat 페이지·사이드바 메뉴가
+                # 이 env 로 표시 여부를 판정한다 (admin-ui/src/app/chat/page.tsx)
+                "--set", "adminUi.env.CHAT_ENABLED=true"]
             for key, out_key in (
                     ("LAMBDA_QUERY_DB", "chat_agent_query_db_function"),
                     ("CHAT_STAGING_BUCKET", "chat_agent_staging_bucket")):

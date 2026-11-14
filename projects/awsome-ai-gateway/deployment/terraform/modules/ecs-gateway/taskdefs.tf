@@ -179,6 +179,9 @@ locals {
         OIDC_AUTHORIZE_URL = var.oidc_authorize_url
         OIDC_TOKEN_URL     = var.oidc_token_url
       } : {},
+      # bi_insight — 서버사이드 게이트: /chat 페이지·사이드바 메뉴 표시
+      # (admin-ui/src/app/chat/page.tsx). ARN 비면 "not deployed" 화면 유지.
+      var.agentcore_runtime_arn != "" ? { CHAT_ENABLED = "true" } : {},
     )
 
     scheduler = merge(local.common_env, local.conn_env, {})
