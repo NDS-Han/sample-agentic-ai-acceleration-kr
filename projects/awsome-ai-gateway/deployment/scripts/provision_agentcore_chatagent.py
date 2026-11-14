@@ -87,6 +87,10 @@ ROLE_ARN = os.environ.get("ROLE_ARN", "")
 AGENT_DIR = os.environ.get("AGENT_DIR", "admin-chat-agent")
 
 NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_]{0,47}$")
+# 커스텀 Code Interpreter (§49) — execution role 을 주입해야 샌드박스가
+# S3(staging/·reports/)에 직접 쓸 수 있다. 이름도 Runtime 과 같은 규칙.
+INTERPRETER_NAME = os.environ.get(
+    "INTERPRETER_NAME", f"{AGENT_NAME}_ci")[:48]
 
 
 def log(msg: str) -> None:
@@ -373,12 +377,63 @@ def find_runtime():
     return None
 
 
-def _env_vars() -> dict:
+def find_interpreter() -> str:
+    """커스텀 Code Interpreter ID — 없거나 조회 실패 시 ""."""
+    ctl = _control()
+    for page in ctl.get_paginator("list_code_interpreters").paginate():
+        for it in page.get("codeInterpreterSummaries", []):
+            if it.get("name") == INTERPRETER_NAME:
+                return it["codeInterpreterId"]
+    return ""
+
+
+def ensure_interpreter(dry: bool) -> str:
+    """커스텀 Code Interpreter 생성/재사용 → ID 반환. 실패 시 "" (fail-soft —
+    interpreter 없으면 에이전트가 기본 interpreter 로 폴백해 S3 리포트만
+    꺼지고 나머지 파이프라인은 산다)."""
+    try:
+        iid = find_interpreter()
+        if iid:
+            log(f"Code Interpreter 재사용: {iid}")
+            return iid
+        if dry:
+            log(f"[dry-run] Code Interpreter {INTERPRETER_NAME} 생성")
+            return "<dry-interpreter-id>"
+        if not ROLE_ARN:
+            fail("ROLE_ARN 미지정 — terraform output "
+                 "chat_agent_execution_role_arn 을 넘기세요")
+        r = _control().create_code_interpreter(
+            name=INTERPRETER_NAME,
+            executionRoleArn=ROLE_ARN,
+            # Runtime 과 같은 이유로 PUBLIC — 샌드박스는 S3/Bedrock 공개 API 만
+            # 부른다. VPC 부착은 필요 없고 오히려 엔드포인트 비용만 든다.
+            networkConfiguration={"networkMode": "PUBLIC"},
+            description="admin-chat-agent report sandbox (NDS auto-provisioned)",
+        )
+        iid = r["codeInterpreterId"]
+        log(f"Code Interpreter created: {iid}")
+        return iid
+    except ClientError as e:
+        log(f"Code Interpreter 생성 실패({e.response['Error']['Code']}) — "
+            "S3 리포트 업로드는 비활성 상태로 진행합니다")
+        return ""
+
+
+def _env_vars(interp_id: str = "") -> dict:
     env = {"AWS_REGION": os.environ.get("AWS_REGION", REGION)}
     for k in ("LAMBDA_QUERY_DB", "LAMBDA_GET_SCHEMA", "CHAT_STAGING_BUCKET"):
         if os.environ.get(k):
             env[k] = os.environ[k]
+    if interp_id:
+        env["CODE_INTERPRETER_ID"] = interp_id
     return env
+
+
+def _env_drift(ex: dict, want_env: dict) -> bool:
+    """Runtime env 가 원하는 값과 어긋나는지 — interpreter 추가 같은 env-only
+    변경도 update 경로를 타게 하려고 이미지 비교와 별도로 본다."""
+    cur = ex.get("environmentVariables") or {}
+    return any(cur.get(k) != v for k, v in want_env.items())
 
 
 def _runtime_image_uri(ex: dict) -> str:
@@ -398,30 +453,38 @@ def _wait_ready(rid: str) -> None:
 
 
 def ensure_runtime(dry: bool) -> str:
+    # interpreter 는 Runtime env(CODE_INTERPRETER_ID)에 들어가므로 먼저 보장.
+    # 실패해도 "" 로 진행 — S3 리포트만 꺼진 채 나머지는 동작한다.
+    interp_id = ensure_interpreter(dry)
+    want_env = _env_vars(interp_id)
     ex = find_runtime()
     if ex:
         arn = ex["agentRuntimeArn"]
         want = image_uri() if ECR_REPO else ""
         current = _runtime_image_uri(ex)
-        if want and current != want:
+        env_drift = _env_drift(ex, want_env)
+        if (want and current != want) or env_drift:
             # 에이전트 코드/태그 변경 — Runtime 은 생성 시점 이미지에 고정되므로
             # 새 태그로 수렴한다. (재사용만 하면 코드 변경이 영영 안 올라감.)
+            # env-only drift(CODE_INTERPRETER_ID 신규 등)도 같은 경로로 반영.
+            why = f"{current} → {want}" if want and current != want \
+                else "env drift"
             if dry:
-                log(f"[dry-run] Runtime update: {current} → {want}")
+                log(f"[dry-run] Runtime update: {why}")
                 return arn
             ensure_image()
             rid = ex["agentRuntimeId"]
             _control().update_agent_runtime(
                 agentRuntimeId=rid,
                 agentRuntimeArtifact={
-                    "containerConfiguration": {"containerUri": want}},
+                    "containerConfiguration": {"containerUri": want or current}},
                 roleArn=ROLE_ARN or ex.get("roleArn", ""),
                 networkConfiguration=ex.get("networkConfiguration")
                     or {"networkMode": "PUBLIC"},
-                environmentVariables=_env_vars(),
+                environmentVariables=want_env,
                 description="admin-chat-agent BI assistant (NDS auto-provisioned)",
             )
-            log(f"Runtime update 요청: {arn} ({current} → {want})")
+            log(f"Runtime update 요청: {arn} ({why})")
             _wait_ready(rid)
             log("Runtime READY (updated)")
             return arn
@@ -444,7 +507,7 @@ def ensure_runtime(dry: bool) -> str:
         # agent 는 Lambda invoke·Bedrock·S3 등 공개 AWS API 만 부른다 —
         # DB 접속은 query_db Lambda(VPC 부착)가 대신하므로 Runtime 자체는 PUBLIC.
         networkConfiguration={"networkMode": "PUBLIC"},
-        environmentVariables=_env_vars(),
+        environmentVariables=want_env,
         description="admin-chat-agent BI assistant (NDS auto-provisioned)",
     )
     arn = r["agentRuntimeArn"]
@@ -457,6 +520,16 @@ def ensure_runtime(dry: bool) -> str:
 
 
 def teardown() -> None:
+    # 프로비저너 소유 리소스는 Runtime + Code Interpreter 둘 다 정리한다 —
+    # interpreter 는 terraform 밖이라 방치하면 고아 리소스가 된다.
+    try:
+        iid = find_interpreter()
+        if iid:
+            _control().delete_code_interpreter(codeInterpreterId=iid)
+            log(f"Code Interpreter 삭제 요청: {iid}")
+    except ClientError as e:
+        log(f"Code Interpreter 삭제 실패({e.response['Error']['Code']}) — "
+            "Runtime 삭제는 계속합니다")
     ex = find_runtime()
     if not ex:
         log("Runtime 없음 — 건너뜀")
