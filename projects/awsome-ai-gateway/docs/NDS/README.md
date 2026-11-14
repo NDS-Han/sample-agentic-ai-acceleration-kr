@@ -73,7 +73,7 @@ LLM Gateway(Claude Code · Cowork · Codex 지원)를 **어느 AWS 계정·리�
 
 - **eks의 인프라 갱신 자체** — `bootstrap`은 최초 생성까지 담당하지만, 이후 클러스터 버전·노드 변경 같은 인프라 변경은 terraform env가 소유합니다(`apply`는 helm/앱 레이어 + feature 인프라 보강만)
 - **ecs 기존 인프라 편입** — 모듈이 전부 새로 만듭니다(기존 VPC/RDS 재사용 불가)
-- **bi_insight AgentCore Runtime** — 수동 프로비저닝 (`web_search` Gateway는 `features.web_search`로 자동)
+- **bi_insight 기본 비활성** — `features.bi_insight: true` 시 managed overlay(`module.agentcore_runtime`)가 인프라를 프로비저닝 (`web_search` Gateway는 `features.web_search`로 자동)
 - **외부 IdP on ecs** — ecs 경로는 Cognito를 직접 생성하므로 yaml의 oidc 값은 무시됩니다(`required_group`만 반영)
 - **DB 롤백** — 마이그레이션은 forward only
 - **유실된 시크릿 복구** — `.env`의 `VIRTUAL_KEY_ENCRYPTION_KEY`를 잃으면 발급된 Virtual Key 전부 재발급 필요
