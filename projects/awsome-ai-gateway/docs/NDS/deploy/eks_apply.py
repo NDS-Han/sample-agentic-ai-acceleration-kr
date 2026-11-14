@@ -74,6 +74,25 @@ def _run_quiet(argv: list[str], *, cwd: Path | None = None,
                                            f"{argv[0]} 응답 없음({timeout}s)")
 
 
+def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
+                     context: str = "") -> str:
+    """라이브 deployment 의 env 값 — 조회 실패·미설정 시 ""."""
+    argv = ["kubectl", "get", "deploy", f"{meta['release']}-{deploy_suffix}",
+            "-n", meta["namespace"], "-o", "json"]
+    if context:
+        argv += ["--context", context]
+    r = _run_quiet(argv)
+    if r.returncode != 0:
+        return ""
+    try:
+        env = json.loads(r.stdout)["spec"]["template"]["spec"][
+            "containers"][0].get("env", [])
+        return next((e.get("value", "") for e in env
+                     if e.get("name") == var), "")
+    except (json.JSONDecodeError, KeyError, IndexError):
+        return ""
+
+
 def tf_outputs(env_dir: Path) -> dict:
     r = _run_quiet(["terraform", "output", "-json"], cwd=env_dir, timeout=120)
     if r.returncode != 0:
@@ -862,7 +881,8 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                   "프로비저닝(provision_agentcore_websearch.py deploy)합니다",
                   file=sys.stderr)
     if cfg.features.bi_insight:
-        arn = chatagent.status_arn(repo_root, outs, env_name=cfg.env)
+        arn = chatagent.status_arn(repo_root, outs, env_name=cfg.env,
+                                   region=cfg.aws.region)
         if arn:
             print(f"ⓘ bi_insight: AgentCore Runtime {arn} 을 --set 합니다",
                   file=sys.stderr)
@@ -878,6 +898,25 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
               f"invoke={st['invoke']} — apply 시 없는 것만 보장합니다",
               file=sys.stderr)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
+    # plan diff 도 apply 와 같은 --set 을 써야 한다 — status 조회만 하고
+    # --set 을 안 넣으면 dry-run manifest 가 env 미주입으로 렌더돼
+    # "ARN 이 지워진다" 는 거짓 wipe diff 를 보인다 (실제 apply 는 주입함).
+    if cfg.features.web_search and url:
+        set_args += [
+            "--set", f"gatewayProxy.env.AGENTCORE_GATEWAY_URL={url}",
+            "--set", f"gatewayProxy.env.AGENTCORE_REGION={websearch.AGENTCORE_REGION}",
+            "--set", f"gatewayProxy.env.AGENTCORE_TARGET_ID={websearch.TARGET_ID}"]
+    if cfg.features.bi_insight and arn:
+        set_args += [
+            "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",
+            "--set",
+            f"adminApi.env.AGENTCORE_REGION={chatagent.resolved_region(cfg.aws.region)}",
+            "--set", "adminUi.env.CHAT_ENABLED=true"]
+        for key, out_key in (
+                ("LAMBDA_QUERY_DB", "chat_agent_query_db_function"),
+                ("CHAT_STAGING_BUCKET", "chat_agent_staging_bucket")):
+            if outs.get(out_key):
+                set_args += ["--set", f"adminApi.env.{key}={outs[out_key]}"]
     _plan_diff(_helm_argv(meta, set_args, dry_run=True, context=context),
                meta, repo_root, context)
 
@@ -923,11 +962,25 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         arn = chatagent.ensure_runtime_arn(
             repo_root, outs, meta=meta,
             migration_image=_migration_image(cfg, meta, gen_dir, repo_root),
-            context=context, env_name=cfg.env)
+            context=context, env_name=cfg.env, region=cfg.aws.region)
+        if not arn:
+            # 프로비저너 실패인데 라이브에 이미 ARN 이 주입돼 있으면 그대로
+            # 유지한다 — --set 누락으로 helm 이 values.yaml 기본 '' 으로
+            # 덮어 멀쩡한 채팅 설정을 지우는 사고 방지 (리전 오조회로 실제
+            # 발생). Runtime 이 실제로 삭제됐다면 재주입해도 503 — wipe 와
+            # 같은 최종 상태라 graceful-off 계약은 유지된다.
+            prev = _live_deploy_env(meta, "admin-api",
+                                    "AGENTCORE_RUNTIME_ARN", context)
+            if prev:
+                arn = prev
+                print("⚠ bi_insight: 프로비저너 실패 — 라이브 ARN 을 보존해 "
+                      "재주입합니다 (Runtime 삭제 여부는 doctor 로 확인)",
+                      file=sys.stderr)
         if arn:
             set_args += [
                 "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",
-                "--set", f"adminApi.env.AGENTCORE_REGION={chatagent.AGENTCORE_REGION}",
+                "--set",
+                f"adminApi.env.AGENTCORE_REGION={chatagent.resolved_region(cfg.aws.region)}",
                 # admin-ui 서버사이드 게이트 — /chat 페이지·사이드바 메뉴가
                 # 이 env 로 표시 여부를 판정한다 (admin-ui/src/app/chat/page.tsx)
                 "--set", "adminUi.env.CHAT_ENABLED=true"]
@@ -944,7 +997,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         # 프로비저너 소유 Runtime 도 정리 — terraform 밖 리소스라 destroy 에 안
         # 잡힌다. outputs 가 없으면(한 번도 안 켬·이미 정리) API 호출 자체를
         # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
-        chatagent.teardown(repo_root, cfg.env)
+        chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region)
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).

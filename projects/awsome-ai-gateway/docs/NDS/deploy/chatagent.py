@@ -27,6 +27,16 @@ PROVISIONER = Path("deployment/scripts/provision_agentcore_chatagent.py")
 AGENTCORE_REGION = os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")
 
 
+def resolved_region(region: str = "") -> str:
+    """Runtime 리전 해결 — CHAT_AGENT_REGION env > 호출부 배포 리전 > 최후 기본값.
+
+    env 만 보면 export 를 잊은 셸이 조용히 다른 리전(기본 ap-northeast-2)을
+    조회해 "Runtime 없음" 오판 → ensure 경로가 빈 ARN 을 내려 rendered 가
+    채팅 env 전부를 닦는 사고가 실제로 났었다(배포 리전과 Runtime 리전은 ECR
+    제약상 항상 같아야 하므로 cfg.aws.region 이 안전한 fallback 이다)."""
+    return os.environ.get("CHAT_AGENT_REGION") or region or "ap-northeast-2"
+
+
 def _agent_name(outs: dict, env_name: str = "") -> str:
     """Runtime 이름 — outputs 우선, 없으면 도출.
 
@@ -52,11 +62,12 @@ def _git_sha(repo_root: Path | None) -> str:
 
 def _env(outs: dict, meta: dict, migration_image: str,
          context: str = "", extras: dict | None = None,
-         env_name: str = "", repo_root: Path | None = None) -> dict[str, str]:
+         env_name: str = "", repo_root: Path | None = None,
+         region: str = "") -> dict[str, str]:
     """terraform output → 프로비저너 env. Runtime 이름은 이름 패턴
     ([a-zA-Z][a-zA-Z0-9_]{0,47}) 때문에 하이픈 → 밑줄 정규화가 필요하다."""
     e = dict(os.environ)
-    e["REGION"] = AGENTCORE_REGION
+    e["REGION"] = resolved_region(region)
     e["AGENT_NAME"] = _agent_name(outs, env_name)
     # 에이전트 이미지 태그 — latest 고정이면 Runtime 이 생성 시점 이미지에
     # 고정돼 코드 변경이 apply 로 영영 재배포되지 않는다. SHA 태그를 기본으로
@@ -96,7 +107,7 @@ def _env(outs: dict, meta: dict, migration_image: str,
 def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
          migration_image: str = "", context: str = "",
          extras: dict | None = None, env_name: str = "",
-         timeout: int = 900) -> subprocess.CompletedProcess:
+         timeout: int = 900, region: str = "") -> subprocess.CompletedProcess:
     script = repo_root / PROVISIONER
     if not script.exists():
         return subprocess.CompletedProcess([], 1, "", f"{script} 없음")
@@ -104,17 +115,19 @@ def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
         return subprocess.run(
             [sys.executable, str(script), sub],
             env=_env(outs, meta or {}, migration_image, context, extras, env_name,
-                     repo_root=repo_root),
+                     repo_root=repo_root, region=region),
             cwd=repo_root, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
 
 
-def status_arn(repo_root: Path, outs: dict, env_name: str = "") -> str:
+def status_arn(repo_root: Path, outs: dict, env_name: str = "",
+               region: str = "") -> str:
     """기존 Runtime ARN — 없거나 조회 실패 시 "".
 
     읽기 전용 — plan/preview 경로에서도 안전하다."""
-    r = _run(repo_root, "status", outs, env_name=env_name, timeout=120)
+    r = _run(repo_root, "status", outs, env_name=env_name, timeout=120,
+             region=region)
     if r.returncode != 0:
         return ""
     m = re.search(r"^  arn: (\S+)", r.stdout, re.M)
@@ -123,7 +136,8 @@ def status_arn(repo_root: Path, outs: dict, env_name: str = "") -> str:
 
 def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
                        migration_image: str = "", context: str = "",
-                       extras: dict | None = None, env_name: str = "") -> str:
+                       extras: dict | None = None, env_name: str = "",
+                       region: str = "") -> str:
     """deploy(멱등) 실행 — chat_reader 비밀번호 동기화 + Runtime 생성/재사용
     → ARN 반환. 실패 시 "".
 
@@ -133,14 +147,14 @@ def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
 
     extras: ecs 경로 입력(ECS_CLUSTER/ECS_PW_TASKDEF_ARN/ECS_SUBNETS/ECS_SG/
     ECS_REGION) — eks 경로는 넘기지 않는다."""
-    arn = status_arn(repo_root, outs, env_name=env_name)
+    arn = status_arn(repo_root, outs, env_name=env_name, region=region)
     if not arn:
         print(f"bi_insight: AgentCore Runtime 이 없어 프로비저닝합니다 "
-              f"(region={AGENTCORE_REGION}, name={_agent_name(outs, env_name)})",
+              f"(region={resolved_region(region)}, name={_agent_name(outs, env_name)})",
               file=sys.stderr)
     r = _run(repo_root, "deploy", outs, meta=meta,
              migration_image=migration_image, context=context, extras=extras,
-             env_name=env_name)
+             env_name=env_name, region=region)
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-3:]
         print(f"⚠ chat-agent 프로비저닝 실패 — {'; '.join(tail) or r.stdout[:200]}",
@@ -182,7 +196,7 @@ def ensure_lambda_build(repo_root: Path) -> bool:
     return True
 
 
-def teardown(repo_root: Path, env_name: str) -> bool:
+def teardown(repo_root: Path, env_name: str, region: str = "") -> bool:
     """bi_insight 선언이 꺼졌을 때 AgentCore Runtime 을 지운다 — 멱등.
 
     terraform 밖 리소스라 destroy 가 못 지운다 — 선언이 진실이려면 apply/\
@@ -192,7 +206,7 @@ def teardown(repo_root: Path, env_name: str) -> bool:
     있어야 하므로 state 조회를 요구하지 않는다."""
     name = f"llm-gateway-{env_name}-admin-chat-agent".replace("-", "_")
     r = _run(repo_root, "teardown", {}, extras={"AGENT_NAME": name},
-             timeout=180)
+             timeout=180, region=region)
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-2:]
         print(f"⚠ chat-agent Runtime teardown 실패 — {'; '.join(tail) or '?'}",

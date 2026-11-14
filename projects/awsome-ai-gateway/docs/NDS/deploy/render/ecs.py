@@ -200,8 +200,8 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     if cfg.features.bi_insight:
         vars_["enable_chat_agent"] = True
         vars_["enable_chat_db_tools"] = True
-        vars_["chat_agent_region"] = os.environ.get(
-            "CHAT_AGENT_REGION", "ap-northeast-2")
+        vars_["chat_agent_region"] = (
+            os.environ.get("CHAT_AGENT_REGION") or cfg.aws.region)
 
     vars_.update(extra_vars or {})
     return vars_

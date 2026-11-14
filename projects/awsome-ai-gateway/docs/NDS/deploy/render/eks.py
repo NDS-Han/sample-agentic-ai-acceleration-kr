@@ -387,8 +387,10 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append("enable_chat_db_tools = true")
         # AgentCore Runtime 은 ECR 이미지와 같은 리전에 있어야 한다 —
         # provisioner(REGION)와 IRSA statement 스코프를 하나의 env로 정렬.
+        # fallback 은 ap-northeast-2 가 아니라 배포 리전: export 를 잊은 셸이
+        # NE2 로 렌더해 IRSA statement 가 엉뚱한 리전을 가리키는 사고가 났었다.
         lines.append('chat_agent_region = "{}"'.format(
-            os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")))
+            os.environ.get("CHAT_AGENT_REGION") or cfg.aws.region))
     inf = cfg.infra
     if inf.vpc_cidr:
         lines.append(f'vpc_cidr = "{inf.vpc_cidr}"')
