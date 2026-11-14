@@ -57,15 +57,32 @@ request metadata.
 
 **Route:** `/monitoring/body-logs` · **Role:** Administrator
 
-Browser over the captured request/response bodies — two views:
+Browser over the captured request/response bodies — available only
+while body logging is on (the toggle above). Two views:
 
-- **Sessions** — grouped by session ID, filterable by period, user, and
-  client.
-- **By request** — individual captured bodies.
+**Sessions** — calls grouped into time-bucketed sessions per user.
+Filter by period, user email/ID, client, or **Errors only**:
 
-![Body Logs browser](screenshots/33-monitoring-bodylogs-nav.png)
+![Body Logs — sessions](screenshots/13-monitoring-body-logs.png)
 
-![Body Logs](screenshots/13-monitoring-body-logs.png)
+Expanding a session lists its individual calls — timestamp, model,
+latency, cost, and in→out token counts — with a **Load bodies** link
+to pull the stored payloads:
+
+![Body Logs — session expanded](screenshots/51-bodylogs-session-expanded.png)
+
+**By request** — a flat list of recent captured calls, filterable by
+user. The **Request ID lookup** at the top is the tool for user
+reports: paste the `X-Request-Id` the caller saw to jump straight to
+that request's bodies:
+
+![Body Logs — by request](screenshots/52-bodylogs-by-request.png)
+
+**View** on a row opens the captured prompt and response — with
+**Copy JSON** / **Raw JSON** for inspection. This is what "unmasked"
+means in practice: the literal user prompt is visible:
+
+![Body viewer — request & response bodies](screenshots/53-bodylogs-request-expanded.png)
 
 Every view of a body is written to the [Audit Log](audit-log.md) as a
 `View body log` event — the top banner states this explicitly because

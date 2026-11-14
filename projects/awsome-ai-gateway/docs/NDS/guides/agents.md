@@ -47,13 +47,26 @@ Click a row to open the agent's [detail view](#agent-detail).
 
 ## Agent detail
 
-**Route:** `/agents/{userId}` · per-agent usage and key inventory.
+**Route:** `/agents/{userId}` · per-agent usage and key inventory —
+click a row in the list to open it.
 
-- **Usage KPIs** — cost, request count, tokens, and last-request latency
-  for the selected period.
-- **Keys** — every long-lived key on the account: prefix, status,
-  issued/expires timestamps, last request, per-key requests and cost.
-- **Usage by model** — cost share across the models this agent called.
+![Agent detail — usage KPIs and issued keys](screenshots/54-agent-detail.png)
+
+- **Usage KPIs** — cost, request count (succeeded/errors/timeouts),
+  tokens (in/out), and average + last-request latency for the selected
+  period (This month / Last month / Select period). Historical usage
+  is backfilled by key lifetime; live attribution starts from when the
+  feature began recording.
+- **Issued keys** — every long-lived key on the account: prefix,
+  status (Active/Expired/Revoked), issued/expires timestamps, last
+  request in the period, and per-key requests and cost — the table to
+  check which key is driving spend.
+
+![Agent detail — usage by model and token mix](screenshots/55-agent-detail-keys.png)
+
+- **Usage by model** — requests/tokens/cost/share per model this agent
+  called, plus a daily cost trend (Cost or Tokens) and a token-mix
+  donut (input/output/cache).
 
 Use this view to confirm a repair worked — a healthy key has a recent
 **last request** and non-zero counters.
