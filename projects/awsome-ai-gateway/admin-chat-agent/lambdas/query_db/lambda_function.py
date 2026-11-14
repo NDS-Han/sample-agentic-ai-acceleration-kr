@@ -216,7 +216,16 @@ def validate_sql(sql: str) -> sqlglot.Expression:
                 name = (fn.sql_name() or "").lower()
             except Exception:  # noqa: BLE001
                 name = ""
-        if name and _DENIED_FN.match(name):
+        # qualified call — `aws_s3.table_import_from_s3(...)` 는
+        # Dot(Identifier(aws_s3), Anonymous(table_import_from_s3)) 로 파싱돼
+        # bare name 만 보면 qualifier 기반 패턴(aws_*, cron.*)이 우회된다
+        # (R38-F1). 부모 Dot 의 qualifier 를 붙인 형태로도 매칭한다.
+        qual = ""
+        if isinstance(fn.parent, exp.Dot):
+            left = fn.parent.this
+            if isinstance(left, exp.Identifier):
+                qual = (left.name or "").lower() + "."
+        if name and (_DENIED_FN.match(name) or _DENIED_FN.match(qual + name)):
             raise ValidationError(
                 f"Function '{name}' is not allowed in read-only queries."
             )

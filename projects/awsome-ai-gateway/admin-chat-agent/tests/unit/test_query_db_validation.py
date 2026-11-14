@@ -120,6 +120,14 @@ REJECT_QUERIES = [
     'SELECT * FROM "USAGE"."USAGE_LOGS"',
     # 인용된 위험 함수명도 denylist 에 걸려야 한다
     'SELECT "PG_READ_FILE"(\'/x\') FROM usage.usage_logs',
+    # R38-F1 — schema-qualified 호출은 sqlglot 이 Dot(Identifier, Anonymous)
+    # 로 나눠 이름에서 qualifier 를 떼므로, aws_*/cron.* 처럼 qualifier 자체가
+    # denylist 패턴인 함수가 bare name 으로 우회됐다
+    "SELECT aws_s3.table_import_from_s3('t','x','y','(a b)','b','k','r')",
+    "SELECT aws_lambda.invoke('fn', '{}')",
+    "SELECT cron.schedule('j', '* * * * *', 'SELECT 1')",
+    "SELECT pg_catalog.pg_read_file('/x')",
+    "SELECT dblink.dblink('x', 'SELECT 1')",
     # 인용 CTE 의 대소문자 불일치 참조는 CTE 가 아니라 실테이블(=비화이트리스트)
     'WITH "pg_roles" AS (SELECT 1) SELECT * FROM "PG_ROLES"',
 ]
