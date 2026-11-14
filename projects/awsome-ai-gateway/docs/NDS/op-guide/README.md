@@ -746,6 +746,17 @@ received — an unchecked row here is a future incident.
 - [ ] Migrations are forward-only — no DB rollback (§11)
 - [ ] Body logging stores unmasked payloads — enable for debugging only
 - [ ] ECS path exists but is **deferred** — not the production target
+- [ ] **policy-helper / AI Governance Hub (US-21) — deferred to the
+      NDS repo restructure.** gateway-proxy ≥ `1.0.91` already serves
+      `GET /v1/policy`, but nothing calls it until the PC helper is
+      installed. Enabling it would give per-user/team `/model` lists
+      (21-A) and, with the separate
+      [ai-governance-hub](https://github.com/gonsoomoon-ml/ai-governance-hub)
+      repo, team-managed plugins/MCP/locks with approvals (21-B).
+      Adopting it under NDS means porting the us-deploy procedure
+      ([8-G-policy-helper](../../us-llm-gateway/ops/8-G-policy-helper.md))
+      into `gateway.yaml` + the managed overlay, plus deciding whether
+      the hub stays a separate repo — parked by agreement.
 
 ### Acceptance — SSIR's first week
 
