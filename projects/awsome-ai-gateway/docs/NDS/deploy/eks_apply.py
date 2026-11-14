@@ -602,7 +602,7 @@ def _discover_alb_dims(cfg: GatewayConfig,
     ensure_infra 와 managed plan 이 각각 부르는 중복 AWS 호출을 막는다."""
     if not cfg.features.alerting.enabled:
         return [], [], ""
-    key = (cfg.deploy.namespace, cfg.aws.region, context)
+    key = (cfg.deploy.namespace, cfg.deploy.release, cfg.aws.region, context)
     if key in _ALB_DIMS_CACHE:
         return _ALB_DIMS_CACHE[key]
 
@@ -689,6 +689,8 @@ def _discover_alb_dims(cfg: GatewayConfig,
                 "tg": "targetgroup/" + tg_arn.split(":targetgroup/")[-1]})
     if not lb_dims:
         return done([], [], "hostname 과 일치하는 application LB 없음")
+    if not tg_pairs:
+        return done([], [], "유효한 TargetGroup dimension 없음")
     return done(lb_dims, tg_pairs)
 
 

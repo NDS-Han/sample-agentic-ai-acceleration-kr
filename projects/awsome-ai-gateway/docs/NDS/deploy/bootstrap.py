@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import subprocess
 import sys
@@ -236,19 +237,44 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
     alb_dims = gen_dir / "alerts-dims.tfvars"
     if alb_dims.exists():
         var_args.append(f"-var-file={alb_dims.resolve()}")
-    else:
-        # 파일 부재(gen/ 는 gitignore — 신규 머신/클론 기본값)인데 state 에
-        # ALB 알람이 있으면 이 apply 가 조용히 전량 삭제한다 → 먼저 차단.
+        # 파일 dims 와 state dims 가 다르면 stale 가능 — 삭제/생성이
+        # auto-approve 된다. 경고만 (신 dims 반영이 정상인 경우도 있음).
         st = eks_apply._run_quiet(["terraform", "state", "list"],
                                 cwd=env_dir_path, timeout=120)
-        if st.returncode == 0 and any(
+        if st.returncode == 0:
+            state_dims = set(re.findall(
+                r'aws_cloudwatch_metric_alarm\.alb_target_5xx\["([^"]+)"\]',
+                st.stdout))
+            file_dims = set(re.findall(
+                r'"(app/[^"]+)"', alb_dims.read_text()))
+            if file_dims != state_dims:
+                print(f"⚠ {alb_dims.name} 의 ALB dimension({sorted(file_dims)})"
+                      f" 이 state({sorted(state_dims)})와 다릅니다 — stale "
+                      "일 수 있으니 `deploy apply` 로 갱신하는 편이 안전합니다",
+                      file=sys.stderr)
+    else:
+        # 파일 부재(gen/ 는 gitignore — 신규 머신/클론 기본값)인데 state 에
+        # ALB 알람이 있으면 이 apply 가 조용히 전량 삭제한다 — 단 env
+        # terraform.tfvars 에 dims 를 수동 고정한 경우(§8-A 수동 경로)는
+        # 삭제가 아니므로 차단하지 않는다.
+        env_tfvars = env_dir_path / "terraform.tfvars"
+        manual_dims = (env_tfvars.exists()
+                       and "alb_lb_dimensions" in env_tfvars.read_text())
+        st = eks_apply._run_quiet(["terraform", "state", "list"],
+                                cwd=env_dir_path, timeout=120)
+        if st.returncode != 0:
+            print("ⓘ terraform state list 실패 — ALB 알람 존재 여부를 검증하지 "
+                  "못했습니다 (backend 일시 오류면 apply 도 실패합니다)",
+                  file=sys.stderr)
+        elif not manual_dims and any(
                 "aws_cloudwatch_metric_alarm.alb_" in l
                 for l in st.stdout.splitlines()):
             raise SystemExit(
                 f"ALB 알람이 state 에 있지만 {alb_dims} 이 없습니다 — "
                 "이 apply 가 알람을 삭제합니다. 먼저 `deploy apply` 를 "
-                "실행해 ALB dimension 을 발견·기록한 뒤 bootstrap 을 "
-                "재실행하세요")
+                "실행해 ALB dimension 을 발견·기록하거나, 수동 경로라면 "
+                "env terraform.tfvars 에 alb_lb_dimensions/alb_target_groups "
+                "를 고정한 뒤 bootstrap 을 재실행하세요")
     _run(["terraform", "apply", "-auto-approve", "-input=false", *var_args],
          cwd=env_dir_path)
     return eks_apply.tf_outputs(env_dir_path)

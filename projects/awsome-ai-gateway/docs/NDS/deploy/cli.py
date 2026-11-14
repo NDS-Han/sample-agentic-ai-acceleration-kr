@@ -979,6 +979,10 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         eks_apply._run(["helm", "uninstall", meta["release"], "-n",
                         meta["namespace"], "--wait", *ctx_args], cwd=REPO_ROOT)
         uninstalled = True
+        # teardown 후 같은 env 이름 재배포 시 gen 의 stale ALB dimension 이
+        # bootstrap env_apply 에 적용돼 죽은 ALB 를 가리키는 알람이 생긴다.
+        alb_dims = GEN_ROOT / cfg.env / "eks" / "alerts-dims.tfvars"
+        alb_dims.unlink(missing_ok=True)
     elif r.returncode == 127:
         # helm 부재를 release 부재와 혼동하면 앱을 안 내리고 인프라만 지워
         # ALB 잔여물이 destroy 를 멈추게 한다

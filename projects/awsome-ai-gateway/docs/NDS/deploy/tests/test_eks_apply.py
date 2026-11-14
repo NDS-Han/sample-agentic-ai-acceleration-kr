@@ -542,6 +542,7 @@ def _discover_fake(monkeypatch, *, kubectl_rc=0,
         return subprocess.CompletedProcess(argv, 0, "", "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
     eks_apply._ALB_DIMS_CACHE.clear()  # 프로세스 캐시 — 테스트 간 오염 방지
+    eks_apply._WARNED.clear()  # 경고 dedupe 도 동일
     return calls
 
 

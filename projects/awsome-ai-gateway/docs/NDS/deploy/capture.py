@@ -1026,8 +1026,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                      "키를 생략했습니다. 켜려면 features.body_logging: true")
 
     # alerting — log_shipping 은 helm values(관측 네임스페이스 라우터)에서,
-    # enabled 는 terraform output(topic ARN)에서 아래 블록이 채운다.
-    # email 구독 목록은 콘솔/CLI 확인 대상이라 캡처하지 않는다.
+    # enabled/emails 는 terraform output·env tfvars 에서 아래 블록이 채운다.
+    # 콘솔 수동 구독은 terraform state 밖이라 캡처 대상이 아니다.
     features["alerting"] = {
         "log_shipping": _is_true_env(
             _val(v, "observability", "fargateLogging", "enabled")),
@@ -1091,6 +1091,13 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 region = str(outs.get("aws_region", "") or outs.get("region", ""))
             if outs.get("alerting_sns_topic_arn"):
                 features["alerting"]["enabled"] = True
+                # emails 는 env tfvars(사람 선언)에서 복원 — 안 잡으면
+                # 채택 yaml 의 emails=[] 가 다음 apply 에 구독 전량 삭제.
+                # 콘솔 수동 구독은 state 밖이라 원래 미대상.
+                _tv = _tfvars(env_dir)
+                if _tv.get("alert_emails"):
+                    features["alerting"]["emails"] = [
+                        str(e) for e in _tv["alert_emails"]]
             if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
                 oidc["issuer_url"] = outs["cognito_issuer_url"]
                 notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")

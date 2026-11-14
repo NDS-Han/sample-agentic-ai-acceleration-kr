@@ -243,8 +243,11 @@ dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 �
   발견이 성공한 경우에만** ALB 알람 delete 를 가드가 허용하므로 차단됩니다.
   drift 수렴 경로는 경고 후 terraform 적용만 건너뛰고 helm 은 계속 진행,
   필수 인프라 누락 경로는 중단됩니다 — kubectl/AWS 접근을 복구하고
-  재실행하세요. `deploy bootstrap` 재실행도 같은 상황이면 사전 차단되니
-  먼저 `deploy apply` 로 발견을 갱신해야 합니다.
+  재실행하세요. 차단 시 같은 plan 의 **정상 변경도 함께 지연**됩니다
+  (저장된 단일 tfplan 은 부분 적용 불가). `deploy bootstrap` 재실행도
+  같은 상황이면 사전 차단되니 먼저 `deploy apply` 로 발견을 갱신해야
+  합니다 — 단 수동 경로(env tfvars 고정)는 dims 가 있으므로 차단되지
+  않습니다.
 - **ALB 교체 (id 변경)** — 신 dims 발견 → 신 알람 create + 구 알람 delete
   가 plan 에 뜨고, 발견 성공 run 이므로 가드가 허용합니다 (dimension
   교체가 정상 수명주기).
