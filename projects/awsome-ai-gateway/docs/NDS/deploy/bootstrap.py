@@ -313,7 +313,8 @@ def _manual_alb_pins(env_dir_path: Path) -> set[str]:
 
 def env_apply(env_dir_path: Path, gen_dir: Path,
               backend: tuple[str, str] | None = None) -> dict:
-    """terraform init(+backend-config) → apply (base tfvars + managed overlay).
+    """terraform init(+backend-config) → plan(-detailed-exitcode, 출력 스트림)
+    → saved plan apply (base tfvars + managed overlay).
 
     반환: terraform outputs."""
     init = ["terraform", "init", "-input=false"]
@@ -394,8 +395,30 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
                     "실행해 ALB dimension 을 발견·기록하거나, 수동 경로라면 "
                     "env terraform.tfvars 에 alb_lb_dimensions/alb_target_groups "
                     "를 고정한 뒤 bootstrap 을 재실행하세요")
-    _run(["terraform", "apply", "-auto-approve", "-input=false", *var_args],
-         cwd=env_dir_path)
+    # plan → saved plan → apply: 첫 배포가 수백 리소스를 -auto-approve 로
+    # 바로 만들던 계약이었다 — plan 출력이 터미널에 그대로 보이게 하고,
+    # 검토된 plan 파일을 그대로 적용해 plan↔apply 사이 drift 도 막는다.
+    plan_file = gen_dir / "bootstrap.tfplan"
+    try:
+        pr = subprocess.run(
+            ["terraform", "plan", "-detailed-exitcode", "-input=false",
+             "-out", str(plan_file), *var_args],
+            cwd=env_dir_path)
+    except FileNotFoundError:
+        raise SystemExit("terraform 명령을 못 찾았습니다 — 설치와 PATH 확인 필요")
+    if pr.returncode == 1:
+        raise SystemExit("terraform plan 실패 — 위 오류를 확인하세요")
+    try:
+        if pr.returncode == 0:
+            print("ⓘ terraform plan: 변경 없음 — env 인프라가 이미 선언 "
+                  "상태입니다 (재실행 안전 경로)", file=sys.stderr)
+            return eks_apply.tf_outputs(env_dir_path)
+        # rc==2 — 변경 있음. 방금 출력된 그 plan 그대로 적용 (saved plan 은
+        # 승인 프롬프트가 없다 — 승인은 위 _confirm_apply 에서 이미 받음)
+        _run(["terraform", "apply", "-input=false", str(plan_file)],
+             cwd=env_dir_path)
+    finally:
+        plan_file.unlink(missing_ok=True)  # plan 은 민감값을 담을 수 있어 정리
     return eks_apply.tf_outputs(env_dir_path)
 
 

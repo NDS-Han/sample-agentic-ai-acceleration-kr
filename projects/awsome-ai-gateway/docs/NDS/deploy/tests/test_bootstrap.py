@@ -550,3 +550,61 @@ def test_onboard_admin_placeholder_email_warns(monkeypatch, tmp_path):
     notes = bootstrap.onboard_admin(
         _cfg(), tmp_path, {"cognito_user_pool_id": "p"}, "r")
     assert any("플레이스홀더" in n for n in notes)
+
+
+def test_env_apply_runs_plan_then_saved_plan(monkeypatch, tmp_path):
+    """첫 배포도 plan 이 먼저 돌고, 출력된 그 plan 파일을 apply 한다."""
+    env = tmp_path / "env"; env.mkdir()
+    gen = tmp_path / "gen"; gen.mkdir()
+    calls = []
+    monkeypatch.setattr(bootstrap, "_run",
+                        lambda a, **k: calls.append(a) or _cp(0))
+    monkeypatch.setattr(bootstrap.eks_apply, "_run_quiet",
+                        lambda a, **k: _cp(0))
+    monkeypatch.setattr(bootstrap.eks_apply, "tf_outputs",
+                        lambda d: {"x": 1})
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda a, **k: calls.append(a) or _sp.CompletedProcess(a, 2, "", ""))
+    outs = bootstrap.env_apply(env, gen, ("bkt", "tbl"))
+    assert outs == {"x": 1}
+    argv0 = calls[0][0]
+    assert argv0 == "terraform" and "init" in calls[0]
+    plan = next(c for c in calls if "plan" in c and "-detailed-exitcode" in c)
+    assert "-out" in plan
+    apply = calls[-1]
+    assert "apply" in apply and "-auto-approve" not in apply
+    assert any(str(gen / "bootstrap.tfplan") in str(a) for a in apply)
+    assert not (gen / "bootstrap.tfplan").exists()  # 민감값 정리
+
+
+def test_env_apply_no_changes_skips_apply(monkeypatch, tmp_path):
+    """plan rc==0(변경 없음)이면 apply 를 호출하지 않는다 — 재실행 빠른 경로."""
+    env = tmp_path / "env"; env.mkdir()
+    gen = tmp_path / "gen"; gen.mkdir()
+    calls = []
+    monkeypatch.setattr(bootstrap, "_run",
+                        lambda a, **k: calls.append(a) or _cp(0))
+    monkeypatch.setattr(bootstrap.eks_apply, "_run_quiet",
+                        lambda a, **k: _cp(0))
+    monkeypatch.setattr(bootstrap.eks_apply, "tf_outputs", lambda d: {})
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda a, **k: calls.append(a) or _sp.CompletedProcess(a, 0, "", ""))
+    bootstrap.env_apply(env, gen, None)
+    assert not any("apply" in c for c in calls)
+
+
+def test_env_apply_plan_failure_stops(monkeypatch, tmp_path):
+    env = tmp_path / "env"; env.mkdir()
+    gen = tmp_path / "gen"; gen.mkdir()
+    monkeypatch.setattr(bootstrap, "_run", lambda a, **k: _cp(0))
+    monkeypatch.setattr(bootstrap.eks_apply, "_run_quiet",
+                        lambda a, **k: _cp(0))
+    import subprocess as _sp
+    monkeypatch.setattr(
+        _sp, "run", lambda a, **k: _sp.CompletedProcess(a, 1, "", "err"))
+    with pytest.raises(SystemExit):
+        bootstrap.env_apply(env, gen, None)
