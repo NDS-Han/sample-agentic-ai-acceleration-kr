@@ -16,7 +16,8 @@
 | admin-ui 페이지 | `/chat` (ADMIN 전용) | 존재 |
 | DB 준비물 | `db/init/08_create_chat_reader.sql` (chat_reader 롤) + `chat_agent` 스키마 + pgvector 임베딩 | init/migration 경로로 이미 적용 |
 | AgentCore Runtime 리소스 | terraform **외** — `deploy apply` 가 `provision_agentcore_chatagent.py` 로 멱등 프로비저닝 (web_search 와 동일 패턴) | 자동화됨 |
-| 에이전트 이미지 | ECR `chat_agent_ecr_url` repo — 프로비저너가 없으면 docker/finch 로 자동 빌드·푸시 | apply 시 보장 |
+| 커스텀 Code Interpreter | terraform 외 — 프로비저너가 멱등 생성/재사용, Runtime env `CODE_INTERPRETER_ID` 주입 (PDF/리포트 S3 쓰기에 execution role 필요) | 자동화됨 |
+| 에이전트 이미지 | ECR `chat_agent_ecr_url` repo — 프로비저너가 없으면 docker/finch 로 자동 빌드·푸시. 태그는 git HEAD short SHA(`IMAGE_TAG` env 로 override) | apply 시 보장 |
 
 ## 활성화 절차
 
@@ -52,13 +53,20 @@ ECS 는 managed overlay 가 없어 env tfvars 로 바로 간다.
 apply 가 `chatagent.ensure_runtime_arn()` 을 호출해:
 
 1. `status` — 같은 이름(`chat_agent_name` 의 하이픈→밑줄 정규화)의 Runtime
-   이 있으면 재사용
+   이 있으면 **containerUri·env 비교 후 수렴**: 다르면 `update_agent_runtime`
+   으로 업데이트해 READY 폴링(에이전트 코드 변경이 apply 로 실제 배포됨),
+   같으면 재사용
 2. 없으면 `deploy`:
-   - ECR 에 `<ecr_url>:latest`(IMAGE_TAG env 로 변경 가능)가 있는지 확인 —
-     없으면 docker/finch 로 `linux/arm64` 빌드·푸시를 시도하고, 빌더가
-     없으면 수동 빌드 명령을 출력하고 graceful-off
+   - 이미지 태그는 git HEAD short SHA — `latest` 고정이면 Runtime 이 생성
+     시점 이미지에 머물러 코드 변경이 반영되지 않는다. `IMAGE_TAG` env 로
+     명시 override 가능(테스트/핫픽스)
+   - ECR 에 `<ecr_url>:<sha>` 가 있는지 확인 — 없으면 docker/finch 로
+     `linux/arm64` 빌드·푸시를 시도하고, 빌더가 없으면 수동 빌드 명령을
+     출력하고 graceful-off
+   - 커스텀 Code Interpreter 를 같은 이름으로 멱등 생성/재사용
    - `create_agent_runtime`(containerUri, exec role, `networkMode: PUBLIC`,
-     LAMBDA_QUERY_DB·LAMBDA_GET_SCHEMA·CHAT_STAGING_BUCKET·AWS_REGION env)
+     LAMBDA_QUERY_DB·LAMBDA_GET_SCHEMA·CHAT_STAGING_BUCKET·AWS_REGION·
+     CODE_INTERPRETER_ID env)
    - READY 까지 폴링
 3. ARN 주입 — eks: `--set adminApi.env.AGENTCORE_RUNTIME_ARN=…` +
    `AGENTCORE_REGION` + `LAMBDA_QUERY_DB` + `CHAT_STAGING_BUCKET`.
@@ -71,12 +79,14 @@ apply 가 `chatagent.ensure_runtime_arn()` 을 호출해:
 agent 가 부르는 것은 Lambda invoke·Bedrock·S3 같은 공개 AWS API 뿐이고,
 DB 접속은 VPC 부착 query_db Lambda 가 대신한다.
 
-> Runtime 리전은 `CHAT_AGENT_REGION` env(기본 `ap-northeast-2` — admin-api
-> 코드 기본값과 동일). **Runtime 은 ECR 이미지와 같은 리전이어야 한다** —
-> `create_agent_runtime` 이 ECR URI 의 리전과 다르면 ValidationException 으로
-> 거부한다. 즉 `CHAT_AGENT_REGION` 은 배포 리전(ECR)과 같게 두는 것이 기본
-> 안전값이며, tfvars 의 `chat_agent_region` 변수(IRSA 스코프용)도 같은
-> `CHAT_AGENT_REGION` env 에서 자동 발산되므로 별도 손댈 필요는 없다.
+> Runtime 리전 해결 순서: `CHAT_AGENT_REGION` env → **배포 리전
+> (`aws.region`)** → 최후 fallback `ap-northeast-2`. 미설정이면 배포 리전이
+> 자동으로 쓰이므로 보통 손댈 필요가 없다 — 예전엔 env 부재 시 하드코드된
+> `ap-northeast-2` 로 떨어져 다른 리전 배포에서 "Runtime 없음" 오판과
+> `chat_agent_region` tfvars 리전 오류를 냈다.
+> **Runtime 은 ECR 이미지와 같은 리전이어야 한다** — `create_agent_runtime`
+> 이 ECR URI 의 리전과 다르면 ValidationException 으로 거부한다. tfvars 의
+> `chat_agent_region` 변수(IRSA 스코프용)도 같은 해결 순서로 발산된다.
 > Runtime 을 ECR 과 다른 리전에 두려면 이미지를 해당 리전의 ECR 로
 > 복제(replication 또는 재푸시)해야 한다.
 
@@ -153,10 +163,10 @@ email `sample_values` 는 합성 값 — 실 PII 넣지 말 것.)
 두 경로 모두 선언 수렴이다 — 수동으로 지울 것은 없다.
 
 - **기능만 끄기**: `features.bi_insight: false` 후 `deploy apply` →
-  `chatagent.teardown()` 이 Runtime 을 멱등 삭제하고(없으면 조회 한 번으로
-  종료), managed overlay/env tfvars 가 `module.agentcore_runtime` 을
-  destroy, admin-api env 도 비워진다 (eks: helm values 리셋, ecs:
-  extra-vars 의 `agentcore_runtime_arn` 자동 제거).
+  `chatagent.teardown()` 이 Runtime 과 커스텀 Code Interpreter 를 멱등
+  삭제하고(없으면 조회 한 번으로 종료), managed overlay/env tfvars 가
+  `module.agentcore_runtime` 을 destroy, admin-api env 도 비워진다 (eks:
+  helm values 리셋, ecs: extra-vars 의 `agentcore_runtime_arn` 자동 제거).
 - **환경 통째 파기**: `deploy teardown` — helm uninstall + terraform
   destroy 에 이어 web_search Gateway·pricing Lambda 와 같은 자리에서
   Runtime 도 함께 정리한다 (삭제 확인 패널에 표시됨).

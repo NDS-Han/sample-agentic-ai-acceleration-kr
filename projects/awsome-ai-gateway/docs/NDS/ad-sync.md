@@ -189,16 +189,15 @@ admin-ui 로그인은 `GET /admin/my/profile`로 역할만 조회합니다 — *
 
 | 경로 | 프로비저닝 | SAML 사용자 커버 |
 |---|---|---|
-| `POST /admin/users/sync-cognito` | 풀 그룹 순회 | ❌ 풀 그룹에 없어 못 봄 |
+| `POST /admin/users/sync-cognito` | 풀 그룹 순회 **+ 전체 유저 목록** — 각 유저의 `OIDC_GROUPS_CLAIM` **속성**(custom:groups)도 읽어 팀·역할에 반영 | ✅ (`groups_claim: custom:groups` 설정 시) |
 | `POST /v1/auth/exchange` | 자동 생성 (VK 발급) | ✅ |
 | admin-ui 로그인 | 없음 | ❌ |
 
-SAML 사용자는 풀 그룹이 없으므로 `sync-cognito`가 잡지 못합니다 — **첫
-admin-ui 로그인 전에 프로비저닝이 필요**합니다. 운영 선택지:
-
-- sync가 사용자의 `custom:groups` 속성도 읽도록 확장 (정석 — 미구현)
-- admin-ui 첫 로그인 시 provisioning 호출 (미구현)
-- 임시: 사용자에게 `/v1/auth/exchange` 호출 한 번 시키거나 관리자가 수동 생성
+SAML 사용자는 풀 그룹이 없어도 **전체 유저 열거(`_list_all_users`)에 잡히고**
+그 `custom:groups` 속성으로 팀이 해석됩니다 — `sync-cognito` 한 번이면
+프로비저닝되므로 첫 로그인 전 sync 실행이 정석 경로입니다. sync가 풀 그룹
+멤버만 순회하던 시절의 제약은 해소됐습니다(`attr_groups` 병합 — SAML 팀이
+stale-team 정리에서도 보존됨).
 
 ## 검증된 테스트 결과 (prod, AD 없이)
 

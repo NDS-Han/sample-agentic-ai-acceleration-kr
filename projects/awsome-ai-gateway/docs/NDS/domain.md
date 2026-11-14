@@ -42,8 +42,8 @@ domain:
 ```yaml
 domain:
   mode: route53-acm
-  name: ssirlabs.net
-  zone_id: Z06161782VTHCXZ98NZPG   # Route53 zone — 없으면 비워두고 수동 레코드
+  name: example.com
+  zone_id: Z0123456789ABCDEFGHIJ   # Route53 zone — 없으면 비워두고 수동 레코드
 ```
 
 > **클라이언트 안내 필수** — 주소가 `https://gateway.<domain>` 등으로 바뀝니다.

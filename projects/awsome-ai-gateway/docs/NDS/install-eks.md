@@ -105,7 +105,7 @@ capture 가 기록하는 것과 notes 가 알려주는 주의점:
   hosts 가 기록되면 네이밍은 유지되고, hosts 가 없으면 다음 render 가
   `gateway./admin./admin-api.<name>` 규칙을 씁니다.
 - **역산으로 복원되는 항목** — `domain.zone_id`(Route53 최장 접미사 매칭 —
-  도메인 자체 zone 이 없으면 `nds.remu.one` 같은 부모 zone 까지 접미사별로
+  도메인 자체 zone 이 없으면 `corp.example.com` 같은 부모 zone 까지 접미사별로
   조회합니다), `deploy.tfstate_bucket/table`(init 된 env 의
   `.terraform/terraform.tfstate`),
   `infra.bedrock_allowed_model_arns`/`mantle_regions`/`cognito_domain_suffix`

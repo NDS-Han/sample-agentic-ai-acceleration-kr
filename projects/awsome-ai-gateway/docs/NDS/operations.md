@@ -311,7 +311,7 @@ terraform 모듈은 두 갈래로 apply 됩니다 — 어디서 고쳤느냐에 
 
 | 모듈 | 수렴 경로 |
 |---|---|
-| `module.body_logging` · `module.irsa` · `module.cognito` | `./deploy apply` 의 managed overlay 가 `-target` 으로 자동 반영 |
+| `module.body_logging` · `module.irsa` · `module.cognito` · `module.agentcore_runtime`(bi_insight 시) | `./deploy apply` 의 managed overlay 가 `-target` 으로 자동 반영 |
 | 그 외 전부 (`module.vpc` `module.eks` `module.aurora` `module.elasticache` …) | **사람 소유** — `deploy apply` 가 손대지 않습니다. 운영자가 env 디렉터리에서 직접 apply: `terraform apply -var-file=<env>-generated.tfvars -target=module.<이름>` |
 
 즉 `deploy apply`가 green이어도 aurora/vpc 쪽 코드 변경은 라이브에 아직
