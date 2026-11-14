@@ -7,8 +7,74 @@
 from __future__ import annotations
 
 import os
+import re
 import secrets
 from pathlib import Path
+
+
+def tfvars_clean(text: str) -> str:
+    """tfvars 텍스트에서 주석·heredoc 본문·{} 맵 본문을 제거한 depth-0 잔여분.
+
+    단일 패스 스캐너 — regex 만으로는 "문자열 안의 # / 들여쓰기 없는 map 본문
+    안의 key=" 처럼 상태가 필요한 경우를 못 걸러 오파싱한다:
+      - ``#``, ``//`` 라인 주석과 ``/* */`` 블록 주석 (문자열 밖일 때만)
+      - ``<<TAG``/``<<-TAG`` heredoc — 종결 ``^TAG$`` 까지 통째로 제거
+      - ``{ ... }`` 본문 — map 값 안의 key=val 은 최상위 할당이 아니다
+    문자열 내용("a#b", "a]b")은 보존된다 — 스캐너가 문자열 상태를 추적하므로.
+    """
+    buf: list[str] = []
+    i, n, depth = 0, len(text), 0
+    in_str = False
+    while i < n:
+        c = text[i]
+        if in_str:
+            # 문자열 상태는 추적해 "} 안의 }" 가 depth 를 깎지 않게 한다 —
+            # 다만 map 본문(depth>0) 안의 문자열은 버퍼에 넣지 않는다
+            if depth == 0:
+                buf.append(c)
+                if c == "\\" and i + 1 < n:      # 이스케이프 쌍은 통째로 통과
+                    buf.append(text[i + 1])
+                    i += 2
+                    continue
+            elif c == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if c == '"':
+                in_str = False
+            i += 1
+            continue
+        if c == '"':
+            in_str = True
+            if depth == 0:
+                buf.append(c)
+            i += 1
+            continue
+        if c == "#" or text[i:i + 2] == "//":
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if text[i:i + 2] == "/*":
+            j = text.find("*/", i + 2)
+            i = n if j < 0 else j + 2
+            continue
+        if text[i:i + 2] == "<<":
+            m = re.match(r"<<-?(\w+)", text[i:])
+            if m:
+                end = re.search(rf"(?m)^{re.escape(m.group(1))}\s*$", text[i:])
+                i = n if not end else i + end.end()
+                continue
+        if c == "{":
+            depth += 1
+            i += 1
+            continue
+        if c == "}":
+            depth = max(0, depth - 1)
+            i += 1
+            continue
+        if depth == 0:
+            buf.append(c)
+        i += 1
+    return "".join(buf)
 
 
 def gen_password() -> str:

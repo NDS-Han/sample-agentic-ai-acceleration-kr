@@ -216,17 +216,36 @@ def ensure_tfstate(cfg: GatewayConfig, repo_root: Path, *, eks: bool,
 
 # ── 3. env terraform apply ────────────────────────────────────────────────────
 
-def _has_manual_alb_dims(env_dir_path: Path) -> bool:
-    """env terraform.tfvars 에 ALB dimension 수동 고정(§8-A 수동 경로)이
-    있는가 — 주석 라인을 제거한 뒤 실제 할당만 매칭해 `# alb_lb_dimensions`
-    같은 죽은 선언이 가드를 우회하지 못하게 한다."""
-    env_tfvars = env_dir_path / "terraform.tfvars"
-    if not env_tfvars.exists():
-        return False
-    _t = "\n".join(l for l in env_tfvars.read_text().splitlines()
-                   if not l.lstrip().startswith("#"))
-    return bool(re.search(
-        r"(?m)^[ \t]*alb_(?:lb_dimensions|target_groups)[ \t]*=", _t))
+def _manual_alb_pins(env_dir_path: Path) -> set[str]:
+    """수동 고정된 ALB dimension 변수명 집합 — §8-A 수동 경로 감지용.
+
+    terraform.tfvars + *.auto.tfvars + terraform.tfvars.json + TF_VAR_alb_*
+    환경변수를 본다 (전부 terraform 이 실제로 읽는 채널). 주석은 스캐너로
+    제거 — `# alb_lb_dimensions` 같은 죽은 선언이 가드를 우회하지 못한다."""
+    from .render.common import tfvars_clean
+    pinned: set[str] = set()
+    for name in ("alb_lb_dimensions", "alb_target_groups"):
+        if os.environ.get(f"TF_VAR_{name}") is not None:
+            pinned.add(name)
+    candidates = [env_dir_path / "terraform.tfvars",
+                  env_dir_path / "terraform.tfvars.json",
+                  *sorted(env_dir_path.glob("*.auto.tfvars"))]
+    pat = re.compile(r"(?m)^[ \t]*(alb_(?:lb_dimensions|target_groups))[ \t]*=")
+    for f in candidates:
+        try:
+            if not f.exists():
+                continue
+            text = f.read_text()
+        except OSError:
+            continue
+        if f.suffix == ".json":
+            # tfvars.json 은 {"key": value} — 주석 불가라 키 존재면 고정
+            pinned.update(n for n in
+                          ("alb_lb_dimensions", "alb_target_groups")
+                          if re.search(rf'"{n}"\s*:', text))
+        else:
+            pinned.update(pat.findall(tfvars_clean(text)))
+    return pinned
 
 
 def env_apply(env_dir_path: Path, gen_dir: Path,
@@ -261,8 +280,15 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
             state_dims = set(re.findall(
                 r'aws_cloudwatch_metric_alarm\.alb_target_5xx\["([^"]+)"\]',
                 st.stdout))
-            file_dims = set(re.findall(
-                r'"(app/[^"]+)"', alb_dims.read_text()))
+            state_tgs = set(re.findall(
+                r'aws_cloudwatch_metric_alarm\.alb_unhealthy\["([^"]+)"\]',
+                st.stdout))
+            try:
+                _dims_text = alb_dims.read_text()
+            except (OSError, UnicodeDecodeError):
+                _dims_text = ""
+            file_dims = set(re.findall(r'"(app/[^"]+)"', _dims_text))
+            file_tgs = set(re.findall(r'"(targetgroup/[^"]+)"', _dims_text))
             # state 에 알람이 하나도 없는 첫 적용은 dims 일치 비교가 무의미
             # — 차이 경고가 매번 오탐된다.
             if state_dims and file_dims != state_dims:
@@ -270,27 +296,41 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
                       f" 이 state({sorted(state_dims)})와 다릅니다 — stale "
                       "일 수 있으니 `deploy apply` 로 갱신하는 편이 안전합니다",
                       file=sys.stderr)
+            if state_tgs and file_tgs != state_tgs:
+                print(f"⚠ {alb_dims.name} 의 TargetGroup dimension "
+                      f"({sorted(file_tgs)})이 state({sorted(state_tgs)})와 "
+                      "다릅니다 — stale 일 수 있으니 `deploy apply` 로 "
+                      "갱신하는 편이 안전합니다", file=sys.stderr)
     else:
         # 파일 부재(gen/ 는 gitignore — 신규 머신/클론 기본값)인데 state 에
         # ALB 알람이 있으면 이 apply 가 조용히 전량 삭제한다 — 단 env
         # terraform.tfvars 에 dims 를 수동 고정한 경우(§8-A 수동 경로)는
         # 삭제가 아니므로 차단하지 않는다.
-        manual_dims = _has_manual_alb_dims(env_dir_path)
+        pinned = _manual_alb_pins(env_dir_path)
         st = eks_apply._run_quiet(["terraform", "state", "list"],
                                 cwd=env_dir_path, timeout=120)
         if st.returncode != 0:
             print("ⓘ terraform state list 실패 — ALB 알람 존재 여부를 검증하지 "
                   "못했습니다 (backend 일시 오류면 apply 도 실패합니다)",
                   file=sys.stderr)
-        elif not manual_dims and any(
-                "aws_cloudwatch_metric_alarm.alb_" in l
-                for l in st.stdout.splitlines()):
-            raise SystemExit(
-                f"ALB 알람이 state 에 있지만 {alb_dims} 이 없습니다 — "
-                "이 apply 가 알람을 삭제합니다. 먼저 `deploy apply` 를 "
-                "실행해 ALB dimension 을 발견·기록하거나, 수동 경로라면 "
-                "env terraform.tfvars 에 alb_lb_dimensions/alb_target_groups "
-                "를 고정한 뒤 bootstrap 을 재실행하세요")
+        else:
+            # 패밀리별 요구 — alb_target_5xx 는 lb_dimensions 가,
+            # alb_unhealthy 는 target_groups 가 있어야 삭제가 아닌 유지다.
+            # 한쪽만 고정하면 다른 패밀리가 [] 로 평가돼 지워진다.
+            need: set[str] = set()
+            if 'aws_cloudwatch_metric_alarm.alb_target_5xx[' in st.stdout:
+                need.add("alb_lb_dimensions")
+            if 'aws_cloudwatch_metric_alarm.alb_unhealthy[' in st.stdout:
+                need.add("alb_target_groups")
+            missing = need - pinned
+            if missing:
+                raise SystemExit(
+                    f"ALB 알람이 state 에 있지만 {alb_dims} 이 없고 수동 고정"
+                    f"({', '.join(sorted(missing))})도 없습니다 — "
+                    "이 apply 가 알람을 삭제합니다. 먼저 `deploy apply` 를 "
+                    "실행해 ALB dimension 을 발견·기록하거나, 수동 경로라면 "
+                    "env terraform.tfvars 에 alb_lb_dimensions/alb_target_groups "
+                    "를 고정한 뒤 bootstrap 을 재실행하세요")
     _run(["terraform", "apply", "-auto-approve", "-input=false", *var_args],
          cwd=env_dir_path)
     return eks_apply.tf_outputs(env_dir_path)

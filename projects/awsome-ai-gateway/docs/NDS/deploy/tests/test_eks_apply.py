@@ -3,6 +3,8 @@
 import json
 import subprocess
 
+import pytest
+
 from deploy import eks_apply
 
 
@@ -882,15 +884,53 @@ def test_tfvars_list_ignores_commented_and_prefixed(tmp_path):
         "https://live.example.com/"]
 
 
-def test_has_manual_alb_dims(tmp_path):
-    """F2/F3 — 주석 처리된 선언은 수동 고정이 아니다."""
+def test_manual_alb_pins(tmp_path):
+    """F2/F3 + 6차 — 주석 처리된 선언은 수동 고정이 아니고, 변수별로 구분해
+    반환한다 (한쪽만 고정이면 다른 패밀리는 여전히 차단돼야 한다)."""
     from deploy import bootstrap
     (tmp_path / "terraform.tfvars").write_text(
         '# alb_lb_dimensions = ["app/x/1"]\nfoo = 1\n')
-    assert bootstrap._has_manual_alb_dims(tmp_path) is False
+    assert bootstrap._manual_alb_pins(tmp_path) == set()
     (tmp_path / "terraform.tfvars").write_text(
         'alb_target_groups = [{lb="app/x/1", tg="targetgroup/y/2"}]\n')
-    assert bootstrap._has_manual_alb_dims(tmp_path) is True
+    assert bootstrap._manual_alb_pins(tmp_path) == {"alb_target_groups"}
+    # terraform 이 실제로 읽는 다른 채널들
+    (tmp_path / "terraform.tfvars").write_text("foo = 1\n")
+    (tmp_path / "x.auto.tfvars").write_text(
+        'alb_lb_dimensions = ["app/x/1"]\n')
+    assert bootstrap._manual_alb_pins(tmp_path) == {"alb_lb_dimensions"}
+    (tmp_path / "x.auto.tfvars").unlink()
+    (tmp_path / "terraform.tfvars.json").write_text(
+        '{"alb_target_groups": [{"lb": "a", "tg": "b"}]}')
+    assert bootstrap._manual_alb_pins(tmp_path) == {"alb_target_groups"}
+    (tmp_path / "terraform.tfvars.json").unlink()
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setenv("TF_VAR_alb_lb_dimensions", '["app/x/1"]')
+    assert bootstrap._manual_alb_pins(tmp_path) == {"alb_lb_dimensions"}
+    monkeypatch.undo()
+
+
+def test_apply_managed_blocked_branch(monkeypatch, tmp_path):
+    """6차 — _apply_managed 의 blocked 3-튜플 계약을 직접 고정:
+    required+blocked → SystemExit, drift+blocked → 경고 후 False(helm 계속)."""
+    ok = subprocess.CompletedProcess([], 0, "plan ok", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: ok)
+    monkeypatch.setattr(
+        eks_apply, "_inspect_managed_plan",
+        lambda *a, **k: ([], [],
+                         ["alb_target_5xx[app/x/1] (delete) — 차단"]))
+    called = []
+    monkeypatch.setattr(eks_apply, "_run", lambda *a, **k: called.append(a))
+    # drift(required=False): apply 를 건너뛰고 False — 알람 보존 + helm 계속
+    assert eks_apply._apply_managed(
+        tmp_path, ["-target=module.alerting"], [], "drift", required=False,
+        allow_alb_destroy=False) is False
+    assert called == []            # terraform apply 가 실행되지 않았다
+    # required=True: 배포 중단
+    with pytest.raises(SystemExit):
+        eks_apply._apply_managed(
+            tmp_path, ["-target=module.alerting"], [], "missing", required=True,
+            allow_alb_destroy=False)
 
 
 def test_alb_dims_unmatched_hostname_is_whole_failure(monkeypatch):

@@ -704,7 +704,8 @@ def cmd_apply(args) -> int:
             console.print(f"[red]{exc}")
             return 1
         console.print(f"\n[green]helm upgrade 완료 — {result['release']} @ ns={result['namespace']}")
-        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+        rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT,
+                            context=context)
         console.print(doc.format_report(cfg, rep))
         _post_apply_notes(cfg)
         return 0 if rep.worst != "HIGH" else 1
@@ -1168,7 +1169,7 @@ def cmd_bootstrap(args) -> int:
     for n in bootstrap.onboard_admin(
             cfg, REPO_ROOT, eks_apply.tf_outputs(env_target), cfg.aws.region):
         console.print(f"  ⓘ {n}")
-    rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT)
+    rep = doc.check_eks(cfg, GEN_ROOT / cfg.env, REPO_ROOT, context=context)
     console.print(doc.format_report(cfg, rep))
     _post_apply_notes(cfg)
     return 0 if rep.worst != "HIGH" else 1

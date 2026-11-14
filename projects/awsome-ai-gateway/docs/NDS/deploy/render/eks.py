@@ -448,16 +448,16 @@ def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
     """env terraform.tfvars 에 선언된 리스트 변수의 문자열 원소 — gen 오버레이가
     리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도.
 
-    주석 라인은 제거 — `# cognito_callback_urls = [...]` 같은 죽은 선언이
+    주석은 라인 필터가 아니라 tfvars_clean 스캐너로 제거 —
+    `#`/`//` 라인 주석, `/* */` 블록 주석, heredoc·map 본문 안의 죽은 선언이
     살아나 OAuth 리다이렉트 허용 목록을 오염시키는 것을 막는다.
     접두 변수(legacy_cognito_callback_urls)도 ^ 앵커로 걸러낸다."""
     import re
+    from .common import tfvars_clean
     tf = env_dir / "terraform.tfvars" if env_dir else None
     if not tf or not tf.exists():
         return []
-    text = "\n".join(
-        l for l in tf.read_text().splitlines()
-        if not l.lstrip().startswith("#"))
+    text = tfvars_clean(tf.read_text())
     m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\[(.*?)\]", text, re.S)
     return re.findall(r'"([^"]+)"', m.group(1)) if m else []
 
