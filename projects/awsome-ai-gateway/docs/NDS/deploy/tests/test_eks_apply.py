@@ -534,25 +534,26 @@ def _discover_fake(monkeypatch, *, kubectl_rc=0, hostnames="alb.example.com",
                 argv, 0, json.dumps({"TargetGroups": tgs or []}), "")
         return subprocess.CompletedProcess(argv, 0, "", "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    eks_apply._ALB_DIMS_CACHE.clear()  # 프로세스 캐시 — 테스트 간 오염 방지
     return calls
 
 
 def test_alb_dims_disabled_no_calls(monkeypatch):
     calls = _discover_fake(monkeypatch)
     cfg = _cfg(features={"notifications": {"provider": "mock"}})
-    assert eks_apply._discover_alb_dims(cfg) == ([], [])
+    assert eks_apply._discover_alb_dims(cfg)[:2] == ([], [])
     assert calls == []
 
 
 def test_alb_dims_kubectl_failure_converges_empty(monkeypatch):
     """첫 배포/kubectl 실패 — 빈 결과로 수렴, 예외 없음."""
     _discover_fake(monkeypatch, kubectl_rc=1)
-    assert eks_apply._discover_alb_dims(_alert_cfg()) == ([], [])
+    assert eks_apply._discover_alb_dims(_alert_cfg())[:2] == ([], [])
 
 
 def test_alb_dims_no_ingress_hostname_empty(monkeypatch):
     calls = _discover_fake(monkeypatch, hostnames="")
-    assert eks_apply._discover_alb_dims(_alert_cfg()) == ([], [])
+    assert eks_apply._discover_alb_dims(_alert_cfg())[:2] == ([], [])
     assert not any("describe-load-balancers" in a for a in calls)
 
 
@@ -565,7 +566,7 @@ def test_alb_dims_resolves_lb_and_tg(monkeypatch):
             "LoadBalancerArn": _ARN_LB + "-nlb"}]
     tgs = [{"TargetGroupArn": _ARN_TG}]
     calls = _discover_fake(monkeypatch, lbs=lbs, tgs=tgs)
-    lb_dims, tg_pairs = eks_apply._discover_alb_dims(_alert_cfg())
+    lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
     # hostname 일치 + application 타입만 — NLB/다른 ALB 제외
     assert lb_dims == ["app/k8s-lb-a/aaa111"]
     assert tg_pairs == [{"lb": "app/k8s-lb-a/aaa111",
@@ -639,3 +640,97 @@ def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
     plan_argv = [a for a in tf_calls if "plan" in a][0]
     assert "-target=module.alerting" in plan_argv
     assert any("alerts-dims.tfvars" in a for a in plan_argv)
+
+
+def test_alb_dims_cached_per_run(monkeypatch):
+    """한 프로세스에서 (ns, region, context) 당 1회만 AWS 호출 — apply 의
+    ensure_infra + managed plan 중복 발견 방지."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+    calls = _discover_fake(monkeypatch, kubectl_rc=1)
+    eks_apply._discover_alb_dims(_alert_cfg())
+    eks_apply._discover_alb_dims(_alert_cfg())
+    assert len(calls) == 1
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+
+def test_alerting_var_args_stale_reuse(monkeypatch, tmp_path, capsys):
+    """알람이 있는 상태에서 발견 실패 → 이전 var-file 재사용. 안 하면
+    alb_*=[] 평가로 기존 알람이 destroy-plan → 파괴 가드가 apply 중단."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+    _discover_fake(monkeypatch, kubectl_rc=1)
+    f = tmp_path / "alerts-dims.tfvars"
+    f.write_text('alb_lb_dimensions = ["app/old/1"]\n')
+    args = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
+    assert args == [f"-var-file={f.resolve()}"]
+    assert "재사용" in capsys.readouterr().err
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+
+def test_alb_dims_malformed_arn_skipped(monkeypatch):
+    """구분자 없는 ARN·키 부재 항목은 스킵 — nonsense dimension 주입 금지."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+    lbs = [{"DNSName": "alb.example.com", "Type": "application",
+            "LoadBalancerArn": "arn:bogus-no-delimiter"},
+           {"DNSName": "alb.example.com", "Type": "application"},  # arn 키 없음
+           {"DNSName": "alb.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB}]
+    _discover_fake(monkeypatch, lbs=lbs,
+                   tgs=[{"TargetGroupArn": "arn:broken"}, {"no-arn": 1},
+                        {"TargetGroupArn": _ARN_TG}])
+    lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
+    assert lb_dims == ["app/k8s-lb-a/aaa111"]
+    assert tg_pairs == [{"lb": "app/k8s-lb-a/aaa111",
+                         "tg": "targetgroup/k8s-tg-a/bbb222"}]
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+
+# ==============================================================================
+# ALB 알람 destroy 화이트리스트 — dimension 교체는 정상 수명주기
+# ==============================================================================
+
+def test_managed_plan_allows_alb_alarm_destroy(tmp_path, monkeypatch):
+    """ALB id 변경 → 신 dims 발견 → plan 에 구 알람 delete. 이 리소스는
+    허용 — 안 하면 ALB 교체 때마다 apply 가 영구 블록."""
+    (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
+        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+                        "alb_target_5xx[\"app/old/1\"]", ["delete"]),
+        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+                        "alb_unhealthy[\"targetgroup/x/1\"]", ["delete"]),
+        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+                        "alb_target_5xx[\"app/new/2\"]", ["create"]),
+    ]}))
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: subprocess.CompletedProcess(
+                            a, 0, (tmp_path / "plan.json").read_text(), ""))
+    bad, changes = eks_apply._inspect_managed_plan(
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
+    assert bad == []
+    assert len(changes) == 3
+
+
+def test_managed_plan_still_blocks_other_alarm_destroy(tmp_path, monkeypatch):
+    """화이트리스트는 ALB 알람뿐 — cache/aurora 알람 destroy 는 여전히 차단."""
+    (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
+        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+                        "cache_cpu[\"c1\"]", ["delete"]),
+    ]}))
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: subprocess.CompletedProcess(
+                            a, 0, (tmp_path / "plan.json").read_text(), ""))
+    bad, _ = eks_apply._inspect_managed_plan(
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
+    assert len(bad) == 1 and "파괴적 변경" in bad[0]
+
+
+def test_doctor_drift_includes_alb_dims_file(tmp_path):
+    """doctor drift plan 이 alerts-dims.tfvars 를 넘긴다 — 빠뜨리면
+    존재하는 ALB 알람이 매번 destroy drift 로 오진."""
+    from deploy import doctor
+    eks = tmp_path / "eks"
+    eks.mkdir()
+    (eks / "terraform.tfvars").write_text("a=1\n")
+    (eks / "alerts-dims.tfvars").write_text('alb_lb_dimensions=["x"]\n')
+    argv = doctor._tf_drift_plan_argv(tmp_path)
+    var_files = [a for a in argv if a.startswith("-var-file=")]
+    assert any("terraform.tfvars" in v for v in var_files)
+    assert any("alerts-dims.tfvars" in v for v in var_files)

@@ -588,75 +588,109 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
     return missing
 
 
+_ALB_DIMS_CACHE: dict = {}
+
+
 def _discover_alb_dims(cfg: GatewayConfig,
-                       context: str = "") -> tuple[list[str], list[dict]]:
+                       context: str = "") -> tuple[list[str], list[dict], str]:
     """ingress 의 ALB hostname → CloudWatch LoadBalancer/TargetGroup dimension.
 
     ALB·TG 는 LB controller 가 배포 시 부여한 id 를 dimension 으로 쓰므로
     plan-time 에 알 수 없다 — 라이브에서 발견한 것만 tfvars 로 내려 알람을
-    만든다. 첫 배포(ALB 미생성)나 kubectl/AWS 실패는 빈 결과로 수렴 —
-    다음 apply 가 알람을 채운다."""
+    만든다. 반환 셋째는 실패 사유(빈 결과일 때 경고 문구용). 결과는 한
+    프로세스 안에서 (namespace, region, context) 단위로 캐시 — apply 의
+    ensure_infra 와 managed plan 이 각각 부르는 중복 AWS 호출을 막는다."""
     if not cfg.features.alerting.enabled:
-        return [], []
+        return [], [], ""
+    key = (cfg.deploy.namespace, cfg.aws.region, context)
+    if key in _ALB_DIMS_CACHE:
+        return _ALB_DIMS_CACHE[key]
+
+    def done(lb_dims, tg_pairs, note=""):
+        _ALB_DIMS_CACHE[key] = (lb_dims, tg_pairs, note)
+        return _ALB_DIMS_CACHE[key]
+
     argv = ["kubectl", "get", "ingress", "-n", cfg.deploy.namespace, "-o",
             "jsonpath={.items[*].status.loadBalancer.ingress[*].hostname}"]
     if context:
         argv += ["--context", context]
     r = _run_quiet(argv, timeout=30)
     if r.returncode != 0:
-        return [], []
+        return done([], [], f"kubectl rc={r.returncode}")
     hostnames = set(r.stdout.split())
     if not hostnames:
-        return [], []
+        return done([], [], "ingress hostname 없음 (ALB 미생성?)")
     r = _run_quiet(["aws", "elbv2", "describe-load-balancers",
                     "--region", cfg.aws.region, "--output", "json"], timeout=60)
     if r.returncode != 0:
-        return [], []
+        return done([], [],
+                    f"describe-load-balancers rc={r.returncode}")
     try:
         lbs = json.loads(r.stdout or "{}").get("LoadBalancers") or []
     except json.JSONDecodeError:
-        return [], []
+        return done([], [], "describe-load-balancers 응답 파싱 실패")
     lb_dims: list[str] = []
     tg_pairs: list[dict] = []
     for lb in lbs:
+        if not isinstance(lb, dict):
+            continue
         if lb.get("DNSName") not in hostnames or lb.get("Type") != "application":
             continue
-        ldim = lb["LoadBalancerArn"].split(":loadbalancer/")[-1]  # app/<name>/<id>
+        arn = lb.get("LoadBalancerArn", "")
+        if ":loadbalancer/" not in arn:
+            continue
+        ldim = arn.split(":loadbalancer/")[-1]  # app/<name>/<id>
         lb_dims.append(ldim)
         r2 = _run_quiet(
             ["aws", "elbv2", "describe-target-groups",
-             "--load-balancer-arn", lb["LoadBalancerArn"],
+             "--load-balancer-arn", arn,
              "--region", cfg.aws.region, "--output", "json"], timeout=60)
         if r2.returncode != 0:
             continue
         try:
-            for tg in json.loads(r2.stdout or "{}").get("TargetGroups") or []:
-                # CW TargetGroup dimension 은 'targetgroup/<name>/<id>' 형식
-                tg_pairs.append({
-                    "lb": ldim,
-                    "tg": "targetgroup/"
-                          + tg["TargetGroupArn"].split(":targetgroup/")[-1]})
+            tgs = json.loads(r2.stdout or "{}").get("TargetGroups") or []
         except json.JSONDecodeError:
             continue
-    return lb_dims, tg_pairs
+        for tg in tgs:
+            if not isinstance(tg, dict):
+                continue
+            tg_arn = tg.get("TargetGroupArn", "")
+            if ":targetgroup/" not in tg_arn:
+                continue
+            # CW TargetGroup dimension 은 'targetgroup/<name>/<id>' 형식
+            tg_pairs.append({
+                "lb": ldim,
+                "tg": "targetgroup/" + tg_arn.split(":targetgroup/")[-1]})
+    if not lb_dims:
+        return done([], [], "hostname 과 일치하는 application LB 없음")
+    return done(lb_dims, tg_pairs)
 
 
 def _alerting_var_args(cfg: GatewayConfig, gen_dir: Path,
                        context: str = "") -> list[str]:
     """ALB dimension 을 별도 gen var-file 로 — render 는 오프라인 순수 함수라
     AWS 호출을 못 하므로 apply/plan 경로(여기)에서 라이브 발견을 주입한다.
-    발견 못 하면 파일을 쓰지 않는다 — 첫 배포(helm 전 ALB 없음)는 다음
-    apply 에서 수렴."""
+
+    발견 실패 시: 이전 발견 파일이 있으면 재사용한다 — transient 실패
+    (kubectl/AWS 오류)로 dims 가 [] 로 평가되면 기존 알람이 destroy-plan 에
+    잡혀 파괴 변경 가드가 apply 를 중단시키기 때문. 파일이 없으면(첫 배포)
+    var-file 없이 진행하고 다음 apply 에서 수렴한다."""
     if not cfg.features.alerting.enabled:
         return []
-    lb_dims, tg_pairs = _discover_alb_dims(cfg, context)
+    lb_dims, tg_pairs, note = _discover_alb_dims(cfg, context)
+    p = gen_dir / "alerts-dims.tfvars"
     if not lb_dims:
-        print("⚠ alerting: ALB dimension 을 발견하지 못했습니다 — "
+        if p.exists():
+            print(f"⚠ alerting: ALB 발견 실패({note}) — 이전 발견 파일 "
+                  f"{p.name} 을 재사용합니다. ALB 를 교체·삭제했다면 stale 일 "
+                  "수 있으니 확인 후 재발견이 필요하면 파일을 지우고 "
+                  "재실행하세요", file=sys.stderr)
+            return [f"-var-file={p.resolve()}"]
+        print(f"⚠ alerting: ALB dimension 을 발견하지 못했습니다({note}) — "
               "ALB 5xx/UnHealthyHost 알람은 아직 생성되지 않습니다. "
               "ingress ALB 가 뜬 뒤 `deploy apply` 를 한 번 더 실행해야 "
               "알람이 만들어집니다", file=sys.stderr)
         return []
-    p = gen_dir / "alerts-dims.tfvars"
     p.write_text(
         "# generated by deploy — 라이브 발견 ALB dimension (apply 마다 재생성)\n"
         f"alb_lb_dimensions = {json.dumps(sorted(lb_dims))}\n"
@@ -720,6 +754,16 @@ def _inspect_managed_plan(env_dir: Path, plan_path: Path,
         if not in_scope:
             bad.append(f"{addr} — target 모듈({', '.join(modules)}) 밖")
         elif any(a in ("delete", "replace", "forget") for a in acts):
+            # ALB 알람은 발견 dimension 이 for_each 키 — ALB 교체·제거로
+            # dims 가 바뀌면 구 알람의 delete 가 정상 수명주기다 (이 리소스만
+            # 예외 — 나머지 managed 리소스의 파괴 변경은 여전히 차단).
+            if addr.startswith(
+                    ("module.alerting.aws_cloudwatch_metric_alarm."
+                     "alb_target_5xx[",
+                     "module.alerting.aws_cloudwatch_metric_alarm."
+                     "alb_unhealthy[")):
+                changes.append(f"{addr} ({'+'.join(acts)})")
+                continue
             bad.append(f"{addr} — {'+'.join(acts)} (파괴적 변경은 자동 적용 불가)")
         else:
             changes.append(f"{addr} ({'+'.join(acts)})")

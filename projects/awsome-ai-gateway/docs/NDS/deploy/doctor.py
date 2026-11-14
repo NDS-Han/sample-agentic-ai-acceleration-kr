@@ -190,6 +190,12 @@ def _tf_drift_plan_argv(gen_dir: Path) -> list[str]:
     var_file = gen_dir / "eks" / "terraform.tfvars"
     if var_file.exists():
         argv.append(f"-var-file={var_file}")
+    # apply 가 발견한 ALB dimension 도 같이 넘긴다 — 빠뜨리면 alb_* 변수가
+    # [] 로 평가돼 이미 만든 ALB 알람이 destroy drift 로 오진된다.
+    # apply 가 쓴 그 파일을 읽기 전용 재사용 (AWS 호출 없음).
+    alb_dims = gen_dir / "eks" / "alerts-dims.tfvars"
+    if alb_dims.exists():
+        argv.append(f"-var-file={alb_dims}")
     return argv
 
 
