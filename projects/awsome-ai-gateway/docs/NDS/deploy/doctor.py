@@ -476,10 +476,17 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         ours = [i for i in all_items
                 if ((i.get("metadata") or {}).get("labels") or {})
                 .get("app.kubernetes.io/instance") == rel]
-        items = ours or all_items
+        # 폴백(레거시 무라벨 채택)에서도 다른 릴리스 소유가 명시된 아이템은
+        # 제외한다 — instance=<다른 release> 인 외부 deployment 가 component
+        # 라벨만 같으면 by_name 을 덮어써 우리 것으로 오흡수된다.
+        items = ours or [i for i in all_items
+                         if not ((i.get("metadata") or {}).get("labels") or {})
+                         .get("app.kubernetes.io/instance")]
         # 서비스 식별은 component 라벨 우선 — 이름 프리픽스는 fullnameOverride
         # 면 어긋나 전부 "deployment 없음" 으로 오진된다. 라벨 없는 수동 배포는
-        # 이름 접두(<release>-<svc>) 폴백.
+        # 이름 접두(<release>-<svc>) 폴백. setdefault — kubectl 은 이름순
+        # 반환이라 동일 component 를 주장하는 중복 아이템이 있으면 첫 것이
+        # 우리 release 쪽일 가능성이 높다(덮어쓰기 방지).
         by_name = {}
         for i in items:
             labels = (i.get("metadata") or {}).get("labels") or {}
@@ -490,7 +497,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                     if n.startswith(p):
                         n = n[len(p):]
                         break
-            by_name[n] = i
+            by_name.setdefault(n, i)
         for name in EKS_DEPLOYMENTS:
             d = by_name.get(name) or by_name.get(f"{rel}-{name}")
             if not d:
@@ -526,8 +533,9 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 try:
                     return {
                         e["name"]: e.get("value", "")
-                        for e in d["spec"]["template"]["spec"]
-                                 ["containers"][0].get("env", [])
+                        for e in (d["spec"]["template"]["spec"]
+                                  ["containers"][0].get("env") or [])
+                        if isinstance(e, dict)
                     }
                 except (KeyError, IndexError):
                     return {}
@@ -554,7 +562,12 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             ours = [j for j in all_jobs
                     if ((j.get("metadata") or {}).get("labels") or {})
                     .get("app.kubernetes.io/instance") == rel]
-            jobs = [j for j in (ours or all_jobs)
+            # deployments 와 같은 규칙 — 무라벨 폴백에서도 타 릴리스 소유가
+            # 명시된 Job 은 우리 migration 결과로 오흡수하지 않는다.
+            unowned = [j for j in all_jobs
+                       if not ((j.get("metadata") or {}).get("labels") or {})
+                       .get("app.kubernetes.io/instance")]
+            jobs = [j for j in (ours or unowned)
                     if "migration" in j["metadata"]["name"]]
             job = max(jobs, key=lambda j: j["metadata"].get("creationTimestamp", "")) if jobs else None
         except (json.JSONDecodeError, ValueError, KeyError):

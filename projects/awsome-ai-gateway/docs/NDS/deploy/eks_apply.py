@@ -111,10 +111,10 @@ def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
         if target is None:
             return ""
         env = target["spec"]["template"]["spec"][
-            "containers"][0].get("env", [])
+            "containers"][0].get("env") or []
         return next((e.get("value", "") for e in env
-                     if e.get("name") == var), "")
-    except (json.JSONDecodeError, KeyError, IndexError):
+                     if isinstance(e, dict) and e.get("name") == var), "")
+    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
         return ""
 
 
@@ -357,7 +357,7 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
         # IRSA 가 없으므로 자동 프로비저닝 대상이 아니다 — 선언자가 만들어야
         # 함을 알리고 생략한다 (ExternalSecret 이 SecretSyncedError 로 상태를
         # 보여주고 doctor 가 잡는다).
-        print(f"⚠ secretStoreRef.kind=SecretStore ('{name}') — namespaced store 는 "
+        print(f"⚠ secretStoreRef.kind={kind} ('{name}') — namespaced store 는 "
               f"같은 ns({meta['namespace']})의 IRSA ServiceAccount 가 필요해 "
               "NDS 가 자동 생성하지 않습니다. store 를 직접 만들거나 kind 를 "
               "ClusterSecretStore 로 바꾸세요 (기본 aws-secrets-manager 는 자동 보장)",
@@ -1362,6 +1362,88 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
             print(f"    {line}")
 
 
+def _human_declared_chat_agent(env_dir: Path) -> bool:
+    """사람이 env 의 변수 채널 어딘가에 enable_chat_agent=true 를 선언했는지.
+
+    HCL(tfvars/auto.tfvars — `= true` 와 `= "true"`, terraform 은 string
+    "true" 를 bool 로 강제변환한다) + JSON(tfvars.json/auto.tfvars.json —
+    tfvars_clean 이 {} 본문을 제거하므로 원문 스캔) + TF_VAR 환경변수까지
+    본다. 하나라도 놓치면 사람 소유 Runtime 을 매 apply 삭제/재생한다."""
+    from .render.common import tfvars_clean
+    from .render.eks import _env_tfvars_texts
+    if re.search(r'(?m)^\s*enable_chat_agent\s*=\s*"?true"?',
+                 tfvars_clean("\n".join(_env_tfvars_texts(env_dir)))):
+        return True
+    for f in [env_dir / "terraform.tfvars.json",
+              *sorted(env_dir.glob("*.auto.tfvars.json"))]:
+        try:
+            if f.exists() and re.search(
+                    r'"enable_chat_agent"\s*:\s*"?true"?', f.read_text()):
+                return True
+        except OSError:
+            continue
+    return os.environ.get("TF_VAR_enable_chat_agent", "").strip().lower() \
+        in ("true", "1")
+
+
+def _warn_missing_ecr_tags(cfg: GatewayConfig, region: str) -> None:
+    """선언된 image tag 가 ECR 에 실제 있는지 확인 — 없으면 helm upgrade 는
+    성공해도 pod 는 ImagePullBackOff 로 죽는다.
+
+    update 경로(deploy apply)는 이미지를 build/push 하지 않는다(bootstrap 만
+    한다) — 태그만 올리고 apply 하면 조용히 배포가 깨지므로 preview 단계에서
+    미리 경고한다. 비-ECR 레지스트리(docker hub·사내 harbor 등)는
+    describe-images 로 확인할 수 없어 스킵한다."""
+    from .bootstrap import EKS_SERVICES
+
+    registry = (cfg.images.registry or "").rstrip("/")
+    reg_id = ""
+    if registry:
+        if ".dkr.ecr." not in registry:
+            return  # 비-ECR 레지스트리는 확인 불가 — 경고 없이 스킵
+        reg_id = registry.split(".", 1)[0]
+
+    pairs: list[tuple[str, str]] = []
+    for helm_key, repo, _ in EKS_SERVICES:
+        tag = (cfg.images.tags or {}).get(helm_key) or cfg.images.tag
+        if tag and (repo, tag) not in pairs:
+            pairs.append((repo, tag))
+    # scheduler 는 admin-api repo 를 별도 태그로 당긴다(push_images_eks 와 동일 규약)
+    sched = (cfg.images.tags or {}).get("scheduler")
+    api_tag = (cfg.images.tags or {}).get("adminApi") or cfg.images.tag
+    if sched and sched != api_tag and ("admin-api", sched) not in pairs:
+        pairs.append(("admin-api", sched))
+    if not pairs:
+        return
+
+    missing: list[str] = []
+    unverifiable = False
+    for repo, tag in pairs:
+        argv = ["aws", "ecr", "describe-images", "--repository-name",
+                f"llm-gateway/{repo}", "--image-ids", f"imageTag={tag}",
+                "--region", region, "--output", "json"]
+        if reg_id:
+            argv += ["--registry-id", reg_id]
+        r = _run_quiet(argv, timeout=30)
+        if r.returncode == 0:
+            continue
+        err = r.stderr or ""
+        if "NotFoundException" in err:
+            missing.append(f"llm-gateway/{repo}:{tag}")
+        else:
+            unverifiable = True  # 권한·네트워크 등 조회 자체 실패 — 판단 유보
+    if missing:
+        print(
+            f"⚠ ECR 에 없는 이미지 태그가 선언됐습니다: {', '.join(missing)}\n"
+            "  deploy apply 는 이미지를 build/push 하지 않습니다 — 먼저 "
+            "build+push 하거나 태그를 되돌리세요. 그대로 진행하면 해당 "
+            "서비스는 ImagePullBackOff 합니다", file=sys.stderr)
+    elif unverifiable:
+        print("ⓘ ECR 이미지 태그 존재 확인에 실패했습니다(권한/네트워크) — "
+              "선언 태그가 이미 push 돼 있는지 별도 확인이 필요합니다",
+              file=sys.stderr)
+
+
 def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
     """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다.
 
@@ -1437,6 +1519,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         print(f"ⓘ pricing_lambda: function={st['function']} role={st['role']} "
               f"invoke={st['invoke']} — apply 시 없는 것만 보장합니다",
               file=sys.stderr)
+    _warn_missing_ecr_tags(cfg, cfg.aws.region)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
     # plan diff 도 apply 와 같은 --set 을 써야 한다 — status 조회만 하고
     # --set 을 안 넣으면 dry-run manifest 가 env 미주입으로 렌더돼
@@ -1594,13 +1677,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         # 사람 소유 — 매 apply 삭제/재생 루프가 되므로 건드리지 않는다.
         human_owned = False
         if env_dir:
-            # terraform.tfvars + *.auto.tfvars 전 채널 — auto.tfvars 선언을
-            # 놓치면 사람 소유 Runtime 을 매 apply 삭제/재생 루프로 만든다.
-            from .render.common import tfvars_clean
-            from .render.eks import _env_tfvars_texts
-            human_owned = bool(re.search(
-                r'(?m)^\s*enable_chat_agent\s*=\s*true',
-                tfvars_clean("\n".join(_env_tfvars_texts(env_dir)))))
+            human_owned = _human_declared_chat_agent(env_dir)
         if human_owned:
             print("ⓘ enable_chat_agent=true 가 env tfvars 에 선언돼 있습니다 — "
                   "bi_insight off 지만 Runtime 은 사람 소유라 유지합니다",

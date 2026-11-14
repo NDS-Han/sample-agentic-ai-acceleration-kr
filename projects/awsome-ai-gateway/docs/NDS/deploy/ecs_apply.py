@@ -50,7 +50,10 @@ def _run(argv: list[str], *, cwd: Path | None = None, capture: bool = False) -> 
 
 def tf_outputs(env_dir: Path) -> dict:
     r = _run(["terraform", "output", "-json"], cwd=env_dir, capture=True)
-    raw = json.loads(r.stdout or "{}")
+    try:
+        raw = json.loads(r.stdout or "{}")
+    except json.JSONDecodeError:
+        return {}
     return {k: v.get("value") for k, v in raw.items()}
 
 

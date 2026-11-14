@@ -225,8 +225,7 @@ def desired_values(cfg: GatewayConfig) -> dict:
             ab["emails"] = cfg.oidc.admin_emails
         v.setdefault("adminApi", {})["oidc"] = dict(o)
         v.setdefault("gatewayProxy", {})["oidc"] = dict(o)
-        ui_env = {"DEV_LOGIN_ENABLED": "true" if cfg.features.dev_login else "false",
-                  "OIDC_CLIENT_ID": cfg.oidc.client_id}
+        ui_env = {"OIDC_CLIENT_ID": cfg.oidc.client_id}
         if cfg.oidc.authorize_url:
             ui_env["OIDC_AUTHORIZE_URL"] = cfg.oidc.authorize_url
         if cfg.oidc.token_url:
@@ -235,8 +234,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
     # dev login 은 admin-api 가 dev. 토큰을 받아야 완결된다 — 어느 한쪽만
     # 켜지면 화면은 있는데 401 이거나 API 는 열렸는데 UI 가 막힌 반쪽 상태.
     # gen 레이어가 양쪽을 features.dev_login 하나로 정렬해 env overlay 의
-    # 흩어진 값까지 수렴시킨다.
-    _dl = "true" if cfg.features.dev_login else "false"
+    # 흩어진 값까지 수렴시킨다. 단 OIDC 배선 시 admin-api 는 dev 토큰을
+    # 무조건 거부(auth 삼중가드)하므로 UI 도 끈다 — 켜두면 영영 401 인
+    # 로그인 버튼만 남는다.
+    _dl = "true" if (cfg.features.dev_login and not cfg.oidc.enabled) \
+        else "false"
     v.setdefault("adminUi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = _dl
     v.setdefault("adminApi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = _dl
 
@@ -353,6 +355,10 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
         notes.append("web_search: apply 시 AgentCore Gateway(us-east-1)를 멱등 "
                      "프로비저닝하고 AGENTCORE_GATEWAY_URL 을 --set 합니다 — "
                      "boto3 와 us-east-1 agentcore/IAM 권한이 필요합니다.")
+    if cfg.oidc.enabled and cfg.features.dev_login:
+        notes.append("dev_login 은 OIDC 배선 중엔 무시됩니다 — admin-api 가 "
+                     "issuer 설정 시 dev. 토큰을 거부합니다(DEV_LOGIN_ENABLED=false "
+                     "로 수렴).")
     if cfg.oidc.enabled and cfg.oidc.client_secret:
         # 차트 adminUi env 범위는 value: 만 렌더하고 secretKeyRef 를 못 만든다 —
         # confidential client 는 템플릿 추가가 필요 (chart values.yaml 주석 §OIDC 참조)
@@ -491,7 +497,14 @@ def _env_tfvars_texts(env_dir: Path | None) -> list[str]:
         return []
     files = [env_dir / "terraform.tfvars",
              *sorted(env_dir.glob("*.auto.tfvars"))]
-    return [f.read_text() for f in files if f.exists()]
+    out: list[str] = []
+    for f in files:
+        try:
+            if f.exists():
+                out.append(f.read_text())
+        except OSError:
+            continue  # 읽기 실패·TOCTOU 삭제는 스캔 대상에서만 빠진다
+    return out
 
 
 def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:

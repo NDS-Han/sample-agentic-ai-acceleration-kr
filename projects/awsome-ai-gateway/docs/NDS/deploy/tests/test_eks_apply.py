@@ -1198,3 +1198,72 @@ def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):
     tfvars = (out / "terraform.tfvars").read_text() if (out / "terraform.tfvars").exists() \
         else (out / "managed.tfvars").read_text()
     assert 'application_namespace = "custom-ns"' in tfvars
+
+
+def test_live_deploy_env_null_and_nondict_entries(monkeypatch):
+    """15차 — live 컨테이너에 env: null 이거나 비-dict 항목이 있어도 ''
+    반환(계약) — TypeError/AttributeError 로 apply 가 죽으면 안 된다."""
+    dep = {"metadata": {"name": "r-admin-api",
+                        "labels": {"app.kubernetes.io/instance": "r",
+                                   "app.kubernetes.io/component": "admin-api"}},
+           "spec": {"template": {"spec": {
+               "containers": [{"env": None}]}}}}
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp([dep]))
+    assert eks_apply._live_deploy_env(
+        {"namespace": "ns", "release": "r"}, "admin-api",
+        "AGENTCORE_RUNTIME_ARN") == ""
+    dep["spec"]["template"]["spec"]["containers"][0]["env"] = [
+        "not-a-dict", {"name": "AGENTCORE_RUNTIME_ARN", "value": "arn:x"}]
+    assert eks_apply._live_deploy_env(
+        {"namespace": "ns", "release": "r"}, "admin-api",
+        "AGENTCORE_RUNTIME_ARN") == "arn:x"
+
+
+def test_human_declared_chat_agent_all_channels(tmp_path, monkeypatch):
+    """15차 — 사람 소유 판정은 HCL("true" 포함)·JSON tfvars·TF_VAR 전
+    채널을 본다 — 놓치면 Runtime 삭제/재생 루프."""
+    h = eks_apply._human_declared_chat_agent
+    assert h(tmp_path) is False
+    (tmp_path / "terraform.tfvars").write_text('enable_chat_agent = "true"\n')
+    assert h(tmp_path) is True
+    (tmp_path / "terraform.tfvars").write_text('# enable_chat_agent = true\n')
+    assert h(tmp_path) is False  # 주석은 선언이 아니다
+    (tmp_path / "terraform.tfvars").unlink()
+    (tmp_path / "x.auto.tfvars.json").write_text('{"enable_chat_agent": "true"}')
+    assert h(tmp_path) is True
+    (tmp_path / "x.auto.tfvars.json").write_text('{"enable_chat_agent": true}')
+    assert h(tmp_path) is True
+    (tmp_path / "x.auto.tfvars.json").unlink()
+    monkeypatch.setenv("TF_VAR_enable_chat_agent", "true")
+    assert h(tmp_path) is True
+
+
+def test_warn_missing_ecr_tags(monkeypatch, capsys):
+    """15차 — apply 경로는 이미지를 push 하지 않는다. 선언 태그가 ECR 에
+    없으면 ImagePullBackOff 가 확정이라 preview 에서 경고해야 한다."""
+    from deploy import schema
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "aws": {"region": "ap-northeast-2"},
+        "deploy": {"target": "eks", "size_tier": "t3"},
+        "images": {"tag": "v9"}})
+
+    def fake(argv, **k):
+        if "llm-gateway/admin-api" in argv:
+            return subprocess.CompletedProcess(
+                [], 1, "", "ImageNotFoundException")
+        return subprocess.CompletedProcess([], 0, "{}", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    eks_apply._warn_missing_ecr_tags(cfg, "ap-northeast-2")
+    assert "admin-api:v9" in capsys.readouterr().err
+    # 비-ECR 레지스트리는 describe-images 가 안 통하니 스킵
+    cfg2 = schema.from_dict({
+        "version": 1, "env": "dev", "aws": {"region": "ap-northeast-2"},
+        "deploy": {"target": "eks", "size_tier": "t3"},
+        "images": {"tag": "v9", "registry": "harbor.example.com/x"}})
+    called = []
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda *a, **k: called.append(a) or
+                        subprocess.CompletedProcess([], 0, "{}", ""))
+    eks_apply._warn_missing_ecr_tags(cfg2, "ap-northeast-2")
+    assert not called

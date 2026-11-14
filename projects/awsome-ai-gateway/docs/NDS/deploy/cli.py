@@ -891,7 +891,13 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     # env 의 실측 Runtime 이름을 미리 확보한다 (eks teardown 과 같은 계약).
     chat_name = ""
     if cfg.features.bi_insight:
-        chat_name = ecs_apply.tf_outputs(env_dir).get("chat_agent_name", "")
+        try:
+            chat_name = ecs_apply.tf_outputs(env_dir).get(
+                "chat_agent_name", "")
+        except SystemExit:
+            # output 조회 실패(state lock·미초기화)로 teardown 자체를 멈추면
+            # 안 된다 — 이름을 못 얻으면 도출값으로 teardown 이 진행된다.
+            pass
     try:
         if safeguards_on:
             ecs_render.render(cfg, out, extra_vars={

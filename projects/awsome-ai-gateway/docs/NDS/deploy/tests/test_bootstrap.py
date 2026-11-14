@@ -676,6 +676,43 @@ def test_sanitize_oidc_reordered_and_variants():
     assert bootstrap._sanitize_copied_values(once) == once
 
 
+def test_sanitize_oidc_crlf_and_yaml11_variants():
+    """15차 — CRLF 파일의 빈 줄이 gap 을 끊어 enabled:true 가 살아남는
+    미스(누출 방향)와 YAML 1.1 진리값 변형(on/TRUE/'yes'/y)·공백 콜론·
+    flow·탑레벨 oidc 를 잡는다."""
+    crlf = ('a:\r\n  oidc:\r\n    issuerUrl: x\r\n\r\n'
+            '    enabled: true\r\n  b: 1\r\n')
+    out = bootstrap._sanitize_copied_values(crlf)
+    assert "enabled: false" in out
+    # 공백 콜론 + 진리값 변형 전부 뒤집힌다
+    for v in ("enabled : true", "enabled: on", "enabled: 'yes'",
+              "enabled: TRUE", "enabled: y"):
+        t = f"a:\n  oidc:\n    {v}\n"
+        assert "false" in bootstrap._sanitize_copied_values(t)
+    # flow 스타일 + 들여쓰기 0 의 탑레벨 oidc
+    assert "enabled: false" in bootstrap._sanitize_copied_values(
+        "a:\n  oidc: {enabled: true, issuerUrl: x}\n")
+    assert "enabled: false" in bootstrap._sanitize_copied_values(
+        "oidc:\n  enabled: true\n")
+
+
+def test_sanitize_block_scalar_and_flow_values_no_corruption():
+    """15차 — folded/literal(>|)·flow([{) 값은 스칼라 매치가 헤더만 삼켜
+    깨진 YAML 을 만들 수 있다 — 구문째 지워야 한다."""
+    folded = ('a:\n  issuerUrl: >\n    https://example.com/x\n    more\n'
+              '  next: keep\n')
+    out = bootstrap._sanitize_copied_values(folded)
+    assert 'issuerUrl: ""' in out and "next: keep" in out
+    assert "example.com" not in out
+    flow = 'a:\n  imageRegistry: [evil]\n  b: 1\n'
+    out2 = bootstrap._sanitize_copied_values(flow)
+    assert 'imageRegistry: ""' in out2 and "evil" not in out2
+    # 단일인용 us-east-1 도 websearch 커넥터 상수라 보존한다
+    sq = "a:\n  AGENTCORE_REGION: 'us-east-1'\n"
+    assert "'us-east-1'" in bootstrap._sanitize_copied_values(
+        sq, "ap-northeast-2")
+
+
 def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):
     """12차 — tfstate 재시도 호출({tfstate} 만)이 features.web_search 를
     false 로 덮어쓰지 않는다."""

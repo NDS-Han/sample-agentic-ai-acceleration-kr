@@ -107,13 +107,24 @@ def test_domain_none_keeps_existing_hosts(tmp_path):
 
 
 def test_dev_login_true_pins_both_services(tmp_path):
-    """features.dev_login=true — oidc 와 공존하는 개발자 로그인. adminUi 뿐 아니라
-    adminApi 에도 켜야 dev. 토큰이 검증을 통과한다(한쪽만 켜면 API 호출 401)."""
+    """features.dev_login=true (oidc 없음) — adminUi 뿐 아니라 adminApi 에도
+    켜야 dev. 토큰이 검증을 통과한다(한쪽만 켜면 API 호출 401)."""
     doc = dict(BASE, features={**BASE["features"], "dev_login": True})
+    doc.pop("oidc")
     _, out, _ = _render(tmp_path, doc)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "true"
     assert v["adminApi"]["env"]["DEV_LOGIN_ENABLED"] == "true"
+
+
+def test_dev_login_suppressed_under_oidc(tmp_path):
+    """15차 — OIDC 배선 시 admin-api 는 issuer 설정으로 dev. 토큰을 무조건
+    거부한다(삼중가드). 켜두면 영영 401 인 로그인 버튼만 남으므로 양쪽 false."""
+    doc = dict(BASE, features={**BASE["features"], "dev_login": True})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
+    assert v["adminApi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
 
 
 def test_dev_login_default_off_with_oidc(tmp_path):
