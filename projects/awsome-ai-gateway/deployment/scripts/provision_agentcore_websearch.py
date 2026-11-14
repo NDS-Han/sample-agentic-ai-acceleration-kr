@@ -104,8 +104,11 @@ def ensure_role(acct: str, dry: bool) -> str:
 # ── Gateway (AWS_IAM inbound) ─────────────────────────────────────────────────
 def find_gateway():
     gw = _control()
-    g = next((x for x in gw.list_gateways().get("items", []) if x.get("name") == GW_NAME), None)
-    return gw.get_gateway(gatewayIdentifier=g["gatewayId"]) if g else None
+    for page in gw.get_paginator("list_gateways").paginate():
+        g = next((x for x in page.get("items", []) if x.get("name") == GW_NAME), None)
+        if g:
+            return gw.get_gateway(gatewayIdentifier=g["gatewayId"])
+    return None
 
 
 def ensure_gateway(role_arn: str, dry: bool):
@@ -140,8 +143,12 @@ def wait_status(getter, label: str, ok="READY", bad=("FAILED", "DELETING", "DELE
 # ── WebSearch connector target (boto3 → SigV4 fallback) ───────────────────────
 def find_target(gw_id: str):
     gw = _control()
-    return next((t for t in gw.list_gateway_targets(gatewayIdentifier=gw_id).get("items", [])
-                 if t.get("name") == TARGET_NAME), None)
+    for page in gw.get_paginator("list_gateway_targets").paginate(
+            gatewayIdentifier=gw_id):
+        t = next((x for x in page.get("items", []) if x.get("name") == TARGET_NAME), None)
+        if t:
+            return t
+    return None
 
 
 def ensure_target(gw_id: str, dry: bool) -> str:

@@ -33,6 +33,11 @@ def _env(env_name: str, caller_role_arn: str = "") -> dict[str, str]:
     e["REGION"] = AGENTCORE_REGION
     # set-websearch-url.sh 와 같은 이름 규칙 — 수동 배포가 만든 gateway 재사용
     e["GW_NAME"] = f"llm-gateway-websearch-{env_name}"
+    # exec role 도 env 스코프 — 고정값이면 prod 가 dev- 이름 role 을 만들고,
+    # 한 env 의 teardown 이 다른 env gateway 가 참조하는 role 을 지운다.
+    # 이 패턴은 env=dev 에서 기존 기본값(llm-gateway-dev-agentcore-websearch-gw)과
+    # 정확히 같아 마이그레이션 없이 수렴한다.
+    e["ROLE_NAME"] = f"llm-gateway-{env_name}-agentcore-websearch-gw"
     if caller_role_arn:
         e["CALLER_ROLE_ARN"] = caller_role_arn
     return e
