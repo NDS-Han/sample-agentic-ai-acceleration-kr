@@ -469,6 +469,14 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     if env_vals:
         env_asg = ((yaml.safe_load(env_vals.read_text()) or {})
                    .get("gatewayProxy", {}).get("autoscaling") or {})
+        # env values 가 logGroupName 을 직접 선언했으면 gen 추론값을 내리지
+        # 않는다 — gen 레이어가 마지막으로 적용되므로, 그대로 두면 env 의
+        # 커스텀 클러스터명 override 가 조용히 덮어쓰기 된다.
+        env_fl = (((yaml.safe_load(env_vals.read_text()) or {})
+                   .get("observability") or {}).get("fargateLogging") or {})
+        if env_fl.get("logGroupName"):
+            (gen.get("observability") or {}).get("fargateLogging", {}) \
+                .pop("logGroupName", None)
     gen_asg = ((gen.get("gatewayProxy") or {}).get("autoscaling") or {})
     # helm 레이어링과 같은 순서: chart 기본 → env overlay → gen(최종). 차트
     # 기본을 깔지 않으면 env 가 min 만 선언한 경우(min:25 > 차트 기본 max:20)

@@ -572,3 +572,53 @@ def test_ecs_sizing_desired_gt_max_rejected():
                     "capacity_tier": "3000",
                     "sizing": {"gateway-proxy": {"desired_count": 20}}},
             images={"tag": "abc"}))
+
+
+def _eks(**over):
+    doc = {"version": 1, "env": "acme-test",
+           "deploy": {"target": "eks", "size_tier": "t2"},
+           "aws": {"region": "ap-northeast-2"},
+           "images": {"tag": "x"}}
+    doc.update(over)
+    return doc
+
+
+def test_alerting_emails_require_enabled():
+    with pytest.raises(schema.SchemaError, match="emails"):
+        schema.from_dict(_eks(features={"alerting": {"emails": ["ops@x.io"]}}))
+
+
+def test_alerting_malformed_email():
+    with pytest.raises(schema.SchemaError, match="이메일"):
+        schema.from_dict(_eks(features={"alerting": {
+            "enabled": True, "emails": "ops@x.io, nope"}}))
+
+
+def test_alerting_compose_rejected():
+    with pytest.raises(schema.SchemaError, match="compose"):
+        schema.from_dict(minimal(features={"alerting": {"enabled": True}}))
+    with pytest.raises(schema.SchemaError, match="compose"):
+        schema.from_dict(minimal(features={"alerting": {"log_shipping": True}}))
+
+
+def test_alerting_log_shipping_eks_only():
+    with pytest.raises(schema.SchemaError, match="eks"):
+        schema.from_dict(_eks(
+            deploy={"target": "ecs", "size_tier": "t1"},
+            features={"alerting": {"log_shipping": True}}))
+
+
+def test_alerting_enabled_no_emails_warns():
+    cfg = schema.from_dict(_eks(features={"alerting": {"enabled": True}}))
+    assert any("emails" in w for w in cfg.warnings())
+
+
+def test_alerting_unknown_key_rejected():
+    with pytest.raises(schema.SchemaError, match="알 수 없는"):
+        schema.from_dict(_eks(features={"alerting": {"enbaled": True}}))
+
+
+def test_alerting_log_shipping_alone_ok_on_eks():
+    cfg = schema.from_dict(_eks(features={"alerting": {"log_shipping": True}}))
+    assert cfg.features.alerting.log_shipping is True
+    assert cfg.features.alerting.enabled is False

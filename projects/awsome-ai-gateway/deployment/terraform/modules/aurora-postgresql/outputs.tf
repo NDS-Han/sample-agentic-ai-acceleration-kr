@@ -4,6 +4,11 @@ output "cluster_identifier" {
   value = module.aurora.cluster_id
 }
 
+output "instance_identifiers" {
+  description = "인스턴스 identifier 목록 — alarm dimension 용 (이름 규칙이 결정적이라 plan 시점 계산 가능)"
+  value       = [for k, v in module.aurora.cluster_instances : v.identifier]
+}
+
 output "cluster_endpoint" {
   description = "Writer endpoint (애플리케이션이 쓰기용으로 연결)"
   value       = module.aurora.cluster_endpoint

@@ -360,7 +360,10 @@ observability:
   fargateLogging:
     enabled: false
     region: ""          # 비우면 aws.region
-    logGroupName: ""    # eks render 가 /aws/eks/<cluster>/fargate-logs 로 채움
+    # eks render 가 /aws/eks/<cluster>/fargate-logs 로 채운다. 커스텀 클러스터
+    # 이름(≠ env 디렉토리명)이면 env values 에서 직접 선언 — 선언이 있으면
+    # render 는 추론값을 내리지 않는다 (env values 가 우선).
+    logGroupName: ""
 
 # ============================================================================
 # 서비스별 설정

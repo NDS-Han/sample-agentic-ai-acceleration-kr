@@ -149,6 +149,9 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
                       or _is_true_env(api_env.get("DEV_LOGIN_ENABLED"))
                       or _is_true_env(ui_env.get("DEV_LOGIN_ENABLED"))),
         "service_keys": _is_true_env(sk_env),
+        # alerting 은 compose 미지원 — 스키마가 비기본 키를 거부하므로 기본값
+        # 블록만 기록한다 (키 존재를 사용자에게 보이되 채택은 무효가 아님).
+        "alerting": {"enabled": False, "emails": [], "log_shipping": False},
     }
 
     # oidc — admin-ui environment(직접 주입된 것) + .env
@@ -493,6 +496,14 @@ def capture_ecs(env_dir: Path, region: str,
             "service_keys": (api_env_ok
                              and _is_true_env(
                                  sizing_env.get("SERVICE_KEYS_ENABLED"))),
+            # 생성 여부의 진리는 terraform output — ECS 는 tfvars 전량 재생성이라
+            # 캡처 누락 시 다음 apply 가 module.alerting 을 통째로 destroy 한다.
+            # emails 는 선언 tfvars(사람 소유)에 있으면 함께 보존한다.
+            "alerting": {
+                "enabled": bool(outputs.get("alerting_sns_topic_arn")),
+                **({"emails": [str(e) for e in tv["alert_emails"]]}
+                   if tv.get("alert_emails") else {}),
+            },
         },
         "images": {"tag": image_tag},
         "clients": {"models_profile": models_profile},
@@ -1014,6 +1025,14 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         notes.append("body_logging 미감지(FIREHOSE_STREAM_NAME 없음) — "
                      "키를 생략했습니다. 켜려면 features.body_logging: true")
 
+    # alerting — log_shipping 은 helm values(관측 네임스페이스 라우터)에서,
+    # enabled 는 terraform output(topic ARN)에서 아래 블록이 채운다.
+    # email 구독 목록은 콘솔/CLI 확인 대상이라 캡처하지 않는다.
+    features["alerting"] = {
+        "log_shipping": _is_true_env(
+            _val(v, "observability", "fargateLogging", "enabled")),
+    }
+
     # dev login — 라이브에 DEV_LOGIN_ENABLED=true 가 켜져 있으면 보존해야 한다.
     # 안 잡으면 채택 첫 apply 에 oidc 설정 경로가 adminUi 를 "false" 로 되돌려
     # 운영 중이던 개발자 로그인이 꺼진다.
@@ -1070,6 +1089,8 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                              "건너뛰었습니다 — 채택 전 terraform 값을 대조하세요")
             if not region:
                 region = str(outs.get("aws_region", "") or outs.get("region", ""))
+            if outs.get("alerting_sns_topic_arn"):
+                features["alerting"]["enabled"] = True
             if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
                 oidc["issuer_url"] = outs["cognito_issuer_url"]
                 notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")
@@ -1087,6 +1108,12 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                         oidc["token_url"] = f"https://{hosted}/oauth2/token"
         except CaptureError:
             notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
+    if "enabled" not in features["alerting"]:
+        # eks 는 overlay 가 "켜기"만 소유하므로 미확인 시 키를 비워둔다 —
+        # enabled 미기록은 다음 apply 가 alerting 을 켜지도 끄지도 않는다.
+        notes.append("alerting.enabled 는 terraform output(alerting_sns_topic_arn)"
+                     "으로만 확인 가능 — 읽지 못해 생략했습니다. "
+                     "활성이었다면 features.alerting.enabled: true 를 직접 기록하세요")
 
     # ── 역산 가능 항목 복원 — zone_id / tfstate / infra / eks 고유 자원 ──────
     tfstate: dict = {}

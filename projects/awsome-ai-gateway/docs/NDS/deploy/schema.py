@@ -21,6 +21,7 @@ MODEL_PROFILES = ("global", "regional")
 
 _ENV_RE = re.compile(r"^[a-z][a-z0-9-]{1,30}$")
 _REGION_RE = re.compile(r"^[a-z]{2}-[a-z]+-\d+$")
+_EMAIL_RE = re.compile(r"^[^@\s,]+@[^@\s,]+\.[^@\s,]+$")
 
 
 class SchemaError(ValueError):
@@ -457,6 +458,10 @@ class GatewayConfig:
         if al.emails and not al.enabled:
             e.append("features.alerting.emails 는 enabled=true 일 때만 유효합니다 — "
                      "email 구독은 SNS topic 이 있어야 붙습니다.")
+        for em in al.emails:
+            if not _EMAIL_RE.match(em):
+                e.append(f"features.alerting.emails '{em}' — 이메일 형식이 아닙니다 "
+                         "(오타가 있으면 apply 중간에 SNS 구독 생성이 실패합니다).")
         if al.log_shipping and self.deploy.target != "eks":
             e.append("features.alerting.log_shipping 은 eks(Fargate) 전용입니다 — "
                      "ecs 는 task definition 의 awslogs 드라이버 경로를 씁니다.")

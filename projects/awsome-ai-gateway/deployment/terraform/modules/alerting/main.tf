@@ -7,6 +7,11 @@
 # ElastiCache). ALB/pod-level signals are deliberately out of scope — pod
 # health is the Prometheus/Alertmanager path (deployment/observability),
 # and ALB dimensions are controller-generated (not knowable at plan time).
+#
+# member id 목록은 data source 로 읽지 않고 호출 env 가 모듈 output
+# (instance_identifiers / member_cluster_ids — 토폴로지에서 결정적)으로 넘긴다.
+# data source 는 대상 리소스를 같은 plan 에서 만들 때 for_each plan-time
+# 에러를 내므로 bootstrap 경로를 깬다.
 # ------------------------------------------------------------------------------
 
 resource "aws_sns_topic" "alerts" {
@@ -25,13 +30,8 @@ resource "aws_sns_topic_subscription" "email" {
 
 # ------------------------------------------------------------------------------
 # Aurora — RDS event subscription (failover/failure/maintenance) + per-instance
-# CPU/memory alarms. Member instance ids come from the live cluster so the
-# module works for serverless and provisioned clusters alike.
+# CPU/memory alarms.
 # ------------------------------------------------------------------------------
-
-data "aws_rds_cluster" "this" {
-  cluster_identifier = var.aurora_cluster_id
-}
 
 resource "aws_db_event_subscription" "aurora" {
   name             = "${var.project}-${var.environment}-aurora-events"
@@ -42,9 +42,9 @@ resource "aws_db_event_subscription" "aurora" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "aurora_cpu" {
-  for_each            = toset(data.aws_rds_cluster.this.cluster_members)
-  alarm_name          = "${var.project}-${var.environment}-aurora-${each.key}-cpu"
-  alarm_description   = "Aurora instance ${each.key} CPU > 85%"
+  for_each            = toset(var.aurora_instance_ids)
+  alarm_name          = "${var.project}-${var.environment}-aurora-${each.value}-cpu"
+  alarm_description   = "Aurora instance ${each.value} CPU > 85%"
   namespace           = "AWS/RDS"
   metric_name         = "CPUUtilization"
   dimensions          = { DBInstanceIdentifier = each.value }
@@ -59,37 +59,19 @@ resource "aws_cloudwatch_metric_alarm" "aurora_cpu" {
   tags                = var.tags
 }
 
-resource "aws_cloudwatch_metric_alarm" "aurora_memory" {
-  for_each            = toset(data.aws_rds_cluster.this.cluster_members)
-  alarm_name          = "${var.project}-${var.environment}-aurora-${each.key}-mem"
-  alarm_description   = "Aurora instance ${each.key} FreeableMemory < 256MiB"
-  namespace           = "AWS/RDS"
-  metric_name         = "FreeableMemory"
-  dimensions          = { DBInstanceIdentifier = each.value }
-  statistic           = "Average"
-  period              = 300
-  evaluation_periods  = 2
-  threshold           = 268435456 # 256 MiB
-  comparison_operator = "LessThanThreshold"
-  treat_missing_data  = "missing"
-  alarm_actions       = [aws_sns_topic.alerts.arn]
-  ok_actions          = [aws_sns_topic.alerts.arn]
-  tags                = var.tags
-}
+# FreeableMemory alarm 은 의도적으로 없다 — serverless v2(min_acu 0.5)에서는
+# 유휴 상태에서도 상시 저수위라 첫날부터 오탐이 된다. failover/failure 는 위
+# event subscription 이 덮고, provisioned env 의 메모리 압박은 필요 시 env
+# tfvars 로 추가한다.
 
 # ------------------------------------------------------------------------------
-# ElastiCache — per-member CPU/memory/connections alarms. Member cache-cluster
-# ids resolved via data source (covers non-cluster and cluster-mode layouts).
+# ElastiCache — per-member CPU/memory/connections alarms.
 # ------------------------------------------------------------------------------
-
-data "aws_elasticache_replication_group" "this" {
-  replication_group_id = var.elasticache_replication_group_id
-}
 
 resource "aws_cloudwatch_metric_alarm" "cache_cpu" {
-  for_each            = data.aws_elasticache_replication_group.this.member_clusters
-  alarm_name          = "${var.project}-${var.environment}-cache-${each.key}-cpu"
-  alarm_description   = "ElastiCache ${each.key} EngineCPUUtilization > 75%"
+  for_each            = toset(var.elasticache_member_ids)
+  alarm_name          = "${var.project}-${var.environment}-cache-${each.value}-cpu"
+  alarm_description   = "ElastiCache ${each.value} EngineCPUUtilization > 75%"
   namespace           = "AWS/ElastiCache"
   metric_name         = "EngineCPUUtilization"
   dimensions          = { CacheClusterId = each.value }
@@ -105,9 +87,9 @@ resource "aws_cloudwatch_metric_alarm" "cache_cpu" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "cache_memory" {
-  for_each            = data.aws_elasticache_replication_group.this.member_clusters
-  alarm_name          = "${var.project}-${var.environment}-cache-${each.key}-mem"
-  alarm_description   = "ElastiCache ${each.key} DatabaseMemoryUsagePercentage > 85%"
+  for_each            = toset(var.elasticache_member_ids)
+  alarm_name          = "${var.project}-${var.environment}-cache-${each.value}-mem"
+  alarm_description   = "ElastiCache ${each.value} DatabaseMemoryUsagePercentage > 85%"
   namespace           = "AWS/ElastiCache"
   metric_name         = "DatabaseMemoryUsagePercentage"
   dimensions          = { CacheClusterId = each.value }
@@ -123,9 +105,9 @@ resource "aws_cloudwatch_metric_alarm" "cache_memory" {
 }
 
 resource "aws_cloudwatch_metric_alarm" "cache_connections" {
-  for_each            = data.aws_elasticache_replication_group.this.member_clusters
-  alarm_name          = "${var.project}-${var.environment}-cache-${each.key}-conn"
-  alarm_description   = "ElastiCache ${each.key} CurrConnections > 80% of node max (65k)"
+  for_each            = toset(var.elasticache_member_ids)
+  alarm_name          = "${var.project}-${var.environment}-cache-${each.value}-conn"
+  alarm_description   = "ElastiCache ${each.value} CurrConnections > 50,000 (노드 상한 ~65k 기준 80%)"
   namespace           = "AWS/ElastiCache"
   metric_name         = "CurrConnections"
   dimensions          = { CacheClusterId = each.value }

@@ -8,18 +8,19 @@ variable "environment" {
   type = string
 }
 
-variable "aws_region" {
-  type = string
-}
-
 variable "aurora_cluster_id" {
-  description = "Aurora cluster identifier — per-instance alarms + event subscription target"
+  description = "Aurora cluster identifier — RDS event subscription 대상"
   type        = string
 }
 
-variable "elasticache_replication_group_id" {
-  description = "ElastiCache replication group id — member clusters are resolved via data source"
-  type        = string
+variable "aurora_instance_ids" {
+  description = "Aurora instance identifiers — alarm dimension. module.aurora-postgresql.instance_identifiers output 으로 전달 (data source 금지 — bootstrap plan 안전)"
+  type        = list(string)
+}
+
+variable "elasticache_member_ids" {
+  description = "ElastiCache member cluster ids — alarm dimension. module.elasticache-valkey.member_cluster_ids output 으로 전달 (토폴로지에서 결정적 유도)"
+  type        = list(string)
 }
 
 variable "alert_emails" {

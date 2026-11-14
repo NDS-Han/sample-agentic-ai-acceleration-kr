@@ -487,3 +487,15 @@ def test_ensure_infra_skips_apply_on_plan_failure(monkeypatch, tmp_path, capsys)
     assert eks_apply.ensure_infra(cfg, tmp_path, _env_dir(tmp_path), outs) is outs
     assert calls == []
     assert "plan 실패" in capsys.readouterr().err
+
+
+def test_infra_targets_alerting_module():
+    cfg = _cfg(features={"alerting": {"enabled": True}})
+    assert "-target=module.alerting" in eks_apply._infra_targets(cfg)
+
+
+def test_infra_missing_alerting_output():
+    cfg = _cfg(features={"alerting": {"enabled": True}})
+    assert eks_apply._infra_missing(cfg, {}) == ["alerting(SNS topic/alarms)"]
+    assert eks_apply._infra_missing(
+        cfg, {"alerting_sns_topic_arn": "arn:aws:sns:ap-northeast-2:1:t"}) == []

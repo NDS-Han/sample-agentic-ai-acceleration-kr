@@ -10,7 +10,6 @@ output "sns_topic_name" {
 
 output "alarm_count" {
   value = (length(aws_cloudwatch_metric_alarm.aurora_cpu)
-    + length(aws_cloudwatch_metric_alarm.aurora_memory)
     + length(aws_cloudwatch_metric_alarm.cache_cpu)
     + length(aws_cloudwatch_metric_alarm.cache_memory)
   + length(aws_cloudwatch_metric_alarm.cache_connections))

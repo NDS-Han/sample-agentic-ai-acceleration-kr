@@ -54,11 +54,13 @@ features:
 - `aws_sns_topic` — `<project>-<env>-alerts`
 - `aws_db_event_subscription` — Aurora cluster 의 `failover`/`failure`/
   `maintenance`/`notification` 이벤트
-- Aurora 인스턴스별 알람 × 2: `CPUUtilization > 85%`(2×5분),
-  `FreeableMemory < 256MiB`(2×5분)
+- Aurora 인스턴스별 알람 × 1: `CPUUtilization > 85%`(2×5분). FreeableMemory
+  알람은 의도적으로 제외 — serverless v2 저 ACU 에서는 유휴 시에도 상시
+  저수위라 오탐입니다.
 - ElastiCache 멤버별 알람 × 3: `EngineCPUUtilization > 75%`,
   `DatabaseMemoryUsagePercentage > 85%`, `CurrConnections > 50,000`
-  (member id 는 data source 로 해석 — cluster/non-cluster mode 모두 대응)
+  (노드 상한 ~65k 의 80% 수준 휴리스틱). member id 는 각 env 모듈의
+  `member_cluster_ids` output 으로 plan-time 결정 — bootstrap 경로도 안전.
 
 ### 안 만드는 것 (의도적)
 
@@ -76,8 +78,13 @@ features:
 ./deploy validate          # 스키마+검증
 ./deploy apply --plan      # module.alerting + helm values 미리보기
 ./deploy apply             # -target=module.alerting 으로 좁혀 적용
-./deploy doctor            # alerting(SNS topic/alarms) output 확인
+./deploy doctor            # managed-overlay plan drift — module.alerting 누락·변경 감지
 ```
+
+`alert_emails` 주의: overlay 가 발산한 `alert_emails` 는 env tfvars 에
+사람이 넣은 같은 키를 대체합니다(나중 -var-file 우선). 즉 terraform 으로
+관리된 구독이 env tfvars 에만 있고 gateway.yaml 의 emails 와 다르면 다음
+apply 에 교체됩니다 — 콘솔로 추가한 구독은 state 밖이라 안전합니다.
 
 `enabled=false` 로 되돌려도 managed overlay 는 비활성화를 apply 하지
 않습니다 — 다른 기능 토글과 같은 계약(destroy 는 env terraform 수동 절차).
@@ -132,6 +139,25 @@ aws cloudwatch set-alarm-state \
 | `log_shipping: false` (기본) | `kubectl -n llm-gateway logs deploy/llm-gateway-gateway-proxy --tail=200` — 파드 재시작 시 유실 |
 | `log_shipping: true` | CloudWatch → Logs → `/aws/eks/<cluster>/fargate-logs` (ConfigMap 생성 후 뜨는 파드부터; 기존 파드는 재시작 시 적용) |
 
+- `logGroupName` 은 render 가 env 디렉토리명(`<project>-<env>` 규칙)으로
+  추론합니다. 커스텀 클러스터명이면 env values 의
+  `observability.fargateLogging.logGroupName` 에 직접 선언 — env values 가
+  gen 추론보다 우선합니다.
+- Fargate 가 아닌 EKS(EC2 nodegroup)에서는 이 라우터가 동작하지 않습니다 —
+  해당 환경은 DaemonSet fluent-bit 등 다른 경로가 필요합니다.
+- `aws-observability` 네임스페이스 또는 `aws-logging` ConfigMap 을 이미 수동
+  생성해 둔 클러스터는 helm 이 "already exists" 로 배포를 거절합니다 — 먼저
+  helm 소유로 adopt 하세요:
+
+  ```bash
+  kubectl label  ns aws-observability app.kubernetes.io/managed-by=Helm
+  kubectl annotate ns aws-observability \
+    meta.helm.sh/release-name=<release> meta.helm.sh/release-namespace=<ns>
+  kubectl -n aws-observability annotate cm aws-logging \
+    meta.helm.sh/release-name=<release> meta.helm.sh/release-namespace=<ns>
+  kubectl -n aws-observability label cm aws-logging app.kubernetes.io/managed-by=Helm
+  ```
+
 로그 스트림명은 `fargate-<namespace>.<pod>.<container>` 형식입니다.
 앱 로그가 CloudWatch 에 온 뒤에는 metric filter(`"ERROR"` 등)로 에러율 알람을
 얹을 수 있습니다 — 기본 모듈 범위 밖이며 필요 시 추가하세요.
@@ -156,7 +182,7 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 
 | 항목 | 단가 | dev 추정 | prod 추정 |
 |---|---|---|---|
-| 알람 | $0.10/개·월 | ~10개 → ~$1 | 멤버 수에 비례 → ~$2–3 |
+| 알람 | $0.10/개·월 | ~4개 → ~$0.5 | 멤버 수에 비례 → ~$1–2 |
 | SNS email | — | 사실상 무료 | 사실상 무료 |
 | Fargate 로그 수집 | $0.50/GB | 수십 MB → <$1 | 요청당 ~2KB 가정 시 ~$10–20 |
 | 로그 보관 | $0.03/GB·월 | 무시 가능 | 30일 기준 수 $ |

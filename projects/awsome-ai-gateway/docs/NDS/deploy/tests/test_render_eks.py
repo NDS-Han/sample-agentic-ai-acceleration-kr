@@ -374,3 +374,44 @@ def test_executor_inflight_target_not_derived_without_declaration(tmp_path, caps
     assert "executorInflightTarget" not in (
         v["gatewayProxy"].get("autoscaling") or {})
     assert "executorInflightTarget" in capsys.readouterr().err
+
+
+def test_alerting_tfvars_and_values(tmp_path):
+    doc = dict(BASE, features={**BASE["features"], "alerting": {
+        "enabled": True, "emails": ["ops@x.io"], "log_shipping": True}})
+    _, out, _ = _render(tmp_path, doc)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "enable_alerting = true" in tfvars
+    assert 'alert_emails = ["ops@x.io"]' in tfvars
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    fl = v["observability"]["fargateLogging"]
+    assert fl["enabled"] is True
+    assert fl["region"] == "ap-south-1"
+    assert fl["logGroupName"] == "/aws/eks/llm-gateway-dev/fargate-logs"
+
+
+def test_alerting_off_emits_nothing(tmp_path):
+    _, out, _ = _render(tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    assert "enable_alerting" not in tfvars
+    assert "alert_emails" not in tfvars
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert (v.get("observability") or {}).get("fargateLogging") is None
+
+
+def test_alerting_env_values_loggroupname_wins(tmp_path, monkeypatch):
+    """env values 가 logGroupName 을 선언하면 gen 추론값을 내리지 않는다 —
+    gen 레이어가 마지막이라 그대로 두면 env override 가 무력화된다."""
+    env_vals = tmp_path / "env-values.yaml"
+    env_vals.write_text(
+        "observability:\n  fargateLogging:\n"
+        "    logGroupName: /aws/eks/custom-cluster/fargate-logs\n")
+    monkeypatch.setattr(eks_render, "env_values_file",
+                        lambda cfg, root: env_vals)
+    doc = dict(BASE, features={**BASE["features"],
+                               "alerting": {"log_shipping": True}})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / "dev" / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    assert "logGroupName" not in v["observability"]["fargateLogging"]

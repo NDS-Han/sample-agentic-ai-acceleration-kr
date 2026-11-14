@@ -7,6 +7,11 @@
   stdout/stderr 를 CloudWatch Logs 로 보낸다. 사이드카 방식이 아니므로
   파드 스펙 변화 없이 동작하며, ConfigMap 생성 후 뜨는 파드부터 로그가
   수집된다 (기존 파드는 재시작 시 적용).
+
+  ⚠️ aws-observability 네임스페이스나 aws-logging ConfigMap 이 helm 관리
+     없이 이미 존재하면 helm upgrade 가 전체 배포를 거절한다 — 수동 생성
+     리소스는 adopt(label+annotation) 후 이 기능을 켠다
+     (docs/NDS/observability.md §8).
 */}}
 {{- if .Values.observability.fargateLogging.enabled }}
 apiVersion: v1

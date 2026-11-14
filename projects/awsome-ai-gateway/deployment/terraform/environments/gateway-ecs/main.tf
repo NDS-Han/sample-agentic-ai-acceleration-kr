@@ -279,11 +279,11 @@ module "alerting" {
 
   project     = var.project
   environment = var.environment
-  aws_region  = var.aws_region
 
-  aurora_cluster_id                = module.aurora.cluster_identifier
-  elasticache_replication_group_id = "${var.project}-${var.environment}"
-  alert_emails                     = var.alert_emails
+  aurora_cluster_id      = module.aurora.cluster_identifier
+  aurora_instance_ids    = module.aurora.instance_identifiers
+  elasticache_member_ids = module.elasticache.member_cluster_ids
+  alert_emails           = var.alert_emails
 
   tags = var.tags
 }
