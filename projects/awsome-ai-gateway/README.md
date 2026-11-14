@@ -92,6 +92,30 @@ alias 를 해석하고(Redis 300s 캐시) `status='INACTIVE'` 로만 차단합�
 | GPT-5.6 (codex) | `codex-gpt-5.6-{sol,terra,luna}` | `openai.gpt-5.6-*` (Mantle, us-east-2) | migration `0025` |
 | GPT-5.5 (codex) | `codex-gpt` | `openai.gpt-5.5` (Mantle, us-east-2) | migration `0017` |
 
+> **⚠️ 신규 모델 등록 시 `alias` 가 계약입니다.** 클라이언트는 요청 바디의 `model` 필드로
+> 문자열을 보내고, 게이트웨이는 그 문자열을 `model_aliases.alias` 와 **정확히 일치**시켜
+> `provider_model_id`(백엔드 엔트리포인트)를 찾습니다. alias 가 클라이언트가 실제로
+> 보내는 형태가 아니면 — 등록 자체는 성공해도 — 모든 호출이 model-not-found 로 실패합니다.
+>
+> - **Claude Code / Cowork**: Anthropic 네이밍을 그대로 보냅니다 — `claude-sonnet-4-6`,
+>   `claude-opus-5-5`, 날짜 suffix 형태 `claude-haiku-4-5-20251001`. managed-settings
+>   `inferenceModels` 배열과 `ANTHROPIC_MODEL` 에 적힌 값이 곧 alias 여야 합니다.
+>   `sonnet`·`my-claude` 같은 임의 축약명은 CLI 가 보낼 수 없어 쓸 수 없습니다.
+> - **Codex**: `codex-*` prefix 계열 — `codex-gpt-5.6-terra` 처럼 라우팅 프로필이
+>   참조하는 이름과 일치시킵니다.
+>
+> 등록 예시 — Claude 신모델 한 개를 열 때 세 값의 관계:
+>
+> | 필드 | 값 | 역할 |
+> |------|-----|------|
+> | `alias` | `claude-sonnet-4-6` | 클라이언트가 `model:` 로 보내는 문자열 (게이트웨이 노출명) |
+> | `provider_model_id` | `global.anthropic.claude-sonnet-4-6` | Bedrock inference profile / 실제 호출 ID |
+> | 계열(family) | Claude 4.x | 문서·IAM 정책 분류용 — `bedrock_allowed_model_arns` 패턴과 대응 |
+>
+> 같은 백엔드에 alias 여러 개를 달아도 됩니다 — dated ID 사용자 호환용으로
+> `claude-haiku-4-5` 와 `claude-haiku-4-5-20251001` 두 alias 가 같은
+> `global.anthropic.claude-haiku-4-5` 를 가리키는 식입니다.
+
 - codex 의 기본 모델은 `0028` 에서 `codex-gpt`(5.5) → **`codex-gpt-5.6-terra`** 로 전환됩니다.
   적용 후 `routing_profile:codex` Redis 캐시를 지우거나 TTL(300s) 을 기다려야 반영됩니다.
 - **Fable 5 는 의도적으로 미등록**입니다 — ap-northeast-2 에 inference profile 이 없습니다.
