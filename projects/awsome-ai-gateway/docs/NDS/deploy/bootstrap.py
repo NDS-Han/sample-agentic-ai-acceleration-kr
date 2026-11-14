@@ -64,10 +64,19 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: dict | None = None,
     return r
 
 
+def _quiet(argv: list[str], *, input: str | None = None) -> subprocess.CompletedProcess:
+    """best-effort 조회용 subprocess — 바이너리 부재를 traceback 대신
+    통제된 SystemExit 로 (eks_apply._run 과 같은 계약)."""
+    try:
+        return subprocess.run([str(a) for a in argv], capture_output=True,
+                              text=True, input=input)
+    except FileNotFoundError:
+        raise SystemExit(f"{argv[0]} 명령을 못 찾았습니다 — 설치/PATH 확인 필요")
+
+
 def _aws(args: list[str], region: str, *, capture: bool = True,
          ok_rc: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
-    r = subprocess.run(["aws", *args, "--region", region, "--output", "json"],
-                       capture_output=True, text=True)
+    r = _quiet(["aws", *args, "--region", region, "--output", "json"])
     if r.returncode not in ok_rc:
         tail = (r.stderr or "").strip().splitlines()
         raise SystemExit(f"aws {' '.join(args[:2])} 실패 — "
@@ -153,7 +162,17 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
                          "deploy.tf_env_dir 로 기존 env 를 지정하십시오")
     target.mkdir(parents=True)
     for f in TF_FILES:
-        (target / f).write_text((template / f).read_text())
+        text = (template / f).read_text()
+        if f == "backend.tf":
+            # 템플릿은 dev 의 key/region 이 하드코딩 — 그대로 복사하면 이 env 의
+            # state 가 dev/terraform.tfstate 에 묶여 apply 가 dev 인프라를
+            # 갈아엎는다. env/region 으로 재작성한다.
+            text = re.sub(r'key\s*=\s*"[^"]*"',
+                          f'key = "{cfg.env}/terraform.tfstate"',
+                          text, count=1)
+            text = re.sub(r'region\s*=\s*"[^"]*"',
+                          f'region = "{region}"', text, count=1)
+        (target / f).write_text(text)
     caller = _aws(["sts", "get-caller-identity"], region)
     arn = json.loads(caller.stdout).get("Arn", "")
     example = (template / "terraform.tfvars.example").read_text()
@@ -363,11 +382,23 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
     notes: list[str] = []
 
     def exists(name: str) -> bool:
-        r = subprocess.run(
-            ["aws", "secretsmanager", "describe-secret", "--secret-id", name,
-             "--region", region, "--output", "json"],
-            capture_output=True, text=True)
-        return r.returncode == 0
+        r = _quiet(["aws", "secretsmanager", "describe-secret",
+                    "--secret-id", name, "--region", region,
+                    "--output", "json"])
+        if r.returncode != 0:
+            return False
+        # 삭제 예약(pending deletion) 시크릿도 describe 는 된다 — "존재"로
+        # 처리하면 create 도 못 하고 ESO sync 도 실패한다 → 명시적 경고.
+        try:
+            if json.loads(r.stdout or "{}").get("DeletedDate"):
+                notes.append(
+                    f"⚠ secrets {name} — 삭제 예약 상태입니다. "
+                    "`aws secretsmanager restore-secret` 로 복구하거나 "
+                    "삭제 완료 후 재실행하세요")
+                return True
+        except json.JSONDecodeError:
+            pass
+        return True
 
     app = f"{prefix}{cfg.env}/app"
     if exists(app):
@@ -401,10 +432,9 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
         notes.append(f"secrets {redis} — auth_token 복사 완료")
 
     db = f"{prefix}{cfg.env}/db"
-    r = subprocess.run(
+    r = _quiet(
         ["aws", "secretsmanager", "get-secret-value", "--secret-id", db,
-         "--query", "SecretString", "--region", region, "--output", "text"],
-        capture_output=True, text=True)
+         "--query", "SecretString", "--region", region, "--output", "text"])
     if r.returncode != 0:
         raise SystemExit(
             f"secrets {db} 가 없습니다 — terraform env apply 가 만들어야 하는 "
@@ -425,13 +455,12 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
 
 def ensure_ecr_repos(region: str, services: tuple = EKS_SERVICES) -> None:
     for _, repo, _ in services:
-        r = subprocess.run(
+        r = _quiet(
             ["aws", "ecr", "create-repository", "--repository-name",
              f"llm-gateway/{repo}",
              "--image-scanning-configuration", "scanOnPush=true",
              "--encryption-configuration", "encryptionType=AES256",
-             "--region", region],
-            capture_output=True, text=True)
+             "--region", region])
         if r.returncode != 0 and "RepositoryAlreadyExists" not in r.stderr:
             raise SystemExit(f"ECR repo 생성 실패 (llm-gateway/{repo}): "
                              f"{(r.stderr or '').strip()}")
@@ -447,13 +476,11 @@ def push_images_eks(cfg: GatewayConfig, outs: dict, repo_root: Path,
     registry = (cfg.images.registry
                 or f"{acct}.dkr.ecr.{region}.amazonaws.com").rstrip("/")
     ensure_ecr_repos(region)
-    r = subprocess.run(["aws", "ecr", "get-login-password", "--region", region],
-                       capture_output=True, text=True)
+    r = _quiet(["aws", "ecr", "get-login-password", "--region", region])
     if r.returncode != 0:
         raise SystemExit("ECR 로그인 비밀번호 조회 실패 — 자격증명 확인")
-    lr = subprocess.run(["docker", "login", "--username", "AWS",
-                         "--password-stdin", registry],
-                        input=r.stdout, capture_output=True, text=True)
+    lr = _quiet(["docker", "login", "--username", "AWS",
+                 "--password-stdin", registry], input=r.stdout)
     if lr.returncode != 0:
         raise SystemExit(f"docker login 실패: {(lr.stderr or '').strip()}")
 
@@ -498,10 +525,9 @@ def onboard_admin(cfg: GatewayConfig, repo_root: Path, outs: dict,
                      "Cognito 사용자는 수동 생성 (ops 8-Y)")
         return notes
     email = emails[0]
-    r = subprocess.run(
+    r = _quiet(
         ["aws", "cognito-idp", "admin-get-user", "--user-pool-id", pool,
-         "--username", email, "--region", region],
-        capture_output=True, text=True)
+         "--username", email, "--region", region])
     if r.returncode != 0:
         temp_pw = secrets.token_urlsafe(16) + "Aa1!"
         _aws(["cognito-idp", "admin-create-user", "--user-pool-id", pool,
@@ -520,11 +546,10 @@ def onboard_admin(cfg: GatewayConfig, repo_root: Path, outs: dict,
                      "이 관리자도 VK 발급 시 403 이 납니다. infra.cognito_groups/"
                      "env tfvars 에 팀 그룹을 선언했는지 확인하세요")
     for group in ("ClaudeAdmin", *teams):
-        gr = subprocess.run(
+        gr = _quiet(
             ["aws", "cognito-idp", "admin-add-user-to-group", "--user-pool-id",
              pool, "--username", email, "--group-name", group,
-             "--region", region],
-            capture_output=True, text=True)
+             "--region", region])
         if gr.returncode == 0:
             notes.append(f"cognito 그룹 배정: {email} → {group}")
         else:
@@ -538,10 +563,9 @@ def _cognito_team_groups(pool: str, region: str) -> list[str]:
     실제 풀의 Claude_* 그룹 중 ClaudeAdmin 을 뺀 첫 것에 배정한다.
     라이브 풀을 읽으므로 ecs(infra.cognito_groups)든 eks(env tfvars)든
     선언 출처와 무관하게 실제 그룹을 고른다."""
-    r = subprocess.run(
+    r = _quiet(
         ["aws", "cognito-idp", "list-groups", "--user-pool-id", pool,
-         "--region", region, "--output", "json"],
-        capture_output=True, text=True)
+         "--region", region, "--output", "json"])
     if r.returncode != 0:
         return []
     try:

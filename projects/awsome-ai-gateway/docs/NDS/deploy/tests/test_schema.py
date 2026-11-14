@@ -76,12 +76,21 @@ def test_tags_rejected_on_compose():
             images={"tags": {"gatewayProxy": "1.0.0"}}))
 
 
-def test_eks_tag_without_migration_pin_warns():
-    # 단일 tag 는 migration 이미지를 건드리지 않는다 — 운영자가 명시해야 인지 가능
+def test_eks_tag_covers_migration_unless_pinned():
+    """7차 — images.tag 는 migration 도 커버한다 (push 가 migration:X 를
+    빌드하므로 render 도 같은 태그를 발산해야 ImagePullBackOff 가 안 난다).
+    개별 핀은 images.tags.migration."""
+    from deploy.render import eks as eks_render
     cfg = schema.from_dict(minimal(
         deploy={"target": "eks", "size_tier": "t3"},
         images={"tag": "1.0.87-us19"}))
-    assert any("migration" in w for w in cfg.warnings())
+    v = eks_render.desired_values(cfg)
+    assert v["migration"]["image"]["tag"] == "1.0.87-us19"
+    cfg2 = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "1.0.87-us19", "tags": {"migration": "1.0.54-us19"}}))
+    v2 = eks_render.desired_values(cfg2)
+    assert v2["migration"]["image"]["tag"] == "1.0.54-us19"
 
 
 def test_domain_route53_requires_name():
@@ -622,3 +631,35 @@ def test_alerting_log_shipping_alone_ok_on_eks():
     cfg = schema.from_dict(_eks(features={"alerting": {"log_shipping": True}}))
     assert cfg.features.alerting.log_shipping is True
     assert cfg.features.alerting.enabled is False
+
+
+def test_eks_empty_release_rejected():
+    """빈 release 면 ALB 발견의 instance 라벨 필터가 외부 ingress 를 전부
+    채택한다 — eks 경로에서는 스키마 에러."""
+    with pytest.raises(schema.SchemaError, match="deploy.release"):
+        schema.from_dict(_eks(deploy={"target": "eks", "size_tier": "t2",
+                                      "release": "  "}))
+
+
+def test_eks_empty_namespace_rejected():
+    # 공백만 있는 값은 오타 가능성이라 에러 — 명시적 null/"" 는 기본값으로 정규화
+    with pytest.raises(schema.SchemaError, match="deploy.namespace"):
+        schema.from_dict(_eks(deploy={"target": "eks", "size_tier": "t2",
+                                      "namespace": "  "}))
+
+
+def test_eks_null_release_defaults_not_literal_none():
+    """release: (null) 은 "None" 리터럴이 아니라 기본값으로 정규화돼야 한다 —
+    그대로면 helm release 이름이 None 이 되고 라벨 필터가 아무것도 못 잡는다."""
+    cfg = schema.from_dict(_eks(deploy={"target": "eks", "size_tier": "t2",
+                                        "release": None, "namespace": None}))
+    assert cfg.deploy.release == "llm-gateway"
+    assert cfg.deploy.namespace == "llm-gateway"
+
+
+def test_alerting_emails_deduped_normalized():
+    """case-variant/중복 이메일은 소문자 정규화 후 dedupe — SNS 구독 중복 방지."""
+    cfg = schema.from_dict(_eks(features={"alerting": {
+        "enabled": True,
+        "emails": ["Ops@X.io", "ops@x.io", "team@x.io"]}}))
+    assert cfg.features.alerting.emails == ["ops@x.io", "team@x.io"]

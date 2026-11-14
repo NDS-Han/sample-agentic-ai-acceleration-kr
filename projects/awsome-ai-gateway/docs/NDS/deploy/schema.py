@@ -399,13 +399,24 @@ class GatewayConfig:
                      "정하고, 미선언 시 env values 가 그대로 유지됩니다.")
         if self.deploy.target == "eks" and not self.images.registry:
             w.append("images.registry 비어 있음 — apply 시 계정 기본 ECR 로 추론합니다.")
+        if self.deploy.target == "eks" and self.deploy.sizing:
+            # Redis 커넥션 예산 — pool_size 는 워커 프로세스당이다. WORKERS
+            # 기본 2. 노드 maxclients 는 스키마가 모르므로 산식만 경고한다.
+            # 실효값 = capacity_tier 밴드 + sizing 명시 키 병합 (render 와 동일).
+            from .tiers import eks_capacity_sizing
+            eff = eks_capacity_sizing(self)
+            gp = eff.get("gateway-proxy") or {}
+            rd = eff.get("redis") or {}
+            pool = rd.get("pool_size")
+            mx = gp.get("max_replicas")
+            if pool and mx and pool * 2 * mx > 30_000:
+                w.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
+                         f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
+                         f"예산을 확인하세요.")
         if self.deploy.target == "eks":
             uncovered = sorted(EKS_TAGGABLE_SERVICES - {"migration"} - set(self.images.tags))
             if self.images.tags and not self.images.tag and uncovered:
                 w.append(f"images.tags 가 {uncovered} 를 덮지 않습니다 — env overlay 의 태그를 그대로 씁니다.")
-            if self.images.tag and "migration" not in self.images.tags:
-                w.append("images.tag 는 migration 이미지를 바꾸지 않습니다 — migration 은 "
-                         "images.tags.migration 또는 env overlay 태그를 따릅니다.")
         if self.deploy.target == "eks" and not self.oidc.enabled:
             # eks 렌더는 oidc 비활성이면 DEV_LOGIN_ENABLED=true 를 쓴다 —
             # 프로덕션 티어에서 admin-ui 가 무인증 로그인으로 열린다
@@ -451,6 +462,16 @@ class GatewayConfig:
             e.append(f"compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
                      f"테스트·평가용 단일 호스트입니다 "
                      f"(size_tier={self.deploy.size_tier!r} 지정됨).")
+        if self.deploy.target == "eks":
+            # 빈 release 면 ALB 발견의 instance 라벨 필터(!= release)가 전부
+            # 통과해 같은 ns 의 외부 ingress ALB 에까지 알람을 단다.
+            if not self.deploy.release.strip():
+                e.append("deploy.release 가 비어 있습니다 — eks 의 ingress/ALB "
+                         "발견이 release 라벨로 우리 차트만 골라내는 키라 "
+                         "비어 있으면 안 됩니다.")
+            if not self.deploy.namespace.strip():
+                e.append("deploy.namespace 가 비어 있습니다 — eks 배포의 "
+                         "kubectl/helm 범위를 정하는 키입니다.")
         al = self.features.alerting
         if self.deploy.target == "compose" and (al.enabled or al.emails or al.log_shipping):
             e.append("features.alerting 은 compose 전용이 아닙니다 — CloudWatch/SNS 는 "
@@ -578,19 +599,8 @@ class GatewayConfig:
                 e.append(f"deploy.sizing 은 ecs/eks 경로에서만 적용됩니다 "
                          f"(deploy.target={self.deploy.target}).")
             elif is_eks:
-                # Redis 커넥션 예산 — pool_size 는 워커 프로세스당이다. WORKERS
-                # 기본 2. 노드 maxclients 는 스키마가 모르므로 산식만 경고한다.
-                # 실효값 = capacity_tier 밴드 + sizing 명시 키 병합 (render 와 동일).
-                from .tiers import eks_capacity_sizing
-                eff = eks_capacity_sizing(self)
-                gp = eff.get("gateway-proxy") or {}
-                rd = eff.get("redis") or {}
-                pool = rd.get("pool_size")
-                mx = gp.get("max_replicas")
-                if pool and mx and pool * 2 * mx > 30_000:
-                    w.append(f"deploy.sizing: redis.pool_size({pool}) × WORKERS(2) × "
-                             f"max_replicas({mx}) = {pool * 2 * mx} — 노드 maxclients "
-                             f"예산을 확인하세요.")
+                # Redis 커넥션 예산은 차단이 아니라 권고 — warnings() 쪽에서 계산
+                pass
         # 병합 결과의 min ≤ max — sizing 에 min 만 있고 max 는 env overlay 값을
         # 물려받는 조합도 잡는다 (render/eks.py 도 최종 병합 후 한 번 더 검사).
         from .tiers import EKS_CAPACITY_TIERS as _BANDS
@@ -873,15 +883,17 @@ def from_dict(raw: dict) -> GatewayConfig:
                   else aws.get("allowed_roles")) or [])],
         ),
         deploy=DeployConfig(
-            target=str(deploy.get("target", "compose")),
-            size_tier=str(deploy.get("size_tier", "t1")),
+            # `or` 패턴 — yaml null(`release:`)도 기본값으로. `str(None)` 은
+            # "None" 리터럴이 돼 release/namespace 이름이 쓰레기가 된다
+            target=str(deploy.get("target") or "compose"),
+            size_tier=str(deploy.get("size_tier") or "t1"),
             sizing=dict(deploy.get("sizing") or {}),
-            capacity_tier=str(deploy.get("capacity_tier", "")),
-            tfstate_bucket=str(deploy.get("tfstate_bucket", "")),
-            tfstate_table=str(deploy.get("tfstate_table", "")),
-            release=str(deploy.get("release", "llm-gateway")),
-            namespace=str(deploy.get("namespace", "llm-gateway")),
-            tf_env_dir=str(deploy.get("tf_env_dir", "")),
+            capacity_tier=str(deploy.get("capacity_tier") or ""),
+            tfstate_bucket=str(deploy.get("tfstate_bucket") or ""),
+            tfstate_table=str(deploy.get("tfstate_table") or ""),
+            release=str(deploy.get("release") or "llm-gateway"),
+            namespace=str(deploy.get("namespace") or "llm-gateway"),
+            tf_env_dir=str(deploy.get("tf_env_dir") or ""),
         ),
         network=NetworkConfig(
             mode=str(network.get("mode", "public")),

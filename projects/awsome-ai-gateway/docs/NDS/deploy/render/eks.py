@@ -101,6 +101,10 @@ def desired_values(cfg: GatewayConfig) -> dict:
     if cfg.images.tag:
         for svc in TAGGED_SERVICES:
             v.setdefault(svc, {})["image"] = {"tag": cfg.images.tag}
+        # migration 도 같은 트리에서 빌드/푸시된다 — tag 를 따르지 않으면
+        # env overlay 의 옛 핀을 당겨 ImagePullBackOff (bootstrap push 와
+        # 계약을 맞춘다). images.tags.migration 이 개별 핀으로 덮는다.
+        v["migration"]["image"] = {"tag": cfg.images.tag}
     # 서비스별 핀 — US-19 같은 멀티태그 릴리스. tag 기본값 위에 개별 키를 덮고
     # migration(TAGGED_SERVICES 에 없음)도 여기서만 핀할 수 있다.
     for svc, tag in (cfg.images.tags or {}).items():
@@ -364,11 +368,15 @@ def env_dir_path(cfg: GatewayConfig, repo_root: Path = REPO_ROOT) -> Path:
 
 
 def _env_vpc_cidr(env_dir: Path | None) -> str:
-    """env 의 terraform.tfvars 에 선언된 vpc_cidr — 없으면 env 기본값."""
+    """env 의 terraform.tfvars 에 선언된 vpc_cidr — 없으면 env 기본값.
+    주석 처리된 값(`# vpc_cidr = "..."`)이 서브넷 산출 기준을 오염시키지
+    않도록 스캐너로 주석을 제거한다."""
     if env_dir:
         tfvars = env_dir / "terraform.tfvars"
         if tfvars.exists():
-            m = re.search(r'vpc_cidr\s*=\s*"([^"]+)"', tfvars.read_text())
+            from .common import tfvars_clean
+            m = re.search(r'(?m)^\s*vpc_cidr\s*=\s*"([^"]+)"',
+                          tfvars_clean(tfvars.read_text()))
             if m:
                 return m.group(1)
     return "10.30.0.0/16"   # llm-gateway-* env variables.tf 기본값

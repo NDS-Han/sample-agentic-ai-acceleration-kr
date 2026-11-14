@@ -673,7 +673,8 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         if managed:
             plain = _run(
                 ["terraform", "plan", "-input=false", "-no-color",
-                 "-detailed-exitcode"], cwd=env_dir, timeout=300)
+                 "-detailed-exitcode", "-lock=false"], cwd=env_dir,
+                timeout=300)
             if plain.returncode == 2:
                 # plain plan 의 삭제 대상 중 NDS 소유 모듈이 있으면 경고.
                 hits = [m for m in managed

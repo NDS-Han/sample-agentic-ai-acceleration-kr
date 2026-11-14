@@ -905,7 +905,7 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     if cfg.features.bi_insight:
         # 프로비저너 소유 Runtime — terraform 모듈 밖이라 destroy 가 못 지운다
         from . import chatagent
-        chatagent.teardown(REPO_ROOT, cfg.env)
+        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 
@@ -1010,7 +1010,7 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     if cfg.features.bi_insight:
         # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown
         from . import chatagent
-        chatagent.teardown(REPO_ROOT, cfg.env)
+        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region)
     if cfg.features.pricing_lambda:
         from . import pricinglambda
         admin_arn = ""
@@ -1117,6 +1117,13 @@ def cmd_bootstrap(args) -> int:
     context = getattr(args, "context", "") or ""
     out = GEN_ROOT / cfg.env / "eks"
 
+    if args.plan:
+        console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
+                      f"terraform apply ({env_dir(cfg)}) → ③ SM 시크릿 시드 → "
+                      "④ ECR 이미지 build/push → ⑤ helm apply → "
+                      "⑥ Cognito admin 생성")
+        return 0
+
     # 로컬 파일만 생성 — 신규 env 는 tfvars 검토를 위해 여기서 멈춘다 (AWS 변경 전)
     env_target = bootstrap.scaffold_eks_env(cfg, REPO_ROOT, cfg.aws.region)
 
@@ -1134,12 +1141,6 @@ def cmd_bootstrap(args) -> int:
     res = eks_render.render(cfg, out)
     for n in res.get("notes", []):
         console.print(f"  [yellow]ⓘ {n}")
-    if args.plan:
-        console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
-                      f"terraform apply ({env_target}) → ③ SM 시크릿 시드 → "
-                      "④ ECR 이미지 build/push → ⑤ helm apply → "
-                      "⑥ Cognito admin 생성")
-        return 0
     console.print(Panel(
         f"신규 설치 (eks — {cfg.env}):\n"
         "① tfstate bucket/lock table 보장\n"
