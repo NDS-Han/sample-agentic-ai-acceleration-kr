@@ -990,6 +990,9 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         return 1
     elif "not found" in f"{r.stdout}{r.stderr}".lower():
         console.print("ⓘ release 가 없습니다 — helm 단계 생략")
+        # release 부재도 dims 는 stale — 재배포 시 죽은 ALB 알람 방지
+        (GEN_ROOT / cfg.env / "eks" / "alerts-dims.tfvars"
+         ).unlink(missing_ok=True)
     else:
         # 클러스터 접속 실패·잘못된 context 도 rc=1 — release 부재로 착각해
         # 건너뛰면 --infra 가 살아있는 앱 아래에서 인프라를 지운다

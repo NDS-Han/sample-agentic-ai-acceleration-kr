@@ -446,12 +446,19 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
 
 def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
     """env terraform.tfvars 에 선언된 리스트 변수의 문자열 원소 — gen 오버레이가
-    리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도."""
+    리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도.
+
+    주석 라인은 제거 — `# cognito_callback_urls = [...]` 같은 죽은 선언이
+    살아나 OAuth 리다이렉트 허용 목록을 오염시키는 것을 막는다.
+    접두 변수(legacy_cognito_callback_urls)도 ^ 앵커로 걸러낸다."""
     import re
     tf = env_dir / "terraform.tfvars" if env_dir else None
     if not tf or not tf.exists():
         return []
-    m = re.search(rf"{name}\s*=\s*\[(.*?)\]", tf.read_text(), re.S)
+    text = "\n".join(
+        l for l in tf.read_text().splitlines()
+        if not l.lstrip().startswith("#"))
+    m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\[(.*?)\]", text, re.S)
     return re.findall(r'"([^"]+)"', m.group(1)) if m else []
 
 

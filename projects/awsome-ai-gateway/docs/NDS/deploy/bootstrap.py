@@ -216,6 +216,19 @@ def ensure_tfstate(cfg: GatewayConfig, repo_root: Path, *, eks: bool,
 
 # ── 3. env terraform apply ────────────────────────────────────────────────────
 
+def _has_manual_alb_dims(env_dir_path: Path) -> bool:
+    """env terraform.tfvars 에 ALB dimension 수동 고정(§8-A 수동 경로)이
+    있는가 — 주석 라인을 제거한 뒤 실제 할당만 매칭해 `# alb_lb_dimensions`
+    같은 죽은 선언이 가드를 우회하지 못하게 한다."""
+    env_tfvars = env_dir_path / "terraform.tfvars"
+    if not env_tfvars.exists():
+        return False
+    _t = "\n".join(l for l in env_tfvars.read_text().splitlines()
+                   if not l.lstrip().startswith("#"))
+    return bool(re.search(
+        r"(?m)^[ \t]*alb_(?:lb_dimensions|target_groups)[ \t]*=", _t))
+
+
 def env_apply(env_dir_path: Path, gen_dir: Path,
               backend: tuple[str, str] | None = None) -> dict:
     """terraform init(+backend-config) → apply (base tfvars + managed overlay).
@@ -241,13 +254,18 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
         # auto-approve 된다. 경고만 (신 dims 반영이 정상인 경우도 있음).
         st = eks_apply._run_quiet(["terraform", "state", "list"],
                                 cwd=env_dir_path, timeout=120)
-        if st.returncode == 0:
+        if st.returncode != 0:
+            print("ⓘ terraform state list 실패 — 파일/state dimension 대조를 "
+                  "건너뜁니다", file=sys.stderr)
+        else:
             state_dims = set(re.findall(
                 r'aws_cloudwatch_metric_alarm\.alb_target_5xx\["([^"]+)"\]',
                 st.stdout))
             file_dims = set(re.findall(
                 r'"(app/[^"]+)"', alb_dims.read_text()))
-            if file_dims != state_dims:
+            # state 에 알람이 하나도 없는 첫 적용은 dims 일치 비교가 무의미
+            # — 차이 경고가 매번 오탐된다.
+            if state_dims and file_dims != state_dims:
                 print(f"⚠ {alb_dims.name} 의 ALB dimension({sorted(file_dims)})"
                       f" 이 state({sorted(state_dims)})와 다릅니다 — stale "
                       "일 수 있으니 `deploy apply` 로 갱신하는 편이 안전합니다",
@@ -257,9 +275,7 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
         # ALB 알람이 있으면 이 apply 가 조용히 전량 삭제한다 — 단 env
         # terraform.tfvars 에 dims 를 수동 고정한 경우(§8-A 수동 경로)는
         # 삭제가 아니므로 차단하지 않는다.
-        env_tfvars = env_dir_path / "terraform.tfvars"
-        manual_dims = (env_tfvars.exists()
-                       and "alb_lb_dimensions" in env_tfvars.read_text())
+        manual_dims = _has_manual_alb_dims(env_dir_path)
         st = eks_apply._run_quiet(["terraform", "state", "list"],
                                 cwd=env_dir_path, timeout=120)
         if st.returncode != 0:

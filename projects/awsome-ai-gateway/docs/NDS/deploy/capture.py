@@ -501,7 +501,12 @@ def capture_ecs(env_dir: Path, region: str,
             # emails 는 선언 tfvars(사람 소유)에 있으면 함께 보존한다.
             "alerting": {
                 "enabled": bool(outputs.get("alerting_sns_topic_arn")),
-                **({"emails": [str(e) for e in tv["alert_emails"]]}
+                # 스칼라 할당도 유효한 HCL — str 을 list 로 감싸지 않으면
+                # 문자를 쪼갠 쓰레기 emails 가 캡처된다
+                **({"emails": [str(e) for e in (
+                    tv["alert_emails"] if isinstance(
+                        tv["alert_emails"], list)
+                    else [tv["alert_emails"]])]}
                    if tv.get("alert_emails") else {}),
             },
         },
@@ -753,7 +758,7 @@ def _tfvars(env_dir: Path) -> dict[str, object]:
     for m in re.finditer(
             # \s 는 개행도 매칭해 "key =\nother_key" 가 other_key 를 삼킨다 —
             # = 주변은 같은 줄 공백만 (s 플래그는 멀티라인 리스트용)
-            r'(?ms)^([A-Za-z_]\w*)[ \t]*=[ \t]*(\[.*?\]|"(?:[^"\\]|\\.)*"|[^\s#{]+)',
+            r'(?ms)^[ \t]*([A-Za-z_]\w*)[ \t]*=[ \t]*(\[.*?\]|"(?:[^"\\]|\\.)*"|[^\s#{]+)',
             clean):
         key, raw = m.group(1), m.group(2).strip()
         if raw.startswith("["):
@@ -1096,8 +1101,10 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 # 콘솔 수동 구독은 state 밖이라 원래 미대상.
                 _tv = _tfvars(env_dir)
                 if _tv.get("alert_emails"):
+                    _ae = _tv["alert_emails"]
                     features["alerting"]["emails"] = [
-                        str(e) for e in _tv["alert_emails"]]
+                        str(e) for e in (_ae if isinstance(_ae, list)
+                                         else [_ae])]
             if not oidc.get("issuer_url") and outs.get("cognito_issuer_url"):
                 oidc["issuer_url"] = outs["cognito_issuer_url"]
                 notes.append("oidc.issuer_url 을 terraform output 에서 가져왔습니다")

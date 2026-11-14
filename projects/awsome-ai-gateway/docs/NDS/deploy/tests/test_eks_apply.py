@@ -861,3 +861,68 @@ def test_alb_dims_filters_foreign_ingress(monkeypatch):
     lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
     assert lb_dims == ["app/k8s-lb-a/aaa111"]
     eks_apply._ALB_DIMS_CACHE.clear()
+
+
+# ==============================================================================
+# 5차 리뷰 회귀 — 주석 오인·미매칭 hostname·스칼라 emails
+# ==============================================================================
+
+def test_tfvars_list_ignores_commented_and_prefixed(tmp_path):
+    """F1 — `# cognito_callback_urls` 주석·legacy_ 접두 변수는 부활 금지.
+    죽은 URL 이 OAuth 허용 목록을 오염하는 보안 경로."""
+    from deploy.render import eks as eks_render
+    (tmp_path / "terraform.tfvars").write_text(
+        '# cognito_callback_urls = ["https://old.example.com/cb"]\n'
+        'legacy_cognito_callback_urls = ["https://legacy.example.com/cb"]\n'
+        'cognito_callback_urls = ["https://live.example.com/cb"]\n'
+        '  cognito_logout_urls = ["https://live.example.com/"]\n')
+    assert eks_render._tfvars_list(tmp_path, "cognito_callback_urls") == [
+        "https://live.example.com/cb"]
+    assert eks_render._tfvars_list(tmp_path, "cognito_logout_urls") == [
+        "https://live.example.com/"]
+
+
+def test_has_manual_alb_dims(tmp_path):
+    """F2/F3 — 주석 처리된 선언은 수동 고정이 아니다."""
+    from deploy import bootstrap
+    (tmp_path / "terraform.tfvars").write_text(
+        '# alb_lb_dimensions = ["app/x/1"]\nfoo = 1\n')
+    assert bootstrap._has_manual_alb_dims(tmp_path) is False
+    (tmp_path / "terraform.tfvars").write_text(
+        'alb_target_groups = [{lb="app/x/1", tg="targetgroup/y/2"}]\n')
+    assert bootstrap._has_manual_alb_dims(tmp_path) is True
+
+
+def test_alb_dims_unmatched_hostname_is_whole_failure(monkeypatch):
+    """F9b — 일부 ingress hostname 의 ALB 가 describe 에 아직 없으면
+    부분 dims 대신 전체 실패 (eventual-consistency flap → 알람 삭제 방지)."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+    items = [
+        {"metadata": {"name": "a-gateway",
+                      "labels": {"app.kubernetes.io/instance": "llm-gateway"}},
+         "status": {"loadBalancer":
+                    {"ingress": [{"hostname": "a.example.com"}]}}},
+        {"metadata": {"name": "b-gateway",
+                      "labels": {"app.kubernetes.io/instance": "llm-gateway"}},
+         "status": {"loadBalancer":
+                    {"ingress": [{"hostname": "b.example.com"}]}}},
+    ]
+    lbs = [{"DNSName": "a.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB}]  # b 는 아직 조회 안 됨
+    _discover_fake(monkeypatch, items=items, lbs=lbs,
+                   tgs=[{"TargetGroupArn": _ARN_TG}])
+    lb_dims, tg_pairs, note = eks_apply._discover_alb_dims(_alert_cfg())
+    assert (lb_dims, tg_pairs) == ([], [])
+    assert "미조회" in note
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+
+def test_capture_eks_scalar_alert_emails(tmp_path, monkeypatch):
+    """F6 — alert_emails = "a@b.com" 스칼라도 유효 HCL — 문자 쪼개기 금지."""
+    from deploy import capture
+    (tmp_path / "terraform.tfvars").write_text(
+        'alert_emails = "ops@example.com"\n')
+    tv = capture._tfvars(tmp_path)
+    ae = tv["alert_emails"]
+    emails = [str(e) for e in (ae if isinstance(ae, list) else [ae])]
+    assert emails == ["ops@example.com"]

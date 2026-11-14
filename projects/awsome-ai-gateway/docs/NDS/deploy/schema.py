@@ -462,6 +462,9 @@ class GatewayConfig:
             if not _EMAIL_RE.match(em):
                 e.append(f"features.alerting.emails '{em}' — 이메일 형식이 아닙니다 "
                          "(오타가 있으면 apply 중간에 SNS 구독 생성이 실패합니다).")
+        # case-variant/중복 주소는 toset(for_each) 에 별개 구독으로 남아
+        # 같은 메일박스에 알림·confirm 이 중복 도착한다 — 정규화+dedupe.
+        al.emails = list(dict.fromkeys(em.lower() for em in al.emails))
         if al.log_shipping and self.deploy.target != "eks":
             e.append("features.alerting.log_shipping 은 eks(Fargate) 전용입니다 — "
                      "ecs 는 task definition 의 awslogs 드라이버 경로를 씁니다.")
