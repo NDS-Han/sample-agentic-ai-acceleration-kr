@@ -71,8 +71,19 @@ Supported clients: **Claude Code**, **Cowork** (Claude Desktop),
 
 `deploy.capacity_tier` is declared as a **user-count band** —
 `"500" | "1000" | "3000" | "6000" | "6000+"` — which the render expands
-into replica/thread-pool/Redis-pool sizes. Individual keys can be
-overridden via `deploy.sizing`.
+into gateway-proxy pod min/max and the Redis pool size:
+
+| band | pods (min/max) | redis pool_size |
+|---|---|---|
+| 500 | 1 / 3 | 150 |
+| 1000 | 2 / 5 | 150 |
+| 3000 | 3 / 6 | 150 |
+| 6000 | 4 / 8 | 150 |
+| 6000+ | 6 / 15 | 150 |
+
+Thread-pool sizing (`bedrock_thread_pool_size`) and individual keys are
+overridden via `deploy.sizing` — bands are encapsulated defaults, not
+declaration precedence.
 
 > SSIR production runs on **EKS**. The compose and ecs paths are
 > documented for completeness; the sections that matter most to you are
@@ -139,7 +150,7 @@ Stages (each idempotent — fix and re-run on failure):
 
 | # | Stage | What happens |
 |---|---|---|
-| 0 | env scaffold | `deploy.tf_env_dir` created from template — **review tfvars, then re-run** |
+| 0 | env scaffold | `deploy.tf_env_dir` created from template — **review tfvars AND set `adminApi.adminBootstrap.emails` to real operator emails in `values-eks-fargate-<env>.local.yaml`, then re-run.** Leftover `admin@example.com` becomes the actual admin user in stage 6 |
 | ★ | infra wizard | AZs, tfstate bucket/table, Cognito domain suffix, `Claude_*` groups, Bedrock allowed ARNs |
 | 1 | tfstate | state bucket + lock table ensured |
 | 2 | env apply | terraform: EKS, VPC, Aurora, ElastiCache, Cognito, Secrets, IRSA |
@@ -152,12 +163,12 @@ Stages (each idempotent — fix and re-run on failure):
 - Run `deployment/scripts/smoke-test.sh --env <env>`.
 - Model aliases/prices are seeded by init SQL + migrations + the pricing
   Lambda — verify in admin-ui `/models`.
-- **Routing profiles**: check `model.routing_profiles` — the seed's
-  cross-account ARNs must be blanked for single-account deployments or
-  every request fails AssumeRole (§9.3).
-- Set `values-eks-fargate-<env>.local.yaml` `adminBootstrap.emails` to
-  real operator emails — the gitignored `.local.yaml` is where
-  environment-specific live values belong.
+- **Routing profiles**: verify `model.routing_profiles` has
+  `account_role_arn`/`external_id`/`default_model` all NULL — migration
+  0055 clears the old sample ARNs, but an environment that ran older
+  images may still carry them and then **every** request fails
+  AssumeRole. Cowork's `default_model` must also be NULL or users can't
+  pick a model (§9.3).
 
 ### 5.2 Adopt an existing deployment (capture path)
 
@@ -200,10 +211,17 @@ roll.
 ## 6. `gateway.yaml` — the fields that matter
 
 ```yaml
+version: 1
+env: prod
+aws:
+  region: <region>
+  account_id: <account-id>
+
 deploy:
-  backend: eks                  # compose | ecs | eks
-  env: prod
-  capacity_tier: "3000"         # user-count band → pod/pool sizes
+  target: eks                   # compose | ecs | eks  (key name is "target")
+  size_tier: t3                 # eks requires t2|t3 — a documentation label;
+                                # real compute size comes from capacity_tier
+  capacity_tier: "3000"         # user-count band → pod min/max (+ Redis pool)
   tf_env_dir: deployment/terraform/environments/llm-gateway-prod
   tfstate_bucket: <bucket>
   tfstate_table: <table>
@@ -221,28 +239,43 @@ network:
   allowed_cidrs: [<employee egress CIDRs>]
   admin_internal: true          # admin Ingress internal-only (S2S VPN)
 
-oidc:
-  groups_claim: custom:groups   # SAML path: attribute-carried groups
+oidc:                           # issuer_url set = OIDC ON; empty = dev-login (never open)
+  issuer_url: https://cognito-idp.<region>.amazonaws.com/<pool-id>
+  client_id: <app-client-id>
+  authorize_url: https://<hosted-ui-domain>.auth.<region>.amazoncognito.com/oauth2/authorize
+  token_url: https://<hosted-ui-domain>.auth.<region>.amazoncognito.com/oauth2/token
+  provider_name: oidc:cognito
+  groups_claim: custom:groups   # SAML path: attribute-carried groups;
+                                # blank → cognito:groups (native pool groups)
   group_prefix: SSIR_
-  admin_groups: [SSIR_Claude_Admin]
+  admin_groups: [SSIR_Claude_Admin]   # AD/SAML groups — separate namespace
   reject_unmatched_groups: false
   vk_ttl_hours: <ttl>
 
+features:
+  service_keys: true            # agent/service VK issuance — default OFF
+  notifications:
+    provider: ses               # mock | smtp | ses | internal_api (no "none" — use mock)
+    ses_from: <verified sender> # required when provider=ses
+
 infra:                          # bootstrap wizard answers (new installs)
-  bedrock_allowed_model_arns: [...]
+  azs: [<az-1>, <az-2>]
   cognito_domain_suffix: <suffix>
-  cognito_groups: [SSIR_Claude_Admin, SSIR_Claude_Developers]
+  cognito_groups: [ClaudeAdmin, Claude_<dept>_<team>]  # POOL groups — must be
+                                                      # Claude_* / ClaudeAdmin,
+                                                      # NOT the SSIR_* AD groups
+  bedrock_allowed_model_arns: [...]
 
 images:
   tag: <git-sha>                # bootstrap auto-injects HEAD sha
   # tags: {service: <pin>}      # per-service overrides
-
-notification:
-  provider: ses | none
 ```
 
 Validation is strict — unknown keys, wrong types, non-boolean booleans
-are rejected by `./deploy validate` (and by `apply`/`configure`).
+are rejected by `./deploy validate` (and by `apply`/`configure`). Two
+groups share names but live in **different namespaces**: Cognito pool
+groups (`infra.cognito_groups`, always `Claude_*`) for native users vs
+AD/SAML attribute groups (`SSIR_*`, carried in `custom:groups`).
 
 ---
 
@@ -251,7 +284,7 @@ are rejected by `./deploy validate` (and by `apply`/`configure`).
 | mode | What | When |
 |---|---|---|
 | `none` | HTTP only | Local/test — **Cowork impossible**, no Cognito SSO |
-| `selfsigned-temp` | Self-signed cert on admin-ui only (EKS) | Need SSO before a domain exists — browser warning, gateway stays HTTP |
+| `selfsigned-temp` | Self-signed cert on admin-ui only (EKS) | Need SSO before a domain exists — browser warning, gateway stays HTTP. **Manual step:** add `https://<admin-ui ALB>/api/auth/callback` + logout URL to the env `terraform.tfvars` `cognito_callback_urls`/`cognito_logout_urls` and `terraform apply` — callbacks are terraform-owned and NOT automated in this mode |
 | `route53-acm` | Real domain + ACM + Route53 records | **Production** |
 
 With `zone_id` set, one `./deploy apply` does everything idempotently:
@@ -306,7 +339,14 @@ login → browser to ADFS → AD auth → signed assertion (email/name/groups)
 - **Role resolution:** ADMIN = `oidc.admin_groups` exact match;
   TEAM_LEADER = console flag only (not a group); DEVELOPER = default.
 - **Team parsing:** `group_prefix: SSIR_` → `SSIR_<Dept>_<Team>`;
-  unmatched names follow `reject_unmatched_groups`.
+  unmatched names follow `reject_unmatched_groups` (default **true** —
+  switching `group_prefix` to `SSIR_` makes native `Claude_*` pool-group
+  members "unmatched" and rejected; keep `reject_unmatched_groups: false`
+  or grant `custom:groups` to native accounts during migration).
+- **Hand to the ADFS admin:** multiple groups must be sent as **one
+  `;`-joined string** in the `groups` claim. If ADFS emits a repeated
+  attribute instead, only the last value may survive — team mapping
+  silently drops all but one group.
 - **Required plumbing:** `custom:groups` schema + client
   `read_attributes` (declared in the cognito terraform module — apply
   `-target=module.cognito`), SAML IdP registration
@@ -361,7 +401,7 @@ for partial updates (`sync-cognito/user/{username}`,
 | Kind | Where issued | Lifetime | Display |
 |---|---|---|---|
 | **User VK** | `gateway-cli login` (browser SSO) | `oidc.vk_ttl_hours` | Once in CLI |
-| **Agent/service VK** | Agents page → **Issue long-lived key** | TTL ≤ 365d | Once in dialog — straight to Secrets Manager |
+| **Agent/service VK** | Agents page → **Issue long-lived key** — requires `features.service_keys: true` in `gateway.yaml` (default OFF — endpoints 403 and the button is hidden while off; turning it off later blocks only new issuance) | TTL ≤ 365d | Once in dialog — straight to Secrets Manager |
 
 - Issuing on a non-agent account **converts it to an agent** (interactive
   login + short-lived keys blocked) — the dialog warns.
@@ -380,19 +420,25 @@ for partial updates (`sync-cognito/user/{username}`,
 Two axes, both manageable in the UI:
 
 - **Per-client** (`/apps` → Cross-account routing): `account_role_arn` +
-  `external_id` + `region`. NULL = in-account. **First thing to check
-  after install** — leftover seed ARNs make every call fail. UI saves
-  invalidate the Redis cache instantly; direct SQL takes up to 5 min.
+  `external_id` + `region`. NULL = in-account. Verify the rows are NULL
+  after install — migration 0055 clears the seed samples, but stale
+  environments may still carry ARNs that break every call. UI saves
+  invalidate the Redis cache instantly; direct SQL takes up to 5 min
+  (300s TTL).
 - **Per-model** (`/models` → edit → Routing): same fields on the model
   alias. Precedence: `model_aliases` ARN > client profile > in-account.
   **Fail-closed** — a failed AssumeRole on a model-scoped route is a 503,
-  never a silent fallback.
+  never a silent fallback. UI/API saves invalidate the model cache
+  immediately; **direct SQL requires deleting the Redis `model:<alias>`
+  key** — the 5-min TTL applies only to client profiles.
 
-Target accounts need an assumable role (trust = gateway execution role
-+ ExternalId) with `bedrock:Invoke*` and model subscription. New
-Anthropic models are **Marketplace subscriptions**, not model-access
-forms — `AccessDenied … aws-marketplace:Subscribe` means subscribe in the
-target account.
+Target accounts need an assumable role — trust = gateway execution role
++ ExternalId — with `bedrock:InvokeModel`, `bedrock:InvokeModelWithResponseStream`,
+`bedrock:CountTokens` (+ `bedrock-mantle:*` for Mantle models), **and**
+the gateway-side role needs `sts:AssumeRole` permission on the target ARN
+(eks: `modules/irsa` role_arn variables). New Anthropic models are
+**Marketplace subscriptions**, not model-access forms — `AccessDenied …
+aws-marketplace:Subscribe` means subscribe in the target account.
 
 ### 9.4 Budgets & rate limits
 
@@ -475,7 +521,10 @@ Before opening to employees ([operations.md](../operations.md) §2 checklist):
 - **Infra modules:** split ownership — `body_logging`/`irsa`/`cognito`/
   `agentcore_runtime` are applied by `deploy apply`'s managed overlay;
   **everything else (vpc/eks/aurora/elasticache) is human-owned** —
-  `terraform plan/apply -target=module.<name>` in the env dir.
+  `terraform plan/apply -var-file=<env>-generated.tfvars -target=module.<name>`
+  in the env dir. The generated var-file carries the bootstrap wizard's
+  answers — running without it can show false drift or revert managed
+  values.
 - **Migrations are forward-only** — no DB rollback. Roll back by pinning
   the previous image tag; schema stays forward.
 - **Cluster/Aurora engine upgrades:** [upgrade-eks-cluster.md](../upgrade-eks-cluster.md) runbook.
@@ -510,10 +559,16 @@ PITR creates a **new cluster** — never overwrites:
 
 1. `aws rds restore-db-cluster-to-point-in-time` → new cluster id.
 2. `aws rds create-db-instance` to attach an instance.
-3. Update the `/llm-gateway/<env>/db` secret's `host` to the new
+3. **RDS Proxy deployments: repoint the proxy target first** — prod eks
+   reads `rds_proxy_endpoint`, so the proxy target is what must change
+   before apps see the new cluster.
+4. Update the `/llm-gateway/<env>/db` secret's `host` to the new
    endpoint → restart pods (eks: `rollout restart`; ecs:
    `update-service --force-new-deployment`).
-4. RDS Proxy deployments: repoint the proxy target too.
+   ⚠️ This is the **one deliberate exception** to "the `/db` secret is
+   terraform-owned — never hand-edit" (§5.1, §14). After recovery, point
+   the env terraform at the restored cluster (or run the equivalent
+   apply) — otherwise a later `terraform apply` can revert the endpoint.
 5. PITR window expired → `restore-db-cluster-from-snapshot` (prod keeps
    a final snapshot on delete).
 
@@ -522,9 +577,13 @@ PITR creates a **new cluster** — never overwrites:
 There is **no recovery** — reissue everyone:
 
 ```bash
-openssl rand -hex 32   # new key → .env or Secrets Manager, restart
+openssl rand -hex 32   # new key → eks: /llm-gateway/<env>/app secret,
+                       # then rollout restart; compose: .env
 # revoke all ACTIVE VKs (admin API or SQL), users re-run gateway-cli login
 ```
+
+Agent/service keys must be **re-issued too** — and every Secrets Manager
+entry holding their plaintext (§14 inventory) updated.
 
 Prevention is everything: keep the key in the team vault **and** a
 second escrow location.
@@ -542,7 +601,7 @@ second escrow location.
 
 | Symptom | First check |
 |---|---|
-| Every request fails AssumeRole | `model.routing_profiles` seed ARNs → blank for single-account (§9.3) |
+| Every request fails AssumeRole | `model.routing_profiles` or `model.model_aliases` carrying non-NULL ARNs intended for another account → NULL for in-account (§9.3) |
 | 401 on a valid agent key | **Repair auth** on Agents page |
 | VK issuance 403 for a user | Missing `Claude_*` team group |
 | admin-ui 403 for a user | Missing `ClaudeAdmin` / not provisioned → Sync Cognito |
@@ -553,7 +612,73 @@ second escrow location.
 
 ---
 
-## 14. Where the details live
+## 14. Handover checklist — what transfers beyond documents
+
+Documents live in git; these do not. Verify each item is delivered and
+received — an unchecked row here is a future incident.
+
+### Values & state (cannot be committed — hand over separately)
+
+- [ ] Real `deployment/gateway.yaml` + `values-eks-fargate-<env>.local.yaml`
+      from the deploy host — committed copies are placeholders
+- [ ] `terraform.tfvars` per env dir (gitignored — real account IDs,
+      CIDRs, ARNs)
+- [ ] tfstate bucket/table names + access
+- [ ] Cognito pool ID, client IDs, hosted UI domain
+- [ ] `./deploy doctor --capture` snapshot at handover time — the
+      baseline of live state
+
+### Access
+
+- [ ] Deploy EC2: SSH key, instance ID, IAM instance profile
+- [ ] AWS account(s): console/role access for SSIR operators
+- [ ] Cognito admin account for admin-ui — or SSIR admin accounts
+      mapped via `custom:groups` (§8.2)
+- [ ] Repository access — `nds/dev` branch + `upstream-sync.md` process
+
+### Secrets escrow
+
+- [ ] `VIRTUAL_KEY_ENCRYPTION_KEY` — stored in **two** places; loss
+      means every VK is dead (§12.4)
+- [ ] `/llm-gateway/<env>/db` and `/app` secret paths — note they are
+      terraform-owned; never overwrite the db secret manually
+
+### People & coordination
+
+- [ ] SSIR-side ADFS administrator (SAML federation counterpart)
+- [ ] DNS/domain owner
+- [ ] Network team — owner of `allowed_cidrs` egress ranges
+
+### Live inventory
+
+- [ ] Active service-agent keys + the Secrets Manager paths holding
+      their plaintext
+- [ ] Marketplace subscriptions currently active
+- [ ] Current `capacity_tier` and observed headroom (§10 signals)
+
+### Known limitations & deferred items
+
+- [ ] EKS API endpoint currently `0.0.0.0/0` — accepted for now,
+      **planned to restrict to internal** later
+- [ ] `bi_insight` chat agent — opt-in via `features.bi_insight`;
+      when enabled, `deploy apply` provisions its infra through the
+      managed overlay (`module.agentcore_runtime`); off by default
+- [ ] Single-region design — full region loss is out of scope (§12.2)
+- [ ] Migrations are forward-only — no DB rollback (§11)
+- [ ] Body logging stores unmasked payloads — enable for debugging only
+- [ ] ECS path exists but is **deferred** — not the production target
+
+### Acceptance — SSIR's first week
+
+- [ ] `./deploy doctor` on the live env → no unexpected HIGH findings
+- [ ] `deployment/scripts/smoke-test.sh --env <env>` passes
+- [ ] One Aurora PITR rehearsal to a throwaway cluster (§12.3)
+- [ ] One test user onboarded end-to-end: Cognito group → sync → CLI
+      login → VK → a live request
+
+---
+
+## 15. Where the details live
 
 | Need | Document |
 |---|---|
