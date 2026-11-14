@@ -79,6 +79,11 @@ output "chat_reader_pw_task_definition_arn" {
   value       = var.chat_reader_secret_arn != "" ? aws_ecs_task_definition.chat_reader_pw[0].arn : null
 }
 
+output "chat_reader_pw_log_group_name" {
+  description = "chat_reader_pw task 의 CloudWatch 로그 그룹 — ALTER ROLE 실패 시 원인 확인용"
+  value       = var.chat_reader_secret_arn != "" ? aws_cloudwatch_log_group.chat_reader_pw[0].name : null
+}
+
 output "managed_certificate_arn" {
   description = "모듈이 발급한 ACM cert — ISSUED 후 certificate_arn 으로 다시 넣으면 HTTPS 전환"
   value       = var.domain_name != "" && var.certificate_arn == "" ? aws_acm_certificate.this[0].arn : ""

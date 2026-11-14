@@ -117,3 +117,8 @@ output "chat_reader_pw_task_definition_arn" {
   value       = try(module.gateway.chat_reader_pw_task_definition_arn, null)
   description = "chat_reader 비밀번호 동기화 task def — provisioner run-task 대상"
 }
+
+output "chat_reader_pw_log_group_name" {
+  description = "chat_reader 비밀번호 동기화 task 로그 그룹 — provisioner 실패 힌트용"
+  value       = try(module.gateway.chat_reader_pw_log_group_name, null)
+}

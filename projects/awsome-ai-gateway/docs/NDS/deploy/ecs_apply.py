@@ -218,6 +218,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         runtime_arn = chatagent.ensure_runtime_arn(repo_root, outputs, extras={
             "ECS_CLUSTER": outputs.get("ecs_cluster_name"),
             "ECS_PW_TASKDEF_ARN": outputs.get("chat_reader_pw_task_definition_arn"),
+            "ECS_PW_LOG_GROUP": outputs.get("chat_reader_pw_log_group_name"),
             "ECS_SUBNETS": ",".join(outputs.get("private_subnet_ids") or []),
             "ECS_SG": outputs.get("task_security_group_id"),
             "ECS_REGION": cfg.aws.region,

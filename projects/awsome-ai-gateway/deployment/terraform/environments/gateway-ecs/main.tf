@@ -229,15 +229,16 @@ module "gateway" {
   # 나머지 연결값은 모듈 출력이라 참조로 바로 넘긴다.
   agentcore_runtime_arn   = var.agentcore_runtime_arn
   chat_agent_region       = var.enable_chat_agent ? var.chat_agent_region : ""
-  chat_lambda_query_db    = var.enable_chat_db_tools ? module.agentcore_runtime[0].query_db_function_name : ""
-  chat_lambda_get_schema  = var.enable_chat_db_tools ? module.agentcore_runtime[0].get_schema_function_name : ""
-  chat_staging_bucket     = var.enable_chat_agent ? module.agentcore_runtime[0].staging_bucket_name : ""
-  chat_staging_bucket_arn = var.enable_chat_agent ? module.agentcore_runtime[0].staging_bucket_arn : ""
+  chat_lambda_query_db    = var.enable_chat_db_tools ? try(module.agentcore_runtime[0].query_db_function_name, "") : ""
+  chat_lambda_get_schema  = var.enable_chat_db_tools ? try(module.agentcore_runtime[0].get_schema_function_name, "") : ""
+  chat_staging_bucket     = var.enable_chat_agent ? try(module.agentcore_runtime[0].staging_bucket_name, "") : ""
+  chat_staging_bucket_arn = var.enable_chat_agent ? try(module.agentcore_runtime[0].staging_bucket_arn, "") : ""
   chat_lambda_function_names = var.enable_chat_db_tools ? [
-    module.agentcore_runtime[0].query_db_function_name,
-    module.agentcore_runtime[0].get_schema_function_name,
+    try(module.agentcore_runtime[0].query_db_function_name, ""),
+    try(module.agentcore_runtime[0].get_schema_function_name, ""),
   ] : []
-  chat_reader_secret_arn = var.enable_chat_db_tools ? module.agentcore_runtime[0].chat_reader_secret_arn : ""
+  chat_reader_secret_arn         = var.enable_chat_db_tools ? try(module.agentcore_runtime[0].chat_reader_secret_arn, "") : ""
+  chat_reader_secret_kms_key_arn = var.enable_chat_db_tools ? try(module.agentcore_runtime[0].kms_key_arn, "") : ""
 
   tags = var.tags
 }

@@ -516,6 +516,12 @@ variable "chat_reader_secret_arn" {
   default     = ""
 }
 
+variable "chat_reader_secret_kms_key_arn" {
+  description = "chat_reader secret 의 SSE-KMS 키 ARN — execution role 이 secret 주입 시 복호화에 필요 (AWS관리키면 비워도 됨)"
+  type        = string
+  default     = ""
+}
+
 variable "litellm_pricing_lambda" {
   description = "LiteLLM 단가 조회 Lambda 이름 — 비면 admin-api 의 litellm 소스 비활성 (ops/NDS-01)"
   type        = string

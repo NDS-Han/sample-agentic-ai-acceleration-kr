@@ -54,6 +54,18 @@ data "aws_iam_policy_document" "execution_secrets" {
       var.chat_reader_secret_arn,
     ] : [])
   }
+
+  # chat_reader secret 은 모듈 전용 CMK 로 암호화돼 있어 주입 시 복호화가 필요
+  # — 없으면 태스크가 시작조차 못 하고 AccessDenied 로 죽는다.
+  dynamic "statement" {
+    for_each = var.chat_reader_secret_kms_key_arn != "" ? [1] : []
+    content {
+      sid       = "ChatReaderSecretKmsDecrypt"
+      effect    = "Allow"
+      actions   = ["kms:Decrypt"]
+      resources = [var.chat_reader_secret_kms_key_arn]
+    }
+  }
 }
 
 resource "aws_iam_policy" "execution_secrets" {

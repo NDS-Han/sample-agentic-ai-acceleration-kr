@@ -382,6 +382,7 @@ resource "aws_ecs_task_definition" "chat_reader_pw" {
 
     environment = [
       { name = "PGHOST", value = var.db_host },
+      { name = "PGPORT", value = tostring(var.db_port) },
       { name = "PGUSER", value = var.db_master_username },
       { name = "PGDATABASE", value = var.db_name },
       { name = "PGSSLMODE", value = "require" },

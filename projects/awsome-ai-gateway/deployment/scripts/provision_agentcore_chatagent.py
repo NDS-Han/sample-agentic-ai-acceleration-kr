@@ -224,9 +224,10 @@ def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
         networkConfiguration={"awsvpcConfiguration": {
             "subnets": subnets, "securityGroups": [sg],
             "assignPublicIp": "DISABLED"}})
-    if r.get("failures"):
-        log(f"⚠ run-task 실패 — 다음 apply 재시도로 수렴합니다: "
-            f"{r['failures'][0].get('reason')}")
+    if r.get("failures") or not r.get("tasks"):
+        why = (r["failures"][0].get("reason") if r.get("failures")
+               else "tasks 가 비어 있음")
+        log(f"⚠ run-task 실패 — 다음 apply 재시도로 수렴합니다: {why}")
         return
     task_arn = r["tasks"][0]["taskArn"]
     log(f"chat_reader 비밀번호 task 실행: {task_arn.rsplit('/', 1)[-1]}")
@@ -234,15 +235,17 @@ def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
         cluster=cluster, tasks=[task_arn],
         WaiterConfig={"Delay": 5, "MaxAttempts": 60})
     desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
-    code = (desc["tasks"][0]["containers"][0].get("exitCode")
-            if desc.get("tasks") else None)
+    task = desc["tasks"][0] if desc.get("tasks") else {}
+    code = (task.get("containers") or [{}])[0].get("exitCode")
     if code == 0:
         log("ALTER ROLE gateway_chat_reader 완료 — 비밀번호 동기화됨")
     else:
-        reason = desc["tasks"][0].get("stoppedReason", "?")
+        reason = task.get("stoppedReason", "?")
+        log_group = os.environ.get("ECS_PW_LOG_GROUP", "")
         log(f"⚠ ALTER ROLE task 실패(exit={code}, {reason}) — SM≠DB 불일치가 "
-            "다음 apply 재시도로 수렴합니다. 로그: "
-            f"aws logs tail /ecs/*-chat-reader-pw --region {region}")
+            "다음 apply 재시도로 수렴합니다."
+            + (f" 로그: aws logs tail {log_group} --region {region}"
+               if log_group else ""))
 
 
 def _alter_via_kubectl(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
@@ -276,10 +279,21 @@ data:
 """
     p = _kubectl("apply", "-f", "-", stdin=manifest)
     if p.returncode != 0:
+        # 부분 생성됐을 가능성에 대비해 임시 secret 정리 — 비밀번호를 담은
+        # 고아 리소스를 네임스페이스에 남기지 않는다.
+        _kubectl("delete", "secret", tmp_secret, "--ignore-not-found",
+                 "--wait=false")
         log(f"⚠ 임시 secret 생성 실패 — 비밀번호 동기화 건너뜀: "
             f"{p.stderr.strip()[:200]}")
         return
-    overrides = {
+    # kubectl run --overrides 는 strategic merge 라 containers 가 name 키로
+    # 합쳐진다 — run 이 만드는 컨테이너 이름은 pod 이름이라 "psql" 로 두면
+    # 기본 CMD 컨테이너 + psql 컨테이너가 같이 떠 pod 가 Succeeded 되지
+    # 못한다. 명시적 Pod manifest 로 create 해 merge 의존을 제거한다.
+    pod_manifest = {
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": pod},
         "spec": {
             "restartPolicy": "Never",
             "containers": [{
@@ -287,6 +301,7 @@ data:
                 "image": os.environ["MIGRATION_IMAGE"],
                 "env": [
                     {"name": "PGHOST", "value": os.environ["DB_HOST"]},
+                    {"name": "PGPORT", "value": os.environ.get("DB_PORT", "5432")},
                     {"name": "PGUSER", "value": os.environ.get("DB_MASTER_USER", "postgres_admin")},
                     {"name": "PGDATABASE", "value": os.environ.get("DB_NAME", "gateway")},
                     {"name": "PGSSLMODE", "value": "require"},
@@ -305,8 +320,7 @@ data:
         }
     }
     try:
-        p = _kubectl("run", pod, f"--image={os.environ['MIGRATION_IMAGE']}",
-                     "--restart=Never", f"--overrides={json.dumps(overrides)}")
+        p = _kubectl("create", "-f", "-", stdin=json.dumps(pod_manifest))
         if p.returncode != 0:
             log(f"⚠ psql pod 생성 실패 — 비밀번호 동기화 건너뜀: "
                 f"{p.stderr.strip()[:200]}")
