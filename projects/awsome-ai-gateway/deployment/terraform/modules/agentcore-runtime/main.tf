@@ -313,7 +313,9 @@ data "aws_iam_policy_document" "code_interpreter" {
     ]
     resources = [
       "arn:aws:bedrock-agentcore:${data.aws_region.current.name}:aws:code-interpreter/*",
-      "arn:aws:bedrock-agentcore:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:code-interpreter/*",
+      # 커스텀 인터프리터의 실제 ARN 타입은 code-interpreter-custom/{id} —
+      # code-interpreter/* 로는 StartCodeInterpreterSession 이 AccessDenied.
+      "arn:aws:bedrock-agentcore:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:code-interpreter-custom/*",
     ]
   }
 }
