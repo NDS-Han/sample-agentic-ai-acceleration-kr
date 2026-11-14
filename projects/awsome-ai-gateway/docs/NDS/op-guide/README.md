@@ -334,6 +334,23 @@ ops contract behind the UI.
 | Force re-auth | Team/member → **Force re-authentication** | Invalidates all VKs in scope |
 | Remove (AD) | Delete in AD → `admin-user-global-sign-out` + `admin-delete-user` | Pool record is housekeeping |
 
+**Provisioning — when does a new user actually appear?** Two paths create
+the DB record, and either one unlocks the rest:
+
+- **Sync Cognito** (admin-driven) — pool groups **+ full user enumeration**;
+  each user's `custom:groups` attribute is read for team/role resolution,
+  so SAML users are covered too. Recommended right after adding users —
+  it makes them visible in the org tree before they ever log in.
+- **`/v1/auth/exchange`** (user-driven) — the first `gateway-cli login`
+  auto-provisions the account from token claims (email-verified link only).
+
+Until **one** of these runs, admin-ui pages return `user_not_provisioned`
+(403) — VKs work fine via CLI, but the user's own usage page and any
+admin-ui route are locked. Team membership also gates VK issuance itself:
+no `Claude_*` group → exchange is a 403. Granular sync endpoints exist
+for partial updates (`sync-cognito/user/{username}`,
+`sync-cognito/group/{groupname}`) when a full sync is unnecessary.
+
 ### 9.2 Keys — two kinds, never mixed
 
 | Kind | Where issued | Lifetime | Display |
