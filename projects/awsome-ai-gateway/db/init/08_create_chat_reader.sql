@@ -7,8 +7,10 @@
 -- whitelist 에 따른 컬럼만 노출. password_hash / virtual_keys.value 같은
 -- 민감 컬럼은 명시적으로 제외.
 --
--- 비밀번호: ESO 가 Secrets Manager 에서 동기화. 실제 password 는 Terraform 또는
--- 운영자가 ALTER ROLE 로 설정한다 (terraform output chat_reader_secret_arn).
+-- 비밀번호: NDS 프로비저너(provision_agentcore_chatagent.py)가 apply 마다
+-- Secrets Manager 값으로 동기화한다 — 클러스터 안의 일회성 pod(migration 이미지)
+-- 이 master 자격증명으로 ALTER ROLE 을 실행한다. 수동 ALTER ROLE 은 프로비저너
+-- 실패 시 폴백으로만 필요 (docs/NDS/chat-agent.md §3).
 --
 -- ⚠️ 여기에 리터럴 placeholder 를 박지 말 것. 이 파일은 git 트리에 있고 이 스크립트는
 --    모든 환경(prod 포함)의 migration Job 에서 실행되므로, 리터럴은 곧 "공개된 비밀번호로

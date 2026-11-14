@@ -62,10 +62,22 @@ DB 접속은 VPC 부착 query_db Lambda 가 대신한다.
 > 코드 기본값과 동일). tfvars 의 `chat_agent_region` 변수(IRSA 스코프용)와
 > 반드시 같은 값이어야 한다 — 다르게 쓰려면 둘 다 바꿀 것.
 
-### 3. chat_reader DB 비밀번호 설정 (apply 후 수동, 유일한 수동 단계)
+### 3. chat_reader DB 비밀번호 (프로비저너 자동)
 
-terraform 은 secret **셸**만 만든다 — `gateway_chat_reader` Postgres 롤의
-비밀번호는 out-of-band 로 설정한다:
+terraform 은 secret **셸**만 만들고, 프로비저너가 apply 마다 비밀번호를
+동기화한다:
+
+1. SM 값이 비어 있으면 `secrets.token_urlsafe(24)` 로 생성
+2. kubectl 일회성 pod(migration 이미지, `llm-gateway-db` 의 master 자격증명)
+   이 클러스터 안에서 `ALTER ROLE gateway_chat_reader` 실행 — deploy 호스트는
+   게이트웨이 VPC 밖이라 psql 직접 접속이 안 되므로 인클러스터 경로를 쓴다
+3. ALTER 성공 후에만 `put-secret-value` — SM 과 DB 가 불일치 상태로 끝나지
+   않는다. 매 apply 재실행돼 수동 변경 드리프트가 자가치유된다.
+
+비밀번호는 argv·SQL·pod spec 에 평문으로 남지 않는다 (SM → 임시 k8s secret
+→ pod env → `psql \password` stdin — 실행 후 임시 secret·pod 삭제).
+kubectl 이 없거나 pod 이 실패하면 경고만 내고 넘어간다 — 그 경우에만 아래
+수동 폴백으로 설정한다:
 
 ```bash
 # DB 에서 롤 비밀번호 설정 (chat_reader 롤은 db/init/08_* 로 이미 존재)

@@ -84,8 +84,9 @@ resource "aws_security_group_rule" "aurora_from_lambda" {
 
 # ------------------------------------------------------------------------------
 # Reader DB credentials secret — query_db reads password from here.
-# Terraform creates the secret shell; the actual password is set out-of-band
-# (apply-time random + ALTER ROLE) so it never lands in state as plaintext.
+# Terraform creates the secret shell; provision_agentcore_chatagent.py generates
+# the password at deploy time and runs ALTER ROLE via an in-cluster pod, so the
+# plaintext never lands in state.
 # ------------------------------------------------------------------------------
 resource "aws_secretsmanager_secret" "chat_reader" {
   count       = local.db_tools_enabled

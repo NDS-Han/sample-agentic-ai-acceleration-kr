@@ -90,6 +90,35 @@ def _aws_account_id(region: str) -> str:
     return r.stdout.strip() if r.returncode == 0 else ""
 
 
+def _migration_image(cfg: GatewayConfig, meta: dict, gen_dir: Path,
+                     repo_root: Path) -> str:
+    """psql 이 든 migration 이미지의 풀 URI — helm values 레이어(base → overlay
+    → gen, last-wins)를 그대로 병합해 실제 배포되는 이미지와 동일한 URI 를 만든다.
+    레지스트리는 global.imageRegistry → images.registry → ECR 추론 순."""
+    layers = [repo_root / "deployment/charts/llm-gateway/values.yaml"]
+    for layer in meta.get("values_layers", []):
+        lp = Path(layer)
+        layers.append(lp if lp.is_absolute() else repo_root / lp)
+    repo, tag, registry = "llm-gateway/migration", "", ""
+    for lp in layers:
+        if not lp.exists():
+            continue
+        v = yaml.safe_load(lp.read_text()) or {}
+        mig = v.get("migration") or {}
+        repo = (mig.get("image") or {}).get("repository") or repo
+        tag = (mig.get("image") or {}).get("tag") or tag
+        registry = (v.get("global") or {}).get("imageRegistry") or registry
+    if not registry:
+        registry = cfg.images.registry
+    if not registry:
+        acct = _aws_account_id(cfg.aws.region)
+        if acct:
+            registry = f"{acct}.dkr.ecr.{cfg.aws.region}.amazonaws.com"
+    if not registry or not tag:
+        return ""  # 프로비저너가 비밀번호 단계를 건너뛰고 경고를 낸다
+    return f"{registry}/{repo}:{tag}"
+
+
 def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     """install-eks.sh 의 SET_ARGS 와 동일한 --set 목록 (terraform output 기반)."""
     args: list[str] = []
@@ -879,9 +908,14 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     # pod env 로 주입한다. 인프라(ECR·role·staging·Lambdas)는 managed overlay
     # (module.agentcore_runtime)가 먼저 보장한다 — outputs 가 없으면
     # _infra_missing 이 먼저 targeted apply 를 돌렸다.
+    # 프로비저너는 chat_reader 비밀번호도 같이 동기화한다 — SM 비밀번호를 채우고
+    # kubectl pod(migration 이미지)으로 ALTER ROLE 을 실행한다.
     # 실패해도 배포를 중단하지 않는다 — env 미주입으로 라우터가 503 graceful-off.
     if cfg.features.bi_insight:
-        arn = chatagent.ensure_runtime_arn(repo_root, outs)
+        arn = chatagent.ensure_runtime_arn(
+            repo_root, outs, meta=meta,
+            migration_image=_migration_image(cfg, meta, gen_dir, repo_root),
+            context=context)
         if arn:
             set_args += [
                 "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",
