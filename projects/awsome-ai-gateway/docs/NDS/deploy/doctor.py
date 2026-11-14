@@ -487,6 +487,37 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             else:
                 rep.add("HIGH", "deploy", msg)
 
+        # 3.5 bi_insight — 선언됐는데 ARN 미주입이면 /chat 은 503 graceful-off,
+        #     CHAT_ENABLED 미설정이면 UI 가 'not deployed' 를 띄운다.
+        #     deployments JSON 를 재사용해 env 주입 상태를 본다.
+        if getattr(cfg.features, "bi_insight", False):
+            def _env_of(svc: str) -> dict:
+                d = by_name.get(svc) or by_name.get(f"{rel}-{svc}")
+                if not d:
+                    return {}
+                try:
+                    return {
+                        e["name"]: e.get("value", "")
+                        for e in d["spec"]["template"]["spec"]
+                                 ["containers"][0].get("env", [])
+                    }
+                except (KeyError, IndexError):
+                    return {}
+            arn = _env_of("admin-api").get("AGENTCORE_RUNTIME_ARN", "")
+            if arn:
+                rep.add("OK", "bi_insight",
+                        f"Runtime 주입됨 ({arn.rsplit('/', 1)[-1][:24]}…, "
+                        f"region={_env_of('admin-api').get('AGENTCORE_REGION', '?')})")
+            else:
+                rep.add("WARN", "bi_insight",
+                        "bi_insight 선언됐으나 admin-api 에 AGENTCORE_RUNTIME_ARN "
+                        "미주입 — /chat 은 503 입니다. apply 의 provisioner "
+                        "로그를 확인하세요")
+            if _env_of("admin-ui").get("CHAT_ENABLED") != "true":
+                rep.add("WARN", "bi_insight",
+                        "admin-ui CHAT_ENABLED 미설정 — /chat 페이지가 "
+                        "'not deployed' 로 표시됩니다")
+
     # 4. migration hook Job — 가장 최근 것의 상태
     r = _run(["kubectl", "get", "jobs", "-n", ns, "-o", "json", *ctx])
     if r.returncode == 0:
