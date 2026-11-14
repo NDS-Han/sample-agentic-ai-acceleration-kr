@@ -717,9 +717,18 @@ received — an unchecked row here is a future incident.
 ### Operations ownership
 
 - [ ] **Observability stack** — `deployment/observability/` (Prometheus,
-      Grafana, otel-collector, prometheus-adapter): is it deployed, who
-      owns the dashboards, where the executor-saturation metric feeds
-      HPA (`features.observability`)
+      Grafana, otel-collector, prometheus-adapter), installed manually
+      via `install.sh` — **not** part of the managed overlay. The
+      executor-saturation metric feeding HPA depends on it. Confirm it
+      is deployed and who owns/watches Grafana
+- [ ] **Alerting is not wired — for us either.** The stack was built for
+      loadtest observability: `alertmanager: enabled: false`, Prometheus
+      retention 24h, emptyDir storage (metrics lost on pod restart), no
+      PrometheusRules/receivers. Pod crashes, ALB 5xx, Redis OOM, and
+      Aurora events produce **no** notification — detection today is
+      pull-only (dashboards + `./deploy doctor`). Decide: enable
+      Alertmanager + rules + a receiver (and persistent storage), or
+      formally accept pull monitoring
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
       budget-alert emails
