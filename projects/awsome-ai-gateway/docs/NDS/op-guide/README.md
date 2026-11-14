@@ -298,6 +298,11 @@ login → browser to ADFS → AD auth → signed assertion (email/name/groups)
       → POST to Cognito → JIT user + custom:groups → token → role/team
 ```
 
+- **The toggle is `oidc.groups_claim`** — set `custom:groups` for the
+  attribute path (ADFS/SAML); leave it blank and it is inferred from
+  `provider_name` → `cognito:groups` (native pool groups). One declared
+  key switches exchange, sync, and session auth together — across all
+  three backends (eks helm value / ecs tfvar / compose env).
 - **Role resolution:** ADMIN = `oidc.admin_groups` exact match;
   TEAM_LEADER = console flag only (not a group); DEVELOPER = default.
 - **Team parsing:** `group_prefix: SSIR_` → `SSIR_<Dept>_<Team>`;
