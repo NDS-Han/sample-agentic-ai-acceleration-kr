@@ -1672,6 +1672,10 @@ def main(argv=None) -> int:
         if isinstance(exc, (CaptureError, schema.SchemaError)):
             console.print(f"[red]{exc}")
             return 1
+        if isinstance(exc, (ValueError, KeyError)):
+            # render/스키마 경로의 데이터 오류 — traceback 보다 메시지가 낫다
+            console.print(f"[red]처리 실패: {exc}")
+            return 1
         raise
 
 

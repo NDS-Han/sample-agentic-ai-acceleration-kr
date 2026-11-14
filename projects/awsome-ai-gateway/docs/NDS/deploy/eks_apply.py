@@ -128,9 +128,13 @@ def _migration_image(cfg: GatewayConfig, meta: dict, gen_dir: Path,
         repo = (mig.get("image") or {}).get("repository") or repo
         tag = (mig.get("image") or {}).get("tag") or tag
         registry = (v.get("global") or {}).get("imageRegistry") or registry
-    if not registry:
+    # helm 실효값과 같은 우선순위 — images.registry 지정 시 gen 레이어에
+    # 기록돼 병합값에 이미 반영된다. 비어 있으면 apply 가 --set 으로 sts 추론
+    # registry 를 주입하므로 레이어 병합값(스캐폴드된 dev 잔재일 수 있음)보다
+    # 그쪽이 우선한다.
+    if cfg.images.registry:
         registry = cfg.images.registry
-    if not registry:
+    else:
         acct = _aws_account_id(cfg.aws.region)
         if acct:
             registry = f"{acct}.dkr.ecr.{cfg.aws.region}.amazonaws.com"
@@ -278,17 +282,20 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
     store 이름은 gen values.yaml 의 externalSecrets.secretStoreRef.name,
     없으면 차트 기본값(aws-secrets-manager)."""
     name = "aws-secrets-manager"
-    for layer in reversed(meta.get("values_layers") or []):
+    # 레이어 순서대로 병합 — 뒤 레이어(gen)가 키를 선언할 때만 덮는다. 첫
+    # 파싱 성공에서 break 하면 env overlay 의 커스텀 store 명이 유실된다.
+    for layer in meta.get("values_layers") or []:
         lp = Path(layer)
         lp = lp if lp.is_absolute() else repo_root / lp
         try:
             vals = yaml.safe_load(lp.read_text()) or {}
-            name = str(((vals.get("externalSecrets") or {})
-                        .get("secretStoreRef") or {}).get("name") or name)
-            break
+            v = ((vals.get("externalSecrets") or {})
+                 .get("secretStoreRef") or {}).get("name")
+            if v:
+                name = str(v)
         except (OSError, yaml.YAMLError):
             continue
-    base = ["kubectl"] + (["--kube-context", context] if context else [])
+    base = ["kubectl"] + (["--context", context] if context else [])
     if _run_quiet(base + ["get", "ns", "external-secrets"],
                   timeout=15).returncode != 0:
         print("ⓘ external-secrets 네임스페이스 없음 — ClusterSecretStore "
@@ -374,11 +381,20 @@ def _alb_hostname_by_suffix(meta: dict, suffix: str, context: str = "") -> str:
         return ""
     try:
         for item in json.loads(r.stdout).get("items", []):
-            name = (item.get("metadata") or {}).get("name") or ""
-            if name.endswith(suffix):
-                lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
-                if lb and lb[0].get("hostname"):
-                    return lb[0]["hostname"]
+            md = item.get("metadata") or {}
+            name = md.get("name") or ""
+            inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
+            rel = meta.get("release")
+            if inst is not None:
+                if inst != rel:
+                    continue
+            elif rel and name != f"{rel}{suffix}":
+                continue
+            elif not rel and not name.endswith(suffix):
+                continue
+            lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
+            if lb and lb[0].get("hostname"):
+                return lb[0]["hostname"]
     except (json.JSONDecodeError, KeyError, IndexError):
         pass
     return ""
@@ -398,8 +414,11 @@ def _find_domain_cert(domain: str, region: str) -> tuple[str, str]:
             c = json.loads(d.stdout or "{}")
         except json.JSONDecodeError:
             continue
-        if {f"*.{domain}", domain} & set(c.get("SAN") or []):
-            return arn, c.get("S", "")
+        # apex SAN 만 있는 인증서는 gateway./admin./admin-api. 서브도메인을
+        # 못 커버한다 — 와일드카드 SAN 필수 (없으면 잘못된 cert 가 붙는다).
+        if f"*.{domain}" not in set(c.get("SAN") or []):
+            continue
+        return arn, c.get("S", "")
     return "", ""
 
 
@@ -410,6 +429,12 @@ def ensure_domain_cert(domain: str, zone_id: str, region: str) -> str:
     arn, status = _find_domain_cert(domain, region)
     if status == "ISSUED":
         return arn
+    if arn and status != "PENDING_VALIDATION":
+        # FAILED/EXPIRED/INACTIVE/VALIDATION_TIMED_OUT — 절대 ISSUED 가 안
+        # 되는 죽은 인증서라 재사용하면 매 apply 가 3분 대기만 반복한다.
+        print(f"ⓘ 기존 인증서 상태가 {status} — 새 인증서를 요청합니다",
+              file=sys.stderr)
+        arn = ""
     if not arn:
         r = _run_quiet(["aws", "acm", "request-certificate",
                         "--domain-name", f"*.{domain}",
@@ -422,19 +447,23 @@ def ensure_domain_cert(domain: str, zone_id: str, region: str) -> str:
             print(f"⚠ ACM request-certificate 실패: {r.stderr[:200]}",
                   file=sys.stderr)
             return ""
-        time.sleep(3)
     if not zone_id:
         print("ⓘ domain.zone_id 가 없어 인증서 검증 CNAME 을 수동 등록해야 "
               "합니다 (등록 후 다음 apply 에 자동 부착)", file=sys.stderr)
         return ""
-    d = _run_quiet(["aws", "acm", "describe-certificate",
-                    "--certificate-arn", arn, "--region", region,
-                    "--query", "Certificate.DomainValidationOptions[].ResourceRecord",
-                    "--output", "json"], timeout=30)
-    try:
-        recs = [x for x in json.loads(d.stdout or "[]") if x]
-    except json.JSONDecodeError:
-        recs = []
+    recs = []
+    for _ in range(6):  # ACM 이 DVO 를 채우는 데 수 초 — 빈 응답은 재시도
+        d = _run_quiet(["aws", "acm", "describe-certificate",
+                        "--certificate-arn", arn, "--region", region,
+                        "--query", "Certificate.DomainValidationOptions[].ResourceRecord",
+                        "--output", "json"], timeout=30)
+        try:
+            recs = [x for x in json.loads(d.stdout or "[]") if x]
+        except json.JSONDecodeError:
+            recs = []
+        if recs:
+            break
+        time.sleep(3)
     changes = [{"Action": "UPSERT",
                 "ResourceRecordSet": {"Name": rec["Name"], "Type": rec["Type"],
                                       "TTL": 300,
@@ -464,9 +493,16 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
         print("ⓘ domain.zone_id 없음 — host 3개의 DNS 레코드는 수동 등록입니다",
               file=sys.stderr)
         return
-    suffix_to_host = {"-gateway": f"gateway.{cfg.domain.name}",
-                      "-admin-ui": f"admin.{cfg.domain.name}",
-                      "-admin-api": f"admin-api.{cfg.domain.name}"}
+    # domain.hosts 선언 호스트를 소유한다 — render 의 ingress 와 같은 계약
+    # (선언 없으면 파생 네이밍). 파생만 upsert 하면 선언 호스트엔 DNS 가
+    # 안 생기고 파생 호스트만 무용하게 ALB 를 가리킨다.
+    suffix_to_host = {
+        "-gateway": cfg.domain.hosts.get("gateway")
+        or f"gateway.{cfg.domain.name}",
+        "-admin-ui": cfg.domain.hosts.get("admin_ui")
+        or f"admin.{cfg.domain.name}",
+        "-admin-api": cfg.domain.hosts.get("admin_api")
+        or f"admin-api.{cfg.domain.name}"}
     changes = []
     for suffix, host in suffix_to_host.items():
         alb = _alb_hostname_by_suffix(meta, suffix, context)
@@ -552,8 +588,16 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
         return ""
     try:
         for item in json.loads(r.stdout).get("items", []):
-            name = (item.get("metadata") or {}).get("name") or ""
-            if not name.endswith("-admin-ui"):
+            md = item.get("metadata") or {}
+            name = md.get("name") or ""
+            inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
+            rel = meta.get("release")
+            if inst is not None:
+                if inst != rel:
+                    continue
+            elif rel and name != f"{rel}-admin-ui":
+                continue
+            elif not rel and not name.endswith("-admin-ui"):
                 continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
@@ -579,8 +623,19 @@ def live_ingress_rule_host(meta: dict, context: str = "") -> str:
         return ""
     try:
         for item in json.loads(r.stdout).get("items", []):
-            name = (item.get("metadata") or {}).get("name") or ""
-            if not name.endswith("-admin-ui"):
+            md = item.get("metadata") or {}
+            name = md.get("name") or ""
+            # 우리 릴리스의 admin-ui ingress 만 — 공유 ns 에 다른 릴리스의
+            # *-admin-ui 가 있으면 그 host 를 집어 2-phase 가 스킵됐다.
+            labels = (md.get("labels") or {})
+            inst = labels.get("app.kubernetes.io/instance")
+            rel = meta.get("release")
+            if inst is not None:
+                if inst != rel:
+                    continue
+            elif rel and name != f"{rel}-admin-ui":
+                continue
+            elif not rel and not name.endswith("-admin-ui"):
                 continue
             for rule in (item.get("spec") or {}).get("rules") or []:
                 if rule.get("host"):
@@ -590,7 +645,8 @@ def live_ingress_rule_host(meta: dict, context: str = "") -> str:
     return ""
 
 
-def strip_es_owned_secrets(meta: dict, context: str = "") -> None:
+def strip_es_owned_secrets(meta: dict, context: str = "",
+                           repo_root: Path | None = None) -> None:
     """ES 교체 시 ownerRef 에 끌려 삭제되는 Secret 보존 (rebuild-image.sh R24-N6r2).
 
     구 ES(creationPolicy: Owner)가 만든 Secret 은 metadata.ownerReferences 에
@@ -603,8 +659,35 @@ def strip_es_owned_secrets(meta: dict, context: str = "") -> None:
     base = ["kubectl", "-n", ns]
     if context:
         base += ["--context", context]
-    for suffix in ("app", "db", "redis"):
-        sec = f"{meta['release']}-{suffix}"
+    rel = meta.get("release") or "llm-gateway"
+    # 실제 Secret 명은 values 가 정한다 — app 은 fullname(override > release
+    # 규칙), db/redis 는 passwordSecretName(dev 는 llm-gateway-* — release 와
+    # 다르다). legacy {release}-{suffix} 도 후보에 남긴다(채택 배포 커버).
+    secrets = {f"{rel}-app", f"{rel}-db", f"{rel}-redis"}
+    override = ""
+    for lp in meta.get("values_layers") or []:
+        p_ = Path(lp)
+        p_ = p_ if p_.is_absolute() or repo_root is None else repo_root / p_
+        try:
+            v = yaml.safe_load(p_.read_text()) or {}
+        except (OSError, yaml.YAMLError):
+            continue
+        override = str(v.get("fullnameOverride") or override or "")
+        for top in ("database", "redis"):
+            n = ((v.get(top) or {}).get("external") or {}
+                 ).get("passwordSecretName")
+            if n:
+                secrets.add(str(n))
+    chart_name = "llm-gateway"
+    if override:
+        fullname = override[:63].rstrip("-")
+    elif chart_name in rel:
+        fullname = rel[:63].rstrip("-")
+    else:
+        fullname = f"{rel}-{chart_name}"[:63].rstrip("-")
+    secrets.add(f"{fullname}-app")
+    secrets.discard("")
+    for sec in sorted(secrets):
         r = _run_quiet([*base, "get", "secret", sec,
                         "-o", "jsonpath={.metadata.ownerReferences[0].kind}"],
                        timeout=30)
@@ -631,8 +714,12 @@ def _infra_targets(cfg: GatewayConfig) -> list[str]:
         # 같은 ARN 이 module.agentcore_runtime 입력에도 쓰이지만 그 모듈은
         # web_search 프로비저닝 경로가 별도로 관리하므로 여기선 대상에 넣지 않는다.
         modules.add("module.irsa")
-    if cfg.domain.name:
-        modules.add("module.cognito")  # gen tfvars 의 콜백/로그아웃 URL 반영
+    if (cfg.domain.name or cfg.infra.cognito_groups
+            or cfg.infra.cognito_domain_suffix):
+        # 콜백/로그아웃 URL(domain) 뿐 아니라 groups/suffix 도 gen tfvars 가
+        # managed overlay 로 내리는 cognito 소유 키다 — domain 없이 그룹만
+        # 바꿔도 수렴 대상에 포함해야 apply 가 반영한다.
+        modules.add("module.cognito")
     if cfg.features.alerting.enabled:
         # SNS topic + Aurora/ElastiCache CloudWatch alarms + RDS event sub.
         # email 구독 확인은 사람 절차라 overlay 가 소유하지 않는다.
@@ -655,7 +742,9 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
         missing.append("notification-worker SES IRSA")
     if (cfg.domain.name and outs.get("cognito_client_id")
             and outs.get("cognito_user_pool_id")):
-        want = f"https://admin.{cfg.domain.name}/api/auth/callback"
+        admin_host = (cfg.domain.hosts.get("admin_ui")
+                      or f"admin.{cfg.domain.name}")
+        want = f"https://{admin_host}/api/auth/callback"
         r = _run_quiet(
             ["aws", "cognito-idp", "describe-user-pool-client",
              "--user-pool-id", outs["cognito_user_pool_id"],
@@ -888,6 +977,25 @@ _MEMBER_ALARM_ADDR = re.compile(
     r"(?:aurora_cpu|cache_cpu|cache_memory|cache_connections)\[")
 
 
+def _tf_init(cfg: GatewayConfig, env_dir: Path) -> subprocess.CompletedProcess:
+    """terraform init — .terraform 부재(새 머신/재클론)면 backend 주입.
+
+    eks backend.tf 는 key/region 만 고정한 partial config 라 bucket/table 은
+    -backend-config 로 넘겨야 한다 — 선언값이 없으면 bootstrap 과 같은
+    계정 기본명을 쓴다."""
+    argv = ["terraform", "init", "-input=false"]
+    if not (env_dir / ".terraform").exists():
+        bucket = cfg.deploy.tfstate_bucket
+        table = cfg.deploy.tfstate_table
+        if not (bucket and table):
+            from .bootstrap import default_tfstate_names
+            db, dt = default_tfstate_names(cfg, eks=True)
+            bucket, table = bucket or db, table or dt
+        argv += [f"-backend-config=bucket={bucket}",
+                 f"-backend-config=dynamodb_table={table}"]
+    return _run_quiet(argv, cwd=env_dir, timeout=300)
+
+
 def _managed_infra_plan(cfg: GatewayConfig, gen_dir: Path,
                         env_dir: Path, context: str = "") -> subprocess.CompletedProcess | None:
     """managed overlay 소유 모듈로 좁힌 terraform plan — rc 0=수렴, 2=drift.
@@ -899,7 +1007,7 @@ def _managed_infra_plan(cfg: GatewayConfig, gen_dir: Path,
     targets = _infra_targets(cfg)
     if not targets or not managed_tfvars.exists() or not env_dir.is_dir():
         return None
-    _run_quiet(["terraform", "init", "-input=false"], cwd=env_dir, timeout=300)
+    _tf_init(cfg, env_dir)
     return _run_quiet(
         ["terraform", "plan", "-detailed-exitcode", "-input=false", "-no-color",
          "-lock=false", f"-var-file={managed_tfvars}",
@@ -975,16 +1083,15 @@ def _inspect_managed_plan(env_dir: Path, plan_path: Path,
     return bad, changes, blocked
 
 
-def _apply_managed(env_dir: Path, targets: list[str], var_args: list[str],
-                   reason: str, required: bool,
+def _apply_managed(cfg: GatewayConfig, env_dir: Path, targets: list[str],
+                   var_args: list[str], reason: str, required: bool,
                    allow_alb_destroy: bool = False) -> bool:
     """plan -out → show -json 범위 검증 → 저장 plan apply.
 
     재계획 없이 검증된 그 plan 파일을 그대로 적용해 preview↔apply 갭을 없앤다.
     required(출력이 비어 필수)일 때 plan 자체가 실패하면 배포를 중단하고,
     아니면 경고만 남기고 helm 을 계속 진행한다."""
-    init = _run_quiet(["terraform", "init", "-input=false"], cwd=env_dir,
-                      timeout=300)
+    init = _tf_init(cfg, env_dir)
     if init.returncode != 0:
         if required:
             print((init.stdout or "") + (init.stderr or ""), file=sys.stderr)
@@ -1067,7 +1174,7 @@ def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path,
     if missing:
         print(f"ⓘ {', '.join(missing)} 가 terraform output 에 없습니다 — "
               "targeted apply 로 프로비저닝합니다", file=sys.stderr)
-        _apply_managed(env_dir, targets, var_args,
+        _apply_managed(cfg, env_dir, targets, var_args,
                        ", ".join(missing), required=True,
                        allow_alb_destroy=alb_fresh)
         fresh = tf_outputs(env_dir)
@@ -1095,7 +1202,7 @@ def ensure_infra(cfg: GatewayConfig, gen_dir: Path, env_dir: Path,
     print("managed overlay 와 live 인프라가 어긋납니다 — 수렴할 diff:",
           file=sys.stderr)
     print(p.stdout)
-    applied = _apply_managed(env_dir, targets, var_args,
+    applied = _apply_managed(cfg, env_dir, targets, var_args,
                              "managed overlay 선언 수렴", required=False,
                              allow_alb_destroy=alb_fresh)
     return tf_outputs(env_dir) if applied else outs
@@ -1198,8 +1305,22 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
     매니페스트와 정규화 비교해 변경/추가/삭제된 리소스와 unified diff 만
     보여준다. live 를 읽지 못하면 종전처럼 전체 덤프로 폴백한다."""
     meta = load_meta(gen_dir, repo_root)
-    outs = tf_outputs(repo_root / meta["env_dir"]) if meta.get("env_dir") else {}
-    if meta.get("env_dir") and not outs:
+    env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
+        # 새 머신/재클론 — backend 미초기화면 output 도 못 읽고 helm dry-run
+        # 도 kubecontext 부재로 실패한다. init 은 멱등이라 먼저 복구한다.
+        ini = _tf_init(cfg, env_dir)
+        if ini.returncode != 0:
+            print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"
+                  "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
+                  "확인하세요", file=sys.stderr)
+    outs = tf_outputs(env_dir) if env_dir else {}
+    if outs.get("cluster_name"):
+        # helm --dry-run=server 도 API 접근이 필요 — preview 전에 등록한다
+        # (apply() 와 동일한 멱등 호출).
+        from .bootstrap import update_kubeconfig
+        update_kubeconfig(outs, cfg.aws.region, context)
+    if env_dir and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — "
               "동적 --set 값(DB/Redis/IRSA/cognito) 없이 dry-run 합니다", file=sys.stderr)
     missing = _infra_missing(cfg, outs)
@@ -1267,6 +1388,38 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                 ("CHAT_STAGING_BUCKET", "chat_agent_staging_bucket")):
             if outs.get(out_key):
                 set_args += ["--set", f"adminApi.env.{key}={outs[out_key]}"]
+    # apply 가 주입하는 런타임 --set 을 preview 에도 넣는다 — cert-arn/lambda/
+    # nextauthUrl 이 빠지면 live 매니페스트 기준 거짓 삭제 diff 가 보인다.
+    # 생성·프로비저닝은 apply 몫이고 여기선 읽기 전용 조회만 한다.
+    if cfg.domain.mode == "route53-acm" and cfg.domain.name:
+        arn_, cst = _find_domain_cert(cfg.domain.name, cfg.aws.region)
+        if arn_ and cst == "ISSUED":
+            for key in ("gateway", "adminUi", "adminApi"):
+                set_args += ["--set-string",
+                             f"ingress.{key}.annotations."
+                             "alb\\.ingress\\.kubernetes\\.io/"
+                             "certificate-arn=" + arn_]
+    if cfg.domain.mode == "selfsigned-temp":
+        cn = f"llm-gateway-{cfg.env}-selfsigned"
+        r = _run_quiet(["aws", "acm", "list-certificates",
+                        "--region", cfg.aws.region,
+                        "--query", f"CertificateSummaryList[?DomainName=='{cn}']"
+                                   ".CertificateArn | [0]",
+                        "--output", "text"], timeout=30)
+        sarn = (r.stdout or "").strip()
+        if r.returncode == 0 and sarn and sarn != "None":
+            set_args += ["--set-string",
+                         "ingress.adminUi.annotations."
+                         "alb\\.ingress\\.kubernetes\\.io/"
+                         "certificate-arn=" + sarn]
+    if cfg.features.pricing_lambda and st.get("function"):
+        set_args += ["--set",
+                     f"adminApi.env.LITELLM_PRICING_LAMBDA={st['function']}"]
+    if not cfg.domain.name and not live_ingress_rule_host(meta, context):
+        host = live_alb_hostname(meta, context)
+        if host:
+            scheme = "https" if cfg.domain.mode == "selfsigned-temp" else "http"
+            set_args += ["--set", f"adminUi.nextauthUrl={scheme}://{host}"]
     _plan_diff(_helm_argv(meta, set_args, dry_run=True, context=context),
                meta, repo_root, context)
 
@@ -1274,6 +1427,10 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
 def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
+        # 새 머신/재클론 — backend 미초기화면 output 조회가 실패해 모든 동적
+        # --set 이 빠진다. init 은 멱등이라 먼저 복구한다.
+        _tf_init(cfg, env_dir)
     outs = tf_outputs(env_dir) if env_dir else {}
     if env_dir and not outs:
         print(f"⚠ {meta['env_dir']} 의 terraform output 이 없습니다 — DB/Redis/"
@@ -1287,10 +1444,16 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         # managed overlay 의 plan/apply 가 'missing directory' 로 실패.
         chatagent.ensure_lambda_build(repo_root)
     if env_dir:
-        outs = ensure_infra(cfg, gen_dir, env_dir, outs, context)
-        # helm/kubectl 전에 클러스터를 kubeconfig 에 등록 — 컨텍스트 부재
-        # 실패·다른 클러스터 오배포 방지 (멱등, context 지정 시 --alias)
+        # ensure_infra 안에서도 kubectl(ALB dims 발견)을 쓰므로 등록이 먼저다
+        # — 컨텍스트 부재 실패·다른 클러스터 오배포 방지 (멱등, --alias).
         if outs.get("cluster_name"):
+            from .bootstrap import update_kubeconfig
+            update_kubeconfig(outs, cfg.aws.region, context)
+        prev_cluster = outs.get("cluster_name")
+        outs = ensure_infra(cfg, gen_dir, env_dir, outs, context)
+        # targeted apply 가 outputs 를 갱신했다면(콜드머신 첫 수렴 등) 방금
+        # 얻은 cluster_name 도 등록한다.
+        if outs.get("cluster_name") and outs["cluster_name"] != prev_cluster:
             from .bootstrap import update_kubeconfig
             update_kubeconfig(outs, cfg.aws.region, context)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
@@ -1353,10 +1516,24 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "503 (미구성) 상태로 진행합니다", file=sys.stderr)
     elif outs.get("chat_agent_name"):
         # 선언 off 인데 모듈이 아직 살아 있다 = 켰던 적이 있는 첫 off apply.
-        # 프로비저너 소유 Runtime 도 정리 — terraform 밖 리소스라 destroy 에 안
-        # 잡힌다. outputs 가 없으면(한 번도 안 켬·이미 정리) API 호출 자체를
-        # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
-        chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region)
+        # 단 env tfvars 에 enable_chat_agent=true 를 사람이 선언한 경우는
+        # 사람 소유 — 매 apply 삭제/재생 루프가 되므로 건드리지 않는다.
+        human_owned = False
+        if env_dir and (env_dir / "terraform.tfvars").exists():
+            from .render.common import tfvars_clean
+            human_owned = bool(re.search(
+                r'(?m)^\s*enable_chat_agent\s*=\s*true',
+                tfvars_clean((env_dir / "terraform.tfvars").read_text())))
+        if human_owned:
+            print("ⓘ enable_chat_agent=true 가 env tfvars 에 선언돼 있습니다 — "
+                  "bi_insight off 지만 Runtime 은 사람 소유라 유지합니다",
+                  file=sys.stderr)
+        else:
+            # 프로비저너 소유 Runtime 도 정리 — terraform 밖 리소스라 destroy 에 안
+            # 잡힌다. outputs 가 없으면(한 번도 안 켬·이미 정리) API 호출 자체를
+            # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
+            chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region,
+                               chat_agent_name=outs["chat_agent_name"])
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).
@@ -1408,7 +1585,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
 
     # helm upgrade 가 구 ES 를 지우는 순간 ownerRef 달린 Secret 이 GC 로 같이
     # 지워지지 않게 미리 정리 (이거 없으면 전 pod CreateContainerConfigError)
-    strip_es_owned_secrets(meta, context)
+    strip_es_owned_secrets(meta, context, repo_root)
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
 
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)

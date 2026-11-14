@@ -663,3 +663,39 @@ def test_alerting_emails_deduped_normalized():
         "enabled": True,
         "emails": ["Ops@X.io", "ops@x.io", "team@x.io"]}}))
     assert cfg.features.alerting.emails == ["ops@x.io", "team@x.io"]
+
+
+def test_admin_groups_scalar_wraps_not_splits():
+    """12차 — 스칼라 문자열은 char 분해가 아니라 1-항목 리스트로."""
+    from deploy import schema
+    cfg = schema.from_dict({
+        "env": "dev", "aws": {"region": "ap-northeast-2"},
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "tfstate_bucket": "b", "tfstate_table": "t"},
+        "images": {"tag": "v1"},
+        "oidc": {"admin_groups": "Claude_DevOps"}})
+    assert cfg.oidc.admin_groups == ["Claude_DevOps"]
+
+
+def test_reject_unmatched_groups_string_rejected():
+    """12차 — 인용된 'false' 가 bool()으로 True 가 되는 극성 반전 방지."""
+    from deploy import schema
+    import pytest
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict({
+            "env": "dev", "aws": {"region": "ap-northeast-2"},
+            "deploy": {"target": "eks", "size_tier": "t3",
+                       "tfstate_bucket": "b", "tfstate_table": "t"},
+            "images": {"tag": "v1"},
+            "oidc": {"reject_unmatched_groups": "false"}})
+
+
+def test_subnet_cidrs_outside_vpc_rejected():
+    """12차 — vpc_cidr /18 에서 파생 /24 가 밖으로 나가면 SchemaError."""
+    from deploy import schema
+    import pytest
+    with pytest.raises(schema.SchemaError):
+        schema.subnet_cidrs("10.30.128.0/18", 2)
+    # /16 은 통과
+    out = schema.subnet_cidrs("10.30.0.0/16", 2)
+    assert out["private_subnet_cidrs"] == ["10.30.1.0/24", "10.30.2.0/24"]

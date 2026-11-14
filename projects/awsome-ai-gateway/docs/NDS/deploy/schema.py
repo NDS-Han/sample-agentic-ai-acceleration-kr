@@ -418,10 +418,22 @@ class GatewayConfig:
             if self.images.tags and not self.images.tag and uncovered:
                 w.append(f"images.tags 가 {uncovered} 를 덮지 않습니다 — env overlay 의 태그를 그대로 씁니다.")
         if self.deploy.target == "eks" and not self.oidc.enabled:
-            # eks 렌더는 oidc 비활성이면 DEV_LOGIN_ENABLED=true 를 쓴다 —
-            # 프로덕션 티어에서 admin-ui 가 무인증 로그인으로 열린다
-            w.append("oidc 가 비활성입니다 — eks render 가 admin-ui DEV_LOGIN_ENABLED=true 로 둡니다 "
-                     "(인증 없는 로그인). 프로덕션에서는 oidc: 를 채우십시오.")
+            if self.features.dev_login:
+                w.append("oidc 비활성 + features.dev_login=true — admin-ui 가 "
+                         "서명 없는 dev 토큰으로 열립니다. 인터넷 노출 ALB 라면 "
+                         "network.allowed_cidrs 로 접근을 제한하고 임시로만 쓰십시오.")
+            else:
+                w.append("oidc 비활성 + features.dev_login 미선언 — render 가 "
+                         "DEV_LOGIN_ENABLED=false 로 강제해 작동하는 admin 로그인 "
+                         "경로가 없습니다. domain 부착 + oidc(권장) 또는 "
+                         "features.dev_login=true 를 선언하십시오.")
+        if (self.deploy.target == "eks" and len(self.env) > 18
+                and (self.features.bi_insight or self.features.web_search)):
+            # 프로비저너 명명에 env 가 박힌다 — llm-gateway-{env}-admin-chat-agent
+            # 는 AgentCore 47자 제한(29+len(env)), websearch role 은 IAM 64자.
+            w.append(f"env '{self.env}'({len(self.env)}자)가 길어 provisioner 이름이 "
+                     "한계를 초과할 수 있습니다 — AgentCore Runtime 은 env ≤18자, "
+                     "IAM role 은 env ≤24자까지 안전합니다 (env 를 짧게 하세요).")
         if self.deploy.target == "compose" and bool(self.images.tag) != bool(self.images.registry):
             w.append("compose render 는 images.registry + images.tag 둘 다 있어야 "
                      "사전 빌드 이미지를 씁니다 — 한쪽만 있으면 해당 선언이 무시되고 "
@@ -1018,11 +1030,13 @@ def from_dict(raw: dict) -> GatewayConfig:
             groups_claim=str(oidc.get("groups_claim", "")),
             group_prefix=str(oidc.get("group_prefix", "")),
             reject_unmatched_groups=(
-                oidc.get("reject_unmatched_groups")
-                if oidc.get("reject_unmatched_groups") is None
-                else bool(oidc.get("reject_unmatched_groups"))),
-            admin_groups=[str(g) for g in (oidc.get("admin_groups") or [])],
-            admin_emails=[str(g) for g in (oidc.get("admin_emails") or [])],
+                None if oidc.get("reject_unmatched_groups") is None
+                else _safe_bool(oidc.get("reject_unmatched_groups"), errors,
+                                "oidc.reject_unmatched_groups")),
+            admin_groups=_str_items(oidc.get("admin_groups"),
+                                    "oidc.admin_groups", errors),
+            admin_emails=_str_items(oidc.get("admin_emails"),
+                                    "oidc.admin_emails", errors),
             vk_ttl_hours=_safe_int(oidc.get("vk_ttl_hours", 0), errors,
                                    "oidc.vk_ttl_hours"),
         ),
@@ -1036,15 +1050,31 @@ def from_dict(raw: dict) -> GatewayConfig:
 def subnet_cidrs(vpc_cidr: str, n: int) -> dict[str, list[str]]:
     """infra.azs 개수에 맞춘 서브넷 CIDR 4종 — eks env(variables.tf)와
     gateway-ecs 의 공통 규약: private {a}.{b}.{i}/24, public {100+i},
-    database {200+i}, elasticache {210+i}."""
+    database {200+i}, elasticache {210+i}.
+
+    파생 /24 가 vpc_cidr 네트워크 밖이면(마스크 </16 등) apply 중간에
+    InvalidSubnet.Range 로 죽는다 — 산출 단계에서 검증한다."""
+    import ipaddress
     octets = vpc_cidr.split(".")
     base = ".".join(octets[:2]) if len(octets) >= 2 else "10.30"
-    return {
+    out = {
         "private_subnet_cidrs": [f"{base}.{i + 1}.0/24" for i in range(n)],
         "public_subnet_cidrs": [f"{base}.{101 + i}.0/24" for i in range(n)],
         "database_subnet_cidrs": [f"{base}.{201 + i}.0/24" for i in range(n)],
         "elasticache_subnet_cidrs": [f"{base}.{211 + i}.0/24" for i in range(n)],
     }
+    try:
+        vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
+        outside = [c for lst in out.values() for c in lst
+                   if not ipaddress.ip_network(c).subnet_of(vpc_net)]
+    except ValueError:
+        outside = []  # 형식 오류는 infra.vpc_cidr 스키마 검증이 잡는다
+    if outside:
+        raise SchemaError(
+            f"파생 서브넷이 vpc_cidr({vpc_cidr}) 범위 밖입니다: {outside} — "
+            "infra.vpc_cidr 을 /16 이상으로 넓히거나 env terraform.tfvars 에 "
+            "subnet CIDR 을 직접 선언하세요")
+    return out
 
 
 def load(path: Path) -> GatewayConfig:

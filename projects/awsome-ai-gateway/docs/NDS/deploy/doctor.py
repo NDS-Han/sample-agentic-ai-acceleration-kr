@@ -384,9 +384,20 @@ def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
     tfvars = env_dir / "terraform.tfvars" if env_dir else None
     if tfvars and tfvars.exists():
-        m = re.search(r'eks_cluster_version\s*=\s*"(\d+\.\d+)"',
-                      tfvars.read_text())
+        from .render.common import tfvars_clean
+        # ^ 앵커 + 주석 제거 — `# eks_cluster_version=`/`legacy_eks_cluster_version=`
+        # 같은 죽은 선언이 라이브와 무관한 허위 다운그레이드 경고를 만든다.
+        m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"(\d+\.\d+)"',
+                      tfvars_clean(tfvars.read_text()))
         declared = m.group(1) if m else ""
+    if not declared and env_dir:
+        # 미선언이면 variables.tf 기본값이 실제 적용값 — 비교 대상은 그쪽이다.
+        varf = env_dir / "variables.tf"
+        if varf.exists():
+            m = re.search(
+                r'variable\s+"eks_cluster_version"[^}]*default\s*=\s*"(\d+\.\d+)"',
+                varf.read_text(), re.S)
+            declared = m.group(1) if m else ""
 
     live = ""
     r = _run(["kubectl", "version", "-o", "json", *ctx], timeout=20)
@@ -457,9 +468,15 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     r = _run(["kubectl", "get", "deployments", "-n", ns, "-o", "json", *ctx])
     if r.returncode == 0:
         try:
-            items = json.loads(r.stdout).get("items", [])
+            all_items = json.loads(r.stdout).get("items", [])
         except json.JSONDecodeError:
-            items = []
+            all_items = []
+        # 공유 ns 의 다른 릴리스가 이름 접두로 우리 것처럼 보인다 — instance
+        # 라벨로 우리 release 만 고른다 (라벨 없는 레거시 채택 배포는 폴백).
+        ours = [i for i in all_items
+                if ((i.get("metadata") or {}).get("labels") or {})
+                .get("app.kubernetes.io/instance") == rel]
+        items = ours or all_items
         # 배포명은 <release>-<svc> — 기본 release 면 llm-gateway- 를 떼고,
         # 커스텀 release 면 그 프리픽스를 뗀다
         by_name = {}
@@ -529,7 +546,11 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     r = _run(["kubectl", "get", "jobs", "-n", ns, "-o", "json", *ctx])
     if r.returncode == 0:
         try:
-            jobs = [j for j in json.loads(r.stdout).get("items", [])
+            all_jobs = json.loads(r.stdout).get("items", [])
+            ours = [j for j in all_jobs
+                    if ((j.get("metadata") or {}).get("labels") or {})
+                    .get("app.kubernetes.io/instance") == rel]
+            jobs = [j for j in (ours or all_jobs)
                     if "migration" in j["metadata"]["name"]]
             job = max(jobs, key=lambda j: j["metadata"].get("creationTimestamp", "")) if jobs else None
         except (json.JSONDecodeError, ValueError, KeyError):

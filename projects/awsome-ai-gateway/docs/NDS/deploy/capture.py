@@ -680,15 +680,25 @@ def _tf_backend(env_dir: Path) -> dict:
     return dict((state.get("backend") or {}).get("config") or {})
 
 
-def _tfvars(env_dir: Path) -> dict[str, object]:
-    """terraform.tfvars 의 스칼라/문자열 리스트 — 캡처 스키마 키용 부분집합 파서.
+def _tfvars(env_dir: Path, extra_files: list[Path] | None = None) -> dict[str, object]:
+    """env tfvars 의 스칼라/문자열 리스트 — 캡처 스키마 키용 부분집합 파서.
+    terraform.tfvars + *.auto.tfvars + extra_files(gen managed overlay 등,
+    뒤가 이김)를 terraform 자동 로드 순서로 병합한다 — NDS 가 managed 키를
+    gen overlay 에 쓰고 사람이 auto.tfvars 에 선언할 수 있어 한 파일만
+    보면 유실된다.
     map/object 값은 _tfvars_clean 이 본문째 제거해 스킵된다
     (우리가 읽는 키는 전부 str|list[str]|number|bool)."""
-    try:
-        text = (env_dir / "terraform.tfvars").read_text()
-    except OSError:
+    texts: list[str] = []
+    for f in ([env_dir / "terraform.tfvars",
+               *sorted(env_dir.glob("*.auto.tfvars")),
+               *(extra_files or [])]):
+        try:
+            texts.append(f.read_text())
+        except OSError:
+            continue
+    if not texts:
         return {}
-    clean = _tfvars_clean(text)
+    clean = _tfvars_clean("\n".join(texts))
     out: dict[str, object] = {}
     for m in re.finditer(
             # \s 는 개행도 매칭해 "key =\nother_key" 가 other_key 를 삼킨다 —
@@ -832,6 +842,17 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     else:
         domain = {"mode": "none"}
         notes.append("ingress.host 비어 있음 — ALB DNS 직접 접근 모드로 추정")
+    if gw_host and not domain.get("name"):
+        # gateway.<base>/gateway-<env>.<base> 규약에 안 맞는 호스트명(api.corp.io
+        # 등)은 베이스 추출이 안 돼 name 이 비는데, route53-acm 은 name 필수라
+        # 캡처 yaml 이 스키마 검증을 못 넘긴다 — none 으로 내리고 실측 호스트는
+        # notes 로 남긴다 (hosts 는 name 없으면 render 가 무시하는 dead config).
+        domain["mode"] = "none"
+        _live = {k: str(_val(ing, ck, "host"))
+                 for k, ck in _HOST_KEY_MAP.items()}
+        notes.append(f"gateway host({gw_host})에서 베이스 도메인을 추출하지 "
+                     "못했습니다 — domain.mode=none 으로 기록합니다. 정식 "
+                     f"도메인이면 name/zone_id + hosts({_live})를 채우세요")
 
     # 라이브 ingress 와 values 의 host 가 다른지 (kubectl 패치 드리프트)
     live_hosts = []
@@ -1031,10 +1052,12 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 region = str(outs.get("aws_region", "") or outs.get("region", ""))
             if outs.get("alerting_sns_topic_arn"):
                 features["alerting"]["enabled"] = True
-                # emails 는 env tfvars(사람 선언)에서 복원 — 안 잡으면
-                # 채택 yaml 의 emails=[] 가 다음 apply 에 구독 전량 삭제.
-                # 콘솔 수동 구독은 state 밖이라 원래 미대상.
-                _tv = _tfvars(env_dir)
+                # emails 는 env tfvars(사람 선언)나 gen managed overlay(NDS
+                # 소유)에서 복원 — 안 잡으면 채택 yaml 의 emails=[] 가 다음
+                # apply 에 구독 전량 삭제. 콘솔 수동 구독은 state 밖이라 미대상.
+                _gen_tfvars = (Path(__file__).resolve().parents[3] / "gen"
+                               / env / "eks" / "terraform.tfvars")
+                _tv = _tfvars(env_dir, extra_files=[_gen_tfvars])
                 if _tv.get("alert_emails"):
                     _ae = _tv["alert_emails"]
                     features["alerting"]["emails"] = [
@@ -1073,7 +1096,9 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             tfstate["tfstate_bucket"] = bc["bucket"]
         if bc.get("dynamodb_table"):
             tfstate["tfstate_table"] = bc["dynamodb_table"]
-        tv = _tfvars(env_dir)
+        tv = _tfvars(env_dir, extra_files=[
+            Path(__file__).resolve().parents[3] / "gen" / env / "eks"
+            / "terraform.tfvars"])
         for tfkey, dockey in (("bedrock_allowed_model_arns",
                                "bedrock_allowed_model_arns"),
                               ("mantle_regions", "mantle_regions"),
@@ -1081,7 +1106,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
             if tv.get(tfkey):
                 infra[dockey] = tv[tfkey]
         if infra:
-            notes.append(f"infra.{', '.join(infra)} 를 terraform.tfvars 에서 복원했습니다")
+            notes.append(f"infra.{', '.join(infra)} 를 tfvars 에서 복원했습니다")
 
     if domain.get("name") and domain.get("mode") == "route53-acm":
         zid = _r53_zone_id(domain["name"], region)
@@ -1185,7 +1210,13 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     doc = {
         "version": 1,
         "env": env,
-        "aws": {"region": region},
+        # allowedAwsAccounts 가 계정 경계(VK 발급 대상 role 의 계정 고정)를 잡는
+        # 보안 키다 — 캡처가 버리면 다음 apply 가 제한을 풀어 타 계정 role 도
+        # 허용된다. helm values 의 라이브 리스트에서 복원한다.
+        "aws": {"region": region,
+                **({"account_id": str((v.get("aws") or {})
+                                      .get("allowedAwsAccounts", [""])[0])}
+                   if (v.get("aws") or {}).get("allowedAwsAccounts") else {})},
         # 실제 릴리스/namespace/env_dir 를 기록 — 기본값이 아닌 배포도
         # 채택 후 apply 가 같은 대상을 가리키도록
         "deploy": {"target": "eks", "size_tier": "t3",

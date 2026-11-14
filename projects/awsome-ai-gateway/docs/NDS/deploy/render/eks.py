@@ -371,15 +371,14 @@ def _env_vpc_cidr(env_dir: Path | None) -> str:
     """env 의 terraform.tfvars 에 선언된 vpc_cidr — 없으면 env 기본값.
     주석 처리된 값(`# vpc_cidr = "..."`)이 서브넷 산출 기준을 오염시키지
     않도록 스캐너로 주석을 제거한다."""
-    if env_dir:
-        tfvars = env_dir / "terraform.tfvars"
-        if tfvars.exists():
-            from .common import tfvars_clean
-            m = re.search(r'(?m)^\s*vpc_cidr\s*=\s*"([^"]+)"',
-                          tfvars_clean(tfvars.read_text()))
-            if m:
-                return m.group(1)
-    return "10.30.0.0/16"   # llm-gateway-* env variables.tf 기본값
+    from .common import tfvars_clean
+    found = ""
+    for text in _env_tfvars_texts(env_dir):
+        m = re.search(r'(?m)^\s*vpc_cidr\s*=\s*"([^"]+)"',
+                      tfvars_clean(text))
+        if m:
+            found = m.group(1)
+    return found or "10.30.0.0/16"  # variables.tf 기본값
 
 
 def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
@@ -424,13 +423,21 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
     if env_dir:
         try:
             from .common import tfvars_clean
-            _et = tfvars_clean((env_dir / "terraform.tfvars").read_text())
+            _et = "\n".join(_env_tfvars_texts(env_dir))
+            _et = tfvars_clean(_et)
             _m = re.search(r'(?m)^\s*application_namespace\s*=\s*"([^"]+)"', _et)
             if _m and _m.group(1) != cfg.deploy.namespace:
-                print(f"⚠ env terraform.tfvars 의 application_namespace="
+                print(f"⚠ env tfvars 의 application_namespace="
                       f"{_m.group(1)} — managed overlay 가 deploy.namespace="
-                      f"{cfg.deploy.namespace} 로 덮어씁니다 (Fargate/IRSA "
-                      f"정렬). env 측 값을 바꾸려면 gateway.yaml 도 갱신하세요",
+                      f"{cfg.deploy.namespace} 로 덮어씁니다. 단 module.eks 는 "
+                      f"managed target 이 아니라 update 경로(deploy apply)는 "
+                      f"Fargate profile/IRSA 를 수렴하지 않습니다 — 신 ns 의 "
+                      f"파드가 스케줄되려면 env terraform apply 가 필요합니다",
+                      file=sys.stderr)
+            elif not _m and cfg.deploy.namespace != "llm-gateway":
+                print(f"ⓘ deploy.namespace={cfg.deploy.namespace} — module.eks 는 "
+                      "managed target 이 아니므로, 기존 env 에서는 env terraform "
+                      "apply 가 Fargate profile/IRSA 에 반영해야 합니다",
                       file=sys.stderr)
         except OSError:
             pass
@@ -457,11 +464,15 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
     if cfg.domain.name:
         # domain 도입 시 Cognito 콜백·로그아웃을 도메인으로 — env tfvars 의 기존
         # 수동 목록과 합집합(-var-file 은 리스트를 통째로 교체하므로 병합 필요)
+        # admin UI 호스트는 ingress 와 같은 domain.hosts 계약을 따라야 한다 —
+        # 파생 admin.<domain> 만 넣으면 선언 호스트의 로그인이 redirect_mismatch.
+        admin_host = (cfg.domain.hosts.get("admin_ui")
+                      or f"admin.{cfg.domain.name}")
         for var, derived in (
             ("cognito_callback_urls",
-             [f"https://admin.{cfg.domain.name}/api/auth/callback"]),
+             [f"https://{admin_host}/api/auth/callback"]),
             ("cognito_logout_urls",
-             [f"https://admin.{cfg.domain.name}/"]),
+             [f"https://{admin_host}/"]),
         ):
             merged = list(dict.fromkeys(
                 [*_tfvars_list(env_dir, var), *derived]))
@@ -469,9 +480,20 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _env_tfvars_texts(env_dir: Path | None) -> list[str]:
+    """env 의 HCL tfvars 소스들 — terraform.tfvars + *.auto.tfvars(abc순,
+    terraform 자동 로드 계약). *.tfvars.json/-var-file 은 형식·호출자 맥락이
+    달라 여기선 보지 않는다."""
+    if not env_dir:
+        return []
+    files = [env_dir / "terraform.tfvars",
+             *sorted(env_dir.glob("*.auto.tfvars"))]
+    return [f.read_text() for f in files if f.exists()]
+
+
 def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
-    """env terraform.tfvars 에 선언된 리스트 변수의 문자열 원소 — gen 오버레이가
-    리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도.
+    """env tfvars(모든 자동 로드 소스)에 선언된 리스트 변수의 문자열 원소 —
+    gen 오버레이가 리스트를 통째로 교체하므로 병합할 기존값을 읽는 용도.
 
     주석은 라인 필터가 아니라 tfvars_clean 스캐너로 제거 —
     `#`/`//` 라인 주석, `/* */` 블록 주석, heredoc·map 본문 안의 죽은 선언이
@@ -479,12 +501,13 @@ def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
     접두 변수(legacy_cognito_callback_urls)도 ^ 앵커로 걸러낸다."""
     import re
     from .common import tfvars_clean
-    tf = env_dir / "terraform.tfvars" if env_dir else None
-    if not tf or not tf.exists():
-        return []
-    text = tfvars_clean(tf.read_text())
-    m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\[(.*?)\]", text, re.S)
-    return re.findall(r'"([^"]+)"', m.group(1)) if m else []
+    out: list[str] = []
+    for text in _env_tfvars_texts(env_dir):
+        m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\[(.*?)\]",
+                      tfvars_clean(text), re.S)
+        if m:
+            out = re.findall(r'"([^"]+)"', m.group(1))  # 뒤 파일이 이긴다
+    return out
 
 
 def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> dict:

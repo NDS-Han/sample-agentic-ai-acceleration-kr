@@ -196,15 +196,19 @@ def ensure_lambda_build(repo_root: Path) -> bool:
     return True
 
 
-def teardown(repo_root: Path, env_name: str, region: str = "") -> bool:
+def teardown(repo_root: Path, env_name: str, region: str = "",
+             chat_agent_name: str = "") -> bool:
     """bi_insight 선언이 꺼졌을 때 AgentCore Runtime 을 지운다 — 멱등.
 
     terraform 밖 리소스라 destroy 가 못 지운다 — 선언이 진실이려면 apply/\
     teardown 경로에서 여기서 정리한다 (websearch.teardown 과 같은 역할).
     이름은 outputs 없이 도출한다 — render 가 project=llm-gateway 로 고정해
     {project}-{env}-admin-chat-agent 이고, 모듈이 이미 지워진 뒤에도 부를 수
-    있어야 하므로 state 조회를 요구하지 않는다."""
-    name = f"llm-gateway-{env_name}-admin-chat-agent".replace("-", "_")
+    있어야 하므로 state 조회를 요구하지 않는다. 호출자가 terraform output 의
+    실측 이름을 아는 경우(사람이 project 변수를 바꾼 env 등) 그쪽을 우선한다
+    — 도출 이름이 어긋나면 조용히 아무것도 못 지우고 리소스가 새어나간다."""
+    name = (chat_agent_name
+            or f"llm-gateway-{env_name}-admin-chat-agent").replace("-", "_")
     r = _run(repo_root, "teardown", {}, extras={"AGENT_NAME": name},
              timeout=180, region=region)
     if r.returncode != 0:

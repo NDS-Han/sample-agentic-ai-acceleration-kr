@@ -366,7 +366,7 @@ def test_onboard_admin_creates_and_groups(monkeypatch, tmp_path):
     created = []
     def fake(cmd, **kw):
         if "admin-get-user" in cmd:
-            return _cp(1)     # 없음 → 생성
+            return _cp(1, err="UserNotFoundException: 없음")  # 없음 → 생성
         created.append(cmd)
         return _cp(0)
     monkeypatch.setattr(bootstrap.subprocess, "run", fake)
@@ -390,7 +390,7 @@ def test_onboard_admin_assigned_to_team_group(monkeypatch, tmp_path):
     def fake(cmd, **kw):
         calls.append(cmd)
         if "admin-get-user" in cmd:
-            return _cp(1)
+            return _cp(1, err="UserNotFoundException")
         if "list-groups" in cmd:
             return _cp(0, _json.dumps({"Groups": [
                 {"GroupName": "ClaudeAdmin"},
@@ -413,7 +413,7 @@ def test_onboard_admin_warns_without_team_group(monkeypatch, tmp_path):
     import json as _json
     def fake(cmd, **kw):
         if "admin-get-user" in cmd:
-            return _cp(1)
+            return _cp(1, err="UserNotFoundException")
         if "list-groups" in cmd:
             return _cp(0, _json.dumps({"Groups": [{"GroupName": "ClaudeAdmin"}]}))
         return _cp(0)
@@ -545,7 +545,8 @@ def test_onboard_admin_placeholder_email_warns(monkeypatch, tmp_path):
     chart.mkdir(parents=True)
     (chart / "values-eks-fargate-dev.yaml").write_text(
         "adminApi:\n  adminBootstrap:\n    emails: [admin@example.com]\n")
-    monkeypatch.setattr(bootstrap, "_quiet", lambda a, **k: _cp(1))
+    monkeypatch.setattr(bootstrap, "_quiet",
+                        lambda a, **k: _cp(1, err="UserNotFoundException"))
     monkeypatch.setattr(bootstrap, "_aws", lambda *a, **k: _cp(0, "[]"))
     notes = bootstrap.onboard_admin(
         _cfg(), tmp_path, {"cognito_user_pool_id": "p"}, "r")
@@ -627,3 +628,42 @@ def test_sanitize_copied_values_neutralizes_oidc():
     assert "ap-northeast-2_ABC" not in out
     # 다른 섹션의 enabled 는 건드리지 않는다
     assert "scheduler:\n  enabled: true" in out
+
+
+def test_sanitize_copied_values_neutralizes_env_pinned():
+    """12차 — dev 의 계정/env 핀값도 전부 중화한다. 그대로 복사하면 같은
+    계정에선 dev 리소스를 조용히 쓰고, 다른 계정에선 깨진 참조가 된다."""
+    text = (
+        'global:\n  imageRegistry: "123.dkr.ecr.ap-northeast-2.amazonaws.com"\n'
+        'aws:\n  allowedIamRoles:\n    - Customer-Developer\n    - admin\n'
+        'gatewayProxy:\n  serviceAccount:\n    annotations:\n'
+        '      eks.amazonaws.com/role-arn: "arn:aws:iam::123:role/dev-gw"\n'
+        '  env:\n    AGENTCORE_GATEWAY_URL: "https://gw-x.gateway/mcp"\n'
+        'adminApi:\n  env:\n'
+        '    COGNITO_USER_POOL_ID: "ap-northeast-2_ABC"\n'
+        '    COGNITO_SYNC_DEACTIVATE_MISSING: "true"\n'
+        '    AGENTCORE_RUNTIME_ARN: "arn:aws:bedrock-agentcore:::runtime/dev_x"\n')
+    out = bootstrap._sanitize_copied_values(text)
+    assert "123456789012" not in out and "ap-northeast-2_ABC" not in out
+    assert "dev-gw" not in out and "runtime/dev_x" not in out
+    assert "Customer-Developer" not in out
+    assert 'COGNITO_SYNC_DEACTIVATE_MISSING: "false"' in out
+    # 주석 처리된 role-arn 예시는 건드리지 않는다
+    text2 = '# eks.amazonaws.com/role-arn: "arn:aws:iam::1:role/keep"\n'
+    assert text2 in bootstrap._sanitize_copied_values(text2)
+
+
+def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):
+    """12차 — tfstate 재시도 호출({tfstate} 만)이 features.web_search 를
+    false 로 덮어쓰지 않는다."""
+    cfg_path = tmp_path / "gateway.yaml"
+    cfg_path.write_text(
+        "version: 1\nenv: dev\naws: {region: ap-northeast-2}\n"
+        "deploy: {target: eks, size_tier: t3}\n"
+        "features: {web_search: true}\n")
+    bootstrap.persist_bootstrap_answers(
+        cfg_path, {"tfstate": ("b", "t")})
+    import yaml as _yaml
+    doc = _yaml.safe_load(cfg_path.read_text())
+    assert doc["features"]["web_search"] is True
+    assert doc["deploy"]["tfstate_bucket"] == "b"

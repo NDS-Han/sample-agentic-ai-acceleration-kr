@@ -56,6 +56,31 @@ def test_live_alb_hostname_kubectl_failure(monkeypatch):
     assert eks_apply.live_alb_hostname({"namespace": "ns"}) == ""
 
 
+def test_live_alb_hostname_skips_foreign_release(monkeypatch):
+    """공유 ns 의 다른 릴리스 admin-ui ingress 를 집으면 2-phase 가 외부
+    ALB 를 가리킨다 — instance 라벨(없으면 정확한 이름)로 우리 것만 고른다."""
+    foreign = _ingress("other-admin-ui", "other-ui.elb.amazonaws.com")
+    foreign["metadata"]["labels"] = {"app.kubernetes.io/instance": "other"}
+    mine = _ingress("myrel-admin-ui", "my-ui.elb.amazonaws.com")
+    mine["metadata"]["labels"] = {"app.kubernetes.io/instance": "myrel"}
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda *a, **k: _cp([foreign, mine]))
+    meta = {"namespace": "ns", "release": "myrel"}
+    assert eks_apply.live_alb_hostname(meta) == "my-ui.elb.amazonaws.com"
+
+
+def test_live_ingress_rule_host_skips_foreign_release(monkeypatch):
+    """외부 릴리스의 host 가 있으면 2-phase 가 스킵돼 우리 nextauthUrl 이
+    영영 미설정 — 라벨 불일치 항목은 무시해야 한다."""
+    foreign = {"metadata": {"name": "other-admin-ui",
+                            "labels": {"app.kubernetes.io/instance": "other"}},
+               "spec": {"rules": [{"host": "other.example.com"}]}}
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda *a, **k: _cp([foreign]))
+    meta = {"namespace": "ns", "release": "myrel"}
+    assert eks_apply.live_ingress_rule_host(meta) == ""
+
+
 def test_context_flag_propagates(monkeypatch):
     seen = {}
     def fake(argv, **k):
@@ -923,14 +948,14 @@ def test_apply_managed_blocked_branch(monkeypatch, tmp_path):
     monkeypatch.setattr(eks_apply, "_run", lambda *a, **k: called.append(a))
     # drift(required=False): apply 를 건너뛰고 False — 알람 보존 + helm 계속
     assert eks_apply._apply_managed(
-        tmp_path, ["-target=module.alerting"], [], "drift", required=False,
-        allow_alb_destroy=False) is False
+        _cfg(), tmp_path, ["-target=module.alerting"], [], "drift",
+        required=False, allow_alb_destroy=False) is False
     assert called == []            # terraform apply 가 실행되지 않았다
     # required=True: 배포 중단
     with pytest.raises(SystemExit):
         eks_apply._apply_managed(
-            tmp_path, ["-target=module.alerting"], [], "missing", required=True,
-            allow_alb_destroy=False)
+            _cfg(), tmp_path, ["-target=module.alerting"], [], "missing",
+            required=True, allow_alb_destroy=False)
 
 
 def test_alb_dims_unmatched_hostname_is_whole_failure(monkeypatch):
@@ -1012,7 +1037,10 @@ def test_ensure_cluster_secret_store_creates_and_skips(monkeypatch, tmp_path):
     # context 전파
     got_ns["yes"] = True; calls.clear()
     eks_apply.ensure_cluster_secret_store(meta, "r", "prod-ctx", tmp_path)
-    assert all("--kube-context" in c for c in calls)
+    # kubectl 은 --context (--kube-context 는 helm 플래그라 kubectl 이 거부해
+    # store 보장이 조용히 생략됐었다)
+    assert all("--context" in c for c in calls)
+    assert all("--kube-context" not in c for c in calls)
 
 
 def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):

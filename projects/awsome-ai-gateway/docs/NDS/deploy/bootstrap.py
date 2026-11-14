@@ -64,14 +64,17 @@ def _run(argv: list[str], *, cwd: Path | None = None, env: dict | None = None,
     return r
 
 
-def _quiet(argv: list[str], *, input: str | None = None) -> subprocess.CompletedProcess:
-    """best-effort 조회용 subprocess — 바이너리 부재를 traceback 대신
+def _quiet(argv: list[str], *, input: str | None = None,
+           timeout: int = 120) -> subprocess.CompletedProcess:
+    """best-effort 조회용 subprocess — 바이너리 부재/행업을 traceback 대신
     통제된 SystemExit 로 (eks_apply._run 과 같은 계약)."""
     try:
         return subprocess.run([str(a) for a in argv], capture_output=True,
-                              text=True, input=input)
+                              text=True, input=input, timeout=timeout)
     except FileNotFoundError:
         raise SystemExit(f"{argv[0]} 명령을 못 찾았습니다 — 설치/PATH 확인 필요")
+    except subprocess.TimeoutExpired:
+        raise SystemExit(f"{argv[0]} 응답 없음({timeout}s) — 네트워크/자격증명 확인 필요")
 
 
 def _aws(args: list[str], region: str, *, capture: bool = True,
@@ -166,7 +169,11 @@ def _sanitize_copied_values(text: str) -> str:
     dev 파일엔 실제 Cognito issuer(`.../ap-northeast-2_xxx`)와 enabled=true 가
     박혀 있다 — 그대로 복사하면 terraform output 이 없거나 OIDC 자동배선이
     스킵되는 배포(domain=none)에서 신 env 가 **dev 풀의 토큰을 신뢰**한다.
-    주석 보존을 위해 텍스트 수준으로 고친다."""
+    같은 계정에서는 COGNITO_USER_POOL_ID·AGENTCORE_RUNTIME_ARN·role-arn
+    어노테이션·imageRegistry·allowedIamRoles 도 dev 리소스를 조용히
+    가리킨다 (render/--set 이 덮지 않는 경로 존재) — 전부 공란화해 terraform
+    output/render 주입이 유일한 소스가 되게 한다. 주석 보존을 위해 텍스트
+    수준으로 고친다."""
     # oidc: 블록의 enabled 만 끈다 — 다른 enabled: 키와 구분하기 위해
     # `oidc:` 라인 뒤 첫 enabled 만 대상.
     text = re.sub(r"(?m)(^\s+oidc:\s*\n\s*enabled:\s*)true",
@@ -174,6 +181,20 @@ def _sanitize_copied_values(text: str) -> str:
     text = re.sub(r'(?m)^(\s+issuerUrl:\s*)"[^"]*"',
                   r'\g<1>""  # scaffold 가 중화 — terraform output 이 apply 시 주입',
                   text)
+    # 계정/env 핀값 공란화 — 키는 남기고 값만 지운다.
+    for key in ("imageRegistry", "COGNITO_USER_POOL_ID",
+                "AGENTCORE_RUNTIME_ARN", "AGENTCORE_GATEWAY_URL"):
+        text = re.sub(rf'(?m)^(\s*{key}:\s*)"[^"]*"', r'\g<1>""', text)
+    # 잘못된 풀 동기화로 사용자 비활성화되는 것을 막는다.
+    text = re.sub(r'(?m)^(\s*COGNITO_SYNC_DEACTIVATE_MISSING:\s*)"true"',
+                  r'\g<1>"false"', text)
+    # dev 의 IAM role 이름 허용목록 — 신 env 의 정책과 무관한 값.
+    text = re.sub(r'(?m)^(\s*allowedIamRoles:)\s*\n(?:\s*-\s+[^\n]*\n)+',
+                  r'\g<1> []\n', text)
+    # dev IRSA role ARN — terraform output(gateway_proxy_role_arn 등)이
+    # --set 으로 주입하는 값이므로 주석 아닌 항목만 공란화한다.
+    text = re.sub(r'(?m)^(\s*eks\.amazonaws\.com/role-arn:\s*)"arn:[^"]*"',
+                  r'\g<1>""', text)
     return text
 
 
@@ -250,8 +271,14 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
     # ADMIN_GROUPS 도 비어 관리자가 아무도 못 된다.
     chart_dir = repo_root / "deployment/charts/llm-gateway"
     vals_dst = chart_dir / f"values-eks-fargate-{cfg.env}.yaml"
-    if not vals_dst.exists() and not (
-            chart_dir / f"values-eks-fargate-{cfg.env}.local.yaml").exists():
+    # env_values_file 의 탐색 순서와 같은 후보군 — fargate 가 아닌 명명도
+    # 우선순위에 들어가므로 어느 하나라도 있으면 사본을 만들지 않는다
+    # (만들면 높은 우선순위로 사용자 파일을 가린다).
+    existing = [chart_dir / f"values-eks-fargate-{cfg.env}.local.yaml",
+                chart_dir / f"values-eks-{cfg.env}.local.yaml",
+                vals_dst,
+                chart_dir / f"values-eks-{cfg.env}.yaml"]
+    if not any(p.exists() for p in existing):
         src = chart_dir / "values-eks-fargate-dev.yaml"
         if src.exists():
             vals_dst.write_text(_sanitize_copied_values(src.read_text()))
@@ -311,7 +338,8 @@ def _manual_alb_pins(env_dir_path: Path) -> set[str]:
             pinned.add(name)
     candidates = [env_dir_path / "terraform.tfvars",
                   env_dir_path / "terraform.tfvars.json",
-                  *sorted(env_dir_path.glob("*.auto.tfvars"))]
+                  *sorted(env_dir_path.glob("*.auto.tfvars")),
+                  *sorted(env_dir_path.glob("*.auto.tfvars.json"))]
     pat = re.compile(r"(?m)^[ \t]*(alb_(?:lb_dimensions|target_groups))[ \t]*=")
     for f in candidates:
         try:
@@ -337,10 +365,14 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
 
     반환: terraform outputs."""
     init = ["terraform", "init", "-input=false"]
-    if backend and not (env_dir_path / ".terraform").exists():
+    if backend:
         bucket, table = backend
         init += [f"-backend-config=bucket={bucket}",
                  f"-backend-config=dynamodb_table={table}"]
+        if (env_dir_path / ".terraform").exists():
+            # tfstate 답변이 바뀐 재실행 — 캐시된 backend 로 plan/apply 가
+            # 낡은 state 에 붙는 것을 막는다 (state 마이그레이션은 없다).
+            init.append("-reconfigure")
     _run(init, cwd=env_dir_path)
     var_args = ["-var-file=terraform.tfvars"]
     managed = gen_dir / "terraform.tfvars"
@@ -513,7 +545,12 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
                 f"{redis} 를 만들 수 없습니다 (env apply 선행 확인)")
         pw = _aws(["secretsmanager", "get-secret-value", "--secret-id", arn,
                    "--query", "SecretString"], region)
-        token = json.loads(pw.stdout)
+        token = json.loads(pw.stdout or "null")
+        if not isinstance(token, str) or not token:
+            raise SystemExit(
+                f"{arn} 의 SecretString 이 비어/비정상입니다 — elasticache "
+                "auth token 시크릿을 확인하세요 (json 오브젝트가 아니라 "
+                "문자열 토큰이어야 합니다)")
         _aws(["secretsmanager", "create-secret", "--name", redis,
               "--secret-string", json.dumps({"password": token})], region)
         notes.append(f"secrets {redis} — auth_token 복사 완료")
@@ -538,7 +575,12 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
             f"secrets {db} 가 없습니다 — terraform env apply 가 만들어야 하는 "
             "시크릿입니다. env apply 결과를 확인하십시오 (절대 수동 create 하지 말 "
             "것 — master_password 를 잃는다)")
-    keys = set(json.loads(r.stdout).keys())
+    try:
+        keys = set(json.loads(r.stdout or "null").keys())
+    except (json.JSONDecodeError, AttributeError):
+        raise SystemExit(
+            f"secrets {db} 의 SecretString 이 JSON 오브젝트가 아닙니다 — "
+            "terraform 관리본이어야 합니다 (손대지 말고 env apply 로 복구)")
     if "password" not in keys:
         raise SystemExit(
             f"secrets {db} 에 password 키가 없습니다({sorted(keys)}) — "
@@ -666,6 +708,13 @@ def onboard_admin(cfg: GatewayConfig, repo_root: Path, outs: dict,
         ["aws", "cognito-idp", "admin-get-user", "--user-pool-id", pool,
          "--username", email, "--region", region])
     if r.returncode != 0:
+        if "UserNotFoundException" not in (r.stderr or ""):
+            # 조회 자체가 실패(throttle/권한)한 것을 없음으로 오인해 create 를
+            # 치면 UsernameExists 로 진짜 원인이 가려진다 — 실패를 그대로 표면.
+            raise SystemExit(
+                f"cognito-idp admin-get-user 실패 — "
+                f"{(r.stderr or '').strip()[:200]}\n"
+                "일시적 오류일 수 있습니다 — 재시도하세요")
         temp_pw = secrets.token_urlsafe(16) + "Aa1!"
         _aws(["cognito-idp", "admin-create-user", "--user-pool-id", pool,
               "--username", email,
@@ -854,8 +903,11 @@ def persist_bootstrap_answers(config_path: Path, answers: dict) -> None:
     infra = {k: v for k, v in (answers.get("infra") or {}).items() if v}
     if infra:
         doc.setdefault("infra", {}).update(infra)
-    doc.setdefault("features", {})["web_search"] = bool(
-        answers.get("web_search"))
+    # tfstate 재시도처럼 web_search 답변이 없는 호출에서 None → false 로
+    # 덮어써 기존 선언을 지우는 사고 방지 — 키가 있을 때만 쓴다.
+    if "web_search" in answers:
+        doc.setdefault("features", {})["web_search"] = bool(
+            answers.get("web_search"))
     # 쓰기 전 검증 — 기존 파일이 유효한데 wizard 답변이 스키마를 깨면 파일이
     # 그대로 죽어 이후 모든 deploy 명령이 _load_config 에서 멈춘다. 기존 파일이
     # 이미 무효했다면 답변 탓이 아니므로 저장한다 (load 는 어차피 실패하지만
