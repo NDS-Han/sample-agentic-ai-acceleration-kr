@@ -139,7 +139,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
         yaml_key = {"gateway": "gateway", "adminUi": "admin_ui",
                     "adminApi": "admin_api"}
         for key, default in derived.items():
+            # 통째 교체가 아니라 병합 — admin_internal 이 위에서 넣은
+            # scheme=internal 어노테이션이 여기서 날아가면 도메인 있는 배포도
+            # admin ALB 가 internet-facing 으로 되돌아간다.
             v["ingress"][key] = {
+                **v["ingress"].get(key, {}),
                 "host": cfg.domain.hosts.get(yaml_key[key]) or default,
                 "path": "/", "pathType": "Prefix"}
         # domain 도입 시 NEXTAUTH_URL 도 새 주소로 — 비워두면 이전 값(ALB DNS
@@ -455,14 +459,30 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
     if inf.azs:
         lines.append(f"azs = {json.dumps(inf.azs)}")
     if inf.vpc_cidr or inf.azs:
-        # azs 개수와 서브넷 cidr 리스트 길이는 같아야 한다 — 선언되면 둘 다 생성
+        # azs 개수와 서브넷 cidr 리스트 길이는 같아야 한다 — 선언되면 둘 다 생성.
+        # 실효 azs 수는 terraform last-wins 기준: infra.azs 를 방출하면 env 선언을
+        # 덮어쓰지만, 미방출이면 env tfvars 의 azs 가 그대로 산다 — 그 개수에
+        # 맞춰야 리스트 길이가 어긋나지 않는다.
+        n_azs = (len(inf.azs) or len(_tfvars_list(env_dir, "azs")) or 2)
         for k, v in schema.subnet_cidrs(
-                inf.vpc_cidr or _env_vpc_cidr(env_dir), len(inf.azs) or 2).items():
+                inf.vpc_cidr or _env_vpc_cidr(env_dir), n_azs).items():
             lines.append(f"{k} = {json.dumps(v)}")
+        # module.vpc/module.aurora 는 managed target 이 아니다 — update 경로
+        # (deploy apply)의 targeted plan 은 이 키들을 평가하지 않으므로 선언이
+        # 조용히 무시된다. 수렴은 bootstrap/env terraform 의 전체 apply 뿐.
+        print("ⓘ infra.vpc_cidr/azs 선언 — managed overlay 에 싣지만 "
+              "module.vpc/aurora 는 managed target 이 아니라 deploy apply 는 "
+              "수렴하지 않습니다(기존 인프라 파괴 방지). 반영은 env terraform "
+              "apply 또는 재-bootstrap 이 필요합니다", file=sys.stderr)
     if inf.cognito_domain_suffix:
         lines.append(f'cognito_domain_suffix = "{inf.cognito_domain_suffix}"')
     if inf.cognito_groups:
-        groups = list(dict.fromkeys([*inf.cognito_groups, "ClaudeAdmin"]))
+        # env tfvars 의 기존 그룹과 합집합 — 콜백/로그아웃 URL 과 같은 계약.
+        # 미병합이면 env 선언 그룹이 managed plan 의 delete 로 잡혀 범위 가드가
+        # 매 apply 를 중단한다 (삭제는 env terraform 수동 절차).
+        groups = list(dict.fromkeys(
+            [*_tfvars_list(env_dir, "cognito_groups"),
+             *inf.cognito_groups, "ClaudeAdmin"]))
         lines.append(f"cognito_groups = {json.dumps(groups)}")
     if inf.bedrock_allowed_model_arns:
         lines.append(

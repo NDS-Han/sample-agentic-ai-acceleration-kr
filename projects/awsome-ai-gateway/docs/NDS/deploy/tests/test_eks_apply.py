@@ -1267,3 +1267,99 @@ def test_warn_missing_ecr_tags(monkeypatch, capsys):
                         subprocess.CompletedProcess([], 0, "{}", ""))
     eks_apply._warn_missing_ecr_tags(cfg2, "ap-northeast-2")
     assert not called
+
+
+def test_find_domain_cert_prefers_issued(monkeypatch):
+    """16차 — 같은 도메인의 cert 가 여러 장이면 ISSUED 를 우선한다.
+    첫 매치가 PENDING/FAILED 이면 사용 가능한 인증서를 영영 못 집는다."""
+    certs = {"arn:1": {"S": "FAILED", "SAN": ["*.gw.example.com"]},
+             "arn:2": {"S": "ISSUED", "SAN": ["*.gw.example.com", "gw.example.com"]}}
+
+    def fake(argv, **k):
+        if "list-certificates" in argv:
+            return subprocess.CompletedProcess(
+                [], 0, "arn:1 arn:2", "")
+        arn = argv[argv.index("--certificate-arn") + 1]
+        return subprocess.CompletedProcess(
+            [], 0, json.dumps({"S": certs[arn]["S"],
+                               "SAN": certs[arn]["SAN"]}), "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    assert eks_apply._find_domain_cert("gw.example.com", "r") == ("arn:2", "ISSUED")
+
+
+def test_declared_nextauth_url_detects_env_layer(tmp_path):
+    """16차 — values 레이어가 nextauthUrl 을 선언하면 2-phase ALB 주입을
+    스킵해야 한다 — --set 이 선언 URL 을 매번 덮어쓰기 때문."""
+    layer = tmp_path / "values-eks-dev.yaml"
+    layer.write_text("adminUi:\n  nextauthUrl: https://admin.internal.example.com\n")
+    meta = {"values_layers": ["values-eks-dev.yaml"]}
+    assert eks_apply._declared_nextauth_url(meta, tmp_path) == \
+        "https://admin.internal.example.com"
+    layer.write_text("adminUi:\n  other: x\n")
+    assert eks_apply._declared_nextauth_url(meta, tmp_path) == ""
+    layer.write_bytes(b"\xff\xfe not utf8")
+    assert eks_apply._declared_nextauth_url(meta, tmp_path) == ""  # 크래시 없이 빈값
+
+
+def test_strip_es_chart_default_db_secret(monkeypatch, tmp_path):
+    """16차 — release 가 llm-gateway 가 아니고 passwordSecretName 미선언이면
+    차트 기본 llm-gateway-db 가 strip 후보에 있어야 한다."""
+    chart = tmp_path / "deployment" / "charts" / "llm-gateway"
+    chart.mkdir(parents=True)
+    (chart / "values.yaml").write_text(
+        "database:\n  external:\n    passwordSecretName: llm-gateway-db\n"
+        "redis:\n  external:\n    passwordSecretName: \"\"\n")
+    meta = {"namespace": "ns", "release": "acme", "values_layers": []}
+    seen = []
+
+    def fake(argv, **k):
+        seen.append(argv)
+        return subprocess.CompletedProcess([], 0, "ExternalSecret", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    eks_apply.strip_es_owned_secrets(meta, repo_root=tmp_path)
+    queried = {a[a.index("secret") + 1] for a in seen if "secret" in a
+               and "get" in a}
+    assert "llm-gateway-db" in queried
+    assert "acme-app" in queried
+
+
+def test_migration_image_malformed_layer(monkeypatch, tmp_path):
+    """16차 — 스칼라/리스트 레이어·깨진 yaml 이 있어도 migration 이미지
+    도출이 AttributeError/YAMLError 로 죽지 않아야 한다."""
+    from deploy import schema
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("migration: just-a-string\nglobal: [not, a, map]\n")
+    bad2 = tmp_path / "bad2.yaml"
+    bad2.write_text("{{{ not yaml")
+    meta = {"values_layers": [str(bad), str(bad2)]}
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "ap-northeast-2"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {"tag": "v1"}})
+    monkeypatch.setattr(eks_apply, "_aws_account_id", lambda r: "")
+    assert eks_apply._migration_image(cfg, meta, tmp_path, tmp_path) == ""
+
+
+def test_selfsigned_cert_only_reuses_issued(monkeypatch):
+    """16차 — EXPIRED/PENDING 자체서명 인증서는 재사용하면 안 된다 —
+    ALB 리스너 부착이 거절돼 ingress sync 가 실패한다. 조회 쿼리에
+    Status=='ISSUED' 필터가 있어야 한다."""
+    queries = []
+
+    def fake(argv, **k):
+        queries.append(argv)
+        if "list-certificates" in argv:
+            return subprocess.CompletedProcess([], 0, "arn:aws:acm:cert/ok", "")
+        return subprocess.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    arn = eks_apply.ensure_selfsigned_cert("dev", "ap-northeast-2")
+    assert arn == "arn:aws:acm:cert/ok"
+    q = next(a for a in queries if "list-certificates" in a)
+    assert any("Status=='ISSUED'" in a for a in q)
+    # 미발급이면 import 경로로 — openssl 실패 시 빈 문자열(부분적 실패 허용)
+    def no_cert(argv, **k):
+        if "list-certificates" in argv:
+            return subprocess.CompletedProcess([], 0, "None", "")
+        return subprocess.CompletedProcess([], 1, "", "boom")
+    monkeypatch.setattr(eks_apply, "_run_quiet", no_cert)
+    assert eks_apply.ensure_selfsigned_cert("dev", "ap-northeast-2") == ""

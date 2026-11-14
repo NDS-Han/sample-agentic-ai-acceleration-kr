@@ -147,11 +147,23 @@ def _migration_image(cfg: GatewayConfig, meta: dict, gen_dir: Path,
     for lp in layers:
         if not lp.exists():
             continue
-        v = yaml.safe_load(lp.read_text()) or {}
+        try:
+            v = yaml.safe_load(lp.read_text()) or {}
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+        if not isinstance(v, dict):
+            continue  # 리스트/스칼라 문서 — .get 호출 시 AttributeError
         mig = v.get("migration") or {}
-        repo = (mig.get("image") or {}).get("repository") or repo
-        tag = (mig.get("image") or {}).get("tag") or tag
-        registry = (v.get("global") or {}).get("imageRegistry") or registry
+        if not isinstance(mig, dict):
+            mig = {}
+        mig_img = mig.get("image") or {}
+        if not isinstance(mig_img, dict):
+            mig_img = {}
+        repo = mig_img.get("repository") or repo
+        tag = mig_img.get("tag") or tag
+        g = v.get("global") or {}
+        registry = (g.get("imageRegistry")
+                    if isinstance(g, dict) else None) or registry
     # helm 실효값과 같은 우선순위 — images.registry 지정 시 gen 레이어에
     # 기록돼 병합값에 이미 반영된다. 비어 있으면 apply 가 --set 으로 sts 추론
     # registry 를 주입하므로 레이어 병합값(스캐폴드된 dev 잔재일 수 있음)보다
@@ -324,7 +336,7 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
                 name = str(ref["name"])
             if ref.get("kind"):
                 kind = str(ref["kind"])
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
     base = ["kubectl"] + (["--context", context] if context else [])
     if _run_quiet(base + ["get", "ns", "external-secrets"],
@@ -392,15 +404,23 @@ spec:
     print(f"ⓘ {kind} '{name}' 생성", file=sys.stderr)
 
 
-def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
+def ensure_selfsigned_cert(env: str, region: str) -> str:
     """domain=selfsigned-temp 용 self-signed 인증서를 ACM 에 보장하고 ARN 을
     돌려준다. CN 에 env 를 넣어 재실행 때 기존 인증서를 찾아 재사용(멱등)한다.
     ALB 가 요구하는 것은 리스너 인증서뿐이라 신뢰 체인은 무관 — 브라우저
-    경고는 사용자 수용 조건이다. 실패 시 빈 문자열."""
+    경고는 사용자 수용 조건이다. 실패 시 빈 문자열.
+
+    SAN 은 *.{region}.elb.amazonaws.com — 구체 ALB hostname 은 ingress 가
+    생성돼야 알 수 있는데, cert 가 없으면 listen-ports 선언의 HTTPS 리스너가
+    안 붙어 ALB 가 영영 안 뜬다(닭-달걀 데드락). 와일드카드 SAN 이 미래의
+    어떤 ALB DNS 라벨도 커버해 ALB 존재와 무관하게 cert 를 먼저 보장한다."""
     cn = f"llm-gateway-{env}-selfsigned"
+    # Status 필터 필수 — EXPIRED 등 죽은 인증서를 재사용하면 ALB 리스너 부착이
+    # 거절돼 ingress sync 가 실패한다 (domain cert 의 _find_domain_cert 와
+    # 같은 재사용 조건: ISSUED 만).
     r = _run_quiet(["aws", "acm", "list-certificates", "--region", region,
-                    "--query", f"CertificateSummaryList[?DomainName=='{cn}']"
-                               ".CertificateArn | [0]",
+                    "--query", f"CertificateSummaryList[?DomainName=='{cn}'"
+                               " && Status=='ISSUED'].CertificateArn | [0]",
                     "--output", "text"], timeout=30)
     arn = (r.stdout or "").strip()
     if r.returncode == 0 and arn and arn != "None":
@@ -411,7 +431,9 @@ def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
         r = _run_quiet(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
                         "-days", "3650", "-keyout", key, "-out", crt,
                         "-subj", f"/CN={cn}",
-                        "-addext", f"subjectAltName=DNS:{alb_host}"], timeout=30)
+                        "-addext",
+                        f"subjectAltName=DNS:*.{region}.elb.amazonaws.com"],
+                       timeout=30)
         if r.returncode != 0:
             return ""
         r = _run_quiet(["aws", "acm", "import-certificate",
@@ -462,6 +484,7 @@ def _find_domain_cert(domain: str, region: str) -> tuple[str, str]:
     r = _run_quiet(["aws", "acm", "list-certificates", "--region", region,
                     "--query", "CertificateSummaryList[].CertificateArn",
                     "--output", "text"], timeout=60)
+    candidates: list[tuple[str, str]] = []
     for arn in (r.stdout or "").split() if r.returncode == 0 else []:
         d = _run_quiet(["aws", "acm", "describe-certificate",
                         "--certificate-arn", arn, "--region", region,
@@ -475,8 +498,17 @@ def _find_domain_cert(domain: str, region: str) -> tuple[str, str]:
         # 못 커버한다 — 와일드카드 SAN 필수 (없으면 잘못된 cert 가 붙는다).
         if f"*.{domain}" not in set(c.get("SAN") or []):
             continue
-        return arn, c.get("S", "")
-    return "", ""
+        candidates.append((arn, c.get("S", "")))
+    if not candidates:
+        return "", ""
+    # 같은 도메인의 인증서가 여러 장일 수 있다(재요청·만료 잔여). list 순서는
+    # 생성순이 아니므로 첫 매치를 집으면 ISSUED 를 두고 FAILED/EXPIRED 를
+    # 재사용하거나, 반대로 살아있는 PENDING 대신 죽은 것을 고른다.
+    for prefer in ("ISSUED", "PENDING_VALIDATION"):
+        for arn, status in candidates:
+            if status == prefer:
+                return arn, status
+    return candidates[0]
 
 
 def ensure_domain_cert(domain: str, zone_id: str, region: str) -> str:
@@ -579,15 +611,50 @@ def ensure_domain_records(cfg: GatewayConfig, meta: dict, context: str = "") -> 
                             "EvaluateTargetHealth": False}}})
     if not changes:
         return
+    # stale 레코드 정리 — domain.hosts 를 바꾸거나 도메인을 갈아끼우면 이전
+    # 레코드가 ALB 를 계속 가리킨다. 자동 삭제는 파생 기본명(gateway./admin./
+    # admin-api.<domain>)이 현재 선언에 없을 때로 한정한다 — 커스텀 호스트명은
+    # 다른 용도와 이름이 겹칠 수 있어 삭제 대신 경고만 낸다.
+    wanted = set(suffix_to_host.values())
+    for derived in (f"gateway.{cfg.domain.name}", f"admin.{cfg.domain.name}",
+                    f"admin-api.{cfg.domain.name}"):
+        if derived in wanted:
+            continue
+        # Route53 은 DELETE 시 기존 레코드와 정확히 일치해야 한다 — 실제 alias
+        # target 을 조회해 채우고, 못 읽으면(없음/비-alias) 삭제를 생략한다.
+        d = _run_quiet(
+            ["aws", "route53", "list-resource-record-sets",
+             "--hosted-zone-id", cfg.domain.zone_id,
+             "--query", f"ResourceRecordSets[?Name=='{derived}.'"
+                        f" && Type=='A'] | [0].AliasTarget",
+             "--output", "json"], timeout=30)
+        try:
+            tgt = json.loads(d.stdout or "null")
+        except json.JSONDecodeError:
+            tgt = None
+        if not (isinstance(tgt, dict) and tgt.get("DNSName")):
+            continue
+        # ALB alias 가 아니면 우리가 만든 레코드가 아니다 — 같은 도메인 아래
+        # 사람이 둔 다른 용도의 A 레코드를 지우지 않는다.
+        if ".elb.amazonaws.com" not in str(tgt["DNSName"]):
+            continue
+        changes.append({"Action": "DELETE", "ResourceRecordSet": {
+            "Name": derived, "Type": "A",
+            "AliasTarget": {
+                "HostedZoneId": tgt["HostedZoneId"],
+                "DNSName": tgt["DNSName"],
+                "EvaluateTargetHealth": bool(
+                    tgt.get("EvaluateTargetHealth"))}}})
+        print(f"  route53: stale 레코드 정리 — {derived}", file=sys.stderr)
     r = _run_quiet(["aws", "route53", "change-resource-record-sets",
                     "--hosted-zone-id", cfg.domain.zone_id,
                     "--change-batch", json.dumps({"Changes": changes})],
                    timeout=60)
     if r.returncode == 0:
-        print(f"  route53: {len(changes)}개 도메인 레코드 등록 "
+        print(f"  route53: {len(changes)}개 도메인 레코드 반영 "
               f"(zone {cfg.domain.zone_id})", file=sys.stderr)
     else:
-        print(f"⚠ route53 레코드 등록 실패: {r.stderr[:200]}", file=sys.stderr)
+        print(f"⚠ route53 레코드 반영 실패: {r.stderr[:200]}", file=sys.stderr)
 
 
 def _helm_version() -> tuple[int, int]:
@@ -727,12 +794,13 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
     # 다르다). legacy {release}-{suffix} 도 후보에 남긴다(채택 배포 커버).
     secrets = {f"{rel}-app", f"{rel}-db", f"{rel}-redis"}
     override = ""
+    declared: set[str] = set()  # passwordSecretName 을 어느 레이어든 선언한 섹션
     for lp in meta.get("values_layers") or []:
         p_ = Path(lp)
         p_ = p_ if p_.is_absolute() or repo_root is None else repo_root / p_
         try:
             v = yaml.safe_load(p_.read_text())
-        except (OSError, yaml.YAMLError):
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
         if not isinstance(v, dict):
             continue  # 리스트/스칼라 문서 — .get 호출 시 AttributeError
@@ -746,6 +814,28 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
                  if isinstance(inner, dict) else None)
             if n:
                 secrets.add(str(n))
+                declared.add(top)
+    # 미선언 섹션은 차트 기본값이 산다 — 커스텀 release(+fullname 비파생 기본값)
+    # 에서 {rel}-db 후보만 찾으면 차트 기본 llm-gateway-db 를 놓친다.
+    if "database" not in declared or "redis" not in declared:
+        chart_defaults = {}
+        if repo_root is not None:
+            try:
+                cv = yaml.safe_load(
+                    (repo_root / "deployment" / "charts" / "llm-gateway"
+                     / "values.yaml").read_text())
+                if isinstance(cv, dict):
+                    chart_defaults = cv
+            except (OSError, yaml.YAMLError):
+                pass
+        for top, fallback in (("database", "llm-gateway-db"), ("redis", "")):
+            if top in declared:
+                continue
+            ext = chart_defaults.get(top)
+            inner = ext.get("external") if isinstance(ext, dict) else None
+            n = (inner.get("passwordSecretName")
+                 if isinstance(inner, dict) else None)
+            secrets.add(str(n) if n else fallback)
     chart_name = "llm-gateway"
     if override:
         fullname = override[:63].rstrip("-")
@@ -1362,6 +1452,24 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
             print(f"    {line}")
 
 
+def _declared_nextauth_url(meta: dict, repo_root: Path) -> str:
+    """values 레이어가 adminUi.nextauthUrl 을 선언했으면 그 값 — 채택 배포의
+    고정 도메인/내부 DNS 는 2-phase 의 ALB 주입으로 덮어쓰면 안 된다
+    (ingress host 는 비운 채 URL 만 잡는 방식도 유효한 구성이다)."""
+    for layer in meta.get("values_layers") or []:
+        lp = Path(layer)
+        lp = lp if lp.is_absolute() else repo_root / lp
+        try:
+            vals = yaml.safe_load(lp.read_text())
+            v = (vals.get("adminUi") or {}).get("nextauthUrl") \
+                if isinstance(vals, dict) else None
+            if v:
+                return str(v)
+        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            continue
+    return ""
+
+
 def _human_declared_chat_agent(env_dir: Path) -> bool:
     """사람이 env 의 변수 채널 어딘가에 enable_chat_agent=true 를 선언했는지.
 
@@ -1553,10 +1661,12 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                              "certificate-arn=" + arn_]
     if cfg.domain.mode == "selfsigned-temp":
         cn = f"llm-gateway-{cfg.env}-selfsigned"
+        # apply 의 ensure_selfsigned_cert 와 같은 재사용 조건 — ISSUED 만
+        # (EXPIRED 재사용은 리스너 부착 거절 → preview 도 실제와 맞춘다).
         r = _run_quiet(["aws", "acm", "list-certificates",
                         "--region", cfg.aws.region,
-                        "--query", f"CertificateSummaryList[?DomainName=='{cn}']"
-                                   ".CertificateArn | [0]",
+                        "--query", f"CertificateSummaryList[?DomainName=='{cn}'"
+                                   " && Status=='ISSUED'].CertificateArn | [0]",
                         "--output", "text"], timeout=30)
         sarn = (r.stdout or "").strip()
         if r.returncode == 0 and sarn and sarn != "None":
@@ -1572,7 +1682,8 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         set_args += ["--set",
                      "adminApi.env.LITELLM_PRICING_LAMBDA="
                      f"{pricinglambda.fn_name(cfg.env)}"]
-    if not cfg.domain.name and not live_ingress_rule_host(meta, context):
+    if not cfg.domain.name and not live_ingress_rule_host(meta, context) \
+            and not _declared_nextauth_url(meta, repo_root):
         host = live_alb_hostname(meta, context)
         if host:
             scheme = "https" if cfg.domain.mode == "selfsigned-temp" else "http"
@@ -1586,8 +1697,13 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
     if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
         # 새 머신/재클론 — backend 미초기화면 output 조회가 실패해 모든 동적
-        # --set 이 빠진다. init 은 멱등이라 먼저 복구한다.
-        _tf_init(cfg, env_dir)
+        # --set 이 빠진다. init 은 멱등이라 먼저 복구한다. plan() 과 같은
+        # 경고 — 실패 원인(백엔드 설정/권한)을 숨기면 아래의 일반 경고만 남는다.
+        ini = _tf_init(cfg, env_dir)
+        if ini.returncode != 0:
+            print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"
+                  "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
+                  "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
     if env_dir and not outs:
         print(f"⚠ {meta['env_dir']} 의 terraform output 이 없습니다 — DB/Redis/"
@@ -1705,32 +1821,37 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "cert 없이 진행하고 다음 apply 에 자동 부착합니다",
                   file=sys.stderr)
 
-    # domain.selfsigned-temp — admin-ui 만 임시 HTTPS. ALB hostname 은 live
-    # ingress 에서 읽으므로 첫 설치(아직 ALB 없음)는 인증서 없이 지나가고 다음
-    # apply 에 붙는다. cert-arn 은 values 에 못 박는 런타임값이라 --set 주입.
+    # domain.selfsigned-temp — admin-ui 만 임시 HTTPS. 인증서는 CN 으로
+    # 재사용되고 SAN 은 리전 와일드카드라 ALB hostname 을 몰라도 먼저 보장할
+    # 수 있다 — ALB 유무로 게이트하면 listen-ports 선언의 HTTPS 리스너가 cert
+    # 부재로 안 붙어 첫 설치 ALB 가 영영 안 뜬다. cert-arn 은 values 에 못
+    # 박는 런타임값이라 --set 주입.
     if cfg.domain.mode == "selfsigned-temp":
-        ss_host = live_alb_hostname(meta, context)
-        if ss_host:
-            arn = ensure_selfsigned_cert(cfg.env, ss_host, cfg.aws.region)
-            if arn:
-                set_args += ["--set-string",
-                             "ingress.adminUi.annotations."
-                             "alb\\.ingress\\.kubernetes\\.io/"
-                             "certificate-arn=" + arn]
-            else:
-                print("⚠ self-signed 인증서 프로비저닝 실패 — 443 리스너 없이 "
-                      "진행합니다 (openssl/aws acm 권한 확인)", file=sys.stderr)
+        arn = ensure_selfsigned_cert(cfg.env, cfg.aws.region)
+        if arn:
+            set_args += ["--set-string",
+                         "ingress.adminUi.annotations."
+                         "alb\\.ingress\\.kubernetes\\.io/"
+                         "certificate-arn=" + arn]
         else:
-            print("ⓘ admin-ui ALB 가 아직 없습니다 — self-signed 인증서는 "
-                  "ALB 생성 후 다음 apply 에 붙습니다", file=sys.stderr)
+            print("⚠ self-signed 인증서 프로비저닝 실패 — 443 리스너 없이 "
+                  "진행합니다 (openssl/aws acm 권한 확인)", file=sys.stderr)
 
     # ops/NDS-01 자동화 — role+함수+invoke 정책을 보장하고(멱등) 함수 이름을
-    # adminApi.env 로 주입한다. 비면 litellm 소스는 비활성(graceful-off).
+    # adminApi.env 로 주입한다. 이름은 fn_name(env) 결정값이라 ensure 실패
+    # 여부와 무관하게 항상 주입한다 — 조건부 주입이면 plan(항상 주입)과
+    # 불일치하고, 이전 apply 의 주입값이 실패 한 번에 '' 로 지워져 litellm
+    # 소스가 꺼진다. 함수 부재 시 admin-api 는 호출 시점 에러로 graceful-off
+    # (env 자체가 비면 503 not-configured — 둘 다 요청 범위 실패다).
     if cfg.features.pricing_lambda:
         fn = pricinglambda.ensure(
             cfg, repo_root, outs.get("admin_api_role_arn", ""))
-        if fn:
-            set_args += ["--set", f"adminApi.env.LITELLM_PRICING_LAMBDA={fn}"]
+        set_args += ["--set",
+                     "adminApi.env.LITELLM_PRICING_LAMBDA="
+                     f"{pricinglambda.fn_name(cfg.env)}"]
+        if not fn:
+            print("⚠ pricing_lambda: ensure 실패 — 함수명만 주입합니다 "
+                  "(sync 버튼은 invoke 에러)", file=sys.stderr)
 
     # terraform 은 ESO operator 만 설치한다 — ClusterSecretStore 는 별도
     # 단계(install-eks.sh 계약). 없으면 ExternalSecret 이 SecretSyncedError 로
@@ -1745,9 +1866,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)
     # 단 env values 가 실제 host 를 공급하는 채택 배포는 차트가 이미
     # https://<host> 를 파생하므로 ALB 주입을 하면 되려 콜백이 깨진다 —
-    # live ingress 에 rule host 가 있으면 생략한다.
+    # live ingress 에 rule host 가 있거나, values 레이어가 nextauthUrl 자체를
+    # 선언한 경우(--set 이 이기므로 선언 URL 을 매번 덮어쓰게 된다) 생략한다.
     # 확인 게이트는 1차 upgrade 전에만 있다 — 2차는 같은 트랜잭션의 후속 조치
-    if not cfg.domain.name and not live_ingress_rule_host(meta, context):
+    if not cfg.domain.name and not live_ingress_rule_host(meta, context) \
+            and not _declared_nextauth_url(meta, repo_root):
         host = live_alb_hostname(meta, context)
         if host:
             scheme = "https" if cfg.domain.mode == "selfsigned-temp" else "http"

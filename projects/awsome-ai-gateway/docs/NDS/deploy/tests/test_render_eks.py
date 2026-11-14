@@ -426,3 +426,54 @@ def test_alerting_env_values_loggroupname_wins(tmp_path, monkeypatch):
     eks_render.render(cfg, out, repo_root=tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert "logGroupName" not in v["observability"]["fargateLogging"]
+
+
+def test_admin_internal_annotations_survive_domain(tmp_path):
+    """16차 — admin_internal 의 scheme=internal 어노테이션이 domain.name 의
+    host 병합에 지워지면 admin ALB 가 internet-facing 으로 되돌아간다."""
+    doc = dict(BASE, network={**BASE["network"], "admin_internal": True})
+    _, out, _ = _render(tmp_path, doc)
+    v = yaml.safe_load((out / "values.yaml").read_text())
+    for key in ("adminUi", "adminApi"):
+        ing = v["ingress"][key]
+        assert ing["annotations"][
+            "alb.ingress.kubernetes.io/scheme"] == "internal"
+        assert ing["host"], "domain host 병합은 유지돼야 한다"
+    assert v["ingress"]["adminUi"]["host"] == "admin.gw.example.com"
+
+
+def _env_dir(repo_root: Path, env: str = "dev") -> Path:
+    d = (repo_root / "deployment" / "terraform" / "environments"
+         / f"llm-gateway-{env}")
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_cognito_groups_merge_with_env_tfvars(tmp_path):
+    """16차 — env tfvars 선언 그룹과 합집합. 미병합이면 managed plan 이
+    기존 그룹의 delete 를 잡아 범위 가드가 매 apply 를 중단한다."""
+    env_dir = _env_dir(tmp_path)
+    (env_dir / "terraform.tfvars").write_text(
+        'cognito_groups = ["Claude_Devops"]\n')
+    doc = dict(BASE, infra={"cognito_groups": ["Claude_ML"]})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / "dev" / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    for g in ("Claude_Devops", "Claude_ML", "ClaudeAdmin"):
+        assert f'"{g}"' in tfvars
+
+
+def test_subnet_count_follows_env_azs(tmp_path):
+    """16차 — infra.vpc_cidr 만 선언하고 azs 는 env 가 가진 경우 서브넷
+    리스트 길이는 env azs 개수를 따라야 한다(terraform last-wins)."""
+    env_dir = _env_dir(tmp_path)
+    (env_dir / "terraform.tfvars").write_text(
+        'azs = ["ap-south-1a", "ap-south-1b", "ap-south-1c"]\n')
+    doc = dict(BASE, infra={"vpc_cidr": "10.50.0.0/16"})
+    cfg = schema.from_dict(doc)
+    out = tmp_path / "gen" / "dev" / "eks"
+    eks_render.render(cfg, out, repo_root=tmp_path)
+    tfvars = (out / "terraform.tfvars").read_text()
+    m = re.search(r'private_subnet_cidrs = (\[[^\]]+\])', tfvars)
+    assert m and len(yaml.safe_load(m.group(1))) == 3
