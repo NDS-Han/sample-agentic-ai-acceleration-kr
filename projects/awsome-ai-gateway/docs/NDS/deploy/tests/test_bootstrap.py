@@ -608,3 +608,22 @@ def test_env_apply_plan_failure_stops(monkeypatch, tmp_path):
         _sp, "run", lambda a, **k: _sp.CompletedProcess(a, 1, "", "err"))
     with pytest.raises(SystemExit):
         bootstrap.env_apply(env, gen, None)
+
+
+def test_sanitize_copied_values_neutralizes_oidc():
+    """dev values 사본의 OIDC enabled/issuerUrl 은 중화한다 — 신 env 가 dev
+    Cognito 풀 토큰을 신뢰하는 교차환경 우회 방지."""
+    text = (
+        "adminApi:\n"
+        "  oidc:\n"
+        "    enabled: true\n"
+        "    issuerUrl: \"https://cognito-idp.ap-northeast-2.amazonaws.com/ap-northeast-2_ABC\"\n"
+        "    audience: \"\"\n"
+        "scheduler:\n"
+        "  enabled: true\n")
+    out = bootstrap._sanitize_copied_values(text)
+    assert "enabled: false" in out.split("oidc:")[1].split("\n")[1]
+    assert 'issuerUrl: ""' in out
+    assert "ap-northeast-2_ABC" not in out
+    # 다른 섹션의 enabled 는 건드리지 않는다
+    assert "scheduler:\n  enabled: true" in out

@@ -160,6 +160,23 @@ def scaffold_tfvars(example: str, *, env: str, region: str, account: str,
     return header + t
 
 
+def _sanitize_copied_values(text: str) -> str:
+    """dev env values 사본에서 환경 교차 값을 중화한다.
+
+    dev 파일엔 실제 Cognito issuer(`.../ap-northeast-2_xxx`)와 enabled=true 가
+    박혀 있다 — 그대로 복사하면 terraform output 이 없거나 OIDC 자동배선이
+    스킵되는 배포(domain=none)에서 신 env 가 **dev 풀의 토큰을 신뢰**한다.
+    주석 보존을 위해 텍스트 수준으로 고친다."""
+    # oidc: 블록의 enabled 만 끈다 — 다른 enabled: 키와 구분하기 위해
+    # `oidc:` 라인 뒤 첫 enabled 만 대상.
+    text = re.sub(r"(?m)(^\s+oidc:\s*\n\s*enabled:\s*)true",
+                  r"\g<1>false", text)
+    text = re.sub(r'(?m)^(\s+issuerUrl:\s*)"[^"]*"',
+                  r'\g<1>""  # scaffold 가 중화 — terraform output 이 apply 시 주입',
+                  text)
+    return text
+
+
 def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
     """deploy.tf_env_dir 또는 기본 경로의 env 디렉토리 — 없으면 템플릿에서 생성."""
     target = repo_root / env_dir(cfg)
@@ -237,8 +254,10 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
             chart_dir / f"values-eks-fargate-{cfg.env}.local.yaml").exists():
         src = chart_dir / "values-eks-fargate-dev.yaml"
         if src.exists():
-            vals_dst.write_text(src.read_text())
+            vals_dst.write_text(_sanitize_copied_values(src.read_text()))
             print(f"ⓘ env values 도 {src.name} 에서 복사했습니다: {vals_dst.name}\n"
+                  "  dev 의 OIDC(enabled/issuerUrl)는 중화했습니다 — 신 env 의 "
+                  "Cognito 는 terraform output 이 apply 시 주입합니다.\n"
                   "  adminBootstrap.emails 를 실제 운영자 이메일로 바꾸세요 — "
                   "그대로 두면 admin@example.com 사용자가 생성됩니다.",
                   file=sys.stderr)
