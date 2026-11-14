@@ -38,14 +38,34 @@ def _agent_name(outs: dict, env_name: str = "") -> str:
     return raw.replace("-", "_")
 
 
+def _git_sha(repo_root: Path | None) -> str:
+    """git HEAD short SHA — rebuild-image.sh 와 같은 태그 규약."""
+    if not repo_root:
+        return ""
+    try:
+        r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
+                           cwd=repo_root, capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() if r.returncode == 0 else ""
+    except OSError:
+        return ""
+
+
 def _env(outs: dict, meta: dict, migration_image: str,
          context: str = "", extras: dict | None = None,
-         env_name: str = "") -> dict[str, str]:
+         env_name: str = "", repo_root: Path | None = None) -> dict[str, str]:
     """terraform output → 프로비저너 env. Runtime 이름은 이름 패턴
     ([a-zA-Z][a-zA-Z0-9_]{0,47}) 때문에 하이픈 → 밑줄 정규화가 필요하다."""
     e = dict(os.environ)
     e["REGION"] = AGENTCORE_REGION
     e["AGENT_NAME"] = _agent_name(outs, env_name)
+    # 에이전트 이미지 태그 — latest 고정이면 Runtime 이 생성 시점 이미지에
+    # 고정돼 코드 변경이 apply 로 영영 재배포되지 않는다. SHA 태그를 기본으로
+    # 줘서 코드가 바뀌면 containerUri 도 바뀌게(update 경로가 수렴). 운영자가
+    # IMAGE_TAG 를 명시하면 그 값이 우선.
+    if "IMAGE_TAG" not in e:
+        sha = _git_sha(repo_root)
+        if sha:
+            e["IMAGE_TAG"] = sha
     if outs.get("chat_agent_ecr_url"):
         e["ECR_REPO"] = outs["chat_agent_ecr_url"]
     if outs.get("chat_agent_execution_role_arn"):
@@ -83,7 +103,8 @@ def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
     try:
         return subprocess.run(
             [sys.executable, str(script), sub],
-            env=_env(outs, meta or {}, migration_image, context, extras, env_name),
+            env=_env(outs, meta or {}, migration_image, context, extras, env_name,
+                     repo_root=repo_root),
             cwd=repo_root, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))

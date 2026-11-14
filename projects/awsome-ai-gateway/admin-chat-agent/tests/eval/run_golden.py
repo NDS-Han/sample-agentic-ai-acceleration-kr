@@ -73,9 +73,11 @@ def run_static(cases: list[dict]) -> list[dict]:
 
     VALID_TOOLS = {
         "ask_sql_specialist",
+        "ask_sql_verified",      # L3 실행기반 후보선택(§58) — _ORCH_TOOLS 등록 tool
         "ask_code_specialist",
         "ask_validator",
         "ask_viz_specialist",
+        "ask_report_specialist", # reports/ 다운로드 카드 — _ORCH_TOOLS 등록 tool
         "render_chart",
     }
     results = []

@@ -133,12 +133,14 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
 
-          // SSE 메시지 = '\n\n' 구분 — 완결 프레임을 먼저 다 뽑고 남은 꼬리만
-          // 상한 검사한다(한 read 에 프레임 여러 개가 와도 오탐 없이).
-          let idx;
-          while ((idx = buffer.indexOf('\n\n')) >= 0) {
-            const block = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
+          // SSE 프레임 경계 — 스펙상 빈 줄이며 LF·CRLF 모두 유효. '\n\n' 만 보면
+          // CRLF 로 정규화하는 프록시가 끼면 프레임이 영원히 안 갈려 버퍼 상한까지
+          // 누적된다 — /\r?\n\r?\n/ 로 두 형태 모두 자른다. 블록 내부 '\r' 은
+          // parseSseBlock 의 trim/JSON.parse(후행 공백 허용)가 흡수.
+          let m: RegExpMatchArray | null;
+          while ((m = buffer.match(/\r?\n\r?\n/)) !== null && m.index !== undefined) {
+            const block = buffer.slice(0, m.index);
+            buffer = buffer.slice(m.index + m[0].length);
             parseSseBlock(block, trackDone);
           }
           if (buffer.length > MAX_SSE_BUFFER_CHARS) {
@@ -239,10 +241,10 @@ export function useChatStream({ onEvent, onError }: ChatStreamOptions) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
-          let idx;
-          while ((idx = buffer.indexOf('\n\n')) >= 0) {
-            const block = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
+          let m: RegExpMatchArray | null;
+          while ((m = buffer.match(/\r?\n\r?\n/)) !== null && m.index !== undefined) {
+            const block = buffer.slice(0, m.index);
+            buffer = buffer.slice(m.index + m[0].length);
             parseSseBlock(block, trackDone);
           }
           if (buffer.length > MAX_SSE_BUFFER_CHARS) {

@@ -381,10 +381,50 @@ def _env_vars() -> dict:
     return env
 
 
+def _runtime_image_uri(ex: dict) -> str:
+    return ((ex.get("agentRuntimeArtifact") or {})
+            .get("containerConfiguration") or {}).get("containerUri", "")
+
+
+def _wait_ready(rid: str) -> None:
+    for _ in range(60):
+        st = _control().get_agent_runtime(agentRuntimeId=rid).get("status")
+        if st == "READY":
+            return
+        if st in ("CREATE_FAILED", "UPDATE_FAILED", "DELETING"):
+            fail(f"Runtime 상태 이상: {st}")
+        time.sleep(5)
+    fail("Runtime READY 대기 타임아웃")
+
+
 def ensure_runtime(dry: bool) -> str:
     ex = find_runtime()
     if ex:
         arn = ex["agentRuntimeArn"]
+        want = image_uri() if ECR_REPO else ""
+        current = _runtime_image_uri(ex)
+        if want and current != want:
+            # 에이전트 코드/태그 변경 — Runtime 은 생성 시점 이미지에 고정되므로
+            # 새 태그로 수렴한다. (재사용만 하면 코드 변경이 영영 안 올라감.)
+            if dry:
+                log(f"[dry-run] Runtime update: {current} → {want}")
+                return arn
+            ensure_image()
+            rid = ex["agentRuntimeId"]
+            _control().update_agent_runtime(
+                agentRuntimeId=rid,
+                agentRuntimeArtifact={
+                    "containerConfiguration": {"containerUri": want}},
+                roleArn=ROLE_ARN or ex.get("roleArn", ""),
+                networkConfiguration=ex.get("networkConfiguration")
+                    or {"networkMode": "PUBLIC"},
+                environmentVariables=_env_vars(),
+                description="admin-chat-agent BI assistant (NDS auto-provisioned)",
+            )
+            log(f"Runtime update 요청: {arn} ({current} → {want})")
+            _wait_ready(rid)
+            log("Runtime READY (updated)")
+            return arn
         log(f"Runtime 재사용: {arn} ({ex.get('status')})")
         return arn
     if dry:
@@ -411,16 +451,9 @@ def ensure_runtime(dry: bool) -> str:
     rid = r["agentRuntimeId"]
     log(f"Runtime created: {arn}")
     # READY 대기 — CREATING 상태로 admin-api 가 호출하면 실패한다.
-    for _ in range(60):
-        st = _control().get_agent_runtime(agentRuntimeId=rid).get("status")
-        if st == "READY":
-            log("Runtime READY")
-            return arn
-        if st in ("CREATE_FAILED", "DELETING"):
-            fail(f"Runtime 상태 이상: {st}")
-        time.sleep(5)
-    fail("Runtime READY 대기 타임아웃")
-    return ""
+    _wait_ready(rid)
+    log("Runtime READY")
+    return arn
 
 
 def teardown() -> None:

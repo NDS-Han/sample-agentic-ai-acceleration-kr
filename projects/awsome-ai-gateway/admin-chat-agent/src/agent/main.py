@@ -518,7 +518,21 @@ def ask_sql_verified(question: str, hints: dict | None = None) -> dict:
         )
         sql_text = str(env.get("sql", "")) if isinstance(env, dict) else ""
         exec_env = env if isinstance(env, dict) else {}
-        if sql_text.strip():
+        if not sql_text.strip():
+            # SQL 미생성(파싱 실패 포함) — LLM 주장 rows/stats/s3_uri 를
+            # 그대로 두면 전 후보 실패 시 candidates[0] 폴백이 stash 돼
+            # 지어낸 숫자가 reconcile grounding 집합에 유입된다(아래
+            # 실행실패 경로의 sanitize 와 동형 결함 — 빈-SQL 분기 누락).
+            exec_env = {
+                **exec_env,
+                "error": exec_env.get("error") or "no sql generated",
+                "rows": [],
+                "row_count": 0,
+                "columns": [],
+                "stats": None,
+                "s3_uri": None,
+            }
+        else:
             # ⚠️ 클러스터링은 반드시 **실제 실행 결과**로 한다 — SqlEnvelope.rows 는
             #    "최대 5행 sample" 이라 적힌 LLM 주장값이라, 그걸 해시하면 모델이
             #    같은 값을 지어내면 허위 합의(또는 별칭만 다른 false-split)가 된다.
