@@ -417,3 +417,13 @@ variable "alert_emails" {
   default     = []
   description = "managed overlay: SNS email subscriptions — pending until recipient confirms"
 }
+
+variable "alb_lb_dimensions" {
+  type    = list(string)
+  default = []
+}
+
+variable "alb_target_groups" {
+  type    = list(object({ lb = string, tg = string }))
+  default = []
+}

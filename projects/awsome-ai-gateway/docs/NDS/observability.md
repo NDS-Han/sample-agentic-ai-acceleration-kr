@@ -64,9 +64,10 @@ features:
 
 ### 안 만드는 것 (의도적)
 
-- **ALB 알람** — ALB dimension(LoadBalancer/TargetGroup suffix)이 AWS
-  Load Balancer Controller 가 생성 시점에 부여해 plan 시점에 알 수 없습니다.
-  ALB 헬스는 Prometheus 경로(후술) 또는 ALB access log 로 보완하세요.
+- **ALB 알람 (eks 자동)** — ALB dimension 은 배포 후 실측값이라 plan 시점에
+  알 수 없습니다. `deploy apply` 가 helm 배포 뒤 ingress 를 조회해 LB/TG
+  dimension 을 라이브 발견하고 gen var-file 로 `module.alerting` 에 주입해
+  자동 생성합니다 (§8-A). 첫 배포(아직 ALB 없음)는 다음 apply 에서 수렴.
 - **파드/앱 레벨 알람** — CrashLoop·restarts·executor 포화는 PrometheusRule
   + Alertmanager 계층의 몫입니다.
 - **빈 로그 그룹** — `log_shipping` 이 라우터 자체를 만들 때만 로그가 실제로
@@ -199,48 +200,41 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 - [ ] 알림 수신 채널·당번 체계 합의 — 알람이 울려도 보는 사람이 없으면 의미 없음
 - [ ] (선택) Alertmanager + PrometheusRule + persistent Prometheus 스토리지 —
       파드/앱 레벨 알림이 필요하면 (§8-B)
-- [ ] (선택) ALB 5xx/UnHealthyHost 알람 — dimension 실측 후 추가 (§8-A)
+- [ ] ALB 5xx/UnHealthyHost 알람 — `deploy apply` 가 ingress ALB 를 발견해
+      자동 생성 (첫 배포 직후엔 다음 apply 에서 수렴, §8-A)
 - [ ] (선택) 앱 에러율 알람 — `log_shipping` 켠 뒤 metric filter 경로 (§8-C)
 
 ## 8. 보류 작업 절차 (follow-up)
 
 기본 모듈 범위 밖인 세 가지 — 필요 시 아래 순서대로 붙입니다.
 
-### 8-A. ALB 알람 추가
+### 8-A. ALB 알람 — apply 시 자동 발견 (eks)
 
 ALB·TargetGroup 은 AWS Load Balancer Controller 가 배포 시 생성하고
-dimension(ARN suffix)을 그때 부여합니다 — plan 시점에 알 수 없어
-`module.alerting` 범위에서 제외된 유일한 알람입니다.
+dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 라이브
+발견해 자동으로 알람을 채웁니다:
 
-```bash
-# 1) dimension 실측 — lb ARN 의 app/<name>/<id>, tg ARN 의 targetgroup/<name>/<id>
-aws elbv2 describe-load-balancers --region <region> \
-  --query 'LoadBalancers[].{n:LoadBalancerName,dim:LoadBalancerArn}' --output table
-aws elbv2 describe-target-groups --region <region> \
-  --query 'TargetGroups[].{n:TargetGroupName,dim:TargetGroupArn}' --output table
+1. helm 배포 후 `kubectl get ingress -n <ns>` 로 ALB hostname 수집
+   (gateway·admin-ui·admin-api 3개 모두)
+2. `aws elbv2 describe-load-balancers` 에서 hostname 일치 + `application`
+   타입만 매칭 → LB dimension `app/<name>/<id>`
+3. LB ARN 각각 `describe-target-groups` 로 TG dimension
+   `targetgroup/<name>/<id>` 수집 (LB 당 1회 호출)
+4. `gen/<env>/alerts-dims.tfvars` 생성 → `module.alerting` 의
+   `alb_lb_dimensions` / `alb_target_groups` 변수로 주입
+5. 알람 2종 생성: ALB별 `HTTPCode_Target_5XX_Count ≥ 1`(5m×2),
+   TG별 `UnHealthyHostCount > 0`(1m×2) — actions 은 기존 alerting topic
 
-# 2) 알람 생성 — topic 은 기존 alerting topic 재사용
-TOPIC=$(cd deployment/terraform/environments/llm-gateway-<env> \
-  && terraform output -raw alerting_sns_topic_arn)
-aws cloudwatch put-metric-alarm --region <region> \
-  --alarm-name <project>-<env>-alb-target-5xx \
-  --namespace AWS/ApplicationELB --metric-name HTTPCode_Target_5XX_Count \
-  --dimensions Name=LoadBalancer,Value=app/<name>/<id> \
-  --statistic Sum --period 300 --evaluation-periods 2 --threshold 1 \
-  --comparison-operator GreaterThanOrEqualToThreshold \
-  --alarm-actions "$TOPIC" --ok-actions "$TOPIC"
-aws cloudwatch put-metric-alarm --region <region> \
-  --alarm-name <project>-<env>-alb-unhealthy \
-  --namespace AWS/ApplicationELB --metric-name UnHealthyHostCount \
-  --dimensions Name=LoadBalancer,Value=app/<name>/<id>,Name=TargetGroup,Value=targetgroup/<name>/<id> \
-  --statistic Average --period 60 --evaluation-periods 2 --threshold 0 \
-  --comparison-operator GreaterThanThreshold \
-  --alarm-actions "$TOPIC" --ok-actions "$TOPIC"
-```
+**수렴 계약**: 첫 배포 등 ALB 를 못 찾으면 var-file 을 만들지 않고
+`ⓘ alerting: ALB dimension 을 발견하지 못했습니다` 를 출력한 뒤 진행합니다 —
+알람 0개는 실패가 아니며, ALB 가 생긴 뒤 다음 `deploy apply` 가 자동으로
+채웁니다. 주입 var-file 은 apply 마다 재생성되므로 ALB 교체(id 변경)도
+자동 추적되고, env tfvars 에 사람이 둔 같은 키는 gen 파일이 덮습니다.
 
-terraform 으로 관리하려면 `module.alerting` 에 `alb_load_balancer_dimension`
-+ `alb_target_group_dimension` 변수를 추가하고 같은 `aws_cloudwatch_metric_alarm`
-리소스로 확장 — 실측값은 env tfvars 에 고정합니다.
+**수동 경로 (ecs/외부 ALB)**: eks 가 아니거나 발견이 불가하면 env tfvars 에
+직접 고정합니다 — `aws elbv2 describe-load-balancers`/`describe-target-groups`
+로 dimension 을 실측해 `alb_lb_dimensions = ["app/<name>/<id>"]`,
+`alb_target_groups = [{lb=..., tg="targetgroup/<name>/<id>"}]`.
 
 ### 8-B. Alertmanager + PrometheusRule (in-cluster 알림)
 

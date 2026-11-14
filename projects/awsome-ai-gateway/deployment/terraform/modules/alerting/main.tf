@@ -121,3 +121,47 @@ resource "aws_cloudwatch_metric_alarm" "cache_connections" {
   ok_actions          = [aws_sns_topic.alerts.arn]
   tags                = var.tags
 }
+
+# ------------------------------------------------------------------------------
+# ALB — dimension 은 배포 후 실측값 (eks: deploy apply 가 라이브 발견해 주입,
+# 기타: env tfvars 수동). 비어 있으면 알람 0개 — 리소스를 만들었다 부수지 않는다.
+# ------------------------------------------------------------------------------
+
+resource "aws_cloudwatch_metric_alarm" "alb_target_5xx" {
+  for_each            = toset(var.alb_lb_dimensions)
+  alarm_name          = "${var.project}-${var.environment}-${replace(each.value, "/", "-")}-5xx"
+  alarm_description   = "ALB ${each.value} target 5xx 발생"
+  namespace           = "AWS/ApplicationELB"
+  metric_name         = "HTTPCode_Target_5XX_Count"
+  dimensions          = { LoadBalancer = each.value }
+  statistic           = "Sum"
+  period              = 300
+  evaluation_periods  = 2
+  threshold           = 1
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+  tags                = var.tags
+}
+
+resource "aws_cloudwatch_metric_alarm" "alb_unhealthy" {
+  for_each          = { for i, p in var.alb_target_groups : p.tg => p }
+  alarm_name        = "${var.project}-${var.environment}-${replace(each.value.tg, "/", "-")}-unhealthy"
+  alarm_description = "TargetGroup ${each.value.tg} unhealthy host > 0"
+  namespace         = "AWS/ApplicationELB"
+  metric_name       = "UnHealthyHostCount"
+  dimensions = {
+    LoadBalancer = each.value.lb
+    TargetGroup  = each.value.tg
+  }
+  statistic           = "Average"
+  period              = 60
+  evaluation_periods  = 2
+  threshold           = 0
+  comparison_operator = "GreaterThanThreshold"
+  treat_missing_data  = "notBreaching"
+  alarm_actions       = [aws_sns_topic.alerts.arn]
+  ok_actions          = [aws_sns_topic.alerts.arn]
+  tags                = var.tags
+}

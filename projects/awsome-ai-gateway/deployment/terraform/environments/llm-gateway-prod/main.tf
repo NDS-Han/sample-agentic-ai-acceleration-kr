@@ -261,6 +261,8 @@ module "alerting" {
   aurora_instance_ids    = module.aurora.instance_identifiers
   elasticache_member_ids = module.elasticache.member_cluster_ids
   alert_emails           = var.alert_emails
+  alb_lb_dimensions      = var.alb_lb_dimensions
+  alb_target_groups      = var.alb_target_groups
 
   tags = var.tags
 }

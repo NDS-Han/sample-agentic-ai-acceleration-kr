@@ -738,11 +738,13 @@ received — an unchecked row here is a future incident.
       subscription, and `log_shipping` routes container logs to
       CloudWatch (eks). Email subscriptions need a manual confirm —
       verify they are ACTIVE, not PendingConfirmation
-      ([observability.md](../observability.md) §3). Pod/app-level and
-      ALB alerts are still unwired: in-cluster Alertmanager is
-      `enabled: false`, Prometheus retention 24h on emptyDir — enable
-      rules + receivers + persistent storage, or formally accept pull
-      monitoring
+      ([observability.md](../observability.md) §3). ALB 5xx/UnHealthyHost
+      alarms are auto-discovered by `deploy apply` (eks) — verify they
+      exist after the apply following ingress creation
+      (§8-A). Pod/app-level alerts are still unwired: in-cluster
+      Alertmanager is `enabled: false`, Prometheus retention 24h on
+      emptyDir — enable rules + receivers + persistent storage, or
+      formally accept pull monitoring
 - [ ] **Notification channel** — `features.notifications.provider`
       (ses/smtp/internal_api): sender address ownership, who receives
       budget-alert emails

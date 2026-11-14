@@ -346,7 +346,7 @@ def _apply_harness(monkeypatch, tmp_path):
     monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
     monkeypatch.setattr(eks_apply, "tf_outputs", lambda d: {})
     monkeypatch.setattr(eks_apply, "ensure_infra",
-                        lambda cfg, gen, env, outs: outs)
+                        lambda cfg, gen, env, outs, context="": outs)
     monkeypatch.setattr(eks_apply, "load_meta", lambda g, r: {
         "release": "r", "namespace": "n", "chart": "c",
         "env_dir": "env", "values_layers": []})
@@ -499,3 +499,141 @@ def test_infra_missing_alerting_output():
     assert eks_apply._infra_missing(cfg, {}) == ["alerting(SNS topic/alarms)"]
     assert eks_apply._infra_missing(
         cfg, {"alerting_sns_topic_arn": "arn:aws:sns:ap-northeast-2:1:t"}) == []
+
+
+# ==============================================================================
+# ALB dimension 라이브 발견 — alerting.enabled 일 때 apply 가 ingress→elbv2 를
+# 조회해 gen var-file 로 module.alerting 에 주입한다 (첫 배포는 수렴형).
+# ==============================================================================
+
+_ARN_LB = ("arn:aws:elasticloadbalancing:ap-south-1:123456789012:"
+           "loadbalancer/app/k8s-lb-a/aaa111")
+_ARN_TG = ("arn:aws:elasticloadbalancing:ap-south-1:123456789012:"
+           "targetgroup/k8s-tg-a/bbb222")
+
+
+def _alert_cfg():
+    return _cfg(features={"notifications": {"provider": "mock"},
+                          "alerting": {"enabled": True}})
+
+
+def _discover_fake(monkeypatch, *, kubectl_rc=0, hostnames="alb.example.com",
+                   lbs=None, tgs=None):
+    """kubectl ingress + aws elbv2 응답 fake — 호출 argv 순서로 분기."""
+    calls = []
+
+    def fake(argv, **k):
+        calls.append(argv)
+        if argv[0] == "kubectl":
+            return subprocess.CompletedProcess(argv, kubectl_rc, hostnames, "")
+        if "describe-load-balancers" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"LoadBalancers": lbs or []}), "")
+        if "describe-target-groups" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"TargetGroups": tgs or []}), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    return calls
+
+
+def test_alb_dims_disabled_no_calls(monkeypatch):
+    calls = _discover_fake(monkeypatch)
+    cfg = _cfg(features={"notifications": {"provider": "mock"}})
+    assert eks_apply._discover_alb_dims(cfg) == ([], [])
+    assert calls == []
+
+
+def test_alb_dims_kubectl_failure_converges_empty(monkeypatch):
+    """첫 배포/kubectl 실패 — 빈 결과로 수렴, 예외 없음."""
+    _discover_fake(monkeypatch, kubectl_rc=1)
+    assert eks_apply._discover_alb_dims(_alert_cfg()) == ([], [])
+
+
+def test_alb_dims_no_ingress_hostname_empty(monkeypatch):
+    calls = _discover_fake(monkeypatch, hostnames="")
+    assert eks_apply._discover_alb_dims(_alert_cfg()) == ([], [])
+    assert not any("describe-load-balancers" in a for a in calls)
+
+
+def test_alb_dims_resolves_lb_and_tg(monkeypatch):
+    lbs = [{"DNSName": "alb.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB},
+           {"DNSName": "other.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB.replace("aaa111", "zzz999")},
+           {"DNSName": "alb.example.com", "Type": "network",
+            "LoadBalancerArn": _ARN_LB + "-nlb"}]
+    tgs = [{"TargetGroupArn": _ARN_TG}]
+    calls = _discover_fake(monkeypatch, lbs=lbs, tgs=tgs)
+    lb_dims, tg_pairs = eks_apply._discover_alb_dims(_alert_cfg())
+    # hostname 일치 + application 타입만 — NLB/다른 ALB 제외
+    assert lb_dims == ["app/k8s-lb-a/aaa111"]
+    assert tg_pairs == [{"lb": "app/k8s-lb-a/aaa111",
+                         "tg": "targetgroup/k8s-tg-a/bbb222"}]
+    # describe-target-groups 는 LB ARN 당 1회 — 발견된 LB 만
+    tg_calls = [a for a in calls if "describe-target-groups" in a]
+    assert len(tg_calls) == 1
+    assert _ARN_LB in tg_calls[0]
+
+
+def test_alerting_var_args_writes_tfvars(monkeypatch, tmp_path):
+    lbs = [{"DNSName": "alb.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB}]
+    tgs = [{"TargetGroupArn": _ARN_TG}]
+    _discover_fake(monkeypatch, lbs=lbs, tgs=tgs)
+    args = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
+    f = tmp_path / "alerts-dims.tfvars"
+    assert args == [f"-var-file={f.resolve()}"]
+    body = f.read_text()
+    assert '"app/k8s-lb-a/aaa111"' in body
+    assert '"lb": "app/k8s-lb-a/aaa111"' in body
+    assert '"tg": "targetgroup/k8s-tg-a/bbb222"' in body
+
+
+def test_alerting_var_args_empty_no_file(monkeypatch, tmp_path, capsys):
+    """ALB 미발견(첫 배포) — var-file 미생성 + 수렴 안내. 다음 apply 가 채운다."""
+    _discover_fake(monkeypatch, kubectl_rc=1)
+    assert eks_apply._alerting_var_args(_alert_cfg(), tmp_path) == []
+    assert not (tmp_path / "alerts-dims.tfvars").exists()
+    assert "다음 apply" in capsys.readouterr().err
+
+
+def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
+    """alerting target plan 에 발견 var-file 이 붙는다 — 수동 편집 없이 관리."""
+    calls = []
+    monkeypatch.setattr(eks_apply, "_run", lambda argv, **k: calls.append(argv))
+    lbs = [{"DNSName": "alb.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB}]
+    tf_calls = []
+    discover = _discover_fake(monkeypatch, lbs=lbs,
+                              tgs=[{"TargetGroupArn": _ARN_TG}])
+    # terraform init/plan/show 도 같은 _run_quiet 을 쓰므로 분기 추가 —
+    # discover fake 는 교체 후엔 호출되지 않으므로 직접 재구현한다
+    lbs_json = json.dumps({"LoadBalancers": lbs})
+    tgs_json = json.dumps({"TargetGroups": [{"TargetGroupArn": _ARN_TG}]})
+
+    def fake2(argv, **k):
+        if argv[0] == "terraform":
+            tf_calls.append(argv)
+            if "show" in argv:
+                return subprocess.CompletedProcess(
+                    argv, 0, json.dumps({"resource_changes": [
+                        _managed_change(
+                            "module.alerting.aws_sns_topic.alerts[0]")]}), "")
+            if "plan" in argv:
+                rc = 2 if "-detailed-exitcode" in argv else 0
+                return subprocess.CompletedProcess(argv, rc, "Plan", "")
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        if "describe-load-balancers" in argv:
+            return subprocess.CompletedProcess(argv, 0, lbs_json, "")
+        if "describe-target-groups" in argv:
+            return subprocess.CompletedProcess(argv, 0, tgs_json, "")
+        return subprocess.CompletedProcess(argv, 0, "alb.example.com", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake2)
+    monkeypatch.setattr(eks_apply, "tf_outputs",
+                        lambda d: {"alerting_sns_topic_arn": "arn:t"})
+    (tmp_path / "terraform.tfvars").write_text("enable_alerting = true\n")
+    eks_apply.ensure_infra(_alert_cfg(), tmp_path, _env_dir(tmp_path), {})
+    plan_argv = [a for a in tf_calls if "plan" in a][0]
+    assert "-target=module.alerting" in plan_argv
+    assert any("alerts-dims.tfvars" in a for a in plan_argv)
