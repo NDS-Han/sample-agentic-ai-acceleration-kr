@@ -72,8 +72,13 @@ agent 가 부르는 것은 Lambda invoke·Bedrock·S3 같은 공개 AWS API 뿐�
 DB 접속은 VPC 부착 query_db Lambda 가 대신한다.
 
 > Runtime 리전은 `CHAT_AGENT_REGION` env(기본 `ap-northeast-2` — admin-api
-> 코드 기본값과 동일). tfvars 의 `chat_agent_region` 변수(IRSA 스코프용)와
-> 반드시 같은 값이어야 한다 — 다르게 쓰려면 둘 다 바꿀 것.
+> 코드 기본값과 동일). **Runtime 은 ECR 이미지와 같은 리전이어야 한다** —
+> `create_agent_runtime` 이 ECR URI 의 리전과 다르면 ValidationException 으로
+> 거부한다. 즉 `CHAT_AGENT_REGION` 은 배포 리전(ECR)과 같게 두는 것이 기본
+> 안전값이며, tfvars 의 `chat_agent_region` 변수(IRSA 스코프용)도 같은
+> `CHAT_AGENT_REGION` env 에서 자동 발산되므로 별도 손댈 필요는 없다.
+> Runtime 을 ECR 과 다른 리전에 두려면 이미지를 해당 리전의 ECR 로
+> 복제(replication 또는 재푸시)해야 한다.
 
 ### 3. chat_reader DB 비밀번호 (프로비저너 자동)
 

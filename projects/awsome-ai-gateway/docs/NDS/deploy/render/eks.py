@@ -596,8 +596,9 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             "bi_insight: managed overlay 가 module.agentcore_runtime 을 "
             "프로비저닝하고, apply 가 AgentCore Runtime 을 멱등 생성해 ARN 을 "
             "admin-api env 로 주입합니다 (provision_agentcore_chatagent.py — "
-            "web_search 와 동일 패턴). chat_reader DB 비밀번호는 terraform "
-            "밖이므로 docs/NDS/chat-agent.md §2 절차로 별도 설정하십시오.")
+            "web_search 와 동일 패턴). chat_reader DB 비밀번호는 in-cluster "
+            "pod 가 자동 동기화합니다. Runtime 리전은 ECR 과 같아야 합니다 — "
+            "CHAT_AGENT_REGION 을 배포 리전과 정렬하십시오.")
     if not env_vals:
         notes.append(f"env overlay(values-eks-fargate-{cfg.env}.yaml)를 못 찾았습니다 — "
                      "차트 기본값 + 이 오버레이만으로 배포됩니다. 기존 배포를 업데이트하는 "

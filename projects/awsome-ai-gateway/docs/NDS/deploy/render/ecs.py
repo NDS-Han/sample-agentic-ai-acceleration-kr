@@ -310,7 +310,8 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "module.agentcore_runtime+chat-reader-pw task def 를 만들고 "
             "provision_agentcore_chatagent.py 로 Runtime·비밀번호를 멱등 "
             "동기화합니다 — ARN 은 agentcore_runtime_arn tfvars 로 기록됩니다 "
-            "(boto3 agentcore/ecs/secretsmanager 권한 필요).")
+            "(boto3 agentcore/ecs/secretsmanager 권한 필요. Runtime 리전은 "
+            "ECR 과 같아야 하므로 CHAT_AGENT_REGION 을 배포 리전과 정렬하십시오).")
     if cfg.domain.mode == "cloudfront-temp":
         notes.append(
             "domain.mode=cloudfront-temp: ecs 경로에 CloudFront 모듈이 없어 domain=none "
