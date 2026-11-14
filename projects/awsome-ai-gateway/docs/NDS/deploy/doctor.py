@@ -186,7 +186,8 @@ def _tf_drift_plan_argv(gen_dir: Path) -> list[str]:
     """apply 와 동일하게 managed overlay(gen/<env>/eks/terraform.tfvars)를
     -var-file 로 준다 — NDS 소유 키(enable_notification_ses 등)를 빠뜨리면
     env tfvars 기본값으로 평가돼 선언된 모듈이 destroy 로 오진된다."""
-    argv = ["terraform", "plan", "-detailed-exitcode", "-input=false", "-no-color"]
+    argv = ["terraform", "plan", "-detailed-exitcode", "-input=false",
+            "-no-color", "-lock=false"]
     var_file = gen_dir / "eks" / "terraform.tfvars"
     if var_file.exists():
         argv.append(f"-var-file={var_file}")

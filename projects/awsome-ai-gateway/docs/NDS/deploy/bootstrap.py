@@ -231,6 +231,11 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
     if managed.exists():
         # cwd 는 env_dir 라 상대경로는 절대경로로 변환해 넘긴다
         var_args.append(f"-var-file={managed.resolve()}")  # 뒤에 오는 -var-file 이 이긴다
+    # 기존 env 재실행 시 발견된 ALB dimension 도 넘긴다 — 빠뜨리면 alb_*=[]
+    # 로 평가돼 이미 만든 ALB 알람이 무경고 삭제된다 (bootstrap 은 plan 검증 없음).
+    alb_dims = gen_dir / "alerts-dims.tfvars"
+    if alb_dims.exists():
+        var_args.append(f"-var-file={alb_dims.resolve()}")
     _run(["terraform", "apply", "-auto-approve", "-input=false", *var_args],
          cwd=env_dir_path)
     return eks_apply.tf_outputs(env_dir_path)

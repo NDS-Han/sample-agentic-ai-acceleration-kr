@@ -214,13 +214,16 @@ ALB·TargetGroup 은 AWS Load Balancer Controller 가 배포 시 생성하고
 dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 라이브
 발견해 자동으로 알람을 채웁니다:
 
-1. helm 배포 후 `kubectl get ingress -n <ns>` 로 ALB hostname 수집
-   (gateway·admin-ui·admin-api 3개 모두)
+1. apply 시점에 `kubectl get ingress -n <ns>` 로 우리 차트의 ingress
+   (`-gateway`/`-admin-ui`/`-admin-api` 접미만) ALB hostname 수집 —
+   ensure_infra 가 helm 보다 먼저 실행되므로 "이전 배포의 ingress" 기준.
+   최초 배포는 항상 미발견 → 다음 apply 에서 수렴
 2. `aws elbv2 describe-load-balancers` 에서 hostname 일치 + `application`
    타입만 매칭 → LB dimension `app/<name>/<id>`
 3. LB ARN 각각 `describe-target-groups` 로 TG dimension
-   `targetgroup/<name>/<id>` 수집 (LB 당 1회 호출)
-4. `gen/<env>/alerts-dims.tfvars` 생성 → `module.alerting` 의
+   `targetgroup/<name>/<id>` 수집 (LB 당 1회 호출 — 실패 시 전체 발견
+   실패로 처리해 부분 dims 주입 방지)
+4. `gen/<env>/eks/alerts-dims.tfvars` 생성 → `module.alerting` 의
    `alb_lb_dimensions` / `alb_target_groups` 변수로 주입
 5. 알람 2종 생성: ALB별 `HTTPCode_Target_5XX_Count ≥ 1`(5m×2),
    TG별 `UnHealthyHostCount > 0`(1m×2) — actions 은 기존 alerting topic
@@ -230,13 +233,19 @@ dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 �
 - **첫 배포** (발견 파일 없음 + 발견 실패) — `⚠ alerting: ALB dimension 을
   발견하지 못했습니다 — ... deploy apply 를 한 번 더 실행해야 알람이
   만들어집니다` 를 출력하고 진행. ingress ALB 가 뜬 뒤 apply 한 번 더.
-- **발견 실패 + 이전 발견 파일 존재** — 일시적 kubectl/AWS 오류로 dims 가
-  [] 로 평가되면 기존 알람이 destroy-plan 에 잡혀 apply 가 중단되므로,
-  이전 `alerts-dims.tfvars` 를 **stale 경고와 함께 재사용**합니다 (알람 유지).
-  ALB 를 실제로 교체·삭제했다면 파일을 지우고 재실행하세요.
+- **발견 실패 + 이전 발견 파일 존재** — 이전 `alerts-dims.tfvars` 를
+  **stale 경고와 함께 재사용**합니다. 안 하면 일시적 kubectl/AWS 오류로
+  dims 가 [] 로 평가돼 기존 알람이 destroy-plan 에 잡힙니다. stale 상태는
+  다음 apply 의 발견 성공으로 자동 정상화됩니다 (doctor 는 같은 파일을
+  재사용해 stale 을 감지하지 못합니다 — apply 경고가 유일한 신호).
+- **발견 실패 + 파일 부재** (신규 머신/CI, gen 삭제) — var-file 없이
+  진행해 기존 알람이 있으면 destroy-plan 이 뜨는데, **이번 실행에 라이브
+  발견이 성공한 경우에만** ALB 알람 delete 를 가드가 허용하므로 apply 가
+  안전하게 중단됩니다. kubectl/AWS 접근을 복구하고 재실행하세요 —
+  알람을 잃는 것보다 배포가 멈추는 쪽을 택했습니다.
 - **ALB 교체 (id 변경)** — 신 dims 발견 → 신 알람 create + 구 알람 delete
-  가 plan 에 뜹니다. ALB 알람의 destroy 는 managed-plan 파괴 가드에서
-  **이 두 리소스만 예외**로 허용됩니다 (dimension 교체가 정상 수명주기).
+  가 plan 에 뜨고, 발견 성공 run 이므로 가드가 허용합니다 (dimension
+  교체가 정상 수명주기).
 - `deploy doctor` 는 drift 검사에 같은 발견 파일을 읽기 전용으로 재사용 —
   없으면 존재하는 ALB 알람이 destroy drift 로 오진됩니다.
 

@@ -517,7 +517,8 @@ def _alert_cfg():
                           "alerting": {"enabled": True}})
 
 
-def _discover_fake(monkeypatch, *, kubectl_rc=0, hostnames="alb.example.com",
+def _discover_fake(monkeypatch, *, kubectl_rc=0,
+                   hostnames="llm-gateway-gateway alb.example.com\n",
                    lbs=None, tgs=None):
     """kubectl ingress + aws elbv2 응답 fake — 호출 argv 순서로 분기."""
     calls = []
@@ -582,9 +583,10 @@ def test_alerting_var_args_writes_tfvars(monkeypatch, tmp_path):
             "LoadBalancerArn": _ARN_LB}]
     tgs = [{"TargetGroupArn": _ARN_TG}]
     _discover_fake(monkeypatch, lbs=lbs, tgs=tgs)
-    args = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
+    args, fresh = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
     f = tmp_path / "alerts-dims.tfvars"
     assert args == [f"-var-file={f.resolve()}"]
+    assert fresh is True
     body = f.read_text()
     assert '"app/k8s-lb-a/aaa111"' in body
     assert '"lb": "app/k8s-lb-a/aaa111"' in body
@@ -594,7 +596,8 @@ def test_alerting_var_args_writes_tfvars(monkeypatch, tmp_path):
 def test_alerting_var_args_empty_no_file(monkeypatch, tmp_path, capsys):
     """ALB 미발견(첫 배포) — var-file 미생성 + 수렴 안내. 다음 apply 가 채운다."""
     _discover_fake(monkeypatch, kubectl_rc=1)
-    assert eks_apply._alerting_var_args(_alert_cfg(), tmp_path) == []
+    args, fresh = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
+    assert args == [] and fresh is False
     assert not (tmp_path / "alerts-dims.tfvars").exists()
     err = capsys.readouterr().err
     assert "deploy apply` 를 한 번 더" in err
@@ -622,7 +625,7 @@ def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
                 return subprocess.CompletedProcess(
                     argv, 0, json.dumps({"resource_changes": [
                         _managed_change(
-                            "module.alerting.aws_sns_topic.alerts[0]")]}), "")
+                            "module.alerting[0].aws_sns_topic.alerts")]}), "")
             if "plan" in argv:
                 rc = 2 if "-detailed-exitcode" in argv else 0
                 return subprocess.CompletedProcess(argv, rc, "Plan", "")
@@ -631,7 +634,8 @@ def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(argv, 0, lbs_json, "")
         if "describe-target-groups" in argv:
             return subprocess.CompletedProcess(argv, 0, tgs_json, "")
-        return subprocess.CompletedProcess(argv, 0, "alb.example.com", "")
+        return subprocess.CompletedProcess(
+            argv, 0, "llm-gateway-gateway alb.example.com\n", "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake2)
     monkeypatch.setattr(eks_apply, "tf_outputs",
                         lambda d: {"alerting_sns_topic_arn": "arn:t"})
@@ -660,8 +664,9 @@ def test_alerting_var_args_stale_reuse(monkeypatch, tmp_path, capsys):
     _discover_fake(monkeypatch, kubectl_rc=1)
     f = tmp_path / "alerts-dims.tfvars"
     f.write_text('alb_lb_dimensions = ["app/old/1"]\n')
-    args = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
+    args, fresh = eks_apply._alerting_var_args(_alert_cfg(), tmp_path)
     assert args == [f"-var-file={f.resolve()}"]
+    assert fresh is False  # stale 재사용은 destroy 허용이 아니다
     assert "재사용" in capsys.readouterr().err
     eks_apply._ALB_DIMS_CACHE.clear()
 
@@ -691,19 +696,22 @@ def test_alb_dims_malformed_arn_skipped(monkeypatch):
 def test_managed_plan_allows_alb_alarm_destroy(tmp_path, monkeypatch):
     """ALB id 변경 → 신 dims 발견 → plan 에 구 알람 delete. 이 리소스는
     허용 — 안 하면 ALB 교체 때마다 apply 가 영구 블록."""
+    # 모듈이 count 라 실제 plan 주소는 module.alerting[0].... — [0] 없는
+    # 주소로 테스트하면 화이트리스트가 실전에서 발화 안 해도 통과한다
     (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
-        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
                         "alb_target_5xx[\"app/old/1\"]", ["delete"]),
-        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
                         "alb_unhealthy[\"targetgroup/x/1\"]", ["delete"]),
-        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
                         "alb_target_5xx[\"app/new/2\"]", ["create"]),
     ]}))
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda a, **k: subprocess.CompletedProcess(
                             a, 0, (tmp_path / "plan.json").read_text(), ""))
     bad, changes = eks_apply._inspect_managed_plan(
-        tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"],
+        allow_alb_destroy=True)
     assert bad == []
     assert len(changes) == 3
 
@@ -711,7 +719,7 @@ def test_managed_plan_allows_alb_alarm_destroy(tmp_path, monkeypatch):
 def test_managed_plan_still_blocks_other_alarm_destroy(tmp_path, monkeypatch):
     """화이트리스트는 ALB 알람뿐 — cache/aurora 알람 destroy 는 여전히 차단."""
     (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
-        _managed_change("module.alerting.aws_cloudwatch_metric_alarm."
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
                         "cache_cpu[\"c1\"]", ["delete"]),
     ]}))
     monkeypatch.setattr(eks_apply, "_run_quiet",
@@ -734,3 +742,83 @@ def test_doctor_drift_includes_alb_dims_file(tmp_path):
     var_files = [a for a in argv if a.startswith("-var-file=")]
     assert any("terraform.tfvars" in v for v in var_files)
     assert any("alerts-dims.tfvars" in v for v in var_files)
+
+
+def test_alb_dims_tg_describe_failure_is_whole_failure(monkeypatch):
+    """TG 조회 실패는 부분이 아니라 전체 실패 — 부분 dims 로 쓰면 TG 알람이
+    destroy-plan 에 잡힌다. 실패 → stale 재사용 경로로 보낸다."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+    def fake(argv, **k):
+        if "describe-target-groups" in argv:
+            return subprocess.CompletedProcess(argv, 1, "", "throttled")
+        if "describe-load-balancers" in argv:
+            return subprocess.CompletedProcess(argv, 0, json.dumps(
+                {"LoadBalancers": [{"DNSName": "alb.example.com",
+                                    "Type": "application",
+                                    "LoadBalancerArn": _ARN_LB}]}), "")
+        return subprocess.CompletedProcess(
+            argv, 0, "llm-gateway-gateway alb.example.com\n", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    lb_dims, tg_pairs, note = eks_apply._discover_alb_dims(_alert_cfg())
+    assert (lb_dims, tg_pairs) == ([], [])
+    assert "describe-target-groups" in note
+    eks_apply._ALB_DIMS_CACHE.clear()
+
+
+def test_managed_plan_blocks_alb_destroy_when_discovery_failed(tmp_path, monkeypatch):
+    """F1 회귀 — 발견 실패(allow_alb_destroy=False) 상태의 alb 알람
+    delete 는 차단된다. 파일 부재+기존 알람 존재 시 전량 삭제가 자동
+    적용되는 것을 막는다."""
+    (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
+                        "alb_target_5xx[\"app/old/1\"]", ["delete"]),
+    ]}))
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: subprocess.CompletedProcess(
+                            a, 0, (tmp_path / "plan.json").read_text(), ""))
+    bad, _ = eks_apply._inspect_managed_plan(
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"],
+        allow_alb_destroy=False)
+    assert len(bad) == 1 and "파괴적 변경" in bad[0]
+
+
+def test_managed_plan_allows_email_sub_delete(tmp_path, monkeypatch):
+    """yaml emails 축소는 선언된 의도 — 구독 delete 는 허용 (F3 회귀)."""
+    (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
+        _managed_change("module.alerting[0].aws_sns_topic_subscription."
+                        "email[\"gone@x.com\"]", ["delete"]),
+    ]}))
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: subprocess.CompletedProcess(
+                            a, 0, (tmp_path / "plan.json").read_text(), ""))
+    bad, changes = eks_apply._inspect_managed_plan(
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
+    assert bad == [] and len(changes) == 1
+
+
+def test_alb_dims_filters_foreign_ingress(monkeypatch):
+    """F4 — 네임스페이스 공유 시 차트 소유가 아닌 ingress 의 ALB 는 제외."""
+    eks_apply._ALB_DIMS_CACHE.clear()
+    lbs = [{"DNSName": "ours.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB},
+           {"DNSName": "grafana.example.com", "Type": "application",
+            "LoadBalancerArn": _ARN_LB.replace("aaa111", "ccc333")}]
+
+    def fake(argv, **k):
+        if argv[0] == "kubectl":
+            out = ("llm-gateway-gateway ours.example.com\n"
+                   "grafana grafana.example.com\n"
+                   "llm-gateway-admin-ui \n")  # hostname 미할당 — 스킵
+            return subprocess.CompletedProcess(argv, 0, out, "")
+        if "describe-load-balancers" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"LoadBalancers": lbs}), "")
+        if "describe-target-groups" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"TargetGroups": [{"TargetGroupArn": _ARN_TG}]}), "")
+        return subprocess.CompletedProcess(argv, 0, "", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
+    assert lb_dims == ["app/k8s-lb-a/aaa111"]  # grafana ALB 제외
+    eks_apply._ALB_DIMS_CACHE.clear()
