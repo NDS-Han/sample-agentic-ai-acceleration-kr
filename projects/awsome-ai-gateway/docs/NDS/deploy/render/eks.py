@@ -417,6 +417,23 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         lines.append('chat_agent_region = "{}"'.format(
             os.environ.get("CHAT_AGENT_REGION") or cfg.aws.region))
     inf = cfg.infra
+    # Fargate profile·IRSA serviceaccount 스코프는 application_namespace 를
+    # 따른다 — deploy.namespace 를 바꾸면 여기가 어긋나 파드가 스케줄되지
+    # 못한다. helm 이 가는 네임스페이스로 항상 정렬한다.
+    lines.append(f'application_namespace = "{cfg.deploy.namespace}"')
+    if env_dir:
+        try:
+            from .common import tfvars_clean
+            _et = tfvars_clean((env_dir / "terraform.tfvars").read_text())
+            _m = re.search(r'(?m)^\s*application_namespace\s*=\s*"([^"]+)"', _et)
+            if _m and _m.group(1) != cfg.deploy.namespace:
+                print(f"⚠ env terraform.tfvars 의 application_namespace="
+                      f"{_m.group(1)} — managed overlay 가 deploy.namespace="
+                      f"{cfg.deploy.namespace} 로 덮어씁니다 (Fargate/IRSA "
+                      f"정렬). env 측 값을 바꾸려면 gateway.yaml 도 갱신하세요",
+                      file=sys.stderr)
+        except OSError:
+            pass
     if inf.vpc_cidr:
         lines.append(f'vpc_cidr = "{inf.vpc_cidr}"')
     if inf.azs:

@@ -966,3 +966,80 @@ def test_capture_eks_scalar_alert_emails(tmp_path, monkeypatch):
     ae = tv["alert_emails"]
     emails = [str(e) for e in (ae if isinstance(ae, list) else [ae])]
     assert emails == ["ops@example.com"]
+
+
+def test_ensure_cluster_secret_store_creates_and_skips(monkeypatch, tmp_path):
+    """terraform 은 ESO 만 설치 — ClusterSecretStore 는 deploy 가 보장한다."""
+    from deploy import eks_apply
+    import subprocess as _sp
+    def _rc(n):
+        return _sp.CompletedProcess([], n, "", "")
+    calls = []
+    got_ns = {"yes": True}
+    got_store = {"yes": False}
+    applied = []
+
+    def fake_quiet(argv, **kw):
+        calls.append(argv)
+        if "ns" in argv and "external-secrets" in argv:
+            return _rc(0) if got_ns["yes"] else _rc(1)
+        if "clustersecretstore" in argv:
+            return _rc(0) if got_store["yes"] else _rc(1)
+        return _rc(0)
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: fake_quiet(a, **k))
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda argv, **k: applied.append(k.get("input", "")) or _rc(0))
+
+    vals = tmp_path / "v.yaml"
+    vals.write_text("externalSecrets:\n  secretStoreRef:\n    name: my-store\n")
+    meta = {"values_layers": [str(vals)]}
+    eks_apply.ensure_cluster_secret_store(meta, "us-west-2", "", tmp_path)
+    assert applied and "name: my-store" in applied[-1]
+    assert "region: us-west-2" in applied[-1]
+
+    # 이미 있으면 apply 안 함
+    applied.clear(); got_store["yes"] = True
+    eks_apply.ensure_cluster_secret_store(meta, "r", "", tmp_path)
+    assert applied == []
+
+    # ESO 네임스페이스 없음 → 조용히 생략
+    got_ns["yes"] = False; got_store["yes"] = False; applied.clear()
+    eks_apply.ensure_cluster_secret_store(meta, "r", "", tmp_path)
+    assert applied == []
+
+    # context 전파
+    got_ns["yes"] = True; calls.clear()
+    eks_apply.ensure_cluster_secret_store(meta, "r", "prod-ctx", tmp_path)
+    assert all("--kube-context" in c for c in calls)
+
+
+def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):
+    """deploy.namespace 변경 시 Fargate/IRSA 가 따라가야 한다 — overlay 에
+    application_namespace 를 항상 방출."""
+    from deploy.render import eks as R
+    # render 의 overlay 생성 경로를 직접 찾기보다, 결과 파일을 확인한다
+    import yaml as _y
+    monkeypatch.setattr(R, "REPO_ROOT", tmp_path)
+    # 최소 차트/env 구조
+    (tmp_path / "deployment/charts/llm-gateway").mkdir(parents=True)
+    (tmp_path / "deployment/charts/llm-gateway/values.yaml").write_text("x: 1\n")
+    vals = tmp_path / "deployment/charts/llm-gateway/values-eks-fargate-stg.yaml"
+    vals.write_text("adminApi: {}\n")
+    env = tmp_path / "deployment/terraform/environments/llm-gateway-stg"
+    env.mkdir(parents=True)
+    (env / "terraform.tfvars").write_text('environment = "stg"\n')
+    from deploy import schema
+    cfg = schema.from_dict({
+        "version": 1, "env": "stg",
+        "aws": {"region": "ap-northeast-2", "account_id": "1"},
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "namespace": "custom-ns"},
+        "features": {"notifications": {"provider": "mock"}},
+        "images": {"tag": "v1"}})
+    out = tmp_path / "gen/stg/eks"
+    R.render(cfg, out)
+    tfvars = (out / "terraform.tfvars").read_text() if (out / "terraform.tfvars").exists() \
+        else (out / "managed.tfvars").read_text()
+    assert 'application_namespace = "custom-ns"' in tfvars

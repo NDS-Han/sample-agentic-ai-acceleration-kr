@@ -269,6 +269,70 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     return args
 
 
+def ensure_cluster_secret_store(meta: dict, region: str, context: str,
+                                repo_root: Path) -> None:
+    """ESO 가 참조하는 ClusterSecretStore 를 보장한다 (멱등).
+
+    terraform 은 external-secrets operator 만 설치하고 store 는 만들지 않는다 —
+    legacy install-eks.sh 가 kubectl apply 로 생성하던 계약을 이관한다.
+    store 이름은 gen values.yaml 의 externalSecrets.secretStoreRef.name,
+    없으면 차트 기본값(aws-secrets-manager)."""
+    name = "aws-secrets-manager"
+    for layer in reversed(meta.get("values_layers") or []):
+        lp = Path(layer)
+        lp = lp if lp.is_absolute() else repo_root / lp
+        try:
+            vals = yaml.safe_load(lp.read_text()) or {}
+            name = str(((vals.get("externalSecrets") or {})
+                        .get("secretStoreRef") or {}).get("name") or name)
+            break
+        except (OSError, yaml.YAMLError):
+            continue
+    base = ["kubectl"] + (["--kube-context", context] if context else [])
+    if _run_quiet(base + ["get", "ns", "external-secrets"],
+                  timeout=15).returncode != 0:
+        print("ⓘ external-secrets 네임스페이스 없음 — ClusterSecretStore "
+              "보장 생략 (env terraform 이 ESO 를 설치하지 않은 구성)",
+              file=sys.stderr)
+        return
+    # ESO pod 준비 대기 — Fargate 콜드스타트로 수 분 걸릴 수 있다. 실패해도
+    # apply 는 시도한다 (CRD 는 이미 등록됐을 수 있음).
+    _run_quiet(base + ["wait", "--for=condition=Ready", "pods",
+                       "-l", "app.kubernetes.io/name=external-secrets",
+                       "-n", "external-secrets", "--timeout=180s"],
+               timeout=200)
+    if _run_quiet(base + ["get", "clustersecretstore", name],
+                  timeout=15).returncode == 0:
+        return
+    manifest = f"""apiVersion: external-secrets.io/v1beta1
+kind: ClusterSecretStore
+metadata:
+  name: {name}
+spec:
+  provider:
+    aws:
+      service: SecretsManager
+      region: {region}
+      auth:
+        jwt:
+          serviceAccountRef:
+            name: external-secrets
+            namespace: external-secrets
+"""
+    try:
+        r = subprocess.run(base + ["apply", "-f", "-"], input=manifest,
+                           capture_output=True, text=True, timeout=60)
+    except FileNotFoundError:
+        raise SystemExit("kubectl 명령을 못 찾았습니다 — PATH 확인 필요")
+    if r.returncode != 0:
+        raise SystemExit(
+            f"ClusterSecretStore '{name}' 생성 실패 — ExternalSecret 이 동기화 "
+            f"되지 않습니다:\n{(r.stderr or r.stdout or '').strip()}\n"
+            f"  수동: kubectl apply -f -  ← 위 manifest (ESO webhook 이 막으면 "
+            f"install-eks.sh 의 failurePolicy 우회 절차 참조)")
+    print(f"ⓘ ClusterSecretStore '{name}' 생성", file=sys.stderr)
+
+
 def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
     """domain=selfsigned-temp 용 self-signed 인증서를 ACM 에 보장하고 ARN 을
     돌려준다. CN 에 env 를 넣어 재실행 때 기존 인증서를 찾아 재사용(멱등)한다.
@@ -1336,6 +1400,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             cfg, repo_root, outs.get("admin_api_role_arn", ""))
         if fn:
             set_args += ["--set", f"adminApi.env.LITELLM_PRICING_LAMBDA={fn}"]
+
+    # terraform 은 ESO operator 만 설치한다 — ClusterSecretStore 는 별도
+    # 단계(install-eks.sh 계약). 없으면 ExternalSecret 이 SecretSyncedError 로
+    # 멈춰 첫 배포가 실패한다. store 이름은 gen values 에서 읽는다.
+    ensure_cluster_secret_store(meta, cfg.aws.region, context, repo_root)
 
     # helm upgrade 가 구 ES 를 지우는 순간 ownerRef 달린 Secret 이 GC 로 같이
     # 지워지지 않게 미리 정리 (이거 없으면 전 pod CreateContainerConfigError)
