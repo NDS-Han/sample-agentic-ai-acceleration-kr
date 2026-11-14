@@ -680,9 +680,11 @@ class GatewayConfig:
         if self.domain.mode == "selfsigned-temp" and self.deploy.target != "eks":
             e.append("domain.mode=selfsigned-temp 는 EKS(ALB ingress certificate-arn) "
                      "전용입니다 — ecs/compose 에서는 지원하지 않습니다")
-        if self.domain.mode == "cloudfront-temp" and self.deploy.target == "compose":
-            e.append("domain.mode=cloudfront-temp 는 compose 에서 지원하지 않습니다 — "
-                     "none 또는 route53-acm 을 쓰십시오 (ecs 는 none 으로 수렴).")
+        if self.domain.mode == "cloudfront-temp" and self.deploy.target in (
+                "compose", "eks"):
+            e.append("domain.mode=cloudfront-temp 는 아직 배포 경로가 구현되지 "
+                     "않았습니다 — none 또는 route53-acm (eks 는 selfsigned-temp "
+                     "도 가능)을 쓰십시오.")
         for c in self.network.allowed_cidrs:
             if not isinstance(c, str):
                 e.append(f"allowed_cidrs 항목은 문자열이어야 합니다: {c!r}")
@@ -690,7 +692,17 @@ class GatewayConfig:
             try:
                 ipaddress.ip_network(c, strict=False)
             except ValueError:
-                e.append(f"allowed_cidrs '{c}' 는 유효한 CIDR 이 아닙니다 (예: 1.2.3.4/32)")
+                e.append(f"allowed_cidrs 항목이 유효한 CIDR 가 아닙니다: {c!r}")
+        if self.infra.vpc_cidr:
+            try:
+                ipaddress.ip_network(self.infra.vpc_cidr, strict=False)
+            except ValueError:
+                e.append(f"infra.vpc_cidr 가 유효한 CIDR 가 아닙니다: "
+                         f"{self.infra.vpc_cidr!r} (예: 10.0.0.0/16)")
+        sfx = self.infra.cognito_domain_suffix
+        if sfx and not re.fullmatch(r"[a-z0-9-]+", sfx):
+            e.append(f"infra.cognito_domain_suffix 는 소문자/숫자/하이픈만 "
+                     f"가능합니다: {sfx!r}")
         if self.clients.models_profile not in MODEL_PROFILES:
             e.append(f"clients.models_profile 은 {MODEL_PROFILES} 중 하나여야 합니다.")
         if self.oidc.enabled:

@@ -201,7 +201,19 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
                   file=sys.stderr)
 
     issuer = outs.get("cognito_issuer_url")
-    if issuer and not cfg.oidc.enabled:
+    if issuer and not cfg.oidc.enabled and not cfg.domain.name:
+        # domain 없는 ALB 는 http — Cognito 콜백은 https(localhost 제외)만
+        # 허용이라 hosted-UI 플로우가 물리적으로 불가. 여기에 OIDC 를 배선하면
+        # hosted-UI 는 redirect_mismatch, admin-api 삼중가드가 dev 토큰까지
+        # 거부해 완전 잠김 — 배선하지 않고 인증 경로를 명시한다.
+        print("⚠ terraform 이 Cognito 를 만들었지만 domain.name 이 없어 "
+              "OIDC 를 배선하지 않습니다 — hosted-UI 콜백은 https 전용이라 "
+              "http ALB 에선 로그인이 불가합니다. admin 접근 경로를 하나 "
+              "선택하세요: (a) domain 을 부착해 OIDC 사용 (권장), (b) "
+              "features.dev_login=true — 단 dev 토큰은 서명이 없어 인터넷 "
+              "노출 ALB 에서는 위험하니 인그레스 CIDR 제한과 함께 임시로만 "
+              "사용하세요", file=sys.stderr)
+    elif issuer and not cfg.oidc.enabled:
         # yaml 에 oidc 가 없어도 terraform 이 Cognito 를 만들었으면 활성화 — 기존
         # 스크립트 계약. 단 admin-ui 까지 같은 OIDC 로 맞추지 않으면 admin-api=OIDC /
         # admin-ui=dev-login 의 비일관 배포가 된다 — terraform output 으로 양쪽을
@@ -230,6 +242,19 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
                      f"adminUi.env.OIDC_AUTHORIZE_URL=https://{hosted}/oauth2/authorize",
                      "--set",
                      f"adminUi.env.OIDC_TOKEN_URL=https://{hosted}/oauth2/token"]
+
+    if (not cfg.oidc.enabled and not cfg.domain.name
+            and not cfg.features.dev_login
+            and not (issuer and outs.get("cognito_client_id"))):
+        # OIDC 도메인도 없고 dev-login 도 꺼진 배포 — admin-ui 는 dev-login
+        # 화면을 띄우지만 admin-api 가 dev 토큰을 거부해 실질 로그인 경로가
+        # 없다. 배포 자체는 유효하니 경고만 (자동 활성화는 인터넷 노출 ALB 에
+        # 서명 없는 토큰을 여는 셈이라 하지 않는다).
+        print("⚠ 작동하는 admin 로그인 경로가 없습니다 — oidc 미설정, "
+              "domain.name 없음, features.dev_login=false. 다음 중 하나를 "
+              "선택하세요: (a) domain 부착 + oidc 설정 (권장), (b) "
+              "features.dev_login=true — dev 토큰은 서명이 없어 인터넷 노출 "
+              "ALB 에선 인그레스 CIDR 제한과 함께 임시로만", file=sys.stderr)
 
     if cfg.features.body_logging:
         if outs.get("body_log_firehose_stream"):
@@ -1199,6 +1224,11 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         chatagent.ensure_lambda_build(repo_root)
     if env_dir:
         outs = ensure_infra(cfg, gen_dir, env_dir, outs, context)
+        # helm/kubectl 전에 클러스터를 kubeconfig 에 등록 — 컨텍스트 부재
+        # 실패·다른 클러스터 오배포 방지 (멱등, context 지정 시 --alias)
+        if outs.get("cluster_name"):
+            from .bootstrap import update_kubeconfig
+            update_kubeconfig(outs, cfg.aws.region, context)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
 
     # install-guide §5-1/§5-2 자동화 — AgentCore Gateway 를 만들고(멱등) URL 을

@@ -183,16 +183,22 @@ def test_ecs_tfvars_infra_and_bedrock_override():
 
 def test_persist_bootstrap_answers(tmp_path):
     cfg_path = tmp_path / "gateway.yaml"
-    cfg_path.write_text("version: 1\nenv: dev\n")
+    cfg_path.write_text(
+        "version: 1\nenv: dev\n"
+        "aws: {region: ap-northeast-2}\n"
+        "deploy: {target: eks, size_tier: t3}\n"
+        "features: {notifications: {provider: mock}}\n"
+        "images: {tag: v1}\n")
     bootstrap.persist_bootstrap_answers(cfg_path, {
         "tfstate": ("bkt", "tbl"),
-        "infra": {"azs": ["a", "b"], "cognito_groups": ["Claude_T"]},
+        "infra": {"azs": ["ap-northeast-2a", "ap-northeast-2c"],
+                  "cognito_groups": ["Claude_T"]},
         "web_search": True,
     })
     import yaml as _y
     doc = _y.safe_load(cfg_path.read_text())
     assert doc["deploy"]["tfstate_bucket"] == "bkt"
-    assert doc["infra"]["azs"] == ["a", "b"]
+    assert doc["infra"]["azs"] == ["ap-northeast-2a", "ap-northeast-2c"]
     assert doc["features"]["web_search"] is True
     assert oct(cfg_path.stat().st_mode)[-3:] == "600"
 
@@ -433,3 +439,114 @@ def test_onboard_admin_existing_user_skips_create(monkeypatch, tmp_path):
         _cfg(), tmp_path, {"cognito_user_pool_id": "pool-1"}, "ap-northeast-2")
     assert not any("admin-create-user" in c for c in created)
     assert any("이미 존재" in n for n in notes)
+
+
+# ── 8차 리뷰 회귀 ─────────────────────────────────────────────────────────────
+
+def test_scaffold_tfvars_blanks_org_groups():
+    """example 의 조직 실명 그룹은 복사 금지 — 오배정·실값 유출 방지."""
+    example = ('cognito_groups = [\n'
+               '  "Claude_AI-Center_S/W-Culture-Office",\n'
+               '  "Claude_test-department_aws-test",\n'
+               '  "ClaudeAdmin",\n'
+               ']\n')
+    out = bootstrap.scaffold_tfvars(
+        example, env="x", region="r", account="a", principal_arn="p")
+    assert "Culture-Office" not in out
+    assert "aws-test" not in out
+    assert 'cognito_groups = ["ClaudeAdmin"]' in out
+
+
+def test_scaffold_normalizes_assumed_role(monkeypatch, tmp_path):
+    """assumed-role 세션 ARN 은 EKS access entry 거부 — IAM role ARN 정규화."""
+    tmpl = tmp_path / "deployment/terraform/environments/llm-gateway-dev"
+    tmpl.mkdir(parents=True)
+    for f in bootstrap.TF_FILES:
+        (tmpl / f).write_text("# tf")
+    (tmpl / "terraform.tfvars.example").write_text(
+        'environment = "dev"\n'
+        'principal_arn = "arn:aws:iam::ACCOUNT_ID:role/YOUR_ROLE"\n')
+    chart = tmp_path / "deployment/charts/llm-gateway"
+    chart.mkdir(parents=True)
+    (chart / "values-eks-fargate-dev.yaml").write_text("adminApi: {}\n")
+    monkeypatch.setattr(bootstrap, "account_id", lambda r: "123456789012")
+    monkeypatch.setattr(bootstrap, "_aws", lambda *a, **k: _cp(
+        0, '{"Arn":"arn:aws:sts::123456789012:assumed-role/DevOps/sess"}'))
+    cfg = _cfg(env="stg")
+    with pytest.raises(SystemExit):
+        bootstrap.scaffold_eks_env(cfg, tmp_path, "ap-northeast-2")
+    t = (tmp_path / "deployment/terraform/environments"
+         "/llm-gateway-stg/terraform.tfvars").read_text()
+    assert "arn:aws:iam::123456789012:role/DevOps" in t
+    assert "assumed-role" not in t
+
+
+def test_update_kubeconfig_alias_skip_fail(monkeypatch):
+    calls = []
+    monkeypatch.setattr(bootstrap, "_quiet",
+                        lambda a, **k: calls.append(a) or _cp(0))
+    bootstrap.update_kubeconfig({"cluster_name": "gw-dev"}, "us-west-2", "ctx1")
+    assert calls[0][:3] == ["aws", "eks", "update-kubeconfig"]
+    assert "--name" in calls[0] and "gw-dev" in calls[0]
+    assert "--alias" in calls[0] and "ctx1" in calls[0]
+    # cluster_name 없음 → 기존 kubeconfig 의존, 호출 없음
+    calls.clear()
+    bootstrap.update_kubeconfig({}, "r")
+    assert calls == []
+    # 실패 → 복구 명령 포함 SystemExit
+    monkeypatch.setattr(bootstrap, "_quiet", lambda a, **k: _cp(1, err="boom"))
+    with pytest.raises(SystemExit):
+        bootstrap.update_kubeconfig({"cluster_name": "x"}, "r")
+
+
+def test_persist_invalid_answer_keeps_file(tmp_path):
+    """유효한 파일에 스키마를 깨는 wizard 답변이 더해지면 쓰기를 거부한다 —
+    이후 모든 명령이 _load_config 에서 멈추는 사고 방지."""
+    cfg_path = tmp_path / "gateway.yaml"
+    original = ("version: 1\nenv: dev\n"
+                "aws: {region: ap-northeast-2}\n"
+                "deploy: {target: eks, size_tier: t3}\n"
+                "features: {notifications: {provider: mock}}\n"
+                "images: {tag: v1}\n")
+    cfg_path.write_text(original)
+    bootstrap.persist_bootstrap_answers(cfg_path, {
+        "tfstate": ("bkt", "tbl"),
+        "infra": {"vpc_cidr": "not-a-cidr"}})
+    assert cfg_path.read_text() == original
+
+
+def test_persist_writes_when_original_already_invalid(tmp_path):
+    """원본이 이미 무효하면 답변 탓이 아니다 — 저장은 진행한다."""
+    cfg_path = tmp_path / "gateway.yaml"
+    cfg_path.write_text("version: 1\nenv: dev\n")  # compose+t1 기본값 → 무효
+    bootstrap.persist_bootstrap_answers(cfg_path, {
+        "tfstate": ("bkt", "tbl")})
+    import yaml as _y
+    assert _y.safe_load(cfg_path.read_text())["deploy"]["tfstate_bucket"] == "bkt"
+
+
+def test_push_images_eks_scheduler_pin(monkeypatch, tmp_path):
+    """images.tags.scheduler 핀 → admin-api 를 그 태그로도 build/push."""
+    ran = []
+    monkeypatch.setattr(bootstrap, "ensure_ecr_repos", lambda r: None)
+    monkeypatch.setattr(bootstrap, "_quiet", lambda a, **k: _cp(0, "pw"))
+    monkeypatch.setattr(
+        bootstrap, "_run",
+        lambda a, **k: ran.append(" ".join(str(x) for x in a)) or _cp(0))
+    cfg = _cfg(images={"tag": "v1", "tags": {"scheduler": "s9"}})
+    bootstrap.push_images_eks(cfg, {}, tmp_path, "r")
+    pushes = [x for x in ran if x.startswith("docker push")]
+    assert any("admin-api:s9" in p for p in pushes)
+
+
+def test_onboard_admin_placeholder_email_warns(monkeypatch, tmp_path):
+    """admin@example.com 플레이스홀더 그대로면 경고가 나와야 한다."""
+    chart = tmp_path / "deployment/charts/llm-gateway"
+    chart.mkdir(parents=True)
+    (chart / "values-eks-fargate-dev.yaml").write_text(
+        "adminApi:\n  adminBootstrap:\n    emails: [admin@example.com]\n")
+    monkeypatch.setattr(bootstrap, "_quiet", lambda a, **k: _cp(1))
+    monkeypatch.setattr(bootstrap, "_aws", lambda *a, **k: _cp(0, "[]"))
+    notes = bootstrap.onboard_admin(
+        _cfg(), tmp_path, {"cognito_user_pool_id": "p"}, "r")
+    assert any("플레이스홀더" in n for n in notes)

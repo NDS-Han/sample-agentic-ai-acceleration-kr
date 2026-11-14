@@ -136,14 +136,18 @@ def _collect_doc(existing: dict | None = None) -> dict:
         default=prev_tier if prev_tier in tier_vals else tier_choices[0].value).ask())
     same_target = target == _g(ex, "deploy", "target")
 
+    domain_choices = [
+        Choice("none — 도메인 없이 시작 (HTTP, Cowork 불가)", "none"),
+        Choice("route53-acm — 도메인 확정 (자동 TLS)", "route53-acm"),
+    ]
+    if target == "eks":  # selfsigned-temp 는 ALB certificate-arn 기반 — eks 전용
+        domain_choices.append(Choice(
+            "selfsigned-temp — 도메인 없이 임시 https (EKS·self-signed, 브라우저 경고)",
+            "selfsigned-temp"))
     domain_mode = _unwrap(questionary.select(
         "HTTPS 도메인",
-        choices=[
-            Choice("none — 도메인 없이 시작 (HTTP, Cowork 불가)", "none"),
-            Choice("route53-acm — 도메인 확정 (자동 TLS)", "route53-acm"),
-            Choice("cloudfront-temp — 임시 https (EKS 전용)", "cloudfront-temp"),
-            Choice("selfsigned-temp — 도메인 없이 임시 https (EKS·self-signed, 브라우저 경고)", "selfsigned-temp"),
-        ], default=_g(ex, "domain", "mode") or "none").ask())
+        choices=domain_choices,
+        default=_g(ex, "domain", "mode") or "none").ask())
     domain_name, zone_id = "", ""
     if domain_mode == "route53-acm":
         domain_name = _unwrap(questionary.text(
@@ -1085,6 +1089,15 @@ def cmd_bootstrap(args) -> int:
                 bucket = _unwrap(questionary.text(
                     "TFSTATE_BUCKET (다른 이름으로 재시도)",
                     default=bucket).ask())
+                table = _unwrap(questionary.text(
+                    "TFLOCK_TABLE", default=table).ask())
+                # 바뀐 값을 gateway.yaml 에도 반영 — 재실행 때 같은 실패를
+                # 반복하지 않도록.
+                try:
+                    bootstrap.persist_bootstrap_answers(
+                        cfg_path, {"tfstate": (bucket, table)})
+                except OSError:
+                    pass
 
     if not eks:
         if args.plan:
@@ -1119,7 +1132,7 @@ def cmd_bootstrap(args) -> int:
 
     if args.plan:
         console.print("[cyan]eks bootstrap 계획: ① tfstate 보장 → ② env "
-                      f"terraform apply ({env_dir(cfg)}) → ③ SM 시크릿 시드 → "
+                      f"terraform apply ({bootstrap.env_dir(cfg)}) → ③ SM 시크릿 시드 → "
                       "④ ECR 이미지 build/push → ⑤ helm apply → "
                       "⑥ Cognito admin 생성")
         return 0
@@ -1156,6 +1169,9 @@ def cmd_bootstrap(args) -> int:
 
     backend = _tfstate_with_retry(bucket, table)
     outs = bootstrap.env_apply(env_target, out, backend)
+    # 새 클러스터를 kubeconfig 에 등록 — 없으면 helm 이 컨텍스트 부재로
+    # 실패하거나 다른 클러스터에 배포된다
+    bootstrap.update_kubeconfig(outs, cfg.aws.region, context)
     for n in bootstrap.seed_secrets(cfg, REPO_ROOT, outs):
         console.print(f"  ⓘ {n}")
     bootstrap.push_images_eks(cfg, outs, REPO_ROOT, cfg.aws.region)
