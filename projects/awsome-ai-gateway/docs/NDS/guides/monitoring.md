@@ -16,8 +16,14 @@ The top banner shows the **Invocation Body Logging** state:
   verbatim.
 - Toggle it off to stop capture; changes reach the gateway within a few
   seconds.
+- Turning it **off** asks for confirmation first — the dialog warns that
+  bodies from the off period cannot be recovered later:
+
+![Turn-off confirmation](screenshots/32-monitoring-toggle-confirm.png)
+
 - The caption **"Capturing — prompt and response bodies are being stored
   in S3 without masking"** stays visible while it is on.
+- The banner links to the [Body Logs](#body-logs) browser:
 
 ## Last 1 Hour Summary
 
@@ -56,6 +62,8 @@ Browser over the captured request/response bodies — two views:
 - **Sessions** — grouped by session ID, filterable by period, user, and
   client.
 - **By request** — individual captured bodies.
+
+![Body Logs browser](screenshots/33-monitoring-bodylogs-nav.png)
 
 ![Body Logs](screenshots/13-monitoring-body-logs.png)
 

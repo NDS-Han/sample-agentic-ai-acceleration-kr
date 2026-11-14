@@ -22,6 +22,15 @@ Code snippets for calling the gateway with a long-lived agent key:
 Each tab shows a `curl` example and a Python example for the matching
 SDK, pre-filled with the deployment's `GATEWAY_URL`.
 
+**OpenAI** tab — `/v1/chat/completions` with the `openai` Python SDK:
+
+![OpenAI examples](screenshots/46-integration-openai.png)
+
+**LangChain** tab — `ChatOpenAI` and `ChatAnthropic` wrappers pointed at
+the gateway base URL:
+
+![LangChain examples](screenshots/47-integration-langchain.png)
+
 ## Guidance notes
 
 The notes under the examples capture the operational contract:

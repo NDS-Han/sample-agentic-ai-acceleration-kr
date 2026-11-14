@@ -14,6 +14,17 @@ to call, with pricing, context limits, status, and per-team permissions.
 | **Sync Pricing** | Re-pulls the pricing feed and refreshes Input/Output/Cache columns. |
 | **+ Add model** | Opens the create-model dialog. |
 
+### Sync Pricing
+
+**Sync Pricing** opens a source picker — *AWS Price List* or a LiteLLM-style
+community catalog — with a **Preview** step before anything is written:
+
+![Sync Official Pricing](screenshots/20-models-sync-pricing.png)
+
+Preview lists the models whose prices would change; **Apply** writes only
+the selected rows. Models with no mapping keep their current price — a sync
+never blanks an existing price.
+
 ## Table columns
 
 | Column | Meaning |
@@ -25,7 +36,21 @@ to call, with pricing, context limits, status, and per-team permissions.
 | **Status** | `Active` models can be called; deactivated models stay listed for historical reporting. |
 | **Actions → Edit** | Opens the edit dialog. |
 
+### Expanded row
+
+Clicking a row expands it in place — the token-pricing detail (including
+the two cache-create tiers and cache read) and a **Model Info** card with
+provider, upstream model ID, context/max-output, endpoint URL, and the
+registration date. The **Deactivate** and **Delete** actions and the
+team-permission panel live inside the expansion.
+
+![Expanded model row](screenshots/22-models-row-expanded.png)
+
 ## Add / Edit model dialog
+
+![Add Model dialog](screenshots/21-models-add-dialog.png)
+
+![Edit Model dialog](screenshots/23-models-edit-dialog.png)
 
 Fields include:
 

@@ -13,10 +13,26 @@ live [Monitoring](monitoring.md) page.
 | Control | Effect |
 |---|---|
 | **This Month / Last Month / Select Period** | Month presets and any month in the data. |
-| **Custom Range** | Explicit start/end dates. |
+| **Custom Range** | Explicit start/end dates (`mm/dd/yyyy` pickers appear inline). |
 | **By Model** | Restricts all charts to one model. |
 | **Refresh** | Re-pulls data without changing filters. |
-| **Export** | Downloads the current view (CSV). |
+| **Export** | Downloads the current view — CSV or JSON. |
+
+Custom Range mode:
+
+![Custom Range](screenshots/36-analytics-custom-range.png)
+
+The **Select Period** dropdown lists every month present in the data:
+
+![Period selector](screenshots/37-analytics-period.png)
+
+**Export** offers a format choice:
+
+![Export menu](screenshots/38-analytics-export.png)
+
+**By Model** scopes every card and chart to a single model:
+
+![By Model filter](screenshots/39-analytics-bymodel.png)
 
 ## KPI cards
 
@@ -38,6 +54,6 @@ live [Monitoring](monitoring.md) page.
 
 - The `/analytics/models` URL still works — it redirects here with
   `?model=` filters preserved.
-- Export produces a CSV of the current filtered view, suitable for
-  importing into finance tooling.
+- Export produces a CSV or JSON of the current filtered view, suitable
+  for importing into finance tooling.
 - Team leaders see the same charts but scoped to their own team.

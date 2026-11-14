@@ -28,12 +28,29 @@ auto-downgrade mechanism that throttles spend before the hard limit.
 
 ## Set Budget dialog
 
-- Set or clear the monthly cap. An empty cap means *no limit*.
-- The dialog shows **current usage** and an **impact summary**
-  (`ConfirmImpactBox`) before saving — e.g. "this would immediately
-  block N members".
+![Set Budget dialog](screenshots/26-budgets-set-dialog.png)
+
+- **Team total budget (USD)** — the monthly cap. Set or clear it; an
+  empty cap means *no limit*.
+- **Team default user cap** — cap applied to members without an
+  individual budget; leave empty to unset.
+- **Overage Policy** — *Hard Block* (reject requests at the cap),
+  *Warning Only* (notify but allow), or *Throttle* (reduce RPM past the
+  threshold).
+- **Alert Thresholds (%)** — notification trigger points; add or remove
+  percentage chips.
+- The dialog shows **current usage** and an impact summary before
+  saving — e.g. "this would immediately block N members".
 - Team caps apply to the **sum** of member spend; a member's individual
   cap (set on the member row) stacks underneath.
+
+## Team expansion
+
+Expanding a team row lists its members inline — each member row shows
+its own cap (`$1,000.00`), *Team budget applied* when it inherits the
+team cap, and a per-member **Set Budget** action:
+
+![Expanded team with members](screenshots/27-budgets-team-expanded.png)
 
 ## Auto-downgrade
 

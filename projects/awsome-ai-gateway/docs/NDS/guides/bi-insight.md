@@ -24,6 +24,11 @@ UI for the BI Insight agent described in
 - A question starts a multi-step run: the orchestrator plans, delegates
   to specialist agents (usage analysis, reporting), validates the
   numbers against the data, then replies.
+- Before executing, the agent presents a **plan card** with the proposed
+  SQL steps and a **Proceed with this plan** button — the run waits for
+  approval unless you edit the plan:
+
+![Running analysis with plan approval](screenshots/48-chat-running.png)
 - **Report cards** appear when the run produces a file — clicking a card
   downloads the PDF/CSV after a server-side ownership check.
 - The session ID in the banner is a debugging handle — cite it when

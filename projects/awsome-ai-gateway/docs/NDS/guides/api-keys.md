@@ -15,6 +15,14 @@ only**; keys cannot be issued from the UI.
 | **Search by user email** | Partial-match filter on the owner's email. |
 | **Active / Expired / Revoked** tabs | Filter by key lifecycle state. |
 
+The **Expired** and **Revoked** tabs list keys by lifecycle state —
+expired keys remain visible for audit even though they can no longer
+authenticate:
+
+![Expired keys](screenshots/24-keys-expired.png)
+
+![Revoked keys](screenshots/25-keys-revoked.png)
+
 ## Table
 
 One row per virtual key: owner, masked key prefix, issued/expiry

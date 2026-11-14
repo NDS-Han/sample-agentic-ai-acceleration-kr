@@ -17,6 +17,13 @@ health, and request volume for the selected period.
 
 All cards and charts update together when a filter changes.
 
+![Period and client filters](screenshots/40-dashboard-period.png)
+
+Selecting a client family (here *Claude Code*) narrows every KPI and
+chart to that app's traffic:
+
+![Client filter applied](screenshots/41-dashboard-client-filter.png)
+
 ## Cost & Budget cards
 
 | Card | Meaning |

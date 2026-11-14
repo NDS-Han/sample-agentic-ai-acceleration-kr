@@ -12,17 +12,36 @@ created in Cognito, then issued and maintained here.
 
 **Issue long-lived key** opens a dialog:
 
-1. Pick the **target user** — an existing account that will own the key
-   (accounts themselves are provisioned via Cognito, not created here).
-2. Confirm — the plaintext key is shown **once** in a copyable block.
-   Store it in Secrets Manager immediately; it cannot be retrieved again.
+![Issue long-lived VK dialog](screenshots/28-agents-issue-dialog.png)
+
+1. Pick the **account to issue** — an existing Cognito account that will
+   own the key (accounts themselves are provisioned via Cognito, not
+   created here). Picking a non-agent account shows a warning that issuing
+   **converts it to an agent** — interactive login and short-lived keys
+   are blocked for that account afterwards.
+2. Set the **TTL** (days, max 365) and type `confirm` into the
+   confirmation field — the **Issue** button stays disabled until the
+   literal string is entered, which prevents accidental issuance.
+
+![Filled issue form](screenshots/29-agents-issue-filled.png)
+
+3. The plaintext key is shown **once** in a copyable block. Store it in
+   Secrets Manager immediately — after this window closes the VK cannot
+   be shown again.
+
+![Key issued — one-time display](screenshots/30-agents-key-issued.png)
+
+The account then appears in the table with its key prefix, issued/expiry
+dates, and live monthly counters:
+
+![Agents list after issuance](screenshots/31-agents-after-issue.png)
 
 ## List actions
 
 | Action | Effect |
 |---|---|
 | **Repair auth** | Re-registers a key's lost auth mapping. Use when an app gets **401 while the key is still valid** — e.g. after a cache eviction or manual DB edit. |
-| **Unmark** | Revokes the account's live service key, then drops the agent marker — the UI blocks unmarking while a key is still valid, so the two happen together. |
+| **Unflag** | Revokes the account's live service key, then drops the agent marker — the backend refuses to unflag while a live key remains, so the UI revokes the key first and the two happen together. |
 
 Click a row to open the agent's [detail view](#agent-detail).
 
@@ -41,10 +60,10 @@ Use this view to confirm a repair worked — a healthy key has a recent
 
 ## Operational notes
 
-- Rotate keys by **unmarking and re-issuing**: Unmark revokes the live
+- Rotate keys by **unflagging and re-issuing**: Unflag revokes the live
   key (and the marker), then Issue long-lived key creates a fresh one on
   the same account. Update the secret in Secrets Manager between the two
   steps so the app does not lose access.
-- `Unmark` is a label only; keys and history survive it.
+- `Unflag` drops the agent marker; key and usage history survive it.
 - Audit entries for issue/revoke/repair are under
   [Audit Log](audit-log.md) category *API key*.
