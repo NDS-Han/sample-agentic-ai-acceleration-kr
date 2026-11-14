@@ -820,6 +820,10 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
 
 
 def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
+    if cfg.features.bi_insight:
+        # archive_file data source 가 build/ 트리를 zip 한다 — 없으면 tf
+        # plan/apply 모두 'missing directory' 로 실패. 어떤 tf 명령보다 먼저.
+        chatagent.ensure_lambda_build(repo_root)
     """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다.
 
     dry-run 덤프는 전체 매니페스트라 읽기 어렵다 — 렌더 결과를 live release
@@ -885,6 +889,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     if env_dir and not outs:
         print(f"ⓘ {meta['env_dir']} 의 terraform output 이 없습니다 — helm 만 "
               "업데이트합니다 (인프라 동적값 주입 생략)", file=sys.stderr)
+    if cfg.features.bi_insight:
+        # archive_file data source 가 build/ 트리를 zip 한다 — 없으면
+        # managed overlay 의 plan/apply 가 'missing directory' 로 실패.
+        chatagent.ensure_lambda_build(repo_root)
     if env_dir:
         outs = ensure_infra(cfg, gen_dir, env_dir, outs)
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)

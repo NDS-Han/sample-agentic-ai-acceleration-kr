@@ -125,6 +125,31 @@ def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
     return m.group(1)
 
 
+def ensure_lambda_build(repo_root: Path) -> bool:
+    """admin-chat-agent/lambdas/build-lambdas.sh 실행 — agentcore-runtime
+    모듈의 archive_file data source 가 참조하는 build/{query_db,get_schema}
+    트리를 만든다.
+
+    terraform plan/apply 모두 data source 를 평가해 디렉토리가 없으면
+    'could not archive missing directory' 로 실패한다 — bi_insight 선언이
+    있으면 어떤 tf 명령보다 먼저 돌아야 한다. 스크립트는 platform-targeted
+    wheel(manylinux2014_x86_64/py3.12)로 vendoring 해 호스트 아키텍처와
+    무관하게 Lambda x86_64 와 맞는다."""
+    script = repo_root / "admin-chat-agent/lambdas/build-lambdas.sh"
+    try:
+        r = subprocess.run(["bash", str(script)], cwd=repo_root,
+                           capture_output=True, text=True, timeout=600)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        print(f"⚠ Lambda 빌드 실패 — {exc}", file=sys.stderr)
+        return False
+    if r.returncode != 0:
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-3:]
+        print(f"⚠ Lambda 빌드 실패 — {'; '.join(tail)}", file=sys.stderr)
+        return False
+    print("  Lambda 빌드 완료 (query_db + get_schema)", file=sys.stderr)
+    return True
+
+
 def teardown(repo_root: Path, env_name: str) -> bool:
     """bi_insight 선언이 꺼졌을 때 AgentCore Runtime 을 지운다 — 멱등.
 

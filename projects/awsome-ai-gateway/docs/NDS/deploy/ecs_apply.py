@@ -56,6 +56,9 @@ def tf_outputs(env_dir: Path) -> dict:
 
 def terraform_plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> None:
     """적용하지 않고 변경 계획만 출력 — apply 전 확인/--plan 용."""
+    if cfg.features.bi_insight:
+        from . import chatagent
+        chatagent.ensure_lambda_build(repo_root)
     env_dir = repo_root / ENV_DIR
     _run(["terraform", "init", "-input=false",
           f"-backend-config={gen_dir / 'backend.hcl'}"], cwd=env_dir)
@@ -173,6 +176,12 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     install-eks.sh --set adminUi.nextauthUrl=http://<alb-dns> 와 같은 결)."""
     from .render import ecs as ecs_render
     from . import websearch
+
+    if cfg.features.bi_insight:
+        # archive_file data source 가 build/ 트리를 zip 한다 — 없으면 tf
+        # plan/apply 가 'missing directory' 로 실패. 어떤 tf 명령보다 먼저.
+        from . import chatagent
+        chatagent.ensure_lambda_build(repo_root)
 
     # 이전 apply 가 발견한 동적 값이 있으면 tfvars 에 반영한다
     existing = load_extra_vars(gen_dir)

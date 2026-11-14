@@ -855,6 +855,11 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     ecs_render.render(cfg, out, extra_vars=ecs_apply.load_extra_vars(out))
     ecs_apply._run(["terraform", "init", "-input=false", "-reconfigure",
                     f"-backend-config={out / 'backend.hcl'}"], cwd=env_dir)
+    if cfg.features.bi_insight:
+        # plan -destroy 도 archive_file data source 를 평가한다 — build/
+        # 트리가 없으면 missing directory 로 실패.
+        from . import chatagent
+        chatagent.ensure_lambda_build(REPO_ROOT)
     console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
     ecs_apply._run(["terraform", "plan", "-destroy", "-input=false",
                     f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
@@ -953,6 +958,10 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                 f"{env_dir} init 실패 — 이 env 는 partial backend 라 저장된 "
                 ".terraform 이 없으면 init 할 수 없습니다. 최초 구성 때와 같은 "
                 "-backend-config(bucket/dynamodb_table)로 먼저 init 하십시오")
+        if cfg.features.bi_insight:
+            # plan -destroy 도 archive_file data source 를 평가한다.
+            from . import chatagent
+            chatagent.ensure_lambda_build(REPO_ROOT)
         console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
         eks_apply._run(["terraform", "plan", "-destroy", "-input=false"], cwd=env_dir)
 
