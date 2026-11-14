@@ -236,6 +236,19 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
     alb_dims = gen_dir / "alerts-dims.tfvars"
     if alb_dims.exists():
         var_args.append(f"-var-file={alb_dims.resolve()}")
+    else:
+        # 파일 부재(gen/ 는 gitignore — 신규 머신/클론 기본값)인데 state 에
+        # ALB 알람이 있으면 이 apply 가 조용히 전량 삭제한다 → 먼저 차단.
+        st = eks_apply._run_quiet(["terraform", "state", "list"],
+                                cwd=env_dir_path, timeout=120)
+        if st.returncode == 0 and any(
+                "aws_cloudwatch_metric_alarm.alb_" in l
+                for l in st.stdout.splitlines()):
+            raise SystemExit(
+                f"ALB 알람이 state 에 있지만 {alb_dims} 이 없습니다 — "
+                "이 apply 가 알람을 삭제합니다. 먼저 `deploy apply` 를 "
+                "실행해 ALB dimension 을 발견·기록한 뒤 bootstrap 을 "
+                "재실행하세요")
     _run(["terraform", "apply", "-auto-approve", "-input=false", *var_args],
          cwd=env_dir_path)
     return eks_apply.tf_outputs(env_dir_path)

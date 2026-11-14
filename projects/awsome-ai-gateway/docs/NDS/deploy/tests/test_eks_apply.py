@@ -518,15 +518,21 @@ def _alert_cfg():
 
 
 def _discover_fake(monkeypatch, *, kubectl_rc=0,
-                   hostnames="llm-gateway-gateway alb.example.com\n",
-                   lbs=None, tgs=None):
+                   items=None, lbs=None, tgs=None):
+    if items is None:
+        items = [{"metadata": {"name": "llm-gateway-gateway",
+                               "labels": {"app.kubernetes.io/instance":
+                                          "llm-gateway"}},
+                  "status": {"loadBalancer":
+                             {"ingress": [{"hostname": "alb.example.com"}]}}}]
     """kubectl ingress + aws elbv2 응답 fake — 호출 argv 순서로 분기."""
     calls = []
 
     def fake(argv, **k):
         calls.append(argv)
         if argv[0] == "kubectl":
-            return subprocess.CompletedProcess(argv, kubectl_rc, hostnames, "")
+            return subprocess.CompletedProcess(argv, kubectl_rc,
+                                               json.dumps({"items": items}), "")
         if "describe-load-balancers" in argv:
             return subprocess.CompletedProcess(
                 argv, 0, json.dumps({"LoadBalancers": lbs or []}), "")
@@ -553,7 +559,7 @@ def test_alb_dims_kubectl_failure_converges_empty(monkeypatch):
 
 
 def test_alb_dims_no_ingress_hostname_empty(monkeypatch):
-    calls = _discover_fake(monkeypatch, hostnames="")
+    calls = _discover_fake(monkeypatch, items=[])
     assert eks_apply._discover_alb_dims(_alert_cfg())[:2] == ([], [])
     assert not any("describe-load-balancers" in a for a in calls)
 
@@ -634,8 +640,7 @@ def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
             return subprocess.CompletedProcess(argv, 0, lbs_json, "")
         if "describe-target-groups" in argv:
             return subprocess.CompletedProcess(argv, 0, tgs_json, "")
-        return subprocess.CompletedProcess(
-            argv, 0, "llm-gateway-gateway alb.example.com\n", "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "llm-gateway-gateway", "labels": {"app.kubernetes.io/instance": "llm-gateway"}}, "status": {"loadBalancer": {"ingress": [{"hostname": "alb.example.com"}]}}}]}), "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake2)
     monkeypatch.setattr(eks_apply, "tf_outputs",
                         lambda d: {"alerting_sns_topic_arn": "arn:t"})
@@ -709,7 +714,7 @@ def test_managed_plan_allows_alb_alarm_destroy(tmp_path, monkeypatch):
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda a, **k: subprocess.CompletedProcess(
                             a, 0, (tmp_path / "plan.json").read_text(), ""))
-    bad, changes = eks_apply._inspect_managed_plan(
+    bad, changes, _ = eks_apply._inspect_managed_plan(
         tmp_path, tmp_path / "x.tfplan", ["module.alerting"],
         allow_alb_destroy=True)
     assert bad == []
@@ -717,17 +722,35 @@ def test_managed_plan_allows_alb_alarm_destroy(tmp_path, monkeypatch):
 
 
 def test_managed_plan_still_blocks_other_alarm_destroy(tmp_path, monkeypatch):
-    """화이트리스트는 ALB 알람뿐 — cache/aurora 알람 destroy 는 여전히 차단."""
+    """화이트리스트 외 리소스의 destroy 는 여전히 차단 — SNS topic 은
+    어느 목록에도 없다."""
     (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
-        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
-                        "cache_cpu[\"c1\"]", ["delete"]),
+        _managed_change("module.alerting[0].aws_sns_topic.alerts",
+                        ["delete"]),
     ]}))
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda a, **k: subprocess.CompletedProcess(
                             a, 0, (tmp_path / "plan.json").read_text(), ""))
-    bad, _ = eks_apply._inspect_managed_plan(
+    bad, _, _ = eks_apply._inspect_managed_plan(
         tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
     assert len(bad) == 1 and "파괴적 변경" in bad[0]
+
+
+def test_managed_plan_allows_member_alarm_shrink(tmp_path, monkeypatch):
+    """M2 — aurora/cache 알람은 모듈 output(member id) 축소를 추종하는
+    delete 라 허용. env terraform 의 토폴로지 축소를 뒤따르는 정상 수렴."""
+    (tmp_path / "plan.json").write_text(json.dumps({"resource_changes": [
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
+                        "cache_cpu[\"c1\"]", ["delete"]),
+        _managed_change("module.alerting[0].aws_cloudwatch_metric_alarm."
+                        "aurora_cpu[\"i1\"]", ["delete"]),
+    ]}))
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda a, **k: subprocess.CompletedProcess(
+                            a, 0, (tmp_path / "plan.json").read_text(), ""))
+    bad, changes, _ = eks_apply._inspect_managed_plan(
+        tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
+    assert bad == [] and len(changes) == 2
 
 
 def test_doctor_drift_includes_alb_dims_file(tmp_path):
@@ -757,8 +780,7 @@ def test_alb_dims_tg_describe_failure_is_whole_failure(monkeypatch):
                 {"LoadBalancers": [{"DNSName": "alb.example.com",
                                     "Type": "application",
                                     "LoadBalancerArn": _ARN_LB}]}), "")
-        return subprocess.CompletedProcess(
-            argv, 0, "llm-gateway-gateway alb.example.com\n", "")
+        return subprocess.CompletedProcess(argv, 0, json.dumps({"items": [{"metadata": {"name": "llm-gateway-gateway", "labels": {"app.kubernetes.io/instance": "llm-gateway"}}, "status": {"loadBalancer": {"ingress": [{"hostname": "alb.example.com"}]}}}]}), "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
     lb_dims, tg_pairs, note = eks_apply._discover_alb_dims(_alert_cfg())
     assert (lb_dims, tg_pairs) == ([], [])
@@ -777,10 +799,11 @@ def test_managed_plan_blocks_alb_destroy_when_discovery_failed(tmp_path, monkeyp
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda a, **k: subprocess.CompletedProcess(
                             a, 0, (tmp_path / "plan.json").read_text(), ""))
-    bad, _ = eks_apply._inspect_managed_plan(
+    bad, _, blocked = eks_apply._inspect_managed_plan(
         tmp_path, tmp_path / "x.tfplan", ["module.alerting"],
         allow_alb_destroy=False)
-    assert len(bad) == 1 and "파괴적 변경" in bad[0]
+    assert bad == []          # bad 가 아니라 soft-blocked 목록으로 분류
+    assert len(blocked) == 1 and "차단" in blocked[0]
 
 
 def test_managed_plan_allows_email_sub_delete(tmp_path, monkeypatch):
@@ -792,33 +815,48 @@ def test_managed_plan_allows_email_sub_delete(tmp_path, monkeypatch):
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda a, **k: subprocess.CompletedProcess(
                             a, 0, (tmp_path / "plan.json").read_text(), ""))
-    bad, changes = eks_apply._inspect_managed_plan(
+    bad, changes, _ = eks_apply._inspect_managed_plan(
         tmp_path, tmp_path / "x.tfplan", ["module.alerting"])
     assert bad == [] and len(changes) == 1
 
 
 def test_alb_dims_filters_foreign_ingress(monkeypatch):
-    """F4 — 네임스페이스 공유 시 차트 소유가 아닌 ingress 의 ALB 는 제외."""
+    """F4+M4 — instance 라벨이 release 와 다른 ingress 는 제외. 접미사가
+    같아도(-gateway) 라벨이 다르면 외부 ALB 를 채택하지 않는다."""
     eks_apply._ALB_DIMS_CACHE.clear()
     lbs = [{"DNSName": "ours.example.com", "Type": "application",
             "LoadBalancerArn": _ARN_LB},
-           {"DNSName": "grafana.example.com", "Type": "application",
+           {"DNSName": "foreign.example.com", "Type": "application",
             "LoadBalancerArn": _ARN_LB.replace("aaa111", "ccc333")}]
+    items = [
+        {"metadata": {"name": "llm-gateway-gateway",
+                      "labels": {"app.kubernetes.io/instance": "llm-gateway"}},
+         "status": {"loadBalancer":
+                    {"ingress": [{"hostname": "ours.example.com"}]}}},
+        # 접미사는 같지만 다른 release 의 외부 ingress — 제외돼야 한다
+        {"metadata": {"name": "payment-gateway",
+                      "labels": {"app.kubernetes.io/instance": "payment"}},
+         "status": {"loadBalancer":
+                    {"ingress": [{"hostname": "foreign.example.com"}]}}},
+        # 라벨 없는 레거시 ingress — 제외
+        {"metadata": {"name": "legacy-admin-ui"},
+         "status": {"loadBalancer":
+                    {"ingress": [{"hostname": "foreign.example.com"}]}}},
+    ]
 
     def fake(argv, **k):
         if argv[0] == "kubectl":
-            out = ("llm-gateway-gateway ours.example.com\n"
-                   "grafana grafana.example.com\n"
-                   "llm-gateway-admin-ui \n")  # hostname 미할당 — 스킵
-            return subprocess.CompletedProcess(argv, 0, out, "")
+            return subprocess.CompletedProcess(
+                argv, 0, json.dumps({"items": items}), "")
         if "describe-load-balancers" in argv:
             return subprocess.CompletedProcess(
                 argv, 0, json.dumps({"LoadBalancers": lbs}), "")
         if "describe-target-groups" in argv:
             return subprocess.CompletedProcess(
-                argv, 0, json.dumps({"TargetGroups": [{"TargetGroupArn": _ARN_TG}]}), "")
+                argv, 0, json.dumps(
+                    {"TargetGroups": [{"TargetGroupArn": _ARN_TG}]}), "")
         return subprocess.CompletedProcess(argv, 0, "", "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
     lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
-    assert lb_dims == ["app/k8s-lb-a/aaa111"]  # grafana ALB 제외
+    assert lb_dims == ["app/k8s-lb-a/aaa111"]
     eks_apply._ALB_DIMS_CACHE.clear()

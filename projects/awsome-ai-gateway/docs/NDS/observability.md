@@ -214,8 +214,8 @@ ALB·TargetGroup 은 AWS Load Balancer Controller 가 배포 시 생성하고
 dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 라이브
 발견해 자동으로 알람을 채웁니다:
 
-1. apply 시점에 `kubectl get ingress -n <ns>` 로 우리 차트의 ingress
-   (`-gateway`/`-admin-ui`/`-admin-api` 접미만) ALB hostname 수집 —
+1. apply 시점에 `kubectl get ingress -n <ns> -o json` 으로 우리 release
+   의 ingress(`app.kubernetes.io/instance` 라벨 일치)만 ALB hostname 수집 —
    ensure_infra 가 helm 보다 먼저 실행되므로 "이전 배포의 ingress" 기준.
    최초 배포는 항상 미발견 → 다음 apply 에서 수렴
 2. `aws elbv2 describe-load-balancers` 에서 hostname 일치 + `application`
@@ -240,9 +240,11 @@ dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 �
   재사용해 stale 을 감지하지 못합니다 — apply 경고가 유일한 신호).
 - **발견 실패 + 파일 부재** (신규 머신/CI, gen 삭제) — var-file 없이
   진행해 기존 알람이 있으면 destroy-plan 이 뜨는데, **이번 실행에 라이브
-  발견이 성공한 경우에만** ALB 알람 delete 를 가드가 허용하므로 apply 가
-  안전하게 중단됩니다. kubectl/AWS 접근을 복구하고 재실행하세요 —
-  알람을 잃는 것보다 배포가 멈추는 쪽을 택했습니다.
+  발견이 성공한 경우에만** ALB 알람 delete 를 가드가 허용하므로 차단됩니다.
+  drift 수렴 경로는 경고 후 terraform 적용만 건너뛰고 helm 은 계속 진행,
+  필수 인프라 누락 경로는 중단됩니다 — kubectl/AWS 접근을 복구하고
+  재실행하세요. `deploy bootstrap` 재실행도 같은 상황이면 사전 차단되니
+  먼저 `deploy apply` 로 발견을 갱신해야 합니다.
 - **ALB 교체 (id 변경)** — 신 dims 발견 → 신 알람 create + 구 알람 delete
   가 plan 에 뜨고, 발견 성공 run 이므로 가드가 허용합니다 (dimension
   교체가 정상 수명주기).
