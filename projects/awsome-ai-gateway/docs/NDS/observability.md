@@ -172,11 +172,8 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 - **executor 큐 포화**: `gateway_bedrock_executor_queue_depth > 0` 지속은
   용량 상한 신호 — §10(op-guide) 의 scale-out 판단 기준과 같은 메트릭입니다.
 - **HPA**: `kubectl -n llm-gateway get hpa` — CPU + `executor_inflight` 두 축.
-- **Alertmanager 를 켜려면**: `deployment/observability/kube-prometheus-stack/
-  values.yaml` 의 `alertmanager.enabled` + `serverFiles.alerts`(PrometheusRule)
-  + receiver(SNS webhook·Slack·email) 설정, 그리고 Prometheus PVC
-  (현 `emptyDir`+24h 는 운영급이 아님). 이 스택은 managed overlay 소유가
-  아니라 수동 설치 자산 — 변경은 `deployment/observability/` 에서 합니다.
+- **Alertmanager 를 켜려면**: 절차는 §8-B — 이 스택은 managed overlay 소유가
+  아니라 `deployment/observability/` 의 수동 설치 자산입니다.
 
 ## 6. 비용 (ap-northeast-2 기준 대략)
 
@@ -201,11 +198,90 @@ kubectl -n observability port-forward svc/kube-prometheus-stack-grafana 3000:80
 - [ ] 로그 그룹 retention 정책 결정(기본 무제한)
 - [ ] 알림 수신 채널·당번 체계 합의 — 알람이 울려도 보는 사람이 없으면 의미 없음
 - [ ] (선택) Alertmanager + PrometheusRule + persistent Prometheus 스토리지 —
-      파드/앱 레벨 알림이 필요하면
-- [ ] (선택) ALB 5xx/UnHealthyHost 알람 — ALB dimension 을 배포 후 실측으로
-      얻어 env tfvars 확장 모듈로 추가
+      파드/앱 레벨 알림이 필요하면 (§8-B)
+- [ ] (선택) ALB 5xx/UnHealthyHost 알람 — dimension 실측 후 추가 (§8-A)
+- [ ] (선택) 앱 에러율 알람 — `log_shipping` 켠 뒤 metric filter 경로 (§8-C)
 
-## 8. 끄기 / 롤백
+## 8. 보류 작업 절차 (follow-up)
+
+기본 모듈 범위 밖인 세 가지 — 필요 시 아래 순서대로 붙입니다.
+
+### 8-A. ALB 알람 추가
+
+ALB·TargetGroup 은 AWS Load Balancer Controller 가 배포 시 생성하고
+dimension(ARN suffix)을 그때 부여합니다 — plan 시점에 알 수 없어
+`module.alerting` 범위에서 제외된 유일한 알람입니다.
+
+```bash
+# 1) dimension 실측 — lb ARN 의 app/<name>/<id>, tg ARN 의 targetgroup/<name>/<id>
+aws elbv2 describe-load-balancers --region <region> \
+  --query 'LoadBalancers[].{n:LoadBalancerName,dim:LoadBalancerArn}' --output table
+aws elbv2 describe-target-groups --region <region> \
+  --query 'TargetGroups[].{n:TargetGroupName,dim:TargetGroupArn}' --output table
+
+# 2) 알람 생성 — topic 은 기존 alerting topic 재사용
+TOPIC=$(cd deployment/terraform/environments/llm-gateway-<env> \
+  && terraform output -raw alerting_sns_topic_arn)
+aws cloudwatch put-metric-alarm --region <region> \
+  --alarm-name <project>-<env>-alb-target-5xx \
+  --namespace AWS/ApplicationELB --metric-name HTTPCode_Target_5XX_Count \
+  --dimensions Name=LoadBalancer,Value=app/<name>/<id> \
+  --statistic Sum --period 300 --evaluation-periods 2 --threshold 1 \
+  --comparison-operator GreaterThanOrEqualToThreshold \
+  --alarm-actions "$TOPIC" --ok-actions "$TOPIC"
+aws cloudwatch put-metric-alarm --region <region> \
+  --alarm-name <project>-<env>-alb-unhealthy \
+  --namespace AWS/ApplicationELB --metric-name UnHealthyHostCount \
+  --dimensions Name=LoadBalancer,Value=app/<name>/<id>,Name=TargetGroup,Value=targetgroup/<name>/<id> \
+  --statistic Average --period 60 --evaluation-periods 2 --threshold 0 \
+  --comparison-operator GreaterThanThreshold \
+  --alarm-actions "$TOPIC" --ok-actions "$TOPIC"
+```
+
+terraform 으로 관리하려면 `module.alerting` 에 `alb_load_balancer_dimension`
++ `alb_target_group_dimension` 변수를 추가하고 같은 `aws_cloudwatch_metric_alarm`
+리소스로 확장 — 실측값은 env tfvars 에 고정합니다.
+
+### 8-B. Alertmanager + PrometheusRule (in-cluster 알림)
+
+`deployment/observability/` 는 managed overlay 소유가 아닌 수동 설치 자산 —
+이 디렉토리에서 직접 변경합니다.
+
+1. `kube-prometheus-stack/values.yaml`:
+   - `alertmanager.enabled: true`
+   - `alertmanager.config.receivers` — email(SES SMTP) 또는 Slack webhook.
+     SNS 직결은 지원하지 않으므로 SNS 경유가 필요하면 SNS→Lambda→webhook.
+   - `prometheus.prometheusSpec.retention: 7d` + `storageSpec`(gp3 PVC 10Gi+)
+     — 현 `emptyDir`+24h 는 재시작 시 소실.
+2. `serverFiles.alerts`(또는 PrometheusRule) 시작 세트:
+   - `KubePodCrashLooping`, container restart 급증, deployment replica 불일치
+   - `gateway_bedrock_executor_queue_depth > 0` 지속 (큐 포화 → 스케일 한계)
+   - budget/rate-limit 실패율, gateway-proxy 5xx 비율 (export 된 메트릭명 확인 후)
+3. `deployment/observability/install.sh` 재실행 또는 `helm upgrade`.
+4. 검증: 크래시 테스트 파드 → alertmanager UI + 실제 채널 도착 확인.
+   silence 규칙으로 유지보수 창구 묵음 처리.
+
+### 8-C. 앱 에러율 알람 (`log_shipping` 전제)
+
+`log_shipping: true` 가 먼저 적용돼 있어야 합니다 — 로그가 CloudWatch 에
+와야 metric filter 가 잡을 수 있습니다.
+
+```bash
+# ERROR 라인 카운트 → 메트릭 → 알람 (필터 패턴은 로그 포맷에 맞춰 조정)
+aws logs put-metric-filter --region <region> \
+  --log-group-name /aws/eks/<cluster>/fargate-logs \
+  --filter-name gateway-errors --filter-pattern "ERROR" \
+  --metric-transformations metricName=GatewayErrorCount,metricNamespace=LLMGateway,metricValue=1
+aws cloudwatch put-metric-alarm --region <region> \
+  --alarm-name <project>-<env>-app-error-rate \
+  --namespace LLMGateway --metric-name GatewayErrorCount \
+  --statistic Sum --period 300 --evaluation-periods 1 --threshold 10 \
+  --comparison-operator GreaterThanThreshold \
+  --treat-missing-data notBreaching \
+  --alarm-actions "$TOPIC" --ok-actions "$TOPIC"
+```
+
+## 9. 끄기 / 롤백
 
 - **알림만 끄기**: `features.alerting.enabled=false` + env 에서
   `terraform apply -var='enable_alerting=false'` — topic·alarm·구독이 모두
