@@ -27,7 +27,10 @@ features:
   bi_insight: true
 ```
 
-`deploy render` 가 managed overlay tfvars 에 `enable_chat_agent = true` +
+지원 타깃: **eks, ecs**. compose 는 스키마가 에러로 차단한다 (로컬 개발용
+타깃이라 AgentCore 인프라를 만들지 않는다).
+
+**eks**: `deploy render` 가 managed overlay tfvars 에 `enable_chat_agent = true` +
 `enable_chat_db_tools = true` 를 발산하고, `deploy apply` 는 범위 검증을 거쳐
 `module.agentcore_runtime` + `module.irsa` 만 `-target` 적용한다 — ECR repo,
 KMS key, agent execution role, staging bucket(`<env>-staging-<account>`,
@@ -36,6 +39,11 @@ lifecycle 1d), query_db/get_schema Lambda, Lambda SG, admin-api IRSA statement.
 끄기는 managed overlay 계약(켜기만 발산)과 동일하게 **env terraform.tfvars 에서
 수동**으로 `enable_chat_agent = false` 후 env 수준 apply 이다 — overlay 는
 false 를 쓰지 않는다.
+
+**ecs**: render 가 env tfvars 에 같은 플래그를 발산하고 apply 가
+`module.agentcore_runtime` + `chat-reader-pw` task def + admin-api task role
+statement(InvokeAgentRuntime·lambda invoke·staging s3:GetObject)를 만든다 —
+ECS 는 managed overlay 가 없어 env tfvars 로 바로 간다.
 
 ### 2. `deploy apply` — Runtime 자동 프로비저닝
 
@@ -50,8 +58,11 @@ apply 가 `chatagent.ensure_runtime_arn()` 을 호출해:
    - `create_agent_runtime`(containerUri, exec role, `networkMode: PUBLIC`,
      LAMBDA_QUERY_DB·LAMBDA_GET_SCHEMA·CHAT_STAGING_BUCKET·AWS_REGION env)
    - READY 까지 폴링
-3. ARN 을 `--set adminApi.env.AGENTCORE_RUNTIME_ARN=…` + `AGENTCORE_REGION` +
-   `LAMBDA_QUERY_DB` + `CHAT_STAGING_BUCKET` 으로 주입
+3. ARN 주입 — eks: `--set adminApi.env.AGENTCORE_RUNTIME_ARN=…` +
+   `AGENTCORE_REGION` + `LAMBDA_QUERY_DB` + `CHAT_STAGING_BUCKET`.
+   ecs: `agentcore_runtime_arn` 을 extra-vars 로 기록 → 재렌더+재적용으로
+   admin-api task env 에 주입 (나머지 LAMBDA/버킷 env 는 모듈 출력이라
+   첫 apply 때 이미 배선됨)
 
 실패해도 배포는 중단하지 않는다 — env 미주입 상태로 진행돼 `/chat` 은 503
 (graceful-off, web_search 와 같은 의미). Runtime 은 PUBLIC 네트워크 —
@@ -67,6 +78,7 @@ DB 접속은 VPC 부착 query_db Lambda 가 대신한다.
 terraform 은 secret **셸**만 만들고, 프로비저너가 apply 마다 비밀번호를
 동기화한다:
 
+**eks** (ALTER → SM 순서 — SM 선기록 불일치 창 없음):
 1. SM 값이 비어 있으면 `secrets.token_urlsafe(24)` 로 생성
 2. kubectl 일회성 pod(migration 이미지, `llm-gateway-db` 의 master 자격증명)
    이 클러스터 안에서 `ALTER ROLE gateway_chat_reader` 실행 — deploy 호스트는
@@ -74,10 +86,20 @@ terraform 은 secret **셸**만 만들고, 프로비저너가 apply 마다 비�
 3. ALTER 성공 후에만 `put-secret-value` — SM 과 DB 가 불일치 상태로 끝나지
    않는다. 매 apply 재실행돼 수동 변경 드리프트가 자가치유된다.
 
-비밀번호는 argv·SQL·pod spec 에 평문으로 남지 않는다 (SM → 임시 k8s secret
-→ pod env → `psql \password` stdin — 실행 후 임시 secret·pod 삭제).
-kubectl 이 없거나 pod 이 실패하면 경고만 내고 넘어간다 — 그 경우에만 아래
-수동 폴백으로 설정한다:
+**ecs** (SM → ALTER 순서 — task def `secrets` 주입이 태스크 시작 시 SM 을
+해석하므로 SM 기록이 선행돼야 함):
+1. SM 값이 비어 있으면 생성·기록
+2. `aws ecs run-task` — `chat-reader-pw` task def(migration 이미지)가
+   PGPASSWORD(master secret)+CHAT_PW(reader secret)를 `secrets` 주입받아
+   `psql \password` 실행 → exitCode 0 확인
+3. ALTER 실패 시 SM≠DB 불일치가 남지만 다음 apply 가 재시도로 수렴한다 —
+   평문은 어디에도 남지 않는다(task spec 도 SM ARN 만 담음)
+
+비밀번호는 argv·SQL·pod/task spec 에 평문으로 남지 않는다 (eks: SM → 임시
+k8s secret → pod env → `psql \password` stdin — 실행 후 임시 secret·pod
+삭제; ecs: task def `secrets` 주입 → 같은 stdin 경로). kubectl/run-task 가
+없거나 실패하면 경고만 내고 넘어간다 — 그 경우에만 아래 수동 폴백으로
+설정한다:
 
 ```bash
 # DB 에서 롤 비밀번호 설정 (chat_reader 롤은 db/init/08_* 로 이미 존재)

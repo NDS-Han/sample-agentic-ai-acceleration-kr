@@ -41,7 +41,7 @@ data "aws_iam_policy_document" "execution_secrets" {
     actions = [
       "secretsmanager:GetSecretValue",
     ]
-    resources = [
+    resources = concat([
       # 모듈이 만든 app/db 시크릿
       aws_secretsmanager_secret.app.arn,
       aws_secretsmanager_secret.db_app.arn,
@@ -49,7 +49,10 @@ data "aws_iam_policy_document" "execution_secrets" {
       var.redis_auth_token_secret_arn,
       var.db_master_secret_arn,
       "arn:aws:secretsmanager:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:secret:rds!cluster-*",
-    ]
+      ], var.chat_reader_secret_arn != "" ? [
+      # chat-reader-pw task def 의 CHAT_PW 주입용
+      var.chat_reader_secret_arn,
+    ] : [])
   }
 }
 
@@ -269,6 +272,55 @@ data "aws_iam_policy_document" "admin_api" {
         variable = "kms:ViaService"
         values   = ["s3.${var.aws_region}.amazonaws.com"]
       }
+    }
+  }
+
+  # ── bi_insight — EKS irsa 모듈의 세 statement 와 동일 스코프 이식 ──
+  # Runtime id 는 생성 후에만 알 수 있어 InvokeGateway 의 gateway/* 와 같은
+  # 패턴으로 runtime/* 스코프.
+  # Runtime ARN 에는 생성 시 붙는 id 가 들어가 terraform 시점에 특정할 수
+  # 없어서 region+계정의 runtime/* 로 스코프한다 (InvokeGateway 의 gateway/*
+  # 패턴과 동일 — irsa 모듈 ChatAgentRuntimeInvoke 이식).
+  dynamic "statement" {
+    for_each = var.agentcore_runtime_arn != "" || var.chat_lambda_query_db != "" ? [1] : []
+    content {
+      sid    = "ChatAgentRuntimeInvoke"
+      effect = "Allow"
+      actions = [
+        "bedrock-agentcore:InvokeAgentRuntime",
+      ]
+      resources = [
+        "arn:aws:bedrock-agentcore:${var.chat_agent_region}:${data.aws_caller_identity.current.account_id}:runtime/*",
+      ]
+    }
+  }
+
+  # /query 재실행 경로가 query_db Lambda 를 admin-api task 에서 직접 invoke 한다
+  # (irsa 모듈 ChatAgentToolLambdaInvoke 이식).
+  dynamic "statement" {
+    for_each = length(var.chat_lambda_function_names) > 0 ? [1] : []
+    content {
+      sid    = "ChatAgentToolLambdaInvoke"
+      effect = "Allow"
+      actions = [
+        "lambda:InvokeFunction",
+      ]
+      resources = [
+        for name in var.chat_lambda_function_names :
+        "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${name}"
+      ]
+    }
+  }
+
+  # BI 리포트 다운로드 presigned URL — staging 버킷의 reports/ prefix 만
+  # (irsa 모듈 ChatAgentReportPresign 이식).
+  dynamic "statement" {
+    for_each = var.chat_staging_bucket_arn != "" ? [1] : []
+    content {
+      sid       = "ChatAgentReportPresign"
+      effect    = "Allow"
+      actions   = ["s3:GetObject"]
+      resources = ["${var.chat_staging_bucket_arn}/reports/*"]
     }
   }
 }

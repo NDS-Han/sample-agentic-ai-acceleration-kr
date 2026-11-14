@@ -225,5 +225,46 @@ module "gateway" {
   agentcore_gateway_url  = var.agentcore_gateway_url
   litellm_pricing_lambda = var.litellm_pricing_lambda
 
+  # ── bi_insight — agentcore_runtime_arn 은 provisioner 산출물이라 var 경로.
+  # 나머지 연결값은 모듈 출력이라 참조로 바로 넘긴다.
+  agentcore_runtime_arn   = var.agentcore_runtime_arn
+  chat_agent_region       = var.enable_chat_agent ? var.chat_agent_region : ""
+  chat_lambda_query_db    = var.enable_chat_db_tools ? module.agentcore_runtime[0].query_db_function_name : ""
+  chat_lambda_get_schema  = var.enable_chat_db_tools ? module.agentcore_runtime[0].get_schema_function_name : ""
+  chat_staging_bucket     = var.enable_chat_agent ? module.agentcore_runtime[0].staging_bucket_name : ""
+  chat_staging_bucket_arn = var.enable_chat_agent ? module.agentcore_runtime[0].staging_bucket_arn : ""
+  chat_lambda_function_names = var.enable_chat_db_tools ? [
+    module.agentcore_runtime[0].query_db_function_name,
+    module.agentcore_runtime[0].get_schema_function_name,
+  ] : []
+  chat_reader_secret_arn = var.enable_chat_db_tools ? module.agentcore_runtime[0].chat_reader_secret_arn : ""
+
+  tags = var.tags
+}
+
+# ─── admin-chat-agent (features.bi_insight) ─────────────────────────────────
+# EKS env 의 배선과 동일 — query_db Lambda 는 Aurora cluster endpoint 로 직접
+# 접속한다 (chat_reader 는 RDS Proxy 미등록 — EKS 주석과 같은 이유).
+module "agentcore_runtime" {
+  count  = var.enable_chat_agent ? 1 : 0
+  source = "../../modules/agentcore-runtime"
+
+  project            = var.project
+  environment        = var.environment
+  vpc_id             = module.vpc.vpc_id
+  private_subnet_ids = module.vpc.private_subnet_ids
+
+  bedrock_allowed_model_arns = var.bedrock_allowed_model_arns
+  cognito_user_pool_arn      = module.cognito.user_pool_arn
+  cognito_issuer_url         = module.cognito.issuer_url
+  cognito_audiences          = [module.cognito.client_id]
+
+  staging_lifecycle_days = 1
+
+  enable_db_tools          = var.enable_chat_db_tools
+  aurora_endpoint          = module.aurora.cluster_endpoint
+  aurora_security_group_id = module.aurora.security_group_id
+  db_name                  = "gateway"
+
   tags = var.tags
 }

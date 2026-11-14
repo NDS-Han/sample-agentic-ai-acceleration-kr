@@ -83,3 +83,37 @@ output "db_endpoint" {
 output "redis_endpoint" {
   value = module.elasticache.primary_endpoint_address
 }
+
+# ─── admin-chat-agent (enable_chat_agent=true 일 때만) ───
+output "chat_agent_ecr_url" {
+  value       = try(module.agentcore_runtime[0].ecr_repository_url, null)
+  description = "admin-chat-agent 컨테이너 image 를 push 할 ECR URL"
+}
+output "chat_agent_execution_role_arn" {
+  value       = try(module.agentcore_runtime[0].agent_execution_role_arn, null)
+  description = "AgentCore CreateAgentRuntime 호출 시 전달할 execution role ARN"
+}
+output "chat_agent_staging_bucket" {
+  value       = try(module.agentcore_runtime[0].staging_bucket_name, null)
+  description = "SQL → Code Specialist 데이터 전달용 S3 staging bucket"
+}
+output "chat_agent_name" {
+  value       = try(module.agentcore_runtime[0].agent_name, null)
+  description = "AgentCore Runtime 등록 시 사용할 agent name"
+}
+output "chat_agent_query_db_function" {
+  value       = try(module.agentcore_runtime[0].query_db_function_name, null)
+  description = "agent/admin-api 의 LAMBDA_QUERY_DB env 값"
+}
+output "chat_agent_get_schema_function" {
+  value       = try(module.agentcore_runtime[0].get_schema_function_name, null)
+  description = "agent/admin-api 의 LAMBDA_GET_SCHEMA env 값"
+}
+output "chat_agent_reader_secret_arn" {
+  value       = try(module.agentcore_runtime[0].chat_reader_secret_arn, null)
+  description = "gateway_chat_reader 비밀번호 secret ARN — provisioner 가 동기화"
+}
+output "chat_reader_pw_task_definition_arn" {
+  value       = try(module.gateway.chat_reader_pw_task_definition_arn, null)
+  description = "chat_reader 비밀번호 동기화 task def — provisioner run-task 대상"
+}

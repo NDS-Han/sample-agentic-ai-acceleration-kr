@@ -22,11 +22,15 @@ Subcommands:
     status    현재 Runtime 의 arn/status 를 출력.
     teardown  Runtime 삭제 (terraform 인프라는 그대로 남음).
 
-비밀번호 경로: deploy EC2 는 게이트웨이 VPC 밖이라 psql 직접 접속이 안 되지만
-kubectl 은 된다 — migration 이미지(postgresql-client 내장)로 일회성 파드를
-띄워 master 자격증명(llm-gateway-db secret)으로 ALTER ROLE 을 실행한다.
-비밀번호는 SM → 임시 k8s secret → pod env 로만 흐르고 argv/pod spec 에는
-평문이 남지 않는다 (실행 후 임시 secret+pod 삭제).
+비밀번호 경로: deploy 호스트는 게이트웨이 VPC 밖이라 psql 직접 접속이 안
+되지만 클러스터 내부 실행은 된다.
+  eks: kubectl 일회성 pod(migration 이미지) — 임시 k8s secret → pod env
+       → psql "password" stdin. ALTER 성공 후에만 put-secret-value.
+  ecs: aws ecs run-task(chat-reader-pw task def) — task def 의 secrets 필드가
+       SM 두 개(master + chat_reader)를 env 로 주입 → 같은 "password" stdin.
+       secrets 는 태스크 시작 시 해석되므로 ECS 는 SM 기록이 ALTER 에 선행한다
+       — ALTER 실패 시 SM≠DB 불일치가 남지만 다음 apply 재시도가 수렴한다.
+어느 쪽이든 argv/SQL 텍스트/실행 spec 에 평문 비밀번호는 남지 않는다.
 
 Env:
     REGION              Runtime 리전 (default ap-northeast-2 — admin-api 기본값과 일치)
@@ -41,6 +45,7 @@ Env:
 
 DB 비밀번호 단계 (chat_reader):
     CHAT_READER_SECRET_ARN  terraform output chat_agent_reader_secret_arn
+    ─ eks 경로 (ECS_* 미설정 시) ─
     K8S_NAMESPACE     게이트웨이 네임스페이스 (default llm-gateway)
     KUBE_CONTEXT      kubectl context (미지정 시 current-context)
     MIGRATION_IMAGE   psql 이 포함된 이미지 URI (llm-gateway/migration:<tag>)
@@ -49,7 +54,13 @@ DB 비밀번호 단계 (chat_reader):
     DB_MASTER_USER    default postgres_admin
     DB_MASTER_SECRET  master 자격증명 k8s secret (default llm-gateway-db)
     DB_MASTER_KEY     그 안의 password 키 (default master_password)
-    위 값이 비어 있으면 비밀번호 단계는 건너뛴다 (db_tools 미사용 환경).
+    ─ ecs 경로 (ECS_PW_TASKDEF_ARN 설정 시 자동 선택) ─
+    ECS_CLUSTER       클러스터 이름/ARN (output ecs_cluster_name)
+    ECS_PW_TASKDEF_ARN  chat-reader-pw task def ARN
+    ECS_SUBNETS       run-task 서브넷 — 쉼표 목록 (output private_subnet_ids)
+    ECS_SG            task SG id (output task_security_group_id)
+    ECS_REGION        run-task 리전 (미지정 시 secret ARN 에서 추출)
+    CHAT_READER_SECRET_ARN/ECS_PW_TASKDEF_ARN 둘 다 비어 있으면 이 단계는 건너뛴다.
 """
 from __future__ import annotations
 
@@ -161,28 +172,14 @@ def _kubectl(*argv: str, stdin: str | None = None) -> subprocess.CompletedProces
 
 
 def ensure_db_password(dry: bool) -> None:
-    """gateway_chat_reader 비밀번호를 보장한다 — deploy EC2 는 게이트웨이 VPC 밖
-    이라 psql 이 직접 못 닿으므로, 클러스터 안의 일회성 pod(migration 이미지)가
-    master 자격증명(llm-gateway-db secret)으로 ALTER ROLE 을 대신 실행한다.
-
-    비밀번호 흐름: provisioner 가 생성 → Secrets Manager (query_db Lambda 가 읽음)
-    → 임시 k8s secret → pod env → psql \\password stdin. argv·SQL 텍스트·pod spec
-    어디에도 평문이 남지 않는다 (\\password 는 새 비밀번호를 stdin 프롬프트로 받음).
-    """
+    """gateway_chat_reader 비밀번호를 보장한다 — deploy 호스트는 게이트웨이
+    VPC 밖이라 psql 이 직접 못 닿으므로 클러스터 안 실행 경로를 쓴다.
+    eks: kubectl 일회성 pod(migration 이미지). ecs: aws ecs run-task
+    (chat-reader-pw task def). ECS_PW_TASKDEF_ARN 이 있으면 ecs 경로."""
     sm_arn = os.environ.get("CHAT_READER_SECRET_ARN", "")
     if not sm_arn:
         log("CHAT_READER_SECRET_ARN 미지정 — chat_reader 비밀번호 단계 건너뜀")
         return
-    if not os.environ.get("MIGRATION_IMAGE") or not os.environ.get("DB_HOST"):
-        log("⚠ MIGRATION_IMAGE/DB_HOST 미지정 — chat_reader 비밀번호 단계 "
-            "건너뜀 (query_db Lambda 가 이전 비밀번호를 계속 씁니다)")
-        return
-    if subprocess.run(["which", "kubectl"],
-                      capture_output=True).returncode != 0:
-        log("⚠ kubectl 없음 — chat_reader 비밀번호 동기화 건너뜀 "
-            "(SM 값과 DB 가 불일치하면 query_db 가 실패합니다)")
-        return
-
     sm_region = sm_arn.split(":")[3]
     sm = boto3.client("secretsmanager", region_name=sm_region)
     pw = None
@@ -195,12 +192,76 @@ def ensure_db_password(dry: bool) -> None:
         log("chat_reader 비밀번호 — SM 기존 값 재사용")
     else:
         pw = secrets.token_urlsafe(24)  # alnum+-_ — psql \\password 가 처리
-        if dry:
-            log(f"[dry-run] SM secret {sm_arn} 에 비밀번호 생성·저장 + ALTER ROLE")
-            return
 
+    if os.environ.get("ECS_PW_TASKDEF_ARN"):
+        _alter_via_ecs(sm, sm_arn, pw, fresh, dry)
+    else:
+        _alter_via_kubectl(sm, sm_arn, pw, fresh, dry)
+
+
+def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
+    cluster = os.environ.get("ECS_CLUSTER", "")
+    taskdef = os.environ["ECS_PW_TASKDEF_ARN"]
+    subnets = [s.strip() for s in
+               os.environ.get("ECS_SUBNETS", "").split(",") if s.strip()]
+    sg = os.environ.get("ECS_SG", "")
+    region = os.environ.get("ECS_REGION") or sm_arn.split(":")[3]
+    if not (cluster and subnets and sg):
+        log("⚠ ECS_CLUSTER/ECS_SUBNETS/ECS_SG 부족 — 비밀번호 동기화 건너뜀")
+        return
     if dry:
-        log("[dry-run] kubectl pod 으로 ALTER ROLE gateway_chat_reader")
+        log(f"[dry-run] ecs run-task {taskdef} 로 ALTER ROLE gateway_chat_reader"
+            f"{' + SM 생성' if fresh else ''}")
+        return
+    # task def 의 secrets 주입은 태스크 시작 시 SM 을 해석한다 — SM 기록이
+    # ALTER 실행보다 선행돼야 컨테이너가 새 값을 받는다 (eks 경로와 순서가 다름).
+    if fresh:
+        sm.put_secret_value(SecretId=sm_arn, SecretString=pw)
+        log("chat_reader 비밀번호 생성 → Secrets Manager")
+    ecs = boto3.client("ecs", region_name=region)
+    r = ecs.run_task(
+        cluster=cluster, taskDefinition=taskdef, launchType="FARGATE",
+        networkConfiguration={"awsvpcConfiguration": {
+            "subnets": subnets, "securityGroups": [sg],
+            "assignPublicIp": "DISABLED"}})
+    if r.get("failures"):
+        log(f"⚠ run-task 실패 — 다음 apply 재시도로 수렴합니다: "
+            f"{r['failures'][0].get('reason')}")
+        return
+    task_arn = r["tasks"][0]["taskArn"]
+    log(f"chat_reader 비밀번호 task 실행: {task_arn.rsplit('/', 1)[-1]}")
+    ecs.get_waiter("tasks_stopped").wait(
+        cluster=cluster, tasks=[task_arn],
+        WaiterConfig={"Delay": 5, "MaxAttempts": 60})
+    desc = ecs.describe_tasks(cluster=cluster, tasks=[task_arn])
+    code = (desc["tasks"][0]["containers"][0].get("exitCode")
+            if desc.get("tasks") else None)
+    if code == 0:
+        log("ALTER ROLE gateway_chat_reader 완료 — 비밀번호 동기화됨")
+    else:
+        reason = desc["tasks"][0].get("stoppedReason", "?")
+        log(f"⚠ ALTER ROLE task 실패(exit={code}, {reason}) — SM≠DB 불일치가 "
+            "다음 apply 재시도로 수렴합니다. 로그: "
+            f"aws logs tail /ecs/*-chat-reader-pw --region {region}")
+
+
+def _alter_via_kubectl(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
+    """비밀번호 흐름: provisioner 가 생성 → Secrets Manager (query_db Lambda 가 읽음)
+    → 임시 k8s secret → pod env → psql \\password stdin. argv·SQL 텍스트·pod spec
+    어디에도 평문이 남지 않는다 (\\password 는 새 비밀번호를 stdin 프롬프트로 받음).
+    """
+    if not os.environ.get("MIGRATION_IMAGE") or not os.environ.get("DB_HOST"):
+        log("⚠ MIGRATION_IMAGE/DB_HOST 미지정 — chat_reader 비밀번호 단계 "
+            "건너뜀 (query_db Lambda 가 이전 비밀번호를 계속 씁니다)")
+        return
+    if subprocess.run(["which", "kubectl"],
+                      capture_output=True).returncode != 0:
+        log("⚠ kubectl 없음 — chat_reader 비밀번호 동기화 건너뜀 "
+            "(SM 값과 DB 가 불일치하면 query_db 가 실패합니다)")
+        return
+    if dry:
+        log(f"[dry-run] SM secret {sm_arn} 에 비밀번호{' 생성·저장' if fresh else ''}"
+            " + kubectl pod 으로 ALTER ROLE gateway_chat_reader")
         return
 
     tmp_secret = f"chat-reader-pw-{secrets.token_hex(4)}"

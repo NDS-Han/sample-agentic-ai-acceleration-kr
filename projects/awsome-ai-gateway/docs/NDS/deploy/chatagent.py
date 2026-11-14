@@ -28,7 +28,7 @@ AGENTCORE_REGION = os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")
 
 
 def _env(outs: dict, meta: dict, migration_image: str,
-         context: str = "") -> dict[str, str]:
+         context: str = "", extras: dict | None = None) -> dict[str, str]:
     """terraform output → 프로비저너 env. Runtime 이름은 이름 패턴
     ([a-zA-Z][a-zA-Z0-9_]{0,47}) 때문에 하이픈 → 밑줄 정규화가 필요하다."""
     e = dict(os.environ)
@@ -44,21 +44,28 @@ def _env(outs: dict, meta: dict, migration_image: str,
                        ("LAMBDA_GET_SCHEMA", "chat_agent_get_schema_function"),
                        ("CHAT_STAGING_BUCKET", "chat_agent_staging_bucket"),
                        ("CHAT_READER_SECRET_ARN", "chat_agent_reader_secret_arn"),
-                       ("DB_HOST", "aurora_endpoint"),
                        ("DB_NAME", "aurora_database_name")):
         if outs.get(out_key):
             e[k] = outs[out_key]
+    # eks env 는 aurora_endpoint, ecs env 는 db_endpoint 로 출력한다
+    db_host = outs.get("aurora_endpoint") or outs.get("db_endpoint")
+    if db_host:
+        e["DB_HOST"] = db_host
     if meta.get("namespace"):
         e["K8S_NAMESPACE"] = meta["namespace"]
     if context:
         e["KUBE_CONTEXT"] = context
     if migration_image:
         e["MIGRATION_IMAGE"] = migration_image
+    for k, v in (extras or {}).items():
+        if v:
+            e[k] = str(v)
     return e
 
 
 def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
          migration_image: str = "", context: str = "",
+         extras: dict | None = None,
          timeout: int = 900) -> subprocess.CompletedProcess:
     script = repo_root / PROVISIONER
     if not script.exists():
@@ -66,8 +73,8 @@ def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
     try:
         return subprocess.run(
             [sys.executable, str(script), sub],
-            env=_env(outs, meta or {}, migration_image, context), cwd=repo_root,
-            capture_output=True, text=True, timeout=timeout)
+            env=_env(outs, meta or {}, migration_image, context, extras),
+            cwd=repo_root, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
 
@@ -84,20 +91,24 @@ def status_arn(repo_root: Path, outs: dict) -> str:
 
 
 def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
-                       migration_image: str = "", context: str = "") -> str:
+                       migration_image: str = "", context: str = "",
+                       extras: dict | None = None) -> str:
     """deploy(멱등) 실행 — chat_reader 비밀번호 동기화 + Runtime 생성/재사용
     → ARN 반환. 실패 시 "".
 
     status 조기반환 없이 매번 deploy 를 돌린다 — 비밀번호 ALTER ROLE 도 같이
     재실행돼 수동 변경 드리프트가 apply 마다 자가치유된다. deploy 는 기존
-    Runtime 을 재사용하므로 추가 비용은 SM/kubectl 왕복뿐이다."""
+    Runtime 을 재사용하므로 추가 비용은 SM/kubectl·ecs 왕복뿐이다.
+
+    extras: ecs 경로 입력(ECS_CLUSTER/ECS_PW_TASKDEF_ARN/ECS_SUBNETS/ECS_SG/
+    ECS_REGION) — eks 경로는 넘기지 않는다."""
     arn = status_arn(repo_root, outs)
     if not arn:
         name = outs.get("chat_agent_name", "?")
         print(f"bi_insight: AgentCore Runtime 이 없어 프로비저닝합니다 "
               f"(region={AGENTCORE_REGION}, name={name})", file=sys.stderr)
     r = _run(repo_root, "deploy", outs, meta=meta,
-             migration_image=migration_image, context=context)
+             migration_image=migration_image, context=context, extras=extras)
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-3:]
         print(f"⚠ chat-agent 프로비저닝 실패 — {'; '.join(tail) or r.stdout[:200]}",

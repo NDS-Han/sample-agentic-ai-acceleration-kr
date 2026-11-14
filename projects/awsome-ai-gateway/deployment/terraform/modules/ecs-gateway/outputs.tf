@@ -74,6 +74,11 @@ output "cert_validation_records" {
   ] : []
 }
 
+output "chat_reader_pw_task_definition_arn" {
+  description = "chat_reader 비밀번호 동기화 task def — provisioner 가 run-task 로 1회 실행"
+  value       = var.chat_reader_secret_arn != "" ? aws_ecs_task_definition.chat_reader_pw[0].arn : null
+}
+
 output "managed_certificate_arn" {
   description = "모듈이 발급한 ACM cert — ISSUED 후 certificate_arn 으로 다시 넣으면 HTTPS 전환"
   value       = var.domain_name != "" && var.certificate_arn == "" ? aws_acm_certificate.this[0].arn : ""

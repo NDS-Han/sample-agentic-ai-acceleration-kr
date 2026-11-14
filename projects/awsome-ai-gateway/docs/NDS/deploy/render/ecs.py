@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from .. import schema
@@ -194,6 +195,14 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
             f"arn:aws:bedrock:{cfg.aws.region}::inference-profile/*",
         ]
 
+    # bi_insight — managed overlay(EKS)와 달리 ecs 는 env tfvars 로 바로 발산.
+    # agentcore_runtime_arn 은 extra_vars 로 들어온다(apply 후처리가 기록).
+    if cfg.features.bi_insight:
+        vars_["enable_chat_agent"] = True
+        vars_["enable_chat_db_tools"] = True
+        vars_["chat_agent_region"] = os.environ.get(
+            "CHAT_AGENT_REGION", "ap-northeast-2")
+
     vars_.update(extra_vars or {})
     return vars_
 
@@ -297,8 +306,11 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "함수 삭제만 terraform 범위 밖입니다 (teardown 이 별도 정리).")
     if cfg.features.bi_insight:
         notes.append(
-            "bi_insight: agentcore_runtime 모듈 연결은 미구현입니다 — env main.tf 에 "
-            "module.agentcore_runtime 추가가 필요합니다 (EKS env 의 배선 참조).")
+            "bi_insight: apply 가 enable_chat_agent/db_tools tfvars 로 "
+            "module.agentcore_runtime+chat-reader-pw task def 를 만들고 "
+            "provision_agentcore_chatagent.py 로 Runtime·비밀번호를 멱등 "
+            "동기화합니다 — ARN 은 agentcore_runtime_arn tfvars 로 기록됩니다 "
+            "(boto3 agentcore/ecs/secretsmanager 권한 필요).")
     if cfg.domain.mode == "cloudfront-temp":
         notes.append(
             "domain.mode=cloudfront-temp: ecs 경로에 CloudFront 모듈이 없어 domain=none "

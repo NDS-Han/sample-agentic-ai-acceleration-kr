@@ -356,10 +356,10 @@ class GatewayConfig:
             w.append("web_search 는 AgentCore(us-east-1) 의존 — apply 가 자동 "
                      "프로비저닝합니다(boto3 + us-east-1 agentcore/IAM 권한 필요). "
                      "과금은 ~$7/1,000 queries, idle ≈ $0 입니다.")
-        if self.features.bi_insight and self.deploy.target == "eks":
+        if self.features.bi_insight and self.deploy.target in ("eks", "ecs"):
             w.append("bi_insight 는 AgentCore Runtime(ap-northeast-2 기본, "
-                     "CHAT_AGENT_REGION 으로 변경) 의존 — apply 가 managed "
-                     "overlay 로 module.agentcore_runtime+irsa 를 만들고 "
+                     "CHAT_AGENT_REGION 으로 변경) 의존 — apply 가 "
+                     "module.agentcore_runtime(+irsa/task-role)을 만들고 "
                      "provision_agentcore_chatagent.py 로 Runtime 을 멱등 "
                      "생성합니다(boto3 agentcore 권한 + ECR 이미지 필요 — "
                      "없으면 docker/finch 빌드를 시도합니다). chat_reader DB "

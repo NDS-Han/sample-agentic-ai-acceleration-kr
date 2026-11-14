@@ -145,6 +145,15 @@ locals {
       var.litellm_pricing_lambda != "" ? { LITELLM_PRICING_LAMBDA = var.litellm_pricing_lambda } : {},
       # 본문 뷰어용 버킷 이름 — 읽기는 admin-api 가 하므로 여기에도 주입한다
       var.body_log_bucket_arn != "" ? { BODY_LOG_S3_BUCKET = local.body_log_bucket_name } : {},
+      # bi_insight — helm adminApi.env.* 와 같은 계약. ARN 비면 라우터가 503
+      # graceful-off (EKS 경로와 동일 의미).
+      var.agentcore_runtime_arn != "" ? {
+        AGENTCORE_RUNTIME_ARN = var.agentcore_runtime_arn
+        AGENTCORE_REGION      = var.chat_agent_region
+      } : {},
+      var.chat_lambda_query_db != "" ? { LAMBDA_QUERY_DB = var.chat_lambda_query_db } : {},
+      var.chat_lambda_get_schema != "" ? { LAMBDA_GET_SCHEMA = var.chat_lambda_get_schema } : {},
+      var.chat_staging_bucket != "" ? { CHAT_STAGING_BUCKET = var.chat_staging_bucket } : {},
     )
 
     admin-ui = merge(local.common_env, {
@@ -345,4 +354,60 @@ resource "aws_ecs_task_definition" "svc" {
   }])
 
   tags = var.tags
+}
+
+# ------------------------------------------------------------------------------
+# chat_reader 비밀번호 동기화 task — EKS 경로의 kubectl 일회성 pod 에 해당.
+# provision_agentcore_chatagent.py 가 `aws ecs run-task` 로 1회 실행한다.
+# 비밀번호는 `secrets` 주입이라 task spec/DescribeTasks 어디에도 평문이 없고,
+# psql \password 는 새 비밀번호를 stdin 으로 받아 SQL 텍스트에도 안 실린다.
+# ------------------------------------------------------------------------------
+resource "aws_ecs_task_definition" "chat_reader_pw" {
+  count = var.chat_reader_secret_arn != "" ? 1 : 0
+
+  family                   = "${local.name_prefix}-chat-reader-pw"
+  requires_compatibilities = ["FARGATE"]
+  network_mode             = "awsvpc"
+  cpu                      = 256
+  memory                   = 512
+  execution_role_arn       = aws_iam_role.execution.arn
+  task_role_arn            = aws_iam_role.baseline.arn
+
+  container_definitions = jsonencode([{
+    name      = "chat-reader-pw"
+    image     = "${local.registry}/migration:${var.image_tag}"
+    essential = true
+    command = ["sh", "-c",
+    "printf \"%s\\n%s\\n\" \"$CHAT_PW\" \"$CHAT_PW\" | psql -v ON_ERROR_STOP=1 -c \"\\password gateway_chat_reader\""]
+
+    environment = [
+      { name = "PGHOST", value = var.db_host },
+      { name = "PGUSER", value = var.db_master_username },
+      { name = "PGDATABASE", value = var.db_name },
+      { name = "PGSSLMODE", value = "require" },
+    ]
+
+    secrets = [
+      { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
+      { name = "CHAT_PW", valueFrom = var.chat_reader_secret_arn },
+    ]
+
+    logConfiguration = {
+      logDriver = "awslogs"
+      options = {
+        "awslogs-group"         = aws_cloudwatch_log_group.chat_reader_pw[0].name
+        "awslogs-region"        = data.aws_region.current.name
+        "awslogs-stream-prefix" = "chat-reader-pw"
+      }
+    }
+  }])
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "chat_reader_pw" {
+  count             = var.chat_reader_secret_arn != "" ? 1 : 0
+  name              = "/ecs/${local.name_prefix}/chat-reader-pw"
+  retention_in_days = 30
+  tags              = var.tags
 }

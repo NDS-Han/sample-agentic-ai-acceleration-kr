@@ -313,6 +313,36 @@ variable "agentcore_gateway_url" {
   default     = ""
 }
 
+# ─── admin-chat-agent (features.bi_insight) ───
+# EKS env 와 같은 플래그 — module.agentcore_runtime 게이트.
+variable "enable_chat_agent" {
+  description = "admin-chat-agent 인프라 (ECR + S3 staging + IAM + KMS) 생성 여부"
+  type        = bool
+  default     = false
+}
+
+variable "enable_chat_db_tools" {
+  description = "admin-chat-agent 의 query_db/get_schema Lambda + reader secret + SG 생성 여부"
+  type        = bool
+  default     = false
+}
+
+# AgentCore Runtime 리전 — provisioner(provision_agentcore_chatagent.py REGION)
+# 와 반드시 같아야 한다. admin-api 코드 기본값(ap-northeast-2)과 일치시켰다.
+variable "chat_agent_region" {
+  description = "admin-chat-agent AgentCore Runtime 을 만들 리전 (task role statement 스코프용)"
+  type        = string
+  default     = "ap-northeast-2"
+}
+
+# provisioner 가 만든 Runtime ARN — deploy apply 가 extra-vars 로 tfvars 에
+# 기록한다 (agentcore_gateway_url 과 같은 2-phase 패턴).
+variable "agentcore_runtime_arn" {
+  description = "AgentCore Runtime ARN — admin-api task env 주입용. 비면 /chat 은 503"
+  type        = string
+  default     = ""
+}
+
 variable "litellm_pricing_lambda" {
   description = "LiteLLM 단가 조회 Lambda 이름 — 비면 litellm 소스 비활성 (ops/NDS-01)"
   type        = string

@@ -464,6 +464,58 @@ variable "agentcore_gateway_url" {
   default     = ""
 }
 
+# ─── admin-chat-agent (features.bi_insight) ───
+# agentcore_runtime_arn 만 apply 후처리(provisioner)의 동적 값 — 나머지 연결값은
+# 모듈 출력이라 terraform 참조로 바로 배선된다. ARN 주입 시 admin-api env 가
+# 업데이트된다.
+variable "agentcore_runtime_arn" {
+  description = "AgentCore Runtime ARN (provisioner 가 생성, deploy apply 가 tfvars 에 기록)"
+  type        = string
+  default     = ""
+}
+
+variable "chat_agent_region" {
+  description = "AgentCore Runtime 리전 — provisioner REGION 과 반드시 일치"
+  type        = string
+  default     = "ap-northeast-2"
+}
+
+variable "chat_lambda_query_db" {
+  description = "query_db Lambda 이름 — admin-api LAMBDA_QUERY_DB env"
+  type        = string
+  default     = ""
+}
+
+variable "chat_lambda_get_schema" {
+  description = "get_schema Lambda 이름 — admin-api LAMBDA_GET_SCHEMA env"
+  type        = string
+  default     = ""
+}
+
+variable "chat_staging_bucket" {
+  description = "BI 리포트 staging 버킷 이름 — admin-api CHAT_STAGING_BUCKET env"
+  type        = string
+  default     = ""
+}
+
+variable "chat_staging_bucket_arn" {
+  description = "staging 버킷 ARN — admin-api task role 의 s3:GetObject 스코프"
+  type        = string
+  default     = ""
+}
+
+variable "chat_lambda_function_names" {
+  description = "query_db/get_schema Lambda 이름 목록 — admin-api task role 의 lambda:InvokeFunction 스코프 (ARN 은 모듈이 deploy 리전으로 조립)"
+  type        = list(string)
+  default     = []
+}
+
+variable "chat_reader_secret_arn" {
+  description = "gateway_chat_reader 비밀번호 secret ARN — 비면 chat-reader-pw task def 를 만들지 않는다"
+  type        = string
+  default     = ""
+}
+
 variable "litellm_pricing_lambda" {
   description = "LiteLLM 단가 조회 Lambda 이름 — 비면 admin-api 의 litellm 소스 비활성 (ops/NDS-01)"
   type        = string

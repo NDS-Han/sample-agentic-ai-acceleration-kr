@@ -208,14 +208,35 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         push_images(cfg, partial, repo_root)
     outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)
 
-    # 동적 주소가 새로 발견되면 기록하고 task-def 반영을 위해 한 번 더 apply
+    # bi_insight — 인프라(module.agentcore_runtime + chat-reader-pw task def)는
+    # 위 terraform_apply 가 만들었으므로 여기서 Runtime 프로비저닝 + chat_reader
+    # 비밀번호 동기화(ecs run-task)를 실행하고 ARN 을 extra-vars 로 기록한다.
+    # 실패해도 배포를 중단하지 않는다 — env 미주입으로 라우터가 503 graceful-off.
+    runtime_arn = ""
+    if cfg.features.bi_insight:
+        from . import chatagent
+        runtime_arn = chatagent.ensure_runtime_arn(repo_root, outputs, extras={
+            "ECS_CLUSTER": outputs.get("ecs_cluster_name"),
+            "ECS_PW_TASKDEF_ARN": outputs.get("chat_reader_pw_task_definition_arn"),
+            "ECS_SUBNETS": ",".join(outputs.get("private_subnet_ids") or []),
+            "ECS_SG": outputs.get("task_security_group_id"),
+            "ECS_REGION": cfg.aws.region,
+        })
+        if not runtime_arn:
+            print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
+                  "503 (미구성) 상태로 진행합니다", file=sys.stderr)
+
+    # 동적 값(Runtime ARN·외부 URL)이 새로 발견되면 기록하고 task-def 반영을
+    # 위해 한 번 더 apply — Runtime ARN 은 admin-api env 주입이라 필수 재적용.
     existing = load_extra_vars(gen_dir)
     discovered = _derived_url_vars(cfg, outputs)
+    if runtime_arn:
+        discovered["agentcore_runtime_arn"] = runtime_arn
     if discovered and any(existing.get(k) != v for k, v in discovered.items()):
         existing.update(discovered)
         _save_extra_vars(gen_dir, existing)
         ecs_render.render(cfg, gen_dir, extra_vars=existing)
-        print("외부 URL 발견 — NEXTAUTH_URL 등 반영을 위해 재적용...", file=sys.stderr)
+        print("동적 값 발견 — task-def env 반영을 위해 재적용...", file=sys.stderr)
         outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)
 
     wait_services(cfg, outputs)
