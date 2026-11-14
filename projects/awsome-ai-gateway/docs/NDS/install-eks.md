@@ -28,8 +28,10 @@
 
 후속 수동 단계: `smoke-test.sh --env <env>` 앱 경로 스모크. 모델 alias·단가는
 init SQL + alembic + LiteLLM pricing Lambda가 자동 시드합니다. **routing
-profiles 는 SQL 로 확인·정규화**해야 합니다 — 시드의 크로스계정 ARN이 다른
-계정에서는 AssumeRole 실패를 유발합니다 → [operations.md](operations.md#3-routing-profiles--크로스계정) §3.
+profiles 는 SQL 로 확인**하세요 — migration 0055가 샘플 크로스계정 ARN을
+비우지만, 이전 이미지로 돌던 환경엔 남아있을 수 있고 그러면 AssumeRole 실패로
+전 요청이 깨집니다 (`default_model` 도 NULL 확인) →
+[operations.md](operations.md#3-routing-profiles--크로스계정) §3.
 
 - **env scaffold 주의**: 생성된 `terraform.tfvars`의 `eks_cluster_version`·
   `eks_addon_versions`·`tags`는 템플릿 기본값 — 조직에 맞게 검토한 뒤
