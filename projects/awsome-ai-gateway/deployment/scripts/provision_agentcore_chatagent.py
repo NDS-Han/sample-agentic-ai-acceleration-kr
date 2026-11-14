@@ -182,24 +182,38 @@ def ensure_db_password(dry: bool) -> None:
         return
     sm_region = sm_arn.split(":")[3]
     sm = boto3.client("secretsmanager", region_name=sm_region)
-    pw = None
+    raw = None
     try:
-        pw = sm.get_secret_value(SecretId=sm_arn).get("SecretString")
+        raw = sm.get_secret_value(SecretId=sm_arn).get("SecretString")
     except ClientError:
         pass
-    fresh = not pw
-    if pw:
-        log("chat_reader 비밀번호 — SM 기존 값 재사용")
-    else:
+    pw = None
+    write = False
+    if raw:
+        try:
+            # query_db / seed_dev_data 는 {"username","password"} JSON 계약.
+            pw = json.loads(raw)["password"]
+            log("chat_reader 비밀번호 — SM 기존 값 재사용")
+        except ValueError:
+            # 레거시 평문(구 프로비저너/수동 생성) — 비밀번호는 재사용하되
+            # JSON 형식으로 재기록해 Lambda 계약에 수렴한다.
+            pw = raw
+            write = True
+            log("chat_reader 비밀번호 — 평문 형식 감지, JSON 형식으로 재기록")
+        except (KeyError, TypeError):
+            # JSON 이지만 password 키가 없음 — 사용 불가 값, 재생성으로 수렴.
+            log("⚠ SM 값이 JSON 이지만 password 키 없음 — 새 비밀번호로 재생성")
+    if not pw:
         pw = secrets.token_urlsafe(24)  # alnum+-_ — psql \\password 가 처리
+        write = True
 
     if os.environ.get("ECS_PW_TASKDEF_ARN"):
-        _alter_via_ecs(sm, sm_arn, pw, fresh, dry)
+        _alter_via_ecs(sm, sm_arn, pw, write, dry)
     else:
-        _alter_via_kubectl(sm, sm_arn, pw, fresh, dry)
+        _alter_via_kubectl(sm, sm_arn, pw, write, dry)
 
 
-def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
+def _alter_via_ecs(sm, sm_arn: str, pw: str, write: bool, dry: bool) -> None:
     cluster = os.environ.get("ECS_CLUSTER", "")
     taskdef = os.environ["ECS_PW_TASKDEF_ARN"]
     subnets = [s.strip() for s in
@@ -211,13 +225,13 @@ def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
         return
     if dry:
         log(f"[dry-run] ecs run-task {taskdef} 로 ALTER ROLE gateway_chat_reader"
-            f"{' + SM 생성' if fresh else ''}")
+            f"{' + SM 기록' if write else ''}")
         return
     # task def 의 secrets 주입은 태스크 시작 시 SM 을 해석한다 — SM 기록이
     # ALTER 실행보다 선행돼야 컨테이너가 새 값을 받는다 (eks 경로와 순서가 다름).
-    if fresh:
-        sm.put_secret_value(SecretId=sm_arn, SecretString=pw)
-        log("chat_reader 비밀번호 생성 → Secrets Manager")
+    if write:
+        sm.put_secret_value(SecretId=sm_arn, SecretString=_secret_json(pw))
+        log("chat_reader 비밀번호 기록 → Secrets Manager")
     ecs = boto3.client("ecs", region_name=region)
     r = ecs.run_task(
         cluster=cluster, taskDefinition=taskdef, launchType="FARGATE",
@@ -248,7 +262,12 @@ def _alter_via_ecs(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
                if log_group else ""))
 
 
-def _alter_via_kubectl(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None:
+def _secret_json(pw: str) -> str:
+    """query_db·seed_dev_data 가 json.loads(SecretString) 하는 계약 형식."""
+    return json.dumps({"username": "gateway_chat_reader", "password": pw})
+
+
+def _alter_via_kubectl(sm, sm_arn: str, pw: str, write: bool, dry: bool) -> None:
     """비밀번호 흐름: provisioner 가 생성 → Secrets Manager (query_db Lambda 가 읽음)
     → 임시 k8s secret → pod env → psql \\password stdin. argv·SQL 텍스트·pod spec
     어디에도 평문이 남지 않는다 (\\password 는 새 비밀번호를 stdin 프롬프트로 받음).
@@ -263,7 +282,7 @@ def _alter_via_kubectl(sm, sm_arn: str, pw: str, fresh: bool, dry: bool) -> None
             "(SM 값과 DB 가 불일치하면 query_db 가 실패합니다)")
         return
     if dry:
-        log(f"[dry-run] SM secret {sm_arn} 에 비밀번호{' 생성·저장' if fresh else ''}"
+        log(f"[dry-run] SM secret {sm_arn} 에 비밀번호{' 기록' if write else ''}"
             " + kubectl pod 으로 ALTER ROLE gateway_chat_reader")
         return
 
@@ -330,13 +349,13 @@ data:
         if p.returncode != 0:
             logs = _kubectl("logs", pod).stdout.strip()
             log(f"⚠ ALTER ROLE pod 실패 — DB 비밀번호 미변경"
-                f"{' (SM 도 기존 값 유지)' if fresh else ''}: {logs[:300]}")
+                f"{' (SM 도 기존 값 유지)' if write else ''}: {logs[:300]}")
             return
         # DB 가 먼저 새 비밀번호를 받은 뒤에만 SM 을 갱신한다 — SM 먼저 쓰고
         # ALTER 가 실패하면 query_db Lambda 가 SM 의 새 값으로 실패한다.
-        if fresh:
-            sm.put_secret_value(SecretId=sm_arn, SecretString=pw)
-            log("chat_reader 비밀번호 생성 → Secrets Manager")
+        if write:
+            sm.put_secret_value(SecretId=sm_arn, SecretString=_secret_json(pw))
+            log("chat_reader 비밀번호 기록 → Secrets Manager")
         log("ALTER ROLE gateway_chat_reader 완료 — 비밀번호 동기화됨")
     finally:
         _kubectl("delete", "pod", pod, "--ignore-not-found", "--wait=false")

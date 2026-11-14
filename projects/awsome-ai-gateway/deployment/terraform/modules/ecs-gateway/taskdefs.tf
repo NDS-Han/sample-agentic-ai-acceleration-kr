@@ -393,7 +393,9 @@ resource "aws_ecs_task_definition" "chat_reader_pw" {
 
     secrets = [
       { name = "PGPASSWORD", valueFrom = "${var.db_master_secret_arn}:password::" },
-      { name = "CHAT_PW", valueFrom = var.chat_reader_secret_arn },
+      # SecretString 은 {"username","password"} JSON — :password:: 키 추출.
+      # (query_db Lambda 가 읽는 형식과 같은 계약)
+      { name = "CHAT_PW", valueFrom = "${var.chat_reader_secret_arn}:password::" },
     ]
 
     logConfiguration = {

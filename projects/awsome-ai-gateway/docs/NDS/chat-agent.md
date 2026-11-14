@@ -83,22 +83,27 @@ DB 접속은 VPC 부착 query_db Lambda 가 대신한다.
 ### 3. chat_reader DB 비밀번호 (프로비저너 자동)
 
 terraform 은 secret **셸**만 만들고, 프로비저너가 apply 마다 비밀번호를
-동기화한다:
+동기화한다. SM 에는 `{"username":"gateway_chat_reader","password":...}` JSON
+형식으로 기록된다 — `query_db`·`seed_dev_data` Lambda 가
+`json.loads(SecretString)` 하는 계약이고, ecs `chat-reader-pw` task 도
+`secretArn:password::` JSON 키 추출로 읽는다. 평문 형식의 기존 값은
+프로비저너가 감지해 비밀번호는 재사용하면서 JSON 으로 재기록한다(자가치유).
 
 **eks** (ALTER → SM 순서 — SM 선기록 불일치 창 없음):
-1. SM 값이 비어 있으면 `secrets.token_urlsafe(24)` 로 생성
+1. SM 값이 비어 있거나 형식이 맞지 않으면 `secrets.token_urlsafe(24)` 로 생성
+   (평문 레거시는 값 재사용 + JSON 재기록)
 2. kubectl 일회성 pod(migration 이미지, `llm-gateway-db` 의 master 자격증명)
    이 클러스터 안에서 `ALTER ROLE gateway_chat_reader` 실행 — deploy 호스트는
    게이트웨이 VPC 밖이라 psql 직접 접속이 안 되므로 인클러스터 경로를 쓴다
-3. ALTER 성공 후에만 `put-secret-value` — SM 과 DB 가 불일치 상태로 끝나지
-   않는다. 매 apply 재실행돼 수동 변경 드리프트가 자가치유된다.
+3. ALTER 성공 후에만 `put-secret-value`(JSON) — SM 과 DB 가 불일치 상태로
+   끝나지 않는다. 매 apply 재실행돼 수동 변경 드리프트가 자가치유된다.
 
 **ecs** (SM → ALTER 순서 — task def `secrets` 주입이 태스크 시작 시 SM 을
 해석하므로 SM 기록이 선행돼야 함):
 1. SM 값이 비어 있으면 생성·기록
 2. `aws ecs run-task` — `chat-reader-pw` task def(migration 이미지)가
-   PGPASSWORD(master secret)+CHAT_PW(reader secret)를 `secrets` 주입받아
-   `psql \password` 실행 → exitCode 0 확인
+   PGPASSWORD(master secret)+CHAT_PW(reader secret 의 `:password::` 키
+   추출)를 `secrets` 주입받아 `psql \password` 실행 → exitCode 0 확인
 3. ALTER 실패 시 SM≠DB 불일치가 남지만 다음 apply 가 재시도로 수렴한다 —
    평문은 어디에도 남지 않는다(task spec 도 SM ARN 만 담음)
 
