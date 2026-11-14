@@ -1099,9 +1099,10 @@ def test_ensure_cluster_secret_store_creates_and_skips(monkeypatch, tmp_path):
     assert all("--kube-context" not in c for c in calls)
 
 
-def test_ensure_secret_store_namespaced_kind(monkeypatch, tmp_path):
-    """kind: SecretStore 선언 시 namespaced store 를 만들어야 한다 —
-    ClusterSecretStore 만 만들면 ExternalSecret 이 참조를 못 찾는다."""
+def test_ensure_secret_store_namespaced_kind(monkeypatch, tmp_path, capsys):
+    """kind: SecretStore 선언 시 namespaced store 는 같은 ns 의 IRSA SA 가
+    필요해 자동 생성할 수 없다 — external-secrets SA 를 가리키는 manifest 를
+    만들면 namespace 가 무시돼 인증이 영영 실패한다. 존재 확인 후 경고+스킵."""
     from deploy import eks_apply
     import subprocess as _sp
     calls, applied = [], []
@@ -1123,11 +1124,50 @@ def test_ensure_secret_store_namespaced_kind(monkeypatch, tmp_path):
         "    name: ns-store\n    kind: SecretStore\n")
     meta = {"values_layers": [str(vals)], "namespace": "app-ns"}
     eks_apply.ensure_cluster_secret_store(meta, "r", "", tmp_path)
-    assert applied and "kind: SecretStore" in applied[-1]
-    assert "namespace: app-ns" in applied[-1]
-    # 존재 확인도 namespaced 조회였는지
+    # 생성은 하지 않고 경고만 — 존재 확인은 namespaced 조회였는지
+    assert applied == []
+    assert "SecretStore" in capsys.readouterr().err
     assert any("secretstore" in c and "-n" in c and "app-ns" in c
                for c in calls)
+
+
+def test_live_deploy_env_fullname_override(monkeypatch):
+    """fullnameOverride 시 deployment 가 {override}-admin-api — release 이름
+    고정 조회는 미스라 instance+component 라벨로 찾아야 한다 (14차)."""
+    items = [{"metadata": {"name": "custom-admin-api",
+                           "labels": {"app.kubernetes.io/instance": "myrel",
+                                      "app.kubernetes.io/component": "admin-api"}},
+              "spec": {"template": {"spec": {"containers": [
+                  {"env": [{"name": "AGENTCORE_RUNTIME_ARN",
+                            "value": "arn:aws:runtime/x"}]}]}}}},
+             {"metadata": {"name": "other-admin-api",
+                           "labels": {"app.kubernetes.io/instance": "other",
+                                      "app.kubernetes.io/component": "admin-api"}},
+              "spec": {"template": {"spec": {"containers": [
+                  {"env": [{"name": "AGENTCORE_RUNTIME_ARN",
+                            "value": "arn:aws:runtime/foreign"}]}]}}}}]
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp(items))
+    meta = {"namespace": "ns", "release": "myrel"}
+    assert (eks_apply._live_deploy_env(meta, "admin-api",
+                                       "AGENTCORE_RUNTIME_ARN")
+            == "arn:aws:runtime/x")
+
+
+def test_strip_es_secrets_malformed_layers(monkeypatch, tmp_path):
+    """values 레이어가 스칼라/리스트/스칼라 external 섹션이어도 죽지 않는다."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("- a\n- b\n")                      # 리스트 문서
+    bad2 = tmp_path / "bad2.yaml"
+    bad2.write_text("database: scalar\nredis:\n  external: true\n")
+    meta = {"namespace": "ns", "release": "r",
+            "values_layers": [str(bad), str(bad2)]}
+    seen = []
+    monkeypatch.setattr(
+        eks_apply, "_run_quiet",
+        lambda a, **k: seen.append(a) or
+        subprocess.CompletedProcess([], 1, "", ""))
+    eks_apply.strip_es_owned_secrets(meta, repo_root=tmp_path)  # 예외 없이 완료
+    assert any("r-app" in c for c in seen)
 
 
 def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):

@@ -174,42 +174,61 @@ def _sanitize_copied_values(text: str, region: str = "") -> str:
     가리킨다 (render/--set 이 덮지 않는 경로 존재) — 전부 공란화해 terraform
     output/render 주입이 유일한 소스가 되게 한다. 주석 보존을 위해 텍스트
     수준으로 고친다."""
-    # oidc: 블록의 enabled 만 끈다 — 다른 enabled: 키와 구분하기 위해
-    # `oidc:` 라인 뒤 첫 enabled 만 대상. 사이에 주석/빈 줄이 끼어도 잡되,
-    # enabled 는 oidc 보다 깊은 들여쓰기(자식)여야 한다 — 같은 들여쓰기의
-    # 형제 enabled: 를 건드리면 안 된다.
+    # oidc: 블록의 enabled 만 끈다 — 다른 enabled: 키와 구분하기 위해 대상은
+    # oidc 보다 깊은 들여쓰기의 직계 자식. 첫 자식이 enabled: 가 아니어도
+    # (issuerUrl 등이 먼저) 같은 들여쓰기의 형제 키를 건너뛰고 찾는다. 손자
+    # 키(더 깊은 들여쓰기)는 매치를 끝내 — 잘못된 enabled 를 끄는 것보다
+    # 미스가 안전하다.
     text = re.sub(
-        r"(?m)(^([ \t]+)oidc:[^\n]*\n(?:(?:[ \t]*#[^\n]*|[ \t]*)\n)*"
-        r"\2[ \t]+enabled:[ \t]*)true",
+        r"(?m)(^([ \t]+)oidc:[^\n]*\n"
+        r"(?:(?:[ \t]*#[^\n]*|[ \t]*)\n)*"
+        r"(?:(\2[ \t]+)(?!enabled:)\S[^\n]*\n"
+        # 자식(\3 과 같은 들여쓰기)과 손자(더 깊은 들여쓰기) 라인을 gap 으로
+        # 소비 — 손자의 enabled 는 매치 대상에서 빠지고 oidc 직계의
+        # enabled: 만 \3enabled: 로 잡힌다. 같은 들여쓰기의 oidc 형제나
+        # 탑레벨 라인이 나오면 매치가 끝나 오조작은 없다.
+        r"(?:(?:[ \t]*#[^\n]*|[ \t]*)\n|\3[ \t]*\S[^\n]*\n)*"
+        r"\3enabled:[ \t]*"
+        r"|\2[ \t]+enabled:[ \t]*))"   # group1 은 enabled: 까지 — 값은 그룹 밖
+        r"(?:true|True|yes|\"true\"|'true'|\"True\"|'True')",
         r"\g<1>false", text)
-    text = re.sub(r'(?m)^(\s*issuerUrl:\s*)("[^"]*"|[^\s#]+)',
+    text = re.sub(r'(?m)^(\s*issuerUrl:\s*)("[^"\n]+"|[^\s#"][^\s#]*)',
                   r'\g<1>""  # scaffold 가 중화 — terraform output 이 apply 시 주입',
                   text)
     # 계정/env 핀값 공란화 — 키는 남기고 값만 지운다 (따옴표 없는 값도 대상).
-    _val = r'("[^"]*"|[^\s#]+)'
+    # 비어 있는 값("")은 매치하지 않아 재실행해도 멱등이다.
+    _val = r'("[^"\n]+"|[^\s#"][^\s#]*)'
     for key in ("imageRegistry", "COGNITO_USER_POOL_ID",
                 "AGENTCORE_RUNTIME_ARN", "AGENTCORE_GATEWAY_URL"):
         text = re.sub(rf'(?m)^(\s*{key}:\s*){_val}', r'\g<1>""', text)
     # 잘못된 풀 동기화로 사용자 비활성화되는 것을 막는다.
-    text = re.sub(r'(?m)^(\s*COGNITO_SYNC_DEACTIVATE_MISSING:\s*)("true"|true)',
+    text = re.sub(r'(?m)^(\s*COGNITO_SYNC_DEACTIVATE_MISSING:\s*)'
+                  r"(?i:true|yes|\"true\"|'true'|\"yes\"|'yes')",
                   r'\g<1>"false"', text)
     # dev 의 IAM role 이름 허용목록 — 신 env 의 정책과 무관한 값.
-    # 블록(- item)과 flow([a, b]) 두 형태 모두.
-    text = re.sub(r'(?m)^(\s*allowedIamRoles:)\s*\[[^\]]*\]\s*$',
+    # flow([a, b] — 뒤따르는 주석 포함)와 블록(- item, 중간 주석/빈 줄 허용).
+    text = re.sub(r'(?m)^(\s*allowedIamRoles:)[ \t]*\[[^\]]*\][ \t]*(?:#[^\n]*)?$',
                   r'\g<1> []', text)
-    text = re.sub(r'(?m)^(\s*allowedIamRoles:)\s*\n(?:\s*-\s+[^\n]*\n)+',
-                  r'\g<1> []\n', text)
+    text = re.sub(
+        r'(?m)^(\s*allowedIamRoles:)[^\n]*\n'
+        r'(?:[ \t]*(?:#[^\n]*|-[^\n]*|)\n)+',
+        r'\g<1> []\n', text)
     # dev IRSA role ARN — terraform output(gateway_proxy_role_arn 등)이
     # --set 으로 주입하는 값이므로 공란화. 주석 예시(# eks...role-arn)에도
     # 실 계정 ARN 이 박혀 있어 같이 중화한다 (비인용 값 포함).
     text = re.sub(r'(?m)^(\s*#?\s*eks\.amazonaws\.com/role-arn:\s*)'
                   r'("arn:[^"]*"|arn:\S+)', r'\g<1>""', text)
-    # 리전 핀값 — render/--set 이 덮지 않는 키(COGNITO_REGION 등)가 dev 리전을
+    # 리전 핀값 — render/--set 이 덮지 않는 키(COGNITO_REGION)가 dev 리전을
     # 가리키면 풀을 잘못된 리전에서 찾는다. 배포 리전으로 치환한다.
+    # AGENTCORE_REGION 은 adminApi 의 채팅 리전만 대상 — gatewayProxy 의
+    # websearch 커넥터는 us-east-1 고정이라 그 값은 건드리지 않는다.
     if region:
-        for key in ("COGNITO_REGION", "AGENTCORE_REGION"):
-            text = re.sub(rf'(?m)^(\s*{key}:\s*){_val}',
-                          rf'\g<1>"{region}"', text)
+        text = re.sub(rf'(?m)^(\s*COGNITO_REGION:\s*){_val}',
+                      rf'\g<1>"{region}"', text)
+        text = re.sub(
+            r'(?m)^(\s*AGENTCORE_REGION:\s*)'
+            r'("(?!us-east-1")[^"\n]+"|(?!us-east-1\b)[^\s#"][^\s#]*)',
+            rf'\g<1>"{region}"', text)
     return text
 
 

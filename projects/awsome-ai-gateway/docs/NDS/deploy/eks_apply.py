@@ -77,16 +77,40 @@ def _run_quiet(argv: list[str], *, cwd: Path | None = None,
 
 def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
                      context: str = "") -> str:
-    """라이브 deployment 의 env 값 — 조회 실패·미설정 시 ""."""
-    argv = ["kubectl", "get", "deploy", f"{meta['release']}-{deploy_suffix}",
-            "-n", meta["namespace"], "-o", "json"]
+    """라이브 deployment 의 env 값 — 조회 실패·미설정 시 "".
+
+    fullnameOverride 시 deployment 이름이 {override}-<svc> 라 release 이름
+    고정 조회는 못 찾는다 — instance+component 라벨로 고른다 (차트가 둘 다
+    찍는다). 라벨 없는 레거시는 이름 접미 폴백."""
+    argv = ["kubectl", "get", "deploy", "-n", meta["namespace"], "-o", "json"]
     if context:
         argv += ["--context", context]
     r = _run_quiet(argv)
     if r.returncode != 0:
         return ""
+    rel = meta.get("release")
     try:
-        env = json.loads(r.stdout)["spec"]["template"]["spec"][
+        items = json.loads(r.stdout).get("items", [])
+        target = None
+        for d in items:
+            md = d.get("metadata") or {}
+            labels = md.get("labels") or {}
+            inst = labels.get("app.kubernetes.io/instance")
+            comp = labels.get("app.kubernetes.io/component")
+            name = md.get("name") or ""
+            if inst is not None:
+                if inst == rel and (comp == deploy_suffix
+                                    or (not comp and name.endswith(
+                                        f"-{deploy_suffix}"))):
+                    target = d
+                    break
+            elif name == f"{rel}-{deploy_suffix}" or (
+                    not rel and name.endswith(f"-{deploy_suffix}")):
+                target = d
+                break
+        if target is None:
+            return ""
+        env = target["spec"]["template"]["spec"][
             "containers"][0].get("env", [])
         return next((e.get("value", "") for e in env
                      if e.get("name") == var), "")
@@ -288,16 +312,20 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
         lp = Path(layer)
         lp = lp if lp.is_absolute() else repo_root / lp
         try:
-            vals = yaml.safe_load(lp.read_text()) or {}
-            ref = ((vals.get("externalSecrets") or {})
-                   .get("secretStoreRef") or {})
+            vals = yaml.safe_load(lp.read_text())
+            if not isinstance(vals, dict):
+                continue  # 리스트/스칼라 문서 — .get 호출 시 AttributeError
+            es = vals.get("externalSecrets")
+            ref = (es.get("secretStoreRef")
+                   if isinstance(es, dict) else None)
+            if not isinstance(ref, dict):
+                continue
             if ref.get("name"):
                 name = str(ref["name"])
             if ref.get("kind"):
                 kind = str(ref["kind"])
         except (OSError, yaml.YAMLError):
             continue
-    namespaced = kind != "ClusterSecretStore"
     base = ["kubectl"] + (["--context", context] if context else [])
     if _run_quiet(base + ["get", "ns", "external-secrets"],
                   timeout=15).returncode != 0:
@@ -311,18 +339,35 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
                        "-l", "app.kubernetes.io/name=external-secrets",
                        "-n", "external-secrets", "--timeout=180s"],
                timeout=200)
-    get_kind = kind.lower()
-    get_argv = base + ["get", get_kind, name]
+    # kind 는 차트 기본 ClusterSecretStore — 소문자 선언도 정규화해 manifest
+    # 가 API 에서 거절되지 않게 한다.
+    canon = kind.lower()
+    kind = {"clustersecretstore": "ClusterSecretStore",
+            "secretstore": "SecretStore"}.get(canon, kind)
+    namespaced = kind != "ClusterSecretStore"
+    get_argv = base + ["get", canon, name]
     if namespaced:
         get_argv += ["-n", meta["namespace"]]
     if _run_quiet(get_argv, timeout=15).returncode == 0:
         return
-    ns_block = f"  namespace: {meta['namespace']}\n" if namespaced else ""
+    if namespaced:
+        # namespaced SecretStore 의 jwt.serviceAccountRef 는 같은 ns 의 SA 만
+        # 가리킬 수 있다(namespace 필드가 무시됨) — external-secrets SA 를
+        # 쓰는 manifest 를 만들면 인증이 영영 실패한다. 앱 SA 에는 시크릿 읽기
+        # IRSA 가 없으므로 자동 프로비저닝 대상이 아니다 — 선언자가 만들어야
+        # 함을 알리고 생략한다 (ExternalSecret 이 SecretSyncedError 로 상태를
+        # 보여주고 doctor 가 잡는다).
+        print(f"⚠ secretStoreRef.kind=SecretStore ('{name}') — namespaced store 는 "
+              f"같은 ns({meta['namespace']})의 IRSA ServiceAccount 가 필요해 "
+              "NDS 가 자동 생성하지 않습니다. store 를 직접 만들거나 kind 를 "
+              "ClusterSecretStore 로 바꾸세요 (기본 aws-secrets-manager 는 자동 보장)",
+              file=sys.stderr)
+        return
     manifest = f"""apiVersion: external-secrets.io/v1beta1
 kind: {kind}
 metadata:
   name: {name}
-{ns_block}spec:
+spec:
   provider:
     aws:
       service: SecretsManager
@@ -686,15 +731,19 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
         p_ = Path(lp)
         p_ = p_ if p_.is_absolute() or repo_root is None else repo_root / p_
         try:
-            v = yaml.safe_load(p_.read_text()) or {}
+            v = yaml.safe_load(p_.read_text())
         except (OSError, yaml.YAMLError):
             continue
+        if not isinstance(v, dict):
+            continue  # 리스트/스칼라 문서 — .get 호출 시 AttributeError
         override = str(v.get("fullnameOverride") or override or "")
         for top in ("database", "redis"):
             ext = v.get(top)
             if not isinstance(ext, dict):
                 continue  # 스칼라/잘못된 섹션 — .get 호출 시 AttributeError
-            n = (ext.get("external") or {}).get("passwordSecretName")
+            inner = ext.get("external")
+            n = (inner.get("passwordSecretName")
+                 if isinstance(inner, dict) else None)
             if n:
                 secrets.add(str(n))
     chart_name = "llm-gateway"
@@ -1544,11 +1593,14 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         # 단 env tfvars 에 enable_chat_agent=true 를 사람이 선언한 경우는
         # 사람 소유 — 매 apply 삭제/재생 루프가 되므로 건드리지 않는다.
         human_owned = False
-        if env_dir and (env_dir / "terraform.tfvars").exists():
+        if env_dir:
+            # terraform.tfvars + *.auto.tfvars 전 채널 — auto.tfvars 선언을
+            # 놓치면 사람 소유 Runtime 을 매 apply 삭제/재생 루프로 만든다.
             from .render.common import tfvars_clean
+            from .render.eks import _env_tfvars_texts
             human_owned = bool(re.search(
                 r'(?m)^\s*enable_chat_agent\s*=\s*true',
-                tfvars_clean((env_dir / "terraform.tfvars").read_text())))
+                tfvars_clean("\n".join(_env_tfvars_texts(env_dir)))))
         if human_owned:
             print("ⓘ enable_chat_agent=true 가 env tfvars 에 선언돼 있습니다 — "
                   "bi_insight off 지만 Runtime 은 사람 소유라 유지합니다",

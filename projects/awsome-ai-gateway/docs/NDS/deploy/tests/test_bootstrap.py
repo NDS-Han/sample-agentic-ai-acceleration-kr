@@ -654,6 +654,28 @@ def test_sanitize_copied_values_neutralizes_env_pinned():
     assert "role/keep" not in out2 and 'role-arn: ""' in out2
 
 
+def test_sanitize_oidc_reordered_and_variants():
+    """oidc 블록의 enabled 가 첫 키가 아니어도(issuerUrl 등이 먼저) 잡는다 —
+    형제/손자 enabled 는 건드리지 않는다."""
+    reordered = ('x:\n  oidc:\n    issuerUrl: "https://dev.pool"\n'
+                 '    enabled: true\n  enabled: true\n')
+    out = bootstrap._sanitize_copied_values(reordered)
+    assert "enabled: false" in out and "enabled: true" in out  # 형제만 생존
+    # yes/'true' 변형
+    for v in ("yes", "'true'", "True"):
+        t = f"x:\n  oidc:\n    enabled: {v}\n"
+        assert "enabled: false" in bootstrap._sanitize_copied_values(t)
+    # 손자 enabled 는 gap 으로 소비되고 oidc 직계 enabled 만 뒤집힌다
+    nested = ('x:\n  oidc:\n    foo:\n      enabled: true\n'
+              '    enabled: true\n')
+    out2 = bootstrap._sanitize_copied_values(nested)
+    assert "      enabled: true" in out2  # 손자는 보존
+    assert "    enabled: false" in out2   # 직계는 뒤집힘
+    # 멱등 — 재실행해도 주석이 두 번 붙지 않는다
+    once = bootstrap._sanitize_copied_values('a:\n  issuerUrl: "x"\n')
+    assert bootstrap._sanitize_copied_values(once) == once
+
+
 def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):
     """12차 — tfstate 재시도 호출({tfstate} 만)이 features.web_search 를
     false 로 덮어쓰지 않는다."""

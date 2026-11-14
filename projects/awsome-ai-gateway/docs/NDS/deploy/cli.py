@@ -887,6 +887,11 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
         title=f"teardown — {cfg.env} (ecs)", expand=False))
     if not _confirm_destroy(cfg.env, args):
         return 130
+    # destroy 후엔 outputs 가 비어 읽을 수 없다 — 사람이 project 변수를 바꾼
+    # env 의 실측 Runtime 이름을 미리 확보한다 (eks teardown 과 같은 계약).
+    chat_name = ""
+    if cfg.features.bi_insight:
+        chat_name = ecs_apply.tf_outputs(env_dir).get("chat_agent_name", "")
     try:
         if safeguards_on:
             ecs_render.render(cfg, out, extra_vars={
@@ -909,7 +914,8 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     if cfg.features.bi_insight:
         # 프로비저너 소유 Runtime — terraform 모듈 밖이라 destroy 가 못 지운다
         from . import chatagent
-        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region)
+        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
+                           chat_agent_name=chat_name)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 

@@ -213,13 +213,18 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         # 프로비저너 소유 Runtime 을 멱등 정리 — 한 번도 안 켰으면 agentcore
         # API 호출/권한 경고를 내지 않게 건너뛴다.
         try:
-            module_alive = bool(
-                tf_outputs(repo_root / ENV_DIR).get("chat_agent_name"))
+            ecs_outs = tf_outputs(repo_root / ENV_DIR)
+            module_alive = bool(ecs_outs.get("chat_agent_name"))
         except SystemExit:
+            ecs_outs = {}
             module_alive = False
         if popped or module_alive:
             from . import chatagent
-            chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region)
+            chatagent.teardown(
+                repo_root, cfg.env, region=cfg.aws.region,
+                # project 변수를 바꾼 env 에선 도출 이름과 실측이 어긋나
+                # Runtime 이 새어나간다 — outputs 실측을 우선한다.
+                chat_agent_name=ecs_outs.get("chat_agent_name", ""))
 
     # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
     # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는

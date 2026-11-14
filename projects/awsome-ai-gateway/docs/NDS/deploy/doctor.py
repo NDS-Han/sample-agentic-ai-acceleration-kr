@@ -477,15 +477,19 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 if ((i.get("metadata") or {}).get("labels") or {})
                 .get("app.kubernetes.io/instance") == rel]
         items = ours or all_items
-        # 배포명은 <release>-<svc> — 기본 release 면 llm-gateway- 를 떼고,
-        # 커스텀 release 면 그 프리픽스를 뗀다
+        # 서비스 식별은 component 라벨 우선 — 이름 프리픽스는 fullnameOverride
+        # 면 어긋나 전부 "deployment 없음" 으로 오진된다. 라벨 없는 수동 배포는
+        # 이름 접두(<release>-<svc>) 폴백.
         by_name = {}
         for i in items:
-            n = i["metadata"]["name"]
-            for p in (f"{rel}-", "llm-gateway-"):
-                if n.startswith(p):
-                    n = n[len(p):]
-                    break
+            labels = (i.get("metadata") or {}).get("labels") or {}
+            comp = labels.get("app.kubernetes.io/component")
+            n = comp or i["metadata"]["name"]
+            if not comp:
+                for p in (f"{rel}-", "llm-gateway-"):
+                    if n.startswith(p):
+                        n = n[len(p):]
+                        break
             by_name[n] = i
         for name in EKS_DEPLOYMENTS:
             d = by_name.get(name) or by_name.get(f"{rel}-{name}")
