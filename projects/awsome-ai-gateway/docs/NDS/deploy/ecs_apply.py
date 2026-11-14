@@ -193,6 +193,12 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
         _save_extra_vars(gen_dir, existing)
 
+    if not cfg.features.bi_insight and existing.pop("agentcore_runtime_arn", None):
+        # 선언을 껐으면 잔여 ARN 도 지운다 — agentcore_runtime_arn != "" 조건이
+        # taskdef 에 AGENTCORE_RUNTIME_ARN env 를 남겨 라우터가 삭제된
+        # Runtime 을 계속 호출하는 것을 되돌린다 (web_search 와 동일 패턴).
+        _save_extra_vars(gen_dir, existing)
+
     # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
     # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는
     # litellm_pricing_lambda tfvars 가 모듈에서 연다 (attach_invoke=False).
