@@ -473,7 +473,31 @@ aws-marketplace:Subscribe` means subscribe in the target account.
 - **BI Insight** (`/chat`, admin only): 5-agent analysis over usage
   data — plan → approve → run → validated numbers.
 
-### 9.7 Employee onboarding — final gate
+### 9.7 What runs automatically — background jobs
+
+Don't be surprised by these — they run on their own schedule (all crons
+in `REPORTING_TIMEZONE`, default **Asia/Seoul**):
+
+| Job | Schedule (default) | What it does |
+|---|---|---|
+| `roi_aggregation` | `*/15 * * * *` | Analytics ROI data rollup |
+| `key_expiry` | `0 * * * *` | Expires VKs past TTL — a user's key "randomly" failing is often this |
+| `service_key_repair` | `*/15 * * * *` | Auto-heals agent-key auth mappings (what **Repair auth** does manually) |
+| `key_purge` | `30 3 * * *` | Deletes expired VKs after 90d retention — **disabled by default** (`KEY_PURGE_ENABLED`); enabling is a retention-policy decision |
+| `daily_usage_agg` (cost-recorder) | `10 0 * * *` | Daily usage/cost aggregation feeding Analytics |
+| notification-worker | event-driven | Budget alert emails via the configured provider — verify `ses_from`/recipient ownership |
+
+### 9.8 Recurring ops cadence
+
+| Cadence | Task |
+|---|---|
+| Daily | `doctor` HIGH findings, queue-depth/503 glance (§10) |
+| Weekly | Audit log review; budget alert follow-ups |
+| Monthly | Model pricing sync check (`/models`); capacity band review vs signals |
+| Quarterly | DR rehearsal (§12.5); stale `ADFS_*` pool records cleanup; access review (`ClaudeAdmin` membership) |
+| On event | New-model Marketplace subscription; upstream sync (`upstream-sync.md`) |
+
+### 9.9 Employee onboarding — final gate
 
 Before opening to employees ([operations.md](../operations.md) §2 checklist):
 
@@ -655,6 +679,27 @@ received — an unchecked row here is a future incident.
       their plaintext
 - [ ] Marketplace subscriptions currently active
 - [ ] Current `capacity_tier` and observed headroom (§10 signals)
+
+### Operations ownership
+
+- [ ] **Observability stack** — `deployment/observability/` (Prometheus,
+      Grafana, otel-collector, prometheus-adapter): is it deployed, who
+      owns the dashboards, where the executor-saturation metric feeds
+      HPA (`features.observability`)
+- [ ] **Notification channel** — `features.notifications.provider`
+      (ses/smtp/internal_api): sender address ownership, who receives
+      budget-alert emails
+- [ ] **AWS-level cost** — account billing alerts are separate from
+      gateway budgets; decide who watches the Aurora/ElastiCache/ALB bill
+- [ ] **Change process** — which branch prod is built from (`nds/dev`),
+      who reviews `apply --plan` diffs, whether a dev/staging stack is
+      kept for pre-prod applys
+- [ ] **Log locations** — CloudWatch log groups / `kubectl -n
+      llm-gateway logs` per service; which team monitors them
+- [ ] **Deploy EC2 succession** — the deploy host holds the real yaml +
+      `.local.yaml` + gen outputs; treat it as an asset to back up or
+      document rebuild steps for (its loss is recoverable via
+      `doctor --capture` but costs time)
 
 ### Known limitations & deferred items
 
