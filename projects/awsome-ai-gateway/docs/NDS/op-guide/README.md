@@ -463,12 +463,18 @@ screenshots in [guides/models.md](../guides/models.md)):
    subscriptions** (Bedrock console → Model catalog → Subscribe),
    propagated in ~2 min — do this *before* registering the alias or
    calls fail `AccessDenied … aws-marketplace:Subscribe`.
-2. **+ Add model** — required: alias (the client-facing `model` string —
-   keep it stable, everything keys off it), provider, upstream model ID
-   (e.g. a `global.anthropic.*` inference profile). Optional: display
-   name, endpoint URL (provider-dependent), description, specs
-   (context window / max output), per-model **Routing** override, and
-   the long-context pricing band (threshold + 5 price fields).
+2. **+ Add model** — required: alias, provider, upstream model ID
+   (e.g. a `global.anthropic.*` inference profile). **The alias is the
+   client contract** — clients send it verbatim as the `model` request
+   field and the gateway resolves it by exact match, so it must be a
+   string the client can actually send: Claude Code/Cowork send
+   Anthropic names (`claude-sonnet-4-6`, dated IDs like
+   `claude-haiku-4-5-20251001`); codex uses `codex-*` names. Arbitrary
+   nicknames register fine but every call fails model-not-found.
+   Optional: display name, endpoint URL (provider-dependent),
+   description, specs (context window / max output), per-model
+   **Routing** override, and the long-context pricing band
+   (threshold + 5 price fields).
 3. **Pricing** — enter per-1M input/output/cache rates directly, or run
    **Sync Pricing** after registration (below).
 4. **Permissions** — expand the row → team-permission panel; the alias
@@ -499,6 +505,10 @@ Lifecycle: **Deactivate** preserves history (preferred for retiring);
 - **Monitoring**: live 1h window + 24h event log. **Body logging** stores
   full request/response bodies **unmasked** in S3 — a debugging tool,
   not an always-on feature; every view is audited.
+- **Dashboards, not alerts** — nothing pages you today. The Prometheus/
+  Grafana stack collects metrics and feeds the HPA, but Alertmanager is
+  disabled (§14 Operations ownership) — detection is pull-only unless
+  SSIR wires receivers.
 - **Audit Log**: every mutation, atomically committed — first stop for
   "who changed X". Body-log views are themselves logged.
 - **Analytics**: aggregated reporting (KPIs, cost trend, per-model,
