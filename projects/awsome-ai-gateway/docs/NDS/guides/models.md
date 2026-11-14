@@ -33,9 +33,12 @@ The preview header reports the effective source (for LiteLLM, the Lambda
 name — e.g. `lambda:llm-gateway-dev-litellm-pricing`) and the match
 counts. The diff table lists changed rows with current → proposed
 input/output/cache prices — check the rows you want, **Apply selected**
-writes only those. Aliases with no mapping in the source are listed as
-**unmatched** and keep their current price — a sync never blanks an
-existing price.
+writes only those:
+
+![LiteLLM preview with a price diff](screenshots/49-models-sync-litellm-diff.png)
+
+Aliases with no mapping in the source are listed as **unmatched** and
+keep their current price — a sync never blanks an existing price.
 
 > Changing the source after a preview clears the result — always
 > re-preview on the source you intend to apply (a server-side drift
@@ -105,8 +108,12 @@ Fields, top to bottom:
 
 - **Deactivate** removes the alias from routing immediately while
   preserving usage history — preferred for retiring a model.
-- **Delete** removes the catalog entry entirely; the UI gates this on
-  models with no dependent references.
+- **Delete** removes the catalog entry entirely; the dialog shows the
+  impact counts (usage logs retained; pricing/permissions/rate limits
+  removed) and requires typing the alias to confirm. A model that is a
+  **downgrade target** for another alias cannot be deleted until the
+  reference is removed. **Usage history survives deletion** — deleted
+  models can still appear in Analytics and audit history.
 
 ## Related
 
