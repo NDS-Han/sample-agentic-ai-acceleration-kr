@@ -862,7 +862,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                   "프로비저닝(provision_agentcore_websearch.py deploy)합니다",
                   file=sys.stderr)
     if cfg.features.bi_insight:
-        arn = chatagent.status_arn(repo_root, outs)
+        arn = chatagent.status_arn(repo_root, outs, env_name=cfg.env)
         if arn:
             print(f"ⓘ bi_insight: AgentCore Runtime {arn} 을 --set 합니다",
                   file=sys.stderr)
@@ -923,7 +923,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         arn = chatagent.ensure_runtime_arn(
             repo_root, outs, meta=meta,
             migration_image=_migration_image(cfg, meta, gen_dir, repo_root),
-            context=context)
+            context=context, env_name=cfg.env)
         if arn:
             set_args += [
                 "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",

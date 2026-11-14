@@ -27,15 +27,25 @@ PROVISIONER = Path("deployment/scripts/provision_agentcore_chatagent.py")
 AGENTCORE_REGION = os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")
 
 
+def _agent_name(outs: dict, env_name: str = "") -> str:
+    """Runtime 이름 — outputs 우선, 없으면 도출.
+
+    -target apply 는 관련 없는 output 을 state 에 안 쓴다 — 첫 활성화 때
+    chat_agent_name 이 비어 있을 수 있어 {project}-{env}-admin-chat-agent
+    (render 가 project=llm-gateway 고정)으로 도출한다. 없으면 provisioner
+    기본값(llm_gateway_dev_chat_agent)이 엉뚱한 이름의 Runtime 을 만든다."""
+    raw = outs.get("chat_agent_name") or f"llm-gateway-{env_name}-admin-chat-agent"
+    return raw.replace("-", "_")
+
+
 def _env(outs: dict, meta: dict, migration_image: str,
-         context: str = "", extras: dict | None = None) -> dict[str, str]:
+         context: str = "", extras: dict | None = None,
+         env_name: str = "") -> dict[str, str]:
     """terraform output → 프로비저너 env. Runtime 이름은 이름 패턴
     ([a-zA-Z][a-zA-Z0-9_]{0,47}) 때문에 하이픈 → 밑줄 정규화가 필요하다."""
     e = dict(os.environ)
     e["REGION"] = AGENTCORE_REGION
-    name = (outs.get("chat_agent_name") or "").replace("-", "_")
-    if name:
-        e["AGENT_NAME"] = name
+    e["AGENT_NAME"] = _agent_name(outs, env_name)
     if outs.get("chat_agent_ecr_url"):
         e["ECR_REPO"] = outs["chat_agent_ecr_url"]
     if outs.get("chat_agent_execution_role_arn"):
@@ -65,7 +75,7 @@ def _env(outs: dict, meta: dict, migration_image: str,
 
 def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
          migration_image: str = "", context: str = "",
-         extras: dict | None = None,
+         extras: dict | None = None, env_name: str = "",
          timeout: int = 900) -> subprocess.CompletedProcess:
     script = repo_root / PROVISIONER
     if not script.exists():
@@ -73,17 +83,17 @@ def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
     try:
         return subprocess.run(
             [sys.executable, str(script), sub],
-            env=_env(outs, meta or {}, migration_image, context, extras),
+            env=_env(outs, meta or {}, migration_image, context, extras, env_name),
             cwd=repo_root, capture_output=True, text=True, timeout=timeout)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
 
 
-def status_arn(repo_root: Path, outs: dict) -> str:
+def status_arn(repo_root: Path, outs: dict, env_name: str = "") -> str:
     """기존 Runtime ARN — 없거나 조회 실패 시 "".
 
     읽기 전용 — plan/preview 경로에서도 안전하다."""
-    r = _run(repo_root, "status", outs, timeout=120)
+    r = _run(repo_root, "status", outs, env_name=env_name, timeout=120)
     if r.returncode != 0:
         return ""
     m = re.search(r"^  arn: (\S+)", r.stdout, re.M)
@@ -92,7 +102,7 @@ def status_arn(repo_root: Path, outs: dict) -> str:
 
 def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
                        migration_image: str = "", context: str = "",
-                       extras: dict | None = None) -> str:
+                       extras: dict | None = None, env_name: str = "") -> str:
     """deploy(멱등) 실행 — chat_reader 비밀번호 동기화 + Runtime 생성/재사용
     → ARN 반환. 실패 시 "".
 
@@ -102,13 +112,14 @@ def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
 
     extras: ecs 경로 입력(ECS_CLUSTER/ECS_PW_TASKDEF_ARN/ECS_SUBNETS/ECS_SG/
     ECS_REGION) — eks 경로는 넘기지 않는다."""
-    arn = status_arn(repo_root, outs)
+    arn = status_arn(repo_root, outs, env_name=env_name)
     if not arn:
-        name = outs.get("chat_agent_name", "?")
         print(f"bi_insight: AgentCore Runtime 이 없어 프로비저닝합니다 "
-              f"(region={AGENTCORE_REGION}, name={name})", file=sys.stderr)
+              f"(region={AGENTCORE_REGION}, name={_agent_name(outs, env_name)})",
+              file=sys.stderr)
     r = _run(repo_root, "deploy", outs, meta=meta,
-             migration_image=migration_image, context=context, extras=extras)
+             migration_image=migration_image, context=context, extras=extras,
+             env_name=env_name)
     if r.returncode != 0:
         tail = (r.stderr or "").strip().splitlines()[-3:]
         print(f"⚠ chat-agent 프로비저닝 실패 — {'; '.join(tail) or r.stdout[:200]}",

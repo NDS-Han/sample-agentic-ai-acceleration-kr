@@ -16,6 +16,7 @@ generate, don't mutate — env values 파일 자체는 건드리지 않는다.
 from __future__ import annotations
 
 import json
+import os
 import re
 import sys
 
@@ -384,6 +385,10 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         # db_tools 없이는 agent 가 쓸 수 없으므로 함께 켠다 (끄기는 env tfvars).
         lines.append("enable_chat_agent = true")
         lines.append("enable_chat_db_tools = true")
+        # AgentCore Runtime 은 ECR 이미지와 같은 리전에 있어야 한다 —
+        # provisioner(REGION)와 IRSA statement 스코프를 하나의 env로 정렬.
+        lines.append('chat_agent_region = "{}"'.format(
+            os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")))
     inf = cfg.infra
     if inf.vpc_cidr:
         lines.append(f'vpc_cidr = "{inf.vpc_cidr}"')

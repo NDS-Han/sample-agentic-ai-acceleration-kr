@@ -250,7 +250,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
             "ECS_SUBNETS": ",".join(outputs.get("private_subnet_ids") or []),
             "ECS_SG": outputs.get("task_security_group_id"),
             "ECS_REGION": cfg.aws.region,
-        })
+        }, env_name=cfg.env)
         if not runtime_arn:
             print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
                   "503 (미구성) 상태로 진행합니다", file=sys.stderr)
