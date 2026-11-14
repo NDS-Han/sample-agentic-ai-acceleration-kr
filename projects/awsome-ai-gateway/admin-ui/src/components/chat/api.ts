@@ -59,6 +59,7 @@ export async function getHistory(sessionId: string): Promise<ChatMessage[]> {
       tool_calls: unknown;
       charts: unknown;
       validator: unknown;
+      reports: unknown;
       cost_usd: number | null;
       duration_ms: number | null;
       created_at: string | null;
@@ -72,6 +73,7 @@ export async function getHistory(sessionId: string): Promise<ChatMessage[]> {
     toolCalls: (m.tool_calls as ChatMessage['toolCalls']) || undefined,
     charts: (m.charts as ChatMessage['charts']) || undefined,
     validator: (m.validator as ChatMessage['validator']) || undefined,
+    reports: (m.reports as ChatMessage['reports']) || undefined,
     costUsd: m.cost_usd ?? undefined,
     durationMs: m.duration_ms ?? undefined,
     createdAt: m.created_at ?? undefined,

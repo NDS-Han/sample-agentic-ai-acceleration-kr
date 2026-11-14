@@ -234,7 +234,7 @@ async def get_history(
     rows = await session.execute(
         text(
             """
-            SELECT id, role, content, tool_calls, charts, validator,
+            SELECT id, role, content, tool_calls, charts, validator, reports,
                    cost_usd, duration_ms, created_at
             FROM chat_agent.messages
             WHERE session_id = CAST(:sid AS uuid)
@@ -251,6 +251,7 @@ async def get_history(
                 "tool_calls": r.tool_calls,
                 "charts": r.charts,
                 "validator": r.validator,
+                "reports": r.reports,
                 "cost_usd": float(r.cost_usd) if r.cost_usd else None,
                 "duration_ms": r.duration_ms,
                 "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -789,8 +790,8 @@ async def _agentcore_producer(
     acc_tool_calls: list[dict] = []
     acc_charts: list[dict] = []
     acc_validator: dict | None = None
-    # report 이벤트 카드. chat_agent.messages 에는 reports 컬럼이 없어 **영속화되지
-    # 않는다** — 세션 중에만 표시된다(복원까지 원하면 컬럼 추가가 필요).
+    # report 이벤트 카드 — messages.reports(jsonb, 0057)에 영속화돼 history
+    # 복원 시 카드가 다시 렌더되고 /reports/download 의 소유권 검증 근거가 된다.
     acc_reports: list[dict] = []
     # 종료 판정 플래그.
     #   saw_done      — agent 가 마지막 {"type":"done"} 프레임을 보냈는가
@@ -886,15 +887,18 @@ async def _agentcore_producer(
             await own_db.execute(
                 text(
                     "INSERT INTO chat_agent.messages "
-                    "(session_id, role, content, tool_calls, charts, validator) "
+                    "(session_id, role, content, tool_calls, charts, validator, "
+                    " reports) "
                     "VALUES (CAST(:sid AS uuid), 'assistant', :c, "
-                    "CAST(:tc AS jsonb), CAST(:ch AS jsonb), CAST(:vd AS jsonb))"
+                    "CAST(:tc AS jsonb), CAST(:ch AS jsonb), CAST(:vd AS jsonb), "
+                    "CAST(:rp AS jsonb))"
                 ).bindparams(
                     sid=session_id,
                     c=full_reply[:8000],
                     tc=json.dumps(acc_tool_calls) if acc_tool_calls else None,
                     ch=json.dumps(acc_charts) if acc_charts else None,
                     vd=json.dumps(acc_validator) if acc_validator else None,
+                    rp=json.dumps(acc_reports) if acc_reports else None,
                 )
             )
             # 세션 목록 메타데이터 — assistant 턴도 카운트/정렬에 반영(R25-N-C8).
@@ -1119,9 +1123,7 @@ async def _agentcore_producer(
                     elif etype == "report":
                         # 다운로드 리포트 카드. s3_uri 는 그대로 전달(UI 가 다운로드 클릭 시
                         # /reports/download 로 presign 요청 — URL 을 미리 굽지 않음, 만료·검증
-                        # 우회 방지). ⚠️ chat_agent.messages 에 reports 컬럼이 없어
-                        # acc_reports 는 **DB 에 저장되지 않는다** — 새로고침하면 카드가
-                        # 사라진다(세션 중에만 유효). 복원까지 원하면 컬럼 추가가 필요.
+                        # 우회 방지). acc_reports 는 messages.reports(0057)에 영속화된다.
                         rep = {
                             "s3_uri": evt.get("s3_uri", ""),
                             "file_name": evt.get("file_name", "report"),
@@ -1469,16 +1471,35 @@ def _parse_report_uri(uri: str) -> tuple[str, str]:
 async def download_report(
     uri: str,
     admin: CurrentUser = Depends(require_admin),
+    session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """리포트 파일 presigned 다운로드 URL 발급(5분 만료).
 
     require_admin 으로 비관리자 접근 차단 + prefix/버킷 화이트리스트로 임의 S3
-    객체 다운로드 차단. URL 은 호출 시점에만 발급해 만료를 통제한다.
+    객체 다운로드 차단. 추가로 URI 가 **요청자 소유 세션의 메시지에 실제로
+    첨부된 리포트**인지 검증한다 — 다른 관리자의 s3_uri 를 알아도 presign 불가
+    (reports 컬럼(0057) 도입 이후 가능해진 바인딩).
+    URL 은 호출 시점에만 발급해 만료를 통제한다.
     """
     import boto3
     from botocore.exceptions import ClientError
 
     bucket, key = _parse_report_uri(uri)
+
+    # 소유권 바인딩 — reports 배열 안에 이 s3_uri 를 품은 메시지가 요청자 세션에
+    # 존재해야 한다. 0057 이전 메시지(reports NULL)는 매칭 안 됨 → 403(안전측).
+    own = await session.execute(
+        text(
+            "SELECT 1 FROM chat_agent.messages m "
+            "JOIN chat_agent.sessions s ON m.session_id = s.id "
+            "WHERE s.user_id = CAST(:uid AS uuid) "
+            "AND m.reports @> CAST(:needle AS jsonb) LIMIT 1"
+        ).bindparams(
+            uid=str(admin.user_id), needle=json.dumps([{"s3_uri": uri}])
+        )
+    )
+    if own.first() is None:
+        raise HTTPException(403, "Report not attached to your sessions")
     file_name = os.path.basename(key) or "report"
     ext = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
     content_type = _CONTENT_TYPES.get(ext, "application/octet-stream")

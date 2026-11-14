@@ -117,21 +117,27 @@ k8s secret → pod env → `psql \password` stdin — 실행 후 임시 secret·
 # DB 에서 롤 비밀번호 설정 (chat_reader 롤은 db/init/08_* 로 이미 존재)
 ALTER ROLE gateway_chat_reader WITH PASSWORD '<생성한 비밀번호>';
 
-# terraform output 의 secret ARN 에 저장 — query_db Lambda 가 여기서 읽는다
+# terraform output 의 secret ARN 에 JSON 형태로 저장 — query_db Lambda 가
+# json.loads(SecretString)["password"] 로 읽으므로 평문을 넣으면 전부
+# JSONDecodeError 로 실패한다 (76c825dc 로 확인된 계약)
 aws secretsmanager put-secret-value \
   --secret-id $(terraform -chdir=deployment/terraform/environments/<env> output -raw chat_agent_reader_secret_arn) \
-  --secret-string '<생성한 비밀번호>'
+  --secret-string '{"username":"gateway_chat_reader","password":"<생성한 비밀번호>"}'
 ```
 
-### 4. 스키마 임베딩 시드
+### 4. 스키마 임베딩 시드 (Phase 2 — 현재 미연결)
 
-`sql_specialist` 가 쓰는 `chat_agent.schema_embeddings`(pgvector)를 채운다:
+`chat_agent.schema_embeddings`(pgvector) 테이블은 마이그레이션 0005 에
+생성돼 있지만, **현재 런타임은 이 테이블을 읽지 않는다** — sql_specialist 의
+스키마 인식은 `get_schema` Lambda(정적 whitelist 메타데이터)와
+`fewshot.py` 의 Jaccard few-shot 으로 동작한다. 이 시드는 Phase 2 RAG
+schema-linking 이 코드에 연결되기 전까지 **실행 불필요**다:
 
 ```bash
 python admin-chat-agent/scripts/build_schema_embeddings.py   # DB 접속 필요
 ```
 
-`config/schema_whitelist.yaml` 을 바꾼 뒤엔 재시드. (R30: whitelist 의
+실행해도 무해하나(멱등) 읽는 코드가 없어 효과는 없다. (R30: whitelist 의
 email `sample_values` 는 합성 값 — 실 PII 넣지 말 것.)
 
 ### 5. 검증
