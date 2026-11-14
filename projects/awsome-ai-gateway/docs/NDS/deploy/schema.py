@@ -363,8 +363,8 @@ class GatewayConfig:
                      "provision_agentcore_chatagent.py 로 Runtime 을 멱등 "
                      "생성합니다(boto3 agentcore 권한 + ECR 이미지 필요 — "
                      "없으면 docker/finch 빌드를 시도합니다). chat_reader DB "
-                     "비밀번호·스키마 임베딩 시드는 별도 수동 단계입니다 "
-                     "(docs/NDS/chat-agent.md).")
+                     "비밀번호도 프로비저너가 동기화하고, 스키마 임베딩 시드만 "
+                     "수동 단계입니다 (docs/NDS/chat-agent.md).")
         if self.deploy.target == "eks":
             w.append("size_tier 는 eks 경로에서 문서용입니다 — 컴퓨트 크기는 "
                      "deploy.capacity_tier(밴드)와 deploy.sizing(개별 키)이 "
