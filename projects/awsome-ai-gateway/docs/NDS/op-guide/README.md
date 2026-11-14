@@ -454,11 +454,45 @@ aws-marketplace:Subscribe` means subscribe in the target account.
 
 ### 9.5 Models & pricing
 
-- Catalog = **aliases** clients send; upstream IDs stay behind the alias.
-- **Sync Pricing** pulls AWS Price List or the LiteLLM community
-  catalog with a Preview→Apply flow; unmapped models keep current price.
-- Deactivate preserves history; Delete requires no dependents.
-- Team model permissions are edited in the model's expanded row.
+Catalog = **aliases** clients send; upstream IDs stay behind the alias.
+Registering a new model (admin-ui `/models` — full field reference and
+screenshots in [guides/models.md](../guides/models.md)):
+
+1. **Serving-account prerequisite** — the account that will invoke the
+   model must be able to. New Anthropic models are **Marketplace
+   subscriptions** (Bedrock console → Model catalog → Subscribe),
+   propagated in ~2 min — do this *before* registering the alias or
+   calls fail `AccessDenied … aws-marketplace:Subscribe`.
+2. **+ Add model** — required: alias (the client-facing `model` string —
+   keep it stable, everything keys off it), provider, upstream model ID
+   (e.g. a `global.anthropic.*` inference profile). Optional: display
+   name, endpoint URL (provider-dependent), description, specs
+   (context window / max output), per-model **Routing** override, and
+   the long-context pricing band (threshold + 5 price fields).
+3. **Pricing** — enter per-1M input/output/cache rates directly, or run
+   **Sync Pricing** after registration (below).
+4. **Permissions** — expand the row → team-permission panel; the alias
+   is not callable until a policy allows it (app policy in `/apps`,
+   team policy in the row).
+5. **Verify** — one test call through the gateway → confirm it appears
+   in Analytics and audit.
+
+**Sync Pricing** (`/models` → *Sync Official Pricing*) — two sources:
+
+| Source | Feed | Requirement |
+|---|---|---|
+| **AWS Price List** | Official AWS Bedrock pricing | None — always available |
+| **3rd-party catalog** (LiteLLM) | LiteLLM canonical cost map (GitHub `model_prices_and_context_window.json`, tag-pinned), fetched via the `llm-gateway-<env>-litellm-pricing` Lambda proxy | `features.pricing_lambda: true` — `apply` auto-provisions role+function+invoke policy. Undeployed → option is **disabled** and the API 503s |
+
+Flow is deliberately read-then-write: pick source → **Preview** (diff
+table: current → proposed input/output/cache5m/cache1h/cacheRead +
+long-context band rows) → select rows → **Apply selected**. Unmatched
+aliases keep their current price — a sync never blanks a price; changing
+the source after previewing clears the result and a server-side drift
+guard rejects stale applies.
+
+Lifecycle: **Deactivate** preserves history (preferred for retiring);
+**Delete** is gated on models with no dependents.
 
 ### 9.6 Monitoring, audit, analytics
 
