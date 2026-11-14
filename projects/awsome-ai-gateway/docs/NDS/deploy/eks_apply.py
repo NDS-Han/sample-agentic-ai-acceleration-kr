@@ -651,8 +651,10 @@ def _alerting_var_args(cfg: GatewayConfig, gen_dir: Path,
         return []
     lb_dims, tg_pairs = _discover_alb_dims(cfg, context)
     if not lb_dims:
-        print("ⓘ alerting: ALB dimension 을 발견하지 못했습니다 — ingress ALB "
-              "생성 후 다음 apply 에서 ALB 알람이 수렴됩니다", file=sys.stderr)
+        print("⚠ alerting: ALB dimension 을 발견하지 못했습니다 — "
+              "ALB 5xx/UnHealthyHost 알람은 아직 생성되지 않습니다. "
+              "ingress ALB 가 뜬 뒤 `deploy apply` 를 한 번 더 실행해야 "
+              "알람이 만들어집니다", file=sys.stderr)
         return []
     p = gen_dir / "alerts-dims.tfvars"
     p.write_text(

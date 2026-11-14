@@ -226,9 +226,11 @@ dimension(ARN suffix)을 그때 부여합니다 — `deploy apply` 는 이를 �
    TG별 `UnHealthyHostCount > 0`(1m×2) — actions 은 기존 alerting topic
 
 **수렴 계약**: 첫 배포 등 ALB 를 못 찾으면 var-file 을 만들지 않고
-`ⓘ alerting: ALB dimension 을 발견하지 못했습니다` 를 출력한 뒤 진행합니다 —
-알람 0개는 실패가 아니며, ALB 가 생긴 뒤 다음 `deploy apply` 가 자동으로
-채웁니다. 주입 var-file 은 apply 마다 재생성되므로 ALB 교체(id 변경)도
+`⚠ alerting: ALB dimension 을 발견하지 못했습니다 — ... deploy apply 를
+한 번 더 실행해야 알람이 만들어집니다` 를 출력한 뒤 진행합니다 — 이 메시지가
+뜨면 **ALB 알람이 없는 상태이므로, ingress ALB 가 뜬 뒤 `deploy apply` 를
+한 번 더 실행해야** 알람이 만들어집니다. 주입 var-file 은 apply 마다
+재생성되므로 ALB 교체(id 변경)도
 자동 추적되고, env tfvars 에 사람이 둔 같은 키는 gen 파일이 덮습니다.
 
 **수동 경로 (ecs/외부 ALB)**: eks 가 아니거나 발견이 불가하면 env tfvars 에

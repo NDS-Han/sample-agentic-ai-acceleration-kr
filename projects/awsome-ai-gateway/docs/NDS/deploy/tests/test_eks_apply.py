@@ -595,7 +595,9 @@ def test_alerting_var_args_empty_no_file(monkeypatch, tmp_path, capsys):
     _discover_fake(monkeypatch, kubectl_rc=1)
     assert eks_apply._alerting_var_args(_alert_cfg(), tmp_path) == []
     assert not (tmp_path / "alerts-dims.tfvars").exists()
-    assert "다음 apply" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "deploy apply` 를 한 번 더" in err
+    assert "알람은 아직 생성되지 않습니다" in err
 
 
 def test_ensure_infra_alerting_injects_dims(monkeypatch, tmp_path):
