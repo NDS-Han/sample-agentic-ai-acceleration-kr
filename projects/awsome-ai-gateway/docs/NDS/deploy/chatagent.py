@@ -171,6 +171,14 @@ def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
     return m.group(1)
 
 
+def build_tree_exists(repo_root: Path) -> bool:
+    """archive_file data source 가 zip 하는 build/ 트리가 있는가 — plan 같은
+    읽기 경로는 존재만 필요하고 최신성은 안 따진다 (pip 재설치 수 분 회피)."""
+    b = repo_root / "deployment/terraform/modules/agentcore-runtime/build"
+    return all((b / n / "lambda_function.py").exists()
+               for n in ("query_db", "get_schema"))
+
+
 def ensure_lambda_build(repo_root: Path) -> bool:
     """admin-chat-agent/lambdas/build-lambdas.sh 실행 — agentcore-runtime
     모듈의 archive_file data source 가 참조하는 build/{query_db,get_schema}

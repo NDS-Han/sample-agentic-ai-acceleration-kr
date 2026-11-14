@@ -425,16 +425,19 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
             from .common import tfvars_clean
             _et = "\n".join(_env_tfvars_texts(env_dir))
             _et = tfvars_clean(_et)
-            _m = re.search(r'(?m)^\s*application_namespace\s*=\s*"([^"]+)"', _et)
-            if _m and _m.group(1) != cfg.deploy.namespace:
+            # terraform 은 last-file-wins — 여러 파일 선언 시 마지막이 실효값
+            _all = re.findall(r'(?m)^\s*application_namespace\s*=\s*"([^"]+)"',
+                              _et)
+            _m_val = _all[-1] if _all else None
+            if _m_val and _m_val != cfg.deploy.namespace:
                 print(f"⚠ env tfvars 의 application_namespace="
-                      f"{_m.group(1)} — managed overlay 가 deploy.namespace="
+                      f"{_m_val} — managed overlay 가 deploy.namespace="
                       f"{cfg.deploy.namespace} 로 덮어씁니다. 단 module.eks 는 "
                       f"managed target 이 아니라 update 경로(deploy apply)는 "
                       f"Fargate profile/IRSA 를 수렴하지 않습니다 — 신 ns 의 "
                       f"파드가 스케줄되려면 env terraform apply 가 필요합니다",
                       file=sys.stderr)
-            elif not _m and cfg.deploy.namespace != "llm-gateway":
+            elif not _m_val and cfg.deploy.namespace != "llm-gateway":
                 print(f"ⓘ deploy.namespace={cfg.deploy.namespace} — module.eks 는 "
                       "managed target 이 아니므로, 기존 env 에서는 env terraform "
                       "apply 가 Fargate profile/IRSA 에 반영해야 합니다",

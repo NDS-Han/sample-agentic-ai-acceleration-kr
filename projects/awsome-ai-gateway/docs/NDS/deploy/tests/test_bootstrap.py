@@ -648,9 +648,10 @@ def test_sanitize_copied_values_neutralizes_env_pinned():
     assert "dev-gw" not in out and "runtime/dev_x" not in out
     assert "Customer-Developer" not in out
     assert 'COGNITO_SYNC_DEACTIVATE_MISSING: "false"' in out
-    # 주석 처리된 role-arn 예시는 건드리지 않는다
+    # 주석 예시의 실 계정 ARN 도 중화한다 — 비활성이라도 조직 핀값이라 유출
     text2 = '# eks.amazonaws.com/role-arn: "arn:aws:iam::1:role/keep"\n'
-    assert text2 in bootstrap._sanitize_copied_values(text2)
+    out2 = bootstrap._sanitize_copied_values(text2)
+    assert "role/keep" not in out2 and 'role-arn: ""' in out2
 
 
 def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):

@@ -281,7 +281,7 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
     legacy install-eks.sh 가 kubectl apply 로 생성하던 계약을 이관한다.
     store 이름은 gen values.yaml 의 externalSecrets.secretStoreRef.name,
     없으면 차트 기본값(aws-secrets-manager)."""
-    name = "aws-secrets-manager"
+    name, kind = "aws-secrets-manager", "ClusterSecretStore"
     # 레이어 순서대로 병합 — 뒤 레이어(gen)가 키를 선언할 때만 덮는다. 첫
     # 파싱 성공에서 break 하면 env overlay 의 커스텀 store 명이 유실된다.
     for layer in meta.get("values_layers") or []:
@@ -289,17 +289,20 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
         lp = lp if lp.is_absolute() else repo_root / lp
         try:
             vals = yaml.safe_load(lp.read_text()) or {}
-            v = ((vals.get("externalSecrets") or {})
-                 .get("secretStoreRef") or {}).get("name")
-            if v:
-                name = str(v)
+            ref = ((vals.get("externalSecrets") or {})
+                   .get("secretStoreRef") or {})
+            if ref.get("name"):
+                name = str(ref["name"])
+            if ref.get("kind"):
+                kind = str(ref["kind"])
         except (OSError, yaml.YAMLError):
             continue
+    namespaced = kind != "ClusterSecretStore"
     base = ["kubectl"] + (["--context", context] if context else [])
     if _run_quiet(base + ["get", "ns", "external-secrets"],
                   timeout=15).returncode != 0:
-        print("ⓘ external-secrets 네임스페이스 없음 — ClusterSecretStore "
-              "보장 생략 (env terraform 이 ESO 를 설치하지 않은 구성)",
+        print("ⓘ external-secrets 네임스페이스 없음 — SecretStore 보장 생략 "
+              "(env terraform 이 ESO 를 설치하지 않은 구성)",
               file=sys.stderr)
         return
     # ESO pod 준비 대기 — Fargate 콜드스타트로 수 분 걸릴 수 있다. 실패해도
@@ -308,14 +311,18 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
                        "-l", "app.kubernetes.io/name=external-secrets",
                        "-n", "external-secrets", "--timeout=180s"],
                timeout=200)
-    if _run_quiet(base + ["get", "clustersecretstore", name],
-                  timeout=15).returncode == 0:
+    get_kind = kind.lower()
+    get_argv = base + ["get", get_kind, name]
+    if namespaced:
+        get_argv += ["-n", meta["namespace"]]
+    if _run_quiet(get_argv, timeout=15).returncode == 0:
         return
+    ns_block = f"  namespace: {meta['namespace']}\n" if namespaced else ""
     manifest = f"""apiVersion: external-secrets.io/v1beta1
-kind: ClusterSecretStore
+kind: {kind}
 metadata:
   name: {name}
-spec:
+{ns_block}spec:
   provider:
     aws:
       service: SecretsManager
@@ -333,11 +340,11 @@ spec:
         raise SystemExit("kubectl 명령을 못 찾았습니다 — PATH 확인 필요")
     if r.returncode != 0:
         raise SystemExit(
-            f"ClusterSecretStore '{name}' 생성 실패 — ExternalSecret 이 동기화 "
+            f"{kind} '{name}' 생성 실패 — ExternalSecret 이 동기화 "
             f"되지 않습니다:\n{(r.stderr or r.stdout or '').strip()}\n"
             f"  수동: kubectl apply -f -  ← 위 manifest (ESO webhook 이 막으면 "
             f"install-eks.sh 의 failurePolicy 우회 절차 참조)")
-    print(f"ⓘ ClusterSecretStore '{name}' 생성", file=sys.stderr)
+    print(f"ⓘ {kind} '{name}' 생성", file=sys.stderr)
 
 
 def ensure_selfsigned_cert(env: str, alb_host: str, region: str) -> str:
@@ -386,11 +393,16 @@ def _alb_hostname_by_suffix(meta: dict, suffix: str, context: str = "") -> str:
             inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
             rel = meta.get("release")
             if inst is not None:
-                if inst != rel:
+                # instance 라벨은 릴리스의 3개 ingress 전부에 찍힌다 — 소유
+                # 확인만으로는 이름 정렬 첫 항목(admin-api)이 항상 선택되므로
+                # 어느 ingress 인지 이름으로도 구분한다. fullnameOverride 시
+                # 이름이 {override}<suffix> 이므로 endswith 로 본다.
+                if inst != rel or not name.endswith(suffix):
                     continue
-            elif rel and name != f"{rel}{suffix}":
-                continue
-            elif not rel and not name.endswith(suffix):
+            elif rel:
+                if name != f"{rel}{suffix}":
+                    continue
+            elif not name.endswith(suffix):
                 continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
@@ -593,11 +605,15 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
             inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
             rel = meta.get("release")
             if inst is not None:
-                if inst != rel:
+                # 라벨은 3개 ingress 전부에 찍힌다 — admin-ui 이름 검사를 항상
+                # 적용 (아니면 이름 정렬 첫 항목 admin-api 의 ALB 를 돌려준다).
+                # fullnameOverride 시 이름이 {override}-admin-ui 라 endswith.
+                if inst != rel or not name.endswith("-admin-ui"):
                     continue
-            elif rel and name != f"{rel}-admin-ui":
-                continue
-            elif not rel and not name.endswith("-admin-ui"):
+            elif rel:
+                if name != f"{rel}-admin-ui":
+                    continue
+            elif not name.endswith("-admin-ui"):
                 continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
@@ -631,11 +647,12 @@ def live_ingress_rule_host(meta: dict, context: str = "") -> str:
             inst = labels.get("app.kubernetes.io/instance")
             rel = meta.get("release")
             if inst is not None:
-                if inst != rel:
+                if inst != rel or not name.endswith("-admin-ui"):
                     continue
-            elif rel and name != f"{rel}-admin-ui":
-                continue
-            elif not rel and not name.endswith("-admin-ui"):
+            elif rel:
+                if name != f"{rel}-admin-ui":
+                    continue
+            elif not name.endswith("-admin-ui"):
                 continue
             for rule in (item.get("spec") or {}).get("rules") or []:
                 if rule.get("host"):
@@ -674,8 +691,10 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
             continue
         override = str(v.get("fullnameOverride") or override or "")
         for top in ("database", "redis"):
-            n = ((v.get(top) or {}).get("external") or {}
-                 ).get("passwordSecretName")
+            ext = v.get(top)
+            if not isinstance(ext, dict):
+                continue  # 스칼라/잘못된 섹션 — .get 호출 시 AttributeError
+            n = (ext.get("external") or {}).get("passwordSecretName")
             if n:
                 secrets.add(str(n))
     chart_name = "llm-gateway"
@@ -1295,15 +1314,16 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
 
 
 def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> None:
-    if cfg.features.bi_insight:
-        # archive_file data source 가 build/ 트리를 zip 한다 — 없으면 tf
-        # plan/apply 모두 'missing directory' 로 실패. 어떤 tf 명령보다 먼저.
-        chatagent.ensure_lambda_build(repo_root)
     """helm upgrade --dry-run — 무엇이 바뀌는지만 보여준다.
 
     dry-run 덤프는 전체 매니페스트라 읽기 어렵다 — 렌더 결과를 live release
     매니페스트와 정규화 비교해 변경/추가/삭제된 리소스와 unified diff 만
     보여준다. live 를 읽지 못하면 종전처럼 전체 덤프로 폴백한다."""
+    if cfg.features.bi_insight and not chatagent.build_tree_exists(repo_root):
+        # archive_file data source 가 build/ 트리를 zip 한다 — 없으면 tf
+        # plan/apply 모두 'missing directory' 로 실패. preview 는 존재만
+        # 필요하니 이미 있으면 pip 재빌드를 건너뛴다 (apply 는 항상 새로 빌드).
+        chatagent.ensure_lambda_build(repo_root)
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
     if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
@@ -1412,9 +1432,14 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                          "ingress.adminUi.annotations."
                          "alb\\.ingress\\.kubernetes\\.io/"
                          "certificate-arn=" + sarn]
-    if cfg.features.pricing_lambda and st.get("function"):
+    if cfg.features.pricing_lambda:
+        # apply 는 ensure 후 함수명(fn_name)을 주입한다 — status() 의
+        # 'function' 필드는 'Active'/'미배포' 표시 문자열이라 그대로 쓰면
+        # preview↔apply 값이 어긋나고 live 의 실제 함수명이 지워지는
+        # 거짓 wipe diff 를 다시 만든다.
         set_args += ["--set",
-                     f"adminApi.env.LITELLM_PRICING_LAMBDA={st['function']}"]
+                     "adminApi.env.LITELLM_PRICING_LAMBDA="
+                     f"{pricinglambda.fn_name(cfg.env)}"]
     if not cfg.domain.name and not live_ingress_rule_host(meta, context):
         host = live_alb_hostname(meta, context)
         if host:

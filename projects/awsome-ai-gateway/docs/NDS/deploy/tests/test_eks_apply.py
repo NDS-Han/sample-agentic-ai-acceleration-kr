@@ -81,6 +81,62 @@ def test_live_ingress_rule_host_skips_foreign_release(monkeypatch):
     assert eks_apply.live_ingress_rule_host(meta) == ""
 
 
+def test_live_alb_hostname_labeled_own_ingresses_still_pick_admin_ui(
+        monkeypatch):
+    """차트는 instance 라벨을 3개 ingress 전부에 찍는다 — 라벨만 보고
+    소유 확인하면 이름 정렬 첫 항목 admin-api 가 선택된다 (13차 회귀)."""
+    def _labeled(name, host):
+        it = _ingress(name, host)
+        it["metadata"]["labels"] = {"app.kubernetes.io/instance": "myrel"}
+        return it
+    items = [
+        _labeled("myrel-admin-api", "api.elb.amazonaws.com"),
+        _labeled("myrel-admin-ui", "ui.elb.amazonaws.com"),
+        _labeled("myrel-gateway", "gw.elb.amazonaws.com"),
+    ]
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp(items))
+    assert (eks_apply.live_alb_hostname({"namespace": "ns", "release": "myrel"})
+            == "ui.elb.amazonaws.com")
+
+
+def test_alb_hostname_by_suffix_labeled_routes_each_host(monkeypatch):
+    """ensure_domain_records 가 suffix 별로 호출 — 라벨 통과 후에도 이름으로
+    구분해야 gateway/admin-ui/admin-api 가 각자의 ALB 를 받는다."""
+    def _labeled(name, host):
+        it = _ingress(name, host)
+        it["metadata"]["labels"] = {"app.kubernetes.io/instance": "myrel"}
+        return it
+    items = [
+        _labeled("myrel-admin-api", "api.elb.amazonaws.com"),
+        _labeled("myrel-admin-ui", "ui.elb.amazonaws.com"),
+        _labeled("myrel-gateway", "gw.elb.amazonaws.com"),
+    ]
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp(items))
+    meta = {"namespace": "ns", "release": "myrel"}
+    assert (eks_apply._alb_hostname_by_suffix(meta, "-gateway")
+            == "gw.elb.amazonaws.com")
+    assert (eks_apply._alb_hostname_by_suffix(meta, "-admin-ui")
+            == "ui.elb.amazonaws.com")
+    assert (eks_apply._alb_hostname_by_suffix(meta, "-admin-api")
+            == "api.elb.amazonaws.com")
+
+
+def test_live_ingress_rule_host_labeled_picks_admin_ui(monkeypatch):
+    """라벨 통과 후에도 admin-ui 이름 검사 — admin-api 의 host 를 집으면
+    2-phase 가 잘못 스킵된다."""
+    items = [
+        {"metadata": {"name": "myrel-admin-api",
+                      "labels": {"app.kubernetes.io/instance": "myrel"}},
+         "spec": {"rules": [{"host": "api.example.com"}]}},
+        {"metadata": {"name": "myrel-admin-ui",
+                      "labels": {"app.kubernetes.io/instance": "myrel"}},
+         "spec": {"rules": [{"host": "ui.example.com"}]}},
+    ]
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp(items))
+    meta = {"namespace": "ns", "release": "myrel"}
+    assert eks_apply.live_ingress_rule_host(meta) == "ui.example.com"
+
+
 def test_context_flag_propagates(monkeypatch):
     seen = {}
     def fake(argv, **k):
@@ -1041,6 +1097,37 @@ def test_ensure_cluster_secret_store_creates_and_skips(monkeypatch, tmp_path):
     # store 보장이 조용히 생략됐었다)
     assert all("--context" in c for c in calls)
     assert all("--kube-context" not in c for c in calls)
+
+
+def test_ensure_secret_store_namespaced_kind(monkeypatch, tmp_path):
+    """kind: SecretStore 선언 시 namespaced store 를 만들어야 한다 —
+    ClusterSecretStore 만 만들면 ExternalSecret 이 참조를 못 찾는다."""
+    from deploy import eks_apply
+    import subprocess as _sp
+    calls, applied = [], []
+
+    def fake_quiet(argv, **kw):
+        calls.append(argv)
+        if "secretstore" in argv:
+            return _sp.CompletedProcess([], 1, "", "")
+        return _sp.CompletedProcess([], 0, "", "")
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake_quiet)
+    monkeypatch.setattr(
+        _sp, "run",
+        lambda argv, **k: applied.append(k.get("input", "")) or
+        _sp.CompletedProcess([], 0, "", ""))
+
+    vals = tmp_path / "v.yaml"
+    vals.write_text(
+        "externalSecrets:\n  secretStoreRef:\n"
+        "    name: ns-store\n    kind: SecretStore\n")
+    meta = {"values_layers": [str(vals)], "namespace": "app-ns"}
+    eks_apply.ensure_cluster_secret_store(meta, "r", "", tmp_path)
+    assert applied and "kind: SecretStore" in applied[-1]
+    assert "namespace: app-ns" in applied[-1]
+    # 존재 확인도 namespaced 조회였는지
+    assert any("secretstore" in c and "-n" in c and "app-ns" in c
+               for c in calls)
 
 
 def test_managed_overlay_emits_application_namespace(monkeypatch, tmp_path):

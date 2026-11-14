@@ -163,7 +163,7 @@ def scaffold_tfvars(example: str, *, env: str, region: str, account: str,
     return header + t
 
 
-def _sanitize_copied_values(text: str) -> str:
+def _sanitize_copied_values(text: str, region: str = "") -> str:
     """dev env values 사본에서 환경 교차 값을 중화한다.
 
     dev 파일엔 실제 Cognito issuer(`.../ap-northeast-2_xxx`)와 enabled=true 가
@@ -175,26 +175,41 @@ def _sanitize_copied_values(text: str) -> str:
     output/render 주입이 유일한 소스가 되게 한다. 주석 보존을 위해 텍스트
     수준으로 고친다."""
     # oidc: 블록의 enabled 만 끈다 — 다른 enabled: 키와 구분하기 위해
-    # `oidc:` 라인 뒤 첫 enabled 만 대상.
-    text = re.sub(r"(?m)(^\s+oidc:\s*\n\s*enabled:\s*)true",
-                  r"\g<1>false", text)
-    text = re.sub(r'(?m)^(\s+issuerUrl:\s*)"[^"]*"',
+    # `oidc:` 라인 뒤 첫 enabled 만 대상. 사이에 주석/빈 줄이 끼어도 잡되,
+    # enabled 는 oidc 보다 깊은 들여쓰기(자식)여야 한다 — 같은 들여쓰기의
+    # 형제 enabled: 를 건드리면 안 된다.
+    text = re.sub(
+        r"(?m)(^([ \t]+)oidc:[^\n]*\n(?:(?:[ \t]*#[^\n]*|[ \t]*)\n)*"
+        r"\2[ \t]+enabled:[ \t]*)true",
+        r"\g<1>false", text)
+    text = re.sub(r'(?m)^(\s*issuerUrl:\s*)("[^"]*"|[^\s#]+)',
                   r'\g<1>""  # scaffold 가 중화 — terraform output 이 apply 시 주입',
                   text)
-    # 계정/env 핀값 공란화 — 키는 남기고 값만 지운다.
+    # 계정/env 핀값 공란화 — 키는 남기고 값만 지운다 (따옴표 없는 값도 대상).
+    _val = r'("[^"]*"|[^\s#]+)'
     for key in ("imageRegistry", "COGNITO_USER_POOL_ID",
                 "AGENTCORE_RUNTIME_ARN", "AGENTCORE_GATEWAY_URL"):
-        text = re.sub(rf'(?m)^(\s*{key}:\s*)"[^"]*"', r'\g<1>""', text)
+        text = re.sub(rf'(?m)^(\s*{key}:\s*){_val}', r'\g<1>""', text)
     # 잘못된 풀 동기화로 사용자 비활성화되는 것을 막는다.
-    text = re.sub(r'(?m)^(\s*COGNITO_SYNC_DEACTIVATE_MISSING:\s*)"true"',
+    text = re.sub(r'(?m)^(\s*COGNITO_SYNC_DEACTIVATE_MISSING:\s*)("true"|true)',
                   r'\g<1>"false"', text)
     # dev 의 IAM role 이름 허용목록 — 신 env 의 정책과 무관한 값.
+    # 블록(- item)과 flow([a, b]) 두 형태 모두.
+    text = re.sub(r'(?m)^(\s*allowedIamRoles:)\s*\[[^\]]*\]\s*$',
+                  r'\g<1> []', text)
     text = re.sub(r'(?m)^(\s*allowedIamRoles:)\s*\n(?:\s*-\s+[^\n]*\n)+',
                   r'\g<1> []\n', text)
     # dev IRSA role ARN — terraform output(gateway_proxy_role_arn 등)이
-    # --set 으로 주입하는 값이므로 주석 아닌 항목만 공란화한다.
-    text = re.sub(r'(?m)^(\s*eks\.amazonaws\.com/role-arn:\s*)"arn:[^"]*"',
-                  r'\g<1>""', text)
+    # --set 으로 주입하는 값이므로 공란화. 주석 예시(# eks...role-arn)에도
+    # 실 계정 ARN 이 박혀 있어 같이 중화한다 (비인용 값 포함).
+    text = re.sub(r'(?m)^(\s*#?\s*eks\.amazonaws\.com/role-arn:\s*)'
+                  r'("arn:[^"]*"|arn:\S+)', r'\g<1>""', text)
+    # 리전 핀값 — render/--set 이 덮지 않는 키(COGNITO_REGION 등)가 dev 리전을
+    # 가리키면 풀을 잘못된 리전에서 찾는다. 배포 리전으로 치환한다.
+    if region:
+        for key in ("COGNITO_REGION", "AGENTCORE_REGION"):
+            text = re.sub(rf'(?m)^(\s*{key}:\s*){_val}',
+                          rf'\g<1>"{region}"', text)
     return text
 
 
@@ -281,7 +296,8 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
     if not any(p.exists() for p in existing):
         src = chart_dir / "values-eks-fargate-dev.yaml"
         if src.exists():
-            vals_dst.write_text(_sanitize_copied_values(src.read_text()))
+            vals_dst.write_text(
+                _sanitize_copied_values(src.read_text(), region))
             print(f"ⓘ env values 도 {src.name} 에서 복사했습니다: {vals_dst.name}\n"
                   "  dev 의 OIDC(enabled/issuerUrl)는 중화했습니다 — 신 env 의 "
                   "Cognito 는 terraform output 이 apply 시 주입합니다.\n"

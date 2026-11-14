@@ -1012,9 +1012,15 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
     if cfg.features.bi_insight:
-        # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown
+        # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown.
+        # env destroy 전이라 outputs 가 읽힌다 — 사람이 project 변수를 바꾼
+        # env 에선 도출 이름과 실측이 어긋나 Runtime 이 새어나가므로 실측 우선.
         from . import chatagent
-        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region)
+        chat_name = ""
+        if env_dir:
+            chat_name = eks_apply.tf_outputs(env_dir).get("chat_agent_name", "")
+        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
+                           chat_agent_name=chat_name)
     if cfg.features.pricing_lambda:
         from . import pricinglambda
         admin_arn = ""
