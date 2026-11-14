@@ -123,3 +123,25 @@ def ensure_runtime_arn(repo_root: Path, outs: dict, meta: dict | None = None,
         if line.startswith("[provision]"):
             print(f"  {line}", file=sys.stderr)
     return m.group(1)
+
+
+def teardown(repo_root: Path, env_name: str) -> bool:
+    """bi_insight 선언이 꺼졌을 때 AgentCore Runtime 을 지운다 — 멱등.
+
+    terraform 밖 리소스라 destroy 가 못 지운다 — 선언이 진실이려면 apply/\
+    teardown 경로에서 여기서 정리한다 (websearch.teardown 과 같은 역할).
+    이름은 outputs 없이 도출한다 — render 가 project=llm-gateway 로 고정해
+    {project}-{env}-admin-chat-agent 이고, 모듈이 이미 지워진 뒤에도 부를 수
+    있어야 하므로 state 조회를 요구하지 않는다."""
+    name = f"llm-gateway-{env_name}-admin-chat-agent".replace("-", "_")
+    r = _run(repo_root, "teardown", {}, extras={"AGENT_NAME": name},
+             timeout=180)
+    if r.returncode != 0:
+        tail = (r.stderr or "").strip().splitlines()[-2:]
+        print(f"⚠ chat-agent Runtime teardown 실패 — {'; '.join(tail) or '?'}",
+              file=sys.stderr)
+        return False
+    for line in (r.stderr or "").strip().splitlines():
+        if line.startswith("[provision]"):
+            print(f"  {line}", file=sys.stderr)
+    return True

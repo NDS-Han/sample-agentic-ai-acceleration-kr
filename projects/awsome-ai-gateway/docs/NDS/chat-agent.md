@@ -38,7 +38,9 @@ lifecycle 1d), query_db/get_schema Lambda, Lambda SG, admin-api IRSA statement.
 
 끄기는 managed overlay 계약(켜기만 발산)과 동일하게 **env terraform.tfvars 에서
 수동**으로 `enable_chat_agent = false` 후 env 수준 apply 이다 — overlay 는
-false 를 쓰지 않는다.
+false 를 쓰지 않는다 (NDS render 경로로 켰다면 gen tfvars 재생성으로 자동
+수렴). `deploy apply` 는 `bi_insight` 가 꺼져 있으면 Runtime 도 자동으로
+teardown 한다 — 아래 "파기" 참조.
 
 **ecs**: render 가 env tfvars 에 같은 플래그를 발산하고 apply 가
 `module.agentcore_runtime` + `chat-reader-pw` task def + admin-api task role
@@ -129,6 +131,23 @@ email `sample_values` 는 합성 값 — 실 PII 넣지 말 것.)
 - admin-ui `/chat` (ADMIN) 에서 질의 → `chat_agent.sessions/messages` 에 기록
 - query_db Lambda 가 Aurora **cluster endpoint** 로 접속함을 확인 —
   RDS Proxy 가 아니다(chat_reader 는 proxy 미등록, 의도된 직결)
+
+## 파기
+
+두 경로 모두 선언 수렴이다 — 수동으로 지울 것은 없다.
+
+- **기능만 끄기**: `features.bi_insight: false` 후 `deploy apply` →
+  `chatagent.teardown()` 이 Runtime 을 멱등 삭제하고(없으면 조회 한 번으로
+  종료), managed overlay/env tfvars 가 `module.agentcore_runtime` 을
+  destroy, admin-api env 도 비워진다 (eks: helm values 리셋, ecs:
+  extra-vars 의 `agentcore_runtime_arn` 자동 제거).
+- **환경 통째 파기**: `deploy teardown` — helm uninstall + terraform
+  destroy 에 이어 web_search Gateway·pricing Lambda 와 같은 자리에서
+  Runtime 도 함께 정리한다 (삭제 확인 패널에 표시됨).
+
+남는 것: `gateway_chat_reader` DB role·스키마 임베딩 데이터(Aurora 잔여,
+재배포 시 재시드로 수렴), KMS 7일 예약 삭제, chat_reader secret 30일 복구창
+— 빠른 재배포가 같은 이름 생성에 막히면 `aws secretsmanager restore-secret`.
 
 ## 수동 폴백 (프로비저너 없이)
 

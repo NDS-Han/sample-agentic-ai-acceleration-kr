@@ -928,6 +928,12 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         else:
             print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
                   "503 (미구성) 상태로 진행합니다", file=sys.stderr)
+    elif outs.get("chat_agent_name"):
+        # 선언 off 인데 모듈이 아직 살아 있다 = 켰던 적이 있는 첫 off apply.
+        # 프로비저너 소유 Runtime 도 정리 — terraform 밖 리소스라 destroy 에 안
+        # 잡힌다. outputs 가 없으면(한 번도 안 켬·이미 정리) API 호출 자체를
+        # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
+        chatagent.teardown(repo_root, cfg.env)
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).
