@@ -117,12 +117,12 @@ def test_dev_login_true_pins_both_services(tmp_path):
 
 
 def test_dev_login_default_off_with_oidc(tmp_path):
-    """기본값 — oidc 가 있고 dev_login 선언이 없으면 admin-ui 는 끄고 adminApi 는
-    env overlay 소유로 둔다(관여하지 않음)."""
+    """기본값 — dev_login 미선언이면 양쪽 다 명시 false. 한쪽만 켜지는 반쪽
+    상태(UI만/ API만)를 막고 env overlay 의 흩어진 true 도 수렴한다."""
     _, out, _ = _render(tmp_path)
     v = yaml.safe_load((out / "values.yaml").read_text())
     assert v["adminUi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
-    assert "DEV_LOGIN_ENABLED" not in v.get("adminApi", {}).get("env", {})
+    assert v["adminApi"]["env"]["DEV_LOGIN_ENABLED"] == "false"
 
 
 def test_domain_hosts_override_beats_derived(tmp_path):

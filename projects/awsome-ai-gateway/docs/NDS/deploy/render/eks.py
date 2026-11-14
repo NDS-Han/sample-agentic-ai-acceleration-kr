@@ -232,13 +232,13 @@ def desired_values(cfg: GatewayConfig) -> dict:
         if cfg.oidc.token_url:
             ui_env["OIDC_TOKEN_URL"] = cfg.oidc.token_url
         v.setdefault("adminUi", {}).setdefault("env", {}).update(ui_env)
-    else:
-        v.setdefault("adminUi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
-
-    # dev login 은 admin-api 가 dev. 토큰을 받아야 완결된다 — adminUi 만 켜면
-    # UI 로그인은 되는데 API 호출이 401 로 떨어진다. 명시적 opt-in 일 때만 양쪽 배선.
-    if cfg.features.dev_login:
-        v.setdefault("adminApi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = "true"
+    # dev login 은 admin-api 가 dev. 토큰을 받아야 완결된다 — 어느 한쪽만
+    # 켜지면 화면은 있는데 401 이거나 API 는 열렸는데 UI 가 막힌 반쪽 상태.
+    # gen 레이어가 양쪽을 features.dev_login 하나로 정렬해 env overlay 의
+    # 흩어진 값까지 수렴시킨다.
+    _dl = "true" if cfg.features.dev_login else "false"
+    v.setdefault("adminUi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = _dl
+    v.setdefault("adminApi", {}).setdefault("env", {})["DEV_LOGIN_ENABLED"] = _dl
 
     # features.service_keys — 기본 꺼짐이라 항상 명시값을 내린다(미방출이면
     # admin-api 앱 기본 true 가 이기고, env overlay 의 "false" 고정도
