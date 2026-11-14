@@ -828,9 +828,10 @@ adminUi:
     periodSeconds: 10
     timeoutSeconds: 5
 
-  # Next.js는 /tmp + /.next/cache에 쓰기 필요 → readOnlyRootFilesystem false
+  # Next.js의 쓰기 경로(/tmp + /.next/cache)는 deployment.yaml 의 emptyDir 이
+  # 커버한다 — readOnlyRootFilesystem 을 켠다. 쓰기 경로가 늘면 volume 도 함께.
   securityContextOverride:
-    readOnlyRootFilesystem: false
+    readOnlyRootFilesystem: true
 
   podAnnotations: {}
   nodeSelector: {}
