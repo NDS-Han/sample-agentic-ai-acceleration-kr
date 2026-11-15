@@ -276,6 +276,16 @@ def capture_ecs(env_dir: Path, region: str,
 
     cluster = outputs.get("ecs_cluster_name") or ""
     env_name = _strip(cluster, "llm-gateway-") or "captured"
+    # 공유 env 디렉토리의 .terraform 캐시는 마지막 init 한 env 의 backend 를
+    # 가리킨다 — 다른 env 의 state 를 읽으면 env 이름만 정직하고 값 전체가
+    # 잘못된다. backend key( ecs/<env>/terraform.tfstate )와 대조한다.
+    _bk = str(_tf_backend(env_dir).get("key", ""))
+    if _bk and env_name != "captured" and not _bk.endswith(
+            f"{env_name}/terraform.tfstate"):
+        notes.append(
+            f"⚠ 캐시된 terraform backend key '{_bk}' 가 env '{env_name}' 과 "
+            "다릅니다 — outputs 는 다른 env 의 state 에서 읽혔습니다. "
+            "이 캡처본의 infra/oidc/region 값을 실측과 대조하세요")
     admin_ui_url = outputs.get("admin_ui_url") or ""
     https = bool(outputs.get("https_enabled"))
 
@@ -787,6 +797,11 @@ def _relpath(p: Path) -> str:
         return str(p)
 
 
+def _gen_root() -> Path:
+    """render 가 managed overlay 를 쓰는 루트 — cli.GEN_ROOT 와 동일 경로."""
+    return Path(__file__).resolve().parents[3] / "deployment" / "gen"
+
+
 def _auto_env_dir(env: str) -> Path | None:
     """표준 명명(llm-gateway-<env> / <env>)으로 terraform env 디렉토리를 탐지."""
     envs = Path(__file__).resolve().parents[3] / "deployment" / \
@@ -1228,8 +1243,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                 # emails 는 env tfvars(사람 선언)나 gen managed overlay(NDS
                 # 소유)에서 복원 — 안 잡으면 채택 yaml 의 emails=[] 가 다음
                 # apply 에 구독 전량 삭제. 콘솔 수동 구독은 state 밖이라 미대상.
-                _gen_tfvars = (Path(__file__).resolve().parents[3] / "gen"
-                               / env / "eks" / "terraform.tfvars")
+                _gen_tfvars = _gen_root() / env / "eks" / "terraform.tfvars"
                 _tv = _tfvars(env_dir, extra_files=[_gen_tfvars])
                 if _tv.get("alert_emails"):
                     _ae = _tv["alert_emails"]
@@ -1270,8 +1284,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         if bc.get("dynamodb_table"):
             tfstate["tfstate_table"] = bc["dynamodb_table"]
         tv = _tfvars(env_dir, extra_files=[
-            Path(__file__).resolve().parents[3] / "gen" / env / "eks"
-            / "terraform.tfvars"])
+            _gen_root() / env / "eks" / "terraform.tfvars"])
         for tfkey, dockey in (("bedrock_allowed_model_arns",
                                "bedrock_allowed_model_arns"),
                               ("mantle_regions", "mantle_regions"),

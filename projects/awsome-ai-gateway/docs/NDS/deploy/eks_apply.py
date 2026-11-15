@@ -115,8 +115,16 @@ def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
                 break
         if target is None:
             return ""
-        env = target["spec"]["template"]["spec"][
-            "containers"][0].get("env") or []
+        containers = (target["spec"]["template"]["spec"]
+                      .get("containers") or [])
+        # 사이드카(otel 등)가 containers[0] 이면 앱 env 가 아니라 사이드카 env 를
+        # 읽어 보존값이 빈다 — 논리 서비스명 컨테이너를 우선 고른다
+        # (capture/doctor 와 같은 규칙)
+        app = next((c for c in containers
+                    if isinstance(c, dict)
+                    and c.get("name") == deploy_suffix), None) \
+            or (containers[0] if containers else {})
+        env = app.get("env") or []
         return next((e.get("value", "") for e in env
                      if isinstance(e, dict) and e.get("name") == var), "")
     except (json.JSONDecodeError, KeyError, IndexError, TypeError):
@@ -1572,9 +1580,10 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         chatagent.ensure_lambda_build(repo_root)
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
-    if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
-        # 새 머신/재클론 — backend 미초기화면 output 도 못 읽고 helm dry-run
-        # 도 kubecontext 부재로 실패한다. init 은 멱등이라 먼저 복구한다.
+    if env_dir and env_dir.is_dir():
+        # 항상 선언된 backend 로 reconfigure — .terraform 캐시가 낡은 backend 를
+        # 가리키면 tf_outputs 가 다른 env 의 state 를 읽어 stale --set 이
+        # 들어간다 (managed 대상이 없으면 stale 이 어디서도 교정되지 않는다)
         ini = _tf_init(cfg, env_dir)
         if ini.returncode != 0:
             print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"
@@ -1702,10 +1711,10 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
 def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
-    if env_dir and env_dir.is_dir() and not (env_dir / ".terraform").exists():
-        # 새 머신/재클론 — backend 미초기화면 output 조회가 실패해 모든 동적
-        # --set 이 빠진다. init 은 멱등이라 먼저 복구한다. plan() 과 같은
-        # 경고 — 실패 원인(백엔드 설정/권한)을 숨기면 아래의 일반 경고만 남는다.
+    if env_dir and env_dir.is_dir():
+        # 항상 선언된 backend 로 reconfigure — 낡은 캐시면 tf_outputs 가 다른
+        # env 의 state 를 읽는다. init 실패 원인(백엔드 설정/권한)을 숨기면
+        # 아래의 일반 경고만 남는다.
         ini = _tf_init(cfg, env_dir)
         if ini.returncode != 0:
             print(f"⚠ terraform init 실패 — {(ini.stderr or '').strip()[:200]}\n"

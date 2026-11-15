@@ -735,13 +735,17 @@ def test_r53_zone_id_picks_longest_suffix(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _no_auto_env_dir(monkeypatch):
+def _no_auto_env_dir(monkeypatch, tmp_path):
     """단위 테스트는 자동탐지로 실제 terraform env 를 읽지 않는다 —
     env_dir 를 명시한 테스트만 파일시스템 경로를 탄다.
     _kube_context_cluster 도 환경 의존 — 기본 ""(검증 스킵)으로 스텁하고
-    불일치 경로를 보는 테스트만 개별 스텁한다."""
+    불일치 경로를 보는 테스트만 개별 스텁한다.
+    _gen_root 는 실제 repo 의 deployment/gen(커밋된 dev 산출물)을 가리켜
+    캡처 결과를 오염시키므로 기본은 빈 tmp 경로로 스텁하고, gen overlay 를
+    보는 테스트만 개별 스텁한다."""
     monkeypatch.setattr(capture, "_auto_env_dir", lambda *a, **kw: None)
     monkeypatch.setattr(capture, "_kube_context_cluster", lambda *a, **kw: "")
+    monkeypatch.setattr(capture, "_gen_root", lambda: tmp_path / "no-gen")
 
 
 def test_r53_alias_target_strips_prefix_only(monkeypatch):
@@ -1174,3 +1178,77 @@ def test_configure_uses_named_captured_file_as_source(tmp_path, monkeypatch):
     args = types.SimpleNamespace(config=str(captured), no_apply=True)
     cli.cmd_configure(args)
     assert seen["existing"].get("env") == "stg"  # prod 가 아니라 stg
+
+
+def test_eks_capture_alert_emails_from_gen_overlay(monkeypatch, tmp_path):
+    """20차 회귀 — alert_emails 는 gen managed overlay(deployment/gen/<env>/eks)
+    에만 있다. 캡처가 gen 루트를 'deployment/gen'이 아닌 'gen'으로 잡으면
+    tfvars 를 영영 못 읽어 emails=[] 로 채택 → 다음 apply 에 구독 전량 삭제."""
+    gen = tmp_path / "deployment" / "gen"
+    (gen / "dev" / "eks").mkdir(parents=True)
+    (gen / "dev" / "eks" / "terraform.tfvars").write_text(
+        'alert_emails = ["ops@example.com", "sre@example.com"]\n'
+        'cognito_domain_suffix = "stg-auth-123456789012"\n')
+    monkeypatch.setattr(capture, "_gen_root", lambda: gen)
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: {
+        "alerting_sns_topic_arn": "arn:aws:sns:ap-northeast-2:123456789012:t",
+        "cluster_name": "llm-gateway-dev"})
+    monkeypatch.setattr(capture, "_helm_values",
+                        lambda *a, **kw: _eks_values())
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    doc, _ = capture.capture_eks(env_dir=tmp_path)
+    assert doc["features"]["alerting"]["enabled"] is True
+    assert doc["features"]["alerting"]["emails"] == [
+        "ops@example.com", "sre@example.com"]
+    assert doc["infra"]["cognito_domain_suffix"] == "stg-auth-123456789012"
+
+
+def test_eks_capture_backend_key_mismatch_warns(monkeypatch, tmp_path):
+    """20차 — 공유 env 디렉토리의 .terraform 캐시가 다른 env 를 가리키면
+    outputs 가 다른 env 의 값이라 경고한다."""
+    (tmp_path / ".terraform").mkdir()
+    (tmp_path / ".terraform" / "terraform.tfstate").write_text(
+        '{"backend": {"config": {"key": "ecs/prod/terraform.tfstate",'
+        ' "bucket": "b"}}}')
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: {
+        "ecs_cluster_name": "llm-gateway-stg"})
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+    doc, notes = capture.capture_ecs(tmp_path, "ap-northeast-2")
+    assert any("backend key" in n and "prod" in n for n in notes), notes
+
+
+def test_collect_doc_survives_scalar_leaf_sections(monkeypatch):
+    """20차 — 깨진 yaml(deploy:/oidc:/features:/domain.hosts 가 스칼라)로
+    configure 를 돌리면 .get/.items()/dict() 가 AttributeError 로 죽던 경로.
+    잎을 비-dict 로 강제해도 wizard 가 완주해야 한다."""
+    import types
+    from deploy import cli
+    class T:
+        def __init__(s, p, default=''): s.v = default if default is not None else 'x'
+        def ask(s): return s.v
+    class S:
+        def __init__(s, p, choices, default=None):
+            vals = {getattr(c, 'value', c) for c in choices}
+            s.v = default if default in vals else getattr(choices[0], 'value', choices[0])
+        def ask(s): return s.v
+    class C:
+        def __init__(s, p, choices, default=None):
+            s.v = [getattr(c, 'value', c) for c in choices if getattr(c, 'checked', False)]
+        def ask(s): return s.v
+    class K:
+        def __init__(s, p, default=False): s.v = default
+        def ask(s): return s.v
+    fake = types.SimpleNamespace(text=T, select=S, checkbox=C, confirm=K)
+    fake.Choice = lambda label, value, checked=False: types.SimpleNamespace(
+        label=label, value=value, checked=checked)
+    monkeypatch.setattr(cli, "_questionary", lambda: fake)
+    broken = {"env": "dev",
+              "aws": "scalar", "deploy": ["not", "a", "map"],
+              "features": "oops", "oidc": 42,
+              "network": {"allowed_cidrs": "scalar-not-list"},
+              "domain": {"hosts": "scalar"},
+              "images": "x", "infra": "y", "clients": "z"}
+    doc = cli._collect_doc(broken)  # AttributeError 없이 완주
+    assert doc["env"] == "dev"
+    assert isinstance(doc["deploy"], dict)

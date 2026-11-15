@@ -758,6 +758,16 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
     #    destroy 로 오진된다.
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
     if env_dir and env_dir.exists():
+        # plan 은 캐시된 backend 에 붙는다 — 낡은 .terraform 이면 다른 env 의
+        # state 로 drift 를 계산해 그대로 보고한다. 선언된 backend 로 먼저
+        # reconfigure 한다 (check_ecs 와 같은 보호).
+        from .eks_apply import _tf_init
+        ini = _tf_init(cfg, env_dir)
+        if ini.returncode != 0:
+            rep.add("WARN", "tf-drift",
+                    f"terraform init 실패 — drift 검사 생략 "
+                    f"({(ini.stderr or '').strip()[:120]})")
+            return rep
         r = _run(_tf_drift_plan_argv(gen_dir), cwd=env_dir, timeout=300)
         if r.returncode == 0:
             rep.add("OK", "tf-drift", "terraform plan no-op")

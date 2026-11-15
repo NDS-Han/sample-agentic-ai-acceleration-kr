@@ -301,47 +301,52 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
             text = re.sub(r'region\s*=\s*"[^"]*"',
                           f'region = "{region}"', text, count=1)
         (target / f).write_text(text)
-    caller = _aws(["sts", "get-caller-identity"], region)
-    arn = json.loads(caller.stdout).get("Arn", "")
-    # SSO/assume-role 세션 ARN(arn:aws:sts::…:assumed-role/Role/session)은
-    # EKS access entry 가 거부한다 — IAM role ARN 으로 정규화.
-    m = re.match(
-        r"arn:aws:sts::(\d+):assumed-role/([^/]+)/", arn)
-    if m:
-        arn = f"arn:aws:iam::{m.group(1)}:role/{m.group(2)}"
-        print(f"ⓘ assumed-role 세션 ARN 을 IAM role ARN 으로 정규화했습니다: "
-              f"{arn}", file=sys.stderr)
-    example = (template / "terraform.tfvars.example").read_text()
-    scaffolded = scaffold_tfvars(
-        example, env=cfg.env, region=region,
-        account=account_id(region), principal_arn=arn)
-    # example 에 없는 필수 키를 보강 — 없으면 variables.tf 기본값(EKS 구버전,
-    # 다른 리전의 AZ/subnet)이 묵묵히 적용돼 apply 중간 실패가 난다.
-    # 클러스터 버전·애드온·AZ 는 템플릿 env 의 실측값을 가져오고, AZ 는
-    # wizard 답변(infra.azs)이 있으면 그걸 우선한다.
-    live = template / "terraform.tfvars"
-    extra: list[str] = []
-    if live.exists():
-        live_t = live.read_text()
-        for key in ("eks_cluster_version", "eks_addon_versions"):
-            m = re.search(
-                rf"(?m)^{key}\s*=\s*(\"[^\"]+\"|\{{[^}}]*\}}|\[[^\]]*\])",
-                live_t)
-            if m and not re.search(rf"(?m)^\s*{key}\s*=", scaffolded):
-                extra.append(f"{key} = {m.group(1)}")
-    azs = cfg.infra.azs
-    if not azs:
-        try:
-            azs = list_azs(region)[:2]
-        except SystemExit:
-            azs = []
-    if azs and not re.search(r"(?m)^\s*azs\s*=", scaffolded):
-        extra.append(f"azs = {json.dumps(sorted(azs))}")
-    if extra:
-        scaffolded += (
-            "\n# ── scaffold 자동 보강 (템플릿 실측/wizard 답변 — 검토 후 조정)\n"
-            + "\n".join(extra) + "\n")
-    (target / "terraform.tfvars").write_text(scaffolded)
+    if not (target / "terraform.tfvars").exists():
+        caller = _aws(["sts", "get-caller-identity"], region)
+        arn = json.loads(caller.stdout).get("Arn", "")
+        # SSO/assume-role 세션 ARN(arn:aws:sts::…:assumed-role/Role/session)은
+        # EKS access entry 가 거부한다 — IAM role ARN 으로 정규화.
+        m = re.match(
+            r"arn:aws:sts::(\d+):assumed-role/([^/]+)/", arn)
+        if m:
+            arn = f"arn:aws:iam::{m.group(1)}:role/{m.group(2)}"
+            print(f"ⓘ assumed-role 세션 ARN 을 IAM role ARN 으로 정규화했습니다: "
+                  f"{arn}", file=sys.stderr)
+        example = (template / "terraform.tfvars.example").read_text()
+        scaffolded = scaffold_tfvars(
+            example, env=cfg.env, region=region,
+            account=account_id(region), principal_arn=arn)
+        # example 에 없는 필수 키를 보강 — 없으면 variables.tf 기본값(EKS 구버전,
+        # 다른 리전의 AZ/subnet)이 묵묵히 적용돼 apply 중간 실패가 난다.
+        # 클러스터 버전·애드온·AZ 는 템플릿 env 의 실측값을 가져오고, AZ 는
+        # wizard 답변(infra.azs)이 있으면 그걸 우선한다.
+        live = template / "terraform.tfvars"
+        extra: list[str] = []
+        if live.exists():
+            live_t = live.read_text()
+            for key in ("eks_cluster_version", "eks_addon_versions"):
+                m = re.search(
+                    rf"(?m)^{key}\s*=\s*(\"[^\"]+\"|\{{[^}}]*\}}|\[[^\]]*\])",
+                    live_t)
+                if m and not re.search(rf"(?m)^\s*{key}\s*=", scaffolded):
+                    extra.append(f"{key} = {m.group(1)}")
+        azs = cfg.infra.azs
+        if not azs:
+            try:
+                azs = list_azs(region)[:2]
+            except SystemExit:
+                azs = []
+        if azs and not re.search(r"(?m)^\s*azs\s*=", scaffolded):
+            extra.append(f"azs = {json.dumps(sorted(azs))}")
+        if extra:
+            scaffolded += (
+                "\n# ── scaffold 자동 보강 (템플릿 실측/wizard 답변 — 검토 후 조정)\n"
+                + "\n".join(extra) + "\n")
+        (target / "terraform.tfvars").write_text(scaffolded)
+    else:
+        # 부분 복구 — 기존 tfvars(사람 검토본)는 절대 덮어쓰지 않는다
+        print("ⓘ 기존 terraform.tfvars 는 보존하고 tf 파일만 보강했습니다",
+              file=sys.stderr)
     print(f"ⓘ terraform env 를 새로 만들었습니다: {target}\n"
           "  terraform.tfvars 의 주석 표시된 항목(cluster 버전·cognito_groups·tags)을 "
           "검토하세요 — 계속 진행하려면 bootstrap 을 다시 실행합니다.",
@@ -541,6 +546,10 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
         raise SystemExit("terraform 명령을 못 찾았습니다 — 설치와 PATH 확인 필요")
     if pr.returncode == 1:
         raise SystemExit("terraform plan 실패 — 위 오류를 확인하세요")
+    if pr.returncode not in (0, 2):
+        # -detailed-exitcode 계약 밖의 rc(시그널 kill 등) — 저장된 plan 도
+        # 없으므로 적용을 시도하지 않는다
+        raise SystemExit(f"terraform plan 비정상 종료(rc={pr.returncode}) — 재시도하세요")
     try:
         if pr.returncode == 0:
             print("ⓘ terraform plan: 변경 없음 — env 인프라가 이미 선언 "

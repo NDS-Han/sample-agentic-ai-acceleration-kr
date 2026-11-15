@@ -100,6 +100,18 @@ def _g(d: dict, *path, default=""):
     return cur if cur is not None else default
 
 
+def _gd(d: dict, *path) -> dict:
+    """_g + 리프가 매핑임을 보장 — 스칼라/리스트 잎이면 {} (깨진 yaml 방어)."""
+    v = _g(d, *path, default={})
+    return dict(v) if isinstance(v, dict) else {}
+
+
+def _gl(d: dict, *path) -> list:
+    """_g + 리프가 리스트임을 보장 — 스칼라/매핑 잎이면 [] (문자열 순회 방지)."""
+    v = _g(d, *path, default=[])
+    return list(v) if isinstance(v, list) else []
+
+
 def _collect_doc(existing: dict | None = None) -> dict:
     """대화형으로 gateway.yaml doc 을 만든다. existing 이 있으면 각 질문의
     기본값으로 현재 설정을 넣는다 (configure = init 의 prefill 버전)."""
@@ -160,7 +172,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "Route53 hosted zone ID (예: Z0123456ABCD)",
             default=str(_g(ex, "domain", "zone_id")) or None).ask())
 
-    prev_notif = _g(ex, "features", "notifications", default={}) or {}
+    prev_notif = _gd(ex, "features", "notifications")
     notif = _unwrap(questionary.select(
         "알림 provider",
         choices=[Choice("mock — 발송 안 함(기본)", "mock"),
@@ -193,7 +205,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
         if k != "provider" and k not in notif_extra:
             notif_extra[k] = v
 
-    prev_feat = _g(ex, "features", default={}) or {}
+    prev_feat = _gd(ex, "features")
     features = _unwrap(questionary.checkbox(
         "추가 기능 (기본 전부 off)",
         choices=[
@@ -209,7 +221,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                    checked=bool(prev_feat.get("observability"))),
         ]).ask())
 
-    prev_oidc = _g(ex, "oidc", default={}) or {}
+    prev_oidc = _gd(ex, "oidc")
     oidc = {}
     oidc_on = _unwrap(questionary.confirm(
         "OIDC 로그인(Cognito 등)을 설정합니까?", default=bool(prev_oidc)).ask())
@@ -264,7 +276,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
     images = {}
     if target in ("ecs", "eks"):
         # target 이 바뀌면 이전 backend 의 이미지/tfstate 는 프리필하지 않는다
-        prev_img = (_g(ex, "images", default={}) or {}) if same_target else {}
+        prev_img = _gd(ex, "images") if same_target else {}
         images["registry"] = _unwrap(questionary.text(
             "외부 이미지 registry (비우면 ECR 자동 추론)",
             default=str(prev_img.get("registry", "")) or None).ask())
@@ -278,7 +290,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     deploy_extra = {}
     if target in ("ecs", "eks"):
-        prev_dep = (_g(ex, "deploy", default={}) or {}) if same_target else {}
+        prev_dep = _gd(ex, "deploy") if same_target else {}
         deploy_extra["tfstate_bucket"] = _unwrap(questionary.text(
             "Terraform state S3 bucket (비우면 llm-gateway-tfstate-<account>)",
             default=str(prev_dep.get("tfstate_bucket", "")) or None).ask())
@@ -295,7 +307,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                          "release", "namespace", "tf_env_dir"):
                 deploy_extra[k] = v
 
-    prev_cidrs = _g(ex, "network", "allowed_cidrs", default=[]) or []
+    prev_cidrs = _gl(ex, "network", "allowed_cidrs")
     allowed = _unwrap(questionary.text(
         "접근 허용 CIDR (쉼표, 비우면 전체 허용 — 경고 대상)",
         default=",".join(str(c) for c in prev_cidrs)).ask())
@@ -309,7 +321,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
     # infra.* 는 블록 통째 보존이 원칙 (bootstrap wizard 가 기록한 azs/cognito/
     # bedrock 등). ecs 경로에만 DB/캐시 크기 고급 분기를 연다 — 나머지 target
     # 에서는 기존 선언을 그대로 둔다(schema 가 ecs 전용을 강제).
-    infra_doc = dict(_g(ex, "infra", default={}) or {})
+    infra_doc = _gd(ex, "infra")
     if target == "ecs":
         prev_db = infra_doc.get("db") or {}
         prev_cache = infra_doc.get("cache") or {}
@@ -400,7 +412,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 infra_doc.pop("db", None)
                 infra_doc.pop("cache", None)
 
-    prev_aws = _g(ex, "aws", default={}) or {}
+    prev_aws = _gd(ex, "aws")
     doc = {
         "version": 1,
         "env": env,
@@ -422,8 +434,8 @@ def _collect_doc(existing: dict | None = None) -> dict:
         # hosts 는 질문이 다루지 않는 선언 키 — 보존 못하면 재 configure 가
         # 파생 호스트로 되돌려 live URL 을 바꾼다 (이전 yaml 값 유지).
         "domain": {"mode": domain_mode, "name": domain_name, "zone_id": zone_id,
-                   **({"hosts": dict(_g(ex, "domain", "hosts"))}
-                      if _g(ex, "domain", "hosts") else {})},
+                   **({"hosts": _gd(ex, "domain", "hosts")}
+                      if _gd(ex, "domain", "hosts") else {})},
         "features": {
             "notifications": {"provider": notif, **notif_extra},
             "web_search": "web_search" in features,
@@ -440,7 +452,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                if k not in ("notifications", "web_search", "body_logging",
                             "bi_insight", "pricing_lambda", "observability")},
         },
-        "clients": _g(ex, "clients", default={}) or {"models_profile": "global"},
+        "clients": _gd(ex, "clients") or {"models_profile": "global"},
     }
     if infra_doc:
         doc["infra"] = infra_doc
@@ -519,7 +531,13 @@ def cmd_configure(args) -> int:
     else:
         captured = sorted(cfg_path.parent.glob("gateway.captured-*.yaml"))
         if captured:
-            console.print(f"[yellow]{cfg_path} 없음 — 캡처본 {captured[0].name} 을 기본값으로 씁니다")
+            if len(captured) > 1:
+                # 여러 env 의 캡처본이 있으면 알파벳 첫 번째가 아닐 수 있다 —
+                # 어느 env 를 골랐는지 명시하고 --config 로 바로 지정하도록 안내
+                console.print(f"[yellow]캡처본이 {len(captured)}개 있습니다: "
+                              + ", ".join(c.name for c in captured))
+            console.print(f"[yellow]{cfg_path} 없음 — 캡처본 {captured[0].name} 을 기본값으로 씁니다 "
+                          "(다른 env 면 --config <파일> 로 지정)")
             existing = _read_doc(captured[0])
         else:
             console.print(f"[yellow]{cfg_path} 없음 — 새로 만듭니다 (init 과 동일)")
@@ -1233,6 +1251,13 @@ def cmd_bootstrap(args) -> int:
         return 130
 
     backend = _tfstate_with_retry(bucket, table)
+    # 재시도가 gateway.yaml 의 tfstate 이름을 고쳐썼을 수 있다 — 메모리 cfg 는
+    # 구 이름이라 eks_apply._tf_init 이 폐기된 backend 로 reconfigure 해 managed
+    # apply/outputs 가 다른 state 에 쓰인다. 영속화된 최신 값으로 다시 읽는다.
+    try:
+        cfg = schema.load(cfg_path)
+    except (OSError, schema.SchemaError):
+        pass
     outs = bootstrap.env_apply(env_target, out, backend)
     # 새 클러스터를 kubeconfig 에 등록 — 없으면 helm 이 컨텍스트 부재로
     # 실패하거나 다른 클러스터에 배포된다
@@ -1348,7 +1373,7 @@ def cmd_capture(args) -> int:
         if not isinstance(existing, dict):
             console.print(f"[yellow]{cfg_path} 이 매핑 문서가 아닙니다 — 비교는 건너뜁니다")
             existing = {}
-        existing_target = (existing.get("deploy") or {}).get("target", "")
+        existing_target = _gd(existing, "deploy").get("target", "")
 
         # eks/ecs 는 gen 디렉토리가 필요 없다 — helm·kubectl·terraform 이 정보원
         if args.target in ("eks", "ecs"):
@@ -1362,15 +1387,15 @@ def cmd_capture(args) -> int:
         if target == "compose":
             doc, notes = capture.capture_compose(gen_dir, unknown)
         elif target == "ecs":
-            region = args.region or (existing.get("aws") or {}).get("region", "ap-northeast-2")
+            region = args.region or _gd(existing, "aws").get("region", "ap-northeast-2")
             env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
                 REPO_ROOT / "deployment/terraform/environments/gateway-ecs"
             doc, notes = capture.capture_ecs(env_dir, region, unknown)
         elif target == "eks":
             # --env-dir > 기존 yaml 의 deploy.tf_env_dir > capture 내부 env명 탐지
             env_dir = Path(args.env_dir) if getattr(args, "env_dir", "") else \
-                (REPO_ROOT / (existing.get("deploy") or {}).get("tf_env_dir", "")
-                 if (existing.get("deploy") or {}).get("tf_env_dir") else None)
+                (REPO_ROOT / _gd(existing, "deploy").get("tf_env_dir", "")
+                 if _gd(existing, "deploy").get("tf_env_dir") else None)
             doc, notes = capture.capture_eks(
                 namespace=args.namespace or "llm-gateway",
                 release=args.release or "llm-gateway",

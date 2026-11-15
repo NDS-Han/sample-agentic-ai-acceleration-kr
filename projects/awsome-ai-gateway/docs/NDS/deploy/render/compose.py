@@ -301,6 +301,12 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
             "oidc + domain=none: admin-ui 가 NEXTAUTH_URL 없이 Host 헤더에 의존합니다 — "
             "리버스 프록시/포트포워딩 뒤에서 접속하면 SSO 콜백 origin 이 어긋날 수 있습니다. "
             "문제가 되면 gen/<env>/.env 에 NEXTAUTH_URL=http://<호스트>:3000 을 추가하세요.")
+    if not cfg.oidc.enabled and not cfg.features.dev_login:
+        notes.append(
+            "admin 로그인 경로 없음: oidc 비활성 + features.dev_login 미선언 — "
+            "DEV_LOGIN_ENABLED=false 로 렌더됐습니다. admin-ui 는 뜨지만 "
+            "로그인할 수 없습니다. 쓰려면 oidc 를 설정하거나 features.dev_login: true "
+            "를 선언하세요(무인증 dev 토큰 — 평가용으로만).")
     if cfg.clients.models_profile == "regional":
         notes.append("models_profile=regional: 시드 alias 는 마이그레이션 관리 — "
                      "리전별 프로필 추가는 마이그레이션/관리 UI 에서 진행하십시오.")

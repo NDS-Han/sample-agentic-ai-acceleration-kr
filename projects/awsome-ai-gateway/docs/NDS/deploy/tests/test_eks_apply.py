@@ -1473,3 +1473,21 @@ def test_load_meta_rejects_scalar_values_layers(tmp_path):
         "release: r\nnamespace: n\nchart: c\nvalues_layers: values.yaml\n")
     with pytest.raises(SystemExit, match="values_layers"):
         eks_apply.load_meta(g, tmp_path)
+
+
+def test_live_deploy_env_prefers_service_named_container(monkeypatch):
+    """20차 — 사이드카(otel 등)가 containers[0] 이면 앱 env 가 아니라
+    사이드카 env 를 읽어 보존값이 빈다 — 서비스명 컨테이너를 골라야 한다."""
+    dep = {"metadata": {"name": "rel-admin-api",
+                        "labels": {"app.kubernetes.io/instance": "rel"}},
+           "spec": {"template": {"spec": {"containers": [
+               {"name": "otel-collector", "env": [
+                   {"name": "AGENTCORE_GATEWAY_URL", "value": "sidecar"}]},
+               {"name": "admin-api", "env": [
+                   {"name": "AGENTCORE_GATEWAY_URL", "value": "app-url"}]},
+           ]}}}}
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda *a, **k: _cp([dep]))
+    assert eks_apply._live_deploy_env(
+        {"namespace": "ns", "release": "rel"},
+        "admin-api", "AGENTCORE_GATEWAY_URL") == "app-url"
