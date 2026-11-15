@@ -24,7 +24,7 @@ nat_ha             = false
 
 # ─── 네트워크 ───
 alb_internal   = false
-allowed_cidrs  = ["1.2.3.0/24"] # 사내 공인 대역 — 비우면 인터넷 전체에 열림
+allowed_cidrs  = ["1.2.3.0/24"] # 사내 공인 대역 — 비우면 ALB 인그레스 0개(fail-closed, 접속 불가)
 
 # ─── 도메인 (없으면 ALB DNS + 포트별 HTTP) ───
 domain_name    = "gw.example.com"

@@ -191,6 +191,9 @@ resource "aws_ecr_repository" "svc" {
   # IMMUTABLE — push 권한자가 핀 태그를 오염 이미지로 덮어써 다음 pull 이
   # poisoned image 를 받는 경로 차단 (R32). 재배포는 새 태그로.
   image_tag_mutability = "IMMUTABLE"
+  # teardown 시 이미지가 있는 repo 도 지울 수 있어야 — 없으면 destroy 가
+  # RepositoryNotEmpty 로 멈춰 재시도해도 영구 실패한다 (도구 소유 repo)
+  force_delete = true
 
   image_scanning_configuration {
     scan_on_push = true

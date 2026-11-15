@@ -265,6 +265,10 @@ def _safe_int(v, default: int = 0) -> int:
 
 
 def _tf_outputs(env_dir: Path) -> dict:
+    if not env_dir.is_dir():
+        # cwd 부재는 FileNotFoundError 로 'terraform 설치' 오진이 난다 — 먼저 확인
+        raise CaptureError(f"{env_dir} 가 없습니다 — --env-dir 로 terraform 환경 "
+                           "디렉토리를 지정하세요")
     r = _sp(["terraform", "output", "-json"], cwd=env_dir, timeout=120, tool="terraform")
     if r.returncode != 0:
         raise CaptureError(f"terraform output 실패 (init/자격 확인 필요): {r.stderr.strip()[:200]}")

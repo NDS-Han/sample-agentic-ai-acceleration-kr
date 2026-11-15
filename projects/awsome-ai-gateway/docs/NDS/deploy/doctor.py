@@ -251,10 +251,18 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
     if backend.exists():
         # .terraform 존재 여부로 생략하면 backend.hcl 변경(bucket/table 바꿈)이
         # plan 에 반영되지 않는다 — init 은 멱등이므로 항상 실행한다
-        _run(["terraform", "init", "-input=false", "-reconfigure",
-              f"-backend-config={backend}"], cwd=env_dir, timeout=180)
+        ini = _run(["terraform", "init", "-input=false", "-reconfigure",
+                    f"-backend-config={backend}"], cwd=env_dir, timeout=180)
+        if ini.returncode != 0:
+            # init 실패 상태로 plan/output 을 읽으면 이전 init 한 env 의
+            # 캐시 backend 로 다른 env 의 건강을 보고한다 — 여기서 중단
+            rep.add("WARN", "drift",
+                    f"terraform init 실패 — stale backend 로 다른 env 를 "
+                    f"볼 수 있으므로 나머지 점검 생략: {ini.stderr.strip()[:150]}")
+            return rep
+    # 읽기 전용 점검이 state lock 을 잡으면 운영 apply 와 충돌한다
     r = _run(["terraform", "plan", "-detailed-exitcode", "-input=false",
-              "-no-color", f"-var-file={var_file}"],
+              "-no-color", "-lock=false", f"-var-file={var_file}"],
              cwd=env_dir, timeout=300)
     if r.returncode == 0:
         rep.add("OK", "drift", "terraform plan no-op — gateway.yaml 과 라이브 인프라 일치")
@@ -294,9 +302,15 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
                 continue
             running, desired = s.get("runningCount", 0), s.get("desiredCount", 0)
             deps = s.get("deployments") or []
-            rolling = len([d for d in deps if d.get("rolloutState") != "COMPLETED"])
-            if running >= desired and desired > 0 and rolling == 0:
+            failed = [d for d in deps if d.get("rolloutState") == "FAILED"]
+            rolling = len([d for d in deps
+                           if d.get("rolloutState") not in ("COMPLETED", "FAILED")])
+            if running >= desired and desired > 0 and rolling == 0 and not failed:
                 rep.add("OK", "services", f"{name} {running}/{desired} running")
+            elif failed:
+                rep.add("WARN", "services",
+                        f"{name} 마지막 배포 실패 — circuit-breaker 롤백 "
+                        f"({running}/{desired})")
             elif rolling:
                 rep.add("WARN", "services", f"{name} 배포 진행 중 ({running}/{desired})")
             else:
@@ -582,15 +596,20 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             want = spec.get("replicas", 1)
             ready = stt.get("readyReplicas", 0)
             img = str(_app_container(d, name).get("image") or "")
-            tag = img.rsplit(":", 1)[-1] if ":" in img else ""
+            # digest 핀(@sha256:)은 태그 비교 불가 — ':' 파싱이 해시 조각을
+            # 태그로 오인해 거짓 drift 를 낸다
+            tag = ("" if "@" in img else
+                   img.rsplit(":", 1)[-1] if ":" in img else "")
             msg = f"{name} {ready}/{want} ready"
             expected = _expected_tag(cfg, name)
-            if expected and tag and tag != expected:
-                rep.add("WARN", "deploy", f"{msg} — tag {tag} ≠ yaml {expected}")
-            elif ready and ready >= want:
+            # readiness 를 태그 drift 보다 먼저 — 다운된 서비스가 drift 경고로
+            # 가려져 HIGH 를 놓치면 안 된다 (drift 는 별도 finding)
+            if ready and ready >= want:
                 rep.add("OK", "deploy", msg)
             else:
                 rep.add("HIGH", "deploy", msg)
+            if expected and tag and tag != expected:
+                rep.add("WARN", "deploy", f"{name} tag {tag} ≠ yaml {expected} — drift")
 
         # 3.5 bi_insight — 선언됐는데 ARN 미주입이면 /chat 은 503 graceful-off,
         #     CHAT_ENABLED 미설정이면 UI 가 'not deployed' 를 띄운다.
@@ -622,6 +641,12 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 rep.add("WARN", "bi_insight",
                         "admin-ui CHAT_ENABLED 미설정 — /chat 페이지가 "
                         "'not deployed' 로 표시됩니다")
+    else:
+        # rc!=0 이면 readiness/env 점검 전체가 스킵된다 — 조용한 '정상' 리포트로
+        # 다운된 서비스를 덮지 않게 미검증임을 기록한다
+        rep.add("WARN", "deploy",
+                f"kubectl get deployments 실패 — readiness 미검증: "
+                f"{r.stderr.strip()[:150]}")
 
     # 4. migration hook Job — 가장 최근 것의 상태
     r = _run(["kubectl", "get", "jobs", "-n", ns, "-o", "json", *ctx])
@@ -674,11 +699,17 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 rep.add("HIGH", "migration", f"{name} Failed — kubectl logs job/{name}")
             else:
                 rep.add("WARN", "migration", f"{name} 진행 중/상태 불명")
+    else:
+        rep.add("WARN", "migration",
+                f"kubectl get jobs 실패 — migration 상태 미검증: "
+                f"{r.stderr.strip()[:150]}")
 
     # 5. values drift — 관리 키만 대조 (전체 values 는 차트가 소유)
     r = _run(["helm", "get", "values", rel, "-n", ns, "--all", "-o", "yaml", *kctx])
     if r.returncode == 0:
         live = yaml.safe_load(r.stdout) or {}
+        if not isinstance(live, dict):
+            live = {}  # 비매핑 values 페이로드 — 아래 .get 체인 방어
         drifts = []
         for kebab, camel in _KEBAB_TO_CAMEL.items():
             expected = _expected_tag(cfg, kebab)
@@ -751,6 +782,10 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                     rep.add("WARN", "hpa-metrics",
                             "메트릭 API는 있으나 시리즈 0 — collector "
                             "k8sattributes/워커 시리즈 미도착")
+    else:
+        rep.add("WARN", "drift",
+                f"helm get values 실패 — 태그/CIDR/HPA drift 미검증: "
+                f"{r.stderr.strip()[:150]}")
 
     # 6. terraform plan drift — env_dir 이 있고 state 가 있으면.
     #    apply 와 동일하게 managed overlay(gen terraform.tfvars)를 -var-file 로

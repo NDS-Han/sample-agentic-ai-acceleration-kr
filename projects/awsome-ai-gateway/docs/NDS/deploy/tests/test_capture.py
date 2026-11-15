@@ -311,7 +311,7 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     import types
     from deploy import cli
     class T:
-        def __init__(s, p, default=''): s.v = default if default is not None else 'x'
+        def __init__(s, p, default='', **kw): s.v = default if default is not None else 'x'
         def ask(s): return s.v
     class S:
         def __init__(s, p, choices, default=None):
@@ -1255,7 +1255,7 @@ def test_collect_doc_survives_scalar_leaf_sections(monkeypatch):
     import types
     from deploy import cli
     class T:
-        def __init__(s, p, default=''): s.v = default if default is not None else 'x'
+        def __init__(s, p, default='', **kw): s.v = default if default is not None else 'x'
         def ask(s): return s.v
     class S:
         def __init__(s, p, choices, default=None):

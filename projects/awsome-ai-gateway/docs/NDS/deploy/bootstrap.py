@@ -1042,9 +1042,11 @@ def persist_bootstrap_answers(config_path: Path, answers: dict) -> bool:
                   f"저장하지 않습니다 (배포는 기본값으로 계속 진행):\n{exc}",
                   file=sys.stderr)
             return False
-    config_path.write_text(
+    tmp = config_path.with_name(config_path.name + ".tmp")
+    tmp.write_text(
         "# gateway.yaml — 이 배포의 source of truth.\n"
         "# infra.* 는 deploy bootstrap wizard 가 기록한 신규 설치 입력.\n"
         + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
+    tmp.replace(config_path)  # 원자적 교체 — 중간 크래시가 yaml 을 반만 남기지 않게
     config_path.chmod(0o600)
     return True

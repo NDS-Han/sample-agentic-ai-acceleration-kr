@@ -59,6 +59,9 @@ def _unwrap(v):
 def _load_config(args):
     """gateway.yaml 로드 — 없으면 근처 캡처본/힌트를 찾아 다음 명령을 안내."""
     path = Path(args.config)
+    if path.is_dir():
+        console.print(f"[red]{path} 는 디렉토리입니다 — gateway.yaml 파일 경로를 지정하세요")
+        raise SystemExit(1)
     if not path.exists():
         captured = sorted(path.parent.glob("gateway.captured-*.yaml"))
         hint = ""
@@ -91,6 +94,13 @@ def _aws_account_id(existing: str = "") -> str:
     return ""
 
 
+def _atomic_write(path: Path, text: str) -> None:
+    """tmp + rename — 중간 크래시가 source-of-truth 파일을 절반만 남기지 않게."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text)
+    tmp.replace(path)
+
+
 def _g(d: dict, *path, default=""):
     cur = d or {}
     for p in path:
@@ -107,9 +117,15 @@ def _gd(d: dict, *path) -> dict:
 
 
 def _gl(d: dict, *path) -> list:
-    """_g + 리프가 리스트임을 보장 — 스칼라/매핑 잎이면 [] (문자열 순회 방지)."""
+    """_g + 리프가 리스트임을 보장. 스키마는 스칼라→1항 리스트를 허용
+    (_str_items)하므로 문자열 잎은 그대로 1항으로 감싼다 — [] 로 떨구면
+    '현재 값 유지' Enter 가 선언된 CIDR/그룹을 조용히 지운다. 매핑 잎만 []."""
     v = _g(d, *path, default=[])
-    return list(v) if isinstance(v, list) else []
+    if isinstance(v, list):
+        return list(v)
+    if isinstance(v, str) and v:
+        return [v]
+    return []
 
 
 def _collect_doc(existing: dict | None = None) -> dict:
@@ -121,6 +137,9 @@ def _collect_doc(existing: dict | None = None) -> dict:
 
     env = _unwrap(questionary.text(
         "환경 이름 (소문자·숫자·하이픈, 예: acme-small)",
+        # 즉시 검증 — wizard 끝의 from_dict 실패로 답변 전체가 날아가지 않게
+        validate=lambda t: bool(schema._ENV_RE.match(t.strip()))
+        or "env 는 소문자로 시작하는 소문자·숫자·하이픈 2-31자",
         default=str(_g(ex, "env")) or None).ask())
     region = _unwrap(questionary.text(
         "AWS 리전", default=str(_g(ex, "aws", "region")) or "ap-northeast-2").ask())
@@ -144,6 +163,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
     ]
     prev_tier = _g(ex, "deploy", "size_tier")
     tier_vals = {c.value for c in tier_choices}
+    if prev_tier and prev_tier not in tier_vals:
+        # 스키마가 허용하는 기존 선언(t2 eks 등)이 tier 목록엔 없을 수 있다 —
+        # 선택지에 넣어 두면 default 로 살고, 빼면 첫 선택지로 덮어씌워진다
+        tier_choices.insert(0, Choice(
+            f"{prev_tier}: (기존 선언 — 목록에 없는 값, 유지)", prev_tier))
+        tier_vals.add(prev_tier)
     size_tier = _unwrap(questionary.select(
         "규모 티어", choices=tier_choices,
         default=prev_tier if prev_tier in tier_vals else tier_choices[0].value).ask())
@@ -171,6 +196,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
         zone_id = _unwrap(questionary.text(
             "Route53 hosted zone ID (예: Z0123456ABCD)",
             default=str(_g(ex, "domain", "zone_id")) or None).ask())
+    else:
+        # domain.name 은 acm 이 아니어도 쓰인다 — selfsigned-temp 의 ingress
+        # 호스트 유도·mode none 에서 domain.hosts 앵커. 모드만 바꾼 configure 가
+        # 선언된 도메인을 지우지 않게 묻지 않는 모드에서도 보존한다.
+        domain_name = str(_g(ex, "domain", "name") or "")
+        zone_id = str(_g(ex, "domain", "zone_id") or "")
 
     prev_notif = _gd(ex, "features", "notifications")
     notif = _unwrap(questionary.select(
@@ -206,20 +237,24 @@ def _collect_doc(existing: dict | None = None) -> dict:
             notif_extra[k] = v
 
     prev_feat = _gd(ex, "features")
+    feat_choices = [
+        Choice("web_search — AgentCore 웹검색 (us-east-1, apply 시 자동 프로비저닝)", "web_search",
+               checked=bool(prev_feat.get("web_search"))),
+        Choice("body_logging — 요청 본문 S3 로깅", "body_logging",
+               checked=bool(prev_feat.get("body_logging"))),
+        Choice("pricing_lambda — LiteLLM 단가 조회 Lambda (ecs/eks)", "pricing_lambda",
+               checked=bool(prev_feat.get("pricing_lambda"))),
+        Choice("observability — OTel/Prometheus/Grafana (compose)", "observability",
+               checked=bool(prev_feat.get("observability"))),
+    ]
+    if target != "compose":
+        # bi_insight 는 compose 에서 스키마 하드에러 — 제안 자체를 하지 않는다
+        # (체크하면 wizard 완료 후 validation 실패로 답변 전부 유실)
+        feat_choices.insert(2, Choice(
+            "bi_insight — BI 어시스턴트 (AgentCore Runtime)", "bi_insight",
+            checked=bool(prev_feat.get("bi_insight"))))
     features = _unwrap(questionary.checkbox(
-        "추가 기능 (기본 전부 off)",
-        choices=[
-            Choice("web_search — AgentCore 웹검색 (us-east-1, apply 시 자동 프로비저닝)", "web_search",
-                   checked=bool(prev_feat.get("web_search"))),
-            Choice("body_logging — 요청 본문 S3 로깅", "body_logging",
-                   checked=bool(prev_feat.get("body_logging"))),
-            Choice("bi_insight — BI 어시스턴트 (AgentCore Runtime)", "bi_insight",
-                   checked=bool(prev_feat.get("bi_insight"))),
-            Choice("pricing_lambda — LiteLLM 단가 조회 Lambda", "pricing_lambda",
-                   checked=bool(prev_feat.get("pricing_lambda"))),
-            Choice("observability — OTel/Prometheus/Grafana (compose)", "observability",
-                   checked=bool(prev_feat.get("observability"))),
-        ]).ask())
+        "추가 기능 (기본 전부 off)", choices=feat_choices).ask())
 
     prev_oidc = _gd(ex, "oidc")
     oidc = {}
@@ -262,13 +297,15 @@ def _collect_doc(existing: dict | None = None) -> dict:
             oidc["group_prefix"] = grp_prefix
         admin_groups = _unwrap(questionary.text(
             "ADMIN 역할 부여 그룹 (쉼표 구분, 예: ClaudeAdmin — 비우면 없음)",
-            default=",".join(prev_oidc.get("admin_groups") or []) or None).ask())
+            default=",".join(str(x) for x in _gl(prev_oidc, "admin_groups"))
+            or None).ask())
         if admin_groups:
             oidc["admin_groups"] = [g.strip()
                                     for g in admin_groups.split(",") if g.strip()]
         admin_emails = _unwrap(questionary.text(
             "ADMIN 이메일 (쉼표 구분 — 비우면 없음)",
-            default=",".join(prev_oidc.get("admin_emails") or []) or None).ask())
+            default=",".join(str(x) for x in _gl(prev_oidc, "admin_emails"))
+            or None).ask())
         if admin_emails:
             oidc["admin_emails"] = [e.strip()
                                     for e in admin_emails.split(",") if e.strip()]
@@ -287,6 +324,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
         # 이전 값을 보존한다 (US-19 같은 멀티태그 릴리스가 지워지지 않게)
         if prev_img.get("tags"):
             images["tags"] = prev_img["tags"]
+    elif _gd(ex, "images"):
+        # compose 도 images.registry/tag 의 prebuilt 핀을 지원한다 — 질문은
+        # 안 하지만 선언된 값을 통째로 버리면 다음 render 가 소스빌드로 바뀐다
+        images = _gd(ex, "images")
 
     deploy_extra = {}
     if target in ("ecs", "eks"):
@@ -297,15 +338,26 @@ def _collect_doc(existing: dict | None = None) -> dict:
         deploy_extra["tfstate_table"] = _unwrap(questionary.text(
             "Terraform lock DynamoDB table (없으면 비움)",
             default=str(prev_dep.get("tfstate_table", "")) or None).ask())
-        deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
-        deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
-        deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
+        if target == "eks":
+            # release/namespace/tf_env_dir 는 eks 전용 — ecs 전환 시 죽은
+            # 키를 문서에 심지 않는다
+            deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
+            deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
+            deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
+        # capacity_tier 는 ecs/eks 양쪽이 소비한다 — target 전환(eks↔ecs)으로
+        # prev_dep 가 비어도 살려야 다음 apply 가 조용히 축소되지 않는다
+        if not same_target and _gd(ex, "deploy").get("capacity_tier"):
+            deploy_extra["capacity_tier"] = _gd(ex, "deploy")["capacity_tier"]
         # 질문하지 않는 deploy 필드는 전부 보존 — sizing 만 살리면
         # capacity_tier 같은 선언이 지워져 다음 apply 가 조용히 축소한다
         for k, v in prev_dep.items():
             if k not in ("target", "size_tier", "tfstate_bucket", "tfstate_table",
                          "release", "namespace", "tf_env_dir"):
                 deploy_extra[k] = v
+        if target != "eks":
+            # 수동 선언 등으로 eks 전용 키가 섞여 있으면 ecs 문서에 옮기지 않는다
+            for k in ("release", "namespace", "tf_env_dir"):
+                deploy_extra.pop(k, None)
 
     prev_cidrs = _gl(ex, "network", "allowed_cidrs")
     allowed = _unwrap(questionary.text(
@@ -357,6 +409,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 db_doc["instance_class"] = _unwrap(questionary.text(
                     "DB 인스턴스 클래스",
                     default=str(prev_db.get("instance_class") or "db.r7g.large")).ask())
+            # engine_version 은 기존 env 에서 사실상 필수 핀 — 재구성하는
+            # db_doc 에 싣지 않으면 다음 plan 부터 family drift 가 뜬다
+            if prev_db.get("engine_version"):
+                db_doc["engine_version"] = prev_db["engine_version"]
             infra_doc["db"] = db_doc
 
             cache_mode = _unwrap(questionary.select(
@@ -470,7 +526,8 @@ def _write_config(out_path: Path, doc: dict) -> int:
         console.print(f"[red]입력 조합이 유효하지 않습니다:\n{exc}")
         return 1
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(
+    _atomic_write(
+        out_path,
         "# gateway.yaml — 이 배포의 source of truth.\n"
         "# 변경 → `deploy configure`(대화형) 또는 직접 편집 → render → apply.\n"
         + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
@@ -506,11 +563,16 @@ def cmd_configure(args) -> int:
 
     def _read_doc(p: Path) -> dict:
         try:
-            return yaml.safe_load(p.read_text()) or {}
+            doc = yaml.safe_load(p.read_text())
         except yaml.YAMLError as exc:
             raise schema.SchemaError(f"{p} 의 YAML이 유효하지 않습니다: {exc}")
         except UnicodeDecodeError as exc:
             raise schema.SchemaError(f"{p} 가 UTF-8 텍스트가 아닙니다: {exc}")
+        if doc is None:
+            return {}
+        if not isinstance(doc, dict):
+            raise schema.SchemaError(f"{p} 가 매핑 문서가 아닙니다")
+        return doc
 
     existing: dict = {}
     if src_path.exists():
@@ -581,11 +643,15 @@ def cmd_validate(args) -> int:
         # infra.db/infra.cache override 가 반영된 실효 spec — tier 기본과
         # 다르면 그 사실을 표시한다
         db, cache = tiers.effective_db_spec(cfg), tiers.effective_cache_spec(cfg)
-        db_over = (db["mode"] != ("serverless" if t.db_mode == "rds-serverless"
-                                  else "provisioned")
-                   or db["min_acu"] != t.db_spec.get("min_acu")
-                   or db["max_acu"] != t.db_spec.get("max_acu")
-                   or db["instance_class"] != t.db_spec.get("instance_class", ""))
+        # override 라벨은 infra.db 를 선언했을 때만 의미가 있다 — 미선언 시
+        # effective 가 provisioned 기본 클래스를 채워 spec 비교가 항상 true
+        # 가 돼 'override' 라벨이 상시로 뜬다
+        db_over = bool(getattr(cfg.infra, "db", None)) and (
+            db["mode"] != ("serverless" if t.db_mode == "rds-serverless"
+                           else "provisioned")
+            or db["min_acu"] != t.db_spec.get("min_acu")
+            or db["max_acu"] != t.db_spec.get("max_acu")
+            or db["instance_class"] != t.db_spec.get("instance_class", ""))
         table.add_row("db (실효)", f"{db['mode']} {db}"
                                   + ("  [infra.db override]" if db_over else ""))
         _ctopo = (f"{cache['num_node_groups']}sh×"
@@ -632,8 +698,12 @@ def cmd_render(args) -> int:
         return 0
 
     if cfg.deploy.target == "ecs":
+        from . import ecs_apply
         out = GEN_ROOT / cfg.env / "ecs"
-        res = ecs_render.render(cfg, out)
+        # apply 가 extra-vars.json 을 합쳐 재렌더하므로 preview 도 같은
+        # tfvars 를 봐야 '확인한 plan ≠ 적용된 plan' 이 되지 않는다
+        res = ecs_render.render(cfg, out,
+                                extra_vars=ecs_apply.load_extra_vars(out))
         console.print(f"[green]생성 완료 ({out}):")
         for f in res["files"]:
             console.print(f"  {f}")
@@ -701,7 +771,10 @@ def cmd_apply(args) -> int:
     if cfg.deploy.target == "ecs":
         from . import ecs_apply, doctor as doc
         out = GEN_ROOT / cfg.env / "ecs"
-        res = ecs_render.render(cfg, out)
+        # apply() 가 extra-vars.json 을 합쳐 재렌더한다 — 확인하는 plan 과
+        # 실제 적용 plan 이 어긋나지 않게 preview 도 같은 tfvars 로 그린다
+        res = ecs_render.render(cfg, out,
+                                extra_vars=ecs_apply.load_extra_vars(out))
         console.print(f"[green]render 완료 ({out})")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
@@ -906,6 +979,15 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     ecs_render.render(cfg, out, extra_vars=ecs_apply.load_extra_vars(out))
     ecs_apply._run(["terraform", "init", "-input=false", "-reconfigure",
                     f"-backend-config={out / 'backend.hcl'}"], cwd=env_dir)
+    sl = ecs_apply._run(["terraform", "state", "list"], cwd=env_dir,
+                        capture=True)
+    if not sl.stdout.strip():
+        # 다른 backend(tfstate 선언 변경/재작성 yaml)로 init 하면 빈 state 가
+        # 나와 destroy 가 '삭제 완료' 를 거짓 보고하고 진짜 인프라는 계속 돈다
+        console.print("[red]terraform state 가 비어 있습니다 — backend 가 이 "
+                      "배포의 것이 아닐 가능성이 있습니다 (deploy.tfstate_* "
+                      "선언 확인). 파괴를 중단합니다")
+        return 1
     if cfg.features.bi_insight:
         # plan -destroy 도 archive_file data source 를 평가한다 — build/
         # 트리가 없으면 missing directory 로 실패.
@@ -1146,9 +1228,11 @@ def _teardown_eks_oob(cfg: schema.GatewayConfig, meta: dict, context: str) -> No
     from . import eks_apply
     base = ["kubectl"] + (["--context", context] if context else [])
     name, kind = eks_apply._secret_store_ref(meta, REPO_ROOT)
-    eks_apply._run_quiet(
-        base + ["delete", kind.lower(), name, "--ignore-not-found"],
-        cwd=REPO_ROOT, timeout=60)
+    del_args = base + ["delete", kind.lower(), name]
+    if kind.lower() != "clustersecretstore":  # namespaced kind 는 -n 필수
+        del_args += ["-n", meta["namespace"]]
+    eks_apply._run_quiet(del_args + ["--ignore-not-found"],
+                         cwd=REPO_ROOT, timeout=60)
     from .bootstrap import secret_prefix
     prefix = secret_prefix(cfg, REPO_ROOT)
     for suffix in ("app", "redis"):
@@ -1396,7 +1480,9 @@ def _captured_to_yaml(path: Path, doc: dict, notes: list[str]) -> None:
     body = yaml.safe_dump(doc, sort_keys=False, allow_unicode=True)
     if notes:
         body += "\n# --- capture notes ---\n" + "".join(f"# {n}\n" for n in notes)
-    path.write_text(
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_write(
+        path,
         "# captured by deploy doctor --capture — 검토 후 gateway.yaml 로 채택하세요.\n"
         "# 빈 값과 notes 는 캡처가 못 읽은 부분입니다.\n" + body)
     path.chmod(0o600)
@@ -1498,6 +1584,9 @@ def cmd_capture(args) -> int:
             _cap_env = "env"
         out_path = Path(args.out) if args.out else \
             cfg_path.parent / f"gateway.captured-{_cap_env}.yaml"
+        if out_path == cfg_path:
+            console.print(f"[yellow]⚠ --out 이 --config 와 같습니다 — 실제 config 위에 "
+                          "캡처본을 씁니다 (이전본은 .bak 으로 보존)")
         if out_path.exists():
             # 생성물이라 덮어도 안전 — 대신 이전본을 백업해 둔다.
             # 캡처본엔 계정 ID·호스트 등이 들어 있어 원본(0600)과 같은 권한을 유지한다.
@@ -1511,13 +1600,14 @@ def cmd_capture(args) -> int:
             console.print(f"  [yellow]ⓘ {n}")
 
         rel = out_path.relative_to(REPO_ROOT) if out_path.is_relative_to(REPO_ROOT) else out_path
+        rel_cfg = cfg_path.relative_to(REPO_ROOT) if cfg_path.is_relative_to(REPO_ROOT) else cfg_path
         adopt_step = (
             f"  2. 채택 — ⚠ 캡처본에 없는 yaml 전용 키가 {len(dropped)}개 있습니다 (위 notes).\n"
             f"       cp 전 복원하거나 --interactive 로 병합 채택하세요\n"
-            f"       cp {rel} deployment/gateway.yaml\n"
+            f"       cp {rel} {rel_cfg}\n"
             if dropped else
             f"  2. 채택 — gateway.yaml 로 승격하거나 --config 로 바로 사용\n"
-            f"       cp {rel} deployment/gateway.yaml\n")
+            f"       cp {rel} {rel_cfg}\n")
         console.print(Panel(
             f"[bold]다음 단계[/bold]\n"
             f"  1. 검토 — 위 notes 의 빈칸/주의사항을 채우세요\n"
@@ -1569,6 +1659,8 @@ def cmd_capture(args) -> int:
                     if c == "absorb" and cv is not None:
                         _set_path(existing, k, cv)
                         adopted += 1
+                    elif c == "absorb":
+                        console.print(f"  [dim]{k}: 캡처 값이 없습니다 — keep 과 동일[/dim]")
                 if adopted:
                     # 흡수 결과가 스키마를 통과해야 저장 — 깨진 yaml 을 쓰지 않는다
                     try:
@@ -1576,12 +1668,18 @@ def cmd_capture(args) -> int:
                     except schema.SchemaError as exc:
                         console.print(f"[red]흡수 결과가 유효하지 않아 저장하지 않았습니다:\n{exc}")
                         return 1
-                    cfg_path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True))
+                    # live config 를 덮어쓰므로 백업 — 0600 파일은 gitignore 대상이
+                    # 될 수 있어 '원본은 git 에서 확인'이 복구 수단이 못 된다
+                    backup = cfg_path.with_suffix(cfg_path.suffix + ".bak")
+                    _atomic_write(backup, cfg_path.read_text())
+                    backup.chmod(0o600)
+                    _atomic_write(cfg_path, yaml.safe_dump(
+                        existing, sort_keys=False, allow_unicode=True))
                     # 흡수된 값에 시크릿성 키가 섞일 수 있다 — _write_config 와
                     # 같은 소유자 전용 권한으로 조인다(사용자가 만든 0644 유지 금지)
                     cfg_path.chmod(0o600)
                     console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다 "
-                                  f"(주석은 보존되지 않습니다 — 원본은 git 에서 확인)")
+                                  f"(주석은 보존되지 않습니다 — 이전본: {backup.name})")
             else:
                 console.print("[yellow]--interactive 로 각 항목의 채택/유지를 선택할 수 있습니다")
         return 0
@@ -1593,6 +1691,15 @@ def cmd_capture(args) -> int:
 def cmd_doctor(args) -> int:
     if getattr(args, "capture", False):
         return cmd_capture(args)
+    # capture 전용 플래그를 --capture 없이 주면 조용히 무시된다 — 안내로 드러낸다
+    if any([getattr(args, "target", ""), getattr(args, "interactive", False),
+            getattr(args, "out", ""), getattr(args, "env_dir", ""),
+            getattr(args, "region", ""), getattr(args, "gen_dir", ""),
+            getattr(args, "namespace", ""), getattr(args, "release", ""),
+            getattr(args, "context", "")]):
+        console.print("[dim]--target/--interactive/--out/--env-dir/--region/"
+                      "--gen-dir/--namespace/--release/--context 는 "
+                      "--capture 와 함께 쓰입니다[/dim]")
     from . import doctor as doc
     try:
         cfg = _load_config(args)
@@ -1805,7 +1912,6 @@ def main(argv=None) -> int:
     sp.add_argument("--out", default="", help="capture 결과 쓸 경로")
     sp.add_argument("--interactive", action="store_true",
                     help="기존 config 와 다른 항목을 absorb/keep/skip 선택")
-    sp.add_argument("--force", action="store_true")
     sp.set_defaults(fn=cmd_doctor)
 
     sp = sub.add_parser("client-values",

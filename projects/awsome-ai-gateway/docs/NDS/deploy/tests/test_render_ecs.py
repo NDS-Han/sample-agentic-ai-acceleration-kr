@@ -437,3 +437,14 @@ def test_capacity_tier_only_touches_gateway_proxy():
     s = v["service_sizing"]
     assert s["cost-recorder-worker"]["desired_count"] == 1
     assert s["admin-api"]["desired_count"] == 2   # t2 tasks_per_service
+
+
+def test_litellm_pricing_lambda_only_via_extra_vars():
+    """선언만으로는 task env 를 열지 않는다 — ecs_apply 가 함수를 만든 뒤
+    extra-vars 에 기록한 값만 주입된다 (실패 시 graceful-off 계약)."""
+    cfg = _cfg(features={"notifications": {"provider": "mock"},
+                         "pricing_lambda": True})
+    assert "litellm_pricing_lambda" not in ecs_render.desired_tfvars(cfg)
+    tf = ecs_render.desired_tfvars(
+        cfg, extra_vars={"litellm_pricing_lambda": "fn-x"})
+    assert tf["litellm_pricing_lambda"] == "fn-x"

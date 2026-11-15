@@ -123,9 +123,26 @@ def push_images(cfg: GatewayConfig, outputs: dict, repo_root: Path) -> None:
     for name, ctx in BUILD_CONTEXTS.items():
         url = repos.get(name)
         if not url:
-            continue
+            # 부분 출력 = task-def 가 참조할 이미지가 없음 — push 후 배포가
+            # pull 실패로 죽기 전에 여기서 멈춘다
+            raise SystemExit(f"ecr_repository_urls 에 '{name}' repo 가 없습니다 — "
+                             "terraform output 확인 필요")
         image = f"{url}:{cfg.images.tag}"
-        _run(["docker", "build", "-t", image, str(repo_root / ctx)])
+        # Fargate 는 x86_64 기본 — ARM 호스트(Apple Silicon/ARM CI)에서 빌드한
+        # arm64 이미지는 push 는 되지만 exec-format 으로 죽는다
+        _run(["docker", "build", "--platform", "linux/amd64",
+              "-t", image, str(repo_root / ctx)])
+        # IMMUTABLE repo — 같은 태그 재push 는 ImageTagAlreadyExists 로 죽는다.
+        # 재시도/설정만 바꾼 apply 가 매번 여기서 멈추지 않게 이미 있으면 건너뛴다.
+        chk = subprocess.run(
+            ["aws", "ecr", "describe-images", "--repository-name",
+             url.split("/", 1)[-1], "--image-ids", f"imageTag={cfg.images.tag}",
+             "--region", cfg.aws.region, "--output", "json"],
+            capture_output=True, text=True, timeout=30)
+        if chk.returncode == 0:
+            print(f"ⓘ {image} — 이미 존재 (immutable repo) — push 건너뜀. "
+                  "내용이 바뀌었으면 images.tag 를 올리세요", file=sys.stderr)
+            continue
         _run(["docker", "push", image])
 
 
@@ -133,9 +150,45 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
     names = list((outputs.get("service_names") or {}).values())
     if not names:
         return
+    cluster = outputs.get("ecs_cluster_name")
+    if not cluster:
+        print("⚠ ecs_cluster_name output 없음 — 안정화 대기를 건너뜁니다",
+              file=sys.stderr)
+        return
     print("서비스 안정화 대기 중...", file=sys.stderr)
-    _run(["aws", "ecs", "wait", "services-stable", "--cluster", outputs["ecs_cluster_name"],
-          "--services", *names, "--region", cfg.aws.region])
+    r = subprocess.run(["aws", "ecs", "wait", "services-stable", "--cluster",
+                        cluster, "--services", *names,
+                        "--region", cfg.aws.region],
+                       capture_output=True, text=True, timeout=900)
+    if r.returncode != 0:
+        # 타임아웃이 곧 실패는 아니다 — 느린 롤아웃이 뒤에서 완료될 수 있어
+        # 아래 describe 로 실제 상태를 확인하고 판정한다
+        print("⚠ services-stable 대기 시간 초과 — 배포 상태를 직접 확인합니다",
+              file=sys.stderr)
+    # circuit-breaker 롤백도 'stable' 로 보고된다 — primary 배포의
+    # rolloutState 를 봐야 실패 배포를 성공으로 오인하지 않는다
+    d = subprocess.run(["aws", "ecs", "describe-services", "--cluster", cluster,
+                        "--services", *names, "--region", cfg.aws.region,
+                        "--output", "json"], capture_output=True, text=True,
+                       timeout=60)
+    if d.returncode != 0:
+        print(f"⚠ describe-services 실패 — 배포 상태 미확인: "
+              f"{d.stderr.strip()[:150]}", file=sys.stderr)
+        return
+    try:
+        svcs = json.loads(d.stdout).get("services", [])
+    except json.JSONDecodeError:
+        svcs = []
+    failed = [s.get("serviceName") for s in svcs
+              if any(dep.get("rolloutState") == "FAILED"
+                     for dep in (s.get("deployments") or []))]
+    if failed:
+        raise SystemExit(
+            f"배포 실패(circuit-breaker 롤백) — {', '.join(failed)}. "
+            "task 로그/이미지 태그를 확인하고 다시 apply 하세요")
+    if r.returncode != 0:
+        print("ⓘ 배포가 아직 진행 중일 수 있습니다 — "
+              "`deploy doctor` 로 완료 여부를 확인하세요", file=sys.stderr)
 
 
 # ------------------------------------------------------------------------------
@@ -210,41 +263,83 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
         _save_extra_vars(gen_dir, existing)
 
+    # 도메인 모드를 none/cloudfront-temp → route53-acm 으로 올리면 이전에 기록한
+    # ALB-DNS 파생 URL 이 남아 모듈의 도메인 유도 URL 을 덮어쓴다 — 로그인
+    # 콜백 불일치로 admin 로그인이 깨지므로 모드 전환 시 stale 키를 지운다
+    if cfg.domain.mode not in ("none", "cloudfront-temp"):
+        for k in ("admin_ui_nextauth_url", "gateway_external_url",
+                  "admin_api_external_url"):
+            existing.pop(k, None)
+
+    bi_popped = False
     if not cfg.features.bi_insight:
-        popped = existing.pop("agentcore_runtime_arn", None)
-        if popped:
+        bi_popped = bool(existing.pop("agentcore_runtime_arn", None))
+        if bi_popped:
             # 선언을 껐으면 잔여 ARN 도 지운다 — agentcore_runtime_arn != ""
             # 조건이 taskdef 에 AGENTCORE_RUNTIME_ARN env 를 남겨 라우터가
             # 삭제된 Runtime 을 계속 호출하는 것을 되돌림 (web_search 패턴).
             _save_extra_vars(gen_dir, existing)
+
+    # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
+    # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는
+    # litellm_pricing_lambda tfvars 가 모듈에서 연다 (attach_invoke=False).
+    # 함수를 못 만들었는데 이름만 주입하면 admin-api 의 단가 조회가 런타임
+    # 에러를 내고 '미주입 = 503 graceful-off' 계약을 깬다 — ensure 성공분만
+    # extra-vars 에 실어 tfvars 로 내보낸다.
+    if cfg.features.pricing_lambda:
+        from . import pricinglambda
+        if pricinglambda.ensure(cfg, repo_root, attach_invoke=False):
+            existing["litellm_pricing_lambda"] = pricinglambda.fn_name(cfg.env)
+        else:
+            existing.pop("litellm_pricing_lambda", None)
+            print("⚠ pricing Lambda 보장 실패 — LITELLM_PRICING_LAMBDA 없이 "
+                  "진행합니다 (단가 조회는 503 graceful-off)", file=sys.stderr)
+    else:
+        existing.pop("litellm_pricing_lambda", None)
+
+    if cfg.features.alerting.enabled:
+        # ecs 경로는 ALB 차원 자동 발견이 없다 — enable_alerting 은 SNS+Aurora/
+        # ElastiCache 알람만 만들고 ALB 5xx/비정상타깃 알람은 생기지 않는다
+        print("ⓘ ecs alerting: ALB 5xx/타겟헬스 알람은 미지원입니다 — "
+              "SNS·Aurora·ElastiCache 알람만 생성됩니다", file=sys.stderr)
+
+    ecs_render.render(cfg, gen_dir, extra_vars=existing)
+
+    # teardown 후 7일 복구유예 중인 동명 시크릿은 create 에서 'scheduled for
+    # deletion' 으로 죽는다 — plan 이 중간에 실패하기 전에 안내한다
+    for sname in (f"/llm-gateway/{cfg.env}/app", f"/llm-gateway/{cfg.env}/db"):
+        chk = subprocess.run(
+            ["aws", "secretsmanager", "describe-secret", "--secret-id", sname,
+             "--region", cfg.aws.region, "--output", "json"],
+            capture_output=True, text=True, timeout=30)
+        if chk.returncode == 0:
+            try:
+                meta = json.loads(chk.stdout)
+            except json.JSONDecodeError:
+                meta = {}
+            if meta.get("DeletedDate"):
+                raise SystemExit(
+                    f"{sname} 가 삭제 유예(7일) 상태입니다 — 재설치 전 "
+                    f"`aws secretsmanager restore-secret --secret-id {sname}` "
+                    "로 복원하거나 유예 종료를 기다리세요")
+
+    terraform_apply(cfg, gen_dir, repo_root, bootstrap=True)
+    partial = tf_outputs(repo_root / ENV_DIR)
+
+    if not cfg.features.bi_insight:
         # 켰던 흔적(stale ARN 또는 아직 살아있는 모듈 outputs)이 있을 때만
         # 프로비저너 소유 Runtime 을 멱등 정리 — 한 번도 안 켰으면 agentcore
-        # API 호출/권한 경고를 내지 않게 건너뛴다.
-        try:
-            ecs_outs = tf_outputs(repo_root / ENV_DIR)
-            module_alive = bool(ecs_outs.get("chat_agent_name"))
-        except SystemExit:
-            ecs_outs = {}
-            module_alive = False
-        if popped or module_alive:
+        # API 호출/권한 경고를 내지 않게 건너뛴다. 반드시 위 terraform_apply
+        # 의 init 이후에 읽는다 — init 전 stale .terraform 캐시가 다른 env 의
+        # chat_agent_name 을 돌려줘 남의 Runtime 을 지울 수 있다.
+        module_alive = bool(partial.get("chat_agent_name"))
+        if bi_popped or module_alive:
             from . import chatagent
             chatagent.teardown(
                 repo_root, cfg.env, region=cfg.aws.region,
                 # project 변수를 바꾼 env 에선 도출 이름과 실측이 어긋나
                 # Runtime 이 새어나간다 — outputs 실측을 우선한다.
-                chat_agent_name=ecs_outs.get("chat_agent_name", ""))
-
-    # ops/NDS-01 자동화 — 함수 자체는 terraform 모듈 밖 리소스라 boto3 로 보장.
-    # task-role invoke 권한과 LITELLM_PRICING_LAMBDA env 는
-    # litellm_pricing_lambda tfvars 가 모듈에서 연다 (attach_invoke=False).
-    if cfg.features.pricing_lambda:
-        from . import pricinglambda
-        pricinglambda.ensure(cfg, repo_root, attach_invoke=False)
-
-    ecs_render.render(cfg, gen_dir, extra_vars=existing)
-
-    terraform_apply(cfg, gen_dir, repo_root, bootstrap=True)
-    partial = tf_outputs(repo_root / ENV_DIR)
+                chat_agent_name=partial.get("chat_agent_name", ""))
     if not skip_push:
         push_images(cfg, partial, repo_root)
     outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)

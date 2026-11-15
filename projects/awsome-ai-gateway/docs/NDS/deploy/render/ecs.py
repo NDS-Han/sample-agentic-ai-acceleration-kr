@@ -56,10 +56,11 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
         # 네트워크 — private 전환의 선행조건(VPN 경로)은 스키마가 아니라
         # docs/NDS 의 전환 런북이 강제한다
         "alb_internal": cfg.network.mode == "private",
-        # 빈 리스트는 var 에 넣지 않는다 — env/main.tf 가 var.allowed_cidrs 를
-        # 항상 모듈에 넘기므로 [] 가 그대로 가면 setproduct([], ports) 로 ALB
-        # 인그레스 규칙이 0개가 된다. 미설정 = var=null = 모듈 기본 0.0.0.0/0.
-        # "아예 닫기" 는 빈 리스트가 아니라 network.mode=private 로 표현한다.
+        # 빈 리스트는 var 에 넣지 않는다 — 어떻게 넘겨도 모듈 기본 [] 이라
+        # setproduct([], ports) 로 ALB 인그레스 규칙이 0개가 된다(fail-closed,
+        # '전체 개방'이 아니라 '아무도 못 접속'). schema.warnings 가 같은
+        # 의미로 경고한다. "아예 닫기" 는 빈 리스트가 아니라
+        # network.mode=private 로 표현한다.
         **({"allowed_cidrs": cfg.network.allowed_cidrs}
            if cfg.network.allowed_cidrs else {}),
 
@@ -170,11 +171,9 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     vars_["enable_alerting"] = cfg.features.alerting.enabled
     if cfg.features.alerting.enabled and cfg.features.alerting.emails:
         vars_["alert_emails"] = cfg.features.alerting.emails
-    if cfg.features.pricing_lambda:
-        # 함수 자체는 ecs_apply 가 boto3 로 보장 — 여기선 task env + invoke
-        # 권한을 여는 이름만 모듈에 넘긴다 (ops/NDS-01 명명 규칙과 동일)
-        vars_["litellm_pricing_lambda"] = \
-            f"llm-gateway-{cfg.env}-litellm-pricing"
+    # litellm_pricing_lambda 는 extra_vars(update 아래) 경로로만 들어온다 —
+    # ecs_apply 가 함수를 실제로 만든 뒤에만 기록한다. 선언만으로 이름을
+    # 주입하면 함수가 없는 env 를 가리켜 graceful-off(미주입 503) 계약을 깬다.
 
     # ── OIDC — ecs 경로는 Cognito 를 만들고 그 출력이 OIDC 소스가 된다.
     #    required_group 만 tfvars 로 간다 (나머지 필드는 module output).

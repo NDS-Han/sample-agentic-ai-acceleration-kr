@@ -1526,3 +1526,29 @@ def test_check_env_dir_declared_match_passes(tmp_path):
     (tmp_path / "terraform.tfvars").write_text('environment = "dev"\n')
     cfg = types.SimpleNamespace(env="dev")
     eks_apply._check_env_dir_declared(cfg, tmp_path, hard=True)
+
+
+def test_check_context_cluster_mismatch_refuses(monkeypatch):
+    """--context 가 backend 와 다른 클러스터를 가리키면 hijack 방지로 차단."""
+    r = types.SimpleNamespace(returncode=0,
+                              stdout="arn:aws:eks:us-east-1:1:cluster/other")
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: r)
+    outs = {"cluster_name": "this-cluster"}
+    eks_apply._check_context_cluster(outs, "myctx", hard=False)  # 경고만
+    with pytest.raises(SystemExit, match="other"):
+        eks_apply._check_context_cluster(outs, "myctx", hard=True)
+
+
+def test_check_context_cluster_match_and_unresolvable_pass(monkeypatch):
+    """일치하거나(이름/ARN 상관없이) 해석 불가면 통과."""
+    r = types.SimpleNamespace(returncode=0,
+                              stdout="arn:aws:eks:us-east-1:1:cluster/this-cluster")
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: r)
+    outs = {"cluster_name": "this-cluster"}
+    eks_apply._check_context_cluster(outs, "myctx", hard=True)
+    # context 미지정/미해석/backend cluster_name 없음 — 전부 조기 통과
+    eks_apply._check_context_cluster(outs, "", hard=True)
+    eks_apply._check_context_cluster({}, "myctx", hard=True)
+    bad = types.SimpleNamespace(returncode=1, stdout="")
+    monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: bad)
+    eks_apply._check_context_cluster(outs, "myctx", hard=True)

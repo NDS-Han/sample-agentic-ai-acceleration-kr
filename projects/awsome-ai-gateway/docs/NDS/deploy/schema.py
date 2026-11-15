@@ -271,10 +271,19 @@ class GatewayConfig:
         w: list[str] = []
         open_cidrs = {"0.0.0.0/0", "::/0"}
         if self.network.mode == "public" and not self.network.allowed_cidrs:
-            w.append(
-                "network.allowed_cidrs 가 비어 있어 게이트웨이가 인터넷 전체에 열립니다. "
-                "사용자 PC의 공인 IP 대역을 지정하십시오."
-            )
+            if self.deploy.target == "ecs":
+                # ecs 모듈의 ALB SG 는 cidrs × ports setproduct — 빈 리스트면
+                # 인그레스 규칙 0개라 '전체 개방'이 아니라 '아무도 못 접속' 이다
+                w.append(
+                    "ecs 에서 network.allowed_cidrs 가 비어 있으면 ALB 인그레스 "
+                    "규칙이 하나도 생기지 않아 배포해도 접속이 불가합니다. "
+                    "사용자 PC의 공인 IP 대역을 지정하십시오."
+                )
+            else:
+                w.append(
+                    "network.allowed_cidrs 가 비어 있어 게이트웨이가 인터넷 전체에 열립니다. "
+                    "사용자 PC의 공인 IP 대역을 지정하십시오."
+                )
         elif (self.network.mode == "public"
               and open_cidrs & set(self.network.allowed_cidrs)):
             # 빈 리스트와 같은 효과인데 '규칙을 넣었다'고 믿기 쉽다 — 캡처된 실제

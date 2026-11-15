@@ -1567,6 +1567,36 @@ def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
               file=sys.stderr)
 
 
+def _kube_context_cluster(context: str) -> str:
+    """kubectl context 가 현재 가리키는 클러스터명 (미해석 시 "")."""
+    r = _run_quiet(["kubectl", "config", "view", "--minify",
+                    "-o", "jsonpath={.contexts[0].context.cluster}",
+                    "--context", context], timeout=15)
+    if r.returncode != 0:
+        return ""
+    return r.stdout.strip().rsplit("/", 1)[-1]
+
+
+def _check_context_cluster(outs: dict, context: str, hard: bool) -> None:
+    """명시적 --context 가 backend 와 다른 클러스터로 해석되면 경고/차단.
+
+    update_kubeconfig 는 --alias 로 그 context 를 outs 클러스터로 재지정하므로,
+    기존 context 가 다른 클러스터를 가리키면 사전에 막지 않으면 타깃 전환 +
+    context 이름 덮어쓰기가 조용히 일어난다."""
+    tf_cluster = str(outs.get("cluster_name") or "")
+    if not context or not tf_cluster:
+        return
+    ctx_cluster = _kube_context_cluster(context)
+    if ctx_cluster and ctx_cluster != tf_cluster:
+        msg = (f"--context '{context}' 는 클러스터 '{ctx_cluster}' 를 가리키는데 "
+               f"terraform backend 의 클러스터는 '{tf_cluster}' 입니다 — 다른 "
+               "클러스터를 대상으로 배포하거나 context 이름이 덮어씌워집니다")
+        if hard:
+            raise SystemExit(f"❌ {msg} — context 이름 또는 gateway.yaml 의 "
+                             "tfstate 선언을 확인하세요")
+        print(f"⚠ {msg}", file=sys.stderr)
+
+
 def _warn_missing_ecr_tags(cfg: GatewayConfig, region: str,
                            migration_image: str = "") -> None:
     """선언된 image tag 가 ECR 에 실제 있는지 확인 — 없으면 helm upgrade 는
@@ -1670,6 +1700,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
+    _check_context_cluster(outs, context, hard=False)
     if outs.get("cluster_name"):
         # helm --dry-run=server 도 API 접근이 필요 — preview 전에 등록한다
         # (apply() 와 동일한 멱등 호출).
@@ -1806,6 +1837,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
+    _check_context_cluster(outs, context, hard=True)
     if env_dir and not outs and _infra_missing(cfg, outs):
         # outputs 가 전혀 비어 있는데 helm release 가 살아 있다 = tfstate 가
         # 이 배포의 것이 아닐 가능성이 높다(wrong bucket/키). 그대로 두면
