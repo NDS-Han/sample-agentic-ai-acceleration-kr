@@ -759,7 +759,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         # 같은 CIDR 집합을 순서만 다르게 쓴 것은 drift 가 아니다 —
         # 어노테이션 문자열과 선언을 집합으로 비교한다.
         if cfg.network.allowed_cidrs and (
-                set(filter(None, cidr.split(",")))
+                {c.strip() for c in str(cidr).split(",") if c.strip()}
                 != set(cfg.network.allowed_cidrs)):
             drifts.append(
                 f"inbound-cidrs={cidr or '(미설정 — 전체 개방)'}≠{want_cidrs}")

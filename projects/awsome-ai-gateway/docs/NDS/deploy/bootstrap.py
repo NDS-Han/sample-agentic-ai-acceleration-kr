@@ -77,6 +77,23 @@ def _quiet(argv: list[str], *, input: str | None = None,
         raise SystemExit(f"{argv[0]} 응답 없음({timeout}s) — 네트워크/자격증명 확인 필요")
 
 
+def _aws_json_file(service_args: list[str], region: str,
+                   payload: dict) -> subprocess.CompletedProcess:
+    """시크릿이 argv 로 노출되지 않게 --cli-input-json file:// 경로로 호출.
+    argv(JSON 본문 포함)는 /proc/<pid>/cmdline 으로 호스트의 비특권
+    사용자에게 읽힌다 — AWS 권장 방식인 파일 전달로 바꾼다."""
+    import tempfile
+    fd, p = tempfile.mkstemp(suffix=".json")
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            json.dump(payload, f)
+        return _aws([*service_args, "--cli-input-json", f"file://{p}"],
+                    region)
+    finally:
+        Path(p).unlink(missing_ok=True)
+
+
 def _aws(args: list[str], region: str, *, capture: bool = True,
          ok_rc: tuple[int, ...] = (0,)) -> subprocess.CompletedProcess:
     r = _quiet(["aws", *args, "--region", region, "--output", "json"])
@@ -645,8 +662,8 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
             # R3-1 — secret.yaml 의 remoteRef 가 이 키를 요구한다 (없으면 ES sync 실패)
             "internal_api_token": secrets.token_hex(32),
         })
-        _aws(["secretsmanager", "create-secret", "--name", app,
-              "--secret-string", app_secret], region)
+        _aws_json_file(["secretsmanager", "create-secret"], region,
+                       {"Name": app, "SecretString": app_secret})
         notes.append(f"secrets {app} — 생성 (랜덤 4키)")
 
     redis = f"{prefix}{cfg.env}/redis"
@@ -666,8 +683,9 @@ def seed_secrets(cfg: GatewayConfig, repo_root: Path, outs: dict) -> list[str]:
                 f"{arn} 의 SecretString 이 비어/비정상입니다 — elasticache "
                 "auth token 시크릿을 확인하세요 (json 오브젝트가 아니라 "
                 "문자열 토큰이어야 합니다)")
-        _aws(["secretsmanager", "create-secret", "--name", redis,
-              "--secret-string", json.dumps({"password": token})], region)
+        _aws_json_file(["secretsmanager", "create-secret"], region,
+                       {"Name": redis,
+                        "SecretString": json.dumps({"password": token})})
         notes.append(f"secrets {redis} — auth_token 복사 완료")
 
     db = f"{prefix}{cfg.env}/db"
@@ -882,12 +900,13 @@ def onboard_admin(cfg: GatewayConfig, repo_root: Path, outs: dict,
                 f"{(r.stderr or '').strip()[:200]}\n"
                 "일시적 오류일 수 있습니다 — 재시도하세요")
         temp_pw = secrets.token_urlsafe(16) + "Aa1!"
-        _aws(["cognito-idp", "admin-create-user", "--user-pool-id", pool,
-              "--username", email,
-              "--user-attributes", f"Name=email,Value={email}",
-              "Name=email_verified,Value=true",
-              "--temporary-password", temp_pw,
-              "--message-action", "SUPPRESS"], region)
+        _aws_json_file(["cognito-idp", "admin-create-user"], region, {
+            "UserPoolId": pool, "Username": email,
+            "UserAttributes": [
+                {"Name": "email", "Value": email},
+                {"Name": "email_verified", "Value": "true"}],
+            "TemporaryPassword": temp_pw,
+            "MessageAction": "SUPPRESS"})
         notes.append(f"cognito 사용자 생성: {email} — 임시 비밀번호(1회 표시, "
                      f"첫 로그인 시 변경 강제): {temp_pw}")
     else:

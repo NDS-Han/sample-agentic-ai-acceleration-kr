@@ -98,6 +98,10 @@ _PROVISIONER_INPUTS = frozenset({
     "DB_MASTER_SECRET", "DB_MASTER_KEY",
     "ECS_CLUSTER", "ECS_PW_TASKDEF_ARN", "ECS_SUBNETS", "ECS_SG",
     "ECS_REGION", "KUBE_CONTEXT", "K8S_NAMESPACE", "MIGRATION_IMAGE",
+    # DB_MASTER_USER / ECS_PW_LOG_GROUP 도 프로비저너가 읽는 입력 —
+    # stale export 가 PGUSER(ALTER 대상 사용자)를 잘못 바꾸면 SM≠DB 가
+    # 조용히 유지된다.
+    "DB_MASTER_USER", "ECS_PW_LOG_GROUP",
     "INTERPRETER_NAME", "AGENT_DIR", "AWS_REGION", "REGION",
     "TARGET_NAME", "CALLER_ROLE_ARN", "GW_NAME",
     # IMAGE_TAG 는 CI 환경에서 가장 흔한 변수명이다 — 스크럽하지 않으면
@@ -181,7 +185,10 @@ def _env(outs: dict, meta: dict, migration_image: str,
 def _run(repo_root: Path, sub: str, outs: dict, meta: dict | None = None,
          migration_image: str = "", context: str = "",
          extras: dict | None = None, env_name: str = "",
-         timeout: int = 900, region: str = "") -> subprocess.CompletedProcess:
+         # 최악 내부 대기 ≈ 780s+(죽은 Runtime 삭제 폴링 180 + READY 300 +
+         # interpreter + waiter) — 너무 짧은 타임아웃은 create 와 READY 사이
+         # 프로비저너를 죽여 부분 상태를 낸다.
+         timeout: int = 1500, region: str = "") -> subprocess.CompletedProcess:
     script = repo_root / PROVISIONER
     if not script.exists():
         return subprocess.CompletedProcess([], 1, "", f"{script} 없음")

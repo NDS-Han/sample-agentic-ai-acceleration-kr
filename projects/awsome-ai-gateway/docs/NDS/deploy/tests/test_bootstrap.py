@@ -4,6 +4,7 @@ import json
 import subprocess
 import types
 
+import pathlib
 import pytest
 
 from deploy import bootstrap
@@ -246,7 +247,14 @@ def _aws_router(secrets_map):
             return _cp(0, json.dumps(secrets_map[name]) if "--query" not in cmd
                        else json.dumps(secrets_map[name]))
         if "create-secret" in cmd:
-            secrets_map[name] = json.loads(cmd[cmd.index("--secret-string") + 1])
+            if "--cli-input-json" in cmd:
+                payload = json.loads(pathlib.Path(
+                    cmd[cmd.index("--cli-input-json") + 1]
+                    .removeprefix("file://")).read_text())
+                secrets_map[payload["Name"]] = json.loads(payload["SecretString"])
+            else:
+                secrets_map[name] = json.loads(
+                    cmd[cmd.index("--secret-string") + 1])
             return _cp(0)
         return _cp(0)
     return fake, calls
@@ -264,9 +272,10 @@ def test_seed_secrets_creates_app_and_redis_copies_db_verified(
 
     def fake_aws(args, region, **k):      # create-secret + auth-token 조회
         if "create-secret" in args:
-            name = args[args.index("--name") + 1]
-            secrets_map[name] = json.loads(
-                args[args.index("--secret-string") + 1])
+            payload = json.loads(pathlib.Path(
+                args[args.index("--cli-input-json") + 1]
+                .removeprefix("file://")).read_text())
+            secrets_map[payload["Name"]] = json.loads(payload["SecretString"])
         return _cp(0, json.dumps("redis-auth-token"))
     monkeypatch.setattr(bootstrap, "_aws", fake_aws)
     notes = bootstrap.seed_secrets(

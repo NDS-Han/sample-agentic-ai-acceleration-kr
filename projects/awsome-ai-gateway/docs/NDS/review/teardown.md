@@ -80,3 +80,15 @@
   tfvars 변경이 target 모듈 안이면 NDS apply 에 동승한다(메시지로 공시).
 - terraform workspace 사용 채택 env 는 `.terraform/environment` 의 선택
   워크스페이스가 env 가드 밖이다(LOW).
+
+## 27차 적용
+
+- **프로비저너 teardown 실패 전파**(HIGH): websearch/chatagent 삭제
+  스크립트가 실패를 삼키고 rc=0 — 호출자가 추적키를 지워 리소스가
+  영구 고아화. 실패 시 rc≠0 + 실패한 리소스만 재시도 대상으로 유지.
+  role 은 gateway 삭제 성공 후에만 삭제(의존 순서).
+- **`"not found"` 매칭 오인**(HIGH): teardown/고아화 가드의 문자열
+  매칭이 `context was not found`·권한 오류를 release 부재로 오인해
+  helm 단절 상태에서 apply/uninstall 진행 — `release` 이름 결합 매칭.
+- **외부 role 삭제 차단**(pricing/websearch): 소유 마커 없는 같은 이름
+  role 을 teardown 이 지우던 경로를 소유 증명 없으면 보존으로 변경.

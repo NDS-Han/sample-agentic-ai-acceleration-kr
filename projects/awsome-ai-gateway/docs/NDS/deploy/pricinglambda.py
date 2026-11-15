@@ -39,6 +39,11 @@ FN_ENV = {
 }
 BASIC_EXEC = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 INVOKE_POLICY = "LitellmPricingInvoke"
+# 소유 마커 — role/함수 이름은 계정-전역이라 같은 env 명을 쓰는 다른
+# 배포와 충돌할 수 있다. 채택/삭제는 이 마커가 있는 리소스로 한정한다
+# (websearch 프로비저너의 Description 마커와 같은 계약). 기존 배포가
+# 만든 리소스도 이 문구를 Description 에 갖는다 — 하위호환.
+_OWNED_MARK = "llm-gateway"
 
 TRUST = json.dumps({
     "Version": "2012-10-17",
@@ -119,7 +124,15 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
         # 죽은 부분 실행이 role 만 남기면 get_role 재사용 경로가 attach 를 영구
         # 스킵해 함수가 로그도 못 쓰는 상태로 수렴한다. attach 는 멱등이다.
         try:
-            iam.get_role(RoleName=name)
+            _role = iam.get_role(RoleName=name)["Role"]
+            if _OWNED_MARK not in (_role.get("Description") or ""):
+                # 마커 없는 같은 이름 role 은 다른 배포/작업 소유일 수 있다 —
+                # trust 를 덮어쓰면 그 워크로드의 AssumeRole 이 죽는다.
+                print(f"⚠ pricing_lambda: role {name} 은 이 도구 소유로 "
+                      "표시돼 있지 않습니다 — trust/policy 변경을 건너뜁니다. "
+                      "의도한 채택이면 role Description 에 'llm-gateway' 를 "
+                      "포함시키거나 role 을 삭제하세요", file=sys.stderr)
+                return ""
             # trust 도 수렴한다 — 외부에서 만든 같은 이름 role 이나 손상된
             # trust 를 영구히 두지 않는다.
             iam.update_assume_role_policy(RoleName=name, PolicyDocument=TRUST)
@@ -141,7 +154,12 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
         # ② 함수 — 코드는 매번 갱신 배포 (멱등)
         zipb = _zip(src)
         try:
-            lam.get_function(FunctionName=name)
+            _fn = lam.get_function(FunctionName=name)["Configuration"]
+            if _OWNED_MARK not in (_fn.get("Description") or ""):
+                print(f"⚠ pricing_lambda: 함수 {name} 은 외부 소유로 보여 "
+                      "코드/설정 갱신을 건너뜁니다 (Description 에 "
+                      "'llm-gateway' 없음)", file=sys.stderr)
+                return ""
             lam.update_function_code(FunctionName=name, ZipFile=zipb)
             lam.get_waiter("function_updated").wait(FunctionName=name)
             # Runtime 도 수렴한다 — 수동/레거시 배포로 남은 구버전 런타임은
@@ -221,10 +239,23 @@ def teardown(cfg, admin_role_arn: str = "", detach_invoke: bool = True) -> bool:
         _step("invoke 정책", lambda: iam.delete_role_policy(
             RoleName=admin_role_arn.rsplit("/", 1)[-1],
             PolicyName=INVOKE_POLICY))
-    _step("함수", lambda: lam.delete_function(FunctionName=name))
+    def _delete_fn():
+        _fn = lam.get_function(FunctionName=name)["Configuration"]
+        if _OWNED_MARK not in (_fn.get("Description") or ""):
+            print(f"⚠ pricing_lambda: 함수 {name} 은 외부 소유로 보여 "
+                  "삭제하지 않습니다", file=sys.stderr)
+            return
+        lam.delete_function(FunctionName=name)
+    _step("함수", _delete_fn)
 
     def _delete_role():
-        iam.get_role(RoleName=name)
+        _role = iam.get_role(RoleName=name)["Role"]
+        if _OWNED_MARK not in (_role.get("Description") or ""):
+            # 마커 없는 role 의 인라인 정책/본체를 지우면 다른 배포가 죽는다.
+            print(f"⚠ pricing_lambda: role {name} 은 외부 소유로 보여 "
+                  "삭제하지 않습니다 (Description 에 'llm-gateway' 없음)",
+                  file=sys.stderr)
+            return
         try:
             iam.detach_role_policy(RoleName=name, PolicyArn=BASIC_EXEC)
         except iam.exceptions.NoSuchEntityException:

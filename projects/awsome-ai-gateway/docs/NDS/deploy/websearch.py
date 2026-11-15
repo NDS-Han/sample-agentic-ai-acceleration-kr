@@ -58,7 +58,10 @@ def _run(env_name: str, repo_root: Path, sub: str,
         return subprocess.run(
             [sys.executable, str(script), sub],
             env=_env(env_name, caller_role_arn),
-            capture_output=True, text=True, timeout=600)
+            # 최악 내부 대기 ≈ 840s(죽은 gw 폴링+gw 생성+target 생성) — 600s
+            # 타임아웃은 create 와 READY 사이에서 프로비저너를 죽여 부분 상태+
+            # '실패' 오보를 낸다. 여유 포함 1200s.
+            capture_output=True, text=True, timeout=1200)
     except (subprocess.TimeoutExpired, OSError) as exc:
         return subprocess.CompletedProcess([], 1, "", str(exc))
 
@@ -145,11 +148,18 @@ def upsert_env_file(env_path: Path, keys: dict[str, str]) -> None:
             out.append(f"{k}={v}")
     # .env 에는 생성 시크릿이 있다 — 직접 truncate 는 쓰기 중 크래시 시
     # 반쪽 파일을 남긴다. 임시파일+rename 으로 원자화하고 권한을 보존한다.
-    tmp = env_path.with_name(env_path.name + ".tmp")
     # umask(0644) tmp → replace 창 동안 시크릿이 노출된다 — 처음부터 0600
-    # 으로 열고, 기존 파일이 있으면 그 모드를 유지한다(write_env_file 계약).
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    os.fchmod(fd, env_path.stat().st_mode & 0o777 if env_path.exists() else 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write("\n".join(out) + "\n")
-    tmp.replace(env_path)
+    # 으로 열고 무조건 0600 유지(write_env_file 계약: 시크릿 파일은
+    # 강화 방향으로 수렴). mkstemp 로 경쟁 upsert 간섭도 피한다.
+    import tempfile
+    fd, _tname = tempfile.mkstemp(dir=env_path.parent,
+                                  prefix=env_path.name + ".", suffix=".tmp")
+    tmp = Path(_tname)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write("\n".join(out) + "\n")
+        tmp.replace(env_path)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise

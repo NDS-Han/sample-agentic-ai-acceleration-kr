@@ -103,8 +103,14 @@ def ensure_role(acct: str, dry: bool) -> str:
             except ClientError:
                 desc = ""
             if desc != "AgentCore Gateway exec role for managed Web Search":
-                log(f"WARN: {ROLE_NAME} 의 Description 이 프로비저너 소유 표식과 "
-                    f"다릅니다({desc!r}) — 수동/외부 생성 role 을 채택합니다")
+                # teardown 은 표식이 없으면 삭제를 거부한다 — ensure 가 trust
+                # 를 덮어쓰는 것도 같은 비대칭으로, 외부 role 의 AssumeRole
+                # 신뢰를 무력화한다. 명시 표식이 없으면 중단한다.
+                fail(f"{ROLE_NAME} 이 이미 존재하지만 소유 표식이 다릅니다"
+                     f"({desc!r}) — 외부 소유일 수 있어 trust 를 변경하지 "
+                     "않습니다. 이 프로비저너 소유가 맞다면 Description 을 "
+                     "'AgentCore Gateway exec role for managed Web Search' "
+                     "로 표시하고 재실행하세요")
             iam.update_assume_role_policy(
                 RoleName=ROLE_NAME, PolicyDocument=json.dumps(trust))
         else:
@@ -289,8 +295,13 @@ def cmd_status():
 
 
 def cmd_teardown():
+    # 삭제 실패를 추적한다 — 호출부(cli.py)는 rc=0 일 때만 extra-vars 의
+    # 추적 키(agentcore_gateway_url)를 지운다. 실패를 삼켜 rc=0 으로 끝나면
+    # 유료 gateway 가 영구 무기록 고아가 된다.
+    failed = False
     g = find_gateway()
     gw = _control()
+    gw_alive = bool(g)
     if g:
         t = find_target(g["gatewayId"])
         if t:
@@ -303,26 +314,55 @@ def cmd_teardown():
                 # target 삭제가 실패해도 gateway/IAM 정리는 계속한다 —
                 # 남은 target 은 다음 실행이 수렴.
                 log(f"target 삭제 실패({e.response['Error']['Code']}) — 계속 진행")
+                failed = True
             # target 삭제가 전파되기 전에 gateway 를 지우면 Conflict 계열 오류 —
             # 고정 sleep 대신 사라질 때까지 폴링한다.
             for _ in range(30):
                 if find_target(g["gatewayId"]) is None:
                     break
                 time.sleep(2)
-        try:
-            gw.delete_gateway(gatewayIdentifier=g["gatewayId"])
-            log(f"gateway deleted: {g['gatewayId']}")
-        except ClientError as e:
-            log(f"gateway 삭제 실패({e.response['Error']['Code']}) — "
-                "다음 실행이 수렴합니다")
+            if find_target(g["gatewayId"]) is not None:
+                log("target 가 60s 내 사라지지 않았습니다 — gateway 삭제를 "
+                    "시도하면 Conflict 입니다. 다음 실행이 수렴합니다")
+                failed = True
+                gw_del_skip = True
+            else:
+                gw_del_skip = False
+        else:
+            gw_del_skip = False
+        if gw_alive and not gw_del_skip:
+            try:
+                gw.delete_gateway(gatewayIdentifier=g["gatewayId"])
+                log(f"gateway deleted: {g['gatewayId']}")
+                # 삭제는 비동기 — 추적 키를 지우기 전에 사라짐을 확인한다.
+                # DELETED 는 목록에 잠시 남는 종단 상태 — 사라진 것으로 본다.
+                def _gone():
+                    _g2 = find_gateway()
+                    return _g2 is None or _g2.get("status") == "DELETED"
+                for _ in range(45):
+                    if _gone():
+                        break
+                    time.sleep(4)
+                gw_alive = not _gone()
+                if gw_alive:
+                    log("gateway 가 아직 삭제 중입니다 — 다음 실행이 수렴합니다")
+                    failed = True
+            except ClientError as e:
+                log(f"gateway 삭제 실패({e.response['Error']['Code']}) — "
+                    "다음 실행이 수렴합니다")
+                failed = True
     else:
         log("gateway NONE — skip")
     iam = boto3.client("iam")
     # 우리가 만든 role 만 지운다 — gateway 가 다른 role 을 참조하거나(수동
     # 배포), Description 이 프로비저너 표식과 다르면 외부 소유로 보고 손대지 않는다.
-    role_ours = True
+    # gateway 가 아직 살아 있으면 role 삭제는 그 gateway 를 고장낸다 —
+    # 이 경우에도 건너뛴다.
+    role_ours = not gw_alive
     expected = f"arn:aws:iam::{account_id()}:role/{ROLE_NAME}"
-    if g and g.get("roleArn") and g["roleArn"] != expected:
+    if gw_alive:
+        log("WARN: gateway 가 남아 있습니다 — exec role 삭제를 건너뜁니다")
+    elif g and g.get("roleArn") and g["roleArn"] != expected:
         log(f"WARN: gateway 가 외부 role({g['roleArn']}) 을 참조 — "
             f"{ROLE_NAME} 삭제를 건너뜁니다")
         role_ours = False
@@ -349,6 +389,9 @@ def cmd_teardown():
                 log("IAM role NONE — skip")
             else:
                 raise
+    if failed:
+        log("teardown 미완료 — 추적 키를 유지하고 다음 실행이 수렴합니다")
+        sys.exit(1)
     log("teardown complete.")
 
 

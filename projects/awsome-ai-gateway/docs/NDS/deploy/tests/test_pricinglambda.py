@@ -25,7 +25,7 @@ class FakeIam:
     def get_role(self, RoleName):
         if RoleName not in self.roles:
             raise _NoSuch(RoleName)
-        return self.roles[RoleName]
+        return {"Role": self.roles[RoleName]}
 
     def create_role(self, RoleName, **kw):
         self.roles[RoleName] = kw
@@ -86,7 +86,7 @@ class FakeLambda:
     def get_function(self, FunctionName):
         if FunctionName not in self.functions:
             raise _NotFound(FunctionName)
-        return self.functions[FunctionName]
+        return {"Configuration": self.functions[FunctionName]}
 
     def create_function(self, **kw):
         self.functions[kw["FunctionName"]] = kw
@@ -154,8 +154,10 @@ def test_ensure_creates_role_fn_and_invoke_policy(fakes, tmp_path):
 
 def test_ensure_existing_fn_updates_code_only(fakes, tmp_path):
     lam, iam = fakes
-    lam.functions["llm-gateway-dev-litellm-pricing"] = {}
-    iam.roles["llm-gateway-dev-litellm-pricing"] = {}
+    lam.functions["llm-gateway-dev-litellm-pricing"] = {
+        "Description": "llm-gateway pricing"}
+    iam.roles["llm-gateway-dev-litellm-pricing"] = {
+        "Description": "llm-gateway pricing"}
     (tmp_path / "litellm-pricing-lambda").mkdir()
     (tmp_path / "litellm-pricing-lambda/lambda_function.py").write_text("x=1")
     pricinglambda.ensure(_cfg(), tmp_path, attach_invoke=False)
@@ -200,8 +202,10 @@ def test_ensure_missing_source_returns_empty(fakes, tmp_path):
 
 def test_teardown_removes_in_order(fakes):
     lam, iam = fakes
-    lam.functions["llm-gateway-dev-litellm-pricing"] = {}
-    iam.roles["llm-gateway-dev-litellm-pricing"] = {}
+    lam.functions["llm-gateway-dev-litellm-pricing"] = {
+        "Description": "llm-gateway pricing"}
+    iam.roles["llm-gateway-dev-litellm-pricing"] = {
+        "Description": "llm-gateway pricing"}
     iam.inline[("llm-gateway-dev-admin-api",
                 pricinglambda.INVOKE_POLICY)] = "{}"
     ok = pricinglambda.teardown(

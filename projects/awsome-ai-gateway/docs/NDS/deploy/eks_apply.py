@@ -80,43 +80,64 @@ def _run_quiet(argv: list[str], *, cwd: Path | None = None,
                                            f"{argv[0]} 응답 없음({timeout}s)")
 
 
+_MANIFEST_CACHE: dict[tuple[str, str, str], list[dict]] = {}
+
+
+def _release_manifest_docs(meta: dict, context: str = "") -> list[dict]:
+    """helm release 에 기록된 매니페스트 — 라이브 오브젝트와 달리 네임스페이스
+    쓰기 권한자가 위조할 수 없는 소유 증명이다. app.kubernetes.io/instance
+    라벨은 공격자가 자유롭게 찍을 수 있어 '우리 release 소유' 판정엔 못 쓴다.
+    한 apply 에서 여러 헬퍼가 부르므로 (release,ns,context) 단위로 캐시."""
+    key = (str(meta.get("release") or ""), str(meta.get("namespace") or ""),
+           context)
+    if key in _MANIFEST_CACHE:
+        return _MANIFEST_CACHE[key]
+    docs: list[dict] = []
+    argv = ["helm", "get", "manifest", key[0], "-n", key[1]]
+    if context:
+        argv += ["--kube-context", context]
+    r = _run_quiet(argv, timeout=30)
+    if r.returncode == 0:
+        for chunk in (r.stdout or "").split("\n---"):
+            try:
+                d = yaml.safe_load(chunk)
+            except Exception:
+                continue
+            if isinstance(d, dict) and isinstance(d.get("kind"), str):
+                docs.append(d)
+    _MANIFEST_CACHE[key] = docs
+    return docs
+
+
+def _release_kind_names(meta: dict, kind: str, context: str = "") -> set[str]:
+    return {((d.get("metadata") or {}).get("name") or "")
+            for d in _release_manifest_docs(meta, context)
+            if d.get("kind") == kind} - {""}
+
+
 def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
                      context: str = "") -> str:
     """라이브 deployment 의 env 값 — 조회 실패·미설정 시 "".
 
     fullnameOverride 시 deployment 이름이 {override}-<svc> 라 release 이름
     고정 조회는 못 찾는다 — instance+component 라벨로 고른다 (차트가 둘 다
-    찍는다). 라벨 없는 레거시는 이름 접미 폴백."""
-    argv = ["kubectl", "get", "deploy", "-n", meta["namespace"], "-o", "json"]
-    if context:
-        argv += ["--context", context]
-    r = _run_quiet(argv)
-    if r.returncode != 0:
+    찍는다). 라벨 없는 레거시는 이름 접미 폴백.
+
+    라이브 deployment 라벨은 네임스페이스 쓰기 권한자가 위조할 수 있다 —
+    instance 라벨을 찍은 공격자 deploy 가 --set 에 콤마 주입(env value 를
+    두 번째 키로 갈라 차트 values 를 주조)하거나 외부 URL 을 심는다.
+    release 매니페스트(helm 기록)에서만 읽는다 — 거기 없으면 신뢰 불가."""
+    names = _release_kind_names(meta, "Deployment", context)
+    target_name = next((n for n in names
+                        if n.endswith(f"-{deploy_suffix}")), "")
+    if not target_name:
         return ""
-    rel = meta.get("release")
-    try:
-        items = json.loads(r.stdout).get("items", [])
-        target = None
-        for d in items:
-            md = d.get("metadata") or {}
-            labels = md.get("labels") or {}
-            inst = labels.get("app.kubernetes.io/instance")
-            comp = labels.get("app.kubernetes.io/component")
-            name = md.get("name") or ""
-            if inst is not None:
-                if inst == rel and (comp == deploy_suffix
-                                    or (not comp and name.endswith(
-                                        f"-{deploy_suffix}"))):
-                    target = d
-                    break
-            elif name == f"{rel}-{deploy_suffix}" or (
-                    not rel and name.endswith(f"-{deploy_suffix}")):
-                target = d
-                break
-        if target is None:
-            return ""
-        containers = (target["spec"]["template"]["spec"]
-                      .get("containers") or [])
+    for d in _release_manifest_docs(meta, context):
+        if d.get("kind") != "Deployment" or (
+                (d.get("metadata") or {}).get("name") != target_name):
+            continue
+        containers = (((d.get("spec") or {}).get("template") or {})
+                      .get("spec") or {}).get("containers") or []
         # 사이드카(otel 등)가 containers[0] 이면 앱 env 가 아니라 사이드카 env 를
         # 읽어 보존값이 빈다 — 논리 서비스명 컨테이너를 우선 고른다
         # (capture/doctor 와 같은 규칙)
@@ -127,8 +148,7 @@ def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
         env = app.get("env") or []
         return next((e.get("value", "") for e in env
                      if isinstance(e, dict) and e.get("name") == var), "")
-    except (json.JSONDecodeError, KeyError, IndexError, TypeError):
-        return ""
+    return ""
 
 
 def tf_outputs(env_dir: Path) -> dict:
@@ -473,23 +493,18 @@ def _alb_hostname_by_suffix(meta: dict, suffix: str, context: str = "") -> str:
     r = _run_quiet(argv, timeout=60)
     if r.returncode != 0:
         return ""
+    # instance 라벨은 네임스페이스 쓰기 권한자가 위조할 수 있다 — 같은 라벨을
+    # 찍은 공격자 ingress 의 ALB hostname 을 채택하면 route53 UPSERT 가
+    # gateway.<domain> 을 공격자 ALB 로 돌린다. release 매니페스트에 기록된
+    # ingress 이름만 소유로 인정한다.
+    owned = _release_kind_names(meta, "Ingress", context)
     try:
         for item in json.loads(r.stdout).get("items", []):
             md = item.get("metadata") or {}
             name = md.get("name") or ""
-            inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
-            rel = meta.get("release")
-            if inst is not None:
-                # instance 라벨은 릴리스의 3개 ingress 전부에 찍힌다 — 소유
-                # 확인만으로는 이름 정렬 첫 항목(admin-api)이 항상 선택되므로
-                # 어느 ingress 인지 이름으로도 구분한다. fullnameOverride 시
-                # 이름이 {override}<suffix> 이므로 endswith 로 본다.
-                if inst != rel or not name.endswith(suffix):
-                    continue
-            elif rel:
-                if name != f"{rel}{suffix}":
-                    continue
-            elif not name.endswith(suffix):
+            # 매니페스트에 없는 ingress(외부/공격자 생성)는 배제.
+            # fullnameOverride 시 이름이 {override}<suffix> 이므로 endswith 로 본다.
+            if name not in owned or not name.endswith(suffix):
                 continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
@@ -801,22 +816,14 @@ def live_alb_hostname(meta: dict, context: str = "") -> str:
     r = _run_quiet(argv, timeout=60)
     if r.returncode != 0:
         return ""
+    # 라벨 기반 소유 판정은 위조 가능 — release 매니페스트의 ingress 이름만 인정
+    # (_alb_hostname_by_suffix 와 같은 이유: 공격자 ALB 로 NEXTAUTH_URL 주조 방지).
+    owned = _release_kind_names(meta, "Ingress", context)
     try:
         for item in json.loads(r.stdout).get("items", []):
             md = item.get("metadata") or {}
             name = md.get("name") or ""
-            inst = (md.get("labels") or {}).get("app.kubernetes.io/instance")
-            rel = meta.get("release")
-            if inst is not None:
-                # 라벨은 3개 ingress 전부에 찍힌다 — admin-ui 이름 검사를 항상
-                # 적용 (아니면 이름 정렬 첫 항목 admin-api 의 ALB 를 돌려준다).
-                # fullnameOverride 시 이름이 {override}-admin-ui 라 endswith.
-                if inst != rel or not name.endswith("-admin-ui"):
-                    continue
-            elif rel:
-                if name != f"{rel}-admin-ui":
-                    continue
-            elif not name.endswith("-admin-ui"):
+            if name not in owned or not name.endswith("-admin-ui"):
                 continue
             lb = ((item.get("status") or {}).get("loadBalancer") or {}).get("ingress") or []
             if lb and lb[0].get("hostname"):
@@ -846,16 +853,11 @@ def live_ingress_rule_host(meta: dict, context: str = "") -> str:
             name = md.get("name") or ""
             # 우리 릴리스의 admin-ui ingress 만 — 공유 ns 에 다른 릴리스의
             # *-admin-ui 가 있으면 그 host 를 집어 2-phase 가 스킵됐다.
-            labels = (md.get("labels") or {})
-            inst = labels.get("app.kubernetes.io/instance")
-            rel = meta.get("release")
-            if inst is not None:
-                if inst != rel or not name.endswith("-admin-ui"):
-                    continue
-            elif rel:
-                if name != f"{rel}-admin-ui":
-                    continue
-            elif not name.endswith("-admin-ui"):
+            # 라벨 판정은 위조 가능 — release 매니페스트의 ingress 만 인정한다
+            # (외부 ingress 의 host 를 읽어 nextauthUrl 주입을 영구 억제하는
+            # 것을 막는다).
+            if name not in _release_kind_names(meta, "Ingress", context) \
+                    or not name.endswith("-admin-ui"):
                 continue
             for rule in (item.get("spec") or {}).get("rules") or []:
                 if rule.get("host"):
@@ -1063,12 +1065,16 @@ def _discover_alb_dims(cfg: GatewayConfig,
         items = json.loads(r.stdout or "{}").get("items") or []
     except json.JSONDecodeError:
         return done([], [], "kubectl ingress 응답 파싱 실패")
+    # instance 라벨은 위조 가능 — release 매니페스트에 기록된 ingress 만 소유로
+    # 본다(공격자 ingress 의 ALB 가 알람 dimension 에 들어가는 것을 막는다).
+    owned = _release_kind_names(
+        {"release": cfg.deploy.release, "namespace": cfg.deploy.namespace},
+        "Ingress", context)
     hostnames = set()
     for it in items:
         if not isinstance(it, dict):
             continue
-        labels = ((it.get("metadata") or {}).get("labels") or {})
-        if labels.get("app.kubernetes.io/instance") != cfg.deploy.release:
+        if ((it.get("metadata") or {}).get("name") or "") not in owned:
             continue
         for ent in ((it.get("status") or {}).get("loadBalancer") or {}
                     ).get("ingress") or []:
@@ -1501,8 +1507,39 @@ def _manifest_docs(text: str) -> dict[str, dict]:
 
 
 def _canon(obj: dict) -> str:
-    """정규화된 YAML — 맵 순서/공백 차이가 diff 로 잡히지 않게 한다."""
+    """정규화된 YAML — 맵 순서/공백 차이가 diff 로 잡히지 않게 한다.
+    Secret 문서는 data/stringData 값을 마스킹한다 — inline .Values.secrets
+    를 쓰는 차트 구성에서 --plan 출력/CI 로그에 크리덴셜이 새지 않게."""
+    if isinstance(obj, dict) and obj.get("kind") == "Secret":
+        obj = {**obj}
+        for field in ("data", "stringData"):
+            if isinstance(obj.get(field), dict):
+                obj[field] = {k: "***" for k in obj[field]}
     return yaml.dump(obj, sort_keys=True, allow_unicode=True)
+
+
+def _redact_secret_docs(text: str) -> str:
+    """매니페스트 덤프 텍스트의 Secret data/stringData 를 마스킹한다.
+    파싱 불가한 문서는 원문 유지 — helm dry-run 출력에 비-YAML 라인이
+    섞여 있을 수 있어 부분 실패를 허용한다."""
+    docs = _manifest_docs(text)
+    if not docs:
+        return text
+    # _manifest_docs 는 {key: obj} — 원래 순서/비문서 라인을 잃으므로
+    # Secret 만 치환한 텍스트로 재구성한다.
+    out = []
+    for chunk in re.split(r"(?m)^---\s*$", text):
+        try:
+            d = yaml.safe_load(chunk)
+        except Exception:
+            d = None
+        if isinstance(d, dict) and d.get("kind") == "Secret":
+            for field in ("data", "stringData"):
+                if isinstance(d.get(field), dict):
+                    d[field] = {k: "***" for k in d[field]}
+            chunk = yaml.dump(d, allow_unicode=True)
+        out.append(chunk)
+    return "---".join(out)
 
 
 def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -> None:
@@ -1510,7 +1547,7 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
     print(f"$ {' '.join(argv_dry)}", file=sys.stderr)
     r = _run_quiet(argv_dry, cwd=repo_root, timeout=300)
     if r.returncode != 0:
-        print(r.stdout)
+        print(_redact_secret_docs(r.stdout))
         print(r.stderr, file=sys.stderr)
         raise SystemExit(f"helm dry-run 실패 ({r.returncode})")
 
@@ -1523,7 +1560,7 @@ def _plan_diff(argv_dry: list[str], meta: dict, repo_root: Path, context: str) -
         # live release 를 못 읽으면 비교 불가 — 종전처럼 전체 덤프로 폴백.
         print("ⓘ live release 매니페스트를 읽지 못해 전체 dry-run 출력을 보여줍니다",
               file=sys.stderr)
-        print(r.stdout)
+        print(_redact_secret_docs(r.stdout))
         return
 
     new_docs = _manifest_docs(r.stdout)
@@ -1585,17 +1622,15 @@ def _human_declared_chat_agent(env_dir: Path) -> bool:
     본다. 하나라도 놓치면 사람 소유 Runtime 을 매 apply 삭제/재생한다."""
     from .render.common import tfvars_clean
     from .render.eks import _env_tfvars_texts
-    if re.search(r'(?m)^\s*enable_chat_agent\s*=\s*"?true"?',
-                 tfvars_clean("\n".join(_env_tfvars_texts(env_dir)))):
-        return True
-    for f in [env_dir / "terraform.tfvars.json",
-              *sorted(env_dir.glob("*.auto.tfvars.json"))]:
-        try:
-            if f.exists() and re.search(
-                    r'"enable_chat_agent"\s*:\s*"?true"?', f.read_text()):
-                return True
-        except OSError:
-            continue
+    # terraform 은 채널 순서대로 읽어 마지막 선언이 이긴다 — true 를 찾은
+    # 존재만 보고 나중 채널의 = false 를 무시하면 effective-off 인데도
+    # 사람 소유로 판정해 Runtime 을 영구 잔여시킨다. 마지막 선언으로 본다.
+    _m = re.findall(r'(?m)^\s*enable_chat_agent\s*=\s*"?(true|false)"?',
+                    tfvars_clean("\n".join(_env_tfvars_texts(env_dir))))
+    # _env_tfvars_texts 가 JSON 채널도 terraform 순서로 펼쳐 주므로
+    # 마지막 선언이 HCL/JSON 어느 쪽이든 실효값이다.
+    if _m:
+        return _m[-1] == "true"
     return os.environ.get("TF_VAR_enable_chat_agent", "").strip().lower() \
         in ("true", "1")
 
@@ -2005,11 +2040,16 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             # 계약 — 실제 인시던트로 확인된 유형).
             prev = _live_deploy_env(meta, "gateway-proxy",
                                     "AGENTCORE_GATEWAY_URL", context)
-            if prev:
+            # --set 은 콤마가 값 구분자다 — 매니페스트 기록이어도 형식 검증
+            # 없이 재주입하면 'url,adminUi.env.X=y' 형태가 두 번째 키를 주조한다.
+            if prev and re.fullmatch(r"https://[^\s,\\'\"]+", prev):
                 url = prev
                 print("⚠ web_search: 프로비저너 실패 — 라이브 URL 을 보존해 "
                       "재주입합니다 (Gateway 상태는 doctor 로 확인)",
                       file=sys.stderr)
+            elif prev:
+                print("⚠ web_search: 라이브 URL 형식이 비정상입니다 — 보존 주입을 "
+                      "건너뜁니다 (값을 수동 확인하세요)", file=sys.stderr)
         if url:
             set_args += [
                 "--set", f"gatewayProxy.env.AGENTCORE_GATEWAY_URL={url}",
@@ -2039,11 +2079,14 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             # 같은 최종 상태라 graceful-off 계약은 유지된다.
             prev = _live_deploy_env(meta, "admin-api",
                                     "AGENTCORE_RUNTIME_ARN", context)
-            if prev:
+            if prev and re.fullmatch(r"arn:aws[a-z-]*:[^\s,\\'\"]+", prev):
                 arn = prev
                 print("⚠ bi_insight: 프로비저너 실패 — 라이브 ARN 을 보존해 "
                       "재주입합니다 (Runtime 삭제 여부는 doctor 로 확인)",
                       file=sys.stderr)
+            elif prev:
+                print("⚠ bi_insight: 라이브 ARN 형식이 비정상입니다 — 보존 주입을 "
+                      "건너뜁니다 (값을 수동 확인하세요)", file=sys.stderr)
         if arn:
             set_args += [
                 "--set", f"adminApi.env.AGENTCORE_RUNTIME_ARN={arn}",

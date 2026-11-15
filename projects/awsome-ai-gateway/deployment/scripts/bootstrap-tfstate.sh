@@ -47,6 +47,7 @@ echo "✓ AWS Account: ${ACCOUNT_ID}"
 HEAD_RC=0
 HEAD_ERR=$(aws s3api head-bucket --bucket "${TFSTATE_BUCKET}" 2>&1 >/dev/null) || HEAD_RC=$?
 BUCKET_EXISTED=0
+OURS=0
 if [ "${HEAD_RC}" -eq 0 ]; then
     echo "✓ S3 bucket ${TFSTATE_BUCKET} 이미 존재"
     BUCKET_EXISTED=1
@@ -63,6 +64,13 @@ elif printf '%s' "${HEAD_ERR}" | grep -Eq '\(404\)|NoSuchBucket|Not Found'; then
             --region "${AWS_REGION}" \
             --create-bucket-configuration LocationConstraint="${AWS_REGION}"
     fi
+    # 소유 표식을 바로 단다 — create 성공 후 후속 하드닝 단계에서 죽으면 다음
+    # 실행이 '기존 버킷' 분기로 들어가 경고만 하고 설정을 영영 안 적용한다.
+    # 태그가 있는 버킷만 하드닝 분기로 보내 수렴시킨다 (태그 실패는 부분 상태
+    # 복구보다 낫다 — 다음 실행이 수렴).
+    aws s3api put-bucket-tagging --bucket "${TFSTATE_BUCKET}" \
+        --tagging 'TagSet=[{Key=llm-gateway-tfstate,Value=owned}]' || \
+        echo "⚠ 소유 태그 부착 실패 — 다음 실행이 '기존 버킷' 검증만 합니다"
 elif printf '%s' "${HEAD_ERR}" | grep -Eq '\(403\)|AccessDenied|Forbidden'; then
     echo "❌ S3 bucket ${TFSTATE_BUCKET} 는 이미 존재하지만 이 계정(${ACCOUNT_ID}) 으로 접근할 수 없습니다 (403)."
     echo "   S3 버킷 이름은 전역 고유이므로 다른 계정이 선점한 이름일 수 있습니다."
@@ -78,10 +86,19 @@ else
 fi
 
 if [ "${BUCKET_EXISTED}" -eq 1 ]; then
-    # 기존 버킷은 우리가 만든 게 아닐 수 있다 — 조직 공유 state 버킷 등.
-    # versioning/암호화/public-access/lifecycle 을 무조건 덮어쓰면 동승한 다른
-    # 워크로드까지 바뀐다(특히 Prefix="" lifecycle 은 타인의 옛 버전을 90일
-    # 뒤 삭제한다). 기존 버킷에는 읽기 검증만 하고 설정 변경은 사람에게 맡긴다.
+    # 우리 태그가 있는 기존 버킷(이전 실행이 중간에 죽은 부분 생성)은
+    # 하드닝을 완료해 수렴시킨다. 태그 없는 버킷은 우리 소유가 아닐 수
+    # 있어(조직 공유 state 버킷 등) 읽기 검증만 한다 — versioning/암호화/
+    # public-access/lifecycle 을 무조건 덮어쓰면 동승한 다른 워크로드까지
+    # 바뀐다(특히 Prefix="" lifecycle 은 타인의 옛 버전을 90일 뒤 삭제).
+    OURS=0
+    T=$(aws s3api get-bucket-tagging --bucket "${TFSTATE_BUCKET}" \
+        --query "TagSet[?Key=='llm-gateway-tfstate'].Value | [0]" \
+        --output text 2>/dev/null || echo "?")
+    [ "${T}" = "owned" ] && OURS=1
+fi
+
+if [ "${BUCKET_EXISTED}" -eq 1 ] && [ "${OURS}" -eq 0 ]; then
     echo "⚠ 기존 버킷이라 버킷 설정은 변경하지 않습니다 — state 용도에 필요한 설정을 확인하세요:"
     V=$(aws s3api get-bucket-versioning --bucket "${TFSTATE_BUCKET}" \
         --query 'Status' --output text 2>/dev/null || echo "?")
@@ -140,6 +157,22 @@ fi
 # 6) DynamoDB 테이블 (lock) — 이미 있으면 스킵
 if aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" --region "${AWS_REGION}" >/dev/null 2>&1; then
     echo "✓ DynamoDB table ${TFLOCK_TABLE} 이미 존재"
+    # 같은 이름의 외부 테이블을 채택하면 terraform init 이 나중에야 알 수 없는
+    # lock 오류로 죽는다 — terraform lock 계약(HASH LockID:S)을 여기서 검증한다.
+    KS=$(aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" \
+        --region "${AWS_REGION}" \
+        --query "Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]" \
+        --output text 2>/dev/null || echo "?")
+    AT=$(aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" \
+        --region "${AWS_REGION}" \
+        --query "Table.AttributeDefinitions[?AttributeName=='LockID'].AttributeType | [0]" \
+        --output text 2>/dev/null || echo "?")
+    if [ "${KS}" != "LockID" ] || [ "${AT}" != "S" ]; then
+        echo "❌ 기존 테이블 ${TFLOCK_TABLE} 의 키 스키마가 terraform lock 계약과 다릅니다"
+        echo "   (HASH=${KS}, LockID 타입=${AT} — 필요: HASH LockID:S)."
+        echo "   다른 용도의 테이블일 수 있으므로 건드리지 않습니다 — TFLOCK_TABLE 이름을 바꾸세요."
+        exit 1
+    fi
 else
     echo "==> DynamoDB table 생성: ${TFLOCK_TABLE}"
     aws dynamodb create-table \

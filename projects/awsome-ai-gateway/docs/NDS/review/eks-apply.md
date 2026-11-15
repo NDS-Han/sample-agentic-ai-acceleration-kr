@@ -111,3 +111,24 @@ _tf_init reconfigure·load_meta·managed plan·teardown 가드·ECR 태그.
 - **CHAT_AGENT_REGION 검증**: tfvars/--set 직행 env 값에 리전 형식 검증.
 - **environment 비인용 값**: `environment = 5` 같은 tfvars 허용 형태도
   '선언됨'으로 인식(과잉 통과 아닌 과잉 차단 방향).
+
+## 27차 적용 (3인 독립 리뷰 — 소유 증명·시크릿 유출·주입 방어)
+
+- **라벨 기반 소유 판정 전면 교체**(HIGH): `app.kubernetes.io/instance`
+  라벨은 네임스페이스 쓰기 권한자가 자유롭게 찍을 수 있다 — 공격자가
+  같은 라벨의 ingress/deployment 를 만들면 ①그 ALB hostname 을 채택해
+  Route53 UPSERT 가 `gateway.<domain>` 을 공격자 ALB 로 돌리고
+  ②외부 URL 을 `--set` 보존값으로 주조하고 ③공격자 ALB 가 알람
+  dimension 에 들어간다. `helm get manifest`(release 기록, 위조 불가)를
+  파싱한 `_release_manifest_docs`/`_release_kind_names` 로 소유 증명을
+  대체 — `_live_deploy_env`·`_alb_hostname_by_suffix`·`live_alb_hostname`·
+  `live_ingress_rule_host`·`_discover_alb_dims` 전 경로 적용.
+- **`--plan` 출력 Secret 마스킹**(MEDIUM): dry-run 덤프/diff 에 Secret
+  `data`/`stringData` 가 평문 출력돼 CI 로그에 크리덴셜이 새던 것을
+  `_redact_secret_docs`·`_canon` 으로 차단.
+- **보존값 재주입 형식 검증**(MEDIUM): 프로비저너 실패 시 매니페스트에서
+  읽은 prev URL/ARN 을 검증 없이 `--set` 에 넣으면 콤마 포함 값이 두
+  번째 키를 주조 — `https://...`/`arn:aws...` 형식 확인 후에만 보존.
+- **`_human_declared_chat_agent` last-wins**(LOW): 전 채널에 `true` 가
+  하나라도 있으면 사람 소유로 보던 것을 terraform 채널 순서 마지막
+  선언(effective 값)으로 판정 — effective-off 시 Runtime 자동 수렴.

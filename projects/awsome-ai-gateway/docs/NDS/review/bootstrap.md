@@ -86,3 +86,23 @@ persist 라운드트립, tfstate 재시도, 시드 멱등, onboard 우선순위.
   패널/plan 스트림으로 공시).
 - `module.eks`·`vpc_cidr`/`azs` 등 사람 소유 모듈은 managed 수렴 대상이
   아니다 — 변경은 env terraform 수동(경고로 안내).
+
+## 27차 적용 (3인 독립 리뷰 — 시크릿 채널·tfstate 소유)
+
+- **시크릿이 AWS CLI argv 에 실리던 경로**(HIGH): `create-secret`
+  `--secret-string`·Cognito 임시 비밀번호가 프로세스 argv/ps·쉘
+  히스토리에 노출 — 0600 임시 JSON + `--cli-input-json file://` 로
+  전환(호출 후 정리).
+- **`cli._atomic_write` 권한 창**(MEDIUM): 기본 umask 로 tmp 를 만든 뒤
+  쓰는 구조라 0644 창이 있고, 크래시 잔여 tmp 의 느슨한 권한을 그대로
+  따르던 것을 `os.open(0600)`+`fchmod`+utf-8 명시로 수정.
+- **teardown/가드의 `"not found"` 오매칭**(HIGH): `helm status` stderr 의
+  `context was not found`·`release not found` 류를 구분 못 해 context
+  단절을 release 부재로 오인 — `release`+`not found` 결합 매칭.
+- **bootstrap-tfstate 부분 실패 잠금**(MEDIUM): 미소유(태그 없는) 기존
+  버킷에 lifecycle/PAB 를 적용하다 실패하면 매 bootstrap 이 같은 지점에서
+  멈춤 — 소유 태그가 있는(우리가 만든) 버킷만 수렴, 외부 버킷은 읽기
+  검증+경고만.
+- **lock table 채택 스키마 검증**(MEDIUM): 같은 이름의 비호환 DynamoDB
+  테이블(키 스키마 불일치)을 채택하면 모든 terraform 작업이 lock 실패 —
+  채택 전 `LockID` 해시키 스키마 확인.

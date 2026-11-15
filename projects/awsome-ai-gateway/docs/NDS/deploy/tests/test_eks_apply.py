@@ -20,6 +20,33 @@ def _ingress(name, hostname=None):
     return item
 
 
+@pytest.fixture(autouse=True)
+def _manifest_owned_names(monkeypatch):
+    """소유 판정이 라벨 → helm release 매니페스트 기록으로 바뀐 후 테스트
+    대응. kubectl items 를 매니페스트 문서로 간주한다(기본: 보이는 이름
+    전부 소유) — 외부 릴리스 제외가 필요한 테스트는 _own(...)으로 좁힌다."""
+    def _docs(meta, context=""):
+        r = eks_apply._run_quiet(
+            ["kubectl", "get", "ingress", "-n",
+             meta.get("namespace", "ns"), "-o", "json",
+             *(["--context", context] if context else [])])
+        try:
+            items = json.loads(r.stdout).get("items", [])
+        except Exception:
+            return []
+        for it in items:
+            if isinstance(it, dict) and not it.get("kind"):
+                it["kind"] = ("Deployment" if (it.get("spec") or {})
+                              .get("template") else "Ingress")
+        return items
+    monkeypatch.setattr(eks_apply, "_release_manifest_docs", _docs)
+
+
+def _own(monkeypatch, *names):
+    monkeypatch.setattr(eks_apply, "_release_kind_names",
+                        lambda *a, **k: set(names))
+
+
 def test_live_alb_hostname_picks_admin_ui_not_first(monkeypatch):
     """kubectl 리스트는 이름순이라 -admin-api 가 먼저 온다. 첫 hostname 을 집으면
     NEXTAUTH_URL 이 admin-api ALB 를 가리켜 OIDC 콜백이 깨진다 — 이름으로 골라야 한다."""
@@ -66,6 +93,7 @@ def test_live_alb_hostname_skips_foreign_release(monkeypatch):
     mine["metadata"]["labels"] = {"app.kubernetes.io/instance": "myrel"}
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda *a, **k: _cp([foreign, mine]))
+    _own(monkeypatch, "myrel-admin-ui")  # 외부 릴리스 ingress 는 미소유
     meta = {"namespace": "ns", "release": "myrel"}
     assert eks_apply.live_alb_hostname(meta) == "my-ui.elb.amazonaws.com"
 
@@ -78,6 +106,7 @@ def test_live_ingress_rule_host_skips_foreign_release(monkeypatch):
                "spec": {"rules": [{"host": "other.example.com"}]}}
     monkeypatch.setattr(eks_apply, "_run_quiet",
                         lambda *a, **k: _cp([foreign]))
+    _own(monkeypatch, "myrel-admin-ui")  # 외부 릴리스 host 는 미소유
     meta = {"namespace": "ns", "release": "myrel"}
     assert eks_apply.live_ingress_rule_host(meta) == ""
 
@@ -942,6 +971,9 @@ def test_alb_dims_filters_foreign_ingress(monkeypatch):
                     {"TargetGroups": [{"TargetGroupArn": _ARN_TG}]}), "")
         return subprocess.CompletedProcess(argv, 0, "", "")
     monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    # release 매니페스트에는 llm-gateway-gateway 만 기록 — payment/legacy
+    # ingress 는 외부 릴리스 소유로 제외돼야 한다.
+    _own(monkeypatch, "llm-gateway-gateway")
     lb_dims, tg_pairs, _ = eks_apply._discover_alb_dims(_alert_cfg())
     assert lb_dims == ["app/k8s-lb-a/aaa111"]
     eks_apply._ALB_DIMS_CACHE.clear()
@@ -1148,6 +1180,7 @@ def test_live_deploy_env_fullname_override(monkeypatch):
                   {"env": [{"name": "AGENTCORE_RUNTIME_ARN",
                             "value": "arn:aws:runtime/foreign"}]}]}}}}]
     monkeypatch.setattr(eks_apply, "_run_quiet", lambda *a, **k: _cp(items))
+    _own(monkeypatch, "custom-admin-api")  # 외부 릴리스 deploy 는 미소유
     meta = {"namespace": "ns", "release": "myrel"}
     assert (eks_apply._live_deploy_env(meta, "admin-api",
                                        "AGENTCORE_RUNTIME_ARN")

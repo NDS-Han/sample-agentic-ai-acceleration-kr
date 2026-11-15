@@ -189,8 +189,19 @@ def ensure_db_password(dry: bool) -> None:
     raw = None
     try:
         raw = sm.get_secret_value(SecretId=sm_arn).get("SecretString")
-    except ClientError:
-        pass
+    except ClientError as e:
+        code = e.response["Error"]["Code"]
+        if code in ("ResourceNotFoundException", "ResourceNotFound"):
+            pass  # 없음 → 새 비밀번호 생성 경로
+        elif code in ("InvalidRequestException",) and "deleted" in str(e):
+            fail(f"chat_reader 시크릿({sm_arn})이 삭제 예정 상태입니다 — "
+                 "restore-secret 후 재실행하세요 (DB 비밀번호와 불일치 위험)")
+        else:
+            # AccessDenied/throttle 을 '없음'으로 보면 새 비밀번호로 DB 를
+            # ALTER 한 뒤 put 이 실패해 SM≠DB 가 영구화된다 — 조회 실패는
+            # 중단한다.
+            fail(f"chat_reader 시크릿 조회 실패({code}) — 권한을 확인하세요. "
+                 "기존 비밀번호를 읽을 수 없어 새 비밀번호 생성을 중단합니다")
     pw = None
     write = False
     if raw:
@@ -423,6 +434,18 @@ def ensure_interpreter(dry: bool) -> str:
                     if not dry:
                         _control().delete_code_interpreter(
                             codeInterpreterId=it["codeInterpreterId"])
+        if not dry:
+            # 삭제 전파 전 create 는 이름 충돌(ConflictException)로 실패한다 —
+            # Runtime/gateway 경로와 달리 폴링이 없어 매번 interpreter 가
+            # 비활성으로 수렴했다. 같은 이름이 사라질 때까지 잠깐 기다린다.
+            for _ in range(30):
+                if not any(x.get("name") == INTERPRETER_NAME
+                           for page in _control().get_paginator(
+                               "list_code_interpreters").paginate()
+                           for x in page.get("codeInterpreterSummaries", [])
+                           if x.get("status") != "DELETED"):
+                    break
+                time.sleep(2)
         if dry:
             log(f"[dry-run] Code Interpreter {INTERPRETER_NAME} 생성")
             return "<dry-interpreter-id>"
@@ -460,7 +483,11 @@ def _env_drift(ex: dict, want_env: dict) -> bool:
     """Runtime env 가 원하는 값과 어긋나는지 — interpreter 추가 같은 env-only
     변경도 update 경로를 타게 하려고 이미지 비교와 별도로 본다."""
     cur = ex.get("environmentVariables") or {}
-    return any(cur.get(k) != v for k, v in want_env.items())
+    # 양방향 비교 — want 에 없는 키가 cur 에 남아 있으면(db_tools 해제로
+    # LAMBDA_QUERY_DB 잔여 등) update 가 절대 안 돌아 영구 잔여가 된다.
+    if any(cur.get(k) != v for k, v in want_env.items()):
+        return True
+    return any(k not in want_env for k in cur)
 
 
 def _runtime_image_uri(ex: dict) -> str:
@@ -519,13 +546,23 @@ def ensure_runtime(dry: bool) -> str:
             if dry:
                 log(f"[dry-run] Runtime update: {why}")
                 return arn
+            # CREATING/UPDATING 중 update_agent_runtime 은 Conflict — 동시
+            # apply 나 직전 실패 잔여 상태에서는 READY 가 될 때까지 먼저
+            # 기다린다.
+            if ex.get("status") != "READY":
+                log(f"Runtime 이 {ex.get('status')} 상태 — READY 대기 후 update")
+                _wait_ready(ex["agentRuntimeId"])
             ensure_image()
             rid = ex["agentRuntimeId"]
+            _upd_role = ROLE_ARN or ex.get("roleArn") or ""
+            if not _upd_role:
+                fail("update 에 넘길 roleArn 을 알 수 없습니다 — "
+                     "ROLE_ARN(chat_agent_execution_role_arn)을 넘기세요")
             _control().update_agent_runtime(
                 agentRuntimeId=rid,
                 agentRuntimeArtifact={
                     "containerConfiguration": {"containerUri": want or current}},
-                roleArn=ROLE_ARN or ex.get("roleArn", ""),
+                roleArn=_upd_role,
                 networkConfiguration=ex.get("networkConfiguration")
                     or {"networkMode": "PUBLIC"},
                 environmentVariables=want_env,
@@ -577,6 +614,9 @@ def ensure_runtime(dry: bool) -> str:
 def teardown() -> None:
     # 프로비저너 소유 리소스는 Runtime + Code Interpreter 둘 다 정리한다 —
     # interpreter 는 terraform 밖이라 방치하면 고아 리소스가 된다.
+    # 호출부(cli.py)는 rc=0 일 때만 추적 키(agentcore_runtime_arn)를 지운다 —
+    # 삭제 실패를 삼켜 0 으로 끝나면 유료 Runtime 이 무기록 고아가 된다.
+    failed = False
     try:
         iid = find_interpreter()
         if iid:
@@ -585,19 +625,24 @@ def teardown() -> None:
     except ClientError as e:
         log(f"Code Interpreter 삭제 실패({e.response['Error']['Code']}) — "
             "Runtime 삭제는 계속합니다")
+        failed = True
     ex = find_runtime()
     if not ex:
         log("Runtime 없음 — 건너뜀")
-        return
-    if ex.get("status") == "DELETING":
+    elif ex.get("status") == "DELETING":
         log("Runtime 이미 삭제 중 — 건너뜀")
-        return
-    try:
-        _control().delete_agent_runtime(agentRuntimeId=ex["agentRuntimeId"])
-        log(f"Runtime 삭제 요청: {ex['agentRuntimeArn']}")
-    except ClientError as e:
-        # 삭제 실패로 teardown 전체가 죽지 않게 — 다음 실행이 수렴한다.
-        log(f"Runtime 삭제 실패({e.response['Error']['Code']})")
+    else:
+        try:
+            _control().delete_agent_runtime(agentRuntimeId=ex["agentRuntimeId"])
+            log(f"Runtime 삭제 요청: {ex['agentRuntimeArn']}")
+            # 삭제 요청 성공 = 수렴 책임이 다음 실행에 넘어감 — 여기선 성공.
+        except ClientError as e:
+            # 삭제 실패로 teardown 전체가 죽지 않게 — 다음 실행이 수렴한다.
+            log(f"Runtime 삭제 실패({e.response['Error']['Code']})")
+            failed = True
+    if failed:
+        log("teardown 미완료 — 추적 키를 유지하고 다음 실행이 수렴합니다")
+        sys.exit(1)
 
 
 def main() -> None:

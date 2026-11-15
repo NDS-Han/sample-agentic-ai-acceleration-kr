@@ -72,8 +72,11 @@ def post(base: str, key: str, body: dict, betas: str = BETAS) -> tuple[int, str]
     url = base.rstrip("/")
     # 접두사 매칭은 localhost.evil.com / localhost@evil.com 을 통과시킨다 —
     # 호스트 컴포넌트를 파싱해서 비교한다.
-    _u = urllib.parse.urlparse(url)
-    _local = _u.hostname in ("localhost", "127.0.0.1", "::1")
+    try:
+        _u = urllib.parse.urlparse(url)
+        _local = _u.hostname in ("localhost", "127.0.0.1", "::1")
+    except ValueError:
+        return -1, f"URL 파싱 실패 — 형식을 확인하세요: {url!r}"
     if _u.scheme != "https" and not (_u.scheme == "http" and _local):
         return -1, f"http:// URL 은 Bearer 키를 평문으로 노출합니다 — https:// 만 허용: {url}"
     req = urllib.request.Request(

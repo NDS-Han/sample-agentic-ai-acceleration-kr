@@ -1171,7 +1171,13 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
         pick = next((c for c in containers
                      if isinstance(c, dict) and c.get("name") == svc_key), None)
         if pick is None and containers:
+            # 논리명 컨테이너 부재 → 첫 컨테이너(사이드카일 수 있음) 폴백 —
+            # 채택 태그로 잘못 핀되지 않게 표면화한다.
             pick = containers[0]
+            notes.append(
+                f"{svc_key}: 동명 컨테이너 부재 — 첫 컨테이너 "
+                f"'{pick.get('name', '?')}' 이미지로 태그를 채택했습니다 "
+                "(사이드카일 수 있으니 확인하세요)")
         img = str((pick or {}).get("image") or "") if isinstance(pick, dict) else ""
         live_tag = img.rsplit(":", 1)[-1] if ":" in img else ""
         if live_tag:

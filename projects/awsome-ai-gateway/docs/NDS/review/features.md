@@ -58,3 +58,27 @@ env 스크럽·READY 요구·신뢰 정책·격리·fn_name·보존 경로.
   문자열 패턴만 확인, 실제 가용 리전 목록은 라이브 확인 필요.
 - 프로비저너의 부분 생성 상태(중간 실패)는 다음 apply 가 수렴 —
   완전 정리는 teardown 에 의존.
+
+## 27차 적용 (3인 독립 리뷰 — 프로비저너 소유·수명주기)
+
+- **pricing Lambda 외부 role 채택/삭제 차단**(HIGH): 같은 이름의 외부
+  IAM role 을 trust/정책 덮어쓰기·삭제하던 것을 소유 마커 검사로 fail-
+  closed — 비소유 role 은 채택도 삭제도 안 한다.
+- **teardown 실패 시 추적키 보존**(HIGH): websearch/chatagent 프로비저너가
+  삭제 실패를 삼키고 rc=0 을 돌려 apply 가 extra-vars 의
+  `agentcore_gateway_url`/`agentcore_runtime_arn` 추적키를 지워 유료
+  리소스가 영구 고아화되던 것을, 실패 시 rc≠0 + 추적키 보존으로 재시도
+  가능하게. gateway 생존 시 execution role 삭제도 금지(순서 의존).
+- **websearch 외부 role trust 덮어쓰기 비대칭**(MEDIUM): ensure 경로는
+  소유 마커 불일치 role 에도 `update_assume_role_policy` 를 실행하던 것을
+  마커 일치 시에만 변경으로 수정.
+- **interpreter 삭제→재생성 전파 레이스**(MEDIUM): `delete` 직후 같은 이름
+  `create` 가 ConflictException — 삭제 확인 폴링 후 생성.
+- **env drift 키셋 비교**(MEDIUM): desired 에서 빠진 키가 라이브 Runtime 에
+  잔류하던 것을 키셋까지 비교해 수렴.
+- **비-READY Runtime update**(MEDIUM): ConflictException 대신 READY 대기
+  후 재시도 + `roleArn=""` ParamValidation 가드.
+- **래퍼 타임아웃 < 내부 대기 합계**(MEDIUM): 호출자 timeout 이 waiter
+  worst-case 보다 짧아 프로비저너를 중간에 죽이던 것을 확장.
+- **`DB_MASTER_USER` env 스크럽 누락**(LOW): 프로비저너 입력에서 제외해
+  DB 크리덴셜이 에이전트 env 로 새지 않게.

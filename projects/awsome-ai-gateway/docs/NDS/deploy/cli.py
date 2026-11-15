@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 from pathlib import Path
@@ -95,9 +96,19 @@ def _aws_account_id(existing: str = "") -> str:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    """tmp + rename — 중간 크래시가 source-of-truth 파일을 절반만 남기지 않게."""
+    """tmp + rename — 중간 크래시가 source-of-truth 파일을 절반만 남기지 않게.
+
+    gateway.yaml/.bak 등 시크릿이 들어갈 수 있는 파일 — umask(0644) tmp 를
+    replace 하면 권한이 느슨한 창이 생긴다. 처음부터 0600 으로 열고,
+    미리 심어둔 심링크를 쓰기로 따라가지 않게 NOFOLLOW+EXCL 로 연다."""
     tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text)
+    # O_EXCL 은 쓰지 않는다 — 이전 크래시의 잔여 .tmp 가 있으면 영구 거부된다.
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(tmp, flags, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(text)
     tmp.replace(path)
 
 
@@ -879,7 +890,10 @@ def cmd_apply(args) -> int:
             # DB/Redis 를 공유하는 병행 설치가 된다. teardown 과 같은 계약으로
             # not-found 외 오류는 중단한다.
             _hs_out = ((hs.stdout or "") + (hs.stderr or "")).lower()
-            if "not found" not in _hs_out and "release: not found" not in _hs_out:
+            # 'release' 단어와 'not found' 가 함께 있어야 부재 판정 —
+            # "context was not found"/"executable aws not found" 같은
+            # 접속·자격 오류를 release 부재로 오인해 진행하지 않는다.
+            if not ("release" in _hs_out and "not found" in _hs_out):
                 console.print(
                     f"[red]이전 release '{old_rel}' 상태를 확인할 수 없습니다 "
                     f"({(hs.stderr or hs.stdout or '').strip()[:200]}) — "
@@ -1326,7 +1340,11 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # ALB 잔여물이 destroy 를 멈추게 한다
         console.print("[red]helm 명령을 못 찾았습니다 — helm 설치 후 재시도하십시오")
         return 1
-    elif "not found" in f"{r.stdout}{r.stderr}".lower():
+    elif "release" in f"{r.stdout}{r.stderr}".lower() and \
+            "not found" in f"{r.stdout}{r.stderr}".lower():
+        # 'release' 결합 매칭 — "context was not found"/"executable aws
+        # not found" 같은 접속·자격 오류를 release 부재로 오인해 외부
+        # 리소스 정리/terraform destroy 를 돌리지 않는다.
         console.print("ⓘ release 가 없습니다 — helm 단계 생략")
         # release 부재도 dims 는 stale — 재배포 시 죽은 ALB 알람 방지
         (GEN_ROOT / cfg.env / "eks" / "alerts-dims.tfvars"
