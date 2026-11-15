@@ -2,6 +2,7 @@
 """eks_apply — helm/kubectl 호출 경계 단위 테스트."""
 import json
 import subprocess
+import types
 
 import pytest
 
@@ -1491,3 +1492,37 @@ def test_live_deploy_env_prefers_service_named_container(monkeypatch):
     assert eks_apply._live_deploy_env(
         {"namespace": "ns", "release": "rel"},
         "admin-api", "AGENTCORE_GATEWAY_URL") == "app-url"
+
+
+def test_declared_environment_all_channels(tmp_path):
+    """21차 — terraform 이 읽는 전 채널에서 environment 를 읽는다:
+    terraform.tfvars 만 보면 auto.tfvars/json 선언을 놓쳐 '판독 불가'로 오인."""
+    (tmp_path / "terraform.tfvars").write_text('# env comment\nfoo = "bar"\n')
+    assert eks_apply._declared_environment(tmp_path) == ""
+    (tmp_path / "x.auto.tfvars").write_text('environment = "prod"\n')
+    assert eks_apply._declared_environment(tmp_path) == "prod"
+    (tmp_path / "x.auto.tfvars").write_text('other = 1\n')
+    (tmp_path / "terraform.tfvars.json").write_text('{"environment": "stg"}')
+    assert eks_apply._declared_environment(tmp_path) == "stg"
+
+
+def test_declared_environment_ignores_comments(tmp_path):
+    # 주석 안의 죽은 선언은 environment 로 오인하면 안 된다 (과잉 차단)
+    (tmp_path / "terraform.tfvars").write_text(
+        '# environment = "dev"\n/* environment = "x" */\nreal = 1\n')
+    assert eks_apply._declared_environment(tmp_path) == ""
+
+
+def test_check_env_dir_declared_hard_refuses_mismatch(tmp_path):
+    (tmp_path / "x.auto.tfvars").write_text('environment = "other-env"\n')
+    cfg = types.SimpleNamespace(env="dev")
+    with pytest.raises(SystemExit, match="other-env"):
+        eks_apply._check_env_dir_declared(cfg, tmp_path, hard=True)
+    # soft 모드는 경고만 — raise 안 함
+    eks_apply._check_env_dir_declared(cfg, tmp_path, hard=False)
+
+
+def test_check_env_dir_declared_match_passes(tmp_path):
+    (tmp_path / "terraform.tfvars").write_text('environment = "dev"\n')
+    cfg = types.SimpleNamespace(env="dev")
+    eks_apply._check_env_dir_declared(cfg, tmp_path, hard=True)

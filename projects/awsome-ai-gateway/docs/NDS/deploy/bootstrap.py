@@ -926,7 +926,12 @@ def wizard_infra(cfg: GatewayConfig, *, eks: bool) -> dict | None:
             return None
         pick = sorted(z.strip() for z in raw.split(",") if z.strip())
         if len(pick) < 2:
-            print("  ⚠ AZ 2개 미만 — 기본(리전 처음 두 AZ)으로 진행합니다")
+            # 아무것도 기록하지 않는다 — 실제로 쓰이는 값은 env terraform.tfvars
+            # 나 variables.tf 의 기본 azs(ap-northeast-2a/c 핀)라 "리전 처음 두
+            # AZ" 가 아니다. 다른 리전 배포면 scaffold 후 직접 고쳐야 한다.
+            print("  ⚠ AZ 2개 미만 — azs 를 기록하지 않습니다. env tfvars/"
+                  "variables.tf 기본값(ap-northeast-2a/c)이 그대로 쓰입니다 — "
+                  f"{cfg.aws.region} 가 아니라면 scaffold 후 azs 를 수정하세요")
         else:
             out["infra"]["azs"] = pick
 
@@ -990,21 +995,35 @@ def wizard_infra(cfg: GatewayConfig, *, eks: bool) -> dict | None:
     return out
 
 
-def persist_bootstrap_answers(config_path: Path, answers: dict) -> None:
-    """wizard 답변을 gateway.yaml doc 에 병합 저장 — 다음 실행부터 선언적."""
+def persist_bootstrap_answers(config_path: Path, answers: dict) -> bool:
+    """wizard 답변을 gateway.yaml doc 에 병합 저장 — 다음 실행부터 선언적.
+
+    반환은 저장 여부 — 스키마 검증에서 스킵되면 False. 호출자는 False 면
+    wizard 의 커스텀 값(특히 tfstate 이름)을 in-memory 로 쓰지 말아야 한다:
+    yaml 에 없는 이름으로 state 를 만들면 다음 apply 가 선언된 기본 backend
+    로 reconfigure 해 split-brain 이 된다."""
     doc = yaml.safe_load(config_path.read_text()) or {}
+    if not isinstance(doc, dict):
+        doc = {}
     deploy = doc.setdefault("deploy", {})
+    if not isinstance(deploy, dict):
+        # deploy: null 같은 명시 null — 스키마는 허용(from_dict 가 {} 로
+        # 정규화)하지만 setdefault 는 None 을 그대로 돌려줘 크래시가 난다
+        deploy = doc["deploy"] = {}
     bucket, table = answers["tfstate"]
     deploy["tfstate_bucket"] = bucket
     deploy["tfstate_table"] = table
     infra = {k: v for k, v in (answers.get("infra") or {}).items() if v}
     if infra:
-        doc.setdefault("infra", {}).update(infra)
+        if not isinstance(doc.get("infra"), dict):
+            doc["infra"] = {}  # infra: null 도 스키마 유효 — 갱신 전 정규화
+        doc["infra"].update(infra)
     # tfstate 재시도처럼 web_search 답변이 없는 호출에서 None → false 로
     # 덮어써 기존 선언을 지우는 사고 방지 — 키가 있을 때만 쓴다.
     if "web_search" in answers:
-        doc.setdefault("features", {})["web_search"] = bool(
-            answers.get("web_search"))
+        if not isinstance(doc.get("features"), dict):
+            doc["features"] = {}  # features: null 정규화 (infra 와 동일)
+        doc["features"]["web_search"] = bool(answers.get("web_search"))
     # 쓰기 전 검증 — 기존 파일이 유효한데 wizard 답변이 스키마를 깨면 파일이
     # 그대로 죽어 이후 모든 deploy 명령이 _load_config 에서 멈춘다. 기존 파일이
     # 이미 무효했다면 답변 탓이 아니므로 저장한다 (load 는 어차피 실패하지만
@@ -1022,9 +1041,10 @@ def persist_bootstrap_answers(config_path: Path, answers: dict) -> None:
             print(f"⚠ wizard 답변이 스키마 검증을 통과하지 못해 gateway.yaml 에 "
                   f"저장하지 않습니다 (배포는 기본값으로 계속 진행):\n{exc}",
                   file=sys.stderr)
-            return
+            return False
     config_path.write_text(
         "# gateway.yaml — 이 배포의 source of truth.\n"
         "# infra.* 는 deploy bootstrap wizard 가 기록한 신규 설치 입력.\n"
         + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True))
     config_path.chmod(0o600)
+    return True

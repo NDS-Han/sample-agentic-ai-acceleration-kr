@@ -426,6 +426,15 @@ class GatewayConfig:
                          "DEV_LOGIN_ENABLED=false 로 강제해 작동하는 admin 로그인 "
                          "경로가 없습니다. domain 부착 + oidc(권장) 또는 "
                          "features.dev_login=true 를 선언하십시오.")
+        elif (self.deploy.target == "eks" and self.oidc.enabled
+              and not self.domain.name):
+            # OIDC 는 배선되지만 Cognito hosted UI 는 https 콜백만 허용해
+            # domain 없는 http ALB 로는 돌아올 수 없고, dev_login 도 oidc
+            # 선언으로 강제 off — 어느 쪽으로도 관리자 로그인이 안 된다.
+            w.append("oidc 선언 + domain.name 없음 — hosted UI 콜백은 https 만 "
+                     "허용해 로그인 redirect 가 거절되고 dev_login 도 꺼집니다. "
+                     "작동하는 admin 경로가 없으니 domain 을 선언하거나 oidc 를 "
+                     "거두세요.")
         if (self.deploy.target == "eks" and len(self.env) > 18
                 and (self.features.bi_insight or self.features.web_search)):
             # 프로비저너 명명에 env 가 박힌다 — llm-gateway-{env}-admin-chat-agent

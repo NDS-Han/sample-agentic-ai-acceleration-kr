@@ -322,14 +322,9 @@ def dynamic_set_args(cfg: GatewayConfig, outs: dict, region: str) -> list[str]:
     return args
 
 
-def ensure_cluster_secret_store(meta: dict, region: str, context: str,
-                                repo_root: Path) -> None:
-    """ESO 가 참조하는 ClusterSecretStore 를 보장한다 (멱등).
-
-    terraform 은 external-secrets operator 만 설치하고 store 는 만들지 않는다 —
-    legacy install-eks.sh 가 kubectl apply 로 생성하던 계약을 이관한다.
-    store 이름은 gen values.yaml 의 externalSecrets.secretStoreRef.name,
-    없으면 차트 기본값(aws-secrets-manager)."""
+def _secret_store_ref(meta: dict, repo_root: Path) -> tuple[str, str]:
+    """gen values 의 externalSecrets.secretStoreRef (name, kind) —
+    없으면 차트 기본 (aws-secrets-manager, ClusterSecretStore)."""
     name, kind = "aws-secrets-manager", "ClusterSecretStore"
     # 레이어 순서대로 병합 — 뒤 레이어(gen)가 키를 선언할 때만 덮는다. 첫
     # 파싱 성공에서 break 하면 env overlay 의 커스텀 store 명이 유실된다.
@@ -351,6 +346,18 @@ def ensure_cluster_secret_store(meta: dict, region: str, context: str,
                 kind = str(ref["kind"])
         except (OSError, UnicodeDecodeError, yaml.YAMLError):
             continue
+    return name, kind
+
+
+def ensure_cluster_secret_store(meta: dict, region: str, context: str,
+                                repo_root: Path) -> None:
+    """ESO 가 참조하는 ClusterSecretStore 를 보장한다 (멱등).
+
+    terraform 은 external-secrets operator 만 설치하고 store 는 만들지 않는다 —
+    legacy install-eks.sh 가 kubectl apply 로 생성하던 계약을 이관한다.
+    store 이름은 gen values.yaml 의 externalSecrets.secretStoreRef.name,
+    없으면 차트 기본값(aws-secrets-manager)."""
+    name, kind = _secret_store_ref(meta, repo_root)
     base = ["kubectl"] + (["--context", context] if context else [])
     if _run_quiet(base + ["get", "ns", "external-secrets"],
                   timeout=15).returncode != 0:
@@ -1509,14 +1516,70 @@ def _human_declared_chat_agent(env_dir: Path) -> bool:
         in ("true", "1")
 
 
-def _warn_missing_ecr_tags(cfg: GatewayConfig, region: str) -> None:
+def _declared_environment(env_dir: Path) -> str:
+    """env_dir 의 terraform 자동로드 채널 전체에서 environment 선언을 읽는다.
+
+    terraform 이 실제로 읽는 채널과 맞춘다 — terraform.tfvars +
+    *.auto.tfvars(HCL, 주석은 tfvars_clean 으로 제거) + *.tfvars.json(JSON
+    은 주석 불가라 키 존재가 곧 선언). terraform.tfvars 만 보면
+    environment 를 auto.tfvars/json 에 둔 디렉토리를 '판독 불가'로 오인해
+    dir-name 폴백 확인만으로 다른 env 의 state 삭제/쓰기가 통과된다.
+    TF_VAR_environment 는 디렉토리에 영속되지 않아 스코프 판단 근거가
+    못 되므로 보지 않는다."""
+    from .render.common import tfvars_clean
+    from .render.eks import _env_tfvars_texts
+    pat = re.compile(r'(?m)^\s*environment\s*=\s*"([^"]+)"')
+    m = pat.search(tfvars_clean("\n".join(_env_tfvars_texts(env_dir))))
+    if m:
+        return m.group(1)
+    for f in sorted(env_dir.glob("*.tfvars.json")):
+        try:
+            data = json.loads(f.read_text())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if isinstance(data, dict) and data.get("environment"):
+            return str(data["environment"])
+    return ""
+
+
+def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
+                            hard: bool) -> None:
+    """env_dir 의 environment 선언이 yaml env 와 다른지 검사.
+
+    선언 불일치 = 이 디렉토리의 terraform state 는 다른 env 소유 — managed
+    수렴(apply)은 그 state 에 쓰므로 hard 면 거부한다. 판독 불가(공유·
+    채택 env·json 만 있는 형태 포함)인데 dir 이름마저 다르면 경고만 —
+    dir 이름과 env 이름이 다른 정상 구성도 있어 거부는 못 한다."""
+    if not env_dir or not env_dir.is_dir():
+        return
+    declared = _declared_environment(env_dir)
+    if declared and declared != cfg.env:
+        msg = (f"{env_dir} 의 environment 선언은 '{declared}' 입니다 — "
+               f"yaml env '{cfg.env}' 와 다른 state 라 관리 대상이 아닙니다. "
+               "deploy.tf_env_dir 지정을 확인하세요")
+        if hard:
+            raise SystemExit(msg + " — managed terraform 적용을 거부합니다")
+        print(f"⚠ {msg}", file=sys.stderr)
+    elif not declared and env_dir.name != cfg.env:
+        print(f"⚠ {env_dir} 에서 environment 선언을 판독할 수 없고 디렉토리 "
+              f"이름도 env '{cfg.env}' 와 다릅니다 — 채택/공유 env 라면 이 "
+              "디렉토리의 state 가 의도한 환경의 것인지 대조하세요",
+              file=sys.stderr)
+
+
+def _warn_missing_ecr_tags(cfg: GatewayConfig, region: str,
+                           migration_image: str = "") -> None:
     """선언된 image tag 가 ECR 에 실제 있는지 확인 — 없으면 helm upgrade 는
     성공해도 pod 는 ImagePullBackOff 로 죽는다.
 
     update 경로(deploy apply)는 이미지를 build/push 하지 않는다(bootstrap 만
     한다) — 태그만 올리고 apply 하면 조용히 배포가 깨지므로 preview 단계에서
     미리 경고한다. 비-ECR 레지스트리(docker hub·사내 harbor 등)는
-    describe-images 로 확인할 수 없어 스킵한다."""
+    describe-images 로 확인할 수 없어 스킵한다.
+
+    migration_image: _migration_image 가 values 레이어에서 역산한 실효
+    이미지 — images.tag/tags.migration 둘 다 비면 helm 은 env overlay 핀에
+    폴백하는데 스캐폴드된 dev 핀은 사용자 ECR 에 없어 같은 함정이 된다."""
     from .bootstrap import EKS_SERVICES
 
     registry = (cfg.images.registry or "").rstrip("/")
@@ -1536,6 +1599,22 @@ def _warn_missing_ecr_tags(cfg: GatewayConfig, region: str) -> None:
     api_tag = (cfg.images.tags or {}).get("adminApi") or cfg.images.tag
     if sched and sched != api_tag and ("admin-api", sched) not in pairs:
         pairs.append(("admin-api", sched))
+    # migration env-overlay 폴백 — 단일 tag/tags.migration 미선언 시 helm 실효
+    # 태그는 env values 핀(스캐폴드 dev 태그일 수 있음). 선언 태그 검사와
+    # 같은 함정이라 env 핀도 ECR 존재를 확인한다.
+    if (not cfg.images.tag
+            and not (cfg.images.tags or {}).get("migration")
+            and migration_image and ":" in migration_image):
+        img_no_tag, _, mig_tag = migration_image.rpartition(":")
+        # URI = registry/repo:tag — repo 는 llm-gateway/* 규약일 때만 아래
+        # describe-images 와 맞다. 커스텀 repository 는 조회 불가라 스킵.
+        mig_repo = (img_no_tag.split("/", 1)[1] if "/" in img_no_tag else "")
+        if mig_repo.startswith("llm-gateway/"):
+            mig_repo = mig_repo.removeprefix("llm-gateway/")
+        else:
+            mig_repo = ""
+        if mig_repo and mig_tag and (mig_repo, mig_tag) not in pairs:
+            pairs.append((mig_repo, mig_tag))
     if not pairs:
         return
 
@@ -1580,6 +1659,7 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         chatagent.ensure_lambda_build(repo_root)
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    _check_env_dir_declared(cfg, env_dir, hard=False)
     if env_dir and env_dir.is_dir():
         # 항상 선언된 backend 로 reconfigure — .terraform 캐시가 낡은 backend 를
         # 가리키면 tf_outputs 가 다른 env 의 state 를 읽어 stale --set 이
@@ -1643,7 +1723,9 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
         print(f"ⓘ pricing_lambda: function={st['function']} role={st['role']} "
               f"invoke={st['invoke']} — apply 시 없는 것만 보장합니다",
               file=sys.stderr)
-    _warn_missing_ecr_tags(cfg, cfg.aws.region)
+    _warn_missing_ecr_tags(
+        cfg, cfg.aws.region,
+        migration_image=_migration_image(cfg, meta, gen_dir, repo_root))
     set_args = dynamic_set_args(cfg, outs, cfg.aws.region)
     # plan diff 도 apply 와 같은 --set 을 써야 한다 — status 조회만 하고
     # --set 을 안 넣으면 dry-run manifest 가 env 미주입으로 렌더돼
@@ -1711,6 +1793,9 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
 def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") -> dict:
     meta = load_meta(gen_dir, repo_root)
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
+    # 다른 env 선언의 env_dir 에 managed 수렴이 쓰기 전에 차단 — teardown
+    # (cli.py)과 같은 env_dir 소유 검증이다.
+    _check_env_dir_declared(cfg, env_dir, hard=True)
     if env_dir and env_dir.is_dir():
         # 항상 선언된 backend 로 reconfigure — 낡은 캐시면 tf_outputs 가 다른
         # env 의 state 를 읽는다. init 실패 원인(백엔드 설정/권한)을 숨기면
@@ -1721,6 +1806,22 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
+    if env_dir and not outs and _infra_missing(cfg, outs):
+        # outputs 가 전혀 비어 있는데 helm release 가 살아 있다 = tfstate 가
+        # 이 배포의 것이 아닐 가능성이 높다(wrong bucket/키). 그대로 두면
+        # _infra_missing 이 "전부 미생성"으로 판정해 required apply 가
+        # 다른 state 에 신규 리소스를 만들다 중간에 이름 충돌로 죽는다.
+        # (outputs 없이 values 임베디드로 도는 외부-인프라 배포는 선언 기능이
+        #  없으면 missing 이 비므로 이 가드를 통과한다)
+        ctx_args = ["--kube-context", context] if context else []
+        _hs = _run_quiet(["helm", "status", meta["release"], "-n",
+                          meta["namespace"], *ctx_args], cwd=repo_root)
+        if _hs.returncode == 0:
+            raise SystemExit(
+                f"helm release '{meta['release']}' 는 배포돼 있는데 {env_dir} 의 "
+                "terraform outputs 가 비어 있습니다 — tfstate_bucket 이 이 "
+                "env 의 state 를 가리키는지(deploy.tfstate_bucket/tf_env_dir) "
+                "확인하세요. 다른 state 에 중복 생성하는 것을 차단했습니다")
     if env_dir and not outs:
         print(f"⚠ {meta['env_dir']} 의 terraform output 이 없습니다 — DB/Redis/"
               "IRSA/Cognito 동적 --set 이 전부 빠집니다. env values 가 실측 "
@@ -1832,6 +1933,28 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
             chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region,
                                chat_agent_name=outs["chat_agent_name"])
+
+    # web_search/pricing_lambda 도 off 면 수렴 삭제 — bi_insight 의 off-teardown
+    # 과 같은 계약이다. 둘 다 terraform 밖 프로비저너 소유라 안 지우면 과금/
+    # 노출 표면(공개 Gateway·Lambda)이 영구 잔여한다. 신호는 "이전 apply 가
+    # 라이브에 env 를 주입한 흔적" — 채택 배포에서 사람이 만든 동명 리소스를
+    # 선언 off 한 번으로 지우는 오타겟을 막는다 (teardown 자체는 멱등·
+    # 이름 범위 삭제라 한 번도 안 켠 env 에선 NotFound no-op).
+    if (not cfg.features.web_search
+            and _live_deploy_env(meta, "gateway-proxy",
+                                 "AGENTCORE_GATEWAY_URL", context)):
+        print("ⓘ web_search off — 이전 apply 가 주입한 AgentCore Gateway 를 "
+              "정리합니다 (수동 프로비저닝한 Gateway 면 teardown 을 건너뛰고 "
+              "라이브 env 만 제거하세요)", file=sys.stderr)
+        websearch.teardown(cfg.env, repo_root,
+                           caller_role_arn=outs.get("gateway_proxy_role_arn", ""))
+    if (not cfg.features.pricing_lambda
+            and _live_deploy_env(meta, "admin-api",
+                                 "LITELLM_PRICING_LAMBDA", context)):
+        print("ⓘ pricing_lambda off — 이전 apply 가 만든 Lambda/role 과 "
+              "admin-api invoke 정책을 정리합니다", file=sys.stderr)
+        pricinglambda.teardown(
+            cfg, admin_role_arn=outs.get("admin_api_role_arn", ""))
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).

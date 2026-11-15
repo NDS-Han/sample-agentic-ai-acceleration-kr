@@ -48,6 +48,28 @@ def test_eks_registry_optional_but_warns():
     assert any("registry" in w for w in cfg.warnings())
 
 
+def test_eks_oidc_without_domain_warns_lockout():
+    # oidc 선언 + domain 없음 — hosted UI 콜백은 https 만 허용해 redirect
+    # 거절 + dev_login 강제 off → 관리자 로그인 경로가 전혀 없다.
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "abc123"},
+        oidc={"issuer_url": "https://x", "client_id": "c",
+              "authorize_url": "https://x/a", "token_url": "https://x/t"}))
+    assert any("로그인" in w or "콜백" in w for w in cfg.warnings())
+
+
+def test_eks_oidc_with_domain_no_lockout_warning():
+    cfg = schema.from_dict(minimal(
+        deploy={"target": "eks", "size_tier": "t3"},
+        images={"tag": "abc123"},
+        domain={"mode": "route53-acm", "name": "example.com",
+                "zone_id": "Z123456789012"},
+        oidc={"issuer_url": "https://x", "client_id": "c",
+              "authorize_url": "https://x/a", "token_url": "https://x/t"}))
+    assert not any("콜백" in w for w in cfg.warnings())
+
+
 def test_eks_requires_tag():
     with pytest.raises(schema.SchemaError, match="tag"):
         schema.from_dict(minimal(

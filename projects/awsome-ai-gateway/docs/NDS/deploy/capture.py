@@ -64,15 +64,21 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
     if not isinstance(composed, dict):
         raise CaptureError(f"{compose_path} 의 최상위가 mapping 이 아닙니다")
     services = _dmap(composed.get("services"))
-    env = parse_env_file(out_dir / ".env")
+    env_path = out_dir / ".env"
+    env = parse_env_file(env_path)
+    env_missing = not env_path.exists()
     caddy_path = out_dir / "Caddyfile"
     try:
         caddy = caddy_path.read_text() if caddy_path.exists() else ""
     except (OSError, UnicodeDecodeError):
         caddy = ""
         notes.append("Caddyfile 읽기 실패(인코딩/권한) — domain/cidrs 추론 불가")
-    if not caddy_path.exists():
-        notes.append("Caddyfile 없음 — allowed_cidrs/domain 은 추론 불가로 둡니다")
+    if not caddy:
+        notes.append("Caddyfile 없음/빈 내용 — allowed_cidrs/domain 은 추론 불가로 둡니다")
+        if unknown is not None:
+            # 읽기 실패를 "비어 있음/none" 으로 기록하면 채택 diff 가 방화벽
+            # 허용목록 삭제·도메인 해제 행으로 보인다 — 못 읽은 키는 unknown.
+            unknown.update({"network.allowed_cidrs", "domain.mode"})
 
     # env 이름: compose 프로젝트명 "llm-gateway-<env>" → 없으면 디렉토리명
     env_name = _strip(str(composed.get("name", "")), "llm-gateway-") or out_dir.name
@@ -108,14 +114,22 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
 
     # notifications
     provider = env.get("EMAIL_SENDER_TYPE", "mock")
-    notif = {"provider": provider if provider in ("mock", "ses", "smtp") else "mock"}
+    notif = {"provider": provider if provider in
+             ("mock", "ses", "smtp", "internal_api") else "mock"}
     if provider == "ses":
         notif["ses_from"] = env.get("EMAIL_SENDER_ADDRESS", "")
     elif provider == "smtp":
         notif.update({"smtp_host": env.get("SMTP_HOST", ""),
                       "smtp_port": _safe_int(env.get("SMTP_PORT"), 587),
                       "smtp_from": env.get("EMAIL_SENDER_ADDRESS", "")})
-    elif provider not in ("mock", "ses", "smtp"):
+    elif provider == "internal_api":
+        notif["internal_api_url"] = env.get("EMAIL_API_URL", "")
+        notif["internal_api_from"] = env.get("EMAIL_SENDER_ADDRESS", "")
+        if not notif["internal_api_url"]:
+            notes.append("EMAIL_SENDER_TYPE=internal_api 인데 EMAIL_API_URL 이 "
+                         "없습니다 — notifications.internal_api_url 을 채우세요 "
+                         "(없으면 스키마 오류로 채택이 막힙니다)")
+    elif provider not in ("mock", "ses", "smtp", "internal_api"):
         notes.append(f"EMAIL_SENDER_TYPE={provider} 는 스키마에 없는 값 — mock 으로 두고 확인하세요")
 
     # features — 스키마 키를 전부 기록한다. 라이브 신호를 못 읽은 기능은
@@ -181,6 +195,23 @@ def capture_compose(out_dir: Path, unknown: set[str] | None = None
     # 캡처 불가 항목 notes
     if not env.get("VIRTUAL_KEY_ENCRYPTION_KEY"):
         notes.append(".env 에 VIRTUAL_KEY_ENCRYPTION_KEY 가 없습니다 — VK DEK 유실 시 발급 키 전부 무효")
+
+    if env_missing:
+        # .env 가 없으면 env 기반 항목은 "못 읽음"이다 — compose environment
+        # 블록 값만으로 추론한 false/mock 기록이 채택 apply 에서 실제 설정을
+        # 내리지 않게 unknown 표기 (다른 소스에서 값을 확인한 키는 제외).
+        notes.append("⚠ .env 파일이 없습니다 — env 기반 항목(기능 플래그/알림/"
+                     "OIDC/region)은 추정입니다. 채택 전 실제 배포의 .env 를 "
+                     "확인하세요")
+        if unknown is not None:
+            unknown.update({"aws.region", "features.web_search",
+                            "features.body_logging",
+                            "features.notifications.provider"})
+            for _k in ("bi_insight", "pricing_lambda", "dev_login"):
+                if not features.get(_k):
+                    unknown.add(f"features.{_k}")
+            if not oidc:
+                unknown.add("oidc.issuer_url")
 
     # 이 산출물이 gen/<env> 아래가 아니면(수작업 배포) 채택 시 새 .env 가 생성되고
     # compose 프로젝트명(llm-gateway-<env>)이 달라져 볼륨이 새로 만들어진다 —
@@ -289,10 +320,15 @@ def capture_ecs(env_dir: Path, region: str,
     admin_ui_url = outputs.get("admin_ui_url") or ""
     https = bool(outputs.get("https_enabled"))
 
-    # 도메인 — admin_ui_url 의 호스트가 admin.<domain> 이면 route53-acm 으로 추론
+    # 도메인 — admin_ui_url 의 호스트가 admin.<domain> 이면 도메인이 설정된
+    # 것이다. https_enabled 로 게이트하면 "도메인은 선언됐지만 인증서 검증
+    # 대기" 상태가 mode=none 으로 기록돼 채택 apply 가 도메인을 내려버린다.
     m = re.match(r"https://admin\.([^/]+)", admin_ui_url)
-    if m and https:
+    if m:
         domain = {"mode": "route53-acm", "name": m.group(1)}
+        if not https:
+            notes.append("domain 은 선언됐지만 https_enabled=false — 인증서/"
+                         "zone 미구성(검증 대기 포함)일 수 있습니다")
         zid = _r53_zone_id(domain["name"], region)
         if zid:
             domain["zone_id"] = zid
@@ -304,6 +340,10 @@ def capture_ecs(env_dir: Path, region: str,
 
     # task def 에서 env 계약 역추출
     name_map = outputs.get("service_names") or {}
+    if not isinstance(name_map, dict):
+        notes.append("service_names output 이 맵이 아닙니다 — 서비스 이름 "
+                     "역매핑을 건너뜁니다")
+        name_map = {}
     service_names = list(name_map.values())
     image_tag, sizing, sender_type, sizing_env = "", {}, "mock", {}
     api_env_ok = True
@@ -398,8 +438,9 @@ def capture_ecs(env_dir: Path, region: str,
     except (CaptureError, KeyError, IndexError) as e:
         notes.append(f"서비스 상태 조회 실패 — sizing 은 비워둡니다: {e}")
 
-    notif = {"provider": sender_type if sender_type in ("mock", "ses", "smtp") else "mock"}
-    if sender_type not in ("mock", "ses", "smtp"):
+    notif = {"provider": sender_type if sender_type in
+             ("mock", "ses", "smtp", "internal_api") else "mock"}
+    if sender_type not in ("mock", "ses", "smtp", "internal_api"):
         notes.append(f"EMAIL_SENDER_TYPE={sender_type} 는 스키마에 없는 값 — "
                      "provider 를 mock 으로 기록했으니 채택 전 확인하세요")
     if sender_type == "ses":
@@ -408,6 +449,12 @@ def capture_ecs(env_dir: Path, region: str,
         notif.update({"smtp_host": sizing_env.get("SMTP_HOST", ""),
                       "smtp_port": _safe_int(sizing_env.get("SMTP_PORT"), 587),
                       "smtp_from": sizing_env.get("EMAIL_SENDER_ADDRESS", "")})
+    elif sender_type == "internal_api":
+        notif["internal_api_url"] = sizing_env.get("EMAIL_API_URL", "")
+        notif["internal_api_from"] = sizing_env.get("EMAIL_SENDER_ADDRESS", "")
+        if not notif["internal_api_url"]:
+            notes.append("EMAIL_SENDER_TYPE=internal_api 인데 EMAIL_API_URL 이 "
+                         "없습니다 — notifications.internal_api_url 을 채우세요")
 
     # tier 추론 + infra.db/infra.cache — 실제 DB/캐시 토폴로지를 읽어 기록한다.
     # 읽은 값을 override 로 명시해야 채택 후 apply 가 tier 프리셋으로 되돌려
@@ -521,18 +568,29 @@ def capture_ecs(env_dir: Path, region: str,
     # ALB SG 인바운드 → allowed_cidrs 역산 + Scheme → network.mode:
     # Route53 alias → ALB → SG 규칙. internal ALB 를 public 으로 기록하면
     # 채택 apply(alb_internal=false 렌더)가 인터넷 노출로 되돌린다.
+    # domain 미설정 배포는 alias 경로가 없으므로 alb_dns_name output 으로도
+    # 탐침한다 — 어느 쪽도 못 읽으면 public 기록이 아니라 unknown 처리.
     allowed_cidrs: list[str] = []
     net_mode = "public"
+    alb_dns = ""
     if domain.get("zone_id") and domain.get("name"):
         alb_dns = _r53_alias_target(domain["zone_id"],
-                                    f"admin.{domain['name']}", region)
-        if alb_dns:
-            allowed_cidrs, alb_scheme = _alb_ingress_cidrs(alb_dns, region)
-            if alb_scheme == "internal":
-                net_mode = "private"
-                notes.append("ALB Scheme=internal — network.mode=private 로 기록합니다")
-            if allowed_cidrs:
-                notes.append(f"allowed_cidrs={allowed_cidrs} 를 ALB SG 에서 역산했습니다")
+                                    f"admin.{domain['name']}", region) or ""
+    if not alb_dns:
+        alb_dns = str(outputs.get("alb_dns_name") or "")
+    if alb_dns:
+        allowed_cidrs, alb_scheme = _alb_ingress_cidrs(alb_dns, region)
+        if alb_scheme == "internal":
+            net_mode = "private"
+            notes.append("ALB Scheme=internal — network.mode=private 로 기록합니다")
+        if allowed_cidrs:
+            notes.append(f"allowed_cidrs={allowed_cidrs} 를 ALB SG 에서 역산했습니다")
+    else:
+        notes.append("ALB 주소를 Route53/output 어느 쪽으로도 못 읽었습니다 — "
+                     "network.mode=public 기록은 미검증입니다. internal ALB "
+                     "배포라면 private 으로 바로잡으세요")
+        if unknown is not None:
+            unknown.add("network.mode")
     if not allowed_cidrs:
         notes.append("allowed_cidrs 를 ALB SG 에서 못 읽었습니다 — 키를 생략합니다 "
                      "(빈 리스트로 쓰면 apply 가 ALB 인그레스 규칙을 전부 지웁니다). "
@@ -1266,7 +1324,14 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
                     if not oidc.get("token_url"):
                         oidc["token_url"] = f"https://{hosted}/oauth2/token"
         except CaptureError:
-            notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — region 등을 확인하세요")
+            # output 을 못 읽으면 이 env_dir 이 정말 이 클러스터의 것인지 검증이
+            # 안 된다 — 아래 블록이 같은 디렉토리의 backend/tfvars 를 읽어
+            # 다른 env 의 tfstate·infra 값을 캡처본에 싣는 것을 차단한다.
+            notes.append(f"{env_dir} 의 terraform output 을 못 읽었습니다 — "
+                         "env_dir 검증이 불가하므로 tfstate_bucket/infra 등 "
+                         "terraform 유래 값은 기록하지 않습니다. env_dir 이 "
+                         "맞는지(init 여부) 확인 후 재캡처하거나 수동 입력하세요")
+            env_dir = None
     if "enabled" not in features["alerting"]:
         # eks 는 overlay 가 "켜기"만 소유하므로 미확인 시 키를 비워둔다 —
         # enabled 미기록은 다음 apply 가 alerting 을 켜지도 끄지도 않는다.

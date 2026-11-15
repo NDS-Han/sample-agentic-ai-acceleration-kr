@@ -502,7 +502,8 @@ def test_update_kubeconfig_alias_skip_fail(monkeypatch):
 
 def test_persist_invalid_answer_keeps_file(tmp_path):
     """유효한 파일에 스키마를 깨는 wizard 답변이 더해지면 쓰기를 거부한다 —
-    이후 모든 명령이 _load_config 에서 멈추는 사고 방지."""
+    이후 모든 명령이 _load_config 에서 멈추는 사고 방지. False 반환으로
+    호출자가 in-memory tfstate 이름 재사용을 막는다(split-brain 방지)."""
     cfg_path = tmp_path / "gateway.yaml"
     original = ("version: 1\nenv: dev\n"
                 "aws: {region: ap-northeast-2}\n"
@@ -510,10 +511,31 @@ def test_persist_invalid_answer_keeps_file(tmp_path):
                 "features: {notifications: {provider: mock}}\n"
                 "images: {tag: v1}\n")
     cfg_path.write_text(original)
-    bootstrap.persist_bootstrap_answers(cfg_path, {
+    saved = bootstrap.persist_bootstrap_answers(cfg_path, {
         "tfstate": ("bkt", "tbl"),
         "infra": {"vpc_cidr": "not-a-cidr"}})
+    assert saved is False
     assert cfg_path.read_text() == original
+
+
+def test_persist_null_sections_no_crash(tmp_path):
+    """infra: null / features: null 은 스키마 유효라 wizard 까지 도달한다 —
+    setdefault 가 None 을 그대로 돌려줘 AttributeError 로 죽던 경로."""
+    cfg_path = tmp_path / "gateway.yaml"
+    cfg_path.write_text(
+        "version: 1\nenv: dev\naws: {region: ap-northeast-2}\n"
+        "deploy: {target: eks, size_tier: t3}\n"
+        "features: null\ninfra: null\nimages: {tag: v1}\n")
+    saved = bootstrap.persist_bootstrap_answers(cfg_path, {
+        "tfstate": ("bkt", "tbl"),
+        "infra": {"cognito_domain_suffix": "s1"},
+        "web_search": True})
+    assert saved is True
+    import yaml as _y
+    doc = _y.safe_load(cfg_path.read_text())
+    assert doc["infra"]["cognito_domain_suffix"] == "s1"
+    assert doc["features"]["web_search"] is True
+    assert doc["deploy"]["tfstate_bucket"] == "bkt"
 
 
 def test_persist_writes_when_original_already_invalid(tmp_path):

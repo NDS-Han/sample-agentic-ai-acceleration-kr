@@ -707,6 +707,11 @@ def test_eks_capture_restores_tfvars_and_tfstate(tmp_path, monkeypatch):
     monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
     monkeypatch.setattr(capture, "_aws_json",
                         lambda *a, **kw: {"HostedZones": []})
+    # terraform output 은 읽혀야 env_dir 검증 경로가 살고 tfvars/backend 까지
+    # 기록된다 — output 실패면 env 유래 값 전체를 기록하지 않는다(회귀:
+    # 미검증 env_dir 채택 차단).
+    monkeypatch.setattr(capture, "_tf_outputs",
+                        lambda *a, **kw: {"aws_region": "ap-south-1"})
     (tmp_path / ".terraform").mkdir()
     (tmp_path / ".terraform" / "terraform.tfstate").write_text(
         '{"backend": {"config": {"bucket": "bkt", "dynamodb_table": "tbl"}}}')
@@ -717,6 +722,31 @@ def test_eks_capture_restores_tfvars_and_tfstate(tmp_path, monkeypatch):
     assert doc["deploy"]["tfstate_table"] == "tbl"
     assert doc["infra"]["mantle_regions"] == ["us-east-1"]
     assert doc["infra"]["cognito_domain_suffix"] == "suf-1"
+
+
+def test_eks_capture_drops_unverified_env_dir(tmp_path, monkeypatch):
+    """terraform output 실패 env_dir — tfvars/backend 도 채택하지 않는다
+    (다른 env state 의 값이 캡처본에 섞이는 오타겟 차단)."""
+    vals = {"global": {"environment": "dev"}, "aws": {"region": "ap-south-1"},
+            "ingress": {"annotations": {}},
+            "gatewayProxy": {"env": {}}, "redis": {}, "adminApi": {"env": {}}}
+    monkeypatch.setattr(capture, "_helm_values", lambda *a, **kw: vals)
+    monkeypatch.setattr(capture, "_kubectl_json", lambda *a, **kw: {})
+    monkeypatch.setattr(capture, "_helm_app_version", lambda *a, **kw: "")
+    monkeypatch.setattr(capture, "_aws_json",
+                        lambda *a, **kw: {"HostedZones": []})
+
+    def _boom(*a, **kw):
+        raise capture.CaptureError("terraform output 실패")
+    monkeypatch.setattr(capture, "_tf_outputs", _boom)
+    (tmp_path / ".terraform").mkdir()
+    (tmp_path / ".terraform" / "terraform.tfstate").write_text(
+        '{"backend": {"config": {"bucket": "bkt", "dynamodb_table": "tbl"}}}')
+    (tmp_path / "terraform.tfvars").write_text('mantle_regions = ["us-east-1"]\n')
+    doc, notes = capture.capture_eks(env_dir=tmp_path)
+    assert "tfstate_bucket" not in doc.get("deploy", {})
+    assert "mantle_regions" not in doc.get("infra", {})
+    assert any("검증이 불가" in n or "못 읽었습니다" in n for n in notes)
 
 
 def test_r53_zone_id_picks_longest_suffix(monkeypatch):
@@ -1252,3 +1282,97 @@ def test_collect_doc_survives_scalar_leaf_sections(monkeypatch):
     doc = cli._collect_doc(broken)  # AttributeError 없이 완주
     assert doc["env"] == "dev"
     assert isinstance(doc["deploy"], dict)
+
+
+def test_compose_capture_missing_caddyfile_marks_unknown(tmp_path):
+    """Caddyfile 을 못 읽으면 cidrs=[]·mode=none 이 '읽은 값'으로 기록돼
+    채택 diff 가 방화벽 삭제/도메인 해제 행으로 보인다 — unknown 표기."""
+    (tmp_path / "docker-compose.yml").write_text(
+        "name: llm-gateway-acme\nservices: {}\n")
+    (tmp_path / ".env").write_text("AWS_REGION=ap-northeast-2\n")
+    unknown: set = set()
+    doc, _ = capture.capture_compose(tmp_path, unknown=unknown)
+    assert "network.allowed_cidrs" in unknown
+    assert "domain.mode" in unknown
+
+
+def test_compose_capture_missing_env_marks_env_keys_unknown(tmp_path):
+    """.env 없이 env 기반 키는 전부 '못 읽음' — false/mock 기록이 채택
+    apply 에서 실제 설정을 내리지 않게 unknown 표기."""
+    (tmp_path / "docker-compose.yml").write_text(
+        "name: llm-gateway-acme\nservices: {}\n")
+    (tmp_path / "Caddyfile").write_text(":8000 {\n  respond ok\n}\n")
+    unknown: set = set()
+    doc, notes = capture.capture_compose(tmp_path, unknown=unknown)
+    for k in ("aws.region", "features.web_search", "features.body_logging",
+              "features.notifications.provider", "features.bi_insight",
+              "features.pricing_lambda", "features.dev_login",
+              "oidc.issuer_url"):
+        assert k in unknown, k
+    assert any(".env" in n for n in notes)
+
+
+def test_compose_capture_internal_api_provider(tmp_path):
+    """EMAIL_SENDER_TYPE=internal_api 는 유효 provider — mock 강등 금지."""
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n")
+    (tmp_path / ".env").write_text(
+        "EMAIL_SENDER_TYPE=internal_api\n"
+        "EMAIL_API_URL=https://mail.corp\n"
+        "EMAIL_SENDER_ADDRESS=noreply@corp\n")
+    doc, _ = capture.capture_compose(tmp_path)
+    n = doc["features"]["notifications"]
+    assert n["provider"] == "internal_api"
+    assert n["internal_api_url"] == "https://mail.corp"
+    assert n["internal_api_from"] == "noreply@corp"
+
+
+def test_ecs_capture_domain_without_https_keeps_route53(monkeypatch, tmp_path):
+    """도메인은 선언됐는데 https_enabled=false(인증서 검증 대기 등)면
+    mode=none 기록은 채택 apply 가 도메인을 내려버린다 — 선언으로 기록."""
+    outputs = {"ecs_cluster_name": "llm-gateway-acme",
+               "admin_ui_url": "https://admin.acme.io",
+               "https_enabled": False, "service_names": {}}
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+    monkeypatch.setattr(capture, "_aws_json",
+                        lambda *a, **kw: {"HostedZones": []})
+    doc, notes = capture.capture_ecs(tmp_path, "r")
+    assert doc["domain"]["mode"] == "route53-acm"
+    assert doc["domain"]["name"] == "acme.io"
+    assert any("https_enabled" in n for n in notes)
+
+
+def test_ecs_capture_alb_scheme_via_output_fallback(monkeypatch, tmp_path):
+    """domain 없는 배포도 alb_dns_name output 으로 scheme 을 탐침한다 —
+    internal ALB 를 public 으로 기록하면 채택 apply 가 인터넷 노출로 되돌림."""
+    outputs = {"ecs_cluster_name": "llm-gateway-acme",
+               "admin_ui_url": "", "https_enabled": False,
+               "service_names": {},
+               "alb_dns_name": "internal-alb.elb.amazonaws.com"}
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+
+    def _aws(argv, region):
+        if argv[0] == "elbv2":
+            return {"LoadBalancers": [
+                {"DNSName": "internal-alb.elb.amazonaws.com",
+                 "Scheme": "internal", "SecurityGroups": ["sg-1"]}]}
+        if argv[0] == "ec2":
+            return {"SecurityGroups": [{"IpPermissions": [
+                {"IpProtocol": "-1",
+                 "IpRanges": [{"CidrIp": "10.0.0.0/8"}]}]}]}
+        return {}
+    monkeypatch.setattr(capture, "_aws_json", _aws)
+    doc, _ = capture.capture_ecs(tmp_path, "r")
+    assert doc["network"]["mode"] == "private"
+
+
+def test_ecs_capture_unverifiable_network_mode_unknown(monkeypatch, tmp_path):
+    """ALB 주소를 어느 경로로도 못 읽으면 public 기록이 아니라 unknown."""
+    outputs = {"ecs_cluster_name": "llm-gateway-acme",
+               "admin_ui_url": "", "https_enabled": False,
+               "service_names": {}}
+    monkeypatch.setattr(capture, "_tf_outputs", lambda *a, **kw: outputs)
+    monkeypatch.setattr(capture, "_aws_json", lambda *a, **kw: {})
+    unknown: set = set()
+    doc, notes = capture.capture_ecs(tmp_path, "r", unknown=unknown)
+    assert "network.mode" in unknown
+    assert any("미검증" in n for n in notes)

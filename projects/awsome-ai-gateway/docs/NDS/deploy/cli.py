@@ -692,6 +692,11 @@ def cmd_apply(args) -> int:
     except schema.SchemaError as exc:
         console.print(f"[red]gateway.yaml 오류:\n{exc}")
         return 1
+    # 선언 위험 경고는 init/validate/render 에만 나오고 apply 에선 안 보였다 —
+    # 채택 yaml 의 allowed_cidrs 공백·dev_login 같은 fail-open 신호가
+    # 확인 게이트 전에 반드시 표시돼야 한다.
+    for w in cfg.warnings():
+        console.print(f"[yellow]⚠ {w}")
 
     if cfg.deploy.target == "ecs":
         from . import ecs_apply, doctor as doc
@@ -996,7 +1001,12 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
             "IRSA·ALB controller 전부[/red]\n"
             "    ⚠️ Aurora deletion protection(prod/provisioned)이 켜져 있으면 destroy 가 "
             "실패합니다 — env 디렉토리 설정으로 먼저 해제하세요. 최종 스냅샷 여부도 그쪽이 결정합니다.\n"
-            "남는 것: terraform state backend, Secrets 복구 유예기간(~7일), 수동 생성 리소스")
+            "    ⚠️ 비어 있지 않은 리소스도 destroy 를 중간에 멈춥니다 — chat staging/"
+            "body-log 버킷(force_destroy=false), 이미지가 있는 agentcore/앱 ECR repo.\n"
+            "남는 것: terraform state backend, llm-gateway/* ECR repo·이미지, "
+            "NDS 생성 ACM 인증서·Route53 레코드(도메인 사용 시), "
+            "Secrets 복구 유예기간(~7일), 수동 생성 리소스\n"
+            "자동 정리: ESO SecretStore, seed 된 secrets ({env}/app·/redis)")
     else:
         lines.append(
             f"[yellow]남는 것: 인프라 전부 (EKS·Aurora·ElastiCache·Cognito·Secrets·IRSA) — "
@@ -1029,13 +1039,9 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # yaml 이면 env 이름을 쳐도 범위 밖 리소스가 지워진다. env_dir 의
         # environment 선언이 cfg.env 와 다르면 명백한 오타겟이라 거부하고,
         # 판독 불가(공유/채택 env)면 확인 문자열을 디렉토리 이름으로 묶는다.
-        declared_env = ""
-        try:
-            m = re.search(r'(?m)^\s*environment\s*=\s*"([^"]+)"',
-                          (env_dir / "terraform.tfvars").read_text())
-            declared_env = m.group(1) if m else ""
-        except (OSError, UnicodeDecodeError):
-            pass
+        # 스캔은 terraform 이 실제 읽는 전 채널 — tfvars/auto.tfvars/json
+        # (terraform.tfvars 하나만 보면 선언을 놓쳐 dir-name 폴백으로 새어나간다)
+        declared_env = eks_apply._declared_environment(env_dir)
         if declared_env and declared_env != cfg.env:
             console.print(f"[red]{env_dir} 의 environment 는 '{declared_env}' 입니다 — "
                           f"yaml env '{cfg.env}' 와 다르므로 인프라 삭제를 거부합니다.\n"
@@ -1098,11 +1104,16 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
             chat_name = eks_apply.tf_outputs(env_dir).get("chat_agent_name", "")
         chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
                            chat_agent_name=chat_name)
-    if cfg.features.pricing_lambda:
+    # 플래그가 현재 꺼져 있어도 detach 는 시도한다 — 켰다 끈 env 의
+    # LitellmPricingInvoke 인라인 정책이 admin-api IRSA role(terraform 소유)에
+    # 남아 있으면 terraform destroy 의 role 삭제가 DeleteConflict 로 중간에
+    # 죽는다. 함수/role 은 결정적 이름의 프로비저너 소유 — 한 번도 안 켠
+    # env 에선 NotFound no-op 이다.
+    admin_arn = ""
+    if env_dir:
+        admin_arn = eks_apply.tf_outputs(env_dir).get("admin_api_role_arn", "")
+    if cfg.features.pricing_lambda or admin_arn:
         from . import pricinglambda
-        admin_arn = ""
-        if env_dir:
-            admin_arn = eks_apply.tf_outputs(env_dir).get("admin_api_role_arn", "")
         pricinglambda.teardown(cfg, admin_role_arn=admin_arn)
     if not infra:
         if uninstalled:
@@ -1116,8 +1127,40 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         raise SystemExit("terraform destroy 가 중간에 실패했습니다 — 일부 리소스가 "
                          "남았을 수 있습니다. 잔여는 "
                          f"`terraform -chdir={env_dir} plan -destroy` 로 확인하십시오")
+    _teardown_eks_oob(cfg, meta, context)
     console.print("[green]teardown 완료 — helm release 와 terraform env 인프라가 삭제됐습니다")
     return 0
+
+
+def _teardown_eks_oob(cfg: schema.GatewayConfig, meta: dict, context: str) -> None:
+    """terraform state 밖이라 destroy 가 못 지우는 NDS 생성 리소스 정리
+    (best-effort — 실패해도 teardown 결과를 뒤집지 않고 경고만 남긴다).
+
+    - ESO SecretStore/ClusterSecretStore: kubectl 으로 apply 한 out-of-band
+      리소스라 helm uninstall·terraform destroy 모두 안 잡는다.
+    - bootstrap seed secrets ({prefix}{env}/app·/redis): aws CLI 직접 생성이라
+      state 에 없다 — 그대로 두면 같은 env 재설치 시 오래된 VK DEK/세션 키를
+      조용히 재사용한다(기존 시크릿 보존 계약의 역효과). 7일 복구 유예로 삭제.
+    ECR repo+이미지·ACM 인증서·Route53 레코드는 삭제 범위가 크거나 소유가
+    모호해(사람이 만든 동명/도메인 리소스 가능) 패널 공시로 남긴다."""
+    from . import eks_apply
+    base = ["kubectl"] + (["--context", context] if context else [])
+    name, kind = eks_apply._secret_store_ref(meta, REPO_ROOT)
+    eks_apply._run_quiet(
+        base + ["delete", kind.lower(), name, "--ignore-not-found"],
+        cwd=REPO_ROOT, timeout=60)
+    from .bootstrap import secret_prefix
+    prefix = secret_prefix(cfg, REPO_ROOT)
+    for suffix in ("app", "redis"):
+        r = eks_apply._run_quiet(
+            ["aws", "secretsmanager", "delete-secret", "--secret-id",
+             f"{prefix}{cfg.env}/{suffix}", "--recovery-window-in-days", "7",
+             "--region", cfg.aws.region, "--output", "json"],
+            cwd=REPO_ROOT, timeout=30)
+        if r.returncode != 0:
+            console.print(f"[yellow]⚠ secret {prefix}{cfg.env}/{suffix} 삭제 "
+                          "실패 — 재설치 시 오래된 키를 재사용할 수 있으니 "
+                          f"수동 삭제하세요 ({(r.stderr or '').strip()[:120]})")
 
 
 def cmd_bootstrap(args) -> int:
@@ -1192,10 +1235,16 @@ def cmd_bootstrap(args) -> int:
             ans = bootstrap.wizard_infra(cfg, eks=False)
             if ans is None:
                 return 130
-            bootstrap.persist_bootstrap_answers(cfg_path, ans)
-            console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
+            saved = bootstrap.persist_bootstrap_answers(cfg_path, ans)
+            if saved:
+                console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
             cfg = schema.load(cfg_path)
-            bucket, table = ans["tfstate"]
+            # eks 와 같은 계약 — persist 스킵 시 저장된 선언/기본으로 수렴
+            bucket, table = bootstrap.default_tfstate_names(cfg, eks=False)
+            if (bucket, table) != tuple(ans["tfstate"]):
+                console.print(f"[yellow]ⓘ tfstate 이름은 저장된 선언({bucket})을 "
+                              "사용합니다 — 커스텀 이름이 필요하면 gateway.yaml 의 "
+                              "deploy.tfstate_* 를 고치고 다시 실행하세요")
         console.print(Panel(
             f"신규 설치 (ecs — {cfg.env}):\n"
             "① tfstate bucket/lock table 보장 (bootstrap-tfstate.sh)\n"
@@ -1229,10 +1278,19 @@ def cmd_bootstrap(args) -> int:
         ans = bootstrap.wizard_infra(cfg, eks=True)
         if ans is None:
             return 130
-        bootstrap.persist_bootstrap_answers(cfg_path, ans)
-        console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
+        saved = bootstrap.persist_bootstrap_answers(cfg_path, ans)
+        if saved:
+            console.print(f"[green]설정 저장: {cfg_path} (infra.* 기록)")
         cfg = schema.load(cfg_path)
-        bucket, table = ans["tfstate"]
+        # persist 가 스킵되면 wizard 의 커스텀 tfstate 이름은 yaml 에 없다 —
+        # 그 이름으로 state 를 만들면 다음 deploy apply 가 yaml 선언(기본명)
+        # 의 다른 backend 로 reconfigure 해 split-brain 이 된다. 재로드한
+        # 선언/기본값으로 수렴해 bootstrap↔update backend 를 일치시킨다.
+        bucket, table = bootstrap.default_tfstate_names(cfg, eks=True)
+        if (bucket, table) != tuple(ans["tfstate"]):
+            console.print(f"[yellow]ⓘ tfstate 이름은 저장된 선언({bucket})을 "
+                          "사용합니다 — 커스텀 이름이 필요하면 gateway.yaml 의 "
+                          "deploy.tfstate_* 를 고치고 다시 실행하세요")
 
     res = eks_render.render(cfg, out)
     for n in res.get("notes", []):

@@ -1,0 +1,60 @@
+# 리뷰: ECS(배포 보류)·compose 경로
+
+**범위**: `deploy/render/ecs.py`·`deploy/ecs_apply.py`,
+`deploy/render/compose.py`·`deploy/render/common.py`, cli 의 compose/
+ecs apply·teardown 경로.
+
+**판정: 조건부 수렴** — ECS 는 배포 보류(코드 검토만, 라이브 미검증),
+compose 는 로컬 평가 경로로 수렴.
+
+## ECS (배포 보류 — 공유 코드 수정분만 활성)
+
+사용자 지시로 ECS 롤아웃은 현재 제외. 다만 공유 캡처/apply 코드가
+ECS 경로를 타므로 아래는 코드 검증으로 수정됐다:
+
+- **internal ALB → private 매핑** (18차): capture 가 `network.mode` 를
+  하드코딩 public 으로 두어 채택 apply 가 internal ALB 를 공개로
+  재생성하던 destructive 경로.
+- **사이드카 오염** (18차): `containerDefinitions[0]` 고정 → 서비스명
+  컨테이너 우선 — 이미지·env 가 otel/firelens 에 오염.
+- **gateway-proxy 대표 태그** (18차): 단일 `images.tag` 스키마에서
+  서비스별 태그 불일치는 노트로 표면.
+- **scalable-targets min/max 캡처** (18차): 수동 상한 유실 방지.
+- **describe-services.failures 검사** (18차): 서비스 조회 실패를
+  조용히 넘기지 않음.
+- **terraform init -reconfigure** (19차): 공유 env dir 의 캐시 backend
+  가 다른 env 에 붙는 문제 — doctor/teardown 과 같은 보호.
+- **backend key/env 불일치 경고** (20차): `ecs/<env>/terraform.tfstate`.
+- **기본 lock table 미참조** (21차): `ensure_tfstate(ecs)`가 만드는 기본
+  DynamoDB table 을 backend.hcl 이 미선언 시 생략해 state unlock →
+  `render_backend_hcl` 이 기본값(`llm-gateway-vanilla-tflock`)을 방출.
+- **teardown**: destroy 전 outputs 실측 chat_agent_name 전달,
+  `-reconfigure` init, `tf_outputs` SystemExit 가드.
+
+미검증: 실제 ECS 배포·서비스 안정 대기·2-phase apply 는 라이브 필요.
+
+## compose (로컬 평가 경로)
+
+- **dev_login fail-closed** (19차): eks 와 동일하게 `dev_login and not
+  oidc → true else false` — oidc 없는 평가 호스트가 서명 없는 dev.ADMIN
+  세션을 발급하던 구멍 + 로그인 경로 없음 경고(feature_notes/schema).
+- **ALLOWED_AWS_ACCOUNTS/IAM_ROLES 주입** (R24 계약): fail-closed —
+  비면 CLI 로그인 전량 403 + 노트.
+- **`merge_env`/secret 보존**: 기존 `.env` 값은 보존, 빈 키만 생성,
+  0600 쓰기 — 재렌더 시 랜덤 시크릿이 회전하지 않는다.
+- **observability**: OTel/Prometheus/Loki/Tempo/Grafana 스택,
+  포트 전부 127.0.0.1 바인드.
+- **body_logging/pricing_lambda 미지원 명시**: feature_notes 로 침묵
+  드롭 금지 — 지원하지 않는 플래그는 "미지원"으로 명시한다.
+
+## 회귀 테스트
+
+`test_render_ecs.py`(sizing·예산·스케일 목표), `test_render_compose.py`
+(dev_login·비밀 보존·포트·프로필), `test_ecs_apply` 부분.
+
+## 잔여 리스크
+
+- ECS 경로는 배포 보류라 코드 검토만 — 실 서비스 안정 대기/롤링은
+  재개 시 라이브 검증 필수.
+- compose 는 프로덕션 배포 대상이 아님(평가용) — 운영 모니터링/
+  백업 계약은 문서 영역.

@@ -252,6 +252,12 @@ def render_backend_hcl(cfg: GatewayConfig) -> str:
             table = table or "YOUR_TFLOCK_TABLE"
             note = ("# ⚠️ placeholder — deploy.tfstate_bucket / deploy.tfstate_table 을 "
                     "gateway.yaml 에 채운 뒤 다시 render 하십시오.\n")
+    if not table and bucket != "YOUR_TFSTATE_BUCKET":
+        # bootstrap(ensure_tfstate, ecs)이 만드는 기본 lock table — 생략하면
+        # table 은 생성되는데 backend.hcl 이 참조하지 않아 state 가 unlock 된다
+        table = "llm-gateway-vanilla-tflock"
+        note += ("# dynamodb_table 은 bootstrap 기본 lock table — 커스텀 "
+                 "table 이면 deploy.tfstate_table 을 선언하십시오.\n")
     return note + (
         f'bucket         = "{bucket}"\n'
         f'key            = "ecs/{cfg.env}/terraform.tfstate"\n'

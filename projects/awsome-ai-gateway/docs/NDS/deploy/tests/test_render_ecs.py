@@ -295,6 +295,14 @@ def test_backend_hcl_infers_from_account_id():
     assert 'key            = "ecs/test/terraform.tfstate"' in hcl
 
 
+def test_backend_hcl_default_lock_table():
+    # bootstrap(ensure_tfstate, ecs)이 만드는 기본 lock table — 생략하면
+    # table 은 만들어지는데 backend 가 참조를 안 해 state 가 unlock 된다
+    cfg = _cfg()
+    hcl = ecs_render.render_backend_hcl(cfg)
+    assert 'dynamodb_table = "llm-gateway-vanilla-tflock"' in hcl
+
+
 def test_backend_hcl_placeholder_without_account():
     cfg = _cfg(aws={"region": "ap-northeast-2"})
     hcl = ecs_render.render_backend_hcl(cfg)
