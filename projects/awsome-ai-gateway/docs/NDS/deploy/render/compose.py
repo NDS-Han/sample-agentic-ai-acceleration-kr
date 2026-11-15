@@ -210,7 +210,11 @@ def desired_env(cfg: GatewayConfig) -> dict[str, str]:
         # aws.account_id 가 비어 있으면 키 자체를 두지 않고 노트로 경고한다.
         **({"ALLOWED_AWS_ACCOUNTS": cfg.aws.account_id} if cfg.aws.account_id else {}),
         **({"ALLOWED_IAM_ROLES": ",".join(cfg.aws.allowed_roles)} if cfg.aws.allowed_roles else {}),
-        "DEV_LOGIN_ENABLED": "false" if cfg.oidc.enabled else "true",
+        # eks 와 같은 fail-closed 계약 — dev_login 선언 + OIDC 미배선일 때만 켠다.
+        # 선언 없이 무조건 true 면 oidc 없는 평가 호스트가 서명 없는 dev. ADMIN
+        # 세션을 발급한다(가상키 발급 → Bedrock 비용)
+        "DEV_LOGIN_ENABLED": "true" if (cfg.features.dev_login
+                                        and not cfg.oidc.enabled) else "false",
         "EMAIL_SENDER_TYPE": n.provider,
         "EMAIL_SENDER_ADDRESS": (n.ses_from or n.smtp_from or n.internal_api_from
                                 or "noreply@llm-gateway.local"),

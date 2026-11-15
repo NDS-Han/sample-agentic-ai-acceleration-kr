@@ -2,6 +2,7 @@
 """bootstrap — 신규 설치 오케스트레이션 단위 테스트."""
 import json
 import subprocess
+import types
 
 import pytest
 
@@ -727,3 +728,77 @@ def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):
     doc = _yaml.safe_load(cfg_path.read_text())
     assert doc["features"]["web_search"] is True
     assert doc["deploy"]["tfstate_bucket"] == "b"
+
+
+def test_scaffold_tfvars_tolerates_reformatted_template():
+    """19차 — 리터럴 replace 는 environment="dev" (공백 변형) 를 조용히 놓쳐
+    신 env state 에 dev 이름 리소스가 만들어졌다. 앵커 정규식으로 잡아야 한다."""
+    example = ('environment="dev"\n'
+               'aws_region ="ap-northeast-2"\n'
+               'cognito_domain_suffix = "vanilla-auth-CHANGE_ACCOUNT_ID"\n'
+               'principal_arn   = "arn:aws:iam::ACCOUNT_ID:role/YOUR_ROLE"\n')
+    out = bootstrap.scaffold_tfvars(
+        example, env="stg", region="ap-south-1", account="123456789012",
+        principal_arn="arn:aws:iam::123456789012:role/Deploy")
+    import re as _re
+    assert _re.search(r'(?m)^environment\s*=\s*"stg"', out)
+    assert "ap-south-1" in out
+    assert "Deploy" in out
+    assert "CHANGE_ACCOUNT_ID" not in out and "YOUR_ROLE" not in out
+
+
+def test_scaffold_tfvars_surfaces_missing_keys():
+    """19차 — 템플릿에 키 자체가 없으면 침묵 대신 경고 주석을 단다."""
+    example = 'environment = "dev"\n'
+    out = bootstrap.scaffold_tfvars(
+        example, env="stg", region="r", account="1",
+        principal_arn="arn:aws:iam::1:role/X")
+    assert "aws_region" in out.split("\n")[3] or "치환을 못" in out
+    assert 'environment = "stg"' in out
+
+
+def test_scaffold_eks_env_repairs_partial_default_dir(monkeypatch, tmp_path):
+    """19차 — 기본 경로 env dir 이 반쪽 scaffold(파일 일부만)면 noop 이 아니라
+    이어서 완성한다."""
+    cfg = _cfg(deploy={"target": "eks", "size_tier": "t3"})
+    default_dir = tmp_path / "deployment/terraform/environments/llm-gateway-dev"
+    default_dir.mkdir(parents=True)
+    (default_dir / "main.tf").write_text("# partial\n")
+    # 템플릿 준비
+    template = tmp_path / "deployment/terraform/environments/llm-gateway-dev-template"
+    monkeypatch.setattr(bootstrap, "ENV_TEMPLATE", template.name)
+    template.mkdir()
+    for f in bootstrap.TF_FILES:
+        (template / f).write_text(f"# {f}\n")
+    (template / "backend.tf").write_text(
+        'terraform {\n  backend "s3" {\n    key = "dev/terraform.tfstate"\n'
+        '    region = "ap-northeast-2"\n  }\n}\n')
+    (template / "terraform.tfvars.example").write_text(
+        'environment = "dev"\naws_region  = "ap-northeast-2"\n')
+    monkeypatch.setattr(bootstrap, "_aws",
+                        lambda *a, **k: types.SimpleNamespace(
+                            stdout='{"Arn": "arn:aws:iam::1:role/X"}'))
+    monkeypatch.setattr(bootstrap, "account_id", lambda r: "1")
+    with pytest.raises(SystemExit):  # scaffold 는 tfvars 검토용 재실행 요구로 멈춘다
+        bootstrap.scaffold_eks_env(cfg, tmp_path, "ap-northeast-2")
+    tfv = (default_dir / "terraform.tfvars").read_text()
+    assert 'environment = "dev"' in tfv  # env 이름은 cfg.env
+    assert 'key = "dev/terraform.tfstate"' in (default_dir / "backend.tf").read_text()
+
+
+def test_onboard_admin_prefers_oidc_admin_emails(monkeypatch, tmp_path):
+    """19차 — gen 레이어가 adminBootstrap.emails = oidc.admin_emails 로 덮어쓴다.
+    env 파일 이메일로 Cognito 를 만들면 실관리자는 로그인 불가 + 구주소 계정 잔여."""
+    cfg = _cfg(oidc={"issuer_url": "u", "client_id": "c",
+                     "authorize_url": "a", "token_url": "t",
+                     "admin_emails": ["real@corp.com"]})
+    calls = []
+
+    def _fake_quiet(argv, **k):
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=0, stdout="", stderr="")
+    monkeypatch.setattr(bootstrap, "_quiet", _fake_quiet)
+    notes = bootstrap.onboard_admin(
+        cfg, tmp_path, {"cognito_user_pool_id": "pool-1"}, "ap-northeast-2")
+    assert any("real@corp.com" in n for n in notes)
+    assert "real@corp.com" in calls[0]

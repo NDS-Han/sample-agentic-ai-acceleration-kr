@@ -111,11 +111,29 @@ def test_env_preserves_secrets_on_rerender(tmp_path):
 
 
 def test_env_generated_keys_filled(tmp_path):
-    render_to(tmp_path, cfg())
+    render_to(tmp_path, cfg(features={"dev_login": True}))
     env = common.parse_env_file(tmp_path / ".env")
     assert len(env["VIRTUAL_KEY_ENCRYPTION_KEY"]) == 64
-    assert env["DEV_LOGIN_ENABLED"] == "true"   # oidc 비활성 → dev-login 필요
+    assert env["DEV_LOGIN_ENABLED"] == "true"   # 선언 + oidc 비활성 → dev-login
     assert env["POSTGRES_PASSWORD"] != "gateway_dev_password"
+
+
+def test_dev_login_off_unless_declared(tmp_path):
+    """dev_login 미선언 + oidc 비활성 — eks 와 같은 fail-closed: 무인증 dev
+    세션을 열지 않는다(로그인 경로 없음은 schema 경고가 안내)."""
+    render_to(tmp_path, cfg())
+    env = common.parse_env_file(tmp_path / ".env")
+    assert env["DEV_LOGIN_ENABLED"] == "false"
+
+
+def test_dev_login_declared_but_oidc_stays_off(tmp_path):
+    """dev_login=true 여도 OIDC 배선 시 admin-api 가 dev 토큰을 거부하므로
+    UI/양쪽 다 false 로 수렴한다 (eks 와 동일 계약)."""
+    render_to(tmp_path, cfg(features={"dev_login": True}, oidc={
+        "issuer_url": "https://idp.example.com", "client_id": "c",
+        "authorize_url": "https://a", "token_url": "https://t"}))
+    env = common.parse_env_file(tmp_path / ".env")
+    assert env["DEV_LOGIN_ENABLED"] == "false"
 
 
 def test_dev_login_off_when_oidc(tmp_path):

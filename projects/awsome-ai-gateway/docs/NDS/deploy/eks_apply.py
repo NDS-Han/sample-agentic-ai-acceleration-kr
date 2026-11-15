@@ -48,11 +48,16 @@ def load_meta(gen_dir: Path, repo_root: Path | None = None) -> dict:
     if not p.exists():
         raise SystemExit(f"{p} 없음 — 먼저 `deploy render` 를 실행하십시오")
     meta = yaml.safe_load(p.read_text()) or {}
+    if not isinstance(meta, dict):
+        raise SystemExit(f"{p} 가 매핑 문서가 아닙니다 — `deploy render` 로 재생성하십시오")
     missing = [k for k in ("release", "namespace", "chart") if not meta.get(k)]
     if missing:
         raise SystemExit(f"{p} 가 불완전합니다({', '.join(missing)} 없음) — `deploy render` 로 재생성하십시오")
     # values 레이어 파일이 실제 있는지 — 없으면 helm 이 apply 중간에 죽는다
-    for layer in meta.get("values_layers", []):
+    layers = meta.get("values_layers") or []
+    if not isinstance(layers, list):
+        raise SystemExit(f"{p} 의 values_layers 가 리스트가 아닙니다 — `deploy render` 로 재생성하십시오")
+    for layer in layers:
         lp = Path(layer)
         if not lp.is_absolute() and repo_root:
             lp = repo_root / lp
@@ -1136,21 +1141,23 @@ _MEMBER_ALARM_ADDR = re.compile(
 
 
 def _tf_init(cfg: GatewayConfig, env_dir: Path) -> subprocess.CompletedProcess:
-    """terraform init — .terraform 부재(새 머신/재클론)면 backend 주입.
+    """terraform init — 항상 선언된 backend 로 reconfigure 한다.
 
     eks backend.tf 는 key/region 만 고정한 partial config 라 bucket/table 은
     -backend-config 로 넘겨야 한다 — 선언값이 없으면 bootstrap 과 같은
-    계정 기본명을 쓴다."""
-    argv = ["terraform", "init", "-input=false"]
-    if not (env_dir / ".terraform").exists():
-        bucket = cfg.deploy.tfstate_bucket
-        table = cfg.deploy.tfstate_table
-        if not (bucket and table):
-            from .bootstrap import default_tfstate_names
-            db, dt = default_tfstate_names(cfg, eks=True)
-            bucket, table = bucket or db, table or dt
-        argv += [f"-backend-config=bucket={bucket}",
-                 f"-backend-config=dynamodb_table={table}"]
+    계정 기본명을 쓴다. .terraform 캐시가 있어도 -reconfigure 로 재연결한다:
+    yaml 의 bucket/table 변경이나 tf_env_dir 공유 시 캐시된 낡은 backend 로
+    다른 env 의 state 에 붙는 cross-env 오적(outputs 조회·managed apply·
+    teardown destroy 전부)을 막는다 (bootstrap.env_apply 와 같은 보호)."""
+    bucket = cfg.deploy.tfstate_bucket
+    table = cfg.deploy.tfstate_table
+    if not (bucket and table):
+        from .bootstrap import default_tfstate_names
+        db, dt = default_tfstate_names(cfg, eks=True)
+        bucket, table = bucket or db, table or dt
+    argv = ["terraform", "init", "-input=false", "-reconfigure",
+            f"-backend-config=bucket={bucket}",
+            f"-backend-config=dynamodb_table={table}"]
     return _run_quiet(argv, cwd=env_dir, timeout=300)
 
 

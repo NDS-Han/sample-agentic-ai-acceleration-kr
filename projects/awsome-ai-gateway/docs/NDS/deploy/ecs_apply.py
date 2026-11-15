@@ -63,7 +63,11 @@ def terraform_plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> None:
         from . import chatagent
         chatagent.ensure_lambda_build(repo_root)
     env_dir = repo_root / ENV_DIR
-    _run(["terraform", "init", "-input=false",
+    # -reconfigure: 모든 ecs env 가 같은 env 디렉토리를 공유하고 env 마다
+    # backend key 가 다르다 — 다른 env 의 캐시가 있으면 reconfigure 없는 init 은
+    # "Backend configuration changed" 로 멈추고, 멈추지 않으면 낡은 state 에
+    # 붙는다 (doctor/teardown 경로와 같은 보호)
+    _run(["terraform", "init", "-input=false", "-reconfigure",
           f"-backend-config={gen_dir / 'backend.hcl'}"], cwd=env_dir)
     _run(["terraform", "plan", "-input=false",
           f"-var-file={gen_dir / 'terraform.tfvars'}"], cwd=env_dir)
@@ -74,7 +78,8 @@ def terraform_apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, boots
     var_file = gen_dir / "terraform.tfvars"
     backend = gen_dir / "backend.hcl"
 
-    _run(["terraform", "init", "-input=false", f"-backend-config={backend}"], cwd=env_dir)
+    _run(["terraform", "init", "-input=false", "-reconfigure",
+          f"-backend-config={backend}"], cwd=env_dir)
     if bootstrap:
         # ECR repo 만 먼저 — 이미지 push 대상이 있어야 task def/migration 이 pull 성공한다
         _run(["terraform", "apply", "-auto-approve", "-input=false",

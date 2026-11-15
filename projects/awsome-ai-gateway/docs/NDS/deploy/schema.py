@@ -416,7 +416,7 @@ class GatewayConfig:
             uncovered = sorted(EKS_TAGGABLE_SERVICES - {"migration"} - set(self.images.tags))
             if self.images.tags and not self.images.tag and uncovered:
                 w.append(f"images.tags 가 {uncovered} 를 덮지 않습니다 — env overlay 의 태그를 그대로 씁니다.")
-        if self.deploy.target == "eks" and not self.oidc.enabled:
+        if self.deploy.target in ("eks", "compose") and not self.oidc.enabled:
             if self.features.dev_login:
                 w.append("oidc 비활성 + features.dev_login=true — admin-ui 가 "
                          "서명 없는 dev 토큰으로 열립니다. 인터넷 노출 ALB 라면 "

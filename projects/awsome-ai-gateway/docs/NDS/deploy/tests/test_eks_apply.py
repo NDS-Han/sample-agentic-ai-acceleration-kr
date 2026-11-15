@@ -1426,3 +1426,50 @@ def test_status_url_requires_ready_gateway_and_target(monkeypatch):
         "gateway: gw-1 status=FAILED\n  url: https://gw.example/mcp\n"
         "  target: t1 status=READY\n"))
     assert websearch.status_url("dev", __import__("pathlib").Path("/x")) == ""
+
+
+def test_tf_init_always_reconfigures_backend(monkeypatch, tmp_path):
+    """19차 — .terraform 캐시가 있어도 선언된 backend 로 -reconfigure 한다.
+    캐시 재사용은 yaml 의 bucket/table 변경이나 env 디렉터리 공유 시 낡은
+    state 에 붙는 cross-env 오적을 만든다."""
+    (tmp_path / ".terraform").mkdir()  # 캐시 존재 시뮬레이션
+    calls = []
+    monkeypatch.setattr(
+        eks_apply, "_run_quiet",
+        lambda argv, **k: (calls.append(argv),
+                           subprocess.CompletedProcess(argv, 0, "", ""))[1])
+    from deploy import schema
+    cfg = schema.from_dict({
+        "version": 1, "env": "dev",
+        "aws": {"region": "ap-northeast-2"},
+        "images": {"tag": "v1"},
+        "deploy": {"target": "eks", "size_tier": "t3",
+                   "tfstate_bucket": "my-bkt", "tfstate_table": "my-tbl"}})
+    eks_apply._tf_init(cfg, tmp_path)
+    argv = calls[0]
+    assert "-reconfigure" in argv
+    assert "-backend-config=bucket=my-bkt" in argv
+    assert "-backend-config=dynamodb_table=my-tbl" in argv
+
+
+def test_load_meta_rejects_nonmapping(tmp_path):
+    """19차 — deploy.yaml 이 리스트/스칼라면 .get 에서 AttributeError 대신
+    명확한 SystemExit."""
+    g = tmp_path / "gen"
+    g.mkdir()
+    (g / "deploy.yaml").write_text("- just\n- a\n- list\n")
+    with pytest.raises(SystemExit, match="매핑"):
+        eks_apply.load_meta(g, tmp_path)
+    (g / "deploy.yaml").write_text("just a scalar\n")
+    with pytest.raises(SystemExit, match="매핑"):
+        eks_apply.load_meta(g, tmp_path)
+
+
+def test_load_meta_rejects_scalar_values_layers(tmp_path):
+    """19차 — values_layers 가 문자열이면 문자 단위 순회 대신 명확한 오류."""
+    g = tmp_path / "gen"
+    g.mkdir()
+    (g / "deploy.yaml").write_text(
+        "release: r\nnamespace: n\nchart: c\nvalues_layers: values.yaml\n")
+    with pytest.raises(SystemExit, match="values_layers"):
+        eks_apply.load_meta(g, tmp_path)

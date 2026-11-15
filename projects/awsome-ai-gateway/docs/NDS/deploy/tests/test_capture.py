@@ -330,8 +330,10 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
         label=label, value=value, checked=checked)
     monkeypatch.setattr(cli, "_questionary", lambda: fake)
     existing = {
-        "env": "dev", "aws": {"region": "ap-south-1", "account_id": "123456789012"},
+        "env": "dev", "aws": {"region": "ap-south-1", "account_id": "123456789012",
+                              "allowed_roles": ["TeamDevRole"]},
         "deploy": {"target": "eks", "size_tier": "t3",
+                   "capacity_tier": "3000",
                    "sizing": {"gateway-proxy": {"cpu": 2048}}},
         "oidc": {"issuer_url": "u", "client_id": "c", "authorize_url": "a",
                  "token_url": "t", "required_group": "grp",
@@ -339,7 +341,8 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
                  "vk_ttl_hours": 4},
         "network": {"mode": "public", "allowed_cidrs": ["1.2.3.4/32"],
                     "admin_internal": True},
-        "domain": {"mode": "none", "name": "", "zone_id": ""},
+        "domain": {"mode": "route53-acm", "name": "gw.example.com",
+                   "zone_id": "Z1234"},
         "features": {"notifications": {"provider": "smtp", "smtp_host": "h",
                                        "smtp_from": "f@x", "smtp_port": 2525,
                                        "sender_name": "GW Alerts",
@@ -366,6 +369,14 @@ def test_configure_preserves_unprompted_fields(tmp_path, monkeypatch):
     # infra.* 는 wizard 가 통째로 덮어쓰면 bootstrap 기록(azs 등)이 소실된다
     assert doc["infra"]["azs"] == ["ap-south-1a", "ap-south-1b"]
     assert doc["infra"]["db"] == {"max_acu": 8}
+    # aws.allowed_roles — 비면 admin-api 로그인 전량 403(fail-closed) 이라
+    # configure 가 버리면 다음 apply 가 잠금 상태를 만든다 (19차 회귀)
+    assert doc["aws"]["allowed_roles"] == ["TeamDevRole"]
+    # deploy.capacity_tier — 버리면 다음 apply 가 프리셋으로 조용히 축소한다
+    assert doc["deploy"]["capacity_tier"] == "3000"
+    # domain.zone_id — eks 도 ACM 검증/Route53 레코드 자동화가 이 키에 달렸다.
+    # ecs 전용 질문이면 eks 경로는 기존 값이 "" 로 덮인다 (19차 회귀)
+    assert doc["domain"]["zone_id"] == "Z1234"
 
 
 # ==============================================================================
@@ -1142,3 +1153,24 @@ def test_ecs_capture_gateway_proxy_tag_preferred(monkeypatch, tmp_path):
     doc, notes = capture.capture_ecs(tmp_path, "r")
     assert doc["images"]["tag"] == "2.0"
     assert any("이미지 태그가 다릅니다" in n for n in notes)
+
+
+def test_configure_uses_named_captured_file_as_source(tmp_path, monkeypatch):
+    """19차 — `deploy configure --config gateway.captured-stg.yaml` 은 출력만
+    DEFAULT_CONFIG 로 돌리고, 기본값 소스는 지명한 캡처본이어야 한다. 이전엔
+    DEFAULT_CONFIG(다른 env)를 읽어 wizard 가 잘못된 env 값으로 미리 채웠다."""
+    import types
+    from deploy import cli
+    captured = tmp_path / "gateway.captured-stg.yaml"
+    captured.write_text("env: stg\ndeploy: {target: eks}\n")
+    (tmp_path / "gateway.yaml").write_text("env: prod\ndeploy: {target: eks}\n")
+    monkeypatch.setattr(cli, "DEFAULT_CONFIG", tmp_path / "gateway.yaml")
+    seen = {}
+    monkeypatch.setattr(cli, "_questionary",
+                        lambda: types.SimpleNamespace())
+    monkeypatch.setattr(cli, "_collect_doc",
+                        lambda ex: (seen.update(existing=ex), {})[1])
+    monkeypatch.setattr(cli, "_write_config", lambda p, d: 0)
+    args = types.SimpleNamespace(config=str(captured), no_apply=True)
+    cli.cmd_configure(args)
+    assert seen["existing"].get("env") == "stg"  # prod 가 아니라 stg

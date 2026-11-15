@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import sys
 from pathlib import Path
 
@@ -153,10 +154,11 @@ def _collect_doc(existing: dict | None = None) -> dict:
         domain_name = _unwrap(questionary.text(
             "베이스 도메인 (예: example.com → gateway./admin./admin-api. 자동)",
             default=str(_g(ex, "domain", "name")) or None).ask())
-        if target == "ecs":  # eks 는 env values 의 기존 인증서를 씀
-            zone_id = _unwrap(questionary.text(
-                "Route53 hosted zone ID (예: Z0123456ABCD)",
-                default=str(_g(ex, "domain", "zone_id")) or None).ask())
+        # eks 도 zone_id 가 있어야 ACM 검증 CNAME/호스트 레코드 자동화가 돈다 —
+        # ecs 전용으로 물으면 eks 경로는 기존 zone_id 가 "" 로 덮여 DNS 자동화가 죽는다
+        zone_id = _unwrap(questionary.text(
+            "Route53 hosted zone ID (예: Z0123456ABCD)",
+            default=str(_g(ex, "domain", "zone_id")) or None).ask())
 
     prev_notif = _g(ex, "features", "notifications", default={}) or {}
     notif = _unwrap(questionary.select(
@@ -286,9 +288,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
         deploy_extra["release"] = prev_dep.get("release") or "llm-gateway"
         deploy_extra["namespace"] = prev_dep.get("namespace") or "llm-gateway"
         deploy_extra["tf_env_dir"] = prev_dep.get("tf_env_dir") or ""
-        # 질문하지 않는 deploy 필드(sizing override 등)는 보존
-        if prev_dep.get("sizing"):
-            deploy_extra["sizing"] = prev_dep["sizing"]
+        # 질문하지 않는 deploy 필드는 전부 보존 — sizing 만 살리면
+        # capacity_tier 같은 선언이 지워져 다음 apply 가 조용히 축소한다
+        for k, v in prev_dep.items():
+            if k not in ("target", "size_tier", "tfstate_bucket", "tfstate_table",
+                         "release", "namespace", "tf_env_dir"):
+                deploy_extra[k] = v
 
     prev_cidrs = _g(ex, "network", "allowed_cidrs", default=[]) or []
     allowed = _unwrap(questionary.text(
@@ -395,6 +400,7 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 infra_doc.pop("db", None)
                 infra_doc.pop("cache", None)
 
+    prev_aws = _g(ex, "aws", default={}) or {}
     doc = {
         "version": 1,
         "env": env,
@@ -403,7 +409,12 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 # ecs/eks 경로에서 aws sts 로 자동 조회 (없으면 비워두고
                 # backend.hcl 이 placeholder + 경고를 낸다)
                 **({"account_id": _aws_account_id(str(_g(ex, "aws", "account_id")))}
-                   if (_g(ex, "aws", "account_id") or target in ("ecs", "eks")) else {})},
+                   if (_g(ex, "aws", "account_id") or target in ("ecs", "eks")) else {}),
+                # 질문하지 않는 aws 필드(allowed_roles 등 — 비면 로그인 전량
+                # 403 인 fail-closed 키)는 보존 — configure 가 조용히 지우면
+                # 다음 apply 가 잠금 상태를 만든다
+                **{k: v for k, v in prev_aws.items()
+                   if k not in ("region", "account_id")}},
         "deploy": {"target": target, "size_tier": size_tier, **deploy_extra},
         "network": {"mode": _g(ex, "network", "mode") or "public",
                     "allowed_cidrs": [c.strip() for c in allowed.split(",") if c.strip()],
@@ -474,7 +485,8 @@ def cmd_init(args) -> int:
 def cmd_configure(args) -> int:
     """기존 gateway.yaml 을 기본값으로 다시 물어보고, 원하면 바로 배포까지."""
     questionary = _questionary()
-    cfg_path = Path(args.config)
+    src_path = Path(args.config)  # 기본값 소스 — 사용자가 지명한 파일
+    cfg_path = src_path           # 출력 경로 — 캡처본이면 DEFAULT_CONFIG 로 돌린다
     if cfg_path.name.startswith("gateway.captured-"):
         console.print(f"[yellow]{cfg_path.name} 은 캡처 산출물입니다 — "
                       f"검토본을 보존하기 위해 {DEFAULT_CONFIG} 에 씁니다")
@@ -489,7 +501,18 @@ def cmd_configure(args) -> int:
             raise schema.SchemaError(f"{p} 가 UTF-8 텍스트가 아닙니다: {exc}")
 
     existing: dict = {}
-    if cfg_path.exists():
+    if src_path.exists():
+        # 지명한 파일이 캡처본이어도 기본값은 그 파일에서 읽는다 — 출력 경로만
+        # 리다이렉트하고 소스를 DEFAULT_CONFIG 로 바꾸면 다른 env 의 값이
+        # 미리 채워져 잘못된 env 설정이 gateway.yaml 에 쓰인다
+        existing = _read_doc(src_path)
+        if src_path != cfg_path:
+            console.print(Panel(
+                f"{src_path} 를 기본값으로 설정 — 결과는 {cfg_path} 에 저장됩니다"))
+        else:
+            console.print(Panel(
+                f"{cfg_path} 를 기본값으로 다시 설정합니다 — Enter 는 현재 값 유지"))
+    elif cfg_path.exists():
         existing = _read_doc(cfg_path)
         console.print(Panel(
             f"{cfg_path} 를 기본값으로 다시 설정합니다 — Enter 는 현재 값 유지"))
@@ -965,16 +988,15 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                         title=f"teardown — {cfg.env} (eks)", expand=False))
 
     if infra:
-        # 삭제 대상을 먼저 보여준다 (read-only). eks env 의 backend.tf 는
-        # partial config — bucket/table 은 최초 init 시 -backend-config 로 주입돼
-        # .terraform 에 저장되므로 -reconfigure 를 쓰면 그 설정을 버려 실패한다
-        try:
-            eks_apply._run(["terraform", "init", "-input=false"], cwd=env_dir)
-        except SystemExit:
+        # 삭제 대상을 먼저 보여준다 (read-only). _tf_init 이 선언된 backend 를
+        # 항상 -backend-config+-reconfigure 로 붙이므로 .terraform 캐시 유무나
+        # 낡은 backend 와 무관하게 이 env 의 state 로 연결된다
+        r_init = eks_apply._tf_init(cfg, env_dir)
+        if r_init.returncode != 0:
+            tail = (r_init.stderr or r_init.stdout or "").strip().splitlines()
             raise SystemExit(
-                f"{env_dir} init 실패 — 이 env 는 partial backend 라 저장된 "
-                ".terraform 이 없으면 init 할 수 없습니다. 최초 구성 때와 같은 "
-                "-backend-config(bucket/dynamodb_table)로 먼저 init 하십시오")
+                f"{env_dir} init 실패 — terraform state backend 를 확인하세요"
+                f"{' — ' + tail[-1] if tail else ''}")
         if cfg.features.bi_insight:
             # plan -destroy 도 archive_file data source 를 평가한다.
             from . import chatagent
@@ -982,7 +1004,32 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         console.print("[bold]삭제 미리보기 (terraform plan -destroy):[/bold]")
         eks_apply._run(["terraform", "plan", "-destroy", "-input=false"], cwd=env_dir)
 
-    if not _confirm_destroy(cfg.env, args):
+    confirm_name = cfg.env
+    if infra:
+        # 확인은 env 이름을 묻지만 terraform destroy 의 스코프는 env_dir 의
+        # state 전체다 — tf_env_dir 로 다른 env/공유 state 를 가리키는 채택
+        # yaml 이면 env 이름을 쳐도 범위 밖 리소스가 지워진다. env_dir 의
+        # environment 선언이 cfg.env 와 다르면 명백한 오타겟이라 거부하고,
+        # 판독 불가(공유/채택 env)면 확인 문자열을 디렉토리 이름으로 묶는다.
+        declared_env = ""
+        try:
+            m = re.search(r'(?m)^\s*environment\s*=\s*"([^"]+)"',
+                          (env_dir / "terraform.tfvars").read_text())
+            declared_env = m.group(1) if m else ""
+        except (OSError, UnicodeDecodeError):
+            pass
+        if declared_env and declared_env != cfg.env:
+            console.print(f"[red]{env_dir} 의 environment 는 '{declared_env}' 입니다 — "
+                          f"yaml env '{cfg.env}' 와 다르므로 인프라 삭제를 거부합니다.\n"
+                          "helm 만 내리려면 --infra 를 빼고, 삭제 대상이 맞다면 "
+                          "yaml 의 deploy.tf_env_dir 를 확인하세요")
+            return 1
+        if not declared_env and env_dir.name != cfg.env:
+            console.print(f"[yellow]{env_dir} 에서 environment 선언을 판독할 수 없습니다 — "
+                          "삭제 스코프는 이 디렉토리의 terraform state 전체입니다")
+            confirm_name = env_dir.name
+
+    if not _confirm_destroy(confirm_name, args):
         return 130
 
     ctx_args = ["--kube-context", context] if context else []
@@ -1298,6 +1345,9 @@ def cmd_capture(args) -> int:
                 existing = yaml.safe_load(cfg_path.read_text()) or {}
             except (yaml.YAMLError, UnicodeDecodeError) as exc:
                 console.print(f"[yellow]{cfg_path} 읽기 실패 — 캡처본과 비교는 건너뜁니다: {exc}")
+        if not isinstance(existing, dict):
+            console.print(f"[yellow]{cfg_path} 이 매핑 문서가 아닙니다 — 비교는 건너뜁니다")
+            existing = {}
         existing_target = (existing.get("deploy") or {}).get("target", "")
 
         # eks/ecs 는 gen 디렉토리가 필요 없다 — helm·kubectl·terraform 이 정보원
@@ -1358,8 +1408,13 @@ def cmd_capture(args) -> int:
                     "읽습니다. cp 전 이 파일에 복원하거나 --interactive 로 병합 "
                     "채택하세요: " + ", ".join(k for k, _ in dropped))
 
+        # env 는 helm global.environment 등 라이브 자유 입력값 — 경로 구분자·
+        # traversal 이 들어가면 파일명이 깨진다. 스키마 env 형식만 파일명에 쓴다
+        _cap_env = str(doc.get("env") or "env")
+        if not schema._ENV_RE.match(_cap_env):
+            _cap_env = "env"
         out_path = Path(args.out) if args.out else \
-            cfg_path.parent / f"gateway.captured-{doc.get('env', 'env')}.yaml"
+            cfg_path.parent / f"gateway.captured-{_cap_env}.yaml"
         if out_path.exists():
             # 생성물이라 덮어도 안전 — 대신 이전본을 백업해 둔다.
             # 캡처본엔 계정 ID·호스트 등이 들어 있어 원본(0600)과 같은 권한을 유지한다.
@@ -1439,6 +1494,9 @@ def cmd_capture(args) -> int:
                         console.print(f"[red]흡수 결과가 유효하지 않아 저장하지 않았습니다:\n{exc}")
                         return 1
                     cfg_path.write_text(yaml.safe_dump(existing, sort_keys=False, allow_unicode=True))
+                    # 흡수된 값에 시크릿성 키가 섞일 수 있다 — _write_config 와
+                    # 같은 소유자 전용 권한으로 조인다(사용자가 만든 0644 유지 금지)
+                    cfg_path.chmod(0o600)
                     console.print(f"[green]{adopted} 개 필드를 {cfg_path} 에 흡수했습니다 "
                                   f"(주석은 보존되지 않습니다 — 원본은 git 에서 확인)")
             else:
