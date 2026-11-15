@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
 import yaml
@@ -297,6 +298,10 @@ def _taskdef_env(region: str, task_arn: str,
         # 논리 서비스명과 같은 컨테이너를 우선 고른다.
         c = next((x for x in defs
                   if container_name and x.get("name") == container_name), defs[0])
+        if container_name and c.get("name") != container_name:
+            print(f"ⓘ 컨테이너 '{container_name}' 없음 — 첫 컨테이너 "
+                  f"'{c.get('name', '?')}' 를 읽습니다 (사이드카일 수 있음)",
+                  file=sys.stderr)
         cenv = c.get("environment") or []
         return {e["name"]: e.get("value", "") for e in cenv
                 if isinstance(e, dict) and "name" in e}
@@ -403,6 +408,11 @@ def capture_ecs(env_dir: Path, region: str,
             # 사이드카가 첫 번째면 image/env 를 잘못 읽는다 — 논리명 컨테이너 우선
             cdef = next((c for c in defs
                          if c.get("name") == logical), defs[0])
+            if cdef.get("name") != logical:
+                notes.append(
+                    f"{s['serviceName']}: 컨테이너 '{logical}' 부재 — 첫 컨테이너 "
+                    f"'{cdef.get('name', '?')}' 의 image/env 를 읽었습니다 "
+                    "(사이드카일 수 있으니 태그 채택 전 확인하세요)")
             img = cdef.get("image", "")
             if ":" in img:
                 tag_by_svc[logical] = img.rsplit(":", 1)[1]

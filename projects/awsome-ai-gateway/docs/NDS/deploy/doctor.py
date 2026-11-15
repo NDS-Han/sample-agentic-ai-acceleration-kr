@@ -465,7 +465,7 @@ def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
             # ^ 앵커 + 주석 제거 — `# eks_cluster_version=`/`legacy_eks_cluster_version=`
             # 같은 죽은 선언이 라이브와 무관한 허위 다운그레이드 경고를 만든다.
             # terraform 은 last-wins — 채널 순서대로 돌며 마지막 매치를 취한다.
-            m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"(\d+\.\d+)"',
+            m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"?(\d+\.\d+)"?',
                           tfvars_clean(text))
             if m:
                 declared = m.group(1)
@@ -729,14 +729,14 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             expected = _expected_tag(cfg, kebab)
             if not expected:
                 continue
-            t = (((live.get(camel) or {}).get("image") or {}).get("tag"))
+            t = _d(_d(live.get(camel)).get("image")).get("tag")
             if t and t != expected:
                 drifts.append(f"{camel}.image.tag={t}≠{expected}")
 
         # migration 이미지 ↔ repo alembic head — images.tag 는 migration 을
         # 바꾸지 않으므로(독립 버전 라인) 새 릴리스 배포 시 head 가 뒤처질 수 있다.
         # 태그에 head(\d+) 마커가 있을 때만 비교한다.
-        mig_tag = str(((live.get("migration") or {}).get("image") or {}).get("tag") or "")
+        mig_tag = str(_d(_d(live.get("migration")).get("image")).get("tag") or "")
         m = re.search(r"head(\d+)", mig_tag)
         repo_head = _migration_head()
         if m and repo_head:
@@ -751,7 +751,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 rep.add("WARN", "migration",
                         f"migration 이미지 head{mig_head} > repo head{repo_head} — "
                         f"checkout 이 배포된 환경보다 오래됐거나 잘못된 이미지 핀입니다")
-        cidr = (((live.get("ingress") or {}).get("annotations") or {})
+        cidr = (_d(_d(live.get("ingress")).get("annotations"))
                 .get("alb.ingress.kubernetes.io/inbound-cidrs", ""))
         want_cidrs = ",".join(cfg.network.allowed_cidrs)
         # 선언된 제한이 live 에 없으면 ALB 가 사실상 전체 공개 — 어노테이션
@@ -763,7 +763,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
                 != set(cfg.network.allowed_cidrs)):
             drifts.append(
                 f"inbound-cidrs={cidr or '(미설정 — 전체 개방)'}≠{want_cidrs}")
-        live_region = (live.get("aws") or {}).get("region")
+        live_region = _d(live.get("aws")).get("region")
         if live_region and live_region != cfg.aws.region:
             drifts.append(f"aws.region={live_region}≠{cfg.aws.region}")
         rep.add("WARN" if drifts else "OK", "drift",
@@ -773,7 +773,7 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         #     서빙하지 못하면 <unknown> 이 된다. 부분 미보고는 HPA 가 감쇠
         #     계산하지만 전 파드 미보고면 스케일 결정(다운 포함)이 정지한다 —
         #     관측 스택(rules.custom + k8sattributes)이 차트보다 먼저여야 한다.
-        if (((live.get("gatewayProxy") or {}).get("autoscaling") or {})
+        if (_d(_d(live.get("gatewayProxy")).get("autoscaling"))
                 .get("executorInflightTarget") is not None):
             m = _run(["kubectl", "get", "--raw",
                       f"/apis/custom.metrics.k8s.io/v1beta1/namespaces/{ns}"

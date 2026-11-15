@@ -604,6 +604,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     # 거부한다. helm 레이어링(chart → env overlay → generated, 마지막이 이김)과
     # 같은 순서로 합성해 render 시점에 잡는다.
     gen = desired_values(cfg)
+    from .common import _dmap
     env_asg: dict = {}
     if env_vals:
         # 사람 소유 overlay — 문서가 스칼라/리스트면 .get 연쇄가 AttributeError
@@ -611,8 +612,7 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
         env_doc = yaml.safe_load(env_vals.read_text()) or {}
         if not isinstance(env_doc, dict):
             env_doc = {}
-        from .common import _dmap
-        env_asg = ((_dmap(env_doc.get("gatewayProxy")).get("autoscaling")) or {})
+        env_asg = _dmap(_dmap(env_doc.get("gatewayProxy")).get("autoscaling"))
         # env values 가 logGroupName 을 직접 선언했으면 gen 추론값을 내리지
         # 않는다 — gen 레이어가 마지막으로 적용되므로, 그대로 두면 env 의
         # 커스텀 클러스터명 override 가 조용히 덮어쓰기 된다.
@@ -639,7 +639,8 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
             f"chart values({_chart_path})를 찾지 못했습니다 — autoscaling 기본값 "
             "레이어 없이 env+gen 합성만 검증했습니다. repo_root 주입을 확인하세요.")
 
-    chart_asg = ((chart_vals.get("gatewayProxy") or {}).get("autoscaling") or {})
+    chart_asg = _dmap(_dmap(chart_vals.get("gatewayProxy")).get("autoscaling"))
+    gen_asg = _dmap(gen_asg)
     merged = {**chart_asg, **env_asg, **gen_asg}
     mn, mx = merged.get("minReplicas"), merged.get("maxReplicas")
     if merged.get("enabled") and (mn is not None or mx is not None):

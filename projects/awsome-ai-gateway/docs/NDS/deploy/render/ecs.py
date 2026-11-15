@@ -204,8 +204,10 @@ def desired_tfvars(cfg: GatewayConfig, extra_vars: dict | None = None) -> dict:
     if cfg.features.bi_insight:
         vars_["enable_chat_agent"] = True
         vars_["enable_chat_db_tools"] = True
-        vars_["chat_agent_region"] = (
-            os.environ.get("CHAT_AGENT_REGION") or cfg.aws.region)
+        # eks 경로(chatagent.resolved_region)와 같은 검증 — 무효 리전
+        # 문자열이 tfvars 를 오염시키지 않게 형식을 확인한다.
+        from ..chatagent import resolved_region
+        vars_["chat_agent_region"] = resolved_region(cfg.aws.region)
 
     vars_.update(extra_vars or {})
     return vars_

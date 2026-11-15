@@ -483,7 +483,6 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
     # 로 평가돼 이미 만든 ALB 알람이 무경고 삭제된다 (bootstrap 은 plan 검증 없음).
     alb_dims = gen_dir / "alerts-dims.tfvars"
     if alb_dims.exists():
-        var_args.append(f"-var-file={alb_dims.resolve()}")
         # 파일 dims 와 state dims 가 다르면 stale 가능 — 삭제/생성이
         # auto-approve 된다. 경고만 (신 dims 반영이 정상인 경우도 있음).
         st = eks_apply._run_quiet(["terraform", "state", "list"],
@@ -491,7 +490,17 @@ def env_apply(env_dir_path: Path, gen_dir: Path,
         if st.returncode != 0:
             print("ⓘ terraform state list 실패 — 파일/state dimension 대조를 "
                   "건너뜁니다", file=sys.stderr)
+            var_args.append(f"-var-file={alb_dims.resolve()}")
+        elif not st.stdout.strip():
+            # state 가 완전히 비어 있다 = destroy/수동 삭제 후 재 bootstrap.
+            # 남은 dims 파일은 죽은 ALB 의 주소 — 적용하면 INSUFFICIENT_DATA
+            # 알람만 만들어진다. 파일을 넘기지 않는다(apply 가 재발견한다).
+            print(f"⚠ {alb_dims.name} 가 남아 있지만 terraform state 가 비어 "
+                  "있습니다 — 이전 배포의 죽은 ALB dimension 이므로 건너뜁니다. "
+                  "헬름 배포 후 `deploy apply` 가 새 ALB 를 재발견합니다",
+                  file=sys.stderr)
         else:
+            var_args.append(f"-var-file={alb_dims.resolve()}")
             state_dims = set(re.findall(
                 r'aws_cloudwatch_metric_alarm\.alb_target_5xx\["([^"]+)"\]',
                 st.stdout))
