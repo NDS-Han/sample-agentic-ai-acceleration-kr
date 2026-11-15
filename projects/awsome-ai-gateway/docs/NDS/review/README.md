@@ -27,7 +27,7 @@
 | 20차 | 40782825 | gen overlay 경로(alert_emails/infra 유실), bootstrap stale cfg, plan/apply/doctor 항상 reconfigure, ECS backend 불일치 경고 |
 | 21차 | 7e6d5a54 | 기능별 독립 검증 3인조 — teardown 완전성(OOB 잔여·인라인 정책·env_dir 전 채널 가드·apply 가드·빈 outputs 차단), capture 채택 안전(compose unknown·internal_api·ALB 폴백·도메인 게이트·env_dir 무효화), bootstrap/apply 수렴(persist split-brain·migration 폴백 ECR·null 섹션·ecs lock table·oidc 잠금 경고) |
 | 22차 | d2d03565+후속 | 3인 리뷰 재투입 — cli 커맨드 표면(wizard 스칼라-리스트 소실·비질문키 보존·원자적 쓰기·absorb 백업), ecs 경로 수렴(immutable push·force_delete·stale URL·pricing 게이트·init 순서·wait 판정·빈 state 중단·삭제유예 가드·cidrs fail-closed 정정·extra-vars preview), doctor(init rc·readiness 우선·미검증 WARN·FAILED 라벨·digest 가드), eks(--context↔backend 불일치 차단·declared last-wins·teardown outputs 검증·namespaced SecretStore 소유 경계·capture provider unknown·tfstate retry persist) — **440 tests** |
-| 23차 | 0a12da88 + 511e22ac + 71ffadb9 + 후속 | 3인 리뷰 재투입 — ①22차 diff 회귀(교차타깃 wizard 저장불가·bootstrap alias 선행 hijack·teardown helm 선행·비인용 environment) ②잔여영역(.env declared-off 수렴→OIDC 잠금/websearch 유출·eks allowedIamRoles 미방출→STS 403·도메인 mode별 scheme 오안내·tfvars/backend.hcl 주입·공유버킷 lifecycle 덮어쓰기·JSON tfvars 채널 누락·questionary default 크래시·plan 의 pre-consent alias·비-ECR 레지스트리·selfsigned className) ③신규 diff 회귀검증 — **454 tests** |
+| 23차 | 0a12da88 + 511e22ac + 71ffadb9 + f729d151 | 3인 리뷰 재투입 — ①22차 diff 회귀(교차타깃 wizard 저장불가·bootstrap alias 선행 hijack·teardown helm 선행·비인용 environment) ②잔여영역(.env declared-off 수렴→OIDC 잠금/websearch 유출·eks allowedIamRoles 미방출→STS 403·도메인 mode별 scheme 오안내·tfvars/backend.hcl 주입·공유버킷 lifecycle 덮어쓰기·JSON tfvars 채널 누락·questionary default 크래시·plan 의 pre-consent alias·비-ECR 레지스트리·selfsigned className) ③신규 diff 회귀검증 — **454 tests** |
 
 ## 기능별 레포트
 
