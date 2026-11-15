@@ -12,6 +12,12 @@ import secrets
 from pathlib import Path
 
 
+def _dmap(v) -> dict:
+    """값이 dict 면 그대로, 아니면 {} — 사람 소유 YAML 의 스칼라/리스트 잎이
+    .get 연쇄를 AttributeError 로 죽이는 걸 방어한다."""
+    return v if isinstance(v, dict) else {}
+
+
 def tfvars_clean(text: str) -> str:
     """tfvars 텍스트에서 주석·heredoc 본문·{} 맵 본문을 제거한 depth-0 잔여분.
 

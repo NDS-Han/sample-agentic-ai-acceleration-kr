@@ -301,11 +301,13 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
         if f == "backend.tf":
             # 템플릿은 dev 의 key/region 이 하드코딩 — 그대로 복사하면 이 env 의
             # state 가 dev/terraform.tfstate 에 묶여 apply 가 dev 인프라를
-            # 갈아엎는다. env/region 으로 재작성한다.
-            text = re.sub(r'key\s*=\s*"[^"]*"',
+            # 갈아엎는다. env/region 으로 재작성한다. 라인 시작 앵커 —
+            # `# key = "..."` 같은 주석 예시나 home_region= 속성이 먼저 잡혀
+            # 진짜 선언이 살아남으면 init 이 dev state 에 붙는다.
+            text = re.sub(r'(?m)^[ \t]*key\s*=\s*"[^"]*"',
                           f'key = "{cfg.env}/terraform.tfstate"',
                           text, count=1)
-            text = re.sub(r'region\s*=\s*"[^"]*"',
+            text = re.sub(r'(?m)^[ \t]*region\s*=\s*"[^"]*"',
                           f'region = "{region}"', text, count=1)
         dst.write_text(text)
     if kept_tf:
@@ -584,9 +586,11 @@ def secret_prefix(cfg: GatewayConfig, repo_root: Path) -> str:
     if vf:
         try:
             vals = yaml.safe_load(vf.read_text()) or {}
-            p = ((vals.get("externalSecrets") or {}).get("secretPathPrefix"))
-            if p:
-                return str(p)
+            if isinstance(vals, dict):
+                es = vals.get("externalSecrets")
+                p = es.get("secretPathPrefix") if isinstance(es, dict) else None
+                if p:
+                    return str(p)
         except yaml.YAMLError:
             pass
     return "/llm-gateway/"
@@ -717,14 +721,25 @@ def push_images_eks(cfg: GatewayConfig, outs: dict, repo_root: Path,
     acct = cfg.aws.account_id or account_id(region)
     registry = (cfg.images.registry
                 or f"{acct}.dkr.ecr.{region}.amazonaws.com").rstrip("/")
-    ensure_ecr_repos(region)
-    r = _quiet(["aws", "ecr", "get-login-password", "--region", region])
-    if r.returncode != 0:
-        raise SystemExit("ECR 로그인 비밀번호 조회 실패 — 자격증명 확인")
-    lr = _quiet(["docker", "login", "--username", "AWS",
-                 "--password-stdin", registry], input=r.stdout)
-    if lr.returncode != 0:
-        raise SystemExit(f"docker login 실패: {(lr.stderr or '').strip()}")
+    # images.registry 는 cross-region ECR 이나 비-ECR(harbor 등) 일 수 있다 —
+    # ECR 호스트면 그 리전에 repo/login 을 맞추고, 비-ECR 이면 ECR 전용
+    # 단계는 건너뛰고 사전 docker login 을 요구한다.
+    ecr_m = re.match(
+        r"^(\d{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com(\.cn)?$", registry)
+    if ecr_m:
+        reg_region = ecr_m.group(2)
+        ensure_ecr_repos(reg_region)
+        r = _quiet(["aws", "ecr", "get-login-password", "--region", reg_region])
+        if r.returncode != 0:
+            raise SystemExit("ECR 로그인 비밀번호 조회 실패 — 자격증명 확인")
+        lr = _quiet(["docker", "login", "--username", "AWS",
+                     "--password-stdin", registry], input=r.stdout)
+        if lr.returncode != 0:
+            raise SystemExit(f"docker login 실패: {(lr.stderr or '').strip()}")
+    else:
+        print(f"ⓘ images.registry({registry}) 가 ECR 이 아닙니다 — repo 생성/"
+              "로그인을 건너뜁니다. 대상 레지스트리에 docker login 돼 있어야 "
+              "push 가 성공합니다", file=sys.stderr)
 
     for helm_key, repo, ctx in EKS_SERVICES:
         tag = (cfg.images.tags or {}).get(helm_key) or cfg.images.tag

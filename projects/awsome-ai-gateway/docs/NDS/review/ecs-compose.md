@@ -49,8 +49,21 @@ ECS 경로를 타므로 아래는 코드 검증으로 수정됐다:
 
 ## 회귀 테스트
 
-`test_render_ecs.py`(sizing·예산·스케일 목표), `test_render_compose.py`
-(dev_login·비밀 보존·포트·프로필), `test_ecs_apply` 부분.
+## 23차 적용 (독립 리뷰 — 추가 수정)
+
+- **.env declared-off 수렴**(HIGH): merge_env 가 desired 에 없는 키를
+  조용히 보존해 oidc→dev_login 전환 시 stale OIDC_* 가 dev 토큰을
+  거부(401 잠금), web_search off 후 기능 계속 켜짐+AgentCore Gateway
+  과금 리소스 잔여. 관리 키 드롭+보고, GENERATED_KEYS·운영자 키 보존,
+  compose apply 에 web_search off-수렴 teardown 연결.
+- **NEXTAUTH_URL mode 게이트**: compose mode=none 은 caddy 포트 라우팅만
+  열어 `http(s)://admin.<name>` 이 죽은 주소 — mode!=none 일 때만 기록.
+- **scheduler migration 게이트**: docker-compose.yml 의 scheduler 가
+  migration 완료를 기다리지 않아 crash-loop 가능 — admin-api 와 동일
+  게이트 추가.
+- **litellm_pricing_lambda extra-vars 영속화**(선행 커밋): ensure 성공
+  값이 in-memory 에만 있어 다음 apply 가 var 를 잃음 — `_save_extra_vars`
+  호출 추가.
 
 ## 잔여 리스크
 

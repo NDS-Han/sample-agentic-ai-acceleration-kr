@@ -175,7 +175,12 @@ def desired_values(cfg: GatewayConfig) -> dict:
     #    올리고 certificate-arn 을 --set 으로 주입한다 (apply 시점에만 ALB 주소를
     #    알 수 있어 render 에선 리스너·redirect 만 선언).
     if cfg.domain.mode == "selfsigned-temp":
-        v.setdefault("ingress", {}).setdefault("adminUi", {}).setdefault(
+        # enabled/className 게이트가 닫혀 있어도(도메인·annotation·admin_internal
+        # 부재) ALB 어노테이션이 살아나야 한다 — 차트 기본 className 은 nginx 라
+        # 그대로 두면 어노테이션만 있고 ALB 가 만들어지지 않는다.
+        v.setdefault("ingress", {}).setdefault("enabled", True)
+        v["ingress"].setdefault("className", "alb")
+        v["ingress"].setdefault("adminUi", {}).setdefault(
             "annotations", {}).update({
                 "alb.ingress.kubernetes.io/listen-ports": '[{"HTTP":80},{"HTTPS":443}]',
                 "alb.ingress.kubernetes.io/ssl-redirect": "443",
@@ -436,8 +441,11 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
         # provisioner(REGION)와 IRSA statement 스코프를 하나의 env로 정렬.
         # fallback 은 ap-northeast-2 가 아니라 배포 리전: export 를 잊은 셸이
         # NE2 로 렌더해 IRSA statement 가 엉뚱한 리전을 가리키는 사고가 났었다.
+        # env 값은 그대로 tfvars 에 박힌다 — resolved_region 이 리전 형식
+        # 외 입력(따옴표·개행·쉼표 주입)을 거절한다.
+        from ..chatagent import resolved_region
         lines.append('chat_agent_region = "{}"'.format(
-            os.environ.get("CHAT_AGENT_REGION") or cfg.aws.region))
+            resolved_region(cfg.aws.region)))
     inf = cfg.infra
     # Fargate profile·IRSA serviceaccount 스코프는 application_namespace 를
     # 따른다 — deploy.namespace 를 바꾸면 여기가 어긋나 파드가 스케줄되지
@@ -525,20 +533,34 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
 
 
 def _env_tfvars_texts(env_dir: Path | None) -> list[str]:
-    """env 의 HCL tfvars 소스들 — terraform.tfvars + *.auto.tfvars(abc순,
-    terraform 자동 로드 계약). *.tfvars.json/-var-file 은 형식·호출자 맥락이
-    달라 여기선 보지 않는다."""
+    """env 의 tfvars 자동 로드 소스 전부 — terraform 실제 로드 순서:
+    terraform.tfvars → terraform.tfvars.json → *.auto.tfvars|*.auto.tfvars.json
+    (파일명 사전순, 마지막이 이긴다). .json 파일도 자동 로드 채널이므로
+    top-level 키를 `key = <json 값>` HCL 형태로 펼쳐 반환 — HCL 스캐너가
+    리스트/문자열 값을 그대로 읽는다. -var-file 전용 이름은 자동로드가
+    아니라 제외한다."""
     if not env_dir:
         return []
     files = [env_dir / "terraform.tfvars",
-             *sorted(env_dir.glob("*.auto.tfvars"))]
+             env_dir / "terraform.tfvars.json",
+             *sorted([*env_dir.glob("*.auto.tfvars"),
+                      *env_dir.glob("*.auto.tfvars.json")],
+                     key=lambda p: p.name)]
     out: list[str] = []
     for f in files:
         try:
-            if f.exists():
+            if not f.exists():
+                continue
+            if f.suffix == ".json":
+                doc = json.loads(f.read_text())
+                if isinstance(doc, dict):
+                    out.append("\n".join(
+                        f"{k} = {json.dumps(v, ensure_ascii=False)}"
+                        for k, v in doc.items()))
+            else:
                 out.append(f.read_text())
-        except OSError:
-            continue  # 읽기 실패·TOCTOU 삭제는 스캔 대상에서만 빠진다
+        except (OSError, json.JSONDecodeError):
+            continue  # 읽기 실패·TOCTOU 삭제·깨진 JSON 은 스캔 대상에서만 빠진다
     return out
 
 
@@ -573,13 +595,17 @@ def render(cfg: GatewayConfig, out_dir: Path, repo_root: Path = REPO_ROOT) -> di
     gen = desired_values(cfg)
     env_asg: dict = {}
     if env_vals:
-        env_asg = ((yaml.safe_load(env_vals.read_text()) or {})
-                   .get("gatewayProxy", {}).get("autoscaling") or {})
+        # 사람 소유 overlay — 문서가 스칼라/리스트면 .get 연쇄가 AttributeError
+        # 로 죽는다. 비-dict 는 빈 overlay 로 취급(_migration_image 와 같은 계약).
+        env_doc = yaml.safe_load(env_vals.read_text()) or {}
+        if not isinstance(env_doc, dict):
+            env_doc = {}
+        from .common import _dmap
+        env_asg = ((_dmap(env_doc.get("gatewayProxy")).get("autoscaling")) or {})
         # env values 가 logGroupName 을 직접 선언했으면 gen 추론값을 내리지
         # 않는다 — gen 레이어가 마지막으로 적용되므로, 그대로 두면 env 의
         # 커스텀 클러스터명 override 가 조용히 덮어쓰기 된다.
-        env_fl = (((yaml.safe_load(env_vals.read_text()) or {})
-                   .get("observability") or {}).get("fargateLogging") or {})
+        env_fl = _dmap(_dmap(env_doc.get("observability")).get("fargateLogging"))
         if env_fl.get("logGroupName"):
             (gen.get("observability") or {}).get("fargateLogging", {}) \
                 .pop("logGroupName", None)

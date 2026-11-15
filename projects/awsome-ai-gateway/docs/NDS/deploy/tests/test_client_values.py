@@ -89,3 +89,29 @@ def test_client_values_compose_http_and_cowork_warning(tmp_path, monkeypatch, ca
     out = capsys.readouterr().out
     assert 'ANTHROPIC_BASE_URL="http://1.2.3.4:8000"' in out
     assert "Cowork" in out  # https 필수 경고
+
+
+def test_client_values_selfsigned_uses_http_for_data_plane(tmp_path, monkeypatch, capsys):
+    """23차 — selfsigned-temp 의 TLS 는 adminUi 전용. gateway/admin-api 는
+    HTTP 리스너뿐이라 https:// 안내는 죽은 주소."""
+    doc = dict(BASE, domain={"mode": "selfsigned-temp", "name": "gw.example.com"})
+    cfg_path = _cfg(tmp_path, doc)
+    monkeypatch.setattr(eks_render, "env_values_file", lambda cfg: None)
+    assert cli.cmd_client_values(types.SimpleNamespace(config=str(cfg_path))) == 0
+    out = capsys.readouterr().out
+    assert 'ANTHROPIC_BASE_URL="http://gateway.gw.example.com"' in out
+    assert 'ADMIN_API_URL="http://admin-api.gw.example.com"' in out
+
+
+def test_client_values_ecs_mode_none_falls_back_to_alb_dns(tmp_path, monkeypatch, capsys):
+    """23차 — ecs + mode=none + domain.name 은 domain_name="" 수렴이라
+    레코드가 없다 — svc.domain 안내 대신 ALB DNS 폴백."""
+    doc = dict(BASE, deploy={"target": "ecs", "size_tier": "t1"},
+               domain={"mode": "none", "name": "gw.example.com"})
+    cfg_path = _cfg(tmp_path, doc)
+    monkeypatch.setattr(cli, "_tf_outputs_soft",
+                        lambda p: {"alb_dns_name": "alb-123.elb.amazonaws.com"})
+    assert cli.cmd_client_values(types.SimpleNamespace(config=str(cfg_path))) == 0
+    out = capsys.readouterr().out
+    assert 'ANTHROPIC_BASE_URL="http://alb-123.elb.amazonaws.com:8000"' in out
+    assert "gateway.gw.example.com" not in out

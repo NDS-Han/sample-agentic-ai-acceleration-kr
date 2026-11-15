@@ -477,3 +477,19 @@ def test_subnet_count_follows_env_azs(tmp_path):
     tfvars = (out / "terraform.tfvars").read_text()
     m = re.search(r'private_subnet_cidrs = (\[[^\]]+\])', tfvars)
     assert m and len(yaml.safe_load(m.group(1))) == 3
+
+
+def test_env_tfvars_texts_includes_json_channels(tmp_path):
+    """23차 — terraform.tfvars.json / *.auto.tfvars.json 도 자동로드 채널.
+    거기에만 선언된 값이 스캔에서 빠지면 gen 오버레이가 병합 없이 통째
+    교체해 cognito 그룹/콜백·AZ·vpc_cidr 이 지워진다."""
+    from deploy.render.eks import _tfvars_list, _env_vpc_cidr
+    (tmp_path / "terraform.tfvars").write_text('cognito_groups = ["A"]\n')
+    (tmp_path / "terraform.tfvars.json").write_text(
+        '{"cognito_callback_urls": ["https://cb"], "vpc_cidr": "10.9.0.0/16"}')
+    (tmp_path / "z.auto.tfvars.json").write_text(
+        '{"cognito_groups": ["B", "C"]}')
+    # 뒤 파일이 이긴다 — z.auto.tfvars.json 의 그룹 목록
+    assert _tfvars_list(tmp_path, "cognito_groups") == ["B", "C"]
+    assert _tfvars_list(tmp_path, "cognito_callback_urls") == ["https://cb"]
+    assert _env_vpc_cidr(tmp_path) == "10.9.0.0/16"

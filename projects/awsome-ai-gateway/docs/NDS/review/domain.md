@@ -49,6 +49,20 @@
 `test_eks_apply.py` — 라벨 보유 ingress 선택·suffix 매칭·cert 우선순위·
 stale 레코드 ALB 조건·`test_capture.py` wizard zone_id 보존.
 
+## 23차 적용 (독립 리뷰 — 추가 수정)
+
+- **scheme 을 mode 에서 도출**: `domain.name` + `mode!=route53-acm` 시
+  nextauthUrl·client-values·Cognito 콜백이 `https://` 를 만들어 HTTP 전용
+  리스너에 죽은 주소를 안내했다. mode=none→http, selfsigned-temp 의
+  gateway/admin-api→http(adminUi 전용 TLS), Cognito 콜백은 mode=none 에
+  미방출(https 필수라 등록 거절). schema 경고 추가(도메인 선언+비-acm
+  mode 조합).
+- **selfsigned-temp ingress 핀**: enabled/className 게이트 밖이면 차트
+  기본 className=nginx 로 ALB 미생성 — 분기에서 `enabled/className=alb`
+  보장.
+- **client-values 폴백**: ecs mode=none/cloudfront-temp·compose mode=none
+  은 도메인 DNS 미생성이라 svc.domain 안내 대신 ALB DNS/공인 IP 폴백.
+
 ## 잔여 리스크
 
 - Route53 API 호출은 페이지네이션 없음 — 레코드 수가 매우 많은 zone 에서

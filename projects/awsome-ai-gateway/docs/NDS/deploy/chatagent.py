@@ -32,8 +32,12 @@ def resolved_region(region: str = "") -> str:
     env 만 보면 export 를 잊은 셸이 조용히 다른 리전(기본 ap-northeast-2)을
     조회해 "Runtime 없음" 오판 → ensure 경로가 빈 ARN 을 내려 rendered 가
     채팅 env 전부를 닦는 사고가 실제로 났었다(배포 리전과 Runtime 리전은 ECR
-    제약상 항상 같아야 하므로 cfg.aws.region 이 안전한 fallback 이다)."""
-    return os.environ.get("CHAT_AGENT_REGION") or region or "ap-northeast-2"
+    제약상 항상 같아야 하므로 cfg.aws.region 이 안전한 fallback 이다).
+    env 값은 tfvars/`--set` 에 그대로 박히므로 리전 형식 외 입력은 거절한다."""
+    env = os.environ.get("CHAT_AGENT_REGION")
+    if env and not re.match(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$", env):
+        raise SystemExit(f"CHAT_AGENT_REGION '{env}' 이 리전 형식이 아닙니다")
+    return env or region or "ap-northeast-2"
 
 
 def _agent_name(outs: dict, env_name: str = "") -> str:

@@ -1838,9 +1838,14 @@ def _eks_ingress_hosts(cfg) -> dict:
         data = yaml.safe_load(p.read_text()) or {}
     except Exception:
         return {}
+    if not isinstance(data, dict):
+        return {}
     ing = data.get("ingress") or {}
+    if not isinstance(ing, dict):
+        return {}
     return {k: (ing.get(k) or {}).get("host", "")
-            for k in ("gateway", "adminApi", "adminUi")}
+            for k in ("gateway", "adminApi", "adminUi")
+            if isinstance(ing.get(k), dict)}
 
 
 def _public_ip() -> str:
@@ -1870,18 +1875,25 @@ def cmd_client_values(args) -> int:
                 or (f"gateway.{cfg.domain.name}" if cfg.domain.name else ""))
         adm_h = (cfg.domain.hosts.get("admin_api") or hosts.get("adminApi")
                  or (f"admin-api.{cfg.domain.name}" if cfg.domain.name else ""))
-        # scheme 은 실제 리스너를 따라야 한다 — mode=none 은 ALB 가 HTTP 만
-        # 서빙하는데 https:// 를 안내하면 직원에게 죽은 주소를 쥐어준다.
-        scheme = "http" if cfg.domain.mode == "none" else "https"
+        # scheme 은 실제 리스너를 따라야 한다 — route53-acm 만 gateway/
+        # admin-api 에 TLS 를 단다. selfsigned-temp 의 인증서는 adminUi 전용이라
+        # 이 둘은 HTTP 리스너뿐 — https:// 를 안내하면 죽은 주소를 쥐어준다.
+        scheme = "https" if cfg.domain.mode == "route53-acm" else "http"
         gw = f"{scheme}://{gw_h}" if gw_h else ""
         adm = f"{scheme}://{adm_h}" if adm_h else ""
         if not gw_h:
             notes.append("eks ingress host 를 못 찾았습니다 — values-eks-*.local.yaml 의 "
                          "ingress.gateway.host 또는 `kubectl -n {ns} get ingress`로 확인")
-    elif cfg.domain.name:
-        scheme = "http" if cfg.domain.mode == "none" else "https"
-        gw = f"{scheme}://gateway.{cfg.domain.name}"
-        adm = f"{scheme}://admin-api.{cfg.domain.name}"
+    elif (cfg.domain.name
+          and ((target == "compose" and cfg.domain.mode != "none")
+               or (target == "ecs" and cfg.domain.mode == "route53-acm"))):
+        # DNS/호스트 라우팅이 실제로 만들어지는 mode 만 도메인 주소를 안내한다 —
+        # ecs 의 none/cloudfront-temp 는 domain_name="" 으로 수렴해 레코드가
+        # 없고, compose 의 none 은 caddy 가 포트 라우팅만 연다 → ALB DNS/
+        # 공인 IP 폴백으로 떨어진다. compose 의 host 블록은 caddy auto-HTTPS,
+        # ecs route53-acm 은 ACM+443 — 이 분기는 전부 https 가 맞다.
+        gw = f"https://gateway.{cfg.domain.name}"
+        adm = f"https://admin-api.{cfg.domain.name}"
     else:
         outs = _tf_outputs_soft(_tf_env_dir(cfg))
         dns = str(outs.get("alb_dns_name") or "")

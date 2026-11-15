@@ -106,12 +106,12 @@ def transform_services(base: dict, cfg: GatewayConfig) -> dict:
                 # confidential client(Cognito secret) — .env 에 보관하고 interpolate 만
                 "OIDC_CLIENT_SECRET": "${OIDC_CLIENT_SECRET:-}",
             })
-        if name == "admin-ui" and cfg.domain.name:
-            # 도메인이 없으면 NEXTAUTH_URL 을 비워 Host 헤더로 유도 — 원격 호스트에서
-            # localhost 단정은 틀린 주소를 만든다. scheme 은 mode 를 따라야 —
-            # none 은 caddy 가 https 라우팅을 안 만들어 죽은 URL 이 된다.
-            scheme = "http" if cfg.domain.mode == "none" else "https"
-            svc.setdefault("environment", {})["NEXTAUTH_URL"] = f"{scheme}://admin.{cfg.domain.name}"
+        if (name == "admin-ui" and cfg.domain.name
+                and cfg.domain.mode != "none"):
+            # 도메인이 없거나 mode=none(caddy 포트 라우팅 — 80번에 아무것도
+            # 없다)이면 NEXTAUTH_URL 을 비워 Host 헤더로 유도 — 원격 호스트에서
+            # localhost 단정이나 접근 불가 도메인 주소는 둘 다 죽은 URL 이다.
+            svc.setdefault("environment", {})["NEXTAUTH_URL"] = f"https://admin.{cfg.domain.name}"
 
         # ⑥ env_file 은 생성 .env 를 가리키도록
         if "env_file" in svc:

@@ -824,3 +824,82 @@ def test_onboard_admin_prefers_oidc_admin_emails(monkeypatch, tmp_path):
         cfg, tmp_path, {"cognito_user_pool_id": "pool-1"}, "ap-northeast-2")
     assert any("real@corp.com" in n for n in notes)
     assert "real@corp.com" in calls[0]
+
+
+def test_scaffold_backend_ignores_commented_key(tmp_path, monkeypatch):
+    """23차 — backend.tf 의 `# key = "..."` 주석 예시가 진짜 선언보다 먼저
+    치환되면 신 env 가 dev state 에 붙어 apply 가 dev 인프라를 건드린다."""
+    from deploy import bootstrap, schema
+    tpl = tmp_path / "deployment/terraform/environments/llm-gateway-dev"
+    tpl.mkdir(parents=True)
+    for f in bootstrap.TF_FILES:
+        (tpl / f).write_text("# t\n")
+    (tpl / "backend.tf").write_text(
+        'terraform {\n'
+        '  backend "s3" {\n'
+        '    # key = "alt/terraform.tfstate"  # 다른 배치 예시\n'
+        '    key = "dev/terraform.tfstate"\n'
+        '    region = "ap-northeast-2"\n'
+        '  }\n}\n')
+    (tpl / "terraform.tfvars.example").write_text('environment = "dev"\n')
+    (tpl / "terraform.tfvars").write_text('environment = "dev"\n')
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "ap-northeast-2",
+                                    "account_id": "123456789012"},
+                            "deploy": {"target": "eks", "size_tier": "t3",
+                                       "tf_env_dir": str(tmp_path / "env")},
+                            "images": {"tag": "v1"}})
+    monkeypatch.setattr(bootstrap, "account_id", lambda r: "123456789012")
+    monkeypatch.setattr(bootstrap, "_aws",
+                        lambda *a, **k: types.SimpleNamespace(
+                            returncode=0, stdout='{"Arn": "arn:aws:iam::1:user/x"}'))
+    monkeypatch.setattr(bootstrap, "list_azs", lambda r: ["a", "b"])
+    target = tmp_path / "env"
+    with pytest.raises(SystemExit):   # scaffold 완성 후 검토 게이트
+        bootstrap.scaffold_eks_env(cfg, tmp_path, "ap-northeast-2")
+    text = (target / "backend.tf").read_text()
+    assert 'key = "dev/terraform.tfstate"' in text
+    assert '# key = "alt/terraform.tfstate"' in text   # 주석 예시는 보존
+
+
+def test_push_images_non_ecr_registry_skips_ecr(monkeypatch, tmp_path):
+    """23차 — 비-ECR registry(harbor 등)엔 repo 생성/ECR 로그인이 무의미 —
+    사전 docker login 을 요구하고 build/push 만 한다."""
+    from deploy import bootstrap, schema
+    calls = []
+    monkeypatch.setattr(bootstrap, "_run", lambda argv, **k: calls.append(argv))
+    monkeypatch.setattr(bootstrap, "ensure_ecr_repos",
+                        lambda r: calls.append(["ensure-ecr", r]))
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda *a, **k: calls.append(["aws"]) or _cp(0, "pw"))
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1",
+                                    "account_id": "123456789012"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {"registry": "harbor.corp.io",
+                                       "tag": "v1"}})
+    bootstrap.push_images_eks(cfg, {}, tmp_path, "us-east-1")
+    assert not any(c[0] == "ensure-ecr" for c in calls)
+    assert not any(isinstance(c, list) and c and c[0] == "aws" for c in calls)
+
+
+def test_push_images_cross_region_ecr_uses_registry_region(monkeypatch, tmp_path):
+    """cross-region ECR registry 는 그 리전에 repo 를 만들고 로그인한다."""
+    from deploy import bootstrap, schema
+    repos = []
+    monkeypatch.setattr(bootstrap, "_run", lambda *a, **k: None)
+    monkeypatch.setattr(bootstrap, "ensure_ecr_repos",
+                        lambda r: repos.append(r))
+    logins = []
+    monkeypatch.setattr(bootstrap.subprocess, "run",
+                        lambda argv, **k: logins.append(argv) or _cp(0, "pw"))
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1",
+                                    "account_id": "123456789012"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {
+                                "registry": "123456789012.dkr.ecr.eu-west-1.amazonaws.com",
+                                "tag": "v1"}})
+    bootstrap.push_images_eks(cfg, {}, tmp_path, "us-east-1")
+    assert repos == ["eu-west-1"]
+    assert any("eu-west-1" in str(a) for a in logins if "--region" in str(a))

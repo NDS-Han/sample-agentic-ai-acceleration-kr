@@ -1451,3 +1451,14 @@ def test_merge_env_keeps_agentcore_when_search_on():
         existing, {"WEB_SEARCH_ENABLED": "true"})
     assert merged["AGENTCORE_GATEWAY_URL"] == "https://gw"
     assert "AGENTCORE_GATEWAY_URL" not in dropped
+
+
+def test_chat_agent_region_env_validated(monkeypatch):
+    """23차 — CHAT_AGENT_REGION 은 tfvars/--set 에 그대로 박힌다 —
+    리전 형식 외 입력(따옴표·개행·쉼표 주입)은 거절."""
+    from deploy import chatagent
+    monkeypatch.setenv("CHAT_AGENT_REGION", 'us-east-1",x=y')
+    with pytest.raises(SystemExit, match="CHAT_AGENT_REGION"):
+        chatagent.resolved_region("ap-northeast-2")
+    monkeypatch.setenv("CHAT_AGENT_REGION", "eu-west-1")
+    assert chatagent.resolved_region("ap-northeast-2") == "eu-west-1"

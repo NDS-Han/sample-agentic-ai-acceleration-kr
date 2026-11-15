@@ -92,3 +92,22 @@ _tf_init reconfigure·load_meta·managed plan·teardown 가드·ECR 태그.
 - `human_owned` 탐지는 tfvars 정규식 기반 — HCL 문법의 극단적 변형
   (heredoc, 멀티라인 주석 사이 선언)은 미스 가능(LOW, fail-open 방향이
   아니라 사람 소유로 오인해 보수적 중단).
+
+## 23차 적용 (독립 리뷰 — 추가 수정)
+
+- **`aws.allowedIamRoles` 미방출**(HIGH): eks desired_values 가 이 키를
+  쓰지 않아 `ALLOWED_IAM_ROLES=""` → STS CLI 로그인 전량 403(fail-closed).
+  방출 + 빈 선언 시 feature_note 경고.
+- **plan() 의 pre-consent alias**(HIGH): preview 단계의
+  `update-kubeconfig --alias` 가 context 를 backend 클러스터로 덮어써
+  apply 의 hard 검사를 무력화 + `--plan` 이 kubeconfig 를 변형 — alias 전
+  hard 대조로 변경.
+- **`_env_tfvars_texts` JSON 채널**(MEDIUM): `terraform.tfvars.json`/
+  `*.auto.tfvars.json` 도 자동로드인데 스캔이 HCL 만 봐 거기만 선언된
+  cognito_groups/콜백/vpc_cidr/AZ 가 gen 오버레이에 통째 교체로 지워졌다 —
+  terraform 로드 순서로 펼쳐 반환.
+- **teardown context 가드**(HIGH): helm status/uninstall 전에 context↔
+  backend cluster_name 대조 + outputs 없으면 검증 생략을 명시 경고.
+- **CHAT_AGENT_REGION 검증**: tfvars/--set 직행 env 값에 리전 형식 검증.
+- **environment 비인용 값**: `environment = 5` 같은 tfvars 허용 형태도
+  '선언됨'으로 인식(과잉 통과 아닌 과잉 차단 방향).
