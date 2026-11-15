@@ -896,14 +896,30 @@ def _tfvars(env_dir: Path, extra_files: list[Path] | None = None) -> dict[str, o
     보면 유실된다.
     map/object 값은 _tfvars_clean 이 본문째 제거해 스킵된다
     (우리가 읽는 키는 전부 str|list[str]|number|bool)."""
+    # terraform 자동 로드 순서: terraform.tfvars → terraform.tfvars.json →
+    # *.auto.tfvars/*.auto.tfvars.json(사전순 병합) — JSON 채널을 빼면 거기만
+    # 선언된 값이 캡처에서 유실된다. JSON 은 평탄 `key = <json>` 줄로 바꿔
+    # 아래 정규식이 HCL 과 같은 경로로 파싱하게 한다.
     texts: list[str] = []
-    for f in ([env_dir / "terraform.tfvars",
-               *sorted(env_dir.glob("*.auto.tfvars")),
-               *(extra_files or [])]):
+    files = [env_dir / "terraform.tfvars", env_dir / "terraform.tfvars.json"]
+    files += sorted([*env_dir.glob("*.auto.tfvars"),
+                     *env_dir.glob("*.auto.tfvars.json")])
+    files += list(extra_files or [])
+    for f in files:
         try:
-            texts.append(f.read_text())
+            text = f.read_text()
         except OSError:
             continue
+        if f.suffix == ".json":
+            try:
+                doc = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(doc, dict):
+                continue
+            text = "\n".join(f"{k} = {json.dumps(v)}"
+                             for k, v in doc.items())
+        texts.append(text)
     if not texts:
         return {}
     clean = _tfvars_clean("\n".join(texts))

@@ -64,9 +64,15 @@ def tfvars_clean(text: str) -> str:
             i = n if j < 0 else j + 2
             continue
         if text[i:i + 2] == "<<":
-            m = re.match(r"<<-?(\w+)", text[i:])
+            # <<-TAG 는 종결자 들여쓰기를 허용하고 <<- 는 0컬럼을 요구한다 —
+            # 들여쓴 종결자를 못 찾으면 heredoc 이후 전부가 지워져 그 뒤의
+            # environment= 같은 선언이 보이지 않게 된다.
+            m = re.match(r"<<(-?)(\w[\w-]*)", text[i:])
             if m:
-                end = re.search(rf"(?m)^{re.escape(m.group(1))}\s*$", text[i:])
+                tag = re.escape(m.group(2))
+                pat = (rf"(?m)^\s*{tag}\s*$" if m.group(1)
+                       else rf"(?m)^{tag}\s*$")
+                end = re.search(pat, text[i:])
                 i = n if not end else i + end.end()
                 continue
         if c == "{":
@@ -130,7 +136,11 @@ def parse_env_file(path: Path) -> dict[str, str]:
 # AGENTCORE_* 는 apply 가 프로비저닝 결과로 주입하는 키라 desired_env 에
 # 나타나지 않는다 — web_search 기능 자체가 꺼질 때(WEB_SEARCH_ENABLED 드롭)
 # 만 함께 지운다.
-_MANAGED_PREFIXES = ("OIDC_", "SMTP_")
+# 접두사 그룹은 앵커 키(desired_env 가 기능을 켤 때만 방출하는 대표 키)가
+# 사라질 때만 통째로 수렴한다 — desired_env 가 한 번도 방출하지 않는
+# 운영자 확장 키(SMTP_USERNAME·OIDC_EMAIL_CLAIM 등)를 기능이 켜진 채로
+# 지우는 사고를 막는다.
+_MANAGED_PREFIX_ANCHORS = {"OIDC_": "OIDC_ISSUER_URL", "SMTP_": "SMTP_HOST"}
 _MANAGED_KEYS = frozenset({
     "POSTGRES_USER", "POSTGRES_DB", "AWS_REGION", "AWS_DEFAULT_REGION",
     "ALLOWED_STS_REGIONS", "ALLOWED_AWS_ACCOUNTS", "ALLOWED_IAM_ROLES",
@@ -140,8 +150,13 @@ _MANAGED_KEYS = frozenset({
 })
 
 
-def _is_managed(key: str) -> bool:
-    return key in _MANAGED_KEYS or key.startswith(_MANAGED_PREFIXES)
+def _is_managed(key: str, desired: dict[str, str]) -> bool:
+    if key in _MANAGED_KEYS:
+        return True
+    for prefix, anchor in _MANAGED_PREFIX_ANCHORS.items():
+        if key.startswith(prefix) and anchor not in desired:
+            return True
+    return False
 
 
 def merge_env(existing: dict[str, str],
@@ -163,7 +178,7 @@ def merge_env(existing: dict[str, str],
             differing.append(k)
     dropped = [k for k in list(merged)
                if k not in desired and k not in GENERATED_KEYS
-               and _is_managed(k)]
+               and _is_managed(k, desired)]
     if "WEB_SEARCH_ENABLED" in dropped:
         # 기능이 꺼지면 apply 주입 URL/target 도 함께 수렴 — 남겨두면
         # 설정 파일엔 없는 외부 엔드포인트를 앱이 계속 가리킨다.

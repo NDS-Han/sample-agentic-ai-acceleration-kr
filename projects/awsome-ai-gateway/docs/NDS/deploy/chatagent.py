@@ -35,19 +35,33 @@ def resolved_region(region: str = "") -> str:
     제약상 항상 같아야 하므로 cfg.aws.region 이 안전한 fallback 이다).
     env 값은 tfvars/`--set` 에 그대로 박히므로 리전 형식 외 입력은 거절한다."""
     env = os.environ.get("CHAT_AGENT_REGION")
-    if env and not re.match(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$", env):
+    if env and not re.fullmatch(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$", env):
         raise SystemExit(f"CHAT_AGENT_REGION '{env}' 이 리전 형식이 아닙니다")
     return env or region or "ap-northeast-2"
 
 
-def _agent_name(outs: dict, env_name: str = "") -> str:
+def _agent_name(outs: dict, env_name: str = "",
+                env_dir: Path | None = None) -> str:
     """Runtime 이름 — outputs 우선, 없으면 도출.
 
     -target apply 는 관련 없는 output 을 state 에 안 쓴다 — 첫 활성화 때
     chat_agent_name 이 비어 있을 수 있어 {project}-{env}-admin-chat-agent
-    (render 가 project=llm-gateway 고정)으로 도출한다. 없으면 provisioner
-    기본값(llm_gateway_dev_chat_agent)이 엉뚱한 이름의 Runtime 을 만든다."""
-    raw = outs.get("chat_agent_name") or f"llm-gateway-{env_name}-admin-chat-agent"
+    으로 도출한다. project 는 env tfvars 선언이 있으면 그 값을 쓴다 —
+    llm-gateway 고정이면 custom project env 의 teardown/provision 이름이
+    어긋나 Runtime 이 누수된다. 없으면 provisioner 기본값이 엉뚱한 이름의
+    Runtime 을 만든다."""
+    raw = outs.get("chat_agent_name")
+    if not raw:
+        project = "llm-gateway"
+        if env_dir:
+            try:
+                from .capture import _tfvars
+                tv = _tfvars(env_dir)
+                if isinstance(tv.get("project"), str) and tv["project"]:
+                    project = tv["project"]
+            except Exception:
+                pass
+        raw = f"{project}-{env_name}-admin-chat-agent"
     return raw.replace("-", "_")
 
 
@@ -86,6 +100,10 @@ _PROVISIONER_INPUTS = frozenset({
     "ECS_REGION", "KUBE_CONTEXT", "K8S_NAMESPACE", "MIGRATION_IMAGE",
     "INTERPRETER_NAME", "AGENT_DIR", "AWS_REGION", "REGION",
     "TARGET_NAME", "CALLER_ROLE_ARN", "GW_NAME",
+    # IMAGE_TAG 는 CI 환경에서 가장 흔한 변수명이다 — 스크럽하지 않으면
+    # 앱 이미지용 태그가 에이전트 이미지를 조용히 리핀한다. 운영자 지정은
+    # 배포 도구가 아니라 프로비저너 직접 실행 경로를 쓴다.
+    "IMAGE_TAG",
 })
 
 
@@ -98,15 +116,17 @@ def _env(outs: dict, meta: dict, migration_image: str,
     e = {k: v for k, v in os.environ.items()
          if k not in _PROVISIONER_INPUTS}
     e["REGION"] = resolved_region(region)
-    e["AGENT_NAME"] = _agent_name(outs, env_name)
+    env_dir = None
+    if meta.get("env_dir") and repo_root:
+        env_dir = Path(repo_root) / meta["env_dir"]
+    e["AGENT_NAME"] = _agent_name(outs, env_name, env_dir=env_dir)
     # 에이전트 이미지 태그 — latest 고정이면 Runtime 이 생성 시점 이미지에
     # 고정돼 코드 변경이 apply 로 영영 재배포되지 않는다. SHA 태그를 기본으로
-    # 줘서 코드가 바뀌면 containerUri 도 바뀌게(update 경로가 수렴). 운영자가
-    # IMAGE_TAG 를 명시하면 그 값이 우선.
-    if "IMAGE_TAG" not in e:
-        sha = _git_sha(repo_root)
-        if sha:
-            e["IMAGE_TAG"] = sha
+    # 줘서 코드가 바뀌면 containerUri 도 바뀌게(update 경로가 수렴).
+    # IMAGE_TAG 는 _PROVISIONER_INPUTS 로 스크럽되므로 여기서 항상 핀한다.
+    sha = _git_sha(repo_root)
+    if sha:
+        e["IMAGE_TAG"] = sha
     if outs.get("chat_agent_ecr_url"):
         e["ECR_REPO"] = outs["chat_agent_ecr_url"]
     if outs.get("chat_agent_execution_role_arn"):

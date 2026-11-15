@@ -800,3 +800,42 @@ def test_domain_and_account_id_format():
                     "zone_id": "not-a-zone"}))
     with pytest.raises(schema.SchemaError, match="account_id"):
         schema.from_dict(minimal(aws={"account_id": "1234"}))
+
+
+# ==============================================================================
+# R24 회귀 — fullmatch 후행개행 거절 / IPv6 vpc_cidr / azs 상한
+# ==============================================================================
+
+def test_trailing_newline_rejected_everywhere():
+    """`match`+`$` 는 후행 개행을 허용한다 — tfvars/Caddyfile 주입 경로라
+    fullmatch 로 거절해야 한다."""
+    base = {"version": 1, "env": "acme-test",
+            "deploy": {"target": "compose", "size_tier": "t0"}}
+    for bad in ("acme-test\n", "prod\n"):
+        doc = dict(base, env=bad)
+        with pytest.raises(schema.SchemaError):
+            schema.from_dict(doc)
+
+
+def test_ipv6_vpc_cidr_rejected():
+    """IPv6 vpc_cidr 는 subnet_cidrs 의 subnet_of 가 TypeError 로 죽는다 —
+    스키마가 거절해야 한다."""
+    doc = {"version": 1, "env": "acme-test",
+           "deploy": {"target": "eks", "size_tier": "t0"},
+           "aws": {"region": "ap-northeast-2", "account_id": "1" * 12},
+           "images": {"tag": "x"},
+           "infra": {"vpc_cidr": "fd00::/8"}}
+    with pytest.raises(schema.SchemaError, match="IPv4"):
+        schema.from_dict(doc)
+
+
+def test_azs_over_54_rejected():
+    """AZ 54개 초과는 파생 서브넷 세 번째 옥텟이 255 를 넘어 무효 CIDR."""
+    doc = {"version": 1, "env": "acme-test",
+           "deploy": {"target": "eks", "size_tier": "t0"},
+           "aws": {"region": "ap-northeast-2", "account_id": "1" * 12},
+           "images": {"tag": "x"},
+           "infra": {"azs": [f"ap-northeast-2{chr(97 + i % 26)}{i}"
+                             for i in range(60)]}}
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(doc)

@@ -86,10 +86,18 @@ if [ "${BUCKET_EXISTED}" -eq 1 ]; then
     V=$(aws s3api get-bucket-versioning --bucket "${TFSTATE_BUCKET}" \
         --query 'Status' --output text 2>/dev/null || echo "?")
     [ "${V}" = "Enabled" ] || echo "  ⚠ versioning 미활성(${V}) — 이전 state 복원이 안 됩니다"
-    aws s3api get-bucket-encryption --bucket "${TFSTATE_BUCKET}" \
-        >/dev/null 2>&1 || echo "  ⚠ SSE 기본 암호화 없음 — get-bucket-encryption 확인"
-    aws s3api get-public-access-block --bucket "${TFSTATE_BUCKET}" \
-        >/dev/null 2>&1 || echo "  ⚠ public-access-block 없음 — 공개 노출 경로 확인"
+    # rc 만으로는 '설정 없음'과 'AccessDenied' 을 구별할 수 없다 — stderr
+    # 내용으로 권한 오류를 별도 표시해 허위 '미설정' 경고를 막는다.
+    E=$(aws s3api get-bucket-encryption --bucket "${TFSTATE_BUCKET}" 2>&1) || {
+        case "${E}" in
+            *AccessDenied*|*Forbidden*) echo "  ⚠ SSE 암호화 조회 거부 — 버킷 정책/권한 확인" ;;
+            *) echo "  ⚠ SSE 기본 암호화 없음 — get-bucket-encryption 확인" ;;
+        esac; }
+    E=$(aws s3api get-public-access-block --bucket "${TFSTATE_BUCKET}" 2>&1) || {
+        case "${E}" in
+            *AccessDenied*|*Forbidden*) echo "  ⚠ public-access-block 조회 거부 — 버킷 정책/권한 확인" ;;
+            *) echo "  ⚠ public-access-block 없음 — 공개 노출 경로 확인" ;;
+        esac; }
 else
     # 2) Versioning (이전 state 복원용)
     aws s3api put-bucket-versioning \

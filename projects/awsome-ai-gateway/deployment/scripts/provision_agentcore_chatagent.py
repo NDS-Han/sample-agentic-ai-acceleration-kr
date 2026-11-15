@@ -373,7 +373,16 @@ def find_runtime():
     for page in ctl.get_paginator("list_agent_runtimes").paginate():
         for it in page.get("agentRuntimes", []):
             if it.get("agentRuntimeName") == AGENT_NAME:
-                return ctl.get_agent_runtime(agentRuntimeId=it["agentRuntimeId"])
+                try:
+                    return ctl.get_agent_runtime(
+                        agentRuntimeId=it["agentRuntimeId"])
+                except ClientError as e:
+                    # list ↔ get 사이에 삭제된 경우 — 다음 목록으로 수렴.
+                    if e.response["Error"]["Code"] in (
+                            "ResourceNotFoundException",
+                            "ResourceNotFound"):
+                        continue
+                    raise
     return None
 
 
@@ -522,6 +531,14 @@ def ensure_runtime(dry: bool) -> str:
             _wait_ready(rid)
             log("Runtime READY (updated)")
             return arn
+        # CREATING/UPDATING 등 미준비 상태의 ARN 을 넘기면 helm 주입 직후
+        # 호출이 실패한다 — READY 가 될 때까지 기다려 반환한다.
+        if ex.get("status") != "READY":
+            if not dry:
+                _wait_ready(ex["agentRuntimeId"])
+                log("Runtime READY (existing)")
+            else:
+                log(f"[dry-run] Runtime 대기: status={ex.get('status')}")
         log(f"Runtime 재사용: {arn} ({ex.get('status')})")
         return arn
     if dry:
@@ -568,8 +585,15 @@ def teardown() -> None:
     if not ex:
         log("Runtime 없음 — 건너뜀")
         return
-    _control().delete_agent_runtime(agentRuntimeId=ex["agentRuntimeId"])
-    log(f"Runtime 삭제 요청: {ex['agentRuntimeArn']}")
+    if ex.get("status") == "DELETING":
+        log("Runtime 이미 삭제 중 — 건너뜀")
+        return
+    try:
+        _control().delete_agent_runtime(agentRuntimeId=ex["agentRuntimeId"])
+        log(f"Runtime 삭제 요청: {ex['agentRuntimeArn']}")
+    except ClientError as e:
+        # 삭제 실패로 teardown 전체가 죽지 않게 — 다음 실행이 수렴한다.
+        log(f"Runtime 삭제 실패({e.response['Error']['Code']})")
 
 
 def main() -> None:

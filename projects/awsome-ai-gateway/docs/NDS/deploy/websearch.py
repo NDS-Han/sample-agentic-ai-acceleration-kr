@@ -143,4 +143,12 @@ def upsert_env_file(env_path: Path, keys: dict[str, str]) -> None:
     for k, v in keys.items():
         if k not in seen:
             out.append(f"{k}={v}")
-    env_path.write_text("\n".join(out) + "\n")
+    # .env 에는 생성 시크릿이 있다 — 직접 truncate 는 쓰기 중 크래시 시
+    # 반쪽 파일을 남긴다. 임시파일+rename 으로 원자화하고 권한을 보존한다.
+    tmp = env_path.with_name(env_path.name + ".tmp")
+    tmp.write_text("\n".join(out) + "\n")
+    if env_path.exists():
+        tmp.chmod(env_path.stat().st_mode & 0o777)
+    else:
+        tmp.chmod(0o600)
+    tmp.replace(env_path)

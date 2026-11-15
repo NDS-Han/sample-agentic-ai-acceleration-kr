@@ -165,7 +165,10 @@ def check_compose(cfg: GatewayConfig, out_dir: Path) -> DoctorReport:
     # 5. 드리프트 — gateway.yaml 대비 .env 결정적 키
     from .render.compose import desired_env
     desired = desired_env(cfg)
-    diffs = [k for k, v in desired.items() if env.get(k) not in (None, "", v)]
+    # 값이 다른 키뿐 아니라 비어 있거나 삭제된 키도 drift 다 —
+    # WEB_SEARCH_ENABLED 를 지우면 기능이 조용히 꺼진다.
+    diffs = [k for k, v in desired.items()
+             if env.get(k) != v and (v != "" or env.get(k) not in (None, ""))]
     if diffs:
         rep.add("WARN", "drift", f".env 가 gateway.yaml 과 다른 키: {', '.join(diffs)} (수동 편집?)")
     else:
@@ -338,17 +341,25 @@ def check_ecs(cfg: GatewayConfig, gen_dir: Path, repo_root: Path) -> DoctorRepor
         if fam and not arns:
             rep.add("HIGH", "migration", "migration task 실행 기록 없음")
         elif fam:
-            r = _aws(["ecs", "describe-tasks", "--cluster", cluster,
-                      "--tasks", *arns[:100]], cfg.aws.region)
-            if r.returncode != 0:
+            # describe-tasks 는 호출당 100개 제한 — 절단된 부분집합의
+            # max(stoppedAt) 이 진짜 최신이 아닐 수 있어 전부 배치 조회한다.
+            tasks = []
+            describe_failed = False
+            for i in range(0, len(arns), 100):
+                r = _aws(["ecs", "describe-tasks", "--cluster", cluster,
+                          "--tasks", *arns[i:i + 100]], cfg.aws.region)
+                if r.returncode != 0:
+                    describe_failed = True
+                    break
+                try:
+                    tasks += json.loads(r.stdout).get("tasks", [])
+                except json.JSONDecodeError:
+                    describe_failed = True
+                    break
+            if describe_failed:
                 rep.add("WARN", "migration",
                         f"describe-tasks 실패: {r.stderr.strip()[:150]}")
                 tasks = []
-            else:
-                try:
-                    tasks = json.loads(r.stdout).get("tasks", [])
-                except json.JSONDecodeError:
-                    tasks = []
             if not tasks:
                 rep.add("WARN", "migration",
                         "describe-tasks 결과가 비어 있습니다 — 이력 확인 불가")
@@ -444,17 +455,20 @@ def _check_cluster_version(rep: DoctorReport, meta: dict, repo_root: Path,
     """
     declared = ""
     env_dir = repo_root / meta["env_dir"] if meta.get("env_dir") else None
-    tfvars = env_dir / "terraform.tfvars" if env_dir else None
-    if tfvars and tfvars.exists():
+    if env_dir and env_dir.exists():
         from .render.common import tfvars_clean
-        # ^ 앵커 + 주석 제거 — `# eks_cluster_version=`/`legacy_eks_cluster_version=`
-        # 같은 죽은 선언이 라이브와 무관한 허위 다운그레이드 경고를 만든다.
-        try:
+        # 전 채널(terraform.tfvars + .json + *.auto.tfvars{,.json})을 terraform
+        # 로드 순서로 읽는다 — auto.tfvars 만 선언된 버전을 못 보면 variables.tf
+        # 기본값과 라이브를 비교해 허위 다운그레이드 경고를 낸다.
+        from .render.eks import _env_tfvars_texts
+        for text in _env_tfvars_texts(env_dir):
+            # ^ 앵커 + 주석 제거 — `# eks_cluster_version=`/`legacy_eks_cluster_version=`
+            # 같은 죽은 선언이 라이브와 무관한 허위 다운그레이드 경고를 만든다.
+            # terraform 은 last-wins — 채널 순서대로 돌며 마지막 매치를 취한다.
             m = re.search(r'(?m)^\s*eks_cluster_version\s*=\s*"(\d+\.\d+)"',
-                          tfvars_clean(tfvars.read_text()))
-        except OSError:
-            m = None
-        declared = m.group(1) if m else ""
+                          tfvars_clean(text))
+            if m:
+                declared = m.group(1)
     if not declared and env_dir:
         # 미선언이면 variables.tf 기본값이 실제 적용값 — 비교 대상은 그쪽이다.
         varf = env_dir / "variables.tf"
@@ -742,7 +756,11 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         want_cidrs = ",".join(cfg.network.allowed_cidrs)
         # 선언된 제한이 live 에 없으면 ALB 가 사실상 전체 공개 — 어노테이션
         # 부재(빈 문자열)도 drift 로 잡아야 침묵 개방을 놓치지 않는다
-        if cfg.network.allowed_cidrs and cidr != want_cidrs:
+        # 같은 CIDR 집합을 순서만 다르게 쓴 것은 drift 가 아니다 —
+        # 어노테이션 문자열과 선언을 집합으로 비교한다.
+        if cfg.network.allowed_cidrs and (
+                set(filter(None, cidr.split(",")))
+                != set(cfg.network.allowed_cidrs)):
             drifts.append(
                 f"inbound-cidrs={cidr or '(미설정 — 전체 개방)'}≠{want_cidrs}")
         live_region = (live.get("aws") or {}).get("region")

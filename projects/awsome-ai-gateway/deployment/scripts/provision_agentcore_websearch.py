@@ -96,6 +96,15 @@ def ensure_role(acct: str, dry: bool) -> str:
             log(f"IAM role reused: {ROLE_NAME}")
             # 재사용 시 trust 도 수렴한다 — 예전 실행이 조건 없이 만든 role 을
             # 영구히 그대로 두지 않는다(put_role_policy 와 같은 멱등 갱신).
+            # 단, 다른 용도로 만든 동명 role 이 있을 수 있으니 소유 표식이
+            # 다르면 경고를 남긴다(teardown 도 이 표식으로 역삭제를 게이트).
+            try:
+                desc = iam.get_role(RoleName=ROLE_NAME)["Role"].get("Description", "")
+            except ClientError:
+                desc = ""
+            if desc != "AgentCore Gateway exec role for managed Web Search":
+                log(f"WARN: {ROLE_NAME} 의 Description 이 프로비저너 소유 표식과 "
+                    f"다릅니다({desc!r}) — 수동/외부 생성 role 을 채택합니다")
             iam.update_assume_role_policy(
                 RoleName=ROLE_NAME, PolicyDocument=json.dumps(trust))
         else:
@@ -111,7 +120,14 @@ def find_gateway():
     for page in gw.get_paginator("list_gateways").paginate():
         g = next((x for x in page.get("items", []) if x.get("name") == GW_NAME), None)
         if g:
-            return gw.get_gateway(gatewayIdentifier=g["gatewayId"])
+            try:
+                return gw.get_gateway(gatewayIdentifier=g["gatewayId"])
+            except ClientError as e:
+                # list ↔ get 사이에 삭제된 경우 — 다음 목록으로 수렴한다.
+                if e.response["Error"]["Code"] in (
+                        "ResourceNotFoundException", "ResourceNotFound"):
+                    continue
+                raise
     return None
 
 
@@ -135,6 +151,16 @@ def ensure_gateway(role_arn: str, dry: bool):
                 fail("Gateway 삭제 전파 타임아웃 — 콘솔에서 삭제 후 재시도하세요")
         existing = None
     if existing:
+        # 이름만으로 채택하기 전에 우리가 만든 형태인지 확인한다 — 동명의
+        # CUSTOM_JWT gateway 를 채택하면 상태는 READY 인데 호출이 전부 403.
+        if existing.get("authorizerType") != "AWS_IAM":
+            fail(f"Gateway {GW_NAME} 이 이미 있지만 authorizerType="
+                 f"{existing.get('authorizerType')} — 외부 소유로 간주하고 중단합니다. "
+                 "삭제하거나 이름을 바꾼 뒤 재실행하세요")
+        if existing.get("roleArn") and existing["roleArn"] != role_arn:
+            log(f"WARN: Gateway roleArn({existing['roleArn']}) 이 이번 실행의 "
+                f"role({role_arn}) 과 다릅니다 — gateway 는 재사용하고 role 은 "
+                "건드리지 않습니다")
         log(f"Gateway reused: {existing['gatewayId']} ({existing.get('status')})")
         return existing["gatewayId"], existing["gatewayUrl"]
     if dry:
@@ -181,12 +207,15 @@ def ensure_target(gw_id: str, dry: bool) -> str:
                                  "UPDATE_FAILED", "DELETING", "DELETED"):
         # 죽은 target 은 재사용하면 검색 도구가 영구 실패 — 삭제 후 재생성.
         log(f"Target {ex.get('status')} 상태 — 재생성을 위해 삭제: {ex['targetId']}")
-        _control().delete_gateway_target(gatewayIdentifier=gw_id,
-                                         targetId=ex["targetId"])
+        if ex.get("status") != "DELETING":
+            _control().delete_gateway_target(gatewayIdentifier=gw_id,
+                                             targetId=ex["targetId"])
         for _ in range(30):
             if find_target(gw_id) is None:
                 break
             time.sleep(2)
+        else:
+            fail("Target 삭제 전파 타임아웃 — 콘솔에서 삭제 후 재시도하세요")
         ex = None
     if ex:
         log(f"Target reused: {ex['targetId']} ({ex.get('status')})")
@@ -265,8 +294,15 @@ def cmd_teardown():
     if g:
         t = find_target(g["gatewayId"])
         if t:
-            gw.delete_gateway_target(gatewayIdentifier=g["gatewayId"], targetId=t["targetId"])
-            log(f"target deleted: {t['targetId']}")
+            try:
+                if t.get("status") != "DELETING":
+                    gw.delete_gateway_target(gatewayIdentifier=g["gatewayId"],
+                                             targetId=t["targetId"])
+                    log(f"target deleted: {t['targetId']}")
+            except ClientError as e:
+                # target 삭제가 실패해도 gateway/IAM 정리는 계속한다 —
+                # 남은 target 은 다음 실행이 수렴.
+                log(f"target 삭제 실패({e.response['Error']['Code']}) — 계속 진행")
             # target 삭제가 전파되기 전에 gateway 를 지우면 Conflict 계열 오류 —
             # 고정 sleep 대신 사라질 때까지 폴링한다.
             for _ in range(30):
@@ -282,15 +318,37 @@ def cmd_teardown():
     else:
         log("gateway NONE — skip")
     iam = boto3.client("iam")
-    try:
-        iam.delete_role_policy(RoleName=ROLE_NAME, PolicyName="web-search-invoke")
-        iam.delete_role(RoleName=ROLE_NAME)
-        log(f"IAM role deleted: {ROLE_NAME}")
-    except ClientError as e:
-        if e.response["Error"]["Code"] == "NoSuchEntity":
-            log("IAM role NONE — skip")
-        else:
-            raise
+    # 우리가 만든 role 만 지운다 — gateway 가 다른 role 을 참조하거나(수동
+    # 배포), Description 이 프로비저너 표식과 다르면 외부 소유로 보고 손대지 않는다.
+    role_ours = True
+    expected = f"arn:aws:iam::{account_id()}:role/{ROLE_NAME}"
+    if g and g.get("roleArn") and g["roleArn"] != expected:
+        log(f"WARN: gateway 가 외부 role({g['roleArn']}) 을 참조 — "
+            f"{ROLE_NAME} 삭제를 건너뜁니다")
+        role_ours = False
+    if role_ours:
+        try:
+            desc = iam.get_role(RoleName=ROLE_NAME)["Role"].get("Description", "")
+            if desc != "AgentCore Gateway exec role for managed Web Search":
+                log(f"WARN: {ROLE_NAME} 의 Description({desc!r}) 이 소유 표식과 "
+                    "달라 삭제를 건너뜁니다")
+                role_ours = False
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchEntity":
+                log("IAM role NONE — skip")
+                role_ours = False
+            else:
+                raise
+    if role_ours:
+        try:
+            iam.delete_role_policy(RoleName=ROLE_NAME, PolicyName="web-search-invoke")
+            iam.delete_role(RoleName=ROLE_NAME)
+            log(f"IAM role deleted: {ROLE_NAME}")
+        except ClientError as e:
+            if e.response["Error"]["Code"] == "NoSuchEntity":
+                log("IAM role NONE — skip")
+            else:
+                raise
     log("teardown complete.")
 
 

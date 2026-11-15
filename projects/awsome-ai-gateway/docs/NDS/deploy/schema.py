@@ -489,9 +489,9 @@ class GatewayConfig:
         e: list[str] = []
         if not self.env:
             e.append("env 는 필수입니다 (예: acme-small).")
-        elif not _ENV_RE.match(self.env):
+        elif not _ENV_RE.fullmatch(self.env):
             e.append(f"env '{self.env}' 는 소문자/숫자/하이픈 2~31자여야 합니다.")
-        if not _REGION_RE.match(self.aws.region):
+        if not _REGION_RE.fullmatch(self.aws.region):
             e.append(f"aws.region '{self.aws.region}' 이 리전 형식이 아닙니다 (예: ap-northeast-2).")
         if self.deploy.target not in DEPLOY_TARGETS:
             e.append(f"deploy.target 은 {DEPLOY_TARGETS} 중 하나여야 합니다: {self.deploy.target}")
@@ -519,15 +519,15 @@ class GatewayConfig:
         # HCL 파괴로 번져 다른 env 의 state/plan 에 손이 닿는다.
         for key, val in (("deploy.namespace", self.deploy.namespace),
                          ("deploy.release", self.deploy.release)):
-            if val and not _K8S_NAME_RE.match(val):
+            if val and not _K8S_NAME_RE.fullmatch(val):
                 e.append(f"{key} '{val}' 은 소문자/숫자/하이픈 DNS-1123 이름이어야 "
                          "합니다 — tfvars/helm 인자로 그대로 쓰입니다.")
         if (self.deploy.tfstate_bucket
-                and not _S3_BUCKET_RE.match(self.deploy.tfstate_bucket)):
+                and not _S3_BUCKET_RE.fullmatch(self.deploy.tfstate_bucket)):
             e.append(f"deploy.tfstate_bucket '{self.deploy.tfstate_bucket}' 이 "
                      "S3 버킷명 형식(소문자/숫자/.-, 3~63자)이 아닙니다.")
         if (self.deploy.tfstate_table
-                and not _DDB_TABLE_RE.match(self.deploy.tfstate_table)):
+                and not _DDB_TABLE_RE.fullmatch(self.deploy.tfstate_table)):
             e.append(f"deploy.tfstate_table '{self.deploy.tfstate_table}' 이 "
                      "DynamoDB 테이블명 형식(3~255자)이 아닙니다.")
         al = self.features.alerting
@@ -538,7 +538,7 @@ class GatewayConfig:
             e.append("features.alerting.emails 는 enabled=true 일 때만 유효합니다 — "
                      "email 구독은 SNS topic 이 있어야 붙습니다.")
         for em in al.emails:
-            if not _EMAIL_RE.match(em):
+            if not _EMAIL_RE.fullmatch(em):
                 e.append(f"features.alerting.emails '{em}' — 이메일 형식이 아닙니다 "
                          "(오타가 있으면 apply 중간에 SNS 구독 생성이 실패합니다).")
         # case-variant/중복 주소는 toset(for_each) 에 별개 구독으로 남아
@@ -565,6 +565,10 @@ class GatewayConfig:
                              f"(허용: {sorted(EKS_TAGGABLE_SERVICES)})")
         # registry 비우면 ecs 는 모듈이 ECR repo 를 만들고, eks 는 apply 가
         # <account>.dkr.ecr.<region> 으로 추론한다 (install-eks.sh 와 동일)
+        if len(self.infra.azs) > 54:
+            # 파생 서브넷의 세 번째 옥텟이 255 를 넘어 무효 CIDR 이 된다.
+            e.append("infra.azs 는 54개를 초과할 수 없습니다 — "
+                     "파생 서브넷 규약이 /24 옥텟을 초과합니다")
         if self.infra.azs and len(self.infra.azs) < 2:
             e.append("infra.azs 는 2개 이상이어야 합니다 — "
                      "DB/ElastiCache subnet group 이 AZ 2개를 요구합니다.")
@@ -632,7 +636,7 @@ class GatewayConfig:
             e.append("domain.mode=route53-acm 이면 domain.name 이 필수입니다.")
         # 캡처/수작업 입력의 쓰레기 값이 ingress host·ACM·Route53 으로 번지는 걸
         # 선언 단계에서 차단 — Caddyfile 파생 이름(후행 콤마 등)이 대표 사례.
-        if self.domain.name and not _HOSTNAME_RE.match(self.domain.name):
+        if self.domain.name and not _HOSTNAME_RE.fullmatch(self.domain.name):
             e.append(f"domain.name '{self.domain.name}' 이 hostname 형식이 아닙니다.")
         if self.domain.zone_id and not re.fullmatch(r"Z[0-9A-Z]+", self.domain.zone_id):
             e.append(f"domain.zone_id '{self.domain.zone_id}' 이 hosted zone ID "
@@ -775,7 +779,12 @@ class GatewayConfig:
                 e.append(f"allowed_cidrs 항목이 유효한 CIDR 가 아닙니다: {c!r}")
         if self.infra.vpc_cidr:
             try:
-                ipaddress.ip_network(self.infra.vpc_cidr, strict=False)
+                net = ipaddress.ip_network(self.infra.vpc_cidr, strict=False)
+                # 서브넷 파생 규약은 IPv4 a.b.x.y/24 전용 — IPv6 는
+                # subnet_cidrs 의 subnet_of 비교가 TypeError 로 죽는다.
+                if net.version != 4:
+                    e.append(f"infra.vpc_cidr 는 IPv4 여야 합니다: "
+                             f"{self.infra.vpc_cidr!r}")
             except ValueError:
                 e.append(f"infra.vpc_cidr 가 유효한 CIDR 가 아닙니다: "
                          f"{self.infra.vpc_cidr!r} (예: 10.0.0.0/16)")
@@ -876,7 +885,7 @@ _REGION_RE = re.compile(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$")
 _K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
 _S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
 _DDB_TABLE_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,255}$")
-_BEDROCK_ARN_RE = re.compile(r"^arn:aws[a-z-]*:bedrock:.+")
+_BEDROCK_ARN_RE = re.compile(r"^arn:aws[a-z-]*:bedrock:.+$")
 
 
 def _str_items(v: Any, path: str, errors: list[str],
@@ -893,7 +902,7 @@ def _str_items(v: Any, path: str, errors: list[str],
         return []
     out: list[str] = []
     for x in items:
-        if not isinstance(x, str) or (item_re is not None and not item_re.match(x)):
+        if not isinstance(x, str) or (item_re is not None and not item_re.fullmatch(x)):
             errors.append(f"{path} 항목은 {item_desc} 이어야 합니다: {x!r}")
         else:
             out.append(x)
@@ -964,7 +973,7 @@ def from_dict(raw: dict) -> GatewayConfig:
     for _hk, _hv in _domain_hosts.items():
         # null/str(None) 같은 값은 "None" 리터럴 호스트로 렌더돼 ingress 를
         # 깨뜨리므로 형식 검증 — 소문자 RFC1123 hostname, 스킴/경로 불가.
-        if not isinstance(_hv, str) or not _HOSTNAME_RE.match(_hv):
+        if not isinstance(_hv, str) or not _HOSTNAME_RE.fullmatch(_hv):
             errors.append(
                 f"domain.hosts.{_hk} 는 소문자 hostname 이어야 합니다: {_hv!r}")
     _check_unknown(features, _FEATURE_KEYS, "features", errors)
@@ -1156,8 +1165,10 @@ def subnet_cidrs(vpc_cidr: str, n: int) -> dict[str, list[str]]:
         vpc_net = ipaddress.ip_network(vpc_cidr, strict=False)
         outside = [c for lst in out.values() for c in lst
                    if not ipaddress.ip_network(c).subnet_of(vpc_net)]
-    except ValueError:
-        outside = []  # 형식 오류는 infra.vpc_cidr 스키마 검증이 잡는다
+    except (ValueError, TypeError):
+        # 형식 오류는 infra.vpc_cidr 스키마 검증이 잡는다 — subnet_of 의
+        # IPv4↔IPv6 비교 TypeError 도 여기서 삼킨다.
+        outside = []
     if outside:
         raise SchemaError(
             f"파생 서브넷이 vpc_cidr({vpc_cidr}) 범위 밖입니다: {outside} — "

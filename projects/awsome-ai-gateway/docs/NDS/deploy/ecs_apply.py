@@ -134,11 +134,15 @@ def push_images(cfg: GatewayConfig, outputs: dict, repo_root: Path) -> None:
               "-t", image, str(repo_root / ctx)])
         # IMMUTABLE repo — 같은 태그 재push 는 ImageTagAlreadyExists 로 죽는다.
         # 재시도/설정만 바꾼 apply 가 매번 여기서 멈추지 않게 이미 있으면 건너뛴다.
-        chk = subprocess.run(
-            ["aws", "ecr", "describe-images", "--repository-name",
-             url.split("/", 1)[-1], "--image-ids", f"imageTag={cfg.images.tag}",
-             "--region", cfg.aws.region, "--output", "json"],
-            capture_output=True, text=True, timeout=30)
+        try:
+            chk = subprocess.run(
+                ["aws", "ecr", "describe-images", "--repository-name",
+                 url.split("/", 1)[-1], "--image-ids",
+                 f"imageTag={cfg.images.tag}",
+                 "--region", cfg.aws.region, "--output", "json"],
+                capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            raise SystemExit(f"ecr describe-images 실행 실패: {exc}")
         if chk.returncode == 0:
             print(f"ⓘ {image} — 이미 존재 (immutable repo) — push 건너뜀. "
                   "내용이 바뀌었으면 images.tag 를 올리세요", file=sys.stderr)
@@ -164,6 +168,8 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
     except subprocess.TimeoutExpired:
         r = subprocess.CompletedProcess([], returncode=255, stdout="",
                                         stderr="waiter timeout")
+    except FileNotFoundError:
+        raise SystemExit("aws CLI 를 찾을 수 없습니다 — ecs wait 실패")
     if r.returncode != 0:
         # 타임아웃이 곧 실패는 아니다 — 느린 롤아웃이 뒤에서 완료될 수 있어
         # 아래 describe 로 실제 상태를 확인하고 판정한다
@@ -222,6 +228,27 @@ def _save_extra_vars(gen_dir: Path, extra: dict) -> None:
     _extra_path(gen_dir).write_text(json.dumps(extra, indent=2))
 
 
+def effective_extra_vars(cfg: GatewayConfig, gen_dir: Path) -> dict:
+    """apply 가 강제하는 declared-off 수렴을 preview 에도 동일하게 적용한
+    extra-vars — 읽기 전용(파일은 건드리지 않는다).
+
+    apply() 는 feature 선언이 꺼지면 저장본에서 키를 빼는데, preview 가
+    날것의 저장본을 렌더하면 '확인한 plan ≠ 적용된 plan' 이 된다 —
+    render/plan/teardown-preview 도 같은 프루닝을 거치게 한다."""
+    v = load_extra_vars(gen_dir)
+    if not cfg.features.web_search:
+        v.pop("agentcore_gateway_url", None)
+    if not cfg.features.bi_insight:
+        v.pop("agentcore_runtime_arn", None)
+    if not cfg.features.pricing_lambda:
+        v.pop("litellm_pricing_lambda", None)
+    if cfg.domain.mode not in ("none", "cloudfront-temp"):
+        for k in ("admin_ui_nextauth_url", "gateway_external_url",
+                  "admin_api_external_url"):
+            v.pop(k, None)
+    return v
+
+
 def _derived_url_vars(cfg: GatewayConfig, outputs: dict) -> dict:
     """도메인 없는 모드이면 ALB DNS 기반 외부 URL — task-def NEXTAUTH_URL 등에 필요.
     tfvars 렌더와 같은 조건을 써야 한다 — cloudfront-temp 는 ecs 경로에서
@@ -259,18 +286,27 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     # install-guide §5-1/§5-2 자동화 — AgentCore Gateway URL 은 프로비저닝
     # 결과물이라 선언이 아니라 apply 산출물이다. extra-vars.json 에 기록해
     # 다음 apply 도 같은 URL 로 렌더한다 (프로비저너는 멱등이라 재사용).
-    if cfg.features.web_search and not existing.get("agentcore_gateway_url"):
+    # 저장된 URL 도 매번 status 로 재검증한다 — 대역 밖에서 지워진 gateway 를
+    # 가리키는 stale URL 을 두면 WEB_SEARCH_ENABLED=true 인 채 검색만 죽는다
+    # (eks 경로와 같은 ensure 계약 — status 는 읽기 전용이라 비용이 없다).
+    if cfg.features.web_search:
         url = websearch.ensure_gateway_url(cfg.env, repo_root)
         if url:
             existing["agentcore_gateway_url"] = url
             _save_extra_vars(gen_dir, existing)
+        elif existing.get("agentcore_gateway_url"):
+            print("⚠ 저장된 web_search URL 을 재검증하지 못했습니다 — 기존 값을 "
+                  "유지합니다 (일시적 조회 실패일 수 있음)", file=sys.stderr)
         else:
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 없이 "
                   "진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
-    elif not cfg.features.web_search and existing.pop("agentcore_gateway_url", None):
-        # 선언을 껐으면 잔여 URL 도 지운다 — taskdef 의
-        # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
-        _save_extra_vars(gen_dir, existing)
+    ws_popped = False
+    if not cfg.features.web_search:
+        ws_popped = bool(existing.pop("agentcore_gateway_url", None))
+        if ws_popped:
+            # 선언을 껐으면 잔여 URL 도 지운다 — taskdef 의
+            # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
+            _save_extra_vars(gen_dir, existing)
 
     # 도메인 모드를 none/cloudfront-temp → route53-acm 으로 올리면 이전에 기록한
     # ALB-DNS 파생 URL 이 남아 모듈의 도메인 유도 URL 을 덮어쓴다 — 로그인
@@ -295,16 +331,26 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     # 함수를 못 만들었는데 이름만 주입하면 admin-api 의 단가 조회가 런타임
     # 에러를 내고 '미주입 = 503 graceful-off' 계약을 깬다 — ensure 성공분만
     # extra-vars 에 실어 tfvars 로 내보낸다.
+    pricing_popped = False
     if cfg.features.pricing_lambda:
         from . import pricinglambda
         if pricinglambda.ensure(cfg, repo_root, attach_invoke=False):
             existing["litellm_pricing_lambda"] = pricinglambda.fn_name(cfg.env)
         else:
-            existing.pop("litellm_pricing_lambda", None)
-            print("⚠ pricing Lambda 보장 실패 — LITELLM_PRICING_LAMBDA 없이 "
-                  "진행합니다 (단가 조회는 503 graceful-off)", file=sys.stderr)
+            # ensure 일시 실패(스로틀·자격증명)가 살아 있는 함수의 이름을 지우면
+            # taskdef 이 env 를 빼 admin-api 가 503 graceful-off 로 떨어진다 —
+            # 함수가 실제로 남아 있으면 이름(결정적)을 유지한다. 상태 조회도
+            # 못 하면 보수적으로 빼서 '이름만 있는 유령 주입'을 막는다.
+            st = pricinglambda.status(cfg.aws.region, cfg.env)
+            if st.get("function") not in ("미배포", "Failed"):
+                print("⚠ pricing Lambda 보장 실패했지만 함수는 존재 — 기존 "
+                      "주입을 유지합니다", file=sys.stderr)
+            else:
+                existing.pop("litellm_pricing_lambda", None)
+                print("⚠ pricing Lambda 보장 실패 — LITELLM_PRICING_LAMBDA 없이 "
+                      "진행합니다 (단가 조회는 503 graceful-off)", file=sys.stderr)
     else:
-        existing.pop("litellm_pricing_lambda", None)
+        pricing_popped = bool(existing.pop("litellm_pricing_lambda", None))
     # extra-vars 는 apply 간 영속 저장소 — 키를 메모리에만 두면 저장본과
     # tfvars 가 어긋나 다음 run 이 var 삭제로 drift 를 낸다
     _save_extra_vars(gen_dir, existing)
@@ -357,6 +403,16 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
                 # project 변수를 바꾼 env 에선 도출 이름과 실측이 어긋나
                 # Runtime 이 새어나간다 — outputs 실측을 우선한다.
                 chat_agent_name=partial.get("chat_agent_name", ""))
+    if ws_popped:
+        # 선언을 껐는데 AgentCore Gateway(us-east-1, 유료)는 프로비저너 소유라
+        # terraform/env 수렴이 못 지운다 — bi_insight 와 같은 off-수렴으로
+        # 이전 apply 흔적(popped URL)이 있을 때 멱등 정리한다.
+        from . import websearch as _ws
+        _ws.teardown(cfg.env, repo_root)
+    if pricing_popped:
+        # invoke 정책은 모듈 소유라 var-off 로 수렴 — Lambda+role 만 정리.
+        from . import pricinglambda as _pl
+        _pl.teardown(cfg, detach_invoke=False)
     if not skip_push:
         push_images(cfg, partial, repo_root)
     outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)

@@ -448,3 +448,26 @@ def test_litellm_pricing_lambda_only_via_extra_vars():
     tf = ecs_render.desired_tfvars(
         cfg, extra_vars={"litellm_pricing_lambda": "fn-x"})
     assert tf["litellm_pricing_lambda"] == "fn-x"
+
+
+def test_effective_extra_vars_prunes_declared_off_keys(tmp_path):
+    """preview 도 apply 와 같은 프루닝을 거쳐야 '확인한 plan = 적용된 plan'
+    이다 — 선언 해제된 기능의 저장 키가 preview 에 살아나면 안 된다."""
+    import json
+    from deploy import ecs_apply
+    (tmp_path / "extra-vars.json").write_text(json.dumps({
+        "agentcore_gateway_url": "https://g/mcp",
+        "agentcore_runtime_arn": "arn:x",
+        "litellm_pricing_lambda": "fn",
+        "admin_ui_nextauth_url": "http://alb:3000"}))
+    v = ecs_apply.effective_extra_vars(_cfg(), tmp_path)
+    assert "agentcore_gateway_url" not in v
+    assert "agentcore_runtime_arn" not in v
+    assert "litellm_pricing_lambda" not in v
+    # domain.mode=none → ALB-DNS 파생 URL 은 유지
+    assert v["admin_ui_nextauth_url"] == "http://alb:3000"
+    # domain.mode 가 올라가면 ALB-DNS 파생 키는 프루닝
+    cfg2 = _cfg(domain={"mode": "route53-acm", "name": "x.example.com",
+                        "zone_id": "Z1"})
+    v2 = ecs_apply.effective_extra_vars(cfg2, tmp_path)
+    assert "admin_ui_nextauth_url" not in v2

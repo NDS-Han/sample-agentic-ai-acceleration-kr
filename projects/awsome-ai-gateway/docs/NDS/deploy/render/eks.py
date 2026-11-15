@@ -450,7 +450,10 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
     # Fargate profile·IRSA serviceaccount 스코프는 application_namespace 를
     # 따른다 — deploy.namespace 를 바꾸면 여기가 어긋나 파드가 스케줄되지
     # 못한다. helm 이 가는 네임스페이스로 항상 정렬한다.
-    lines.append(f'application_namespace = "{cfg.deploy.namespace}"')
+    # 스키마가 DNS-1123 을 보장하지만 심층 방어로 JSON 이스케이프를 쓴다 —
+    # raw f-string 은 개행/따옴표를 tfvars 구문으로 직접 새게 한다.
+    lines.append('application_namespace = '
+                 + json.dumps(cfg.deploy.namespace))
     if env_dir:
         try:
             from .common import tfvars_clean
@@ -576,10 +579,15 @@ def _tfvars_list(env_dir: Path | None, name: str) -> list[str]:
     from .common import tfvars_clean
     out: list[str] = []
     for text in _env_tfvars_texts(env_dir):
-        m = re.search(rf"(?m)^\s*{re.escape(name)}\s*=\s*\[(.*?)\]",
-                      tfvars_clean(text), re.S)
+        # `]` 를 담은 문자열 원소에서 멈추지 않게 — 따옴표 문자열이나
+        # `]` 외 문자만 반복해서 진짜 닫는 대괄호까지 읽는다.
+        m = re.search(
+            rf'(?m)^\s*{re.escape(name)}\s*=\s*\[((?:"(?:[^"\\]|\\.)*"|[^\]])*)\]',
+            tfvars_clean(text), re.S)
         if m:
-            out = re.findall(r'"([^"]+)"', m.group(1))  # 뒤 파일이 이긴다
+            # 뒤 파일이 이긴다 — 이스케이프된 따옴표도 원소로 인식
+            out = [s.replace('\\"', '"') for s in
+                   re.findall(r'\"((?:[^"\\]|\\.)*)\"', m.group(1))]
     return out
 
 

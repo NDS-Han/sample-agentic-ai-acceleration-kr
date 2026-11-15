@@ -144,9 +144,11 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
             lam.get_function(FunctionName=name)
             lam.update_function_code(FunctionName=name, ZipFile=zipb)
             lam.get_waiter("function_updated").wait(FunctionName=name)
+            # Runtime 도 수렴한다 — 수동/레거시 배포로 남은 구버전 런타임은
+            # ensure/status 어느 쪽에도 drift 로 표시되지 않는다.
             lam.update_function_configuration(
-                FunctionName=name, Timeout=TIMEOUT, MemorySize=MEMORY,
-                Environment={"Variables": FN_ENV})
+                FunctionName=name, Runtime=RUNTIME, Timeout=TIMEOUT,
+                MemorySize=MEMORY, Environment={"Variables": FN_ENV})
         except lam.exceptions.ResourceNotFoundException:
             lam.create_function(
                 FunctionName=name, Runtime=RUNTIME,

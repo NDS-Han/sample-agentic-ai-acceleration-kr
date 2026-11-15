@@ -1462,3 +1462,29 @@ def test_chat_agent_region_env_validated(monkeypatch):
         chatagent.resolved_region("ap-northeast-2")
     monkeypatch.setenv("CHAT_AGENT_REGION", "eu-west-1")
     assert chatagent.resolved_region("ap-northeast-2") == "eu-west-1"
+
+
+def test_tfvars_indented_dash_heredoc_terminator(tmp_path):
+    """<<-TAG 는 들여쓴 종결자를 허용한다 — 종결자를 못 찾으면 이후 선언
+    전부가 지워져 environment= 등이 보이지 않게 된다."""
+    (tmp_path / "terraform.tfvars").write_text(
+        'desc = <<-EOT\n'
+        '    production cluster\n'
+        '  EOT\n'
+        'environment = "prod"\n')
+    tv = capture._tfvars(tmp_path)
+    assert tv["environment"] == "prod"
+
+
+def test_tfvars_json_channels_loaded(tmp_path):
+    """terraform.tfvars.json / *.auto.tfvars.json 도 자동 로드 — 거기만
+    선언된 값이 캡처에서 유실되면 안 된다 (last-wins)."""
+    import json
+    (tmp_path / "terraform.tfvars").write_text('environment = "dev"\n')
+    (tmp_path / "terraform.tfvars.json").write_text(
+        json.dumps({"environment": "stage", "alert_emails": ["a@b.co"]}))
+    (tmp_path / "zz.auto.tfvars.json").write_text(
+        json.dumps({"models_profile": "p1"}))
+    tv = capture._tfvars(tmp_path)
+    assert tv["environment"] == "stage"
+    assert tv["alert_emails"] == ["a@b.co"] and tv["models_profile"] == "p1"

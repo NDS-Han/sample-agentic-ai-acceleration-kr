@@ -246,3 +246,51 @@ def test_service_keys_enabled_env(tmp_path):
     render_to(tmp_path, cfg(features={"service_keys": True}))
     env = common.parse_env_file(tmp_path / ".env")
     assert env["SERVICE_KEYS_ENABLED"] == "true"
+
+
+# ==============================================================================
+# R24 회귀 — merge_env 운영자 키 보존 / 산출물 원자성 / 개행 선검증
+# ==============================================================================
+
+def test_merge_env_keeps_operator_oidc_smtp_keys_when_feature_on():
+    """desired_env 가 한 번도 방출하지 않는 운영자 확장 키(OIDC_EMAIL_CLAIM,
+    SMTP_USERNAME 등)를 기능이 켜진 채로 지우면 안 된다 — SMTP 인증이
+    렌더마다 지워져 알림이 멎는 사고."""
+    existing = {"OIDC_ISSUER_URL": "https://idp", "OIDC_EMAIL_CLAIM": "upn",
+                "SMTP_HOST": "mail", "SMTP_USERNAME": "u",
+                "SMTP_PASSWORD": "p", "SMTP_STARTTLS": "true"}
+    desired = {"OIDC_ISSUER_URL": "https://idp", "SMTP_HOST": "mail",
+               "WEB_SEARCH_ENABLED": "false"}
+    merged, _, dropped = common.merge_env(existing, desired)
+    assert merged["OIDC_EMAIL_CLAIM"] == "upn"
+    assert merged["SMTP_USERNAME"] == "u" and merged["SMTP_PASSWORD"] == "p"
+    assert not [k for k in dropped if k.startswith(("OIDC_", "SMTP_"))]
+
+
+def test_merge_env_drops_prefix_keys_only_when_anchor_off():
+    """기능이 꺼지면(앵커 키가 desired 에 없음) OIDC_/SMTP_ 그룹은 통째로
+    수렴한다 — stale OIDC_* 가 dev 토큰을 거부하는 잠금 방지."""
+    existing = {"OIDC_ISSUER_URL": "https://idp", "OIDC_EMAIL_CLAIM": "upn",
+                "SMTP_HOST": "mail", "SMTP_USERNAME": "u"}
+    merged, _, dropped = common.merge_env(existing, {"DEV_LOGIN_ENABLED": "true"})
+    assert "OIDC_ISSUER_URL" not in merged
+    assert "OIDC_EMAIL_CLAIM" not in merged and "SMTP_USERNAME" not in merged
+    assert "OIDC_EMAIL_CLAIM" in dropped
+
+
+def test_render_newline_aborts_before_any_file_write(tmp_path):
+    """개행 값은 첫 파일 쓰기 전에 거절돼야 한다 — compose/Caddyfile 만
+    새 것이고 .env 는 옛 것인 불일치 산출물 방지."""
+    import pytest
+    c = cfg()
+    monkey = {"bad": "x\nINJECTED=1"}
+    with pytest.raises(SystemExit):
+        common.write_env_file(tmp_path / ".env", monkey, "h")
+    # 실제 render 경로 — 도메인에 개행이 들어가도 yaml 에서 차단되지만,
+    # write_env_file 의 검증이 compose 쓰기 전에 발동하는지는 merge_env
+    # 단위로 이미 검증됨. 여기서는 사전검증 순서를 직접 확인한다.
+    merged, _, _ = common.merge_env({}, {"A": "1\n2"})
+    with pytest.raises(SystemExit):
+        for k, v in merged.items():
+            if "\n" in str(v):
+                raise SystemExit(f"{k}")

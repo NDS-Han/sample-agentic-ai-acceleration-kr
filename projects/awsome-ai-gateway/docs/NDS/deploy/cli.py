@@ -736,7 +736,7 @@ def cmd_render(args) -> int:
         # apply 가 extra-vars.json 을 합쳐 재렌더하므로 preview 도 같은
         # tfvars 를 봐야 '확인한 plan ≠ 적용된 plan' 이 되지 않는다
         res = ecs_render.render(cfg, out,
-                                extra_vars=ecs_apply.load_extra_vars(out))
+                                extra_vars=ecs_apply.effective_extra_vars(cfg, out))
         console.print(f"[green]생성 완료 ({out}):")
         for f in res["files"]:
             console.print(f"  {f}")
@@ -807,7 +807,7 @@ def cmd_apply(args) -> int:
         # apply() 가 extra-vars.json 을 합쳐 재렌더한다 — 확인하는 plan 과
         # 실제 적용 plan 이 어긋나지 않게 preview 도 같은 tfvars 로 그린다
         res = ecs_render.render(cfg, out,
-                                extra_vars=ecs_apply.load_extra_vars(out))
+                                extra_vars=ecs_apply.effective_extra_vars(cfg, out))
         console.print(f"[green]render 완료 ({out})")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
@@ -840,10 +840,43 @@ def cmd_apply(args) -> int:
         from .render import eks as eks_render
         context = getattr(args, "context", "") or ""
         out = GEN_ROOT / cfg.env / "eks"
+        # render 가 deploy.yaml 을 덮어쓰기 전에 이전 배포 identity 를
+        # 보존한다 — release/namespace 를 바꾼 apply 는 upgrade 가 아니라
+        # '새 install + 구 release 고아화'가 된다 (같은 DB 를 공유하는
+        # 두 스택이 병행 기동).
+        prior_meta = {}
+        prior_meta_path = out / "deploy.yaml"
+        if prior_meta_path.exists():
+            try:
+                prior_meta = yaml.safe_load(
+                    prior_meta_path.read_text()) or {}
+            except yaml.YAMLError:
+                prior_meta = {}
         res = eks_render.render(cfg, out)
         console.print(f"[green]render 완료 ({out})")
         for n in res.get("notes", []):
             console.print(f"  [yellow]ⓘ {n}")
+        if isinstance(prior_meta, dict) and (
+                prior_meta.get("release"), prior_meta.get("namespace")
+        ) != (cfg.deploy.release, cfg.deploy.namespace) and prior_meta.get(
+                "release"):
+            old_rel, old_ns = prior_meta["release"], prior_meta["namespace"]
+            hs = eks_apply._run_quiet(
+                ["helm", "status", old_rel, "-n", old_ns or "default",
+                 *(["--kube-context", context] if context else [])])
+            if hs.returncode == 0:
+                console.print(
+                    f"[red]이전 배포 release '{old_rel}'(ns={old_ns})가 아직 "
+                    f"클러스터에 있습니다 — release/namespace 를 "
+                    f"'{cfg.deploy.release}'/'{cfg.deploy.namespace}' 로 바꾸면 "
+                    "upgrade 가 아니라 병행 install 이 되고 구 release 는 "
+                    "영구 고아가 됩니다. 의도한 변경이면 먼저 "
+                    f"`helm uninstall {old_rel} -n {old_ns}` 로 정리하고 "
+                    "재시도하세요")
+                return 1
+            console.print(f"ⓘ release 명칭이 {old_rel} → {cfg.deploy.release} "
+                          "로 바뀝니다 — 이전 release 는 클러스터에 없어 "
+                          "고아화 위험은 없습니다")
         if args.plan:
             try:
                 eks_apply.plan(cfg, out, REPO_ROOT, context)
@@ -872,6 +905,11 @@ def cmd_apply(args) -> int:
 
     import subprocess
     out = GEN_ROOT / cfg.env
+    env_file_pre = out / ".env"
+    # render 가 새 POSTGRES_PASSWORD 를 만들기 전에 .env 부재를 기록한다 —
+    # 볼륨에 이미 비밀번호가 박힌 pgdata 가 남아 있는데 새 비밀번호로
+    # 기동하면 모든 DB 접속이 실패한다.
+    env_existed = env_file_pre.exists()
     res = compose_render.render(cfg, out)
     console.print(f"[green]render 완료 ({out})")
     for n in res.get("notes", []):
@@ -893,6 +931,23 @@ def cmd_apply(args) -> int:
         return 0
     if not _confirm_apply(args):
         return 130
+    if not env_existed:
+        # .env 를 잃고(pgdata 볼륨은 살아 있음) 새 시크릿으로 기동하면
+        # postgres 가 옛 비밀번호를 요구해 DB 접속이 전부 잠긴다.
+        try:
+            v = subprocess.run(
+                ["docker", "volume", "ls", "-q", "-f",
+                 f"name=llm-gateway-{cfg.env}"],
+                capture_output=True, text=True, timeout=15)
+            if v.returncode == 0 and v.stdout.strip():
+                console.print(
+                    "[yellow]⚠ .env 가 없는데 기존 docker 볼륨이 남아 있습니다 — "
+                    "새로 생성된 POSTGRES_PASSWORD 가 기존 pgdata 와 어긋나 DB "
+                    "접속이 잠길 수 있습니다. 복구 방법: 이전 .env 복원, "
+                    "`deploy teardown --purge` 로 볼륨 삭제 후 재기동, 또는 "
+                    "ALTER USER 로 비밀번호 동기화")
+        except (OSError, subprocess.TimeoutExpired):
+            pass
     if cfg.features.web_search:
         # install-guide §5-1/§5-2 자동화 — AgentCore Gateway(멱등) 생성 후 URL 을
         # .env 에 주입. merge_env 가 비관리 키를 보존하므로 다음 render 도 유지된다.
@@ -1001,7 +1056,11 @@ def _teardown_compose(cfg: schema.GatewayConfig, args) -> int:
     if r.returncode != 0:
         console.print("[red]compose down 실패 — 로그를 확인하십시오")
         return 1
-    if cfg.features.web_search:
+    # yaml 에서 끄고 곧바로 teardown 하면 플래그가 꺼져 Gateway 가 새나간다 —
+    # .env 의 주입 흔적(AGENTCORE_GATEWAY_URL)으로도 정리한다.
+    from .render.common import parse_env_file
+    env_evidence = parse_env_file(env_file)
+    if cfg.features.web_search or env_evidence.get("AGENTCORE_GATEWAY_URL"):
         # env 규칙명의 AgentCore Gateway — 우리가 만든 외부 리소스라 함께 정리
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
@@ -1015,7 +1074,7 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     env_dir = REPO_ROOT / ecs_apply.ENV_DIR
     # destroy 도 required 변수(environment/aws_region/image_tag)가 필요 —
     # 현재 선언으로 tfvars 를 재생성한다
-    ecs_render.render(cfg, out, extra_vars=ecs_apply.load_extra_vars(out))
+    ecs_render.render(cfg, out, extra_vars=ecs_apply.effective_extra_vars(cfg, out))
     ecs_apply._run(["terraform", "init", "-input=false", "-reconfigure",
                     f"-backend-config={out / 'backend.hcl'}"], cwd=env_dir)
     sl = ecs_apply._run(["terraform", "state", "list"], cwd=env_dir,
@@ -1068,7 +1127,8 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     try:
         if safeguards_on:
             ecs_render.render(cfg, out, extra_vars={
-                **ecs_apply.load_extra_vars(out), "db_safeguards": False})
+                **ecs_apply.effective_extra_vars(cfg, out),
+                "db_safeguards": False})
             ecs_apply._run(["terraform", "apply", "-auto-approve", "-input=false",
                             f"-var-file={out / 'terraform.tfvars'}"], cwd=env_dir)
         ecs_apply._run(["terraform", "destroy", "-auto-approve", "-input=false",
@@ -1076,19 +1136,27 @@ def _teardown_ecs(cfg: schema.GatewayConfig, args) -> int:
     except SystemExit:
         raise SystemExit("teardown 중간 실패 — 일부 리소스가 남았을 수 있습니다. 잔여는 "
                          f"`terraform -chdir={env_dir} plan -destroy` 로 확인하십시오")
-    if cfg.features.web_search:
+    # 프로비저너 소유 리소스는 '현재 플래그'가 아니라 '과거 apply 흔적'으로
+    # 정리한다 — yaml 에서 끄고 곧바로 teardown 하면 플래그가 꺼져 있어
+    # AgentCore Gateway/Lambda/Runtime 이 영구 누수된다.
+    extra = ecs_apply.load_extra_vars(out)
+    if cfg.features.web_search or extra.get("agentcore_gateway_url"):
         # terraform 관리 밖의 프로비저닝 리소스 — 마지막에 정리
         from . import websearch
-        websearch.teardown(cfg.env, REPO_ROOT)
-    if cfg.features.pricing_lambda:
+        if websearch.teardown(cfg.env, REPO_ROOT):
+            extra.pop("agentcore_gateway_url", None)
+    if cfg.features.pricing_lambda or extra.get("litellm_pricing_lambda"):
         # boto3 프로비저닝 리소스 — invoke 정책은 모듈 소유라 destroy 가 정리
         from . import pricinglambda
-        pricinglambda.teardown(cfg, detach_invoke=False)
-    if cfg.features.bi_insight:
+        if pricinglambda.teardown(cfg, detach_invoke=False):
+            extra.pop("litellm_pricing_lambda", None)
+    if cfg.features.bi_insight or chat_name or extra.get("agentcore_runtime_arn"):
         # 프로비저너 소유 Runtime — terraform 모듈 밖이라 destroy 가 못 지운다
         from . import chatagent
-        chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
-                           chat_agent_name=chat_name)
+        if chatagent.teardown(REPO_ROOT, cfg.env, region=cfg.aws.region,
+                              chat_agent_name=chat_name):
+            extra.pop("agentcore_runtime_arn", None)
+    ecs_apply._save_extra_vars(out, extra)
     console.print("[green]teardown 완료 — AWS 리소스가 삭제됐습니다")
     return 0
 
@@ -1212,6 +1280,15 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                       f"'{context or '(current-context)'}' 가 가리키는 클러스터에 "
                       "그대로 실행됩니다. 대상이 이 env 의 클러스터인지 "
                       "확인하고 진행하세요")
+    elif tf_cluster and not ctx_cluster:
+        # kubectl 이 context 를 못 읽으면(미설치/kubeconfig 손상) 검증이
+        # 조용히 무력화된다 — helm 은 kubeconfig 를 독자 해석해 여전히 동작
+        # 하므로, 다른 클러스터의 동명 release 를 지우는 사고를 막으려면
+        # 검증 불가를 명시해야 한다.
+        console.print(f"[yellow]⚠ context '{context or '(current-context)'}' 의 "
+                      "클러스터를 확인할 수 없습니다(kubectl 오류?) — "
+                      f"terraform 의 '{tf_cluster}' 와 대조하지 못한 채 helm 을 "
+                      "실행합니다. 대상 클러스터를 확인하고 진행하세요")
 
     ctx_args = ["--kube-context", context] if context else []
     r = eks_apply._run_quiet(
@@ -1247,11 +1324,14 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                       "클러스터 접속·kubeconfig context(--context)를 확인하세요. "
                       "앱이 살아있는 상태로 인프라 삭제는 진행하지 않습니다.")
         return 1
-    if cfg.features.web_search:
-        # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown
+    if cfg.features.web_search or outs.get("cluster_name"):
+        # helm/terraform 관리 밖의 프로비저닝 리소스 — 멱등 teardown.
+        # yaml 에서 끄고 곧바로 teardown 하면 플래그가 꺼져 Gateway 가 새므로
+        # '인프라가 있었다(outputs)'는 증거로도 정리한다 — 이름 스코프라
+        # 한 번도 안 켠 env 에선 no-op 이다.
         from . import websearch
         websearch.teardown(cfg.env, REPO_ROOT)
-    if cfg.features.bi_insight:
+    if cfg.features.bi_insight or outs.get("chat_agent_name"):
         # 프로비저너 소유 Runtime — helm/terraform 관리 밖, 멱등 teardown.
         # env destroy 전이라 outputs 가 읽힌다 — 사람이 project 변수를 바꾼
         # env 에선 도출 이름과 실측이 어긋나 Runtime 이 새어나가므로 실측 우선.
