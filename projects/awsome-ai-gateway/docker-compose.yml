@@ -211,6 +211,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      migration:
+        # admin-api 와 같은 게이트 — migration 완료 전 기동하면 없는
+        # 테이블/컬럼으로 crash-loop 한다
+        condition: service_completed_successfully
     restart: unless-stopped
 
   # ============================================================

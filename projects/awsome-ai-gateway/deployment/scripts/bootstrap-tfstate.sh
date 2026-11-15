@@ -46,8 +46,10 @@ echo "✓ AWS Account: ${ACCOUNT_ID}"
 # BucketAlreadyExists 만 남았다. stderr 의 HTTP 코드를 보고 세 경우를 분리한다.
 HEAD_RC=0
 HEAD_ERR=$(aws s3api head-bucket --bucket "${TFSTATE_BUCKET}" 2>&1 >/dev/null) || HEAD_RC=$?
+BUCKET_EXISTED=0
 if [ "${HEAD_RC}" -eq 0 ]; then
     echo "✓ S3 bucket ${TFSTATE_BUCKET} 이미 존재"
+    BUCKET_EXISTED=1
 elif printf '%s' "${HEAD_ERR}" | grep -Eq '\(404\)|NoSuchBucket|Not Found'; then
     echo "==> S3 bucket 생성: ${TFSTATE_BUCKET}"
     # LocationConstraint 를 거부하는 리전은 us-east-1 뿐이고, 나머지는 모두 요구한다.
@@ -75,42 +77,57 @@ else
     exit 1
 fi
 
-# 2) Versioning (이전 state 복원용)
-aws s3api put-bucket-versioning \
-    --bucket "${TFSTATE_BUCKET}" \
-    --versioning-configuration Status=Enabled
-echo "✓ Versioning 활성화"
+if [ "${BUCKET_EXISTED}" -eq 1 ]; then
+    # 기존 버킷은 우리가 만든 게 아닐 수 있다 — 조직 공유 state 버킷 등.
+    # versioning/암호화/public-access/lifecycle 을 무조건 덮어쓰면 동승한 다른
+    # 워크로드까지 바뀐다(특히 Prefix="" lifecycle 은 타인의 옛 버전을 90일
+    # 뒤 삭제한다). 기존 버킷에는 읽기 검증만 하고 설정 변경은 사람에게 맡긴다.
+    echo "⚠ 기존 버킷이라 버킷 설정은 변경하지 않습니다 — state 용도에 필요한 설정을 확인하세요:"
+    V=$(aws s3api get-bucket-versioning --bucket "${TFSTATE_BUCKET}" \
+        --query 'Status' --output text 2>/dev/null || echo "?")
+    [ "${V}" = "Enabled" ] || echo "  ⚠ versioning 미활성(${V}) — 이전 state 복원이 안 됩니다"
+    aws s3api get-bucket-encryption --bucket "${TFSTATE_BUCKET}" \
+        >/dev/null 2>&1 || echo "  ⚠ SSE 기본 암호화 없음 — get-bucket-encryption 확인"
+    aws s3api get-public-access-block --bucket "${TFSTATE_BUCKET}" \
+        >/dev/null 2>&1 || echo "  ⚠ public-access-block 없음 — 공개 노출 경로 확인"
+else
+    # 2) Versioning (이전 state 복원용)
+    aws s3api put-bucket-versioning \
+        --bucket "${TFSTATE_BUCKET}" \
+        --versioning-configuration Status=Enabled
+    echo "✓ Versioning 활성화"
 
-# 3) Server-side 암호화
-aws s3api put-bucket-encryption \
-    --bucket "${TFSTATE_BUCKET}" \
-    --server-side-encryption-configuration '{
-      "Rules": [{
-        "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
-        "BucketKeyEnabled": true
-      }]
-    }'
-echo "✓ SSE-S3 암호화 설정"
+    # 3) Server-side 암호화
+    aws s3api put-bucket-encryption \
+        --bucket "${TFSTATE_BUCKET}" \
+        --server-side-encryption-configuration '{
+          "Rules": [{
+            "ApplyServerSideEncryptionByDefault": {"SSEAlgorithm": "AES256"},
+            "BucketKeyEnabled": true
+          }]
+        }'
+    echo "✓ SSE-S3 암호화 설정"
 
-# 4) Public access 완전 차단
-aws s3api put-public-access-block \
-    --bucket "${TFSTATE_BUCKET}" \
-    --public-access-block-configuration \
-        "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
-echo "✓ Public access 차단"
+    # 4) Public access 완전 차단
+    aws s3api put-public-access-block \
+        --bucket "${TFSTATE_BUCKET}" \
+        --public-access-block-configuration \
+            "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"
+    echo "✓ Public access 차단"
 
-# 5) Lifecycle — 오래된 버전 정리
-aws s3api put-bucket-lifecycle-configuration \
-    --bucket "${TFSTATE_BUCKET}" \
-    --lifecycle-configuration '{
-      "Rules": [{
-        "ID": "expire-old-versions",
-        "Status": "Enabled",
-        "Filter": {"Prefix": ""},
-        "NoncurrentVersionExpiration": {"NoncurrentDays": 90}
-      }]
-    }'
-echo "✓ 90일 지난 이전 버전 자동 삭제"
+    # 5) Lifecycle — 오래된 버전 정리 (새로 만든 전용 버킷에만 적용)
+    aws s3api put-bucket-lifecycle-configuration \
+        --bucket "${TFSTATE_BUCKET}" \
+        --lifecycle-configuration '{
+          "Rules": [{
+            "ID": "expire-old-versions",
+            "Status": "Enabled",
+            "Filter": {"Prefix": ""},
+            "NoncurrentVersionExpiration": {"NoncurrentDays": 90}
+          }]
+        }'
+    echo "✓ 90일 지난 이전 버전 자동 삭제"
+fi
 
 # 6) DynamoDB 테이블 (lock) — 이미 있으면 스킵
 if aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" --region "${AWS_REGION}" >/dev/null 2>&1; then

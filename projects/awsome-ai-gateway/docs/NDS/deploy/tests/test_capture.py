@@ -1378,3 +1378,76 @@ def test_ecs_capture_unverifiable_network_mode_unknown(monkeypatch, tmp_path):
     doc, notes = capture.capture_ecs(tmp_path, "r", unknown=unknown)
     assert "network.mode" in unknown
     assert any("미검증" in n for n in notes)
+
+
+def test_configure_domain_mode_default_gated(tmp_path, monkeypatch):
+    """23차 — eks→ecs 전환 시 이전 domain.mode(selfsigned-temp)가 선택지에
+    없어 실제 questionary 라면 ValueError 로 wizard 전체가 죽는다.
+    default 가 항상 선택지 안으로 게이트돼야 한다."""
+    import types
+    from deploy import cli
+    seen_defaults = []
+
+    class T:
+        def __init__(s, p, default='', **kw): s.v = default if default is not None else 'x'
+        def ask(s): return s.v
+    class S:
+        def __init__(s, p, choices, default=None):
+            vals = {getattr(c, 'value', c) for c in choices}
+            if default is not None and default not in vals:
+                raise ValueError(f"Invalid 'default' value passed: {default!r}")
+            seen_defaults.append(default)
+            s.v = default if default in vals else getattr(choices[0], 'value', choices[0])
+        def ask(s): return s.v
+    class C:
+        def __init__(s, p, choices, default=None):
+            s.v = [getattr(c, 'value', c) for c in choices if getattr(c, 'checked', False)]
+        def ask(s): return s.v
+    class K:
+        def __init__(s, p, default=False): s.v = default
+        def ask(s): return s.v
+    fake = types.SimpleNamespace(text=T, select=S, checkbox=C, confirm=K)
+    fake.Choice = lambda label, value, checked=False: types.SimpleNamespace(
+        label=label, value=value, checked=checked)
+    monkeypatch.setattr(cli, "_questionary", lambda: fake)
+    # eks + selfsigned-temp → ecs 전환. schema 유효한 이전 doc 에서 시작.
+    existing = {
+        "env": "dev", "aws": {"region": "ap-south-1", "account_id": "123456789012"},
+        "deploy": {"target": "ecs", "size_tier": "t1"},
+        "domain": {"mode": "selfsigned-temp"},   # eks 전용 mode — ecs 선택지에 없음
+        "images": {"tag": "v1"},
+    }
+    doc = cli._collect_doc(existing)
+    assert doc["domain"]["mode"] == "none"   # 선택지 밖이면 첫 유효 기본값
+
+
+def test_merge_env_drops_declared_off_managed_keys(tmp_path):
+    """23차 — oidc 제거 + dev_login 전환 시 stale OIDC_* 가 .env 에 남으면
+    admin-api 가 dev 토큰을 거부해 로그인이 잠긴다. web_search off 시
+    apply 주입 AGENTCORE_* 도 함께 수렴한다."""
+    from deploy.render import common
+    existing = {
+        "OIDC_ISSUER_URL": "https://idp", "OIDC_CLIENT_ID": "c",
+        "OIDC_CLIENT_SECRET": "s", "WEB_SEARCH_ENABLED": "true",
+        "AGENTCORE_GATEWAY_URL": "https://gw", "AGENTCORE_REGION": "us-east-1",
+        "POSTGRES_PASSWORD": "keepme", "OPERATOR_KEY": "keepme",
+    }
+    desired = {"AWS_REGION": "us-east-1", "DEV_LOGIN_ENABLED": "true"}
+    merged, differing, dropped = common.merge_env(existing, desired)
+    assert "OIDC_ISSUER_URL" not in merged and "OIDC_CLIENT_SECRET" not in merged
+    assert "WEB_SEARCH_ENABLED" not in merged and "AGENTCORE_GATEWAY_URL" not in merged
+    assert merged["POSTGRES_PASSWORD"] == "keepme"   # GENERATED — 절대 삭제 금지
+    assert merged["OPERATOR_KEY"] == "keepme"        # 비관리 운영자 키는 보존
+    assert "OIDC_ISSUER_URL" in dropped and "AGENTCORE_GATEWAY_URL" in dropped
+
+
+def test_merge_env_keeps_agentcore_when_search_on():
+    """web_search 켜진 채 재렌더하면 apply 주입 AGENTCORE_* 는 desired 에
+    없어도 유지돼야 한다 — 없으면 기능이 깨진다."""
+    from deploy.render import common
+    existing = {"WEB_SEARCH_ENABLED": "true",
+                "AGENTCORE_GATEWAY_URL": "https://gw"}
+    merged, _, dropped = common.merge_env(
+        existing, {"WEB_SEARCH_ENABLED": "true"})
+    assert merged["AGENTCORE_GATEWAY_URL"] == "https://gw"
+    assert "AGENTCORE_GATEWAY_URL" not in dropped

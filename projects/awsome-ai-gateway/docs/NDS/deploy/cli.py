@@ -128,6 +128,16 @@ def _gl(d: dict, *path) -> list:
     return []
 
 
+def _default_in(value, choices, fallback=""):
+    """questionary.select 의 default — 선택지에 없는 값을 넘기면
+    questionary 2.x 가 ValueError 로 죽어 wizard 전체 답변이 유실된다.
+    이전 선언이 target 전환 등으로 유효 선택지 밖이면 fallback 을 쓴다."""
+    vals = {getattr(c, "value", c) for c in choices}
+    if value in vals:
+        return value
+    return fallback if fallback in vals else (choices[0].value if choices else "")
+
+
 def _collect_doc(existing: dict | None = None) -> dict:
     """대화형으로 gateway.yaml doc 을 만든다. existing 이 있으면 각 질문의
     기본값으로 현재 설정을 넣는다 (configure = init 의 prefill 버전)."""
@@ -144,15 +154,15 @@ def _collect_doc(existing: dict | None = None) -> dict:
     region = _unwrap(questionary.text(
         "AWS 리전", default=str(_g(ex, "aws", "region")) or "ap-northeast-2").ask())
 
-    target_default = _g(ex, "deploy", "target")
+    target_choices = [
+        Choice("compose — 단일 호스트 Docker (평가·테스트용, 최저 티어로만 배포)", "compose"),
+        Choice("ecs — ECS Fargate (소규모~표준 권장)", "ecs"),
+        Choice("eks — EKS Fargate (대규모·기존 프로덕션)", "eks"),
+    ]
     target = _unwrap(questionary.select(
-        "배포 대상",
-        choices=[
-            Choice("compose — 단일 호스트 Docker (평가·테스트용, 최저 티어로만 배포)", "compose"),
-            Choice("ecs — ECS Fargate (소규모~표준 권장)", "ecs"),
-            Choice("eks — EKS Fargate (대규모·기존 프로덕션)", "eks"),
-        ],
-        default=target_default or "compose").ask())
+        "배포 대상", choices=target_choices,
+        default=_default_in(_g(ex, "deploy", "target"), target_choices,
+                            "compose")).ask())
     if target == "compose":
         console.print("[dim]compose 형태는 최저 티어(t0)로만 배포 가능합니다 — "
                       "테스트·평가용 단일 호스트입니다.[/dim]")
@@ -164,7 +174,13 @@ def _collect_doc(existing: dict | None = None) -> dict:
     ]
     prev_tier = _g(ex, "deploy", "size_tier")
     tier_vals = {c.value for c in tier_choices}
-    if same_target and prev_tier and prev_tier not in tier_vals:
+    # target 별 스키마 유효 tier — 보존 선택지에 넣을 수 있는지의 기준.
+    # 무효한 기존 선언(eks yaml 의 t1 등)을 다시 제안하면 wizard 를 돌린 뒤
+    # 저장 단계에서 SchemaError 로 전체 답변이 유실된다.
+    _VALID_TIERS = {"compose": {"t0"}, "ecs": {"t1", "t2"},
+                    "eks": {"t2", "t3"}}
+    if (same_target and prev_tier and prev_tier not in tier_vals
+            and prev_tier in _VALID_TIERS.get(target, ())):
         # 스키마가 허용하는 기존 선언(t2 eks 등)이 tier 목록엔 없을 수 있다 —
         # 선택지에 넣어 두면 default 로 살고, 빼면 첫 선택지로 덮어씌워진다.
         # target 전환이면 이전 tier 는 신 target 에 무효 — 기본값으로 쓰면
@@ -187,7 +203,10 @@ def _collect_doc(existing: dict | None = None) -> dict:
     domain_mode = _unwrap(questionary.select(
         "HTTPS 도메인",
         choices=domain_choices,
-        default=_g(ex, "domain", "mode") or "none").ask())
+        # target 전환으로 이전 mode 가 선택지 밖(selfsigned-temp on ecs 등)이면
+        # questionary 가 ValueError 로 죽어 wizard 전체가 사라진다 — 게이트.
+        default=_default_in(_g(ex, "domain", "mode"), domain_choices,
+                            "none")).ask())
     domain_name, zone_id = "", ""
     if domain_mode == "route53-acm":
         domain_name = _unwrap(questionary.text(
@@ -206,13 +225,14 @@ def _collect_doc(existing: dict | None = None) -> dict:
         zone_id = str(_g(ex, "domain", "zone_id") or "")
 
     prev_notif = _gd(ex, "features", "notifications")
+    notif_choices = [Choice("mock — 발송 안 함(기본)", "mock"),
+                     Choice("ses — Amazon SES", "ses"),
+                     Choice("smtp — 외부 SMTP", "smtp"),
+                     Choice("internal_api — 사내 메일 API", "internal_api")]
     notif = _unwrap(questionary.select(
-        "알림 provider",
-        choices=[Choice("mock — 발송 안 함(기본)", "mock"),
-                 Choice("ses — Amazon SES", "ses"),
-                 Choice("smtp — 외부 SMTP", "smtp"),
-                 Choice("internal_api — 사내 메일 API", "internal_api")],
-        default=prev_notif.get("provider", "mock")).ask())
+        "알림 provider", choices=notif_choices,
+        default=_default_in(prev_notif.get("provider"), notif_choices,
+                            "mock")).ask())
     notif_extra = {}
     if notif == "ses":
         notif_extra["ses_from"] = _unwrap(questionary.text(
@@ -323,8 +343,9 @@ def _collect_doc(existing: dict | None = None) -> dict:
             "이미지 태그 (명시적 핀 필수)",
             default=str(prev_img.get("tag", "")) or None).ask())
         # 서비스별 tags 맵은 질문으로 다루지 않는다 — configure 재실행 시
-        # 이전 값을 보존한다 (US-19 같은 멀티태그 릴리스가 지워지지 않게)
-        if prev_img.get("tags"):
+        # 이전 값을 보존한다 (US-19 같은 멀티태그 릴리스가 지워지지 않게).
+        # eks 전용 키 — ecs yaml 에 수작업으로 섞여 있어도 담으면 스키마 거부.
+        if target == "eks" and prev_img.get("tags"):
             images["tags"] = prev_img["tags"]
     elif _gd(ex, "images"):
         # compose 도 images.registry/tag 의 prebuilt 핀을 지원한다 — 질문은
@@ -391,13 +412,15 @@ def _collect_doc(existing: dict | None = None) -> dict:
             f"Aurora {t.db_mode} {t.db_spec}, cache {t.cache_mode})",
             default=bool(prev_db or prev_cache)).ask())
         if adv:
+            db_choices = [Choice("serverless — Aurora Serverless v2 (ACU 자동 스케일)",
+                                 "serverless"),
+                          Choice("provisioned — 고정 인스턴스", "provisioned")]
             db_mode = _unwrap(questionary.select(
-                "DB 모드",
-                choices=[Choice("serverless — Aurora Serverless v2 (ACU 자동 스케일)",
-                                "serverless"),
-                         Choice("provisioned — 고정 인스턴스", "provisioned")],
-                default=prev_db.get("mode")
-                or ("serverless" if t.db_mode == "rds-serverless" else "provisioned")).ask())
+                "DB 모드", choices=db_choices,
+                default=_default_in(
+                    prev_db.get("mode"), db_choices,
+                    "serverless" if t.db_mode == "rds-serverless"
+                    else "provisioned")).ask())
             db_doc: dict = {"mode": db_mode}
             if db_mode == "serverless":
                 lo = _unwrap(questionary.text(
@@ -423,13 +446,15 @@ def _collect_doc(existing: dict | None = None) -> dict:
                 db_doc["engine_version"] = prev_db["engine_version"]
             infra_doc["db"] = db_doc
 
+            cache_choices = [Choice("single — 단일 노드 (최소 비용)", "single"),
+                             Choice("replicated — replica 1대 failover", "replicated"),
+                             Choice("cluster — cluster mode", "cluster")]
             cache_mode = _unwrap(questionary.select(
-                "ElastiCache 토폴로지",
-                choices=[Choice("single — 단일 노드 (최소 비용)", "single"),
-                         Choice("replicated — replica 1대 failover", "replicated"),
-                         Choice("cluster — cluster mode", "cluster")],
-                default=prev_cache.get("mode")
-                or ("single" if t.cache_mode == "elasticache-single" else "replicated")).ask())
+                "ElastiCache 토폴로지", choices=cache_choices,
+                default=_default_in(
+                    prev_cache.get("mode"), cache_choices,
+                    "single" if t.cache_mode == "elasticache-single"
+                    else "replicated")).ask())
             cache_doc: dict = {
                 "mode": cache_mode,
                 "node_type": _unwrap(questionary.text(
@@ -881,6 +906,12 @@ def cmd_apply(args) -> int:
         else:
             console.print("[yellow]⚠ web_search URL 을 얻지 못했습니다 — "
                           "플래그만 켜진 채로 기동합니다")
+    elif "WEB_SEARCH_ENABLED" in res.get("dropped", ()):
+        # eks 의 off-수렴과 같은 계약 — 이전 .env 에 주입 흔적(실측 마커)이
+        # 있으면 우리가 만든 AgentCore Gateway 를 멱등 정리한다. 유예 과금
+        # 리소스가 선언 해제 뒤에도 영구히 남는 걸 막는다.
+        from . import websearch
+        websearch.teardown(cfg.env, REPO_ROOT)
     try:
         r = subprocess.run(argv)
     except FileNotFoundError:
@@ -1175,6 +1206,12 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
                       f"의 클러스터는 '{tf_cluster}' 입니다 — 다른 클러스터의 "
                       "release 를 내리는 것을 막기 위해 중단합니다")
         return 1
+    if not tf_cluster:
+        console.print("[yellow]⚠ terraform output 에 cluster_name 이 없어 "
+                      "context↔클러스터 검증을 생략합니다 — helm 은 "
+                      f"'{context or '(current-context)'}' 가 가리키는 클러스터에 "
+                      "그대로 실행됩니다. 대상이 이 env 의 클러스터인지 "
+                      "확인하고 진행하세요")
 
     ctx_args = ["--kube-context", context] if context else []
     r = eks_apply._run_quiet(
@@ -1833,14 +1870,18 @@ def cmd_client_values(args) -> int:
                 or (f"gateway.{cfg.domain.name}" if cfg.domain.name else ""))
         adm_h = (cfg.domain.hosts.get("admin_api") or hosts.get("adminApi")
                  or (f"admin-api.{cfg.domain.name}" if cfg.domain.name else ""))
-        gw = f"https://{gw_h}" if gw_h else ""
-        adm = f"https://{adm_h}" if adm_h else ""
+        # scheme 은 실제 리스너를 따라야 한다 — mode=none 은 ALB 가 HTTP 만
+        # 서빙하는데 https:// 를 안내하면 직원에게 죽은 주소를 쥐어준다.
+        scheme = "http" if cfg.domain.mode == "none" else "https"
+        gw = f"{scheme}://{gw_h}" if gw_h else ""
+        adm = f"{scheme}://{adm_h}" if adm_h else ""
         if not gw_h:
             notes.append("eks ingress host 를 못 찾았습니다 — values-eks-*.local.yaml 의 "
                          "ingress.gateway.host 또는 `kubectl -n {ns} get ingress`로 확인")
     elif cfg.domain.name:
-        gw = f"https://gateway.{cfg.domain.name}"
-        adm = f"https://admin-api.{cfg.domain.name}"
+        scheme = "http" if cfg.domain.mode == "none" else "https"
+        gw = f"{scheme}://gateway.{cfg.domain.name}"
+        adm = f"{scheme}://admin-api.{cfg.domain.name}"
     else:
         outs = _tf_outputs_soft(_tf_env_dir(cfg))
         dns = str(outs.get("alb_dns_name") or "")

@@ -289,7 +289,14 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
         raise SystemExit(f"env 템플릿 {template} 이 없습니다 — "
                          "deploy.tf_env_dir 로 기존 env 를 지정하십시오")
     target.mkdir(parents=True, exist_ok=True)  # 부분 scaffold 재실행 경로
+    kept_tf: list[str] = []
     for f in TF_FILES:
+        dst = target / f
+        if dst.exists():
+            # 부분 복구 경로 — 존재하는 tf 는 사람이 수정했을 수 있는 검토본.
+            # 전부 다시 쓰면 그 수정이 조용히 날아간다.
+            kept_tf.append(f)
+            continue
         text = (template / f).read_text()
         if f == "backend.tf":
             # 템플릿은 dev 의 key/region 이 하드코딩 — 그대로 복사하면 이 env 의
@@ -300,7 +307,11 @@ def scaffold_eks_env(cfg: GatewayConfig, repo_root: Path, region: str) -> Path:
                           text, count=1)
             text = re.sub(r'region\s*=\s*"[^"]*"',
                           f'region = "{region}"', text, count=1)
-        (target / f).write_text(text)
+        dst.write_text(text)
+    if kept_tf:
+        print(f"ⓘ 기존 tf 파일은 보존했습니다: {', '.join(kept_tf)} — "
+              "템플릿과 의도적으로 다르게 유지한 것인지 확인하세요",
+              file=sys.stderr)
     if not (target / "terraform.tfvars").exists():
         caller = _aws(["sts", "get-caller-identity"], region)
         arn = json.loads(caller.stdout).get("Arn", "")

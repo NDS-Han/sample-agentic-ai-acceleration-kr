@@ -54,6 +54,11 @@ output "rds_proxy_endpoint" {
 output "application_db_endpoint" {
   value = module.aurora.application_endpoint
 }
+# Helm values database.external.name 에 주입할 DB 이름 — env 가 database_name
+# 변수를 바꾸면 deploy CLI 의 'gateway' 폴백이 틀린 이름을 --set 한다.
+output "aurora_database_name" {
+  value = module.aurora.database_name
+}
 
 output "elasticache_endpoint" {
   # cluster mode(prod)에선 primary_endpoint_address 가 비어 configuration endpoint 로 대체.

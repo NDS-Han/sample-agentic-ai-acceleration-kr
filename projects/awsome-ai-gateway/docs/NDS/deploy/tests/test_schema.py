@@ -693,7 +693,7 @@ def test_admin_groups_scalar_wraps_not_splits():
     cfg = schema.from_dict({
         "env": "dev", "aws": {"region": "ap-northeast-2"},
         "deploy": {"target": "eks", "size_tier": "t3",
-                   "tfstate_bucket": "b", "tfstate_table": "t"},
+                   "tfstate_bucket": "state-bucket", "tfstate_table": "lock-table"},
         "images": {"tag": "v1"},
         "oidc": {"admin_groups": "Claude_DevOps"}})
     assert cfg.oidc.admin_groups == ["Claude_DevOps"]
@@ -707,7 +707,7 @@ def test_reject_unmatched_groups_string_rejected():
         schema.from_dict({
             "env": "dev", "aws": {"region": "ap-northeast-2"},
             "deploy": {"target": "eks", "size_tier": "t3",
-                       "tfstate_bucket": "b", "tfstate_table": "t"},
+                       "tfstate_bucket": "state-bucket", "tfstate_table": "lock-table"},
             "images": {"tag": "v1"},
             "oidc": {"reject_unmatched_groups": "false"}})
 

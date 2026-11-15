@@ -918,7 +918,8 @@ def _infra_missing(cfg: GatewayConfig, outs: dict) -> list[str]:
     if (cfg.features.notifications.provider == "ses"
             and not outs.get("notification_worker_ses_role_arn")):
         missing.append("notification-worker SES IRSA")
-    if (cfg.domain.name and outs.get("cognito_client_id")
+    if (cfg.domain.name and cfg.domain.mode != "none"
+            and outs.get("cognito_client_id")
             and outs.get("cognito_user_pool_id")):
         admin_host = (cfg.domain.hosts.get("admin_ui")
                       or f"admin.{cfg.domain.name}")
@@ -1586,10 +1587,16 @@ def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
 
 
 def _kube_context_cluster(context: str) -> str:
-    """kubectl context 가 현재 가리키는 클러스터명 (미해석 시 "")."""
-    r = _run_quiet(["kubectl", "config", "view", "--minify",
-                    "-o", "jsonpath={.contexts[0].context.cluster}",
-                    "--context", context], timeout=15)
+    """kubectl context 가 현재 가리키는 클러스터명 (미해석 시 "").
+
+    context="" 면 --context 플래그 자체를 생략해 current-context 를 해석한다 —
+    빈 문자열을 넘기면 kubectl 버전에 따라 'context "" not found' 로 실패해
+    검증이 조용히 스킵된다 (teardown 의 current-context 검사가 무력화)."""
+    cmd = ["kubectl", "config", "view", "--minify",
+           "-o", "jsonpath={.contexts[0].context.cluster}"]
+    if context:
+        cmd += ["--context", context]
+    r = _run_quiet(cmd, timeout=15)
     if r.returncode != 0:
         return ""
     return r.stdout.strip().rsplit("/", 1)[-1]
@@ -1718,7 +1725,11 @@ def plan(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "") 
                   "  새 머신이라면 deploy.tfstate_bucket/tfstate_table 선언을 "
                   "확인하세요", file=sys.stderr)
     outs = tf_outputs(env_dir) if env_dir else {}
-    _check_context_cluster(outs, context, hard=False)
+    # soft 경고로 두면 이어지는 update-kubeconfig --alias 가 확인 전에 기존
+    # context 를 backend 클러스터로 덮어쓴다 — preview(--plan)만 띄워도
+    # kubeconfig 가 변형되고, apply() 의 hard 검사는 이미 재지정된 context 를
+    # 읽어 영구 무력화된다. 불일치면 변형 전에 여기서 멈춘다.
+    _check_context_cluster(outs, context, hard=True)
     if outs.get("cluster_name"):
         # helm --dry-run=server 도 API 접근이 필요 — preview 전에 등록한다
         # (apply() 와 동일한 멱등 호출).

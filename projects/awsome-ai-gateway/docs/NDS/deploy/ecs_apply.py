@@ -171,10 +171,15 @@ def wait_services(cfg: GatewayConfig, outputs: dict) -> None:
               file=sys.stderr)
     # circuit-breaker 롤백도 'stable' 로 보고된다 — primary 배포의
     # rolloutState 를 봐야 실패 배포를 성공으로 오인하지 않는다
-    d = subprocess.run(["aws", "ecs", "describe-services", "--cluster", cluster,
-                        "--services", *names, "--region", cfg.aws.region,
-                        "--output", "json"], capture_output=True, text=True,
-                       timeout=60)
+    try:
+        d = subprocess.run(["aws", "ecs", "describe-services", "--cluster",
+                            cluster, "--services", *names,
+                            "--region", cfg.aws.region, "--output", "json"],
+                           capture_output=True, text=True, timeout=60)
+    except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+        print(f"⚠ describe-services 호출 실패({exc}) — 배포 상태 미확인",
+              file=sys.stderr)
+        return
     if d.returncode != 0:
         print(f"⚠ describe-services 실패 — 배포 상태 미확인: "
               f"{d.stderr.strip()[:150]}", file=sys.stderr)
@@ -315,10 +320,15 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
     # teardown 후 7일 복구유예 중인 동명 시크릿은 create 에서 'scheduled for
     # deletion' 으로 죽는다 — plan 이 중간에 실패하기 전에 안내한다
     for sname in (f"/llm-gateway/{cfg.env}/app", f"/llm-gateway/{cfg.env}/db"):
-        chk = subprocess.run(
-            ["aws", "secretsmanager", "describe-secret", "--secret-id", sname,
-             "--region", cfg.aws.region, "--output", "json"],
-            capture_output=True, text=True, timeout=30)
+        try:
+            chk = subprocess.run(
+                ["aws", "secretsmanager", "describe-secret", "--secret-id",
+                 sname, "--region", cfg.aws.region, "--output", "json"],
+                capture_output=True, text=True, timeout=30)
+        except (subprocess.TimeoutExpired, FileNotFoundError) as exc:
+            print(f"⚠ {sname} 삭제유예 확인 실패({exc}) — plan 이 해당 시크릿 "
+                  "생성에서 멈출 수 있습니다", file=sys.stderr)
+            continue
         if chk.returncode == 0:
             try:
                 meta = json.loads(chk.stdout)

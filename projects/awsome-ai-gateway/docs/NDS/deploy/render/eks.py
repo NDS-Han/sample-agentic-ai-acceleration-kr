@@ -93,6 +93,11 @@ def desired_values(cfg: GatewayConfig) -> dict:
             # VK 발급 허용 계정 — role 이름 검사는 외부 계정의 동명 role/IAM user 로
             # 우회되므로 계정 경계가 필요. gateway.yaml 의 aws.account_id 사용.
             **({"allowedAwsAccounts": [cfg.aws.account_id]} if cfg.aws.account_id else {}),
+            # CLI(STS 경로) VK 발급의 IAM role 허용 목록 — 차트가
+            # ALLOWED_IAM_ROLES 로 매핑하고 빈 목록은 전량 403(fail-closed)이다.
+            # compose/ecs 는 주입되는데 eks 만 빠져 있으면 선언이 조용히 무시된다.
+            **({"allowedIamRoles": list(cfg.aws.allowed_roles)}
+               if cfg.aws.allowed_roles else {}),
         },
         "migration": {"enabled": True},
     }
@@ -147,9 +152,12 @@ def desired_values(cfg: GatewayConfig) -> dict:
                 "host": cfg.domain.hosts.get(yaml_key[key]) or default,
                 "path": "/", "pathType": "Prefix"}
         # domain 도입 시 NEXTAUTH_URL 도 새 주소로 — 비워두면 이전 값(ALB DNS
-        # 등)이 남아 Cognito callback allowlist 와 어긋나 SSO 가 깨진다
+        # 등)이 남아 Cognito callback allowlist 와 어긋나 SSO 가 깨진다.
+        # scheme 은 실제 리스너를 따라야 한다 — mode=none 은 HTTP 만 서빙되는데
+        # https:// URL 을 쓰면 NextAuth 가 죽은 주소로 리다이렉트한다.
+        scheme = "http" if cfg.domain.mode == "none" else "https"
         v.setdefault("adminUi", {})["nextauthUrl"] = (
-            f"https://{v['ingress']['adminUi']['host']}")
+            f"{scheme}://{v['ingress']['adminUi']['host']}")
 
     # ── route53-acm — 정식 도메인: 443 리스너 + redirect 는 render 가 선언하고,
     #    certificate-arn 은 apply 가 ACM 인증서를 보장한 뒤 --set 으로 주입한다.
@@ -349,6 +357,11 @@ def feature_notes(cfg: GatewayConfig) -> list[str]:
                          "URL 이 바뀌므로 클라이언트 재안내가 필요합니다.")
     if not cfg.domain.name and cfg.domain.mode != "none":
         notes.append("domain.name 이 없어 ingress host 는 기존 values 를 유지합니다.")
+    if not cfg.aws.allowed_roles:
+        notes.append("aws.allowed_roles 가 비어 있습니다 — ALLOWED_IAM_ROLES 를 "
+                     "주입하지 않아 CLI(STS) VK 발급이 전부 403 거부됩니다 "
+                     "(fail-closed). gateway-cli 로그인이 필요하면 aws.allowed_roles 를 "
+                     "선언하세요.")
     if cfg.features.notifications.provider == "internal_api":
         notes.append("notifications.provider=internal_api — internalApi.url 에 "
                      f"{cfg.features.notifications.internal_api_url} 를 렌더했습니다.")
@@ -490,11 +503,13 @@ def render_tfvars(cfg: GatewayConfig, env_dir: Path | None = None) -> str:
             f"{json.dumps(inf.bedrock_allowed_model_arns, indent=2)}")
     if inf.mantle_regions:
         lines.append(f"mantle_regions = {json.dumps(inf.mantle_regions)}")
-    if cfg.domain.name:
+    if cfg.domain.name and cfg.domain.mode != "none":
         # domain 도입 시 Cognito 콜백·로그아웃을 도메인으로 — env tfvars 의 기존
         # 수동 목록과 합집합(-var-file 은 리스트를 통째로 교체하므로 병합 필요)
         # admin UI 호스트는 ingress 와 같은 domain.hosts 계약을 따라야 한다 —
         # 파생 admin.<domain> 만 넣으면 선언 호스트의 로그인이 redirect_mismatch.
+        # mode=none 은 HTTP 리스너뿐 — Cognito 콜백은 https 필수라 도메인 주소를
+        # 넣으면 UserPoolClient 등록이 거절된다. 그 조합은 schema 경고 대상.
         admin_host = (cfg.domain.hosts.get("admin_ui")
                       or f"admin.{cfg.domain.name}")
         for var, derived in (

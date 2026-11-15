@@ -745,11 +745,11 @@ def test_persist_answers_keeps_web_search_on_tfstate_retry(tmp_path):
         "deploy: {target: eks, size_tier: t3}\n"
         "features: {web_search: true}\n")
     bootstrap.persist_bootstrap_answers(
-        cfg_path, {"tfstate": ("b", "t")})
+        cfg_path, {"tfstate": ("state-bucket", "lock-table")})
     import yaml as _yaml
     doc = _yaml.safe_load(cfg_path.read_text())
     assert doc["features"]["web_search"] is True
-    assert doc["deploy"]["tfstate_bucket"] == "b"
+    assert doc["deploy"]["tfstate_bucket"] == "state-bucket"
 
 
 def test_scaffold_tfvars_tolerates_reformatted_template():

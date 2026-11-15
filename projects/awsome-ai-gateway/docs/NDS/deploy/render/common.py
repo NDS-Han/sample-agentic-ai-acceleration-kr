@@ -116,12 +116,37 @@ def parse_env_file(path: Path) -> dict[str, str]:
     return out
 
 
-def merge_env(existing: dict[str, str], desired: dict[str, str]) -> tuple[dict[str, str], list[str]]:
+# 도구가 쓰는 관리 키 — yaml 선언이 빠지면 .env 에서도 수렴(삭제)해야 한다.
+# stale OIDC_* 가 남으면 admin-api 가 dev 토큰을 거부해 dev-login 이 401 로
+# 잠기고, stale WEB_SEARCH/AGENTCORE_* 는 꺼진 기능이 계속 켜진다.
+# GENERATED_KEYS(시크릿)는 절대 여기 넣지 않는다 — 삭제되면 발급 키가 전부
+# 무효화된다.
+# AGENTCORE_* 는 apply 가 프로비저닝 결과로 주입하는 키라 desired_env 에
+# 나타나지 않는다 — web_search 기능 자체가 꺼질 때(WEB_SEARCH_ENABLED 드롭)
+# 만 함께 지운다.
+_MANAGED_PREFIXES = ("OIDC_", "SMTP_")
+_MANAGED_KEYS = frozenset({
+    "POSTGRES_USER", "POSTGRES_DB", "AWS_REGION", "AWS_DEFAULT_REGION",
+    "ALLOWED_STS_REGIONS", "ALLOWED_AWS_ACCOUNTS", "ALLOWED_IAM_ROLES",
+    "DEV_LOGIN_ENABLED", "EMAIL_SENDER_TYPE", "EMAIL_SENDER_ADDRESS",
+    "LOG_LEVEL", "SERVICE_KEYS_ENABLED", "WEB_SEARCH_ENABLED",
+    "AWS_SES_REGION", "EMAIL_API_URL", "ADMIN_GROUPS", "ADMIN_EMAILS",
+})
+
+
+def _is_managed(key: str) -> bool:
+    return key in _MANAGED_KEYS or key.startswith(_MANAGED_PREFIXES)
+
+
+def merge_env(existing: dict[str, str],
+              desired: dict[str, str]) -> tuple[dict[str, str], list[str], list[str]]:
     """existing 을 보존하고 desired 의 누락 키만 채운다.
 
     desired 에 있는 값이 existing 과 다르면 **덮지 않고** 이름을 돌려준다 —
     운영자가 의도를 가지고 바꾼 값일 수 있으므로 결정권을 사람에게 둔다.
-    반환: (merged, preserved_differing_keys)
+    도구 관리 키가 existing 에 있는데 desired 에 없으면(선언 해제) 삭제해
+    declared-off 수렴을 맞춘다 — 운영자가 손으로 넣은 비관리 키는 보존한다.
+    반환: (merged, preserved_differing_keys, dropped_managed_keys)
     """
     merged = dict(existing)
     differing: list[str] = []
@@ -130,7 +155,17 @@ def merge_env(existing: dict[str, str], desired: dict[str, str]) -> tuple[dict[s
             merged[k] = v
         elif merged[k] != v:
             differing.append(k)
-    return merged, differing
+    dropped = [k for k in list(merged)
+               if k not in desired and k not in GENERATED_KEYS
+               and _is_managed(k)]
+    if "WEB_SEARCH_ENABLED" in dropped:
+        # 기능이 꺼지면 apply 주입 URL/target 도 함께 수렴 — 남겨두면
+        # 설정 파일엔 없는 외부 엔드포인트를 앱이 계속 가리킨다.
+        dropped += [k for k in list(merged)
+                    if k.startswith("AGENTCORE_") and k not in dropped]
+    for k in dropped:
+        del merged[k]
+    return merged, differing, dropped
 
 
 def fill_generated(env: dict[str, str]) -> list[str]:
@@ -144,6 +179,13 @@ def fill_generated(env: dict[str, str]) -> list[str]:
 
 
 def write_env_file(path: Path, env: dict[str, str], header: str) -> None:
+    for k, v in env.items():
+        # KEY=VALUE 를 raw 로 쓰는 형식 — 개행이 섞이면 다음 줄이 별도 키로
+        # 파싱돼 임의 env 주입/파일 파괴가 된다. yaml block-scalar 등에서
+        # 들어오는 개행은 선언 단계에서 걸러지지 않으므로 여기서 차단한다.
+        if "\n" in str(v) or "\r" in str(v):
+            raise SystemExit(f".env 키 {k} 의 값에 개행이 있습니다 — "
+                             "gateway.yaml 선언을 확인하세요")
     lines = [header.rstrip(), ""]
     for k, v in env.items():
         lines.append(f"{k}={v}")

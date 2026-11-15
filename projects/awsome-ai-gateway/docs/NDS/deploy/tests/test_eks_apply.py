@@ -1639,3 +1639,41 @@ def test_bootstrap_checks_context_before_alias(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="other cluster"):
         cli.cmd_bootstrap(args)
     assert aliased == []
+
+
+def test_declared_environment_unquoted_and_name_key(tmp_path):
+    """23차 — terraform 은 비인용 값(숫자 등)도 선언으로 수용한다. 따옴표만
+    보면 선언을 놓쳐 외부 state 로 과잉 통과한다. environment_name 같은
+    접두 키는 environment 가 아니다."""
+    (tmp_path / "terraform.tfvars").write_text('environment = 5\n')
+    assert eks_apply._declared_environment(tmp_path) == "5"
+    (tmp_path / "terraform.tfvars").write_text('environment_name = "x"\n')
+    assert eks_apply._declared_environment(tmp_path) == ""
+
+
+def test_plan_blocks_context_mismatch_before_alias(monkeypatch, tmp_path):
+    """23차 — plan() 은 update-kubeconfig --alias 전에 context 대조를 해야
+    한다. soft 경고만 하고 alias 를 쓰면 preview(--plan) 한 번으로도
+    kubeconfig 가 변형되고 apply 의 hard 검사가 재지정된 context 를 읽어
+    무력화된다."""
+    from deploy import bootstrap
+    meta = {"release": "gw", "namespace": "gw",
+            "env_dir": str(tmp_path), "env": "dev"}
+    monkeypatch.setattr(eks_apply, "load_meta", lambda *a, **k: dict(meta))
+    monkeypatch.setattr(eks_apply, "_check_env_dir_declared", lambda *a, **k: None)
+    monkeypatch.setattr(eks_apply, "_tf_init",
+                        lambda *a, **k: types.SimpleNamespace(returncode=0))
+    monkeypatch.setattr(eks_apply, "tf_outputs",
+                        lambda d: {"cluster_name": "real-cluster"})
+    monkeypatch.setattr(eks_apply, "_kube_context_cluster", lambda c: "other-cluster")
+    aliased = []
+    monkeypatch.setattr(bootstrap, "update_kubeconfig",
+                        lambda *a, **k: aliased.append(a))
+    from deploy import schema
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "images": {"tag": "v1"}})
+    with pytest.raises(SystemExit, match="other-cluster"):
+        eks_apply.plan(cfg, tmp_path, tmp_path, "victim-ctx")
+    assert aliased == []

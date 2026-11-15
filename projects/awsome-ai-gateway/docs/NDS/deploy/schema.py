@@ -325,6 +325,16 @@ class GatewayConfig:
                 "domain.mode=none 이면 TLS 없이 HTTP 로 시작합니다 — "
                 "Cowork 는 https 가 필수라 해당 클라이언트는 동작하지 않습니다."
             )
+        if self.domain.name and self.domain.mode != "route53-acm":
+            w.append(
+                f"domain.name='{self.domain.name}' 이 선언됐지만 "
+                f"domain.mode={self.domain.mode} — 인증서·DNS 레코드 자동화는 "
+                "route53-acm 에서만 동작합니다. 이 호스트의 DNS 는 수동으로 "
+                "만들어야 하고"
+                + (" mode=none 이면 HTTP 만 서빙되므로 Cognito SSO 콜백(https "
+                   "필수)은 도메인 주소를 쓸 수 없습니다." if self.domain.mode == "none"
+                   else " selfsigned-temp 의 인증서는 이 도메인을 커버하지 않아 "
+                        "브라우저 경고가 뜹니다."))
         if self.network.mode == "private" and self.deploy.target == "compose":
             # compose 렌더러는 mode 를 읽지 않는다 — caddy 가 호스트 포트를
             # 그대로 연다. 선언과 다른 외부 노출이 되므로 경고한다.
@@ -504,6 +514,22 @@ class GatewayConfig:
             if not self.deploy.namespace.strip():
                 e.append("deploy.namespace 가 비어 있습니다 — eks 배포의 "
                          "kubectl/helm 범위를 정하는 키입니다.")
+        # 이 값들은 tfvars/backend.hcl/helm args 에 f-string 으로 직접 박힌다 —
+        # 따옴표·개행이 섞인 문자열은 var-file 주입(environment= 덮어쓰기)이나
+        # HCL 파괴로 번져 다른 env 의 state/plan 에 손이 닿는다.
+        for key, val in (("deploy.namespace", self.deploy.namespace),
+                         ("deploy.release", self.deploy.release)):
+            if val and not _K8S_NAME_RE.match(val):
+                e.append(f"{key} '{val}' 은 소문자/숫자/하이픈 DNS-1123 이름이어야 "
+                         "합니다 — tfvars/helm 인자로 그대로 쓰입니다.")
+        if (self.deploy.tfstate_bucket
+                and not _S3_BUCKET_RE.match(self.deploy.tfstate_bucket)):
+            e.append(f"deploy.tfstate_bucket '{self.deploy.tfstate_bucket}' 이 "
+                     "S3 버킷명 형식(소문자/숫자/.-, 3~63자)이 아닙니다.")
+        if (self.deploy.tfstate_table
+                and not _DDB_TABLE_RE.match(self.deploy.tfstate_table)):
+            e.append(f"deploy.tfstate_table '{self.deploy.tfstate_table}' 이 "
+                     "DynamoDB 테이블명 형식(3~255자)이 아닙니다.")
         al = self.features.alerting
         if self.deploy.target == "compose" and (al.enabled or al.emails or al.log_shipping):
             e.append("features.alerting 은 compose 전용이 아닙니다 — CloudWatch/SNS 는 "
@@ -847,6 +873,9 @@ _HOSTNAME_RE = re.compile(
     r"^(?=.{1,253}$)[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?"
     r"(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$")
 _REGION_RE = re.compile(r"^[a-z]{2}(-gov|-iso|-isob)?-[a-z]+-\d+$")
+_K8S_NAME_RE = re.compile(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+_S3_BUCKET_RE = re.compile(r"^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$")
+_DDB_TABLE_RE = re.compile(r"^[A-Za-z0-9_.\-]{3,255}$")
 _BEDROCK_ARN_RE = re.compile(r"^arn:aws[a-z-]*:bedrock:.+")
 
 
