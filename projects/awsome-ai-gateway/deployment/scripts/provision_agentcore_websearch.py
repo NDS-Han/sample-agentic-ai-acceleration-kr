@@ -94,6 +94,10 @@ def ensure_role(acct: str, dry: bool) -> str:
     except ClientError as e:
         if e.response["Error"]["Code"] == "EntityAlreadyExists":
             log(f"IAM role reused: {ROLE_NAME}")
+            # 재사용 시 trust 도 수렴한다 — 예전 실행이 조건 없이 만든 role 을
+            # 영구히 그대로 두지 않는다(put_role_policy 와 같은 멱등 갱신).
+            iam.update_assume_role_policy(
+                RoleName=ROLE_NAME, PolicyDocument=json.dumps(trust))
         else:
             raise
     iam.put_role_policy(RoleName=ROLE_NAME, PolicyName="web-search-invoke",
@@ -113,6 +117,23 @@ def find_gateway():
 
 def ensure_gateway(role_arn: str, dry: bool):
     existing = find_gateway()
+    if existing and existing.get("status") in (
+            "FAILED", "CREATE_FAILED", "UPDATE_FAILED",
+            "DELETING", "DELETED"):
+        # 죽은 gateway 는 이름 충돌로 create 를 막는다 — 그대로 재사용하면
+        # wait_status 가 매번 실패해 수동 삭제 전까지 영구 데드락.
+        gw_id = existing["gatewayId"]
+        log(f"Gateway {existing.get('status')} 상태 — 재생성을 위해 삭제: {gw_id}")
+        if not dry:
+            if existing.get("status") != "DELETING":
+                _control().delete_gateway(gatewayIdentifier=gw_id)
+            for _ in range(45):
+                if find_gateway() is None:
+                    break
+                time.sleep(4)
+            else:
+                fail("Gateway 삭제 전파 타임아웃 — 콘솔에서 삭제 후 재시도하세요")
+        existing = None
     if existing:
         log(f"Gateway reused: {existing['gatewayId']} ({existing.get('status')})")
         return existing["gatewayId"], existing["gatewayUrl"]
@@ -156,6 +177,17 @@ def ensure_target(gw_id: str, dry: bool) -> str:
         log(f"[dry-run] WebSearch connector target (connectorId={CONNECTOR_ID})")
         return "<dry-target-id>"
     ex = find_target(gw_id)
+    if ex and ex.get("status") in ("FAILED", "CREATE_FAILED",
+                                 "UPDATE_FAILED", "DELETING", "DELETED"):
+        # 죽은 target 은 재사용하면 검색 도구가 영구 실패 — 삭제 후 재생성.
+        log(f"Target {ex.get('status')} 상태 — 재생성을 위해 삭제: {ex['targetId']}")
+        _control().delete_gateway_target(gatewayIdentifier=gw_id,
+                                         targetId=ex["targetId"])
+        for _ in range(30):
+            if find_target(gw_id) is None:
+                break
+            time.sleep(2)
+        ex = None
     if ex:
         log(f"Target reused: {ex['targetId']} ({ex.get('status')})")
         return ex["targetId"]
@@ -235,9 +267,18 @@ def cmd_teardown():
         if t:
             gw.delete_gateway_target(gatewayIdentifier=g["gatewayId"], targetId=t["targetId"])
             log(f"target deleted: {t['targetId']}")
-            time.sleep(5)
-        gw.delete_gateway(gatewayIdentifier=g["gatewayId"])
-        log(f"gateway deleted: {g['gatewayId']}")
+            # target 삭제가 전파되기 전에 gateway 를 지우면 Conflict 계열 오류 —
+            # 고정 sleep 대신 사라질 때까지 폴링한다.
+            for _ in range(30):
+                if find_target(g["gatewayId"]) is None:
+                    break
+                time.sleep(2)
+        try:
+            gw.delete_gateway(gatewayIdentifier=g["gatewayId"])
+            log(f"gateway deleted: {g['gatewayId']}")
+        except ClientError as e:
+            log(f"gateway 삭제 실패({e.response['Error']['Code']}) — "
+                "다음 실행이 수렴합니다")
     else:
         log("gateway NONE — skip")
     iam = boto3.client("iam")

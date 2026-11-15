@@ -1363,3 +1363,66 @@ def test_selfsigned_cert_only_reuses_issued(monkeypatch):
         return subprocess.CompletedProcess([], 1, "", "boom")
     monkeypatch.setattr(eks_apply, "_run_quiet", no_cert)
     assert eks_apply.ensure_selfsigned_cert("dev", "ap-northeast-2") == ""
+
+
+def test_chatagent_env_scrubs_stale_provisioner_inputs(monkeypatch):
+    """17차 — 부모 쉘의 stale export 가 outputs 를 이기면 eks 배포가
+    ecs run-task 로 ALTER 하거나 엉뚱한 secret 을 쓴다. 프로비저너 입력
+    키는 스크럽 후 명시된 값만 주입돼야 한다."""
+    from deploy import chatagent
+    for k in ("ECS_PW_TASKDEF_ARN", "KUBE_CONTEXT", "ECR_REPO",
+              "DB_MASTER_SECRET", "TARGET_NAME", "AWS_REGION",
+              "AGENT_NAME", "MIGRATION_IMAGE"):
+        monkeypatch.setenv(k, "stale")
+    monkeypatch.setenv("CHAT_AGENT_REGION", "us-west-2")
+    e = chatagent._env({"chat_agent_ecr_url": "real.ecr/repo"},
+                       {"namespace": "ns"}, "", context="ctx",
+                       env_name="dev", region="ap-south-1")
+    assert e["ECR_REPO"] == "real.ecr/repo"
+    assert e["KUBE_CONTEXT"] == "ctx"          # 명시 인자가 산다
+    assert e["K8S_NAMESPACE"] == "ns"
+    assert "ECS_PW_TASKDEF_ARN" not in e        # eks 경로에서 스크럽
+    assert "DB_MASTER_SECRET" not in e
+    assert "TARGET_NAME" not in e
+    assert e["REGION"] == "us-west-2"           # env 우선 계약 유지
+    assert e["AGENT_NAME"] == "llm_gateway_dev_admin_chat_agent"
+
+
+def test_websearch_env_scrubs_target_name(monkeypatch):
+    """17차 — stale TARGET_NAME 이 있으면 다른 이름의 target 이 생기는데
+    주입값은 web-search-tool 고정이라 도구를 못 찾는다."""
+    from deploy import websearch
+    monkeypatch.setenv("TARGET_NAME", "stale-tool")
+    monkeypatch.setenv("REGION", "ap-south-1")
+    e = websearch._env("dev")
+    assert "TARGET_NAME" not in e
+    assert e["REGION"] == "us-east-1"           # 핀 고정은 유지
+    assert e["GW_NAME"] == "llm-gateway-websearch-dev"
+
+
+def test_status_url_requires_ready_gateway_and_target(monkeypatch):
+    """17차 — URL 만 출력되는 부분 삭제 상태(target 없음/FAILED)를
+    '존재'로 판정하면 ensure 가 deploy 를 영영 안 돌려 자가치유 불가."""
+    from deploy import websearch
+
+    def fake(stdout):
+        return lambda *a, **k: subprocess.CompletedProcess([], 0, stdout, "")
+    base = "gateway: gw-1 status=READY authorizerType=AWS_IAM\n" \
+           "  url: https://gw.example/mcp\n"
+    # target NONE — 부분 삭제 → "" (deploy 수렴 유도)
+    monkeypatch.setattr(websearch, "_run", fake(base + "  target: NONE\n"))
+    assert websearch.status_url("dev", __import__("pathlib").Path("/x")) == ""
+    # target FAILED → "" (재생성 필요)
+    monkeypatch.setattr(websearch, "_run",
+                        fake(base + "  target: t1 status=FAILED\n"))
+    assert websearch.status_url("dev", __import__("pathlib").Path("/x")) == ""
+    # target READY → URL 반환
+    monkeypatch.setattr(websearch, "_run",
+                        fake(base + "  target: t1 status=READY\n"))
+    assert websearch.status_url("dev", __import__("pathlib").Path("/x")) == \
+        "https://gw.example/mcp"
+    # gateway FAILED → target 있어도 ""
+    monkeypatch.setattr(websearch, "_run", fake(
+        "gateway: gw-1 status=FAILED\n  url: https://gw.example/mcp\n"
+        "  target: t1 status=READY\n"))
+    assert websearch.status_url("dev", __import__("pathlib").Path("/x")) == ""

@@ -29,7 +29,13 @@ TARGET_ID = "web-search-tool"
 
 
 def _env(env_name: str, caller_role_arn: str = "") -> dict[str, str]:
-    e = dict(os.environ)
+    # 부모 쉘의 stale export 가 핀 값을 이기는 걸 막는다 — TARGET_NAME 을
+    # 재지정한 쉘에서 deploy 하면 target 이 다른 이름으로 만들어지는데
+    # 주입값은 web-search-tool 고정이라 도구를 못 찾는다 (chatagent._env 와
+    # 같은 스크럽).
+    from .chatagent import _PROVISIONER_INPUTS
+    e = {k: v for k, v in os.environ.items()
+         if k not in _PROVISIONER_INPUTS}
     e["REGION"] = AGENTCORE_REGION
     # set-websearch-url.sh 와 같은 이름 규칙 — 수동 배포가 만든 gateway 재사용
     e["GW_NAME"] = f"llm-gateway-websearch-{env_name}"
@@ -63,11 +69,20 @@ def _norm_mcp(url: str) -> str:
 
 
 def status_url(env_name: str, repo_root: Path, caller_role_arn: str = "") -> str:
-    """기존 gateway 의 /mcp URL — 없거나 조회 실패 시 "".
+    """정상 gateway 의 /mcp URL — 없거나 조회 실패 시 "".
 
-    읽기 전용 — plan/preview 경로에서도 안전하다."""
+    읽기 전용 — plan/preview 경로에서도 안전하다.
+    ⚠️ URL 만으로 판정하지 않는다 — target 없이 gateway 만 남은 부분 삭제나
+    FAILED 상태도 URL 은 출력한다. 그런 상태를 "존재"로 보면 ensure 가
+    deploy(자가치유 경로)를 영영 안 돌려 검색이 죽은 채로 수렴한다 —
+    gateway READY + target 존재 둘 다 만족할 때만 URL 을 인정한다."""
     r = _run(env_name, repo_root, "status", caller_role_arn)
     if r.returncode != 0:
+        return ""
+    if not re.search(r"^gateway: \S+ status=READY", r.stdout, re.M):
+        return ""
+    if not re.search(r"^  target: \S+ status=(READY|CREATING|UPDATING)",
+                     r.stdout, re.M):
         return ""
     m = re.search(r"^  url: (\S+)", r.stdout, re.M)
     return _norm_mcp(m.group(1)) if m else ""
@@ -106,6 +121,7 @@ def teardown(env_name: str, repo_root: Path, caller_role_arn: str = "") -> bool:
         tail = (r.stderr or r.stdout or "").strip().splitlines()
         print(f"⚠ web_search teardown 실패 — {tail[-1] if tail else '오류 없음'} "
               f"(수동: REGION={AGENTCORE_REGION} GW_NAME=llm-gateway-websearch-{env_name} "
+              f"ROLE_NAME=llm-gateway-{env_name}-agentcore-websearch-gw "
               "python3 deployment/scripts/provision_agentcore_websearch.py teardown)",
               file=sys.stderr)
         return False

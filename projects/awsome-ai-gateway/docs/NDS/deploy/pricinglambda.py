@@ -67,12 +67,18 @@ def _zip(src: Path) -> bytes:
 
 
 def status(region: str, env: str, admin_role_name: str = "") -> dict:
-    """읽기 전용 상태 — plan/preview 에서도 안전."""
-    lam, iam, _ = _clients(region)
+    """읽기 전용 상태 — plan/preview 에서도 안전.
+    boto3 미설치 머신에서도 preview 가 죽지 않게 import 실패를 삼킨다."""
     fn, role, invoke = "미배포", "미생성", "미부여"
     try:
-        lam.get_function(FunctionName=fn_name(env))
-        fn = "Active"
+        lam, iam, _ = _clients(region)
+    except Exception:
+        return {"function": fn, "role": role, "invoke": invoke}
+    try:
+        f = lam.get_function(FunctionName=fn_name(env))
+        # State=Failed/Pending 도 존재로 치면 preview 가 'Active' 로 거짓 표시
+        st = ((f.get("Configuration") or {}).get("State")) or "Active"
+        fn = st
     except Exception:
         pass
     try:
@@ -109,18 +115,28 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
         role_arn = f"arn:aws:iam::{acct}:role/{name}"
 
         # ① role — BasicExecutionRole 만 (DB/Secret 접근 없음, ops 와 동일)
+        # 부착은 get_role 성공 여부와 무관하게 항상 — create 와 attach 사이에서
+        # 죽은 부분 실행이 role 만 남기면 get_role 재사용 경로가 attach 를 영구
+        # 스킵해 함수가 로그도 못 쓰는 상태로 수렴한다. attach 는 멱등이다.
         try:
             iam.get_role(RoleName=name)
+            # trust 도 수렴한다 — 외부에서 만든 같은 이름 role 이나 손상된
+            # trust 를 영구히 두지 않는다.
+            iam.update_assume_role_policy(RoleName=name, PolicyDocument=TRUST)
         except iam.exceptions.NoSuchEntityException:
             iam.create_role(
                 RoleName=name,
                 AssumeRolePolicyDocument=TRUST,
                 Description="llm-gateway LiteLLM pricing catalog fetch proxy")
-            iam.attach_role_policy(RoleName=name, PolicyArn=BASIC_EXEC)
             iam.get_waiter("role_exists").wait(RoleName=name)
             print(f"pricing_lambda: role 생성 {name} (전파 대기)", file=sys.stderr)
             import time
             time.sleep(10)   # role→lambda 전파 — ops 스크립트와 같은 10s
+        had_policies = {p["PolicyArn"] for p in
+                        iam.list_attached_role_policies(RoleName=name)
+                        .get("AttachedPolicies", [])}
+        if BASIC_EXEC not in had_policies:
+            iam.attach_role_policy(RoleName=name, PolicyArn=BASIC_EXEC)
 
         # ② 함수 — 코드는 매번 갱신 배포 (멱등)
         zipb = _zip(src)
@@ -142,6 +158,10 @@ def ensure(cfg, repo_root: Path, admin_role_arn: str = "",
                             "for llm-gateway admin-api")
 
         # ③ admin-api role 에 invoke 인라인 정책 (eks — ecs 는 모듈 소유)
+        if attach_invoke and not admin_role_arn:
+            print("⚠ pricing_lambda: admin_api_role_arn output 없음 — invoke "
+                  "정책 미부여로 함수만 배포됩니다 (admin-api invoke 는 "
+                  "AccessDenied)", file=sys.stderr)
         if attach_invoke and admin_role_arn:
             admin_name = admin_role_arn.rsplit("/", 1)[-1]
             iam.put_role_policy(
@@ -170,31 +190,49 @@ def teardown(cfg, admin_role_arn: str = "", detach_invoke: bool = True) -> bool:
     ok = True
     try:
         lam, iam, _ = _clients(region)
-        if detach_invoke and admin_role_arn:
-            try:
-                iam.delete_role_policy(
-                    RoleName=admin_role_arn.rsplit("/", 1)[-1],
-                    PolicyName=INVOKE_POLICY)
-            except iam.exceptions.NoSuchEntityException:
-                pass
-        try:
-            lam.delete_function(FunctionName=name)
-        except lam.exceptions.ResourceNotFoundException:
-            pass
-        try:
-            iam.get_role(RoleName=name)
-            try:
-                iam.detach_role_policy(RoleName=name, PolicyArn=BASIC_EXEC)
-            except iam.exceptions.NoSuchEntityException:
-                pass
-            for p in iam.list_role_policies(RoleName=name)["PolicyNames"]:
-                iam.delete_role_policy(RoleName=name, PolicyName=p)
-            iam.delete_role(RoleName=name)
-        except iam.exceptions.NoSuchEntityException:
-            pass
-        print(f"pricing_lambda: {name} 제거 완료", file=sys.stderr)
     except Exception as exc:
         print(f"⚠ pricing_lambda teardown 실패 — {exc} "
               f"(수동: Lambda {name} / role {name} 삭제)", file=sys.stderr)
-        ok = False
+        return False
+
+    def _step(label: str, fn) -> None:
+        # 단계별 격리 — 한 리소스의 실패가 나머지 정리를 중단시키지 않는다
+        # (함수만 남고 role 이 새는 부분 teardown 방지). 재실행은 멱등.
+        nonlocal ok
+        try:
+            fn()
+        except Exception as exc:
+            # NotFound 계열은 '이미 정리됨' — 성공으로 본다. 타입으로 먼저
+            # 보고(boto3 예외 클래스), 코드도 함께 본다(래핑된 오류).
+            notfound = isinstance(
+                exc, (iam.exceptions.NoSuchEntityException,
+                      lam.exceptions.ResourceNotFoundException))
+            code = getattr(exc, "response", {}).get("Error", {}).get("Code", "")
+            if not notfound and code not in (
+                    "NoSuchEntity", "ResourceNotFoundException",
+                    "ResourceNotFound"):
+                ok = False
+                print(f"⚠ pricing_lambda teardown {label} 실패 — {exc}",
+                      file=sys.stderr)
+
+    if detach_invoke and admin_role_arn:
+        _step("invoke 정책", lambda: iam.delete_role_policy(
+            RoleName=admin_role_arn.rsplit("/", 1)[-1],
+            PolicyName=INVOKE_POLICY))
+    _step("함수", lambda: lam.delete_function(FunctionName=name))
+
+    def _delete_role():
+        iam.get_role(RoleName=name)
+        try:
+            iam.detach_role_policy(RoleName=name, PolicyArn=BASIC_EXEC)
+        except iam.exceptions.NoSuchEntityException:
+            pass
+        for page in iam.get_paginator("list_role_policies").paginate(
+                RoleName=name):
+            for p in page["PolicyNames"]:
+                iam.delete_role_policy(RoleName=name, PolicyName=p)
+        iam.delete_role(RoleName=name)
+    _step("role", _delete_role)
+    if ok:
+        print(f"pricing_lambda: {name} 제거 완료", file=sys.stderr)
     return ok

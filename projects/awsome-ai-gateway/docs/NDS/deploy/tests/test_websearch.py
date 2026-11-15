@@ -40,10 +40,28 @@ def test_ensure_reuses_existing_without_deploy(monkeypatch, tmp_path):
     calls = []
     def fake(env_name, repo_root, sub, caller_role_arn=""):
         calls.append(sub)
-        return _cp(0, "  url: https://g/mcp\n")
+        return _cp(0, "gateway: g1 status=READY\n"
+                      "  url: https://g/mcp\n"
+                      "  target: t status=READY\n")
     monkeypatch.setattr(websearch, "_run", fake)
     assert websearch.ensure_gateway_url("dev", tmp_path) == "https://g/mcp"
     assert calls == ["status"]        # deploy 는 돌리지 않는다
+
+
+def test_ensure_deploys_when_gateway_degraded(monkeypatch, tmp_path):
+    """17차 — target 만 지워진 부분 삭제를 '존재'로 치면 자가치유가
+    영영 안 돌아간다. degraded 상태는 deploy(멱등 수렴)를 돌린다."""
+    calls = []
+    def fake(env_name, repo_root, sub, caller_role_arn=""):
+        calls.append(sub)
+        if sub == "status":
+            return _cp(0, "gateway: g1 status=READY\n"
+                          "  url: https://g/mcp\n"
+                          "  target: NONE\n")
+        return _cp(0, "AGENTCORE_GATEWAY_URL=https://g2/mcp\n")
+    monkeypatch.setattr(websearch, "_run", fake)
+    assert websearch.ensure_gateway_url("dev", tmp_path) == "https://g2/mcp"
+    assert calls == ["status", "deploy"]
 
 
 def test_ensure_provisions_when_missing(monkeypatch, tmp_path):

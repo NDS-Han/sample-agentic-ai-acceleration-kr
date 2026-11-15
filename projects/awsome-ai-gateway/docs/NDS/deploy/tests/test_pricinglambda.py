@@ -33,6 +33,15 @@ class FakeIam:
     def attach_role_policy(self, RoleName, PolicyArn):
         self.attached.append((RoleName, PolicyArn))
 
+    def list_attached_role_policies(self, RoleName):
+        return {"AttachedPolicies": [
+            {"PolicyArn": arn} for (r, arn) in self.attached
+            if r == RoleName]}
+
+    def update_assume_role_policy(self, RoleName, PolicyDocument):
+        if RoleName not in self.roles:
+            raise _NoSuch(RoleName)
+
     def put_role_policy(self, RoleName, PolicyName, PolicyDocument):
         self.inline[(RoleName, PolicyName)] = PolicyDocument
 
@@ -51,6 +60,14 @@ class FakeIam:
 
     def list_role_policies(self, RoleName):
         return {"PolicyNames": [p for (r, p) in self.inline if r == RoleName]}
+
+    def get_paginator(self, _name):
+        iam = self
+        class _P:
+            def paginate(self, RoleName):
+                return [{"PolicyNames": [
+                    p for (r, p) in iam.inline if r == RoleName]}]
+        return _P()
 
     def delete_role(self, RoleName):
         self.roles.pop(RoleName, None)

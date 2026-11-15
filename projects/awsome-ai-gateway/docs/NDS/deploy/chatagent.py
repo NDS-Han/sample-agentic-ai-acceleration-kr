@@ -24,7 +24,6 @@ import sys
 from pathlib import Path
 
 PROVISIONER = Path("deployment/scripts/provision_agentcore_chatagent.py")
-AGENTCORE_REGION = os.environ.get("CHAT_AGENT_REGION", "ap-northeast-2")
 
 
 def resolved_region(region: str = "") -> str:
@@ -49,15 +48,41 @@ def _agent_name(outs: dict, env_name: str = "") -> str:
 
 
 def _git_sha(repo_root: Path | None) -> str:
-    """git HEAD short SHA — rebuild-image.sh 와 같은 태그 규약."""
+    """git HEAD short SHA — rebuild-image.sh 와 같은 태그 규약.
+    미커밋 변경이 있으면 -dirty 접미 — 같은 SHA 라 image_exists 가 옛
+    이미지를 재사용해 미커밋 수정이 영영 안 올라가는 함정을 막는다."""
     if not repo_root:
         return ""
     try:
         r = subprocess.run(["git", "rev-parse", "--short", "HEAD"],
                            cwd=repo_root, capture_output=True, text=True, timeout=10)
-        return r.stdout.strip() if r.returncode == 0 else ""
-    except OSError:
+        if r.returncode != 0:
+            return ""
+        sha = r.stdout.strip()
+        d = subprocess.run(["git", "status", "--porcelain", "--",
+                            "admin-chat-agent/"],
+                           cwd=repo_root, capture_output=True, text=True, timeout=10)
+        if d.returncode == 0 and d.stdout.strip():
+            sha += "-dirty"
+        return sha
+    except (OSError, subprocess.TimeoutExpired):
         return ""
+
+
+# 프로비저너 입력 키 — 부모 쉘의 stale export 가 outputs/파라미터를 조용히
+# 이기는 걸 막는다. 수동 절차 문서가 이 변수들을 export 하라고 안내하기
+# 때문에 eks 경로에서도 실제로 박혀 있는 경우가 있다 (예: ECS_PW_TASKDEF_ARN
+# 이 있으면 eks 배포가 ecs run-task 로 ALTER 를 시도해 엉뚱한 DB 를 건드린다).
+_PROVISIONER_INPUTS = frozenset({
+    "AGENT_NAME", "ECR_REPO", "ROLE_ARN", "ROLE_NAME",
+    "LAMBDA_QUERY_DB", "LAMBDA_GET_SCHEMA", "CHAT_STAGING_BUCKET",
+    "CHAT_READER_SECRET_ARN", "DB_HOST", "DB_NAME", "DB_PORT",
+    "DB_MASTER_SECRET", "DB_MASTER_KEY",
+    "ECS_CLUSTER", "ECS_PW_TASKDEF_ARN", "ECS_SUBNETS", "ECS_SG",
+    "ECS_REGION", "KUBE_CONTEXT", "K8S_NAMESPACE", "MIGRATION_IMAGE",
+    "INTERPRETER_NAME", "AGENT_DIR", "AWS_REGION", "REGION",
+    "TARGET_NAME", "CALLER_ROLE_ARN", "GW_NAME",
+})
 
 
 def _env(outs: dict, meta: dict, migration_image: str,
@@ -66,7 +91,8 @@ def _env(outs: dict, meta: dict, migration_image: str,
          region: str = "") -> dict[str, str]:
     """terraform output → 프로비저너 env. Runtime 이름은 이름 패턴
     ([a-zA-Z][a-zA-Z0-9_]{0,47}) 때문에 하이픈 → 밑줄 정규화가 필요하다."""
-    e = dict(os.environ)
+    e = {k: v for k, v in os.environ.items()
+         if k not in _PROVISIONER_INPUTS}
     e["REGION"] = resolved_region(region)
     e["AGENT_NAME"] = _agent_name(outs, env_name)
     # 에이전트 이미지 태그 — latest 고정이면 Runtime 이 생성 시점 이미지에
@@ -98,6 +124,30 @@ def _env(outs: dict, meta: dict, migration_image: str,
         e["KUBE_CONTEXT"] = context
     if migration_image:
         e["MIGRATION_IMAGE"] = migration_image
+    # ALTER pod 의 master 자격증명 k8s secret — 차트 값
+    # database.external.passwordSecretName/masterPasswordSecretKey 와 맞춰야
+    # 한다. 커스텀 채택 배포는 기본값(llm-gateway-db/master_password)이 아니라
+    # 값을 선언하므로 레이어를 병합해 읽는다 (_migration_image 와 같은 패턴).
+    if meta.get("values_layers") and repo_root:
+        import yaml
+        db_sec = db_key = ""
+        for layer in meta["values_layers"]:
+            lp = Path(layer)
+            lp = lp if lp.is_absolute() else repo_root / lp
+            try:
+                v = yaml.safe_load(lp.read_text())
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
+                continue
+            ext = (v.get("database") or {}).get("external") \
+                if isinstance(v, dict) else None
+            if not isinstance(ext, dict):
+                continue
+            db_sec = str(ext.get("passwordSecretName") or db_sec)
+            db_key = str(ext.get("masterPasswordSecretKey") or db_key)
+        if db_sec:
+            e["DB_MASTER_SECRET"] = db_sec
+        if db_key:
+            e["DB_MASTER_KEY"] = db_key
     for k, v in (extras or {}).items():
         if v:
             e[k] = str(v)

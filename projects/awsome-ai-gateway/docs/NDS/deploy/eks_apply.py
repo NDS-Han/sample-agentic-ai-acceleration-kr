@@ -1737,6 +1737,18 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         url = websearch.ensure_gateway_url(
             cfg.env, repo_root,
             caller_role_arn=outs.get("gateway_proxy_role_arn", ""))
+        if not url:
+            # 프로비저너 실패인데 라이브에 이미 URL 이 주입돼 있으면 보존한다 —
+            # --set 누락으로 helm 이 values 의 placeholder/빈 값으로 덮어
+            # 멀쩡한 검색을 끊는 사고 방지 (bi_insight 의 ARN 보존과 같은
+            # 계약 — 실제 인시던트로 확인된 유형).
+            prev = _live_deploy_env(meta, "gateway-proxy",
+                                    "AGENTCORE_GATEWAY_URL", context)
+            if prev:
+                url = prev
+                print("⚠ web_search: 프로비저너 실패 — 라이브 URL 을 보존해 "
+                      "재주입합니다 (Gateway 상태는 doctor 로 확인)",
+                      file=sys.stderr)
         if url:
             set_args += [
                 "--set", f"gatewayProxy.env.AGENTCORE_GATEWAY_URL={url}",

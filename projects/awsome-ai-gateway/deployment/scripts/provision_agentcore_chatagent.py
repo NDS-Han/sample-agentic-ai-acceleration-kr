@@ -378,12 +378,17 @@ def find_runtime():
 
 
 def find_interpreter() -> str:
-    """커스텀 Code Interpreter ID — 없거나 조회 실패 시 ""."""
+    """커스텀 Code Interpreter ID — 없거나 조회 실패 시 "".
+    죽은(FAILED/삭제중) 항목은 재사용 대상이 아니라 건너뛴다."""
     ctl = _control()
     for page in ctl.get_paginator("list_code_interpreters").paginate():
         for it in page.get("codeInterpreterSummaries", []):
-            if it.get("name") == INTERPRETER_NAME:
-                return it["codeInterpreterId"]
+            if it.get("name") != INTERPRETER_NAME:
+                continue
+            if it.get("status") in ("CREATE_FAILED", "DELETING",
+                                   "DELETED", "FAILED"):
+                continue
+            return it["codeInterpreterId"]
     return ""
 
 
@@ -396,6 +401,19 @@ def ensure_interpreter(dry: bool) -> str:
         if iid:
             log(f"Code Interpreter 재사용: {iid}")
             return iid
+        # 같은 이름의 죽은(FAILED/삭제중) interpreter 가 있으면 이름 충돌로
+        # 생성이 막힌다 — 정리 후 생성한다. 목록의 나머지 동명 항목이 대상.
+        for page in _control().get_paginator("list_code_interpreters").paginate():
+            for it in page.get("codeInterpreterSummaries", []):
+                if it.get("name") != INTERPRETER_NAME:
+                    continue
+                if it.get("status") in ("CREATE_FAILED", "DELETING",
+                                       "DELETED", "FAILED"):
+                    log(f"죽은 Code Interpreter({it.get('status')}) 삭제: "
+                        f"{it['codeInterpreterId']}")
+                    if not dry:
+                        _control().delete_code_interpreter(
+                            codeInterpreterId=it["codeInterpreterId"])
         if dry:
             log(f"[dry-run] Code Interpreter {INTERPRETER_NAME} 생성")
             return "<dry-interpreter-id>"
@@ -458,6 +476,22 @@ def ensure_runtime(dry: bool) -> str:
     interp_id = ensure_interpreter(dry)
     want_env = _env_vars(interp_id)
     ex = find_runtime()
+    if ex and ex.get("status") in ("CREATE_FAILED", "UPDATE_FAILED",
+                                 "DELETING", "DELETED"):
+        # 죽은 Runtime 을 이름으로 재사용하면 admin-api 가 영구히 죽은 ARN 을
+        # 받는다 — 삭제가 전파될 때까지 기다린 뒤 새로 만든다.
+        rid = ex["agentRuntimeId"]
+        log(f"Runtime {ex.get('status')} 상태 — 재생성을 위해 삭제: {rid}")
+        if not dry:
+            if ex.get("status") != "DELETING":
+                _control().delete_agent_runtime(agentRuntimeId=rid)
+            for _ in range(36):
+                if find_runtime() is None:
+                    break
+                time.sleep(5)
+            else:
+                fail("Runtime 삭제 전파 타임아웃 — 콘솔에서 삭제 후 재시도하세요")
+        ex = None
     if ex:
         arn = ex["agentRuntimeArn"]
         want = image_uri() if ECR_REPO else ""
