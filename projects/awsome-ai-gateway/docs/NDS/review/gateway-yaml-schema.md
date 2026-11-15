@@ -63,3 +63,9 @@ scalar_leaf_sections`+`test_configure_uses_named_captured_file_as_source`.
 - `deploy configure` 가 캡처본 다수 존재 시 `captured[0]` 을 기본값으로
   선택 — 목록을 출력하고 `--config` 안내를 추가했으나 자동 선택 자체는
   사용자 확인에 의존 (LOW).
+
+## 28차 적용
+
+- **`aws.allowed_roles` 콤마 거부**(LOW): 항목 안 콤마가 ALLOWED_IAM_ROLES
+  의 ",".join() 에서 두 role 로 갈라져 허가 목록이 조용히 확장 —
+  item_re(role 이름/ARN 문자셋 + 와일드카드 *, 콤마 제외)로 거부.

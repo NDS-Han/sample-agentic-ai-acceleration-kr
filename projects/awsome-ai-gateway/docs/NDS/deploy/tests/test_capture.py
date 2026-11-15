@@ -1500,3 +1500,30 @@ def test_tfvars_quoted_heredoc_terminator(tmp_path):
         'environment = "prod"\n')
     tv = capture._tfvars(tmp_path)
     assert tv["environment"] == "prod"
+
+
+def test_r53_alias_target_rejects_invalid_host(monkeypatch):
+    """28차 — host(tfvars/output 유래)에 ' 나 JMESPath 메타문자가 섞이면
+    쿼리가 주입돼 잘못된 레코드를 집는다 — hostname 형식만 통과."""
+    monkeypatch.setattr(capture, "_aws_json",
+                        lambda *a, **k: (_ for _ in ()).throw(
+                            AssertionError("aws 호출이면 안 됨")))
+    assert capture._r53_alias_target("Z1", "x']|*", "r") == ""
+    assert capture._r53_alias_target("Z1", "a'b.example", "r") == ""
+
+
+def test_instance_items_manifest_owned_beats_labels():
+    """28차 — owned(helm 매니페스트)가 주어지면 instance 라벨과 무관하게
+    기록된 이름만 인정한다 — 라벨 위조 항목은 제외."""
+    forged = {"metadata": {"name": "evil-admin-ui",
+                           "labels": {"app.kubernetes.io/instance": "myrel"}}}
+    mine = {"metadata": {"name": "myrel-admin-ui",
+                         "labels": {"app.kubernetes.io/instance": "other"}}}
+    # 라벨과 무관하게 이름 기준 — forged 라벨이 release 와 같아도 탈락,
+    # 라벨이 다른 우리 항목은 채택
+    got = capture._instance_items([forged, mine], "myrel",
+                                  owned={"myrel-admin-ui"})
+    assert [i["metadata"]["name"] for i in got] == ["myrel-admin-ui"]
+    # owned=None(매니페스트 조회 불가)이면 라벨 폴백 계약 유지
+    got = capture._instance_items([forged, mine], "myrel", owned=None)
+    assert [i["metadata"]["name"] for i in got] == ["evil-admin-ui"]

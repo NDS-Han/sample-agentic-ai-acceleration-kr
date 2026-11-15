@@ -25,7 +25,7 @@ from pathlib import Path
 
 import yaml
 
-from .schema import GatewayConfig
+from .schema import GatewayConfig, _K8S_NAME_RE
 from . import chatagent, pricinglambda, websearch
 
 
@@ -53,6 +53,28 @@ def load_meta(gen_dir: Path, repo_root: Path | None = None) -> dict:
     missing = [k for k in ("release", "namespace", "chart") if not meta.get(k)]
     if missing:
         raise SystemExit(f"{p} 가 불완전합니다({', '.join(missing)} 없음) — `deploy render` 로 재생성하십시오")
+    # gen 파일은 디스크와 변경 명령 사이의 유일한 경계다 — 손편집된
+    # deploy.yaml 이 임의 chart/env_dir/이름으로 helm·terraform 을 돌리지
+    # 못하게 값 형식을 검증한다.
+    for key in ("release", "namespace"):
+        if not _K8S_NAME_RE.fullmatch(str(meta[key])):
+            raise SystemExit(f"{p} 의 {key} '{meta[key]}' 이 DNS-1123 형식이 "
+                             "아닙니다 — `deploy render` 로 재생성하십시오")
+    if repo_root:
+        # 최소 계약: chart 는 repo 안의 상대 경로 — 절대경로/../ 이탈은 거부.
+        # deployment/charts 디렉터리가 있으면 그 아래로도 좁힌다(표준
+        # 레이아웃을 벗어난 차트는 render 가 만들지 않는다).
+        root = Path(repo_root).resolve()
+        try:
+            chart_abs = (root / str(meta["chart"])).resolve()
+            chart_abs.relative_to(root)
+            charts_root = (root / "deployment" / "charts").resolve()
+            if charts_root.is_dir():
+                chart_abs.relative_to(charts_root)
+        except (ValueError, OSError):
+            raise SystemExit(f"{p} 의 chart '{meta['chart']}' 이 repo/"
+                             "deployment/charts 밖을 가리킵니다 — "
+                             "`deploy render` 로 재생성하십시오") from None
     # values 레이어 파일이 실제 있는지 — 없으면 helm 이 apply 중간에 죽는다
     layers = meta.get("values_layers") or []
     if not isinstance(layers, list):
@@ -97,16 +119,55 @@ def _release_manifest_docs(meta: dict, context: str = "") -> list[dict]:
     if context:
         argv += ["--kube-context", context]
     r = _run_quiet(argv, timeout=30)
-    if r.returncode == 0:
-        for chunk in (r.stdout or "").split("\n---"):
-            try:
-                d = yaml.safe_load(chunk)
-            except Exception:
-                continue
-            if isinstance(d, dict) and isinstance(d.get("kind"), str):
-                docs.append(d)
+    if r.returncode != 0:
+        # 실패는 캐시하지 않는다 — fresh install(릴리스 부재)이나 일시적
+        # context 단절을 [] 로 굳히면 upgrade 후 조회가 전부 빈 값을 돌려
+        # 2-phase nextauthUrl·Route53 레코드·live env 보존이 통째로 스킵된다.
+        return docs
+    for chunk in (r.stdout or "").split("\n---"):
+        try:
+            d = yaml.safe_load(chunk)
+        except Exception:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("kind"), str):
+            docs.append(d)
     _MANIFEST_CACHE[key] = docs
     return docs
+
+
+def _invalidate_manifest_cache(meta: dict, context: str = "") -> None:
+    """helm upgrade/uninstall 직후 — 기록이 바뀌었으니 다음 조회는 다시 읽는다."""
+    _MANIFEST_CACHE.pop((str(meta.get("release") or ""),
+                         str(meta.get("namespace") or ""), context), None)
+
+
+def _pending_teardown_path(gen_dir: Path) -> Path:
+    return gen_dir / ".pending-provisioner-teardown"
+
+
+def _pending_teardown(gen_dir: Path) -> set[str]:
+    """이전 apply 의 off-teardown 실패 마커 — upgrade 가 라이브 env 증거를
+    지워도 다음 apply 가 유료 리소스를 재시도할 수 있게 하는 유일한 흔적."""
+    try:
+        return {l.strip() for l in _pending_teardown_path(gen_dir)
+                .read_text().splitlines() if l.strip()}
+    except OSError:
+        return set()
+
+
+def _mark_pending(gen_dir: Path, key: str, failed: bool) -> None:
+    p = _pending_teardown_path(gen_dir)
+    cur = _pending_teardown(gen_dir)
+    (cur.add if failed else cur.discard)(key)
+    try:
+        if cur:
+            fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write("\n".join(sorted(cur)) + "\n")
+        elif p.exists():
+            p.unlink()
+    except OSError:
+        pass
 
 
 def _release_kind_names(meta: dict, kind: str, context: str = "") -> set[str]:
@@ -128,8 +189,11 @@ def _live_deploy_env(meta: dict, deploy_suffix: str, var: str,
     두 번째 키로 갈라 차트 values 를 주조)하거나 외부 URL 을 심는다.
     release 매니페스트(helm 기록)에서만 읽는다 — 거기 없으면 신뢰 불가."""
     names = _release_kind_names(meta, "Deployment", context)
-    target_name = next((n for n in names
-                        if n.endswith(f"-{deploy_suffix}")), "")
+    # 같은 접미사의 deployment 가 둘 이상이면 set 순회가 비결정적 — 짧은
+    # 이름(정규 {fullname}-svc)을 우선해 결정적으로 고른다.
+    cands = sorted((n for n in names if n.endswith(f"-{deploy_suffix}")),
+                   key=lambda n: (len(n), n))
+    target_name = cands[0] if cands else ""
     if not target_name:
         return ""
     for d in _release_manifest_docs(meta, context):
@@ -943,10 +1007,13 @@ def strip_es_owned_secrets(meta: dict, context: str = "",
     secrets.add(f"{fullname}-app")
     secrets.discard("")
     for sec in sorted(secrets):
+        # ownerReferences 는 복수일 수 있다 — [0] 만 보면 두 번째 이후의
+        # ExternalSecret 소유 표식을 놓쳐 GC 연쇄 삭제를 막지 못한다.
         r = _run_quiet([*base, "get", "secret", sec,
-                        "-o", "jsonpath={.metadata.ownerReferences[0].kind}"],
+                        "-o", "jsonpath={.metadata.ownerReferences[*].kind}"],
                        timeout=30)
-        if r.returncode != 0 or (r.stdout or "").strip() != "ExternalSecret":
+        if r.returncode != 0 or "ExternalSecret" not in \
+                (r.stdout or "").split():
             continue
         p = _run_quiet([*base, "patch", "secret", sec, "--type=json",
                         "-p", '[{"op":"remove","path":"/metadata/ownerReferences"}]'],
@@ -1490,7 +1557,9 @@ def _manifest_docs(text: str) -> dict[str, dict]:
     for chunk in re.split(r"^---\s*$", text, flags=re.M):
         body = "\n".join(
             l for l in chunk.splitlines()
-            if not l.lstrip().startswith("#") and not marker.match(l)
+            # '#' 주석은 컬럼0 만 — 블록 스칼라(|) 안의 '#!'/'#' 들여쓰기 줄을
+            # 지우면 스크립트 내용이 훼손돼 diff 가 '변경 없음' 을 거짓 보고한다.
+            if not l.startswith("#") and not marker.match(l)
         ).strip()
         if not body:
             continue
@@ -1506,38 +1575,95 @@ def _manifest_docs(text: str) -> dict[str, dict]:
     return docs
 
 
+_SENSITIVE_ENV_RE = re.compile(
+    r"(?i)(secret|token|passw|_pw\b|apikey|api_key|private[_-]?key|credential)")
+
+
+def _pod_spec(d: dict) -> dict | None:
+    """Deployment/StatefulSet/DaemonSet/Job/CronJob/Pod 의 컨테이너 spec."""
+    spec = d.get("spec") or {}
+    tpl = spec.get("template")
+    if isinstance(tpl, dict) and isinstance(tpl.get("spec"), dict):
+        return tpl["spec"]
+    jt = (spec.get("jobTemplate") or {}).get("spec") or {}
+    tpl = jt.get("template")
+    if isinstance(tpl, dict) and isinstance(tpl.get("spec"), dict):
+        return tpl["spec"]
+    return spec if isinstance(spec.get("containers"), list) else None
+
+
+def _mask_doc(d: dict) -> None:
+    """in-place 마스킹 — Secret data/stringData 전부, pod-spec env 의
+    민감 이름 value 평문(차트가 사용자 env map 을 value: 로 렌더한다)."""
+    if not isinstance(d, dict):
+        return
+    if d.get("kind") == "Secret":
+        for field in ("data", "stringData"):
+            if isinstance(d.get(field), dict):
+                d[field] = {k: "***" for k in d[field]}
+        return
+    ps = _pod_spec(d)
+    if not isinstance(ps, dict):
+        return
+    for cl in ("containers", "initContainers"):
+        for c in ps.get(cl) or []:
+            if not isinstance(c, dict):
+                continue
+            for e in c.get("env") or []:
+                if isinstance(e, dict) and "value" in e and _SENSITIVE_ENV_RE \
+                        .search(str(e.get("name") or "")):
+                    e["value"] = "***"
+
+
 def _canon(obj: dict) -> str:
     """정규화된 YAML — 맵 순서/공백 차이가 diff 로 잡히지 않게 한다.
-    Secret 문서는 data/stringData 값을 마스킹한다 — inline .Values.secrets
-    를 쓰는 차트 구성에서 --plan 출력/CI 로그에 크리덴셜이 새지 않게."""
-    if isinstance(obj, dict) and obj.get("kind") == "Secret":
+    Secret data/stringData 와 민감 이름의 env value 는 마스킹한다 —
+    inline .Values.secrets/env 를 쓰는 차트 구성에서 --plan 출력/CI 로그에
+    크리덴셜이 새지 않게."""
+    if isinstance(obj, dict):
         obj = {**obj}
-        for field in ("data", "stringData"):
-            if isinstance(obj.get(field), dict):
-                obj[field] = {k: "***" for k in obj[field]}
+        _mask_doc(obj)
     return yaml.dump(obj, sort_keys=True, allow_unicode=True)
 
 
+def _redact_chunk_text(chunk: str) -> str:
+    """파싱 불가 chunk 의 data:/stringData: 블록 값 줄을 텍스트로 마스킹 —
+    렌더된 값이 YAML 을 깨뜨려 safe_load 가 실패한 Secret 문서가 그대로
+    출력되는 fail-open 을 막는다."""
+    lines, out, in_block, base = chunk.splitlines(), [], False, 0
+    for l in lines:
+        m = re.match(r"^(\s*)(data|stringData)\s*:", l)
+        if m:
+            in_block, base = True, len(m.group(1))
+            out.append(l)
+            continue
+        if in_block:
+            indent = len(l) - len(l.lstrip())
+            if l.strip() and indent > base:
+                out.append(" " * indent + l.split(":", 1)[0] + ": ***")
+                continue
+            in_block = False
+        out.append(l)
+    return "\n".join(out)
+
+
 def _redact_secret_docs(text: str) -> str:
-    """매니페스트 덤프 텍스트의 Secret data/stringData 를 마스킹한다.
-    파싱 불가한 문서는 원문 유지 — helm dry-run 출력에 비-YAML 라인이
-    섞여 있을 수 있어 부분 실패를 허용한다."""
-    docs = _manifest_docs(text)
-    if not docs:
-        return text
-    # _manifest_docs 는 {key: obj} — 원래 순서/비문서 라인을 잃으므로
-    # Secret 만 치환한 텍스트로 재구성한다.
+    """매니페스트 덤프 텍스트의 Secret data/stringData·민감 env value 를
+    마스킹한다. 파싱 불가 Secret 문서는 텍스트 마스킹으로 처리한다."""
+    if not re.search(r"(?m)^kind\s*:", text or ""):
+        return text  # YAML 매니페스트가 아닌 출력은 그대로
     out = []
     for chunk in re.split(r"(?m)^---\s*$", text):
         try:
             d = yaml.safe_load(chunk)
         except Exception:
             d = None
-        if isinstance(d, dict) and d.get("kind") == "Secret":
-            for field in ("data", "stringData"):
-                if isinstance(d.get(field), dict):
-                    d[field] = {k: "***" for k in d[field]}
-            chunk = yaml.dump(d, allow_unicode=True)
+        if isinstance(d, dict):
+            _mask_doc(d)
+            if d.get("kind") == "Secret" or _pod_spec(d) is not None:
+                chunk = yaml.dump(d, allow_unicode=True)
+        elif re.search(r"(?m)^\s*kind\s*:\s*Secret\s*$", chunk):
+            chunk = _redact_chunk_text(chunk)
         out.append(chunk)
     return "---".join(out)
 
@@ -1694,14 +1820,22 @@ def _check_env_dir_declared(cfg: GatewayConfig, env_dir: Path | None,
         if hard:
             raise SystemExit(msg + " — managed terraform 적용을 거부합니다")
         print(f"⚠ {msg}", file=sys.stderr)
-    elif not declared and env_dir.name not in (cfg.env,
-                                               f"llm-gateway-{cfg.env}"):
-        # 관례 디렉토리(environments/llm-gateway-<env>)도 정상 — 그걸 불일치로
-        # 경고하면 표준 레이아웃에서 매 apply 가 거짓 경고를 낸다
-        print(f"⚠ {env_dir} 에서 environment 선언을 판독할 수 없고 디렉토리 "
-              f"이름도 env '{cfg.env}' 와 다릅니다 — 채택/공유 env 라면 이 "
-              "디렉토리의 state 가 의도한 환경의 것인지 대조하세요",
-              file=sys.stderr)
+    elif not declared:
+        # 이름-일치 통과는 관례 루트(environments/) 아래 디렉토리에만 인정한다 —
+        # tf_env_dir: /tmp/dev + env: dev 처럼 경로 이름이 우연히 env 와 같으면
+        # 외부 state 에 managed 수렴/destroy 가 아무 경고 없이 쓰인다.
+        envs_root = (Path(__file__).resolve().parents[3]
+                     / "deployment" / "terraform" / "environments")
+        try:
+            under_envs = env_dir.resolve().is_relative_to(envs_root.resolve())
+        except OSError:
+            under_envs = False
+        if not (under_envs and env_dir.name in (cfg.env,
+                                                f"llm-gateway-{cfg.env}")):
+            print(f"⚠ {env_dir} 에서 environment 선언을 판독할 수 없고 "
+                  f"관례 env 디렉터리도 아닙니다 — 채택/공유 env 라면 이 "
+                  "디렉토리의 state 가 의도한 환경의 것인지 대조하세요",
+                  file=sys.stderr)
 
 
 def _kube_context_cluster(context: str) -> str:
@@ -2103,7 +2237,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
         else:
             print("⚠ bi_insight: Runtime ARN 을 얻지 못했습니다 — /chat 은 "
                   "503 (미구성) 상태로 진행합니다", file=sys.stderr)
-    elif outs.get("chat_agent_name"):
+    elif outs.get("chat_agent_name") or "chatagent" in _pending_teardown(
+            gen_dir):
         # 선언 off 인데 모듈이 아직 살아 있다 = 켰던 적이 있는 첫 off apply.
         # 단 env tfvars 에 enable_chat_agent=true 를 사람이 선언한 경우는
         # 사람 소유 — 매 apply 삭제/재생 루프가 되므로 건드리지 않는다.
@@ -2118,8 +2253,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
             # 프로비저너 소유 Runtime 도 정리 — terraform 밖 리소스라 destroy 에 안
             # 잡힌다. outputs 가 없으면(한 번도 안 켬·이미 정리) API 호출 자체를
             # 건너뛴다 — agentcore 권한 없는 배포에서 매번 경고가 나오는 것 방지.
-            chatagent.teardown(repo_root, cfg.env, region=cfg.aws.region,
-                               chat_agent_name=outs["chat_agent_name"])
+            ok = chatagent.teardown(
+                repo_root, cfg.env, region=cfg.aws.region,
+                chat_agent_name=outs.get("chat_agent_name", ""))
+            _mark_pending(gen_dir, "chatagent", not ok)
 
     # web_search/pricing_lambda 도 off 면 수렴 삭제 — bi_insight 의 off-teardown
     # 과 같은 계약이다. 둘 다 terraform 밖 프로비저너 소유라 안 지우면 과금/
@@ -2127,21 +2264,30 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     # 라이브에 env 를 주입한 흔적" — 채택 배포에서 사람이 만든 동명 리소스를
     # 선언 off 한 번으로 지우는 오타겟을 막는다 (teardown 자체는 멱등·
     # 이름 범위 삭제라 한 번도 안 켠 env 에선 NotFound no-op).
-    if (not cfg.features.web_search
-            and _live_deploy_env(meta, "gateway-proxy",
-                                 "AGENTCORE_GATEWAY_URL", context)):
-        print("ⓘ web_search off — 이전 apply 가 주입한 AgentCore Gateway 를 "
-              "정리합니다 (수동 프로비저닝한 Gateway 면 teardown 을 건너뛰고 "
-              "라이브 env 만 제거하세요)", file=sys.stderr)
-        websearch.teardown(cfg.env, repo_root,
-                           caller_role_arn=outs.get("gateway_proxy_role_arn", ""))
-    if (not cfg.features.pricing_lambda
-            and _live_deploy_env(meta, "admin-api",
-                                 "LITELLM_PRICING_LAMBDA", context)):
-        print("ⓘ pricing_lambda off — 이전 apply 가 만든 Lambda/role 과 "
-              "admin-api invoke 정책을 정리합니다", file=sys.stderr)
-        pricinglambda.teardown(
-            cfg, admin_role_arn=outs.get("admin_api_role_arn", ""))
+    if not cfg.features.web_search:
+        if ("websearch" in _pending_teardown(gen_dir)
+                or _live_deploy_env(meta, "gateway-proxy",
+                                    "AGENTCORE_GATEWAY_URL", context)):
+            print("ⓘ web_search off — 이전 apply 가 주입한 AgentCore Gateway 를 "
+                  "정리합니다 (수동 프로비저닝한 Gateway 면 teardown 을 건너뛰고 "
+                  "라이브 env 만 제거하세요)", file=sys.stderr)
+            ok = websearch.teardown(
+                cfg.env, repo_root,
+                caller_role_arn=outs.get("gateway_proxy_role_arn", ""))
+            _mark_pending(gen_dir, "websearch", not ok)
+    else:
+        _mark_pending(gen_dir, "websearch", False)
+    if not cfg.features.pricing_lambda:
+        if ("pricinglambda" in _pending_teardown(gen_dir)
+                or _live_deploy_env(meta, "admin-api",
+                                    "LITELLM_PRICING_LAMBDA", context)):
+            print("ⓘ pricing_lambda off — 이전 apply 가 만든 Lambda/role 과 "
+                  "admin-api invoke 정책을 정리합니다", file=sys.stderr)
+            ok = pricinglambda.teardown(
+                cfg, admin_role_arn=outs.get("admin_api_role_arn", ""))
+            _mark_pending(gen_dir, "pricinglambda", not ok)
+    else:
+        _mark_pending(gen_dir, "pricinglambda", False)
 
     # domain.route53-acm — ACM 인증서를 보장하고 cert-arn 을 --set 주입한다.
     # 미발급이면 주입 없이 진행하고 다음 apply 에 자동 부착(멱등).
@@ -2200,6 +2346,9 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
     # 지워지지 않게 미리 정리 (이거 없으면 전 pod CreateContainerConfigError)
     strip_es_owned_secrets(meta, context, repo_root)
     _run(_helm_argv(meta, set_args, context=context), cwd=repo_root)
+    # 매니페스트가 방금 바뀌었다 — 이후 소유 조회는 새 기록을 봐야 한다
+    # (fresh install 에서 upgrade 전 miss 가 남으면 2-phase/Route53 이 스킵됨).
+    _invalidate_manifest_cache(meta, context)
 
     # 2-phase: domain=none 이면 ALB DNS 를 nextauthUrl 로 (누적 안 되니 매번 주입)
     # 단 env values 가 실제 host 를 공급하는 채택 배포는 차트가 이미
@@ -2218,6 +2367,7 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, context: str = "")
                             extra_sets=["--set",
                                         f"adminUi.nextauthUrl={scheme}://{host}"]),
                  cwd=repo_root)
+            _invalidate_manifest_cache(meta, context)
     # domain.route53-acm — ALB 가 생긴 뒤 host 3개의 A alias 를 upsert 한다
     if cfg.domain.mode == "route53-acm" and cfg.domain.name:
         ensure_domain_records(cfg, meta, context)

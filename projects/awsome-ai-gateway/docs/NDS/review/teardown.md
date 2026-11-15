@@ -92,3 +92,16 @@
   helm 단절 상태에서 apply/uninstall 진행 — `release` 이름 결합 매칭.
 - **외부 role 삭제 차단**(pricing/websearch): 소유 마커 없는 같은 이름
   role 을 teardown 이 지우던 경로를 소유 증명 없으면 보존으로 변경.
+
+## 28차 적용
+
+- **'not found' 정확 매칭**(LOW-MED): 'release'+'not found' 단어 동시 존재가
+  `context "release-eu" not found` 류를 release 부재로 오판해 destroy/병행
+  apply 를 진행 — `release: not found`·`release "X" not found` 정확 패턴
+  (`_is_release_not_found`)으로 apply 가드/teardown 양쪽 통일.
+- **pricing detach 조용한 생략 경고**(LOW-MED): admin_api_role_arn 출력
+  미조회 시 invoke 정책 잔류 → terraform destroy 가 role 에서 멈춤 —
+  --infra + pricing_lambda + arn 부재 시 수동 제거 안내를 명시 경고.
+- **DynamoDB lock 테이블**(bootstrap-tfstate.sh): RANGE 키 추가 테이블을
+  HASH=LockID 만으로 통과시켜 PutItem ValidationException — KeySchema
+  길이=1 검증 + 소유 태그 없는 스키마 일치 테이블 채택 시 경고.

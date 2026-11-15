@@ -1033,8 +1033,11 @@ def from_dict(raw: dict) -> GatewayConfig:
             account_id=_opt_str(aws.get("account_id"), ""),
             # 스칼라("DevRole")는 1-항목 리스트로 감싼다 — int/dict 같은
             # 비-list 는 순회 불가/키 순회 침묵오용이라 명시 오류로 둔다.
-            allowed_roles=_str_items(aws.get("allowed_roles"),
-                                     "aws.allowed_roles", errors),
+            # 콤마는 금지 — ALLOWED_IAM_ROLES 가 ",".join() 이라 항목 안
+            # 콤마가 두 role 로 갈라져 허가 목록이 조용히 넓어진다.
+            allowed_roles=_str_items(
+                aws.get("allowed_roles"), "aws.allowed_roles", errors,
+                item_re=re.compile(r"^[a-zA-Z0-9+=.@_/*:-]+$")),
         ),
         deploy=DeployConfig(
             # `or` 패턴 — yaml null(`release:`)도 기본값으로. `str(None)` 은

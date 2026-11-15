@@ -82,3 +82,21 @@ env 스크럽·READY 요구·신뢰 정책·격리·fn_name·보존 경로.
   worst-case 보다 짧아 프로비저너를 중간에 죽이던 것을 확장.
 - **`DB_MASTER_USER` env 스크럽 누락**(LOW): 프로비저너 입력에서 제외해
   DB 크리덴셜이 에이전트 env 로 새지 않게.
+
+## 28차 적용 (프로비저너 수명주기·상태 오판)
+
+- **ecs off-teardown 추적키 조기 소실**(MEDIUM): `apply` 가 teardown 전에
+  `agentcore_gateway_url`/`runtime_arn`/`litellm_pricing_lambda` 를 pop 해
+  persist — terraform/teardown 실패 시 유료 리소스 무기록 고아. teardown
+  실패·human-declared 생략 시 추적키 복원+재저장으로 재시도 경로 확보.
+- **`pricinglambda.status` 오류-미배포 혼동**(MEDIUM): AccessDenied/스로틀을
+  '미배포' 로 반환해 ecs_apply 가 살아있는 함수의 주입을 지움 —
+  ResourceNotFound 만 미배포, 그 외는 '조회 실패' (존재 유지 방향).
+- **chatagent teardown dead interpreter 고아**(LOW-MED): find_interpreter 가
+  건너뛰는 CREATE_FAILED/FAILED/DELETING 항목이 teardown 대상 밖 — DELETED
+  제외 동명 항목 전체 삭제. ensure 의 dead-sweep 도 DELETED 에 delete 를
+  걸어 outer except 가 생성 전체를 건너뛰던 문제 수정.
+- **`ensure_image` 빌드 무방비**(LOW): 호출자 1500s cap 안에 subprocess
+  timeout 없어 kill 반복 — build 1200s/push 300s 내부 cap.
+- **teardown 마커(eks)**: off-teardown 실패를 `.pending-provisioner-teardown`
+  에 기록해 env 증거 소실 후에도 재시도 (eks-apply.md 28차 참조).

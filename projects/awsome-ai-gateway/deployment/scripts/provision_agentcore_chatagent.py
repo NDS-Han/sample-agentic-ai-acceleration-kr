@@ -153,14 +153,18 @@ def ensure_image() -> None:
     pw = base64.b64decode(
         token["authorizationData"][0]["authorizationToken"]).decode().split(":", 1)[1]
     p = subprocess.run([builder, "login", "--username", "AWS", "--password-stdin", ecr_reg],
-                       input=pw, text=True)
+                       input=pw, text=True, timeout=60)
     if p.returncode != 0:
         fail("ECR login 실패")
+    # 호출자(chatagent._run)가 1500s 에 이 프로세스를 죽인다 — 빌드/푸시가
+    # 무방비로 매달리면 부분 상태에서 kill 돼 매번 부분 프로비저닝만 반복한다.
+    # 내부 cap 을 두고 깔끔한 실패 메시지로 끝낸다.
     r = subprocess.run(
-        [builder, "build", "--platform", "linux/arm64", "-t", image_uri(), AGENT_DIR + "/"])
+        [builder, "build", "--platform", "linux/arm64", "-t", image_uri(), AGENT_DIR + "/"],
+        timeout=1200)
     if r.returncode != 0:
         fail(f"{builder} build 실패 — 수동 빌드 후 재시도하세요")
-    r = subprocess.run([builder, "push", image_uri()])
+    r = subprocess.run([builder, "push", image_uri()], timeout=300)
     if r.returncode != 0:
         fail(f"{builder} push 실패")
 
@@ -428,7 +432,9 @@ def ensure_interpreter(dry: bool) -> str:
                 if it.get("name") != INTERPRETER_NAME:
                     continue
                 if it.get("status") in ("CREATE_FAILED", "DELETING",
-                                       "DELETED", "FAILED"):
+                                       "FAILED"):
+                    # DELETED 는 이미 삭제 완료 — delete 가 ValidationException
+                    # 을 내면 outer except 가 생성 전체를 건너뛰게 만든다.
                     log(f"죽은 Code Interpreter({it.get('status')}) 삭제: "
                         f"{it['codeInterpreterId']}")
                     if not dry:
@@ -618,10 +624,18 @@ def teardown() -> None:
     # 삭제 실패를 삼켜 0 으로 끝나면 유료 Runtime 이 무기록 고아가 된다.
     failed = False
     try:
-        iid = find_interpreter()
-        if iid:
-            _control().delete_code_interpreter(codeInterpreterId=iid)
-            log(f"Code Interpreter 삭제 요청: {iid}")
+        # find_interpreter 는 죽은(CREATE_FAILED/DELETING/FAILED) 항목을
+        # 건너뛴다 — 그 항목들도 프로비저너 소유라 방치하면 영구 고아다.
+        # DELETED 만 제외하고 동명 항목을 전부 삭제한다.
+        for page in _control().get_paginator("list_code_interpreters").paginate():
+            for it in page.get("codeInterpreterSummaries", []):
+                if it.get("name") != INTERPRETER_NAME \
+                        or it.get("status") == "DELETED":
+                    continue
+                _control().delete_code_interpreter(
+                    codeInterpreterId=it["codeInterpreterId"])
+                log(f"Code Interpreter 삭제 요청: "
+                    f"{it['codeInterpreterId']}({it.get('status')})")
     except ClientError as e:
         log(f"Code Interpreter 삭제 실패({e.response['Error']['Code']}) — "
             "Runtime 삭제는 계속합니다")

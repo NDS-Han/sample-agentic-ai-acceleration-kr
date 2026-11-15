@@ -571,6 +571,19 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
         # 제외한다 — instance=<다른 release> 인 외부 deployment 가 component
         # 라벨만 같으면 by_name 을 덮어써 우리 것으로 오흡수된다.
         items = ours or [i for i in all_items if not _inst_of(i)]
+        # instance 라벨은 위조 가능 — helm 매니페스트 기록이 있으면 그
+        # 이름만 인정해 위조 deployment 가 readiness/이미지 판정을 가리지
+        # 못하게 한다 (기록이 없는 레거시 채택은 라벨 폴백 유지).
+        try:
+            from .eks_apply import _release_kind_names
+            owned = _release_kind_names(
+                {"release": rel, "namespace": ns}, "Deployment", context)
+        except Exception:
+            owned = None
+        if owned:
+            items = [i for i in items
+                     if str(_d(_d(i.get("metadata")).get("name")) or "")
+                     in owned]
         # 서비스 식별은 component 라벨 우선 — 이름 프리픽스는 fullnameOverride
         # 면 어긋나 전부 "deployment 없음" 으로 오진된다. 라벨 없는 수동 배포는
         # 이름 접두(<release>-<svc>) 폴백. setdefault — kubectl 은 이름순
@@ -674,6 +687,18 @@ def check_eks(cfg: GatewayConfig, gen_dir: Path, repo_root: Path,
             unowned = [j for j in all_jobs if not _inst_of(j)]
             jobs = [j for j in (ours or unowned)
                     if "migration" in str(_d(j.get("metadata")).get("name", ""))]
+            # deployments 와 같은 이유 — 라벨 위조 migration Job 이 판정을
+            # 속이지 못하게 매니페스트 기록 이름으로 좁힌다(없으면 폴백 유지).
+            try:
+                from .eks_apply import _release_kind_names
+                owned_jobs = _release_kind_names(
+                    {"release": rel, "namespace": ns}, "Job", context)
+            except Exception:
+                owned_jobs = None
+            if owned_jobs:
+                jobs = [j for j in jobs
+                        if str(_d(j.get("metadata")).get("name") or "")
+                        in owned_jobs]
             job = max(jobs, key=lambda j: _d(j.get("metadata"))
                       .get("creationTimestamp", "")) if jobs else None
         except (json.JSONDecodeError, ValueError, KeyError):

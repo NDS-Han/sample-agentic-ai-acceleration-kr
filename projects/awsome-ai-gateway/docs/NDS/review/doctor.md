@@ -54,3 +54,10 @@
 - doctor 는 읽기 전용이라 실패 방향은 오진(WARN) — destructive 경로 없음.
 - `_tf_drift_plan_argv` 의 상세 플래그는 환경의 terraform 버전에 의존
   (LOW).
+
+## 28차 적용
+
+- **라벨 위조가 doctor 판정을 가림**(MEDIUM): instance 라벨 위조
+  deployment/Job 이 readiness·이미지·migration 판정을 오흡수/은폐 —
+  helm 매니페스트 기록 이름이 있으면 그것만 인정(레거시는 라벨 폴백),
+  deployment·migration Job 양쪽에 적용.

@@ -331,8 +331,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
             print("⚠ web_search URL 을 얻지 못했습니다 — WEB_SEARCH_ENABLED 없이 "
                   "진행합니다 (라우터가 검색을 건너뜀)", file=sys.stderr)
     ws_popped = False
+    ws_prev_url = ""
     if not cfg.features.web_search:
-        ws_popped = bool(existing.pop("agentcore_gateway_url", None))
+        ws_prev_url = existing.pop("agentcore_gateway_url", "") or ""
+        ws_popped = bool(ws_prev_url)
         if ws_popped:
             # 선언을 껐으면 잔여 URL 도 지운다 — taskdef 의
             # agentcore_gateway_url != "" → WEB_SEARCH_ENABLED=true 조건을 되돌림
@@ -347,8 +349,10 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
             existing.pop(k, None)
 
     bi_popped = False
+    bi_prev_arn = ""
     if not cfg.features.bi_insight:
-        bi_popped = bool(existing.pop("agentcore_runtime_arn", None))
+        bi_prev_arn = existing.pop("agentcore_runtime_arn", "") or ""
+        bi_popped = bool(bi_prev_arn)
         if bi_popped:
             # 선언을 껐으면 잔여 ARN 도 지운다 — agentcore_runtime_arn != ""
             # 조건이 taskdef 에 AGENTCORE_RUNTIME_ARN env 를 남겨 라우터가
@@ -373,8 +377,8 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
             # 못 하면 보수적으로 빼서 '이름만 있는 유령 주입'을 막는다.
             st = pricinglambda.status(cfg.aws.region, cfg.env)
             if st.get("function") not in ("미배포", "Failed"):
-                print("⚠ pricing Lambda 보장 실패했지만 함수는 존재 — 기존 "
-                      "주입을 유지합니다", file=sys.stderr)
+                print("⚠ pricing Lambda 보장 실패했지만 함수 존재/상태 불명 — "
+                      "기존 주입을 유지합니다", file=sys.stderr)
             else:
                 existing.pop("litellm_pricing_lambda", None)
                 print("⚠ pricing Lambda 보장 실패 — LITELLM_PRICING_LAMBDA 없이 "
@@ -442,21 +446,36 @@ def apply(cfg: GatewayConfig, gen_dir: Path, repo_root: Path, *, skip_push: bool
         if (bi_popped or module_alive) and not _human_declared_chat_agent(
                 repo_root / ENV_DIR):
             from . import chatagent
-            chatagent.teardown(
+            ok = chatagent.teardown(
                 repo_root, cfg.env, region=cfg.aws.region,
                 # project 변수를 바꾼 env 에선 도출 이름과 실측이 어긋나
                 # Runtime 이 새어나간다 — outputs 실측을 우선한다.
                 chat_agent_name=partial.get("chat_agent_name", ""))
+            if bi_popped and not ok:
+                # teardown 실패 — 추적키를 되살려 다음 apply 가 재시도하게
+                # 한다. 키가 지워진 채면 Runtime 이 영구 고아가 된다.
+                existing["agentcore_runtime_arn"] = bi_prev_arn
+                _save_extra_vars(gen_dir, existing)
+                print("⚠ bi_insight teardown 실패 — 추적키를 보존해 다음 "
+                      "apply 에서 재시도합니다", file=sys.stderr)
     if ws_popped:
         # 선언을 껐는데 AgentCore Gateway(us-east-1, 유료)는 프로비저너 소유라
         # terraform/env 수렴이 못 지운다 — bi_insight 와 같은 off-수렴으로
         # 이전 apply 흔적(popped URL)이 있을 때 멱등 정리한다.
         from . import websearch as _ws
-        _ws.teardown(cfg.env, repo_root)
+        if not _ws.teardown(cfg.env, repo_root):
+            existing["agentcore_gateway_url"] = ws_prev_url
+            _save_extra_vars(gen_dir, existing)
+            print("⚠ web_search teardown 실패 — 추적키를 보존해 다음 "
+                  "apply 에서 재시도합니다", file=sys.stderr)
     if pricing_popped:
         # invoke 정책은 모듈 소유라 var-off 로 수렴 — Lambda+role 만 정리.
         from . import pricinglambda as _pl
-        _pl.teardown(cfg, detach_invoke=False)
+        if not _pl.teardown(cfg, detach_invoke=False):
+            existing["litellm_pricing_lambda"] = _pl.fn_name(cfg.env)
+            _save_extra_vars(gen_dir, existing)
+            print("⚠ pricing Lambda teardown 실패 — 추적키를 보존해 다음 "
+                  "apply 에서 재시도합니다", file=sys.stderr)
     if not skip_push:
         push_images(cfg, partial, repo_root)
     outputs = terraform_apply(cfg, gen_dir, repo_root, bootstrap=False)

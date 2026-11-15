@@ -84,8 +84,12 @@ def status(region: str, env: str, admin_role_name: str = "") -> dict:
         # State=Failed/Pending 도 존재로 치면 preview 가 'Active' 로 거짓 표시
         st = ((f.get("Configuration") or {}).get("State")) or "Active"
         fn = st
-    except Exception:
-        pass
+    except Exception as e:
+        # ResourceNotFound 만 '미배포' — 권한/스로틀/엔드포인트 오류를 '없음'으로
+        # 오판하면 소비자(ecs_apply)가 살아 있는 함수의 주입을 지운다.
+        code = str((getattr(e, "response", None) or {})
+                   .get("Error", {}).get("Code") or "")
+        fn = "미배포" if "ResourceNotFound" in code else "조회 실패"
     try:
         iam.get_role(RoleName=fn_name(env))
         role = "존재"

@@ -214,7 +214,12 @@ def write_env_file(path: Path, env: dict[str, str], header: str) -> None:
         lines.append(f"{k}={v}")
     # write_text()+chmod 는 시크릿이 잠깐 umask 권한(0644)으로 노출되는
     # TOCTOU 창이 있다. 처음부터 0600 으로 생성한다.
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # .env 가 심링크면 O_TRUNC 쓰기가 링크 대상 파일을 덮어쓴다(dotenv-symlink
+    # 설정 흔함) — 링크를 떼고 새 파일로 쓴다. NOFOLLOW 은 확인-사이 TOCTOU 보강.
+    if path.is_symlink():
+        path.unlink()
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+                 | getattr(os, "O_NOFOLLOW", 0), 0o600)
     # os.open 의 mode 는 신규 생성에만 적용 — 기존 파일(0644 로 남은 재렌더,
     # cp 로 가져온 백업)은 O_TRUNC 로 내용만 덮어 퍼미션이 그대로다. 무조건
     # fchmod 해서 시크릿 파일이 0600 아래에 있음을 보장한다.

@@ -85,3 +85,17 @@ dropped_keys·gen overlay·backend 불일치·소스 선택·스칼라 잎.
   목록 누락 가능(LOW).
 - 캡처된 doc 이 스키마 무효(desired_count=0 등)면 `schema.from_dict`
   검증이 실행되어 미완성 필드로 표면 — 사람이 채우는 계약.
+
+## 28차 적용 (캡처 신뢰 경계)
+
+- **instance 라벨 위조 채택**(MEDIUM): 위조 ingress/deployment 의
+  cidr/scheme/host/image-tag 가 캡처돼 채택본이 공격자 네트워크 상태로
+  배포 — `helm get manifest` 기록 이름만 소유로 인정(`_release_manifest_names`)
+  + 조회 불가 시 라벨 폴백(레거시 채택 계약 유지).
+- **helm values `environment` 경로 탐색**(MEDIUM): 라이브 values 의 env 가
+  `_auto_env_dir`/`gen` 경로 결합으로 `../../x` 외부 디렉터리를 읽어 tfstate/
+  backend 정보를 캡처에 주입 — `_ENV_RE` 검증 후에만 경로 사용.
+- **`_r53_alias_target` JMESPath 주입**(LOW): tfvars 유래 host 의 `'`/메타문자가
+  `--query` 를 주조 — `_HOSTNAME_RE` 통과분만 보간.
+- **cmd_capture 기본 release/namespace**(LOW-MED): 채택 yaml 의
+  deploy.release/namespace 를 우선 — 기본 "llm-gateway" 오질의 해소.

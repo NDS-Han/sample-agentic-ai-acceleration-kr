@@ -856,3 +856,17 @@ def test_image_tags_reject_none_and_dict_coercion():
         schema.from_dict(minimal(
             deploy={"target": "eks", "size_tier": "t3"},
             images={"tags": {"gatewayProxy": "bad tag,with"}}))
+
+
+def test_allowed_roles_rejects_comma():
+    """28차 — ALLOWED_IAM_ROLES 가 ",".join() 이라 항목 안 콤마가 두 role 로
+    갈라져 허가 목록이 조용히 넓어진다 — 콤마는 스키마 거부."""
+    import pytest
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(aws={"allowed_roles": ["Evil,AdminRole"]}))
+    with pytest.raises(schema.SchemaError):
+        schema.from_dict(minimal(aws={"allowed_roles": "A,B"}))
+    # 정상 케이스는 통과
+    cfg = schema.from_dict(minimal(aws={"allowed_roles": ["TeamDevRole",
+                                                        "arn:aws:iam::1:role/X"]}))
+    assert len(cfg.aws.allowed_roles) == 2

@@ -132,3 +132,31 @@ _tf_init reconfigure·load_meta·managed plan·teardown 가드·ECR 태그.
 - **`_human_declared_chat_agent` last-wins**(LOW): 전 채널에 `true` 가
   하나라도 있으면 사람 소유로 보던 것을 terraform 채널 순서 마지막
   선언(effective 값)으로 판정 — effective-off 시 Runtime 자동 수렴.
+
+## 28차 적용 (3인 독립 리뷰 — 캐시 생명주기·증거 소실·경계 검증)
+
+- **`_MANIFEST_CACHE` stale-poisoning**(HIGH): 27차 소유 증명이 만든 회귀 —
+  apply 시작부 `helm get manifest` 실패(fresh install·일시 단절)의 빈 결과를
+  프로세스 끝까지 캐시해, upgrade 후 `live_*`/`_alb_hostname_by_suffix`/
+  `_discover_alb_dims` 가 전부 공집합 → 2-phase nextauthUrl·Route53 A레코드
+  3개·ALB 알람 dims·live env 보존이 통째로 스킵. rc≠0 은 미캐시 + upgrade
+  직후 `_invalidate_manifest_cache` 로 수정.
+- **off-teardown 증거 소실**(MEDIUM): teardown 이 실패해도 같은 upgrade 가
+  라이브 env 를 지워 다음 apply 의 `_live_deploy_env` 신호가 사라져 유료
+  리소스가 재시도 없이 고아화 — `.pending-provisioner-teardown` 마커 파일로
+  실패 항목을 기록해 다음 apply 가 재시도(기능 재활성 시 마커 해제).
+- **plan 출력 env 평문 유출**(MEDIUM): `_canon`/`_redact_secret_docs` 가
+  Secret 만 마스킹 — 차트가 사용자 env map 을 `value:` 평문으로 렌더하므로
+  `SMTP_PASSWORD` 류가 diff/전체 덤프에 출력. pod-spec env 의 민감 이름
+  (secret|token|passw|_pw|apikey|api_key|private_key|credential) 마스킹 +
+  파싱 불가 Secret chunk 는 텍스트 블록 마스킹(fail-open 제거).
+- **load_meta 경계 검증**(LOW): 손편집된 deploy.yaml 의 release/namespace
+  비DNS-1123·chart repo 이탈을 거부 — 디스크와 변경 명령 사이의 유일한
+  경계를 명시화. env_dir 이름-일치 통과는 environments/ 루트 하위로 제한
+  (`/tmp/dev`+`env:dev` 우연 일치가 외부 state 에 쓰기 허용 방지).
+- **ownerReferences[0] 만 검사**(LOW): 두 번째 이후의 ExternalSecret 소유
+  표식을 놓쳐 GC 연쇄 삭제 — `[*]` 전체로 확장.
+- **Deployment 접미사 비결정**(LOW): 동일 접미사 2개일 때 set 순회 —
+  최단 이름(정규 {fullname}-svc) 우선으로 결정화.
+- **`_manifest_docs` 주석 스트립 과잉**(LOW): lstrip '#' 이 블록 스칼라 안
+  '#!' 줄까지 지워 diff 가 '변경 없음' 을 거짓 보고 — 컬럼0 주석만 제거.

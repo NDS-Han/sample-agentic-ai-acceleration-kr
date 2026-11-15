@@ -22,7 +22,7 @@ import yaml
 
 from .render.common import parse_env_file, tfvars_clean as _tfvars_clean
 from .render.compose import OBSERVABILITY, WEB_PORTS
-from .schema import _HOSTNAME_RE
+from .schema import _ENV_RE, _HOSTNAME_RE
 
 
 class CaptureError(Exception):
@@ -788,11 +788,46 @@ def _dmap(node) -> dict:
     return node if isinstance(node, dict) else {}
 
 
-def _instance_items(items: list, release: str) -> list:
+def _release_manifest_names(release: str, namespace: str,
+                            context: str = "") -> set[str] | None:
+    """helm get manifest 에 기록된 오브젝트 이름 — instance 라벨과 달리
+    네임스페이스 쓰기 권한자가 위조할 수 없는 소유 증명이다.
+    조회 실패(helm 부재/릴리스 없음/권한 오류) 시 None — 라벨 폴백으로 구분."""
+    argv = ["helm", "get", "manifest", release, "-n", namespace]
+    if context:
+        argv += ["--kube-context", context]
+    try:
+        r = _sp(argv, tool="helm", timeout=30)
+    except CaptureError:
+        return None
+    if r.returncode != 0:
+        return None
+    names: set[str] = set()
+    for chunk in (r.stdout or "").split("\n---"):
+        try:
+            d = yaml.safe_load(chunk)
+        except Exception:
+            continue
+        if isinstance(d, dict) and isinstance(d.get("kind"), str):
+            n = (d.get("metadata") or {}).get("name")
+            if n:
+                names.add(str(n))
+    return names
+
+
+def _instance_items(items: list, release: str,
+                    owned: set[str] | None = None) -> list:
     """공유 ns 의 다른 릴리스가 이름 접미(-gateway 등)로 우리 것처럼 보인다 —
     doctor 와 같은 계약으로 app.kubernetes.io/instance == release 만 고르고,
-    라벨 없는 레거시 채택은 타 릴리스 소유가 명시되지 않은 것만 폴백한다."""
+    라벨 없는 레거시 채택은 타 릴리스 소유가 명시되지 않은 것만 폴백한다.
+
+    owned(helm 매니페스트 기록)가 주어지면 그 이름만 인정한다 — 같은 라벨을
+    찍은 위조 ingress/deployment 가 캡처된 cidr/scheme/image tag 를 주조해
+    채택본이 공격자 네트워크 상태로 배포되는 것을 막는다."""
     items = [i for i in items if isinstance(i, dict)]
+    if owned is not None:
+        return [i for i in items
+                if str(_dmap(i.get("metadata")).get("name") or "") in owned]
     def _inst(i) -> str:
         return str((_dmap(_dmap(i.get("metadata")).get("labels")))
                    .get("app.kubernetes.io/instance") or "")
@@ -989,6 +1024,10 @@ def _r53_zone_id(domain: str, region: str) -> str:
 
 def _r53_alias_target(zone_id: str, host: str, region: str) -> str:
     """hosted zone 에서 host 의 A/AAAA alias 대상 DNS (예 dualstack.<alb>.elb...)."""
+    # host 는 tfvars/output 유래 — ' 나 JMESPath 메타문자가 섞이면 쿼리가
+    # 주입돼 잘못된 레코드를 집는다. hostname 형식만 JMESPath 에 넣는다.
+    if not _HOSTNAME_RE.fullmatch(host):
+        return ""
     try:
         r = _aws_json(
             ["route53", "list-resource-record-sets",
@@ -1053,6 +1092,12 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
 
     env = str(_val(v, "global", "environment") or release)
     region = str(_val(v, "aws", "region"))
+    # helm values 는 라이브 입력 — `../../x` 같은 env 가 _auto_env_dir·
+    # gen 경로 결합으로 외부 디렉터리를 읽게 한다. 스키마 env 형식만 통과.
+    if not _ENV_RE.fullmatch(env):
+        notes.append(f"⚠ helm values 의 environment 값이 비정상입니다({env!r}) — "
+                     "env 디렉터리/gen 경로 탐색을 건너뜁니다")
+        env = ""
     if env_dir is None:
         found = _auto_env_dir(env)
         if found:
@@ -1098,10 +1143,14 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # 공유 ns 의 다른 릴리스는 instance 라벨로 걸러낸다 — 타 릴리스의
     # <other>-gateway ingress 를 우리 것으로 읽으면 채택 yaml 이 scheme/cidr
     # 까지 외부 배포 것으로 뒤집힌다.
+    # instance 라벨은 위조 가능 — helm 매니페스트 기록의 이름만 소유로 인정
+    # (위조 ingress 의 cidr/scheme/host 가 캡처돼 채택본에 심어지는 것을 막는다).
+    # 조회 불가(레거시 수작업 배포)면 라벨 폴백 — 채택 경로의 기존 계약.
+    owned = _release_manifest_names(release, namespace, context)
     live_hosts = []
     live_schemes: dict[str, str] = {}
     live_cidr_map: dict[str, str] = {}
-    for item in _instance_items(live.get("items", []), release):
+    for item in _instance_items(live.get("items", []), release, owned):
         anns = _dmap(_dmap(item.get("metadata")).get("annotations"))
         iname = str(_dmap(item.get("metadata")).get("name") or "")
         rules = _dmap(item.get("spec")).get("rules") or []
@@ -1159,7 +1208,7 @@ def capture_eks(namespace: str = "llm-gateway", release: str = "llm-gateway",
     # 라이브 태그가 곧 유효 태그다 — 기록하지 않으면 채택본 apply 가 폴백 대상
     # 서비스를 global images.tag 로 덮어쓴다.
     live_tags: dict[str, str] = {}
-    for item in _instance_items(deploys.get("items", []), release):
+    for item in _instance_items(deploys.get("items", []), release, owned):
         name = str(_dmap(item.get("metadata")).get("name") or "")
         svc_key = next((s for s in helm_keys if name.endswith(f"-{s}")), "")
         if not svc_key:

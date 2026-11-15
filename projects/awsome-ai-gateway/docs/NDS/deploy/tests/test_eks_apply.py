@@ -1710,3 +1710,142 @@ def test_plan_blocks_context_mismatch_before_alias(monkeypatch, tmp_path):
     with pytest.raises(SystemExit, match="other-cluster"):
         eks_apply.plan(cfg, tmp_path, tmp_path, "victim-ctx")
     assert aliased == []
+
+
+# ==============================================================================
+# 28차 리뷰 회귀 — 매니페스트 캐시 생명주기·not-found 정확 매칭·plan 마스킹
+# ==============================================================================
+
+# autouse fixture 가 _release_manifest_docs 를 가짜로 바꾸므로, 원본 계약
+# (캐시·helm 파싱)을 검증하는 테스트는 임포트 시점의 원본으로 되돌린다.
+_REAL_MANIFEST_DOCS = eks_apply._release_manifest_docs
+
+
+def test_manifest_cache_failure_not_cached(monkeypatch):
+    """28차 — rc!=0 결과를 캐시하면 fresh install(upgrade 전 miss)의 [] 가
+    upgrade 후 조회까지 오염시켜 2-phase/Route53 이 통째로 스킵된다.
+    실패는 재조회해야 한다."""
+    eks_apply._MANIFEST_CACHE.clear()
+    calls = []
+    def fake(argv, **k):
+        calls.append(argv)
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 1, "", "release: not found")
+        return subprocess.CompletedProcess(
+            argv, 0, "---\nkind: Ingress\nmetadata:\n  name: r-admin-ui\n", "")
+    monkeypatch.setattr(eks_apply, "_release_manifest_docs",
+                        _REAL_MANIFEST_DOCS)
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    meta = {"release": "r", "namespace": "ns"}
+    assert eks_apply._release_manifest_docs(meta) == []
+    # 두 번째 호출은 재조회 — 실패가 캐시됐으면 helm 호출 없이 [] 를 돌린다
+    docs = eks_apply._release_manifest_docs(meta)
+    assert len(calls) == 2
+    assert any(d.get("kind") == "Ingress" for d in docs)
+    eks_apply._MANIFEST_CACHE.clear()
+
+
+def test_manifest_cache_success_cached_and_invalidated(monkeypatch):
+    """성공 조회는 캐시하고, _invalidate_manifest_cache 후엔 재조회한다 —
+    upgrade 직후 stale 기록을 계속 쓰는 것을 막는다."""
+    eks_apply._MANIFEST_CACHE.clear()
+    calls = []
+    def fake(argv, **k):
+        calls.append(argv)
+        return subprocess.CompletedProcess(
+            argv, 0, "---\nkind: Ingress\nmetadata:\n  name: r-a\n", "")
+    monkeypatch.setattr(eks_apply, "_release_manifest_docs",
+                        _REAL_MANIFEST_DOCS)
+    monkeypatch.setattr(eks_apply, "_run_quiet", fake)
+    meta = {"release": "r", "namespace": "ns"}
+    eks_apply._release_manifest_docs(meta)
+    eks_apply._release_manifest_docs(meta)
+    assert len(calls) == 1          # 성공은 캐시
+    eks_apply._invalidate_manifest_cache(meta)
+    eks_apply._release_manifest_docs(meta)
+    assert len(calls) == 2          # 무효화 후 재조회
+    eks_apply._MANIFEST_CACHE.clear()
+
+
+def test_release_manifest_parses_helm_multidoc(monkeypatch):
+    """helm get manifest 실제 출력 형태(--- 구분 + # Source 주석 + NOTES 꼬리)
+    를 파싱해 kind/name 을 낸다."""
+    text = ("---\n# Source: chart/templates/ingress.yaml\n"
+            "kind: Ingress\nmetadata:\n  name: r-admin-ui\n"
+            "---\nkind: Deployment\nmetadata:\n  name: r-admin-api\n"
+            "spec:\n  template:\n    spec:\n      containers:\n"
+            "      - name: admin-api\n        env:\n"
+            "        - name: A\n          value: v\n")
+    monkeypatch.setattr(eks_apply, "_release_manifest_docs",
+                        _REAL_MANIFEST_DOCS)
+    monkeypatch.setattr(eks_apply, "_run_quiet",
+                        lambda *a, **k: subprocess.CompletedProcess([], 0, text, ""))
+    eks_apply._MANIFEST_CACHE.clear()
+    names = eks_apply._release_kind_names(
+        {"release": "r", "namespace": "ns"}, "Ingress")
+    assert names == {"r-admin-ui"}
+    assert eks_apply._release_kind_names(
+        {"release": "r", "namespace": "ns"}, "Deployment") == {"r-admin-api"}
+    eks_apply._MANIFEST_CACHE.clear()
+
+
+def test_is_release_not_found_precise_matching():
+    """'release'+'not found' 단어 동시 존재는 context "release-eu" not found
+    류를 부재로 오판해 destroy 를 진행한다 — 정확 패턴만 인정한다."""
+    from deploy import cli
+    assert cli._is_release_not_found("Error: release: not found")
+    assert cli._is_release_not_found('Error: release "myrel" not found')
+    assert cli._is_release_not_found('Error: release myrel not found')
+    assert not cli._is_release_not_found(
+        'Error: context "release-eu" not found')
+    assert not cli._is_release_not_found(
+        "Error: context was not found")
+    assert not cli._is_release_not_found(
+        "Error: executable aws not found in PATH")
+    assert not cli._is_release_not_found("connection refused")
+
+
+def test_canon_masks_sensitive_env_values():
+    """Deployment env 의 평문 value 는 Secret 이 아니라도 plan 출력에 새면
+    안 된다 — 민감 이름만 마스킹한다."""
+    dep = {"kind": "Deployment",
+           "spec": {"template": {"spec": {"containers": [{
+               "name": "admin-api",
+               "env": [{"name": "SMTP_PASSWORD", "value": "hunter2"},
+                       {"name": "NORMAL_VAR", "value": "shown"},
+                       {"name": "FROM_SECRET",
+                        "valueFrom": {"secretKeyRef": {"name": "s"}}}]}]}}}}
+    out = eks_apply._canon(dep)
+    assert "hunter2" not in out and "shown" in out
+    assert "secretKeyRef" in out  # valueFrom 은 참조라 마스킹 대상 아님
+
+
+def test_redact_secret_docs_pod_env_and_broken_chunk():
+    """Secret data 마스킹 + pod env 마스킹 + 파싱 불가 Secret chunk 도
+    텍스트 마스킹으로 처리한다."""
+    text = ("---\nkind: Secret\nmetadata:\n  name: s\ndata:\n  pw: c2VjcmV0\n"
+            "stringData:\n  tok: plaintext\n"
+            "---\nkind: Deployment\nmetadata:\n  name: d\n"
+            "spec:\n  template:\n    spec:\n      containers:\n"
+            "      - name: a\n        env:\n"
+            "        - {name: API_KEY, value: k3y}\n"
+            "        - {name: MODE, value: prod}\n")
+    out = eks_apply._redact_secret_docs(text)
+    assert "c2VjcmV0" not in out and "plaintext" not in out
+    assert "k3y" not in out and "prod" in out
+
+
+def test_env_dir_guard_name_match_requires_environments_root(tmp_path,
+                                                             monkeypatch, capsys):
+    """tf_env_dir=/tmp/dev + env=dev — 경로 이름이 우연히 env 와 같아도
+    environments/ 아래가 아니면 이름-일치 통과를 인정하지 않는다."""
+    from deploy import schema
+    outside = tmp_path / "dev"          # environments/ 밖의 'dev' 디렉터리
+    outside.mkdir()
+    cfg = schema.from_dict({"version": 1, "env": "dev",
+                            "aws": {"region": "us-east-1"},
+                            "deploy": {"target": "eks", "size_tier": "t3"},
+                            "features": {"notifications": {"provider": "mock"}},
+                            "images": {"tag": "v1"}})
+    eks_apply._check_env_dir_declared(cfg, outside, hard=False)
+    assert "판독할 수 없" in capsys.readouterr().err

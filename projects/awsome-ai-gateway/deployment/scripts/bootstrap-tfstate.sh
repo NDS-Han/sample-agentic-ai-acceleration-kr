@@ -163,15 +163,36 @@ if aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" --region "${AWS_RE
         --region "${AWS_REGION}" \
         --query "Table.KeySchema[?KeyType=='HASH'].AttributeName | [0]" \
         --output text 2>/dev/null || echo "?")
+    KSLEN=$(aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" \
+        --region "${AWS_REGION}" \
+        --query "length(Table.KeySchema)" \
+        --output text 2>/dev/null || echo "?")
     AT=$(aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" \
         --region "${AWS_REGION}" \
         --query "Table.AttributeDefinitions[?AttributeName=='LockID'].AttributeType | [0]" \
         --output text 2>/dev/null || echo "?")
-    if [ "${KS}" != "LockID" ] || [ "${AT}" != "S" ]; then
+    # RANGE 키가 추가된 테이블은 HASH=LockID 여도 lock PutItem 이
+    # ValidationException 으로 죽는다 — 스키마가 정확히 1키어야 한다.
+    if [ "${KS}" != "LockID" ] || [ "${AT}" != "S" ] || [ "${KSLEN}" != "1" ]; then
         echo "❌ 기존 테이블 ${TFLOCK_TABLE} 의 키 스키마가 terraform lock 계약과 다릅니다"
-        echo "   (HASH=${KS}, LockID 타입=${AT} — 필요: HASH LockID:S)."
+        echo "   (HASH=${KS}, LockID 타입=${AT}, 키 수=${KSLEN} — 필요: HASH LockID:S 단일)."
         echo "   다른 용도의 테이블일 수 있으므로 건드리지 않습니다 — TFLOCK_TABLE 이름을 바꾸세요."
         exit 1
+    fi
+    # 소유 태그 없는 스키마 일치 테이블은 외부 테이블일 수 있다 — 채택은 하되
+    # 외부 lock state 가 섞일 수 있음을 경고한다(우리가 만든 테이블은 생성 시
+    # Project/ManagedBy 태그가 붙는다).
+    TBL_ARN=$(aws dynamodb describe-table --table-name "${TFLOCK_TABLE}" \
+        --region "${AWS_REGION}" --query "Table.TableArn" \
+        --output text 2>/dev/null || echo "")
+    if [ -n "${TBL_ARN}" ]; then
+        TT=$(aws dynamodb list-tags-of-resource --resource-arn "${TBL_ARN}" \
+            --region "${AWS_REGION}" \
+            --query "Tags[?Key=='ManagedBy'].Value | [0]" \
+            --output text 2>/dev/null || echo "?")
+        [ "${TT}" = "bootstrap-script" ] || \
+            echo "⚠ ${TFLOCK_TABLE} 에 ManagedBy=bootstrap-script 태그가 없습니다 —" \
+                 "외부/수작업 테이블이면 다른 용도의 lock 행이 섞일 수 있으니 확인하세요"
     fi
 else
     echo "==> DynamoDB table 생성: ${TFLOCK_TABLE}"

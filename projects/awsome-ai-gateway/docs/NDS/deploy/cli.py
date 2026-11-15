@@ -100,16 +100,35 @@ def _atomic_write(path: Path, text: str) -> None:
 
     gateway.yaml/.bak 등 시크릿이 들어갈 수 있는 파일 — umask(0644) tmp 를
     replace 하면 권한이 느슨한 창이 생긴다. 처음부터 0600 으로 열고,
-    미리 심어둔 심링크를 쓰기로 따라가지 않게 NOFOLLOW+EXCL 로 연다."""
+    미리 심어둔 심링크를 쓰기로 따라가지 않게 NOFOLLOW 로 연다."""
     tmp = path.with_name(path.name + ".tmp")
     # O_EXCL 은 쓰지 않는다 — 이전 크래시의 잔여 .tmp 가 있으면 영구 거부된다.
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     flags |= getattr(os, "O_NOFOLLOW", 0)
     fd = os.open(tmp, flags, 0o600)
-    os.fchmod(fd, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as f:
-        f.write(text)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+    except BaseException:
+        # fchmod/fdopen 실패는 열린 fd 를 남긴다 — 정리 후 재전파
+        try:
+            os.close(fd)
+        except OSError:
+            pass  # fdopen 이 이미 닫았으면 EBADF — 무시
+        raise
     tmp.replace(path)
+
+
+_RELEASE_NOT_FOUND_RE = re.compile(
+    # helm v3 'release: not found'·v2 'release "X" not found' 정확 패턴 —
+    # 'release'+'not found' 단어 동시 존재로는 context "release-eu"
+    # not found 류를 release 부재로 오판해 destroy/apply 를 진행한다.
+    r"release:\s*not found|release\s+\"?[a-z0-9][-a-z0-9.]*\"?\s+not found")
+
+
+def _is_release_not_found(out: str) -> bool:
+    return bool(_RELEASE_NOT_FOUND_RE.search((out or "").lower()))
 
 
 def _g(d: dict, *path, default=""):
@@ -889,11 +908,10 @@ def cmd_apply(args) -> int:
             # 오류까지 '없음'으로 보면 apply 가 진행돼 두 release 가 같은
             # DB/Redis 를 공유하는 병행 설치가 된다. teardown 과 같은 계약으로
             # not-found 외 오류는 중단한다.
-            _hs_out = ((hs.stdout or "") + (hs.stderr or "")).lower()
-            # 'release' 단어와 'not found' 가 함께 있어야 부재 판정 —
-            # "context was not found"/"executable aws not found" 같은
-            # 접속·자격 오류를 release 부재로 오인해 진행하지 않는다.
-            if not ("release" in _hs_out and "not found" in _hs_out):
+            # 'release: not found'/'release "X" not found' 정확 패턴만 부재
+            # 판정 — context 단절/helm 부재/권한 오류까지 '없음'으로 보면
+            # apply 가 진행돼 두 release 가 같은 DB/Redis 를 공유한다.
+            if not _is_release_not_found((hs.stdout or "") + (hs.stderr or "")):
                 console.print(
                     f"[red]이전 release '{old_rel}' 상태를 확인할 수 없습니다 "
                     f"({(hs.stderr or hs.stdout or '').strip()[:200]}) — "
@@ -1340,10 +1358,9 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
         # ALB 잔여물이 destroy 를 멈추게 한다
         console.print("[red]helm 명령을 못 찾았습니다 — helm 설치 후 재시도하십시오")
         return 1
-    elif "release" in f"{r.stdout}{r.stderr}".lower() and \
-            "not found" in f"{r.stdout}{r.stderr}".lower():
-        # 'release' 결합 매칭 — "context was not found"/"executable aws
-        # not found" 같은 접속·자격 오류를 release 부재로 오인해 외부
+    elif _is_release_not_found(f"{r.stdout}{r.stderr}"):
+        # 'release: not found' 정확 매칭 — "context was not found"/"executable
+        # aws not found" 같은 접속·자격 오류를 release 부재로 오인해 외부
         # 리소스 정리/terraform destroy 를 돌리지 않는다.
         console.print("ⓘ release 가 없습니다 — helm 단계 생략")
         # release 부재도 dims 는 stale — 재배포 시 죽은 ALB 알람 방지
@@ -1381,6 +1398,15 @@ def _teardown_eks(cfg: schema.GatewayConfig, args) -> int:
     if cfg.features.pricing_lambda or admin_arn:
         from . import pricinglambda
         pricinglambda.teardown(cfg, admin_role_arn=admin_arn)
+        if infra and cfg.features.pricing_lambda and not admin_arn:
+            # admin_api_role_arn 출력을 못 읽으면 detach 가 건너뛰어진다 —
+            # role 에 남은 인라인 정책이 destroy 의 role 삭제를 DeleteConflict
+            # 로 멈추게 한다는 사실을 숨기지 않는다.
+            console.print("[yellow]⚠ admin_api_role_arn 출력을 못 읽어 invoke "
+                          "정책 detach 를 건너뛰었습니다 — terraform destroy 가 "
+                          "admin role 에서 멈추면 `aws iam delete-role-policy "
+                          "--role-name <role> --policy-name LitellmPricingInvoke` "
+                          "로 수동 제거하세요")
     if not infra:
         if uninstalled:
             console.print("[green]helm uninstall 완료 — 인프라는 남아 있습니다 "
@@ -1742,8 +1768,13 @@ def cmd_capture(args) -> int:
                 (REPO_ROOT / _gd(existing, "deploy").get("tf_env_dir", "")
                  if _gd(existing, "deploy").get("tf_env_dir") else None)
             doc, notes = capture.capture_eks(
-                namespace=args.namespace or "llm-gateway",
-                release=args.release or "llm-gateway",
+                # 채택 배포의 custom release/namespace 는 기존 yaml 에 실려 있다
+                # — 기본값 "llm-gateway" 로 물으면 다른 릴리스를 캡처하거나
+                # 없는 릴리스를 찾는다.
+                namespace=args.namespace
+                or _gd(existing, "deploy").get("namespace", "llm-gateway"),
+                release=args.release
+                or _gd(existing, "deploy").get("release", "llm-gateway"),
                 context=args.context or "",
                 env_dir=env_dir, unknown=unknown)
         else:

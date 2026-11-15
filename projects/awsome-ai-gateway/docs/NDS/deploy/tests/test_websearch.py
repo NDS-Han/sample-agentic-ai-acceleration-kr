@@ -185,7 +185,27 @@ def test_ecs_apply_websearch_off_removes_stale_url(monkeypatch, tmp_path):
     _ecs_apply_stubs(monkeypatch)
     import deploy.render.ecs as ecs_render
     monkeypatch.setattr(ecs_render, "render", lambda *a, **k: None)
+    # teardown 성공 스텁 — 실패하면 추적키가 복원돼 URL 이 남는다(28차 계약)
+    monkeypatch.setattr(websearch, "teardown", lambda *a, **k: True)
     cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1"})
     ecs_apply.apply(cfg, tmp_path, tmp_path)
     # 선언 off → 잔여 URL 제거 (taskdef 의 url!="" → WEB_SEARCH_ENABLED=true 되돌림)
     assert saved.get("agentcore_gateway_url") is None
+
+
+def test_ecs_apply_websearch_teardown_failure_restores_key(monkeypatch, tmp_path):
+    """28차 — off-teardown 실패 시 추적키를 되살린다. 키가 지워진 채면
+    AgentCore Gateway(유료)가 무기록 고아가 돼 다음 apply 도 재시도 못한다."""
+    saved = {}
+    monkeypatch.setattr(ecs_apply, "load_extra_vars",
+                        lambda g: {"agentcore_gateway_url": "https://old/mcp"})
+    monkeypatch.setattr(ecs_apply, "_save_extra_vars",
+                        lambda g, e: saved.update(dict(e)))
+    _ecs_apply_stubs(monkeypatch)
+    import deploy.render.ecs as ecs_render
+    monkeypatch.setattr(ecs_render, "render", lambda *a, **k: None)
+    monkeypatch.setattr(websearch, "teardown",
+                        lambda *a, **k: False)
+    cfg = _cfg(deploy={"target": "ecs", "size_tier": "t1"})
+    ecs_apply.apply(cfg, tmp_path, tmp_path)
+    assert saved.get("agentcore_gateway_url") == "https://old/mcp"
